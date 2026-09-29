@@ -10,9 +10,14 @@ import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync, rmSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { deriveSessionId } from "../desktop/hooks/desk-backchannel-hook.ts";
+import { deriveSessionId, deriveSessionSource, SESSION_START_SOURCES } from "../desktop/hooks/desk-backchannel-hook.ts";
 import { writeDeskSessionFile, deskSessionFileName } from "../shared/peer-cache.ts";
-import { readDeskSessionId } from "../desktop/src/main/desk-session.ts";
+import {
+  DESK_SESSION_SOURCES,
+  liveRotationId,
+  readDeskSession,
+  readDeskSessionId,
+} from "../desktop/src/main/desk-session.ts";
 import { transcriptExists, encodeProjectDir } from "../desktop/src/main/session-transcript.ts";
 
 const tmpDirs: string[] = [];
@@ -63,32 +68,53 @@ describe("deriveSessionId (hook)", () => {
   });
 });
 
+describe("deriveSessionSource (hook)", () => {
+  test("carries the SessionStart source of the payload", () => {
+    for (const source of ["startup", "resume", "clear", "compact"] as const) {
+      expect(deriveSessionSource({ source })).toBe(source);
+    }
+  });
+
+  test("the Deck reader knows exactly the hook's sources plus register", () => {
+    const expected = new Set([...SESSION_START_SOURCES, "register"]);
+    expect([...DESK_SESSION_SOURCES].sort()).toEqual([...expected].sort());
+    expect(SESSION_START_SOURCES.has("register"), "register is server.ts' source, never the hook's").toBe(false);
+  });
+
+  test("reads a missing or unknown source as startup, never as a rotation", () => {
+    expect(deriveSessionSource({})).toBe("startup");
+    expect(deriveSessionSource({ source: "clear!" as never })).toBe("startup");
+  });
+});
+
 describe("writeDeskSessionFile", () => {
-  test("writes the id to desk-session-<token>.txt", async () => {
+  test("writes the id and its source to desk-session-<token>.txt", async () => {
     const home = tmpHome();
-    await writeDeskSessionFile("tile-A", "id-123", home);
+    await writeDeskSessionFile("tile-A", { sid: "id-123", source: "clear" }, home);
     const f = join(home, ".claude", "peers", deskSessionFileName("tile-A"));
     expect(existsSync(f)).toBe(true);
-    expect(readFileSync(f, "utf-8")).toBe("id-123");
+    expect(JSON.parse(readFileSync(f, "utf-8"))).toEqual({ sid: "id-123", source: "clear" });
   });
 
   test("is a no-op when token is empty", async () => {
     const home = tmpHome();
-    await writeDeskSessionFile("", "id-123", home);
+    await writeDeskSessionFile("", { sid: "id-123", source: "register" }, home);
     expect(existsSync(join(home, ".claude", "peers"))).toBe(false);
   });
 
   test("is a no-op when id is empty/whitespace", async () => {
     const home = tmpHome();
-    await writeDeskSessionFile("tile-A", "   ", home);
+    await writeDeskSessionFile("tile-A", { sid: "   ", source: "register" }, home);
     const f = join(home, ".claude", "peers", deskSessionFileName("tile-A"));
     expect(existsSync(f)).toBe(false);
   });
 
-  test("round-trips through the Deck reader (readDeskSessionId)", async () => {
+  test("round-trips through the Deck reader (readDeskSession)", async () => {
     const home = tmpHome();
-    await writeDeskSessionFile("tile-X", "minted-42", home);
-    expect(readDeskSessionId("tile-X", join(home, ".claude", "peers"))).toBe("minted-42");
+    await writeDeskSessionFile("tile-X", { sid: "minted-42", source: "compact" }, home);
+    const peers = join(home, ".claude", "peers");
+    expect(readDeskSessionId("tile-X", peers)).toBe("minted-42");
+    expect(readDeskSession("tile-X", peers)).toEqual({ sid: "minted-42", source: "compact" });
   });
 });
 
@@ -98,9 +124,9 @@ describe("save-time adoption signal (refreshLiveSessionIds building blocks)", ()
 
   // Mirror of the refreshLiveSessionIds predicate, fed by the real readers, so
   // the test exercises the exact condition the service uses.
-  function wouldAdopt(home: string, currentId: string): string | null {
-    const back = readDeskSessionId(TOKEN, join(home, ".claude", "peers"));
-    if (back && back !== currentId && transcriptExists(home, CWD, back)) return back;
+  function wouldAdopt(home: string, currentId: string, adoptedSinceSpawn = true): string | null {
+    const back = liveRotationId(readDeskSession(TOKEN, join(home, ".claude", "peers")), currentId, adoptedSinceSpawn);
+    if (back && transcriptExists(home, CWD, back)) return back;
     return null;
   }
 
@@ -114,22 +140,36 @@ describe("save-time adoption signal (refreshLiveSessionIds building blocks)", ()
     const home = tmpHome();
     const preClear = "26bbec1f-pre";
     const postClear = "0f79f2b1-post";
-    await writeDeskSessionFile(TOKEN, postClear, home); // hook wrote the new id
+    await writeDeskSessionFile(TOKEN, { sid: postClear, source: "clear" }, home); // hook wrote the new id
     seedTranscript(home, postClear); // the post-/clear transcript exists
     expect(wouldAdopt(home, preClear)).toBe(postClear);
+  });
+
+  test("ignores a child claude's register write even when its transcript sits in the tile's cwd", async () => {
+    const home = tmpHome();
+    await writeDeskSessionFile(TOKEN, { sid: "child-probe", source: "register" }, home);
+    seedTranscript(home, "child-probe");
+    expect(wouldAdopt(home, "tile-id")).toBeNull();
+  });
+
+  test("adopts the tile's own late register write when no real id was adopted since spawn", async () => {
+    const home = tmpHome();
+    await writeDeskSessionFile(TOKEN, { sid: "slow-mcp-tile", source: "register" }, home);
+    seedTranscript(home, "slow-mcp-tile");
+    expect(wouldAdopt(home, "placeholder-id", false)).toBe("slow-mcp-tile");
   });
 
   test("no-op when the back-channel id equals the current id", async () => {
     const home = tmpHome();
     const id = "same-id";
-    await writeDeskSessionFile(TOKEN, id, home);
+    await writeDeskSessionFile(TOKEN, { sid: id, source: "clear" }, home);
     seedTranscript(home, id);
     expect(wouldAdopt(home, id)).toBeNull();
   });
 
   test("no-op when the back-channel id has no transcript (not resumable)", async () => {
     const home = tmpHome();
-    await writeDeskSessionFile(TOKEN, "ghost-id", home); // no transcript seeded
+    await writeDeskSessionFile(TOKEN, { sid: "ghost-id", source: "clear" }, home); // no transcript seeded
     expect(wouldAdopt(home, "current-id")).toBeNull();
   });
 

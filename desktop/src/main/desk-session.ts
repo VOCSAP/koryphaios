@@ -14,6 +14,7 @@
 import { existsSync, readFileSync, rmSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import { reportError } from './log'
 
 const PEERS_DIR = join(homedir(), '.claude', 'peers')
 
@@ -52,16 +53,69 @@ export function isPlausibleSessionId(value: string): boolean {
  * tampered file). Best-effort.
  */
 export function readDeskSessionId(token: string, peersDir: string = PEERS_DIR): string | null {
+  return readDeskSession(token, peersDir)?.sid ?? null
+}
+
+export type DeskSessionSource = 'register' | 'startup' | 'resume' | 'clear' | 'compact'
+
+export interface DeskSessionRecord {
+  sid: string
+  source: DeskSessionSource
+}
+
+const reportedCorruptTokens = new Set<string>()
+
+export const DESK_SESSION_SOURCES: ReadonlySet<string> = new Set(['register', 'startup', 'resume', 'clear', 'compact'])
+
+/**
+ * The value and its writer. A legacy plain-text file reads as a register
+ * write; a missing or unknown source reads as startup, so neither can pass
+ * for a rotation.
+ */
+export function readDeskSession(token: string, peersDir: string = PEERS_DIR): DeskSessionRecord | null {
   if (!sanitizeToken(token)) return null
   try {
     const full = deskSessionPath(token, peersDir)
     if (!existsSync(full)) return null
-    const value = readFileSync(full, 'utf8').trim()
-    if (!value) return null
-    return isPlausibleSessionId(value) ? value : null
+    const raw = readFileSync(full, 'utf8').trim()
+    if (!raw) return null
+    if (!raw.startsWith('{')) return isPlausibleSessionId(raw) ? { sid: raw, source: 'register' } : null
+    let parsed: { sid?: unknown; source?: unknown }
+    try {
+      parsed = JSON.parse(raw) as { sid?: unknown; source?: unknown }
+    } catch (error) {
+      if (!reportedCorruptTokens.has(token)) {
+        reportedCorruptTokens.add(token)
+        reportError('session', `desk-session back-channel for tile ${token} is not valid JSON`, error)
+      }
+      return null
+    }
+    if (typeof parsed.sid !== 'string' || !isPlausibleSessionId(parsed.sid)) return null
+    const source =
+      typeof parsed.source === 'string' && DESK_SESSION_SOURCES.has(parsed.source)
+        ? (parsed.source as DeskSessionSource)
+        : 'startup'
+    return { sid: parsed.sid, source }
   } catch {
     return null
   }
+}
+
+/**
+ * The id to adopt at save time. Until the tile has adopted a real id since
+ * its spawn, any first write is its own (a slow MCP /register included): a
+ * claude child needs the tile's claude already running. Afterwards only a
+ * rotation the tile reported itself (/clear, compaction) is adopted, since a
+ * register or startup write may come from a child that inherited the token.
+ */
+export function liveRotationId(
+  record: DeskSessionRecord | null,
+  currentId: string,
+  adoptedSinceSpawn: boolean
+): string | null {
+  if (!record || record.sid === currentId) return null
+  if (!adoptedSinceSpawn) return record.sid
+  return record.source === 'clear' || record.source === 'compact' ? record.sid : null
 }
 
 /**

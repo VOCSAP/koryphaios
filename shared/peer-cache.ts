@@ -67,24 +67,41 @@ export function deskSessionFileName(token: string): string {
 }
 
 /**
- * Write the Deck back-channel file for an already-resolved (token, sessionId)
- * pair. No-op when either is empty. Best-effort: failures are silent so callers
- * never break their own flow. Shared by writeDeskSessionId (env-driven, from
- * server.ts at /register) and the SessionStart hook (payload-driven, which also
- * fires on /clear and compaction -- the rotations server.ts cannot observe).
+ * Which writer produced a back-channel value: `register` for server.ts, the
+ * SessionStart payload's own source for the hook. A claude child launched
+ * from a tile inherits the tile's token, so the Deck needs the writer to tell
+ * the tile's /clear or compaction from a child's /register.
+ */
+export type DeskSessionSource = "register" | "startup" | "resume" | "clear" | "compact";
+
+export interface DeskSessionRecord {
+  sid: string;
+  source: DeskSessionSource;
+}
+
+/**
+ * Write the Deck back-channel file, as JSON {sid, source}, for an
+ * already-resolved token. No-op when the token or the sid is empty.
+ * Best-effort: failures are silent so callers never break their own flow.
+ * Shared by writeDeskSessionId (env-driven, from server.ts at /register) and
+ * the SessionStart hook (payload-driven, which also fires on /clear and
+ * compaction -- the rotations server.ts cannot observe).
  */
 export async function writeDeskSessionFile(
   token: string,
-  sessionId: string,
+  record: DeskSessionRecord,
   home: string = homedir(),
 ): Promise<void> {
   const safeToken = sanitizeSessionId(token);
-  const id = (sessionId ?? "").trim();
+  const id = (record.sid ?? "").trim();
   if (!safeToken || !id) return;
   try {
     const cacheDir = join(home, ".claude", "peers");
     await mkdir(cacheDir, { recursive: true });
-    await writeCacheAtomic(join(cacheDir, deskSessionFileName(safeToken)), id);
+    await writeCacheAtomic(
+      join(cacheDir, deskSessionFileName(safeToken)),
+      JSON.stringify({ sid: id, source: record.source }),
+    );
   } catch {
     // best-effort: the Deck falls back to transcript discovery if absent
   }
@@ -105,7 +122,7 @@ export async function writeDeskSessionId(
 ): Promise<void> {
   await writeDeskSessionFile(
     env.CLAUDE_PEERS_DESK_SESSION ?? "",
-    env.CLAUDE_CODE_SESSION_ID ?? "",
+    { sid: env.CLAUDE_CODE_SESSION_ID ?? "", source: "register" },
     home,
   );
 }

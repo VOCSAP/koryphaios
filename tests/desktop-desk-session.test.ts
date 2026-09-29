@@ -8,8 +8,11 @@ import {
   deskSessionFileName,
   deskSessionPath,
   readDeskSessionId,
+  readDeskSession,
+  liveRotationId,
   clearDeskSessionId,
 } from "../desktop/src/main/desk-session.ts";
+import { onDeckError } from "../desktop/src/main/log.ts";
 // Cross-check the Deck reader against the core writer (filename must match).
 import { writeDeskSessionId, deskSessionFileName as coreFileName } from "../shared/peer-cache.ts";
 
@@ -113,4 +116,88 @@ test("readDeskSessionId REFUSES a tampered value (sandbox escape chain)", () => 
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// ----- who wrote the back-channel (a child claude inherits the tile's token) -----
+
+test("once the tile adopted a real id, a child claude's register write in today's plain format is ignored", () => {
+  const peers = tmpPeers();
+  writeFileSync(deskSessionPath("tile", peers), "child-sid-1\n", "utf-8");
+  expect(liveRotationId(readDeskSession("tile", peers), "tile-sid-0", true)).toBeNull();
+});
+
+test("the tile's own /clear or compaction rotation is adopted after its first real id", () => {
+  const peers = tmpPeers();
+  for (const source of ["clear", "compact"]) {
+    writeFileSync(deskSessionPath("tile", peers), JSON.stringify({ sid: "rotated-1", source }), "utf-8");
+    expect([source, liveRotationId(readDeskSession("tile", peers), "tile-sid-0", true)]).toEqual([source, "rotated-1"]);
+  }
+});
+
+test("once the tile adopted a real id, a register, startup or resume write is never a rotation", () => {
+  const peers = tmpPeers();
+  for (const source of ["register", "startup", "resume"]) {
+    writeFileSync(deskSessionPath("tile", peers), JSON.stringify({ sid: "other-1", source }), "utf-8");
+    expect([source, liveRotationId(readDeskSession("tile", peers), "tile-sid-0", true)]).toEqual([source, null]);
+  }
+});
+
+test("a first write landing after discovery closed is adopted whatever its source, while no real id was adopted yet", () => {
+  const peers = tmpPeers();
+  for (const source of ["register", "startup", "resume"]) {
+    writeFileSync(deskSessionPath("tile", peers), JSON.stringify({ sid: "late-tile-sid", source }), "utf-8");
+    expect([source, liveRotationId(readDeskSession("tile", peers), "placeholder-sid", false)]).toEqual([
+      source,
+      "late-tile-sid",
+    ]);
+  }
+});
+
+test("a legacy plain-text file reads as a register write", () => {
+  const peers = tmpPeers();
+  writeFileSync(deskSessionPath("tile", peers), "legacy-sid\n", "utf-8");
+  expect(readDeskSession("tile", peers)).toEqual({ sid: "legacy-sid", source: "register" });
+});
+
+test("an unknown or missing source never reads as a rotation", () => {
+  const peers = tmpPeers();
+  for (const body of [{ sid: "other-1", source: "clear!" }, { sid: "other-1" }]) {
+    writeFileSync(deskSessionPath("tile", peers), JSON.stringify(body), "utf-8");
+    expect([JSON.stringify(body), liveRotationId(readDeskSession("tile", peers), "tile-sid-0", true)]).toEqual([
+      JSON.stringify(body),
+      null,
+    ]);
+  }
+});
+
+test("a tampered sid inside the JSON record is refused like a plain one", () => {
+  const peers = tmpPeers();
+  writeFileSync(deskSessionPath("tile", peers), JSON.stringify({ sid: "$(id)", source: "clear" }), "utf-8");
+  expect(readDeskSession("tile", peers)).toBeNull();
+  writeFileSync(deskSessionPath("tile", peers), "{not json", "utf-8");
+  expect(readDeskSession("tile", peers)).toBeNull();
+});
+
+test("a corrupt JSON back-channel is reported once per token, never swallowed", () => {
+  const peers = tmpPeers();
+  const reported: string[] = [];
+  onDeckError((scope, text) => reported.push(`${scope}: ${text}`));
+  try {
+    writeFileSync(deskSessionPath("corrupt-a", peers), "{not json", "utf-8");
+    writeFileSync(deskSessionPath("corrupt-b", peers), "{not json", "utf-8");
+    expect(readDeskSession("corrupt-a", peers)).toBeNull();
+    expect(readDeskSession("corrupt-a", peers)).toBeNull();
+    expect(readDeskSession("corrupt-b", peers)).toBeNull();
+  } finally {
+    onDeckError(() => {});
+  }
+  expect(reported.length, reported.join("\n")).toBe(2);
+  expect(reported[0]).toContain("corrupt-a");
+  expect(reported[1]).toContain("corrupt-b");
+});
+
+test("the same id as the current one is never a rotation", () => {
+  const peers = tmpPeers();
+  writeFileSync(deskSessionPath("tile", peers), JSON.stringify({ sid: "tile-sid-0", source: "clear" }), "utf-8");
+  expect(liveRotationId(readDeskSession("tile", peers), "tile-sid-0", false)).toBeNull();
 });

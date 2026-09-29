@@ -9,12 +9,13 @@
 // Must run under bun; imports resolve relative to this file regardless of the
 // session's cwd.
 
-import { sanitizeSessionId, writeDeskSessionFile } from "../../shared/peer-cache.ts";
+import { sanitizeSessionId, writeDeskSessionFile, type DeskSessionSource } from "../../shared/peer-cache.ts";
 
 /** SessionStart payload fields this hook consumes (others ignored). */
 export interface SessionStartPayload {
   transcript_path?: string;
   session_id?: string;
+  source?: string;
 }
 
 /**
@@ -32,6 +33,17 @@ export function deriveSessionId(payload: SessionStartPayload): string {
     return file.replace(/\.jsonl$/i, "");
   }
   return (payload.session_id ?? "").trim();
+}
+
+export const SESSION_START_SOURCES: ReadonlySet<string> = new Set(["startup", "resume", "clear", "compact"]);
+
+/**
+ * The payload's SessionStart source; a missing or unknown one reads as
+ * startup, which the Deck never adopts as a later rotation.
+ */
+export function deriveSessionSource(payload: SessionStartPayload): DeskSessionSource {
+  const source = payload.source;
+  return source !== undefined && SESSION_START_SOURCES.has(source) ? (source as DeskSessionSource) : "startup";
 }
 
 /** Read all of stdin as a UTF-8 string (the hook payload). */
@@ -55,7 +67,7 @@ async function main(): Promise<void> {
 
   const id = deriveSessionId(payload);
   if (!id) return;
-  await writeDeskSessionFile(token, id);
+  await writeDeskSessionFile(token, { sid: id, source: deriveSessionSource(payload) });
 }
 
 // Only run when executed directly (so tests can import deriveSessionId cleanly).

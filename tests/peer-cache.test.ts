@@ -168,15 +168,18 @@ describe("writeDeskSessionId", () => {
 
   const file = (home: string, token: string): string =>
     join(home, ".claude", "peers", `desk-session-${token}.txt`);
+  const sidIn = async (home: string, token: string): Promise<string> =>
+    (JSON.parse(await readFile(file(home, token), "utf-8")) as { sid: string }).sid;
 
-  test("writes the real session id to desk-session-<token>.txt when both env vars set", async () => {
+  test("writes the real session id to desk-session-<token>.txt, tagged as a register write", async () => {
     await writeDeskSessionId(tmpHome, {
       CLAUDE_PEERS_DESK_SESSION: "tile-A",
       CLAUDE_CODE_SESSION_ID: "23c2dc97-d254-4ec8-9cd9-8bc0b4ad3ba1",
     });
-    expect(await readFile(file(tmpHome, "tile-A"), "utf-8")).toBe(
-      "23c2dc97-d254-4ec8-9cd9-8bc0b4ad3ba1",
-    );
+    expect(JSON.parse(await readFile(file(tmpHome, "tile-A"), "utf-8"))).toEqual({
+      sid: "23c2dc97-d254-4ec8-9cd9-8bc0b4ad3ba1",
+      source: "register",
+    });
   });
 
   test("is a no-op when the token (CLAUDE_PEERS_DESK_SESSION) is unset", async () => {
@@ -192,7 +195,7 @@ describe("writeDeskSessionId", () => {
   test("overwrites a stale id (resume captures the fresh minted id)", async () => {
     await writeDeskSessionId(tmpHome, { CLAUDE_PEERS_DESK_SESSION: "t", CLAUDE_CODE_SESSION_ID: "old-id" });
     await writeDeskSessionId(tmpHome, { CLAUDE_PEERS_DESK_SESSION: "t", CLAUDE_CODE_SESSION_ID: "new-id" });
-    expect(await readFile(file(tmpHome, "t"), "utf-8")).toBe("new-id");
+    expect(await sidIn(tmpHome, "t")).toBe("new-id");
   });
 
   test("sanitizes an unsafe token before using it as a filename", async () => {
@@ -200,14 +203,14 @@ describe("writeDeskSessionId", () => {
       CLAUDE_PEERS_DESK_SESSION: "a/../b",
       CLAUDE_CODE_SESSION_ID: "real",
     });
-    expect(await readFile(file(tmpHome, "a____b"), "utf-8")).toBe("real");
+    expect(await sidIn(tmpHome, "a____b")).toBe("real");
   });
 
   test("two tiles in the same cwd keep distinct token files (D1 fix)", async () => {
     await writeDeskSessionId(tmpHome, { CLAUDE_PEERS_DESK_SESSION: "tileA", CLAUDE_CODE_SESSION_ID: "id-A" });
     await writeDeskSessionId(tmpHome, { CLAUDE_PEERS_DESK_SESSION: "tileB", CLAUDE_CODE_SESSION_ID: "id-B" });
-    expect(await readFile(file(tmpHome, "tileA"), "utf-8")).toBe("id-A");
-    expect(await readFile(file(tmpHome, "tileB"), "utf-8")).toBe("id-B");
+    expect(await sidIn(tmpHome, "tileA")).toBe("id-A");
+    expect(await sidIn(tmpHome, "tileB")).toBe("id-B");
   });
 
   test("silently swallows errors when home is unwritable", async () => {

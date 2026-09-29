@@ -39,7 +39,7 @@ import {
   transcriptExists,
   type TranscriptEntry
 } from './session-transcript'
-import { clearDeskSessionId, readDeskSessionId } from './desk-session'
+import { clearDeskSessionId, liveRotationId, readDeskSession, readDeskSessionId } from './desk-session'
 import {
   clearStatusFile,
   clearStatusLineCache,
@@ -886,15 +886,21 @@ export class SessionService extends EventEmitter {
    * pre-clear id.
    * The one-shot discovery track closes after 30s, so a later rotation is
    * invisible to it; only picked up here at save time.
-   * Adopts only when the new id actually has a transcript.
+   * After the tile's first real id, adopts only a /clear or compaction it
+   * reported itself (sessionIdHistory is reset at each spawn and grows only
+   * by adoption), and only when the new id actually has a transcript.
    * Kept off the template path so capturing a template never mutates live
    * session ids.
    */
   refreshLiveSessionIds(): void {
     for (const def of this.defs) {
       if (!this.pty.isAlive(def.id)) continue
-      const back = readDeskSessionId(def.id, this.peersDirFor(def))
-      if (back && back !== def.sessionId && this.hasTranscript(def.cwd, back)) {
+      const back = liveRotationId(
+        readDeskSession(def.id, this.peersDirFor(def)),
+        def.sessionId,
+        (def.sessionIdHistory?.length ?? 0) > 0
+      )
+      if (back && this.hasTranscript(def.cwd, back)) {
         this.adoptRealId(def, def.sessionId, back)
       }
     }
