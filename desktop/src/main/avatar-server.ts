@@ -45,6 +45,7 @@ export interface AvatarServer {
   readonly port: number
   attachedDecks(): AvatarAttachedDeck[]
   focusDeck(identity: AvatarDeckIdentity): Promise<AvatarCommandResult>
+  isDeckBound(identity: AvatarDeckIdentity): boolean
   close(): Promise<void>
 }
 
@@ -87,6 +88,7 @@ export interface AvatarSocketHub {
   accept(socket: AvatarDeckSocket): void
   focusDeck(identity: AvatarDeckIdentity): Promise<AvatarCommandResult>
   detach(identity: AvatarDeckIdentity): void
+  isDeckBound(identity: AvatarDeckIdentity): boolean
 }
 
 interface BoundAvatarSocket {
@@ -309,6 +311,7 @@ export async function startAvatarServer(options: AvatarServerOptions): Promise<A
         port: address.port,
         attachedDecks: () => [...attached.values()].map((deck) => ({ ...deck })),
         focusDeck: hub.focusDeck,
+        isDeckBound: hub.isDeckBound,
         close: () =>
           new Promise((resolveClose, rejectClose) => {
             for (const socket of sockets) socket.terminate()
@@ -483,5 +486,8 @@ export function createAvatarSocketHub(options: AvatarSocketHubOptions): AvatarSo
     })
   }
 
-  return { accept, focusDeck, detach }
+  const isDeckBound = (identity: AvatarDeckIdentity): boolean =>
+    boundSockets.get(deckKey(identity))?.ws.readyState === WebSocket.OPEN
+
+  return { accept, focusDeck, detach, isDeckBound }
 }

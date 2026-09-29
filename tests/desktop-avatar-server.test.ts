@@ -600,6 +600,16 @@ test('closes and traces a second bind on an already bound socket', () => {
   expect(reports).toEqual(['rejected a second Avatar WebSocket bind on a bound socket'])
 })
 
+test('reports a Deck bound only between its bind and its disconnect', () => {
+  const { hub } = openHub()
+  expect(hub.isDeckBound(deck)).toBe(false)
+  const socket = boundSocket(hub)
+  expect(hub.isDeckBound(deck)).toBe(true)
+  expect(hub.isDeckBound(otherDeck)).toBe(false)
+  socket.close(1000, 'test done')
+  expect(hub.isDeckBound(deck)).toBe(false)
+})
+
 test('A1 binds any attached identity a socket declares, without proving Deck ownership', () => {
   const { hub } = openHub()
   const socket = boundSocket(hub, otherDeck)

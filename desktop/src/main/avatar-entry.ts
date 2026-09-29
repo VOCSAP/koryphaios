@@ -3,6 +3,8 @@ import { join } from 'node:path'
 import { app } from 'electron'
 import { startAvatarBrokerProbe, type AvatarBrokerProbe } from './avatar-broker-probe'
 import { generateAvatarRunCertificate } from './avatar-certificate'
+import { createDeckFocusGesture, deckProcessIsAlive } from './avatar-focus-gesture'
+import { allowForegroundWindow, runForegroundHelper } from './avatar-foreground'
 import { configureAvatarLifetime, type AvatarLifetimeLease } from './avatar-lifetime'
 import { ensureAvatarPrivateDir } from './avatar-private-dir'
 import { claimAvatarRegistry, type AvatarRegistryOwner } from './avatar-registry'
@@ -11,7 +13,7 @@ import { releaseAvatarResources } from './avatar-quit'
 import { createAvatarTray, type AvatarTray } from './avatar-tray'
 import { createAvatarQuitHandler } from './avatar-quit-handler'
 import { resolveBrokerEndpoint } from './broker-client'
-import { initDeckLog, logInfo, reportError } from './log'
+import { initDeckLog, reportError } from './log'
 import { installProcessFailureGuard } from './process-failure-guard'
 import { APP_STATE_SUBDIR } from './migrate-data-dir'
 import { AvatarState } from '../shared/avatar-state'
@@ -61,10 +63,20 @@ async function startAvatar(): Promise<void> {
   )
   owner = claim.kind === 'claimed' ? claim.owner : null
   if (!owner) throw new Error('Avatar registry could not be claimed')
+  const focusFromTray = createDeckFocusGesture({
+    platform: process.platform,
+    attachedDecks: () => server?.attachedDecks() ?? [],
+    isAlive: deckProcessIsAlive,
+    isDeckBound: (identity) => server?.isDeckBound(identity) ?? false,
+    allowForeground: (pid) => allowForegroundWindow(pid, { platform: process.platform, env: process.env, run: runForegroundHelper }),
+    focusDeck: (identity) => (server ? server.focusDeck(identity) : Promise.reject(new Error('Avatar server stopped')))
+  })
   tray = createAvatarTray({
     state,
     attachedDecks: () => server?.attachedDecks() ?? [],
-    onDeckMenuClick: (identity) => logInfo('avatar-entry', `Deck focus requested from Avatar Tray (${identity.deckRunId})`),
+    onDeckMenuClick: (identity) => {
+      void focusFromTray(identity).catch((error: unknown) => reportError('avatar-focus', 'Tray focus gesture failed', error))
+    },
     onQuit: () => app.quit()
   })
 }
