@@ -2140,3 +2140,37 @@ test("an upstream reorder applied by the pull never re-triggers the queue-dirty 
     row.sync_dirty,
   ]).toEqual(["the pull's own write never marks the row dirty", 0]);
 }, 30_000);
+
+test("a pulled card with a miscased project_key is skipped and logged, its page neighbours still apply and the cursor advances", async () => {
+  const miscased = "github.com/VOCSAP/replica-repo";
+  const logPath = join(replica.tmpDir, "logs", "broker.log");
+  const logStart = readFileSync(logPath, "utf-8").length;
+  pullSuppressed = true;
+  let skipped: RoadmapItem;
+  let neighbour: RoadmapItem;
+  try {
+    skipped = await createOn(upstream, { by: "agent-upstream", title: "miscased upstream key" });
+    const upstreamDb = new Database(upstream.dbPath);
+    upstreamDb.run("PRAGMA busy_timeout = 3000");
+    upstreamDb.run("UPDATE roadmap_items SET project_key = ? WHERE id = ?", [miscased, skipped.id]);
+    upstreamDb.close();
+    neighbour = await createOn(upstream, { by: "agent-upstream", title: "canonical neighbour" });
+  } finally {
+    pullSuppressed = false;
+  }
+
+  await waitForItem("the canonical neighbour reaches the replica", replica, neighbour.id, (i) => i.title === "canonical neighbour");
+  const upstreamDb = new Database(upstream.dbPath, { readonly: true });
+  const upstreamMaxRev = (upstreamDb.query("SELECT MAX(rev) AS rev FROM roadmap_items").get() as { rev: number }).rev;
+  upstreamDb.close();
+  await pollUntil("the replica cursor passes the skipped card", 15_000, async () => {
+    const cursor = localSyncMeta(replica, "upstream_cursor");
+    return { done: cursor >= upstreamMaxRev, value: cursor };
+  });
+
+  const replicaDb = new Database(replica.dbPath, { readonly: true });
+  const stored = replicaDb.query("SELECT COUNT(*) AS n FROM roadmap_items WHERE id = ?").get(skipped.id) as { n: number };
+  replicaDb.close();
+  expect(["the miscased card never lands on the replica", stored.n]).toEqual(["the miscased card never lands on the replica", 0]);
+  expect(readFileSync(logPath, "utf-8").slice(logStart)).toContain(skipped.id);
+}, 30_000);

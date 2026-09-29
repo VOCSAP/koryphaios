@@ -756,6 +756,36 @@ test("push refuses an unchecked enum, an unparsable timestamp or an author outsi
   }
 }, 20_000);
 
+test("push refuses a miscased project_key with 400 naming the lowercase form, nothing stored", async () => {
+  const b = await startBroker();
+  try {
+    const res = await post<{ error?: string }>(`${b.url}/roadmap/sync/push`, {
+      replica_id: R1,
+      item: pushItem({ id: "card-miscased-key", project_key: "github.com/VOCSAP/sync-routes-repo" }),
+      expected_content_rev: null,
+    });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain("github.com/vocsap/sync-routes-repo");
+
+    const db = new Database(b.dbPath, { readonly: true });
+    try {
+      const row = db.query("SELECT COUNT(*) AS n FROM roadmap_items WHERE id = ?").get("card-miscased-key") as { n: number };
+      expect(row.n).toBe(0);
+    } finally {
+      db.close();
+    }
+
+    const control = await post<RoadmapSyncPushResponse>(`${b.url}/roadmap/sync/push`, {
+      replica_id: R1,
+      item: pushItem({ id: "card-lowercase-key" }),
+      expected_content_rev: null,
+    });
+    expect(control.status).toBe(200);
+  } finally {
+    await stopBroker(b);
+  }
+}, 20_000);
+
 test("a replicated write carries content and never locks; a relayed claim still obeys the inactive rule", async () => {
   const b = await startBroker();
   try {

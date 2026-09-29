@@ -85,6 +85,18 @@ export function validateProjectKey(value: string): ProjectKeyValidation {
 }
 
 /**
+ * Every producer emits a lowercase key (a normalized remote, or the
+ * local:<hex> fallback): a miscased key is a hand-typed one that would open a
+ * phantom project. Returns the refusal message, or null for a canonical key.
+ * Compared to its own toLowerCase(), never to normalizeRemoteUrl(): that one
+ * strips a trailing .git a legitimate key can carry.
+ */
+export function projectKeyCaseRefusal(value: string): string | null {
+  const lower = value.toLowerCase();
+  return value === lower ? null : `project_key must be lowercase: "${lower}"`;
+}
+
+/**
  * Always returns non-null: the normalized git remote when present, else a
  * deterministic local:<hash> fallback so repos without a remote still get a
  * per-project scope.

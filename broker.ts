@@ -12,7 +12,7 @@ import { hostname } from "node:os";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { brokerMode, isLoopbackBrokerUrl, loadConfig, upstreamUrl } from "./shared/config.ts";
 import { createLogger, coreLogDir } from "./shared/logger.ts";
-import { validateProjectKey } from "./shared/project-key.ts";
+import { projectKeyCaseRefusal, validateProjectKey } from "./shared/project-key.ts";
 import {
   formatRoadmapContextDocumentHeader,
   formatRoadmapContextDocumentOmission,
@@ -4239,12 +4239,8 @@ function handleRoadmapUpsert(
   if (!createProjectKeyCheck.ok) {
     return { error: `project_key is invalid (${createProjectKeyCheck.reason})`, status: 400 };
   }
-  // Every producer emits a lowercase key (a normalized remote, or the
-  // local:<hex> fallback): a miscased key is a hand-typed one that would open
-  // a phantom project.
-  if (rawCreateProjectKey !== rawCreateProjectKey.toLowerCase()) {
-    return { error: `project_key must be lowercase: "${rawCreateProjectKey.toLowerCase()}"`, status: 400 };
-  }
+  const createCaseRefusal = projectKeyCaseRefusal(rawCreateProjectKey);
+  if (createCaseRefusal) return { error: createCaseRefusal, status: 400 };
   const projectKey = rawCreateProjectKey;
   const title = typeof body.title === "string" ? body.title.trim() : "";
   if (!title) return { error: "title is required", status: 400 };
@@ -4942,9 +4938,8 @@ function handleRoadmapImport(body: {
   if (!importProjectKeyCheck.ok) {
     return { error: `project_key is invalid (${importProjectKeyCheck.reason})`, status: 400 };
   }
-  if (rawImportProjectKey !== rawImportProjectKey.toLowerCase()) {
-    return { error: `project_key must be lowercase: "${rawImportProjectKey.toLowerCase()}"`, status: 400 };
-  }
+  const importCaseRefusal = projectKeyCaseRefusal(rawImportProjectKey);
+  if (importCaseRefusal) return { error: importCaseRefusal, status: 400 };
   const projectKey = rawImportProjectKey;
   if (!Array.isArray(body.items)) return { error: "items must be an array", status: 400 };
 
@@ -5835,6 +5830,8 @@ function validatePushItem(
   if (!projectKeyCheck.ok) {
     return { error: `item.project_key is invalid (${projectKeyCheck.reason})`, status: 400 };
   }
+  const caseRefusal = projectKeyCaseRefusal(rawProjectKey);
+  if (caseRefusal) return { error: caseRefusal, status: 400 };
   if (
     badEnum(it.kind, ROADMAP_KINDS) ||
     badEnum(it.priority, ROADMAP_PRIORITIES) ||
@@ -6959,6 +6956,13 @@ function applyPulledRow(remote: RoadmapSyncRow): boolean {
   // costs no extra row version.
   const contestedJson = JSON.stringify(foreignContested(remote.lock_contested_by));
   if (!local) {
+    // Only this INSERT stores the upstream's project_key; skipping the card
+    // lets its page neighbours apply and the cursor advance past it.
+    const caseRefusal = projectKeyCaseRefusal(remote.project_key);
+    if (caseRefusal) {
+      log.warn(`roadmap sync: pulled card ${remote.id} skipped, ${caseRefusal}`);
+      return false;
+    }
     const lockedRemotely = remote.locked && remote.locked_by !== null;
     db.run(
       `INSERT INTO roadmap_items
