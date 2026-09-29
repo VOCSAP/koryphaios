@@ -3224,7 +3224,7 @@ function getRoadmapContextDocumentReadSummaries(
               COALESCE(s.raw_bytes, 0) AS raw_bytes
          FROM roadmap_context_documents d
          LEFT JOIN (
-           SELECT u.document_id, SUM(LENGTH(CAST(u.raw AS BLOB))) AS raw_bytes
+           SELECT u.document_id, SUM(octet_length(u.raw)) AS raw_bytes
              FROM roadmap_context_document_units u
              JOIN roadmap_context_documents p ON p.id = u.document_id
             WHERE p.roadmap_item_id = ? AND p.project_key = ?
