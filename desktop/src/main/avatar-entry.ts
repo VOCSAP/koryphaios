@@ -7,7 +7,9 @@ import { ensureAvatarPrivateDir } from './avatar-private-dir'
 import { claimAvatarRegistry, type AvatarRegistryOwner } from './avatar-registry'
 import { startAvatarServer, type AvatarServer } from './avatar-server'
 import { releaseAvatarResources } from './avatar-quit'
-import { initDeckLog, reportError } from './log'
+import { createAvatarTray, type AvatarTray } from './avatar-tray'
+import { createAvatarQuitHandler } from './avatar-quit-handler'
+import { initDeckLog, logInfo, reportError } from './log'
 import { installProcessFailureGuard } from './process-failure-guard'
 import { APP_STATE_SUBDIR } from './migrate-data-dir'
 import { AvatarState } from '../shared/avatar-state'
@@ -22,7 +24,7 @@ installProcessFailureGuard()
 const stateDir = join(deckUserData, APP_STATE_SUBDIR)
 let owner: AvatarRegistryOwner | null = null
 let server: AvatarServer | null = null
-let stopping = false
+let tray: AvatarTray | null = null
 
 async function startAvatar(): Promise<void> {
   if (!lifetime) {
@@ -51,11 +53,21 @@ async function startAvatar(): Promise<void> {
   )
   owner = claim.kind === 'claimed' ? claim.owner : null
   if (!owner) throw new Error('Avatar registry could not be claimed')
+  tray = createAvatarTray({
+    state,
+    attachedDecks: () => server?.attachedDecks() ?? [],
+    onDeckMenuClick: (identity) => logInfo('avatar-entry', `Deck focus requested from Avatar Tray (${identity.deckRunId})`),
+    onQuit: () => app.quit()
+  })
+}
+
+function disposeAvatarTray(): void {
+  const currentTray = tray
+  tray = null
+  currentTray?.dispose()
 }
 
 async function stopAvatar(): Promise<void> {
-  if (stopping) return
-  stopping = true
   const currentServer = server
   const currentOwner = owner
   const currentLifetime = lifetime
@@ -65,13 +77,14 @@ async function stopAvatar(): Promise<void> {
   await releaseAvatarResources(currentServer, currentOwner, currentLifetime)
 }
 
-app.on('before-quit', (event) => {
-  if (stopping) return
-  event.preventDefault()
-  void stopAvatar()
-    .catch((error: unknown) => reportError('avatar-entry', 'cannot close Avatar server', error))
-    .finally(() => app.quit())
+const handleBeforeQuit = createAvatarQuitHandler({
+  disposeTray: disposeAvatarTray,
+  release: stopAvatar,
+  quit: () => app.quit(),
+  report: reportError
 })
+
+app.on('before-quit', handleBeforeQuit)
 
 void app.whenReady().then(startAvatar).catch(async (error: unknown) => {
   try {
