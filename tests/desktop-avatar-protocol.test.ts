@@ -2,8 +2,10 @@ import { expect, test } from 'bun:test'
 import {
   AVATAR_PROTOCOL_VERSION,
   AvatarProtocolError,
+  MAX_AVATAR_COUNTER,
   escapeAvatarTrayLabel,
-  parseAvatarAttachRequest
+  parseAvatarAttachRequest,
+  parseAvatarStateRequest
 } from '../desktop/src/shared/avatar-protocol.ts'
 
 const validAttach = {
@@ -19,8 +21,20 @@ test('accepts the current protocol version and resolved Deck identity', () => {
   expect(parseAvatarAttachRequest(validAttach)).toEqual(validAttach)
 })
 
-test('rejects every unknown protocol version with a typed error', () => {
-  for (const protocol_version of [undefined, 0, AVATAR_PROTOCOL_VERSION + 1, '1']) {
+test('rejects malformed protocol versions as invalid attach requests', () => {
+  for (const protocol_version of [undefined, null, '1', 1.5, 'abc', {}, Number.MAX_SAFE_INTEGER + 1]) {
+    try {
+      parseAvatarAttachRequest({ ...validAttach, protocol_version })
+      throw new Error('expected protocol rejection')
+    } catch (error) {
+      expect(error).toBeInstanceOf(AvatarProtocolError)
+      expect((error as AvatarProtocolError).code).toBe('invalid_attach_request')
+    }
+  }
+})
+
+test('rejects safe unsupported protocol versions with a typed error', () => {
+  for (const protocol_version of [0, AVATAR_PROTOCOL_VERSION + 1]) {
     try {
       parseAvatarAttachRequest({ ...validAttach, protocol_version })
       throw new Error('expected protocol rejection')
@@ -29,6 +43,29 @@ test('rejects every unknown protocol version with a typed error', () => {
       expect((error as AvatarProtocolError).code).toBe('unsupported_protocol_version')
     }
   }
+})
+
+test('bounds Avatar state counters at the safe aggregation limit', () => {
+  const counters = {
+    working: MAX_AVATAR_COUNTER,
+    idle: MAX_AVATAR_COUNTER,
+    unknown: MAX_AVATAR_COUNTER,
+    waiting: MAX_AVATAR_COUNTER,
+    exited: MAX_AVATAR_COUNTER,
+    rateLimited: MAX_AVATAR_COUNTER
+  }
+  const state = {
+    identity: { deckRunId: validAttach.deckRunId, broker_url: validAttach.broker_url },
+    counters,
+    unread: MAX_AVATAR_COUNTER
+  }
+  expect(parseAvatarStateRequest(state)).toEqual(state)
+  for (const field of Object.keys(counters)) {
+    expect(() => parseAvatarStateRequest({ ...state, counters: { ...counters, [field]: MAX_AVATAR_COUNTER + 1 } })).toThrow(
+      /invalid Avatar attach request/
+    )
+  }
+  expect(() => parseAvatarStateRequest({ ...state, unread: MAX_AVATAR_COUNTER + 1 })).toThrow(/invalid Avatar attach request/)
 })
 
 test('requires the identity fields that distinguish concurrent Decks', () => {

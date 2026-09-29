@@ -147,6 +147,7 @@ import {
   sandboxPromptRoot
 } from './sandbox-prompt'
 import { createPersistentJournal, initDeckLog, logInfo, logWarn, onDeckError, reportError } from './log'
+import { installProcessFailureGuard } from './process-failure-guard'
 import {
   startDeckControl,
   type DeckControlDeps,
@@ -258,20 +259,7 @@ runDataMigration({ userDataDir: app.getPath('userData') })
 // Last-resort safety nets. Steady-state: log + journal and keep running (live
 // PTYs beat a crash). Before the window exists there is nothing to keep alive:
 // surface the error loudly and exit instead of dying silently.
-const handleFatal = (kind: string) => (e: unknown) => {
-  reportError('main', kind, e)
-  if (!app.isReady()) {
-    const msg = e instanceof Error ? (e.stack ?? e.message) : String(e)
-    try {
-      dialog.showErrorBox('Koryphaios', `Startup failure (${kind}):\n\n${msg}`)
-    } catch {
-      // dialog unavailable this early: the log line above is the trace.
-    }
-    process.exit(1)
-  }
-}
-process.on('uncaughtException', handleFatal('uncaught exception'))
-process.on('unhandledRejection', handleFatal('unhandled rejection'))
+installProcessFailureGuard()
 
 // Renderer / GPU / utility process crashes never reach uncaughtException: hook
 // them explicitly, journal them, and offer a reload when the window died.

@@ -11,7 +11,10 @@ export default defineConfig({
     },
     build: {
       rollupOptions: {
-        input: { index: resolve(__dirname, 'src/main/index.ts') }
+        input: {
+          index: resolve(__dirname, 'src/main/index.ts'),
+          'avatar-entry': resolve(__dirname, 'src/main/avatar-entry.ts')
+        }
       }
     }
   },

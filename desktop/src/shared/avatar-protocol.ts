@@ -1,6 +1,9 @@
 import { posix, win32 } from 'node:path'
+import type { AvatarDeckCounters, AvatarDeckIdentity, AvatarDeckSnapshot } from './avatar-state'
 
 export const AVATAR_PROTOCOL_VERSION = 1
+export const MAX_AVATAR_COUNTER = 1_000_000
+export const MAX_AVATAR_ATTACHMENTS = 1_000_000
 
 const MAX_DECK_RUN_ID_LENGTH = 64
 const MAX_DECK_NAME_LENGTH = 64
@@ -96,20 +99,60 @@ export function escapeAvatarTrayLabel(deckName: string): string {
   return deckName.replaceAll('&', '&&')
 }
 
+function requiredProtocolVersion(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value)) invalidAttachRequest()
+  if (value !== AVATAR_PROTOCOL_VERSION) {
+    throw new AvatarProtocolError('unsupported_protocol_version', `unsupported Avatar protocol version ${value}`)
+  }
+  return value
+}
+
 export function parseAvatarAttachRequest(value: unknown): AvatarAttachRequest {
   const input = record(value)
-  if (input.protocol_version !== AVATAR_PROTOCOL_VERSION) {
-    throw new AvatarProtocolError(
-      'unsupported_protocol_version',
-      `unsupported Avatar protocol version ${String(input.protocol_version)}`
-    )
-  }
   return {
-    protocol_version: AVATAR_PROTOCOL_VERSION,
+    protocol_version: requiredProtocolVersion(input.protocol_version),
     deckRunId: requiredDeckRunId(input.deckRunId),
     deckPid: requiredPid(input.deckPid),
     broker_url: requiredBrokerUrl(input.broker_url),
     projectDir: requiredProjectDir(input.projectDir),
     deckName: requiredDeckName(input.deckName)
+  }
+}
+
+function parseAvatarDeckIdentity(value: unknown): AvatarDeckIdentity {
+  const input = record(value)
+  return {
+    deckRunId: requiredDeckRunId(input.deckRunId),
+    broker_url: requiredBrokerUrl(input.broker_url)
+  }
+}
+
+function requiredCounter(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0 || value > MAX_AVATAR_COUNTER) invalidAttachRequest()
+  return value
+}
+
+function parseAvatarDeckCounters(value: unknown): AvatarDeckCounters {
+  const input = record(value)
+  return {
+    working: requiredCounter(input.working),
+    idle: requiredCounter(input.idle),
+    unknown: requiredCounter(input.unknown),
+    waiting: requiredCounter(input.waiting),
+    exited: requiredCounter(input.exited),
+    rateLimited: requiredCounter(input.rateLimited)
+  }
+}
+
+export function parseAvatarDetachRequest(value: unknown): AvatarDeckIdentity {
+  return parseAvatarDeckIdentity(value)
+}
+
+export function parseAvatarStateRequest(value: unknown): AvatarDeckSnapshot {
+  const input = record(value)
+  return {
+    identity: parseAvatarDeckIdentity(input.identity),
+    counters: parseAvatarDeckCounters(input.counters),
+    unread: requiredCounter(input.unread)
   }
 }
