@@ -315,6 +315,7 @@ const NOT_APP_STATE: Record<string, NotAppStateRule> = {
   SANDBOX_CREDENTIALS_FILE: { reason: "container-side path constant (/home/.../.claude/.credentials.json), never a host file" },
   SANDBOX_CLAUDE_JSON: { reason: "container-side path constant of .claude.json, never a host file" },
   buildAuthProbeArgs: { reason: "shell probe run INSIDE the container interpolating the two constants above; writes nothing" },
+  "sidebar.lock": { reason: "i18n key of the Lock button on a Sidebar row (i18n.ts EN_DEFAULTS); a translation identifier that only ends like a .lock sidecar name, never a file" },
   availableLocales: { reason: "<code>.json locale bundles shipped with the app, read-only" },
   readDictFile: { reason: "<lang>.json locale bundle read from the app's locales dir, read-only" },
   transcriptPath: { reason: "~/.claude/projects/<cwd>/<id>.jsonl, Claude Code's own transcript, read for the resume digest" },

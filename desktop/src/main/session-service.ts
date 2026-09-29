@@ -81,6 +81,8 @@ interface RuntimeState {
   resumeAt: number | null
   /** True while the session waits for the operator (attention.ts, PLAN C11). */
   needsAttention: boolean
+  locked: boolean
+  mintedCallerId: string | null
   /**
    * True when this session runs the Claude Code CLI itself; frozen at spawn
    * time from the command used to build that spawn, never recomputed while the
@@ -375,12 +377,17 @@ export class SessionService extends EventEmitter {
       // 'exited' state so the error stays visible and the tile can be restarted.
       if (exitCode === 0) {
         if (def) this.dropStatusFile(def)
-        this.defs = this.defs.filter((d) => d.id !== id)
-        this.runtime.delete(id)
-        this.persist()
+        // Emitted while the tile is still listed: listeners resolve its
+        // runtime state (minted caller id) before it disappears.
         // name rides along for the journal (C14); the renderer ignores it.
-        this.emit('exit', { id, exitCode, name: def?.name })
-        this.broadcast()
+        try {
+          this.emit('exit', { id, exitCode, name: def?.name })
+        } finally {
+          this.defs = this.defs.filter((d) => d.id !== id)
+          this.runtime.delete(id)
+          this.persist()
+          this.broadcast()
+        }
         return
       }
 
@@ -678,7 +685,7 @@ export class SessionService extends EventEmitter {
     // Kept in team-lead-bridge.ts, a module with no @shared import, so it stays
     // testable under a plain bun test run.
     const launched = effectiveAgent(agent, input.args)
-    const mcpConfig = resolveMcpConfig(
+    const resolvedMcpConfig = resolveMcpConfig(
       input,
       sanitizeFlagValue(launched.agent ?? ''),
       opts?.teamLeadDeckBridge === true,
@@ -686,6 +693,7 @@ export class SessionService extends EventEmitter {
       reportError,
       launched.ambiguity
     )
+    const mcpConfig = resolvedMcpConfig?.mcpConfig
     // Strict enum, like every other agent-/companion-reachable field that
     // reaches a command line: only the exact string requests the wrapper. It is
     // stored as a marker and applied at every spawn (resolveBaseCommand), so
@@ -735,6 +743,8 @@ export class SessionService extends EventEmitter {
       rateLimited: false,
       resumeAt: null,
       needsAttention: false,
+      locked: false,
+      mintedCallerId: resolvedMcpConfig?.callerId ?? null,
       // Initial value; startPty() (called synchronously below via
       // spawnSession) overwrites it with the authoritative frozen-at-spawn
       // read, so this only avoids a structurally-missing field in the
@@ -944,9 +954,10 @@ export class SessionService extends EventEmitter {
     // AGENT def arrives here with mcpConfig stripped by the workspace
     // round-trip -- args is the only surviving signal, recovered through the
     // SAME isTeamLeadAgent predicate every other route decides the bridge with.
+    const mintedCallerIds = new Map<string, string>()
     for (const d of this.defs) {
       const { agent, ambiguity } = effectiveAgent(undefined, d.args)
-      d.mcpConfig = resolveMcpConfig(
+      const resolvedMcpConfig = resolveMcpConfig(
         { name: d.name },
         agent ?? '',
         isTeamLeadAgent(agent),
@@ -954,6 +965,8 @@ export class SessionService extends EventEmitter {
         reportError,
         ambiguity
       )
+      d.mcpConfig = resolvedMcpConfig?.mcpConfig
+      if (resolvedMcpConfig?.callerId) mintedCallerIds.set(d.id, resolvedMcpConfig.callerId)
     }
     for (const d of this.defs) {
       this.runtime.set(d.id, {
@@ -965,6 +978,8 @@ export class SessionService extends EventEmitter {
         rateLimited: false,
         resumeAt: null,
         needsAttention: false,
+        locked: false,
+        mintedCallerId: mintedCallerIds.get(d.id) ?? null,
         // Initial value; the spawnSession()->startPty() loop right below
         // overwrites it with the authoritative frozen-at-spawn read for
         // every def, same as create() above.
@@ -1107,6 +1122,19 @@ export class SessionService extends EventEmitter {
     r.liveStatusAttentionAt = Date.now()
     this.attentionDetector.clear(id)
     this.emit('attention', { id, waiting: false, manual: true } satisfies AttentionEvent)
+    this.broadcast()
+  }
+
+  /** Kept out of list() so a minted caller id never reaches the renderer or a paired companion. */
+  mintedCallerOf(id: string): string | null {
+    return this.runtime.get(id)?.mintedCallerId ?? null
+  }
+
+  setLocked(id: string, locked: boolean): void {
+    const r = this.runtime.get(id)
+    if (!r) throw new Error(`unknown session: ${id}`)
+    if (typeof locked !== 'boolean') throw new Error('locked must be boolean')
+    r.locked = locked
     this.broadcast()
   }
 
@@ -1459,6 +1487,7 @@ export class SessionService extends EventEmitter {
       rateLimited: r?.rateLimited ?? false,
       resumeAt: r?.resumeAt ?? null,
       needsAttention: r?.needsAttention ?? false,
+      locked: r?.locked ?? false,
       // Read from RuntimeState, never recomputed here (card fd1914cc
       // correction) -- single source of truth, frozen at spawn by startPty.
       // No runtime yet: leans "it's claude" (see isClaudeSession's doc).

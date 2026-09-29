@@ -151,14 +151,10 @@ const TOOLS = [
   {
     name: 'deck_close_session',
     description:
-      'Close a session tile, named EITHER by its tile id OR by its peer_id -- exactly one of the two, never both, never neither (the call is refused otherwise, and a peer_id carried by no live tile or by several is refused too). Only sessions the supervisor spawned can be closed; the operator owns the rest.',
+      'Close a session tile, named EITHER by its tile id OR by its peer_id -- exactly one of the two, never both, never neither (the call is refused otherwise, and a peer_id carried by no live tile or by several is refused too). A team-lead may close any non-locked peer except its own tile or a lead/supervisor tile. The supervisor may close any non-locked peer except supervisor tiles.',
     inputSchema: {
       type: 'object',
-      // Neither key is `required`: this schema is DOCUMENTATION, it rejects
-      // nothing (the handler receives the arguments verbatim). The
-      // exactly-one-of rule, the unresolved/ambiguous refusals and the
-      // ownership guard are all enforced in `case 'deck_close_session'` of
-      // desktop/src/main/deck-control.ts -- read that, not this.
+      // JSON Schema cannot express live-session resolution or authorization.
       properties: {
         id: { type: 'string', description: 'Tile id, e.g. from deck_spawn_session.' },
         peer_id: {

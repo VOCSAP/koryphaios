@@ -25,7 +25,8 @@ import {
   SUPERVISOR_BRIEFING,
   SUPERVISOR_SYSTEM_PROMPT
 } from "../desktop/src/main/supervisor.ts";
-import type { CreateSessionInput, SessionRuntime } from "../desktop/src/shared/types.ts";
+import type { CreateSessionInput } from "../desktop/src/shared/types.ts";
+import type { DeckControlSession as SessionRuntime } from "../desktop/src/main/deck-control.ts";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -88,6 +89,7 @@ function fakeSession(id: string, extra: Partial<SessionRuntime> = {}): SessionRu
 
 function makeDeps(state: { sessions: SessionRuntime[] }): DeckControlDeps & {
   closed: string[];
+  journalEntries: string[];
   removedWt: string[];
   acked: string[];
   approvals: SpawnSummary[][];
@@ -105,6 +107,7 @@ function makeDeps(state: { sessions: SessionRuntime[] }): DeckControlDeps & {
   }[];
 } {
   const closed: string[] = [];
+  const journalEntries: string[] = [];
   const removedWt: string[] = [];
   const acked: string[] = [];
   const approvals: SpawnSummary[][] = [];
@@ -118,6 +121,7 @@ function makeDeps(state: { sessions: SessionRuntime[] }): DeckControlDeps & {
   return {
     directiveRuns,
     closed,
+    journalEntries,
     removedWt,
     acked,
     approvals,
@@ -145,9 +149,12 @@ function makeDeps(state: { sessions: SessionRuntime[] }): DeckControlDeps & {
     restartSession: (id) => {
       restarted.push(id);
     },
-    closeSession: (id) => {
+    closeSession: async (id) => {
       closed.push(id);
       state.sessions = state.sessions.filter((s) => s.id !== id);
+    },
+    journal: (message) => {
+      journalEntries.push(message);
     },
     createWorktree: async (branch) => ({ path: `/proj/.worktrees/${branch}`, branch, main: false }),
     listWorktrees: async () => [{ path: "/proj", branch: "main", main: true }],
@@ -250,24 +257,21 @@ test("dispatches list tools and spawn; unknown tool errors", async () => {
   expect(unknown.body.error).toContain("unknown tool");
 });
 
-test("guards: close/remove only touch supervisor-created objects; spawn cap", async () => {
+test("guards: close accepts every unlocked non-supervisor tile; remove only touches supervisor-created objects; spawn cap", async () => {
   const state = { sessions: [fakeSession("operator-1")] };
   const deps = makeDeps(state);
   const srv = await startDeckControl(deps);
   servers.push(srv);
 
-  // Closing an operator session is refused.
-  const refused = await call(srv, "deck_close_session", { id: "operator-1" });
-  expect(refused.status).toBe(400);
-  expect(refused.body.error).toContain("refused");
-  expect(deps.closed).toEqual([]);
+  const operatorTile = await call(srv, "deck_close_session", { id: "operator-1" });
+  expect(operatorTile.body.ok).toBe(true);
+  expect(deps.closed).toEqual(["operator-1"]);
 
-  // A supervisor-spawned session can be closed.
   const spawned = await call(srv, "deck_spawn_session", { name: "mine" });
   const id = (spawned.body.result as { session: { id: string } }).session.id;
   const ok = await call(srv, "deck_close_session", { id });
   expect(ok.body.ok).toBe(true);
-  expect(deps.closed).toEqual([id]);
+  expect(deps.closed).toEqual(["operator-1", id]);
 
   // Worktrees: same ownership rule.
   const wtRefused = await call(srv, "deck_remove_worktree", { path: "/proj/.worktrees/foreign" });
@@ -287,12 +291,7 @@ test("guards: close/remove only touch supervisor-created objects; spawn cap", as
   expect(capped.body.error).toContain("spawn cap");
 });
 
-// ----- Card 6c380073: ownedSessions/ownedWorktrees keyed by CALLER, not by -----
-// "spawned through this endpoint" -- a second minted caller must not be able
-// to close, restart or touch a tile/worktree the first caller created, and
-// the server-side allow-list must bite at POST /call itself.
-
-test("mintCaller: a second caller cannot close nor restart a tile owned by the first caller", async () => {
+test("mintCaller: a second caller can close but cannot restart a tile owned by the first caller", async () => {
   const state = { sessions: [] as SessionRuntime[] };
   const deps = makeDeps(state);
   const srv = await startDeckControl(deps);
@@ -302,25 +301,17 @@ test("mintCaller: a second caller cannot close nor restart a tile owned by the f
   const spawned = await call(srv, "deck_spawn_session", { name: "mine" });
   const id = (spawned.body.result as { session: { id: string } }).session.id;
 
-  // A second, independently minted, UNRESTRICTED caller (allowedTools=null)
-  // is still refused: the allow-list and the ownership guard are two
-  // different dimensions, and this probes ownership specifically.
   const other = srv.mintCaller("other-caller", null);
   expect(other.token).not.toBe(srv.token);
   expect(other.callerId).not.toBe("supervisor");
-
-  const closeRefused = await call(srv, "deck_close_session", { id }, other.token);
-  expect(closeRefused.status).toBe(400);
-  expect(closeRefused.body.error).toContain("refused");
-  expect(deps.closed).toEqual([]);
 
   const restartRefused = await call(srv, "deck_restart_session", { id }, other.token);
   expect(restartRefused.status).toBe(400);
   expect(restartRefused.body.error).toContain("refused");
   expect(deps.restarted).toEqual([]);
 
-  // Restarting/closing an id NEVER seen by this endpoint at all is refused
-  // the same way -- no branch falls back to a default owner.
+  // Restarting an id never seen by this endpoint is also refused -- no branch
+  // falls back to a default owner.
   const unknownId = await call(srv, "deck_restart_session", { id: "never-spawned" }, other.token);
   expect(unknownId.status).toBe(400);
   expect(unknownId.body.error).toContain("refused");
@@ -328,19 +319,15 @@ test("mintCaller: a second caller cannot close nor restart a tile owned by the f
   const restartOk = await call(srv, "deck_restart_session", { id });
   expect(restartOk.body.ok).toBe(true);
   expect(deps.restarted).toEqual([id]);
-  const closeOk = await call(srv, "deck_close_session", { id });
+
+  const closeOk = await call(srv, "deck_close_session", { id }, other.token);
   expect(closeOk.body.ok).toBe(true);
   expect(deps.closed).toEqual([id]);
 });
 
-// ----- Card c4cbb845: deck_close_session takes `peer_id` as an ALTERNATIVE to -----
-// the tile id, resolved through resolveDirectiveTargets (the only peer_id ->
-// tile resolver main-side). Two properties these tests pin, in order of
-// importance:
-//  1. the ownership guard bites on the RESOLVED tile id -- otherwise the new
-//     argument is an ownership bypass wearing another name;
-//  2. resolution fails CLOSED (zero match AND ambiguous match both refuse),
-//     because closing a tile is irreversible and must never be a guess.
+// deck_close_session takes `peer_id` as an alternative to the tile id. The
+// authorization rules bite on the RESOLVED tile, and resolution fails closed:
+// zero match and ambiguous match both refuse.
 
 test("deck_close_session: a peer_id resolving to a tile this caller owns closes THAT tile", async () => {
   const state = { sessions: [] as SessionRuntime[] };
@@ -356,6 +343,178 @@ test("deck_close_session: a peer_id resolving to a tile this caller owns closes 
   expect(ok.body.ok).toBe(true);
   // The RESOLVED tile id reaches closeSession, never the peer_id.
   expect(deps.closed).toEqual([session.id]);
+});
+
+test("deck_close_session: a team-lead closes another unlocked peer by peer_id", async () => {
+  const target = fakeSession("operator-tile", { peerId: "peer-operator-tile" });
+  const state = { sessions: [target] as SessionRuntime[] };
+  const deps = makeDeps(state);
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+  const teamLead = srv.mintCaller("team-lead", TEAM_LEAD_DECK_TOOLS);
+
+  const closed = await call(srv, "deck_close_session", { peer_id: target.peerId }, teamLead.token);
+
+  expect(closed.status).toBe(200);
+  expect(deps.closed).toEqual([target.id]);
+});
+
+test("deck_close_session: a team-lead cannot close its own, lead, or supervisor tile", async () => {
+  const state = {
+    sessions: [
+      fakeSession("self", { mintedCallerId: "team-lead-test" }),
+      fakeSession("lead", { lead: true }),
+      fakeSession("supervisor", { supervisor: true })
+    ] as SessionRuntime[]
+  };
+  const deps = makeDeps(state);
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+  const teamLead = srv.mintCaller("team-lead", TEAM_LEAD_DECK_TOOLS);
+  state.sessions[0]!.mintedCallerId = teamLead.callerId;
+
+  for (const id of ["self", "lead", "supervisor"]) {
+    const refused = await call(srv, "deck_close_session", { id }, teamLead.token);
+    expect(refused.status, id).toBe(400);
+    expect(refused.body.error, id).toContain("cannot close");
+  }
+  expect(deps.closed).toEqual([]);
+});
+
+test("deck_close_session: every team-lead is refused its own tile, whichever record holds its caller id", async () => {
+  const state = { sessions: [] as SessionRuntime[] };
+  const deps = makeDeps(state);
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+
+  const spawnedTiles: { id: string; peer_id: string }[] = [];
+  for (const name of ["first-lead", "second-lead"]) {
+    const created = await call(srv, "deck_spawn_session", { name, embedded_agent: "team-lead" });
+    expect(created.status, name).toBe(200);
+    spawnedTiles.push((created.body.result as { session: { id: string; peer_id: string } }).session);
+  }
+  const secondTile = state.sessions.find((s) => s.id === spawnedTiles[1]!.id)!;
+  expect(secondTile.lead, "precondition: the second spawned team-lead is not the crowned lead").toBeFalsy();
+  expect(secondTile.mintedCallerId, "precondition: its caller id is not in runtime state").toBeUndefined();
+
+  const runtimeMinted = srv.mintCaller("team-lead", TEAM_LEAD_DECK_TOOLS);
+  const runtimeTile = fakeSession("runtime-lead", { mintedCallerId: runtimeMinted.callerId });
+  state.sessions.push(runtimeTile);
+
+  const cases = [
+    { label: "first spawned", token: deps.leadMcpCalls[0]!.token, tile: spawnedTiles[0]! },
+    { label: "second spawned", token: deps.leadMcpCalls[1]!.token, tile: spawnedTiles[1]! },
+    { label: "runtime-minted", token: runtimeMinted.token, tile: { id: runtimeTile.id, peer_id: runtimeTile.peerId } }
+  ];
+  for (const { label, token, tile } of cases) {
+    for (const args of [{ id: tile.id }, { peer_id: tile.peer_id }]) {
+      const refused = await call(srv, "deck_close_session", args, token);
+      expect(refused.status, `${label} via ${Object.keys(args)[0]}`).toBe(400);
+      expect(refused.body.error, `${label} via ${Object.keys(args)[0]}`).toBe(
+        "refused: a team-lead cannot close its own tile"
+      );
+    }
+  }
+  expect(deps.closed).toEqual([]);
+});
+
+test("deck_close_session: a team-lead closes the tile of ANOTHER team-lead that is not a lead tile", async () => {
+  const state = { sessions: [] as SessionRuntime[] };
+  const deps = makeDeps(state);
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+  await call(srv, "deck_spawn_session", { name: "first-lead", embedded_agent: "team-lead" });
+  const second = await call(srv, "deck_spawn_session", { name: "second-lead", embedded_agent: "team-lead" });
+  const secondId = (second.body.result as { session: { id: string } }).session.id;
+
+  const closed = await call(srv, "deck_close_session", { id: secondId }, deps.leadMcpCalls[0]!.token);
+
+  expect(closed.status).toBe(200);
+  expect(deps.closed).toEqual([secondId]);
+});
+
+test("deck_close_session: the supervisor can close an unlocked lead but not a supervisor tile", async () => {
+  const lead = fakeSession("lead", { lead: true });
+  const supervisor = fakeSession("supervisor", { supervisor: true });
+  const state = { sessions: [lead, supervisor] as SessionRuntime[] };
+  const deps = makeDeps(state);
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+
+  const closedLead = await call(srv, "deck_close_session", { id: lead.id });
+  expect(closedLead.status).toBe(200);
+  expect(deps.closed).toEqual([lead.id]);
+
+  const refusedSupervisor = await call(srv, "deck_close_session", { id: supervisor.id });
+  expect(refusedSupervisor.status).toBe(400);
+  expect(refusedSupervisor.body.error).toContain("cannot close");
+});
+
+test("deck_close_session: a locked peer is refused and journaled for both callers", async () => {
+  const target = fakeSession("locked", { locked: true });
+  const state = { sessions: [target] as SessionRuntime[] };
+  const deps = makeDeps(state);
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+  const teamLead = srv.mintCaller("team-lead", TEAM_LEAD_DECK_TOOLS);
+
+  const leadRefused = await call(srv, "deck_close_session", { id: target.id }, teamLead.token);
+  const supervisorRefused = await call(srv, "deck_close_session", { id: target.id });
+
+  expect(leadRefused.body.error).toBe("refused: peer verrouillé");
+  expect(supervisorRefused.body.error).toBe("refused: peer verrouillé");
+  expect(deps.closed).toEqual([]);
+  expect(deps.journalEntries).toHaveLength(2);
+  expect(deps.journalEntries.every((entry) => entry.includes("peer verrouillé"))).toBe(true);
+});
+
+test("deck_close_session: a locked peer named by peer_id is refused, and the journal names the resolved tile", async () => {
+  const target = fakeSession("locked-tile", { locked: true, peerId: "peer-locked-tile" });
+  const state = { sessions: [target] as SessionRuntime[] };
+  const deps = makeDeps(state);
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+  const teamLead = srv.mintCaller("team-lead", TEAM_LEAD_DECK_TOOLS);
+
+  for (const token of [teamLead.token, undefined]) {
+    const refused = await call(srv, "deck_close_session", { peer_id: target.peerId }, token);
+    expect(refused.status).toBe(400);
+    expect(refused.body.error).toBe("refused: peer verrouillé");
+  }
+
+  expect(deps.closed).toEqual([]);
+  expect(deps.journalEntries).toEqual([
+    `deck_close_session refused: peer verrouillé (${target.id})`,
+    `deck_close_session refused: peer verrouillé (${target.id})`
+  ]);
+});
+
+test("deck_close_session returns a real SessionService.remove failure", async () => {
+  const target = fakeSession("failing-remove");
+  const state = { sessions: [target] as SessionRuntime[] };
+  const deps = makeDeps(state);
+  deps.closeSession = async () => {
+    throw new Error("remove failed");
+  };
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+
+  const failed = await call(srv, "deck_close_session", { id: target.id });
+
+  expect(failed.status).toBe(400);
+  expect(failed.body.error).toContain("remove failed");
+  expect(state.sessions).toEqual([target]);
+});
+
+test("deck_close_session descriptions state the four gestures and close authorization rule", () => {
+  const mcpSource = readFileSync(join(import.meta.dir, "..", "desktop", "mcp", "deck-control-mcp.ts"), "utf-8");
+  const embeddedSource = readFileSync(join(import.meta.dir, "..", "desktop", "src", "main", "team-embedded.ts"), "utf-8");
+
+  expect(mcpSource).toContain("A team-lead may close any non-locked peer except its own tile or a lead/supervisor tile.");
+  expect(mcpSource).toContain("The supervisor may close any non-locked peer except supervisor tiles.");
+  expect(embeddedSource).toContain("Close any non-locked session tile except a supervisor tile.");
+  expect(embeddedSource).toContain("You have exactly four gestures:");
+  expect(embeddedSource).toContain("deck_close_session (a non-locked peer other than your own tile or a lead/supervisor tile)");
 });
 
 test("deck_close_session: id and peer_id together are refused; neither is still refused", async () => {
@@ -398,42 +557,12 @@ test("deck_close_session: a peer_id matching zero tiles, or TWO live tiles, is r
   expect(unknown.body.error).toContain("no live session");
   expect(deps.closed).toEqual([]);
 
-  // A SECOND live tile carrying the SAME peer_id (measured as possible,
-  // commit 73b5e67): resolveDirectiveTargets buckets it ambiguous, and the
-  // close must refuse rather than pick one of the two.
+  // Two live tiles can carry the same peer_id: the close must refuse rather
+  // than pick one.
   state.sessions.push(fakeSession("twin", { peerId: session.peer_id }));
   const ambiguous = await call(srv, "deck_close_session", { peer_id: session.peer_id });
   expect(ambiguous.status).toBe(400);
   expect(ambiguous.body.error).toContain("ambiguous");
-  expect(deps.closed).toEqual([]);
-});
-
-test("deck_close_session: a peer_id resolving to a tile this caller does NOT own is refused, exactly like the tile id", async () => {
-  const state = { sessions: [fakeSession("operator-1")] };
-  const deps = makeDeps(state);
-  const srv = await startDeckControl(deps);
-  servers.push(srv);
-
-  // An operator tile the endpoint never spawned: reachable by peer_id, but
-  // owned by nobody here. The refusal must be WORD FOR WORD the one the tile
-  // id already produces: the ownership answer never distinguishes "someone
-  // else's tile" from "no such tile" (the unresolved/ambiguous refusals are
-  // deliberately distinct, see the case's comment for what backs that split).
-  const byId = await call(srv, "deck_close_session", { id: "operator-1" });
-  const byPeer = await call(srv, "deck_close_session", { peer_id: "peer-operator-1" });
-  expect(byId.status).toBe(400);
-  expect(byPeer.status).toBe(400);
-  expect(byPeer.body.error).toBe(byId.body.error);
-  expect(deps.closed).toEqual([]);
-
-  // The bypass probe proper: a tile owned by ANOTHER minted caller resolves
-  // fine, then the guard must bite on the resolved id.
-  const spawned = await call(srv, "deck_spawn_session", { name: "mine" });
-  const session = (spawned.body.result as { session: { id: string; peer_id: string } }).session;
-  const other = srv.mintCaller("other-caller", null);
-  const refused = await call(srv, "deck_close_session", { peer_id: session.peer_id }, other.token);
-  expect(refused.status).toBe(400);
-  expect(refused.body.error).toContain("refused");
   expect(deps.closed).toEqual([]);
 });
 
@@ -685,12 +814,9 @@ test("embedded spawn: threads embedded.id as `role` (never embedded.role, the pr
   }
 });
 
-// Card 6c380073 audit fix #3: the old stub threw away the (token, callerId,
-// allowedTools) spawnEntry passes to writeTeamLeadMcpConfig, so nothing
-// proved a team-lead spawn actually mints its OWN distinct identity/scope --
-// the exact regression this whole card exists to close would have stayed
-// GREEN under the old mock. This proves it behaviorally: capture the real
-// token, then POST /call with it directly against the real dispatch.
+// Captures the real token passed to writeTeamLeadMcpConfig, then POSTs /call
+// with it against the real dispatch: the minted identity and scope are proven
+// by behavior, not by the returned strings.
 test("a team-lead spawn mints its OWN token/callerId (never the supervisor's), scoped to TEAM_LEAD_DECK_TOOLS", async () => {
   const state = { sessions: [] as SessionRuntime[] };
   const deps = makeDeps(state);
@@ -725,10 +851,7 @@ test("a team-lead spawn mints its OWN token/callerId (never the supervisor's), s
   expect(refused.status).toBe(403);
 });
 
-// Card 6c380073, review round 2 point 5(a): revokeCallerForSession was
-// exported, wired into index.ts's 'removed' listener, and proven by NOTHING --
-// the stub's revokedLeadCallerIds array was never asserted either. This is the
-// promise's own end-to-end proof: the lead's token works, then it does not.
+// End to end: the lead's token works, then it does not.
 test("revokeCallerForSession kills the lead's token -- its next call 401s", async () => {
   const state = { sessions: [] as SessionRuntime[] };
   const deps = makeDeps(state);
@@ -753,8 +876,24 @@ test("revokeCallerForSession kills the lead's token -- its next call 401s", asyn
   expect(srv.revokeCallerForSession(sessionId)).toBe(null);
 });
 
-// Point 5(b): the spawn-failure rollback. The mint and the --mcp-config write
-// both happen BEFORE deps.spawnSession, so a throw there must undo both.
+test("revokeCallerForSession finds a caller minted by the operator or template path in runtime state", async () => {
+  const state = { sessions: [] as SessionRuntime[] };
+  const deps = makeDeps(state);
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+  const minted = srv.mintCaller("team-lead", TEAM_LEAD_DECK_TOOLS);
+  state.sessions.push(fakeSession("template-lead", { mintedCallerId: minted.callerId }));
+  const before = await call(srv, "deck_spawn_session", { name: "before" }, minted.token);
+  expect(before.status).toBe(200);
+
+  expect(srv.revokeCallerForSession("template-lead")).toBe(minted.callerId);
+
+  const after = await call(srv, "deck_spawn_session", { name: "after" }, minted.token);
+  expect(after.status).toBe(401);
+});
+
+// The mint and the --mcp-config write both happen BEFORE deps.spawnSession, so
+// a throw there must undo both.
 test("a spawn that fails AFTER the mint revokes the token and deletes its config file", async () => {
   const deps = makeDeps({ sessions: [] });
   deps.spawnSession = async () => {
@@ -946,23 +1085,6 @@ test("deck_apply_template shows a clodex bridge in the agent approval recap", as
 
   await call(srv, "deck_apply_template", { path: "/t.json" });
   expect(deps.approvals[0]![0]!.name).toBe("[clodex] bridge");
-});
-
-test("deck_apply_template: a foreign caller cannot close a template-spawned tile", async () => {
-  const state = { sessions: [] as SessionRuntime[] };
-  const deps = makeDeps(state);
-  const srv = await startDeckControl(deps);
-  servers.push(srv);
-
-  await call(srv, "deck_apply_template", { path: "/t.json" });
-  const listed = await call(srv, "deck_list_sessions");
-  const [first] = (listed.body.result as { sessions: { id: string }[] }).sessions;
-
-  const other = srv.mintCaller("other-caller", null);
-  const closeRefused = await call(srv, "deck_close_session", { id: first!.id }, other.token);
-  expect(closeRefused.status).toBe(400);
-  expect(closeRefused.body.error).toContain("refused");
-  expect(deps.closed).toEqual([]);
 });
 
 test("deck_apply_template: batch cap refuses the whole template before any tile spawns or approval is asked", async () => {
@@ -1360,7 +1482,94 @@ async function speakMcp(
   };
 }
 
-test("DECK_CONTROL_TOOLS unset: every tool listed, unrestricted (zero regression for the supervisor)", async () => {
+// Top-level member names of an interface body: comments dropped, then every
+// bracketed span blanked so parameter lists and object types cannot leak names.
+// Every remaining segment (a line, or a `;`-separated part of one) must be
+// consumed as a member; an unrecognised shape throws instead of being skipped.
+function interfaceMemberNames(body: string): string[] {
+  const noComments = body.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
+  let depth = 0;
+  let flat = "";
+  for (const ch of noComments) {
+    if (depth === 0) flat += ch;
+    if (ch === "(" || ch === "{" || ch === "[") depth++;
+    else if (ch === ")" || ch === "}" || ch === "]") depth--;
+  }
+  return flat
+    .split(/[\n;]/)
+    .map((segment) => segment.trim())
+    .filter((segment) => segment !== "")
+    .map((segment) => {
+      const member = /^(?:readonly\s+)?([A-Za-z_]\w*)\??\s*(?:<[^\n(]*?>)?\s*[(:]/.exec(segment);
+      if (!member) throw new Error(`interfaceMemberNames: unrecognised member text "${segment}"`);
+      return member[1]!;
+    });
+}
+
+// Reviewed dependency surface of the deck-control endpoint. None of these can
+// reach SessionService.setLocked; adding one fails this list and forces that
+// review.
+const REVIEWED_DECK_CONTROL_DEPS = [
+  "announce",
+  "approveSpawn",
+  "armSpawnAck",
+  "closeSession",
+  "confirmSpawnShellFields",
+  "createWorktree",
+  "journal",
+  "listAgents",
+  "listModels",
+  "listPresets",
+  "listSessions",
+  "listTemplates",
+  "listWorktrees",
+  "removeWorktree",
+  "resolveTemplate",
+  "restartSession",
+  "revokeTeamLeadMcpConfig",
+  "runDirective",
+  "sandboxExec",
+  "saveTemplate",
+  "spawnSession",
+  "spawnTemplateEntry",
+  "waitForPeer",
+  "writeEmbeddedPrompt",
+  "writeTeamLeadMcpConfig"
+];
+
+test("interfaceMemberNames reads multi-line methods, optional members and properties, ignoring comments", () => {
+  const body = `
+    /** doc with fake(member: string) inside */
+    plain(): void
+    multi(
+      a: string,
+      b: { nested(x: number): void }
+    ): Promise<void>
+    // line comment hidden(): void
+    optional?(): void
+    prop: string
+    readonly ro: string
+    generic<T extends Record<string, X>>(value: T): T
+    first(): void; second(): void
+  `;
+  expect(interfaceMemberNames(body)).toEqual([
+    "plain",
+    "multi",
+    "optional",
+    "prop",
+    "ro",
+    "generic",
+    "first",
+    "second"
+  ]);
+});
+
+test("interfaceMemberNames refuses a member shape it cannot read instead of skipping it", () => {
+  expect(() => interfaceMemberNames("plain(): void\n  [key: string]: unknown\n")).toThrow("unrecognised member text");
+  expect(() => interfaceMemberNames("plain(): void\n  get accessor(): string\n")).toThrow("unrecognised member text");
+});
+
+test("DeckControlDeps holds exactly the reviewed dependencies, none able to mutate a session lock", async () => {
   const srv = await startDeckControl(makeDeps({ sessions: [] }));
   servers.push(srv);
   const { send, recv } = await speakMcp({
@@ -1376,6 +1585,21 @@ test("DECK_CONTROL_TOOLS unset: every tool listed, unrestricted (zero regression
   expect(names).toContain("deck_apply_template");
   expect(names).toContain("deck_sandbox_exec");
   expect(names.length).toBeGreaterThan(15);
+
+  const deckControlSource = readFileSync(
+    join(import.meta.dir, "..", "desktop", "src", "main", "deck-control.ts"),
+    "utf-8"
+  );
+  const depsStart = deckControlSource.indexOf("export interface DeckControlDeps {");
+  expect(depsStart).toBeGreaterThanOrEqual(0);
+  const depsBody = extractBracedBody(deckControlSource, deckControlSource.indexOf("{", depsStart));
+  const members = interfaceMemberNames(depsBody);
+
+  expect(
+    [...members].sort(),
+    "DeckControlDeps gained or lost a dependency: review that it cannot reach SessionService.setLocked, then update REVIEWED_DECK_CONTROL_DEPS"
+  ).toEqual([...REVIEWED_DECK_CONTROL_DEPS].sort());
+  expect(deckControlSource).not.toMatch(/\bsetLocked\b/);
 });
 
 test("initialize serves an instructions block that keeps its supervisor clauses, ends on the destructive-action rule, and only names tools that tools/list serves", async () => {

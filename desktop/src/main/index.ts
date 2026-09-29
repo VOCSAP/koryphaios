@@ -208,7 +208,12 @@ import {
   writeSupervisorSystemPrompt,
   writeTeamLeadMcpConfig
 } from './supervisor'
-import { buildMintTeamLeadBridge, effectiveAgent, isTeamLeadAgent } from './team-lead-bridge'
+import {
+  buildMintTeamLeadBridge,
+  effectiveAgent,
+  isTeamLeadAgent,
+  wireTeamLeadRevocation
+} from './team-lead-bridge'
 import { sweepTeamLeadMcpConfigs, teamLeadInstanceToken, teamLeadMcpConfigFileName } from './team-lead-mcp-sweep'
 import {
   createWorktree,
@@ -823,11 +828,9 @@ service.setSandboxProvider(
           ? ttsr.projectIntoSandbox(env.CLAUDE_PEERS_DESK_SESSION ?? '', sessionId, launch.runDirHost)
           : { file: '', log: '' }
         sandbox.writeLaunchScript(sessionId, {
-          // Card a79c7696 volet 1: `command` still carries --plugin-dir
-          // pointing at the HOST deck-plugin path (session-command.ts's
-          // pluginFlag has no sandbox awareness) -- rewrite it onto the
-          // container path projectDeckPlugin() copied it to. No-op if the
-          // flag is absent (deck-plugin build missing on the host).
+          // `command` carries --plugin-dir pointing at the HOST deck-plugin
+          // path; rewrite it onto the container path projectDeckPlugin()
+          // copied it to. No-op if the flag is absent.
           command: composeSandboxAppendPrompt(sessionId, rewritePluginDirForContainer(command), launch),
           cwd,
           env: {
@@ -851,7 +854,7 @@ service.setSandboxProvider(
       }
     }
   },
-  // M2 resume: transcripts live in the container's auth volume, so the host
+  // M2 resume: transcripts live in the auth volume of the container, so the host
   // readers would see none and every restore would start fresh.
   (cwdHost) => sandbox.transcriptsFor(cwdHost),
   // Sandboxed sessions write their back-channel + peer cache into the
@@ -882,14 +885,10 @@ const sandboxGate = async (): Promise<string | null> => {
 service.on('removed', ({ id, name }: { id: string; name: string }) => {
   journal.add('session', `session "${name}" closed`)
   ttsr.remove(id)
-  // Revokes a team-lead tile's minted deck-control token/callerId and deletes
-  // its team-lead-mcp file only on final removal, not on crash or non-zero exit
-  // (which emit 'exit', not 'removed') — a crashed tile is kept as a
-  // restartable corpse and restart() reuses the same mcpConfig.
-  // No-op for a session that never minted its own caller (the supervisor tile,
-  // any non-lead profile).
-  const revokedCallerId = controlServer?.revokeCallerForSession(id) ?? null
-  if (revokedCallerId) cleanupTeamLeadMcpFile(revokedCallerId)
+})
+wireTeamLeadRevocation(service, {
+  revokeCallerForSession: (id) => controlServer?.revokeCallerForSession(id) ?? null,
+  cleanupMcpFile: (callerId) => cleanupTeamLeadMcpFile(callerId)
 })
 service.on('exit', ({ id, exitCode, name }: { id: string; exitCode: number; name?: string }) => {
   const label = name ?? id.slice(0, 8)
@@ -2673,15 +2672,7 @@ const sweepStaleTeamLeadMcpConfigs = (): void => {
   })
 }
 
-/**
- * Audit fix #2 (card 6c380073): delete a team-lead callerId's --mcp-config
- * file, if any. Shared by the spawn-failure rollback (spawnEntry's own catch,
- * via revokeTeamLeadMcpConfig below) AND the final-removal revocation (the
- * 'removed' listener further down) so both paths agree on the exact same
- * file name. Best-effort: a missing file is not an error, and the file may
- * legitimately not exist yet (spawn failed before the write) or already be
- * gone (removed by the other path under a genuine race).
- */
+/** Best-effort: a missing file is not an error. */
 const cleanupTeamLeadMcpFile = (callerId: string): void => {
   const file = join(app.getPath('userData'), APP_STATE_SUBDIR, teamLeadMcpConfigFile(callerId))
   try {
@@ -2712,11 +2703,12 @@ const controlDeps: DeckControlDeps = {
       { teamLeadDeckBridge: isTeamLeadAgent(input.agent) }
     )
   },
-  listSessions: () => service.list(),
+  listSessions: () => service.list().map((s) => ({ ...s, mintedCallerId: service.mintedCallerOf(s.id) })),
   sandboxExec: (command) => sandbox.supervisorExec(command),
   runDirective: directiveBindings.runDirective,
   restartSession: (id) => void service.restart(id),
   closeSession: (id) => service.remove(id),
+  journal: (message) => journal.add('session', message),
   createWorktree: async (branch) => {
     const wt = await createWorktree(getConfig().projectDir, branch)
     const init = getWorktreeInit()

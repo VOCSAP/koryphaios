@@ -3,7 +3,7 @@ import type { SessionRuntime } from '@shared/types'
 import { moveBeside } from '@shared/reorder'
 import { shortModelLabel } from '@shared/models'
 import { GLYPH_ACTIONS, GLYPH_BADGES, GLYPHS, PithosGlyph, roleGlyph } from './icons'
-import { useDeck } from '../store'
+import { errorText, useDeck } from '../store'
 import { formatPeerTable } from '../peer-table'
 import { formatClock, useT } from '../i18n'
 import { ConfirmDialog } from './ConfirmDialog'
@@ -89,6 +89,21 @@ export function SessionRow({
     showToast('toast.peerTableCopied')
   }
 
+  // Operator-only: no agent tool reaches this channel. A refusal must say so,
+  // or the frame would keep promising a protection that was never set.
+  const locked = session.locked === true
+  const toggleLock = (): void => {
+    window.api.setSessionLocked(session.id, !locked).catch((e: unknown) => {
+      const msg = errorText(e)
+      try {
+        window.api.reportError('sidebar', `set locked failed: ${msg}`)
+      } catch {
+        // Reporting must never mask the toast.
+      }
+      showToast(`set locked: ${msg}`, 'error', { raw: true })
+    })
+  }
+
   const commit = (): void => {
     setEditing(false)
     if (draft.trim() && draft !== session.name) renameSession(session.id, draft.trim())
@@ -98,6 +113,7 @@ export function SessionRow({
   const className = [
     'row',
     selectedId === session.id ? 'row-selected' : '',
+    locked ? 'row-locked' : '',
     dnd.dragId === session.id ? 'row-dragging' : '',
     dnd.overId === session.id && dnd.dragId !== session.id ? 'row-drag-over' : ''
   ]
@@ -228,15 +244,14 @@ export function SessionRow({
           )}
         </div>
       )}
-      {/* Role mark (card b5ba8cac): what this agent DOES, read straight from
-          the local SessionDef (no broker round-trip -- SessionRuntime extends
-          SessionDef). It sits in the SAME right-hand badge column as the
-          laurel, ahead of it, for one reason that covers both panel states:
-          folded, .row-main is not rendered at all, so this exact DOM order
-          collapses to dot -> role -> laurel with no conditional rule, while
-          unfolded every name still starts at the same x. The two marks are
-          independent dimensions -- a lead that also carries a role shows both,
-          side by side. No role => nothing rendered, row unchanged. */}
+      {/* After .row-main, not before it: folded, .row-main is absent, so this
+          order collapses to dot -> badges with no conditional rule, and unfolded
+          every name keeps the same left edge. */}
+      {locked && (
+        <span className="row-lock" title={t('sidebar.lockedTitle')}>
+          {GLYPH_BADGES.lock}
+        </span>
+      )}
       {roleGlyph(session.role) && (
         <span className="row-role" title={t('sidebar.roleTitle', { role: session.role ?? '' })}>
           {roleGlyph(session.role)}
@@ -281,6 +296,17 @@ export function SessionRow({
           `visibility` would not. */}
       {!collapsed && (
         <span className="row-actions">
+          <button
+            className="row-btn"
+            title={locked ? t('sidebar.unlock') : t('sidebar.lock')}
+            aria-pressed={locked}
+            onClick={(e) => {
+              e.stopPropagation()
+              toggleLock()
+            }}
+          >
+            {locked ? GLYPH_ACTIONS.unlock : GLYPH_ACTIONS.lock}
+          </button>
           {!editing && (
             <button
               className="row-btn"
@@ -392,6 +418,15 @@ export function SessionRow({
               ),
               onSelect: () => void window.api.setLead(session.id),
               disabled: !!session.lead
+            },
+            {
+              label: (
+                <>
+                  {locked ? GLYPH_ACTIONS.unlock : GLYPH_ACTIONS.lock}{' '}
+                  {locked ? t('sidebar.unlock') : t('sidebar.lock')}
+                </>
+              ),
+              onSelect: toggleLock
             },
             {
               label: t('sidebar.viewDiff'),

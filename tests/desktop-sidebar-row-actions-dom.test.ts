@@ -144,13 +144,19 @@ function directChildren(el: Element, cls: string): Element[] {
   return [...el.children].filter((c) => c.classList.contains(cls));
 }
 
-test("the three row buttons sit in one overlay container, a direct child of the row", () => {
+const ROW_ACTION_TITLES = ["sidebar.lock", "sidebar.renameTitle", "common.maximize", "sidebar.removeTitle"];
+
+function overlayTitles(): string[] {
+  return [...row().querySelectorAll<HTMLButtonElement>(".row-actions .row-btn")].map((b) => b.title);
+}
+
+test("the row buttons sit in one overlay container, a direct child of the row", () => {
   renderRow(session());
   const overlays = directChildren(row(), "row-actions");
   expect(overlays, "one .row-actions overlay per row, anchored on the row itself").toHaveLength(1);
   const inside = [...overlays[0]!.children];
   expect(inside.every((b) => b.tagName === "BUTTON" && b.classList.contains("row-btn"))).toBe(true);
-  expect(inside, "rename, maximize and remove all ride the overlay").toHaveLength(3);
+  expect(overlayTitles(), "lock, rename, maximize and remove all ride the overlay").toEqual(ROW_ACTION_TITLES);
   expect(
     directChildren(row(), "row-btn"),
     "a row button left in the row's flow takes width from the session name again"
@@ -175,10 +181,10 @@ test("the context ring names the model, so hiding the badge on a narrow row lose
 test("without a live status the overlay still carries the actions and no ring renders", () => {
   renderRow(session({ liveStatus: null }));
   expect(row().querySelector("svg.context-ring")).toBeNull();
-  expect(row().querySelectorAll(".row-actions .row-btn")).toHaveLength(3);
+  expect(overlayTitles()).toEqual(ROW_ACTION_TITLES);
 });
 
-test("while renaming, the overlay drops the rename button and keeps the other two", () => {
+test("while renaming, the overlay drops the rename button and keeps the others", () => {
   renderRow(session());
   const rename = row().querySelector<HTMLButtonElement>('.row-actions .row-btn[title="sidebar.renameTitle"]');
   if (!rename) throw new Error("no rename button in the overlay");
@@ -186,7 +192,7 @@ test("while renaming, the overlay drops the rename button and keeps the other tw
     rename.click();
   });
   expect(row().querySelector(".row-edit")).not.toBeNull();
-  expect(row().querySelectorAll(".row-actions .row-btn")).toHaveLength(2);
+  expect(overlayTitles()).toEqual(ROW_ACTION_TITLES.filter((t) => t !== "sidebar.renameTitle"));
 });
 
 // happy-dom applies no stylesheet, so the three rules the layout depends on are
@@ -226,4 +232,142 @@ test("renaming hides the overlay, which would otherwise cover the caret through 
 test("a folded row renders no overlay at all", () => {
   renderRow(session(), true);
   expect(row().querySelector(".row-actions")).toBeNull();
+});
+
+test("an unlocked row, locked field absent, wears no frame and no padlock", () => {
+  renderRow(session());
+  expect(row().classList.contains("row-locked"), "an absent `locked` must read as unlocked").toBe(false);
+  expect(row().querySelector(".row-lock")).toBeNull();
+});
+
+test("a locked row wears the frame and the padlock, AHEAD of the role glyph", () => {
+  renderRow(session({ locked: true, role: "developer" }));
+  expect(row().classList.contains("row-locked")).toBe(true);
+  const children = [...row().children];
+  const lock = children.findIndex((c) => c.classList.contains("row-lock"));
+  const role = children.findIndex((c) => c.classList.contains("row-role"));
+  expect(lock, "the padlock must be a direct child of the row, in the badge column").toBeGreaterThanOrEqual(0);
+  expect(role, "fixture must carry a role for the order to mean anything").toBeGreaterThanOrEqual(0);
+  expect(lock, "the operator asked for the padlock BEFORE the role glyph").toBeLessThan(role);
+  expect(row().querySelector(".row-lock")?.getAttribute("title")).toBe("sidebar.lockedTitle");
+});
+
+test("folded, a locked row keeps its frame class, so the rail still shows the lock", () => {
+  renderRow(session({ locked: true }), true);
+  expect(row().classList.contains("row-locked")).toBe(true);
+});
+
+test("the lock button offers the gesture the row does NOT have yet", () => {
+  renderRow(session({ locked: true }));
+  const titles = overlayTitles();
+  expect(titles).toContain("sidebar.unlock");
+  expect(titles).not.toContain("sidebar.lock");
+  const btn = row().querySelector<HTMLButtonElement>('.row-actions .row-btn[title="sidebar.unlock"]');
+  expect(btn?.getAttribute("aria-pressed")).toBe("true");
+});
+
+function withApi(api: Record<string, unknown>, body: () => Promise<void>): Promise<void> {
+  const w = window as unknown as { api?: unknown };
+  const prev = w.api;
+  w.api = api;
+  return body().finally(() => {
+    w.api = prev;
+  });
+}
+
+test("clicking the lock button asks main to flip the lock of THIS session", async () => {
+  const calls: Array<[string, boolean]> = [];
+  await withApi(
+    {
+      setSessionLocked: async (id: string, locked: boolean) => {
+        calls.push([id, locked]);
+      },
+      reportError: () => {}
+    },
+    async () => {
+      renderRow(session());
+      const btn = row().querySelector<HTMLButtonElement>('.row-actions .row-btn[title="sidebar.lock"]');
+      if (!btn) throw new Error("no lock button in the overlay");
+      await act(async () => {
+        btn.click();
+      });
+      expect(calls).toEqual([["tile-a", true]]);
+    }
+  );
+});
+
+function menuItem(label: string): HTMLButtonElement | undefined {
+  return [...container.querySelectorAll<HTMLButtonElement>('.context-menu [role="menuitem"]')].find(
+    (b) => b.textContent?.trim() === label
+  );
+}
+
+async function pickFromMenu(label: string): Promise<void> {
+  act(() => {
+    row().dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
+  });
+  const item = menuItem(label);
+  if (!item) throw new Error(`the right-click menu offers no "${label}" entry`);
+  await act(async () => {
+    item.click();
+  });
+}
+
+test("the right-click menu flips the lock both ways, on THIS session", async () => {
+  const calls: Array<[string, boolean]> = [];
+  await withApi(
+    {
+      setSessionLocked: async (id: string, locked: boolean) => {
+        calls.push([id, locked]);
+      },
+      reportError: () => {}
+    },
+    async () => {
+      renderRow(session());
+      await pickFromMenu("sidebar.lock");
+      renderRow(session({ locked: true }));
+      await pickFromMenu("sidebar.unlock");
+      expect(calls, "unlocked offers Lock, locked offers Unlock, each asking for the inverse").toEqual([
+        ["tile-a", true],
+        ["tile-a", false]
+      ]);
+    }
+  );
+});
+
+test("a refused lock is traced and toasted, never swallowed", async () => {
+  const reported: string[] = [];
+  const toasts: string[] = [];
+  fakeUseDeck.setState({ showToast: (key: string) => void toasts.push(key) });
+  await withApi(
+    {
+      setSessionLocked: async () => {
+        throw new Error("unknown session");
+      },
+      reportError: (_scope: string, msg: string) => void reported.push(msg)
+    },
+    async () => {
+      renderRow(session({ locked: true }));
+      const btn = row().querySelector<HTMLButtonElement>('.row-actions .row-btn[title="sidebar.unlock"]');
+      if (!btn) throw new Error("no unlock button in the overlay");
+      await act(async () => {
+        btn.click();
+      });
+      expect(reported.join("\n"), "the refusal must reach the Deck journal").toContain("unknown session");
+      expect(toasts.join("\n"), "and the operator, or the frame keeps lying").toContain("unknown session");
+    }
+  );
+});
+
+test("folded, the padlock badge is hidden by CSS alone and the frame stays", () => {
+  expect(ruleBody(".sidebar-collapsed .row-lock"), "option B: no badge in the folded rail").toMatch(/display: none;/);
+  expect(ruleBody(".row-locked:not(.row-drag-over)"), "the frame must be inset, on the --locked token").toMatch(
+    /box-shadow: inset 0 0 0 1px var\(--locked\);/
+  );
+});
+
+test("on a locked row the hover overlay stands 1px inside the frame, or it paints over its edge", () => {
+  const body = ruleBody(".row-locked .row-actions");
+  expect(body, "measured on screen: the opaque overlay hid the frame's top, right and bottom").not.toBeNull();
+  for (const side of ["top", "right", "bottom"]) expect(body!).toMatch(new RegExp(`${side}: 1px;`));
 });

@@ -10,6 +10,7 @@
 // This closes only the shortcut of forging the marker directly; a caller
 // requesting agent: 'team-lead' through the normal path still gets the bridge
 // by design.
+import type { EventEmitter } from 'node:events'
 import { TEAM_LEAD_DECK_TOOLS } from './supervisor'
 
 export interface TeamLeadBridgeInput {
@@ -19,6 +20,11 @@ export interface TeamLeadBridgeInput {
 }
 
 export type MintTeamLeadBridge = () => { mcpConfig: string; callerId: string } | null
+
+export interface ResolvedMcpConfig {
+  mcpConfig: string
+  callerId?: string
+}
 
 /**
  * Single source of truth for computing the `agent`-based deck-control bridge
@@ -108,9 +114,9 @@ export function wantsTeamLeadBridge(
 }
 
 /**
- * Resolves the mcpConfig to use: the input's own value if set, else a freshly
- * minted bridge, else undefined. Never throws: a mint failure is reported and
- * degrades to no bridge for this spawn.
+ * Resolves the mcpConfig to use and preserves the callerId when a bridge is
+ * freshly minted. Never throws: a mint failure is reported and degrades to no
+ * bridge for this spawn.
  * marker is the only input trusted for the bridge decision beyond
  * mcpConfig/sanitizedAgent; callers must construct it from a channel a remote
  * payload cannot influence.
@@ -122,9 +128,9 @@ export function resolveMcpConfig(
   mint: MintTeamLeadBridge,
   report: (scope: string, message: string, error?: unknown) => void,
   ambiguity?: string
-): string | undefined {
+): ResolvedMcpConfig | undefined {
   const explicit = input.mcpConfig?.trim() || undefined
-  if (explicit) return explicit
+  if (explicit) return { mcpConfig: explicit }
   const sessionName = input.name?.trim() || 'unnamed session'
   if (ambiguity) {
     report('session', `team-lead deck-control bridge refused for ${sessionName}: ${ambiguity}`)
@@ -138,7 +144,7 @@ export function resolveMcpConfig(
   }
   try {
     const bridge = mint()
-    if (bridge) return bridge.mcpConfig
+    if (bridge) return bridge
     report(
       'session',
       'team-lead deck-control bridge unavailable (deck-control server not started yet) -- tile opened without it'
@@ -148,6 +154,31 @@ export function resolveMcpConfig(
     report('session', 'failed to mint the team-lead deck-control bridge', e)
     return undefined
   }
+}
+
+/**
+ * Revokes a team-lead tile's minted caller and asks for its --mcp-config file
+ * to be deleted once the tile is finally gone: an explicit remove ('removed')
+ * or a clean PTY exit (exit code 0, which auto-closes the tile). A crash keeps
+ * the tile as a restartable corpse that reuses the same config, so it revokes
+ * nothing. The 'exit' event fires while the tile is still listed, which is
+ * what lets the caller be resolved from runtime state.
+ */
+export function wireTeamLeadRevocation(
+  service: Pick<EventEmitter, 'on'>,
+  deps: {
+    revokeCallerForSession(sessionId: string): string | null
+    cleanupMcpFile(callerId: string): void
+  }
+): void {
+  const release = (id: string): void => {
+    const callerId = deps.revokeCallerForSession(id)
+    if (callerId) deps.cleanupMcpFile(callerId)
+  }
+  service.on('removed', ({ id }: { id: string }) => release(id))
+  service.on('exit', ({ id, exitCode }: { id: string; exitCode: number }) => {
+    if (exitCode === 0) release(id)
+  })
 }
 
 /** Minimal shape `buildMintTeamLeadBridge` needs from the real DeckControlServer (deck-control.ts) -- a structural subset, not an import of that type, so this module never pulls in deck-control.ts's own dependency graph. */

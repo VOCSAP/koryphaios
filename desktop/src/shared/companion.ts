@@ -29,6 +29,7 @@ export const COMPANION_MANIFEST = {
   setSessionAutoResume: { kind: 'invoke', channel: 'sessions:set-auto-resume' },
   clearAttention: { kind: 'invoke', channel: 'sessions:clear-attention' },
   setLead: { kind: 'invoke', channel: 'sessions:set-lead' },
+  setSessionLocked: { kind: 'invoke', channel: 'sessions:set-locked' },
   peekNextColor: { kind: 'invoke', channel: 'sessions:peek-next-color' },
   reorderSessions: { kind: 'invoke', channel: 'sessions:reorder' },
   newClear: { kind: 'invoke', channel: 'app:new-clear' },
@@ -248,6 +249,7 @@ export type CompanionMethodName = keyof typeof COMPANION_MANIFEST
  * channel, so a new trust-changing channel is blocked the moment it's tiered 3.
  */
 const EXPLICIT_REMOTE_BLOCKED_CHANNELS: readonly string[] = [
+  'sessions:set-locked',
   'dialog:pickDirectory',
   'journal:export',
   'roadmap:import-plan',
@@ -426,6 +428,7 @@ export const CHANNEL_TIERS: Readonly<Record<string, 0 | 1 | 2 | 3>> = {
   'sessions:create': 2,
   'sessions:remove': 2,
   'sessions:restart': 2,
+  'sessions:set-locked': 2,
   'app:new-clear': 2,
   'workspace:save': 2,
   'workspace:restore': 2,

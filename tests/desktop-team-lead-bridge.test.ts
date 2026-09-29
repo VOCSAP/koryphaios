@@ -37,7 +37,10 @@ test("marker true + agent team-lead + no existing mcpConfig -> mints and uses th
   const mint = mock(fakeMint({ mcpConfig: "/state/team-lead-abc.json", callerId: "team-lead-abc" }));
   const report = mock(() => {});
   const result = resolveMcpConfig({}, "team-lead", true, mint, report);
-  expect(result).toBe("/state/team-lead-abc.json");
+  expect(result).toEqual({
+    mcpConfig: "/state/team-lead-abc.json",
+    callerId: "team-lead-abc"
+  });
   expect(mint).toHaveBeenCalledTimes(1);
   expect(report).not.toHaveBeenCalled();
 });
@@ -91,7 +94,7 @@ test("marker true but agent is NOT team-lead -> no mcpConfig, mint never called"
 test("an explicit input.mcpConfig always wins and is never overwritten, even with marker true", () => {
   const mint = mock(fakeMint({ mcpConfig: "/state/from-mint.json", callerId: "x" }));
   const result = resolveMcpConfig({ mcpConfig: "/state/already-set.json" }, "team-lead", true, mint, () => {});
-  expect(result).toBe("/state/already-set.json");
+  expect(result).toEqual({ mcpConfig: "/state/already-set.json" });
   expect(mint).not.toHaveBeenCalled();
 });
 
@@ -99,7 +102,7 @@ test("PROOF 3: mint returning null (deck-control server not started -- ipc.ts's 
   const mint = mock(fakeMint(null));
   const report = mock(() => {});
   let thrown: unknown = null;
-  let result: string | undefined;
+  let result: ReturnType<typeof resolveMcpConfig>;
   try {
     result = resolveMcpConfig({}, "team-lead", true, mint, report);
   } catch (e) {
@@ -117,7 +120,7 @@ test("PROOF 3b: mint THROWING synchronously does not propagate -- reports and co
   };
   const report = mock(() => {});
   let thrown: unknown = null;
-  let result: string | undefined;
+  let result: ReturnType<typeof resolveMcpConfig>;
   try {
     result = resolveMcpConfig({}, "team-lead", true, mint, report);
   } catch (e) {
@@ -239,11 +242,11 @@ function extractCreateBridgeDecision(src: string): string {
   if (start === -1 || src.indexOf(head, start + 1) !== -1) {
     throw new Error(`session-service.ts: expected exactly 1 "${head}"`);
   }
-  const callHead = "const mcpConfig = resolveMcpConfig(";
+  const callHead = "const resolvedMcpConfig = resolveMcpConfig(";
   const callIdx = src.indexOf(callHead, start);
   if (callIdx === -1 || callIdx - start > 200) throw new Error(`"${callHead}" does not follow "${head}"`);
   const openIdx = callIdx + callHead.length - 1;
-  return `${src.slice(start, openIdx)}(${extractParenBody(src, openIdx)})`;
+  return `${src.slice(start, openIdx)}(${extractParenBody(src, openIdx)})\nconst mcpConfig = resolvedMcpConfig?.mcpConfig\nreturn { mcpConfig, callerId: resolvedMcpConfig?.callerId }`;
 }
 
 function runCreateBridgeDecision(agent: string, input: { args?: string; name?: string }, marker: boolean) {
@@ -259,9 +262,9 @@ function runCreateBridgeDecision(agent: string, input: { args?: string; name?: s
     "agent",
     "input",
     "opts",
-    `${extractCreateBridgeDecision(src)}\nreturn mcpConfig`
+    extractCreateBridgeDecision(src)
   );
-  const mcpConfig = run.call(
+  const result = run.call(
     {
       mintTeamLeadBridge: () => {
         mintCalls.push("called");
@@ -275,13 +278,14 @@ function runCreateBridgeDecision(agent: string, input: { args?: string; name?: s
     agent,
     input,
     { teamLeadDeckBridge: marker }
-  ) as string | undefined;
-  return { mcpConfig, mintCalls: mintCalls.length, reports };
+  ) as { mcpConfig: string | undefined; callerId?: string };
+  return { ...result, mintCalls: mintCalls.length, reports };
 }
 
 test("create() mints the bridge for a template entry whose agent is carried only in args", () => {
   const r = runCreateBridgeDecision("", { args: '--agent "team-lead"', name: "lead" }, true);
   expect(r.mcpConfig).toBe("/state/team-lead-mcp-create.json");
+  expect(r.callerId).toBe("team-lead-create");
   expect(r.mintCalls).toBe(1);
 });
 
@@ -317,7 +321,12 @@ for (const [args, motif] of SHELL_AMBIGUOUS_ARGS) {
 for (const args of KORY_PRODUCED_TEAM_LEAD_ARGS) {
   test(`negative control: create() still mints exactly once for the Kory-produced args ${args}`, () => {
     const r = runCreateBridgeDecision("", { args, name: "shell lead" }, true);
-    expect(r).toEqual({ mcpConfig: "/state/team-lead-mcp-create.json", mintCalls: 1, reports: [] });
+    expect(r).toEqual({
+      mcpConfig: "/state/team-lead-mcp-create.json",
+      callerId: "team-lead-create",
+      mintCalls: 1,
+      reports: []
+    });
   });
 }
 
@@ -453,8 +462,11 @@ export function checkMcpConfigWiring(src: string): string | null {
     return `expected exactly one resolveMcpConfig( call in create(), found ${callMatches.length}`;
   }
 
-  if (!/const\s+mcpConfig\s*=\s*resolveMcpConfig\(/.test(body)) {
-    return "resolveMcpConfig(...) call found, but not assigned to `const mcpConfig` -- its return value may be discarded";
+  if (!/const\s+resolvedMcpConfig\s*=\s*resolveMcpConfig\(/.test(body)) {
+    return "resolveMcpConfig(...) call found, but not assigned to `const resolvedMcpConfig` -- its callerId may be discarded";
+  }
+  if (!/const\s+mcpConfig\s*=\s*resolvedMcpConfig\?\.mcpConfig/.test(body)) {
+    return "resolved mcpConfig is not projected into `const mcpConfig`";
   }
 
   const defMatch = /const def: SessionDef = \{/.exec(body);
@@ -464,11 +476,14 @@ export function checkMcpConfigWiring(src: string): string | null {
   if (!/\bmcpConfig\b\s*(,|:)/.test(defBody)) {
     return "SessionDef literal does not carry an `mcpConfig` key -- resolveMcpConfig's result may never reach the created session";
   }
+  if (!/mintedCallerId:\s*resolvedMcpConfig\?\.callerId\s*\?\?\s*null/.test(body)) {
+    return "RuntimeState does not retain the minted callerId from resolveMcpConfig";
+  }
 
   return null;
 }
 
-test("session-service.ts::create() calls resolveMcpConfig exactly once and its return reaches SessionDef.mcpConfig", () => {
+test("session-service.ts::create() retains resolveMcpConfig's callerId in RuntimeState", () => {
   const src = readFileSync(SESSION_SERVICE_PATH, "utf-8");
   const reason = checkMcpConfigWiring(src);
   expect(reason).toBeNull();
@@ -487,7 +502,7 @@ test("negative control: the checker REJECTS a synthetic body where resolveMcpCon
   ].join("\n");
   const reason = checkMcpConfigWiring(mutated);
   expect(reason).not.toBeNull();
-  expect(reason).toContain("not assigned to `const mcpConfig`");
+  expect(reason).toContain("not assigned to `const resolvedMcpConfig`");
 });
 
 test("negative control: the checker REJECTS a synthetic body where the call is dropped entirely", () => {

@@ -1,8 +1,8 @@
 // 127.0.0.1 only; multiple bearer tokens can be live at once, each resolved to
 // a callerId and optional tool allow-list in `callerTable`.
-// Destructive operations are allowed only on objects the same caller created
-// through this endpoint, enforced by ownedSessions/ownedWorktrees, never by
-// which endpoint the request arrived through.
+// Restart and worktree removal are allowed only on objects the same caller
+// created through this endpoint (ownedSessions/ownedWorktrees); closing a
+// session follows the role and lock rules of deck_close_session instead.
 // The per-caller tool allow-list is enforced here at the request handler,
 // before dispatch runs, not only by the client-side copy of the filter.
 // Does not resist a hostile sibling tile reading another tile's mcp-config
@@ -81,15 +81,19 @@ export type SpawnApprovalResult = { pending: true } | { pending: false; decision
 /** Tool-result note for a `pending` SpawnApprovalResult, shared by every dispatch case below. */
 const SPAWN_APPROVAL_PENDING_NOTE = 'awaiting operator approval -- retry this exact call to check the verdict'
 
+/** A session as deck-control sees it: the renderer-visible runtime plus the caller id minted for a team-lead tile. */
+export type DeckControlSession = SessionRuntime & { mintedCallerId?: string | null }
+
 export interface DeckControlDeps {
   listAgents(): string[]
   listModels(): ModelOption[]
   listPresets(): LaunchPreset[]
   /** Same path as the operator's create (worktree handling included). */
   spawnSession(input: CreateSessionInput): Promise<SessionRuntime>
-  listSessions(): SessionRuntime[]
+  listSessions(): DeckControlSession[]
   restartSession(id: string): void
-  closeSession(id: string): void
+  closeSession(id: string): Promise<void>
+  journal(message: string): void
   createWorktree(branch: string): Promise<WorktreeInfo>
   listWorktrees(): Promise<WorktreeInfo[]>
   removeWorktree(path: string): Promise<void>
@@ -200,8 +204,7 @@ export interface DeckControlServer {
     allowedTools?: readonly string[] | null
   ): { token: string; callerId: string }
   /**
-   * Audit fix #2 (card 6c380073): revoke the caller minted for a team-lead
-   * SESSION on its final removal, keyed by the session id (the object index
+   * Revoke the caller minted for a team-lead SESSION on its final removal, keyed by the session id (the object index
    * caller ipc already has) rather than by callerId (which the caller would
    * have to have tracked separately). No-ops (returns null) for a session
    * that was never minted its own caller -- the supervisor tile, any
@@ -409,9 +412,18 @@ export function startDeckControl(
     }
   }
 
+  /** The caller id minted for this tile's own calls: runtime state first, then the spawn-time map. */
+  function callerForSession(sessionId: string): string | null {
+    return (
+      deps.listSessions().find((session) => session.id === sessionId)?.mintedCallerId ??
+      sessionMintedCallerId.get(sessionId) ??
+      null
+    )
+  }
+
   /** See DeckControlServer.revokeCallerForSession's own doc. */
   function revokeCallerForSession(sessionId: string): string | null {
-    const callerId = sessionMintedCallerId.get(sessionId)
+    const callerId = callerForSession(sessionId)
     if (!callerId) return null
     revokeCaller(callerId)
     sessionMintedCallerId.delete(sessionId)
@@ -424,8 +436,7 @@ export function startDeckControl(
   const ownedSessions = new Map<string, string>()
   const ownedWorktrees = new Map<string, string>()
   /**
-   * Audit fix #2 (card 6c380073): session id -> the callerId MINTED FOR that
-   * session's own future calls (never the spawning caller's own callerId,
+   * Session id -> the callerId MINTED FOR that session's own future calls (never the spawning caller's own callerId,
    * already tracked by ownedSessions above -- a distinct dimension). Only
    * populated for a team-lead spawn. Read by revokeCallerForSession on final
    * removal so a departed lead's token/file stop authorizing anything.
@@ -671,30 +682,15 @@ export function startDeckControl(
       case 'deck_close_session': {
         const id = str(args, 'id')
         const peerId = str(args, 'peer_id')
-        // Card c4cbb845: `peer_id` names the SAME target by its other name, it
-        // is never a second target -- both set is refused rather than one
-        // silently preferred (same discipline as validateEntry's
-        // agent/embedded_agent above). The MCP schema
-        // (desktop/mcp/deck-control-mcp.ts) declares both and requires
-        // neither; it validates NOTHING, the handler receives arguments
-        // verbatim, so these four lines ARE the exactly-one-of rule.
+        // The MCP schema requires neither argument and validates nothing: these
+        // two lines are the exactly-one-of rule.
         if (id && peerId) throw new Error('id and peer_id are mutually exclusive -- pick one')
         if (!id && !peerId) throw new Error('id or peer_id is required')
         let target = id
         if (peerId) {
-          // The one existing peer_id -> tile resolver main-side (directive.ts,
-          // also used by index.ts and agent-stop.ts): reused, not
-          // re-implemented. Closing a tile is irreversible, so zero match and
-          // several matches both refuse and this path never picks.
           const resolved = resolveDirectiveTargets([peerId], deps.listSessions())
-          // Ambiguity is refused BEFORE matched is read, on purpose. The
-          // resolver already keeps an ambiguous peer_id out of `matched`
-          // (directive.ts), but its own doc calls `ambiguous` an annotation of
-          // WHY an id is missing -- a guarantee this case would merely be
-          // BORROWING. Should that resolver ever be "improved" into pushing
-          // the first match while still annotating, closing here must fail,
-          // not pick. So the fail-closed is LOCAL: an annotated ambiguity
-          // refuses whatever `matched` holds.
+          // Refused before `matched` is read: closing is irreversible, so an
+          // annotated ambiguity must refuse whatever `matched` holds.
           if (resolved.ambiguous.length > 0) {
             throw new Error(
               `refused: peer_id "${peerId}" is ambiguous -- several live tiles carry it, close it by tile id instead`
@@ -704,25 +700,24 @@ export function startDeckControl(
           if (!hit) throw new Error(`refused: no live session carries peer_id "${peerId}"`)
           target = hit.id
         }
-        // The unresolved/ambiguous and the wrong-owner refusals are worded
-        // identically on purpose: a caller must not learn from the ownership
-        // refusal alone whether a tile is someone else's or simply absent.
-        // That distinction is safe to leak at the unresolved stage because the
-        // same enumeration is already available to the tile through list_peers
-        // on the merged claude-peers MCP server.
-        if (ownedSessions.get(target) !== callerId) {
-          throw new Error(
-            'refused: only a session spawned by this same caller can be closed -- ask the operator for the rest'
-          )
+        const targetSession = deps.listSessions().find((session) => session.id === target)
+        if (!targetSession) throw new Error(`refused: no live session carries id "${target}"`)
+        if (targetSession.locked) {
+          deps.journal(`deck_close_session refused: peer verrouillé (${target})`)
+          throw new Error('refused: peer verrouillé')
         }
-        deps.closeSession(target)
+        if (restricted) {
+          if (callerForSession(target) === callerId) {
+            throw new Error('refused: a team-lead cannot close its own tile')
+          }
+          if (targetSession.lead || targetSession.supervisor) {
+            throw new Error('refused: a team-lead cannot close a lead or supervisor tile')
+          }
+        } else if (targetSession.supervisor) {
+          throw new Error('refused: the supervisor cannot close a supervisor tile')
+        }
+        await deps.closeSession(target)
         ownedSessions.delete(target)
-        // Drops only the ownership entry; it deliberately does not call
-        // revokeCallerForSession or touch sessionMintedCallerId here.
-        // That happens transitively: closeSession emits a 'removed' event whose
-        // single production listener revokes the caller and deletes the config
-        // file. Revoking here too would be a second, divergence-prone path to
-        // the same guarantee.
         return { ok: true }
       }
 

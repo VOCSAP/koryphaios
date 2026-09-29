@@ -29,6 +29,7 @@ use the variables so both themes keep working.
 | `--glow`       | `#d4a24a` | `#b8860b` | Gold — attention-glow halo (see §5)    |
 | `--action-prompt` | `#e0b341` | `#b07d10` | Yellow — "compose / insert a prompt" |
 | `--action-expand` | `#a06bff` | `#7c3aed` | Violet — "maximize / restore a tile" |
+| `--locked`     | `#e0b341` | `#9a6700` | Amber: "held, agents may not act on it"  |
 | `--select-arrow` | data URI | data URI | Chevron drawn for `<select>` (see §4)  |
 
 Layout tokens: `--gap: 8px`, `--radius: 8px` (containers), base font 13px
@@ -67,6 +68,13 @@ Colour is meaning. Do not repurpose these:
 - **Green** — positive states: `#3ec46d` running dot, `#2f7d4f` success toast.
 - **Amber** — transient/warning states: `#e0b341` starting dot & "local"
   badge, `#9a6700` info toast.
+- **Amber `var(--locked)`**: held, an operator-locked session (sidebar row
+  frame `.row-locked` + padlock `.row-lock`). Same hue as a
+  claimed roadmap card, whose four sites still hardcode `#e0b341`. Not
+  `--action-prompt`: that one already colours the context ring inside the
+  same row. The light value is the info-toast amber `#9a6700`: a 1px
+  outline needs 3:1 on both sides, and it measures 4.87 on white, 3.87 on
+  `--selected`, 3.97 on the hover `--bg-3`.
 - **Banner red `#a03030`** — full-width outage banner (state, not event).
 - **Gold `var(--glow)`** — the "enchanted glyph" attention halo (§5). User-
   configurable (AppConfig.glowColor); never reuse it for anything but

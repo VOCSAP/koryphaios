@@ -99,6 +99,10 @@
   /* Violet again, but a distinct name: "stop, reversibly" (a container halt),
      as opposed to the red that destroys. */
   --action-halt: #a06bff;
+  /* "Held, agents may not act on it": the amber a claimed roadmap card already
+     wears, named so the operator's session lock does not borrow
+     --action-prompt, which the same sidebar row spends on the context ring. */
+  --locked: #e0b341;
   /* Drop-down chevron drawn by us: the native <select> arrow cannot be themed,
      so `appearance: none` hides it and this data URI takes over (--fg-dim). */
   --select-arrow: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%239a9a9a' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
@@ -121,6 +125,7 @@
   --action-prompt: #b07d10;
   --action-expand: #7c3aed;
   --action-halt: #7c3aed;
+  --locked: #9a6700;
   --select-arrow: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%236a6a6a' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
 }
 
@@ -586,20 +591,41 @@ body {
   color: var(--accent);
 }
 
-/* Peer ROLE mark (card b5ba8cac), the laurel's neighbour in the same badge
-   column: same box, same `flex: 0 0 auto` so it never shrinks under a long
-   name, and the glyph renders at 1em like every other (13px at the app's base
-   font -- the value the rail token is sized from).
-   TONE, and it is the one difference from .row-lead: --fg-dim, not --accent.
-   The row already spends the accent on identity (.row-branch, the laurel), and
-   a second accent-coloured badge would make lead and role compete for the same
-   "this row is special" reading. The role qualifies EVERY session that has
-   one, so it is meta, not a distinction -- dim is what says that. */
+/* --fg-dim, not --accent: the accent already marks identity (branch, laurel),
+   and a role qualifies every session that has one, so it is meta. */
 .row-role {
   display: inline-flex;
   align-items: center;
   flex: 0 0 auto;
   color: var(--fg-dim);
+}
+
+.row-lock {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  color: var(--locked);
+}
+
+/* Folded, the frame alone says "locked": a 13px badge would cost the rail
+   19px (--sidebar-rail-w) for every operator, locked tile or not. */
+.sidebar-collapsed .row-lock {
+  display: none;
+}
+
+/* Inset, like .row-drag-over, so locking never moves a pixel of the row. The
+   :not() keeps the drop target readable, since this rule sits later in the
+   file at the same specificity. */
+.row-locked:not(.row-drag-over) {
+  box-shadow: inset 0 0 0 1px var(--locked);
+}
+
+/* The opaque hover overlay would paint over the frame's right edge. */
+.row-locked .row-actions {
+  top: 1px;
+  right: 1px;
+  bottom: 1px;
+  border-radius: 0 5px 5px 0;
 }
 
 /* Model badge + context ring: the tile's own statusLine report. Same

@@ -139,6 +139,7 @@ export interface SessionRuntime extends SessionDef {
   resumeAt: number | null
   /** True while the session waits for the operator (permission/question, C11). */
   needsAttention: boolean
+  locked?: boolean
   /**
    * Frozen at spawn from the command actually used, never recomputed afterward,
    * so it cannot flip out from under an already-live session if the global
@@ -2048,6 +2049,7 @@ export interface DeckApi {
   clearAttention(id: string): Promise<void>
   /** Designate a session as the window's team-lead (unique, PLAN C10). */
   setLead(id: string): Promise<void>
+  setSessionLocked(id: string, locked: boolean): Promise<void>
   /** The colour the next auto-assigned session would receive (create preview). */
   peekNextColor(): Promise<string>
   /** Reorder the session list (sidebar drag-and-drop); drives sidebar + tiles. */

@@ -344,10 +344,11 @@ export function registerIpc({
   )
   regHandle('sessions:clear-attention', (_e, id: string) => service.clearAttention(id))
   regHandle('sessions:set-lead', (_e, id: string) => service.setLead(id))
+  regHandle('sessions:set-locked', (_e, id: string, locked: boolean) =>
+    service.setLocked(id, locked)
+  )
   regHandle('sessions:peek-next-color', () => service.peekNextColor())
   regHandle('sessions:reorder', (_e, ids: string[]) => service.reorder(ids ?? []))
-  // "New (clear)": save+detach the current workspace (while sessions still
-  // exist) THEN close all sessions, returning the window to the empty state.
   regHandle('app:new-clear', () => {
     workspaces.startNew()
     service.closeAll()

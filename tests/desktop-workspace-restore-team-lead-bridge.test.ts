@@ -174,15 +174,20 @@ function extractRestoreMintLoopBody(src: string): string {
 }
 
 interface RestoredDefStub {
+  id: string;
   name: string;
   args: string;
   mcpConfig: string | undefined;
 }
 
-function runRestoreMintLoop(defs: RestoredDefStub[]): { mintCalls: number; reports: string[] } {
+function runRestoreMintLoop(defs: RestoredDefStub[]): {
+  mintCalls: number;
+  reports: string[];
+  mintedCallerIds: Map<string, string>;
+} {
   const src = readFileSync(SESSION_SERVICE_PATH, "utf-8");
   const loopBody = extractRestoreMintLoopBody(src);
-  const wrapped = `for (const d of this.defs) {${loopBody}}`;
+  const wrapped = `const mintedCallerIds = new Map(); for (const d of this.defs) {${loopBody}} return mintedCallerIds`;
 
   let mintCalls = 0;
   const mint: MintTeamLeadBridge = () => {
@@ -198,14 +203,20 @@ function runRestoreMintLoop(defs: RestoredDefStub[]): { mintCalls: number; repor
     isTeamLeadAgentFn: typeof isTeamLeadAgent,
     effectiveAgentFn: typeof effectiveAgent,
     reportErrorFn: typeof report
-  ) => void;
-  run.call({ defs, mintTeamLeadBridge: mint }, resolveMcpConfig, isTeamLeadAgent, effectiveAgent, report);
-  return { mintCalls, reports };
+  ) => Map<string, string>;
+  const mintedCallerIds = run.call(
+    { defs, mintTeamLeadBridge: mint },
+    resolveMcpConfig,
+    isTeamLeadAgent,
+    effectiveAgent,
+    report
+  );
+  return { mintCalls, reports, mintedCallerIds };
 }
 
 test("card 6363bd69 wiring: restoreFrom()'s real mint loop grants mcpConfig only to the team-lead-agent def, using the injected real predicates", () => {
-  const leadDef = { name: "lead", args: '--agent "team-lead"', mcpConfig: undefined as string | undefined };
-  const otherDef = { name: "rev", args: '--agent "reviewer"', mcpConfig: undefined as string | undefined };
+  const leadDef = { id: "lead", name: "lead", args: '--agent "team-lead"', mcpConfig: undefined as string | undefined };
+  const otherDef = { id: "reviewer", name: "rev", args: '--agent "reviewer"', mcpConfig: undefined as string | undefined };
 
   const r = runRestoreMintLoop([leadDef, otherDef]);
 
@@ -213,14 +224,15 @@ test("card 6363bd69 wiring: restoreFrom()'s real mint loop grants mcpConfig only
     "/state/team-lead-mcp-xyz.json"
   );
   expect(otherDef.mcpConfig, "a non-team-lead def must never be minted a bridge").toBeUndefined();
+  expect(r.mintedCallerIds).toEqual(new Map([["lead", "team-lead-xyz"]]));
   expect(r.mintCalls).toBe(1);
   expect(r.reports).toEqual([]);
 });
 
 test("restoreFrom()'s mint loop follows the last --agent and refuses an ambiguous one with a report naming the session", () => {
-  const overriddenToLead = { name: "a", args: '--agent "developer" --agent "team-lead"', mcpConfig: undefined as string | undefined };
-  const overriddenAway = { name: "b", args: '--agent "team-lead" --agent "developer"', mcpConfig: undefined as string | undefined };
-  const ambiguous = { name: "hand-edited lead", args: '--agent "team-lead" ; true', mcpConfig: undefined as string | undefined };
+  const overriddenToLead = { id: "to-lead", name: "a", args: '--agent "developer" --agent "team-lead"', mcpConfig: undefined as string | undefined };
+  const overriddenAway = { id: "away", name: "b", args: '--agent "team-lead" --agent "developer"', mcpConfig: undefined as string | undefined };
+  const ambiguous = { id: "ambiguous", name: "hand-edited lead", args: '--agent "team-lead" ; true', mcpConfig: undefined as string | undefined };
 
   const r = runRestoreMintLoop([overriddenToLead, overriddenAway, ambiguous]);
 
@@ -230,6 +242,18 @@ test("restoreFrom()'s mint loop follows the last --agent and refuses an ambiguou
   expect(r.mintCalls).toBe(1);
   expect(r.reports).toHaveLength(1);
   expect(r.reports[0]).toContain("hand-edited lead");
+});
+
+test("restoreFrom stores each restored mint in runtime state", () => {
+  const src = readFileSync(SESSION_SERVICE_PATH, "utf-8");
+  const mapStart = src.indexOf("const mintedCallerIds = new Map<string, string>()");
+  expect(mapStart).toBeGreaterThanOrEqual(0);
+  const firstLoop = src.indexOf("for (const d of this.defs) {", mapStart);
+  const runtimeLoop = src.indexOf("for (const d of this.defs) {", firstLoop + 1);
+  expect(runtimeLoop).toBeGreaterThan(firstLoop);
+  const open = runtimeLoop + "for (const d of this.defs) ".length;
+  const body = extractBracedBody(src, open);
+  expect(body).toMatch(/mintedCallerId:\s*mintedCallerIds\.get\(d\.id\)\s*\?\?\s*null/);
 });
 
 // ----- ipc.ts's workspace:restore: ensureControlServer() gated on

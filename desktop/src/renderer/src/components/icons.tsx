@@ -648,11 +648,22 @@ const IconTorchOut = (
   </Svg>
 )
 
-/** Padlock: a roadmap item an agent is working on. */
+/** Padlock: held, so agents may not act on it (a claimed roadmap item, an
+ *  operator-locked session). */
 const IconLock = (
   <Svg>
     <rect x="6.5" y="10.5" width="11" height="9" rx="1.5" />
     <path d="M8.5 10.5V8a3.5 3.5 0 0 1 7 0v2.5" />
+    <Dot cx={12} cy={15} r={1.1} />
+  </Svg>
+)
+
+/** Open padlock: IconLock's body unchanged, only the shackle lifts free of it
+ *  on the right, so the pair reads as one object changing state. */
+const IconUnlock = (
+  <Svg>
+    <rect x="6.5" y="10.5" width="11" height="9" rx="1.5" />
+    <path d="M8.5 10.5V6.5a3.5 3.5 0 0 1 7 0V7" />
     <Dot cx={12} cy={15} r={1.1} />
   </Svg>
 )
@@ -1074,7 +1085,9 @@ export const GLYPH_ACTIONS = {
   folder: IconFolder,
   check: IconCheck,
   wand: IconWand,
-  checklist: IconChecklist
+  checklist: IconChecklist,
+  lock: IconLock,
+  unlock: IconUnlock
 }
 
 /** Provider sigils: ModelPicker sections and graph-chat node avatars share
