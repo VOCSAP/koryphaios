@@ -13,6 +13,7 @@ import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypt
 import { brokerMode, isLoopbackBrokerUrl, loadConfig, upstreamUrl } from "./shared/config.ts";
 import { createLogger, coreLogDir } from "./shared/logger.ts";
 import { projectKeyCaseRefusal, validateProjectKey } from "./shared/project-key.ts";
+import { roadmapTitleRefusal } from "./shared/roadmap-title.ts";
 import {
   formatRoadmapContextDocumentHeader,
   formatRoadmapContextDocumentOmission,
@@ -4084,6 +4085,9 @@ function handleRoadmapUpsert(
       nextTargets = [];
     }
 
+    const updateTitleRefusal = body.title !== undefined ? roadmapTitleRefusal(body.title.trim()) : null;
+    if (updateTitleRefusal) return { error: updateTitleRefusal, status: 400 };
+
     const next: RoadmapItem = {
       ...existing,
       kind: nextKind,
@@ -4244,6 +4248,8 @@ function handleRoadmapUpsert(
   const projectKey = rawCreateProjectKey;
   const title = typeof body.title === "string" ? body.title.trim() : "";
   if (!title) return { error: "title is required", status: 400 };
+  const createTitleRefusal = roadmapTitleRefusal(title);
+  if (createTitleRefusal) return { error: createTitleRefusal, status: 400 };
   if (body.status === "archived") {
     return { error: "cannot create an item directly archived", status: 400 };
   }
@@ -4976,6 +4982,8 @@ function handleRoadmapImport(body: {
     ) {
       return { error: `invalid item at index ${i}`, status: 400 };
     }
+    const importTitleRefusal = roadmapTitleRefusal(it.title.trim());
+    if (importTitleRefusal) return { error: `item at index ${i}: ${importTitleRefusal}`, status: 400 };
     // Uphold the same directive coherence as create/patch: a 'directive' row
     // must carry a valid command (never persist kind='directive' + directive=null).
     if (it.kind === "directive" && (!it.directive || !DIRECTIVE_COMMANDS.includes(it.directive))) {
@@ -5866,6 +5874,8 @@ function validatePushItem(
   }
   const title = typeof it.title === "string" ? it.title.trim() : "";
   if (!title) return { error: "item.title is required", status: 400 };
+  const pushTitleRefusal = roadmapTitleRefusal(title);
+  if (pushTitleRefusal) return { error: `item.${pushTitleRefusal}`, status: 400 };
   for (const field of ["description", "rationale", "context"] as const) {
     if (typeof it[field] !== "string") return { error: `item.${field} must be a string`, status: 400 };
   }
@@ -6004,6 +6014,8 @@ function validateContextDocumentSync(
   const projectKey = typeof document.project_key === "string" ? document.project_key : "";
   const projectKeyCheck = validateProjectKey(projectKey);
   if (!projectKeyCheck.ok) return { error: `document.project_key is invalid (${projectKeyCheck.reason})`, status: 400 };
+  const caseRefusal = projectKeyCaseRefusal(projectKey);
+  if (caseRefusal) return { error: `document.${caseRefusal}`, status: 400 };
   const author = normalizeAuthorIdentity(typeof document.created_by === "string" ? document.created_by : "");
   if (!author.ok) return { error: "document.created_by is empty or outside [a-z0-9:_-]", status: 400 };
   if (typeof document.created_at !== "string" || Number.isNaN(Date.parse(document.created_at))) {
@@ -6697,9 +6709,10 @@ function handleRoadmapSyncResolve(
   // local content of its own, hence dirty like 'local'.
   const dirty = body.choice !== "remote";
 
-  withApplying(() => {
+  const writeRefusal = withApplying((): string | null => {
     if (applied !== null && !contentEquals(applied, localContent)) {
-      writeSyncContent(row.id, applied, author.by, new Date().toISOString());
+      const refused = writeSyncContent(row.id, applied, author.by, new Date().toISOString());
+      if (refused) return refused;
     }
     db.run(
       `UPDATE roadmap_items SET
@@ -6707,18 +6720,33 @@ function handleRoadmapSyncResolve(
        WHERE id = ?`,
       [remote.content_rev, JSON.stringify(remoteContent), dirty ? 1 : 0, row.id]
     );
+    return null;
   });
+  if (writeRefusal) {
+    return { error: `the stored upstream row cannot be applied, cannot resolve: ${writeRefusal}`, status: 409 };
+  }
   log.info(`roadmap sync: conflict on card ${row.id} resolved '${body.choice}' by '${author.by}'`);
   return { item: getRoadmapItem(row.id)! };
 }
 
-/** The one statement that writes replicated content onto a local card. */
+/** A replicated title comes from another broker, typed only by its JSON. */
+function syncTitleRefusal(title: unknown): string | null {
+  return typeof title === "string" ? roadmapTitleRefusal(title.trim()) : "title is not a string";
+}
+
+/**
+ * The one statement that writes replicated content onto a local card, for the
+ * pull and for a resolve alike. Returns the refusal instead of writing a title
+ * the direct doors would refuse; null once written.
+ */
 function writeSyncContent(
   id: string,
   content: RoadmapSyncContent,
   updatedBy: string,
   updatedAt: string
-): void {
+): string | null {
+  const titleRefusal = syncTitleRefusal(content.title);
+  if (titleRefusal) return titleRefusal;
   db.run(
     `UPDATE roadmap_items SET
        kind = ?, title = ?, description = ?, rationale = ?, context = ?, priority = ?,
@@ -6734,6 +6762,7 @@ function writeSyncContent(
       updatedBy, updatedAt, id,
     ]
   );
+  return null;
 }
 
 // --- Roadmap replication: the pass a replica runs against its upstream (§8) ---
@@ -6946,6 +6975,13 @@ function keepLocalAgainstSweep(remote: RoadmapSyncRow): void {
  * be silent).
  */
 function applyPulledRow(remote: RoadmapSyncRow): boolean {
+  // Checked before every branch: the conflict branch parks the row in
+  // sync_remote, which a later resolve would write back as the card.
+  const titleRefusal = syncTitleRefusal(remote.title);
+  if (titleRefusal) {
+    log.warn(`roadmap sync: pulled card ${remote.id} skipped, ${titleRefusal}`);
+    return false;
+  }
   const local = getRoadmapRow(remote.id);
   const content = pickSyncContent(remote);
   const contentJson = JSON.stringify(content);
@@ -6958,7 +6994,10 @@ function applyPulledRow(remote: RoadmapSyncRow): boolean {
   if (!local) {
     // Only this INSERT stores the upstream's project_key; skipping the card
     // lets its page neighbours apply and the cursor advance past it.
-    const caseRefusal = projectKeyCaseRefusal(remote.project_key);
+    const caseRefusal =
+      typeof remote.project_key === "string"
+        ? projectKeyCaseRefusal(remote.project_key)
+        : "project_key is not a string";
     if (caseRefusal) {
       log.warn(`roadmap sync: pulled card ${remote.id} skipped, ${caseRefusal}`);
       return false;
@@ -7027,7 +7066,11 @@ function applyPulledRow(remote: RoadmapSyncRow): boolean {
   ) {
     keepLocalAgainstSweep(remote);
   } else if (!dirty) {
-    writeSyncContent(remote.id, content, updatedBy, remote.updated_at);
+    const writeRefusal = writeSyncContent(remote.id, content, updatedBy, remote.updated_at);
+    if (writeRefusal) {
+      log.warn(`roadmap sync: pulled card ${remote.id} skipped, ${writeRefusal}`);
+      return false;
+    }
     db.run(
       `UPDATE roadmap_items SET sync_base_rev = ?, sync_base = ?, sync_dirty = 0,
          sync_state = 'clean', sync_remote = NULL WHERE id = ?`,
@@ -9281,6 +9324,8 @@ function handleApprovalTokenMint(
   if (!projectKeyCheck.ok) {
     return { error: `project_key is invalid (${projectKeyCheck.reason})`, status: 400 };
   }
+  const mintCaseRefusal = projectKeyCaseRefusal(rawProjectKey);
+  if (mintCaseRefusal) return { error: mintCaseRefusal, status: 400 };
   const projectKey = rawProjectKey;
   const tokenId = deriveTokenId(sessionPublicKey);
   const now = new Date();

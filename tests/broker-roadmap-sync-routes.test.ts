@@ -16,6 +16,7 @@ import {
   type TestBroker,
 } from "./_helper.ts";
 import { buildRoadmapAppendHeader } from "../shared/roadmap-append.ts";
+import { ROADMAP_TITLE_MAX } from "../shared/roadmap-title.ts";
 import type {
   RegisterResponse,
   RoadmapContextDocument,
@@ -781,6 +782,36 @@ test("push refuses a miscased project_key with 400 naming the lowercase form, no
       expected_content_rev: null,
     });
     expect(control.status).toBe(200);
+  } finally {
+    await stopBroker(b);
+  }
+}, 20_000);
+
+test("push refuses a title over the roadmap bound with 400, and stores one at the bound", async () => {
+  const b = await startBroker();
+  try {
+    const over = await post<{ error?: string }>(`${b.url}/roadmap/sync/push`, {
+      replica_id: R1,
+      item: pushItem({ id: "card-title-over", title: "t".repeat(ROADMAP_TITLE_MAX + 1) }),
+      expected_content_rev: null,
+    });
+    expect(over.status).toBe(400);
+    expect(over.body.error).toContain(String(ROADMAP_TITLE_MAX));
+
+    const atBound = await post<RoadmapSyncPushResponse>(`${b.url}/roadmap/sync/push`, {
+      replica_id: R1,
+      item: pushItem({ id: "card-title-at-bound", title: "t".repeat(ROADMAP_TITLE_MAX) }),
+      expected_content_rev: null,
+    });
+    expect(atBound.status).toBe(200);
+
+    const db = new Database(b.dbPath, { readonly: true });
+    try {
+      const rows = db.query("SELECT id FROM roadmap_items WHERE id IN ('card-title-over', 'card-title-at-bound')").all() as { id: string }[];
+      expect(rows.map((r) => r.id)).toEqual(["card-title-at-bound"]);
+    } finally {
+      db.close();
+    }
   } finally {
     await stopBroker(b);
   }
@@ -1976,6 +2007,44 @@ test("context document sync relays a deck author and refuses a foreign relay", a
       { replica_id: R1, document: { ...document, id: "document-sync-foreign", created_by: "via:otherrep:x" } },
     );
     expect([deck.status, deck.body.document.created_by, foreign.status]).toEqual([200, "via:replica-:deck", 400]);
+  } finally {
+    await stopBroker(b);
+  }
+}, 30_000);
+
+test("context document sync push refuses a miscased project_key, ASCII or not, and stores the lowercase one", async () => {
+  const b = await startBroker();
+  try {
+    const unit = {
+      id: "unit-sync-case",
+      source_target: "body",
+      raw: "case guard",
+      deported_at: "2026-09-23T14:00:00.000Z",
+      position: 0,
+    };
+    for (const [miscased, lower] of [
+      ["github.com/VOCSAP/sync-routes-repo", "github.com/vocsap/sync-routes-repo"],
+      ["github.com/acme/Élan", "github.com/acme/élan"],
+    ]) {
+      const refused = await post<{ error?: string }>(`${b.url}/roadmap/context-document/sync/push`, {
+        replica_id: R1,
+        document: { ...syncDocument(`document-case-${lower!.length}`, [unit]), project_key: miscased },
+      });
+      expect([miscased, refused.status]).toEqual([miscased, 400]);
+      expect(refused.body.error).toContain(lower!);
+    }
+    const db = new Database(b.dbPath, { readonly: true });
+    try {
+      const row = db.query("SELECT COUNT(*) AS n FROM roadmap_context_documents").get() as { n: number };
+      expect(row.n, "no document stored under a miscased key").toBe(0);
+    } finally {
+      db.close();
+    }
+    const stored = await post<RoadmapContextDocumentSyncPushResponse>(`${b.url}/roadmap/context-document/sync/push`, {
+      replica_id: R1,
+      document: syncDocument("document-case-lower", [unit]),
+    });
+    expect(stored.status).toBe(200);
   } finally {
     await stopBroker(b);
   }

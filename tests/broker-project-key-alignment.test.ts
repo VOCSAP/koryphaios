@@ -278,6 +278,43 @@ test("mint (/approval/token-mint): a project_key with a control character is ref
   }
 });
 
+test("mint (/approval/token-mint): a miscased project_key, ASCII or not, is refused with 400; its lowercase form is minted", async () => {
+  const b = await startBroker();
+  try {
+    const opCred = generateCredential();
+    const operatorId = deriveOperatorId(opCred.publicKey);
+    const mint = async (projectKey: string, sessionRef: string) => {
+      const mintBody = {
+        session_public_key: generateCredential().publicKey,
+        session_ref: sessionRef,
+        project_key: projectKey,
+        public_key: opCred.publicKey,
+      };
+      const auth = buildAuthProof(opCred.privateKey, mintBody, { kind: "operator", operator_id: operatorId });
+      return post<{ error?: string }>(`${b.url}/approval/token-mint`, { ...mintBody, auth });
+    };
+    for (const [miscased, lower] of [
+      ["github.com/VOCSAP/project-key-probe", "github.com/vocsap/project-key-probe"],
+      ["github.com/acme/Élan", "github.com/acme/élan"],
+    ]) {
+      const refused = await mint(miscased!, `l0-mint-${lower}`);
+      expect([miscased, refused.status]).toEqual([miscased, 400]);
+      expect(refused.body.error).toContain(lower!);
+    }
+    const db = new Database(b.dbPath, { readonly: true });
+    try {
+      const row = db.query("SELECT COUNT(*) AS n FROM approval_session_tokens").get() as { n: number };
+      expect(row.n, "no token minted under a miscased key").toBe(0);
+    } finally {
+      db.close();
+    }
+    const minted = await mint("github.com/vocsap/project-key-probe", "l0-mint-lower");
+    expect(minted.status).toBe(200);
+  } finally {
+    await stopBroker(b);
+  }
+});
+
 test("roadmap/upsert (create): a project_key with a control character is refused with 400, nothing created", async () => {
   const b = await startBroker();
   try {

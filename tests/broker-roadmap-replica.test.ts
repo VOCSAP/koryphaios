@@ -16,6 +16,7 @@ import {
   scrubEnv,
   type TestBroker,
 } from "./_helper.ts";
+import { ROADMAP_TITLE_MAX } from "../shared/roadmap-title.ts";
 import type {
   RegisterResponse,
   RoadmapContextDocument,
@@ -66,6 +67,10 @@ let pullSuppressed = false;
 let pushSuppressed = false;
 let documentPullIncludesInvalid = false;
 let documentPullImmutableConflict: { documentId: string; unit: RoadmapContextDocument["units"][number] } | null = null;
+/** Documents the proxy prepends to every context-document pull page, as an older upstream could serve them. */
+let documentPullExtra: unknown[] = [];
+/** Rows the proxy prepends to every roadmap pull page, as a broken upstream could serve them. */
+let roadmapPullExtra: unknown[] = [];
 
 beforeAll(async () => {
   // The upstream takes the ROLE explicitly (serve_replicas) on top of the token:
@@ -98,8 +103,15 @@ beforeAll(async () => {
         headers,
         body,
       });
+      if (roadmapPullExtra.length > 0 && url.pathname === "/roadmap/sync/pull" && req.method === "POST") {
+        const payload = await response.json() as { items: unknown[]; next_rev: number };
+        return new Response(JSON.stringify({ ...payload, items: [...roadmapPullExtra, ...payload.items] }), {
+          status: response.status,
+          headers: { "content-type": "application/json" },
+        });
+      }
       if (
-        (documentPullIncludesInvalid || documentPullImmutableConflict) &&
+        (documentPullIncludesInvalid || documentPullImmutableConflict || documentPullExtra.length > 0) &&
         url.pathname === "/roadmap/context-document/sync/pull" &&
         req.method === "POST"
       ) {
@@ -109,6 +121,7 @@ beforeAll(async () => {
           return { ...document, units: [...document.units, documentPullImmutableConflict.unit] };
         });
         if (documentPullIncludesInvalid) documents.unshift({ id: "broken-document", units: [] });
+        documents.unshift(...documentPullExtra);
         return new Response(JSON.stringify({ ...payload, documents }), {
           status: response.status,
           headers: { "content-type": "application/json" },
@@ -407,6 +420,53 @@ test("an invalid pulled document does not block later documents in the same sync
   } finally {
     documentPullIncludesInvalid = false;
   }
+});
+
+test("a pulled context document with a miscased project_key is skipped and logged, its neighbours still land", async () => {
+  const skippedId = "document-replica-miscased-key";
+  const neighbourId = "document-replica-miscased-neighbour";
+  const unit = (id: string) => ({
+    id,
+    source_target: "body",
+    raw: "case guard on the document pull",
+    deported_at: "2026-09-24T02:02:00.000Z",
+    position: 0,
+  });
+  const logPath = join(replica.tmpDir, "logs", "broker.log");
+  const logStart = readFileSync(logPath, "utf-8").length;
+  documentPullExtra = [{
+    id: skippedId,
+    roadmap_item_id: "card-replica-miscased-document",
+    project_key: "github.com/VOCSAP/replica-repo",
+    created_by: "agent-upstream",
+    created_at: "2026-09-24T02:02:00.000Z",
+    units: [unit("unit-replica-miscased-key")],
+  }];
+  try {
+    const pushed = await post<RoadmapContextDocumentSyncPushResponse>(`${upstream.url}/roadmap/context-document/sync/push`, {
+      replica_id: replicaId,
+      document: {
+        id: neighbourId,
+        roadmap_item_id: "card-replica-miscased-neighbour",
+        project_key: PK,
+        created_by: "agent-upstream",
+        created_at: "2026-09-24T02:02:00.000Z",
+        units: [unit("unit-replica-miscased-neighbour")],
+      },
+    });
+    expect(pushed.status).toBe(200);
+    await pollUntil("the canonical neighbour lands on the replica", 5_000, async () => {
+      const current = localDocumentState(replica, neighbourId);
+      return { done: current?.syncDirty === 0, value: current };
+    });
+  } finally {
+    documentPullExtra = [];
+  }
+  expect(["the miscased document never lands", localDocumentCounts(replica, skippedId)]).toEqual([
+    "the miscased document never lands",
+    { documents: 0, units: 0 },
+  ]);
+  expect(readFileSync(logPath, "utf-8").slice(logStart)).toContain("project_key must be lowercase");
 });
 
 test("a pulled document with the same id and an extra unit is logged and never extends the local document", async () => {
@@ -2174,3 +2234,136 @@ test("a pulled card with a miscased project_key is skipped and logged, its page 
   expect(["the miscased card never lands on the replica", stored.n]).toEqual(["the miscased card never lands on the replica", 0]);
   expect(readFileSync(logPath, "utf-8").slice(logStart)).toContain(skipped.id);
 }, 30_000);
+
+test("a pulled card whose title exceeds the bound is skipped and logged, new or already local, and never parked for resolve", async () => {
+  const overBound = "t".repeat(ROADMAP_TITLE_MAX + 1);
+  const logPath = join(replica.tmpDir, "logs", "broker.log");
+  const logStart = readFileSync(logPath, "utf-8").length;
+
+  const existing = await createOn(upstream, { by: "agent-upstream", title: "title before the upstream grew it" });
+  await waitForItem("the existing card reaches the replica", replica, existing.id, (i) => i.title === existing.title);
+
+  pullSuppressed = true;
+  let fresh: RoadmapItem;
+  let neighbour: RoadmapItem;
+  try {
+    fresh = await createOn(upstream, { by: "agent-upstream", title: "placeholder" });
+    const upstreamDb = new Database(upstream.dbPath);
+    upstreamDb.run("PRAGMA busy_timeout = 3000");
+    upstreamDb.run("UPDATE roadmap_items SET title = ? WHERE id IN (?, ?)", [overBound, fresh.id, existing.id]);
+    upstreamDb.close();
+    neighbour = await createOn(upstream, { by: "agent-upstream", title: "canonical neighbour of the long titles" });
+  } finally {
+    pullSuppressed = false;
+  }
+
+  await waitForItem("the neighbour reaches the replica", replica, neighbour.id, (i) => i.title === neighbour.title);
+  const upstreamDb = new Database(upstream.dbPath, { readonly: true });
+  const upstreamMaxRev = (upstreamDb.query("SELECT MAX(rev) AS rev FROM roadmap_items").get() as { rev: number }).rev;
+  upstreamDb.close();
+  await pollUntil("the replica cursor passes the long titles", 15_000, async () => {
+    const cursor = localSyncMeta(replica, "upstream_cursor");
+    return { done: cursor >= upstreamMaxRev, value: cursor };
+  });
+
+  const replicaDb = new Database(replica.dbPath, { readonly: true });
+  const freshRows = (replicaDb.query("SELECT COUNT(*) AS n FROM roadmap_items WHERE id = ?").get(fresh.id) as { n: number }).n;
+  const kept = replicaDb.query("SELECT title, sync_remote FROM roadmap_items WHERE id = ?").get(existing.id) as {
+    title: string;
+    sync_remote: string | null;
+  };
+  replicaDb.close();
+  expect(["the new over-long card never lands", freshRows]).toEqual(["the new over-long card never lands", 0]);
+  expect(["the local card keeps its title", kept.title]).toEqual(["the local card keeps its title", existing.title]);
+  expect(["nothing parked for a resolve", kept.sync_remote]).toEqual(["nothing parked for a resolve", null]);
+  const logged = readFileSync(logPath, "utf-8").slice(logStart);
+  expect(logged).toContain(fresh.id);
+  expect(logged).toContain(existing.id);
+}, 30_000);
+
+test("a pulled row whose title is not a string is skipped and logged without aborting its page", async () => {
+  const logPath = join(replica.tmpDir, "logs", "broker.log");
+  const logStart = readFileSync(logPath, "utf-8").length;
+  const bogusId = "card-replica-non-string-title";
+  roadmapPullExtra = [{ id: bogusId, project_key: PK, title: 42 }];
+  let neighbour: RoadmapItem;
+  try {
+    neighbour = await createOn(upstream, { by: "agent-upstream", title: "neighbour of a non-string title" });
+    await waitForItem("the neighbour lands despite the bogus row", replica, neighbour.id, (i) => i.title === neighbour.title);
+  } finally {
+    roadmapPullExtra = [];
+  }
+  const replicaDb = new Database(replica.dbPath, { readonly: true });
+  const stored = (replicaDb.query("SELECT COUNT(*) AS n FROM roadmap_items WHERE id = ?").get(bogusId) as { n: number }).n;
+  replicaDb.close();
+  expect(["the bogus row never lands", stored]).toEqual(["the bogus row never lands", 0]);
+  expect(readFileSync(logPath, "utf-8").slice(logStart)).toContain(bogusId);
+}, 30_000);
+
+test("a pulled row whose project_key is not a string is skipped and logged without aborting its page", async () => {
+  const logPath = join(replica.tmpDir, "logs", "broker.log");
+  const logStart = readFileSync(logPath, "utf-8").length;
+  const bogusId = "card-replica-non-string-project-key";
+  roadmapPullExtra = [{
+    id: bogusId,
+    project_key: 42,
+    title: "a valid title on a bogus row",
+    tags: [],
+    depends_on: [],
+    target_peer_ids: [],
+    created_by: "agent-upstream",
+    updated_by: "agent-upstream",
+    locked: false,
+    lock_contested_by: [],
+  }];
+  let neighbour: RoadmapItem;
+  try {
+    neighbour = await createOn(upstream, { by: "agent-upstream", title: "neighbour of a non-string project_key" });
+    await waitForItem("the neighbour lands despite the bogus row", replica, neighbour.id, (i) => i.title === neighbour.title);
+  } finally {
+    roadmapPullExtra = [];
+  }
+  const replicaDb = new Database(replica.dbPath, { readonly: true });
+  const stored = (replicaDb.query("SELECT COUNT(*) AS n FROM roadmap_items WHERE id = ?").get(bogusId) as { n: number }).n;
+  replicaDb.close();
+  expect(["the bogus row never lands", stored]).toEqual(["the bogus row never lands", 0]);
+  expect(readFileSync(logPath, "utf-8").slice(logStart)).toContain(bogusId);
+}, 30_000);
+
+test("resolving 'remote' onto an upstream row parked by a refused push is refused when its title exceeds the bound", async () => {
+  const overBound = "t".repeat(ROADMAP_TITLE_MAX + 1);
+  const card = await createOn(upstream, { by: "agent-upstream", title: "title kept through a refused resolve" });
+  await waitForItem("the card reaches the replica", replica, card.id, (i) => i.title === card.title);
+
+  await goOffline();
+  await createOn(replica, { id: card.id, by: "agent-local", description: "edited offline on the replica" });
+  const upstreamDb = new Database(upstream.dbPath);
+  upstreamDb.run("PRAGMA busy_timeout = 3000");
+  upstreamDb.run("UPDATE roadmap_items SET title = ? WHERE id = ?", [overBound, card.id]);
+  upstreamDb.close();
+  pullSuppressed = true;
+  try {
+    await goOnline();
+    await pollUntil("the refused push parks the upstream row", 15_000, async () => {
+      const res = await post<RoadmapSyncConflictsResponse>(`${replica.url}/roadmap/sync/conflicts`, { project_key: PK });
+      const parked = res.body.items.find((c) => c.local.id === card.id);
+      return { done: parked !== undefined, value: parked?.remote.title.length };
+    });
+
+    const refused = await post<{ error?: string }>(
+      `${replica.url}/roadmap/sync/resolve`,
+      deckAuthored({ id: card.id, choice: "remote" })
+    );
+    expect(refused.status).toBe(409);
+    expect(refused.body.error).toContain("title exceeds");
+    expect((await itemOn(replica, card.id))?.title).toBe(card.title);
+
+    const kept = await post<{ item: RoadmapItem }>(
+      `${replica.url}/roadmap/sync/resolve`,
+      deckAuthored({ id: card.id, choice: "local" })
+    );
+    expect(kept.status, "'local' still resolves: it writes nothing from the parked row").toBe(200);
+  } finally {
+    pullSuppressed = false;
+  }
+}, 45_000);
