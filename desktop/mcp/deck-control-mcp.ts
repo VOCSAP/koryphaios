@@ -165,6 +165,12 @@ const TOOLS = [
     }
   },
   {
+    name: 'deck_close_all',
+    description:
+      'Close every session tile except supervisor tiles and locked tiles (everything except me), team-lead tiles last. Returns {closed, locked, failed, remaining}: names of the tiles closed, of the locked tiles left open (the operator closes those by hand), {name, error} for each closure that failed, and the names of tiles spawned during the call, left open. It does not land the peers first: send them their landing instruction before calling it.',
+    inputSchema: { type: 'object', properties: {} }
+  },
+  {
     name: 'deck_run_directive',
     description:
       'Run a directive on live peer tiles now, without a roadmap card: the same effect as a kind=directive card reaching the dispatch queue. clear resets context for free, compact costs one inference, magic_compact uses the plugin and falls back to compact. A peer_id carried by no live tile or by several is reported unreached, never guessed.',
@@ -282,6 +288,20 @@ const TOOLS_ALLOWLIST_RAW = process.env[TOOLS_ENV_VAR]
 const TOOLS_ALLOWLIST = resolveToolAllowlist(TOOLS_ALLOWLIST_RAW)
 const FILTERED_TOOLS = filterTools(TOOLS, TOOLS_ALLOWLIST)
 
+const SUPERVISOR_INSTRUCTIONS =
+  'You are the Deck SUPERVISOR. You pilot the desktop app that hosts this session: spawn visible agent sessions (deck_spawn_session for one, deck_spawn_team for a whole plan, with agent profiles from deck_list_agents or embedded fallbacks from deck_team_agents, initial prompts, optional worktrees), inspect them (deck_list_sessions), manage worktrees and templates, and broadcast announcements. You do NOT write code yourself: read the project, consult the shared roadmap (roadmap_* tools), pick the right agent profiles, brief them via the initial prompt, then coordinate through send_message / list_peers. CONSENT: never spawn without an explicit operator instruction in the conversation — a question calls for a proposal plus confirmation; read deck_team_playbook before composing a team. You may close any non-locked tile except supervisor tiles (deck_close_session, deck_close_all); other destructive actions only work on what you created, ask the operator otherwise.'
+
+/** A restricted caller (DECK_CONTROL_TOOLS set) is a team-lead: its text names only the tools it is served. */
+function subsetInstructions(toolNames: string[]): string {
+  const closeRule = toolNames.includes('deck_close_session')
+    ? ' deck_close_session closes any non-locked tile except your own and lead or supervisor tiles.'
+    : ''
+  return `You are a team-lead of this Deck, not its supervisor. Your Deck tools: ${toolNames.join(', ') || 'none'}.${closeRule}`
+}
+
+const INSTRUCTIONS =
+  TOOLS_ALLOWLIST === null ? SUPERVISOR_INSTRUCTIONS : subsetInstructions(FILTERED_TOOLS.map((t) => t.name))
+
 // Resolution trace at startup (Card ff091064): when a tool is missing from a
 // caller's surface, this is what says whether DECK_CONTROL_TOOLS ate it and
 // what the requested vs retained lists were -- without it, diagnosing a
@@ -332,8 +352,7 @@ async function handle(req: JsonRpcRequest): Promise<void> {
           (req.params?.protocolVersion as string | undefined) ?? '2024-11-05',
         capabilities: { tools: {} },
         serverInfo: { name: 'deck-control', version: '0.6.0' },
-        instructions:
-          'You are the Deck SUPERVISOR. You pilot the desktop app that hosts this session: spawn visible agent sessions (deck_spawn_session for one, deck_spawn_team for a whole plan, with agent profiles from deck_list_agents or embedded fallbacks from deck_team_agents, initial prompts, optional worktrees), inspect them (deck_list_sessions), manage worktrees and templates, and broadcast announcements. You do NOT write code yourself: read the project, consult the shared roadmap (roadmap_* tools), pick the right agent profiles, brief them via the initial prompt, then coordinate through send_message / list_peers. CONSENT: never spawn without an explicit operator instruction in the conversation — a question calls for a proposal plus confirmation; read deck_team_playbook before composing a team. Destructive actions only work on what you created; ask the operator otherwise.'
+        instructions: INSTRUCTIONS
       })
     case 'ping':
       return reply(req.id, {})

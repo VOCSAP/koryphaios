@@ -506,6 +506,217 @@ test("deck_close_session returns a real SessionService.remove failure", async ()
   expect(state.sessions).toEqual([target]);
 });
 
+function closeAllRig(sessions: SessionRuntime[]) {
+  const state = { sessions };
+  const deps = makeDeps(state);
+  const events: string[] = [];
+  const failing = new Set<string>();
+  const during = new Map<string, () => void>();
+  deps.closeSession = async (id) => {
+    events.push(`start:${id}`);
+    await new Promise((resolve) => setTimeout(resolve, 15));
+    during.get(id)?.();
+    if (failing.has(id)) {
+      events.push(`fail:${id}`);
+      throw new Error(`cannot close ${id}`);
+    }
+    events.push(`end:${id}`);
+    deps.closed.push(id);
+    state.sessions = state.sessions.filter((s) => s.id !== id);
+  };
+  return { state, deps, events, failing, during };
+}
+
+type CloseAllResult = {
+  closed: string[];
+  locked: string[];
+  failed: { name: string; error: string }[];
+  remaining: string[];
+};
+
+test("deck_close_all: closes every non-locked, non-supervisor tile, team-leads last, and names the locked ones", async () => {
+  const { deps, events } = closeAllRig([
+    fakeSession("lead-a", { name: "Lead A", lead: true }),
+    fakeSession("dev-1", { name: "Dev 1" }),
+    fakeSession("sup", { name: "Supervisor", supervisor: true }),
+    fakeSession("kept", { name: "Kept", locked: true }),
+    fakeSession("dev-2", { name: "Dev 2" }),
+    fakeSession("lead-b", { name: "Lead B", lead: true }),
+    fakeSession("lead-c", { name: "Lead C", mintedCallerId: "team-lead-c" })
+  ]);
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+
+  const res = await call(srv, "deck_close_all");
+
+  expect(res.status).toBe(200);
+  const result = res.body.result as CloseAllResult;
+  expect(result.closed).toEqual(["Dev 1", "Dev 2", "Lead A", "Lead B", "Lead C"]);
+  expect(result.locked).toEqual(["Kept"]);
+  expect(result.failed).toEqual([]);
+  expect(deps.closed.sort()).toEqual(["dev-1", "dev-2", "lead-a", "lead-b", "lead-c"]);
+  const lastPlainEnd = Math.max(events.indexOf("end:dev-1"), events.indexOf("end:dev-2"));
+  for (const lead of ["lead-a", "lead-b", "lead-c"]) {
+    expect(events.indexOf(`start:${lead}`), `${lead} starts only after every other tile settled`).toBeGreaterThan(lastPlainEnd);
+  }
+  expect(
+    events.indexOf("start:dev-2"),
+    "tiles of one wave close in parallel: the second starts before the first ends"
+  ).toBeLessThan(events.indexOf("end:dev-1"));
+  expect(deps.journalEntries).toEqual([`deck_close_all skipped: peer verrouillé (kept)`]);
+});
+
+test("deck_close_all: one failing closure is reported by name and does not stop the others", async () => {
+  const { deps, failing } = closeAllRig([
+    fakeSession("dev-1", { name: "Dev 1" }),
+    fakeSession("dev-2", { name: "Dev 2" }),
+    fakeSession("lead-a", { name: "Lead A", lead: true })
+  ]);
+  failing.add("dev-1");
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+
+  const res = await call(srv, "deck_close_all");
+
+  expect(res.status).toBe(200);
+  const result = res.body.result as CloseAllResult;
+  expect(result.closed).toEqual(["Dev 2", "Lead A"]);
+  expect(result.failed).toEqual([{ name: "Dev 1", error: "cannot close dev-1" }]);
+  expect(result.locked).toEqual([]);
+});
+
+test("deck_close_all: only supervisor and locked tiles left means nothing closes", async () => {
+  const { deps } = closeAllRig([
+    fakeSession("sup", { name: "Supervisor", supervisor: true }),
+    fakeSession("kept", { name: "Kept", locked: true })
+  ]);
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+
+  const res = await call(srv, "deck_close_all");
+
+  expect(res.body.result).toEqual({ closed: [], locked: ["Kept"], failed: [], remaining: [] });
+  expect(deps.closed).toEqual([]);
+});
+
+test("deck_close_all: a lock or a removal that lands during the first wave is honoured before the team-leads close", async () => {
+  const { state, deps, during } = closeAllRig([
+    fakeSession("dev-1", { name: "Dev 1" }),
+    fakeSession("lead-a", { name: "Lead A", lead: true }),
+    fakeSession("lead-b", { name: "Lead B", lead: true }),
+    fakeSession("lead-c", { name: "Lead C", lead: true })
+  ]);
+  during.set("dev-1", () => {
+    state.sessions.find((s) => s.id === "lead-a")!.locked = true;
+    state.sessions = state.sessions.filter((s) => s.id !== "lead-b");
+  });
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+
+  const res = await call(srv, "deck_close_all");
+
+  const result = res.body.result as CloseAllResult;
+  expect(result.closed).toEqual(["Dev 1", "Lead C"]);
+  expect(result.locked).toEqual(["Lead A"]);
+  expect(result.failed).toEqual([]);
+  expect(deps.closed.sort()).toEqual(["dev-1", "lead-c"]);
+  expect(deps.journalEntries).toEqual(["deck_close_all skipped: peer verrouillé (lead-a)"]);
+});
+
+test("deck_close_all: a tile spawned while the call runs is reported as remaining, never closed and never listed as failed", async () => {
+  const { state, deps, during, failing } = closeAllRig([
+    fakeSession("dev-1", { name: "Dev 1" }),
+    fakeSession("dev-2", { name: "Dev 2" }),
+    fakeSession("lead-a", { name: "Lead A", lead: true })
+  ]);
+  failing.add("dev-2");
+  during.set("dev-1", () => {
+    state.sessions.push(fakeSession("late", { name: "Late" }));
+    state.sessions.push(fakeSession("late-locked", { name: "Late Locked", locked: true }));
+    state.sessions.push(fakeSession("late-sup", { name: "Late Supervisor", supervisor: true }));
+  });
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+
+  const res = await call(srv, "deck_close_all");
+
+  const result = res.body.result as CloseAllResult;
+  expect(result.closed).toEqual(["Dev 1", "Lead A"]);
+  expect(result.failed).toEqual([{ name: "Dev 2", error: "cannot close dev-2" }]);
+  expect(result.remaining).toEqual(["Late"]);
+  expect(result.locked, "a tile spawned and locked during the call is reported as left open").toEqual(["Late Locked"]);
+  expect(deps.journalEntries).toContain("deck_close_all skipped: peer verrouillé (late-locked)");
+  expect(deps.closed).not.toContain("late");
+});
+
+test("deck_close_all: a second call while the first runs is refused, the first completes, and the guard is released afterwards", async () => {
+  const { deps } = closeAllRig([
+    fakeSession("dev-1", { name: "Dev 1" }),
+    fakeSession("dev-2", { name: "Dev 2" }),
+    fakeSession("lead-a", { name: "Lead A", lead: true })
+  ]);
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+
+  const [first, second] = await Promise.all([call(srv, "deck_close_all"), call(srv, "deck_close_all")]);
+
+  const outcomes = [first, second].sort((a, b) => a.status - b.status);
+  expect(outcomes[1]!.status).toBe(400);
+  expect(outcomes[1]!.body.error).toBe("refused: deck_close_all already running");
+  expect(outcomes[0]!.status).toBe(200);
+  expect((outcomes[0]!.body.result as CloseAllResult).closed).toEqual(["Dev 1", "Dev 2", "Lead A"]);
+  expect(deps.closed.sort(), "each tile is closed exactly once").toEqual(["dev-1", "dev-2", "lead-a"]);
+
+  const afterwards = await call(srv, "deck_close_all");
+  expect(afterwards.status, "the guard is released once the first call settled").toBe(200);
+});
+
+test("deck_close_all: the in-flight guard is released when a closure throws through the call", async () => {
+  const { deps } = closeAllRig([fakeSession("dev-1", { name: "Dev 1" })]);
+  let listCalls = 0;
+  const realList = deps.listSessions;
+  deps.listSessions = () => {
+    if (++listCalls === 1) throw new Error("list failed");
+    return realList();
+  };
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+
+  const failed = await call(srv, "deck_close_all");
+  const retried = await call(srv, "deck_close_all");
+
+  expect(failed.status).toBe(400);
+  expect(failed.body.error).toContain("list failed");
+  expect(retried.status, "a throw must not leave the guard held").toBe(200);
+});
+
+test("deck_close_all is supervisor-only: absent from TEAM_LEAD_DECK_TOOLS, refused to a team-lead and to any restricted list", async () => {
+  expect(TEAM_LEAD_DECK_TOOLS as readonly string[]).not.toContain("deck_close_all");
+  const { deps } = closeAllRig([fakeSession("dev-1", { name: "Dev 1" })]);
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+  const teamLead = srv.mintCaller("team-lead", TEAM_LEAD_DECK_TOOLS);
+  const narrowed = srv.mintCaller("narrowed", ["deck_close_all"]);
+
+  const notListed = await call(srv, "deck_close_all", {}, teamLead.token);
+  const listedButRestricted = await call(srv, "deck_close_all", {}, narrowed.token);
+
+  expect(notListed.status).toBe(403);
+  expect(listedButRestricted.status).toBe(400);
+  expect(listedButRestricted.body.error).toContain("supervisor");
+  expect(deps.closed).toEqual([]);
+});
+
+test("deck_close_all: the MCP description says close everything except the supervisor, and the supervisor prompt says to land peers first", () => {
+  const mcpSource = readFileSync(join(import.meta.dir, "..", "desktop", "mcp", "deck-control-mcp.ts"), "utf-8");
+  expect(mcpSource).toContain("name: 'deck_close_all'");
+  expect(mcpSource).toContain("Close every session tile except supervisor tiles and locked tiles");
+  expect(mcpSource).toContain("Returns {closed, locked, failed, remaining}");
+  expect(SUPERVISOR_SYSTEM_PROMPT).toContain("remaining");
+  expect(SUPERVISOR_SYSTEM_PROMPT).toContain("deck_close_all");
+  expect(SUPERVISOR_SYSTEM_PROMPT).toContain("before calling deck_close_all");
+});
+
 test("deck_close_session descriptions state the four gestures and close authorization rule", () => {
   const mcpSource = readFileSync(join(import.meta.dir, "..", "desktop", "mcp", "deck-control-mcp.ts"), "utf-8");
   const embeddedSource = readFileSync(join(import.meta.dir, "..", "desktop", "src", "main", "team-embedded.ts"), "utf-8");
@@ -1636,7 +1847,8 @@ test("initialize serves an instructions block that keeps its supervisor clauses,
       fragment
     );
   }
-  const closing = "Destructive actions only work on what you created; ask the operator otherwise.";
+  const closing =
+    "You may close any non-locked tile except supervisor tiles (deck_close_session, deck_close_all); other destructive actions only work on what you created, ask the operator otherwise.";
   expect(
     block.trimEnd().endsWith(closing),
     "the served block no longer ENDS with the destructive-action rule: it was truncated, its tail rewritten, or text was appended after it"
@@ -1646,6 +1858,10 @@ test("initialize serves an instructions block that keeps its supervisor clauses,
   const tools = (await recv()) as { result: { tools: { name: string }[] } };
   const served = new Set(tools.result.tools.map((t) => t.name));
   expect(served.size, "tools/list served no tool: the cross-check below would compare against nothing").toBeGreaterThan(0);
+  expectNamedToolsServed(block, served);
+});
+
+function expectNamedToolsServed(block: string, served: Set<string>): void {
   const mentioning = block.split(/[^A-Za-z0-9_-]+/).filter((t) => t.includes("deck_"));
   const embedded = mentioning.filter((t) => !t.startsWith("deck_"));
   expect(embedded, "a deck_ mention sits inside a longer word, so it cannot be cross-checked as a tool name").toEqual([]);
@@ -1653,6 +1869,34 @@ test("initialize serves an instructions block that keeps its supervisor clauses,
   expect(named.length, "no deck_* tool is named in the block: the cross-check below would pass on nothing").toBeGreaterThan(0);
   const dangling = named.filter((n) => !served.has(n));
   expect(dangling, "instructions name deck_* tools that tools/list does not serve (renamed or removed tool)").toEqual([]);
+}
+
+test("initialize in subset mode (team-lead) speaks as a team-lead, names only the tools it is served, and never claims supervisor powers", async () => {
+  const srv = await startDeckControl(makeDeps({ sessions: [] }));
+  servers.push(srv);
+  const { send, recv } = await speakMcp({
+    DECK_CONTROL_URL: srv.url,
+    DECK_CONTROL_TOKEN: srv.token,
+    DECK_CONTROL_TOOLS: TEAM_LEAD_DECK_TOOLS.join(",")
+  });
+
+  send({
+    jsonrpc: "2.0",
+    id: 1,
+    method: "initialize",
+    params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "t", version: "0" } }
+  });
+  const block = ((await recv()) as { result: { instructions: string } }).result.instructions;
+  send({ jsonrpc: "2.0", id: 2, method: "tools/list" });
+  const tools = (await recv()) as { result: { tools: { name: string }[] } };
+  const served = new Set(tools.result.tools.map((t) => t.name));
+
+  expect(served, "tools/list must be the filtered team-lead subset").toEqual(new Set(TEAM_LEAD_DECK_TOOLS));
+  expect(block).toContain("You are a team-lead of this Deck, not its supervisor");
+  expect(block).toContain("closes any non-locked tile except your own and lead or supervisor tiles");
+  expect(block, "a team-lead is never told it is the supervisor").not.toContain("You are the Deck SUPERVISOR");
+  expect(block, "deck_close_all is not served to a team-lead").not.toContain("deck_close_all");
+  expectNamedToolsServed(block, served);
 });
 
 test("DECK_CONTROL_TOOLS set: tools/list returns exactly the named subset, and tools/call refuses an excluded name", async () => {

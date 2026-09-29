@@ -442,6 +442,8 @@ export function startDeckControl(
    * removal so a departed lead's token/file stop authorizing anything.
    */
   const sessionMintedCallerId = new Map<string, string>()
+  /** A second deck_close_all would re-read tiles the first is closing and force their cleanup (a kill without /exit). */
+  let closeAllInFlight = false
 
   /** Enforce the live-session cap for a batch of n upcoming spawns. */
   function capCheck(n: number): void {
@@ -719,6 +721,60 @@ export function startDeckControl(
         await deps.closeSession(target)
         ownedSessions.delete(target)
         return { ok: true }
+      }
+
+      case 'deck_close_all': {
+        if (restricted) throw new Error('refused: deck_close_all is reserved to the supervisor')
+        if (closeAllInFlight) throw new Error('refused: deck_close_all already running')
+        closeAllInFlight = true
+        try {
+          const isLeadTile = (session: DeckControlSession): boolean =>
+            !!session.lead || callerForSession(session.id) !== null
+          const closed: string[] = []
+          const locked: string[] = []
+          const failed: { name: string; error: string }[] = []
+          const handled = new Set<string>()
+          const skipLocked = (session: DeckControlSession): void => {
+            deps.journal(`deck_close_all skipped: peer verrouillé (${session.id})`)
+            locked.push(session.name)
+          }
+          // The live list is re-read before each wave: a lock set or a tile
+          // removed while the previous wave was closing must be honoured.
+          for (const leadWave of [false, true]) {
+            const wave: DeckControlSession[] = []
+            for (const session of deps.listSessions()) {
+              if (session.supervisor || handled.has(session.id) || isLeadTile(session) !== leadWave) continue
+              handled.add(session.id)
+              if (session.locked) {
+                skipLocked(session)
+                continue
+              }
+              wave.push(session)
+            }
+            const settled = await Promise.allSettled(wave.map(async (session) => deps.closeSession(session.id)))
+            settled.forEach((outcome, i) => {
+              const session = wave[i]!
+              if (outcome.status === 'fulfilled') {
+                ownedSessions.delete(session.id)
+                closed.push(session.name)
+                return
+              }
+              const error = outcome.reason instanceof Error ? outcome.reason.message : String(outcome.reason)
+              deps.journal(`deck_close_all failed for ${session.id}: ${error}`)
+              failed.push({ name: session.name, error })
+            })
+          }
+          // Tiles spawned during the call (a lead may spawn while the first wave closes).
+          const remaining: string[] = []
+          for (const session of deps.listSessions()) {
+            if (session.supervisor || handled.has(session.id)) continue
+            if (session.locked) skipLocked(session)
+            else remaining.push(session.name)
+          }
+          return { closed, locked, failed, remaining }
+        } finally {
+          closeAllInFlight = false
+        }
       }
 
       case 'deck_run_directive': {
