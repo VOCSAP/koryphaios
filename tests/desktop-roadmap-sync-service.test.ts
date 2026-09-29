@@ -529,11 +529,27 @@ test("the error message still carries the broker's own text, as before", async (
 test("a transport failure carries NO status: it is a different failure entirely", async () => {
   // Nothing listening: fetch rejects with its own error, which must not be
   // read as a version gap and silence the poll for the rest of the run.
+  // The client calls the global fetch, which honours HTTP_PROXY/HTTPS_PROXY: a
+  // proxy on the machine would answer 502 for the dead port instead of the
+  // connection failing, so loopback is exempted for this request only.
   const dead = { url: "http://127.0.0.1:1", token: null };
-  const error = await fetchRoadmapSyncStatus(dead).then(
-    () => null,
-    (e: unknown) => e
-  );
+  const noProxyKeys = ["NO_PROXY", "no_proxy"];
+  const before = noProxyKeys.map((key) => process.env[key]);
+  noProxyKeys.forEach((key, i) => {
+    process.env[key] = [before[i], "127.0.0.1,localhost"].filter(Boolean).join(",");
+  });
+  let error: unknown;
+  try {
+    error = await fetchRoadmapSyncStatus(dead).then(
+      () => null,
+      (e: unknown) => e
+    );
+  } finally {
+    noProxyKeys.forEach((key, i) => {
+      if (before[i] === undefined) delete process.env[key];
+      else process.env[key] = before[i];
+    });
+  }
   expect(error).toBeInstanceOf(Error);
   expect(error).not.toBeInstanceOf(RoadmapRequestError);
 });
