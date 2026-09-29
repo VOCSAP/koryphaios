@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   resolveBrokerEndpoint,
+  adoptedBrokerNotice,
   computeGroupSecretHash,
   buildAnnouncePayload,
   sendAnnounce,
@@ -54,6 +55,78 @@ test("resolveBrokerEndpoint: env overrides the config file", () => {
 test("resolveBrokerEndpoint tolerates a missing config file", () => {
   const ep = resolveBrokerEndpoint({ CLAUDE_PEERS_PORT: "8000" } as unknown as NodeJS.ProcessEnv, "/no/such/config.json");
   expect(ep.url).toBe("http://127.0.0.1:8000");
+});
+
+// ----- adopting a loopback broker the caller's BROKER_URL did not choose -----
+
+const PRIVATE_URL = "http://10.0.0.9:7899";
+const LOOPBACK = "http://127.0.0.1:7899";
+
+test("an env BROKER_URL turned into a replica client by the FILE resolves to the operator's loopback port", () => {
+  const cfg = tmpConfig({ broker_url: "http://central:7899", offline_replica: true });
+  const env = { CLAUDE_PEERS_BROKER_URL: PRIVATE_URL } as unknown as NodeJS.ProcessEnv;
+  expect(resolveBrokerEndpoint(env, cfg).url).toBe(LOOPBACK);
+});
+
+const PRIVATE_ENV = { CLAUDE_PEERS_BROKER_URL: PRIVATE_URL } as unknown as NodeJS.ProcessEnv;
+const replicaFile = (): string => tmpConfig({ broker_url: "http://central:7899", offline_replica: true });
+
+test("a private instance adopting a running loopback broker is reported when the file's offline_replica overrode its BROKER_URL", () => {
+  const cfg = replicaFile();
+  const notice = adoptedBrokerNotice(PRIVATE_ENV, cfg, "already-running", LOOPBACK, true);
+  expect(notice, "silent adoption of the operator's broker").not.toBeNull();
+  for (const fragment of [LOOPBACK, PRIVATE_URL, cfg, "offline_replica", "CLAUDE_PEERS_OFFLINE_REPLICA=0", "CLAUDE_PEERS_PORT"]) {
+    expect(notice, `notice must name ${fragment}`).toContain(fragment);
+  }
+});
+
+test("no notice for the operator's own Deck: BROKER_URL in the user environment, offline_replica alone in the file, default profile", () => {
+  const cfg = tmpConfig({ offline_replica: true });
+  const env = { CLAUDE_PEERS_BROKER_URL: "http://192.168.10.23:7899", CLAUDE_PEERS_BROKER_TOKEN: "t" } as unknown as NodeJS.ProcessEnv;
+  expect(adoptedBrokerNotice(env, cfg, "already-running", LOOPBACK, false)).toBeNull();
+});
+
+test("no notice when the private instance's BROKER_URL is the file's own broker_url", () => {
+  const env = { CLAUDE_PEERS_BROKER_URL: "http://central:7899" } as unknown as NodeJS.ProcessEnv;
+  expect(adoptedBrokerNotice(env, replicaFile(), "already-running", LOOPBACK, true)).toBeNull();
+});
+
+test("the file's own broker_url is recognised by origin, whatever its trailing slash or host case", () => {
+  const env = { CLAUDE_PEERS_BROKER_URL: "http://CENTRAL:7899/" } as unknown as NodeJS.ProcessEnv;
+  expect(adoptedBrokerNotice(env, replicaFile(), "already-running", LOOPBACK, true)).toBeNull();
+});
+
+test("an unparsable BROKER_URL never reads as the file's own upstream", () => {
+  const env = { CLAUDE_PEERS_BROKER_URL: "not a url" } as unknown as NodeJS.ProcessEnv;
+  expect(adoptedBrokerNotice(env, replicaFile(), "already-running", LOOPBACK, true)).not.toBeNull();
+});
+
+test("a non-numeric CLAUDE_PEERS_PORT does not silence the notice", () => {
+  for (const port of ["abc", "7950abc", ""]) {
+    const env = { ...PRIVATE_ENV, CLAUDE_PEERS_PORT: port } as unknown as NodeJS.ProcessEnv;
+    expect([port, adoptedBrokerNotice(env, replicaFile(), "already-running", LOOPBACK, true)]).not.toEqual([port, null]);
+  }
+});
+
+test("no notice when the private instance already runs on its own port, still one on the default port", () => {
+  const privatePort = { ...PRIVATE_ENV, CLAUDE_PEERS_PORT: "7950" } as unknown as NodeJS.ProcessEnv;
+  expect(adoptedBrokerNotice(privatePort, replicaFile(), "already-running", "http://127.0.0.1:7950", true)).toBeNull();
+  const defaultPort = { ...PRIVATE_ENV, CLAUDE_PEERS_PORT: "7899" } as unknown as NodeJS.ProcessEnv;
+  expect(adoptedBrokerNotice(defaultPort, replicaFile(), "already-running", LOOPBACK, true)).not.toBeNull();
+});
+
+test("no notice when the environment chose replica mode explicitly", () => {
+  const env = { ...PRIVATE_ENV, CLAUDE_PEERS_OFFLINE_REPLICA: "1" } as unknown as NodeJS.ProcessEnv;
+  expect(adoptedBrokerNotice(env, replicaFile(), "already-running", LOOPBACK, true)).toBeNull();
+});
+
+test("no notice when the Deck started the broker itself", () => {
+  expect(adoptedBrokerNotice(PRIVATE_ENV, replicaFile(), "started", LOOPBACK, true)).toBeNull();
+});
+
+test("no notice in remote mode, even for a broker reported as already running", () => {
+  const remoteCfg = tmpConfig({ broker_url: "http://central:7899" });
+  expect(adoptedBrokerNotice(PRIVATE_ENV, remoteCfg, "already-running", PRIVATE_URL, true)).toBeNull();
 });
 
 test("computeGroupSecretHash is the full sha256 hex of the secret", () => {

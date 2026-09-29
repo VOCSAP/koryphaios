@@ -77,7 +77,7 @@ import {
 } from './broker-client'
 import { appendInboxHistory, clearInboxHistory, deleteInboxHistoryEntries, discardUnscopedInboxFiles } from './inbox-store'
 import { spawn as spawnProcess } from 'node:child_process'
-import { deckBrokerMode } from './broker-client'
+import { adoptedBrokerNotice, deckBrokerMode, peersConfigPath } from './broker-client'
 import { ensureLoopbackBroker, locateBrokerScript, RespawnThrottle, withPathEntry } from './broker-spawn'
 import { createInboxSessionTracker, purgeInboxSessionCore } from './inbox-session'
 import {
@@ -1381,9 +1381,18 @@ async function startLoopbackBroker(reason: 'startup' | 'outage'): Promise<void> 
     case 'skipped':
       journal.add('session', 'broker: remote mode, nothing to start locally')
       break
-    case 'already-running':
+    case 'already-running': {
       if (reason === 'startup') journal.add('session', 'broker: loopback broker already running')
+      const notice = adoptedBrokerNotice(
+        process.env,
+        peersConfigPath(),
+        outcome.action,
+        endpoint.url,
+        app.commandLine.hasSwitch('user-data-dir')
+      )
+      if (notice && reason === 'startup') reportError('broker', notice)
       break
+    }
     case 'started':
       journal.add('session', `broker: loopback broker started from ${outcome.script} (${outcome.source})`)
       break

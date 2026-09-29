@@ -144,6 +144,43 @@ export function resolveBrokerEndpoint(
   return { url, token }
 }
 
+/** An unparsable URL is never the same broker as anything. */
+function sameOrigin(a: string, b: string): boolean {
+  return URL.canParse(a) && URL.canParse(b) && new URL(a).origin === new URL(b).origin
+}
+
+/**
+ * The warning owed when a PRIVATE instance (its own --user-data-dir) adopted
+ * an already-running loopback broker although its environment named another
+ * one: the global config file's offline_replica turns that BROKER_URL into a
+ * replica client of the operator's loopback port, and --user-data-dir does
+ * not isolate that file. The operator's own Deck meets every other condition
+ * on a machine whose user environment carries BROKER_URL, hence the profile
+ * test. Null when the instance runs on its own port or named the file's own
+ * upstream.
+ */
+export function adoptedBrokerNotice(
+  env: NodeJS.ProcessEnv,
+  configPath: string,
+  action: string,
+  url: string,
+  privateProfile: boolean
+): string | null {
+  const envUrl = env.CLAUDE_PEERS_BROKER_URL
+  if (action !== 'already-running' || !envUrl || !privateProfile) return null
+  if (parseBooleanEnvFlag(env.CLAUDE_PEERS_OFFLINE_REPLICA) !== undefined) return null
+  if (deckBrokerMode(env, configPath) !== 'replica') return null
+  const file = readPeersConfig(configPath)
+  if (file.broker_url !== undefined && sameOrigin(envUrl, file.broker_url)) return null
+  const port = Number(env.CLAUDE_PEERS_PORT)
+  if (env.CLAUDE_PEERS_PORT && Number.isInteger(port) && port !== (file.port ?? 7899)) return null
+  return (
+    `adopted the loopback broker already answering on ${url}, not CLAUDE_PEERS_BROKER_URL=${envUrl}: ` +
+    `offline_replica in ${configPath} makes this Deck a replica client of the loopback broker; ` +
+    `set CLAUDE_PEERS_OFFLINE_REPLICA=0 or a private CLAUDE_PEERS_PORT to isolate it`
+  )
+}
+
 /** Full sha256 hex of a group secret (== shared/config.ts computeGroupSecretHash). */
 export function computeGroupSecretHash(secret: string): string {
   return createHash('sha256').update(secret, 'utf-8').digest('hex')
