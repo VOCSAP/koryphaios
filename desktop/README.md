@@ -574,7 +574,7 @@ src/
     broker-client.ts      resolve broker endpoint + POST /announce (outbound megaphone)
     migrate-data-dir.ts   harmonize the %APPDATA% deck/desk folders (app state under config/)
     workspace-store.ts    in-repo workspace JSON (save/list/load/delete)
-    workspace-lock.ts     sidecar <id>.lock liveness (heartbeat / pid)
+    workspace-lock.ts     same-host OS lock <id>.lock.sqlite + <id>.lock liveness (heartbeat / pid, cross-host)
     workspace-session-map.ts  SessionDef <-> persisted WorkspaceSession
     session-close.ts      graceful close routine (/exit -> Ctrl+C -> SIGTERM)
     workspace-service.ts  orchestrates store + lock + auto-save + restore

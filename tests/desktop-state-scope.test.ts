@@ -194,6 +194,11 @@ const STATE_SCOPES: Record<string, StateFileRule> = {
     scope: "project",
     reason: "<id>.lock next to a workspace JSON (workspace-lock.ts) and <file>.lock.sqlite (file-lock.ts): sidecars of the file they guard",
   },
+  heldLockPath: {
+    kind: "constructor",
+    scope: "project",
+    reason: "<id>.lock.sqlite next to a workspace JSON (workspace-lock.ts): the same-host OS lock of the workspace it guards",
+  },
 
   // ----- MACHINE: belongs to the operator and the workstation -----
   "config.json": {

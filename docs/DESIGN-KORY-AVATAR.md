@@ -786,7 +786,8 @@ regarder la planche des masques a 2 m et dire lequel se lit.
 ### Palier A1 : processus avatar, branchement, tray (sans personnage, sans inbox)
 
 - `desktop/src/avatar/` : point d'entree `kory --avatar`, `avatar.json`
-  (verrou `wx`, reprise pid mort), endpoint
+  (publie par le seul detenteur du bail `requestSingleInstanceLock` d'un
+  userData dedie, sans reprise sur pid mort), endpoint
   loopback `POST /attach|/detach|/state` (Bearer, JSON, tailles bornees).
   Le branchement porte `protocol_version` (decision 13), `broker_url` du Deck
   (decision 16 ; l'identite d'un Deck branche inclut son broker) et son

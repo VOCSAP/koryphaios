@@ -28,12 +28,17 @@ import {
 } from './workspace-store'
 import {
   acquireLock,
+  inspectLock,
   isLockLive,
   ownsLock,
-  readLock,
+  probeSameHostLock,
   refreshLock,
-  releaseLock
+  releaseHeldLock,
+  releaseLock,
+  stampLock,
+  type Lock
 } from './workspace-lock'
+import type { LockConnection, LockOpener } from './file-lock'
 import { fromWorkspaceSessions, joinArgs, toWorkspaceSessions } from './workspace-session-map'
 import { logWarn, reportError } from './log'
 import { effectiveAgent, isTeamLeadAgent } from './team-lead-bridge'
@@ -171,6 +176,8 @@ export interface WorkspaceDeps {
   /** THIS process's own actual start time (epoch ms). Test-injectable like
    *  `pid`/`host`; production default is `ownProcessStartedAt()`. */
   startedAt?: number
+  /** Opens the same-host lock databases. Test-injectable like `pid`/`host`; production default is `openLockDatabase`. */
+  openLock?: LockOpener
 }
 
 export class WorkspaceService {
@@ -183,6 +190,8 @@ export class WorkspaceService {
    *  reference `currentBootInstant` advances from afterward. */
   private readonly bootAnchorProcessUptime: number
   private currentId: string | null = null
+  /** The same-host OS lock of `currentId`: this reference is what keeps it held. */
+  private held: LockConnection | null = null
   private persistedName: { id: string; name: string } | null = null
   private heartbeatTimer: NodeJS.Timeout | null = null
   private pruneTimer: NodeJS.Timeout | null = null
@@ -207,6 +216,37 @@ export class WorkspaceService {
    */
   private currentBootInstant(): number {
     return this.bootAnchorInstant + Math.round((process.uptime() - this.bootAnchorProcessUptime) * 1000)
+  }
+
+  /**
+   * Held by another instance: its same-host OS lock, or a live JSON lock that
+   * is not ours. The one predicate behind the list badge and the restore
+   * refusal. An unreadable JSON lock alone proves no owner.
+   */
+  private lockedByOther(id: string, now: number): boolean {
+    if (this.currentId === id && this.held) return false
+    if (probeSameHostLock(this.deps.projectDir, id, this.deps.openLock) !== 'free') return true
+    const read = inspectLock(this.deps.projectDir, id)
+    return read.kind === 'lock' && this.liveForeign(read.lock, now)
+  }
+
+  private liveForeign(lock: Lock, now: number): boolean {
+    return (
+      isLockLive(lock, {
+        host: this.host,
+        now,
+        bootInstant: this.currentBootInstant(),
+        isPidAlive: pidAlive,
+        staleMs: LOCK_STALE_MS
+      }) && !ownsLock(lock, { pid: this.pid, host: this.host })
+    )
+  }
+
+  private releaseCurrent(): boolean {
+    if (!this.currentId) return true
+    const released = releaseLock(this.deps.projectDir, this.currentId, { pid: this.pid, host: this.host }, this.held)
+    this.held = null
+    return released
   }
 
   get currentWorkspaceId(): string | null {
@@ -249,17 +289,8 @@ export class WorkspaceService {
     })
     const pruned: string[] = []
     for (const id of candidates) {
-      const lock = readLock(this.deps.projectDir, id)
-      const liveElsewhere =
-        !!lock &&
-        isLockLive(lock, {
-          host: this.host,
-          now,
-          bootInstant: this.currentBootInstant(),
-          isPidAlive: pidAlive,
-          staleMs: LOCK_STALE_MS
-        })
-      if (liveElsewhere) continue
+      if (inspectLock(this.deps.projectDir, id).kind === 'unreadable') continue
+      if (this.lockedByOther(id, now)) continue
       deleteWorkspace(this.deps.projectDir, id)
       pruned.push(id)
     }
@@ -275,25 +306,25 @@ export class WorkspaceService {
    * race was invisible).
    */
   private own(id: string): boolean {
-    // Not calling acquireLock() again here: it refuses against any live lock,
-    // including our own (isLockLive checks pid-alive, not identity), turning a
-    // self-restore into a false error.
-    // this.currentId is only an in-memory belief; ownsLock reconfirms the
-    // on-disk lock still names this identity before skipping acquire/release,
-    // falling through to the normal path if a third party has since reclaimed
-    // it.
-    if (this.currentId === id) {
-      const lock = readLock(this.deps.projectDir, id)
-      if (lock && ownsLock(lock, { pid: this.pid, host: this.host })) {
+    // Not calling acquireLock() again while the OS lock is ours: it would wait
+    // on that very lock. this.currentId is only an in-memory belief; the held
+    // connection and the on-disk JSON decide.
+    if (this.currentId === id && this.held) {
+      const read = inspectLock(this.deps.projectDir, id)
+      const mine = read.kind === 'lock' && ownsLock(read.lock, { pid: this.pid, host: this.host })
+      if (mine || !(read.kind === 'lock' && this.liveForeign(read.lock, Date.now()))) {
+        // A missing, unreadable or dead JSON lock is ours to rewrite: the OS
+        // lock says no one else on this host can hold the workspace.
+        if (!mine) this.stampCurrent(id)
         if (!this.heartbeatTimer) {
           this.heartbeatTimer = setInterval(() => this.heartbeatTick(), HEARTBEAT_MS)
         }
         return true
       }
-      // Lock is gone or now foreign -- our own heartbeat should already have
-      // self-ejected (heartbeatTick, above) and cleared the timer on the
-      // same discovery; do NOT restart it here, or a self-eject would be
-      // undone by the very shortcut it was meant to guard.
+      // A live foreign JSON lock (another host, or a Deck without the OS
+      // lock) took it: give ours back, the acquire below then refuses.
+      releaseHeldLock(this.held)
+      this.held = null
     }
     // The lock is written before saveWorkspace would create the tree, so a
     // fresh project dir (no .claude/claude-peers/workspaces yet) would ENOENT.
@@ -306,15 +337,15 @@ export class WorkspaceService {
       now: Date.now(),
       bootInstant: this.currentBootInstant(),
       isPidAlive: pidAlive,
-      staleMs: LOCK_STALE_MS
+      staleMs: LOCK_STALE_MS,
+      open: this.deps.openLock
     })
     if (!acquired) return false
     // Only release the PREVIOUS workspace's lock once the new one is
     // actually ours -- releasing it first (the old ordering) would strand
     // this instance owning neither workspace if the new acquire then failed.
-    if (this.currentId && this.currentId !== id) {
-      releaseLock(this.deps.projectDir, this.currentId, { pid: this.pid, host: this.host })
-    }
+    if (this.currentId && this.currentId !== id) this.releaseCurrent()
+    this.held = acquired
     this.currentId = id
     if (!this.heartbeatTimer) {
       this.heartbeatTimer = setInterval(() => this.heartbeatTick(), HEARTBEAT_MS)
@@ -350,13 +381,25 @@ export class WorkspaceService {
       host: this.host
     })
     if (!refreshed) {
-      // Another instance now holds this lock (or it vanished) -- keeping
-      // this timer alive would just re-stamp a foreign identity every
-      // tick. Log ONCE at the transition, then stop.
+      const read = inspectLock(this.deps.projectDir, this.currentId)
+      if (this.held && !(read.kind === 'lock' && this.liveForeign(read.lock, Date.now()))) {
+        this.stampCurrent(this.currentId)
+        return
+      }
+      // Another instance now holds this lock -- keeping this timer alive
+      // would just re-stamp a foreign identity every tick. Log ONCE at the
+      // transition, then stop, and give the OS lock back with it.
       reportError('workspace', `heartbeat lost ownership of workspace ${this.currentId}, stopping`)
       if (this.heartbeatTimer) clearInterval(this.heartbeatTimer)
       this.heartbeatTimer = null
+      if (this.held) releaseHeldLock(this.held)
+      this.held = null
     }
+  }
+
+  private stampCurrent(id: string): void {
+    reportError('workspace', `rewriting the missing, unreadable or dead JSON lock of the owned workspace ${id}`)
+    stampLock(this.deps.projectDir, id, { pid: this.pid, host: this.host, startedAt: this.startedAt, now: Date.now() })
   }
 
   /** Mint + own a fresh workspace if none is current yet, or reconfirm
@@ -464,18 +507,7 @@ export class WorkspaceService {
     // lock this instance does not actually match.
     // Resolve the lock object first, then ask whether this caller (pid+host) is
     // the one holding it.
-    const lock = readLock(this.deps.projectDir, id)
-    if (
-      lock &&
-      isLockLive(lock, {
-        host: this.host,
-        now: Date.now(),
-        bootInstant: this.currentBootInstant(),
-        isPidAlive: pidAlive,
-        staleMs: LOCK_STALE_MS
-      }) &&
-      !ownsLock(lock, { pid: this.pid, host: this.host })
-    ) {
+    if (this.lockedByOther(id, Date.now())) {
       return { ok: false, reason: 'locked' }
     }
     // Card 09d54a29: a workspace is read from a REPO-CLONED file
@@ -524,10 +556,7 @@ export class WorkspaceService {
       // sessions.
       // The currentId reset below closes that path; releaseLock's result is
       // still checked and traced rather than ignored.
-      if (
-        this.currentId &&
-        !releaseLock(this.deps.projectDir, this.currentId, { pid: this.pid, host: this.host })
-      ) {
+      if (this.currentId && !this.releaseCurrent()) {
         reportError(
           'workspace',
           `restore(${id}) skipped releaseLock for ${this.currentId}: on-disk lock owned by another identity`
@@ -552,7 +581,11 @@ export class WorkspaceService {
   }
 
   deleteWs(id: string): void {
-    if (id === this.currentId) this.currentId = null
+    if (id === this.currentId) {
+      if (this.held) releaseHeldLock(this.held)
+      this.held = null
+      this.currentId = null
+    }
     deleteWorkspace(this.deps.projectDir, id)
   }
 
@@ -565,7 +598,7 @@ export class WorkspaceService {
   startNew(): void {
     if (!this.currentId) return
     this.saveAuto()
-    if (!releaseLock(this.deps.projectDir, this.currentId, { pid: this.pid, host: this.host })) {
+    if (!this.releaseCurrent()) {
       reportError(
         'workspace',
         `startNew() skipped releaseLock for ${this.currentId}: on-disk lock owned by another identity`
@@ -578,17 +611,7 @@ export class WorkspaceService {
   listForCwd(): WorkspaceSummary[] {
     const now = Date.now()
     return listWorkspaces(this.deps.projectDir).map((ws) => {
-      const lock = readLock(this.deps.projectDir, ws.id)
-      const lockedByOther =
-        ws.id !== this.currentId &&
-        !!lock &&
-        isLockLive(lock, {
-          host: this.host,
-          now,
-          bootInstant: this.currentBootInstant(),
-          isPidAlive: pidAlive,
-          staleMs: LOCK_STALE_MS
-        })
+      const lockedByOther = ws.id !== this.currentId && this.lockedByOther(ws.id, now)
       return {
         id: ws.id,
         name: ws.name,
@@ -610,7 +633,7 @@ export class WorkspaceService {
     this.pruneTimer = null
     if (!this.currentId) return
     this.saveAuto()
-    if (!releaseLock(this.deps.projectDir, this.currentId, { pid: this.pid, host: this.host })) {
+    if (!this.releaseCurrent()) {
       // Lost the acquire race earlier without this instance noticing (or a
       // second Deck reclaimed after this one went stale) -- deleting the
       // lock file here would tear down a LIVE instance's ownership. This is

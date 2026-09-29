@@ -7,11 +7,18 @@
 // (documented DESIGN 15). A robust cross-host lock would delegate to the broker
 // (single clock) -- a Phase 2 enhancement.
 //
-// Pure: node fs/path only (the pid predicate, host and clock are injected), so
-// it is unit-testable under bun.
+// On the same host the authority is an OS lock: a SQLite write lock on
+// <id>.lock.sqlite, held with BEGIN IMMEDIATE for the whole ownership and
+// dropped by the OS when the owner dies. The JSON lock and its heartbeat stay
+// the only cross-host signal.
+//
+// Node builtins plus this layer's log sink (the pid predicate, host and clock
+// are injected), so it is unit-testable under bun.
 
 import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { openLockDatabase, type LockConnection, type LockOpener } from './file-lock'
+import { reportError } from './log'
 
 export interface Lock {
   pid: number
@@ -76,23 +83,125 @@ export function lockPath(projectDir: string, id: string): string {
   return join(projectDir, '.claude', 'claude-peers', 'workspaces', `${id}.lock`)
 }
 
-export function readLock(projectDir: string, id: string): Lock | null {
+export type LockRead = { kind: 'absent' } | { kind: 'lock'; lock: Lock } | { kind: 'unreadable' }
+
+export function inspectLock(projectDir: string, id: string): LockRead {
   const file = lockPath(projectDir, id)
-  if (!existsSync(file)) return null
+  let raw: string
   try {
-    const parsed = JSON.parse(readFileSync(file, 'utf8')) as Partial<Lock>
-    if (typeof parsed.pid === 'number' && typeof parsed.host === 'string') {
-      return {
+    raw = readFileSync(file, 'utf8')
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === 'ENOENT') return { kind: 'absent' }
+    reportError('workspace', `cannot read the workspace lock ${file}`, e)
+    return { kind: 'unreadable' }
+  }
+  let parsed: Partial<Lock> | null
+  try {
+    parsed = JSON.parse(raw) as Partial<Lock> | null
+  } catch (e) {
+    reportError('workspace', `${file} is not valid JSON`, e)
+    return { kind: 'unreadable' }
+  }
+  if (typeof parsed?.pid === 'number' && typeof parsed.host === 'string') {
+    return {
+      kind: 'lock',
+      lock: {
         pid: parsed.pid,
         host: parsed.host,
         startedAt: parsed.startedAt ?? 0,
         heartbeat: parsed.heartbeat ?? 0
       }
     }
-    return null
-  } catch {
-    return null
   }
+  reportError('workspace', `${file} does not name an owner`)
+  return { kind: 'unreadable' }
+}
+
+/** The parsed lock, or null when it is absent OR unreadable: `inspectLock` tells the two apart. */
+export function readLock(projectDir: string, id: string): Lock | null {
+  const read = inspectLock(projectDir, id)
+  return read.kind === 'lock' ? read.lock : null
+}
+
+const SQLITE_BUSY = 5
+const ACQUIRE_BUSY_MS = 250
+
+function sqliteBusy(error: unknown): boolean {
+  const e = error as { errcode?: unknown; errno?: unknown }
+  return (e?.errcode ?? e?.errno) === SQLITE_BUSY
+}
+
+function heldLockPath(projectDir: string, id: string): string {
+  return `${lockPath(projectDir, id)}.sqlite`
+}
+
+/**
+ * Give up a same-host lock taken by `acquireLock`. The caller must keep the
+ * connection referenced until then: a collected connection drops its lock.
+ */
+export function releaseHeldLock(held: LockConnection): void {
+  try {
+    held.exec('ROLLBACK')
+  } catch (e) {
+    reportError('workspace', 'cannot roll back a held workspace lock', e)
+  }
+  try {
+    held.close()
+  } catch (e) {
+    reportError('workspace', 'cannot close a held workspace lock', e)
+  }
+}
+
+/** The same-host lock of `id`, or null when another connection holds it. Throws, untraced, when it cannot be taken at all. */
+function holdSameHostLock(projectDir: string, id: string, open: LockOpener, busyMs: number): LockConnection | null {
+  const path = heldLockPath(projectDir, id)
+  const db = open(path)
+  try {
+    db.exec(`PRAGMA busy_timeout = ${busyMs}`)
+    db.exec('BEGIN IMMEDIATE')
+    return db
+  } catch (e) {
+    try {
+      db.close()
+    } catch (closeError) {
+      reportError('workspace', `cannot close the refused workspace lock ${path}`, closeError)
+    }
+    if (sqliteBusy(e)) return null
+    throw e
+  }
+}
+
+function unusableLockMessage(projectDir: string, id: string): string {
+  return `${heldLockPath(projectDir, id)} cannot be used as a lock; delete that file by hand`
+}
+
+export type SameHostLockState = 'free' | 'held' | 'unprobeable'
+
+const reportedUnprobeable = new Set<string>()
+
+/**
+ * Is `id` held by ANOTHER connection on this host? Answers 'held' for this
+ * process's own held lock too, so a caller must exclude what it owns first.
+ * 'unprobeable' (not a database, no access) proves nothing free; it is traced
+ * once per lock file, not on every probe.
+ */
+export function probeSameHostLock(projectDir: string, id: string, open: LockOpener = openLockDatabase): SameHostLockState {
+  const path = heldLockPath(projectDir, id)
+  if (!existsSync(path)) return 'free'
+  let probe: LockConnection | null
+  try {
+    probe = holdSameHostLock(projectDir, id, open, 0)
+  } catch (e) {
+    if (!reportedUnprobeable.has(path)) {
+      reportedUnprobeable.add(path)
+      reportError('workspace', unusableLockMessage(projectDir, id), e)
+    }
+    return 'unprobeable'
+  }
+  reportedUnprobeable.delete(path)
+  if (!probe) return 'held'
+  releaseHeldLock(probe)
+  return 'free'
 }
 
 /**
@@ -136,10 +245,22 @@ export function ownsLock(lock: Lock, identity: LockIdentity): boolean {
   return lock.pid === identity.pid && lock.host === identity.host
 }
 
+/** Write the JSON lock of `id` for its owner; only for a caller that holds the same-host OS lock. */
+export function stampLock(
+  projectDir: string,
+  id: string,
+  owner: { pid: number; host: string; startedAt: number; now: number }
+): void {
+  writeLock(projectDir, id, { pid: owner.pid, host: owner.host, startedAt: owner.startedAt, heartbeat: owner.now })
+}
+
 /**
- * Try to acquire the lock for `id`. Refuses if an existing lock is held by a
- * live owner; otherwise writes a fresh lock (reclaiming a stale one) and
- * returns true. `pid`/`host` describe THIS owner; `startedAt` is THIS
+ * Try to acquire the lock for `id`: first the same-host OS lock, then a JSON
+ * lock that no OTHER live owner still holds (a cross-host owner, or a Deck
+ * that predates the OS lock). Returns the held connection, which the caller keeps
+ * referenced for the whole ownership and gives back through `releaseLock`, or
+ * null when either lock is held. An unreadable JSON lock is rewritten once the
+ * OS lock is won. `pid`/`host` describe THIS owner; `startedAt` is THIS
  * owner's OWN actual process start time (not the acquisition timestamp --
  * see `Lock.startedAt` and `isLockLive`, which need a real launch time to
  * compare against this machine's boot instant on the NEXT liveness check,
@@ -148,17 +269,31 @@ export function ownsLock(lock: Lock, identity: LockIdentity): boolean {
 export function acquireLock(
   projectDir: string,
   id: string,
-  opts: LivenessOpts & { pid: number; startedAt: number }
-): boolean {
-  const existing = readLock(projectDir, id)
-  if (existing && isLockLive(existing, opts)) return false
-  writeLock(projectDir, id, {
-    pid: opts.pid,
-    host: opts.host,
-    startedAt: opts.startedAt,
-    heartbeat: opts.now
-  })
-  return true
+  opts: LivenessOpts & { pid: number; startedAt: number; open?: LockOpener }
+): LockConnection | null {
+  let held: LockConnection | null
+  try {
+    held = holdSameHostLock(projectDir, id, opts.open ?? openLockDatabase, ACQUIRE_BUSY_MS)
+  } catch (e) {
+    reportError('workspace', unusableLockMessage(projectDir, id), e)
+    throw new Error(unusableLockMessage(projectDir, id))
+  }
+  if (!held) return null
+  try {
+    const existing = inspectLock(projectDir, id)
+    if (existing.kind === 'lock' && isLockLive(existing.lock, opts) && !ownsLock(existing.lock, opts)) {
+      releaseHeldLock(held)
+      return null
+    }
+    if (existing.kind === 'unreadable') {
+      reportError('workspace', `rewriting the unreadable lock of workspace ${id}`)
+    }
+    stampLock(projectDir, id, opts)
+    return held
+  } catch (e) {
+    releaseHeldLock(held)
+    throw e
+  }
 }
 
 /**
@@ -185,15 +320,25 @@ export function refreshLock(
  * different pid+host -- an instance that lost the acquire race must not be
  * able to destroy a live instance's lock on its own way out. Returns false
  * when a foreign lock blocked the release, true otherwise (deleted, or
- * nothing to delete).
+ * nothing to delete). `held` is given back in every case, after the JSON
+ * lock is gone, so no same-host contender can write it in between.
  */
-export function releaseLock(projectDir: string, id: string, identity: LockIdentity): boolean {
-  const lock = readLock(projectDir, id)
-  if (lock && !ownsLock(lock, identity)) return false
+export function releaseLock(
+  projectDir: string,
+  id: string,
+  identity: LockIdentity,
+  held: LockConnection | null
+): boolean {
   try {
-    rmSync(lockPath(projectDir, id), { force: true })
-  } catch {
-    // already gone -> nothing to do
+    const lock = readLock(projectDir, id)
+    if (lock && !ownsLock(lock, identity)) return false
+    try {
+      rmSync(lockPath(projectDir, id), { force: true })
+    } catch (e) {
+      reportError('workspace', `cannot remove the lock of workspace ${id}`, e)
+    }
+    return true
+  } finally {
+    if (held) releaseHeldLock(held)
   }
-  return true
 }

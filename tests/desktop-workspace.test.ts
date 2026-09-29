@@ -25,9 +25,11 @@ import {
   ownsLock,
   readLock,
   refreshLock,
+  releaseHeldLock,
   releaseLock,
   type Lock,
 } from "../desktop/src/main/workspace-lock.ts";
+import type { LockConnection } from "../desktop/src/main/file-lock.ts";
 import { gracefulClose } from "../desktop/src/main/session-close.ts";
 // WorkspaceService's own runtime imports (node:os + the pure modules above)
 // carry no electron/node-pty, so importing it directly under bun test proves
@@ -47,7 +49,10 @@ import type { Scope } from "../desktop/src/main/scope.ts";
 const LEAK_MARKER = "leak-sentinel-xyz";
 
 const tmpDirs: string[] = [];
+const heldLocks = new Set<LockConnection>();
 afterEach(() => {
+  for (const held of heldLocks) releaseHeldLock(held);
+  heldLocks.clear();
   for (const d of tmpDirs.splice(0)) {
     try {
       rmSync(d, { recursive: true, force: true });
@@ -276,11 +281,35 @@ const baseLiveness = {
   isPidAlive: () => true,
 };
 
+/** acquireLock whose held connection stays referenced until the test ends, as the service keeps it. */
+function takeLock(...args: Parameters<typeof acquireLock>): LockConnection | null {
+  const held = acquireLock(...args);
+  if (held) heldLocks.add(held);
+  return held;
+}
+
+/**
+ * The owner's OS lock is gone while its JSON lock stays: what a Deck that
+ * predates the OS lock, or one on another host, leaves. Only the JSON can
+ * refuse from here on.
+ */
+function dropOsLock(held: LockConnection | null): void {
+  expect(held, "the lock being dropped was never acquired").not.toBeNull();
+  heldLocks.delete(held!);
+  releaseHeldLock(held!);
+}
+
+/** Hand a tracked connection to releaseLock, which gives it back itself. */
+function untrack(held: LockConnection | null): LockConnection | null {
+  if (held) heldLocks.delete(held);
+  return held;
+}
+
 test("acquireLock writes a fresh lock when none exists", () => {
   const proj = freshProject();
   ensureWorkspacesDir(proj);
-  const ok = acquireLock(proj, "wsp_1", { ...baseLiveness, pid: 4242 });
-  expect(ok).toBe(true);
+  const held = takeLock(proj, "wsp_1", { ...baseLiveness, pid: 4242 });
+  expect(held).not.toBeNull();
   const lock = readLock(proj, "wsp_1");
   expect(lock).not.toBeNull();
   expect(lock!.pid).toBe(4242);
@@ -295,20 +324,22 @@ test("acquireLock writes a fresh lock when none exists", () => {
 test("acquireLock refuses a live same-host owner, reclaims a dead one", () => {
   const proj = freshProject();
   ensureWorkspacesDir(proj);
-  acquireLock(proj, "wsp_1", { ...baseLiveness, pid: 4242 });
+  const first = takeLock(proj, "wsp_1", { ...baseLiveness, pid: 4242 });
 
+  // The owner's OS lock refuses on its own, whatever its JSON lock says.
+  expect(takeLock(proj, "wsp_1", { ...baseLiveness, pid: 9999, isPidAlive: () => false })).toBeNull();
+
+  dropOsLock(first);
   // Same host, pid alive -> refuse.
-  expect(
-    acquireLock(proj, "wsp_1", { ...baseLiveness, pid: 9999, isPidAlive: () => true }),
-  ).toBe(false);
+  expect(takeLock(proj, "wsp_1", { ...baseLiveness, pid: 9999, isPidAlive: () => true })).toBeNull();
 
   // Same host, pid dead -> reclaim.
-  const reclaimed = acquireLock(proj, "wsp_1", {
+  const reclaimed = takeLock(proj, "wsp_1", {
     ...baseLiveness,
     pid: 9999,
     isPidAlive: () => false,
   });
-  expect(reclaimed).toBe(true);
+  expect(reclaimed).not.toBeNull();
   expect(readLock(proj, "wsp_1")!.pid).toBe(9999);
 });
 
@@ -409,7 +440,7 @@ test("isLockLive same-host: tolerance boundary fails toward 'cannot conclude', n
 test("acquireLock: lock startedAt precedes this machine's boot, pid alive -> reclaimed (positive proof)", () => {
   const proj = freshProject();
   ensureWorkspacesDir(proj);
-  acquireLock(proj, "wsp_1", { ...baseLiveness, pid: 4242, startedAt: 1_000, bootInstant: 0 });
+  dropOsLock(takeLock(proj, "wsp_1", { ...baseLiveness, pid: 4242, startedAt: 1_000, bootInstant: 0 }));
   // A later liveness check runs on a machine that has since rebooted:
   // bootInstant now postdates the recorded owner's startedAt by more than
   // the tolerance, so the lock is provably stale even with a live pid. Also
@@ -417,7 +448,7 @@ test("acquireLock: lock startedAt precedes this machine's boot, pid alive -> rec
   // baseLiveness.now = 10_000) + staleMs (5_000) so the AND condition's
   // second half (heartbeat stale, review round 6) is satisfied too --
   // without it the reclaim would fall back to isPidAlive and stay refused.
-  const reclaimed = acquireLock(proj, "wsp_1", {
+  const reclaimed = takeLock(proj, "wsp_1", {
     ...baseLiveness,
     now: 20_000,
     pid: 5555,
@@ -425,7 +456,7 @@ test("acquireLock: lock startedAt precedes this machine's boot, pid alive -> rec
     bootInstant: 5_000,
     isPidAlive: () => true,
   });
-  expect(reclaimed).toBe(true);
+  expect(reclaimed).not.toBeNull();
   const lock = readLock(proj, "wsp_1")!;
   expect(lock.pid).toBe(5555);
   expect(lock.startedAt).toBe(6_000);
@@ -434,15 +465,15 @@ test("acquireLock: lock startedAt precedes this machine's boot, pid alive -> rec
 test("acquireLock: lock startedAt at/after boot, pid alive -> refused, on-disk lock unchanged (negative proof)", () => {
   const proj = freshProject();
   ensureWorkspacesDir(proj);
-  acquireLock(proj, "wsp_1", { ...baseLiveness, pid: 4242, startedAt: 6_000, bootInstant: 0 });
-  const refused = acquireLock(proj, "wsp_1", {
+  dropOsLock(takeLock(proj, "wsp_1", { ...baseLiveness, pid: 4242, startedAt: 6_000, bootInstant: 0 }));
+  const refused = takeLock(proj, "wsp_1", {
     ...baseLiveness,
     pid: 9999,
     startedAt: 7_000,
     bootInstant: 5_000, // inconclusive: 6_000 >= 5_000 - 2_000
     isPidAlive: () => true,
   });
-  expect(refused).toBe(false);
+  expect(refused).toBeNull();
   const lock = readLock(proj, "wsp_1")!;
   expect(lock.pid).toBe(4242);
   expect(lock.startedAt).toBe(6_000);
@@ -451,15 +482,15 @@ test("acquireLock: lock startedAt at/after boot, pid alive -> refused, on-disk l
 test("acquireLock: lock startedAt at/after boot, pid dead -> reclaimed (fallback preserves the pre-card guarantee)", () => {
   const proj = freshProject();
   ensureWorkspacesDir(proj);
-  acquireLock(proj, "wsp_1", { ...baseLiveness, pid: 4242, startedAt: 6_000, bootInstant: 0 });
-  const reclaimed = acquireLock(proj, "wsp_1", {
+  dropOsLock(takeLock(proj, "wsp_1", { ...baseLiveness, pid: 4242, startedAt: 6_000, bootInstant: 0 }));
+  const reclaimed = takeLock(proj, "wsp_1", {
     ...baseLiveness,
     pid: 9999,
     startedAt: 7_000,
     bootInstant: 5_000, // inconclusive on the boot check alone
     isPidAlive: () => false, // ...but the fallback still catches a dead owner
   });
-  expect(reclaimed).toBe(true);
+  expect(reclaimed).not.toBeNull();
   expect(readLock(proj, "wsp_1")!.pid).toBe(9999);
 });
 
@@ -473,13 +504,14 @@ test("isLockLive cross-host relies on heartbeat freshness, boundary is stale", (
 test("refreshLock updates heartbeat; releaseLock removes the file (no-op if gone)", () => {
   const proj = freshProject();
   ensureWorkspacesDir(proj);
-  acquireLock(proj, "wsp_1", { ...baseLiveness, pid: 4242 });
+  const held = takeLock(proj, "wsp_1", { ...baseLiveness, pid: 4242 });
   const owner = { pid: 4242, host: "this-host" };
   expect(refreshLock(proj, "wsp_1", 99_999, owner)).toBe(true);
   expect(readLock(proj, "wsp_1")!.heartbeat).toBe(99_999);
-  expect(releaseLock(proj, "wsp_1", owner)).toBe(true);
+  expect(releaseLock(proj, "wsp_1", owner, untrack(held))).toBe(true);
   expect(readLock(proj, "wsp_1")).toBeNull();
-  expect(releaseLock(proj, "wsp_1", owner)).toBe(true); // already gone -> no-op, still ok
+  expect(releaseLock(proj, "wsp_1", owner, null)).toBe(true); // already gone -> no-op, still ok
+  expect(takeLock(proj, "wsp_1", { ...baseLiveness, pid: 9999 }), "the release gave the OS lock back").not.toBeNull();
 });
 
 test("ownsLock matches pid+host exactly, mismatched pid or host both refuse", () => {
@@ -492,7 +524,7 @@ test("ownsLock matches pid+host exactly, mismatched pid or host both refuse", ()
 test("refreshLock refuses to re-stamp a lock owned by a different identity (no heartbeat theft)", () => {
   const proj = freshProject();
   ensureWorkspacesDir(proj);
-  acquireLock(proj, "wsp_1", { ...baseLiveness, pid: 4242 });
+  takeLock(proj, "wsp_1", { ...baseLiveness, pid: 4242 });
   const foreign = { pid: 9999, host: "this-host" };
   expect(refreshLock(proj, "wsp_1", 99_999, foreign)).toBe(false);
   expect(readLock(proj, "wsp_1")!.heartbeat).not.toBe(99_999);
@@ -501,9 +533,9 @@ test("refreshLock refuses to re-stamp a lock owned by a different identity (no h
 test("releaseLock refuses to delete a lock owned by a different identity (no cross-instance destruction)", () => {
   const proj = freshProject();
   ensureWorkspacesDir(proj);
-  acquireLock(proj, "wsp_1", { ...baseLiveness, pid: 4242 });
+  takeLock(proj, "wsp_1", { ...baseLiveness, pid: 4242 });
   const foreign = { pid: 9999, host: "this-host" };
-  expect(releaseLock(proj, "wsp_1", foreign)).toBe(false);
+  expect(releaseLock(proj, "wsp_1", foreign, null)).toBe(false);
   expect(readLock(proj, "wsp_1")).not.toBeNull();
 });
 
@@ -619,9 +651,10 @@ test("WorkspaceService.restore(): TOCTOU race lost between the top guard and own
   // after its guard and before own(). Overridden on the SAME deps object
   // restore() already holds, so only THIS call races.
   deps.adoptScope = () => {
-    acquireLock(proj, "wsp_target", {
+    takeLock(proj, "wsp_target", {
       host: "other-host",
       now: Date.now(),
+      bootInstant: 0,
       startedAt: 1_000,
       staleMs: 5_000,
       isPidAlive: () => true,
@@ -1051,8 +1084,9 @@ test("WorkspaceService.heartbeatTick(): refreshes with THIS instance's own ident
   expect(readLock(proj, id)!.host).toBe("this-host");
 
   // Phase 2: steal the lock out from under this instance WITHOUT going
-  // through WorkspaceService, so the next tick() must observe a mismatch.
-  const foreignLock: Lock = { pid: 99_999, host: "this-host", startedAt: 0, heartbeat: 0 };
+  // through WorkspaceService, so the next tick() must observe a mismatch. A
+  // LIVE owner (fresh heartbeat on another host): a dead one is rewritten.
+  const foreignLock: Lock = { pid: 99_999, host: "other-host", startedAt: 0, heartbeat: Date.now() };
   writeFileSync(join(workspacesDir(proj), `${id}.lock`), JSON.stringify(foreignLock));
 
   const reported: Array<{ scope: string; text: string }> = [];
@@ -1152,9 +1186,10 @@ test("WorkspaceService.restore(): failing to acquire the NEW lock leaves the OLD
   // touching wsp_a's lock: own() only releases the OLD lock AFTER the NEW
   // one is confirmed acquired (workspace-service.ts), so a failed
   // acquisition of the new id must never cost the old one.
-  acquireLock(proj, "wsp_b", {
+  takeLock(proj, "wsp_b", {
     host: "other-host",
     now: Date.now(),
+    bootInstant: 0,
     startedAt: 1_000,
     staleMs: 5_000,
     isPidAlive: () => true,
@@ -1182,6 +1217,8 @@ test("WorkspaceService.saveAuto(): reclaims a lock left by a dead pid after the 
   // WorkspaceService (fresh instance, same host, different pid) try to
   // restore the same workspace -- it must reclaim, not be permanently
   // refused, exactly the concern raised before writing any of this code.
+  // A dead instance holds no OS lock: releaseOnQuit stands for its exit.
+  svc.releaseOnQuit();
   const deadLock: Lock = { pid: 777_777, host: "this-host", startedAt: 0, heartbeat: 0 };
   writeFileSync(join(workspacesDir(proj), `${id}.lock`), JSON.stringify(deadLock));
   const deps2 = fakeDeps(proj, { pid: 5555 });
