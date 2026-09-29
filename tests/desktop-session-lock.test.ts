@@ -1,8 +1,8 @@
-import { test, expect, mock, afterEach } from "bun:test";
+import { test, expect, mock, afterEach, describe } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { extractBracedBody } from "./_braced-body.ts";
+import { extractBracedBody, extractParenBody } from "./_braced-body.ts";
 import {
   CHANNEL_TIERS,
   COMPANION_MANIFEST,
@@ -41,7 +41,8 @@ const { toWorkspaceSessions } = await import("../desktop/src/main/workspace-sess
 const { toTemplate } = await import("../desktop/src/shared/template.ts");
 
 const { startDeckControl } = await import("../desktop/src/main/deck-control.ts");
-const { wireTeamLeadRevocation } = await import("../desktop/src/main/team-lead-bridge.ts");
+const { wireTileDisappearance } = await import("../desktop/src/main/team-lead-bridge.ts");
+const { TtsrService } = await import("../desktop/src/main/ttsr-service.ts");
 
 const tmpDirs: string[] = [];
 const services: InstanceType<typeof SessionService>[] = [];
@@ -205,7 +206,9 @@ async function leadRig() {
   const minted = srv.mintCaller("team-lead", null);
   mintedCallerId = minted.callerId;
   const cleaned: string[] = [];
-  wireTeamLeadRevocation(svc, {
+  wireTileDisappearance(svc, {
+    forgetTile: () => {},
+    report: () => {},
     revokeCallerForSession: (id: string) => srv.revokeCallerForSession(id),
     cleanupMcpFile: (callerId: string) => cleaned.push(callerId)
   });
@@ -242,6 +245,122 @@ test("an explicit remove revokes the tile's team-lead token and asks for its MCP
   expect(svc.list().some((t) => t.id === lead.id), "the tile is gone").toBe(false);
   expect(await tokenStatus(), "token after the remove").toBe(401);
   expect(cleaned).toEqual([minted.callerId]);
+});
+
+function ttsrRig(forgetTile?: (id: string, forget: (id: string) => void) => void) {
+  const { svc } = setup();
+  const dir = mkdtempSync(join(tmpdir(), "kory-session-ttsr-"));
+  tmpDirs.push(dir);
+  const errors: string[] = [];
+  const ttsr = new TtsrService({
+    globalRulesFile: () => join(dir, "config", "ttsr-rules.json"),
+    approvalsFile: () => join(dir, "state", "ttsr-approvals.json"),
+    sessionDir: () => join(dir, "state", "sessions", "g"),
+    getDisabled: () => [],
+    reportError: (scope: string, message: string) => errors.push(`${scope}: ${message}`),
+    journal: () => {},
+    promptApproval: async () => false,
+    onChanged: () => {},
+    resolveProject: (cwd: string) => ({ root: cwd, projectKey: `local:${cwd}` }),
+    defer: (fn: () => void) => fn(),
+    probeRules: () => []
+  });
+  const forgotten: string[] = [];
+  const revoked: string[] = [];
+  const reported: unknown[] = [];
+  wireTileDisappearance(svc, {
+    report: (error: unknown) => reported.push(error),
+    forgetTile: (id: string) => {
+      forgotten.push(id);
+      if (forgetTile) forgetTile(id, (tile) => ttsr.remove(tile));
+      else ttsr.remove(id);
+    },
+    revokeCallerForSession: (id: string) => {
+      revoked.push(id);
+      return null;
+    },
+    cleanupMcpFile: () => {}
+  });
+  ptyExitHandlers.length = 0;
+  const tile = svc.create({ name: "ttsr-tile" });
+  const file = ttsr.fileFor({ id: tile.id, cwd: tile.cwd });
+  return { svc, ttsr, tile, file, errors, forgotten, revoked, reported };
+}
+
+describe("wireTileDisappearance forgets the tile in TtsrService on every final disappearance", () => {
+  test("precondition: a spawned tile is known to ttsr and has its effective file on disk", () => {
+    const { ttsr, tile, file, errors } = ttsrRig();
+    expect(errors).toEqual([]);
+    expect(file, "fileFor returned no path").not.toBe("");
+    expect(existsSync(file)).toBe(true);
+    expect(ttsr.effectivePathOf(tile.id)).toBe(file);
+  });
+
+  test("a clean PTY exit forgets the tile and deletes its effective file", () => {
+    const { ttsr, tile, file, forgotten } = ttsrRig();
+
+    ptyExitHandlers.at(-1)!({ exitCode: 0 });
+
+    expect(ttsr.effectivePathOf(tile.id), "ttsr still knows a tile that exited cleanly").toBeNull();
+    expect(existsSync(file), "the effective rules file of the gone tile is still on disk").toBe(false);
+    expect(forgotten).toEqual([tile.id]);
+  });
+
+  test("an explicit remove forgets the tile, once", async () => {
+    const { svc, ttsr, tile, file, forgotten } = ttsrRig();
+
+    await svc.remove(tile.id);
+
+    expect(ttsr.effectivePathOf(tile.id)).toBeNull();
+    expect(existsSync(file)).toBe(false);
+    expect(forgotten).toEqual([tile.id]);
+  });
+
+  test("a crash (non-zero exit) keeps the tile and its file: it stays restartable", () => {
+    const { ttsr, tile, file, forgotten } = ttsrRig();
+
+    ptyExitHandlers.at(-1)!({ exitCode: 1 });
+
+    expect(ttsr.effectivePathOf(tile.id)).toBe(file);
+    expect(existsSync(file)).toBe(true);
+    expect(forgotten).toEqual([]);
+  });
+
+  test("a forgetTile that throws is reported, the caller revocation still runs, and nothing escapes the listener", () => {
+    const { tile, revoked, reported } = ttsrRig(() => {
+      throw new Error("forget failed");
+    });
+
+    expect(() => ptyExitHandlers.at(-1)!({ exitCode: 0 })).not.toThrow();
+
+    expect(reported.map((e) => String(e))).toEqual(["Error: forget failed"]);
+    expect(revoked).toEqual([tile.id]);
+  });
+
+  test("a throwing forgetTile does not short-circuit the exit listeners registered after the wiring", () => {
+    const { svc, revoked } = ttsrRig(() => {
+      throw new Error("forget failed");
+    });
+    const seen: string[] = [];
+    svc.on("exit", (e: { id: string }) => seen.push(e.id));
+
+    ptyExitHandlers.at(-1)!({ exitCode: 0 });
+
+    expect(seen.length, "the later exit listener did not run").toBe(1);
+    expect(revoked.length).toBe(1);
+  });
+});
+
+test("index.ts hands forgetTile to ttsr.remove through wireTileDisappearance, and no other path removes ttsr tiles (weak source scan)", () => {
+  const index = readFileSync(join(DESKTOP_SRC, "main", "index.ts"), "utf8");
+  const call = index.indexOf("wireTileDisappearance(service,");
+  expect(call, "index.ts no longer calls wireTileDisappearance(service, ...)").toBeGreaterThanOrEqual(0);
+  const args = extractParenBody(index, index.indexOf("(", call), true);
+  expect(args).toContain("forgetTile: (id) => ttsr.remove(id)");
+  expect(
+    index.split("ttsr.remove(").length - 1,
+    "ttsr.remove must be reached only through wireTileDisappearance"
+  ).toBe(1);
 });
 
 test("a throwing exit listener does not leave a clean-exited tile listed as running", () => {

@@ -216,7 +216,7 @@ import {
   buildMintTeamLeadBridge,
   effectiveAgent,
   isTeamLeadAgent,
-  wireTeamLeadRevocation
+  wireTileDisappearance
 } from './team-lead-bridge'
 import { sweepTeamLeadMcpConfigs, teamLeadInstanceToken, teamLeadMcpConfigFileName } from './team-lead-mcp-sweep'
 import {
@@ -886,11 +886,12 @@ const sandboxGate = async (): Promise<string | null> => {
   return sandbox.effectiveRoot()
 }
 
-service.on('removed', ({ id, name }: { id: string; name: string }) => {
+service.on('removed', ({ name }: { name: string }) => {
   journal.add('session', `session "${name}" closed`)
-  ttsr.remove(id)
 })
-wireTeamLeadRevocation(service, {
+wireTileDisappearance(service, {
+  forgetTile: (id) => ttsr.remove(id),
+  report: (error) => reportError('session', 'could not forget a finished tile', error),
   revokeCallerForSession: (id) => controlServer?.revokeCallerForSession(id) ?? null,
   cleanupMcpFile: (callerId) => cleanupTeamLeadMcpFile(callerId)
 })

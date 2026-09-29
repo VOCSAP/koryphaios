@@ -157,21 +157,30 @@ export function resolveMcpConfig(
 }
 
 /**
- * Revokes a team-lead tile's minted caller and asks for its --mcp-config file
- * to be deleted once the tile is finally gone: an explicit remove ('removed')
- * or a clean PTY exit (exit code 0, which auto-closes the tile). A crash keeps
- * the tile as a restartable corpse that reuses the same config, so it revokes
- * nothing. The 'exit' event fires while the tile is still listed, which is
- * what lets the caller be resolved from runtime state.
+ * Runs the per-tile cleanup once the tile is finally gone: an explicit remove
+ * ('removed') or a clean PTY exit (exit code 0, which auto-closes the tile).
+ * A crash keeps the tile as a restartable corpse that reuses the same config,
+ * so it cleans nothing. Cleanup is forgetTile (state the tile owns elsewhere),
+ * then the revocation of a team-lead tile's minted caller and the deletion of
+ * its --mcp-config file. The 'exit' event fires while the tile is still
+ * listed, which is what lets the caller be resolved from runtime state.
  */
-export function wireTeamLeadRevocation(
+export function wireTileDisappearance(
   service: Pick<EventEmitter, 'on'>,
   deps: {
+    forgetTile(sessionId: string): void
     revokeCallerForSession(sessionId: string): string | null
     cleanupMcpFile(callerId: string): void
+    /** Receives a forgetTile failure: nothing may escape into the other 'exit' listeners. */
+    report(error: unknown): void
   }
 ): void {
   const release = (id: string): void => {
+    try {
+      deps.forgetTile(id)
+    } catch (e) {
+      deps.report(e)
+    }
     const callerId = deps.revokeCallerForSession(id)
     if (callerId) deps.cleanupMcpFile(callerId)
   }
