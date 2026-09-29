@@ -570,7 +570,7 @@ src/
     sandbox-projection.ts operator ~/.claude allow-list + host-only hook detection
     desk-session.ts       read/clear the deterministic per-tile session-id back-channel
     open-id-registry.ts   guard against resuming the same id twice
-    peer-state.ts         resolve peer_id from the status-line cache
+    peer-state.ts         TilePeerPoller: poll the broker for each tile's peer_id
     broker-client.ts      resolve broker endpoint + POST /announce (outbound megaphone)
     migrate-data-dir.ts   harmonize the %APPDATA% deck/desk folders (app state under config/)
     workspace-store.ts    in-repo workspace JSON (save/list/load/delete)

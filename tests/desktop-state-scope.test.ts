@@ -310,8 +310,6 @@ const NOT_APP_STATE: Record<string, NotAppStateRule> = {
   containerPath: { reason: "container-side path of the sandbox prompt file (/kory-run), a mount target, not userData" },
   composeSandboxAppendPrompt: { reason: "prompt-<sessionId>.txt under the sandbox run dir on the host, per session uuid, outside the state dir" },
   deskSessionFileName: { reason: "desk-session-<token>.txt under ~/.claude/peers, the peer-id cache shared with the CLI; mirrors shared/peer-cache.ts" },
-  resolvePeerId: { reason: "reads peer-id-<cwd>-<session>.txt from ~/.claude/peers, the CLI's own cache; keyed by cwd and CC session" },
-  peerIdCacheFileName: { reason: "builds the same peer-id-<cwd>-<session>.txt name for resolvePeerIdAmong, the CLI's own cache under ~/.claude/peers; never Deck state" },
   SANDBOX_CREDENTIALS_FILE: { reason: "container-side path constant (/home/.../.claude/.credentials.json), never a host file" },
   SANDBOX_CLAUDE_JSON: { reason: "container-side path constant of .claude.json, never a host file" },
   buildAuthProbeArgs: { reason: "shell probe run INSIDE the container interpolating the two constants above; writes nothing" },
