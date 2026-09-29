@@ -54,8 +54,7 @@ function main() {
     env.CLAUDE_PEERS_DESK_SCOPE_ID = scopeId.trim()
   }
 
-  const entry = avatar ? path.resolve(appRoot, 'out', 'main', 'avatar-entry.js') : appRoot
-  const child = spawn(electron, [entry], { stdio: 'inherit', env })
+  const child = spawn(electron, avatar ? [appRoot, '--avatar'] : [appRoot], { stdio: 'inherit', env })
 
   child.on('exit', (code, signal) => {
     if (signal) process.kill(process.pid, signal)

@@ -2994,9 +2994,6 @@ async function startAvatarProcess(): Promise<void> {
     case 'started':
       journal.add('session', 'avatar: started')
       break
-    case 'unsupported-packaged':
-      reportError('avatar', 'a packaged Deck cannot start the Avatar yet: run `kory --avatar`')
-      break
     case 'no-rendezvous':
       logWarn('avatar', `no Avatar rendezvous ${outcome.waitedMs} ms after spawning; the client keeps retrying`)
       break

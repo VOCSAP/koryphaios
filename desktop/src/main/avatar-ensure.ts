@@ -28,9 +28,8 @@ export interface AvatarLaunchInput {
   isPackaged: boolean
 }
 
-/** Null for a packaged Deck: its executable ignores a script argument and would start another Deck. */
-export function avatarLaunchCommand(input: AvatarLaunchInput): AvatarLaunchCommand | null {
-  if (input.isPackaged) return null
+/** mainDir is the Deck's own compiled main directory (out/main), whose grandparent is the app root. */
+export function avatarLaunchCommand(input: AvatarLaunchInput): AvatarLaunchCommand {
   const env: Record<string, string> = {}
   for (const [key, value] of Object.entries(input.env)) {
     if (value === undefined || EXCLUDED_ENV_KEYS.has(key)) continue
@@ -39,7 +38,7 @@ export function avatarLaunchCommand(input: AvatarLaunchInput): AvatarLaunchComma
   }
   return {
     command: input.execPath,
-    args: [join(input.mainDir, 'avatar-entry.js')],
+    args: input.isPackaged ? ['--avatar'] : [join(input.mainDir, '..', '..'), '--avatar'],
     options: { cwd: input.homeDir, env, detached: true, stdio: 'ignore', windowsHide: true }
   }
 }
@@ -64,7 +63,6 @@ export function spawnDetachedAvatar(
 export type AvatarEnsureOutcome =
   | { action: 'disabled' }
   | { action: 'already-running' }
-  | { action: 'unsupported-packaged' }
   | { action: 'started' }
   | { action: 'no-rendezvous'; waitedMs: number }
   | { action: 'failed'; reason: string }
@@ -72,7 +70,7 @@ export type AvatarEnsureOutcome =
 export interface AvatarEnsureDeps {
   autoAttachEnabled(): boolean
   rendezvous(): AvatarRendezvous | null
-  launch(): AvatarLaunchCommand | null
+  launch(): AvatarLaunchCommand
   /** Resolves on the child's 'spawn' event and rejects on its 'error' event (ENOENT, EACCES arrive there, not as a throw). */
   spawn(launch: AvatarLaunchCommand): Promise<void>
   sleep(ms: number): Promise<void>
@@ -82,7 +80,6 @@ export async function ensureAvatar(deps: AvatarEnsureDeps): Promise<AvatarEnsure
   if (!deps.autoAttachEnabled()) return { action: 'disabled' }
   if (deps.rendezvous()) return { action: 'already-running' }
   const launch = deps.launch()
-  if (!launch) return { action: 'unsupported-packaged' }
   try {
     await deps.spawn(launch)
   } catch (error) {

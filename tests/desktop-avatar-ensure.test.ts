@@ -42,11 +42,11 @@ function launchInput(overrides: Partial<AvatarLaunchInput> = {}): AvatarLaunchIn
   }
 }
 
-test('launches the Deck own Electron binary on its sibling avatar-entry, from home, detached', () => {
+test('a dev Deck launches its own Electron binary on its app root with --avatar, from home, detached', () => {
   const launch = avatarLaunchCommand(launchInput())
   expect(launch).toEqual({
     command: 'C:/deck/electron.exe',
-    args: [join('C:/deck/out/main', 'avatar-entry.js')],
+    args: [join('C:/deck'), '--avatar'],
     options: {
       cwd: 'C:/Users/me',
       env: {
@@ -61,8 +61,10 @@ test('launches the Deck own Electron binary on its sibling avatar-entry, from ho
   })
 })
 
-test('launches nothing from a packaged Deck, whose executable would start another Deck', () => {
-  expect(avatarLaunchCommand(launchInput({ isPackaged: true }))).toBeNull()
+test('a packaged Deck launches its own executable with --avatar only, which its entry routes to the Avatar', () => {
+  const launch = avatarLaunchCommand(launchInput({ execPath: 'C:/Koryphaios/koryphaios.exe', isPackaged: true }))
+  expect(launch.command).toBe('C:/Koryphaios/koryphaios.exe')
+  expect(launch.args).toEqual(['--avatar'])
 })
 
 function ensureDeps(overrides: Partial<AvatarEnsureDeps> & { appearsAfter?: number } = {}) {
@@ -94,12 +96,6 @@ test('does not start an Avatar the Deck will not attach to', async () => {
 test('leaves a live Avatar alone', async () => {
   const { deps, spawned } = ensureDeps({ rendezvous: () => rendezvous })
   expect(await ensureAvatar(deps)).toEqual({ action: 'already-running' })
-  expect(spawned).toEqual([])
-})
-
-test('spawns nothing and says so from a packaged Deck', async () => {
-  const { deps, spawned } = ensureDeps({ launch: () => avatarLaunchCommand(launchInput({ isPackaged: true })) })
-  expect(await ensureAvatar(deps)).toEqual({ action: 'unsupported-packaged' })
   expect(spawned).toEqual([])
 })
 

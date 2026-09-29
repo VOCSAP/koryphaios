@@ -118,7 +118,7 @@ test("kory routes --avatar to its dedicated Electron entry without turning it in
   const avatar = runLaunch(["--avatar"]);
   expect(avatar).toEqual({
     binary: "electron-binary",
-    args: [join(DESKTOP, "out", "main", "avatar-entry.js")],
+    args: [DESKTOP, "--avatar"],
     env: { project: process.cwd() }
   });
 });
