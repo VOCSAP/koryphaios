@@ -17,7 +17,9 @@ function toCharArray(cs: CharSet): string[] {
  * EOF-truncated index.
  * quoteAware (default false) tracks quoted strings so a bracket character
  * inside a string literal does not desync the count; escaped quotes are skipped
- * as a pair.
+ * as a pair. It also skips // and block comments, so a quote or bracket inside
+ * a comment cannot desync the count; a regex literal holding a quote, // or /*
+ * still can; so can JSX text holding // or an apostrophe.
  */
 export function findMatchingClose(
   s: string,
@@ -41,6 +43,16 @@ export function findMatchingClose(
         }
         if (c === inString) inString = null;
         i++;
+        continue;
+      }
+      if (c === "/" && s[i + 1] === "/") {
+        const eol = s.indexOf("\n", i);
+        i = eol < 0 ? s.length : eol;
+        continue;
+      }
+      if (c === "/" && s[i + 1] === "*") {
+        const end = s.indexOf("*/", i + 2);
+        i = end < 0 ? s.length : end + 2;
         continue;
       }
       if (c === '"' || c === "'" || c === "`") {
