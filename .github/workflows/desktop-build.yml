@@ -73,6 +73,19 @@ jobs:
         with:
           node-version: '20'
 
+      # TEMPORARY, card 7ce18c06: remove this step and
+      # scripts/ci-diag-temp-powershell-foreground.ts once the avatar
+      # foreground helper hang on windows-latest is settled. Placed before every
+      # install/typecheck step so an earlier red cannot skip it, and
+      # non-blocking so it can never turn the job red. The script uses only
+      # node builtins, so it needs nothing beyond setup-bun.
+      - name: Diagnostic PowerShell foreground helper (TEMPORARY, card 7ce18c06)
+        if: runner.os == 'Windows'
+        shell: bash
+        continue-on-error: true
+        timeout-minutes: 8
+        run: bun scripts/ci-diag-temp-powershell-foreground.ts
+
       # Root install: most of these suites still import with node builtins
       # only, but a renderer test harness (happy-dom + React) now also lives
       # under tests/desktop-*.test.ts, and its deps (@happy-dom/global-registrator,
