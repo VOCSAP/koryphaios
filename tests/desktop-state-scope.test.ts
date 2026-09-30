@@ -316,6 +316,7 @@ const NOT_APP_STATE: Record<string, NotAppStateRule> = {
   "sidebar.lock": { reason: "i18n key of the Lock button on a Sidebar row (i18n.ts EN_DEFAULTS); a translation identifier that only ends like a .lock sidecar name, never a file" },
   availableLocales: { reason: "<code>.json locale bundles shipped with the app, read-only" },
   readDictFile: { reason: "<lang>.json locale bundle read from the app's locales dir, read-only" },
+  iconBasename: { reason: "avatar-<variant>.png Tray icon shipped as an extraResource, read-only" },
   transcriptPath: { reason: "~/.claude/projects/<cwd>/<id>.jsonl, Claude Code's own transcript, read for the resume digest" },
   "rules.json": { reason: "a repository's guard rules under .claude/claude-peers, read as hostile repo content and written only on an explicit operator save; never under userData" },
   "serve.json": { reason: "a cloned repository's serve convention under .claude/claude-peers; its name is imposed by the project and the Deck only reads it" },

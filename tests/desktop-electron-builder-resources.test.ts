@@ -2,28 +2,27 @@ import { test, expect, afterEach } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-
-// Reads the extraResources list from desktop/electron-builder.yml rather than
-// hardcoding it, since a hardcoded list would silently miss a newly added
-// entry.
-// Two independent halves: the local half checks each declared `to` target
-// exists in a packaged dist/win-unpacked tree (skipped unless one was just
-// built) and catches an aborted packaging run; the CI half checks each `from:`
-// source directory exists in desktop/ and catches a typo or renamed source,
-// running everywhere including CI. Neither subsumes the other.
+import { AVATAR_TRAY_ICON_DIRNAME, avatarTrayIconFiles } from "../desktop/src/main/avatar-tray-icon.ts";
 
 const DESKTOP_DIR = join(import.meta.dir, "..", "desktop");
 const YML_PATH = join(DESKTOP_DIR, "electron-builder.yml");
 
-/**
- * Extract every `extraResources[].to` target from electron-builder.yml.
- * Intentionally a tiny hand-rolled parser rather than a YAML library
- * dependency (none is declared in desktop/package.json; js-yaml only exists
- * transitively via electron-builder itself, which would make this test rely
- * on an undeclared dependency). Scoped to the flat, hand-maintained shape of
- * this one file: find the `extraResources:` block, walk its indented lines
- * until the next top-level (unindented) key, and pull every `to: <value>`.
- */
+// Targets whose content is a closed set the app loads by name: a partial copy
+// is as broken as an empty one, so presence of "some file" is not enough.
+const EXACT_FILES: Record<string, string[]> = {
+  [AVATAR_TRAY_ICON_DIRNAME]: avatarTrayIconFiles()
+};
+
+interface ResourceCheck {
+  missing: string[];
+  empty: string[];
+  absent: string[];
+  unexpected: string[];
+}
+
+const CLEAN: ResourceCheck = { missing: [], empty: [], absent: [], unexpected: [] };
+
+// Hand-rolled on purpose: no YAML parser is a declared dependency of desktop/.
 function parseExtraResourcesTargets(yamlText: string): string[] {
   const lines = yamlText.split(/\r?\n/);
   const startIdx = lines.findIndex((l) => /^extraResources:\s*$/.test(l));
@@ -31,28 +30,33 @@ function parseExtraResourcesTargets(yamlText: string): string[] {
   const targets: string[] = [];
   for (let i = startIdx + 1; i < lines.length; i++) {
     const line = lines[i];
-    if (/^\S/.test(line)) break; // next top-level key: block ended
+    if (/^\S/.test(line)) break;
     const m = line.match(/^\s*-?\s*to:\s*(.+?)\s*$/);
     if (m) targets.push(m[1].replace(/^["']|["']$/g, ""));
   }
   return targets;
 }
 
-/** What the packaged-tree check below actually asserts, factored out so the
- * red path (a broken tree) is provable against a synthetic directory instead
- * of only against the real, currently-healthy desktop/dist/win-unpacked. */
-function checkPackagedResources(resourcesDir: string, targets: string[]): { missing: string[]; empty: string[] } {
-  const missing: string[] = [];
-  const empty: string[] = [];
-  for (const target of targets) {
-    const targetDir = join(resourcesDir, target);
-    if (!existsSync(targetDir)) {
-      missing.push(target);
-      continue;
-    }
-    if (readdirSync(targetDir).length === 0) empty.push(target);
+function checkDir(dir: string, label: string, target: string, result: ResourceCheck): void {
+  if (!existsSync(dir)) {
+    result.missing.push(label);
+    return;
   }
-  return { missing, empty };
+  const present = readdirSync(dir);
+  if (present.length === 0) {
+    result.empty.push(label);
+    return;
+  }
+  const expected = EXACT_FILES[target];
+  if (expected === undefined) return;
+  for (const file of expected) if (!present.includes(file)) result.absent.push(`${label}/${file}`);
+  for (const file of present) if (!expected.includes(file)) result.unexpected.push(`${label}/${file}`);
+}
+
+function checkPackagedResources(resourcesDir: string, targets: string[]): ResourceCheck {
+  const result: ResourceCheck = { missing: [], empty: [], absent: [], unexpected: [] };
+  for (const target of targets) checkDir(join(resourcesDir, target), target, target, result);
+  return result;
 }
 
 interface ExtraResourceEntry {
@@ -60,15 +64,6 @@ interface ExtraResourceEntry {
   to: string;
 }
 
-/**
- * Extract every `extraResources[].{from,to}` pair from electron-builder.yml.
- * Same hand-rolled-parser rationale as parseExtraResourcesTargets above
- * (no YAML lib dependency), extended to also capture `from` since the CI-side
- * half of the guard (reviewer d02c8e96 review, source-tree check) needs the
- * SOURCE path, not just the packaged `to` name -- they differ for at least
- * one entry (`from: resources/sandbox` / `to: sandbox`), which is exactly the
- * kind of divergence a typo in `from:` can hide behind.
- */
 function parseExtraResourcesEntries(yamlText: string): ExtraResourceEntry[] {
   const lines = yamlText.split(/\r?\n/);
   const startIdx = lines.findIndex((l) => /^extraResources:\s*$/.test(l));
@@ -81,8 +76,9 @@ function parseExtraResourcesEntries(yamlText: string): ExtraResourceEntry[] {
   };
   for (let i = startIdx + 1; i < lines.length; i++) {
     const line = lines[i];
-    if (/^\S/.test(line)) break; // next top-level key: block ended
-    if (/^\s*-\s/.test(line)) flush(); // new list item starts (any key first, not just `from:`)
+    if (/^\S/.test(line)) break;
+    // A list item may open with `to:` as legally as with `from:`.
+    if (/^\s*-\s/.test(line)) flush();
     const fromM = line.match(/^\s*-?\s*from:\s*(.+?)\s*$/);
     if (fromM) current.from = fromM[1].replace(/^["']|["']$/g, "");
     const toM = line.match(/^\s*-?\s*to:\s*(.+?)\s*$/);
@@ -92,68 +88,34 @@ function parseExtraResourcesEntries(yamlText: string): ExtraResourceEntry[] {
   return entries;
 }
 
-/**
- * Checks each extraResources `from:` exists and is non-empty in the source
- * tree, so it runs everywhere including plain CI, unlike the local/packaged
- * half which needs a real `npm run package` output and is skipped there.
- */
-function checkSourceEntries(desktopDir: string, entries: ExtraResourceEntry[]): { missing: string[]; empty: string[] } {
-  const missing: string[] = [];
-  const empty: string[] = [];
-  for (const entry of entries) {
-    const sourceDir = join(desktopDir, entry.from);
-    if (!existsSync(sourceDir)) {
-      missing.push(entry.from);
-      continue;
-    }
-    if (readdirSync(sourceDir).length === 0) empty.push(entry.from);
-  }
-  return { missing, empty };
+function checkSourceEntries(desktopDir: string, entries: ExtraResourceEntry[]): ResourceCheck {
+  const result: ResourceCheck = { missing: [], empty: [], absent: [], unexpected: [] };
+  for (const entry of entries) checkDir(join(desktopDir, entry.from), entry.from, entry.to, result);
+  return result;
 }
 
 test("electron-builder.yml declares at least the known extraResources entries", () => {
-  const yamlText = readFileSync(YML_PATH, "utf-8");
-  const targets = parseExtraResourcesTargets(yamlText);
-  // Known floor, not a ceiling: asserts the parser itself still finds the
-  // entries known at the time this test was written. A 5th entry added later
-  // is picked up automatically by the packaged-tree check below since that
-  // one iterates `targets`, not this list.
-  expect(targets).toEqual(expect.arrayContaining(["locales", "docs", "deck-plugin", "sandbox"]));
+  const targets = parseExtraResourcesTargets(readFileSync(YML_PATH, "utf-8"));
+  expect(targets).toEqual(expect.arrayContaining(["locales", "docs", "deck-plugin", "sandbox", AVATAR_TRAY_ICON_DIRNAME]));
 });
 
 const PACKAGED_RESOURCES_DIR = join(DESKTOP_DIR, "dist", "win-unpacked", "resources");
 const HAS_PACKAGED_TREE = existsSync(PACKAGED_RESOURCES_DIR);
 
-// Reviewer Q1 (card d02c8e96 review): a silent `console.warn` + early `return`
-// when no packaged tree exists is itself the fail-open shape CLAUDE.md warns
-// about -- indistinguishable from a real pass in the `bun test` summary, and
-// today's CI (.github/workflows/desktop-build.yml) has no packaging step at
-// all, so this branch would ALWAYS be the one CI takes: zero real regression
-// coverage there. `test.skipIf` makes that an explicit, visibly-labelled SKIP
-// in the runner's own tally (not a pass) instead of a silently-succeeding
-// no-op, and the arbitration is spelled out here rather than left implicit:
-// this repo does not run a real `npm run package` in CI, so the only place
-// this test's actual assertion executes today is a developer machine that has
-// packaged locally, or a future dedicated CI packaging job. Until one exists,
-// CI honestly reports "skipped", not "passed".
+// CI does not package: without a local tree this reports SKIP, never a vacuous pass.
 test.skipIf(!HAS_PACKAGED_TREE)(
-  "every extraResources target exists under a packaged win-unpacked/resources (needs desktop/dist/win-unpacked/resources)",
+  "every extraResources target is complete under a packaged win-unpacked/resources (needs desktop/dist/win-unpacked/resources)",
   () => {
-    const yamlText = readFileSync(YML_PATH, "utf-8");
-    const targets = parseExtraResourcesTargets(yamlText);
+    const targets = parseExtraResourcesTargets(readFileSync(YML_PATH, "utf-8"));
     expect(targets.length).toBeGreaterThan(0);
-    expect(checkPackagedResources(PACKAGED_RESOURCES_DIR, targets)).toEqual({ missing: [], empty: [] });
+    expect(checkPackagedResources(PACKAGED_RESOURCES_DIR, targets)).toEqual(CLEAN);
   }
 );
 
-test("every extraResources `from:` source directory exists and is non-empty (runs in CI, no packaging needed)", () => {
-  const yamlText = readFileSync(YML_PATH, "utf-8");
-  const entries = parseExtraResourcesEntries(yamlText);
-  // Fails RED if the yml is ever reformatted into a shape the parser can't
-  // read as zero entries -- a would-be "empty list, vacuously green" trap
-  // (reviewer d02c8e96 review: "elle doit rougir si la liste est VIDE").
-  expect(entries.length).toBeGreaterThan(0);
-  expect(checkSourceEntries(DESKTOP_DIR, entries)).toEqual({ missing: [], empty: [] });
+test("every extraResources source directory is present and complete", () => {
+  const entries = parseExtraResourcesEntries(readFileSync(YML_PATH, "utf-8"));
+  expect(entries.length, "the parser read no extraResources entry from the yml").toBeGreaterThan(0);
+  expect(checkSourceEntries(DESKTOP_DIR, entries)).toEqual(CLEAN);
 });
 
 let tmpDir: string | null = null;
@@ -162,12 +124,13 @@ afterEach(() => {
   tmpDir = null;
 });
 
-test("the check is RED on a tree missing an extraResources entry (proves it would have caught card d02c8e96)", () => {
-  tmpDir = mkdtempSync(join(tmpdir(), "kory-eb-resources-"));
-  const resourcesDir = join(tmpDir, "resources");
-  // Reproduce the exact incident: an aborted electron-builder run left the
-  // resources dir with only what it managed to unpack before it died,
-  // deck-plugin/locales/docs/sandbox never landed.
+function scratch(prefix: string): string {
+  tmpDir = mkdtempSync(join(tmpdir(), prefix));
+  return tmpDir;
+}
+
+test("a packaged tree holding only app.asar reports every target missing", () => {
+  const resourcesDir = join(scratch("kory-eb-resources-"), "resources");
   mkdirSync(resourcesDir, { recursive: true });
   writeFileSync(join(resourcesDir, "app.asar"), "stub");
 
@@ -176,10 +139,9 @@ test("the check is RED on a tree missing an extraResources entry (proves it woul
   expect(result.empty).toEqual([]);
 });
 
-test("the check is RED on a target dir that exists but is empty (partial unpack, not just absent)", () => {
-  tmpDir = mkdtempSync(join(tmpdir(), "kory-eb-resources-"));
-  const resourcesDir = join(tmpDir, "resources");
-  mkdirSync(join(resourcesDir, "locales"), { recursive: true }); // present, empty
+test("a packaged target dir that exists but is empty is reported empty", () => {
+  const resourcesDir = join(scratch("kory-eb-resources-"), "resources");
+  mkdirSync(join(resourcesDir, "locales"), { recursive: true });
   mkdirSync(join(resourcesDir, "docs"), { recursive: true });
   writeFileSync(join(resourcesDir, "docs", "index.md"), "stub");
 
@@ -188,15 +150,12 @@ test("the check is RED on a target dir that exists but is empty (partial unpack,
   expect(result.empty).toEqual(["locales"]);
 });
 
-test("the source-tree check is RED on a `from:` that points nowhere (typo / renamed source dir)", () => {
-  tmpDir = mkdtempSync(join(tmpdir(), "kory-eb-source-"));
-  mkdirSync(join(tmpDir, "locales"), { recursive: true });
-  writeFileSync(join(tmpDir, "locales", "fr.json"), "{}");
-  // "resources/sandbox" is the real entry's from: for the `sandbox` target
-  // (see electron-builder.yml) -- reusing the same shape, but only creating
-  // "locales" in the fixture so "resources/sandbox" is provably missing.
+test("a source entry whose from: points nowhere is reported missing", () => {
+  const dir = scratch("kory-eb-source-");
+  mkdirSync(join(dir, "locales"), { recursive: true });
+  writeFileSync(join(dir, "locales", "fr.json"), "{}");
 
-  const result = checkSourceEntries(tmpDir, [
+  const result = checkSourceEntries(dir, [
     { from: "locales", to: "locales" },
     { from: "resources/sandbox", to: "sandbox" }
   ]);
@@ -204,24 +163,34 @@ test("the source-tree check is RED on a `from:` that points nowhere (typo / rena
   expect(result.empty).toEqual([]);
 });
 
-test("the source-tree check is RED on a `from:` dir that exists but is empty", () => {
-  tmpDir = mkdtempSync(join(tmpdir(), "kory-eb-source-"));
-  mkdirSync(join(tmpDir, "deck-plugin"), { recursive: true }); // present, empty
+test("a source entry whose from: dir is empty is reported empty", () => {
+  const dir = scratch("kory-eb-source-");
+  mkdirSync(join(dir, "deck-plugin"), { recursive: true });
 
-  const result = checkSourceEntries(tmpDir, [{ from: "deck-plugin", to: "deck-plugin" }]);
+  const result = checkSourceEntries(dir, [{ from: "deck-plugin", to: "deck-plugin" }]);
   expect(result.missing).toEqual([]);
   expect(result.empty).toEqual(["deck-plugin"]);
 });
 
-test("parseExtraResourcesEntries handles a `to:`-first entry (legal YAML this repo doesn't currently write, but the parser must not silently drop the prior entry over it)", () => {
-  // Reviewer catch: flushing only on `- from:` assumed every entry writes
-  // `from:` first. `- to: x` / `from: y` is legal YAML that reads exactly
-  // the same to a human, and the old flush trigger let the new item's `to:`
-  // overwrite the previous item's `to:` before it was ever pushed -- the
-  // previous entry vanished, entries.length stayed > 0, so the "list is
-  // non-empty" guard above didn't catch it. This is the same "reformat ->
-  // silent subset" shape this whole file exists to guard against, one layer
-  // down in the parser itself.
+test("an avatar-tray dir short of one icon, or carrying a stale one, is reported file by file", () => {
+  const expected = avatarTrayIconFiles();
+  expect(expected.length).toBeGreaterThan(1);
+  const [dropped, ...kept] = expected;
+  const dir = scratch("kory-eb-avatar-");
+  const from = join("resources", AVATAR_TRAY_ICON_DIRNAME);
+  mkdirSync(join(dir, from), { recursive: true });
+  for (const file of [...kept, "avatar.png"]) writeFileSync(join(dir, from, file), "png");
+
+  const source = checkSourceEntries(dir, [{ from, to: AVATAR_TRAY_ICON_DIRNAME }]);
+  expect(source.absent).toEqual([`${from}/${dropped}`]);
+  expect(source.unexpected).toEqual([`${from}/avatar.png`]);
+
+  const packaged = checkPackagedResources(join(dir, "resources"), [AVATAR_TRAY_ICON_DIRNAME]);
+  expect(packaged.absent).toEqual([`${AVATAR_TRAY_ICON_DIRNAME}/${dropped}`]);
+  expect(packaged.unexpected).toEqual([`${AVATAR_TRAY_ICON_DIRNAME}/avatar.png`]);
+});
+
+test("parseExtraResourcesEntries keeps both entries when one opens with to: and the next with from:", () => {
   const yaml = [
     "extraResources:",
     "  - to: locales",
@@ -231,18 +200,12 @@ test("parseExtraResourcesEntries handles a `to:`-first entry (legal YAML this re
     "files:",
     "  - out/**/*"
   ].join("\n");
-  const entries = parseExtraResourcesEntries(yaml);
-  expect(entries).toEqual([
+  expect(parseExtraResourcesEntries(yaml)).toEqual([
     { from: "locales", to: "locales" },
     { from: "docs", to: "docs" }
   ]);
 });
 
-test("parseExtraResourcesEntries is RED (empty) on a reformatted yml with no extraResources block, not silently vacuous-green", () => {
-  const entries = parseExtraResourcesEntries("appId: com.example.app\nfiles:\n  - out/**/*\n");
-  expect(entries).toEqual([]);
-  // The test above this one (`entries.length > 0`) is what turns this
-  // specific shape RED against the real yml -- this probe just proves the
-  // parser itself degrades to an honest empty list rather than throwing or
-  // hallucinating entries, so that upstream assertion is trustworthy.
+test("parseExtraResourcesEntries returns an empty list for a yml with no extraResources block", () => {
+  expect(parseExtraResourcesEntries("appId: com.example.app\nfiles:\n  - out/**/*\n")).toEqual([]);
 });

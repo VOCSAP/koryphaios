@@ -12,6 +12,7 @@ import { claimAvatarRegistry, type AvatarRegistryOwner } from './avatar-registry
 import { deckSocketEndpoints, startAvatarServer, type AvatarServer } from './avatar-server'
 import { releaseAvatarResources } from './avatar-quit'
 import { createAvatarTray, type AvatarTray } from './avatar-tray'
+import { avatarTrayIconDir } from './avatar-tray-icon'
 import { createAvatarQuitHandler } from './avatar-quit-handler'
 import { resolveBrokerEndpoint } from './broker-client'
 import { initDeckLog, reportError } from './log'
@@ -79,6 +80,7 @@ async function startAvatar(): Promise<void> {
   })
   tray = createAvatarTray({
     state,
+    iconDir: avatarTrayIconDir(app.isPackaged, process.resourcesPath, app.getAppPath()),
     attachedDecks: () => server?.attachedDecks() ?? [],
     onDeckMenuClick: (identity) => {
       void focusFromTray(identity).catch((error: unknown) => reportError('avatar-focus', 'Tray focus gesture failed', error))

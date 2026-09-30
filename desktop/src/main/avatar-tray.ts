@@ -1,6 +1,6 @@
 import { createRequire } from 'node:module'
 import type { MenuItemConstructorOptions } from 'electron'
-import { AVATAR_HEARTBEAT_MS, type AvatarDeckIdentity, type AvatarState } from '../shared/avatar-state'
+import { AVATAR_HEARTBEAT_MS, type AvatarDeckIdentity, type AvatarFace, type AvatarState } from '../shared/avatar-state'
 import { escapeAvatarTrayLabel, type AvatarAttachRequest } from '../shared/avatar-protocol'
 import {
   avatarTrayMayRebound,
@@ -10,6 +10,7 @@ import {
   type AvatarTrayAction,
   type AvatarTrayMenuItem
 } from './avatar-tray-menu'
+import { avatarTrayIconPath, avatarTrayVariant, type AvatarTrayVariant } from './avatar-tray-icon'
 import { reportError } from './log'
 
 export interface AvatarTray {
@@ -19,6 +20,7 @@ export interface AvatarTray {
 
 export interface AvatarTrayOptions {
   state: AvatarState
+  iconDir: string
   attachedDecks(): AvatarAttachRequest[]
   onDeckMenuClick(identity: AvatarDeckIdentity): void
   onQuit(): void
@@ -27,38 +29,50 @@ export interface AvatarTrayOptions {
 export interface AvatarTrayNative {
   setToolTip(tooltip: string): void
   setContextMenu(menu: unknown): void
+  setImage(image: AvatarTrayImage): void
   destroy(): void
+}
+
+export interface AvatarTrayImage {
+  isEmpty(): boolean
 }
 
 export interface AvatarTrayDependencies {
   now(): number
-  createTray(): AvatarTrayNative
+  loadImage(path: string): AvatarTrayImage
+  createTray(image: AvatarTrayImage): AvatarTrayNative
   buildMenu(template: MenuItemConstructorOptions[]): unknown
   setInterval(callback: () => void, delay: number): ReturnType<typeof setInterval>
   clearInterval(timer: ReturnType<typeof setInterval>): void
   reportError(scope: string, message: string, error?: unknown): void
 }
 
-type ElectronTrayModule = Pick<typeof import('electron'), 'Menu' | 'Tray' | 'nativeImage'>
+export type ElectronTrayModule = Pick<typeof import('electron'), 'Menu' | 'Tray' | 'nativeImage'>
 
 // Lazy loading keeps injected adapter tests independent of Electron runtime exports.
 const requireElectron = createRequire(import.meta.url)
 
-function electronTrayModule(): ElectronTrayModule {
-  return requireElectron('electron') as ElectronTrayModule
+export function electronAvatarTrayDependencies(electron: () => ElectronTrayModule): AvatarTrayDependencies {
+  return {
+    now: Date.now,
+    loadImage: (path) => electron().nativeImage.createFromPath(path),
+    createTray: (image) => {
+      const tray = new (electron().Tray)(image as import('electron').NativeImage)
+      return {
+        setToolTip: (tooltip) => tray.setToolTip(tooltip),
+        setContextMenu: (menu) => tray.setContextMenu(menu as import('electron').Menu),
+        setImage: (next) => tray.setImage(next as import('electron').NativeImage),
+        destroy: () => tray.destroy()
+      }
+    },
+    buildMenu: (template) => electron().Menu.buildFromTemplate(template),
+    setInterval,
+    clearInterval,
+    reportError
+  }
 }
 
-const defaultAvatarTrayDependencies: AvatarTrayDependencies = {
-  now: Date.now,
-  createTray: () => {
-    const { Tray, nativeImage } = electronTrayModule()
-    return new Tray(nativeImage.createEmpty())
-  },
-  buildMenu: (template) => electronTrayModule().Menu.buildFromTemplate(template),
-  setInterval,
-  clearInterval,
-  reportError
-}
+const defaultAvatarTrayDependencies = electronAvatarTrayDependencies(() => requireElectron('electron') as ElectronTrayModule)
 
 function nativeMenuItem(item: AvatarTrayMenuItem, invoke: (action: AvatarTrayAction) => void): MenuItemConstructorOptions {
   if (item.type === 'separator') return { type: 'separator' }
@@ -73,12 +87,31 @@ function nativeMenuItem(item: AvatarTrayMenuItem, invoke: (action: AvatarTrayAct
 }
 
 export function createAvatarTray(options: AvatarTrayOptions, dependencies: AvatarTrayDependencies = defaultAvatarTrayDependencies): AvatarTray {
-  const tray = dependencies.createTray()
+  const loadIcon = (variant: AvatarTrayVariant): AvatarTrayImage => {
+    const iconPath = avatarTrayIconPath(options.iconDir, variant)
+    const icon = dependencies.loadImage(iconPath)
+    if (icon.isEmpty()) dependencies.reportError('avatar-tray', `Avatar Tray icon missing or unreadable: ${iconPath}`)
+    return icon
+  }
+  let variant = avatarTrayVariant(options.state.summary().face)
+  const tray = dependencies.createTray(loadIcon(variant))
   let dnd: AvatarDndState | null = null
+
+  // The variant is recorded even when its image is unreadable, so a missing file
+  // is reported once per change instead of on every heartbeat.
+  const syncIcon = (face: AvatarFace): void => {
+    const next = avatarTrayVariant(face)
+    if (next === variant) return
+    variant = next
+    const icon = loadIcon(next)
+    if (!icon.isEmpty()) tray.setImage(icon)
+  }
 
   const refresh = (): void => {
     try {
-      const menu = buildAvatarTrayMenu(options.state.summary(), options.attachedDecks(), dnd, dependencies.now())
+      const summary = options.state.summary()
+      syncIcon(summary.face)
+      const menu = buildAvatarTrayMenu(summary, options.attachedDecks(), dnd, dependencies.now())
       tray.setToolTip(menu.tooltip)
       tray.setContextMenu(dependencies.buildMenu(menu.items.map((item) => nativeMenuItem(item, invoke))))
     } catch (error) {

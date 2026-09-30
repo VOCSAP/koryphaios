@@ -12,62 +12,37 @@ files:
 # node-pty ships a native .node binary that must stay outside the asar archive.
 asarUnpack:
   - node_modules/node-pty/**
-# Locale files are read at runtime from process.resourcesPath/locales when
-# packaged (see ipc.ts buildI18n). Ship them as resources so `fr` resolves
-# instead of silently falling back to the embedded English base (debt D3).
+# Read from the resources path when packaged; without them `fr` falls back to English.
 extraResources:
   - from: locales
     to: locales
-  # Reference documentation (docs/): read at runtime by the help assistant and
-  # the supervisor (resolveDocsDir resolves process.resourcesPath/docs when
-  # packaged, the app dir in dev). Without this a packaged app silently loses
-  # the docs grounding.
+  # Help assistant and supervisor grounding.
   - from: docs
     to: docs
-  # Embedded Claude Code plugin: the SessionStart back-channel hook, the approval
-  # hook, the TTSR rules hook, the deck-control and demo-browser MCP bridges, the
-  # kory-rules CLI, and the roadmap-card and repo-rules skills (roadmap-card forks
-  # into the roadmap-scribe agent). Dropping this directory costs all of them, not
-  # just one hook. Loaded into every Deck session via --plugin-dir (resolved LIVE
-  # from process.resourcesPath when packaged, see index.ts getDeckPluginDir --
-  # re-checked at every spawn, not cached at boot). The hook bundles (.mjs) are
-  # produced by `npm run build:hook`, the CLI bundle by `npm run build:cli`,
-  # both of which run before packaging via the build/package scripts.
-  # tests/desktop-electron-builder-resources.test.ts reads this extraResources
-  # list to guard against a packaging run silently dropping an entry.
+  # Every Deck session loads this plugin (hooks, MCP bridges, CLI, skills).
   - from: deck-plugin
     to: deck-plugin
-  # Sandbox image recipe: the Docker view builds it from
-  # process.resourcesPath/sandbox when packaged (index.ts imageContextDir).
-  # Without this the packaged app can detect an engine but never build.
+  # Sandbox image recipe the Docker view builds from.
   - from: resources/sandbox
     to: sandbox
+  # Avatar Tray icon PNGs, loaded by path (nativeImage has no SVG decoder).
+  - from: resources/avatar-tray
+    to: avatar-tray
 win:
-  # Pre-built, pre-stacked .ico (512/256/128/64 with plate, 32/16 without --
-  # see build/icon-sources/ and build/make-icns.py header for the tier rule).
-  # Points at the file, not build/, so electron-builder's own directory-icon
-  # convention (which would pick only the largest PNG and re-derive the rest)
-  # never kicks in. File already carries the .ico extension so app-builder-lib
-  # returns it as-is (skips conversion) -- see app-builder-lib/out/util/
-  # iconConverter.js doConvertIcon, single-file/target-extension branch.
+  # A file, not a directory: a directory would be downscaled from its largest PNG.
   icon: build/icon.ico
-  # NSIS installer plus a portable .zip (run anywhere, no install).
   target:
     - nsis
     - zip
 mac:
-  # Pre-built .icns (same per-tier stacking, hand-rolled by build/make-icns.py
-  # since ImageMagick on this box can write an .icns but silently keeps only
-  # the first frame -- see that script's header for the measured proof).
-  # Same skip-conversion mechanism as win.icon above.
+  # Hand-rolled: ImageMagick writes an .icns that keeps only its first frame.
   icon: build/icon.icns
   target:
     - dmg
     - zip
   category: public.app-category.developer-tools
 linux:
-  # Pre-built per-tier PNG set (build/icons/NxN.png) instead of a single
-  # master PNG, for the same tier-rule reason.
+  # Per-size PNG set: Linux keeps every NxN.png without downscaling.
   icon: build/icons
   # AppImage is already a single portable binary.
   target:

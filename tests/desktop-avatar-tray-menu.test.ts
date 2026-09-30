@@ -6,34 +6,27 @@ import {
   type AvatarTrayMenuItem
 } from '../desktop/src/main/avatar-tray-menu.ts'
 import { createAvatarTray, type AvatarTrayDependencies } from '../desktop/src/main/avatar-tray.ts'
-import { AVATAR_HEARTBEAT_MS, type AvatarSummary, type AvatarState } from '../desktop/src/shared/avatar-state.ts'
+import { AVATAR_HEARTBEAT_MS, AvatarState, type AvatarSummary } from '../desktop/src/shared/avatar-state.ts'
 import type { AvatarAttachRequest } from '../desktop/src/shared/avatar-protocol.ts'
 
 const now = new Date(2026, 4, 14, 10, 30).getTime()
 
-const summary: AvatarSummary = {
-  face: 'travaille',
-  counters: { working: 3, idle: 1, unknown: 0, waiting: 2, exited: 0, rateLimited: 0 },
-  unread: 4,
-  decks: [
-    {
-      identity: { deckRunId: 'deck-1', broker_url: 'https://broker-one.test/?a=1&b=2' },
-      counters: { working: 2, idle: 0, unknown: 0, waiting: 1, exited: 0, rateLimited: 0 },
-      unread: 1,
-      suspect: false,
-      brokerReachable: true,
-      torchOut: false
-    },
-    {
-      identity: { deckRunId: 'deck-2', broker_url: 'https://broker-two.test/?x=3&y=4' },
-      counters: { working: 1, idle: 1, unknown: 0, waiting: 1, exited: 0, rateLimited: 0 },
-      unread: 3,
-      suspect: false,
-      brokerReachable: true,
-      torchOut: false
-    }
-  ]
+function stateSummary(): AvatarSummary {
+  const state = new AvatarState({ now: () => now })
+  state.receiveSnapshot({
+    identity: { deckRunId: 'deck-1', broker_url: 'https://broker-one.test/?a=1&b=2' },
+    counters: { working: 2, idle: 0, unknown: 0, waiting: 1, exited: 0, rateLimited: 0 },
+    unread: 1
+  })
+  state.receiveSnapshot({
+    identity: { deckRunId: 'deck-2', broker_url: 'https://broker-two.test/?x=3&y=4' },
+    counters: { working: 1, idle: 1, unknown: 0, waiting: 1, exited: 0, rateLimited: 0 },
+    unread: 3
+  })
+  return state.summary()
 }
+
+const summary = stateSummary()
 
 const attached: AvatarAttachRequest[] = [
   {
@@ -89,7 +82,7 @@ function deckSubmenus(menu: ReturnType<typeof buildAvatarTrayMenu>): AvatarTrayM
 test('keeps raw unique Deck labels and complete distinct Deck details in the pure menu model', () => {
   const menu = buildAvatarTrayMenu(summary, attached, null, now)
 
-  expect(menu.tooltip).toBe('Koryphaios Avatar: travaille | 2 Decks | 3 working | 2 waiting | 4 unread')
+  expect(menu.tooltip).toBe('Koryphaios Avatar: reclame | 2 Decks | 3 working | 2 waiting | 4 unread')
   expect(labels(menu.items)).toEqual(expect.arrayContaining([
     'Alpha & Beta',
     'Alpha & Beta (2)',
@@ -157,9 +150,11 @@ test('translates every native label, drives actions, refreshes, reports errors a
   let quit = 0
   const dependencies: AvatarTrayDependencies = {
     now: () => currentNow,
+    loadImage: () => ({ isEmpty: () => false }),
     createTray: () => ({
       setToolTip: (tooltip) => tooltips.push(tooltip),
       setContextMenu: (menu) => menus.push(menu as NativeItem[]),
+      setImage: () => {},
       destroy: () => { destroyed += 1 }
     }),
     buildMenu: (template) => template,
@@ -174,12 +169,13 @@ test('translates every native label, drives actions, refreshes, reports errors a
 
   const tray = createAvatarTray({
     state: { summary: () => summary } as unknown as AvatarState,
+    iconDir: 'icons',
     attachedDecks: () => attached,
     onDeckMenuClick: (identity) => focused.push(identity.deckRunId),
     onQuit: () => { quit += 1 }
   }, dependencies)
 
-  expect(tooltips).toEqual(['Koryphaios Avatar: travaille | 2 Decks | 3 working | 2 waiting | 4 unread'])
+  expect(tooltips).toEqual(['Koryphaios Avatar: reclame | 2 Decks | 3 working | 2 waiting | 4 unread'])
   expect(interval.delay).toBe(AVATAR_HEARTBEAT_MS)
   expect(menus).toHaveLength(1)
   expect(requireNativeItem(menus[0]!, 'Alpha && Beta').submenu?.map((item) => item.label)).toEqual([
@@ -226,14 +222,17 @@ test('reports a native refresh failure without preventing disposal', () => {
   const errors: unknown[] = []
   const tray = createAvatarTray({
     state: { summary: () => summary } as unknown as AvatarState,
+    iconDir: 'icons',
     attachedDecks: () => attached,
     onDeckMenuClick: () => {},
     onQuit: () => {}
   }, {
     now: () => now,
+    loadImage: () => ({ isEmpty: () => false }),
     createTray: () => ({
       setToolTip: () => { throw boom },
       setContextMenu: () => {},
+      setImage: () => {},
       destroy: () => { destroyed += 1 }
     }),
     buildMenu: (template) => template,
@@ -248,7 +247,7 @@ test('reports a native refresh failure without preventing disposal', () => {
 })
 
 test('keeps the tray usable with no attached Deck', () => {
-  const menu = buildAvatarTrayMenu({ ...summary, face: 'seul', counters: { working: 0, idle: 0, unknown: 0, waiting: 0, exited: 0, rateLimited: 0 }, unread: 0, decks: [] }, [], null, now)
+  const menu = buildAvatarTrayMenu(new AvatarState({ now: () => now }).summary(), [], null, now)
 
   expect(menu.tooltip).toBe('Koryphaios Avatar: seul | 0 Decks | 0 working | 0 waiting | 0 unread')
   expect(labels(menu.items)).toContain('Quit Avatar')
