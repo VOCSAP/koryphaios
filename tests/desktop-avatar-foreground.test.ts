@@ -3,6 +3,7 @@ import { win32 } from 'node:path'
 import {
   ALLOW_FOREGROUND_SCRIPT,
   allowForegroundWindow,
+  powerShellCommandInvocations,
   runForegroundHelper,
   windowsPowerShellPath,
   type AllowForegroundDeps,
@@ -40,6 +41,32 @@ test('starts PowerShell from the absolute SystemRoot, never by bare name, with S
   expect(run!.args).toEqual(['-NoProfile', '-NonInteractive', '-Command', ALLOW_FOREGROUND_SCRIPT])
   expect(run!.args.join(' ')).not.toContain('4242')
   expect(ALLOW_FOREGROUND_SCRIPT).toContain('AllowSetForegroundWindow([int]$env:KORY_FOCUS_PID)')
+})
+
+test('the foreground script invokes no PowerShell command, so the reduced env stays fast', () => {
+  expect(
+    powerShellCommandInvocations(ALLOW_FOREGROUND_SCRIPT),
+    'any cmdlet, alias or external command in the helper triggers command discovery, which costs 11-28 s under the reduced env on Windows Server: keep the script a pure .NET P/Invoke'
+  ).toEqual([])
+  expect(ALLOW_FOREGROUND_SCRIPT, 'without PreserveSig the emitted P/Invoke answers False even when the call succeeds').toContain(
+    'SetImplementationFlags([Reflection.MethodImplAttributes]::PreserveSig)'
+  )
+})
+
+test('the command detector sees cmdlets, aliases, pipelines and call operators, not quoted text', () => {
+  expect(powerShellCommandInvocations("Add-Type -Namespace K -Name F -MemberDefinition 'x'; $x = 1")).toContain('Add-Type')
+  expect(powerShellCommandInvocations("$n = New-Object Reflection.AssemblyName 'K'")).toContain('New-Object')
+  expect(powerShellCommandInvocations('$m = $x | % Name')).not.toEqual([])
+  expect(powerShellCommandInvocations("& 'C:\\x.exe'")).not.toEqual([])
+  expect(powerShellCommandInvocations('iex $s')).toEqual(['iex'])
+  expect(powerShellCommandInvocations("$s = 'Add-Type | New-Object'; [int]$env:X -join ','")).toEqual([])
+})
+
+test('the command detector is blind to an alias assigned inside an expression', () => {
+  expect(
+    powerShellCommandInvocations('$x = iex $s'),
+    'known limit: a non Verb-Noun command after a variable head is not detected; if this starts failing, the detector grew and this pin can go'
+  ).toEqual([])
 })
 
 test('hands PowerShell a minimal env: SystemRoot and the pid, nothing inherited', async () => {

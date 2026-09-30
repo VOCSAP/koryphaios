@@ -6,10 +6,32 @@ import { system32Dir } from './windows-system-root'
 export const ALLOW_FOREGROUND_TIMEOUT_MS = 5_000
 const MAX_POWERSHELL_INT = 0x7fffffff
 
+/** A pure .NET P/Invoke: any cmdlet invocation triggers command discovery, which is slow under the reduced env. */
 export const ALLOW_FOREGROUND_SCRIPT = [
-  "Add-Type -Namespace KoryAvatar -Name Foreground -MemberDefinition '[DllImport(\"user32.dll\")] public static extern bool AllowSetForegroundWindow(int dwProcessId);'",
-  '[KoryAvatar.Foreground]::AllowSetForegroundWindow([int]$env:KORY_FOCUS_PID)'
+  "$assembly = [AppDomain]::CurrentDomain.DefineDynamicAssembly([Reflection.AssemblyName]::new('KoryAvatar'), 'Run')",
+  "$type = $assembly.DefineDynamicModule('KoryAvatar').DefineType('Foreground', 'Public,Class')",
+  "$method = $type.DefinePInvokeMethod('AllowSetForegroundWindow', 'user32.dll', 'Public,Static,PinvokeImpl', [Reflection.CallingConventions]::Standard, [bool], [Type[]]@([int]), [Runtime.InteropServices.CallingConvention]::Winapi, [Runtime.InteropServices.CharSet]::Auto)",
+  '$method.SetImplementationFlags([Reflection.MethodImplAttributes]::PreserveSig)',
+  '$foreground = $type.CreateType()',
+  '$foreground::AllowSetForegroundWindow([int]$env:KORY_FOCUS_PID)'
 ].join('; ')
+
+const QUOTED_TEXT = /'(?:[^']|'')*'/g
+const VERB_NOUN = /\b[A-Za-z]+-[A-Za-z]+\b/g
+
+/**
+ * Lists Verb-Noun names, pipelines, call operators and statements not starting with a variable or a type.
+ * Blind to a non Verb-Noun command inside an expression, such as `$x = iex ...` or `$(...)`.
+ */
+export function powerShellCommandInvocations(script: string): string[] {
+  const code = script.replace(QUOTED_TEXT, "''")
+  const found = [...code.matchAll(VERB_NOUN)].map((match) => match[0])
+  for (const statement of code.split(';').map((part) => part.trim()).filter(Boolean)) {
+    if (!/^[$[]/.test(statement)) found.push(statement.split(/\s+/)[0]!)
+  }
+  for (const operator of code.match(/[|&]/g) ?? []) found.push(operator)
+  return found
+}
 
 export interface ForegroundRunOptions {
   cwd: string
