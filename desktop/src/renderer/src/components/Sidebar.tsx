@@ -589,14 +589,6 @@ export function Sidebar(): React.JSX.Element {
           </button>
         </div>
       )}
-      {/* The one child NOT guarded by `collapsed`, deliberately. CreateMenu
-          opens from the advanced caret, which only exists unfolded, and it
-          renders inside `.popover-backdrop` (`position: fixed; inset: 0`,
-          z-index 60, `onMouseDown={onClose}` in CreateMenu.tsx) -- so it covers
-          the fold button and any click that would fold the panel closes the
-          popover first. `createOpen` and `collapsed` therefore cannot both be
-          true; a guard here would be a condition that never fires, hiding this
-          reasoning instead of stating it. */}
       {createOpen && <CreateMenu onClose={() => setCreateOpen(false)} />}
 
       <ul className="rows">

@@ -220,7 +220,13 @@ failure shape as a className matching no selector at all, different cause.
 - **Status banner** (`.status-banner`): fixed top, full-width, filled dark red
   — persistent STATE (e.g. broker offline). Actions inside use
   `.status-banner-action` (translucent white outline). A dismissed banner must
-  leave a red indicator on the nav rail until the state clears.
+  leave a red indicator on the nav rail until the state clears. It RESERVES
+  its band instead of covering the views: `--banner-h` is 0 until
+  `.app:has(> .status-banner)` raises it to the banner's single fixed height
+  (38px, every state), `.app` pads its top by it, and every full-height view
+  or fixed full-window panel subtracts it (`calc(100vh - var(--banner-h))`,
+  `inset: var(--banner-h) 0 0 0`). A new view written with a bare `100vh`
+  slides its header back under the banner.
 - **Modals**: `.modal-backdrop` (45% black) + `.modal` (`--bg-2`, radius 8,
   padding 20). Footer = `.modal-actions` right-aligned; its non-`.primary`
   buttons are auto-styled as Secondary — order: neutral Cancel left, coloured

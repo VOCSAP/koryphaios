@@ -1,5 +1,6 @@
 :root {
   --sidebar-w: 260px;
+  --banner-h: 0px;
   /* Width of the persistent rail the Agents sidebar leaves behind when folded.
      Both occupants measured, border-box, at the app's 13px base font:
        header  12 (padding-left) + 33 (fold button: glyph 13 at 1em + padding
@@ -209,6 +210,14 @@ body {
   display: grid;
   grid-template-columns: auto 1fr;
   height: 100vh;
+  padding-top: var(--banner-h);
+}
+
+/* The banner's height is fixed so it can be reserved in CSS alone: its text is
+   one ellipsed line, and 38px is the tallest of its states (the ones carrying
+   an action button), so every state reserves the same band. */
+.app:has(> .status-banner) {
+  --banner-h: 38px;
 }
 
 /* Agents view wrapper: the pre-rail layout, kept mounted (PTYs alive) and
@@ -220,7 +229,7 @@ body {
 .view-agents {
   display: grid;
   grid-template-columns: auto 1fr;
-  height: 100vh;
+  height: calc(100vh - var(--banner-h));
   min-width: 0;
 }
 
@@ -230,7 +239,7 @@ body {
 
 /* Home view: the supervisor tile, full width (PLAN C5). */
 .view-home {
-  height: 100vh;
+  height: calc(100vh - var(--banner-h));
   min-width: 0;
 }
 
@@ -1525,13 +1534,12 @@ textarea:disabled {
   border: 1px solid #c04545;
 }
 
-/* Persistent top status banner (PLAN O5): a fixed overlay so it never
-   disturbs the .app grid, whatever view is active. */
 .status-banner {
   position: fixed;
   top: 0;
   left: 0;
   right: 0;
+  height: var(--banner-h);
   display: flex;
   align-items: center;
   gap: 12px;
@@ -1641,7 +1649,7 @@ textarea:disabled {
 /* ---------- Modal ---------- */
 .modal-backdrop {
   position: fixed;
-  inset: 0;
+  inset: var(--banner-h) 0 0 0;
   background: rgba(0, 0, 0, 0.45);
   display: grid;
   place-items: center;
@@ -1651,7 +1659,7 @@ textarea:disabled {
 .modal {
   width: 480px;
   max-width: calc(100vw - 40px);
-  max-height: calc(100vh - 40px);
+  max-height: calc(100vh - 40px - var(--banner-h));
   overflow-y: auto;
   background: var(--bg-2);
   border: 1px solid var(--border);
@@ -1792,7 +1800,7 @@ small.field-error {
 /* ---------- Settings page (VS Code-style tree + panel) ---------- */
 .settings-view {
   position: fixed;
-  inset: 0;
+  inset: var(--banner-h) 0 0 0;
   z-index: 40;
   display: flex;
   flex-direction: column;
@@ -2120,7 +2128,7 @@ code {
 /* ---------- CreateMenu popover ---------- */
 .popover-backdrop {
   position: fixed;
-  inset: 0;
+  inset: var(--banner-h) 0 0 0;
   background: rgba(0, 0, 0, 0.35);
   display: grid;
   place-items: center;
@@ -2130,7 +2138,7 @@ code {
 .popover {
   width: 420px;
   max-width: calc(100vw - 40px);
-  max-height: calc(100vh - 40px);
+  max-height: calc(100vh - 40px - var(--banner-h));
   overflow-y: auto;
   background: var(--bg-2);
   border: 1px solid var(--border);
@@ -2549,7 +2557,7 @@ svg.glyph {
 .roadmap-view {
   display: flex;
   flex-direction: column;
-  height: 100vh;
+  height: calc(100vh - var(--banner-h));
   min-width: 0;
 }
 
@@ -4071,7 +4079,7 @@ svg.glyph {
 .worktrees-view {
   display: flex;
   flex-direction: column;
-  height: 100vh;
+  height: calc(100vh - var(--banner-h));
   min-width: 0;
 }
 
@@ -4162,7 +4170,7 @@ svg.glyph {
 .git-view {
   display: flex;
   flex-direction: column;
-  height: 100vh;
+  height: calc(100vh - var(--banner-h));
   min-width: 0;
 }
 
@@ -4297,7 +4305,7 @@ svg.glyph {
 .explorer-view {
   display: flex;
   flex-direction: column;
-  height: 100vh;
+  height: calc(100vh - var(--banner-h));
   min-width: 0;
 }
 
@@ -5167,7 +5175,7 @@ svg.glyph {
 .journal-view {
   display: flex;
   flex-direction: column;
-  height: 100vh;
+  height: calc(100vh - var(--banner-h));
   min-width: 0;
 }
 
@@ -5799,13 +5807,13 @@ svg.glyph {
 
 /* Keep-mounted wrapper, same contract as .view-home. */
 .view-browser {
-  height: 100vh;
+  height: calc(100vh - var(--banner-h));
   min-width: 0;
 }
 
 .browser-view {
   display: flex;
-  height: 100vh;
+  height: calc(100vh - var(--banner-h));
   min-width: 0;
 }
 
@@ -6255,7 +6263,7 @@ svg.glyph {
 
 .graph-view {
   display: flex;
-  height: 100vh;
+  height: calc(100vh - var(--banner-h));
   min-width: 0;
 }
 
@@ -6913,7 +6921,7 @@ svg.glyph {
 /* context inspector modal */
 .graph-inspector-overlay {
   position: fixed;
-  inset: 0;
+  inset: var(--banner-h) 0 0 0;
   background: rgba(0, 0, 0, 0.5);
   display: flex;
   align-items: center;
@@ -7785,8 +7793,8 @@ svg.glyph {
 .is-mobile .roadmap-modal,
 .is-mobile .diff-modal {
   width: 100vw;
-  height: 100vh;
-  height: var(--vvh, 100vh);
+  height: calc(100vh - var(--banner-h));
+  height: calc(var(--vvh, 100vh) - var(--banner-h));
   max-width: none;
   max-height: none;
   border-radius: 0;

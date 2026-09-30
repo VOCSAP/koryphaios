@@ -144,6 +144,90 @@ test("the workflow lane resize handle (card ba3d2456) stays positioned on the fr
   expect(resize).toMatch(/top:\s*0/);
 });
 
+function ruleBlocks(css: string): { selector: string; body: string }[] {
+  return Array.from(css.matchAll(/([^{}]+)\{([^{}]*)\}/g), (m) => ({
+    selector: m[1]!.trim().replace(/\s+/g, " "),
+    body: m[2]!
+  }));
+}
+
+test("--banner-h is 0 by default and raised only while a status banner is mounted", () => {
+  const { text } = readCss();
+  expect(ruleBlock(text, ":root")).toMatch(/--banner-h:\s*0(px)?\s*;/);
+  const raised = ruleBlock(text, ".app:has(> .status-banner)").match(/--banner-h:\s*(\d+)px/);
+  expect(`raised banner height: ${raised?.[1] ?? "absent"}`).toMatch(/^raised banner height: [1-9]\d*$/);
+  // A banner taller than the band it reserves would cover the view headers again.
+  expect(ruleBlock(text, ".status-banner")).toMatch(/(^|;|\s)height:\s*var\(--banner-h\)/);
+  expect(ruleBlock(text, ".app")).toMatch(/padding-top:\s*var\(--banner-h\)/);
+});
+
+// Per-declaration keys prevent one exemption from masking another violation on the same selector.
+const BANNER_EXEMPT: Record<string, string> = {
+  ".app { height: 100vh }": "its padding-top IS the reservation; the height stays the whole window",
+  ".app-mobile { height: 100vh }": "the mobile shell also carries .app, whose padding-top reserves the band",
+  ".app-mobile { height: var(--vvh, 100vh) }": "same shell, visual-viewport height",
+  ".help-popup { max-height: calc(100vh - 90px) }": "anchored to the bottom and painted after the banner",
+  ".inbox-panel { max-height: calc(100vh - 90px) }": "anchored to the bottom, its top never reaches the band",
+  ".status-banner { top: 0 }": "the band itself",
+  ".context-menu-backdrop { inset: 0 }": "transparent click catcher at z-index 70, above the banner",
+  ".remote-overlay { inset: 0 }": "link-lost overlay at z-index 5000, meant to cover everything",
+  ".msheet-backdrop { inset: 0 }": "mobile bottom sheet at z-index 4000, meant to cover everything"
+};
+
+const FULL_VIEWPORT_HEIGHT = /\b100[dsl]?vh\b/;
+
+function bannerCensus(css: string): { violations: string[]; exemptHit: Set<string> } {
+  const violations: string[] = [];
+  const exemptHit = new Set<string>();
+  for (const { selector, body } of ruleBlocks(css)) {
+    const decls = body.split(";").map((d) => d.trim().replace(/\s+/g, " ")).filter(Boolean);
+    const fixed = decls.some((d) => /^position: ?fixed$/.test(d));
+    for (const d of decls) {
+      const fullHeight = FULL_VIEWPORT_HEIGHT.test(d) && !d.includes("var(--banner-h)");
+      const topEdge = fixed && (/^(inset|top): ?0(px)?$/.test(d) || /^inset: ?0(px)? /.test(d));
+      if (!fullHeight && !topEdge) continue;
+      const key = `${selector} { ${d} }`;
+      if (key in BANNER_EXEMPT) exemptHit.add(key);
+      else violations.push(key);
+    }
+  }
+  return { violations, exemptHit };
+}
+
+test("the banner census recognises every full viewport height unit and a fixed top edge", () => {
+  for (const unit of ["vh", "dvh", "svh", "lvh"]) {
+    const { violations } = bannerCensus(`.probe { height: 100${unit}; }`);
+    expect(`${unit}: ${violations.length}`).toBe(`${unit}: 1`);
+  }
+  expect(bannerCensus(".probe { height: calc(100dvh - var(--banner-h)); }").violations).toEqual([]);
+  expect(bannerCensus(".probe { position: fixed; top: 0; }").violations).toEqual([".probe { top: 0 }"]);
+  expect(bannerCensus(".probe { position: absolute; top: 0; }").violations).toEqual([]);
+});
+
+test("every full-height or top-pinned fixed surface reserves the banner band", () => {
+  const { text } = readCss();
+  const { violations, exemptHit } = bannerCensus(text);
+  // Positive control: a scan that parsed nothing would report no violation.
+  expect(exemptHit.size).toBeGreaterThan(0);
+  expect(violations).toEqual([]);
+});
+
+test("every banner exemption still names a declaration that needs it", () => {
+  const { text } = readCss();
+  expect(Object.keys(BANNER_EXEMPT).length).toBeGreaterThan(0);
+  const { exemptHit } = bannerCensus(text);
+  const stale = Object.keys(BANNER_EXEMPT).filter((k) => !exemptHit.has(k));
+  expect(stale).toEqual([]);
+});
+
+test("the mobile shell carries .app, whose padding-top reserves the banner band", () => {
+  const app = readFileSync(join(SRC, "renderer", "src", "components", "App.tsx"), "utf8");
+  const classLists = Array.from(app.matchAll(/className="([^"]*)"/g), (m) => m[1]!.split(/\s+/));
+  const mobile = classLists.filter((c) => c.includes("app-mobile"));
+  expect(mobile.length).toBeGreaterThan(0);
+  expect(mobile.every((c) => c.includes("app"))).toBe(true);
+});
+
 test("a themed :focus-visible ring exists at element level, not per class", () => {
   const { text } = readCss();
   // Element-level so a control written tomorrow inherits it; a per-class fix
