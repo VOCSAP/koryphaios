@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Terminal, type ITheme } from '@xterm/xterm'
+import type { ITheme, Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { WebLinksAddon } from '@xterm/addon-web-links'
 import type { SessionRuntime, SnippetSummary } from '@shared/types'
@@ -8,6 +8,7 @@ import { useDeck } from '../store'
 import { formatClock, useT } from '../i18n'
 import { registerTerminal, unregisterTerminal } from '../terminal-registry'
 import { copySelection, pasteFromClipboard } from '../terminal-clipboard'
+import { createSessionTerminal } from '../terminal-focus-report'
 import { ConfirmDialog } from './ConfirmDialog'
 import { ContextMenu, type ContextMenuItem } from './ContextMenu'
 import { SnippetsDialog } from './SnippetsDialog'
@@ -66,15 +67,17 @@ export function TerminalTile({
     }
   }
 
-  // Create the xterm instance once per session id.
   useEffect(() => {
-    const term = new Terminal({
-      fontSize: config.fontSize,
-      fontFamily: FONT_STACK,
-      cursorBlink: true,
-      scrollback: 8000,
-      theme: THEMES[config.theme]
-    })
+    const term = createSessionTerminal(
+      {
+        fontSize: config.fontSize,
+        fontFamily: FONT_STACK,
+        cursorBlink: true,
+        scrollback: 8000,
+        theme: THEMES[config.theme]
+      },
+      (message) => window.api.reportError('terminal', message)
+    )
     const fit = new FitAddon()
     term.loadAddon(fit)
     term.loadAddon(new WebLinksAddon((_e, uri) => window.open(uri)))

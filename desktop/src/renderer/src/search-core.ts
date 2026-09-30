@@ -1,6 +1,6 @@
 // Pure buffer-search core for the cross-session search bar. Operates on a
-// structural subset of xterm's IBuffer so it carries no @xterm/xterm import
-// and stays unit-testable under bun from the repo root (tests/desktop-search-core).
+// structural subset of xterm's IBuffer so it carries no xterm import and stays
+// unit-testable under bun from the repo root.
 
 export interface BufferLineLike {
   readonly isWrapped: boolean

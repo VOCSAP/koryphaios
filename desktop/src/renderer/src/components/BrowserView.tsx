@@ -10,8 +10,9 @@
 // for native targets.
 
 import { useEffect, useRef, useState } from 'react'
-import { Terminal, type ITheme } from '@xterm/xterm'
+import type { ITheme, Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
+import { createSessionTerminal } from '../terminal-focus-report'
 import type {
   ElementPick,
   PickAnnotation,
@@ -172,13 +173,16 @@ function DockTerminal({ session, active }: { session: SessionRuntime; active: bo
   }
 
   useEffect(() => {
-    const term = new Terminal({
-      fontSize: config.fontSize,
-      fontFamily: FONT_STACK,
-      cursorBlink: true,
-      scrollback: 8000,
-      theme: THEMES[config.theme]
-    })
+    const term = createSessionTerminal(
+      {
+        fontSize: config.fontSize,
+        fontFamily: FONT_STACK,
+        cursorBlink: true,
+        scrollback: 8000,
+        theme: THEMES[config.theme]
+      },
+      (message) => window.api.reportError('terminal', message)
+    )
     const fit = new FitAddon()
     term.loadAddon(fit)
     if (hostRef.current) term.open(hostRef.current)
