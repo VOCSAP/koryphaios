@@ -256,6 +256,28 @@ function savedWindowsAcl(dir: string): WindowsAclSnapshot {
   }
 }
 
+function describeWindowsAcl(dir: string): string {
+  const parts: string[] = []
+  try {
+    parts.push(`whoami /user:\n${execFileSync(windowsBinary('whoami.exe'), ['/user'], { encoding: 'utf8' })}`)
+  } catch (error) {
+    parts.push(`whoami /user failed: ${error instanceof Error ? error.message : String(error)}`)
+  }
+  try {
+    const acl = savedWindowsAcl(dir)
+    let sid = 'unresolved'
+    try {
+      sid = currentWindowsSid()
+    } catch (error) {
+      parts.push(`current SID unresolved: ${error instanceof Error ? error.message : String(error)}`)
+    }
+    parts.push(`icacls display:\n${acl.display}`, `saved SDDL:\n${acl.sddl}`, `hasPrivateAvatarAcl for ${sid}: ${String(sid !== 'unresolved' && hasPrivateAvatarAcl(acl, sid))}`)
+  } catch (error) {
+    parts.push(`ACL of ${dir} unreadable: ${error instanceof Error ? error.message : String(error)}`)
+  }
+  return parts.join('\n')
+}
+
 function privateAcl(sddl: string, display = 'C:\\state\\avatar'): WindowsAclSnapshot {
   return { display, sddl }
 }
@@ -329,7 +351,15 @@ test.skipIf(process.platform !== 'win32')('a whoami.exe planted under a relative
 
 test.skipIf(process.platform !== 'win32')('creates a protected Avatar directory verified by real icacls output', () => {
   const dir = freshDir()
-  const privateDir = ensureAvatarPrivateDir(dir)
+  let privateDir = ''
+  try {
+    privateDir = ensureAvatarPrivateDir(dir)
+  } catch (error) {
+    throw new Error(
+      `ensureAvatarPrivateDir rejected the directory it just configured: ${error instanceof Error ? error.message : String(error)}\n${describeWindowsAcl(avatarPrivateDir(dir))}`,
+      { cause: error }
+    )
+  }
   const acl = savedWindowsAcl(privateDir)
   const sid = currentWindowsSid()
 

@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -12,7 +12,7 @@ afterEach(() => {
 });
 
 function temporaryRoot(): string {
-  const root = mkdtempSync(join(tmpdir(), "broker-import-closure-"));
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), "broker-import-closure-")));
   temporaryRoots.push(root);
   return root;
 }
@@ -29,7 +29,20 @@ function isAllowedBrokerInput(path: string): boolean {
   return path === "broker.ts" || path.startsWith("shared/") || path.startsWith("notify/");
 }
 
+// Bun reports metafile inputs relative to the process cwd, not to `root`: a
+// root on another drive or behind a symlink makes them unusable, so the build
+// runs from inside the canonical root.
 async function brokerImportViolations(root: string): Promise<string[]> {
+  const previousCwd = process.cwd();
+  process.chdir(root);
+  try {
+    return await collectBrokerImportViolations(root);
+  } finally {
+    process.chdir(previousCwd);
+  }
+}
+
+async function collectBrokerImportViolations(root: string): Promise<string[]> {
   let result: Awaited<ReturnType<typeof Bun.build>>;
   try {
     result = await Bun.build({
@@ -64,7 +77,7 @@ async function brokerImportViolations(root: string): Promise<string[]> {
     for (const dependency of input.imports) {
       const specifier = dependency.original ?? dependency.path;
       if (dependency.external || !isRelativeImport(specifier)) continue;
-      const importerPath = isAbsolute(importer) ? importer : resolve(REPO, importer);
+      const importerPath = isAbsolute(importer) ? importer : resolve(root, importer);
       const resolved = normalizedRelative(root, normalize(resolve(dirname(importerPath), specifier)));
       if (!isAllowedBrokerInput(resolved)) violations.push(`${normalizedRelative(root, importerPath)} imports ${specifier} (${resolved})`);
     }
