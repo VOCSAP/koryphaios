@@ -11,6 +11,7 @@ import {
   realpathSync,
   rmSync,
   symlinkSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -93,7 +94,7 @@ interface Harness {
 }
 
 /** Service on a throwaway dir; project root = the cwd itself, key from `keys` (default local:<root>). */
-function harness(opts: Partial<TtsrServiceDeps> = {}): Harness {
+function harness(opts: Partial<TtsrServiceDeps> & { readBounded?: typeof readBounded } = {}): Harness {
   const dir = tmp();
   const h: Harness = {
     svc: undefined as unknown as TtsrService,
@@ -202,6 +203,26 @@ describe("effective file per tile", () => {
     expect(list.global.rules).toEqual([]);
     h.svc.tick();
     expect(h.errors.filter((e) => e.includes("global guard rules rejected"))).toHaveLength(1);
+  });
+
+  test("stable read failures trace once and rearm after recovery", () => {
+    let fails = true;
+    const h = harness({
+      readBounded: (path, opts) => {
+        if (fails) throw Object.assign(new Error("sharing violation"), { code: "EACCES" });
+        return readBounded(path, opts);
+      },
+    });
+    mkdirSync(join(h.dir, "config"), { recursive: true });
+    writeFileSync(h.globalFile, fileOf(rule("g-one")));
+    h.svc.tick();
+    h.svc.tick();
+    expect(h.errors.filter((error) => error.includes("cannot read"))).toHaveLength(1);
+    fails = false;
+    h.svc.tick();
+    fails = true;
+    h.svc.tick();
+    expect(h.errors.filter((error) => error.includes("cannot read"))).toHaveLength(2);
   });
 
   test("the supervisor tile gets Kory rules only, whatever global and repo rules exist", async () => {
@@ -1030,6 +1051,27 @@ describe("hostile files: no hang, no read outside, bounded", () => {
     expect(effective(path), "a deleted effective file must be restored on the next poll").toEqual(KORY_IDS);
     expect(h.errors.filter((e) => e.includes("modified or removed outside the Deck"))).toHaveLength(2);
   });
+
+  test("same-size repo rewrites with the same mtime refresh the current rules", () => {
+    const h = harness();
+    const cwd = tmp();
+    const first = fileOf(rule("a0"));
+    const second = fileOf(rule("b0"));
+    expect(Buffer.byteLength(second)).toBe(Buffer.byteLength(first));
+    const path = writeRepoRules(cwd, first);
+    h.svc.fileFor({ id: randomUUID(), cwd });
+    const timestamp = 1_700_000_000;
+    utimesSync(path, timestamp, timestamp);
+    h.svc.tick();
+    const before = lstatSync(path);
+    writeFileSync(path, second);
+    utimesSync(path, timestamp, timestamp);
+    const after = lstatSync(path);
+    expect(after.size).toBe(before.size);
+    expect(after.mtimeMs).toBe(before.mtimeMs);
+    h.svc.tick();
+    expect(h.svc.list().projects[0]!.rules[0]!.rule.id).toBe("b0");
+  });
 });
 
 describe("dialogs, memos and probe workers are bounded", () => {
@@ -1054,11 +1096,14 @@ describe("dialogs, memos and probe workers are bounded", () => {
       now: () => h.clock.now,
       probeRules: () => [],
     });
-    writeRepoRules(cwd, fileOf(rule("a")));
+    const path = writeRepoRules(cwd, fileOf(rule("a")));
+    const timestamp = 1_700_000_000;
+    utimesSync(path, timestamp, timestamp);
     svc.fileFor({ id: randomUUID(), cwd });
     for (let i = 0; i < 5; i++) {
       h.clock.now += TTSR_PROMPT_INTERVAL_MS;
       writeRepoRules(cwd, fileOf(rule(`b${i}`)));
+      utimesSync(path, timestamp, timestamp);
       svc.tick();
     }
     expect(h.prompts, "an agent rewriting its file must not stack dialogs for one root").toHaveLength(1);

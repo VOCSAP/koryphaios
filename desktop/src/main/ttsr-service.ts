@@ -33,7 +33,7 @@ import {
   type TtsrTool
 } from '../shared/ttsr-rules'
 import { KORY_EFFECTIVE_RULES } from '../shared/ttsr-builtin'
-import { fileIdentity, fileIdentityMismatch, readBounded, type FileIdentity } from '../shared/ttsr-fs'
+import { fileIdentity, fileIdentityMismatch, readBounded, type BoundedReadOptions, type BoundedReadResult, type FileIdentity } from '../shared/ttsr-fs'
 import type {
   TtsrApproveResult,
   TtsrFileState,
@@ -161,6 +161,7 @@ export interface TtsrServiceDeps {
   defer?: (fn: () => void) => void
   /** Clock of the dialog interval and the log rate limit; defaults to Date.now. */
   now?: () => number
+  readBounded?: (path: string, opts: BoundedReadOptions) => BoundedReadResult
 }
 
 type FileStatus = 'absent' | 'invalid' | 'ok'
@@ -324,11 +325,13 @@ export class TtsrService {
   private readonly lastPromptAt = new BoundedMap<number>(TTSR_MEMO_MAX)
   /** `<path>\n<hash or errors>` already traced as invalid this run. */
   private readonly reportedInvalid = new BoundedSet(TTSR_MEMO_MAX)
+  private readonly readFailures = new BoundedMap<string>(TTSR_MEMO_MAX)
   private timer: NodeJS.Timeout | null = null
   private readonly defer: (fn: () => void) => void
   private readonly now: () => number
   private readonly match: NonNullable<TtsrServiceDeps['matchIsolated']>
   private readonly probeRules: NonNullable<TtsrServiceDeps['probeRules']>
+  private readonly boundedRead: (path: string, opts: BoundedReadOptions) => BoundedReadResult
   /** Timing verdict per file hash: one probe per content per run. */
   private readonly probes = new BoundedMap<ProbeVerdict>(TTSR_MEMO_MAX)
   private probeActive = 0
@@ -339,6 +342,7 @@ export class TtsrService {
     this.now = deps.now ?? Date.now
     this.match = deps.matchIsolated ?? matchIsolated
     this.probeRules = deps.probeRules ?? probeRulesSpeed
+    this.boundedRead = deps.readBounded ?? readBounded
     this.global = this.readRulesFile(deps.globalRulesFile(), null)
     this.reloadApprovals()
   }
@@ -490,14 +494,11 @@ export class TtsrService {
       changed = true
     }
     const gPath = this.deps.globalRulesFile()
-    if (statSig(gPath, true) !== this.global.sig) {
-      const before = this.global
-      this.global = this.readRulesFile(gPath, null)
-      if (before.hash !== this.global.hash || before.status !== this.global.status) changed = true
-    }
+    const beforeGlobal = this.global
+    this.global = this.readRulesFile(gPath, null)
+    if (beforeGlobal.hash !== this.global.hash || beforeGlobal.status !== this.global.status) changed = true
     for (const state of this.projects.values()) {
       const path = join(state.root, REPO_RULES_REL)
-      if (statSig(path) === state.snap.sig) continue
       const before = state.snap
       state.snap = this.readRulesFile(path, state.root)
       if (before.hash !== state.snap.hash || before.status !== state.snap.status) {
@@ -804,7 +805,7 @@ export class TtsrService {
     if (!state) {
       state = { root: ref.root, key: ref.projectKey, snap: this.readRulesFile(path, ref.root), applied: null }
       this.projects.set(ref.root, state)
-    } else if (statSig(path) !== state.snap.sig) {
+    } else {
       state.snap = this.readRulesFile(path, ref.root)
     }
     return state
@@ -1160,7 +1161,10 @@ export class TtsrService {
    */
   private readRulesFile(path: string, root: string | null): FileSnapshot {
     let sig = statSig(path, root === null)
-    if (sig === 'absent') return ABSENT
+    if (sig === 'absent') {
+      this.readFailures.delete(path)
+      return ABSENT
+    }
     const invalid = (errors: string[], text: string | null = null): FileSnapshot => ({
       sig,
       status: 'invalid',
@@ -1171,6 +1175,7 @@ export class TtsrService {
       probed: true
     })
     if (sig.startsWith('error:')) {
+      this.readFailures.delete(path)
       const tag = `${path}\n${sig}`
       if (!this.reportedInvalid.has(tag)) {
         this.reportedInvalid.add(tag)
@@ -1187,13 +1192,18 @@ export class TtsrService {
         if (!within(root, realpathSync.native(dirname(path)))) return invalid(['file: resolves outside the project root'])
         expect = fileIdentity(st)
       }
-      const res = readBounded(path, { cap: MAX_FILE_BYTES, follow: root === null, expect })
-      if (res.kind === 'absent') return ABSENT
+      const res = this.boundedRead(path, { cap: MAX_FILE_BYTES, follow: root === null, expect })
+      if (res.kind === 'absent') {
+        this.readFailures.delete(path)
+        return ABSENT
+      }
       if (res.kind === 'refused') {
+        this.readFailures.delete(path)
         return invalid([
           res.reason === 'is a symlink' ? 'file: is a symlink; a repo rules file must be a regular file' : `file: ${res.reason}`
         ])
       }
+      this.readFailures.delete(path)
       sig = sigOf(res.stat)
       if (root !== null) {
         // The directory may have been swapped for a symlink between the
@@ -1226,9 +1236,17 @@ export class TtsrService {
       return { sig, status: 'ok', text, hash, errors: [], rules, probed: verdict?.done === true }
     } catch (e) {
       const code = (e as NodeJS.ErrnoException).code
-      if (code === 'ENOENT' || code === 'ENOTDIR') return ABSENT
-      this.deps.reportError('ttsr', `cannot read ${path}`, e)
-      return invalid([`file: cannot read: ${(e as Error).message}`])
+      if (code === 'ENOENT' || code === 'ENOTDIR') {
+        this.readFailures.delete(path)
+        return ABSENT
+      }
+      const message = (e as Error).message
+      const fault = `${code ?? 'unknown'}:${message}`
+      if (this.readFailures.get(path) !== fault) {
+        this.readFailures.set(path, fault)
+        this.deps.reportError('ttsr', `cannot read ${path}`, e)
+      }
+      return invalid([`file: cannot read: ${message}`])
     }
   }
 }
