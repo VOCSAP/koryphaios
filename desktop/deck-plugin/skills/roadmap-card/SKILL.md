@@ -1,133 +1,85 @@
 ---
 name: roadmap-card
-description: File ONE new card onto the project's shared claude-peers roadmap (a feature, bug, debt, idea, or chore), richly enriched at creation. Delegates the writing to the cheap Sonnet `roadmap-scribe` subagent so an expensive lead/Opus session never spends its own context on card prose. Use whenever the operator says things like "note this bug", "log this as a card", "add this to the roadmap", "file an idea for X", "this is worth tracking" -- and whenever an agent has just diagnosed a bug, gap, or improvement and needs to hand its findings to the roadmap instead of losing them when the session ends. NOT for updating, re-prioritizing, archiving, or picking up an existing card -- creation only; not for reading the roadmap either (that's a plain `roadmap_list`/`roadmap_get` call, no skill needed).
-context: fork
-agent: claude-peers-deck-backchannel:roadmap-scribe
+description: Use before calling roadmap_add to file ONE new card (bug, feature, debt, idea, chore) on the shared claude-peers roadmap. Triggers include "note ce bug", "crée une carte", "ajoute à la roadmap", "note une idée", "file an idea", "log this as a card", "add this to the roadmap", and the end of a diagnosis or review whose findings another session must pick up. NOT for updating, re-prioritizing, archiving or reading an existing card, nor for a directive card (workflow-from-cards).
 ---
 
-# File a roadmap card (delegated to Sonnet, token-cheap)
+# Roadmap card
 
-You are running as the `roadmap-scribe` subagent. Write ONE roadmap card
-following the contract below, then return its id. The heavy lifting (field
-composition, duplicate check, HTTP fallback) stays in this cheap fork -- the
-calling session only relays the result.
+You write ONE card with `roadmap_add`, right on the first call, and read it
+back before announcing it. Its reader is an agent with none of your context.
 
-## Two callers -- decide which one you are, first
+## 1. Look for a twin, and for what it depends on
 
-- **The operator, in free prose.** You may ask AT MOST 1-2 targeted
-  clarifying questions when a required field is genuinely undecidable. Do not
-  interrogate -- default what you reasonably can from the contract below and
-  write.
-- **An agent handing off diagnosed findings.** FORMAT what you were given.
-  Never reinvent, soften, or upgrade its confidence -- if the handoff said
-  "strong lead, unconfirmed", the card says exactly that. Ask nothing.
+- Call `roadmap_list({ q, q_deep: true, statuses: ["idea", "planned", "in_progress"] })`
+  twice, with two different keyword sets: first the English words a card title
+  would use, then a synonym or the area/file name. `q` requires EVERY word,
+  whole words only, no stemming (`pidfile` misses `pidfiles`, a French word
+  misses an English card), so one empty list proves nothing.
+- Same defect or same ask already filed: create nothing. Give the caller its
+  id8 and title; a fact that card lacks goes in with `roadmap_append_context`.
+- A card that must land first: `roadmap_get` it and copy its full `id:` line
+  into `depends_on`. An id8 is stored as typed, never resolved, and dispatch
+  reads an unknown id as a satisfied dependency.
 
-## Field discipline
+## 2. Fields
 
-- `title` -- imperative, area-prefixed (`Roadmap: ...`, `Workflow: ...`,
-  `Audit: ...`), one line.
-- `description` -- the literal behaviour/UI spec, 1-2 sentences. Never argues
-  why. **Mandatory, even on a debt/chore card** -- a card with this field
-  empty reads as blank in the kanban list view, which only shows title +
-  description.
-- `rationale` -- attributed and dated: `Operator, <date>: <the raw ask>` or
-  `Found by <agent/role> while <activity>`. **Also mandatory, always.**
-- `context` -- the briefing for whoever picks the card up later. Carries
-  confidence markers, `file:line` pointers, open decisions. Cite `file:line`
-  only for code that exists; never fabricate a pointer for a not-yet-built
-  feature. No word limit: keep every measurement, since re-acquiring one costs
-  an audit and reading a long card does not. But it is read by an AGENT, which
-  needs constraining, not convincing -- see "Prose economy" in the
-  `roadmap-scribe` agent for what to cut and where non-card content belongs.
-- `tags` -- track AREA (`desktop`, `broker`, `roadmap`, `sandbox`, `graph`,
-  ...), not urgency or confidence -- those live in the confidence marker and
-  the `priority`/`value`/`effort` fields instead.
-- `depends_on` -- the STRUCTURED array of ids this card depends on, not just
-  a sentence in `context` claiming the coupling. Look the dependency's id up
-  (`roadmap_get`/`roadmap_list`) before writing; narrate the coupling in
-  `context` as well, the two are complementary.
-- `priority` (MoSCoW: must/should/could/wont), `value` (low/medium/high),
-  `effort` (low/medium/high), `status` (idea/planned/in_progress/done) --
-  default to `could`/`medium`/`medium`/`idea` when the input gives no signal,
-  rather than asking.
-- `triage` -- use the canonical roles and field values in
-  `docs/agents/triage-labels.md`; do not reproduce its role table here. For an
-  operator's free-prose request, infer the role from the ask, but resolve doubt
-  to `needs-triage`, never to a promise. For a diagnosed agent handoff, use
-  `ready-for-agent` only when another session can take the card without
-  rereading; use `needs-info` or `ready-for-human` when a human decision is
-  still needed. When both could apply, `needs-info` takes precedence.
-  `ready-for-agent` is an engagement, never a default or a
-  courtesy: do not upgrade the confidence you were given. A card may
-  legitimately have no role because it has never been triaged. The broker
-  refuses the contradictory `wontfix` / non-`wont` priority write with 400;
-  set `priority: wont` whenever you set `triage: wontfix`.
-
-## Confidence markers (reuse verbatim, never invent new ones)
-
-| Marker | Means |
+| field | rule |
 |---|---|
-| `ROOT CAUSE` | Diagnosed, evidence given |
-| `STRONG LEAD, not yet confirmed by measurement` | Plausible, not measured |
-| `TO ENRICH after a deeper audit` | Known gap, needs more digging |
-| `NON AUDITE` | Not looked at yet |
-| `CADRAGE (decision operateur <date>)` | An operator decision, not a finding |
-| `SHIPPED AND APPROVED` | Done and signed off |
+| `title` | `Area: <verb> <what>`, under 80 chars, naming the change, not the symptom (the symptom goes in `description`): `Broker: refuse a queue rank on an archived card`. |
+| `kind` | `bug` broken behaviour · `feature` new capability · `debt` works but costs later · `idea` not decided yet · `chore` upkeep, no behaviour change. |
+| `status` | `planned` when the work is decided and specified (a diagnosed bug usually is), else `idea`. Never `in_progress`: it locks the card under you. |
+| `priority` | `must` / `should` / `could` / `wont`. No signal: `could`. |
+| `value`, `effort` | `low` / `medium` / `high`. No signal: `medium`. |
+| `triage` | `ready-for-agent` only when a session can take it as written: cause located, acceptance testable, no open decision. Else `needs-info` (question for the reporter), `ready-for-human` (needs a human decision or hands), `needs-triage` (unsure). `wontfix` requires `priority: wont`. |
+| `tags` | Areas (`sandbox`, `broker`, `roadmap`, `desktop`, `inbox`...), never urgency or confidence. |
+| `description` | The WHAT, 1-3 sentences for a human scanning the board (the list shows only title and description). Never empty. |
+| `rationale` | Who asked or found it, and why it matters: `Operator, 2026-09-30: ...` or `Found by <role> while <activity>`. Never empty. |
+| `depends_on` | Full ids only (section 1). |
+| `context` | The brief below. |
 
-A card must never state a conclusion at a higher confidence than its evidence
-supports. Put the marker in `context` whenever the card is not a fully
-diagnosed root cause. End a hard/audit card with a directing question for
-whoever picks it up, and state explicitly what was deliberately NOT asked --
-that pre-empts scope creep on the next pass.
+`context`, one short block per item, in this order; say an item is unknown
+or empty rather than skip it:
 
-## Anti-patterns to avoid (measured in this project's own card corpus)
+1. Objective, and what is out of scope.
+2. Files and tests: a `file:line` or symbol only for code someone actually
+   read; a test to write names its path.
+3. Acceptance: the observable check that closes the card.
+4. Decisions already made, and by whom, so nobody reopens them.
+5. Evidence, each item labelled `MESURÉ` (the number and how it was
+   obtained), `DÉDUIT` (from code read) or `SUPPOSÉ`. Keep the label you were
+   given, never a higher one. An idea with no measurement says so and lists its
+   open questions.
 
-1. `description`/`rationale` left empty "because it's all in `context`
-   anyway" -- both are mandatory, always, regardless of how much detail also
-   lives in `context`.
-2. A dependency narrated in prose with `depends_on: []` -- nothing parses
-   prose; populate the array.
-3. `tags` used only for UI cards, or used for urgency instead of area.
-4. **Writing the essay instead of the brief.** Narrative provenance ("the
-   debugger measured, then the architect confirmed"), the same point restated
-   from three angles, meta-commentary on method, and the justification of WHY
-   this design beat the alternative. The last one belongs in the commit
-   message; a reusable cross-project fact belongs in Kleos. A card carrying all
-   three is the common failure, and roadmap writes echo the card back to the
-   caller, so every redundant word is paid twice. Cutting a MEASUREMENT to
-   shorten a card is the one unacceptable edit.
+Keep every measurement. Cut the story of who found what, repetition, and the
+argument for a design (that goes in the commit). Stay under 16000 characters:
+past that, every later `roadmap_append_context` is refused. Write in the
+caller's language.
 
-## Duplicate check (mandatory, before writing)
+## 3. Write: one call, alone in its tool block
 
-Both the operator and other agents can file cards now, so the same defect can
-be reported twice. Before creating, check open cards for a near-match (via
-`roadmap_list`, or the HTTP fallback's list/export). On a near-match: **report
-the collision to your caller instead of silently creating a twin.** Enriching
-the existing card is out of scope for this skill -- leave that to whoever
-reads the report.
+- Emit `roadmap_add` with no other tool call beside it, so a refusal or a
+  malformed argument touches this call only.
+- No text field may contain a parameter closing tag (`</context>`,
+  `</parameter>`) followed by `<parameter name="...">`: the plugin's guard
+  refuses the call, because that shape means content meant for two parameters
+  landed in one. To quote such markup (a repro), put a space after the `<` of
+  each closing tag and add a line to `context` saying that the real input has
+  no such space. Never encode it instead (`<`, entities, a literal `\n`):
+  the stored text is then something nobody sent, and the guard stays blind.
+- Refused (guard or broker 400): fix what the message names, resend once. A
+  refusal is never routed around, through the CLI below or otherwise.
+- `roadmap_add` absent from your tools: write the same fields plus `by` (your
+  peer_id from `whoami`) as JSON with the Write tool to a file outside any
+  repo, then run `bun <repo>/cli.ts roadmap-add --input <file>` from the target
+  repo. Never build the broker request yourself.
 
-## Writing it
+## 4. Read it back before announcing it
 
-Prefer the `roadmap_add` MCP tool (it resolves the project and your author
-identity automatically). Its presence in your tool list is not guaranteed --
-the MCP server can advertise the tool while the invoking session's own tool
-allow-list omits it, independent of the server. When absent or erroring, fall
-back to `bun <claude-peers>/cli.ts roadmap-add --input <payload.json>`, run
-with the TARGET repo as working directory, instead of a raw HTTP call: the
-verb derives `project_key` from that repo (never put it in the payload), and
-the CLI resolves the broker's secret internally (env or the global config
-file), so it never appears on your command line or in the session
-transcript. Never construct the broker request or a secret-bearing header
-yourself. The payload JSON needs `by` (your author identity) and `title` at
-minimum; the full step-by-step
-procedure (project_key resolution, depends_on lookup, reporting) is
-documented in the `roadmap-scribe` agent this skill forks into -- follow it
-end to end and return its result: the created (or colliding) item's id, its
-title, and a one-line echo of what was sent. If the write path fails
-outright, report the exact error rather than working around it.
-
-## Language
-
-Match the caller's own language: operator-facing UX cards in English,
-process/self-referential cards in French, following whichever language the
-input itself was written in.
+1. The ack says `Roadmap item created: <id8>` and, per text field,
+   `requested N chars, landed M chars`. Any N different from M: the card is not
+   what you sent; fix that field with `roadmap_update` and check again.
+2. `roadmap_get <id8>`: compare the title, the first and last lines of
+   `context`, and `depends_on` with what you sent.
+3. Announce only an id8 that `roadmap_get` returned, with the title,
+   kind/priority/triage and the fields you defaulted. A failed write is
+   reported with its exact error, never with an id.
