@@ -34,18 +34,51 @@ async function reserveEphemeralPort(): Promise<number> {
   return port;
 }
 
+export interface StartBrokerOptions {
+  /** argv to spawn in place of `bun broker.ts`; it must serve /health on CLAUDE_PEERS_PORT. */
+  command?: string[];
+  /** Wall-clock budget shared by every attempt. */
+  budgetMs?: number;
+}
+
+// Shared by every attempt and kept under the integration step's 30 s
+// `--timeout`, so a broker that never comes up fails this helper with its
+// diagnostic instead of being killed by bun's timeout with none.
+const BOOT_BUDGET_MS = 20_000;
+const STDERR_TAIL_CHARS = 2000;
+
+async function readTail(path: string, chars: number): Promise<string> {
+  const file = Bun.file(path);
+  if (!(await file.exists())) return "<absent>";
+  const text = await file.text();
+  return text.length > 0 ? text.slice(-chars) : "<empty>";
+}
+
+// The first timestamped line says when a broker first executed at all, the
+// last one how far its boot got.
+async function readLogEnds(path: string): Promise<string> {
+  const file = Bun.file(path);
+  if (!(await file.exists())) return "<absent>";
+  const lines = (await file.text()).split("\n").filter((l) => l.length > 0);
+  if (lines.length === 0) return "<empty>";
+  return `first: ${lines[0]} | last: ${lines[lines.length - 1]}`;
+}
+
 export async function startBroker(
-  envOverrides: Record<string, string> = {}
+  envOverrides: Record<string, string> = {},
+  options: StartBrokerOptions = {}
 ): Promise<TestBroker> {
   const tmpDir = mkdtempSync(join(tmpdir(), "cp-test-"));
   const dbPath = join(tmpDir, "peers.db");
+  const command = options.command ?? ["bun", "broker.ts"];
+  const deadline = Date.now() + (options.budgetMs ?? BOOT_BUDGET_MS);
+  const failures: string[] = [];
 
-  // 20 attempts existed to burn through the random window's collisions.
-  // With an OS-reserved port the systematic collision is gone, so this now
-  // only needs to cover the residual TOCTOU race (rare) and genuine spawn
-  // failures (e.g. a transient exec error) -- 3 is enough headroom for
-  // that, without reintroducing multi-minute dead loops under contention.
-  for (let attempt = 0; attempt < 3; attempt++) {
+  // A retry only follows a process that EXITED (lost the TOCTOU port race,
+  // crashed at boot). A live broker that has not answered yet is still
+  // booting: killing it to try another port throws that boot away, which is
+  // how a slow runner turned into three killed brokers in a row.
+  for (let attempt = 0; attempt < 3 && Date.now() < deadline; attempt++) {
     const port = await reserveEphemeralPort();
     const env = scrubEnv(tmpDir, {
       CLAUDE_PEERS_PORT: String(port),
@@ -55,9 +88,11 @@ export async function startBroker(
       CLAUDE_PEERS_DORMANT_TTL_HOURS: "24",
       ...envOverrides,
     });
-    const proc = Bun.spawn(["bun", "broker.ts"], {
+    // A file, never an unread pipe: a pipe nobody drains can block the child.
+    const stderrPath = join(tmpDir, `broker-stderr-${attempt}.log`);
+    const proc = Bun.spawn(command, {
       env,
-      stdio: ["ignore", "ignore", "ignore"],
+      stdio: ["ignore", "ignore", Bun.file(stderrPath)],
     });
 
     // A 200 on /health only proves that SOMEBODY listens on this port, never
@@ -75,8 +110,8 @@ export async function startBroker(
     const SETTLE_MS = 250;
     const spawnedAt = Date.now();
     let ready = false;
-    for (let i = 0; i < 80; i++) {
-      if (proc.exitCode !== null) break;
+    while (Date.now() < deadline) {
+      if (proc.exitCode !== null || proc.signalCode !== null) break;
       try {
         const res = await fetch(`http://127.0.0.1:${port}/health`, {
           signal: AbortSignal.timeout(500),
@@ -99,10 +134,20 @@ export async function startBroker(
         env,
       };
     }
+    const exitedOnItsOwn = proc.exitCode !== null || proc.signalCode !== null;
     try { proc.kill(); await proc.exited; } catch { /* */ }
+    failures.push(
+      `attempt ${attempt} port ${port}: ${exitedOnItsOwn ? "exited" : "alive but silent, killed at the budget"}` +
+        ` exitCode=${proc.exitCode} signalCode=${proc.signalCode} after ${Date.now() - spawnedAt}ms` +
+        `\n  broker.log (shared by all attempts) ${await readLogEnds(join(tmpDir, "logs", "broker.log"))}` +
+        `\n  stderr tail: ${await readTail(stderrPath, STDERR_TAIL_CHARS)}`
+    );
+    if (!exitedOnItsOwn) break;
   }
   rmSync(tmpDir, { recursive: true, force: true });
-  throw new Error("could not start broker on any port");
+  throw new Error(
+    `could not start broker on any port (${command.join(" ")}, ${failures.length} attempt(s)):\n${failures.join("\n")}`
+  );
 }
 
 export async function stopBroker(b: TestBroker): Promise<void> {
