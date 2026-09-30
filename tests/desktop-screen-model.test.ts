@@ -1,5 +1,5 @@
 import { test, expect, describe } from 'bun:test'
-import { readFileSync } from 'node:fs'
+import { readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { makeScreen, classifyInjectGuard, ScreenGuard } from '../desktop/src/main/screen-model'
 
@@ -37,10 +37,41 @@ function screenBeforeMarker(fixture: string, stopAtMarker: RegExp) {
   return screen
 }
 
-function screenFromFixture(fixture: string) {
-  const screen = makeScreen(COLS, ROWS)
+function screenFromFixture(fixture: string, cols = COLS, rows = ROWS) {
+  const screen = makeScreen(cols, rows)
   for (const c of load(fixture)) screen.feed(c.data)
   return screen
+}
+
+function fixtureVerdicts(fixture: string): { checkpoints: readonly ('clear' | 'modal')[]; final: 'clear' | 'modal' } {
+  const screen = makeScreen(COLS, ROWS)
+  const checkpoints: Array<'clear' | 'modal'> = []
+  for (const c of load(fixture)) {
+    if (isMarker(c)) {
+      checkpoints.push(classifyInjectGuard(screen))
+      continue
+    }
+    screen.feed(c.data)
+  }
+  return { checkpoints, final: classifyInjectGuard(screen) }
+}
+
+const EXPECTED_FIXTURE_VERDICTS: Record<string, { checkpoints: readonly ('clear' | 'modal')[]; final: 'clear' | 'modal' }> = {
+  'channels-warning-conpty-win.json': { checkpoints: [], final: 'modal' },
+  'composer-2.1.283-reduced.json': { checkpoints: [], final: 'clear' },
+  'dialog-open-no-esc.json': { checkpoints: ['modal', 'modal'], final: 'modal' },
+  'dialog-open-with-esc.json': { checkpoints: ['modal', 'modal'], final: 'modal' },
+  'draft-typed-with-esc.json': { checkpoints: ['clear', 'clear', 'clear', 'clear', 'clear'], final: 'clear' },
+  'prompt-idle-with-esc.json': { checkpoints: ['clear', 'clear', 'clear', 'clear'], final: 'clear' },
+  'scroll-context-2.1.284-reduced.json': { checkpoints: [], final: 'modal' },
+  'slash-menu-with-esc.json': { checkpoints: ['clear', 'clear', 'clear', 'clear', 'clear'], final: 'clear' },
+  'trust-dialog-quick-safety-check.json': { checkpoints: [], final: 'modal' },
+  'turn-chunks-inherited-env.json': { checkpoints: [], final: 'modal' },
+  'turn-chunks-scrubbed-env.json': { checkpoints: [], final: 'modal' },
+  'turn-no-statusline-count.json': { checkpoints: [], final: 'clear' },
+  'turn-no-statusline-hi.json': { checkpoints: [], final: 'clear' },
+  'turn-with-statusline-count.json': { checkpoints: [], final: 'clear' },
+  'turn-with-statusline-hi.json': { checkpoints: [], final: 'clear' }
 }
 
 describe('classifyInjectGuard against real captures (tests/pty-harness/fixtures)', () => {
@@ -80,6 +111,19 @@ describe('classifyInjectGuard against real captures (tests/pty-harness/fixtures)
       'clear'
     )
   })
+
+  test('matches the declared checkpoint and final verdict for every existing capture', () => {
+    const fixtureNames = readdirSync(FIXTURES)
+      .filter((name) => name.endsWith('.json') && name !== 'composer-2.1.285-agent-explorer-reduced.json')
+      .sort()
+    expect(fixtureNames).toEqual(Object.keys(EXPECTED_FIXTURE_VERDICTS).sort())
+
+    for (const fixture of fixtureNames) {
+      const expected = EXPECTED_FIXTURE_VERDICTS[fixture]
+      if (!expected) throw new Error(`missing baseline verdict for ${fixture}`)
+      expect(fixtureVerdicts(fixture), fixture).toEqual(expected)
+    }
+  })
 })
 
 describe('classifyInjectGuard fail-closed defaults (D2: unclassifiable = modal, never a guess)', () => {
@@ -113,6 +157,12 @@ describe('classifyInjectGuard reduced ConPTY composer fixture', () => {
   const border = horizontal.repeat(COLS)
   const esc = String.fromCharCode(27)
   const composer = () => screenFromFixture('composer-2.1.283-reduced.json')
+  const agentComposer = () => screenFromFixture('composer-2.1.285-agent-explorer-reduced.json', 100, 30)
+  const composerWithTop = (top: string) => {
+    const screen = makeScreen(100, 30)
+    screen.feed(`${esc}[8;1H${top}${esc}[9;1H${chevron}${esc}[10;1H${horizontal.repeat(100)}${esc}[9;3H`)
+    return screen
+  }
 
   const feedComposer = (screen: ReturnType<typeof makeScreen>, row: number): void => {
     screen.feed(`${esc}[${row};1H${border}${esc}[${row + 1};1H${chevron}${esc}[${row + 2};1H${border}`)
@@ -121,6 +171,35 @@ describe('classifyInjectGuard reduced ConPTY composer fixture', () => {
   test('replays the captured full-width composer as clear', () => {
     expect(classifyInjectGuard(composer())).toBe('clear')
   })
+
+  test('replays the captured agent-labelled composer as clear', () => {
+    expect(classifyInjectGuard(agentComposer())).toBe('clear')
+  })
+
+  test('rejects a top border with two label segments', () => {
+    const top = `${horizontal.repeat(40)} explorer ${horizontal.repeat(40)} worker ${horizontal.repeat(2)}`
+    expect(classifyInjectGuard(composerWithTop(top))).toBe('modal')
+  })
+
+  test('rejects a top border without a final horizontal segment', () => {
+    const top = `${horizontal.repeat(90)} explorer `
+    expect(classifyInjectGuard(composerWithTop(top))).toBe('modal')
+  })
+
+  const h = (count: number): string => horizontal.repeat(count)
+  for (const [name, top] of [
+    ['without a leading horizontal segment', ` explorer ${h(90)}`],
+    ['with an empty label between two spaces', `${h(40)}  ${h(58)}`],
+    ['with a label padded by an extra leading space', `${h(40)}  explorer ${h(49)}`],
+    ['with a label padded by an extra trailing space', `${h(40)} explorer  ${h(49)}`],
+    ['with a non-horizontal character in the leading segment', `${h(39)}x explorer ${h(50)}`],
+    ['with a non-horizontal character in the trailing segment', `${h(40)} explorer ${h(49)}x`]
+  ] as const) {
+    test(`rejects a full-width top border ${name}`, () => {
+      expect([...top].length, 'the case must be exactly as wide as the screen, or the width check masks the conjunct under test').toBe(100)
+      expect(classifyInjectGuard(composerWithTop(top)), JSON.stringify(top)).toBe('modal')
+    })
+  }
 
   test('recognizes the captured composer below a historical chevron', () => {
     const screen = composer()

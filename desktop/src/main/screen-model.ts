@@ -203,8 +203,26 @@ export function inspectInjectGuard(screen: Screen): InjectGuardInspection {
   const dialogBottomRight = String.fromCodePoint(0x256f)
   const lines = screen.lines()
   const { cy } = screen.cursor()
-  const isBorder = (line: string): boolean =>
+  const isPureBorder = (line: string): boolean =>
     [...line].length === screen.columns() && [...line].every((character) => character === horizontal)
+  const isTopBorder = (line: string): boolean => {
+    if ([...line].length !== screen.columns()) return false
+    const labelStart = line.indexOf(' ')
+    if (labelStart < 0) return isPureBorder(line)
+    const labelEnd = line.lastIndexOf(' ')
+    const beforeLabel = line.slice(0, labelStart)
+    const label = line.slice(labelStart + 1, labelEnd)
+    const afterLabel = line.slice(labelEnd + 1)
+    return (
+      beforeLabel.length > 0 &&
+      afterLabel.length > 0 &&
+      label.length > 0 &&
+      label.trim() === label &&
+      !label.includes(horizontal) &&
+      [...beforeLabel].every((character) => character === horizontal) &&
+      [...afterLabel].every((character) => character === horizontal)
+    )
+  }
   const isPicker = (line: string): boolean => new RegExp(`^\\s*${chevron}\\s+\\d+\\.`).test(line)
   const isDialogTop = (line: string): boolean => line.trimStart().startsWith(dialogTopLeft) && line.trimEnd().endsWith(dialogTopRight)
   const isDialogBottom = (line: string): boolean =>
@@ -225,9 +243,9 @@ export function inspectInjectGuard(screen: Screen): InjectGuardInspection {
     top !== undefined &&
     composer !== undefined &&
     bottom !== undefined &&
-    isBorder(top) &&
+    isTopBorder(top) &&
     composer.trimStart().startsWith(chevron) &&
-    isBorder(bottom)
+    isPureBorder(bottom)
   ) {
     return { state: 'clear' }
   }
