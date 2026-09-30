@@ -42,6 +42,12 @@ async function pollUntil<T>(
   throw new Error(`timed out after ${budgetMs}ms; last observed ${JSON.stringify(last)}`);
 }
 
+function openBrokerDb(path: string): Database {
+  const db = new Database(path);
+  db.run("PRAGMA busy_timeout = 3000");
+  return db;
+}
+
 async function itemOn(broker: TestBroker, id: string): Promise<RoadmapItem | undefined> {
   const res = await post<ListRes>(`${broker.url}/roadmap/list`, { project_key: PK });
   return res.body.items.find((i) => i.id === id);
@@ -115,7 +121,7 @@ test("a lock that replicated cleanly survives the upstream stale-lock sweep, exa
       const e = await itemOn(upstream, edited.body.item.id);
       return { done: h?.locked === true && e?.locked === true, value: [h, e] };
     });
-    const db = new Database(replica.dbPath);
+    const db = openBrokerDb(replica.dbPath);
     await pollUntil(15_000, 150, async () => {
       const rows = db
         .query("SELECT sync_dirty FROM roadmap_items WHERE id IN (?, ?)")
@@ -175,7 +181,7 @@ test("a lock that replicated cleanly survives the upstream stale-lock sweep, exa
     // sync_base_rev having ADVANCED past heldBaseRevBefore, not just on the
     // final fields matching their starting values: a branch that fired but
     // did nothing to the row would satisfy the field check by pure inertia.
-    const dbAfter = new Database(replica.dbPath);
+    const dbAfter = openBrokerDb(replica.dbPath);
     const heldAfter = await pollUntil(15_000, 200, async () => {
       const item = await itemOn(replica!, held.body.item.id);
       const row = dbAfter
@@ -246,7 +252,7 @@ test("an ordinary upstream author's status change is adopted, never mistaken for
       const item = await itemOn(upstream, held.body.item.id);
       return { done: item?.locked === true, value: item };
     });
-    const db = new Database(replica.dbPath);
+    const db = openBrokerDb(replica.dbPath);
     await pollUntil(15_000, 150, async () => {
       const row = db
         .query("SELECT sync_dirty FROM roadmap_items WHERE id = ?")
@@ -258,7 +264,7 @@ test("an ordinary upstream author's status change is adopted, never mistaken for
     // An ordinary author, not the sweep, reverts status upstream -- the
     // exact content shape isSweepOnlyStatusChange is built to accept, but
     // written by someone else entirely.
-    const upstreamDb = new Database(upstream.dbPath);
+    const upstreamDb = openBrokerDb(upstream.dbPath);
     upstreamDb.run(
       "UPDATE roadmap_items SET status = 'planned', updated_by = 'an-ordinary-author' WHERE id = ?",
       [held.body.item.id]
@@ -323,7 +329,7 @@ test("a swept card this replica does not hold adopts the released state plainly,
 
     // Kill the native holder for real -- upstream's own sweep releases it,
     // production's mechanism, not a synthetic column edit.
-    const upstreamDb = new Database(upstream.dbPath);
+    const upstreamDb = openBrokerDb(upstream.dbPath);
     upstreamDb.run(
       "UPDATE peers SET status = 'dormant', last_seen = datetime('now', '-1 hour') WHERE instance_token = ?",
       [nativeReg.body.instance_token]
@@ -444,7 +450,7 @@ test("a registered peer that goes dark stays protected through a sweep round-tri
 
     // The holder goes dark on the REPLICA's own peers table -- a real death,
     // not just the network partition set up below.
-    const db = new Database(replica.dbPath);
+    const db = openBrokerDb(replica.dbPath);
     // Captured now, for the same reason as the first test: the direct
     // witness below needs a BEFORE value to prove the row was actually
     // rewritten, not just left looking the same.
@@ -480,7 +486,7 @@ test("a registered peer that goes dark stays protected through a sweep round-tri
     // (kept out of reach above) is not this fix's job. Gated on
     // sync_base_rev having ADVANCED, same reason as the first test: the
     // field values alone cannot tell "protected" from "nothing happened".
-    const dbAfter = new Database(replica.dbPath);
+    const dbAfter = openBrokerDb(replica.dbPath);
     const after = await pollUntil(15_000, 200, async () => {
       const item = await itemOn(replica!, held.body.item.id);
       const row = dbAfter
