@@ -314,6 +314,19 @@ test('requires a protected SID-only ACL and configures it before publishing secr
   }
 })
 
+test('the built-in Administrator is recognised through its SDDL alias', () => {
+  const administratorSid = 'S-1-5-21-111-222-333-500'
+  const ordinaryUserSid = 'S-1-5-21-111-222-333-1001'
+  const administratorAcl = privateAcl('avatar\nD:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;LA)')
+  const guestAcl = privateAcl('avatar\nD:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;LG)')
+  const noUserAcl = privateAcl('avatar\nD:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)')
+
+  expect(hasPrivateAvatarAcl(administratorAcl, administratorSid)).toBe(true)
+  expect(hasPrivateAvatarAcl(administratorAcl, ordinaryUserSid)).toBe(false)
+  expect(hasPrivateAvatarAcl(guestAcl, administratorSid)).toBe(false)
+  expect(hasPrivateAvatarAcl(noUserAcl, administratorSid)).toBe(false)
+})
+
 test('a SystemRoot the working directory could complete stops the private directory before anything is spawned', () => {
   for (const systemRoot of [undefined, '', 'rel', 'C:\\Windows\\..\\rel']) {
     const reported: string[] = []

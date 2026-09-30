@@ -21,6 +21,7 @@ export interface AvatarPrivateDirDeps {
 }
 
 const SID_RE = /\bS-\d-(?:\d+-)*\d+\b/i
+const BUILT_IN_ADMINISTRATOR_SID_RE = /^S-1-5-21-\d+-\d+-\d+-500$/i
 const ALLOWED_WINDOWS_ACL_SIDS = new Set(['SY', 'BA'])
 
 /** Throws before anything is spawned when SystemRoot would let the working directory supply the binary. */
@@ -82,7 +83,10 @@ export function hasPrivateAvatarAcl(acl: WindowsAclSnapshot, userSid: string): b
 
   const aceText = dacl[2]
   if (aceText === undefined) return false
-  const allowedSids = new Set([...ALLOWED_WINDOWS_ACL_SIDS, userSid.toUpperCase()])
+  const currentUserSid = userSid.toUpperCase()
+  const isBuiltInAdministrator = BUILT_IN_ADMINISTRATOR_SID_RE.test(userSid)
+  const allowedSids = new Set([...ALLOWED_WINDOWS_ACL_SIDS, currentUserSid])
+  if (isBuiltInAdministrator) allowedSids.add('LA')
   const aces = [...aceText.matchAll(/\(([^()]*)\)/g)]
   if (aces.length === 0) return false
 
@@ -91,7 +95,7 @@ export function hasPrivateAvatarAcl(acl: WindowsAclSnapshot, userSid: string): b
     const fields = ace[1]!.split(';')
     const sid = fields[5]?.toUpperCase()
     if (fields.length !== 6 || fields[0] !== 'A' || sid === undefined || !allowedSids.has(sid)) return false
-    hasCurrentUser ||= sid === userSid.toUpperCase()
+    hasCurrentUser ||= sid === currentUserSid || (isBuiltInAdministrator && sid === 'LA')
   }
   return hasCurrentUser
 }
