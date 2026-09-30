@@ -37,8 +37,8 @@ const RATE_LIMITED_CHECK = /this\.runtime\.get\(id\)\?\.rateLimited/
 const REFUSAL_RETURN = /return\s+'refused-modal'/g
 
 /**
- * All three signals must be checked, and EACH check must return the refusal
- * BEFORE the Escape write -- a check present but placed after the write (or
+ * All three signals must be checked, and each check must return the refusal
+ * before the Escape write -- a check present but placed after the write (or
  * present without its own `return 'refused-modal'`) would compile and read
  * fine while doing nothing.
  */

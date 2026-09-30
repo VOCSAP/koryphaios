@@ -114,13 +114,7 @@ test("the negative control REJECTS a synthetic 'stragglers' shape that DOES abso
   expect(buggyStragglers({ result: 'refused-modal' })).toBe(true) // proves the extractor is live
 })
 
-// ----- Card 120148eb: SessionService.interrupt() gates Pause (not Hard) on
-// the same screen-state guard injectCommand uses. Source-scan of the real
-// file (SessionService isn't bun-test-importable, same constraint as
-// desktop-inject-command-modal-guard.test.ts), plus a RED-proof against
-// synthetic bodies, same convention as that file.
-
-describe("SessionService.interrupt()'s pause-only screen-state gate (card 120148eb)", () => {
+describe("SessionService.interrupt()'s pause-only screen-state gate", () => {
   const SESSION_SERVICE_PATH = join(
     import.meta.dir,
     '..',
@@ -140,20 +134,10 @@ describe("SessionService.interrupt()'s pause-only screen-state gate (card 120148
   const PAUSE_BRANCH = /mode\s*===\s*'pause'/
   const SCREEN_GUARD_CHECK = /this\.screenGuard\.inspect\(id\)/
   const ATTENTION_CHECK = /this\.runtime\.get\(id\)\?\.needsAttention/
-  // Third signal (mutation review round 2, D1): same as injectCommand's own
-  // three-signal union -- without it, Pause during a quota-resume window
-  // races autoResume's own raw ESC write on the same tile.
   const RATE_LIMITED_CHECK = /this\.runtime\.get\(id\)\?\.rateLimited/
   const REFUSAL_RETURN = /return\s+'refused-modal'/g
 
-  /**
-   * All three signals must be checked INSIDE a `mode === 'pause'` branch,
-   * and each check must return the refusal BEFORE the Escape write --
-   * exactly the injectCommand convention, applied here to interrupt(). A
-   * body that gates unconditionally (no pause branch at all) would also
-   * gate Hard, which the card explicitly says NOT to do -- so
-   * PAUSE_BRANCH.test is required, not just the three signal checks.
-   */
+  // Hard interrupts must always send Escape, so only the pause branch is guarded.
   function pauseIsGatedBeforeEscape(body: string): boolean {
     const escIdx = body.search(ESC_WRITE)
     if (escIdx === -1) return false
@@ -173,7 +157,7 @@ describe("SessionService.interrupt()'s pause-only screen-state gate (card 120148
     expect(pauseIsGatedBeforeEscape(body)).toBe(true)
   })
 
-  test("the gate REJECTS the pre-120148eb shape: unconditional bare Escape, no pause branch at all", () => {
+  test('the gate rejects an unconditional Escape with no pause branch', () => {
     const body = `
       if (!this.pty.isAlive(id)) return 'no-terminal'
       this.pty.write(id, '\\x1b')
@@ -194,7 +178,7 @@ describe("SessionService.interrupt()'s pause-only screen-state gate (card 120148
     expect(pauseIsGatedBeforeEscape(body)).toBe(false)
   })
 
-  test('the gate REJECTS a pause branch with screenGuard and attention but missing rateLimited (the exact D1 gap)', () => {
+  test('the gate rejects a pause branch missing rateLimited', () => {
     const body = `
       if (!this.pty.isAlive(id)) return 'no-terminal'
       if (mode === 'pause') {
@@ -235,14 +219,6 @@ describe("SessionService.interrupt()'s pause-only screen-state gate (card 120148
     `
     expect(pauseIsGatedBeforeEscape(body)).toBe(true)
   })
-
-  // ----- D6 (mutation review round 2): the pause-vs-hard asymmetry itself,
-  // pinned BEHAVIORALLY, not just by shape. The extracted body is executed
-  // for real (new Function + a stub `this`), against a MODAL-classified
-  // tile: pause must refuse, hard must not. A regex on the source text
-  // could not tell "gates neither" from "gates both" apart from "gates only
-  // pause" without re-deriving the same logic a second time; actually
-  // EXECUTING the real extracted code against both modes can.
 
   /**
    * Stub of the slice of `this` interrupt() reads: pty.isAlive/write,
@@ -314,16 +290,6 @@ describe("SessionService.interrupt()'s pause-only screen-state gate (card 120148
     expect(pauseCase.writes).toEqual(['\x1b'])
   })
 
-  // ----- Third mutation review round: the two unions (injectCommand's guard
-  // prologue, interrupt()'s `mode === 'pause'` branch) are identical TODAY,
-  // but each was pinned by its OWN hard-coded list of exactly three signal
-  // names -- a fourth signal added to only ONE side left both lists
-  // individually satisfied (reviewer's measured mutation: 69 pass/0 fail).
-  // This derives the signal SET from each side generically (any
-  // `this.runtime.get(id)?.<field>`, plus screenGuard.classify), with no
-  // hardcoded field list, so it grows automatically with the domain and
-  // catches a one-sided addition by set inequality instead of by name.
-
   function extractInjectCommandGuardPrologue(src: string): string {
     const fnMatch = /async injectCommand\([^)]*\)[^{]*\{/.exec(src)
     if (!fnMatch) throw new Error('injectCommand() not found in tile-injector.ts -- has it been renamed?')
@@ -387,7 +353,7 @@ describe("SessionService.interrupt()'s pause-only screen-state gate (card 120148
     }
   )
 
-  test('the equality check REJECTS a synthetic divergence: a signal present on only one side (the exact shape of the reviewer\'s measured mutation) is named in the failure', () => {
+  test('the equality check rejects a signal present on only one side', () => {
     const withExtra = extractGuardSignals(`
       if (this.screenGuard.classify(id) === 'modal') return 'refused-modal'
       if (this.runtime.get(id)?.needsAttention) return 'refused-modal'
@@ -400,7 +366,7 @@ describe("SessionService.interrupt()'s pause-only screen-state gate (card 120148
       if (this.runtime.get(id)?.rateLimited) return 'refused-modal'
     `)
     const onlyLeft = [...withExtra].filter((s) => !withoutExtra.has(s))
-    expect(onlyLeft).toEqual(['sandboxPaused']) // proves the derivation is live and names the extra signal
+    expect(onlyLeft).toEqual(['sandboxPaused'])
   })
 })
 
