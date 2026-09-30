@@ -1554,6 +1554,8 @@ export interface GraphDraftOpenResponse {
 
 export type DispatchRequestStatus = "pending" | "done";
 
+export type DispatchRefusalReason = "refused-modal" | "busy-timeout" | "no-terminal" | "error";
+
 /** One card the wave dispatched, and where it landed. */
 export interface DispatchedCard {
   /** Roadmap item id (full uuid). */
@@ -1561,20 +1563,16 @@ export interface DispatchedCard {
   title: string;
   /** Roadmap kind ('directive', 'feature', ...): a lead reads the wave by it. */
   kind: string;
-  /**
-   * peer_ids whose live tile was resolved AND hit. The three buckets below
-   * mirror resolveDirectiveTargets (desktop/src/main/directive.ts) exactly:
-   * `ambiguous` is a SUBSET of `missing`, never of `matched` — since commit
-   * 73b5e67 an id carried by several live tiles is refused rather than routed
-   * to the first one found. Reporting it separately is what tells the caller
-   * WHY a target was not hit, instead of leaving it indistinguishable from an
-   * unreachable one.
-   */
+  /** Peer ids whose command was written to a live terminal. */
   matched: string[];
   /** Requested peer_ids no live tile answered for (includes every `ambiguous`). */
   missing: string[];
   /** Refused for collision: several live tiles carry this peer_id. */
   ambiguous: string[];
+  /** Settled terminal injection refusals, absent when produced by an older Deck. */
+  refused?: { peerId: string; reason: DispatchRefusalReason }[];
+  /** Terminal injections unresolved at the reporting deadline. */
+  pending?: string[];
 }
 
 export interface DispatchRequestOutcome {

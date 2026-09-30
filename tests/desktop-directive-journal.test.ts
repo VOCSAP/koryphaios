@@ -106,7 +106,7 @@ test("dispatchedTargetsTail: counts only, singular/plural, and an explicit zero"
   expect(dispatchedTargetsTail(0, 3)).toBe("no target reached, 3 unreached");
 });
 
-test("runDirectiveOn reports absent and ambiguous targets in the result and journal", () => {
+test("runDirectiveOn reports absent and ambiguous targets in the result and journal", async () => {
   const sessions = [
     { id: "one", peerId: "twin", status: "running" },
     { id: "two", peerId: "twin", status: "running" }
@@ -120,9 +120,11 @@ test("runDirectiveOn reports absent and ambiguous targets in the result and jour
     journal: (line) => journal.push(line),
     reportError: () => undefined
   };
-  const result = runDirectiveOn("clear", ["gone", "twin"], undefined, "reset", deps);
+  const result = await runDirectiveOn("clear", ["gone", "twin"], undefined, "reset", deps);
   expect(result).toEqual({
     injected: [],
+    refused: [],
+    pending: [],
     unreached: [
       { peerId: "gone", reason: "no-live-target" },
       { peerId: "twin", reason: "ambiguous" }

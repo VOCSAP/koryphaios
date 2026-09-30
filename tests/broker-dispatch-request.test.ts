@@ -73,6 +73,8 @@ const OUTCOME: DispatchRequestOutcome = {
       matched: ["reviewer-1", "reviewer-2"],
       missing: ["reviewer-3"],
       ambiguous: ["reviewer-3"],
+      refused: [{ peerId: "reviewer-4", reason: "refused-modal" }],
+      pending: ["reviewer-5"],
     },
   ],
   note: "1 card dispatched",
@@ -168,11 +170,6 @@ test("resolve round-trips the whole outcome, buckets included", async () => {
   expect(res.status).toBe(200);
   expect(res.body.request.status).toBe("done");
   expect(res.body.request.resolved_at).toBeTruthy();
-  // Field by field rather than a shape check: an outcome that survives the
-  // JSON column but drops `ambiguous` would still be a "done" request, and
-  // `ambiguous` is exactly what tells the caller WHY a tile was not hit
-  // (commit 73b5e67 refuses a peer_id carried by several live tiles instead
-  // of routing to the first one found).
   const card = res.body.request.outcome?.cards[0];
   expect(card?.id).toBe(OUTCOME.cards[0]!.id);
   expect(card?.title).toBe("Purge the reviewers");
@@ -180,6 +177,8 @@ test("resolve round-trips the whole outcome, buckets included", async () => {
   expect(card?.matched).toEqual(["reviewer-1", "reviewer-2"]);
   expect(card?.missing).toEqual(["reviewer-3"]);
   expect(card?.ambiguous).toEqual(["reviewer-3"]);
+  expect(card?.refused).toEqual([{ peerId: "reviewer-4", reason: "refused-modal" }]);
+  expect(card?.pending).toEqual(["reviewer-5"]);
   expect(res.body.request.outcome?.note).toBe("1 card dispatched");
 });
 
@@ -239,10 +238,51 @@ test("a hostile outcome is flattened and bounded before it can reach an agent's 
   expect(outcome.cards[0]!.matched).toHaveLength(50);
 });
 
+test("supplemental outcome fields are bounded and refusal reasons are fail-closed", async () => {
+  const peer = await register(PK);
+  const request = await park(peer);
+  const res = await post<AddRes>(`${broker.url}/dispatch-request/resolve`, {
+    id: request.id,
+    outcome: {
+      note: "n",
+      cards: [
+        {
+          id: "c",
+          title: "t",
+          kind: "directive",
+          matched: [],
+          missing: [],
+          ambiguous: [],
+          refused: Array.from({ length: 200 }, (_, i) => ({
+            peerId: `refused-${i}`,
+            reason: "busy-timeout",
+            extra: `discard-${i}`
+          })),
+          pending: Array.from({ length: 200 }, (_, i) => `pending-${i}`),
+        },
+        {
+          id: "invalid",
+          title: "invalid refusal",
+          kind: "directive",
+          matched: [],
+          missing: [],
+          ambiguous: [],
+          refused: [{ peerId: "peer", reason: "unknown-reason" }],
+          pending: [],
+        },
+      ],
+    },
+  });
+
+  expect(res.status).toBe(200);
+  const cards = res.body.request.outcome!.cards;
+  expect(cards[0]!.refused).toHaveLength(50);
+  expect(cards[0]!.refused![0]).toEqual({ peerId: "refused-0", reason: "busy-timeout" });
+  expect(cards[0]!.pending).toHaveLength(50);
+  expect(cards[1]!.refused).toEqual([]);
+});
+
 test("an unknown extra property is dropped, not projected onward", async () => {
-  // Fail-CLOSED rebuild (CLAUDE.md's rest-spread precedent, toPublicPeer): the
-  // sanitiser reconstructs every declared field instead of spreading, so a
-  // field the Deck invents cannot ride along into the caller's context.
   const peer = await register(PK);
   const request = await park(peer);
   const res = await post<AddRes>(`${broker.url}/dispatch-request/resolve`, {

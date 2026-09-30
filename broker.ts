@@ -177,6 +177,7 @@ import type {
   TilePeersRequest,
   TilePeersResponse,
   DispatchedCard,
+  DispatchRefusalReason,
   Approval,
   ApprovalAddRequest,
   ApprovalAddResponse,
@@ -8464,14 +8465,25 @@ function cleanDispatchTargets(v: unknown): string[] {
     .filter((t) => t.length > 0);
 }
 
-/**
- * Flatten a Deck-supplied outcome before it can be parked and read back by an
- * agent. Hostile-input class 2 (CLAUDE.md): this crosses the broker HTTP
- * boundary in BOTH directions, so nothing here may keep a control byte, an
- * ANSI sequence or an unbounded length. Total, not partial: every field the
- * wire type declares is rebuilt from scratch, so an unknown extra property in
- * the request body is dropped rather than projected onward.
- */
+const DISPATCH_REFUSAL_REASONS = new Set<DispatchRefusalReason>([
+  "refused-modal",
+  "busy-timeout",
+  "no-terminal",
+  "error",
+]);
+
+function cleanDispatchRefusals(v: unknown): NonNullable<DispatchedCard["refused"]> {
+  if (!Array.isArray(v)) return [];
+  return v.slice(0, DISPATCH_OUTCOME_MAX_TARGETS).flatMap((entry) => {
+    const refusal = (typeof entry === "object" && entry !== null ? entry : {}) as Record<string, unknown>;
+    const peerId = cleanDispatchText(refusal.peerId, DISPATCH_OUTCOME_MAX_TEXT);
+    const reason = refusal.reason;
+    if (!peerId || typeof reason !== "string" || !DISPATCH_REFUSAL_REASONS.has(reason as DispatchRefusalReason)) return [];
+    return [{ peerId, reason: reason as DispatchRefusalReason }];
+  });
+}
+
+/** Rebuild explicitly so unrecognized input fields cannot cross the agent boundary. */
 function sanitizeDispatchOutcome(v: unknown): DispatchRequestOutcome {
   const src = (typeof v === "object" && v !== null ? v : {}) as Record<string, unknown>;
   const rawCards = Array.isArray(src.cards) ? src.cards.slice(0, DISPATCH_OUTCOME_MAX_CARDS) : [];
@@ -8484,6 +8496,8 @@ function sanitizeDispatchOutcome(v: unknown): DispatchRequestOutcome {
       matched: cleanDispatchTargets(card.matched),
       missing: cleanDispatchTargets(card.missing),
       ambiguous: cleanDispatchTargets(card.ambiguous),
+      refused: cleanDispatchRefusals(card.refused),
+      pending: cleanDispatchTargets(card.pending),
     };
   });
   return { cards, note: cleanDispatchText(src.note, DISPATCH_OUTCOME_MAX_TEXT) };

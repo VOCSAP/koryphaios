@@ -236,25 +236,11 @@ export function unresolvedDirectiveNote(item: RoadmapItem): string {
 
 export interface DirectiveWaveDeps {
   markDone: (item: RoadmapItem) => Promise<void>
-  /**
-   * Executes ONE directive card and reports what it reached (card bf76d37f).
-   * The report is the executor's own resolver output, never re-derived here:
-   * this module owns no liveness predicate and must not grow one.
-   */
+  /** Uses executor-owned resolver buckets so this layer never re-derives liveness. */
   execute: (item: RoadmapItem) => Promise<DirectiveDispatch>
   journal: (line: string) => void
   reportError: (message: string, error: unknown) => void
-  /**
-   * Card 249ed831 (form b): called once, right after `execute` resolves, when
-   * and ONLY when the card was consumed with NOTHING done -- the exact
-   * predicate is `report.directive !== null && report.injected.length === 0`,
-   * checked by the caller below, not by this dep. `directive !== null`
-   * excludes the separate parse-refusal branch (an invalid command, already
-   * reported through `reportError` inside `execute` itself); this hook is
-   * only for a VALID command that resolved zero live targets. Its failure is
-   * caught by the caller and routed through `reportError` -- it must never
-   * abort the wave or drop `report` from `executed`.
-   */
+  /** Called only after a valid directive settles with no writes or pending targets. */
   noteUnresolved: (item: RoadmapItem) => Promise<void>
 }
 
@@ -287,11 +273,8 @@ export async function runDirectiveWave(
           report.unreached.length
         )}`
       )
-      // `directive !== null`, not `injected.length === 0`, is what
-      // distinguishes a parse-refusal (excluded here) from a
-      // resolved-but-unreached card: the parse-refusal branch also reaches this
-      // code with an empty `injected`.
-      if (report.directive !== null && report.injected.length === 0) {
+      // Parse refusals use directive:null and must not receive unresolved notes.
+      if (report.directive !== null && report.injected.length === 0 && (report.pending?.length ?? 0) === 0) {
         try {
           await deps.noteUnresolved(item)
         } catch (e) {
@@ -309,11 +292,6 @@ export async function runDirectiveWave(
   }
   return executed
 }
-
-// ---------------------------------------------------------------------------
-// Dispatch requests (card bf76d37f): an agent asks through its MCP tool, the
-// broker PARKS the request, the Deck serves it here and posts the outcome back.
-// ---------------------------------------------------------------------------
 
 /**
  * Projection, not derivation: the three buckets come straight from the
@@ -334,7 +312,9 @@ export function composeDispatchOutcome(result: DispatchResult): DispatchRequestO
         kind: 'directive',
         matched: d.injected.map((t) => t.peerId),
         missing,
-        ambiguous: d.unreached.filter((u) => u.reason === 'ambiguous').map((u) => u.peerId)
+        ambiguous: d.unreached.filter((u) => u.reason === 'ambiguous').map((u) => u.peerId),
+        ...(d.refused ? { refused: d.refused.map(({ peerId, reason }) => ({ peerId, reason })) } : {}),
+        ...(d.pending ? { pending: d.pending.map((t) => t.peerId) } : {})
       }
     }),
     ...(result.dispatched ?? []).map((m): DispatchedCard => ({

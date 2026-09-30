@@ -33,12 +33,6 @@ export interface DirectiveRunDeps {
   reportError(message: string, error?: unknown): void
 }
 
-export interface DirectiveRunResult {
-  injected: { tileId: string; peerId: string }[]
-  unreached: UnreachedDirectiveTarget[]
-  error?: 'directive execution failed'
-}
-
 type DirectiveTarget = { tileId: string; peerId: string }
 
 /** 'refused-modal' also covers needsAttention and rateLimited; 'error' is a rejected injection. */
@@ -206,20 +200,14 @@ function launchDirective(
   }
 }
 
-/** Card path: fire-and-forget, `injected` lists every target the command was launched at. */
-export function runDirectiveOn(
+export async function runDirectiveOn(
   cmd: RoadmapDirective,
   peerIds: string[],
   prompt: string | undefined,
   label: string,
   deps: DirectiveRunDeps
-): DirectiveRunResult {
-  const run = launchDirective(cmd, peerIds, prompt, label, deps)
-  return {
-    injected: run.launched.map(({ tileId, peerId }) => ({ tileId, peerId })),
-    unreached: run.unreached,
-    ...(run.error ? { error: run.error } : {})
-  }
+): Promise<DeckDirectiveRunResult> {
+  return settleLaunch(launchDirective(cmd, peerIds, prompt, label, deps), DIRECTIVE_REPORT_WAIT_MS)
 }
 
 async function settleLaunch(run: DirectiveLaunch, waitMs: number): Promise<DeckDirectiveRunResult> {
@@ -244,16 +232,16 @@ async function settleLaunch(run: DirectiveLaunch, waitMs: number): Promise<DeckD
   return result
 }
 
-export function executeDirectiveItem(
+export async function executeDirectiveItem(
   item: { id: string; title: string; directive?: unknown; target_peer_ids: string[] },
   deps: DirectiveRunDeps
-): DirectiveDispatch {
+): Promise<DirectiveDispatch> {
   const cmd = item.directive
   if (!isDirectiveCommand(cmd)) {
     deps.reportError(`directive card "${item.title}" carries no valid command; skipped`)
     return { id: item.id, title: item.title, directive: null, injected: [], unreached: [] }
   }
-  const run = runDirectiveOn(cmd, item.target_peer_ids, undefined, item.title, deps)
+  const run = await runDirectiveOn(cmd, item.target_peer_ids, undefined, item.title, deps)
   return { id: item.id, title: item.title, directive: cmd, ...run }
 }
 

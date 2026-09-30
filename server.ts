@@ -1051,13 +1051,8 @@ function roadmapProof(): Record<string, string> {
   return myInstanceToken ? { instance_token: myInstanceToken } : {};
 }
 
-/**
- * Card bf76d37f. Render what the wave ACTUALLY did. Never "ok": the caller
- * must be able to tell "dispatched to these tiles" from "nothing was queued"
- * from "still running", because a directive card is marked done before it is
- * executed and its status therefore acknowledges nothing.
- */
-function renderDispatchOutcome(request: DispatchRequest): string {
+/** A completed roadmap card may still have no execution outcome. */
+export function renderDispatchOutcome(request: DispatchRequest): string {
   if (request.status !== "done" || !request.outcome) {
     return `Dispatch requested (id ${request.id}) — the Deck had not answered within the wait. The request is PARKED broker-side, not lost: the Deck runs it and announces the outcome on this channel. Do not assume it ran.`;
   }
@@ -1072,6 +1067,12 @@ function renderDispatchOutcome(request: DispatchRequest): string {
     if (c.ambiguous.length > 0) {
       parts.push(`    refused as ambiguous (several live tiles share the id): ${c.ambiguous.join(", ")}`);
     }
+    const refused = c.refused ?? [];
+    if (refused.length > 0) {
+      parts.push(`    refused: ${refused.map(({ peerId, reason }) => `${peerId} (${reason})`).join(", ")}`);
+    }
+    const pending = c.pending ?? [];
+    if (pending.length > 0) parts.push(`    pending: ${pending.join(", ")}`);
     return parts.join("\n");
   });
   return `Dispatch ran. ${cards.length} card(s) dispatched:\n${lines.join("\n")}${note ? `\n${note}` : ""}`;

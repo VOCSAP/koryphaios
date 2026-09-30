@@ -93,7 +93,7 @@ test("a directive card and deck_run_directive reach the same targets for every d
   const ids = ["alpha", "twin", "gone"];
   for (const directive of directiveCommands()) {
     const card = recorder(LIVE());
-    const cardResult = executeDirectiveItem(
+    const cardResult = await executeDirectiveItem(
       { id: "card-1", title: "reset the team", directive, target_peer_ids: ids },
       card.deps
     );
@@ -250,7 +250,7 @@ test("the report cap is far below the 120 s idle wait so a caller targeting its 
 
 test("runDirectiveOn reaches only single live tiles and reports the absent and the ambiguous", async () => {
   const r = recorder(LIVE());
-  const out = runDirectiveOn("clear", ["alpha", "twin", "gone"], undefined, "x", r.deps);
+  const out = await runDirectiveOn("clear", ["alpha", "twin", "gone"], undefined, "x", r.deps);
   await r.settle();
   expect(out.injected).toEqual([{ tileId: "t1", peerId: "alpha" }]);
   expect(out.unreached).toEqual([
@@ -263,7 +263,7 @@ test("runDirectiveOn reaches only single live tiles and reports the absent and t
 
 test("a compact prompt is typed after /compact, the journal keeps the bare command", async () => {
   const r = recorder(LIVE());
-  runDirectiveOn("compact", ["alpha"], "keep the API decisions", "x", r.deps);
+  await runDirectiveOn("compact", ["alpha"], "keep the API decisions", "x", r.deps);
   await r.settle();
   expect(r.typed).toEqual([{ tileId: "t1", keys: "/compact keep the API decisions" }]);
   expect(r.journal).toEqual(['directive /compact -> "alpha": written']);
@@ -271,7 +271,7 @@ test("a compact prompt is typed after /compact, the journal keeps the bare comma
 
 test("an invalid card directive is refused before any resolution, with nothing typed", async () => {
   const r = recorder(LIVE());
-  const out = executeDirectiveItem(
+  const out = await executeDirectiveItem(
     { id: "c", title: "bad", directive: "hello" as never, target_peer_ids: ["alpha"] },
     r.deps
   );
@@ -415,23 +415,21 @@ test("the tool's directive check is the card's own predicate", () => {
   }
 });
 
-test("runDirectiveOn returns a clean error when a dependency throws", () => {
+test("runDirectiveOn returns a clean error when a dependency throws", async () => {
   for (const name of ["listSessions", "resolveMagic"] as const) {
     const r = recorder(LIVE());
     const cause = new Error(`${name} failed`);
-    let run: () => unknown;
     if (name === "listSessions") {
       r.deps.listSessions = () => { throw cause; };
-      run = () => runDirectiveOn("clear", ["alpha"], undefined, "x", r.deps);
+      expect(await runDirectiveOn("clear", ["alpha"], undefined, "x", r.deps), name).toEqual({
+        injected: [], refused: [], pending: [], unreached: [], error: "directive execution failed"
+      });
     } else {
       r.deps.resolveMagic = () => { throw cause; };
-      run = () => runDirectiveOn("magic_compact", ["alpha"], undefined, "x", r.deps);
+      expect(await runDirectiveOn("magic_compact", ["alpha"], undefined, "x", r.deps), name).toEqual({
+        injected: [], refused: [], pending: [], unreached: [], error: "directive execution failed"
+      });
     }
-    let result: unknown;
-    expect(() => {
-      result = run();
-    }, name).not.toThrow();
-    expect(result, name).toEqual({ injected: [], unreached: [], error: "directive execution failed" });
     expect(r.errors, name).toEqual([{ message: "directive execution failed", error: cause }]);
   }
 });
@@ -481,9 +479,11 @@ test("runDirectiveOn retains targets injected before a synchronous later failure
     return Promise.resolve("written");
   };
 
-  const result = runDirectiveOn("clear", ["alpha", "beta"], undefined, "x", r.deps);
+  const result = await runDirectiveOn("clear", ["alpha", "beta"], undefined, "x", r.deps);
   expect(result).toEqual({
     injected: [{ tileId: "first", peerId: "alpha" }],
+    refused: [],
+    pending: [],
     unreached: [],
     error: "directive execution failed"
   });
@@ -529,7 +529,9 @@ test("createRunDirectiveAdapter forwards the directive, ids, prompt and caller t
 test("createDirectiveBindings invokes the card executor and deck adapter with its shared deps", () => {
   const deps = {} as DirectiveRunDeps;
   const item = { id: "card-1", title: "reset", directive: "clear", target_peer_ids: ["alpha"] };
-  const cardResult = { id: "card-1", title: "reset", directive: "clear" as RoadmapDirective, injected: [], unreached: [] };
+  const cardResult = Promise.resolve({
+    id: "card-1", title: "reset", directive: "clear" as RoadmapDirective, injected: [], unreached: []
+  });
   const deckResult = Promise.resolve({ injected: [], refused: [], pending: [], unreached: [] });
   const cardCalls: unknown[][] = [];
   const adapterDeps: DirectiveRunDeps[] = [];
@@ -555,27 +557,89 @@ test("createDirectiveBindings invokes the card executor and deck adapter with it
   expect(deckCalls).toEqual([["clear", ["alpha"], undefined, "team-lead-a1b2", true]]);
 });
 
-test("runDirectiveOn reports the original asynchronous injection rejection after dispatch", async () => {
+test("runDirectiveOn excludes an asynchronously rejected injection from its injected targets", async () => {
   const r = recorder([session("t1", "alpha")]);
   const cause = new Error("terminal unavailable");
   r.deps.injectCommand = () => Promise.reject(cause);
 
-  const result = runDirectiveOn("clear", ["alpha"], undefined, "x", r.deps);
-  await r.settle();
+  const result = await runDirectiveOn("clear", ["alpha"], undefined, "x", r.deps);
 
-  expect(result).toEqual({ injected: [{ tileId: "t1", peerId: "alpha" }], unreached: [] });
+  expect(result).toEqual({
+    injected: [],
+    refused: [{ tileId: "t1", peerId: "alpha", reason: "error" }],
+    pending: [],
+    unreached: []
+  });
   expect(r.errors).toEqual([{ message: 'directive injection failed for "alpha"', error: cause }]);
 });
 
-test("runDirectiveOn reports the original asynchronous magic rejection after dispatch", async () => {
+test("executeDirectiveItem reports a card injection refusal instead of an injected target", async () => {
+  const r = recorder([session("t1", "alpha")]);
+  r.deps.injectCommand = async () => "refused-modal";
+
+  const result = await executeDirectiveItem(
+    { id: "card-1", title: "Clear the team", directive: "clear", target_peer_ids: ["alpha"] },
+    r.deps
+  );
+
+  expect(result).toEqual({
+    id: "card-1",
+    title: "Clear the team",
+    directive: "clear",
+    injected: [],
+    refused: [{ tileId: "t1", peerId: "alpha", reason: "refused-modal" }],
+    pending: [],
+    unreached: []
+  });
+});
+
+test("executeDirectiveItem reports an unresolved card injection as pending", async () => {
+  const r = recorder([session("t1", "alpha")]);
+  r.deps.injectCommand = () => new Promise<"written">(() => {});
+
+  const result = await executeDirectiveItem(
+    { id: "card-1", title: "Clear the team", directive: "clear", target_peer_ids: ["alpha"] },
+    r.deps
+  );
+
+  expect(result).toEqual({
+    id: "card-1",
+    title: "Clear the team",
+    directive: "clear",
+    injected: [],
+    refused: [],
+    pending: [{ tileId: "t1", peerId: "alpha" }],
+    unreached: []
+  });
+});
+
+test("runDirectiveOn reports an unresolved injection as pending at the report deadline", async () => {
+  const r = recorder([session("t1", "alpha")]);
+  r.deps.injectCommand = () => new Promise<"written">(() => {});
+
+  const result = await runDirectiveOn("clear", ["alpha"], undefined, "x", r.deps);
+
+  expect(result).toEqual({
+    injected: [],
+    refused: [],
+    pending: [{ tileId: "t1", peerId: "alpha" }],
+    unreached: []
+  });
+});
+
+test("runDirectiveOn reports an asynchronous magic rejection as refused", async () => {
   const r = recorder([session("t1", "alpha")]);
   const cause = new Error("plugin unavailable");
   r.deps.runMagicCompact = () => Promise.reject(cause);
 
-  const result = runDirectiveOn("magic_compact", ["alpha"], undefined, "x", r.deps);
-  await r.settle();
+  const result = await runDirectiveOn("magic_compact", ["alpha"], undefined, "x", r.deps);
 
-  expect(result).toEqual({ injected: [{ tileId: "t1", peerId: "alpha" }], unreached: [] });
+  expect(result).toEqual({
+    injected: [],
+    refused: [{ tileId: "t1", peerId: "alpha", reason: "error" }],
+    pending: [],
+    unreached: []
+  });
   expect(r.errors).toEqual([{ message: 'magic_compact failed for "alpha"', error: cause }]);
 });
 

@@ -868,32 +868,13 @@ export interface RoadmapWandDraft {
   mode: "replace" | "append"
 }
 
-/**
- * ONE requested peer_id a directive card never reached, and WHY (card
- * bf76d37f). The distinction already exists in the resolver
- * (desktop/src/main/directive.ts, `DirectiveTargets.ambiguous` is a subset of
- * `missing`) and in the journal wording (`unreachedTargetsText`); this type
- * only stops it from being thrown away at the executor's return.
- *
- * 'no-live-target' = absent, dormant, exited or malformed. 'ambiguous' = the
- * id matched MORE THAN ONE live tile and was refused for safety, so the target
- * exists -- twice -- which is why it must never be reported as absent.
- */
+/** An ambiguous target is unreached but remains distinct from an absent target. */
 export interface UnreachedDirectiveTarget {
   peerId: string
   reason: 'no-live-target' | 'ambiguous'
 }
 
-/**
- * What ONE directive card actually reached when the Deck executed it (card
- * bf76d37f). Purely a REPORT: it records the resolver's own buckets, it never
- * re-derives liveness -- a second liveness predicate is exactly the drift card
- * 6c380073 closed.
- *
- * Why this exists at all: `runDirectiveWave` is mark-then-execute, so the card
- * reads `done` in the roadmap before its execution is even attempted. The card
- * status therefore cannot answer "what was really hit"; only this can.
- */
+/** Execution outcome for one directive card; it never recomputes liveness. */
 export interface DirectiveDispatch {
   /** The directive card's id. */
   id: string
@@ -901,20 +882,20 @@ export interface DirectiveDispatch {
   title: string
   /**
    * The command actually executed, or `null` when the card carried no valid
-   * one and was refused BEFORE any target resolution happened. That null is
+   * one and was refused before any target resolution happened. That null is
    * the discriminant for "nothing was resolved": on that path `injected` and
-   * `unreached` are both empty because no bucket was ever computed, NOT
+   * `unreached` are both empty because no bucket was ever computed, not
    * because every requested id was reached.
    */
   directive: RoadmapDirective | null
-  /**
-   * The live tiles the command was typed into: the resolver's `matched`,
-   * one entry per tile. Dispatched, not necessarily completed -- each
-   * injection reports its own outcome asynchronously in the journal.
-   */
+  /** The live tiles whose command was written, one entry per tile. */
   injected: { tileId: string; peerId: string }[]
   /** Requested peer_ids that reached no tile, each with its reason. */
   unreached: UnreachedDirectiveTarget[]
+  /** Targets whose injection settled without writing to the terminal. */
+  refused?: { tileId: string; peerId: string; reason: 'refused-modal' | 'busy-timeout' | 'no-terminal' | 'error' }[]
+  /** Targets whose injection did not settle before the report deadline. */
+  pending?: { tileId: string; peerId: string }[]
 }
 
 /** Result of a queue dispatch to the team-lead (PLAN C15). */

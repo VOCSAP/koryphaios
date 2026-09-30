@@ -329,9 +329,6 @@ test("splitWave: an all-normal or all-directive wave leaves the other bucket emp
   expect(splitWave([item({ id: "a", kind: "directive" })]).normal).toEqual([]);
 });
 
-// Directive drain ordering (roadmap card b1932a6a): mark-then-execute, not
-// execute-then-mark. See runDirectiveWave's doc comment in dispatch.ts.
-
 /** A report shaped like executeDirective's, with nothing resolved by default. */
 function report(over: Partial<DirectiveDispatch> = {}): DirectiveDispatch {
   return {
@@ -339,7 +336,9 @@ function report(over: Partial<DirectiveDispatch> = {}): DirectiveDispatch {
     title: over.title ?? "t",
     directive: over.directive ?? "clear",
     injected: over.injected ?? [],
-    unreached: over.unreached ?? []
+    unreached: over.unreached ?? [],
+    refused: over.refused,
+    pending: over.pending
   };
 }
 
@@ -370,7 +369,6 @@ function mockDirectiveDeps(
       },
       journal: (line: string) => journaled.push(line),
       reportError: (message: string, error: unknown) => reported.push({ message, error }),
-      // Card 249ed831 (form b).
       noteUnresolved: async (it: RoadmapItem) => {
         order.push(`note:${it.id}`);
         if (opts.noteThrowsForIds?.has(it.id)) throw new Error(`note failed for ${it.id}`);
@@ -383,16 +381,9 @@ function mockDirectiveDeps(
 test("runDirectiveWave: marks done BEFORE executing (mark-then-execute, not the reverse)", async () => {
   const { order, deps } = mockDirectiveDeps();
   await runDirectiveWave([item({ id: "a", kind: "directive", directive: "clear" })], deps);
-  // The default mock report (directive:'clear', injected:[]) is itself an
-  // unresolved-target outcome (card 249ed831), so the note fires too -- see
-  // the dedicated noteUnresolved tests below for its own ordering/predicate.
   expect(order).toEqual(["mark:a", "execute:a", "note:a"]);
 });
 
-// The failure-path assertion the card's briefing calls out explicitly: a
-// throwing execute must surface as a JOURNAL LINE, not merely as "markDone
-// was called" or "the card is done" -- a status-only assertion would pass
-// even if the journal call were deleted entirely.
 test("runDirectiveWave: execute throwing after the mark is journaled, not swallowed", async () => {
   const { order, journaled, reported, deps } = mockDirectiveDeps({ throwForIds: new Set(["a"]) });
   await runDirectiveWave([item({ id: "a", kind: "directive", directive: "clear", title: "Clear all" })], deps);
@@ -512,18 +503,12 @@ test("runDirectiveWave: the dispatched journal line carries the hit/miss counts 
   expect(journaled[0]).not.toContain("gone");
 });
 
-// Card 249ed831 (form b): a directive card marked done with zero targets
-// resolved must post the operator-visible note, on the exact predicate
-// `report.directive !== null && report.injected.length === 0` -- not a
-// heuristic reconstructed from the item or from `unreached`.
-
 test("runDirectiveWave: posts the unresolved note when zero targets are resolved (directive stays non-null)", async () => {
   const { noted, order, deps } = mockDirectiveDeps({
     reports: { a: report({ id: "a", directive: "clear", injected: [], unreached: [{ peerId: "gone", reason: "no-live-target" }] }) }
   });
   await runDirectiveWave([item({ id: "a", kind: "directive", directive: "clear" })], deps);
   expect(noted).toEqual(["a"]);
-  // Runs AFTER the journal line, not interleaved before it.
   expect(order).toEqual(["mark:a", "execute:a", "note:a"]);
 });
 
@@ -537,13 +522,41 @@ test("runDirectiveWave: does NOT post the note when the card resolved at least o
   expect(noted).toEqual([]);
 });
 
+test("runDirectiveWave: does NOT post the note while an unwritten target is pending", async () => {
+  const pendingReport = report({
+    id: "a",
+    directive: "clear",
+    injected: [],
+    pending: [{ tileId: "t1", peerId: "peer-a" }]
+  });
+  const { noted, order, deps } = mockDirectiveDeps({ reports: { a: pendingReport } });
+
+  const out = await runDirectiveWave([item({ id: "a", kind: "directive", directive: "clear" })], deps);
+
+  expect(noted).toEqual([]);
+  expect(order).toEqual(["mark:a", "execute:a"]);
+  expect(out).toEqual([pendingReport]);
+});
+
+test("runDirectiveWave: posts the unresolved note when every attempted target refuses", async () => {
+  const { noted, deps } = mockDirectiveDeps({
+    reports: {
+      a: report({
+        id: "a",
+        directive: "clear",
+        injected: [],
+        refused: [{ tileId: "t1", peerId: "peer-a", reason: "refused-modal" }],
+        pending: []
+      })
+    }
+  });
+
+  await runDirectiveWave([item({ id: "a", kind: "directive", directive: "clear" })], deps);
+
+  expect(noted).toEqual(["a"]);
+});
+
 test("runDirectiveWave: does NOT post the note on the parse-refusal report (directive: null)", async () => {
-  // Shape executeDirective actually returns when isDirectiveCommand(cmd) is
-  // false (index.ts): directive:null, injected:[] -- injected is empty here
-  // too, so `directive !== null` is the ONLY thing distinguishing this from
-  // the branch that must fire. Built by hand, not via report(): that helper's
-  // `over.directive ?? "clear"` default treats an explicit `null` as "not
-  // provided" (nullish coalescing) and silently substitutes "clear".
   const { noted, deps } = mockDirectiveDeps({
     reports: { a: { id: "a", title: "t", directive: null, injected: [], unreached: [] } }
   });
@@ -558,15 +571,12 @@ test("runDirectiveWave: noteUnresolved throwing is reported, not fatal -- the wa
     noteThrowsForIds: new Set(["a"])
   });
   const out = await runDirectiveWave([item({ id: "a", kind: "directive", directive: "clear" })], deps);
-  expect(noted).toEqual([]); // threw before pushing
-  expect(out).toEqual([unresolvedReport]); // execute's own result is unaffected
+  expect(noted).toEqual([]);
+  expect(out).toEqual([unresolvedReport]);
   expect(reported).toHaveLength(1);
   expect(reported[0]!.message).toContain("unresolved-target note");
   expect(reported[0]!.error).toBeInstanceOf(Error);
 });
-
-// Card 249ed831, reviewer round 2 point 5: two distinct causes, two distinct
-// (and mutually exclusive) recommendations.
 
 test("unresolvedDirectiveNote: empty target_peer_ids gets the 'set targets first' note, not the re-queue one", () => {
   expect(unresolvedDirectiveNote(item({ target_peer_ids: [] }))).toBe(NO_TARGET_REQUESTED_NOTE);
@@ -720,6 +730,38 @@ test("composeDispatchOutcome: the three buckets are PROJECTED, ambiguous stays a
   expect(c.missing).toEqual(["gone", "dup"]);
   expect(c.ambiguous).toEqual(["dup"]);
   for (const a of c.ambiguous) expect(c.missing).toContain(a);
+});
+
+test("composeDispatchOutcome: refused and pending targets are separate from matched", () => {
+  const out = composeDispatchOutcome({
+    sent: true,
+    count: 1,
+    titles: ["Clear the team"],
+    directives: [
+      {
+        id: "d1",
+        title: "Clear the team",
+        directive: "clear",
+        injected: [{ tileId: "t-written", peerId: "written" }],
+        refused: [{ tileId: "t-refused", peerId: "refused", reason: "refused-modal" }],
+        pending: [{ tileId: "t-pending", peerId: "pending" }],
+        unreached: []
+      }
+    ]
+  });
+
+  expect(out.cards).toEqual([
+    {
+      id: "d1",
+      title: "Clear the team",
+      kind: "directive",
+      matched: ["written"],
+      missing: [],
+      ambiguous: [],
+      refused: [{ peerId: "refused", reason: "refused-modal" }],
+      pending: ["pending"]
+    }
+  ]);
 });
 
 test("composeDispatchOutcome: a mixed wave reports both families, directives first, each with its kind", () => {
