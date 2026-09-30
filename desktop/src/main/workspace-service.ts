@@ -194,6 +194,7 @@ export class WorkspaceService {
   private held: LockConnection | null = null
   private persistedName: { id: string; name: string } | null = null
   private heartbeatTimer: NodeJS.Timeout | null = null
+  private heartbeatFailureWorkspaceId: string | null = null
   private pruneTimer: NodeJS.Timeout | null = null
 
   constructor(private deps: WorkspaceDeps) {
@@ -353,52 +354,41 @@ export class WorkspaceService {
     return true
   }
 
-  /**
-   * Body of the heartbeat timer, extracted to a named method so a test can
-   * call it directly and prove the two things that matter -- it passes THIS
-   * instance's own identity (pid+host) to refreshLock(), and it self-ejects
-   * once on a mismatch rather than re-tracing every tick (card 438c15e3: a
-   * bare `setInterval(() => {...})` closure is unreachable from a test, so
-   * the wiring between the timer and `this.pid`/`this.host` would stay
-   * unproven -- exactly the "correct consumer nothing calls, or calls with
-   * the wrong argument" failure family). The remaining unproven surface is
-   * the one-line `setInterval(() => this.heartbeatTick(), ...)` above, which
-   * is greppable.
-   */
   private heartbeatTick(): void {
-    // heartbeatTimer null means either never started, or already stopped by
-    // a prior mismatch (below). Guarding on it here -- not only on the
-    // clearInterval call at the bottom -- is what makes "self-eject ONCE"
-    // true for a caller that invokes heartbeatTick() directly (a test, or
-    // any future non-timer caller), not merely for the real setInterval
-    // (which by construction can't fire again once cleared): without this
-    // guard, a second direct call after ejection would refreshLock() and
-    // reportError() again, since clearing the timer does not, on its own,
-    // stop the METHOD from running.
     if (!this.currentId || !this.heartbeatTimer) return
-    const refreshed = refreshLock(this.deps.projectDir, this.currentId, Date.now(), {
-      pid: this.pid,
-      host: this.host
-    })
-    if (!refreshed) {
-      const read = inspectLock(this.deps.projectDir, this.currentId)
-      if (this.held && !(read.kind === 'lock' && this.liveForeign(read.lock, Date.now()))) {
-        this.stampCurrent(this.currentId)
-        return
+    const id = this.currentId
+    try {
+      const refreshed = refreshLock(this.deps.projectDir, id, Date.now(), {
+        pid: this.pid,
+        host: this.host
+      })
+      if (!refreshed) {
+        const read = inspectLock(this.deps.projectDir, id)
+        if (this.held && !(read.kind === 'lock' && this.liveForeign(read.lock, Date.now()))) {
+          this.stampCurrent(id, false)
+          if (this.heartbeatFailureWorkspaceId !== id) {
+            reportError('workspace', `rewriting the missing, unreadable or dead JSON lock of the owned workspace ${id}`)
+          }
+        } else {
+          // A foreign owner cannot be refreshed by this instance.
+          reportError('workspace', `heartbeat lost ownership of workspace ${id}, stopping`)
+          if (this.heartbeatTimer) clearInterval(this.heartbeatTimer)
+          this.heartbeatTimer = null
+          if (this.held) releaseHeldLock(this.held)
+          this.held = null
+        }
       }
-      // Another instance now holds this lock -- keeping this timer alive
-      // would just re-stamp a foreign identity every tick. Log ONCE at the
-      // transition, then stop, and give the OS lock back with it.
-      reportError('workspace', `heartbeat lost ownership of workspace ${this.currentId}, stopping`)
-      if (this.heartbeatTimer) clearInterval(this.heartbeatTimer)
-      this.heartbeatTimer = null
-      if (this.held) releaseHeldLock(this.held)
-      this.held = null
+      this.heartbeatFailureWorkspaceId = null
+    } catch (error) {
+      if (this.heartbeatFailureWorkspaceId !== id) {
+        reportError('workspace', `heartbeat failed for workspace ${id}`, error)
+        this.heartbeatFailureWorkspaceId = id
+      }
     }
   }
 
-  private stampCurrent(id: string): void {
-    reportError('workspace', `rewriting the missing, unreadable or dead JSON lock of the owned workspace ${id}`)
+  private stampCurrent(id: string, report = true): void {
+    if (report) reportError('workspace', `rewriting the missing, unreadable or dead JSON lock of the owned workspace ${id}`)
     stampLock(this.deps.projectDir, id, { pid: this.pid, host: this.host, startedAt: this.startedAt, now: Date.now() })
   }
 

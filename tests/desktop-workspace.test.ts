@@ -50,15 +50,14 @@ const LEAK_MARKER = "leak-sentinel-xyz";
 
 const tmpDirs: string[] = [];
 const heldLocks = new Set<LockConnection>();
+const workspaceServices = new Set<WorkspaceService>();
 afterEach(() => {
+  for (const service of workspaceServices) service.releaseOnQuit();
+  workspaceServices.clear();
   for (const held of heldLocks) releaseHeldLock(held);
   heldLocks.clear();
   for (const d of tmpDirs.splice(0)) {
-    try {
-      rmSync(d, { recursive: true, force: true });
-    } catch {
-      /* best-effort */
-    }
+    rmSync(d, { recursive: true, force: true });
   }
 });
 
@@ -608,6 +607,12 @@ function fakeDeps(
   return deps;
 }
 
+function workspaceService(deps: WorkspaceDeps): WorkspaceService {
+  const service = new WorkspaceService(deps);
+  workspaceServices.add(service);
+  return service;
+}
+
 test("WorkspaceService.restore(): TOCTOU race lost between the top guard and own() still returns false, not silently true, and does NOT corrupt the OLD workspace's file (review correction D1, card 07134c6a)", () => {
   const proj = freshProject();
   ensureWorkspacesDir(proj);
@@ -631,7 +636,7 @@ test("WorkspaceService.restore(): TOCTOU race lost between the top guard and own
   saveWorkspace(proj, targetWs);
 
   const deps = fakeDeps(proj);
-  const svc = new WorkspaceService(deps);
+  const svc = workspaceService(deps);
 
   // Needs a real prior restore so currentId is non-null and its lock is
   // genuinely on disk: a freshly constructed service with currentId already
@@ -697,7 +702,7 @@ test("WorkspaceService.restore(): succeeds and owns the lock when nothing conten
   const ws = sampleWorkspace({ id: "wsp_target" });
   saveWorkspace(proj, ws);
   const deps = fakeDeps(proj);
-  const svc = new WorkspaceService(deps);
+  const svc = workspaceService(deps);
   const result = svc.restore("wsp_target", "attended");
   expect(result).toEqual({ ok: true });
   expect(svc.currentWorkspaceId).toBe("wsp_target");
@@ -711,7 +716,7 @@ test("WorkspaceService.restore(): a workspace id with no saved file resolves to 
   const proj = freshProject();
   ensureWorkspacesDir(proj);
   const deps = fakeDeps(proj);
-  const svc = new WorkspaceService(deps);
+  const svc = workspaceService(deps);
   const result = svc.restore("wsp_does_not_exist", "attended");
   expect(result).toEqual({ ok: false, reason: "missing" });
   expect(svc.currentWorkspaceId).not.toBe("wsp_does_not_exist");
@@ -723,7 +728,7 @@ test("WorkspaceService.restore(): a saved workspace with zero sessions resolves 
   const ws = sampleWorkspace({ id: "wsp_empty", sessions: [] });
   saveWorkspace(proj, ws);
   const deps = fakeDeps(proj);
-  const svc = new WorkspaceService(deps);
+  const svc = workspaceService(deps);
   const result = svc.restore("wsp_empty", "attended");
   expect(result).toEqual({ ok: false, reason: "empty" });
   // restoreFrom() must never run for an empty snapshot: it starts with
@@ -764,7 +769,7 @@ test("WorkspaceService.restore(): refuses when args are shell-bearing and confir
       return "declined";
     },
   });
-  const svc = new WorkspaceService(deps);
+  const svc = workspaceService(deps);
   const result = svc.restore("wsp_hostile", "attended");
   expect(result).toEqual({ ok: false, reason: "shell-declined" });
   // The exact shape of the vulnerability: restoreFrom() (-> startPty ->
@@ -802,7 +807,7 @@ test("WorkspaceService.restore(): refuses when a session carries only a bridge m
       return "declined";
     },
   });
-  const svc = new WorkspaceService(deps);
+  const svc = workspaceService(deps);
   expect(svc.restore("wsp_bridge_only", "attended")).toEqual({
     ok: false,
     reason: "shell-declined",
@@ -819,7 +824,7 @@ test("WorkspaceService.restore(): proceeds when args are shell-bearing and confi
   const ws = sampleWorkspace({ id: "wsp_approved" });
   saveWorkspace(proj, ws);
   const deps = fakeDeps(proj, { confirmShellFields: () => "approved" });
-  const svc = new WorkspaceService(deps);
+  const svc = workspaceService(deps);
   const result = svc.restore("wsp_approved", "attended");
   expect(result).toEqual({ ok: true });
 });
@@ -830,7 +835,7 @@ test("WorkspaceService.restore(): an unattended caller with an unapproved shell-
   const ws = sampleWorkspace({ id: "wsp_hostile_unattended" });
   saveWorkspace(proj, ws);
   const deps = fakeDeps(proj, { confirmShellFields: () => "unattended" });
-  const svc = new WorkspaceService(deps);
+  const svc = workspaceService(deps);
   const result = svc.restore("wsp_hostile_unattended", "unattended");
   expect(result).toEqual({ ok: false, reason: "unattended" });
   expect(deps.sessions).toEqual([fakeSession()]);
@@ -853,7 +858,7 @@ test("WorkspaceService.restore(): the caller's own attendance ('unattended') rea
       return "approved";
     },
   });
-  const svc = new WorkspaceService(deps);
+  const svc = workspaceService(deps);
   svc.restore("wsp_seen_unattended", "unattended");
   expect(seen).toEqual(["unattended"]);
 });
@@ -870,7 +875,7 @@ test("WorkspaceService.restore(): the caller's own attendance ('attended') reach
       return "approved";
     },
   });
-  const svc = new WorkspaceService(deps);
+  const svc = workspaceService(deps);
   svc.restore("wsp_seen_attended", "attended");
   expect(seen).toEqual(["attended"]);
 });
@@ -899,7 +904,7 @@ test("WorkspaceService.restore(): never asks for approval when no session carrie
       return "declined";
     },
   });
-  const svc = new WorkspaceService(deps);
+  const svc = workspaceService(deps);
   const result = svc.restore("wsp_benign", "attended");
   expect(result).toEqual({ ok: true });
   expect(confirmCalls).toBe(0);
@@ -941,7 +946,7 @@ test("WorkspaceService.restore(): refuses when a session's cwd is outside the pr
       return "declined";
     },
   });
-  const svc = new WorkspaceService(deps);
+  const svc = workspaceService(deps);
   const result = svc.restore("wsp_hostile_cwd", "attended");
   expect(result).toEqual({ ok: false, reason: "cwd-declined" });
   expect(deps.sessions).toEqual([fakeSession()]);
@@ -962,7 +967,7 @@ test("WorkspaceService.restore(): an unattended caller with an unapproved untrus
   });
   saveWorkspace(proj, ws);
   const deps = fakeDeps(proj, { confirmUntrustedCwd: () => "unattended" });
-  const svc = new WorkspaceService(deps);
+  const svc = workspaceService(deps);
   const result = svc.restore("wsp_hostile_cwd_unattended", "unattended");
   expect(result).toEqual({ ok: false, reason: "unattended" });
   expect(deps.sessions).toEqual([fakeSession()]);
@@ -993,7 +998,7 @@ test("WorkspaceService.restore(): the caller's own attendance reaches confirmUnt
       return "approved";
     },
   });
-  const svc = new WorkspaceService(deps);
+  const svc = workspaceService(deps);
   svc.restore("wsp_cwd_seen_unattended", "unattended");
   svc.restore("wsp_cwd_seen_attended", "attended");
   expect(seen).toEqual(["unattended", "attended"]);
@@ -1020,7 +1025,7 @@ test("WorkspaceService.restore(): proceeds when cwd is outside the project tree 
   });
   saveWorkspace(proj, ws);
   const deps = fakeDeps(proj, { confirmUntrustedCwd: () => "approved" });
-  const svc = new WorkspaceService(deps);
+  const svc = workspaceService(deps);
   const result = svc.restore("wsp_approved_cwd", "attended");
   expect(result).toEqual({ ok: true });
 });
@@ -1050,7 +1055,7 @@ test("WorkspaceService.restore(): never asks about cwd for the project root or a
       return "declined";
     },
   });
-  const svc = new WorkspaceService(deps);
+  const svc = workspaceService(deps);
   const result = svc.restore("wsp_worktrees", "attended");
   expect(result).toEqual({ ok: true });
   expect(confirmCalls).toBe(0);
@@ -1065,7 +1070,7 @@ test("WorkspaceService.heartbeatTick(): refreshes with THIS instance's own ident
   const proj = freshProject();
   ensureWorkspacesDir(proj);
   const deps = fakeDeps(proj); // pid: 4242, host: "this-host"
-  const svc = new WorkspaceService(deps);
+  const svc = workspaceService(deps);
   expect(svc.saveAuto()).not.toBeNull();
   const id = svc.currentWorkspaceId!;
   const tick = () => (svc as unknown as { heartbeatTick(): void }).heartbeatTick();
@@ -1108,13 +1113,139 @@ test("WorkspaceService.heartbeatTick(): refreshes with THIS instance's own ident
   expect(readLock(proj, id)).toEqual(foreignLock);
 });
 
+test("WorkspaceService.heartbeatTick(): reports a successful repair when no failure was reported", () => {
+  const proj = freshProject();
+  ensureWorkspacesDir(proj);
+  const svc = workspaceService(fakeDeps(proj, {
+    openLock: () => ({ exec: () => {}, close: () => {} }),
+  }));
+  expect(svc.saveAuto()).not.toBeNull();
+  const id = svc.currentWorkspaceId!;
+  const tick = () => (svc as unknown as { heartbeatTick(): void }).heartbeatTick();
+  const reported: Array<{ scope: string; text: string }> = [];
+
+  rmSync(workspacesDir(proj), { recursive: true, force: true });
+  ensureWorkspacesDir(proj);
+  onDeckError((scope, text) => reported.push({ scope, text }));
+  try {
+    tick();
+    tick();
+  } finally {
+    onDeckError(() => {});
+  }
+
+  expect(reported).toEqual([
+    expect.objectContaining({ scope: "workspace", text: expect.stringContaining(id) }),
+  ]);
+  expect(readLock(proj, id)).toEqual(expect.objectContaining({ pid: 4242, host: "this-host" }));
+});
+
+test("WorkspaceService.heartbeatTick(): reports failures independently after changing workspaces", () => {
+  const proj = freshProject();
+  ensureWorkspacesDir(proj);
+  const svc = workspaceService(fakeDeps(proj, {
+    openLock: () => ({ exec: () => {}, close: () => {} }),
+  }));
+  expect(svc.saveAuto()).not.toBeNull();
+  const firstId = svc.currentWorkspaceId!;
+  const tick = () => (svc as unknown as { heartbeatTick(): void }).heartbeatTick();
+  const reported: Array<{ scope: string; text: string }> = [];
+  const tickWithoutThrow = () => {
+    let thrown: unknown;
+    try {
+      tick();
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeUndefined();
+  };
+
+  rmSync(workspacesDir(proj), { recursive: true, force: true });
+  onDeckError((scope, text) => reported.push({ scope, text }));
+  try {
+    tickWithoutThrow();
+    ensureWorkspacesDir(proj);
+    saveWorkspace(proj, sampleWorkspace({ id: "wsp_b" }));
+    expect(svc.restore("wsp_b", "attended")).toEqual({ ok: true });
+
+    rmSync(workspacesDir(proj), { recursive: true, force: true });
+    tickWithoutThrow();
+  } finally {
+    onDeckError(() => {});
+    ensureWorkspacesDir(proj);
+  }
+
+  expect(reported.filter(({ text }) => text.includes("heartbeat failed"))).toEqual([
+    expect.objectContaining({ text: expect.stringContaining(firstId) }),
+    expect.objectContaining({ text: expect.stringContaining("wsp_b") }),
+  ]);
+});
+
+test("WorkspaceService.heartbeatTick(): retains the lock and retries after workspace storage disappears", () => {
+  const proj = freshProject();
+  ensureWorkspacesDir(proj);
+  let rollbacks = 0;
+  let closes = 0;
+  const svc = workspaceService(fakeDeps(proj, {
+    openLock: () => ({
+      exec: (sql) => {
+        if (sql === "ROLLBACK") rollbacks++;
+      },
+      close: () => {
+        closes++;
+      },
+    }),
+  }));
+  expect(svc.saveAuto()).not.toBeNull();
+  const id = svc.currentWorkspaceId!;
+  const tick = () => (svc as unknown as { heartbeatTick(): void }).heartbeatTick();
+  const reported: Array<{ scope: string; text: string }> = [];
+  const heartbeatFailures = () => reported.filter(({ text }) => text.includes("heartbeat failed"));
+  const tickWithoutThrow = () => {
+    let thrown: unknown;
+    try {
+      tick();
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeUndefined();
+  };
+
+  rmSync(workspacesDir(proj), { recursive: true, force: true });
+  onDeckError((scope, text) => reported.push({ scope, text }));
+  try {
+    tickWithoutThrow();
+    expect(heartbeatFailures()).toHaveLength(1);
+    expect(reported).toHaveLength(1);
+    expect(rollbacks).toBe(0);
+    expect(closes).toBe(0);
+
+    tickWithoutThrow();
+    expect(heartbeatFailures()).toHaveLength(1);
+    expect(reported).toHaveLength(1);
+
+    ensureWorkspacesDir(proj);
+    tickWithoutThrow();
+    expect(reported).toHaveLength(1);
+    expect(readLock(proj, id)).toEqual(expect.objectContaining({ pid: 4242, host: "this-host" }));
+
+    rmSync(workspacesDir(proj), { recursive: true, force: true });
+    tickWithoutThrow();
+    expect(heartbeatFailures()).toHaveLength(2);
+    expect(reported).toHaveLength(2);
+  } finally {
+    onDeckError(() => {});
+    ensureWorkspacesDir(proj);
+  }
+});
+
 test("WorkspaceService.restore(): re-restoring the already-current workspace does not lose the lock (own() same-id fast path)", () => {
   const proj = freshProject();
   ensureWorkspacesDir(proj);
   const ws = sampleWorkspace({ id: "wsp_target" });
   saveWorkspace(proj, ws);
   const deps = fakeDeps(proj);
-  const svc = new WorkspaceService(deps);
+  const svc = workspaceService(deps);
   expect(svc.restore("wsp_target", "attended")).toEqual({ ok: true });
   const before = readLock(proj, "wsp_target");
   expect(before).not.toBeNull();
@@ -1141,7 +1272,7 @@ test("WorkspaceService.saveNamed(): a third party reclaiming the lock file out f
   const ws = sampleWorkspace({ id: "wsp_target" });
   saveWorkspace(proj, ws);
   const deps = fakeDeps(proj); // pid: 4242, host: "this-host"
-  const svc = new WorkspaceService(deps);
+  const svc = workspaceService(deps);
   expect(svc.restore("wsp_target", "attended")).toEqual({ ok: true });
   expect(svc.currentWorkspaceId).toBe("wsp_target");
 
@@ -1177,7 +1308,7 @@ test("WorkspaceService.restore(): failing to acquire the NEW lock leaves the OLD
   saveWorkspace(proj, sampleWorkspace({ id: "wsp_a" }));
   saveWorkspace(proj, sampleWorkspace({ id: "wsp_b" }));
   const deps = fakeDeps(proj);
-  const svc = new WorkspaceService(deps);
+  const svc = workspaceService(deps);
   expect(svc.restore("wsp_a", "attended")).toEqual({ ok: true });
   const lockABefore = readLock(proj, "wsp_a");
   expect(lockABefore).not.toBeNull();
@@ -1208,7 +1339,7 @@ test("WorkspaceService.saveAuto(): reclaims a lock left by a dead pid after the 
   const proj = freshProject();
   ensureWorkspacesDir(proj);
   const deps = fakeDeps(proj);
-  const svc = new WorkspaceService(deps);
+  const svc = workspaceService(deps);
   const summary = svc.saveAuto();
   expect(summary).not.toBeNull();
   const id = svc.currentWorkspaceId!;
@@ -1222,7 +1353,7 @@ test("WorkspaceService.saveAuto(): reclaims a lock left by a dead pid after the 
   const deadLock: Lock = { pid: 777_777, host: "this-host", startedAt: 0, heartbeat: 0 };
   writeFileSync(join(workspacesDir(proj), `${id}.lock`), JSON.stringify(deadLock));
   const deps2 = fakeDeps(proj, { pid: 5555 });
-  const svc2 = new WorkspaceService(deps2);
+  const svc2 = workspaceService(deps2);
   const result = svc2.restore(id, "attended");
   expect(result).toEqual({ ok: true });
   expect(readLock(proj, id)!.pid).toBe(5555);
