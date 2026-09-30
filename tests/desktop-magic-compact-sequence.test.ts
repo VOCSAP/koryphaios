@@ -15,7 +15,7 @@ function fixture(banner: string | null) {
         return true
       }
     },
-    { classify: () => 'clear' },
+    { inspect: () => ({ state: 'clear' as const }), classify: () => 'clear' },
     { get: () => ({}) },
     () => null,
     { activityIdleMs: 500, settleMs: 5, idlePollMs: 5 },

@@ -189,8 +189,12 @@ export function makeScreen(cols = 400, rows = 200): Screen {
 }
 
 export type InjectGuardState = 'clear' | 'modal'
+export type InjectGuardRule = 'empty-grid' | 'picker' | 'dialog' | 'composer-geometry' | 'no-screen'
+export type InjectGuardInspection =
+  | { state: 'clear' }
+  | { state: 'modal'; rule: InjectGuardRule; line?: number }
 
-export function classifyInjectGuard(screen: Screen): InjectGuardState {
+export function inspectInjectGuard(screen: Screen): InjectGuardInspection {
   const horizontal = String.fromCodePoint(0x2500)
   const chevron = String.fromCodePoint(0x276f)
   const dialogTopLeft = String.fromCodePoint(0x256d)
@@ -206,7 +210,13 @@ export function classifyInjectGuard(screen: Screen): InjectGuardState {
   const isDialogBottom = (line: string): boolean =>
     line.trimStart().startsWith(dialogBottomLeft) && line.trimEnd().endsWith(dialogBottomRight)
 
-  if (lines.some(isPicker) || (lines.some(isDialogTop) && lines.some(isDialogBottom))) return 'modal'
+  if (lines.every((line) => line.length === 0)) return { state: 'modal', rule: 'empty-grid' }
+
+  const pickerLine = lines.findIndex(isPicker)
+  if (pickerLine >= 0) return { state: 'modal', rule: 'picker', line: pickerLine + 1 }
+
+  const dialogTopLine = lines.findIndex(isDialogTop)
+  if (dialogTopLine >= 0 && lines.some(isDialogBottom)) return { state: 'modal', rule: 'dialog', line: dialogTopLine + 1 }
 
   const top = lines[cy - 1]
   const composer = lines[cy]
@@ -219,10 +229,14 @@ export function classifyInjectGuard(screen: Screen): InjectGuardState {
     composer.trimStart().startsWith(chevron) &&
     isBorder(bottom)
   ) {
-    return 'clear'
+    return { state: 'clear' }
   }
 
-  return 'modal'
+  return { state: 'modal', rule: 'composer-geometry', line: cy + 1 }
+}
+
+export function classifyInjectGuard(screen: Screen): InjectGuardState {
+  return inspectInjectGuard(screen).state
 }
 
 /**
@@ -234,6 +248,7 @@ export function classifyInjectGuard(screen: Screen): InjectGuardState {
  */
 export class ScreenGuard {
   private screens = new Map<string, Screen>()
+  private dimensions = new Map<string, { cols: number; rows: number }>()
 
   feed(id: string, data: string): void {
     let s = this.screens.get(id)
@@ -255,6 +270,9 @@ export class ScreenGuard {
    */
   resize(id: string, cols: number, rows: number): void {
     if (!Number.isFinite(cols) || !Number.isFinite(rows) || cols < 1 || rows < 1) return
+    const previous = this.dimensions.get(id)
+    if (previous?.cols === cols && previous.rows === rows) return
+    this.dimensions.set(id, { cols, rows })
     this.screens.set(id, makeScreen(cols, rows))
   }
 
@@ -263,20 +281,25 @@ export class ScreenGuard {
    * there is nothing on record to confirm the composer box is present, and
    * D2 makes that ignorance cost a refusal, not a write. This also means a
    * freshly-created session with no first paint yet is never written into
-   * before the guard can see anything -- a byproduct, not a substitute for
-   * the boot-grace period card 63ca372f names separately (out of scope here).
+   * before the guard can see anything.
    */
-  classify(id: string): InjectGuardState {
+  inspect(id: string): InjectGuardInspection {
     const s = this.screens.get(id)
-    if (!s) return 'modal'
-    return classifyInjectGuard(s)
+    if (!s) return { state: 'modal', rule: 'no-screen' }
+    return inspectInjectGuard(s)
+  }
+
+  classify(id: string): InjectGuardState {
+    return this.inspect(id).state
   }
 
   clear(id: string): void {
     this.screens.delete(id)
+    this.dimensions.delete(id)
   }
 
   stop(): void {
     this.screens.clear()
+    this.dimensions.clear()
   }
 }

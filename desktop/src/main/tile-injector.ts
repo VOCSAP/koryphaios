@@ -6,7 +6,7 @@ import { logInfo, reportError } from './log'
 import { encodeSubmittedKeystrokes } from './session-command'
 import { DIRECTIVE_IDLE_WAIT_MS } from './directive-run'
 import { MAGIC_TIMEOUT_MS } from './magic-compact'
-import type { InjectGuardState } from './screen-model'
+import type { InjectGuardInspection, InjectGuardState } from './screen-model'
 import type { DirectiveOutcome } from './session-service'
 
 const DIRECTIVE_IDLE_POLL_MS = 500
@@ -25,6 +25,7 @@ export interface InjectorTerminal {
 }
 
 export interface InjectorScreen {
+  inspect(id: string): InjectGuardInspection
   classify(id: string): InjectGuardState
 }
 
@@ -51,7 +52,8 @@ export class TileInjector {
     private readonly runtime: InjectorRuntime,
     private readonly lastOutputAt: (id: string) => number | null,
     timing: Partial<InjectorTiming> & { activityIdleMs: number },
-    private readonly report: (message: string) => void = (message) => reportError('session', message)
+    private readonly report: (message: string) => void = (message) => reportError('session', message),
+    private readonly info: (scope: string, message: string) => void = logInfo
   ) {
     this.timing = {
       settleMs: timing.settleMs ?? DIRECTIVE_SETTLE_MS,
@@ -121,8 +123,10 @@ export class TileInjector {
     if (!this.pty.isAlive(id)) return 'no-terminal'
     if (!idle) return 'busy-timeout'
     // Escape or pasted text can change a modal selection, so every refusal blocks both writes.
-    if (this.screenGuard.classify(id) === 'modal') {
-      logInfo('session', `command injection refused-modal for ${id}: screen guard`)
+    const guard = this.screenGuard.inspect(id)
+    if (guard.state === 'modal') {
+      const line = guard.line === undefined ? '' : ` at line ${guard.line}`
+      this.info('session', `command injection refused-modal for ${id}: screen guard ${guard.rule}${line}`)
       return 'refused-modal'
     }
     if (this.runtime.get(id)?.needsAttention) {

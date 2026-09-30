@@ -31,11 +31,8 @@ function extractKillWithTraceBody(src: string): string {
 }
 
 const ESC_WRITE = /this\.pty\.write\(id,\s*'\\x1b'\)/
-const SCREEN_GUARD_CHECK = /this\.screenGuard\.classify\(id\)\s*===\s*'modal'/
+const SCREEN_GUARD_CHECK = /this\.screenGuard\.inspect\(id\)/
 const ATTENTION_CHECK = /this\.runtime\.get\(id\)\?\.needsAttention/
-// Card 63ca372f's own contract: idle AND NOT needsAttention AND NOT
-// rateLimited. Added alongside ATTENTION_CHECK -- rateLimited was the one
-// signal the original A2-1 guard left out (roadmap card, dev1's fix).
 const RATE_LIMITED_CHECK = /this\.runtime\.get\(id\)\?\.rateLimited/
 const REFUSAL_RETURN = /return\s+'refused-modal'/g
 
@@ -63,21 +60,22 @@ test("injectCommand's screen-state guard runs BEFORE the Escape write and refuse
   expect(guardIsWiredBeforeEscape(body)).toBe(true)
 })
 
-test('every modal refusal and SessionService kill path logs a static reason before acting (real file)', () => {
+test('every modal refusal and SessionService kill path logs a reason before acting (real file)', () => {
   const src = readFileSync(SESSION_SERVICE_PATH, 'utf-8')
+  const tileBody = extractInjectCommandBody(readFileSync(TILE_INJECTOR_PATH, 'utf-8'))
   const removeBody = extractRemoveBody(src)
   const killBody = extractKillWithTraceBody(src)
-  for (const refusalSource of [src, readFileSync(TILE_INJECTOR_PATH, 'utf-8')]) {
-    const refusals = [...refusalSource.matchAll(/return 'refused-modal'/g)]
-    const refusalBlocks = [
-      ...refusalSource.matchAll(
-        /if \((?:[^()]|\([^()]*\))*\) \{\s*logInfo\('session', `[^$`]*refused-modal for \$\{id\}: [^$`]+`\)\s*return 'refused-modal'/g
-      )
-    ]
+  const sessionRefusals = [...src.matchAll(/return 'refused-modal'/g)]
+  const sessionRefusalBlocks = [
+    ...src.matchAll(
+      /if \((?:[^()]|\([^()]*\))*\) \{\s*logInfo\('session', `[^$`]*refused-modal for \$\{id\}: [^$`]+`\)\s*return 'refused-modal'/g
+    )
+  ]
 
-    expect(refusals.length).toBeGreaterThan(0)
-    expect(refusalBlocks).toHaveLength(refusals.length)
-  }
+  expect(sessionRefusals.length).toBeGreaterThan(0)
+  expect(sessionRefusalBlocks).toHaveLength(sessionRefusals.length)
+  expect(tileBody).toContain("const guard = this.screenGuard.inspect(id)")
+  expect(tileBody).toContain("this.info('session', `command injection refused-modal for ${id}: screen guard ${guard.rule}${line}`)")
 
   expect(killBody.indexOf('logInfo')).toBeGreaterThan(-1)
   expect(killBody.indexOf('logInfo')).toBeLessThan(killBody.indexOf('this.pty.kill(id)'))
@@ -102,9 +100,7 @@ test("agent-stop.ts's mirrored InjectOutcome carries the same new member (real f
   expect(typeMatch![1]).toContain("'refused-modal'")
 })
 
-// ----- RED-proof: the guard function itself, exercised against synthetic
-// bodies, not the real file -- mutating session-service.ts in a test is
-// fragile (same convention as desktop-inject-command-write-check.test.ts).
+// Synthetic bodies isolate the guard check without mutating production sources.
 
 test('the guard REJECTS a body with no screen-state check at all (the pre-A2-1 shape)', () => {
   const body = `
@@ -170,7 +166,8 @@ test('the guard REJECTS a check placed AFTER the Escape write (too late to preve
 test('the guard ACCEPTS the fixed shape: all three signals checked, all refusing before the Escape write', () => {
   const body = `
     if (!idle) return 'busy-timeout'
-    if (this.screenGuard.classify(id) === 'modal') return 'refused-modal'
+    const guard = this.screenGuard.inspect(id)
+    if (guard.state === 'modal') return 'refused-modal'
     if (this.runtime.get(id)?.needsAttention) return 'refused-modal'
     if (this.runtime.get(id)?.rateLimited) return 'refused-modal'
     this.pty.write(id, '\\x1b')
@@ -192,14 +189,7 @@ test('screenGuard.feed is wired into the central pty data handler alongside the 
   expect(feedBlockMatch![0]).toContain('this.startupAckDetector.feed(e.id, e.data)')
 })
 
-// Exercises ScreenGuard.clear()'s own contract directly rather than scanning
-// session-service.ts, because an occurrence count of screenGuard.clear/stop
-// calls detects a call disappearing but not relocating: a deleted call from a
-// real boundary plus an unrelated call added elsewhere leaves the count
-// unchanged.
-// Whether session-service.ts's remove() (or any other boundary) actually calls
-// screenGuard.clear(id) at runtime is not verified here: SessionService isn't
-// bun-test-importable, so that wiring gap is a separate open item.
+// Directly exercises reused tile IDs because source scans cannot prove lifecycle behaviour.
 test('a tile id reused after ScreenGuard.clear() gets a fresh classification', () => {
   const guard = new ScreenGuard()
   const id = 'tile-reused'

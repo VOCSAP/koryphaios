@@ -1,13 +1,14 @@
 import { expect, test } from 'bun:test'
-import { TileInjector } from '../desktop/src/main/tile-injector.ts'
+import { TileInjector, type InjectorScreen } from '../desktop/src/main/tile-injector.ts'
 import { DIRECTIVE_IDLE_WAIT_MS } from '../desktop/src/main/directive-run.ts'
-import type { InjectGuardState } from '../desktop/src/main/screen-model.ts'
+import { ScreenGuard, type InjectGuardState } from '../desktop/src/main/screen-model.ts'
 
 const ESC = '\x1b'
 
 function fixture(
   options: {
     classify?: InjectGuardState
+    screen?: InjectorScreen
     runtime?: { needsAttention?: boolean; rateLimited?: boolean }
     lastOutputAt?: number | null
     turnCeilingMs?: number
@@ -15,6 +16,7 @@ function fixture(
 ) {
   const writes: string[] = []
   const reports: string[] = []
+  const logs: string[] = []
   const alive = new Set(['t1'])
   const injector = new TileInjector(
     {
@@ -25,13 +27,17 @@ function fixture(
         return true
       }
     },
-    { classify: () => options.classify ?? 'clear' },
+    options.screen ?? {
+      classify: () => options.classify ?? 'clear',
+      inspect: () => (options.classify === 'modal' ? { state: 'modal', rule: 'composer-geometry' } : { state: 'clear' })
+    },
     { get: (id) => (alive.has(id) ? options.runtime ?? {} : undefined) },
     () => options.lastOutputAt ?? null,
     { activityIdleMs: 500, settleMs: 5, idlePollMs: 5, ...(options.turnCeilingMs ? { turnCeilingMs: options.turnCeilingMs } : {}) },
-    (message) => reports.push(message)
+    (message) => reports.push(message),
+    (_scope, message) => logs.push(message)
   )
-  return { injector, writes, reports, alive }
+  return { injector, writes, reports, logs, alive }
 }
 
 /** The command text as written, whatever the bracketed-paste wrapping. */
@@ -40,6 +46,19 @@ const commands = (writes: string[]) => writes.map((w) => (w === 'ESC' ? 'ESC' : 
 function withinMs<T>(promise: Promise<T>, ms: number, what: string): Promise<T> {
   return Promise.race([promise, new Promise<T>((_, reject) => setTimeout(() => reject(new Error(`${what} still pending after ${ms} ms`)), ms))])
 }
+
+test('a screen guard modal refusal logs its rule and line without rendered screen text', async () => {
+  const hiddenScreenText = 'untrusted screen content'
+  const screen = new ScreenGuard()
+  screen.resize('t1', 120, 40)
+  screen.feed('t1', `${ESC}[6;1H${String.fromCodePoint(0x276f)} 1. ${hiddenScreenText}`)
+  const { injector, writes, logs } = fixture({ screen })
+
+  expect(await injector.injectCommand('t1', '/clear')).toBe('refused-modal')
+  expect(writes).toEqual([])
+  expect(logs).toEqual(['command injection refused-modal for t1: screen guard picker at line 6'])
+  expect(logs.join('\n')).not.toContain(hiddenScreenText)
+})
 
 test('two injections outside of any turn interleave their Escape and command writes', async () => {
   const { injector, writes } = fixture()

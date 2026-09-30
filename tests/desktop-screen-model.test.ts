@@ -1,7 +1,7 @@
 import { test, expect, describe } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { makeScreen, classifyInjectGuard } from '../desktop/src/main/screen-model'
+import { makeScreen, classifyInjectGuard, ScreenGuard } from '../desktop/src/main/screen-model'
 
 // Marker chunks inserted by the capture harness are synthetic, never emitted by
 // the real CLI; isMarker filters them out before feed(), or they'd paint into
@@ -164,6 +164,34 @@ describe('classifyInjectGuard reduced ConPTY composer fixture', () => {
     screen.feed(`${esc}[16;3H`)
     expect(classifyInjectGuard(screen)).toBe('modal')
   })
+})
+
+describe('ScreenGuard resize preservation', () => {
+  test('a first resize creates an empty-grid refusal', () => {
+    const guard = new ScreenGuard()
+    guard.resize('new-tile', COLS, ROWS)
+    expect(guard.inspect('new-tile')).toEqual({ state: 'modal', rule: 'empty-grid' })
+  })
+
+  for (const [dimension, cols, rows] of [
+    ['columns', COLS - 1, ROWS],
+    ['rows', COLS, ROWS - 1]
+  ] as const) {
+    test(`keeps an idle capture clear at unchanged dimensions but resets it when only ${dimension} change`, () => {
+      const guard = new ScreenGuard()
+      const id = 'idle-capture'
+
+      guard.resize(id, COLS, ROWS)
+      for (const chunk of load('composer-2.1.283-reduced.json')) guard.feed(id, chunk.data)
+      expect(guard.classify(id)).toBe('clear')
+
+      guard.resize(id, COLS, ROWS)
+      expect(guard.classify(id)).toBe('clear')
+
+      guard.resize(id, cols, rows)
+      expect(guard.classify(id)).toBe('modal')
+    })
+  }
 })
 
 describe('makeScreen deferred wrap after erasure', () => {
