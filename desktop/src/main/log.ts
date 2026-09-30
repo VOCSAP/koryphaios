@@ -10,7 +10,7 @@ import {
 } from 'node:fs'
 import { join } from 'node:path'
 import { Journal, type JournalEntry } from './journal'
-import { MAX_LOGGED_CHARS, redactSecrets } from '../shared/log-redact'
+import { MAX_LOGGED_CHARS, redactSecrets } from '../../../shared/log-redact'
 
 export type LogLevel = 'info' | 'warn' | 'error'
 

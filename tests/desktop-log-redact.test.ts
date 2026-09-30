@@ -2,7 +2,7 @@ import { test, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, rmSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { redactSecrets } from "../desktop/src/shared/log-redact";
+import { redactSecrets } from "../shared/log-redact.ts";
 import { Journal } from "../desktop/src/main/journal";
 import { createPersistentJournal, createRollingLogger } from "../desktop/src/main/log";
 

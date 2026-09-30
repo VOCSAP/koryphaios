@@ -1,11 +1,9 @@
-// PLAN-observabilite-erreurs O1: rolling file logger (shared/logger.ts).
-
 import { test, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, rmSync, readFileSync, writeFileSync, existsSync, readdirSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createLogger, coreLogDir, stderrMirror } from "../shared/logger.ts";
-import { MAX_LOGGED_CHARS } from "../desktop/src/shared/log-redact.ts";
+import { MAX_LOGGED_CHARS } from "../shared/log-redact.ts";
 
 let dir: string;
 
@@ -111,13 +109,10 @@ test("rotates at maxBytes and keeps at most maxFiles files, oldest dropped", () 
     mirrorToConsole: false,
     now: fixedNow,
   });
-  // Each line is ~80 bytes; write enough to force several rotations.
   for (let i = 0; i < 40; i++) log.info(`entry-${String(i).padStart(3, "0")}`);
 
   const files = readdirSync(dir).sort();
   expect(files).toEqual(["t.log", "t.log.1", "t.log.2"]);
-  // The newest entry is in the base file, the oldest surviving in .2 --
-  // and rotation dropped the earliest entries entirely.
   expect(readFileSync(join(dir, "t.log"), "utf-8")).toContain("entry-039");
   expect(readFileSync(join(dir, "t.log.2"), "utf-8")).not.toContain("entry-000\n");
 });
@@ -133,7 +128,6 @@ test("boot trim removes rotated files beyond maxFiles", () => {
 });
 
 test("a write failure never throws (falls back to console)", () => {
-  // Point the logger at a path that cannot be a directory: a regular file.
   const blocked = join(dir, "not-a-dir");
   writeFileSync(blocked, "occupied");
   const log = createLogger({ dir: join(blocked, "logs"), name: "t", mirrorToConsole: false, now: fixedNow });

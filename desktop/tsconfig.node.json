@@ -24,8 +24,6 @@
     "skipLibCheck": true,
     "esModuleInterop": true,
     "resolveJsonModule": true,
-    // shared/approval.ts imports shared/text.ts by path (one leaf module, so
-    // the mobile shell can reuse it without dragging node:crypto in).
     "allowImportingTsExtensions": true,
     "noEmit": true
   },
@@ -41,6 +39,7 @@
     "../shared/approval-client.ts",
     "../shared/peer-cache.ts",
     "../shared/logger.ts",
+    "../shared/log-redact.ts",
     "hooks/**/*.ts",
     "mcp/**/*.ts",
     "scripts/win-verify/**/*.ts",

@@ -1,13 +1,4 @@
-/**
- * Node builtins and pure modules only (no Bun.file, no electron imports) so this runs in both
- * the core (Bun) and the Electron main process, and is unit-testable with an
- * injected directory.
- * Size-based rotation: <name>.log shifts to .log.1 ... .log.<maxFiles-1> when
- * it hits maxBytes, oldest dropped.
- * Writes are synchronous so ordering is guaranteed and a last line can be
- * emitted from an uncaughtException handler; a failure to write the log itself
- * must never throw, falling back to console once per cause.
- */
+/** Synchronous writes preserve the last log line from an uncaught exception. */
 
 import {
   appendFileSync,
@@ -20,7 +11,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
-import { MAX_LOGGED_CHARS, redactSecrets } from "../desktop/src/shared/log-redact.ts";
+import { MAX_LOGGED_CHARS, redactSecrets } from "./log-redact.ts";
 
 export type LogLevel = "info" | "warn" | "error";
 
@@ -162,11 +153,6 @@ export function createLogger(options: LoggerOptions): Logger {
   return make("");
 }
 
-/**
- * For a process whose stdout carries a protocol (server.ts, MCP over stdio):
- * the tagged line goes to stderr, masked like the file, and the entry to the
- * file log.
- */
 export function stderrMirror(
   fileLog: Logger,
   tag: string
@@ -184,11 +170,6 @@ export function stderrMirror(
   };
 }
 
-/**
- * Default log directory for the core processes (broker.ts, server.ts):
- * `<claude-peers config dir>/logs`, overridable via CLAUDE_PEERS_LOG_DIR.
- * Mirrors the settings-file resolution in shared/config.ts (XDG / APPDATA).
- */
 export function coreLogDir(env: NodeJS.ProcessEnv = process.env): string {
   const override = env.CLAUDE_PEERS_LOG_DIR;
   if (override && override.length > 0) return override;

@@ -1,4 +1,4 @@
-import { MAX_LOGGED_CHARS, redactSecrets } from '../shared/log-redact'
+import { MAX_LOGGED_CHARS, redactSecrets } from '../../../shared/log-redact'
 
 export type JournalKind =
   | 'session'
