@@ -40,10 +40,16 @@ function writeElectronProbe(dir: string): string {
   return file;
 }
 
-async function waitForResult(file: string): Promise<{ acquired: boolean }> {
+const LINUX_PROBE_FLAGS = process.platform === "linux" ? ["--no-sandbox", "--ozone-platform=headless"] : [];
+
+async function waitForResult(file: string, child: ChildProcess, stderr: { text: string }): Promise<{ acquired: boolean }> {
   const deadline = Date.now() + 5_000;
   while (!existsSync(file)) {
-    if (Date.now() >= deadline) throw new Error(`Electron probe did not write ${file}`);
+    if (Date.now() >= deadline) {
+      throw new Error(
+        `Electron probe did not write ${file} (exitCode=${String(child.exitCode)}, signal=${String(child.signalCode)})\nprobe stderr:\n${stderr.text || "(empty)"}`
+      );
+    }
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
   return JSON.parse(readFileSync(file, "utf-8")) as { acquired: boolean };
@@ -51,9 +57,16 @@ async function waitForResult(file: string): Promise<{ acquired: boolean }> {
 
 async function startProbe(probe: string, root: string, profile: string): Promise<{ child: ChildProcess; result: { acquired: boolean } }> {
   const resultFile = join(root, `${profile}-${randomId()}.json`);
-  const child = spawn(electronBinary(), [probe, resultFile, `--user-data-dir=${join(root, profile)}`], { stdio: "ignore", windowsHide: true });
+  const child = spawn(electronBinary(), [probe, resultFile, `--user-data-dir=${join(root, profile)}`, ...LINUX_PROBE_FLAGS], {
+    stdio: ["ignore", "ignore", "pipe"],
+    windowsHide: true
+  });
   children.push(child);
-  return { child, result: await waitForResult(resultFile) };
+  const stderr = { text: "" };
+  child.stderr?.on("data", (chunk: Buffer) => {
+    stderr.text = (stderr.text + chunk.toString("utf-8")).slice(-4_000);
+  });
+  return { child, result: await waitForResult(resultFile, child, stderr) };
 }
 
 let nextId = 0;
@@ -63,7 +76,7 @@ function randomId(): number {
 }
 
 async function stopProbe(child: ChildProcess | undefined): Promise<void> {
-  if (!child || child.exitCode !== null) return;
+  if (!child || child.exitCode !== null || child.signalCode !== null) return;
   await new Promise<void>((resolve) => {
     child.once("exit", () => resolve());
     if (process.platform === "win32" && child.pid !== undefined) {
