@@ -266,10 +266,12 @@ detects a stale container is done on Destination and RW only, never on Source.
 ## Isolation between projects and containers (the run/peers dirs)
 
 Every sandboxed container needs a small host-side directory for two things
-that never belong in the auth volume or the project mount: the per-session
-launch script the PTY runs (`cmd-<sessionId>.sh`, mounted at `/kory-run`),
-and the peer back-channel cache the container's `server.ts` writes into
-(mounted at `~/.claude/peers`). Both are keyed by the container name
+that never belong in the auth volume or the project mount: the per-tile
+launch script the PTY runs (`cmd-<tileId>.sh`) and pidfile (`pid-<tileId>`,
+mounted at `/kory-run`), and the peer back-channel cache the container's
+`server.ts` writes into (mounted at `~/.claude/peers`). The pidfile identifies
+the tile process group to terminate, then is removed before a relaunch or
+closure completes. Both are keyed by the container name
 (`kory-sbx-<hash>`) under the app state dir — `sandbox-run/<containerName>`
 and `sandbox-peers/<containerName>` — exactly like `sandbox-copies/<containerName>`,
 the clone directory used in ephemeral-copy mode.
@@ -288,9 +290,9 @@ sharing by default, whether or not the content it holds looks sensitive.
 Before both dirs carried the container name, this is exactly what happened
 to the run dir: one `sandbox-run` directory served every project, mounted
 read-write into every container under the same uid. A compromised agent in
-one container could overwrite another *session's* — potentially another
-*project's* — `cmd-<sessionId>.sh`, and get its own code executed there at
-that session's next launch. The peers dir had the identical construction
+one container could overwrite another *tile's* -- potentially another
+*project's* -- `cmd-<tileId>.sh`, and get its own code executed there at
+that tile's next launch. The peers dir had the identical construction
 defect, with a smaller blast radius: it carries the peer-cache/back-channel
 data the container's `server.ts` writes, not a script the PTY executes, so a
 compromised write there does not by itself get code run.
