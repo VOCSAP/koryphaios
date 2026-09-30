@@ -1,0 +1,15 @@
+{
+  "format": "koryphaios-lot/draft-0",
+  "name": "Suite courante (fiabilite Deck, replica, UI)",
+  "created": "2026-09-30",
+  "author": "team-lead",
+  "note": "Rang partage = vague (cartes lancees en parallele). Format provisoire : il sera remplace par celui que definit la carte d'import, et ce fichier regenere par son CLI.",
+  "items": [
+    { "rank": 1, "card": "2327907c", "title": "Relancer une tuile sandbox laisse un claude orphelin dans le conteneur" },
+    { "rank": 1, "card": "c149cc3c", "title": "Push de replique : tout le lot en une seule transaction upstream" },
+    { "rank": 2, "card": "fbcc0239", "title": "Broker : une erreur 500 ne renvoie plus le message brut au client" },
+    { "rank": 2, "card": "a808f90c", "title": "Barres de defilement natives (dont la bande blanche des terminaux)" },
+    { "rank": 3, "card": "2850488c", "title": "Replica : pull avant push qui laisse deux cartes au meme rang (mesure d'abord)" },
+    { "rank": 4, "card": "c753a704", "title": "Directives : lot 3 (raisons distinctes, UI, ecran)" }
+  ]
+}

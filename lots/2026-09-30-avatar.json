@@ -1,0 +1,16 @@
+{
+  "format": "koryphaios-lot/draft-0",
+  "name": "Avatar (paliers A1 a B2)",
+  "created": "2026-09-30",
+  "author": "team-lead",
+  "note": "Ordre des paliers de docs/DESIGN-KORY-AVATAR.md. Rang partage = vague. ed6944c6 attend un triage avant d'etre pris. Format provisoire, a regenerer par le CLI de la carte d'import.",
+  "items": [
+    { "rank": 1, "card": "1d136f60", "title": "A1 : finir (validation ecran focus/renommage/lancement auto, deux silences a tracer)" },
+    { "rank": 2, "card": "d70b01a8", "title": "Sources SVG et generateur des icones Tray, contraste theme clair" },
+    { "rank": 3, "card": "8fb62e61", "title": "A2 : le personnage (masque du coryphee), fenetre transparente Windows" },
+    { "rank": 4, "card": "0278b922", "title": "A3 : inbox agregee de tous les Decks, coupure des toasts du Deck" },
+    { "rank": 5, "card": "ed6944c6", "title": "A4 : dialogue par un peer avatar cache et signe" },
+    { "rank": 6, "card": "a799871c", "title": "B1 : cerveau facultatif (routage, synthese, brouillons)" },
+    { "rank": 7, "card": "2d9784be", "title": "B2 : confort (Kory recent, demarrage, mode discret, sons, raccourci)" }
+  ]
+}
