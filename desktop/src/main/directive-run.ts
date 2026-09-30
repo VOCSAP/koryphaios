@@ -57,6 +57,10 @@ interface DirectiveLaunch {
   error?: 'directive execution failed'
 }
 
+interface DirectiveRunOptions {
+  reportWaitMs?: number
+}
+
 const LINE_BREAKS = new Set([0x0a, 0x0d, 0x09, 0x2028, 0x2029])
 const STRIPPED_RANGES: readonly (readonly [number, number])[] = [
   [0x00, 0x1f],
@@ -205,9 +209,10 @@ export async function runDirectiveOn(
   peerIds: string[],
   prompt: string | undefined,
   label: string,
-  deps: DirectiveRunDeps
+  deps: DirectiveRunDeps,
+  options: DirectiveRunOptions = {}
 ): Promise<DeckDirectiveRunResult> {
-  return settleLaunch(launchDirective(cmd, peerIds, prompt, label, deps), DIRECTIVE_REPORT_WAIT_MS)
+  return settleLaunch(launchDirective(cmd, peerIds, prompt, label, deps), options.reportWaitMs ?? DIRECTIVE_REPORT_WAIT_MS)
 }
 
 async function settleLaunch(run: DirectiveLaunch, waitMs: number): Promise<DeckDirectiveRunResult> {
@@ -234,14 +239,15 @@ async function settleLaunch(run: DirectiveLaunch, waitMs: number): Promise<DeckD
 
 export async function executeDirectiveItem(
   item: { id: string; title: string; directive?: unknown; target_peer_ids: string[] },
-  deps: DirectiveRunDeps
+  deps: DirectiveRunDeps,
+  options: DirectiveRunOptions = {}
 ): Promise<DirectiveDispatch> {
   const cmd = item.directive
   if (!isDirectiveCommand(cmd)) {
     deps.reportError(`directive card "${item.title}" carries no valid command; skipped`)
     return { id: item.id, title: item.title, directive: null, injected: [], unreached: [] }
   }
-  const run = await runDirectiveOn(cmd, item.target_peer_ids, undefined, item.title, deps)
+  const run = await runDirectiveOn(cmd, item.target_peer_ids, undefined, item.title, deps, options)
   return { id: item.id, title: item.title, directive: cmd, ...run }
 }
 
@@ -251,7 +257,7 @@ export async function runDirectiveForCaller(
   prompt: string | undefined,
   callerId: string,
   deps: DirectiveRunDeps,
-  options: { excludeSupervisor?: boolean; reportWaitMs?: number } = {}
+  options: DirectiveRunOptions & { excludeSupervisor?: boolean } = {}
 ): Promise<DeckDirectiveRunResult> {
   const scopedDeps = options.excludeSupervisor
     ? { ...deps, listSessions: () => deps.listSessions().filter((session) => !session.supervisor) }

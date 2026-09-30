@@ -599,7 +599,8 @@ test("executeDirectiveItem reports an unresolved card injection as pending", asy
 
   const result = await executeDirectiveItem(
     { id: "card-1", title: "Clear the team", directive: "clear", target_peer_ids: ["alpha"] },
-    r.deps
+    r.deps,
+    { reportWaitMs: 20 }
   );
 
   expect(result).toEqual({
@@ -611,13 +612,13 @@ test("executeDirectiveItem reports an unresolved card injection as pending", asy
     pending: [{ tileId: "t1", peerId: "alpha" }],
     unreached: []
   });
-});
+}, 500);
 
 test("runDirectiveOn reports an unresolved injection as pending at the report deadline", async () => {
   const r = recorder([session("t1", "alpha")]);
   r.deps.injectCommand = () => new Promise<"written">(() => {});
 
-  const result = await runDirectiveOn("clear", ["alpha"], undefined, "x", r.deps);
+  const result = await runDirectiveOn("clear", ["alpha"], undefined, "x", r.deps, { reportWaitMs: 20 });
 
   expect(result).toEqual({
     injected: [],
@@ -625,7 +626,7 @@ test("runDirectiveOn reports an unresolved injection as pending at the report de
     pending: [{ tileId: "t1", peerId: "alpha" }],
     unreached: []
   });
-});
+}, 500);
 
 test("runDirectiveOn reports an asynchronous magic rejection as refused", async () => {
   const r = recorder([session("t1", "alpha")]);
