@@ -1110,6 +1110,7 @@ test("the dispatch queue is GLOBAL: an upstream order arrives, and a live local 
     first.id,
     (i) => i.queue === 2
   );
+  await waitForItem("the swap moved both rows", upstream, second.id, (i) => i.queue === 1);
   const upstreamTail = await itemOn(upstream, second.id);
   expect(["the swap moved both rows", upstreamTail!.queue]).toEqual(["the swap moved both rows", 1]);
 }, 40_000);
