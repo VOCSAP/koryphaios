@@ -331,7 +331,11 @@ test.skipIf(process.platform !== 'win32')('creates a protected Avatar directory 
   const dir = freshDir()
   const privateDir = ensureAvatarPrivateDir(dir)
   const acl = savedWindowsAcl(privateDir)
+  const sid = currentWindowsSid()
 
   expect(acl.display).toContain(privateDir)
-  expect(hasPrivateAvatarAcl(acl, currentWindowsSid())).toBe(true)
+  expect(
+    hasPrivateAvatarAcl(acl, sid),
+    `the private Avatar ACL was rejected for SID ${sid}\nicacls display:\n${acl.display}\nsaved SDDL:\n${acl.sddl}`
+  ).toBe(true)
 })

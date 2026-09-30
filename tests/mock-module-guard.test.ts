@@ -1,5 +1,5 @@
 import { afterAll, expect, mock, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -22,7 +22,7 @@ afterAll(() => {
 });
 
 function scratchDir(prefix: string): string {
-  const dir = mkdtempSync(join(tmpdir(), prefix));
+  const dir = realpathSync.native(mkdtempSync(join(tmpdir(), prefix)));
   scratch.push(dir);
   return dir;
 }
@@ -271,7 +271,10 @@ const SHARED_DIR = join(GUARD_REPO_ROOT, "desktop", "src", "shared");
 const MOCK_LITERAL = /\b(?:mock\.module|jest\.mock|vi\.mock)\(\s*(?:"([^"\n]*)"|'([^'\n]*)'|`([^`\n$]*)`)/g;
 const OWN_FILES = new Set(["mock-module-guard.test.ts", "_mock-module-guard.ts"]);
 const BUILT_SPECIFIER_TARGETS = [join(GUARD_REPO_ROOT, "desktop", "src", "main", "store.ts")];
-const MAY_BE_UNIMPORTABLE_IN_RUNNER = ["desktop/src/main/store.ts"];
+const MAY_BE_UNIMPORTABLE_IN_RUNNER: Record<string, RegExp> = {
+  "desktop/src/main/store.ts": /Cannot find package 'electron'|Export named 'app' not found in module '[^']*[\\/]electron[\\/]index\.js'/,
+  "desktop/src/renderer/src/components/DiffPanel.tsx": /Cannot find package 'shiki'/
+};
 
 /** Project modules named by a literal specifier in a mock call under tests/, plus every desktop/src/shared module. */
 function calibrationTargets(): { fromLiterals: string[]; all: string[] } {
@@ -307,22 +310,21 @@ test("the export scan agrees with the runtime export list of every project modul
   }
   const roadmapAppend = await import(join(GUARD_REPO_ROOT, "shared", "roadmap-append.ts"));
   mock.module("@roadmap-append", () => roadmapAppend);
-  const notImportable: string[] = [];
-  const reasons: string[] = [];
+  const unexpected: string[] = [];
   for (const file of targets) {
     const shown = relative(GUARD_REPO_ROOT, file).split(sep).join("/");
     let imported: string[];
     try {
       imported = Object.keys((await import(file)) as object).sort();
     } catch (error) {
-      notImportable.push(shown);
-      reasons.push(`${shown}: ${String(error).split("\n")[0]}`);
+      const reason = String(error).split("\n")[0] as string;
+      const accepted = Object.hasOwn(MAY_BE_UNIMPORTABLE_IN_RUNNER, shown) && MAY_BE_UNIMPORTABLE_IN_RUNNER[shown]!.test(reason);
+      if (!accepted) unexpected.push(`${shown}: ${reason}`);
       continue;
     }
     expect(runtimeExportsOf(readFileSync(file, "utf8"), file), `${shown}: the scan must list exactly what the module exports at runtime`).toEqual(imported);
   }
-  const unexpected = notImportable.filter((shown) => !MAY_BE_UNIMPORTABLE_IN_RUNNER.includes(shown));
-  expect(unexpected, `targets whose scan could not be checked against a real import:\n${reasons.join("\n")}`).toEqual([]);
+  expect(unexpected, "targets whose scan could not be checked against a real import, or that failed to import for a reason other than the missing package their exemption names").toEqual([]);
 });
 
 const FIXTURE_MODULES = ["pick-security", "role", "announce", "palette", "reorder", "session-status", "workflow", "graph", "models", "types"] as const;

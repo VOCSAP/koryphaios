@@ -98,8 +98,14 @@ test('traces a failing helper and reports false', async () => {
   expect(reports).toEqual(['AllowSetForegroundWindow helper failed'])
 })
 
+function describeHelperError(error: unknown): string {
+  const detail = (error ?? {}) as { killed?: unknown; signal?: unknown; code?: unknown }
+  return `${String(error)} [killed=${String(detail.killed)} signal=${String(detail.signal)} code=${String(detail.code)}]`
+}
+
 test.skipIf(process.platform !== 'win32')('the real PowerShell helper prints a boolean', async () => {
   const outputs: string[] = []
+  const started = Date.now()
   const result = await allowForegroundWindow(process.pid, {
     platform: 'win32',
     env: process.env,
@@ -108,9 +114,10 @@ test.skipIf(process.platform !== 'win32')('the real PowerShell helper prints a b
       outputs.push(output.trim())
       return output
     },
-    report: (_scope, message) => outputs.push(`report: ${message}`)
+    report: (_scope, message, error) => outputs.push(`report: ${message}: ${describeHelperError(error)}`)
   })
+  const elapsed = `the helper ran ${Date.now() - started} ms against a 15000 ms timeout; recorded: ${JSON.stringify(outputs)}`
   expect(typeof result).toBe('boolean')
-  expect(outputs).toHaveLength(1)
-  expect(['True', 'False']).toContain(outputs[0])
+  expect(outputs, elapsed).toHaveLength(1)
+  expect(['True', 'False'], elapsed).toContain(outputs[0] ?? '')
 }, 20_000)
