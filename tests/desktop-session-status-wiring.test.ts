@@ -134,7 +134,7 @@ test("a non-Claude tile gets no --settings", () => {
   expect(lastLine(), "plain shell tile: no statusLine to install").not.toContain("--settings");
 });
 
-test("a resumed (forked) spawn gets --settings too", () => {
+test("a resumed (forked) spawn gets --settings too", async () => {
   const { svc, home, cwd } = setup();
   const rt = svc.create({});
   // Make the session resumable: a transcript exists and the process died.
@@ -142,10 +142,317 @@ test("a resumed (forked) spawn gets --settings too", () => {
   mkdirSync(projDir, { recursive: true });
   writeFileSync(join(projDir, `${rt.sessionId}.jsonl`), "{}\n");
   spawned.at(-1)!.exit(1);
-  svc.restart(rt.id);
+  await svc.restart(rt.id);
   const line = lastLine();
   expect(line, "restart took the resume path").toContain("--fork-session");
   expect(line, "resume spawn launched with the Deck statusLine").toContain(`--settings "${SETTINGS}"`);
+});
+
+test("a sandbox restart cleans its prior tile process before replacement spawn", async () => {
+  const { svc } = setup();
+  const calls: string[] = [];
+  let releaseCleanup: () => void = () => {};
+  const cleanupDone = new Promise<void>((resolve) => {
+    releaseCleanup = resolve;
+  });
+  svc.setSandboxProvider(
+    () => ({
+      wrap: (tileId: string) => {
+        calls.push(`spawn:${tileId}`);
+        return "docker exec sandbox";
+      },
+      cleanup: (tileId: string) => {
+        calls.push(`cleanup:${tileId}`);
+        return cleanupDone;
+      }
+    }),
+    undefined,
+    () => "/sandbox-peers"
+  );
+
+  const rt = svc.create({});
+  expect(calls).toEqual([`spawn:${rt.id}`]);
+  spawned.at(-1)!.exit(1);
+  expect(calls).toEqual([`spawn:${rt.id}`, `cleanup:${rt.id}`]);
+
+  const restarting = svc.restart(rt.id);
+  expect(calls).toEqual([`spawn:${rt.id}`, `cleanup:${rt.id}`]);
+  expect(spawned).toHaveLength(1);
+
+  releaseCleanup();
+  await restarting;
+  expect(calls).toEqual([`spawn:${rt.id}`, `cleanup:${rt.id}`, `spawn:${rt.id}`]);
+  expect(spawned).toHaveLength(2);
+});
+
+test("concurrent sandbox restarts share one operation and replacement spawn", async () => {
+  const { svc } = setup();
+  const calls: string[] = [];
+  let releaseCleanup: () => void = () => {};
+  const cleanupDone = new Promise<void>((resolve) => {
+    releaseCleanup = resolve;
+  });
+  svc.setSandboxProvider(
+    () => ({
+      wrap: (tileId: string) => {
+        calls.push(`spawn:${tileId}`);
+        return "docker exec sandbox";
+      },
+      cleanup: (tileId: string) => {
+        calls.push(`cleanup:${tileId}`);
+        return cleanupDone;
+      }
+    }),
+    undefined,
+    () => "/sandbox-peers"
+  );
+
+  const rt = svc.create({});
+  spawned.at(-1)!.exit(1);
+  const first = svc.restart(rt.id);
+  const second = svc.restart(rt.id);
+
+  expect(first, "concurrent callers receive the same restart operation").toBe(second);
+  expect(calls).toEqual([`spawn:${rt.id}`, `cleanup:${rt.id}`]);
+  releaseCleanup();
+  await first;
+  expect(calls).toEqual([`spawn:${rt.id}`, `cleanup:${rt.id}`, `spawn:${rt.id}`]);
+  expect(spawned).toHaveLength(2);
+});
+
+test("concurrent supervisor restarts share one replacement spawn", async () => {
+  const { svc } = setup();
+  const rt = svc.create({ supervisor: true } as never);
+  spawned.at(-1)!.exit(1);
+  const first = svc.restart(rt.id);
+  const second = svc.restart(rt.id);
+
+  expect(first, "concurrent callers receive the same restart operation").toBe(second);
+  await first;
+  expect(spawned).toHaveLength(2);
+});
+
+test("restart does not spawn after removing its tile during cleanup", async () => {
+  const { svc } = setup();
+  let releaseCleanup: () => void = () => {};
+  const cleanupDone = new Promise<void>((resolve) => {
+    releaseCleanup = resolve;
+  });
+  svc.setSandboxProvider(
+    () => ({ wrap: () => "docker exec sandbox", cleanup: () => cleanupDone }),
+    undefined,
+    () => "/sandbox-peers"
+  );
+
+  const rt = svc.create({});
+  spawned.at(-1)!.exit(1);
+  const restarting = svc.restart(rt.id);
+  await svc.remove(rt.id);
+  releaseCleanup();
+  await expect(restarting).rejects.toThrow("session removed or replaced during restart");
+
+  expect(spawned).toHaveLength(1);
+});
+
+test("restart does not spawn after closing all tiles during cleanup", async () => {
+  const { svc } = setup();
+  let releaseCleanup: () => void = () => {};
+  const cleanupDone = new Promise<void>((resolve) => {
+    releaseCleanup = resolve;
+  });
+  svc.setSandboxProvider(
+    () => ({ wrap: () => "docker exec sandbox", cleanup: () => cleanupDone }),
+    undefined,
+    () => "/sandbox-peers"
+  );
+
+  const rt = svc.create({});
+  spawned.at(-1)!.exit(1);
+  const restarting = svc.restart(rt.id);
+  svc.closeAll();
+  releaseCleanup();
+  await expect(restarting).rejects.toThrow("session removed or replaced during restart");
+
+  expect(spawned).toHaveLength(1);
+});
+
+test("restart does not spawn after restoring a replacement session list during cleanup", async () => {
+  const { svc } = setup();
+  let releaseCleanup: () => void = () => {};
+  const cleanupDone = new Promise<void>((resolve) => {
+    releaseCleanup = resolve;
+  });
+  svc.setSandboxProvider(
+    () => ({ wrap: () => "docker exec sandbox", cleanup: () => cleanupDone }),
+    undefined,
+    () => "/sandbox-peers"
+  );
+
+  const rt = svc.create({});
+  spawned.at(-1)!.exit(1);
+  const restarting = svc.restart(rt.id);
+  svc.restoreFrom(svc.captureSessions());
+  expect(spawned).toHaveLength(2);
+  releaseCleanup();
+  await expect(restarting).rejects.toThrow("session removed or replaced during restart");
+
+  expect(spawned).toHaveLength(2);
+});
+
+test("a sandbox tile cleans its process group after a non-zero PTY exit", async () => {
+  const { svc } = setup();
+  const calls: string[] = [];
+  svc.setSandboxProvider(
+    () => ({
+      wrap: (tileId: string) => {
+        calls.push(`spawn:${tileId}`);
+        return "docker exec sandbox";
+      },
+      cleanup: (tileId: string) => {
+        calls.push(`cleanup:${tileId}`);
+        return Promise.resolve();
+      }
+    }),
+    undefined,
+    () => "/sandbox-peers"
+  );
+
+  const rt = svc.create({});
+  spawned.at(-1)!.exit(1);
+  await Promise.resolve();
+  expect(calls).toEqual([`spawn:${rt.id}`, `cleanup:${rt.id}`]);
+});
+
+test("a sandbox tile cleans its process group after a zero PTY exit", async () => {
+  const { svc } = setup();
+  const calls: string[] = [];
+  svc.setSandboxProvider(
+    () => ({
+      wrap: (tileId: string) => {
+        calls.push(`spawn:${tileId}`);
+        return "docker exec sandbox";
+      },
+      cleanup: (tileId: string) => {
+        calls.push(`cleanup:${tileId}`);
+        return Promise.resolve();
+      }
+    }),
+    undefined,
+    () => "/sandbox-peers"
+  );
+
+  const rt = svc.create({});
+  spawned.at(-1)!.exit(0);
+  await Promise.resolve();
+  expect(calls).toEqual([`spawn:${rt.id}`, `cleanup:${rt.id}`]);
+});
+
+test("removing a sandbox tile cleans its process group", async () => {
+  const { svc } = setup();
+  const calls: string[] = [];
+  svc.setSandboxProvider(
+    () => ({
+      wrap: (tileId: string) => {
+        calls.push(`spawn:${tileId}`);
+        return "docker exec sandbox";
+      },
+      cleanup: (tileId: string) => {
+        calls.push(`cleanup:${tileId}`);
+        return Promise.resolve();
+      }
+    }),
+    undefined,
+    () => "/sandbox-peers"
+  );
+
+  const rt = svc.create({});
+  const runtime = svc as unknown as { runtime: Map<string, { needsAttention: boolean }> };
+  runtime.runtime.get(rt.id)!.needsAttention = true;
+  await svc.remove(rt.id);
+  expect(calls).toEqual([`spawn:${rt.id}`, `cleanup:${rt.id}`]);
+});
+
+test("replacing sessions cleans outgoing sandbox tiles", async () => {
+  const { svc } = setup();
+  const calls: string[] = [];
+  svc.setSandboxProvider(
+    () => ({
+      wrap: (tileId: string) => {
+        calls.push(`spawn:${tileId}`);
+        return "docker exec sandbox";
+      },
+      cleanup: (tileId: string) => {
+        calls.push(`cleanup:${tileId}`);
+        return Promise.resolve();
+      }
+    }),
+    undefined,
+    () => "/sandbox-peers"
+  );
+
+  const rt = svc.create({});
+  svc.restoreFrom([]);
+  await Promise.resolve();
+  expect(calls).toEqual([`spawn:${rt.id}`, `cleanup:${rt.id}`]);
+});
+
+test("closing all sessions cleans sandbox tiles", async () => {
+  const { svc } = setup();
+  const calls: string[] = [];
+  svc.setSandboxProvider(
+    () => ({
+      wrap: (tileId: string) => {
+        calls.push(`spawn:${tileId}`);
+        return "docker exec sandbox";
+      },
+      cleanup: (tileId: string) => {
+        calls.push(`cleanup:${tileId}`);
+        return Promise.resolve();
+      }
+    }),
+    undefined,
+    () => "/sandbox-peers"
+  );
+
+  const rt = svc.create({});
+  svc.closeAll();
+  await Promise.resolve();
+  expect(calls).toEqual([`spawn:${rt.id}`, `cleanup:${rt.id}`]);
+});
+
+test("host-side and supervisor tiles never invoke sandbox cleanup", async () => {
+  const { svc } = setup();
+  const calls: string[] = [];
+  let sandboxActive = false;
+  svc.setSandboxProvider(
+    () => {
+      if (!sandboxActive) return null;
+      return {
+        wrap: (tileId: string) => {
+          calls.push(`spawn:${tileId}`);
+          return "docker exec sandbox";
+        },
+        cleanup: (tileId: string) => {
+          calls.push(`cleanup:${tileId}`);
+          return Promise.resolve();
+        }
+      };
+    },
+    undefined,
+    () => "/sandbox-peers"
+  );
+
+  const hostTile = svc.create({});
+  spawned.at(-1)!.exit(1);
+  await Promise.resolve();
+  sandboxActive = true;
+  const supervisor = svc.create({ supervisor: true } as never);
+  spawned.at(-1)!.exit(1);
+  await Promise.resolve();
+
+  expect(hostTile.supervisor).toBeFalsy();
+  expect(supervisor.supervisor).toBeTruthy();
+  expect(calls).toEqual([]);
 });
 
 test("poll: model A then B reach the broadcast; a report older than the spawn is ignored", () => {
@@ -216,7 +523,7 @@ test("silent statusLine: reported once per spawn after the grace period, never o
   expect(silent().filter((e) => e.includes('"shell"')), "a tile without --settings is never flagged").toEqual([]);
 });
 
-test("liveStatusLine off: no --settings on any spawn, and a status file found is never shown", () => {
+test("liveStatusLine off: no --settings on any spawn, and a status file found is never shown", async () => {
   const { svc, peersDir, home, cwd } = setup({ liveStatusLine: false });
   const rt = svc.create({});
   expect(lastLine(), "fresh spawn without the Deck statusLine").not.toContain("--settings");
@@ -230,7 +537,7 @@ test("liveStatusLine off: no --settings on any spawn, and a status file found is
   mkdirSync(projDir, { recursive: true });
   writeFileSync(join(projDir, `${rt.sessionId}.jsonl`), "{}\n");
   spawned.find((p) => p.args.join(" ").includes(rt.sessionId))!.exit(1);
-  svc.restart(rt.id);
+  await svc.restart(rt.id);
   expect(lastLine(), "resume path taken").toContain("--fork-session");
   expect(lastLine(), "resume spawn without the Deck statusLine").not.toContain("--settings");
 });

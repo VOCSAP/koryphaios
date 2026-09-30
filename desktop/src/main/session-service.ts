@@ -201,7 +201,8 @@ export type DirectiveOutcome = 'written' | 'no-terminal' | 'busy-timeout' | 'ref
  * this service never imports the engine service (and stays electron-lean).
  */
 export interface SandboxWrapper {
-  wrap(sessionId: string, command: string, cwdHost: string, env: Record<string, string>): string
+  wrap(tileId: string, sessionId: string, command: string, cwdHost: string, env: Record<string, string>): string
+  cleanup(tileId: string): Promise<void>
 }
 /** null = sandbox off. MAY THROW when enabled but the container is not ready. */
 export type SandboxProvider = () => SandboxWrapper | null
@@ -353,6 +354,7 @@ export class SessionService extends EventEmitter {
       // Frees the double-resume guard for the id; a later restart re-registers
       // the fresh forked id.
       const def = this.defs.find((d) => d.id === id)
+      void this.cleanupSandbox(id, def?.name ?? id)
       if (def?.sessionId) this.registry.release(def.sessionId)
       this.thinkingDetector.clear(id)
       this.quotaDetector.clear(id)
@@ -496,6 +498,9 @@ export class SessionService extends EventEmitter {
 
   /** Injected after construction (index.ts) — a setter, like setLaunchCommand. */
   private getSandboxWrapper: SandboxProvider = () => null
+  private sandboxCleanup = new Map<string, () => Promise<void>>()
+  private sandboxCleanupInFlight = new Map<string, Promise<void>>()
+  private restartInFlight = new Map<string, Promise<SessionRuntime>>()
 
   /** Container-side transcript lookup; default = "sandbox off, use the host". */
   private sandboxTranscripts: SandboxTranscriptLookup = () => null
@@ -535,6 +540,23 @@ export class SessionService extends EventEmitter {
     this.getSandboxWrapper = provider
     if (transcripts) this.sandboxTranscripts = transcripts
     if (peersDir) this.sandboxPeersDir = peersDir
+  }
+
+  private async cleanupSandbox(id: string, name: string): Promise<void> {
+    const inFlight = this.sandboxCleanupInFlight.get(id)
+    if (inFlight) return inFlight
+    const cleanup = this.sandboxCleanup.get(id)
+    if (!cleanup) return
+    this.sandboxCleanup.delete(id)
+    const done = cleanup().catch((e) => {
+      reportError('sandbox', `cleanup failed for "${name}"`, e)
+    })
+    this.sandboxCleanupInFlight.set(id, done)
+    try {
+      await done
+    } finally {
+      this.sandboxCleanupInFlight.delete(id)
+    }
   }
 
   /**
@@ -782,6 +804,7 @@ export class SessionService extends EventEmitter {
       this.emit('removed', { id: def.id, name: def.name })
       if (def.sessionId) this.registry.release(def.sessionId)
       this.killWithTrace(id, 'force cleanup')
+      void this.cleanupSandbox(def.id, def.name)
       this.thinkingDetector.clear(id)
       this.quotaDetector.clear(id)
       this.attentionDetector.clear(id)
@@ -860,6 +883,7 @@ export class SessionService extends EventEmitter {
       if (d.sessionId) this.registry.release(d.sessionId)
     }
     this.pty.killAll()
+    for (const d of this.defs) void this.cleanupSandbox(d.id, d.name)
     this.thinkingDetector.stop()
     this.quotaDetector.stop()
     this.attentionDetector.stop()
@@ -927,6 +951,7 @@ export class SessionService extends EventEmitter {
     // that happens to reuse an id.
     for (const d of this.defs) this.emit('removed', { id: d.id, name: d.name })
     this.pty.killAll()
+    for (const d of this.defs) void this.cleanupSandbox(d.id, d.name)
     this.thinkingDetector.stop()
     this.quotaDetector.stop()
     this.attentionDetector.stop()
@@ -1154,14 +1179,28 @@ export class SessionService extends EventEmitter {
    * (no transcript) starts fresh with the stored args (the "start new" action of
    * the expired overlay) by clearing its dead id first.
    */
-  restart(id: string): SessionRuntime {
+  restart(id: string): Promise<SessionRuntime> {
+    const inFlight = this.restartInFlight.get(id)
+    if (inFlight) return inFlight
+
     const def = this.defs.find((d) => d.id === id)
-    if (!def) throw new Error(`unknown session ${id}`)
-    // spawnSession downgrades to a fresh launch automatically when there is no
-    // transcript to resume, so a single 'resume' request covers both cases.
-    this.spawnSession(def, 'resume')
-    this.broadcast()
-    return this.toRuntime(def)
+    if (!def) return Promise.reject(new Error(`unknown session ${id}`))
+
+    const restart = (async (): Promise<SessionRuntime> => {
+      await this.cleanupSandbox(def.id, def.name)
+      if (!this.defs.includes(def)) throw new Error('session removed or replaced during restart')
+      // spawnSession downgrades to a fresh launch automatically when there is no
+      // transcript to resume, so a single 'resume' request covers both cases.
+      this.spawnSession(def, 'resume')
+      this.broadcast()
+      return this.toRuntime(def)
+    })()
+    this.restartInFlight.set(id, restart)
+    void restart.then(
+      () => this.restartInFlight.delete(id),
+      () => this.restartInFlight.delete(id)
+    )
+    return restart
   }
 
   write(id: string, data: string): void {
@@ -1391,10 +1430,14 @@ export class SessionService extends EventEmitter {
     // throw here only happens on ungated paths (workspace restore with a
     // cold container) where a visibly-exited tile beats a login prompt in
     // every tile (SBX3).
+    this.sandboxCleanup.delete(def.id)
     if (!def.supervisor) {
       try {
         const wrapper = this.getSandboxWrapper()
-        if (wrapper) command = wrapper.wrap(def.sessionId, command, def.cwd, sessionEnv)
+        if (wrapper) {
+          command = wrapper.wrap(def.id, def.sessionId, command, def.cwd, sessionEnv)
+          this.sandboxCleanup.set(def.id, () => wrapper.cleanup(def.id))
+        }
       } catch (e) {
         reportError('sandbox', `sandboxed spawn refused for "${def.name}"`, e)
         if (r) {
@@ -1465,6 +1508,7 @@ export class SessionService extends EventEmitter {
       // invisible zombie (O6). Mark the tile exited so the operator sees a
       // dead tile whose Restart retries the spawn.
       reportError('session', `spawn failed for "${def.name}" (cwd: ${def.cwd})`, e)
+      void this.cleanupSandbox(def.id, def.name)
       if (r) {
         r.status = 'exited'
         r.exitCode = -1

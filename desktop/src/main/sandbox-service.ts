@@ -39,7 +39,9 @@ import {
   buildImageBuildCommand,
   buildImageProbeArgs,
   buildImageRemoveArgs,
+  buildKillPidGroupArgs,
   buildLaunchScript,
+  buildReadPidArgs,
   buildProjectionChownArgs,
   buildProjectionCleanArgs,
   buildSupervisorExecArgs,
@@ -47,7 +49,9 @@ import {
   containerNameFor,
   containerTranscriptDir,
   isSandboxContainerName,
+  parseSandboxPid,
   parseTranscriptList,
+  pidFileContainerPath,
   SANDBOX_DECK_PLUGIN_NAME,
   scriptFileName,
   type SandboxEngine,
@@ -1519,16 +1523,36 @@ export class SandboxService extends EventEmitter {
   }
 
   /** Write a session's launch script into the run dir. */
-  writeLaunchScript(sessionId: string, spec: SandboxLaunchScriptSpec): void {
+  writeLaunchScript(tileId: string, spec: SandboxLaunchScriptSpec): void {
     mkdirSync(this.runDirHost, { recursive: true })
-    writeFileSync(join(this.runDirHost, scriptFileName(sessionId)), buildLaunchScript(spec), {
+    writeFileSync(join(this.runDirHost, scriptFileName(tileId)), buildLaunchScript(spec, pidFileContainerPath(tileId)), {
       mode: 0o700
     })
   }
 
+  async cleanupSession(tileId: string): Promise<void> {
+    const launch = this.launchInfo()
+    if (!launch) {
+      reportError('sandbox', `sandbox cleanup skipped for tile ${tileId}: no active launch`)
+      return
+    }
+    const pidResult = await this.run(buildReadPidArgs(launch.container, tileId))
+    if (pidResult.code !== 0) {
+      reportError('sandbox', `failed to read sandbox pid for tile ${tileId}`, pidResult.stderr || `exit code ${pidResult.code}`)
+      return
+    }
+    const pid = parseSandboxPid(pidResult.stdout)
+    if (!pid) {
+      reportError('sandbox', `refusing invalid sandbox pid for tile ${tileId}`)
+      return
+    }
+    const cleanup = await this.run(buildKillPidGroupArgs(launch.container, pid, tileId))
+    if (cleanup.code !== 0) reportError('sandbox', `failed to clean sandbox process group for tile ${tileId}`, cleanup.stderr)
+  }
+
   /** The `docker exec` command line the PTY runs for a sandboxed session. */
-  execCommand(launch: SandboxLaunch, sessionId: string): string {
-    return buildExecCommand(launch.engine, launch.container, sessionId)
+  execCommand(launch: SandboxLaunch, tileId: string): string {
+    return buildExecCommand(launch.engine, launch.container, tileId)
   }
 
   /** True when any kory-sbx container is running (auth-purge guard, SBX3). */

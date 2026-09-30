@@ -815,7 +815,7 @@ service.setSandboxProvider(
     const launch = sandbox.launchInfo()
     if (!launch) return null
     return {
-      wrap: (sessionId, command, cwdHost, env) => {
+      wrap: (tileId, sessionId, command, cwdHost, env) => {
         const cwd = mapHostPathToContainer(cwdHost, launch.workSource)
         if (cwd === null) {
           // Never relocate an agent silently: refusing marks the tile exited
@@ -827,7 +827,7 @@ service.setSandboxProvider(
         const ttsrInContainer = env.CLAUDE_PEERS_TTSR_FILE
           ? ttsr.projectIntoSandbox(env.CLAUDE_PEERS_DESK_SESSION ?? '', sessionId, launch.runDirHost)
           : { file: '', log: '' }
-        sandbox.writeLaunchScript(sessionId, {
+        sandbox.writeLaunchScript(tileId, {
           // `command` carries --plugin-dir pointing at the HOST deck-plugin
           // path; rewrite it onto the container path projectDeckPlugin()
           // copied it to. No-op if the flag is absent.
@@ -850,8 +850,9 @@ service.setSandboxProvider(
             CLAUDE_PEERS_TTSR_LOG: ttsrInContainer.log
           }
         })
-        return sandbox.execCommand(launch, sessionId)
-      }
+        return sandbox.execCommand(launch, tileId)
+      },
+      cleanup: (tileId) => sandbox.cleanupSession(tileId)
     }
   },
   // M2 resume: transcripts live in the auth volume of the container, so the host
@@ -2674,7 +2675,9 @@ const controlDeps: DeckControlDeps = {
   listSessions: () => service.list().map((s) => ({ ...s, mintedCallerId: service.mintedCallerOf(s.id) })),
   sandboxExec: (command) => sandbox.supervisorExec(command),
   runDirective: directiveBindings.runDirective,
-  restartSession: (id) => void service.restart(id),
+  restartSession: async (id) => {
+    await service.restart(id)
+  },
   closeSession: (id) => service.remove(id),
   journal: (message) => journal.add('session', message),
   createWorktree: async (branch) => {

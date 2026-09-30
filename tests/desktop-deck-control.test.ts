@@ -146,7 +146,7 @@ function makeDeps(state: { sessions: SessionRuntime[] }): DeckControlDeps & {
       return s;
     },
     listSessions: () => state.sessions,
-    restartSession: (id) => {
+    restartSession: async (id) => {
       restarted.push(id);
     },
     closeSession: async (id) => {
@@ -333,6 +333,44 @@ test("mintCaller: a second caller can close but cannot restart a tile owned by t
 // deck_close_session takes `peer_id` as an alternative to the tile id. The
 // authorization rules bite on the RESOLVED tile, and resolution fails closed:
 // zero match and ambiguous match both refuse.
+
+test("deck_restart_session waits for restart completion and returns its rejection", async () => {
+  const state = { sessions: [] as SessionRuntime[] };
+  const deps = makeDeps(state);
+  let restartStarted: () => void = () => {};
+  const started = new Promise<void>((resolve) => {
+    restartStarted = resolve;
+  });
+  let rejectRestart: (reason: Error) => void = () => {};
+  const restartDone = new Promise<void>((_resolve, reject) => {
+    rejectRestart = reject;
+  });
+  void restartDone.catch((error) => error.message);
+  deps.restartSession = (id) => {
+    deps.restarted.push(id);
+    restartStarted();
+    return restartDone;
+  };
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+  const spawned = await call(srv, "deck_spawn_session", { name: "mine" });
+  const id = (spawned.body.result as { session: { id: string } }).session.id;
+
+  const pending = call(srv, "deck_restart_session", { id });
+  await started;
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  let acknowledged = false;
+  void pending.then(() => {
+    acknowledged = true;
+  });
+  await Promise.resolve();
+  expect(acknowledged, "restart acknowledgement waits for the restart promise").toBe(false);
+
+  rejectRestart(new Error("restart unavailable"));
+  const rejected = await pending;
+  expect(rejected.status).toBe(400);
+  expect(rejected.body.error).toContain("restart unavailable");
+});
 
 test("deck_close_session: a peer_id resolving to a tile this caller owns closes THAT tile", async () => {
   const state = { sessions: [] as SessionRuntime[] };

@@ -91,7 +91,7 @@ export interface DeckControlDeps {
   /** Same path as the operator's create (worktree handling included). */
   spawnSession(input: CreateSessionInput): Promise<SessionRuntime>
   listSessions(): DeckControlSession[]
-  restartSession(id: string): void
+  restartSession(id: string): Promise<void>
   closeSession(id: string): Promise<void>
   journal(message: string): void
   createWorktree(branch: string): Promise<WorktreeInfo>
@@ -677,7 +677,7 @@ export function startDeckControl(
             'refused: only a session spawned by this same caller can be restarted -- ask the operator for the rest'
           )
         }
-        deps.restartSession(id)
+        await deps.restartSession(id)
         return { ok: true }
       }
 

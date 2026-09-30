@@ -270,20 +270,21 @@ export interface SandboxLaunchScriptSpec {
 }
 
 /**
- * The per-session launch script written to the run dir. A script — not `-e`
+ * The per-tile launch script written to the run dir. A script — not `-e`
  * flags or an inline `bash -lc '…'` — because the outer command already
  * crosses `powershell -Command` on Windows (shell-command.ts) and a second
  * quoting layer over an arbitrary session command line is exactly the kind of
  * string-gluing the SBX plan forbids. `-l` keeps the image user's login PATH
  * (bun, claude in ~/.local/bin).
  */
-export function buildLaunchScript(spec: SandboxLaunchScriptSpec): string {
+export function buildLaunchScript(spec: SandboxLaunchScriptSpec, pidFile: string): string {
   const lines = ['#!/bin/bash -l']
   for (const [key, value] of Object.entries(spec.env)) {
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) continue // never script-inject via a key
     lines.push(`export ${key}=${shQuote(value)}`)
   }
   lines.push(`cd ${shQuote(spec.cwd)} || exit 1`)
+  lines.push(`printf '%s\\n' "$$" > ${shQuote(pidFile)}`)
   lines.push(`exec ${spec.command}`)
   return lines.join('\n') + '\n'
 }
@@ -329,18 +330,51 @@ export function sandboxifyEnv(
 }
 
 /** Container-side path of a launch script written to the host run dir. */
-export function scriptContainerPath(sessionId: string): string {
-  return `${SANDBOX_RUN_DIR}/cmd-${sessionId}.sh`
+export function scriptContainerPath(tileId: string): string {
+  return `${SANDBOX_RUN_DIR}/cmd-${tileId}.sh`
 }
 
 /** Host-side file name of the same script (joined onto the run dir by the caller). */
-export function scriptFileName(sessionId: string): string {
-  return `cmd-${sessionId}.sh`
+export function scriptFileName(tileId: string): string {
+  return `cmd-${tileId}.sh`
+}
+
+export function pidFileContainerPath(tileId: string): string {
+  return `${SANDBOX_RUN_DIR}/pid-${tileId}`
+}
+
+function isSandboxPid(value: string): boolean {
+  if (!/^[1-9]\d*$/.test(value)) return false
+  const pid = Number(value)
+  return Number.isSafeInteger(pid) && pid >= 2 && pid <= 2147483647
+}
+
+export function parseSandboxPid(stdout: string): string | null {
+  const pid = stdout.replace(/\r?\n$/, '')
+  return isSandboxPid(pid) ? pid : null
+}
+
+export function buildReadPidArgs(name: string, tileId: string): string[] {
+  return ['exec', name, 'cat', pidFileContainerPath(tileId)]
+}
+
+export function buildKillPidGroupArgs(name: string, pid: string, tileId: string): string[] {
+  if (!isSandboxPid(pid)) throw new Error('sandbox-pid-invalid')
+  return [
+    'exec',
+    name,
+    'bash',
+    '-c',
+    'kill -- -"$1" 2>/dev/null || true; rm -f "$2"',
+    'sandbox-cleanup',
+    pid,
+    pidFileContainerPath(tileId)
+  ]
 }
 
 /** The PTY command that runs a sandboxed session: exec into the idling container. */
-export function buildExecCommand(engine: SandboxEngine, name: string, sessionId: string): string {
-  return `${engine} exec -it ${name} bash ${scriptContainerPath(sessionId)}`
+export function buildExecCommand(engine: SandboxEngine, name: string, tileId: string): string {
+  return `${engine} exec -it ${name} bash ${scriptContainerPath(tileId)}`
 }
 
 /**

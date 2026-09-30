@@ -20,6 +20,7 @@ import {
 } from "../desktop/src/main/sandbox-prompt.ts";
 import { writeSupervisorSystemPrompt } from "../desktop/src/main/supervisor.ts";
 import { writeEmbeddedAgentPrompt } from "../desktop/src/main/team-embedded.ts";
+import { onDeckError } from "../desktop/src/main/log.ts";
 import {
   computeRebuildReasons,
   isProtectionRebuildNeeded,
@@ -32,6 +33,7 @@ import {
   type SandboxServiceDeps,
 } from "../desktop/src/main/sandbox-service.ts";
 import { containerNameFor, isSandboxContainerName } from "../desktop/src/main/sandbox-command.ts";
+import { writeSandboxSettings } from "../desktop/src/main/sandbox-store.ts";
 import type { ProtectionPlan } from "../desktop/src/main/sandbox-protect.ts";
 
 /** Minimal SandboxServiceDeps for constructor/keying-level tests -- no exec calls unless provided. */
@@ -389,10 +391,106 @@ test("audit fix 1 sexies: writeEmbeddedAgentPrompt's real output (team-role anch
   rmSync(userDataDir, { recursive: true, force: true });
 });
 
+test("cleanupSession reports an unavailable launch with its tile id", async () => {
+  const reports: Array<[string, string]> = [];
+  onDeckError((scope, text) => reports.push([scope, text]));
+  const svc = new SandboxService(makeDeps("/project/cleanup-trace", join(tmpdir(), "cp-sandbox-svc-cleanup-trace")));
+
+  await svc.cleanupSession("tile-cleanup-trace");
+
+  expect(reports).toEqual([["sandbox", "sandbox cleanup skipped for tile tile-cleanup-trace: no active launch"]]);
+  onDeckError(() => {});
+});
+
+test("cleanupSession reports an empty-stderr pid read failure", async () => {
+  const stateDir = mkdtempSync(join(tmpdir(), "cp-sandbox-svc-read-failure-"));
+  const calls: string[][] = [];
+  const svc = new SandboxService(
+    makeDeps("/project/read-failure", stateDir, async (_file, args) => {
+      calls.push(args);
+      if (args[0] === "version") return { code: 0, stdout: "1.2.3", stderr: "" };
+      return { code: 7, stdout: "", stderr: "" };
+    })
+  );
+  writeSandboxSettings(join(stateDir, "sandbox.json"), "k", { enabled: true });
+  await svc.detectEngine();
+  (svc as unknown as { lastReady: boolean }).lastReady = true;
+  const reports: Array<[string, string]> = [];
+  onDeckError((scope, text) => reports.push([scope, text]));
+
+  await svc.cleanupSession("tile-read-failure");
+
+  expect(calls).toEqual([
+    ["version", "--format", "{{.Client.Version}}"],
+    ["exec", containerNameFor("/project/read-failure"), "cat", "/kory-run/pid-tile-read-failure"]
+  ]);
+  expect(reports).toEqual([[
+    "sandbox",
+    "failed to read sandbox pid for tile tile-read-failure: exit code 7"
+  ]]);
+  onDeckError(() => {});
+  rmSync(stateDir, { recursive: true, force: true });
+});
+
+test("cleanupSession reads a valid pid before killing its process group", async () => {
+  const stateDir = mkdtempSync(join(tmpdir(), "cp-sandbox-svc-cleanup-flow-"));
+  const projectDir = "/project/cleanup-flow";
+  const calls: string[][] = [];
+  const svc = new SandboxService(
+    makeDeps(projectDir, stateDir, async (_file, args) => {
+      calls.push(args);
+      if (args[0] === "version") return { code: 0, stdout: "1.2.3", stderr: "" };
+      if (args[2] === "cat") return { code: 0, stdout: "517\n", stderr: "" };
+      return { code: 0, stdout: "", stderr: "" };
+    })
+  );
+  writeSandboxSettings(join(stateDir, "sandbox.json"), "k", { enabled: true });
+  await svc.detectEngine();
+  (svc as unknown as { lastReady: boolean }).lastReady = true;
+
+  await svc.cleanupSession("tile-cleanup-flow");
+
+  expect(calls).toEqual([
+    ["version", "--format", "{{.Client.Version}}"],
+    ["exec", containerNameFor(projectDir), "cat", "/kory-run/pid-tile-cleanup-flow"],
+    [
+      "exec",
+      containerNameFor(projectDir),
+      "bash",
+      "-c",
+      "kill -- -\"$1\" 2>/dev/null || true; rm -f \"$2\"",
+      "sandbox-cleanup",
+      "517",
+      "/kory-run/pid-tile-cleanup-flow"
+    ]
+  ]);
+  rmSync(stateDir, { recursive: true, force: true });
+});
+
+test("cleanupSession refuses an invalid pid before the kill command", async () => {
+  const stateDir = mkdtempSync(join(tmpdir(), "cp-sandbox-svc-invalid-pid-"));
+  const calls: string[][] = [];
+  const svc = new SandboxService(
+    makeDeps("/project/invalid-pid", stateDir, async (_file, args) => {
+      calls.push(args);
+      if (args[0] === "version") return { code: 0, stdout: "1.2.3", stderr: "" };
+      return { code: 0, stdout: "2147483648\n", stderr: "" };
+    })
+  );
+  writeSandboxSettings(join(stateDir, "sandbox.json"), "k", { enabled: true });
+  await svc.detectEngine();
+  (svc as unknown as { lastReady: boolean }).lastReady = true;
+
+  await svc.cleanupSession("tile-invalid-pid");
+
+  expect(calls).toHaveLength(2);
+  expect(calls.at(-1)).toEqual(["exec", containerNameFor("/project/invalid-pid"), "cat", "/kory-run/pid-tile-invalid-pid"]);
+  rmSync(stateDir, { recursive: true, force: true });
+});
+
 // runDirHost/peersDirHost are keyed by containerName and purged on remove or
 // rebuild -- the shared-mount drift signal depends on this per-container
 // isolation.
-
 test("P-a: two projects' writeLaunchScript land in DIFFERENT, containerName-keyed run dirs", () => {
   const stateDir = mkdtempSync(join(tmpdir(), "cp-sandbox-svc-keying-"));
   const svcA = new SandboxService(makeDeps("/project/a", stateDir));

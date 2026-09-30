@@ -12,6 +12,8 @@ import {
   buildAuthProbeArgs,
   buildAuthPurgeArgs,
   buildBrokerProbeArgs,
+  buildKillPidGroupArgs,
+  buildReadPidArgs,
   buildImageRemoveArgs,
   buildCopyIntoArgs,
   buildProjectionChownArgs,
@@ -30,6 +32,7 @@ import {
   isSandboxContainerName,
   mapHostPathToContainer,
   normalizeProjectDir,
+  parseSandboxPid,
   parseTranscriptList,
   rewriteLoopbackForContainer,
   rewritePluginDirForContainer,
@@ -240,23 +243,56 @@ test("buildCreateArgs emits nothing extra when protection is not-applicable or a
   expect(notApplicable.filter((a) => a === "-v")).toHaveLength(3);
 });
 
-test("buildLaunchScript exports env, cds and execs — hostile keys dropped", () => {
-  const script = buildLaunchScript({
-    command: 'claude --session-id "abc"',
-    cwd: "/work/.worktrees/fix",
-    env: {
-      CLAUDE_PEERS_DESK_SESSION: "tile-1",
-      "BAD KEY; rm": "x",
-      QUOTED: "it's",
+test("buildLaunchScript writes the tile pidfile before exec and drops hostile env keys", () => {
+  const script = buildLaunchScript(
+    {
+      command: 'claude --session-id "abc"',
+      cwd: "/work/.worktrees/fix",
+      env: {
+        CLAUDE_PEERS_DESK_SESSION: "tile-1",
+        "BAD KEY; rm": "x",
+        QUOTED: "it's",
+      },
     },
-  });
+    "/kory-run/pid-tile-1"
+  );
   const lines = script.trim().split("\n");
   expect(lines[0]).toBe("#!/bin/bash -l");
   expect(script).toContain(`export CLAUDE_PEERS_DESK_SESSION='tile-1'`);
   expect(script).toContain(`export QUOTED='it'\\''s'`);
   expect(script).not.toContain("BAD KEY");
   expect(script).toContain(`cd '/work/.worktrees/fix' || exit 1`);
-  expect(lines[lines.length - 1]).toBe(`exec claude --session-id "abc"`);
+  expect(lines.at(-2)).toBe(`printf '%s\\n' "$$" > '/kory-run/pid-tile-1'`);
+  expect(lines.at(-1)).toBe(`exec claude --session-id "abc"`);
+});
+
+test("sandbox cleanup accepts one numeric pid and uses fixed argv", () => {
+  expect(parseSandboxPid("517\n")).toBe("517");
+  expect(parseSandboxPid("2147483647\n")).toBe("2147483647");
+  for (const invalid of ["", "0\n", "1\n", "2147483648\n", " 517\n", "517 9\n", "517\n9\n", "-517\n"]) {
+    expect(parseSandboxPid(invalid)).toBeNull();
+  }
+  expect(buildReadPidArgs("kory-sbx-0123456789ab", "tile-1")).toEqual([
+    "exec",
+    "kory-sbx-0123456789ab",
+    "cat",
+    "/kory-run/pid-tile-1"
+  ]);
+  expect(buildKillPidGroupArgs("kory-sbx-0123456789ab", "517", "tile-1")).toEqual([
+    "exec",
+    "kory-sbx-0123456789ab",
+    "bash",
+    "-c",
+    "kill -- -\"$1\" 2>/dev/null || true; rm -f \"$2\"",
+    "sandbox-cleanup",
+    "517",
+    "/kory-run/pid-tile-1"
+  ]);
+  expect(() => buildKillPidGroupArgs("kory-sbx-0123456789ab", "1", "tile-1")).toThrow("sandbox-pid-invalid");
+  expect(() => buildKillPidGroupArgs("kory-sbx-0123456789ab", "2147483648", "tile-1")).toThrow("sandbox-pid-invalid");
+  expect(() => buildKillPidGroupArgs("kory-sbx-0123456789ab", "517; touch /tmp/pwned", "tile-1")).toThrow(
+    "sandbox-pid-invalid"
+  );
 });
 
 test("sandboxifyEnv translates the FORCE_GROUP file transport inline", () => {

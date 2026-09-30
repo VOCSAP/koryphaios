@@ -331,6 +331,7 @@ function makeExitSelf(id: string, initialActivity: Activity) {
     oscParsers: { delete: () => {} },
     activityTrackers: { get: () => undefined, delete: () => {} },
     pendingPrompt: { delete: () => {} },
+    cleanupSandbox: () => Promise.resolve(),
     persist: () => {},
     emit: () => {},
     broadcast: () => {},
