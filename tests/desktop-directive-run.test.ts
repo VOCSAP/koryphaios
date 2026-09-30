@@ -62,7 +62,7 @@ function recorder(sessions: SessionRuntime[]): Recorder {
     },
     runMagicCompact: (tileId, peerId, useMagic, mode) => {
       magic.push({ tileId, peerId, useMagic, mode });
-      return Promise.resolve();
+      return Promise.resolve("written" as const);
     },
     resolveMagic: () => ({ useMagic: true, mode: "auto" }),
     journal: (line) => journal.push(line),
@@ -108,12 +108,48 @@ test("a directive card and deck_run_directive reach the same targets for every d
     );
     expect(tool.typed, directive).toEqual(card.typed);
     expect(tool.magic, directive).toEqual(card.magic);
-    const launched =
-      directive === "magic_compact"
-        ? { injected: [], pending: cardResult.injected }
-        : { injected: cardResult.injected, pending: [] };
-    expect(toolResult, directive).toEqual({ ...launched, refused: [], unreached: cardResult.unreached });
+    expect(toolResult, directive).toEqual({
+      injected: cardResult.injected,
+      pending: [],
+      refused: [],
+      unreached: cardResult.unreached
+    });
   }
+});
+
+test("magic_compact reports the outcome of its sequence like any other directive", async () => {
+  const written = recorder([session("t1", "alpha")]);
+  expect(await runDirectiveForCaller("magic_compact", ["alpha"], undefined, "lead", written.deps, { reportWaitMs: 500 })).toEqual({
+    injected: [{ tileId: "t1", peerId: "alpha" }],
+    refused: [],
+    pending: [],
+    unreached: []
+  });
+
+  const refused = recorder([session("t1", "alpha")]);
+  refused.deps.runMagicCompact = () => Promise.resolve("refused-modal" as const);
+  expect(await runDirectiveForCaller("magic_compact", ["alpha"], undefined, "lead", refused.deps, { reportWaitMs: 500 })).toEqual({
+    injected: [],
+    refused: [{ tileId: "t1", peerId: "alpha", reason: "refused-modal" }],
+    pending: [],
+    unreached: []
+  });
+
+  const failed = recorder([session("t1", "alpha")]);
+  failed.deps.runMagicCompact = () => Promise.reject(new Error("pty gone"));
+  expect(await runDirectiveForCaller("magic_compact", ["alpha"], undefined, "lead", failed.deps, { reportWaitMs: 500 })).toEqual({
+    injected: [],
+    refused: [{ tileId: "t1", peerId: "alpha", reason: "error" }],
+    pending: [],
+    unreached: []
+  });
+  expect(failed.errors.map((e) => e.message)).toEqual(['magic_compact failed for "alpha"']);
+
+  const slow = recorder([session("t1", "alpha")]);
+  slow.deps.runMagicCompact = () => new Promise(() => {});
+  expect(
+    await runDirectiveForCaller("magic_compact", ["alpha"], undefined, "lead", slow.deps, { reportWaitMs: 20 })
+  ).toEqual({ injected: [], refused: [], pending: [{ tileId: "t1", peerId: "alpha" }], unreached: [] });
 });
 
 function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {

@@ -17,7 +17,6 @@ import { PEER_POLL_MS, TilePeerPoller } from './peer-state'
 import {
   buildSessionCommandLine,
   encodeInitialPromptKeystrokes,
-  encodeSubmittedKeystrokes,
   sanitizeFlagValue,
   shouldInjectPrompt,
   type SpawnMode
@@ -51,6 +50,7 @@ import {
 } from './session-status-file'
 import { sameLiveStatus } from '@shared/session-status'
 import { ScreenGuard } from './screen-model'
+import { TileInjector, type InTurnInject } from './tile-injector'
 import { DIRECTIVE_IDLE_WAIT_MS } from './directive-run'
 import { gracefulClose } from './session-close'
 import { createOscParser, type OscSnapshot } from './detect/osc'
@@ -150,16 +150,6 @@ function pushSessionIdHistory(history: string[] | undefined, realId: string): st
 }
 
 /**
- * Directive injection (CT3): a command is only typed into a tile that is idle,
- * so a /clear or /compact never lands mid-turn. When the tile is busy the
- * injection waits up to DIRECTIVE_IDLE_WAIT_MS (polling every
- * DIRECTIVE_IDLE_POLL_MS) for it to fall idle, else reports a skip.
- * DIRECTIVE_SETTLE_MS mirrors the autoResume settle between Escape and the text.
- */
-const DIRECTIVE_IDLE_POLL_MS = 500
-const DIRECTIVE_SETTLE_MS = 120
-
-/**
  * Soft-stop's idle wait (aaf4537d lot 3), kept separate from
  * DIRECTIVE_IDLE_WAIT_MS on purpose: tuning one must never detune the other,
  * since a global stop is expected to give up on an unresponsive tile much
@@ -244,6 +234,9 @@ export class SessionService extends EventEmitter {
    * Fed and cleared alongside the four detectors above, same convention.
    */
   private screenGuard = new ScreenGuard()
+  private injector = new TileInjector(this.pty, this.screenGuard, this.runtime, (id) => this.lastOutputAt(id), {
+    activityIdleMs: ACTIVITY_IDLE_MS
+  })
   /**
    * OSC 0/2/9;4/777 extraction (card 1aa69066/H2, desktop/src/main/detect/osc.ts).
    * One createOscParser() instance per session id -- same session-keyed
@@ -1577,59 +1570,19 @@ export class SessionService extends EventEmitter {
     this.emit('quota', { id, limited: true, resetAt: r.resumeAt, resumed: true })
   }
 
-  /**
-   * Types a command the way the operator would: dismiss any open menu, settle,
-   * then one write carrying the text and its submit keystroke.
-   * A directive command has a code-constant prefix; any appended prompt was
-   * sanitized before this boundary.
-   * Gated on the tile being idle so a directive never interrupts a live turn;
-   * if it never falls idle within the deadline the command is not sent and
-   * 'busy-timeout' is returned.
-   */
-  async injectCommand(
-    id: string,
-    command: string,
-    idleWaitMs: number = DIRECTIVE_IDLE_WAIT_MS
-  ): Promise<DirectiveOutcome> {
-    if (!this.pty.isAlive(id)) return 'no-terminal'
-    const idle = await this.waitIdle(id, idleWaitMs)
-    if (!this.pty.isAlive(id)) return 'no-terminal'
-    if (!idle) return 'busy-timeout'
-    // Escape or pasted text can change a modal selection, so every refusal blocks both writes.
-    if (this.screenGuard.classify(id) === 'modal') {
-      logInfo('session', `command injection refused-modal for ${id}: screen guard`)
-      return 'refused-modal'
-    }
-    if (this.runtime.get(id)?.needsAttention) {
-      logInfo('session', `command injection refused-modal for ${id}: needs attention`)
-      return 'refused-modal'
-    }
-    if (this.runtime.get(id)?.rateLimited) {
-      logInfo('session', `command injection refused-modal for ${id}: rate limited`)
-      return 'refused-modal'
-    }
-    this.pty.write(id, '\x1b')
-    await new Promise((res) => setTimeout(res, DIRECTIVE_SETTLE_MS))
-    if (!this.pty.isAlive(id)) return 'no-terminal'
-    // One write, bracketed-paste wrapped, with the CR inside the same string:
-    // two separate writes did not submit, because ConPTY coalesces them into
-    // one read and the CLI only turns a control byte into Enter when the whole
-    // read is under 64 characters.
-    // Do not split this back into two writes or add a delay; a delay is a race
-    // that passes only on an idle machine.
-    // write()'s own return value is consulted, not just the prior isAlive
-    // check, since isAlive only proves liveness at that instant, not for this
-    // specific write.
-    if (!this.pty.write(id, encodeSubmittedKeystrokes(command))) return 'no-terminal'
-    // 'written' guarantees pty.write() returned true and the bytes are the
-    // shape the CLI submits at the main prompt; it does not guarantee the
-    // terminal accepted them in every UI state.
-    // On a modal dialog, a bare Escape quits the CLI outright, while the paste
-    // alone confirms whichever option is highlighted; the screen-state guard
-    // above this point is what stops both from reaching the dialog.
-    // waitIdle's idleness signal is byte-recency, not RuntimeState.activity,
-    // since the activity predicate is silent while the operator types.
-    return 'written'
+  /** Types a command into tile `id` once its earlier injections are done. */
+  injectCommand(id: string, command: string, idleWaitMs: number = DIRECTIVE_IDLE_WAIT_MS): Promise<DirectiveOutcome> {
+    return this.injector.inTurn(id, () => this.injector.injectCommand(id, command, idleWaitMs))
+  }
+
+  /** Holds tile `id` for a whole injection sequence; injections inside it take no further turn. */
+  serializeTile<T>(id: string, fn: (inject: InTurnInject) => Promise<T>): Promise<T> {
+    return this.injector.serializeTile(id, fn)
+  }
+
+  /** The operator's stop: it never waits behind a queued directive or a magic_compact. */
+  injectCommandOutOfTurn(id: string, command: string, idleWaitMs: number): Promise<DirectiveOutcome> {
+    return this.injector.injectCommand(id, command, idleWaitMs)
   }
 
   /**
@@ -1702,26 +1655,6 @@ export class SessionService extends EventEmitter {
       this.on('data', onData)
       this.on('exit', onExit)
     })
-  }
-
-  /**
-   * Resolves once the PTY has been quiet for at least ACTIVITY_IDLE_MS, or
-   * false at the deadline.
-   * Driven by byte recency, not RuntimeState.activity: OSC 0 stays silent while
-   * the operator types, so gating on the activity field would open the write
-   * gate exactly while a human is mid-keystroke.
-   * A session with no output yet is treated as idle.
-   */
-  private async waitIdle(id: string, deadlineMs: number): Promise<boolean> {
-    const deadline = Date.now() + deadlineMs
-    for (;;) {
-      const r = this.runtime.get(id)
-      if (!r) return false
-      const last = this.lastOutputAt(id)
-      if (last === null || Date.now() - last >= ACTIVITY_IDLE_MS) return true
-      if (Date.now() >= deadline) return false
-      await new Promise((res) => setTimeout(res, DIRECTIVE_IDLE_POLL_MS))
-    }
   }
 
   private pollPeerIds(): void {

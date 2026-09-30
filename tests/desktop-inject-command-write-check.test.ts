@@ -14,12 +14,12 @@ import { extractBracedBody } from "./_braced-body";
 // @shared/* aliases), so this reads the real file text instead of instantiating
 // the class.
 
-const SESSION_SERVICE_PATH = join(import.meta.dir, "..", "desktop", "src", "main", "session-service.ts");
+const SESSION_SERVICE_PATH = join(import.meta.dir, "..", "desktop", "src", "main", "tile-injector.ts");
 
 
 function extractInjectCommandBody(src: string): string {
   const fnMatch = /async injectCommand\([^)]*\)[^{]*\{/.exec(src);
-  if (!fnMatch) throw new Error("injectCommand() not found in session-service.ts -- has it been renamed?");
+  if (!fnMatch) throw new Error("injectCommand() not found in tile-injector.ts -- has it been renamed?");
   return extractBracedBody(src, fnMatch.index + fnMatch[0].length - 1);
 }
 

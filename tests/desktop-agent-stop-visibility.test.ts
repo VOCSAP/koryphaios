@@ -311,7 +311,7 @@ describe("SessionService.interrupt()'s pause-only screen-state gate (card 120148
 
   function extractInjectCommandGuardPrologue(src: string): string {
     const fnMatch = /async injectCommand\([^)]*\)[^{]*\{/.exec(src)
-    if (!fnMatch) throw new Error('injectCommand() not found in session-service.ts -- has it been renamed?')
+    if (!fnMatch) throw new Error('injectCommand() not found in tile-injector.ts -- has it been renamed?')
     const body = extractBracedBody(src, fnMatch.index + fnMatch[0].length - 1)
     const escIdx = body.search(ESC_WRITE)
     if (escIdx === -1) {
@@ -354,7 +354,8 @@ describe("SessionService.interrupt()'s pause-only screen-state gate (card 120148
     "injectCommand's guard and interrupt()'s pause branch consult the exact SAME set of screen-state signals -- no hardcoded list on either side, and a one-sided addition is caught by set inequality (real file)",
     () => {
       const src = readFileSync(SESSION_SERVICE_PATH, 'utf-8')
-      const injectSignals = extractGuardSignals(extractInjectCommandGuardPrologue(src))
+      const injectorSrc = readFileSync(join(SESSION_SERVICE_PATH, '..', 'tile-injector.ts'), 'utf-8')
+      const injectSignals = extractGuardSignals(extractInjectCommandGuardPrologue(injectorSrc))
       const interruptSignals = extractGuardSignals(extractInterruptPauseBranch(src))
 
       const onlyInject = [...injectSignals].filter((s) => !interruptSignals.has(s)).sort()

@@ -1203,7 +1203,7 @@ export function registerIpc({
       {
         list: () => service.list(),
         interrupt: (id, mode) => service.interrupt(id, toInterruptMode(mode)),
-        injectCommand: (id, command) => service.injectCommand(id, command, STOP_IDLE_WAIT_MS),
+        injectCommand: (id, command) => service.injectCommandOutOfTurn(id, command, STOP_IDLE_WAIT_MS),
         journal: (line) => journal.add('dispatch', line)
       },
       peerIds

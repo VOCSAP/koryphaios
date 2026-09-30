@@ -17,7 +17,7 @@ import { sanitizeGlowColor } from '@shared/palette'
 import { loadConfig, saveConfig } from './store'
 import { buildAppMenu } from './menu'
 import { safeExternalUrl } from './external-url'
-import { SessionService } from './session-service'
+import { SessionService, type DirectiveOutcome } from './session-service'
 import { createMissingDirTracker, deckPluginDirFor } from './session-command'
 import { statusLineHookPath, writeStatusLineSettings } from './statusline-settings'
 import { registerIpc, resolveDocsDir } from './ipc'
@@ -50,12 +50,8 @@ import {
   resolveFeatures,
   resolveLaunchConfig
 } from './launch-config'
-import {
-  MAGIC_TIMEOUT_MS,
-  isMagicShimFailure,
-  magicCompactPluginPresent,
-  parseMagicResume
-} from './magic-compact'
+import { magicCompactPluginPresent } from './magic-compact'
+import { runMagicCompactInTurn } from './magic-compact-sequence'
 import { approve, commandHash, isApproved, resolveApprovedLaunchCommand } from './launch-approval'
 import { homedir, hostname } from 'node:os'
 import {
@@ -1791,50 +1787,8 @@ const DISPATCH_WATCH_MS = 20_000
  * Falls back to a standard /compact on the plugin's shim-failure message or a
  * timeout; goes straight to /compact when the plugin is disabled or absent.
  */
-const runMagicCompact = async (
-  tileId: string,
-  peerId: string,
-  useMagic: boolean,
-  mode: MagicCompactMode
-): Promise<void> => {
-  if (!useMagic) {
-    const why = mode === 'off' ? 'disabled' : 'plugin absent'
-    const o = await service.injectCommand(tileId, '/compact')
-    journal.add('dispatch', `magic_compact -> "${peerId}": ${why}, used /compact (${o})`)
-    return
-  }
-  // Inject FIRST, then arm the scanner. Arming after the command is typed means
-  // the scanner can never capture output that predates it (a stale /resume
-  // banner or unrelated agent text), and the MAGIC_TIMEOUT_MS budget starts at
-  // injection rather than being eaten by injectCommand's idle wait. If injection
-  // never happens (no terminal / busy timeout) no scanner is armed, so no
-  // listeners leak. The banner is a PTY macrotask, so the synchronous
-  // waitForOutput() on the next line always attaches before it can arrive.
-  const injected = await service.injectCommand(tileId, '/magic-compact')
-  if (injected !== 'written') {
-    journal.add('dispatch', `magic_compact -> "${peerId}": /magic-compact not injected (${injected})`)
-    return
-  }
-  const res = await service.waitForOutput(tileId, MAGIC_TIMEOUT_MS, (buf) => {
-    const id = parseMagicResume(buf)
-    if (id) return { kind: 'resume' as const, id }
-    if (isMagicShimFailure(buf)) return { kind: 'shim' as const }
-    return null
-  })
-  if (res?.kind === 'resume') {
-    // Option A: re-enter in place. The id is a strict UUID from the agent's own
-    // terminal, typed behind the code-constant /resume prefix.
-    const o = await service.injectCommand(tileId, `/resume ${res.id}`)
-    journal.add(
-      'dispatch',
-      `magic_compact -> "${peerId}": compacted, re-entered ${res.id.slice(0, 8)} (${o})`
-    )
-    return
-  }
-  const o = await service.injectCommand(tileId, '/compact')
-  const why = res?.kind === 'shim' ? 'plugin shim (not intercepted)' : 'no banner within timeout'
-  journal.add('dispatch', `magic_compact -> "${peerId}": ${why}, fell back to /compact (${o})`)
-}
+const runMagicCompact = (tileId: string, peerId: string, useMagic: boolean, mode: MagicCompactMode): Promise<DirectiveOutcome> =>
+  runMagicCompactInTurn(service, (line) => journal.add('dispatch', line), tileId, peerId, useMagic, mode)
 
 const directiveRunDeps: DirectiveRunDeps = {
   listSessions: () => service.list(),

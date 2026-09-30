@@ -25,7 +25,8 @@ export const DIRECTIVE_IDLE_WAIT_MS = 120_000
 export interface DirectiveRunDeps {
   listSessions(): SessionRuntime[]
   injectCommand(tileId: string, keys: string): Promise<DirectiveOutcome>
-  runMagicCompact(tileId: string, peerId: string, useMagic: boolean, mode: MagicCompactMode): Promise<void>
+  /** Resolves with the outcome of the command that ends the sequence. */
+  runMagicCompact(tileId: string, peerId: string, useMagic: boolean, mode: MagicCompactMode): Promise<DirectiveOutcome>
   /** Called once per run, and only for magic_compact. */
   resolveMagic(): { useMagic: boolean; mode: MagicCompactMode }
   journal(line: string): void
@@ -46,7 +47,7 @@ export type DirectiveRefusalReason = Exclude<DirectiveOutcome, 'written'> | 'err
 /**
  * deck_run_directive's result: `injected` holds only targets whose command was
  * written; `pending` did not settle within DIRECTIVE_REPORT_WAIT_MS and is
- * still queued behind the tile's idle wait, magic_compact always included.
+ * still queued behind the tile's idle wait or turn.
  */
 export interface DeckDirectiveRunResult {
   injected: DirectiveTarget[]
@@ -57,8 +58,7 @@ export interface DeckDirectiveRunResult {
 }
 
 interface DirectiveLaunch {
-  /** `outcome` is null for magic_compact, whose result only reaches the journal. */
-  launched: (DirectiveTarget & { outcome: Promise<DirectiveOutcome | 'error'> | null })[]
+  launched: (DirectiveTarget & { outcome: Promise<DirectiveOutcome | 'error'> })[]
   unreached: UnreachedDirectiveTarget[]
   error?: 'directive execution failed'
 }
@@ -173,10 +173,11 @@ function launchDirective(
     const magic = cmd === 'magic_compact' ? deps.resolveMagic() : null
     for (const t of matched) {
       if (magic) {
-        void deps
-          .runMagicCompact(t.id, t.peerId, magic.useMagic, magic.mode)
-          .catch((e) => reportDirectiveError(deps, `magic_compact failed for "${t.peerId}"`, e))
-        launched.push({ tileId: t.id, peerId: t.peerId, outcome: null })
+        const outcome = deps.runMagicCompact(t.id, t.peerId, magic.useMagic, magic.mode).catch((e): 'error' => {
+          reportDirectiveError(deps, `magic_compact failed for "${t.peerId}"`, e)
+          return 'error'
+        })
+        launched.push({ tileId: t.id, peerId: t.peerId, outcome })
       } else {
         const outcome = deps.injectCommand(t.id, typed).then(
           (o): DirectiveOutcome => {
@@ -228,7 +229,7 @@ async function settleLaunch(run: DirectiveLaunch, waitMs: number): Promise<DeckD
   })
   let outcomes: (DirectiveOutcome | 'error' | null)[]
   try {
-    outcomes = await Promise.all(run.launched.map((t) => (t.outcome ? Promise.race([t.outcome, cap]) : null)))
+    outcomes = await Promise.all(run.launched.map((t) => Promise.race([t.outcome, cap])))
   } finally {
     clearTimeout(timer)
   }

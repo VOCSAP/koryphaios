@@ -222,6 +222,7 @@ test("stripOsc0 sanity: it actually removes the titles this fixture is known to 
 // ----- 4. Wiring proof: session-service.ts's pty.on('data') handler --------
 
 const SESSION_SERVICE_PATH = join(import.meta.dir, "..", "desktop", "src", "main", "session-service.ts");
+const TILE_INJECTOR_PATH = join(import.meta.dir, "..", "desktop", "src", "main", "tile-injector.ts");
 const PTY_DATA_HANDLER_ANCHOR = "this.pty.on('data', (e: { id: string; data: string }) => {";
 
 function extractPtyDataHandlerBody(src: string): string {
@@ -363,29 +364,24 @@ test("B1: a session already 'idle' at exit stays 'idle'", () => {
 const WAIT_IDLE_ANCHOR = "private async waitIdle(id: string, deadlineMs: number): Promise<boolean> {";
 
 function makeWaitIdle() {
-  const src = readFileSync(SESSION_SERVICE_PATH, "utf-8");
+  const src = readFileSync(TILE_INJECTOR_PATH, "utf-8");
   const body = extractByAnchor(src, WAIT_IDLE_ANCHOR, "waitIdle()");
-  // Free identifiers ACTIVITY_IDLE_MS (imported real value) and
-  // DIRECTIVE_IDLE_POLL_MS (module-private, not exported -- passed as a
-  // small arbitrary poll interval; only its EXISTENCE as a real delay
-  // matters for this proof, not its exact production value).
-  const fnSrc = `async function(id, deadlineMs, ACTIVITY_IDLE_MS, DIRECTIVE_IDLE_POLL_MS) ${body}`;
+  const fnSrc = `async function(id, deadlineMs) ${body}`;
   // eslint-disable-next-line no-new-func -- extracted from the real source text, not user input
   const factory = new Function("return " + fnSrc)() as (
     this: unknown,
     id: string,
-    deadlineMs: number,
-    activityIdleMs: number,
-    pollMs: number
+    deadlineMs: number
   ) => Promise<boolean>;
   return (self: unknown, id: string, deadlineMs: number): Promise<boolean> =>
-    factory.call(self, id, deadlineMs, ACTIVITY_IDLE_MS, 10);
+    factory.call(self, id, deadlineMs);
 }
 
 test("B2: waitIdle resolves true from BYTE RECENCY even when activity is 'working' -- proves it reads lastOutputAt, not RuntimeState.activity", async () => {
   const waitIdle = makeWaitIdle();
   const self = {
     runtime: new Map([["a", { activity: "working" as Activity }]]),
+    timing: { activityIdleMs: ACTIVITY_IDLE_MS, idlePollMs: 10 },
     // 5s of silence -- past the 3s ACTIVITY_IDLE_MS threshold.
     lastOutputAt: (_id: string) => Date.now() - 5000
   };
@@ -402,6 +398,7 @@ test("B2: waitIdle resolves false at the deadline when bytes are still fresh, ev
   const waitIdle = makeWaitIdle();
   const self = {
     runtime: new Map([["a", { activity: "idle" as Activity }]]),
+    timing: { activityIdleMs: ACTIVITY_IDLE_MS, idlePollMs: 10 },
     lastOutputAt: (_id: string) => Date.now() // just wrote -- not quiet yet
   };
   const result = await waitIdle(self, "a", 150);
@@ -418,6 +415,7 @@ test("B2: a session with a PRESENT runtime entry that has never produced a byte 
   const waitIdle = makeWaitIdle();
   const self = {
     runtime: new Map([["a", { activity: "unknown" as Activity }]]),
+    timing: { activityIdleMs: ACTIVITY_IDLE_MS, idlePollMs: 10 },
     lastOutputAt: (_id: string) => null
   };
   const start = Date.now();

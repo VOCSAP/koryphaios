@@ -10,10 +10,11 @@ import { extractBracedBody } from './_braced-body'
 // instantiating the class.
 
 const SESSION_SERVICE_PATH = join(import.meta.dir, '..', 'desktop', 'src', 'main', 'session-service.ts')
+const TILE_INJECTOR_PATH = join(import.meta.dir, '..', 'desktop', 'src', 'main', 'tile-injector.ts')
 
 function extractInjectCommandBody(src: string): string {
   const fnMatch = /async injectCommand\([^)]*\)[^{]*\{/.exec(src)
-  if (!fnMatch) throw new Error('injectCommand() not found in session-service.ts -- has it been renamed?')
+  if (!fnMatch) throw new Error('injectCommand() not found in tile-injector.ts -- has it been renamed?')
   return extractBracedBody(src, fnMatch.index + fnMatch[0].length - 1)
 }
 
@@ -58,7 +59,7 @@ function guardIsWiredBeforeEscape(body: string): boolean {
 }
 
 test("injectCommand's screen-state guard runs BEFORE the Escape write and refuses on either signal (real file)", () => {
-  const body = extractInjectCommandBody(readFileSync(SESSION_SERVICE_PATH, 'utf-8'))
+  const body = extractInjectCommandBody(readFileSync(TILE_INJECTOR_PATH, 'utf-8'))
   expect(guardIsWiredBeforeEscape(body)).toBe(true)
 })
 
@@ -66,15 +67,17 @@ test('every modal refusal and SessionService kill path logs a static reason befo
   const src = readFileSync(SESSION_SERVICE_PATH, 'utf-8')
   const removeBody = extractRemoveBody(src)
   const killBody = extractKillWithTraceBody(src)
-  const refusals = [...src.matchAll(/return 'refused-modal'/g)]
-  const refusalBlocks = [
-    ...src.matchAll(
-      /if \((?:[^()]|\([^()]*\))*\) \{\s*logInfo\('session', `[^$`]*refused-modal for \$\{id\}: [^$`]+`\)\s*return 'refused-modal'/g
-    )
-  ]
+  for (const refusalSource of [src, readFileSync(TILE_INJECTOR_PATH, 'utf-8')]) {
+    const refusals = [...refusalSource.matchAll(/return 'refused-modal'/g)]
+    const refusalBlocks = [
+      ...refusalSource.matchAll(
+        /if \((?:[^()]|\([^()]*\))*\) \{\s*logInfo\('session', `[^$`]*refused-modal for \$\{id\}: [^$`]+`\)\s*return 'refused-modal'/g
+      )
+    ]
 
-  expect(refusals.length).toBeGreaterThan(0)
-  expect(refusalBlocks).toHaveLength(refusals.length)
+    expect(refusals.length).toBeGreaterThan(0)
+    expect(refusalBlocks).toHaveLength(refusals.length)
+  }
 
   expect(killBody.indexOf('logInfo')).toBeGreaterThan(-1)
   expect(killBody.indexOf('logInfo')).toBeLessThan(killBody.indexOf('this.pty.kill(id)'))

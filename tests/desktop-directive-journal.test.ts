@@ -115,7 +115,7 @@ test("runDirectiveOn reports absent and ambiguous targets in the result and jour
   const deps: DirectiveRunDeps = {
     listSessions: () => sessions,
     injectCommand: async () => "written",
-    runMagicCompact: async () => undefined,
+    runMagicCompact: async () => "written" as const,
     resolveMagic: () => ({ useMagic: false, mode: "off" }),
     journal: (line) => journal.push(line),
     reportError: () => undefined
