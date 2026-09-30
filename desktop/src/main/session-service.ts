@@ -1599,8 +1599,10 @@ export class SessionService extends EventEmitter {
   interrupt(id: string, mode: 'pause' | 'hard'): 'interrupted' | 'no-terminal' | 'refused-modal' {
     if (!this.pty.isAlive(id)) return 'no-terminal'
     if (mode === 'pause') {
-      if (this.screenGuard.classify(id) === 'modal') {
-        logInfo('session', `pause interruption refused-modal for ${id}: screen guard`)
+      const guard = this.screenGuard.inspect(id)
+      if (guard.state === 'modal') {
+        const line = guard.line === undefined ? '' : ` at line ${guard.line}`
+        logInfo('session', `pause interruption refused-modal for ${id}: screen guard ${guard.rule}${line}`)
         return 'refused-modal'
       }
       if (this.runtime.get(id)?.needsAttention) {

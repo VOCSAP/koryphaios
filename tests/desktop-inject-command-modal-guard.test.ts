@@ -72,8 +72,14 @@ test('every modal refusal and SessionService kill path logs a reason before acti
     )
   ]
 
+  const structuredPauseRefusal =
+    src.includes("const guard = this.screenGuard.inspect(id)") &&
+    src.includes("const line = guard.line === undefined ? '' : ` at line ${guard.line}`") &&
+    src.includes("logInfo('session', `pause interruption refused-modal for ${id}: screen guard ${guard.rule}${line}`)")
+
   expect(sessionRefusals.length).toBeGreaterThan(0)
-  expect(sessionRefusalBlocks).toHaveLength(sessionRefusals.length)
+  expect(structuredPauseRefusal).toBe(true)
+  expect(sessionRefusalBlocks.length + Number(structuredPauseRefusal)).toBe(sessionRefusals.length)
   expect(tileBody).toContain("const guard = this.screenGuard.inspect(id)")
   expect(tileBody).toContain("this.info('session', `command injection refused-modal for ${id}: screen guard ${guard.rule}${line}`)")
 

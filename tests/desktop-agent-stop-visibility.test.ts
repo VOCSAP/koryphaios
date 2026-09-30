@@ -2,6 +2,7 @@ import { test, expect, describe } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { extractBracedBody } from './_braced-body'
+import { ScreenGuard } from '../desktop/src/main/screen-model.ts'
 
 // AgentStopControls.tsx pulls in React and sibling components that don't import
 // cleanly under `bun test` (no bundler/CSS loader), so this extracts each
@@ -137,7 +138,7 @@ describe("SessionService.interrupt()'s pause-only screen-state gate (card 120148
 
   const ESC_WRITE = /this\.pty\.write\(id,\s*'\\x1b'\)/
   const PAUSE_BRANCH = /mode\s*===\s*'pause'/
-  const SCREEN_GUARD_CHECK = /this\.screenGuard\.classify\(id\)\s*===\s*'modal'/
+  const SCREEN_GUARD_CHECK = /this\.screenGuard\.inspect\(id\)/
   const ATTENTION_CHECK = /this\.runtime\.get\(id\)\?\.needsAttention/
   // Third signal (mutation review round 2, D1): same as injectCommand's own
   // three-signal union -- without it, Pause during a quota-resume window
@@ -224,7 +225,8 @@ describe("SessionService.interrupt()'s pause-only screen-state gate (card 120148
     const body = `
       if (!this.pty.isAlive(id)) return 'no-terminal'
       if (mode === 'pause') {
-        if (this.screenGuard.classify(id) === 'modal') return 'refused-modal'
+        const guard = this.screenGuard.inspect(id)
+        if (guard.state === 'modal') return 'refused-modal'
         if (this.runtime.get(id)?.needsAttention) return 'refused-modal'
         if (this.runtime.get(id)?.rateLimited) return 'refused-modal'
       }
@@ -244,10 +246,16 @@ describe("SessionService.interrupt()'s pause-only screen-state gate (card 120148
 
   /**
    * Stub of the slice of `this` interrupt() reads: pty.isAlive/write,
-   * screenGuard.classify, runtime.get. `writes` records every byte sent so
+   * screenGuard.inspect, runtime.get. `writes` records every byte sent so
    * a refusal can also be checked to have written nothing.
    */
-  function makeInterruptStub(opts: { classify?: 'clear' | 'modal'; needsAttention?: boolean; rateLimited?: boolean } = {}) {
+  function makeInterruptStub(
+    opts: {
+      screen?: { inspect(id: string): unknown }
+      needsAttention?: boolean
+      rateLimited?: boolean
+    } = {}
+  ) {
     const writes: string[] = []
     const self = {
       pty: {
@@ -257,7 +265,7 @@ describe("SessionService.interrupt()'s pause-only screen-state gate (card 120148
           return true
         }
       },
-      screenGuard: { classify: () => opts.classify ?? 'clear' },
+      screenGuard: opts.screen ?? { inspect: () => ({ state: 'clear' as const }) },
       runtime: { get: () => ({ needsAttention: opts.needsAttention ?? false, rateLimited: opts.rateLimited ?? false }) }
     }
     return { self, writes }
@@ -272,13 +280,20 @@ describe("SessionService.interrupt()'s pause-only screen-state gate (card 120148
       id: string,
       mode: 'pause' | 'hard'
     ) => string
-    const logInfo = () => undefined
+    const logs: string[] = []
+    const logInfo = (_scope: string, message: string) => logs.push(message)
+    const hiddenScreenText = 'untrusted pause screen content'
+    const screen = new ScreenGuard()
+    screen.resize('tile-a', 120, 40)
+    screen.feed('tile-a', `${String.fromCharCode(27)}[6;1H${String.fromCodePoint(0x276f)} 1. ${hiddenScreenText}`)
 
-    const pauseCase = makeInterruptStub({ classify: 'modal' })
+    const pauseCase = makeInterruptStub({ screen })
     expect(interrupt.call(pauseCase.self, logInfo, 'tile-a', 'pause')).toBe('refused-modal')
     expect(pauseCase.writes).toEqual([])
+    expect(logs).toEqual(['pause interruption refused-modal for tile-a: screen guard picker at line 6'])
+    expect(logs.join('\n')).not.toContain(hiddenScreenText)
 
-    const hardCase = makeInterruptStub({ classify: 'modal' })
+    const hardCase = makeInterruptStub({ screen })
     expect(interrupt.call(hardCase.self, logInfo, 'tile-a', 'hard')).toBe('interrupted')
     expect(hardCase.writes).toEqual(['\x1b'])
   })
@@ -294,7 +309,7 @@ describe("SessionService.interrupt()'s pause-only screen-state gate (card 120148
     ) => string
     const logInfo = () => undefined
 
-    const pauseCase = makeInterruptStub({ classify: 'clear' })
+    const pauseCase = makeInterruptStub()
     expect(interrupt.call(pauseCase.self, logInfo, 'tile-a', 'pause')).toBe('interrupted')
     expect(pauseCase.writes).toEqual(['\x1b'])
   })
@@ -346,7 +361,7 @@ describe("SessionService.interrupt()'s pause-only screen-state gate (card 120148
     const fieldRe = /this\.runtime\.get\(id\)\?\.(\w+)/g
     let m: RegExpExecArray | null
     while ((m = fieldRe.exec(text))) signals.add(m[1])
-    if (/this\.screenGuard\.classify\(id\)\s*===\s*'modal'/.test(text)) signals.add('screenGuard.classify()===modal')
+    if (/this\.screenGuard\.(?:inspect|classify)\(id\)/.test(text)) signals.add('screenGuard')
     return signals
   }
 
@@ -366,12 +381,9 @@ describe("SessionService.interrupt()'s pause-only screen-state gate (card 120148
           `Signal sets diverged -- injectCommand-only: [${onlyInject.join(', ')}], interrupt(pause)-only: [${onlyInterrupt.join(', ')}]`
         )
       }
-      // Anti-vacuity: two empty sets would also satisfy equality above, which
-      // would let this test pass even if the body being checked stopped
-      // checking anything at all.
-      // A floor, not a fixed list, rules that degenerate case out without
-      // hardcoding any field name.
-      expect(injectSignals.size).toBeGreaterThanOrEqual(2)
+      expect(injectSignals).toContain('screenGuard')
+      expect(interruptSignals).toContain('screenGuard')
+      expect(injectSignals.size).toBeGreaterThanOrEqual(3)
     }
   )
 
