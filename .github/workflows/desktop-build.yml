@@ -83,7 +83,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: bash
         continue-on-error: true
-        timeout-minutes: 8
+        timeout-minutes: 15
         run: bun scripts/ci-diag-temp-powershell-foreground.ts
 
       # Root install: most of these suites still import with node builtins
