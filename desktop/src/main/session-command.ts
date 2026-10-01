@@ -47,14 +47,7 @@ export interface SessionCommandInput {
    * Empty/undefined => omit the flag entirely (Claude's default effort).
    */
   effort?: string
-  /**
-   * Absolute path to the Deck's embedded plugin dir (SessionStart back-channel
-   * hook, approval hook, deck-control/demo-browser MCP bridges, roadmap-card
-   * skill + roadmap-scribe agent). When set, prepends `--plugin-dir "<dir>"`
-   * so the whole plugin loads for this session (back-channel hook keeps the
-   * per-tile session id current across /clear). Empty/undefined => omit the
-   * flag (no plugin). Passed on BOTH fresh and resume.
-   */
+  /** Absolute path to the embedded plugin, passed on both fresh and resumed sessions. */
   pluginDir?: string
   /**
    * Path to a generated .mcp config, emitted as `--mcp-config "<path>"` on

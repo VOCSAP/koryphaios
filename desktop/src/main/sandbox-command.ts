@@ -71,16 +71,6 @@ export const SANDBOX_CONFIG_DIR_ENV = `CLAUDE_CONFIG_DIR=${SANDBOX_CONFIG_DIR}`
 export const SANDBOX_CREDENTIALS_FILE = `${SANDBOX_HOME}/.claude/.credentials.json`
 /** Onboarding state file — sits in CLAUDE_CONFIG_DIR, so inside the volume. */
 export const SANDBOX_CLAUDE_JSON = `${SANDBOX_CONFIG_DIR}/.claude.json`
-/**
- * Name the embedded deck-plugin (roadmap-card skill + roadmap-scribe agent,
- * back-channel/deck-control/demo-browser MCP bridges — desktop/deck-plugin)
- * lands under inside a sandboxed container. Re-exports DECK_PLUGIN_DIRNAME
- * (session-command.ts) rather than repeating the literal: reviewer (card
- * a79c7696 volet 1 review) measured THREE unpinned occurrences of
- * 'deck-plugin' -- this constant, the ProjectionEntry.name that drives
- * clean/chown in sandbox-service.ts, and index.ts's getDeckPluginDir host
- * basename. All three now derive from the one constant.
- */
 export const SANDBOX_DECK_PLUGIN_NAME = DECK_PLUGIN_DIRNAME
 /**
  * Where SANDBOX_DECK_PLUGIN_NAME lands inside a sandboxed container. Nested

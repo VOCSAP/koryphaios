@@ -188,10 +188,6 @@ export function computeRebuildReasons(
   if (isRunDirMountShared(mounts, containerName, containerState)) reasons.push('shared-run-dir')
   return reasons
 }
-// Card a79c7696 volet 1: deck-plugin (roadmap-card skill + roadmap-scribe
-// agent) is projected as an extra ProjectionEntry alongside the operator's
-// config, reusing the same clean/copy/chown plumbing and signature walk.
-
 import {
   projectSandboxSettings,
   readSandboxStore,
@@ -1180,13 +1176,9 @@ export class SandboxService extends EventEmitter {
   }
 
   /**
-   * Copy the embedded deck-plugin (roadmap-card skill + roadmap-scribe
-   * agent, back-channel/deck-control/demo-browser MCP bridges) into the
-   * container at SANDBOX_DECK_PLUGIN_DIR, so index.ts's wrap() can rewrite
-   * `--plugin-dir` onto a path the container actually has (card a79c7696
-   * volet 1). Runs unconditionally from projectConfig() -- BOTH branches,
-   * regardless of the operator's config-projection opt-out: this is app
-   * tooling, not operator config. No-op when the build is missing.
+   * Copy the embedded plugin into the container so `--plugin-dir` resolves to
+   * a path available there. This app tooling is projected independently of the
+   * operator config projection and becomes a no-op when the build is missing.
    */
   private async projectDeckPlugin(): Promise<void> {
     const entries = this.deckPluginProjectionEntries()
@@ -1213,7 +1205,7 @@ export class SandboxService extends EventEmitter {
     if (owned.code !== 0) {
       reportError('sandbox', `deck-plugin projection chown failed: ${owned.stderr.trim().slice(0, 400)}`)
     }
-    this.deps.journal('sandbox: deck-plugin projected (roadmap-card skill + roadmap-scribe agent)')
+    this.deps.journal('sandbox: deck-plugin projected')
   }
 
   /**

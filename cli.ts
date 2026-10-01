@@ -280,14 +280,9 @@ switch (cmd) {
       const remoteProjectKey = await computeProjectKey(cwd);
       const derivedProjectKey = resolveProjectKey(remoteProjectKey, gitRoot, cwd);
 
-      // A payload-declared project_key is not silently trusted NOR silently
-      // dropped: a caller that still writes one (roadmap-scribe.md's
-      // documented payload shape still does today, pending that page's own
-      // fix) believes it is authoritative, so a MISMATCH is refused loudly,
-      // before any network call, rather than overridden without a trace --
-      // the same refuse-don't-diverge discipline as card c92614ed's
-      // project_key checks in broker.ts. A matching value (the common case
-      // today) is a no-op.
+      // A payload-declared project_key must agree with the key derived from cwd.
+      // Rejecting a mismatch makes the caller's intended project explicit before
+      // a request can target a different roadmap.
       if (
         typeof payload.project_key === "string" &&
         payload.project_key.length > 0 &&
