@@ -1,10 +1,13 @@
 import type { AvatarState, AvatarSummary } from '../shared/avatar-state'
 import type { AvatarViewState, AvatarViewSummary, AvatarViewTheme } from '../shared/avatar-view'
+import { avatarFaceCopy } from './avatar-face-copy'
 import type { AvatarPublication } from './avatar-window-state'
+import type { SupportedLocale } from './i18n'
 
 export interface AvatarPresentationOptions {
   state: AvatarState
   theme: AvatarViewTheme
+  locale: SupportedLocale
   now?(): number
 }
 
@@ -13,9 +16,10 @@ export interface AvatarPresentation {
   setTheme(theme: AvatarViewTheme): void
 }
 
-function projectSummary(summary: AvatarSummary): AvatarViewSummary {
+function projectSummary(summary: AvatarSummary, locale: SupportedLocale): AvatarViewSummary {
   return {
     face: summary.face,
+    faceCopy: avatarFaceCopy(summary, locale),
     counters: {
       working: summary.counters.working,
       idle: summary.counters.idle,
@@ -56,7 +60,7 @@ export function createAvatarPresentation(options: AvatarPresentationOptions): Av
       return {
         generation: publication.generation ?? 0,
         revision: publication.revision,
-        summary: projectSummary(options.state.summary()),
+        summary: projectSummary(options.state.summary(), options.locale),
         presentation: {
           position: publication.position ? { x: publication.position.x, y: publication.position.y } : null,
           theme,

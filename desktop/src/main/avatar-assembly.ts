@@ -6,6 +6,7 @@ import { chooseAvatarDnd, type AvatarDndChoice, type AvatarDndState } from './av
 import { registerAvatarViewIpcHandlers, type AvatarBrowserWindow, type AvatarViewIpcMain, type AvatarWindowConstructionOptions } from './avatar-window'
 import { createAvatarWindowController, type AvatarWindowController } from './avatar-window-controller'
 import type { AvatarGeometry } from './avatar-window-state'
+import type { SupportedLocale } from './i18n'
 
 export interface AvatarAssemblyOptions {
   ipc: AvatarViewIpcMain
@@ -17,6 +18,7 @@ export interface AvatarAssemblyOptions {
   writeSnapshot(appearance: AvatarAppearance): void
   geometry: AvatarGeometry
   theme(): AvatarViewTheme
+  locale: SupportedLocale
   now(): number
   reportError(scope: string, message: string, error?: unknown): void
   setTimeout(callback: () => void, delayMs: number): unknown
@@ -34,7 +36,7 @@ export interface AvatarAssembly {
 }
 
 export function assembleAvatar(options: AvatarAssemblyOptions): AvatarAssembly {
-  const { state, presentation } = createAvatarBootstrap({ theme: options.theme(), now: options.now })
+  const { state, presentation } = createAvatarBootstrap({ theme: options.theme(), locale: options.locale, now: options.now })
   const tray: { envelope: AvatarViewState | null } = { envelope: null }
   const controller = createAvatarWindowController({
     available: options.available,

@@ -8561,6 +8561,16 @@ html.avatar-document body {
   opacity: 0.18;
 }
 
+.avatar-root[data-move='free'] .avatar-face {
+  cursor: grab;
+}
+
+/* Root-wide: a captured drag outruns the face it started on. */
+.avatar-root[data-move='dragging'],
+.avatar-root[data-move='dragging'] * {
+  cursor: grabbing;
+}
+
 .avatar-root .avatar-skin[data-face='panne'] .avatar-ink,
 .avatar-root .avatar-skin[data-face='endormi'] .avatar-ink {
   stroke: var(--avatar-dim);

@@ -20,7 +20,7 @@ function publication(revision: number) {
 
 test('connects AvatarState attachment, broker state, suspicion and detach to the projection', () => {
   let now = 1_000
-  const bootstrap = createAvatarBootstrap({ theme: 'dark', now: () => now })
+  const bootstrap = createAvatarBootstrap({ theme: 'dark', locale: 'fr', now: () => now })
   const identity = { deckRunId: 'deck-1', broker_url: 'https://broker.test' }
 
   bootstrap.state.receiveSnapshot({
@@ -28,7 +28,7 @@ test('connects AvatarState attachment, broker state, suspicion and detach to the
     counters: { working: 1, idle: 0, unknown: 0, waiting: 0, exited: 0, rateLimited: 0 },
     unread: 0
   })
-  expect(bootstrap.presentation.project(publication(1)).summary.face).toBe('travaille')
+  expect(bootstrap.presentation.project(publication(1)).summary).toMatchObject({ face: 'travaille', faceCopy: { title: '1 session au travail' } })
   bootstrap.state.setBrokerReachable(identity.broker_url, false)
   expect(bootstrap.presentation.project(publication(2)).summary.decks[0]).toMatchObject({ brokerReachable: false, torchOut: true })
   now += 15_000

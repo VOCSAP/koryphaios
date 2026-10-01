@@ -20,7 +20,7 @@ const { act, React, createRoot } = await import("../desktop/tests-support/react-
 mock.module("@shared/avatar-mask-geometry", () => ({ ...geometry }));
 
 const skins = await import("../desktop/src/renderer/src/avatar/skins");
-const { AVATAR_SKINS, avatarFaceText, avatarThemeVars } = skins;
+const { AVATAR_SKINS, avatarThemeVars } = skins;
 const AVATAR_FACES: AvatarFace[] = skins.AVATAR_FACES;
 const { deckIdentityKey } = await import("../desktop/src/renderer/src/avatar/MaskSkin");
 
@@ -136,16 +136,13 @@ describe("domain", () => {
 for (const [skinId, skin] of Object.entries(AVATAR_SKINS) as [string, Skin][]) {
   describe(`skin ${skinId}`, () => {
     for (const face of AVATAR_FACES) {
-      test(`renders ${face} with its own text`, () => {
+      test(`renders ${face}`, () => {
         const summary = SCENARIOS[face]();
         const svg = render(skin, summary);
         expect(svg.getAttribute("data-face")).toBe(face);
         expect(svg.querySelectorAll(".avatar-ink .avatar-outline").length, "the mask outline is missing").toBe(1);
         expect(svg.querySelectorAll(".avatar-ink .avatar-opening").length, "eyes and mouth must be three openings, never a bare line").toBe(3);
         expect(markers(svg).map((p) => p.deck).sort(), "one marker per deck, keyed by its identity").toEqual(summary.decks.map(deckIdentityKey).sort());
-        const text = avatarFaceText(summary);
-        expect(text.key).toBe(`avatar.face.${face}`);
-        for (const value of Object.values(text.params)) expect(Number.isFinite(value)).toBe(true);
       });
     }
 
@@ -228,8 +225,6 @@ describe("mask skin geometry", () => {
   test("Panne cracks the mask and Reclame wears the halo", () => {
     expect(render(skin, SCENARIOS.panne()).querySelectorAll(".avatar-ink .avatar-crack").length).toBe(1);
     expect(render(skin, SCENARIOS.reclame()).querySelectorAll(".avatar-halo").length).toBe(1);
-    expect(avatarFaceText(SCENARIOS.panne()).params).toEqual({ count: 1 });
-    expect(avatarFaceText(SCENARIOS.perdu()).params).toEqual({ exited: 1, rateLimited: 1 });
   });
 
   test("the viewBox holds the mask, its underlay ring and the Reclame halo, tilted faces included", () => {

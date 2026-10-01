@@ -3,6 +3,7 @@ import type { AvatarFace } from '@shared/avatar-state'
 import type { AvatarViewApi, AvatarViewState } from '@shared/avatar-view'
 import { AvatarShell, motionInput } from './AvatarShell'
 import { motionMode, type AvatarMotionMode } from './motion'
+import { usePointerGesture } from './pointer-gesture'
 
 export function isNewerView(next: AvatarViewState, current: AvatarViewState): boolean {
   if (next.generation !== current.generation) return next.generation > current.generation
@@ -74,6 +75,8 @@ export function AvatarApp({ api, reducedMotion }: AvatarAppProps): React.JSX.Ele
     return unsubscribe
   }, [api])
 
+  const move = usePointerGesture(api, state.rendered?.view ?? null)
+
   if (state.rendered === null) return null
-  return <AvatarShell view={state.rendered.view} previous={state.rendered.previous} osReducedMotion={state.osReducedMotion} />
+  return <AvatarShell view={state.rendered.view} previous={state.rendered.previous} osReducedMotion={state.osReducedMotion} move={move} />
 }

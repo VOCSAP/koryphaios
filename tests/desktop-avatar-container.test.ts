@@ -20,7 +20,7 @@ const { act, React, createRoot } = await import("../desktop/tests-support/react-
 mock.module("@shared/avatar-mask-geometry", () => ({ ...geometry }));
 
 const { AvatarApp } = await import("../desktop/src/renderer/src/avatar/AvatarApp");
-const { avatarThemeVars } = await import("../desktop/src/renderer/src/avatar/skins");
+const { AVATAR_FACES, avatarThemeVars } = await import("../desktop/src/renderer/src/avatar/skins");
 const { MOTION_LIMITS } = await import("../desktop/src/renderer/src/avatar/motion");
 
 const DECK = { deckRunId: "run-a", broker_url: "http://127.0.0.1:7899" };
@@ -55,7 +55,7 @@ const PRESENTATION: AvatarViewPresentation = {
 };
 
 function view(generation: number, revision: number, summary: AvatarSummary, presentation: Partial<AvatarViewPresentation> = {}): AvatarViewState {
-  return { generation, revision, summary, presentation: { ...PRESENTATION, ...presentation } };
+  return { generation, revision, summary: { ...summary, faceCopy: { title: "t", ariaLabel: "a" } }, presentation: { ...PRESENTATION, ...presentation } };
 }
 
 interface FakeBridge {
@@ -282,13 +282,24 @@ describe("shell attributes", () => {
     expect(avatarThemeVars("light")["--avatar-ink"]).not.toBe(avatarThemeVars("dark")["--avatar-ink"]);
   });
 
-  test("the face key is exposed raw, with no visible text until the main supplies the copy", async () => {
+  test("title and aria-label are the main's copy for each of the seven faces, and follow a newer view", async () => {
     const fake = bridge();
     mount(fake);
-    await fake.reply(view(1, 1, SUMMARIES.seul()));
-    expect(attr("data-face-key")).toBe("avatar.face.seul");
-    expect(attr("title")).toBeNull();
-    expect(attr("aria-label")).toBeNull();
+    const base = SUMMARIES.seul();
+    const copyOf = (face: string, count: number) => ({ title: `title ${face} ${count}`, ariaLabel: `label ${face} ${count}` });
+    await fake.reply({ ...view(1, 1, base), summary: { ...base, face: AVATAR_FACES[0]!, faceCopy: copyOf(AVATAR_FACES[0]!, 0) } });
+    let revision = 1;
+    for (const face of AVATAR_FACES) {
+      for (const count of [1, 2]) {
+        revision += 1;
+        const faceCopy = copyOf(face, count);
+        fake.push({ ...view(1, revision, base), summary: { ...base, face, faceCopy } });
+        expect(attr("data-face")).toBe(face);
+        expect(attr("title"), `${face} title`).toBe(faceCopy.title);
+        expect(attr("aria-label"), `${face} aria-label`).toBe(faceCopy.ariaLabel);
+      }
+    }
+    expect(attr("role"), "aria-label is not announced on a generic div").toBe("img");
     expect(shell().querySelector("svg.avatar-skin"), "the skin is not mounted").not.toBeNull();
   });
 

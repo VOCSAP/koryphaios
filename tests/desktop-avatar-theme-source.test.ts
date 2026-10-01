@@ -170,6 +170,12 @@ test('no module the avatar process loads names nativeTheme.themeSource', async (
   expect(violations, `a module of the avatar process names themeSource, which makes the Tray follow the app theme instead of the taskbar: ${violations.join(', ')}`).toEqual([])
 })
 
+test('the avatar process reads the Deck locale without loading the Deck config store', async () => {
+  const { inputs } = await themeSourceViolations(DESKTOP, AVATAR_ENTRY)
+  expect(inputs, 'the avatar closure lost its locale reader, so the store exclusion below proves nothing').toContain('src/main/avatar-locale.ts')
+  expect(inputs, 'store.ts resolves userData at call time, which the avatar process redirects to its own subdirectory: it would read another config.json').not.toContain('src/main/store.ts')
+})
+
 test('a themeSource write in an imported module is reported, one in a module outside the closure is not', async () => {
   const root = temporaryRoot()
   mkdirSync(join(root, 'lib'), { recursive: true })

@@ -15,12 +15,12 @@ import { createAvatarTray, type AvatarTray } from './avatar-tray'
 import { avatarTrayIconDir } from './avatar-tray-icon'
 import { AVATAR_APPEARANCE_FILE, readAvatarAppearance, writeAvatarAppearance } from './avatar-appearance'
 import { assembleAvatar, type AvatarAssembly } from './avatar-assembly'
+import { avatarDeckStateDir, readAvatarLocale } from './avatar-locale'
 import type { AvatarGeometry } from './avatar-window-state'
 import { createAvatarQuitHandler } from './avatar-quit-handler'
 import { resolveBrokerEndpoint } from './broker-client'
 import { initDeckLog, logWarn, reportError } from './log'
 import { installProcessFailureGuard } from './process-failure-guard'
-import { APP_STATE_SUBDIR } from './migrate-data-dir'
 
 app.setName('koryphaios')
 const deckUserData = app.getPath('userData')
@@ -29,7 +29,7 @@ app.setAppLogsPath()
 initDeckLog(app.getPath('logs'))
 installProcessFailureGuard()
 
-const stateDir = join(deckUserData, APP_STATE_SUBDIR)
+const stateDir = avatarDeckStateDir(deckUserData)
 let owner: AvatarRegistryOwner | null = null
 let server: AvatarServer | null = null
 let tray: AvatarTray | null = null
@@ -68,6 +68,7 @@ async function startAvatar(): Promise<void> {
     writeSnapshot: (snapshot) => writeAvatarAppearance(appearanceFile, snapshot, { reportError }),
     geometry: avatarGeometry(),
     theme: () => (nativeTheme.shouldUseDarkColors ? 'dark' : 'light'),
+    locale: readAvatarLocale(stateDir, app.getLocale(), { reportError }),
     now: Date.now,
     reportError,
     setTimeout: (callback, delayMs) => setTimeout(callback, delayMs),

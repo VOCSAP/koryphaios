@@ -14,8 +14,14 @@ export interface AvatarViewDeckStatus {
   torchOut: boolean
 }
 
+export interface AvatarViewFaceCopy {
+  title: string
+  ariaLabel: string
+}
+
 export interface AvatarViewSummary {
   face: AvatarFace
+  faceCopy: AvatarViewFaceCopy
   counters: AvatarDeckCounters
   unread: number
   decks: AvatarViewDeckStatus[]

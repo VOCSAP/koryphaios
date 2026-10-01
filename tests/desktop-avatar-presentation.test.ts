@@ -33,7 +33,7 @@ test('projects one summary and the machine snapshot into a view state', () => {
     counters: { working: 1, idle: 0, unknown: 0, waiting: 0, exited: 0, rateLimited: 0 },
     unread: 0
   })
-  const presentation = createAvatarPresentation({ state, theme: 'dark' })
+  const presentation = createAvatarPresentation({ state, theme: 'dark', locale: 'en' })
 
   const view = presentation.project(
     publication({
@@ -49,6 +49,7 @@ test('projects one summary and the machine snapshot into a view state', () => {
     revision: 5,
     summary: {
       face: 'travaille',
+      faceCopy: { title: '1 session working', ariaLabel: 'Koryphaios avatar: 1 session working' },
       counters: { working: 1, idle: 0, unknown: 0, waiting: 0, exited: 0, rateLimited: 0 },
       unread: 0,
       decks: [{
@@ -75,7 +76,7 @@ test('projects one summary and the machine snapshot into a view state', () => {
 })
 
 test('takes visibility, lock and position from the snapshot it is given, never from an earlier call', () => {
-  const presentation = createAvatarPresentation({ state: new AvatarState({ now: () => now }), theme: 'dark' })
+  const presentation = createAvatarPresentation({ state: new AvatarState({ now: () => now }), theme: 'dark', locale: 'en' })
 
   expect(presentation.project(publication({ appearance: appearance({ visible: false }) })).presentation.visible).toBe(false)
   expect(presentation.project(publication({ appearance: appearance({ visible: true }) })).presentation.visible).toBe(true)
@@ -86,7 +87,7 @@ test('takes visibility, lock and position from the snapshot it is given, never f
 test('retains the summary while an absolute DND deadline expires', () => {
   let currentNow = now
   const state = new AvatarState({ now: () => currentNow })
-  const presentation = createAvatarPresentation({ state, now: () => currentNow, theme: 'dark' })
+  const presentation = createAvatarPresentation({ state, now: () => currentNow, theme: 'dark', locale: 'en' })
   const snapshot = publication({ appearance: appearance({ dndUntil: now + 1_000, dndChoice: '30m' }) })
 
   expect(presentation.project(snapshot).summary.face).toBe('seul')

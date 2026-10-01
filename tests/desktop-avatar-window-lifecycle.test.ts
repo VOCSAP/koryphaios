@@ -184,6 +184,7 @@ interface RigOptions {
 
 const SUMMARY: AvatarViewState['summary'] = {
   face: 'seul',
+  faceCopy: { title: 'No Deck attached', ariaLabel: 'Koryphaios avatar: No Deck attached' },
   counters: { working: 0, idle: 0, unknown: 0, waiting: 0, exited: 0, rateLimited: 0 },
   unread: 0,
   decks: []

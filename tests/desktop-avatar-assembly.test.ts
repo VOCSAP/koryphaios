@@ -90,7 +90,7 @@ class MiniWindow implements AvatarBrowserWindow {
 
 const flush = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0))
 
-function setup(options: { geometry?: AvatarGeometry; seed?: AvatarAppearance } = {}) {
+function setup(options: { geometry?: AvatarGeometry; seed?: AvatarAppearance; locale?: 'en' | 'fr' } = {}) {
   const dir = tempDir()
   const file = join(dir, 'avatar-appearance.json')
   const target = { file }
@@ -122,6 +122,7 @@ function setup(options: { geometry?: AvatarGeometry; seed?: AvatarAppearance } =
     writeSnapshot: (snapshot) => writeAvatarAppearance(target.file, snapshot, { reportError }),
     geometry: options.geometry ?? GEOMETRY,
     theme: () => (dark ? 'dark' : 'light'),
+    locale: options.locale ?? 'fr',
     now: () => 1_000,
     reportError,
     setTimeout: (callback, delay) => {
@@ -275,6 +276,20 @@ describe('Avatar assembly', () => {
 
     expect(summaries).toBe(1)
     expect(traySummary).toBe(window.sent.at(-1)!.summary)
+  })
+
+  test('the locale given to the assembly is the one the projection speaks', async () => {
+    const en = setup({ locale: 'en' })
+    const fr = setup({ locale: 'fr' })
+    await en.open()
+    await fr.open()
+
+    const english = en.assembly.traySummary().faceCopy
+    const french = fr.assembly.traySummary().faceCopy
+
+    expect(french.title, 'two locales must not project the same copy').not.toBe(english.title)
+    expect(english).toEqual({ title: 'No Deck attached', ariaLabel: 'Koryphaios avatar: No Deck attached' })
+    expect(french).toEqual({ title: 'Aucun Deck attaché', ariaLabel: 'Avatar Koryphaios : Aucun Deck attaché' })
   })
 
   test('the theme and the Do Not Disturb choice flow through the machine to the window and the file', async () => {

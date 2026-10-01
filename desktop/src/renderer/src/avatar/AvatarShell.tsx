@@ -1,12 +1,14 @@
 import type { AvatarFace } from '@shared/avatar-state'
 import type { AvatarViewState } from '@shared/avatar-view'
 import { motionAttributes, motionPlan, type AvatarMotionInput } from './motion'
-import { AVATAR_SKINS, avatarFaceText, avatarThemeVars } from './skins'
+import type { AvatarMoveMode } from './pointer-gesture'
+import { AVATAR_SKINS, avatarThemeVars } from './skins'
 
 export interface AvatarShellProps {
   view: AvatarViewState
   previous: AvatarFace | null
   osReducedMotion: boolean
+  move?: AvatarMoveMode
 }
 
 export function motionInput(view: AvatarViewState, osReducedMotion: boolean): AvatarMotionInput {
@@ -14,13 +16,23 @@ export function motionInput(view: AvatarViewState, osReducedMotion: boolean): Av
   return { choice: motion, osReducedMotion, visible, dndActive }
 }
 
-export function AvatarShell({ view, previous, osReducedMotion }: AvatarShellProps): React.JSX.Element {
+export function AvatarShell({ view, previous, osReducedMotion, move }: AvatarShellProps): React.JSX.Element {
   const { summary, presentation } = view
   const motion = motionAttributes(motionPlan(motionInput(view, osReducedMotion), previous, summary.face))
   const style = { ...avatarThemeVars(presentation.theme), ...motion.vars } as React.CSSProperties
   const Skin = AVATAR_SKINS.mask
   return (
-    <div className="avatar-root" style={style} data-face={summary.face} data-face-key={avatarFaceText(summary).key} {...motion.data}>
+    // role img: aria-label is not announced on a generic div, and the character is one picture.
+    <div
+      className="avatar-root"
+      role="img"
+      title={summary.faceCopy.title}
+      aria-label={summary.faceCopy.ariaLabel}
+      style={style}
+      data-face={summary.face}
+      data-move={move}
+      {...motion.data}
+    >
       {/* Keyed by face: the one-shot enter animation restarts only on a fresh element. */}
       <Skin key={summary.face} summary={summary} />
     </div>

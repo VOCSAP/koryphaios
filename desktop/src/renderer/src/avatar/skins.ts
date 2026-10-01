@@ -22,34 +22,6 @@ export const AVATAR_SKINS = {
 
 export type AvatarSkinId = keyof typeof AVATAR_SKINS
 
-export type AvatarFaceTextKey = `avatar.face.${AvatarFace}`
-
-export interface AvatarFaceText {
-  key: AvatarFaceTextKey
-  params: Record<string, number>
-}
-
-/** Tooltip and aria-label of the character, resolved by the container's i18n. */
-export function avatarFaceText(summary: AvatarSummary): AvatarFaceText {
-  const key: AvatarFaceTextKey = `avatar.face.${summary.face}`
-  switch (summary.face) {
-    case 'panne':
-      return { key, params: { count: summary.decks.filter((deck) => deck.torchOut).length } }
-    case 'reclame':
-      return { key, params: { count: summary.counters.waiting } }
-    case 'perdu':
-      return { key, params: { exited: summary.counters.exited, rateLimited: summary.counters.rateLimited } }
-    case 'courrier':
-      return { key, params: { count: summary.unread } }
-    case 'travaille':
-      return { key, params: { count: summary.counters.working } }
-    case 'endormi':
-      return { key, params: { decks: summary.decks.length } }
-    case 'seul':
-      return { key, params: {} }
-  }
-}
-
 const PALETTE_VARS = {
   ink: '--avatar-ink',
   underlay: '--avatar-underlay',
