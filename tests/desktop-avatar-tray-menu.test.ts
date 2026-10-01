@@ -3,6 +3,7 @@ import {
   avatarTrayMayRebound,
   buildAvatarTrayMenu,
   chooseAvatarDnd,
+  type AvatarDndState,
   type AvatarTrayMenuItem
 } from '../desktop/src/main/avatar-tray-menu.ts'
 import { createAvatarTray, type AvatarTrayDependencies } from '../desktop/src/main/avatar-tray.ts'
@@ -140,6 +141,7 @@ test('keeps every counter while each do-not-disturb choice is active and clears 
 
 test('translates every native label, drives actions, refreshes, reports errors and disposes', () => {
   let currentNow = now
+  let currentDnd: AvatarDndState | null = null
   const interval: { callback: (() => void) | null; delay: number | null } = { callback: null, delay: null }
   let cleared: unknown = null
   let destroyed = 0
@@ -171,9 +173,11 @@ test('translates every native label, drives actions, refreshes, reports errors a
   }
 
   const tray = createAvatarTray({
-    state: { summary: () => summary } as unknown as AvatarState,
+    summary: () => summary,
     iconDir: 'icons',
     attachedDecks: () => attached,
+    getDnd: () => currentDnd,
+    onDnd: (choice) => { currentDnd = chooseAvatarDnd(choice, currentNow) },
     onDeckMenuClick: (identity) => focused.push(identity.deckRunId),
     onQuit: () => { quit += 1 }
   }, dependencies)
@@ -199,6 +203,7 @@ test('translates every native label, drives actions, refreshes, reports errors a
   requireNativeItem(menus[0]!, 'Bring Deck to front').click?.()
   requireNativeItem(menus[0]!, 'Alpha && Beta (2)').submenu?.find((item) => item.label === 'Bring Deck to front')?.click?.()
   requireNativeItem(menus[0]!, '30 minutes').click?.()
+  expect(currentDnd as AvatarDndState | null).toEqual({ choice: '30m', until: now + 30 * 60 * 1_000 })
   expect(focused).toEqual(['deck-1', 'deck-2'])
   expect(quit).toBe(0)
   expect(tray.mayRebound()).toBe(false)
@@ -224,9 +229,11 @@ test('reports a native refresh failure without preventing disposal', () => {
   let destroyed = 0
   const errors: unknown[] = []
   const tray = createAvatarTray({
-    state: { summary: () => summary } as unknown as AvatarState,
+    summary: () => summary,
     iconDir: 'icons',
     attachedDecks: () => attached,
+    getDnd: () => null,
+    onDnd: () => {},
     onDeckMenuClick: () => {},
     onQuit: () => {}
   }, {

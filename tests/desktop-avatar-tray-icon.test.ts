@@ -1,5 +1,8 @@
 import { expect, test } from 'bun:test'
-import { existsSync, readFileSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   AVATAR_TRAY_FACES,
@@ -19,9 +22,30 @@ import {
   type AvatarTrayImage,
   type ElectronTrayModule
 } from '../desktop/src/main/avatar-tray.ts'
-import type { AvatarFace, AvatarState, AvatarSummary } from '../desktop/src/shared/avatar-state.ts'
+import type { AvatarFace, AvatarSummary } from '../desktop/src/shared/avatar-state.ts'
+import { MASK_OUTLINE } from '../desktop/src/shared/avatar-mask-geometry.ts'
+import { avatarTrayInk, avatarTraySvg } from '../scripts/avatar-tray/tray-svg.ts'
 
 const DESKTOP_DIR = join(import.meta.dir, '..', 'desktop')
+const MANIFEST_PATH = join(import.meta.dir, '..', 'scripts', 'avatar-tray', 'manifest.json')
+const REGENERATE = 'regenerate with MAGICK_BIN=<magick> bun scripts/avatar-tray/make.ts'
+const TASKBAR_COLOUR: Record<AvatarTrayTaskbar, string> = { dark: '#202020', light: '#f3f3f3' }
+
+const sha256 = (data: string | Buffer): string => createHash('sha256').update(data).digest('hex')
+
+function contrast(a: string, b: string): number {
+  const lin = (c: number) => {
+    const s = c / 255
+    return s <= 0.04045 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4
+  }
+  const lum = (hex: string) => {
+    const [r, g, bl] = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16))
+    return 0.2126 * lin(r!) + 0.7152 * lin(g!) + 0.0722 * lin(bl!)
+  }
+  const x = lum(a)
+  const y = lum(b)
+  return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05)
+}
 
 function summaryWithFace(face: AvatarFace): AvatarSummary {
   return {
@@ -90,6 +114,54 @@ test('the icon file set is every variant, on both taskbars, at both tiers, and n
   for (const variant of AVATAR_TRAY_VARIANTS) {
     expect(avatarTrayIconPath('d', variant, 'dark')).toBe(join('d', `avatar-${variant}.png`))
     expect(avatarTrayIconPath('d', variant, 'light')).toBe(join('d', `avatar-${variant}-light.png`))
+  }
+})
+
+test('every shipped icon is the raster of the current mask geometry, as recorded by the generator', () => {
+  const manifest = JSON.parse(readFileSync(MANIFEST_PATH, 'utf-8')) as Record<string, { svg: string; png: string }>
+  expect(Object.keys(manifest).sort(), `the manifest and the icon file set disagree: ${REGENERATE}`).toEqual([...avatarTrayIconFiles()].sort())
+  const dir = avatarTrayIconDir(false, 'unused-resources', DESKTOP_DIR)
+  expect(existsSync(join(dir, 'manifest.json')), 'the manifest sits in the shipped icon dir, so it would be packaged').toBe(false)
+  for (const taskbar of AVATAR_TRAY_TASKBARS) {
+    for (const variant of AVATAR_TRAY_VARIANTS) {
+      const svgHash = sha256(avatarTraySvg(variant, taskbar))
+      const path = avatarTrayIconPath(dir, variant, taskbar)
+      for (const file of [path, hiDpiSibling(path)]) {
+        const name = file.slice(dir.length + 1)
+        expect(manifest[name]?.svg, `${name} was rasterized from another geometry or palette: ${REGENERATE}`).toBe(svgHash)
+        expect(sha256(readFileSync(file)), `${name} is not the file the generator wrote: ${REGENERATE}`).toBe(manifest[name]!.png)
+      }
+    }
+  }
+})
+
+const MAGICK_BIN = process.env.MAGICK_BIN
+const REGENERATION = 'regenerating the icons with ImageMagick reproduces the shipped PNGs and manifest byte for byte'
+
+;(MAGICK_BIN ? test : test.skip)(MAGICK_BIN ? REGENERATION : `skipped: MAGICK_BIN unset -- ${REGENERATION}`, () => {
+  const out = mkdtempSync(join(tmpdir(), 'avatar-tray-regen-'))
+  try {
+    const run = spawnSync(process.execPath, [join(import.meta.dir, '..', 'scripts', 'avatar-tray', 'make.ts'), out], { encoding: 'utf-8', env: { ...process.env, MAGICK_BIN } })
+    expect(run.status, `make.ts failed: ${run.stderr}`).toBe(0)
+    const dir = avatarTrayIconDir(false, 'unused-resources', DESKTOP_DIR)
+    for (const name of avatarTrayIconFiles()) {
+      expect(sha256(readFileSync(join(out, name))), `${name} differs from a fresh rasterization of the current geometry`).toBe(sha256(readFileSync(join(dir, name))))
+    }
+    expect(readFileSync(join(out, 'manifest.json'), 'utf-8'), 'the committed manifest is not what the generator writes').toBe(readFileSync(MANIFEST_PATH, 'utf-8').replaceAll('\r\n', '\n'))
+  } finally {
+    rmSync(out, { recursive: true, force: true })
+  }
+}, 60_000)
+
+test('the Tray icon is the character mask outline, in colours that clear 3:1 on its own taskbar', () => {
+  for (const taskbar of AVATAR_TRAY_TASKBARS) {
+    for (const variant of AVATAR_TRAY_VARIANTS) {
+      expect(avatarTraySvg(variant, taskbar), `${variant}/${taskbar} does not draw the character outline`).toContain(`d="${MASK_OUTLINE}"`)
+      const ink = avatarTrayInk(variant, taskbar)
+      for (const colour of [ink.stroke, ink.badge].filter((c): c is string => c !== null)) {
+        expect(contrast(colour, TASKBAR_COLOUR[taskbar]), `${variant}/${taskbar} ${colour} on ${TASKBAR_COLOUR[taskbar]}`).toBeGreaterThanOrEqual(3)
+      }
+    }
   }
 })
 
@@ -181,9 +253,11 @@ function startTray(
   let face = initialFace
   let tick: (() => void) | null = null
   const tray = createAvatarTray({
-    state: { summary: () => summaryWithFace(face) } as unknown as AvatarState,
+    summary: () => summaryWithFace(face),
     iconDir,
     attachedDecks: () => [],
+    getDnd: () => null,
+    onDnd: () => {},
     onDeckMenuClick: () => {},
     onQuit: () => {}
   }, {

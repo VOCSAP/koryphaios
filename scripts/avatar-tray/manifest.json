@@ -1,0 +1,66 @@
+{
+  "avatar-endormi-light.png": {
+    "svg": "b1ce51534d7e0a22a178963047428e8826e8d846159da1e93846ffab840bf9dd",
+    "png": "9ed3d41a5514ea6dc61ac5bfaf552b22140f7d0d0c62a53b29f220554d771567"
+  },
+  "avatar-endormi-light@2x.png": {
+    "svg": "b1ce51534d7e0a22a178963047428e8826e8d846159da1e93846ffab840bf9dd",
+    "png": "6e0ed63bb735ec11c66f58e7b464120b7c2d3ba91c967aa51eb38a3eb9716953"
+  },
+  "avatar-endormi.png": {
+    "svg": "93e26fc4df637c966f7d8d0d50c64942ff7597a9f03827bb0fdd20c898459c9d",
+    "png": "5ff83fd6cecb6276824ff10c8b18d56a222963930a5f0ffd3a8ea82e7c8fc16d"
+  },
+  "avatar-endormi@2x.png": {
+    "svg": "93e26fc4df637c966f7d8d0d50c64942ff7597a9f03827bb0fdd20c898459c9d",
+    "png": "c81adc571ccca48662442fb87de0893c3262efc0fb26efdd01ef987821754298"
+  },
+  "avatar-eveille-light.png": {
+    "svg": "4955e063acb0c46ee14fc30b0bcfd1f26093fa28db4fec2e36eb0dba7ce0575f",
+    "png": "03711a67613289f01435bd4c4b8862f66182d3c2cfaddeabef354b53a42359e2"
+  },
+  "avatar-eveille-light@2x.png": {
+    "svg": "4955e063acb0c46ee14fc30b0bcfd1f26093fa28db4fec2e36eb0dba7ce0575f",
+    "png": "501e264167b2204793d11898373f479fb36ca77dfa70c851e44516ebaa291501"
+  },
+  "avatar-eveille.png": {
+    "svg": "7be299682bac544fec4b5638fb5facbba44d002747a204e4eb3ce58a88cbd87c",
+    "png": "a31de4b1f115f5b5baaf3bee23e8b0e3c278458d4f05a6830e8e558cfd58b6ee"
+  },
+  "avatar-eveille@2x.png": {
+    "svg": "7be299682bac544fec4b5638fb5facbba44d002747a204e4eb3ce58a88cbd87c",
+    "png": "9d139670694601a57b98b8cb7a7e5f583a848b60f634d8c3d2c9b191ae410056"
+  },
+  "avatar-panne-light.png": {
+    "svg": "8290751bf23efcea946a1ff1bdcdbb5986de159e983a2fe315a44c21e4fd8511",
+    "png": "2b49b6851cc80832b5b9125e348f9725c31de76d38570cbfaf4ff80abfd9a295"
+  },
+  "avatar-panne-light@2x.png": {
+    "svg": "8290751bf23efcea946a1ff1bdcdbb5986de159e983a2fe315a44c21e4fd8511",
+    "png": "3ed352d1f28f4ffb915d8f3e76886a1ba1115adb76839ee6f5a75cdbe1291a17"
+  },
+  "avatar-panne.png": {
+    "svg": "ba178764bfad99399f8bfa6f797116dedccd59713e49bcd07bae06eead2706a2",
+    "png": "904eab87543f4b654b938f0b0addb27981cd3c301c4ecc59eb35cb358a62b2a6"
+  },
+  "avatar-panne@2x.png": {
+    "svg": "ba178764bfad99399f8bfa6f797116dedccd59713e49bcd07bae06eead2706a2",
+    "png": "c97eaf7e0c368b6f533260fab3ff0afc6ebdfe5451fdb90aab5d6cc6a97f12f6"
+  },
+  "avatar-reclame-light.png": {
+    "svg": "9142fc72131b5dff0156bda4ad9146fad5d27749e5e5ddf8c1b9a515ca5d4f87",
+    "png": "b5eb5b5bf915df1035036af83ed2cc823dbec76e262f2fa558517fed2b1a8f17"
+  },
+  "avatar-reclame-light@2x.png": {
+    "svg": "9142fc72131b5dff0156bda4ad9146fad5d27749e5e5ddf8c1b9a515ca5d4f87",
+    "png": "e5ad7854c2c00a50f8cd346dcf0a01b88f1735221c60d2ac38a3a515871a5b8e"
+  },
+  "avatar-reclame.png": {
+    "svg": "56cba71dd5781502338769efd176bad9a33f8c88a16cd2b657aecb8e42ed8f29",
+    "png": "d32de70c56f2e7ecb9ece83eb8bc045fa94fc8ad064471442824475395fb829a"
+  },
+  "avatar-reclame@2x.png": {
+    "svg": "56cba71dd5781502338769efd176bad9a33f8c88a16cd2b657aecb8e42ed8f29",
+    "png": "e106d8a0737043495288b919bec6aeff3f855f68a21ace7df02ba9f75f0a24bb"
+  }
+}

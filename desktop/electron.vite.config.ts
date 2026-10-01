@@ -27,6 +27,7 @@ export default defineConfig({
       rollupOptions: {
         input: {
           index: resolve(__dirname, 'src/preload/index.ts'),
+          avatar: resolve(__dirname, 'src/preload/avatar.ts'),
           // Guest preload injected into the embedded-browser <webview> (PLAN D1).
           'browser-inspect': resolve(__dirname, 'src/preload/browser-inspect.ts')
         }
@@ -44,7 +45,10 @@ export default defineConfig({
     plugins: [react()],
     build: {
       rollupOptions: {
-        input: { index: resolve(__dirname, 'src/renderer/index.html') }
+        input: {
+          index: resolve(__dirname, 'src/renderer/index.html'),
+          avatar: resolve(__dirname, 'src/renderer/avatar.html')
+        }
       }
     }
   }

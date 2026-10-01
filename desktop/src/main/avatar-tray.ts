@@ -1,11 +1,10 @@
 import { createRequire } from 'node:module'
 import type { MenuItemConstructorOptions } from 'electron'
-import { AVATAR_HEARTBEAT_MS, type AvatarDeckIdentity, type AvatarState } from '../shared/avatar-state'
+import { AVATAR_HEARTBEAT_MS, type AvatarDeckIdentity, type AvatarSummary } from '../shared/avatar-state'
 import { escapeAvatarTrayLabel, type AvatarAttachRequest } from '../shared/avatar-protocol'
 import {
   avatarTrayMayRebound,
   buildAvatarTrayMenu,
-  chooseAvatarDnd,
   type AvatarDndState,
   type AvatarTrayAction,
   type AvatarTrayMenuItem
@@ -19,9 +18,11 @@ export interface AvatarTray {
 }
 
 export interface AvatarTrayOptions {
-  state: AvatarState
+  summary(): AvatarSummary
   iconDir: string
   attachedDecks(): AvatarAttachRequest[]
+  getDnd(): AvatarDndState | null
+  onDnd(choice: AvatarDndState['choice']): void
   onDeckMenuClick(identity: AvatarDeckIdentity): void
   onQuit(): void
 }
@@ -106,10 +107,9 @@ export function createAvatarTray(options: AvatarTrayOptions, dependencies: Avata
     return icon
   }
   const currentTaskbar = (): AvatarTrayTaskbar => avatarTrayTaskbar(dependencies.platform, dependencies.systemIntegratedUiDark())
-  let variant = avatarTrayVariant(options.state.summary().face)
+  let variant = avatarTrayVariant(options.summary().face)
   let taskbar = currentTaskbar()
   const tray = dependencies.createTray(loadIcon(variant, taskbar))
-  let dnd: AvatarDndState | null = null
 
   // The pair is recorded even when its image is unreadable, so a missing file
   // is reported once per change instead of on every heartbeat.
@@ -133,9 +133,9 @@ export function createAvatarTray(options: AvatarTrayOptions, dependencies: Avata
   // not raise nativeTheme 'updated'.
   const refresh = (): void => {
     try {
-      const summary = options.state.summary()
+      const summary = options.summary()
       syncIcon(avatarTrayVariant(summary.face), currentTaskbar())
-      const menu = buildAvatarTrayMenu(summary, options.attachedDecks(), dnd, dependencies.now())
+      const menu = buildAvatarTrayMenu(summary, options.attachedDecks(), options.getDnd(), dependencies.now())
       tray.setToolTip(menu.tooltip)
       tray.setContextMenu(dependencies.buildMenu(menu.items.map((item) => nativeMenuItem(item, invoke))))
     } catch (error) {
@@ -145,7 +145,7 @@ export function createAvatarTray(options: AvatarTrayOptions, dependencies: Avata
 
   const invoke = (action: AvatarTrayAction): void => {
     if (action.kind === 'dnd') {
-      dnd = chooseAvatarDnd(action.choice, dependencies.now())
+      options.onDnd(action.choice)
       refresh()
       return
     }
@@ -167,7 +167,7 @@ export function createAvatarTray(options: AvatarTrayOptions, dependencies: Avata
       tray.destroy()
     },
     mayRebound() {
-      return avatarTrayMayRebound(dnd, dependencies.now())
+      return avatarTrayMayRebound(options.getDnd(), dependencies.now())
     }
   }
 }

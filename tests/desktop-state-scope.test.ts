@@ -216,6 +216,11 @@ const STATE_SCOPES: Record<string, StateFileRule> = {
     scope: "machine",
     reason: "global Avatar auto-attach choice and project opt-outs are operator settings shared by every Deck on this workstation",
   },
+  "avatar-appearance.json": {
+    kind: "literal",
+    scope: "machine",
+    reason: "Avatar appearance, DND deadline and per-screen positions are operator preferences shared by every Deck on this workstation",
+  },
   "sessions.json": {
     kind: "literal",
     scope: "machine",

@@ -8493,3 +8493,254 @@ svg.glyph {
   font-family: var(--mono);
   font-size: 12px;
 }
+
+/* ---------- Avatar character window (A2) ----------------------------------
+   Colours are --avatar-* custom properties the container sets from the shared
+   palette for the system theme. Every stroke is drawn twice, an underlay ring
+   under the ink, so the mask reads on any desktop behind the transparent
+   window. */
+.avatar-root {
+  --avatar-ink: #ece8dc;
+  --avatar-underlay: #202020;
+  --avatar-dim: #9a9a9a;
+  --avatar-faded: #6e6e6e;
+  --avatar-fault: #d04545;
+  --avatar-glow: #d4a24a;
+  --avatar-lost: #b678ff;
+  --avatar-quota: #e0b341;
+  --avatar-mail: #4488ff;
+  --avatar-work: #3ec46d;
+  --avatar-loop-ms: 4000ms;
+  --avatar-loop-steps: 8;
+  --avatar-transition-ms: 200ms;
+  background: transparent;
+}
+
+html.avatar-document,
+html.avatar-document body {
+  background: transparent;
+}
+
+.avatar-root .avatar-skin {
+  display: block;
+  width: 100%;
+  height: auto;
+  overflow: visible;
+}
+
+.avatar-root .avatar-skin .avatar-under,
+.avatar-root .avatar-skin .avatar-ink {
+  fill: none;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.avatar-root .avatar-skin .avatar-ink {
+  stroke: var(--avatar-ink);
+  stroke-width: 3.5;
+}
+
+.avatar-root .avatar-skin .avatar-under {
+  stroke: var(--avatar-underlay);
+  stroke-width: 6.5;
+}
+
+.avatar-root .avatar-skin .avatar-ink .avatar-brow { stroke-width: 5; }
+.avatar-root .avatar-skin .avatar-under .avatar-brow { stroke-width: 8; }
+.avatar-root .avatar-skin .avatar-ink .avatar-opening { stroke-width: 4; }
+.avatar-root .avatar-skin .avatar-under .avatar-opening { stroke-width: 7; }
+.avatar-root .avatar-skin .avatar-ink .avatar-nose { stroke-width: 2.5; }
+.avatar-root .avatar-skin .avatar-under .avatar-nose { stroke-width: 5.5; }
+.avatar-root .avatar-skin .avatar-ink .avatar-gaze { fill: var(--avatar-ink); stroke: none; }
+.avatar-root .avatar-skin .avatar-under .avatar-gaze { fill: var(--avatar-underlay); }
+.avatar-root .avatar-skin .avatar-ink .avatar-crack { stroke: var(--avatar-fault); }
+
+.avatar-root .avatar-skin .avatar-plate {
+  fill: var(--avatar-ink);
+  opacity: 0.18;
+}
+
+.avatar-root .avatar-skin[data-face='panne'] .avatar-ink,
+.avatar-root .avatar-skin[data-face='endormi'] .avatar-ink {
+  stroke: var(--avatar-dim);
+}
+
+.avatar-root .avatar-skin[data-face='panne'] .avatar-plate,
+.avatar-root .avatar-skin[data-face='endormi'] .avatar-plate {
+  fill: var(--avatar-dim);
+}
+
+.avatar-root .avatar-skin[data-face='seul'] .avatar-ink {
+  stroke: var(--avatar-faded);
+}
+
+.avatar-root .avatar-skin[data-face='seul'] .avatar-plate {
+  fill: var(--avatar-faded);
+}
+
+.avatar-root .avatar-skin .avatar-halo path {
+  fill: none;
+  stroke-dasharray: 2 5;
+  stroke-linecap: round;
+}
+
+.avatar-root .avatar-skin .avatar-halo-ink {
+  stroke: var(--avatar-glow);
+  stroke-width: 2.5;
+}
+
+.avatar-root .avatar-skin .avatar-halo-under {
+  stroke: var(--avatar-underlay);
+  stroke-width: 5.5;
+}
+
+.avatar-root[data-halo='off'] .avatar-halo {
+  display: none;
+}
+
+.avatar-root .avatar-skin .avatar-stage-line {
+  fill: none;
+  stroke: var(--avatar-dim);
+  stroke-width: 2;
+  stroke-linecap: round;
+}
+
+.avatar-root .avatar-skin .avatar-stage[data-empty='true'] .avatar-stage-line {
+  stroke: var(--avatar-faded);
+  stroke-dasharray: 3 5;
+}
+
+.avatar-root .avatar-skin .avatar-stage-overflow {
+  fill: var(--avatar-ink);
+  stroke: var(--avatar-underlay);
+  stroke-width: 3;
+  paint-order: stroke;
+  font: 700 10px ui-sans-serif, system-ui, "Segoe UI", sans-serif;
+}
+
+.avatar-root .avatar-skin .avatar-pill {
+  stroke-width: 2;
+  paint-order: stroke;
+}
+
+.avatar-root .avatar-skin .avatar-pill.is-working {
+  fill: var(--avatar-work);
+  stroke: var(--avatar-underlay);
+}
+
+.avatar-root .avatar-skin .avatar-pill.is-idle {
+  fill: var(--avatar-underlay);
+  stroke: var(--avatar-ink);
+}
+
+.avatar-root .avatar-skin[data-face='endormi'] .avatar-pill.is-idle {
+  stroke: var(--avatar-dim);
+}
+
+/* Reused Greek badge glyphs, sized in the figure's user units, not at 1em. */
+.avatar-root .avatar-skin svg.glyph {
+  width: 24px;
+  height: 24px;
+  vertical-align: baseline;
+  stroke-width: 2.4;
+}
+
+.avatar-root .avatar-skin .avatar-pill-glyph.is-fault { color: var(--avatar-fault); }
+.avatar-root .avatar-skin .avatar-pill-glyph.is-lost { color: var(--avatar-lost); }
+.avatar-root .avatar-skin .avatar-pill-glyph.is-quota { color: var(--avatar-quota); }
+
+.avatar-root .avatar-skin .avatar-pill-glyph .avatar-glyph-under {
+  color: var(--avatar-underlay);
+}
+
+.avatar-root .avatar-skin .avatar-pill-glyph .avatar-glyph-under svg.glyph {
+  stroke-width: 5.5;
+}
+
+.avatar-root .avatar-skin .avatar-badge-knockout {
+  fill: var(--avatar-underlay);
+}
+
+.avatar-root .avatar-skin .avatar-badge.is-waiting .avatar-badge-disc { fill: var(--avatar-glow); }
+.avatar-root .avatar-skin .avatar-badge.is-unread .avatar-badge-disc { fill: var(--avatar-mail); }
+.avatar-root .avatar-skin .avatar-badge-glyph { color: var(--avatar-underlay); }
+
+.avatar-root .avatar-skin .avatar-badge-text {
+  fill: var(--avatar-underlay);
+  font: 700 14px ui-sans-serif, system-ui, "Segoe UI", sans-serif;
+}
+
+.avatar-root .avatar-skin .avatar-badge-text.is-small {
+  font-size: 9px;
+}
+
+/* steps(), never a smooth loop: each frame recomposites the transparent window. */
+.avatar-root .avatar-skin .avatar-face,
+.avatar-root .avatar-skin .avatar-gaze {
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+.avatar-root[data-loop='on'] .avatar-skin[data-face='endormi'] .avatar-face {
+  animation: avatar-breathe var(--avatar-loop-ms) steps(var(--avatar-loop-steps)) infinite;
+}
+
+.avatar-root[data-loop='on'] .avatar-skin[data-face='reclame'] .avatar-halo {
+  animation: avatar-halo-pulse var(--avatar-loop-ms) steps(var(--avatar-loop-steps)) infinite;
+}
+
+.avatar-root[data-loop='on'] .avatar-skin[data-face='travaille'] .avatar-gaze {
+  animation: avatar-scan var(--avatar-loop-ms) steps(var(--avatar-loop-steps)) infinite;
+}
+
+.avatar-root[data-loop='on'] .avatar-skin[data-face='courrier'] .avatar-gaze {
+  animation: avatar-glance var(--avatar-loop-ms) steps(var(--avatar-loop-steps)) infinite;
+}
+
+.avatar-root[data-loop='on'] .avatar-skin[data-face='perdu'] .avatar-brow {
+  animation: avatar-droop var(--avatar-loop-ms) steps(var(--avatar-loop-steps)) infinite;
+}
+
+.avatar-root[data-transition='animate'] .avatar-skin {
+  animation: avatar-enter var(--avatar-transition-ms) ease-out 1;
+}
+
+.avatar-root[data-transition='fade'] .avatar-skin {
+  animation: avatar-fade var(--avatar-transition-ms) linear 1;
+}
+
+@keyframes avatar-breathe {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.02); }
+}
+
+@keyframes avatar-halo-pulse {
+  0%, 100% { opacity: 0.45; }
+  50% { opacity: 1; }
+}
+
+@keyframes avatar-scan {
+  0%, 100% { transform: translateX(0); }
+  33% { transform: translateX(4px); }
+  66% { transform: translateX(-2px); }
+}
+
+@keyframes avatar-glance {
+  0%, 85%, 100% { transform: translate(0, 0); }
+  90%, 95% { transform: translate(2px, -1.5px); }
+}
+
+@keyframes avatar-droop {
+  0%, 85%, 100% { transform: translateY(0); }
+  90%, 95% { transform: translateY(2px); }
+}
+
+@keyframes avatar-enter {
+  from { opacity: 0.35; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes avatar-fade {
+  from { opacity: 0.35; }
+  to { opacity: 1; }
+}
