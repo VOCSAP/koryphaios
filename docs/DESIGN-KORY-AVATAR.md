@@ -378,14 +378,14 @@ visage.
 | Priorite | Etat | Ce que voit l'operateur | Source | Extincteur | Couleur |
 |---|---|---|---|---|---|
 | 1 | **Panne** : au moins un Deck branché a une liaison suspecte ou un broker injoignable | masque grisé, fissure ; seules les pastilles des Decks concernés portent `torchOut`, les autres restent actives | fraîcheur du `/state` par branchement ; `/health` par broker | snapshot valide pour la liaison ; `/health` OK pour le broker ; retrait explicite du Deck ou mort confirmée | rouge bannière `#a03030` |
-| 2 | **Reclame** (niveau A) | sourcils leves, yeux tournes vers l'operateur, halo or, badge compteur ; petit rebond a chaque NOUVEL episode, puis immobile | approbation `pending` ; `ask_operator` ; `attention` du Deck | l'approbation quitte `pending` ; le Deck baisse `waiting` | or `--glow` (c'est SA couleur) |
+| 2 | **Reclame** (niveau A) | sourcils leves, yeux tournes vers l'operateur, halo or, badge compteur ; mouvement selon le réglage ci-dessous, sans détection d'épisodes individuels en A2 | approbation `pending` ; `ask_operator` ; `attention` du Deck | l'approbation quitte `pending` ; le Deck baisse `waiting` | or `--glow` (c'est SA couleur) |
 | 3 | **Perdu** (niveau B) | masque tragique, une pastille grise avec `warning` ; pour un quota, une `clepsydra` | tuile `exited` non voulue ; `rateLimited` | relance de la tuile ; `resumeAt` atteint et tuile repartie | ambre `#e0b341` (quota), violet `#b678ff` (perdu) |
 | 4 | **Courrier** (niveau C) | expression neutre, badge caducee avec compteur | messages inbox non lus (curseur avatar) | lecture depuis la bulle, ou `seen` propage par le Deck | accent `--accent` |
-| 5 | **Travaille** | yeux qui parcourent, respiration reguliere, pastilles qui pulsent en rythme avec leur agent | compteur `working > 0` d'au moins un Deck | `working == 0` partout pendant `ACTIVITY_IDLE_MS` | vert `#3ec46d` sur les pastilles |
-| 6 | **Endormi** | yeux mi-clos, respiration lente, orchestra a peine visible (les choreutes sont la, ils attendent) | `working == 0` partout, aucun etat 1-4, au moins un Deck branche | tout ce qui precede | `--fg-dim` |
+| 5 | **Travaille** | yeux qui parcourent, respiration régulière, pastilles actives ; mouvements soumis au réglage ci-dessous, activité agrégée par Deck en A2 | compteur `working > 0` d'au moins un Deck | `working == 0` partout pendant `ACTIVITY_IDLE_MS` | vert `#3ec46d` sur les pastilles |
+| 6 | **Endormi** | yeux mi-clos, respiration lente si le réglage l'autorise, orchestra à peine visible (les choreutes sont là, ils attendent) | `working == 0` partout, aucun etat 1-4, au moins un Deck branche | tout ce qui precede | `--fg-dim` |
 | 7 | **Seul** | yeux **entierement fermes**, aucune respiration, orchestra VIDE, masque legerement incline | aucun Deck branche (**DECIDE**, 2026-09-27) | un `attach` | `--fg-dim`, plus sombre qu'Endormi |
-| -- | **Accompli** (transitoire, 3 s) | laurier qui apparait et s'efface | une carte de roadmap passe `done` par un agent ; un lot se termine | minuterie (transitoire, PAS un etat : R2 ne s'applique pas a un ornement) | or, mais un ORNEMENT, pas un halo : ne pas confondre avec « Reclame » |
-| -- | **Reflechit** (bulle) | « ... » anime DANS la bulle, jamais sur le visage | un tour du cerveau en cours | fin du tour, erreur, ou annulation | accent |
+| -- | **Accompli** (palier B2, transitoire, 3 s ; hors A2) | laurier qui apparait et s'efface | une carte de roadmap passe `done` par un agent ; un lot se termine | minuterie (transitoire, PAS un etat : R2 ne s'applique pas a un ornement) | or, mais un ORNEMENT, pas un halo : ne pas confondre avec « Reclame » |
+| -- | **Reflechit** (palier B1, bulle ; hors A2) | « ... » anime DANS la bulle, jamais sur le visage | un tour du cerveau en cours | fin du tour, erreur, ou annulation | accent |
 
 **DÉCIDÉ (opérateur, 2026-09-28, décision 20).** Le visage résume l'existence
 d'une panne, pas une panne de tous les Decks. Un broker défaillant affecte
@@ -393,6 +393,28 @@ seulement les Decks qui l'utilisent ; une liaison Deck défaillante n'affecte
 pas ses voisins. Les motifs de panne restent indépendants : un heartbeat
 ne guérit pas un broker injoignable. Quand il ne reste aucun Deck branché,
 l'état est « Seul ».
+
+**Mouvement en A2.** Le menu du Tray expose un réglage MACHINE à trois
+valeurs : **continu** (défaut), **changements d'état**, **aucune**. Le
+conteneur applique cette politique ; la peau ne consulte ni préférence ni
+horloge métier. En continu, les mouvements décrits dans la table sont
+possibles, mais Seul reste sans respiration. En changements d'état, une
+transition de `face` anime au plus une seconde puis s'immobilise ; un
+heartbeat identique, un compteur modifié ou une réapparition ne rejoue pas
+l'animation. En aucune, le rendu est statique. `prefers-reduced-motion:
+reduce` prime sur ces trois valeurs et utilise seulement des fondus brefs,
+sans déplacement ni boucle. Le ne-pas-déranger fige les animations et coupe
+le halo, sans changer les visages ni les compteurs. Aucun rattrapage
+d'animations à sa sortie ou après un masquage. Les animations sont suspendues
+lorsque la fenêtre est masquée.
+
+A2 rend les **sept faces** de `AvatarFace`. Accompli appartient au palier B2
+et Reflechit au palier B1 ; aucun événement supplémentaire ne traverse le
+protocole Deck vers avatar pour A2. Courrier a son dessin et son texte, mais
+son compteur reste nul avec le producteur A1. L'orchestra porte une pastille
+par Deck, identifiée par le couple `{deckRunId, broker_url}` ; elle ne
+prétend pas suivre chaque agent. A2 n'infère pas un nouvel épisode de demande
+depuis une variation des compteurs.
 
 Regle de lecture : **le visage porte l'urgence, l'orchestra porte le volume,
 les badges portent le detail**. Trois couches, trois questions (« dois-je
@@ -711,13 +733,17 @@ priorites ; le dialogue par le peer `avatar` est le palier A4.
 
 ## 7. Autres axes
 
-- **D'autres personnages plus tard** (**DECIDE**, 2026-09-27 : le masque
-  d'abord, d'autres « peaux » ensuite). Consequence de structure des le palier
-  A2 : la machine d'etats (`shared/avatar-state.ts`, pure) ne connait aucun
-  dessin ; un personnage est un module de RENDU qui recoit `AvatarState` et
-  rien d'autre. Un second personnage ne touche ni les etats, ni le
-  protocole, ni le tray. Un test exige que chaque peau rende les huit etats
-  de §4.2 (couverture, pas seulement sensibilite).
+- **D'autres personnages plus tard** : le masque d'abord, d'autres « peaux »
+  ensuite. La machine pure `desktop/src/shared/avatar-state.ts` ne connaît
+  aucun dessin. L'unique instance `AvatarState`, en main, produit son
+  `AvatarSummary` sérialisable ; la peau reçoit uniquement cet état de rendu,
+  jamais la classe mutable, un client broker ou les réglages. Le conteneur
+  applique la politique de mouvement. Les sept faces d'A1 sont le domaine
+  exhaustif d'A2 ; Accompli est réservé à B2 et Reflechit à B1. Le test parcourt
+  toutes les peaux enregistrées et chacune des sept faces, y compris Courrier
+  sans producteur actif en A2. Ajouter une peau ne change ni la machine
+  d'états ni le protocole. Le Tray dérive sa géométrie du personnage avec un
+  niveau de détail adapté, sans redéfinir la priorité des faces.
 - **Une v0 sans personnage** : le protocole de branchement + le tray seul
   (icone a etat, sous-menu par Deck, compteurs) livre deja les cas 1, 5 et 7
   de §5. Il permet de valider le protocole et l'agregation avant un pixel de
@@ -735,8 +761,11 @@ priorites ; le dialogue par le peer `avatar` est le palier A4.
   titre de tray) : la couleur et l'animation ne sont jamais le seul canal.
 - **Pas de persistance des elements** : l'avatar ne journalise ni approbations
   ni Courrier au-dela de sa vie (regle CLAUDE.md « locales par
-  construction ») ; il ne persiste que ses reglages (position, taille, DND,
-  autoAttach) en portee MACHINE.
+  construction ») ; seuls les réglages sont persistés en portée MACHINE.
+  `avatar-settings.json` porte autoAttach et les opt-out projet.
+  `avatar-appearance.json`, écrit uniquement par l'avatar, porte visibilité,
+  position par écran, taille, opacité au repos, alwaysOnTop, verrouillage,
+  échéance DND et mode de mouvement. Aucun état d'activité n'est persisté.
 - **Deux Decks sur le meme depot** : deux `deck_id`, deux `group_id`, un seul
   `project_key`, donc la liste `pending` par `project_key` est PARTAGEE ; les
   approbations portent `origin.group_id` et `session_ref` : l'avatar range
@@ -749,10 +778,10 @@ priorites ; le dialogue par le peer `avatar` est le palier A4.
 Chaque palier est livrable et utile seul. Les skills du depot a lire sont
 nommes ; les tests exigibles aussi.
 
-Ordre recommande : 0, A1, A2, A4, A3, B1, B2. **Calendrier (DECIDE,
-decision 15)** : apres le travail en vol et les cartes de libelles de
-modele, les paliers 0 et A1 forment le Lot suivant ; A2 a B2 restent des
-cartes `planned` hors file, rangees apres quelques jours d'usage de A1. A4 passe avant A3 parce que
+Ordre recommandé : 0, A1, A2, A4, A3, B1, B2. **Calendrier** : A2 peut
+être engagé sans attendre plusieurs jours d'usage d'A1 ; les retours sur le
+Tray ne bloquent pas le personnage. Les paliers A3 à B2 restent hors file
+jusqu'à décision de l'opérateur. A4 passe avant A3 parce que
 le bouton « repondre » du Courrier et l'onglet « Demander » reposent sur le
 peer `avatar` ; A3 livre avant A4 reste utile (lecture + `claim`) mais sans
 reponse au Courrier.
@@ -780,7 +809,7 @@ regarder la planche des masques a 2 m et dire lequel se lit.
   apres un kill du processus. Modele le moins cher (decision 17) ; si la
   compaction ne se declenche pas, gonfler les tours plutot que les multiplier.
 - **Le masque** : dessiner masque + orchestra en monochrome a 120 px sur gris
-  moyen, rendre les huit etats de §4.2, verifier a 2 m de l'ecran et contre
+  moyen, rendre les sept faces d'A1, vérifier à 2 m de l'écran et contre
   la regle 8 de `DESIGN.md` §5 (empreinte de patte).
 
 ### Palier A1 : processus avatar, branchement, tray (sans personnage, sans inbox)
@@ -835,14 +864,56 @@ regarder la planche des masques a 2 m et dire lequel se lit.
   Un échec du geste reste visible et tracé, jamais annoncé comme un succès.
 - Skills : `add-deck-view` (canal IPC), `error-reporting`.
 
-### Palier A2 : le personnage et les etats
+### Palier A2 : le personnage et les états
 
-- Fenetre transparente sans cadre, `alwaysOnTop`, `skipTaskbar`,
-  deplacable, position persistee, opacite au repos.
-- SVG du masque + orchestra, animations CSS (`prefers-reduced-motion`
-  respecte), les huit etats de §4.2 + « Accompli » et « Reflechit »,
-  tooltips textuels ; machine d'etats pure separee du rendu (§7).
-- Skill `deck-design` ; verifier §5 regle 8 (empreinte de patte).
+- Fenêtre Windows transparente sans cadre, `alwaysOnTop`, `skipTaskbar`,
+  déplaçable, sans prise de focus à l'apparition. Position persistée par écran
+  en DIP, clamp à la zone utile, repli visible si l'écran disparaît ; taille,
+  verrouillage et opacité au repos réglables depuis le Tray. Masquer ne
+  détache aucun Deck. Zéro Deck conserve le visage Seul et le processus.
+- Renderer et preload dédiés dans le processus `--avatar`, jamais le bridge
+  `DeckApi`. L'unique `AvatarState` main publie un snapshot commun au Tray et
+  au personnage. `AvatarViewApi` sépare lecture de l'état et commandes locales
+  de présentation bornées. Contrat : `docs/adr/003-avatar-a2-render-boundary.md`.
+- Nouvelle planche : deux ou trois silhouettes de masque, chacune avec les
+  sept faces d'A1 et l'orchestra en arc. Validation monochrome sur gris moyen,
+  à taille réelle puis à deux mètres ; le dessin retenu fournit aussi la
+  géométrie de l'icône Tray, à deux niveaux de détail. La peau reçoit uniquement
+  `AvatarSummary`, avec texte accessible par face. Courrier est dessiné mais
+  reste dormant ; Accompli relève de B2, Reflechit de B1. Pas de bulle ni
+  d'extension du protocole Deck vers avatar dans A2.
+- Mouvement : continu par défaut, changements d'état, aucune ; menu du Tray,
+  persistance dans `avatar-appearance.json`, politique appliquée au conteneur.
+  Le mode réduit OS impose des fondus brefs. DND conserve compteurs et visage
+  mais coupe animations et halo ; la fenêtre masquée ne continue pas à animer.
+  Les notifications OS des Decks restent inchangées avant A3.
+- Interaction et validation Windows : glisser JS par `pointerdown` et
+  `setPointerCapture`, IPC de position seulement, jamais de taille fournie
+  par le renderer ; coordonnées finies, clamp et émetteur/frame vérifiés en
+  main. Le survol arme le masque grâce au `mousemove` transféré par
+  `setIgnoreMouseEvents(true, { forward: true })`. Pas de région native
+  `-webkit-app-region: drag`. Tout rechargement, HMR ou crash détruit puis
+  recrée la fenêtre, jamais `loadFile()` sur une fenêtre vivante. La taille
+  relève du main et doit être revalidée après changement d'écran/DPI, sans
+  boucle `setBounds` de redimensionnement pendant le glisser.
+
+DÉDUIT du rapport de sonde de la carte `8fb62e61` : le chemin retenu dispose
+précisément d'une preuve limitée au poste Windows et à l'écran principal à
+100 %. Le transfert souris disparaît sur reload et revient après recréation.
+Le drag JS réussit dans certaines exécutions mais échoue dans deux autres,
+sans cause isolée ; la validation sur le paquet final reste exigible. Les
+échelles fractionnaires émulées ne prouvent ni les vrais 125/150 % Windows ni
+le déplacement entre écrans à DPI différents. La sonde CPU porte sur un
+avatar, pendant environ 25 secondes, et compte en pourcentage d'un cœur,
+pas de la machine : environ 0,37 % statique, 15,35 % avec animation continue
+à 60 fps. Ce sont des repères, pas des budgets garantis pour le dessin final.
+La part GPU n'est pas établie par les artefacts. Détail des preuves et limites
+dans l'ADR ; aucun de ces chiffres ne change le défaut continu choisi.
+
+Découpage et gardes : `docs/DESIGN-AVATAR-A2-LOTS.md`. Skills `deck-design`,
+`add-deck-view`, `error-reporting` ; contrôle de la règle anti-empreinte de
+patte de `DESIGN.md` §5. La matrice mouvement × reduced-motion × face et le
+rejeu Windows font partie du contrat, pas seulement le rendu d'un SVG.
 
 ### Palier A3 : inbox agregee
 
@@ -929,6 +1000,9 @@ regarder la planche des masques a 2 m et dire lequel se lit.
 
 - Ouvrir un Kory recent, demarrer avec la session, mode discret, sons
   optionnels, `setBadgeCount`, raccourci global afficher/masquer.
+- Ornement Accompli : laurier transitoire de trois secondes, distinct du halo
+  d'attention. Ce palier doit définir sa source d'événements de fin de carte
+  ou de lot et sa déduplication ; aucun signal n'est inféré des compteurs A1.
 
 ---
 
@@ -988,8 +1062,8 @@ Second tour (seance de questions sur ce brief) :
    l'avatar redemarre ; version inconnue = refus trace (§3.5).
 14. **Toasts du Deck** : coupes seulement si capacite `inbox` + avatar non
    masque + hors « ne pas deranger » (§4.2).
-15. **Calendrier** : travail en vol d'abord, puis paliers 0 + A1 comme Lot
-   suivant ; A2-B2 en cartes hors file (§8).
+15. **Calendrier** : A2 peut être engagé sans délai d'usage préalable d'A1 ;
+   A3-B2 restent hors file jusqu'à décision de l'opérateur (§8).
 16. **Plusieurs brokers** : pris en charge des A1, `broker_url` fait partie
    de l'identite d'un Deck branche ; l'operateur est en mode `replica`
    (§2).
@@ -1010,9 +1084,19 @@ Arbitrage complémentaire (2026-09-28) :
     visible. Le visage résume la présence d'une panne, pas une panne de
     tous les Decks. Zéro Deck reste « Seul » (§4.2, §8 palier A1).
 
-Reste ouvert, a mesurer au palier 0 SUR LE POSTE : transparence,
-always-on-top, tray et passage au premier plan (Windows) ; auto-compaction d'un `claude -p --input-format stream-json` longue
-duree et reprise par `--resume` ; lisibilite du masque a 120 px en monochrome.
+21. **Périmètre A2** : les sept faces d'A1, sans extension du protocole ;
+    Accompli appartient à B2 et Reflechit à B1.
+22. **Mouvement** : réglage continu (défaut), changements d'état, aucune ;
+    reduced-motion OS prioritaire avec fondus brefs ; propriété du conteneur,
+    persistance MACHINE séparée, choix dans le Tray.
+23. **Dessin** : nouvelle planche de deux ou trois silhouettes avec sept
+    visages chacune et orchestra en arc ; la géométrie du Tray dérive du
+    personnage retenu, avec un niveau de détail adapté.
+
+Restent à valider pour A2 : dessin choisi à taille réelle et à deux mètres,
+interactions sur le paquet final, vrais DPI Windows 125/150 % et mélange
+multi-écran. Les preuves partielles de la sonde ne ferment pas ces gates.
+L'auto-compaction du cerveau en longue durée relève du palier B1.
 
 Ce que l'echange a ecarte, pour ne pas le reproposer : une route admin
 broker « tout voir » (§3.3 B) ; l'avatar comme Deck sans tuiles (§3.3 C) ;
