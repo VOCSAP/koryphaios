@@ -10311,9 +10311,15 @@ const server = Bun.serve<WsData>({
       return new Response("claude-peers broker", { status: 200 });
     }
 
+    let body: unknown;
     try {
-      const body = await req.json();
+      body = await req.json();
+    } catch (e) {
+      log.warn(`request ${url.pathname} has invalid JSON body`, e);
+      return Response.json({ error: "invalid JSON body" }, { status: 400 });
+    }
 
+    try {
       switch (path) {
         case "/register": {
           const result = handleRegister(body as RegisterRequest);
@@ -10660,10 +10666,9 @@ const server = Bun.serve<WsData>({
           return Response.json({ error: "not found" }, { status: 404 });
       }
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      // The client only gets the message; keep the stack on the broker side.
-      log.error(`request ${url.pathname} failed with 500`, e);
-      return Response.json({ error: msg }, { status: 500 });
+      const errorId = randomBytes(4).toString("hex");
+      log.error(`request ${url.pathname} failed with 500 error_id=${errorId}`, e);
+      return Response.json({ error: "internal error", error_id: errorId }, { status: 500 });
     }
   },
 });
