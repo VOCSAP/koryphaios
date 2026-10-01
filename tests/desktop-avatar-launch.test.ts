@@ -1,9 +1,9 @@
 import { afterAll, expect, test } from "bun:test";
 import { spawn, spawnSync } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { configureAvatarLifetime } from "../desktop/src/main/avatar-lifetime.ts";
 
 const REPO = join(import.meta.dir, "..");
@@ -196,3 +196,29 @@ test("a second real Electron using the same profile is denied the singleton", as
     await stopProbe(first.child);
   }
 }, 20_000);
+
+const SINGLETON_LOSS_TRACE = "logWarn('avatar-entry', 'Avatar stopped because another process owns its singleton lock')";
+
+function assertSingletonLossTrace(file: string): void {
+  const source = readFileSync(file, "utf-8");
+  const singletonLoss = source.indexOf("if (!lifetime) {");
+  const startup = source.indexOf("  ensureAvatarPrivateDir", singletonLoss);
+  expect(singletonLoss, "Avatar startup must handle an unavailable singleton lock").toBeGreaterThanOrEqual(0);
+  expect(startup, "the singleton-loss branch must precede Avatar startup").toBeGreaterThan(singletonLoss);
+  const branch = source.slice(singletonLoss, startup);
+  expect(branch).toContain(SINGLETON_LOSS_TRACE);
+  expect(branch.indexOf(SINGLETON_LOSS_TRACE)).toBeLessThan(branch.indexOf("app.quit()"));
+}
+
+test("records singleton-lock loss before the Avatar exits", () => {
+  const source = resolve(DESKTOP, "src", "main", "avatar-entry.ts");
+  assertSingletonLossTrace(source);
+
+  const mirror = join(tempDir(), "avatar-entry.ts");
+  copyFileSync(source, mirror);
+  const original = readFileSync(mirror, "utf-8");
+  const mutated = original.replace(SINGLETON_LOSS_TRACE, "void 0");
+  expect(mutated, "the negative control must remove the singleton-loss trace").not.toBe(original);
+  writeFileSync(mirror, mutated);
+  expect(() => assertSingletonLossTrace(mirror)).toThrow(SINGLETON_LOSS_TRACE);
+});

@@ -1,7 +1,8 @@
 import { expect, test } from 'bun:test'
 import { spawn } from 'node:child_process'
+import { copyFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import {
   avatarLaunchCommand,
   ensureAvatar,
@@ -91,6 +92,35 @@ test('does not start an Avatar the Deck will not attach to', async () => {
   const { deps, spawned } = ensureDeps({ autoAttachEnabled: () => false })
   expect(await ensureAvatar(deps)).toEqual({ action: 'disabled' })
   expect(spawned).toEqual([])
+})
+
+const DISABLED_AVATAR_TRACE = "logInfo('avatar', 'Avatar automatic attachment is disabled')"
+
+function assertDisabledAvatarTrace(file: string): void {
+  const source = readFileSync(file, 'utf-8')
+  const disabled = source.indexOf("case 'disabled':")
+  const alreadyRunning = source.indexOf("case 'already-running':", disabled)
+  expect(disabled, 'startAvatarProcess must handle the disabled Avatar outcome').toBeGreaterThanOrEqual(0)
+  expect(alreadyRunning, 'the disabled Avatar outcome must end before the next case').toBeGreaterThan(disabled)
+  expect(source.slice(disabled, alreadyRunning)).toContain(DISABLED_AVATAR_TRACE)
+}
+
+test('writes the disabled Avatar outcome to the Deck main log with an informational trace', () => {
+  const source = resolve(import.meta.dir, '..', 'desktop', 'src', 'main', 'index.ts')
+  assertDisabledAvatarTrace(source)
+
+  const mirrorDir = mkdtempSync(join(tmpdir(), 'kory-avatar-disabled-trace-'))
+  const mirror = join(mirrorDir, 'index.ts')
+  try {
+    copyFileSync(source, mirror)
+    const original = readFileSync(mirror, 'utf-8')
+    const mutated = original.replace(DISABLED_AVATAR_TRACE, 'void 0')
+    expect(mutated, 'the negative control must remove the disabled Avatar trace').not.toBe(original)
+    writeFileSync(mirror, mutated)
+    expect(() => assertDisabledAvatarTrace(mirror)).toThrow(DISABLED_AVATAR_TRACE)
+  } finally {
+    rmSync(mirrorDir, { recursive: true, force: true })
+  }
 })
 
 test('leaves a live Avatar alone', async () => {

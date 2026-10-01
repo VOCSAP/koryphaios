@@ -15,7 +15,7 @@ import { createAvatarTray, type AvatarTray } from './avatar-tray'
 import { avatarTrayIconDir } from './avatar-tray-icon'
 import { createAvatarQuitHandler } from './avatar-quit-handler'
 import { resolveBrokerEndpoint } from './broker-client'
-import { initDeckLog, reportError } from './log'
+import { initDeckLog, logWarn, reportError } from './log'
 import { installProcessFailureGuard } from './process-failure-guard'
 import { APP_STATE_SUBDIR } from './migrate-data-dir'
 import { AvatarState } from '../shared/avatar-state'
@@ -35,6 +35,7 @@ let brokerProbe: AvatarBrokerProbe | null = null
 
 async function startAvatar(): Promise<void> {
   if (!lifetime) {
+    logWarn('avatar-entry', 'Avatar stopped because another process owns its singleton lock')
     app.quit()
     return
   }

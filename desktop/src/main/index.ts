@@ -2955,6 +2955,9 @@ async function startAvatarProcess(): Promise<void> {
     sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms))
   })
   switch (outcome.action) {
+    case 'disabled':
+      logInfo('avatar', 'Avatar automatic attachment is disabled')
+      break
     case 'already-running':
       journal.add('session', 'avatar: already running')
       break
