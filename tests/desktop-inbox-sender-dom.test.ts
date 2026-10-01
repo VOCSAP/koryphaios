@@ -113,13 +113,14 @@ mock.module("@shared/types", () => ({
 // '@shared/companion': InboxPanel.tsx computes VERDICT_BLOCKED_REMOTELY at
 // module-eval time from these two, so the stub shape only needs to satisfy
 // that one expression (`REMOTE_BLOCKED_CHANNELS.has(COMPANION_MANIFEST.approvalReply.channel)`
-// and its two siblings) -- an empty Set means "nothing blocked remotely",
+// and its siblings) -- an empty Set means "nothing blocked remotely",
 // which is irrelevant here since `remote` stays false in every fixture.
 mock.module("@shared/companion", () => ({
   ...realSharedCompanion,
   COMPANION_MANIFEST: {
     approvalReply: { channel: "deck-only" },
     approvalDecline: { channel: "deck-only" },
+    approvalAck: { channel: "deck-only" },
     approvalAllow: { channel: "deck-only" }
   },
   REMOTE_BLOCKED_CHANNELS: new Set<string>()

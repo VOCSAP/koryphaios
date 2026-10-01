@@ -238,7 +238,7 @@ export const JOIN_ANNOUNCE_LEVELS: JoinAnnounceLevel[] = ['off', 'lead', 'all']
  * Keep the fields in sync by hand if the broker's shape moves -- nothing
  * enforces that automatically.
  */
-export type ApprovalStatus = 'pending' | 'answered' | 'expired_notif' | 'abandoned'
+export type ApprovalStatus = 'pending' | 'answered' | 'expired_notif' | 'abandoned' | 'acknowledged'
 export type ApprovalKind = 'permission' | 'question' | 'plan'
 export type ApprovalVia = 'deck' | 'telegram' | 'discord' | 'ntfy'
 export type ApprovalReplyRoute = 'channel' | 'pty'
@@ -2330,10 +2330,15 @@ export interface DeckApi {
   approvalReply(id: string, text: string): Promise<boolean>
   /**
    * Decline a pending/expired_notif blocking question. This IS an answer
-   * (settles the ticket, unblocks the agent with a refusal) — never an ack,
-   * which would leave the agent waiting indefinitely.
+   * (settles the ticket, unblocks the agent with a refusal).
    */
   approvalDecline(id: string): Promise<boolean>
+  /**
+   * Acknowledge a channel-route question: settles it as read without an
+   * answer, which the agent receives as distinct from a refusal. The broker
+   * refuses it on a permission or keystroke-route approval.
+   */
+  approvalAck(id: string): Promise<boolean>
   /**
    * Allow a pending/expired_notif 'permission' approval: mirrors
    * approvalDecline exactly (card c7df3781), the other verdict. Distinct

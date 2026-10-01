@@ -116,6 +116,7 @@ import {
 import { composeOutboundMessage } from "./shared/message-framing.ts";
 import { formatPeer, renderSendAck } from "./shared/peer-render.ts";
 import { resolveProjectKey } from "./shared/project-key.ts";
+import { askOperatorWaitReply } from "./shared/approval-outcome.ts";
 import { tmpdir } from "node:os";
 import { mkdirSync, writeFileSync, unlinkSync } from "node:fs";
 import { spawn as spawnChildProcess } from "node:child_process";
@@ -1518,32 +1519,11 @@ async function handleAskOperator(name: string, args: unknown, identity: Companio
       id: approvalId,
       timeout_sec: 90,
     });
-    const answered = res.approval?.status === "answered" ? res.approval : null;
-    if (answered) {
-      const verdict =
-        answered.answer_kind === "text"
-          ? (answered.answer_text ?? "")
-          : answered.answer_kind === "allow"
-            ? "yes / approved"
-            : "no / rejected";
+    const reply = res.approval ? askOperatorWaitReply(res.approval) : null;
+    if (reply) {
       return {
-        content: [
-          {
-            type: "text" as const,
-            text: `The operator answered (via ${answered.answered_via}): ${verdict}`,
-          },
-        ],
-      };
-    }
-    if (res.approval && res.approval.status !== "pending") {
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: "That question is no longer awaiting an answer (it expired or was withdrawn). Ask the operator on screen.",
-          },
-        ],
-        isError: true,
+        content: [{ type: "text" as const, text: reply.text }],
+        ...(reply.isError ? { isError: true } : {}),
       };
     }
     return {

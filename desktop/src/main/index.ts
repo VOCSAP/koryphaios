@@ -172,6 +172,7 @@ import {
 import { ApprovalRuntime, armApprovalsAtStartup } from './approval-runtime'
 import { remoteApprovalsEnabled } from './approval-store'
 import {
+  ackApproval,
   addApproval,
   arbitrateSpawnApproval,
   arbitrateSpawnGrant,
@@ -3292,6 +3293,12 @@ app.whenReady().then(async () => {
       const deps = approvals.deps()
       if (!deps) return false
       const res = await claimApproval(deps, { id, answerKind: 'deny' })
+      return res !== null
+    },
+    approvalAck: async (id: string): Promise<boolean> => {
+      const deps = approvals.deps()
+      if (!deps) return false
+      const res = await ackApproval(deps, id)
       return res !== null
     },
     approvalAllow: async (id: string): Promise<boolean> => {

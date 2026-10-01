@@ -10,6 +10,7 @@
 
 import { truncate } from "../shared/text.ts";
 import type { Approval } from "../shared/types.ts";
+import { settledOutcome } from "../shared/approval-outcome.ts";
 
 /** Telegram sendMessage hard limit. */
 export const TELEGRAM_TEXT_MAX = 4096;
@@ -85,12 +86,26 @@ export function renderDiscord(approval: Approval): string {
 
 /** What the message becomes once somebody answered, on every channel. */
 export function renderSettled(approval: Approval, viaLabel: string): string {
-  const verdict =
-    approval.answer_kind === "text"
-      ? truncate(approval.answer_text ?? "", 500)
-      : approval.answer_kind === "allow"
-        ? "approved"
-        : "rejected";
+  const outcome = settledOutcome(approval);
+  let verdict: string;
+  switch (outcome.kind) {
+    case "text":
+      verdict = truncate(outcome.text, 500);
+      break;
+    case "approved":
+      verdict = "approved";
+      break;
+    case "rejected":
+      verdict = "rejected";
+      break;
+    case "acknowledged":
+      verdict = "acknowledged, no answer";
+      break;
+    case "pending":
+    case "gone":
+      verdict = "closed";
+      break;
+  }
   return `✓ ${truncate(approval.title, 120)} — handled via ${viaLabel}: ${verdict}`;
 }
 

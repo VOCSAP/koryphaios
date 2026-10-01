@@ -90,6 +90,7 @@ import {
   verifyAuthProof,
   type ApprovalOperation,
 } from "./shared/approval.ts";
+import { settledOutcome } from "./shared/approval-outcome.ts";
 import {
   createApprovalAuth,
   approvalWhere,
@@ -8556,6 +8557,7 @@ type ApprovalRow = {
   reply_route: string;
   reply_token: string;
   reply_group: string;
+  mergeable: number;
   kind: string;
   title: string;
   question: string;
@@ -8710,12 +8712,29 @@ function resolveReplyRoute(
  */
 function deliverApprovalAnswer(row: ApprovalRow): void {
   if (row.reply_route !== "channel" || !row.reply_token) return;
-  const answer =
-    row.answer_kind === "text"
-      ? (row.answer_text ?? "")
-      : row.answer_kind === "allow"
-        ? "Approved."
-        : "Rejected.";
+  const outcome = settledOutcome({
+    status: row.status as ApprovalStatus,
+    answer_kind: (row.answer_kind as Approval["answer_kind"]) ?? null,
+    answer_text: row.answer_text,
+  });
+  let answer: string;
+  switch (outcome.kind) {
+    case "text":
+      answer = outcome.text;
+      break;
+    case "approved":
+      answer = "Approved.";
+      break;
+    case "rejected":
+      answer = "Rejected.";
+      break;
+    case "acknowledged":
+      answer = "Acknowledged, no answer.";
+      break;
+    case "pending":
+    case "gone":
+      return;
+  }
   const text = [
     `[approval ${row.id}] ${row.title}`,
     "",
@@ -8916,16 +8935,17 @@ function settleApproval(
   scope: ApprovalScope,
   via: ApprovalVia,
   answerKind: Approval["answer_kind"],
-  answerText: string | null
+  answerText: string | null,
+  status: "answered" | "acknowledged"
 ): { approval: Approval } | { error: string; status: number } {
   const allowed = via === "deck" ? "('pending','expired_notif')" : "('pending')";
   const now = new Date().toISOString();
   const where = approvalWhere(scope);
   const res = db.run(
     `UPDATE pending_approvals
-        SET status = 'answered', answered_via = ?, answer_kind = ?, answer_text = ?, answered_at = ?
+        SET status = ?, answered_via = ?, answer_kind = ?, answer_text = ?, answered_at = ?
       WHERE id = ? AND ${where.sql} AND status IN ${allowed}`,
-    [via, answerKind, answerText, now, id, ...(where.params as never[])]
+    [status, via, answerKind, answerText, now, id, ...(where.params as never[])]
   );
   if (res.changes === 0) {
     // The existence probe is scoped TOO. Unscoped it would answer 409 for a row
@@ -8969,6 +8989,24 @@ function handleApprovalClaim(
   if (!id) return { error: "id is required", status: 400 };
   const via = (body.via ?? "deck") as ApprovalVia;
   if (!APPROVAL_VIAS.includes(via)) return { error: "unknown via", status: 400 };
+  if (body.acknowledge === true) {
+    if (body.answer_kind !== undefined || body.answer_text !== undefined) {
+      return { error: "acknowledge excludes answer_kind and answer_text", status: 400 };
+    }
+    // Only a non-mergeable channel-route question (an ask_operator ticket) can
+    // be acknowledged: a mergeable row may have absorbed a later permission
+    // raise for the same tile, whose dialog would stay blocked on screen while
+    // the item vanished from the inbox.
+    const row = authorized.rows[0];
+    if (row && (row.kind === "permission" || row.reply_route !== "channel" || row.mergeable !== 0)) {
+      return { error: "only a channel-route question can be acknowledged", status: 422 };
+    }
+    const acked = settleApproval(id, scope, via, null, null, "acknowledged");
+    if (!("error" in acked)) {
+      void notifyRegistry.settle(acked.approval, via).catch((e) => log.error("notify: settle failed", e));
+    }
+    return acked;
+  }
   const answerKind = body.answer_kind;
   if (!answerKind || !APPROVAL_ANSWER_KINDS.includes(answerKind)) {
     return { error: "answer_kind must be allow|deny|text", status: 400 };
@@ -8986,7 +9024,7 @@ function handleApprovalClaim(
     return { error: "answer_text is required for a text answer", status: 400 };
   }
 
-  const settled = settleApproval(id, scope, via, answerKind, answerText);
+  const settled = settleApproval(id, scope, via, answerKind, answerText, "answered");
   if (!("error" in settled)) {
     // Answered in the Deck: every phone copy must stop looking actionable.
     void notifyRegistry.settle(settled.approval, via).catch((e) =>
@@ -9397,7 +9435,7 @@ function sweepApprovals(): { expired: number; purged: number } {
   ).changes;
   const purged = db.run(
     `DELETE FROM pending_approvals
-      WHERE status IN ('answered','abandoned') AND created_at < datetime('now', ?)`,
+      WHERE status IN ('answered','abandoned','acknowledged') AND created_at < datetime('now', ?)`,
     [`-${APPROVAL_TTL_DAYS} days`]
   ).changes;
   // Pairing codes were only ever deleted when someone tried to redeem one, so
@@ -9588,7 +9626,8 @@ const channelHost: ChannelHost = {
       resolved.scope,
       kind,
       answer.answerKind,
-      answerText
+      answerText,
+      "answered"
     );
     if ("error" in settled) return null;
     // Rewrite the copies on the OTHER channels; the winning one has already

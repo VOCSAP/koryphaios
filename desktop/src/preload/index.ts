@@ -234,6 +234,7 @@ const api: DeckApi = {
   inboxHistory: () => ipcRenderer.invoke('inbox:history'),
   approvalReply: (id, text) => ipcRenderer.invoke('approvals:reply', id, text),
   approvalDecline: (id) => ipcRenderer.invoke('approvals:decline', id),
+  approvalAck: (id) => ipcRenderer.invoke('approvals:ack', id),
   approvalAllow: (id) => ipcRenderer.invoke('approvals:allow', id),
   inboxReply: (toPeerId, text) => ipcRenderer.invoke('inbox:reply', toPeerId, text),
   inboxAckState: () => ipcRenderer.invoke('inbox:ack-state'),

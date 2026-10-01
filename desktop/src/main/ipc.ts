@@ -223,9 +223,11 @@ interface IpcDeps {
   approvalReply: (id: string, text: string) => Promise<boolean>
   /**
    * Decline a pending/expired_notif blocking question. This IS an answer
-   * (settles the ticket, unblocks the agent with a refusal) -- never an ack.
+   * (settles the ticket, unblocks the agent with a refusal).
    */
   approvalDecline: (id: string) => Promise<boolean>
+  /** Acknowledge a channel-route question: read, no answer, not a refusal. */
+  approvalAck: (id: string) => Promise<boolean>
   /**
    * Allow a pending/expired_notif 'permission' approval. Mirrors
    * approvalDecline exactly (card c7df3781) -- same claim primitive, other
@@ -287,6 +289,7 @@ export function registerIpc({
   sandboxWarmTranscripts,
   approvalReply,
   approvalDecline,
+  approvalAck,
   approvalAllow,
   announceTo,
   purgeInboxSession,
@@ -1614,6 +1617,7 @@ export function registerIpc({
     approvalReply(String(id ?? ''), String(text ?? ''))
   )
   regHandle('approvals:decline', (_e, id: string) => approvalDecline(String(id ?? '')))
+  regHandle('approvals:ack', (_e, id: string) => approvalAck(String(id ?? '')))
   regHandle('approvals:allow', (_e, id: string) => approvalAllow(String(id ?? '')))
   regHandle('inbox:reply', (_e, toPeerId: string, text: string) =>
     announceTo(String(toPeerId ?? ''), String(text ?? ''))

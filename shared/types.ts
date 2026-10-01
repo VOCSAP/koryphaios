@@ -1666,8 +1666,9 @@ export type ApprovalKind = "permission" | "question" | "plan";
  * expired_notif  -> the NOTIFICATION expired (default 24h). The session is
  *                   still blocked and the Deck may still claim it.
  * abandoned      -> the producer gave up (session closed, host gone)
+ * acknowledged   -> the operator read it and gave no answer; never a refusal
  */
-export type ApprovalStatus = "pending" | "answered" | "expired_notif" | "abandoned";
+export type ApprovalStatus = "pending" | "answered" | "expired_notif" | "abandoned" | "acknowledged";
 
 /** Shape of the answer. `text` carries a free-form operator prompt. */
 export type ApprovalAnswerKind = "allow" | "deny" | "text";
@@ -1802,6 +1803,8 @@ export interface ApprovalClaimRequest {
   via?: ApprovalVia;
   answer_kind?: ApprovalAnswerKind;
   answer_text?: string;
+  /** Settle as acknowledged instead of answering; exclusive with answer_kind. */
+  acknowledge?: boolean;
 }
 
 export interface ApprovalClaimResponse {

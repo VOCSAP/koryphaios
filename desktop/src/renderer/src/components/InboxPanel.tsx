@@ -12,9 +12,9 @@ import { resolveApprovalSender } from '../inbox-sender'
  * Three structurally distinct entry families: a peer message (repliable,
  * ackable), an event (no recipient, ackable), and a blocking question
  * (repliable and correlated — an agent stays stopped until answered).
- * A question carries no ack at all, not even a greyed one — AckableInboxEntry
- * forbids passing it to inboxAck at compile time; its counterpart is decline,
- * an answer that settles the ticket, not a dismissal.
+ * A question never reaches inboxAck — AckableInboxEntry forbids it at compile
+ * time; it leaves the inbox only when settled broker-side: answered, declined,
+ * or acknowledged (channel-route questions only), never by a local dismissal.
  * Closing the modal never acks, so an entry opened without time to handle it
  * stays in the operator's way.
  */
@@ -73,6 +73,7 @@ const GONE_PEER = '<gone>'
 const VERDICT_BLOCKED_REMOTELY =
   REMOTE_BLOCKED_CHANNELS.has(COMPANION_MANIFEST.approvalReply.channel) ||
   REMOTE_BLOCKED_CHANNELS.has(COMPANION_MANIFEST.approvalDecline.channel) ||
+  REMOTE_BLOCKED_CHANNELS.has(COMPANION_MANIFEST.approvalAck.channel) ||
   REMOTE_BLOCKED_CHANNELS.has(COMPANION_MANIFEST.approvalAllow.channel)
 
 export function InboxPanel(): React.JSX.Element {
@@ -225,7 +226,7 @@ export function InboxPanel(): React.JSX.Element {
    */
   const answerApproval = async (
     id: string,
-    action: { kind: 'allow' } | { kind: 'deny' } | { kind: 'text'; text: string }
+    action: { kind: 'allow' } | { kind: 'deny' } | { kind: 'ack' } | { kind: 'text'; text: string }
   ): Promise<void> => {
     if (sending) return
     setSending(true)
@@ -233,13 +234,19 @@ export function InboxPanel(): React.JSX.Element {
       const ok =
         action.kind === 'deny'
           ? await window.api.approvalDecline(id)
-          : action.kind === 'allow'
-            ? await window.api.approvalAllow(id)
-            : await window.api.approvalReply(id, action.text)
+          : action.kind === 'ack'
+            ? await window.api.approvalAck(id)
+            : action.kind === 'allow'
+              ? await window.api.approvalAllow(id)
+              : await window.api.approvalReply(id, action.text)
       // `false` is not a failure: another channel (phone, Telegram…) won the
       // race and the agent is already released.
       showToast(
-        ok ? 'toast.inboxAnswerSent' : 'toast.inboxAnsweredElsewhere',
+        ok
+          ? action.kind === 'ack'
+            ? 'toast.inboxAckSent'
+            : 'toast.inboxAnswerSent'
+          : 'toast.inboxAnsweredElsewhere',
         ok ? 'success' : 'info'
       )
       setInboxReplyDraft(draftKey, '')
@@ -444,6 +451,17 @@ export function InboxPanel(): React.JSX.Element {
                       {t('inbox.decline')}
                     </button>
                   )}
+                  {canAnswerVerdict &&
+                    open.approval.kind !== 'permission' &&
+                    open.approval.reply_route === 'channel' && (
+                      <button
+                        className="btn"
+                        disabled={sending}
+                        onClick={() => void answerApproval(open.approval.id, { kind: 'ack' })}
+                      >
+                        {t('inbox.ack')}
+                      </button>
+                    )}
                   <button className="btn" onClick={() => setOpenKey(null)}>
                     {t('inbox.close')}
                   </button>

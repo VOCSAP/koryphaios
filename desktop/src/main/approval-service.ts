@@ -155,6 +155,22 @@ export async function claimApproval(
   }
 }
 
+/** Settle as acknowledged (read, no answer). Same 409 contract as claimApproval. */
+export async function ackApproval(deps: ApprovalDeps, id: string): Promise<Approval | null> {
+  try {
+    const res = await signedPost<{ approval: Approval }>(deps, '/approval/claim', {
+      id,
+      project_key: deps.projectKey,
+      via: 'deck',
+      acknowledge: true
+    })
+    return res.approval
+  } catch (e) {
+    if (e instanceof Error && /: 409$/.test(e.message)) return null
+    throw e
+  }
+}
+
 /**
  * Long-poll a raised approval for its verdict (card 02e1c07c). The broker
  * bounds the wait itself and answers `pending: true` on timeout rather than

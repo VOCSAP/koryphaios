@@ -67,7 +67,7 @@ const UNSCOPED_BY_DESIGN: Record<string, string> = {
   // card d3f23918: anchored on the specific status pair and TTL comparison
   // unique to sweepApprovals's purge statement, not the bare table name, so an
   // unrelated unscoped DELETE elsewhere cannot silently match this exemption.
-  "status IN ('answered','abandoned') AND created_at < datetime('now'":
+  "status IN ('answered','abandoned','acknowledged') AND created_at < datetime('now'":
     "Retention purge (sweepApprovals). Same reason as the sweep above: a maintenance job with no caller and no identity to scope by.",
   "readonly [SCOPE_BRAND]":
     "Not SQL. The table name is the BRAND of the opaque scope type, which is deliberately named after the thing it authorises so a reader knows what it unlocks.",

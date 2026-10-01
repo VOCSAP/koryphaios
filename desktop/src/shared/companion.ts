@@ -159,6 +159,7 @@ export const COMPANION_MANIFEST = {
   inboxHistory: { kind: 'invoke', channel: 'inbox:history' },
   approvalReply: { kind: 'invoke', channel: 'approvals:reply' },
   approvalDecline: { kind: 'invoke', channel: 'approvals:decline' },
+  approvalAck: { kind: 'invoke', channel: 'approvals:ack' },
   approvalAllow: { kind: 'invoke', channel: 'approvals:allow' },
   inboxReply: { kind: 'invoke', channel: 'inbox:reply' },
   inboxAckState: { kind: 'invoke', channel: 'inbox:ack-state' },
@@ -306,9 +307,11 @@ const EXPLICIT_REMOTE_BLOCKED_CHANNELS: readonly string[] = [
   // agent. Tier 2 alone (see CHANNEL_TIERS) does not block remote access,
   // so this floor is what actually does. approvals:allow is the same
   // verdict-rendering primitive as approvals:decline, just the other
-  // outcome (card c7df3781) -- same floor, same reasoning.
+  // outcome (card c7df3781) -- same floor, same reasoning. approvals:ack
+  // releases the waiting agent too, so it sits on the same floor.
   'approvals:reply',
   'approvals:decline',
+  'approvals:ack',
   'approvals:allow',
   // A READ, and still host-only: the summary describes which broker every
   // agent on the HOST machine talks to -- its URL, whether a bearer token is
@@ -389,6 +392,7 @@ export const CHANNEL_TIERS: Readonly<Record<string, 0 | 1 | 2 | 3>> = {
   'inbox:reply': 2,
   'approvals:reply': 2,
   'approvals:decline': 2,
+  'approvals:ack': 2,
   'approvals:allow': 2,
   'companion:status': 0,
   // Remote approvals. Reading the channel list is tier 0; everything else is

@@ -131,8 +131,8 @@ describe("rendering", () => {
   });
 
   test("allow and deny read as words, not codes", () => {
-    expect(renderSettled(approval({ answer_kind: "allow" }), "deck")).toContain("approved");
-    expect(renderSettled(approval({ answer_kind: "deny" }), "deck")).toContain("rejected");
+    expect(renderSettled(approval({ status: "answered", answer_kind: "allow" }), "deck")).toContain("approved");
+    expect(renderSettled(approval({ status: "answered", answer_kind: "deny" }), "deck")).toContain("rejected");
   });
 
   test("the late-answer notice is the wording the operator was promised", () => {
