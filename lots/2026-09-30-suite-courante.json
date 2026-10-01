@@ -2,14 +2,22 @@
   "format": "koryphaios-lot/draft-0",
   "name": "Suite courante (fiabilite Deck, replica, UI)",
   "created": "2026-09-30",
+  "updated": "2026-10-01",
   "author": "team-lead",
-  "note": "Rang partage = vague (cartes lancees en parallele). Format provisoire : il sera remplace par celui que definit la carte d'import, et ce fichier regenere par son CLI.",
+  "note": "Rang partage = vague (cartes lancees en parallele). Format provisoire : il sera remplace par celui que definit la carte d'import, et ce fichier regenere par son CLI. Le champ status est informatif ; la roadmap fait autorite.",
   "items": [
-    { "rank": 1, "card": "2327907c", "title": "Relancer une tuile sandbox laisse un claude orphelin dans le conteneur" },
-    { "rank": 1, "card": "c149cc3c", "title": "Push de replique : tout le lot en une seule transaction upstream" },
-    { "rank": 2, "card": "fbcc0239", "title": "Broker : une erreur 500 ne renvoie plus le message brut au client" },
-    { "rank": 2, "card": "a808f90c", "title": "Barres de defilement natives (dont la bande blanche des terminaux)" },
-    { "rank": 3, "card": "2850488c", "title": "Replica : pull avant push qui laisse deux cartes au meme rang (mesure d'abord)" },
-    { "rank": 4, "card": "c753a704", "title": "Directives : lot 3 (raisons distinctes, UI, ecran)" }
+    { "rank": 1, "card": "2327907c", "status": "done", "commits": ["459dc02", "cdfb920"], "title": "Relancer une tuile sandbox laisse un claude orphelin dans le conteneur" },
+    { "rank": 1, "card": "c149cc3c", "status": "deferred", "note": "Differee le 2026-10-01 (operateur) : plus grosse que prevu ; arbitrages A1+B1 ; travail sur la branche locale wip/c149cc3c-replica-delta (6e775b1)", "title": "Push de replique : tout le lot en une seule transaction upstream" },
+    { "rank": 2, "card": "fbcc0239", "status": "done", "commits": ["45c9974"], "title": "Broker : une erreur 500 ne renvoie plus le message brut au client" },
+    { "rank": 2, "card": "a808f90c", "status": "done", "commits": ["5f36e7f"], "title": "Barres de defilement natives (dont la bande blanche des terminaux)" },
+    { "rank": 3, "card": "2850488c", "status": "planned", "title": "Replica : pull avant push qui laisse deux cartes au meme rang (mesure d'abord)" },
+    { "rank": 4, "card": "c753a704", "status": "planned", "title": "Directives : lot 3 (raisons distinctes, UI, ecran)" },
+    { "rank": 5, "card": "b7ee3194", "status": "designing", "note": "Conception architecte faite, mesures debugger faites, arbitrages operateur rendus ; prochaine etape : contrat L1 (identite, registre, depot CLI)", "title": "Kory : buffer de contexte ephemere pour reprendre un peer apres /clear, sans outil MCP" },
+    { "rank": 5, "card": "a20b202e", "status": "planned", "note": "Option (c) operateur : clic = reveler dans l'explorateur, bouton ouvrir pour les extensions sures ; companion = liens web seulement", "title": "Inbox : rendre cliquables les URL web et les chemins de fichiers locaux" },
+    { "rank": 6, "card": "9db3a50d", "status": "planned", "title": "Statut de sync replica : last_error recopie le message brut des erreurs locales, de transport et d'un upstream non patche" },
+    { "rank": 6, "card": "bd389320", "status": "planned", "title": "Nettoyer les fichiers de cache peer-id : aucune retention, plus de 1200 fichiers accumules" },
+    { "rank": 7, "card": "29f70d0c", "status": "planned", "title": "Garde agent-refs : tester les deux autres sorties invalid du frontmatter" },
+    { "rank": 7, "card": "9bcf148d", "status": "planned", "title": "Garde scrollbar : retirer les commentaires CSS avec un lecteur a etats" },
+    { "rank": 7, "card": "1ce570ad", "status": "planned", "title": "Garder la barre de defilement de xterm.css apres npm ci (runner desktop)" }
   ]
 }

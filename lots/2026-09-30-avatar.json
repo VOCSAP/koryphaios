@@ -2,15 +2,17 @@
   "format": "koryphaios-lot/draft-0",
   "name": "Avatar (paliers A1 a B2)",
   "created": "2026-09-30",
+  "updated": "2026-10-01",
   "author": "team-lead",
-  "note": "Ordre des paliers de docs/DESIGN-KORY-AVATAR.md. Rang partage = vague. ed6944c6 attend un triage avant d'etre pris. Format provisoire, a regenerer par le CLI de la carte d'import.",
+  "note": "Ordre des paliers de docs/DESIGN-KORY-AVATAR.md. Rang partage = vague. ed6944c6 attend un triage avant d'etre pris. La decision 15 (attendre l'usage de A1) a ete levee pour A2 par l'operateur le 2026-10-01. Format provisoire, a regenerer par le CLI de la carte d'import. Le champ status est informatif ; la roadmap fait autorite.",
   "items": [
-    { "rank": 1, "card": "1d136f60", "title": "A1 : finir (validation ecran focus/renommage/lancement auto, deux silences a tracer)" },
-    { "rank": 2, "card": "d70b01a8", "title": "Sources SVG et generateur des icones Tray, contraste theme clair" },
-    { "rank": 3, "card": "8fb62e61", "title": "A2 : le personnage (masque du coryphee), fenetre transparente Windows" },
-    { "rank": 4, "card": "0278b922", "title": "A3 : inbox agregee de tous les Decks, coupure des toasts du Deck" },
-    { "rank": 5, "card": "ed6944c6", "title": "A4 : dialogue par un peer avatar cache et signe" },
-    { "rank": 6, "card": "a799871c", "title": "B1 : cerveau facultatif (routage, synthese, brouillons)" },
-    { "rank": 7, "card": "2d9784be", "title": "B2 : confort (Kory recent, demarrage, mode discret, sons, raccourci)" }
+    { "rank": 1, "card": "1d136f60", "status": "screen-validation", "commits": ["079acef"], "note": "Code complet ; ecran valide le 2026-10-01 (icone et compteur, focus d'un Deck, renommage, lancement auto) ; reste Ne-pas-deranger et Quitter a tester par l'operateur", "title": "A1 : finir (validation ecran focus/renommage/lancement auto, deux silences a tracer)" },
+    { "rank": 2, "card": "d70b01a8", "status": "done", "commits": ["480b77c"], "note": "Jeu clair et sombre choisi d'apres la barre des taches ; validation ecran apres rebuild (barre claire, puis barre sombre) ; icones re-derivees de la planche B' en eec456d", "title": "Sources SVG et generateur des icones Tray, contraste theme clair" },
+    { "rank": 3, "card": "8fb62e61", "status": "in-progress", "commits": ["023a234", "eec456d", "5e57466", "de0edde", "c7b65f7"], "note": "Contrat (brief, ADR 003, etapes), planche B' retenue, L1 main + L2 peau et Tray derive (dormant), ADR 004 et machine d'etats de la fenetre (db34d743), L2c renderer : faits. Reste : L2d (glisser, survol, textes via faceCopy) puis L3 (activation de la fenetre, validation Windows, DPI, CPU)", "title": "A2 : le personnage (masque du coryphee), fenetre transparente Windows" },
+    { "rank": 3, "card": "db34d743", "status": "done", "commits": ["c7b65f7"], "note": "Condition d'activation de la fenetre A2", "title": "Avatar A2 : une seule machine d'etats pour la fenetre (creation, visibilite, position)" },
+    { "rank": 4, "card": "0278b922", "status": "planned", "title": "A3 : inbox agregee de tous les Decks, coupure des toasts du Deck" },
+    { "rank": 5, "card": "ed6944c6", "status": "needs-triage", "title": "A4 : dialogue par un peer avatar cache et signe" },
+    { "rank": 6, "card": "a799871c", "status": "planned", "note": "Accueille l'ornement Reflechit, reporte de A2", "title": "B1 : cerveau facultatif (routage, synthese, brouillons)" },
+    { "rank": 7, "card": "2d9784be", "status": "planned", "note": "Accueille l'ornement Accompli, reporte de A2", "title": "B2 : confort (Kory recent, demarrage, mode discret, sons, raccourci)" }
   ]
 }
