@@ -134,17 +134,15 @@ export function avatarAppearanceDnd(appearance: AvatarAppearance): AvatarDndStat
 
 export function writeAvatarAppearance(
   file: string,
-  patch: Partial<AvatarAppearance>,
+  snapshot: AvatarAppearance,
   dependencies: AvatarAppearanceDependencies = defaultAvatarAppearanceDependencies
-): AvatarAppearance {
-  const current = readAvatarAppearance(file, dependencies)
-  const next = readAppearance({ ...current, ...patch, version: 1 }, dependencies)
+): void {
+  const next = readAppearance(snapshot, dependencies)
   if (!next) throw new Error('Avatar appearance is invalid')
 
   try {
     mkdirSync(dirname(file), { recursive: true })
     writeFileAtomic(file, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 })
-    return next
   } catch (error) {
     dependencies.reportError('avatar-appearance', `cannot write ${file}`, error)
     throw new Error('Avatar appearance could not be written')

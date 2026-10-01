@@ -41,6 +41,7 @@ test('accepts each AvatarView handler only from its current main frame', async (
       removeHandler: (channel) => { handlers.delete(channel) }
     },
     currentWindow: () => current,
+    loadingWindow: () => null,
     getState: state,
     setPosition: (...args) => { calls.push(args) },
     setPointerInside: (...args) => { calls.push(args) },
@@ -83,6 +84,36 @@ test('accepts each AvatarView handler only from its current main frame', async (
   expect(handlers).toEqual(new Map())
 })
 
+test('admits only the first state request of a window that is still loading and nothing else from it', async () => {
+  const handlers = new Map<string, Handler>()
+  const mainFrame = {}
+  const loadingContents = { mainFrame }
+  const generations: number[] = []
+  const calls: unknown[][] = []
+  registerAvatarViewIpcHandlers({
+    ipc: { handle: (channel, handler) => handlers.set(channel, handler), removeHandler: () => {} },
+    currentWindow: () => null,
+    loadingWindow: () => ({ webContents: loadingContents, generation: 9 }),
+    getState: (generation) => {
+      generations.push(generation)
+      return state()
+    },
+    setPosition: (...args) => { calls.push(args) },
+    setPointerInside: (...args) => { calls.push(args) },
+    reportError: (...args) => { calls.push(args) }
+  })
+  const event = { sender: loadingContents, senderFrame: mainFrame }
+
+  await expect(handlers.get(AVATAR_VIEW_CHANNELS.getState)!(event)).resolves.toEqual(state())
+  expect(generations).toEqual([9])
+  await expect(handlers.get(AVATAR_VIEW_CHANNELS.getState)!({ sender: loadingContents, senderFrame: {} })).rejects.toThrow('AvatarView sender is not current')
+  await expect(handlers.get(AVATAR_VIEW_CHANNELS.getState)!({ sender: { mainFrame: {} }, senderFrame: {} })).rejects.toThrow('AvatarView sender is not current')
+  await expect(handlers.get(AVATAR_VIEW_CHANNELS.setPosition)!(event, 1, 2)).rejects.toThrow('AvatarView sender is not current')
+  await expect(handlers.get(AVATAR_VIEW_CHANNELS.setPointerInside)!(event, true)).rejects.toThrow('AvatarView sender is not current')
+  await expect(handlers.get(AVATAR_VIEW_CHANNELS.reportError)!(event, 'early')).rejects.toThrow('AvatarView sender is not current')
+  expect(calls).toEqual([])
+})
+
 test('aggregates suppressed renderer errors and resets its bucket for a new generation', async () => {
   const handlers = new Map<string, Handler>()
   const mainFrame = {}
@@ -93,6 +124,7 @@ test('aggregates suppressed renderer errors and resets its bucket for a new gene
   registerAvatarViewIpcHandlers({
     ipc: { handle: (channel, handler) => handlers.set(channel, handler), removeHandler: () => {} },
     currentWindow: () => ({ webContents: contents, generation }),
+    loadingWindow: () => null,
     getState: state,
     setPosition: () => {},
     setPointerInside: () => {},
@@ -113,269 +145,4 @@ test('aggregates suppressed renderer errors and resets its bucket for a new gene
   await report(event, 'five')
 
   expect(reports).toEqual(['one', 'two', '1 Avatar renderer errors suppressed; four', 'five'])
-})
-
-test('keeps pointer forwarding, visibility, topmost state and reload lifecycle in the window adapter', async () => {
-  const { createAvatarWindow } = await import('../desktop/src/main/avatar-window.ts')
-  const windows: { destroy: () => void; hide: () => void; loadFile: (file: string) => Promise<void>; setAlwaysOnTop: (alwaysOnTop: boolean) => void; setIgnoreMouseEvents: (ignore: boolean, options?: { forward: boolean }) => void; setPosition: (x: number, y: number) => void; showInactive: () => void; webContents: { mainFrame: object; send: (channel: string, payload: AvatarViewState) => void; setWindowOpenHandler: (handler: () => { action: 'deny' }) => void; on: (event: string, listener: (...args: unknown[]) => void) => void } }[] = []
-  const generations: number[] = []
-  const sent: unknown[][] = []
-  const pointerModes: { ignore: boolean; options?: { forward: boolean } }[] = []
-  const topmost: boolean[] = []
-  const constructionTopmost: boolean[] = []
-  let willNavigate: ((event: { preventDefault(): void }) => void) | null = null
-  let renderProcessGone: (() => void) | null = null
-  let windowOpen: (() => { action: 'deny' }) | null = null
-  let hides = 0
-  let shows = 0
-  const avatarWindow = createAvatarWindow({
-    platform: 'win32',
-    preload: 'avatar-preload.js',
-    html: 'avatar.html',
-    alwaysOnTop: false,
-    createWindow: (options) => {
-      constructionTopmost.push(options.alwaysOnTop)
-      expect(options).toMatchObject({
-        frame: false,
-        transparent: true,
-        skipTaskbar: true,
-        show: false,
-        webPreferences: { preload: 'avatar-preload.js', sandbox: true, contextIsolation: true, nodeIntegration: false, webviewTag: false }
-      })
-      const window = {
-        destroy: () => { windows.splice(windows.indexOf(window), 1) },
-        on: () => {},
-        hide: () => { hides += 1 },
-        loadFile: async () => {},
-        setAlwaysOnTop: (alwaysOnTop: boolean) => { topmost.push(alwaysOnTop) },
-        setIgnoreMouseEvents: (ignore: boolean, options?: { forward: boolean }) => { pointerModes.push({ ignore, options }) },
-        setPosition: () => {},
-        showInactive: () => { shows += 1 },
-        webContents: {
-          mainFrame: {},
-          send: (channel: string, payload: AvatarViewState) => { sent.push([channel, payload]) },
-          setWindowOpenHandler: (handler: () => { action: 'deny' }) => { windowOpen = handler },
-          on: (event: string, listener: (...args: unknown[]) => void) => {
-            if (event === 'will-navigate') willNavigate = listener as (event: { preventDefault(): void }) => void
-            if (event === 'render-process-gone') renderProcessGone = listener as () => void
-          }
-        }
-      }
-      windows.push(window)
-      return window
-    },
-    reportError: () => {},
-    onGeneration: (generation) => generations.push(generation)
-  })
-
-  await avatarWindow.show()
-  expect(windowOpen?.()).toEqual({ action: 'deny' })
-  if (willNavigate === null) throw new Error('Expected navigation guard')
-  const navigationGuard = willNavigate as unknown as (event: { preventDefault(): void }) => void
-  let prevented = false
-  navigationGuard({ preventDefault: () => { prevented = true } })
-  expect(prevented).toBe(true)
-  avatarWindow.setPointerInside(true)
-  avatarWindow.setPointerInside(false)
-  avatarWindow.hide()
-  await avatarWindow.show()
-  avatarWindow.setAlwaysOnTop(true)
-  avatarWindow.sendState(state())
-  expect(sent).toEqual([[AVATAR_VIEW_CHANNELS.state, state()]])
-  expect(pointerModes).toEqual([
-    { ignore: true, options: { forward: true } },
-    { ignore: false },
-    { ignore: true, options: { forward: true } },
-    { ignore: true, options: { forward: true } }
-  ])
-  expect(topmost).toEqual([true])
-  expect(hides).toBe(1)
-  expect(shows).toBe(2)
-
-  if (renderProcessGone === null) throw new Error('Expected crash handler')
-  const crashHandler = renderProcessGone as unknown as () => void
-  crashHandler()
-  await Promise.resolve()
-  expect(generations).toEqual([1])
-  expect(windows).toHaveLength(0)
-  await avatarWindow.show()
-  expect(generations).toEqual([1, 2])
-  await avatarWindow.reload()
-  expect(generations).toEqual([1, 2, 3])
-  expect(constructionTopmost).toEqual([false, true, true])
-  expect(pointerModes.filter((mode) => mode.ignore)).toEqual(expect.arrayContaining([
-    { ignore: true, options: { forward: true } },
-    { ignore: true, options: { forward: true } }
-  ]))
-})
-
-test('invalidates a pending creation before reload', async () => {
-  const { createAvatarWindow } = await import('../desktop/src/main/avatar-window.ts')
-  const resolvers: (() => void)[] = []
-  const windows: { destroy: () => void; hide: () => void; loadFile: () => Promise<void>; setAlwaysOnTop: () => void; setIgnoreMouseEvents: () => void; setPosition: () => void; showInactive: () => void; webContents: { mainFrame: {}; send: () => void; setWindowOpenHandler: () => void; on: () => void } }[] = []
-  const generations: number[] = []
-  const avatarWindow = createAvatarWindow({
-    platform: 'win32',
-    preload: 'avatar-preload.js',
-    html: 'avatar.html',
-    alwaysOnTop: true,
-    createWindow: () => {
-      const window = {
-        destroy: () => { windows.splice(windows.indexOf(window), 1) },
-        on: () => {},
-        hide: () => {},
-        loadFile: () => new Promise<void>((resolve) => resolvers.push(resolve)),
-        setAlwaysOnTop: () => {},
-        setIgnoreMouseEvents: () => {},
-        setPosition: () => {},
-        showInactive: () => {},
-        webContents: { mainFrame: {}, send: () => {}, setWindowOpenHandler: () => {}, on: () => {} }
-      }
-      windows.push(window)
-      return window
-    },
-    reportError: () => {},
-    onGeneration: (generation) => generations.push(generation)
-  })
-
-  const first = avatarWindow.show()
-  const replacement = avatarWindow.reload()
-  resolvers.shift()!()
-  resolvers.shift()!()
-  await Promise.all([first, replacement])
-  expect(windows).toHaveLength(1)
-  expect(generations).toEqual([1])
-  avatarWindow.destroy()
-  expect(windows).toHaveLength(0)
-})
-
-interface DeferredAvatarWindow {
-  destroyed: boolean
-  emit(event: 'close' | 'closed' | 'render-process-gone'): boolean
-  on(event: string, listener: (...args: unknown[]) => void): void
-  destroy(): void
-  hide(): void
-  loadFile(): Promise<void>
-  setAlwaysOnTop(): void
-  setIgnoreMouseEvents(): void
-  setPosition(): void
-  showInactive(): void
-  webContents: {
-    mainFrame: {}
-    send(): void
-    setWindowOpenHandler(): void
-    on(event: string, listener: (...args: unknown[]) => void): void
-  }
-}
-
-function deferredWindowHarness() {
-  const windows: DeferredAvatarWindow[] = []
-  const resolvers: (() => void)[] = []
-  const generations: number[] = []
-  const createWindow = (): DeferredAvatarWindow => {
-    const listeners = new Map<string, (...args: unknown[]) => void>()
-    const window: DeferredAvatarWindow = {
-      destroyed: false,
-      on: (event, listener) => { listeners.set(event, listener) },
-      emit(event) {
-        let prevented = false
-        listeners.get(event)?.({ preventDefault: () => { prevented = true } })
-        return prevented
-      },
-      destroy() {
-        window.destroyed = true
-        windows.splice(windows.indexOf(window), 1)
-        listeners.get('closed')?.()
-      },
-      hide() {},
-      loadFile: () => new Promise<void>((resolve) => resolvers.push(resolve)),
-      setAlwaysOnTop() {},
-      setIgnoreMouseEvents() {},
-      setPosition() {},
-      showInactive() {},
-      webContents: {
-        mainFrame: {},
-        send() {},
-        setWindowOpenHandler() {},
-        on: (event, listener) => { listeners.set(event, listener) }
-      }
-    }
-    windows.push(window)
-    return window
-  }
-  return { windows, resolvers, generations, createWindow }
-}
-
-test('destroys a pending window before reload publishes its replacement', async () => {
-  const { createAvatarWindow } = await import('../desktop/src/main/avatar-window.ts')
-  const harness = deferredWindowHarness()
-  const avatarWindow = createAvatarWindow({
-    platform: 'win32', preload: 'avatar-preload.js', html: 'avatar.html', alwaysOnTop: true,
-    createWindow: harness.createWindow, reportError: () => {}, onGeneration: (generation) => harness.generations.push(generation)
-  })
-
-  const first = avatarWindow.show()
-  const original = harness.windows[0]!
-  const replacement = avatarWindow.reload()
-  expect(original.destroyed).toBe(true)
-  expect(harness.windows).toHaveLength(1)
-  original.emit('render-process-gone')
-  harness.resolvers[1]!()
-  await replacement
-  harness.resolvers[0]!()
-  await first
-
-  expect(harness.windows).toHaveLength(1)
-  expect(harness.generations).toEqual([1])
-})
-
-test('destroys a pending window when Avatar is destroyed', async () => {
-  const { createAvatarWindow } = await import('../desktop/src/main/avatar-window.ts')
-  const harness = deferredWindowHarness()
-  const avatarWindow = createAvatarWindow({
-    platform: 'win32', preload: 'avatar-preload.js', html: 'avatar.html', alwaysOnTop: true,
-    createWindow: harness.createWindow, reportError: () => {}, onGeneration: (generation) => harness.generations.push(generation)
-  })
-
-  const pending = avatarWindow.show()
-  const original = harness.windows[0]!
-  avatarWindow.destroy()
-  expect(original.destroyed).toBe(true)
-  expect(harness.windows).toHaveLength(0)
-  harness.resolvers[0]!()
-  await pending
-
-  expect(harness.generations).toEqual([])
-  expect(harness.windows).toHaveLength(0)
-})
-
-test('hides a user close while destroy closes the Avatar window', async () => {
-  const { createAvatarWindow } = await import('../desktop/src/main/avatar-window.ts')
-  const harness = deferredWindowHarness()
-  let hides = 0
-  let shows = 0
-  const createWindow = () => {
-    const window = harness.createWindow()
-    window.hide = () => { hides += 1 }
-    window.showInactive = () => { shows += 1 }
-    return window
-  }
-  const avatarWindow = createAvatarWindow({
-    platform: 'win32', preload: 'avatar-preload.js', html: 'avatar.html', alwaysOnTop: true,
-    createWindow, reportError: () => {}, onGeneration: () => {}
-  })
-
-  const opening = avatarWindow.show()
-  harness.resolvers[0]!()
-  await opening
-  const window = harness.windows[0]!
-  expect(window.emit('close')).toBe(true)
-  expect(window.destroyed).toBe(false)
-  expect(hides).toBe(1)
-  await avatarWindow.show()
-  expect(shows).toBe(2)
-  avatarWindow.destroy()
-
-  expect(window.destroyed).toBe(true)
-  expect(harness.windows).toHaveLength(0)
 })

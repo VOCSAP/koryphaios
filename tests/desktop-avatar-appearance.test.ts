@@ -45,6 +45,54 @@ test('persists a complete valid appearance record', async () => {
   expect(JSON.parse(readFileSync(file, 'utf8'))).toEqual(expected)
 })
 
+test('writes exactly the snapshot it is given, without reading the file or merging its content', async () => {
+  const appearance = await import('../desktop/src/main/avatar-appearance.ts')
+  const file = appearanceFile()
+  const record = validAppearance()
+  record.positions = { primary: record.positions.primary! }
+  writeFileSync(file, JSON.stringify({ ...validAppearance(), visible: false, positions: { stale: { workArea: { x: 0, y: 0, width: 10, height: 10 }, x: 1, y: 1 } } }))
+  const errors: string[] = []
+
+  const returned = appearance.writeAvatarAppearance(file, record, { reportError: (_scope, message) => errors.push(message) })
+
+  expect(returned).toBeUndefined()
+  expect(errors).toEqual([])
+  expect(JSON.parse(readFileSync(file, 'utf8'))).toEqual(record)
+})
+
+test('overwrites a corrupt file with the snapshot instead of resetting to defaults first', async () => {
+  const appearance = await import('../desktop/src/main/avatar-appearance.ts')
+  const file = appearanceFile()
+  writeFileSync(file, '{ not json')
+  const errors: string[] = []
+
+  appearance.writeAvatarAppearance(file, { ...validAppearance(), visible: false }, { reportError: (_scope, message) => errors.push(message) })
+
+  expect(errors).toEqual([])
+  expect(JSON.parse(readFileSync(file, 'utf8'))).toMatchObject({ visible: false, dndChoice: '1h' })
+})
+
+test('refuses an invalid snapshot and leaves the file untouched', async () => {
+  const appearance = await import('../desktop/src/main/avatar-appearance.ts')
+  const file = appearanceFile()
+  appearance.writeAvatarAppearance(file, validAppearance())
+  const before = readFileSync(file, 'utf8')
+
+  expect(() => appearance.writeAvatarAppearance(file, { ...validAppearance(), idleOpacity: Number.NaN })).toThrow('Avatar appearance is invalid')
+  expect(readFileSync(file, 'utf8')).toBe(before)
+})
+
+test('reports a write failure with its file and throws a stable error', async () => {
+  const appearance = await import('../desktop/src/main/avatar-appearance.ts')
+  const blocker = appearanceFile()
+  writeFileSync(blocker, '{}')
+  const file = join(blocker, 'nested', 'avatar-appearance.json')
+  const errors: { message: string }[] = []
+
+  expect(() => appearance.writeAvatarAppearance(file, validAppearance(), { reportError: (_scope, message) => errors.push({ message }) })).toThrow('Avatar appearance could not be written')
+  expect(errors).toEqual([{ message: `cannot write ${file}` }])
+})
+
 test('rejects one malformed appearance field while preserving validation of every other field', async () => {
   const appearance = await import('../desktop/src/main/avatar-appearance.ts')
   const file = appearanceFile()

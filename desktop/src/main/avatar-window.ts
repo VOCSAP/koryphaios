@@ -24,7 +24,8 @@ export interface AvatarViewWindowEndpoint {
 export interface AvatarViewIpcOptions {
   ipc: AvatarViewIpcMain
   currentWindow(): AvatarViewWindowEndpoint | null
-  getState(): AvatarViewState
+  loadingWindow(): AvatarViewWindowEndpoint | null
+  getState(generation: number): AvatarViewState | Promise<AvatarViewState>
   setPosition(x: number, y: number): void | Promise<void>
   setPointerInside(inside: boolean): void | Promise<void>
   reportError(message: string): void
@@ -58,6 +59,7 @@ export interface AvatarBrowserWindow {
   webContents: AvatarBrowserWebContents
   on(event: string, listener: (...args: unknown[]) => void): void
   destroy(): void
+  isDestroyed(): boolean
   hide(): void
   loadFile(file: string): Promise<unknown>
   setAlwaysOnTop(alwaysOnTop: boolean): void
@@ -66,26 +68,39 @@ export interface AvatarBrowserWindow {
   showInactive(): void
 }
 
-export interface AvatarWindowOptions {
-  platform: string
-  preload: string
-  html: string
-  alwaysOnTop: boolean
-  createWindow(options: AvatarWindowConstructionOptions): AvatarBrowserWindow
-  reportError(scope: string, message: string, error?: unknown): void
-  onGeneration(generation: number): void
+export interface AvatarNativeCallbacks {
+  rendererGone(token: number): void
+  closeRequested(token: number): boolean
+  closed(token: number): void
 }
 
-export interface AvatarWindow {
-  show(): Promise<void>
-  sendState(state: AvatarViewState): void
-  setAlwaysOnTop(alwaysOnTop: boolean): void
-  setPosition(x: number, y: number): void
-  setPointerInside(inside: boolean): void
-  hide(): void
-  reload(): Promise<void>
-  destroy(): void
-  current(): AvatarViewWindowEndpoint | null
+export interface AvatarNativeAdapterOptions {
+  preload: string
+  html: string
+  createWindow(options: AvatarWindowConstructionOptions): AvatarBrowserWindow
+  callbacks: AvatarNativeCallbacks
+}
+
+export interface AvatarNativeAdapter {
+  allocate(token: number, alwaysOnTop: boolean): void
+  load(token: number): Promise<void>
+  prepare(token: number, x: number, y: number, alwaysOnTop: boolean): void
+  send(token: number, state: AvatarViewState): void
+  show(token: number): void
+  hide(token: number): void
+  setPointerMode(token: number, inside: boolean): void
+  setAlwaysOnTop(token: number, alwaysOnTop: boolean): void
+  setPosition(token: number, x: number, y: number): void
+  destroy(token: number): void
+  isDestroyed(token: number): boolean
+  release(token: number): void
+  endpoint(token: number): AvatarViewWindowEndpoint | null
+}
+
+export class AvatarAllocationError extends Error {
+  constructor(readonly cause: unknown) {
+    super('Avatar window setup failed after allocation')
+  }
 }
 
 function isCurrentSender(event: AvatarViewIpcEvent, current: AvatarViewWindowEndpoint | null): boolean {
@@ -153,9 +168,11 @@ export function registerAvatarViewIpcHandlers(options: AvatarViewIpcOptions): ()
   }
 
   const getState: AvatarViewIpcHandler = async (event, ...args) => {
-    requireCurrentSender(event, options.currentWindow())
+    const current = options.currentWindow()
+    const endpoint = isCurrentSender(event, current) ? current : options.loadingWindow()
+    if (endpoint === null || !isCurrentSender(event, endpoint)) throw new Error('AvatarView sender is not current')
     requireNoArguments(args)
-    return options.getState()
+    return options.getState(endpoint.generation)
   }
   const setPosition: AvatarViewIpcHandler = async (event, ...args) => {
     requireCurrentSender(event, options.currentWindow())
@@ -187,184 +204,100 @@ export function registerAvatarViewIpcHandlers(options: AvatarViewIpcOptions): ()
   }
 }
 
-export function createAvatarWindow(options: AvatarWindowOptions): AvatarWindow {
-  let window: AvatarBrowserWindow | null = null
-  let pendingWindow: { window: AvatarBrowserWindow; token: number } | null = null
-  let creating: Promise<void> | null = null
-  let creationToken = 0
-  const destroyingWindows = new Set<AvatarBrowserWindow>()
-  let disposed = false
-  let generation = 0
-  let pointerInside = false
-  let alwaysOnTop = options.alwaysOnTop
+function preventDefault(event: unknown): void {
+  if (typeof event === 'object' && event !== null && 'preventDefault' in event && typeof event.preventDefault === 'function') {
+    event.preventDefault()
+  }
+}
 
-  const applyPointerMode = (target: AvatarBrowserWindow): void => {
-    if (pointerInside) target.setIgnoreMouseEvents(false)
-    else target.setIgnoreMouseEvents(true, { forward: true })
+export function createAvatarNativeAdapter(options: AvatarNativeAdapterOptions): AvatarNativeAdapter {
+  const resources = new Map<number, AvatarBrowserWindow>()
+
+  const resource = (token: number): AvatarBrowserWindow => {
+    const window = resources.get(token)
+    if (!window) throw new Error('Avatar window is unavailable')
+    return window
   }
 
-  const hideWindow = (target: AvatarBrowserWindow): void => {
-    pointerInside = false
-    applyPointerMode(target)
-    target.hide()
-  }
-
-  const destroyWindow = (target: AvatarBrowserWindow): void => {
-    destroyingWindows.add(target)
-    target.destroy()
-  }
-
-  const invalidate = (): void => {
-    creationToken += 1
-    creating = null
-    const pending = pendingWindow
-    pendingWindow = null
-    if (pending) destroyWindow(pending.window)
-  }
-
-  const destroyCurrent = (): void => {
-    invalidate()
-    const current = window
-    window = null
-    if (!current) return
-    pointerInside = false
-    applyPointerMode(current)
-    destroyWindow(current)
-  }
-
-  const retire = (target: AvatarBrowserWindow, token: number): void => {
-    const isCurrent = window === target
-    const isPending = pendingWindow?.window === target
-    if (!isCurrent && !isPending) return
-    if (isCurrent) {
-      window = null
-      pointerInside = false
-    }
-    if (isPending) pendingWindow = null
-    if (token === creationToken) {
-      creationToken += 1
-      creating = null
-    }
-    destroyWindow(target)
-  }
-
-  const create = async (token: number): Promise<void> => {
-    if (options.platform !== 'win32' || disposed || token !== creationToken) return
-    const next = options.createWindow({
-      frame: false,
-      transparent: true,
-      alwaysOnTop,
-      skipTaskbar: true,
-      show: false,
-      webPreferences: {
-        preload: options.preload,
-        sandbox: true,
-        contextIsolation: true,
-        nodeIntegration: false,
-        webviewTag: false
-      }
-    })
-    next.setIgnoreMouseEvents(true, { forward: true })
-    next.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
-    next.webContents.on('will-navigate', (event: unknown) => {
-      if (typeof event === 'object' && event !== null && 'preventDefault' in event && typeof event.preventDefault === 'function') {
-        event.preventDefault()
-      }
-    })
-    pendingWindow = { window: next, token }
-    next.webContents.on('render-process-gone', () => {
-      options.reportError('avatar-window', 'Avatar renderer crashed')
-      retire(next, token)
-    })
-    next.on('close', (event: unknown) => {
-      if (destroyingWindows.has(next)) return
-      if (typeof event === 'object' && event !== null && 'preventDefault' in event && typeof event.preventDefault === 'function') {
-        event.preventDefault()
-      }
-      hideWindow(next)
-    })
-    next.on('closed', () => {
-      destroyingWindows.delete(next)
-      if (window === next) window = null
-      if (pendingWindow?.window === next) {
-        pendingWindow = null
-        if (token === creationToken) {
-          creationToken += 1
-          creating = null
-        }
-      }
-    })
-    try {
-      await next.loadFile(options.html)
-      if (disposed || token !== creationToken || pendingWindow?.window !== next) return
-      pendingWindow = null
-      window = next
-      generation += 1
-      options.onGeneration(generation)
-      if (disposed || token !== creationToken || window !== next) return
-      next.showInactive()
-    } catch (error) {
-      if (pendingWindow?.window === next) {
-        pendingWindow = null
-        destroyWindow(next)
-      }
-      if (!disposed && token === creationToken) {
-        options.reportError('avatar-window', 'Avatar renderer could not load', error)
-      }
-    }
-  }
-
-  const ensureCreated = async (): Promise<void> => {
-    if (disposed || window !== null) return
-    if (creating) return creating
-    const token = creationToken
-    const pending = create(token)
-    creating = pending
-    try {
-      await pending
-    } finally {
-      if (creating === pending) creating = null
-    }
-  }
+  const ignoreMouse = (window: AvatarBrowserWindow): void => window.setIgnoreMouseEvents(true, { forward: true })
 
   return {
-    async show() {
-      if (disposed) return
-      if (window !== null) {
-        window.showInactive()
-        return
+    allocate(token, alwaysOnTop) {
+      if (resources.size > 0) throw new Error('Avatar window is already held')
+      const window = options.createWindow({
+        frame: false,
+        transparent: true,
+        alwaysOnTop,
+        skipTaskbar: true,
+        show: false,
+        webPreferences: {
+          preload: options.preload,
+          sandbox: true,
+          contextIsolation: true,
+          nodeIntegration: false,
+          webviewTag: false
+        }
+      })
+      resources.set(token, window)
+      try {
+        // close and closed come first so a failing setup below still reports the closure.
+        window.on('close', (event) => {
+          if (options.callbacks.closeRequested(token)) preventDefault(event)
+        })
+        window.on('closed', () => {
+          resources.delete(token)
+          options.callbacks.closed(token)
+        })
+        ignoreMouse(window)
+        window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+        window.webContents.on('will-navigate', preventDefault)
+        window.webContents.on('render-process-gone', () => options.callbacks.rendererGone(token))
+      } catch (error) {
+        throw new AvatarAllocationError(error)
       }
-      await ensureCreated()
     },
-    sendState(state) {
-      window?.webContents.send('avatar-view:state', state)
+    async load(token) {
+      await resource(token).loadFile(options.html)
     },
-    setAlwaysOnTop(nextAlwaysOnTop) {
-      alwaysOnTop = nextAlwaysOnTop
-      window?.setAlwaysOnTop(alwaysOnTop)
+    prepare(token, x, y, alwaysOnTop) {
+      const window = resource(token)
+      ignoreMouse(window)
+      window.setAlwaysOnTop(alwaysOnTop)
+      window.setPosition(x, y)
     },
-    setPosition(x, y) {
-      window?.setPosition(x, y)
+    send(token, state) {
+      resource(token).webContents.send('avatar-view:state', state)
     },
-    setPointerInside(inside) {
-      pointerInside = inside
-      if (window) applyPointerMode(window)
+    show(token) {
+      resource(token).showInactive()
     },
-    hide() {
-      if (!window) return
-      hideWindow(window)
+    hide(token) {
+      resource(token).hide()
     },
-    async reload() {
-      if (disposed) return
-      destroyCurrent()
-      await ensureCreated()
+    setPointerMode(token, inside) {
+      const window = resource(token)
+      if (inside) window.setIgnoreMouseEvents(false)
+      else ignoreMouse(window)
     },
-    destroy() {
-      disposed = true
-      destroyCurrent()
+    setAlwaysOnTop(token, alwaysOnTop) {
+      resource(token).setAlwaysOnTop(alwaysOnTop)
     },
-    current() {
-      return window === null ? null : { webContents: window.webContents, generation }
+    setPosition(token, x, y) {
+      resource(token).setPosition(x, y)
+    },
+    destroy(token) {
+      resources.get(token)?.destroy()
+    },
+    isDestroyed(token) {
+      const window = resources.get(token)
+      return window === undefined || window.isDestroyed()
+    },
+    release(token) {
+      resources.delete(token)
+    },
+    endpoint(token) {
+      const window = resources.get(token)
+      return window === undefined ? null : { webContents: window.webContents, generation: token }
     }
   }
 }
