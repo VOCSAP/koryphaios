@@ -1,6 +1,6 @@
 import { createRequire } from 'node:module'
 import type { MenuItemConstructorOptions } from 'electron'
-import { AVATAR_HEARTBEAT_MS, type AvatarDeckIdentity, type AvatarFace, type AvatarState } from '../shared/avatar-state'
+import { AVATAR_HEARTBEAT_MS, type AvatarDeckIdentity, type AvatarState } from '../shared/avatar-state'
 import { escapeAvatarTrayLabel, type AvatarAttachRequest } from '../shared/avatar-protocol'
 import {
   avatarTrayMayRebound,
@@ -10,7 +10,7 @@ import {
   type AvatarTrayAction,
   type AvatarTrayMenuItem
 } from './avatar-tray-menu'
-import { avatarTrayIconPath, avatarTrayVariant, type AvatarTrayVariant } from './avatar-tray-icon'
+import { avatarTrayIconPath, avatarTrayTaskbar, avatarTrayVariant, type AvatarTrayTaskbar, type AvatarTrayVariant } from './avatar-tray-icon'
 import { reportError } from './log'
 
 export interface AvatarTray {
@@ -45,9 +45,12 @@ export interface AvatarTrayDependencies {
   setInterval(callback: () => void, delay: number): ReturnType<typeof setInterval>
   clearInterval(timer: ReturnType<typeof setInterval>): void
   reportError(scope: string, message: string, error?: unknown): void
+  platform: string
+  systemIntegratedUiDark(): boolean | undefined
+  onSystemThemeUpdated(listener: () => void): () => void
 }
 
-export type ElectronTrayModule = Pick<typeof import('electron'), 'Menu' | 'Tray' | 'nativeImage'>
+export type ElectronTrayModule = Pick<typeof import('electron'), 'Menu' | 'Tray' | 'nativeImage' | 'nativeTheme'>
 
 // Lazy loading keeps injected adapter tests independent of Electron runtime exports.
 const requireElectron = createRequire(import.meta.url)
@@ -68,7 +71,16 @@ export function electronAvatarTrayDependencies(electron: () => ElectronTrayModul
     buildMenu: (template) => electron().Menu.buildFromTemplate(template),
     setInterval,
     clearInterval,
-    reportError
+    reportError,
+    platform: process.platform,
+    // Tracks the taskbar only while nothing in this process forces the app theme
+    // source; forcing it makes this value follow the app theme instead.
+    systemIntegratedUiDark: () => electron().nativeTheme.shouldUseDarkColorsForSystemIntegratedUI,
+    onSystemThemeUpdated: (listener) => {
+      const theme = electron().nativeTheme
+      theme.on('updated', listener)
+      return () => { theme.removeListener('updated', listener) }
+    }
   }
 }
 
@@ -87,30 +99,42 @@ function nativeMenuItem(item: AvatarTrayMenuItem, invoke: (action: AvatarTrayAct
 }
 
 export function createAvatarTray(options: AvatarTrayOptions, dependencies: AvatarTrayDependencies = defaultAvatarTrayDependencies): AvatarTray {
-  const loadIcon = (variant: AvatarTrayVariant): AvatarTrayImage => {
-    const iconPath = avatarTrayIconPath(options.iconDir, variant)
+  const loadIcon = (variant: AvatarTrayVariant, taskbar: AvatarTrayTaskbar): AvatarTrayImage => {
+    const iconPath = avatarTrayIconPath(options.iconDir, variant, taskbar)
     const icon = dependencies.loadImage(iconPath)
     if (icon.isEmpty()) dependencies.reportError('avatar-tray', `Avatar Tray icon missing or unreadable: ${iconPath}`)
     return icon
   }
+  const currentTaskbar = (): AvatarTrayTaskbar => avatarTrayTaskbar(dependencies.platform, dependencies.systemIntegratedUiDark())
   let variant = avatarTrayVariant(options.state.summary().face)
-  const tray = dependencies.createTray(loadIcon(variant))
+  let taskbar = currentTaskbar()
+  const tray = dependencies.createTray(loadIcon(variant, taskbar))
   let dnd: AvatarDndState | null = null
 
-  // The variant is recorded even when its image is unreadable, so a missing file
+  // The pair is recorded even when its image is unreadable, so a missing file
   // is reported once per change instead of on every heartbeat.
-  const syncIcon = (face: AvatarFace): void => {
-    const next = avatarTrayVariant(face)
-    if (next === variant) return
-    variant = next
-    const icon = loadIcon(next)
+  const syncIcon = (nextVariant: AvatarTrayVariant, nextTaskbar: AvatarTrayTaskbar): void => {
+    if (nextVariant === variant && nextTaskbar === taskbar) return
+    variant = nextVariant
+    taskbar = nextTaskbar
+    const icon = loadIcon(nextVariant, nextTaskbar)
     if (!icon.isEmpty()) tray.setImage(icon)
   }
 
+  const onThemeUpdated = (): void => {
+    try {
+      syncIcon(variant, currentTaskbar())
+    } catch (error) {
+      dependencies.reportError('avatar-tray', 'cannot follow the taskbar theme', error)
+    }
+  }
+
+  // The heartbeat re-reads the taskbar too, in case a taskbar-only change does
+  // not raise nativeTheme 'updated'.
   const refresh = (): void => {
     try {
       const summary = options.state.summary()
-      syncIcon(summary.face)
+      syncIcon(avatarTrayVariant(summary.face), currentTaskbar())
       const menu = buildAvatarTrayMenu(summary, options.attachedDecks(), dnd, dependencies.now())
       tray.setToolTip(menu.tooltip)
       tray.setContextMenu(dependencies.buildMenu(menu.items.map((item) => nativeMenuItem(item, invoke))))
@@ -134,10 +158,12 @@ export function createAvatarTray(options: AvatarTrayOptions, dependencies: Avata
 
   refresh()
   const refreshTimer = dependencies.setInterval(refresh, AVATAR_HEARTBEAT_MS)
+  const stopFollowingTheme = dependencies.onSystemThemeUpdated(onThemeUpdated)
 
   return {
     dispose() {
       dependencies.clearInterval(refreshTimer)
+      stopFollowingTheme()
       tray.destroy()
     },
     mayRebound() {

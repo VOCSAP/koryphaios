@@ -4,10 +4,14 @@ import { join } from 'node:path'
 import {
   AVATAR_TRAY_FACES,
   AVATAR_TRAY_ICON_DIRNAME,
+  AVATAR_TRAY_TASKBARS,
+  AVATAR_TRAY_VARIANTS,
   avatarTrayIconDir,
+  avatarTrayIconFiles,
   avatarTrayIconPath,
+  avatarTrayTaskbar,
   avatarTrayVariant,
-  type AvatarTrayVariant
+  type AvatarTrayTaskbar
 } from '../desktop/src/main/avatar-tray-icon.ts'
 import {
   createAvatarTray,
@@ -55,21 +59,53 @@ test('the icon variant of every face is the one the brief assigns', () => {
   }
 })
 
-test('every face resolves to a real 16 px PNG with a 32 px @2x sibling, and no two variants share pixels', () => {
+test('every face resolves, on each taskbar, to a real 16 px PNG with a 32 px @2x sibling, and no two icons share pixels', () => {
   const dir = avatarTrayIconDir(false, 'unused-resources', DESKTOP_DIR)
   const variants = [...new Set(AVATAR_TRAY_FACES.map(avatarTrayVariant))]
   expect(variants.length, 'faces collapse onto fewer icons than the brief draws').toBe(new Set(Object.values(BRIEF_VARIANT_BY_FACE)).size)
 
-  const bytesByTier: Array<Map<string, AvatarTrayVariant>> = [new Map(), new Map()]
-  for (const variant of variants) {
-    const path = avatarTrayIconPath(dir, variant)
-    for (const [tier, file, size] of [[0, path, 16], [1, hiDpiSibling(path), 32]] as const) {
-      expect(existsSync(file), `Avatar Tray icon missing at ${file}`).toBe(true)
-      expect(pngSize(file), file).toEqual({ width: size, height: size })
-      const hex = readFileSync(file).toString('hex')
-      expect(bytesByTier[tier]!.get(hex), `${variant} is byte-identical to another variant at ${size} px`).toBeUndefined()
-      bytesByTier[tier]!.set(hex, variant)
+  const bytesByTier: Array<Map<string, string>> = [new Map(), new Map()]
+  for (const taskbar of AVATAR_TRAY_TASKBARS) {
+    for (const variant of variants) {
+      const path = avatarTrayIconPath(dir, variant, taskbar)
+      for (const [tier, file, size] of [[0, path, 16], [1, hiDpiSibling(path), 32]] as const) {
+        expect(existsSync(file), `Avatar Tray icon missing at ${file}`).toBe(true)
+        expect(readFileSync(file).length, `Avatar Tray icon is empty at ${file}`).toBeGreaterThan(0)
+        expect(pngSize(file), file).toEqual({ width: size, height: size })
+        const hex = readFileSync(file).toString('hex')
+        expect(bytesByTier[tier]!.get(hex), `${variant} on a ${taskbar} taskbar is byte-identical to ${bytesByTier[tier]!.get(hex)} at ${size} px`).toBeUndefined()
+        bytesByTier[tier]!.set(hex, `${variant}/${taskbar}`)
+      }
     }
+  }
+})
+
+test('the icon file set is every variant, on both taskbars, at both tiers, and nothing else', () => {
+  const expected = AVATAR_TRAY_TASKBARS.flatMap((taskbar) => AVATAR_TRAY_VARIANTS.flatMap((variant) => {
+    const base = taskbar === 'light' ? `avatar-${variant}-light.png` : `avatar-${variant}.png`
+    return [base, base.replace(/\.png$/, '@2x.png')]
+  }))
+  expect([...avatarTrayIconFiles()].sort()).toEqual(expected.sort())
+  expect(new Set(avatarTrayIconFiles()).size, 'two (variant, taskbar) pairs share one file name').toBe(AVATAR_TRAY_VARIANTS.length * AVATAR_TRAY_TASKBARS.length * 2)
+  for (const variant of AVATAR_TRAY_VARIANTS) {
+    expect(avatarTrayIconPath('d', variant, 'dark')).toBe(join('d', `avatar-${variant}.png`))
+    expect(avatarTrayIconPath('d', variant, 'light')).toBe(join('d', `avatar-${variant}-light.png`))
+  }
+})
+
+test('the taskbar shade follows the system-integrated UI on win32 and darwin, and is dark elsewhere', () => {
+  const cases: Array<[string, boolean | undefined, AvatarTrayTaskbar]> = [
+    ['win32', true, 'dark'],
+    ['win32', false, 'light'],
+    ['win32', undefined, 'dark'],
+    ['darwin', true, 'dark'],
+    ['darwin', false, 'light'],
+    ['linux', false, 'dark'],
+    ['linux', true, 'dark'],
+    ['linux', undefined, 'dark']
+  ]
+  for (const [platform, systemDark, expected] of cases) {
+    expect(avatarTrayTaskbar(platform, systemDark), `${platform}, systemIntegratedUiDark=${String(systemDark)}`).toBe(expected)
   }
 })
 
@@ -86,10 +122,20 @@ interface FakeElectron {
   trayImages: unknown[]
   setImages: unknown[]
   emptyCalls: number
+  systemDark: boolean | undefined
+  themeListeners: Set<() => void>
 }
 
 function fakeElectron(load: (path: string) => AvatarTrayImage): FakeElectron {
-  const fake: FakeElectron = { module: null as unknown as ElectronTrayModule, loadedPaths: [], trayImages: [], setImages: [], emptyCalls: 0 }
+  const fake: FakeElectron = {
+    module: null as unknown as ElectronTrayModule,
+    loadedPaths: [],
+    trayImages: [],
+    setImages: [],
+    emptyCalls: 0,
+    systemDark: true,
+    themeListeners: new Set()
+  }
   class Tray {
     constructor(image: unknown) { fake.trayImages.push(image) }
     setToolTip(): void {}
@@ -103,6 +149,11 @@ function fakeElectron(load: (path: string) => AvatarTrayImage): FakeElectron {
     nativeImage: {
       createFromPath: (path: string) => { fake.loadedPaths.push(path); return load(path) },
       createEmpty: () => { fake.emptyCalls += 1; return { isEmpty: () => true } }
+    },
+    nativeTheme: {
+      get shouldUseDarkColorsForSystemIntegratedUI() { return fake.systemDark },
+      on: (event: string, listener: () => void) => { if (event === 'updated') fake.themeListeners.add(listener) },
+      removeListener: (event: string, listener: () => void) => { if (event === 'updated') fake.themeListeners.delete(listener) }
     }
   } as unknown as ElectronTrayModule
   return fake
@@ -112,12 +163,20 @@ interface TrayHarness {
   fake: FakeElectron
   errors: string[]
   setFace(face: AvatarFace): void
+  setSystemDark(dark: boolean | undefined, notify: boolean): void
   tick(): void
   dispose(): void
 }
 
-function startTray(iconDir: string, initialFace: AvatarFace, load: (path: string) => AvatarTrayImage): TrayHarness {
+function startTray(
+  iconDir: string,
+  initialFace: AvatarFace,
+  load: (path: string) => AvatarTrayImage,
+  initialSystemDark: boolean | undefined = true,
+  platform = 'win32'
+): TrayHarness {
   const fake = fakeElectron(load)
+  fake.systemDark = initialSystemDark
   const errors: string[] = []
   let face = initialFace
   let tick: (() => void) | null = null
@@ -131,12 +190,17 @@ function startTray(iconDir: string, initialFace: AvatarFace, load: (path: string
     ...electronAvatarTrayDependencies(() => fake.module),
     setInterval: (callback: () => void) => { tick = callback; return 'timer' as unknown as ReturnType<typeof setInterval> },
     clearInterval: () => {},
-    reportError: (_scope: string, message: string) => { errors.push(message) }
+    reportError: (_scope: string, message: string) => { errors.push(message) },
+    platform
   })
   return {
     fake,
     errors,
     setFace: (next) => { face = next },
+    setSystemDark: (dark, notify) => {
+      fake.systemDark = dark
+      if (notify) for (const listener of [...fake.themeListeners]) listener()
+    },
     tick: () => {
       if (tick === null) throw new Error('Expected the Tray refresh interval to be armed')
       tick()
@@ -153,8 +217,8 @@ test('the Tray is built from the icon of the variant of the current face, never 
   const harness = startTray('icons-dir', 'panne', imageFor)
   harness.dispose()
 
-  expect(harness.fake.loadedPaths).toEqual([avatarTrayIconPath('icons-dir', 'panne')])
-  expect(harness.fake.trayImages.map(String)).toEqual([avatarTrayIconPath('icons-dir', 'panne')])
+  expect(harness.fake.loadedPaths).toEqual([avatarTrayIconPath('icons-dir', 'panne', 'dark')])
+  expect(harness.fake.trayImages.map(String)).toEqual([avatarTrayIconPath('icons-dir', 'panne', 'dark')])
   expect(harness.fake.emptyCalls, 'the Tray fell back to nativeImage.createEmpty(), the blank-square icon').toBe(0)
   expect(harness.errors).toEqual([])
 })
@@ -170,8 +234,8 @@ test('a refresh swaps the icon only when the variant changes', () => {
   harness.setFace('travaille')
   harness.tick()
   expect(harness.fake.setImages.map(String)).toEqual([
-    avatarTrayIconPath('icons-dir', 'reclame'),
-    avatarTrayIconPath('icons-dir', 'eveille')
+    avatarTrayIconPath('icons-dir', 'reclame', 'dark'),
+    avatarTrayIconPath('icons-dir', 'eveille', 'dark')
   ])
 
   harness.setFace('courrier')
@@ -181,7 +245,7 @@ test('a refresh swaps the icon only when the variant changes', () => {
 
   harness.setFace('seul')
   harness.tick()
-  expect(harness.fake.setImages.map(String).at(-1)).toBe(avatarTrayIconPath('icons-dir', 'endormi'))
+  expect(harness.fake.setImages.map(String).at(-1)).toBe(avatarTrayIconPath('icons-dir', 'endormi', 'dark'))
   harness.dispose()
   expect(harness.errors).toEqual([])
 })
@@ -191,11 +255,11 @@ test('an icon that loads empty is reported with its path and the Tray still come
   harness.dispose()
 
   expect(harness.fake.trayImages).toHaveLength(1)
-  expect(harness.errors).toEqual([`Avatar Tray icon missing or unreadable: ${avatarTrayIconPath('missing-dir', 'endormi')}`])
+  expect(harness.errors).toEqual([`Avatar Tray icon missing or unreadable: ${avatarTrayIconPath('missing-dir', 'endormi', 'dark')}`])
 })
 
 test('an unreadable variant keeps the previous icon and is reported once, not on every heartbeat', () => {
-  const claim = avatarTrayIconPath('icons-dir', 'reclame')
+  const claim = avatarTrayIconPath('icons-dir', 'reclame', 'dark')
   const harness = startTray('icons-dir', 'seul', (path) => path === claim ? { isEmpty: () => true } : imageFor(path))
 
   harness.setFace('reclame')
@@ -205,4 +269,64 @@ test('an unreadable variant keeps the previous icon and is reported once, not on
 
   expect(harness.fake.setImages, 'an empty image replaced the visible icon').toEqual([])
   expect(harness.errors).toEqual([`Avatar Tray icon missing or unreadable: ${claim}`])
+})
+
+test('a light taskbar at start builds the Tray from the light set', () => {
+  const harness = startTray('icons-dir', 'reclame', imageFor, false)
+  harness.dispose()
+
+  expect(harness.fake.trayImages.map(String)).toEqual([avatarTrayIconPath('icons-dir', 'reclame', 'light')])
+})
+
+test('a taskbar theme change re-sets the icon of the current variant, and an unchanged one does not', () => {
+  const harness = startTray('icons-dir', 'travaille', imageFor, true)
+
+  harness.setSystemDark(true, true)
+  expect(harness.fake.setImages, 'an updated event with the same taskbar shade re-set the icon').toEqual([])
+
+  harness.setSystemDark(false, true)
+  harness.setSystemDark(true, true)
+  expect(harness.fake.setImages.map(String)).toEqual([
+    avatarTrayIconPath('icons-dir', 'eveille', 'light'),
+    avatarTrayIconPath('icons-dir', 'eveille', 'dark')
+  ])
+
+  harness.setSystemDark(false, true)
+  harness.setFace('panne')
+  harness.tick()
+  expect(harness.fake.setImages.map(String).at(-1), 'a face change lost the taskbar shade').toBe(avatarTrayIconPath('icons-dir', 'panne', 'light'))
+  harness.dispose()
+  expect(harness.errors).toEqual([])
+})
+
+test('a taskbar change that raises no updated event is still picked up by the heartbeat', () => {
+  const harness = startTray('icons-dir', 'seul', imageFor, true)
+
+  harness.setSystemDark(false, false)
+  expect(harness.fake.setImages).toEqual([])
+  harness.tick()
+  harness.dispose()
+
+  expect(harness.fake.setImages.map(String)).toEqual([avatarTrayIconPath('icons-dir', 'endormi', 'light')])
+})
+
+test('without a system-integrated UI theme the dark set applies, whatever the API answers', () => {
+  const absent = startTray('icons-dir', 'seul', imageFor, undefined)
+  absent.dispose()
+  expect(absent.fake.trayImages.map(String)).toEqual([avatarTrayIconPath('icons-dir', 'endormi', 'dark')])
+
+  const linux = startTray('icons-dir', 'seul', imageFor, false, 'linux')
+  linux.setSystemDark(false, true)
+  linux.tick()
+  linux.dispose()
+  expect(linux.fake.trayImages.map(String)).toEqual([avatarTrayIconPath('icons-dir', 'endormi', 'dark')])
+  expect(linux.fake.setImages, 'a platform without the API switched to the light set').toEqual([])
+})
+
+test('disposing the Tray stops following the taskbar theme', () => {
+  const harness = startTray('icons-dir', 'seul', imageFor, true)
+  expect(harness.fake.themeListeners.size, 'the Tray never subscribed to nativeTheme updated').toBe(1)
+  harness.dispose()
+
+  expect(harness.fake.themeListeners.size, 'a disposed Tray still listens to nativeTheme updated').toBe(0)
 })

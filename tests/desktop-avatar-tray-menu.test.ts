@@ -164,7 +164,10 @@ test('translates every native label, drives actions, refreshes, reports errors a
       return 'timer' as unknown as ReturnType<typeof setInterval>
     },
     clearInterval: (timer) => { cleared = timer },
-    reportError: (_scope, _message, error) => errors.push(error)
+    reportError: (_scope, _message, error) => errors.push(error),
+    platform: 'win32',
+    systemIntegratedUiDark: () => true,
+    onSystemThemeUpdated: () => () => {}
   }
 
   const tray = createAvatarTray({
@@ -238,7 +241,10 @@ test('reports a native refresh failure without preventing disposal', () => {
     buildMenu: (template) => template,
     setInterval: () => 'timer' as unknown as ReturnType<typeof setInterval>,
     clearInterval: () => {},
-    reportError: (_scope, _message, error) => errors.push(error)
+    reportError: (_scope, _message, error) => errors.push(error),
+    platform: 'win32',
+    systemIntegratedUiDark: () => true,
+    onSystemThemeUpdated: () => () => {}
   })
 
   expect(errors).toEqual([boom])
