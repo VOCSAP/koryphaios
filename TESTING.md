@@ -203,6 +203,43 @@ by `scripts/fixtures/make-closure-sensitivity-repo.ts` (ships in the same
 commit as the checker on purpose -- a proof nobody can replay after the
 next refactor is not a proof), by `tests/desktop-commit-closure-check.test.ts`.
 
+## Sondes hors gate
+
+`scripts/probe-askuserquestion-hooks.py` measures what the Claude Code CLI does
+on an `AskUserQuestion`: which hooks fire and in which order (`--hooks`), whether
+a `PreToolUse` deny naming `ask_operator` redirects the agent (`--redirect`), and
+what typed keys select in the native menu (`--type '2\r'`, `--type 'Beta\r'`).
+It drives a real authenticated CLI and a real model, so it is NOT in `bun test`.
+
+Replay it on every Claude CLI bump used by the Deck and after any change to the
+hook set (`desktop/deck-plugin/hooks/hooks.json`,
+`desktop/hooks/approval-hook.ts`). It runs on Linux/macOS/WSL only (stdlib
+`pty`); on this Windows workstation it runs in the WSL distro `NVIDIA-Workbench`
+(user `nemo`, `claude` in `~/.local/bin`, hence `bash -lc`), with the token
+injected by `cred` and never written:
+
+```bash
+WSLENV=CLAUDE_CODE_OAUTH_TOKEN/u cred exec claude-code token --env CLAUDE_CODE_OAUTH_TOKEN -- \
+  wsl.exe -d NVIDIA-Workbench -- bash -lc 'python3 /mnt/c/Users/Olivier/workspace/koryphaios/scripts/probe-askuserquestion-hooks.py --hooks'
+```
+
+It prints `CLI <version>`, one line per hook payload and a `VERDICT <M1|M3/M4|M5|M6>
+<PASS|FAIL|INCONCLUSIVE>` line; exit 0 pass, 1 fail, 2 usage or missing token, 3
+inconclusive (login, onboarding or trust screen, or the menu never appeared).
+Work files live in an OS temp directory, removed at the end; `--keep-workdir DIR`
+keeps them in `DIR` (never inside the repository, symlinks and case aliases
+included) to inspect `hooks.log`. Typed keys keep their backslash through
+`wsl.exe` in this form:
+`bash -lc "python3 .../probe-askuserquestion-hooks.py --type '2\r'"`.
+`claude auth status` does NOT validate a token: a revoked one still prints
+`loggedIn: true`, and the probe then reports INCONCLUSIVE with the 401 on the
+screen.
+
+`tests/probe-askuserquestion-hooks.test.ts` runs only `--selftest` (secret
+scrubbing, generated hook files, verdict table) and checks that the tool name
+the probe cites is the one `server.ts` registers. It detects no CLI drift: that
+needs the replay above.
+
 ## Environment quirks (remote/proxied sessions)
 
 - Fresh container: run `bun install` (root) before the smoke check, and

@@ -37,6 +37,7 @@ export const EXPECTED_LAUNCHES: Readonly<Record<string, number>> = {
   "desktop-deck-control.test.ts": 2,
   "mcp-instructions-registry.test.ts": 1,
   "mcp-roadmap-ack.test.ts": 1,
+  "probe-askuserquestion-hooks.test.ts": 2,
   "server-ask-operator.test.ts": 2,
   "server-cleanup-identity.test.ts": 1,
   "server-deck-reply-route.test.ts": 2,
