@@ -76,6 +76,7 @@ export function createAvatarWindowController(options: AvatarWindowControllerOpti
     preload: options.preload,
     html: options.html,
     createWindow: options.createWindow,
+    windowSize: options.geometry.size,
     callbacks: {
       rendererGone: (token) => {
         dispatch({ kind: 'RendererGone', token })
@@ -156,7 +157,7 @@ export function createAvatarWindowController(options: AvatarWindowControllerOpti
       }
       case 'prepare': {
         const { token, op, placement } = effect
-        const ok = attempt(() => native.prepare(token, placement.x, placement.y, effect.alwaysOnTop), 'Avatar window preparation failed')
+        const ok = attempt(() => native.prepare(token, placement.x, placement.y, effect.size, effect.alwaysOnTop), 'Avatar window preparation failed')
         settle(ok ? { kind: 'PrepareSucceeded', token, op, placement } : { kind: 'PrepareFailed', token, op })
         return
       }

@@ -1,6 +1,6 @@
 import { randomBytes, randomUUID } from 'node:crypto'
 import { join } from 'node:path'
-import { app, BrowserWindow, ipcMain, nativeTheme, screen } from 'electron'
+import { app, BrowserWindow, ipcMain, Menu, nativeTheme, screen } from 'electron'
 import { startAvatarBrokerProbe, type AvatarBrokerProbe } from './avatar-broker-probe'
 import { generateAvatarRunCertificate } from './avatar-certificate'
 import { createDeckFocusGesture, deckProcessIsAlive } from './avatar-focus-gesture'
@@ -29,6 +29,8 @@ let lifetime: AvatarLifetimeLease | null = configureAvatarLifetime(app, deckUser
 app.setAppLogsPath()
 initDeckLog(app.getPath('logs'))
 installProcessFailureGuard()
+// The default application menu would give a focused avatar window Ctrl+R (in-place reload) and F11 (fullscreen).
+Menu.setApplicationMenu(null)
 
 const stateDir = avatarDeckStateDir(deckUserData)
 let owner: AvatarRegistryOwner | null = null

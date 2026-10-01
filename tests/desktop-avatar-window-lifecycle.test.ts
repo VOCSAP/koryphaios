@@ -72,11 +72,17 @@ class FakeWindow implements AvatarBrowserWindow {
     }
   }
 
+  readonly geometryCalls: string[] = []
+  driftOnMove = false
+  size: [number, number]
+
   constructor(
     readonly index: number,
     readonly options: AvatarWindowConstructionOptions,
     private readonly log: string[]
-  ) {}
+  ) {
+    this.size = [options.width, options.height]
+  }
 
   private step(name: string): void {
     if (this.failing.has(name)) throw new Error(`${name} failed`)
@@ -153,6 +159,18 @@ class FakeWindow implements AvatarBrowserWindow {
   setPosition(x: number, y: number): void {
     this.step('setPosition')
     this.positions.push([x, y])
+    this.geometryCalls.push('setPosition')
+    if (this.driftOnMove) this.size = [this.size[0] + 1, this.size[1]]
+  }
+
+  setSize(width: number, height: number): void {
+    this.step('setSize')
+    this.size = [width, height]
+    this.geometryCalls.push('setSize')
+  }
+
+  getSize(): number[] {
+    return [...this.size]
   }
 
   showInactive(): void {
@@ -320,6 +338,15 @@ describe('window adapter security and pointer behaviour', () => {
     expect(window.emitWeb('will-navigate')).toBe(true)
     expect(window.loads).toEqual(['avatar.html'])
     expect(window.topmost).toEqual([false])
+  })
+
+  test('the window takes the avatar size at construction and the placement size once prepared', async () => {
+    const narrow: AvatarGeometry = { displays: [{ id: '1', workArea: { x: 0, y: 0, width: 80, height: 70 } }], size: GEOMETRY.size }
+    const r = rig({ geometry: narrow })
+    const window = await r.open()
+
+    expect(window.options).toMatchObject({ width: 100, height: 100, resizable: false })
+    expect(window.getSize(), 'a work area smaller than the avatar shrinks the prepared window').toEqual([80, 70])
   })
 
   test('keeps pointer forwarding, topmost and visibility behind the machine', async () => {
@@ -874,10 +901,48 @@ describe('native adapter against a missing or duplicated handle', () => {
         windows.push(window)
         return window
       },
+      windowSize: { width: 160, height: 160 },
       callbacks: { rendererGone: () => {}, closeRequested: () => false, closed: () => {} }
     })
     return { native, windows }
   }
+
+  test('the window is built at the avatar size and cannot be resized by the user', () => {
+    const { native, windows } = adapter()
+    native.allocate(1, true)
+    expect(windows[0]!.options, 'Electron would otherwise build an 800x600 resizable window').toMatchObject({ width: 160, height: 160, resizable: false })
+    expect(windows[0]!.options, 'resizable:false alone still lets maximize and fullscreen grow the window').toMatchObject({ maximizable: false, fullscreenable: false })
+  })
+
+  test('a drag of many moves that each drift the size ends at the exact prepared size', () => {
+    const { native, windows } = adapter()
+    native.allocate(1, true)
+    native.prepare(1, 10, 20, { width: 120, height: 100 }, true)
+    windows[0]!.driftOnMove = true
+    for (let step = 1; step <= 40; step += 1) native.setPosition(1, 10 + step, 20 + step)
+
+    expect(windows[0]!.getSize(), 'the drift must not accumulate over a drag').toEqual([120, 100])
+    expect(windows[0]!.positions.at(-1)).toEqual([50, 60])
+  })
+
+  test('prepare sets the size before the position and leaves the exact requested size', () => {
+    const { native, windows } = adapter()
+    native.allocate(1, true)
+    windows[0]!.size = [800, 600]
+    native.prepare(1, 10, 20, { width: 120, height: 100 }, true)
+    expect(windows[0]!.geometryCalls).toEqual(['setSize', 'setPosition'])
+    expect(windows[0]!.getSize()).toEqual([120, 100])
+    expect(windows[0]!.positions.at(-1)).toEqual([10, 20])
+  })
+
+  test('a size drifted by the move is forced back to the requested size', () => {
+    const { native, windows } = adapter()
+    native.allocate(1, true)
+    windows[0]!.driftOnMove = true
+    native.prepare(1, 10, 20, { width: 120, height: 100 }, true)
+    expect(windows[0]!.geometryCalls).toEqual(['setSize', 'setPosition', 'setSize'])
+    expect(windows[0]!.getSize()).toEqual([120, 100])
+  })
 
   test('every native operation on an unknown token fails explicitly instead of being credited as a success', async () => {
     const { native } = adapter()
@@ -885,7 +950,7 @@ describe('native adapter against a missing or duplicated handle', () => {
     expect(() => native.show(7)).toThrow(refused)
     expect(() => native.hide(7)).toThrow(refused)
     expect(() => native.setPosition(7, 1, 2)).toThrow(refused)
-    expect(() => native.prepare(7, 1, 2, true)).toThrow(refused)
+    expect(() => native.prepare(7, 1, 2, { width: 160, height: 160 }, true)).toThrow(refused)
     expect(() => native.setPointerMode(7, true)).toThrow(refused)
     expect(() => native.setAlwaysOnTop(7, true)).toThrow(refused)
     expect(() => native.send(7, {} as AvatarViewState)).toThrow(refused)

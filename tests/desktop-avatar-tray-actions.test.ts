@@ -77,6 +77,16 @@ class MiniWindow implements AvatarBrowserWindow {
   setIgnoreMouseEvents(): void {}
   setPosition(): void {}
 
+  private size: [number, number] = [0, 0]
+
+  setSize(width: number, height: number): void {
+    this.size = [width, height]
+  }
+
+  getSize(): number[] {
+    return [...this.size]
+  }
+
   showInactive(): void {
     this.calls.push('show')
   }

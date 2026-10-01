@@ -1,4 +1,5 @@
 import { AVATAR_VIEW_CHANNELS, type AvatarViewState } from '../shared/avatar-view'
+import type { AvatarWindowSize } from './avatar-window-placement'
 
 export interface AvatarViewWebContents {
   mainFrame: unknown
@@ -35,6 +36,11 @@ export interface AvatarViewIpcOptions {
 }
 
 export interface AvatarWindowConstructionOptions {
+  width: number
+  height: number
+  resizable: false
+  maximizable: false
+  fullscreenable: false
   frame: false
   transparent: true
   alwaysOnTop: boolean
@@ -65,6 +71,8 @@ export interface AvatarBrowserWindow {
   setAlwaysOnTop(alwaysOnTop: boolean): void
   setIgnoreMouseEvents(ignore: boolean, options?: { forward: true }): void
   setPosition(x: number, y: number): void
+  setSize(width: number, height: number): void
+  getSize(): number[]
   showInactive(): void
 }
 
@@ -78,13 +86,14 @@ export interface AvatarNativeAdapterOptions {
   preload: string
   html: string
   createWindow(options: AvatarWindowConstructionOptions): AvatarBrowserWindow
+  windowSize: AvatarWindowSize
   callbacks: AvatarNativeCallbacks
 }
 
 export interface AvatarNativeAdapter {
   allocate(token: number, alwaysOnTop: boolean): void
   load(token: number): Promise<void>
-  prepare(token: number, x: number, y: number, alwaysOnTop: boolean): void
+  prepare(token: number, x: number, y: number, size: AvatarWindowSize, alwaysOnTop: boolean): void
   send(token: number, state: AvatarViewState): void
   show(token: number): void
   hide(token: number): void
@@ -221,10 +230,23 @@ export function createAvatarNativeAdapter(options: AvatarNativeAdapterOptions): 
 
   const ignoreMouse = (window: AvatarBrowserWindow): void => window.setIgnoreMouseEvents(true, { forward: true })
 
+  // A move may change the size at fractional DPI (measured under emulated 1.25/1.5 scaling only): never setBounds,
+  // and put the size back after every move.
+  const placeAt = (window: AvatarBrowserWindow, x: number, y: number, size: AvatarWindowSize): void => {
+    window.setPosition(x, y)
+    const [width = 0, height = 0] = window.getSize()
+    if (Math.abs(width - size.width) >= 1 || Math.abs(height - size.height) >= 1) window.setSize(size.width, size.height)
+  }
+
   return {
     allocate(token, alwaysOnTop) {
       if (resources.size > 0) throw new Error('Avatar window is already held')
       const window = options.createWindow({
+        width: options.windowSize.width,
+        height: options.windowSize.height,
+        resizable: false,
+        maximizable: false,
+        fullscreenable: false,
         frame: false,
         transparent: true,
         alwaysOnTop,
@@ -259,11 +281,12 @@ export function createAvatarNativeAdapter(options: AvatarNativeAdapterOptions): 
     async load(token) {
       await resource(token).loadFile(options.html)
     },
-    prepare(token, x, y, alwaysOnTop) {
+    prepare(token, x, y, size, alwaysOnTop) {
       const window = resource(token)
       ignoreMouse(window)
       window.setAlwaysOnTop(alwaysOnTop)
-      window.setPosition(x, y)
+      window.setSize(size.width, size.height)
+      placeAt(window, x, y, size)
     },
     send(token, state) {
       resource(token).webContents.send('avatar-view:state', state)
@@ -283,7 +306,9 @@ export function createAvatarNativeAdapter(options: AvatarNativeAdapterOptions): 
       resource(token).setAlwaysOnTop(alwaysOnTop)
     },
     setPosition(token, x, y) {
-      resource(token).setPosition(x, y)
+      const window = resource(token)
+      const [width = 0, height = 0] = window.getSize()
+      placeAt(window, x, y, { width, height })
     },
     destroy(token) {
       resources.get(token)?.destroy()
