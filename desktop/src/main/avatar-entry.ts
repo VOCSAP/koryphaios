@@ -15,8 +15,9 @@ import { createAvatarTray, type AvatarTray } from './avatar-tray'
 import { avatarTrayIconDir } from './avatar-tray-icon'
 import { AVATAR_APPEARANCE_FILE, readAvatarAppearance, writeAvatarAppearance } from './avatar-appearance'
 import { assembleAvatar, type AvatarAssembly } from './avatar-assembly'
+import { finishAvatarStartup } from './avatar-startup'
 import { avatarDeckStateDir, readAvatarLocale } from './avatar-locale'
-import type { AvatarGeometry } from './avatar-window-state'
+import { selectWindowShown, type AvatarGeometry } from './avatar-window-state'
 import { createAvatarQuitHandler } from './avatar-quit-handler'
 import { resolveBrokerEndpoint } from './broker-client'
 import { initDeckLog, logWarn, reportError } from './log'
@@ -35,7 +36,7 @@ let server: AvatarServer | null = null
 let tray: AvatarTray | null = null
 let brokerProbe: AvatarBrokerProbe | null = null
 let avatarAssembly: AvatarAssembly | null = null
-let stopFollowingTheme: (() => void) | null = null
+let stopFollowers: (() => void) | null = null
 
 const AVATAR_WINDOW_SIZE = { width: 160, height: 160 }
 
@@ -58,6 +59,7 @@ async function startAvatar(): Promise<void> {
   const certificate = await generateAvatarRunCertificate()
   const token = randomBytes(32).toString('base64url')
   const appearanceFile = join(stateDir, AVATAR_APPEARANCE_FILE)
+  const locale = readAvatarLocale(stateDir, app.getLocale(), { reportError })
   const assembly = assembleAvatar({
     ipc: ipcMain,
     available: process.platform === 'win32',
@@ -66,17 +68,15 @@ async function startAvatar(): Promise<void> {
     createWindow: (options) => new BrowserWindow(options),
     appearance: readAvatarAppearance(appearanceFile, { reportError }),
     writeSnapshot: (snapshot) => writeAvatarAppearance(appearanceFile, snapshot, { reportError }),
-    geometry: avatarGeometry(),
+    geometry: avatarGeometry,
     theme: () => (nativeTheme.shouldUseDarkColors ? 'dark' : 'light'),
-    locale: readAvatarLocale(stateDir, app.getLocale(), { reportError }),
+    locale,
     now: Date.now,
     reportError,
     setTimeout: (callback, delayMs) => setTimeout(callback, delayMs),
     clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>)
   })
   avatarAssembly = assembly
-  nativeTheme.on('updated', assembly.themeChanged)
-  stopFollowingTheme = () => nativeTheme.removeListener('updated', assembly.themeChanged)
   server = await startAvatarServer({ avatarRunId, certificate, state: assembly.state, token })
   brokerProbe = startAvatarBrokerProbe({
     brokerUrls: () => server?.attachedDecks().map((deck) => deck.broker_url) ?? [],
@@ -84,20 +84,7 @@ async function startAvatar(): Promise<void> {
     setBrokerReachable: (brokerUrl, reachable) => assembly.state.setBrokerReachable(brokerUrl, reachable)
   })
 
-  const claim = claimAvatarRegistry(
-    stateDir,
-    () => ({
-      version: 1,
-      avatarRunId,
-      pid: process.pid,
-      port: server!.port,
-      certPem: certificate.certPem,
-      token
-    }),
-    lifetime
-  )
-  owner = claim.kind === 'claimed' ? claim.owner : null
-  if (!owner) throw new Error('Avatar registry could not be claimed')
+  const currentLifetime = lifetime
   const focusFromTray = createDeckFocusGesture({
     platform: process.platform,
     attachedDecks: () => server?.attachedDecks() ?? [],
@@ -111,16 +98,45 @@ async function startAvatar(): Promise<void> {
     allowForeground: (pid) => allowForegroundWindow(pid, { platform: process.platform, env: process.env, run: runForegroundHelper }),
     focusDeck: (identity) => (server ? server.focusDeck(identity) : Promise.reject(new Error('Avatar server stopped')))
   })
-  tray = createAvatarTray({
-    summary: assembly.traySummary,
-    iconDir: avatarTrayIconDir(app.isPackaged, process.resourcesPath, app.getAppPath()),
-    attachedDecks: () => server?.attachedDecks() ?? [],
-    getDnd: assembly.trayDnd,
-    onDnd: assembly.chooseDnd,
-    onDeckMenuClick: (identity) => {
-      void focusFromTray(identity).catch((error: unknown) => reportError('avatar-focus', 'Tray focus gesture failed', error))
+  stopFollowers = finishAvatarStartup({
+    claimRegistry: () => {
+      const claim = claimAvatarRegistry(
+        stateDir,
+        () => ({
+          version: 1,
+          avatarRunId,
+          pid: process.pid,
+          port: server!.port,
+          certPem: certificate.certPem,
+          token
+        }),
+        currentLifetime
+      )
+      owner = claim.kind === 'claimed' ? claim.owner : null
+      if (!owner) throw new Error('Avatar registry could not be claimed')
     },
-    onQuit: () => app.quit()
+    createTray: () => {
+      tray = createAvatarTray({
+        summary: assembly.traySummary,
+        iconDir: avatarTrayIconDir(app.isPackaged, process.resourcesPath, app.getAppPath()),
+        locale,
+        attachedDecks: () => server?.attachedDecks() ?? [],
+        appearance: () => assembly.controller.snapshot().appearance,
+        windowShown: () => selectWindowShown(assembly.controller.snapshot()),
+        dispatch: assembly.controller.dispatch,
+        getDnd: assembly.trayDnd,
+        onDnd: assembly.chooseDnd,
+        onDeckMenuClick: (identity) => {
+          void focusFromTray(identity).catch((error: unknown) => reportError('avatar-focus', 'Tray focus gesture failed', error))
+        },
+        onQuit: () => app.quit()
+      })
+    },
+    theme: nativeTheme,
+    themeChanged: assembly.themeChanged,
+    screen,
+    geometryChanged: assembly.geometryChanged,
+    dispatch: assembly.controller.dispatch
   })
 }
 
@@ -131,10 +147,10 @@ function disposeAvatarTray(): void {
 }
 
 async function stopAvatar(): Promise<void> {
+  stopFollowers?.()
+  stopFollowers = null
   avatarAssembly?.dispose()
   avatarAssembly = null
-  stopFollowingTheme?.()
-  stopFollowingTheme = null
   brokerProbe?.stop()
   brokerProbe = null
   const currentServer = server

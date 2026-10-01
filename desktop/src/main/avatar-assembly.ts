@@ -16,7 +16,7 @@ export interface AvatarAssemblyOptions {
   createWindow(options: AvatarWindowConstructionOptions): AvatarBrowserWindow
   appearance: AvatarAppearance
   writeSnapshot(appearance: AvatarAppearance): void
-  geometry: AvatarGeometry
+  geometry(): AvatarGeometry
   theme(): AvatarViewTheme
   locale: SupportedLocale
   now(): number
@@ -32,7 +32,24 @@ export interface AvatarAssembly {
   trayDnd(): AvatarDndState | null
   chooseDnd(choice: AvatarDndChoice): void
   themeChanged(): void
+  geometryChanged(): void
   dispose(): void
+}
+
+type AvatarScreenEvent = 'display-added' | 'display-removed' | 'display-metrics-changed'
+
+export interface AvatarScreenSource {
+  on(event: AvatarScreenEvent, listener: () => void): unknown
+  removeListener(event: AvatarScreenEvent, listener: () => void): unknown
+}
+
+const AVATAR_SCREEN_EVENTS: readonly AvatarScreenEvent[] = ['display-added', 'display-removed', 'display-metrics-changed']
+
+export function followAvatarScreens(source: AvatarScreenSource, onChange: () => void): () => void {
+  for (const event of AVATAR_SCREEN_EVENTS) source.on(event, onChange)
+  return () => {
+    for (const event of AVATAR_SCREEN_EVENTS) source.removeListener(event, onChange)
+  }
 }
 
 export function assembleAvatar(options: AvatarAssemblyOptions): AvatarAssembly {
@@ -44,7 +61,7 @@ export function assembleAvatar(options: AvatarAssemblyOptions): AvatarAssembly {
     html: options.html,
     createWindow: options.createWindow,
     appearance: options.appearance,
-    geometry: options.geometry,
+    geometry: options.geometry(),
     buildEnvelope: presentation.project,
     publishTray: (envelope) => {
       tray.envelope = envelope
@@ -80,6 +97,9 @@ export function assembleAvatar(options: AvatarAssemblyOptions): AvatarAssembly {
     themeChanged() {
       presentation.setTheme(options.theme())
       controller.dispatch({ kind: 'RefreshRequested' })
+    },
+    geometryChanged() {
+      controller.dispatch({ kind: 'GeometryChanged', geometry: options.geometry() })
     },
     dispose() {
       disposeIpc()

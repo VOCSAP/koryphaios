@@ -116,14 +116,18 @@ export function readAvatarAppearance(
   file: string,
   dependencies: AvatarAppearanceDependencies = defaultAvatarAppearanceDependencies
 ): AvatarAppearance {
+  let parsed: unknown
   try {
     if (!existsSync(file)) return defaultAppearance()
-    const appearance = readAppearance(JSON.parse(readFileSync(file, 'utf8')) as unknown, dependencies)
+    parsed = JSON.parse(readFileSync(file, 'utf8')) as unknown
+    const appearance = readAppearance(parsed, dependencies)
     if (appearance) return appearance
     throw new Error('appearance data is invalid')
   } catch (error) {
     dependencies.reportError('avatar-appearance', `appearance unreadable (${file})`, error)
-    return defaultAppearance()
+    // An existing file means the operator has used the avatar: never resurrect a window they may have hidden.
+    const visible = isRecord(parsed) && typeof parsed.visible === 'boolean' ? parsed.visible : false
+    return { ...defaultAppearance(), visible }
   }
 }
 

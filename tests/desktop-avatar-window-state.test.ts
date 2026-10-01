@@ -774,6 +774,54 @@ describe('lifecycle reduction, cases a to g', () => {
     expect(h.state.appearance.visible).toBe(true)
   })
 
+  test('h: a startup restore allocates once for a visible avatar and leaves the preference untouched', () => {
+    const h = new Harness()
+    const before = h.state
+    const result = reduce(before, { kind: 'RestoreRequested' })
+
+    expect(result.reply.kind).toBe('accepted')
+    expect(result.state.lifecycle.kind).toBe('loading')
+    expect(result.effects.filter((effect) => effect.kind === 'allocate')).toHaveLength(1)
+    expect(result.effects.filter((effect) => effect.kind === 'writeSnapshot'), 'a restore must not rewrite the stored preference').toEqual([])
+    expect(result.effects.filter((effect) => effect.kind === 'publish'), 'a restore publishes nothing before the window exists').toEqual([])
+    expect(result.state.appearance).toEqual(before.appearance)
+    expect(result.state.appearanceRevision).toBe(before.appearanceRevision)
+  })
+
+  test('h: a startup restore of a hidden avatar keeps it hidden and does nothing', () => {
+    const h = new Harness({ appearance: { visible: false } })
+    const before = h.state
+    const result = reduce(before, { kind: 'RestoreRequested' })
+
+    expect(result.reply.kind).toBe('none')
+    expect(sameState(result.state, before), 'visible:false must survive a restore').toBe(true)
+    expect(result.effects).toEqual([])
+  })
+
+  test('h: without a window platform the restore is silent, neither refused nor traced', () => {
+    const h = new Harness({ available: false })
+    const result = reduce(h.state, { kind: 'RestoreRequested' })
+
+    expect(result.reply.kind).toBe('none')
+    expect(result.effects).toEqual([])
+  })
+
+  test('h: a second restore after a crash allocates nothing', () => {
+    const h = new Harness()
+    h.dispatch({ kind: 'RestoreRequested' })
+    expect(h.kind).toBe('ready')
+    const first = h.allocations.length
+    h.dispatch({ kind: 'RendererGone', token: liveToken(h) })
+    expect(h.kind).toBe('absent')
+
+    expect(h.dispatch({ kind: 'RestoreRequested' }).kind).toBe('none')
+    expect(h.allocations, 'only an explicit Show may bring the avatar back after a crash').toHaveLength(first)
+    expect(h.kind).toBe('absent')
+    h.dispatch({ kind: 'GeometryChanged', geometry: { displays: [DISPLAY_B], size: GEOMETRY.size } })
+    expect(h.allocations, 'a topology change does not bring a crashed avatar back either').toHaveLength(first)
+    expect(h.kind).toBe('absent')
+  })
+
   test('move then crash then Show applies the same P to the next window', () => {
     const h = readyHarness()
     h.dispatch({ kind: 'PositionRequested', x: 123, y: 234 })
@@ -1205,6 +1253,7 @@ function livePlacement(h: Harness): AvatarAppliedPlacement {
 
 const EVENT: Record<AvatarEventKind, (h: Harness) => AvatarEvent> = {
   ShowRequested: () => ({ kind: 'ShowRequested' }),
+  RestoreRequested: () => ({ kind: 'RestoreRequested' }),
   HideRequested: () => ({ kind: 'HideRequested' }),
   LockChanged: () => ({ kind: 'LockChanged', value: true }),
   ReloadRequested: () => ({ kind: 'ReloadRequested' }),

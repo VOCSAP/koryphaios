@@ -1,6 +1,11 @@
 import type { AvatarAttachRequest } from '../shared/avatar-protocol'
 import { uniqueAvatarDeckLabels } from '../shared/avatar-label'
-import type { AvatarDeckIdentity, AvatarDeckStatus, AvatarSummary } from '../shared/avatar-state'
+import type { AvatarDeckIdentity } from '../shared/avatar-state'
+import type { AvatarViewDeckStatus, AvatarViewSummary } from '../shared/avatar-view'
+import type { AvatarAppearance } from './avatar-appearance'
+import { AVATAR_TRAY_COPY } from './avatar-tray-copy'
+import type { AvatarEvent } from './avatar-window-state'
+import type { SupportedLocale } from './i18n'
 
 export type AvatarDndChoice = '30m' | '1h' | 'tomorrow'
 
@@ -9,13 +14,31 @@ export interface AvatarDndState {
   until: number
 }
 
+export type AvatarTrayAppearance = Pick<AvatarAppearance, 'positionLocked' | 'alwaysOnTop' | 'motion'>
+
 export type AvatarTrayAction =
   | { kind: 'deck-focus'; identity: AvatarDeckIdentity }
   | { kind: 'dnd'; choice: AvatarDndChoice }
+  | { kind: 'dnd-off' }
+  | { kind: 'visible'; value: boolean }
+  | { kind: 'lock'; value: boolean }
+  | { kind: 'always-on-top'; value: boolean }
+  | { kind: 'motion'; value: AvatarAppearance['motion'] }
   | { kind: 'quit' }
 
+export const AVATAR_TRAY_ACTION_KINDS = {
+  'deck-focus': true,
+  dnd: true,
+  'dnd-off': true,
+  visible: true,
+  lock: true,
+  'always-on-top': true,
+  motion: true,
+  quit: true
+} as const satisfies Record<AvatarTrayAction['kind'], true>
+
 export interface AvatarTrayMenuItem {
-  type?: 'separator' | 'radio'
+  type?: 'separator' | 'radio' | 'checkbox'
   label?: string
   enabled?: boolean
   checked?: boolean
@@ -32,9 +55,7 @@ function deckKey(identity: AvatarDeckIdentity): string {
   return JSON.stringify([identity.deckRunId, identity.broker_url])
 }
 
-function formatCounters(counters: AvatarDeckStatus['counters'], unread: number): string {
-  return `${counters.working} working | ${counters.waiting} waiting | ${unread} unread`
-}
+type TrayCopy = (typeof AVATAR_TRAY_COPY)[SupportedLocale]
 
 function nextLocalMidnight(now: number): number {
   const tomorrow = new Date(now)
@@ -52,56 +73,95 @@ export function avatarTrayMayRebound(dnd: AvatarDndState | null, now: number): b
   return dnd === null || now >= dnd.until
 }
 
-function deckMenuItem(deck: AvatarAttachRequest, status: AvatarDeckStatus, label: string): AvatarTrayMenuItem {
+export type AvatarTrayWindowAction = Extract<AvatarTrayAction, { kind: 'dnd-off' | 'visible' | 'lock' | 'always-on-top' | 'motion' }>
+
+export function avatarTrayEvent(action: AvatarTrayWindowAction): AvatarEvent {
+  switch (action.kind) {
+    case 'visible':
+      return { kind: action.value ? 'ShowRequested' : 'HideRequested' }
+    case 'lock':
+      return { kind: 'LockChanged', value: action.value }
+    case 'always-on-top':
+      return { kind: 'AppearanceChanged', patch: { alwaysOnTop: action.value } }
+    case 'motion':
+      return { kind: 'AppearanceChanged', patch: { motion: action.value } }
+    case 'dnd-off':
+      return { kind: 'AppearanceChanged', patch: { dndUntil: null, dndChoice: null } }
+  }
+}
+
+function deckMenuItem(copy: TrayCopy, deck: AvatarAttachRequest, status: AvatarViewDeckStatus, label: string): AvatarTrayMenuItem {
   return {
     label,
     submenu: [
-      { label: `Project: ${deck.projectDir}`, enabled: false },
-      { label: `Broker: ${deck.broker_url}`, enabled: false },
-      { label: formatCounters(status.counters, status.unread), enabled: false },
+      { label: copy.project(deck.projectDir), enabled: false },
+      { label: copy.broker(deck.broker_url), enabled: false },
+      { label: copy.counters({ ...status.counters, unread: status.unread }), enabled: false },
       { type: 'separator' },
       {
-        label: 'Bring Deck to front',
+        label: copy.focusDeck,
         action: { kind: 'deck-focus', identity: { deckRunId: deck.deckRunId, broker_url: deck.broker_url } }
       }
     ]
   }
 }
 
-function dndMenuItem(dnd: AvatarDndState | null, now: number): AvatarTrayMenuItem {
+function dndMenuItem(copy: TrayCopy, dnd: AvatarDndState | null, now: number): AvatarTrayMenuItem {
   const active = dnd !== null && !avatarTrayMayRebound(dnd, now) ? dnd.choice : null
   return {
-    label: 'Do not disturb',
+    label: copy.doNotDisturb,
     submenu: [
-      { label: '30 minutes', type: 'radio', checked: active === '30m', action: { kind: 'dnd', choice: '30m' } },
-      { label: '1 hour', type: 'radio', checked: active === '1h', action: { kind: 'dnd', choice: '1h' } },
-      { label: 'Until tomorrow', type: 'radio', checked: active === 'tomorrow', action: { kind: 'dnd', choice: 'tomorrow' } }
+      { label: copy.dndOff, type: 'radio', checked: active === null, action: { kind: 'dnd-off' } },
+      { label: copy.dnd30m, type: 'radio', checked: active === '30m', action: { kind: 'dnd', choice: '30m' } },
+      { label: copy.dnd1h, type: 'radio', checked: active === '1h', action: { kind: 'dnd', choice: '1h' } },
+      { label: copy.dndTomorrow, type: 'radio', checked: active === 'tomorrow', action: { kind: 'dnd', choice: 'tomorrow' } }
     ]
   }
 }
 
+function windowMenuItems(copy: TrayCopy, appearance: AvatarTrayAppearance, windowShown: boolean): AvatarTrayMenuItem[] {
+  return [
+    { label: copy.showAvatar, type: 'checkbox', checked: windowShown, action: { kind: 'visible', value: !windowShown } },
+    { label: copy.lockPosition, type: 'checkbox', checked: appearance.positionLocked, action: { kind: 'lock', value: !appearance.positionLocked } },
+    { label: copy.alwaysOnTop, type: 'checkbox', checked: appearance.alwaysOnTop, action: { kind: 'always-on-top', value: !appearance.alwaysOnTop } },
+    {
+      label: copy.motion,
+      submenu: [
+        { label: copy.motionContinuous, type: 'radio', checked: appearance.motion === 'continuous', action: { kind: 'motion', value: 'continuous' } },
+        { label: copy.motionTransitions, type: 'radio', checked: appearance.motion === 'transitions', action: { kind: 'motion', value: 'transitions' } },
+        { label: copy.motionNone, type: 'radio', checked: appearance.motion === 'none', action: { kind: 'motion', value: 'none' } }
+      ]
+    }
+  ]
+}
+
 export function buildAvatarTrayMenu(
-  summary: AvatarSummary,
+  summary: AvatarViewSummary,
   attached: readonly AvatarAttachRequest[],
   dnd: AvatarDndState | null,
-  now: number
+  now: number,
+  appearance: AvatarTrayAppearance,
+  windowShown: boolean,
+  locale: SupportedLocale
 ): AvatarTrayMenu {
+  const copy = AVATAR_TRAY_COPY[locale]
   const statuses = new Map(summary.decks.map((deck) => [deckKey(deck.identity), deck]))
   const labels = uniqueAvatarDeckLabels(attached.map((deck) => deck.deckName))
   const decks = attached.flatMap((deck, index) => {
     const status = statuses.get(deckKey({ deckRunId: deck.deckRunId, broker_url: deck.broker_url }))
     const label = labels[index]
-    return status === undefined || label === undefined ? [] : [deckMenuItem(deck, status, label)]
+    return status === undefined || label === undefined ? [] : [deckMenuItem(copy, deck, status, label)]
   })
 
   return {
-    tooltip: `Koryphaios Avatar: ${summary.face} | ${summary.decks.length} Decks | ${formatCounters(summary.counters, summary.unread)}`,
+    tooltip: summary.faceCopy.ariaLabel,
     items: [
-      { label: formatCounters(summary.counters, summary.unread), enabled: false },
+      { label: copy.counters({ ...summary.counters, unread: summary.unread }), enabled: false },
       ...(decks.length > 0 ? [{ type: 'separator' } as AvatarTrayMenuItem, ...decks, { type: 'separator' } as AvatarTrayMenuItem] : []),
-      dndMenuItem(dnd, now),
+      ...windowMenuItems(copy, appearance, windowShown),
+      dndMenuItem(copy, dnd, now),
       { type: 'separator' },
-      { label: 'Quit Avatar', action: { kind: 'quit' } }
+      { label: copy.quit, action: { kind: 'quit' } }
     ]
   }
 }

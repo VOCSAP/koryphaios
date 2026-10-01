@@ -116,7 +116,7 @@ test('rejects one malformed appearance field while preserving validation of ever
       reportError: (scope, message) => errors.push({ scope, message })
     })).toEqual({
       version: 1,
-      visible: true,
+      visible: field !== 'visible',
       alwaysOnTop: true,
       positionLocked: false,
       size: 'm',
@@ -128,6 +128,39 @@ test('rejects one malformed appearance field while preserving validation of ever
     })
     expect(errors).toEqual([{ scope: 'avatar-appearance', message: `appearance unreadable (${file})` }])
   }
+})
+
+test('an existing but invalid file keeps a readable visible, otherwise hides; only a missing file shows by default', async () => {
+  const appearance = await import('../desktop/src/main/avatar-appearance.ts')
+  const file = appearanceFile()
+  const read = () => appearance.readAvatarAppearance(file, { reportError: () => {} }).visible
+
+  expect(read(), 'first launch').toBe(true)
+  writeFileSync(file, JSON.stringify({ ...validAppearance(), version: 2, visible: false }))
+  expect(read(), 'a newer schema still carries the hidden choice').toBe(false)
+  writeFileSync(file, JSON.stringify({ ...validAppearance(), version: 2, visible: true }))
+  expect(read()).toBe(true)
+  writeFileSync(file, JSON.stringify({ ...validAppearance(), visible: 'no' }))
+  expect(read(), 'an unreadable visible hides').toBe(false)
+  writeFileSync(file, '{ not json')
+  expect(read(), 'an unparsable file hides').toBe(false)
+})
+
+test('a hidden choice stored under a newer schema makes the startup restore allocate nothing', async () => {
+  const appearance = await import('../desktop/src/main/avatar-appearance.ts')
+  const { createAvatarMachineState, reduce } = await import('../desktop/src/main/avatar-window-state.ts')
+  const file = appearanceFile()
+  writeFileSync(file, JSON.stringify({ ...validAppearance(), version: 2, visible: false }))
+
+  const state = createAvatarMachineState({
+    available: true,
+    appearance: appearance.readAvatarAppearance(file, { reportError: () => {} }),
+    geometry: { displays: [{ id: '1', workArea: { x: 0, y: 0, width: 1000, height: 800 } }], size: { width: 100, height: 100 } }
+  })
+  const result = reduce(state, { kind: 'RestoreRequested' })
+
+  expect(result.effects.filter((effect) => effect.kind === 'allocate')).toEqual([])
+  expect(result.state.lifecycle.kind).toBe('absent')
 })
 
 test('rehydrates DND from its deadline before expiry and clears its effect after expiry', async () => {

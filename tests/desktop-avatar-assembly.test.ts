@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test'
+import { EventEmitter } from 'node:events'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -7,7 +8,7 @@ import {
   writeAvatarAppearance,
   type AvatarAppearance
 } from '../desktop/src/main/avatar-appearance.ts'
-import { assembleAvatar } from '../desktop/src/main/avatar-assembly.ts'
+import { assembleAvatar, followAvatarScreens } from '../desktop/src/main/avatar-assembly.ts'
 import type { AvatarBrowserWindow, AvatarViewIpcHandler } from '../desktop/src/main/avatar-window.ts'
 import type { AvatarGeometry } from '../desktop/src/main/avatar-window-state.ts'
 import { AVATAR_VIEW_CHANNELS, type AvatarViewState } from '../desktop/src/shared/avatar-view.ts'
@@ -120,7 +121,7 @@ function setup(options: { geometry?: AvatarGeometry; seed?: AvatarAppearance; lo
     },
     appearance: startupAppearance,
     writeSnapshot: (snapshot) => writeAvatarAppearance(target.file, snapshot, { reportError }),
-    geometry: options.geometry ?? GEOMETRY,
+    geometry: () => options.geometry ?? GEOMETRY,
     theme: () => (dark ? 'dark' : 'light'),
     locale: options.locale ?? 'fr',
     now: () => 1_000,
@@ -303,6 +304,38 @@ describe('Avatar assembly', () => {
     expect(window.sent.at(-1)!.presentation).toMatchObject({ theme: 'light', dndActive: true })
     expect(s.assembly.trayDnd()).toEqual({ choice: '30m', until: 1_000 + 30 * 60_000 })
     expect(s.stored()).toMatchObject({ dndChoice: '30m', dndUntil: 1_000 + 30 * 60_000 })
+  })
+
+  test('a screen topology change hands the freshly read geometry to the machine', async () => {
+    const options: { geometry: AvatarGeometry } = { geometry: GEOMETRY }
+    const s = setup(options)
+    await s.open()
+    const wider: AvatarGeometry = { displays: [MAIN, { id: '2', workArea: { x: -1920, y: 0, width: 1920, height: 1080 } }], size: GEOMETRY.size }
+    options.geometry = wider
+
+    expect(s.assembly.controller.snapshot().geometry, 'the geometry is read again only on a topology event').toEqual(GEOMETRY)
+    s.assembly.geometryChanged()
+    expect(s.assembly.controller.snapshot().geometry).toEqual(wider)
+  })
+
+  test('each of the three display events triggers a geometry refresh, and stopping detaches all three', () => {
+    const source = new EventEmitter()
+    const seen: string[] = []
+    let current = ''
+    const stop = followAvatarScreens(source, () => seen.push(current))
+
+    for (const event of ['display-added', 'display-removed', 'display-metrics-changed'] as const) {
+      current = event
+      source.emit(event, {}, {})
+    }
+    expect(seen).toEqual(['display-added', 'display-removed', 'display-metrics-changed'])
+
+    stop()
+    for (const event of ['display-added', 'display-removed', 'display-metrics-changed']) {
+      expect(source.listenerCount(event), `${event} still has a listener after stop`).toBe(0)
+      source.emit(event, {}, {})
+    }
+    expect(seen).toHaveLength(3)
   })
 
   test('dispose flushes the applied position, destroys the window and unregisters the handlers', async () => {

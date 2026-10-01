@@ -22,7 +22,8 @@ import {
   type AvatarTrayImage,
   type ElectronTrayModule
 } from '../desktop/src/main/avatar-tray.ts'
-import type { AvatarFace, AvatarSummary } from '../desktop/src/shared/avatar-state.ts'
+import type { AvatarFace } from '../desktop/src/shared/avatar-state.ts'
+import type { AvatarViewSummary } from '../desktop/src/shared/avatar-view.ts'
 import { MASK_OUTLINE } from '../desktop/src/shared/avatar-mask-geometry.ts'
 import { avatarTrayInk, avatarTraySvg } from '../scripts/avatar-tray/tray-svg.ts'
 
@@ -47,9 +48,10 @@ function contrast(a: string, b: string): number {
   return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05)
 }
 
-function summaryWithFace(face: AvatarFace): AvatarSummary {
+function summaryWithFace(face: AvatarFace): AvatarViewSummary {
   return {
     face,
+    faceCopy: { title: face, ariaLabel: face },
     counters: { working: 0, idle: 0, unknown: 0, waiting: 0, exited: 0, rateLimited: 0 },
     unread: 0,
     decks: []
@@ -255,7 +257,11 @@ function startTray(
   const tray = createAvatarTray({
     summary: () => summaryWithFace(face),
     iconDir,
+    locale: 'en',
     attachedDecks: () => [],
+    appearance: () => ({ positionLocked: false, alwaysOnTop: true, motion: 'continuous' }),
+    windowShown: () => true,
+    dispatch: () => {},
     getDnd: () => null,
     onDnd: () => {},
     onDeckMenuClick: () => {},

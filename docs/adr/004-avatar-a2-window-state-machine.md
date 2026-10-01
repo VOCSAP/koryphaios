@@ -20,6 +20,7 @@ DÉDUIT / prescription : **précisions contractuelles explicites**, à appliquer
 2. Le crash conserve l'intention `visible` et ne recrée rien automatiquement. La phrase de 003:96 sur la recréation lors d'un crash se lit avec sa dernière phrase : la nouvelle création attend **Afficher**. Un reload explicite peut recréer immédiatement, sans changer `visible`.
 3. « Zéro persist » dans les cas d/e de la carte signifie zéro persistance **de la position refusée**. Masquer, fermer ou verrouiller doit néanmoins enregistrer le réglage correspondant. Un fichier unique peut contenir `visible:false` et une ancienne position P1 légitimement appliquée.
 4. La promotion autorise l'identité IPC avant son premier envoi de snapshot, mais pas le mouvement avant l'état prêt. Une requête initiale `getState()` arrivant pendant le chargement attend cette promotion ou échoue sur invalidation ; elle n'obtient pas un accès privilégié à une fenêtre future.
+5. « Créer le contrôleur après obtention du singleton et initialisation du serveur » (003:92) se lit comme une contrainte sur la **fenêtre**, pas sur l'objet réducteur. Écart nommé : dans `startAvatar`, `assembleAvatar` construit le contrôleur avant `startAvatarServer`, parce que le serveur consomme l'état A1 créé par le même assemblage. Ce contrôleur n'émet aucune allocation de fenêtre avant `RestoreRequested` (§9), émis après le registre et le Tray ; le Tray, seule source de `ShowRequested`/`ReloadRequested`, est lui-même créé après le registre. Toute émission plus précoce d'un de ces trois événements rouvrirait l'écart.
 
 DÉDUIT / prescription : ces précisions ne doivent pas être présentées comme un changement silencieux de 003. **LIMITE NOMMÉE du cas c : unicité prioritaire sur restauration en double panne.** Le cas c garantit une recréation après échec de publication/show si l'ancienne ressource peut être détruite ou attestée détruite. S'il y a aussi échec de destruction et impossibilité d'attester sa disparition, la machine reste révoquée plutôt que violer « au plus une fenêtre vivante » : current=null, trace et aucune nouvelle allocation. Ce cumul de pannes est testé séparément et ne doit pas être dissimulé dans la formule « recréation toujours possible ».
 
@@ -113,7 +114,7 @@ DÉDUIT / prescription : création et montage initial des listeners sont synchro
 
 ### 3. Familles d'événements et table de cycle de vie
 
-DÉDUIT / prescription : les événements exposés à l'assemblage sont `ShowRequested`, `HideRequested`, `LockChanged`, `ReloadRequested`, `QuitRequested`, `AppearanceChanged`, `PositionRequested`, `PointerChanged` et `RefreshRequested`. Les événements internes sont des unions typées : allocation/chargement, résultat d'effet, `NativeCloseRequested`, `NativeClosed`, `RendererGone`, échéances move/persist/destruction. `AppearanceChanged` exclut **visible, positionLocked et positions** : ces champs ne contournent pas leurs transitions dédiées.
+DÉDUIT / prescription : les événements exposés à l'assemblage sont `ShowRequested`, `HideRequested`, `LockChanged`, `ReloadRequested`, `RestoreRequested` (§9), `QuitRequested`, `AppearanceChanged`, `PositionRequested`, `PointerChanged` et `RefreshRequested`. Les événements internes sont des unions typées : allocation/chargement, résultat d'effet, `NativeCloseRequested`, `NativeClosed`, `RendererGone`, échéances move/persist/destruction. `AppearanceChanged` exclut **visible, positionLocked et positions** : ces champs ne contournent pas leurs transitions dédiées.
 
 DÉDUIT / prescription : toute entrée native est d'abord comparée au token détenu. Une entrée d'un token ancien est sans effet, sauf un diagnostic borné ; elle ne révoque ni le token actuel ni ses timers. `EffectSucceeded/Failed` précise une espèce d'effet et un numéro d'opération attendu. Une nouvelle espèce doit être classée explicitement dans les deux tables, pas absorbée par un défaut permissif.
 
@@ -269,6 +270,32 @@ DÉDUIT / prescription, plan incrémental :
 2. **Interpréteur + bridge.** Déplacer la politique existante vers le dispatch, tester load/crash/promotion/retraite et le close via les vrais handlers injectés. Remplacer le contrôleur de position et son flush dans la même étape ; pas de compatibilité qui laisse deux autorités actives.
 3. **Persistance + présentation + assemblage.** Snapshot writer, initialisation unique, sorties dérivées, quit borné. Tester l'échec disque sans rollback de visible/locked et la dette P1. Conserver la fenêtre dormante dans `avatar-entry.ts` ; l'activation n'est pas une preuve de ce lot.
 4. **Garde et livraison.** Exécuter séparément chaque fichier ciblé modifié, négatifs a-g en miroir, revue indépendante. Remettre les risques inter-fichiers et la liste des changements à l'intégrateur pour son unique gate complet. L3 peut ensuite activer et vérifier le paquet natif, après clôture de `db34d743`.
+
+### 9. Amendement L3, carte `8fb62e61` : restauration au démarrage
+
+DÉDUIT, `onShow` dans `avatar-window-state.ts` : `ShowRequested` écrit `visible:true` avant d'allouer ; l'émettre au démarrage écraserait un `visible:false` persisté par un close ou un Masquer (cas d). Trois options : (i) un test de `appearance.visible` dans `avatar-entry`, donc un lecteur hors réducteur, contraire au §4 ; (ii) un événement dédié du réducteur ; (iii) une allocation à la construction de la machine, donc avant le registre (`assembleAvatar` précède `claimAvatarRegistry` dans `startAvatar`). **Retenu par le lead : (ii), `RestoreRequested`.**
+
+DÉDUIT / prescription : `RestoreRequested` s'ajoute aux événements exposés du §3. Il n'alloue que si `lifecycle=absent`, `appearance.visible===true` et `lastToken===0`, c'est-à-dire tant que cette machine n'a encore alloué aucune fenêtre. Il ne modifie jamais `appearance`, ne bouge aucune révision, n'émet ni écriture ni publication, et ne répond jamais `rejected`.
+
+| Événement | unavailable | absent | loading | promoting | ready | retiring | stopped |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `RestoreRequested` | I | si visible et `lastToken===0` : C sans changer visible, réponse `accepted` ; sinon `=`, réponse `none`, aucun effet | I | I | I | I ; fin conservée, pas de `RetryCleanup` | I |
+
+DÉDUIT / prescription : ligne de classification `RestoreRequested: row('I', 'T', 'I', 'I', 'I', 'I', 'I')`. La case `unavailable` est **I et non X** : hors Windows, l'absence de fenêtre est l'état normal, pas un refus de commande ; réponse `none`, aucun effet `trace`, aucun `reportError`. `stopped` est I pour la même raison : un démarrage qui croise un Quit n'a personne à qui répondre. Le témoin de la case T d'`absent` porte `visible:true` et `lastToken=0`.
+
+DÉDUIT / prescription, **double réception** : le second `RestoreRequested` est sans effet dans tous les états. Le garde est `lastToken===0`, consommé par `startAllocation`, qui incrémente `lastToken`, sans nouveau champ d'état. Écartés : aucun garde (un second envoi après crash réallouerait, contre la branche 1 de la limite c, « sans auto-relance ») ; un booléen consommé en tout état (les cases I modifieraient l'état, contre le contrat I du §7). Conséquence assumée : un `ShowRequested` ou un `ReloadRequested` reçu avant lui le neutralise aussi, la commande explicite prime.
+
+DÉDUIT / prescription, émission : `avatar-entry` appelle `controller.dispatch({ kind: 'RestoreRequested' })` une seule fois, en dernière instruction de `startAvatar`, donc après le contrôle `owner` qui suit `claimAvatarRegistry` et après la création du Tray. `dispatch` et non `requireReply` : aucune réponse ne lève. Une fenêtre n'existe ainsi jamais sans registre détenu ni sans sa surface Quitter.
+
+Ligne ajoutée à la matrice du §6 :
+
+| Cas | Ligne de transition et trace attendue | Négatif à faire rougir dans un miroir privé |
+| --- | --- | --- |
+| **h** restauration au démarrage | `absent, visible=true, lastToken=0 + RestoreRequested -> loading(g1)` : un seul `allocate`, zéro `writeSnapshot`, `appearance` inchangée. Avec `visible=false` : état identique, zéro effet. En `unavailable` : réponse `none`, zéro trace. Second envoi après `RendererGone(g1)` et retour à `absent` : zéro `allocate`. | (1) Router l'événement vers `onShow` : le `visible:false` persisté passe à true et un `writeSnapshot` part. (2) Retirer `lastToken===0` : le second envoi après crash alloue g2. (3) Reprendre en `unavailable` le rejet de `onShow` : la réponse `rejected` fait rougir la case I. |
+
+**Limite nommée, DÉDUIT `beginPrepare` et `onGeometry` dans `avatar-window-state.ts` :** au démarrage sans aucun écran, `RestoreRequested` alloue et charge g1, puis `prepare` trace « Avatar placement requires an available display » et retire vers `absent`. `lastToken` vaut alors 1 : un écran qui apparaît ensuite ne recrée rien, puisque `GeometryChanged` en `absent` ne fait que mémoriser. La fenêtre reste absente jusqu'à **Afficher**, ce qui est la règle « sans auto-relance », pas un défaut à corriger par un second envoi.
+
+MESURÉ, `bun test ./tests/desktop-avatar-window-state.test.ts -t "h: "` : `4 pass`, `0 fail`, `60 expect() calls`. Les quatre tests de la ligne h couvrent le réducteur et son harnais, pas le raccord `avatar-entry`. Leurs trois négatifs sont rapportés tués en miroir par les peers developer et reviewer, selon le message du team-lead du 2026-10-01 à 17:18:41Z ; ils n'ont pas été rejoués pour cet amendement. SUPPOSÉ : l'apparition native au démarrage reste à mesurer par L3.
 
 ## État des preuves à la livraison de conception
 

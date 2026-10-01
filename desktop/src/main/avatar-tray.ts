@@ -1,15 +1,20 @@
 import { createRequire } from 'node:module'
 import type { MenuItemConstructorOptions } from 'electron'
-import { AVATAR_HEARTBEAT_MS, type AvatarDeckIdentity, type AvatarSummary } from '../shared/avatar-state'
+import { AVATAR_HEARTBEAT_MS, type AvatarDeckIdentity } from '../shared/avatar-state'
 import { escapeAvatarTrayLabel, type AvatarAttachRequest } from '../shared/avatar-protocol'
+import type { AvatarViewSummary } from '../shared/avatar-view'
 import {
+  avatarTrayEvent,
   avatarTrayMayRebound,
   buildAvatarTrayMenu,
   type AvatarDndState,
   type AvatarTrayAction,
+  type AvatarTrayAppearance,
   type AvatarTrayMenuItem
 } from './avatar-tray-menu'
 import { avatarTrayIconPath, avatarTrayTaskbar, avatarTrayVariant, type AvatarTrayTaskbar, type AvatarTrayVariant } from './avatar-tray-icon'
+import type { AvatarEvent } from './avatar-window-state'
+import type { SupportedLocale } from './i18n'
 import { reportError } from './log'
 
 export interface AvatarTray {
@@ -18,9 +23,13 @@ export interface AvatarTray {
 }
 
 export interface AvatarTrayOptions {
-  summary(): AvatarSummary
+  summary(): AvatarViewSummary
   iconDir: string
+  locale: SupportedLocale
   attachedDecks(): AvatarAttachRequest[]
+  appearance(): AvatarTrayAppearance
+  windowShown(): boolean
+  dispatch(event: AvatarEvent): void
   getDnd(): AvatarDndState | null
   onDnd(choice: AvatarDndState['choice']): void
   onDeckMenuClick(identity: AvatarDeckIdentity): void
@@ -87,12 +96,16 @@ export function electronAvatarTrayDependencies(electron: () => ElectronTrayModul
 
 const defaultAvatarTrayDependencies = electronAvatarTrayDependencies(() => requireElectron('electron') as ElectronTrayModule)
 
+function assertNever(value: never): never {
+  throw new Error(`Unhandled Avatar Tray action: ${JSON.stringify(value)}`)
+}
+
 function nativeMenuItem(item: AvatarTrayMenuItem, invoke: (action: AvatarTrayAction) => void): MenuItemConstructorOptions {
   if (item.type === 'separator') return { type: 'separator' }
 
   return {
     label: escapeAvatarTrayLabel(item.label ?? ''),
-    ...(item.type === 'radio' ? { type: 'radio' as const, checked: item.checked } : {}),
+    ...(item.type === 'radio' || item.type === 'checkbox' ? { type: item.type, checked: item.checked } : {}),
     ...(item.enabled === undefined ? {} : { enabled: item.enabled }),
     ...(item.submenu === undefined ? {} : { submenu: item.submenu.map((child) => nativeMenuItem(child, invoke)) }),
     ...(item.action === undefined ? {} : { click: () => invoke(item.action!) })
@@ -135,7 +148,7 @@ export function createAvatarTray(options: AvatarTrayOptions, dependencies: Avata
     try {
       const summary = options.summary()
       syncIcon(avatarTrayVariant(summary.face), currentTaskbar())
-      const menu = buildAvatarTrayMenu(summary, options.attachedDecks(), options.getDnd(), dependencies.now())
+      const menu = buildAvatarTrayMenu(summary, options.attachedDecks(), options.getDnd(), dependencies.now(), options.appearance(), options.windowShown(), options.locale)
       tray.setToolTip(menu.tooltip)
       tray.setContextMenu(dependencies.buildMenu(menu.items.map((item) => nativeMenuItem(item, invoke))))
     } catch (error) {
@@ -144,16 +157,28 @@ export function createAvatarTray(options: AvatarTrayOptions, dependencies: Avata
   }
 
   const invoke = (action: AvatarTrayAction): void => {
-    if (action.kind === 'dnd') {
-      options.onDnd(action.choice)
-      refresh()
-      return
+    switch (action.kind) {
+      case 'dnd':
+        options.onDnd(action.choice)
+        refresh()
+        return
+      case 'deck-focus':
+        options.onDeckMenuClick(action.identity)
+        return
+      case 'quit':
+        options.onQuit()
+        return
+      case 'dnd-off':
+      case 'visible':
+      case 'lock':
+      case 'always-on-top':
+      case 'motion':
+        options.dispatch(avatarTrayEvent(action))
+        refresh()
+        return
+      default:
+        assertNever(action)
     }
-    if (action.kind === 'deck-focus') {
-      options.onDeckMenuClick(action.identity)
-      return
-    }
-    options.onQuit()
   }
 
   refresh()

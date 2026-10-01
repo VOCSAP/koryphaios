@@ -133,6 +133,7 @@ const PATCH_KEYS = (Object.keys(APPEARANCE_FIELD_OWNER) as (keyof AvatarAppearan
 
 export type AvatarEvent =
   | { readonly kind: 'ShowRequested' }
+  | { readonly kind: 'RestoreRequested' }
   | { readonly kind: 'HideRequested' }
   | { readonly kind: 'LockChanged'; readonly value: boolean }
   | { readonly kind: 'ReloadRequested' }
@@ -270,6 +271,12 @@ export function createAvatarMachineState(init: AvatarMachineInit): AvatarMachine
 export function selectCurrentToken(state: AvatarMachineState): number | null {
   const lifecycle = state.lifecycle
   return lifecycle.kind === 'promoting' || lifecycle.kind === 'ready' ? lifecycle.token : null
+}
+
+/** What the operator sees, not what they asked for: after a crash `visible` stays true with no window. */
+export function selectWindowShown(state: AvatarMachineState): boolean {
+  const kind = state.lifecycle.kind
+  return state.appearance.visible && (kind === 'loading' || kind === 'promoting' || kind === 'ready')
 }
 
 export function selectIsRetiring(state: AvatarMachineState, token: number): boolean {
@@ -657,6 +664,12 @@ function onShow(d: Draft): void {
     default:
       return assertNever(lifecycle)
   }
+}
+
+function onRestore(d: Draft): void {
+  if (d.s.lifecycle.kind !== 'absent' || !d.s.appearance.visible || d.s.lastToken !== 0) return
+  d.reply = ACCEPTED
+  startAllocation(d)
 }
 
 function onHide(d: Draft): void {
@@ -1075,6 +1088,9 @@ export function reduce(state: AvatarMachineState, event: AvatarEvent): AvatarRed
     case 'ShowRequested':
       onShow(d)
       break
+    case 'RestoreRequested':
+      onRestore(d)
+      break
     case 'HideRequested':
       onHide(d)
       break
@@ -1220,6 +1236,7 @@ function row(
 
 export const AVATAR_EVENT_CLASSIFICATION: Readonly<Record<AvatarEventKind, Readonly<Record<AvatarLifecycleKind, AvatarCell>>>> = {
   ShowRequested: row('X', 'T', 'T', 'T', 'T', 'T', 'X'),
+  RestoreRequested: row('I', 'T', 'I', 'I', 'I', 'I', 'I'),
   HideRequested: row('T', 'T', 'T', 'T', 'T', 'T', 'X'),
   LockChanged: row('T', 'T', 'T', 'T', 'T', 'T', 'X'),
   ReloadRequested: row('X', 'T', 'T', 'T', 'T', 'T', 'X'),
