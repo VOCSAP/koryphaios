@@ -617,23 +617,39 @@ export class WorkspaceService {
 
   /** Final auto-save + lock release on quit. */
   releaseOnQuit(): void {
-    if (this.heartbeatTimer) clearInterval(this.heartbeatTimer)
-    this.heartbeatTimer = null
-    if (this.pruneTimer) clearInterval(this.pruneTimer)
-    this.pruneTimer = null
-    if (!this.currentId) return
-    this.saveAuto()
-    if (!this.releaseCurrent()) {
-      // Lost the acquire race earlier without this instance noticing (or a
-      // second Deck reclaimed after this one went stale) -- deleting the
-      // lock file here would tear down a LIVE instance's ownership. This is
-      // the "destruction croisee" gap the card flags as the most severe of
-      // the three: releaseLock() now refuses instead of rmSync'ing blindly.
-      reportError(
-        'workspace',
-        `releaseOnQuit skipped releaseLock for ${this.currentId}: on-disk lock owned by another identity`
-      )
+    // A failed final save still propagates to the quit effect that traces it,
+    // but must not leave the lock behind.
+    let saveFailed = false
+    let saveError: unknown
+    if (this.currentId) {
+      try {
+        this.saveAuto()
+      } catch (e) {
+        saveFailed = true
+        saveError = e
+      }
     }
+    try {
+      if (this.currentId && !this.releaseCurrent()) {
+        // Lost the acquire race earlier without this instance noticing (or a
+        // second Deck reclaimed after this one went stale): deleting the lock
+        // file here would tear down a live instance's ownership.
+        reportError(
+          'workspace',
+          `releaseOnQuit skipped releaseLock for ${this.currentId}: on-disk lock owned by another identity`
+        )
+      }
+    } catch (releaseError) {
+      if (!saveFailed) throw releaseError
+      reportError('workspace', 'releaseOnQuit: lock release failed after a failed final save', releaseError)
+    } finally {
+      // Stopped after the save, which restarts the heartbeat through own().
+      if (this.heartbeatTimer) clearInterval(this.heartbeatTimer)
+      this.heartbeatTimer = null
+      if (this.pruneTimer) clearInterval(this.pruneTimer)
+      this.pruneTimer = null
+    }
+    if (saveFailed) throw saveError
   }
 
   // ----- internals -----
