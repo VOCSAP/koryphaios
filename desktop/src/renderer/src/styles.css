@@ -160,6 +160,28 @@
   outline-offset: 1px;
 }
 
+/* Element level so no scroll area shows the native Windows bar. Chromium drops
+   these pseudo-elements on any element that sets the standard scrollbar-color or
+   scrollbar-width, and the standard pair keeps the Windows arrow buttons. */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track,
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--fg) 28%, transparent);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--fg) 42%, transparent);
+}
+
 html,
 body,
 #root {

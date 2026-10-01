@@ -240,6 +240,7 @@ failure shape as a className matching no selector at all, different cause.
   `h2` + dim paragraph + `.empty-actions` row.
 - **Inputs**: `--bg` fill, 1px `--border`, radius 4–6, padding 6px 8px,
   `font: inherit`; focus = `border-color: var(--accent)` (no outline ring).
+- **Scrollbars**: styled at the ELEMENT level (`::-webkit-scrollbar`: 8px, transparent track, `--fg` thumb at 28% / 42% hover, the `.wf-scrollbar` thumb opacities, radius 4); never set `scrollbar-color` or a `scrollbar-width` other than `none`, which silently brings the native Windows bar back.
 - **Selects / dropdowns**: styled at the ELEMENT level (`select { … }`) so a new
   dropdown is themed the day it is written — same box as an input, plus
   `appearance: none` and a hand-drawn chevron (`--select-arrow`, per theme)

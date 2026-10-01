@@ -236,3 +236,136 @@ test("a themed :focus-visible ring exists at element level, not per class", () =
     true
   );
 });
+
+// The whole census, global rule and per-surface overrides alike: a new override
+// is added here with the reason it may depart from the global look.
+const SCROLLBAR_DECLS: string[] = [
+  "::-webkit-scrollbar { width: 8px }",
+  "::-webkit-scrollbar { height: 8px }",
+  "::-webkit-scrollbar-track { background: transparent }",
+  "::-webkit-scrollbar-corner { background: transparent }",
+  "::-webkit-scrollbar-thumb { background: color-mix(in srgb, var(--fg) 28%, transparent) }",
+  "::-webkit-scrollbar-thumb { border-radius: 4px }",
+  "::-webkit-scrollbar-thumb:hover { background: color-mix(in srgb, var(--fg) 42%, transparent) }",
+  // Collapsed agents rail: a bar would eat a third of its width.
+  ".sidebar-collapsed .rows::-webkit-scrollbar { width: 0 }",
+  ".sidebar-collapsed .rows::-webkit-scrollbar { height: 0 }",
+  // Annotation list hides its bar the same way, wheel scrolling kept.
+  ".annotate-panel-list::-webkit-scrollbar { display: none }"
+];
+
+function decl(raw: string): string | null {
+  const d = raw.trim().replace(/\s+/g, " ");
+  const colon = d.indexOf(":");
+  if (colon < 0) return null;
+  return `${d.slice(0, colon).trim().toLowerCase()}: ${d.slice(colon + 1).trim()}`;
+}
+
+/** Every declaration of every selector that names a ::-webkit-scrollbar pseudo-element. */
+function scrollbarCensus(css: string): string[] {
+  const out: string[] = [];
+  for (const { selector, body } of ruleBlocks(css)) {
+    for (const part of selector.split(",").map((s) => s.trim())) {
+      if (!/::-webkit-scrollbar/i.test(part)) continue;
+      for (const raw of body.split(";")) {
+        const d = decl(raw);
+        if (d) out.push(`${part} { ${d} }`);
+      }
+    }
+  }
+  return out.sort();
+}
+
+// Surfaces whose bar is hidden outright; a new one is added here with its reason.
+const SCROLLBAR_HIDDEN: string[] = [
+  // Collapsed agents rail: a bar would eat a third of its width.
+  ".sidebar-collapsed .rows { scrollbar-width: none }",
+  // Annotation list: wheel scrolling kept, bar suppressed.
+  ".annotate-panel-list { scrollbar-width: none }"
+];
+
+/** `scrollbar-color`, or a `scrollbar-width` other than `none`, makes Chromium drop the pseudo-elements. */
+function nativeScrollbarDecls(css: string): { violations: string[]; hidden: string[] } {
+  const violations: string[] = [];
+  const hidden: string[] = [];
+  for (const { selector, body } of ruleBlocks(css)) {
+    for (const raw of body.split(";")) {
+      const d = decl(raw);
+      const m = d?.match(/^scrollbar-(color|width): (.+)$/);
+      if (!m) continue;
+      const key = `${selector} { ${d} }`;
+      if (m[1] === "width" && m[2]!.toLowerCase() === "none") hidden.push(key);
+      else violations.push(key);
+    }
+  }
+  return { violations, hidden: hidden.sort() };
+}
+
+const RAW_PSEUDO = /::-webkit-scrollbar/gi;
+const RAW_STANDARD = /(?<![\w-])scrollbar-(?:color|width)\s*:/gi;
+
+/**
+ * The block extractor is a regex and loses a block holding a nested rule or a
+ * brace inside a string; this barrier counts the raw occurrences independently,
+ * so such a block fails the test instead of leaving the census.
+ */
+function censusBarrier(css: string): string {
+  let pseudo = 0;
+  let standard = 0;
+  for (const { selector, body } of ruleBlocks(css)) {
+    for (const part of selector.split(",")) pseudo += part.match(RAW_PSEUDO)?.length ?? 0;
+    for (const raw of body.split(";")) if (/^scrollbar-(color|width):/.test(decl(raw) ?? "")) standard++;
+  }
+  const rawPseudo = css.match(RAW_PSEUDO)?.length ?? 0;
+  const rawStandard = css.match(RAW_STANDARD)?.length ?? 0;
+  return `pseudo ${pseudo}/${rawPseudo}, standard ${standard}/${rawStandard}`;
+}
+
+test("the scrollbar census sees every pseudo-element rule, whatever its casing or grouping", () => {
+  expect(scrollbarCensus(".a, .b::-WEBKIT-SCROLLBAR-thumb { BACKGROUND: red; }")).toEqual([
+    ".b::-WEBKIT-SCROLLBAR-thumb { background: red }"
+  ]);
+  expect(scrollbarCensus("@media (x) { .p::-webkit-scrollbar { width: 12px } }")).toEqual([
+    ".p::-webkit-scrollbar { width: 12px }"
+  ]);
+});
+
+test("the census barrier catches a block the extractor loses", () => {
+  expect(censusBarrier(".p::-webkit-scrollbar { width: 3px }")).toBe("pseudo 1/1, standard 0/0");
+  expect(censusBarrier(".p::-webkit-scrollbar { @media (x) { width: 3px } }")).toBe("pseudo 0/1, standard 0/0");
+  expect(censusBarrier('.p::-webkit-scrollbar { content: "{"; width: 3px }')).toBe("pseudo 0/1, standard 0/0");
+  expect(censusBarrier('.p { scrollbar-width: none; content: "{" }')).toBe("pseudo 0/0, standard 0/1");
+});
+
+test("the native-scrollbar detector flags the standard properties in any casing and spares none", () => {
+  expect(nativeScrollbarDecls(".p { SCROLLBAR-COLOR: red blue; }").violations).toEqual([
+    ".p { scrollbar-color: red blue }"
+  ]);
+  expect(nativeScrollbarDecls(".p { scrollbar-width: thin; }").violations).toEqual([".p { scrollbar-width: thin }"]);
+  expect(nativeScrollbarDecls(".p { Scrollbar-Width: NONE; }")).toEqual({
+    violations: [],
+    hidden: [".p { scrollbar-width: NONE }"]
+  });
+});
+
+test("every scrollbar occurrence in each Deck stylesheet is seen by the census", () => {
+  const { files } = readCss();
+  for (const f of files) {
+    const css = readFileSync(f, "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+    const seen = censusBarrier(css);
+    const [, rp, rs] = seen.match(/pseudo \d+\/(\d+), standard \d+\/(\d+)/)!;
+    expect(`${f}: ${seen}`).toBe(`${f}: pseudo ${rp}/${rp}, standard ${rs}/${rs}`);
+  }
+});
+
+test("every scrollbar rule in the Deck stylesheet is the themed global or a listed override", () => {
+  const { text } = readCss();
+  expect(scrollbarCensus(text)).toEqual([...SCROLLBAR_DECLS].sort());
+});
+
+test("no rule brings the native scrollbar back, and only the listed surfaces hide it", () => {
+  const { text } = readCss();
+  const { violations, hidden } = nativeScrollbarDecls(text);
+  expect(violations).toEqual([]);
+  expect(hidden).toEqual([...SCROLLBAR_HIDDEN].sort());
+});
