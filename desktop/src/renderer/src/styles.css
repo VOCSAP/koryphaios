@@ -8519,6 +8519,7 @@ svg.glyph {
 html.avatar-document,
 html.avatar-document body {
   background: transparent;
+  overflow: hidden;
 }
 
 .avatar-root .avatar-skin {

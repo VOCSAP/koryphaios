@@ -377,6 +377,8 @@ describe("stylesheet", () => {
       html.classList.add("avatar-document");
       expect(getComputedStyle(document.body).backgroundColor, "the Deck body background still paints the avatar window").toMatch(/^(transparent|rgba\(0, 0, 0, 0\))$/);
       expect(getComputedStyle(html).backgroundColor).toMatch(/^(transparent|rgba\(0, 0, 0, 0\))$/);
+      expect(getComputedStyle(html).overflow, "the enter animation can scroll the avatar window").toBe("hidden");
+      expect(getComputedStyle(document.body).overflow).toBe("hidden");
     } finally {
       html.classList.remove("avatar-document");
       html.removeAttribute("data-theme");

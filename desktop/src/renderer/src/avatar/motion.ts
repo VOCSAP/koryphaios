@@ -51,10 +51,7 @@ export function motionMode(input: AvatarMotionInput): AvatarMotionMode {
   return input.choice
 }
 
-/**
- * `previous` is the last face the container RENDERED, null on first paint, so
- * an identical heartbeat, a counter change or a reappearance never replays.
- */
+/** `previous`: the face before the last face or mode change, null on first paint. */
 export function motionPlan(input: AvatarMotionInput, previous: AvatarFace | null, face: AvatarFace): AvatarMotionPlan {
   const mode = motionMode(input)
   const changed = previous !== null && previous !== face
