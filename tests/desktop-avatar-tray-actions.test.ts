@@ -83,6 +83,10 @@ class MiniWindow implements AvatarBrowserWindow {
     this.size = [width, height]
   }
 
+  setContentSize(width: number, height: number): void {
+    this.size = [width, height]
+  }
+
   getSize(): number[] {
     return [...this.size]
   }

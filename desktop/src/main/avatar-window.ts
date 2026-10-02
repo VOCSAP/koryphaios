@@ -72,6 +72,7 @@ export interface AvatarBrowserWindow {
   setIgnoreMouseEvents(ignore: boolean, options?: { forward: true }): void
   setPosition(x: number, y: number): void
   setSize(width: number, height: number): void
+  setContentSize(width: number, height: number): void
   getSize(): number[]
   showInactive(): void
 }
@@ -221,6 +222,9 @@ function preventDefault(event: unknown): void {
 
 export function createAvatarNativeAdapter(options: AvatarNativeAdapterOptions): AvatarNativeAdapter {
   const resources = new Map<number, AvatarBrowserWindow>()
+  // The size each window must keep. Read back from the window instead, a width the system added after a move at
+  // fractional DPI would become the size every later move preserves.
+  const wantedSizes = new Map<number, AvatarWindowSize>()
 
   const resource = (token: number): AvatarBrowserWindow => {
     const window = resources.get(token)
@@ -230,12 +234,13 @@ export function createAvatarNativeAdapter(options: AvatarNativeAdapterOptions): 
 
   const ignoreMouse = (window: AvatarBrowserWindow): void => window.setIgnoreMouseEvents(true, { forward: true })
 
-  // A move may change the size at fractional DPI (measured under emulated 1.25/1.5 scaling only): never setBounds,
-  // and put the size back after every move.
+  // At fractional DPI a move to a position that is not a whole pixel grows the window (electron/electron#9477), and a
+  // non-resizable window then pins its min and max to the grown size, which setSize cannot cross.
+  // setContentSize resets that bound; it runs after every move, unconditionally, because getSize reads a pixel over
+  // the content even when the content is right.
   const placeAt = (window: AvatarBrowserWindow, x: number, y: number, size: AvatarWindowSize): void => {
     window.setPosition(x, y)
-    const [width = 0, height = 0] = window.getSize()
-    if (Math.abs(width - size.width) >= 1 || Math.abs(height - size.height) >= 1) window.setSize(size.width, size.height)
+    window.setContentSize(size.width, size.height)
   }
 
   return {
@@ -261,6 +266,7 @@ export function createAvatarNativeAdapter(options: AvatarNativeAdapterOptions): 
         }
       })
       resources.set(token, window)
+      wantedSizes.set(token, options.windowSize)
       try {
         // close and closed come first so a failing setup below still reports the closure.
         window.on('close', (event) => {
@@ -268,6 +274,7 @@ export function createAvatarNativeAdapter(options: AvatarNativeAdapterOptions): 
         })
         window.on('closed', () => {
           resources.delete(token)
+          wantedSizes.delete(token)
           options.callbacks.closed(token)
         })
         ignoreMouse(window)
@@ -287,6 +294,7 @@ export function createAvatarNativeAdapter(options: AvatarNativeAdapterOptions): 
       window.setAlwaysOnTop(alwaysOnTop)
       window.setSize(size.width, size.height)
       placeAt(window, x, y, size)
+      wantedSizes.set(token, size)
     },
     send(token, state) {
       resource(token).webContents.send('avatar-view:state', state)
@@ -306,9 +314,7 @@ export function createAvatarNativeAdapter(options: AvatarNativeAdapterOptions): 
       resource(token).setAlwaysOnTop(alwaysOnTop)
     },
     setPosition(token, x, y) {
-      const window = resource(token)
-      const [width = 0, height = 0] = window.getSize()
-      placeAt(window, x, y, { width, height })
+      placeAt(resource(token), x, y, wantedSizes.get(token) ?? options.windowSize)
     },
     destroy(token) {
       resources.get(token)?.destroy()
@@ -319,6 +325,7 @@ export function createAvatarNativeAdapter(options: AvatarNativeAdapterOptions): 
     },
     release(token) {
       resources.delete(token)
+      wantedSizes.delete(token)
     },
     endpoint(token) {
       const window = resources.get(token)

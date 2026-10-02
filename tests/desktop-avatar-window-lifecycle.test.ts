@@ -74,6 +74,12 @@ class FakeWindow implements AvatarBrowserWindow {
 
   readonly geometryCalls: string[] = []
   driftOnMove = false
+  /**
+   * Electron at 125 %: a move grows the window on both axes and pins its min and max to the grown size, which setSize
+   * cannot cross; only setContentSize moves the bound.
+   */
+  growAndPinOnMove = false
+  private pinned: [number, number] | null = null
   size: [number, number]
 
   constructor(
@@ -161,12 +167,23 @@ class FakeWindow implements AvatarBrowserWindow {
     this.positions.push([x, y])
     this.geometryCalls.push('setPosition')
     if (this.driftOnMove) this.size = [this.size[0] + 1, this.size[1]]
+    if (this.growAndPinOnMove) {
+      this.size = [this.size[0] + 1, this.size[1] + 1]
+      this.pinned = [...this.size]
+    }
   }
 
   setSize(width: number, height: number): void {
     this.step('setSize')
-    this.size = [width, height]
+    this.size = this.pinned ? [...this.pinned] : [width, height]
     this.geometryCalls.push('setSize')
+  }
+
+  setContentSize(width: number, height: number): void {
+    this.step('setContentSize')
+    this.size = [width, height]
+    if (this.pinned) this.pinned = [width, height]
+    this.geometryCalls.push('setContentSize')
   }
 
   getSize(): number[] {
@@ -925,12 +942,27 @@ describe('native adapter against a missing or duplicated handle', () => {
     expect(windows[0]!.positions.at(-1)).toEqual([50, 60])
   })
 
+  test('a move that grows the window and pins its bounds is undone by the content size, never by setSize', () => {
+    const { native, windows } = adapter()
+    native.allocate(1, true)
+    native.prepare(1, 10, 20, { width: 120, height: 100 }, true)
+    const window = windows[0]!
+    window.growAndPinOnMove = true
+    window.setPosition(0, 0)
+    window.setSize(120, 100)
+    expect(window.getSize(), 'the fake must pin the grown size the way Electron does, or setSize passes for a fix').toEqual([121, 101])
+
+    for (let step = 1; step <= 10; step += 1) native.setPosition(1, 10 + step, 20 + step)
+
+    expect(window.getSize(), 'a pinned min and max swallow setSize: the avatar grows on every move').toEqual([120, 100])
+  })
+
   test('prepare sets the size before the position and leaves the exact requested size', () => {
     const { native, windows } = adapter()
     native.allocate(1, true)
     windows[0]!.size = [800, 600]
     native.prepare(1, 10, 20, { width: 120, height: 100 }, true)
-    expect(windows[0]!.geometryCalls).toEqual(['setSize', 'setPosition'])
+    expect(windows[0]!.geometryCalls).toEqual(['setSize', 'setPosition', 'setContentSize'])
     expect(windows[0]!.getSize()).toEqual([120, 100])
     expect(windows[0]!.positions.at(-1)).toEqual([10, 20])
   })
@@ -940,7 +972,7 @@ describe('native adapter against a missing or duplicated handle', () => {
     native.allocate(1, true)
     windows[0]!.driftOnMove = true
     native.prepare(1, 10, 20, { width: 120, height: 100 }, true)
-    expect(windows[0]!.geometryCalls).toEqual(['setSize', 'setPosition', 'setSize'])
+    expect(windows[0]!.geometryCalls).toEqual(['setSize', 'setPosition', 'setContentSize'])
     expect(windows[0]!.getSize()).toEqual([120, 100])
   })
 
