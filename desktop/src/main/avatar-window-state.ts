@@ -1,5 +1,5 @@
 import type { AvatarAppearance, AvatarScreenPosition, AvatarWorkArea } from './avatar-appearance'
-import { clampAvatarPlacement, restoreAvatarPlacement, type AvatarDisplay, type AvatarWindowSize } from './avatar-window-placement'
+import { AVATAR_WINDOW_SIZES, clampAvatarPlacement, restoreAvatarPlacement, type AvatarDisplay, type AvatarWindowSize } from './avatar-window-placement'
 
 export type AvatarDestination = 'absent' | 'replacement' | 'stop'
 export type AvatarRetirementPhase = 'allocating' | 'destroying' | 'checking' | 'blocked'
@@ -8,7 +8,8 @@ export type AvatarLifecycle =
   | { readonly kind: 'unavailable' }
   | { readonly kind: 'absent' }
   | { readonly kind: 'loading'; readonly token: number; readonly step: 'allocating' | 'document' }
-  | { readonly kind: 'promoting'; readonly token: number; readonly step: 'prepare' | 'publish' | 'show' }
+  | { readonly kind: 'promoting'; readonly token: number; readonly step: 'prepare'; readonly recordsPlacement: boolean }
+  | { readonly kind: 'promoting'; readonly token: number; readonly step: 'publish' | 'show' }
   | { readonly kind: 'ready'; readonly token: number }
   | {
       readonly kind: 'retiring'
@@ -39,7 +40,6 @@ export const DEFAULT_AVATAR_MACHINE_CONFIG: AvatarMachineConfig = {
 
 export interface AvatarGeometry {
   readonly displays: readonly AvatarDisplay[]
-  readonly size: AvatarWindowSize
 }
 
 export interface AvatarAppliedPlacement {
@@ -502,10 +502,10 @@ function nearestDisplay(displays: readonly AvatarDisplay[], x: number, y: number
   return best
 }
 
-function placeAt(geometry: AvatarGeometry, x: number, y: number): AvatarAppliedPlacement | null {
+function placeAt(geometry: AvatarGeometry, size: AvatarWindowSize, x: number, y: number): AvatarAppliedPlacement | null {
   const display = nearestDisplay(geometry.displays, x, y)
   if (!display) return null
-  const clamped = clampAvatarPlacement({ x, y }, display.workArea, geometry.size)
+  const clamped = clampAvatarPlacement({ x, y }, display.workArea, size)
   return { screenId: display.id, workArea: display.workArea, x: clamped.x, y: clamped.y }
 }
 
@@ -586,16 +586,16 @@ function retryCleanup(d: Draft): void {
   startProbe(d, lifecycle.token)
 }
 
-function beginPrepare(d: Draft, token: number): void {
+function beginPrepare(d: Draft, token: number, recordsPlacement = true): void {
   dropPermits(d, token)
-  set(d, { lifecycle: { kind: 'promoting', token, step: 'prepare' }, applied: null, pointerInside: false })
+  set(d, { lifecycle: { kind: 'promoting', token, step: 'prepare', recordsPlacement }, applied: null, pointerInside: false })
   const geometry = d.s.geometry
   if (geometry.displays.length === 0) {
     trace(d, 'Avatar placement requires an available display')
     retire(d, 'absent')
     return
   }
-  const restored = restoreAvatarPlacement(geometry.displays, d.s.appearance.positions, geometry.size)
+  const restored = restoreAvatarPlacement(geometry.displays, d.s.appearance.positions, AVATAR_WINDOW_SIZES[d.s.appearance.size])
   const display = geometry.displays.find((candidate) => candidate.id === restored.screenId)
   if (!display) {
     trace(d, 'Avatar placement display is unknown')
@@ -750,6 +750,23 @@ function pickPatch(patch: AvatarAppearancePatch): Partial<AvatarAppearance> {
   return picked as Partial<AvatarAppearance>
 }
 
+// The stored corners stay the unclamped intent, so the edge clamp of a large size is undone by a smaller one.
+function anchorAtCenter(
+  positions: Readonly<Record<string, AvatarScreenPosition>>,
+  from: AvatarWindowSize,
+  to: AvatarWindowSize
+): Record<string, AvatarScreenPosition> {
+  const anchored = Object.create(null) as Record<string, AvatarScreenPosition>
+  for (const [screenId, position] of Object.entries(positions)) {
+    anchored[screenId] = {
+      workArea: position.workArea,
+      x: position.x - (to.width - from.width) / 2,
+      y: position.y - (to.height - from.height) / 2
+    }
+  }
+  return anchored
+}
+
 function onAppearance(d: Draft, patch: AvatarAppearancePatch): void {
   const lifecycle = d.s.lifecycle
   if (lifecycle.kind === 'stopped') return reject(d, 'Avatar window is stopped')
@@ -757,9 +774,16 @@ function onAppearance(d: Draft, patch: AvatarAppearancePatch): void {
   d.reply = ACCEPTED
   const picked = pickPatch(patch)
   const alwaysOnTopChanged = picked.alwaysOnTop !== undefined && picked.alwaysOnTop !== d.s.appearance.alwaysOnTop
-  const changed = changeAppearance(d, picked)
+  const resized = picked.size !== undefined && picked.size !== d.s.appearance.size ? picked.size : null
+  const changed = changeAppearance(
+    d,
+    resized === null ? picked : { ...picked, positions: anchorAtCenter(d.s.appearance.positions, AVATAR_WINDOW_SIZES[d.s.appearance.size], AVATAR_WINDOW_SIZES[resized]) }
+  )
   commit(d, changed)
-  if (alwaysOnTopChanged && (lifecycle.kind === 'promoting' || lifecycle.kind === 'ready')) {
+  if (resized !== null && (lifecycle.kind === 'promoting' || lifecycle.kind === 'ready')) {
+    invalidateMoves(d)
+    beginPrepare(d, lifecycle.token, false)
+  } else if (alwaysOnTopChanged && (lifecycle.kind === 'promoting' || lifecycle.kind === 'ready')) {
     emit(d, {
       kind: 'setAlwaysOnTop',
       token: lifecycle.token,
@@ -775,7 +799,7 @@ function onPosition(d: Draft, x: number, y: number): void {
   const lifecycle = d.s.lifecycle
   if (lifecycle.kind !== 'ready') return reject(d, 'Avatar window is unavailable')
   if (!Number.isFinite(x) || !Number.isFinite(y)) return reject(d, 'Avatar position requires finite numbers')
-  const placement = placeAt(d.s.geometry, x, y)
+  const placement = placeAt(d.s.geometry, AVATAR_WINDOW_SIZES[d.s.appearance.size], x, y)
   if (placement === null) return reject(d, 'Avatar placement requires an available display')
   set(d, { requested: { token: lifecycle.token, epoch: d.s.moveEpoch, placement } })
   if (d.s.timers.move === null) arm(d, 'move', d.s.config.moveDelayMs, lifecycle.token, d.s.moveEpoch)
@@ -883,9 +907,10 @@ function promotingStep(state: AvatarMachineState, token: number, step: 'prepare'
 }
 
 function onPrepareSucceeded(d: Draft, token: number, op: number, placement: AvatarAppliedPlacement): void {
+  const lifecycle = d.s.lifecycle
   if (!promotingStep(d.s, token, 'prepare') || !settle(d, token, op, 'prepare')) return
   set(d, { applied: { token, placement }, lifecycle: { kind: 'promoting', token, step: 'publish' } })
-  recordPlacement(d, placement, true)
+  if (lifecycle.kind === 'promoting' && lifecycle.step === 'prepare' && lifecycle.recordsPlacement) recordPlacement(d, placement, true)
   set(d, { viewRevision: d.s.viewRevision + 1 })
   emit(d, { kind: 'publish', scope: 'promotion', token, op: grant(d, token, 'promotion'), snapshot: selectPublication(d.s) })
 }

@@ -7,6 +7,7 @@ import {
   type AvatarViewWindowEndpoint,
   type AvatarWindowConstructionOptions
 } from './avatar-window'
+import { AVATAR_WINDOW_SIZES } from './avatar-window-placement'
 import {
   createAvatarMachineState,
   isEffectLive,
@@ -76,7 +77,7 @@ export function createAvatarWindowController(options: AvatarWindowControllerOpti
     preload: options.preload,
     html: options.html,
     createWindow: options.createWindow,
-    windowSize: options.geometry.size,
+    windowSize: () => AVATAR_WINDOW_SIZES[state.appearance.size],
     callbacks: {
       rendererGone: (token) => {
         dispatch({ kind: 'RendererGone', token })

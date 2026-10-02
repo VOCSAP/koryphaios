@@ -155,7 +155,7 @@ test('a hidden choice stored under a newer schema makes the startup restore allo
   const state = createAvatarMachineState({
     available: true,
     appearance: appearance.readAvatarAppearance(file, { reportError: () => {} }),
-    geometry: { displays: [{ id: '1', workArea: { x: 0, y: 0, width: 1000, height: 800 } }], size: { width: 100, height: 100 } }
+    geometry: { displays: [{ id: '1', workArea: { x: 0, y: 0, width: 1000, height: 800 } }] }
   })
   const result = reduce(state, { kind: 'RestoreRequested' })
 

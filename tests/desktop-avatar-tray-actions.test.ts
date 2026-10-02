@@ -4,6 +4,7 @@ import { assembleAvatar } from '../desktop/src/main/avatar-assembly.ts'
 import { AVATAR_TRAY_ACTION_KINDS, buildAvatarTrayMenu, type AvatarTrayAction, type AvatarTrayMenuItem } from '../desktop/src/main/avatar-tray-menu.ts'
 import { createAvatarTray, type AvatarTrayDependencies } from '../desktop/src/main/avatar-tray.ts'
 import type { AvatarBrowserWindow } from '../desktop/src/main/avatar-window.ts'
+import { AVATAR_WINDOW_SIZES } from '../desktop/src/main/avatar-window-placement.ts'
 import { selectWindowShown } from '../desktop/src/main/avatar-window-state.ts'
 import type { AvatarAttachRequest } from '../desktop/src/shared/avatar-protocol.ts'
 import type { AvatarViewState } from '../desktop/src/shared/avatar-view.ts'
@@ -120,7 +121,7 @@ async function setup() {
     },
     appearance: { ...APPEARANCE, positions: {} },
     writeSnapshot: () => {},
-    geometry: () => ({ displays: [{ id: '1', workArea: { x: 0, y: 0, width: 1000, height: 800 } }], size: { width: 100, height: 100 } }),
+    geometry: () => ({ displays: [{ id: '1', workArea: { x: 0, y: 0, width: 1000, height: 800 } }] }),
     theme: () => 'dark',
     locale: 'en',
     now: () => NOW,
@@ -254,6 +255,19 @@ test('Motion checks exactly the stored choice', async () => {
   s.locate((a) => a.kind === 'motion' && a.value === 'none').native.click!()
   expect(s.appearance().motion).toBe('none')
   expect(s.checkedIn((a) => a.kind === 'motion')).toEqual([{ kind: 'motion', value: 'none' }])
+})
+
+test('Size checks the stored choice and its click resizes the native window', async () => {
+  const s = await setup()
+  const window = s.windows.at(-1)!
+  expect(s.checkedIn((a) => a.kind === 'size')).toEqual([{ kind: 'size', value: 'm' }])
+  expect(window.getSize()).toEqual([AVATAR_WINDOW_SIZES.m.width, AVATAR_WINDOW_SIZES.m.height])
+
+  s.locate((a) => a.kind === 'size' && a.value === 'l').native.click!()
+  await flush()
+  expect(s.appearance().size).toBe('l')
+  expect(window.getSize(), 'the menu choice must reach the native window').toEqual([AVATAR_WINDOW_SIZES.l.width, AVATAR_WINDOW_SIZES.l.height])
+  expect(s.checkedIn((a) => a.kind === 'size')).toEqual([{ kind: 'size', value: 'l' }])
 })
 
 test('Do not disturb checks Off when inactive, the chosen duration when active, and Off turns it off', async () => {

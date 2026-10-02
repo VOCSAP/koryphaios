@@ -18,6 +18,10 @@ interface AvatarTrayCopy {
   motionContinuous: string
   motionTransitions: string
   motionNone: string
+  size: string
+  sizeSmall: string
+  sizeMedium: string
+  sizeLarge: string
   doNotDisturb: string
   dndOff: string
   dnd30m: string
@@ -39,6 +43,10 @@ export const AVATAR_TRAY_COPY = {
     motionContinuous: 'Continuous',
     motionTransitions: 'Transitions only',
     motionNone: 'None',
+    size: 'Size',
+    sizeSmall: 'Small',
+    sizeMedium: 'Medium',
+    sizeLarge: 'Large',
     doNotDisturb: 'Do not disturb',
     dndOff: 'Off',
     dnd30m: '30 minutes',
@@ -58,6 +66,10 @@ export const AVATAR_TRAY_COPY = {
     motionContinuous: 'Continue',
     motionTransitions: 'Transitions seulement',
     motionNone: 'Aucune',
+    size: 'Taille',
+    sizeSmall: 'Petite',
+    sizeMedium: 'Moyenne',
+    sizeLarge: 'Grande',
     doNotDisturb: 'Ne pas déranger',
     dndOff: 'Désactivé',
     dnd30m: 'Pendant 30 minutes',

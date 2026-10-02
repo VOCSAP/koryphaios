@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import type { AvatarAppearance } from '../desktop/src/main/avatar-appearance.ts'
+import { AVATAR_WINDOW_SIZES } from '../desktop/src/main/avatar-window-placement.ts'
 import {
   AVATAR_EVENT_CLASSIFICATION,
   createAvatarMachineState,
@@ -23,7 +24,8 @@ import {
 
 const DISPLAY_A = { id: '1', workArea: { x: 0, y: 0, width: 1000, height: 800 } }
 const DISPLAY_B = { id: '2', workArea: { x: 1000, y: 0, width: 1000, height: 800 } }
-const GEOMETRY: AvatarGeometry = { displays: [DISPLAY_A, DISPLAY_B], size: { width: 100, height: 100 } }
+const GEOMETRY: AvatarGeometry = { displays: [DISPLAY_A, DISPLAY_B] }
+const MEDIUM = AVATAR_WINDOW_SIZES.m
 
 function appearance(patch: Partial<AvatarAppearance> = {}): AvatarAppearance {
   return {
@@ -817,7 +819,7 @@ describe('lifecycle reduction, cases a to g', () => {
     expect(h.dispatch({ kind: 'RestoreRequested' }).kind).toBe('none')
     expect(h.allocations, 'only an explicit Show may bring the avatar back after a crash').toHaveLength(first)
     expect(h.kind).toBe('absent')
-    h.dispatch({ kind: 'GeometryChanged', geometry: { displays: [DISPLAY_B], size: GEOMETRY.size } })
+    h.dispatch({ kind: 'GeometryChanged', geometry: { displays: [DISPLAY_B] } })
     expect(h.allocations, 'a topology change does not bring a crashed avatar back either').toHaveLength(first)
     expect(h.kind).toBe('absent')
   })
@@ -860,7 +862,7 @@ describe('lifecycle reduction, cases a to g', () => {
     const g = h.token
     expect(h.displayed.has(g)).toBe(true)
     h.hold('prepare')
-    h.dispatch({ kind: 'GeometryChanged', geometry: { displays: [DISPLAY_B], size: GEOMETRY.size } })
+    h.dispatch({ kind: 'GeometryChanged', geometry: { displays: [DISPLAY_B] } })
     expect(h.state.lifecycle).toMatchObject({ kind: 'promoting', token: g, step: 'prepare' })
     h.dispatch({ kind: 'HideRequested' })
     expect(h.displayed.has(g)).toBe(false)
@@ -951,7 +953,7 @@ describe('position, restoration and persistence rules', () => {
       '2': other
     })
     const h = readyHarness({ appearance: { positions } })
-    expect(h.state.appearance.positions['1']).toEqual({ workArea: DISPLAY_A.workArea, x: 900, y: 700 })
+    expect(h.state.appearance.positions['1']).toEqual({ workArea: DISPLAY_A.workArea, x: 1000 - MEDIUM.width, y: 800 - MEDIUM.height })
     expect(h.state.appearance.positions['2']).toBe(other)
     expect(h.state.timers.persist).not.toBeNull()
   })
@@ -960,24 +962,25 @@ describe('position, restoration and persistence rules', () => {
     const absent = { workArea: { x: 5000, y: 0, width: 800, height: 600 }, x: 5100, y: 50 }
     const positions = Object.assign(Object.create(null), { '9': absent })
     const h = readyHarness({ appearance: { positions } })
-    expect(h.state.appearance.positions['1']).toEqual({ workArea: DISPLAY_A.workArea, x: 450, y: 350 })
+    const centered = { workArea: DISPLAY_A.workArea, x: (1000 - MEDIUM.width) / 2, y: (800 - MEDIUM.height) / 2 }
+    expect(h.state.appearance.positions['1']).toEqual(centered)
     expect(h.state.appearance.positions['9']).toBe(absent)
     expect(h.state.appearanceRevision).toBe(1)
     expect(h.state.timers.persist).not.toBeNull()
     h.fire('persist')
     expect(lastWrite(h).positions['9']).toBe(absent)
-    expect(lastWrite(h).positions['1']).toEqual({ workArea: DISPLAY_A.workArea, x: 450, y: 350 })
+    expect(lastWrite(h).positions['1']).toEqual(centered)
   })
 
   test('a restoration with no stored position is applied but not persisted', () => {
     const h = readyHarness()
-    expect(h.state.applied?.placement).toEqual(at(450, 350))
+    expect(h.state.applied?.placement).toEqual(at((1000 - MEDIUM.width) / 2, (800 - MEDIUM.height) / 2))
     expect(Object.keys(h.state.appearance.positions)).toEqual([])
     expect(h.state.appearanceRevision).toBe(0)
   })
 
   test('with no display, preparation fails, is traced and the window is retired', () => {
-    const h = new Harness({ geometry: { displays: [], size: GEOMETRY.size } })
+    const h = new Harness({ geometry: { displays: [] } })
     h.dispatch({ kind: 'ShowRequested' })
     expect(h.kind).toBe('absent')
     expect(h.traces).toContain('Avatar placement requires an available display')
@@ -990,7 +993,7 @@ describe('position, restoration and persistence rules', () => {
     h.dispatch({ kind: 'PositionRequested', x: 100, y: 200 })
     const stale = h.timerOf('move')
     h.hold('prepare')
-    h.dispatch({ kind: 'GeometryChanged', geometry: { displays: [DISPLAY_B], size: GEOMETRY.size } })
+    h.dispatch({ kind: 'GeometryChanged', geometry: { displays: [DISPLAY_B] } })
     expect(h.state.lifecycle).toMatchObject({ kind: 'promoting', token: g, step: 'prepare' })
     expect(h.state.applied).toBeNull()
     expect(h.state.requested).toBeNull()
@@ -1006,7 +1009,95 @@ describe('position, restoration and persistence rules', () => {
     const h = readyHarness()
     h.dispatch({ kind: 'PositionRequested', x: 5000, y: -50 })
     h.fire('move')
-    expect(h.nativeMoves).toEqual([at(1900, 0, DISPLAY_B)])
+    expect(h.nativeMoves).toEqual([at(2000 - MEDIUM.width, 0, DISPLAY_B)])
+  })
+
+  test('a size change re-prepares the window at the table size and drops the pending move', () => {
+    const h = readyHarness()
+    const g = h.token
+    h.dispatch({ kind: 'PositionRequested', x: 100, y: 200 })
+    h.hold('prepare')
+    expect(h.dispatch({ kind: 'AppearanceChanged', patch: { size: 'l' } }).kind).toBe('accepted')
+    expect(h.state.lifecycle).toMatchObject({ kind: 'promoting', token: g, step: 'prepare' })
+    expect(h.state.requested, 'a move computed for the old size would land clamped to it').toBeNull()
+    expect(h.lastExecuted('prepare').size).toEqual(AVATAR_WINDOW_SIZES.l)
+  })
+
+  test('the same size chosen again re-prepares nothing', () => {
+    const h = readyHarness()
+    const prepares = h.count('prepare')
+    h.dispatch({ kind: 'AppearanceChanged', patch: { size: 'm' } })
+    expect(h.count('prepare')).toBe(prepares)
+  })
+
+  test('a size chosen while hidden is kept and applied by the next preparation', () => {
+    const h = new Harness({ appearance: { visible: false } })
+    h.dispatch({ kind: 'AppearanceChanged', patch: { size: 's' } })
+    expect(h.count('prepare'), 'no window exists to resize').toBe(0)
+    h.dispatch({ kind: 'ShowRequested' })
+    expect(h.lastExecuted('prepare').size).toEqual(AVATAR_WINDOW_SIZES.s)
+  })
+
+  test('a display change keeps the chosen size', () => {
+    const h = readyHarness()
+    h.dispatch({ kind: 'AppearanceChanged', patch: { size: 'l' } })
+    h.dispatch({ kind: 'GeometryChanged', geometry: { displays: [DISPLAY_B] } })
+    expect(h.lastExecuted('prepare').size, 'a display change must not bring the window back to a fixed size').toEqual(AVATAR_WINDOW_SIZES.l)
+  })
+
+  test('each size clamps a move with its own width', () => {
+    for (const size of ['s', 'm', 'l'] as const) {
+      const h = readyHarness({ appearance: { size } })
+      h.dispatch({ kind: 'PositionRequested', x: 5000, y: -50 })
+      h.fire('move')
+      expect(h.nativeMoves, `size ${size}`).toEqual([at(2000 - AVATAR_WINDOW_SIZES[size].width, 0, DISPLAY_B)])
+    }
+  })
+
+  test('a size change keeps the centre of the window where it was', () => {
+    const positions = Object.assign(Object.create(null), { '1': { workArea: DISPLAY_A.workArea, x: 100, y: 200 } })
+    const h = readyHarness({ appearance: { positions } })
+    const centre = (x: number, y: number, size: 's' | 'm' | 'l') => [x + AVATAR_WINDOW_SIZES[size].width / 2, y + AVATAR_WINDOW_SIZES[size].height / 2]
+    h.dispatch({ kind: 'AppearanceChanged', patch: { size: 'l' } })
+    const placed = h.lastExecuted('prepare').placement
+    expect(centre(placed.x, placed.y, 'l'), 'the top-left corner must not be the anchor').toEqual(centre(100, 200, 'm'))
+  })
+
+  test('near an edge the clamp wins over the centre, and is not written', () => {
+    const positions = Object.assign(Object.create(null), { '1': { workArea: DISPLAY_A.workArea, x: 830, y: 300 } })
+    const h = readyHarness({ appearance: { positions } })
+    h.dispatch({ kind: 'AppearanceChanged', patch: { size: 'l' } })
+    expect(h.lastExecuted('prepare').placement).toEqual(at(1000 - AVATAR_WINDOW_SIZES.l.width, 270))
+    expect(h.kind).toBe('ready')
+    expect(h.state.appearance.positions['1'], 'a resize must not store the clamped corner').toEqual({ workArea: DISPLAY_A.workArea, x: 800, y: 270 })
+  })
+
+  test('a large size pushed against an edge then a small one returns to the intended centre', () => {
+    const positions = Object.assign(Object.create(null), { '1': { workArea: DISPLAY_A.workArea, x: 830, y: 300 } })
+    const h = readyHarness({ appearance: { positions } })
+    h.dispatch({ kind: 'AppearanceChanged', patch: { size: 'l' } })
+    h.dispatch({ kind: 'AppearanceChanged', patch: { size: 's' } })
+    const placed = h.lastExecuted('prepare').placement
+    expect([placed.x + AVATAR_WINDOW_SIZES.s.width / 2, placed.y + AVATAR_WINDOW_SIZES.s.height / 2]).toEqual([830 + MEDIUM.width / 2, 300 + MEDIUM.height / 2])
+    expect(lastWrite(h).positions['1']).toEqual({ workArea: DISPLAY_A.workArea, x: placed.x, y: placed.y })
+  })
+
+  test('a size chosen while the window is ready but hidden prepares it at that size and shows nothing', () => {
+    const h = new Harness({ appearance: { visible: false } })
+    h.dispatch({ kind: 'ReloadRequested' })
+    expect(h.kind).toBe('ready')
+    h.dispatch({ kind: 'AppearanceChanged', patch: { size: 's' } })
+    expect(h.lastExecuted('prepare').size).toEqual(AVATAR_WINDOW_SIZES.s)
+    expect(h.kind).toBe('ready')
+    expect(h.shows, 'a resize must not reveal a hidden avatar').toBe(0)
+  })
+
+  test('a patch changing size and always on top carries both in one preparation', () => {
+    const h = readyHarness()
+    const separate = h.count('setAlwaysOnTop')
+    h.dispatch({ kind: 'AppearanceChanged', patch: { size: 'l', alwaysOnTop: false } })
+    expect(h.lastExecuted('prepare')).toMatchObject({ size: AVATAR_WINDOW_SIZES.l, alwaysOnTop: false })
+    expect(h.count('setAlwaysOnTop'), 'the preparation already applies always on top').toBe(separate)
   })
 
   test('requests are coalesced onto one move timer and the latest placement wins', () => {
@@ -1262,7 +1353,7 @@ const EVENT: Record<AvatarEventKind, (h: Harness) => AvatarEvent> = {
   PositionRequested: () => ({ kind: 'PositionRequested', x: 50, y: 60 }),
   PointerChanged: () => ({ kind: 'PointerChanged', inside: true }),
   RefreshRequested: () => ({ kind: 'RefreshRequested' }),
-  GeometryChanged: () => ({ kind: 'GeometryChanged', geometry: { displays: [DISPLAY_B], size: GEOMETRY.size } }),
+  GeometryChanged: () => ({ kind: 'GeometryChanged', geometry: { displays: [DISPLAY_B] } }),
   InitialStateRequested: (h) => ({ kind: 'InitialStateRequested', token: liveToken(h) }),
   Allocated: (h) => ({ kind: 'Allocated', token: liveToken(h) }),
   AllocationFailed: (h) => ({ kind: 'AllocationFailed', token: liveToken(h) }),
@@ -1387,7 +1478,7 @@ describe('invariants over random schedules', () => {
           case 7: h.dispatch({ kind: 'PointerChanged', inside: random() < 0.5 }); break
           case 8: h.dispatch({ kind: 'RefreshRequested' }); break
           case 9:
-            h.dispatch({ kind: 'GeometryChanged', geometry: random() < 0.1 ? { displays: [], size: GEOMETRY.size } : pick([GEOMETRY, { displays: [DISPLAY_B], size: GEOMETRY.size }]) })
+            h.dispatch({ kind: 'GeometryChanged', geometry: random() < 0.1 ? { displays: [] } : pick([GEOMETRY, { displays: [DISPLAY_B] }]) })
             break
           case 10: h.dispatch({ kind: 'NativeCloseRequested', token }); break
           case 11: if (random() < 0.4) h.dispatch({ kind: 'RendererGone', token }); break

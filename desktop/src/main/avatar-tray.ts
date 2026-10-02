@@ -173,6 +173,7 @@ export function createAvatarTray(options: AvatarTrayOptions, dependencies: Avata
       case 'lock':
       case 'always-on-top':
       case 'motion':
+      case 'size':
         options.dispatch(avatarTrayEvent(action))
         refresh()
         return

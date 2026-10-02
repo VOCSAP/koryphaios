@@ -1,4 +1,4 @@
-import type { AvatarScreenPosition, AvatarWorkArea } from './avatar-appearance'
+import type { AvatarScreenPosition, AvatarSize, AvatarWorkArea } from './avatar-appearance'
 
 export interface AvatarDisplay {
   id: string
@@ -8,6 +8,12 @@ export interface AvatarDisplay {
 export interface AvatarWindowSize {
   width: number
   height: number
+}
+
+export const AVATAR_WINDOW_SIZES: Readonly<Record<AvatarSize, AvatarWindowSize>> = {
+  s: { width: 120, height: 120 },
+  m: { width: 160, height: 160 },
+  l: { width: 220, height: 220 }
 }
 
 export interface AvatarPlacement extends AvatarWindowSize {

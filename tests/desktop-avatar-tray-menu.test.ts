@@ -16,7 +16,7 @@ import type { AvatarViewSummary } from '../desktop/src/shared/avatar-view.ts'
 
 const now = new Date(2026, 4, 14, 10, 30).getTime()
 
-const APPEARANCE: AvatarTrayAppearance = { positionLocked: false, alwaysOnTop: true, motion: 'continuous' }
+const APPEARANCE: AvatarTrayAppearance = { positionLocked: false, alwaysOnTop: true, motion: 'continuous', size: 'm' }
 
 function view(summary: AvatarSummary): AvatarViewSummary {
   return { ...summary, faceCopy: avatarFaceCopy(summary, 'en') }
@@ -301,6 +301,10 @@ test('a menu built in French carries the French texts', () => {
     fr.motionContinuous,
     fr.motionTransitions,
     fr.motionNone,
+    fr.size,
+    fr.sizeSmall,
+    fr.sizeMedium,
+    fr.sizeLarge,
     fr.doNotDisturb,
     fr.dndOff,
     fr.dnd30m,

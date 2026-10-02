@@ -40,12 +40,9 @@ let brokerProbe: AvatarBrokerProbe | null = null
 let avatarAssembly: AvatarAssembly | null = null
 let stopFollowers: (() => void) | null = null
 
-const AVATAR_WINDOW_SIZE = { width: 160, height: 160 }
-
 function avatarGeometry(): AvatarGeometry {
   return {
-    displays: screen.getAllDisplays().map((display) => ({ id: String(display.id), workArea: display.workArea })),
-    size: AVATAR_WINDOW_SIZE
+    displays: screen.getAllDisplays().map((display) => ({ id: String(display.id), workArea: display.workArea }))
   }
 }
 

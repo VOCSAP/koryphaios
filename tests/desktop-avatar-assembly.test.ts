@@ -27,7 +27,7 @@ function tempDir(): string {
 
 const MAIN = { id: '1', workArea: { x: 0, y: 0, width: 1000, height: 800 } }
 const LEFT = { id: '2', workArea: { x: -1920, y: 0, width: 1920, height: 1080 } }
-const GEOMETRY: AvatarGeometry = { displays: [MAIN], size: { width: 100, height: 100 } }
+const GEOMETRY: AvatarGeometry = { displays: [MAIN] }
 
 class MiniWindow implements AvatarBrowserWindow {
   destroyed = false
@@ -249,7 +249,7 @@ describe('Avatar assembly', () => {
 
   test('a position on a negative-coordinate screen is restored on the first window and again on the next one', async () => {
     const saved = seed({ positions: { '2': { workArea: LEFT.workArea, x: -1800, y: 100 } } })
-    const s = setup({ geometry: { displays: [MAIN, LEFT], size: { width: 100, height: 100 } }, seed: saved })
+    const s = setup({ geometry: { displays: [MAIN, LEFT] }, seed: saved })
     const g1 = await s.open()
     expect(g1.positions).toEqual([[-1800, 100]])
 
@@ -324,7 +324,7 @@ describe('Avatar assembly', () => {
     const options: { geometry: AvatarGeometry } = { geometry: GEOMETRY }
     const s = setup(options)
     await s.open()
-    const wider: AvatarGeometry = { displays: [MAIN, { id: '2', workArea: { x: -1920, y: 0, width: 1920, height: 1080 } }], size: GEOMETRY.size }
+    const wider: AvatarGeometry = { displays: [MAIN, { id: '2', workArea: { x: -1920, y: 0, width: 1920, height: 1080 } }] }
     options.geometry = wider
 
     expect(s.assembly.controller.snapshot().geometry, 'the geometry is read again only on a topology event').toEqual(GEOMETRY)

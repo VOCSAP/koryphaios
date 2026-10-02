@@ -9,10 +9,11 @@ import {
   type AvatarWindowConstructionOptions
 } from '../desktop/src/main/avatar-window.ts'
 import { createAvatarWindowController } from '../desktop/src/main/avatar-window-controller.ts'
+import { AVATAR_WINDOW_SIZES } from '../desktop/src/main/avatar-window-placement.ts'
 import type { AvatarGeometry, AvatarPublication } from '../desktop/src/main/avatar-window-state.ts'
 
 const DISPLAY_A = { id: '1', workArea: { x: 0, y: 0, width: 1000, height: 800 } }
-const GEOMETRY: AvatarGeometry = { displays: [DISPLAY_A], size: { width: 100, height: 100 } }
+const GEOMETRY: AvatarGeometry = { displays: [DISPLAY_A] }
 
 function appearance(patch: Partial<AvatarAppearance> = {}): AvatarAppearance {
   return {
@@ -190,6 +191,11 @@ class FakeWindow implements AvatarBrowserWindow {
     return [...this.size]
   }
 
+  /** A non-resizable Electron window whose min and max are pinned to its current size. */
+  pinBounds(): void {
+    this.pinned = [...this.size]
+  }
+
   showInactive(): void {
     this.step('showInactive')
     this.calls.push('show')
@@ -357,13 +363,51 @@ describe('window adapter security and pointer behaviour', () => {
     expect(window.topmost).toEqual([false])
   })
 
-  test('the window takes the avatar size at construction and the placement size once prepared', async () => {
-    const narrow: AvatarGeometry = { displays: [{ id: '1', workArea: { x: 0, y: 0, width: 80, height: 70 } }], size: GEOMETRY.size }
-    const r = rig({ geometry: narrow })
+  test('the window takes the persisted size at construction and the placement size once prepared', async () => {
+    const narrow: AvatarGeometry = { displays: [{ id: '1', workArea: { x: 0, y: 0, width: 80, height: 70 } }] }
+    const r = rig({ geometry: narrow, appearance: { size: 'l' } })
     const window = await r.open()
 
-    expect(window.options).toMatchObject({ width: 100, height: 100, resizable: false })
+    expect(window.options).toMatchObject({ width: AVATAR_WINDOW_SIZES.l.width, height: AVATAR_WINDOW_SIZES.l.height, resizable: false })
     expect(window.getSize(), 'a work area smaller than the avatar shrinks the prepared window').toEqual([80, 70])
+  })
+
+  test('a window rebuilt after a size change is constructed at the current size', async () => {
+    const r = rig()
+    await r.open()
+    r.controller.dispatch({ kind: 'AppearanceChanged', patch: { size: 'l' } })
+    await flush()
+    r.controller.dispatch({ kind: 'ReloadRequested' })
+    const rebuilt = r.windows.at(-1)!
+    rebuilt.finishLoad()
+    await flush()
+    expect(r.windows.length).toBe(2)
+    expect(rebuilt.options, 'a window built at the launch size relies on a resize Electron may pin').toMatchObject({ width: AVATAR_WINDOW_SIZES.l.width, height: AVATAR_WINDOW_SIZES.l.height })
+    expect(rebuilt.getSize()).toEqual([AVATAR_WINDOW_SIZES.l.width, AVATAR_WINDOW_SIZES.l.height])
+  })
+
+  test('a size chosen while shown grows and shrinks a window whose bounds are pinned', async () => {
+    const r = rig({
+      configure: (window) => {
+        window.pinBounds()
+        window.growAndPinOnMove = true
+      }
+    })
+    const window = await r.open()
+    window.setSize(1, 1)
+    expect(window.getSize(), 'the fake must pin the window the way Electron does, or setSize passes for a resize').not.toEqual([1, 1])
+
+    r.controller.dispatch({ kind: 'AppearanceChanged', patch: { size: 'l' } })
+    await flush()
+    expect(window.getSize(), 'growing past pinned bounds').toEqual([AVATAR_WINDOW_SIZES.l.width, AVATAR_WINDOW_SIZES.l.height])
+
+    r.controller.dispatch({ kind: 'AppearanceChanged', patch: { size: 's' } })
+    await flush()
+    expect(window.getSize(), 'shrinking below pinned bounds').toEqual([AVATAR_WINDOW_SIZES.s.width, AVATAR_WINDOW_SIZES.s.height])
+
+    await r.invoke(AVATAR_VIEW_CHANNELS.setPosition, window, 30, 40)
+    r.fire(16)
+    expect(window.getSize(), 'a move after the resize keeps the chosen size').toEqual([AVATAR_WINDOW_SIZES.s.width, AVATAR_WINDOW_SIZES.s.height])
   })
 
   test('keeps pointer forwarding, topmost and visibility behind the machine', async () => {
@@ -918,7 +962,7 @@ describe('native adapter against a missing or duplicated handle', () => {
         windows.push(window)
         return window
       },
-      windowSize: { width: 160, height: 160 },
+      windowSize: () => ({ width: 160, height: 160 }),
       callbacks: { rendererGone: () => {}, closeRequested: () => false, closed: () => {} }
     })
     return { native, windows }

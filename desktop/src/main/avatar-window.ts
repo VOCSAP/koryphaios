@@ -87,7 +87,7 @@ export interface AvatarNativeAdapterOptions {
   preload: string
   html: string
   createWindow(options: AvatarWindowConstructionOptions): AvatarBrowserWindow
-  windowSize: AvatarWindowSize
+  windowSize(): AvatarWindowSize
   callbacks: AvatarNativeCallbacks
 }
 
@@ -246,9 +246,10 @@ export function createAvatarNativeAdapter(options: AvatarNativeAdapterOptions): 
   return {
     allocate(token, alwaysOnTop) {
       if (resources.size > 0) throw new Error('Avatar window is already held')
+      const size = options.windowSize()
       const window = options.createWindow({
-        width: options.windowSize.width,
-        height: options.windowSize.height,
+        width: size.width,
+        height: size.height,
         resizable: false,
         maximizable: false,
         fullscreenable: false,
@@ -266,7 +267,7 @@ export function createAvatarNativeAdapter(options: AvatarNativeAdapterOptions): 
         }
       })
       resources.set(token, window)
-      wantedSizes.set(token, options.windowSize)
+      wantedSizes.set(token, size)
       try {
         // close and closed come first so a failing setup below still reports the closure.
         window.on('close', (event) => {
@@ -314,7 +315,7 @@ export function createAvatarNativeAdapter(options: AvatarNativeAdapterOptions): 
       resource(token).setAlwaysOnTop(alwaysOnTop)
     },
     setPosition(token, x, y) {
-      placeAt(resource(token), x, y, wantedSizes.get(token) ?? options.windowSize)
+      placeAt(resource(token), x, y, wantedSizes.get(token) ?? options.windowSize())
     },
     destroy(token) {
       resources.get(token)?.destroy()
