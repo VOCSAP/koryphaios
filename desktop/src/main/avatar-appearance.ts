@@ -8,6 +8,7 @@ export const AVATAR_APPEARANCE_FILE = 'avatar-appearance.json'
 
 export type AvatarMotion = 'continuous' | 'transitions' | 'none'
 export type AvatarSize = 's' | 'm' | 'l'
+export type AvatarFrame = 'normal' | 'full'
 
 export interface AvatarWorkArea {
   x: number
@@ -28,6 +29,7 @@ export interface AvatarAppearance {
   alwaysOnTop: boolean
   positionLocked: boolean
   size: AvatarSize
+  frame: AvatarFrame
   idleOpacity: number
   motion: AvatarMotion
   dndUntil: number | null
@@ -75,6 +77,7 @@ function defaultAppearance(): AvatarAppearance {
     alwaysOnTop: true,
     positionLocked: false,
     size: 'm',
+    frame: 'normal',
     idleOpacity: 1,
     motion: 'continuous',
     dndUntil: null,
@@ -89,6 +92,8 @@ function readAppearance(value: unknown, dependencies: AvatarAppearanceDependenci
   if (value.version !== 1) return null
   if (typeof value.visible !== 'boolean' || typeof value.alwaysOnTop !== 'boolean' || typeof value.positionLocked !== 'boolean') return null
   if (value.size !== 's' && value.size !== 'm' && value.size !== 'l') return null
+  const frame = value.frame === undefined ? 'normal' : value.frame
+  if (frame !== 'normal' && frame !== 'full') return null
   if (!isFiniteNumber(value.idleOpacity) || value.idleOpacity < 0 || value.idleOpacity > 1) return null
   if (value.motion !== 'continuous' && value.motion !== 'transitions' && value.motion !== 'none') return null
   if (value.dndUntil !== null && !isFiniteNumber(value.dndUntil)) return null
@@ -100,6 +105,7 @@ function readAppearance(value: unknown, dependencies: AvatarAppearanceDependenci
   appearance.alwaysOnTop = value.alwaysOnTop
   appearance.positionLocked = value.positionLocked
   appearance.size = value.size
+  appearance.frame = frame
   appearance.idleOpacity = value.idleOpacity
   appearance.motion = value.motion
   appearance.dndUntil = value.dndUntil

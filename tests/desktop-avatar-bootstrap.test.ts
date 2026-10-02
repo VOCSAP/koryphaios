@@ -7,6 +7,7 @@ const appearance = {
   alwaysOnTop: true,
   positionLocked: false,
   size: 'm' as const,
+  frame: 'normal' as const,
   idleOpacity: 1,
   motion: 'continuous' as const,
   dndUntil: null,

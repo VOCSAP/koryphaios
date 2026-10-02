@@ -51,6 +51,7 @@ const PRESENTATION: AvatarViewPresentation = {
   alwaysOnTop: true,
   positionLocked: false,
   size: "m",
+  frame: "normal",
   idleOpacity: 1
 };
 

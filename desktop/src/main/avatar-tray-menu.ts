@@ -14,7 +14,7 @@ export interface AvatarDndState {
   until: number
 }
 
-export type AvatarTrayAppearance = Pick<AvatarAppearance, 'positionLocked' | 'alwaysOnTop' | 'motion' | 'size'>
+export type AvatarTrayAppearance = Pick<AvatarAppearance, 'positionLocked' | 'alwaysOnTop' | 'motion' | 'size' | 'frame'>
 
 export type AvatarTrayAction =
   | { kind: 'deck-focus'; identity: AvatarDeckIdentity }
@@ -25,6 +25,7 @@ export type AvatarTrayAction =
   | { kind: 'always-on-top'; value: boolean }
   | { kind: 'motion'; value: AvatarAppearance['motion'] }
   | { kind: 'size'; value: AvatarAppearance['size'] }
+  | { kind: 'frame'; value: AvatarAppearance['frame'] }
   | { kind: 'quit' }
 
 export const AVATAR_TRAY_ACTION_KINDS = {
@@ -36,6 +37,7 @@ export const AVATAR_TRAY_ACTION_KINDS = {
   'always-on-top': true,
   motion: true,
   size: true,
+  frame: true,
   quit: true
 } as const satisfies Record<AvatarTrayAction['kind'], true>
 
@@ -75,7 +77,7 @@ export function avatarTrayMayRebound(dnd: AvatarDndState | null, now: number): b
   return dnd === null || now >= dnd.until
 }
 
-export type AvatarTrayWindowAction = Extract<AvatarTrayAction, { kind: 'dnd-off' | 'visible' | 'lock' | 'always-on-top' | 'motion' | 'size' }>
+export type AvatarTrayWindowAction = Extract<AvatarTrayAction, { kind: 'dnd-off' | 'visible' | 'lock' | 'always-on-top' | 'motion' | 'size' | 'frame' }>
 
 export function avatarTrayEvent(action: AvatarTrayWindowAction): AvatarEvent {
   switch (action.kind) {
@@ -89,6 +91,8 @@ export function avatarTrayEvent(action: AvatarTrayWindowAction): AvatarEvent {
       return { kind: 'AppearanceChanged', patch: { motion: action.value } }
     case 'size':
       return { kind: 'AppearanceChanged', patch: { size: action.value } }
+    case 'frame':
+      return { kind: 'AppearanceChanged', patch: { frame: action.value } }
     case 'dnd-off':
       return { kind: 'AppearanceChanged', patch: { dndUntil: null, dndChoice: null } }
   }
@@ -142,6 +146,13 @@ function windowMenuItems(copy: TrayCopy, appearance: AvatarTrayAppearance, windo
         { label: copy.sizeSmall, type: 'radio', checked: appearance.size === 's', action: { kind: 'size', value: 's' } },
         { label: copy.sizeMedium, type: 'radio', checked: appearance.size === 'm', action: { kind: 'size', value: 'm' } },
         { label: copy.sizeLarge, type: 'radio', checked: appearance.size === 'l', action: { kind: 'size', value: 'l' } }
+      ]
+    },
+    {
+      label: copy.frame,
+      submenu: [
+        { label: copy.frameNormal, type: 'radio', checked: appearance.frame === 'normal', action: { kind: 'frame', value: 'normal' } },
+        { label: copy.frameFull, type: 'radio', checked: appearance.frame === 'full', action: { kind: 'frame', value: 'full' } }
       ]
     }
   ]

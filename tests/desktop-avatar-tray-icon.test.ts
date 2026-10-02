@@ -259,7 +259,7 @@ function startTray(
     iconDir,
     locale: 'en',
     attachedDecks: () => [],
-    appearance: () => ({ positionLocked: false, alwaysOnTop: true, motion: 'continuous', size: 'm' }),
+    appearance: () => ({ positionLocked: false, alwaysOnTop: true, motion: 'continuous', size: 'm', frame: 'normal' }),
     windowShown: () => true,
     dispatch: () => {},
     getDnd: () => null,

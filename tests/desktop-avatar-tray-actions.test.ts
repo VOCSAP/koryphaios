@@ -17,6 +17,7 @@ const APPEARANCE: AvatarAppearance = {
   alwaysOnTop: true,
   positionLocked: false,
   size: 'm',
+  frame: 'normal',
   idleOpacity: 1,
   motion: 'continuous',
   dndUntil: null,
@@ -268,6 +269,20 @@ test('Size checks the stored choice and its click resizes the native window', as
   expect(s.appearance().size).toBe('l')
   expect(window.getSize(), 'the menu choice must reach the native window').toEqual([AVATAR_WINDOW_SIZES.l.width, AVATAR_WINDOW_SIZES.l.height])
   expect(s.checkedIn((a) => a.kind === 'size')).toEqual([{ kind: 'size', value: 'l' }])
+})
+
+test('Frame checks Normal terminal by default and Full screen reaches the machine without resizing the window', async () => {
+  const s = await setup()
+  const window = s.windows.at(-1)!
+  const size = window.getSize()
+  expect(s.checkedIn((a) => a.kind === 'frame')).toEqual([{ kind: 'frame', value: 'normal' }])
+
+  s.locate((a) => a.kind === 'frame' && a.value === 'full').native.click!()
+  await flush()
+  expect(s.appearance().frame).toBe('full')
+  expect(s.checkedIn((a) => a.kind === 'frame')).toEqual([{ kind: 'frame', value: 'full' }])
+  expect(window.getSize()).toEqual(size)
+  expect(s.windows.at(-1), 'a frame change must not rebuild the window').toBe(window)
 })
 
 test('Do not disturb checks Off when inactive, the chosen duration when active, and Off turns it off', async () => {

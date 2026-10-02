@@ -173,6 +173,7 @@ function seed(patch: Partial<AvatarAppearance> = {}): AvatarAppearance {
     alwaysOnTop: true,
     positionLocked: false,
     size: 'm',
+    frame: 'normal',
     idleOpacity: 1,
     motion: 'continuous',
     dndUntil: null,

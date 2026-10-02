@@ -171,7 +171,8 @@ const BANNER_EXEMPT: Record<string, string> = {
   ".status-banner { top: 0 }": "the band itself",
   ".context-menu-backdrop { inset: 0 }": "transparent click catcher at z-index 70, above the banner",
   ".remote-overlay { inset: 0 }": "link-lost overlay at z-index 5000, meant to cover everything",
-  ".msheet-backdrop { inset: 0 }": "mobile bottom sheet at z-index 4000, meant to cover everything"
+  ".msheet-backdrop { inset: 0 }": "mobile bottom sheet at z-index 4000, meant to cover everything",
+  ".avatar-root .avatar-frame { inset: 0 }": "the avatar window is its own document, which never mounts a status banner"
 };
 
 const FULL_VIEWPORT_HEIGHT = /\b100[dsl]?vh\b/;

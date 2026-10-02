@@ -8528,9 +8528,10 @@ body:has(.rm-modal) .rm-conflict-modal {
 
 /* ---------- Avatar character window (A2) ----------------------------------
    Colours are --avatar-* custom properties the container sets from the shared
-   palette for the system theme. Every stroke is drawn twice, an underlay ring
-   under the ink, so the mask reads on any desktop behind the transparent
-   window. */
+   palette for the system theme. The face sits in a dark terminal frame drawn
+   inside the transparent window, so .avatar-frame re-declares the dark palette
+   for its descendants whatever the system theme; the underlay ring takes the
+   frame colour and only detaches the strokes from the plate. */
 .avatar-root {
   --avatar-ink: #ece8dc;
   --avatar-underlay: #202020;
@@ -8559,6 +8560,56 @@ html.avatar-document body {
   width: 100%;
   height: auto;
   overflow: visible;
+}
+
+/* Dark palette whatever the system theme; faded is lifted for contrast on the opaque frame, the underlay melts into it. */
+.avatar-root .avatar-frame {
+  --avatar-ink: #ece8dc;
+  --avatar-underlay: #181818;
+  --avatar-dim: #9a9a9a;
+  --avatar-faded: #7a7a7a;
+  --avatar-fault: #d04545;
+  --avatar-glow: #d4a24a;
+  --avatar-lost: #b678ff;
+  --avatar-quota: #e0b341;
+  --avatar-mail: #4488ff;
+  --avatar-accent: #4488ff;
+  --avatar-work: #3ec46d;
+  position: fixed;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+  background: #181818;
+  border: 1px solid #333;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.avatar-root[data-frame='normal'] .avatar-frame::before {
+  content: '\276F  kory';
+  flex: none;
+  height: 16px;
+  line-height: 16px;
+  padding: 0 7px;
+  background: #202020;
+  border-bottom: 1px solid #333;
+  color: #9a9a9a;
+  font-family: var(--mono);
+  font-size: 10px;
+  font-variant-emoji: text;
+  white-space: pre;
+  overflow: hidden;
+}
+
+.avatar-root .avatar-frame .avatar-skin {
+  flex: 1 1 0;
+  min-height: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 2px;
+  box-sizing: border-box;
 }
 
 .avatar-root .avatar-skin .avatar-under,
@@ -8593,7 +8644,7 @@ html.avatar-document body {
   opacity: 0.18;
 }
 
-.avatar-root[data-move='free'] .avatar-face {
+.avatar-root[data-move='free'] .avatar-frame {
   cursor: grab;
 }
 

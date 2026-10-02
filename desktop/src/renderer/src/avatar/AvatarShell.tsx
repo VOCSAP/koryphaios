@@ -31,10 +31,13 @@ export function AvatarShell({ view, previous, osReducedMotion, move }: AvatarShe
       style={style}
       data-face={summary.face}
       data-move={move}
+      data-frame={presentation.frame}
       {...motion.data}
     >
-      {/* Keyed by face: the one-shot enter animation restarts only on a fresh element. */}
-      <Skin key={summary.face} summary={summary} />
+      <div className="avatar-frame">
+        {/* Keyed by face: the one-shot enter animation restarts only on a fresh element. */}
+        <Skin key={summary.face} summary={summary} />
+      </div>
     </div>
   )
 }

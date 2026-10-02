@@ -22,6 +22,9 @@ interface AvatarTrayCopy {
   sizeSmall: string
   sizeMedium: string
   sizeLarge: string
+  frame: string
+  frameNormal: string
+  frameFull: string
   doNotDisturb: string
   dndOff: string
   dnd30m: string
@@ -47,6 +50,9 @@ export const AVATAR_TRAY_COPY = {
     sizeSmall: 'Small',
     sizeMedium: 'Medium',
     sizeLarge: 'Large',
+    frame: 'Frame',
+    frameNormal: 'Normal terminal',
+    frameFull: 'Full screen',
     doNotDisturb: 'Do not disturb',
     dndOff: 'Off',
     dnd30m: '30 minutes',
@@ -70,6 +76,9 @@ export const AVATAR_TRAY_COPY = {
     sizeSmall: 'Petite',
     sizeMedium: 'Moyenne',
     sizeLarge: 'Grande',
+    frame: 'Cadre',
+    frameNormal: 'Terminal normal',
+    frameFull: 'Plein écran',
     doNotDisturb: 'Ne pas déranger',
     dndOff: 'Désactivé',
     dnd30m: 'Pendant 30 minutes',

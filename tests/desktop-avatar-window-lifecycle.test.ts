@@ -22,6 +22,7 @@ function appearance(patch: Partial<AvatarAppearance> = {}): AvatarAppearance {
     alwaysOnTop: true,
     positionLocked: false,
     size: 'm',
+    frame: 'normal',
     idleOpacity: 1,
     motion: 'continuous',
     dndUntil: null,
@@ -271,6 +272,7 @@ function rig(init: RigOptions = {}) {
           alwaysOnTop: publication.appearance.alwaysOnTop,
           positionLocked: publication.appearance.positionLocked,
           size: publication.appearance.size,
+          frame: publication.appearance.frame,
           idleOpacity: publication.appearance.idleOpacity
         }
       }

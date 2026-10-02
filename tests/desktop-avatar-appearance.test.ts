@@ -20,6 +20,7 @@ function validAppearance(): AvatarAppearance {
     alwaysOnTop: true,
     positionLocked: false,
     size: 'm',
+    frame: 'normal',
     idleOpacity: 1,
     motion: 'continuous',
     dndUntil: 1_800_000_000_000,
@@ -103,6 +104,7 @@ test('rejects one malformed appearance field while preserving validation of ever
     ['alwaysOnTop', 'yes'],
     ['positionLocked', 'yes'],
     ['size', 'xl'],
+    ['frame', 'wide'],
     ['idleOpacity', 1.1],
     ['dndUntil', 'never'],
     ['dndChoice', 'later'],
@@ -120,6 +122,7 @@ test('rejects one malformed appearance field while preserving validation of ever
       alwaysOnTop: true,
       positionLocked: false,
       size: 'm',
+      frame: 'normal',
       idleOpacity: 1,
       motion: 'continuous',
       dndUntil: null,
@@ -128,6 +131,25 @@ test('rejects one malformed appearance field while preserving validation of ever
     })
     expect(errors).toEqual([{ scope: 'avatar-appearance', message: `appearance unreadable (${file})` }])
   }
+})
+
+test('a file written before the frame existed reads as a normal frame and keeps every other choice', async () => {
+  const appearance = await import('../desktop/src/main/avatar-appearance.ts')
+  const file = appearanceFile()
+  const { frame: _frame, ...older } = { ...validAppearance(), size: 'l' as const }
+  writeFileSync(file, JSON.stringify(older))
+  const errors: string[] = []
+  const read = appearance.readAvatarAppearance(file, { reportError: (_scope, message) => errors.push(message) })
+  expect(read.frame).toBe('normal')
+  expect(read.size, 'a missing frame must not reset the stored appearance to defaults').toBe('l')
+  expect(errors).toEqual([])
+})
+
+test('a full frame round-trips through the file', async () => {
+  const appearance = await import('../desktop/src/main/avatar-appearance.ts')
+  const file = appearanceFile()
+  appearance.writeAvatarAppearance(file, { ...validAppearance(), frame: 'full' })
+  expect(appearance.readAvatarAppearance(file, { reportError: () => {} }).frame).toBe('full')
 })
 
 test('an existing but invalid file keeps a readable visible, otherwise hides; only a missing file shows by default', async () => {

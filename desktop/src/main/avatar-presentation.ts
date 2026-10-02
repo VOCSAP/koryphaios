@@ -70,6 +70,7 @@ export function createAvatarPresentation(options: AvatarPresentationOptions): Av
           alwaysOnTop: appearance.alwaysOnTop,
           positionLocked: appearance.positionLocked,
           size: appearance.size,
+          frame: appearance.frame,
           idleOpacity: appearance.idleOpacity
         }
       }

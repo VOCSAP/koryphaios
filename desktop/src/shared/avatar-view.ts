@@ -43,6 +43,7 @@ export interface AvatarViewPresentation {
   alwaysOnTop: boolean
   positionLocked: boolean
   size: 's' | 'm' | 'l'
+  frame: 'normal' | 'full'
   idleOpacity: number
 }
 

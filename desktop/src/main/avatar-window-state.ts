@@ -117,6 +117,7 @@ const APPEARANCE_FIELD_OWNER = {
   positions: 'transition',
   alwaysOnTop: 'patch',
   size: 'patch',
+  frame: 'patch',
   idleOpacity: 'patch',
   motion: 'patch',
   dndUntil: 'patch',

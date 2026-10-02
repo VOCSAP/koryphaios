@@ -34,6 +34,7 @@ function appearance(patch: Partial<AvatarAppearance> = {}): AvatarAppearance {
     alwaysOnTop: true,
     positionLocked: false,
     size: 'm',
+    frame: 'normal',
     idleOpacity: 1,
     motion: 'continuous',
     dndUntil: null,
@@ -1090,6 +1091,19 @@ describe('position, restoration and persistence rules', () => {
     expect(h.lastExecuted('prepare').size).toEqual(AVATAR_WINDOW_SIZES.s)
     expect(h.kind).toBe('ready')
     expect(h.shows, 'a resize must not reveal a hidden avatar').toBe(0)
+  })
+
+  test('a frame change is stored and published without any native effect', () => {
+    const h = readyHarness()
+    const native = h.executed.length
+    const writes = h.writes.length
+    h.dispatch({ kind: 'AppearanceChanged', patch: { frame: 'full' } })
+    expect(h.state.appearance.frame).toBe('full')
+    const kinds = h.executed.slice(native).map((effect) => effect.kind)
+    expect(new Set(kinds), 'the frame is drawn by the renderer: the window keeps its size and options').toEqual(new Set(['writeSnapshot', 'publish']))
+    expect(h.writes.length).toBe(writes + 1)
+    h.dispatch({ kind: 'AppearanceChanged', patch: { frame: 'full' } })
+    expect(h.writes.length, 'the same frame chosen again writes nothing').toBe(writes + 1)
   })
 
   test('a patch changing size and always on top carries both in one preparation', () => {

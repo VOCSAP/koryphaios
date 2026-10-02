@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import type { AvatarViewApi, AvatarViewState } from '@shared/avatar-view'
 
-export const AVATAR_HIT_SELECTOR = '.avatar-face'
+// The whole drawn frame is a target; outside its rounded corners the window stays click-through.
+export const AVATAR_HIT_SELECTOR = '.avatar-frame'
 const AVATAR_CAPTURE_SELECTOR = '.avatar-root'
 
 export type AvatarMoveMode = 'free' | 'locked' | 'dragging'

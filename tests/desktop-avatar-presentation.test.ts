@@ -13,6 +13,7 @@ function appearance(patch: Partial<AvatarAppearance> = {}): AvatarAppearance {
     alwaysOnTop: true,
     positionLocked: false,
     size: 'm',
+    frame: 'normal',
     idleOpacity: 1,
     motion: 'continuous',
     dndUntil: null,
@@ -39,7 +40,7 @@ test('projects one summary and the machine snapshot into a view state', () => {
     publication({
       revision: 5,
       generation: 3,
-      appearance: appearance({ visible: false, positionLocked: true, size: 'l', idleOpacity: 0.5, motion: 'none' }),
+      appearance: appearance({ visible: false, positionLocked: true, size: 'l', frame: 'full', idleOpacity: 0.5, motion: 'none' }),
       position: { screenId: '1', workArea: { x: 0, y: 0, width: 1000, height: 800 }, x: 10, y: 20 }
     })
   )
@@ -70,6 +71,7 @@ test('projects one summary and the machine snapshot into a view state', () => {
       alwaysOnTop: true,
       positionLocked: true,
       size: 'l',
+      frame: 'full',
       idleOpacity: 0.5
     }
   })

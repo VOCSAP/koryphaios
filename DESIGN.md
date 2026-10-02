@@ -357,6 +357,17 @@ failure shape as a className matching no selector at all, different cause.
   not as a rectangle glued on top. Moving a handle changes which element owns
   pointer events at that edge: check the header's own controls stay clickable
   along their top edge, not only at their center.
+- **Avatar in a terminal frame.** The character window stays transparent and
+  DRAWS a dark console frame (`.avatar-frame`: `#181818`, 1px `#333`, radius
+  8px, the dark-theme token values, because the avatar document has no
+  `data-theme`). Two variants on `.avatar-root[data-frame]`, chosen in the
+  Tray: `normal` adds a 16px title bar (`#202020`, mono 10px `--fg-dim` grey)
+  reading `❯  kory`, `full` is the backdrop alone. The prompt is U+276F, a
+  typographic ornament with no emoji presentation, written as the CSS escape
+  `\276F` with `font-variant-emoji: text`. The frame re-declares the dark
+  `--avatar-*` palette, so the face never follows a light system theme, and
+  the underlay ring takes the frame colour. The whole frame is the grab and
+  hover target; only the area outside its rounded corners stays click-through.
 
 ## 5. Iconography — the Greek glyph set
 
