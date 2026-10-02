@@ -10,7 +10,9 @@ import {
   buildKeystrokes,
   canApplyVerdict,
   classifyVerdict,
+  settleTileAnsweredInTerminal,
 } from "../desktop/src/main/approval-service";
+import { deriveOperatorId, generateCredential } from "../shared/approval.ts";
 import type { Approval } from "../desktop/src/main/approval-auth";
 
 // KORY_INDEX_TS overrides which index.ts copy is sliced, letting this suite
@@ -76,7 +78,7 @@ ${POLLER}
 
 const registerListener = await evaluate<void>(
   `export function register(env) {
-  const { service, waitingTiles, openApprovals, approvals, claimApproval, markVerdictsDelivered, reportError, journal,
+  const { service, waitingTiles, openApprovals, approvals, settleTileAnsweredInTerminal, reportError, journal,
           addApproval, approvalsEnabled, computeDeckProjectKey, cliContext, activeScope, hostname,
           config, Notification, app } = env
 ${LISTENER}
@@ -281,7 +283,13 @@ describe("pollApprovalVerdicts (sliced verbatim from index.ts)", () => {
 });
 
 describe("attention listener (sliced verbatim from index.ts)", () => {
-  function listenerEnv(claimResult: unknown = { id: "appr-42" }) {
+  function listenerEnv(
+    sweepResult: { settled: string[]; lost: string[]; delivered: string[] } = {
+      settled: ["appr-42"],
+      lost: [],
+      delivered: [],
+    },
+  ) {
     const calls: Call[] = [];
     const service = new EventEmitter() as EventEmitter & { list: () => unknown[] };
     service.list = () => [{ id: "s1", name: "tile one", peerId: null }];
@@ -292,13 +300,9 @@ describe("attention listener (sliced verbatim from index.ts)", () => {
       waitingTiles,
       openApprovals,
       approvals: { deps: () => ({ fake: true }) },
-      claimApproval: (...args: unknown[]) => {
-        calls.push({ fn: "claimApproval", args });
-        return Promise.resolve(claimResult);
-      },
-      markVerdictsDelivered: (...args: unknown[]) => {
-        calls.push({ fn: "markVerdictsDelivered", args });
-        return Promise.resolve(1);
+      settleTileAnsweredInTerminal: (...args: unknown[]) => {
+        calls.push({ fn: "settleTileAnsweredInTerminal", args });
+        return Promise.resolve(sweepResult);
       },
       addApproval: (...args: unknown[]) => {
         calls.push({ fn: "addApproval", args });
@@ -325,7 +329,7 @@ describe("attention listener (sliced verbatim from index.ts)", () => {
     await Bun.sleep(20);
     expect(calls.some((c) => c.fn === "reportError")).toBe(true);
     // 4f0143ff must stay closed: a dismiss still answers nothing on its own.
-    expect(calls.some((c) => c.fn === "claimApproval")).toBe(false);
+    expect(calls.some((c) => c.fn === "settleTileAnsweredInTerminal")).toBe(false);
     // ...and the approval stays open, so the poller can still deliver it.
     expect(openApprovals.get("s1")).toBe("appr-42");
   });
@@ -337,48 +341,128 @@ describe("attention listener (sliced verbatim from index.ts)", () => {
     expect(calls.some((c) => c.fn === "reportError")).toBe(false);
   });
 
-  test("an automatic clear still settles the open approval (untouched path)", async () => {
+  test("an automatic clear sweeps the whole tile, even with no approval of the Deck's own open", async () => {
     const { calls, service, openApprovals } = listenerEnv();
+    service.emit("attention", { id: "s1", waiting: false });
+    await Bun.sleep(20);
+    const sweeps = calls.filter((c) => c.fn === "settleTileAnsweredInTerminal");
+    expect(
+      sweeps.map((c) => c.args[1]),
+      "the hook's permission is not in openApprovals: gating the sweep on it leaves the permission Approve-able",
+    ).toEqual(["s1"]);
+    expect(calls.some((c) => c.fn === "reportError"), "the local settlement failed").toBe(false);
     openApprovals.set("s1", "appr-42");
     service.emit("attention", { id: "s1", waiting: false });
     await Bun.sleep(20);
-    expect(calls.filter((c) => c.fn === "claimApproval")).toHaveLength(1);
     expect(openApprovals.has("s1")).toBe(false);
   });
 
-  test("an answer given in the terminal is marked delivered, so no keystroke is replayed into the next dialog", async () => {
-    const { calls, service, openApprovals } = listenerEnv();
-    openApprovals.set("s1", "appr-42");
+  test("a verdict given elsewhere that the terminal answer overrides is journaled once", async () => {
+    const { calls, service } = listenerEnv({ settled: [], lost: ["appr-42"], delivered: ["appr-42", "appr-43"] });
     service.emit("attention", { id: "s1", waiting: false });
     await Bun.sleep(20);
-    expect(calls.some((c) => c.fn === "reportError"), "the local settlement failed").toBe(false);
-    const marks = calls.filter((c) => c.fn === "markVerdictsDelivered");
-    expect(
-      marks.map((c) => c.args[1]),
-      "a locally-answered verdict left undelivered is typed as Allow into the next dialog of the tile",
-    ).toEqual([["appr-42"]]);
-    const order = calls.map((c) => c.fn).filter((fn) => fn === "claimApproval" || fn === "markVerdictsDelivered");
-    expect(order).toEqual(["claimApproval", "markVerdictsDelivered"]);
+    const traced = (id: string) =>
+      calls.filter((c) => c.fn === "journal.add" && c.args[0] === "attention" && String(c.args[1]).includes(id));
+    expect(traced("appr-42"), "a remote verdict overridden by the terminal answer must leave one journal line").toHaveLength(1);
+    expect(traced("appr-43")).toHaveLength(1);
+  });
+});
 
-    // The broker stops listing a delivered verdict as undelivered: a new
-    // dialog on the same tile then gets nothing typed into it.
-    const delivered = new Set(marks.flatMap((c) => c.args[1] as string[]));
-    const settled = [verdict()].filter((v) => !delivered.has(v.id));
-    const { poll, written } = pollerEnv({ settled, tiles: ["s1"], waiting: ["s1"] });
-    await poll();
-    expect(written).toEqual([]);
-    expect(calls.some((c) => c.fn === "journal.add" && String(c.args[1]).includes("appr-42"))).toBe(false);
+describe("settleTileAnsweredInTerminal", () => {
+  const identity = (() => {
+    const cred = generateCredential();
+    return {
+      publicKey: cred.publicKey,
+      privateKey: cred.privateKey,
+      operatorId: deriveOperatorId(cred.publicKey),
+      osUserHash: "h",
+    };
+  })();
+
+  function row(id: string, tile: string, over: Partial<Approval> = {}): Approval {
+    return {
+      id,
+      status: "pending",
+      mergeable: true,
+      absorbed_permission: false,
+      answer_kind: null,
+      created_at: "2026-10-02T08:00:00.000Z",
+      origin: { tile_ref: tile, session_ref: tile },
+      ...over,
+    } as unknown as Approval;
+  }
+
+  function fakeBroker(opts: { pending: Approval[]; undelivered: Approval[]; lost?: string[] }) {
+    const claims: Array<Record<string, unknown>> = [];
+    const marked: string[][] = [];
+    const fetchImpl = (async (_url: string, init: RequestInit) => {
+      const url = String(_url);
+      const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+      const json = (v: unknown, status = 200) => new Response(JSON.stringify(v), { status });
+      if (url.endsWith("/approval/list")) {
+        if (body.undelivered_only) return json({ approvals: opts.undelivered });
+        return json({ approvals: body.status === "pending" ? opts.pending : [] });
+      }
+      if (url.endsWith("/approval/claim")) {
+        claims.push(body);
+        if (opts.lost?.includes(String(body.id))) return json({ error: "already-settled" }, 409);
+        return json({ approval: row(String(body.id), "s1", { status: "answered_terminal" }) });
+      }
+      if (url.endsWith("/approval/delivered")) {
+        marked.push(body.ids as string[]);
+        return json({ marked: (body.ids as string[]).length });
+      }
+      return json({ error: "unexpected" }, 500);
+    }) as unknown as typeof fetch;
+    const deps = { endpoint: { url: "http://broker", token: null }, identity, projectKey: "proj", fetchImpl };
+    return { deps, claims, marked };
+  }
+
+  test("closes every tile notification as answered in the terminal and spares guarded requests and other tiles", async () => {
+    const { deps, claims, marked } = fakeBroker({
+      pending: [
+        row("deck-question", "s1", { absorbed_permission: true }),
+        row("hook-permission", "s1"),
+        row("session-only", "s1", { origin: { tile_ref: "", session_ref: "s1" } } as Partial<Approval>),
+        row("guarded-ticket", "s1", { mergeable: false }),
+        row("other-tile", "s2"),
+      ],
+      undelivered: [
+        row("phone-allow", "s1", { status: "answered", answer_kind: "allow" }),
+        row("other-verdict", "s2", { status: "answered", answer_kind: "allow" }),
+      ],
+      lost: ["hook-permission"],
+    });
+    const result = await settleTileAnsweredInTerminal(deps as never, "s1");
+    expect(claims.map((c) => c.id)).toEqual(["deck-question", "hook-permission", "session-only"]);
+    expect(
+      claims.every((c) => c.terminal === true && c.answer_kind === undefined),
+      "a terminal answer must never be relayed as a verdict the operator did not give",
+    ).toBe(true);
+    expect(result).toEqual({
+      settled: ["deck-question", "session-only"],
+      lost: ["hook-permission"],
+      delivered: ["phone-allow"],
+    });
+    expect(marked, "a verdict answered before the terminal would be typed into the tile's next dialog").toEqual([
+      ["phone-allow"],
+    ]);
   });
 
-  test("a verdict given elsewhere first (409) is still marked delivered, and its loss is journaled", async () => {
-    const { calls, service, openApprovals } = listenerEnv(null);
-    openApprovals.set("s1", "appr-42");
-    service.emit("attention", { id: "s1", waiting: false });
-    await Bun.sleep(20);
-    expect(calls.filter((c) => c.fn === "markVerdictsDelivered").map((c) => c.args[1])).toEqual([["appr-42"]]);
-    const trace = calls.filter(
-      (c) => c.fn === "journal.add" && c.args[0] === "attention" && String(c.args[1]).includes("appr-42"),
-    );
-    expect(trace, "a remote verdict overridden by the terminal answer must leave a journal line").toHaveLength(1);
+  test("a row raised just before the sweep is closed, never left Approve-able: losing the next dialog's phone answer beats an orphan permission typed later", async () => {
+    const justRaised = row("raised-just-now", "s1", { kind: "permission", created_at: new Date().toISOString() } as Partial<Approval>);
+    const { deps, claims, marked } = fakeBroker({ pending: [justRaised], undelivered: [] });
+    const result = await settleTileAnsweredInTerminal(deps as never, "s1");
+    expect(result.settled, "the sweep takes no snapshot: a row whose hook POST landed late is still closed").toEqual([
+      "raised-just-now",
+    ]);
+    expect(claims).toEqual([expect.objectContaining({ id: "raised-just-now", terminal: true })]);
+    expect(marked).toEqual([]);
+    const closed = row("raised-just-now", "s1", { status: "answered_terminal" });
+    expect(
+      classifyVerdict(closed, { exists: true, waiting: true }),
+      "a row closed by the terminal must never be typed into the dialog now on screen",
+    ).not.toBe("apply");
+    expect(buildKeystrokes(closed)).toBeNull();
   });
 });

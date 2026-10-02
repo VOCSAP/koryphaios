@@ -1667,8 +1667,16 @@ export type ApprovalKind = "permission" | "question" | "plan";
  *                   still blocked and the Deck may still claim it.
  * abandoned      -> the producer gave up (session closed, host gone)
  * acknowledged   -> the operator read it and gave no answer; never a refusal
+ * answered_terminal -> the operator answered on the tile itself; which verdict
+ *                   is unknown, so nothing is relayed or typed
  */
-export type ApprovalStatus = "pending" | "answered" | "expired_notif" | "abandoned" | "acknowledged";
+export type ApprovalStatus =
+  | "pending"
+  | "answered"
+  | "expired_notif"
+  | "abandoned"
+  | "acknowledged"
+  | "answered_terminal";
 
 /** Shape of the answer. `text` carries a free-form operator prompt. */
 export type ApprovalAnswerKind = "allow" | "deny" | "text";
@@ -1747,7 +1755,7 @@ export interface Approval {
   reply_route: ApprovalReplyRoute;
   /** A tile notification that a later raise for the same tile may merge into; never acknowledgeable. */
   mergeable: boolean;
-  /** A permission raise merged into this question: it takes no deny or text verdict, its dialog is answered on the tile. */
+  /** A permission was raised on this question's tile: it takes no verdict, only a terminal answer closes it. */
   absorbed_permission: boolean;
   answered_via: ApprovalVia | null;
   answer_kind: ApprovalAnswerKind | null;
@@ -1809,6 +1817,8 @@ export interface ApprovalClaimRequest {
   answer_text?: string;
   /** Settle as acknowledged instead of answering; exclusive with answer_kind. */
   acknowledge?: boolean;
+  /** Settle as answered on the tile itself (status answered_terminal); via deck only, exclusive with the others. */
+  terminal?: boolean;
 }
 
 export interface ApprovalClaimResponse {

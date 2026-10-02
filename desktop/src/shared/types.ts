@@ -238,7 +238,13 @@ export const JOIN_ANNOUNCE_LEVELS: JoinAnnounceLevel[] = ['off', 'lead', 'all']
  * Keep the fields in sync by hand if the broker's shape moves -- nothing
  * enforces that automatically.
  */
-export type ApprovalStatus = 'pending' | 'answered' | 'expired_notif' | 'abandoned' | 'acknowledged'
+export type ApprovalStatus =
+  | 'pending'
+  | 'answered'
+  | 'expired_notif'
+  | 'abandoned'
+  | 'acknowledged'
+  | 'answered_terminal'
 export type ApprovalKind = 'permission' | 'question' | 'plan'
 export type ApprovalVia = 'deck' | 'telegram' | 'discord' | 'ntfy'
 export type ApprovalReplyRoute = 'channel' | 'pty'

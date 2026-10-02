@@ -592,6 +592,32 @@ describe("notification expiry (C-4: the notif expires, the session does not)", (
     expect(deckClaim.status).toBe(200);
   });
 
+  test("retention purges a row answered in the terminal, never a pending one", async () => {
+    const b = await boot();
+    const op = newOperator();
+    const terminal = await addApproval(b, op, { tile_ref: "tile-retention" });
+    const pending = await addApproval(b, op, { tile_ref: "tile-retention-pending" });
+    const closed = await signedPost(
+      b,
+      "/approval/claim",
+      { id: terminal.id, via: "deck", terminal: true },
+      { cred: op.cred, operator_id: op.id }
+    );
+    expect(closed.status).toBe(200);
+
+    const db = new Database(b.dbPath);
+    const longAgo = new Date(Date.now() - 400 * 86400_000).toISOString();
+    db.run("UPDATE pending_approvals SET created_at = ? WHERE id IN (?, ?)", [longAgo, terminal.id, pending.id]);
+    db.close();
+
+    await fetch(`${b.url}/admin/purge-messages`);
+    const check = new Database(b.dbPath);
+    const left = (check.query("SELECT id FROM pending_approvals").all() as { id: string }[]).map((r) => r.id);
+    check.close();
+    expect(left, "a status missing from the purge list keeps its rows forever").not.toContain(terminal.id);
+    expect(left).toContain(pending.id);
+  });
+
   test("an expired notification can NOT be settled from a remote channel", async () => {
     const b = await boot();
     const op = newOperator();
@@ -892,7 +918,12 @@ describe("merge species (chantier 3189b002+874e9053)", () => {
       { cred: sessionA.cred, operator_id: op.id, kind: "session", token_id: sessionA.token_id }
     );
     expect(hookFirst.status).toBe(200);
-    const deckSecond = await addApproval(b, op, { title: "deck title", question: "deck question", tile_ref: tileA });
+    const deckSecond = await addApproval(b, op, {
+      kind: "question",
+      title: "deck title",
+      question: "deck question",
+      tile_ref: tileA,
+    });
     expect(deckSecond.id).toBe(hookFirst.body.approval.id);
 
     // deck-then-hook: the order 874e9053 measured as NOT merging pre-fix,
@@ -1002,7 +1033,7 @@ describe("merge species (chantier 3189b002+874e9053)", () => {
     );
     db.close();
 
-    const second = await addApproval(b, op, { tile_ref: tileRef });
+    const second = await addApproval(b, op, { kind: "question", tile_ref: tileRef });
     expect(second.id).toBe(legacyId);
   });
 });

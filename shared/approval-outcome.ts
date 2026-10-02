@@ -11,6 +11,7 @@ export type SettledOutcome =
   | { kind: "approved" }
   | { kind: "rejected" }
   | { kind: "acknowledged" }
+  | { kind: "terminal" }
   | { kind: "gone" };
 
 function unreachable(value: never): never {
@@ -25,6 +26,8 @@ export function settledOutcome(
       return { kind: "pending" };
     case "acknowledged":
       return { kind: "acknowledged" };
+    case "answered_terminal":
+      return { kind: "terminal" };
     case "expired_notif":
     case "abandoned":
       return { kind: "gone" };
@@ -48,6 +51,9 @@ export function settledOutcome(
 export const ACKNOWLEDGED_WAIT_TEXT =
   "The operator acknowledged your question without answering: read, nothing to add. This is not a refusal; proceed on your own judgment.";
 
+export const TERMINAL_WAIT_TEXT =
+  "The operator answered this directly in your terminal. What they chose is not relayed here: rely on what your session received.";
+
 /** The ask_operator / ask_operator_wait reply, or null while still pending. */
 export function askOperatorWaitReply(
   approval: Pick<Approval, "status" | "answer_kind" | "answer_text" | "answered_via">
@@ -64,6 +70,8 @@ export function askOperatorWaitReply(
       return { text: `The operator answered (via ${approval.answered_via}): no / rejected`, isError: false };
     case "acknowledged":
       return { text: ACKNOWLEDGED_WAIT_TEXT, isError: false };
+    case "terminal":
+      return { text: TERMINAL_WAIT_TEXT, isError: false };
     case "gone":
       return {
         text: "That question is no longer awaiting an answer (it expired or was withdrawn). Ask the operator on screen.",

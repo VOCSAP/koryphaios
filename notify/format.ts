@@ -102,6 +102,9 @@ export function renderSettled(approval: Approval, viaLabel: string): string {
     case "acknowledged":
       verdict = "acknowledged, no answer";
       break;
+    case "terminal":
+      verdict = "answered in the terminal";
+      break;
     case "pending":
     case "gone":
       verdict = "closed";

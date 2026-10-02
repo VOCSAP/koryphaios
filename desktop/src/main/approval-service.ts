@@ -155,6 +155,49 @@ export async function claimApproval(
   }
 }
 
+/**
+ * Settle as answered on the tile itself, verdict unknown: the broker relays
+ * nothing to the agent and nothing is ever typed. Same 409 contract as
+ * claimApproval.
+ */
+export async function settleAnsweredInTerminal(deps: ApprovalDeps, id: string): Promise<Approval | null> {
+  try {
+    const res = await signedPost<{ approval: Approval }>(deps, '/approval/claim', {
+      id,
+      project_key: deps.projectKey,
+      via: 'deck',
+      terminal: true
+    })
+    return res.approval
+  } catch (e) {
+    if (e instanceof Error && /: 409$/.test(e.message)) return null
+    throw e
+  }
+}
+
+/**
+ * The tile stopped waiting because the operator answered it in its terminal:
+ * close every tile notification still open for it (the Deck's question and the
+ * hook's permission alike), and mark delivered any verdict answered elsewhere
+ * that was still to be typed, so it can never land in the tile's NEXT dialog.
+ * Guarded requests (`mergeable` false) gate an action and are left alone.
+ */
+export async function settleTileAnsweredInTerminal(
+  deps: ApprovalDeps,
+  tile: string
+): Promise<{ settled: string[]; lost: string[]; delivered: string[] }> {
+  const onTile = (a: Approval): boolean => a.mergeable && (a.origin.tile_ref || a.origin.session_ref) === tile
+  const settled: string[] = []
+  const lost: string[] = []
+  for (const approval of (await fetchPendingApprovals(deps)).filter(onTile)) {
+    if (await settleAnsweredInTerminal(deps, approval.id)) settled.push(approval.id)
+    else lost.push(approval.id)
+  }
+  const delivered = (await fetchUndeliveredVerdicts(deps)).filter(onTile).map((a) => a.id)
+  await markVerdictsDelivered(deps, delivered)
+  return { settled, lost, delivered }
+}
+
 /** Settle as acknowledged (read, no answer). Same 409 contract as claimApproval. */
 export async function ackApproval(deps: ApprovalDeps, id: string): Promise<Approval | null> {
   try {

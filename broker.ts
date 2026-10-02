@@ -1598,7 +1598,7 @@ try {
   if (!msg.includes("duplicate column name")) log.error(`migration: ${msg}`);
 }
 
-// A tile question into which a permission raise merged: refuses a deny or text verdict.
+// A tile question whose permission raise has its own row: it takes no verdict.
 try {
   db.run("ALTER TABLE pending_approvals ADD COLUMN absorbed_permission INTEGER NOT NULL DEFAULT 0");
 } catch (e) {
@@ -8744,6 +8744,8 @@ function deliverApprovalAnswer(row: ApprovalRow): void {
     case "acknowledged":
       answer = "Acknowledged, no answer.";
       break;
+    // The agent already got the operator's answer through its own terminal.
+    case "terminal":
     case "pending":
     case "gone":
       return;
@@ -8810,11 +8812,11 @@ function handleApprovalAdd(
   const pinned = assertStampSessionRef(stamp, draft.value.session_ref);
   if (pinned) return pinned;
 
-  // De-duplication: a tile can only be waiting on ONE thing at a time, so a
-  // second NOTIFICATION for the same tile is a double-raise, merged into one
-  // (commit 4c2b2cf). A GUARDED REQUEST (`merge: 'never'`) neither searches
-  // for a row to reuse nor is ever found by one: its verdict is re-read by a
-  // caller gating an action (chantier 3189b002+874e9053).
+  // De-duplication per tile: a permission keeps its own row, a question joins
+  // the tile's pending permission, and a question with none is marked absorbed
+  // once a permission arrives. A GUARDED REQUEST (`merge: 'never'`) neither
+  // searches for a row to reuse nor is ever found by one: its verdict is
+  // re-read by a caller gating an action.
   // The pending-count check keeps the session-pinned `approvalWhere` (a flood
   // cap is about THIS credential). The dedup SELECT uses `approvalTileWhere`
   // instead, deliberately wider (no session_ref), so the hook's session
@@ -8823,26 +8825,22 @@ function handleApprovalAdd(
   const where = approvalWhere(scope);
   if (draft.value.tile_ref && draft.value.merge === "tile") {
     const tileWhere = approvalTileWhere(scope);
+    // A permission keeps a row of its own, so it stays answerable from a phone:
+    // it reuses only a permission, while any other raise prefers to merge into
+    // one.
     const existing = db
       .query(
-        `SELECT id, status, kind FROM pending_approvals
+        `SELECT id, status FROM pending_approvals
           WHERE ${tileWhere.sql} AND tile_ref = ? AND mergeable = 1 AND status = 'pending'
-          ORDER BY created_at DESC LIMIT 1`
+            AND (? <> 'permission' OR kind = 'permission')
+          ORDER BY (kind = 'permission') DESC, created_at DESC LIMIT 1`
       )
-      .get(...(tileWhere.params as never[]), draft.value.tile_ref) as { id: string; status: string; kind: string } | null;
+      .get(...(tileWhere.params as never[]), draft.value.tile_ref, draft.value.kind) as {
+      id: string;
+      status: string;
+    } | null;
     if (existing) {
       log.info(`approval: duplicate raise for tile ${draft.value.tile_ref} — reusing ${existing.id}`);
-      // tile_ref is not authenticated, so the row is not turned into a
-      // permission: it only stops taking a deny or text verdict, which would
-      // settle it while the CLI dialog stays on screen.
-      if (draft.value.kind === "permission" && existing.kind !== "permission") {
-        db.run(
-          `UPDATE pending_approvals SET absorbed_permission = 1
-            WHERE ${tileWhere.sql} AND id = ? AND mergeable = 1 AND status = 'pending'`,
-          [...(tileWhere.params as never[]), existing.id]
-        );
-        log.info(`approval: ${existing.id} absorbed a permission raise`);
-      }
       // Only id + status: this branch can now match a row from a DIFFERENT
       // credential kind, so the caller must not read another producer's
       // title/question off it.
@@ -8910,6 +8908,20 @@ function handleApprovalAdd(
     ]
   );
 
+  // The tile's open question now describes a dialog that has its own row: a
+  // verdict on it would settle it while the CLI stays blocked. Marked only once
+  // that row exists, so a refused raise leaves no question absorbed.
+  if (draft.value.tile_ref && draft.value.merge === "tile" && draft.value.kind === "permission") {
+    const tileWhere = approvalTileWhere(scope);
+    const absorbed = db.run(
+      `UPDATE pending_approvals SET absorbed_permission = 1
+        WHERE ${tileWhere.sql} AND tile_ref = ? AND mergeable = 1 AND status = 'pending'
+          AND kind <> 'permission'`,
+      [...(tileWhere.params as never[]), draft.value.tile_ref]
+    ).changes;
+    if (absorbed > 0) log.info(`approval: ${absorbed} question(s) on tile ${draft.value.tile_ref} absorbed a permission raise`);
+  }
+
   // Read the row back UNDER SCOPE rather than assembling the response from the
   // values that were just written. Two reasons, and the second is the one that
   // matters: the response has to carry `operator_id` and `origin.project_key`,
@@ -8960,21 +8972,22 @@ function settleApproval(
   via: ApprovalVia,
   answerKind: Approval["answer_kind"],
   answerText: string | null,
-  status: "answered" | "acknowledged"
+  status: "answered" | "acknowledged" | "answered_terminal"
 ): { approval: Approval } | { error: string; status: number; refused?: AnswerRefusal } {
   const allowed = via === "deck" ? "('pending','expired_notif')" : "('pending')";
   const now = new Date().toISOString();
   const where = approvalWhere(scope);
   // A permission dialog only takes allow/deny keystrokes: free text would be
-  // typed into the chooser. A row that absorbed a permission keeps allow,
-  // which is how a terminal answer settles it. Checked inside the UPDATE so a
-  // permission absorbed between a read and this write is refused too.
+  // typed into the chooser. A row that absorbed a permission takes no verdict
+  // at all: its dialog has its own row, and only a terminal answer closes it.
+  // Checked inside the UPDATE so a permission absorbed between a read and this
+  // write is refused too.
   const res = db.run(
     `UPDATE pending_approvals
         SET status = ?, answered_via = ?, answer_kind = ?, answer_text = ?, answered_at = ?
       WHERE id = ? AND ${where.sql} AND status IN ${allowed}
         AND NOT (kind = 'permission' AND COALESCE(?, '') = 'text')
-        AND NOT (absorbed_permission = 1 AND COALESCE(?, '') IN ('deny', 'text'))`,
+        AND NOT (absorbed_permission = 1 AND COALESCE(?, '') IN ('allow', 'deny', 'text'))`,
     [status, via, answerKind, answerText, now, id, ...(where.params as never[]), answerKind, answerKind]
   );
   if (res.changes === 0) {
@@ -8990,7 +9003,7 @@ function settleApproval(
     if (existing.kind === "permission" && answerKind === "text" && settleable) {
       return { error: "a permission takes allow or deny, not a text answer", status: 422, refused: "verdict-only" };
     }
-    if (existing.absorbed_permission !== 0 && (answerKind === "deny" || answerKind === "text") && settleable) {
+    if (existing.absorbed_permission !== 0 && answerKind !== null && settleable) {
       return { error: "this question absorbed a permission dialog: answer it on its tile", status: 422, refused: "on-tile" };
     }
     return { error: "already-settled", status: 409 };
@@ -9025,6 +9038,23 @@ function handleApprovalClaim(
   if (!id) return { error: "id is required", status: 400 };
   const via = (body.via ?? "deck") as ApprovalVia;
   if (!APPROVAL_VIAS.includes(via)) return { error: "unknown via", status: 400 };
+  if (body.terminal === true) {
+    if (body.acknowledge !== undefined || body.answer_kind !== undefined || body.answer_text !== undefined) {
+      return { error: "terminal excludes acknowledge, answer_kind and answer_text", status: 400 };
+    }
+    // Only the Deck sees its own tiles: a terminal answer has no other witness.
+    if (via !== "deck") return { error: "a terminal answer is settled via deck only", status: 400 };
+    // A guarded request gates an action on its verdict: a tile's terminal
+    // answer says nothing about it.
+    if (authorized.rows[0]?.mergeable === 0) {
+      return { error: "only a tile notification can be answered in the terminal", status: 422 };
+    }
+    const closed = settleApproval(id, scope, via, null, null, "answered_terminal");
+    if (!("error" in closed)) {
+      void notifyRegistry.settle(closed.approval, via).catch((e) => log.error("notify: settle failed", e));
+    }
+    return closed;
+  }
   if (body.acknowledge === true) {
     if (body.answer_kind !== undefined || body.answer_text !== undefined) {
       return { error: "acknowledge excludes answer_kind and answer_text", status: 400 };
@@ -9471,7 +9501,7 @@ function sweepApprovals(): { expired: number; purged: number } {
   ).changes;
   const purged = db.run(
     `DELETE FROM pending_approvals
-      WHERE status IN ('answered','abandoned','acknowledged') AND created_at < datetime('now', ?)`,
+      WHERE status IN ('answered','abandoned','acknowledged','answered_terminal') AND created_at < datetime('now', ?)`,
     [`-${APPROVAL_TTL_DAYS} days`]
   ).changes;
   // Pairing codes were only ever deleted when someone tried to redeem one, so

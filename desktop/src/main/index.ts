@@ -187,6 +187,7 @@ import {
   fetchUndeliveredVerdicts,
   listChannels,
   markVerdictsDelivered,
+  settleTileAnsweredInTerminal,
   spawnPlanFootprint,
   waitApproval,
   type ApprovalDeps,
@@ -1244,24 +1245,20 @@ service.on(
           )
         return
       }
-      const open = openApprovals.get(id)
-      if (open) {
-        openApprovals.delete(id)
-        const deps = approvals.deps()
-        if (deps) {
-          // Delivered at once: the answer was given in the terminal, so the
-          // poller must never type this verdict into the next dialog.
-          void claimApproval(deps, { id: open, answerKind: 'allow' })
-            .then((claimed) => {
-              if (claimed === null)
-                journal.add(
-                  'attention',
-                  `"${session?.name ?? id}" was answered in the terminal: the verdict already given elsewhere for approval ${open} will not be typed`
-                )
-              return markVerdictsDelivered(deps, [open])
-            })
-            .catch((e) => reportError('approvals', 'could not settle a locally-answered approval', e))
-        }
+      openApprovals.delete(id)
+      const deps = approvals.deps()
+      if (deps) {
+        // The hook's permission never passes through openApprovals, so the
+        // whole tile is swept, not just the Deck's own question.
+        void settleTileAnsweredInTerminal(deps, id)
+          .then(({ lost, delivered }) => {
+            for (const approval of new Set([...lost, ...delivered]))
+              journal.add(
+                'attention',
+                `"${session?.name ?? id}" was answered in the terminal: the verdict already given elsewhere for approval ${approval} will not be typed`
+              )
+          })
+          .catch((e) => reportError('approvals', 'could not settle a locally-answered approval', e))
       }
       return
     }
