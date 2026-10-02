@@ -1,0 +1,16 @@
+{
+  "format": "koryphaios-lot/draft-0",
+  "name": "Mods Claude Code (module de function hooks dans le deck-plugin)",
+  "created": "2026-10-02",
+  "updated": "2026-10-02",
+  "author": "team-lead",
+  "note": "Decision operateur 2026-10-02 : approche ADDITIVE, un module a cote des hooks commande, qui restent le repli (CLI < 2.1.287, sandbox en 2.1.220). API mods instable entre versions. Le champ status est informatif ; la roadmap fait autorite.",
+  "items": [
+    { "rank": 0, "card": "bcf98df3", "status": "done", "note": "Sondes D1-D7 toutes MESUREES : chargement, usage/window, fork = cache chaud, reponse a AskUserQuestion et retrait du menu, allow d'une permission, fail-open, attente > 10 s par un appel $ ou next en vol (jamais $.clock.sleep ; fetch plafonne a 30 s par appel)", "title": "Lot 0 : sondes" },
+    { "rank": 1, "card": "373d492f", "status": "planned", "note": "Prochain du chantier. Jauge (inconnu = symbole actuel), activite thinking/outil/attente", "title": "Lot 1 : socle et telemetrie en lecture seule" },
+    { "rank": 2, "card": "9696c6a2", "status": "planned", "note": "Degelee, depend du lot 1. Voie $.model.fork validee par D3", "title": "Lot 2 : keep-warm du cache par fork" },
+    { "rank": 3, "card": "173814b2", "status": "planned", "note": "Depend du lot 1. next(e) + long-poll du Courrier (< 30 s par requete). Audit securite impose. A mesurer : latence, reponse vraie rendue par next(e) sur la tuile", "title": "Lot 3 : questions et permissions repondues par le module" },
+    { "rank": 4, "card": "32ffc303", "status": "planned", "note": "Apres le lot 1 tenu en usage reel", "title": "Lot 4 : retrait du scraping PTY" },
+    { "rank": 9, "card": "0e0659bf", "status": "frozen", "note": "Repli hors module du lot 3, avec bcd254f9 ; 93990265 candidate a l'archivage", "title": "Consommateurs choice (repli PTY)" }
+  ]
+}

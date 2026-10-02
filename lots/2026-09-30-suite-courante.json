@@ -2,7 +2,7 @@
   "format": "koryphaios-lot/draft-0",
   "name": "Suite courante (fiabilite Deck, replica, UI, Courrier)",
   "created": "2026-09-30",
-  "updated": "2026-10-01",
+  "updated": "2026-10-02",
   "author": "team-lead",
   "note": "Rang partage = vague (cartes lancees en parallele). Format provisoire : il sera remplace par celui que definit la carte d'import, et ce fichier regenere par son CLI. Le champ status est informatif ; la roadmap fait autorite.",
   "items": [
@@ -14,10 +14,12 @@
     { "rank": 2, "card": "11458bab", "status": "done", "commits": ["3ca9f3f"], "note": "Coeur deja regle par 84d180f ; residu verrou + heartbeat corrige", "title": "Deck : une sauvegarde de workspace qui echoue empeche Kory de se fermer" },
     { "rank": 2, "card": "7c5e21e7", "status": "done", "commits": ["cc9c296"], "note": "Plafond deck 3423 (3003 mesures sur le fil)", "title": "Le plafond de surface MCP ignore DECK_ONLY_TOOLS" },
     { "rank": 2, "card": "a7067102", "status": "wont", "note": "Tuee le 2026-10-01 (operateur) : Kory ne doit JAMAIS arreter le broker (sessions hors Kory et autres postes)", "title": "Le broker loopback survit a la fermeture de Kory" },
-    { "rank": 3, "card": "e78c8fae", "status": "in-progress", "note": "ARBRE NON COMMITE chez le developer -4. Option C (operateur) : RETIRER la bascule permission->pty AVANT le rebuild de l'operateur ; garder 422 texte/permission, puces Allow/Deny fixes, markVerdictsDelivered + journal 409 ; item fusionne = Acquitter + Fermer seulement (marque 'a absorbe une permission' necessaire, la garde 422 mergeable de 793207b4 refuse l'ack). Revue + securite, gate, commit", "title": "Repondre/Decliner sur une ligne fusionnee question+permission" },
-    { "rank": 4, "card": "75fcf64e", "status": "planned", "note": "Apres e78c8fae (meme garde d'ack). Les 5 choix operateur acceptes : blocking defaut true, pas de notification a l'ack, telephone sans boutons, plafond separe, libelle Information hors badge", "title": "ask_operator non bloquant : deposer une information" },
-    { "rank": 4, "card": "9696c6a2", "status": "planned", "note": "Ready. TTL cache mesure 1 h ; keepalive apres 50 min d'inactivite, arret apres 8 h ; brouillon dans le composer = aucun envoi ; tuiles non-Claude exclues ; service.injectCommand (inTurn)", "title": "Deck : tour de maintien du cache sur une tuile inactive" },
-    { "rank": 5, "card": "6781dafd", "status": "deferred", "note": "Sonde statique en c051e5e. Reportee : l'operateur s'authentifie lui-meme dans WSL (procedure dans la carte), puis HOME reel + --setting-sources ; corriger d'abord le MAJOR redirect. Bloque la chaine AskUserQuestion 0e0659bf, bcd254f9, 93990265", "title": "Sonder AskUserQuestion avant les lots" },
+    { "rank": 3, "card": "e78c8fae", "status": "done", "commits": ["6fdf397"], "note": "Option C : absorbed_permission, Fermer seulement, refus 422 deny/text ; notices de refus Telegram/Discord", "title": "Repondre/Decliner sur une ligne fusionnee question+permission" },
+    { "rank": 3, "card": "084095a3", "status": "done", "commits": ["9161c76", "aceea39"], "note": "Dialogue de conflit au premier plan, deplacable, carte utilisable dessous ; conflit perime resolu seul en local", "title": "Arbitrage d'un conflit de roadmap visible, conflits perimes auto-resolus" },
+    { "rank": 3, "card": "56c43919", "status": "done", "commits": ["a4992d9"], "note": "Avec 342965b9. Une permission garde sa ligne (accordable du telephone) ; reponse au terminal = answered_terminal. Limites : LIMIT 500 du balayage, course qui ferme la ligne du dialogue suivant (choix assume)", "title": "Ne pas fusionner une permission dans une question de tuile" },
+    { "rank": 4, "card": "75fcf64e", "status": "planned", "note": "Les 5 choix operateur acceptes : blocking defaut true, pas de notification a l'ack, telephone sans boutons, plafond separe, libelle Information hors badge", "title": "ask_operator non bloquant : deposer une information" },
+    { "rank": 4, "card": "4122eb9c", "status": "planned", "note": "Integrite : une permission reutilise la permission pending precedente sans retombee d'attention. Le lot 3 mods (tool_use_id) peut la fermer", "title": "Une permission de tuile reutilise la permission precedente" },
+    { "rank": 5, "card": "94d3fb53", "status": "planned", "note": "ntfy annonce Handled un texte refuse sur une question absorbee ; a reevaluer apres le lot 3 mods", "title": "Annoncer au telephone (ntfy / mobile-shell) le refus d'une reponse" },
     { "rank": 6, "card": "2850488c", "status": "planned", "title": "Replica : pull avant push qui laisse deux cartes au meme rang (mesure d'abord)" },
     { "rank": 7, "card": "c753a704", "status": "planned", "title": "Directives : lot 3 (raisons distinctes, UI, ecran)" },
     { "rank": 8, "card": "b7ee3194", "status": "designing", "note": "Conception architecte faite, mesures debugger faites, arbitrages operateur rendus ; prochaine etape : contrat L1 (identite, registre, depot CLI)", "title": "Kory : buffer de contexte ephemere pour reprendre un peer apres /clear, sans outil MCP" },
@@ -27,6 +29,6 @@
     { "rank": 10, "card": "29f70d0c", "status": "planned", "title": "Garde agent-refs : tester les deux autres sorties invalid du frontmatter" },
     { "rank": 10, "card": "9bcf148d", "status": "planned", "title": "Garde scrollbar : retirer les commentaires CSS avec un lecteur a etats" },
     { "rank": 10, "card": "1ce570ad", "status": "planned", "title": "Garder la barre de defilement de xterm.css apres npm ci (runner desktop)" },
-    { "rank": 11, "card": "51c5e72b", "status": "idea", "note": "Prealable si l'on veut reintroduire la bascule de e78c8fae", "title": "Approbations : un credential de session par tuile pour authentifier tile_ref" }
+    { "rank": 11, "card": "51c5e72b", "status": "idea", "note": "Prealable si l'on veut reintroduire une bascule authentifiee par tuile", "title": "Approbations : un credential de session par tuile pour authentifier tile_ref" }
   ]
 }
