@@ -6726,12 +6726,7 @@ function handleRoadmapSyncResolve(
       const refused = writeSyncContent(row.id, applied, author.by, new Date().toISOString());
       if (refused) return refused;
     }
-    db.run(
-      `UPDATE roadmap_items SET
-         sync_base_rev = ?, sync_base = ?, sync_dirty = ?, sync_state = 'clean', sync_remote = NULL
-       WHERE id = ?`,
-      [remote.content_rev, JSON.stringify(remoteContent), dirty ? 1 : 0, row.id]
-    );
+    clearSyncConflict(row.id, remote, dirty);
     return null;
   });
   if (writeRefusal) {
@@ -6739,6 +6734,21 @@ function handleRoadmapSyncResolve(
   }
   log.info(`roadmap sync: conflict on card ${row.id} resolved '${body.choice}' by '${author.by}'`);
   return { item: getRoadmapItem(row.id)! };
+}
+
+/**
+ * Ends a conflict: the base becomes the upstream row, and `dirty` says whether
+ * the local content still has to be pushed. Opens no transaction of its own:
+ * both callers already run inside withApplying, and a nested one would reset
+ * the applying flag before the outer pass is done.
+ */
+function clearSyncConflict(id: string, remote: RoadmapSyncRow, dirty: boolean): void {
+  db.run(
+    `UPDATE roadmap_items SET
+       sync_base_rev = ?, sync_base = ?, sync_dirty = ?, sync_state = 'clean', sync_remote = NULL
+     WHERE id = ?`,
+    [remote.content_rev, JSON.stringify(pickSyncContent(remote)), dirty ? 1 : 0, id]
+  );
 }
 
 /** A replicated title comes from another broker, typed only by its JSON. */
@@ -7160,6 +7170,51 @@ function applyPulledPage(items: RoadmapSyncRow[], nextRev: number): void {
       );
     }
   });
+}
+
+/** Stored upstream rows (by card id and content) whose refusal was already logged. */
+const unreadableSyncRemotes = new Set<string>();
+
+/**
+ * Re-reads every parked conflict against its STORED upstream row, which the
+ * pull keeps current: an upstream card that stops moving is never pulled
+ * again, so a conflict it left behind would otherwise wait forever. Untouched
+ * upstream since the base resolves 'local', the operator's own answer.
+ */
+function resolveStaleConflicts(): void {
+  const rows = db
+    .query(
+      `SELECT * FROM roadmap_items
+        WHERE sync_state = 'conflict' AND sync_base_rev IS NOT NULL
+          AND sync_remote IS NOT NULL AND json_valid(sync_remote)`
+    )
+    .all() as RoadmapRow[];
+  for (const row of rows) {
+    // One failing card must not abort the pass before its push, where it would
+    // read as an unreachable upstream.
+    try {
+      // parseSyncRemote logs its refusal: once per stored row, not every pass.
+      const seenKey = `${row.id}\u0000${row.sync_remote}`;
+      if (unreadableSyncRemotes.has(seenKey)) continue;
+      const remote = parseSyncRemote(row.id, row.sync_remote);
+      if (!remote) {
+        unreadableSyncRemotes.add(seenKey);
+        continue;
+      }
+      if (row.sync_base_rev !== remote.content_rev) continue;
+      // A third party's lock upstream would refuse the push again and bring the
+      // conflict straight back; this replica's own relayed claim would not. The
+      // claim relays `locked_by` as its owner, so the upstream holder is ours
+      // only under that name.
+      const ownClaim =
+        row.locked === 1 && readLockScope(row.lock_scope) === "global" && remote.locked_by === row.locked_by;
+      if (remote.locked && remote.locked_by !== null && !ownClaim) continue;
+      withApplying(() => clearSyncConflict(row.id, remote, true));
+      log.info(`roadmap sync: stale conflict on card ${row.id} resolved 'local', the upstream is unchanged since the base`);
+    } catch (e) {
+      log.error(`roadmap sync: stale conflict check failed for card ${row.id}`, e);
+    }
+  }
 }
 
 async function syncPullPass(): Promise<void> {
@@ -8125,6 +8180,7 @@ async function runSyncPass(): Promise<void> {
   try {
     await syncPullPass();
     await syncContextDocumentPullPass();
+    resolveStaleConflicts();
     await syncPushPass();
     await syncContextDocumentPushPass();
     await syncLockPass();

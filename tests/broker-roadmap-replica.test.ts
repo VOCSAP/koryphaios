@@ -763,6 +763,18 @@ test("both sides editing one card yields a conflict the operator resolves three 
   );
   expect(remoteChoice.status).toBe(200);
   expect(remoteChoice.body.item.description).toBe("the upstream's version");
+  const resolvedDb = new Database(replica.dbPath, { readonly: true });
+  const resolvedBase = resolvedDb
+    .query("SELECT sync_base, sync_base_rev FROM roadmap_items WHERE id = ?")
+    .get(cards[0]!.id) as { sync_base: string | null; sync_base_rev: number | null };
+  resolvedDb.close();
+  expect(
+    [
+      resolvedBase.sync_base_rev,
+      resolvedBase.sync_base === null ? null : (JSON.parse(resolvedBase.sync_base) as RoadmapItem).description,
+    ],
+    "a resolution makes the upstream row the base, or the next pull diverges again"
+  ).toEqual([localContentRev(upstream, cards[0]!.id), "the upstream's version"]);
   const remoteUpstream = await itemOn(upstream, cards[0]!.id);
   expect(remoteUpstream!.description).toBe("the upstream's version");
 
@@ -2368,3 +2380,310 @@ test("resolving 'remote' onto an upstream row parked by a refused push is refuse
     pullSuppressed = false;
   }
 }, 45_000);
+
+/**
+ * Parks a card in conflict the way a refused push leaves it, against an
+ * upstream row whose content is exactly the local base: a stale conflict the
+ * pull will never touch again, since the upstream row does not move.
+ */
+function parkStaleConflict(id: string, remoteOver: Record<string, unknown> = {}): Record<string, unknown> {
+  const db = new Database(replica.dbPath);
+  try {
+    const row = db
+      .query("SELECT project_key, sync_base, sync_base_rev FROM roadmap_items WHERE id = ?")
+      .get(id) as { project_key: string; sync_base: string; sync_base_rev: number };
+    const remote = {
+      ...(JSON.parse(row.sync_base) as Record<string, unknown>),
+      id,
+      project_key: row.project_key,
+      rev: row.sync_base_rev + 40,
+      content_rev: row.sync_base_rev,
+      created_by: "agent-upstream",
+      updated_by: "lock-sweep",
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      queue: null,
+      locked: false,
+      locked_by: null,
+      locked_at: null,
+      locked_group: null,
+      lock_contested_by: [],
+      ...remoteOver,
+    };
+    db.run("UPDATE roadmap_items SET sync_state = 'conflict', sync_remote = ? WHERE id = ?", [
+      JSON.stringify(remote),
+      id,
+    ]);
+    return remote;
+  } finally {
+    db.close();
+  }
+}
+
+async function conflictIds(): Promise<string[]> {
+  const res = await post<RoadmapSyncConflictsResponse>(`${replica.url}/roadmap/sync/conflicts`, { project_key: PK });
+  return res.body.items.map((c) => c.local.id);
+}
+
+/** Waits until the replica has completed `n` more sync passes. */
+async function waitPasses(n: number): Promise<void> {
+  let seen = (await syncStatus()).last_sync_at;
+  let count = 0;
+  await pollUntil(`${n} sync passes`, 20_000, async () => {
+    const now = (await syncStatus()).last_sync_at;
+    if (now !== seen) {
+      seen = now;
+      count += 1;
+    }
+    return { done: count >= n, value: count };
+  });
+}
+
+for (const edit of [
+  { label: "an edit", body: { description: "the replica's version" }, field: "description" as const },
+  { label: "an archive", body: { status: "archived" }, field: "status" as const },
+]) {
+  test(`a stale conflict on ${edit.label} resolves 'local' on the next pass although the upstream row never moves again`, async () => {
+    const card = await createOn(upstream, { by: "agent-upstream", title: `stale conflict on ${edit.label}`, description: "common base" });
+    await waitForItem("the card reaches the replica", replica, card.id, (i) => i.description === "common base");
+
+    await goOffline();
+    await createOn(replica, { id: card.id, by: "agent-local", ...edit.body });
+    const parked = parkStaleConflict(card.id);
+    expect(await conflictIds()).toContain(card.id);
+
+    // The push is held back so the base the resolution wrote is still there to read.
+    pushSuppressed = true;
+    let base: { sync_base: string | null; sync_base_rev: number | null };
+    try {
+      upstreamBlocked = false;
+      base = await pollUntil("the stale conflict resolves", 15_000, async () => {
+        const db = new Database(replica.dbPath, { readonly: true });
+        try {
+          const row = db
+            .query("SELECT sync_state, sync_base, sync_base_rev FROM roadmap_items WHERE id = ?")
+            .get(card.id) as { sync_state: string; sync_base: string | null; sync_base_rev: number | null };
+          return { done: row.sync_state === "clean", value: row };
+        } finally {
+          db.close();
+        }
+      });
+    } finally {
+      pushSuppressed = false;
+    }
+    expect(base.sync_base_rev, "the base adopts the upstream revision the conflict was parked against").toBe(parked.content_rev as number);
+    expect(
+      base.sync_base === null ? null : (JSON.parse(base.sync_base) as Record<string, unknown>).description,
+      "without the upstream content as base the next pull would re-diverge"
+    ).toBe(parked.description);
+    await goOnline();
+
+    // Read from the upstream's own table: the list route hides an archived card.
+    const expected = edit.body[edit.field as keyof typeof edit.body] as string;
+    const pushed = await pollUntil("the local edit reaches the upstream once the stale conflict resolves", 15_000, async () => {
+      const db = new Database(upstream.dbPath, { readonly: true });
+      try {
+        const row = db.query(`SELECT ${edit.field} AS v FROM roadmap_items WHERE id = ?`).get(card.id) as { v: string };
+        return { done: row.v === expected, value: row.v };
+      } finally {
+        db.close();
+      }
+    });
+    expect(pushed).toBe(expected);
+    expect(
+      await conflictIds(),
+      "an upstream untouched since the base leaves nothing for the operator to arbitrate"
+    ).not.toContain(card.id);
+  }, 60_000);
+}
+
+test("a stale conflict stays parked while a third party holds the card upstream, and nothing is pushed", async () => {
+  const card = await createOn(upstream, { by: "agent-upstream", title: "stale conflict under a foreign lock", description: "common base" });
+  await waitForItem("the card reaches the replica", replica, card.id, (i) => i.description === "common base");
+
+  await goOffline();
+  await createOn(replica, { id: card.id, by: "agent-local", description: "the replica's version" });
+  parkStaleConflict(card.id, { locked: true, locked_by: "upstream-holder", status: "in_progress" });
+  await goOnline();
+  await waitPasses(2);
+
+  expect(
+    await conflictIds(),
+    "resolving under a foreign lock would be refused at push and flap back into conflict every pass"
+  ).toContain(card.id);
+  expect((await itemOn(upstream, card.id))!.description).toBe("common base");
+}, 60_000);
+
+test("a stale conflict under this replica's own relayed lock still resolves 'local'", async () => {
+  const localPeer = await post<RegisterResponse>(`${replica.url}/register`, {
+    pid: livePid(),
+    cwd: "/work/replica-stale-owner",
+    git_root: null,
+    tty: null,
+    summary: "",
+    host: "replica-host",
+    client_pid: livePid(),
+    project_key: PK,
+    group_id: "default",
+    group_secret_hash: null,
+  });
+  const card = await createOn(replica, {
+    by: localPeer.body.peer_id,
+    instance_token: localPeer.body.instance_token,
+    title: "stale conflict under our own lock",
+    description: "common base",
+    status: "in_progress",
+  });
+  await waitForItem("our lock is accepted upstream", replica, card.id, (i) => i.lock_scope === "global");
+  await waitForItem("the card is clean upstream", upstream, card.id, (i) => i.locked && i.description === "common base");
+
+  await goOffline();
+  await createOn(replica, {
+    id: card.id,
+    by: localPeer.body.peer_id,
+    instance_token: localPeer.body.instance_token,
+    description: "the replica's version",
+  });
+  parkStaleConflict(card.id, { locked: true, locked_by: localPeer.body.peer_id });
+  await goOnline();
+
+  const pushed = await waitForItem(
+    "our own relayed claim does not block the stale conflict",
+    upstream,
+    card.id,
+    (i) => i.description === "the replica's version"
+  );
+  expect(pushed.description).toBe("the replica's version");
+  expect(await conflictIds()).not.toContain(card.id);
+}, 60_000);
+
+function staleResolutionsLogged(id: string, logStart: number): number {
+  const text = readFileSync(join(replica.tmpDir, "logs", "broker.log"), "utf-8").slice(logStart);
+  return text.split(`stale conflict on card ${id} resolved`).length - 1;
+}
+
+test("a card mirrored as locked upstream by a third party keeps its conflict, whatever the local lock scope", async () => {
+  const nativePeer = await post<RegisterResponse>(`${upstream.url}/register`, {
+    pid: livePid(),
+    cwd: "/work/upstream-stale-holder",
+    git_root: null,
+    tty: null,
+    summary: "",
+    host: "upstream-host",
+    client_pid: livePid(),
+    project_key: PK,
+    group_id: "default",
+    group_secret_hash: null,
+  });
+  const held = await createOn(upstream, {
+    by: nativePeer.body.peer_id,
+    instance_token: nativePeer.body.instance_token,
+    title: "stale conflict mirrored as locked",
+    description: "common base",
+    status: "in_progress",
+  });
+  await waitForItem("the upstream lock is mirrored", replica, held.id, (i) => i.lock_scope === "remote");
+  const logStart = readFileSync(join(replica.tmpDir, "logs", "broker.log"), "utf-8").length;
+
+  await createOn(replica, { id: held.id, by: "agent-local", description: "the replica's version" });
+  await pollUntil("the refused push parks the card", 20_000, async () => {
+    const ids = await conflictIds();
+    return { done: ids.includes(held.id), value: ids };
+  });
+  await waitPasses(2);
+
+  expect(
+    staleResolutionsLogged(held.id, logStart),
+    "the same name under a scope that is not our accepted claim is the upstream holder's lock, not ours"
+  ).toBe(0);
+  expect(await conflictIds()).toContain(held.id);
+}, 60_000);
+
+test("a global local claim does not cover an upstream lock held under another name", async () => {
+  const localPeer = await post<RegisterResponse>(`${replica.url}/register`, {
+    pid: livePid(),
+    cwd: "/work/replica-stale-mismatch",
+    git_root: null,
+    tty: null,
+    summary: "",
+    host: "replica-host",
+    client_pid: livePid(),
+    project_key: PK,
+    group_id: "default",
+    group_secret_hash: null,
+  });
+  const card = await createOn(replica, {
+    by: localPeer.body.peer_id,
+    instance_token: localPeer.body.instance_token,
+    title: "stale conflict under a foreign holder name",
+    description: "common base",
+    status: "in_progress",
+  });
+  await waitForItem("our lock is accepted upstream", replica, card.id, (i) => i.lock_scope === "global");
+  await waitForItem("the card is clean upstream", upstream, card.id, (i) => i.locked && i.description === "common base");
+
+  await goOffline();
+  await createOn(replica, {
+    id: card.id,
+    by: localPeer.body.peer_id,
+    instance_token: localPeer.body.instance_token,
+    description: "the replica's version",
+  });
+  parkStaleConflict(card.id, { locked: true, locked_by: "upstream-holder" });
+  const logStart = readFileSync(join(replica.tmpDir, "logs", "broker.log"), "utf-8").length;
+  // The pull is held back so the parked holder name is not overwritten by ours.
+  pullSuppressed = true;
+  try {
+    await goOnline();
+    await waitPasses(2);
+    expect(
+      staleResolutionsLogged(card.id, logStart),
+      "a global scope proves our claim, not that the upstream lock carries our name"
+    ).toBe(0);
+    expect(await conflictIds()).toContain(card.id);
+  } finally {
+    pullSuppressed = false;
+  }
+}, 60_000);
+
+test("an unreadable stored upstream row is reported once, not on every pass", async () => {
+  const card = await createOn(upstream, { by: "agent-upstream", title: "stale conflict with a broken upstream row", description: "common base" });
+  await waitForItem("the card reaches the replica", replica, card.id, (i) => i.description === "common base");
+  await goOffline();
+  await createOn(replica, { id: card.id, by: "agent-local", description: "the replica's version" });
+  const db = new Database(replica.dbPath);
+  try {
+    const base = (db.query("SELECT sync_base_rev FROM roadmap_items WHERE id = ?").get(card.id) as { sync_base_rev: number })
+      .sync_base_rev;
+    db.run("UPDATE roadmap_items SET sync_state = 'conflict', sync_remote = ? WHERE id = ?", [
+      JSON.stringify({ id: card.id, content_rev: base }),
+      card.id,
+    ]);
+  } finally {
+    db.close();
+  }
+  const logPath = join(replica.tmpDir, "logs", "broker.log");
+  const logStart = readFileSync(logPath, "utf-8").length;
+  await goOnline();
+  await waitPasses(3);
+  const traces = readFileSync(logPath, "utf-8").slice(logStart).split(`card ${card.id} has a stored upstream row missing content fields`).length - 1;
+  expect(traces, "a pass every few seconds would repeat the same refusal thousands of times a day").toBe(1);
+}, 60_000);
+
+test("a conflict whose upstream content moved since the base stays parked across passes", async () => {
+  const card = await createOn(upstream, { by: "agent-upstream", title: "real conflict stays", description: "common base" });
+  await waitForItem("the card reaches the replica", replica, card.id, (i) => i.description === "common base");
+
+  await goOffline();
+  await createOn(replica, { id: card.id, by: "agent-local", description: "the replica's version" });
+  await createOn(upstream, { id: card.id, by: "agent-upstream", description: "the upstream's version" });
+  await goOnline();
+  await pollUntil("the divergence is parked", 15_000, async () => {
+    const ids = await conflictIds();
+    return { done: ids.includes(card.id), value: ids };
+  });
+  await waitPasses(2);
+
+  expect(await conflictIds(), "an upstream edit since the base is the operator's to arbitrate").toContain(card.id);
+  expect((await itemOn(upstream, card.id))!.description).toBe("the upstream's version");
+}, 60_000);
