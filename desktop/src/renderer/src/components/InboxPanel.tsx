@@ -391,9 +391,17 @@ export function InboxPanel(): React.JSX.Element {
               <div className="inbox-modal-note">{t('inbox.verdictRemoteBlocked')}</div>
             )}
 
-            {open.kind === 'approval' && canAnswerVerdict && open.approval.options.length > 0 && (
+            {open.kind === 'approval' &&
+              canAnswerVerdict &&
+              !open.approval.absorbed_permission &&
+              (open.approval.kind === 'permission' || open.approval.options.length > 0) && (
               <div className="inbox-modal-options">
-                {open.approval.options.map((opt, idx) => {
+                {/* A permission's chips are positional verdicts: their labels
+                    are ours, never the producer's options. */}
+                {(open.approval.kind === 'permission'
+                  ? [t('inbox.permissionAllow'), t('inbox.permissionDeny')]
+                  : open.approval.options
+                ).map((opt, idx) => {
                   // Discriminate on `kind`, never on the label string
                   // (see approval-verdict.ts): a 'permission' chip renders
                   // an allow/deny VERDICT, a 'question' chip relays its
@@ -426,7 +434,10 @@ export function InboxPanel(): React.JSX.Element {
             )}
             {open.kind !== 'event' &&
               !(open.kind === 'message' && open.message.from === GONE_PEER) &&
-              !(open.kind === 'approval' && !canAnswerVerdict) && (
+              !(
+                open.kind === 'approval' &&
+                (!canAnswerVerdict || open.approval.kind === 'permission' || open.approval.absorbed_permission)
+              ) && (
               <textarea
                 className="inbox-modal-reply"
                 rows={3}
@@ -442,7 +453,7 @@ export function InboxPanel(): React.JSX.Element {
                   {/* Not an ack: it ANSWERS with a refusal, which is what
                       releases the waiting agent. Both verdict controls are
                       absent on a remote companion (see canAnswerVerdict). */}
-                  {canAnswerVerdict && (
+                  {canAnswerVerdict && !open.approval.absorbed_permission && (
                     <button
                       className="btn danger"
                       disabled={sending}
@@ -453,7 +464,8 @@ export function InboxPanel(): React.JSX.Element {
                   )}
                   {canAnswerVerdict &&
                     open.approval.kind !== 'permission' &&
-                    open.approval.reply_route === 'channel' && (
+                    open.approval.reply_route === 'channel' &&
+                    !open.approval.mergeable && (
                       <button
                         className="btn"
                         disabled={sending}
@@ -465,7 +477,9 @@ export function InboxPanel(): React.JSX.Element {
                   <button className="btn" onClick={() => setOpenKey(null)}>
                     {t('inbox.close')}
                   </button>
-                  {canAnswerVerdict && (
+                  {canAnswerVerdict &&
+                    open.approval.kind !== 'permission' &&
+                    !open.approval.absorbed_permission && (
                     <button
                       className="primary"
                       disabled={sending || !draft.trim()}

@@ -91,6 +91,15 @@ export function applyEffect(
   return prune([effect.approval, ...without], now);
 }
 
+/**
+ * Whether the card offers a free-text answer. A permission takes Approve or
+ * Reject only: the broker refuses text on it, and the answer path drops the
+ * row as sent before that refusal could reach the phone.
+ */
+export function acceptsFreeText(approval: PendingApproval): boolean {
+  return !approval.hasButtons;
+}
+
 /** Drop what the broker would already refuse to settle, and cap the list. */
 export function prune(pending: PendingApproval[], now: number): PendingApproval[] {
   return pending.filter((p) => now - p.receivedAt < PENDING_TTL_MS).slice(0, MAX_PENDING);

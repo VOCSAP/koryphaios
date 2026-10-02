@@ -1745,6 +1745,10 @@ export interface Approval {
   status: ApprovalStatus;
   /** Where the answer will be delivered. The routing TOKEN is never exposed. */
   reply_route: ApprovalReplyRoute;
+  /** A tile notification that a later raise for the same tile may merge into; never acknowledgeable. */
+  mergeable: boolean;
+  /** A permission raise merged into this question: it takes no deny or text verdict, its dialog is answered on the tile. */
+  absorbed_permission: boolean;
   answered_via: ApprovalVia | null;
   answer_kind: ApprovalAnswerKind | null;
   answer_text: string | null;

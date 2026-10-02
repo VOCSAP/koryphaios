@@ -160,7 +160,7 @@ describe("approval lifecycle", () => {
   test("a free-text answer is flattened before storage (PTY safety)", async () => {
     const b = await boot();
     const op = newOperator();
-    const approval = await addApproval(b, op);
+    const approval = await addApproval(b, op, { kind: "question" });
 
     const res = await signedPost<{ approval: Approval }>(
       b,

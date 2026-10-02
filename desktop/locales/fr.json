@@ -659,6 +659,8 @@
   "inbox.hint": "Fermer un message ne l'acquitte jamais — il reste ici tant que tu ne l'as pas fait.",
   "inbox.openEntry": "Ouvrir",
   "inbox.ack": "Acquitter",
+  "inbox.permissionAllow": "Autoriser",
+  "inbox.permissionDeny": "Refuser",
   "inbox.reply": "Répondre",
   "inbox.decline": "Décliner",
   "inbox.delete": "Supprimer",

@@ -43,6 +43,11 @@ interface FakeApproval {
   origin: FakeApprovalOrigin;
   question: string;
   created_at: string;
+  kind?: "permission" | "question";
+  reply_route?: "channel" | "pty";
+  mergeable?: boolean;
+  absorbed_permission?: boolean;
+  options?: string[];
 }
 type FakeInboxEntry = { kind: "approval"; approval: FakeApproval };
 
@@ -210,6 +215,77 @@ test("unresolved sender with an EMPTY tile_ref -> senderUnresolvedEmpty text, no
   expect(span).not.toBeNull();
   expect(span!.textContent).toBe("inbox.senderUnresolvedEmpty");
   expect(span!.querySelector("code")).toBeNull();
+});
+
+test("the Acknowledge button is offered on a channel question and hidden on a mergeable one", () => {
+  const ackButtons = (a: FakeApproval): number => {
+    renderPanel(a, []);
+    act(() => {
+      (container.querySelector(".inbox-entry") as HTMLElement).click();
+    });
+    return [...container.querySelectorAll("button")].filter((b) => b.textContent === "inbox.ack").length;
+  };
+  const channelQuestion: Partial<FakeApproval> = { kind: "question", reply_route: "channel", options: [] };
+  expect(ackButtons(approval({ ...channelQuestion, mergeable: false })), "ask_operator ticket").toBe(1);
+  act(() => {
+    root.unmount();
+  });
+  root = createRoot(container);
+  expect(
+    ackButtons(approval({ ...channelQuestion, id: "apr-merge", mergeable: true })),
+    "a mergeable tile notification is refused by the broker, so no button may offer it"
+  ).toBe(0);
+});
+
+test("a permission shows exactly two fixed verdict chips and no free-text reply, whatever its options", () => {
+  renderPanel(
+    approval({
+      kind: "permission",
+      reply_route: "pty",
+      mergeable: true,
+      options: ["Yes, run anything", "No", "Always allow"],
+    }),
+    []
+  );
+  act(() => {
+    (container.querySelector(".inbox-entry") as HTMLElement).click();
+  });
+  const chips = [...container.querySelectorAll(".inbox-option")].map((b) => b.textContent);
+  expect(chips, "producer options must not label or extend a permission's verdict chips").toEqual([
+    "inbox.permissionAllow",
+    "inbox.permissionDeny",
+  ]);
+  expect(container.querySelector(".inbox-modal-reply")).toBeNull();
+  expect([...container.querySelectorAll("button")].some((b) => b.textContent === "inbox.reply")).toBe(false);
+});
+
+test("a question that absorbed a permission offers only Close: no chip, no reply, no Decline, no Acknowledge", () => {
+  renderPanel(
+    approval({
+      kind: "question",
+      reply_route: "channel",
+      mergeable: true,
+      absorbed_permission: true,
+      options: ["A", "B"],
+    }),
+    []
+  );
+  act(() => {
+    (container.querySelector(".inbox-entry") as HTMLElement).click();
+  });
+  expect(container.querySelectorAll(".inbox-option"), "a chip would settle the row behind the CLI dialog").toHaveLength(0);
+  expect(container.querySelector(".inbox-modal-reply")).toBeNull();
+  const actions = [...container.querySelectorAll(".inbox-modal-actions button")].map((b) => b.textContent);
+  expect(actions, "the operator answers an absorbed permission on its tile").toEqual(["inbox.close"]);
+});
+
+test("a question keeps its producer options as chips and its free-text reply", () => {
+  renderPanel(approval({ kind: "question", reply_route: "channel", mergeable: false, options: ["A", "B", "C"] }), []);
+  act(() => {
+    (container.querySelector(".inbox-entry") as HTMLElement).click();
+  });
+  expect([...container.querySelectorAll(".inbox-option")].map((b) => b.textContent)).toEqual(["A", "B", "C"]);
+  expect(container.querySelector(".inbox-modal-reply")).not.toBeNull();
 });
 
 test("timestamps use local calendar days and refresh after local midnight", async () => {

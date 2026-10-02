@@ -2318,6 +2318,8 @@ function fakeApproval(overrides: Partial<Approval> = {}): Approval {
     options: [],
     status: "pending",
     reply_route: "pty",
+    mergeable: false,
+    absorbed_permission: false,
     answered_via: null,
     answer_kind: null,
     answer_text: null,

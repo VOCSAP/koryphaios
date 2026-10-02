@@ -76,7 +76,7 @@ ${POLLER}
 
 const registerListener = await evaluate<void>(
   `export function register(env) {
-  const { service, waitingTiles, openApprovals, approvals, claimApproval, reportError, journal,
+  const { service, waitingTiles, openApprovals, approvals, claimApproval, markVerdictsDelivered, reportError, journal,
           addApproval, approvalsEnabled, computeDeckProjectKey, cliContext, activeScope, hostname,
           config, Notification, app } = env
 ${LISTENER}
@@ -281,7 +281,7 @@ describe("pollApprovalVerdicts (sliced verbatim from index.ts)", () => {
 });
 
 describe("attention listener (sliced verbatim from index.ts)", () => {
-  function listenerEnv() {
+  function listenerEnv(claimResult: unknown = { id: "appr-42" }) {
     const calls: Call[] = [];
     const service = new EventEmitter() as EventEmitter & { list: () => unknown[] };
     service.list = () => [{ id: "s1", name: "tile one", peerId: null }];
@@ -294,7 +294,11 @@ describe("attention listener (sliced verbatim from index.ts)", () => {
       approvals: { deps: () => ({ fake: true }) },
       claimApproval: (...args: unknown[]) => {
         calls.push({ fn: "claimApproval", args });
-        return Promise.resolve();
+        return Promise.resolve(claimResult);
+      },
+      markVerdictsDelivered: (...args: unknown[]) => {
+        calls.push({ fn: "markVerdictsDelivered", args });
+        return Promise.resolve(1);
       },
       addApproval: (...args: unknown[]) => {
         calls.push({ fn: "addApproval", args });
@@ -340,5 +344,41 @@ describe("attention listener (sliced verbatim from index.ts)", () => {
     await Bun.sleep(20);
     expect(calls.filter((c) => c.fn === "claimApproval")).toHaveLength(1);
     expect(openApprovals.has("s1")).toBe(false);
+  });
+
+  test("an answer given in the terminal is marked delivered, so no keystroke is replayed into the next dialog", async () => {
+    const { calls, service, openApprovals } = listenerEnv();
+    openApprovals.set("s1", "appr-42");
+    service.emit("attention", { id: "s1", waiting: false });
+    await Bun.sleep(20);
+    expect(calls.some((c) => c.fn === "reportError"), "the local settlement failed").toBe(false);
+    const marks = calls.filter((c) => c.fn === "markVerdictsDelivered");
+    expect(
+      marks.map((c) => c.args[1]),
+      "a locally-answered verdict left undelivered is typed as Allow into the next dialog of the tile",
+    ).toEqual([["appr-42"]]);
+    const order = calls.map((c) => c.fn).filter((fn) => fn === "claimApproval" || fn === "markVerdictsDelivered");
+    expect(order).toEqual(["claimApproval", "markVerdictsDelivered"]);
+
+    // The broker stops listing a delivered verdict as undelivered: a new
+    // dialog on the same tile then gets nothing typed into it.
+    const delivered = new Set(marks.flatMap((c) => c.args[1] as string[]));
+    const settled = [verdict()].filter((v) => !delivered.has(v.id));
+    const { poll, written } = pollerEnv({ settled, tiles: ["s1"], waiting: ["s1"] });
+    await poll();
+    expect(written).toEqual([]);
+    expect(calls.some((c) => c.fn === "journal.add" && String(c.args[1]).includes("appr-42"))).toBe(false);
+  });
+
+  test("a verdict given elsewhere first (409) is still marked delivered, and its loss is journaled", async () => {
+    const { calls, service, openApprovals } = listenerEnv(null);
+    openApprovals.set("s1", "appr-42");
+    service.emit("attention", { id: "s1", waiting: false });
+    await Bun.sleep(20);
+    expect(calls.filter((c) => c.fn === "markVerdictsDelivered").map((c) => c.args[1])).toEqual([["appr-42"]]);
+    const trace = calls.filter(
+      (c) => c.fn === "journal.add" && c.args[0] === "attention" && String(c.args[1]).includes("appr-42"),
+    );
+    expect(trace, "a remote verdict overridden by the terminal answer must leave a journal line").toHaveLength(1);
   });
 });

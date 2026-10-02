@@ -11,6 +11,7 @@
 import { truncate } from "../shared/text.ts";
 import type { Approval } from "../shared/types.ts";
 import { settledOutcome } from "../shared/approval-outcome.ts";
+import type { AnswerRefusal } from "./types.ts";
 
 /** Telegram sendMessage hard limit. */
 export const TELEGRAM_TEXT_MAX = 4096;
@@ -110,3 +111,28 @@ export function renderSettled(approval: Approval, viaLabel: string): string {
 }
 
 export const ALREADY_HANDLED_NOTICE = "Validation expired or invalid / already handled";
+
+export const REFUSAL_NOTICES: Record<AnswerRefusal, string> = {
+  "verdict-only": "Not sent: this request takes Approve or Reject, not a written answer.",
+  "on-tile": "Not sent: this request is waiting on its tile, answer it in Koryphaios.",
+};
+
+/**
+ * What to tell the sender after `onAnswer`: null when the answer settled the
+ * request, the refusal's reason when the request is still pending, and the
+ * already-handled notice when the claim lost the race.
+ */
+export function channelAnswerResult(
+  settled: { approval: Approval } | { error: string; status: number; refused?: AnswerRefusal },
+  onSettled: (approval: Approval) => void
+): Approval | { refused: AnswerRefusal } | null {
+  if ("error" in settled) return settled.refused ? { refused: settled.refused } : null;
+  onSettled(settled.approval);
+  return settled.approval;
+}
+
+export function answerNotice(result: Approval | { refused: AnswerRefusal } | null): string | null {
+  if (result === null) return ALREADY_HANDLED_NOTICE;
+  if ("refused" in result) return REFUSAL_NOTICES[result.refused];
+  return null;
+}

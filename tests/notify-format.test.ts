@@ -1,7 +1,9 @@
 import { test, expect, describe } from "bun:test";
 import {
   ALREADY_HANDLED_NOTICE,
+  answerNotice,
   CALLBACK_DATA_MAX,
+  channelAnswerResult,
   DISCORD_TEXT_MAX,
   TELEGRAM_TEXT_MAX,
   decodeCallback,
@@ -137,6 +139,34 @@ describe("rendering", () => {
 
   test("the late-answer notice is the wording the operator was promised", () => {
     expect(ALREADY_HANDLED_NOTICE).toContain("already handled");
+  });
+
+  test("onAnswer's result: a 422 refusal keeps its reason, a 409 is null, a settlement fans out", () => {
+    const fanned: string[] = [];
+    const fanOut = (a: Approval): void => {
+      fanned.push(a.id);
+    };
+    expect(
+      channelAnswerResult({ error: "verdict", status: 422, refused: "verdict-only" }, fanOut),
+      "a refusal collapsed to null reads as already handled on the phone"
+    ).toEqual({ refused: "verdict-only" });
+    expect(channelAnswerResult({ error: "tile", status: 422, refused: "on-tile" }, fanOut)).toEqual({ refused: "on-tile" });
+    expect(channelAnswerResult({ error: "already-settled", status: 409 }, fanOut)).toBeNull();
+    expect(fanned, "nothing settled, nothing to rewrite elsewhere").toEqual([]);
+    const settled = approval({ id: "appr-won", status: "answered", answer_kind: "allow" });
+    expect(channelAnswerResult({ approval: settled }, fanOut)).toBe(settled);
+    expect(fanned).toEqual(["appr-won"]);
+  });
+
+  test("a refused answer says why, a lost race says already handled, a settled one says nothing", () => {
+    expect(answerNotice(approval({ status: "answered", answer_kind: "allow" }))).toBeNull();
+    expect(answerNotice(null)).toBe(ALREADY_HANDLED_NOTICE);
+    const verdictOnly = answerNotice({ refused: "verdict-only" });
+    const onTile = answerNotice({ refused: "on-tile" });
+    expect(verdictOnly, "a refusal leaves the request pending: it must not read as handled").not.toBe(ALREADY_HANDLED_NOTICE);
+    expect(onTile).not.toBe(ALREADY_HANDLED_NOTICE);
+    expect(verdictOnly).toContain("Approve or Reject");
+    expect(onTile).toContain("tile");
   });
 });
 

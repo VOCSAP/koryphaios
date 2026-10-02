@@ -7,7 +7,7 @@
 // invites it to a private server first, and nothing here works around that.
 
 import type { Approval } from "../shared/types.ts";
-import { ALREADY_HANDLED_NOTICE, decodeCallback, encodeCallback, renderDiscord, renderSettled } from "./format.ts";
+import { ALREADY_HANDLED_NOTICE, answerNotice, decodeCallback, encodeCallback, renderDiscord, renderSettled } from "./format.ts";
 import type {
   ChannelBinding,
   ChannelHost,
@@ -340,13 +340,15 @@ export class DiscordChannel implements NotificationChannel {
         });
         return;
       }
-      const settled = await this.deps.host.onAnswer("discord", {
-        approvalId: decoded.approvalId,
-        answerKind: decoded.action,
-        fromAddress: address,
-      });
-      await this.respond(i.id, i.token, settled ? CALLBACK_DEFERRED_UPDATE : CALLBACK_MESSAGE, settled ? {} : {
-        content: ALREADY_HANDLED_NOTICE,
+      const notice = answerNotice(
+        await this.deps.host.onAnswer("discord", {
+          approvalId: decoded.approvalId,
+          answerKind: decoded.action,
+          fromAddress: address,
+        })
+      );
+      await this.respond(i.id, i.token, notice === null ? CALLBACK_DEFERRED_UPDATE : CALLBACK_MESSAGE, notice === null ? {} : {
+        content: notice,
         flags: 64, // ephemeral
       });
       return;
@@ -356,14 +358,16 @@ export class DiscordChannel implements NotificationChannel {
       const decoded = decodeCallback(i.data?.custom_id ?? "");
       const value = i.data?.components?.[0]?.components?.[0]?.value ?? "";
       if (!decoded || !value.trim()) return;
-      const settled = await this.deps.host.onAnswer("discord", {
-        approvalId: decoded.approvalId,
-        answerKind: "text",
-        answerText: value,
-        fromAddress: address,
-      });
+      const notice = answerNotice(
+        await this.deps.host.onAnswer("discord", {
+          approvalId: decoded.approvalId,
+          answerKind: "text",
+          answerText: value,
+          fromAddress: address,
+        })
+      );
       await this.respond(i.id, i.token, CALLBACK_MESSAGE, {
-        content: settled ? "Sent to the agent." : ALREADY_HANDLED_NOTICE,
+        content: notice ?? "Sent to the agent.",
         flags: 64,
       });
     }

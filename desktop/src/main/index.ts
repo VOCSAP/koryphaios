@@ -1249,9 +1249,18 @@ service.on(
         openApprovals.delete(id)
         const deps = approvals.deps()
         if (deps) {
-          void claimApproval(deps, { id: open, answerKind: 'allow' }).catch((e) =>
-            reportError('approvals', 'could not settle a locally-answered approval', e)
-          )
+          // Delivered at once: the answer was given in the terminal, so the
+          // poller must never type this verdict into the next dialog.
+          void claimApproval(deps, { id: open, answerKind: 'allow' })
+            .then((claimed) => {
+              if (claimed === null)
+                journal.add(
+                  'attention',
+                  `"${session?.name ?? id}" was answered in the terminal: the verdict already given elsewhere for approval ${open} will not be typed`
+                )
+              return markVerdictsDelivered(deps, [open])
+            })
+            .catch((e) => reportError('approvals', 'could not settle a locally-answered approval', e))
         }
       }
       return

@@ -9,6 +9,7 @@
 import type { Approval } from "../shared/types.ts";
 import {
   ALREADY_HANDLED_NOTICE,
+  answerNotice,
   decodeCallback,
   encodeCallback,
   renderSettled,
@@ -149,16 +150,18 @@ export class TelegramChannel implements NotificationChannel {
         });
         return;
       }
-      const settled = await this.deps.host.onAnswer("telegram", {
-        approvalId: decoded.approvalId,
-        answerKind: decoded.action,
-        fromAddress: address,
-        ack: u.callback_query.id,
-      });
+      const notice = answerNotice(
+        await this.deps.host.onAnswer("telegram", {
+          approvalId: decoded.approvalId,
+          answerKind: decoded.action,
+          fromAddress: address,
+          ack: u.callback_query.id,
+        })
+      );
       await this.call("answerCallbackQuery", {
         callback_query_id: u.callback_query.id,
-        text: settled ? "Sent." : ALREADY_HANDLED_NOTICE,
-        show_alert: !settled,
+        text: notice ?? "Sent.",
+        show_alert: notice !== null,
       });
       return;
     }
@@ -201,16 +204,18 @@ export class TelegramChannel implements NotificationChannel {
       return;
     }
 
-    const settled = await this.deps.host.onAnswer("telegram", {
-      approvalId,
-      answerKind: "text",
-      answerText: msg.text,
-      fromAddress: address,
-    });
+    const notice = answerNotice(
+      await this.deps.host.onAnswer("telegram", {
+        approvalId,
+        answerKind: "text",
+        answerText: msg.text,
+        fromAddress: address,
+      })
+    );
     await this.call("sendMessage", {
       chat_id: address,
       reply_parameters: { message_id: msg.message_id },
-      text: settled ? "Sent to the agent." : ALREADY_HANDLED_NOTICE,
+      text: notice ?? "Sent to the agent.",
     });
   }
 

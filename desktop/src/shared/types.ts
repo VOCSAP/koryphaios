@@ -264,6 +264,8 @@ export interface Approval {
   options: string[]
   status: ApprovalStatus
   reply_route: ApprovalReplyRoute
+  mergeable: boolean
+  absorbed_permission: boolean
   answered_via: ApprovalVia | null
   answer_kind: ApprovalAnswerKind | null
   answer_text: string | null

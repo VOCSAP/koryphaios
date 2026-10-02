@@ -20,6 +20,7 @@ import {
   subscribeUrl,
 } from "../desktop/mobile-shell/src/approval-pairing.ts";
 import {
+  acceptsFreeText,
   applyEffect,
   classify,
   createLineSplitter,
@@ -186,6 +187,13 @@ describe("the inbox", () => {
   test("an open question arrives without buttons: free text lives in the app", () => {
     const effect = classify(request("appr-2", false), T0);
     expect(applyEffect([], effect, T0)[0]!.hasButtons).toBe(false);
+  });
+
+  test("only a question offers free text: a permission takes Approve or Reject", () => {
+    const [permission] = applyEffect([], classify(request("appr-p"), T0), T0);
+    const [question] = applyEffect([], classify(request("appr-q", false), T0), T0);
+    expect(acceptsFreeText(permission!), "the broker refuses text on a permission, after the row was dropped as sent").toBe(false);
+    expect(acceptsFreeText(question!)).toBe(true);
   });
 
   test("a closing message removes the row — ntfy cannot edit, so this is it", () => {

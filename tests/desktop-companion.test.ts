@@ -124,17 +124,19 @@ test('agents:stop (trust-changing) is remote-blocked; agents:stop-state (read) i
   expect(REMOTE_BLOCKED_CHANNELS.has('agents:stop-state')).toBe(false)
 })
 
-// approvals:reply and approvals:decline render a human verdict a stopped agent
-// consumes directly, unlike inbox:reply where the recipient keeps judgement --
-// a remote companion answering here manufactures the consent that was the only
-// thing stopping the agent.
-// Both are tier 2, below the tier>=3 threshold REMOTE_BLOCKED_CHANNELS
+// approvals:reply, decline, ack and allow release a stopped agent directly,
+// unlike inbox:reply where the recipient keeps judgement -- a remote companion
+// answering here manufactures the consent that was the only thing stopping
+// the agent.
+// All four are tier 2, below the tier>=3 threshold REMOTE_BLOCKED_CHANNELS
 // auto-unions, so they are blocked only because
-// EXPLICIT_REMOTE_BLOCKED_CHANNELS hand-lists them; a third channel with this
+// EXPLICIT_REMOTE_BLOCKED_CHANNELS hand-lists them; another channel with this
 // property must be added to both by hand.
-test('approvals:reply and approvals:decline (render a human verdict a stopped agent consumes) stay on the remote-block floor', () => {
+test('the approval channels that release a stopped agent stay on the remote-block floor', () => {
   expect(REMOTE_BLOCKED_CHANNELS.has('approvals:reply')).toBe(true)
   expect(REMOTE_BLOCKED_CHANNELS.has('approvals:decline')).toBe(true)
+  expect(REMOTE_BLOCKED_CHANNELS.has('approvals:ack'), 'approvals:ack releases a waiting agent').toBe(true)
+  expect(REMOTE_BLOCKED_CHANNELS.has('approvals:allow'), 'approvals:allow renders a verdict').toBe(true)
 })
 
 // peersConfig:get is a READ (tier 0) and is blocked anyway: it describes the

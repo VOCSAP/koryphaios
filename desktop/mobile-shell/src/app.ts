@@ -8,6 +8,7 @@
 // only.
 
 import {
+  acceptsFreeText,
   applyEffect,
   classify,
   loadInbox,
@@ -292,6 +293,11 @@ function renderApprovals(root: HTMLElement): void {
       no.onclick = () => void answer(approval, "deny");
       actions.append(yes, no);
       card.append(actions);
+    }
+
+    if (!acceptsFreeText(approval)) {
+      list.append(card);
+      continue;
     }
 
     // The free-text box: the whole reason this screen exists.

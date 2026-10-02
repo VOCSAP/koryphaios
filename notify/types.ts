@@ -74,13 +74,21 @@ export interface NotificationChannel {
   stop(): Promise<void>;
 }
 
+/**
+ * Why the broker refused an answer on a request that is still pending:
+ * `verdict-only` -- a permission takes allow or deny, never free text;
+ * `on-tile` -- the question absorbed a permission dialog, answered on its tile.
+ */
+export type AnswerRefusal = "verdict-only" | "on-tile";
+
 /** What a gateway needs from the broker, injected so adapters stay testable. */
 export interface ChannelHost {
   /**
-   * Called when a channel receives an answer. Returns the settled approval, or
-   * null when the claim lost the race (already handled / expired).
+   * Called when a channel receives an answer. Returns the settled approval,
+   * `{ refused }` when the request is still pending but does not take this
+   * answer, or null when the claim lost the race (already handled / expired).
    */
-  onAnswer(kind: ChannelKind, answer: InboundAnswer): Promise<Approval | null>;
+  onAnswer(kind: ChannelKind, answer: InboundAnswer): Promise<Approval | { refused: AnswerRefusal } | null>;
 
   /**
    * Called when an address wants to pair using a one-shot code shown by the

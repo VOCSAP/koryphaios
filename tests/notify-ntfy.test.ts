@@ -9,7 +9,7 @@
 import { describe, expect, test } from "bun:test";
 import { NtfyChannel, type NtfyConfig } from "../notify/ntfy.ts";
 import { encodeAnswer, encodePair, parseClickUrl } from "../notify/ntfy-protocol.ts";
-import type { ChannelBinding, ChannelHost, InboundAnswer } from "../notify/types.ts";
+import type { AnswerRefusal, ChannelBinding, ChannelHost, InboundAnswer } from "../notify/types.ts";
 import type { Approval } from "../shared/types.ts";
 
 const CONFIG: NtfyConfig = {
@@ -66,10 +66,14 @@ interface Recorder {
   errors: string[];
 }
 
-function makeHost(rec: Recorder, opts: { settle?: boolean; pair?: boolean } = {}): ChannelHost {
+function makeHost(
+  rec: Recorder,
+  opts: { settle?: boolean; pair?: boolean; refused?: AnswerRefusal } = {}
+): ChannelHost {
   return {
     async onAnswer(_kind, answer) {
       rec.answers.push(answer);
+      if (opts.refused) return { refused: opts.refused };
       return opts.settle === false ? null : approval({ status: "answered", answered_via: "ntfy" });
     },
     async onPair(_kind, code, address, label) {
@@ -297,7 +301,7 @@ describe("post / settle / rejectLate", () => {
 describe("subscription (the inbound leg)", () => {
   async function run(
     lines: string[],
-    opts: { settle?: boolean; pair?: boolean; bind?: boolean } = {}
+    opts: { settle?: boolean; pair?: boolean; bind?: boolean; refused?: AnswerRefusal } = {}
   ): Promise<Recorder> {
     const rec = newRecorder();
     const ch = new NtfyChannel({
@@ -357,6 +361,14 @@ describe("subscription (the inbound leg)", () => {
     });
     expect(rec.answers).toHaveLength(1);
     expect(String(rec.published.at(-1)!.message)).toContain("already handled");
+  });
+
+  test("a refused answer is not taken for a settled one: it gets the closing message too", async () => {
+    const rec = await run([JSON.stringify({ id: "m1", message: encodeAnswer("appr-1", "text", "go") })], {
+      refused: "verdict-only",
+    });
+    expect(rec.answers).toHaveLength(1);
+    expect(rec.published, "a refusal object is truthy and must not pass for a settled approval").toHaveLength(1);
   });
 
   test("a pairing message pairs the notification topic and confirms on it", async () => {

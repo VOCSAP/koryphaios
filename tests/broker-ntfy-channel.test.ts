@@ -567,6 +567,23 @@ describe("ntfy enrolment", () => {
     const found = list.body.approvals.find((a) => a.id === approvalId)!;
     expect(found.answered_via).toBe("ntfy");
     expect(found.answer_kind).toBe("allow");
+
+    // A late second tap is told "already handled"; an unknown pairing code
+    // after it is answered on the same sequential stream, so once its reply is
+    // published every earlier reply is too.
+    await ntfy.publishRaw(payload.topic_replies, encodeAnswer(approvalId, "deny"));
+    await ntfy.publishRaw(payload.topic_replies, encodePair("no-such-code", "Pixel 8"));
+    const fenced = await until(() =>
+      (ntfy.published.get(payload.topic_notif) ?? []).some((m) => String(m.message).includes("unknown or expired"))
+    );
+    expect(fenced).toBe(true);
+    const handledNotices = (ntfy.published.get(payload.topic_notif) ?? []).filter(
+      (m) => String(m.click).includes(approvalId) && String(m.message).includes("already handled")
+    );
+    expect(
+      handledNotices,
+      "the winning answer was told 'already handled': onAnswer returned null for a settled approval"
+    ).toHaveLength(1);
   }, 60_000);
 
   test("answering twice is refused, and the phone is told so (C-1 arbitration)", async () => {

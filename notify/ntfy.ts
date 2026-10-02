@@ -299,7 +299,7 @@ export class NtfyChannel implements NotificationChannel {
       fromAddress: address,
     };
     const settled = await this.deps.host.onAnswer("ntfy", answer);
-    if (!settled) await this.rejectLate(binding, answer);
+    if (!settled || "refused" in settled) await this.rejectLate(binding, answer);
   }
 
   /**

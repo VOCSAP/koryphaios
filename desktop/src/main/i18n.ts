@@ -854,6 +854,8 @@ export const EN_DEFAULTS: Record<string, string> = {
   'inbox.hint': 'Closing a message never acknowledges it — it stays here until you do.',
   'inbox.openEntry': 'Open',
   'inbox.ack': 'Acknowledge',
+  'inbox.permissionAllow': 'Allow',
+  'inbox.permissionDeny': 'Deny',
   'inbox.reply': 'Reply',
   'inbox.decline': 'Decline',
   'inbox.delete': 'Delete',

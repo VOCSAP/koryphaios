@@ -263,6 +263,182 @@ describe("acknowledging a channel-route question", () => {
   }, 30_000);
 });
 
+describe("a permission raise merged into a tile's channel question", () => {
+  async function pendingRow(b: TestBroker, op: Operator, id: string): Promise<Approval> {
+    const list = await signedPost<{ approvals: Approval[] }>(
+      b,
+      "/approval/list",
+      { ...approvalListBody("p"), status: "pending" },
+      op
+    );
+    const row = list.body.approvals.find((a) => a.id === id);
+    if (!row) throw new Error(`approval ${id} is not pending`);
+    return row;
+  }
+
+  // Same shape as the PermissionRequest hook: no reply_route, no merge field.
+  const hookPermission = {
+    kind: "permission",
+    title: "Bash: rm -rf build",
+    question: "The agent wants to use Bash.",
+    options: ["Allow", "Deny"],
+    merge: undefined,
+  };
+
+  test("the merged row stays a channel question marked absorbed: deny and text are refused, allow settles it", async () => {
+    const b = await startBroker();
+    brokers.push(b);
+    const op = newOperator();
+    const peer = await connectPeer(b, "/tmp/merge-proj-a");
+
+    const question = await raise(b, op, {
+      reply_route: "channel",
+      reply_peer_id: peer.peerId,
+      tile_ref: "t-absorb",
+      merge: "tile",
+    });
+    expect([question.kind, question.reply_route, question.absorbed_permission]).toEqual(["question", "channel", false]);
+    const permission = await raise(b, op, { ...hookPermission, tile_ref: "t-absorb" });
+    expect(permission.id).toBe(question.id);
+    await raise(b, op, { ...hookPermission, tile_ref: "t-absorb" });
+
+    const merged = await pendingRow(b, op, question.id);
+    expect(
+      [merged.kind, merged.reply_route, merged.absorbed_permission],
+      "tile_ref is unauthenticated: the row keeps its route and only carries the mark"
+    ).toEqual(["question", "channel", true]);
+    expect(merged.mergeable, "a tile notification is mergeable").toBe(true);
+
+    const refusals = [
+      { answer_kind: "deny" },
+      { answer_kind: "text", answer_text: "go ahead" },
+    ];
+    for (const verdict of refusals) {
+      const res = await signedPost(b, "/approval/claim", { id: question.id, via: "deck", ...verdict }, op);
+      expect(res.status, `${verdict.answer_kind} would settle the row while the CLI dialog stays on screen`).toBe(422);
+      expect((await pendingRow(b, op, question.id)).status).toBe("pending");
+    }
+    const ack = await signedPost(b, "/approval/claim", { id: question.id, via: "deck", acknowledge: true }, op);
+    expect(ack.status, "acknowledging would drop the row from the inbox while the CLI dialog stays on screen").toBe(422);
+    expect((await pendingRow(b, op, question.id)).status).toBe("pending");
+
+    const lone = await raise(b, op, { reply_route: "channel", reply_peer_id: peer.peerId, tile_ref: "t-lone" });
+    expect(lone.mergeable, "a merge:'never' ticket is not mergeable").toBe(false);
+    const denyLone = await signedPost(b, "/approval/claim", { id: lone.id, via: "deck", answer_kind: "deny" }, op);
+    expect(denyLone.status, "a question that absorbed nothing still takes deny").toBe(200);
+
+    const allow = await signedPost(b, "/approval/claim", { id: question.id, via: "deck", answer_kind: "allow" }, op);
+    expect(allow.status, "the terminal-answer listener settles an absorbed row with allow").toBe(200);
+    const settled = await waitOn(b, op, question.id);
+    expect([settled.status, settled.answer_kind]).toEqual(["answered", "allow"]);
+
+    const late = await signedPost(b, "/approval/claim", { id: question.id, via: "deck", answer_kind: "deny" }, op);
+    expect(late.status, "a settled absorbed row answers 409, not 422").toBe(409);
+  }, 30_000);
+
+  test("the hook's SESSION credential marks the Deck's OPERATOR-raised question as absorbed", async () => {
+    const b = await startBroker();
+    brokers.push(b);
+    const op = newOperator();
+    const peer = await connectPeer(b, "/tmp/merge-proj-cross");
+    const tile = "t-cross";
+
+    const question = await raise(b, op, {
+      reply_route: "channel",
+      reply_peer_id: peer.peerId,
+      tile_ref: tile,
+      merge: "tile",
+    });
+
+    const session = generateCredential();
+    const minted = await signedPost<{ token_id: string }>(
+      b,
+      "/approval/token-mint",
+      { session_public_key: session.publicKey, session_ref: tile },
+      op
+    );
+    expect(minted.status).toBe(200);
+    const body = {
+      project_key: "p",
+      kind: "permission",
+      title: hookPermission.title,
+      question: hookPermission.question,
+      options: hookPermission.options,
+      session_ref: tile,
+      tile_ref: tile,
+      origin: { host: "test-host", project_key: "p", group_id: "default" },
+      public_key: session.publicKey,
+    };
+    const auth = buildAuthProof(session.privateKey, body, {
+      kind: "session",
+      operator_id: op.id,
+      token_id: minted.body.token_id,
+    });
+    const permission = await post<{ approval: Approval }>(`${b.url}/approval/add`, { ...body, auth });
+    expect(permission.status).toBe(200);
+    expect(permission.body.approval.id, "the hook's raise merges into the Deck's row").toBe(question.id);
+
+    expect(
+      (await pendingRow(b, op, question.id)).absorbed_permission,
+      "a session-pinned UPDATE misses the operator-raised row, leaving deny and text open on it"
+    ).toBe(true);
+  }, 30_000);
+
+  test("a text answer on a permission is refused with 422 and the row stays pending", async () => {
+    const b = await startBroker();
+    brokers.push(b);
+    const op = newOperator();
+    const peer = await connectPeer(b, "/tmp/merge-proj-text");
+
+    const plain = await raise(b, op, { ...hookPermission, tile_ref: "t-plain" });
+    const res = await signedPost(
+      b,
+      "/approval/claim",
+      { id: plain.id, via: "deck", answer_kind: "text", answer_text: "Always allow" },
+      op
+    );
+    expect(res.status, "free text would be typed into the permission chooser").toBe(422);
+    expect((await pendingRow(b, op, plain.id)).status).toBe("pending");
+
+    const lone = await raise(b, op, { reply_route: "channel", reply_peer_id: peer.peerId, tile_ref: "t-q" });
+    const text = await signedPost(
+      b,
+      "/approval/claim",
+      { id: lone.id, via: "deck", answer_kind: "text", answer_text: "go ahead" },
+      op
+    );
+    expect(text.status, "a question still takes a text answer").toBe(200);
+    const deny = await signedPost(b, "/approval/claim", { id: plain.id, via: "deck", answer_kind: "deny" }, op);
+    expect(deny.status, "a permission still takes deny").toBe(200);
+  }, 30_000);
+
+  test("a question merging into an existing permission leaves the permission unchanged", async () => {
+    const b = await startBroker();
+    brokers.push(b);
+    const op = newOperator();
+    const peer = await connectPeer(b, "/tmp/merge-proj-b");
+
+    const permission = await raise(b, op, { ...hookPermission, tile_ref: "t-order" });
+    expect([permission.kind, permission.reply_route]).toEqual(["permission", "pty"]);
+    const question = await raise(b, op, {
+      title: "Fallback",
+      reply_route: "channel",
+      reply_peer_id: peer.peerId,
+      tile_ref: "t-order",
+      merge: "tile",
+    });
+    expect(question.id).toBe(permission.id);
+
+    const row = await pendingRow(b, op, permission.id);
+    expect([row.kind, row.reply_route, row.title, row.absorbed_permission]).toEqual([
+      "permission",
+      "pty",
+      hookPermission.title,
+      false,
+    ]);
+  }, 30_000);
+});
+
 describe("settledOutcome and its readers", () => {
   const base = { answer_text: null, answered_via: "deck" as const };
 
