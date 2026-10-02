@@ -287,19 +287,6 @@ export function RoadmapItemModal({
               {GLYPH_ACTIONS.edit}
             </button>
           )}
-          {/* Offline replica: the second way into the arbitration dialog (the
-              first is the badge on the board card), for the operator who
-              opened the card to read it before deciding. */}
-          {item.sync_state === 'conflict' && (
-            <button
-              className="icon-btn"
-              title={t('roadmap.sync.resolve')}
-              aria-label={t('roadmap.sync.resolve')}
-              onClick={() => openConflict(item.id)}
-            >
-              {GLYPH_BADGES.scales}
-            </button>
-          )}
           <button className="icon-btn" title={t('common.close')} onClick={onClose}>
             {GLYPH_ACTIONS.close}
           </button>
@@ -425,6 +412,14 @@ export function RoadmapItemModal({
                 {t('roadmap.queueRemove')}
               </button>
             ))}
+          {/* Next to Archive on purpose: archiving touches no sync column, so
+              on a conflicting card it is the action that LOOKS like a way out
+              and is not. The dialog stacks over this modal, which stays open. */}
+          {item.sync_state === 'conflict' && (
+            <button className="btn" onClick={() => openConflict(item.id)}>
+              {GLYPH_BADGES.scales} {t('roadmap.sync.resolve')}
+            </button>
+          )}
           {item.status === 'archived' ? (
             <button className="btn btn-restore" onClick={onRestore}>
               {t('roadmap.restore')}

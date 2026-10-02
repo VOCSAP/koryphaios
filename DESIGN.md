@@ -236,6 +236,21 @@ failure shape as a className matching no selector at all, different cause.
   Per-modal twins exist (`.rm-detail-head`, `.usage-head`); a new dialog should
   take `.modal-head` rather than mint a third. Never align that cross with a
   `margin-left: auto` or an offset: the title's `flex: 1` is the mechanism.
+- **Stacked, movable dialog** (`RoadmapConflictDialog`, the only instance): a
+  dialog opened FROM another modal does not close it, so the operator can set
+  them side by side. Its backdrop takes a dedicated class one step above the
+  modals (`z-index: 55`). The ladder above it: status banner, popovers, help
+  and inbox at 60, context menus at 70. When a modal is open beneath it, that
+  backdrop turns transparent through `:has()` and the dialog takes the toast
+  shadow (no double veil); the veil then passes pointer events through, so the
+  modal beneath stays usable, and an outside click no longer closes the dialog.
+  Opened alone, it keeps the veil and the outside-click close. Its
+  `.modal-head` is the drag handle: pointer capture, plus arrow keys (16 px) once focused, clamped so 120 px stay on
+  screen (the parked strip also holds the close cross) and the top never goes
+  under the banner; a window resize re-applies the clamp. The close cross and
+  Escape still work. Escape listens in the CAPTURE phase and stops propagation,
+  only while open and never for a text field outside the dialog, so one press
+  closes one layer.
 - **Empty states**: centered `.empty-card` (`--bg-2`, border, radius 8) with
   `h2` + dim paragraph + `.empty-actions` row.
 - **Inputs**: `--bg` fill, 1px `--border`, radius 4–6, padding 6px 8px,

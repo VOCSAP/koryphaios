@@ -3194,6 +3194,38 @@ svg.glyph {
   flex-direction: column;
 }
 
+/* Opened from the card's own modal, which stays open so both can sit side by
+   side: one step above the modals (50), below the status banner and popovers
+   (60). Over a card modal the veil goes, since a second 45% veil would darken
+   the very card the operator moved the dialog aside to read; a shadow then
+   separates the two surfaces. */
+.rm-conflict-backdrop {
+  z-index: 55;
+}
+
+/* The card beneath stays usable (scroll, click) while the dialog floats over it:
+   the veil lets pointer events through, only the dialog itself catches them. */
+body:has(.rm-modal) .rm-conflict-backdrop {
+  background: transparent;
+  pointer-events: none;
+}
+
+body:has(.rm-modal) .rm-conflict-modal {
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+  pointer-events: auto;
+}
+
+/* The header is the drag handle (pointer, or arrow keys once focused). */
+.rm-conflict-modal .modal-head {
+  cursor: grab;
+  user-select: none;
+  touch-action: none;
+}
+
+.rm-conflict-modal.is-dragging .modal-head {
+  cursor: grabbing;
+}
+
 .rm-conflict-intro {
   margin: 4px 0 0;
   color: var(--fg-dim);
