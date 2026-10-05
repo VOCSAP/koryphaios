@@ -45,7 +45,55 @@ const PAYLOAD = JSON.stringify({
   hook_event_name: "Status",
   session_id: "abc123",
   model: { id: "claude-opus-4-1", display_name: "Opus" },
-  context_window: { context_window_size: 200000, used_percentage: 12.5 },
+  context_window: { context_window_size: 200000, used_percentage: 8 },
+});
+
+const COMPACTED_PAYLOAD = JSON.stringify({
+  model: { id: "claude-opus-5-5", display_name: "Opus 5.5" },
+  context_window: {
+    total_input_tokens: 0,
+    total_output_tokens: 0,
+    context_window_size: 1000000,
+    current_usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+    used_percentage: 0,
+    remaining_percentage: 100,
+  },
+});
+
+const NONZERO_TOTAL_PAYLOAD = JSON.stringify({
+  model: { id: "claude-opus-5-5", display_name: "Opus 5.5" },
+  context_window: {
+    total_input_tokens: 1,
+    total_output_tokens: 0,
+    context_window_size: 1000000,
+    current_usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+    used_percentage: 8,
+    remaining_percentage: 92,
+  },
+});
+
+const NONZERO_USAGE_PAYLOAD = JSON.stringify({
+  model: { id: "claude-opus-5-5", display_name: "Opus 5.5" },
+  context_window: {
+    total_input_tokens: 0,
+    total_output_tokens: 0,
+    context_window_size: 1000000,
+    current_usage: { input_tokens: 1, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+    used_percentage: 8,
+    remaining_percentage: 92,
+  },
+});
+
+const FIRST_TURN_PAYLOAD = JSON.stringify({
+  model: { id: "claude-opus-5-5", display_name: "Opus 5.5" },
+  context_window: {
+    total_input_tokens: 0,
+    total_output_tokens: 0,
+    context_window_size: 1000000,
+    current_usage: null,
+    used_percentage: null,
+    remaining_percentage: null,
+  },
 });
 
 // ----- pure helpers -----
@@ -115,8 +163,54 @@ test("real script: writes the status file for a Deck tile and prints nothing wit
   expect(decodeStatusFile(readFileSync(written, "utf-8")), "written file decodes main-side").toMatchObject({
     model: "Opus",
     modelId: "claude-opus-4-1",
-    contextPct: 12.5,
+    contextPct: 8,
     contextWindow: 200000,
+  });
+}, 20000);
+
+test("real script: zeroed post-compact context reports an unknown percentage", async () => {
+  const home = tmpDir();
+  const res = await runHook(home, { CLAUDE_PEERS_DESK_SESSION: "tile-compact" }, COMPACTED_PAYLOAD);
+  expect(res.exitCode, "exits 0").toBe(0);
+  const written = join(home, ".claude", "peers", "desk-status-tile-compact.json");
+  expect(decodeStatusFile(readFileSync(written, "utf-8")), "zeroed compact payload is not displayed as zero percent").toMatchObject({
+    model: "Opus 5.5",
+    modelId: "claude-opus-5-5",
+    contextPct: null,
+    contextWindow: 1000000,
+  });
+}, 20000);
+
+test("real script: nonzero input tokens preserve the reported percentage", async () => {
+  const home = tmpDir();
+  const res = await runHook(home, { CLAUDE_PEERS_DESK_SESSION: "tile-nonzero-total" }, NONZERO_TOTAL_PAYLOAD);
+  expect(res.exitCode, "exits 0").toBe(0);
+  const written = join(home, ".claude", "peers", "desk-status-tile-nonzero-total.json");
+  expect(decodeStatusFile(readFileSync(written, "utf-8")), "nonzero input tokens keep the measured percentage").toMatchObject({
+    contextPct: 8,
+    contextWindow: 1000000,
+  });
+}, 20000);
+
+test("real script: nonzero usage preserves the reported percentage", async () => {
+  const home = tmpDir();
+  const res = await runHook(home, { CLAUDE_PEERS_DESK_SESSION: "tile-nonzero-usage" }, NONZERO_USAGE_PAYLOAD);
+  expect(res.exitCode, "exits 0").toBe(0);
+  const written = join(home, ".claude", "peers", "desk-status-tile-nonzero-usage.json");
+  expect(decodeStatusFile(readFileSync(written, "utf-8")), "nonzero token usage keeps the measured percentage").toMatchObject({
+    contextPct: 8,
+    contextWindow: 1000000,
+  });
+}, 20000);
+
+test("real script: unmeasured first-turn context reports an unknown percentage", async () => {
+  const home = tmpDir();
+  const res = await runHook(home, { CLAUDE_PEERS_DESK_SESSION: "tile-first-turn" }, FIRST_TURN_PAYLOAD);
+  expect(res.exitCode, "exits 0").toBe(0);
+  const written = join(home, ".claude", "peers", "desk-status-tile-first-turn.json");
+  expect(decodeStatusFile(readFileSync(written, "utf-8")), "first-turn payload has no measured percentage").toMatchObject({
+    contextPct: null,
+    contextWindow: 1000000,
   });
 }, 20000);
 

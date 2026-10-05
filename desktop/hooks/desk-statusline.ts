@@ -118,6 +118,17 @@ async function readStdin(): Promise<string> {
   return Buffer.concat(chunks).toString("utf-8");
 }
 
+function normalizeZeroedContext(payload: unknown): unknown {
+  if (typeof payload !== "object" || payload === null || Array.isArray(payload)) return payload;
+  const context = (payload as Record<string, unknown>).context_window;
+  if (typeof context !== "object" || context === null || Array.isArray(context)) return payload;
+  const usage = (context as Record<string, unknown>).current_usage;
+  if (typeof usage !== "object" || usage === null || Array.isArray(usage)) return payload;
+  const values = Object.values(usage);
+  if ((context as Record<string, unknown>).total_input_tokens !== 0 || values.length === 0 || !values.every((value) => value === 0)) return payload;
+  return { ...payload, context_window: { ...context, used_percentage: null } };
+}
+
 function reportStatus(raw: string, log: Logger): void {
   const target = statusFileTarget(process.env.CLAUDE_PEERS_DESK_SESSION);
   if (!target) return;
@@ -128,7 +139,7 @@ function reportStatus(raw: string, log: Logger): void {
     log.warn("statusLine payload is not JSON, no report written", e);
     return;
   }
-  const encoded = encodeStatusFromPayload(payload, Date.now());
+  const encoded = encodeStatusFromPayload(normalizeZeroedContext(payload), Date.now());
   if (!encoded) return; // no usable model yet: nothing to report
   try {
     writeStatusFile(target, encoded);

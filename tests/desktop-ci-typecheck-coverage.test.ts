@@ -9,7 +9,8 @@
 // tsconfig using block comments, and an extends-only config with no own
 // compilerOptions (silently excluded from the domain).
 
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative, sep } from "node:path";
 import { expect, test } from "bun:test";
@@ -22,24 +23,10 @@ const WORKFLOW_PATH = join(REPO_ROOT, ".github", "workflows", "desktop-build.yml
 // every `\n`-anchored regex below on that runner alone.
 const REAL_WORKFLOW_TEXT = readFileSync(WORKFLOW_PATH, "utf-8").replace(/\r\n/g, "\n");
 
-function toRepoRelative(absPath: string): string {
-  return relative(REPO_ROOT, absPath).split(sep).join("/");
+function toRepoRelative(absPath: string, repoRoot = REPO_ROOT): string {
+  return relative(repoRoot, absPath).split(sep).join("/");
 }
 
-// ----- tsconfig domain discovery: structural, not a hardcoded list --------
-
-// Same pruning as desktop-tsconfig-flags.test.ts's collectTsconfigs: vendored
-// dependency trees and build output ship their own tsconfig*.json files and
-// must never be descended into.
-const EXCLUDED_DIR_NAMES = new Set(["node_modules", "dist", "out"]);
-
-// Same single-piece-of-state `//`-comment stripper as
-// desktop-tsconfig-flags.test.ts (JSON has no other comment-adjacent literal
-// forms to worry about -- see that file's header for why this is safe for
-// JSONC tsconfigs specifically). Duplicated deliberately: that file owns no
-// exported production module for this repo to import from, and this file's
-// scope for this card is "the workflow + the tests I add", not a refactor of
-// a sibling test file's internals.
 function stripJsonComments(src: string): string {
   let out = "";
   let inString = false;
@@ -74,42 +61,25 @@ function parseJsonc(src: string): unknown {
   return JSON.parse(stripJsonComments(src));
 }
 
-/**
- * Walks `root`, returning the absolute path of every tsconfig*.json that
- * carries its own `compilerOptions` key -- the structural property that
- * makes it an actual `tsc -p` program, as opposed to a solution file (`files:
- * []`, only `references`) like desktop/tsconfig.json. This is deliberately
- * NOT a hand-maintained exemption list: a future solution-file-shaped config
- * is excluded automatically by the same rule, and a future real program is
- * included automatically the same way, with nothing here to edit either way.
- * An unparseable tsconfig is skipped rather than thrown on -- this function's
- * job is domain discovery, not tsconfig validity, which desktop-tsconfig-
- * flags.test.ts already audits separately.
- */
-function collectTypecheckedConfigs(root: string): string[] {
-  const out: string[] = [];
-  function walk(dir: string) {
-    for (const entry of readdirSync(dir, { withFileTypes: true })) {
-      if (entry.isDirectory()) {
-        if (EXCLUDED_DIR_NAMES.has(entry.name)) continue;
-        walk(join(dir, entry.name));
-        continue;
-      }
-      if (!entry.isFile() || !/^tsconfig.*\.json$/.test(entry.name)) continue;
-      const abs = join(dir, entry.name);
-      let parsed: unknown;
-      try {
-        parsed = parseJsonc(readFileSync(abs, "utf-8"));
-      } catch {
-        continue;
-      }
-      if (parsed && typeof parsed === "object" && Object.hasOwn(parsed as object, "compilerOptions")) {
-        out.push(abs);
-      }
-    }
+function isTypecheckedConfig(abs: string): boolean {
+  let parsed: unknown;
+  try {
+    parsed = parseJsonc(readFileSync(abs, "utf-8"));
+  } catch {
+    return false;
   }
-  walk(root);
-  return out;
+  return !!parsed && typeof parsed === "object" && Object.hasOwn(parsed as object, "compilerOptions");
+}
+
+function collectTrackedTypecheckedConfigs(repoRoot: string, root: string): string[] {
+  const relRoot = relative(repoRoot, root).split(sep).join("/");
+  const result = spawnSync("git", ["ls-files", "--cached", "--", relRoot], { cwd: repoRoot, encoding: "utf-8" });
+  if (result.status !== 0) throw new Error(`git ls-files failed for ${relRoot}: ${result.error?.message ?? result.stderr ?? "unknown error"}`);
+  return result.stdout
+    .split(/\r?\n/)
+    .filter((path) => /^tsconfig.*\.json$/.test(path.slice(path.lastIndexOf("/") + 1)))
+    .map((path) => join(repoRoot, path))
+    .filter(isTypecheckedConfig);
 }
 
 // ----- bounded workflow step parser (derives indentation, never hardcodes it) --
@@ -240,7 +210,7 @@ function resolveTsConfigsForRun(
   let m: RegExpExecArray | null;
   while ((m = tscRe.exec(run))) {
     const arg = m[1]!.replace(/^"|"$/g, "");
-    results.push(toRepoRelative(join(dirAbs, arg)));
+    results.push(toRepoRelative(join(dirAbs, arg), repoRoot));
   }
 
   const npmRunRe = /\bnpm run ([\w:.-]+)/g;
@@ -294,16 +264,6 @@ function jobLevelSafe(text: string): boolean {
   return /^[ \t]*push:/m.test(prefix) && /^[ \t]*pull_request:/m.test(prefix);
 }
 
-/**
- * The set of tsconfig paths actually type-checked by SOME non-neutralized
- * step in `workflowText`. A neutralized step's resolved configs are dropped
- * entirely (not just flagged) -- since today each config is checked by
- * exactly one step, this makes "step removed" and "step neutralized"
- * collapse into the identical observable effect on `covered`, which is what
- * lets one coverage assertion catch both mutation families. A job-level kill
- * switch (see jobLevelSafe) empties the whole set outright: nothing below it
- * is trustworthy once the job itself cannot fail, or cannot even run.
- */
 function coveredConfigsFromWorkflowText(
   workflowText: string,
   repoRoot: string,
@@ -321,10 +281,9 @@ function coveredConfigsFromWorkflowText(
   return covered;
 }
 
-// ----- mutation helpers: operate on an in-memory COPY of the workflow text --
-// Per team-lead instruction: never mutate the real .github/workflows/
-// desktop-build.yml on this shared checkout. Every function below takes a
-// text string and returns a new string; none of them touch the filesystem.
+function findUncoveredConfigs(discovered: string[], covered: Set<string>): string[] {
+  return discovered.filter((config) => !covered.has(config));
+}
 
 /**
  * Selects the step to mutate by the tsconfig its run: actually resolves to, not
@@ -399,10 +358,10 @@ function appendShellSwallow(
 // Real-repo tests
 // ============================================================================
 
-const DISCOVERED_CONFIGS_ABS = collectTypecheckedConfigs(DESKTOP_ROOT);
-const DISCOVERED_CONFIGS = DISCOVERED_CONFIGS_ABS.map(toRepoRelative);
+const DISCOVERED_CONFIGS_ABS = collectTrackedTypecheckedConfigs(REPO_ROOT, DESKTOP_ROOT);
+const DISCOVERED_CONFIGS = DISCOVERED_CONFIGS_ABS.map((path) => toRepoRelative(path));
 
-test("floor: at least 2 tsconfigs carrying their own compilerOptions are discovered under desktop/ (a broken walk must not read as a vacuous pass)", () => {
+test("floor: at least 2 tracked tsconfigs carrying their own compilerOptions are discovered under desktop/", () => {
   expect(DISCOVERED_CONFIGS.length).toBeGreaterThanOrEqual(2);
 });
 
@@ -418,7 +377,7 @@ test("desktop/tsconfig.json (the solution file) is excluded by construction -- i
 
 test("every discovered tsconfig is actually invoked by some non-neutralized CI step -- domain is discovered, not a hardcoded 2-step list", () => {
   const covered = coveredConfigsFromWorkflowText(REAL_WORKFLOW_TEXT, REPO_ROOT, realReadPackageScripts);
-  const missing = DISCOVERED_CONFIGS.filter((c) => !covered.has(c));
+  const missing = findUncoveredConfigs(DISCOVERED_CONFIGS, covered);
   expect(missing, `not typechecked by any live CI step: ${missing.join(", ")}`).toEqual([]);
 });
 
@@ -462,9 +421,6 @@ test("MUTATION: if: false on the mobile-shell typecheck step turns it red (a sec
 });
 
 test("MUTATION, NEIGHBOR KEY: appending `|| true` to the desktop typecheck run line turns it red -- no GitHub Actions key involved at all", () => {
-  // This is the neighbor the team-lead asked for by name: a guard keyed only
-  // on continue-on-error/if would stay green here, because neither key is
-  // touched -- the failure is swallowed at the shell level instead.
   const mutated = appendShellSwallow(REAL_WORKFLOW_TEXT, "desktop/tsconfig.node.json", REPO_ROOT, realReadPackageScripts);
   const after = coveredConfigsFromWorkflowText(mutated, REPO_ROOT, realReadPackageScripts);
   expect(after.has("desktop/tsconfig.node.json")).toBe(false);
@@ -485,9 +441,6 @@ test("MUTATION-SELECTOR RESILIENCE: renaming a step does not break mutation sele
 });
 
 test("MUTATION: a shell swallow moved into the npm script BODY (not the workflow run: line) still turns the config red", () => {
-  // The swallow never touches .github/workflows/desktop-build.yml at all --
-  // only the RESOLVED script body carries it, which is exactly what a
-  // detector keyed on the workflow text alone would miss.
   const fixtureScripts: Record<string, string> = {
     "typecheck:node": "tsc --noEmit -p tsconfig.node.json || true",
     "typecheck:web": "tsc --noEmit -p tsconfig.web.json",
@@ -523,10 +476,10 @@ test("MUTATION: a commented-out tsc line inside a multi-line run: block does not
 
 test("MUTATION, JOB-LEVEL KILL SWITCH: continue-on-error: true placed on the job itself (above every step) empties coverage entirely", () => {
   const before = coveredConfigsFromWorkflowText(REAL_WORKFLOW_TEXT, REPO_ROOT, realReadPackageScripts);
-  expect(before.size).toBeGreaterThan(0); // sanity: the real workflow is covered before this mutation
+  expect(before.size).toBeGreaterThan(0);
 
   const mutated = REAL_WORKFLOW_TEXT.replace(/^([ \t]*)runs-on:/m, "$1continue-on-error: true\n$1runs-on:");
-  expect(mutated).not.toBe(REAL_WORKFLOW_TEXT); // sanity: the mutation actually landed
+  expect(mutated).not.toBe(REAL_WORKFLOW_TEXT);
 
   const after = coveredConfigsFromWorkflowText(mutated, REPO_ROOT, realReadPackageScripts);
   expect(after.size).toBe(0);
@@ -543,13 +496,6 @@ test("MUTATION, JOB-LEVEL KILL SWITCH: dropping pull_request: from the on: trigg
   const after = coveredConfigsFromWorkflowText(mutated, REPO_ROOT, realReadPackageScripts);
   expect(after.size).toBe(0);
 });
-
-// ============================================================================
-// Detector unit tests: positive AND negative control for every extraction
-// primitive, per the team-lead's explicit requirement.
-// ============================================================================
-
-// ----- stepBoundsList / parseStep: bounded parse ---------------------------
 
 test("POSITIVE: stepBoundsList finds every step in the real workflow (sanity floor against a broken marker regex)", () => {
   expect(stepBoundsList(REAL_WORKFLOW_TEXT).length).toBeGreaterThanOrEqual(8);
@@ -676,50 +622,49 @@ test("POSITIVE against the REAL desktop/package.json: resolving \"npm run typech
   expect(result.sort()).toEqual(["desktop/tsconfig.node.json", "desktop/tsconfig.web.json"]);
 });
 
-// ----- collectTypecheckedConfigs: structural exclusion, growth + shrink ----
+function makeTrackedTsconfigFixture(): { dir: string; desktop: string; configs: string[] } {
+  const dir = mkdtempSync(join(tmpdir(), "cp-ci-typecheck-tracked-"));
+  const desktop = join(dir, "desktop");
+  const names = ["tsconfig.a.json", "tsconfig.b.json", "tsconfig.c.json", "tsconfig.d.json", "tsconfig.zz-growth.json"];
+  mkdirSync(desktop);
+  for (const name of names) {
+    writeFileSync(join(desktop, name), JSON.stringify({ compilerOptions: { strict: true } }));
+  }
+  writeFileSync(join(desktop, "tsconfig.generated.json"), JSON.stringify({ compilerOptions: { strict: true } }));
+  expect(spawnSync("git", ["init"], { cwd: dir }).status).toBe(0);
+  expect(spawnSync("git", ["add", ...names.map((name) => `desktop/${name}`)], { cwd: dir }).status).toBe(0);
+  return { dir, desktop, configs: names.map((name) => join(desktop, name)) };
+}
 
-test("POSITIVE: a synthetic tsconfig WITH compilerOptions is discovered", () => {
-  const dir = mkdtempSync(join(tmpdir(), "cp-ci-typecheck-discover-"));
+test("tracked discovery returns every tracked tsconfig and excludes an untracked tsconfig", () => {
+  const { dir, desktop, configs } = makeTrackedTsconfigFixture();
   try {
-    writeFileSync(join(dir, "tsconfig.json"), JSON.stringify({ compilerOptions: { strict: true } }));
-    const found = collectTypecheckedConfigs(dir);
-    expect(found).toEqual([join(dir, "tsconfig.json")]);
+    expect(collectTrackedTypecheckedConfigs(dir, desktop)).toEqual(configs);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test("NEGATIVE: a synthetic solution-file-shaped tsconfig (files: [], references only, no compilerOptions) is excluded", () => {
-  const dir = mkdtempSync(join(tmpdir(), "cp-ci-typecheck-solution-"));
+test("a tracked tsconfig without a live CI step is uncovered", () => {
+  const { dir, desktop, configs } = makeTrackedTsconfigFixture();
   try {
-    writeFileSync(join(dir, "tsconfig.json"), JSON.stringify({ files: [], references: [{ path: "./tsconfig.a.json" }] }));
-    expect(collectTypecheckedConfigs(dir)).toEqual([]);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test("MUTATION, domain growth: a fourth real program (a synthetic tsconfig with compilerOptions dropped into a nested dir) is discovered automatically, nothing to edit in this file", () => {
-  const dir = mkdtempSync(join(tmpdir(), "cp-ci-typecheck-fourth-"));
-  try {
-    writeFileSync(join(dir, "tsconfig.json"), JSON.stringify({ files: [], references: [] }));
-    mkdirSync(join(dir, "some-new-subproject"));
-    writeFileSync(join(dir, "some-new-subproject", "tsconfig.json"), JSON.stringify({ compilerOptions: { strict: true } }));
-    const found = collectTypecheckedConfigs(dir).map((p) => relative(dir, p).split(sep).join("/"));
-    expect(found).toEqual(["some-new-subproject/tsconfig.json"]);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test("collectTypecheckedConfigs never descends into node_modules/dist/out (vendored/build tsconfigs must not be adopted as real programs)", () => {
-  const dir = mkdtempSync(join(tmpdir(), "cp-ci-typecheck-vendored-"));
-  try {
-    for (const excluded of ["node_modules", "dist", "out"]) {
-      mkdirSync(join(dir, excluded, "some-pkg"), { recursive: true });
-      writeFileSync(join(dir, excluded, "some-pkg", "tsconfig.json"), JSON.stringify({ compilerOptions: { strict: true } }));
-    }
-    expect(collectTypecheckedConfigs(dir)).toEqual([]);
+    const workflow = [
+      "on:",
+      "  push:",
+      "  pull_request:",
+      "jobs:",
+      "  typecheck:",
+      "    runs-on: ubuntu-latest",
+      "    steps:",
+      ...configs.slice(0, 4).map((path, index) => [
+        `      - name: Typecheck ${index}`,
+        "        working-directory: desktop",
+        `        run: bunx tsc --noEmit -p ${relative(desktop, path).split(sep).join("/")}`,
+      ].join("\n")),
+    ].join("\n");
+    const discovered = collectTrackedTypecheckedConfigs(dir, desktop).map((path) => toRepoRelative(path, dir));
+    const covered = coveredConfigsFromWorkflowText(workflow, dir, () => undefined);
+    expect(findUncoveredConfigs(discovered, covered)).toEqual(["desktop/tsconfig.zz-growth.json"]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

@@ -1,9 +1,5 @@
-// Pins noUnusedLocals/noUnusedParameters across every desktop tsconfig by
-// walking desktop/** on disk rather than a fixed list, so a new config is
-// either compliant or must be named in EXEMPT_CONFIGS with a written reason.
-
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative, sep } from "node:path";
 import { afterEach, expect, test } from "bun:test";
@@ -11,45 +7,20 @@ import { afterEach, expect, test } from "bun:test";
 const REPO_ROOT = join(import.meta.dir, "..");
 const DESKTOP_ROOT = join(REPO_ROOT, "desktop");
 
-// Directories that are never source: vendored dependency trees (each ships
-// its own tsconfig*.json, e.g. node-pty, big-integer, hasown), the built
-// Electron output (dist/win-unpacked ships a copy of node-pty's tsconfig
-// inside app.asar.unpacked), and the electron-vite build output (`out`,
-// gitignored alongside `dist` -- see .gitignore "# output"). Pruned during
-// the walk itself (never descended into), not filtered after collection --
-// so this can't accidentally include a vendored/build config that happens to
-// pass and mask a real one that doesn't.
-const EXCLUDED_DIR_NAMES = new Set(["node_modules", "dist", "out"]);
-
 function toRepoRelative(absPath: string): string {
   return relative(REPO_ROOT, absPath).split(sep).join("/");
 }
 
-// Recursive walk rather than a single-level readdir: mobile-shell/tsconfig.json
-// lives one directory below desktop/, so a flat scan would miss it.
-function collectTsconfigs(dir: string): string[] {
-  const out: string[] = [];
-  for (const entry of readdirSync(dir, { withFileTypes: true })) {
-    if (entry.isDirectory()) {
-      if (EXCLUDED_DIR_NAMES.has(entry.name)) continue;
-      out.push(...collectTsconfigs(join(dir, entry.name)));
-    } else if (entry.isFile() && /^tsconfig.*\.json$/.test(entry.name)) {
-      out.push(join(dir, entry.name));
-    }
-  }
-  return out;
+function collectTrackedTsconfigs(repoRoot: string, dir: string): string[] {
+  const relDir = relative(repoRoot, dir).split(sep).join("/") || ".";
+  const result = spawnSync("git", ["ls-files", "--cached", "--", relDir], { cwd: repoRoot, encoding: "utf-8" });
+  if (result.status !== 0) throw new Error(`git ls-files failed for ${relDir}: ${result.error?.message ?? result.stderr ?? "unknown error"}`);
+  return result.stdout
+    .split(/\r?\n/)
+    .filter((path) => /^tsconfig.*\.json$/.test(path.slice(path.lastIndexOf("/") + 1)))
+    .map((path) => join(repoRoot, path));
 }
 
-// Named, written-reason exemption list -- the only sanctioned way for a
-// config to skip the flag assertion below. Adding a path here requires a
-// human to state why; the alternative (an implicit "no compilerOptions key ->
-// skip" check) would silently exempt anything shaped like a solution file,
-// including a future real program that happened to be misconfigured, which
-// is exactly the fail-open shape CLAUDE.md's gating-coverage rule warns
-// about. Keys are repo-root-relative, forward-slash-normalized paths. Values
-// are enforced (see "exemption list" test below) to be more than a token
-// placeholder -- an empty or trivial string defeats the "written reason"
-// requirement just as silently as no check at all.
 const EXEMPT_CONFIGS: Record<string, string> = {
   "desktop/tsconfig.json":
     "Solution file only (files: [], references: [tsconfig.node.json, tsconfig.web.json]) -- " +
@@ -147,24 +118,17 @@ function auditConfigs(paths: string[], baseDir: string): string[] {
   return violations;
 }
 
-test("every desktop tsconfig (discovered by walking the tree, not a hardcoded list) enforces noUnusedLocals + noUnusedParameters", () => {
-  const configs = collectTsconfigs(DESKTOP_ROOT);
+test("every tracked desktop tsconfig enforces noUnusedLocals + noUnusedParameters", () => {
+  const configs = collectTrackedTsconfigs(REPO_ROOT, DESKTOP_ROOT);
   const discovered = configs.map(toRepoRelative);
 
-  // Sanity floor: if the walk root or the exclusion logic is ever broken (a
-  // typo pruning everything, a wrong root), `configs` collapses toward 0 and
+  // Sanity floor: if tracked discovery is broken, `configs` collapses toward 0 and
   // the loop below would trivially pass with nothing checked -- fail loudly
   // on that instead of reporting a suspiciously clean "0 violations".
   expect(configs.length).toBeGreaterThanOrEqual(3);
 
-  // Anchor, not just a floor: the floor above only catches wholesale
-  // breakage (walk root wrong, exclusion set swallowing everything). It does
-  // NOT catch one specific known config quietly disappearing -- e.g.
-  // desktop/mobile-shell/tsconfig.json being deleted still leaves 3+ other
-  // vendored/real configs on disk, so the length check alone stays green.
-  // Pin the three configs this card and its predecessors are known to carry
-  // the flags on, so losing any one of them fails loudly instead of just
-  // shrinking the checked set.
+  // The floor does not detect one known config quietly disappearing. Pin the
+  // three configs carrying these flags so their removal fails loudly.
   expect(discovered).toEqual(
     expect.arrayContaining([
       "desktop/tsconfig.node.json",
@@ -178,12 +142,11 @@ test("every desktop tsconfig (discovered by walking the tree, not a hardcoded li
 });
 
 test("the exemption list only names configs that actually exist on disk, with a real written reason", () => {
-  // Guards the OTHER direction: a stale exemption for a deleted/renamed file
-  // would silently narrow future coverage (the path just never matches
-  // anything collectTsconfigs finds) without ever failing loudly on its own.
-  const configs = new Set(collectTsconfigs(DESKTOP_ROOT).map(toRepoRelative));
+  // A stale exemption for a deleted or renamed file must fail instead of
+  // silently narrowing future coverage.
+  const configs = new Set(collectTrackedTsconfigs(REPO_ROOT, DESKTOP_ROOT).map(toRepoRelative));
   for (const [rel, reason] of Object.entries(EXEMPT_CONFIGS)) {
-    expect(configs.has(rel), `EXEMPT_CONFIGS names ${rel}, which collectTsconfigs did not find`).toBe(true);
+    expect(configs.has(rel), `EXEMPT_CONFIGS names ${rel}, which tracked discovery did not find`).toBe(true);
     // The exemption's whole justification is a written reason, but nothing
     // checks the string's actual content, so an empty string would pass
     // silently.
@@ -194,15 +157,6 @@ test("the exemption list only names configs that actually exist on disk, with a 
     ).toBeGreaterThan(20);
   }
 });
-
-// ----- auditConfigs fixture tests ---------------------------------------
-//
-// These are the mutations a reviewer measured by hand (new config without
-// exemption -> red; flag flipped to false -> red) and then discarded. Shipped
-// here as permanent fixture-backed guards so they can't silently stop firing
-// -- a temp dir outside the repo, built and torn down per test, exercising
-// auditConfigs() directly (the same function the real-repo test above uses,
-// so the two paths cannot drift).
 
 let fixtureDir: string | undefined;
 
@@ -221,6 +175,24 @@ function makeFixture(name: string, compilerOptions: Record<string, unknown>): { 
   writeFileSync(abs, JSON.stringify({ compilerOptions }, null, 2));
   return { dir, abs };
 }
+
+function makeTrackedTsconfigFixture(): { dir: string; configs: string[] } {
+  const dir = mkdtempSync(join(tmpdir(), "cp-tsconfig-tracked-"));
+  fixtureDir = dir;
+  const names = ["tsconfig.a.json", "tsconfig.b.json", "tsconfig.c.json", "tsconfig.d.json", "tsconfig.zz-growth.json"];
+  for (const name of names) {
+    writeFileSync(join(dir, name), JSON.stringify({ compilerOptions: { noUnusedLocals: true, noUnusedParameters: true } }));
+  }
+  writeFileSync(join(dir, "tsconfig.generated.json"), JSON.stringify({ compilerOptions: {} }));
+  expect(spawnSync("git", ["init"], { cwd: dir }).status).toBe(0);
+  expect(spawnSync("git", ["add", ...names], { cwd: dir }).status).toBe(0);
+  return { dir, configs: names.map((name) => join(dir, name)) };
+}
+
+test("tracked discovery returns every tracked tsconfig and excludes an untracked tsconfig", () => {
+  const { dir, configs } = makeTrackedTsconfigFixture();
+  expect(collectTrackedTsconfigs(dir, dir)).toEqual(configs);
+});
 
 test("auditConfigs: both flags true -> no violation", () => {
   const { dir, abs } = makeFixture("both-true", { noUnusedLocals: true, noUnusedParameters: true });
@@ -324,17 +296,9 @@ function matchesAnyGlob(relPath: string, globs: string[]): boolean {
   return globs.some((g) => globToRegExp(g).test(relPath));
 }
 
-// Domain is every tracked .ts/.tsx file under desktop/ via git ls-files, not a
-// directory allow-list: scoping to two named directories left a probe file
-// under a brand-new directory uncovered and still green.
-// EXEMPT_SOURCES only admits an entry with a written reason and a nature of
-// undeclared-gap (tracked by a roadmap card, expected to disappear) or
-// deliberate (already documented next to some tsconfig's own include/exclude,
-// cited by path and symbol rather than line number since this repo has had
-// comments rot after a reflow).
 type SourceExemptionNature =
-  | "undeclared-gap" // no tsconfig, no CI step, no comment names it anywhere; tracked by a dedicated roadmap card; expected to disappear.
-  | "deliberate"; // excluded on purpose, already documented in the product itself (a written comment next to some tsconfig's own include/exclude); expected to stay.
+  | "undeclared-gap"
+  | "deliberate";
 
 interface SourceExemption {
   reason: string;
@@ -364,20 +328,8 @@ const EXEMPT_SOURCES: Record<string, SourceExemption> = {
   },
 };
 
-// The desktop tsconfigs that between them are meant to cover every desktop/
-// TypeScript source file. DISCOVERED via the same collectTsconfigs walk the
-// flags test above uses (minus EXEMPT_CONFIGS -- desktop/tsconfig.json is a
-// files-less solution file with no include of its own), never a hardcoded
-// array: this file's own flags-coverage half already answers "what happens
-// when a tsconfig is added" by walking disk, and the source-coverage half
-// must answer the identical question the identical way, or a genuinely new
-// tsconfig (with its own real include) would be invisible to source
-// coverage while still passing the flags test. baseDir is where that
-// config's OWN include/exclude globs are relative to, repo-root-relative
-// with a trailing slash (the empty string for a hypothetical config at
-// REPO_ROOT itself, though none exists today).
 function discoverDesktopTsConfigs(): { path: string; baseDir: string }[] {
-  return collectTsconfigs(DESKTOP_ROOT)
+  return collectTrackedTsconfigs(REPO_ROOT, DESKTOP_ROOT)
     .map(toRepoRelative)
     .filter((rel) => !Object.hasOwn(EXEMPT_CONFIGS, rel))
     .map((rel) => {
@@ -389,13 +341,6 @@ function discoverDesktopTsConfigs(): { path: string; baseDir: string }[] {
 
 const DESKTOP_TS_CONFIGS: { path: string; baseDir: string }[] = discoverDesktopTsConfigs();
 
-// Reads BOTH include and exclude -- a config that only consulted include
-// would treat exclude as inert, so a one-line `"exclude": ["mcp/**/*.ts"]`
-// addition would silently drop the same two production MCP servers card
-// a7822bc4 brought under typecheck back out of tsc's program, with every
-// assertion below still green (MEASURED against a disposable git-archive
-// mirror of desktop/, never the real tree: the unfixed include-only logic
-// reported zero uncovered files even with exclude covering mcp/**/*.ts).
 function loadIncludeGlobs(spec: {
   path: string;
   baseDir: string;
@@ -463,10 +408,6 @@ test("globToRegExp: a plain path with no wildcard only matches itself", () => {
 // never to invent one: the reason's author still writes the sentence.
 const REASON_PATH_REFERENCE = /[\w.-]+(?:\/[\w.-]+)+\.(?:json|ts|tsx|md)\b/;
 
-// An undeclared-gap entry must cite an 8-hex-char roadmap card id so it is
-// attributable and removable; a deliberate entry must name a file that both
-// exists and itself mentions the exempted file's basename, so the claimed
-// documentation is real rather than an invented pointer.
 function validateExemptionNature(rel: string, entry: SourceExemption): string | undefined {
   if (entry.nature === "undeclared-gap") {
     if (!/\b[0-9a-f]{8}\b/.test(entry.reason)) {
@@ -499,11 +440,6 @@ test("EXEMPT_SOURCES only names files that actually exist on disk, are genuinely
     ).toBeGreaterThan(20);
     expect(["undeclared-gap", "deliberate"]).toContain(entry.nature);
 
-    // Staleness guard: if `rel` is ALREADY covered by a real tsconfig on its
-    // own (e.g. the day roadmap card f4125a11 lands and covers tests-support),
-    // the exemption became dead weight -- an "undeclared-gap" entry is meant
-    // to die the moment its gap closes, and nothing should let an exemption
-    // linger unnoticed regardless of nature.
     expect(
       findUncoveredDesktopSources([rel], configs, {}),
       `EXEMPT_SOURCES["${rel}"] is unnecessary: ${rel} is already covered by a real tsconfig without it`
@@ -539,22 +475,12 @@ test("every .ts/.tsx/.mts/.cts file staged or committed under desktop/ is covere
 
   const gitResult = spawnSync("git", DESKTOP_SOURCE_DISCOVERY_ARGS, { cwd: REPO_ROOT, encoding: "utf-8" });
   expect(gitResult.status, `git ls-files failed: ${gitResult.stderr}`).toBe(0);
-  // .mts/.cts included alongside .ts/.tsx: a glob like "mcp/**/*.ts" does NOT
-  // match "*.mts" (globToRegExp's own fixture test above proves this), so if
-  // this filter stayed .ts/.tsx-only, a .mts file dropped under desktop/
-  // would be invisible to BOTH tsc's real program and this guard -- the
-  // exact double-blind spot the "escapes twice" review finding named. None
-  // exist under desktop/ today (this filter simply has nothing to match yet).
   const files = gitResult.stdout
     .split("\n")
     .map((s) => s.trim())
     .filter(Boolean)
     .filter((f) => /\.(m|c)?tsx?$/.test(f));
 
-  // Sanity floor: if the walk root or the extension filter is ever broken,
-  // `files` collapses toward 0 and the loop below would trivially pass with
-  // nothing checked. Measured today at 193 real files -- 100 is a floor
-  // with real margin, not a number chosen to just barely pass.
   expect(files.length, "git ls-files --cached desktop returned no .ts/.tsx files").toBeGreaterThan(100);
 
   const unmatched = findUncoveredDesktopSources(files, configs, EXEMPT_SOURCES);
@@ -564,10 +490,6 @@ test("every .ts/.tsx/.mts/.cts file staged or committed under desktop/ is covere
   ).toEqual([]);
 });
 
-// Exercises the real include data and the real EXEMPT_SOURCES against a
-// simulated git-ls-files output containing a brand-new uncovered directory:
-// proves the real config/exemption data reports such a file, which a narrower
-// version scoped to two named directories did not.
 test("findUncoveredDesktopSources: against the REAL desktop tsconfigs and REAL exemptions, a file under a brand-new uncovered directory is still reported", () => {
   const configs = DESKTOP_TS_CONFIGS.map(loadIncludeGlobs);
   const files = ["desktop/mcp/deck-control-mcp.ts", "desktop/agents/zzprobe.ts"];
@@ -604,9 +526,6 @@ test("findUncoveredDesktopSources: a file matching no config's include is report
   expect(findUncoveredDesktopSources(files, configs, exemption)).toEqual([]);
 });
 
-// exclude cancels a matching include, exactly like tsc itself: an include-only
-// version reported zero uncovered files even after adding a matching exclude
-// entry.
 test("findUncoveredDesktopSources: a file matching include but also matching exclude is reported as uncovered", () => {
   const configs = [{ baseDir: "desktop/", include: ["mcp/**/*.ts"], exclude: ["mcp/**/*.ts"] }];
   const files = ["desktop/mcp/deck-control-mcp.ts"];

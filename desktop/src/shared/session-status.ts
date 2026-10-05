@@ -1,7 +1,4 @@
-// Codec for the per-tile statusLine report file. The Deck's statusLine script
-// (hooks/desk-statusline.ts) encodes Claude Code's statusLine stdin payload
-// into `desk-status-<token>.json`; Deck main decodes it on its peer poll.
-// Pure (no node/electron import) so both the bun-bundled hook and main use it.
+// Hook bundles and Deck main share this Node-free codec.
 //
 // The file lives in the peers dir, which is mounted into sandbox containers:
 // its content is attacker-controlled, so decoding rejects rather than repairs.
@@ -100,6 +97,25 @@ export function encodeStatusFromPayload(payload: unknown, now: number): string |
     model,
     pct: validPct(ctx.used_percentage),
     size: validSize(ctx.context_window_size),
+    at: now
+  })
+}
+
+export interface MeasuredContext {
+  window?: unknown
+  percent?: unknown
+}
+
+/** session.measure omits model identity, so only a valid fallback report supplies it. */
+export function encodeStatusFromMeasure(raw: string, context: MeasuredContext, now: number): string | null {
+  const previous = decodeStatusFile(raw)
+  if (!previous || !Number.isFinite(now) || now <= 0) return null
+  return JSON.stringify({
+    v: STATUS_FILE_VERSION,
+    model_id: previous.modelId,
+    model: previous.model,
+    pct: validPct(context.percent),
+    size: validSize(context.window) ?? previous.contextWindow,
     at: now
   })
 }

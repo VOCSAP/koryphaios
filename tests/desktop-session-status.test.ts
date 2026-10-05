@@ -7,6 +7,7 @@ import { spawnSync } from "node:child_process";
 import {
   STATUS_FILE_MAX_BYTES,
   decodeStatusFile,
+  encodeStatusFromMeasure,
   encodeStatusFromPayload,
   sameLiveStatus,
   sanitizeStatusToken,
@@ -103,6 +104,33 @@ test("encode then decode round-trips a realistic doc payload", () => {
 test("encoder: null used_percentage (early session, after /compact) stays null", () => {
   const raw = encodeStatusFromPayload({ ...DOC_PAYLOAD, context_window: { ...DOC_PAYLOAD.context_window, used_percentage: null } }, 5);
   expect(decodeStatusFile(raw!)?.contextPct, "null pct preserved").toBeNull();
+});
+
+test("measure encoder preserves fallback identity and the unknown-context semantic", () => {
+  const fallback = encodeStatusFromPayload(DOC_PAYLOAD, 1)!;
+  const measured = encodeStatusFromMeasure(fallback, { window: 1_000_000, percent: 7 }, 2)!;
+  const compacted = encodeStatusFromMeasure(measured, { window: 1_000_000 }, 3)!;
+
+  expect(Object.keys(JSON.parse(measured)).sort(), "same report fields as the fallback").toEqual(Object.keys(JSON.parse(fallback)).sort());
+  expect(decodeStatusFile(measured), "module report preserves model identity").toMatchObject({
+    model: "Opus",
+    modelId: "claude-opus-4-1",
+    contextPct: 7,
+    contextWindow: 1_000_000,
+  });
+  expect(decodeStatusFile(compacted), "post-compact module report stays compatible with fallback").toMatchObject({
+    model: "Opus",
+    modelId: "claude-opus-4-1",
+    contextPct: null,
+    contextWindow: 1_000_000,
+  });
+});
+
+test("measure encoder leaves an unavailable fallback report untouched", () => {
+  expect(encodeStatusFromMeasure("not json", { window: 1_000_000, percent: 7 }, 1), "invalid source report").toBeNull();
+  const noWindow = encodeStatusFromMeasure(file({ size: null }), { percent: 7 }, 1);
+  expect(noWindow, "missing window preserves a valid report").not.toBeNull();
+  expect(noWindow!, "missing window remains null").toContain('"size":null');
 });
 
 test("encoder: no model means nothing to write", () => {
