@@ -90,6 +90,7 @@ function bridge(): FakeBridge {
     },
     setPosition: async () => {},
     setPointerInside: async () => {},
+    gesture: async () => {},
     reportError: (message) => {
       errors.push(message);
     }

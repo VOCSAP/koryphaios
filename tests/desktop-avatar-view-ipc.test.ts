@@ -47,6 +47,7 @@ test('accepts each AvatarView handler only from its current main frame', async (
     getState: state,
     setPosition: (...args) => { calls.push(args) },
     setPointerInside: (...args) => { calls.push(args) },
+    gesture: (...args) => { calls.push(args) },
     reportError: (...args) => { calls.push(args) }
   })
   const cases: [string, unknown[]][] = [
@@ -86,6 +87,35 @@ test('accepts each AvatarView handler only from its current main frame', async (
   expect(handlers).toEqual(new Map())
 })
 
+test('accepts only a current Avatar gesture with a closed enum', async () => {
+  const handlers = new Map<string, Handler>()
+  const mainFrame = {}
+  const currentContents = { mainFrame }
+  const gestures: string[] = []
+  registerAvatarViewIpcHandlers({
+    ipc: { handle: (channel, handler) => handlers.set(channel, handler), removeHandler: () => {} },
+    currentWindow: () => ({ webContents: currentContents, generation: 4 }),
+    loadingWindow: () => null,
+    getState: state,
+    setPosition: () => {},
+    setPointerInside: () => {},
+    gesture: (kind) => { gestures.push(kind) },
+    reportError: () => {}
+  })
+  const gesture = handlers.get('avatar-view:gesture')
+  const current = { sender: currentContents, senderFrame: mainFrame }
+
+  expect(gesture).toBeDefined()
+  await expect(gesture!(current, 'single')).resolves.toBeUndefined()
+  await expect(gesture!(current, 'double')).resolves.toBeUndefined()
+  for (const invalid of ['double-click', null, {}, 1]) {
+    await expect(gesture!(current, invalid)).rejects.toThrow('AvatarView gesture is invalid')
+  }
+  await expect(gesture!({ sender: currentContents, senderFrame: {} }, 'single')).rejects.toThrow('AvatarView sender is not current')
+  await expect(gesture!({ sender: { mainFrame: {} }, senderFrame: {} }, 'single')).rejects.toThrow('AvatarView sender is not current')
+  expect(gestures).toEqual(['single', 'double'])
+})
+
 test('admits only the first state request of a window that is still loading and nothing else from it', async () => {
   const handlers = new Map<string, Handler>()
   const mainFrame = {}
@@ -102,6 +132,7 @@ test('admits only the first state request of a window that is still loading and 
     },
     setPosition: (...args) => { calls.push(args) },
     setPointerInside: (...args) => { calls.push(args) },
+    gesture: (...args) => { calls.push(args) },
     reportError: (...args) => { calls.push(args) }
   })
   const event = { sender: loadingContents, senderFrame: mainFrame }
@@ -130,6 +161,7 @@ test('aggregates suppressed renderer errors and resets its bucket for a new gene
     getState: state,
     setPosition: () => {},
     setPointerInside: () => {},
+    gesture: () => {},
     reportError: (message) => reports.push(message),
     now: () => now,
     rendererErrorBurst: 2,

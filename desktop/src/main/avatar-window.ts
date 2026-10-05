@@ -1,4 +1,4 @@
-import { AVATAR_VIEW_CHANNELS, type AvatarViewState } from '../shared/avatar-view'
+import { AVATAR_VIEW_CHANNELS, type AvatarViewGesture, type AvatarViewState } from '../shared/avatar-view'
 import type { AvatarWindowSize } from './avatar-window-placement'
 
 export interface AvatarViewWebContents {
@@ -29,6 +29,7 @@ export interface AvatarViewIpcOptions {
   getState(generation: number): AvatarViewState | Promise<AvatarViewState>
   setPosition(x: number, y: number): void | Promise<void>
   setPointerInside(inside: boolean): void | Promise<void>
+  gesture(kind: AvatarViewGesture): void | Promise<void>
   reportError(message: string): void
   now?(): number
   rendererErrorBurst?: number
@@ -135,6 +136,10 @@ function requirePointerInside(args: unknown[]): asserts args is [boolean] {
   if (args.length !== 1 || typeof args[0] !== 'boolean') throw new Error('AvatarView pointer state must be a boolean')
 }
 
+function requireGesture(args: unknown[]): asserts args is [AvatarViewGesture] {
+  if (args.length !== 1 || (args[0] !== 'single' && args[0] !== 'double')) throw new Error('AvatarView gesture is invalid')
+}
+
 function requireErrorMessage(args: unknown[]): asserts args is [string] {
   if (args.length !== 1 || typeof args[0] !== 'string' || args[0].length > 2_048) {
     throw new Error('AvatarView error message is invalid')
@@ -194,6 +199,11 @@ export function registerAvatarViewIpcHandlers(options: AvatarViewIpcOptions): ()
     requirePointerInside(args)
     await options.setPointerInside(args[0])
   }
+  const gesture: AvatarViewIpcHandler = async (event, ...args) => {
+    requireCurrentSender(event, options.currentWindow())
+    requireGesture(args)
+    await options.gesture(args[0])
+  }
   const reportError: AvatarViewIpcHandler = async (event, ...args) => {
     const endpoint = options.currentWindow()
     if (endpoint === null || !isCurrentSender(event, endpoint)) throw new Error('AvatarView sender is not current')
@@ -204,12 +214,14 @@ export function registerAvatarViewIpcHandlers(options: AvatarViewIpcOptions): ()
   options.ipc.handle(AVATAR_VIEW_CHANNELS.getState, getState)
   options.ipc.handle(AVATAR_VIEW_CHANNELS.setPosition, setPosition)
   options.ipc.handle(AVATAR_VIEW_CHANNELS.setPointerInside, setPointerInside)
+  options.ipc.handle(AVATAR_VIEW_CHANNELS.gesture, gesture)
   options.ipc.handle(AVATAR_VIEW_CHANNELS.reportError, reportError)
 
   return () => {
     options.ipc.removeHandler(AVATAR_VIEW_CHANNELS.getState)
     options.ipc.removeHandler(AVATAR_VIEW_CHANNELS.setPosition)
     options.ipc.removeHandler(AVATAR_VIEW_CHANNELS.setPointerInside)
+    options.ipc.removeHandler(AVATAR_VIEW_CHANNELS.gesture)
     options.ipc.removeHandler(AVATAR_VIEW_CHANNELS.reportError)
   }
 }

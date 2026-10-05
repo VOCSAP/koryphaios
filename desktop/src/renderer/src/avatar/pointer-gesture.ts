@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
 import type { AvatarViewApi, AvatarViewState } from '@shared/avatar-view'
 
-// The whole drawn frame is a target; outside its rounded corners the window stays click-through.
 export const AVATAR_HIT_SELECTOR = '.avatar-frame'
 const AVATAR_CAPTURE_SELECTOR = '.avatar-root'
+const DRAG_THRESHOLD_PX = 4
+const DOUBLE_CLICK_DELAY_MS = 250
 
 export type AvatarMoveMode = 'free' | 'locked' | 'dragging'
 
@@ -13,12 +14,18 @@ interface Gesture {
   grabX: number
   grabY: number
   last: { x: number; y: number } | null
+  moved: boolean
+  dragging: boolean
   reported: boolean
 }
 
 interface Hover {
   sent: boolean | null
   blocked: boolean
+}
+
+interface PendingClick {
+  timer: ReturnType<typeof setTimeout> | null
 }
 
 function canMove(view: AvatarViewState | null): boolean {
@@ -33,30 +40,51 @@ function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-/**
- * Main silently resets its pointer state on hide, re-preparation and a new
- * window, and publishes a newer view each time; the last sent value is
- * therefore forgotten on every newer view instead of being deduplicated
- * forever. Rejections are not classified: any one ends the gesture.
- */
 export function usePointerGesture(api: AvatarViewApi, view: AvatarViewState | null): AvatarMoveMode {
   const viewRef = useRef(view)
   const hover = useRef<Hover>({ sent: null, blocked: false })
   const gesture = useRef<Gesture | null>(null)
+  const pendingClick = useRef<PendingClick | null>(null)
   const [dragging, setDragging] = useState(false)
 
-  const endGesture = (): void => {
+  const clearPendingClick = (): void => {
+    const pending = pendingClick.current
+    if (pending !== null && pending.timer !== null) clearTimeout(pending.timer)
+    pendingClick.current = null
+  }
+
+  const sendGesture = (kind: 'single' | 'double'): void => {
+    api.gesture(kind).catch((error: unknown) => {
+      api.reportError(`avatar gesture rejected: ${errorText(error)}`.slice(0, 2048))
+    })
+  }
+
+  const scheduleSingleClick = (): void => {
+    const pending: PendingClick = { timer: null }
+    pendingClick.current = pending
+    queueMicrotask(() => {
+      if (pendingClick.current !== pending) return
+      pending.timer = setTimeout(() => {
+        if (pendingClick.current !== pending) return
+        pendingClick.current = null
+        sendGesture('single')
+      }, DOUBLE_CLICK_DELAY_MS)
+    })
+  }
+
+  const endGesture = (): Gesture | null => {
     const current = gesture.current
-    if (current === null) return
+    if (current === null) return null
     gesture.current = null
     setDragging(false)
     try {
       if (current.element.hasPointerCapture(current.pointerId)) current.element.releasePointerCapture(current.pointerId)
     } catch (error) {
-      if (current.reported) return
+      if (current.reported) return current
       current.reported = true
       api.reportError(`avatar pointer release failed: ${errorText(error)}`.slice(0, 2048))
     }
+    return current
   }
 
   const sendHover = (target: EventTarget | null): void => {
@@ -77,6 +105,7 @@ export function usePointerGesture(api: AvatarViewApi, view: AvatarViewState | nu
   useEffect(() => {
     viewRef.current = view
     hover.current = { sent: null, blocked: false }
+    if (view === null || !view.presentation.visible) clearPendingClick()
     if (gesture.current !== null && !canMove(view)) endGesture()
   }, [view])
 
@@ -92,8 +121,8 @@ export function usePointerGesture(api: AvatarViewApi, view: AvatarViewState | nu
       sendHover(null)
     }
     const onPointerDown = (event: PointerEvent): void => {
-      if (event.button !== 0 || gesture.current !== null || !canMove(viewRef.current) || !onFace(event.target)) return
-      // The face node is remounted on every face change, which would drop a capture held on it.
+      const current = viewRef.current
+      if (event.button !== 0 || gesture.current !== null || current === null || !current.presentation.visible || !onFace(event.target)) return
       const element = event.target.closest(AVATAR_CAPTURE_SELECTOR) ?? event.target
       try {
         element.setPointerCapture(event.pointerId)
@@ -102,12 +131,31 @@ export function usePointerGesture(api: AvatarViewApi, view: AvatarViewState | nu
         return
       }
       event.preventDefault()
-      gesture.current = { pointerId: event.pointerId, element, grabX: event.clientX, grabY: event.clientY, last: null, reported: false }
-      setDragging(true)
+      gesture.current = {
+        pointerId: event.pointerId,
+        element,
+        grabX: event.clientX,
+        grabY: event.clientY,
+        last: null,
+        moved: false,
+        dragging: false,
+        reported: false
+      }
     }
     const onPointerMove = (event: PointerEvent): void => {
       const current = gesture.current
       if (current === null || event.pointerId !== current.pointerId) return
+      if (!current.moved) {
+        const deltaX = event.clientX - current.grabX
+        const deltaY = event.clientY - current.grabY
+        if (deltaX * deltaX + deltaY * deltaY <= DRAG_THRESHOLD_PX * DRAG_THRESHOLD_PX) return
+        current.moved = true
+        clearPendingClick()
+        if (!canMove(viewRef.current)) return
+        current.dragging = true
+        setDragging(true)
+      }
+      if (!current.dragging) return
       const x = Math.round(event.screenX - current.grabX)
       const y = Math.round(event.screenY - current.grabY)
       if (current.last !== null && current.last.x === x && current.last.y === y) return
@@ -122,7 +170,16 @@ export function usePointerGesture(api: AvatarViewApi, view: AvatarViewState | nu
     const onPointerEnd = (event: PointerEvent): void => {
       const current = gesture.current
       if (current === null || event.pointerId !== current.pointerId) return
-      endGesture()
+      const ended = endGesture()
+      if (event.type === 'pointerup' && ended !== null && !ended.moved) {
+        if (pendingClick.current === null) scheduleSingleClick()
+        else {
+          clearPendingClick()
+          sendGesture('double')
+        }
+      } else {
+        clearPendingClick()
+      }
       sendHover(doc.elementFromPoint(event.clientX, event.clientY))
     }
 
@@ -141,6 +198,7 @@ export function usePointerGesture(api: AvatarViewApi, view: AvatarViewState | nu
       doc.removeEventListener('pointerup', onPointerEnd)
       doc.removeEventListener('pointercancel', onPointerEnd)
       doc.removeEventListener('lostpointercapture', onPointerEnd)
+      clearPendingClick()
       gesture.current = null
     }
   }, [api])

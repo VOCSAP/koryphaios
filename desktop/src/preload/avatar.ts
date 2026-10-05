@@ -12,6 +12,7 @@ const api: AvatarViewApi = {
   },
   setPosition: (x, y) => ipcRenderer.invoke(AVATAR_VIEW_CHANNELS.setPosition, x, y) as Promise<void>,
   setPointerInside: (inside) => ipcRenderer.invoke(AVATAR_VIEW_CHANNELS.setPointerInside, inside) as Promise<void>,
+  gesture: (kind) => ipcRenderer.invoke(AVATAR_VIEW_CHANNELS.gesture, kind) as Promise<void>,
   reportError(message) {
     void ipcRenderer.invoke(AVATAR_VIEW_CHANNELS.reportError, message)
   }

@@ -1,5 +1,5 @@
 import type { AvatarState } from '../shared/avatar-state'
-import type { AvatarViewState, AvatarViewSummary, AvatarViewTheme } from '../shared/avatar-view'
+import type { AvatarViewGesture, AvatarViewState, AvatarViewSummary, AvatarViewTheme } from '../shared/avatar-view'
 import { avatarAppearanceDnd, type AvatarAppearance } from './avatar-appearance'
 import { createAvatarBootstrap } from './avatar-bootstrap'
 import { chooseAvatarDnd, type AvatarDndChoice, type AvatarDndState } from './avatar-tray-menu'
@@ -21,6 +21,7 @@ export interface AvatarAssemblyOptions {
   locale: SupportedLocale
   now(): number
   reportError(scope: string, message: string, error?: unknown): void
+  gesture(kind: AvatarViewGesture): void | Promise<void>
   setTimeout(callback: () => void, delayMs: number): unknown
   clearTimeout(handle: unknown): void
 }
@@ -78,6 +79,13 @@ export function assembleAvatar(options: AvatarAssemblyOptions): AvatarAssembly {
     getState: controller.getState,
     setPosition: controller.setPosition,
     setPointerInside: controller.setPointerInside,
+    gesture: (kind) => {
+      if (kind === 'double') {
+        controller.dispatch({ kind: 'HideRequested' })
+        return
+      }
+      return options.gesture(kind)
+    },
     reportError: (message) => options.reportError('avatar-renderer', message)
   })
 

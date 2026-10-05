@@ -64,6 +64,7 @@ function fakeApi(): Fake {
       setPointerInside: async (inside) => {
         fake.calls.push(`inside:${inside}`);
       },
+      gesture: async () => {},
       reportError: () => {}
     },
     push(state) {
@@ -150,8 +151,9 @@ describe("grab target", () => {
     const fake = mount(view(1, { frame: "normal" }));
     move(one(".avatar-frame"));
     pointer(one(".avatar-frame"), "pointerdown", { clientX: 10, clientY: 5, screenX: 510, screenY: 305 });
-    expect(one(".avatar-root").getAttribute("data-move"), "a press on the frame did not start a drag").toBe("dragging");
-    pointer(document.body, "pointermove", { screenX: 610, screenY: 405 });
+    expect(one(".avatar-root").getAttribute("data-move")).toBe("free");
+    pointer(document.body, "pointermove", { clientX: 110, clientY: 105, screenX: 610, screenY: 405 });
+    expect(one(".avatar-root").getAttribute("data-move"), "a frame drag did not start after crossing the threshold").toBe("dragging");
     expect(fake.calls).toEqual(["inside:true", "position:600,400"]);
     pointer(document.body, "pointerup", { clientX: 10, clientY: 5 });
   });

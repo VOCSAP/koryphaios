@@ -45,6 +45,7 @@ function view(revision: number, presentation: Partial<AvatarViewPresentation> = 
 interface Spy {
   api: AvatarViewApi;
   calls: string[];
+  gestures: string[];
   errors: string[];
   rejectPosition: boolean;
   rejectPointer: boolean;
@@ -55,6 +56,7 @@ function spy(): Spy {
   let listener: ((state: AvatarViewState) => void) | null = null;
   const fake: Spy = {
     calls: [],
+    gestures: [],
     errors: [],
     rejectPosition: false,
     rejectPointer: false,
@@ -73,6 +75,9 @@ function spy(): Spy {
       setPointerInside: async (inside) => {
         fake.calls.push(`inside:${inside}`);
         if (fake.rejectPointer) throw new Error("Avatar window is unavailable");
+      },
+      gesture: async (gesture) => {
+        fake.gestures.push(gesture);
       },
       reportError: (message) => {
         fake.errors.push(message);
@@ -137,6 +142,12 @@ async function settle(): Promise<void> {
   });
 }
 
+async function waitForClickArbitration(): Promise<void> {
+  await act(async () => {
+    await Bun.sleep(260);
+  });
+}
+
 describe("hover", () => {
   test("arms the hit-test once over the face and disarms it off the face", async () => {
     const fake = mount(view(1));
@@ -195,8 +206,9 @@ describe("drag", () => {
     const fake = mount(view(1));
     hoverFace();
     pointer(face(), "pointerdown", { clientX: 10, clientY: 20, screenX: 510, screenY: 320 });
+    expect(avatarRoot().getAttribute("data-move")).toBe("free");
+    pointer(document.body, "pointermove", { clientX: 110, clientY: 120, screenX: 610, screenY: 420 });
     expect(avatarRoot().getAttribute("data-move")).toBe("dragging");
-    pointer(document.body, "pointermove", { screenX: 610, screenY: 420 });
     pointer(document.body, "pointermove", { screenX: 610.4, screenY: 420 });
     hoverOff();
     pointer(document.body, "pointermove", { screenX: 640, screenY: 400 });
@@ -232,8 +244,8 @@ describe("drag", () => {
     fake.push(view(2, {}, "travaille"));
     expect(face(), "the face did not remount, so this test proves nothing").not.toBe(before);
     expect(avatarRoot().hasPointerCapture(1)).toBe(true);
+    pointer(document.body, "pointermove", { clientX: 60, clientY: 70, screenX: 60, screenY: 70 });
     expect(avatarRoot().getAttribute("data-move")).toBe("dragging");
-    pointer(document.body, "pointermove", { screenX: 60, screenY: 70 });
     expect(positions(fake)).toEqual(["position:50,60"]);
   });
 
@@ -254,8 +266,9 @@ describe("drag", () => {
     pointer(document.body, "pointercancel", { pointerId: 2 });
     pointer(document, "lostpointercapture", { pointerId: 2 });
     expect(positions(fake)).toEqual([]);
+    expect(avatarRoot().getAttribute("data-move")).toBe("free");
+    pointer(document.body, "pointermove", { clientX: 20, clientY: 30, screenX: 20, screenY: 30 });
     expect(avatarRoot().getAttribute("data-move")).toBe("dragging");
-    pointer(document.body, "pointermove", { screenX: 20, screenY: 30 });
     expect(positions(fake)).toEqual(["position:20,30"]);
   });
 
@@ -305,10 +318,10 @@ describe("drag", () => {
     const fake = mount(view(1));
     fake.rejectPosition = true;
     pointer(face(), "pointerdown", { clientX: 0, clientY: 0, screenX: 0, screenY: 0 });
-    pointer(document.body, "pointermove", { screenX: 10, screenY: 10 });
-    pointer(document.body, "pointermove", { screenX: 20, screenY: 20 });
+    pointer(document.body, "pointermove", { clientX: 10, clientY: 10, screenX: 10, screenY: 10 });
+    pointer(document.body, "pointermove", { clientX: 20, clientY: 20, screenX: 20, screenY: 20 });
     await settle();
-    pointer(document.body, "pointermove", { screenX: 30, screenY: 30 });
+    pointer(document.body, "pointermove", { clientX: 30, clientY: 30, screenX: 30, screenY: 30 });
     expect(fake.calls).toEqual(["position:10,10", "position:20,20"]);
     expect(fake.errors.length).toBe(1);
     expect(avatarRoot().getAttribute("data-move")).toBe("free");
@@ -325,6 +338,72 @@ describe("drag", () => {
       expect(fake.errors).toEqual([]);
       expect(avatarRoot().getAttribute("data-move")).toBe("locked");
     }
+  });
+});
+
+describe("click", () => {
+  test("preserves a single click when lostpointercapture follows pointerup", async () => {
+    const fake = mount(view(1));
+    pointer(face(), "pointerdown", { clientX: 10, clientY: 10, screenX: 100, screenY: 100 });
+    pointer(document.body, "pointerup", { clientX: 10, clientY: 10, screenX: 100, screenY: 100 });
+    pointer(document, "lostpointercapture");
+
+    await waitForClickArbitration();
+    expect(fake.gestures).toEqual(["single"]);
+    expect(positions(fake)).toEqual([]);
+  });
+
+  test("moves beyond four CSS pixels without sending a click", async () => {
+    const fake = mount(view(1));
+    pointer(face(), "pointerdown", { clientX: 0, clientY: 0, screenX: 100, screenY: 100 });
+    pointer(document.body, "pointermove", { clientX: 5, clientY: 0, screenX: 105, screenY: 100 });
+    pointer(document.body, "pointerup", { clientX: 5, clientY: 0, screenX: 105, screenY: 100 });
+
+    await waitForClickArbitration();
+    expect(positions(fake)).toEqual(["position:105,100"]);
+    expect(fake.gestures).toEqual([]);
+  });
+
+  test("sends only a double gesture when lostpointercapture follows both pointerups", async () => {
+    const fake = mount(view(1));
+    pointer(face(), "pointerdown", { clientX: 10, clientY: 10, screenX: 100, screenY: 100 });
+    pointer(document.body, "pointerup", { clientX: 10, clientY: 10, screenX: 100, screenY: 100 });
+    pointer(document, "lostpointercapture");
+    pointer(face(), "pointerdown", { clientX: 10, clientY: 10, screenX: 100, screenY: 100 });
+    pointer(document.body, "pointerup", { clientX: 10, clientY: 10, screenX: 100, screenY: 100 });
+    pointer(document, "lostpointercapture");
+
+    await waitForClickArbitration();
+    expect(fake.gestures).toEqual(["double"]);
+  });
+
+  test("pointercancel and lostpointercapture before pointerup cancel a gesture", async () => {
+    for (const end of ["pointercancel", "lostpointercapture"] as const) {
+      const fake = mount(view(1));
+      pointer(face(), "pointerdown", { clientX: 10, clientY: 10, screenX: 100, screenY: 100 });
+      pointer(document, end);
+      pointer(document.body, "pointerup", { clientX: 10, clientY: 10, screenX: 100, screenY: 100 });
+
+      await waitForClickArbitration();
+      expect(fake.gestures, end).toEqual([]);
+      act(() => root.unmount());
+      root = createRoot(container);
+    }
+  });
+
+  test("permits clicks while position lock still refuses dragging", async () => {
+    const fake = mount(view(1, { positionLocked: true }));
+    pointer(face(), "pointerdown", { clientX: 0, clientY: 0, screenX: 100, screenY: 100 });
+    pointer(document.body, "pointermove", { clientX: 5, clientY: 0, screenX: 105, screenY: 100 });
+    pointer(document.body, "pointerup", { clientX: 5, clientY: 0, screenX: 105, screenY: 100 });
+    await waitForClickArbitration();
+    expect(positions(fake)).toEqual([]);
+    expect(fake.gestures).toEqual([]);
+
+    pointer(face(), "pointerdown", { clientX: 0, clientY: 0, screenX: 100, screenY: 100 });
+    pointer(document.body, "pointerup", { clientX: 0, clientY: 0, screenX: 100, screenY: 100 });
+    await waitForClickArbitration();
+    expect(fake.gestures).toEqual(["single"]);
   });
 });
 
@@ -345,6 +424,7 @@ describe("cursor", () => {
       expect(getComputedStyle(face()).cursor).toBe("grab");
       remount(view(1));
       pointer(face(), "pointerdown", { clientX: 0, clientY: 0, screenX: 0, screenY: 0 });
+      pointer(document.body, "pointermove", { clientX: 5, clientY: 0, screenX: 5, screenY: 0 });
       expect(avatarRoot().getAttribute("data-move")).toBe("dragging");
       expect(getComputedStyle(avatarRoot()).cursor, "the captured drag can leave the face").toBe("grabbing");
       expect(getComputedStyle(face()).cursor).toBe("grabbing");

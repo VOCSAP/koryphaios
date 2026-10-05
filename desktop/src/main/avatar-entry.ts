@@ -1,6 +1,7 @@
 import { randomBytes, randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 import { app, BrowserWindow, ipcMain, Menu, nativeTheme, screen } from 'electron'
+import { selectAvatarFocusDeck } from '../shared/avatar-state'
 import { startAvatarBrokerProbe, type AvatarBrokerProbe } from './avatar-broker-probe'
 import { generateAvatarRunCertificate } from './avatar-certificate'
 import { createDeckFocusGesture, deckProcessIsAlive } from './avatar-focus-gesture'
@@ -20,7 +21,7 @@ import { avatarDeckStateDir, readAvatarLocale } from './avatar-locale'
 import { selectWindowShown, type AvatarGeometry } from './avatar-window-state'
 import { createAvatarQuitHandler } from './avatar-quit-handler'
 import { resolveBrokerEndpoint } from './broker-client'
-import { initDeckLog, logWarn, reportError } from './log'
+import { initDeckLog, logInfo, logWarn, reportError } from './log'
 import { installProcessFailureGuard } from './process-failure-guard'
 
 app.setName('koryphaios')
@@ -72,6 +73,14 @@ async function startAvatar(): Promise<void> {
     locale,
     now: Date.now,
     reportError,
+    gesture: () => {
+      const target = selectAvatarFocusDeck(avatarAssembly?.state.summary().decks ?? [], server?.attachedDecks() ?? [])
+      if (target === null) {
+        logInfo('avatar-focus', 'Avatar click ignored because no attached Deck produces an urgent face')
+        return
+      }
+      void focusFromTray(target).catch((error: unknown) => reportError('avatar-focus', 'Avatar click focus gesture failed', error))
+    },
     setTimeout: (callback, delayMs) => setTimeout(callback, delayMs),
     clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>)
   })

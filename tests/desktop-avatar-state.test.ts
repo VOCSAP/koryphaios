@@ -3,6 +3,7 @@ import {
   AVATAR_HEARTBEAT_MS,
   AVATAR_SUSPECT_AFTER_MS,
   AvatarState,
+  selectAvatarFocusDeck,
   type AvatarDeckIdentity,
   type AvatarDeckSnapshot
 } from '../desktop/src/shared/avatar-state.ts'
@@ -133,4 +134,45 @@ test('prioritizes waiting work over failed, unread, and active counts', () => {
   })
 
   expect(state.summary().face).toBe('reclame')
+})
+
+test('selects the attached Deck that produces the global urgent face', () => {
+  const state = new AvatarState({ now: () => 0 })
+  const failedBroker = 'http://broker-failed.example:7899'
+  const waiting = identity('waiting')
+  const panne = identity('panne', failedBroker)
+  state.receiveSnapshot({ ...snapshot(waiting.deckRunId, { waiting: 1 }), identity: waiting })
+  state.receiveSnapshot({ ...snapshot(panne.deckRunId, { exited: 1 }, failedBroker), identity: panne })
+  state.setBrokerReachable(failedBroker, false)
+
+  const summary = state.summary()
+  expect(summary.face).toBe('panne')
+  expect(selectAvatarFocusDeck(summary.decks, [waiting, panne])).toEqual(panne)
+})
+
+test('selects an eligible Deck by lexicographic identity instead of attach order', () => {
+  const state = new AvatarState({ now: () => 0 })
+  const later = identity('run-z')
+  const first = identity('run-a', 'http://broker-z.example:7899')
+  const firstByBroker = identity('run-a', 'http://broker-a.example:7899')
+  state.receiveSnapshot({ ...snapshot(later.deckRunId, { waiting: 1 }), identity: later })
+  state.receiveSnapshot({ ...snapshot(first.deckRunId, { waiting: 1 }, first.broker_url), identity: first })
+  state.receiveSnapshot({ ...snapshot(firstByBroker.deckRunId, { waiting: 1 }, firstByBroker.broker_url), identity: firstByBroker })
+
+  expect(selectAvatarFocusDeck(state.summary().decks, [later, first, firstByBroker])).toEqual(firstByBroker)
+})
+
+test('selects no Deck when no urgent Deck is attached', () => {
+  const state = new AvatarState({ now: () => 0 })
+  state.receiveSnapshot(snapshot('waiting', { waiting: 1 }))
+
+  expect(selectAvatarFocusDeck(state.summary().decks, [])).toBeNull()
+})
+
+test('selects no Deck when no Deck produces an urgent face', () => {
+  const state = new AvatarState({ now: () => 0 })
+  const working = identity('working')
+  state.receiveSnapshot({ ...snapshot(working.deckRunId, { working: 1 }), identity: working })
+
+  expect(selectAvatarFocusDeck(state.summary().decks, [working])).toBeNull()
 })

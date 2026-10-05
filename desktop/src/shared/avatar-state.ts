@@ -61,6 +61,15 @@ const ZERO_COUNTERS: AvatarDeckCounters = {
   rateLimited: 0
 }
 
+type UrgentAvatarFace = 'panne' | 'reclame' | 'perdu'
+type UrgentFaceRule = readonly [UrgentAvatarFace, (deck: AvatarDeckStatus) => boolean]
+
+const URGENT_FACE_RULES: readonly UrgentFaceRule[] = [
+  ['panne', (deck) => deck.torchOut],
+  ['reclame', (deck) => deck.counters.waiting > 0],
+  ['perdu', (deck) => deck.counters.exited > 0 || deck.counters.rateLimited > 0]
+]
+
 function deckKey(identity: AvatarDeckIdentity): string {
   return JSON.stringify([identity.deckRunId, identity.broker_url])
 }
@@ -82,6 +91,34 @@ function addCounters(left: AvatarDeckCounters, right: AvatarDeckCounters): Avata
     exited: left.exited + right.exited,
     rateLimited: left.rateLimited + right.rateLimited
   }
+}
+
+function urgentRule(decks: readonly AvatarDeckStatus[]): UrgentFaceRule | null {
+  for (const rule of URGENT_FACE_RULES) {
+    if (decks.some(rule[1])) return rule
+  }
+  return null
+}
+
+function compareIdentity(left: AvatarDeckIdentity, right: AvatarDeckIdentity): number {
+  if (left.deckRunId < right.deckRunId) return -1
+  if (left.deckRunId > right.deckRunId) return 1
+  if (left.broker_url < right.broker_url) return -1
+  if (left.broker_url > right.broker_url) return 1
+  return 0
+}
+
+export function selectAvatarFocusDeck(
+  decks: readonly AvatarDeckStatus[],
+  attached: readonly AvatarDeckIdentity[]
+): AvatarDeckIdentity | null {
+  const rule = urgentRule(decks)
+  if (rule === null) return null
+  const attachedKeys = new Set(attached.map(deckKey))
+  const winner = decks
+    .filter((deck) => attachedKeys.has(deckKey(deck.identity)) && rule[1](deck))
+    .sort((left, right) => compareIdentity(left.identity, right.identity))[0]
+  return winner ? { ...winner.identity } : null
 }
 
 export class AvatarState {
@@ -131,9 +168,8 @@ export class AvatarState {
     const unread = decks.reduce((total, deck) => total + deck.unread, 0)
 
     if (decks.length === 0) return { face: 'seul', counters, unread, decks }
-    if (decks.some((deck) => deck.torchOut)) return { face: 'panne', counters, unread, decks }
-    if (counters.waiting > 0) return { face: 'reclame', counters, unread, decks }
-    if (counters.exited > 0 || counters.rateLimited > 0) return { face: 'perdu', counters, unread, decks }
+    const urgent = urgentRule(decks)
+    if (urgent !== null) return { face: urgent[0], counters, unread, decks }
     if (unread > 0) return { face: 'courrier', counters, unread, decks }
     if (counters.working > 0) return { face: 'travaille', counters, unread, decks }
     return { face: 'endormi', counters, unread, decks }

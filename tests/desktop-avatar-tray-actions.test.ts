@@ -127,6 +127,7 @@ async function setup() {
     locale: 'en',
     now: () => NOW,
     reportError: () => {},
+    gesture: () => {},
     setTimeout: () => ({}),
     clearTimeout: () => {}
   })

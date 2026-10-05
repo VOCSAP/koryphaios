@@ -54,11 +54,14 @@ export interface AvatarViewState {
   presentation: AvatarViewPresentation
 }
 
+export type AvatarViewGesture = 'single' | 'double'
+
 export const AVATAR_VIEW_CHANNELS = {
   getState: 'avatar-view:get-state',
   state: 'avatar-view:state',
   setPosition: 'avatar-view:set-position',
   setPointerInside: 'avatar-view:pointer-inside',
+  gesture: 'avatar-view:gesture',
   reportError: 'avatar-view:report-error'
 } as const
 
@@ -67,5 +70,6 @@ export interface AvatarViewApi {
   onState(callback: (state: AvatarViewState) => void): () => void
   setPosition(x: number, y: number): Promise<void>
   setPointerInside(inside: boolean): Promise<void>
+  gesture(kind: AvatarViewGesture): Promise<void>
   reportError(message: string): void
 }

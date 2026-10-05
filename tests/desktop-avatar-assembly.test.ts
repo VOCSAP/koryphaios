@@ -111,6 +111,7 @@ function setup(options: { geometry?: AvatarGeometry; seed?: AvatarAppearance; lo
   const target = { file }
   if (options.seed) writeAvatarAppearance(file, options.seed, { reportError: () => {} })
   const reports: string[] = []
+  const gestures: string[] = []
   const reportError = (_scope: string, message: string): void => {
     reports.push(message)
   }
@@ -140,6 +141,7 @@ function setup(options: { geometry?: AvatarGeometry; seed?: AvatarAppearance; lo
     locale: options.locale ?? 'fr',
     now: () => 1_000,
     reportError,
+    gesture: (kind) => { gestures.push(kind) },
     setTimeout: (callback, delay) => {
       const timer = { delay, callback, active: true }
       timers.push(timer)
@@ -163,7 +165,7 @@ function setup(options: { geometry?: AvatarGeometry; seed?: AvatarAppearance; lo
     return windows[windows.length - 1]!
   }
   const stored = (): AvatarAppearance => JSON.parse(readFileSync(target.file, 'utf8')) as AvatarAppearance
-  return { assembly, file, target, dir, reports, handlers, windows, invoke, fire, open, stored, reads: () => reads, setDark: (value: boolean) => { dark = value } }
+  return { assembly, file, target, dir, reports, gestures, handlers, windows, invoke, fire, open, stored, reads: () => reads, setDark: (value: boolean) => { dark = value } }
 }
 
 function seed(patch: Partial<AvatarAppearance> = {}): AvatarAppearance {
@@ -190,6 +192,18 @@ describe('Avatar assembly', () => {
     expect([...s.handlers.keys()].sort()).toEqual(Object.values(AVATAR_VIEW_CHANNELS).filter((channel) => channel !== AVATAR_VIEW_CHANNELS.state).sort())
     s.assembly.dispose()
     expect(s.handlers.size).toBe(0)
+  })
+
+  test('forwards a validated gesture from the current Avatar window', async () => {
+    const s = setup()
+    const window = await s.open()
+
+    await s.invoke(AVATAR_VIEW_CHANNELS.gesture, window, 'single')
+    expect(s.gestures).toEqual(['single'])
+
+    await s.invoke(AVATAR_VIEW_CHANNELS.gesture, window, 'double')
+    expect(s.stored().visible).toBe(false)
+    expect(s.gestures).toEqual(['single'])
   })
 
   test('the persisted file is a pure output: tampering with it mid-run is overwritten, never merged back', async () => {
