@@ -22,7 +22,7 @@ mock.module("@shared/avatar-mask-geometry", () => ({ ...geometry }));
 const skins = await import("../desktop/src/renderer/src/avatar/skins");
 const { AVATAR_SKINS, avatarThemeVars } = skins;
 const AVATAR_FACES: AvatarFace[] = skins.AVATAR_FACES;
-const { deckIdentityKey } = await import("../desktop/src/renderer/src/avatar/MaskSkin");
+const { deckIdentityKey, PILL_KINDS } = await import("../desktop/src/renderer/src/avatar/MaskSkin");
 
 const DESKTOP_SRC = join(import.meta.dir, "..", "desktop", "src");
 const SKIN_REGISTRY = join(DESKTOP_SRC, "renderer", "src", "avatar", "skins.ts");
@@ -259,6 +259,298 @@ describe("mask skin geometry", () => {
       }
     }
     expect(render(skin, SCENARIOS.reclame()).getAttribute("viewBox")).toBe(`${box.x} ${box.y} ${box.width} ${box.height}`);
+  });
+
+  type Box = { l: number; t: number; r: number; b: number; label?: boolean };
+
+  type Point = { x: number; y: number };
+
+  function strokeOf(rules: ReturnType<typeof cssRules>, selector: string): number {
+    const values = declarationValues(rules, selector, "stroke-width").map(Number);
+    if (values.length === 0) throw new Error(`no stroke-width for ${selector} in the avatar block`);
+    if (!values.every(Number.isFinite)) throw new Error(`a stroke-width for ${selector} is not a finite number: ${values.join(", ")}`);
+    return Math.max(...values);
+  }
+
+  // Every point a segment is drawn from, reflected S/T control points included:
+  // a Bezier lies inside the convex hull of its control points, so their box
+  // bounds the ink of the whole path.
+  function pathPoints(d: string): Point[] {
+    const tokens = d.match(/[a-zA-Z]|-?(?:\d+\.?\d*|\.\d+)/g) ?? [];
+    if (tokens.join("").length !== d.replace(/[\s,]/g, "").length) throw new Error(`path data "${d}" holds a token the hull walker cannot read`);
+    const arity: Record<string, number> = { m: 2, l: 2, h: 1, v: 1, c: 6, s: 4, q: 4, t: 2, z: 0 };
+    const out: Point[] = [];
+    let cmd = "";
+    let cur: Point = { x: 0, y: 0 };
+    let start: Point = { x: 0, y: 0 };
+    let cubicCtrl: Point | null = null;
+    let quadCtrl: Point | null = null;
+    let i = 0;
+    while (i < tokens.length) {
+      if (/[a-zA-Z]/.test(tokens[i]!)) cmd = tokens[i++]!;
+      const lower = cmd.toLowerCase();
+      if (!(lower in arity)) throw new Error(`path command ${cmd} is not handled by the hull walker`);
+      const rel = cmd === lower;
+      const n = tokens.slice(i, i + arity[lower]!).map(Number);
+      if (n.length !== arity[lower] || !n.every(Number.isFinite)) throw new Error(`path command ${cmd} in "${d}" has malformed arguments`);
+      i += arity[lower]!;
+      const at = (k: number): Point => ({ x: rel ? cur.x + n[k]! : n[k]!, y: rel ? cur.y + n[k + 1]! : n[k + 1]! });
+      const reflect = (ctrl: Point | null): Point => (ctrl ? { x: 2 * cur.x - ctrl.x, y: 2 * cur.y - ctrl.y } : cur);
+      let next: Point;
+      let nextCubic: Point | null = null;
+      let nextQuad: Point | null = null;
+      if (lower === "z") next = start;
+      else if (lower === "h") next = { x: rel ? cur.x + n[0]! : n[0]!, y: cur.y };
+      else if (lower === "v") next = { x: cur.x, y: rel ? cur.y + n[0]! : n[0]! };
+      else if (lower === "c") {
+        out.push(at(0), at(2));
+        nextCubic = at(2);
+        next = at(4);
+      } else if (lower === "s") {
+        out.push(reflect(cubicCtrl), at(0));
+        nextCubic = at(0);
+        next = at(2);
+      } else if (lower === "q") {
+        out.push(at(0));
+        nextQuad = at(0);
+        next = at(2);
+      } else if (lower === "t") {
+        nextQuad = reflect(quadCtrl);
+        out.push(nextQuad);
+        next = at(0);
+      } else next = at(0);
+      if (lower === "m") out.push(next);
+      else out.push(cur, next);
+      cur = next;
+      cubicCtrl = nextCubic;
+      quadCtrl = nextQuad;
+      if (lower === "m") {
+        start = cur;
+        cmd = rel ? "l" : "L";
+      }
+    }
+    return out;
+  }
+
+  const GLYPH_SHAPES = new Set(["svg", "g", "path", "circle"]);
+
+  function markerInk(svg: SVGSVGElement, rules: ReturnType<typeof cssRules>): Box[] {
+    const pillPad = strokeOf(rules, ".avatar-root .avatar-skin .avatar-pill") / 2;
+    const glyphPad = strokeOf(rules, ".avatar-root .avatar-skin .avatar-pill-glyph .avatar-glyph-under svg.glyph") / 2;
+    const boxes: Box[] = [];
+    for (const el of svg.querySelectorAll("rect.avatar-pill")) {
+      const x = Number(el.getAttribute("x"));
+      const y = Number(el.getAttribute("y"));
+      boxes.push({ l: x - pillPad, t: y - pillPad, r: x + Number(el.getAttribute("width")) + pillPad, b: y + Number(el.getAttribute("height")) + pillPad });
+    }
+    for (const el of svg.querySelectorAll(".avatar-pill-glyph > g:not(.avatar-glyph-under)")) {
+      const match = /translate\(([-\d.]+) ([-\d.]+)\) scale\(([\d.]+)\)/.exec(el.getAttribute("transform") ?? "");
+      if (!match) throw new Error("a glyph marker has no translate/scale transform");
+      // Chromium sizes the nested glyph viewport from its width attribute, not from the CSS width.
+      const glyph = el.querySelector("svg.glyph");
+      const viewBoxWidth = Number(glyph?.getAttribute("viewBox")?.split(/\s+/)[2]);
+      const viewportWidth = Number(glyph?.getAttribute("width"));
+      if (!(viewBoxWidth > 0) || !(viewportWidth > 0)) throw new Error("a glyph marker has no width attribute and viewBox to scale it by");
+      const [tx, ty] = [Number(match[1]), Number(match[2])];
+      const s = Number(match[3]) * (viewportWidth / viewBoxWidth);
+      const drawn = [...el.querySelectorAll("*")];
+      const unread = drawn.filter((node) => !GLYPH_SHAPES.has(node.localName));
+      if (unread.length > 0) throw new Error(`a glyph marker draws <${unread[0]!.localName}>, which the ink bound does not measure`);
+      const local = drawn.filter((node) => node.localName === "path").flatMap((p) => pathPoints(p.getAttribute("d") ?? ""));
+      for (const c of drawn.filter((node) => node.localName === "circle")) {
+        const [cx, cy, r] = ["cx", "cy", "r"].map((a) => Number(c.getAttribute(a)));
+        if (![cx, cy, r].every(Number.isFinite)) throw new Error("a glyph marker circle has a non-numeric cx, cy or r");
+        local.push({ x: cx! - r!, y: cy! - r! }, { x: cx! + r!, y: cy! + r! });
+      }
+      if (local.length === 0) throw new Error("a glyph marker draws nothing the hull walker can read");
+      const xs = local.map((p) => tx + p.x * s);
+      const ys = local.map((p) => ty + p.y * s);
+      const pad = glyphPad * s;
+      boxes.push({ l: Math.min(...xs) - pad, t: Math.min(...ys) - pad, r: Math.max(...xs) + pad, b: Math.max(...ys) + pad });
+    }
+    const label = svg.querySelector(".avatar-stage-overflow");
+    if (label) {
+      const fonts = declarationValues(rules, ".avatar-root .avatar-skin .avatar-stage-overflow", "font");
+      const size = Number(/(\d+(?:\.\d+)?)px/.exec(fonts[0] ?? "")?.[1]);
+      if (fonts.length !== 1 || !(size > 0)) throw new Error("the +N label has no single px font size in the avatar block");
+      const pad = strokeOf(rules, ".avatar-root .avatar-skin .avatar-stage-overflow") / 2;
+      const x = Number(label.getAttribute("x"));
+      const y = Number(label.getAttribute("y"));
+      // Upper bounds, not font metrics: no character of a sans face is wider
+      // than 1em, rises more than 1.25em above its baseline or drops 0.5em below.
+      const half = ((label.textContent ?? "").length * size) / 2;
+      boxes.push({ l: x - half - pad, t: y - 1.25 * size - pad, r: x + half + pad, b: y + 0.5 * size + pad, label: true });
+    }
+    return boxes;
+  }
+
+  type Segment = [Point, Point];
+
+  const OUTLINE_FLATNESS = 0.05;
+
+  // Every segment stays within OUTLINE_FLATNESS of the true curve: a cubic is
+  // split until both inner control points lie that close to its chord, and the
+  // curve lies inside the hull of its control points.
+  function underlayOutline(face: AvatarFace, scale: number): Segment[] {
+    const tokens = geometry.MASK_OUTLINE.match(/[a-zA-Z]|-?(?:\d+\.?\d*|\.\d+)/g) ?? [];
+    if (tokens.join("").length !== geometry.MASK_OUTLINE.replace(/[\s,]/g, "").length) throw new Error("MASK_OUTLINE holds a token the outline reader cannot read");
+    const commands = tokens.filter((t) => /[a-zA-Z]/.test(t));
+    const shape = tokens.map((t) => (/[a-zA-Z]/.test(t) ? t : "n")).join("");
+    if (commands.length < 3 || !/^Mnn(Cnnnnnn)+Z$/.test(shape)) throw new Error(`MASK_OUTLINE is no longer exactly M, absolute C cubics, then Z: ${commands.join(" ")}`);
+    const nums = tokens.filter((t) => !/[a-zA-Z]/.test(t)).map(Number);
+    const c = geometry.MASK_CENTER;
+    const tilt = (geometry.FACE_GEOMETRY[face].tilt * Math.PI) / 180;
+    const place = (px: number, py: number): Point => {
+      const sx = (px - c.x) * scale;
+      const sy = (py - c.y) * scale;
+      return {
+        x: c.x + sx * Math.cos(tilt) - sy * Math.sin(tilt) + geometry.MASK_ORIGIN.x,
+        y: c.y + sx * Math.sin(tilt) + sy * Math.cos(tilt) + geometry.MASK_ORIGIN.y
+      };
+    };
+    const segments: Segment[] = [];
+    const split = (p: [Point, Point, Point, Point], depth: number): void => {
+      if (depth > 24) throw new Error("the outline cubic does not flatten");
+      if (Math.max(distanceToSegment(p[1], p[0], p[3]), distanceToSegment(p[2], p[0], p[3])) <= OUTLINE_FLATNESS) {
+        segments.push([p[0], p[3]]);
+        return;
+      }
+      const mid = (a: Point, b: Point): Point => ({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 });
+      const ab = mid(p[0], p[1]);
+      const bc = mid(p[1], p[2]);
+      const cd = mid(p[2], p[3]);
+      const abc = mid(ab, bc);
+      const bcd = mid(bc, cd);
+      const m = mid(abc, bcd);
+      split([p[0], ab, abc, m], depth + 1);
+      split([m, bcd, cd, p[3]], depth + 1);
+    };
+    let p0 = place(nums[0]!, nums[1]!);
+    for (let k = 2; k + 5 < nums.length; k += 6) {
+      const [x1, y1, x2, y2, x3, y3] = nums.slice(k, k + 6) as [number, number, number, number, number, number];
+      const p3 = place(x3, y3);
+      split([p0, place(x1, y1), place(x2, y2), p3], 0);
+      p0 = p3;
+    }
+    if ((nums.length - 2) % 6 !== 0 || segments.length === 0) throw new Error("MASK_OUTLINE did not parse into whole cubics");
+    return segments;
+  }
+
+  function distanceToSegment(p: Point, a: Point, b: Point): number {
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const len2 = dx * dx + dy * dy;
+    const t = len2 === 0 ? 0 : Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / len2));
+    return Math.hypot(p.x - (a.x + t * dx), p.y - (a.y + t * dy));
+  }
+
+  // Exact: two disjoint convex shapes are closest at a vertex of one of them.
+  function segmentToBox([a, b]: Segment, box: Box): number {
+    let t0 = 0;
+    let t1 = 1;
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const clip = (p: number, q: number): boolean => {
+      if (p === 0) return q >= 0;
+      const r = q / p;
+      if (p < 0) t0 = Math.max(t0, r);
+      else t1 = Math.min(t1, r);
+      return t0 <= t1;
+    };
+    if (clip(-dx, a.x - box.l) && clip(dx, box.r - a.x) && clip(-dy, a.y - box.t) && clip(dy, box.b - a.y)) return 0;
+    const toBox = (p: Point): number => Math.hypot(Math.max(box.l - p.x, 0, p.x - box.r), Math.max(box.t - p.y, 0, p.y - box.b));
+    const corners: Point[] = [
+      { x: box.l, y: box.t },
+      { x: box.r, y: box.t },
+      { x: box.l, y: box.b },
+      { x: box.r, y: box.b }
+    ];
+    return Math.min(toBox(a), toBox(b), ...corners.map((corner) => distanceToSegment(corner, a, b)));
+  }
+
+  function inkTop(d: string): number {
+    return Math.min(...pathPoints(d).map((p) => p.y));
+  }
+
+  test("the hull walker bounds an S curve by its reflected control point", () => {
+    // The C control (10,20) is reflected through (20,10) to (30,0), the topmost point drawn from.
+    expect(inkTop("M0 10C0 10 10 20 20 10S30 10 40 10"), "the reflected S control point is missing from the ink bound").toBe(0);
+    expect(inkTop("m0 10c0 0 10 10 20 0s20 0 20 0"), "the reflected s control point is missing from the ink bound").toBe(0);
+  });
+
+  test("the hull walker bounds a T curve by its reflected control point", () => {
+    // The Q control (10,20) is reflected through (20,10) to (30,0), the topmost point drawn from.
+    expect(inkTop("M0 10Q10 20 20 10T40 10"), "the reflected T control point is missing from the ink bound").toBe(0);
+    expect(inkTop("m0 10q10 10 20 0t20 0"), "the reflected t control point is missing from the ink bound").toBe(0);
+  });
+
+  function faultDecks(count: number): AvatarSummary {
+    return produced((s, clock) => {
+      for (let i = 0; i < count; i++) s.receiveSnapshot({ identity: { deckRunId: `run-${i}`, broker_url: BROKER }, counters: counters({ working: 1 }), unread: 0 });
+      clock.now += 20_000;
+    });
+  }
+
+  test("the raised stage stays inside the figure and its markers clear the mask and the Reclame halo, every face, 1 to capacity + 1 decks and the +N label at one, two and three digits (the label's horizontal fit is not covered)", () => {
+    const rules = cssRules(avatarCssBlock());
+    const stroke = (selector: string): number => strokeOf(rules, selector);
+    const box = geometry.FIGURE_VIEWBOX;
+    const lineHalf = stroke(".avatar-root .avatar-skin .avatar-stage-line") / 2;
+    const lineTop = Math.min(geometry.STAGE.p0.y, geometry.STAGE.p2.y) - lineHalf;
+    const lineBottom = Math.max(...Array.from({ length: 101 }, (_, i) => geometry.stagePoint(i / 100).y)) + lineHalf;
+    expect(lineTop, "the stage line rises above the figure").toBeGreaterThanOrEqual(box.y);
+    expect(lineBottom, "the stage line is clipped at the bottom of the figure").toBeLessThanOrEqual(box.y + box.height);
+
+    const kinds: [string, Set<string>, (count: number) => AvatarSummary][] = [
+      ["lost", new Set(["lost"]), (n) => decks(n, [{ exited: 1 }])],
+      ["quota", new Set(["quota"]), (n) => decks(n, [{ rateLimited: 1 }])],
+      ["fault", new Set(["fault"]), faultDecks],
+      ["capsules", new Set(["idle", "working"]), (n) => decks(n, [{ idle: 1 }, { working: 1 }])]
+    ];
+    const capacity = geometry.STAGE_MARKER.capacity;
+    // The label shows count - (capacity - 1): these counts cross the capacity
+    // and take it from one digit to two and from two to three.
+    const counts = [...Array.from({ length: capacity + 1 }, (_, i) => i + 1), capacity + 8, capacity + 9, capacity + 98, capacity + 99];
+    const labelDigits = new Set<number>();
+    const facesSeen = new Set<string>();
+    const kindsSeen = new Set<string>();
+    for (const face of AVATAR_FACES) {
+      const g = geometry.FACE_GEOMETRY[face];
+      // The halo underlay is stroked inside its scaled group, so its width scales too.
+      const obstacles = [
+        { name: "mask underlay", segments: underlayOutline(face, 1), half: stroke(".avatar-root .avatar-skin .avatar-under") / 2 },
+        ...(g.halo ? [{ name: "Reclame halo underlay", segments: underlayOutline(face, geometry.HALO_SCALE), half: (stroke(".avatar-root .avatar-skin .avatar-halo-under") / 2) * geometry.HALO_SCALE }] : [])
+      ];
+      for (const [kind, expectedKinds, summaryOf] of kinds) {
+        for (const count of counts) {
+          const svg = render(skin, { ...summaryOf(count), face });
+          facesSeen.add(svg.getAttribute("data-face") ?? "");
+          const rendered = new Set(markers(svg).map((m) => m.kind));
+          expect([...rendered].filter((k) => !expectedKinds.has(k)), `${face}/${kind}/${count}: the fixture rendered another marker kind`).toEqual([]);
+          rendered.forEach((k) => kindsSeen.add(k));
+          const label = svg.querySelector(".avatar-stage-overflow");
+          if (label) labelDigits.add((label.textContent ?? "").replace(/\D/g, "").length);
+          const inks = markerInk(svg, rules);
+          expect(inks.length, `${face}/${kind}/${count}: no marker was measured`).toBeGreaterThan(0);
+          for (const ink of inks) {
+            const where = `${face}/${kind}/${count} decks, ${ink.label ? "+N label" : "marker"} at x ${((ink.l + ink.r) / 2).toFixed(1)}`;
+            expect(ink.t, `${where} sticks out of the top of the figure`).toBeGreaterThanOrEqual(box.y);
+            expect(ink.b, `${where} is clipped at the bottom of the figure`).toBeLessThanOrEqual(box.y + box.height);
+            if (!ink.label) {
+              expect(ink.l, `${where} is clipped on the left of the figure`).toBeGreaterThanOrEqual(box.x);
+              expect(ink.r, `${where} is clipped on the right of the figure`).toBeLessThanOrEqual(box.x + box.width);
+            }
+            for (const { name, segments, half } of obstacles) {
+              const gap = Math.min(...segments.map((segment) => segmentToBox(segment, ink))) - OUTLINE_FLATNESS - half;
+              expect(gap, `${where} overlaps the ${name}`).toBeGreaterThan(0);
+            }
+          }
+        }
+      }
+    }
+    expect([...facesSeen].sort(), "a face was never rendered by the stage clearance sweep").toEqual([...AVATAR_FACES].sort());
+    expect([...kindsSeen].sort(), "a marker kind of PILL_KINDS was never rendered by the stage clearance sweep").toEqual([...PILL_KINDS].sort());
+    expect([...labelDigits].sort(), "the +N label was not swept at one, two and three digits").toEqual([1, 2, 3]);
   });
 
   test("Seul is an empty stage with shut eyes, Endormi a dim stage with half-closed eyes", () => {

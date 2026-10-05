@@ -3,7 +3,7 @@ import type { AvatarFace } from './avatar-state'
 // Mask paths are in mask-local units (100 x 110), placed in the figure at MASK_ORIGIN.
 
 // y starts above 0 so the Reclame halo and the underlay ring above the brow are not clipped.
-export const FIGURE_VIEWBOX = { x: 0, y: -9, width: 150, height: 181 } as const
+export const FIGURE_VIEWBOX = { x: 0, y: -9, width: 150, height: 152 } as const
 export const MASK_ORIGIN = { x: 25, y: 2 } as const
 export const MASK_CENTER = { x: 50, y: 55 } as const
 
@@ -71,10 +71,12 @@ export const FACE_GEOMETRY = {
   seul: { eyes: EYES.shut, brows: BROWS.low, mouth: MOUTHS.slitLow, crack: false, halo: false, tilt: -12 }
 } as const satisfies Record<AvatarFace, FaceGeometry>
 
-// The stage is a floor, not a necklace: wider than the mask and well below
-// the chin, so an arc of small marks under one large shape does not read as
-// a paw print turned upside down.
-export const STAGE = { p0: { x: 0, y: 150 }, p1: { x: 75, y: 178 }, p2: { x: 150, y: 150 } } as const
+// The stage is a floor, not a necklace: wider than the mask and below the
+// chin, so an arc of small marks under one large shape does not read as a paw
+// print turned upside down. Its height is the highest that keeps a centre
+// glyph clear of the Reclame halo: every unit lower is figure height the
+// terminal frame spends on the floor instead of the face.
+export const STAGE = { p0: { x: 0, y: 128 }, p1: { x: 75, y: 156 }, p2: { x: 150, y: 128 } } as const
 export const PILL = { width: 7, height: 13, lift: 2 } as const
 
 export function stagePoint(t: number): { x: number; y: number } {

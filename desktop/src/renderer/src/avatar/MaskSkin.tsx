@@ -21,7 +21,9 @@ import {
 } from '@shared/avatar-mask-geometry'
 import { GLYPHS, GLYPH_BADGES } from '../components/icons'
 
-export type AvatarPillKind = 'fault' | 'lost' | 'quota' | 'working' | 'idle'
+export const PILL_KINDS = ['fault', 'lost', 'quota', 'working', 'idle'] as const
+
+export type AvatarPillKind = (typeof PILL_KINDS)[number]
 
 /** One marker per deck, the most urgent condition of that deck alone. */
 export function pillKind(deck: AvatarDeckStatus): AvatarPillKind {
