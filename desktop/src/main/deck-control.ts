@@ -89,7 +89,10 @@ export interface DeckControlDeps {
   listModels(): ModelOption[]
   listPresets(): LaunchPreset[]
   /** Same path as the operator's create (worktree handling included). */
-  spawnSession(input: CreateSessionInput): Promise<SessionRuntime>
+  spawnSession(
+    input: CreateSessionInput,
+    opts?: { hasDeckLeadTools?: boolean }
+  ): Promise<SessionRuntime>
   listSessions(): DeckControlSession[]
   restartSession(id: string): Promise<void>
   closeSession(id: string): Promise<void>
@@ -509,7 +512,7 @@ export function startDeckControl(
     }
     let created: SessionRuntime
     try {
-      created = await deps.spawnSession(input)
+      created = await deps.spawnSession(input, leadMint ? { hasDeckLeadTools: true } : undefined)
     } catch (e) {
       // Audit fix #2 (card 6c380073): the mint AND the --mcp-config file
       // write both happen ABOVE, before the spawn -- if spawnSession then

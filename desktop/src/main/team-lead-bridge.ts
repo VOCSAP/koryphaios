@@ -113,6 +113,14 @@ export function wantsTeamLeadBridge(
   return !input.mcpConfig?.trim() && marker === true && isTeamLeadAgent(sanitizedAgent)
 }
 
+export function wantsDeckLeadPlugin(
+  resolvedMcpConfig: ResolvedMcpConfig | undefined,
+  supervisor: boolean | undefined,
+  embeddedMinted: boolean
+): boolean {
+  return supervisor === true || resolvedMcpConfig?.callerId !== undefined || embeddedMinted
+}
+
 /**
  * Resolves the mcpConfig to use and preserves the callerId when a bridge is
  * freshly minted. Never throws: a mint failure is reported and degrades to no

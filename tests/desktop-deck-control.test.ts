@@ -98,6 +98,7 @@ function makeDeps(state: { sessions: SessionRuntime[] }): DeckControlDeps & {
   leadMcpCalls: { token: string; callerId: string; allowedTools: readonly string[] }[];
   revokedLeadCallerIds: string[];
   spawnOpts: { checkpoint: boolean; hasLead: boolean }[];
+  sessionSpawnOpts: Array<{ hasDeckLeadTools?: boolean } | undefined>;
   directiveRuns: {
     directive: string;
     peerIds: string[];
@@ -114,6 +115,7 @@ function makeDeps(state: { sessions: SessionRuntime[] }): DeckControlDeps & {
   const spawnInputs: CreateSessionInput[] = [];
   const restarted: string[] = [];
   const spawnOpts: { checkpoint: boolean; hasLead: boolean }[] = [];
+  const sessionSpawnOpts: Array<{ hasDeckLeadTools?: boolean } | undefined> = [];
   const leadMcpCalls: { token: string; callerId: string; allowedTools: readonly string[] }[] = [];
   const revokedLeadCallerIds: string[] = [];
   const directiveRuns: { directive: string; peerIds: string[]; prompt: string | undefined; callerId: string }[] = [];
@@ -130,11 +132,13 @@ function makeDeps(state: { sessions: SessionRuntime[] }): DeckControlDeps & {
     leadMcpCalls,
     revokedLeadCallerIds,
     spawnOpts,
+    sessionSpawnOpts,
     listAgents: () => ["team-lead", "dev", "reviewer"],
     listModels: () => [{ id: "opus", label: "Opus" }],
     listPresets: () => [],
-    spawnSession: async (input: CreateSessionInput) => {
+    spawnSession: async (input: CreateSessionInput, opts) => {
       spawnInputs.push(input);
+      sessionSpawnOpts.push(opts);
       const s = fakeSession(`spawned-${++n}`, {
         name: input.name ?? "peer",
         lead: input.lead,
@@ -991,6 +995,7 @@ test("embedded spawn: prompt file, harness disallowedTools, team-lead crown rule
   expect(deps.spawnInputs[1]!.lead).toBe(true);
   // ...and, unlike every other profile, gets its own deck-control config.
   expect(deps.spawnInputs[1]!.mcpConfig).toBe("/state/team-lead-mcp.json");
+  expect(deps.sessionSpawnOpts[1]).toEqual({ hasDeckLeadTools: true });
 
   // ...but never demotes an existing live lead.
   await call(srv, "deck_spawn_session", { name: "another", embedded_agent: "team-lead" });
@@ -1002,6 +1007,7 @@ test("embedded spawn: prompt file, harness disallowedTools, team-lead crown rule
   // A plain operator-profile spawn (no embedded_agent at all) never gets it.
   await call(srv, "deck_spawn_session", { agent: "dev" });
   expect(deps.spawnInputs[3]!.mcpConfig).toBeUndefined();
+  expect(deps.sessionSpawnOpts[3]).toBeUndefined();
 });
 
 // Card 3c085f1a: spawnEntry threads embedded.peerTools into

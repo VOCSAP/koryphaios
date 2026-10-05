@@ -13,6 +13,7 @@ import {
   effectiveAgent,
   isTeamLeadAgent,
   resolveMcpConfig,
+  wantsDeckLeadPlugin,
   type MintTeamLeadBridge
 } from "../desktop/src/main/team-lead-bridge";
 import {
@@ -198,17 +199,26 @@ function runRestoreMintLoop(defs: RestoredDefStub[]): {
   const report = (_scope: string, message: string) => reports.push(message);
 
   // eslint-disable-next-line no-new-func -- extracted from the real source text, not user input
-  const run = new Function("resolveMcpConfig", "isTeamLeadAgent", "effectiveAgent", "reportError", wrapped) as (
+  const run = new Function(
+    "resolveMcpConfig",
+    "isTeamLeadAgent",
+    "effectiveAgent",
+    "wantsDeckLeadPlugin",
+    "reportError",
+    wrapped
+  ) as (
     resolveMcpConfigFn: typeof resolveMcpConfig,
     isTeamLeadAgentFn: typeof isTeamLeadAgent,
     effectiveAgentFn: typeof effectiveAgent,
+    wantsDeckLeadPluginFn: typeof wantsDeckLeadPlugin,
     reportErrorFn: typeof report
   ) => Map<string, string>;
   const mintedCallerIds = run.call(
-    { defs, mintTeamLeadBridge: mint },
+    { defs, mintTeamLeadBridge: mint, deckLeadPluginTiles: new Set<string>() },
     resolveMcpConfig,
     isTeamLeadAgent,
     effectiveAgent,
+    wantsDeckLeadPlugin,
     report
   );
   return { mintCalls, reports, mintedCallerIds };

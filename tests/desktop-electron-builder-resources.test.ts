@@ -96,7 +96,9 @@ function checkSourceEntries(desktopDir: string, entries: ExtraResourceEntry[]): 
 
 test("electron-builder.yml declares at least the known extraResources entries", () => {
   const targets = parseExtraResourcesTargets(readFileSync(YML_PATH, "utf-8"));
-  expect(targets).toEqual(expect.arrayContaining(["locales", "docs", "deck-plugin", "sandbox", AVATAR_TRAY_ICON_DIRNAME]));
+  expect(targets).toEqual(
+    expect.arrayContaining(["locales", "docs", "deck-plugin", "deck-lead-plugin", "sandbox", AVATAR_TRAY_ICON_DIRNAME])
+  );
 });
 
 const PACKAGED_RESOURCES_DIR = join(DESKTOP_DIR, "dist", "win-unpacked", "resources");

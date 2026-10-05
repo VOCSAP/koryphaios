@@ -15,6 +15,7 @@ import { join } from 'node:path'
  * index.ts).
  */
 export const DECK_PLUGIN_DIRNAME = 'deck-plugin'
+export const DECK_LEAD_PLUGIN_DIRNAME = 'deck-lead-plugin'
 
 /**
  * Pure decision behind index.ts's getDeckPluginDir: a packaged app reads the
@@ -28,6 +29,10 @@ export const DECK_PLUGIN_DIRNAME = 'deck-plugin'
  */
 export function deckPluginDirFor(isPackaged: boolean, resourcesPath: string, appPath: string): string {
   return join(isPackaged ? resourcesPath : appPath, DECK_PLUGIN_DIRNAME)
+}
+
+export function deckLeadPluginDirFor(isPackaged: boolean, resourcesPath: string, appPath: string): string {
+  return join(isPackaged ? resourcesPath : appPath, DECK_LEAD_PLUGIN_DIRNAME)
 }
 
 export type SpawnMode = 'fresh' | 'resume'
@@ -47,8 +52,8 @@ export interface SessionCommandInput {
    * Empty/undefined => omit the flag entirely (Claude's default effort).
    */
   effort?: string
-  /** Absolute path to the embedded plugin, passed on both fresh and resumed sessions. */
-  pluginDir?: string
+  /** Absolute paths to embedded plugins, passed on both fresh and resumed sessions. */
+  pluginDirs?: readonly string[]
   /**
    * Path to a generated .mcp config, emitted as `--mcp-config "<path>"` on
    * BOTH fresh and resume (not restored by --fork-session, like --effort).
@@ -100,10 +105,24 @@ function settingsFlag(path?: string): string {
   return p ? ` --settings "${p}"` : ''
 }
 
-/** ` --plugin-dir "<dir>"` when a plugin dir is set, otherwise empty. */
-function pluginFlag(pluginDir?: string): string {
-  const d = pluginDir?.trim()
-  return d ? ` --plugin-dir "${d}"` : ''
+/** ` --plugin-dir "<dir>"` for every non-empty embedded plugin directory. */
+function pluginFlags(pluginDirs?: readonly string[]): string {
+  return (pluginDirs ?? [])
+    .map((pluginDir) => pluginDir.trim())
+    .filter(Boolean)
+    .map((pluginDir) => ` --plugin-dir "${pluginDir}"`)
+    .join('')
+}
+
+export function pluginDirsForTile(
+  deckPluginDir: string,
+  deckLeadPluginDir: () => string,
+  hasDeckLeadTools: boolean,
+  sandboxed: boolean
+): { pluginDirs: readonly string[]; rolePluginOmitted: boolean } {
+  if (!hasDeckLeadTools) return { pluginDirs: [deckPluginDir], rolePluginOmitted: false }
+  if (sandboxed) return { pluginDirs: [deckPluginDir], rolePluginOmitted: true }
+  return { pluginDirs: [deckPluginDir, deckLeadPluginDir()], rolePluginOmitted: false }
 }
 
 /**
@@ -176,10 +195,10 @@ export function buildSessionCommandLine(input: SessionCommandInput): string {
     // prevSessionId can originate from the desk-session back-channel, whose file
     // lives in a dir mounted into sandbox containers (validated in
     // desk-session.ts). Quoting is the second lock on that door.
-    return `${base}${pluginFlag(input.pluginDir)}${mcpConfigFlag(input.mcpConfig)}${appendSystemPromptFlag(input.appendSystemPromptFile)}${settingsFlag(input.settingsFile)} --resume "${input.prevSessionId}" --fork-session --session-id "${input.sessionId}"${effortFlag(input.effort)}`
+    return `${base}${pluginFlags(input.pluginDirs)}${mcpConfigFlag(input.mcpConfig)}${appendSystemPromptFlag(input.appendSystemPromptFile)}${settingsFlag(input.settingsFile)} --resume "${input.prevSessionId}" --fork-session --session-id "${input.sessionId}"${effortFlag(input.effort)}`
   }
 
-  let line = `${base}${pluginFlag(input.pluginDir)}${mcpConfigFlag(input.mcpConfig)}${appendSystemPromptFlag(input.appendSystemPromptFile)}${settingsFlag(input.settingsFile)} --session-id "${input.sessionId}"`
+  let line = `${base}${pluginFlags(input.pluginDirs)}${mcpConfigFlag(input.mcpConfig)}${appendSystemPromptFlag(input.appendSystemPromptFile)}${settingsFlag(input.settingsFile)} --session-id "${input.sessionId}"`
   const extra = input.args?.trim()
   if (extra) line += ` ${extra}`
   line += effortFlag(input.effort)

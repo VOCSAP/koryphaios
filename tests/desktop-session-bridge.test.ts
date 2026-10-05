@@ -187,7 +187,7 @@ test("a bridge marker that is not the exact string is ignored, never wrapped: a 
 /** Exported so a mutation probe can run it against a MUTATED COPY of the real
  * source text without touching the file the test itself reads. */
 export function checkCreateBridgeWiring(src: string): string | null {
-  const fnMatch = /create\(input: CreateSessionInput[\s\S]*?\): SessionRuntime \{/.exec(src);
+  const fnMatch = /create\(\s*input:\s*CreateSessionInput[\s\S]*?\):\s*SessionRuntime\s*\{/.exec(src);
   if (!fnMatch) {
     return "create(input: CreateSessionInput, ...): SessionRuntime not found in session-service.ts -- has its signature changed?";
   }

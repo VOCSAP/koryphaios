@@ -49,21 +49,8 @@ export async function createSessionWithWorktree(
    * warming only the root left every worktree resume starting fresh.
    */
   sandboxWarmTranscripts?: (cwd: string) => Promise<void>,
-  /**
-   * Card 3c322f10: threaded straight through to SessionService.create()'s
-   * own `opts` -- see that parameter's doc for why it is a plain function
-   * argument here too, never a property merged into `input`/`req` below.
-   * ipc.ts's `sessions:create` and `template:apply` handlers and index.ts's
-   * `spawnTemplateEntry`/`spawnSession` all compute it from the resolved
-   * input's `agent` field via `isTeamLeadAgent` (team-lead-bridge.ts) and
-   * supply it; only `diff:review` and `roadmap:import-plan` omit it, since
-   * both spawn under fixed, non-team-lead names and so never need it.
-   * `spawnSession`'s `embedded_agent`-driven bridge (deck-control.ts's own
-   * leadMint/mcpConfig) is a separate mechanism from this marker -- it sets
-   * `input.mcpConfig` directly, which `resolveMcpConfig` always prefers over
-   * anything this marker would mint.
-   */
-  opts?: { teamLeadDeckBridge?: boolean }
+  /** Runtime-only bridge options; `hasDeckLeadTools` is set only by deck-control after a successful `leadMint`. */
+  opts?: { teamLeadDeckBridge?: boolean; hasDeckLeadTools?: boolean }
 ): Promise<SessionRuntime> {
   let root = projectDir
   if (sandboxGate && !input.supervisor) {

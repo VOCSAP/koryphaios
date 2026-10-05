@@ -74,7 +74,14 @@ afterEach(() => {
   spawned.length = 0;
 });
 
-function setup(opts: { sandboxPeersDir?: string; liveStatusLine?: boolean } = {}) {
+function setup(
+  opts: {
+    sandboxPeersDir?: string;
+    liveStatusLine?: boolean;
+    pluginDirs?: (hasDeckLeadTools: boolean, sandboxed: boolean) => readonly string[];
+    mintTeamLeadBridge?: () => { mcpConfig: string; callerId: string } | null;
+  } = {}
+) {
   const home = mkdtempSync(join(tmpdir(), "kory-status-wiring-"));
   tmpDirs.push(home);
   const cwd = join(home, "proj");
@@ -85,7 +92,14 @@ function setup(opts: { sandboxPeersDir?: string; liveStatusLine?: boolean } = {}
     interactiveShell: false,
     ...(opts.liveStatusLine === undefined ? {} : { liveStatusLine: opts.liveStatusLine }),
   } as never;
-  const svc = new SessionService(() => config, () => ({}), "claude", () => "", home);
+  const svc = new SessionService(
+    () => config,
+    () => ({}),
+    "claude",
+    opts.pluginDirs ?? (() => []),
+    home,
+    opts.mintTeamLeadBridge
+  );
   services.push(svc);
   svc.setStatusLineSettingsProvider(() => SETTINGS);
   if (opts.sandboxPeersDir) svc.setSandboxProvider(() => null, undefined, () => opts.sandboxPeersDir!);
@@ -126,6 +140,93 @@ test("a sandboxed tile gets no --settings, the supervisor still does", () => {
   expect(lastLine(), "sandboxed tile: host hook path unreachable, no flag").not.toContain("--settings");
   svc.create({ supervisor: true } as never);
   expect(lastLine(), "supervisor is never sandboxed: flag kept").toContain(`--settings "${SETTINGS}"`);
+});
+
+test("a host team-lead tile keeps the ordered plugins on fresh and resumed launches", async () => {
+  const reads: Array<[boolean, boolean]> = [];
+  const { svc, home, cwd } = setup({
+    mintTeamLeadBridge: () => ({ mcpConfig: "/state/team-lead.json", callerId: "team-lead-1" }),
+    pluginDirs: (hasDeckLeadTools, sandboxed) => {
+      reads.push([hasDeckLeadTools, sandboxed]);
+      return hasDeckLeadTools ? ["/plugins/general", "/plugins/role"] : ["/plugins/general"];
+    }
+  });
+  const runtime = svc.create({ agent: "team-lead" }, { teamLeadDeckBridge: true });
+  expect(lastLine()).toContain('--plugin-dir "/plugins/general" --plugin-dir "/plugins/role"');
+
+  const transcriptDir = join(home, ".claude", "projects", encodeProjectDir(cwd));
+  mkdirSync(transcriptDir, { recursive: true });
+  writeFileSync(join(transcriptDir, `${runtime.sessionId}.jsonl`), "{}\n");
+  spawned.at(-1)!.exit(1);
+  await svc.restart(runtime.id);
+
+  expect(lastLine()).toContain('--plugin-dir "/plugins/general" --plugin-dir "/plugins/role"');
+  expect(reads).toEqual([
+    [true, false],
+    [true, false]
+  ]);
+});
+
+test("an embedded team-lead mint grants the role plugin through the trusted create option", () => {
+  const reads: Array<[boolean, boolean]> = [];
+  const { svc } = setup({
+    pluginDirs: (hasDeckLeadTools, sandboxed) => {
+      reads.push([hasDeckLeadTools, sandboxed]);
+      return hasDeckLeadTools ? ["/plugins/general", "/plugins/role"] : ["/plugins/general"];
+    }
+  });
+  svc.create(
+    { agent: "team-lead", mcpConfig: "/state/embedded-team-lead.json" },
+    { hasDeckLeadTools: true }
+  );
+  expect(lastLine()).toContain('--plugin-dir "/plugins/general" --plugin-dir "/plugins/role"');
+  expect(reads).toEqual([[true, false]]);
+});
+
+test("a failed team-lead mint omits the role plugin", () => {
+  const reads: Array<[boolean, boolean]> = [];
+  const { svc } = setup({
+    mintTeamLeadBridge: () => null,
+    pluginDirs: (hasDeckLeadTools, sandboxed) => {
+      reads.push([hasDeckLeadTools, sandboxed]);
+      return ["/plugins/general"];
+    }
+  });
+  svc.create({ agent: "team-lead" }, { teamLeadDeckBridge: true });
+  expect(lastLine()).not.toContain("/plugins/role");
+  expect(reads).toEqual([[false, false]]);
+});
+
+test("an ordinary developer tile delegates general-plugin selection to the provider", () => {
+  const reads: Array<[boolean, boolean]> = [];
+  const { svc } = setup({
+    pluginDirs: (hasDeckLeadTools, sandboxed) => {
+      reads.push([hasDeckLeadTools, sandboxed]);
+      return ["/plugins/general"];
+    }
+  });
+  svc.create({ agent: "developer" });
+  expect(lastLine()).toContain('--plugin-dir "/plugins/general"');
+  expect(lastLine()).not.toContain("/plugins/role");
+  expect(reads).toEqual([[false, false]]);
+});
+
+test("a sandboxed role tile delegates role-plugin omission to the provider", () => {
+  const sbx = mkdtempSync(join(tmpdir(), "kory-sbx-peers-"));
+  tmpDirs.push(sbx);
+  const reads: Array<[boolean, boolean]> = [];
+  const { svc } = setup({
+    sandboxPeersDir: sbx,
+    mintTeamLeadBridge: () => ({ mcpConfig: "/state/team-lead.json", callerId: "team-lead-1" }),
+    pluginDirs: (hasDeckLeadTools, sandboxed) => {
+      reads.push([hasDeckLeadTools, sandboxed]);
+      return ["/plugins/general"];
+    }
+  });
+  svc.create({ agent: "team-lead" }, { teamLeadDeckBridge: true });
+  expect(lastLine()).toContain('--plugin-dir "/plugins/general"');
+  expect(lastLine()).not.toContain("/plugins/role");
+  expect(reads).toEqual([[true, true]]);
 });
 
 test("a non-Claude tile gets no --settings", () => {

@@ -16,9 +16,12 @@ import {
 import {
   buildSessionCommandLine,
   createMissingDirTracker,
+  DECK_LEAD_PLUGIN_DIRNAME,
   DECK_PLUGIN_DIRNAME,
+  deckLeadPluginDirFor,
   deckPluginDirFor,
   encodeInitialPromptKeystrokes,
+  pluginDirsForTile,
   quotePromptArg,
   sanitizeFlagValue,
   shouldInjectPrompt
@@ -243,36 +246,71 @@ test("a legitimate effort still rides the line, now double-quoted like --agent/-
   expect(line).toBe('claude run --session-id "id-1" --effort "xhigh"');
 });
 
-test("fresh launch inserts --plugin-dir right after the base command", () => {
+test("fresh launch inserts every --plugin-dir right after the base command", () => {
   const line = buildSessionCommandLine({
     baseCommand: "claude run",
     sessionId: "id-1",
     args: "--agent reviewer",
-    pluginDir: "C:/res/deck-plugin",
+    pluginDirs: ["C:/res/deck-plugin", "C:/res/deck-lead-plugin"],
     effort: "high",
     mode: "fresh"
   });
   expect(line).toBe(
-    'claude run --plugin-dir "C:/res/deck-plugin" --session-id "id-1" --agent reviewer --effort "high"'
+    'claude run --plugin-dir "C:/res/deck-plugin" --plugin-dir "C:/res/deck-lead-plugin" --session-id "id-1" --agent reviewer --effort "high"'
   );
 });
 
-test("resume inserts --plugin-dir before --resume", () => {
+test("resume inserts every --plugin-dir before --resume", () => {
   const line = buildSessionCommandLine({
     baseCommand: "claude run",
     sessionId: "id-new",
     prevSessionId: "id-old",
-    pluginDir: "/opt/deck-plugin",
+    pluginDirs: ["/opt/deck-plugin", "/opt/deck-lead-plugin"],
     mode: "resume"
   });
-  expect(line).toBe('claude run --plugin-dir "/opt/deck-plugin" --resume "id-old" --fork-session --session-id \"id-new\"');
+  expect(line).toBe(
+    'claude run --plugin-dir "/opt/deck-plugin" --plugin-dir "/opt/deck-lead-plugin" --resume "id-old" --fork-session --session-id "id-new"'
+  );
 });
 
-test("an empty/whitespace pluginDir never emits the flag", () => {
-  const fresh = buildSessionCommandLine({ baseCommand: "claude run", sessionId: "id-1", pluginDir: "  ", mode: "fresh" });
-  expect(fresh).toBe("claude run --session-id \"id-1\"");
+test("empty plugin directories never emit a flag", () => {
+  const fresh = buildSessionCommandLine({
+    baseCommand: "claude run",
+    sessionId: "id-1",
+    pluginDirs: ["  ", "C:/res/deck-plugin", ""],
+    mode: "fresh"
+  });
+  expect(fresh).toBe('claude run --plugin-dir "C:/res/deck-plugin" --session-id "id-1"');
   const none = buildSessionCommandLine({ baseCommand: "claude run", sessionId: "id-1", mode: "fresh" });
   expect(none).toBe("claude run --session-id \"id-1\"");
+});
+
+test("a sandboxed deck-lead tile omits the unprojected role plugin", () => {
+  let rolePluginDirRead = 0;
+  const selected = pluginDirsForTile(
+    "C:/res/deck-plugin",
+    () => {
+      rolePluginDirRead += 1;
+      return "C:/res/deck-lead-plugin";
+    },
+    true,
+    true
+  );
+  expect(selected).toEqual({ pluginDirs: ["C:/res/deck-plugin"], rolePluginOmitted: true });
+  expect(rolePluginDirRead).toBe(0);
+});
+
+test("a host deck-lead tile adds the role plugin after the general plugin", () => {
+  const selected = pluginDirsForTile(
+    "C:/res/deck-plugin",
+    () => "C:/res/deck-lead-plugin",
+    true,
+    false
+  );
+  expect(selected).toEqual({
+    pluginDirs: ["C:/res/deck-plugin", "C:/res/deck-lead-plugin"],
+    rolePluginOmitted: false
+  });
 });
 
 // Card a79c7696 volet 1 review: pins the third corner of the deck-plugin
@@ -281,13 +319,19 @@ test("an empty/whitespace pluginDir never emits the flag", () => {
 // literal driving the container-side copy/clean/chown). deckPluginDirFor is
 // the pure decision index.ts's getDeckPluginDir now delegates to, so this
 // runs the SAME resolution index.ts uses -- not a re-statement of it.
-test("deckPluginDirFor resolves to a dir named DECK_PLUGIN_DIRNAME, packaged and dev alike", () => {
-  const packaged = deckPluginDirFor(true, "C:/res", "C:/repo");
-  const dev = deckPluginDirFor(false, "C:/res", "C:/repo");
-  expect(basename(packaged)).toBe(DECK_PLUGIN_DIRNAME);
-  expect(basename(dev)).toBe(DECK_PLUGIN_DIRNAME);
-  expect(packaged.startsWith("C:/res") || packaged.startsWith("C:\\res")).toBe(true);
-  expect(dev.startsWith("C:/repo") || dev.startsWith("C:\\repo")).toBe(true);
+test("embedded plugin resolvers use their own directory names in packaged and dev builds", () => {
+  const plugins = [
+    [deckPluginDirFor, DECK_PLUGIN_DIRNAME],
+    [deckLeadPluginDirFor, DECK_LEAD_PLUGIN_DIRNAME]
+  ] as const;
+  for (const [resolve, dirname] of plugins) {
+    const packaged = resolve(true, "C:/res", "C:/repo");
+    const dev = resolve(false, "C:/res", "C:/repo");
+    expect(basename(packaged)).toBe(dirname);
+    expect(basename(dev)).toBe(dirname);
+    expect(packaged.startsWith("C:/res") || packaged.startsWith("C:\\res")).toBe(true);
+    expect(dev.startsWith("C:/repo") || dev.startsWith("C:\\repo")).toBe(true);
+  }
 });
 
 // ----- supervisor flags (PLAN C5/C8): re-passed on fresh AND resume -----

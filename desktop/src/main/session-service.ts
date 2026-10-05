@@ -56,7 +56,13 @@ import { gracefulClose } from './session-close'
 import { createOscParser, type OscSnapshot } from './detect/osc'
 import { createActivityTracker, ACTIVITY_IDLE_MS, type Activity } from './detect/activity'
 import { logInfo, reportError } from './log'
-import { effectiveAgent, isTeamLeadAgent, resolveMcpConfig, type MintTeamLeadBridge } from './team-lead-bridge'
+import {
+  effectiveAgent,
+  isTeamLeadAgent,
+  resolveMcpConfig,
+  wantsDeckLeadPlugin,
+  type MintTeamLeadBridge
+} from './team-lead-bridge'
 import { DEFAULT_PALETTE, paletteColor } from '@shared/palette'
 import { sanitizeRole } from '@shared/role'
 import { reconcileOrder } from '@shared/reorder'
@@ -298,6 +304,7 @@ export class SessionService extends EventEmitter {
 
   /** Live (post-fork) claude session ids open in this process; double-resume guard. */
   private registry = new OpenIdRegistry()
+  private deckLeadPluginTiles = new Set<string>()
 
   constructor(
     private getConfig: () => AppConfig,
@@ -309,13 +316,8 @@ export class SessionService extends EventEmitter {
     private getScopeEnv: () => Record<string, string> = () => ({}),
     /** Resolved base command (launch-config) used when a session has no override. */
     private launchCommand = '',
-    /**
-     * Getter, not a cached string: resolved fresh via existsSync on every
-     * spawn, so a deletion of the plugin dir after construction is still
-     * detected.
-     * Empty return means no --plugin-dir flag is passed.
-     */
-    private getPluginDir: () => string = () => '',
+    /** Resolves the embedded plugin directories fresh for every spawn. */
+    private getPluginDirs: (hasDeckLeadTools: boolean, sandboxed: boolean) => readonly string[] = () => [],
     /** Home dir for transcript existence checks (injectable for tests). */
     private home: string = homedir(),
     /**
@@ -371,6 +373,7 @@ export class SessionService extends EventEmitter {
       // non-interactive zombie. A non-zero exit (crash) is kept on screen in the
       // 'exited' state so the error stays visible and the tile can be restarted.
       if (exitCode === 0) {
+        this.deckLeadPluginTiles.delete(id)
         if (def) this.dropStatusFile(def)
         // Emitted while the tile is still listed: listeners resolve its
         // runtime state (minted caller id) before it disappears.
@@ -674,7 +677,10 @@ export class SessionService extends EventEmitter {
    * Stays synchronous: an async mint would insert a yield point before
    * defs.push(def) on every create() call, breaking create()'s atomicity.
    */
-  create(input: CreateSessionInput, opts?: { teamLeadDeckBridge?: boolean }): SessionRuntime {
+  create(
+    input: CreateSessionInput,
+    opts?: { teamLeadDeckBridge?: boolean; hasDeckLeadTools?: boolean }
+  ): SessionRuntime {
     const cfg = this.getConfig()
     // B6: agent/model are structured identifiers that get interpolated into the
     // login-shell command line, so they are allow-listed (sanitizeFlagValue) and
@@ -700,10 +706,12 @@ export class SessionService extends EventEmitter {
     // Kept in team-lead-bridge.ts, a module with no @shared import, so it stays
     // testable under a plain bun test run.
     const launched = effectiveAgent(agent, input.args)
+    const launchedAgent = sanitizeFlagValue(launched.agent ?? '')
+    const teamLeadMarker = opts?.teamLeadDeckBridge === true
     const resolvedMcpConfig = resolveMcpConfig(
       input,
-      sanitizeFlagValue(launched.agent ?? ''),
-      opts?.teamLeadDeckBridge === true,
+      launchedAgent,
+      teamLeadMarker,
       this.mintTeamLeadBridge,
       reportError,
       launched.ambiguity
@@ -743,6 +751,9 @@ export class SessionService extends EventEmitter {
       mcpConfig,
       appendSystemPromptFile: input.appendSystemPromptFile?.trim() || undefined,
       createdAt: Date.now()
+    }
+    if (wantsDeckLeadPlugin(resolvedMcpConfig, def.supervisor, opts?.hasDeckLeadTools === true)) {
+      this.deckLeadPluginTiles.add(def.id)
     }
     // Single team-lead per window: designating a new one demotes the previous.
     if (def.lead) {
@@ -814,6 +825,7 @@ export class SessionService extends EventEmitter {
       this.activityTrackers.get(id)?.stop()
       this.activityTrackers.delete(id)
       this.pendingPrompt.delete(id)
+      this.deckLeadPluginTiles.delete(id)
       this.dropStatusFile(def)
       this.defs = this.defs.filter((d) => d.id !== id)
       this.runtime.delete(id)
@@ -890,6 +902,7 @@ export class SessionService extends EventEmitter {
     this.startupAckDetector.stop()
     this.screenGuard.stop()
     this.pendingPrompt.clear()
+    this.deckLeadPluginTiles.clear()
     this.defs = []
     this.runtime.clear()
     this.outputAt.clear()
@@ -973,22 +986,23 @@ export class SessionService extends EventEmitter {
       if (d.lead && leadSeen) delete d.lead
       if (d.lead) leadSeen = true
     }
-    // Card 6363bd69: restore never goes through create()/resolveMcpConfig (a
-    // batch replace, not per-def CreateSessionInput calls), so a team-lead
-    // AGENT def arrives here with mcpConfig stripped by the workspace
-    // round-trip -- args is the only surviving signal, recovered through the
-    // SAME isTeamLeadAgent predicate every other route decides the bridge with.
+    this.deckLeadPluginTiles.clear()
     const mintedCallerIds = new Map<string, string>()
     for (const d of this.defs) {
       const { agent, ambiguity } = effectiveAgent(undefined, d.args)
+      const bridgeInput = { name: d.name }
+      const teamLeadMarker = isTeamLeadAgent(agent)
       const resolvedMcpConfig = resolveMcpConfig(
-        { name: d.name },
+        bridgeInput,
         agent ?? '',
-        isTeamLeadAgent(agent),
+        teamLeadMarker,
         this.mintTeamLeadBridge,
         reportError,
         ambiguity
       )
+      if (wantsDeckLeadPlugin(resolvedMcpConfig, d.supervisor, false)) {
+        this.deckLeadPluginTiles.add(d.id)
+      }
       d.mcpConfig = resolvedMcpConfig?.mcpConfig
       if (resolvedMcpConfig?.callerId) mintedCallerIds.set(d.id, resolvedMcpConfig.callerId)
     }
@@ -1345,6 +1359,10 @@ export class SessionService extends EventEmitter {
     def.sessionIdHistory = []
 
     const settingsFile = this.statusLineSettingsFor(def, base)
+    const pluginDirs = this.getPluginDirs(
+      this.deckLeadPluginTiles.has(def.id),
+      !def.supervisor && this.sandboxPeersDir() !== null
+    )
 
     let command: string
     if (effective === 'resume') {
@@ -1356,7 +1374,7 @@ export class SessionService extends EventEmitter {
         sessionId: def.sessionId,
         prevSessionId: prev,
         effort: def.effort,
-        pluginDir: this.getPluginDir(),
+        pluginDirs,
         mcpConfig: def.mcpConfig,
         appendSystemPromptFile: def.appendSystemPromptFile,
         settingsFile,
@@ -1370,7 +1388,7 @@ export class SessionService extends EventEmitter {
         sessionId: def.sessionId,
         args: def.args,
         effort: def.effort,
-        pluginDir: this.getPluginDir(),
+        pluginDirs,
         mcpConfig: def.mcpConfig,
         appendSystemPromptFile: def.appendSystemPromptFile,
         settingsFile,

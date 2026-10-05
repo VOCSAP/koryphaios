@@ -9,15 +9,17 @@ import { test, expect, mock } from "bun:test";
 import { readFileSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { extractBracedBody, extractParenBody } from "./_braced-body";
+import { extractBracedBody, extractParenBody, findMatchingClose } from "./_braced-body";
 import {
   effectiveAgent,
   isTeamLeadAgent,
+  wantsDeckLeadPlugin,
   wantsTeamLeadBridge,
   resolveMcpConfig,
   buildMintTeamLeadBridge,
   type TeamLeadBridgeInput,
   type MintTeamLeadBridge,
+  type ResolvedMcpConfig,
   type DeckControlServerLike
 } from "../desktop/src/main/team-lead-bridge";
 import { TEAM_LEAD_DECK_TOOLS, writeTeamLeadMcpConfig } from "../desktop/src/main/supervisor";
@@ -151,6 +153,21 @@ test("wantsTeamLeadBridge: agent comparison is exact, not a prefix/substring mat
   expect(wantsTeamLeadBridge({}, "", true)).toBe(false);
 });
 
+test("deck-lead plugin eligibility follows an effective bridge, a trusted embedded mint, or the supervisor marker", () => {
+  expect(wantsDeckLeadPlugin({ mcpConfig: "/state/team-lead.json", callerId: "team-lead-1" }, false, false)).toBe(true);
+  expect(wantsDeckLeadPlugin({ mcpConfig: "/state/custom.json" }, false, false)).toBe(false);
+  expect(wantsDeckLeadPlugin(undefined, false, true)).toBe(true);
+  expect(wantsDeckLeadPlugin(undefined, true, false)).toBe(true);
+});
+
+test("MUTATION PROOF: treating any mcpConfig as a granted bridge would enable the role plugin without a caller", () => {
+  const explicitWithoutCaller: ResolvedMcpConfig = { mcpConfig: "/state/custom.json" };
+  expect(wantsDeckLeadPlugin(explicitWithoutCaller, false, false)).toBe(false);
+  const mutant = (resolved: ResolvedMcpConfig | undefined, supervisor: boolean, embeddedMint: boolean): boolean =>
+    supervisor || resolved?.mcpConfig !== undefined || embeddedMint;
+  expect(mutant(explicitWithoutCaller, false, false)).toBe(true);
+});
+
 // ----- isTeamLeadAgent: the single predicate all three marker call sites share -----
 
 test("isTeamLeadAgent: exact match only, not a prefix/substring, and false on empty/undefined", () => {
@@ -282,11 +299,81 @@ function runCreateBridgeDecision(agent: string, input: { args?: string; name?: s
   return { ...result, mintCalls: mintCalls.length, reports };
 }
 
+function extractDeckLeadPluginDecision(src: string, head: string): string {
+  const start = src.indexOf(head);
+  if (start === -1 || src.indexOf(head, start + 1) !== -1) {
+    throw new Error(`session-service.ts: expected exactly 1 "${head}"`);
+  }
+  const open = src.indexOf("{", start);
+  if (open === -1) throw new Error(`session-service.ts: missing block after "${head}"`);
+  return src.slice(start, findMatchingClose(src, open, "{", "}", true));
+}
+
+function runCreateDeckLeadPluginDecision(
+  resolvedMcpConfig: ResolvedMcpConfig | undefined,
+  supervisor: boolean | undefined,
+  hasDeckLeadTools = false
+): string[] {
+  const src = readFileSync(SESSION_SERVICE_PATH, "utf-8");
+  const body = `${extractDeckLeadPluginDecision(
+    src,
+    "if (wantsDeckLeadPlugin(resolvedMcpConfig, def.supervisor, opts?.hasDeckLeadTools === true))"
+  )}\nreturn [...this.deckLeadPluginTiles]`;
+  // eslint-disable-next-line no-new-func -- extracted from the real source text, not user input
+  const run = new Function("wantsDeckLeadPlugin", "resolvedMcpConfig", "opts", "def", body);
+  return run.call(
+    { deckLeadPluginTiles: new Set<string>() },
+    wantsDeckLeadPlugin,
+    resolvedMcpConfig,
+    { hasDeckLeadTools },
+    { id: "tile", supervisor }
+  ) as string[];
+}
+
+function runRestoreDeckLeadPluginDecision(args: string | undefined, supervisor: boolean | undefined): string[] {
+  const src = readFileSync(SESSION_SERVICE_PATH, "utf-8");
+  const head = "const { agent, ambiguity } = effectiveAgent(undefined, d.args)";
+  const start = src.indexOf(head);
+  if (start === -1 || src.indexOf(head, start + 1) !== -1) {
+    throw new Error(`session-service.ts: expected exactly 1 "${head}"`);
+  }
+  const decision = extractDeckLeadPluginDecision(src, "if (wantsDeckLeadPlugin(resolvedMcpConfig, d.supervisor, false))");
+  const body = `${src.slice(start, src.indexOf(decision, start))}${decision}\nreturn [...this.deckLeadPluginTiles]`;
+  // eslint-disable-next-line no-new-func -- extracted from the real source text, not user input
+  const run = new Function("effectiveAgent", "isTeamLeadAgent", "resolveMcpConfig", "wantsDeckLeadPlugin", "reportError", "d", body);
+  return run.call(
+    {
+      deckLeadPluginTiles: new Set<string>(),
+      mintTeamLeadBridge: fakeMint({ mcpConfig: "/state/team-lead-mcp-restore.json", callerId: "team-lead-restore" })
+    },
+    effectiveAgent,
+    isTeamLeadAgent,
+    resolveMcpConfig,
+    wantsDeckLeadPlugin,
+    () => {},
+    { id: "tile", args, supervisor, name: "restored" }
+  ) as string[];
+}
+
 test("create() mints the bridge for a template entry whose agent is carried only in args", () => {
   const r = runCreateBridgeDecision("", { args: '--agent "team-lead"', name: "lead" }, true);
   expect(r.mcpConfig).toBe("/state/team-lead-mcp-create.json");
   expect(r.callerId).toBe("team-lead-create");
   expect(r.mintCalls).toBe(1);
+});
+
+test("SessionService create() grants the role plugin only to an effective bridge, a trusted embedded mint, or a supervisor", () => {
+  expect(runCreateDeckLeadPluginDecision({ mcpConfig: "/state/team-lead.json", callerId: "team-lead-1" }, undefined)).toEqual(["tile"]);
+  expect(runCreateDeckLeadPluginDecision({ mcpConfig: "/state/custom.json" }, undefined)).toEqual([]);
+  expect(runCreateDeckLeadPluginDecision(undefined, undefined, true)).toEqual(["tile"]);
+  expect(runCreateDeckLeadPluginDecision(undefined, undefined)).toEqual([]);
+  expect(runCreateDeckLeadPluginDecision(undefined, true)).toEqual(["tile"]);
+});
+
+test("SessionService restoreFrom() rederives the role plugin from the restored agent or supervisor", () => {
+  expect(runRestoreDeckLeadPluginDecision("--agent team-lead", undefined)).toEqual(["tile"]);
+  expect(runRestoreDeckLeadPluginDecision("--agent developer", undefined)).toEqual([]);
+  expect(runRestoreDeckLeadPluginDecision("--agent developer", true)).toEqual(["tile"]);
 });
 
 test("create() refuses the bridge to team-leader in args, to an agent field overridden by args, and to an ambiguous --agent", () => {
@@ -450,7 +537,7 @@ export function checkMcpConfigWiring(src: string): string | null {
   // own `opts?: { teamLeadDeckBridge?: boolean }` parameter type contains a
   // `{` BEFORE the function body's own opening brace, which a naive
   // "anything but a brace" class would stop at, matching the WRONG brace.
-  const fnMatch = /create\(input: CreateSessionInput[\s\S]*?\): SessionRuntime \{/.exec(src);
+  const fnMatch = /create\(\s*input: CreateSessionInput[\s\S]*?\): SessionRuntime \{/.exec(src);
   if (!fnMatch) {
     return "create(input: CreateSessionInput, ...): SessionRuntime not found in session-service.ts -- has its signature changed?";
   }
@@ -612,9 +699,13 @@ test("index.ts's spawnTemplateEntry passes a linked isTeamLeadAgent(effectiveAge
 
 export function checkSpawnSessionWiring(src: string): string | null {
   return checkWiring(src, {
-    anchor: /spawnSession:\s*\(input\)\s*=>\s*\{/,
+    anchor: /spawnSession:\s*\(input,\s*opts\)\s*=>\s*\{/,
     fileLabel: "index.ts",
-    anchorLabel: "spawnSession"
+    anchorLabel: "spawnSession",
+    extraCheck: (body) =>
+      /hasDeckLeadTools\s*:\s*opts\?\.hasDeckLeadTools\s*===\s*true/.test(body)
+        ? null
+        : "spawnSession does not forward its trusted hasDeckLeadTools option"
   });
 }
 
@@ -640,13 +731,13 @@ test("MUTATION PROOF: checkSpawnSessionWiring REJECTS a delegated spawnSession w
 
 test("MUTATION PROOF: checkSpawnSessionWiring REJECTS a braced spawnSession with a second, unguarded createSessionWithWorktree(...) call", () => {
   const secondCallUnguarded = [
-    "  spawnSession: (input) => {",
+    "  spawnSession: (input, opts) => {",
     "    if (legacy) {",
     "      createSessionWithWorktree(service, getConfig().projectDir, input, undefined, getWorktreeInit())",
     "    }",
     "    return createSessionWithWorktree(",
     "      service, getConfig().projectDir, input, undefined, getWorktreeInit(), sandboxGate, warmSandboxTranscripts,",
-    "      { teamLeadDeckBridge: isTeamLeadAgent(input.agent) }",
+    "      { teamLeadDeckBridge: isTeamLeadAgent(input.agent), hasDeckLeadTools: opts?.hasDeckLeadTools === true }",
     "    )",
     "  },"
   ].join("\n");
@@ -657,10 +748,10 @@ test("MUTATION PROOF: checkSpawnSessionWiring REJECTS a braced spawnSession with
 
 test("negative control: LINKED_MARKER accepts the optional-chained input?.agent form, not just input.agent", () => {
   const optionalChained = [
-    "  spawnSession: (input) => {",
+    "  spawnSession: (input, opts) => {",
     "    return createSessionWithWorktree(",
     "      service, getConfig().projectDir, input, undefined, getWorktreeInit(), sandboxGate, warmSandboxTranscripts,",
-    "      { teamLeadDeckBridge: isTeamLeadAgent(input?.agent) }",
+    "      { teamLeadDeckBridge: isTeamLeadAgent(input?.agent), hasDeckLeadTools: opts?.hasDeckLeadTools === true }",
     "    )",
     "  },"
   ].join("\n");

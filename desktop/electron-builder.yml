@@ -22,6 +22,8 @@ extraResources:
   # Every Deck session loads this plugin (hooks, MCP bridges, CLI, skills).
   - from: deck-plugin
     to: deck-plugin
+  - from: deck-lead-plugin
+    to: deck-lead-plugin
   # Sandbox image recipe the Docker view builds from.
   - from: resources/sandbox
     to: sandbox

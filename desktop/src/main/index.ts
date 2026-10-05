@@ -18,7 +18,12 @@ import { loadConfig, saveConfig } from './store'
 import { buildAppMenu } from './menu'
 import { safeExternalUrl } from './external-url'
 import { SessionService, type DirectiveOutcome } from './session-service'
-import { createMissingDirTracker, deckPluginDirFor } from './session-command'
+import {
+  createMissingDirTracker,
+  deckLeadPluginDirFor,
+  deckPluginDirFor,
+  pluginDirsForTile
+} from './session-command'
 import { statusLineHookPath, writeStatusLineSettings } from './statusline-settings'
 import { registerIpc, resolveDocsDir } from './ipc'
 import { parseCliContext } from './cli-context'
@@ -487,6 +492,30 @@ const getDeckPluginDir = (): string => {
   return exists ? dir : ''
 }
 
+const deckLeadPluginMissingTracker = createMissingDirTracker()
+const getDeckLeadPluginDir = (): string => {
+  const dir = deckLeadPluginDirFor(app.isPackaged, process.resourcesPath, app.getAppPath())
+  const exists = existsSync(dir)
+  if (deckLeadPluginMissingTracker.check(exists)) {
+    reportError(
+      'session',
+      'deck-lead-plugin dir missing (resources/deck-lead-plugin) -- role-restricted autonomous mode is unavailable until the app is repackaged and the Deck restarted'
+    )
+  }
+  return exists ? dir : ''
+}
+
+const getPluginDirs = (hasDeckLeadTools: boolean, sandboxed: boolean): readonly string[] => {
+  const selected = pluginDirsForTile(getDeckPluginDir(), getDeckLeadPluginDir, hasDeckLeadTools, sandboxed)
+  if (selected.rolePluginOmitted) {
+    reportError(
+      'sandbox',
+      'deck-lead-plugin omitted from a sandboxed tile because its container projection is not available'
+    )
+  }
+  return selected.pluginDirs
+}
+
 // Design endpoint (PLAN D2b): loopback receiver for element picks coming from
 // EXTERNAL apps in design mode (Tauri/Electron dev builds running the
 // deck-design client). Started at whenReady; its url/token are injected into
@@ -594,7 +623,7 @@ const service = new SessionService(
       : null)
   }),
   safeLaunchCommand,
-  getDeckPluginDir,
+  getPluginDirs,
   undefined,
   // Both getters are wrapped in an arrow function on purpose: controlServer and
   // controlDeps are declared further down this file (TDZ), and the arrow only
@@ -2662,7 +2691,7 @@ const controlDeps: DeckControlDeps = {
   listAgents: () => listAgents(getConfig().projectDir),
   listModels: () => resolveLaunchConfig(getConfig().projectDir).models,
   listPresets: () => resolveLaunchConfig(getConfig().projectDir).presets,
-  spawnSession: (input) => {
+  spawnSession: (input, opts) => {
     // Card 3c322f10: this is the plain `deck_spawn_session` MCP tool,
     // `entry.agent` set directly rather than `embedded_agent` -- deck-control.ts's
     // own leadMint/mcpConfig above only fires for the latter, so an
@@ -2676,7 +2705,10 @@ const controlDeps: DeckControlDeps = {
       getWorktreeInit(),
       sandboxGate,
       warmSandboxTranscripts,
-      { teamLeadDeckBridge: isTeamLeadAgent(input.agent) }
+      {
+        teamLeadDeckBridge: isTeamLeadAgent(input.agent),
+        hasDeckLeadTools: opts?.hasDeckLeadTools === true
+      }
     )
   },
   listSessions: () => service.list().map((s) => ({ ...s, mintedCallerId: service.mintedCallerOf(s.id) })),

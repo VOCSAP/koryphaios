@@ -57,7 +57,7 @@ function spawnTile() {
   const cwd = join(home, "proj");
   mkdirSync(cwd, { recursive: true });
   const config = { projectDir: cwd, shell: "/bin/sh", interactiveShell: false } as never;
-  const svc = new SessionService(() => config, () => ({}), "claude", () => "", home);
+  const svc = new SessionService(() => config, () => ({}), "claude", () => [], home);
   services.push(svc);
   const { id } = svc.create({});
   const peers = join(home, ".claude", "peers");
