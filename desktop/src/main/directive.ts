@@ -9,36 +9,46 @@
 
 import type { RoadmapDirective, SessionRuntime } from '@shared/types'
 
+/** Direct deck-control directives extend the commands persisted on roadmap cards. */
+export type DeckDirective = RoadmapDirective | 'clear_reload'
+
 /**
  * The keystroke text the Deck types for each directive. magic_compact types
  * /magic-compact; the availability + /compact fallback decision lives in the
  * executor (CT4), not here.
  */
-export const DIRECTIVE_KEYS: Record<RoadmapDirective, string> = {
+export const DIRECTIVE_KEYS: Record<DeckDirective, string> = {
   clear: '/clear',
+  clear_reload: '/clear',
   compact: '/compact',
   magic_compact: '/magic-compact'
 }
 
-export const DIRECTIVE_ACCEPTS_PROMPT: Record<RoadmapDirective, boolean> = {
+export const DIRECTIVE_ACCEPTS_PROMPT: Record<DeckDirective, boolean> = {
   clear: false,
+  clear_reload: false,
   compact: true,
   magic_compact: false
 }
 
-export function directiveCommands(): RoadmapDirective[] {
-  return Object.keys(DIRECTIVE_KEYS) as RoadmapDirective[]
+export function directiveCommands(): DeckDirective[] {
+  return Object.keys(DIRECTIVE_KEYS) as DeckDirective[]
 }
 
 export const PEER_ID_RE = /^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$/
 
-/** True when `cmd` is a known directive command (re-validates a broker value). */
-export function isDirectiveCommand(cmd: unknown): cmd is RoadmapDirective {
+/** True when `cmd` is a known deck-control directive command. */
+export function isDirectiveCommand(cmd: unknown): cmd is DeckDirective {
   return typeof cmd === 'string' && Object.prototype.hasOwnProperty.call(DIRECTIVE_KEYS, cmd)
 }
 
+/** True when `cmd` may be stored on a roadmap directive card. */
+export function isRoadmapDirectiveCommand(cmd: unknown): cmd is RoadmapDirective {
+  return isDirectiveCommand(cmd) && cmd !== 'clear_reload'
+}
+
 /** The keystroke text for a directive command. */
-export function directiveKeys(cmd: RoadmapDirective): string {
+export function directiveKeys(cmd: DeckDirective): string {
   return DIRECTIVE_KEYS[cmd]
 }
 

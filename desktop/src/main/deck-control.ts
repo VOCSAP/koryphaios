@@ -14,7 +14,6 @@ import type {
   CreateSessionInput,
   LaunchPreset,
   ModelOption,
-  RoadmapDirective,
   SandboxExecResponse,
   SessionRuntime,
   TemplateSummary
@@ -22,7 +21,7 @@ import type {
 import type { WorktreeInfo } from './worktree-service'
 import type { TemplateInput, TemplateResolveResult } from '../shared/template'
 import { templateInputsOrEmpty } from '../shared/template-apply-outcome'
-import { resolveDirectiveTargets } from './directive'
+import { resolveDirectiveTargets, type DeckDirective } from './directive'
 import { parseRunDirectiveArgs, type DeckDirectiveRunResult } from './directive-run'
 import { EMBEDDED_AGENTS, getEmbeddedAgent, type EmbeddedAgent } from './team-embedded'
 import { TEAM_PLAYBOOK } from './team-embedded'
@@ -184,7 +183,7 @@ export interface DeckControlDeps {
    */
   sandboxExec(command: string): Promise<SandboxExecResponse>
   runDirective(
-    directive: RoadmapDirective,
+    directive: DeckDirective,
     peerIds: string[],
     prompt: string | undefined,
     callerId: string,
@@ -781,8 +780,21 @@ export function startDeckControl(
       }
 
       case 'deck_run_directive': {
-        const { directive, peerIds, prompt } = parseRunDirectiveArgs(args)
-        const run = await deps.runDirective(directive, peerIds, prompt, callerId, restricted)
+        const { directive, peerIds, prompt, workstream } = parseRunDirectiveArgs(args)
+        if (restricted && directive === 'clear_reload') {
+          const { matched } = resolveDirectiveTargets(peerIds, deps.listSessions())
+          const target = matched[0]
+          if (peerIds.length !== 1 || matched.length !== 1 || !target || callerForSession(target.id) !== callerId) {
+            throw new Error('refused: a team-lead may clear_reload only its own tile')
+          }
+        }
+        const run = await deps.runDirective(
+          directive,
+          peerIds,
+          directive === 'clear_reload' ? workstream : prompt,
+          callerId,
+          restricted
+        )
         return {
           directive,
           injected: run.injected.map((t) => t.peerId),

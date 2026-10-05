@@ -6,6 +6,7 @@ import {
   createDirectiveBindings,
   executeDirectiveItem,
   parseRunDirectiveArgs,
+  runClearReloadInTurn,
   runDirectiveForCaller,
   runDirectiveOn,
   sanitizeDirectivePrompt,
@@ -42,6 +43,7 @@ interface Recorder {
   journal: string[];
   typed: { tileId: string; keys: string }[];
   magic: { tileId: string; peerId: string; useMagic: boolean; mode: string }[];
+  clearReload: { tileId: string; peerId: string; workstream: string }[];
   errors: { message: string; error: unknown }[];
   settle: () => Promise<void>;
 }
@@ -50,6 +52,7 @@ function recorder(sessions: SessionRuntime[]): Recorder {
   const journal: string[] = [];
   const typed: { tileId: string; keys: string }[] = [];
   const magic: { tileId: string; peerId: string; useMagic: boolean; mode: string }[] = [];
+  const clearReload: { tileId: string; peerId: string; workstream: string }[] = [];
   const errors: { message: string; error: unknown }[] = [];
   const pending: Promise<unknown>[] = [];
   const deps: DirectiveRunDeps = {
@@ -64,6 +67,10 @@ function recorder(sessions: SessionRuntime[]): Recorder {
       magic.push({ tileId, peerId, useMagic, mode });
       return Promise.resolve("written" as const);
     },
+    runClearReload: (tileId, peerId, workstream) => {
+      clearReload.push({ tileId, peerId, workstream });
+      return Promise.resolve("written" as const);
+    },
     resolveMagic: () => ({ useMagic: true, mode: "auto" }),
     journal: (line) => journal.push(line),
     reportError: (message, error) => errors.push({ message, error })
@@ -73,6 +80,7 @@ function recorder(sessions: SessionRuntime[]): Recorder {
     journal,
     typed,
     magic,
+    clearReload,
     errors,
     settle: async () => {
       await Promise.all(pending);
@@ -91,7 +99,7 @@ const LIVE = () => [
 
 test("a directive card and deck_run_directive reach the same targets for every directive", async () => {
   const ids = ["alpha", "twin", "gone"];
-  for (const directive of directiveCommands()) {
+  for (const directive of directiveCommands().filter((directive) => directive !== "clear_reload")) {
     const card = recorder(LIVE());
     const cardResult = await executeDirectiveItem(
       { id: "card-1", title: "reset the team", directive, target_peer_ids: ids },
@@ -150,6 +158,63 @@ test("magic_compact reports the outcome of its sequence like any other directive
   expect(
     await runDirectiveForCaller("magic_compact", ["alpha"], undefined, "lead", slow.deps, { reportWaitMs: 20 })
   ).toEqual({ injected: [], refused: [], pending: [{ tileId: "t1", peerId: "alpha" }], unreached: [] });
+});
+
+test("clear_reload serializes clear then the fixed recovery order", async () => {
+  const typed: string[] = [];
+  const journal: string[] = [];
+  const outcome = await runClearReloadInTurn(
+    { serializeTile: (_id, fn) => fn(async (keys) => { typed.push(keys); return "written" as const; }) },
+    (line) => journal.push(line),
+    "tile-1",
+    "lead-a1b2",
+    "night-shift"
+  );
+
+  expect(outcome).toBe("written");
+  expect(typed).toEqual([
+    "/clear",
+    'Reprends le workstream "night-shift". D’abord, appelle handoffs_latest(project, workstream) avec project et workstream="night-shift". Ensuite, appelle check_messages et lis tous les messages reçus. Seulement après ces deux étapes, appelle send_message. Retrouve dans le handoff la prochaine tâche puis exécute-la.'
+  ]);
+  expect(journal).toEqual(['clear_reload -> "lead-a1b2": written']);
+});
+
+test("clear_reload stops before the reload instruction and announces when clear is refused", async () => {
+  const typed: string[] = [];
+  const journal: string[] = [];
+  const failures: { peerId: string; outcome: string }[] = [];
+  const outcome = await runClearReloadInTurn(
+    { serializeTile: (_id, fn) => fn(async (keys) => { typed.push(keys); return "busy-timeout" as const; }) },
+    (line) => journal.push(line),
+    "tile-1",
+    "lead-a1b2",
+    "night-shift",
+    (peerId, failure) => failures.push({ peerId, outcome: failure })
+  );
+
+  expect(outcome).toBe("busy-timeout");
+  expect(typed).toEqual(["/clear"]);
+  expect(journal).toEqual(['clear_reload -> "lead-a1b2": /clear not injected (busy-timeout)']);
+  expect(failures).toEqual([{ peerId: "lead-a1b2", outcome: "busy-timeout" }]);
+});
+
+test("clear_reload reports its sequence outcome without a second direct injection", async () => {
+  const r = recorder([session("t1", "alpha")]);
+  r.deps.runClearReload = (tileId, peerId, workstream) => {
+    r.clearReload.push({ tileId, peerId, workstream });
+    return Promise.resolve("refused-modal");
+  };
+
+  const result = await runDirectiveForCaller("clear_reload", ["alpha"], "night-shift", "lead", r.deps);
+
+  expect(result).toEqual({
+    injected: [],
+    refused: [{ tileId: "t1", peerId: "alpha", reason: "refused-modal" }],
+    pending: [],
+    unreached: []
+  });
+  expect(r.clearReload).toEqual([{ tileId: "t1", peerId: "alpha", workstream: "night-shift" }]);
+  expect(r.typed).toEqual([]);
 });
 
 function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
@@ -291,7 +356,15 @@ test("runDirectiveForCaller journals the sanitized prompt as one quoted JSON str
   expect(out.injected).toEqual([{ tileId: "t1", peerId: "alpha" }]);
 });
 
-test("the accepted directive set is the one roadmap_add and roadmap_update accept for directive cards", () => {
+test("clear_reload journals its workstream rather than a prompt", async () => {
+  const r = recorder(LIVE());
+  await runDirectiveForCaller("clear_reload", ["alpha"], "night-shift", "team-lead-ab12", r.deps);
+  await r.settle();
+
+  expect(r.journal[0]).toBe('directive /clear requested by team-lead-ab12 for alpha with workstream "night-shift"');
+});
+
+test("clear_reload is accepted only by deck_run_directive, not roadmap cards", () => {
   const schemaEnum = (name: string): string[] => {
     const tool = TOOLS.find((t) => t.name === name) as
       | { inputSchema: { properties: { directive?: { enum?: string[] } } } }
@@ -300,10 +373,14 @@ test("the accepted directive set is the one roadmap_add and roadmap_update accep
     if (!e) throw new Error(`${name} carries no directive enum`);
     return [...e].sort();
   };
-  const accepted = directiveCommands().sort();
-  expect(accepted).toEqual(schemaEnum("roadmap_add"));
-  expect(accepted).toEqual(schemaEnum("roadmap_update"));
-  for (const d of accepted) expect(parseRunDirectiveArgs({ directive: d, peer_ids: ["alpha"] }).directive).toBe(d);
+  const cardCommands = directiveCommands().filter((directive) => directive !== "clear_reload").sort();
+  expect(cardCommands).toEqual(schemaEnum("roadmap_add"));
+  expect(cardCommands).toEqual(schemaEnum("roadmap_update"));
+  expect(schemaEnum("roadmap_add")).not.toContain("clear_reload");
+  for (const directive of directiveCommands()) {
+    const args = directive === "clear_reload" ? { directive, peer_ids: ["alpha"], workstream: "night-shift" } : { directive, peer_ids: ["alpha"] };
+    expect(parseRunDirectiveArgs(args).directive).toBe(directive);
+  }
 });
 
 test("parseRunDirectiveArgs refuses a directive outside the enum, and a non-string one", () => {
@@ -344,6 +421,26 @@ test("a prompt is refused on every directive that does not declare it accepts on
 test("a non-string prompt is refused, a blank one is treated as absent", () => {
   expect(() => parseRunDirectiveArgs({ directive: "compact", peer_ids: ["a"], prompt: 42 })).toThrow("prompt");
   expect(parseRunDirectiveArgs({ directive: "clear", peer_ids: ["a"], prompt: "   " }).prompt).toBeUndefined();
+});
+
+test("clear_reload accepts only a bounded lowercase workstream and no caller prompt", () => {
+  expect(parseRunDirectiveArgs({ directive: "clear_reload", peer_ids: ["alpha"], workstream: "night-shift-1" })).toEqual({
+    directive: "clear_reload",
+    peerIds: ["alpha"],
+    prompt: undefined,
+    workstream: "night-shift-1"
+  });
+  for (const workstream of [undefined, "", "UPPER", "two\nlines", "has space", "x".repeat(65), `a${String.fromCodePoint(0x200b)}b`]) {
+    expect(() => parseRunDirectiveArgs({ directive: "clear_reload", peer_ids: ["alpha"], workstream }), String(workstream)).toThrow(
+      "workstream"
+    );
+  }
+  expect(() =>
+    parseRunDirectiveArgs({ directive: "clear_reload", peer_ids: ["alpha"], workstream: "night-shift", prompt: "peer prose" })
+  ).toThrow("does not accept a prompt");
+  expect(() => parseRunDirectiveArgs({ directive: "clear", peer_ids: ["alpha"], workstream: "night-shift" })).toThrow(
+    "workstream"
+  );
 });
 
 test("sanitizeDirectivePrompt folds line breaks to spaces and strips C0, C1, bidi and zero-width characters", () => {
@@ -571,6 +668,20 @@ test("runDirectiveOn excludes an asynchronously rejected injection from its inje
     unreached: []
   });
   expect(r.errors).toEqual([{ message: 'directive injection failed for "alpha"', error: cause }]);
+});
+
+test("executeDirectiveItem rejects direct-only clear_reload cards before they can type /clear", async () => {
+  const r = recorder([session("t1", "alpha")]);
+
+  const result = await executeDirectiveItem(
+    { id: "card-1", title: "Reload the lead", directive: "clear_reload", target_peer_ids: ["alpha"] },
+    r.deps
+  );
+
+  expect(result).toEqual({ id: "card-1", title: "Reload the lead", directive: null, injected: [], unreached: [] });
+  expect(r.typed).toEqual([]);
+  expect(r.clearReload).toEqual([]);
+  expect(r.errors).toEqual([{ message: 'directive card "Reload the lead" carries no valid command; skipped', error: undefined }]);
 });
 
 test("executeDirectiveItem reports a card injection refusal instead of an injected target", async () => {

@@ -1,4 +1,4 @@
-import type { DirectiveDispatch, RoadmapDirective, SessionRuntime, UnreachedDirectiveTarget } from '../shared/types'
+import type { DirectiveDispatch, SessionRuntime, UnreachedDirectiveTarget } from '../shared/types'
 import type { MagicCompactMode } from './launch-config'
 import type { DirectiveOutcome } from './session-service'
 import {
@@ -6,6 +6,8 @@ import {
   directiveCommands,
   directiveKeys,
   isDirectiveCommand,
+  isRoadmapDirectiveCommand,
+  type DeckDirective,
   PEER_ID_RE,
   resolveDirectiveTargets
 } from './directive'
@@ -13,6 +15,8 @@ import { unreachedTargets, unreachedTargetsText } from './directive-journal'
 
 export const DIRECTIVE_PROMPT_MAX = 500
 export const DIRECTIVE_MAX_TARGETS = 16
+export const CLEAR_RELOAD_WORKSTREAM_MAX = 64
+export const CLEAR_RELOAD_WORKSTREAM_RE = /^[a-z0-9-]{1,64}$/
 /**
  * How long deck_run_directive waits for injection outcomes before reporting a
  * target pending. Far below the 120 s idle wait on purpose: a caller targeting
@@ -27,10 +31,38 @@ export interface DirectiveRunDeps {
   injectCommand(tileId: string, keys: string): Promise<DirectiveOutcome>
   /** Resolves with the outcome of the command that ends the sequence. */
   runMagicCompact(tileId: string, peerId: string, useMagic: boolean, mode: MagicCompactMode): Promise<DirectiveOutcome>
+  runClearReload(tileId: string, peerId: string, workstream: string): Promise<DirectiveOutcome>
   /** Called once per run, and only for magic_compact. */
   resolveMagic(): { useMagic: boolean; mode: MagicCompactMode }
   journal(line: string): void
   reportError(message: string, error?: unknown): void
+}
+
+export interface ClearReloadHost {
+  serializeTile<T>(id: string, fn: (inject: (keys: string) => Promise<DirectiveOutcome>) => Promise<T>): Promise<T>
+}
+
+export function runClearReloadInTurn(
+  host: ClearReloadHost,
+  journal: (line: string) => void,
+  tileId: string,
+  peerId: string,
+  workstream: string,
+  announceFailure?: (peerId: string, outcome: Exclude<DirectiveOutcome, 'written'>) => void
+): Promise<DirectiveOutcome> {
+  return host.serializeTile(tileId, async (inject) => {
+    const cleared = await inject('/clear')
+    if (cleared !== 'written') {
+      journal(`clear_reload -> "${peerId}": /clear not injected (${cleared})`)
+      announceFailure?.(peerId, cleared)
+      return cleared
+    }
+    const reloaded = await inject(
+      `Reprends le workstream "${workstream}". D’abord, appelle handoffs_latest(project, workstream) avec project et workstream="${workstream}". Ensuite, appelle check_messages et lis tous les messages reçus. Seulement après ces deux étapes, appelle send_message. Retrouve dans le handoff la prochaine tâche puis exécute-la.`
+    )
+    journal(`clear_reload -> "${peerId}": ${reloaded}`)
+    return reloaded
+  })
 }
 
 type DirectiveTarget = { tileId: string; peerId: string }
@@ -99,9 +131,10 @@ export function sanitizeDirectivePrompt(raw: string): string {
 }
 
 export interface RunDirectiveArgs {
-  directive: RoadmapDirective
+  directive: DeckDirective
   peerIds: string[]
   prompt: string | undefined
+  workstream: string | undefined
 }
 
 /** Validates deck_run_directive's raw arguments; throws a message meant for the calling agent. */
@@ -127,11 +160,26 @@ export function parseRunDirectiveArgs(args: Record<string, unknown>): RunDirecti
     throw new Error('peer_ids must contain unique valid peer_id strings')
   }
   const rawPrompt = args['prompt']
+  const rawWorkstream = args['workstream']
+  if (directive === 'clear_reload') {
+    if (rawPrompt !== undefined && rawPrompt !== null) {
+      throw new Error(`directive "${directive}" does not accept a prompt`)
+    }
+    if (typeof rawWorkstream !== 'string' || !CLEAR_RELOAD_WORKSTREAM_RE.test(rawWorkstream)) {
+      throw new Error(
+        `workstream must be 1 to ${CLEAR_RELOAD_WORKSTREAM_MAX} lowercase letters, digits, or hyphens`
+      )
+    }
+    return { directive, peerIds: normalizedPeerIds, prompt: undefined, workstream: rawWorkstream }
+  }
+  if (rawWorkstream !== undefined && rawWorkstream !== null) {
+    throw new Error('workstream is only valid for clear_reload')
+  }
   if (rawPrompt !== undefined && rawPrompt !== null && typeof rawPrompt !== 'string') {
     throw new Error('prompt must be a string')
   }
   const prompt = typeof rawPrompt === 'string' ? sanitizeDirectivePrompt(rawPrompt) : ''
-  if (!prompt) return { directive, peerIds: normalizedPeerIds, prompt: undefined }
+  if (!prompt) return { directive, peerIds: normalizedPeerIds, prompt: undefined, workstream: undefined }
   if (!DIRECTIVE_ACCEPTS_PROMPT[directive]) {
     throw new Error(`directive "${directive}" does not accept a prompt`)
   }
@@ -139,7 +187,7 @@ export function parseRunDirectiveArgs(args: Record<string, unknown>): RunDirecti
   if (promptLength > DIRECTIVE_PROMPT_MAX) {
     throw new Error(`prompt is ${promptLength} characters, the limit is ${DIRECTIVE_PROMPT_MAX}`)
   }
-  return { directive, peerIds: normalizedPeerIds, prompt }
+  return { directive, peerIds: normalizedPeerIds, prompt, workstream: undefined }
 }
 
 function reportDirectiveError(deps: DirectiveRunDeps, message: string, error: unknown): void {
@@ -152,7 +200,7 @@ function failedDeckDirectiveRun(deps: DirectiveRunDeps, error: unknown): DeckDir
 }
 
 function launchDirective(
-  cmd: RoadmapDirective,
+  cmd: DeckDirective,
   peerIds: string[],
   prompt: string | undefined,
   label: string,
@@ -161,6 +209,10 @@ function launchDirective(
   const launched: DirectiveLaunch['launched'] = []
   try {
     const keys = directiveKeys(cmd)
+    const clearReloadWorkstream = cmd === 'clear_reload' ? prompt : undefined
+    if (cmd === 'clear_reload' && !clearReloadWorkstream) {
+      throw new Error('clear_reload requires a workstream')
+    }
     const typed = prompt ? `${keys} ${prompt}` : keys
     const { matched, missing, ambiguous } = resolveDirectiveTargets(peerIds, deps.listSessions())
     if (matched.length === 0) {
@@ -173,6 +225,12 @@ function launchDirective(
       if (magic) {
         const outcome = deps.runMagicCompact(t.id, t.peerId, magic.useMagic, magic.mode).catch((e): 'error' => {
           reportDirectiveError(deps, `magic_compact failed for "${t.peerId}"`, e)
+          return 'error'
+        })
+        launched.push({ tileId: t.id, peerId: t.peerId, outcome })
+      } else if (clearReloadWorkstream) {
+        const outcome = deps.runClearReload(t.id, t.peerId, clearReloadWorkstream).catch((e): 'error' => {
+          reportDirectiveError(deps, `clear_reload failed for "${t.peerId}"`, e)
           return 'error'
         })
         launched.push({ tileId: t.id, peerId: t.peerId, outcome })
@@ -205,7 +263,7 @@ function launchDirective(
 }
 
 export async function runDirectiveOn(
-  cmd: RoadmapDirective,
+  cmd: DeckDirective,
   peerIds: string[],
   prompt: string | undefined,
   label: string,
@@ -243,7 +301,7 @@ export async function executeDirectiveItem(
   options: DirectiveRunOptions = {}
 ): Promise<DirectiveDispatch> {
   const cmd = item.directive
-  if (!isDirectiveCommand(cmd)) {
+  if (!isRoadmapDirectiveCommand(cmd)) {
     deps.reportError(`directive card "${item.title}" carries no valid command; skipped`)
     return { id: item.id, title: item.title, directive: null, injected: [], unreached: [] }
   }
@@ -252,7 +310,7 @@ export async function executeDirectiveItem(
 }
 
 export async function runDirectiveForCaller(
-  cmd: RoadmapDirective,
+  cmd: DeckDirective,
   peerIds: string[],
   prompt: string | undefined,
   callerId: string,
@@ -264,8 +322,8 @@ export async function runDirectiveForCaller(
     : deps
   let run: DirectiveLaunch
   try {
-    const promptNote = prompt ? ` with prompt ${JSON.stringify(prompt)}` : ''
-    scopedDeps.journal(`directive ${directiveKeys(cmd)} requested by ${callerId} for ${peerIds.join(', ')}${promptNote}`)
+    const inputNote = prompt ? ` with ${cmd === 'clear_reload' ? 'workstream' : 'prompt'} ${JSON.stringify(prompt)}` : ''
+    scopedDeps.journal(`directive ${directiveKeys(cmd)} requested by ${callerId} for ${peerIds.join(', ')}${inputNote}`)
     run = launchDirective(cmd, peerIds, prompt, `deck_run_directive by ${callerId}`, scopedDeps)
   } catch (e) {
     return failedDeckDirectiveRun(scopedDeps, e)
@@ -277,7 +335,7 @@ export function createRunDirectiveAdapter(
   deps: DirectiveRunDeps,
   run: typeof runDirectiveForCaller = runDirectiveForCaller
 ): (
-  directive: RoadmapDirective,
+  directive: DeckDirective,
   peerIds: string[],
   prompt: string | undefined,
   callerId: string,

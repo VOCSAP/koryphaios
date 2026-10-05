@@ -2884,6 +2884,23 @@ test("deck_run_directive forwards the validated arguments and the server-known c
   ]);
 });
 
+test("deck_run_directive forwards clear_reload's validated workstream without caller prose", async () => {
+  const deps = makeDeps({ sessions: [] });
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+
+  const res = await call(srv, "deck_run_directive", {
+    directive: "clear_reload",
+    peer_ids: ["alpha"],
+    workstream: "night-shift"
+  });
+
+  expect(res.status).toBe(200);
+  expect(deps.directiveRuns).toEqual([
+    { directive: "clear_reload", peerIds: ["alpha"], prompt: "night-shift", callerId: "supervisor" }
+  ]);
+});
+
 test("deck_run_directive refuses a hostile directive, a prompt on clear, and bad peer_ids before running anything", async () => {
   const deps = makeDeps({ sessions: [] });
   const srv = await startDeckControl(deps);
@@ -2892,6 +2909,9 @@ test("deck_run_directive refuses a hostile directive, a prompt on clear, and bad
     [{ directive: "rm -rf", peer_ids: ["alpha"] }, "directive must be one of"],
     [{ directive: "clear", peer_ids: ["alpha"], prompt: "do more" }, "does not accept a prompt"],
     [{ directive: "magic_compact", peer_ids: ["alpha"], prompt: "5" }, "does not accept a prompt"],
+    [{ directive: "clear_reload", peer_ids: ["alpha"] }, "workstream"],
+    [{ directive: "clear_reload", peer_ids: ["alpha"], workstream: "Night-Shift" }, "workstream"],
+    [{ directive: "clear_reload", peer_ids: ["alpha"], workstream: "night-shift", prompt: "peer prose" }, "does not accept a prompt"],
     [{ directive: "clear", peer_ids: [] }, "peer_ids"],
     [{ directive: "compact", peer_ids: ["alpha"], prompt: "x".repeat(501) }, "500"]
   ];
@@ -2916,6 +2936,84 @@ test("deck_run_directive is refused at POST /call to a caller whose allow-list o
   const allowed = await call(srv, "deck_run_directive", { directive: "clear", peer_ids: ["alpha"] }, lead.token);
   expect(allowed.status).toBe(200);
   expect(deps.directiveRuns.map((r) => r.callerId)).toEqual([lead.callerId]);
+});
+
+test("a restricted caller can clear_reload only its own tile", async () => {
+  const state = {
+    sessions: [fakeSession("operator", { peerId: "operator-peer", supervisor: true })] as SessionRuntime[]
+  };
+  const deps = makeDeps(state);
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+
+  const spawned = await call(srv, "deck_spawn_session", { name: "self", embedded_agent: "team-lead" });
+  const self = (spawned.body.result as { session: { peer_id: string } }).session;
+  const selfToken = deps.leadMcpCalls[0]!.token;
+  const other = srv.mintCaller("team-lead", TEAM_LEAD_DECK_TOOLS);
+  const runtimeLead = srv.mintCaller("team-lead", TEAM_LEAD_DECK_TOOLS);
+  state.sessions.push(
+    fakeSession("other-lead", { peerId: "other-lead-peer", mintedCallerId: other.callerId }),
+    fakeSession("runtime-self", { peerId: "runtime-self-peer", mintedCallerId: runtimeLead.callerId }),
+    fakeSession("ordinary-operator", { peerId: "ordinary-operator-peer" })
+  );
+
+  const selfReload = await call(
+    srv,
+    "deck_run_directive",
+    { directive: "clear_reload", peer_ids: [self.peer_id], workstream: "night-shift" },
+    selfToken
+  );
+  expect(selfReload.status).toBe(200);
+  expect(deps.directiveRuns).toEqual([
+    { directive: "clear_reload", peerIds: [self.peer_id], prompt: "night-shift", callerId: deps.leadMcpCalls[0]!.callerId }
+  ]);
+
+  const runtimeSelfReload = await call(
+    srv,
+    "deck_run_directive",
+    { directive: "clear_reload", peer_ids: ["runtime-self-peer"], workstream: "night-shift" },
+    runtimeLead.token
+  );
+  expect(runtimeSelfReload.status).toBe(200);
+  expect(deps.directiveRuns.at(-1)).toEqual({
+    directive: "clear_reload",
+    peerIds: ["runtime-self-peer"],
+    prompt: "night-shift",
+    callerId: runtimeLead.callerId
+  });
+
+  for (const peerId of ["other-lead-peer", "operator-peer", "ordinary-operator-peer"]) {
+    const refused = await call(
+      srv,
+      "deck_run_directive",
+      { directive: "clear_reload", peer_ids: [peerId], workstream: "night-shift" },
+      selfToken
+    );
+    expect(refused.status, peerId).toBe(400);
+    expect(refused.body.error, peerId).toBe("refused: a team-lead may clear_reload only its own tile");
+  }
+  const multiTarget = await call(
+    srv,
+    "deck_run_directive",
+    { directive: "clear_reload", peer_ids: [self.peer_id, "other-lead-peer"], workstream: "night-shift" },
+    selfToken
+  );
+  expect(multiTarget.status).toBe(400);
+  expect(multiTarget.body.error).toBe("refused: a team-lead may clear_reload only its own tile");
+  expect(deps.directiveRuns).toHaveLength(2);
+
+  const supervisorReload = await call(srv, "deck_run_directive", {
+    directive: "clear_reload",
+    peer_ids: ["operator-peer"],
+    workstream: "night-shift"
+  });
+  expect(supervisorReload.status).toBe(200);
+  expect(deps.directiveRuns.at(-1)).toEqual({
+    directive: "clear_reload",
+    peerIds: ["operator-peer"],
+    prompt: "night-shift",
+    callerId: "supervisor"
+  });
 });
 
 test("a restricted caller leaves the supervisor unreached while the unrestricted supervisor can target it", async () => {
@@ -3001,6 +3099,7 @@ test("the MCP bridge serves deck_run_directive with the card directive enum and 
             directive?: { enum?: string[] };
             peer_ids?: { minItems?: number; maxItems?: number };
             prompt?: { maxLength?: number };
+            workstream?: { maxLength?: number; pattern?: string };
           };
           required?: string[];
         };
@@ -3013,6 +3112,7 @@ test("the MCP bridge serves deck_run_directive with the card directive enum and 
   expect([...(tool!.inputSchema.properties.directive?.enum ?? [])].sort()).toEqual(directiveCommands().sort());
   expect(tool!.inputSchema.properties.peer_ids).toEqual(expect.objectContaining({ minItems: 1, maxItems: 16 }));
   expect(tool!.inputSchema.properties.prompt).toEqual(expect.objectContaining({ maxLength: 500 }));
+  expect(tool!.inputSchema.properties.workstream).toEqual(expect.objectContaining({ maxLength: 64, pattern: "^[a-z0-9-]{1,64}$" }));
   expect(tool!.inputSchema.required).toEqual(["directive", "peer_ids"]);
 });
 

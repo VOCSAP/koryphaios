@@ -21,9 +21,10 @@ function sess(over: Partial<SessionRuntime>): SessionRuntime {
 
 test("directiveKeys maps each command to its code-constant keystroke", () => {
   expect(directiveKeys("clear")).toBe("/clear");
+  expect(directiveKeys("clear_reload")).toBe("/clear");
   expect(directiveKeys("compact")).toBe("/compact");
   expect(directiveKeys("magic_compact")).toBe("/magic-compact");
-  expect(Object.keys(DIRECTIVE_KEYS).sort()).toEqual(["clear", "compact", "magic_compact"]);
+  expect(Object.keys(DIRECTIVE_KEYS).sort()).toEqual(["clear", "clear_reload", "compact", "magic_compact"]);
 });
 
 test("isDirectiveCommand re-validates a broker-provided value", () => {

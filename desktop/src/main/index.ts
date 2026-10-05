@@ -106,7 +106,7 @@ import {
   unresolvedDirectiveNote,
   type DispatchedEntry
 } from './dispatch'
-import { createDirectiveBindings, type DirectiveRunDeps } from './directive-run'
+import { createDirectiveBindings, runClearReloadInTurn, type DirectiveRunDeps } from './directive-run'
 import { decidePeerAnnounce } from './peer-rotation'
 import { ownsIdleLock } from './idle-lock'
 import type {
@@ -1827,10 +1827,30 @@ const DISPATCH_WATCH_MS = 20_000
 const runMagicCompact = (tileId: string, peerId: string, useMagic: boolean, mode: MagicCompactMode): Promise<DirectiveOutcome> =>
   runMagicCompactInTurn(service, (line) => journal.add('dispatch', line), tileId, peerId, useMagic, mode)
 
+const announceClearReloadFailure = (peerId: string, outcome: Exclude<DirectiveOutcome, 'written'>): void => {
+  void sendAnnounce(
+    {
+      groupId: activeScope.groupId,
+      secret: activeScope.secret,
+      text: `clear_reload was not applied (${outcome}); nothing was cleared.`,
+      toPeerId: peerId
+    },
+    { endpoint: resolveBrokerEndpoint() }
+  )
+    .then(({ sent }) => {
+      if (sent > 0) journal.add('dispatch', `clear_reload failure announced to "${peerId}"`)
+    })
+    .catch((e) => reportError('announce', `clear_reload failure announce failed for "${peerId}"`, e))
+}
+
+const runClearReload = (tileId: string, peerId: string, workstream: string): Promise<DirectiveOutcome> =>
+  runClearReloadInTurn(service, (line) => journal.add('dispatch', line), tileId, peerId, workstream, announceClearReloadFailure)
+
 const directiveRunDeps: DirectiveRunDeps = {
   listSessions: () => service.list(),
   injectCommand: (tileId, keys) => service.injectCommand(tileId, keys),
   runMagicCompact: (tileId, peerId, useMagic, mode) => runMagicCompact(tileId, peerId, useMagic, mode),
+  runClearReload: (tileId, peerId, workstream) => runClearReload(tileId, peerId, workstream),
   // CLAUDE_CONFIG_DIR is honored so a relocated ~/.claude is still probed.
   resolveMagic: () => {
     const mode = resolveFeatures(config.projectDir).magicCompact

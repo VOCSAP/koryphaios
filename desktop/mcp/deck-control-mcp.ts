@@ -9,7 +9,12 @@
 
 import { createInterface } from 'node:readline'
 import { DIRECTIVE_ACCEPTS_PROMPT, directiveCommands } from '../src/main/directive'
-import { DIRECTIVE_MAX_TARGETS, DIRECTIVE_PROMPT_MAX } from '../src/main/directive-run'
+import {
+  CLEAR_RELOAD_WORKSTREAM_MAX,
+  CLEAR_RELOAD_WORKSTREAM_RE,
+  DIRECTIVE_MAX_TARGETS,
+  DIRECTIVE_PROMPT_MAX
+} from '../src/main/directive-run'
 
 const CONTROL_URL = process.env.DECK_CONTROL_URL ?? ''
 const CONTROL_TOKEN = process.env.DECK_CONTROL_TOKEN ?? ''
@@ -191,6 +196,12 @@ const TOOLS = [
           description: `One line, max ${DIRECTIVE_PROMPT_MAX} code points, typed after the command. Only for: ${directiveCommands()
             .filter((d) => DIRECTIVE_ACCEPTS_PROMPT[d])
             .join(', ')}.`
+        },
+        workstream: {
+          type: 'string',
+          maxLength: CLEAR_RELOAD_WORKSTREAM_MAX,
+          pattern: CLEAR_RELOAD_WORKSTREAM_RE.source,
+          description: 'Required only for clear_reload; selects its fixed recovery instruction.'
         }
       },
       required: ['directive', 'peer_ids']

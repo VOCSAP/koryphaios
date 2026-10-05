@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test'
 import { TileInjector, type InjectorScreen } from '../desktop/src/main/tile-injector.ts'
-import { DIRECTIVE_IDLE_WAIT_MS } from '../desktop/src/main/directive-run.ts'
+import { DIRECTIVE_IDLE_WAIT_MS, runClearReloadInTurn } from '../desktop/src/main/directive-run.ts'
 import { ScreenGuard, type InjectGuardState } from '../desktop/src/main/screen-model.ts'
 
 const ESC = '\x1b'
@@ -108,6 +108,39 @@ test('a directive queued during a magic_compact sequence is written only after t
   expect(await withinMs(magic, 1_000, 'the magic_compact sequence')).toBe('written')
   expect(await withinMs(directive, 1_000, 'the earlier turn never released')).toBe('written')
   expect(commands(writes)).toEqual(['ESC', '/magic-compact', 'ESC', '/resume', 'ESC', '/clear'])
+})
+
+test('a second clear_reload cannot type another /clear before the pending reload instruction settles', async () => {
+  const { injector, writes } = fixture()
+  const original = injector.injectCommand.bind(injector)
+  let reloadStarted!: () => void
+  const reloadPending = new Promise<void>((resolve) => {
+    reloadStarted = resolve
+  })
+  let releaseReload!: () => void
+  const reloadReleased = new Promise<void>((resolve) => {
+    releaseReload = resolve
+  })
+  let firstReload = true
+  injector.injectCommand = async (id, command, idleWaitMs) => {
+    if (command.startsWith('Reprends le workstream') && firstReload) {
+      firstReload = false
+      reloadStarted()
+      await reloadReleased
+    }
+    return original(id, command, idleWaitMs)
+  }
+
+  const first = runClearReloadInTurn(injector, () => {}, 't1', 'lead-a1b2', 'night-shift')
+  await reloadPending
+  const second = runClearReloadInTurn(injector, () => {}, 't1', 'lead-a1b2', 'night-shift')
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  expect(commands(writes).filter((command) => command === '/clear')).toHaveLength(1)
+
+  releaseReload()
+  expect(await withinMs(first, 1_000, 'the first clear_reload sequence')).toBe('written')
+  expect(await withinMs(second, 1_000, 'the second clear_reload sequence')).toBe('written')
+  expect(commands(writes).filter((command) => command === '/clear')).toHaveLength(2)
 })
 
 test('a turn that never settles releases its tile at the ceiling, traced with the tile it held', async () => {

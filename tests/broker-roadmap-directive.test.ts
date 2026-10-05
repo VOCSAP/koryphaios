@@ -67,6 +67,12 @@ test("an invalid directive command is rejected", async () => {
   expect(res.status).toBe(400);
 });
 
+test("a clear_reload card is rejected because only deck_run_directive carries a workstream", async () => {
+  const res = await add({ kind: "directive", title: "Reload the lead", directive: "clear_reload" });
+  expect(res.status).toBe(400);
+  expect(res.body.error).toContain("directive");
+});
+
 test("target_peer_ids are sanitized: reserved, malformed and dupes dropped", async () => {
   // Raw length stays <= 16 here; the over-cap case is covered by its own test.
   const some = Array.from({ length: 6 }, (_, i) => `peer-${i}`);
