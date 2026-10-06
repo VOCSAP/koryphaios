@@ -205,6 +205,20 @@ describe("classifyVerdict (pure)", () => {
     expect(classifyVerdict(verdict({ reply_route: "channel" }), { exists: true, waiting: true })).toBe("settle");
   });
 
+  test("a hook-route answer settles on every session state: the Claude Code module returns it itself", () => {
+    const states: Array<{ exists: boolean; waiting: boolean } | null> = [
+      { exists: true, waiting: true },
+      { exists: true, waiting: false },
+      { exists: false, waiting: false },
+      null,
+    ];
+    const stale = new Date(Date.now() - VERDICT_DEFER_MS - 1_000).toISOString();
+    for (const s of states) {
+      expect(classifyVerdict(verdict({ reply_route: "hook" }), s)).toBe("settle");
+      expect(classifyVerdict(verdict({ reply_route: "hook", answered_at: stale }), s)).toBe("settle");
+    }
+  });
+
   test("an unsettled approval is never applied", () => {
     const pending = verdict({ status: "pending", answer_kind: null });
     expect(classifyVerdict(pending, { exists: true, waiting: true })).not.toBe("apply");
@@ -280,6 +294,18 @@ describe("pollApprovalVerdicts (sliced verbatim from index.ts)", () => {
       "the LOCAL delivery leg must not read mobileApprovals -- that setting governs the phone relay only, never a Deck-local Allow click",
     ).toEqual([{ tile: "s1", keys: "\r" }]);
     expect(flat(marked)).toEqual(["appr-42"]);
+  });
+
+  test("an answered hook-route row on a live waiting tile is settled with zero keystrokes", async () => {
+    const { poll, written, marked, calls } = pollerEnv({
+      settled: [verdict({ reply_route: "hook" })],
+      tiles: ["s1"],
+      waiting: ["s1"],
+    });
+    await poll();
+    expect(written, "the module already returned this verdict to Claude Code; typing it would answer twice").toEqual([]);
+    expect(flat(marked)).toEqual(["appr-42"]);
+    expect(calls.filter((c) => c.fn === "reportError")).toEqual([]);
   });
 
   test("a verdict for a tile that no longer exists is still settled in one poll", async () => {

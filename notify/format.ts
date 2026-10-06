@@ -107,8 +107,8 @@ export function renderSettled(approval: Approval, viaLabel: string): string {
       break;
     case "pending":
     case "gone":
-      verdict = "closed";
-      break;
+      // Nobody answered: no check mark, and the label is the reason, not a channel.
+      return `✕ ${truncate(approval.title, 120)}: closed, ${viaLabel}`;
   }
   return `✓ ${truncate(approval.title, 120)} — handled via ${viaLabel}: ${verdict}`;
 }
@@ -118,6 +118,7 @@ export const ALREADY_HANDLED_NOTICE = "Validation expired or invalid / already h
 export const REFUSAL_NOTICES: Record<AnswerRefusal, string> = {
   "verdict-only": "Not sent: this request takes Approve or Reject, not a written answer.",
   "on-tile": "Not sent: this request is waiting on its tile, answer it in Koryphaios.",
+  "session-gone": "Not sent: the session is no longer waiting for this answer, answer it in its terminal.",
 };
 
 /**

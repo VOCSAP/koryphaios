@@ -61,6 +61,16 @@ export const APPROVAL_AUTH_SKEW_SEC = 120;
 /** Hard ceiling of a single /approval/wait long poll. */
 export const APPROVAL_WAIT_MAX_SEC = 300;
 
+/** Ceiling on a 'hook' row: a longer park would keep a dead CLI's row looking alive. */
+export const HOOK_WAIT_MAX_SEC = 30;
+
+/** The long-poll duration /approval/wait uses: 30 when absent or not a finite number, clamped to [1, ceiling of the route]. */
+export function approvalWaitTimeoutSec(requested: unknown, replyRoute: string): number {
+  const ceiling = replyRoute === "hook" ? HOOK_WAIT_MAX_SEC : APPROVAL_WAIT_MAX_SEC;
+  const asked = typeof requested === "number" && Number.isFinite(requested) ? requested : 30;
+  return Math.max(1, Math.min(ceiling, asked));
+}
+
 export const APPROVAL_KINDS: readonly ApprovalKind[] = ["permission", "question", "plan"];
 export const APPROVAL_ANSWER_KINDS: readonly ApprovalAnswerKind[] = ["allow", "deny", "text"];
 export const APPROVAL_VIAS: readonly ApprovalVia[] = ["deck", "telegram", "discord", "ntfy"];
@@ -212,6 +222,9 @@ export function verifyAuthProof(
 export type ApprovalOperation =
   | "add"
   | "wait"
+  // A session closing its own guarded row without a verdict: it settles
+  // nothing and authorises nothing, so it stays on the session side.
+  | "withdraw"
   | "claim"
   | "list"
   | "channels"
@@ -229,7 +242,7 @@ export type ApprovalOperation =
  * `roadmap-write` speaks as the operator on a shared backlog, so a sandboxed
  * agent holding a session token must reach neither (PLAN §6.8).
  */
-const SESSION_ALLOWED: ReadonlySet<ApprovalOperation> = new Set<ApprovalOperation>(["add", "wait"]);
+const SESSION_ALLOWED: ReadonlySet<ApprovalOperation> = new Set<ApprovalOperation>(["add", "wait", "withdraw"]);
 
 export function isOperationAllowed(kind: ApprovalAuthKind, op: ApprovalOperation): boolean {
   return kind === "operator" ? true : SESSION_ALLOWED.has(op);

@@ -83,7 +83,7 @@ import {
 import {
   APPROVAL_ANSWER_KINDS,
   APPROVAL_VIAS,
-  APPROVAL_WAIT_MAX_SEC,
+  approvalWaitTimeoutSec,
   deriveOperatorId,
   deriveTokenId,
   isOperationAllowed,
@@ -200,6 +200,8 @@ import type {
   ApprovalVia,
   ApprovalWaitRequest,
   ApprovalWaitResponse,
+  ApprovalWithdrawRequest,
+  ApprovalWithdrawResponse,
   OperatorInboxRequest,
   OperatorInboxResponse,
   OperatorInboxMessage,
@@ -1538,6 +1540,8 @@ db.run(`
     reply_route    TEXT NOT NULL DEFAULT 'pty',
     reply_token    TEXT NOT NULL DEFAULT '',
     reply_group    TEXT NOT NULL DEFAULT '',
+    last_wait_at   TEXT,
+    producer_secret_hash TEXT NOT NULL DEFAULT '',
     kind           TEXT NOT NULL,
     title          TEXT NOT NULL,
     question       TEXT NOT NULL,
@@ -1608,10 +1612,16 @@ try {
 
 // Migration (C-9): the return path. 'channel' delivers the answer to the peer
 // as a claude-peers message; 'pty' leaves it to the Deck's keystrokes.
+// last_wait_at: when the producer last waited on a 'hook' row, i.e. whether
+// anyone is still there to receive a verdict. producer_secret_hash: sha256 of
+// the secret handed to that producer alone, since every tile of a Deck window
+// shares one session credential.
 for (const col of [
   "reply_route TEXT NOT NULL DEFAULT 'pty'",
   "reply_token TEXT NOT NULL DEFAULT ''",
   "reply_group TEXT NOT NULL DEFAULT ''",
+  "last_wait_at TEXT",
+  "producer_secret_hash TEXT NOT NULL DEFAULT ''",
 ]) {
   try {
     db.run(`ALTER TABLE pending_approvals ADD COLUMN ${col}`);
@@ -8636,7 +8646,19 @@ type ApprovalRow = {
   notif_expires_at: string;
   answered_at: string | null;
   delivered_at: string | null;
+  last_wait_at: string | null;
+  producer_secret_hash: string;
 };
+
+/**
+ * An unknown stored value reads as 'pty', the column default, but leaves a
+ * trace naming the row.
+ */
+function readReplyRoute(row: Pick<ApprovalRow, "id" | "reply_route">): ApprovalReplyRoute {
+  if (row.reply_route === "channel" || row.reply_route === "hook" || row.reply_route === "pty") return row.reply_route;
+  log.error(`approval ${row.id}: unknown reply_route '${row.reply_route}', read as pty`);
+  return "pty";
+}
 
 /**
  * Public projection (hostile input #2): the wire shape carries no
@@ -8667,7 +8689,7 @@ function rowToApproval(row: ApprovalRow): Approval {
     },
     // The ROUTE is public (the Deck must know whether to type); the routing
     // TOKEN never is -- same family as instance_token/from_token.
-    reply_route: (row.reply_route === "channel" ? "channel" : "pty") as ApprovalReplyRoute,
+    reply_route: readReplyRoute(row),
     mergeable: row.mergeable !== 0,
     absorbed_permission: row.absorbed_permission !== 0,
     kind: row.kind as Approval["kind"],
@@ -8729,6 +8751,38 @@ const approvalAuth = createApprovalAuth({
 // Long-poll registry: /approval/wait parks here until a claim resolves it.
 const approvalWaiters = new Map<string, Set<(a: Approval) => void>>();
 
+/**
+ * Above the module's per-wait ceiling (under 30 s) plus a respawn of its
+ * helper, so a module that is still looping never reads as gone.
+ */
+const HOOK_WAIT_STALE_MS = 45_000;
+
+/**
+ * Whether nobody is left to receive a verdict on a 'hook' row: no wait parked
+ * now, and none started within HOOK_WAIT_STALE_MS. A row never waited on yet
+ * counts from its creation. An unreadable stamp counts as gone, so the claim
+ * is refused rather than recorded for nobody.
+ */
+function hookProducerGone(row: ApprovalRow, now: number = Date.now()): boolean {
+  if (row.reply_route !== "hook" || (row.status !== "pending" && row.status !== "expired_notif")) return false;
+  if (approvalWaiters.has(row.id)) return false;
+  const last = Date.parse(row.last_wait_at ?? row.created_at);
+  return !(Number.isFinite(last) && now - last < HOOK_WAIT_STALE_MS);
+}
+
+/**
+ * Whether a SESSION caller acting on a 'hook' row failed to present the
+ * producer secret returned by its add. The operator credential needs none.
+ * An empty stored hash never matches.
+ */
+function sessionLacksProducerSecret(body: Record<string, unknown>, row: ApprovalRow): boolean {
+  if ((body.auth as ApprovalAuthProof | undefined)?.kind !== "session" || row.reply_route !== "hook") return false;
+  const presented = typeof body.producer_secret === "string" ? body.producer_secret : "";
+  const expected = Buffer.from(row.producer_secret_hash, "hex");
+  const got = createHash("sha256").update(presented).digest();
+  return !(expected.length === got.length && timingSafeEqual(expected, got));
+}
+
 function resolveApprovalWaiters(approval: Approval): void {
   const set = approvalWaiters.get(approval.id);
   if (!set) return;
@@ -8755,6 +8809,8 @@ function resolveReplyRoute(
   replyPeerId: string | undefined,
   groupId: string
 ): { route: ApprovalReplyRoute; token: string; group: string } {
+  // The producer itself waits for the verdict: there is no peer to resolve.
+  if (requested === "hook") return { route: "hook", token: "", group: "" };
   if (requested !== "channel") return { route: "pty", token: "", group: "" };
   if (!replyPeerId || !groupId) return { route: "pty", token: "", group: "" };
   const peer = db
@@ -8856,6 +8912,12 @@ function handleApprovalAdd(
 
   const draft = validateApprovalDraft(body);
   if (!draft.ok) return { error: draft.error, status: 400 };
+  // A mergeable row is shared with any later raise on the same tile, so the
+  // verdict the module returns to the engine could answer a dialog it did not
+  // raise.
+  if (body.reply_route === "hook" && draft.value.merge !== "never") {
+    return { error: "reply_route hook requires merge never", status: 400 };
+  }
 
   // A session credential is pinned to its own session_ref: it can neither
   // impersonate another tile nor emit "anonymously". The comparison happens
@@ -8937,6 +8999,8 @@ function handleApprovalAdd(
   // Deck re-validates against its own live tiles. Widening the credential to
   // cover it would be scope creep with no threat behind it.
   const stamped = stampInsert(stamp);
+  const producerSecret = reply.route === "hook" ? randomBytes(32).toString("base64url") : "";
+  const producerSecretHash = producerSecret ? createHash("sha256").update(producerSecret).digest("hex") : "";
   const id = randomUUID();
   const createdAt = now.toISOString();
   const notifExpiresAt = new Date(now.getTime() + ttlHours * 3600_000).toISOString();
@@ -8944,9 +9008,9 @@ function handleApprovalAdd(
     db.run(
       `INSERT INTO pending_approvals
          (id, ${stamped.columns.join(", ")}, origin_host, origin_user, group_id, from_peer,
-          tile_ref, mergeable, reply_route, reply_token, reply_group,
+          tile_ref, mergeable, reply_route, reply_token, reply_group, producer_secret_hash,
           kind, title, question, options_json, status, created_at, notif_expires_at)
-       VALUES (?, ${stamped.columns.map(() => "?").join(", ")}, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
+       VALUES (?, ${stamped.columns.map(() => "?").join(", ")}, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
       [
         id,
         ...stamped.values,
@@ -8959,6 +9023,7 @@ function handleApprovalAdd(
         reply.route,
         reply.token,
         reply.group,
+        producerSecretHash,
         draft.value.kind,
         draft.value.title,
         draft.value.question,
@@ -9032,7 +9097,7 @@ function handleApprovalAdd(
   // Ring the operator's channels. Fire-and-forget: the approval is already
   // durable, and a dead transport must never fail the producer's call.
   void notifyRegistry.fanOut(approval).catch((e) => log.error("notify: fan-out failed", e));
-  return { approval };
+  return producerSecret ? { approval, producer_secret: producerSecret } : { approval };
 }
 
 /**
@@ -9060,6 +9125,30 @@ function settleApproval(
   const allowed = via === "deck" ? "('pending','expired_notif')" : "('pending')";
   const now = new Date().toISOString();
   const where = approvalWhere(scope);
+  // Every settling path runs through here, the phone gateways included, so a
+  // verdict nobody waits for anymore is refused on all of them at once.
+  const current = db
+    .query(`SELECT * FROM pending_approvals WHERE id = ? AND ${where.sql}`)
+    .get(id, ...(where.params as never[])) as ApprovalRow | null;
+  if (current && hookProducerGone(current)) {
+    const closed = db.run(
+      `UPDATE pending_approvals SET status = 'abandoned', answered_at = ?
+        WHERE id = ? AND ${where.sql} AND status IN ('pending','expired_notif')`,
+      [now, id, ...(where.params as never[])]
+    );
+    // Zero changes: settled by someone else in between; the UPDATE below then
+    // answers with its own 409.
+    if (closed.changes > 0) {
+      log.info(`approval ${id}: hook producer stopped waiting, answer refused and row abandoned`);
+      const gone = rowToApproval({ ...current, status: "abandoned", answered_at: now });
+      void notifyRegistry.settle(gone, "the session stopped waiting").catch((e) => log.error("notify: settle failed", e));
+      return {
+        error: "the session is no longer waiting for this answer (closed or restarted): answer it in its terminal",
+        status: 410,
+        refused: "session-gone",
+      };
+    }
+  }
   // A permission dialog only takes allow/deny keystrokes: free text would be
   // typed into the chooser. A row that absorbed a permission takes no verdict
   // at all: its dialog has its own row, and only a terminal answer closes it.
@@ -9121,6 +9210,27 @@ function handleApprovalClaim(
   if (!id) return { error: "id is required", status: 400 };
   const via = (body.via ?? "deck") as ApprovalVia;
   if (!APPROVAL_VIAS.includes(via)) return { error: "unknown via", status: 400 };
+  const target = authorized.rows[0];
+  if (body.handback === true) {
+    if (
+      body.terminal !== undefined ||
+      body.acknowledge !== undefined ||
+      body.answer_kind !== undefined ||
+      body.answer_text !== undefined
+    ) {
+      return { error: "handback excludes terminal, acknowledge, answer_kind and answer_text", status: 400 };
+    }
+    // Only a module waiting on its own row can give the dialog back to the
+    // native menu; any other route has no one to hand it to.
+    if (target && target.reply_route !== "hook") {
+      return { error: "only a hook-route request can be handed back to the terminal", status: 422 };
+    }
+    const handed = settleApproval(id, scope, via, null, null, "answered_terminal");
+    if (!("error" in handed)) {
+      void notifyRegistry.settle(handed.approval, via).catch((e) => log.error("notify: settle failed", e));
+    }
+    return handed;
+  }
   if (body.terminal === true) {
     if (body.acknowledge !== undefined || body.answer_kind !== undefined || body.answer_text !== undefined) {
       return { error: "terminal excludes acknowledge, answer_kind and answer_text", status: 400 };
@@ -9200,13 +9310,24 @@ async function handleApprovalWait(
   // never confirm the existence of another operator's -- or another project's
   // -- approval. The scoping preserves that indistinguishability by
   // construction, since an out-of-scope row simply does not come back.
-  if (!row) return { error: "unknown approval", status: 404 };
-  if (row.status !== "pending") return { approval: rowToApproval(row) };
+  // A wrong producer secret reads exactly like an unknown id, so another tile
+  // of the same window learns nothing about the row.
+  if (!row || sessionLacksProducerSecret(body, row)) return { error: "unknown approval", status: 404 };
+  const where = approvalWhere(authorized.scope);
+  db.run(`UPDATE pending_approvals SET last_wait_at = ? WHERE id = ? AND ${where.sql}`, [
+    new Date().toISOString(),
+    id,
+    ...(where.params as never[]),
+  ]);
+  // A hook row's notification expiring says nothing about its module, which
+  // is still waiting: returning at once would only make it poll in a loop.
+  const parkable = row.status === "pending" || (row.reply_route === "hook" && row.status === "expired_notif");
+  if (!parkable) return { approval: rowToApproval(row) };
 
-  const timeoutSec = Math.max(
-    1,
-    Math.min(APPROVAL_WAIT_MAX_SEC, Number.isFinite(body.timeout_sec) ? Number(body.timeout_sec) : 30)
-  );
+  const timeoutSec = approvalWaitTimeoutSec(body.timeout_sec, row.reply_route);
+  if (typeof body.timeout_sec === "number" && timeoutSec < body.timeout_sec) {
+    log.info(`approval ${id}: wait capped at ${timeoutSec} s (asked ${body.timeout_sec} s)`);
+  }
 
   return await new Promise<ApprovalWaitResponse>((resolve) => {
     let done = false;
@@ -9232,6 +9353,43 @@ async function handleApprovalWait(
     }
     set.add(onClaim);
   });
+}
+
+/**
+ * Close one's own pending guarded row without a verdict (answered_terminal,
+ * answer_kind stays null). A mergeable row is refused: it may carry another
+ * producer's dialog for the same tile. A session may only withdraw a 'hook'
+ * row, and only with its producer secret: every tile of a window holds the
+ * same session credential.
+ */
+function handleApprovalWithdraw(
+  body: ApprovalWithdrawRequest & Record<string, unknown>
+): ApprovalWithdrawResponse | { error: string; status: number } {
+  const id = typeof body.id === "string" ? body.id : "";
+  const authorized = approvalAuth.authorizeTarget<ApprovalRow>(body, "withdraw", id ? [id] : []);
+  if (isAuthError(authorized)) return authorized;
+  if (!id) return { error: "id is required", status: 400 };
+  const row = authorized.rows[0] ?? null;
+  if (!row || sessionLacksProducerSecret(body, row)) return { error: "unknown approval", status: 404 };
+  if (row.mergeable !== 0) return { error: "only a guarded request (merge never) can be withdrawn", status: 422 };
+  if ((body.auth as ApprovalAuthProof | undefined)?.kind === "session" && row.reply_route !== "hook") {
+    return { error: "a session may only withdraw a hook-route request", status: 422 };
+  }
+
+  const where = approvalWhere(authorized.scope);
+  const closedAt = new Date().toISOString();
+  const res = db.run(
+    `UPDATE pending_approvals SET status = 'answered_terminal', answered_at = ?
+      WHERE id = ? AND ${where.sql} AND status IN ('pending','expired_notif')`,
+    [closedAt, id, ...(where.params as never[])]
+  );
+  if (res.changes === 0) return { error: "already-settled", status: 409 };
+  const approval = rowToApproval({ ...row, status: "answered_terminal", answered_at: closedAt });
+  log.info(`approval ${id}: withdrawn by its session`);
+  resolveApprovalWaiters(approval);
+  // Withdrawn because the dialog was answered or dismissed on the tile itself.
+  void notifyRegistry.settle(approval, "terminal").catch((e) => log.error("notify: settle failed", e));
+  return { approval };
 }
 
 function handleApprovalList(
@@ -10757,6 +10915,13 @@ const server = Bun.serve<WsData>({
         }
         case "/approval/claim": {
           const result = handleApprovalClaim(body as ApprovalClaimRequest & Record<string, unknown>);
+          if ("error" in result) {
+            return Response.json({ error: result.error }, { status: result.status });
+          }
+          return Response.json(result);
+        }
+        case "/approval/withdraw": {
+          const result = handleApprovalWithdraw(body as ApprovalWithdrawRequest & Record<string, unknown>);
           if ("error" in result) {
             return Response.json({ error: result.error }, { status: result.status });
           }

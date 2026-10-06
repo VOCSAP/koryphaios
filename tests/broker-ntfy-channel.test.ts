@@ -7,6 +7,7 @@
 // back the QR payload — without ever leaving 127.0.0.1.
 
 import { afterAll, describe, expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
 import { post, startBroker, stopBroker, approvalListBody, type TestBroker } from "./_helper.ts";
 import {
   buildAuthProof,
@@ -584,6 +585,55 @@ describe("ntfy enrolment", () => {
       handledNotices,
       "the winning answer was told 'already handled': onAnswer returned null for a settled approval"
     ).toHaveLength(1);
+  }, 60_000);
+
+  test("a phone answer on a hook request whose session stopped waiting is refused, never recorded", async () => {
+    const b = await startBroker();
+    brokers.push(b);
+    const ntfy = startStubNtfy();
+    const op = newOperator();
+    const project = "github.com/vocsap/koryphaios";
+
+    const conn = await signedPost<{ mobile_payload: string }>(b, "/approval/channel-connect", { kind: "ntfy", server: ntfy.url }, op);
+    const payload = decodePairingPayload(conn.body.mobile_payload)!;
+    await ntfy.publishRaw(payload.topic_replies, encodePair(payload.code, "Pixel 8"));
+    await until(async () => {
+      const list = await signedPost<{ channels: Array<Record<string, unknown>> }>(b, "/approval/channel-list", {}, op);
+      return list.body.channels.find((c) => c.kind === "ntfy")!.paired === 1;
+    });
+
+    const added = await signedPost<{ approval: Approval }>(
+      b,
+      "/approval/add",
+      {
+        kind: "permission",
+        title: "Bash: rm build",
+        question: "Allow?",
+        options: ["Allow", "Deny"],
+        reply_route: "hook",
+        merge: "never",
+        origin: { host: "bureau", project_key: project },
+      },
+      op
+    );
+    const approvalId = added.body.approval.id;
+    expect(added.body.approval.reply_route).toBe("hook");
+    // The Claude Code session that raised it is gone: no wait for 46 s.
+    const db = new Database(b.dbPath);
+    const past = new Date(Date.now() - 46_000).toISOString();
+    db.run("UPDATE pending_approvals SET created_at = ?, last_wait_at = ? WHERE id = ?", [past, past, approvalId]);
+    db.close();
+
+    await ntfy.publishRaw(payload.topic_replies, encodeAnswer(approvalId, "allow"));
+    const onPhone = () =>
+      (ntfy.published.get(payload.topic_notif) ?? []).filter((m) => String(m.click).includes(approvalId)).map((m) => String(m.message));
+    const told = await until(() => onPhone().some((m) => m.includes("closed, the session stopped waiting")));
+    expect(told, "the phone must say why its Allow went nowhere").toBe(true);
+    expect(onPhone().some((m) => m.includes("approved")), "an Allow nobody received must never read as approved").toBe(false);
+
+    const list = await signedPost<{ approvals: Approval[] }>(b, "/approval/list", approvalListBody(project), op);
+    const row = list.body.approvals.find((a) => a.id === approvalId)!;
+    expect([row.status, row.answer_kind], "an allow nobody receives must not be recorded").toEqual(["abandoned", null]);
   }, 60_000);
 
   test("answering twice is refused, and the phone is told so (C-1 arbitration)", async () => {

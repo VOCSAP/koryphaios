@@ -75,11 +75,13 @@ export interface NotificationChannel {
 }
 
 /**
- * Why the broker refused an answer on a request that is still pending:
+ * Why the broker refused an answer:
  * `verdict-only` -- a permission takes allow or deny, never free text;
- * `on-tile` -- the question absorbed a permission dialog, answered on its tile.
+ * `on-tile` -- the question absorbed a permission dialog, answered on its tile;
+ * `session-gone` -- the session that waited for it is gone, and the request
+ * was closed by this very refusal.
  */
-export type AnswerRefusal = "verdict-only" | "on-tile";
+export type AnswerRefusal = "verdict-only" | "on-tile" | "session-gone";
 
 /** What a gateway needs from the broker, injected so adapters stay testable. */
 export interface ChannelHost {

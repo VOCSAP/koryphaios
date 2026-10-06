@@ -137,6 +137,23 @@ describe("rendering", () => {
     expect(renderSettled(approval({ status: "answered", answer_kind: "deny" }), "deck")).toContain("rejected");
   });
 
+  test("a row closed without an answer never reads as handled", () => {
+    for (const status of ["abandoned", "pending"] as const) {
+      const out = renderSettled(approval({ status }), "the session stopped waiting");
+      expect(out, status).not.toContain("✓");
+      expect(out, status).not.toContain("handled via");
+      expect(out, status).toContain("closed");
+      expect(out, status).toContain("the session stopped waiting");
+    }
+  });
+
+  test("an answer on a request whose session stopped waiting is refused with that reason", () => {
+    expect(channelAnswerResult({ error: "gone", status: 410, refused: "session-gone" }, () => {})).toEqual({
+      refused: "session-gone",
+    });
+    expect(answerNotice({ refused: "session-gone" })).toContain("no longer waiting");
+  });
+
   test("the late-answer notice is the wording the operator was promised", () => {
     expect(ALREADY_HANDLED_NOTICE).toContain("already handled");
   });

@@ -247,7 +247,7 @@ export type ApprovalStatus =
   | 'answered_terminal'
 export type ApprovalKind = 'permission' | 'question' | 'plan'
 export type ApprovalVia = 'deck' | 'telegram' | 'discord' | 'ntfy'
-export type ApprovalReplyRoute = 'channel' | 'pty'
+export type ApprovalReplyRoute = 'channel' | 'pty' | 'hook'
 export type ApprovalAnswerKind = 'allow' | 'deny' | 'text'
 
 export interface ApprovalOrigin {

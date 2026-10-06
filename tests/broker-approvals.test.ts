@@ -1,7 +1,12 @@
 import { test, expect, describe, afterAll } from "bun:test";
 import { Database } from "bun:sqlite";
+import { mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { startBroker, stopBroker, post, approvalListBody, type TestBroker } from "./_helper.ts";
 import {
+  approvalWaitTimeoutSec,
   buildAuthProof,
   deriveOperatorId,
   deriveTokenId,
@@ -1213,5 +1218,437 @@ describe("a permission raise never inherits another dialog's row", () => {
     await hookRaise("tile-guarded", "Bash", { command: "ls" });
     const rows = await onTile(b, op, "tile-guarded");
     expect(rows.find((a) => a.id === guarded.id)?.status).toBe("pending");
+  });
+});
+
+describe("the hook route: a verdict the Claude Code module returns itself", () => {
+  type Op = { cred: ApprovalCredential; id: string };
+  type Signer = { cred: ApprovalCredential; operator_id: string; kind: "session"; token_id: string };
+
+  async function session(b: TestBroker, op: Op, sessionRef: string): Promise<Signer> {
+    const cred = generateCredential();
+    const res = await signedPost<{ token_id: string }>(
+      b,
+      "/approval/token-mint",
+      { session_public_key: cred.publicKey, session_ref: sessionRef },
+      { cred: op.cred, operator_id: op.id }
+    );
+    expect(res.status).toBe(200);
+    return { cred, operator_id: op.id, kind: "session", token_id: res.body.token_id };
+  }
+
+  /** An `undefined` override drops the key, so it is absent from the signed body. */
+  const raise = (b: TestBroker, signer: Signer, sessionRef: string, over: Record<string, unknown> = {}) => {
+    const body: Record<string, unknown> = {
+      kind: "permission",
+      title: "Bash",
+      question: "Allow `ls`?",
+      options: ["Allow", "Deny"],
+      session_ref: sessionRef,
+      tile_ref: "tile-hook",
+      reply_route: "hook",
+      merge: "never",
+      ...over,
+    };
+    for (const k of Object.keys(body)) if (body[k] === undefined) delete body[k];
+    return signedPost<{ approval: Approval; producer_secret?: string; error?: string }>(b, "/approval/add", body, signer);
+  };
+
+  /** A default hook row, with the producer secret only its add returns. */
+  async function hook(b: TestBroker, signer: Signer): Promise<Approval & { secret: string }> {
+    const res = await raise(b, signer, "window-hook");
+    expect(res.status, res.body.error).toBe(200);
+    expect(typeof res.body.producer_secret).toBe("string");
+    return { ...res.body.approval, secret: res.body.producer_secret ?? "" };
+  }
+
+  /** `secret` undefined leaves producer_secret out of the signed body. */
+  const withSecret = (body: Record<string, unknown>, secret: string | undefined) =>
+    secret === undefined ? body : { ...body, producer_secret: secret };
+
+  const wait = (b: TestBroker, signer: Signer, id: string, timeout_sec: number, secret?: string) =>
+    signedPost<{ approval?: Approval; pending?: boolean; error?: string }>(
+      b, "/approval/wait", withSecret({ id, timeout_sec }, secret), signer
+    );
+
+  const withdraw = (b: TestBroker, signer: Signer, id: string, secret?: string) =>
+    signedPost<{ approval?: Approval; error?: string }>(b, "/approval/withdraw", withSecret({ id }, secret), signer);
+
+  const claimAllow = (b: TestBroker, op: Op, id: string) =>
+    signedPost<{ approval?: Approval; error?: string }>(
+      b, "/approval/claim", { id, via: "deck", answer_kind: "allow" }, { cred: op.cred, operator_id: op.id }
+    );
+
+  async function listed(b: TestBroker, op: Op, id: string): Promise<Approval | undefined> {
+    const res = await signedPost<{ approvals: Approval[] }>(
+      b, "/approval/list", approvalListBody(DEFAULT_PROJECT_KEY), { cred: op.cred, operator_id: op.id }
+    );
+    return res.body.approvals.find((a) => a.id === id);
+  }
+
+  /** Pushes the row's liveness stamps back in time, as if the module stopped waiting. */
+  function age(b: TestBroker, id: string, ms: number): void {
+    const db = new Database(b.dbPath);
+    const past = new Date(Date.now() - ms).toISOString();
+    db.run("UPDATE pending_approvals SET last_wait_at = ?, created_at = ? WHERE id = ?", [past, past, id]);
+    db.close();
+  }
+
+  test("a hook route is accepted only on a guarded request, and is read back as hook", async () => {
+    const b = await boot();
+    const op = newOperator();
+    const s = await session(b, op, "window-hook");
+
+    const merged = await raise(b, s, "window-hook", { merge: "tile" });
+    expect(merged.status, "a mergeable row could be settled by another producer's verdict").toBe(400);
+    const absent = await raise(b, s, "window-hook", { merge: undefined });
+    expect(absent.status, "an absent merge normalises to tile").toBe(400);
+
+    const ok = await raise(b, s, "window-hook");
+    expect(ok.status).toBe(200);
+    expect(ok.body.approval.reply_route).toBe("hook");
+    expect((await listed(b, op, ok.body.approval.id))?.reply_route).toBe("hook");
+    expect((await claimAllow(b, op, ok.body.approval.id)).status).toBe(200);
+    const after = await wait(b, s, ok.body.approval.id, 1, ok.body.producer_secret);
+    expect([after.body.approval?.reply_route, after.body.approval?.answer_kind]).toEqual(["hook", "allow"]);
+    // The Deck poller's own read: a 'pty' here would get the verdict typed in.
+    const undelivered = await signedPost<{ approvals: Approval[] }>(
+      b, "/approval/list", { ...approvalListBody(DEFAULT_PROJECT_KEY), undelivered_only: true },
+      { cred: op.cred, operator_id: op.id }
+    );
+    expect(undelivered.body.approvals.find((a) => a.id === ok.body.approval.id)?.reply_route).toBe("hook");
+  });
+
+  test("an unknown stored route is read back as pty, never silently: the broker log names the row", async () => {
+    const b = await boot();
+    const op = newOperator();
+    const s = await session(b, op, "window-hook");
+    const row = await hook(b, s);
+    const db = new Database(b.dbPath);
+    db.run("UPDATE pending_approvals SET reply_route = 'carrier-pigeon' WHERE id = ?", [row.id]);
+    db.close();
+
+    expect((await listed(b, op, row.id))?.reply_route).toBe("pty");
+    const logPath = join(b.tmpDir, "logs", "broker.log");
+    const deadline = Date.now() + 2000;
+    let traced = false;
+    while (!traced && Date.now() < deadline) {
+      traced = readFileSync(logPath, "utf8").includes(`approval ${row.id}: unknown reply_route 'carrier-pigeon'`);
+      if (!traced) await Bun.sleep(50);
+    }
+    expect(traced).toBe(true);
+  });
+
+  test("withdraw closes the session's own guarded row with no verdict and wakes its waiter", async () => {
+    const b = await boot();
+    const op = newOperator();
+    const s = await session(b, op, "window-hook");
+    const row = await hook(b, s);
+
+    const parked = wait(b, s, row.id, 20, row.secret);
+    await Bun.sleep(100);
+    const res = await withdraw(b, s, row.id, row.secret);
+    expect(res.status, res.body.error).toBe(200);
+    expect([res.body.approval?.status, res.body.approval?.answer_kind]).toEqual(["answered_terminal", null]);
+
+    const woke = await parked;
+    expect(woke.body.pending).toBeUndefined();
+    expect(woke.body.approval?.status).toBe("answered_terminal");
+    // Not 'answered': the Deck's undelivered list must never offer it.
+    const undelivered = await signedPost<{ approvals: Approval[] }>(
+      b, "/approval/list", { ...approvalListBody(DEFAULT_PROJECT_KEY), undelivered_only: true },
+      { cred: op.cred, operator_id: op.id }
+    );
+    expect(undelivered.body.approvals.map((a) => a.id)).not.toContain(row.id);
+  });
+
+  test("withdraw refuses a mergeable row, another session's row, and a row already settled", async () => {
+    const b = await boot();
+    const op = newOperator();
+    const s = await session(b, op, "window-hook");
+    const other = await session(b, op, "window-other");
+
+    const tileRow = (await raise(b, s, "window-hook", { reply_route: "pty", merge: "tile" })).body.approval;
+    expect((await withdraw(b, s, tileRow.id)).status).toBe(422);
+    expect((await listed(b, op, tileRow.id))?.status).toBe("pending");
+
+    const mine = await hook(b, s);
+    expect((await withdraw(b, other, mine.id)).status, "same operator, other session: indistinguishable from unknown").toBe(404);
+    expect((await listed(b, op, mine.id))?.status).toBe("pending");
+
+    expect((await withdraw(b, s, mine.id, mine.secret)).status).toBe(200);
+    expect((await withdraw(b, s, mine.id, mine.secret)).status).toBe(409);
+  });
+
+  test("every wait stamps last_wait_at", async () => {
+    const b = await boot();
+    const op = newOperator();
+    const s = await session(b, op, "window-hook");
+    const row = await hook(b, s);
+    const read = (): string | null => {
+      const db = new Database(b.dbPath);
+      const r = db.query("SELECT last_wait_at FROM pending_approvals WHERE id = ?").get(row.id) as {
+        last_wait_at: string | null;
+      };
+      db.close();
+      return r.last_wait_at;
+    };
+    expect(read()).toBeNull();
+    const before = Date.now();
+    await wait(b, s, row.id, 1, row.secret);
+    const stamped = Date.parse(read() ?? "");
+    expect(stamped).toBeGreaterThanOrEqual(before - 1000);
+    expect(stamped).toBeLessThanOrEqual(Date.now());
+  });
+
+  test("a claim 46 s after the module's last wait is refused, with a reason, and the row is closed", async () => {
+    const b = await boot();
+    const op = newOperator();
+    const s = await session(b, op, "window-hook");
+    const row = await hook(b, s);
+    await wait(b, s, row.id, 1, row.secret);
+    age(b, row.id, 46_000);
+
+    const res = await claimAllow(b, op, row.id);
+    expect(res.status, "an allow nobody is waiting for must not be recorded as settled").toBe(410);
+    expect(res.body.error).toContain("no longer waiting");
+    expect((await listed(b, op, row.id))?.status).toBe("abandoned");
+    expect((await claimAllow(b, op, row.id)).status).toBe(409);
+  });
+
+  const handback = (b: TestBroker, signer: { cred: ApprovalCredential; operator_id: string; kind?: "operator" | "session"; token_id?: string }, id: string) =>
+    signedPost<{ approval?: Approval; error?: string }>(b, "/approval/claim", { id, via: "deck", handback: true }, signer);
+
+  test("handback closes a hook row with no verdict, and the parked wait reads it back", async () => {
+    const b = await boot();
+    const op = newOperator();
+    const s = await session(b, op, "window-hook");
+    const row = await hook(b, s);
+
+    const parked = wait(b, s, row.id, 20, row.secret);
+    await Bun.sleep(100);
+    const res = await handback(b, { cred: op.cred, operator_id: op.id }, row.id);
+    expect(res.status, res.body.error).toBe(200);
+    const woke = (await parked).body.approval;
+    expect([woke?.status, woke?.answer_kind, woke?.answer_text]).toEqual(["answered_terminal", null, null]);
+    expect((await claimAllow(b, op, row.id)).status, "handed back means settled: no later allow").toBe(409);
+  });
+
+  test("handback is refused on a row that is not hook-route", async () => {
+    const b = await boot();
+    const op = newOperator();
+    const ptyRow = await addApproval(b, op);
+    expect(ptyRow.reply_route).toBe("pty");
+    expect((await handback(b, { cred: op.cred, operator_id: op.id }, ptyRow.id)).status).toBe(422);
+    expect((await listed(b, op, ptyRow.id))?.status).toBe("pending");
+  });
+
+  test("handback is a claim: a session credential gets 403", async () => {
+    const b = await boot();
+    const op = newOperator();
+    const s = await session(b, op, "window-hook");
+    const row = await hook(b, s);
+    expect((await handback(b, s, row.id)).status).toBe(403);
+    expect((await listed(b, op, row.id))?.status).toBe("pending");
+  });
+
+  test("another tile holding the same window credential cannot wait on or withdraw a hook row without its secret", async () => {
+    const b = await boot();
+    const op = newOperator();
+    // One credential per window: tile B signs with exactly A's session credential.
+    const s = await session(b, op, "window-hook");
+    const row = await hook(b, s);
+    const unknown = await wait(b, s, crypto.randomUUID(), 1);
+    expect(unknown.status).toBe(404);
+
+    for (const secret of [undefined, "", "not-the-secret", `${row.secret}x`]) {
+      const w = await wait(b, s, row.id, 1, secret);
+      expect([w.status, w.body], `wait with ${JSON.stringify(secret)} must read like an unknown id`).toEqual([
+        unknown.status,
+        unknown.body,
+      ]);
+      const wd = await withdraw(b, s, row.id, secret);
+      expect([wd.status, wd.body]).toEqual([unknown.status, unknown.body]);
+    }
+    const db = new Database(b.dbPath);
+    const stamp = db.query("SELECT last_wait_at FROM pending_approvals WHERE id = ?").get(row.id) as {
+      last_wait_at: string | null;
+    };
+    db.close();
+    expect(stamp.last_wait_at, "an unauthenticated wait must not keep the row alive").toBeNull();
+    expect((await listed(b, op, row.id))?.status).toBe("pending");
+
+    expect((await wait(b, s, row.id, 1, row.secret)).body.pending).toBe(true);
+    const opWait = await signedPost<{ pending?: boolean }>(
+      b, "/approval/wait", { id: row.id, timeout_sec: 1 }, { cred: op.cred, operator_id: op.id }
+    );
+    expect(opWait.body.pending, "the operator credential needs no producer secret").toBe(true);
+    expect((await withdraw(b, s, row.id, row.secret)).status).toBe(200);
+  });
+
+  test("the producer secret appears only in the add response: not in list, wait, nor the broker log", async () => {
+    const b = await boot();
+    const op = newOperator();
+    const s = await session(b, op, "window-hook");
+    const row = await hook(b, s);
+    expect(row.secret.length).toBeGreaterThanOrEqual(22);
+
+    const list = await signedPost(b, "/approval/list", approvalListBody(DEFAULT_PROJECT_KEY), {
+      cred: op.cred,
+      operator_id: op.id,
+    });
+    await claimAllow(b, op, row.id);
+    const waited = await wait(b, s, row.id, 1, row.secret);
+    await withdraw(b, s, row.id, "wrong");
+    expect(JSON.stringify(list.body)).not.toContain(row.secret);
+    expect(JSON.stringify(waited.body)).not.toContain(row.secret);
+    expect(JSON.stringify(waited.body)).not.toContain("producer_secret");
+    await Bun.sleep(200);
+    expect(readFileSync(join(b.tmpDir, "logs", "broker.log"), "utf8")).not.toContain(row.secret);
+  });
+
+  test("approvalWaitTimeoutSec caps a hook row at 30 s and leaves other routes on the general ceiling", () => {
+    expect(approvalWaitTimeoutSec(300, "hook"), "a 300 s park would keep a dead CLI's row looking alive").toBe(30);
+    expect(approvalWaitTimeoutSec(25, "hook")).toBe(25);
+    expect(approvalWaitTimeoutSec(Number.NaN, "hook")).toBe(30);
+    expect(approvalWaitTimeoutSec(undefined, "hook")).toBe(30);
+    expect(approvalWaitTimeoutSec("300", "hook")).toBe(30);
+    expect(approvalWaitTimeoutSec(-5, "hook")).toBe(1);
+    expect(approvalWaitTimeoutSec(300, "pty")).toBe(300);
+    expect(approvalWaitTimeoutSec(300, "channel")).toBe(300);
+    expect(approvalWaitTimeoutSec(1_000, "pty")).toBe(300);
+    expect(approvalWaitTimeoutSec(Number.NaN, "pty")).toBe(30);
+  });
+
+  test("/approval/wait parks a hook row for the capped duration, not the one asked", async () => {
+    const b = await boot();
+    const op = newOperator();
+    const s = await session(b, op, "window-hook");
+    const row = await hook(b, s);
+
+    const started = Date.now();
+    expect((await wait(b, s, row.id, 1, row.secret)).body.pending).toBe(true);
+    expect(Date.now() - started).toBeLessThan(5_000);
+
+    const parked = wait(b, s, row.id, 300, row.secret);
+    await Bun.sleep(150);
+    await claimAllow(b, op, row.id);
+    expect((await parked).body.approval?.answer_kind).toBe("allow");
+    const logPath = join(b.tmpDir, "logs", "broker.log");
+    const deadline = Date.now() + 2000;
+    let capped = false;
+    while (!capped && Date.now() < deadline) {
+      capped = readFileSync(logPath, "utf8").includes(`approval ${row.id}: wait capped at 30 s (asked 300 s)`);
+      if (!capped) await Bun.sleep(50);
+    }
+    expect(capped, "the handler must park for approvalWaitTimeoutSec's value").toBe(true);
+  });
+
+  test("a session may withdraw only a hook-route row", async () => {
+    const b = await boot();
+    const op = newOperator();
+    const s = await session(b, op, "window-hook");
+    const ptyGuarded = (await raise(b, s, "window-hook", { reply_route: "pty", merge: "never" })).body.approval;
+    expect(ptyGuarded.mergeable).toBe(false);
+    const res = await withdraw(b, s, ptyGuarded.id);
+    expect(res.status, "another tile's ask_operator ticket is not this session's to close").toBe(422);
+    expect((await listed(b, op, ptyGuarded.id))?.status).toBe("pending");
+  });
+
+  test("settleApproval, the body every gateway answer runs through, refuses an orphan hook row as session-gone", async () => {
+    // broker.ts starts a server on import, so the real function body is cut
+    // out and evaluated against an in-memory table. onAnswer hands this exact
+    // value to channelAnswerResult, which keeps `refused` for the phone.
+    const src = readFileSync(join(import.meta.dir, "..", "broker.ts"), "utf8").replace(/\r\n/g, "\n");
+    const start = src.indexOf("function settleApproval(");
+    const end = src.indexOf("\n}\n", start);
+    expect(start, "settleApproval not found in broker.ts").toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const dir = realpathSync.native(mkdtempSync(join(tmpdir(), "kory-settle-")));
+    const file = join(dir, "settle.ts");
+    writeFileSync(
+      file,
+      `export function register(env) {\n` +
+        `  const { db, approvalWhere, hookProducerGone, rowToApproval, notifyRegistry, log, deliverApprovalAnswer, resolveApprovalWaiters } = env;\n` +
+        `${src.slice(start, end + 2)}\n  return settleApproval;\n}\n`
+    );
+    const { register } = (await import(pathToFileURL(file).href)) as {
+      register: (env: Record<string, unknown>) => (...args: unknown[]) => Record<string, unknown>;
+    };
+    const db = new Database(":memory:");
+    db.run("CREATE TABLE pending_approvals (id TEXT, status TEXT, answered_at TEXT)");
+    db.run("INSERT INTO pending_approvals VALUES ('orphan', 'pending', NULL)");
+    const settle = register({
+      db,
+      approvalWhere: () => ({ sql: "1 = 1", params: [] }),
+      hookProducerGone: () => true,
+      rowToApproval: (r: unknown) => r,
+      notifyRegistry: { settle: async () => {} },
+      log: { info: () => {}, error: () => {} },
+      deliverApprovalAnswer: () => {
+        throw new Error("an orphan row must never be delivered");
+      },
+      resolveApprovalWaiters: () => {
+        throw new Error("an orphan row has no waiter to wake");
+      },
+    });
+
+    const res = settle("orphan", {}, "telegram", "allow", null, "answered");
+    expect(res.status).toBe(410);
+    expect(res.refused, "without it the phone reads 'already handled' instead of why").toBe("session-gone");
+    const row = db.query("SELECT status FROM pending_approvals WHERE id = 'orphan'").get() as { status: string };
+    expect(row.status).toBe("abandoned");
+    db.close();
+  });
+
+  test("a hook row whose notification expired is still parked by wait and closed by withdraw", async () => {
+    const b = await boot();
+    const op = newOperator();
+    const s = await session(b, op, "window-hook");
+    const row = await hook(b, s);
+    const db = new Database(b.dbPath);
+    db.run("UPDATE pending_approvals SET status = 'expired_notif' WHERE id = ?", [row.id]);
+    db.close();
+
+    const started = Date.now();
+    const waited = await wait(b, s, row.id, 1, row.secret);
+    expect(waited.body.pending, "an immediate return would make the module respawn its helper in a loop").toBe(true);
+    expect(Date.now() - started).toBeGreaterThanOrEqual(900);
+
+    const res = await withdraw(b, s, row.id, row.secret);
+    expect(res.status, res.body.error).toBe(200);
+    expect(res.body.approval?.status).toBe("answered_terminal");
+  });
+
+  test("a malformed claim on a hook row whose module stopped waiting is refused without closing the row", async () => {
+    const b = await boot();
+    const op = newOperator();
+    const s = await session(b, op, "window-hook");
+    const row = await hook(b, s);
+    age(b, row.id, 46_000);
+
+    const res = await signedPost<{ error?: string }>(
+      b, "/approval/claim", { id: row.id, via: "deck", answer_kind: "maybe" }, { cred: op.cred, operator_id: op.id }
+    );
+    expect(res.status).toBe(400);
+    expect((await listed(b, op, row.id))?.status).toBe("pending");
+  });
+
+  test("a claim on a hook row with a recent wait, or a wait still parked, is settled", async () => {
+    const b = await boot();
+    const op = newOperator();
+    const s = await session(b, op, "window-hook");
+
+    const recent = await hook(b, s);
+    await wait(b, s, recent.id, 1, recent.secret);
+    expect((await claimAllow(b, op, recent.id)).status).toBe(200);
+
+    const parkedRow = await hook(b, s);
+    const parked = wait(b, s, parkedRow.id, 20, parkedRow.secret);
+    await Bun.sleep(100);
+    age(b, parkedRow.id, 60_000);
+    const claimed = await claimAllow(b, op, parkedRow.id);
+    expect(claimed.status, "a long wait in flight is the module being alive").toBe(200);
+    expect((await parked).body.approval?.answer_kind).toBe("allow");
   });
 });

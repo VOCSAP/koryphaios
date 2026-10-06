@@ -157,3 +157,28 @@ test("markVerdictsDelivered sends project_key on its /approval/delivered request
   expect(calls[0]!.url.endsWith("/approval/delivered")).toBe(true);
   expect(calls[0]!.body.project_key).toBe("proj-deliver");
 });
+
+test("a refused claim surfaces the broker's reason to the operator, status last", async () => {
+  const answering = (status: number, body: string): typeof fetch =>
+    (async () => new Response(body, { status, headers: { "content-type": "application/json" } })) as unknown as typeof fetch;
+  const deps = makeDeps("proj-claim");
+  const reason = "the session is no longer waiting for this answer (closed or restarted): answer it in its terminal";
+
+  const gone = claimApproval(
+    { ...deps, fetchImpl: answering(410, JSON.stringify({ error: reason })) },
+    { id: "a", answerKind: "allow" }
+  );
+  await expect(gone).rejects.toThrow(`/approval/claim failed: ${reason}: 410`);
+
+  const raw = claimApproval({ ...deps, fetchImpl: answering(502, "Bad Gateway") }, { id: "a", answerKind: "allow" });
+  await expect(raw).rejects.toThrow("/approval/claim failed: Bad Gateway: 502");
+
+  const empty = claimApproval({ ...deps, fetchImpl: answering(500, "") }, { id: "a", answerKind: "allow" });
+  await expect(empty).rejects.toThrow(/^\/approval\/claim failed: 500$/);
+
+  const lost = await claimApproval(
+    { ...deps, fetchImpl: answering(409, JSON.stringify({ error: "already-settled" })) },
+    { id: "a", answerKind: "allow" }
+  );
+  expect(lost, "a lost race still reads as null once the reason is in the message").toBeNull();
+});

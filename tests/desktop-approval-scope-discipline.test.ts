@@ -43,6 +43,10 @@ const ALLOWED_FILES = new Set([
   // The exemption covers only that replay, not an unscoped query added
   // elsewhere in this file that impersonates a caller.
   join("tests", "migrate-project-key-case.test.ts"),
+  // This end-to-end gateway suite ages ONE hook row's liveness columns in the
+  // broker's own database file, as a fixture standing for a dead CLI session:
+  // a fixture, not a caller.
+  join("tests", "broker-ntfy-channel.test.ts"),
 ]);
 
 /**

@@ -1693,8 +1693,10 @@ export type ApprovalVia = "deck" | "telegram" | "discord" | "ntfy";
  *   message would simply queue behind it.
  * `pty` — the Deck types the answer into the tile. Required for permission
  *   dialogs, and for CLIs that have no push channel at all (codex, gemini).
+ * `hook` -- the Claude Code module that raised the row waits for the verdict
+ *   and returns it to the engine itself; nothing is typed into the tile.
  */
-export type ApprovalReplyRoute = "channel" | "pty";
+export type ApprovalReplyRoute = "channel" | "pty" | "hook";
 
 /**
  * Whether a row may merge with another pending row on the same tile.
@@ -1775,7 +1777,7 @@ export interface ApprovalAddRequest {
   options?: string[];
   session_ref?: string;
   tile_ref?: string;
-  /** Defaults to 'pty'. 'channel' additionally needs reply_peer_id. */
+  /** Defaults to 'pty'. 'channel' additionally needs reply_peer_id; 'hook' needs merge 'never'. */
   reply_route?: ApprovalReplyRoute;
   /**
    * Peer to deliver the answer to, resolved broker-side against the group in
@@ -1795,12 +1797,21 @@ export interface ApprovalAddResponse {
    * also widen what a caller can read off SOMEONE ELSE's approval.
    */
   approval: Approval | Pick<Approval, "id" | "status">;
+  /**
+   * Only for reply_route 'hook', and only in this response: a session must
+   * present it on every wait and withdraw of that row. The broker keeps its
+   * hash only.
+   */
+  producer_secret?: string;
 }
 
 export interface ApprovalWaitRequest {
   auth?: ApprovalAuthProof;
   id?: string;
+  /** Capped at 30 on a hook-route row. */
   timeout_sec?: number;
+  /** Required from a session on a hook-route row: the secret its add returned. */
+  producer_secret?: string;
 }
 
 /** Either the settled approval, or `pending: true` when the long poll expired. */
@@ -1819,9 +1830,30 @@ export interface ApprovalClaimRequest {
   acknowledge?: boolean;
   /** Settle as answered on the tile itself (status answered_terminal); via deck only, exclusive with the others. */
   terminal?: boolean;
+  /**
+   * Give a hook-route request back to the native menu on its tile: status
+   * answered_terminal, answer_kind null, which the waiting module reads as no
+   * verdict. Hook route only, exclusive with the others.
+   */
+  handback?: boolean;
 }
 
 export interface ApprovalClaimResponse {
+  approval: Approval;
+}
+
+/**
+ * The session closes its own pending guarded row (merge 'never') without a
+ * verdict, e.g. once the dialog was answered on the tile itself.
+ */
+export interface ApprovalWithdrawRequest {
+  auth?: ApprovalAuthProof;
+  id?: string;
+  /** Required from a session on a hook-route row: the secret its add returned. */
+  producer_secret?: string;
+}
+
+export interface ApprovalWithdrawResponse {
   approval: Approval;
 }
 

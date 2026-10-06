@@ -44,7 +44,18 @@ async function signedPost<T>(
     headers,
     body: JSON.stringify({ ...body, auth })
   })
-  if (!res.ok) throw new Error(`${path} failed: ${res.status}`)
+  if (!res.ok) {
+    // The status stays last: callers match a lost race with /: 409$/.
+    const raw = (await res.text()).trim()
+    let detail = raw
+    try {
+      const parsed = JSON.parse(raw) as { error?: unknown }
+      if (typeof parsed.error === 'string') detail = parsed.error
+    } catch {
+      // Not JSON: the raw body is the operator's only clue, kept as is.
+    }
+    throw new Error(detail ? `${path} failed: ${detail.slice(0, 300)}: ${res.status}` : `${path} failed: ${res.status}`)
+  }
   return (await res.json()) as T
 }
 
@@ -398,9 +409,10 @@ export function classifyVerdict(
   session: { exists: boolean; waiting: boolean } | null,
   now: number = Date.now()
 ): VerdictDisposition {
-  // The broker already handed a 'channel' answer to the peer as a message;
-  // typing it in as well would deliver it twice.
-  if (approval.reply_route === 'channel') return 'settle'
+  // The broker already handed a 'channel' answer to the peer as a message, and
+  // a 'hook' answer is returned to Claude Code by the module waiting on it;
+  // typing either in as well would deliver it twice.
+  if (approval.reply_route === 'channel' || approval.reply_route === 'hook') return 'settle'
   // No tile to type into, and none will appear: this one is genuinely over.
   // Checked before the 'answered' check below on purpose: an unanswered
   // approval whose tile has vanished would otherwise fall through to
