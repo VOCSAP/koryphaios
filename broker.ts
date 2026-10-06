@@ -1833,6 +1833,14 @@ const CLEAR_LOCK_RELAY_SET =
   "lock_relay = NULL, lock_relay_seen = NULL, lock_contested_by = '[]'";
 
 /**
+ * The lock columns every release path clears. Park, relay, operator_id and
+ * status stay outside it: what each path does with them differs on purpose
+ * (on a replica, the upsert leaves the relay columns to the replication pass).
+ */
+const CLEAR_LOCK_SET =
+  "locked = 0, locked_by = NULL, locked_group = NULL, locked_by_token = NULL, locked_at = NULL";
+
+/**
  * A lock RELAYED for a replica's agent has no `peers` row on this broker and no
  * local write refreshing its `updated_at`: the replica's own heartbeat
  * (`lock_relay_seen`, rewritten by every claim of its replication pass) is the
@@ -1891,7 +1899,7 @@ function releaseStaleLocks(): void {
     }[];
     db.run(
       `UPDATE roadmap_items SET
-         locked = 0, locked_by = NULL, locked_group = NULL, locked_by_token = NULL, locked_at = NULL, operator_id = NULL,
+         ${CLEAR_LOCK_SET}, operator_id = NULL,
          lock_parked_at = NULL, lock_parked_by = NULL, ${CLEAR_LOCK_RELAY_SET},
          status = CASE WHEN status = 'in_progress' THEN 'planned' ELSE status END,
          updated_by = 'lock-sweep', updated_at = datetime('now')
@@ -4413,7 +4421,7 @@ function handleRoadmapArchive(
     `UPDATE roadmap_items SET
        status = 'archived',
        deleted_at = COALESCE(deleted_at, datetime('now')),
-       locked = 0, locked_by = NULL, locked_group = NULL, locked_by_token = NULL, locked_at = NULL,
+       ${CLEAR_LOCK_SET},
        operator_id = COALESCE(?, operator_id),
        lock_parked_at = NULL, lock_parked_by = NULL, ${CLEAR_LOCK_RELAY_SET},
        updated_by = ?, updated_at = datetime('now')
@@ -4581,7 +4589,7 @@ function handleRoadmapLockRelease(
       // this loop, that would reopen the race.
       const res = db.run(
         `UPDATE roadmap_items SET
-           locked = 0, locked_by = NULL, locked_by_token = NULL, locked_at = NULL, operator_id = NULL,
+           ${CLEAR_LOCK_SET}, operator_id = NULL,
            lock_parked_at = NULL, lock_parked_by = NULL, ${CLEAR_LOCK_RELAY_SET},
            status = CASE WHEN status = 'in_progress' THEN 'planned' ELSE status END,
            updated_by = ?, updated_at = datetime('now')
@@ -5236,10 +5244,10 @@ function handleRoadmapImport(body: {
             : []
         ),
         locked: lockedVal ? 1 : 0,
-        locked_by: lockedByVal,
-        locked_group: lockedGroupVal,
-        locked_by_token: lockedByTokenVal,
-        locked_at: lockedAtVal,
+        locked_by: lockedVal ? lockedByVal : null,
+        locked_group: lockedVal ? lockedGroupVal : null,
+        locked_by_token: lockedVal ? lockedByTokenVal : null,
+        locked_at: lockedVal ? lockedAtVal : null,
         // Card edefff05: same discipline as created_by/updated_by above, not
         // the file-wins discipline the content fields use just above --
         // `it.operator_id` is UNTRUSTED file content, and this column exists
@@ -6477,10 +6485,7 @@ function handleRoadmapSyncLock(body: RoadmapSyncLockRequest): SyncLockResult {
 
   if (heldByThisRelay) {
     db.run(
-      `UPDATE roadmap_items SET
-         locked = 0, locked_by = NULL, locked_group = NULL, locked_by_token = NULL,
-         locked_at = NULL, ${CLEAR_LOCK_RELAY_SET}
-       WHERE id = ?`,
+      `UPDATE roadmap_items SET ${CLEAR_LOCK_SET}, ${CLEAR_LOCK_RELAY_SET} WHERE id = ?`,
       [body.id]
     );
     return { ok: true, release: { released: true, item: rowToSyncRow(getRoadmapRow(body.id)!) } };
@@ -7134,8 +7139,7 @@ function applyPulledRow(remote: RoadmapSyncRow): boolean {
     );
   } else if (localScope === "remote") {
     db.run(
-      `UPDATE roadmap_items SET queue = ?, locked = 0, locked_by = NULL, locked_group = NULL,
-         locked_by_token = NULL, locked_at = NULL, lock_scope = NULL,
+      `UPDATE roadmap_items SET queue = ?, ${CLEAR_LOCK_SET}, lock_scope = NULL,
          lock_contested_by = ? WHERE id = ?`,
       [remote.queue, contestedJson, remote.id]
     );

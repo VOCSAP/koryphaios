@@ -354,6 +354,15 @@ test("a swept card this replica does not hold adopts the released state plainly,
       "planned",
       false,
     ]);
+    const replicaDb = openBrokerDb(replica.dbPath);
+    const mirrorColumns = replicaDb
+      .query("SELECT locked, locked_by, locked_group, locked_by_token, locked_at FROM roadmap_items WHERE id = ?")
+      .get(held.body.item.id);
+    replicaDb.close();
+    expect(["the mirrored release clears every lock column", mirrorColumns]).toEqual([
+      "the mirrored release clears every lock column",
+      { locked: 0, locked_by: null, locked_group: null, locked_by_token: null, locked_at: null },
+    ]);
   } finally {
     if (replica) await stopBroker(replica);
     await stopBroker(upstream);
