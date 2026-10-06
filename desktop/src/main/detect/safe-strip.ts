@@ -123,10 +123,7 @@ export function createSafeStripper(): { feed(chunk: string): string } {
           } else {
             pendingLen++
             if (pendingLen > OSC_MAX_LEN) {
-              // Abandon resumes 'idle' and lets subsequent bytes through as
-              // ordinary text, same posture as the CSI branch: the alternative,
-              // staying in 'osc' forever, used to swallow the entire rest of
-              // the session's output silently and permanently.
+              // Abandon resumes 'idle' so an unterminated OSC cannot swallow the rest of the stream.
               mode = 'idle'
             }
             i++
@@ -138,9 +135,10 @@ export function createSafeStripper(): { feed(chunk: string): string } {
             mode = 'idle'
             i++
           } else {
-            // Not a real ST -- the held ESC was literal OSC payload content
-            // (discarded either way). Reprocess this character under 'osc'.
-            mode = 'osc'
+            // Not a real ST: the held ESC counts as payload toward the cap,
+            // and this character is reprocessed under the resulting mode.
+            pendingLen++
+            mode = pendingLen > OSC_MAX_LEN ? 'idle' : 'osc'
           }
           break
       }

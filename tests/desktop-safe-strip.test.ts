@@ -2,6 +2,7 @@
 
 import { expect, test } from "bun:test";
 import { createSafeStripper } from "../desktop/src/main/detect/safe-strip.ts";
+import { createOscParser } from "../desktop/src/main/detect/osc.ts";
 
 const ESC = "\x1b";
 const BEL = "\x07";
@@ -127,6 +128,47 @@ test("a never-terminated OSC does not grow memory without bound (each call's cos
   // would be orders of magnitude slower here.
   expect(ms).toBeLessThan(500);
 });
+
+// Smallest payload length at which the open OSC was already abandoned before the next byte arrives, so that byte is handled fresh.
+function abandonPoint(recovered: (payload: string) => boolean, unit: string, max: number): number | null {
+  if (!recovered(unit.repeat(Math.ceil(max / unit.length)).slice(0, max))) return null;
+  let lo = 0;
+  let hi = max;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (recovered(unit.repeat(Math.ceil(mid / unit.length)).slice(0, mid))) hi = mid;
+    else lo = mid + 1;
+  }
+  return lo;
+}
+
+const MARK = "plain-after";
+const stripRecovers = (payload: string): boolean => {
+  const s = createSafeStripper();
+  s.feed(`${ESC}]0;`);
+  s.feed(payload);
+  return s.feed(`Q${MARK}`).includes(`Q${MARK}`);
+};
+const oscRecovers = (payload: string): boolean => {
+  const p = createOscParser();
+  p.feed(`${ESC}]0;`);
+  p.feed(payload);
+  return p.feed(`${ESC}]0;${MARK}${BEL}`).title === MARK;
+};
+
+for (const [label, unit] of [
+  ["plain bytes", "x"],
+  ["ESC + non-terminating byte pairs", `${ESC}a`],
+  ["a run of bare ESC bytes", ESC],
+] as const) {
+  test(`the OSC length cap gives up on an open OSC at the same payload length as osc.ts: ${label}`, () => {
+    const max = 40_000;
+    const strip = abandonPoint(stripRecovers, unit, max);
+    const osc = abandonPoint(oscRecovers, unit, max);
+    expect(osc).not.toBeNull();
+    expect({ strip, osc }).toEqual({ strip: osc, osc });
+  });
+}
 
 test("two instances never share state", () => {
   const a = createSafeStripper();
