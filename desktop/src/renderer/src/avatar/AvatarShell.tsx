@@ -26,7 +26,6 @@ export function AvatarShell({ view, previous, osReducedMotion, move }: AvatarShe
     <div
       className="avatar-root"
       role="img"
-      title={summary.faceCopy.title}
       aria-label={summary.faceCopy.ariaLabel}
       style={style}
       data-face={summary.face}

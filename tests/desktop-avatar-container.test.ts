@@ -284,7 +284,7 @@ describe("shell attributes", () => {
     expect(avatarThemeVars("light")["--avatar-ink"]).not.toBe(avatarThemeVars("dark")["--avatar-ink"]);
   });
 
-  test("title and aria-label are the main's copy for each of the seven faces, and follow a newer view", async () => {
+  test("aria-label is the main's copy for each of the seven faces and follows a newer view, with no hover title", async () => {
     const fake = bridge();
     mount(fake);
     const base = SUMMARIES.seul();
@@ -297,7 +297,8 @@ describe("shell attributes", () => {
         const faceCopy = copyOf(face, count);
         fake.push({ ...view(1, revision, base), summary: { ...base, face, faceCopy } });
         expect(attr("data-face")).toBe(face);
-        expect(attr("title"), `${face} title`).toBe(faceCopy.title);
+        expect(shell().querySelector("[title]"), `${face}: a title attribute shows a hover bubble`).toBeNull();
+        expect(attr("title"), `${face}: a title attribute shows a hover bubble`).toBeNull();
         expect(attr("aria-label"), `${face} aria-label`).toBe(faceCopy.ariaLabel);
       }
     }
