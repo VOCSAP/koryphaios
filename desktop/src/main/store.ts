@@ -23,6 +23,7 @@ import { APP_STATE_SUBDIR } from './migrate-data-dir'
 import { reportError } from './log'
 import { WF_LANE_H_DEFAULT, WF_LANE_H_MIN } from '@shared/workflow'
 import { sanitizeTtsrDisabled } from './ttsr-toggles'
+import { SPAWN_CAP, sanitizeSpawnCap } from './spawn-cap'
 
 const DEFAULT_CONFIG: AppConfig = {
   projectDir: homedir(),
@@ -73,6 +74,7 @@ const DEFAULT_CONFIG: AppConfig = {
   // consent rule lives in the supervisor's system prompt, the app confirms
   // nothing. 'team-review' / 'full-control' add native approval dialogs.
   supervisorSpawnMode: 'hands-free',
+  agentSpawnCap: SPAWN_CAP,
   // Join-announce gate (card 8cb54a0f): off by default -- the operator opts
   // into either the lead-only note or the full historical broadcast.
   joinAnnounceLevel: 'off',
@@ -145,6 +147,11 @@ export function loadConfig(): AppConfig {
   if (!SUPERVISOR_SPAWN_MODES.includes(cfg.supervisorSpawnMode)) {
     cfg.supervisorSpawnMode = 'hands-free'
   }
+  const agentSpawnCap = sanitizeSpawnCap(raw.agentSpawnCap)
+  if (agentSpawnCap === null && raw.agentSpawnCap !== undefined) {
+    reportError('store', `invalid agentSpawnCap (${String(raw.agentSpawnCap).slice(0, 40)}) in config.json, using ${SPAWN_CAP}`)
+  }
+  cfg.agentSpawnCap = agentSpawnCap ?? SPAWN_CAP
   // Unknown/absent join-announce level (older config, hand-edited file) -> default.
   if (!JOIN_ANNOUNCE_LEVELS.includes(cfg.joinAnnounceLevel)) {
     cfg.joinAnnounceLevel = 'off'

@@ -81,7 +81,7 @@ const TOOLS = [
   {
     name: 'deck_spawn_team',
     description:
-      'Spawn a whole team plan in ONE call (subject to the operator trust-mode setting). Returns immediately; the Deck then notifies you (targeted deck announce) as each session connects or fails to. Capped to 8 live sessions total.',
+      'Spawn a whole team plan in ONE call (subject to the operator trust-mode setting). Returns immediately; the Deck then notifies you (targeted deck announce) as each session connects or fails to. Operator caps live sessions.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -113,7 +113,7 @@ const TOOLS = [
   {
     name: 'deck_spawn_session',
     description:
-      'Spawn ONE visible Claude Code session tile in the Deck (subject to the operator trust-mode setting). By default the call waits for the session to connect and returns its peer_id (wait_for_peer:false returns immediately and the Deck notifies you instead). Optionally in a fresh git worktree. Capped to 8 live sessions.',
+      'Spawn ONE visible Claude Code session tile in the Deck (subject to the operator trust-mode setting). By default the call waits for the session to connect and returns its peer_id (wait_for_peer:false returns immediately and the Deck notifies you instead). Optionally in a fresh git worktree. Operator caps live sessions.',
     inputSchema: {
       type: 'object',
       properties: {

@@ -233,6 +233,8 @@
   "settings.spawnModeTeamReviewHelp": "L'app te montre le plan d'équipe complet avant de lancer ; un clic valide tout.",
   "settings.spawnModeFullControl": "Contrôle total",
   "settings.spawnModeFullControlHelp": "Chaque agent est confirmé un par un avant son lancement. Le plus de contrôle, le plus de clics.",
+  "settings.agentSpawnCap": "Limite de lancement des agents (sessions vivantes)",
+  "settings.agentSpawnCapHelp": "Les agents ne peuvent pas ouvrir de tuile au-delà de ce nombre de sessions vivantes (1 à 32). La baisser ne ferme rien ; vos propres lancements ne sont jamais limités.",
   "settings.joinAnnounceLevel": "Annonce de jonction",
   "settings.joinAnnounceLevelOff": "Désactivée",
   "settings.joinAnnounceLevelOffHelp": "Aucune annonce quand un nouveau peer rejoint le groupe.",

@@ -26,7 +26,8 @@ import { parseRunDirectiveArgs, type DeckDirectiveRunResult } from './directive-
 import { EMBEDDED_AGENTS, getEmbeddedAgent, type EmbeddedAgent } from './team-embedded'
 import { TEAM_PLAYBOOK } from './team-embedded'
 import { TEAM_LEAD_DECK_TOOLS } from './supervisor'
-import { createSpawnCap } from './spawn-cap'
+import { createSpawnCap, SPAWN_CAP } from './spawn-cap'
+import { reportError } from './log'
 
 export { SPAWN_CAP } from './spawn-cap'
 
@@ -93,6 +94,8 @@ export interface DeckControlDeps {
     opts?: { hasDeckLeadTools?: boolean }
   ): Promise<SessionRuntime>
   listSessions(): DeckControlSession[]
+  /** The operator's agent spawn cap, read at every reservation so a Settings change applies to the next spawn. */
+  getSpawnCap(): number
   restartSession(id: string): Promise<void>
   closeSession(id: string): Promise<void>
   journal(message: string): void
@@ -439,7 +442,11 @@ export function startDeckControl(
   /** A second deck_close_all would re-read tiles the first is closing and force their cleanup (a kill without /exit). */
   let closeAllInFlight = false
 
-  const spawnCap = createSpawnCap(deps.listSessions)
+  const spawnCap = createSpawnCap(deps.listSessions, {
+    getCap: () => deps.getSpawnCap(),
+    onInvalidCap: (value) =>
+      reportError('deck-control', `invalid agent spawn cap (${String(value).slice(0, 40)}), applying ${SPAWN_CAP}`)
+  })
 
   /** Spawn one validated entry (shared by deck_spawn_session / deck_spawn_team). */
   async function spawnEntry(

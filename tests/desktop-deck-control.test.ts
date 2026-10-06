@@ -150,6 +150,7 @@ function makeDeps(state: { sessions: SessionRuntime[] }): DeckControlDeps & {
       return s;
     },
     listSessions: () => state.sessions,
+    getSpawnCap: () => SPAWN_CAP,
     restartSession: async (id) => {
       restarted.push(id);
     },
@@ -298,6 +299,43 @@ test("guards: close accepts every unlocked non-supervisor tile; remove only touc
   const capped = await call(srv, "deck_spawn_session", { name: "one-too-many" });
   expect(capped.status).toBe(400);
   expect(capped.body.error).toContain("spawn cap");
+});
+
+test("agent spawns follow the operator's cap setting live, without restarting the endpoint", async () => {
+  const state = { sessions: [fakeSession("live-0"), fakeSession("live-1")] };
+  const deps = makeDeps(state);
+  let setting = 3;
+  deps.getSpawnCap = () => setting;
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+
+  const allowed = await call(srv, "deck_spawn_session", { name: "third", wait_for_peer: false });
+  expect(allowed.status).toBe(200);
+  const refused = await call(srv, "deck_spawn_session", { name: "fourth", wait_for_peer: false });
+  expect(refused.status).toBe(400);
+  expect(refused.body.error).toContain("exceeds the 3 cap");
+
+  setting = 4;
+  const raised = await call(srv, "deck_spawn_session", { name: "fourth", wait_for_peer: false });
+  expect(raised.status).toBe(200);
+
+  setting = 1;
+  const team = await call(srv, "deck_spawn_team", { team: [{ name: "late" }] });
+  expect(team.status).toBe(400);
+  expect(state.sessions).toHaveLength(4);
+  expect(deps.closed).toEqual([]);
+});
+
+test("an agent spawn cap setting that is not a number falls back to SPAWN_CAP instead of lifting the cap", async () => {
+  const state = { sessions: Array.from({ length: SPAWN_CAP }, (_, i) => fakeSession(`live-${i}`)) };
+  const deps = makeDeps(state);
+  deps.getSpawnCap = () => NaN;
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+
+  const refused = await call(srv, "deck_spawn_session", { name: "past-cap", wait_for_peer: false });
+  expect(refused.status).toBe(400);
+  expect(refused.body.error).toContain(`exceeds the ${SPAWN_CAP} cap`);
 });
 
 test("deck_spawn_session reserves capacity while another approval is pending", async () => {
@@ -1869,6 +1907,7 @@ const REVIEWED_DECK_CONTROL_DEPS = [
   "closeSession",
   "confirmSpawnShellFields",
   "createWorktree",
+  "getSpawnCap",
   "journal",
   "listAgents",
   "listModels",

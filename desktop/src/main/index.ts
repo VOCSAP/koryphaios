@@ -151,6 +151,7 @@ import {
 } from './sandbox-prompt'
 import { createPersistentJournal, initDeckLog, logInfo, logWarn, onDeckError, reportError } from './log'
 import { installProcessFailureGuard } from './process-failure-guard'
+import { sanitizeSpawnCap } from './spawn-cap'
 import {
   startDeckControl,
   type DeckControlDeps,
@@ -438,6 +439,11 @@ const setConfig = (patch: Partial<AppConfig>): AppConfig => {
   // here too so a compromised-renderer patch can't persist arbitrary text.
   if (patch.glowColor !== undefined) {
     patch = { ...patch, glowColor: sanitizeGlowColor(patch.glowColor) }
+  }
+  if (patch.agentSpawnCap !== undefined && sanitizeSpawnCap(patch.agentSpawnCap) === null) {
+    reportError('config', `rejected config:set agentSpawnCap (${String(patch.agentSpawnCap).slice(0, 40)}), kept ${config.agentSpawnCap}`)
+    const { agentSpawnCap: _ignored, ...rest } = patch
+    patch = rest
   }
   // Local-provider API keys never persist in clear (C29): a renderer patch
   // carries transient `apiKey` fields that are encrypted (safeStorage) into
@@ -2736,6 +2742,7 @@ const controlDeps: DeckControlDeps = {
     )
   },
   listSessions: () => service.list().map((s) => ({ ...s, mintedCallerId: service.mintedCallerOf(s.id) })),
+  getSpawnCap: () => getConfig().agentSpawnCap,
   sandboxExec: (command) => sandbox.supervisorExec(command),
   runDirective: directiveBindings.runDirective,
   restartSession: async (id) => {

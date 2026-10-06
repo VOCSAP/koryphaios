@@ -17,6 +17,7 @@ change, free-text inputs on blur.
 | **System notification when a session waits for your input** | The "needs you" notification (⏸ badge always shows) |
 | **Show the floating "?" help button** | Show/hide the help assistant button (also right-click > hide) |
 | **Supervisor agent spawns** | Trust mode for supervisor-initiated spawns: Hands-free / Team review / Full control (see [supervisor-team.md](supervisor-team.md)) |
+| **Agent spawn limit** | Live sessions past which agents cannot spawn a tile (1 to 32, default 8). Lowering it closes nothing; your own launches are never limited |
 
 ### Appearance
 

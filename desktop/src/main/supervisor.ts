@@ -19,7 +19,7 @@ export const SUPERVISOR_NAME = 'supervisor'
 // repo-configurable, by design. It pilots the app (deck_* tools), so a
 // customizable harness (a supervisor.md picked up from the repo, or an agent
 // profile whose body REPLACES the system prompt) would let a cloned repository
-// silently repurpose a session that can spawn up to 8 briefed agents. Both
+// silently repurpose a session that can spawn briefed agents. Both
 // texts below are code constants; the system-prompt file is regenerated from
 // them at every spawn (an edited file on disk is overwritten).
 

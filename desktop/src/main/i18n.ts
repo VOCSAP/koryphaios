@@ -351,6 +351,9 @@ export const EN_DEFAULTS: Record<string, string> = {
   'settings.spawnModeFullControl': 'Full control',
   'settings.spawnModeFullControlHelp':
     'Each agent is confirmed one by one before it launches. Most control, most clicks.',
+  'settings.agentSpawnCap': 'Agent spawn limit (live sessions)',
+  'settings.agentSpawnCapHelp':
+    'Agents cannot spawn a tile past this many live sessions (1 to 32). Lowering it closes nothing; your own launches are never limited.',
   'settings.joinAnnounceLevel': 'Peer-join announcement',
   'settings.joinAnnounceLevelOff': 'Off',
   'settings.joinAnnounceLevelOffHelp': 'No announcement when a new peer joins the group.',

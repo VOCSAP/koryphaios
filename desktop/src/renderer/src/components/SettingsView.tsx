@@ -11,6 +11,7 @@ import {
 } from '@shared/models'
 import { ModelPicker } from './ModelPicker'
 import { DEFAULT_GLOW, DEFAULT_PALETTE } from '@shared/palette'
+import { SPAWN_CAP_MAX, SPAWN_CAP_MIN } from '@shared/spawn-cap-limits'
 import { GLYPH_ACTIONS } from './icons'
 import { graphId } from '@shared/graph'
 import { useDeck } from '../store'
@@ -59,6 +60,16 @@ export function SettingsView(): React.JSX.Element {
   useEffect(() => setProjectDir(config.projectDir), [config.projectDir])
   useEffect(() => setShell(config.shell), [config.shell])
   useEffect(() => setClodexProxyArgs(config.clodexProxyArgs), [config.clodexProxyArgs])
+  const [agentSpawnCap, setAgentSpawnCap] = useState(String(config.agentSpawnCap))
+  useEffect(() => setAgentSpawnCap(String(config.agentSpawnCap)), [config.agentSpawnCap])
+  const commitAgentSpawnCap = (): void => {
+    const cap = Number(agentSpawnCap)
+    if (Number.isInteger(cap) && cap >= SPAWN_CAP_MIN && cap <= SPAWN_CAP_MAX) {
+      if (cap !== config.agentSpawnCap) set('agentSpawnCap', cap)
+    } else {
+      setAgentSpawnCap(String(config.agentSpawnCap))
+    }
+  }
 
   // launchCommand lives in the (global) launch config, not AppConfig. presets +
   // models are carried through unchanged so saving the command preserves them.
@@ -264,6 +275,22 @@ export function SettingsView(): React.JSX.Element {
                   </small>
                 </div>
               ))}
+
+              <label className="field">
+                <span>{t('settings.agentSpawnCap')}</span>
+                <input
+                  type="number"
+                  min={SPAWN_CAP_MIN}
+                  max={SPAWN_CAP_MAX}
+                  value={agentSpawnCap}
+                  onChange={(e) => setAgentSpawnCap(e.target.value)}
+                  onBlur={commitAgentSpawnCap}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') commitAgentSpawnCap()
+                  }}
+                />
+              </label>
+              <small className="field-check-help">{t('settings.agentSpawnCapHelp')}</small>
 
               <div className="field">
                 <span>{t('settings.joinAnnounceLevel')}</span>

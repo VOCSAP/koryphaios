@@ -379,6 +379,8 @@ export interface AppConfig {
   mobileApprovals: boolean
   /** Confirmation level for supervisor-initiated spawns (PLAN TS4). */
   supervisorSpawnMode: SupervisorSpawnMode
+  /** Live-session ceiling for agent-initiated spawns (deck-control); operator gestures are not capped. */
+  agentSpawnCap: number
   /** Gate for the peer-join announcement broadcast; default 'off'. */
   joinAnnounceLevel: JoinAnnounceLevel
   /** Show the floating "?" help-assistant button (PLAN C9). */

@@ -29,7 +29,7 @@ session that pilots the app. Additional hard rules:
   (`deck_close_all`). A tile the operator locked is refused with "peer
   verrouillé" and left open. The other destructive deck actions (remove
   worktree, restart…) only work on what the supervisor itself created.
-- **Spawn cap**: at most 8 live sessions; large roadmaps are worked in waves.
+- **Spawn cap**: agents spawn up to the operator's agent spawn limit (Settings, default 8 live sessions); large roadmaps are worked in waves.
 
 ## The deck tools
 
