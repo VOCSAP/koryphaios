@@ -74,6 +74,11 @@ export function register(on: On): void {
     return next(e)
   })
 
+  on('session.end', async ($, e, next) => {
+    if (e.reason === 'clear') await reportMeasuredContext($, {})
+    return next(e)
+  })
+
   on('session.compact', async ($, e, next) => {
     const result = await next(e)
     if ('skip' in result) return result

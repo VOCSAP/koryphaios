@@ -252,6 +252,60 @@ test('session.compact continues before it writes the unknown context', async () 
   })
 })
 
+function registeredHandlers(): Map<string, (...args: unknown[]) => Promise<unknown>> {
+  const handlers = new Map<string, (...args: unknown[]) => Promise<unknown>>()
+  register(
+    ((event: string, ...args: unknown[]) => {
+      const handler = args.at(-1)
+      if (typeof handler === 'function') handlers.set(event, handler as (...args: unknown[]) => Promise<unknown>)
+    }) as never,
+  )
+  return handlers
+}
+
+const REPORT_AT_20_PERCENT = encodeStatusFromPayload(
+  {
+    model: { id: 'claude-opus-4-1', display_name: 'Opus' },
+    context_window: { context_window_size: 1_000_000, used_percentage: 20 },
+  },
+  1,
+)!
+
+test('a /clear empties the context gauge and keeps the model and window', async () => {
+  const probe = host(REPORT_AT_20_PERCENT)
+  const ended: unknown[] = []
+
+  const result = await registeredHandlers().get('session.end')!(probe.value, { reason: 'clear' }, async (e: unknown) => {
+    expect(probe.writes, 'the report is written before the engine ends the session').toHaveLength(1)
+    ended.push(e)
+    return { sessionId: 'old' }
+  })
+
+  expect(result).toEqual({ sessionId: 'old' })
+  expect(ended).toEqual([{ reason: 'clear' }])
+  expect(decodeStatusFile(probe.writes[0]!), 'the gauge reads unused after /clear').toMatchObject({
+    modelId: 'claude-opus-4-1',
+    contextPct: null,
+    contextWindow: 1_000_000,
+  })
+})
+
+test('a session ending for any other reason leaves the report alone', async () => {
+  const probe = host(REPORT_AT_20_PERCENT)
+
+  await registeredHandlers().get('session.end')!(probe.value, { reason: 'prompt_input_exit' }, async () => ({ sessionId: 'old' }))
+
+  expect(probe.writes).toEqual([])
+})
+
+test('a /clear under the fallback status line writes nothing from the module', async () => {
+  const probe = host(REPORT_AT_20_PERCENT, [], 'claude-opus-5-5', '1')
+
+  await registeredHandlers().get('session.end')!(probe.value, { reason: 'clear' }, async () => ({ sessionId: 'old' }))
+
+  expect(probe.writes).toEqual([])
+})
+
 test('telemetry does not replace the fallback report before it exists', async () => {
   const probe = host(null)
 
