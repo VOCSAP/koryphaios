@@ -101,6 +101,21 @@ export function encodeStatusFromPayload(payload: unknown, now: number): string |
   })
 }
 
+export function encodeStatusFromModelIdentity(modelId: unknown, displayName: unknown, now: number): string | null {
+  if (!Number.isFinite(now) || now <= 0) return null
+  const id = validModelId(modelId)
+  const model = validModelName(displayName) ?? validModelName(id)
+  if (!id || !model) return null
+  return JSON.stringify({
+    v: STATUS_FILE_VERSION,
+    model_id: id,
+    model,
+    pct: null,
+    size: null,
+    at: now
+  })
+}
+
 export interface MeasuredContext {
   window?: unknown
   percent?: unknown

@@ -2,9 +2,9 @@
 // payloads + the readUsage orchestration with injected probes/fetch/rpc.
 
 import { test, expect, beforeEach } from "bun:test";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { chmodSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import {
   antigravityBucketMeta,
   parseAntigravityKeyring,
@@ -13,8 +13,12 @@ import {
   parseClaudeUsage,
   parseCodexRateLimits,
   parseCodexSessionText,
+  parseClaudeVersionOutput,
+  prewarmClaudeVersion,
+  hostSupportsKoryTelemetry,
   readUsage,
-  resetUsageCaches
+  resetUsageCaches,
+  supportsKoryTelemetry
 } from "../desktop/src/main/usage-service.ts";
 
 beforeEach(() => resetUsageCaches());
@@ -51,6 +55,54 @@ test("parseClaudeCredentials extracts the OAuth access token", () => {
   );
   expect(parseClaudeCredentials({ claudeAiOauth: { accessToken: "" } })).toBeNull();
   expect(parseClaudeCredentials({})).toBeNull();
+});
+
+test("Kory telemetry accepts only the measured host version boundary or newer", () => {
+  expect(supportsKoryTelemetry("2.1.288")).toBe(false);
+  expect(supportsKoryTelemetry("2.1.289")).toBe(true);
+  expect(supportsKoryTelemetry("2.2.0")).toBe(true);
+  expect(supportsKoryTelemetry("claude-code/2.1.90")).toBe(false);
+  expect(supportsKoryTelemetry("not-a-version")).toBe(false);
+  expect(supportsKoryTelemetry(null)).toBe(false);
+});
+
+test("Claude version output requires an exact Claude Code banner", () => {
+  expect(parseClaudeVersionOutput("2.1.289 (Claude Code)\n")).toBe("2.1.289");
+  expect(parseClaudeVersionOutput("shell 99.0.0\n2.1.288 (Claude Code)")).toBeNull();
+  expect(parseClaudeVersionOutput("2.1.289")).toBeNull();
+});
+
+test("prewarming a changed shell keeps its version decision separate", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "kory-claude-version-shell-"));
+  const originalPath = process.env.PATH;
+  try {
+    if (process.platform === "win32") {
+      const claude = join(dir, "claude.cmd");
+      writeFileSync(claude, "@echo off\r\necho 2.1.289 ^(Claude Code^)\r\n");
+      process.env.PATH = `${dir}${delimiter}${originalPath ?? ""}`;
+      await prewarmClaudeVersion("powershell.exe");
+      writeFileSync(claude, "@echo off\r\necho 2.1.288 ^(Claude Code^)\r\n");
+      const alternateShell = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+      await prewarmClaudeVersion(alternateShell);
+      expect(hostSupportsKoryTelemetry("powershell.exe")).toBe(true);
+      expect(hostSupportsKoryTelemetry(alternateShell)).toBe(false);
+    } else {
+      const compatibleShell = join(dir, "compatible-shell");
+      const incompatibleShell = join(dir, "incompatible-shell");
+      writeFileSync(compatibleShell, "#!/bin/sh\nprintf '2.1.289 (Claude Code)\\n'\n");
+      writeFileSync(incompatibleShell, "#!/bin/sh\nprintf '2.1.288 (Claude Code)\\n'\n");
+      chmodSync(compatibleShell, 0o755);
+      chmodSync(incompatibleShell, 0o755);
+      await prewarmClaudeVersion(compatibleShell);
+      await prewarmClaudeVersion(incompatibleShell);
+      expect(hostSupportsKoryTelemetry(compatibleShell)).toBe(true);
+      expect(hostSupportsKoryTelemetry(incompatibleShell)).toBe(false);
+    }
+  } finally {
+    if (originalPath === undefined) delete process.env.PATH;
+    else process.env.PATH = originalPath;
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 // ---------------------------------------------------------------------------

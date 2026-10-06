@@ -25,6 +25,7 @@ import {
   pluginDirsForTile
 } from './session-command'
 import { statusLineHookPath, writeStatusLineSettings } from './statusline-settings'
+import { hostSupportsKoryTelemetry, prewarmClaudeVersion } from './usage-service'
 import { registerIpc, resolveDocsDir } from './ipc'
 import { parseCliContext } from './cli-context'
 import { computeScope, buildScopeEnv, resolveAdoptedScope, type Scope, type ScopeEnv } from './scope'
@@ -457,7 +458,9 @@ const setConfig = (patch: Partial<AppConfig>): AppConfig => {
   }
   const autoStartWas = config.clodexAutoStart
   const ttsrDisabledWas = (config.ttsrDisabled ?? []).join('\n')
+  const shellWas = config.shell
   config = { ...config, ...patch }
+  if (config.shell !== shellWas) void prewarmClaudeVersion(config.shell)
   saveConfig(config)
   nativeTheme.themeSource = config.theme
   if (config.clodexAutoStart !== autoStartWas) void applyClodexAutoStart(config.clodexAutoStart)
@@ -672,6 +675,7 @@ const getStatusLineSettingsFile = (): string => {
   return file ?? ''
 }
 service.setStatusLineSettingsProvider(getStatusLineSettingsFile)
+service.setHostTelemetryProvider(hostSupportsKoryTelemetry)
 
 const journal = createPersistentJournal({
   dir: app.getPath('logs'),
@@ -3130,6 +3134,7 @@ function createWindow(): void {
 }
 
 app.whenReady().then(async () => {
+  void prewarmClaudeVersion(config.shell)
   nativeTheme.themeSource = config.theme
   // Card 6c380073: drop last run's team-lead --mcp-config files before this
   // run can mint anything (see the function's own doc for why the ordering

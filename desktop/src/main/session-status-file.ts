@@ -169,11 +169,7 @@ export function sweepStaleStatusFiles(
 export interface StatusPollGate {
   /** The tile's PTY is alive. */
   alive: boolean
-  /**
-   * This spawn was given the Deck's statusLine (`--settings`). A tile without
-   * it (sandboxed, not Claude Code) never writes a genuine report, so anything
-   * found under its token is not trusted.
-   */
+  /** This spawn has a trusted source for its status report. */
   enabled: boolean
   /** Epoch ms this spawn started; a report older than it is the previous process's. */
   spawnedAt: number
@@ -181,7 +177,7 @@ export interface StatusPollGate {
 
 /**
  * Gate a status-file read for one poll tick. The file is not even read for a
- * dead or statusLine-less tile, and a report written before this spawn (a late
+ * dead or untrusted tile, and a report written before this spawn (a late
  * run of the previous process, after the pre-spawn clear) reads as absent.
  */
 export function pollStatusFile(gate: StatusPollGate, read: () => StatusFileRead): StatusFileRead {
@@ -191,7 +187,7 @@ export function pollStatusFile(gate: StatusPollGate, read: () => StatusFileRead)
   return res
 }
 
-/** How long a statusLine-enabled tile may stay without any report before it is flagged. */
+/** How long a trusted-status tile may stay without any report before it is flagged. */
 export const STATUS_SILENCE_MS = 60_000
 
 /** What the poll knows when deciding whether a tile's statusLine has gone silent. */

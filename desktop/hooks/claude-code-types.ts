@@ -95,8 +95,29 @@ type TelemetryPluginHost = {
   }
   clock: { now(): Promise<number> }
   ui: { log(text: string, options?: { to: 'debug' }): void }
-  session: { usage(): Promise<{ context: SessionContextUsage }> }
+  session: {
+    usage(): Promise<{ context: SessionContextUsage }>
+    model(): Promise<string>
+  }
 }
+
+type RenderSurface = 'terminal' | 'desktop' | 'mobile' | 'vscode'
+
+type SessionStartInput = {
+  cwd: string
+  surface: RenderSurface | null
+  isInteractive: boolean
+}
+
+type SessionStartResult = {
+  cwd: string
+}
+
+type SessionStartHook = (
+  host: TelemetryPluginHost,
+  event: Frozen<SessionStartInput>,
+  next: Next<SessionStartInput, SessionStartResult>,
+) => SessionStartResult | Promise<SessionStartResult>
 
 type SessionMeasureHook = (
   host: TelemetryPluginHost,
@@ -110,10 +131,12 @@ type SessionCompactHook = (
   next: Next<SessionCompactInput, SessionCompactResult>,
 ) => SessionCompactResult | Promise<SessionCompactResult>
 
-type EventName = 'session.measure' | 'session.compact'
+type EventName = 'session.start' | 'session.measure' | 'session.compact'
 
-type HookFor<Event extends EventName> = Event extends 'session.measure'
-  ? SessionMeasureHook
-  : SessionCompactHook
+type HookFor<Event extends EventName> = Event extends 'session.start'
+  ? SessionStartHook
+  : Event extends 'session.measure'
+    ? SessionMeasureHook
+    : SessionCompactHook
 
 export type On = <Event extends EventName>(event: Event, hook: HookFor<Event>) => void

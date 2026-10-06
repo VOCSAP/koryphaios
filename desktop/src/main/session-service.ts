@@ -111,8 +111,8 @@ interface RuntimeState {
    * is reported once per episode instead of on every poll tick.
    */
   liveStatusFaulted: boolean
-  /** This spawn was given the Deck's statusLine (`--settings`); set by startPty. */
-  liveStatusEnabled: boolean
+  /** The source allowed to write this spawn's status report is trusted. */
+  statusSourceTrusted: boolean
   /** Epoch ms of this spawn; reports older than it belong to the previous process. */
   spawnedAt: number
   /** A status file (valid or refused) was seen since this spawn. */
@@ -516,22 +516,27 @@ export class SessionService extends EventEmitter {
    * owns the app-state dir and the plugin dir.
    */
   private getStatusLineSettings: () => string = () => ''
+  private hostSupportsKoryTelemetry: (shell: string) => boolean = () => false
 
   setStatusLineSettingsProvider(provider: () => string): void {
     this.getStatusLineSettings = provider
   }
 
-  /**
-   * `--settings` file for this spawn: only for a tile that runs Claude Code on
-   * the host. A sandboxed tile writes its status inside the container, which
-   * the host path in the file does not reach, so it gets no flag. The
-   * supervisor is never sandboxed. Off entirely when the operator turned
-   * `liveStatusLine` off (the statusLine hides Claude Code's footer hints).
-   */
-  private statusLineSettingsFor(def: SessionDef, base: string): string | undefined {
+  setHostTelemetryProvider(provider: (shell: string) => boolean): void {
+    this.hostSupportsKoryTelemetry = provider
+  }
+
+  /** A sandboxed tile writes its status inside the container, which the host path in the settings file does not reach. */
+  private statusLineSettingsFor(
+    def: SessionDef,
+    base: string,
+    telemetryPluginLoaded: boolean,
+    shell: string
+  ): string | undefined {
     if (this.getConfig().liveStatusLine === false) return undefined
     if (!isClaudeLaunch(base)) return undefined
     if (!def.supervisor && this.sandboxPeersDir() !== null) return undefined
+    if (this.hostSupportsKoryTelemetry(shell) && telemetryPluginLoaded) return undefined
     return this.getStatusLineSettings() || undefined
   }
 
@@ -787,7 +792,7 @@ export class SessionService extends EventEmitter {
       },
       liveStatus: null,
       liveStatusFaulted: false,
-      liveStatusEnabled: false,
+      statusSourceTrusted: false,
       spawnedAt: 0,
       liveStatusSeen: false,
       liveStatusSilenceWarned: false,
@@ -1027,7 +1032,7 @@ export class SessionService extends EventEmitter {
         announce: null,
         liveStatus: null,
         liveStatusFaulted: false,
-        liveStatusEnabled: false,
+        statusSourceTrusted: false,
         spawnedAt: 0,
         liveStatusSeen: false,
         liveStatusSilenceWarned: false,
@@ -1358,11 +1363,14 @@ export class SessionService extends EventEmitter {
     // process's history owes the new one nothing.
     def.sessionIdHistory = []
 
-    const settingsFile = this.statusLineSettingsFor(def, base)
-    const pluginDirs = this.getPluginDirs(
-      this.deckLeadPluginTiles.has(def.id),
-      !def.supervisor && this.sandboxPeersDir() !== null
-    )
+    const sandboxed = !def.supervisor && this.sandboxPeersDir() !== null
+    const pluginDirs = this.getPluginDirs(this.deckLeadPluginTiles.has(def.id), sandboxed)
+    const telemetryPluginLoaded = Boolean(pluginDirs[0])
+    const settingsFile = this.statusLineSettingsFor(def, base, telemetryPluginLoaded, cfg.shell)
+    const fallbackInjected = settingsFile !== undefined
+    const statusSourceTrusted =
+      fallbackInjected ||
+      (!sandboxed && isClaudeLaunch(base) && telemetryPluginLoaded && this.hostSupportsKoryTelemetry(cfg.shell))
 
     let command: string
     if (effective === 'resume') {
@@ -1408,32 +1416,13 @@ export class SessionService extends EventEmitter {
 
     const r = this.runtime.get(def.id)
 
-    // Session env, also handed to the sandbox wrapper (which translates the
-    // host-only transports before exporting them container-side).
-    // CLAUDE_PEERS_ROLE is ALWAYS exported, empty string included (card
-    // a2f61172): same neutralisation rule as the scope env, since a value
-    // inherited from the process that launched the Deck would otherwise
-    // re-activate a role on a session that has none. This spawn path serves
-    // BOTH 'fresh' and 'resume', which is why the role lives in def rather
-    // than in def.args -- a fork-resume re-exports it here for free.
     const sessionEnv = {
       ...this.getScopeEnv(),
       CLAUDE_PEERS_DESK_SESSION: def.id,
-      CLAUDE_PEERS_ROLE: def.role ?? ''
+      CLAUDE_PEERS_ROLE: def.role ?? '',
+      ...(fallbackInjected ? { KORY_STATUS_FALLBACK: '1' } : null)
     }
-    // CLAUDE_PEERS_TOOLS is omitted entirely when def.peerTools is undefined,
-    // never exported as '', unlike CLAUDE_PEERS_ROLE just above.
-    // The consumer treats absent (full surface) and an explicit empty list
-    // (zero tools) as opposites.
     const peerToolsValue = peerToolsEnvValue(def.peerTools)
-    // Object.assign, not a direct `sessionEnv.CLAUDE_PEERS_TOOLS = ...` write:
-    // the object literal's inferred type (implicit index signature, TS's own
-    // rule for object-literal-typed consts) is what lets sessionEnv satisfy
-    // Record<string, string> at the two call sites below without an explicit
-    // type annotation up top -- a direct property write needs that property
-    // declared up front, forcing either an annotation or a key in the
-    // literal, both of which would change the declaration's exact text that
-    // the sibling role-env test's structural scan of startPty() depends on.
     if (peerToolsValue !== undefined) Object.assign(sessionEnv, { CLAUDE_PEERS_TOOLS: peerToolsValue })
     // Always exported, '' included: a value inherited from the process that
     // launched the Deck must never point a tile at another tile's rules or log.
@@ -1505,7 +1494,7 @@ export class SessionService extends EventEmitter {
     if (r) {
       r.liveStatus = null
       r.liveStatusFaulted = false
-      r.liveStatusEnabled = settingsFile !== undefined
+      r.statusSourceTrusted = statusSourceTrusted
       r.spawnedAt = Date.now()
       r.liveStatusSeen = false
       r.liveStatusSilenceWarned = false
@@ -1799,14 +1788,14 @@ export class SessionService extends EventEmitter {
     let next: SessionLiveStatus | null = null
     const alive = this.pty.isAlive(def.id)
     const read = pollStatusFile(
-      { alive, enabled: r.liveStatusEnabled, spawnedAt: r.spawnedAt },
+      { alive, enabled: r.statusSourceTrusted, spawnedAt: r.spawnedAt },
       () => readStatusFile(def.id, this.peersDirFor(def))
     )
     if (read.kind !== 'absent') r.liveStatusSeen = true
     if (
       statusSilenceOverdue({
         alive,
-        enabled: r.liveStatusEnabled,
+        enabled: r.statusSourceTrusted,
         spawnedAt: r.spawnedAt,
         now: Date.now(),
         reported: r.liveStatusSeen,

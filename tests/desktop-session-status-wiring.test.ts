@@ -18,6 +18,7 @@ interface FakeProc {
   pid: number;
   file: string;
   args: string[];
+  env: Record<string, string | undefined>;
   exit(code: number): void;
   /** Deliver PTY output as node-pty's onData would. */
   output(data: string): void;
@@ -26,13 +27,14 @@ const spawned: FakeProc[] = [];
 let nextPid = 40000;
 
 mock.module("node-pty", () => ({
-  spawn(file: string, args: string[]) {
+  spawn(file: string, args: string[], opts: { env: Record<string, string | undefined> }) {
     let onExit: ((e: { exitCode: number }) => void) | null = null;
     let onData: ((d: string) => void) | null = null;
     const proc: FakeProc & Record<string, unknown> = {
       pid: nextPid++,
       file,
       args,
+      env: opts.env,
       exit: (code: number) => onExit?.({ exitCode: code }),
       output: (d: string) => onData?.(d),
       onData: (cb: (d: string) => void) => {
@@ -78,6 +80,7 @@ function setup(
   opts: {
     sandboxPeersDir?: string;
     liveStatusLine?: boolean;
+    hostTelemetry?: boolean;
     pluginDirs?: (hasDeckLeadTools: boolean, sandboxed: boolean) => readonly string[];
     mintTeamLeadBridge?: () => { mcpConfig: string; callerId: string } | null;
   } = {}
@@ -102,6 +105,7 @@ function setup(
   );
   services.push(svc);
   svc.setStatusLineSettingsProvider(() => SETTINGS);
+  svc.setHostTelemetryProvider(() => opts.hostTelemetry === true);
   if (opts.sandboxPeersDir) svc.setSandboxProvider(() => null, undefined, () => opts.sandboxPeersDir!);
   const broadcasts: Array<Array<{ id: string; liveStatus: { model: string } | null }>> = [];
   svc.on("changed", (list) => broadcasts.push(list));
@@ -126,10 +130,53 @@ function poll(svc: unknown): void {
   (svc as { pollPeerIds(): void }).pollPeerIds();
 }
 
-test("a host Claude Code tile gets --settings", () => {
+test("a host Claude Code tile gets --settings and marks the fallback writer", () => {
   const { svc } = setup();
   svc.create({});
   expect(lastLine(), "claude tile launched with the Deck statusLine").toContain(`--settings "${SETTINGS}"`);
+  expect(spawned.at(-1)!.env.KORY_STATUS_FALLBACK).toBe("1");
+});
+
+test("a compatible host keeps the fallback when no telemetry plugin is loaded", () => {
+  const { svc } = setup({ hostTelemetry: true });
+  svc.create({});
+
+  expect(lastLine()).toContain(`--settings "${SETTINGS}"`);
+  expect(spawned.at(-1)!.env.KORY_STATUS_FALLBACK).toBe("1");
+});
+
+test("a compatible host Claude tile trusts the plugin without the fallback", () => {
+  const { svc, peersDir } = setup({ hostTelemetry: true, pluginDirs: () => ["/plugins/general"] });
+  const runtime = svc.create({});
+
+  expect(lastLine()).not.toContain("--settings");
+  expect(spawned.at(-1)!.env.KORY_STATUS_FALLBACK).not.toBe("1");
+  writeStatus(peersDir, runtime.id, "Opus", Date.now() + 1);
+  poll(svc);
+  expect(svc.list().find((session) => session.id === runtime.id)!.liveStatus?.model).toBe("Opus");
+});
+
+test("a compatible host with only the role plugin keeps the fallback", () => {
+  const { svc } = setup({ hostTelemetry: true, pluginDirs: () => ["", "/plugins/role"] });
+  svc.create({});
+
+  expect(lastLine()).toContain(`--settings "${SETTINGS}"`);
+  expect(spawned.at(-1)!.env.KORY_STATUS_FALLBACK).toBe("1");
+});
+
+test("a plugin-only launch clears an inherited fallback marker", () => {
+  const inherited = process.env.KORY_STATUS_FALLBACK;
+  process.env.KORY_STATUS_FALLBACK = "1";
+  try {
+    const { svc } = setup({ hostTelemetry: true, pluginDirs: () => ["/plugins/general"] });
+    svc.create({});
+
+    expect(lastLine()).not.toContain("--settings");
+    expect(spawned.at(-1)!.env.KORY_STATUS_FALLBACK).toBeUndefined();
+  } finally {
+    if (inherited === undefined) delete process.env.KORY_STATUS_FALLBACK;
+    else process.env.KORY_STATUS_FALLBACK = inherited;
+  }
 });
 
 test("a sandboxed tile gets no --settings, the supervisor still does", () => {
@@ -140,6 +187,17 @@ test("a sandboxed tile gets no --settings, the supervisor still does", () => {
   expect(lastLine(), "sandboxed tile: host hook path unreachable, no flag").not.toContain("--settings");
   svc.create({ supervisor: true } as never);
   expect(lastLine(), "supervisor is never sandboxed: flag kept").toContain(`--settings "${SETTINGS}"`);
+});
+
+test("a sandboxed tile never trusts the compatible host plugin", () => {
+  const sbx = mkdtempSync(join(tmpdir(), "kory-sbx-peers-"));
+  tmpDirs.push(sbx);
+  const { svc } = setup({ sandboxPeersDir: sbx, hostTelemetry: true, pluginDirs: () => ["/plugins/general"] });
+  const runtime = svc.create({});
+
+  writeStatus(sbx, runtime.id, "Forged", Date.now() + 1);
+  poll(svc);
+  expect(svc.list().find((session) => session.id === runtime.id)!.liveStatus).toBeNull();
 });
 
 test("a host team-lead tile keeps the ordered plugins on fresh and resumed launches", async () => {
@@ -622,6 +680,17 @@ test("silent statusLine: reported once per spawn after the grace period, never o
   runtime.get(shell.id)!.spawnedAt = Date.now() - STATUS_SILENCE_MS - 1;
   poll(svc);
   expect(silent().filter((e) => e.includes('"shell"')), "a tile without --settings is never flagged").toEqual([]);
+});
+
+test("liveStatusLine off still trusts a compatible host telemetry plugin", () => {
+  const { svc, peersDir } = setup({ liveStatusLine: false, hostTelemetry: true, pluginDirs: () => ["/plugins/general"] });
+  const runtime = svc.create({});
+
+  expect(lastLine()).not.toContain("--settings");
+  expect(spawned.at(-1)!.env.KORY_STATUS_FALLBACK).not.toBe("1");
+  writeStatus(peersDir, runtime.id, "Opus", Date.now() + 1);
+  poll(svc);
+  expect(svc.list().find((session) => session.id === runtime.id)!.liveStatus?.model).toBe("Opus");
 });
 
 test("liveStatusLine off: no --settings on any spawn, and a status file found is never shown", async () => {

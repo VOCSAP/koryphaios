@@ -8,6 +8,7 @@ import {
   STATUS_FILE_MAX_BYTES,
   decodeStatusFile,
   encodeStatusFromMeasure,
+  encodeStatusFromModelIdentity,
   encodeStatusFromPayload,
   sameLiveStatus,
   sanitizeStatusToken,
@@ -143,6 +144,19 @@ test("encoder: no model means nothing to write", () => {
 test("encoder: display_name falls back to the id when unusable", () => {
   const raw = encodeStatusFromPayload({ model: { id: "claude-sonnet-4-5", display_name: "$(x)" } }, 5);
   expect(decodeStatusFile(raw!)?.model, "display name replaced by id, never sanitized").toBe("claude-sonnet-4-5");
+});
+
+test("model identity encoder emits an empty-context report and falls back to the canonical id", () => {
+  const raw = encodeStatusFromModelIdentity("claude-unlisted-99-9", undefined, 5);
+  expect(decodeStatusFile(raw!), "seed report is readable by the Deck").toEqual({
+    model: "claude-unlisted-99-9",
+    modelId: "claude-unlisted-99-9",
+    contextPct: null,
+    contextWindow: null,
+    at: 5,
+  });
+  expect(encodeStatusFromModelIdentity("a;rm -rf", "x", 5), "hostile model id is rejected").toBeNull();
+  expect(encodeStatusFromModelIdentity("claude-unlisted-99-9", "$(x)", 5), "hostile display name falls back to the id").not.toBeNull();
 });
 
 test("decoder: happy path, including [1m] suffix and null pct", () => {

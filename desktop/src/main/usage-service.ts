@@ -13,7 +13,7 @@ import { homedir, platform } from 'node:os'
 import { join } from 'node:path'
 import { buildShellInvocation } from './shell-command'
 import { buildDetectCommand } from './model-registry'
-import { reportError } from './log'
+import { logWarn, reportError } from './log'
 import type {
   UsageCredits,
   UsageProviderId,
@@ -134,20 +134,63 @@ async function readClaudeToken(env: NodeJS.ProcessEnv, home: string): Promise<st
   return null
 }
 
-/** Session-lifetime cache: version probes spawn login shells. */
-let claudeUaCache: string | null = null
+type ClaudeVersionProbe = {
+  userAgent: string
+  observedVersion: string | null
+}
+
+const claudeVersionCache = new Map<string, ClaudeVersionProbe>()
+const claudeVersionInFlight = new Map<string, Promise<ClaudeVersionProbe>>()
+
+export function parseClaudeVersionOutput(output: string): string | null {
+  const match = /^(\d+)\.(\d+)\.(\d+) \(Claude Code\)$/.exec(output.trim())
+  return match ? `${match[1]!}.${match[2]!}.${match[3]!}` : null
+}
+
+export function supportsKoryTelemetry(version: string | null): boolean {
+  const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(version ?? '')
+  if (!match) return false
+  const major = Number(match[1])
+  const minor = Number(match[2])
+  const patch = Number(match[3])
+  return major > 2 || (major === 2 && (minor > 1 || (minor === 1 && patch >= 289)))
+}
+
+function resolveClaudeVersion(shell: string): Promise<ClaudeVersionProbe> {
+  const cached = claudeVersionCache.get(shell)
+  if (cached) return Promise.resolve(cached)
+  const inFlight = claudeVersionInFlight.get(shell)
+  if (inFlight) return inFlight
+  const probe = (async () => {
+    try {
+      const inv = buildShellInvocation({ command: 'claude --version', shell, interactive: false })
+      const out = await execFileText(inv.file, inv.args, 15_000)
+      const observedVersion = parseClaudeVersionOutput(out)
+      return { userAgent: observedVersion ? `claude-code/${observedVersion}` : CLAUDE_UA_FALLBACK, observedVersion }
+    } catch (err) {
+      logWarn('usage', 'Claude Code version probe failed; telemetry compatibility remains unconfirmed', err)
+      return { userAgent: CLAUDE_UA_FALLBACK, observedVersion: null }
+    }
+  })().then((result) => {
+    claudeVersionCache.set(shell, result)
+    return result
+  }).finally(() => {
+    claudeVersionInFlight.delete(shell)
+  })
+  claudeVersionInFlight.set(shell, probe)
+  return probe
+}
+
+export function prewarmClaudeVersion(shell: string): Promise<void> {
+  return resolveClaudeVersion(shell).then(() => undefined)
+}
+
+export function hostSupportsKoryTelemetry(shell: string): boolean {
+  return supportsKoryTelemetry(claudeVersionCache.get(shell)?.observedVersion ?? null)
+}
 
 async function claudeUserAgent(shell: string): Promise<string> {
-  if (claudeUaCache) return claudeUaCache
-  try {
-    const inv = buildShellInvocation({ command: 'claude --version', shell, interactive: false })
-    const out = await execFileText(inv.file, inv.args, 15_000)
-    const m = /(\d+\.\d+\.\d+)/.exec(out)
-    claudeUaCache = m ? `claude-code/${m[1]}` : CLAUDE_UA_FALLBACK
-  } catch {
-    claudeUaCache = CLAUDE_UA_FALLBACK // probe failure only degrades the UA
-  }
-  return claudeUaCache
+  return (await resolveClaudeVersion(shell)).userAgent
 }
 
 async function readClaudeUsage(deps: Required<UsageDeps>): Promise<UsageProviderReport> {
@@ -783,7 +826,8 @@ export async function readUsage(
 export function resetUsageCaches(): void {
   snapshotCache = null
   binCache = null
-  claudeUaCache = null
+  claudeVersionCache.clear()
+  claudeVersionInFlight.clear()
   antigravityRefreshed = null
   antigravitySecretCache = undefined
   usedProviders.clear()
