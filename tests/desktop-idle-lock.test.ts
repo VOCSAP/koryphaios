@@ -4,13 +4,20 @@
 // predicate's caller relies on.
 
 import { test, expect } from "bun:test";
-import { ownsIdleLock } from "../desktop/src/main/idle-lock.ts";
+import { lockReleasePatch, ownsIdleLock } from "../desktop/src/main/idle-lock.ts";
 import { computeScope } from "../desktop/src/main/scope.ts";
 import { computeGroupId } from "../shared/config.ts";
 
 // ---------------------------------------------------------------------------
 // 1. ownsIdleLock -- the predicate itself.
 // ---------------------------------------------------------------------------
+
+test("lockReleasePatch: an in_progress card drops back to planned, any other status is kept", () => {
+  expect(lockReleasePatch({ id: "a", status: "in_progress" })).toEqual({ id: "a", status: "planned", locked: false });
+  for (const status of ["done", "archived", "planned", "idea"]) {
+    expect([status, lockReleasePatch({ id: "a", status })]).toEqual([status, { id: "a", locked: false }]);
+  }
+});
 
 test("same peerId, same group: release is allowed", () => {
   expect(ownsIdleLock("peer-a", "group-1", "peer-a", "group-1")).toBe(true);

@@ -82,6 +82,25 @@ test("PRESENCE: watchIdleLocks wires ownsIdleLock with the group-aware arguments
   expect(findWatchIdleLocksWiringFailures(src)).toEqual([]);
 });
 
+test("watchIdleLocks releases through lockReleasePatch and traces its failure", () => {
+  const src = readFileSync(INDEX_PATH, "utf-8");
+  const declMatch = /const\s+watchIdleLocks\s*=\s*async\s*\([^)]*\)\s*:\s*Promise<void>\s*=>\s*\{/.exec(src);
+  expect(declMatch).not.toBeNull();
+  const body = extractBracedBody(src, declMatch!.index + declMatch![0].length - 1);
+  expect(["release payload comes from lockReleasePatch(item)", /upsertRoadmap\([^)]*lockReleasePatch\(item\)\)/.test(body)]).toEqual([
+    "release payload comes from lockReleasePatch(item)",
+    true,
+  ]);
+  expect(["no hand-written status:'planned' release", /status:\s*'planned'/.test(body)]).toEqual([
+    "no hand-written status:'planned' release",
+    false,
+  ]);
+  expect(["the catch traces through reportError", /catch\s*\(\s*\w+\s*\)\s*\{\s*reportError\(/.test(body)]).toEqual([
+    "the catch traces through reportError",
+    true,
+  ]);
+});
+
 test("ABSENCE: no TEXTUALLY ADJACENT bare peerId<->locked_by equality survives anywhere under desktop/src/main", () => {
   const files = listTsFiles(MAIN_DIR);
   // Anti-vacuity floor: 86 .ts files measured under desktop/src/main at the

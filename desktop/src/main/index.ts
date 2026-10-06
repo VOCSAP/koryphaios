@@ -109,7 +109,7 @@ import {
 } from './dispatch'
 import { createDirectiveBindings, runClearReloadInTurn, type DirectiveRunDeps } from './directive-run'
 import { decidePeerAnnounce } from './peer-rotation'
-import { ownsIdleLock } from './idle-lock'
+import { lockReleasePatch, ownsIdleLock } from './idle-lock'
 import type {
   AssignResult,
   DirectiveDispatch,
@@ -2194,21 +2194,15 @@ const stopRoadmapItem = async (id: string): Promise<StopResult> => {
     if (sent > 0) via = 'broadcast'
   }
 
-  await upsertRoadmap(
-    endpoint,
-    key,
-    item.status === 'in_progress'
-      ? { id: item.id, status: 'planned', locked: false }
-      : { id: item.id, locked: false }
-  )
+  await upsertRoadmap(endpoint, key, lockReleasePatch(item))
   journal.add('dispatch', `stop requested on "${item.title}" (via ${via})`)
   return { stopped: true, via }
 }
 
-// Releases a locked item back to 'planned' when its owner is one of this
-// window's tiles with a silent PTY for LOCK_IDLE_MS — finer than the broker's
-// sweep, since the heartbeat keeps a peer 'active' even while Claude sits idle,
-// but only covers sessions this Deck can observe.
+// Releases an item's lock (an in_progress item back to 'planned') when its
+// owner is one of this window's tiles with a silent PTY for LOCK_IDLE_MS —
+// finer than the broker's sweep, since the heartbeat keeps a peer 'active'
+// even while Claude sits idle, but only covers sessions this Deck can observe.
 // Also requires locked_group to match this Deck's own group, fail-closed when
 // locked_group is null, since a peer_id is only unique per group and a
 // same-named peer in a different group could otherwise have its lock silently
@@ -2232,11 +2226,11 @@ const watchIdleLocks = async (): Promise<void> => {
       if (!owner) continue // not one of our tiles: the broker sweep owns it
       const last = service.lastOutputAt(owner.id)
       if (last === null || Date.now() - last < LOCK_IDLE_MS) continue
-      await upsertRoadmap(endpoint, key, { id: item.id, status: 'planned', locked: false })
+      await upsertRoadmap(endpoint, key, lockReleasePatch(item))
       journal.add('dispatch', `lock released on "${item.title}" (session "${owner.name}" idle)`)
     }
-  } catch {
-    // Broker down: the next tick retries.
+  } catch (e) {
+    reportError('dispatch', 'idle-lock watch failed (retried next tick)', e)
   }
 }
 let lockWatchTimer: NodeJS.Timeout | null = null

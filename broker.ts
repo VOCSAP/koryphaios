@@ -3976,12 +3976,7 @@ function handleRoadmapUpsert(
     // Lock guard (PLAN K2): while an agent holds the work-lock, only the owner
     // or the operator ('deck') may write the item's status or claim the lock
     // (a same-status in_progress write IS a claim attempt). Other writes
-    // (context enrichment, tags...) stay open to everyone -- EXCEPT when the
-    // write would drop the lock as a side effect, which the delta clause
-    // below refuses too: a locked item whose stored status is already not
-    // in_progress resolves `nextStatus !== "in_progress"` to true even from a
-    // body with neither `status` nor `locked` set, so an unrelated-field
-    // write from a third party would otherwise silently clear the lock.
+    // (context enrichment, tags...) stay open to everyone, and keep the lock.
     // Card e344fa79: the OWNER check is a (peer_id, group) pair, not a bare
     // peer_id -- `by !== existing.locked_by` alone let a legitimately-
     // registered homonym peer in a DIFFERENT group satisfy this guard,

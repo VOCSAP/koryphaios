@@ -147,6 +147,62 @@ test("same-owner re-claim keeps the original locked_at", async () => {
   expect(r.item!.locked_at).toBe(first!);
 });
 
+// A lock held on a card whose status is not in_progress is reachable (an
+// import writes locked as-is). A Deck write about something else must not
+// release it as a side effect.
+function holdOutsideInProgress(id: string, holder: string): void {
+  const db = new Database(broker.dbPath);
+  db.run(
+    `UPDATE roadmap_items SET locked = 1, locked_by = ?, locked_group = 'grp-held', locked_by_token = 'tok-held',
+       locked_at = datetime('now'), status = 'planned' WHERE id = ?`,
+    [holder, id]
+  );
+  db.close();
+}
+
+function heldLockColumns(id: string): Record<string, unknown> {
+  const db = new Database(broker.dbPath);
+  const row = db
+    .query("SELECT locked, locked_by, locked_group, locked_by_token FROM roadmap_items WHERE id = ?")
+    .get(id) as Record<string, unknown>;
+  db.close();
+  return row;
+}
+
+test.each([
+  ["priority", { priority: "must" }],
+  ["inactive", { inactive: true }],
+  ["queue", { queue: null }],
+] as const)("a deck write of %s alone keeps a lock held outside in_progress", async (_field, fields) => {
+  const item = await add({ title: `held outside in_progress, deck edits ${_field}` });
+  holdOutsideInProgress(item.id, "holder-peer");
+  const r = await patch(item.id, "deck", fields);
+  expect(r.status).toBe(200);
+  expect(heldLockColumns(item.id)).toEqual({
+    locked: 1,
+    locked_by: "holder-peer",
+    locked_group: "grp-held",
+    locked_by_token: "tok-held",
+  });
+});
+
+test("a deck status write still releases a lock held outside in_progress", async () => {
+  const item = await add({ title: "held outside in_progress, deck moves it" });
+  holdOutsideInProgress(item.id, "holder-peer");
+  const r = await patch(item.id, "deck", { status: "idea" });
+  expect(r.status).toBe(200);
+  expect(r.item!.locked).toBe(false);
+  expect(r.item!.locked_by).toBeNull();
+});
+
+test("a third party's unrelated write on a lock held outside in_progress succeeds and keeps the lock", async () => {
+  const item = await add({ title: "held outside in_progress, bystander edits" });
+  holdOutsideInProgress(item.id, "holder-peer");
+  const r = await patch(item.id, "bystander-peer", { priority: "must" });
+  expect(r.status).toBe(200);
+  expect(heldLockColumns(item.id).locked_by).toBe("holder-peer");
+});
+
 // ----- guard -----
 
 test("another peer's status write on a locked item is refused with 409", async () => {

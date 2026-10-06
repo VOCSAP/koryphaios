@@ -26,8 +26,11 @@ export interface RoadmapLockResolution {
 }
 
 /**
- * Work-lock resolution (PLAN K2). Leaving in_progress always releases the
- * lock. While in_progress: an explicit `locked` wins; otherwise a non-'deck'
+ * Work-lock resolution (PLAN K2). Leaving in_progress releases the lock, but
+ * only for a write that touches `status`, `locked` or `release`: a lock held on
+ * a card already outside in_progress survives a write about something else,
+ * and the stale-lock sweep remains what clears it.
+ * While in_progress: an explicit `locked` wins; otherwise a non-'deck'
  * author WRITING status=in_progress claims the lock (the Deck's own
  * in_progress writes never lock -- the item is "submitted", the lock arrives
  * when the agent actually starts). Returns `{locked, lockedBy, claimed}` --
@@ -38,14 +41,14 @@ export interface RoadmapLockResolution {
 export function resolveRoadmapLock(
   existing: Pick<RoadmapItem, "locked" | "locked_by">,
   nextStatus: RoadmapStatus,
-  body: Pick<RoadmapUpsertRequest, "locked" | "status">,
+  body: Pick<RoadmapUpsertRequest, "locked" | "status" | "release">,
   by: string
 ): RoadmapLockResolution {
   let locked = existing.locked;
   let lockedBy = existing.locked_by;
   let claimed = false;
   if (nextStatus !== "in_progress") {
-    locked = false;
+    if (body.status !== undefined || body.locked !== undefined || body.release === true) locked = false;
   } else if (body.locked !== undefined) {
     locked = body.locked;
     if (body.locked) {

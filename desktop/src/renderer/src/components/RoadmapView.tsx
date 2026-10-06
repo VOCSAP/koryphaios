@@ -17,12 +17,12 @@ import { ConfirmDialog } from './ConfirmDialog'
 import { ContextMenu, type ContextMenuItem } from './ContextMenu'
 import { CreateMenu } from './CreateMenu'
 import { KIND_ICONS, RoadmapItemModal } from './RoadmapItemModal'
-import { isLocked, RoadmapBoard } from './RoadmapBoard'
+import { RoadmapBoard } from './RoadmapBoard'
 import { RoadmapFilterPanel } from './RoadmapFilterPanel'
 import { RoadmapFilterChips } from './RoadmapFilterChips'
 import { WorkflowLane } from './WorkflowLane'
 import { hasActiveCriteria, useRoadmapData } from '../roadmap-data'
-import { buildAppendToQueue, buildInsertIntoQueue, buildStackIntoQueue } from '@shared/workflow'
+import { buildAppendToQueue, buildInsertIntoQueue, buildStackIntoQueue, isRoadmapLocked } from '@shared/workflow'
 import {
   getRoadmapContextEditorProjection,
   isRoadmapStaleSaveError,
@@ -689,7 +689,7 @@ export function RoadmapView(): React.JSX.Element {
   }
 
   const moveItem = (item: RoadmapItem, status: RoadmapStatus): void => {
-    if (item.status === status || isLocked(item)) return
+    if (item.status === status || isRoadmapLocked(item)) return
     if (status === 'done') setConfirmDone(item)
     else void applyMove(item, status)
   }
@@ -733,9 +733,9 @@ export function RoadmapView(): React.JSX.Element {
   // from going through signedAsOperator() when posting, not from the by:
   // DECK_AUTHOR stamp, which an unsigned caller could send too.
   // This call (id/inactive only) cannot itself trip refusesInactiveClaim or
-  // refusesInactiveQueue: it sends no queue field, and the lock resolver only
-  // forces locked to false in the releasing direction when nextStatus stays
-  // unchanged from in_progress, never claims one.
+  // refusesInactiveQueue: it sends no queue field, and the lock resolver
+  // neither claims nor releases on a write touching none of status, locked or
+  // release.
   // A failure still surfaces like any other, through the ordinary
   // network/broker-down channel — never swallowed.
   const toggleInactive = async (item: RoadmapItem): Promise<void> => {
@@ -782,7 +782,7 @@ export function RoadmapView(): React.JSX.Element {
   // ----- card context menu (K6) -----
 
   const menuItems = (item: RoadmapItem): ContextMenuItem[] => {
-    const locked = isLocked(item)
+    const locked = isRoadmapLocked(item)
     const closed = item.status === 'done' || item.status === 'archived'
     const archived = item.status === 'archived'
 
@@ -791,9 +791,8 @@ export function RoadmapView(): React.JSX.Element {
     // roadmap.menuDelete on an action that actually calls setConfirmArchive
     // -- card's own measurement) lives in a single place instead of drifting
     // between the open- and closed-card branches below. `disabled: locked`
-    // is dead code today (isLocked() requires status==='in_progress', never
-    // true together with 'done'/'archived') but kept so this entry inherits
-    // the lockedHint discipline for free if that invariant ever loosens.
+    // also bites a done card still holding a lock: the detail modal's Stop is
+    // the way to release it first.
     const archiveOrRestoreItem: ContextMenuItem = archived
       ? {
           label: (

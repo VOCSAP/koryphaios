@@ -42,9 +42,17 @@ export function initialLaneHeight(configHeight: number | undefined, viewportH: n
   return clampLaneHeight(configHeight ?? WF_LANE_H_DEFAULT, viewportH)
 }
 
+/**
+ * Frozen by an agent's work-lock (PLAN K2), whatever its status: a lock can
+ * outlive in_progress, and such a card is not free until Stop releases it.
+ */
+export function isRoadmapLocked(i: RoadmapItem): boolean {
+  return i.locked
+}
+
 /** A locked in_progress item with no queue slot: active work outside the queue. */
 export function isHead(i: RoadmapItem): boolean {
-  return i.locked && i.status === 'in_progress' && i.queue === null
+  return isRoadmapLocked(i) && i.status === 'in_progress' && i.queue === null
 }
 
 /**

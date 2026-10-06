@@ -10,6 +10,7 @@ import {
   insertSlotAt,
   insertSoloWaves,
   isHead,
+  isRoadmapLocked,
   joinAnchorAt,
   laneEdges,
   laneItems,
@@ -269,7 +270,7 @@ export function WorkflowLane({
 
   const droppable = (id: string): RoadmapItem | null => {
     const item = byId.get(id)
-    if (!item || (item.locked && item.status === 'in_progress')) return null
+    if (!item || isRoadmapLocked(item)) return null
     if (item.status === 'done' || item.status === 'archived') return null
     return item
   }
@@ -371,8 +372,7 @@ export function WorkflowLane({
     if (e.button !== 0) return
     e.stopPropagation()
     setEdgeInfo(null)
-    const locked = item.locked && item.status === 'in_progress'
-    if (locked) return // work-locked: not movable (K2)
+    if (isRoadmapLocked(item)) return // work-locked: not movable (K2)
     const p = pos.get(item.id)!
     drag.current = {
       kind: 'node',
@@ -790,7 +790,7 @@ export function WorkflowLane({
               const dragged = ghost?.id === item.id
               const x = dragged ? ghost.x : p.x
               const y = dragged ? ghost.y : p.y
-              const locked = item.locked && item.status === 'in_progress'
+              const locked = isRoadmapLocked(item)
               const unmet = unmetDeps(item, items, shownIds)
               const directive = item.kind === 'directive'
               return (

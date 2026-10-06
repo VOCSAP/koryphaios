@@ -17,12 +17,28 @@ const LOCKED_BY_OWNER: Existing = { locked: true, locked_by: "owner-peer" };
 test.each([
   // [name, existing, nextStatus, body, by, expected]
   [
-    "leaving in_progress always releases, regardless of who writes it",
+    "a status write leaving in_progress releases, regardless of who writes it",
+    LOCKED_BY_OWNER,
+    "planned",
+    { status: "planned" },
+    "intruder",
+    { locked: false, lockedBy: null, claimed: false },
+  ],
+  [
+    "release:true alone on a card outside in_progress releases",
+    LOCKED_BY_OWNER,
+    "planned",
+    { release: true },
+    "deck",
+    { locked: false, lockedBy: null, claimed: false },
+  ],
+  [
+    "a write touching neither status, locked nor release keeps a lock held outside in_progress",
     LOCKED_BY_OWNER,
     "planned",
     {},
-    "intruder",
-    { locked: false, lockedBy: null, claimed: false },
+    "deck",
+    { locked: true, lockedBy: "owner-peer", claimed: false },
   ],
   [
     "explicit locked:true claims for the caller while in_progress",

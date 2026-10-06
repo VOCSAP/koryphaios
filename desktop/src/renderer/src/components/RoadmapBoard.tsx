@@ -1,4 +1,5 @@
 import type { RoadmapItem, RoadmapPriority, RoadmapStatus } from '@shared/types'
+import { isRoadmapLocked } from '@shared/workflow'
 import { AgentStopControls } from './AgentStopControls'
 import { GLYPH_BADGES } from './icons'
 import { KIND_ICONS, RoadmapItemId } from './RoadmapItemModal'
@@ -14,11 +15,6 @@ import { type TFn } from '../i18n'
 /** Column order of the board; 'archived' joins only when the toggle is on. */
 export const BOARD_COLUMNS: RoadmapStatus[] = ['idea', 'planned', 'in_progress', 'done']
 const PRIORITY_RANK: Record<RoadmapPriority, number> = { must: 0, should: 1, could: 2, wont: 3 }
-
-/** True when the card is frozen by an agent's work-lock (PLAN K2). */
-export function isLocked(item: RoadmapItem): boolean {
-  return item.locked && item.status === 'in_progress'
-}
 
 function BoardCard({
   item,
@@ -37,7 +33,7 @@ function BoardCard({
   onDragEnd: () => void
   t: TFn
 }): React.JSX.Element {
-  const locked = isLocked(item)
+  const locked = isRoadmapLocked(item)
   // Offline replica: the card diverged from the upstream, or its lock is
   // contested there. Both are rings on the card itself, not badges only: the
   // operator must see them while scanning a column, not after opening one.

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import type { RoadmapItem, RoadmapKind, SessionRuntime } from '@shared/types'
-import { dependsWouldCycle } from '@shared/workflow'
+import { dependsWouldCycle, isRoadmapLocked } from '@shared/workflow'
 import { useT, type TFn } from '../i18n'
 import { useDeck } from '../store'
 import { GLYPH_ACTIONS, GLYPH_BADGES, GLYPH_KINDS } from './icons'
@@ -250,7 +250,7 @@ export function RoadmapItemModal({
     return () => window.removeEventListener('keydown', onKey)
   }, [onClose])
 
-  const stoppable = item.locked && item.status === 'in_progress'
+  const stoppable = isRoadmapLocked(item)
   // Card 99d3a9eb, arbitrage 3: content stays readable, edit affordances
   // don't -- shared by the pencil, launch-agent and the dependency editor
   // below (AC1: onAddDep/onRemoveDep both write depends_on, a modification

@@ -14,6 +14,7 @@ import {
   insertSlotAt,
   insertSoloWaves,
   isHead,
+  isRoadmapLocked,
   joinAnchorAt,
   slotConflicts,
   laneEdges,
@@ -80,6 +81,17 @@ test('isHead: false for a queued-but-not-yet-dispatched item, even if in_progres
 
 test('isHead: false for a fresh assignRoadmapItem direct-assign (in_progress, unlocked)', () => {
   expect(isHead(item('a', { status: 'in_progress', locked: false, queue: null }))).toBe(false)
+})
+
+test('isRoadmapLocked: a lock held outside in_progress still freezes the card', () => {
+  expect(isRoadmapLocked(item('a', { status: 'planned', locked: true }))).toBe(true)
+  expect(isRoadmapLocked(item('a', { status: 'done', locked: true }))).toBe(true)
+  expect(isRoadmapLocked(item('a', { status: 'in_progress', locked: false }))).toBe(false)
+})
+
+test('isHead: false for a lock held outside in_progress (not active work)', () => {
+  expect(isHead(item('a', { status: 'planned', locked: true, queue: null }))).toBe(false)
+  expect(isHead(item('a', { status: 'done', locked: true, queue: null }))).toBe(false)
 })
 
 test('laneItems: queue order, locked in_progress heads first, closed items out', () => {

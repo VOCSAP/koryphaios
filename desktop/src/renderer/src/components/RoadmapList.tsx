@@ -8,7 +8,7 @@ import { ConfirmDialog } from './ConfirmDialog'
 import { MobileSheet } from './MobileSheet'
 import { KIND_ICONS, RoadmapItemModal } from './RoadmapItemModal'
 import { DEFAULT_HOLD_GESTURE, HoldGesture } from '@shared/hold-gesture'
-import { buildAppendToQueue } from '@shared/workflow'
+import { buildAppendToQueue, isRoadmapLocked } from '@shared/workflow'
 
 // One column at a time, full-width cards, moves through an action sheet, plus a
 // floating basket: long-press seizes a card into a thumbnail tray docked above
@@ -21,10 +21,6 @@ import { buildAppendToQueue } from '@shared/workflow'
 const STATUSES: RoadmapStatus[] = ['idea', 'planned', 'in_progress', 'done']
 const PRIORITY_RANK: Record<RoadmapPriority, number> = { must: 0, should: 1, could: 2, wont: 3 }
 const PRIORITIES: RoadmapPriority[] = ['must', 'should', 'could', 'wont']
-
-function isLocked(item: RoadmapItem): boolean {
-  return item.locked && item.status === 'in_progress'
-}
 
 /** Compact edit buffer (mobile v1: the fields that matter on the go). */
 interface QuickEdit {
@@ -51,7 +47,7 @@ function RoadmapCard({
 }): React.JSX.Element {
   const ref = useRef<HTMLDivElement>(null)
   const [seized, setSeized] = useState(false)
-  const locked = isLocked(item)
+  const locked = isRoadmapLocked(item)
   // Offline replica: same two states as the kanban card, same meaning.
   const conflicted = item.sync_state === 'conflict'
   const contested = item.lock_scope === 'contested'
@@ -251,7 +247,7 @@ export function RoadmapList(): React.JSX.Element {
   // family by construction instead of chasing each entry point.
   const moveTo = (item: RoadmapItem, status: RoadmapStatus): void => {
     const closed = item.status === 'done' || item.status === 'archived'
-    if (item.status === status || isLocked(item) || closed) return
+    if (item.status === status || isRoadmapLocked(item) || closed) return
     if (status === 'done') setConfirmDone(item)
     else void applyMove(item, status)
   }
@@ -433,7 +429,7 @@ export function RoadmapList(): React.JSX.Element {
               {!closed && (
                 <button
                   className="msheet-item"
-                  disabled={isLocked(sheetItem)}
+                  disabled={isRoadmapLocked(sheetItem)}
                   onClick={() => {
                     setEdit({
                       id: sheetItem.id,
@@ -450,7 +446,7 @@ export function RoadmapList(): React.JSX.Element {
               {!closed && (
                 <button
                   className="msheet-item"
-                  disabled={isLocked(sheetItem) || sheetItem.queue !== null}
+                  disabled={isRoadmapLocked(sheetItem) || sheetItem.queue !== null}
                   onClick={() => {
                     void queueItem(sheetItem)
                     setSheetItem(null)
@@ -466,7 +462,7 @@ export function RoadmapList(): React.JSX.Element {
               {!closed && (
                 <button
                   className="msheet-item"
-                  disabled={isLocked(sheetItem) || liveAgents.length === 0}
+                  disabled={isRoadmapLocked(sheetItem) || liveAgents.length === 0}
                   onClick={() => {
                     setAssignItem(sheetItem)
                     setSheetItem(null)
@@ -475,7 +471,7 @@ export function RoadmapList(): React.JSX.Element {
                   <span className="msheet-icon">{GLYPHS.agents}</span> {t('roadmap.menuAssign')}
                 </button>
               )}
-              {isLocked(sheetItem) && (
+              {isRoadmapLocked(sheetItem) && (
                 <button
                   className="msheet-item"
                   onClick={() => {
@@ -492,7 +488,7 @@ export function RoadmapList(): React.JSX.Element {
               {archived ? (
                 <button
                   className="msheet-item"
-                  disabled={isLocked(sheetItem)}
+                  disabled={isRoadmapLocked(sheetItem)}
                   onClick={() => {
                     void upsert({ id: sheetItem.id, status: 'planned' })
                     setSheetItem(null)
@@ -504,7 +500,7 @@ export function RoadmapList(): React.JSX.Element {
               ) : (
                 <button
                   className="msheet-item msheet-item-danger"
-                  disabled={isLocked(sheetItem)}
+                  disabled={isRoadmapLocked(sheetItem)}
                   onClick={() => {
                     void archive(sheetItem)
                     setSheetItem(null)

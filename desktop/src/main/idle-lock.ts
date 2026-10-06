@@ -29,3 +29,16 @@ export function ownsIdleLock(
   if (itemLockedGroup === null) return false
   return itemLockedGroup === activeGroupId
 }
+
+/**
+ * The upsert that releases a card's lock from the Deck. Only an in_progress
+ * card drops back to planned: a lock can outlive in_progress, and releasing it
+ * must not reopen a card already done or archived.
+ */
+export function lockReleasePatch(item: { id: string; status: string }):
+  | { id: string; status: 'planned'; locked: false }
+  | { id: string; locked: false } {
+  return item.status === 'in_progress'
+    ? { id: item.id, status: 'planned', locked: false }
+    : { id: item.id, locked: false }
+}
