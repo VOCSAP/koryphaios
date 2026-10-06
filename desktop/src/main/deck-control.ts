@@ -26,9 +26,9 @@ import { parseRunDirectiveArgs, type DeckDirectiveRunResult } from './directive-
 import { EMBEDDED_AGENTS, getEmbeddedAgent, type EmbeddedAgent } from './team-embedded'
 import { TEAM_PLAYBOOK } from './team-embedded'
 import { TEAM_LEAD_DECK_TOOLS } from './supervisor'
+import { createSpawnCap } from './spawn-cap'
 
-/** Live sessions cap enforced on deck_spawn_session / deck_spawn_team. */
-export const SPAWN_CAP = 8
+export { SPAWN_CAP } from './spawn-cap'
 
 /** Sync wait for a spawned session's peer_id (deck_spawn_session default). */
 export const WAIT_PEER_TIMEOUT_MS = 90_000
@@ -100,15 +100,7 @@ export interface DeckControlDeps {
   listWorktrees(): Promise<WorktreeInfo[]>
   removeWorktree(path: string): Promise<void>
   listTemplates(): TemplateSummary[]
-  /**
-   * Card 89cb66f9: resolution + containment/approval gate (MAY prompt the
-   * operator and persist an approval, see index.ts's confirmShellFieldApproval)
-   * -- no SPAWN side effect, returns a discriminated TemplateResolveResult
-   * (card 96c98453: 'ok:true' carries the inputs to spawn, 'ok:false' names
-   * why not). Split out of the old applyTemplate(path): Promise<number> so
-   * deck_apply_template can capCheck/approveSpawn the batch BEFORE any tile
-   * spawns, exactly like deck_spawn_team already does.
-   */
+  /** May prompt the operator and persist an approval, but never spawns, so the batch is approved before any tile exists. */
   resolveTemplate(path: string): TemplateResolveResult
   /**
    * Card 89cb66f9: spawn exactly ONE template entry and return the created
@@ -447,15 +439,7 @@ export function startDeckControl(
   /** A second deck_close_all would re-read tiles the first is closing and force their cleanup (a kill without /exit). */
   let closeAllInFlight = false
 
-  /** Enforce the live-session cap for a batch of n upcoming spawns. */
-  function capCheck(n: number): void {
-    const live = deps.listSessions().filter((s) => s.status !== 'exited').length
-    if (live + n > SPAWN_CAP) {
-      throw new Error(
-        `spawn cap: ${live} live session(s) + ${n} requested exceeds the ${SPAWN_CAP} cap -- close sessions or spawn in waves`
-      )
-    }
-  }
+  const spawnCap = createSpawnCap(deps.listSessions)
 
   /** Spawn one validated entry (shared by deck_spawn_session / deck_spawn_team). */
   async function spawnEntry(
@@ -564,20 +548,24 @@ export function startDeckControl(
       case 'deck_spawn_session': {
         const entry = parseEntry(args)
         const embedded = validateEntry(entry)
-        // Audit fix #1a (card 6c380073): before capCheck/approval, never after.
         assertArgsAllowedForRestrictedCaller(entry, restricted)
         // Audit fix #1c: shell-bearing `args` needs operator approval (same
         // gate templates/workspace-restore use), unless already cached.
         if (!deps.confirmSpawnShellFields({ args: entry.args })) {
           throw new Error('refused: this launch carries unapproved shell arguments')
         }
-        capCheck(1)
-        const approval = await deps.approveSpawn([summarizeEntry(entry, embedded)], [entry], callerId)
-        if (approval.pending) {
-          return { pending: true, note: SPAWN_APPROVAL_PENDING_NOTE }
+        const releaseCapacity = spawnCap.reserve(1)
+        let created!: SessionRuntime
+        try {
+          const approval = await deps.approveSpawn([summarizeEntry(entry, embedded)], [entry], callerId)
+          if (approval.pending) {
+            return { pending: true, note: SPAWN_APPROVAL_PENDING_NOTE }
+          }
+          if (!approval.decisions[0]) throw new Error('spawn refused by the operator')
+          created = await spawnEntry(entry, embedded, callerId)
+        } finally {
+          releaseCapacity()
         }
-        if (!approval.decisions[0]) throw new Error('spawn refused by the operator')
-        const created = await spawnEntry(entry, embedded, callerId)
         // Sync ack by default (single-agent contract, TS3): the result carries
         // the peer_id. wait_for_peer:false switches to the async targeted ack.
         if (args['wait_for_peer'] === false) {
@@ -622,36 +610,38 @@ export function startDeckControl(
             throw new Error('refused: this team plan carries unapproved shell arguments')
           }
         }
-        capCheck(entries.length)
-        const approval = await deps.approveSpawn(
-          entries.map((entry, i) => summarizeEntry(entry, embeddeds[i] ?? null)),
-          entries,
-          callerId
-        )
-        if (approval.pending) {
-          return { pending: true, note: SPAWN_APPROVAL_PENDING_NOTE }
-        }
-        const decisions = approval.decisions
-        const spawned: Record<string, unknown>[] = []
-        let refused = 0
-        for (let i = 0; i < entries.length; i++) {
-          if (!decisions[i]) {
-            refused++
-            continue
+        const releaseCapacity = spawnCap.reserve(entries.length)
+        try {
+          const approval = await deps.approveSpawn(
+            entries.map((entry, i) => summarizeEntry(entry, embeddeds[i] ?? null)),
+            entries,
+            callerId
+          )
+          if (approval.pending) {
+            return { pending: true, note: SPAWN_APPROVAL_PENDING_NOTE }
           }
-          const created = await spawnEntry(entries[i]!, embeddeds[i] ?? null, callerId)
-          // Team contract (TS3): always async -- the Deck notifies the
-          // supervisor as each session connects (or fails to).
-          deps.armSpawnAck(created.id, created.name)
-          spawned.push(sessionView(created))
-        }
-        return {
-          spawned,
-          refused,
-          note:
-            spawned.length > 0
-              ? 'async acks armed: the Deck will notify you as each session connects'
-              : 'nothing spawned'
+          const decisions = approval.decisions
+          const spawned: Record<string, unknown>[] = []
+          let refused = 0
+          for (let i = 0; i < entries.length; i++) {
+            if (!decisions[i]) {
+              refused++
+              continue
+            }
+            const created = await spawnEntry(entries[i]!, embeddeds[i] ?? null, callerId)
+            deps.armSpawnAck(created.id, created.name)
+            spawned.push(sessionView(created))
+          }
+          return {
+            spawned,
+            refused,
+            note:
+              spawned.length > 0
+                ? 'async acks armed: the Deck will notify you as each session connects'
+                : 'nothing spawned'
+          }
+        } finally {
+          releaseCapacity()
         }
       }
 
@@ -679,8 +669,14 @@ export function startDeckControl(
             'refused: only a session spawned by this same caller can be restarted -- ask the operator for the rest'
           )
         }
-        await deps.restartSession(id)
-        return { ok: true }
+        const targetSession = deps.listSessions().find((session) => session.id === id)
+        const releaseCapacity = targetSession?.status === 'exited' ? spawnCap.reserve(1) : null
+        try {
+          await deps.restartSession(id)
+          return { ok: true }
+        } finally {
+          releaseCapacity?.()
+        }
       }
 
       case 'deck_close_session': {
@@ -835,16 +831,8 @@ export function startDeckControl(
         return { templates: deps.listTemplates() }
 
       case 'deck_apply_template': {
-        // Card 89cb66f9: was spawning unconditionally through a dep that
-        // returned only a count, bypassing the cap/approval pair that guards
-        // deck_spawn_session/deck_spawn_team AND leaving every tile out of
-        // ownedSessions (untraceable: nobody, supervisor included, could
-        // later close or restart it). Now mirrors deck_spawn_team exactly:
-        // resolve first, capCheck the whole batch, ONE approveSpawn call for
-        // the lot (never N dialogs), then spawn + ownedSessions.set per tile.
         const path = str(args, 'path')
         if (!path) throw new Error('path is required')
-        // Card 96c98453: resolveTemplate now returns a discriminated result.
         // This route never throws for a non-ok reason (containment,
         // malformed, or the operator declining the approval dialog) -- every
         // one maps to an empty batch, via templateInputsOrEmpty
@@ -868,38 +856,37 @@ export function startDeckControl(
             ? { spawned: 0, refused: 0 }
             : { spawned: 0, refused: 0, resolution: resolved.reason }
         }
-        capCheck(inputs.length)
-        const approval = await deps.approveSpawn(inputs.map(summarizeTemplateInput), inputs, callerId)
-        if (approval.pending) {
-          return { pending: true, note: SPAWN_APPROVAL_PENDING_NOTE }
-        }
-        const decisions = approval.decisions
-        // Crown rule (PLAN C18): decided ONCE for the whole batch, same as
-        // the pre-existing applyTemplate behaviour -- a later tile in this
-        // same batch never re-checks against tiles this batch just spawned.
-        const hasLead = deps.listSessions().some((s) => s.lead && s.status !== 'exited')
-        let spawned = 0
-        // A real counter (not inputs.length - spawned, review round 2 nit 1):
-        // `refused` must stay accurate the day a second skip reason joins
-        // the lone `!decisions[i]` one (malformed entry, per-tile quota,
-        // dedup) instead of silently reading as "refused by the operator".
-        let refused = 0
-        for (let i = 0; i < inputs.length; i++) {
-          if (!decisions[i]) {
-            refused++
-            continue
+        const releaseCapacity = spawnCap.reserve(inputs.length)
+        try {
+          const approval = await deps.approveSpawn(inputs.map(summarizeTemplateInput), inputs, callerId)
+          if (approval.pending) {
+            return { pending: true, note: SPAWN_APPROVAL_PENDING_NOTE }
           }
-          const created = await deps.spawnTemplateEntry(inputs[i]!, {
-            checkpoint: spawned === 0,
-            hasLead
-          })
-          ownedSessions.set(created.id, callerId)
-          spawned++
+          const decisions = approval.decisions
+          // hasLead is decided once for the whole batch.
+          const hasLead = deps.listSessions().some((s) => s.lead && s.status !== 'exited')
+          let spawned = 0
+          // Counted, not derived, so a future skip reason stays distinct from an operator refusal.
+          let refused = 0
+          for (let i = 0; i < inputs.length; i++) {
+            if (!decisions[i]) {
+              refused++
+              continue
+            }
+            const created = await deps.spawnTemplateEntry(inputs[i]!, {
+              checkpoint: spawned === 0,
+              hasLead
+            })
+            ownedSessions.set(created.id, callerId)
+            spawned++
+          }
+          // Distinct from a resolved-but-empty template (spawned:0, refused:0
+          // above): a total refusal by the operator must not read the same as
+          // "there was nothing to spawn" (same shape as deck_spawn_team).
+          return { spawned, refused }
+        } finally {
+          releaseCapacity()
         }
-        // Distinct from a resolved-but-empty template (spawned:0, refused:0
-        // above): a total refusal by the operator must not read the same as
-        // "there was nothing to spawn" (same shape as deck_spawn_team).
-        return { spawned, refused }
       }
 
       case 'deck_save_template': {

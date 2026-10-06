@@ -41,6 +41,7 @@ import {
   type WorkspaceDeps,
 } from "../desktop/src/main/workspace-service.ts";
 import { onDeckError } from "../desktop/src/main/log.ts";
+import { SPAWN_CAP } from "../desktop/src/main/spawn-cap.ts";
 import type { AppConfig, SessionDef } from "../desktop/src/shared/types.ts";
 import type { Scope } from "../desktop/src/main/scope.ts";
 
@@ -710,6 +711,30 @@ test("WorkspaceService.restore(): succeeds and owns the lock when nothing conten
   expect(lock).not.toBeNull();
   expect(lock!.pid).toBe(4242);
   expect(lock!.host).toBe("this-host");
+});
+
+test("WorkspaceService.restore(): operator restore is not bound by the agent spawn cap", () => {
+  const proj = freshProject();
+  ensureWorkspacesDir(proj);
+  saveWorkspace(
+    proj,
+    sampleWorkspace({
+      id: "wsp_over_cap",
+      sessions: Array.from({ length: SPAWN_CAP + 3 }, (_, position) => ({
+        claudeSessionId: `sid-${position}`,
+        name: `tile-${position}`,
+        cwd: "/abs/project",
+        args: ["--agent", "reviewer"],
+        color: "#4488ff",
+        position,
+      })),
+    })
+  );
+  const deps = fakeDeps(proj);
+  const svc = workspaceService(deps);
+
+  expect(svc.restore("wsp_over_cap", "attended")).toEqual({ ok: true });
+  expect(deps.sessions).toHaveLength(SPAWN_CAP + 3);
 });
 
 test("WorkspaceService.restore(): a workspace id with no saved file resolves to reason 'missing'", () => {

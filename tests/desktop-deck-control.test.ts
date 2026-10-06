@@ -300,6 +300,98 @@ test("guards: close accepts every unlocked non-supervisor tile; remove only touc
   expect(capped.body.error).toContain("spawn cap");
 });
 
+test("deck_spawn_session reserves capacity while another approval is pending", async () => {
+  const state = { sessions: Array.from({ length: SPAWN_CAP - 1 }, (_, i) => fakeSession(`live-${i}`)) };
+  const deps = makeDeps(state);
+  const { releaseApproval, firstApproval, secondApproval } = holdFirstApproval(deps);
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+
+  const first = call(srv, "deck_spawn_session", { name: "first" });
+  await firstApproval;
+  const second = call(srv, "deck_spawn_session", { name: "second" });
+  const outcome = await Promise.race([
+    second.then((response) => ({ kind: "response" as const, status: response.status })),
+    secondApproval.then(() => ({ kind: "approval" as const }))
+  ]);
+  releaseApproval({ pending: false, decisions: [true] });
+  await first;
+  await second;
+
+  expect(outcome).toEqual({ kind: "response", status: 400 });
+  expect(deps.approvals).toHaveLength(1);
+});
+
+function holdFirstApproval(deps: ReturnType<typeof makeDeps>) {
+  let releaseApproval: (approval: { pending: false; decisions: boolean[] }) => void = () => {};
+  const approval = new Promise<{ pending: false; decisions: boolean[] }>((resolve) => {
+    releaseApproval = resolve;
+  });
+  let firstApprovalObserved: () => void = () => {};
+  const firstApproval = new Promise<void>((resolve) => {
+    firstApprovalObserved = resolve;
+  });
+  let secondApprovalObserved: () => void = () => {};
+  const secondApproval = new Promise<void>((resolve) => {
+    secondApprovalObserved = resolve;
+  });
+  let approvalCalls = 0;
+  deps.approveSpawn = async (entries) => {
+    deps.approvals.push(entries);
+    approvalCalls++;
+    if (approvalCalls === 1) firstApprovalObserved();
+    else secondApprovalObserved();
+    return approval;
+  };
+  return { releaseApproval, firstApproval, secondApproval };
+}
+
+for (const { tool, args } of [
+  { tool: "deck_spawn_team", args: { team: [{ name: "a" }, { name: "b" }] } },
+  { tool: "deck_apply_template", args: { path: "/t.json" } }
+]) {
+  test(`${tool} reserves capacity for its whole batch while another approval is pending`, async () => {
+    const state = { sessions: Array.from({ length: SPAWN_CAP - 3 }, (_, i) => fakeSession(`live-${i}`)) };
+    const deps = makeDeps(state);
+    const { releaseApproval, firstApproval, secondApproval } = holdFirstApproval(deps);
+    const srv = await startDeckControl(deps);
+    servers.push(srv);
+
+    const first = call(srv, tool, args);
+    await firstApproval;
+    const second = call(srv, tool, args);
+    const outcome = await Promise.race([
+      second.then((response) => ({ kind: "response" as const, status: response.status })),
+      secondApproval.then(() => ({ kind: "approval" as const }))
+    ]);
+    releaseApproval({ pending: false, decisions: [true, true] });
+    await first;
+    await second;
+
+    expect(outcome).toEqual({ kind: "response", status: 400 });
+    expect(state.sessions.filter((session) => session.status !== "exited")).toHaveLength(SPAWN_CAP - 1);
+  });
+}
+
+test("deck_restart_session refuses an exited tile when the live cap is full", async () => {
+  const state = { sessions: [] as SessionRuntime[] };
+  const deps = makeDeps(state);
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+  const spawned = await call(srv, "deck_spawn_session", { name: "mine" });
+  const id = (spawned.body.result as { session: { id: string } }).session.id;
+  state.sessions.find((session) => session.id === id)!.status = "exited";
+  while (state.sessions.filter((session) => session.status !== "exited").length < SPAWN_CAP) {
+    state.sessions.push(fakeSession(`live-${state.sessions.length}`));
+  }
+
+  const restarted = await call(srv, "deck_restart_session", { id });
+
+  expect(restarted.status).toBe(400);
+  expect(restarted.body.error).toContain("spawn cap");
+  expect(deps.restarted).toEqual([]);
+});
+
 test("mintCaller: a second caller can close but cannot restart a tile owned by the first caller", async () => {
   const state = { sessions: [] as SessionRuntime[] };
   const deps = makeDeps(state);
