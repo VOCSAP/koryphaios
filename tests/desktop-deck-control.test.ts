@@ -2460,6 +2460,8 @@ function fakeApproval(overrides: Partial<Approval> = {}): Approval {
     answered_via: null,
     answer_kind: null,
     answer_text: null,
+    questions: null,
+    answers: null,
     created_at: new Date().toISOString(),
     notif_expires_at: new Date().toISOString(),
     answered_at: null,

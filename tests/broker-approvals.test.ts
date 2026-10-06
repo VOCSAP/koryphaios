@@ -1560,17 +1560,20 @@ describe("the hook route: a verdict the Claude Code module returns itself", () =
     // out and evaluated against an in-memory table. onAnswer hands this exact
     // value to channelAnswerResult, which keeps `refused` for the phone.
     const src = readFileSync(join(import.meta.dir, "..", "broker.ts"), "utf8").replace(/\r\n/g, "\n");
-    const start = src.indexOf("function settleApproval(");
-    const end = src.indexOf("\n}\n", start);
-    expect(start, "settleApproval not found in broker.ts").toBeGreaterThan(-1);
-    expect(end).toBeGreaterThan(start);
+    const cut = (anchor: string): string => {
+      const start = src.indexOf(anchor);
+      const end = src.indexOf("\n}\n", start);
+      expect(start, `${anchor} not found in broker.ts`).toBeGreaterThan(-1);
+      expect(end).toBeGreaterThan(start);
+      return src.slice(start, end + 2);
+    };
     const dir = realpathSync.native(mkdtempSync(join(tmpdir(), "kory-settle-")));
     const file = join(dir, "settle.ts");
     writeFileSync(
       file,
       `export function register(env) {\n` +
         `  const { db, approvalWhere, hookProducerGone, rowToApproval, notifyRegistry, log, deliverApprovalAnswer, resolveApprovalWaiters } = env;\n` +
-        `${src.slice(start, end + 2)}\n  return settleApproval;\n}\n`
+        `${cut("function abandonIfHookProducerGone(")}\n${cut("function settleApproval(")}\n  return settleApproval;\n}\n`
     );
     const { register } = (await import(pathToFileURL(file).href)) as {
       register: (env: Record<string, unknown>) => (...args: unknown[]) => Record<string, unknown>;
@@ -1631,7 +1634,69 @@ describe("the hook route: a verdict the Claude Code module returns itself", () =
       b, "/approval/claim", { id: row.id, via: "deck", answer_kind: "maybe" }, { cred: op.cred, operator_id: op.id }
     );
     expect(res.status).toBe(400);
-    expect((await listed(b, op, row.id))?.status).toBe("pending");
+    // Read straight from the table: /approval/list would itself close the orphan.
+    const db = new Database(b.dbPath);
+    const stored = db.query("SELECT status FROM pending_approvals WHERE id = ?").get(row.id) as { status: string };
+    db.close();
+    expect(stored.status).toBe("pending");
+  });
+
+  test("last_wait_at is stamped when a wait ENDS, by timeout or by an answer, not only when it starts", async () => {
+    const b = await boot();
+    const op = newOperator();
+    const s = await session(b, op, "window-hook");
+    const stampOf = (id: string): number => {
+      const db = new Database(b.dbPath);
+      const r = db.query("SELECT last_wait_at FROM pending_approvals WHERE id = ?").get(id) as { last_wait_at: string };
+      db.close();
+      return Date.parse(r.last_wait_at);
+    };
+
+    const expiring = await hook(b, s);
+    const t0 = Date.now();
+    expect((await wait(b, s, expiring.id, 1, expiring.secret)).body.pending).toBe(true);
+    expect(stampOf(expiring.id) - t0, "the window must count from the end of a 30 s wait, not its start").toBeGreaterThanOrEqual(900);
+
+    const answered = await hook(b, s);
+    const t1 = Date.now();
+    const parked = wait(b, s, answered.id, 20, answered.secret);
+    await Bun.sleep(400);
+    await claimAllow(b, op, answered.id);
+    await parked;
+    expect(stampOf(answered.id) - t1).toBeGreaterThanOrEqual(350);
+  });
+
+  test("/approval/list closes a hook row whose module stopped waiting, and only that one", async () => {
+    const b = await boot();
+    const op = newOperator();
+    const s = await session(b, op, "window-hook");
+    const pendingIds = async (): Promise<string[]> => {
+      const res = await signedPost<{ approvals: Approval[] }>(
+        b, "/approval/list", { ...approvalListBody(DEFAULT_PROJECT_KEY), status: "pending" }, { cred: op.cred, operator_id: op.id }
+      );
+      return res.body.approvals.map((a) => a.id);
+    };
+
+    const orphan = await hook(b, s);
+    age(b, orphan.id, 46_000);
+    const recent = await hook(b, s);
+    await wait(b, s, recent.id, 1, recent.secret);
+    const parkedRow = await hook(b, s);
+    const parked = wait(b, s, parkedRow.id, 20, parkedRow.secret);
+    await Bun.sleep(100);
+    age(b, parkedRow.id, 46_000);
+    const ptyRow = await addApproval(b, op);
+    const db = new Database(b.dbPath);
+    db.run("UPDATE pending_approvals SET created_at = ? WHERE id = ?", [new Date(Date.now() - 46_000).toISOString(), ptyRow.id]);
+    db.close();
+
+    const ids = await pendingIds();
+    expect(ids, "a module that stopped waiting must not keep the tile flagged").not.toContain(orphan.id);
+    expect(ids).toEqual(expect.arrayContaining([recent.id, parkedRow.id, ptyRow.id]));
+    expect((await listed(b, op, orphan.id))?.status).toBe("abandoned");
+
+    await withdraw(b, s, parkedRow.id, parkedRow.secret);
+    await parked;
   });
 
   test("a claim on a hook row with a recent wait, or a wait still parked, is settled", async () => {
@@ -1650,5 +1715,136 @@ describe("the hook route: a verdict the Claude Code module returns itself", () =
     const claimed = await claimAllow(b, op, parkedRow.id);
     expect(claimed.status, "a long wait in flight is the module being alive").toBe(200);
     expect((await parked).body.approval?.answer_kind).toBe("allow");
+  });
+});
+
+describe("AskUserQuestion: questions on add, answers on claim", () => {
+  type Op = { cred: ApprovalCredential; id: string };
+  const questions = [
+    { question: "Pick fruits?", header: "Fruit", options: [{ label: "Apple" }, { label: "Cherry" }], multi_select: true },
+    { question: "Which colour?", header: "Colour", options: [{ label: "Red" }, { label: "Blue" }] },
+  ];
+  const asOp = (op: Op) => ({ cred: op.cred, operator_id: op.id });
+  const claimAnswers = (b: TestBroker, op: Op, id: string, extra: Record<string, unknown>) =>
+    signedPost<{ approval?: Approval; error?: string }>(b, "/approval/claim", { id, via: "deck", ...extra }, asOp(op));
+  const raiseQuestions = (b: TestBroker, op: Op, over: Record<string, unknown> = {}) =>
+    addApproval(b, op, {
+      kind: "question",
+      title: "Questions",
+      question: "Two questions",
+      options: [],
+      questions,
+      reply_route: "hook",
+      merge: "never",
+      ...over,
+    });
+
+  test("the questions are stored and read back; an answers claim stores arrays and a summary", async () => {
+    const b = await boot();
+    const op = newOperator();
+    const row = await raiseQuestions(b, op);
+    expect(row.questions?.map((q) => [q.question, q.multi_select, q.options.map((o) => o.label)])).toEqual([
+      ["Pick fruits?", true, ["Apple", "Cherry"]],
+      ["Which colour?", false, ["Red", "Blue"]],
+    ]);
+    expect(row.answers).toBeNull();
+
+    const res = await claimAnswers(b, op, row.id, {
+      answer_kind: "answers",
+      answers: { "Pick fruits?": ["Cherry", "Apple"], "Which colour?": ["Green"] },
+    });
+    expect(res.status, res.body.error).toBe(200);
+    expect(res.body.approval?.answer_kind).toBe("answers");
+    expect(res.body.approval?.answers).toEqual({ "Pick fruits?": ["Apple", "Cherry"], "Which colour?": ["Green"] });
+    expect(res.body.approval?.answer_text).toBe("Pick fruits?: Apple, Cherry\nWhich colour?: Green");
+    const listed = await signedPost<{ approvals: Approval[] }>(b, "/approval/list", approvalListBody(DEFAULT_PROJECT_KEY), asOp(op));
+    expect(listed.body.approvals.find((a) => a.id === row.id)?.answers).toEqual(res.body.approval?.answers);
+  });
+
+  test("add refuses malformed questions with 400", async () => {
+    const b = await boot();
+    const op = newOperator();
+    const bad = [
+      { questions: [questions[0], { ...questions[0], header: "dup" }] },
+      { questions: "Pick fruits?" },
+      { questions, kind: "permission" },
+    ];
+    for (const over of bad) {
+      const res = await signedPost<{ error?: string }>(
+        b,
+        "/approval/add",
+        { kind: "question", title: "t", question: "q", origin: { project_key: DEFAULT_PROJECT_KEY }, ...over },
+        asOp(op)
+      );
+      expect(res.status, JSON.stringify(over)).toBe(400);
+    }
+  });
+
+  test("an answers claim is refused where it cannot reach anyone, or does not match the questions", async () => {
+    const b = await boot();
+    const op = newOperator();
+    const plain = await addApproval(b, op, { kind: "question", title: "t", question: "q", reply_route: "hook", merge: "never" });
+    const noQuestions = await claimAnswers(b, op, plain.id, { answer_kind: "answers", answers: { "q": ["x"] } });
+    expect(noQuestions.status, "answers on a row without questions").toBe(422);
+
+    const row = await raiseQuestions(b, op);
+    const bad: Array<Record<string, unknown>> = [
+      { answer_kind: "answers", answers: { "Pick fruits?": ["Apple"], "Which colour?": ["Red"], "Rogue?": ["x"] } },
+      { answer_kind: "answers", answers: { "Pick fruits?": ["Apple"] } },
+      { answer_kind: "answers", answers: { "Pick fruits?": "Apple", "Which colour?": ["Red"] } },
+      { answer_kind: "answers", answers: { "Pick fruits?": ["Apple"], "Which colour?": ["Red", "Blue"] } },
+      { answer_kind: "answers" },
+      { answer_kind: "text", answer_text: "hi", answers: { "Pick fruits?": ["Apple"], "Which colour?": ["Red"] } },
+      { answer_kind: "answers", answer_text: "hi", answers: { "Pick fruits?": ["Apple"], "Which colour?": ["Red"] } },
+    ];
+    for (const extra of bad) {
+      expect((await claimAnswers(b, op, row.id, extra)).status, JSON.stringify(extra)).toBe(400);
+    }
+    const still = await signedPost<{ approvals: Approval[] }>(b, "/approval/list", approvalListBody(DEFAULT_PROJECT_KEY), asOp(op));
+    expect(still.body.approvals.find((a) => a.id === row.id)?.status, "a refused answer settles nothing").toBe("pending");
+  });
+
+  test("questions are refused at add unless a hook or channel route and merge never can carry the answers back", async () => {
+    const b = await boot();
+    const op = newOperator();
+    const add = (over: Record<string, unknown>) =>
+      signedPost<{ error?: string }>(
+        b,
+        "/approval/add",
+        { kind: "question", title: "t", question: "q", questions, origin: { project_key: DEFAULT_PROJECT_KEY }, ...over },
+        asOp(op)
+      );
+    expect((await add({ reply_route: "pty", merge: "never" })).status, "nothing can type answers into a terminal").toBe(400);
+    expect((await add({ merge: "never" })).status, "the default route is pty").toBe(400);
+    const downgraded = await add({ reply_route: "channel", reply_peer_id: "nobody-here", merge: "never" });
+    expect(downgraded.status, "a channel route whose peer is gone falls back to pty").toBe(400);
+    expect((await add({ reply_route: "channel", merge: "tile" })).status, "a mergeable row could be absorbed").toBe(400);
+  });
+
+  test("an absorbed question takes no answers verdict", async () => {
+    const b = await boot();
+    const op = newOperator();
+    const row = await raiseQuestions(b, op);
+    const db = new Database(b.dbPath);
+    db.run("UPDATE pending_approvals SET absorbed_permission = 1 WHERE id = ?", [row.id]);
+    db.close();
+    const res = await claimAnswers(b, op, row.id, {
+      answer_kind: "answers",
+      answers: { "Pick fruits?": ["Apple"], "Which colour?": ["Red"] },
+    });
+    expect(res.status).toBe(422);
+    const listed = await signedPost<{ approvals: Approval[] }>(b, "/approval/list", approvalListBody(DEFAULT_PROJECT_KEY), asOp(op));
+    expect(listed.body.approvals.find((a) => a.id === row.id)?.status).toBe("pending");
+  });
+
+  test("questions named like Object.prototype members survive the round trip", async () => {
+    const b = await boot();
+    const op = newOperator();
+    const row = await raiseQuestions(b, op, {
+      questions: ["__proto__", "constructor"].map((question) => ({ question, options: [{ label: "A" }, { label: "B" }] })),
+    });
+    const res = await claimAnswers(b, op, row.id, { answer_kind: "answers", answers: JSON.parse('{"__proto__":["A"],"constructor":["B"]}') });
+    expect(res.status, res.body.error).toBe(200);
+    expect(Object.keys(res.body.approval?.answers ?? {})).toEqual(["__proto__", "constructor"]);
   });
 });

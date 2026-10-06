@@ -1678,8 +1678,34 @@ export type ApprovalStatus =
   | "acknowledged"
   | "answered_terminal";
 
-/** Shape of the answer. `text` carries a free-form operator prompt. */
-export type ApprovalAnswerKind = "allow" | "deny" | "text";
+/**
+ * Shape of the answer. `text` carries a free-form operator prompt; `answers`
+ * answers every question of a row that carries `questions`.
+ */
+export type ApprovalAnswerKind = "allow" | "deny" | "text" | "answers";
+
+/** One choice of an AskUserQuestion question. */
+export interface ApprovalQuestionOption {
+  label: string;
+  description: string;
+}
+
+/** One AskUserQuestion question, as validated by the broker. */
+export interface ApprovalQuestion {
+  question: string;
+  header: string;
+  options: ApprovalQuestionOption[];
+  multi_select: boolean;
+}
+
+/**
+ * Per question TEXT, the chosen labels in the options' display order, then at
+ * most one free text (Other) last. Kept as arrays: Claude Code wants one
+ * string per question, which the module builds by joining with ", " exactly
+ * as the native menu does, so a label containing ", " is no more ambiguous
+ * to the model than when the operator answers on the tile.
+ */
+export type ApprovalAnswers = Record<string, string[]>;
 
 /** Which channel settled the approval. */
 export type ApprovalVia = "deck" | "telegram" | "discord" | "ntfy";
@@ -1761,7 +1787,12 @@ export interface Approval {
   absorbed_permission: boolean;
   answered_via: ApprovalVia | null;
   answer_kind: ApprovalAnswerKind | null;
+  /** For `answers`, a readable summary of them, one line per question. */
   answer_text: string | null;
+  /** AskUserQuestion questions, or null for any other request. */
+  questions: ApprovalQuestion[] | null;
+  /** Set once answered with answer_kind `answers`. */
+  answers: ApprovalAnswers | null;
   created_at: string; // ISO timestamp
   notif_expires_at: string; // ISO timestamp
   answered_at: string | null;
@@ -1787,6 +1818,16 @@ export interface ApprovalAddRequest {
   ttl_hours?: number;
   /** Absent, null or unrecognised normalises to 'tile' broker-side. */
   merge?: ApprovalMerge;
+  /**
+   * AskUserQuestion questions: kind 'question', merge 'never', and a hook route
+   * or a channel route to an active peer. `multi_select` defaults to false.
+   */
+  questions?: Array<{
+    question: string;
+    header?: string;
+    options: Array<{ label: string; description?: string }>;
+    multi_select?: boolean;
+  }>;
 }
 
 export interface ApprovalAddResponse {
@@ -1836,6 +1877,8 @@ export interface ApprovalClaimRequest {
    * verdict. Hook route only, exclusive with the others.
    */
   handback?: boolean;
+  /** With answer_kind 'answers' only: one array of labels per question text. */
+  answers?: ApprovalAnswers;
 }
 
 export interface ApprovalClaimResponse {

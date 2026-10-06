@@ -171,6 +171,40 @@ describe("channel return path", () => {
     expect(frame.from_peer_id).toBe("operator");
   }, 30_000);
 
+  test("an answers verdict reaches the peer as its summary, one line per question", async () => {
+    const b = await startBroker();
+    brokers.push(b);
+    const op = newOperator();
+    const peer = await connectPeer(b, "/tmp/proj-q");
+
+    const approval = await raise(b, op, {
+      reply_route: "channel",
+      reply_peer_id: peer.peerId,
+      merge: "never",
+      questions: [
+        { question: "Pick fruits?", options: [{ label: "Apple" }, { label: "Cherry" }], multi_select: true },
+        { question: "Which colour?", options: [{ label: "Red" }, { label: "Blue" }] },
+      ],
+    });
+    expect(approval.reply_route).toBe("channel");
+    const claimed = await signedPost<{ error?: string }>(
+      b,
+      "/approval/claim",
+      {
+        id: approval.id,
+        via: "deck",
+        answer_kind: "answers",
+        answers: { "Pick fruits?": ["Cherry", "Apple"], "Which colour?": ["Blue"] },
+      },
+      op
+    );
+    expect(claimed.status, claimed.body.error).toBe(200);
+
+    const frame = await waitForMessage(peer.frames, "Pick fruits?: Apple, Cherry");
+    expect(String(frame.text)).toContain("Which colour?: Blue");
+    expect(frame.from_peer_id).toBe("operator");
+  }, 30_000);
+
   test("the routing token never crosses the HTTP boundary", async () => {
     const b = await startBroker();
     brokers.push(b);

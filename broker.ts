@@ -88,6 +88,7 @@ import {
   deriveTokenId,
   isOperationAllowed,
   sanitizeAnswerForPty,
+  validateApprovalAnswers,
   validateApprovalDraft,
   verifyAuthProof,
   type ApprovalOperation,
@@ -184,6 +185,7 @@ import type {
   Approval,
   ApprovalAddRequest,
   ApprovalAddResponse,
+  ApprovalAnswers,
   ApprovalAuthProof,
   ApprovalClaimRequest,
   ApprovalClaimResponse,
@@ -191,6 +193,7 @@ import type {
   ApprovalDeliveredResponse,
   ApprovalListRequest,
   ApprovalListResponse,
+  ApprovalQuestion,
   ApprovalReplyRoute,
   ApprovalStatus,
   ApprovalTokenMintRequest,
@@ -1542,6 +1545,8 @@ db.run(`
     reply_group    TEXT NOT NULL DEFAULT '',
     last_wait_at   TEXT,
     producer_secret_hash TEXT NOT NULL DEFAULT '',
+    questions_json TEXT,
+    answers_json   TEXT,
     kind           TEXT NOT NULL,
     title          TEXT NOT NULL,
     question       TEXT NOT NULL,
@@ -1622,6 +1627,8 @@ for (const col of [
   "reply_group TEXT NOT NULL DEFAULT ''",
   "last_wait_at TEXT",
   "producer_secret_hash TEXT NOT NULL DEFAULT ''",
+  "questions_json TEXT",
+  "answers_json TEXT",
 ]) {
   try {
     db.run(`ALTER TABLE pending_approvals ADD COLUMN ${col}`);
@@ -8648,7 +8655,20 @@ type ApprovalRow = {
   delivered_at: string | null;
   last_wait_at: string | null;
   producer_secret_hash: string;
+  questions_json: string | null;
+  answers_json: string | null;
 };
+
+/** A stored JSON column that fails to parse reads as null, with a trace. */
+function parseStoredJson<T>(row: { id: string }, column: string, raw: string | null): T | null {
+  if (raw === null) return null;
+  try {
+    return JSON.parse(raw) as T;
+  } catch (err) {
+    log.error(`approval ${row.id}: unreadable ${column}`, err);
+    return null;
+  }
+}
 
 /**
  * An unknown stored value reads as 'pty', the column default, but leaves a
@@ -8700,6 +8720,8 @@ function rowToApproval(row: ApprovalRow): Approval {
     answered_via: (row.answered_via as ApprovalVia | null) ?? null,
     answer_kind: (row.answer_kind as Approval["answer_kind"]) ?? null,
     answer_text: row.answer_text,
+    questions: parseStoredJson<ApprovalQuestion[]>(row, "questions_json", row.questions_json ?? null),
+    answers: parseStoredJson<ApprovalAnswers>(row, "answers_json", row.answers_json ?? null),
     created_at: row.created_at,
     notif_expires_at: row.notif_expires_at,
     answered_at: row.answered_at,
@@ -8768,6 +8790,27 @@ function hookProducerGone(row: ApprovalRow, now: number = Date.now()): boolean {
   if (approvalWaiters.has(row.id)) return false;
   const last = Date.parse(row.last_wait_at ?? row.created_at);
   return !(Number.isFinite(last) && now - last < HOOK_WAIT_STALE_MS);
+}
+
+/**
+ * Close a 'hook' row nobody waits on anymore, so neither an answer nor the
+ * Deck's "needs you" flag outlives the CLI that raised it. The one definition
+ * shared by every settling path and by the list the Deck polls. Returns true
+ * only when this call closed the row; a row settled in between is left alone.
+ */
+function abandonIfHookProducerGone(row: ApprovalRow, scope: ApprovalScope, now: string): boolean {
+  if (!hookProducerGone(row)) return false;
+  const where = approvalWhere(scope);
+  const closed = db.run(
+    `UPDATE pending_approvals SET status = 'abandoned', answered_at = ?
+      WHERE id = ? AND ${where.sql} AND status IN ('pending','expired_notif')`,
+    [now, row.id, ...(where.params as never[])]
+  );
+  if (closed.changes === 0) return false;
+  log.info(`approval ${row.id}: hook producer stopped waiting, row abandoned`);
+  const gone = rowToApproval({ ...row, status: "abandoned", answered_at: now });
+  void notifyRegistry.settle(gone, "the session stopped waiting").catch((e) => log.error("notify: settle failed", e));
+  return true;
 }
 
 /**
@@ -8984,6 +9027,11 @@ function handleApprovalAdd(
     typeof body.reply_peer_id === "string" ? body.reply_peer_id : undefined,
     pick("group_id")
   );
+  // Checked on the RESOLVED route: a channel whose peer is gone falls back to
+  // pty, and nothing can type structured answers into a terminal.
+  if (draft.value.questions && reply.route === "pty") {
+    return { error: "questions need a hook route, or a channel route to an active peer", status: 400 };
+  }
   const now = new Date();
   const ttlHours = Math.max(
     1,
@@ -9009,8 +9057,8 @@ function handleApprovalAdd(
       `INSERT INTO pending_approvals
          (id, ${stamped.columns.join(", ")}, origin_host, origin_user, group_id, from_peer,
           tile_ref, mergeable, reply_route, reply_token, reply_group, producer_secret_hash,
-          kind, title, question, options_json, status, created_at, notif_expires_at)
-       VALUES (?, ${stamped.columns.map(() => "?").join(", ")}, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
+          kind, title, question, options_json, questions_json, status, created_at, notif_expires_at)
+       VALUES (?, ${stamped.columns.map(() => "?").join(", ")}, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
       [
         id,
         ...stamped.values,
@@ -9028,6 +9076,7 @@ function handleApprovalAdd(
         draft.value.title,
         draft.value.question,
         JSON.stringify(draft.value.options),
+        draft.value.questions ? JSON.stringify(draft.value.questions) : null,
         createdAt,
         notifExpiresAt,
       ]
@@ -9120,7 +9169,9 @@ function settleApproval(
   via: ApprovalVia,
   answerKind: Approval["answer_kind"],
   answerText: string | null,
-  status: "answered" | "acknowledged" | "answered_terminal"
+  status: "answered" | "acknowledged" | "answered_terminal",
+  /** Validated JSON of an `answers` verdict; null for every other kind. */
+  answersJson: string | null = null
 ): { approval: Approval } | { error: string; status: number; refused?: AnswerRefusal } {
   const allowed = via === "deck" ? "('pending','expired_notif')" : "('pending')";
   const now = new Date().toISOString();
@@ -9130,24 +9181,14 @@ function settleApproval(
   const current = db
     .query(`SELECT * FROM pending_approvals WHERE id = ? AND ${where.sql}`)
     .get(id, ...(where.params as never[])) as ApprovalRow | null;
-  if (current && hookProducerGone(current)) {
-    const closed = db.run(
-      `UPDATE pending_approvals SET status = 'abandoned', answered_at = ?
-        WHERE id = ? AND ${where.sql} AND status IN ('pending','expired_notif')`,
-      [now, id, ...(where.params as never[])]
-    );
-    // Zero changes: settled by someone else in between; the UPDATE below then
-    // answers with its own 409.
-    if (closed.changes > 0) {
-      log.info(`approval ${id}: hook producer stopped waiting, answer refused and row abandoned`);
-      const gone = rowToApproval({ ...current, status: "abandoned", answered_at: now });
-      void notifyRegistry.settle(gone, "the session stopped waiting").catch((e) => log.error("notify: settle failed", e));
-      return {
-        error: "the session is no longer waiting for this answer (closed or restarted): answer it in its terminal",
-        status: 410,
-        refused: "session-gone",
-      };
-    }
+  // Not closed: settled by someone else in between; the UPDATE below then
+  // answers with its own 409.
+  if (current && abandonIfHookProducerGone(current, scope, now)) {
+    return {
+      error: "the session is no longer waiting for this answer (closed or restarted): answer it in its terminal",
+      status: 410,
+      refused: "session-gone",
+    };
   }
   // A permission dialog only takes allow/deny keystrokes: free text would be
   // typed into the chooser. A row that absorbed a permission takes no verdict
@@ -9156,11 +9197,11 @@ function settleApproval(
   // write is refused too.
   const res = db.run(
     `UPDATE pending_approvals
-        SET status = ?, answered_via = ?, answer_kind = ?, answer_text = ?, answered_at = ?
+        SET status = ?, answered_via = ?, answer_kind = ?, answer_text = ?, answers_json = ?, answered_at = ?
       WHERE id = ? AND ${where.sql} AND status IN ${allowed}
         AND NOT (kind = 'permission' AND COALESCE(?, '') = 'text')
-        AND NOT (absorbed_permission = 1 AND COALESCE(?, '') IN ('allow', 'deny', 'text'))`,
-    [status, via, answerKind, answerText, now, id, ...(where.params as never[]), answerKind, answerKind]
+        AND NOT (absorbed_permission = 1 AND COALESCE(?, '') IN ('allow', 'deny', 'text', 'answers'))`,
+    [status, via, answerKind, answerText, answersJson, now, id, ...(where.params as never[]), answerKind, answerKind]
   );
   if (res.changes === 0) {
     // The existence probe is scoped TOO. Unscoped it would answer 409 for a row
@@ -9211,6 +9252,9 @@ function handleApprovalClaim(
   const via = (body.via ?? "deck") as ApprovalVia;
   if (!APPROVAL_VIAS.includes(via)) return { error: "unknown via", status: 400 };
   const target = authorized.rows[0];
+  if (body.answers !== undefined && body.answer_kind !== "answers") {
+    return { error: "answers needs answer_kind answers", status: 400 };
+  }
   if (body.handback === true) {
     if (
       body.terminal !== undefined ||
@@ -9268,7 +9312,34 @@ function handleApprovalClaim(
   }
   const answerKind = body.answer_kind;
   if (!answerKind || !APPROVAL_ANSWER_KINDS.includes(answerKind)) {
-    return { error: "answer_kind must be allow|deny|text", status: 400 };
+    return { error: "answer_kind must be allow|deny|text|answers", status: 400 };
+  }
+
+  if (answerKind === "answers") {
+    if (body.answer_text !== undefined) return { error: "answers excludes answer_text", status: 400 };
+    if (!target) return { error: "unknown approval", status: 404 };
+    const questions = parseStoredJson<ApprovalQuestion[]>(target, "questions_json", target.questions_json ?? null);
+    if (!questions) return { error: "this request has no questions to answer", status: 422 };
+    // A structured answer can only be handed back by the module or as a
+    // message; nothing types it into a terminal.
+    if (readReplyRoute(target) === "pty") {
+      return { error: "answers need a hook or channel route", status: 422 };
+    }
+    const valid = validateApprovalAnswers(questions, body.answers);
+    if (!valid.ok) return { error: `answers: ${valid.error}`, status: 400 };
+    const answered = settleApproval(
+      id,
+      scope,
+      via,
+      "answers",
+      valid.value.summary,
+      "answered",
+      JSON.stringify(valid.value.answers)
+    );
+    if (!("error" in answered)) {
+      void notifyRegistry.settle(answered.approval, via).catch((e) => log.error("notify: settle failed", e));
+    }
+    return answered;
   }
 
   let answerText: string | null = null;
@@ -9314,11 +9385,14 @@ async function handleApprovalWait(
   // of the same window learns nothing about the row.
   if (!row || sessionLacksProducerSecret(body, row)) return { error: "unknown approval", status: 404 };
   const where = approvalWhere(authorized.scope);
-  db.run(`UPDATE pending_approvals SET last_wait_at = ? WHERE id = ? AND ${where.sql}`, [
-    new Date().toISOString(),
-    id,
-    ...(where.params as never[]),
-  ]);
+  const stampWait = (): void => {
+    db.run(`UPDATE pending_approvals SET last_wait_at = ? WHERE id = ? AND ${where.sql}`, [
+      new Date().toISOString(),
+      id,
+      ...(where.params as never[]),
+    ]);
+  };
+  stampWait();
   // A hook row's notification expiring says nothing about its module, which
   // is still waiting: returning at once would only make it poll in a loop.
   const parkable = row.status === "pending" || (row.reply_route === "hook" && row.status === "expired_notif");
@@ -9340,6 +9414,14 @@ async function handleApprovalWait(
         if (set.size === 0) approvalWaiters.delete(id);
       }
       clearTimeout(timer);
+      // Stamped at the END as well: the staleness window then runs from when
+      // the module was last answered, so the gap before its next wait (helper
+      // respawn included) does not eat into it.
+      try {
+        stampWait();
+      } catch (err) {
+        log.error(`approval ${id}: could not stamp the end of a wait`, err);
+      }
       resolve(value);
     };
     const onClaim = (approval: Approval): void => settle({ approval });
@@ -9407,6 +9489,15 @@ function handleApprovalList(
   if (isAuthError(authorized)) return authorized;
 
   const where = approvalWhere(authorized.scope);
+  // The Deck lights a tile's flag from this list: a hook row whose module
+  // stopped waiting must not stay pending until someone tries to answer it.
+  const now = new Date().toISOString();
+  const hookRows = db
+    .query(
+      `SELECT * FROM pending_approvals WHERE ${where.sql} AND reply_route = 'hook' AND status IN ('pending','expired_notif')`
+    )
+    .all(...(where.params as never[])) as ApprovalRow[];
+  for (const row of hookRows) abandonIfHookProducerGone(row, authorized.scope, now);
   // The identity clause is interpolated first and literally, not pushed into
   // the filters array, so a reader -- and an automated discipline check -- can
   // see the scope in the statement itself rather than trusting that whatever

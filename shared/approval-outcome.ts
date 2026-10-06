@@ -34,6 +34,7 @@ export function settledOutcome(
     case "answered":
       switch (approval.answer_kind) {
         case "text":
+        case "answers":
           return { kind: "text", text: approval.answer_text ?? "" };
         case "allow":
           return { kind: "approved" };

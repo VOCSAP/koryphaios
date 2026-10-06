@@ -248,7 +248,22 @@ export type ApprovalStatus =
 export type ApprovalKind = 'permission' | 'question' | 'plan'
 export type ApprovalVia = 'deck' | 'telegram' | 'discord' | 'ntfy'
 export type ApprovalReplyRoute = 'channel' | 'pty' | 'hook'
-export type ApprovalAnswerKind = 'allow' | 'deny' | 'text'
+export type ApprovalAnswerKind = 'allow' | 'deny' | 'text' | 'answers'
+
+export interface ApprovalQuestionOption {
+  label: string
+  description: string
+}
+
+export interface ApprovalQuestion {
+  question: string
+  header: string
+  options: ApprovalQuestionOption[]
+  multi_select: boolean
+}
+
+/** Per question text: chosen labels in display order, then at most one free text. */
+export type ApprovalAnswers = Record<string, string[]>
 
 export interface ApprovalOrigin {
   host: string
@@ -277,6 +292,8 @@ export interface Approval {
   answer_text: string | null
   created_at: string
   notif_expires_at: string
+  questions: ApprovalQuestion[] | null
+  answers: ApprovalAnswers | null
   answered_at: string | null
   delivered_at: string | null
 }

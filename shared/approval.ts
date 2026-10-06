@@ -22,11 +22,13 @@ import type {
   Approval,
   ApprovalAddResponse,
   ApprovalAnswerKind,
+  ApprovalAnswers,
   ApprovalAuthKind,
   ApprovalAuthProof,
   ApprovalKind,
   ApprovalMerge,
   ApprovalOrigin,
+  ApprovalQuestion,
   ApprovalReplyRoute,
   ApprovalStatus,
   ApprovalVia,
@@ -54,6 +56,11 @@ export const APPROVAL_OPTION_MAX = 200;
 export const APPROVAL_OPTIONS_MAX = 10;
 export const APPROVAL_ANSWER_MAX = 4000;
 export const APPROVAL_SESSION_REF_MAX = 128;
+export const APPROVAL_QUESTIONS_MAX = 4;
+export const APPROVAL_HEADER_MAX = 64;
+export const APPROVAL_OPTION_DESCRIPTION_MAX = 500;
+/** One Other answer: it reaches the model as is. */
+export const APPROVAL_FREE_TEXT_MAX = 1000;
 
 /** Replay window for an auth proof, either side of the broker's clock. */
 export const APPROVAL_AUTH_SKEW_SEC = 120;
@@ -72,7 +79,7 @@ export function approvalWaitTimeoutSec(requested: unknown, replyRoute: string): 
 }
 
 export const APPROVAL_KINDS: readonly ApprovalKind[] = ["permission", "question", "plan"];
-export const APPROVAL_ANSWER_KINDS: readonly ApprovalAnswerKind[] = ["allow", "deny", "text"];
+export const APPROVAL_ANSWER_KINDS: readonly ApprovalAnswerKind[] = ["allow", "deny", "text", "answers"];
 export const APPROVAL_VIAS: readonly ApprovalVia[] = ["deck", "telegram", "discord", "ntfy"];
 
 // --- Auth proof ---
@@ -265,12 +272,147 @@ export interface ApprovalDraft {
    * this field.
    */
   merge: ApprovalMerge;
+  /** AskUserQuestion questions, null when the body carries none. */
+  questions: ApprovalQuestion[] | null;
 }
 
 export type ValidationResult<T> = { ok: true; value: T } | { ok: false; error: string };
 
 function str(v: unknown): string {
   return typeof v === "string" ? v : "";
+}
+
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+/**
+ * Every control, format and line/paragraph separator character (C0/C1, zero
+ * width, bidi, soft hyphen, tags, BOM...): text that shows nothing, or
+ * reorders what is shown, to the operator who answers or the model that reads
+ * the answer. Matched by Unicode category so the whole family goes, not a
+ * list of ranges. Tab, CR and LF are left to stripControl, which decides per
+ * field whether a line break survives. Applied only to AskUserQuestion text:
+ * stripControl has other consumers.
+ */
+const INVISIBLE_CHARS = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu;
+const KEPT_FOR_STRIP_CONTROL = new Set(["\t", "\r", "\n"]);
+
+/** Cut on a code point, never between the two halves of a surrogate pair. */
+function cutCodePoints(s: string, max: number): string {
+  const points = Array.from(s);
+  return points.length <= max ? s : points.slice(0, max).join("");
+}
+
+function cleanQuestionText(s: string, keepNewlines: boolean): string {
+  return stripControl(
+    s.replace(INVISIBLE_CHARS, (c) => (KEPT_FOR_STRIP_CONTROL.has(c) ? c : "")),
+    { keepNewlines }
+  ).trim();
+}
+
+/**
+ * Questions come from an agent (hostile input #4) and their text reaches the
+ * operator, so every string is stripped and capped. Anything that would make
+ * an answer ambiguous (two questions with one text, two options with one
+ * label) is refused rather than normalised away.
+ */
+function validateQuestions(raw: unknown): ValidationResult<ApprovalQuestion[]> {
+  if (!Array.isArray(raw)) return { ok: false, error: "questions must be an array" };
+  if (raw.length === 0) return { ok: false, error: "questions needs at least one question" };
+  if (raw.length > APPROVAL_QUESTIONS_MAX) return { ok: false, error: `at most ${APPROVAL_QUESTIONS_MAX} questions` };
+  const seen = new Set<string>();
+  const out: ApprovalQuestion[] = [];
+  for (const [i, q] of raw.entries()) {
+    if (!isPlainObject(q)) return { ok: false, error: `question ${i + 1} must be an object` };
+    const question = cutCodePoints(cleanQuestionText(str(q.question), true), APPROVAL_QUESTION_MAX);
+    if (!question) return { ok: false, error: `question ${i + 1} needs a question text` };
+    if (seen.has(question)) return { ok: false, error: `the question "${cutCodePoints(question, 80)}" appears twice` };
+    seen.add(question);
+    if (q.header !== undefined && typeof q.header !== "string") {
+      return { ok: false, error: `question ${i + 1}: header must be a string` };
+    }
+    const header = cutCodePoints(cleanQuestionText(str(q.header), false), APPROVAL_HEADER_MAX);
+    if (q.multi_select !== undefined && typeof q.multi_select !== "boolean") {
+      return { ok: false, error: `question ${i + 1}: multi_select must be a boolean` };
+    }
+    if (!Array.isArray(q.options) || q.options.length === 0) {
+      return { ok: false, error: `question ${i + 1} needs at least one option` };
+    }
+    if (q.options.length > APPROVAL_OPTIONS_MAX) {
+      return { ok: false, error: `question ${i + 1}: at most ${APPROVAL_OPTIONS_MAX} options` };
+    }
+    const labels = new Set<string>();
+    const options: ApprovalQuestion["options"] = [];
+    for (const o of q.options) {
+      if (!isPlainObject(o)) return { ok: false, error: `question ${i + 1}: each option must be an object` };
+      if (typeof o.label !== "string") return { ok: false, error: `question ${i + 1}: an option label must be a string` };
+      const label = cutCodePoints(cleanQuestionText(o.label, false), APPROVAL_OPTION_MAX);
+      if (!label) return { ok: false, error: `question ${i + 1}: an option label is empty` };
+      if (labels.has(label)) return { ok: false, error: `question ${i + 1}: the label "${label}" appears twice` };
+      labels.add(label);
+      if (o.description !== undefined && typeof o.description !== "string") {
+        return { ok: false, error: `question ${i + 1}: an option description must be a string` };
+      }
+      const description = cutCodePoints(cleanQuestionText(str(o.description), false), APPROVAL_OPTION_DESCRIPTION_MAX);
+      options.push({ label, description });
+    }
+    out.push({ question, header, options, multi_select: q.multi_select === true });
+  }
+  return { ok: true, value: out };
+}
+
+/**
+ * Validate an `answers` claim against the row's questions. Every question must
+ * be answered, by option labels (any number on a multi-select question, one
+ * otherwise) and at most one free text, which reaches the model: it is
+ * flattened, control-stripped and capped. Labels are returned in the options'
+ * display order, the free text last; `summary` is what every reader that only
+ * knows `answer_text` shows.
+ */
+export function validateApprovalAnswers(
+  questions: ApprovalQuestion[],
+  raw: unknown
+): ValidationResult<{ answers: ApprovalAnswers; summary: string }> {
+  if (!isPlainObject(raw)) return { ok: false, error: "answers must be an object keyed by question text" };
+  const known = new Set(questions.map((q) => q.question));
+  for (const key of Object.keys(raw)) {
+    if (!known.has(key)) return { ok: false, error: `"${cutCodePoints(key, 80)}" is not one of the questions` };
+  }
+  // Keyed by agent-chosen text: a question named "__proto__" or "constructor"
+  // must be an ordinary key, never a write to or a read from a prototype.
+  const answers = Object.create(null) as ApprovalAnswers;
+  const lines: string[] = [];
+  for (const q of questions) {
+    const shown = cutCodePoints(q.question, 80);
+    const given = Object.prototype.hasOwnProperty.call(raw, q.question) ? raw[q.question] : undefined;
+    if (given === undefined) return { ok: false, error: `"${shown}" is unanswered` };
+    if (!Array.isArray(given)) return { ok: false, error: `the answer to "${shown}" must be an array` };
+    if (given.length === 0) return { ok: false, error: `the answer to "${shown}" needs at least one value` };
+    const chosen = new Set<string>();
+    let free: string | null = null;
+    for (const value of given) {
+      if (typeof value !== "string") return { ok: false, error: "every answer value must be a string" };
+      const cleaned = cleanQuestionText(value, false);
+      const label = q.options.find((o) => o.label === cleaned)?.label;
+      if (label !== undefined) {
+        if (chosen.has(label)) return { ok: false, error: `the label "${label}" is chosen twice` };
+        chosen.add(label);
+        continue;
+      }
+      if (free !== null) return { ok: false, error: "at most one free text per question" };
+      const flat = cleaned.replace(/\s+/g, " ");
+      if (!flat) return { ok: false, error: "a free text answer is empty" };
+      free = cutCodePoints(flat, APPROVAL_FREE_TEXT_MAX);
+    }
+    const values = [...q.options.map((o) => o.label).filter((l) => chosen.has(l)), ...(free === null ? [] : [free])];
+    if (!q.multi_select && values.length > 1) {
+      return { ok: false, error: `"${shown}" takes a single answer` };
+    }
+    answers[q.question] = values;
+    lines.push(`${q.question.replace(/\s+/g, " ")}: ${values.join(", ")}`);
+  }
+  return { ok: true, value: { answers, summary: cutCodePoints(lines.join("\n"), APPROVAL_ANSWER_MAX) } };
 }
 
 /**
@@ -286,6 +428,7 @@ export function validateApprovalDraft(body: {
   session_ref?: unknown;
   tile_ref?: unknown;
   merge?: unknown;
+  questions?: unknown;
 }): ValidationResult<ApprovalDraft> {
   const kind = str(body.kind) as ApprovalKind;
   if (!APPROVAL_KINDS.includes(kind)) return { ok: false, error: "kind must be permission|question|plan" };
@@ -318,7 +461,18 @@ export function validateApprovalDraft(body: {
   }
   const merge: ApprovalMerge = body.merge === "never" ? "never" : "tile";
 
-  return { ok: true, value: { kind, title, question, options, session_ref, tile_ref, merge } };
+  let questions: ApprovalQuestion[] | null = null;
+  if (body.questions !== undefined && body.questions !== null) {
+    if (kind !== "question") return { ok: false, error: "questions belong to kind question" };
+    // A mergeable row is absorbed by the tile's pending row, and its questions
+    // with it.
+    if (merge !== "never") return { ok: false, error: "questions need merge never" };
+    const parsed = validateQuestions(body.questions);
+    if (!parsed.ok) return parsed;
+    questions = parsed.value;
+  }
+
+  return { ok: true, value: { kind, title, question, options, session_ref, tile_ref, merge, questions } };
 }
 
 // --- Sanitisers ---
