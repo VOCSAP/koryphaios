@@ -2,12 +2,12 @@
 // the dialog the CLI shows is the one the operator approved. Layout read from
 // Claude Code 2.1.291: below the last full-width rule, a header ("Bash
 // command" + description, or "Create file" + cwd-relative path), a body
-// between two dashed rules, then the numbered chooser. A command that fits is
-// indented by one space; a longer one is wrapped behind a " │ " gutter at
-// (columns - 4): at a space, the space is dropped; inside a token longer than
-// that width, the token is cut at the margin. Anything else is refused: an
-// untyped verdict costs one terminal keystroke, a mistyped one grants what
-// nobody approved.
+// between two dashed rules, then the numbered chooser. Only a command shown on
+// one row is checked: indented by one space, or on a single " │ " gutter row.
+// Across gutter rows nothing is decidable: trailing spaces are invisible and
+// the CLI pads a wrapped row with spaces, so a long run of spaces and a typed
+// newline render the same. Anything else is refused: an untyped verdict costs
+// one terminal keystroke, a mistyped one grants what nobody approved.
 
 import { basename, dirname, join, resolve } from 'node:path'
 import { TITLE_DETAIL_MAX, summarizeToolInput } from '../../hooks/tool-summary'
@@ -16,8 +16,13 @@ const RULE = String.fromCodePoint(0x2500)
 const DASHED = String.fromCodePoint(0x254c)
 const CHEVRON = String.fromCodePoint(0x276f)
 const GUTTER = ` ${String.fromCodePoint(0x2502)} `
-/** Columns the CLI keeps out of a wrapped command line: the gutter plus one. */
-const WRAP_MARGIN = 4
+/**
+ * Longest one-line command the CLI shows in the indented form; a longer one
+ * that still fits gets a single gutter row. Measured on 120 columns only, so
+ * a single gutter row is refused on a narrower terminal.
+ */
+const INDENTED_MAX = 80
+const GUTTER_MEASURED_COLUMNS = 120
 
 /** Dialog header per tool, only for layouts measured on a live CLI. */
 const HEADERS: Record<string, string> = { Bash: 'Bash command', Write: 'Create file' }
@@ -115,27 +120,19 @@ function approvedInput(tool: string, title: string, question: string): string | 
   return width(detail) < TITLE_DETAIL_MAX ? detail : null
 }
 
-/** Rebuild the command from its displayed lines, under the measured wrap rule. */
-function commandMatches(body: string[], command: string, columns: number): boolean {
-  if (/[\r\n\t]/.test(command)) return false
-  const expected = command.trimEnd()
-  if (body.length === 1 && !body[0]!.startsWith(GUTTER)) return body[0] === ` ${expected}`
-  if (!body.every((l) => l.startsWith(GUTTER))) return false
-  const wrap = columns - WRAP_MARGIN
-  const parts = body.map((l) => l.slice(GUTTER.length))
-  let pos = 0
-  for (let i = 0; i < parts.length; i++) {
-    const part = parts[i]!
-    if (!part || !expected.startsWith(part, pos)) return false
-    pos += part.length
-    if (i === parts.length - 1) break
-    // A full line renders the same whether a long token was cut there or a
-    // word ended exactly at the margin, so the command is undecidable.
-    if (width(part) >= wrap) return false
-    if (expected[pos] !== ' ') return false
-    pos += 1
-  }
-  return pos === expected.length
+/** The one row of the dialog body against the approved command. */
+function commandMatches(line: string, command: string, columns: number): boolean {
+  // The screen drops trailing whitespace of every kind, so only the ASCII space
+  // can be told apart by its position.
+  if (/[^\S ]/u.test(command)) return false
+  if (!line.startsWith(GUTTER)) return line === ` ${command.replace(/ +$/, '')}`
+  // Outside printable ASCII, code points are not display columns.
+  return (
+    columns >= GUTTER_MEASURED_COLUMNS &&
+    width(command) > INDENTED_MAX &&
+    line.slice(GUTTER.length) === command &&
+    !/[^ -~]/.test(command)
+  )
 }
 
 export function matchPermissionDialog(
@@ -173,7 +170,9 @@ export function matchPermissionDialog(
   }
 
   if (tool === 'Bash') {
-    return commandMatches(region.slice(open + 1, close), input, columns)
+    const body = region.slice(open + 1, close)
+    if (body.length > 1) return { ok: false, absent: false, reason: 'a command shown on more than one line cannot be checked on screen' }
+    return commandMatches(body[0] ?? '', input, columns)
       ? { ok: true }
       : { ok: false, absent: false, reason: 'the command on screen differs from the one the operator approved' }
   }
