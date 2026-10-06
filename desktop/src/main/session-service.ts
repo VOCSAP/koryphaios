@@ -1388,9 +1388,9 @@ export class SessionService extends EventEmitter {
     const telemetryPluginLoaded = Boolean(pluginDirs[0])
     const settingsFile = this.statusLineSettingsFor(def, base, telemetryPluginLoaded, cfg.shell)
     const fallbackInjected = settingsFile !== undefined
-    const statusSourceTrusted =
-      fallbackInjected ||
-      (!sandboxed && isClaudeLaunch(base) && telemetryPluginLoaded && this.hostSupportsKoryTelemetry(cfg.shell))
+    const koryModuleServed =
+      !sandboxed && isClaudeLaunch(base) && telemetryPluginLoaded && this.hostSupportsKoryTelemetry(cfg.shell)
+    const statusSourceTrusted = fallbackInjected || koryModuleServed
 
     let command: string
     if (effective === 'resume') {
@@ -1440,6 +1440,7 @@ export class SessionService extends EventEmitter {
       ...this.getScopeEnv(),
       CLAUDE_PEERS_DESK_SESSION: def.id,
       CLAUDE_PEERS_ROLE: def.role ?? '',
+      KORY_APPROVAL_MODULE: koryModuleServed ? '1' : '',
       ...(fallbackInjected ? { KORY_STATUS_FALLBACK: '1' } : null)
     }
     const peerToolsValue = peerToolsEnvValue(def.peerTools)

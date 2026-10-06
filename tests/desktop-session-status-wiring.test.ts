@@ -200,6 +200,39 @@ test("a sandboxed tile never trusts the compatible host plugin", () => {
   expect(svc.list().find((session) => session.id === runtime.id)!.liveStatus).toBeNull();
 });
 
+test("the approval module is armed only where the host serves the Kory module", () => {
+  const served = setup({ hostTelemetry: true, pluginDirs: () => ["/plugins/general"] });
+  served.svc.create({});
+  expect(spawned.at(-1)!.env.KORY_APPROVAL_MODULE, "host claude tile with the plugin and a compatible CLI").toBe("1");
+
+  const noPlugin = setup({ hostTelemetry: true });
+  noPlugin.svc.create({});
+  expect(spawned.at(-1)!.env.KORY_APPROVAL_MODULE, "no plugin loaded").toBe("");
+
+  const oldCli = setup({ pluginDirs: () => ["/plugins/general"] });
+  oldCli.svc.create({});
+  expect(spawned.at(-1)!.env.KORY_APPROVAL_MODULE, "CLI without the module host").toBe("");
+
+  const sbx = mkdtempSync(join(tmpdir(), "kory-sbx-peers-"));
+  tmpDirs.push(sbx);
+  const sandboxed = setup({ sandboxPeersDir: sbx, hostTelemetry: true, pluginDirs: () => ["/plugins/general"] });
+  sandboxed.svc.create({});
+  expect(spawned.at(-1)!.env.KORY_APPROVAL_MODULE, "sandboxed tile").toBe("");
+});
+
+test("an inherited approval module switch never arms a tile the host does not serve", () => {
+  const inherited = process.env.KORY_APPROVAL_MODULE;
+  process.env.KORY_APPROVAL_MODULE = "1";
+  try {
+    const { svc } = setup();
+    svc.create({});
+    expect(spawned.at(-1)!.env.KORY_APPROVAL_MODULE).toBe("");
+  } finally {
+    if (inherited === undefined) delete process.env.KORY_APPROVAL_MODULE;
+    else process.env.KORY_APPROVAL_MODULE = inherited;
+  }
+});
+
 test("a host team-lead tile keeps the ordered plugins on fresh and resumed launches", async () => {
   const reads: Array<[boolean, boolean]> = [];
   const { svc, home, cwd } = setup({

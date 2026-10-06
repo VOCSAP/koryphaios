@@ -1,5 +1,5 @@
 {
-  "modules": ["./kory-telemetry.mjs"],
+  "modules": ["./kory-module.mjs"],
   "hooks": {
     "SessionStart": [
       {
