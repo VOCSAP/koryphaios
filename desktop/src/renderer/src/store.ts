@@ -445,6 +445,17 @@ async function guarded(label: string, fn: () => Promise<unknown>): Promise<boole
 }
 
 /**
+ * True when `e` is the sandbox gate's 'sandbox-auth-required' refusal, which
+ * it then routes to the login modal instead of an error toast. Every IPC call
+ * that can spawn a tile must route its failure through this.
+ */
+export function routeSandboxAuth(e: unknown): boolean {
+  if (!String(e instanceof Error ? e.message : e).includes('sandbox-auth-required')) return false
+  useDeck.setState({ sandboxAuthOpen: true })
+  return true
+}
+
+/**
  * Courrier entries still in the operator's way: family 1/2 entries whose
  * DURABLE state is anything but 'acked' (absent from the map = unread).
  *
@@ -899,7 +910,13 @@ export const useDeck = create<DeckState>((set, get) => ({
 
   async applyTemplate(path, mode) {
     await guarded('apply template', async () => {
-      const count = await window.api.applyTemplate(path, mode)
+      let count: Awaited<ReturnType<typeof window.api.applyTemplate>>
+      try {
+        count = await window.api.applyTemplate(path, mode)
+      } catch (e) {
+        if (routeSandboxAuth(e)) return
+        throw e
+      }
       // Card 96c98453: whether to show the success toast is delegated to
       // shouldShowTemplateAppliedToast (shared/template-apply-outcome.ts),
       // the same pure module the main-process handler consults for its own
@@ -1043,12 +1060,7 @@ export const useDeck = create<DeckState>((set, get) => ({
         set({ selectedId: created.id })
         // sessions list refreshes via onSessionsChanged
       } catch (e) {
-        // SBX3: the pre-spawn gate refused because the sandbox is not logged
-        // in — route to the login modal instead of a cryptic error toast.
-        if (String(e instanceof Error ? e.message : e).includes('sandbox-auth-required')) {
-          set({ sandboxAuthOpen: true })
-          return
-        }
+        if (routeSandboxAuth(e)) return
         throw e
       }
     })
@@ -1073,7 +1085,14 @@ export const useDeck = create<DeckState>((set, get) => ({
   },
 
   async restartSession(id) {
-    await guarded('restart session', () => window.api.restartSession(id))
+    await guarded('restart session', async () => {
+      try {
+        await window.api.restartSession(id)
+      } catch (e) {
+        if (routeSandboxAuth(e)) return
+        throw e
+      }
+    })
   },
 
   async setAutoResume(id, enabled) {
@@ -1204,7 +1223,13 @@ export const useDeck = create<DeckState>((set, get) => ({
       // apart from a stale lock, and got it wrong for 3 of 6 real causes.
       // The contract now carries the real reason (workspaceRestoreOrThrow,
       // shared/workspace-restore-outcome.ts); no more guessing here.
-      const outcome = await window.api.restoreWorkspace(id)
+      let outcome: Awaited<ReturnType<typeof window.api.restoreWorkspace>>
+      try {
+        outcome = await window.api.restoreWorkspace(id)
+      } catch (e) {
+        if (routeSandboxAuth(e)) return
+        throw e
+      }
       // Sessions refresh via onSessionsChanged (restoreFrom broadcasts 'changed').
       await get().refreshWorkspaces()
       if (outcome.applied) {

@@ -63,7 +63,7 @@ import {
   upsertRoadmap
 } from './roadmap-service'
 import { validateReorderWaves } from './roadmap-reorder-validate'
-import { createSessionWithWorktree } from './create-session'
+import { createSessionWithWorktree, gateSandboxForCwds, restartSessionGated } from './create-session'
 import { effectiveAgent, isTeamLeadAgent } from './team-lead-bridge'
 import { composePlanImportPrompt } from './import-plan'
 import { collectDiff, collectFileDiff, composeDiffReviewPrompt } from './diff-service'
@@ -302,7 +302,8 @@ export function registerIpc({
   regHandle('sessions:list', () => service.list())
   // teamLeadDeckBridge is computed here from input?.agent directly, never read
   // off input and forwarded — no boolean may ride along on the object passed to
-  // createSessionWithWorktree, which stays byte-for-byte what the caller sent.
+  // createSessionWithWorktree, which is what the caller sent minus `supervisor`:
+  // that flag exempts a tile from the sandbox, so only ensureSupervisor sets it.
   // A paired companion requesting agent:'team-lead' does get the bridge, by
   // design; that's acceptable only because such a companion can already call
   // pty:input into any live tile — execute an arbitrary command by shell-prefix
@@ -325,14 +326,17 @@ export function registerIpc({
         reportError('session', 'failed to start the deck-control endpoint for an operator-opened team-lead tile', e)
       }
     }
+    const { supervisor: _supervisor, ...requested } = input ?? {}
     return createSessionWithWorktree(
       service,
       getConfig().projectDir,
-      input ?? {},
-      checkpoint,
-      getWorktreeInit(),
-      sandboxGate,
-      sandboxWarmTranscripts,
+      requested,
+      {
+        sandboxGate,
+        warmSandboxTranscripts: sandboxWarmTranscripts,
+        beforeSpawn: checkpoint,
+        worktreeInit: getWorktreeInit()
+      },
       { teamLeadDeckBridge: isTeamLeadAgent(input?.agent) }
     )
   })
@@ -341,7 +345,9 @@ export function registerIpc({
   regHandle('sessions:set-color', (_e, id: string, color: string) =>
     service.setColor(id, color)
   )
-  regHandle('sessions:restart', (_e, id: string) => service.restart(id))
+  regHandle('sessions:restart', (_e, id: string) =>
+    restartSessionGated(service, id, { sandboxGate, warmSandboxTranscripts: sandboxWarmTranscripts })
+  )
   regHandle('sessions:set-auto-resume', (_e, id: string, enabled: boolean) =>
     service.setAutoResume(id, !!enabled)
   )
@@ -748,19 +754,15 @@ export function registerIpc({
     name && name.trim() ? workspaces.saveNamed(name) : workspaces.saveAuto()
   )
   regHandle('workspace:restore', async (_e, id: string) => {
-    // Restore respawns straight through SessionService (no create gate), so
-    // the container-side transcript cache must be warm here or every restored
-    // tile would look "expired" and start fresh (PLAN-SANDBOX M2).
-    if (sandbox.isEnabled()) {
-      await sandbox.ensure()
-      // Warm EVERY cwd the workspace will respawn into, not just the root:
-      // worktree sessions live elsewhere and would otherwise all start fresh.
-      for (const cwd of workspaces.sessionCwds(id)) await sandbox.refreshTranscripts(cwd)
-    }
-    // Card 6363bd69: started once for the whole batch, before restoreFrom()
-    // ever runs -- mirrors template:apply's own best-effort start (see that
-    // handler above). A failure here must not block the restore, only mean
-    // the team-lead tile(s) in it reopen without the bridge.
+    // Restore respawns straight through SessionService, so it gates here and
+    // warms EVERY cwd it will respawn into, not just the root: otherwise
+    // worktree tiles would look "expired" and start fresh.
+    await gateSandboxForCwds(workspaces.sessionCwds(id), {
+      sandboxGate,
+      warmSandboxTranscripts: sandboxWarmTranscripts
+    })
+    // Best-effort, once for the batch before restoreFrom(): a failure must not
+    // block the restore, only mean the team-lead tile(s) reopen without the bridge.
     if (workspaces.hasTeamLeadAgentSession(id)) {
       try {
         await ensureControlServer()
@@ -1042,7 +1044,12 @@ export function registerIpc({
         prompt: composeDiffReviewPrompt({ dir: d, base: await diffBase(d), leadPeerId: lead }),
         announce: `one-shot reviewer: reviews the diff in "${d}"`
       },
-      checkpoint
+      {
+        sandboxGate,
+        warmSandboxTranscripts: sandboxWarmTranscripts,
+        beforeSpawn: checkpoint,
+        cwdOutsideRoot: 'refuse'
+      }
     )
     journal.add('review', `review agent spawned on ${d}${lead ? ` (reports to ${lead})` : ''}`)
     return true
@@ -1175,7 +1182,7 @@ export function registerIpc({
         prompt: composePlanImportPrompt(file),
         announce: `one-shot agent: imports plan "${file}" into the shared roadmap`
       },
-      checkpoint
+      { sandboxGate, warmSandboxTranscripts: sandboxWarmTranscripts, beforeSpawn: checkpoint }
     )
     return true
   })
@@ -1394,6 +1401,9 @@ export function registerIpc({
     const resolved = resolveTemplateInputs(path, attendance)
     const inputs = templateInputsOrThrow(resolved, path)
     if (inputs === null) return null
+    // One gate for the whole batch, before 'replace' clears the grid: a refusal
+    // must leave the current tiles in place.
+    const sandboxRoot = inputs.length > 0 ? await sandboxGate() : null
     // One checkpoint covers the batch: every session spawns in the project dir.
     if (inputs.length > 0) await checkpoint(getConfig().projectDir)
     if (mode === 'replace') {
@@ -1430,10 +1440,11 @@ export function registerIpc({
         service,
         getConfig().projectDir,
         hasLead ? { ...input, lead: undefined } : input,
-        undefined,
-        getWorktreeInit(),
-        undefined,
-        undefined,
+        {
+          sandboxGate: async () => sandboxRoot,
+          warmSandboxTranscripts: sandboxWarmTranscripts,
+          worktreeInit: getWorktreeInit()
+        },
         { teamLeadDeckBridge: isTeamLeadAgent(effectiveAgent(input.agent, input.args).agent) }
       )
     }

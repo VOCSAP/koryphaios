@@ -130,7 +130,7 @@ import { isHead, queuedItems, wavesOf } from '@shared/workflow'
 import { APP_STATE_SUBDIR, runDataMigration } from './migrate-data-dir'
 import type { SessionRuntime } from '@shared/types'
 import { listAgents } from './agents'
-import { createSessionWithWorktree } from './create-session'
+import { createSessionWithWorktree, restartSessionGated } from './create-session'
 import { SandboxService, type SandboxLaunch } from './sandbox-service'
 import {
   mapHostPathToContainer,
@@ -2731,10 +2731,7 @@ const controlDeps: DeckControlDeps = {
       service,
       getConfig().projectDir,
       input,
-      checkpointBeforeSpawn,
-      getWorktreeInit(),
-      sandboxGate,
-      warmSandboxTranscripts,
+      { sandboxGate, warmSandboxTranscripts, beforeSpawn: checkpointBeforeSpawn, worktreeInit: getWorktreeInit() },
       {
         teamLeadDeckBridge: isTeamLeadAgent(input.agent),
         hasDeckLeadTools: opts?.hasDeckLeadTools === true
@@ -2746,7 +2743,7 @@ const controlDeps: DeckControlDeps = {
   sandboxExec: (command) => sandbox.supervisorExec(command),
   runDirective: directiveBindings.runDirective,
   restartSession: async (id) => {
-    await service.restart(id)
+    await restartSessionGated(service, id, { sandboxGate, warmSandboxTranscripts })
   },
   closeSession: (id) => service.remove(id),
   journal: (message) => journal.add('session', message),
@@ -2787,10 +2784,7 @@ const controlDeps: DeckControlDeps = {
       service,
       getConfig().projectDir,
       opts.hasLead ? { ...input, lead: undefined } : input,
-      undefined,
-      getWorktreeInit(),
-      sandboxGate,
-      warmSandboxTranscripts,
+      { sandboxGate, warmSandboxTranscripts, worktreeInit: getWorktreeInit() },
       // Card 3c322f10 (piece 3, agent route): the deck-control server is
       // necessarily already up here -- this call only ever arrives through
       // it -- so unlike the operator route there is no ensureControlServer()

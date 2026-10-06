@@ -14,46 +14,75 @@ function isInside(target: string, root: string): boolean {
   return t === r || t.startsWith(r + sep)
 }
 
+export interface CreateSessionDeps {
+  /**
+   * Sandbox readiness gate: when the sandbox is enabled it ensures the
+   * container is up AND authenticated before the tile spawns, throwing
+   * 'sandbox-auth-required' otherwise (the renderer maps that to the login
+   * modal). Returns the EFFECTIVE PROJECT ROOT (the project dir in mount mode,
+   * the ephemeral clone in copy mode) so worktrees and the tile cwd land inside
+   * the tree actually mounted at /work; null when the sandbox is off.
+   * Required so that a spawn site cannot forget it; the supervisor is exempted
+   * by `input.supervisor`, never by omission.
+   */
+  sandboxGate: () => Promise<string | null>
+  /**
+   * Warm the container-side transcript cache for the cwd this session will
+   * actually run in. Runs AFTER the worktree is created: a worktree session's
+   * cwd is not the project root, and warming only the root would start every
+   * worktree resume fresh.
+   */
+  warmSandboxTranscripts: (cwd: string) => Promise<void>
+  /**
+   * Called with the session's final cwd for sessions landing in an EXISTING
+   * tree (a fresh worktree is clean by construction, so it is skipped).
+   */
+  beforeSpawn?: (cwd: string) => Promise<void>
+  /**
+   * The approved worktree-init hook, resolved once through the
+   * operator-approval gate and passed in rather than re-read from the project
+   * config here, so a repo-shipped worktreeInit cannot reach the shell without
+   * that approval.
+   */
+  worktreeInit?: string
+  /**
+   * Copy mode, requested cwd outside the clone: 'remap' (default) moves the
+   * session to the clone root; 'refuse' throws, for a caller whose purpose is
+   * that exact dir and would otherwise silently work on another tree.
+   */
+  cwdOutsideRoot?: 'remap' | 'refuse'
+}
+
+type SandboxSpawnDeps = Pick<CreateSessionDeps, 'sandboxGate' | 'warmSandboxTranscripts'>
+
+/** Gate, then warm each cwd, for spawn paths that respawn stored defs (restore, restart). */
+export async function gateSandboxForCwds(cwds: Iterable<string>, deps: SandboxSpawnDeps): Promise<void> {
+  await deps.sandboxGate()
+  for (const cwd of cwds) await deps.warmSandboxTranscripts(cwd)
+}
+
+/** service.restart behind the sandbox gate; the supervisor runs on the host and is exempt. */
+export async function restartSessionGated(
+  service: SessionService,
+  id: string,
+  deps: SandboxSpawnDeps
+): Promise<SessionRuntime> {
+  const session = service.list().find((s) => s.id === id)
+  if (session && !session.supervisor) await gateSandboxForCwds([session.cwd], deps)
+  return service.restart(id)
+}
+
 export async function createSessionWithWorktree(
   service: SessionService,
   projectDir: string,
   input: CreateSessionInput,
-  /**
-   * Pre-spawn hook (PLAN C16): called with the session's final cwd for
-   * sessions landing in an EXISTING tree (a fresh worktree is clean by
-   * construction, so it is skipped). index.ts injects the git checkpoint.
-   */
-  beforeSpawn?: (cwd: string) => Promise<void>,
-  /**
-   * The approved worktree-init hook.
-   * Resolved once at startup through the operator-approval gate, then passed in
-   * rather than re-read from the project config here, so a repo-shipped
-   * worktreeInit cannot reach the shell without that approval.
-   */
-  worktreeInit?: string,
-  /**
-   * Sandbox readiness gate (PLAN-SANDBOX SBX3/M3): when the sandbox is enabled
-   * it ensures the container is up AND authenticated BEFORE any tile spawns,
-   * throwing 'sandbox-auth-required' otherwise (the renderer maps that to the
-   * login modal). It returns the EFFECTIVE PROJECT ROOT — the project dir in
-   * mount mode, the ephemeral clone in copy mode — so worktrees and the tile
-   * cwd land inside the tree that is actually mounted at /work. One gate here
-   * covers the operator create, the supervisor's deck-control spawn and
-   * template batches (all funnel through this path).
-   */
-  sandboxGate?: () => Promise<string | null>,
-  /**
-   * Warm the sandbox's container-side transcript cache for the cwd this session
-   * will actually run in (PLAN-SANDBOX M2 resume). It must happen AFTER the
-   * worktree is created — a worktree session's cwd is not the project root, and
-   * warming only the root left every worktree resume starting fresh.
-   */
-  sandboxWarmTranscripts?: (cwd: string) => Promise<void>,
+  deps: CreateSessionDeps,
   /** Runtime-only bridge options; `hasDeckLeadTools` is set only by deck-control after a successful `leadMint`. */
   opts?: { teamLeadDeckBridge?: boolean; hasDeckLeadTools?: boolean }
 ): Promise<SessionRuntime> {
+  const { sandboxGate, warmSandboxTranscripts, beforeSpawn, worktreeInit } = deps
   let root = projectDir
-  if (sandboxGate && !input.supervisor) {
+  if (!input.supervisor) {
     root = (await sandboxGate()) || projectDir
   }
   const req = { ...input }
@@ -73,10 +102,13 @@ export async function createSessionWithWorktree(
     // An empty cwd would default to cfg.projectDir inside SessionService —
     // the REAL tree — so copy mode must pin it explicitly here.
     if (root !== projectDir && (!requested || !isInside(requested, root))) {
+      if (requested && deps.cwdOutsideRoot === 'refuse') {
+        throw new Error(`${requested} is outside the sandbox copy (${root}): refusing to relocate the session`)
+      }
       req.cwd = root
     }
     if (beforeSpawn) await beforeSpawn(req.cwd?.trim() || root)
   }
-  if (sandboxWarmTranscripts) await sandboxWarmTranscripts(req.cwd?.trim() || root)
+  if (!input.supervisor) await warmSandboxTranscripts(req.cwd?.trim() || root)
   return service.create(req, opts)
 }

@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import type { DiffFile, SessionDiff } from '@shared/types'
 import { classifyDiffLines, type CodeLang, type DiffLineKind } from '@shared/code-lang'
 import { GLYPH_ACTIONS } from './icons'
-import { useDeck } from '../store'
+import { routeSandboxAuth, useDeck } from '../store'
 import { useT } from '../i18n'
 import { highlightBlocks, type HlBlock, type HlLine } from '../highlight'
 import { CodeTokens } from './CodeTokens'
@@ -172,6 +172,7 @@ export function DiffPanel(): React.JSX.Element | null {
       showToast('toast.reviewStarted')
       setView('agents')
     } catch (e) {
+      if (routeSandboxAuth(e)) return
       setError(e instanceof Error ? e.message : String(e))
     }
   }

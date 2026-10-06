@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import type { DiffFile, FileDiff, SessionDiff, WorktreeRow } from '@shared/types'
 import { GLYPHS, GLYPH_ACTIONS } from './icons'
-import { useDeck } from '../store'
+import { routeSandboxAuth, useDeck } from '../store'
 import { useT } from '../i18n'
 import { DiffFileRow, DiffText } from './DiffPanel'
 
@@ -179,6 +179,7 @@ export function GitView(): React.JSX.Element {
       showToast('toast.reviewStarted')
       setView('agents')
     } catch (e) {
+      if (routeSandboxAuth(e)) return
       setError(e instanceof Error ? e.message : String(e))
     }
   }

@@ -1432,11 +1432,9 @@ export class SessionService extends EventEmitter {
     // Sandbox mode (SBX1): wrap the composed command in a `docker exec` into
     // the project container. The supervisor is exempt — it pilots the Deck
     // from the host and its MCP harness (Electron binary + loopback control
-    // url) does not exist container-side. The gated create path (sandboxGate
-    // in create-session.ts) has already ensured the container + auth; a
-    // throw here only happens on ungated paths (workspace restore with a
-    // cold container) where a visibly-exited tile beats a login prompt in
-    // every tile (SBX3).
+    // url) does not exist container-side. Callers gate container + auth before
+    // spawning; a throw here (container lost since that gate) leaves a
+    // visibly-exited tile rather than a login prompt in it.
     this.sandboxCleanup.delete(def.id)
     if (!def.supervisor) {
       try {

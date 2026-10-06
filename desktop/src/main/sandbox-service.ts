@@ -1494,10 +1494,9 @@ export class SandboxService extends EventEmitter {
 
   /**
    * Synchronous launch info for SessionService.startPty. null = sandbox off.
-   * Throws when enabled but the container is not known-running — create() has
-   * an async gate upstream (sandboxGate in create-session.ts) so this only
-   * fires on ungated paths (workspace restore with a cold container), where a
-   * visibly-exited tile beats a login prompt in every tile (SBX3).
+   * Throws when enabled but the container is not known-running. Spawn paths
+   * gate container + auth upstream, so this is the backstop for a container
+   * lost after that gate: the tile exits visibly instead of prompting a login.
    */
   launchInfo(): SandboxLaunch | null {
     if (!this.isEnabled()) return null

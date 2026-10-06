@@ -11,7 +11,7 @@ import type {
 } from '@shared/types'
 import { ROADMAP_TRIAGE_ROLES } from '@shared/types'
 import { GLYPH_ACTIONS, GLYPH_BADGES, roleGlyph } from './icons'
-import { roadmapConflictCount, useDeck } from '../store'
+import { roadmapConflictCount, routeSandboxAuth, useDeck } from '../store'
 import { useT } from '../i18n'
 import { ConfirmDialog } from './ConfirmDialog'
 import { ContextMenu, type ContextMenuItem } from './ContextMenu'
@@ -883,12 +883,17 @@ export function RoadmapView(): React.JSX.Element {
         <button
           className="btn"
           onClick={() => {
-            void window.api.importPlan().then((spawned) => {
-              if (spawned) {
-                showToast('toast.planImportStarted')
-                setView('agents')
+            void window.api.importPlan().then(
+              (spawned) => {
+                if (spawned) {
+                  showToast('toast.planImportStarted')
+                  setView('agents')
+                }
+              },
+              (e: unknown) => {
+                if (!routeSandboxAuth(e)) throw e
               }
-            })
+            )
           }}
         >
           {t('roadmap.importPlan')}

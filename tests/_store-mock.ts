@@ -146,7 +146,8 @@ export const storeMockStubs = {
   inboxPendingCount: (): number => 0,
   inboxBadgeCount: (): number => 0,
   inboxAwaitsAction: (): boolean => false,
-  roadmapConflictCount: (): number => 0
+  roadmapConflictCount: (): number => 0,
+  routeSandboxAuth: (): boolean => false
 };
 
 // ---------------------------------------------------------------------------
