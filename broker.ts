@@ -8878,19 +8878,18 @@ function handleApprovalAdd(
   // credential and the Deck fallback's operator credential see the SAME
   // candidate rows regardless of arrival order (874e9053's asymmetry).
   const where = approvalWhere(scope);
-  if (draft.value.tile_ref && draft.value.merge === "tile") {
+  // A permission never reuses a row: the reused row would keep the previous
+  // dialog's title while an Allow is typed into the new one. It always inserts,
+  // and the older permissions of its tile are closed below.
+  if (draft.value.tile_ref && draft.value.merge === "tile" && draft.value.kind !== "permission") {
     const tileWhere = approvalTileWhere(scope);
-    // A permission keeps a row of its own, so it stays answerable from a phone:
-    // it reuses only a permission, while any other raise prefers to merge into
-    // one.
     const existing = db
       .query(
         `SELECT id, status FROM pending_approvals
           WHERE ${tileWhere.sql} AND tile_ref = ? AND mergeable = 1 AND status = 'pending'
-            AND (? <> 'permission' OR kind = 'permission')
           ORDER BY (kind = 'permission') DESC, created_at DESC LIMIT 1`
       )
-      .get(...(tileWhere.params as never[]), draft.value.tile_ref, draft.value.kind) as {
+      .get(...(tileWhere.params as never[]), draft.value.tile_ref) as {
       id: string;
       status: string;
     } | null;
@@ -8903,9 +8902,15 @@ function handleApprovalAdd(
     }
   }
 
+  // A tile permission closes the tile's older permission in the same write, so
+  // that row does not count against the cap it is about to free.
+  const replacesTilePermission = Boolean(draft.value.tile_ref) && draft.value.merge === "tile" && draft.value.kind === "permission";
   const pending = db
-    .query(`SELECT COUNT(*) AS n FROM pending_approvals WHERE ${where.sql} AND status = 'pending'`)
-    .get(...(where.params as never[])) as { n: number };
+    .query(
+      `SELECT COUNT(*) AS n FROM pending_approvals WHERE ${where.sql} AND status = 'pending'
+         AND NOT (? AND tile_ref = ? AND mergeable = 1 AND kind = 'permission')`
+    )
+    .get(...(where.params as never[]), replacesTilePermission ? 1 : 0, draft.value.tile_ref) as { n: number };
   if (pending.n >= APPROVAL_MAX_PENDING) {
     return { error: "too many pending approvals", status: 429 };
   }
@@ -8935,39 +8940,54 @@ function handleApprovalAdd(
   const id = randomUUID();
   const createdAt = now.toISOString();
   const notifExpiresAt = new Date(now.getTime() + ttlHours * 3600_000).toISOString();
-
-  db.run(
-    `INSERT INTO pending_approvals
-       (id, ${stamped.columns.join(", ")}, origin_host, origin_user, group_id, from_peer,
-        tile_ref, mergeable, reply_route, reply_token, reply_group,
-        kind, title, question, options_json, status, created_at, notif_expires_at)
-     VALUES (?, ${stamped.columns.map(() => "?").join(", ")}, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
-    [
-      id,
-      ...stamped.values,
-      pick("host").slice(0, 128),
-      pick("os_user_hash").slice(0, 64),
-      pick("group_id").slice(0, 64),
-      pick("from_peer").slice(0, 128),
-      draft.value.tile_ref,
-      draft.value.merge === "tile" ? 1 : 0,
-      reply.route,
-      reply.token,
-      reply.group,
-      draft.value.kind,
-      draft.value.title,
-      draft.value.question,
-      JSON.stringify(draft.value.options),
-      createdAt,
-      notifExpiresAt,
-    ]
-  );
-
-  // The tile's open question now describes a dialog that has its own row: a
-  // verdict on it would settle it while the CLI stays blocked. Marked only once
-  // that row exists, so a refused raise leaves no question absorbed.
-  if (draft.value.tile_ref && draft.value.merge === "tile" && draft.value.kind === "permission") {
+  const superseded = db.transaction((): ApprovalRow[] => {
+    db.run(
+      `INSERT INTO pending_approvals
+         (id, ${stamped.columns.join(", ")}, origin_host, origin_user, group_id, from_peer,
+          tile_ref, mergeable, reply_route, reply_token, reply_group,
+          kind, title, question, options_json, status, created_at, notif_expires_at)
+       VALUES (?, ${stamped.columns.map(() => "?").join(", ")}, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
+      [
+        id,
+        ...stamped.values,
+        pick("host").slice(0, 128),
+        pick("os_user_hash").slice(0, 64),
+        pick("group_id").slice(0, 64),
+        pick("from_peer").slice(0, 128),
+        draft.value.tile_ref,
+        draft.value.merge === "tile" ? 1 : 0,
+        reply.route,
+        reply.token,
+        reply.group,
+        draft.value.kind,
+        draft.value.title,
+        draft.value.question,
+        JSON.stringify(draft.value.options),
+        createdAt,
+        notifExpiresAt,
+      ]
+    );
+    if (!replacesTilePermission) return [];
     const tileWhere = approvalTileWhere(scope);
+
+    // The CLI shows one permission dialog at a time: an older permission of
+    // this tile describes a dialog that has left the screen. 'abandoned' rather
+    // than 'answered_terminal' because nobody answered it; it is unsettleable
+    // (a claim gets 409) and every reader treats it as gone.
+    const older = db
+      .query(
+        `SELECT * FROM pending_approvals
+          WHERE ${tileWhere.sql} AND tile_ref = ? AND mergeable = 1 AND kind = 'permission'
+            AND status IN ('pending', 'expired_notif') AND id <> ?`
+      )
+      .all(...(tileWhere.params as never[]), draft.value.tile_ref, id) as ApprovalRow[];
+    for (const row of older) {
+      db.run(`UPDATE pending_approvals SET status = 'abandoned', answered_at = ? WHERE id = ?`, [createdAt, row.id]);
+    }
+
+    // The tile's open question now describes a dialog that has its own row: a
+    // verdict on it would settle it while the CLI stays blocked. Marked only once
+    // that row exists, so a refused raise leaves no question absorbed.
     const absorbed = db.run(
       `UPDATE pending_approvals SET absorbed_permission = 1
         WHERE ${tileWhere.sql} AND tile_ref = ? AND mergeable = 1 AND status = 'pending'
@@ -8975,6 +8995,14 @@ function handleApprovalAdd(
       [...(tileWhere.params as never[]), draft.value.tile_ref]
     ).changes;
     if (absorbed > 0) log.info(`approval: ${absorbed} question(s) on tile ${draft.value.tile_ref} absorbed a permission raise`);
+    return older;
+  })();
+  for (const row of superseded) {
+    log.info(`approval: permission ${row.id} on tile ${draft.value.tile_ref} superseded by ${id}, closed as abandoned`);
+    const closed = rowToApproval({ ...row, status: "abandoned", answered_at: createdAt });
+    void notifyRegistry
+      .settle(closed, "a newer dialog on the same tile")
+      .catch((e) => log.error("notify: settle failed", e));
   }
 
   // Read the row back UNDER SCOPE rather than assembling the response from the

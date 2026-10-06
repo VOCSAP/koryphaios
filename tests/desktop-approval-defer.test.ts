@@ -12,6 +12,11 @@ import {
   classifyVerdict,
   settleTileAnsweredInTerminal,
 } from "../desktop/src/main/approval-service";
+import { matchPermissionDialog, permissionDialogShown } from "../desktop/src/main/permission-dialog";
+import { withinDeferWindow } from "../desktop/src/main/approval-service";
+import { canonicalPath } from "../desktop/src/main/worktree-service";
+import { buildApprovalRequest } from "../desktop/hooks/approval-hook";
+import { ScreenGuard } from "../desktop/src/main/screen-model";
 import { deriveOperatorId, generateCredential } from "../shared/approval.ts";
 import type { Approval } from "../desktop/src/main/approval-auth";
 
@@ -68,7 +73,8 @@ const registerPoller = await evaluate<{ poll: () => Promise<void> }>(
   `export function register(env) {
   const { approvals, approvalsEnabled, fetchUndeliveredVerdicts, service, waitingTiles,
           openApprovals, heldVerdicts, canApplyVerdict, classifyVerdict, buildKeystrokes,
-          journal, markVerdictsDelivered, reportError } = env
+          journal, markVerdictsDelivered, reportError, matchPermissionDialog, permissionDialogShown,
+          withinDeferWindow, canonicalPath, broadcast } = env
 ${POLLER}
   return { poll: pollApprovalVerdicts }
 }
@@ -113,6 +119,8 @@ function pollerEnv(opts: {
   waiting?: string[];
   /** Card 7394e2f8: overridable so a test can force it false and still expect delivery. */
   approvalsEnabled?: () => boolean;
+  /** What each tile's screen model holds; an absent tile has never painted. */
+  screens?: Record<string, string[]>;
 }) {
   const calls: Call[] = [];
   const waitingTiles = new Set<string>(opts.waiting ?? []);
@@ -124,8 +132,9 @@ function pollerEnv(opts: {
     approvalsEnabled: opts.approvalsEnabled ?? (() => true),
     fetchUndeliveredVerdicts: async () => opts.settled,
     service: {
-      list: () => (opts.tiles ?? ["s1"]).map((id) => ({ id, name: `tile ${id}`, peerId: null })),
+      list: () => (opts.tiles ?? ["s1"]).map((id) => ({ id, name: `tile ${id}`, peerId: null, cwd: "C:\\proj" })),
       write: (tile: string, keys: string) => written.push({ tile, keys }),
+      screenLines: (tile: string) => opts.screens?.[tile] ?? null,
     },
     waitingTiles,
     openApprovals,
@@ -136,6 +145,11 @@ function pollerEnv(opts: {
     canApplyVerdict,
     classifyVerdict,
     buildKeystrokes,
+    matchPermissionDialog,
+    permissionDialogShown,
+    withinDeferWindow,
+    canonicalPath,
+    broadcast: (...args: unknown[]) => calls.push({ fn: "broadcast", args }),
     journal: { add: (...args: unknown[]) => calls.push({ fn: "journal.add", args }) },
     markVerdictsDelivered: async (_deps: unknown, ids: string[]) => {
       marked.push([...ids]);
@@ -279,6 +293,109 @@ describe("pollApprovalVerdicts (sliced verbatim from index.ts)", () => {
     const { poll, marked } = pollerEnv({ settled: [] });
     await poll();
     expect(marked).toEqual([]);
+  });
+});
+
+describe("pollApprovalVerdicts types a permission verdict only into the dialog it describes", () => {
+  // Claude Code 2.1.291 captured with `mkdir probe-4122-dir && echo created`
+  // waiting in its permission dialog.
+  const chunks = JSON.parse(
+    readFileSync(join(import.meta.dir, "pty-harness", "fixtures", "permission-bash-2.1.291.json"), "utf8")
+  ) as { data: string }[];
+  const guard = new ScreenGuard();
+  guard.resize("s1", 120, 40);
+  for (const c of chunks) if (!c.data.startsWith("\n##########")) guard.feed("s1", c.data);
+  const SCREEN = guard.lines("s1")!;
+  /** A permission verdict on the row the hook raises for `command`. */
+  const permission = (command: string, over: Partial<Approval> = {}) => {
+    const body = buildApprovalRequest(
+      { hook_event_name: "PermissionRequest", tool_name: "Bash", tool_input: { command } },
+      { origin: {} } as never,
+      "s1"
+    );
+    return verdict({ kind: "permission", title: body.title, question: body.question, ...over } as Partial<Approval>);
+  };
+  const notApplied = (calls: Call[]) => calls.filter((c) => c.fn === "broadcast" && c.args[0] === "approvals:not-applied");
+
+  test("the dialog on screen is the approved one: Enter is typed", async () => {
+    const { poll, written, marked, calls } = pollerEnv({
+      settled: [permission("mkdir probe-4122-dir && echo created")],
+      waiting: ["s1"],
+      screens: { s1: SCREEN },
+    });
+    await poll();
+    expect(written).toEqual([{ tile: "s1", keys: "\r" }]);
+    expect(flat(marked)).toEqual(["appr-42"]);
+    expect(notApplied(calls)).toEqual([]);
+  });
+
+  test("a verdict describing another dialog types NOTHING, is consumed, traced and toasted", async () => {
+    // Planted row (benign title) answered while the tile shows a real dialog.
+    const { poll, written, marked, calls } = pollerEnv({
+      settled: [permission("ls")],
+      waiting: ["s1"],
+      screens: { s1: SCREEN },
+    });
+    await poll();
+    expect(written, "a verdict must never be typed into a dialog the operator was not shown").toEqual([]);
+    expect(flat(marked)).toEqual(["appr-42"]);
+    expect(calls.filter((c) => c.fn === "reportError" && /NOT typed/.test(String(c.args[1])))).toHaveLength(1);
+    const toast = notApplied(calls);
+    expect(toast, "the operator who answered must see it was not applied").toHaveLength(1);
+    expect(toast[0]!.args[1]).toMatchObject({ tile: "tile s1", title: "Bash: ls" });
+  });
+
+  test("no dialog on screen yet: the verdict is HELD, not burnt, then given up with a trace", async () => {
+    // A resize rebuilds the grid blank; a legitimate Allow must survive it.
+    const { poll, written, marked, calls } = pollerEnv({
+      settled: [permission("mkdir probe-4122-dir && echo created")],
+      waiting: ["s1"],
+    });
+    await poll();
+    expect(written).toEqual([]);
+    expect(flat(marked), "an absent screen must not consume the answer").toEqual([]);
+    expect(calls.filter((c) => c.fn === "journal.add" && /holding/.test(String(c.args[1])))).toHaveLength(1);
+
+    const stale = permission("mkdir probe-4122-dir && echo created", {
+      answered_at: new Date(Date.now() - VERDICT_DEFER_MS - 1_000).toISOString(),
+    });
+    const late = pollerEnv({ settled: [stale], waiting: ["s1"] });
+    await late.poll();
+    expect(flat(late.marked)).toEqual(["appr-42"]);
+    expect(late.calls.some((c) => c.fn === "reportError" && /no screen recorded/.test(String(c.args[1])))).toBe(true);
+    expect(notApplied(late.calls)).toHaveLength(1);
+  });
+
+  test("a held verdict lands once its dialog is painted", async () => {
+    const screens: Record<string, string[]> = {};
+    const { poll, written } = pollerEnv({
+      settled: [permission("mkdir probe-4122-dir && echo created")],
+      waiting: ["s1"],
+      screens,
+    });
+    await poll();
+    expect(written).toEqual([]);
+    screens.s1 = SCREEN;
+    await poll();
+    expect(written).toEqual([{ tile: "s1", keys: "\r" }]);
+  });
+
+  test("a question's text answer is never typed into a permission chooser", async () => {
+    // A question raised by the session's own credential, answered "1": typed
+    // into the Bash dialog, that would select Yes.
+    const question = verdict({ kind: "question", answer_kind: "text", answer_text: "1" } as Partial<Approval>);
+    const { poll, written, marked, calls } = pollerEnv({ settled: [question], waiting: ["s1"], screens: { s1: SCREEN } });
+    await poll();
+    expect(written).toEqual([]);
+    expect(flat(marked)).toEqual(["appr-42"]);
+    expect(notApplied(calls)).toHaveLength(1);
+  });
+
+  test("a question's answer still reaches a tile showing no chooser", async () => {
+    const question = verdict({ kind: "question", answer_kind: "text", answer_text: "go on" } as Partial<Approval>);
+    const { poll, written } = pollerEnv({ settled: [question], waiting: ["s1"], screens: { s1: SCREEN.slice(0, 5) } });
+    await poll();
+    expect(written).toEqual([{ tile: "s1", keys: "go on\r" }]);
   });
 });
 

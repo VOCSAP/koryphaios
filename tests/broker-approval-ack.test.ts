@@ -302,7 +302,8 @@ describe("a permission raise merged into a tile's channel question", () => {
     expect(permission.id, "a permission merged into the question is answerable on the tile only").not.toBe(question.id);
     expect([permission.kind, permission.reply_route]).toEqual(["permission", "pty"]);
     const again = await raise(b, op, { ...hookPermission, tile_ref: "t-absorb" });
-    expect(again.id, "a double-raised permission still merges into its own row").toBe(permission.id);
+    expect(again.id, "a re-raised permission gets a row of its own").not.toBe(permission.id);
+    await expect(pendingRow(b, op, permission.id), "the earlier permission row is closed").rejects.toThrow(/not pending/);
 
     const absorbed = await pendingRow(b, op, question.id);
     expect([absorbed.kind, absorbed.reply_route, absorbed.absorbed_permission]).toEqual(["question", "channel", true]);
@@ -325,7 +326,7 @@ describe("a permission raise merged into a tile's channel question", () => {
     const denyLone = await signedPost(b, "/approval/claim", { id: lone.id, via: "deck", answer_kind: "deny" }, op);
     expect(denyLone.status, "a question that absorbed nothing still takes deny").toBe(200);
 
-    const allow = await signedPost(b, "/approval/claim", { id: permission.id, via: "deck", answer_kind: "allow" }, op);
+    const allow = await signedPost(b, "/approval/claim", { id: again.id, via: "deck", answer_kind: "allow" }, op);
     expect(allow.status, "the permission's own row takes Allow, from the Deck or a phone").toBe(200);
   }, 30_000);
 

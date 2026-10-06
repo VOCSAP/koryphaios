@@ -882,6 +882,7 @@ export const EN_DEFAULTS: Record<string, string> = {
   'toast.inboxAnswerSent': 'Answer sent — the agent is released',
   'toast.inboxAckSent': 'Acknowledged: the agent is released',
   'toast.inboxAnsweredElsewhere': 'Already answered from another channel',
+  'toast.approvalNotApplied': 'Your answer was NOT typed into "{tile}": {reason}. Answer it in the terminal.',
   'toast.inboxDeleted': 'Message deleted',
   'worktrees.diff': 'Diff',
   'sidebar.viewDiff': 'View diff',

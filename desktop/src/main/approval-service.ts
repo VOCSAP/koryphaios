@@ -413,13 +413,19 @@ export function classifyVerdict(
   // only chance to answer it.
   if (approval.status !== 'answered' || approval.answer_kind === null) return 'defer'
   if (session.waiting) return 'apply'
-  // Alive, answered, but its flag is down. NaN-safe on purpose: an absent or
-  // malformed answered_at has no deadline to compare against, so it falls to
-  // the traced outcome rather than deferring forever (every comparison against
-  // NaN is false, which would otherwise read as "still inside the window").
+  // Alive, answered, but its flag is down.
+  return withinDeferWindow(approval, now) ? 'defer' : 'abandon'
+}
+
+/**
+ * Whether an answered verdict may still wait for its dialog. NaN-safe on
+ * purpose: an absent or malformed answered_at has no deadline to compare
+ * against, so it falls to the traced outcome rather than waiting forever
+ * (every comparison against NaN is false).
+ */
+export function withinDeferWindow(approval: Pick<Approval, 'answered_at'>, now: number = Date.now()): boolean {
   const answeredAt = Date.parse(approval.answered_at ?? '')
-  if (!Number.isFinite(answeredAt)) return 'abandon'
-  return now - answeredAt < VERDICT_DEFER_MS ? 'defer' : 'abandon'
+  return Number.isFinite(answeredAt) && now - answeredAt < VERDICT_DEFER_MS
 }
 
 /**

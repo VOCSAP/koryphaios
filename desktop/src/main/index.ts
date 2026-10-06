@@ -197,9 +197,11 @@ import {
   settleTileAnsweredInTerminal,
   spawnPlanFootprint,
   waitApproval,
+  withinDeferWindow,
   type ApprovalDeps,
   type SpawnGrantStore
 } from './approval-service'
+import { matchPermissionDialog, permissionDialogShown } from './permission-dialog'
 import {
   applyEnrolment,
   createOperatorIdentity,
@@ -225,6 +227,7 @@ import {
 } from './team-lead-bridge'
 import { sweepTeamLeadMcpConfigs, teamLeadInstanceToken, teamLeadMcpConfigFileName } from './team-lead-mcp-sweep'
 import {
+  canonicalPath,
   createWorktree,
   listWorktrees,
   removeWorktree,
@@ -1241,6 +1244,33 @@ const pollApprovalVerdicts = async (): Promise<void> => {
           'approvals',
           `the answer to "${approval.title}" could not be typed into "${live?.name ?? tile}": nothing safe to send for a ${approval.answer_kind} answer`
         )
+        continue
+      }
+      // A verdict names no dialog: a newer one, or one an agent raised under a
+      // benign title, may be what the keystrokes would land in now. Any other
+      // kind is typed at the composer, never into a permission chooser.
+      const screen = service.screenLines(tile)
+      const match =
+        approval.kind === 'permission'
+          ? matchPermissionDialog(approval, screen, { cwd: live?.cwd ?? null, canonical: canonicalPath })
+          : permissionDialogShown(screen)
+            ? { ok: false as const, absent: false, reason: 'a permission dialog is on screen, and this answer is not for it' }
+            : { ok: true as const }
+      if (!match.ok) {
+        if (match.absent && withinDeferWindow(approval)) {
+          if (!heldVerdicts.has(approval.id)) {
+            heldVerdicts.add(approval.id)
+            journal.add('attention', `holding the answer to "${live?.name ?? tile}": ${match.reason} yet`)
+          }
+          continue
+        }
+        applied.push(approval.id)
+        heldVerdicts.delete(approval.id)
+        reportError(
+          'approvals',
+          `the answer to "${approval.title}" (from ${approval.answered_via}) was NOT typed into "${live?.name ?? tile}": ${match.reason}. Answer the dialog in the terminal.`
+        )
+        broadcast('approvals:not-applied', { tile: live?.name ?? tile, title: approval.title, reason: match.reason })
         continue
       }
       service.write(tile, keys)

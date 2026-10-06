@@ -136,6 +136,10 @@ function makeDb(existingRow: unknown) {
         },
       };
     },
+    // bun:sqlite's transaction wraps a function; a fake db has nothing to roll back.
+    transaction<A extends unknown[], R>(fn: (...args: A) => R) {
+      return (...args: A): R => fn(...args);
+    },
     run(_sql: string, values: unknown[]) {
       // Mirror just enough of the INSERT for the read-back above. The column
       // order is the handler's own: id, then the three stamp columns, then

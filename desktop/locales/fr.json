@@ -684,6 +684,7 @@
   "toast.inboxAnswerSent": "Réponse envoyée — l'agent est débloqué",
   "toast.inboxAckSent": "Acquitté : l'agent est débloqué",
   "toast.inboxAnsweredElsewhere": "Déjà répondu depuis un autre canal",
+  "toast.approvalNotApplied": "Ta réponse n'a PAS été tapée dans « {tile} » : {reason}. Réponds dans le terminal.",
   "toast.inboxDeleted": "Message supprimé",
   "worktrees.diff": "Diff",
   "sidebar.viewDiff": "Voir le diff",

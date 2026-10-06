@@ -131,14 +131,17 @@ export function approvalWhere(scope: ApprovalScope): { sql: string; params: unkn
 }
 
 /**
- * THE SINGLE PRODUCER of the tile-merge identity clause: operator_id AND
- * project_key only, deliberately WITHOUT session_ref. Called EXCLUSIVELY by
- * the /approval/add de-duplication SELECT (card 874e9053): a hook's SESSION
- * credential and the Deck fallback's OPERATOR credential must see the SAME
- * candidate rows for the same tile regardless of which posts first, or the
- * merge commit 4c2b2cf buys only one direction. Not an optional parameter on
- * approvalWhere (D2, classed Fatal, just above) -- a second NAMED mint so its
- * one caller stays greppable instead of a flag any caller could flip.
+ * THE SINGLE PRODUCER of the tile identity clause: operator_id AND
+ * project_key only, deliberately WITHOUT session_ref, so a hook's SESSION
+ * credential and the Deck fallback's OPERATOR credential see the SAME rows of
+ * a tile whichever posts first. Its callers, all in /approval/add
+ * (handleApprovalAdd): the de-duplication SELECT a question merges through;
+ * the closing UPDATE that marks a tile's older permissions 'abandoned' when a
+ * new one is raised, the one call that WRITES to rows another credential
+ * created; and the UPDATE that marks the tile's questions as having absorbed
+ * a permission. Not an optional parameter on approvalWhere (D2, classed
+ * Fatal, just above) -- a second NAMED mint so its callers stay greppable
+ * instead of a flag any caller could flip.
  */
 export function approvalTileWhere(scope: ApprovalScope): { sql: string; params: unknown[] } {
   const f = scopeFields.get(scope);

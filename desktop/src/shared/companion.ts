@@ -209,6 +209,7 @@ export const COMPANION_MANIFEST = {
   onSessionsChanged: { kind: 'event', channel: 'sessions:changed' },
   onSessionThinking: { kind: 'event', channel: 'session:thinking' },
   onSessionQuota: { kind: 'event', channel: 'session:quota' },
+  onApprovalNotApplied: { kind: 'event', channel: 'approvals:not-applied' },
   onSessionAttention: { kind: 'event', channel: 'session:attention' },
   onInboxMessages: { kind: 'event', channel: 'inbox:new' },
   onInboxCleared: { kind: 'event', channel: 'inbox:cleared' },

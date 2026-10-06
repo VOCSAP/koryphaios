@@ -25,6 +25,7 @@ import type {
   SandboxStatus,
   SessionAttentionEvent,
   SessionQuotaEvent,
+  ApprovalNotAppliedEvent,
   SessionRuntime,
   SessionThinkingEvent,
   StopMode,
@@ -266,6 +267,7 @@ const api: DeckApi = {
   onSessionThinking: (cb: (e: SessionThinkingEvent) => void) =>
     subscribe('session:thinking', cb),
   onSessionQuota: (cb: (e: SessionQuotaEvent) => void) => subscribe('session:quota', cb),
+  onApprovalNotApplied: (cb: (e: ApprovalNotAppliedEvent) => void) => subscribe('approvals:not-applied', cb),
   onSessionAttention: (cb: (e: SessionAttentionEvent) => void) =>
     subscribe('session:attention', cb),
   onInboxMessages: (cb: (messages: InboxMessage[]) => void) => subscribe('inbox:new', cb),

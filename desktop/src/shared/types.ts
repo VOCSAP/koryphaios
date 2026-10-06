@@ -1809,6 +1809,15 @@ export interface SessionAttentionEvent {
   manual?: boolean
 }
 
+export interface ApprovalNotAppliedEvent {
+  /** The tile's display name. */
+  tile: string
+  /** The approval title the operator answered. */
+  title: string
+  /** Why the keystrokes were withheld. */
+  reason: string
+}
+
 export interface SessionQuotaEvent {
   id: string
   /** True while at the limit screen; false when the episode ends. */
@@ -2520,6 +2529,8 @@ export interface DeckApi {
   onSessionsChanged(cb: (sessions: SessionRuntime[]) => void): () => void
   onSessionThinking(cb: (e: SessionThinkingEvent) => void): () => void
   onSessionQuota(cb: (e: SessionQuotaEvent) => void): () => void
+  /** An operator's answer the Deck refused to type into a tile (screen check). */
+  onApprovalNotApplied(cb: (e: ApprovalNotAppliedEvent) => void): () => void
   onSessionAttention(cb: (e: SessionAttentionEvent) => void): () => void
   /** Operator-inbox batch drained from the broker (PLAN C12), oldest first. */
   onInboxMessages(cb: (messages: InboxMessage[]) => void): () => void

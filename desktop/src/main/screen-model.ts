@@ -311,6 +311,11 @@ export class ScreenGuard {
     return this.inspect(id).state
   }
 
+  /** null when no output was ever observed for this id, never an empty grid. */
+  lines(id: string): string[] | null {
+    return this.screens.get(id)?.lines() ?? null
+  }
+
   clear(id: string): void {
     this.screens.delete(id)
     this.dimensions.delete(id)

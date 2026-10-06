@@ -1232,6 +1232,11 @@ export class SessionService extends EventEmitter {
     }
   }
 
+  /** The tile's screen as the inject guard sees it; null before any output. */
+  screenLines(id: string): string[] | null {
+    return this.screenGuard.lines(id)
+  }
+
   resize(id: string, cols: number, rows: number): void {
     this.pty.resize(id, cols, rows)
     // Card 63ca372f/120148eb review finding: ScreenGuard's own Screen was

@@ -18,7 +18,9 @@ import {
   type SessionApprovalCredential,
 } from "../../shared/approval-client.ts";
 
-export { APPROVAL_FILE_ENV, APPROVAL_HOOK_BLOCK_SEC_DEFAULT };
+import { TITLE_DETAIL_MAX, summarizeToolInput } from "./tool-summary.ts";
+
+export { APPROVAL_FILE_ENV, APPROVAL_HOOK_BLOCK_SEC_DEFAULT, TITLE_DETAIL_MAX, summarizeToolInput };
 
 /** Ceiling on the single POST the hook makes. It never waits for an answer. */
 const POST_TIMEOUT_SEC = 15;
@@ -69,24 +71,6 @@ export function classifyPayload(p: HookPayload): "permission" | "question" | "sk
     return t === "agent_needs_input" ? "question" : "skip";
   }
   return "skip";
-}
-
-/** Single-line summary of a tool call, safe for a notification title. */
-export function summarizeToolInput(toolName: string, input: Record<string, unknown> | undefined): string {
-  const name = stripControl(toolName || "tool").trim() || "tool";
-  if (!input || typeof input !== "object") return name;
-  const detail =
-    typeof input.command === "string"
-      ? input.command
-      : typeof input.file_path === "string"
-        ? input.file_path
-        : typeof input.path === "string"
-          ? input.path
-          : typeof input.url === "string"
-            ? input.url
-            : "";
-  const clean = stripControl(String(detail)).trim();
-  return clean ? `${name}: ${clean.slice(0, 160)}` : name;
 }
 
 /** Build the /approval/add body for a payload (without auth). */

@@ -669,6 +669,11 @@ export const useDeck = create<DeckState>((set, get) => ({
     window.api.onSessionQuota((e) => {
       if (e.resumed) get().showToast('toast.quotaResumed', 'info')
     })
+    // The operator answered from a phone or this Courrier and believes it
+    // landed: the journal alone would leave the dialog waiting unnoticed.
+    window.api.onApprovalNotApplied((e) => {
+      get().showToast('toast.approvalNotApplied', 'error', { params: { tile: e.tile, reason: e.reason } })
+    })
     // System-notification click (PLAN C11): jump to the waiting session.
     window.api.onFocusSession((id) => {
       set({ view: 'agents', selectedId: id })
