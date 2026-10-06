@@ -33,7 +33,7 @@ L'état et le niveau persistent jusqu'au prochain appel de ce skill ou jusqu'à 
 | Annonce d'un dispatch, d'un commit, d'un verdict de revue (une ligne) | oui | non |
 | Question, doute, incohérence (section 3) | oui | oui |
 | Ce qui continue pendant qu'une question attend | oui | oui |
-| Compte rendu de fin de carte ou de lot (section 7) | oui | oui |
+| Compte rendu de fin de carte ou de lot (section 8) | oui | oui |
 
 En hard, hors des lignes marquées « oui » ci-dessus et de la ligne de confirmation, tu n'écris aucun texte entre deux appels d'outil, et un tour qui s'achève sans question ni compte rendu s'achève sans texte. Le travail ne change pas d'un niveau à l'autre : seul l'affichage change.
 
@@ -105,7 +105,19 @@ La directive attend que la tuile cible soit inactive (jusqu'à 120 s) : un peer 
 
 S'il enchaîne sur le même sous-système, tu ne fais rien : un contexte chaud coûte moins qu'une redécouverte. Une compaction peut servir de moyen terme sur une grosse session qui reste sur le même sujet.
 
-## 7. Compte rendu de fin de carte ou de lot
+## 7. Vider ton propre contexte
+
+Fais-le à une frontière de carte, après réception du rapport et écriture de la mémoire durable, seulement si aucun commit n'est en cours de séquencement. Fais-le aussi vers 70 % de contexte si tu peux le mesurer. Mesure d'abord ce que le lead voit lui-même : statusLine, jauge du Deck ou `/context`. Si aucune mesure n'est disponible depuis la tuile, la frontière de carte suffit.
+
+1. Sauvegarde un handoff Kleos sous un workstream dédié au lead, par exemple `lead-autonome`, limité à `[a-z0-9-]`. Il contient l'état des cartes, les peers en attente avec l'âge de chaque attente, la prochaine action, et l'état du mode (`start`, `verbose`). Enregistre-le sous le projet Kleos courant (`KLEOS_SPACE`, sinon le nom du dépôt) : c'est ce même projet que tu passes à `handoffs_latest` après le rechargement.
+2. Appelle `deck_run_directive({ directive: "clear_reload", peer_ids: [<ton propre peer_id>], workstream })`.
+3. Termine immédiatement le tour, sans autre outil, sinon `busy-timeout`.
+4. Si l'appel rend `pending`, ne le renvoie jamais : il est déjà en file.
+5. Une annonce `clear_reload was not applied` signifie que rien n'a été vidé : reprends normalement.
+
+Après le rechargement, la consigne impose l'ordre `handoffs_latest`, puis `check_messages`, puis `send_message`. Respecte cet ordre avant d'exécuter la prochaine tâche du handoff.
+
+## 8. Compte rendu de fin de carte ou de lot
 
 Un bloc par carte ou par lot, et rien d'autre :
 
@@ -117,6 +129,6 @@ Carte <id8> -- <titre court> : CLOSE (commit <sha>)
 - Reste / cartes ouvertes : <id8 + une ligne>
 ```
 
-## 8. Fin de session
+## 9. Fin de session
 
 Handoff Kleos : cartes closes, lots en vol avec leur porteur et leur état, questions en attente chez l'opérateur, état et niveau du mode, première action à la reprise. Tu mémorises les faits durables, pas le récit.

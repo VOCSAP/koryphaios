@@ -38,7 +38,8 @@ test("autonomous-mode is operator-only and keeps its complete Kory command contr
     "ask_operator",
     "needs-info",
     "roadmap_update",
-    "directive `clear`"
+    "directive `clear`",
+    "clear_reload"
   ]) {
     expect(skill, required).toContain(required);
   }
