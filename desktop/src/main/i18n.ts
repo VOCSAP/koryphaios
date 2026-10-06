@@ -337,6 +337,7 @@ export const EN_DEFAULTS: Record<string, string> = {
   'status.needsAttention': 'waiting for you',
   'attention.badge': 'needs you',
   'attention.dismiss': 'Dismiss (mark as no longer waiting)',
+  'attention.inInbox': 'Waiting for your answer in the Inbox; clears once it is answered',
   'settings.notifyAttention': 'System notification when a session waits for your input',
   'settings.liveStatusLine': 'Show model and context fill in the session list',
   'settings.liveStatusLineHelp':

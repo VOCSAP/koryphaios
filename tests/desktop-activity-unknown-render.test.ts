@@ -35,6 +35,7 @@ interface FakeSession {
   rateLimited: boolean;
   resumeAt: number | null;
   needsAttention: boolean;
+  attentionSource?: "pty" | "hook" | "both";
   claudeLaunch: boolean;
 }
 
@@ -242,3 +243,42 @@ test("TerminalTile does NOT render dot-unknown for a normal ('idle') activity se
   expect(dot.className).not.toContain("dot-unknown");
   expect(dot.getAttribute("title")).not.toBe("status.unknown");
 });
+
+// ---------------------------------------------------------------------------
+// The "needs you" badge: dismissable only for the part a click can clear.
+
+function attentionBadge(selector: string): { badge: HTMLElement; dismissed: string[] } {
+  const dismissed: string[] = [];
+  act(() => fakeDeck.setState({ clearAttention: async (id: string) => void dismissed.push(id) }));
+  const badge = container.querySelector(selector);
+  if (!badge) throw new Error(`no ${selector} rendered`);
+  return { badge: badge as HTMLElement, dismissed };
+}
+
+for (const [label, render, selector] of [
+  ["TerminalTile", renderTerminalTile, ".tile-attention"],
+  ["SessionRow", renderSessionRow, ".row-attention"],
+] as const) {
+  test(`${label}: a badge held only by an Inbox request shows, but is not a dismiss button`, () => {
+    render(session({ needsAttention: true, attentionSource: "hook" }));
+    const { badge, dismissed } = attentionBadge(selector);
+
+    expect(badge.tagName).toBe("SPAN");
+    expect(badge.getAttribute("title")).toBe("attention.inInbox");
+    expect(badge.className).toContain("attention-static");
+    act(() => badge.click());
+    expect(dismissed).toEqual([]);
+  });
+
+  for (const source of ["pty", "both"] as const) {
+    test(`${label}: a badge with a wait screen behind it (${source}) stays a dismiss button`, () => {
+      render(session({ needsAttention: true, attentionSource: source }));
+      const { badge, dismissed } = attentionBadge(selector);
+
+      expect(badge.tagName).toBe("BUTTON");
+      expect(badge.getAttribute("title")).toBe("attention.dismiss");
+      act(() => badge.click());
+      expect(dismissed).toEqual(["tile-a"]);
+    });
+  }
+}

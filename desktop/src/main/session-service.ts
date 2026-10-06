@@ -86,8 +86,12 @@ interface RuntimeState {
   rateLimited: boolean
   /** Epoch ms of the announced quota reset, or null when unknown/not limited. */
   resumeAt: number | null
-  /** True while the session waits for the operator (attention.ts, PLAN C11). */
+  /** True while the session waits for the operator: ptyAttention || hookAttention. */
   needsAttention: boolean
+  /** A wait screen detected in the PTY (attention.ts, PLAN C11). */
+  ptyAttention: boolean
+  /** An open `hook` approval row names this tile: its module waits on a verdict. */
+  hookAttention: boolean
   locked: boolean
   mintedCallerId: string | null
   /**
@@ -432,9 +436,8 @@ export class SessionService extends EventEmitter {
     // notification in index.ts (ipc -> session:attention).
     this.attentionDetector.on('attention', ({ id, waiting }: AttentionEvent) => {
       const r = this.runtime.get(id)
-      if (!r || r.needsAttention === waiting) return
-      r.needsAttention = waiting
-      r.liveStatusAttentionAt = Date.now()
+      if (!r || r.ptyAttention === waiting) return
+      this.applyAttention(id, r, waiting, r.hookAttention)
       this.emit('attention', { id, waiting })
       this.broadcast()
     })
@@ -789,6 +792,8 @@ export class SessionService extends EventEmitter {
       rateLimited: false,
       resumeAt: null,
       needsAttention: false,
+      ptyAttention: false,
+      hookAttention: false,
       locked: false,
       mintedCallerId: resolvedMcpConfig?.callerId ?? null,
       // Initial value; startPty() (called synchronously below via
@@ -1036,6 +1041,8 @@ export class SessionService extends EventEmitter {
         rateLimited: false,
         resumeAt: null,
         needsAttention: false,
+        ptyAttention: false,
+        hookAttention: false,
         locked: false,
         mintedCallerId: mintedCallerIds.get(d.id) ?? null,
         // Initial value; the spawnSession()->startPty() loop right below
@@ -1175,12 +1182,37 @@ export class SessionService extends EventEmitter {
    */
   clearAttention(id: string): void {
     const r = this.runtime.get(id)
-    if (!r || !r.needsAttention) return
-    r.needsAttention = false
-    r.liveStatusAttentionAt = Date.now()
+    if (!r || !r.ptyAttention) return
+    this.applyAttention(id, r, false, r.hookAttention)
     this.attentionDetector.clear(id)
     this.emit('attention', { id, waiting: false, manual: true } satisfies AttentionEvent)
     this.broadcast()
+  }
+
+  /**
+   * The hook source of needsAttention, fed by the pending-approvals poll. It
+   * never emits 'attention': that event raises a fallback Courrier question
+   * and sweeps the tile's rows.
+   */
+  setHookAwaited(tiles: ReadonlySet<string>): void {
+    let changed = false
+    for (const [id, r] of this.runtime) {
+      const awaited = tiles.has(id) && r.status !== 'exited'
+      if (r.hookAttention === awaited) continue
+      this.applyAttention(id, r, r.ptyAttention, awaited)
+      changed = true
+    }
+    if (changed) this.broadcast()
+  }
+
+  /** 'needs-you' fires when needsAttention rises, whichever source lit it, so a tile is notified once. */
+  private applyAttention(id: string, r: RuntimeState, pty: boolean, hook: boolean): void {
+    const was = r.needsAttention
+    r.ptyAttention = pty
+    r.hookAttention = hook
+    r.needsAttention = pty || hook
+    r.liveStatusAttentionAt = Date.now()
+    if (!was && r.needsAttention) this.emit('needs-you', { id })
   }
 
   /** Kept out of list() so a minted caller id never reaches the renderer or a paired companion. */
@@ -1481,6 +1513,8 @@ export class SessionService extends EventEmitter {
       r.rateLimited = false
       r.resumeAt = null
       r.needsAttention = false
+      r.ptyAttention = false
+      r.hookAttention = false
       // Frozen-at-spawn (card fd1914cc correction): `base` above is the
       // command THIS instance actually starts on -- set here, not
       // recomputed by isClaudeSession/toRuntime afterward, so a later
@@ -1556,6 +1590,7 @@ export class SessionService extends EventEmitter {
       rateLimited: r?.rateLimited ?? false,
       resumeAt: r?.resumeAt ?? null,
       needsAttention: r?.needsAttention ?? false,
+      attentionSource: r?.ptyAttention ? (r.hookAttention ? 'both' : 'pty') : r?.hookAttention ? 'hook' : undefined,
       locked: r?.locked ?? false,
       // Read from RuntimeState, never recomputed here (card fd1914cc
       // correction) -- single source of truth, frozen at spawn by startPty.

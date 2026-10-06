@@ -4558,6 +4558,15 @@ body:has(.rm-modal) .rm-conflict-modal {
   filter: brightness(1.2);
 }
 
+/* Held by an open Inbox request, not dismissable from the tile. */
+.attention-static {
+  cursor: default;
+}
+
+.attention-static:hover {
+  filter: none;
+}
+
 /* ---------- Operator inbox (PLAN C12) ---------- */
 
 .nav-rail-spacer {

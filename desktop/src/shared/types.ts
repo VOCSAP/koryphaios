@@ -139,6 +139,8 @@ export interface SessionRuntime extends SessionDef {
   resumeAt: number | null
   /** True while the session waits for the operator (permission/question, C11). */
   needsAttention: boolean
+  /** What holds needsAttention: a wait screen, an open hook approval row, or both. Absent when it is false. */
+  attentionSource?: 'pty' | 'hook' | 'both'
   locked?: boolean
   /**
    * Frozen at spawn from the command actually used, never recomputed afterward,
@@ -290,10 +292,10 @@ export interface Approval {
   answered_via: ApprovalVia | null
   answer_kind: ApprovalAnswerKind | null
   answer_text: string | null
-  created_at: string
-  notif_expires_at: string
   questions: ApprovalQuestion[] | null
   answers: ApprovalAnswers | null
+  created_at: string
+  notif_expires_at: string
   answered_at: string | null
   delivered_at: string | null
 }

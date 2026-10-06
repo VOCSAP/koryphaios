@@ -248,19 +248,24 @@ export function TerminalTile({
             {t('session.pending', { id: (session.sessionId || session.id).slice(0, 8) })}
           </span>
         )}
-        {session.needsAttention && (
-          <button
-            type="button"
-            className="tile-quota tile-attention"
-            title={t('attention.dismiss')}
-            onClick={(e) => {
-              e.stopPropagation()
-              void clearAttention(id)
-            }}
-          >
-            {GLYPH_BADGES.warning} {t('attention.badge')}
-          </button>
-        )}
+        {session.needsAttention &&
+          (session.attentionSource === 'hook' ? (
+            <span className="tile-quota tile-attention attention-static" title={t('attention.inInbox')}>
+              {GLYPH_BADGES.warning} {t('attention.badge')}
+            </span>
+          ) : (
+            <button
+              type="button"
+              className="tile-quota tile-attention"
+              title={t('attention.dismiss')}
+              onClick={(e) => {
+                e.stopPropagation()
+                void clearAttention(id)
+              }}
+            >
+              {GLYPH_BADGES.warning} {t('attention.badge')}
+            </button>
+          ))}
         {/* Consciously exempt from the claudeLaunch gate (card fd1914cc):
             main-side detection only stays off for a claude session while it
             follows the global default (session-service.ts quotaGateActive);

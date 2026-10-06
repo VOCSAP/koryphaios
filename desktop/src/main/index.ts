@@ -201,6 +201,7 @@ import {
   type ApprovalDeps,
   type SpawnGrantStore
 } from './approval-service'
+import { createPendingApprovalsTick } from './hook-attention'
 import { matchPermissionDialog, permissionDialogShown } from './permission-dialog'
 import {
   applyEnrolment,
@@ -1359,22 +1360,28 @@ service.on(
           .catch((e) => reportError('approvals', 'could not raise an approval', e))
       }
     }
-    if (!config.notifyAttention) return
-    if (!Notification.isSupported()) return
-    if (!session) return
-    const isFr = (config.locale || app.getLocale()).toLowerCase().startsWith('fr')
-    const n = new Notification({
-      title: session.name,
-      body: isFr ? 'attend une réponse de ta part' : 'is waiting for your input'
-    })
-    n.on('click', () => {
-      mainWindow?.show()
-      mainWindow?.focus()
-      mainWindow?.webContents.send('session:focus', id)
-    })
-    n.show()
   }
 )
+
+function notifyWaitingSession(id: string): void {
+  if (!config.notifyAttention) return
+  if (!Notification.isSupported()) return
+  const session = service.list().find((s) => s.id === id)
+  if (!session) return
+  const isFr = (config.locale || app.getLocale()).toLowerCase().startsWith('fr')
+  const n = new Notification({
+    title: session.name,
+    body: isFr ? 'attend une réponse de ta part' : 'is waiting for your input'
+  })
+  n.on('click', () => {
+    mainWindow?.show()
+    mainWindow?.focus()
+    mainWindow?.webContents.send('session:focus', id)
+  })
+  n.show()
+}
+
+service.on('needs-you', ({ id }: { id: string }) => notifyWaitingSession(id))
 
 // ----- Operator inbox (PLAN C12) -----
 // Agents `send_message` to the reserved 'operator' peer; the broker parks those
@@ -1759,22 +1766,13 @@ const pollRoadmapSync = async (): Promise<void> => {
 // Non-destructive (fetchPendingApprovals lists, it does not drain), same
 // dedupe-by-signature shape as pollGraphDrafts above so a quiet tick does not
 // re-render the renderer's list for nothing.
-let lastPendingApprovalSignature = ''
-
-const pollPendingApprovals = async (): Promise<void> => {
-  const deps = approvals.deps()
-  if (!deps) return
-  try {
-    const list = await fetchPendingApprovals(deps)
-    const signature = list.map((a) => `${a.id}:${a.status}`).join(',')
-    if (signature !== lastPendingApprovalSignature) {
-      lastPendingApprovalSignature = signature
-      broadcast('approvals:pending', list)
-    }
-  } catch {
-    // Broker down / unreachable: silent, the next tick retries.
-  }
-}
+const pollPendingApprovals = createPendingApprovalsTick({
+  deps: () => approvals.deps(),
+  fetchPending: fetchPendingApprovals,
+  setHookAwaited: (tiles) => service.setHookAwaited(tiles),
+  broadcastPending: (list) => broadcast('approvals:pending', list),
+  report: (text, err) => reportError('approvals', text, err)
+})
 
 /**
  * Targeted announce to the window's TEAM-LEAD (PLAN C10). No lead designated:

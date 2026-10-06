@@ -222,19 +222,24 @@ export function SessionRow({
             {session.peerId ??
               t('session.pending', { id: (session.sessionId || session.id).slice(0, 8) })}
           </span>
-          {session.needsAttention && (
-            <button
-              type="button"
-              className="row-attention"
-              title={t('attention.dismiss')}
-              onClick={(e) => {
-                e.stopPropagation()
-                void clearAttention(session.id)
-              }}
-            >
-              {GLYPH_BADGES.warning} {t('attention.badge')}
-            </button>
-          )}
+          {session.needsAttention &&
+            (session.attentionSource === 'hook' ? (
+              <span className="row-attention attention-static" title={t('attention.inInbox')}>
+                {GLYPH_BADGES.warning} {t('attention.badge')}
+              </span>
+            ) : (
+              <button
+                type="button"
+                className="row-attention"
+                title={t('attention.dismiss')}
+                onClick={(e) => {
+                  e.stopPropagation()
+                  void clearAttention(session.id)
+                }}
+              >
+                {GLYPH_BADGES.warning} {t('attention.badge')}
+              </button>
+            ))}
           {session.rateLimited && (
             <span className="row-quota">
               {autoResumeOn && session.resumeAt

@@ -220,6 +220,110 @@ test("the approval module is armed only where the host serves the Kory module", 
   expect(spawned.at(-1)!.env.KORY_APPROVAL_MODULE, "sandboxed tile").toBe("");
 });
 
+function attentionProbe() {
+  const { svc } = setup();
+  const internals = svc as unknown as { attentionDetector: { emit(ev: string, e: unknown): void } };
+  const attention: unknown[] = [];
+  const awaited: unknown[] = [];
+  svc.on("attention", (e: unknown) => attention.push(e));
+  svc.on("needs-you", (e: unknown) => awaited.push(e));
+  const rt = svc.create({ name: "waiting-on-module" });
+  const flag = (): boolean => svc.list().find((s) => s.id === rt.id)!.needsAttention;
+  const source = () => svc.list().find((s) => s.id === rt.id)!.attentionSource;
+  const pty = (waiting: boolean): void => internals.attentionDetector.emit("attention", { id: rt.id, waiting });
+  return { svc, rt, flag, source, pty, attention, awaited };
+}
+
+test("a hook row the module waits on lights the tile's needs-you flag and clears with it", () => {
+  const { svc, rt, flag, attention } = attentionProbe();
+
+  svc.setHookAwaited(new Set([rt.id]));
+  expect(flag(), "pending hook row: the tile needs the operator").toBe(true);
+  svc.setHookAwaited(new Set());
+  expect(flag(), "row closed: flag down").toBe(false);
+  expect(attention, "the hook source never raises the PTY attention event (no fallback question, no sweep)").toEqual([]);
+});
+
+test("the hook and PTY sources are ORed", () => {
+  const { svc, rt, flag, pty } = attentionProbe();
+
+  svc.setHookAwaited(new Set([rt.id]));
+  pty(true);
+  svc.setHookAwaited(new Set());
+  expect(flag(), "the PTY episode still holds the flag").toBe(true);
+  pty(false);
+  expect(flag()).toBe(false);
+
+  pty(true);
+  svc.setHookAwaited(new Set([rt.id]));
+  pty(false);
+  expect(flag(), "the hook row still holds the flag").toBe(true);
+});
+
+test("dismissing the badge clears only the PTY source", () => {
+  const { svc, rt, flag, pty } = attentionProbe();
+
+  svc.setHookAwaited(new Set([rt.id]));
+  svc.clearAttention(rt.id);
+  expect(flag(), "a hook-lit badge stays until its row closes").toBe(true);
+
+  pty(true);
+  svc.clearAttention(rt.id);
+  expect(flag(), "the hook source still holds after the PTY part is dismissed").toBe(true);
+});
+
+test("a hook row already pending when the Deck starts notifies at the first tick, then not per poll", () => {
+  const { svc, rt, awaited } = attentionProbe();
+  let broadcasts = 0;
+  svc.on("changed", () => broadcasts++);
+
+  svc.setHookAwaited(new Set([rt.id]));
+  svc.setHookAwaited(new Set([rt.id]));
+  svc.setHookAwaited(new Set([rt.id]));
+  expect(awaited).toEqual([{ id: rt.id }]);
+  expect(broadcasts, "unchanged ticks broadcast nothing").toBe(1);
+
+  svc.setHookAwaited(new Set());
+  svc.setHookAwaited(new Set([rt.id]));
+  expect(awaited, "a new episode notifies again").toEqual([{ id: rt.id }, { id: rt.id }]);
+});
+
+test("a tile already waiting is not notified again when its second source lights", () => {
+  const { svc, rt, pty, awaited } = attentionProbe();
+
+  pty(true);
+  svc.setHookAwaited(new Set([rt.id]));
+  expect(awaited, "PTY first: the hook row adds no notification").toEqual([{ id: rt.id }]);
+
+  pty(false);
+  svc.setHookAwaited(new Set());
+  svc.setHookAwaited(new Set([rt.id]));
+  pty(true);
+  expect(awaited, "hook first: the PTY wait screen adds no notification").toEqual([{ id: rt.id }, { id: rt.id }]);
+});
+
+test("the renderer learns which source holds the flag", () => {
+  const { svc, rt, pty, source } = attentionProbe();
+
+  expect(source()).toBeUndefined();
+  svc.setHookAwaited(new Set([rt.id]));
+  expect(source()).toBe("hook");
+  pty(true);
+  expect(source()).toBe("both");
+  svc.setHookAwaited(new Set());
+  expect(source()).toBe("pty");
+});
+
+test("a hook row naming an exited or unknown tile lights nothing", () => {
+  const { svc, rt, awaited } = attentionProbe();
+  const runtime = (svc as unknown as { runtime: Map<string, { status: string; needsAttention: boolean }> }).runtime;
+  runtime.get(rt.id)!.status = "exited";
+
+  svc.setHookAwaited(new Set([rt.id, "no-such-tile"]));
+  expect(runtime.get(rt.id)!.needsAttention, "an exited tile's stale row lights nothing").toBe(false);
+  expect(awaited).toEqual([]);
+});
+
 test("an inherited approval module switch never arms a tile the host does not serve", () => {
   const inherited = process.env.KORY_APPROVAL_MODULE;
   process.env.KORY_APPROVAL_MODULE = "1";
