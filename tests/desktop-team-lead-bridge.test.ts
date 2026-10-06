@@ -266,8 +266,20 @@ function extractCreateBridgeDecision(src: string): string {
   return `${src.slice(start, openIdx)}(${extractParenBody(src, openIdx)})\nconst mcpConfig = resolvedMcpConfig?.mcpConfig\nreturn { mcpConfig, callerId: resolvedMcpConfig?.callerId }`;
 }
 
+function extractFlagValue(src: string): (field: string, raw: string | undefined, report: (scope: string, message: string) => void) => string {
+  const head = "private flagValue(field: string, raw: string | undefined): string {";
+  const start = src.indexOf(head);
+  if (start === -1 || src.indexOf(head, start + 1) !== -1) {
+    throw new Error(`session-service.ts: expected exactly 1 "${head}"`);
+  }
+  // eslint-disable-next-line no-new-func -- extracted from the real source text, not user input
+  const fn = new Function("field", "raw", "sanitizeFlagValue", "reportError", extractBracedBody(src, start + head.length - 1));
+  return (field, raw, report) => fn(field, raw, sanitizeFlagValue, report) as string;
+}
+
 function runCreateBridgeDecision(agent: string, input: { args?: string; name?: string }, marker: boolean) {
   const src = readFileSync(SESSION_SERVICE_PATH, "utf-8");
+  const flagValue = extractFlagValue(src);
   const mintCalls: string[] = [];
   const reports: string[] = [];
   // eslint-disable-next-line no-new-func -- extracted from the real source text, not user input
@@ -286,7 +298,9 @@ function runCreateBridgeDecision(agent: string, input: { args?: string; name?: s
       mintTeamLeadBridge: () => {
         mintCalls.push("called");
         return { mcpConfig: "/state/team-lead-mcp-create.json", callerId: "team-lead-create" };
-      }
+      },
+      flagValue: (field: string, raw: string | undefined) =>
+        flagValue(field, raw, (_scope, message) => reports.push(message))
     },
     effectiveAgent,
     resolveMcpConfig,

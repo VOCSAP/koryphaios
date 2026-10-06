@@ -672,6 +672,21 @@ export class SessionService extends EventEmitter {
     return def.bridge === 'clodex' ? this.bridgedCommand(base) : base
   }
 
+  private flagValue(field: string, raw: string | undefined): string {
+    const value = sanitizeFlagValue(raw ?? '')
+    const rejected = (raw ?? '').trim()
+    if (!value && rejected) {
+      // The effective agent is read out of input.args, which still reaches the
+      // command line verbatim: only the bridge decision loses the value.
+      const outcome = field === 'effective agent' ? 'ignored for the bridge decision' : 'flag omitted'
+      reportError(
+        'session',
+        `${field} value refused by the flag allow-list, ${outcome}: ${JSON.stringify(rejected.slice(0, 64))}`
+      )
+    }
+    return value
+  }
+
   /**
    * opts.teamLeadDeckBridge is a separate function parameter, never a property
    * of input: input is forwarded verbatim from a remote-reachable channel, so a
@@ -695,8 +710,8 @@ export class SessionService extends EventEmitter {
     // shell fragment: after B4 (template approval) / B5 every path that reaches
     // here is operator-authorized (advanced menu, approved template, trusted
     // companion cred), so it is not further escaped.
-    const agent = sanitizeFlagValue(input.agent ?? '')
-    const model = sanitizeFlagValue(input.model ?? '')
+    const agent = this.flagValue('agent', input.agent)
+    const model = this.flagValue('model', input.model)
     const args = [
       agent ? `--agent "${agent}"` : '',
       model ? `--model "${model}"` : '',
@@ -711,7 +726,7 @@ export class SessionService extends EventEmitter {
     // Kept in team-lead-bridge.ts, a module with no @shared import, so it stays
     // testable under a plain bun test run.
     const launched = effectiveAgent(agent, input.args)
-    const launchedAgent = sanitizeFlagValue(launched.agent ?? '')
+    const launchedAgent = this.flagValue('effective agent', launched.agent)
     const teamLeadMarker = opts?.teamLeadDeckBridge === true
     const resolvedMcpConfig = resolveMcpConfig(
       input,
@@ -737,7 +752,7 @@ export class SessionService extends EventEmitter {
       args,
       sessionId: '',
       color: input.color?.trim() || paletteColor(cfg.palette ?? DEFAULT_PALETTE, this.defs.length),
-      effort: input.effort?.trim() || '',
+      effort: this.flagValue('effort', input.effort),
       // Re-normalised here, not only in the popover: this is the last main-side
       // point before the value becomes an exported env var, and the renderer's
       // sanitizer is typing assistance, not a guarantee.
@@ -1386,7 +1401,7 @@ export class SessionService extends EventEmitter {
         baseCommand: base,
         sessionId: def.sessionId,
         prevSessionId: prev,
-        effort: def.effort,
+        effort: this.flagValue('effort', def.effort),
         pluginDirs,
         mcpConfig: def.mcpConfig,
         appendSystemPromptFile: def.appendSystemPromptFile,
@@ -1400,7 +1415,7 @@ export class SessionService extends EventEmitter {
         baseCommand: base,
         sessionId: def.sessionId,
         args: def.args,
-        effort: def.effort,
+        effort: this.flagValue('effort', def.effort),
         pluginDirs,
         mcpConfig: def.mcpConfig,
         appendSystemPromptFile: def.appendSystemPromptFile,
