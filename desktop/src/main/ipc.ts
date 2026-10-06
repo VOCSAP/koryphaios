@@ -107,8 +107,7 @@ import {
   templateSource,
   writeTemplate,
   deleteTemplate,
-  globalTemplatesDir,
-  localTemplatesDir
+  templateWriteDir
 } from './template-store'
 import {
   deleteSnippet,
@@ -1373,9 +1372,10 @@ export function registerIpc({
   // ----- templates (portable team recipes) -----
   regHandle('template:list', () => listTemplates(getConfig().projectDir))
   regHandle('template:export', (_e, name: string, local: boolean) => {
+    const attendance: CallerAttendance = isLocalIpcEvent(_e) ? 'attended' : 'unattended'
+    const dir = templateWriteDir(getConfig().projectDir, local, attendance)
     // captureSessions() carries cwd; toTemplate strips it (and id/sessionId).
     const tpl = toTemplate(service.captureSessions(), name)
-    const dir = local ? localTemplatesDir(getConfig().projectDir) : globalTemplatesDir()
     return writeTemplate(dir, name || tpl.name || 'template', tpl)
   })
   regHandle('template:delete', (_e, path: string) =>
@@ -1663,8 +1663,10 @@ export function registerIpc({
     templateSource(path, getConfig().projectDir) ? readTemplate(path) : null
   )
   regHandle('template:write', (_e, name: string, local: boolean, tpl: unknown) => {
+    const attendance: CallerAttendance = isLocalIpcEvent(_e) ? 'attended' : 'unattended'
+    const dir = templateWriteDir(getConfig().projectDir, local, attendance)
     // parseTemplate validates the shape AND normalizes lead uniqueness; a
-    // demotion here is surfaced the same way readTemplate does (card 240d6efd).
+    // demotion here is surfaced the same way readTemplate does.
     const parsed = parseTemplate(tpl)
     if (!parsed) throw new Error('invalid template')
     if (parsed.demotedLeadNames.length > 0) {
@@ -1676,7 +1678,6 @@ export function registerIpc({
     }
     const out = parsed.template
     if (name && name.trim()) out.name = name.trim()
-    const dir = local ? localTemplatesDir(getConfig().projectDir) : globalTemplatesDir()
     return writeTemplate(dir, name || out.name || 'template', out)
   })
 

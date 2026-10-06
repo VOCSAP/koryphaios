@@ -12,6 +12,7 @@ import { dirname, join, resolve } from 'node:path'
 import { globalConfigDir } from './launch-config'
 import { parseTemplate, type SessionTemplate } from '../shared/template'
 import { reportError } from './log'
+import type { CallerAttendance } from './workspace-service'
 
 export interface TemplateSummary {
   /** Absolute path of the .json file; doubles as the id. */
@@ -28,6 +29,26 @@ export function globalTemplatesDir(env: NodeJS.ProcessEnv = process.env): string
 
 export function localTemplatesDir(projectDir: string): string {
   return join(projectDir, '.claude', 'claude-peers', 'templates')
+}
+
+/**
+ * Target dir of a template write. The global dir is trusted (applying a template
+ * from it asks no shell-field approval), so only the Deck window may write there;
+ * any other caller throws.
+ */
+export function templateWriteDir(
+  projectDir: string,
+  local: boolean,
+  attendance: CallerAttendance,
+  env: NodeJS.ProcessEnv = process.env
+): string {
+  if (local) return localTemplatesDir(projectDir)
+  if (attendance !== 'attended') {
+    throw new Error(
+      'refused: a paired device cannot save a template to the global folder -- save it in this project, or use the Deck on the PC'
+    )
+  }
+  return globalTemplatesDir(env)
 }
 
 /**

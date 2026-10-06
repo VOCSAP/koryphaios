@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { TemplateSummary } from '@shared/types'
 import { GLYPH_ACTIONS } from './icons'
-import { useDeck } from '../store'
+import { errorText, useDeck } from '../store'
 import { useT } from '../i18n'
 import { ConfirmDialog } from './ConfirmDialog'
 import { TemplateComposer } from './TemplateComposer'
@@ -68,10 +68,16 @@ export function TemplatesDialog(): React.JSX.Element {
   const duplicate = async (tpl: TemplateSummary): Promise<void> => {
     const content = await window.api.readTemplateFile(tpl.path)
     if (!content) return
-    await window.api.writeTemplateFile(`${tpl.name}-copy`, tpl.source === 'local', {
-      ...content,
-      name: `${tpl.name}-copy`
-    })
+    try {
+      await window.api.writeTemplateFile(`${tpl.name}-copy`, tpl.source === 'local', {
+        ...content,
+        name: `${tpl.name}-copy`
+      })
+    } catch (e) {
+      window.api.reportError('templates', `duplicate ${tpl.name} failed: ${errorText(e)}`)
+      showToast(`${t('composer.duplicate')}: ${errorText(e)}`, 'error', { raw: true })
+      return
+    }
     showToast('toast.templateSaved')
     await refreshTemplates()
   }

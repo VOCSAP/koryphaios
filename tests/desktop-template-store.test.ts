@@ -1,5 +1,5 @@
 import { test, expect, afterEach } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -12,6 +12,7 @@ import {
   readTemplate,
   deleteTemplate,
   templateSource,
+  templateWriteDir,
 } from "../desktop/src/main/template-store.ts";
 import { toTemplate, TEMPLATE_TYPE } from "../desktop/src/shared/template.ts";
 import { onDeckError } from "../desktop/src/main/log.ts";
@@ -197,4 +198,61 @@ test("templateSource classifies allowed dirs and rejects out-of-tree paths", () 
   expect(templateSource(join(globalTemplatesDir(e), "..", "escape.json"), proj, e)).toBeNull();
   // Non-.json in an allowed dir → rejected.
   expect(templateSource(join(globalTemplatesDir(e), "x.txt"), proj, e)).toBeNull();
+});
+
+test("templateWriteDir refuses the global dir to a caller that is not the Deck window", () => {
+  const e = env(tmp());
+  const proj = tmp();
+  expect(() => templateWriteDir(proj, false, "unattended", e)).toThrow(/refused/);
+});
+
+test("templateWriteDir refuses the global dir when the attendance is not recognized", () => {
+  const e = env(tmp());
+  expect(() => templateWriteDir(tmp(), false, undefined as never, e)).toThrow(/refused/);
+});
+
+test("templateWriteDir gives the Deck window the global dir", () => {
+  const e = env(tmp());
+  expect(templateWriteDir(tmp(), false, "attended", e)).toBe(globalTemplatesDir(e));
+});
+
+test("templateWriteDir gives any caller the project dir for a local template", () => {
+  const e = env(tmp());
+  const proj = tmp();
+  expect(templateWriteDir(proj, true, "unattended", e)).toBe(localTemplatesDir(proj));
+  expect(templateWriteDir(proj, true, "attended", e)).toBe(localTemplatesDir(proj));
+});
+
+test("ipc.ts reaches the global templates dir only through templateWriteDir, with attendance from isLocalIpcEvent", () => {
+  const ipcSource = readFileSync(join(import.meta.dir, "..", "desktop", "src", "main", "ipc.ts"), "utf-8");
+  expect(
+    ipcSource,
+    "ipc.ts must not name globalTemplatesDir: a handler resolving the global dir itself bypasses the companion refusal of templateWriteDir"
+  ).not.toContain("globalTemplatesDir");
+  for (const [channel, firstWork] of [
+    ["template:write", "parseTemplate("],
+    ["template:export", "captureSessions("]
+  ] as const) {
+    const start = ipcSource.indexOf(`regHandle('${channel}'`);
+    expect(start, `${channel} handler not found in ipc.ts`).toBeGreaterThanOrEqual(0);
+    const end = ipcSource.indexOf("regHandle(", start + 1);
+    const body = ipcSource.slice(start, end < 0 ? undefined : end);
+    expect(
+      body.split("templateWriteDir(").length - 1,
+      `${channel} must call templateWriteDir exactly once, or a second call can feed the sink a dir resolved without the caller's attendance`
+    ).toBe(1);
+    expect(body, `${channel} must write to the dir templateWriteDir resolved`).toContain("writeTemplate(dir,");
+    expect(body.indexOf(firstWork), `${channel} body must contain ${firstWork}`).toBeGreaterThanOrEqual(0);
+    expect(
+      body.indexOf("templateWriteDir(") < body.indexOf(firstWork),
+      `${channel} must refuse a paired device before ${firstWork} runs, not after work is done`
+    ).toBe(true);
+    expect(
+      body,
+      `${channel} must resolve its dir through templateWriteDir with the caller's attendance, or a paired device writes into the global templates dir`
+    ).toMatch(/templateWriteDir\(getConfig\(\)\.projectDir, local, attendance\)/);
+    expect(body, `${channel} must derive attendance from isLocalIpcEvent(_e)`).toContain(
+      "const attendance: CallerAttendance = isLocalIpcEvent(_e) ? 'attended' : 'unattended'"
+    );
+  }
 });
