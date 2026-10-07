@@ -1,7 +1,7 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, posix, win32 } from "node:path";
 import { ScreenGuard } from "../desktop/src/main/screen-model.ts";
 import { matchPermissionDialog, permissionDialogShown } from "../desktop/src/main/permission-dialog.ts";
 import { TITLE_DETAIL_MAX, buildApprovalRequest, type HookPayload } from "../desktop/hooks/approval-hook.ts";
@@ -28,7 +28,18 @@ const BASH_CMD = "mkdir probe-4122-dir && echo created";
 const WRAPPED_CMD =
   `mkdir d${"w".repeat(150)} && echo alpha bravo charlie delta echo foxtrot golf hotel india juliett kilo lima mike ` +
   "november oscar papa quebec romeo sierra tango uniform victor whiskey";
-const CWD = "C:\\Users\\o\\proj";
+/**
+ * A fixture path the matcher resolves must be absolute under BOTH conventions:
+ * `C:\x` or `C:/x` is relative to POSIX node:path, so the Write cases passed on
+ * Windows only. A rooted `/x` is absolute everywhere.
+ */
+function portableAbs(p: string): string {
+  if (!posix.isAbsolute(p) || !win32.isAbsolute(p)) {
+    throw new Error(`fixture path ${JSON.stringify(p)} is not absolute on both POSIX and Windows; write it rooted, as /a/b`);
+  }
+  return p;
+}
+const CWD = portableAbs("/Users/o/proj");
 const ctx = { cwd: CWD, canonical: canonicalPath };
 
 /** The row exactly as the PermissionRequest hook would raise it. */
@@ -45,6 +56,12 @@ const MULTI_LINE = "a command shown on more than one line cannot be checked on s
 const scratch: string[] = [];
 afterAll(() => {
   for (const dir of scratch) rmSync(dir, { recursive: true, force: true });
+});
+
+test("a Windows-only fixture path is refused on every OS, a rooted one accepted", () => {
+  expect(() => portableAbs("C:\\Users\\o\\proj")).toThrow("not absolute on both POSIX and Windows");
+  expect(() => portableAbs("C:/proj")).toThrow("not absolute on both POSIX and Windows");
+  expect(portableAbs("/proj")).toBe("/proj");
 });
 
 describe("matchPermissionDialog on captured CLI screens", () => {
@@ -96,23 +113,24 @@ describe("matchPermissionDialog on captured CLI screens", () => {
 
   test("a Bash row does not match a Write dialog, nor a Write row a Bash dialog", () => {
     expect(matchPermissionDialog(bash(BASH_CMD), WRITE, ctx).ok).toBe(false);
-    expect(matchPermissionDialog(row("Write", { file_path: `${CWD}\\Create directory and confirm` }), BASH, ctx).ok).toBe(false);
+    expect(matchPermissionDialog(row("Write", { file_path: portableAbs(`${CWD}/Create directory and confirm`) }), BASH, ctx).ok).toBe(false);
   });
 
   test("Write: the shown path is resolved against the tile's cwd, then compared whole", () => {
-    expect(matchPermissionDialog(row("Write", { file_path: `${CWD}\\probe-note.txt` }), WRITE, ctx)).toEqual({ ok: true });
+    const note = portableAbs(`${CWD}/probe-note.txt`);
+    expect(matchPermissionDialog(row("Write", { file_path: note }), WRITE, ctx)).toEqual({ ok: true });
     expect(matchPermissionDialog(row("Write", { file_path: "probe-note.txt" }), WRITE, ctx)).toEqual({ ok: true });
-    expect(matchPermissionDialog(row("Write", { file_path: `${CWD}\\sub\\probe-note.txt` }), WRITE, ctx).ok).toBe(false);
-    expect(matchPermissionDialog(row("Write", { file_path: `${CWD}\\probe-note.txt` }), WRITE, { ...ctx, cwd: null }).ok).toBe(false);
+    expect(matchPermissionDialog(row("Write", { file_path: portableAbs(`${CWD}/sub/probe-note.txt`) }), WRITE, ctx).ok).toBe(false);
+    expect(matchPermissionDialog(row("Write", { file_path: note }), WRITE, { ...ctx, cwd: null }).ok).toBe(false);
   });
 
   test("Write: a title merely ENDING with the shown path is refused", () => {
     const rule = "─".repeat(120);
     const dash = "╌".repeat(120);
     const shown = [rule, " Create file", " .ssh/authorized_keys", dash, "  1 ssh-ed25519 AAAA", dash, " Do you want to create authorized_keys?", " ❯ 1. Yes"];
-    const c = { cwd: "C:/proj", canonical: canonicalPath };
-    expect(matchPermissionDialog(row("Write", { file_path: "C:/proj/sandbox/.ssh/authorized_keys" }), shown, c).ok).toBe(false);
-    expect(matchPermissionDialog(row("Write", { file_path: "C:/proj/.ssh/authorized_keys" }), shown, c)).toEqual({ ok: true });
+    const c = { cwd: portableAbs("/proj"), canonical: canonicalPath };
+    expect(matchPermissionDialog(row("Write", { file_path: portableAbs("/proj/sandbox/.ssh/authorized_keys") }), shown, c).ok).toBe(false);
+    expect(matchPermissionDialog(row("Write", { file_path: portableAbs("/proj/.ssh/authorized_keys") }), shown, c)).toEqual({ ok: true });
   });
 
   test("Write: a symlinked cwd and its real path name the same file", () => {
@@ -127,6 +145,32 @@ describe("matchPermissionDialog on captured CLI screens", () => {
     const shown = [rule, " Create file", " sub/a.txt", dash, "  1 x", dash, " Do you want to create a.txt?", " ❯ 1. Yes"];
     const c = { cwd: link, canonical: canonicalPath };
     expect(matchPermissionDialog(row("Write", { file_path: join(real, "sub", "a.txt") }), shown, c)).toEqual({ ok: true });
+  });
+
+  test.skipIf(process.platform !== "win32")("Write on Windows: native C:\\ paths, mixed separators and drive-letter case", () => {
+    const win = { cwd: "C:\\Users\\o\\proj", canonical: canonicalPath };
+    expect(matchPermissionDialog(row("Write", { file_path: "C:\\Users\\o\\proj\\probe-note.txt" }), WRITE, win)).toEqual({ ok: true });
+    expect(matchPermissionDialog(row("Write", { file_path: "C:\\Users\\o\\proj\\sub\\probe-note.txt" }), WRITE, win).ok).toBe(false);
+    expect(matchPermissionDialog(row("Write", { file_path: "C:/Users/o\\proj/probe-note.txt" }), WRITE, win)).toEqual({ ok: true });
+    expect(matchPermissionDialog(row("Write", { file_path: "C:/Users/o\\proj/sub\\probe-note.txt" }), WRITE, win).ok).toBe(false);
+
+    const rule = "─".repeat(120);
+    const dash = "╌".repeat(120);
+    const keys = [rule, " Create file", " .ssh/authorized_keys", dash, "  1 ssh-ed25519 AAAA", dash, " Do you want to create authorized_keys?", " ❯ 1. Yes"];
+    const proj = { cwd: "C:/proj", canonical: canonicalPath };
+    expect(matchPermissionDialog(row("Write", { file_path: "C:/proj/sandbox/.ssh/authorized_keys" }), keys, proj).ok).toBe(false);
+    expect(matchPermissionDialog(row("Write", { file_path: "C:\\proj\\.ssh\\authorized_keys" }), keys, proj)).toEqual({ ok: true });
+
+    // The drive letter's case is settled by resolving the directory on disk, so only an existing cwd
+    // (what a live tile always has) is compared case-insensitively on it.
+    const real = realpathSync.native(mkdtempSync(join(tmpdir(), "kory-perm-drive-")));
+    scratch.push(real);
+    mkdirSync(join(real, "sub"));
+    const lower = real[0]!.toLowerCase() + real.slice(1);
+    const note = [rule, " Create file", " probe-note.txt", dash, "  1 x", dash, " Do you want to create probe-note.txt?", " ❯ 1. Yes"];
+    expect(matchPermissionDialog(row("Write", { file_path: `${lower}\\probe-note.txt` }), note, { cwd: real, canonical: canonicalPath })).toEqual({ ok: true });
+    expect(matchPermissionDialog(row("Write", { file_path: `${real}\\probe-note.txt` }), note, { cwd: lower, canonical: canonicalPath })).toEqual({ ok: true });
+    expect(matchPermissionDialog(row("Write", { file_path: `${lower}\\sub\\probe-note.txt` }), note, { cwd: real, canonical: canonicalPath }).ok).toBe(false);
   });
 
   test("fail closed, and says whether a dialog may still appear", () => {
