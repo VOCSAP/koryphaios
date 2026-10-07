@@ -68,20 +68,72 @@ Electron + React 19 + zustand, xterm terminals over node-pty. Sources in
 - **Remote approvals (opt-in, `mobileApprovals`)**: when a session blocks, the
   question is parked broker-side and can be answered from elsewhere; the Deck
   holds the ONLY credential able to settle one. Three producers, because the
-  kinds of question differ: the embedded plugin's `PermissionRequest` hook
-  (structured detection — it fires only when a permission dialog appears,
-  unlike `PreToolUse` which would fire on every tool call; it does NOT block,
-  since Claude Code is already waiting on its own dialog and keeps waiting), the `ask_operator`
-  MCP tool (open questions — no hook covers `AskUserQuestion` or plan
-  approval, and the tool's return value IS the answer, so free text reaches
-  the agent with no keystrokes), and `attention.ts` as the fallback for
-  non-Claude CLIs. Answering IN the Deck settles the approval, which
-  invalidates the remote notification (and vice versa — the broker's
-  conditional update makes them exclusive). Verdicts that must be typed go
-  through `buildKeystrokes`, which is deliberately conservative (allow = a
-  bare Enter on the highlighted option, deny = Escape rather than guessing a
-  "no" index that could land on "yes, and don't ask again") and appends the
-  submitting Enter itself — a remote answer can never carry its own.
+  kinds of question differ: the embedded plugin's blocking `PermissionRequest`
+  command hook (`desktop/hooks/approval-hook.ts`, timeout 1860 s in
+  `desktop/deck-plugin/hooks/hooks.json`), the `ask_operator` MCP tool (open
+  questions: no hook covers `AskUserQuestion` or plan approval, and the
+  tool's return value IS the answer, so free text reaches the agent with no
+  keystrokes), and `attention.ts` as the fallback for non-Claude CLIs.
+  Answering IN the Deck settles the approval, which invalidates the remote
+  notification (and vice versa: the broker's conditional update makes them
+  exclusive).
+  **Permissions are served by the hook, not by `tool.check`.** Documented as
+  of 2026-10-07 (sources in ADR 005): `PermissionRequest` fires only when a
+  native dialog is about to open, unlike `PreToolUse` which fires on every
+  tool call, hence after the rules, the `PreToolUse` hooks and the auto-mode
+  classifier, so the Courrier receives what the terminal would have asked.
+  A `tool.check` mod answers BEFORE that classifier and would short-circuit
+  it; it only emits telemetry
+  (`desktop/hooks/kory-approvals.ts`). The hook does not read
+  `KORY_APPROVAL_MODULE`: it serves as soon as an approval credential exists.
+  Flow: `add` (row routed `hook`), then a `wait` loop (25 s per poll,
+  monotonic 1800 s budget), `verdictOf`, then a single `allow` or `deny` JSON
+  on stdout with a fixed deny message (never `answer_text`, never permission
+  suggestions). Only an `ok` answer for the expected id, routed `hook`,
+  `answered`, with kind `allow` or `deny` settles the permission
+  (`desktop/hooks/approval-verdict.ts`). Anything else, any failure or a spent
+  budget triggers a bounded `withdraw` and an exit 0 with no stdout: the
+  native menu decides. A `withdraw` refused with 409 is followed by one last
+  bounded read, so an already accepted verdict is not lost. In the MAIN
+  session the native menu stays up while the hook waits and the first answer,
+  terminal or Courrier, wins (documented concurrency plus our PTY race probe).
+  For background subagents the hook is awaited BEFORE the dialog is built, so
+  there is no native menu during the wait, up to 30 min
+  (https://github.com/anthropics/claude-code/issues/82150, open). This path types
+  nothing: the Deck classifies its answer `settle`, not `apply`
+  (`classifyVerdict`, `desktop/src/main/approval-service.ts`).
+  `AskUserQuestion` and `ExitPlanMode` are never served. Before any `add`, a
+  guard sends the call back to the native menu, posting nothing to the
+  Courrier, when `tool_input` holds a `Cc`, `Cf`, `Zl` or `Zp` character,
+  recursively and keys included; `\n` and `\t` are allowed in values only.
+  `tool_name` and `cwd` are checked with no exemption, and a non-string field
+  counts as unsafe. The question carries the tool name, the JSON input, then
+  the working directory, capped at 4000 code points with a visible cut marker,
+  so it is not guaranteed whole (`shared/approval.ts`, `shared/text.ts`).
+  Broker side, a `hook`-routed permission has an absolute 30 min deadline from
+  its creation: it turns `abandoned`, wakes its waiters and refuses a late
+  claim. A ghost row can outlive a terminal answer (measured on card
+  `b29a4ea4`, race probe): on No or Esc the hook process tree is killed in
+  about 200 ms, so `hookProducerGone` retires the row about one minute later
+  (parked waiter up to 25 s, then `HOOK_WAIT_STALE_MS` = 45 s), swept on `/approval/list` and on claim; on Yes
+  the hook is neither killed nor notified and keeps polling, so the row stays
+  until the 30 min deadline (accepted limit; zero ghosts: card `56689093`,
+  tile-close lease: card `6dbebca2`).
+  Known Claude Code limits, documented as of 2026-10-07: `PermissionRequest`
+  carries no `tool_use_id`; its `allow` does not override a `deny` or `ask`
+  rule of the settings; with `--bg` the hook's decision is discarded (issue
+  https://github.com/anthropics/claude-code/issues/88698, open); agent-teams teammates never dispatch
+  it (https://github.com/anthropics/claude-code/issues/82418, seen by
+  cross-reference only).
+  The `Notification` hook raises a non-blocking question with no `hook` route,
+  so it is routed `pty`. Verdicts that must be typed go through
+  `buildKeystrokes`, which is deliberately conservative (allow = a bare Enter
+  on the highlighted option, deny = Escape rather than guessing a "no" index
+  that could land on "yes, and don't ask again") and appends the submitting
+  Enter itself, so a remote answer can never carry its own; it types only after
+  the dialog check (`matchPermissionDialog`, `permissionDialogShown`; verdict
+  poll in `desktop/src/main/index.ts`). Decision and limits:
+  [ADR 005](docs/adr/005-module-answered-approvals.md).
   Three channels are enrolled from `Settings > Notifications`: Telegram and
   Discord take a bot token, the **Parastatès** row takes an ntfy relay
   address (the broker mints the topics) and answers with a QR that is a
@@ -92,8 +144,9 @@ Electron + React 19 + zustand, xterm terminals over node-pty. Sources in
   Enabling is `global AND NOT project-opt-out`: a project can restrict, never
   enable. Identity lives in the app-state dir, which is per OS user, so two
   Windows accounts on one machine are compartmentalised without a line of code
-  deciding it. Hooks fail CLOSED: no credential, broker down or budget spent
-  yields no decision at all, leaving the native dialog up.
+  deciding it. Hooks fail CLOSED: no credential, broker down, an unusable
+  answer or a spent budget yields no decision at all (exit 0, no stdout),
+  leaving the native dialog up.
 - **Supervisor (Home rail)**: a Claude session piloting the app through a
   loopback deck-control endpoint + dependency-free MCP stdio bridge, injected
   only into the supervisor via a generated `--mcp-config`.
