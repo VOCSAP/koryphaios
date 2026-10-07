@@ -17,7 +17,7 @@ import {
   sign,
   verify,
 } from "node:crypto";
-import { stripControl } from "./text.ts";
+import { capVisibly, stripControl } from "./text.ts";
 import type {
   Approval,
   ApprovalAddResponse,
@@ -304,20 +304,6 @@ function cutCodePoints(s: string, max: number): string {
   return points.length <= max ? s : points.slice(0, max).join("");
 }
 
-/**
- * Cut to `max` code points, saying so: the end is replaced by a marker naming
- * the original length, so the operator never answers a silently shortened text.
- * A bound too small to hold the marker cuts without it.
- */
-export function capVisibly(s: string, max: number): string {
-  const points = Array.from(s);
-  if (points.length <= max) return s;
-  const marker = ` … [truncated from ${points.length} characters]`;
-  const room = max - Array.from(marker).length;
-  if (room <= 0) return points.slice(0, Math.max(0, max)).join("");
-  return points.slice(0, room).join("").trimEnd() + marker;
-}
-
 function cleanQuestionText(s: string, keepNewlines: boolean): string {
   return stripControl(
     s.replace(INVISIBLE_CHARS, (c) => (KEPT_FOR_STRIP_CONTROL.has(c) ? c : "")),
@@ -492,7 +478,7 @@ export function validateApprovalDraft(body: {
 // `stripControl` lives in `shared/text.ts` (a dependency-free leaf, so the
 // mobile app can share it without dragging `node:crypto` into a WebView) and
 // is re-exported here: every existing caller imports it from this module.
-export { stripControl };
+export { capVisibly, stripControl };
 
 /**
  * Make a REMOTE answer safe to type into a PTY (hostile input, PLAN §6.3).

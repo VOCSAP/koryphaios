@@ -20,6 +20,41 @@ export function stripControl(s: string, opts: { keepNewlines?: boolean } = {}): 
 }
 
 /**
+ * Cut to `max` code points, saying so: the end is replaced by a marker naming
+ * the original length, so the operator never answers a silently shortened text.
+ * A bound too small to hold the marker cuts without it.
+ */
+export function capVisibly(s: string, max: number): string {
+  const points = Array.from(s);
+  if (points.length <= max) return s;
+  const marker = ` … [truncated from ${points.length} characters]`;
+  const room = max - Array.from(marker).length;
+  if (room <= 0) return points.slice(0, Math.max(0, max)).join("");
+  return points.slice(0, room).join("").trimEnd() + marker;
+}
+
+/**
+ * Render `compose(text)` whole when `text` fits `budget` and the message fits
+ * `messageMax` (both in UTF-16 units, what the chat APIs count); otherwise the
+ * longest `capVisibly` cut whose message fits, with `whole` false.
+ */
+export function fitVisibly(
+  text: string,
+  budget: number,
+  messageMax: number,
+  compose: (body: string, whole: boolean) => string
+): { message: string; whole: boolean } {
+  if (text.length <= budget) {
+    const message = compose(text, true);
+    if (message.length <= messageMax) return { message, whole: true };
+  }
+  for (let n = Math.min(Array.from(text).length, budget); ; n = Math.floor(n * 0.9)) {
+    const message = compose(capVisibly(text, n), false);
+    if (message.length <= messageMax || n === 0) return { message, whole: false };
+  }
+}
+
+/**
  * Cut to `max` on a character boundary, appending an ellipsis when cut.
  * Length is measured in UTF-16 code units, matching what the chat APIs count.
  */

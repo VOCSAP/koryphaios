@@ -9,7 +9,7 @@
 // notification.
 
 import { isPrivateHost } from "../shared/net.ts";
-import { stripControl, truncate } from "../shared/text.ts";
+import { fitVisibly, stripControl, truncate } from "../shared/text.ts";
 import type { Approval } from "../shared/types.ts";
 
 /** Envelope version. Bumped only on a breaking change; the app checks it. */
@@ -29,7 +29,6 @@ export const NTFY_ACTIONS_MAX = 3;
 
 /** Where a request that the phone cannot answer with a button is answered. */
 export const QUESTIONS_POINTER = "Answer it in the Koryphaios inbox or in Parastates.";
-
 /** Topics are secrets, not names: 24 random bytes rendered as 48 hex chars. */
 export const NTFY_TOPIC_HEX_LEN = 48;
 const TOPIC_RE = /^[a-z0-9_-]{16,64}$/;
@@ -324,7 +323,10 @@ export function questionLines(approval: Pick<Approval, "questions">): string[] {
  * risk is control characters and length, both handled here. Newlines survive
  * in the body because an Android notification renders them.
  */
-export function renderNtfy(approval: Approval, originText: string): { title: string; message: string } {
+export function renderNtfy(
+  approval: Approval,
+  originText: string
+): { title: string; message: string; whole: boolean } {
   // The origin gets a fixed share of the budget so it can never crowd the
   // agent's title out entirely: a long hostname plus a long project key would
   // otherwise fill 200 characters on its own and the operator would see which
@@ -335,11 +337,14 @@ export function renderNtfy(approval: Approval, originText: string): { title: str
     NTFY_TITLE_MAX - origin.length - 3
   );
   const question = stripControl(approval.question, { keepNewlines: true }).trim();
-  if (!approval.questions) return { title: `${origin} · ${title}`, message: truncate(question, NTFY_MESSAGE_MAX) };
+  if (!approval.questions) {
+    const fit = fitVisibly(question, NTFY_MESSAGE_MAX, NTFY_MESSAGE_MAX, (body) => body);
+    return { title: `${origin} · ${title}`, message: fit.message, whole: fit.whole };
+  }
   const listed = [question, stripControl(questionLines(approval).join("\n"), { keepNewlines: true })].join("\n\n");
   const pointer = optionButtons(approval, NTFY_ACTIONS_MAX) ? "" : QUESTIONS_POINTER;
-  const body = pointer ? `${truncate(listed, NTFY_MESSAGE_MAX - pointer.length - 2)}\n\n${pointer}` : truncate(listed, NTFY_MESSAGE_MAX);
-  return { title: `${origin} · ${title}`, message: body };
+  const fit = fitVisibly(listed, NTFY_MESSAGE_MAX, NTFY_MESSAGE_MAX, (body) => (pointer ? `${body}\n\n${pointer}` : body));
+  return { title: `${origin} · ${title}`, message: fit.message, whole: fit.whole };
 }
 
 export interface BuildPublishDeps {

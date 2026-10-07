@@ -8,7 +8,7 @@
 // runs in HTML mode (three characters to escape) rather than MarkdownV2 (which
 // needs eighteen escaped anywhere in the string, and silently 400s on a miss).
 
-import { truncate } from "../shared/text.ts";
+import { fitVisibly, truncate } from "../shared/text.ts";
 import type { Approval } from "../shared/types.ts";
 import { settledOutcome } from "../shared/approval-outcome.ts";
 import type { AnswerRefusal } from "./types.ts";
@@ -74,44 +74,50 @@ export function chatOptionButtons(approval: Approval): string[] | null {
   return optionButtons(approval, CHAT_OPTION_BUTTONS_MAX);
 }
 
-/** The notification body for Telegram (HTML parse mode). */
-export function renderTelegram(approval: Approval): string {
+/** Question budget of each chat channel; past it the question is cut visibly. */
+export const TELEGRAM_QUESTION_MAX = 2500;
+export const DISCORD_QUESTION_MAX = 1500;
+
+/** The Telegram message (HTML parse mode), and whether it shows the question whole. */
+export function telegramView(approval: Approval): { message: string; whole: boolean } {
   const head = `<b>${escapeHtml(truncate(approval.title, 200))}</b>`;
   const badge = `<i>${escapeHtml(originLabel(approval))}</i>`;
-  const body = escapeHtml(truncate(approval.question, 2500));
   if (approval.questions) {
     const listed = escapeHtml(truncate(questionLines(approval).join("\n"), 1200));
     const hint = chatOptionButtons(approval) ? "Tap an option." : QUESTIONS_POINTER;
-    return truncate([head, badge, "", body, "", listed, "", `<i>${escapeHtml(hint)}</i>`].join("\n"), TELEGRAM_TEXT_MAX);
+    return fitVisibly(approval.question, TELEGRAM_QUESTION_MAX, TELEGRAM_TEXT_MAX, (body) =>
+      [head, badge, "", escapeHtml(body), "", listed, "", `<i>${escapeHtml(hint)}</i>`].join("\n")
+    );
   }
   const hint =
     approval.kind === "permission"
       ? "Tap a button, or reply with instructions."
       : "Reply to this message with your answer.";
-  return truncate([head, badge, "", body, "", `<i>${escapeHtml(hint)}</i>`].join("\n"), TELEGRAM_TEXT_MAX);
+  return fitVisibly(approval.question, TELEGRAM_QUESTION_MAX, TELEGRAM_TEXT_MAX, (body) =>
+    [head, badge, "", escapeHtml(body), "", `<i>${escapeHtml(hint)}</i>`].join("\n")
+  );
 }
 
-/** The notification body for Discord (plain content, no markup injection). */
-export function renderDiscord(approval: Approval): string {
+export function renderTelegram(approval: Approval): string {
+  return telegramView(approval).message;
+}
+
+/** The Discord message (plain content, no markup injection), and whether it shows the question whole. */
+export function discordView(approval: Approval): { message: string; whole: boolean } {
   // Discord has no parse-mode toggle: markdown is always live. Fencing the
   // agent-supplied block keeps a stray backtick or underscore from reflowing
   // the message, and stops any attempt at fake formatting.
   const fenced = approval.questions ? `${approval.question}\n\n${questionLines(approval).join("\n")}` : approval.question;
-  const body = truncate(fenced, 1500).replace(/```/g, "``​`");
+  const title = `**${truncate(approval.title, 200).replace(/\*/g, "\\*")}**`;
   const pointer = approval.questions && !chatOptionButtons(approval) ? [QUESTIONS_POINTER] : [];
-  return truncate(
-    [
-      `**${truncate(approval.title, 200).replace(/\*/g, "\\*")}**`,
-      `_${originLabel(approval)}_`,
-      "```",
-      body,
-      "```",
-      ...pointer,
-    ].join("\n"),
-    DISCORD_TEXT_MAX
+  return fitVisibly(fenced, DISCORD_QUESTION_MAX, DISCORD_TEXT_MAX, (body) =>
+    [title, `_${originLabel(approval)}_`, "```", body.replace(/```/g, "``​`"), "```", ...pointer].join("\n")
   );
 }
 
+export function renderDiscord(approval: Approval): string {
+  return discordView(approval).message;
+}
 /** What the message becomes once somebody answered, on every channel. */
 export function renderSettled(approval: Approval, viaLabel: string): string {
   const outcome = settledOutcome(approval);
@@ -146,8 +152,7 @@ export const REFUSAL_NOTICES: Record<AnswerRefusal, string> = {
   "verdict-only": "Not sent: this request takes Approve or Reject, not a written answer.",
   "on-tile": "Not sent: this request is waiting on its tile, answer it in Koryphaios.",
   "session-gone": "Not sent: the session is no longer waiting for this answer, answer it in its terminal.",
-  "answers-only": `Not sent: this request takes one of its options. ${QUESTIONS_POINTER}`,
-};
+  "answers-only": `Not sent: this request takes one of its options. ${QUESTIONS_POINTER}`,};
 
 /**
  * What to tell the sender after `onAnswer`: null when the answer settled the
