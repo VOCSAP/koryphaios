@@ -178,6 +178,7 @@ type TelemetryPluginHost = {
   session: {
     usage(): Promise<{ context: SessionContextUsage }>
     model(): Promise<string>
+    cwd(): Promise<string>
   }
   process: {
     /** No shell; the child inherits the session's env and cwd; timeout 30 s by default. */

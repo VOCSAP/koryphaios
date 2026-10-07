@@ -23,6 +23,18 @@ const FAULTY_MODULE = `export function register(on) {
 }
 `;
 
+/** Passes $ to a const arrow: harmless as written, refused once the bundler turns the const into a var. */
+const CONST_ARROW_SOURCE = `const logAsk = async ($: any) => {
+  $.ui.log("ask", { to: "debug" });
+};
+export function register(on: any): void {
+  on("tool.check", async ($: any, e: any, next: any) => {
+    await logAsk($);
+    return next(e);
+  });
+}
+`;
+
 type Finding = { path?: string; message?: string };
 type ValidateReport = {
   manifest?: { errors?: Finding[] };
@@ -84,6 +96,26 @@ test.skipIf(skip === "1")(
     expect(errors, "a non-literal $.env.get name must surface as a module error").not.toEqual([]);
     expect(errors.join("\n"), "the error names the broken rule").toContain("$.env.get");
     expect(errors.join("\n"), "the error is the literal-name rule, not a parse error quoting the source").toContain("takes a literal name");
+  },
+  VALIDATE_TIMEOUT_MS + 30_000,
+);
+
+test.skipIf(skip === "1")(
+  "the CLI still reports $ passed to a bundled const arrow (positive control)",
+  async () => {
+    const claude = claudeOrFail();
+    const dir = mkdtempSync(join(tmpdir(), "kory-const-arrow-"));
+    try {
+      writeFileSync(join(dir, "module.ts"), CONST_ARROW_SOURCE);
+      const built = await Bun.build({ entrypoints: [join(dir, "module.ts")], target: "node" });
+      expect(built.success, "the const-arrow fixture bundles").toBe(true);
+      const { report } = validateModule(claude, await built.outputs[0]!.text());
+      expect(moduleErrors(report).join("\n"), "$ handed to a const arrow must surface as a module error").toContain(
+        '$ is passed to "logAsk"',
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   },
   VALIDATE_TIMEOUT_MS + 30_000,
 );
