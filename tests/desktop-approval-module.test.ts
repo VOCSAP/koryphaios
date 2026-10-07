@@ -2,18 +2,11 @@ import { expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { APPROVAL_QUESTION_MAX, generateCredential, verifyAuthProof } from "../shared/approval.ts";
+import { generateCredential, verifyAuthProof } from "../shared/approval.ts";
 import type { SessionApprovalCredential } from "../shared/approval-client.ts";
 import {
-  ALLOW_REASON,
   APPROVAL_MODULE_ENV,
-  approvalHelperPath,
-  callApprovalHelper,
-  DENY_REASON,
-  permissionQuestion,
   register,
-  VERDICT_CEILING_MS,
-  VERDICT_WAIT_SEC,
   type ApprovalHost,
 } from "../desktop/hooks/kory-approvals.ts";
 import { APPROVAL_WAIT_MAX_SEC, buildSignedRequest, runApprovalClient } from "../desktop/hooks/approval-client.ts";
@@ -38,8 +31,6 @@ function host(
   run: (argv: readonly string[], init?: ProcessRunInit) => Promise<ProcessRunResult> = async () => {
     throw new Error("process.run must not be called");
   },
-  now: () => Promise<number> = async () => 0,
-  cwd: () => Promise<string> = async () => "C:/work/repo",
 ): { value: ApprovalHost; logs: string[] } {
   const logs: string[] = [];
   return {
@@ -48,379 +39,80 @@ function host(
       process: { run },
       plugin: { root: PLUGIN_ROOT },
       ui: { log: (text) => void logs.push(text) },
-      clock: { now },
-      session: { cwd },
     },
     logs,
   };
 }
 
-function nextResolving<T>(
-  value: T,
-  controller = new AbortController(),
-): ((e: unknown) => Promise<T>) & { calls: unknown[]; signal: AbortSignal } {
+function nextResolving<T>(value: T): ((e: unknown) => Promise<T>) & { calls: unknown[]; signal: AbortSignal } {
   const calls: unknown[] = [];
   const next = async (e: unknown) => {
     calls.push(e);
     return value;
   };
-  return Object.assign(next, { calls, signal: controller.signal });
-}
-
-function stdout(body: unknown): ProcessRunResult {
-  return { exitCode: 0, stdout: JSON.stringify(body), stderr: "", isStdoutTruncated: false, isStderrTruncated: false };
-}
-
-const FAILED: ProcessRunResult = { exitCode: 1, stdout: "", stderr: "", isStdoutTruncated: false, isStderrTruncated: false };
-const PENDING = { ok: true, pending: true };
-const ADDED = { ok: true, id: "ap-1", reply_route: "hook", producer_secret: "ps-1" };
-
-function answered(fields: Record<string, unknown>): unknown {
-  return { ok: true, approval: { id: "ap-1", reply_route: "hook", status: "answered", ...fields } };
-}
-
-/**
- * A fake approval helper: add answers `add`, each wait takes the next of `waits` (a function runs first), then fails.
- * `withdrawFails` plays the broker's 409 when the operator answered first.
- */
-function helper(add: unknown, waits: unknown[] = [], withdrawFails = false) {
-  const calls: Array<{ op: string; request: Record<string, unknown> }> = [];
-  const run = async (argv: readonly string[], init?: ProcessRunInit): Promise<ProcessRunResult> => {
-    const op = argv[2]!;
-    calls.push({ op, request: JSON.parse(init?.stdin ?? "{}") });
-    if (op === "add") return add === null ? FAILED : stdout(add);
-    if (op === "withdraw") {
-      return withdrawFails
-        ? stdout({ ok: false, error: "HTTP 409: already answered" })
-        : stdout({ ok: true, approval: { id: "ap-1", status: "answered_terminal" } });
-    }
-    if (waits.length === 0) return FAILED;
-    const step = waits.shift();
-    const body = typeof step === "function" ? step() : step;
-    return body === null ? FAILED : stdout(body);
-  };
-  return { run, calls, ops: () => calls.map((c) => c.op) };
+  return Object.assign(next, { calls, signal: new AbortController().signal });
 }
 
 const BASH = { tool: "Bash", input: { command: "rm -rf build" }, tool_use_id: "toolu_1" };
 const ASK = { decision: "ask" as const, reason: "core" };
 
-for (const gate of ["1", ""]) {
-  for (const decision of ["allow", "deny"] as const) {
-    test(`a ${decision} from next is returned untouched, no helper call (gate '${gate}')`, async () => {
-      const verdict = { decision, reason: "core" };
-      const next = nextResolving(verdict);
-
-      const result = await registered().get("tool.check")!(host(gate).value, BASH, next);
-
-      expect(result).toBe(verdict);
-      expect(next.calls).toEqual([BASH]);
-    });
-  }
-
-  test(`tool.call returns next's own result object (gate '${gate}')`, async () => {
-    const answered = { result: { answers: { "Which?": "A" } }, text: "ok", ref: 3 };
-    const e = { tool: "AskUserQuestion", tool_use_id: "toolu_2", questions: [] };
-    const next = nextResolving(answered);
-
-    const result = await registered().get("tool.call")!(host(gate).value, e, next);
-
-    expect(result).toBe(answered);
-    expect(next.calls).toEqual([e]);
+test("tool.check leaves an ask to PermissionRequest without invoking the helper", async () => {
+  const calls: string[] = [];
+  const probe = host("1", async (argv) => {
+    calls.push(String(argv[2]));
+    return { exitCode: 0, stdout: '{"ok":true}', stderr: "", isStdoutTruncated: false, isStderrTruncated: false };
   });
-}
-
-test("an ask is not served when the module is off, the call is a query, or the tool keeps its own dialog", async () => {
-  const check = registered().get("tool.check")!;
-  const cases = [
-    { gate: "", e: BASH },
-    { gate: "1", e: { tool: "Bash", input: {} } },
-    { gate: "1", e: { tool: "AskUserQuestion", input: {}, tool_use_id: "toolu_q" } },
-    { gate: "1", e: { tool: "ExitPlanMode", input: {}, tool_use_id: "toolu_p" } },
-  ];
-  for (const { gate, e } of cases) {
-    const fake = helper(ADDED, [answered({ answer_kind: "allow" })]);
-    const next = nextResolving(ASK);
-    expect(await check(host(gate, fake.run).value, e, next), JSON.stringify(e)).toBe(ASK);
-    expect(fake.ops(), `${e.tool} (gate '${gate}') reaches no helper`).toEqual([]);
-    expect(next.calls).toHaveLength(1);
-  }
-});
-
-test("pending then allow: the operator's allow runs the tool, with a fixed reason", async () => {
-  const fake = helper(ADDED, [PENDING, answered({ answer_kind: "allow", answer_text: "free text" })]);
   const next = nextResolving(ASK);
 
-  const result = await registered().get("tool.check")!(host("1", fake.run).value, BASH, next);
-
-  expect(result).toEqual({ decision: "allow", reason: ALLOW_REASON });
-  expect(fake.ops()).toEqual(["add", "wait", "wait"]);
-  expect(next.calls, "next is called once, never after the wait").toHaveLength(1);
-  const add = fake.calls[0]!.request;
-  expect(add).toMatchObject({ kind: "permission", title: "Bash: rm -rf build", options: ["Allow", "Deny"] });
-  expect(String(add.question).split("\n")[0], "the command comes first, verbatim").toBe("rm -rf build");
-  expect(String(add.question).split("\n")[1], "the session directory comes right after").toBe("Dir: C:/work/repo");
-  expect(fake.calls[1]!.request).toEqual({ id: "ap-1", producer_secret: "ps-1", timeout_sec: VERDICT_WAIT_SEC });
-});
-
-test("pending then deny: the reason is fixed, never the operator's text", async () => {
-  const fake = helper(ADDED, [PENDING, answered({ answer_kind: "deny", answer_text: "do not touch build" })]);
-
-  const result = await registered().get("tool.check")!(host("1", fake.run).value, BASH, nextResolving(ASK));
-
-  expect(result).toEqual({ decision: "deny", reason: DENY_REASON });
-  expect(JSON.stringify(result)).not.toContain("do not touch");
-});
-
-test("a long command is cut visibly in the question, the command still first", () => {
-  const question = permissionQuestion({ command: "x".repeat(APPROVAL_QUESTION_MAX + 10) }, "C:/work/repo");
-  expect(Array.from(question).length).toBeLessThanOrEqual(APPROVAL_QUESTION_MAX);
-  expect(question).toContain("[truncated from");
-  expect(question.startsWith("xxx")).toBe(true);
-});
-
-/** Every way the module ends without an operator verdict: it must return next's own ask, never allow. */
-const FALLBACKS: Array<{ name: string; add: unknown; waits?: unknown[]; ops: string[]; abortOnWait?: boolean; now?: () => Promise<number> }> = [
-  { name: "add fails", add: null, ops: ["add"] },
-  { name: "add answers another route", add: { ...ADDED, reply_route: "channel" }, ops: ["add"] },
-  { name: "the operator hands back", add: ADDED, waits: [PENDING, answered({ status: "answered_terminal", answer_kind: null })], ops: ["add", "wait", "wait", "withdraw"] },
-  { name: "the wait answers another id", add: ADDED, waits: [{ ok: true, approval: { id: "ap-2", reply_route: "hook", status: "answered", answer_kind: "allow" } }], ops: ["add", "wait", "withdraw"] },
-  { name: "the helper fails while waiting", add: ADDED, waits: [PENDING, null], ops: ["add", "wait", "wait", "withdraw"] },
-  { name: "Escape while waiting, even if the wait then says allow", add: ADDED, waits: [answered({ answer_kind: "allow" })], abortOnWait: true, ops: ["add", "wait", "withdraw"] },
-];
-
-for (const c of FALLBACKS) {
-  test(`fallback: ${c.name} -> withdraw when added, return next's ask`, async () => {
-    const controller = new AbortController();
-    const waits = (c.waits ?? []).map((w) => (c.abortOnWait ? () => (controller.abort("user-cancel"), w) : w));
-    const fake = helper(c.add, waits);
-    const next = nextResolving(ASK, controller);
-
-    const result = await registered().get("tool.check")!(host("1", fake.run, c.now).value, BASH, next);
-
-    expect(result, "only an operator's allow may allow; every fallback returns next's own verdict").toBe(ASK);
-    expect(fake.ops()).toEqual(c.ops);
-    expect(next.calls, "next is never called again").toHaveLength(1);
-  });
-}
-
-test("fallback: the 30 min ceiling withdraws a row the operator never answered", async () => {
-  let t = 0;
-  const fake = helper(ADDED, Array.from({ length: 100 }, () => PENDING));
-  const now = async () => (t += 10 * 60_000);
-
-  const result = await registered().get("tool.check")!(host("1", fake.run, now).value, BASH, nextResolving(ASK));
+  const result = await registered().get("tool.check")!(probe.value, BASH, next);
 
   expect(result).toBe(ASK);
-  expect(fake.ops().at(-1)).toBe("withdraw");
-  expect(fake.ops().filter((op) => op === "wait").length).toBeLessThan(VERDICT_CEILING_MS / 60_000);
+  expect(next.calls).toEqual([BASH]);
+  expect(calls).toEqual([]);
+  expect(probe.logs).toEqual(["Kory approvals: permission deferred to PermissionRequest hook"]);
 });
 
-test("fallback: an exception after add withdraws and returns next's ask", async () => {
-  const fake = helper(ADDED, [PENDING]);
-  const probe = host("1", fake.run, async () => {
-    throw new Error("clock down");
-  });
-
-  const result = await registered().get("tool.check")!(probe.value, BASH, nextResolving(ASK));
-
-  expect(result).toBe(ASK);
-  expect(fake.ops()).toEqual(["add", "withdraw"]);
-  expect(probe.logs).toContain("Kory permission wait failed: clock down");
-});
-
-test("fallback: an exception before add returns next's ask", async () => {
+test("tool.check returns the engine decision when the approval environment is unavailable", async () => {
   const probe = host("1");
   probe.value.env.get = async () => {
-    throw new Error("env down");
+    throw new Error("environment unavailable");
   };
-  expect(await registered().get("tool.check")!(probe.value, BASH, nextResolving(ASK))).toBe(ASK);
-  expect(probe.logs).toEqual(["Kory approvals failed: env down"]);
-});
+  const next = nextResolving(ASK);
 
-test("a deny or an allow from the engine is never turned into an operator request", async () => {
-  for (const decision of ["deny", "allow"] as const) {
-    const verdict = { decision, reason: "settings rule" };
-    const fake = helper(ADDED, [answered({ answer_kind: decision === "deny" ? "allow" : "deny" })]);
-
-    const result = await registered().get("tool.check")!(host("1", fake.run).value, BASH, nextResolving(verdict));
-
-    expect(result, `an engine ${decision} must reach the tile untouched; the operator cannot overturn it`).toBe(verdict);
-    expect(fake.ops()).toEqual([]);
-  }
-});
-
-test("a call carrying bidi or other format characters is left to the native menu, unchanged", async () => {
-  const cp = (n: number) => String.fromCodePoint(n);
-  const [RLO, LRI, PDI, PDF] = [cp(0x202e), cp(0x2066), cp(0x2069), cp(0x202c)];
-  const trojan = `ls ${RLO}${LRI} ; rm -rf ~/x ${PDI}${LRI} # list files ${PDI}${PDF}`;
-  for (const command of [trojan, `ls${cp(0x200b)}`, `ls${cp(0x2028)}rm -rf ~/x`]) {
-    const fake = helper(ADDED, [answered({ answer_kind: "allow" })]);
-    const probe = host("1", fake.run);
-    const e = { tool: "Bash", input: { command }, tool_use_id: "toolu_b" };
-
-    const result = await registered().get("tool.check")!(probe.value, e, nextResolving(ASK));
-
-    expect(result, "a reordered command never reaches the operator").toBe(ASK);
-    expect(fake.ops()).toEqual([]);
-    expect(probe.logs).toEqual(["Kory approvals: format characters in the call, left to the native menu"]);
-  }
-});
-
-test("without a session directory the call is still served, with no Dir line", async () => {
-  const fake = helper(ADDED, [answered({ answer_kind: "allow" })]);
-  const probe = host("1", fake.run, undefined, async () => {
-    throw new Error("no cwd");
-  });
-
-  const result = await registered().get("tool.check")!(probe.value, BASH, nextResolving(ASK));
-
-  expect(result).toEqual({ decision: "allow", reason: ALLOW_REASON });
-  expect(String(fake.calls[0]!.request.question)).not.toContain("Dir:");
-  expect(probe.logs).toContain("Kory approvals: no session cwd: no cwd");
-});
-
-test("fallback: a signal already aborted before the first wait withdraws at once", async () => {
-  const controller = new AbortController();
-  controller.abort("user-cancel");
-  const fake = helper(ADDED, [answered({ answer_kind: "allow" })]);
-
-  const result = await registered().get("tool.check")!(host("1", fake.run).value, BASH, nextResolving(ASK, controller));
+  const result = await registered().get("tool.check")!(probe.value, BASH, next);
 
   expect(result).toBe(ASK);
-  expect(fake.ops()).toEqual(["add", "withdraw"]);
+  expect(next.calls).toEqual([BASH]);
+  expect(probe.logs).toEqual(["Kory approvals: permission defer failed: environment unavailable"]);
 });
 
-test("a withdraw refused because the operator just answered applies that answer, read once", async () => {
-  for (const [late, expected] of [
-    [answered({ answer_kind: "allow" }), { decision: "allow", reason: ALLOW_REASON }],
-    [answered({ answer_kind: "deny" }), { decision: "deny", reason: DENY_REASON }],
-    [PENDING, ASK],
-  ] as const) {
-    const fake = helper(ADDED, [PENDING, null, late], true);
+test("tool.check returns the engine decision unchanged when it is not an ask", async () => {
+  const verdict = { decision: "allow", reason: "settings rule" };
+  const next = nextResolving(verdict);
 
-    const result = await registered().get("tool.check")!(host("1", fake.run).value, BASH, nextResolving(ASK));
+  const result = await registered().get("tool.check")!(host("1").value, BASH, next);
 
-    expect(result).toEqual(expected);
-    expect(fake.ops()).toEqual(["add", "wait", "wait", "withdraw", "wait"]);
-    expect(fake.calls.at(-1)!.request).toEqual({ id: "ap-1", producer_secret: "ps-1", timeout_sec: 0 });
-  }
+  expect(result).toBe(verdict);
+  expect(next.calls).toEqual([BASH]);
 });
 
-test("a late read is applied only for an answered hook row of the call's own id", async () => {
-  const lateRows = [
-    { name: "another id", approval: { id: "ap-2", reply_route: "hook", status: "answered", answer_kind: "allow" } },
-    { name: "a pty route", approval: { id: "ap-1", reply_route: "pty", status: "answered", answer_kind: "allow" } },
-    { name: "still pending", approval: { id: "ap-1", reply_route: "hook", status: "pending", answer_kind: "allow" } },
-  ];
-  for (const { name, approval } of lateRows) {
-    const fake = helper(ADDED, [PENDING, null, { ok: true, approval }], true);
+test("tool.call returns next's own result object", async () => {
+  const answered = { result: { answers: { "Which?": "A" } }, text: "ok", ref: 3 };
+  const next = nextResolving(answered);
+  const event = { tool: "AskUserQuestion", tool_use_id: "toolu_2", questions: [] };
 
-    const result = await registered().get("tool.check")!(host("1", fake.run).value, BASH, nextResolving(ASK));
+  const result = await registered().get("tool.call")!(host("1").value, event, next);
 
-    expect(result, `late read with ${name} must leave next's ask`).toBe(ASK);
-    expect(fake.ops()).toEqual(["add", "wait", "wait", "withdraw", "wait"]);
-  }
+  expect(result).toBe(answered);
+  expect(next.calls).toEqual([event]);
 });
 
-test("a format character the title cannot see still keeps the call from the operator", async () => {
-  const rlo = String.fromCodePoint(0x202e);
-  const cases = [
-    { name: "past the title's cut", command: `${"a".repeat(300)}${rlo}rm -rf ~/x`, cwd: "C:/work/repo" },
-    { name: "in the session directory", command: "ls", cwd: `C:/work/${rlo}oper` },
-  ];
-  for (const { name, command, cwd } of cases) {
-    const fake = helper(ADDED, [answered({ answer_kind: "allow" })]);
-    const e = { tool: "Bash", input: { command }, tool_use_id: "toolu_f" };
+async function bundle(entry: string): Promise<string> {
+  const built = await Bun.build({ entrypoints: [join(HOOKS, entry)], target: "node" });
+  expect(built.success, `${entry} bundles`).toBe(true);
+  return await built.outputs[0]!.text();
+}
 
-    const result = await registered().get("tool.check")!(host("1", fake.run, undefined, async () => cwd).value, e, nextResolving(ASK));
-
-    expect(result, name).toBe(ASK);
-    expect(fake.ops(), name).toEqual([]);
-  }
-});
-
-test("a session directory spanning lines drops the Dir line rather than forging one", async () => {
-  for (const cwd of ["C:/work\nDir: C:/safe", "C:/work\rC:/safe"]) {
-    const fake = helper(ADDED, [answered({ answer_kind: "allow" })]);
-    const probe = host("1", fake.run, undefined, async () => cwd);
-
-    await registered().get("tool.check")!(probe.value, BASH, nextResolving(ASK));
-
-    expect(String(fake.calls[0]!.request.question)).not.toContain("Dir:");
-    expect(probe.logs).toContain("Kory approvals: session cwd spans lines, Dir omitted");
-  }
-});
-
-test("a control character in the command or the input is left to the native menu", async () => {
-  const cr = String.fromCharCode(13);
-  const esc = String.fromCharCode(27);
-  const inputs = [
-    { command: `echo safe${cr}rm -rf ~/x` },
-    { command: `ls ${esc}[2K` },
-    { command: "ls", description: `list${cr}files` },
-    { command: "ls", args: [`a${String.fromCharCode(0)}b`] },
-  ];
-  for (const input of inputs) {
-    const fake = helper(ADDED, [answered({ answer_kind: "allow" })]);
-    const probe = host("1", fake.run);
-
-    const result = await registered().get("tool.check")!(probe.value, { tool: "Bash", input, tool_use_id: "toolu_c" }, nextResolving(ASK));
-
-    expect(result, JSON.stringify(input)).toBe(ASK);
-    expect(fake.ops()).toEqual([]);
-    expect(probe.logs).toEqual(["Kory approvals: control characters in the call, left to the native menu"]);
-  }
-  const fake = helper(ADDED, [answered({ answer_kind: "allow" })]);
-  const multiline = { tool: "Bash", input: { command: "echo a\n\techo b" }, tool_use_id: "toolu_m" };
-  expect(await registered().get("tool.check")!(host("1", fake.run).value, multiline, nextResolving(ASK)), "newline and tab stay served").toEqual({
-    decision: "allow",
-    reason: ALLOW_REASON,
-  });
-});
-
-test("after Escape a refused withdraw is not read again", async () => {
-  const controller = new AbortController();
-  const fake = helper(ADDED, [() => (controller.abort("user-cancel"), PENDING), answered({ answer_kind: "allow" })], true);
-
-  const result = await registered().get("tool.check")!(host("1", fake.run).value, BASH, nextResolving(ASK, controller));
-
-  expect(result).toBe(ASK);
-  expect(fake.ops()).toEqual(["add", "wait", "withdraw"]);
-});
-
-test("the helper is spawned from the plugin root with the request on stdin", async () => {
-  const runs: Array<{ argv: readonly string[]; init?: ProcessRunInit }> = [];
-  const probe = host("1", async (argv, init) => {
-    runs.push({ argv, init });
-    return { exitCode: 0, stdout: '{"ok":true,"id":"ap-1"}\n', stderr: "", isStdoutTruncated: false, isStderrTruncated: false };
-  });
-
-  const out = await callApprovalHelper(probe.value, "add", { kind: "permission" });
-
-  expect(out).toEqual({ ok: true, id: "ap-1" });
-  expect(runs[0]!.argv).toEqual(["bun", `${PLUGIN_ROOT}/hooks/approval-client.mjs`, "add"]);
-  expect(JSON.parse(runs[0]!.init!.stdin!)).toEqual({ kind: "permission" });
-  expect(approvalHelperPath("C:/plugins/deck/")).toBe(`${PLUGIN_ROOT}/hooks/approval-client.mjs`);
-});
-
-test("every helper failure reads as no answer, never as a refusal", async () => {
-  const outcomes: Array<() => Promise<ProcessRunResult>> = [
-    async () => ({ exitCode: 1, stdout: '{"ok":true}', stderr: "", isStdoutTruncated: false, isStderrTruncated: false }),
-    async () => ({ exitCode: 0, stdout: '{"ok":false,"error":"HTTP 404"}', stderr: "", isStdoutTruncated: false, isStderrTruncated: false }),
-    async () => ({ exitCode: 0, stdout: "not json", stderr: "", isStdoutTruncated: false, isStderrTruncated: false }),
-    async () => {
-      throw new Error("bun not found");
-    },
-  ];
-  for (const outcome of outcomes) {
-    const probe = host("1", outcome);
-    expect(await callApprovalHelper(probe.value, "wait", { id: "x" })).toBeNull();
-    expect(probe.logs).toHaveLength(1);
-  }
-});
-
-/** What the Claude Code engine cannot load: any non-relative import (static, side-effect, re-export or dynamic), `require`, `process`. */
 function engineForbidden(code: string): string[] {
   const found: string[] = [];
   const specifiers = [
@@ -438,12 +130,6 @@ function engineForbidden(code: string): string[] {
   if (/\brequire\s*\(/.test(code)) found.push("require(");
   if (/(?<!\$\.)\bprocess\b(?!\s*:)/.test(code)) found.push("process.");
   return found;
-}
-
-async function bundle(entry: string): Promise<string> {
-  const built = await Bun.build({ entrypoints: [join(HOOKS, entry)], target: "node" });
-  expect(built.success, `${entry} bundles`).toBe(true);
-  return await built.outputs[0]!.text();
 }
 
 test("the engine-loading guard flags every way to reach a host module", () => {
@@ -558,7 +244,7 @@ test("helper refusals come back as ok:false, never as a verdict", async () => {
   expect((await runApprovalClient("wait", '{"id":"a"}', cfg, "", unreachable)).ok).toBe(false);
 });
 
-test("add asks for the hook route and a guarded row; wait stays under the engine's per-call ceiling", () => {
+test("add asks for the hook route and a guarded row; wait timeout is clamped and its HTTP deadline stays under 30 s", () => {
   const cred = generateCredential();
   const cfg = { sessionRef: "tile-1", publicKey: cred.publicKey, origin: {} } as SessionApprovalCredential;
 
@@ -567,11 +253,11 @@ test("add asks for the hook route and a guarded row; wait stays under the engine
 
   const wait = buildSignedRequest("wait", { id: "a", timeout_sec: 120 }, cfg, "");
   expect(wait).toMatchObject({ payload: { timeout_sec: APPROVAL_WAIT_MAX_SEC } });
-  expect((wait as { timeoutMs: number }).timeoutMs, "the HTTP wait ends before the module's 30 s process timeout").toBeLessThan(30_000);
+  expect((wait as { timeoutMs: number }).timeoutMs, "the HTTP wait ends before 30 s").toBeLessThan(30_000);
   expect(buildSignedRequest("wait", { id: "a", timeout_sec: Number.NaN }, cfg, "")).toMatchObject({ payload: { timeout_sec: APPROVAL_WAIT_MAX_SEC } });
 });
 
-test("withdraw posts a session-signed request for the module's own id", async () => {
+test("withdraw posts a session-signed request carrying the producer secret", async () => {
   const cred = generateCredential();
   const cfg: SessionApprovalCredential = {
     brokerUrl: "http://broker.test",

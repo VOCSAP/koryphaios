@@ -1,8 +1,3 @@
-// Signing helper for the Claude Code module: the engine has no node:crypto, so
-// the module spawns this bun script (`add|wait|withdraw`, request JSON on
-// stdin) and never reads the credential itself. One JSON line on stdout,
-// `{ ok: true, ... }` or `{ ok: false, error }`, exit 0 either way.
-
 import { buildAuthProof } from "../../shared/approval.ts";
 import {
   APPROVAL_FILE_ENV,
@@ -14,7 +9,6 @@ export type ApprovalClientOp = "add" | "wait" | "withdraw";
 
 export type ApprovalClientOutput = { ok: true; [field: string]: unknown } | { ok: false; error: string };
 
-/** With REQUEST_SLACK_MS, one wait ends before the module's 30 s timeout on the helper process. */
 export const APPROVAL_WAIT_MAX_SEC = 25;
 
 const REQUEST_SLACK_MS = 2_000;
@@ -136,7 +130,8 @@ async function signAndPost(
   request: unknown,
   cfg: SessionApprovalCredential,
   tileRef: string,
-  fetchImpl: Fetch
+  fetchImpl: Fetch,
+  budgetSignal?: AbortSignal
 ): Promise<ApprovalClientOutput> {
   if (!request || typeof request !== "object" || Array.isArray(request)) {
     return { ok: false, error: "request is not an object" };
@@ -157,7 +152,7 @@ async function signAndPost(
       method: "POST",
       headers,
       body: JSON.stringify({ ...built.payload, auth }),
-      signal: AbortSignal.timeout(built.timeoutMs),
+      signal: budgetSignal ? AbortSignal.any([AbortSignal.timeout(built.timeoutMs), budgetSignal]) : AbortSignal.timeout(built.timeoutMs),
     });
   } catch (err) {
     return { ok: false, error: `broker unreachable: ${errorText(err)}` };
@@ -172,7 +167,8 @@ export async function runApprovalClient(
   rawRequest: string,
   cfg: SessionApprovalCredential | null,
   tileRef: string,
-  fetchImpl: Fetch = fetch
+  fetchImpl: Fetch = fetch,
+  budgetSignal?: AbortSignal
 ): Promise<ApprovalClientOutput> {
   if (!cfg) return { ok: false, error: "no approval credential" };
   let request: unknown;
@@ -182,7 +178,7 @@ export async function runApprovalClient(
     return { ok: false, error: "request is not JSON" };
   }
   try {
-    return await signAndPost(op, request, cfg, tileRef, fetchImpl);
+    return await signAndPost(op, request, cfg, tileRef, fetchImpl, budgetSignal);
   } catch (err) {
     return { ok: false, error: `helper failed: ${errorText(err)}` };
   }

@@ -1,5 +1,5 @@
 import { test, expect, describe, afterAll } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { startBroker, stopBroker, post, approvalListBody, type TestBroker } from "./_helper.ts";
@@ -13,9 +13,13 @@ import type { Approval } from "../shared/types.ts";
 import {
   buildApprovalRequest,
   classifyPayload,
+  hasUnsafePermissionRepresentation,
   loadConfig,
   parseHookPayload,
+  PERMISSION_BUDGET_MS,
+  servePermission,
   summarizeToolInput,
+  WITHDRAW_GRACE_SEC,
   type ApprovalHookConfig,
 } from "../desktop/hooks/approval-hook.ts";
 
@@ -64,16 +68,6 @@ describe("event classification", () => {
       classifyPayload({ hook_event_name: "Notification", notification_type: "idle_prompt" })
     ).toBe("skip");
 
-    // The SHAPE, not just the two known values. classifyPayload is written as
-    // an ALLOW-LIST of one type; a deny-list of the two names we happen to
-    // know today would behave identically on every input this CLI version can
-    // produce, and would then map any type a FUTURE version adds onto
-    // "question" -- silently, with no error and no red test. Measured on this
-    // lot's own mutation review: degrading the allow-list back into a
-    // deny-list was caught by exactly ONE pre-existing assertion, and only
-    // because it happened to name a real type ("auth_success"). That is an
-    // incidental literal, not a guarantee. This unknown type is the guarantee:
-    // it can only stay green while the code decides by inclusion.
     expect(
       classifyPayload({
         hook_event_name: "Notification",
@@ -145,6 +139,386 @@ describe("config gate", () => {
     expect(cfg?.blockSec).toBe(900);
     expect(cfg?.sessionRef).toBe("");
   });
+});
+
+test("a refused withdraw reads one late valid verdict without the expired budget", async () => {
+  const calls: Array<{ op: string; request: Record<string, unknown>; signal: AbortSignal | undefined }> = [];
+  const decisions: string[] = [];
+  const cfg = {
+    brokerUrl: "http://broker.test",
+    brokerToken: null,
+    operatorId: "op",
+    tokenId: "tok",
+    sessionRef: "window-1",
+    privateKey: "private",
+    publicKey: "public",
+    osUserHash: "",
+    blockSec: 900,
+    origin: {},
+  } satisfies ApprovalHookConfig;
+  const runClient = async (
+    op: string,
+    rawRequest: string,
+    _cfg: ApprovalHookConfig | null,
+    _tileRef: string,
+    _fetch?: (url: string, init: RequestInit) => Promise<Response>,
+    signal?: AbortSignal
+  ) => {
+    const request = JSON.parse(rawRequest) as Record<string, unknown>;
+    calls.push({ op, request, signal });
+    if (op === "add") return { ok: true as const, id: "approval-1", producer_secret: "secret-1" };
+    if (op === "withdraw") return { ok: false as const, error: "HTTP 409: already answered" };
+    return {
+      ok: true as const,
+      approval: { id: "approval-1", reply_route: "hook", status: "answered", answer_kind: "allow" },
+    };
+  };
+
+  await servePermission(
+    cfg,
+    { kind: "permission", title: "Bash", question: "q", options: ["Allow", "Deny"] },
+    "tile-1",
+    { budgetMs: 0, runClient, writeDecision: (decision) => decisions.push(decision) }
+  );
+
+  expect(calls.map((call) => call.op)).toEqual(["add", "withdraw", "wait"]);
+  expect(calls[0]?.signal).toBeUndefined();
+  expect(calls[1]?.signal).toBeUndefined();
+  expect(calls[2]).toMatchObject({
+    request: { id: "approval-1", producer_secret: "secret-1", timeout_sec: 20 },
+    signal: undefined,
+  });
+  expect(decisions).toEqual(["allow"]);
+});
+
+test("a late read ignores verdicts for a different id, route or status", async () => {
+  const invalidApprovals = [
+    { id: "another", reply_route: "hook", status: "answered", answer_kind: "allow" },
+    { id: "approval-1", reply_route: "pty", status: "answered", answer_kind: "allow" },
+    { id: "approval-1", reply_route: "hook", status: "abandoned", answer_kind: "allow" },
+  ];
+  for (const approval of invalidApprovals) {
+    const decisions: string[] = [];
+    const cfg = {
+      brokerUrl: "http://broker.test",
+      brokerToken: null,
+      operatorId: "op",
+      tokenId: "tok",
+      sessionRef: "window-1",
+      privateKey: "private",
+      publicKey: "public",
+      osUserHash: "",
+      blockSec: 900,
+      origin: {},
+    } satisfies ApprovalHookConfig;
+    const runClient = async (op: string) => {
+      if (op === "add") return { ok: true as const, id: "approval-1", producer_secret: "secret-1" };
+      if (op === "withdraw") return { ok: false as const, error: "HTTP 409: already answered" };
+      return { ok: true as const, approval };
+    };
+
+    await servePermission(
+      cfg,
+      { kind: "permission", title: "Bash", question: "q", options: ["Allow", "Deny"] },
+      "tile-1",
+      { budgetMs: 0, runClient, writeDecision: (decision) => decisions.push(decision) }
+    );
+
+    expect(decisions).toEqual([]);
+  }
+});
+
+async function captureStderr<T>(run: () => Promise<T>): Promise<{ result: T; stderr: string }> {
+  const original = process.stderr.write;
+  let stderr = "";
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    stderr += String(chunk);
+    return true;
+  }) as typeof process.stderr.write;
+  try {
+    return { result: await run(), stderr };
+  } finally {
+    process.stderr.write = original;
+  }
+}
+
+describe("hasUnsafePermissionRepresentation", () => {
+  const safe = { hook_event_name: "PermissionRequest", tool_name: "Bash", cwd: "C:/a", tool_input: { command: "ls" } };
+
+  test("a clean payload is safe", () => {
+    expect(hasUnsafePermissionRepresentation(safe)).toBe(false);
+  });
+
+  test("a non-string cwd or tool name is unsafe", () => {
+    expect(hasUnsafePermissionRepresentation({ ...safe, cwd: ["C:/a"] as never })).toBe(true);
+    expect(hasUnsafePermissionRepresentation({ ...safe, tool_name: ["Bash"] as never })).toBe(true);
+    expect(hasUnsafePermissionRepresentation({ ...safe, cwd: 5 as never })).toBe(true);
+  });
+
+  test("a line break or tab is unsafe in the tool name and the cwd but legitimate in a tool input value", () => {
+    expect(hasUnsafePermissionRepresentation({ ...safe, tool_name: "Bash\nAllow" })).toBe(true);
+    expect(hasUnsafePermissionRepresentation({ ...safe, cwd: "C:/a\tb" })).toBe(true);
+    expect(hasUnsafePermissionRepresentation({ ...safe, tool_input: { command: "a\n\tb" } })).toBe(false);
+  });
+});
+
+test("a non-conflict withdraw failure does not start a late read and is traced", async () => {
+  const calls: string[] = [];
+  const cfg = {
+    brokerUrl: "http://broker.test",
+    brokerToken: null,
+    operatorId: "op",
+    tokenId: "tok",
+    sessionRef: "window-1",
+    privateKey: "private",
+    publicKey: "public",
+    osUserHash: "",
+    blockSec: 900,
+    origin: {},
+  } satisfies ApprovalHookConfig;
+  const runClient = async (op: string) => {
+    calls.push(op);
+    if (op === "add") return { ok: true as const, id: "approval-1", producer_secret: "secret-1" };
+    if (op === "withdraw") return { ok: false as const, error: "broker unreachable" };
+    return { ok: true as const, pending: true };
+  };
+
+  const { stderr } = await captureStderr(() =>
+    servePermission(
+      cfg,
+      { kind: "permission", title: "Bash", question: "q", options: ["Allow", "Deny"] },
+      "tile-1",
+      { budgetMs: 0, runClient, writeDecision: () => {} }
+    )
+  );
+
+  expect(calls).toEqual(["add", "withdraw"]);
+  expect(stderr).toContain("permission withdraw failed: broker unreachable");
+});
+
+test("a failed late read after a conflicting withdraw is traced", async () => {
+  const cfg = {
+    brokerUrl: "http://broker.test",
+    brokerToken: null,
+    operatorId: "op",
+    tokenId: "tok",
+    sessionRef: "window-1",
+    privateKey: "private",
+    publicKey: "public",
+    osUserHash: "",
+    blockSec: 900,
+    origin: {},
+  } satisfies ApprovalHookConfig;
+  const calls: string[] = [];
+  const runClient = async (op: string) => {
+    calls.push(op);
+    if (op === "add") return { ok: true as const, id: "approval-1", producer_secret: "secret-1" };
+    if (op === "withdraw") return { ok: false as const, error: "HTTP 409: already answered" };
+    return { ok: false as const, error: "late read unreachable" };
+  };
+
+  const { stderr } = await captureStderr(() =>
+    servePermission(
+      cfg,
+      { kind: "permission", title: "Bash", question: "q", options: ["Allow", "Deny"] },
+      "tile-1",
+      { budgetMs: 0, runClient, writeDecision: () => {} }
+    )
+  );
+
+  expect(calls).toEqual(["add", "withdraw", "wait"]);
+  expect(stderr).toContain("permission late read failed: late read unreachable");
+});
+
+test("wait fallbacks leave the native permission dialog in control", async () => {
+  const cfg = {
+    brokerUrl: "http://broker.test",
+    brokerToken: null,
+    operatorId: "op",
+    tokenId: "tok",
+    sessionRef: "window-1",
+    privateKey: "private",
+    publicKey: "public",
+    osUserHash: "",
+    blockSec: 900,
+    origin: {},
+  } satisfies ApprovalHookConfig;
+  const fallbacks = [
+    { ok: false as const, error: "broker unreachable" },
+    { ok: true as const, approval: { id: "approval-1", reply_route: "hook", status: "abandoned" } },
+    { ok: true as const, approval: { id: "another", reply_route: "hook", status: "answered", answer_kind: "allow" } },
+    { ok: true as const, approval: { id: "approval-1", reply_route: "pty", status: "answered", answer_kind: "allow" } },
+  ];
+  for (const fallback of fallbacks) {
+    const calls: string[] = [];
+    const decisions: string[] = [];
+    const runClient = async (op: string) => {
+      calls.push(op);
+      if (op === "add") return { ok: true as const, id: "approval-1", producer_secret: "secret-1" };
+      if (op === "withdraw") return { ok: true as const, approval: { id: "approval-1", status: "answered_terminal" } };
+      return fallback;
+    };
+
+    await servePermission(
+      cfg,
+      { kind: "permission", title: "Bash", question: "q", options: ["Allow", "Deny"] },
+      "tile-1",
+      { budgetMs: 1_000, runClient, writeDecision: (decision) => decisions.push(decision) }
+    );
+
+    expect(calls).toEqual(["add", "wait", "withdraw"]);
+    expect(decisions).toEqual([]);
+  }
+});
+
+test("an expired local budget leaves the native permission dialog in control", async () => {
+  const calls: string[] = [];
+  const decisions: string[] = [];
+  const cfg = {
+    brokerUrl: "http://broker.test",
+    brokerToken: null,
+    operatorId: "op",
+    tokenId: "tok",
+    sessionRef: "window-1",
+    privateKey: "private",
+    publicKey: "public",
+    osUserHash: "",
+    blockSec: 900,
+    origin: {},
+  } satisfies ApprovalHookConfig;
+  const runClient = async (op: string) => {
+    calls.push(op);
+    if (op === "add") return { ok: true as const, id: "approval-1", producer_secret: "secret-1" };
+    return { ok: true as const, approval: { id: "approval-1", status: "answered_terminal" } };
+  };
+
+  await servePermission(
+    cfg,
+    { kind: "permission", title: "Bash", question: "q", options: ["Allow", "Deny"] },
+    "tile-1",
+    { budgetMs: 0, runClient, writeDecision: (decision) => decisions.push(decision) }
+  );
+
+  expect(calls).toEqual(["add", "withdraw"]);
+  expect(decisions).toEqual([]);
+});
+
+describe("servePermission fallbacks", () => {
+  const cfg = {
+    brokerUrl: "http://broker.test",
+    brokerToken: null,
+    operatorId: "op",
+    tokenId: "tok",
+    sessionRef: "window-1",
+    privateKey: "private",
+    publicKey: "public",
+    osUserHash: "",
+    blockSec: 900,
+    origin: {},
+  } satisfies ApprovalHookConfig;
+  const request = { kind: "permission", title: "Bash", question: "q", options: ["Allow", "Deny"] };
+
+  for (const [name, added] of [
+    ["an id", { ok: true as const, producer_secret: "secret-1" }],
+    ["a producer secret", { ok: true as const, id: "approval-1" }],
+  ] as const) {
+    test(`an add answer without ${name} starts no wait`, async () => {
+      const calls: string[] = [];
+      const decisions: string[] = [];
+      const runClient = async (op: string) => {
+        calls.push(op);
+        return added;
+      };
+
+      await captureStderr(() =>
+        servePermission(cfg, request, "tile-1", { budgetMs: 1_000, runClient, writeDecision: (d) => decisions.push(d) })
+      );
+
+      expect(calls).toEqual(["add"]);
+      expect(decisions).toEqual([]);
+    });
+  }
+
+  test("a broker that only answers pending is withdrawn once the budget is spent", async () => {
+    const calls: string[] = [];
+    const decisions: string[] = [];
+    const runClient = async (op: string) => {
+      calls.push(op);
+      if (op === "add") return { ok: true as const, id: "approval-1", producer_secret: "secret-1" };
+      if (op === "withdraw") return { ok: true as const, approval: { id: "approval-1", status: "answered_terminal" } };
+      await Bun.sleep(5);
+      return { ok: true as const, pending: true };
+    };
+
+    await servePermission(cfg, request, "tile-1", {
+      budgetMs: 50,
+      runClient,
+      writeDecision: (d) => decisions.push(d),
+    });
+
+    expect(calls.filter((op) => op === "wait").length).toBeGreaterThan(1);
+    expect(calls.at(-1)).toBe("withdraw");
+    expect(calls.filter((op) => op === "withdraw")).toHaveLength(1);
+    expect(decisions).toEqual([]);
+  });
+
+  test("an exception during the wait is traced and the delivered row is withdrawn", async () => {
+    const calls: string[] = [];
+    const decisions: string[] = [];
+    const runClient = async (op: string) => {
+      calls.push(op);
+      if (op === "add") return { ok: true as const, id: "approval-1", producer_secret: "secret-1" };
+      if (op === "wait") throw new Error("wait exploded");
+      return { ok: true as const, approval: { id: "approval-1", status: "answered_terminal" } };
+    };
+
+    const { stderr } = await captureStderr(() =>
+      servePermission(cfg, request, "tile-1", { budgetMs: 1_000, runClient, writeDecision: (d) => decisions.push(d) })
+    );
+
+    expect(calls).toEqual(["add", "wait", "withdraw"]);
+    expect(decisions).toEqual([]);
+    expect(stderr).toContain("wait exploded");
+  });
+
+  test("an exception during the add is traced and nothing is withdrawn", async () => {
+    const calls: string[] = [];
+    const runClient = async (op: string) => {
+      calls.push(op);
+      throw new Error("add exploded");
+    };
+
+    const { stderr } = await captureStderr(() =>
+      servePermission(cfg, request, "tile-1", { budgetMs: 1_000, runClient, writeDecision: () => {} })
+    );
+
+    expect(calls).toEqual(["add"]);
+    expect(stderr).toContain("add exploded");
+  });
+
+  test("a failing withdraw after an exception is traced too", async () => {
+    const runClient = async (op: string) => {
+      if (op === "add") return { ok: true as const, id: "approval-1", producer_secret: "secret-1" };
+      throw new Error(`${op} exploded`);
+    };
+
+    const { stderr } = await captureStderr(() =>
+      servePermission(cfg, request, "tile-1", { budgetMs: 1_000, runClient, writeDecision: () => {} })
+    );
+
+    expect(stderr).toContain("withdraw exploded");
+  });
+});
+
+test("PermissionRequest outlives the blocking budget, the withdraw and the late read while Notification stays short", () => {
+  const hooks = JSON.parse(
+    readFileSync(join(import.meta.dir, "..", "desktop", "deck-plugin", "hooks", "hooks.json"), "utf8")
+  ) as { hooks: Record<string, Array<{ hooks: Array<{ timeout: number }> }>> };
+
+  const WITHDRAW_AND_MARGIN_SEC = 30;
+  const needSec = PERMISSION_BUDGET_MS / 1000 + WITHDRAW_GRACE_SEC + WITHDRAW_AND_MARGIN_SEC;
+  expect(hooks.hooks.PermissionRequest?.[0]?.hooks[0]?.timeout ?? 0).toBeGreaterThan(needSec);
+  expect(hooks.hooks.Notification?.[0]?.hooks[0]?.timeout).toBe(20);
 });
 
 describe("approval request shaping", () => {
@@ -292,7 +666,7 @@ describe("hook subprocess", () => {
     credFile: string | null,
     payload: unknown,
     tileRef?: string
-  ): ReturnType<typeof Bun.spawn> {
+  ): Bun.Subprocess<"pipe", "pipe", "pipe"> {
     const env: Record<string, string> = { ...process.env } as Record<string, string>;
     if (credFile) env.CLAUDE_PEERS_APPROVAL_FILE = credFile;
     else delete env.CLAUDE_PEERS_APPROVAL_FILE;
@@ -300,7 +674,9 @@ describe("hook subprocess", () => {
     else delete env.CLAUDE_PEERS_DESK_SESSION;
     const proc = Bun.spawn(["bun", "desktop/hooks/approval-hook.ts"], {
       env,
-      stdio: ["pipe", "pipe", "pipe"],
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe",
       cwd: process.cwd(),
     });
     proc.stdin.write(JSON.stringify(payload));
@@ -308,17 +684,21 @@ describe("hook subprocess", () => {
     return proc;
   }
 
+  async function listApprovals(
+    b: TestBroker,
+    op: { privateKey: string; publicKey: string; id: string }
+  ): Promise<Approval[]> {
+    const body = approvalListBody("koryphaios", { public_key: op.publicKey });
+    const auth = buildAuthProof(op.privateKey, body, { kind: "operator", operator_id: op.id });
+    return (await post<{ approvals: Approval[] }>(`${b.url}/approval/list`, { ...body, auth })).body.approvals;
+  }
+
   async function firstApproval(
     b: TestBroker,
     op: { privateKey: string; publicKey: string; id: string }
   ): Promise<Approval | null> {
     for (let i = 0; i < 60; i++) {
-      // "koryphaios" matches the origin.project_key setup() writes into the
-      // session credential the hook raises approvals with (card 4df14b5b).
-      const body = approvalListBody("koryphaios", { public_key: op.publicKey });
-      const auth = buildAuthProof(op.privateKey, body, { kind: "operator", operator_id: op.id });
-      const res = await post<{ approvals: Approval[] }>(`${b.url}/approval/list`, { ...body, auth });
-      const found = res.body.approvals?.[0];
+      const found = (await listApprovals(b, op))[0];
       if (found) return found;
       await Bun.sleep(100);
     }
@@ -332,9 +712,74 @@ describe("hook subprocess", () => {
     expect(out.trim()).toBe("");
   });
 
-  test("a permission request is registered and the hook returns IMMEDIATELY", async () => {
+  for (const toolName of ["AskUserQuestion", "ExitPlanMode"]) {
+    test(`${toolName} leaves its native dialog untouched`, async () => {
+      const { b, credFile, op } = await setup();
+      const proc = runHook(credFile, { hook_event_name: "PermissionRequest", tool_name: toolName });
+      try {
+        await Bun.sleep(300);
+        expect(await listApprovals(b, op)).toHaveLength(0);
+        expect(await new Response(proc.stdout).text()).toBe("");
+        expect(await proc.exited).toBe(0);
+      } finally {
+        proc.kill();
+        await proc.exited;
+      }
+    }, 30_000);
+  }
+
+  const hostilePermissionPayloads: Array<[string, Record<string, unknown>]> = [
+    ["a bidi character in tool input", { hook_event_name: "PermissionRequest", tool_name: "Bash", tool_input: { command: `echo ${String.fromCodePoint(0x202e)}` } }],
+    ["a control character in the command", { hook_event_name: "PermissionRequest", tool_name: "Bash", tool_input: { command: `echo ${String.fromCharCode(7)}` } }],
+    ["a control character in nested input", { hook_event_name: "PermissionRequest", tool_name: "Bash", tool_input: { args: [{ value: String.fromCharCode(0x1f) }] } }],
+    ["a format character after a visible cut", { hook_event_name: "PermissionRequest", tool_name: "Bash", tool_input: { command: `${"x".repeat(4_100)}${String.fromCodePoint(0x2060)}` } }],
+    ["a format character in cwd", { hook_event_name: "PermissionRequest", tool_name: "Bash", cwd: `C:/work/${String.fromCodePoint(0x2060)}repo` }],
+    ["a bidi character in the tool name", { hook_event_name: "PermissionRequest", tool_name: `Ba${String.fromCodePoint(0x202e)}sh` }],
+    ["a line separator in a tool input value", { hook_event_name: "PermissionRequest", tool_name: "Bash", tool_input: { command: "echo \u2028x" } }],
+    ["a paragraph separator in a tool input value", { hook_event_name: "PermissionRequest", tool_name: "Bash", tool_input: { command: "echo \u2029x" } }],
+    ["a bidi character in a tool input key", { hook_event_name: "PermissionRequest", tool_name: "Bash", tool_input: { "k\u202ey": "v" } }],
+    ["a bell in cwd", { hook_event_name: "PermissionRequest", tool_name: "Bash", cwd: "C:/work\u0007repo" }],
+    ["a tab in cwd", { hook_event_name: "PermissionRequest", tool_name: "Bash", cwd: "C:/work\trepo" }],
+    ["a line break in cwd", { hook_event_name: "PermissionRequest", tool_name: "Bash", cwd: "C:/work\nAllow every command" }],
+    ["a line break in the tool name", { hook_event_name: "PermissionRequest", tool_name: "Bash\nAllow everything" }],
+    ["a non-string cwd", { hook_event_name: "PermissionRequest", tool_name: "Bash", cwd: 5 }],
+    ["a non-string tool name", { hook_event_name: "PermissionRequest", tool_name: { name: "Bash" } }],
+  ];
+  for (const [name, payload] of hostilePermissionPayloads) {
+    test(`${name} leaves the native permission dialog untouched`, async () => {
+      const { b, credFile, op } = await setup();
+      const proc = runHook(credFile, payload);
+      try {
+        await Bun.sleep(300);
+        expect(await listApprovals(b, op)).toHaveLength(0);
+        expect(await new Response(proc.stdout).text()).toBe("");
+        expect(await proc.exited).toBe(0);
+      } finally {
+        proc.kill();
+        await proc.exited;
+      }
+    }, 30_000);
+  }
+
+  test("a multiline tab-indented command is still served", async () => {
     const { b, credFile, op } = await setup();
-    const started = Date.now();
+    const proc = runHook(credFile, {
+      hook_event_name: "PermissionRequest",
+      tool_name: "Bash",
+      tool_input: { command: "a\n\tb" },
+    });
+    try {
+      const approval = await firstApproval(b, op);
+      expect(approval?.kind).toBe("permission");
+      expect(approval?.question).toContain("Input:");
+    } finally {
+      proc.kill();
+      await proc.exited;
+    }
+  }, 30_000);
+
+  test("a permission request waits for an operator verdict and emits its allow result", async () => {
+    const { b, credFile, op } = await setup();
     const proc = runHook(
       credFile,
       {
@@ -346,23 +791,81 @@ describe("hook subprocess", () => {
       "tile-42"
     );
 
-    const out = await new Response(proc.stdout).text();
-    expect(await proc.exited).toBe(0);
-    // It does not hold the session: Claude Code keeps its own dialog up and
-    // waits, exactly as it would without this feature.
-    expect(Date.now() - started).toBeLessThan(20_000);
-    // And it emits NO decision, ever.
-    expect(out.trim()).toBe("");
-
     const approval = await firstApproval(b, op);
     expect(approval).not.toBeNull();
     expect(approval?.kind).toBe("permission");
     expect(approval?.title).toBe("Bash: rm -rf build");
     expect(approval?.status).toBe("pending");
-    // Authenticated window handle vs untrusted routing hint.
     expect(approval?.origin.session_ref).toBe("window-1");
     expect(approval?.origin.tile_ref).toBe("tile-42");
+
+    const claim = { id: approval?.id, via: "deck", answer_kind: "allow", project_key: "koryphaios" };
+    const auth = buildAuthProof(op.privateKey, claim, { kind: "operator", operator_id: op.id });
+    const claimed = await post<{ error?: string }>(`${b.url}/approval/claim`, { ...claim, auth });
+    expect(claimed.status, claimed.body.error).toBe(200);
+
+    const out = await new Response(proc.stdout).text();
+    expect(await proc.exited).toBe(0);
+    expect(JSON.parse(out)).toEqual({
+      hookSpecificOutput: {
+        hookEventName: "PermissionRequest",
+        decision: { behavior: "allow" },
+      },
+    });
   }, 30_000);
+
+  test("a deny verdict emits the fixed hook message instead of operator text", async () => {
+    const { b, credFile, op } = await setup();
+    const proc = runHook(credFile, {
+      hook_event_name: "PermissionRequest",
+      tool_name: "Bash",
+      tool_input: { command: "rm -rf build" },
+    });
+    const approval = await firstApproval(b, op);
+    const claim = {
+      id: approval?.id,
+      via: "deck",
+      answer_kind: "deny",
+      answer_text: "operator-supplied text must not reach Claude Code",
+      project_key: "koryphaios",
+    };
+    const auth = buildAuthProof(op.privateKey, claim, { kind: "operator", operator_id: op.id });
+    expect((await post(`${b.url}/approval/claim`, { ...claim, auth })).status).toBe(200);
+
+    const out = await new Response(proc.stdout).text();
+    expect(await proc.exited).toBe(0);
+    expect(JSON.parse(out)).toEqual({
+      hookSpecificOutput: {
+        hookEventName: "PermissionRequest",
+        decision: { behavior: "deny", message: "Denied by the operator from Koryphaios" },
+      },
+    });
+    expect(out).not.toContain("operator-supplied");
+  }, 30_000);
+
+  test("a terminal handback leaves the native dialog in control without stdout", async () => {
+    const { b, credFile, op } = await setup();
+    const proc = runHook(credFile, { hook_event_name: "PermissionRequest", tool_name: "Bash" });
+    const approval = await firstApproval(b, op);
+    const handback = { id: approval?.id, via: "deck", handback: true, project_key: "koryphaios" };
+    const auth = buildAuthProof(op.privateKey, handback, { kind: "operator", operator_id: op.id });
+    expect((await post(`${b.url}/approval/claim`, { ...handback, auth })).status).toBe(200);
+
+    const out = await new Response(proc.stdout).text();
+    expect(await proc.exited).toBe(0);
+    expect(out).toBe("");
+  }, 30_000);
+
+  test("a permission delivery failure leaves the native dialog in control without stdout", async () => {
+    const { credFile } = await setup();
+    const cfg = JSON.parse(readFileSync(credFile, "utf8")) as Record<string, unknown>;
+    writeFileSync(credFile, JSON.stringify({ ...cfg, brokerUrl: "http://127.0.0.1:0" }));
+    const proc = runHook(credFile, { hook_event_name: "PermissionRequest", tool_name: "Bash" });
+
+    const out = await new Response(proc.stdout).text();
+    expect(await proc.exited).toBe(0);
+    expect(out).toBe("");
+  });
 
   test("an open-question notification is registered too", async () => {
     const { b, credFile, op } = await setup();

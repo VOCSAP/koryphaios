@@ -1,14 +1,3 @@
-// Fire-and-forget: posts the approval and exits immediately rather than
-// blocking; Claude Code already waits on its own dialog until the Deck later
-// types the answer into the tile.
-// Wired only on PermissionRequest and Notification's agent_needs_input —
-// permission_prompt is skipped (already covered) and idle_prompt is
-// deliberately excluded, since it fires once no dialog is on screen.
-// Carries a restricted session credential (read from a chmod-600 file, never
-// argv/environ) that can only add for this window, never settle.
-// Fails silent: any error (no credential, broker down, malformed payload) exits
-// 0 and leaves the session waiting on its dialog as if the hook were absent.
-
 import { APPROVAL_QUESTION_MAX, buildAuthProof, capVisibly, stripControl } from "../../shared/approval.ts";
 import {
   APPROVAL_FILE_ENV,
@@ -18,18 +7,22 @@ import {
   type SessionApprovalCredential,
 } from "../../shared/approval-client.ts";
 
+import { runApprovalClient } from "./approval-client.ts";
+import { verdictOf } from "./approval-verdict.ts";
 import { TITLE_DETAIL_MAX, summarizeToolInput } from "./tool-summary.ts";
 
 export { APPROVAL_FILE_ENV, APPROVAL_HOOK_BLOCK_SEC_DEFAULT, TITLE_DETAIL_MAX, summarizeToolInput };
 
-/** Ceiling on the single POST the hook makes. It never waits for an answer. */
 const POST_TIMEOUT_SEC = 15;
-
-/** Per-tile handle the Deck injects into every session it spawns. */
+export const PERMISSION_BUDGET_MS = 30 * 60_000;
+const PERMISSION_WAIT_SEC = 25;
+export const WITHDRAW_GRACE_SEC = 20;
+const DENY_MESSAGE = "Denied by the operator from Koryphaios";
 const DESK_SESSION_ENV = "CLAUDE_PEERS_DESK_SESSION";
+const EXCLUDED_PERMISSION_TOOLS = new Set(["AskUserQuestion", "ExitPlanMode"]);
+const FORMAT_OR_SEPARATOR = /[\p{Cf}\p{Zl}\p{Zp}]/u;
+const CONTROL = /\p{Cc}/u;
 
-/** The on-disk shape lives in shared/approval-client.ts so the MCP tool and
- * this hook can never drift apart. */
 export type ApprovalHookConfig = SessionApprovalCredential;
 
 export interface HookPayload {
@@ -43,37 +36,56 @@ export interface HookPayload {
   message?: string;
 }
 
-// --- Pure helpers (unit-tested without a broker or Claude Code) ---
+function errorText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
 
-/** Parse the stdin payload; malformed input yields an empty payload, never a throw. */
+function trace(message: string, err: unknown): void {
+  process.stderr.write(`Kory approval hook: ${message}: ${errorText(err)}\n`);
+}
+
 export function parseHookPayload(raw: string): HookPayload {
   try {
     const parsed = JSON.parse(raw || "{}");
     return parsed && typeof parsed === "object" ? (parsed as HookPayload) : {};
-  } catch {
+  } catch (err) {
+    trace("invalid hook payload", err);
     return {};
   }
 }
 
-/**
- * What KIND of approval this payload deserves — not whether to wait, since the
- * hook never waits. `skip` keeps one dialog from raising two notifications.
- */
 export function classifyPayload(p: HookPayload): "permission" | "question" | "skip" {
   if (p.hook_event_name === "PermissionRequest") return "permission";
   if (p.hook_event_name === "Notification") {
     const t = p.notification_type ?? "";
-    // ALLOW-LIST of exactly one type, never a deny-list (card 47baf25a): every
-    // other notification_type -- including the ones this CLI version does not
-    // emit yet -- must fall through to `skip`, because the cost of the wrong
-    // answer is asymmetric. A missed question is one entry the operator raises
-    // by hand; a spurious one is an inbox nobody reads any more.
     return t === "agent_needs_input" ? "question" : "skip";
   }
   return "skip";
 }
 
-/** Build the /approval/add body for a payload (without auth). */
+function hasUnsafeText(value: string, allowLayout: boolean): boolean {
+  for (const character of value) {
+    if (FORMAT_OR_SEPARATOR.test(character)) return true;
+    if (CONTROL.test(character) && !(allowLayout && (character === "\n" || character === "\t"))) return true;
+  }
+  return false;
+}
+
+// Only tool_input values may span lines: a multiline command is legitimate, a multiline name or path is a forgery.
+function hasUnsafeValue(value: unknown): boolean {
+  if (typeof value === "string") return hasUnsafeText(value, true);
+  if (Array.isArray(value)) return value.some(hasUnsafeValue);
+  if (!value || typeof value !== "object") return false;
+  return Object.entries(value).some(([key, nested]) => hasUnsafeText(key, false) || hasUnsafeValue(nested));
+}
+
+export function hasUnsafePermissionRepresentation(payload: HookPayload): boolean {
+  const { cwd, tool_name: toolName } = payload;
+  if (cwd !== undefined && typeof cwd !== "string") return true;
+  if (toolName !== undefined && typeof toolName !== "string") return true;
+  return hasUnsafeText(cwd ?? "", false) || hasUnsafeText(toolName ?? "", false) || hasUnsafeValue(payload.tool_input);
+}
+
 export function buildApprovalRequest(
   p: HookPayload,
   cfg: ApprovalHookConfig,
@@ -103,8 +115,7 @@ export function buildApprovalRequest(
     question,
     options: blocking ? ["Allow", "Deny"] : [],
     session_ref: cfg.sessionRef,
-    // Untrusted routing hint: which tile the Deck should answer into. The
-    // credential authenticates the WINDOW, not this — the Deck re-validates it.
+    // The credential authenticates the window, not this untrusted routing hint.
     tile_ref: tileRef,
     origin: {
       host: cfg.origin?.host ?? "",
@@ -120,23 +131,17 @@ export function buildApprovalRequest(
 function safeJson(value: unknown): string {
   try {
     return stripControl(JSON.stringify(value) ?? "", { keepNewlines: true });
-  } catch {
+  } catch (err) {
+    trace("unserializable tool input", err);
     return "";
   }
 }
 
-/** Read + shape the credential file. Returns null when the feature is off. */
 export function loadConfig(path: string | undefined, read?: FileReader): ApprovalHookConfig | null {
   return loadApprovalCredential(path, read);
 }
 
-// --- I/O ---
-
-/** One signed POST. Returns false on any failure; the caller just gives up. */
-async function postApproval(
-  cfg: ApprovalHookConfig,
-  payload: Record<string, unknown>
-): Promise<boolean> {
+async function postQuestion(cfg: ApprovalHookConfig, payload: Record<string, unknown>): Promise<void> {
   const auth = buildAuthProof(cfg.privateKey, payload, {
     kind: "session",
     operator_id: cfg.operatorId,
@@ -151,11 +156,118 @@ async function postApproval(
       body: JSON.stringify({ ...payload, auth }),
       signal: AbortSignal.timeout(POST_TIMEOUT_SEC * 1000),
     });
-    return res.ok;
-  } catch {
-    // Broker unreachable: the session is unaffected, it just waits on screen.
-    return false;
+    if (!res.ok) trace("question delivery failed", `HTTP ${res.status}`);
+  } catch (err) {
+    trace("question delivery failed", err);
   }
+}
+
+function text(value: unknown): string {
+  return typeof value === "string" ? value : "";
+}
+
+function writePermissionDecision(behavior: "allow" | "deny"): void {
+  const decision = behavior === "deny" ? { behavior, message: DENY_MESSAGE } : { behavior };
+  process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: "PermissionRequest", decision } }));
+}
+
+export interface ServePermissionOptions {
+  budgetMs?: number;
+  runClient?: typeof runApprovalClient;
+  writeDecision?: typeof writePermissionDecision;
+}
+
+export async function servePermission(
+  cfg: ApprovalHookConfig,
+  payload: Record<string, unknown>,
+  tileRef: string,
+  options: ServePermissionOptions = {}
+): Promise<void> {
+  const runClient = options.runClient ?? runApprovalClient;
+  let delivered: { id: string; producerSecret: string } | null = null;
+  try {
+    await servePermissionRows(cfg, payload, tileRef, options, (row) => (delivered = row));
+  } catch (err) {
+    trace("permission flow failed", err);
+    if (!delivered) return;
+    const { id, producerSecret } = delivered as { id: string; producerSecret: string };
+    try {
+      await runClient("withdraw", JSON.stringify({ id, producer_secret: producerSecret }), cfg, tileRef, fetch);
+    } catch (withdrawErr) {
+      trace("permission withdraw failed", withdrawErr);
+    }
+  }
+}
+
+async function servePermissionRows(
+  cfg: ApprovalHookConfig,
+  payload: Record<string, unknown>,
+  tileRef: string,
+  options: ServePermissionOptions,
+  onDelivered: (row: { id: string; producerSecret: string }) => void
+): Promise<void> {
+  const runClient = options.runClient ?? runApprovalClient;
+  const writeDecision = options.writeDecision ?? writePermissionDecision;
+  const added = await runClient("add", JSON.stringify(payload), cfg, tileRef, fetch);
+  if (!added.ok) {
+    trace("permission delivery failed", added.error);
+    return;
+  }
+  const id = text(added.id);
+  const producerSecret = text(added.producer_secret);
+  if (!id || !producerSecret) {
+    trace("permission delivery failed", "invalid broker response");
+    return;
+  }
+  onDelivered({ id, producerSecret });
+
+  const budgetMs = options.budgetMs ?? PERMISSION_BUDGET_MS;
+  const budget = AbortSignal.timeout(budgetMs);
+  const deadline = performance.now() + budgetMs;
+  while (!budget.aborted && performance.now() < deadline) {
+    const remainingMs = deadline - performance.now();
+    const timeoutSec = Math.max(1, Math.min(PERMISSION_WAIT_SEC, Math.ceil(remainingMs / 1000)));
+    const output = await runClient(
+      "wait",
+      JSON.stringify({ id, producer_secret: producerSecret, timeout_sec: timeoutSec }),
+      cfg,
+      tileRef,
+      fetch,
+      budget
+    );
+    const verdict = verdictOf(id, output);
+    if (verdict.kind === "allow") {
+      writeDecision("allow");
+      return;
+    }
+    if (verdict.kind === "deny") {
+      writeDecision("deny");
+      return;
+    }
+    if (verdict.kind === "none") {
+      if (!output.ok) trace("permission wait failed", output.error);
+      break;
+    }
+  }
+
+  const withdrawn = await runClient("withdraw", JSON.stringify({ id, producer_secret: producerSecret }), cfg, tileRef, fetch);
+  if (withdrawn.ok) return;
+  if (!withdrawn.error.startsWith("HTTP 409:")) {
+    trace("permission withdraw failed", withdrawn.error);
+    return;
+  }
+
+  const late = await runClient(
+    "wait",
+    JSON.stringify({ id, producer_secret: producerSecret, timeout_sec: WITHDRAW_GRACE_SEC }),
+    cfg,
+    tileRef,
+    fetch
+  );
+  const verdict = verdictOf(id, late);
+  if (verdict.kind === "allow") writeDecision("allow");
+  else if (verdict.kind === "deny") writeDecision("deny");
+  else if (!late.ok) trace("permission late read failed", late.error);
 }
 
 async function readStdin(): Promise<string> {
@@ -166,18 +278,29 @@ async function readStdin(): Promise<string> {
 
 async function main(): Promise<void> {
   const cfg = loadConfig(process.env[APPROVAL_FILE_ENV]);
-  if (!cfg) return; // gate: a non-Deck session is a silent no-op
+  if (!cfg) return;
 
   const payload = parseHookPayload(await readStdin());
-  if (classifyPayload(payload) === "skip") return;
+  const kind = classifyPayload(payload);
+  if (kind === "skip") return;
+  if (
+    kind === "permission" &&
+    (EXCLUDED_PERMISSION_TOOLS.has(payload.tool_name ?? "") || hasUnsafePermissionRepresentation(payload))
+  ) {
+    return;
+  }
 
   const tileRef = (process.env[DESK_SESSION_ENV] ?? "").trim();
-  await postApproval(cfg, buildApprovalRequest(payload, cfg, tileRef));
-  // Deliberately no stdout: the hook emits NO decision, ever. Claude Code keeps
-  // its own dialog up and the Deck applies whatever the operator answers.
+  const request = buildApprovalRequest(payload, cfg, tileRef);
+  if (kind === "permission") {
+    await servePermission(cfg, request, tileRef);
+    return;
+  }
+  await postQuestion(cfg, request);
 }
 
-// Only run when executed directly, so tests can import the pure helpers.
 if (import.meta.main) {
-  void main().finally(() => process.exit(0));
+  main()
+    .catch((err) => trace("hook failed", err))
+    .finally(() => process.exit(0));
 }

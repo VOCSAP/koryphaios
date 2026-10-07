@@ -72,6 +72,38 @@ test("helper add then wait against a real broker: pending at timeout, then the o
   expect(settled.approval).toMatchObject({ id, status: "answered", answer_kind: "allow" });
 });
 
+test("helper combines the hook budget signal with its request timeout", async () => {
+  const cred = generateCredential();
+  const cfg: SessionApprovalCredential = {
+    brokerUrl: "http://broker.invalid",
+    brokerToken: null,
+    operatorId: "operator",
+    tokenId: "token",
+    sessionRef: "tile-1",
+    privateKey: cred.privateKey,
+    publicKey: cred.publicKey,
+    osUserHash: "",
+    blockSec: 900,
+    origin: { host: "bureau", project_key: PROJECT_KEY },
+  };
+  const controller = new AbortController();
+  controller.abort("budget elapsed");
+
+  const output = await runApprovalClient(
+    "wait",
+    JSON.stringify({ id: "approval-1", timeout_sec: 1, producer_secret: "secret" }),
+    cfg,
+    "tile-1",
+    async (_url, init) => {
+      expect(init.signal?.aborted).toBe(true);
+      return new Response(JSON.stringify({ pending: true }));
+    },
+    controller.signal,
+  );
+
+  expect(output).toEqual({ ok: true, pending: true });
+});
+
 test("helper withdraw against a real broker closes the module's own row without a verdict", async () => {
   const b = await startBroker();
   brokers.push(b);

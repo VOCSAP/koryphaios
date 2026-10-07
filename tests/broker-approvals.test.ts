@@ -1402,6 +1402,72 @@ describe("the hook route: a verdict the Claude Code module returns itself", () =
     expect(stamped).toBeLessThanOrEqual(Date.now());
   });
 
+  test("a permission hook row reaches its absolute deadline despite a fresh wait stamp", async () => {
+    const b = await boot();
+    const op = newOperator();
+    const s = await session(b, op, "window-hook");
+    const row = await hook(b, s);
+    const db = new Database(b.dbPath);
+    db.run(
+      "UPDATE pending_approvals SET created_at = ?, last_wait_at = ? WHERE id = ?",
+      [new Date(Date.now() - 30 * 60_000 - 1).toISOString(), new Date().toISOString(), row.id]
+    );
+    db.close();
+
+    const res = await claimAllow(b, op, row.id);
+
+    expect(res.status, res.body.error).toBe(410);
+    expect((await listed(b, op, row.id))?.status).toBe("abandoned");
+  });
+
+  test("the deadline wakes a parked permission waiter with an abandoned approval", async () => {
+    const b = await boot();
+    const op = newOperator();
+    const s = await session(b, op, "window-hook");
+    const row = await hook(b, s);
+    const db = new Database(b.dbPath);
+    db.run(
+      "UPDATE pending_approvals SET created_at = ? WHERE id = ?",
+      [new Date(Date.now() - 30 * 60_000 + 1_500).toISOString(), row.id]
+    );
+    db.close();
+
+    const started = Date.now();
+    const parked = wait(b, s, row.id, 20, row.secret);
+    let stamped = false;
+    while (!stamped && Date.now() - started < 1_000) {
+      const check = new Database(b.dbPath);
+      const found = check.query("SELECT last_wait_at FROM pending_approvals WHERE id = ?").get(row.id) as {
+        last_wait_at: string | null;
+      };
+      check.close();
+      stamped = found.last_wait_at !== null;
+      if (!stamped) await Bun.sleep(25);
+    }
+    expect(stamped).toBe(true);
+
+    const waited = await parked;
+    expect(waited.body.approval?.status).toBe("abandoned");
+    expect(Date.now() - started).toBeGreaterThanOrEqual(1_000);
+    expect(Date.now() - started).toBeLessThan(5_000);
+  }, 10_000);
+
+  test("the absolute permission deadline does not close a hook question", async () => {
+    const b = await boot();
+    const op = newOperator();
+    const s = await session(b, op, "window-hook");
+    const created = await raise(b, s, "window-hook", { kind: "question", title: "Question", question: "Continue?", options: [] });
+    expect(created.status).toBe(200);
+    const db = new Database(b.dbPath);
+    db.run(
+      "UPDATE pending_approvals SET created_at = ?, last_wait_at = ? WHERE id = ?",
+      [new Date(Date.now() - 30 * 60_000 - 1).toISOString(), new Date().toISOString(), created.body.approval.id]
+    );
+    db.close();
+
+    expect((await claimAllow(b, op, created.body.approval.id)).status).toBe(200);
+  });
+
   test("a claim 46 s after the module's last wait is refused, with a reason, and the row is closed", async () => {
     const b = await boot();
     const op = newOperator();
@@ -1573,7 +1639,7 @@ describe("the hook route: a verdict the Claude Code module returns itself", () =
     writeFileSync(
       file,
       `export function register(env) {\n` +
-        `  const { db, approvalWhere, hookProducerGone, rowToApproval, notifyRegistry, log, deliverApprovalAnswer, resolveApprovalWaiters } = env;\n` +
+        `  const { db, approvalWhere, hookProducerGone, hookPermissionDeadlineElapsed, rowToApproval, notifyRegistry, log, deliverApprovalAnswer, resolveApprovalWaiters } = env;\n` +
         `${cut("function abandonIfHookProducerGone(")}\n${cut("function settleApproval(")}\n  return settleApproval;\n}\n`
     );
     const { register } = (await import(pathToFileURL(file).href)) as {
@@ -1586,15 +1652,14 @@ describe("the hook route: a verdict the Claude Code module returns itself", () =
       db,
       approvalWhere: () => ({ sql: "1 = 1", params: [] }),
       hookProducerGone: () => true,
+      hookPermissionDeadlineElapsed: () => false,
       rowToApproval: (r: unknown) => r,
       notifyRegistry: { settle: async () => {} },
       log: { info: () => {}, error: () => {} },
       deliverApprovalAnswer: () => {
         throw new Error("an orphan row must never be delivered");
       },
-      resolveApprovalWaiters: () => {
-        throw new Error("an orphan row has no waiter to wake");
-      },
+      resolveApprovalWaiters: () => {},
     });
 
     const res = settle("orphan", {}, "telegram", "allow", null, "answered");

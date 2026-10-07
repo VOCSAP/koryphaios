@@ -8775,10 +8775,17 @@ const approvalAuth = createApprovalAuth({
 const approvalWaiters = new Map<string, Set<(a: Approval) => void>>();
 
 /**
- * Above the module's per-wait ceiling (under 30 s) plus a respawn of its
- * helper, so a module that is still looping never reads as gone.
+ * Above the hook process's per-wait ceiling (under 30 s) plus a respawn of its
+ * helper, so a hook process that is still looping never reads as gone.
  */
 const HOOK_WAIT_STALE_MS = 45_000;
+const HOOK_PERMISSION_DEADLINE_MS = 30 * 60_000;
+
+function hookPermissionDeadlineElapsed(row: ApprovalRow, now: number): boolean {
+  if (row.kind !== "permission" || row.reply_route !== "hook") return false;
+  const created = Date.parse(row.created_at);
+  return !(Number.isFinite(created) && now - created < HOOK_PERMISSION_DEADLINE_MS);
+}
 
 /**
  * Whether nobody is left to receive a verdict on a 'hook' row: no wait parked
@@ -8788,6 +8795,7 @@ const HOOK_WAIT_STALE_MS = 45_000;
  */
 function hookProducerGone(row: ApprovalRow, now: number = Date.now()): boolean {
   if (row.reply_route !== "hook" || (row.status !== "pending" && row.status !== "expired_notif")) return false;
+  if (hookPermissionDeadlineElapsed(row, now)) return true;
   if (approvalWaiters.has(row.id)) return false;
   const last = Date.parse(row.last_wait_at ?? row.created_at);
   return !(Number.isFinite(last) && now - last < HOOK_WAIT_STALE_MS);
@@ -8808,9 +8816,13 @@ function abandonIfHookProducerGone(row: ApprovalRow, scope: ApprovalScope, now: 
     [now, row.id, ...(where.params as never[])]
   );
   if (closed.changes === 0) return false;
-  log.info(`approval ${row.id}: hook producer stopped waiting, row abandoned`);
   const gone = rowToApproval({ ...row, status: "abandoned", answered_at: now });
-  void notifyRegistry.settle(gone, "the session stopped waiting").catch((e) => log.error("notify: settle failed", e));
+  const reason = hookPermissionDeadlineElapsed(row, Date.parse(now))
+    ? "hook permission deadline elapsed"
+    : "the session stopped waiting";
+  log.info(`approval ${row.id}: ${reason}, row abandoned`);
+  resolveApprovalWaiters(gone);
+  void notifyRegistry.settle(gone, reason).catch((e) => log.error("notify: settle failed", e));
   return true;
 }
 
@@ -9410,6 +9422,13 @@ async function handleApprovalWait(
   // A wrong producer secret reads exactly like an unknown id, so another tile
   // of the same window learns nothing about the row.
   if (!row || sessionLacksProducerSecret(body, row)) return { error: "unknown approval", status: 404 };
+  const abandonedAt = new Date().toISOString();
+  if (
+    hookPermissionDeadlineElapsed(row, Date.parse(abandonedAt)) &&
+    abandonIfHookProducerGone(row, authorized.scope, abandonedAt)
+  ) {
+    return { approval: rowToApproval({ ...row, status: "abandoned", answered_at: abandonedAt }) };
+  }
   const where = approvalWhere(authorized.scope);
   const stampWait = (): void => {
     db.run(`UPDATE pending_approvals SET last_wait_at = ? WHERE id = ? AND ${where.sql}`, [
@@ -9419,12 +9438,17 @@ async function handleApprovalWait(
     ]);
   };
   stampWait();
-  // A hook row's notification expiring says nothing about its module, which
-  // is still waiting: returning at once would only make it poll in a loop.
+  // A hook row's notification expiring says nothing about its hook process,
+  // which is still waiting: returning at once would only make it poll in a loop.
   const parkable = row.status === "pending" || (row.reply_route === "hook" && row.status === "expired_notif");
   if (!parkable) return { approval: rowToApproval(row) };
 
-  const timeoutSec = approvalWaitTimeoutSec(body.timeout_sec, row.reply_route);
+  let timeoutSec = approvalWaitTimeoutSec(body.timeout_sec, row.reply_route);
+  if (row.kind === "permission" && row.reply_route === "hook") {
+    const created = Date.parse(row.created_at);
+    const remainingMs = created + HOOK_PERMISSION_DEADLINE_MS - Date.now();
+    timeoutSec = Math.min(timeoutSec, Math.max(1, Math.ceil(remainingMs / 1000)));
+  }
   if (typeof body.timeout_sec === "number" && timeoutSec < body.timeout_sec) {
     log.info(`approval ${id}: wait capped at ${timeoutSec} s (asked ${body.timeout_sec} s)`);
   }
@@ -9441,8 +9465,8 @@ async function handleApprovalWait(
       }
       clearTimeout(timer);
       // Stamped at the END as well: the staleness window then runs from when
-      // the module was last answered, so the gap before its next wait (helper
-      // respawn included) does not eat into it.
+      // the hook process was last answered, so the gap before its next wait
+      // (helper respawn included) does not eat into it.
       try {
         stampWait();
       } catch (err) {
@@ -9451,7 +9475,15 @@ async function handleApprovalWait(
       resolve(value);
     };
     const onClaim = (approval: Approval): void => settle({ approval });
-    const timer = setTimeout(() => settle({ pending: true }), timeoutSec * 1000);
+    const timer = setTimeout(() => {
+      if (
+        hookPermissionDeadlineElapsed(row, Date.now()) &&
+        abandonIfHookProducerGone(row, authorized.scope, new Date().toISOString())
+      ) {
+        return;
+      }
+      settle({ pending: true });
+    }, timeoutSec * 1000);
     // A long poll must never keep the process alive on its own.
     timer.unref?.();
     let set = approvalWaiters.get(id);
