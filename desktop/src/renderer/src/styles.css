@@ -1754,7 +1754,8 @@ textarea:disabled {
 .field input[type='password'],
 .field textarea,
 .rm-tag-search-input,
-.notif-link-row input {
+.notif-link-row input,
+.aq-other-input {
   font: inherit;
   background: var(--bg);
   color: var(--fg);
@@ -4936,6 +4937,205 @@ body:has(.rm-modal) .rm-conflict-modal {
 
 .inbox-modal-actions {
   margin-top: 12px;
+}
+
+/* A request the Claude Code module waits on (ApprovalAnswerForm). Handing
+   back to the terminal decides nothing, so it sits on the left, away from the
+   verdicts. */
+.approval-actions {
+  align-items: center;
+}
+
+.approval-actions-spacer {
+  flex: 1;
+}
+
+.approval-actions > button {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.aq-progress + .approval-actions {
+  margin-top: 6px;
+}
+
+.approval-handback {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* One question per fieldset; the header is the short tag Claude Code shows on
+   its own menu, so the operator recognises the question from the tile. */
+.aq {
+  border: 0;
+  margin: 12px 0 0;
+  padding: 0;
+  min-width: 0;
+}
+
+.aq + .aq {
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+}
+
+/* The fieldset's <legend>, floated so it stops being drawn on the fieldset's
+   top edge: unfloated it would cut the separator between two questions. */
+.aq-head {
+  float: left;
+  width: 100%;
+  padding: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.aq-head + * {
+  clear: both;
+}
+
+.aq-tag {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--fg-dim);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+
+.aq-q {
+  flex: 1;
+  font-weight: 600;
+  word-break: break-word;
+}
+
+.aq-mode {
+  font-size: 11px;
+  color: var(--fg-dim);
+}
+
+/* Missing, not wrong: amber names what is left to do. */
+.aq-mode.is-missing {
+  color: var(--locked);
+}
+
+.aq-opts {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.aq-opt {
+  display: grid;
+  grid-template-columns: 14px 1fr;
+  column-gap: 8px;
+  align-items: start;
+  padding: 6px 8px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.aq-opt input[type='radio'],
+.aq-opt input[type='checkbox'] {
+  margin-top: 2px;
+}
+
+.aq-opt:hover {
+  background: var(--bg-3);
+}
+
+.aq-opt.is-on {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+}
+
+.aq-opt.is-free {
+  grid-template-columns: 1fr;
+  cursor: default;
+}
+
+.aq-opt.is-free:hover {
+  background: none;
+}
+
+.aq-label {
+  word-break: break-word;
+}
+
+.aq-desc {
+  grid-column: 2;
+  font-size: 11px;
+  color: var(--fg-dim);
+}
+
+.aq-other-input {
+  grid-column: 2;
+  margin-top: 6px;
+  width: 100%;
+  min-width: 0;
+}
+
+.aq-opt.is-free .aq-other-input,
+.aq-opt.is-free .aq-count {
+  grid-column: 1;
+}
+
+.aq-count {
+  grid-column: 2;
+  font-size: 10px;
+  color: var(--fg-dim);
+  text-align: right;
+  margin-top: 2px;
+}
+
+.aq-count.is-full {
+  color: var(--locked);
+}
+
+/* Single question, single choice: the row IS the answer, one click. */
+.aq-pick {
+  display: grid;
+  grid-template-columns: 1fr 13px;
+  column-gap: 8px;
+  align-items: center;
+  width: 100%;
+  text-align: left;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-3);
+  color: var(--fg);
+  font: inherit;
+  cursor: pointer;
+}
+
+.aq-pick:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+}
+
+.aq-pick:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.aq-pick svg {
+  color: var(--fg-dim);
+}
+
+.aq-pick .aq-desc {
+  grid-column: 1;
+}
+
+/* Above the footer, not in it: with the handback on the left, Close and Send
+   on the right, the row has no room left in the 560px modal. Right-aligned so
+   it reads as the state of the Send button below. */
+.aq-progress {
+  margin-top: 10px;
+  text-align: right;
+  font-size: 11px;
+  color: var(--fg-dim);
 }
 
 /* Scoped danger-outline, exactly like .wt-actions .danger and

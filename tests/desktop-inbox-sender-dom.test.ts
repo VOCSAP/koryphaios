@@ -44,10 +44,11 @@ interface FakeApproval {
   question: string;
   created_at: string;
   kind?: "permission" | "question";
-  reply_route?: "channel" | "pty";
+  reply_route?: "channel" | "pty" | "hook";
   mergeable?: boolean;
   absorbed_permission?: boolean;
   options?: string[];
+  questions?: { question: string; header: string; options: { label: string; description: string }[]; multi_select: boolean }[] | null;
 }
 type FakeInboxEntry = { kind: "approval"; approval: FakeApproval };
 
@@ -126,7 +127,9 @@ mock.module("@shared/companion", () => ({
     approvalReply: { channel: "deck-only" },
     approvalDecline: { channel: "deck-only" },
     approvalAck: { channel: "deck-only" },
-    approvalAllow: { channel: "deck-only" }
+    approvalAllow: { channel: "deck-only" },
+    approvalAnswers: { channel: "deck-only" },
+    approvalHandback: { channel: "deck-only" }
   },
   REMOTE_BLOCKED_CHANNELS: new Set<string>()
 }));
@@ -286,6 +289,72 @@ test("a question keeps its producer options as chips and its free-text reply", (
   });
   expect([...container.querySelectorAll(".inbox-option")].map((b) => b.textContent)).toEqual(["A", "B", "C"]);
   expect(container.querySelector(".inbox-modal-reply")).not.toBeNull();
+});
+
+test("the request text is shown once: hidden when the hook form renders the questions, kept otherwise", () => {
+  const openModal = (a: FakeApproval): { text: string | null; fieldsets: number } => {
+    act(() => {
+      root.unmount();
+    });
+    root = createRoot(container);
+    renderPanel(a, []);
+    act(() => {
+      (container.querySelector(".inbox-entry") as HTMLElement).click();
+    });
+    return {
+      text: container.querySelector(".inbox-modal-text")?.textContent ?? null,
+      fieldsets: container.querySelectorAll("fieldset.aq").length
+    };
+  };
+  const asked = "Which database should the migration target?";
+  const questions = [
+    { question: asked, header: "DB", multi_select: false, options: [{ label: "PostgreSQL", description: "" }] }
+  ];
+
+  expect(
+    openModal(approval({ id: "hook-q", kind: "question", reply_route: "hook", question: asked, options: [], questions })),
+    "each fieldset carries its question, so the body would repeat it"
+  ).toEqual({ text: null, fieldsets: 1 });
+  expect(
+    openModal(approval({ id: "hook-p", kind: "permission", reply_route: "hook", question: "rm -rf build", options: [], questions })),
+    "a permission renders no question, its body is the command to judge"
+  ).toEqual({ text: "rm -rf build", fieldsets: 0 });
+  expect(
+    openModal(approval({ id: "chan-q", kind: "question", reply_route: "channel", question: asked, options: [], questions })),
+    "outside the hook route there is no form, so the body is the only place the question shows"
+  ).toEqual({ text: asked, fieldsets: 0 });
+});
+
+test("a hook row offers neither option chips nor a free reply: the module would read them as no verdict", () => {
+  const surfaces = (a: FakeApproval): { chips: boolean; composer: boolean; form: boolean } => {
+    act(() => {
+      root.unmount();
+    });
+    root = createRoot(container);
+    renderPanel(a, []);
+    act(() => {
+      (container.querySelector(".inbox-entry") as HTMLElement).click();
+    });
+    return {
+      chips: container.querySelector(".inbox-modal-options") !== null,
+      composer: container.querySelector(".inbox-modal-reply") !== null,
+      form: container.querySelector(".approval-actions") !== null
+    };
+  };
+  const questions = [{ question: "Which?", header: "", multi_select: false, options: [{ label: "A", description: "" }] }];
+
+  expect(
+    surfaces(approval({ id: "hook-perm", kind: "permission", reply_route: "hook", options: ["Allow", "Deny"] })),
+    "a hook permission is answered by the form's Allow/Deny, never by verdict chips"
+  ).toEqual({ chips: false, composer: false, form: true });
+  expect(
+    surfaces(approval({ id: "hook-ask", kind: "question", reply_route: "hook", options: ["A", "B"], questions })),
+    "a hook question is answered by structured answers, never by chips or a typed reply"
+  ).toEqual({ chips: false, composer: false, form: true });
+  expect(
+    surfaces(approval({ id: "chan-ask", kind: "question", reply_route: "channel", options: ["A", "B"] })),
+    "control: the same question off the hook route keeps its chips and reply"
+  ).toEqual({ chips: true, composer: true, form: false });
 });
 
 test("timestamps use local calendar days and refresh after local midnight", async () => {
