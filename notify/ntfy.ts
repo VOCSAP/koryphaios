@@ -296,6 +296,7 @@ export class NtfyChannel implements NotificationChannel {
       approvalId: inbound.approvalId,
       answerKind: inbound.kind,
       answerText: inbound.text || undefined,
+      optionIndex: inbound.index,
       fromAddress: address,
     };
     const settled = await this.deps.host.onAnswer("ntfy", answer);

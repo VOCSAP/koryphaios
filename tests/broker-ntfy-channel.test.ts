@@ -636,6 +636,67 @@ describe("ntfy enrolment", () => {
     expect([row.status, row.answer_kind], "an allow nobody receives must not be recorded").toEqual(["abandoned", null]);
   }, 60_000);
 
+  test("a tapped option settles a hook question as its answer; text and an out-of-range index settle nothing", async () => {
+    const b = await startBroker();
+    brokers.push(b);
+    const ntfy = startStubNtfy();
+    const op = newOperator();
+    const project = "github.com/vocsap/koryphaios";
+
+    const conn = await signedPost<{ mobile_payload: string }>(b, "/approval/channel-connect", { kind: "ntfy", server: ntfy.url }, op);
+    const payload = decodePairingPayload(conn.body.mobile_payload)!;
+    await ntfy.publishRaw(payload.topic_replies, encodePair(payload.code, "Pixel 8"));
+    await until(async () => {
+      const list = await signedPost<{ channels: Array<Record<string, unknown>> }>(b, "/approval/channel-list", {}, op);
+      return list.body.channels.find((c) => c.kind === "ntfy")!.paired === 1;
+    });
+
+    const added = await signedPost<{ approval: Approval }>(
+      b,
+      "/approval/add",
+      {
+        kind: "question",
+        title: "Colour",
+        question: "Pick a colour",
+        questions: [{ question: "Which colour?", options: [{ label: "Red" }, { label: "Green" }, { label: "Blue" }] }],
+        reply_route: "hook",
+        merge: "never",
+        origin: { host: "bureau", project_key: project },
+      },
+      op
+    );
+    const approvalId = added.body.approval.id;
+    const request = await until(() =>
+      (ntfy.published.get(payload.topic_notif) ?? []).some((m) => String(m.click).includes(approvalId))
+    );
+    expect(request).toBe(true);
+    const published = (ntfy.published.get(payload.topic_notif) ?? []).find((m) => String(m.click).includes(approvalId))!;
+    expect((published.actions as Array<{ label: string }>).map((a) => a.label)).toEqual(["Red", "Green", "Blue"]);
+
+    await ntfy.publishRaw(payload.topic_replies, encodeAnswer(approvalId, "text", "Green"));
+    await ntfy.publishRaw(payload.topic_replies, encodeAnswer(approvalId, "allow"));
+    await ntfy.publishRaw(payload.topic_replies, encodeAnswer(approvalId, "option", "", "", 3));
+    await ntfy.publishRaw(payload.topic_replies, encodePair("no-such-code", "Pixel 8"));
+    const fenced = await until(() =>
+      (ntfy.published.get(payload.topic_notif) ?? []).some((m) => String(m.message).includes("unknown or expired"))
+    );
+    expect(fenced).toBe(true);
+    const pending = await signedPost<{ approvals: Approval[] }>(b, "/approval/list", approvalListBody(project), op);
+    expect(pending.body.approvals.find((a) => a.id === approvalId)?.status, "text, allow and index 3 settle nothing").toBe(
+      "pending"
+    );
+
+    await ntfy.publishRaw(payload.topic_replies, encodeAnswer(approvalId, "option", "", "", 1));
+    const settled = await until(async () => {
+      const list = await signedPost<{ approvals: Approval[] }>(b, "/approval/list", approvalListBody(project), op);
+      return list.body.approvals.find((a) => a.id === approvalId)?.status === "answered";
+    });
+    expect(settled).toBe(true);
+    const list = await signedPost<{ approvals: Approval[] }>(b, "/approval/list", approvalListBody(project), op);
+    const row = list.body.approvals.find((a) => a.id === approvalId)!;
+    expect([row.answered_via, row.answer_kind, row.answers]).toEqual(["ntfy", "answers", { "Which colour?": ["Green"] }]);
+  }, 60_000);
+
   test("answering twice is refused, and the phone is told so (C-1 arbitration)", async () => {
     const b = await startBroker();
     brokers.push(b);

@@ -7,7 +7,16 @@
 // invites it to a private server first, and nothing here works around that.
 
 import type { Approval } from "../shared/types.ts";
-import { ALREADY_HANDLED_NOTICE, answerNotice, decodeCallback, encodeCallback, renderDiscord, renderSettled } from "./format.ts";
+import {
+  ALREADY_HANDLED_NOTICE,
+  answerNotice,
+  chatOptionButtons,
+  decodeCallback,
+  encodeCallback,
+  renderDiscord,
+  renderSettled,
+  truncate,
+} from "./format.ts";
 import type {
   ChannelBinding,
   ChannelHost,
@@ -34,6 +43,25 @@ const INTERACTION_MODAL_SUBMIT = 5;
 const CALLBACK_MESSAGE = 4;
 const CALLBACK_MODAL = 9;
 const CALLBACK_DEFERRED_UPDATE = 6;
+
+/** Discord caps an action row at five buttons and a button label at 80 characters. */
+const BUTTONS_PER_ROW = 5;
+const BUTTON_LABEL_MAX = 80;
+
+/** One button per option, five per row; no row at all when the request takes none. */
+function optionRows(approval: Approval): Array<{ type: 1; components: unknown[] }> {
+  const buttons = (chatOptionButtons(approval) ?? []).map((label, i) => ({
+    type: 2,
+    style: 1,
+    label: truncate(label, BUTTON_LABEL_MAX),
+    custom_id: encodeCallback("option", approval.id, i),
+  }));
+  const rows: Array<{ type: 1; components: unknown[] }> = [];
+  for (let at = 0; at < buttons.length; at += BUTTONS_PER_ROW) {
+    rows.push({ type: 1, components: buttons.slice(at, at + BUTTONS_PER_ROW) });
+  }
+  return rows;
+}
 
 interface GatewayPayload {
   op: number;
@@ -344,6 +372,7 @@ export class DiscordChannel implements NotificationChannel {
         await this.deps.host.onAnswer("discord", {
           approvalId: decoded.approvalId,
           answerKind: decoded.action,
+          optionIndex: decoded.optionIndex,
           fromAddress: address,
         })
       );
@@ -405,14 +434,16 @@ export class DiscordChannel implements NotificationChannel {
               ],
             },
           ]
-        : [
-            {
-              type: 1,
-              components: [
-                { type: 2, style: 1, label: "Answer…", custom_id: encodeCallback("text", approval.id) },
-              ],
-            },
-          ];
+        : approval.questions
+          ? optionRows(approval)
+          : [
+              {
+                type: 1,
+                components: [
+                  { type: 2, style: 1, label: "Answer…", custom_id: encodeCallback("text", approval.id) },
+                ],
+              },
+            ];
     const sent = await this.rest<{ id: string }>(`/channels/${channel}/messages`, {
       method: "POST",
       body: JSON.stringify({ content: renderDiscord(approval), components }),

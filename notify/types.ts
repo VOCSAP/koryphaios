@@ -28,8 +28,10 @@ export interface PostedMessage {
 /** An answer coming back FROM a channel, already normalised. */
 export interface InboundAnswer {
   approvalId: string;
-  answerKind: "allow" | "deny" | "text";
+  answerKind: "allow" | "deny" | "text" | "option";
   answerText?: string;
+  /** With answerKind 'option': the tapped option's position, resolved broker-side. */
+  optionIndex?: number;
   /** Address that sent it — checked against the binding before it is trusted. */
   fromAddress: string;
   /** Provider-specific acknowledgement handle (callback query id, interaction). */
@@ -79,9 +81,10 @@ export interface NotificationChannel {
  * `verdict-only` -- a permission takes allow or deny, never free text;
  * `on-tile` -- the question absorbed a permission dialog, answered on its tile;
  * `session-gone` -- the session that waited for it is gone, and the request
- * was closed by this very refusal.
+ * was closed by this very refusal;
+ * `answers-only` -- a module waits on these questions and reads only their answers.
  */
-export type AnswerRefusal = "verdict-only" | "on-tile" | "session-gone";
+export type AnswerRefusal = "verdict-only" | "on-tile" | "session-gone" | "answers-only";
 
 /** What a gateway needs from the broker, injected so adapters stay testable. */
 export interface ChannelHost {

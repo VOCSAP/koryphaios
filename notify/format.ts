@@ -12,6 +12,7 @@ import { truncate } from "../shared/text.ts";
 import type { Approval } from "../shared/types.ts";
 import { settledOutcome } from "../shared/approval-outcome.ts";
 import type { AnswerRefusal } from "./types.ts";
+import { optionButtons, questionLines, QUESTIONS_POINTER } from "./ntfy-protocol.ts";
 
 /** Telegram sendMessage hard limit. */
 export const TELEGRAM_TEXT_MAX = 4096;
@@ -42,8 +43,12 @@ export function originLabel(approval: Approval): string {
  * it at 64 bytes, so the approval id (a uuid, 36 chars) plus a verb is the
  * entire budget. Anything richer must be looked up server-side by id.
  */
-export function encodeCallback(action: "allow" | "deny" | "text", approvalId: string): string {
-  const out = `${action[0]}:${approvalId}`;
+export function encodeCallback(
+  action: "allow" | "deny" | "text" | "option",
+  approvalId: string,
+  optionIndex?: number
+): string {
+  const out = action === "option" ? `o:${optionIndex}:${approvalId}` : `${action[0]}:${approvalId}`;
   if (Buffer.byteLength(out, "utf-8") > CALLBACK_DATA_MAX) {
     throw new Error(`callback_data too long for ${approvalId}`);
   }
@@ -52,11 +57,21 @@ export function encodeCallback(action: "allow" | "deny" | "text", approvalId: st
 
 export function decodeCallback(
   data: string
-): { action: "allow" | "deny" | "text"; approvalId: string } | null {
+): { action: "allow" | "deny" | "text" | "option"; approvalId: string; optionIndex?: number } | null {
+  const option = /^o:(0|[1-9]\d{0,5}):(.+)$/.exec(data ?? "");
+  if (option) return { action: "option", approvalId: option[2]!, optionIndex: Number(option[1]) };
   const m = /^([adt]):(.+)$/.exec(data ?? "");
   if (!m) return null;
   const action = m[1] === "a" ? "allow" : m[1] === "d" ? "deny" : "text";
   return { action, approvalId: m[2]! };
+}
+
+/** Telegram and Discord show every option the broker accepts. */
+const CHAT_OPTION_BUTTONS_MAX = Number.POSITIVE_INFINITY;
+
+/** Labels a chat channel offers as buttons, or null when the row takes none. */
+export function chatOptionButtons(approval: Approval): string[] | null {
+  return optionButtons(approval, CHAT_OPTION_BUTTONS_MAX);
 }
 
 /** The notification body for Telegram (HTML parse mode). */
@@ -64,6 +79,11 @@ export function renderTelegram(approval: Approval): string {
   const head = `<b>${escapeHtml(truncate(approval.title, 200))}</b>`;
   const badge = `<i>${escapeHtml(originLabel(approval))}</i>`;
   const body = escapeHtml(truncate(approval.question, 2500));
+  if (approval.questions) {
+    const listed = escapeHtml(truncate(questionLines(approval).join("\n"), 1200));
+    const hint = chatOptionButtons(approval) ? "Tap an option." : QUESTIONS_POINTER;
+    return truncate([head, badge, "", body, "", listed, "", `<i>${escapeHtml(hint)}</i>`].join("\n"), TELEGRAM_TEXT_MAX);
+  }
   const hint =
     approval.kind === "permission"
       ? "Tap a button, or reply with instructions."
@@ -76,11 +96,18 @@ export function renderDiscord(approval: Approval): string {
   // Discord has no parse-mode toggle: markdown is always live. Fencing the
   // agent-supplied block keeps a stray backtick or underscore from reflowing
   // the message, and stops any attempt at fake formatting.
-  const body = truncate(approval.question, 1500).replace(/```/g, "``​`");
+  const fenced = approval.questions ? `${approval.question}\n\n${questionLines(approval).join("\n")}` : approval.question;
+  const body = truncate(fenced, 1500).replace(/```/g, "``​`");
+  const pointer = approval.questions && !chatOptionButtons(approval) ? [QUESTIONS_POINTER] : [];
   return truncate(
-    [`**${truncate(approval.title, 200).replace(/\*/g, "\\*")}**`, `_${originLabel(approval)}_`, "```", body, "```"].join(
-      "\n"
-    ),
+    [
+      `**${truncate(approval.title, 200).replace(/\*/g, "\\*")}**`,
+      `_${originLabel(approval)}_`,
+      "```",
+      body,
+      "```",
+      ...pointer,
+    ].join("\n"),
     DISCORD_TEXT_MAX
   );
 }
@@ -119,6 +146,7 @@ export const REFUSAL_NOTICES: Record<AnswerRefusal, string> = {
   "verdict-only": "Not sent: this request takes Approve or Reject, not a written answer.",
   "on-tile": "Not sent: this request is waiting on its tile, answer it in Koryphaios.",
   "session-gone": "Not sent: the session is no longer waiting for this answer, answer it in its terminal.",
+  "answers-only": `Not sent: this request takes one of its options. ${QUESTIONS_POINTER}`,
 };
 
 /**

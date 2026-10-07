@@ -1837,6 +1837,45 @@ describe("AskUserQuestion: questions on add, answers on claim", () => {
     expect(listed.body.approvals.find((a) => a.id === row.id)?.status).toBe("pending");
   });
 
+  test("a hook question row refuses allow, deny and text with answers-only, and stays pending", async () => {
+    const b = await boot();
+    const op = newOperator();
+    const row = await raiseQuestions(b, op);
+    const verdicts: Array<Record<string, unknown>> = [
+      { answer_kind: "allow" },
+      { answer_kind: "deny" },
+      { answer_kind: "text", answer_text: "Red" },
+    ];
+    for (const extra of verdicts) {
+      const res = await claimAnswers(b, op, row.id, extra);
+      expect(res.status, JSON.stringify(extra)).toBe(422);
+      expect(res.body.error, JSON.stringify(extra)).toContain("answer_kind answers");
+    }
+    const still = await signedPost<{ approvals: Approval[] }>(b, "/approval/list", approvalListBody(DEFAULT_PROJECT_KEY), asOp(op));
+    expect(still.body.approvals.find((a) => a.id === row.id)?.status, "a refused verdict settles nothing").toBe("pending");
+  });
+
+  test("a hook question row can still be handed back to the terminal", async () => {
+    const b = await boot();
+    const op = newOperator();
+    const row = await raiseQuestions(b, op);
+    const res = await claimAnswers(b, op, row.id, { handback: true });
+    expect(res.status, res.body.error).toBe(200);
+    expect([res.body.approval?.status, res.body.approval?.answer_kind]).toEqual(["answered_terminal", null]);
+  });
+
+  test("a question row no module waits on still takes a text answer", async () => {
+    const b = await boot();
+    const op = newOperator();
+    const row = await raiseQuestions(b, op);
+    const db = new Database(b.dbPath);
+    db.run("UPDATE pending_approvals SET reply_route = 'pty' WHERE id = ?", [row.id]);
+    db.close();
+    const res = await claimAnswers(b, op, row.id, { answer_kind: "text", answer_text: "Red" });
+    expect(res.status, res.body.error).toBe(200);
+    expect(res.body.approval?.answer_kind).toBe("text");
+  });
+
   test("questions named like Object.prototype members survive the round trip", async () => {
     const b = await boot();
     const op = newOperator();

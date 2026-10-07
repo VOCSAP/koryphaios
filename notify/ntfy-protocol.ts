@@ -24,7 +24,11 @@ export const NTFY_MESSAGE_MAX = 1800;
 export const NTFY_ANSWER_MAX = 2000;
 /** Device labels are display-only; keep them short and boring. */
 export const NTFY_LABEL_MAX = 64;
-// ntfy allows at most three action buttons per message; we publish two.
+/** ntfy publishes at most three action buttons per message. */
+export const NTFY_ACTIONS_MAX = 3;
+
+/** Where a request that the phone cannot answer with a button is answered. */
+export const QUESTIONS_POINTER = "Answer it in the Koryphaios inbox or in Parastates.";
 
 /** Topics are secrets, not names: 24 random bytes rendered as 48 hex chars. */
 export const NTFY_TOPIC_HEX_LEN = 48;
@@ -136,14 +140,23 @@ export function decodePairingPayload(raw: string): NtfyPairingPayload | null {
 
 export type NtfyInbound =
   | { t: "pair"; code: string; device: string }
-  | { t: "answer"; approvalId: string; kind: "allow" | "deny" | "text"; text: string; device: string };
+  | {
+      t: "answer";
+      approvalId: string;
+      kind: "allow" | "deny" | "text" | "option";
+      text: string;
+      device: string;
+      /** With kind 'option' only: the option's position in the single question. */
+      index?: number;
+    };
 
 /** A tap on an ntfy action button, or our app answering. */
 export function encodeAnswer(
   approvalId: string,
-  kind: "allow" | "deny" | "text",
+  kind: "allow" | "deny" | "text" | "option",
   text = "",
-  device = ""
+  device = "",
+  index?: number
 ): string {
   return JSON.stringify({
     v: NTFY_PROTOCOL_VERSION,
@@ -152,6 +165,7 @@ export function encodeAnswer(
     k: kind,
     ...(text ? { x: truncate(text, NTFY_ANSWER_MAX) } : {}),
     ...(device ? { d: truncate(device, NTFY_LABEL_MAX) } : {}),
+    ...(kind === "option" ? { i: index } : {}),
   });
 }
 
@@ -196,6 +210,11 @@ export function decodeInbound(raw: string): NtfyInbound | null {
     const approvalId = typeof p.a === "string" ? p.a.trim() : "";
     if (!approvalId || approvalId.length > 64) return null;
     const kind = p.k;
+    if (kind === "option") {
+      const index = p.i;
+      if (typeof index !== "number" || !Number.isSafeInteger(index) || index < 0) return null;
+      return { t: "answer", approvalId, kind, text: "", device, index };
+    }
     if (kind !== "allow" && kind !== "deny" && kind !== "text") return null;
     const text = typeof p.x === "string" ? truncate(p.x, NTFY_ANSWER_MAX) : "";
     // A "text" answer with no text is not an answer: refuse it here rather
@@ -276,6 +295,28 @@ export function parseClickUrl(url: string): { view: ClickView; approvalId: strin
 }
 
 /**
+ * Labels to offer as one button each, or null: only a row whose questions are
+ * exactly one single-select question can be settled by a single tap, and only
+ * when the channel can show every option.
+ */
+export function optionButtons(approval: Pick<Approval, "questions">, cap: number): string[] | null {
+  const q = approval.questions;
+  if (!q || q.length !== 1 || q[0]!.multi_select) return null;
+  const labels = q[0]!.options.map((o) => o.label);
+  return labels.length > 0 && labels.length <= cap ? labels : null;
+}
+
+/** The questions as plain lines, read-only, for every channel body. */
+export function questionLines(approval: Pick<Approval, "questions">): string[] {
+  const lines: string[] = [];
+  for (const q of approval.questions ?? []) {
+    lines.push(q.header ? `${q.header}: ${q.question}` : q.question);
+    for (const o of q.options) lines.push(`- ${o.label}`);
+  }
+  return lines;
+}
+
+/**
  * Human body of a pending request.
  *
  * HOSTILE INPUT #4: title and question come from an AGENT. ntfy renders plain
@@ -293,7 +334,11 @@ export function renderNtfy(approval: Approval, originText: string): { title: str
     stripControl(approval.title) || "Koryphaios",
     NTFY_TITLE_MAX - origin.length - 3
   );
-  const body = truncate(stripControl(approval.question, { keepNewlines: true }).trim(), NTFY_MESSAGE_MAX);
+  const question = stripControl(approval.question, { keepNewlines: true }).trim();
+  if (!approval.questions) return { title: `${origin} · ${title}`, message: truncate(question, NTFY_MESSAGE_MAX) };
+  const listed = [question, stripControl(questionLines(approval).join("\n"), { keepNewlines: true })].join("\n\n");
+  const pointer = optionButtons(approval, NTFY_ACTIONS_MAX) ? "" : QUESTIONS_POINTER;
+  const body = pointer ? `${truncate(listed, NTFY_MESSAGE_MAX - pointer.length - 2)}\n\n${pointer}` : truncate(listed, NTFY_MESSAGE_MAX);
   return { title: `${origin} · ${title}`, message: body };
 }
 
@@ -317,16 +362,20 @@ export function buildApprovalPublish(
 ): NtfyPublish {
   const { title, message } = renderNtfy(approval, originText);
   const repliesUrl = `${deps.server}/${deps.topicReplies}`;
-  const button = (label: string, kind: "allow" | "deny"): NtfyAction => ({
+  const button = (label: string, kind: "allow" | "deny" | "option", index?: number): NtfyAction => ({
     action: "http",
     label,
     url: repliesUrl,
     method: "POST",
-    body: encodeAnswer(approval.id, kind),
+    body: encodeAnswer(approval.id, kind, "", "", index),
     clear: true,
   });
   const actions: NtfyAction[] =
-    approval.kind === "permission" ? [button("Approve", "allow"), button("Reject", "deny")] : [];
+    approval.kind === "permission"
+      ? [button("Approve", "allow"), button("Reject", "deny")]
+      : (optionButtons(approval, NTFY_ACTIONS_MAX) ?? []).map((label, i) =>
+          button(truncate(label, NTFY_LABEL_MAX), "option", i)
+        );
   return {
     topic: deps.topicNotif,
     title,

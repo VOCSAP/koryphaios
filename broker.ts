@@ -31,6 +31,7 @@ import {
   isValidTopic,
   normalizeNtfyServer,
   NTFY_TOPIC_HEX_LEN,
+  optionButtons,
 } from "./notify/ntfy-protocol.ts";
 import { channelAnswerResult } from "./notify/format.ts";
 import type {
@@ -9200,8 +9201,21 @@ function settleApproval(
         SET status = ?, answered_via = ?, answer_kind = ?, answer_text = ?, answers_json = ?, answered_at = ?
       WHERE id = ? AND ${where.sql} AND status IN ${allowed}
         AND NOT (kind = 'permission' AND COALESCE(?, '') = 'text')
-        AND NOT (absorbed_permission = 1 AND COALESCE(?, '') IN ('allow', 'deny', 'text', 'answers'))`,
-    [status, via, answerKind, answerText, answersJson, now, id, ...(where.params as never[]), answerKind, answerKind]
+        AND NOT (absorbed_permission = 1 AND COALESCE(?, '') IN ('allow', 'deny', 'text', 'answers'))
+        AND NOT (reply_route = 'hook' AND questions_json IS NOT NULL AND COALESCE(?, '') IN ('allow', 'deny', 'text'))`,
+    [
+      status,
+      via,
+      answerKind,
+      answerText,
+      answersJson,
+      now,
+      id,
+      ...(where.params as never[]),
+      answerKind,
+      answerKind,
+      answerKind,
+    ]
   );
   if (res.changes === 0) {
     // The existence probe is scoped TOO. Unscoped it would answer 409 for a row
@@ -9209,8 +9223,16 @@ function settleApproval(
     // the caller a lie: from where it stands, that approval is not settled, it
     // is not theirs.
     const existing = db
-      .query(`SELECT kind, status, absorbed_permission FROM pending_approvals WHERE id = ? AND ${where.sql}`)
-      .get(id, ...(where.params as never[])) as { kind: string; status: string; absorbed_permission: number } | null;
+      .query(
+        `SELECT kind, status, absorbed_permission, reply_route, questions_json FROM pending_approvals WHERE id = ? AND ${where.sql}`
+      )
+      .get(id, ...(where.params as never[])) as {
+      kind: string;
+      status: string;
+      absorbed_permission: number;
+      reply_route: string;
+      questions_json: string | null;
+    } | null;
     if (!existing) return { error: "unknown approval", status: 404 };
     const settleable = allowed.includes(`'${existing.status}'`);
     if (existing.kind === "permission" && answerKind === "text" && settleable) {
@@ -9218,6 +9240,14 @@ function settleApproval(
     }
     if (existing.absorbed_permission !== 0 && answerKind !== null && settleable) {
       return { error: "this question absorbed a permission dialog: answer it on its tile", status: 422, refused: "on-tile" };
+    }
+    if (
+      existing.reply_route === "hook" &&
+      existing.questions_json !== null &&
+      (answerKind === "allow" || answerKind === "deny" || answerKind === "text") &&
+      settleable
+    ) {
+      return { error: "a module waits on these questions: answer them with answer_kind answers", status: 422, refused: "answers-only" };
     }
     return { error: "already-settled", status: 409 };
   }
@@ -10006,19 +10036,39 @@ const channelHost: ChannelHost = {
     // "already handled": never that the id exists but is somebody else's.
     if (!binding) return null;
 
+    const onSettled = (approval: Approval): void => {
+      // Rewrite the copies on the OTHER channels; the winning one has already
+      // acknowledged its own user.
+      void notifyRegistry.settle(approval, kind, kind);
+    };
+    if (answer.answerKind === "option") {
+      const questions = parseStoredJson<ApprovalQuestion[]>(row, "questions_json", row.questions_json ?? null);
+      const label = questions ? optionButtons({ questions }, Number.POSITIVE_INFINITY)?.[answer.optionIndex ?? -1] : undefined;
+      if (!questions || label === undefined) return null;
+      const valid = validateApprovalAnswers(questions, { [questions[0]!.question]: [label] });
+      if (!valid.ok) {
+        log.error(`notify: option ${answer.optionIndex} of approval ${row.id} failed answers validation: ${valid.error}`);
+        return null;
+      }
+      const settled = settleApproval(
+        answer.approvalId,
+        resolved.scope,
+        kind,
+        "answers",
+        valid.value.summary,
+        "answered",
+        JSON.stringify(valid.value.answers)
+      );
+      return channelAnswerResult(settled, onSettled);
+    }
+
     let answerText: string | null = null;
     if (answer.answerText) {
       const clean = sanitizeAnswerForPty(answer.answerText);
       if (!clean.ok) return null;
       answerText = clean.value;
     }
-    // Card 1def56da. The TWELFTH authorization path, and the only one with no
-    // credential: the sender proved nothing by signature, the PAIRING above is
-    // what proves ownership. The scope was minted by the module from the row it
-    // read, so it matches that one row and can widen nothing. Nothing here
-    // chooses it: review measured that when this call passed a scope BUILT from
-    // local values, swapping `binding.operator_id` for `answer.fromAddress`
-    // left every suite green.
+    // No credential here: the pairing proves ownership, and the scope comes from the resolved row, never from sender input.
     const settled = settleApproval(
       answer.approvalId,
       resolved.scope,
@@ -10029,11 +10079,7 @@ const channelHost: ChannelHost = {
     );
     // One return for both outcomes: a test can then pin the refusal mapping
     // in the pure function, and the end-to-end suite pins this call.
-    return channelAnswerResult(settled, (approval) => {
-      // Rewrite the copies on the OTHER channels; the winning one has already
-      // acknowledged its own user.
-      void notifyRegistry.settle(approval, kind, kind);
-    });
+    return channelAnswerResult(settled, onSettled);
   },
 
   async onPair(kind, code, address, label) {

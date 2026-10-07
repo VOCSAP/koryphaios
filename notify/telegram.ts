@@ -10,6 +10,7 @@ import type { Approval } from "../shared/types.ts";
 import {
   ALREADY_HANDLED_NOTICE,
   answerNotice,
+  chatOptionButtons,
   decodeCallback,
   encodeCallback,
   renderSettled,
@@ -154,6 +155,7 @@ export class TelegramChannel implements NotificationChannel {
         await this.deps.host.onAnswer("telegram", {
           approvalId: decoded.approvalId,
           answerKind: decoded.action,
+          optionIndex: decoded.optionIndex,
           fromAddress: address,
           ack: u.callback_query.id,
         })
@@ -220,6 +222,7 @@ export class TelegramChannel implements NotificationChannel {
   }
 
   async post(binding: ChannelBinding, approval: Approval): Promise<PostedMessage | null> {
+    const options = chatOptionButtons(approval);
     const keyboard =
       approval.kind === "permission"
         ? {
@@ -230,7 +233,13 @@ export class TelegramChannel implements NotificationChannel {
               ],
             ],
           }
-        : undefined;
+        : options
+          ? {
+              inline_keyboard: options.map((label, i) => [
+                { text: label, callback_data: encodeCallback("option", approval.id, i) },
+              ]),
+            }
+          : undefined;
     const sent = await this.call<{ message_id: number }>("sendMessage", {
       chat_id: binding.address,
       text: renderTelegram(approval),
