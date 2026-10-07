@@ -28,7 +28,7 @@ const fakeUseDeck = create(() => ({
 mockStore({ useDeck: fakeUseDeck, ...storeMockStubs });
 
 const { ApprovalAnswerForm } = await import("../desktop/src/renderer/src/components/ApprovalAnswerForm.tsx");
-const { formQuestions } = await import("../desktop/src/renderer/src/components/approval-answers.ts");
+const { formQuestions, keepDrafts } = await import("../desktop/src/renderer/src/components/approval-answers.ts");
 
 interface Q {
   question: string;
@@ -252,6 +252,14 @@ test("each question is captioned by its fieldset's legend", () => {
     (fs) => fs.firstElementChild?.tagName + ":" + fs.firstElementChild?.querySelector(".aq-q")?.textContent
   );
   expect(captions).toEqual(["LEGEND:Pick one", "LEGEND:Pick many"]);
+});
+
+test("a draft leaves with its row: the pushed list no longer naming it drops it", () => {
+  const draft = [{ picked: [1], other: false, otherText: "" }];
+  const drafts = { kept: draft, gone: draft };
+  expect(keepDrafts(drafts, [{ id: "kept" }, { id: "fresh" }])).toEqual({ kept: draft });
+  expect(keepDrafts(drafts, [])).toEqual({});
+  expect(keepDrafts(drafts, [{ id: "kept" }, { id: "gone" }]), "nothing settled: the same object, no re-render").toBe(drafts);
 });
 
 test("formQuestions names the requests whose form shows the questions, so the host shows their text once", () => {

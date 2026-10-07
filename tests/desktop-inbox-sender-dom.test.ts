@@ -58,6 +58,7 @@ interface FakeDeckState {
   sessions: FakeSession[];
   inboxAckState: Record<string, string>;
   inboxReplyDrafts: Record<string, string>;
+  approvalDrafts: Record<string, unknown>;
   graphDrafts: unknown[];
   dict: Record<string, string>;
   remote: boolean;
@@ -66,6 +67,7 @@ interface FakeDeckState {
   markInboxSeen: () => void;
   ackInboxEntry: () => void;
   setInboxReplyDraft: () => void;
+  setApprovalDraft: () => void;
   clearPendingApproval: () => void;
   showToast: () => void;
 }
@@ -77,6 +79,7 @@ function initialFakeState(): FakeDeckState {
     sessions: [],
     inboxAckState: {},
     inboxReplyDrafts: {},
+    approvalDrafts: {},
     graphDrafts: [],
     dict: {},
     remote: false,
@@ -85,6 +88,7 @@ function initialFakeState(): FakeDeckState {
     markInboxSeen: () => {},
     ackInboxEntry: () => {},
     setInboxReplyDraft: () => {},
+    setApprovalDraft: () => {},
     clearPendingApproval: () => {},
     showToast: () => {}
   };
@@ -107,7 +111,6 @@ mockStore({ useDeck: fakeUseDeck, ...storeMockStubs });
 // imports another value export of the same specifier. Re-export the real
 // module and only override the one symbol this fixture needs to control.
 import * as realSharedTypes from "../desktop/src/shared/types.ts";
-import * as realSharedCompanion from "../desktop/src/shared/companion.ts";
 
 mock.module("@shared/types", () => ({
   ...realSharedTypes,
@@ -116,27 +119,9 @@ mock.module("@shared/types", () => ({
   }
 }));
 
-// '@shared/companion': InboxPanel.tsx computes VERDICT_BLOCKED_REMOTELY at
-// module-eval time from these two, so the stub shape only needs to satisfy
-// that one expression (`REMOTE_BLOCKED_CHANNELS.has(COMPANION_MANIFEST.approvalReply.channel)`
-// and its siblings) -- an empty Set means "nothing blocked remotely",
-// which is irrelevant here since `remote` stays false in every fixture.
-mock.module("@shared/companion", () => ({
-  ...realSharedCompanion,
-  COMPANION_MANIFEST: {
-    approvalReply: { channel: "deck-only" },
-    approvalDecline: { channel: "deck-only" },
-    approvalAck: { channel: "deck-only" },
-    approvalAllow: { channel: "deck-only" },
-    approvalAnswers: { channel: "deck-only" },
-    approvalHandback: { channel: "deck-only" }
-  },
-  REMOTE_BLOCKED_CHANNELS: new Set<string>()
-}));
-
-// Imported AFTER all three mock.module calls above, so InboxPanel.tsx's own
-// imports (`../store`, `@shared/types`, `@shared/companion`) bind to the
-// mocks rather than attempting real resolution.
+// Imported AFTER the mock.module calls above, so InboxPanel.tsx's own imports
+// (`../store`, `@shared/types`) bind to the mocks rather than attempting real
+// resolution. The remote verdict floor is the REAL companion manifest.
 const { InboxPanel } = await import("../desktop/src/renderer/src/components/InboxPanel.tsx");
 
 let container: HTMLDivElement;
@@ -355,6 +340,37 @@ test("a hook row offers neither option chips nor a free reply: the module would 
     surfaces(approval({ id: "chan-ask", kind: "question", reply_route: "channel", options: ["A", "B"] })),
     "control: the same question off the hook route keeps its chips and reply"
   ).toEqual({ chips: true, composer: true, form: false });
+});
+
+test("on a remote companion a hook row offers no verdict, only the blocked note", () => {
+  renderPanel(approval({ id: "hook-remote", kind: "permission", reply_route: "hook", options: ["Allow", "Deny"] }), []);
+  act(() => {
+    fakeUseDeck.setState({ remote: true });
+  });
+  act(() => {
+    (container.querySelector(".inbox-entry") as HTMLElement).click();
+  });
+  const labels = [...container.querySelectorAll("button")].map((b) => b.textContent);
+  expect(labels, "Allow would be refused remote-blocked by construction").not.toContain("inbox.permissionAllow");
+  expect(labels).not.toContain("inbox.handback");
+  expect([...container.querySelectorAll(".inbox-modal-note")].map((n) => n.textContent)).toContain(
+    "inbox.verdictRemoteBlocked"
+  );
+});
+
+test("a hook row settled from the Courrier closes its modal", async () => {
+  (globalThis as unknown as { window: { api: Record<string, unknown> } }).window.api = {
+    approvalAllow: async () => true
+  };
+  renderPanel(approval({ id: "hook-settle", kind: "permission", reply_route: "hook", options: ["Allow", "Deny"] }), []);
+  act(() => {
+    (container.querySelector(".inbox-entry") as HTMLElement).click();
+  });
+  expect(container.querySelector(".inbox-modal")).not.toBeNull();
+  await act(async () => {
+    ([...container.querySelectorAll("button")].find((b) => b.textContent === "inbox.permissionAllow") as HTMLElement).click();
+  });
+  expect(container.querySelector(".inbox-modal"), "the answered request leaves the screen").toBeNull();
 });
 
 test("timestamps use local calendar days and refresh after local midnight", async () => {

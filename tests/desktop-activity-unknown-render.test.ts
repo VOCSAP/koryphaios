@@ -102,6 +102,11 @@ interface FakeDeckState {
   openDiff: (id: string) => void;
   restartSession: (id: string) => Promise<void>;
   openBrowser: (id: string) => void;
+  pendingApprovals: unknown[];
+  remote: boolean;
+  approvalDrafts: Record<string, unknown>;
+  setApprovalDraft: () => void;
+  clearPendingApproval: () => void;
 }
 
 function initialFakeDeckState(): FakeDeckState {
@@ -120,7 +125,12 @@ function initialFakeDeckState(): FakeDeckState {
     showToast: () => {},
     openDiff: () => {},
     restartSession: async () => {},
-    openBrowser: () => {}
+    openBrowser: () => {},
+    pendingApprovals: [],
+    remote: false,
+    approvalDrafts: {},
+    setApprovalDraft: () => {},
+    clearPendingApproval: () => {}
   };
 }
 
@@ -282,3 +292,27 @@ for (const [label, render, selector] of [
     });
   }
 }
+
+test("TerminalTile docks the verdict panel of a request its module waits on, and none otherwise", () => {
+  renderTerminalTile(session({ needsAttention: true, attentionSource: "hook" }));
+  expect(container.querySelector(".tile-approval")).toBeNull();
+  act(() =>
+    fakeDeck.setState({
+      pendingApprovals: [
+        {
+          id: "r1",
+          kind: "permission",
+          reply_route: "hook",
+          status: "pending",
+          title: "Bash: ls",
+          question: "ls",
+          options: [],
+          questions: null,
+          created_at: "2026-10-07T08:00:00.000Z",
+          origin: { tile_ref: "tile-a" }
+        }
+      ]
+    })
+  );
+  expect(container.querySelector(".tile .tile-approval"), "the tile mounts the panel for its own row").not.toBeNull();
+});

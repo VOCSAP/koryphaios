@@ -1,16 +1,14 @@
 import type { Approval } from './approval-auth'
+import { awaitsModuleVerdict } from '../shared/hook-await'
 
 /**
  * Tiles whose Claude Code module is waiting on an operator verdict: an open
  * `hook` row draws nothing on screen, so the PTY detector cannot see it.
- * `tile_ref` is the producer's declaration, used only to find a tile we own.
  */
 export function hookAwaitedTiles(approvals: readonly Approval[]): Set<string> {
   const tiles = new Set<string>()
   for (const approval of approvals) {
-    if (approval.reply_route !== 'hook') continue
-    if (approval.status !== 'pending' && approval.status !== 'expired_notif') continue
-    if (approval.origin.tile_ref) tiles.add(approval.origin.tile_ref)
+    if (awaitsModuleVerdict(approval)) tiles.add(approval.origin.tile_ref)
   }
   return tiles
 }

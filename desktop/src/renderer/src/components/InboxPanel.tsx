@@ -4,11 +4,11 @@ import { errorText, useDeck } from '../store'
 import { useT } from '../i18n'
 import { inboxEntryKey } from '@shared/types'
 import type { AckableInboxEntry, InboxEntry } from '@shared/types'
-import { COMPANION_MANIFEST, REMOTE_BLOCKED_CHANNELS } from '@shared/companion'
 import { verdictAnswerKindFor } from './approval-verdict'
 import { resolveApprovalSender } from '../inbox-sender'
-import { ApprovalAnswerForm } from './ApprovalAnswerForm'
-import { formQuestions, type QuestionDraft } from './approval-answers'
+import { HookApprovalAnswer } from './HookApprovalAnswer'
+import { formQuestions } from './approval-answers'
+import { canAnswerVerdict as verdictAllowed } from './verdict-remote'
 
 /**
  * Three structurally distinct entry families: a peer message (repliable,
@@ -65,21 +65,6 @@ function ackable(e: InboxEntry): AckableInboxEntry | null {
  */
 const GONE_PEER = '<gone>'
 
-/**
- * Answering a blocking question RENDERS A HUMAN VERDICT, so both its channels
- * sit on the companion's explicit remote floor: a remote client's call is
- * rejected with 'remote-blocked' by construction, not by accident. DERIVED
- * from that floor rather than hardcoded here — re-tier the channels and this
- * UI follows instead of offering a button that provably cannot land.
- */
-const VERDICT_BLOCKED_REMOTELY =
-  REMOTE_BLOCKED_CHANNELS.has(COMPANION_MANIFEST.approvalReply.channel) ||
-  REMOTE_BLOCKED_CHANNELS.has(COMPANION_MANIFEST.approvalDecline.channel) ||
-  REMOTE_BLOCKED_CHANNELS.has(COMPANION_MANIFEST.approvalAck.channel) ||
-  REMOTE_BLOCKED_CHANNELS.has(COMPANION_MANIFEST.approvalAllow.channel) ||
-  REMOTE_BLOCKED_CHANNELS.has(COMPANION_MANIFEST.approvalAnswers.channel) ||
-  REMOTE_BLOCKED_CHANNELS.has(COMPANION_MANIFEST.approvalHandback.channel)
-
 export function InboxPanel(): React.JSX.Element {
   const t = useT()
   const messages = useDeck((s) => s.inboxMessages)
@@ -99,10 +84,9 @@ export function InboxPanel(): React.JSX.Element {
   // On a remote companion the verdict controls are not rendered at all: the
   // call is refused by design, so offering the button would promise an action
   // that can never land (and the modal would report a raw 'remote-blocked').
-  const canAnswerVerdict = !(remote && VERDICT_BLOCKED_REMOTELY)
+  const canAnswerVerdict = verdictAllowed(remote)
   const [openKey, setOpenKey] = useState<string | null>(null)
   const [sending, setSending] = useState(false)
-  const [questionDrafts, setQuestionDrafts] = useState<Record<string, QuestionDraft[]>>({})
   const [today, setToday] = useState(() => new Date())
 
   useEffect(() => {
@@ -238,9 +222,7 @@ export function InboxPanel(): React.JSX.Element {
       | { kind: 'allow' }
       | { kind: 'deny' }
       | { kind: 'ack' }
-      | { kind: 'handback' }
       | { kind: 'text'; text: string }
-      | { kind: 'answers'; answers: Record<string, string[]> }
   ): Promise<void> => {
     if (sending) return
     setSending(true)
@@ -252,25 +234,14 @@ export function InboxPanel(): React.JSX.Element {
             ? await window.api.approvalAck(id)
             : action.kind === 'allow'
               ? await window.api.approvalAllow(id)
-              : action.kind === 'handback'
-                ? await window.api.approvalHandback(id)
-                : action.kind === 'answers'
-                  ? await window.api.approvalAnswers(id, action.answers)
-                  : await window.api.approvalReply(id, action.text)
+              : await window.api.approvalReply(id, action.text)
       // `false` is not a failure: another channel (phone, Telegram…) won the
       // race and the agent is already released.
       showToast(
-        ok
-          ? action.kind === 'ack'
-            ? 'toast.inboxAckSent'
-            : action.kind === 'handback'
-              ? 'toast.inboxHandedBack'
-              : 'toast.inboxAnswerSent'
-          : 'toast.inboxAnsweredElsewhere',
+        ok ? (action.kind === 'ack' ? 'toast.inboxAckSent' : 'toast.inboxAnswerSent') : 'toast.inboxAnsweredElsewhere',
         ok ? 'success' : 'info'
       )
       setInboxReplyDraft(draftKey, '')
-      setQuestionDrafts(({ [id]: _settled, ...rest }) => rest)
       clearPendingApproval(id)
       setOpenKey(null)
     } catch (e) {
@@ -279,10 +250,7 @@ export function InboxPanel(): React.JSX.Element {
       // WHY in the operator's language instead of leaking 'remote-blocked'.
       const msg = errorText(e)
       if (msg.includes('remote-blocked')) showToast('inbox.verdictRemoteBlocked', 'error')
-      else
-        showToast(`${t(action.kind === 'answers' ? 'inbox.answersFailed' : 'inbox.reply')}: ${msg}`, 'error', {
-          raw: true
-        })
+      else showToast(`${t('inbox.reply')}: ${msg}`, 'error', { raw: true })
     } finally {
       setSending(false)
     }
@@ -476,21 +444,15 @@ export function InboxPanel(): React.JSX.Element {
             )}
 
             {hookApproval && canAnswerVerdict ? (
-              <ApprovalAnswerForm
+              <HookApprovalAnswer
                 approval={hookApproval}
-                disabled={sending}
-                draft={questionDrafts[hookApproval.id]}
-                onDraft={(d) => setQuestionDrafts((all) => ({ ...all, [hookApproval.id]: d }))}
-                onAllow={() => void answerApproval(hookApproval.id, { kind: 'allow' })}
-                onDeny={() => void answerApproval(hookApproval.id, { kind: 'deny' })}
-                onAnswers={(answers) => void answerApproval(hookApproval.id, { kind: 'answers', answers })}
-                onHandback={() => void answerApproval(hookApproval.id, { kind: 'handback' })}
                 actionsClassName="modal-actions inbox-modal-actions approval-actions"
+                onSettled={() => setOpenKey(null)}
               >
                 <button className="btn" onClick={() => setOpenKey(null)}>
                   {t('inbox.close')}
                 </button>
-              </ApprovalAnswerForm>
+              </HookApprovalAnswer>
             ) : (
             <div className="modal-actions inbox-modal-actions">
               {open.kind === 'approval' ? (

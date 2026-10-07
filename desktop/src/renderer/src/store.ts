@@ -31,6 +31,7 @@ import {
 } from '@shared/roadmap-sync'
 import { shouldShowTemplateAppliedToast } from '@shared/template-apply-outcome'
 import { workspaceRestoreToastKeyFor } from '@shared/workspace-restore-outcome'
+import { keepDrafts, type QuestionDraft } from './components/approval-answers'
 
 /**
  * The blocking-question payload, DERIVED from the Courrier union instead of
@@ -130,6 +131,12 @@ interface DeckState {
    * close — the operator would lose what they typed.
    */
   inboxReplyDrafts: Record<string, string>
+  /**
+   * Answers drafted for a request a module waits on, keyed by approval id.
+   * Shared by its two hosts (the Courrier modal and the tile panel), so a
+   * draft begun on one is found on the other; dropped once the row leaves.
+   */
+  approvalDrafts: Record<string, QuestionDraft[]>
   /** Pending graph drafts (agent-escalated questions): drive the rail glyph. */
   graphDrafts: DeckGraphDraft[]
   /**
@@ -279,6 +286,8 @@ interface DeckState {
   ackInboxEntry(entry: AckableInboxEntry): void
   /** Store/clear a reply draft for an entry key ('' drops the key). */
   setInboxReplyDraft(key: string, text: string): void
+  /** Store/clear the answer draft of one approval (null drops the key). */
+  setApprovalDraft(id: string, draft: QuestionDraft[] | null): void
   /** Drop a resolved blocking question from the pending list (optimistic). */
   clearPendingApproval(id: string): void
   /** Open a pending draft: create the pre-filled graph and navigate to it. */
@@ -540,6 +549,7 @@ export const useDeck = create<DeckState>((set, get) => ({
   pendingApprovals: [],
   inboxAckState: {},
   inboxReplyDrafts: {},
+  approvalDrafts: {},
   graphDrafts: [],
   // 'local' is the inert default: a Deck that has not heard from its broker
   // yet must render as a plain non-replica one, never raise the offline
@@ -710,7 +720,9 @@ export const useDeck = create<DeckState>((set, get) => ({
     // Family 3: the broker's pending blocking questions, pushed as a WHOLE
     // list. Replacing (not merging) is what makes a question answered from
     // the phone disappear here without any local bookkeeping.
-    window.api.onPendingApprovals((approvals) => set({ pendingApprovals: approvals }))
+    window.api.onPendingApprovals((approvals) =>
+      set((s) => ({ pendingApprovals: approvals, approvalDrafts: keepDrafts(s.approvalDrafts, approvals) }))
+    )
     // Durable read-state of the family 1/2 entries, read once at startup: the
     // three Courrier states must survive a Deck restart, so 'seen' is not a
     // render-time flag.
@@ -820,8 +832,18 @@ export const useDeck = create<DeckState>((set, get) => ({
       else delete next[key]
       return { inboxReplyDrafts: next }
     }),
+  setApprovalDraft: (id, draft) =>
+    set((s) => {
+      const next = { ...s.approvalDrafts }
+      if (draft) next[id] = draft
+      else delete next[id]
+      return { approvalDrafts: next }
+    }),
   clearPendingApproval: (id) =>
-    set((s) => ({ pendingApprovals: s.pendingApprovals.filter((a) => a.id !== id) })),
+    set((s) => {
+      const pendingApprovals = s.pendingApprovals.filter((a) => a.id !== id)
+      return { pendingApprovals, approvalDrafts: keepDrafts(s.approvalDrafts, pendingApprovals) }
+    }),
   openGraphDraft: async (draft) => {
     // Main creates the pre-filled doc and flips the broker status; the local
     // list is trimmed optimistically (the next poll confirms).

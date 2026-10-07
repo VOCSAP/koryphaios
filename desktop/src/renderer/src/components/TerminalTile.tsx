@@ -12,6 +12,7 @@ import { createSessionTerminal } from '../terminal-focus-report'
 import { ConfirmDialog } from './ConfirmDialog'
 import { ContextMenu, type ContextMenuItem } from './ContextMenu'
 import { SnippetsDialog } from './SnippetsDialog'
+import { TileApprovalPanel } from './TileApprovalPanel'
 
 const THEMES: Record<'dark' | 'light', ITheme> = {
   dark: { background: '#1e1e1e', foreground: '#d4d4d4', cursor: '#d4d4d4', selectionBackground: '#264f78' },
@@ -352,6 +353,7 @@ export function TerminalTile({
           if (!copySelection(term)) void pasteFromClipboard(term)
         }}
       />
+      <TileApprovalPanel tileId={id} />
       {session.expired && (
         <div className="tile-expired">
           <div className="tile-expired-card">

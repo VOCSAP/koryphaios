@@ -35,6 +35,17 @@ export function formQuestions<Q>(approval: {
     : null
 }
 
+/** The drafts whose approval is still listed: a settled row takes its draft with it. */
+export function keepDrafts<D>(
+  drafts: Record<string, D>,
+  approvals: ReadonlyArray<{ id: string }>
+): Record<string, D> {
+  const live = new Set(approvals.map((a) => a.id))
+  const ids = Object.keys(drafts)
+  if (ids.every((id) => live.has(id))) return drafts
+  return Object.fromEntries(ids.filter((id) => live.has(id)).map((id) => [id, drafts[id]!]))
+}
+
 export function emptyDrafts(questions: ReadonlyArray<AnswerableQuestion>): QuestionDraft[] {
   return questions.map(() => ({ picked: [], other: false, otherText: '' }))
 }
