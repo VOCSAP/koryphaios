@@ -9,7 +9,7 @@
 // Fails silent: any error (no credential, broker down, malformed payload) exits
 // 0 and leaves the session waiting on its dialog as if the hook were absent.
 
-import { buildAuthProof, stripControl } from "../../shared/approval.ts";
+import { APPROVAL_QUESTION_MAX, buildAuthProof, capVisibly, stripControl } from "../../shared/approval.ts";
 import {
   APPROVAL_FILE_ENV,
   APPROVAL_HOOK_BLOCK_SEC_DEFAULT,
@@ -82,17 +82,20 @@ export function buildApprovalRequest(
   const blocking = classifyPayload(p) === "permission";
   const title = blocking
     ? summarizeToolInput(p.tool_name ?? "", p.tool_input)
-    : stripControl(p.message ?? "").trim().slice(0, 160) || "The agent is waiting for you";
-  const question = blocking
-    ? [
-        `The agent wants to use ${stripControl(p.tool_name ?? "a tool").trim() || "a tool"}.`,
-        p.tool_input ? `Input: ${safeJson(p.tool_input)}` : "",
-        p.cwd ? `Working directory: ${stripControl(p.cwd).trim()}` : "",
-      ]
-        .filter(Boolean)
-        .join("\n")
-    : stripControl(p.message ?? "", { keepNewlines: true }).trim() ||
-      "The session is waiting for an answer.";
+    : capVisibly(stripControl(p.message ?? "").trim(), 160) || "The agent is waiting for you";
+  const question = capVisibly(
+    blocking
+      ? [
+          `The agent wants to use ${stripControl(p.tool_name ?? "a tool").trim() || "a tool"}.`,
+          p.tool_input ? `Input: ${safeJson(p.tool_input)}` : "",
+          p.cwd ? `Working directory: ${stripControl(p.cwd).trim()}` : "",
+        ]
+          .filter(Boolean)
+          .join("\n")
+      : stripControl(p.message ?? "", { keepNewlines: true }).trim() ||
+          "The session is waiting for an answer.",
+    APPROVAL_QUESTION_MAX
+  );
 
   return {
     kind: blocking ? "permission" : "question",
@@ -116,7 +119,7 @@ export function buildApprovalRequest(
 
 function safeJson(value: unknown): string {
   try {
-    return stripControl(JSON.stringify(value) ?? "", { keepNewlines: true }).slice(0, 1200);
+    return stripControl(JSON.stringify(value) ?? "", { keepNewlines: true });
   } catch {
     return "";
   }

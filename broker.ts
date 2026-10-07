@@ -9042,11 +9042,7 @@ function handleApprovalAdd(
   // values this handler splices without ever reading. `operator_id`,
   // `project_key` and `session_ref` therefore cannot be chosen here, and the
   // absence of `pick("project_key")` below is the fix card 1def56da exists for.
-  //
-  // `tile_ref` stays OUT of the stamp on purpose, and is not hardened by
-  // symmetry: the code already declares it an untrusted routing hint that the
-  // Deck re-validates against its own live tiles. Widening the credential to
-  // cover it would be scope creep with no threat behind it.
+  // `tile_ref` is declared by the producer, never proven, and it grants a blocking state.
   const stamped = stampInsert(stamp);
   const producerSecret = reply.route === "hook" ? randomBytes(32).toString("base64url") : "";
   const producerSecretHash = producerSecret ? createHash("sha256").update(producerSecret).digest("hex") : "";

@@ -8,6 +8,7 @@ import { startBroker, stopBroker, post, approvalListBody, type TestBroker } from
 import {
   approvalWaitTimeoutSec,
   buildAuthProof,
+  capVisibly,
   deriveOperatorId,
   deriveTokenId,
   generateCredential,
@@ -1885,5 +1886,63 @@ describe("AskUserQuestion: questions on add, answers on claim", () => {
     const res = await claimAnswers(b, op, row.id, { answer_kind: "answers", answers: JSON.parse('{"__proto__":["A"],"constructor":["B"]}') });
     expect(res.status, res.body.error).toBe(200);
     expect(Object.keys(res.body.approval?.answers ?? {})).toEqual(["__proto__", "constructor"]);
+  });
+});
+
+describe("over-long title and question are cut visibly", () => {
+  const EMOJI = String.fromCodePoint(0x1f600);
+  const codePoints = (s: string): number => Array.from(s).length;
+  const loneSurrogate = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+
+  test("a 5000-character question is stored with a marker naming its original length, within 4000", async () => {
+    const b = await boot();
+    const row = await addApproval(b, newOperator(), { question: "q".repeat(5000) });
+    expect(row.question.endsWith("[truncated from 5000 characters]"), row.question.slice(-60)).toBe(true);
+    expect(codePoints(row.question)).toBeLessThanOrEqual(4000);
+    expect(row.question.startsWith("q".repeat(3900))).toBe(true);
+  });
+
+  test("a question of exactly 4000 code points is stored intact, an astral one included", async () => {
+    const b = await boot();
+    const question = `${"a".repeat(3998)}${EMOJI}b`;
+    expect(codePoints(question)).toBe(4000);
+    const row = await addApproval(b, newOperator(), { question });
+    expect(row.question).toBe(question);
+  });
+
+  test("an emoji at the cut position is never split", async () => {
+    const b = await boot();
+    const row = await addApproval(b, newOperator(), { question: EMOJI.repeat(4100) });
+    expect(loneSurrogate.test(row.question), "a lone surrogate reached the stored question").toBe(false);
+    expect(row.question, "a split pair stored as UTF-8 comes back as the replacement character").not.toContain(String.fromCharCode(0xfffd));
+    const marker = ` ${String.fromCharCode(0x2026)} [truncated from 4100 characters]`;
+    expect(row.question, "a split pair can also come back fused with the next character").toBe(
+      EMOJI.repeat(4000 - marker.length) + marker
+    );
+    expect(row.question).toContain("[truncated from 4100 characters]");
+    expect(codePoints(row.question)).toBeLessThanOrEqual(4000);
+  });
+
+  test("capVisibly never leaves a lone surrogate, whatever the parity of the cut", () => {
+    for (const s of [EMOJI.repeat(4100), `a${EMOJI.repeat(4100)}`]) {
+      const cut = capVisibly(s, 4000);
+      expect(loneSurrogate.test(cut), `offset ${s.length % 2}`).toBe(false);
+      expect(cut).toContain(`[truncated from ${codePoints(s)} characters]`);
+      expect(codePoints(cut)).toBeLessThanOrEqual(4000);
+    }
+  });
+
+  test("capVisibly stays within a bound too small for the marker", () => {
+    expect(capVisibly("x".repeat(50), 10)).toBe("x".repeat(10));
+    expect(capVisibly("x".repeat(50), 0)).toBe("");
+    expect(capVisibly("x".repeat(50), -5)).toBe("");
+  });
+
+  test("an over-long title carries the same marker within 200", async () => {
+    const b = await boot();
+    const row = await addApproval(b, newOperator(), { title: `${EMOJI}${"t".repeat(300)}` });
+    expect(row.title.endsWith("[truncated from 301 characters]"), row.title).toBe(true);
+    expect(codePoints(row.title)).toBeLessThanOrEqual(200);
+    expect(row.title.startsWith(EMOJI)).toBe(true);
   });
 });

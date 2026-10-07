@@ -274,6 +274,18 @@ describe("ask_operator over MCP stdio", () => {
     expect(res.result?.content?.[0]?.text).toContain("approved");
   }, 60_000);
 
+  test("an over-long question reaches the broker whole and is stored with the truncation marker", async () => {
+    const h = await boot(true);
+    h.send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/call",
+      params: { name: "ask_operator", arguments: { title: "Long", question: "q".repeat(5000) } },
+    });
+    const approval = await firstApproval(h);
+    expect(approval?.question.endsWith("[truncated from 5000 characters]"), approval?.question.slice(-60)).toBe(true);
+  }, 60_000);
+
   test("ask_operator_wait on an unknown ticket errors rather than blocking", async () => {
     const h = await boot(true);
     h.send({

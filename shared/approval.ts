@@ -304,6 +304,20 @@ function cutCodePoints(s: string, max: number): string {
   return points.length <= max ? s : points.slice(0, max).join("");
 }
 
+/**
+ * Cut to `max` code points, saying so: the end is replaced by a marker naming
+ * the original length, so the operator never answers a silently shortened text.
+ * A bound too small to hold the marker cuts without it.
+ */
+export function capVisibly(s: string, max: number): string {
+  const points = Array.from(s);
+  if (points.length <= max) return s;
+  const marker = ` … [truncated from ${points.length} characters]`;
+  const room = max - Array.from(marker).length;
+  if (room <= 0) return points.slice(0, Math.max(0, max)).join("");
+  return points.slice(0, room).join("").trimEnd() + marker;
+}
+
 function cleanQuestionText(s: string, keepNewlines: boolean): string {
   return stripControl(
     s.replace(INVISIBLE_CHARS, (c) => (KEPT_FOR_STRIP_CONTROL.has(c) ? c : "")),
@@ -433,12 +447,10 @@ export function validateApprovalDraft(body: {
   const kind = str(body.kind) as ApprovalKind;
   if (!APPROVAL_KINDS.includes(kind)) return { ok: false, error: "kind must be permission|question|plan" };
 
-  const title = stripControl(str(body.title)).trim().slice(0, APPROVAL_TITLE_MAX);
+  const title = capVisibly(stripControl(str(body.title)).trim(), APPROVAL_TITLE_MAX);
   if (!title) return { ok: false, error: "title is required" };
 
-  const question = stripControl(str(body.question), { keepNewlines: true })
-    .trim()
-    .slice(0, APPROVAL_QUESTION_MAX);
+  const question = capVisibly(stripControl(str(body.question), { keepNewlines: true }).trim(), APPROVAL_QUESTION_MAX);
   if (!question) return { ok: false, error: "question is required" };
 
   const rawOptions = Array.isArray(body.options) ? body.options : [];

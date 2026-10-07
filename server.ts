@@ -84,8 +84,6 @@ import type {
   ApprovalWaitResponse,
 } from "./shared/types.ts";
 import {
-  APPROVAL_QUESTION_MAX,
-  APPROVAL_TITLE_MAX,
   buildAuthProof,
   loadSessionApprovalCredential,
 } from "./shared/approval-client.ts";
@@ -1472,8 +1470,8 @@ async function handleAskOperator(name: string, args: unknown, identity: Companio
       const rawOptions = (args as { options?: unknown }).options;
       const created = await signedPost<ApprovalAddResponse>("/approval/add", {
         kind: "question",
-        title: title.slice(0, APPROVAL_TITLE_MAX),
-        question: question.slice(0, APPROVAL_QUESTION_MAX),
+        title,
+        question,
         options: Array.isArray(rawOptions) ? rawOptions.slice(0, 10).map(String) : [],
         session_ref: cred.sessionRef,
         // The caller may only wait on its own new approval.

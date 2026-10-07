@@ -200,6 +200,29 @@ describe("approval request shaping", () => {
     expect(body.options).toEqual([]);
   });
 
+  test("a tool input past the question bound is cut with a marker naming its real length", () => {
+    const body = buildApprovalRequest(
+      { hook_event_name: "PermissionRequest", tool_name: "Bash", tool_input: { command: "x".repeat(5000) } },
+      cfg
+    );
+    const question = String(body.question);
+    const fullLength = Array.from(`The agent wants to use Bash.\nInput: ${JSON.stringify({ command: "x".repeat(5000) })}`).length;
+    expect(question.endsWith(`[truncated from ${fullLength} characters]`), question.slice(-60)).toBe(true);
+    expect(Array.from(question).length).toBeLessThanOrEqual(4000);
+    expect(question).toContain("x".repeat(3000));
+  });
+
+  test("a long notification message is cut visibly in the title, whole in the question", () => {
+    const message = "m".repeat(400);
+    const body = buildApprovalRequest(
+      { hook_event_name: "Notification", notification_type: "agent_needs_input", message },
+      cfg
+    );
+    expect(String(body.title).endsWith("[truncated from 400 characters]"), String(body.title)).toBe(true);
+    expect(Array.from(String(body.title)).length).toBeLessThanOrEqual(160);
+    expect(body.question).toBe(message);
+  });
+
   test("a payload with no message still produces a usable title", () => {
     const body = buildApprovalRequest(
       { hook_event_name: "Notification", notification_type: "agent_needs_input" },
