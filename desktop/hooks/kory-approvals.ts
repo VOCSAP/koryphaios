@@ -11,9 +11,6 @@ export interface ApprovalHost {
 
 export type AskedCall = { tool: string; tool_use_id: string }
 
-/** Runs after the engine settled on `ask`, before the dialog opens; it cannot change the verdict. */
-export type AskObserver = ($: ApprovalHost, call: AskedCall) => Promise<void>
-
 export type ApprovalHelperOp = 'add' | 'wait' | 'withdraw'
 
 const HELPER_TIMEOUT_MS = 30_000
@@ -54,27 +51,24 @@ export async function callApprovalHelper(
   }
 }
 
+// The engine's module loader takes only a string literal here, never APPROVAL_MODULE_ENV.
 export async function approvalModuleEnabled($: ApprovalHost): Promise<boolean> {
-  return (await $.env.get(APPROVAL_MODULE_ENV)) === '1'
+  return (await $.env.get('KORY_APPROVAL_MODULE')) === '1'
 }
 
-const logAsk: AskObserver = async ($, call) => {
+// The loader refuses $ passed to anything but a top-level function declaration: no observer list, no const arrow.
+async function logAsk($: ApprovalHost, call: AskedCall): Promise<void> {
   if (await approvalModuleEnabled($)) $.ui.log(`Kory approvals: ask for ${call.tool} ${call.tool_use_id}`, { to: 'debug' })
 }
 
-export function register(on: On, askObservers: readonly AskObserver[] = []): void {
-  const observers = [logAsk, ...askObservers]
-
+export function register(on: On): void {
   on('tool.check', async ($, e, next) => {
     const verdict = await next(e)
     if (verdict.decision !== 'ask' || !e.tool_use_id) return verdict
-    const call = { tool: e.tool, tool_use_id: e.tool_use_id }
-    for (const observe of observers) {
-      try {
-        await observe($, call)
-      } catch (err) {
-        $.ui.log(`Kory ask observer failed: ${errorText(err)}`, { to: 'debug' })
-      }
+    try {
+      await logAsk($, { tool: e.tool, tool_use_id: e.tool_use_id })
+    } catch (err) {
+      $.ui.log(`Kory ask observer failed: ${errorText(err)}`, { to: 'debug' })
     }
     return verdict
   })

@@ -10,7 +10,6 @@ import {
   callApprovalHelper,
   register,
   type ApprovalHost,
-  type AskObserver,
 } from "../desktop/hooks/kory-approvals.ts";
 import { APPROVAL_WAIT_MAX_SEC, buildSignedRequest, runApprovalClient } from "../desktop/hooks/approval-client.ts";
 import type { ProcessRunInit, ProcessRunResult } from "../desktop/hooks/claude-code-types.ts";
@@ -20,15 +19,12 @@ const PLUGIN_ROOT = "C:/plugins/deck";
 
 type Handler = (...args: unknown[]) => Promise<unknown>;
 
-function registered(observers: readonly AskObserver[] = []): Map<string, Handler> {
+function registered(): Map<string, Handler> {
   const handlers = new Map<string, Handler>();
-  register(
-    ((event: string, ...args: unknown[]) => {
-      const handler = args.at(-1);
-      if (typeof handler === "function") handlers.set(event, handler as Handler);
-    }) as never,
-    observers,
-  );
+  register(((event: string, ...args: unknown[]) => {
+    const handler = args.at(-1);
+    if (typeof handler === "function") handlers.set(event, handler as Handler);
+  }) as never);
   return handlers;
 }
 
@@ -85,29 +81,33 @@ for (const gate of ["1", ""]) {
   });
 }
 
-test("ask observers run on a real call's ask only", async () => {
-  const seen: string[] = [];
-  const observer: AskObserver = async (_$, call) => void seen.push(`${call.tool}:${call.tool_use_id}`);
-  const check = registered([observer]).get("tool.check")!;
+test("the ask observer runs on a real call's ask only", async () => {
+  const probe = host("1");
+  const check = registered().get("tool.check")!;
 
-  await check(host("").value, { tool: "Bash", input: {}, tool_use_id: "toolu_a" }, nextResolving({ decision: "ask" }));
-  await check(host("").value, { tool: "Bash", input: {}, tool_use_id: "toolu_b" }, nextResolving({ decision: "allow" }));
-  await check(host("").value, { tool: "Bash", input: {} }, nextResolving({ decision: "ask" }));
+  await check(probe.value, { tool: "Bash", input: {}, tool_use_id: "toolu_a" }, nextResolving({ decision: "ask" }));
+  await check(probe.value, { tool: "Bash", input: {}, tool_use_id: "toolu_b" }, nextResolving({ decision: "allow" }));
+  await check(probe.value, { tool: "Bash", input: {} }, nextResolving({ decision: "ask" }));
 
-  expect(seen, "allow and the $.tool.check query (no tool_use_id) are not asks to observe").toEqual(["Bash:toolu_a"]);
+  expect(probe.logs, "allow and the $.tool.check query (no tool_use_id) are not asks to observe").toEqual([
+    "Kory approvals: ask for Bash toolu_a",
+  ]);
 });
 
 test("a throwing ask observer is logged and leaves the verdict untouched", async () => {
   const verdict = { decision: "ask" as const };
-  const probe = host("");
-  const result = await registered([
-    async () => {
-      throw new Error("observer down");
-    },
-  ]).get("tool.check")!(probe.value, { tool: "Bash", input: {}, tool_use_id: "toolu_c" }, nextResolving(verdict));
+  const probe = host("1");
+  probe.value.env.get = async () => {
+    throw new Error("env down");
+  };
+  const result = await registered().get("tool.check")!(
+    probe.value,
+    { tool: "Bash", input: {}, tool_use_id: "toolu_c" },
+    nextResolving(verdict),
+  );
 
   expect(result).toBe(verdict);
-  expect(probe.logs).toEqual(["Kory ask observer failed: observer down"]);
+  expect(probe.logs).toEqual(["Kory ask observer failed: env down"]);
 });
 
 test("the approval module observes an ask only when the Deck armed it", async () => {

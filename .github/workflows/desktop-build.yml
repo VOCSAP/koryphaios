@@ -96,6 +96,29 @@ jobs:
         shell: bash
         run: bun run typecheck
 
+      # The Deck plugin guard runs the real `claude plugin validate` and fails
+      # when `claude` is not on PATH. Pinned, never latest: the loader rules
+      # belong to the CLI, so a floating CLI changes what the gate accepts with
+      # no commit in between. Scripts and optional dependencies stay enabled:
+      # the postinstall copies the per-platform native binary over the bin/
+      # stub, and --ignore-scripts or --omit=optional leaves a stub that cannot
+      # run. The package declares node >=22 while this job stays on node 20:
+      # npm only warns, the binary does not use node at run time, and the
+      # version guard below fails the job if that stops being true.
+      - name: Install Claude Code CLI (pinned)
+        shell: bash
+        run: |
+          npm install --prefix "${{ runner.temp }}/claude-cli" --no-audit --no-fund @anthropic-ai/claude-code@2.1.292
+          echo "${{ runner.temp }}/claude-cli/node_modules/.bin" >> "$GITHUB_PATH"
+          echo "${{ runner.temp }}/claude-cli/node_modules/@anthropic-ai/claude-code/bin" >> "$GITHUB_PATH"
+
+      - name: Claude Code CLI version guard
+        shell: bash
+        run: |
+          version="$(claude --version)"
+          echo "$version"
+          test "$version" = "2.1.292 (Claude Code)"
+
       # Pure modules (desktop main-process helpers, the notify channels and
       # their wire format, the mobile shell's decision logic, and a
       # happy-dom/React renderer harness) import under bun -- no node-pty /
