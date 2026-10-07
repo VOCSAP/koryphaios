@@ -2386,6 +2386,17 @@ export interface DeckApi {
    */
   approvalAllow(id: string): Promise<boolean>
   /**
+   * Answer a structured question (AskUserQuestion) with option labels or one
+   * free text per question, keyed by the question text. Rejects when the
+   * payload is malformed; `false` when another channel won the race.
+   */
+  approvalAnswers(id: string, answers: Record<string, string[]>): Promise<boolean>
+  /**
+   * Give a module-served request back to the native terminal menu, the only
+   * place that offers "Yes, always" and the native question screen.
+   */
+  approvalHandback(id: string): Promise<boolean>
+  /**
    * Reply to an ordinary (family 1) inbox message: not correlated, not a
    * resolution — a plain targeted announce. Resolves to the recipient
    * count from the underlying /announce call (0 or 1 for a single named

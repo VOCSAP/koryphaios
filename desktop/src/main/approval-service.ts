@@ -6,10 +6,20 @@
 // broker-side on claim and again here, and the submitting Enter is added by
 // this code, never by the received text.
 
-import { buildAuthProof, sanitizeAnswerForPty, type Approval, type ApprovalAddResponse } from './approval-auth'
+import {
+  APPROVAL_ANSWER_MAX,
+  APPROVAL_OPTIONS_MAX,
+  APPROVAL_QUESTION_MAX,
+  APPROVAL_QUESTIONS_MAX,
+  buildAuthProof,
+  sanitizeAnswerForPty,
+  type Approval,
+  type ApprovalAddResponse
+} from './approval-auth'
 import type { OperatorIdentity } from './operator-identity'
 import type { BrokerEndpoint } from './broker-client'
 import { commandHash } from './launch-approval'
+import { reportError } from './log'
 
 export interface ApprovalDeps {
   endpoint: BrokerEndpoint
@@ -147,7 +157,11 @@ export async function addApproval(
  */
 export async function claimApproval(
   deps: ApprovalDeps,
-  args: { id: string; answerKind: 'allow' | 'deny' | 'text'; answerText?: string }
+  args: { id: string } & (
+    | { answerKind: 'allow' | 'deny' | 'text'; answerText?: string }
+    | { answerKind: 'answers'; answers: Record<string, string[]> }
+    | { handback: true }
+  )
 ): Promise<Approval | null> {
   try {
     const res = await signedPost<{ approval: Approval }>(deps, '/approval/claim', {
@@ -156,14 +170,62 @@ export async function claimApproval(
       // and the Deck cannot settle any approval.
       project_key: deps.projectKey,
       via: 'deck',
-      answer_kind: args.answerKind,
-      answer_text: args.answerText
+      // The broker refuses a handback carrying any answer field, so each
+      // shape sends only its own members.
+      ...('handback' in args
+        ? { handback: true }
+        : args.answerKind === 'answers'
+          ? { answer_kind: 'answers', answers: args.answers }
+          : { answer_kind: args.answerKind, answer_text: args.answerText })
     })
     return res.approval
   } catch (e) {
     if (e instanceof Error && /: 409$/.test(e.message)) return null
     throw e
   }
+}
+
+/**
+ * Shape and size check of an `answers` verdict arriving over IPC, before it is
+ * signed and sent. Whether each key is a real question and each value a real
+ * option is the broker's call, against the row it holds. Null when malformed.
+ */
+export function parseApprovalAnswers(raw: unknown): Record<string, string[]> | null {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return null
+  const proto = Object.getPrototypeOf(raw)
+  if (proto !== Object.prototype && proto !== null) return null
+  const keys = Object.keys(raw)
+  if (keys.length === 0 || keys.length > APPROVAL_QUESTIONS_MAX) return null
+  const codePoints = (s: string): number => Array.from(s).length
+  // Keys are question texts an agent chose: "__proto__" must stay an own key.
+  const out = Object.create(null) as Record<string, string[]>
+  for (const key of keys) {
+    if (codePoints(key) > APPROVAL_QUESTION_MAX) return null
+    const values = (raw as Record<string, unknown>)[key]
+    if (!Array.isArray(values) || values.length === 0 || values.length > APPROVAL_OPTIONS_MAX + 1) return null
+    const strings: string[] = []
+    for (let i = 0; i < values.length; i++) {
+      const v: unknown = values[i]
+      if (typeof v !== 'string' || codePoints(v) > APPROVAL_ANSWER_MAX) return null
+      strings.push(v)
+    }
+    out[key] = strings
+  }
+  return out
+}
+
+/** The `approvals:answers` handler: `call` is reached only with a payload parseApprovalAnswers accepted. */
+export function handleAnswersIpc(
+  id: unknown,
+  raw: unknown,
+  call: (id: string, answers: Record<string, string[]>) => Promise<boolean>
+): Promise<boolean> {
+  const answers = parseApprovalAnswers(raw)
+  if (!answers) {
+    reportError('approvals', 'approvals:answers received a malformed answers payload')
+    return Promise.reject(new Error('approvals:answers: malformed answers'))
+  }
+  return call(String(id ?? ''), answers)
 }
 
 /**

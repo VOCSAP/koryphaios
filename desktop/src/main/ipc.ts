@@ -2,6 +2,7 @@ import { join } from 'node:path'
 import { app, BrowserWindow, desktopCapturer, dialog, shell, webContents } from 'electron'
 import { broadcast, isLocalIpcEvent, regHandle, regOn } from './api-registry'
 import { safeExternalUrl } from './external-url'
+import { handleAnswersIpc } from './approval-service'
 import type {
   AckableInboxEntry,
   AppConfig,
@@ -233,6 +234,10 @@ interface IpcDeps {
    * verdict (`answerKind: 'allow'`).
    */
   approvalAllow: (id: string) => Promise<boolean>
+  /** Answer a structured question; `answers` is already shape-checked. */
+  approvalAnswers: (id: string, answers: Record<string, string[]>) => Promise<boolean>
+  /** Give a module-served request back to the native terminal menu. */
+  approvalHandback: (id: string) => Promise<boolean>
   /** Reply to an ordinary (family 1) inbox message: a plain targeted announce, not correlated to anything broker-side. */
   announceTo: (toPeerId: string, text: string) => Promise<number>
   /**
@@ -290,6 +295,8 @@ export function registerIpc({
   approvalDecline,
   approvalAck,
   approvalAllow,
+  approvalAnswers,
+  approvalHandback,
   announceTo,
   purgeInboxSession,
   inboxDelete,
@@ -1630,6 +1637,10 @@ export function registerIpc({
   regHandle('approvals:decline', (_e, id: string) => approvalDecline(String(id ?? '')))
   regHandle('approvals:ack', (_e, id: string) => approvalAck(String(id ?? '')))
   regHandle('approvals:allow', (_e, id: string) => approvalAllow(String(id ?? '')))
+  regHandle('approvals:answers', (_e, id: string, rawAnswers: unknown) =>
+    handleAnswersIpc(id, rawAnswers, approvalAnswers)
+  )
+  regHandle('approvals:handback', (_e, id: string) => approvalHandback(String(id ?? '')))
   regHandle('inbox:reply', (_e, toPeerId: string, text: string) =>
     announceTo(String(toPeerId ?? ''), String(text ?? ''))
   )

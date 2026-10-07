@@ -3393,6 +3393,18 @@ app.whenReady().then(async () => {
       const res = await claimApproval(deps, { id, answerKind: 'allow' })
       return res !== null
     },
+    approvalAnswers: async (id: string, answers: Record<string, string[]>): Promise<boolean> => {
+      const deps = approvals.deps()
+      if (!deps) return false
+      const res = await claimApproval(deps, { id, answerKind: 'answers', answers })
+      return res !== null
+    },
+    approvalHandback: async (id: string): Promise<boolean> => {
+      const deps = approvals.deps()
+      if (!deps) return false
+      const res = await claimApproval(deps, { id, handback: true })
+      return res !== null
+    },
     // Unified Courrier's reply-to-a-peer-message action: same sendAnnounce
     // primitive as the existing team-lead/supervisor/assignment announces
     // above, just addressed by the caller's own toPeerId instead of a role

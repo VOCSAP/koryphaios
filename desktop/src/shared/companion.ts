@@ -161,6 +161,8 @@ export const COMPANION_MANIFEST = {
   approvalDecline: { kind: 'invoke', channel: 'approvals:decline' },
   approvalAck: { kind: 'invoke', channel: 'approvals:ack' },
   approvalAllow: { kind: 'invoke', channel: 'approvals:allow' },
+  approvalAnswers: { kind: 'invoke', channel: 'approvals:answers' },
+  approvalHandback: { kind: 'invoke', channel: 'approvals:handback' },
   inboxReply: { kind: 'invoke', channel: 'inbox:reply' },
   inboxAckState: { kind: 'invoke', channel: 'inbox:ack-state' },
   inboxMarkSeen: { kind: 'invoke', channel: 'inbox:mark-seen' },
@@ -314,6 +316,8 @@ const EXPLICIT_REMOTE_BLOCKED_CHANNELS: readonly string[] = [
   'approvals:decline',
   'approvals:ack',
   'approvals:allow',
+  'approvals:answers',
+  'approvals:handback',
   // A READ, and still host-only: the summary describes which broker every
   // agent on the HOST machine talks to -- its URL, whether a bearer token is
   // configured, which environment variables are forcing it. That is host
@@ -395,6 +399,8 @@ export const CHANNEL_TIERS: Readonly<Record<string, 0 | 1 | 2 | 3>> = {
   'approvals:decline': 2,
   'approvals:ack': 2,
   'approvals:allow': 2,
+  'approvals:answers': 2,
+  'approvals:handback': 2,
   'companion:status': 0,
   // Remote approvals. Reading the channel list is tier 0; everything else is
   // trust-changing: a bot token grants control of the operator's notification
