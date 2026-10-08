@@ -21,10 +21,12 @@
     "react": "~19.2.0",
     "react-dom": "~19.2.0",
     "selfsigned": "^5.5.0",
+    "typescript": "^7.0.2",
+    "typescript6": "npm:typescript@^6.0.2",
     "zustand": "~5.0.0"
   },
   "peerDependencies": {
-    "typescript": "^5"
+    "typescript": "^7"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.27.1"

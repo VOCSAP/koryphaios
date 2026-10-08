@@ -88,7 +88,6 @@ function typecheckFactory() {
       allowImportingTsExtensions: true,
       types: ["node"],
       typeRoots: [TYPE_ROOTS],
-      baseUrl: ".",
       paths: { "clodex-lifecycle-io": [SOURCE.replaceAll("\\", "/")] },
     },
     files: ["probe.ts"],

@@ -9,7 +9,7 @@
 
 import { readdirSync } from "node:fs";
 import { join } from "node:path";
-import ts from "typescript";
+import ts from "typescript6";
 
 /** A server entry named at a path boundary: avatar-server.ts is another program. */
 export const SERVER_ARTIFACT = /(?:^|[\\/"'`\s=])server(?:-deck)?\.(?:ts|[cm]?js)\b/;

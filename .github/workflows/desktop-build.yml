@@ -29,6 +29,12 @@ on:
       - 'cli.ts'
       - 'scripts/**'
       - '.github/workflows/desktop-build.yml'
+      # The compiler, the typescript6 alias and the Bun pin live in the root
+      # manifest, lockfile and .bun-version; the typecheck steps and the
+      # toolchain guard must run when only those change.
+      - 'package.json'
+      - 'bun.lock'
+      - '.bun-version'
   pull_request:
     paths:
       - 'desktop/**'
@@ -40,6 +46,9 @@ on:
       - 'cli.ts'
       - 'scripts/**'
       - '.github/workflows/desktop-build.yml'
+      - 'package.json'
+      - 'bun.lock'
+      - '.bun-version'
 
 jobs:
   build:
