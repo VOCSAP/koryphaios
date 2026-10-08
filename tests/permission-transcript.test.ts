@@ -221,6 +221,153 @@ describe("permission transcript identity", () => {
     expect(inspectPermissionTranscript(longContext, transcript(prompt(), tool("long", "prompt", { content: `${"x".repeat(160)}different` })))).toEqual({ kind: "none" });
   });
 
+  test("acquires an Edit whose file path differs only by Windows separators", () => {
+    const input = { file_path: "C:\\Users\\agent\\note.txt", old_string: "before", new_string: "after" };
+    const editContext = { promptId: "prompt-edit", toolName: "Edit", toolInput: input };
+    const raw = transcript(
+      { uuid: "edit-prompt", promptId: "prompt-edit" },
+      {
+        uuid: "edit-tool",
+        parentUuid: "edit-prompt",
+        message: { content: [{ type: "tool_use", id: "edit-1", name: "Edit", input: { ...input, file_path: "C:/Users/agent/note.txt" } }] },
+      }
+    );
+
+    expect(inspectPermissionTranscript(editContext, raw, undefined, "win32")).toEqual({ kind: "candidate", toolUseId: "edit-1", hasResult: false });
+    expect(inspectPermissionTranscript(editContext, raw, undefined, "linux")).toEqual({ kind: "none" });
+  });
+
+  test("normalizes every permitted top-level native path field on win32", () => {
+    for (const key of ["file_path", "notebook_path", "path"] as const) {
+      const input = { [key]: "C:\\Users\\agent\\note.txt" };
+      const raw = transcript(
+        { uuid: "native-prompt", promptId: "prompt-native" },
+        {
+          uuid: `native-${key}`,
+          parentUuid: "native-prompt",
+          message: { content: [{ type: "tool_use", id: key, name: "Read", input: { [key]: "C:/Users/agent/note.txt" } }] },
+        }
+      );
+
+      expect(inspectPermissionTranscript({ promptId: "prompt-native", toolName: "Read", toolInput: input }, raw, undefined, "win32")).toEqual({ kind: "candidate", toolUseId: key, hasResult: false });
+      expect(inspectPermissionTranscript({ promptId: "prompt-native", toolName: "Read", toolInput: input }, raw, undefined, "linux")).toEqual({ kind: "none" });
+    }
+  });
+
+  test("distinguishes two Edit calls to one canonical file by old_string", () => {
+    const first = { file_path: "C:\\Users\\agent\\note.txt", old_string: "one", new_string: "next" };
+    const second = { file_path: "C:\\Users\\agent\\note.txt", old_string: "two", new_string: "next" };
+    const raw = transcript(
+      { uuid: "edit-prompt", promptId: "prompt-edit" },
+      {
+        uuid: "edit-first",
+        parentUuid: "edit-prompt",
+        message: { content: [{ type: "tool_use", id: "edit-1", name: "Edit", input: { ...first, file_path: "C:/Users/agent/note.txt" } }] },
+      },
+      {
+        uuid: "edit-second",
+        parentUuid: "edit-prompt",
+        message: { content: [{ type: "tool_use", id: "edit-2", name: "Edit", input: { ...second, file_path: "C:/Users/agent/note.txt" } }] },
+      }
+    );
+
+    expect(inspectPermissionTranscript({ promptId: "prompt-edit", toolName: "Edit", toolInput: first }, raw, undefined, "win32")).toEqual({ kind: "candidate", toolUseId: "edit-1", hasResult: false });
+    expect(inspectPermissionTranscript({ promptId: "prompt-edit", toolName: "Edit", toolInput: second }, raw, undefined, "win32")).toEqual({ kind: "candidate", toolUseId: "edit-2", hasResult: false });
+    expect(inspectPermissionTranscript({ promptId: "prompt-edit", toolName: "Edit", toolInput: first }, raw, undefined, "linux")).toEqual({ kind: "none" });
+    expect(inspectPermissionTranscript({ promptId: "prompt-edit", toolName: "Edit", toolInput: second }, raw, undefined, "linux")).toEqual({ kind: "none" });
+  });
+
+  test("treats duplicate Edit calls with equivalent Windows paths as ambiguous", () => {
+    const input = { file_path: "C:\\Users\\agent\\note.txt", old_string: "before", new_string: "after" };
+    const raw = transcript(
+      { uuid: "edit-prompt", promptId: "prompt-edit" },
+      { uuid: "edit-backslash", parentUuid: "edit-prompt", message: { content: [{ type: "tool_use", id: "edit-1", name: "Edit", input }] } },
+      {
+        uuid: "edit-slash",
+        parentUuid: "edit-prompt",
+        message: { content: [{ type: "tool_use", id: "edit-2", name: "Edit", input: { ...input, file_path: "C:/Users/agent/note.txt" } }] },
+      }
+    );
+
+    expect(inspectPermissionTranscript({ promptId: "prompt-edit", toolName: "Edit", toolInput: input }, raw, undefined, "win32")).toEqual({ kind: "ambiguous" });
+    expect(inspectPermissionTranscript({ promptId: "prompt-edit", toolName: "Edit", toolInput: input }, raw, undefined, "linux")).toEqual({ kind: "candidate", toolUseId: "edit-1", hasResult: false });
+  });
+
+  test("does not normalize separators in non-path Edit fields", () => {
+    for (const field of ["old_string", "new_string"] as const) {
+      const input = { file_path: "C:\\Users\\agent\\note.txt", old_string: "before", new_string: "after", [field]: "C:\\before" };
+      const raw = transcript(
+        { uuid: "edit-prompt", promptId: "prompt-edit" },
+        {
+          uuid: "edit-tool",
+          parentUuid: "edit-prompt",
+          message: { content: [{ type: "tool_use", id: "edit-1", name: "Edit", input: { ...input, file_path: "C:/Users/agent/note.txt", [field]: "C:/before" } }] },
+        }
+      );
+
+      expect(inspectPermissionTranscript({ promptId: "prompt-edit", toolName: "Edit", toolInput: input }, raw, undefined, "win32")).toEqual({ kind: "none" });
+      expect(inspectPermissionTranscript({ promptId: "prompt-edit", toolName: "Edit", toolInput: input }, raw, undefined, "linux")).toEqual({ kind: "none" });
+    }
+  });
+
+  test("keeps backslashes significant in path fields outside win32", () => {
+    const input = { file_path: "C:\\Users\\agent\\note.txt", old_string: "before", new_string: "after" };
+    const raw = transcript(
+      { uuid: "edit-prompt", promptId: "prompt-edit" },
+      {
+        uuid: "edit-tool",
+        parentUuid: "edit-prompt",
+        message: { content: [{ type: "tool_use", id: "edit-1", name: "Edit", input: { ...input, file_path: "C:/Users/agent/note.txt" } }] },
+      }
+    );
+
+    expect(inspectPermissionTranscript({ promptId: "prompt-edit", toolName: "Edit", toolInput: input }, raw, undefined, "linux")).toEqual({ kind: "none" });
+  });
+
+  test("rejects distinct canonical paths on win32", () => {
+    const input = { file_path: "C:\\Users\\agent\\first.txt" };
+    const raw = transcript(
+      { uuid: "path-prompt", promptId: "prompt-path" },
+      {
+        uuid: "path-tool",
+        parentUuid: "path-prompt",
+        message: { content: [{ type: "tool_use", id: "path-1", name: "Read", input: { file_path: "c:/Users/agent/second.txt" } }] },
+      }
+    );
+
+    expect(inspectPermissionTranscript({ promptId: "prompt-path", toolName: "Read", toolInput: input }, raw, undefined, "win32")).toEqual({ kind: "none" });
+  });
+
+  test("canonicalizes the drive letter case on win32", () => {
+    const input = { file_path: "C:/Users/agent/note.txt" };
+    const raw = transcript(
+      { uuid: "drive-prompt", promptId: "prompt-drive" },
+      {
+        uuid: "drive-tool",
+        parentUuid: "drive-prompt",
+        message: { content: [{ type: "tool_use", id: "drive-1", name: "Read", input: { file_path: "c:\\Users\\agent\\note.txt" } }] },
+      }
+    );
+
+    expect(inspectPermissionTranscript({ promptId: "prompt-drive", toolName: "Read", toolInput: input }, raw, undefined, "win32")).toEqual({ kind: "candidate", toolUseId: "drive-1", hasResult: false });
+    expect(inspectPermissionTranscript({ promptId: "prompt-drive", toolName: "Read", toolInput: input }, raw, undefined, "linux")).toEqual({ kind: "none" });
+  });
+
+  test("does not canonicalize nested path fields", () => {
+    const input = { file_path: "C:/Users/agent/note.txt", nested: { file_path: "C:\\Users\\agent\\nested.txt" } };
+    const raw = transcript(
+      { uuid: "nested-prompt", promptId: "prompt-nested" },
+      {
+        uuid: "nested-tool",
+        parentUuid: "nested-prompt",
+        message: { content: [{ type: "tool_use", id: "nested-1", name: "Read", input: { file_path: "C:/Users/agent/note.txt", nested: { file_path: "C:/Users/agent/nested.txt" } } }] },
+      }
+    );
+
+    expect(inspectPermissionTranscript({ promptId: "prompt-nested", toolName: "Read", toolInput: input }, raw, undefined, "win32")).toEqual({ kind: "none" });
+    expect(inspectPermissionTranscript({ promptId: "prompt-nested", toolName: "Read", toolInput: input }, raw, undefined, "linux")).toEqual({ kind: "none" });
+  });
+
   test("rejects foreign, missing, cyclic, and contradictory prompt ancestry", () => {
     const foreign = transcript({ uuid: "foreign", promptId: "another" }, tool("foreign-tool", "foreign"));
     const missing = transcript(tool("missing-tool", "unknown"));

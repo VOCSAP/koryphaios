@@ -134,6 +134,18 @@ function deepEqual(left: JsonValue, right: JsonValue): boolean {
   return true;
 }
 
+function canonicalToolInput(input: JsonValue, platform: NodeJS.Platform): JsonValue {
+  if (platform !== "win32" || !isRecord(input)) return input;
+  let canonical: JsonRecord | null = null;
+  for (const key of ["file_path", "notebook_path", "path"] as const) {
+    const value = input[key];
+    if (typeof value !== "string") continue;
+    const normalized = value.replaceAll("\\", "/").replace(/^([A-Za-z]):/, (_, drive: string) => `${drive.toLowerCase()}:`);
+    if (normalized !== value) (canonical ??= { ...input })[key] = normalized;
+  }
+  return canonical ?? input;
+}
+
 function parseEntries(
   raw: string,
   maxLines: number
@@ -178,9 +190,12 @@ function hasPromptAncestor(entry: TranscriptEntry, entriesByUuid: ReadonlyMap<st
 export function inspectPermissionTranscript(
   context: Pick<PermissionTranscriptContext, "promptId" | "toolName" | "toolInput">,
   raw: string,
-  maxLines = DEFAULT_MAX_LINES
+  maxLines = DEFAULT_MAX_LINES,
+  platform: NodeJS.Platform = process.platform
 ): PermissionTranscriptInspection {
-  if (!isJsonValue(context.toolInput)) return { kind: "invalid" };
+  const contextInput = context.toolInput;
+  if (!isJsonValue(contextInput)) return { kind: "invalid" };
+  const canonicalContextInput = canonicalToolInput(contextInput as JsonRecord, platform);
   const parsed = parseEntries(raw, maxLines);
   if (parsed.kind !== "entries") return parsed;
 
@@ -203,7 +218,7 @@ export function inspectPermissionTranscript(
         && typeof content.id === "string"
         && content.name === context.toolName
         && isJsonValue(content.input)
-        && deepEqual(content.input, context.toolInput)
+        && deepEqual(canonicalToolInput(content.input, platform), canonicalContextInput)
         && hasPromptAncestor(entry, entriesByUuid, context.promptId)
       ) {
         candidates.set(content.id, entry);
