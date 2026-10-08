@@ -20,9 +20,12 @@ import { TITLE_DETAIL_MAX, summarizeToolInput } from "./tool-summary.ts";
 export { APPROVAL_FILE_ENV, APPROVAL_HOOK_BLOCK_SEC_DEFAULT, TITLE_DETAIL_MAX, summarizeToolInput };
 
 const POST_TIMEOUT_SEC = 15;
-export const PERMISSION_BUDGET_MS = 30 * 60_000;
-const PERMISSION_WAIT_SEC = 25;
 export const WITHDRAW_GRACE_SEC = 20;
+const PERMISSION_RUNNER_TIMEOUT_SEC = 2_147_400;
+const PERMISSION_WITHDRAW_AND_MARGIN_SEC = 30;
+export const PERMISSION_BUDGET_MS =
+  (PERMISSION_RUNNER_TIMEOUT_SEC - WITHDRAW_GRACE_SEC - PERMISSION_WITHDRAW_AND_MARGIN_SEC) * 1000;
+const PERMISSION_WAIT_SEC = 25;
 const DENY_MESSAGE = "Denied by the operator from Koryphaios";
 const DESK_SESSION_ENV = "CLAUDE_PEERS_DESK_SESSION";
 const EXCLUDED_PERMISSION_TOOLS = new Set(["AskUserQuestion", "ExitPlanMode"]);
@@ -212,11 +215,10 @@ function leaseIsActive(lease: PermissionLeaseReader | undefined): boolean {
 }
 
 function waitSignal(
-  budget: AbortSignal | undefined,
   lease: PermissionLeaseReader | undefined,
   transcript: PermissionTranscriptObserver | null
 ): AbortSignal | undefined {
-  const signals = [...(budget ? [budget] : []), ...(lease ? [lease.signal] : []), ...(transcript ? [transcript.resultSignal] : [])];
+  const signals = [...(lease ? [lease.signal] : []), ...(transcript ? [transcript.resultSignal] : [])];
   if (signals.length === 0) return undefined;
   return signals.length === 1 ? signals[0]! : AbortSignal.any(signals);
 }
@@ -325,10 +327,9 @@ async function servePermissionRows(
   }
 
   const budgetMs = options.budgetMs ?? PERMISSION_BUDGET_MS;
-  const budget = AbortSignal.timeout(budgetMs);
   const deadline = performance.now() + budgetMs;
   let waitFailure: { error: string; expired: boolean } | null = null;
-  while (!budget.aborted && performance.now() < deadline) {
+  while (performance.now() < deadline) {
     const remainingMs = deadline - performance.now();
     const timeoutSec = Math.max(1, Math.min(PERMISSION_WAIT_SEC, Math.ceil(remainingMs / 1000)));
     const output = await runClient(
@@ -337,7 +338,7 @@ async function servePermissionRows(
       cfg,
       tileRef,
       fetch,
-      waitSignal(budget, lease, transcript)
+      waitSignal(lease, transcript)
     );
     if (transcriptResultObserved(transcript) || !leaseIsActive(lease)) {
       await withdrawLostLease(runClient, cfg, tileRef, id, producerSecret);
@@ -353,7 +354,26 @@ async function servePermissionRows(
       return;
     }
     if (verdict.kind === "none") {
-      if (!output.ok) waitFailure = { error: output.error, expired: budget.aborted || performance.now() >= deadline };
+      if (!output.ok && (output.error.startsWith("HTTP 401:") || output.error.startsWith("HTTP 403:"))) {
+        trace("permission wait failed", output.error);
+        try {
+          const withdrawn = await runClient(
+            "withdraw",
+            JSON.stringify({ id, producer_secret: producerSecret }),
+            cfg,
+            tileRef,
+            fetch,
+            lease?.signal
+          );
+          if (!withdrawn.ok && !withdrawn.error.startsWith("HTTP 409:")) {
+            trace("permission withdraw failed", withdrawn.error);
+          }
+        } catch (withdrawErr) {
+          trace("permission withdraw failed", withdrawErr);
+        }
+        return;
+      }
+      if (!output.ok) waitFailure = { error: output.error, expired: performance.now() >= deadline };
       break;
     }
   }
@@ -363,7 +383,7 @@ async function servePermissionRows(
     return;
   }
   if (waitFailure) trace(waitFailure.expired ? "permission wait budget expired" : "permission wait failed", waitFailure.error);
-  else if (budget.aborted || performance.now() >= deadline) trace("permission wait budget expired", "local approval budget expired");
+  else if (performance.now() >= deadline) trace("permission wait budget expired", "local approval budget expired");
 
   if (!leaseIsActive(lease)) {
     await withdrawLostLease(runClient, cfg, tileRef, id, producerSecret);
@@ -394,7 +414,7 @@ async function servePermissionRows(
     cfg,
     tileRef,
     fetch,
-    waitSignal(undefined, lease, transcript)
+    waitSignal(lease, transcript)
   );
   if (transcriptResultObserved(transcript) || !leaseIsActive(lease)) return;
   const verdict = verdictOf(id, late);

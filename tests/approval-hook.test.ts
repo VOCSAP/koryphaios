@@ -921,6 +921,87 @@ test("an expired local budget leaves the native permission dialog in control", a
   expect(decisions).toEqual([]);
 });
 
+test("the local approval deadline does not create a long-lived abort signal", async () => {
+  const calls: Array<{ op: string; signal: AbortSignal | undefined }> = [];
+  const cfg = {
+    brokerUrl: "http://broker.test",
+    brokerToken: null,
+    operatorId: "op",
+    tokenId: "tok",
+    sessionRef: "window-1",
+    privateKey: "private",
+    publicKey: "public",
+    osUserHash: "",
+    blockSec: 900,
+    origin: {},
+  } satisfies ApprovalHookConfig;
+  const runClient = async (
+    op: string,
+    _rawRequest: string,
+    _cfg: ApprovalHookConfig | null,
+    _tileRef: string,
+    _fetch?: (url: string, init: RequestInit) => Promise<Response>,
+    signal?: AbortSignal
+  ) => {
+    calls.push({ op, signal });
+    if (op === "add") return { ok: true as const, id: "approval-1", producer_secret: "secret-1" };
+    if (op === "withdraw") return { ok: true as const, approval: { id: "approval-1", status: "answered_terminal" } };
+    const until = performance.now() + 30;
+    while (performance.now() < until) {}
+    return { ok: true as const, pending: true };
+  };
+
+  await servePermission(
+    cfg,
+    { kind: "permission", title: "Bash", question: "q", options: ["Allow", "Deny"] },
+    "tile-1",
+    { budgetMs: 10, runClient, writeDecision: () => {} }
+  );
+
+  expect(calls.map(({ op }) => op)).toEqual(["add", "wait", "withdraw"]);
+  expect(calls[1]?.signal).toBeUndefined();
+});
+
+test("session authentication errors stop polling without a verdict", async () => {
+  const cfg = {
+    brokerUrl: "http://broker.test",
+    brokerToken: null,
+    operatorId: "op",
+    tokenId: "tok",
+    sessionRef: "window-1",
+    privateKey: "private",
+    publicKey: "public",
+    osUserHash: "",
+    blockSec: 900,
+    origin: {},
+  } satisfies ApprovalHookConfig;
+
+  for (const error of ["HTTP 401: session token expired", "HTTP 403: session token revoked"]) {
+    const calls: string[] = [];
+    const decisions: string[] = [];
+    const runClient = async (op: string) => {
+      calls.push(op);
+      if (op === "add") return { ok: true as const, id: "approval-1", producer_secret: "secret-1" };
+      if (op === "wait" && calls.length === 2) return { ok: false as const, error };
+      if (op === "withdraw") return { ok: false as const, error: "HTTP 409: already answered" };
+      return {
+        ok: true as const,
+        approval: { id: "approval-1", reply_route: "hook", status: "answered", answer_kind: "allow" },
+      };
+    };
+
+    await servePermission(
+      cfg,
+      { kind: "permission", title: "Bash", question: "q", options: ["Allow", "Deny"] },
+      "tile-1",
+      { budgetMs: 1_000, runClient, writeDecision: (decision) => decisions.push(decision) }
+    );
+
+    expect(calls).toEqual(["add", "wait", "withdraw"]);
+    expect(decisions).toEqual([]);
+  }
+});
+
 test("an expired local budget is traced separately from broker unreachability", async () => {
   const calls: string[] = [];
   const cfg = {
@@ -941,20 +1022,13 @@ test("an expired local budget is traced separately from broker unreachability", 
     _cfg: ApprovalHookConfig | null,
     _tileRef: string,
     _fetch?: (url: string, init: RequestInit) => Promise<Response>,
-    signal?: AbortSignal
+    _signal?: AbortSignal
   ) => {
     calls.push(op);
     if (op === "add") return { ok: true as const, id: "approval-1", producer_secret: "secret-1" };
     if (op === "withdraw") return { ok: true as const, approval: { id: "approval-1", status: "answered_terminal" } };
-    await Promise.race([
-      new Promise<void>((resolve) => {
-        if (signal?.aborted) resolve();
-        else signal?.addEventListener("abort", () => resolve(), { once: true });
-      }),
-      Bun.sleep(200).then(() => {
-        throw new Error("budget signal did not abort");
-      }),
-    ]);
+    const until = performance.now() + 50;
+    while (performance.now() < until) {}
     return { ok: false as const, error: "broker unreachable: The operation timed out." };
   };
 
@@ -972,7 +1046,7 @@ test("an expired local budget is traced separately from broker unreachability", 
   expect(stderr).not.toContain("permission wait failed");
 });
 
-test("a wait failure after the deadline is traced as budget expiry before its signal fires", async () => {
+test("a wait failure after the deadline is traced as budget expiry", async () => {
   const cfg = {
     brokerUrl: "http://broker.test",
     brokerToken: null,
@@ -991,13 +1065,12 @@ test("a wait failure after the deadline is traced as budget expiry before its si
     _cfg: ApprovalHookConfig | null,
     _tileRef: string,
     _fetch?: (url: string, init: RequestInit) => Promise<Response>,
-    signal?: AbortSignal
+    _signal?: AbortSignal
   ) => {
     if (op === "add") return { ok: true as const, id: "approval-1", producer_secret: "secret-1" };
     if (op === "withdraw") return { ok: true as const, approval: { id: "approval-1", status: "answered_terminal" } };
     const deadline = performance.now() + 30;
     while (performance.now() < deadline) {}
-    expect(signal?.aborted).toBe(false);
     return { ok: false as const, error: "broker unreachable: The operation timed out." };
   };
 
@@ -1035,19 +1108,12 @@ test("an allow verdict returned as the budget expires is emitted", async () => {
     _cfg: ApprovalHookConfig | null,
     _tileRef: string,
     _fetch?: (url: string, init: RequestInit) => Promise<Response>,
-    signal?: AbortSignal
+    _signal?: AbortSignal
   ) => {
     calls.push(op);
     if (op === "add") return { ok: true as const, id: "approval-1", producer_secret: "secret-1" };
-    await Promise.race([
-      new Promise<void>((resolve) => {
-        if (signal?.aborted) resolve();
-        else signal?.addEventListener("abort", () => resolve(), { once: true });
-      }),
-      Bun.sleep(200).then(() => {
-        throw new Error("budget signal did not abort");
-      }),
-    ]);
+    const until = performance.now() + 50;
+    while (performance.now() < until) {}
     return {
       ok: true as const,
       approval: { id: "approval-1", reply_route: "hook", status: "answered", answer_kind: "allow" },
@@ -1175,14 +1241,17 @@ describe("servePermission fallbacks", () => {
   });
 });
 
-test("PermissionRequest outlives the blocking budget, the withdraw and the late read while Notification stays short", () => {
+test("PermissionRequest reserves withdrawal grace and margin inside the runner timeout while Notification stays short", () => {
   const hooks = JSON.parse(
     readFileSync(join(import.meta.dir, "..", "desktop", "deck-plugin", "hooks", "hooks.json"), "utf8")
   ) as { hooks: Record<string, Array<{ hooks: Array<{ timeout: number }> }>> };
 
+  const RUNNER_TIMEOUT_SEC = 2_147_400;
   const WITHDRAW_AND_MARGIN_SEC = 30;
   const needSec = PERMISSION_BUDGET_MS / 1000 + WITHDRAW_GRACE_SEC + WITHDRAW_AND_MARGIN_SEC;
-  expect(hooks.hooks.PermissionRequest?.[0]?.hooks[0]?.timeout ?? 0).toBeGreaterThan(needSec);
+  expect(PERMISSION_BUDGET_MS).toBe(2_147_350_000);
+  expect(hooks.hooks.PermissionRequest?.[0]?.hooks[0]?.timeout).toBe(RUNNER_TIMEOUT_SEC);
+  expect(hooks.hooks.PermissionRequest?.[0]?.hooks[0]?.timeout ?? 0).toBeGreaterThanOrEqual(needSec);
   expect(hooks.hooks.Notification?.[0]?.hooks[0]?.timeout).toBe(20);
 });
 
