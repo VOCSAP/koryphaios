@@ -1,7 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, renameSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, posix, win32 } from "node:path";
 import { randomUUID } from "node:crypto";
 import {
   decodePermissionLeaseDescriptor,
@@ -14,6 +14,7 @@ import {
 import { PermissionLeaseRuntime } from "../desktop/src/main/permission-lease-runtime.ts";
 
 const tempDirs: string[] = [];
+const LEASE_FILE = "/state/lease.json";
 
 afterEach(() => {
   for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
@@ -41,8 +42,11 @@ test("permission lease documents require their versioned identity and finite seq
   expect(parsePermissionLeaseDocument(JSON.stringify({ ...document, sequence: Number.NaN }))).toBeNull();
   expect(parsePermissionLeaseDocument(JSON.stringify({ ...document, launchId: "not-a-uuid" }))).toBeNull();
 
-  const descriptor = encodePermissionLeaseDescriptor({ file: "C:/state/lease.json", ...lease });
-  expect(decodePermissionLeaseDescriptor(descriptor)).toEqual({ file: "C:/state/lease.json", ...lease });
+  expect(posix.isAbsolute(LEASE_FILE)).toBe(true);
+  expect(win32.isAbsolute(LEASE_FILE)).toBe(true);
+
+  const descriptor = encodePermissionLeaseDescriptor({ file: LEASE_FILE, ...lease });
+  expect(decodePermissionLeaseDescriptor(descriptor)).toEqual({ file: LEASE_FILE, ...lease });
   expect(decodePermissionLeaseDescriptor(JSON.stringify({ file: "lease.json", ...lease }))).toBeNull();
 });
 
