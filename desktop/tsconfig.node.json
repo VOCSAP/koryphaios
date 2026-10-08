@@ -7,10 +7,9 @@
     "lib": [
       "ES2022"
     ],
-    "baseUrl": ".",
     "paths": {
       "@shared/*": [
-        "src/shared/*"
+        "./src/shared/*"
       ]
     },
     "types": [

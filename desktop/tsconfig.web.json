@@ -6,9 +6,8 @@
     "moduleResolution": "bundler",
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
     "jsx": "react-jsx",
-    "baseUrl": ".",
     "paths": {
-      "@shared/*": ["src/shared/*"],
+      "@shared/*": ["./src/shared/*"],
       "@roadmap-append": ["../shared/roadmap-append.ts"]
     },
     "types": ["node"],
@@ -17,6 +16,7 @@
     "noUnusedLocals": true,
     "noUnusedParameters": true,
     "skipLibCheck": true,
+    "noUncheckedSideEffectImports": false,
     "esModuleInterop": true,
     "noEmit": true
   },
