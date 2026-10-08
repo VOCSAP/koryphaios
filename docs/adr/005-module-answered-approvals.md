@@ -48,6 +48,8 @@ Le verdict distant doit régler la permission correspondant à l'appel, sans dé
 
 Un appel inadmissible n'est pas refusé : il retombe sur le menu natif. Cette garde remplace l'ancien repli du module, qui ne cherchait `\p{Cf}`, `\p{Zl}` et `\p{Zp}` que dans le titre résumé et la question déjà coupée. **DÉDUIT** : la détection porte désormais sur l'input entier avant coupe. La suite prévue par la carte `0bc8cbab` (L8.5a, détection et révélation côté broker) n'est pas évaluée ici ; **non vérifié**.
 
+Le Deck ne renouvelle périodiquement son credential que si le broker annonce `renew_only` ; son absence laisse le credential initial actif sans renouvellement.
+
 **DÉDUIT**, `buildApprovalRequest` : la question contient `The agent wants to use <outil>.`, puis `Input: <JSON>`, puis `Working directory: <cwd>` ; elle est bornée par `capVisibly(..., APPROVAL_QUESTION_MAX)`, soit 4000 points de code avec un marqueur de coupe visible portant la longueur d'origine (`shared/approval.ts`, `shared/text.ts`). Le titre est `summarizeToolInput`, dont le détail est coupé à `TITLE_DETAIL_MAX` (`desktop/hooks/tool-summary.ts`). La commande n'est plus placée en tête verbatim et n'est pas garantie entière.
 
 ### 2. Un seul interpréteur du verdict
@@ -74,7 +76,20 @@ Cette dernière branche exclut notamment `answered_terminal`, `abandoned`, les s
 
 **Côté broker** (`handleApprovalWait`, `hookProducerGone`, `abandonIfHookProducerGone`) : une permission de route `hook` a une échéance absolue de 30 minutes depuis sa création, indépendante de l'horodatage du dernier `wait`. Passée l'échéance, la ligne devient `abandoned`, les waiters en cours sont réveillés et un claim tardif est refusé (410, couvert par `tests/broker-approvals.test.ts`). Le temps d'un long poll est ramené au temps restant avant l'échéance, et le timer d'un `wait` se résout toujours. L'échéance ne s'applique pas aux questions de route `hook`. La borne d'un long poll `hook` reste distincte : 30 s (`HOOK_WAIT_MAX_SEC`, `shared/approval.ts`).
 
-### 4. Repli et conséquences
+### 4. Bail local coopératif
+
+Une tuile Claude hôte donne au hook un bail local distinct pour son lancement. Le
+hook attend sa progression avant tout `add`. La fin de la tuile le révoque ; dès
+que cette perte est observée, le hook ne produit plus de verdict et tente de
+retirer une ligne locale déjà créée avec une borne de deux secondes.
+
+Le bail est coopératif, pas une frontière de sécurité. Il ne supprime ni une
+course interprocessus ni les processus Bun ou Bash qu'un kill dur peut laisser
+orphelins. Un échec d'écriture démarre la tuile sans bail, et une tuile sandbox
+n'en reçoit pas ; ces chemins sortent sans stdout et laissent le menu natif
+servir la demande. Le budget broker reste trente minutes, indépendant du bail.
+
+### 5. Repli et conséquences
 
 Le repli est **le menu natif**, jamais une réponse fabriquée : panne du helper, broker injoignable, sortie invalide, `add` sans id ou secret, garde d'entrée, outil exclu, budget épuisé. Le hook n'accorde pas sur un défaut technique et ne refuse pas non plus. La garde d'écran et la frappe PTY restent le chemin des routes `pty` : la question du hook `Notification` (`agent_needs_input`, posée sans route `hook`) et les approbations des autres CLI. **DÉDUIT**, `postQuestion` n'envoie pas de `reply_route` et une route absente se résout en `pty` (`resolveReplyRoute` accepte `hook` et `channel`) ; le poll des verdicts de `index.ts` exige `matchPermissionDialog` pour une permission et `permissionDialogShown` négatif pour le reste. La route `hook` n'est pas frappée par le Deck.
 
@@ -117,6 +132,6 @@ Sondes L0 et L0bis, Claude Code 2.1.291, rapportées dans la carte `173814b2` et
 1. **Conserver le repli existant.** Cette décision n'autorise ni la suppression de la garde d'écran des routes `pty` ni son relâchement ; la sortie sans stdout reste le mode dégradé du hook.
 2. **Séparer les questions des permissions.** La proposition initiale d'attendre `AskUserQuestion` dans `tool.call` pour rendre `{ result: { answers } }` reste hors du périmètre livré ici : le handler `tool.call` actuel délègue à `next(e)`. Ne pas documenter une machine d'attente commune comme réalisée.
 3. **Zéro fantôme et bail de tuile** : cartes `56689093` et `6dbebca2`.
-4. **Preuves PTY** : mesurées en `auto`, `default` et `accept-edits` (en `accept-edits`, `Edit` et `Write` passent sans dialogue donc sans ligne au Courrier ; un `Bash` non autorisé ouvre le dialogue et part au Courrier). La règle `ask` et `--bg` sont mesurés (voir §4, point 5). Les sous-agents restent à mesurer.
+4. **Preuves PTY** : mesurées en `auto`, `default` et `accept-edits` (en `accept-edits`, `Edit` et `Write` passent sans dialogue donc sans ligne au Courrier ; un `Bash` non autorisé ouvre le dialogue et part au Courrier). La règle `ask` et `--bg` sont mesurés (voir §5, point 5). Les sous-agents restent à mesurer.
 
 Aucun test runtime ni nouvelle sonde PTY n'a été exécuté pour cette mise à jour documentaire ; les références de code établissent le comportement décrit, pas une nouvelle certification de toutes ses branches.

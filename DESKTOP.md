@@ -76,7 +76,10 @@ Electron + React 19 + zustand, xterm terminals over node-pty. Sources in
   keystrokes), and `attention.ts` as the fallback for non-Claude CLIs.
   Answering IN the Deck settles the approval, which invalidates the remote
   notification (and vice versa: the broker's conditional update makes them
-  exclusive).
+  exclusive). When the broker advertises `renew_only` and returns a valid
+  future expiry, the Deck renews its credential periodically; a missing
+  capability or an invalid expiry keeps the initial credential with no
+  renewal timer.
   **Permissions are served by the hook, not by `tool.check`.** Documented as
   of 2026-10-07 (sources in ADR 005): `PermissionRequest` fires only when a
   native dialog is about to open, unlike `PreToolUse` which fires on every
@@ -102,6 +105,14 @@ Electron + React 19 + zustand, xterm terminals over node-pty. Sources in
   (https://github.com/anthropics/claude-code/issues/82150, open). This path types
   nothing: the Deck classifies its answer `settle`, not `apply`
   (`classifyVerdict`, `desktop/src/main/approval-service.ts`).
+  A host Claude tile grants the hook a local, cooperative lease before it can
+  add an approval. A tile end revokes it; after the hook observes that loss, it
+  emits neither `allow` nor `deny` and attempts to withdraw an already-created
+  local row with a two-second deadline. The lease is not a security boundary and cannot remove an
+  interprocess race or a Bun or Bash process orphaned by a hard kill. A failed
+  lease write starts the tile without a lease, and sandbox tiles receive none;
+  both cases fall back to the native menu. The broker approval budget remains
+  thirty minutes and is independent of the lease.
   `AskUserQuestion` and `ExitPlanMode` are never served. Before any `add`, a
   guard sends the call back to the native menu, posting nothing to the
   Courrier, when `tool_input` holds a `Cc`, `Cf`, `Zl` or `Zp` character,
