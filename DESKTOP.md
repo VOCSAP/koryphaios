@@ -120,11 +120,24 @@ Electron + React 19 + zustand, xterm terminals over node-pty. Sources in
   until the 30 min deadline (accepted limit; zero ghosts: card `56689093`,
   tile-close lease: card `6dbebca2`).
   Known Claude Code limits, documented as of 2026-10-07: `PermissionRequest`
-  carries no `tool_use_id`; its `allow` does not override a `deny` or `ask`
-  rule of the settings; with `--bg` the hook's decision is discarded (issue
-  https://github.com/anthropics/claude-code/issues/88698, open); agent-teams teammates never dispatch
+  carries no `tool_use_id`; a `permissions.ask` rule opens the dialog, the
+  hook answers it and its `allow` IS applied (command runs, no native menu;
+  measured with a rule set through `--settings`), whereas a `deny` rule opens
+  no dialog so the hook should not see it (DEDUCED, not measured); with `--bg` the
+  hook served and its verdict was applied (measured twice, daemon started by
+  the client; issue
+  https://github.com/anthropics/claude-code/issues/88698 not reproduced, a
+  daemon already running from another env is untested); agent-teams teammates never dispatch
   it (https://github.com/anthropics/claude-code/issues/82418, seen by
-  cross-reference only).
+  cross-reference only). In a SANDBOX tile the hook path is unavailable: the
+  approval credential (`CLAUDE_PEERS_APPROVAL_FILE`) reaches the container as
+  a HOST path whose folder is not mounted (`ApprovalRuntime.env()`,
+  `sandboxifyEnv`), so the hook finds no credential and exits without stdout.
+  The native menu that follows is served by the screen-guard fallback: the
+  attention detector sees the numbered chooser and, when remote approvals are
+  enabled, the main listener raises a `question` row in the Courrier, answered
+  through the resolved peer channel, or by keystrokes typed into the terminal
+  when no peer is resolved.
   The `Notification` hook raises a non-blocking question with no `hook` route,
   so it is routed `pty`. Verdicts that must be typed go through
   `buildKeystrokes`, which is deliberately conservative (allow = a bare Enter
