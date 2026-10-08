@@ -8,6 +8,7 @@ import {
 } from "../../shared/approval-client.ts";
 
 import { runApprovalClient } from "./approval-client.ts";
+import { createPermissionLeaseReader, type PermissionLeaseReader } from "./permission-lease.ts";
 import { verdictOf } from "./approval-verdict.ts";
 import { TITLE_DETAIL_MAX, summarizeToolInput } from "./tool-summary.ts";
 
@@ -189,8 +190,41 @@ function writePermissionDecision(behavior: "allow" | "deny"): void {
 
 export interface ServePermissionOptions {
   budgetMs?: number;
+  lease?: PermissionLeaseReader;
   runClient?: typeof runApprovalClient;
   writeDecision?: typeof writePermissionDecision;
+}
+
+const PERMISSION_LEASE_WITHDRAW_MS = 2_000;
+
+function leaseIsActive(lease: PermissionLeaseReader | undefined): boolean {
+  return !lease || (lease.isActive() && !lease.signal.aborted);
+}
+
+function waitSignal(budget: AbortSignal, lease: PermissionLeaseReader | undefined): AbortSignal {
+  return lease ? AbortSignal.any([budget, lease.signal]) : budget;
+}
+
+async function withdrawLostLease(
+  runClient: typeof runApprovalClient,
+  cfg: ApprovalHookConfig,
+  tileRef: string,
+  id: string,
+  producerSecret: string
+): Promise<void> {
+  try {
+    const withdrawn = await runClient(
+      "withdraw",
+      JSON.stringify({ id, producer_secret: producerSecret }),
+      cfg,
+      tileRef,
+      fetch,
+      AbortSignal.timeout(PERMISSION_LEASE_WITHDRAW_MS)
+    );
+    if (!withdrawn.ok && !withdrawn.error.startsWith("HTTP 409:")) trace("permission withdraw failed", withdrawn.error);
+  } catch (error) {
+    trace("permission withdraw failed", error);
+  }
 }
 
 export async function servePermission(
@@ -200,6 +234,8 @@ export async function servePermission(
   options: ServePermissionOptions = {}
 ): Promise<void> {
   const runClient = options.runClient ?? runApprovalClient;
+  const lease = options.lease;
+  if (lease && (!(await lease.waitForAdmission()) || !leaseIsActive(lease))) return;
   let delivered: { id: string; producerSecret: string } | null = null;
   try {
     await servePermissionRows(cfg, payload, tileRef, options, (row) => (delivered = row));
@@ -207,9 +243,21 @@ export async function servePermission(
     trace("permission flow failed", err);
     if (!delivered) return;
     const { id, producerSecret } = delivered as { id: string; producerSecret: string };
+    if (!leaseIsActive(lease)) {
+      await withdrawLostLease(runClient, cfg, tileRef, id, producerSecret);
+      return;
+    }
     try {
-      await runClient("withdraw", JSON.stringify({ id, producer_secret: producerSecret }), cfg, tileRef, fetch);
+      await runClient("withdraw", JSON.stringify({ id, producer_secret: producerSecret }), cfg, tileRef, fetch, lease?.signal);
+      if (!leaseIsActive(lease)) {
+        await withdrawLostLease(runClient, cfg, tileRef, id, producerSecret);
+        return;
+      }
     } catch (withdrawErr) {
+      if (!leaseIsActive(lease)) {
+        await withdrawLostLease(runClient, cfg, tileRef, id, producerSecret);
+        return;
+      }
       trace("permission withdraw failed", withdrawErr);
     }
   }
@@ -236,6 +284,11 @@ async function servePermissionRows(
     return;
   }
   onDelivered({ id, producerSecret });
+  const lease = options.lease;
+  if (!leaseIsActive(lease)) {
+    await withdrawLostLease(runClient, cfg, tileRef, id, producerSecret);
+    return;
+  }
 
   const budgetMs = options.budgetMs ?? PERMISSION_BUDGET_MS;
   const budget = AbortSignal.timeout(budgetMs);
@@ -250,8 +303,12 @@ async function servePermissionRows(
       cfg,
       tileRef,
       fetch,
-      budget
+      waitSignal(budget, lease)
     );
+    if (!leaseIsActive(lease)) {
+      await withdrawLostLease(runClient, cfg, tileRef, id, producerSecret);
+      return;
+    }
     const verdict = verdictOf(id, output);
     if (verdict.kind === "allow") {
       writeDecision("allow");
@@ -270,20 +327,38 @@ async function servePermissionRows(
   if (waitFailure) trace(waitFailure.expired ? "permission wait budget expired" : "permission wait failed", waitFailure.error);
   else if (budget.aborted || performance.now() >= deadline) trace("permission wait budget expired", "local approval budget expired");
 
-  const withdrawn = await runClient("withdraw", JSON.stringify({ id, producer_secret: producerSecret }), cfg, tileRef, fetch);
+  if (!leaseIsActive(lease)) {
+    await withdrawLostLease(runClient, cfg, tileRef, id, producerSecret);
+    return;
+  }
+  const withdrawn = await runClient(
+    "withdraw",
+    JSON.stringify({ id, producer_secret: producerSecret }),
+    cfg,
+    tileRef,
+    fetch,
+    lease?.signal
+  );
+  if (!leaseIsActive(lease)) {
+    await withdrawLostLease(runClient, cfg, tileRef, id, producerSecret);
+    return;
+  }
   if (withdrawn.ok) return;
   if (!withdrawn.error.startsWith("HTTP 409:")) {
     trace("permission withdraw failed", withdrawn.error);
     return;
   }
+  if (!leaseIsActive(lease)) return;
 
   const late = await runClient(
     "wait",
     JSON.stringify({ id, producer_secret: producerSecret, timeout_sec: WITHDRAW_GRACE_SEC }),
     cfg,
     tileRef,
-    fetch
+    fetch,
+    lease?.signal
   );
+  if (!leaseIsActive(lease)) return;
   const verdict = verdictOf(id, late);
   if (verdict.kind === "allow") writeDecision("allow");
   else if (verdict.kind === "deny") writeDecision("deny");
@@ -313,7 +388,13 @@ async function main(): Promise<void> {
   const tileRef = (process.env[DESK_SESSION_ENV] ?? "").trim();
   const request = buildApprovalRequest(payload, cfg, tileRef);
   if (kind === "permission") {
-    await servePermission(cfg, request, tileRef);
+    const lease = createPermissionLeaseReader(process.env.KORY_PERMISSION_LEASE, { reportError: trace });
+    if (!lease) return;
+    try {
+      await servePermission(cfg, request, tileRef, { lease });
+    } finally {
+      lease.dispose();
+    }
     return;
   }
   await postQuestion(cfg, request);

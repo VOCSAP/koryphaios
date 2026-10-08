@@ -68,6 +68,7 @@ import { sanitizeRole } from '@shared/role'
 import { reconcileOrder } from '@shared/reorder'
 import type { JoinAnnounceIntent } from '@shared/announce'
 import { peerToolsEnvValue } from './session-env'
+import { PermissionLeaseRuntime, type PermissionLeaseHandle } from './permission-lease-runtime'
 
 interface RuntimeState {
   status: SessionStatus
@@ -235,6 +236,7 @@ export type SandboxTranscriptLookup = (cwdHost: string) => TranscriptEntry[] | n
 export class SessionService extends EventEmitter {
   private defs: SessionDef[]
   private runtime = new Map<string, RuntimeState>()
+  private permissionLeaseHandles = new Map<string, PermissionLeaseHandle>()
   private pty = new PtyManager()
   private thinkingDetector = new ThinkingDetector()
   private quotaDetector = new QuotaDetector()
@@ -334,7 +336,8 @@ export class SessionService extends EventEmitter {
      */
     private mintTeamLeadBridge: MintTeamLeadBridge = () => null,
     /** Null leaves every tile without a peer_id. */
-    private getTilePeerScope: (() => TilePeerScope) | null = null
+    private getTilePeerScope: (() => TilePeerScope) | null = null,
+    private permissionLeases: PermissionLeaseRuntime | null = null
   ) {
     super()
     // Starts empty: the previous run is recovered explicitly through a
@@ -349,16 +352,12 @@ export class SessionService extends EventEmitter {
       this.attentionDetector.feed(e.id, e.data)
       this.startupAckDetector.feed(e.id, e.data)
       this.screenGuard.feed(e.id, e.data)
-      // Card f8082208: the activity tracker reads the SAME snapshot's
-      // titleSeq, never the title text -- see detect/activity.ts's header.
       const oscSnap = this.oscParserFor(e.id).feed(e.data)
       this.activityTrackerFor(e.id).observe(oscSnap.titleSeq)
     })
     this.pty.on('exit', ({ id, exitCode }: { id: string; exitCode: number }) => {
-      // pty-manager only emits 'exit' for a spontaneous process exit, never for
-      // kill()/restart, so this handler owns the close decision.
-      // Frees the double-resume guard for the id; a later restart re-registers
-      // the fresh forked id.
+      this.revokePermissionLease(id)
+      // This listener receives spontaneous exits only.
       const def = this.defs.find((d) => d.id === id)
       void this.cleanupSandbox(id, def?.name ?? id)
       if (def?.sessionId) this.registry.release(def.sessionId)
@@ -594,12 +593,29 @@ export class SessionService extends EventEmitter {
    * inert (no runtime entry for the id).
    */
   spawnUtility(id: string, cwd: string, opts: { command: string; shell: string; interactive: boolean }): void {
-    this.pty.spawn(id, cwd, opts, {})
+    this.pty.spawn(id, cwd, opts, { KORY_PERMISSION_LEASE: '' })
   }
 
   private killWithTrace(id: string, reason: string): void {
     logInfo('session', `pty kill ${id}: ${reason}`)
     this.pty.kill(id)
+  }
+
+  private revokePermissionLeaseHandle(handle: PermissionLeaseHandle | null): void {
+    if (!handle) return
+    if (this.permissionLeaseHandles.get(handle.tileId) === handle) this.permissionLeaseHandles.delete(handle.tileId)
+    this.permissionLeases?.revoke(handle)
+  }
+
+  private revokePermissionLease(id: string): PermissionLeaseHandle | null {
+    const handle = this.permissionLeaseHandles.get(id) ?? null
+    this.revokePermissionLeaseHandle(handle)
+    return handle
+  }
+
+  private revokeAllPermissionLeases(): void {
+    for (const handle of [...this.permissionLeaseHandles.values()]) this.revokePermissionLeaseHandle(handle)
+    this.permissionLeases?.revokeAll()
   }
 
   killUtility(id: string): void {
@@ -625,6 +641,7 @@ export class SessionService extends EventEmitter {
     this.startupAckDetector.stop()
     this.screenGuard.stop()
     this.pendingPrompt.clear()
+    this.revokeAllPermissionLeases()
     this.pty.killAll()
   }
 
@@ -834,9 +851,11 @@ export class SessionService extends EventEmitter {
    * legitimately run twice under that race.
    */
   async remove(id: string): Promise<void> {
+    this.revokePermissionLease(id)
     const forceCleanup = (): void => {
       const def = this.defs.find((d) => d.id === id)
       if (!def) return
+      this.revokePermissionLease(id)
       this.emit('removed', { id: def.id, name: def.name })
       if (def.sessionId) this.registry.release(def.sessionId)
       this.killWithTrace(id, 'force cleanup')
@@ -891,13 +910,7 @@ export class SessionService extends EventEmitter {
         absoluteDeadlineMs: CLOSE_HARD_DEADLINE_MS
       })
     } catch (e) {
-      // Card 6c380073 (review round 2): the try above ALSO covers isModal(),
-      // which reads screenGuard/runtime BEFORE gracefulClose is ever called --
-      // so a throw there used to escape with no cleanup at all, leaving the
-      // pty running and the def in place while remove() rejected. Nothing in
-      // this method may leave the process alive: force the same idempotent
-      // cleanup the escalation itself would have run, and leave a trace
-      // (no-silent-errors) rather than swallowing.
+      // Failures before gracefulClose still require terminal cleanup.
       reportError('session', `close escalation failed for ${id}`, e)
       forceCleanup()
     } finally {
@@ -915,6 +928,7 @@ export class SessionService extends EventEmitter {
    */
   closeAll(): void {
     if (this.defs.length === 0) return
+    this.revokeAllPermissionLeases()
     for (const d of this.defs) {
       this.emit('removed', { id: d.id, name: d.name })
       if (d.sessionId) this.registry.release(d.sessionId)
@@ -979,14 +993,7 @@ export class SessionService extends EventEmitter {
    * open in this process (double-resume guard).
    */
   restoreFrom(defs: SessionDef[]): SessionRuntime[] {
-    // Tear down whatever is currently live.
-    // Card 6c380073 (second audit round): emit 'removed' for the OUTGOING defs
-    // FIRST, before anything is killed or replaced -- same reason as
-    // closeAll() above (a departed team-lead's minted token and its
-    // --mcp-config file must not outlive its tile). Order matters: emitting
-    // before `this.defs` is replaced means each revocation resolves against
-    // the session that is actually going away, never against an incoming one
-    // that happens to reuse an id.
+    this.revokeAllPermissionLeases()
     for (const d of this.defs) this.emit('removed', { id: d.id, name: d.name })
     this.pty.killAll()
     for (const d of this.defs) void this.cleanupSandbox(d.id, d.name)
@@ -1252,6 +1259,7 @@ export class SessionService extends EventEmitter {
     const def = this.defs.find((d) => d.id === id)
     if (!def) return Promise.reject(new Error(`unknown session ${id}`))
 
+    this.revokePermissionLease(id)
     const restart = (async (): Promise<SessionRuntime> => {
       await this.cleanupSandbox(def.id, def.name)
       if (!this.defs.includes(def)) throw new Error('session removed or replaced during restart')
@@ -1389,18 +1397,10 @@ export class SessionService extends EventEmitter {
   }
 
   private startPty(def: SessionDef, mode: SpawnMode): void {
+    this.revokePermissionLease(def.id)
     const cfg = this.getConfig()
     const base = this.resolveBaseCommand(def)
 
-    // Single source of truth for "is this actually a fresh line" (review nit
-    // on 150eb188/ce5aacf): `mode` alone is not enough because a caller could
-    // in principle pass mode='resume' with an empty def.sessionId. Today only
-    // spawnSession calls startPty and it already normalizes to 'fresh' before
-    // doing so, so this can't currently diverge -- but computing it once and
-    // feeding the SAME value to the branch condition, buildSessionCommandLine
-    // and shouldInjectPrompt means a future direct caller can't produce a
-    // fresh line whose prompt injection is silently disarmed by a stale
-    // 'resume' tag.
     const effective: SpawnMode = mode === 'resume' && def.sessionId ? 'resume' : 'fresh'
 
     // Drop any stale prompt-injection entry from a previous spawn of this id
@@ -1472,6 +1472,7 @@ export class SessionService extends EventEmitter {
       ...this.getScopeEnv(),
       CLAUDE_PEERS_DESK_SESSION: def.id,
       CLAUDE_PEERS_ROLE: def.role ?? '',
+      KORY_PERMISSION_LEASE: '',
       KORY_APPROVAL_MODULE: koryModuleServed ? '1' : '',
       ...(fallbackInjected ? { KORY_STATUS_FALLBACK: '1' } : null)
     }
@@ -1515,11 +1516,7 @@ export class SessionService extends EventEmitter {
       r.needsAttention = false
       r.ptyAttention = false
       r.hookAttention = false
-      // Frozen-at-spawn (card fd1914cc correction): `base` above is the
-      // command THIS instance actually starts on -- set here, not
-      // recomputed by isClaudeSession/toRuntime afterward, so a later
-      // this.launchCommand change (setLaunchCommand) cannot flip an
-      // already-live session's claude/non-claude answer out from under it.
+      // Freeze the launch classification for the process actually spawned.
       r.claudeLaunch = isClaudeLaunch(base)
     }
     // Fresh process -> fresh detector state (stale buffers/timers dropped).
@@ -1553,6 +1550,17 @@ export class SessionService extends EventEmitter {
       r.liveStatusSilenceWarned = false
       r.liveStatusAttentionAt = 0
     }
+    let permissionLease: PermissionLeaseHandle | null = null
+    if (!sandboxed && isClaudeLaunch(base) && this.permissionLeases) {
+      try {
+        permissionLease = this.permissionLeases.createLease(def.id)
+        this.permissionLeaseHandles.set(def.id, permissionLease)
+        sessionEnv.KORY_PERMISSION_LEASE = this.permissionLeases.descriptor(permissionLease)
+      } catch (e) {
+        this.revokePermissionLeaseHandle(permissionLease)
+        reportError('session', `permission lease setup failed for "${def.name}"`, e)
+      }
+    }
     try {
       this.pty.spawn(
         def.id,
@@ -1563,11 +1571,9 @@ export class SessionService extends EventEmitter {
       )
       this.deadWriteReported.delete(def.id)
     } catch (e) {
-      // node-pty throws synchronously on a bad cwd / missing shell binary.
-      // Without this catch the def was already pushed but never broadcast: an
-      // invisible zombie (O6). Mark the tile exited so the operator sees a
-      // dead tile whose Restart retries the spawn.
+      // Keep a synchronous spawn failure visible as an exited tile.
       reportError('session', `spawn failed for "${def.name}" (cwd: ${def.cwd})`, e)
+      this.revokePermissionLeaseHandle(permissionLease)
       void this.cleanupSandbox(def.id, def.name)
       if (r) {
         r.status = 'exited'

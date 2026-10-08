@@ -332,6 +332,7 @@ function makeExitSelf(id: string, initialActivity: Activity) {
     activityTrackers: { get: () => undefined, delete: () => {} },
     pendingPrompt: { delete: () => {} },
     cleanupSandbox: () => Promise.resolve(),
+    revokePermissionLease: () => {},
     persist: () => {},
     emit: () => {},
     broadcast: () => {},

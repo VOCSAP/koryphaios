@@ -34,7 +34,7 @@ export function runPtyCommand(opts: {
       cols: 200,
       rows: 50,
       cwd: opts.cwd,
-      env: process.env as Record<string, string>
+      env: { ...process.env, KORY_PERMISSION_LEASE: '' } as Record<string, string>
     })
     const finish = (err: Error | null, value?: string): void => {
       if (settled) return

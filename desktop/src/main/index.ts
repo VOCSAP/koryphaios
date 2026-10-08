@@ -18,6 +18,7 @@ import { loadConfig, saveConfig } from './store'
 import { buildAppMenu } from './menu'
 import { safeExternalUrl } from './external-url'
 import { SessionService, type DirectiveOutcome } from './session-service'
+import { PermissionLeaseRuntime } from './permission-lease-runtime'
 import {
   createMissingDirTracker,
   deckLeadPluginDirFor,
@@ -579,7 +580,6 @@ const applyClodexAutoStart = async (enabled: boolean): Promise<void> => {
   }
 }
 
-// Remote approvals are armed at readiness only when enabled, and env() always neutralizes inherited state.
 const approvalRunId = randomUUID()
 const approvals = new ApprovalRuntime({
   stateDir: join(app.getPath('userData'), APP_STATE_SUBDIR),
@@ -588,6 +588,11 @@ const approvals = new ApprovalRuntime({
   runId: approvalRunId,
   host: hostname(),
   projectKey: () => computeDeckProjectKey(cliContext.projectDir)
+})
+const permissionLeases = new PermissionLeaseRuntime({
+  stateDir: join(app.getPath('userData'), APP_STATE_SUBDIR),
+  runId: approvalRunId,
+  reportError: (message, error) => reportError('permission-lease', message, error)
 })
 
 // configureRoadmapSigner's loader runs lazily on the first write, not at boot,
@@ -658,7 +663,8 @@ const service = new SessionService(
     groupId: activeScope.groupId,
     secret: activeScope.secret,
     endpoint: resolveBrokerEndpoint()
-  })
+  }),
+  permissionLeases
 )
 
 // statusLine settings for `--settings`: resolved at every spawn, like

@@ -159,6 +159,16 @@ const STATE_SCOPES: Record<string, StateFileRule> = {
     scope: "run",
     reason: "builds <projectHash>-<runId>-session-approval.json so the credential remains owned by one in-memory Deck run",
   },
+  createLease: {
+    kind: "constructor",
+    scope: "run",
+    reason: "builds a lease file beneath permission-leases/<runId>/<tileId>; approvalRunId isolates concurrent Deck runs",
+  },
+  permissionLeaseTemporaryFile: {
+    kind: "constructor",
+    scope: "run",
+    reason: "builds the atomic temporary sibling of a run-owned permission lease before it is renamed into place",
+  },
   teamLeadMcpConfigFileName: {
     kind: "constructor",
     scope: "project",

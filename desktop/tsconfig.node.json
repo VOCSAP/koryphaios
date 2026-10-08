@@ -37,6 +37,7 @@
     "../shared/types.ts",
     "../shared/project-key.ts",
     "../shared/approval-client.ts",
+    "shared/permission-lease.ts",
     "../shared/peer-cache.ts",
     "../shared/logger.ts",
     "../shared/log-redact.ts",

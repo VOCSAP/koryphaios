@@ -85,6 +85,7 @@ export class PtyManager extends EventEmitter {
     // defaulting it, is the only correct shape.
     if (!extraEnv || !('CLAUDE_PEERS_TOOLS' in extraEnv)) delete env.CLAUDE_PEERS_TOOLS
     if (!extraEnv || !('KORY_STATUS_FALLBACK' in extraEnv)) delete env.KORY_STATUS_FALLBACK
+    if (!extraEnv || !('KORY_PERMISSION_LEASE' in extraEnv)) env.KORY_PERMISSION_LEASE = ''
 
     const proc = pty.spawn(file, args, {
       name: 'xterm-256color',

@@ -1,7 +1,8 @@
 import { test, expect, describe, afterAll } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { randomUUID } from "node:crypto";
 import { startBroker, stopBroker, post, approvalListBody, type TestBroker } from "./_helper.ts";
 import {
   buildAuthProof,
@@ -10,6 +11,8 @@ import {
   generateCredential,
 } from "../shared/approval.ts";
 import type { Approval } from "../shared/types.ts";
+import type { PermissionLeaseReader } from "../desktop/hooks/permission-lease.ts";
+import { encodePermissionLeaseDescriptor } from "../desktop/shared/permission-lease.ts";
 import {
   buildApprovalRequest,
   classifyPayload,
@@ -226,6 +229,298 @@ test("a late read ignores verdicts for a different id, route or status", async (
 
     expect(decisions).toEqual([]);
   }
+});
+
+test("a permission lease must advance before delivery is added", async () => {
+  let admit: (value: boolean) => void = () => {};
+  const admission = new Promise<boolean>((resolve) => {
+    admit = resolve;
+  });
+  const controller = new AbortController();
+  const lease = {
+    signal: controller.signal,
+    isActive: () => !controller.signal.aborted,
+    waitForAdmission: () => admission,
+    dispose: () => {},
+  } satisfies PermissionLeaseReader;
+  const calls: string[] = [];
+  const decisions: string[] = [];
+  const cfg = {
+    brokerUrl: "http://broker.test",
+    brokerToken: null,
+    operatorId: "op",
+    tokenId: "tok",
+    sessionRef: "window-1",
+    privateKey: "private",
+    publicKey: "public",
+    osUserHash: "",
+    blockSec: 900,
+    origin: {},
+  } satisfies ApprovalHookConfig;
+  const runClient = async (op: string) => {
+    calls.push(op);
+    if (op === "add") return { ok: true as const, id: "approval-1", producer_secret: "secret-1" };
+    return { ok: true as const, approval: { id: "approval-1", reply_route: "hook", status: "answered", answer_kind: "allow" } };
+  };
+
+  const served = servePermission(
+    cfg,
+    { kind: "permission", title: "Bash", question: "q", options: ["Allow", "Deny"] },
+    "tile-1",
+    { budgetMs: 1_000, lease, runClient, writeDecision: (decision) => decisions.push(decision) }
+  );
+  await Promise.resolve();
+  expect(calls).toEqual([]);
+
+  admit(true);
+  await served;
+  expect(calls).toEqual(["add", "wait"]);
+  expect(decisions).toEqual(["allow"]);
+});
+
+test("a refused permission lease leaves the native decision untouched", async () => {
+  const controller = new AbortController();
+  const lease = {
+    signal: controller.signal,
+    isActive: () => false,
+    waitForAdmission: async () => false,
+    dispose: () => {},
+  } satisfies PermissionLeaseReader;
+  const calls: string[] = [];
+  const decisions: string[] = [];
+  const cfg = {
+    brokerUrl: "http://broker.test",
+    brokerToken: null,
+    operatorId: "op",
+    tokenId: "tok",
+    sessionRef: "window-1",
+    privateKey: "private",
+    publicKey: "public",
+    osUserHash: "",
+    blockSec: 900,
+    origin: {},
+  } satisfies ApprovalHookConfig;
+
+  await servePermission(
+    cfg,
+    { kind: "permission", title: "Bash", question: "q", options: ["Allow", "Deny"] },
+    "tile-1",
+    {
+      lease,
+      runClient: async (op) => {
+        calls.push(op);
+        return { ok: true as const, id: "approval-1", producer_secret: "secret-1" };
+      },
+      writeDecision: (decision) => decisions.push(decision),
+    }
+  );
+
+  expect(calls).toEqual([]);
+  expect(decisions).toEqual([]);
+});
+
+test("a lost permission lease withdraws without emitting a late verdict", async () => {
+  const controller = new AbortController();
+  const lease = {
+    signal: controller.signal,
+    isActive: () => !controller.signal.aborted,
+    waitForAdmission: async () => true,
+    dispose: () => {},
+  } satisfies PermissionLeaseReader;
+  const calls: Array<{ op: string; signal: AbortSignal | undefined }> = [];
+  let startedWaiting: () => void = () => {};
+  const waitStarted = new Promise<void>((resolve) => {
+    startedWaiting = resolve;
+  });
+  const decisions: string[] = [];
+  const cfg = {
+    brokerUrl: "http://broker.test",
+    brokerToken: null,
+    operatorId: "op",
+    tokenId: "tok",
+    sessionRef: "window-1",
+    privateKey: "private",
+    publicKey: "public",
+    osUserHash: "",
+    blockSec: 900,
+    origin: {},
+  } satisfies ApprovalHookConfig;
+  const runClient = async (
+    op: string,
+    _request: string,
+    _cfg: ApprovalHookConfig | null,
+    _tileRef: string,
+    _fetch?: (url: string, init: RequestInit) => Promise<Response>,
+    signal?: AbortSignal
+  ) => {
+    calls.push({ op, signal });
+    if (op === "add") return { ok: true as const, id: "approval-1", producer_secret: "secret-1" };
+    if (op === "withdraw") return { ok: false as const, error: "HTTP 409: already answered" };
+    startedWaiting();
+    await Promise.race([
+      new Promise<void>((resolve) => signal?.addEventListener("abort", () => resolve(), { once: true })),
+      Bun.sleep(50),
+    ]);
+    return {
+      ok: true as const,
+      approval: { id: "approval-1", reply_route: "hook", status: "answered", answer_kind: "allow" },
+    };
+  };
+
+  const served = servePermission(
+    cfg,
+    { kind: "permission", title: "Bash", question: "q", options: ["Allow", "Deny"] },
+    "tile-1",
+    { budgetMs: 1_000, lease, runClient, writeDecision: (decision) => decisions.push(decision) }
+  );
+  await waitStarted;
+  controller.abort();
+  await served;
+
+  expect(calls.map((call) => call.op)).toEqual(["add", "wait", "withdraw"]);
+  expect(calls[2]?.signal?.aborted).toBe(false);
+  expect(decisions).toEqual([]);
+});
+
+test("a lost lease during normal withdrawal retries within the lease budget", async () => {
+  const controller = new AbortController();
+  const lease = {
+    signal: controller.signal,
+    isActive: () => !controller.signal.aborted,
+    waitForAdmission: async () => true,
+    dispose: () => {},
+  } satisfies PermissionLeaseReader;
+  const calls: Array<{ op: string; signal: AbortSignal | undefined }> = [];
+  let startedWithdrawal: () => void = () => {};
+  const withdrawalStarted = new Promise<void>((resolve) => {
+    startedWithdrawal = resolve;
+  });
+  let retryElapsedMs = 0;
+  let retryTimedOut = false;
+  const cfg = {
+    brokerUrl: "http://broker.test",
+    brokerToken: null,
+    operatorId: "op",
+    tokenId: "tok",
+    sessionRef: "window-1",
+    privateKey: "private",
+    publicKey: "public",
+    osUserHash: "",
+    blockSec: 900,
+    origin: {},
+  } satisfies ApprovalHookConfig;
+  const runClient = async (
+    op: string,
+    _request: string,
+    _cfg: ApprovalHookConfig | null,
+    _tileRef: string,
+    _fetch?: (url: string, init: RequestInit) => Promise<Response>,
+    signal?: AbortSignal
+  ) => {
+    calls.push({ op, signal });
+    if (op === "add") return { ok: true as const, id: "approval-1", producer_secret: "secret-1" };
+    if (op === "wait") return { ok: false as const, error: "broker unavailable" };
+    const withdrawalCount = calls.filter((call) => call.op === "withdraw").length;
+    if (withdrawalCount === 1) {
+      startedWithdrawal();
+      await Promise.race([
+        new Promise<void>((resolve) => signal?.addEventListener("abort", () => resolve(), { once: true })),
+        Bun.sleep(50),
+      ]);
+    }
+    if (withdrawalCount === 2) {
+      const startedAt = performance.now();
+      await Promise.race([
+        new Promise<void>((resolve) => signal?.addEventListener("abort", () => resolve(), { once: true })),
+        Bun.sleep(3_000).then(() => {
+          retryTimedOut = true;
+        }),
+      ]);
+      retryElapsedMs = performance.now() - startedAt;
+    }
+    return { ok: true as const };
+  };
+
+  const served = servePermission(
+    cfg,
+    { kind: "permission", title: "Bash", question: "q", options: ["Allow", "Deny"] },
+    "tile-1",
+    { budgetMs: 1_000, lease, runClient, writeDecision: () => {} }
+  );
+  await withdrawalStarted;
+  controller.abort();
+  await served;
+
+  expect(calls.map((call) => call.op)).toEqual(["add", "wait", "withdraw", "withdraw"]);
+  expect(calls[3]?.signal?.aborted).toBe(true);
+  expect(retryTimedOut).toBe(false);
+  expect(retryElapsedMs).toBeGreaterThanOrEqual(1_500);
+  expect(retryElapsedMs).toBeLessThan(3_000);
+});
+
+test("a lost lease during error cleanup retries withdrawal without a verdict", async () => {
+  const controller = new AbortController();
+  const lease = {
+    signal: controller.signal,
+    isActive: () => !controller.signal.aborted,
+    waitForAdmission: async () => true,
+    dispose: () => {},
+  } satisfies PermissionLeaseReader;
+  const calls: Array<{ op: string; signal: AbortSignal | undefined }> = [];
+  let startedWithdrawal: () => void = () => {};
+  const withdrawalStarted = new Promise<void>((resolve) => {
+    startedWithdrawal = resolve;
+  });
+  const cfg = {
+    brokerUrl: "http://broker.test",
+    brokerToken: null,
+    operatorId: "op",
+    tokenId: "tok",
+    sessionRef: "window-1",
+    privateKey: "private",
+    publicKey: "public",
+    osUserHash: "",
+    blockSec: 900,
+    origin: {},
+  } satisfies ApprovalHookConfig;
+  const runClient = async (
+    op: string,
+    _request: string,
+    _cfg: ApprovalHookConfig | null,
+    _tileRef: string,
+    _fetch?: (url: string, init: RequestInit) => Promise<Response>,
+    signal?: AbortSignal
+  ) => {
+    calls.push({ op, signal });
+    if (op === "add") return { ok: true as const, id: "approval-1", producer_secret: "secret-1" };
+    if (op === "wait") {
+      return {
+        ok: true as const,
+        approval: { id: "approval-1", reply_route: "hook", status: "answered", answer_kind: "allow" },
+      };
+    }
+    if (calls.filter((call) => call.op === "withdraw").length === 1) {
+      startedWithdrawal();
+      await Promise.race([
+        new Promise<void>((resolve) => signal?.addEventListener("abort", () => resolve(), { once: true })),
+        Bun.sleep(50),
+      ]);
+    }
+    return { ok: true as const };
+  };
+
+  const served = servePermission(
+    cfg,
+    { kind: "permission", title: "Bash", question: "q", options: ["Allow", "Deny"] },
+    "tile-1",
+    { budgetMs: 1_000, lease, runClient, writeDecision: () => { throw new Error("decision sink failed"); } }
+  );
+  await withdrawalStarted;
+  controller.abort();
+  await served;
+
+  expect(calls.map((call) => call.op)).toEqual(["add", "wait", "withdraw", "withdraw"]);
+  expect(calls[3]?.signal?.aborted).toBe(false);
 });
 
 async function captureStderr<T>(run: () => Promise<T>): Promise<{ result: T; stderr: string }> {
@@ -859,19 +1154,58 @@ describe("hook subprocess", () => {
   function runHook(
     credFile: string | null,
     payload: unknown,
-    tileRef?: string
+    tileRef?: string,
+    permissionLease = true
   ): Bun.Subprocess<"pipe", "pipe", "pipe"> {
     const env: Record<string, string> = { ...process.env } as Record<string, string>;
     if (credFile) env.CLAUDE_PEERS_APPROVAL_FILE = credFile;
     else delete env.CLAUDE_PEERS_APPROVAL_FILE;
     if (tileRef) env.CLAUDE_PEERS_DESK_SESSION = tileRef;
     else delete env.CLAUDE_PEERS_DESK_SESSION;
+
+    const permission =
+      typeof payload === "object" && payload !== null && (payload as { hook_event_name?: unknown }).hook_event_name === "PermissionRequest";
+    let leaseFile: string | null = null;
+    let lease: { version: 1; runId: string; tileId: string; launchId: string; sequence: number; writtenAtMs: number } | null = null;
+    if (permission && credFile && permissionLease) {
+      lease = {
+        version: 1,
+        runId: randomUUID(),
+        tileId: randomUUID(),
+        launchId: randomUUID(),
+        sequence: 1,
+        writtenAtMs: Date.now(),
+      };
+      leaseFile = join(dirname(credFile), `${lease.launchId}.json`);
+      writeFileSync(leaseFile, JSON.stringify(lease), { mode: 0o600 });
+      env.KORY_PERMISSION_LEASE = encodePermissionLeaseDescriptor({ file: leaseFile, ...lease });
+    } else {
+      delete env.KORY_PERMISSION_LEASE;
+    }
     const proc = Bun.spawn(["bun", "desktop/hooks/approval-hook.ts"], {
       env,
       stdin: "pipe",
       stdout: "pipe",
       stderr: "pipe",
       cwd: process.cwd(),
+    });
+    const pulse = lease
+      ? setInterval(() => {
+          lease.sequence++;
+          lease.writtenAtMs = Date.now();
+          const temporary = `${leaseFile}.${lease.sequence}.tmp`;
+          try {
+            writeFileSync(temporary, JSON.stringify(lease), { mode: 0o600 });
+            renameSync(temporary, leaseFile as string);
+          } catch (error) {
+            const code = (error as NodeJS.ErrnoException).code;
+            if (!code || !["EPERM", "EBUSY", "EACCES"].includes(code)) throw error;
+            process.stderr.write(`permission lease fixture pulse retry: ${code}\n`);
+          }
+        }, 50)
+      : null;
+    void proc.exited.finally(() => {
+      if (pulse) clearInterval(pulse);
     });
     proc.stdin.write(JSON.stringify(payload));
     proc.stdin.end();
@@ -904,6 +1238,16 @@ describe("hook subprocess", () => {
     const out = await new Response(proc.stdout).text();
     expect(await proc.exited).toBe(0);
     expect(out.trim()).toBe("");
+  });
+
+  test("a permission request without a lease does not add an approval", async () => {
+    const { b, credFile, op } = await setup();
+    const proc = runHook(credFile, { hook_event_name: "PermissionRequest", tool_name: "Bash" }, undefined, false);
+    const out = await new Response(proc.stdout).text();
+
+    expect(await proc.exited).toBe(0);
+    expect(out.trim()).toBe("");
+    expect(await listApprovals(b, op)).toHaveLength(0);
   });
 
   for (const toolName of ["AskUserQuestion", "ExitPlanMode"]) {
