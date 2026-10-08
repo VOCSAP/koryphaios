@@ -1,7 +1,15 @@
 import { expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
+import { posix, win32 } from "node:path";
 import { encodePermissionLeaseDescriptor } from "../desktop/shared/permission-lease.ts";
 import { createPermissionLeaseReader } from "../desktop/hooks/permission-lease.ts";
+
+const LEASE_FILE = "/state/lease.json";
+
+test("the lease fixture path is absolute on POSIX and Windows", () => {
+  expect(posix.isAbsolute(LEASE_FILE)).toBe(true);
+  expect(win32.isAbsolute(LEASE_FILE)).toBe(true);
+});
 
 function document(sequence: number, writtenAtMs: number) {
   return {
@@ -19,7 +27,7 @@ test("a permission lease is admitted only after its sequence advances", async ()
   let monotonicNow = 10;
   let current = document(1, wallNow);
   const ticks: Array<() => void> = [];
-  const descriptor = encodePermissionLeaseDescriptor({ file: "C:/state/lease.json", ...current });
+  const descriptor = encodePermissionLeaseDescriptor({ file: LEASE_FILE, ...current });
   const reader = createPermissionLeaseReader(descriptor, {
     readFile: () => JSON.stringify(current),
     wallNow: () => wallNow,
@@ -51,7 +59,7 @@ test("a permission lease is admitted only after its sequence advances", async ()
 test("a lease read failure is reported once before the reader aborts", () => {
   let reads = 0;
   const current = document(1, 1_000);
-  const descriptor = encodePermissionLeaseDescriptor({ file: "C:/state/lease.json", ...current });
+  const descriptor = encodePermissionLeaseDescriptor({ file: LEASE_FILE, ...current });
   const ticks: Array<() => void> = [];
   const failure = new Error("access denied");
   const reports: Array<[string, unknown]> = [];
@@ -84,7 +92,7 @@ test("an initial lease read failure is reported before rejection", () => {
   const reports: Array<[string, unknown]> = [];
 
   const reader = createPermissionLeaseReader(
-    encodePermissionLeaseDescriptor({ file: "C:/state/lease.json", ...lease }),
+    encodePermissionLeaseDescriptor({ file: LEASE_FILE, ...lease }),
     {
       readFile: () => {
         throw failure;
@@ -105,7 +113,7 @@ test.each([
   ["regressive", (current: ReturnType<typeof document>) => JSON.stringify({ ...current, sequence: 1 })],
 ])("a %s lease stops permanently before admission", async (_name, invalid) => {
   const initial = document(2, 20_000);
-  const descriptor = encodePermissionLeaseDescriptor({ file: "C:/state/lease.json", ...initial });
+  const descriptor = encodePermissionLeaseDescriptor({ file: LEASE_FILE, ...initial });
   let raw: string | null = JSON.stringify(initial);
   const ticks: Array<() => void> = [];
   const reader = createPermissionLeaseReader(descriptor, {
@@ -141,7 +149,7 @@ test.each([
 ])("an initial %s lease is rejected", (_name, writtenAtMs) => {
   const initial = document(1, writtenAtMs);
   const reader = createPermissionLeaseReader(
-    encodePermissionLeaseDescriptor({ file: "C:/state/lease.json", ...initial }),
+    encodePermissionLeaseDescriptor({ file: LEASE_FILE, ...initial }),
     {
       readFile: () => JSON.stringify(initial),
       wallNow: () => 20_000,
@@ -157,7 +165,7 @@ test("a lease with no pulse expires from the reader's monotonic clock", () => {
   const current = document(1, 1_000);
   const ticks: Array<() => void> = [];
   const reader = createPermissionLeaseReader(
-    encodePermissionLeaseDescriptor({ file: "C:/state/lease.json", ...current }),
+    encodePermissionLeaseDescriptor({ file: LEASE_FILE, ...current }),
     {
       readFile: () => JSON.stringify(current),
       wallNow: () => 1_000,
