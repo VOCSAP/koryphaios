@@ -117,7 +117,7 @@ jobs:
       - name: Install Claude Code CLI (pinned)
         shell: bash
         run: |
-          npm install --prefix "${{ runner.temp }}/claude-cli" --no-audit --no-fund @anthropic-ai/claude-code@2.1.292
+          npm install --prefix "${{ runner.temp }}/claude-cli" --no-audit --no-fund @anthropic-ai/claude-code@2.1.293
           echo "${{ runner.temp }}/claude-cli/node_modules/.bin" >> "$GITHUB_PATH"
           echo "${{ runner.temp }}/claude-cli/node_modules/@anthropic-ai/claude-code/bin" >> "$GITHUB_PATH"
 
@@ -126,7 +126,7 @@ jobs:
         run: |
           version="$(claude --version)"
           echo "$version"
-          test "$version" = "2.1.292 (Claude Code)"
+          test "$version" = "2.1.293 (Claude Code)"
 
       # Pure modules (desktop main-process helpers, the notify channels and
       # their wire format, the mobile shell's decision logic, and a
