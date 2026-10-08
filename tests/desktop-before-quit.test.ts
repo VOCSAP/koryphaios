@@ -1,4 +1,6 @@
 import { expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { createBeforeQuitHandler } from "../desktop/src/main/before-quit.ts";
 
 interface Harness {
@@ -72,6 +74,16 @@ function pendingRelease(): { release: () => Promise<string>; settle: () => void 
   });
   return { release: () => pending, settle };
 }
+
+function hasBoundedApprovalClose(source: string): boolean {
+  return source.includes("{ label: 'approvals', timeoutMs: 2_000, run: () => approvals.close() }");
+}
+
+test("the main process bounds and awaits approval revocation at quit", () => {
+  const source = readFileSync(join(import.meta.dir, "..", "desktop", "src", "main", "index.ts"), "utf8");
+  expect(hasBoundedApprovalClose(source)).toBe(true);
+  expect(hasBoundedApprovalClose(source.replace("run: () => approvals.close()", "run: () => void approvals.close()"))).toBe(false);
+});
 
 test("the first pass prevents the default quit, runs every effect once and quits itself", async () => {
   const h = harness({ release: async () => "idle" });
@@ -181,6 +193,59 @@ test("the latch opens before the quit call, so the pass served in answer is not 
   expect(h.quits, "the pass quit() triggers must not ask to quit a second time").toBe(1);
   expect(h.ran, "nor replay the effects").toEqual(["alpha", "beta", "gamma"]);
   expect(h.errors, "that pass reports nothing").toEqual([]);
+});
+
+test("quit waits for an approval revocation effect before exiting", async () => {
+  let settleRevocation = (): void => {};
+  const revoked = new Promise<void>((resolve) => {
+    settleRevocation = resolve;
+  });
+  let quit = false;
+  let resolveQuit = (): void => {};
+  const quitted = new Promise<void>((resolve) => {
+    resolveQuit = resolve;
+  });
+  const handler = createBeforeQuitHandler({
+    effects: [{ label: "approvals", run: () => revoked }],
+    release: async () => undefined,
+    quit: () => {
+      quit = true;
+      resolveQuit();
+    },
+    onError: () => {},
+  });
+
+  handler(() => {});
+  await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  expect(quit).toBe(false);
+
+  settleRevocation();
+  await quitted;
+  expect(quit).toBe(true);
+});
+
+test("an approval revocation timeout is reported before quit", async () => {
+  const timeoutMs = 20;
+  const errors: { message: string; error?: unknown }[] = [];
+  let resolveQuit = (): void => {};
+  const quitted = new Promise<void>((resolve) => {
+    resolveQuit = resolve;
+  });
+  const handler = createBeforeQuitHandler({
+    effects: [{ label: "approvals", timeoutMs, run: () => new Promise<void>(() => {}) }],
+    release: async () => undefined,
+    quit: resolveQuit,
+    onError: (_scope, message, error) => errors.push({ message, error }),
+  });
+
+  const startedAt = performance.now();
+  handler(() => {});
+  await quitted;
+
+  expect(performance.now() - startedAt).toBeLessThan(timeoutMs * 10);
+  expect(errors).toEqual([
+    expect.objectContaining({ message: "quit effect failed: approvals", error: expect.any(Error) }),
+  ]);
 });
 
 test("a quit that throws and a release that rejects are reported apart", async () => {

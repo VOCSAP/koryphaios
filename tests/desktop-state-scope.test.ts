@@ -151,13 +151,13 @@ const STATE_SCOPES: Record<string, StateFileRule> = {
   },
   "session-approval.json": {
     kind: "literal",
-    scope: "project",
-    reason: "suffix of the per-window agent credential file, prefixed by approvalCredFileName with the project-derived instance token",
+    scope: "run",
+    reason: "suffix of a Deck run credential file; a random run UUID separates concurrent windows sharing one repository or scope",
   },
   approvalCredFileName: {
     kind: "constructor",
-    scope: "project",
-    reason: "builds <instanceToken(project_key)>-session-approval.json; the residual worktree collision is documented in the function",
+    scope: "run",
+    reason: "builds <projectHash>-<runId>-session-approval.json so the credential remains owned by one in-memory Deck run",
   },
   teamLeadMcpConfigFileName: {
     kind: "constructor",

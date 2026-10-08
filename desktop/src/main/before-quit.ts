@@ -14,7 +14,8 @@ export type QuitErrorSink = (scope: string, message: string, error?: unknown) =>
 export interface QuitEffect {
   /** Names the failing effect in the error trace. */
   readonly label: string
-  readonly run: () => void
+  readonly run: () => void | Promise<void>
+  readonly timeoutMs?: number
 }
 
 export interface BeforeQuitPlan {
@@ -23,6 +24,17 @@ export interface BeforeQuitPlan {
   readonly release: () => Promise<unknown>
   readonly quit: () => void
   readonly onError: QuitErrorSink
+}
+
+function withinEffectDeadline(run: Promise<void>, timeoutMs: number | undefined): Promise<void> {
+  if (timeoutMs === undefined) return run
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`quit effect timed out after ${timeoutMs}ms`)), timeoutMs)
+  })
+  return Promise.race([run, deadline]).finally(() => {
+    if (timer) clearTimeout(timer)
+  })
 }
 
 /**
@@ -38,17 +50,25 @@ export function createBeforeQuitHandler(
     if (!allowQuit) preventDefault()
     if (started) return
     started = true
+    const pendingEffects: Promise<void>[] = []
     try {
       for (const effect of plan.effects) {
         try {
-          effect.run()
+          const run = effect.run()
+          if (run) {
+            pendingEffects.push(
+              withinEffectDeadline(run, effect.timeoutMs).catch((error: unknown) => {
+                plan.onError('main', `quit effect failed: ${effect.label}`, error)
+              })
+            )
+          }
         } catch (error) {
           plan.onError('main', `quit effect failed: ${effect.label}`, error)
         }
       }
     } finally {
-      void plan
-        .release()
+      void Promise.all(pendingEffects)
+        .then(() => plan.release())
         .finally(() => {
           allowQuit = true
           try {

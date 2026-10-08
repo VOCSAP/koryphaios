@@ -37,7 +37,7 @@
 
 import { findMatchingClose } from "./_braced-body";
 
-export type StateScope = "session" | "project" | "machine";
+export type StateScope = "session" | "run" | "project" | "machine";
 
 export interface WiringRule {
   /** Function taking the directory the file is written under. */

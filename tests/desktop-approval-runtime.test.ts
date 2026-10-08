@@ -68,22 +68,16 @@ function stubMintSuccess(): void {
     })) as typeof fetch;
 }
 
-describe("armApprovalsAtStartup() -- the PRIMARY, behavioral proof for card 469f3176", () => {
+describe("armApprovalsAtStartup()", () => {
   beforeEach(() => stubMintSuccess());
 
-  // armApprovalsAtStartup takes no mobileApprovals-shaped argument, so nothing
-  // inside it can branch on transport config regardless of how a caller spells
-  // the condition.
   test("arms successfully with no mobile transport ever configured or reachable", async () => {
-    const operatorNeverEnabledMobile = { mobileApprovals: false as const };
-    void operatorNeverEnabledMobile; // documents the scenario; deliberately unused below
-
     const stateDir = tmp();
     const runtime = new ApprovalRuntime({
       stateDir,
       cipher: fakeCipher,
       endpoint: () => ({ url: "http://broker.local", token: "" }),
-      sessionRef: "window-test",
+      runId: "run-test",
       host: "test-host",
     });
 
@@ -104,7 +98,7 @@ describe("ApprovalRuntime.arm() without any mobile transport configured", () => 
       stateDir,
       cipher: fakeCipher,
       endpoint: () => ({ url: "http://broker.local", token: "" }),
-      sessionRef: "window-test",
+      runId: "run-test",
       host: "test-host",
     });
     const armed = await runtime.arm();
@@ -113,14 +107,6 @@ describe("ApprovalRuntime.arm() without any mobile transport configured", () => 
     expect(runtime.operator?.operatorId).toMatch(/^[0-9a-f]{16}$/);
   });
 
-  // This is the regression this card fixes: before, a corrupted/undecryptable
-  // identity file made arm() give up for good ("re-enrol this machine").
-  // Reverting the `?? createOperatorIdentity(...)` fallback in arm() back to
-  // a bare null-check-and-fail turns this test red. hostileCipher below has
-  // isAvailable() === true (the keychain itself works, only THIS data is
-  // bad), which is exactly the case arm()'s cipher.isAvailable() gate must
-  // still let through -- see the "merely unavailable" describe block further
-  // down for the case it must NOT let through.
   test("self-heals when the persisted identity is corrupt, instead of giving up", async () => {
     const stateDir = tmp();
     createOperatorIdentity(stateDir, fakeCipher, generateCredential());
@@ -128,7 +114,7 @@ describe("ApprovalRuntime.arm() without any mobile transport configured", () => 
       stateDir,
       cipher: hostileCipher,
       endpoint: () => ({ url: "http://broker.local", token: "" }),
-      sessionRef: "window-test",
+      runId: "run-test",
       host: "test-host",
     });
     const armed = await runtime.arm();
@@ -143,7 +129,7 @@ describe("ApprovalRuntime.arm() without any mobile transport configured", () => 
       stateDir,
       cipher: fakeCipher,
       endpoint: () => ({ url: "http://broker.local", token: "" }),
-      sessionRef: "window-test",
+      runId: "run-test",
       host: "test-host",
     });
     const armed = await runtime.arm();
@@ -155,14 +141,6 @@ describe("ApprovalRuntime.arm() without any mobile transport configured", () => 
 describe("ApprovalRuntime.arm() when the keychain is merely unavailable (not corrupt)", () => {
   beforeEach(() => stubMintSuccess());
 
-  // Card 469f3176 REVIEW FINDING (mutation Q1): the first version of this fix
-  // treated ANY decrypt failure as corruption and regenerated unconditionally
-  // -- which destroyed a REAL identity the moment the keychain that
-  // encrypted it became temporarily unavailable (locked, OS profile
-  // mid-migration). Removing the `cipher.isAvailable()` gate in arm() (back
-  // to unconditional `?? createOperatorIdentity(...)`) turns this test red:
-  // the old identity gets replaced (new operator_id, and/or a .bak file
-  // appears) instead of surviving completely untouched.
   test("gives up arming this run WITHOUT touching the existing identity", async () => {
     const stateDir = tmp();
     const original = createOperatorIdentity(stateDir, fakeCipher, generateCredential());
@@ -173,7 +151,7 @@ describe("ApprovalRuntime.arm() when the keychain is merely unavailable (not cor
       stateDir,
       cipher: unavailableCipher,
       endpoint: () => ({ url: "http://broker.local", token: "" }),
-      sessionRef: "window-test",
+      runId: "run-test",
       host: "test-host",
     });
     const armed = await runtime.arm();

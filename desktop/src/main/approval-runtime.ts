@@ -13,54 +13,36 @@ import { writeFileAtomic } from './atomic-write'
 import { loadOperatorIdentity, createOperatorIdentity, type OperatorIdentity } from './operator-identity'
 import { mintSessionToken, revokeSessionToken, type ApprovalDeps } from './approval-service'
 import { teamLeadInstanceToken } from './team-lead-mcp-sweep'
-import { loadApprovalCredential } from '../../../shared/approval-client'
 import type { SecretCipher } from './scope-secrets'
 import type { BrokerEndpoint } from './broker-client'
 import { reportError } from './log'
 
 const CRED_FILE = 'session-approval.json'
 
-/**
- * Card a76d8b4a: userData is shared across Kory instances (no
- * requestSingleInstanceLock, same root cause as card 9d8e24f4). Prefixing
- * the filename with the SAME instance token that card already established
- * for team-lead-mcp-*.json keeps this a single pattern for that shared
- * defect class, not a second one.
- *
- * RESIDUAL GAP, deliberately not closed tonight: projectKey is the
- * normalized git remote, so every WORKTREE of the same repo shares one
- * project_key and therefore one instanceToken. Two Kory windows open on two
- * worktrees of the SAME repo still collide on this file -- a discriminant
- * narrower than "project" (pid, a persisted per-window nonce, ...) is a
- * design decision left open on purpose, not an oversight.
- */
-export function approvalCredFileName(projectKey: string): string {
-  return `${teamLeadInstanceToken(projectKey)}-${CRED_FILE}`
+export function approvalCredFileName(projectKey: string, runId: string): string {
+  return `${teamLeadInstanceToken(projectKey)}-${runId}-${CRED_FILE}`
 }
 
 export interface ApprovalRuntimeOptions {
   stateDir: string
   cipher: SecretCipher
   endpoint: () => BrokerEndpoint
-  /** Stable handle for this window's agents. */
-  sessionRef: string
+  runId: string
   host: string
-  /**
-   * The WINDOW's project key (computeDeckProjectKey on its cwd) -- unlike
-   * `from_peer`/a tile identity, this is correctly scoped at credential level
-   * (card 55c5470e): one window has one project, so writing it here does not
-   * mint a singleton keyed by too little the way a per-tile field would.
-   * Injected as a function (same shape as `endpoint`) so this module never
-   * needs to shell out to git itself. Optional so existing callers/tests that
-   * predate card 55c5470e keep compiling; arm() falls back to '' when absent.
-   */
+  /** Injected so this module does not resolve the window project through git. */
   projectKey?: () => string
 }
 
 export class ApprovalRuntime {
   private identity: OperatorIdentity | null = null
   private credPath: string | null = null
+  private tokenId: string | null = null
   private armed = false
+  private generation = 0
+  private closed = false
+  private disarming = false
+  private armInFlight: Promise<boolean> | null = null
+  private disarmInFlight: Promise<void> | null = null
 
   constructor(private readonly opts: ApprovalRuntimeOptions) {}
 
@@ -107,13 +89,48 @@ export class ApprovalRuntime {
     return { CLAUDE_PEERS_APPROVAL_FILE: this.armed && this.credPath ? this.credPath : '' }
   }
 
+  private async revokeStoredToken(): Promise<boolean> {
+    const tokenId = this.tokenId
+    if (!tokenId) return true
+    const deps = this.deps()!
+    try {
+      await revokeSessionToken(deps, tokenId)
+      this.tokenId = null
+      return true
+    } catch (e) {
+      reportError('approvals', 'could not revoke the session credential', e)
+      return false
+    }
+  }
+
+  private isCurrentArm(generation: number): boolean {
+    return !this.closed && !this.disarming && this.generation === generation
+  }
+
   /**
    * Turn the feature on: resolve the identity, mint a session credential and
-   * publish it. Idempotent. Returns false when it could not arm — the caller
-   * should treat that as "the feature is off", never as a fatal error.
+   * publish it. Concurrent callers share one operation. Returns false when it
+   * could not arm so callers can keep the feature off.
    */
   async arm(): Promise<boolean> {
+    if (this.closed || this.disarming) return false
     if (this.armed) return true
+    if (this.armInFlight) return this.armInFlight
+
+    const generation = ++this.generation
+    const pending = this.armGeneration(generation)
+    this.armInFlight = pending
+    try {
+      return await pending
+    } finally {
+      if (this.armInFlight === pending) this.armInFlight = null
+    }
+  }
+
+  private async armGeneration(generation: number): Promise<boolean> {
+    if (!(await this.revokeStoredToken())) return false
+    if (!this.isCurrentArm(generation)) return false
+
     try {
       if (!existsSync(this.opts.stateDir)) mkdirSync(this.opts.stateDir, { recursive: true })
       // loadOperatorIdentity returning null does not by itself mean corruption:
@@ -139,30 +156,29 @@ export class ApprovalRuntime {
       this.identity = identity
 
       const cred = generateCredential()
-      // projectKey is resolved once and reused for both the ApprovalDeps
-      // literal and the credential's origin.project_key.
-      // It is a window property, not a tile identity: a window carries multiple
-      // tiles, so writing a tile identity here would be a singleton keyed by
-      // too little.
       const projectKey = this.safeProjectKey()
-      // projectKey reaches the wire: a resolution failure produces '', which
-      // the broker refuses at mint time rather than silently filing an approval
-      // nobody's window can see.
+      const sessionRef = `window-${this.opts.runId}`
+      const tokenId = deriveTokenId(cred.publicKey)
       const deps: ApprovalDeps = { endpoint: this.opts.endpoint(), identity, projectKey }
       await mintSessionToken(deps, {
         sessionPublicKey: cred.publicKey,
-        sessionRef: this.opts.sessionRef
+        sessionRef
       })
+      this.tokenId = tokenId
+      if (!this.isCurrentArm(generation)) {
+        await this.revokeStoredToken()
+        return false
+      }
 
-      const path = join(this.opts.stateDir, approvalCredFileName(projectKey))
+      const path = join(this.opts.stateDir, approvalCredFileName(projectKey, this.opts.runId))
       writeFileAtomic(
         path,
         JSON.stringify({
           brokerUrl: this.opts.endpoint().url,
           brokerToken: this.opts.endpoint().token,
           operatorId: identity.operatorId,
-          tokenId: deriveTokenId(cred.publicKey),
-          sessionRef: this.opts.sessionRef,
+          tokenId,
+          sessionRef,
           privateKey: cred.privateKey,
           publicKey: cred.publicKey,
           osUserHash: identity.osUserHash,
@@ -172,45 +188,43 @@ export class ApprovalRuntime {
       )
       this.credPath = path
       this.armed = true
-      this.cleanupLegacyCredFile(projectKey)
       return true
     } catch (e) {
       // Broker down at launch, unwritable state dir: the app must still start,
       // simply without remote approvals.
       reportError('approvals', 'could not arm remote approvals', e)
+      await this.revokeStoredToken()
       return false
     }
   }
 
-  /**
-   * Removes the unprefixed file, but ONLY when empty or scoped to THIS
-   * window's own project: an unconditional delete breaks an OLDER,
-   * still-running window sharing it -- its ask_operator refuses with a
-   * now-false "restart the session" message, and approval-hook.ts silently
-   * stops mirroring permission prompts (`if (!cfg) return`, no trace).
-   * A read failure (absent/corrupt) is safe to delete either way. Compares
-   * ONLY origin.project_key, never logs the parsed credential. Never
-   * revokes broker-side (unlike disarm()): that would kill a co-existing
-   * window's LIVE token under cohabitation; it expires on its own.
-   */
-  private cleanupLegacyCredFile(projectKey: string): void {
-    const legacyPath = join(this.opts.stateDir, CRED_FILE)
-    const legacy = loadApprovalCredential(legacyPath)
-    if (legacy && legacy.origin.project_key && legacy.origin.project_key !== projectKey) return
+  async disarm(): Promise<void> {
+    if (this.disarmInFlight) return this.disarmInFlight
+
+    this.disarming = true
+    this.generation += 1
+    this.armed = false
+    const pending = this.finishDisarm()
+    this.disarmInFlight = pending
     try {
-      rmSync(legacyPath, { force: false })
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException)?.code !== 'ENOENT') {
-        reportError('approvals', 'could not remove the legacy shared credential file', e)
-      }
+      await pending
+    } finally {
+      if (this.disarmInFlight === pending) this.disarmInFlight = null
+      this.disarming = false
     }
   }
 
-  /** Turn it off: revoke broker-side and delete the credential file. */
-  async disarm(): Promise<void> {
+  /** Stops approval arming permanently while the process exits. */
+  async close(): Promise<void> {
+    this.closed = true
+    await this.disarm()
+  }
+
+  private async finishDisarm(): Promise<void> {
+    await this.armInFlight
+
     const path = this.credPath
     this.credPath = null
-    this.armed = false
     if (path) {
       try {
         rmSync(path, { force: true })
@@ -218,15 +232,7 @@ export class ApprovalRuntime {
         reportError('approvals', 'could not remove the session credential file', e)
       }
     }
-    const deps = this.deps()
-    if (!deps) return
-    try {
-      await revokeSessionToken(deps, this.opts.sessionRef)
-    } catch (e) {
-      // The token expires on its own; a failed revoke is worth a trace, not a
-      // blocked shutdown.
-      reportError('approvals', 'could not revoke the session credential', e)
-    }
+    await this.revokeStoredToken()
   }
 }
 

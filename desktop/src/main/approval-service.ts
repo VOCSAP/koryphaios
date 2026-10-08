@@ -87,12 +87,11 @@ export async function mintSessionToken(
   })
 }
 
-/** Revoke a session's credential — called when the tile closes. */
 export async function revokeSessionToken(
   deps: ApprovalDeps,
-  sessionRef: string
+  tokenId: string
 ): Promise<{ revoked: number }> {
-  return signedPost(deps, '/approval/token-revoke', { session_ref: sessionRef })
+  return signedPost(deps, '/approval/token-revoke', { token_id: tokenId })
 }
 
 export async function addApproval(

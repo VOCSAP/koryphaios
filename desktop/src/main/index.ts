@@ -573,14 +573,13 @@ const applyClodexAutoStart = async (enabled: boolean): Promise<void> => {
   }
 }
 
-// Remote approvals (PLAN-notifications-mobiles N2.c). Armed at whenReady only
-// when the operator enabled it; `env()` always emits the key so a value
-// inherited from the parent process can never silently re-enable it.
+// Remote approvals are armed at readiness only when enabled, and env() always neutralizes inherited state.
+const approvalRunId = randomUUID()
 const approvals = new ApprovalRuntime({
   stateDir: join(app.getPath('userData'), APP_STATE_SUBDIR),
   cipher: secretCipher,
   endpoint: () => resolveBrokerEndpoint(),
-  sessionRef: `window-${activeScope.groupId.slice(0, 12)}`,
+  runId: approvalRunId,
   host: hostname(),
   projectKey: () => computeDeckProjectKey(cliContext.projectDir)
 })
@@ -3335,7 +3334,10 @@ app.whenReady().then(async () => {
     const adopted = applyEnrolment(join(app.getPath('userData'), APP_STATE_SUBDIR), secretCipher, payload)
     if (!adopted) return false
     await approvals.disarm()
-    await approvals.arm()
+    if (!(await approvals.arm())) {
+      reportError('approvals', 'could not arm remote approvals after enrolment')
+      return false
+    }
     journal.add('session', 'this PC was linked to an existing operator identity')
     return true
   })
@@ -3541,7 +3543,7 @@ const runBeforeQuit = createBeforeQuitHandler({
     { label: 'companionServer', run: () => void companionServer?.stop(true) },
     // A stale credential surviving the app would keep raising approvals nobody
     // applies.
-    { label: 'approvals', run: () => void approvals.disarm() },
+    { label: 'approvals', timeoutMs: 2_000, run: () => approvals.close() },
     { label: 'scopeEnv', run: () => activeScopeEnv.cleanup() }
   ],
   release: () =>

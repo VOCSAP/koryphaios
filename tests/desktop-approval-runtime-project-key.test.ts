@@ -32,7 +32,7 @@ function stubMintSuccess(): void {
 }
 
 function readCredentialOrigin(stateDir: string, projectKey: string): Record<string, unknown> {
-  const raw = readFileSync(join(stateDir, approvalCredFileName(projectKey)), "utf8");
+  const raw = readFileSync(join(stateDir, approvalCredFileName(projectKey, "run-test")), "utf8");
   return (JSON.parse(raw) as { origin: Record<string, unknown> }).origin;
 }
 
@@ -45,7 +45,7 @@ describe("ApprovalRuntime.arm() writes origin.project_key", () => {
         stateDir,
         cipher: fakeCipher,
         endpoint: () => ({ url: "http://broker.local", token: "" }),
-        sessionRef: "window-test",
+        runId: "run-test",
         host: "test-host",
         projectKey: () => "local:deadbeefcafebabe",
       });
@@ -53,8 +53,6 @@ describe("ApprovalRuntime.arm() writes origin.project_key", () => {
       expect(armed).toBe(true);
       const origin = readCredentialOrigin(stateDir, "local:deadbeefcafebabe");
       expect(origin.project_key).toBe("local:deadbeefcafebabe");
-      // Purely additive, per team-lead ruling: everything the identity path
-      // writes stays exactly as before.
       expect(origin.host).toBe("test-host");
       expect(typeof origin.os_user_hash).toBe("string");
       expect((origin.os_user_hash as string).length).toBeGreaterThan(0);
@@ -63,7 +61,7 @@ describe("ApprovalRuntime.arm() writes origin.project_key", () => {
     }
   });
 
-  test("omitting projectKey() entirely (existing callers/tests) degrades to an empty project_key, not a crash", async () => {
+  test("omitting projectKey() writes an empty project_key", async () => {
     stubMintSuccess();
     try {
       const stateDir = tmp();
@@ -71,7 +69,7 @@ describe("ApprovalRuntime.arm() writes origin.project_key", () => {
         stateDir,
         cipher: fakeCipher,
         endpoint: () => ({ url: "http://broker.local", token: "" }),
-        sessionRef: "window-test",
+        runId: "run-test",
         host: "test-host",
         // projectKey intentionally omitted.
       });
@@ -92,7 +90,7 @@ describe("ApprovalRuntime.arm() writes origin.project_key", () => {
         stateDir,
         cipher: fakeCipher,
         endpoint: () => ({ url: "http://broker.local", token: "" }),
-        sessionRef: "window-test",
+        runId: "run-test",
         host: "test-host",
         projectKey: () => {
           throw new Error("git shelled out and failed");

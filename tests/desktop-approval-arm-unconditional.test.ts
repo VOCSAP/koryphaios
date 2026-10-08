@@ -12,20 +12,27 @@ const indexTs = readFileSync(
 );
 
 test("the startup arm() call site is unconditional, not gated by config.mobileApprovals", () => {
-  // `approvals.arm()` / `armApprovalsAtStartup()` have other call sites
-  // (on-demand: connecting a channel, adopting an enrolment payload) that are
-  // legitimately opt-in triggers, not the startup gate this card fixes. The
-  // startup call site is the only one that assigns its result to `armed` for
-  // the journal line right after.
   const marker = "const armed = await armApprovalsAtStartup(approvals)";
   const callIdx = indexTs.indexOf(marker);
   expect(callIdx).toBeGreaterThan(-1);
-  expect(indexTs.indexOf(marker, callIdx + 1)).toBe(-1); // exactly one startup call site
+  expect(indexTs.indexOf(marker, callIdx + 1)).toBe(-1);
 
-  // Look at the 200 characters immediately BEFORE the call for a guard that
-  // would skip it. Scoped narrowly (not "anywhere in the file") so a
-  // legitimate, unrelated `config.mobileApprovals` check elsewhere (e.g. the
-  // phone-relay-specific approvalsEnabled()) does not false-positive this.
   const before = indexTs.slice(Math.max(0, callIdx - 200), callIdx);
   expect(before).not.toMatch(/mobileApprovals/);
+});
+
+function enrolmentApplyFailsWhenArmFails(source: string): boolean {
+  const start = source.indexOf("regHandle('approvals:enrolment-apply'");
+  const end = source.indexOf("\n  })", start);
+  if (start === -1 || end === -1) return false;
+  const body = source.slice(start, end);
+  const failure = body.indexOf("if (!(await approvals.arm())) {");
+  const report = body.indexOf("reportError('approvals', 'could not arm remote approvals after enrolment')");
+  const success = body.indexOf("journal.add('session', 'this PC was linked to an existing operator identity')");
+  return failure !== -1 && report > failure && success > report && body.slice(failure, success).includes("return false");
+}
+
+test("enrolment apply fails before reporting successful linking when approval arm fails", () => {
+  expect(enrolmentApplyFailsWhenArmFails(indexTs)).toBe(true);
+  expect(enrolmentApplyFailsWhenArmFails(indexTs.replace("if (!(await approvals.arm())) {", "if (false) {"))).toBe(false);
 });
