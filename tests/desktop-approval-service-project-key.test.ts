@@ -1,12 +1,5 @@
-// mintSessionToken, addApproval, claimApproval and markVerdictsDelivered must
-// each put project_key in their outgoing HTTP body -- a compile-time-required
-// struct field does not guarantee it reaches the JSON.
-// mintSessionToken enforces this via its own check in broker.ts, not the shared
-// resolveProjectKey gate the other three share.
-// fetchPendingApprovals fires two independent requests (status:'pending' and
-// status:'expired_notif'), so each is checked addressably, not just one of the
-// two.
 import { afterEach, beforeEach, expect, test } from "bun:test";
+import * as approvalService from "../desktop/src/main/approval-service.ts";
 import {
   addApproval,
   claimApproval,
@@ -24,6 +17,7 @@ interface CapturedCall {
 }
 
 let calls: CapturedCall[];
+const renewSessionToken = Reflect.get(approvalService, "renewSessionToken") as typeof mintSessionToken | undefined;
 
 function fakeFetchImpl(): typeof fetch {
   return (async (url: string | URL | Request, init?: RequestInit) => {
@@ -120,6 +114,21 @@ test("mintSessionToken sends project_key on its /approval/token-mint request", a
   expect(calls.length).toBe(1);
   expect(calls[0]!.url.endsWith("/approval/token-mint")).toBe(true);
   expect(calls[0]!.body.project_key).toBe("proj-mint");
+});
+
+test("renewSessionToken sends renew_only and project_key on its /approval/token-mint request", async () => {
+  expect(renewSessionToken).toBeTypeOf("function");
+  const deps = makeDeps("proj-renew");
+  await renewSessionToken!(deps, { sessionPublicKey: "session-pub-renew", sessionRef: "session-renew" });
+  expect(calls.length).toBe(1);
+  expect(calls[0]!.url.endsWith("/approval/token-mint")).toBe(true);
+  expect(calls[0]!.body).toMatchObject({
+    session_public_key: "session-pub-renew",
+    session_ref: "session-renew",
+    project_key: "proj-renew",
+    ttl_hours: 24,
+    renew_only: true
+  });
 });
 
 test("addApproval sends project_key TOP-LEVEL on its /approval/add request", async () => {

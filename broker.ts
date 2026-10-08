@@ -9803,9 +9803,6 @@ function handleChannelList(
 function handleApprovalTokenMint(
   body: ApprovalTokenMintRequest & Record<string, unknown>
 ): ApprovalTokenMintResponse | { error: string; status: number } {
-  // Card 1def56da: identity, not scope. A session token belongs to an operator
-  // and this handler writes `approval_session_tokens`, a different table that
-  // `approvalWhere` deliberately does not cover.
   const auth = approvalAuth.authenticateOperator(body, "mint-token");
   if (isAuthError(auth)) return auth;
 
@@ -9814,15 +9811,9 @@ function handleApprovalTokenMint(
   if (!sessionPublicKey) return { error: "session_public_key is required", status: 400 };
   if (!sessionRef) return { error: "session_ref is required", status: 400 };
 
-  const ttlHours = Math.max(
-    1,
-    Math.min(24 * 30, Number.isFinite(body.ttl_hours) ? Number(body.ttl_hours) : 24)
-  );
-  // Card 1def56da: the project the Deck window minting this credential works
-  // on. It is pinned HERE, once, by the operator, so that the agent holding the
-  // token can never choose it later -- the same discipline `session_ref` has
-  // always had. Required: a mint without it would produce a credential that
-  // every `add` then refuses, which is a worse failure than refusing the mint.
+  const ttlHours = body.renew_only === true
+    ? 24
+    : Math.max(1, Math.min(24 * 30, Number.isFinite(body.ttl_hours) ? Number(body.ttl_hours) : 24));
   const rawProjectKey = typeof body.project_key === "string" ? body.project_key : "";
   if (!rawProjectKey) return { error: "project_key is required", status: 400 };
   // A refusal, not a truncation: silently truncating an oversized project_key
@@ -9837,28 +9828,36 @@ function handleApprovalTokenMint(
   const projectKey = rawProjectKey;
   const tokenId = deriveTokenId(sessionPublicKey);
   const now = new Date();
+  const nowIso = now.toISOString();
   const expiresAt = new Date(now.getTime() + ttlHours * 3600_000).toISOString();
+  const capabilities = { renew_only: true } as const;
+  if (body.renew_only === true) {
+    const renewal = db.run(
+      `UPDATE approval_session_tokens
+         SET expires_at = ?
+       WHERE token_id = ? AND operator_id = ? AND public_key = ?
+         AND session_ref = ? AND project_key = ?
+         AND revoked_at IS NULL AND expires_at > ?`,
+      [expiresAt, tokenId, auth.operator_id, sessionPublicKey, sessionRef, projectKey, nowIso]
+    );
+    if (renewal.changes !== 1) return { error: "session token is not renewable", status: 409 };
+    return { token_id: tokenId, expires_at: expiresAt, capabilities };
+  }
   db.run(
     `INSERT INTO approval_session_tokens
        (token_id, operator_id, public_key, session_ref, project_key, created_at, expires_at, revoked_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, NULL)
      ON CONFLICT(token_id) DO UPDATE SET
        expires_at = excluded.expires_at, revoked_at = NULL,
-       -- Re-minting must REFRESH the project: a tile reused for another repo
-       -- keeps its token_id (derived from the key) but must not keep the old
-       -- project, or the scope would silently lag one window behind.
        project_key = excluded.project_key`,
-    [tokenId, auth.operator_id, sessionPublicKey, sessionRef, projectKey, now.toISOString(), expiresAt]
+    [tokenId, auth.operator_id, sessionPublicKey, sessionRef, projectKey, nowIso, expiresAt]
   );
-  return { token_id: tokenId, expires_at: expiresAt };
+  return { token_id: tokenId, expires_at: expiresAt, capabilities };
 }
 
 function handleApprovalTokenRevoke(
   body: ApprovalTokenRevokeRequest & Record<string, unknown>
 ): ApprovalTokenRevokeResponse | { error: string; status: number } {
-  // Card 1def56da: identity, not scope. A session token belongs to an operator
-  // and this handler writes `approval_session_tokens`, a different table that
-  // `approvalWhere` deliberately does not cover.
   const auth = approvalAuth.authenticateOperator(body, "mint-token");
   if (isAuthError(auth)) return auth;
   const now = new Date().toISOString();

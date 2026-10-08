@@ -564,6 +564,258 @@ describe("session tokens (PLAN §6.8 — the sandbox guard)", () => {
   });
 });
 
+describe("session token renewal", () => {
+  async function mintSessionToken(
+    b: TestBroker,
+    op: { cred: ApprovalCredential; id: string },
+    cred: ApprovalCredential,
+    sessionRef: string,
+    projectKey = DEFAULT_PROJECT_KEY
+  ): Promise<{ token_id: string; expires_at: string; capabilities?: { renew_only?: boolean } }> {
+    const res = await signedPost<{ token_id: string; expires_at: string; capabilities?: { renew_only?: boolean } }>(
+      b,
+      "/approval/token-mint",
+      { session_public_key: cred.publicKey, session_ref: sessionRef, project_key: projectKey },
+      { cred: op.cred, operator_id: op.id }
+    );
+    expect(res.status).toBe(200);
+    return res.body;
+  }
+
+  test("renew_only extends the same live token and advertises its capability", async () => {
+    const b = await boot();
+    const op = newOperator();
+    const cred = generateCredential();
+    const first = await mintSessionToken(b, op, cred, "renew-live");
+    const priorExpiresAt = new Date(Date.now() + 3_600_000).toISOString();
+    const seeded = new Database(b.dbPath);
+    seeded.run("UPDATE approval_session_tokens SET expires_at = ? WHERE token_id = ?", [priorExpiresAt, first.token_id]);
+    seeded.close();
+
+    const renew = await signedPost<{ token_id: string; expires_at: string; capabilities?: { renew_only?: boolean } }>(
+      b,
+      "/approval/token-mint",
+      { session_public_key: cred.publicKey, session_ref: "renew-live", renew_only: true, ttl_hours: 24 },
+      { cred: op.cred, operator_id: op.id }
+    );
+
+    expect(renew.status).toBe(200);
+    expect(renew.body).toEqual({
+      token_id: first.token_id,
+      expires_at: expect.any(String),
+      capabilities: { renew_only: true }
+    });
+    expect(Date.parse(renew.body.expires_at)).toBeGreaterThan(Date.parse(priorExpiresAt));
+    const db = new Database(b.dbPath);
+    const row = db
+      .query("SELECT operator_id, public_key, session_ref, project_key, revoked_at FROM approval_session_tokens WHERE token_id = ?")
+      .get(first.token_id) as {
+      operator_id: string;
+      public_key: string;
+      session_ref: string;
+      project_key: string;
+      revoked_at: string | null;
+    };
+    db.close();
+    expect(row).toEqual({
+      operator_id: op.id,
+      public_key: cred.publicKey,
+      session_ref: "renew-live",
+      project_key: DEFAULT_PROJECT_KEY,
+      revoked_at: null
+    });
+  });
+
+  test("renew_only fixes every renewed lease at 24 hours", async () => {
+    const b = await boot();
+    const op = newOperator();
+    for (const requestedTtlHours of [1, 720]) {
+      const cred = generateCredential();
+      await mintSessionToken(b, op, cred, `renew-ttl-${requestedTtlHours}`);
+      const beforeRenewal = Date.now();
+      const renew = await signedPost<{ expires_at: string }>(
+        b,
+        "/approval/token-mint",
+        {
+          session_public_key: cred.publicKey,
+          session_ref: `renew-ttl-${requestedTtlHours}`,
+          renew_only: true,
+          ttl_hours: requestedTtlHours
+        },
+        { cred: op.cred, operator_id: op.id }
+      );
+      const afterRenewal = Date.now();
+      expect(renew.status).toBe(200);
+      const expiresAt = Date.parse(renew.body.expires_at);
+      expect(expiresAt).toBeGreaterThanOrEqual(beforeRenewal + 24 * 3600_000);
+      expect(expiresAt).toBeLessThanOrEqual(afterRenewal + 24 * 3600_000 + 1);
+    }
+  });
+
+  test("renew_only cannot revive a token after its revoke", async () => {
+    const b = await boot();
+    const op = newOperator();
+    const cred = generateCredential();
+    const first = await mintSessionToken(b, op, cred, "renew-revoked");
+    const firstRenewal = await signedPost<{ token_id: string }>(
+      b,
+      "/approval/token-mint",
+      { session_public_key: cred.publicKey, session_ref: "renew-revoked", renew_only: true },
+      { cred: op.cred, operator_id: op.id }
+    );
+    expect(firstRenewal).toMatchObject({ status: 200, body: { token_id: first.token_id } });
+    const revoke = await signedPost<{ revoked: number }>(
+      b,
+      "/approval/token-revoke",
+      { token_id: first.token_id },
+      { cred: op.cred, operator_id: op.id }
+    );
+    expect(revoke.body.revoked).toBe(1);
+
+    const renew = await signedPost<{ error: string }>(
+      b,
+      "/approval/token-mint",
+      { session_public_key: cred.publicKey, session_ref: "renew-revoked", renew_only: true },
+      { cred: op.cred, operator_id: op.id }
+    );
+
+    expect(renew.status).toBe(409);
+    const db = new Database(b.dbPath);
+    const row = db.query("SELECT revoked_at FROM approval_session_tokens WHERE token_id = ?").get(first.token_id) as {
+      revoked_at: string | null;
+    };
+    db.close();
+    expect(row.revoked_at).toEqual(expect.any(String));
+  });
+
+  test("legacy mint revives the token and refreshes its project scope", async () => {
+    const b = await boot();
+    const op = newOperator();
+    const cred = generateCredential();
+    const first = await mintSessionToken(b, op, cred, "legacy-revive");
+    const revoke = await signedPost<{ revoked: number }>(
+      b,
+      "/approval/token-revoke",
+      { token_id: first.token_id },
+      { cred: op.cred, operator_id: op.id }
+    );
+    expect(revoke.body.revoked).toBe(1);
+
+    const reminted = await mintSessionToken(b, op, cred, "legacy-revive", "github.com/vocsap/refreshed-project");
+    expect(reminted.token_id).toBe(first.token_id);
+    const db = new Database(b.dbPath);
+    const row = db.query("SELECT revoked_at, project_key FROM approval_session_tokens WHERE token_id = ?").get(first.token_id) as {
+      revoked_at: string | null;
+      project_key: string;
+    };
+    db.close();
+    expect(row).toEqual({ revoked_at: null, project_key: "github.com/vocsap/refreshed-project" });
+  });
+
+  test("renew_only rejects each changed scope dimension without mutating the stored row", async () => {
+    const b = await boot();
+    const op = newOperator();
+    const cred = generateCredential();
+    const first = await mintSessionToken(b, op, cred, "renew-original");
+    const before = new Database(b.dbPath);
+    const beforeExpiresAt = (before.query("SELECT expires_at FROM approval_session_tokens WHERE token_id = ?").get(first.token_id) as {
+      expires_at: string;
+    }).expires_at;
+    before.close();
+
+    for (const payload of [
+      { session_public_key: cred.publicKey, session_ref: "renew-other", renew_only: true },
+      {
+        session_public_key: cred.publicKey,
+        session_ref: "renew-original",
+        project_key: "github.com/vocsap/other-project",
+        renew_only: true
+      }
+    ]) {
+      const renew = await signedPost<{ error: string }>(
+        b,
+        "/approval/token-mint",
+        payload,
+        { cred: op.cred, operator_id: op.id }
+      );
+      expect(renew.status).toBe(409);
+    }
+    const db = new Database(b.dbPath);
+    const row = db
+      .query("SELECT session_ref, project_key, expires_at FROM approval_session_tokens WHERE token_id = ?")
+      .get(first.token_id) as { session_ref: string; project_key: string; expires_at: string };
+    db.close();
+    expect(row).toEqual({ session_ref: "renew-original", project_key: DEFAULT_PROJECT_KEY, expires_at: beforeExpiresAt });
+  });
+
+  test("renew_only rejects an absent, expired, foreign, or corrupted token", async () => {
+    const b = await boot();
+    const op = newOperator();
+    const cred = generateCredential();
+    const absent = await signedPost<{ error: string }>(
+      b,
+      "/approval/token-mint",
+      { session_public_key: cred.publicKey, session_ref: "renew-absent", renew_only: true },
+      { cred: op.cred, operator_id: op.id }
+    );
+    expect(absent.status).toBe(409);
+    const absentDb = new Database(b.dbPath);
+    const absentRows = (absentDb.query("SELECT COUNT(*) AS count FROM approval_session_tokens").get() as { count: number }).count;
+    absentDb.close();
+    expect(absentRows).toBe(0);
+
+    const first = await mintSessionToken(b, op, cred, "renew-checked");
+    const beforeForeign = new Database(b.dbPath);
+    const expiresBeforeForeign = (beforeForeign.query("SELECT expires_at FROM approval_session_tokens WHERE token_id = ?").get(first.token_id) as {
+      expires_at: string;
+    }).expires_at;
+    beforeForeign.close();
+    const foreign = newOperator();
+    const foreignRenew = await signedPost<{ error: string }>(
+      b,
+      "/approval/token-mint",
+      { session_public_key: cred.publicKey, session_ref: "renew-checked", renew_only: true },
+      { cred: foreign.cred, operator_id: foreign.id }
+    );
+    expect(foreignRenew.status).toBe(409);
+    const afterForeign = new Database(b.dbPath);
+    const expiresAfterForeign = (afterForeign.query("SELECT expires_at FROM approval_session_tokens WHERE token_id = ?").get(first.token_id) as {
+      expires_at: string;
+    }).expires_at;
+    afterForeign.close();
+    expect(expiresAfterForeign).toBe(expiresBeforeForeign);
+
+    const db = new Database(b.dbPath);
+    db.run("UPDATE approval_session_tokens SET expires_at = ? WHERE token_id = ?", [
+      new Date(Date.now() - 1_000).toISOString(),
+      first.token_id
+    ]);
+    db.close();
+    const expired = await signedPost<{ error: string }>(
+      b,
+      "/approval/token-mint",
+      { session_public_key: cred.publicKey, session_ref: "renew-checked", renew_only: true },
+      { cred: op.cred, operator_id: op.id }
+    );
+    expect(expired.status).toBe(409);
+
+    const altered = new Database(b.dbPath);
+    altered.run("UPDATE approval_session_tokens SET expires_at = ?, public_key = ? WHERE token_id = ?", [
+      "2030-01-02T00:00:00.000Z",
+      "different-public-key",
+      first.token_id
+    ]);
+    altered.close();
+    const mismatchedKey = await signedPost<{ error: string }>(
+      b,
+      "/approval/token-mint",
+      { session_public_key: cred.publicKey, session_ref: "renew-checked", renew_only: true },
+      { cred: op.cred, operator_id: op.id }
+    );
+    expect(mismatchedKey.status).toBe(409);
+  });
+});
+
 describe("notification expiry (C-4: the notif expires, the session does not)", () => {
   test("an overdue pending approval flips to expired_notif but stays claimable by the Deck", async () => {
     const b = await boot();

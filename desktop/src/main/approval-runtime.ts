@@ -11,13 +11,14 @@ import { join } from 'node:path'
 import { generateCredential, deriveTokenId } from './approval-auth'
 import { writeFileAtomic } from './atomic-write'
 import { loadOperatorIdentity, createOperatorIdentity, type OperatorIdentity } from './operator-identity'
-import { mintSessionToken, revokeSessionToken, type ApprovalDeps } from './approval-service'
+import { mintSessionToken, renewSessionToken, revokeSessionToken, type ApprovalDeps } from './approval-service'
 import { teamLeadInstanceToken } from './team-lead-mcp-sweep'
 import type { SecretCipher } from './scope-secrets'
 import type { BrokerEndpoint } from './broker-client'
 import { reportError } from './log'
 
 const CRED_FILE = 'session-approval.json'
+const RENEWAL_INTERVAL_MS = 6 * 3600_000
 
 export function approvalCredFileName(projectKey: string, runId: string): string {
   return `${teamLeadInstanceToken(projectKey)}-${runId}-${CRED_FILE}`
@@ -31,6 +32,10 @@ export interface ApprovalRuntimeOptions {
   host: string
   /** Injected so this module does not resolve the window project through git. */
   projectKey?: () => string
+  renewalIntervalMs?: number
+  now?: () => number
+  setTimeout?: (callback: () => void, delayMs: number) => unknown
+  clearTimeout?: (timer: unknown) => void
 }
 
 export class ApprovalRuntime {
@@ -43,6 +48,10 @@ export class ApprovalRuntime {
   private disarming = false
   private armInFlight: Promise<boolean> | null = null
   private disarmInFlight: Promise<void> | null = null
+  private renewal: { publicKey: string; sessionRef: string; projectKey: string; expiresAt: string } | null = null
+  private renewalTimer: unknown | null = null
+  private renewalAbort: AbortController | null = null
+  private renewalInFlight: Promise<void> | null = null
 
   constructor(private readonly opts: ApprovalRuntimeOptions) {}
 
@@ -107,6 +116,91 @@ export class ApprovalRuntime {
     return !this.closed && !this.disarming && this.generation === generation
   }
 
+  private stopRenewal(): void {
+    if (this.renewalTimer !== null) {
+      if (this.opts.clearTimeout) this.opts.clearTimeout(this.renewalTimer)
+      else clearTimeout(this.renewalTimer as ReturnType<typeof setTimeout>)
+      this.renewalTimer = null
+    }
+    this.renewalAbort?.abort()
+    this.renewalAbort = null
+    this.renewalInFlight = null
+    this.renewal = null
+  }
+
+  private canRenew(generation: number, renewal: { publicKey: string; sessionRef: string; projectKey: string; expiresAt: string }): boolean {
+    return this.isCurrentArm(generation) && this.armed && this.renewal === renewal && this.now() < Date.parse(renewal.expiresAt)
+  }
+
+  private now(): number {
+    return this.opts.now?.() ?? Date.now()
+  }
+
+  private renewalExpiry(expiresAt: unknown): string | null {
+    if (typeof expiresAt !== 'string') return null
+    const timestamp = Date.parse(expiresAt)
+    if (!Number.isFinite(timestamp) || new Date(timestamp).toISOString() !== expiresAt || timestamp <= this.now()) return null
+    return expiresAt
+  }
+
+  private scheduleRenewal(generation: number): void {
+    const renewal = this.renewal
+    if (!renewal || !this.canRenew(generation, renewal)) return
+    let timer: unknown
+    const callback = () => {
+      if (this.renewalTimer === timer) this.renewalTimer = null
+      void this.renew(generation, renewal)
+    }
+    const delayMs = this.opts.renewalIntervalMs ?? RENEWAL_INTERVAL_MS
+    timer = this.opts.setTimeout ? this.opts.setTimeout(callback, delayMs) : setTimeout(callback, delayMs)
+    this.renewalTimer = timer
+  }
+
+  private async renew(generation: number, renewal: { publicKey: string; sessionRef: string; projectKey: string; expiresAt: string }): Promise<void> {
+    if (!this.canRenew(generation, renewal) || this.renewalInFlight) return
+    const controller = new AbortController()
+    this.renewalAbort = controller
+    const pending = this.renewGeneration(generation, renewal, controller.signal)
+    this.renewalInFlight = pending
+    try {
+      await pending
+    } finally {
+      if (this.renewalInFlight === pending) this.renewalInFlight = null
+      if (this.renewalAbort === controller) this.renewalAbort = null
+    }
+  }
+
+  private async renewGeneration(
+    generation: number,
+    renewal: { publicKey: string; sessionRef: string; projectKey: string; expiresAt: string },
+    signal: AbortSignal
+  ): Promise<void> {
+    try {
+      if (!this.identity) return
+      const response = await renewSessionToken({
+        endpoint: this.opts.endpoint(),
+        identity: this.identity,
+        projectKey: renewal.projectKey
+      }, {
+        sessionPublicKey: renewal.publicKey,
+        sessionRef: renewal.sessionRef,
+        signal
+      })
+      if (!this.canRenew(generation, renewal)) return
+      const expiresAt = this.renewalExpiry(response.expires_at)
+      if (!expiresAt) {
+        reportError('approvals', 'broker returned an invalid approval token expiry; renewal is disabled for this run')
+        return
+      }
+      renewal.expiresAt = expiresAt
+      this.scheduleRenewal(generation)
+    } catch (e) {
+      if (signal.aborted) return
+      reportError('approvals', 'could not renew the session credential', e)
+      if (this.canRenew(generation, renewal)) this.scheduleRenewal(generation)
+    }
+  }
+
   /**
    * Turn the feature on: resolve the identity, mint a session credential and
    * publish it. Concurrent callers share one operation. Returns false when it
@@ -160,7 +254,7 @@ export class ApprovalRuntime {
       const sessionRef = `window-${this.opts.runId}`
       const tokenId = deriveTokenId(cred.publicKey)
       const deps: ApprovalDeps = { endpoint: this.opts.endpoint(), identity, projectKey }
-      await mintSessionToken(deps, {
+      const minted = await mintSessionToken(deps, {
         sessionPublicKey: cred.publicKey,
         sessionRef
       })
@@ -188,6 +282,17 @@ export class ApprovalRuntime {
       )
       this.credPath = path
       this.armed = true
+      if (minted.capabilities?.renew_only === true) {
+        const expiresAt = this.renewalExpiry(minted.expires_at)
+        if (expiresAt) {
+          this.renewal = { publicKey: cred.publicKey, sessionRef, projectKey, expiresAt }
+          this.scheduleRenewal(generation)
+        } else {
+          reportError('approvals', 'broker returned an invalid approval token expiry; renewal is disabled for this run')
+        }
+      } else {
+        reportError('approvals', 'broker does not support approval token renewal; renewal is disabled for this run')
+      }
       return true
     } catch (e) {
       // Broker down at launch, unwritable state dir: the app must still start,
@@ -204,6 +309,7 @@ export class ApprovalRuntime {
     this.disarming = true
     this.generation += 1
     this.armed = false
+    this.stopRenewal()
     const pending = this.finishDisarm()
     this.disarmInFlight = pending
     try {

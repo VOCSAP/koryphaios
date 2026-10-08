@@ -39,7 +39,8 @@ export interface ApprovalDeps {
 async function signedPost<T>(
   deps: ApprovalDeps,
   path: string,
-  payload: Record<string, unknown>
+  payload: Record<string, unknown>,
+  signal?: AbortSignal
 ): Promise<T> {
   const f = deps.fetchImpl ?? fetch
   const body = { ...payload, public_key: deps.identity.publicKey }
@@ -52,7 +53,8 @@ async function signedPost<T>(
   const res = await f(`${deps.endpoint.url}${path}`, {
     method: 'POST',
     headers,
-    body: JSON.stringify({ ...body, auth })
+    body: JSON.stringify({ ...body, auth }),
+    signal
   })
   if (!res.ok) {
     // The status stays last: callers match a lost race with /: 409$/.
@@ -73,18 +75,26 @@ async function signedPost<T>(
 export async function mintSessionToken(
   deps: ApprovalDeps,
   args: { sessionPublicKey: string; sessionRef: string; ttlHours?: number }
-): Promise<{ token_id: string; expires_at: string }> {
+): Promise<{ token_id: string; expires_at: string; capabilities?: { renew_only?: boolean } }> {
   return signedPost(deps, '/approval/token-mint', {
     session_public_key: args.sessionPublicKey,
     session_ref: args.sessionRef,
-    // Card 1def56da: the window's project is PINNED into the credential here,
-    // by the operator, so the agent that later holds the token cannot choose
-    // the project its blocking questions are filed under. Same discipline as
-    // session_ref, extended to the dimension that became a scope with card
-    // 4df14b5b. The broker refuses a mint without it.
     project_key: deps.projectKey,
     ttl_hours: args.ttlHours ?? 24
   })
+}
+
+export async function renewSessionToken(
+  deps: ApprovalDeps,
+  args: { sessionPublicKey: string; sessionRef: string; signal?: AbortSignal }
+): Promise<{ token_id: string; expires_at: string; capabilities?: { renew_only?: boolean } }> {
+  return signedPost(deps, '/approval/token-mint', {
+    session_public_key: args.sessionPublicKey,
+    session_ref: args.sessionRef,
+    project_key: deps.projectKey,
+    ttl_hours: 24,
+    renew_only: true
+  }, args.signal)
 }
 
 export async function revokeSessionToken(
