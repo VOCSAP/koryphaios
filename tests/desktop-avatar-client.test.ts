@@ -185,6 +185,35 @@ test('attaches, binds, pushes state on change and repeats it every five seconds'
   await client.stop()
 })
 
+test('pushes the pending Courrier requests and the unread inbox it is given, neutral when not given', async () => {
+  const rows = [{ reply_route: 'channel', status: 'pending', origin: { tile_ref: '' } }]
+  const { client, posts } = harness({ pendingApprovals: () => rows, inboxUnread: () => 3 })
+  client.start()
+  await flush()
+  expect(posts.at(-1)).toEqual({
+    path: '/state',
+    body: { identity, counters: { working: 0, idle: 0, unknown: 0, waiting: 1, exited: 0, rateLimited: 0 }, unread: 3 }
+  })
+  await client.stop()
+})
+
+test('an invalid unread count is traced once per episode and the bounded state is still pushed', async () => {
+  let unread = Number.NaN
+  const { client, posts, reports, infos, heartbeat } = harness({ inboxUnread: () => unread })
+  client.start()
+  await flush()
+  heartbeat.tick?.()
+  await flush()
+  expect(reports.filter((message) => message.includes('Invalid inbox unread count'))).toHaveLength(1)
+  expect(posts.filter((post) => post.path === '/state').every((post) => (post.body as { unread: number }).unread === 0)).toBe(true)
+  unread = 2
+  heartbeat.tick?.()
+  await flush()
+  expect(infos).toContain('Inbox unread count valid again')
+  expect((posts.at(-1)!.body as { unread: number }).unread).toBe(2)
+  await client.stop()
+})
+
 test('focuses on a bound command and answers its result', async () => {
   const { client, socket, live } = await boundHarness()
   socket.receive(command())

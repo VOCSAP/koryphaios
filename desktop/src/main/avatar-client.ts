@@ -7,8 +7,9 @@ import {
   type AvatarAttachRequest
 } from '../shared/avatar-protocol'
 import { AVATAR_HEARTBEAT_MS, type AvatarDeckIdentity } from '../shared/avatar-state'
+import type { HookAwaitRow } from '../shared/hook-await'
 import type { SessionRuntime } from '../shared/types'
-import { projectAvatarCounters } from './avatar-counters'
+import { isAvatarCounter, projectAvatarCounters } from './avatar-counters'
 import type { AvatarRendezvous } from './avatar-registry'
 import { avatarHttpsRequestOptions, connectAvatarWss } from './avatar-transport'
 import { logInfo, reportError } from './log'
@@ -33,6 +34,10 @@ export interface AvatarClientOptions {
   autoAttachEnabled(): boolean
   rendezvous(): AvatarRendezvous | null
   sessions(): SessionRuntime[]
+  /** The last pending-approvals list of this Deck's broker; absent reads as none. */
+  pendingApprovals?(): readonly HookAwaitRow[]
+  /** Unread operator inbox messages; absent reads as zero. */
+  inboxUnread?(): number
   focus(): Promise<void>
   post?: AvatarPost
   connect?: (rendezvous: AvatarRendezvous) => AvatarClientSocket
@@ -108,6 +113,7 @@ export function createAvatarClient(options: AvatarClientOptions): AvatarClient {
   const info = options.info ?? logInfo
   const link = failureEpisode(report, info, 'Avatar link restored')
   const webSocket = failureEpisode(report, info, 'Avatar WebSocket restored')
+  const unreadInput = failureEpisode(report, info, 'Inbox unread count valid again')
   const initialDeck = options.deck()
   const identity: AvatarDeckIdentity = { deckRunId: initialDeck.deckRunId, broker_url: initialDeck.broker_url }
   let attachedRunId: string | null = null
@@ -215,7 +221,14 @@ export function createAvatarClient(options: AvatarClientOptions): AvatarClient {
     }
     if (!socket) openSocket(rendezvous)
 
-    const snapshot = { identity, ...projectAvatarCounters(options.sessions()) }
+    const unread = options.inboxUnread?.() ?? 0
+    if (isAvatarCounter(unread)) unreadInput.ok()
+    const snapshot = {
+      identity,
+      ...projectAvatarCounters(options.sessions(), options.pendingApprovals?.() ?? [], unread, (value) =>
+        unreadInput.fail(`Invalid inbox unread count (${String(value)}), bounded before the Avatar snapshot`)
+      )
+    }
     const serialized = JSON.stringify(snapshot)
     if (!force && serialized === lastPushed) return
     const status = await post(rendezvous, '/state', snapshot)
