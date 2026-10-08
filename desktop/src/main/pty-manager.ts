@@ -1,7 +1,8 @@
 import { EventEmitter } from 'node:events'
 import { appendFileSync } from 'node:fs'
 import * as pty from 'node-pty'
-import { buildShellInvocation, type SpawnOpts } from './shell-command'
+import { buildSpawnPlan, type SpawnOpts } from './shell-command'
+import { JobStartupStatus, scanJobStartup } from './pty-startup-status'
 import { reportError } from './log'
 
 /**
@@ -49,6 +50,7 @@ interface Spawned {
   /** Start marker to strip (interactive mode), or null. */
   marker: string | null
   markerSeen: boolean
+  jobStartup: JobStartupStatus | null
   preBuf: string
   /** Pending ConPTY flush kicks (win32 only, cleared on kill/exit/respawn). */
   kickTimers: NodeJS.Timeout[]
@@ -66,15 +68,10 @@ export class PtyManager extends EventEmitter {
    */
   spawn(id: string, cwd: string, opts: SpawnOpts, extraEnv?: Record<string, string>): number {
     this.kill(id)
-    const { file, args, marker } = buildShellInvocation(opts)
-
-    const env: Record<string, string | undefined> = {
-      ...process.env,
-      // Populate the status-line peer_id cache so the Deck can show peer_id.
-      CLAUDE_PEERS_STATUS_LINE_CACHE: '1',
-      TERM: 'xterm-256color',
-      ...extraEnv
-    }
+    const {
+      invocation: { file, args, marker },
+      env
+    } = buildSpawnPlan(opts, extraEnv, process.platform)
     // CLAUDE_PEERS_TOOLS's absence is load-bearing, unlike every other key this
     // merge handles: '' means zero tools, the opposite of 'no restriction', so
     // it can't be neutralized with an empty-string default the way other keys
@@ -101,6 +98,7 @@ export class PtyManager extends EventEmitter {
       rows: 24,
       marker,
       markerSeen: false,
+      jobStartup: process.platform === 'win32' ? new JobStartupStatus(Date.now()) : null,
       preBuf: '',
       kickTimers: []
     }
@@ -166,6 +164,9 @@ export class PtyManager extends EventEmitter {
   private handleData(id: string, data: string): void {
     const s = this.procs.get(id)
     if (!s) return
+    const jobScan = scanJobStartup(s.jobStartup, data, Date.now)
+    s.jobStartup = jobScan.status
+    if (jobScan.reportFailure) reportError('pty', `kory-job: tree kill disabled for tile ${id}`)
     if (!s.marker || s.markerSeen) {
       this.emit('data', { id, data } satisfies PtyDataPayload)
       return

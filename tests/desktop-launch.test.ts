@@ -26,7 +26,15 @@ import {
   sanitizeFlagValue,
   shouldInjectPrompt
 } from "../desktop/src/main/session-command.ts";
-import { buildShellInvocation } from "../desktop/src/main/shell-command.ts";
+import * as shellCommand from "../desktop/src/main/shell-command.ts";
+import {
+  JOB_STARTUP_SCAN_WINDOW_MS,
+  JobStartupStatus,
+  MAX_ESCAPE_SEQUENCE_CODE_UNITS,
+  scanJobStartup
+} from "../desktop/src/main/pty-startup-status.ts";
+
+const { buildShellInvocation, buildSpawnPlan } = shellCommand;
 
 const tmpDirs: string[] = [];
 function tmpProject(): string {
@@ -521,7 +529,7 @@ test("interactive unix adds -i and prepends a start marker", () => {
 test("windows non-interactive uses -NoProfile, interactive loads the profile", () => {
   const off = buildShellInvocation({ command: "claude x", shell: "", interactive: false }, "win32");
   expect(off.file).toBe("powershell.exe");
-  expect(off.args).toContain("-NoProfile");
+  expect(off.args).toEqual(["-NoLogo", "-NoProfile", "-Command", "claude x"]);
   expect(off.marker).toBeNull();
 
   const on = buildShellInvocation({ command: "claude x", shell: "", interactive: true }, "win32");
@@ -530,30 +538,195 @@ test("windows non-interactive uses -NoProfile, interactive loads the profile", (
   expect(on.args[on.args.length - 1]).toContain(on.marker as string);
 });
 
-// card d02c8e96: the incident this tracker exists for was NOT "dir missing
-// at boot" (that would have been caught by the original module-level const
-// too, once). It was "dir present at boot, deleted 9h into a running
-// process". A tracker that only reports the FIRST-EVER check would never
-// fire on that exact sequence. These probes replay the incident directly.
+test("windows killTreeOnClose evaluates the Job Object preamble from the environment", () => {
+  const invocation = buildShellInvocation({ command: "claude x", shell: "", interactive: false, killTreeOnClose: true }, "win32");
+  const command = invocation.args.at(-1)!;
+
+  expect(shellCommand.JOB_PREAMBLE_PS).toContain("Add-Type");
+  expect(command).toContain("[ScriptBlock]::Create($env:KORY_JOB_PS)");
+  expect(command).toContain("$global:KoryJobOk");
+  expect(command).toEndWith("claude x");
+  expect(command).not.toContain("Add-Type");
+  expect(command).not.toContain(shellCommand.JOB_PREAMBLE_PS);
+});
+
+test("windows interactive killTreeOnClose keeps the output marker before the preamble", () => {
+  const invocation = buildShellInvocation({ command: "claude x", shell: "", interactive: true, killTreeOnClose: true }, "win32");
+  const command = invocation.args.at(-1)!;
+
+  expect(invocation.marker).toBeTruthy();
+  expect(command.indexOf(invocation.marker!)).toBeLessThan(command.indexOf("[ScriptBlock]::Create($env:KORY_JOB_PS)"));
+  expect(command).toEndWith("claude x");
+});
+
+test("killTreeOnClose leaves unix shell invocation unchanged", () => {
+  const invocation = buildShellInvocation({ command: "claude x", shell: "/bin/bash", interactive: false, killTreeOnClose: true }, "linux");
+
+  expect(invocation.args).toEqual(["-l", "-c", "claude x"]);
+});
+
+const JOB_MARKER = "kory-job: tree kill disabled";
+const CONPTY_SUCCESS =
+  "\x1b[?9001h\x1b[?1004h\x1b[?25l\x1b[2J\x1b[m\x1b[HPS C:\\work> " +
+  "\x1b]0;C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\x07\x1b[?25h\r\n";
+const CONPTY_FAILURE = `AVERTISSEMENT : ${JOB_MARKER}: job not entered\x1b[K\x1b[m\r\n`;
+const TITLE_WITH_MARKER_BEL = `\x1b]0;${JOB_MARKER}\x07`;
+const TITLE_WITH_MARKER_ST = `\x1b]0;${JOB_MARKER}\x1b\\`;
+
+function countReports(chunks: string[], now = 1_000): number {
+  const status = new JobStartupStatus(1_000);
+  return chunks.filter((chunk) => status.consume(chunk, now).reportFailure).length;
+}
+
+function everyTwoChunkSplit(output: string): string[][] {
+  return Array.from({ length: output.length + 1 }, (_, at) => [output.slice(0, at), output.slice(at)]);
+}
+
+test("Job startup status never reports the real ConPTY success output, at any chunk split", () => {
+  for (const chunks of everyTwoChunkSplit(CONPTY_SUCCESS)) {
+    expect(countReports(chunks), `split ${JSON.stringify(chunks)}`).toBe(0);
+  }
+});
+
+test("Job startup status reports the real ConPTY failure line exactly once, at any chunk split", () => {
+  for (const chunks of everyTwoChunkSplit(CONPTY_SUCCESS + CONPTY_FAILURE)) {
+    expect(countReports(chunks), `split ${JSON.stringify(chunks)}`).toBe(1);
+  }
+});
+
+test("Job startup status ignores the marker inside an OSC title terminated by BEL or ST, at any chunk split", () => {
+  for (const title of [TITLE_WITH_MARKER_BEL, TITLE_WITH_MARKER_ST]) {
+    for (const chunks of everyTwoChunkSplit(CONPTY_SUCCESS + title + CONPTY_SUCCESS)) {
+      expect(countReports(chunks), `split ${JSON.stringify(chunks)}`).toBe(0);
+    }
+  }
+});
+
+test("Job startup status reports the visible marker after an OSC title holding it, at any chunk split", () => {
+  for (const title of [TITLE_WITH_MARKER_BEL, TITLE_WITH_MARKER_ST]) {
+    for (const chunks of everyTwoChunkSplit(title + CONPTY_FAILURE)) {
+      expect(countReports(chunks), `split ${JSON.stringify(chunks)}`).toBe(1);
+    }
+  }
+});
+
+test.each([
+  ["OSC split at ESC | ]", ["PS> \x1b", `]0;${JOB_MARKER}\x07`], 0],
+  ["OSC split right after its introducer", ["\x1b]0;", `${JOB_MARKER}\x07`], 0],
+  ["OSC split before BEL", [`\x1b]0;${JOB_MARKER}`, "\x07\r\n"], 0],
+  ["OSC split at ESC | \\ of ST", [`\x1b]0;${JOB_MARKER}\x1b`, "\\\r\n"], 0],
+  ["OSC split at ESC | \\ of ST, failure line after", ["\x1b]0;title\x1b", `\\${CONPTY_FAILURE}`], 1],
+  ["CSI split at ESC | [ inside the marker", ["kory-job: tree \x1b", "[Kkill disabled\r\n"], 1],
+  ["CSI split after the introducer inside the marker", ["kory-job: tree \x1b[", "Kkill disabled\r\n"], 1],
+  ["CSI split inside the parameter inside the marker", ["kory-job: tree \x1b[1", "0Ckill disabled\r\n"], 1],
+  ["CSI split after the final byte inside the marker", ["kory-job: tree \x1b[10C", "kill disabled\r\n"], 1]
+] as const)("Job startup status keeps escape state across chunks: %s", (_name, chunks, reports) => {
+  expect(countReports([...chunks])).toBe(reports);
+});
+
+test("Job startup status abandons an unterminated OSC after its code-unit cap and reports what follows", () => {
+  const runaway = "\x1b]0;" + "x".repeat(MAX_ESCAPE_SEQUENCE_CODE_UNITS);
+  expect(countReports([runaway, CONPTY_FAILURE]), "an OSC never terminated must not hide the rest of startup").toBe(1);
+
+  const longTitle = "\x1b]0;" + "x".repeat(MAX_ESCAPE_SEQUENCE_CODE_UNITS - 100) + JOB_MARKER + "\x07";
+  expect(countReports([longTitle]), "an OSC within the cap stays hidden").toBe(0);
+});
+
+test("Job startup status reports a ConPTY repaint only once, then stays done", () => {
+  const status = new JobStartupStatus(1_000);
+
+  expect(status.consume(CONPTY_FAILURE, 1_000)).toEqual({ reportFailure: true, done: true });
+  expect(status.consume(CONPTY_FAILURE, 15_000)).toEqual({ reportFailure: false, done: true });
+});
+
+test("Job startup status reports the marker only strictly inside its startup window", () => {
+  const startedAt = 1_000;
+  const lastInside = startedAt + JOB_STARTUP_SCAN_WINDOW_MS - 1;
+
+  expect(new JobStartupStatus(startedAt).consume(CONPTY_FAILURE, lastInside), "1 ms before the window ends").toEqual({
+    reportFailure: true,
+    done: true
+  });
+  for (const now of [startedAt + JOB_STARTUP_SCAN_WINDOW_MS, startedAt + JOB_STARTUP_SCAN_WINDOW_MS + 1, startedAt + 60_000]) {
+    expect(new JobStartupStatus(startedAt).consume(CONPTY_FAILURE, now), `at +${now - startedAt} ms`).toEqual({
+      reportFailure: false,
+      done: true
+    });
+  }
+});
+
+test("Job startup scan drops the status at its terminal state and reads no clock afterwards", () => {
+  let clockReads = 0;
+  const clock = () => {
+    clockReads++;
+    return 1_000;
+  };
+
+  const live = scanJobStartup(new JobStartupStatus(1_000), CONPTY_SUCCESS, clock);
+  expect(live.status, "a live status survives a chunk without the marker").not.toBeNull();
+  expect(clockReads).toBe(1);
+
+  const reported = scanJobStartup(live.status, CONPTY_FAILURE, clock);
+  expect(reported).toEqual({ status: null, reportFailure: true });
+
+  const expired = scanJobStartup(new JobStartupStatus(1_000), CONPTY_SUCCESS, () => 1_000 + JOB_STARTUP_SCAN_WINDOW_MS);
+  expect(expired).toEqual({ status: null, reportFailure: false });
+
+  clockReads = 0;
+  expect(scanJobStartup(null, CONPTY_FAILURE, clock)).toEqual({ status: null, reportFailure: false });
+  expect(clockReads, "a dropped status costs no clock read per chunk").toBe(0);
+});
+
+test("spawn plan on win32 forces the Job Object preamble over a hostile extraEnv", () => {
+  const { invocation, env } = buildSpawnPlan(
+    { command: "claude x", shell: "", interactive: false },
+    { KORY_JOB_PS: "Remove-Item C:\\ -Recurse", OTHER: "kept" },
+    "win32"
+  );
+
+  expect(env.KORY_JOB_PS, "the preamble env must be ours, not the caller's").toBe(shellCommand.JOB_PREAMBLE_PS);
+  expect(env.OTHER).toBe("kept");
+  expect(invocation.args.at(-1), "killTreeOnClose must be forced on every tile").toContain(
+    "[ScriptBlock]::Create($env:KORY_JOB_PS)"
+  );
+  expect(invocation.args.at(-1)).toEndWith("claude x");
+});
+
+test("spawn plan off win32 neither sets KORY_JOB_PS nor changes the shell command", () => {
+  const { invocation, env } = buildSpawnPlan({ command: "claude x", shell: "/bin/bash", interactive: false }, {}, "linux");
+
+  expect(env.KORY_JOB_PS, "KORY_JOB_PS is only ours on win32").toBe(process.env.KORY_JOB_PS);
+  expect(invocation.args).toEqual(["-l", "-c", "claude x"]);
+});
+
+test("windows non-interactive Job Object command emits no startup sentinel", () => {
+  const invocation = buildShellInvocation({ command: "claude x", shell: "", interactive: false, killTreeOnClose: true }, "win32");
+  const command = invocation.args.at(-1)!;
+
+  expect(invocation.marker).toBeNull();
+  expect(command).not.toContain("KORY_JOB_STARTUP");
+  expect(command).not.toContain("Write-Output");
+});
+
 test("createMissingDirTracker reports once when the dir is missing from the very first check", () => {
   const tracker = createMissingDirTracker();
-  expect(tracker.check(false)).toBe(true); // first check, missing -> report
-  expect(tracker.check(false)).toBe(false); // still missing -> no spam
+  expect(tracker.check(false)).toBe(true);
+  expect(tracker.check(false)).toBe(false);
   expect(tracker.check(false)).toBe(false);
 });
 
 test("createMissingDirTracker reports on a present->absent transition mid-run, not just at boot", () => {
   const tracker = createMissingDirTracker();
-  expect(tracker.check(true)).toBe(false); // boot: dir present, nothing to report
-  expect(tracker.check(true)).toBe(false); // still present across many spawns
-  expect(tracker.check(false)).toBe(true); // it just got deleted -- must fire NOW
-  expect(tracker.check(false)).toBe(false); // stays missing -> no repeat spam
+  expect(tracker.check(true)).toBe(false);
+  expect(tracker.check(true)).toBe(false);
+  expect(tracker.check(false)).toBe(true);
+  expect(tracker.check(false)).toBe(false);
 });
 
 test("createMissingDirTracker re-arms: a return to present clears the report, a later disappearance reports again", () => {
   const tracker = createMissingDirTracker();
-  expect(tracker.check(false)).toBe(true); // missing -> reported
-  expect(tracker.check(true)).toBe(false); // repackaged, dir is back
-  expect(tracker.check(true)).toBe(false); // stays present
-  expect(tracker.check(false)).toBe(true); // disappears again -> reports again, not spent
+  expect(tracker.check(false)).toBe(true);
+  expect(tracker.check(true)).toBe(false);
+  expect(tracker.check(true)).toBe(false);
+  expect(tracker.check(false)).toBe(true);
 });
