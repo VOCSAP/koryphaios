@@ -255,9 +255,24 @@ describe("hasUnsafePermissionRepresentation", () => {
     expect(hasUnsafePermissionRepresentation({ ...safe, cwd: 5 as never })).toBe(true);
   });
 
-  test("a line break or tab is unsafe in the tool name and the cwd but legitimate in a tool input value", () => {
+  test("an agent type rejects every non-string boundary value", () => {
+    for (const agentType of [{}, 5, true, null, Number.NaN]) {
+      expect(hasUnsafePermissionRepresentation({ ...safe, agent_type: agentType as never })).toBe(true);
+    }
+  });
+
+  test("an empty or whitespace agent type behaves as absent", () => {
+    for (const agentType of ["", "   "]) {
+      expect(hasUnsafePermissionRepresentation({ ...safe, agent_type: agentType })).toBe(false);
+      expect(buildApprovalRequest({ ...safe, agent_type: agentType }, { brokerUrl: "http://x" } as ApprovalHookConfig).title).toBe("Bash: ls");
+    }
+  });
+
+  test("a line break or tab is unsafe in the tool name, cwd, and agent type but legitimate in a tool input value", () => {
     expect(hasUnsafePermissionRepresentation({ ...safe, tool_name: "Bash\nAllow" })).toBe(true);
     expect(hasUnsafePermissionRepresentation({ ...safe, cwd: "C:/a\tb" })).toBe(true);
+    expect(hasUnsafePermissionRepresentation({ ...safe, agent_type: "general-purpose\nAllow" })).toBe(true);
+    expect(hasUnsafePermissionRepresentation({ ...safe, agent_type: `general-purpose${String.fromCodePoint(0x202e)}` })).toBe(true);
     expect(hasUnsafePermissionRepresentation({ ...safe, tool_input: { command: "a\n\tb" } })).toBe(false);
   });
 });
@@ -403,6 +418,150 @@ test("an expired local budget leaves the native permission dialog in control", a
   expect(decisions).toEqual([]);
 });
 
+test("an expired local budget is traced separately from broker unreachability", async () => {
+  const calls: string[] = [];
+  const cfg = {
+    brokerUrl: "http://broker.test",
+    brokerToken: null,
+    operatorId: "op",
+    tokenId: "tok",
+    sessionRef: "window-1",
+    privateKey: "private",
+    publicKey: "public",
+    osUserHash: "",
+    blockSec: 900,
+    origin: {},
+  } satisfies ApprovalHookConfig;
+  const runClient = async (
+    op: string,
+    _rawRequest: string,
+    _cfg: ApprovalHookConfig | null,
+    _tileRef: string,
+    _fetch?: (url: string, init: RequestInit) => Promise<Response>,
+    signal?: AbortSignal
+  ) => {
+    calls.push(op);
+    if (op === "add") return { ok: true as const, id: "approval-1", producer_secret: "secret-1" };
+    if (op === "withdraw") return { ok: true as const, approval: { id: "approval-1", status: "answered_terminal" } };
+    await Promise.race([
+      new Promise<void>((resolve) => {
+        if (signal?.aborted) resolve();
+        else signal?.addEventListener("abort", () => resolve(), { once: true });
+      }),
+      Bun.sleep(200).then(() => {
+        throw new Error("budget signal did not abort");
+      }),
+    ]);
+    return { ok: false as const, error: "broker unreachable: The operation timed out." };
+  };
+
+  const { stderr } = await captureStderr(() =>
+    servePermission(
+      cfg,
+      { kind: "permission", title: "Bash", question: "q", options: ["Allow", "Deny"] },
+      "tile-1",
+      { budgetMs: 30, runClient, writeDecision: () => {} }
+    )
+  );
+
+  expect(calls).toEqual(["add", "wait", "withdraw"]);
+  expect(stderr).toContain("permission wait budget expired: broker unreachable: The operation timed out.");
+  expect(stderr).not.toContain("permission wait failed");
+});
+
+test("a wait failure after the deadline is traced as budget expiry before its signal fires", async () => {
+  const cfg = {
+    brokerUrl: "http://broker.test",
+    brokerToken: null,
+    operatorId: "op",
+    tokenId: "tok",
+    sessionRef: "window-1",
+    privateKey: "private",
+    publicKey: "public",
+    osUserHash: "",
+    blockSec: 900,
+    origin: {},
+  } satisfies ApprovalHookConfig;
+  const runClient = async (
+    op: string,
+    _rawRequest: string,
+    _cfg: ApprovalHookConfig | null,
+    _tileRef: string,
+    _fetch?: (url: string, init: RequestInit) => Promise<Response>,
+    signal?: AbortSignal
+  ) => {
+    if (op === "add") return { ok: true as const, id: "approval-1", producer_secret: "secret-1" };
+    if (op === "withdraw") return { ok: true as const, approval: { id: "approval-1", status: "answered_terminal" } };
+    const deadline = performance.now() + 30;
+    while (performance.now() < deadline) {}
+    expect(signal?.aborted).toBe(false);
+    return { ok: false as const, error: "broker unreachable: The operation timed out." };
+  };
+
+  const { stderr } = await captureStderr(() =>
+    servePermission(
+      cfg,
+      { kind: "permission", title: "Bash", question: "q", options: ["Allow", "Deny"] },
+      "tile-1",
+      { budgetMs: 10, runClient, writeDecision: () => {} }
+    )
+  );
+
+  expect(stderr).toContain("permission wait budget expired: broker unreachable: The operation timed out.");
+  expect(stderr).not.toContain("permission wait failed");
+});
+
+test("an allow verdict returned as the budget expires is emitted", async () => {
+  const calls: string[] = [];
+  const decisions: string[] = [];
+  const cfg = {
+    brokerUrl: "http://broker.test",
+    brokerToken: null,
+    operatorId: "op",
+    tokenId: "tok",
+    sessionRef: "window-1",
+    privateKey: "private",
+    publicKey: "public",
+    osUserHash: "",
+    blockSec: 900,
+    origin: {},
+  } satisfies ApprovalHookConfig;
+  const runClient = async (
+    op: string,
+    _rawRequest: string,
+    _cfg: ApprovalHookConfig | null,
+    _tileRef: string,
+    _fetch?: (url: string, init: RequestInit) => Promise<Response>,
+    signal?: AbortSignal
+  ) => {
+    calls.push(op);
+    if (op === "add") return { ok: true as const, id: "approval-1", producer_secret: "secret-1" };
+    await Promise.race([
+      new Promise<void>((resolve) => {
+        if (signal?.aborted) resolve();
+        else signal?.addEventListener("abort", () => resolve(), { once: true });
+      }),
+      Bun.sleep(200).then(() => {
+        throw new Error("budget signal did not abort");
+      }),
+    ]);
+    return {
+      ok: true as const,
+      approval: { id: "approval-1", reply_route: "hook", status: "answered", answer_kind: "allow" },
+    };
+  };
+
+  await servePermission(
+    cfg,
+    { kind: "permission", title: "Bash", question: "q", options: ["Allow", "Deny"] },
+    "tile-1",
+    { budgetMs: 30, runClient, writeDecision: (decision) => decisions.push(decision) }
+  );
+
+  expect(calls).toEqual(["add", "wait"]);
+  expect(decisions).toEqual(["allow"]);
+});
+
 describe("servePermission fallbacks", () => {
   const cfg = {
     brokerUrl: "http://broker.test",
@@ -439,7 +598,7 @@ describe("servePermission fallbacks", () => {
     });
   }
 
-  test("a broker that only answers pending is withdrawn once the budget is spent", async () => {
+  test("a broker that only answers pending traces budget expiry and leaves the dialog native", async () => {
     const calls: string[] = [];
     const decisions: string[] = [];
     const runClient = async (op: string) => {
@@ -450,16 +609,19 @@ describe("servePermission fallbacks", () => {
       return { ok: true as const, pending: true };
     };
 
-    await servePermission(cfg, request, "tile-1", {
-      budgetMs: 50,
-      runClient,
-      writeDecision: (d) => decisions.push(d),
-    });
+    const { stderr } = await captureStderr(() =>
+      servePermission(cfg, request, "tile-1", {
+        budgetMs: 50,
+        runClient,
+        writeDecision: (d) => decisions.push(d),
+      })
+    );
 
     expect(calls.filter((op) => op === "wait").length).toBeGreaterThan(1);
     expect(calls.at(-1)).toBe("withdraw");
     expect(calls.filter((op) => op === "withdraw")).toHaveLength(1);
     expect(decisions).toEqual([]);
+    expect(stderr.match(/permission wait budget expired/g)).toHaveLength(1);
   });
 
   test("an exception during the wait is traced and the delivered row is withdrawn", async () => {
@@ -548,6 +710,38 @@ describe("approval request shaping", () => {
     expect(String(body.question)).toContain("/home/u/p");
     expect(body.options).toEqual(["Allow", "Deny"]);
     expect(body.session_ref).toBe("tile-1");
+  });
+
+  test("a sub-agent type visibly prefixes a permission title", () => {
+    const body = buildApprovalRequest(
+      {
+        hook_event_name: "PermissionRequest",
+        agent_type: "general-purpose",
+        tool_name: "Bash",
+        tool_input: { command: "rm -rf build" },
+      },
+      cfg
+    );
+
+    expect(body.title).toBe("general-purpose agent -- Bash: rm -rf build");
+  });
+
+  test("a long sub-agent type keeps a visible marker and the beginning of a 160-character command", () => {
+    const command = "c".repeat(160);
+    const body = buildApprovalRequest(
+      {
+        hook_event_name: "PermissionRequest",
+        agent_type: "x".repeat(160),
+        tool_name: "Bash",
+        tool_input: { command },
+      },
+      cfg
+    );
+
+    expect(String(body.title)).toContain("[truncated from 160 characters]");
+    expect(String(body.title)).toContain("[truncated from 166 characters]");
+    expect(String(body.title)).toContain(`Bash: ${command.slice(0, 20)}`);
+    expect(Array.from(String(body.title)).length).toBeLessThanOrEqual(160);
   });
 
   test("the tile ref travels as untrusted routing metadata", () => {

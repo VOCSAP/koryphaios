@@ -22,6 +22,8 @@ const DESK_SESSION_ENV = "CLAUDE_PEERS_DESK_SESSION";
 const EXCLUDED_PERMISSION_TOOLS = new Set(["AskUserQuestion", "ExitPlanMode"]);
 const FORMAT_OR_SEPARATOR = /[\p{Cf}\p{Zl}\p{Zp}]/u;
 const CONTROL = /\p{Cc}/u;
+const AGENT_TYPE_TITLE_BUDGET = 80;
+const AGENT_TITLE_SEPARATOR = " agent -- ";
 
 export type ApprovalHookConfig = SessionApprovalCredential;
 
@@ -30,6 +32,7 @@ export interface HookPayload {
   session_id?: string;
   cwd?: string;
   tool_name?: string;
+  agent_type?: string;
   tool_input?: Record<string, unknown>;
   tool_use_id?: string;
   notification_type?: string;
@@ -80,10 +83,16 @@ function hasUnsafeValue(value: unknown): boolean {
 }
 
 export function hasUnsafePermissionRepresentation(payload: HookPayload): boolean {
-  const { cwd, tool_name: toolName } = payload;
+  const { cwd, tool_name: toolName, agent_type: agentType } = payload;
   if (cwd !== undefined && typeof cwd !== "string") return true;
   if (toolName !== undefined && typeof toolName !== "string") return true;
-  return hasUnsafeText(cwd ?? "", false) || hasUnsafeText(toolName ?? "", false) || hasUnsafeValue(payload.tool_input);
+  if (agentType !== undefined && typeof agentType !== "string") return true;
+  return (
+    hasUnsafeText(cwd ?? "", false) ||
+    hasUnsafeText(toolName ?? "", false) ||
+    hasUnsafeText(agentType ?? "", false) ||
+    hasUnsafeValue(payload.tool_input)
+  );
 }
 
 export function buildApprovalRequest(
@@ -92,8 +101,15 @@ export function buildApprovalRequest(
   tileRef = ""
 ): Record<string, unknown> {
   const blocking = classifyPayload(p) === "permission";
+  const toolSummary = blocking ? summarizeToolInput(p.tool_name ?? "", p.tool_input) : "";
+  const agentType = blocking ? capVisibly(p.agent_type?.trim() ?? "", AGENT_TYPE_TITLE_BUDGET) : "";
   const title = blocking
-    ? summarizeToolInput(p.tool_name ?? "", p.tool_input)
+    ? agentType
+      ? `${agentType}${AGENT_TITLE_SEPARATOR}${capVisibly(
+          toolSummary,
+          TITLE_DETAIL_MAX - Array.from(agentType).length - Array.from(AGENT_TITLE_SEPARATOR).length
+        )}`
+      : toolSummary
     : capVisibly(stripControl(p.message ?? "").trim(), 160) || "The agent is waiting for you";
   const question = capVisibly(
     blocking
@@ -224,6 +240,7 @@ async function servePermissionRows(
   const budgetMs = options.budgetMs ?? PERMISSION_BUDGET_MS;
   const budget = AbortSignal.timeout(budgetMs);
   const deadline = performance.now() + budgetMs;
+  let waitFailure: { error: string; expired: boolean } | null = null;
   while (!budget.aborted && performance.now() < deadline) {
     const remainingMs = deadline - performance.now();
     const timeoutSec = Math.max(1, Math.min(PERMISSION_WAIT_SEC, Math.ceil(remainingMs / 1000)));
@@ -245,10 +262,13 @@ async function servePermissionRows(
       return;
     }
     if (verdict.kind === "none") {
-      if (!output.ok) trace("permission wait failed", output.error);
+      if (!output.ok) waitFailure = { error: output.error, expired: budget.aborted || performance.now() >= deadline };
       break;
     }
   }
+
+  if (waitFailure) trace(waitFailure.expired ? "permission wait budget expired" : "permission wait failed", waitFailure.error);
+  else if (budget.aborted || performance.now() >= deadline) trace("permission wait budget expired", "local approval budget expired");
 
   const withdrawn = await runClient("withdraw", JSON.stringify({ id, producer_secret: producerSecret }), cfg, tileRef, fetch);
   if (withdrawn.ok) return;
