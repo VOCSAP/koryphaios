@@ -1,5 +1,5 @@
 import { test, expect, describe, afterAll } from "bun:test";
-import { mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -12,6 +12,7 @@ import {
 } from "../shared/approval.ts";
 import type { Approval } from "../shared/types.ts";
 import type { PermissionLeaseReader } from "../desktop/hooks/permission-lease.ts";
+import type { PermissionTranscriptContext, PermissionTranscriptObserver } from "../desktop/hooks/permission-transcript.ts";
 import { encodePermissionLeaseDescriptor } from "../desktop/shared/permission-lease.ts";
 import {
   buildApprovalRequest,
@@ -144,6 +145,147 @@ describe("config gate", () => {
   });
 });
 
+test("a transcript result during wait withdraws the producer row without a late read or verdict", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "cp-approval-transcript-"));
+  tmpDirs.push(dir);
+  const transcriptPath = join(dir, "main.jsonl");
+  const requestInput = { command: "rm -rf build" };
+  writeFileSync(
+    transcriptPath,
+    [
+      { uuid: "prompt", promptId: "prompt-1" },
+      { uuid: "tool", parentUuid: "prompt", message: { content: [{ type: "tool_use", id: "tool-1", name: "Bash", input: requestInput }] } },
+    ].map((entry) => `${JSON.stringify(entry)}\n`).join("")
+  );
+  const cfg = {
+    brokerUrl: "http://broker.test",
+    brokerToken: null,
+    operatorId: "op",
+    tokenId: "tok",
+    sessionRef: "window-1",
+    privateKey: "private",
+    publicKey: "public",
+    osUserHash: "",
+    blockSec: 900,
+    origin: {},
+  } satisfies ApprovalHookConfig;
+  const calls: Array<{ op: string; request: Record<string, unknown>; signal: AbortSignal | undefined }> = [];
+  const decisions: string[] = [];
+  let startedWaiting: () => void = () => {};
+  const waitStarted = new Promise<void>((resolve) => {
+    startedWaiting = resolve;
+  });
+  const runClient = async (
+    op: string,
+    rawRequest: string,
+    _cfg: ApprovalHookConfig | null,
+    _tileRef: string,
+    _fetch?: (url: string, init: RequestInit) => Promise<Response>,
+    signal?: AbortSignal
+  ) => {
+    calls.push({ op, request: JSON.parse(rawRequest) as Record<string, unknown>, signal });
+    if (op === "add") return { ok: true as const, id: "approval-1", producer_secret: "secret-1" };
+    if (op === "withdraw") return { ok: false as const, error: "HTTP 409: already answered" };
+    startedWaiting();
+    await new Promise<void>((resolve) => signal?.addEventListener("abort", () => resolve(), { once: true }));
+    return { ok: true as const, pending: true };
+  };
+
+  const served = servePermission(
+    cfg,
+    { kind: "permission" },
+    "tile-1",
+    {
+      runClient,
+      writeDecision: (decision) => decisions.push(decision),
+      transcript: { transcriptPath, promptId: "prompt-1", toolName: "Bash", toolInput: requestInput },
+    }
+  );
+  await waitStarted;
+  writeFileSync(
+    transcriptPath,
+    [
+      { uuid: "prompt", promptId: "prompt-1" },
+      { uuid: "tool", parentUuid: "prompt", message: { content: [{ type: "tool_use", id: "tool-1", name: "Bash", input: requestInput }] } },
+      { uuid: "result", parentUuid: "tool", message: { content: [{ type: "tool_result", tool_use_id: "tool-1" }] } },
+    ].map((entry) => `${JSON.stringify(entry)}\n`).join("")
+  );
+  await served;
+
+  expect(calls.map((call) => call.op)).toEqual(["add", "wait", "withdraw"]);
+  expect(calls[2]?.request).toEqual({ id: "approval-1", producer_secret: "secret-1" });
+  expect(calls[2]?.signal?.aborted).toBe(false);
+  expect(decisions).toEqual([]);
+});
+
+test("a transcript result during add withdraws after delivery without starting a wait", async () => {
+  const result = new AbortController();
+  const requestInput = { file_path: "/repo/a.ts", content: "new" };
+  const context: PermissionTranscriptContext = {
+    transcriptPath: "/virtual/transcript.jsonl",
+    promptId: "prompt-1",
+    toolName: "Write",
+    toolInput: requestInput,
+  };
+  const observer: PermissionTranscriptObserver = {
+    acquired: Promise.resolve(),
+    finished: new Promise(() => {}),
+    resultSignal: result.signal,
+    toolUseId: "tool-1",
+    dispose: () => {},
+  };
+  const cfg = {
+    brokerUrl: "http://broker.test",
+    brokerToken: null,
+    operatorId: "op",
+    tokenId: "tok",
+    sessionRef: "window-1",
+    privateKey: "private",
+    publicKey: "public",
+    osUserHash: "",
+    blockSec: 900,
+    origin: {},
+  } satisfies ApprovalHookConfig;
+  const calls: string[] = [];
+  let releaseAdd: () => void = () => {};
+  let added: () => void = () => {};
+  const addPending = new Promise<void>((resolve) => {
+    releaseAdd = resolve;
+  });
+  const addStarted = new Promise<void>((resolve) => {
+    added = resolve;
+  });
+  const runClient = async (op: string) => {
+    calls.push(op);
+    if (op === "add") {
+      added();
+      await addPending;
+      return { ok: true as const, id: "approval-1", producer_secret: "secret-1" };
+    }
+    return { ok: false as const, error: "HTTP 409: already answered" };
+  };
+
+  const served = servePermission(
+    cfg,
+    { kind: "permission" },
+    "tile-1",
+    {
+      runClient,
+      writeDecision: () => {
+        throw new Error("a transcript result must not emit a verdict");
+      },
+      transcript: context,
+      observeTranscript: () => observer,
+    }
+  );
+  await addStarted;
+  result.abort();
+  releaseAdd();
+  await served;
+
+  expect(calls).toEqual(["add", "withdraw"]);
+});
+
 test("a refused withdraw reads one late valid verdict without the expired budget", async () => {
   const calls: Array<{ op: string; request: Record<string, unknown>; signal: AbortSignal | undefined }> = [];
   const decisions: string[] = [];
@@ -192,6 +334,72 @@ test("a refused withdraw reads one late valid verdict without the expired budget
     signal: undefined,
   });
   expect(decisions).toEqual(["allow"]);
+});
+
+test("a late wait stops when the transcript reports its result", async () => {
+  const result = new AbortController();
+  const context: PermissionTranscriptContext = {
+    transcriptPath: "/virtual/transcript.jsonl",
+    promptId: "prompt-1",
+    toolName: "Bash",
+    toolInput: { command: "echo ready" },
+  };
+  const observer: PermissionTranscriptObserver = {
+    acquired: Promise.resolve(),
+    finished: new Promise(() => {}),
+    resultSignal: result.signal,
+    toolUseId: "tool-1",
+    dispose: () => {},
+  };
+  const cfg = {
+    brokerUrl: "http://broker.test",
+    brokerToken: null,
+    operatorId: "op",
+    tokenId: "tok",
+    sessionRef: "window-1",
+    privateKey: "private",
+    publicKey: "public",
+    osUserHash: "",
+    blockSec: 900,
+    origin: {},
+  } satisfies ApprovalHookConfig;
+  let waiting: () => void = () => {};
+  const lateWaitStarted = new Promise<void>((resolve) => {
+    waiting = resolve;
+  });
+  let lateSignal: AbortSignal | undefined;
+  const runClient = async (
+    op: string,
+    _rawRequest: string,
+    _cfg: ApprovalHookConfig | null,
+    _tileRef: string,
+    _fetch?: (url: string, init: RequestInit) => Promise<Response>,
+    signal?: AbortSignal
+  ) => {
+    if (op === "add") return { ok: true as const, id: "approval-1", producer_secret: "secret-1" };
+    if (op === "withdraw") return { ok: false as const, error: "HTTP 409: already answered" };
+    lateSignal = signal;
+    waiting();
+    await new Promise<void>((resolve) => signal?.addEventListener("abort", () => resolve(), { once: true }));
+    return { ok: true as const, pending: true };
+  };
+
+  const served = servePermission(
+    cfg,
+    { kind: "permission" },
+    "tile-1",
+    { budgetMs: 0, runClient, transcript: context, observeTranscript: () => observer }
+  );
+  await lateWaitStarted;
+  result.abort();
+  await Promise.race([
+    served,
+    Bun.sleep(1_000).then(() => {
+      throw new Error("late transcript wait did not abort");
+    }),
+  ]);
+
+  expect(lateSignal?.aborted).toBe(true);
 });
 
 test("a late read ignores verdicts for a different id, route or status", async () => {
@@ -1095,11 +1303,6 @@ describe("approval request shaping", () => {
   });
 });
 
-// --- The hook as a real subprocess, against a real broker ---
-//
-// This is the end-to-end proof that needs neither Electron nor Claude Code:
-// the hook is just a bun script reading JSON on stdin and writing JSON out.
-
 describe("hook subprocess", () => {
   async function setup(): Promise<{
     b: TestBroker;
@@ -1115,16 +1318,9 @@ describe("hook subprocess", () => {
     const operatorId = deriveOperatorId(opCred.publicKey);
     const sessionCred = generateCredential();
 
-    // The Deck mints the restricted session credential.
     const mintBody = {
       session_public_key: sessionCred.publicKey,
       session_ref: "window-1",
-      // Card 1def56da: the Deck PINS the window's project into the credential
-      // at mint time, exactly as it already pinned session_ref. This is what
-      // lets the broker stop reading origin.project_key out of the agent's own
-      // request body -- and the value below is deliberately the same string the
-      // credential file's origin carries, so that the two agreeing is what the
-      // suite exercises rather than a coincidence of defaults.
       project_key: "koryphaios",
       public_key: opCred.publicKey,
     };
@@ -1232,6 +1428,46 @@ describe("hook subprocess", () => {
     }
     return null;
   }
+
+  test("transcript payload removes the matching child row without stdout", async () => {
+    const { b, credFile, op } = await setup();
+    const transcriptPath = join(dirname(credFile), "main.jsonl");
+    const childDirectory = join(dirname(transcriptPath), "main", "subagents");
+    const requestInput = { command: "echo child" };
+    mkdirSync(childDirectory, { recursive: true });
+    writeFileSync(
+      join(childDirectory, "agent-child.jsonl"),
+      [
+        { uuid: "prompt", promptId: "prompt-child" },
+        { uuid: "tool", parentUuid: "prompt", message: { content: [{ type: "tool_use", id: "tool-child", name: "Bash", input: requestInput }] } },
+      ].map((entry) => `${JSON.stringify(entry)}\n`).join("")
+    );
+    const proc = runHook(credFile, {
+      hook_event_name: "PermissionRequest",
+      tool_name: "Bash",
+      tool_input: requestInput,
+      transcript_path: transcriptPath,
+      prompt_id: "prompt-child",
+      agent_id: "child",
+    });
+    const stdout = new Response(proc.stdout).text();
+
+    expect(await firstApproval(b, op)).toMatchObject({ reply_route: "hook" });
+    writeFileSync(
+      join(childDirectory, "agent-child.jsonl"),
+      [
+        { uuid: "prompt", promptId: "prompt-child" },
+        { uuid: "tool", parentUuid: "prompt", message: { content: [{ type: "tool_use", id: "tool-child", name: "Bash", input: requestInput }] } },
+        { uuid: "result", parentUuid: "tool", message: { content: [{ type: "tool_result", tool_use_id: "tool-child" }] } },
+      ].map((entry) => `${JSON.stringify(entry)}\n`).join("")
+    );
+
+    expect(await proc.exited).toBe(0);
+    expect((await stdout).trim()).toBe("");
+    const approvals = await listApprovals(b, op);
+    expect(approvals.filter((approval) => approval.status === "pending")).toEqual([]);
+    expect(approvals).toMatchObject([{ status: "answered_terminal" }]);
+  });
 
   test("without a credential the hook is a silent no-op", async () => {
     const proc = runHook(null, { hook_event_name: "PermissionRequest", tool_name: "Bash" });

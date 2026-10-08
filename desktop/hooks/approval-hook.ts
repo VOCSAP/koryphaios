@@ -9,6 +9,11 @@ import {
 
 import { runApprovalClient } from "./approval-client.ts";
 import { createPermissionLeaseReader, type PermissionLeaseReader } from "./permission-lease.ts";
+import {
+  observePermissionTranscript,
+  type PermissionTranscriptContext,
+  type PermissionTranscriptObserver,
+} from "./permission-transcript.ts";
 import { verdictOf } from "./approval-verdict.ts";
 import { TITLE_DETAIL_MAX, summarizeToolInput } from "./tool-summary.ts";
 
@@ -36,6 +41,9 @@ export interface HookPayload {
   agent_type?: string;
   tool_input?: Record<string, unknown>;
   tool_use_id?: string;
+  transcript_path?: string;
+  prompt_id?: string;
+  agent_id?: string;
   notification_type?: string;
   message?: string;
 }
@@ -191,6 +199,8 @@ function writePermissionDecision(behavior: "allow" | "deny"): void {
 export interface ServePermissionOptions {
   budgetMs?: number;
   lease?: PermissionLeaseReader;
+  transcript?: PermissionTranscriptContext;
+  observeTranscript?: (context: PermissionTranscriptContext) => PermissionTranscriptObserver;
   runClient?: typeof runApprovalClient;
   writeDecision?: typeof writePermissionDecision;
 }
@@ -201,8 +211,18 @@ function leaseIsActive(lease: PermissionLeaseReader | undefined): boolean {
   return !lease || (lease.isActive() && !lease.signal.aborted);
 }
 
-function waitSignal(budget: AbortSignal, lease: PermissionLeaseReader | undefined): AbortSignal {
-  return lease ? AbortSignal.any([budget, lease.signal]) : budget;
+function waitSignal(
+  budget: AbortSignal | undefined,
+  lease: PermissionLeaseReader | undefined,
+  transcript: PermissionTranscriptObserver | null
+): AbortSignal | undefined {
+  const signals = [...(budget ? [budget] : []), ...(lease ? [lease.signal] : []), ...(transcript ? [transcript.resultSignal] : [])];
+  if (signals.length === 0) return undefined;
+  return signals.length === 1 ? signals[0]! : AbortSignal.any(signals);
+}
+
+function transcriptResultObserved(transcript: PermissionTranscriptObserver | null): boolean {
+  return transcript?.resultSignal.aborted === true;
 }
 
 async function withdrawLostLease(
@@ -236,30 +256,43 @@ export async function servePermission(
   const runClient = options.runClient ?? runApprovalClient;
   const lease = options.lease;
   if (lease && (!(await lease.waitForAdmission()) || !leaseIsActive(lease))) return;
+  const transcript = options.transcript ? (options.observeTranscript ?? observePermissionTranscript)(options.transcript) : null;
+  if (transcript) {
+    void transcript.finished.then((outcome) => {
+      if (outcome !== "result" && outcome !== "completed" && outcome !== "disposed") {
+        trace("permission transcript stopped", outcome);
+      }
+    });
+  }
   let delivered: { id: string; producerSecret: string } | null = null;
   try {
-    await servePermissionRows(cfg, payload, tileRef, options, (row) => (delivered = row));
+    await servePermissionRows(cfg, payload, tileRef, options, transcript, (row) => (delivered = row));
   } catch (err) {
-    trace("permission flow failed", err);
-    if (!delivered) return;
+    if (!delivered) {
+      if (!transcriptResultObserved(transcript)) trace("permission flow failed", err);
+      return;
+    }
     const { id, producerSecret } = delivered as { id: string; producerSecret: string };
-    if (!leaseIsActive(lease)) {
+    if (transcriptResultObserved(transcript) || !leaseIsActive(lease)) {
       await withdrawLostLease(runClient, cfg, tileRef, id, producerSecret);
       return;
     }
+    trace("permission flow failed", err);
     try {
       await runClient("withdraw", JSON.stringify({ id, producer_secret: producerSecret }), cfg, tileRef, fetch, lease?.signal);
-      if (!leaseIsActive(lease)) {
+      if (transcriptResultObserved(transcript) || !leaseIsActive(lease)) {
         await withdrawLostLease(runClient, cfg, tileRef, id, producerSecret);
         return;
       }
     } catch (withdrawErr) {
-      if (!leaseIsActive(lease)) {
+      if (transcriptResultObserved(transcript) || !leaseIsActive(lease)) {
         await withdrawLostLease(runClient, cfg, tileRef, id, producerSecret);
         return;
       }
       trace("permission withdraw failed", withdrawErr);
     }
+  } finally {
+    transcript?.dispose();
   }
 }
 
@@ -268,6 +301,7 @@ async function servePermissionRows(
   payload: Record<string, unknown>,
   tileRef: string,
   options: ServePermissionOptions,
+  transcript: PermissionTranscriptObserver | null,
   onDelivered: (row: { id: string; producerSecret: string }) => void
 ): Promise<void> {
   const runClient = options.runClient ?? runApprovalClient;
@@ -285,7 +319,7 @@ async function servePermissionRows(
   }
   onDelivered({ id, producerSecret });
   const lease = options.lease;
-  if (!leaseIsActive(lease)) {
+  if (transcriptResultObserved(transcript) || !leaseIsActive(lease)) {
     await withdrawLostLease(runClient, cfg, tileRef, id, producerSecret);
     return;
   }
@@ -303,9 +337,9 @@ async function servePermissionRows(
       cfg,
       tileRef,
       fetch,
-      waitSignal(budget, lease)
+      waitSignal(budget, lease, transcript)
     );
-    if (!leaseIsActive(lease)) {
+    if (transcriptResultObserved(transcript) || !leaseIsActive(lease)) {
       await withdrawLostLease(runClient, cfg, tileRef, id, producerSecret);
       return;
     }
@@ -324,6 +358,10 @@ async function servePermissionRows(
     }
   }
 
+  if (transcriptResultObserved(transcript)) {
+    await withdrawLostLease(runClient, cfg, tileRef, id, producerSecret);
+    return;
+  }
   if (waitFailure) trace(waitFailure.expired ? "permission wait budget expired" : "permission wait failed", waitFailure.error);
   else if (budget.aborted || performance.now() >= deadline) trace("permission wait budget expired", "local approval budget expired");
 
@@ -339,7 +377,7 @@ async function servePermissionRows(
     fetch,
     lease?.signal
   );
-  if (!leaseIsActive(lease)) {
+  if (transcriptResultObserved(transcript) || !leaseIsActive(lease)) {
     await withdrawLostLease(runClient, cfg, tileRef, id, producerSecret);
     return;
   }
@@ -348,7 +386,7 @@ async function servePermissionRows(
     trace("permission withdraw failed", withdrawn.error);
     return;
   }
-  if (!leaseIsActive(lease)) return;
+  if (transcriptResultObserved(transcript) || !leaseIsActive(lease)) return;
 
   const late = await runClient(
     "wait",
@@ -356,13 +394,34 @@ async function servePermissionRows(
     cfg,
     tileRef,
     fetch,
-    lease?.signal
+    waitSignal(undefined, lease, transcript)
   );
-  if (!leaseIsActive(lease)) return;
+  if (transcriptResultObserved(transcript) || !leaseIsActive(lease)) return;
   const verdict = verdictOf(id, late);
   if (verdict.kind === "allow") writeDecision("allow");
   else if (verdict.kind === "deny") writeDecision("deny");
   else if (!late.ok) trace("permission late read failed", late.error);
+}
+
+function permissionTranscriptContext(payload: HookPayload): PermissionTranscriptContext | null {
+  if (
+    typeof payload.transcript_path !== "string"
+    || typeof payload.prompt_id !== "string"
+    || typeof payload.tool_name !== "string"
+    || !payload.tool_input
+    || Array.isArray(payload.tool_input)
+    || typeof payload.tool_input !== "object"
+    || (payload.agent_id !== undefined && typeof payload.agent_id !== "string")
+  ) {
+    return null;
+  }
+  return {
+    transcriptPath: payload.transcript_path,
+    promptId: payload.prompt_id,
+    toolName: payload.tool_name,
+    toolInput: payload.tool_input,
+    agentId: payload.agent_id,
+  };
 }
 
 async function readStdin(): Promise<string> {
@@ -388,10 +447,12 @@ async function main(): Promise<void> {
   const tileRef = (process.env[DESK_SESSION_ENV] ?? "").trim();
   const request = buildApprovalRequest(payload, cfg, tileRef);
   if (kind === "permission") {
+    const transcript = permissionTranscriptContext(payload);
+    if (payload.transcript_path !== undefined && !transcript) trace("permission transcript stopped", "invalid context");
     const lease = createPermissionLeaseReader(process.env.KORY_PERMISSION_LEASE, { reportError: trace });
     if (!lease) return;
     try {
-      await servePermission(cfg, request, tileRef, { lease });
+      await servePermission(cfg, request, tileRef, { lease, transcript: transcript ?? undefined });
     } finally {
       lease.dispose();
     }
