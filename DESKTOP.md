@@ -69,17 +69,17 @@ Electron + React 19 + zustand, xterm terminals over node-pty. Sources in
   question is parked broker-side and can be answered from elsewhere; the Deck
   holds the ONLY credential able to settle one. Three producers, because the
   kinds of question differ: the embedded plugin's blocking `PermissionRequest`
-  command hook (`desktop/hooks/approval-hook.ts`, timeout 1860 s in
+  command hook (`desktop/hooks/approval-hook.ts`, timeout 2 147 400 s in
   `desktop/deck-plugin/hooks/hooks.json`), the `ask_operator` MCP tool (open
   questions: no hook covers `AskUserQuestion` or plan approval, and the
   tool's return value IS the answer, so free text reaches the agent with no
   keystrokes), and `attention.ts` as the fallback for non-Claude CLIs.
   Answering IN the Deck settles the approval, which invalidates the remote
   notification (and vice versa: the broker's conditional update makes them
-  exclusive). When the broker advertises `renew_only` and returns a valid
-  future expiry, the Deck renews its credential periodically; a missing
-  capability or an invalid expiry keeps the initial credential with no
-  renewal timer.
+  exclusive). The initial credential expires after 24 h. When the broker
+  advertises `renew_only` and returns a valid future expiry, the Deck renews
+  it every 6 h for another 24 h; a missing capability or an invalid expiry
+  keeps the initial credential with no renewal timer.
   **Permissions are served by the hook, not by `tool.check`.** Documented as
   of 2026-10-07 (sources in ADR 005): `PermissionRequest` fires only when a
   native dialog is about to open, unlike `PreToolUse` which fires on every
@@ -90,19 +90,23 @@ Electron + React 19 + zustand, xterm terminals over node-pty. Sources in
   (`desktop/hooks/kory-approvals.ts`). The hook does not read
   `KORY_APPROVAL_MODULE`: it serves as soon as an approval credential exists.
   Flow: `add` (row routed `hook`), then a `wait` loop (25 s per poll,
-  monotonic 1800 s budget), `verdictOf`, then a single `allow` or `deny` JSON
-  on stdout with a fixed deny message (never `answer_text`, never permission
-  suggestions). Only an `ok` answer for the expected id, routed `hook`,
-  `answered`, with kind `allow` or `deny` settles the permission
-  (`desktop/hooks/approval-verdict.ts`). Anything else, any failure or a spent
-  budget triggers a bounded `withdraw` and an exit 0 with no stdout: the
-  native menu decides. A `withdraw` refused with 409 is followed by one last
-  bounded read, so an already accepted verdict is not lost. In the MAIN
-  session the native menu stays up while the hook waits and the first answer,
-  terminal or Courrier, wins (documented concurrency plus our PTY race probe).
-  For background subagents the hook is awaited BEFORE the dialog is built, so
-  there is no native menu during the wait, up to 30 min
-  (https://github.com/anthropics/claude-code/issues/82150, open). This path types
+  monotonic deadline of 2 147 350 s derived from the runner timeout minus 20 s
+  withdrawal grace and 30 s margin), `verdictOf`, then a single `allow` or
+  `deny` JSON on stdout with a fixed deny message (never `answer_text`, never
+  permission suggestions). The durable deadline uses no long `AbortSignal` or
+  timer; only the short polls observe it. Only an `ok` answer for the expected
+  id, routed `hook`, `answered`, with kind `allow` or `deny` settles the
+  permission (`desktop/hooks/approval-verdict.ts`). Anything else, any failure
+  or a spent deadline triggers a bounded `withdraw` and an exit 0 with no
+  stdout: the native menu decides. A `wait` `HTTP 401` or `HTTP 403` does not
+  retry: it withdraws once and exits with no verdict, whatever the withdraw
+  returns. Outside this authentication-failure path, a `withdraw` refused
+  with 409 is followed by one last bounded read, so an already accepted verdict
+  is not lost. In the MAIN session the native menu stays up while the hook
+  waits and the first answer, terminal or Courrier, wins (documented concurrency
+  plus our PTY race probe). For background subagents the hook is awaited BEFORE
+  the dialog is built, so there is no native menu during the wait, up to the
+  runner timeout (https://github.com/anthropics/claude-code/issues/82150, open). This path types
   nothing: the Deck classifies its answer `settle`, not `apply`
   (`classifyVerdict`, `desktop/src/main/approval-service.ts`).
   A host Claude tile grants the hook a local, cooperative lease before it can
@@ -110,9 +114,7 @@ Electron + React 19 + zustand, xterm terminals over node-pty. Sources in
   emits neither `allow` nor `deny` and attempts to withdraw an already-created
   local row with a two-second deadline. The lease is not a security boundary and cannot remove an
   interprocess race or a Bun or Bash process orphaned by a hard kill. A failed
-  lease write starts the tile without a lease, and sandbox tiles receive none;
-  both cases fall back to the native menu. The broker approval budget remains
-  thirty minutes and is independent of the lease.
+  lease write starts the tile without a lease and falls back to the native menu.
   `AskUserQuestion` and `ExitPlanMode` are never served. Before any `add`, a
   guard sends the call back to the native menu, posting nothing to the
   Courrier, when `tool_input` holds a `Cc`, `Cf`, `Zl` or `Zp` character,
@@ -121,15 +123,18 @@ Electron + React 19 + zustand, xterm terminals over node-pty. Sources in
   counts as unsafe. The question carries the tool name, the JSON input, then
   the working directory, capped at 4000 code points with a visible cut marker,
   so it is not guaranteed whole (`shared/approval.ts`, `shared/text.ts`).
-  Broker side, a `hook`-routed permission has an absolute 30 min deadline from
-  its creation: it turns `abandoned`, wakes its waiters and refuses a late
-  claim. A ghost row can outlive a terminal answer (measured on card
+  Broker side, a `hook`-routed permission has no absolute deadline. The broker
+  considers its producer gone only when no waiter is parked and `last_wait_at`
+  is stale beyond `HOOK_WAIT_STALE_MS` = 45 s. `expired_notif` is notification
+  expiry, not hook expiry, so a hook may still wait and the Deck may still
+  settle that row. A ghost row can outlive a terminal answer (measured on card
   `b29a4ea4`, race probe): on No or Esc the hook process tree is killed in
   about 200 ms, so `hookProducerGone` retires the row about one minute later
-  (parked waiter up to 25 s, then `HOOK_WAIT_STALE_MS` = 45 s), swept on `/approval/list` and on claim; on Yes
-  the hook is neither killed nor notified and keeps polling, so the row stays
-  until the 30 min deadline (accepted limit; zero ghosts: card `56689093`,
-  tile-close lease: card `6dbebca2`).
+  (parked waiter up to 25 s, then the stale period), swept on `/approval/list`
+  and on claim; on Yes the hook is neither killed nor notified and keeps polling
+  until a valid result, its deadline or credential expiry. On authentication
+  expiry it stops without a verdict; stale liveness then retires the row (zero
+  ghosts: card `56689093`, tile-close lease: card `6dbebca2`).
   Known Claude Code limits, documented as of 2026-10-07: `PermissionRequest`
   carries no `tool_use_id`; a `permissions.ask` rule opens the dialog, the
   hook answers it and its `allow` IS applied (command runs, no native menu;
