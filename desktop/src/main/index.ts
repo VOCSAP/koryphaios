@@ -77,7 +77,13 @@ import {
   resolveDispatchRequest,
   sendAnnounce
 } from './broker-client'
-import { appendInboxHistory, clearInboxHistory, deleteInboxHistoryEntries, discardUnscopedInboxFiles } from './inbox-store'
+import {
+  appendInboxHistory,
+  clearInboxHistory,
+  deleteInboxHistoryEntries,
+  discardUnscopedInboxFiles,
+  pendingInboxCounter
+} from './inbox-store'
 import { spawn as spawnProcess } from 'node:child_process'
 import { adoptedBrokerNotice, deckBrokerMode, peersConfigPath } from './broker-client'
 import { ensureLoopbackBroker, locateBrokerScript, RespawnThrottle, withPathEntry } from './broker-spawn'
@@ -209,7 +215,7 @@ import {
   exportEnrolment,
   loadOperatorIdentity
 } from './operator-identity'
-import { buildAuthProof, generateCredential } from './approval-auth'
+import { buildAuthProof, generateCredential, type Approval } from './approval-auth'
 import { addEventSink, broadcast, regHandle } from './api-registry'
 import { CompanionServer } from './companion-server'
 import {
@@ -1765,11 +1771,19 @@ const pollRoadmapSync = async (): Promise<void> => {
 // Non-destructive (fetchPendingApprovals lists, it does not drain), same
 // dedupe-by-signature shape as pollGraphDrafts above so a quiet tick does not
 // re-render the renderer's list for nothing.
+let lastPendingApprovals: readonly Approval[] = []
 const pollPendingApprovals = createPendingApprovalsTick({
   deps: () => approvals.deps(),
   fetchPending: fetchPendingApprovals,
   setHookAwaited: (tiles) => service.setHookAwaited(tiles),
-  broadcastPending: (list) => broadcast('approvals:pending', list),
+  broadcastPending: (list) => {
+    lastPendingApprovals = list
+    broadcast('approvals:pending', list)
+    avatarClient.sessionsChanged()
+  },
+  pendingUnavailable: () => {
+    lastPendingApprovals = []
+  },
   report: (text, err) => reportError('approvals', text, err)
 })
 
@@ -3020,7 +3034,11 @@ const avatarOptions = deckAvatarClientOptions({
   window: () => mainWindow,
   workspaceName: () => workspaces.currentWorkspaceName
 })
-const avatarClient = createAvatarClient(avatarOptions)
+const avatarClient = createAvatarClient({
+  ...avatarOptions,
+  pendingApprovals: () => lastPendingApprovals,
+  inboxUnread: pendingInboxCounter(sessionDir, () => pendingInboxWrites)
+})
 let avatarDetach: Promise<void> = Promise.resolve()
 service.on('changed', () => avatarClient.sessionsChanged())
 

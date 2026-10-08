@@ -105,8 +105,54 @@ test("disarmed approvals drop the hook source without a report: no module can ra
   expect(probe.reports).toEqual([]);
 });
 
+test("a list that cannot be read is announced as unavailable, and the same list is broadcast again once readable", async () => {
+  const list = [approval({ status: "pending", reply_route: "channel", tile_ref: "" })];
+  let down = false;
+  const unavailable: number[] = [];
+  const probe = tickProbe({
+    fetch: async () => {
+      if (down) throw new Error("ECONNREFUSED");
+      return list;
+    },
+  });
+  probe.io.pendingUnavailable = () => void unavailable.push(probe.broadcasts.length);
+
+  await probe.tick();
+  down = true;
+  await probe.tick();
+  down = false;
+  await probe.tick();
+
+  expect(unavailable, "the failed tick drops the held list").toEqual([1]);
+  expect(probe.broadcasts, "the unchanged list reaches the consumer that dropped it").toEqual([list, list]);
+});
+
+test("disarmed approvals announce the list as unavailable on every tick", async () => {
+  let count = 0;
+  const probe = tickProbe({ deps: null });
+  probe.io.pendingUnavailable = () => void (count += 1);
+
+  await probe.tick();
+  await probe.tick();
+
+  expect(count).toBe(2);
+  expect(probe.broadcasts).toEqual([]);
+});
+
 test("the Deck's poll timer runs the tested tick and notifies on the service's needs-you event", () => {
   const index = readFileSync(join(import.meta.dir, "..", "desktop", "src", "main", "index.ts"), "utf8");
   expect(index).toMatch(/const pollPendingApprovals = createPendingApprovalsTick\(/);
   expect(index).toMatch(/service\.on\('needs-you', \(\{ id \}: \{ id: string \}\) => notifyWaitingSession\(id\)\)/);
+});
+
+test("the Avatar client reads the poll's last list and the Courrier's pending messages", () => {
+  const index = readFileSync(join(import.meta.dir, "..", "desktop", "src", "main", "index.ts"), "utf8");
+  const tick = index.slice(index.indexOf("const pollPendingApprovals = createPendingApprovalsTick("));
+  const tickBody = tick.slice(0, tick.indexOf("\n})"));
+  expect(tickBody, "the list kept for the Avatar is the one broadcast").toMatch(/broadcastPending: \(list\) => \{\s*lastPendingApprovals = list/);
+  expect(tickBody, "an unreadable poll empties the list kept for the Avatar").toMatch(/pendingUnavailable: \(\) => \{\s*lastPendingApprovals = \[\]/);
+  const client = index.slice(index.indexOf("const avatarClient = createAvatarClient("));
+  const clientBody = client.slice(0, client.indexOf("\n})"));
+  expect(clientBody).toMatch(/pendingApprovals: \(\) => lastPendingApprovals/);
+  expect(clientBody).toMatch(/inboxUnread: pendingInboxCounter\(sessionDir, \(\) => pendingInboxWrites\)/);
 });

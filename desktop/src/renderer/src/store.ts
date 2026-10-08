@@ -29,6 +29,7 @@ import {
   pendingQueueReplaced,
   queueReplacedDelta
 } from '@shared/roadmap-sync'
+import { countPendingInboxMessages } from '@shared/inbox-pending'
 import { shouldShowTemplateAppliedToast } from '@shared/template-apply-outcome'
 import { workspaceRestoreToastKeyFor } from '@shared/workspace-restore-outcome'
 import { keepDrafts, type QuestionDraft } from './components/approval-answers'
@@ -477,10 +478,7 @@ export function routeSandboxAuth(e: unknown): boolean {
  * restart.
  */
 export function inboxPendingCount(s: DeckState): number {
-  return s.inboxMessages.reduce(
-    (n, message) => (s.inboxAckState[inboxEntryKey({ kind: 'message', message })] === 'acked' ? n : n + 1),
-    0
-  )
+  return countPendingInboxMessages(s.inboxMessages, s.inboxAckState)
 }
 
 /**

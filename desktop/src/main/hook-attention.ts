@@ -18,6 +18,8 @@ export interface PendingApprovalsIo<Deps> {
   fetchPending(deps: Deps): Promise<Approval[]>
   setHookAwaited(tiles: ReadonlySet<string>): void
   broadcastPending(list: Approval[]): void
+  /** No list could be read this tick: a consumer holding the last one must drop it. */
+  pendingUnavailable?(): void
   report(text: string, err?: unknown): void
 }
 
@@ -30,15 +32,21 @@ export interface PendingApprovalsIo<Deps> {
 export function createPendingApprovalsTick<Deps>(io: PendingApprovalsIo<Deps>): () => Promise<void> {
   let lastSignature = ''
   let failing = false
-  const fail = (text: string, err?: unknown): void => {
+  // The next readable list is broadcast even if it equals the last one, so a consumer that dropped it gets it back.
+  const unavailable = (): void => {
     io.setHookAwaited(new Set())
+    io.pendingUnavailable?.()
+    lastSignature = ''
+  }
+  const fail = (text: string, err?: unknown): void => {
+    unavailable()
     if (failing) return
     failing = true
     io.report(text, err)
   }
   return async () => {
     const deps = io.deps()
-    if (!deps) return io.setHookAwaited(new Set())
+    if (!deps) return unavailable()
     let list: Approval[]
     try {
       list = await io.fetchPending(deps)

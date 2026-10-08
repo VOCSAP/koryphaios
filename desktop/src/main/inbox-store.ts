@@ -4,39 +4,60 @@
 // is minted in-memory and never persisted, so a restart starts a brand new
 // session whose cursor seeds at the box's current max id, unable to replay
 // anything from the broker either.
-// SESSION scope: every function takes the WINDOW's directory
-// (session-state.ts's sessionStateDir), never the shared state root. Two Kory
-// windows share userData, and an inbox written at the root is read by both.
 
-import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { writeFileAtomic } from './atomic-write'
 import { join } from 'node:path'
+import { countPendingInboxMessages } from '../shared/inbox-pending'
 import { inboxEntryKey, type InboxAckStatus, type InboxMessage } from '../shared/types'
+import { reportError } from './log'
 
 export const INBOX_HISTORY_CAP = 500
 const FILE = 'inbox-history.json'
+
+export type InboxReadErrorSink = (message: string, error?: unknown) => void
+
+const traceInboxRead: InboxReadErrorSink = (message, error) => reportError('inbox', message, error)
+
+/** Absent is a normal empty state; any other read or parse failure is traced, then read as absent. */
+function readJsonFile(file: string, onReadError: InboxReadErrorSink): unknown {
+  let text: string
+  try {
+    text = readFileSync(file, 'utf-8')
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== 'ENOENT') onReadError(`${file} unreadable, read as empty`, e)
+    return undefined
+  }
+  try {
+    return JSON.parse(text)
+  } catch (e) {
+    onReadError(`${file} is not valid JSON, read as empty`, e)
+    return undefined
+  }
+}
 
 export function inboxHistoryFile(sessionDir: string): string {
   return join(sessionDir, FILE)
 }
 
-/** Load the persisted history (oldest first). Corrupt/missing file -> []. */
-export function loadInboxHistory(sessionDir: string): InboxMessage[] {
-  try {
-    const raw = JSON.parse(readFileSync(inboxHistoryFile(sessionDir), 'utf-8'))
-    if (!Array.isArray(raw)) return []
-    return raw.filter(
-      (m): m is InboxMessage =>
-        !!m &&
-        typeof m === 'object' &&
-        typeof (m as InboxMessage).id === 'number' &&
-        typeof (m as InboxMessage).from === 'string' &&
-        typeof (m as InboxMessage).text === 'string' &&
-        typeof (m as InboxMessage).sentAt === 'string'
-    )
-  } catch {
+/** Load the persisted history (oldest first). Missing file -> []; a corrupt one is traced, then []. */
+export function loadInboxHistory(sessionDir: string, onReadError: InboxReadErrorSink = traceInboxRead): InboxMessage[] {
+  const file = inboxHistoryFile(sessionDir)
+  const raw = readJsonFile(file, onReadError)
+  if (raw === undefined) return []
+  if (!Array.isArray(raw)) {
+    onReadError(`${file} is not a list, read as empty`)
     return []
   }
+  return raw.filter(
+    (m): m is InboxMessage =>
+      !!m &&
+      typeof m === 'object' &&
+      typeof (m as InboxMessage).id === 'number' &&
+      typeof (m as InboxMessage).from === 'string' &&
+      typeof (m as InboxMessage).text === 'string' &&
+      typeof (m as InboxMessage).sentAt === 'string'
+  )
 }
 
 /**
@@ -127,19 +148,17 @@ export function inboxAckFile(sessionDir: string): string {
   return join(sessionDir, ACK_FILE)
 }
 
-function loadAckFile(sessionDir: string): AckFileShape {
-  try {
-    const raw = JSON.parse(readFileSync(inboxAckFile(sessionDir), 'utf-8'))
-    const seen = Array.isArray(raw?.seen)
-      ? raw.seen.filter((k: unknown): k is string => typeof k === 'string')
-      : []
-    const acked = Array.isArray(raw?.acked)
-      ? raw.acked.filter((k: unknown): k is string => typeof k === 'string')
-      : []
-    return { seen, acked }
-  } catch {
+function loadAckFile(sessionDir: string, onReadError: InboxReadErrorSink = traceInboxRead): AckFileShape {
+  const file = inboxAckFile(sessionDir)
+  const raw = readJsonFile(file, onReadError) as { seen?: unknown; acked?: unknown } | null | undefined
+  if (raw === undefined) return { seen: [], acked: [] }
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    onReadError(`${file} is not an object, read as empty`)
     return { seen: [], acked: [] }
   }
+  const seen = Array.isArray(raw.seen) ? raw.seen.filter((k: unknown): k is string => typeof k === 'string') : []
+  const acked = Array.isArray(raw.acked) ? raw.acked.filter((k: unknown): k is string => typeof k === 'string') : []
+  return { seen, acked }
 }
 
 function saveAckFile(
@@ -156,8 +175,11 @@ function saveAckFile(
 }
 
 /** Merged read-state map for startup hydration: key -> 'seen' | 'acked'. */
-export function loadAckState(sessionDir: string): Record<string, InboxAckStatus> {
-  const { seen, acked } = loadAckFile(sessionDir)
+export function loadAckState(
+  sessionDir: string,
+  onReadError: InboxReadErrorSink = traceInboxRead
+): Record<string, InboxAckStatus> {
+  const { seen, acked } = loadAckFile(sessionDir, onReadError)
   const out: Record<string, InboxAckStatus> = {}
   for (const k of seen) out[k] = 'seen'
   for (const k of acked) out[k] = 'acked' // acked always wins over a stale seen entry
@@ -250,4 +272,46 @@ export function discardUnscopedInboxFiles(stateDir: string): UnscopedInboxDiscar
   if (hadHistory) rmSync(historyFile)
   if (hadAck) rmSync(ackFile)
   return { historyEntries, ackKeys }
+}
+
+/**
+ * The Courrier badge's message count, from what main holds: the journal plus
+ * the batches whose journal write failed (they were shown, they exist nowhere
+ * else). Deduplicated by broker id and capped like the renderer's list.
+ */
+export function countPendingInbox(
+  history: readonly InboxMessage[],
+  unjournaled: readonly InboxMessage[],
+  ackState: Readonly<Record<string, InboxAckStatus>>
+): number {
+  const byId = new Map<number, InboxMessage>()
+  for (const message of [...history, ...unjournaled]) if (!byId.has(message.id)) byId.set(message.id, message)
+  return countPendingInboxMessages([...byId.values()].slice(-INBOX_HISTORY_CAP), ackState)
+}
+
+// A seen -> acked move keeps the ack file's size, so the size and a millisecond mtime alone can miss it;
+// writeFileAtomic renames a new file into place, so the inode changes on every write.
+function fileStamp(file: string): string {
+  const stat = statSync(file, { bigint: true, throwIfNoEntry: false })
+  return stat ? `${stat.ino}:${stat.mtimeNs}:${stat.size}` : 'absent'
+}
+
+/** Avoid reparsing both journals on every five-second Avatar heartbeat. */
+export function pendingInboxCounter(
+  sessionDir: () => string,
+  unjournaled: () => readonly InboxMessage[],
+  onReadError: InboxReadErrorSink = traceInboxRead
+): () => number {
+  let lastKey = ''
+  let lastCount = 0
+  return () => {
+    const dir = sessionDir()
+    const pending = unjournaled()
+    const key = [dir, fileStamp(inboxHistoryFile(dir)), fileStamp(inboxAckFile(dir)), pending.map((m) => m.id).join(',')].join('|')
+    if (key !== lastKey) {
+      lastCount = countPendingInbox(loadInboxHistory(dir, onReadError), pending, loadAckState(dir, onReadError))
+      lastKey = key
+    }
+    return lastCount
+  }
 }

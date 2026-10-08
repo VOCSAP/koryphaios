@@ -1,24 +1,22 @@
-// Operator-inbox disk persistence (desktop/src/main/inbox-store). Covers
-// load/append round-trip, dedupe by id, cap, corruption, and (Courrier lot
-// 1D/1E, card 1e81ee7b) the two purge-side writers: clearInboxHistory (full
-// truncate, session-scope purge) and deleteInboxHistoryEntries (by-id manual
-// delete). This journal is the only durable copy across Deck restarts for a
-// reason that has nothing to do with the broker drain being destructive
-// anymore (it is not, since lot 1A) -- see inbox-store.ts's header comment:
-// session_id is minted in-memory and never survives a restart either.
-
 import { test, expect } from "bun:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  appendAckedKey,
   appendInboxHistory,
+  appendSeenKey,
   clearInboxHistory,
+  countPendingInbox,
   deleteInboxHistoryEntries,
+  inboxAckFile,
+  INBOX_HISTORY_CAP,
   inboxHistoryFile,
   loadInboxHistory,
+  pendingInboxCounter,
 } from "../desktop/src/main/inbox-store.ts";
-import type { InboxMessage } from "../desktop/src/shared/types.ts";
+import { countPendingInboxMessages } from "../desktop/src/shared/inbox-pending.ts";
+import { inboxEntryKey, type InboxMessage } from "../desktop/src/shared/types.ts";
 
 function dir(): string {
   return mkdtempSync(join(tmpdir(), "cp-inbox-"));
@@ -52,11 +50,17 @@ test("history is capped, oldest first out", () => {
 
 test("missing or corrupt file loads as empty, then recovers on append", () => {
   const d = dir();
-  expect(loadInboxHistory(d)).toEqual([]);
+  const traces: string[] = [];
+  const sink = (message: string): void => void traces.push(message);
+  expect(loadInboxHistory(d, sink)).toEqual([]);
+  expect(traces, "an absent journal is a normal empty state").toEqual([]);
   writeFileSync(inboxHistoryFile(d), "{not json", "utf-8");
-  expect(loadInboxHistory(d)).toEqual([]);
+  expect(loadInboxHistory(d, sink)).toEqual([]);
+  expect(traces).toHaveLength(1);
+  expect(traces[0]).toContain("is not valid JSON");
   appendInboxHistory(d, [msg(7)]);
-  expect(loadInboxHistory(d).map((m) => m.id)).toEqual([7]);
+  expect(loadInboxHistory(d, sink).map((m) => m.id)).toEqual([7]);
+  expect(traces).toHaveLength(1);
 });
 
 test("malformed entries are filtered on load", () => {
@@ -123,4 +127,97 @@ test("deleteInboxHistoryEntries with an empty or unknown-id list is a 0-effect n
   expect(deleteInboxHistoryEntries(d, []).map((m) => m.id)).toEqual([1, 2]);
   expect(deleteInboxHistoryEntries(d, [999]).map((m) => m.id)).toEqual([1, 2]);
   expect(loadInboxHistory(d).map((m) => m.id)).toEqual([1, 2]);
+});
+
+const key = (m: InboxMessage): string => inboxEntryKey({ kind: "message", message: m });
+
+test("a message counts as pending until acked: unread and seen both count", () => {
+  const messages = [msg(1), msg(2), msg(3)];
+  const ack = { [key(msg(2))]: "seen" as const, [key(msg(3))]: "acked" as const };
+  expect(countPendingInboxMessages(messages, ack)).toBe(2);
+  expect(countPendingInbox(messages, [], ack)).toBe(2);
+});
+
+test("main counts the journal plus the unjournaled batches once each, capped like the renderer list", () => {
+  expect(countPendingInbox([msg(1), msg(2)], [msg(2), msg(3)], {})).toBe(3);
+  const many = Array.from({ length: INBOX_HISTORY_CAP + 10 }, (_, i) => msg(i + 1));
+  const ackOldest = Object.fromEntries(many.slice(0, 10).map((m) => [key(m), "acked" as const]));
+  expect(countPendingInbox(many, [], {}), "only the newest entries stay in the list").toBe(INBOX_HISTORY_CAP);
+  expect(countPendingInbox(many, [], ackOldest), "acks on entries past the cap change nothing").toBe(INBOX_HISTORY_CAP);
+});
+
+test("the Avatar's counter follows the journal and the ack file on disk, and the unjournaled batches", () => {
+  const d = dir();
+  const unjournaled: InboxMessage[] = [];
+  const count = pendingInboxCounter(() => d, () => unjournaled);
+  expect(count()).toBe(0);
+  appendInboxHistory(d, [msg(1), msg(2)]);
+  expect(count()).toBe(2);
+  appendSeenKey(d, key(msg(1)));
+  expect(count(), "seen is still pending").toBe(2);
+  appendAckedKey(d, key(msg(1)));
+  expect(count()).toBe(1);
+  unjournaled.push(msg(3));
+  expect(count()).toBe(2);
+});
+
+test("the Avatar's counter traces a corrupt journal once per file change, not on every heartbeat", () => {
+  const d = dir();
+  const traces: string[] = [];
+  const count = pendingInboxCounter(() => d, () => [], (message) => void traces.push(message));
+  for (let i = 0; i < 3; i++) expect(count()).toBe(0);
+  expect(traces, "absent files are a normal empty state").toEqual([]);
+
+  writeFileSync(inboxHistoryFile(d), "{not json", "utf-8");
+  writeFileSync(inboxAckFile(d), "[1]", "utf-8");
+  for (let i = 0; i < 3; i++) expect(count()).toBe(0);
+  expect(traces).toHaveLength(2);
+  expect(traces.some((t) => t.includes("is not valid JSON"))).toBe(true);
+  expect(traces.some((t) => t.includes("is not an object"))).toBe(true);
+
+  writeFileSync(inboxHistoryFile(d), "{still not json}", "utf-8");
+  count();
+  expect(traces, "a new corrupt version is traced again").toHaveLength(4);
+});
+
+test("a journal that cannot be read for another reason than absence is traced", () => {
+  const d = dir();
+  mkdirSync(inboxHistoryFile(d));
+  const traces: string[] = [];
+  expect(loadInboxHistory(d, (message) => void traces.push(message))).toEqual([]);
+  expect(traces).toHaveLength(1);
+  expect(traces[0]).toContain("unreadable");
+});
+
+test("a journal holding valid JSON that is not a list is traced", () => {
+  const d = dir();
+  writeFileSync(inboxHistoryFile(d), JSON.stringify({ id: 1 }), "utf-8");
+  const traces: string[] = [];
+  expect(loadInboxHistory(d, (message) => void traces.push(message))).toEqual([]);
+  expect(traces).toHaveLength(1);
+  expect(traces[0]).toContain("is not a list");
+});
+
+test("the counter sees a seen -> acked move even when the ack file keeps its size and its mtime", () => {
+  const d = dir();
+  appendInboxHistory(d, [msg(1)]);
+  appendSeenKey(d, key(msg(1)));
+  const frozen = new Date(1_700_000_000_000);
+  utimesSync(inboxAckFile(d), frozen, frozen);
+  const count = pendingInboxCounter(() => d, () => []);
+  expect(count()).toBe(1);
+  const before = statSync(inboxAckFile(d), { bigint: true });
+  appendAckedKey(d, key(msg(1)));
+  utimesSync(inboxAckFile(d), frozen, frozen);
+  const after = statSync(inboxAckFile(d), { bigint: true });
+  expect([after.size, after.mtimeNs], "the move keeps the size and the mtime").toEqual([before.size, before.mtimeNs]);
+  expect(count()).toBe(0);
+});
+
+test("the Courrier badge in the renderer counts with the same rule as main", () => {
+  const store = readFileSync(join(import.meta.dir, "..", "desktop", "src", "renderer", "src", "store.ts"), "utf8");
+  const start = store.indexOf("export function inboxPendingCount(");
+  const body = store.slice(start, store.indexOf("\n}", start));
+  expect(start, "inboxPendingCount still exists").toBeGreaterThan(-1);
+  expect(body).toMatch(/return countPendingInboxMessages\(s\.inboxMessages, s\.inboxAckState\)/);
 });
