@@ -134,6 +134,47 @@ test("measure encoder leaves an unavailable fallback report untouched", () => {
   expect(noWindow!, "missing window remains null").toContain('"size":null');
 });
 
+test("measure encoder prefers the current model over the previous report", () => {
+  const switched = encodeStatusFromMeasure(file({}), { percent: 7 }, 2, { modelId: "claude-sonnet-5-5", displayName: "Sonnet 5.5" });
+  expect(decodeStatusFile(switched!), "a /model switch replaces the identity, context window kept").toEqual({
+    model: "Sonnet 5.5",
+    modelId: "claude-sonnet-5-5",
+    contextPct: 7,
+    contextWindow: 200000,
+    at: 2,
+  });
+  const sameId = encodeStatusFromMeasure(file({}), { percent: 7 }, 2, { modelId: "claude-opus-4-1", displayName: "claude-opus-4-1" });
+  expect(decodeStatusFile(sameId!)?.model, "an unchanged id keeps the previous label").toBe("Opus");
+});
+
+test("measure encoder keeps the previous identity when the current model is unusable", () => {
+  for (const current of [undefined, { modelId: "", displayName: "" }, { modelId: "a;rm -rf", displayName: "x" }, { modelId: 7, displayName: null }]) {
+    expect(decodeStatusFile(encodeStatusFromMeasure(file({}), { percent: 7 }, 2, current)!), `current ${JSON.stringify(current)}`).toMatchObject({
+      model: "Opus",
+      modelId: "claude-opus-4-1",
+      contextPct: 7,
+    });
+  }
+});
+
+test("measure encoder builds a report from the current model when none is readable", () => {
+  for (const raw of ["", "not json"]) {
+    const built = encodeStatusFromMeasure(raw, { window: 1_000_000, percent: 3 }, 2, { modelId: "claude-unlisted-99-9", displayName: "$(x)" });
+    expect(decodeStatusFile(built!), `source ${JSON.stringify(raw)}`).toEqual({
+      model: "claude-unlisted-99-9",
+      modelId: "claude-unlisted-99-9",
+      contextPct: 3,
+      contextWindow: 1_000_000,
+      at: 2,
+    });
+  }
+  expect(encodeStatusFromMeasure("", { percent: 3 }, 2), "no report and no model: nothing to write").toBeNull();
+  const current = { modelId: "claude-sonnet-5-5", displayName: "Sonnet 5.5" };
+  for (const now of [0, -1, Number.NaN]) {
+    expect(encodeStatusFromMeasure(file({}), {}, now, current), `invalid clock ${now}`).toBeNull();
+  }
+});
+
 test("encoder: no model means nothing to write", () => {
   expect(encodeStatusFromPayload({}, 5), "payload without model").toBeNull();
   expect(encodeStatusFromPayload(null, 5), "null payload").toBeNull();

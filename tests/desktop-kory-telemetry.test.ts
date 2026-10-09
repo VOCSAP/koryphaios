@@ -163,7 +163,7 @@ test('session.start continues after fs.write fails without a second write', asyn
   expect(errors).toEqual(['Kory telemetry report failed: disk full'])
 })
 
-test('measure telemetry preserves the fallback model and updates the context', async () => {
+test('measure telemetry keeps the fallback label for an unchanged model and updates the context', async () => {
   const fallback = encodeStatusFromPayload(
     {
       model: { id: 'claude-opus-4-1', display_name: 'Opus' },
@@ -171,7 +171,7 @@ test('measure telemetry preserves the fallback model and updates the context', a
     },
     1,
   )!
-  const probe = host(fallback)
+  const probe = host(fallback, [], 'claude-opus-4-1')
 
   await reportMeasuredContext(probe.value, { window: 1_000_000, percent: 7 })
 
@@ -272,7 +272,7 @@ const REPORT_AT_20_PERCENT = encodeStatusFromPayload(
 )!
 
 test('a /clear empties the context gauge and keeps the model and window', async () => {
-  const probe = host(REPORT_AT_20_PERCENT)
+  const probe = host(REPORT_AT_20_PERCENT, [], 'claude-opus-4-1')
   const ended: unknown[] = []
 
   const result = await registeredHandlers().get('session.end')!(probe.value, { reason: 'clear' }, async (e: unknown) => {
@@ -306,12 +306,47 @@ test('a /clear under the fallback status line writes nothing from the module', a
   expect(probe.writes).toEqual([])
 })
 
-test('telemetry does not replace the fallback report before it exists', async () => {
-  const probe = host(null)
+test('a measure never recreates a report the Deck cleared', async () => {
+  const probe = host(null, [], 'claude-unlisted-99-9')
 
-  await reportMeasuredContext(probe.value, { window: 1_000_000 })
+  await reportMeasuredContext(probe.value, { window: 1_000_000, percent: 3 })
 
-  expect(probe.writes).toEqual([])
+  expect(probe.writes, 'a late measure from a respawned process must not plant its model before the new seed').toEqual([])
+})
+
+test('a measure after /model reports the new model', async () => {
+  const probe = host(REPORT_AT_20_PERCENT, [], 'claude-opus-4-8')
+
+  await reportMeasuredContext(probe.value, { percent: 5 })
+
+  expect(decodeStatusFile(probe.writes[0]!), 'the badge follows a model switched mid-session').toEqual({
+    model: 'Claude Opus 4.8',
+    modelId: 'claude-opus-4-8',
+    contextPct: 5,
+    contextWindow: 1_000_000,
+    at: 2,
+  })
+})
+
+test('a measure keeps the previous model when the host cannot supply one', async () => {
+  const errors: string[] = []
+  const failing = host(REPORT_AT_20_PERCENT, errors)
+  failing.value.session.model = async () => {
+    throw new Error('model unavailable')
+  }
+  const hostile = host(REPORT_AT_20_PERCENT, [], 'a;rm -rf')
+  const empty = host(REPORT_AT_20_PERCENT, [], '')
+
+  for (const probe of [failing, hostile, empty]) await reportMeasuredContext(probe.value, { percent: 9 })
+
+  for (const probe of [failing, hostile, empty]) {
+    expect(decodeStatusFile(probe.writes[0]!), 'an unusable model never blanks the identity nor blocks the context').toMatchObject({
+      model: 'Opus',
+      modelId: 'claude-opus-4-1',
+      contextPct: 9,
+    })
+  }
+  expect(errors).toEqual(['Kory telemetry report failed: model unavailable'])
 })
 
 test('session.measure write failures are logged without blocking the session', async () => {

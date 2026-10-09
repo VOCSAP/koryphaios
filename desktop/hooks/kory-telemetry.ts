@@ -1,6 +1,6 @@
 import type { On } from './claude-code-types.ts'
 import { FRONTIER_CATALOG } from '../src/shared/models.ts'
-import { decodeStatusFile, encodeStatusFromMeasure, encodeStatusFromModelIdentity, statusFileName, type MeasuredContext } from '../src/shared/session-status.ts'
+import { decodeStatusFile, encodeStatusFromMeasure, encodeStatusFromModelIdentity, statusFileName, type CurrentModel, type MeasuredContext } from '../src/shared/session-status.ts'
 
 export interface TelemetryHost {
   env: { get(name: string): Promise<string | undefined> }
@@ -48,15 +48,28 @@ export async function seedModelIdentity($: TelemetryHost): Promise<void> {
   }
 }
 
+/** A failed model read degrades to the previous report's identity instead of skipping the context update. */
+async function currentModel($: TelemetryHost): Promise<CurrentModel | undefined> {
+  try {
+    const modelId = await $.session.model()
+    return { modelId, displayName: typeof modelId === 'string' ? modelDisplayName(modelId) : undefined }
+  } catch (err) {
+    logFailure($, err)
+    return undefined
+  }
+}
+
 export async function reportMeasuredContext($: TelemetryHost, context: MeasuredContext): Promise<void> {
   try {
     if (await $.env.get('KORY_STATUS_FALLBACK') === '1') return
     const token = await $.env.get('CLAUDE_PEERS_DESK_SESSION')
     const home = (await $.env.get('USERPROFILE')) ?? (await $.env.get('HOME'))
     const target = telemetryStatusPath(token, home)
+    // An absent file is never recreated here: Deck main clears it at respawn, and
+    // a late measure from the dead process would plant its model before the new seed.
     if (!target || !(await $.fs.exists(target))) return
     const raw = await $.fs.read(target)
-    const encoded = encodeStatusFromMeasure(raw, context, await $.clock.now())
+    const encoded = encodeStatusFromMeasure(raw, context, await $.clock.now(), await currentModel($))
     if (encoded) await $.fs.write(target, encoded)
   } catch (err) {
     logFailure($, err)

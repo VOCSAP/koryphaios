@@ -121,16 +121,38 @@ export interface MeasuredContext {
   percent?: unknown
 }
 
-/** session.measure omits model identity, so only a valid fallback report supplies it. */
-export function encodeStatusFromMeasure(raw: string, context: MeasuredContext, now: number): string | null {
+export interface CurrentModel {
+  modelId: unknown
+  displayName: unknown
+}
+
+/**
+ * session.measure carries no model, and /model changes it mid-session, so the
+ * caller passes the session's current model. It wins over the previous report
+ * unless it names the same id, which keeps the previous (statusLine) label. An
+ * absent or unusable current model keeps the previous identity.
+ */
+export function encodeStatusFromMeasure(
+  raw: string,
+  context: MeasuredContext,
+  now: number,
+  current?: CurrentModel
+): string | null {
+  if (!Number.isFinite(now) || now <= 0) return null
   const previous = decodeStatusFile(raw)
-  if (!previous || !Number.isFinite(now) || now <= 0) return null
+  const currentId = validModelId(current?.modelId)
+  const currentName = validModelName(current?.displayName) ?? validModelName(currentId)
+  const identity =
+    currentId && currentName && currentId !== previous?.modelId
+      ? { modelId: currentId, model: currentName }
+      : previous
+  if (!identity) return null
   return JSON.stringify({
     v: STATUS_FILE_VERSION,
-    model_id: previous.modelId,
-    model: previous.model,
+    model_id: identity.modelId,
+    model: identity.model,
     pct: validPct(context.percent),
-    size: validSize(context.window) ?? previous.contextWindow,
+    size: validSize(context.window) ?? previous?.contextWindow ?? null,
     at: now
   })
 }
