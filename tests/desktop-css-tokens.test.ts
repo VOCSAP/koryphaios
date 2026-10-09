@@ -161,6 +161,27 @@ test("--banner-h is 0 by default and raised only while a status banner is mounte
   expect(ruleBlock(text, ".app")).toMatch(/padding-top:\s*var\(--banner-h\)/);
 });
 
+test("the inbox panel stacks under the modal veil, never over an open modal", () => {
+  const { text } = readCss();
+  // Every rule whose selector list MENTIONS the class (descendant, compound, :has(), list, media)
+  // can set the element's z-index; a whole-selector match would miss every one of them.
+  const z = (cls: string): number => {
+    const token = new RegExp(`(?<![\\w-])\\.${cls}(?![\\w-])`);
+    const setters = ruleBlocks(text).filter((r) => token.test(r.selector) && /(?:^|[;\s])z-index\s*:/.test(r.body));
+    expect(setters.map((r) => r.selector), `.${cls}: exactly one rule may set its z-index`).toEqual([`.${cls}`]);
+    const value = Number(setters[0]!.body.match(/(?:^|[;\s])z-index:\s*([^;]+);/)?.[1]);
+    // NaN compares false both ways, so a lost z-index would otherwise pass or fail for the wrong reason.
+    expect(Number.isFinite(value), `no numeric z-index on .${cls}`).toBe(true);
+    return value;
+  };
+  expect(z("inbox-panel"), "the inbox paints unveiled over an open modal and hides its left edge").toBeLessThan(
+    z("modal-backdrop")
+  );
+  const panel = readFileSync(join(SRC, "renderer", "src", "components", "InboxPanel.tsx"), "utf8");
+  expect(panel.includes('"inbox-panel'), "InboxPanel.tsx no longer renders .inbox-panel: the scan below reads nothing").toBe(true);
+  expect(panel.match(/zIndex|z-index/g) ?? [], "an inline z-index in InboxPanel.tsx outranks the stylesheet ladder").toEqual([]);
+});
+
 // Per-declaration keys prevent one exemption from masking another violation on the same selector.
 const BANNER_EXEMPT: Record<string, string> = {
   ".app { height: 100vh }": "its padding-top IS the reservation; the height stays the whole window",

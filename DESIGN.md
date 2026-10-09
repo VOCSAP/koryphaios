@@ -239,8 +239,12 @@ failure shape as a className matching no selector at all, different cause.
 - **Stacked, movable dialog** (`RoadmapConflictDialog`, the only instance): a
   dialog opened FROM another modal does not close it, so the operator can set
   them side by side. Its backdrop takes a dedicated class one step above the
-  modals (`z-index: 55`). The ladder above it: status banner, popovers, help
-  and inbox at 60, context menus at 70. When a modal is open beneath it, that
+  modals (`z-index: 55`). The ladder above it: status banner, popovers and
+  help at 60, context menus at 70. Below the modals: the inbox panel at 45,
+  above the Settings page at 40. A modal veils the rail that opens the inbox,
+  so when a modal opens, the inbox is beneath it and takes its veil like the
+  page; help stays at 60 because its button stays clickable over a veil, to
+  ask about the dialog on screen. When a modal is open beneath it, that
   backdrop turns transparent through `:has()` and the dialog takes the toast
   shadow (no double veil); the veil then passes pointer events through, so the
   modal beneath stays usable, and an outside click no longer closes the dialog.

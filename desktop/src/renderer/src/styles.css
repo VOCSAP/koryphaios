@@ -4713,11 +4713,14 @@ body:has(.rm-modal) .rm-conflict-modal {
   position: relative;
 }
 
+/* Under the modals (50), above the Settings page (40): a modal veils the rail
+   that opens the inbox, so an inbox stacked higher would sit unveiled over the
+   modal's left edge. */
 .inbox-panel {
   position: fixed;
   left: 66px;
   bottom: 16px;
-  z-index: 60;
+  z-index: 45;
   width: 380px;
   max-width: calc(100vw - 90px);
   /* The operator runs eleven peers, so a scrolling list is the NOMINAL case,
