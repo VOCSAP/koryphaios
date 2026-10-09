@@ -1,4 +1,4 @@
-// The single enforcer for all three receive paths in server.ts, so a fourth
+// The single enforcer for all four receive paths in server.ts, so a fourth
 // sender class is added once here instead of risking a copy that silently
 // diverges.
 // Framing stays at reception rather than moving to emission: emission-side
@@ -13,6 +13,8 @@ import {
   DECK_INSTANCE_TOKEN,
   OPERATOR_PEER_ID,
   OPERATOR_INSTANCE_TOKEN,
+  type DelegationContext,
+  type DelegationTaskRef,
 } from "./types.ts";
 
 // Deck sentinel messages are one-way operator broadcasts and must not trigger
@@ -90,9 +92,57 @@ export const ROUTING_REMINDER_NOTE =
  * scoped to the ordinary-peer branch: a deck announcement or operator answer is
  * never "a peer that just replied", so those two classes ignore it entirely.
  */
-export function renderInbound(fromPeerId: string, text: string, recipientRole?: string | null): string {
+export function renderInbound(
+  fromPeerId: string,
+  text: string,
+  recipientRole?: string | null,
+  delegation?: DelegationContext
+): string {
   if (isDeckSender(fromPeerId)) return renderDeckAnnouncement(text);
   if (isOperatorSender(fromPeerId)) return renderOperatorAnswer(text);
   const base = renderPeerMessage(text);
-  return recipientRole === "team-lead" ? `${base}${ROUTING_REMINDER_NOTE}${LEAD_DIRECTIVE_NOTE}` : base;
+  const framed = recipientRole === "team-lead" ? `${base}${ROUTING_REMINDER_NOTE}${LEAD_DIRECTIVE_NOTE}` : base;
+  return `${framed}${renderDelegationNote(fromPeerId, delegation)}`;
+}
+
+export function formatInboundLine(
+  fromPeerId: string,
+  text: string,
+  sentAt: string,
+  recipientRole: string | null,
+  delegation?: DelegationContext
+): string {
+  const label = isOperatorSender(fromPeerId)
+    ? OPERATOR_PEER_ID
+    : isDeckSender(fromPeerId)
+      ? DECK_PEER_ID
+      : fromPeerId || "<dormant peer>";
+  return `From ${label} (${sentAt}):\n${renderInbound(fromPeerId, text, recipientRole, delegation)}`;
+}
+
+// Like PEER_INBOUND_NOTE, neither note says anything about replying to the
+// peer: a message sent with expects_reply=false carries one of them too.
+export const DELEGATE_CLOSE_NOTE =
+  'When it is done, close it explicitly with send_message(task_id=<this id>, task_action="close"); an ACK or a citation never closes it.';
+
+export const DELEGATOR_CHECK_NOTE =
+  'Check whether this message completes one of them; if so, close it explicitly with send_message(task_id=<its id>, task_action="close"). An ACK never closes a task.';
+
+function describeTask(task: DelegationTaskRef): string {
+  const due = task.due_at === null ? "no deadline" : `due ${task.due_at}`;
+  return `${task.task_id} ${JSON.stringify(task.label)}, ${due}, status ${task.status}`;
+}
+
+/** A citation received by the delegator renders nothing: only the delegate needs the id it was never told. */
+export function renderDelegationNote(fromPeerId: string, context: DelegationContext | undefined): string {
+  if (context?.task?.recipient_side === "delegate") {
+    const close = context.task.status === "closed" ? "" : ` ${DELEGATE_CLOSE_NOTE}`;
+    return `\n\n[claude-peers] Tracked task ${describeTask(context.task)}.${close}`;
+  }
+  const open = context?.open_from_recipient_to_sender;
+  if (!open) return "";
+  const lines = open.tasks.map((task) => `- ${describeTask(task)}`).join("\n");
+  const hidden = open.total - open.tasks.length;
+  const more = hidden > 0 ? ` Full list (${hidden} more): check_messages(open_tasks_with=${JSON.stringify(fromPeerId || "*")}).` : "";
+  return `\n\n[claude-peers] This peer has ${open.total} open task(s) from you:\n${lines}\n${DELEGATOR_CHECK_NOTE}${more}`;
 }

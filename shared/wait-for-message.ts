@@ -3,6 +3,8 @@
 // A timed-out, cancelled, or filter-mismatched message is therefore never
 // marked delivered and stays available for a later check_messages call.
 
+import type { DelegationContext } from "./types.ts";
+
 /**
  * Hard ceiling for timeout_sec, in seconds.
  * Must stay strictly under CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS's default of
@@ -62,6 +64,7 @@ export interface WaitCandidateMessage {
   readonly from_cwd: string;
   readonly text: string;
   readonly sent_at: string;
+  readonly delegation_context?: DelegationContext;
 }
 
 /** True if `candidate` satisfies an optional from_peer_id filter. */

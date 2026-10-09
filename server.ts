@@ -33,7 +33,11 @@ import type {
   RoadmapContextDocumentListResponse,
   RoadmapUpsertAckField,
   SendMessageResponse,
+  DelegationContext,
+  DelegationsCloseResponse,
+  DelegationsListResponse,
 } from "./shared/types.ts";
+import { taskLabelFromText } from "./shared/delegated-task.ts";
 import {
   formatRoadmapContextDocumentHeader,
   formatRoadmapContextDocumentOmission,
@@ -57,8 +61,8 @@ import {
   computeGroupSecretHash,
 } from "./shared/config.ts";
 import {
+  formatInboundLine,
   isDeckSender,
-  isOperatorSender,
   renderInbound,
 } from "./shared/inbound-framing.ts";
 import {
@@ -71,7 +75,6 @@ import { createLogger, coreLogDir, stderrMirror } from "./shared/logger.ts";
 import {
   DECK_PEER_ID,
   DECK_INSTANCE_TOKEN,
-  OPERATOR_PEER_ID,
   OPERATOR_INSTANCE_TOKEN,
   ROADMAP_UPSERT_ACK_FIELDS,
   ROADMAP_ADD_ACK_FIELDS,
@@ -112,7 +115,7 @@ import {
   type WaitCandidateMessage,
 } from "./shared/wait-for-message.ts";
 import { composeOutboundMessage } from "./shared/message-framing.ts";
-import { formatPeer, renderSendAck } from "./shared/peer-render.ts";
+import { formatPeer, renderOpenTasks, renderSendAck, renderTaskCloseAck } from "./shared/peer-render.ts";
 import { resolveProjectKey } from "./shared/project-key.ts";
 import { askOperatorWaitReply } from "./shared/approval-outcome.ts";
 import { tmpdir } from "node:os";
@@ -365,6 +368,7 @@ function connectWs() {
         from_cwd: string;
         text: string;
         sent_at: string;
+        delegation_context?: DelegationContext;
       };
       // Card a21f1303: a pending wait_for_message call is resolved here
       // FIRST, before the ordinary mcp.notification() push -- this is the
@@ -386,7 +390,7 @@ function connectWs() {
         await mcp.notification({
           method: "notifications/claude/channel",
           params: {
-            content: renderInbound(f.from_peer_id, f.text, myRole),
+            content: renderInbound(f.from_peer_id, f.text, myRole, f.delegation_context),
             meta: {
               from_peer_id: fromDeck ? DECK_PEER_ID : f.from_peer_id,
               from_summary: f.from_summary,
@@ -453,7 +457,7 @@ async function pollFallback() {
         await mcp.notification({
           method: "notifications/claude/channel",
           params: {
-            content: renderInbound(msg.from_peer_id, msg.text, myRole),
+            content: renderInbound(msg.from_peer_id, msg.text, myRole, msg.delegation_context),
             meta: {
               from_peer_id: fromDeck ? DECK_PEER_ID : (msg.from_peer_id || "<dormant peer>"),
               from_summary: msg.from_summary,
@@ -530,7 +534,7 @@ const TOOLS = [
   {
     name: "send_message",
     description:
-      "Send a message to another Claude Code instance by peer_id. The message is pushed via WebSocket if the recipient is connected, otherwise queued for their next poll.",
+      "Send a message to another Claude Code instance by peer_id. The message is pushed via WebSocket if the recipient is connected, otherwise queued for their next poll. deadline_sec tracks a task. task_id cites/rearms it; task_action close explicitly closes it, with or without a message. ACKs never close tasks.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -547,8 +551,20 @@ const TOOLS = [
           description:
             "Optional. Set to false for a message that INFORMS rather than asks: the recipient is then explicitly told not to acknowledge it, which saves them a whole inference turn. Omit it (or pass true) when you genuinely need an answer. Use false for results, status updates and hand-offs; use the default for questions and requests.",
         },
+        deadline_sec: {
+          type: "number" as const,
+          description: "Seconds until due; omitted = no task, or no rearm with task_id.",
+        },
+        task_id: {
+          type: "string" as const,
+          description: "Task UUID; omit to create, cite to reply/rearm/close.",
+        },
+        task_action: {
+          type: "string" as const,
+          enum: ["close"],
+          description: "Explicit close; task_id alone never closes.",
+        },
       },
-      required: ["to_peer_id", "message"],
     },
   },
   {
@@ -569,10 +585,15 @@ const TOOLS = [
   {
     name: "check_messages",
     description:
-      "Manually poll for new messages. Messages normally arrive automatically via WebSocket; use this if you suspect the push channel is down.",
+      "Manually poll for new messages. Messages normally arrive automatically via WebSocket; use this if you suspect the push channel is down. open_tasks_with lists tasks instead of draining messages; use * for all my open tasks.",
     inputSchema: {
       type: "object" as const,
-      properties: {},
+      properties: {
+        open_tasks_with: {
+          type: "string" as const,
+          description: "List my open tasks for this peer, without draining messages.",
+        },
+      },
     },
   },
   {
@@ -1376,15 +1397,6 @@ const roadmapToolError = (e: unknown): { content: { type: "text"; text: string }
   isError: true,
 });
 
-function formatInboundLine(fromPeerId: string, text: string, sentAt: string, recipientRole: string | null): string {
-  const label = isOperatorSender(fromPeerId)
-    ? OPERATOR_PEER_ID
-    : isDeckSender(fromPeerId)
-      ? DECK_PEER_ID
-      : fromPeerId || "<dormant peer>";
-  return `From ${label} (${sentAt}):\n${renderInbound(fromPeerId, text, recipientRole)}`;
-}
-
 /** graph_draft_prepare: pure local inference, no peer identity, no broker call. */
 async function handleGraphDraftPrepare(args: unknown) {
   const a = args as { question?: string; hints?: string };
@@ -1684,10 +1696,45 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
       const a = args as {
         to_peer_id?: string;
         to_id?: string;
-        message: string;
+        message?: string;
         expects_reply?: unknown;
+        deadline_sec?: unknown;
+        task_id?: unknown;
+        task_action?: unknown;
       };
       const target = a.to_peer_id ?? a.to_id;
+      if (a.task_action !== undefined && a.message === undefined && target === undefined) {
+        if (!myInstanceToken) {
+          return {
+            content: [{ type: "text" as const, text: "Not registered with broker yet" }],
+            isError: true,
+          };
+        }
+        if (a.task_action !== "close" || typeof a.task_id !== "string") {
+          return {
+            content: [{ type: "text" as const, text: "A close without a message needs task_id and task_action 'close'" }],
+            isError: true,
+          };
+        }
+        if (a.deadline_sec !== undefined) {
+          return {
+            content: [{ type: "text" as const, text: "deadline_sec cannot accompany task_action" }],
+            isError: true,
+          };
+        }
+        try {
+          const closed = await brokerFetch<DelegationsCloseResponse>("/delegations/close", {
+            from_token: myInstanceToken,
+            task_id: a.task_id,
+          });
+          return { content: [{ type: "text" as const, text: renderTaskCloseAck(closed.task) }] };
+        } catch (e) {
+          return {
+            content: [{ type: "text" as const, text: `Error closing task: ${e instanceof Error ? e.message : String(e)}` }],
+            isError: true,
+          };
+        }
+      }
       if (!target) {
         return {
           content: [{ type: "text" as const, text: "Missing 'to_peer_id'" }],
@@ -1701,6 +1748,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
         };
       }
       try {
+        const creatingTask = a.deadline_sec !== undefined && a.task_id === undefined;
         const result = await brokerFetch<SendMessageResponse>("/send-message", {
           from_token: myInstanceToken,
           to_peer_id: target,
@@ -1708,11 +1756,27 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
           // accepts to_peer_id 'operator', which reaches a PERSON. See
           // composeOutboundMessage's own doc; the exclusion lives there, not
           // here, so a test can pin it.
-          text: composeOutboundMessage(a.message, a.expects_reply, target),
+          text: composeOutboundMessage(a.message as string, a.expects_reply, target),
+          deadline_sec: a.deadline_sec,
+          task_id: a.task_id,
+          task_action: a.task_action,
+          task_label: creatingTask && typeof a.message === "string" ? taskLabelFromText(a.message) : undefined,
         });
         if (!result.ok) {
           return {
             content: [{ type: "text" as const, text: `Failed to send: ${result.error}` }],
+            isError: true,
+          };
+        }
+        // A broker older than delegated tasks ignores deadline_sec and task_action and still answers ok.
+        if ((a.deadline_sec !== undefined || a.task_action !== undefined) && !result.task) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: `Message sent to peer '${target}', but NO task was tracked, rearmed or closed: the broker returned no task, it may predate delegated tasks.`,
+              },
+            ],
             isError: true,
           };
         }
@@ -1755,6 +1819,27 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
           isError: true,
         };
       }
+      const { open_tasks_with } = (args ?? {}) as { open_tasks_with?: unknown };
+      if (open_tasks_with !== undefined) {
+        if (typeof open_tasks_with !== "string" || open_tasks_with === "") {
+          return {
+            content: [{ type: "text" as const, text: "open_tasks_with must be a peer_id or '*'" }],
+            isError: true,
+          };
+        }
+        try {
+          const listed = await brokerFetch<DelegationsListResponse>("/delegations/list", {
+            from_token: myInstanceToken,
+            peer_id: open_tasks_with,
+          });
+          return { content: [{ type: "text" as const, text: renderOpenTasks(open_tasks_with, listed.tasks) }] };
+        } catch (e) {
+          return {
+            content: [{ type: "text" as const, text: `Error listing open tasks: ${e instanceof Error ? e.message : String(e)}` }],
+            isError: true,
+          };
+        }
+      }
       try {
         const result = await brokerFetch<PollMessagesResponse>("/poll-messages", {
           instance_token: myInstanceToken,
@@ -1766,7 +1851,9 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
         // Card e3f8065d / a21f1303: formatInboundLine (above) is the shared
         // enforcer for the "From <name> (<date>):" prefix over renderInbound,
         // now reused by wait_for_message too.
-        const lines = result.messages.map((m) => formatInboundLine(m.from_peer_id, m.text, m.sent_at, myRole));
+        const lines = result.messages.map((m) =>
+          formatInboundLine(m.from_peer_id, m.text, m.sent_at, myRole, m.delegation_context)
+        );
         return {
           content: [
             {
@@ -1848,7 +1935,13 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
           content: [
             {
               type: "text" as const,
-              text: formatInboundLine(outcome.message.from_peer_id, outcome.message.text, outcome.message.sent_at, myRole),
+              text: formatInboundLine(
+                outcome.message.from_peer_id,
+                outcome.message.text,
+                outcome.message.sent_at,
+                myRole,
+                outcome.message.delegation_context
+              ),
             },
           ],
         };

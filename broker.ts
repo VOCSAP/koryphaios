@@ -3261,7 +3261,7 @@ const markTaskOverdueTx = db.transaction((row: DelegatedTaskRow, nowMs: number):
   if (result.changes !== 1) return null;
   const delegate = publicTaskPeerName(row.delegate_binding, row.group_id, row.delegate_peer_id_snapshot);
   const text =
-    `No explicit closure from '${delegate}' for task ${row.task_id} ("${row.label}"); its deadline has passed. ` +
+    `No explicit closure from '${delegate}' for task ${row.task_id} (${JSON.stringify(row.label)}); its deadline has passed. ` +
     `Check the outcome, then close the task or rearm it with a new deadline (${row.max_rearms - row.rearm_count} rearm(s) left). ` +
     `Escalation to the operator at ${new Date(decisionDueMs).toISOString()}, in ${describeDuration(decisionDueMs - nowMs)}, without a decision.`;
   reserveDelegationEvent(row, "due", row.delegator_token, text, at);
@@ -3309,7 +3309,7 @@ const settleTaskTx = db.transaction(
     const delegator = publicTaskPeerName(row.delegator_token, row.group_id, row.delegator_peer_id_snapshot);
     const delegate = publicTaskPeerName(row.delegate_binding, row.group_id, row.delegate_peer_id_snapshot);
     const text =
-      `Task ${row.task_id} ("${row.label}") from '${delegator}' to '${delegate}' is unresolved: ` +
+      `Task ${row.task_id} (${JSON.stringify(row.label)}) from '${delegator}' to '${delegate}' is unresolved: ` +
       `${SETTLE_REASON_TEXT[reason]} (${row.rearm_count}/${row.max_rearms} rearms used). ` +
       `The broker will not follow this task up again; close it explicitly once it is settled.`;
     const pushes: DeckPush[] = [];

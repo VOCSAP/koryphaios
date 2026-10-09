@@ -43,6 +43,7 @@ export const EXPECTED_LAUNCHES: Readonly<Record<string, number>> = {
   "server-deck-reply-route.test.ts": 2,
   "server-deck-token-authz.test.ts": 1,
   "server-deck-tools-parity.test.ts": 1,
+  "server-delegated-task.test.ts": 2,
   "server-inbound-framing-delivery.test.ts": 2,
   "server-roadmap-inactive-agent-guard.test.ts": 1,
   "server-roadmap-inactive-marker.test.ts": 1,

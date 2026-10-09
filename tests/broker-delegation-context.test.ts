@@ -347,6 +347,82 @@ describe("immediate WS push projects the delegation context", () => {
   });
 });
 
+describe("sweep notifications quote the label", () => {
+  test("a label with a quote and a parenthesis cannot break the due alert or the escalation", async () => {
+    const swept = await startBroker({ CLAUDE_PEERS_DELEGATION_SWEEP_SEC: "1" });
+    try {
+      const secret = `delegation-label-${randomUUID()}`;
+      const sweptGroup = await groupId(secret);
+      const sweptHash = await sha256Hex(secret);
+      const registerSwept = async (name: string): Promise<Peer> => {
+        const result = await post<Peer>(`${swept.url}/register`, {
+          pid: livePid(),
+          cwd: `/${name}-${randomUUID()}`,
+          git_root: null,
+          tty: null,
+          summary: "",
+          host: name,
+          client_pid: 1,
+          project_key: null,
+          group_id: sweptGroup,
+          group_secret_hash: sweptHash,
+        });
+        expect(result.status).toBe(200);
+        return result.body;
+      };
+      const bob = await registerSwept("label-bob");
+      const alice = await registerSwept("label-alice");
+      const label = 'a"), x';
+      const create = async (text: string): Promise<string> => {
+        const result = await post<{ ok: boolean; task?: { task_id: string } }>(`${swept.url}/send-message`, {
+          from_token: bob.instance_token,
+          to_peer_id: alice.peer_id,
+          text,
+          deadline_sec: 600,
+          task_label: label,
+        });
+        expect(result.body.ok).toBeTrue();
+        return result.body.task!.task_id;
+      };
+      const due = await create("label: due");
+      const escalated = await create("label: escalated");
+      const db = new Database(swept.dbPath);
+      try {
+        db.run("PRAGMA busy_timeout = 3000");
+        db.run("UPDATE delegated_tasks SET due_at_ms = ? WHERE task_id = ?", [Date.now() - 1000, due]);
+        db.run("UPDATE delegated_tasks SET due_at_ms = 1, rearm_count = max_rearms WHERE task_id = ?", [escalated]);
+      } finally {
+        db.close();
+      }
+
+      const quoted = `(${JSON.stringify(label)})`;
+      const texts = async (): Promise<string[]> => {
+        const read = new Database(swept.dbPath, { readonly: true });
+        try {
+          return (read.query("SELECT text FROM messages WHERE text LIKE ? OR text LIKE ?").all(`%${due}%`, `%${escalated}%`) as {
+            text: string;
+          }[]).map((r) => r.text);
+        } finally {
+          read.close();
+        }
+      };
+      const deadline = Date.now() + 10_000;
+      let found: string[] = [];
+      while (Date.now() < deadline) {
+        found = await texts();
+        if (found.some((t) => t.includes(due)) && found.some((t) => t.includes(escalated))) break;
+        await Bun.sleep(200);
+      }
+      const alert = found.find((t) => t.includes(due) && t.includes("deadline has passed"));
+      const escalation = found.find((t) => t.includes(escalated) && t.includes("is unresolved"));
+      expect(alert).toContain(`task ${due} ${quoted};`);
+      expect(escalation).toContain(`Task ${escalated} ${quoted} from`);
+    } finally {
+      await stopBroker(swept);
+    }
+  }, 30_000);
+});
+
 describe("a failed projection never costs the message", () => {
   test("push, peek and poll deliver without context, and the failure is logged", async () => {
     const failing = await startBroker();

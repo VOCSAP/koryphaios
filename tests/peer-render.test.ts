@@ -5,8 +5,8 @@
 // never leak into it.
 
 import { test, expect, describe } from "bun:test";
-import type { PublicPeer } from "../shared/types.ts";
-import { formatPeer, formatDuration, renderSendAck } from "../shared/peer-render.ts";
+import type { DelegatedTask, PublicPeer } from "../shared/types.ts";
+import { formatPeer, formatDuration, renderOpenTasks, renderSendAck, renderTaskCloseAck } from "../shared/peer-render.ts";
 
 const NOW = Date.parse("2026-09-06T12:00:00.000Z");
 
@@ -157,5 +157,60 @@ describe("renderSendAck", () => {
       expect(text, `grace ${grace} must fall back to a wording without a number`).not.toContain("NaN");
       expect(text, `grace ${grace} must still say the message is queued`).toContain("queued");
     }
+  });
+});
+
+const TASK: DelegatedTask = {
+  task_id: "6f1c2a4e-0b7d-4c3e-9a51-2d8e7f6a9b10",
+  group_id: "g",
+  delegator_peer_id: "bob",
+  delegate_peer_id: "alice",
+  label: "Audit the resume flow",
+  status: "armed",
+  due_at_ms: Date.parse("2026-10-09T20:00:00.000Z"),
+  decision_due_at_ms: null,
+  rearm_count: 1,
+  generation: 1,
+  policy: { max_rearms: 3, lead_silence_sec: 300, max_deadline_sec: 14_400 },
+  created_at: "2026-10-09T18:00:00.000Z",
+  updated_at: "2026-10-09T18:00:00.000Z",
+  closed_at: null,
+  terminal_reason: null,
+  escalation_result: null,
+};
+
+describe("tracked task acknowledgements", () => {
+  test("a created or rearmed task names its id, label, due date and rearm counter", () => {
+    expect(renderSendAck("alice", { task: TASK })).toBe(
+      `Message sent to peer 'alice'; tracked task ${TASK.task_id} "Audit the resume flow", due 2026-10-09T20:00:00.000Z, rearms used 1/3.`
+    );
+  });
+
+  test("a report that closes the task says so", () => {
+    expect(renderSendAck("bob", { task: { ...TASK, status: "closed", due_at_ms: null } })).toBe(
+      `Message sent to peer 'bob'; task ${TASK.task_id} "Audit the resume flow" is closed.`
+    );
+  });
+
+  test("a label with quotes stays quoted in every rendering", () => {
+    const quoted = { ...TASK, label: 'say "done"' };
+    expect(renderSendAck("alice", { task: quoted })).toContain(`tracked task ${TASK.task_id} "say \\"done\\"",`);
+    expect(renderOpenTasks("*", [quoted])).toContain(`task ${TASK.task_id} "say \\"done\\"" to 'alice'`);
+  });
+
+  test("a close without a message is never presented as a sent message", () => {
+    const text = renderTaskCloseAck({ ...TASK, status: "closed", due_at_ms: null });
+    expect(text).toBe(`No message sent; task ${TASK.task_id} "Audit the resume flow" is closed.`);
+    expect(text).not.toContain("Message sent");
+  });
+
+  test("the open task list names each delegate and keeps the peer scope", () => {
+    expect(renderOpenTasks("alice", [])).toBe("No open tasks you delegated with 'alice'.");
+    expect(renderOpenTasks("*", [])).toBe("No open tasks you delegated.");
+    expect(renderOpenTasks("*", [TASK, { ...TASK, task_id: "t2", status: "overdue", rearm_count: 2 }])).toBe(
+      "2 open task(s) you delegated:\n" +
+        `- task ${TASK.task_id} "Audit the resume flow" to 'alice', due 2026-10-09T20:00:00.000Z, status armed, rearms used 1/3\n` +
+        `- task t2 "Audit the resume flow" to 'alice', due 2026-10-09T20:00:00.000Z, status overdue, rearms used 2/3`
+    );
   });
 });

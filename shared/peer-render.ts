@@ -4,7 +4,7 @@
  * broker or process state so a test can pin the exact strings the model reads.
  */
 
-import type { PublicPeer, SendMessageResponse } from "./types.ts";
+import type { DelegatedTask, PublicPeer, SendMessageResponse } from "./types.ts";
 
 export function formatElapsed(iso: string | null, now: number = Date.now()): string {
   if (!iso) return "never";
@@ -63,11 +63,42 @@ export function formatPeer(p: PublicPeer, now: number = Date.now()): string {
  * long the broker can still hold the message; a grace that is absent or not a
  * finite number is never rendered as "NaN min".
  */
-export function renderSendAck(target: string, response: Pick<SendMessageResponse, "queued" | "grace_left_sec">): string {
+function describeDue(dueAtMs: number | null): string {
+  return dueAtMs === null ? "no deadline" : `due ${new Date(dueAtMs).toISOString()}`;
+}
+
+function describeTask(task: DelegatedTask): string {
+  return `task ${task.task_id} ${JSON.stringify(task.label)}`;
+}
+
+export function renderSendAck(
+  target: string,
+  response: Pick<SendMessageResponse, "queued" | "grace_left_sec" | "task">
+): string {
+  const task = response.task;
+  if (task) {
+    if (task.status === "closed") return `Message sent to peer '${target}'; ${describeTask(task)} is closed.`;
+    return `Message sent to peer '${target}'; tracked ${describeTask(task)}, ${describeDue(task.due_at_ms)}, rearms used ${task.rearm_count}/${task.policy.max_rearms}.`;
+  }
   if (!response.queued) return `Message sent to peer '${target}'`;
   const grace = response.grace_left_sec;
   const window = typeof grace === "number" && Number.isFinite(grace)
     ? `within ${Math.max(1, Math.ceil(grace / 60))} min`
     : "before the federation grace expires";
   return `Message to peer '${target}' queued: the central broker is unreachable, it will be delivered if the link returns ${window}, otherwise dropped and you will be told.`;
+}
+
+/** The result of a close without a message: nothing was sent. */
+export function renderTaskCloseAck(task: DelegatedTask): string {
+  return `No message sent; ${describeTask(task)} is closed.`;
+}
+
+export function renderOpenTasks(peerFilter: string, tasks: readonly DelegatedTask[]): string {
+  const scope = peerFilter === "*" ? "" : ` with '${peerFilter}'`;
+  if (tasks.length === 0) return `No open tasks you delegated${scope}.`;
+  const lines = tasks.map(
+    (t) =>
+      `- ${describeTask(t)} to '${t.delegate_peer_id}', ${describeDue(t.due_at_ms)}, status ${t.status}, rearms used ${t.rearm_count}/${t.policy.max_rearms}`
+  );
+  return `${tasks.length} open task(s) you delegated${scope}:\n${lines.join("\n")}`;
 }
