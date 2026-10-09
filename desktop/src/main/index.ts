@@ -176,6 +176,7 @@ import { createClodexController, type ClodexController } from './clodex-lifecycl
 import { announceModelsChanged } from './model-registry'
 import { createBeforeQuitHandler } from './before-quit'
 import { ServeService } from './serve-service'
+import { SERVE_QUIT_DEADLINE_MS } from './serve-lifecycle'
 import { createAvatarClient } from './avatar-client'
 import { boundedAvatarDetach, deckAvatarClientOptions } from './avatar-deck-link'
 import { avatarLaunchCommand, ensureAvatar, spawnDetachedAvatar } from './avatar-ensure'
@@ -3559,9 +3560,12 @@ const runBeforeQuit = createBeforeQuitHandler({
       label: 'serve',
       timeoutMs: 16_000,
       run: async () => {
-        await serve.stop()
         sessionDir.close()
-        removeSessionStateDir(appStateDir(), activeScope.groupId, reportSessionState)
+        try {
+          await serve.quit({ deadlineMs: SERVE_QUIT_DEADLINE_MS })
+        } finally {
+          removeSessionStateDir(appStateDir(), activeScope.groupId, reportSessionState)
+        }
       }
     },
     { label: 'sandbox', run: () => sandbox.stopCurrentDetached() },

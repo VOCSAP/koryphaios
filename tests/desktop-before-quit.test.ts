@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { createBeforeQuitHandler } from "../desktop/src/main/before-quit.ts";
+import { SERVE_QUIT_DEADLINE_MS } from "../desktop/src/main/serve-lifecycle.ts";
 
 interface Harness {
   readonly handler: (preventDefault: () => void) => void;
@@ -79,24 +80,54 @@ function hasBoundedApprovalClose(source: string): boolean {
   return source.includes("{ label: 'approvals', timeoutMs: 2_000, run: () => approvals.close() }");
 }
 
-function extractServeShutdown(source: string): (deps: {
-  serve: { stop(): Promise<void> }
+interface ServeShutdownDeps {
+  serve: { quit(options: { deadlineMs?: number }): Promise<void> }
   sessionDir: { close(): void }
   removeSessionStateDir: (dir: string, groupId: string, report: unknown) => void
   appStateDir: () => string
   activeScope: { groupId: string }
   reportSessionState: unknown
-}) => Promise<void> {
+  SERVE_QUIT_DEADLINE_MS: number
+}
+
+function readIndex(): string {
+  return readFileSync(join(import.meta.dir, "..", "desktop", "src", "main", "index.ts"), "utf8");
+}
+
+function extractServeShutdown(source: string): (deps: ServeShutdownDeps) => Promise<void> {
   const match = /label: 'serve',\s*timeoutMs: 16_000,\s*run: async \(\) => \{([\s\S]*?)\n      \}/.exec(source)
   if (!match) throw new Error('missing Serve shutdown effect')
-  return new Function('deps', `const { serve, sessionDir, removeSessionStateDir, appStateDir, activeScope, reportSessionState } = deps; return (async () => {${match[1]!}})()`) as (deps: {
-    serve: { stop(): Promise<void> }
-    sessionDir: { close(): void }
-    removeSessionStateDir: (dir: string, groupId: string, report: unknown) => void
-    appStateDir: () => string
-    activeScope: { groupId: string }
-    reportSessionState: unknown
-  }) => Promise<void>
+  return new Function(
+    'deps',
+    `const { serve, sessionDir, removeSessionStateDir, appStateDir, activeScope, reportSessionState, SERVE_QUIT_DEADLINE_MS } = deps; return (async () => {${match[1]!}})()`
+  ) as (deps: ServeShutdownDeps) => Promise<void>
+}
+
+/** Names every mention of `name` by its enclosing top-level declaration, so a call, an alias or a helper anywhere in the file shows up. */
+function referenceSites(source: string, name: string): string[] {
+  const lines = source.split(/\r?\n/)
+  const mention = new RegExp(`\\b${name}\\b`, 'g')
+  const sites: string[] = []
+  lines.forEach((line, index) => {
+    const hits = line.match(mention)?.length ?? 0
+    let top = index
+    while (top > 0 && !/^[A-Za-z]/.test(lines[top]!)) top--
+    const declaration = /^(?:export\s+)?(?:import|const|let|var|function|async function|class)\b[^=({:]*/.exec(lines[top]!)?.[0].trim() ?? lines[top]!
+    for (let hit = 0; hit < hits; hit++) sites.push(declaration)
+  })
+  return sites
+}
+
+function serveShutdownDeps(order: string[], quit: (options: { deadlineMs?: number }) => Promise<void>): ServeShutdownDeps {
+  return {
+    serve: { quit },
+    sessionDir: { close: () => order.push('session dir closed') },
+    removeSessionStateDir: () => order.push('session state removed'),
+    appStateDir: () => 'C:/state',
+    activeScope: { groupId: 'group' },
+    reportSessionState: undefined,
+    SERVE_QUIT_DEADLINE_MS
+  }
 }
 
 test("the main process bounds and awaits approval revocation at quit", () => {
@@ -105,31 +136,49 @@ test("the main process bounds and awaits approval revocation at quit", () => {
   expect(hasBoundedApprovalClose(source.replace("run: () => approvals.close()", "run: () => void approvals.close()"))).toBe(false);
 });
 
-test("Serve shutdown finishes before both session cleanup operations", async () => {
-  const source = readFileSync(join(import.meta.dir, "..", "desktop", "src", "main", "index.ts"), "utf8");
-  const run = extractServeShutdown(source)
+test("Serve shutdown closes the session dir, quits Serve under its deadline, then removes the session state", async () => {
+  const run = extractServeShutdown(readIndex())
   const order: string[] = []
-  let releaseStop = (): void => {}
-  const stopped = new Promise<void>((resolve) => {
-    releaseStop = () => {
-      order.push('serve stopped')
+  const deadlines: Array<number | undefined> = []
+  let releaseQuit = (): void => {}
+  const quitted = new Promise<void>((resolve) => {
+    releaseQuit = () => {
+      order.push('serve quitted')
       resolve()
     }
   })
 
-  const pending = run({
-    serve: { stop: () => stopped },
-    sessionDir: { close: () => order.push('session dir closed') },
-    removeSessionStateDir: () => order.push('session state removed'),
-    appStateDir: () => 'C:/state',
-    activeScope: { groupId: 'group' },
-    reportSessionState: undefined
-  })
-  expect(order).toEqual([])
-  releaseStop()
+  const pending = run(serveShutdownDeps(order, (options) => {
+    deadlines.push(options.deadlineMs)
+    return quitted
+  }))
+  expect(order).toEqual(['session dir closed'])
+  releaseQuit()
   await pending
 
-  expect(order).toEqual(['serve stopped', 'session dir closed', 'session state removed'])
+  expect(order).toEqual(['session dir closed', 'serve quitted', 'session state removed'])
+  expect(deadlines).toEqual([SERVE_QUIT_DEADLINE_MS])
+});
+
+test("Serve shutdown removes the session state even when the Serve quit rejects", async () => {
+  const run = extractServeShutdown(readIndex())
+  const order: string[] = []
+  const failure = new Error('serve quit failed')
+
+  await expect(run(serveShutdownDeps(order, () => Promise.reject(failure)))).rejects.toBe(failure)
+
+  expect(order).toEqual(['session dir closed', 'session state removed'])
+});
+
+test("exactly one quit effect removes the session state dir", () => {
+  expect(
+    referenceSites(readIndex(), 'removeSessionStateDir'),
+    'removeSessionStateDir must appear exactly at: its import, the group switch in adoptScope, and the serve quit effect in runBeforeQuit'
+  ).toEqual(['import', 'const adoptScope', 'const runBeforeQuit'])
+});
+
+test("the Serve quit deadline expires before the quit effect bound", () => {
+  expect(SERVE_QUIT_DEADLINE_MS).toBeLessThan(16_000)
 });
 
 test("the first pass prevents the default quit, runs every effect once and quits itself", async () => {

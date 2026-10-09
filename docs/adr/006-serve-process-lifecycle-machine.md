@@ -188,7 +188,7 @@ Câblage cible :
 - **Crash du Deck** (pas de `before-quit`) : rien n'est persisté et aucun ramassage n'a lieu au démarrage suivant, conformément au caractère local d'un run.
 - **Contention de port** entre l'allocation et le `bind` : déjà acceptée par le brief.
 - **Santé** au-delà du code HTTP ; **plusieurs instances** (une par fenêtre Deck) ; **horloge** (les délais sont des minuteurs).
-- **Exploration exhaustive des séquences** : `19^8 × 3 = 5,1e10` séquences, sans déduplication possible tant que `op` et `timerId` sont monotones (`MESURÉ (challenger)`, arithmétique). Un générateur des événements « possibles ici » serait un second modèle non vérifié. Retirée de l'exigence : la garantie est la table complète (phase × événement × {frais, périmé} × plateforme), avec I1 à I6 assertés sur chaque case, et les scénarios nommés de `cb092ec2` et de la fenêtre de récolte mesurée.
+- **Exploration exhaustive des séquences** : `17^8 × 3 ≈ 2,1e10` séquences pour les 17 événements (§11, A5), sans déduplication possible tant que `op` et `timerId` sont monotones (`DÉDUIT`, arithmétique). Un générateur des événements « possibles ici » serait un second modèle non vérifié. Retirée de l'exigence : la garantie est la table complète (phase × événement × {frais, périmé} × plateforme), avec I1 à I6 assertés sur chaque case, et les scénarios nommés de `cb092ec2` et de la fenêtre de récolte mesurée.
 
 ## 9. Coût et ordre des lots
 
@@ -204,3 +204,17 @@ Câblage cible :
 2. **Identité, lead** : abandon du stamp dans Serve (§2), sur mesures du challenger. Cela contredit la lettre du brief §LS2 (« PID + spawn time ») : à acter en amendant le brief.
 3. **B contre C, lead** : B recommandé (§3). Si le coût prime, C couvre la même liste pour environ un jour de moins, avec le risque résiduel décrit.
 4. **darwin EPERM, TRANCHÉ par la mesure** (§6) : EPERM sur notre groupe vaut « groupe vide ou zombie », exit observé ou non.
+
+## 11. Amendements à l'implémentation
+
+- **A1** `QuitDeadline × stopping` n'émet ni SIGKILL si SIGKILL figure déjà parmi les actes de l'`op`, ni `killLeader` s'il a déjà été émis ou si l'`exit` Windows est observé : la ligne du §5 violait I2 quand SIGKILL avait échoué et qu'un `probeGroup` était en vol.
+- **A2** `GroupProbed` porte un `code` d'erreur : la ligne darwin EPERM du §5 doit le distinguer, comme pour `SignalResult`.
+- **A3** `probing` n'a pas de `probeOp` : un seul probe est en vol à la fois, et un `ProbeAnswered` ou un `ProbeFailed` reçu pendant l'attente `probeDelay` vaut `none`.
+- **A4** `op` s'incrémente au seul `Start`, et une cellule vide du §5 vaut `none`, sans effet ni `report` : la table l'asserte telle quelle.
+- **A5** Un 17e événement, `LogFailed{op}`, mène à `stopping(logSetup)` depuis `probing` ou `ready` : un serveur sans `serve.log` est une panne invisible. `Spawned` avec un `pendingStop` n'émet pas `openLog`, puisque le dossier de session est déjà fermé au quit.
+- **A6** `idle{failure}` porte `url`, `port` et `pid` quand l'exécution les connaissait : le statut `failed` vu par LS3 les expose déjà.
+- **A7** `start()` se résout à la première phase hors de `preparing` et `spawning` ; `busy` et `rejected` rendent l'état courant sans lever, comme l'API actuelle.
+- **A8** Les chemins System32 de PowerShell et de `taskkill` se résolvent dans l'effet `prepare` : un `SystemRoot` invalide donne `PrepareFailed`, et le réducteur reste sans import `node:`.
+- **A9** `LogFailed × stopping` émet `report` et oublie le journal, sans changer le sous-pas ; un résultat qui ne correspond pas au sous-pas en cours (autre signal, `TaskkillDone` hors `taskkill`, minuteur autre que celui du sous-pas) vaut `none`.
+- **A10** `probeGroup` et `GroupProbed` portent un `probeId` : une réponse dont l'id n'est pas celui du probe en attente est périmée (I5), et quitter une grâce oublie son probe, pour qu'une réponse tardive ne déclenche ni un signal en trop ni un faux « unreachable ».
+- **A11** `SignalResult sent` reçu après l'`exit` du leader arme la grâce ET sonde le groupe : la grâce pleine ne s'applique plus seulement quand l'`exit` arrive après le signal.

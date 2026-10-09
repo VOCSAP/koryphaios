@@ -1,12 +1,11 @@
 import { EventEmitter } from 'node:events'
-import { readFileSync } from 'node:fs'
-import { join } from 'node:path'
 import { expect, test } from 'bun:test'
 import type { ServeAction } from '../desktop/src/main/serve-config.ts'
+import { SYSTEM_COMMAND_TIMEOUT_MS } from '../desktop/src/main/serve-lifecycle.ts'
 import { measureWindowsProcessStamp } from '../desktop/src/main/process-stamp.ts'
 import {
   ServeService,
-  type ProcessStamp,
+  runSystemCommand,
   type ServeChild,
   type ServeFetchResponse,
   type ServeServiceDeps,
@@ -15,6 +14,8 @@ import {
 
 const PID = 4512
 const PORT = 4317
+const POWERSHELL = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe'
+const TASKKILL = 'C:\\Windows\\System32\\taskkill.exe'
 
 class FakeChild extends EventEmitter implements ServeChild {
   readonly stdout = new EventEmitter()
@@ -37,20 +38,33 @@ class FakeChild extends EventEmitter implements ServeChild {
 
 class FakeClock {
   now = 0
-  readonly delays: number[] = []
-  private waiters: Array<() => void> = []
+  private nextId = 1
+  private readonly timers = new Map<number, { due: number; ms: number; fire: () => void }>()
 
-  sleep = async (ms: number): Promise<void> => {
-    this.delays.push(ms)
-    await new Promise<void>((resolve) => this.waiters.push(resolve))
+  setTimer = (ms: number, fire: () => void): unknown => {
+    const id = this.nextId++
+    this.timers.set(id, { due: this.now + ms, ms, fire })
+    return id
+  }
+
+  clearTimer = (handle: unknown): void => {
+    this.timers.delete(handle as number)
+  }
+
+  pending(): number[] {
+    return [...this.timers.values()].map((timer) => timer.ms)
   }
 
   advance(ms: number): void {
-    this.now += ms
-    const resolve = this.waiters.shift()
-    if (!resolve) throw new Error(`no pending sleep for ${ms}ms`)
-    expect(this.delays.at(-1)).toBe(ms)
-    resolve()
+    const target = this.now + ms
+    for (;;) {
+      const due = [...this.timers.entries()].filter(([, timer]) => timer.due <= target).sort(([a, x], [b, y]) => x.due - y.due || a - b)[0]
+      if (!due) break
+      this.timers.delete(due[0])
+      this.now = due[1].due
+      due[1].fire()
+    }
+    this.now = target
   }
 }
 
@@ -82,6 +96,10 @@ async function completeWithin<T>(promise: Promise<T>, label: string): Promise<T>
   ])
 }
 
+function errno(code: string): Error {
+  return Object.assign(new Error(`kill ${code}`), { code })
+}
+
 interface HarnessInit {
   platform?: NodeJS.Platform
   systemRoot?: string
@@ -90,30 +108,31 @@ interface HarnessInit {
   sessionDir?: () => string
   fetch?: ServeServiceDeps['fetch']
   statuses?: Array<number | Error>
-  stamps?: ProcessStamp[]
-  measureProcess?: (child: FakeChild) => Promise<ProcessStamp>
-  useDefaultMeasure?: boolean
   onSignal?: (pid: number, signal: NodeJS.Signals, child: FakeChild) => void
-  sleep?: ServeServiceDeps['sleep']
+  onProbe?: (pid: number, child: FakeChild) => void
   run?: ServeServiceDeps['run']
+  createLog?: (child: FakeChild) => void
+  failTimer?: (ms: number) => boolean
+  onReport?: (message: string) => void
 }
 
 function harness(init: HarnessInit = {}) {
   const clock = new FakeClock()
-  const child = new FakeChild()
+  const children: FakeChild[] = []
   const spawns: Array<{ file: string; args: string[]; options: ServeSpawnOptions }> = []
   const runs: Array<{ file: string; args: string[] }> = []
   const signals: Array<{ pid: number; signal: NodeJS.Signals }> = []
+  const probes: number[] = []
   const errors: string[] = []
   const log = { info: [] as string[], error: [] as string[] }
   const logDirs: string[] = []
   let logWriteFailure: ((file: string, error: unknown) => void) | null = null
   const ports = [...(init.ports ?? [PORT])]
   const statuses = [...(init.statuses ?? [200])]
-  const stamps = [...(init.stamps ?? [stamp(init.platform ?? 'linux'), stamp(init.platform ?? 'linux'), stamp(init.platform ?? 'linux'), stamp(init.platform ?? 'linux')])]
+  const current = (): FakeChild => children.at(-1) ?? new FakeChild()
   const deps: ServeServiceDeps = {
     platform: init.platform ?? 'linux',
-    systemRoot: init.systemRoot,
+    systemRoot: init.systemRoot ?? 'C:\\Windows',
     sessionDir: init.sessionDir ?? (() => 'C:/state/sessions/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'),
     allocatePort: init.allocatePort ?? (async () => ports.shift() ?? PORT),
     fetch: init.fetch ?? (async () => {
@@ -121,10 +140,15 @@ function harness(init: HarnessInit = {}) {
       if (response instanceof Error) throw response
       return { status: response }
     }),
-    now: () => clock.now,
-    sleep: init.sleep ?? clock.sleep,
+    setTimer: (ms, fire) => {
+      if (init.failTimer?.(ms)) throw new Error(`no timer for ${ms}ms`)
+      return clock.setTimer(ms, fire)
+    },
+    clearTimer: clock.clearTimer,
     spawn: (file, args, options) => {
       spawns.push({ file, args, options })
+      const child = new FakeChild()
+      children.push(child)
       return child
     },
     run: async (file, args) => {
@@ -132,19 +156,16 @@ function harness(init: HarnessInit = {}) {
       return init.run ? init.run(file, args) : { code: 0, stdout: '', stderr: '' }
     },
     signal: (pid, signal) => {
+      if (signal === 0) {
+        probes.push(pid)
+        init.onProbe?.(pid, current())
+        return
+      }
       signals.push({ pid, signal })
-      init.onSignal?.(pid, signal, child)
+      init.onSignal?.(pid, signal, current())
     },
-    measureProcess: init.useDefaultMeasure
-      ? undefined
-      : init.measureProcess
-        ? () => init.measureProcess!(child)
-        : async () => {
-            const next = stamps.shift()
-            if (!next) throw new Error('unexpected process stamp measurement')
-            return next
-          },
     createLog: (dir, options) => {
+      init.createLog?.(current())
       logDirs.push(dir)
       logWriteFailure = options.onWriteFailure
       return {
@@ -152,16 +173,23 @@ function harness(init: HarnessInit = {}) {
         error: (text) => log.error.push(text)
       }
     },
-    reportError: (_scope, message) => errors.push(message)
+    reportError: (_scope, message) => {
+      errors.push(message)
+      init.onReport?.(message)
+    }
   }
   const service = new ServeService(deps)
   return {
     service,
-    child,
+    get child(): FakeChild {
+      return current()
+    },
+    children,
     clock,
     spawns,
     runs,
     signals,
+    probes,
     errors,
     log,
     logDirs,
@@ -172,12 +200,6 @@ function harness(init: HarnessInit = {}) {
   }
 }
 
-function stamp(platform: NodeJS.Platform, identity = '889900'): ProcessStamp {
-  return platform === 'win32'
-    ? { platform: 'win32', pid: PID, creationUtc: identity }
-    : { platform, pid: PID, startToken: identity, pgid: PID }
-}
-
 function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
   let resolve = (_value: T): void => {}
   const promise = new Promise<T>((settle) => {
@@ -186,11 +208,25 @@ function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
   return { promise, resolve }
 }
 
+const ESCALATION: Array<{ pid: number; signal: NodeJS.Signals }> = [
+  { pid: -PID, signal: 'SIGINT' },
+  { pid: -PID, signal: 'SIGTERM' },
+  { pid: -PID, signal: 'SIGKILL' }
+]
+
+async function readyHarness(init: HarnessInit = {}): Promise<ReturnType<typeof harness>> {
+  const h = harness({ statuses: [200], ...init })
+  await h.service.start(action())
+  await settle()
+  expect(h.service.state().status).toBe('ready')
+  return h
+}
+
 test('measures a Windows process through the supplied PowerShell path', async () => {
   const calls: string[] = []
 
   await measureWindowsProcessStamp({
-    powershellPath: 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
+    powershellPath: POWERSHELL,
     run: async (file) => {
       calls.push(file)
       return { code: 0, stdout: '2026-10-09T14:00:00.0000000Z', stderr: '' }
@@ -198,33 +234,41 @@ test('measures a Windows process through the supplied PowerShell path', async ()
     readFile: () => null
   }, PID)
 
-  expect(calls).toEqual(['C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe'])
+  expect(calls).toEqual([POWERSHELL])
 })
 
-test('bounds the default system command execution', () => {
-  const source = readFileSync(join(import.meta.dir, '..', 'desktop', 'src', 'main', 'serve-service.ts'), 'utf8')
-
-  expect(source).toContain("timeout: SYSTEM_COMMAND_TIMEOUT_MS")
-  expect(source.replace('timeout: SYSTEM_COMMAND_TIMEOUT_MS', 'timeout: 0')).not.toContain("timeout: SYSTEM_COMMAND_TIMEOUT_MS")
-})
-
-test('measures the default Windows process through System32 PowerShell', async () => {
-  const h = harness({
-    platform: 'win32',
-    systemRoot: 'C:\\Windows',
-    useDefaultMeasure: true,
-    run: async () => ({
-      code: 0,
-      stdout: '2026-10-09T14:00:00.0000000Z',
-      stderr: ''
-    })
+test('bounds a system command and keeps the failure message when stderr is empty', async () => {
+  const timeouts: number[] = []
+  const missing = await runSystemCommand(TASKKILL, ['/T'], (_file, _args, options, callback) => {
+    timeouts.push(options.timeout)
+    callback(Object.assign(new Error(`spawn ${TASKKILL} ENOENT`), { code: 'ENOENT' }), '', '')
+  })
+  const denied = await runSystemCommand(TASKKILL, ['/T'], (_file, _args, options, callback) => {
+    timeouts.push(options.timeout)
+    callback(Object.assign(new Error('Command failed'), { code: 5 }), '', 'Access denied.')
   })
 
-  await h.service.start(action())
-  await settle()
+  expect(timeouts).toEqual([SYSTEM_COMMAND_TIMEOUT_MS, SYSTEM_COMMAND_TIMEOUT_MS])
+  expect(missing).toEqual({ code: 1, stdout: '', stderr: `spawn ${TASKKILL} ENOENT` })
+  expect(denied).toEqual({ code: 5, stdout: '', stderr: 'Access denied.' })
+})
 
-  expect(h.runs[0]?.file).toBe('C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe')
-  expect(h.service.state().status).toBe('ready')
+test('launches the Windows shell through the System32 PowerShell path without detaching it', async () => {
+  const h = harness({ platform: 'win32' })
+
+  await h.service.start(action())
+
+  expect(h.spawns[0]?.file).toBe(POWERSHELL)
+  expect(h.spawns[0]?.options.detached).toBe(false)
+})
+
+test('refuses to start on Windows when SystemRoot is not a canonical absolute path', async () => {
+  const h = harness({ platform: 'win32', systemRoot: 'C:\\Windows\\..\\clone' })
+
+  await h.service.start(action())
+
+  expect(h.spawns).toEqual([])
+  expect(h.service.state()).toEqual({ status: 'failed', error: 'cannot resolve Windows system executable: dot-dot' })
 })
 
 test('starts a detached shell command with substituted action values', async () => {
@@ -255,19 +299,6 @@ test('starts a detached shell command with substituted action values', async () 
   })
 })
 
-test('does not detach the Windows shell process', async () => {
-  const h = harness({
-    platform: 'win32',
-    systemRoot: 'C:\\Windows',
-    measureProcess: async () => stamp('win32')
-  })
-
-  await h.service.start(action())
-  await settle()
-
-  expect(h.spawns[0]?.options.detached).toBe(false)
-})
-
 test('accepts readiness status 399', async () => {
   const h = harness({ statuses: [399] })
 
@@ -288,17 +319,14 @@ test('aborts a health request when its readiness deadline expires', async () => 
       }, { once: true })
     })
   })
-  const failed = new Promise<void>((resolve) => {
-    h.service.on('changed', (state) => {
-      if (state.status === 'failed') resolve()
-    })
-  })
 
-  await h.service.start(action({ readyTimeoutSec: 0 }))
-  await completeWithin(failed, 'aborted health request')
+  await h.service.start(action())
+  h.clock.advance(1000)
+  await settle()
 
   expect(aborted).toBe(true)
-  expect(h.service.state()).toMatchObject({ status: 'failed', error: 'health check http://127.0.0.1:4317/health timed out after health request deadline elapsed' })
+  expect(h.runs).toEqual([{ file: TASKKILL, args: ['/T', '/F', '/PID', String(PID)] }])
+  expect(h.service.state()).toMatchObject({ status: 'failed', error: 'health check http://127.0.0.1:4317/health timed out after no response' })
 })
 
 test('cancels the health response body after reading its status', async () => {
@@ -323,15 +351,14 @@ test('does not restore ready after a health response resolves during stop', asyn
   await settle()
 
   const stopping = h.service.stop()
-  await settle()
   response.resolve({ status: 200 })
   await settle()
 
   expect(h.service.state().status).toBe('stopping')
   h.clock.advance(3000)
-  await settle()
   h.clock.advance(3000)
-  await stopping
+  await completeWithin(stopping, 'stop after a late health response')
+  expect(h.service.state()).toEqual({ status: 'idle' })
 })
 
 test('reports a rejected health response body cancellation', async () => {
@@ -348,18 +375,20 @@ test('reports a rejected health response body cancellation', async () => {
   expect(h.errors).toEqual(['could not cancel serve health response body'])
 })
 
-test('reports an unhandled readiness task failure', async () => {
-  const h = harness({
-    statuses: [500],
-    sleep: async () => {
-      throw new Error('test sleep failure')
+test('reports a throwing state listener and still settles the quit', async () => {
+  const h = await readyHarness({
+    onSignal: (_pid, signal) => {
+      if (signal === 'SIGINT') throw errno('ESRCH')
     }
   })
+  h.service.on('changed', () => {
+    throw new Error('listener bug')
+  })
 
-  await h.service.start(action())
-  await settle()
+  await completeWithin(h.service.quit(), 'quit with a throwing listener')
 
-  expect(h.errors).toEqual(['serve readiness task failed'])
+  expect(h.errors).toContain('Serve state listener failed')
+  expect(h.service.state()).toEqual({ status: 'idle' })
 })
 
 test('fails readiness after its timeout and stops the owned process', async () => {
@@ -372,111 +401,79 @@ test('fails readiness after its timeout and stops the owned process', async () =
   h.clock.advance(500)
   await settle()
   h.clock.advance(3000)
-  await settle()
   h.clock.advance(3000)
   await settle()
 
   expect(h.service.state()).toMatchObject({
     status: 'failed',
+    pid: PID,
     error: 'health check http://127.0.0.1:4317/health timed out after HTTP 500'
   })
-  expect(h.signals).toEqual([
-    { pid: -PID, signal: 'SIGINT' },
-    { pid: -PID, signal: 'SIGTERM' },
-    { pid: -PID, signal: 'SIGKILL' }
-  ])
+  expect(h.signals).toEqual(ESCALATION)
   expect(h.errors).toEqual(['health check http://127.0.0.1:4317/health timed out after HTTP 500'])
 })
 
-test('kills the verified POSIX process group when session log setup fails after spawn', async () => {
+test('stops the POSIX process group when the session log cannot open after spawn', async () => {
   const h = harness({
     sessionDir: () => {
       throw new Error('session state unavailable')
+    },
+    onSignal: (_pid, signal) => {
+      if (signal === 'SIGINT') throw errno('ESRCH')
     }
   })
 
   await h.service.start(action())
 
-  expect(h.signals).toEqual([{ pid: -PID, signal: 'SIGKILL' }])
+  expect(h.signals).toEqual([{ pid: -PID, signal: 'SIGINT' }])
   expect(h.child.killCalls).toBe(0)
-  expect(h.service.state()).toMatchObject({ status: 'failed', error: 'session state unavailable' })
+  expect(h.clock.pending()).toEqual([])
+  expect(h.service.state()).toMatchObject({ status: 'failed', error: 'could not open the serve log: session state unavailable' })
   await h.service.start(action())
   expect(h.spawns).toHaveLength(2)
 })
 
-test('uses taskkill to clean up a spawned Windows process after setup fails', async () => {
+test('uses taskkill to stop a spawned Windows process whose session log cannot open', async () => {
   const h = harness({
     platform: 'win32',
-    systemRoot: 'C:\\Windows',
-    measureProcess: async () => stamp('win32'),
     sessionDir: () => {
       throw new Error('session state unavailable')
     }
   })
 
   await h.service.start(action())
+  await settle()
 
-  expect(h.runs).toEqual([{ file: 'C:\\Windows\\System32\\taskkill.exe', args: ['/T', '/F', '/PID', String(PID)] }])
+  expect(h.runs).toEqual([{ file: TASKKILL, args: ['/T', '/F', '/PID', String(PID)] }])
   expect(h.child.killCalls).toBe(0)
+  expect(h.service.state()).toMatchObject({ status: 'failed', error: 'could not open the serve log: session state unavailable' })
 })
 
-test('subscribes to child exit and error before measuring its process stamp', async () => {
+test('subscribes to child exit and error before the spawn is reported', async () => {
+  const listeners: number[] = []
   const h = harness({
-    measureProcess: async (child) => {
-      expect(child.listenerCount('exit')).toBe(1)
-      expect(child.listenerCount('error')).toBe(1)
-      return stamp('linux')
+    createLog: (child) => listeners.push(child.listenerCount('exit'), child.listenerCount('error'))
+  })
+
+  await h.service.start(action())
+
+  expect(listeners).toEqual([1, 1])
+})
+
+test('reaps the POSIX group of a child that exits while readiness is pending', async () => {
+  const h = harness({
+    statuses: [500],
+    onSignal: (_pid, signal) => {
+      if (signal === 'SIGINT') throw errno('ESRCH')
     }
   })
-
-  await h.service.start(action())
-
-  expect(h.service.state().status).toBe('ready')
-})
-
-test('kills a spawned child when its first stamp has a different PID', async () => {
-  const h = harness({
-    measureProcess: async () => ({ platform: 'linux', pid: PID + 1, startToken: '889900', pgid: PID })
-  })
-
-  await h.service.start(action())
-
-  expect(h.child.killCalls).toBe(1)
-  expect(h.service.state()).toMatchObject({ status: 'failed', error: `cannot establish identity for serve pid ${PID}` })
-})
-
-test('kills a spawned child when its first stamp has another platform', async () => {
-  const h = harness({
-    platform: 'win32',
-    measureProcess: async () => stamp('linux')
-  })
-
-  await h.service.start(action())
-
-  expect(h.child.killCalls).toBe(1)
-  expect(h.service.state()).toMatchObject({ status: 'failed', error: `cannot establish identity for serve pid ${PID}` })
-})
-
-test('refuses a POSIX child that does not lead its detached process group', async () => {
-  const h = harness({
-    measureProcess: async () => ({ platform: 'linux', pid: PID, startToken: '889900', pgid: PID + 1 })
-  })
-
-  await h.service.start(action())
-
-  expect(h.child.killCalls).toBe(1)
-  expect(h.signals).toEqual([])
-  expect(h.service.state()).toMatchObject({ status: 'failed', error: `serve pid ${PID} does not lead its process group` })
-})
-
-test('reports an early child exit while readiness is pending', async () => {
-  const h = harness({ statuses: [500] })
 
   await h.service.start(action())
   await settle()
   h.child.exit(17)
   await settle()
 
+  expect(h.signals).toEqual([{ pid: -PID, signal: 'SIGINT' }])
   expect(h.service.state()).toMatchObject({
     status: 'failed',
     error: 'serve process exited with code 17 before readiness'
@@ -484,9 +481,11 @@ test('reports an early child exit while readiness is pending', async () => {
 })
 
 test('reports a signal when the ready process exits unexpectedly', async () => {
-  const h = harness({ statuses: [200] })
-  await h.service.start(action())
-  await settle()
+  const h = await readyHarness({
+    onSignal: (_pid, signal) => {
+      if (signal === 'SIGINT') throw errno('ESRCH')
+    }
+  })
 
   h.child.exit(null, 'SIGTERM')
   await settle()
@@ -505,21 +504,23 @@ test('reports an error when the session serve log cannot be written', async () =
   expect(h.errors).toEqual(['could not write serve log C:/state/sessions/run/serve.log'])
 })
 
-test('reports an unexpected child error after readiness', async () => {
-  const h = harness({ statuses: [200] })
-  const error = new Error('serve socket closed')
-  await h.service.start(action())
+test('stops the process group after an unexpected child error', async () => {
+  const h = await readyHarness({
+    onSignal: (_pid, signal) => {
+      if (signal === 'SIGINT') throw errno('ESRCH')
+    }
+  })
+
+  h.child.emit('error', new Error('serve socket closed'))
   await settle()
 
-  h.child.emit('error', error)
-  await settle()
-
-  expect(h.service.state()).toMatchObject({ status: 'failed', error: 'serve socket closed' })
-  expect(h.errors).toEqual(['serve process error'])
+  expect(h.signals).toEqual([{ pid: -PID, signal: 'SIGINT' }])
+  expect(h.service.state()).toMatchObject({ status: 'failed', error: 'serve process error: serve socket closed' })
+  expect(h.errors).toEqual(['serve process error: serve socket closed'])
 })
 
 test('creates a fresh session logger after an unexpected child exit', async () => {
-  const h = harness({ platform: 'win32', systemRoot: 'C:\\Windows', statuses: [200, 200] })
+  const h = harness({ platform: 'win32', statuses: [200, 200] })
   await h.service.start(action())
   await settle()
   h.child.exit(1)
@@ -550,52 +551,39 @@ test('stopping idle is a no-op', async () => {
   expect(h.service.state()).toEqual({ status: 'idle' })
 })
 
-test('stopping during startup waits and terminates the spawned process', async () => {
+test('stopping while the port is allocated never spawns the server', async () => {
   const port = deferred<number>()
-  const h = harness({ platform: 'win32', systemRoot: 'C:\\Windows', allocatePort: () => port.promise })
+  const h = harness({ platform: 'win32', allocatePort: () => port.promise })
 
   const started = h.service.start(action())
   const stopped = h.service.stop()
   port.resolve(PORT)
-  await started
-  await stopped
+  await completeWithin(started, 'start')
+  await completeWithin(stopped, 'stop')
+  await settle()
 
-  expect(h.runs).toEqual([{ file: 'C:\\Windows\\System32\\taskkill.exe', args: ['/T', '/F', '/PID', String(PID)] }])
+  expect(h.spawns).toEqual([])
+  expect(h.runs).toEqual([])
   expect(h.service.state()).toEqual({ status: 'idle' })
 })
 
-test('stops a verified POSIX group in escalation order', async () => {
-  const h = harness({ statuses: [200] })
-  await h.service.start(action())
-  await settle()
+test('stops a POSIX group in escalation order', async () => {
+  const h = await readyHarness()
 
   const stopping = h.service.stop()
-  await settle()
   h.clock.advance(3000)
-  await settle()
   h.clock.advance(3000)
-  await stopping
+  await completeWithin(stopping, 'escalation')
 
-  expect(h.signals).toEqual([
-    { pid: -PID, signal: 'SIGINT' },
-    { pid: -PID, signal: 'SIGTERM' },
-    { pid: -PID, signal: 'SIGKILL' }
-  ])
+  expect(h.signals).toEqual(ESCALATION)
   expect(h.service.state()).toEqual({ status: 'idle' })
 })
 
 test('creates a fresh logger after a clean stop and restart', async () => {
-  const h = harness({
-    statuses: [200, 200],
-    stamps: [stamp('linux'), stamp('linux'), stamp('linux'), stamp('linux'), stamp('linux')]
-  })
-  await h.service.start(action())
-  await settle()
+  const h = await readyHarness({ statuses: [200, 200] })
 
   const stopping = h.service.stop()
-  await settle()
   h.clock.advance(3000)
-  await settle()
   h.clock.advance(3000)
   await stopping
   await h.service.start(action())
@@ -605,14 +593,10 @@ test('creates a fresh logger after a clean stop and restart', async () => {
 })
 
 test('releases the session logger after a clean stop', async () => {
-  const h = harness({ statuses: [200] })
-  await h.service.start(action())
-  await settle()
+  const h = await readyHarness()
 
   const stopping = h.service.stop()
-  await settle()
   h.clock.advance(3000)
-  await settle()
   h.clock.advance(3000)
   await stopping
   h.child.stdout.emit('data', Buffer.from('late output'))
@@ -620,46 +604,44 @@ test('releases the session logger after a clean stop', async () => {
   expect(h.log.info).toEqual([])
 })
 
-test('shares one escalation between concurrent stop calls', async () => {
-  const h = harness({ statuses: [200] })
+test('does not write the output of a previous child into the log of the next run', async () => {
+  const h = await readyHarness({
+    statuses: [200, 200],
+    onSignal: (_pid, signal) => {
+      if (signal === 'SIGINT') throw errno('ESRCH')
+    }
+  })
+  await h.service.stop()
   await h.service.start(action())
   await settle()
 
+  h.children[0]!.stdout.emit('data', Buffer.from('previous run'))
+  h.children[1]!.stdout.emit('data', Buffer.from('current run'))
+
+  expect(h.log.info).toEqual(['current run'])
+})
+
+test('shares one escalation between concurrent stop calls', async () => {
+  const h = await readyHarness()
+
   const first = h.service.stop()
-  await settle()
   const second = h.service.stop()
-  await settle()
   h.clock.advance(3000)
-  await settle()
   h.clock.advance(3000)
   await completeWithin(Promise.all([first, second]), 'concurrent stop')
 
-  expect(h.signals).toEqual([
-    { pid: -PID, signal: 'SIGINT' },
-    { pid: -PID, signal: 'SIGTERM' },
-    { pid: -PID, signal: 'SIGKILL' }
-  ])
+  expect(h.signals).toEqual(ESCALATION)
   expect(h.service.state()).toEqual({ status: 'idle' })
 })
 
 test('finishes shutdown when SIGINT reports an absent process group', async () => {
-  let exited = false
-  const h = harness({
-    statuses: [200],
-    measureProcess: async () => {
-      if (exited) throw new Error('must not measure after group exit')
-      return stamp('linux')
-    },
+  const h = await readyHarness({
     onSignal: (_pid, signal, child) => {
       if (signal !== 'SIGINT') return
-      exited = true
       child.exit(null, 'SIGINT')
-      const error = Object.assign(new Error('process group is gone'), { code: 'ESRCH' })
-      throw error
+      throw errno('ESRCH')
     }
   })
-  await h.service.start(action())
-  await settle()
 
   await completeWithin(h.service.stop(), 'ESRCH shutdown')
 
@@ -668,110 +650,123 @@ test('finishes shutdown when SIGINT reports an absent process group', async () =
   expect(h.errors).toEqual([])
 })
 
-test('keeps escalating descendants without remeasuring after the leader exits', async () => {
-  let exited = false
-  const h = harness({
-    statuses: [200],
-    measureProcess: async () => {
-      if (exited) throw new Error('must not measure after leader exit')
-      return stamp('linux')
-    },
+test('keeps escalating the group after its leader exits on SIGINT', async () => {
+  const h = await readyHarness({
     onSignal: (_pid, signal, child) => {
-      if (signal !== 'SIGINT') return
-      exited = true
-      child.exit(null, 'SIGINT')
+      if (signal === 'SIGINT') child.exit(null, 'SIGINT')
     }
   })
-  await h.service.start(action())
-  await settle()
 
   const stopping = h.service.stop()
-  await settle()
   h.clock.advance(3000)
-  await settle()
   h.clock.advance(3000)
-  await stopping
+  await completeWithin(stopping, 'escalation after leader exit')
 
-  expect(h.signals).toEqual([
-    { pid: -PID, signal: 'SIGINT' },
-    { pid: -PID, signal: 'SIGTERM' },
-    { pid: -PID, signal: 'SIGKILL' }
-  ])
+  expect(h.signals).toEqual(ESCALATION)
   expect(h.service.state()).toEqual({ status: 'idle' })
 })
 
-test('refuses the final POSIX escalation when the stamp changes after SIGTERM', async () => {
-  const h = harness({
-    statuses: [200],
-    stamps: [stamp('linux'), stamp('linux'), stamp('linux'), stamp('linux', 'recycled-before-kill')]
+test('ends the stop on an empty group probe instead of waiting out the grace', async () => {
+  const h = await readyHarness({
+    onProbe: () => {
+      throw errno('ESRCH')
+    }
   })
-  await h.service.start(action())
-  await settle()
+
+  const stopping = h.service.stop()
+  h.child.exit(null, 'SIGINT')
+  await completeWithin(stopping, 'stop after the leader exit')
+
+  expect(h.signals).toEqual([{ pid: -PID, signal: 'SIGINT' }])
+  expect(h.probes).toEqual([-PID])
+  expect(h.clock.pending()).toEqual([])
+  expect(h.service.state()).toEqual({ status: 'idle' })
+})
+
+test('uses the System32 taskkill path for a Windows tree', async () => {
+  const h = await readyHarness({ platform: 'win32' })
+
+  await completeWithin(h.service.stop(), 'taskkill stop')
+
+  expect(h.runs).toEqual([{ file: TASKKILL, args: ['/T', '/F', '/PID', String(PID)] }])
+  expect(h.signals).toEqual([])
+  expect(h.service.state()).toEqual({ status: 'idle' })
+})
+
+test('kills the Windows leader by its handle when taskkill cannot run', async () => {
+  const h = await readyHarness({
+    platform: 'win32',
+    run: async () => {
+      throw new Error('taskkill unavailable')
+    }
+  })
 
   const stopping = h.service.stop()
   await settle()
   h.clock.advance(3000)
-  await settle()
+  await completeWithin(stopping, 'stop after a taskkill failure')
+
+  expect(h.child.killCalls).toBe(1)
+  expect(h.service.state()).toMatchObject({ status: 'failed', error: `taskkill failed for serve pid ${PID}: taskkill unavailable` })
+})
+
+test('quit kills the group at its deadline and settles', async () => {
+  const h = await readyHarness()
+
+  const quitting = h.service.quit({ deadlineMs: 5000 })
   h.clock.advance(3000)
-  await stopping
+  h.clock.advance(2000)
+  await completeWithin(quitting, 'quit deadline')
 
-  expect(h.signals).toEqual([
-    { pid: -PID, signal: 'SIGINT' },
-    { pid: -PID, signal: 'SIGTERM' }
-  ])
-  expect(h.service.state()).toMatchObject({ status: 'failed', error: 'serve process identity changed before shutdown' })
+  expect(h.signals).toEqual(ESCALATION)
+  expect(h.errors).toEqual(['serve process did not stop before the quit deadline'])
+  expect(h.clock.pending()).toEqual([])
+  expect(h.service.state()).toMatchObject({ status: 'failed', error: 'serve process did not stop before the quit deadline' })
 })
 
-test('uses the System32 taskkill path for a verified Windows tree', async () => {
-  const h = harness({ platform: 'win32', systemRoot: 'C:\\Windows', statuses: [200] })
-  await h.service.start(action())
-  await settle()
+test('reports an effect that throws outside its failure path and still settles the quit at its deadline', async () => {
+  const h = await readyHarness({ failTimer: (ms) => ms === 3000 })
 
-  await h.service.stop()
+  const quitting = h.service.quit({ deadlineMs: 5000 })
+  h.clock.advance(5000)
+  await completeWithin(quitting, 'quit after a grace timer failure')
 
-  expect(h.runs).toEqual([{ file: 'C:\\Windows\\System32\\taskkill.exe', args: ['/T', '/F', '/PID', String(PID)] }])
-  expect(h.signals).toEqual([])
+  expect(h.errors).toContain('Serve effect armTimer failed outside its failure path')
+  expect(h.signals).toEqual([{ pid: -PID, signal: 'SIGINT' }, { pid: -PID, signal: 'SIGKILL' }])
+  expect(h.service.state()).toMatchObject({ status: 'failed', error: 'serve process did not stop before the quit deadline' })
 })
 
-test('refuses Windows shutdown when SystemRoot is not a canonical absolute path', async () => {
-  const h = harness({ platform: 'win32', systemRoot: 'C:\\Windows\\..\\clone', statuses: [200] })
-  await h.service.start(action())
-  await settle()
-
-  await h.service.stop()
-
-  expect(h.runs).toEqual([])
-  expect(h.service.state()).toMatchObject({ status: 'failed', error: 'cannot resolve Windows system executable: dot-dot' })
-})
-
-test('refuses Windows taskkill when the process stamp changes', async () => {
-  const h = harness({
-    platform: 'win32',
-    systemRoot: 'C:\\Windows',
-    statuses: [200],
-    stamps: [stamp('win32'), stamp('win32', 'recycled-windows-process')]
+test('keeps dispatching after an error escapes a queued event', async () => {
+  let explosions = 2
+  const h = await readyHarness({
+    onSignal: (_pid, signal) => {
+      if (signal === 'SIGINT') throw errno('EIO')
+    },
+    onReport: () => {
+      if (explosions > 0) {
+        explosions--
+        throw new Error('error sink down')
+      }
+    }
   })
-  await h.service.start(action())
-  await settle()
 
-  await h.service.stop()
+  await expect(h.service.stop()).rejects.toThrow('error sink down')
+  const quitting = h.service.quit({ deadlineMs: 5000 })
+  h.clock.advance(5000)
+  await completeWithin(quitting, 'quit after an escaped error')
 
-  expect(h.runs).toEqual([])
-  expect(h.service.state()).toMatchObject({ status: 'failed', error: 'serve process identity changed before shutdown' })
+  expect(h.signals.at(-1)).toEqual({ pid: -PID, signal: 'SIGKILL' })
+  expect(h.service.state().status).toBe('failed')
 })
 
-test('refuses to signal a recycled PID with a different process stamp', async () => {
-  const h = harness({
-    statuses: [200],
-    stamps: [stamp('linux'), stamp('linux', 'different-process')]
-  })
-  await h.service.start(action())
-  await settle()
+test('refuses to start after quit', async () => {
+  const h = harness()
 
-  await completeWithin(h.service.stop(), 'recycled PID shutdown')
+  await h.service.quit()
+  const state = await h.service.start(action())
 
-  expect(h.signals).toEqual([])
-  expect(h.service.state()).toMatchObject({ status: 'failed', error: 'serve process identity changed before shutdown' })
+  expect(h.spawns).toEqual([])
+  expect(state).toEqual({ status: 'idle' })
 })
 
 test('writes child standard streams to the session serve log', async () => {

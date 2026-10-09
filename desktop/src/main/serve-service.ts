@@ -1,20 +1,23 @@
 import { execFile, spawn } from 'node:child_process'
-import { readFileSync } from 'node:fs'
 import { platform as hostPlatform } from 'node:os'
 import { EventEmitter } from 'node:events'
 import { win32 } from 'node:path'
 import { createRollingLogger, reportError } from './log'
 import { type ServeAction } from './serve-config'
+import {
+  SERVE_QUIT_DEADLINE_MS,
+  SYSTEM_COMMAND_TIMEOUT_MS,
+  initialServeLifecycle,
+  reduce,
+  selectServePublicState,
+  type ServeLaunch,
+  type ServeLifecycleEffect,
+  type ServeLifecycleEvent,
+  type ServeLifecycleState,
+  type ServePosixSignal
+} from './serve-lifecycle'
 import { buildShellInvocation } from './shell-command'
 import { system32Dir } from './windows-system-root'
-import {
-  measurePosixProcessStamp,
-  measureWindowsProcessStamp,
-  sameProcessStamp,
-  type ProcessStamp
-} from './process-stamp'
-
-export type { ProcessStamp } from './process-stamp'
 
 export type ServeStatus = 'idle' | 'starting' | 'ready' | 'failed' | 'stopping'
 
@@ -61,37 +64,36 @@ export interface ServeFetchResponse {
   body?: { cancel(): Promise<unknown> | unknown } | null
 }
 
+export interface ServeCommandResult {
+  code: number
+  stdout: string
+  stderr: string
+}
+
 export interface ServeServiceDeps {
   sessionDir: () => string
   platform?: NodeJS.Platform
   systemRoot?: string
   allocatePort?: () => Promise<number>
   fetch?: (url: string, init?: { signal?: AbortSignal }) => Promise<ServeFetchResponse>
-  now?: () => number
-  sleep?: (ms: number) => Promise<void>
+  setTimer?: (ms: number, fire: () => void) => unknown
+  clearTimer?: (handle: unknown) => void
   spawn?: (file: string, args: string[], options: ServeSpawnOptions) => ServeChild
-  run?: (file: string, args: string[]) => Promise<{ code: number; stdout: string; stderr: string }>
-  signal?: (pid: number, signal: NodeJS.Signals) => void
-  measureProcess?: (pid: number, platform: NodeJS.Platform) => Promise<ProcessStamp>
+  run?: (file: string, args: string[]) => Promise<ServeCommandResult>
+  /** Signal 0 probes the group without signalling it. */
+  signal?: (pid: number, signal: NodeJS.Signals | 0) => void
   createLog?: (dir: string, options: ServeLogOptions) => ServeLog
   reportError?: typeof reportError
 }
 
-interface RunningServe {
-  child: ServeChild
-  pid: number
-  stamp: ProcessStamp
-  url: string
-  health: string
-  port: number
-  exited: boolean
-  stopping?: Promise<void>
-}
+type ExecFileLike = (
+  file: string,
+  args: string[],
+  options: { encoding: 'utf-8'; windowsHide: true; timeout: number },
+  callback: (error: Error | null, stdout: string, stderr: string) => void
+) => unknown
 
 const HOST = '127.0.0.1'
-const READINESS_INTERVAL_MS = 500
-const STOP_GRACE_MS = 3000
-const SYSTEM_COMMAND_TIMEOUT_MS = 3000
 export const SERVE_LOG_FILE = 'serve.log'
 
 function interpolate(value: string, port: number): string {
@@ -111,15 +113,18 @@ async function defaultAllocatePort(): Promise<number> {
   return address.port
 }
 
-function defaultRun(file: string, args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
+/** Never rejects: a spawn failure or a timeout kill resolves with a non-zero code and the error message as stderr. */
+export function runSystemCommand(
+  file: string,
+  args: string[],
+  execFileImpl: ExecFileLike = execFile as unknown as ExecFileLike
+): Promise<ServeCommandResult> {
   return new Promise((resolve) => {
-    execFile(file, args, { encoding: 'utf-8', windowsHide: true, timeout: SYSTEM_COMMAND_TIMEOUT_MS }, (error, stdout, stderr) => {
-      const code = error && typeof (error as NodeJS.ErrnoException & { code?: unknown }).code === 'number'
-        ? (error as NodeJS.ErrnoException & { code: number }).code
-        : error
-          ? 1
-          : 0
-      resolve({ code, stdout: String(stdout), stderr: String(stderr) })
+    execFileImpl(file, args, { encoding: 'utf-8', windowsHide: true, timeout: SYSTEM_COMMAND_TIMEOUT_MS }, (error, stdout, stderr) => {
+      const exitCode = (error as { code?: unknown } | null)?.code
+      const code = !error ? 0 : typeof exitCode === 'number' ? exitCode : 1
+      const errorText = String(stderr ?? '')
+      resolve({ code, stdout: String(stdout ?? ''), stderr: error && errorText.trim() === '' ? error.message : errorText })
     })
   })
 }
@@ -134,34 +139,13 @@ function windowsSystemExecutable(systemRoot: string | undefined, name: string): 
   return win32.join(root.dir, name)
 }
 
-function isNoSuchProcess(error: unknown): boolean {
-  return typeof error === 'object' && error !== null && (error as NodeJS.ErrnoException).code === 'ESRCH'
+function errorCode(error: unknown): string | undefined {
+  const code = (error as NodeJS.ErrnoException | null)?.code
+  return typeof code === 'string' ? code : undefined
 }
 
-function defaultReadFile(path: string): string | null {
-  try {
-    return readFileSync(path, 'utf-8')
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null
-    throw error
-  }
-}
-
-async function defaultMeasureProcess(
-  pid: number,
-  platform: NodeJS.Platform,
-  systemRoot: string | undefined,
-  run: (file: string, args: string[]) => Promise<{ code: number; stdout: string; stderr: string }>
-): Promise<ProcessStamp> {
-  const deps = {
-    run,
-    readFile: defaultReadFile,
-    powershellPath: platform === 'win32'
-      ? windowsSystemExecutable(systemRoot, 'WindowsPowerShell\\v1.0\\powershell.exe')
-      : undefined
-  }
-  if (platform === 'win32') return measureWindowsProcessStamp(deps, pid)
-  return measurePosixProcessStamp(deps, platform, pid)
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
 }
 
 function defaultLog(dir: string, options: ServeLogOptions): ServeLog {
@@ -173,95 +157,196 @@ function defaultLog(dir: string, options: ServeLogOptions): ServeLog {
   })
 }
 
-function defaultSleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms))
+interface Waiter {
+  readonly until: (state: ServeLifecycleState) => boolean
+  readonly resolve: () => void
 }
 
 export class ServeService extends EventEmitter {
   private readonly platform: NodeJS.Platform
+  private readonly systemRoot: string | undefined
   private readonly allocatePort: () => Promise<number>
   private readonly fetch: (url: string, init?: { signal?: AbortSignal }) => Promise<ServeFetchResponse>
-  private readonly now: () => number
-  private readonly sleep: (ms: number) => Promise<void>
+  private readonly setTimer: (ms: number, fire: () => void) => unknown
+  private readonly clearTimer: (handle: unknown) => void
   private readonly spawn: (file: string, args: string[], options: ServeSpawnOptions) => ServeChild
-  private readonly run: (file: string, args: string[]) => Promise<{ code: number; stdout: string; stderr: string }>
-  private readonly signal: (pid: number, signal: NodeJS.Signals) => void
-  private readonly measureProcess: (pid: number, platform: NodeJS.Platform) => Promise<ProcessStamp>
+  private readonly run: (file: string, args: string[]) => Promise<ServeCommandResult>
+  private readonly signal: (pid: number, signal: NodeJS.Signals | 0) => void
   private readonly createLog: (dir: string, options: ServeLogOptions) => ServeLog
   private readonly reportError: typeof reportError
-  private current: RunningServe | null = null
-  private currentLog: ServeLog | null = null
-  private startPromise: Promise<ServeState> | null = null
-  private currentState: ServeState = { status: 'idle' }
+  private machine: ServeLifecycleState
+  private published: ServeState
+  private readonly queue: ServeLifecycleEvent[] = []
+  private dispatching = false
+  private readonly timers = new Map<number, unknown>()
+  private readonly waiters: Waiter[] = []
+  private taskkillFile: { op: number; file: string } | null = null
+  private child: { op: number; child: ServeChild } | null = null
+  private log: { op: number; log: ServeLog } | null = null
+  private probe: { op: number; controller: AbortController } | null = null
 
   constructor(private readonly deps: ServeServiceDeps) {
     super()
     this.platform = deps.platform ?? hostPlatform()
+    this.systemRoot = deps.systemRoot ?? process.env.SystemRoot
     this.allocatePort = deps.allocatePort ?? defaultAllocatePort
     this.fetch = deps.fetch ?? ((url, init) => fetch(url, init))
-    this.now = deps.now ?? Date.now
-    this.sleep = deps.sleep ?? defaultSleep
+    this.setTimer = deps.setTimer ?? ((ms, fire) => setTimeout(fire, ms))
+    this.clearTimer = deps.clearTimer ?? ((handle) => clearTimeout(handle as ReturnType<typeof setTimeout>))
     this.spawn = deps.spawn ?? defaultSpawn
-    this.run = deps.run ?? defaultRun
-    this.signal = deps.signal ?? process.kill
-    this.measureProcess = deps.measureProcess ?? ((pid, platform) =>
-      defaultMeasureProcess(pid, platform, deps.systemRoot ?? process.env.SystemRoot, this.run)
-    )
+    this.run = deps.run ?? ((file, args) => runSystemCommand(file, args))
+    this.signal = deps.signal ?? ((pid, signal) => process.kill(pid, signal))
     this.createLog = deps.createLog ?? defaultLog
     this.reportError = deps.reportError ?? reportError
+    this.machine = initialServeLifecycle(this.platform)
+    this.published = { ...selectServePublicState(this.machine) }
   }
 
   state(): ServeState {
-    return { ...this.currentState }
+    return { ...this.published }
   }
 
   async start(action: ServeAction): Promise<ServeState> {
-    if (this.current || this.startPromise) return this.state()
-    const pending = this.startInner(action)
-    this.startPromise = pending
-    try {
-      return await pending
-    } finally {
-      if (this.startPromise === pending) this.startPromise = null
-    }
+    this.dispatch({ kind: 'Start', action })
+    await this.waitFor((state) => state.phase.kind !== 'preparing' && state.phase.kind !== 'spawning')
+    return this.state()
   }
 
   async stop(): Promise<void> {
-    if (this.startPromise) await this.startPromise
-    const running = this.current
-    if (!running) return
-    this.setState({ status: 'stopping', url: running.url, port: running.port, pid: running.pid })
-    const stopping = running.stopping ??= this.stopRunning(running)
+    this.dispatch({ kind: 'Stop' })
+    await this.waitFor((state) => state.phase.kind === 'idle')
+  }
+
+  /** Settles at the next idle; past the deadline a run still stopping is killed (SIGKILL or killLeader) and forced to idle. */
+  async quit(options: { deadlineMs?: number } = {}): Promise<void> {
+    this.dispatch({ kind: 'Quit' })
+    const deadline = this.setTimer(options.deadlineMs ?? SERVE_QUIT_DEADLINE_MS, () => this.dispatch({ kind: 'QuitDeadline' }))
     try {
-      await stopping
-      if (this.current === running) this.current = null
-      if (this.current === null) {
-        this.currentLog = null
-        this.setState({ status: 'idle' })
-      }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      this.reportError('serve', message, error)
-      if (this.current === running) this.current = null
-      if (this.current === null) {
-        this.currentLog = null
-        this.setState({ status: 'failed', url: running.url, port: running.port, pid: running.pid, error: message })
+      await this.waitFor((state) => state.phase.kind === 'idle')
+    } finally {
+      this.clearTimer(deadline)
+    }
+  }
+
+  private waitFor(until: (state: ServeLifecycleState) => boolean): Promise<void> {
+    if (until(this.machine)) return Promise.resolve()
+    return new Promise((resolve) => this.waiters.push({ until, resolve }))
+  }
+
+  private dispatch(event: ServeLifecycleEvent): void {
+    if (this.dispatching) {
+      this.queue.push(event)
+      return
+    }
+    this.dispatching = true
+    try {
+      this.process(event)
+    } finally {
+      try {
+        for (let next = this.queue.shift(); next !== undefined; next = this.queue.shift()) this.process(next)
+      } finally {
+        this.dispatching = false
       }
     }
   }
 
-  private async startInner(action: ServeAction): Promise<ServeState> {
-    let child: ServeChild | null = null
-    let groupVerified = false
-    const startup = {
-      exit: null as { code: number | null; signal: NodeJS.Signals | null } | null,
-      error: null as Error | null
+  private process(event: ServeLifecycleEvent): void {
+    let effects: readonly ServeLifecycleEffect[]
+    try {
+      const reduction = reduce(this.machine, event)
+      this.machine = reduction.state
+      effects = reduction.effects
+    } catch (error) {
+      this.reportError('serve', `Serve lifecycle event ${event.kind} failed`, error)
+      return
     }
-    this.setState({ status: 'starting' })
+    for (const effect of effects) {
+      try {
+        this.perform(effect)
+      } catch (error) {
+        this.reportError('serve', `Serve effect ${effect.kind} failed outside its failure path`, error)
+      }
+    }
+    this.publish()
+  }
+
+  private publish(): void {
+    const next = selectServePublicState(this.machine)
+    if (JSON.stringify(next) !== JSON.stringify(this.published)) {
+      this.published = { ...next }
+      try {
+        this.emit('changed', this.state())
+      } catch (error) {
+        this.reportError('serve', 'Serve state listener failed', error)
+      }
+    }
+    for (let index = this.waiters.length - 1; index >= 0; index--) {
+      const waiter = this.waiters[index]!
+      if (!waiter.until(this.machine)) continue
+      this.waiters.splice(index, 1)
+      waiter.resolve()
+    }
+  }
+
+  private perform(effect: ServeLifecycleEffect): void {
+    switch (effect.kind) {
+      case 'prepare':
+        void this.prepare(effect.op, effect.action)
+        return
+      case 'spawn':
+        this.spawnChild(effect)
+        return
+      case 'openLog':
+        this.openLog(effect.op)
+        return
+      case 'closeLog':
+        if (this.log?.op === effect.op) this.log = null
+        return
+      case 'probe':
+        this.startProbe(effect.op, effect.url)
+        return
+      case 'abortProbe':
+        if (this.probe?.op === effect.op) this.probe.controller.abort()
+        return
+      case 'signalGroup':
+        this.signalGroup(effect.op, effect.pid, effect.signal)
+        return
+      case 'probeGroup':
+        this.probeGroup(effect.op, effect.pid, effect.probeId)
+        return
+      case 'taskkill':
+        void this.taskkill(effect.op, effect.pid)
+        return
+      case 'killLeader':
+        if (this.child?.op === effect.op) this.child.child.kill()
+        return
+      case 'armTimer': {
+        const timerId = effect.timerId
+        this.timers.set(timerId, this.setTimer(effect.delayMs, () => {
+          this.timers.delete(timerId)
+          this.dispatch({ kind: 'TimerFired', timerId })
+        }))
+        return
+      }
+      case 'cancelTimer': {
+        const handle = this.timers.get(effect.timerId)
+        if (handle === undefined) return
+        this.timers.delete(effect.timerId)
+        this.clearTimer(handle)
+        return
+      }
+      case 'report':
+        this.reportError('serve', effect.message)
+        return
+      default:
+        effect satisfies never
+    }
+  }
+
+  private async prepare(op: number, action: ServeAction): Promise<void> {
+    let launch: ServeLaunch
     try {
       const port = action.port === 'auto' ? await this.allocatePort() : action.port
-      const url = interpolate(action.url, port)
-      const health = interpolate(action.health, port)
       const env: NodeJS.ProcessEnv = { ...process.env }
       for (const name of action.inheritEnv) {
         const value = process.env[name]
@@ -270,182 +355,119 @@ export class ServeService extends EventEmitter {
       for (const [name, value] of Object.entries(action.env)) env[name] = interpolate(value, port)
       env.HOST = HOST
       env.PORT = String(port)
-      const invocation = buildShellInvocation({ command: interpolate(action.command, port), shell: '', interactive: false }, this.platform)
-      child = this.spawn(invocation.file, invocation.args, {
+      const shell = this.platform === 'win32' ? windowsSystemExecutable(this.systemRoot, 'WindowsPowerShell\\v1.0\\powershell.exe') : ''
+      if (this.platform === 'win32') this.taskkillFile = { op, file: windowsSystemExecutable(this.systemRoot, 'taskkill.exe') }
+      const invocation = buildShellInvocation({ command: interpolate(action.command, port), shell, interactive: false }, this.platform)
+      launch = {
+        file: invocation.file,
+        args: invocation.args,
         cwd: action.cwd,
         env,
-        detached: this.platform !== 'win32',
+        url: interpolate(action.url, port),
+        health: interpolate(action.health, port),
+        port,
+        readyTimeoutMs: action.readyTimeoutSec * 1000
+      }
+    } catch (error) {
+      this.dispatch({ kind: 'PrepareFailed', op, message: errorMessage(error) })
+      return
+    }
+    this.dispatch({ kind: 'Prepared', op, launch })
+  }
+
+  private spawnChild(effect: Extract<ServeLifecycleEffect, { kind: 'spawn' }>): void {
+    const op = effect.op
+    let child: ServeChild
+    try {
+      child = this.spawn(effect.file, [...effect.args], {
+        cwd: effect.cwd,
+        env: { ...effect.env },
+        detached: effect.detached,
         stdio: ['ignore', 'pipe', 'pipe'],
         windowsHide: true
       })
-      child.once('exit', (code, signal) => {
-        startup.exit = { code, signal }
-      })
-      child.once('error', (error) => {
-        startup.error = error
-      })
-      if (child.pid === undefined) throw new Error('serve process did not expose a pid')
-      const stamp = await this.measureProcess(child.pid, this.platform)
-      if (startup.error) throw startup.error
-      const exited = startup.exit
-      if (exited) {
-        const exit = exited.signal ? `signal ${exited.signal}` : `code ${exited.code ?? 'unknown'}`
-        throw new Error(`serve process exited with ${exit} before readiness`)
-      }
-      if (stamp.pid !== child.pid || stamp.platform !== this.platform) {
-        throw new Error(`cannot establish identity for serve pid ${child.pid}`)
-      }
-      if (stamp.platform !== 'win32' && stamp.pgid !== child.pid) {
-        throw new Error(`serve pid ${child.pid} does not lead its process group`)
-      }
-      groupVerified = stamp.platform === 'win32' || stamp.pgid === child.pid
-      const running: RunningServe = { child, pid: child.pid, stamp, url, health, port, exited: false }
-      this.current = running
-      this.attachChild(running)
-      this.currentLog = this.createLog(this.deps.sessionDir(), {
-        onWriteFailure: (file, error) => this.reportError('serve', `could not write serve log ${file}`, error)
-      })
-      child.stdout?.on('data', (chunk) => this.currentLog?.info(String(chunk)))
-      child.stderr?.on('data', (chunk) => this.currentLog?.error(String(chunk)))
-      void this.awaitReady(running, action.readyTimeoutSec).catch((error) =>
-        this.reportError('serve', 'serve readiness task failed', error)
-      )
-      return this.state()
     } catch (error) {
-      if (child) await this.terminateStartupChild(child, startup.exit !== null, groupVerified)
-      if (this.current?.child === child) this.current = null
-      this.currentLog = null
-      const message = error instanceof Error ? error.message : String(error)
-      this.reportError('serve', 'serve process could not start', error)
-      this.setState({ status: 'failed', error: message })
-      return this.state()
-    }
-  }
-
-  private async terminateStartupChild(child: ServeChild, exited: boolean, groupVerified: boolean): Promise<void> {
-    if (exited) return
-    try {
-      if (child.pid === undefined || !groupVerified) {
-        child.kill()
-        return
-      }
-      if (this.platform === 'win32') {
-        const taskkill = windowsSystemExecutable(this.deps.systemRoot ?? process.env.SystemRoot, 'taskkill.exe')
-        const result = await this.run(taskkill, ['/T', '/F', '/PID', String(child.pid)])
-        if (result.code !== 0) throw new Error(`taskkill failed for serve pid ${child.pid}: ${result.stderr.trim()}`)
-        return
-      }
-      this.signal(-child.pid, 'SIGKILL')
-    } catch (error) {
-      if (!isNoSuchProcess(error)) {
-        this.reportError('serve', 'could not clean up failed serve process', error)
-      }
-    }
-  }
-
-  private attachChild(running: RunningServe): void {
-    running.child.once('exit', (code, signal) => {
-      running.exited = true
-      if (this.current !== running) return
-      this.current = null
-      this.currentLog = null
-      if (this.currentState.status === 'stopping') return
-      const exit = signal ? `signal ${signal}` : `code ${code ?? 'unknown'}`
-      const message = `serve process exited with ${exit}${this.currentState.status === 'ready' ? '' : ' before readiness'}`
-      this.reportError('serve', message)
-      this.setState({ status: 'failed', url: running.url, port: running.port, pid: running.pid, error: message })
-    })
-    running.child.once('error', (error) => {
-      if (this.current !== running) return
-      this.current = null
-      this.currentLog = null
-      this.reportError('serve', 'serve process error', error)
-      this.setState({ status: 'failed', url: running.url, port: running.port, pid: running.pid, error: error.message })
-    })
-  }
-
-  private async awaitReady(running: RunningServe, readyTimeoutSec: number): Promise<void> {
-    const deadline = this.now() + readyTimeoutSec * 1000
-    let lastStatus = 'no response'
-    while (this.current === running && this.currentState.status === 'starting') {
-      try {
-        const remaining = Math.max(0, deadline - this.now())
-        const response = await this.fetch(running.health, { signal: AbortSignal.timeout(remaining) })
-        if (response.body) {
-          void Promise.resolve()
-            .then(() => response.body!.cancel())
-            .catch((error) => this.reportError('serve', 'could not cancel serve health response body', error))
-        }
-        if (this.current !== running || this.currentState.status !== 'starting') return
-        if (response.status >= 200 && response.status <= 399) {
-          this.setState({ status: 'ready', url: running.url, port: running.port, pid: running.pid })
-          return
-        }
-        lastStatus = `HTTP ${response.status}`
-      } catch (error) {
-        lastStatus = error instanceof Error ? error.message : String(error)
-      }
-      if (this.now() >= deadline) {
-        await this.fail(running, `health check ${running.health} timed out after ${lastStatus}`)
-        return
-      }
-      await this.sleep(READINESS_INTERVAL_MS)
-    }
-  }
-
-  private async fail(running: RunningServe, message: string): Promise<void> {
-    if (this.current !== running) return
-    this.reportError('serve', message)
-    this.setState({ status: 'stopping', url: running.url, port: running.port, pid: running.pid })
-    try {
-      await this.stopRunning(running)
-    } catch (error) {
-      this.reportError('serve', 'serve process could not stop after readiness failure', error)
-    }
-    if (this.current === running) {
-      this.current = null
-      this.currentLog = null
-      this.setState({ status: 'failed', url: running.url, port: running.port, pid: running.pid, error: message })
-    }
-  }
-
-  private async stopRunning(running: RunningServe): Promise<void> {
-    if (this.platform === 'win32') {
-      await this.assertCurrentIdentity(running)
-      const taskkill = windowsSystemExecutable(this.deps.systemRoot ?? process.env.SystemRoot, 'taskkill.exe')
-      const result = await this.run(taskkill, ['/T', '/F', '/PID', String(running.pid)])
-      if (result.code !== 0) throw new Error(`taskkill failed for serve pid ${running.pid}: ${result.stderr.trim()}`)
+      this.dispatch({ kind: 'SpawnFailed', op, message: errorMessage(error) })
       return
     }
-    if (!running.exited) await this.assertCurrentIdentity(running)
-    if (!this.signalGroup(running.pid, 'SIGINT')) return
-    await this.sleep(STOP_GRACE_MS)
-    if (!running.exited) await this.assertCurrentIdentity(running)
-    if (!this.signalGroup(running.pid, 'SIGTERM')) return
-    await this.sleep(STOP_GRACE_MS)
-    if (!running.exited) await this.assertCurrentIdentity(running)
-    this.signalGroup(running.pid, 'SIGKILL')
+    child.once('exit', (code, signal) => this.dispatch({ kind: 'ChildExited', op, code, signal }))
+    child.once('error', (error) => this.dispatch({ kind: 'ChildError', op, message: error.message }))
+    child.stdout?.on('data', (chunk) => {
+      if (this.log?.op === op) this.log.log.info(String(chunk))
+    })
+    child.stderr?.on('data', (chunk) => {
+      if (this.log?.op === op) this.log.log.error(String(chunk))
+    })
+    if (child.pid === undefined) {
+      this.dispatch({ kind: 'SpawnFailed', op, message: 'serve process did not expose a pid' })
+      return
+    }
+    this.child = { op, child }
+    this.dispatch({ kind: 'Spawned', op, pid: child.pid })
   }
 
-  private signalGroup(pid: number, signal: NodeJS.Signals): boolean {
+  private openLog(op: number): void {
+    try {
+      const log = this.createLog(this.deps.sessionDir(), {
+        onWriteFailure: (file, error) => this.reportError('serve', `could not write serve log ${file}`, error)
+      })
+      this.log = { op, log }
+    } catch (error) {
+      this.dispatch({ kind: 'LogFailed', op, message: errorMessage(error) })
+    }
+  }
+
+  private startProbe(op: number, url: string): void {
+    const controller = new AbortController()
+    this.probe = { op, controller }
+    const signal = controller.signal
+    void Promise.resolve()
+      .then(() => this.fetch(url, { signal }))
+      .then(
+        (response) => {
+          if (response.body) {
+            void Promise.resolve()
+              .then(() => response.body!.cancel())
+              .catch((error) => this.reportError('serve', 'could not cancel serve health response body', error))
+          }
+          this.dispatch({ kind: 'ProbeAnswered', op, status: response.status })
+        },
+        (error) => this.dispatch({ kind: 'ProbeFailed', op, message: errorMessage(error) })
+      )
+  }
+
+  private signalGroup(op: number, pid: number, signal: ServePosixSignal): void {
     try {
       this.signal(-pid, signal)
-      return true
     } catch (error) {
-      if (isNoSuchProcess(error)) return false
-      throw error
+      const code = errorCode(error)
+      if (code === 'ESRCH') this.dispatch({ kind: 'SignalResult', op, signal, outcome: 'absent' })
+      else this.dispatch({ kind: 'SignalResult', op, signal, outcome: 'failed', code, message: errorMessage(error) })
+      return
     }
+    this.dispatch({ kind: 'SignalResult', op, signal, outcome: 'sent' })
   }
 
-  private async assertCurrentIdentity(running: RunningServe): Promise<void> {
-    const measured = await this.measureProcess(running.pid, this.platform)
-    if (!sameProcessStamp(running.stamp, measured)) {
-      throw new Error('serve process identity changed before shutdown')
+  private probeGroup(op: number, pid: number, probeId: number): void {
+    try {
+      this.signal(-pid, 0)
+    } catch (error) {
+      const code = errorCode(error)
+      if (code === 'ESRCH') this.dispatch({ kind: 'GroupProbed', op, probeId, outcome: 'absent' })
+      else this.dispatch({ kind: 'GroupProbed', op, probeId, outcome: 'failed', code, message: errorMessage(error) })
+      return
     }
+    this.dispatch({ kind: 'GroupProbed', op, probeId, outcome: 'present' })
   }
 
-  private setState(state: ServeState): void {
-    this.currentState = state
-    this.emit('changed', this.state())
+  private async taskkill(op: number, pid: number): Promise<void> {
+    let result: ServeCommandResult
+    try {
+      if (this.taskkillFile?.op !== op) throw new Error(`no taskkill path resolved for serve run ${op}`)
+      result = await this.run(this.taskkillFile.file, ['/T', '/F', '/PID', String(pid)])
+    } catch (error) {
+      result = { code: 1, stdout: '', stderr: errorMessage(error) }
+    }
+    this.dispatch({ kind: 'TaskkillDone', op, code: result.code, stderr: result.stderr })
   }
 }
