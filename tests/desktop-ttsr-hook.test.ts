@@ -136,6 +136,23 @@ test("decide(): a rule whose path cannot be resolved (ELOOP) is traced and skipp
   expect(readFileSync(join(dir, "hook.log"), "utf-8")).toContain("rule not evaluated: kory/scoped");
 });
 
+test("decide(): a deny regex cut at the JavaScriptCore match limit denies, and the overrun is traced", () => {
+  const dir = makeTmpDir("ttsr-budget-");
+  const eff = join(dir, "eff.json");
+  const rule = { id: "deny-danger", event: "PreToolUse", tools: ["Bash"], field: "command", pattern: "x(?:ab|a|b)*$|DANGER",
+    mode: "deny", message: "DANGER is denied", source: "user", qualifiedId: "user/deny-danger" };
+  writeFileSync(eff, JSON.stringify({ version: 1, rules: [rule] }));
+  process.env.CLAUDE_PEERS_TTSR_FILE = eff;
+  process.env.CLAUDE_PEERS_TTSR_LOG = join(dir, "hook.log");
+  const payload = { hook_event_name: "PreToolUse", tool_name: "Bash", cwd: dir, tool_input: { command: `echo x${"ab".repeat(40)}! DANGER` } };
+  const out = decide(payload) as { hookSpecificOutput: { permissionDecision?: string; permissionDecisionReason?: string } };
+  expect(out?.hookSpecificOutput.permissionDecision).toBe("deny");
+  expect(out.hookSpecificOutput.permissionDecisionReason).toContain("denied by default");
+  expect(readFileSync(join(dir, "hook.log"), "utf-8")).toMatch(
+    /regex over budget \(deny, denied by default\): user\/deny-danger took \d+ ms on command \(94 chars\), budget 50 ms/
+  );
+});
+
 test("decide(): paths are relative to the git toplevel even when the session runs in a subdirectory", () => {
   const repo = realpathSync.native(makeTmpDir("ttsr-subdir-"));
   expect(spawnSync("git", ["init", "-q"], { cwd: repo }).status).toBe(0);

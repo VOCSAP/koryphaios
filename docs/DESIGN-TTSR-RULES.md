@@ -185,6 +185,12 @@ Comportement :
    pas recopier le `.catch(() => {})` de `roadmap-guard-hook.ts`. Sink à
    choisir avec la skill `error-reporting` (fichier journal dont le chemin
    passe par l'env, ou back-channel).
+7. Chaque appel de regex a un budget (`TTSR_REGEX_BUDGET_MS`, 50 ms) : sous
+   JavaScriptCore, un motif catastrophique est coupé à sa limite d'états et
+   rend « pas de correspondance » sans lever. Une non-correspondance hors
+   budget compte comme un `deny` pour une règle `deny` (message suffixé) et
+   n'applique pas une règle `warn` ; les deux sont tracées (`overBudget`).
+   Une regex qui lève suit la même règle.
 
 Précédence documentée par Claude Code entre hooks : `deny` > `defer` > `ask` >
 `allow`. Un `deny` TTSR l'emporte donc sur les hooks de l'opérateur (AiDex

@@ -21,6 +21,7 @@ import {
   FIELD_CAP,
   hookEvaluationOrder,
   parseEffectiveFile,
+  TTSR_REGEX_BUDGET_MS,
   type TtsrEvent,
 } from "../src/shared/ttsr-rules.ts";
 
@@ -170,6 +171,14 @@ export function decide(payload: HookPayload): Record<string, unknown> | null {
     readExisting,
   });
   for (const err of result.errors) trace(`rule not evaluated: ${err}`);
+  for (const o of result.overBudget) {
+    const action = o.mode === "deny" ? "denied by default" : "not applied";
+    trace(
+      o.error !== undefined
+        ? `regex threw (${o.mode}, ${action}): ${o.qualifiedId} on ${o.field} (${o.chars} chars): ${o.error}`
+        : `regex over budget (${o.mode}, ${action}): ${o.qualifiedId} took ${o.ms} ms on ${o.field} (${o.chars} chars), budget ${TTSR_REGEX_BUDGET_MS} ms`
+    );
+  }
   return buildHookOutput(event, result);
 }
 

@@ -85,15 +85,38 @@ export interface TtsrResult {
   warns: TtsrMatch[]
 }
 
+/**
+ * Budget of one regex call in evaluate(). JavaScriptCore cuts a catastrophic
+ * pattern at its match limit and returns "no match" without throwing, so a
+ * slow "no match" cannot be told from a real one.
+ */
+export const TTSR_REGEX_BUDGET_MS = 50
+
+/** A rule whose regex found no match but ran past the budget, or threw. */
+export interface TtsrOverBudget {
+  qualifiedId: string
+  /** A deny counts as a deny; a warn does not fire. */
+  mode: TtsrMode
+  ms: number
+  field: TtsrField
+  chars: number
+  /** Set when the regex threw instead of returning. */
+  error?: string
+}
+
 /** What evaluate() returns: the matches, plus one entry per rule it could not evaluate. */
 export interface TtsrEvaluation extends TtsrResult {
   /** `<qualifiedId>: <reason>`; such a rule did not fire, the others still ran. */
   errors: string[]
+  overBudget: TtsrOverBudget[]
 }
 
 export interface TtsrEvaluateOptions {
   /** Return as soon as one deny matches: the hook needs one deny, not all of them. */
   stopAtFirstDeny?: boolean
+  /** Milliseconds; defaults to performance.now. */
+  clock?: () => number
+  regexBudgetMs?: number
   /**
    * Current content of a Write target, null when it does not exist. When
    * given, an `added` rule on Write fires only if the new content holds more
@@ -667,8 +690,26 @@ export function evaluate(
   projectDir: string | (() => string),
   opts: TtsrEvaluateOptions = {}
 ): TtsrEvaluation {
-  const result: TtsrEvaluation = { denies: [], warns: [], errors: [] }
+  const result: TtsrEvaluation = { denies: [], warns: [], errors: [], overBudget: [] }
   if (!isObject(payload)) return result
+  const clock = opts.clock ?? (() => performance.now())
+  const budgetMs = opts.regexBudgetMs ?? TTSR_REGEX_BUDGET_MS
+  const slow: { entry: TtsrOverBudget | null } = { entry: null }
+  // A true result is never a false one: only a "no match" past the budget is suspect.
+  const timed = (rule: TtsrEffectiveRule, text: string, run: () => boolean): boolean => {
+    const at = { qualifiedId: rule.qualifiedId, mode: rule.mode, field: rule.field, chars: text.length }
+    const t0 = clock()
+    let hit: boolean
+    try {
+      hit = run()
+    } catch (e) {
+      slow.entry = { ...at, ms: Math.round(clock() - t0), error: (e as Error).message ?? String(e) }
+      return false
+    }
+    const ms = clock() - t0
+    if (!hit && ms > budgetMs) slow.entry = { ...at, ms: Math.round(ms) }
+    return hit
+  }
   const event = payload.hook_event_name
   const tool = payload.tool_name
   const input = isObject(payload.tool_input) ? payload.tool_input : {}
@@ -719,11 +760,19 @@ export function evaluate(
     const pathsFirst = hasPaths && (root !== null || typeof projectDir === 'string')
     if (pathsFirst && !pathsAllowTarget(c, resolveTarget())) return false
     const texts = extractField(payload, rule.field)
-    if (!texts.some((s) => c.re.test(s))) return false
+    let matched = false
+    for (const s of texts) {
+      if (timed(rule, s, () => c.re.test(s))) {
+        matched = true
+        break
+      }
+      if (slow.entry) return false
+    }
+    if (!matched) return false
     if (hasPaths && !pathsFirst && !pathsAllowTarget(c, resolveTarget())) return false
     if (rule.field === 'added' && tool === 'Write' && opts.readExisting && texts.length === 1) {
       const before = existingContent(opts.readExisting)
-      if (before !== null) return addsMatch(c.re, texts[0]!, capTo(before, FIELD_CAP))
+      if (before !== null) return timed(rule, texts[0]!, () => addsMatch(c.re, texts[0]!, capTo(before, FIELD_CAP)))
     }
     return true
   }
@@ -731,14 +780,25 @@ export function evaluate(
   for (const rule of rules) {
     if (rule.event !== event || !oneOf(rule.tools, tool)) continue
     let hit: boolean
+    slow.entry = null
     try {
       hit = fires(rule)
     } catch (e) {
       result.errors.push(`${rule.qualifiedId}: ${(e as Error).message ?? String(e)}`)
       continue
     }
+    let message = rule.message
+    const suspect = slow.entry as TtsrOverBudget | null
+    if (!hit && suspect) {
+      result.overBudget.push(suspect)
+      if (rule.mode !== 'deny') continue
+      hit = true
+      message = suspect.error
+        ? `${rule.message} (TTSR: rule evaluation failed; denied by default)`
+        : `${rule.message} (TTSR: rule evaluation exceeded the ${budgetMs} ms budget; denied by default)`
+    }
     if (!hit) continue
-    const match: TtsrMatch = { qualifiedId: rule.qualifiedId, mode: rule.mode, message: rule.message }
+    const match: TtsrMatch = { qualifiedId: rule.qualifiedId, mode: rule.mode, message }
     if (rule.mode === 'deny') {
       result.denies.push(match)
       if (opts.stopAtFirstDeny) return result

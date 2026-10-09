@@ -21,6 +21,7 @@ import {
   parseRulesFile,
   qualifyRule,
   rulesHash,
+  TTSR_REGEX_BUDGET_MS,
   type TtsrEffectiveRule,
   type TtsrResult,
   type TtsrRule,
@@ -592,6 +593,122 @@ describe("evaluate: hook order, short-circuit, failures, Write over an existing 
     expect(evaluate([r], write("/elsewhere/a.md", "foo"), "/x").denies).toHaveLength(0);
     const inc = rule("i", { paths: ["**"] });
     expect(evaluate([inc], write("/elsewhere/a.ts", "foo"), "/x").denies, "an include glob never matches outside").toHaveLength(0);
+  });
+});
+
+describe("evaluate: a regex past its time budget", () => {
+  const rule = (id: string, over: Partial<TtsrRule>, source: "kory" | "repo" | "user" = "repo"): TtsrEffectiveRule =>
+    qualifyRule(source, { ...(base() as unknown as TtsrRule), id, ...over });
+  const write = (file_path: string, content: string) => pre("Write", { file_path, content });
+  /** Each regex call reads the clock twice, so it appears to last exactly `step` ms. */
+  const steppingClock = (step: number) => {
+    let now = 0;
+    let reads = 0;
+    return {
+      clock: () => {
+        reads++;
+        now += step;
+        return now;
+      },
+      reads: () => reads,
+    };
+  };
+  const OVER = TTSR_REGEX_BUDGET_MS + 1;
+
+  test("a deny that finds no match past the budget denies by default, with a suffixed message", () => {
+    const r = rule("slow-deny", {});
+    const res = evaluate([r], write("/x/a.ts", "bar"), "/x", { clock: steppingClock(OVER).clock });
+    expect(res.denies.map((d) => d.qualifiedId)).toEqual(["repo/slow-deny"]);
+    expect(res.denies[0]!.message).toBe(
+      `${r.message} (TTSR: rule evaluation exceeded the ${TTSR_REGEX_BUDGET_MS} ms budget; denied by default)`
+    );
+    expect(res.overBudget).toEqual([{ qualifiedId: "repo/slow-deny", mode: "deny", ms: OVER, field: "added", chars: 3 }]);
+    expect(res.errors, "over budget is not 'not evaluated'").toEqual([]);
+  });
+
+  test("within the budget, no match stays no match", () => {
+    const res = evaluate([rule("fast", {})], write("/x/a.ts", "bar"), "/x", { clock: steppingClock(TTSR_REGEX_BUDGET_MS).clock });
+    expect(res.denies).toEqual([]);
+    expect(res.overBudget).toEqual([]);
+  });
+
+  test("a warn past the budget does not fire and is reported", () => {
+    const res = evaluate([rule("slow-warn", { mode: "warn" })], write("/x/a.ts", "bar"), "/x", { clock: steppingClock(OVER).clock });
+    expect(res.warns).toEqual([]);
+    expect(res.denies).toEqual([]);
+    expect(res.overBudget.map((o) => [o.qualifiedId, o.mode])).toEqual([["repo/slow-warn", "warn"]]);
+  });
+
+  test("a match found past the budget fires normally: a true result is never a false one", () => {
+    const r = rule("slow-match", {});
+    const res = evaluate([r], write("/x/a.ts", "foo"), "/x", { clock: steppingClock(OVER).clock });
+    expect(res.denies.map((d) => d.message)).toEqual([r.message]);
+    expect(res.overBudget).toEqual([]);
+  });
+
+  test("the occurrence count of a Write over an existing file is timed too", () => {
+    const content = "a foo\n";
+    const opts = { readExisting: () => content };
+    expect(evaluate([rule("no-foo", {})], write("/x/a.ts", content), "/x", opts).denies, "same content, real clock").toHaveLength(0);
+    const res = evaluate([rule("no-foo", {})], write("/x/a.ts", content), "/x", { ...opts, clock: steppingClock(OVER).clock });
+    expect(res.denies.map((d) => d.qualifiedId)).toEqual(["repo/no-foo"]);
+    expect(res.overBudget.map((o) => o.qualifiedId)).toEqual(["repo/no-foo"]);
+  });
+
+  test("the first text past the budget decides: the rule's later texts are not tested", () => {
+    const fake = steppingClock(OVER);
+    const multi = pre("MultiEdit", { file_path: "/x/a.ts", edits: [{ new_string: "bar" }, { new_string: "foo" }] });
+    const res = evaluate([rule("multi", { tools: ["MultiEdit"] })], multi, "/x", { clock: fake.clock });
+    expect(res.denies.map((d) => d.message.endsWith("denied by default)"))).toEqual([true]);
+    expect(res.overBudget.map((o) => o.chars)).toEqual([3]);
+    expect(fake.reads(), "only the first edit was tested").toBe(2);
+  });
+
+  test("with stopAtFirstDeny, a deny past the budget ends the evaluation", () => {
+    const fake = steppingClock(OVER);
+    const rules = hookEvaluationOrder([rule("w", { mode: "warn", pattern: "bar" }), rule("d", {})]);
+    const res = evaluate(rules, write("/x/a.ts", "bar"), "/x", { clock: fake.clock, stopAtFirstDeny: true });
+    expect(res.denies.map((d) => d.qualifiedId)).toEqual(["repo/d"]);
+    expect(res.warns).toEqual([]);
+    expect(fake.reads(), "the warn's regex never ran").toBe(2);
+  });
+
+  test("a regex that throws instead of returning denies by default too, and names the error", () => {
+    const realTest = RegExp.prototype.test;
+    const realMatchAll = RegExp.prototype[Symbol.matchAll];
+    RegExp.prototype.test = function (this: RegExp, s: string): boolean {
+      if (this.source === "boom") throw new RangeError("Maximum call stack size exceeded");
+      return realTest.call(this, s);
+    };
+    RegExp.prototype[Symbol.matchAll] = function (this: RegExp, s: string) {
+      if (this.source === "boom") throw new RangeError("Maximum call stack size exceeded");
+      return realMatchAll.call(this, s);
+    };
+    try {
+      const res = evaluate([rule("throws", { pattern: "boom" })], write("/x/a.ts", "x"), "/x");
+      expect(res.denies.map((d) => d.message)).toEqual([`${base().message} (TTSR: rule evaluation failed; denied by default)`]);
+      expect(res.overBudget.map((o) => [o.qualifiedId, o.error])).toEqual([["repo/throws", "Maximum call stack size exceeded"]]);
+      expect(res.errors, "a throwing regex is not 'not evaluated'").toEqual([]);
+
+      RegExp.prototype.test = realTest;
+      const counted = evaluate([rule("throws", { pattern: "boom" })], write("/x/a.ts", "boom"), "/x", { readExisting: () => "" });
+      expect(counted.denies.map((d) => d.message.endsWith("rule evaluation failed; denied by default)")), "the matchAll count throws").toEqual([true]);
+      expect(counted.overBudget.map((o) => o.error)).toEqual(["Maximum call stack size exceeded"]);
+    } finally {
+      RegExp.prototype.test = realTest;
+      RegExp.prototype[Symbol.matchAll] = realMatchAll;
+    }
+  });
+
+  test("a catastrophic deny pattern that JavaScriptCore cuts at its match limit still denies", () => {
+    const r = rule("deny-danger", { tools: ["Bash"], field: "command", pattern: "x(?:ab|a|b)*$|DANGER", message: "DANGER is denied" });
+    const bash = (command: string) => pre("Bash", { command }, { cwd: "/x" });
+    const cut = evaluate([r], bash(`echo x${"ab".repeat(40)}! DANGER`), "/x", { stopAtFirstDeny: true });
+    expect(cut.denies.map((d) => d.qualifiedId), "the x40 command contains DANGER").toEqual(["repo/deny-danger"]);
+    expect(cut.overBudget.map((o) => o.qualifiedId)).toEqual(["repo/deny-danger"]);
+    const plain = evaluate([r], bash("echo DANGER"), "/x", { stopAtFirstDeny: true });
+    expect(plain.denies.map((d) => d.message), "a real match is not a budget deny").toEqual(["DANGER is denied"]);
+    expect(plain.overBudget).toEqual([]);
   });
 });
 
