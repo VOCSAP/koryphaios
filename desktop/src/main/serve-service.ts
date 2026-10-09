@@ -1,5 +1,6 @@
 import { execFile, spawn } from 'node:child_process'
-import { platform as hostPlatform } from 'node:os'
+import { readFileSync } from 'node:fs'
+import { homedir, platform as hostPlatform } from 'node:os'
 import { EventEmitter } from 'node:events'
 import { win32 } from 'node:path'
 import { createRollingLogger, reportError } from './log'
@@ -16,6 +17,14 @@ import {
   type ServeLifecycleState,
   type ServePosixSignal
 } from './serve-lifecycle'
+import {
+  LOGIN_ENV_CAPTURE_TIMEOUT_MS,
+  captureLoginEnv,
+  loginEnvSeed,
+  loginShell,
+  type LoginEnvRequest,
+  type ServeEnv
+} from './serve-login-env'
 import { buildShellInvocation } from './shell-command'
 import { system32Dir } from './windows-system-root'
 
@@ -84,6 +93,13 @@ export interface ServeServiceDeps {
   signal?: (pid: number, signal: NodeJS.Signals | 0) => void
   createLog?: (dir: string, options: ServeLogOptions) => ServeLog
   reportError?: typeof reportError
+  /** The Deck's own environment: the Windows base, the source of inheritEnv and of the login seed. */
+  env?: Readonly<Record<string, string | undefined>>
+  /** The operator's shell, used for the login capture only when /etc/shells lists it by absolute path. */
+  shell?: string
+  etcShells?: () => string
+  homeDir?: string
+  captureLoginEnv?: (request: LoginEnvRequest) => Promise<ServeEnv>
 }
 
 type ExecFileLike = (
@@ -94,6 +110,8 @@ type ExecFileLike = (
 ) => unknown
 
 const HOST = '127.0.0.1'
+/** serve.json is shared through the repository, so its command keeps one meaning whatever shell each operator logs in with. */
+const COMMAND_SHELL = '/bin/sh'
 export const SERVE_LOG_FILE = 'serve.log'
 
 function interpolate(value: string, port: number): string {
@@ -148,6 +166,16 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
+/** A missing /etc/shells lists no shell, so the capture falls back to /bin/sh with a trace. */
+function defaultEtcShells(): string {
+  try {
+    return readFileSync('/etc/shells', 'utf-8')
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return ''
+    throw error
+  }
+}
+
 function defaultLog(dir: string, options: ServeLogOptions): ServeLog {
   return createRollingLogger({
     dir,
@@ -174,6 +202,11 @@ export class ServeService extends EventEmitter {
   private readonly signal: (pid: number, signal: NodeJS.Signals | 0) => void
   private readonly createLog: (dir: string, options: ServeLogOptions) => ServeLog
   private readonly reportError: typeof reportError
+  private readonly env: Readonly<Record<string, string | undefined>>
+  private readonly shell: string | undefined
+  private readonly etcShells: () => string
+  private readonly homeDir: string
+  private readonly captureLoginEnv: (request: LoginEnvRequest) => Promise<ServeEnv>
   private machine: ServeLifecycleState
   private published: ServeState
   private readonly queue: ServeLifecycleEvent[] = []
@@ -198,6 +231,11 @@ export class ServeService extends EventEmitter {
     this.signal = deps.signal ?? ((pid, signal) => process.kill(pid, signal))
     this.createLog = deps.createLog ?? defaultLog
     this.reportError = deps.reportError ?? reportError
+    this.env = deps.env ?? process.env
+    this.shell = deps.shell ?? process.env.SHELL
+    this.etcShells = deps.etcShells ?? defaultEtcShells
+    this.homeDir = deps.homeDir ?? homedir()
+    this.captureLoginEnv = deps.captureLoginEnv ?? captureLoginEnv
     this.machine = initialServeLifecycle(this.platform)
     this.published = { ...selectServePublicState(this.machine) }
   }
@@ -347,21 +385,37 @@ export class ServeService extends EventEmitter {
     }
   }
 
+  private captureLoginBase(): Promise<ServeEnv> {
+    const shell = loginShell(this.shell, this.etcShells())
+    if (shell !== this.shell) {
+      this.reportError('serve', `login shell ${this.shell ?? '(unset)'} is not an absolute path listed in /etc/shells; capturing the login environment with ${shell}`)
+    }
+    return this.captureLoginEnv({ shell, cwd: this.homeDir, seed: loginEnvSeed(this.env), timeoutMs: LOGIN_ENV_CAPTURE_TIMEOUT_MS })
+  }
+
   private async prepare(op: number, action: ServeAction): Promise<void> {
     let launch: ServeLaunch
     try {
       const port = action.port === 'auto' ? await this.allocatePort() : action.port
-      const env: NodeJS.ProcessEnv = { ...process.env }
+      const windows = this.platform === 'win32'
+      const base = windows ? this.env : await this.captureLoginBase()
+      const env: NodeJS.ProcessEnv = { ...base }
       for (const name of action.inheritEnv) {
-        const value = process.env[name]
+        const value = this.env[name]
         if (value !== undefined) env[name] = value
       }
       for (const [name, value] of Object.entries(action.env)) env[name] = interpolate(value, port)
       env.HOST = HOST
       env.PORT = String(port)
-      const shell = this.platform === 'win32' ? windowsSystemExecutable(this.systemRoot, 'WindowsPowerShell\\v1.0\\powershell.exe') : ''
-      if (this.platform === 'win32') this.taskkillFile = { op, file: windowsSystemExecutable(this.systemRoot, 'taskkill.exe') }
-      const invocation = buildShellInvocation({ command: interpolate(action.command, port), shell, interactive: false }, this.platform)
+      const command = interpolate(action.command, port)
+      let invocation: { file: string; args: string[] }
+      if (windows) {
+        this.taskkillFile = { op, file: windowsSystemExecutable(this.systemRoot, 'taskkill.exe') }
+        const shell = windowsSystemExecutable(this.systemRoot, 'WindowsPowerShell\\v1.0\\powershell.exe')
+        invocation = buildShellInvocation({ command, shell, interactive: false }, this.platform)
+      } else {
+        invocation = { file: COMMAND_SHELL, args: ['-c', command] }
+      }
       launch = {
         file: invocation.file,
         args: invocation.args,

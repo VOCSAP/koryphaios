@@ -1,9 +1,10 @@
 import { EventEmitter } from 'node:events'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, expect, test } from 'bun:test'
 import { resolveApprovedServeConfig, type ApprovedServeAction, type ServeAction } from '../desktop/src/main/serve-config.ts'
+import { LOGIN_ENV_CAPTURE_TIMEOUT_MS, type LoginEnvRequest } from '../desktop/src/main/serve-login-env.ts'
 import { SYSTEM_COMMAND_TIMEOUT_MS } from '../desktop/src/main/serve-lifecycle.ts'
 import { measureWindowsProcessStamp } from '../desktop/src/main/process-stamp.ts'
 import {
@@ -131,7 +132,15 @@ interface HarnessInit {
   createLog?: (child: FakeChild) => void
   failTimer?: (ms: number) => boolean
   onReport?: (message: string) => void
+  env?: Record<string, string>
+  shell?: string
+  etcShells?: string
+  homeDir?: string
+  loginEnv?: ServeServiceDeps['captureLoginEnv'] | 'real'
 }
+
+const DECK_ENV = { HOME: '/home/op', USER: 'op', SHELL: '/bin/zsh', LANG: 'fr_FR.UTF-8', PATH: '/deck/bin', DECK_ONLY: 'deck' }
+const LOGIN_ENV = { HOME: '/home/op', PATH: '/login/bin', LOGIN_ONLY: 'login', NODE_ENV: 'profile', HOST: 'laptop.local', PORT: '3000' }
 
 function harness(init: HarnessInit = {}) {
   const clock = new FakeClock()
@@ -147,7 +156,21 @@ function harness(init: HarnessInit = {}) {
   const ports = [...(init.ports ?? [PORT])]
   const statuses = [...(init.statuses ?? [200])]
   const current = (): FakeChild => children.at(-1) ?? new FakeChild()
+  const captures: LoginEnvRequest[] = []
+  const loginEnv = init.loginEnv
   const deps: ServeServiceDeps = {
+    env: init.env ?? DECK_ENV,
+    shell: init.shell ?? '/bin/zsh',
+    etcShells: () => init.etcShells ?? '# /etc/shells\n/bin/sh\n/bin/bash\n/bin/zsh\n',
+    homeDir: init.homeDir ?? '/home/op',
+    ...(loginEnv === 'real'
+      ? {}
+      : {
+          captureLoginEnv: async (request: LoginEnvRequest) => {
+            captures.push(request)
+            return loginEnv ? loginEnv(request) : { ...LOGIN_ENV }
+          }
+        }),
     platform: init.platform ?? 'linux',
     systemRoot: init.systemRoot ?? 'C:\\Windows',
     sessionDir: init.sessionDir ?? (() => 'C:/state/sessions/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'),
@@ -202,6 +225,7 @@ function harness(init: HarnessInit = {}) {
       return current()
     },
     children,
+    captures,
     clock,
     spawns,
     runs,
@@ -811,6 +835,137 @@ test('an approved action cannot be changed between its approval and its spawn', 
   expect(h.spawns[0]?.args).toContain('bun run dev -- --host 127.0.0.1 --port 4317')
   expect(h.spawns[0]?.options.env.NODE_ENV).toBe('development')
 })
+
+test('layers the login environment, inheritEnv, the action env, then HOST and PORT', async () => {
+  const h = harness()
+
+  await h.service.start(action({ inheritEnv: ['PATH'], env: { NODE_ENV: 'development' } }))
+
+  const env = h.spawns[0]!.options.env
+  expect(env.LOGIN_ONLY, 'the login shell environment is the base').toBe('login')
+  expect(env.DECK_ONLY, 'a Deck-only variable never reaches the server unless inheritEnv names it').toBeUndefined()
+  expect(env.PATH, 'inheritEnv copies the Deck value over the login one').toBe('/deck/bin')
+  expect(env.NODE_ENV, 'the action env overrides the profile').toBe('development')
+  expect(env.HOST, 'HOST is injected last, over the profile').toBe('127.0.0.1')
+  expect(env.PORT, 'PORT is injected last, over the profile').toBe(String(PORT))
+})
+
+test('captures the login environment from the home directory with a minimal seed', async () => {
+  const h = harness({ env: { ...DECK_ENV, LC_TIME: 'C', TMPDIR: '/tmp/op', LOGNAME: 'op' } })
+
+  await h.service.start(action())
+
+  expect(h.captures).toEqual([
+    {
+      shell: '/bin/zsh',
+      cwd: '/home/op',
+      seed: {
+        PATH: '/usr/bin:/bin:/usr/sbin:/sbin',
+        HOME: '/home/op',
+        USER: 'op',
+        SHELL: '/bin/zsh',
+        LANG: 'fr_FR.UTF-8',
+        LC_TIME: 'C',
+        TMPDIR: '/tmp/op',
+        LOGNAME: 'op'
+      },
+      timeoutMs: LOGIN_ENV_CAPTURE_TIMEOUT_MS
+    }
+  ])
+})
+
+test('runs the approved command with /bin/sh without a login shell, whatever the operator shell', async () => {
+  const h = harness()
+
+  await h.service.start(action())
+
+  expect(h.spawns[0]?.file).toBe('/bin/sh')
+  expect(h.spawns[0]?.args).toEqual(['-c', 'bun run dev -- --host 127.0.0.1 --port 4317'])
+})
+
+test('fails the start without a partial environment when the login capture fails', async () => {
+  const h = harness({
+    loginEnv: async () => {
+      throw new Error('login shell environment capture printed no end marker')
+    }
+  })
+
+  await h.service.start(action())
+
+  expect(h.spawns).toEqual([])
+  expect(h.service.state()).toEqual({ status: 'failed', error: 'login shell environment capture printed no end marker' })
+})
+
+test('keeps the Deck environment as the Windows base without a login capture', async () => {
+  const h = harness({ platform: 'win32' })
+
+  await h.service.start(action())
+
+  expect(h.captures).toEqual([])
+  expect(h.spawns[0]?.options.env).toMatchObject({ DECK_ONLY: 'deck', HOST: '127.0.0.1', PORT: String(PORT) })
+})
+
+test('captures with /bin/sh and traces it when the operator shell is not listed in /etc/shells', async () => {
+  const h = harness({ shell: '/opt/odd/fish', etcShells: '/bin/sh\n/bin/bash\n' })
+
+  await h.service.start(action())
+
+  expect(h.captures.map((request) => request.shell)).toEqual(['/bin/sh'])
+  expect(h.errors).toEqual([
+    'login shell /opt/odd/fish is not an absolute path listed in /etc/shells; capturing the login environment with /bin/sh'
+  ])
+})
+
+test('captures with /bin/sh when the operator shell is a relative name, even one /etc/shells lists', async () => {
+  const h = harness({ shell: 'zsh', etcShells: 'zsh\n/bin/zsh\n' })
+
+  await h.service.start(action())
+
+  expect(h.captures.map((request) => request.shell)).toEqual(['/bin/sh'])
+})
+
+const REAL_BASH = process.platform === 'win32' ? 'C:/Program Files/Git/bin/bash.exe' : '/bin/bash'
+const realShellTest = existsSync(REAL_BASH) ? test : test.skip
+
+async function startWithRealProfile(profile: string): Promise<ReturnType<typeof harness>> {
+  const home = mkdtempSync(join(tmpdir(), 'cp-serve-login-home-'))
+  try {
+    writeFileSync(join(home, '.bash_profile'), profile)
+    const h = harness({
+      loginEnv: 'real',
+      shell: REAL_BASH,
+      etcShells: `${REAL_BASH}\n`,
+      homeDir: home,
+      env: { HOME: home, USER: 'op', SHELL: REAL_BASH, DECK_ONLY: 'deck' }
+    })
+    await h.service.start(action())
+    return h
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+}
+
+realShellTest('POSIX capture path, through Git Bash on Windows and not the win32 production path: a profile env failure fails the start', async () => {
+  const h = await startWithRealProfile("/usr/bin/env() { printf 'PATH=/partial\\0'; return 1; }\n")
+
+  expect(h.spawns).toEqual([])
+  expect(h.service.state()).toMatchObject({ status: 'failed', error: expect.stringContaining('login shell environment capture failed') })
+}, 20_000)
+
+realShellTest('POSIX capture path, through Git Bash on Windows and not the win32 production path: a profile banner and PORT cannot override ours', async () => {
+  {
+    const h = await startWithRealProfile(
+      'printf "WELCOME banner without newline"\nexport PORT=3000\nexport PROFILE_ONLY=yes\necho "profile noise" >&2\n'
+    )
+
+    const env = h.spawns[0]?.options.env
+    expect(h.service.state().status).not.toBe('failed')
+    expect(env?.PROFILE_ONLY, 'the profile ran and its export was captured').toBe('yes')
+    expect(env?.PORT).toBe(String(PORT))
+    expect(env?.HOST).toBe('127.0.0.1')
+    expect(env?.DECK_ONLY).toBeUndefined()
+  }
+}, 20_000)
 
 test('refuses to start after quit', async () => {
   const h = harness()
