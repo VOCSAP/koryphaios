@@ -1,3 +1,5 @@
+import type { DelegationPolicy, DelegationTaskAction, DelegationTaskStatus } from "./delegated-task.ts";
+
 // Display name for a peer, mutable via set_id, unique per (peer_id, group_id).
 export type PeerId = string;
 
@@ -190,13 +192,55 @@ export interface ListPeersRequest {
 
 export interface SendMessageRequest {
   from_token: InstanceToken;
-  to_peer_id: PeerId; // resolved against the sender's group_id by the broker
-  text: string;
+  to_peer_id?: PeerId; // resolved against the sender's group_id by the broker
+  text?: string;
+  deadline_sec?: number;
+  task_id?: string;
+  task_action?: DelegationTaskAction;
+  task_label?: string;
+}
+
+export interface DelegatedTask {
+  task_id: string;
+  group_id: GroupId;
+  delegator_peer_id: PeerId;
+  delegate_peer_id: PeerId;
+  label: string;
+  status: DelegationTaskStatus;
+  due_at_ms: number | null;
+  decision_due_at_ms: number | null;
+  rearm_count: number;
+  generation: number;
+  policy: DelegationPolicy;
+  created_at: string;
+  updated_at: string;
+  closed_at: string | null;
+  terminal_reason: string | null;
+  escalation_result: string | null;
+}
+
+export interface DelegationsListRequest {
+  from_token: InstanceToken;
+  peer_id?: PeerId | "*";
+}
+
+export interface DelegationsListResponse {
+  tasks: DelegatedTask[];
+}
+
+export interface DelegationsCloseRequest {
+  from_token: InstanceToken;
+  task_id: string;
+}
+
+export interface DelegationsCloseResponse {
+  task: DelegatedTask;
 }
 
 export interface SendMessageResponse {
   ok: boolean;
   error?: string;
+  task?: DelegatedTask;
   /**
    * Set by a replica when the target is a remote peer and the upstream link is
    * down within the federation grace: the message sits in the local queue and

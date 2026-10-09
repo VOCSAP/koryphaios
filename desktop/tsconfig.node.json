@@ -34,6 +34,7 @@
     "../shared/approval.ts",
     "../shared/text.ts",
     "../shared/types.ts",
+    "../shared/delegated-task.ts",
     "../shared/project-key.ts",
     "../shared/approval-client.ts",
     "shared/permission-lease.ts",

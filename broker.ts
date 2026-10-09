@@ -11,6 +11,15 @@ import { mkdirSync } from "node:fs";
 import { hostname } from "node:os";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { brokerMode, isLoopbackBrokerUrl, loadConfig, upstreamUrl } from "./shared/config.ts";
+import {
+  MAX_OPEN_DELEGATED_TASKS,
+  isDelegationTaskAction,
+  isDelegationTaskId,
+  taskLabelFromText,
+  validateDeadlineSec,
+  validateTaskLabel,
+  type DelegationTaskStatus,
+} from "./shared/delegated-task.ts";
 import { createLogger, coreLogDir } from "./shared/logger.ts";
 import { projectKeyCaseRefusal, validateProjectKey } from "./shared/project-key.ts";
 import { roadmapTitleRefusal } from "./shared/roadmap-title.ts";
@@ -117,6 +126,11 @@ import type {
   ListPeersRequest,
   SendMessageRequest,
   SendMessageResponse,
+  DelegatedTask,
+  DelegationsCloseRequest,
+  DelegationsCloseResponse,
+  DelegationsListRequest,
+  DelegationsListResponse,
   PollMessagesRequest,
   PollMessagesResponse,
   DisconnectRequest,
@@ -266,6 +280,7 @@ const PORT = config.port;
 const DB_PATH = config.db;
 const BIND_HOST = config.bind_host ?? "127.0.0.1";
 const BROKER_TOKEN = config.broker_token ?? null;
+const DELEGATION_POLICY = config.delegation_policy;
 const DORMANT_TTL_HOURS = parseInt(
   process.env.CLAUDE_PEERS_DORMANT_TTL_HOURS ?? "24",
   10
@@ -647,6 +662,53 @@ for (const sentinel of SENTINEL_DEFINITIONS) {
 }
 
 db.run(`CREATE INDEX IF NOT EXISTS idx_messages_pending ON messages(to_token, delivered)`);
+
+db.run(`
+  CREATE TABLE IF NOT EXISTS delegated_tasks (
+    task_id TEXT PRIMARY KEY,
+    group_id TEXT NOT NULL,
+    owner_broker_id TEXT NOT NULL,
+    delegator_token TEXT NOT NULL,
+    delegate_kind TEXT NOT NULL,
+    delegate_binding TEXT NOT NULL,
+    delegator_peer_id_snapshot TEXT NOT NULL,
+    delegate_peer_id_snapshot TEXT NOT NULL,
+    label TEXT NOT NULL,
+    status TEXT NOT NULL,
+    due_at_ms INTEGER,
+    decision_due_at_ms INTEGER,
+    rearm_count INTEGER NOT NULL,
+    generation INTEGER NOT NULL,
+    max_rearms INTEGER NOT NULL,
+    lead_silence_sec INTEGER NOT NULL,
+    max_deadline_sec INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    closed_at TEXT,
+    closed_by_binding TEXT,
+    terminal_reason TEXT,
+    escalation_result TEXT
+  )
+`);
+db.run(`CREATE INDEX IF NOT EXISTS idx_delegated_tasks_due ON delegated_tasks(status, due_at_ms)`);
+db.run(`CREATE INDEX IF NOT EXISTS idx_delegated_tasks_decision ON delegated_tasks(status, decision_due_at_ms)`);
+db.run(`CREATE INDEX IF NOT EXISTS idx_delegated_tasks_delegator ON delegated_tasks(group_id, delegator_token, status)`);
+db.run(`CREATE INDEX IF NOT EXISTS idx_delegated_tasks_delegate ON delegated_tasks(group_id, delegate_binding, status)`);
+
+db.run(`
+  CREATE TABLE IF NOT EXISTS delegation_events (
+    event_id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL,
+    generation INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    destination_binding TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    transport_status TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    emitted_at TEXT,
+    UNIQUE(task_id, generation, kind)
+  )
+`);
 
 // Migration (idempotent): `<upstream_id>:<id>` of a message a replica pulled,
 // qualified by the answering broker's identity so that a numeric id reused
@@ -2144,18 +2206,18 @@ const ackPriorMessagesForSender = db.prepare(
      )`
 );
 
+function recordMessage(fromToken: string, toToken: string, groupId: string, text: string, sentAt: string): number {
+  const result = insertMessage.run(fromToken, toToken, groupId, text, sentAt);
+  const messageId = Number(result.lastInsertRowid);
+  updateLastActivity.run(sentAt, fromToken);
+  updateLastActivity.run(sentAt, toToken);
+  ackPriorMessagesForSender.run(fromToken, groupId, messageId);
+  return messageId;
+}
+
 // Message insert + activity refresh + heuristic ack land atomically: an abrupt
 // broker death mid-sequence must not leave a message without its bookkeeping.
-const recordMessageTx = db.transaction(
-  (fromToken: string, toToken: string, groupId: string, text: string, sentAt: string): number => {
-    const result = insertMessage.run(fromToken, toToken, groupId, text, sentAt);
-    const messageId = Number(result.lastInsertRowid);
-    updateLastActivity.run(sentAt, fromToken);
-    updateLastActivity.run(sentAt, toToken);
-    ackPriorMessagesForSender.run(fromToken, groupId, messageId);
-    return messageId;
-  }
-);
+const recordMessageTx = db.transaction(recordMessage);
 
 const purgeOldUndeliveredStmt = db.prepare(
   `DELETE FROM messages
@@ -2684,97 +2746,365 @@ function handleListPeers(body: ListPeersRequest): PublicPeer[] {
     });
 }
 
-async function handleSendMessage(body: SendMessageRequest): Promise<SendMessageResponse> {
-  // Card 37a2b8c7 volet 2 (Chain A): the sentinel constants are PUBLIC, so a
-  // client declaring one as ITS OWN from_token is an impersonation attempt,
-  // never a legitimate identity -- refuse by shape before the lookup can ever
-  // resolve it. Mirrors resolveRoadmapAuthor's refusal (layer 1, card 39c40571).
-  if (isSentinelInstanceToken(body.from_token)) {
-    log.warn(`send-message: refused sentinel-shaped from_token`, { from_token: body.from_token.slice(0, 64) });
-    return { ok: false, error: "from_token cannot be a reserved sentinel identity" };
-  }
-  const sender = db.query(
-    "SELECT instance_token, peer_id, group_id, summary, host, cwd FROM peers WHERE instance_token = ?"
-  ).get(body.from_token) as
-    | {
-        instance_token: InstanceToken;
-        peer_id: string;
-        group_id: GroupId;
-        summary: string;
-        host: string;
-        cwd: string;
-      }
+type DelegatedTaskRow = {
+  task_id: string;
+  group_id: GroupId;
+  owner_broker_id: string;
+  delegator_token: InstanceToken;
+  delegate_kind: "local";
+  delegate_binding: InstanceToken;
+  delegator_peer_id_snapshot: string;
+  delegate_peer_id_snapshot: string;
+  label: string;
+  status: DelegationTaskStatus;
+  due_at_ms: number | null;
+  decision_due_at_ms: number | null;
+  rearm_count: number;
+  generation: number;
+  max_rearms: number;
+  lead_silence_sec: number;
+  max_deadline_sec: number;
+  created_at: string;
+  updated_at: string;
+  closed_at: string | null;
+  closed_by_binding: string | null;
+  terminal_reason: string | null;
+  escalation_result: string | null;
+};
+
+type MessageSender = {
+  instance_token: InstanceToken;
+  peer_id: string;
+  group_id: GroupId;
+  summary: string;
+  host: string;
+  cwd: string;
+  via: string | null;
+};
+
+type MessageTarget = {
+  instance_token: InstanceToken;
+  peer_id: string;
+  via: string | null;
+  upstream_peer_id: string | null;
+};
+
+type TaskResult<T> = T | { error: string; status: number };
+
+function senderForDelegation(token: InstanceToken): MessageSender | null {
+  return db.query(
+    "SELECT instance_token, peer_id, group_id, summary, host, cwd, via FROM peers WHERE instance_token = ?"
+  ).get(token) as MessageSender | null;
+}
+
+function taskRow(taskId: string, groupId: GroupId): DelegatedTaskRow | null {
+  return db.query("SELECT * FROM delegated_tasks WHERE task_id = ? AND group_id = ?").get(taskId, groupId) as DelegatedTaskRow | null;
+}
+
+function taskParticipant(row: DelegatedTaskRow, token: InstanceToken): boolean {
+  return row.delegator_token === token || row.delegate_binding === token;
+}
+
+function publicTaskPeerName(token: InstanceToken, groupId: GroupId, fallback: string): string {
+  const peer = db.query("SELECT peer_id FROM peers WHERE instance_token = ? AND group_id = ?").get(token, groupId) as
+    | { peer_id: string }
     | null;
-  if (!sender) return { ok: false, error: "Sender not registered" };
-  if (typeof body.text !== "string" || body.text.length > MESSAGE_TEXT_MAX) {
+  return peer?.peer_id ?? fallback;
+}
+
+function toDelegatedTask(row: DelegatedTaskRow): DelegatedTask {
+  return {
+    task_id: row.task_id,
+    group_id: row.group_id,
+    delegator_peer_id: publicTaskPeerName(row.delegator_token, row.group_id, row.delegator_peer_id_snapshot),
+    delegate_peer_id: publicTaskPeerName(row.delegate_binding, row.group_id, row.delegate_peer_id_snapshot),
+    label: row.label,
+    status: row.status,
+    due_at_ms: row.due_at_ms,
+    decision_due_at_ms: row.decision_due_at_ms,
+    rearm_count: row.rearm_count,
+    generation: row.generation,
+    policy: {
+      max_rearms: row.max_rearms,
+      lead_silence_sec: row.lead_silence_sec,
+      max_deadline_sec: row.max_deadline_sec,
+    },
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+    closed_at: row.closed_at,
+    terminal_reason: row.terminal_reason,
+    escalation_result: row.escalation_result,
+  };
+}
+
+function activeTaskTarget(row: DelegatedTaskRow, sender: MessageSender): MessageTarget | null {
+  const token = row.delegator_token === sender.instance_token ? row.delegate_binding : row.delegator_token;
+  return db.query(
+    "SELECT instance_token, peer_id, via, upstream_peer_id FROM peers WHERE instance_token = ? AND group_id = ? AND status = 'active'"
+  ).get(token, sender.group_id) as MessageTarget | null;
+}
+
+function taskForParticipant(taskId: string, sender: MessageSender): TaskResult<DelegatedTaskRow> {
+  const row = taskRow(taskId, sender.group_id);
+  if (!row) return { error: "Task not found in your group", status: 404 };
+  if (!taskParticipant(row, sender.instance_token)) return { error: "You are not a participant in this task", status: 403 };
+  return row;
+}
+
+async function sendOrdinaryMessage(
+  sender: MessageSender,
+  targetId: string,
+  text: string
+): Promise<SendMessageResponse> {
+  if (text.length > MESSAGE_TEXT_MAX) {
     return { ok: false, error: `text must be a string of at most ${MESSAGE_TEXT_MAX} characters` };
   }
-
-  // Operator inbox (PLAN C12): 'operator' routes to the reserved sentinel,
-  // scoped to the sender's group (the Deck drains it per group). No WS pool
-  // entry exists for it, so delivery is purely poll-based.
-  // Card 37a2b8c7 volet 1: the DEPOSIT half. A TOFU-exempt group cannot hold
-  // the operator inbox (see groupMayCarryOperatorInbox), and the drain there is
-  // refused, so accepting the write would store a message nobody can ever read.
-  if (body.to_peer_id === OPERATOR_PEER_ID && !groupMayCarryOperatorInbox(sender.group_id)) {
+  if (targetId === OPERATOR_PEER_ID && !groupMayCarryOperatorInbox(sender.group_id)) {
     log.warn(`send-message: refused operator deposit in a secret-less group`, {
       group_id: sender.group_id,
       from_peer_id: sender.peer_id,
     });
     return {
       ok: false,
-      // Review MINOR-2: the group is INTERPOLATED, not hardcoded as "default".
-      // The refusal derives from isTofuExemptGroup, so a second exempt group
-      // would inherit it -- and a message naming the wrong group would
-      // contradict the very guard that produced it.
       error: `The operator inbox is unavailable in the '${sender.group_id}' group: it pins no secret, so anyone could read it. Join a group with a secret (a Koryphaios Deck always does) to message the operator.`,
     };
   }
-
   const target =
-    body.to_peer_id === OPERATOR_PEER_ID
+    targetId === OPERATOR_PEER_ID
       ? { instance_token: OPERATOR_INSTANCE_TOKEN, peer_id: OPERATOR_PEER_ID, via: null, upstream_peer_id: null }
       : (db.query(
           "SELECT instance_token, peer_id, via, upstream_peer_id FROM peers WHERE peer_id = ? AND group_id = ? AND status = 'active'"
-        ).get(body.to_peer_id, sender.group_id) as
-          | { instance_token: InstanceToken; peer_id: string; via: string | null; upstream_peer_id: string | null }
-          | null);
+        ).get(targetId, sender.group_id) as MessageTarget | null);
   if (!target) {
-    // A remote peer this replica knows but cannot reach: the upstream stopped
-    // federating, and the mirror was hidden for that reason, not because the
-    // peer left.
-    if (BROKER_MODE === "replica" && federationUnsupported && body.to_peer_id !== OPERATOR_PEER_ID) {
+    if (BROKER_MODE === "replica" && federationUnsupported && targetId !== OPERATOR_PEER_ID) {
       const hidden = db
         .query("SELECT 1 FROM peers WHERE peer_id = ? AND group_id = ? AND via IS NOT NULL")
-        .get(body.to_peer_id, sender.group_id);
-      if (hidden) return { ok: false, error: unfederatedPeerError(body.to_peer_id) };
+        .get(targetId, sender.group_id);
+      if (hidden) return { ok: false, error: unfederatedPeerError(targetId) };
     }
-    return { ok: false, error: `Peer '${body.to_peer_id}' not found in your group` };
+    return { ok: false, error: `Peer '${targetId}' not found in your group` };
   }
-
-  // A mirrored remote peer: relayed through the upstream, or queued for the
-  // federation grace when the link is down. Only a replica holds mirrors; on
-  // an upstream a relayed row (via set as well) is a local delivery that its
-  // replica pulls.
   if (BROKER_MODE === "replica" && target.via !== null) {
-    return relayOutboundMessage(sender, { ...target, upstream_peer_id: target.upstream_peer_id ?? target.peer_id }, body.text);
+    return relayOutboundMessage(sender, { ...target, upstream_peer_id: target.upstream_peer_id ?? target.peer_id }, text);
+  }
+  const sentAt = new Date().toISOString();
+  const messageId = recordMessageTx(sender.instance_token, target.instance_token, sender.group_id, text, sentAt);
+  pushPeerMessage(target.instance_token, messageId, sender, text, sentAt);
+  return { ok: true };
+}
+
+function messageForTask(
+  body: SendMessageRequest,
+  row: DelegatedTaskRow,
+  sender: MessageSender
+): TaskResult<{ target: MessageTarget; text: string }> {
+  if (typeof body.text !== "string" || typeof body.to_peer_id !== "string") {
+    return { error: "A task message requires text and to_peer_id", status: 400 };
+  }
+  if (body.text.length > MESSAGE_TEXT_MAX) {
+    return { error: `text must be a string of at most ${MESSAGE_TEXT_MAX} characters`, status: 400 };
+  }
+  if (!taskLabelFromText(body.text)) return { error: "text must contain visible text", status: 400 };
+  const target = activeTaskTarget(row, sender);
+  if (!target) return { error: "The task participant is not active", status: 409 };
+  if (target.peer_id !== body.to_peer_id) {
+    return { error: `to_peer_id must name the current task participant '${target.peer_id}'`, status: 400 };
+  }
+  return { target, text: body.text };
+}
+
+const createDelegatedTaskTx = db.transaction(
+  (sender: MessageSender, target: MessageTarget, deadlineSec: number, label: string, text: string, nowMs: number) => {
+    const open = db.query(
+      "SELECT COUNT(*) AS n FROM delegated_tasks WHERE group_id = ? AND delegator_token = ? AND status <> 'closed'"
+    ).get(sender.group_id, sender.instance_token) as { n: number };
+    if (open.n >= MAX_OPEN_DELEGATED_TASKS) return null;
+    const taskId = randomUUID();
+    const now = new Date(nowMs).toISOString();
+    db.run(
+      `INSERT INTO delegated_tasks (
+        task_id, group_id, owner_broker_id, delegator_token, delegate_kind, delegate_binding,
+        delegator_peer_id_snapshot, delegate_peer_id_snapshot, label, status, due_at_ms,
+        decision_due_at_ms, rearm_count, generation, max_rearms, lead_silence_sec, max_deadline_sec,
+        created_at, updated_at, closed_at, closed_by_binding, terminal_reason, escalation_result
+      ) VALUES (?, ?, ?, ?, 'local', ?, ?, ?, ?, 'armed', ?, NULL, 0, 0, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL)`,
+      [
+        taskId,
+        sender.group_id,
+        BROKER_ID,
+        sender.instance_token,
+        target.instance_token,
+        sender.peer_id,
+        target.peer_id,
+        label,
+        nowMs + deadlineSec * 1000,
+        DELEGATION_POLICY.values.max_rearms,
+        DELEGATION_POLICY.values.lead_silence_sec,
+        DELEGATION_POLICY.values.max_deadline_sec,
+        now,
+        now,
+      ]
+    );
+    const messageId = recordMessage(sender.instance_token, target.instance_token, sender.group_id, text, now);
+    return { row: taskRow(taskId, sender.group_id)!, messageId, sentAt: now };
+  }
+);
+
+const closeDelegatedTaskTx = db.transaction(
+  (row: DelegatedTaskRow, sender: MessageSender, report: { target: MessageTarget; text: string } | null) => {
+    if (row.status === "closed") return { row, messageId: null, sentAt: null };
+    const now = new Date().toISOString();
+    db.run(
+      `UPDATE delegated_tasks
+          SET status = 'closed', due_at_ms = NULL, decision_due_at_ms = NULL, updated_at = ?, closed_at = ?,
+              closed_by_binding = ?, terminal_reason = NULL
+        WHERE task_id = ? AND group_id = ? AND status <> 'closed'`,
+      [now, now, sender.instance_token, row.task_id, row.group_id]
+    );
+    const messageId = report
+      ? recordMessage(sender.instance_token, report.target.instance_token, sender.group_id, report.text, now)
+      : null;
+    return { row: taskRow(row.task_id, row.group_id)!, messageId, sentAt: report ? now : null };
+  }
+);
+
+const rearmDelegatedTaskTx = db.transaction(
+  (row: DelegatedTaskRow, sender: MessageSender, target: MessageTarget, text: string, deadlineSec: number, nowMs: number) => {
+    const now = new Date(nowMs).toISOString();
+    const result = db.run(
+      `UPDATE delegated_tasks
+          SET status = 'armed', due_at_ms = ?, decision_due_at_ms = NULL, rearm_count = rearm_count + 1,
+              generation = generation + 1, updated_at = ?
+        WHERE task_id = ? AND group_id = ? AND status = 'overdue' AND decision_due_at_ms > ? AND rearm_count < max_rearms`,
+      [nowMs + deadlineSec * 1000, now, row.task_id, row.group_id, nowMs]
+    );
+    if (result.changes !== 1) return null;
+    const messageId = recordMessage(sender.instance_token, target.instance_token, sender.group_id, text, now);
+    return { row: taskRow(row.task_id, row.group_id)!, messageId, sentAt: now };
+  }
+);
+
+async function handleSendMessage(body: SendMessageRequest): Promise<SendMessageResponse & { status?: number }> {
+  if (isSentinelInstanceToken(body.from_token)) {
+    log.warn(`send-message: refused sentinel-shaped from_token`, { from_token: body.from_token.slice(0, 64) });
+    return { ok: false, error: "from_token cannot be a reserved sentinel identity" };
+  }
+  const sender = senderForDelegation(body.from_token);
+  if (!sender) return { ok: false, error: "Sender not registered" };
+  const hasDeadline = body.deadline_sec !== undefined;
+  const hasTaskId = body.task_id !== undefined;
+  const hasTaskAction = body.task_action !== undefined;
+  if (!hasDeadline && !hasTaskId && !hasTaskAction) {
+    if (typeof body.to_peer_id !== "string" || typeof body.text !== "string") {
+      return { ok: false, error: "to_peer_id and text are required" };
+    }
+    return sendOrdinaryMessage(sender, body.to_peer_id, body.text);
+  }
+  if (hasTaskAction && !isDelegationTaskAction(body.task_action)) {
+    return { ok: false, error: "task_action must be 'close'" };
+  }
+  if (hasTaskAction && !hasTaskId) return { ok: false, error: "task_action requires task_id" };
+  if (hasDeadline && hasTaskAction) return { ok: false, error: "deadline_sec cannot accompany task_action" };
+  if (hasTaskId && !isDelegationTaskId(body.task_id)) return { ok: false, error: "task_id must be a UUID" };
+
+  if (!hasTaskId) {
+    if (!DELEGATION_POLICY.available) {
+      return { ok: false, error: `Delegation policy unavailable: ${DELEGATION_POLICY.diagnostics.join("; ")}` };
+    }
+    if (typeof body.to_peer_id !== "string" || typeof body.text !== "string") {
+      return { ok: false, error: "A tracked task requires to_peer_id and text" };
+    }
+    const deadline = validateDeadlineSec(body.deadline_sec, DELEGATION_POLICY.values);
+    if (!deadline.ok) return { ok: false, error: deadline.error };
+    const label = validateTaskLabel(body.task_label);
+    if (!label.ok) return { ok: false, error: label.error };
+    if (body.text.length > MESSAGE_TEXT_MAX) {
+      return { ok: false, error: `text must be a string of at most ${MESSAGE_TEXT_MAX} characters` };
+    }
+    if (!taskLabelFromText(body.text)) return { ok: false, error: "text must contain visible text" };
+    if (!groupMayCarryOperatorInbox(sender.group_id)) {
+      return { ok: false, error: "Tracked tasks require a group with an operator inbox" };
+    }
+    if (body.to_peer_id === OPERATOR_PEER_ID || body.to_peer_id === DECK_PEER_ID) {
+      return { ok: false, error: "Tracked tasks cannot target a sentinel" };
+    }
+    const target = db.query(
+      "SELECT instance_token, peer_id, via, upstream_peer_id FROM peers WHERE peer_id = ? AND group_id = ? AND status = 'active'"
+    ).get(body.to_peer_id, sender.group_id) as MessageTarget | null;
+    if (!target) return { ok: false, error: `Peer '${body.to_peer_id}' not found in your group` };
+    if (target.instance_token === sender.instance_token || sender.via !== null || target.via !== null) {
+      return { ok: false, error: "Tracked tasks require two distinct local peers" };
+    }
+    const created = createDelegatedTaskTx(sender, target, deadline.value, label.value, body.text, Date.now());
+    if (!created) return { ok: false, error: `You already have ${MAX_OPEN_DELEGATED_TASKS} open delegated tasks in this group` };
+    pushPeerMessage(target.instance_token, created.messageId, sender, body.text, created.sentAt);
+    return { ok: true, task: toDelegatedTask(created.row) };
   }
 
-  const sentAt = new Date().toISOString();
-  const messageId = recordMessageTx(
-    sender.instance_token,
-    target.instance_token,
-    sender.group_id,
-    body.text,
-    sentAt
-  );
+  const taskId = body.task_id;
+  if (!isDelegationTaskId(taskId)) return { ok: false, error: "task_id must be a UUID" };
+  const task = taskForParticipant(taskId, sender);
+  if ("error" in task) return { ok: false, error: task.error, status: task.status };
+  if (body.task_label !== undefined) return { ok: false, error: "task_label is only allowed when creating a task" };
 
-  // Try WebSocket push if the target is connected. Never markDelivered here:
-  // the WS notification is fire-and-forget, delivered=0 stays until
-  // check_messages is explicitly called by the LLM.
-  pushPeerMessage(target.instance_token, messageId, sender, body.text, sentAt);
+  if (body.task_action === "close") {
+    if (task.status === "closed") return { ok: true, task: toDelegatedTask(task) };
+    const report = body.text === undefined && body.to_peer_id === undefined ? null : messageForTask(body, task, sender);
+    if (report && "error" in report) return { ok: false, error: report.error };
+    const closed = closeDelegatedTaskTx(task, sender, report);
+    if (report && closed.messageId !== null && closed.sentAt !== null) {
+      pushPeerMessage(report.target.instance_token, closed.messageId, sender, report.text, closed.sentAt);
+    }
+    return { ok: true, task: toDelegatedTask(closed.row) };
+  }
 
-  return { ok: true };
+  if (hasDeadline) {
+    if (sender.instance_token !== task.delegator_token) return { ok: false, error: "Only the delegator can rearm this task" };
+    const deadline = validateDeadlineSec(body.deadline_sec, {
+      max_rearms: task.max_rearms,
+      lead_silence_sec: task.lead_silence_sec,
+      max_deadline_sec: task.max_deadline_sec,
+    });
+    if (!deadline.ok) return { ok: false, error: deadline.error };
+    const report = messageForTask(body, task, sender);
+    if ("error" in report) return { ok: false, error: report.error };
+    const rearmed = rearmDelegatedTaskTx(task, sender, report.target, report.text, deadline.value, Date.now());
+    if (!rearmed) return { ok: false, error: "Task cannot be rearmed in its current state" };
+    pushPeerMessage(report.target.instance_token, rearmed.messageId, sender, report.text, rearmed.sentAt);
+    return { ok: true, task: toDelegatedTask(rearmed.row) };
+  }
+
+  const report = messageForTask(body, task, sender);
+  if ("error" in report) return { ok: false, error: report.error };
+  return sendOrdinaryMessage(sender, report.target.peer_id, report.text);
+}
+
+function handleDelegationsList(body: DelegationsListRequest): TaskResult<DelegationsListResponse> {
+  if (isSentinelInstanceToken(body.from_token)) return { error: "from_token cannot be a reserved sentinel identity", status: 400 };
+  const sender = senderForDelegation(body.from_token);
+  if (!sender) return { error: "Sender not registered", status: 404 };
+  if (body.peer_id !== undefined && body.peer_id !== "*" && typeof body.peer_id !== "string") {
+    return { error: "peer_id must be a peer id or '*'", status: 400 };
+  }
+  const rows = db.query(
+    `SELECT * FROM delegated_tasks
+      WHERE group_id = ? AND delegator_token = ? AND status <> 'closed'
+        AND (? = '*' OR delegate_peer_id_snapshot = ? OR delegate_binding IN (
+          SELECT instance_token FROM peers WHERE group_id = ? AND peer_id = ?
+        ))
+      ORDER BY due_at_ms IS NULL, due_at_ms, task_id`
+  ).all(sender.group_id, sender.instance_token, body.peer_id ?? "*", body.peer_id ?? "*", sender.group_id, body.peer_id ?? "*") as DelegatedTaskRow[];
+  return { tasks: rows.map(toDelegatedTask) };
+}
+
+function handleDelegationsClose(body: DelegationsCloseRequest): TaskResult<DelegationsCloseResponse> {
+  if (isSentinelInstanceToken(body.from_token)) return { error: "from_token cannot be a reserved sentinel identity", status: 400 };
+  const sender = senderForDelegation(body.from_token);
+  if (!sender) return { error: "Sender not registered", status: 404 };
+  if (!isDelegationTaskId(body.task_id)) return { error: "task_id must be a UUID", status: 400 };
+  const task = taskForParticipant(body.task_id, sender);
+  if ("error" in task) return task;
+  return { task: toDelegatedTask(closeDelegatedTaskTx(task, sender, null).row) };
 }
 
 /**
@@ -10747,6 +11077,7 @@ const server = Bun.serve<WsData>({
           // replica's operator) whether THIS broker will answer the
           // replication routes at all, whatever shape it runs in.
           serve_replicas: SERVE_REPLICAS,
+          delegation_policy: DELEGATION_POLICY,
           // Only a replica has an upstream to be online against; on the other
           // modes the field is absent rather than a misleading `true`.
           ...(BROKER_MODE === "replica"
@@ -10841,8 +11172,20 @@ const server = Bun.serve<WsData>({
         }
         case "/list-peers":
           return Response.json(handleListPeers(body as ListPeersRequest));
-        case "/send-message":
-          return Response.json(await handleSendMessage(body as SendMessageRequest));
+        case "/send-message": {
+          const { status, ...result } = await handleSendMessage(body as SendMessageRequest);
+          return Response.json(result, { status: status ?? 200 });
+        }
+        case "/delegations/list": {
+          const result = handleDelegationsList(body as DelegationsListRequest);
+          if ("error" in result) return Response.json({ error: result.error }, { status: result.status });
+          return Response.json(result);
+        }
+        case "/delegations/close": {
+          const result = handleDelegationsClose(body as DelegationsCloseRequest);
+          if ("error" in result) return Response.json({ error: result.error }, { status: result.status });
+          return Response.json(result);
+        }
         case "/announce": {
           const result = handleAnnounce(body as AnnounceRequest);
           if ("error" in result) {

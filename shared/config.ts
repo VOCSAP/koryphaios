@@ -18,6 +18,16 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 
 import type { GroupId } from "./types.ts";
 import type { SummaryProviderConfig } from "./summarize.ts";
+import { canonicalConfigPath } from "./canonical-config-path.ts";
+import {
+  DELEGATION_POLICY_BOUNDS,
+  DELEGATION_POLICY_DEFAULTS,
+  parseDelegationPolicyEnvironment,
+  validateDelegationPolicyValue,
+  type DelegationPolicy,
+  type DelegationPolicyKey,
+  type DelegationPolicyState,
+} from "./delegated-task.ts";
 import { createLogger, coreLogDir } from "./logger.ts";
 
 export type SummaryProvider = "auto" | "anthropic" | "openai-compat" | "none";
@@ -59,6 +69,7 @@ export interface Config {
    * replicated from must not become one by having a token.
    */
   serve_replicas: boolean;
+  delegation_policy: DelegationPolicyState;
 }
 
 interface FileConfig {
@@ -77,6 +88,15 @@ interface FileConfig {
   bind_host?: string;
   offline_replica?: boolean;
   serve_replicas?: boolean;
+  delegation_max_rearms?: unknown;
+  delegation_lead_silence_sec?: unknown;
+  delegation_max_deadline_sec?: unknown;
+}
+
+interface FileConfigResult {
+  config: FileConfig;
+  path: string;
+  error: string | null;
 }
 
 const DEFAULT_ANTHROPIC_MODEL = "claude-haiku-4-5-20251001";
@@ -106,15 +126,18 @@ function decodeConfigBuffer(buf: Buffer): string {
   return buf.toString("utf-8");
 }
 
-async function readFileConfig(): Promise<FileConfig> {
+async function readFileConfig(): Promise<FileConfigResult> {
   const path = settingsFilePath();
   try {
     if (!existsSync(path)) {
-      return {};
+      return { config: {}, path, error: null };
     }
     const raw = decodeConfigBuffer(readFileSync(path)).replace(/^\uFEFF/, "");
-    const data = JSON.parse(raw) as FileConfig;
-    return data ?? {};
+    const data = JSON.parse(raw) as unknown;
+    if (!data || typeof data !== "object" || Array.isArray(data)) {
+      throw new Error("config root must be an object");
+    }
+    return { config: data as FileConfig, path, error: null };
   } catch (e) {
     let isDir = false;
     try {
@@ -127,7 +150,7 @@ async function readFileConfig(): Promise<FileConfig> {
     const msg = `ignoring malformed config ${path}: ${reason} (using defaults)`;
     console.error(`[claude-peers] ${msg}`);
     createLogger({ dir: coreLogDir(), name: "config", mirrorToConsole: false }).child("config").error(msg);
-    return {};
+    return { config: {}, path, error: reason };
   }
 }
 
@@ -147,11 +170,70 @@ function parseProvider(value: string | undefined): SummaryProvider | null {
   return null;
 }
 
+function resolveDelegationPolicy(fileCfg: FileConfig, fileResult: FileConfigResult): DelegationPolicyState {
+  const values: DelegationPolicy = { ...DELEGATION_POLICY_DEFAULTS };
+  const sources: Record<DelegationPolicyKey, "env" | "file" | "default"> = {
+    max_rearms: "default",
+    lead_silence_sec: "default",
+    max_deadline_sec: "default",
+  };
+  const diagnostics = fileResult.error ? ["delegation policy config file is unavailable"] : [];
+  const fields: Array<{ key: DelegationPolicyKey; environment: string; fileValue: unknown }> = [
+    {
+      key: "max_rearms",
+      environment: "CLAUDE_PEERS_DELEGATION_MAX_REARMS",
+      fileValue: fileCfg.delegation_max_rearms,
+    },
+    {
+      key: "lead_silence_sec",
+      environment: "CLAUDE_PEERS_DELEGATION_LEAD_SILENCE_SEC",
+      fileValue: fileCfg.delegation_lead_silence_sec,
+    },
+    {
+      key: "max_deadline_sec",
+      environment: "CLAUDE_PEERS_DELEGATION_MAX_DEADLINE_SEC",
+      fileValue: fileCfg.delegation_max_deadline_sec,
+    },
+  ];
+
+  for (const field of fields) {
+    const environment = process.env[field.environment];
+    const result =
+      environment !== undefined
+        ? parseDelegationPolicyEnvironment(field.key, environment)
+        : field.fileValue !== undefined
+          ? validateDelegationPolicyValue(field.key, field.fileValue)
+          : null;
+    if (result === null) continue;
+    if (!result.ok) {
+      diagnostics.push(result.error);
+      continue;
+    }
+    values[field.key] = result.value;
+    sources[field.key] = environment !== undefined ? "env" : "file";
+  }
+
+  return {
+    available: diagnostics.length === 0,
+    values,
+    sources,
+    bounds: {
+      max_rearms: { ...DELEGATION_POLICY_BOUNDS.max_rearms },
+      lead_silence_sec: { ...DELEGATION_POLICY_BOUNDS.lead_silence_sec },
+      max_deadline_sec: { ...DELEGATION_POLICY_BOUNDS.max_deadline_sec },
+    },
+    diagnostics,
+    config_path_fingerprint: createHash("sha256").update(canonicalConfigPath(fileResult.path)).digest("hex"),
+  };
+}
+
 /**
  * Load configuration. Tolerant of missing file. Always returns a complete Config.
  */
 export async function loadConfig(): Promise<Config> {
-  const fileCfg = await readFileConfig();
+  const fileResult = await readFileConfig();
+  const fileCfg = fileResult.config;
+  const delegation_policy = resolveDelegationPolicy(fileCfg, fileResult);
 
   const port = parseInt(
     process.env.CLAUDE_PEERS_PORT ?? String(fileCfg.port ?? 7899),
@@ -211,6 +293,7 @@ export async function loadConfig(): Promise<Config> {
     bind_host,
     offline_replica,
     serve_replicas,
+    delegation_policy,
   };
 }
 

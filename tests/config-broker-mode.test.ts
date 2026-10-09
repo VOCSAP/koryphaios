@@ -87,6 +87,9 @@ const ENV_KEYS = [
   "CLAUDE_PEERS_SERVE_REPLICAS",
   "CLAUDE_PEERS_BROKER_URL",
   "CLAUDE_PEERS_PORT",
+  "CLAUDE_PEERS_DELEGATION_MAX_REARMS",
+  "CLAUDE_PEERS_DELEGATION_LEAD_SILENCE_SEC",
+  "CLAUDE_PEERS_DELEGATION_MAX_DEADLINE_SEC",
 ] as const;
 
 let envSnapshot: Record<string, string | undefined> = {};
@@ -298,4 +301,85 @@ test("loadConfig: a config.json path that is a directory falls back to defaults 
   const cfg = await loadConfig();
   expect(cfg.port).toBe(7899);
   expect(readConfigLogContent()).toContain("is a directory, not a file");
+});
+
+test("loadConfig: delegation policy defaults are available and identify their source", async () => {
+  const cfg = await loadConfig();
+  expect(cfg.delegation_policy).toMatchObject({
+    available: true,
+    values: { max_rearms: 3, lead_silence_sec: 300, max_deadline_sec: 14_400 },
+    sources: { max_rearms: "default", lead_silence_sec: "default", max_deadline_sec: "default" },
+    diagnostics: [],
+  });
+  expect(cfg.delegation_policy.config_path_fingerprint).toMatch(/^[0-9a-f]{64}$/);
+});
+
+test("loadConfig: delegation policy reads bounded file values", async () => {
+  writeConfigFile({
+    delegation_max_rearms: 4,
+    delegation_lead_silence_sec: 600,
+    delegation_max_deadline_sec: 1_200,
+  });
+  const cfg = await loadConfig();
+  expect(cfg.delegation_policy).toMatchObject({
+    available: true,
+    values: { max_rearms: 4, lead_silence_sec: 600, max_deadline_sec: 1_200 },
+    sources: { max_rearms: "file", lead_silence_sec: "file", max_deadline_sec: "file" },
+  });
+});
+
+test("loadConfig: each strict delegation environment key overrides its file value", async () => {
+  writeConfigFile({
+    delegation_max_rearms: 4,
+    delegation_lead_silence_sec: 600,
+    delegation_max_deadline_sec: 1_200,
+  });
+  process.env.CLAUDE_PEERS_DELEGATION_MAX_REARMS = "5";
+  process.env.CLAUDE_PEERS_DELEGATION_LEAD_SILENCE_SEC = "601";
+  process.env.CLAUDE_PEERS_DELEGATION_MAX_DEADLINE_SEC = "1201";
+  const cfg = await loadConfig();
+  expect(cfg.delegation_policy).toMatchObject({
+    available: true,
+    values: { max_rearms: 5, lead_silence_sec: 601, max_deadline_sec: 1_201 },
+    sources: { max_rearms: "env", lead_silence_sec: "env", max_deadline_sec: "env" },
+  });
+});
+
+test("loadConfig: delegation policy accepts the documented bounds for every key", async () => {
+  const cases = [
+    { fileKey: "delegation_max_rearms", valueKey: "max_rearms", min: 0, max: 10 },
+    { fileKey: "delegation_lead_silence_sec", valueKey: "lead_silence_sec", min: 15, max: 3_600 },
+    { fileKey: "delegation_max_deadline_sec", valueKey: "max_deadline_sec", min: 1, max: 86_400 },
+  ] as const;
+  for (const entry of cases) {
+    for (const value of [entry.min, entry.max]) {
+      writeConfigFile({ [entry.fileKey]: value });
+      const cfg = await loadConfig();
+      expect(cfg.delegation_policy.available).toBeTrue();
+      expect(cfg.delegation_policy.values[entry.valueKey]).toBe(value);
+      expect(cfg.delegation_policy.sources[entry.valueKey]).toBe("file");
+    }
+  }
+});
+
+test("marks the delegation policy unavailable for every invalid file/environment key", async () => {
+  const cases = [
+    { fileKey: "delegation_max_rearms", envKey: "CLAUDE_PEERS_DELEGATION_MAX_REARMS", valueKey: "max_rearms", invalidFile: 11, validFile: 4, invalidEnv: "04" },
+    { fileKey: "delegation_lead_silence_sec", envKey: "CLAUDE_PEERS_DELEGATION_LEAD_SILENCE_SEC", valueKey: "lead_silence_sec", invalidFile: 14, validFile: 600, invalidEnv: "0600" },
+    { fileKey: "delegation_max_deadline_sec", envKey: "CLAUDE_PEERS_DELEGATION_MAX_DEADLINE_SEC", valueKey: "max_deadline_sec", invalidFile: 86_401, validFile: 1_200, invalidEnv: "01200" },
+  ] as const;
+  for (const entry of cases) {
+    writeConfigFile({ [entry.fileKey]: entry.invalidFile });
+    const fileCfg = await loadConfig();
+    expect(fileCfg.port).toBe(7899);
+    expect(fileCfg.delegation_policy.available).toBeFalse();
+    expect(fileCfg.delegation_policy.diagnostics.join(" ")).toContain(entry.valueKey);
+
+    writeConfigFile({ [entry.fileKey]: entry.validFile });
+    process.env[entry.envKey] = entry.invalidEnv;
+    const envCfg = await loadConfig();
+    expect(envCfg.delegation_policy.available).toBeFalse();
+    expect(envCfg.delegation_policy.diagnostics.join(" ")).toContain("environment");
+    delete process.env[entry.envKey];
+  }
 });
