@@ -21,6 +21,7 @@ import {
   parseRulesFile,
   qualifyRule,
   rulesHash,
+  TTSR_EVALUATE_DEADLINE_MS,
   TTSR_REGEX_BUDGET_MS,
   type TtsrEffectiveRule,
   type TtsrResult,
@@ -603,17 +604,28 @@ describe("evaluate: a regex past its time budget", () => {
   /** Each regex call reads the clock twice, so it appears to last exactly `step` ms. */
   const steppingClock = (step: number) => {
     let now = 0;
-    let reads = 0;
     return {
       clock: () => {
-        reads++;
         now += step;
         return now;
       },
-      reads: () => reads,
     };
   };
   const OVER = TTSR_REGEX_BUDGET_MS + 1;
+  /** Runs `fn` while counting the RegExp.prototype.test calls made on `source`. */
+  const countingTests = <T,>(source: string, fn: () => T): { value: T; calls: number } => {
+    const realTest = RegExp.prototype.test;
+    let calls = 0;
+    RegExp.prototype.test = function (this: RegExp, s: string): boolean {
+      if (this.source === source) calls++;
+      return realTest.call(this, s);
+    };
+    try {
+      return { value: fn(), calls };
+    } finally {
+      RegExp.prototype.test = realTest;
+    }
+  };
 
   test("a deny that finds no match past the budget denies by default, with a suffixed message", () => {
     const r = rule("slow-deny", {});
@@ -622,7 +634,9 @@ describe("evaluate: a regex past its time budget", () => {
     expect(res.denies[0]!.message).toBe(
       `${r.message} (TTSR: rule evaluation exceeded the ${TTSR_REGEX_BUDGET_MS} ms budget; denied by default)`
     );
-    expect(res.overBudget).toEqual([{ qualifiedId: "repo/slow-deny", mode: "deny", ms: OVER, field: "added", chars: 3 }]);
+    expect(res.overBudget).toEqual([
+      { qualifiedId: "repo/slow-deny", mode: "deny", reason: "budget", ms: OVER, field: "added", chars: 3 },
+    ]);
     expect(res.errors, "over budget is not 'not evaluated'").toEqual([]);
   });
 
@@ -656,21 +670,23 @@ describe("evaluate: a regex past its time budget", () => {
   });
 
   test("the first text past the budget decides: the rule's later texts are not tested", () => {
-    const fake = steppingClock(OVER);
     const multi = pre("MultiEdit", { file_path: "/x/a.ts", edits: [{ new_string: "bar" }, { new_string: "foo" }] });
-    const res = evaluate([rule("multi", { tools: ["MultiEdit"] })], multi, "/x", { clock: fake.clock });
+    const { value: res, calls } = countingTests("foo", () =>
+      evaluate([rule("multi", { tools: ["MultiEdit"] })], multi, "/x", { clock: steppingClock(OVER).clock })
+    );
     expect(res.denies.map((d) => d.message.endsWith("denied by default)"))).toEqual([true]);
     expect(res.overBudget.map((o) => o.chars)).toEqual([3]);
-    expect(fake.reads(), "only the first edit was tested").toBe(2);
+    expect(calls, "only the first edit was tested").toBe(1);
   });
 
   test("with stopAtFirstDeny, a deny past the budget ends the evaluation", () => {
-    const fake = steppingClock(OVER);
     const rules = hookEvaluationOrder([rule("w", { mode: "warn", pattern: "bar" }), rule("d", {})]);
-    const res = evaluate(rules, write("/x/a.ts", "bar"), "/x", { clock: fake.clock, stopAtFirstDeny: true });
+    const { value: res, calls } = countingTests("bar", () =>
+      evaluate(rules, write("/x/a.ts", "bar"), "/x", { clock: steppingClock(OVER).clock, stopAtFirstDeny: true })
+    );
     expect(res.denies.map((d) => d.qualifiedId)).toEqual(["repo/d"]);
     expect(res.warns).toEqual([]);
-    expect(fake.reads(), "the warn's regex never ran").toBe(2);
+    expect(calls, "the warn's regex never ran").toBe(0);
   });
 
   test("a regex that throws instead of returning denies by default too, and names the error", () => {
@@ -698,6 +714,52 @@ describe("evaluate: a regex past its time budget", () => {
       RegExp.prototype.test = realTest;
       RegExp.prototype[Symbol.matchAll] = realMatchAll;
     }
+  });
+
+  test("past the evaluation deadline, a deny rule denies by default without running its regex", () => {
+    let reads = 0;
+    const jump = () => (reads++ === 0 ? 0 : TTSR_EVALUATE_DEADLINE_MS + 1);
+    const r = rule("late-deny", {});
+    const { value: res, calls } = countingTests("foo", () => evaluate([r], write("/x/a.ts", "foo"), "/x", { clock: jump }));
+    expect(calls, "the regex never ran").toBe(0);
+    expect(res.denies.map((d) => d.message)).toEqual([
+      `${r.message} (TTSR: evaluation deadline of ${TTSR_EVALUATE_DEADLINE_MS} ms exceeded; denied by default)`,
+    ]);
+    expect(res.overBudget.map((o) => [o.qualifiedId, o.reason])).toEqual([["repo/late-deny", "deadline"]]);
+  });
+
+  test("past the evaluation deadline, a warn rule does not apply and is reported", () => {
+    let reads = 0;
+    const jump = () => (reads++ === 0 ? 0 : TTSR_EVALUATE_DEADLINE_MS + 1);
+    const res = evaluate([rule("late-warn", { mode: "warn" })], write("/x/a.ts", "foo"), "/x", { clock: jump });
+    expect(res.warns).toEqual([]);
+    expect(res.overBudget.map((o) => [o.qualifiedId, o.mode, o.reason])).toEqual([["repo/late-warn", "warn", "deadline"]]);
+  });
+
+  test("the deadline is checked between the texts of one rule: a long MultiEdit stops where it falls", () => {
+    const edits = Array.from({ length: 100 }, () => ({ new_string: "bar" }));
+    const multi = pre("MultiEdit", { file_path: "/x/a.ts", edits });
+    // 45 ms per read keeps every regex call under its 50 ms budget, so only the deadline can stop the rule.
+    const { value: res, calls } = countingTests("foo", () =>
+      evaluate([rule("long", { tools: ["MultiEdit"] })], multi, "/x", { clock: steppingClock(45).clock })
+    );
+    expect(res.overBudget.map((o) => o.reason)).toEqual(["deadline"]);
+    expect(res.denies.map((d) => d.qualifiedId)).toEqual(["repo/long"]);
+    expect(calls, "texts after the deadline are not tested").toBeGreaterThan(0);
+    expect(calls).toBeLessThan(edits.length);
+  });
+
+  test("time spent resolving the project root counts toward the deadline", () => {
+    let now = 0;
+    const slowRoot = () => {
+      now += TTSR_EVALUATE_DEADLINE_MS + 100;
+      return "/x";
+    };
+    const rules = [rule("scoped-warn", { mode: "warn", pattern: "bar", paths: ["**"] }), rule("after", { pattern: "zzz" })];
+    const res = evaluate(rules, write("/x/a.ts", "bar"), slowRoot, { clock: () => now });
+    expect(res.warns.map((w) => w.qualifiedId), "the rule that resolved the root was already decided").toEqual(["repo/scoped-warn"]);
+    expect(res.denies.map((d) => d.qualifiedId)).toEqual(["repo/after"]);
+    expect(res.overBudget.map((o) => [o.qualifiedId, o.reason])).toEqual([["repo/after", "deadline"]]);
   });
 
   test("a catastrophic deny pattern that JavaScriptCore cuts at its match limit still denies", () => {

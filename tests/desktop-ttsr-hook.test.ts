@@ -8,7 +8,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
-import { decide, parseHookPayload, readExisting, runHook, trace, type HookPayload } from "../desktop/hooks/ttsr-hook.ts";
+import { decide, overBudgetTraceLine, parseHookPayload, readExisting, runHook, trace, type HookPayload } from "../desktop/hooks/ttsr-hook.ts";
 import { KORY_EFFECTIVE_RULES } from "../desktop/src/shared/ttsr-builtin";
 
 const DESKTOP_DIR = resolve(import.meta.dir, "..", "desktop");
@@ -150,6 +150,22 @@ test("decide(): a deny regex cut at the JavaScriptCore match limit denies, and t
   expect(out.hookSpecificOutput.permissionDecisionReason).toContain("denied by default");
   expect(readFileSync(join(dir, "hook.log"), "utf-8")).toMatch(
     /regex over budget \(deny, denied by default\): user\/deny-danger took \d+ ms on command \(94 chars\), budget 50 ms/
+  );
+});
+
+test("overBudgetTraceLine(): one wording per reason, naming what was decided", () => {
+  const at = { qualifiedId: "user/r", field: "added" as const, chars: 12 };
+  expect(overBudgetTraceLine({ ...at, mode: "deny", reason: "deadline", ms: 2104 })).toBe(
+    "evaluation deadline exceeded (deny, denied by default): user/r after 2104 ms, deadline 2000 ms"
+  );
+  expect(overBudgetTraceLine({ ...at, mode: "warn", reason: "deadline", ms: 2104 })).toBe(
+    "evaluation deadline exceeded (warn, not applied): user/r after 2104 ms, deadline 2000 ms"
+  );
+  expect(overBudgetTraceLine({ ...at, mode: "deny", reason: "budget", ms: 300 })).toBe(
+    "regex over budget (deny, denied by default): user/r took 300 ms on added (12 chars), budget 50 ms"
+  );
+  expect(overBudgetTraceLine({ ...at, mode: "deny", reason: "threw", ms: 1, error: "boom" })).toBe(
+    "regex threw (deny, denied by default): user/r on added (12 chars): boom"
   );
 });
 

@@ -92,11 +92,22 @@ export interface TtsrResult {
  */
 export const TTSR_REGEX_BUDGET_MS = 50
 
-/** A rule whose regex found no match but ran past the budget, or threw. */
+/**
+ * Deadline of one whole evaluate() call, well under the hook's 10 s timeout:
+ * Claude Code lets a call through when its hook times out.
+ */
+export const TTSR_EVALUATE_DEADLINE_MS = 2000
+
+/**
+ * A rule that could not be decided: its regex found no match past the budget,
+ * threw, or the evaluation deadline had passed before it was decided.
+ */
 export interface TtsrOverBudget {
   qualifiedId: string
   /** A deny counts as a deny; a warn does not fire. */
   mode: TtsrMode
+  reason: 'budget' | 'threw' | 'deadline'
+  /** The regex call's duration, or the evaluation's elapsed time for 'deadline'. */
   ms: number
   field: TtsrField
   chars: number
@@ -117,6 +128,7 @@ export interface TtsrEvaluateOptions {
   /** Milliseconds; defaults to performance.now. */
   clock?: () => number
   regexBudgetMs?: number
+  evaluateDeadlineMs?: number
   /**
    * Current content of a Write target, null when it does not exist. When
    * given, an `added` rule on Write fires only if the new content holds more
@@ -694,20 +706,35 @@ export function evaluate(
   if (!isObject(payload)) return result
   const clock = opts.clock ?? (() => performance.now())
   const budgetMs = opts.regexBudgetMs ?? TTSR_REGEX_BUDGET_MS
+  const deadlineMs = opts.evaluateDeadlineMs ?? TTSR_EVALUATE_DEADLINE_MS
+  const start = clock()
   const slow: { entry: TtsrOverBudget | null } = { entry: null }
+  const where = (rule: TtsrEffectiveRule, chars: number) => ({
+    qualifiedId: rule.qualifiedId,
+    mode: rule.mode,
+    field: rule.field,
+    chars,
+  })
+  /** Records a 'deadline' entry and returns true once the evaluation is past its deadline. */
+  const pastDeadline = (rule: TtsrEffectiveRule, chars: number): boolean => {
+    const elapsed = clock() - start
+    if (elapsed <= deadlineMs) return false
+    slow.entry = { ...where(rule, chars), reason: 'deadline', ms: Math.round(elapsed) }
+    return true
+  }
   // A true result is never a false one: only a "no match" past the budget is suspect.
   const timed = (rule: TtsrEffectiveRule, text: string, run: () => boolean): boolean => {
-    const at = { qualifiedId: rule.qualifiedId, mode: rule.mode, field: rule.field, chars: text.length }
     const t0 = clock()
     let hit: boolean
     try {
       hit = run()
     } catch (e) {
-      slow.entry = { ...at, ms: Math.round(clock() - t0), error: (e as Error).message ?? String(e) }
+      const error = (e as Error).message ?? String(e)
+      slow.entry = { ...where(rule, text.length), reason: 'threw', ms: Math.round(clock() - t0), error }
       return false
     }
     const ms = clock() - t0
-    if (!hit && ms > budgetMs) slow.entry = { ...at, ms: Math.round(ms) }
+    if (!hit && ms > budgetMs) slow.entry = { ...where(rule, text.length), reason: 'budget', ms: Math.round(ms) }
     return hit
   }
   const event = payload.hook_event_name
@@ -762,6 +789,7 @@ export function evaluate(
     const texts = extractField(payload, rule.field)
     let matched = false
     for (const s of texts) {
+      if (pastDeadline(rule, s.length)) return false
       if (timed(rule, s, () => c.re.test(s))) {
         matched = true
         break
@@ -793,9 +821,12 @@ export function evaluate(
       result.overBudget.push(suspect)
       if (rule.mode !== 'deny') continue
       hit = true
-      message = suspect.error
-        ? `${rule.message} (TTSR: rule evaluation failed; denied by default)`
-        : `${rule.message} (TTSR: rule evaluation exceeded the ${budgetMs} ms budget; denied by default)`
+      const why = {
+        threw: 'rule evaluation failed',
+        budget: `rule evaluation exceeded the ${budgetMs} ms budget`,
+        deadline: `evaluation deadline of ${deadlineMs} ms exceeded`,
+      }[suspect.reason]
+      message = `${rule.message} (TTSR: ${why}; denied by default)`
     }
     if (!hit) continue
     const match: TtsrMatch = { qualifiedId: rule.qualifiedId, mode: rule.mode, message }

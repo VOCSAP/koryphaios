@@ -191,6 +191,11 @@ Comportement :
    budget compte comme un `deny` pour une règle `deny` (message suffixé) et
    n'applique pas une règle `warn` ; les deux sont tracées (`overBudget`).
    Une regex qui lève suit la même règle.
+8. Une évaluation entière a une échéance (`TTSR_EVALUATE_DEADLINE_MS`, 2 s),
+   contrôlée avant chaque règle et chaque texte, loin du timeout de 10 s du
+   hook au-delà duquel Claude Code laisse passer l'appel. Passé l'échéance,
+   chaque règle `deny` restante vaut `deny` et les `warn` restantes ne
+   s'appliquent pas, tracées de la même façon.
 
 Précédence documentée par Claude Code entre hooks : `deny` > `defer` > `ask` >
 `allow`. Un `deny` TTSR l'emporte donc sur les hooks de l'opérateur (AiDex
