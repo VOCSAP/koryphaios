@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events'
 import { appendFileSync } from 'node:fs'
-import * as pty from 'node-pty'
+import type { IPty } from 'node-pty'
 import { buildSpawnPlan, type SpawnOpts } from './shell-command'
 import { JobStartupStatus, scanJobStartup } from './pty-startup-status'
 import { reportError } from './log'
@@ -29,8 +29,8 @@ export interface PtyExitPayload {
   exitCode: number
 }
 
-/** Give up stripping the interactive start marker after this many buffered bytes. */
-const MARKER_BUFFER_CAP = 65536
+/** Give up stripping the interactive start marker after this many buffered UTF-16 code units. */
+const MARKER_BUFFER_CAP_CODE_UNITS = 65536
 
 /**
  * ConPTY (Windows) can withhold a TUI's first full-screen frame until the next
@@ -42,9 +42,22 @@ const MARKER_BUFFER_CAP = 65536
  * the spread covers slow boots (MCP servers, hooks) without kicking forever.
  */
 const CONPTY_KICK_DELAYS_MS = [1500, 4000, 8000, 15000]
+const KILL_ACK_TIMEOUT_MS = 3000
+
+type PtyAdapter = {
+  spawn: typeof import('node-pty').spawn
+}
+
+interface SpawnRequest {
+  cwd: string
+  opts: SpawnOpts
+  extraEnv?: Record<string, string>
+  cols: number
+  rows: number
+}
 
 interface Spawned {
-  proc: pty.IPty
+  proc: IPty
   cols: number
   rows: number
   /** Start marker to strip (interactive mode), or null. */
@@ -56,22 +69,74 @@ interface Spawned {
   kickTimers: NodeJS.Timeout[]
 }
 
+interface Retired {
+  id: string
+  pid: number
+  killTimer: NodeJS.Timeout | null
+}
+
+interface PtyManagerDeps {
+  pty?: PtyAdapter
+  now?: () => number
+  setTimeout?: (callback: () => void, delay: number) => NodeJS.Timeout
+  clearTimeout?: (timer: NodeJS.Timeout) => void
+  reportError?: typeof reportError
+  scanJobStartup?: typeof scanJobStartup
+}
+
+function defaultPtyAdapter(): PtyAdapter {
+  return require('node-pty') as PtyAdapter
+}
+
+function consumeJobStartup(
+  holder: { jobStartup: JobStartupStatus | null },
+  data: string,
+  scan: typeof scanJobStartup,
+  clock: () => number
+): boolean {
+  const jobScan = scan(holder.jobStartup, data, clock)
+  holder.jobStartup = jobScan.status
+  return jobScan.reportFailure
+}
+
 /** Owns every live PTY. One instance for the whole app. */
 export class PtyManager extends EventEmitter {
   private procs = new Map<string, Spawned>()
+  private retired = new Map<IPty, Retired>()
+  private readonly pty: PtyAdapter
+  private readonly now: () => number
+  private readonly schedule: (callback: () => void, delay: number) => NodeJS.Timeout
+  private readonly cancel: (timer: NodeJS.Timeout) => void
+  private readonly reportError: typeof reportError
+  private readonly scanJobStartup: typeof scanJobStartup
+
+  constructor(deps: PtyManagerDeps = {}) {
+    super()
+    this.pty = deps.pty ?? defaultPtyAdapter()
+    this.now = deps.now ?? Date.now
+    this.schedule = deps.setTimeout ?? setTimeout
+    this.cancel = deps.clearTimeout ?? clearTimeout
+    this.reportError = deps.reportError ?? reportError
+    this.scanJobStartup = deps.scanJobStartup ?? scanJobStartup
+  }
 
   /**
-   * Spawn a peer terminal for `id`. Replaces any existing PTY for that id.
+   * Spawn a peer terminal for `id`. A replacement immediately takes the tile's
+   * public identity while the old process stays separately observable until exit.
    * `extraEnv` (the scope env from scope.ts) is merged last so its forced-group
-   * vars win over anything inherited from the parent process. In interactive
-   * mode the rc/profile noise before the start marker is stripped from output.
+   * vars win over anything inherited from the parent process. In interactive mode
+   * the rc/profile noise before the start marker is stripped from output.
    */
   spawn(id: string, cwd: string, opts: SpawnOpts, extraEnv?: Record<string, string>): number {
     this.kill(id)
+    return this.spawnNow(id, { cwd, opts, extraEnv, cols: 80, rows: 24 })
+  }
+
+  private spawnNow(id: string, request: SpawnRequest): number {
     const {
       invocation: { file, args, marker },
       env
-    } = buildSpawnPlan(opts, extraEnv, process.platform)
+    } = buildSpawnPlan(request.opts, request.extraEnv, process.platform)
     // CLAUDE_PEERS_TOOLS's absence is load-bearing, unlike every other key this
     // merge handles: '' means zero tools, the opposite of 'no restriction', so
     // it can't be neutralized with an empty-string default the way other keys
@@ -80,25 +145,25 @@ export class PtyManager extends EventEmitter {
     // sessionEnv didn't set it, the ...process.env spread would otherwise
     // silently restrict a tile nobody meant to restrict — deleting the key, not
     // defaulting it, is the only correct shape.
-    if (!extraEnv || !('CLAUDE_PEERS_TOOLS' in extraEnv)) delete env.CLAUDE_PEERS_TOOLS
-    if (!extraEnv || !('KORY_STATUS_FALLBACK' in extraEnv)) delete env.KORY_STATUS_FALLBACK
-    if (!extraEnv || !('KORY_PERMISSION_LEASE' in extraEnv)) env.KORY_PERMISSION_LEASE = ''
+    if (!request.extraEnv || !('CLAUDE_PEERS_TOOLS' in request.extraEnv)) delete env.CLAUDE_PEERS_TOOLS
+    if (!request.extraEnv || !('KORY_STATUS_FALLBACK' in request.extraEnv)) delete env.KORY_STATUS_FALLBACK
+    if (!request.extraEnv || !('KORY_PERMISSION_LEASE' in request.extraEnv)) env.KORY_PERMISSION_LEASE = ''
 
-    const proc = pty.spawn(file, args, {
+    const proc = this.pty.spawn(file, args, {
       name: 'xterm-256color',
-      cols: 80,
-      rows: 24,
-      cwd,
+      cols: request.cols,
+      rows: request.rows,
+      cwd: request.cwd,
       env
     })
 
     const state: Spawned = {
       proc,
-      cols: 80,
-      rows: 24,
+      cols: request.cols,
+      rows: request.rows,
       marker,
       markerSeen: false,
-      jobStartup: process.platform === 'win32' ? new JobStartupStatus(Date.now()) : null,
+      jobStartup: process.platform === 'win32' ? new JobStartupStatus(this.now()) : null,
       preBuf: '',
       kickTimers: []
     }
@@ -109,7 +174,7 @@ export class PtyManager extends EventEmitter {
     // time a kick fires, hence state.cols/rows read at fire time.
     if (process.platform === 'win32') {
       state.kickTimers = CONPTY_KICK_DELAYS_MS.map((ms) =>
-        setTimeout(() => {
+        this.schedule(() => {
           if (this.procs.get(id) !== state) return
           try {
             state.proc.resize(state.cols, state.rows)
@@ -121,20 +186,20 @@ export class PtyManager extends EventEmitter {
     }
 
     proc.onData((data) => {
+      if (this.procs.get(id) !== state) return
       if (RAW_CAPTURE_FILE && rawCaptureCount < RAW_CAPTURE_LIMIT) this.captureRawChunk(id, data)
       this.handleData(id, data)
     })
     proc.onExit(({ exitCode }) => {
-      // Only react if THIS proc is still the one registered for `id`. A kill()
-      // (remove/closeAll) deletes procs[id] before killing, and a spawn() during
-      // restart replaces procs[id] with a fresh state -- in both cases the dying
-      // proc's late, asynchronous onExit must NOT emit, otherwise it would tear
-      // down a tile that was intentionally closed or just respawned. Emitting
-      // here therefore means strictly "the process exited on its own" (the user
-      // typed /exit, or it crashed).
+      const retired = this.retired.get(proc)
+      if (retired) {
+        this.retired.delete(proc)
+        if (retired.killTimer) this.cancel(retired.killTimer)
+        return
+      }
       if (this.procs.get(id) !== state) return
       this.procs.delete(id)
-      for (const t of state.kickTimers) clearTimeout(t)
+      for (const t of state.kickTimers) this.cancel(t)
       this.emit('exit', { id, exitCode } satisfies PtyExitPayload)
     })
 
@@ -164,9 +229,9 @@ export class PtyManager extends EventEmitter {
   private handleData(id: string, data: string): void {
     const s = this.procs.get(id)
     if (!s) return
-    const jobScan = scanJobStartup(s.jobStartup, data, Date.now)
-    s.jobStartup = jobScan.status
-    if (jobScan.reportFailure) reportError('pty', `kory-job: tree kill disabled for tile ${id}`)
+    if (consumeJobStartup(s, data, this.scanJobStartup, this.now)) {
+      this.reportError('pty', `kory-job: tree kill disabled for tile ${id}`)
+    }
     if (!s.marker || s.markerSeen) {
       this.emit('data', { id, data } satisfies PtyDataPayload)
       return
@@ -181,7 +246,7 @@ export class PtyManager extends EventEmitter {
       s.markerSeen = true
       s.preBuf = ''
       if (rest) this.emit('data', { id, data: rest } satisfies PtyDataPayload)
-    } else if (s.preBuf.length > MARKER_BUFFER_CAP) {
+    } else if (s.preBuf.length > MARKER_BUFFER_CAP_CODE_UNITS) {
       // Marker never showed up; stop swallowing and flush what we have.
       const buf = s.preBuf
       s.markerSeen = true
@@ -190,7 +255,6 @@ export class PtyManager extends EventEmitter {
     }
   }
 
-  /** Returns false when no live PTY carries this id (write silently dropped). */
   write(id: string, data: string): boolean {
     const s = this.procs.get(id)
     if (!s) return false
@@ -218,19 +282,35 @@ export class PtyManager extends EventEmitter {
     return this.procs.get(id)?.proc.pid ?? null
   }
 
-  kill(id: string): void {
-    const s = this.procs.get(id)
-    if (!s) return
-    this.procs.delete(id)
-    for (const t of s.kickTimers) clearTimeout(t)
+  private retryKill(proc: IPty, retired: Retired): void {
     try {
-      s.proc.kill()
-    } catch {
-      // already gone
+      proc.kill()
+    } catch (error) {
+      this.reportError('pty', `failed to kill retired PTY for tile ${retired.id} pid ${retired.pid}`, error)
     }
   }
 
+  private retire(id: string, state: Spawned): void {
+    for (const timer of state.kickTimers) this.cancel(timer)
+    const retired: Retired = { id, pid: state.proc.pid, killTimer: null }
+    this.retired.set(state.proc, retired)
+    retired.killTimer = this.schedule(() => {
+      if (this.retired.get(state.proc) !== retired) return
+      retired.killTimer = null
+      this.reportError('pty', `kill not acknowledged for tile ${retired.id} pid ${retired.pid}`)
+    }, KILL_ACK_TIMEOUT_MS)
+    this.retryKill(state.proc, retired)
+  }
+
+  kill(id: string): void {
+    const state = this.procs.get(id)
+    if (!state) return
+    this.procs.delete(id)
+    this.retire(id, state)
+  }
+
   killAll(): void {
+    for (const [proc, retired] of this.retired) this.retryKill(proc, retired)
     for (const id of [...this.procs.keys()]) this.kill(id)
   }
 }

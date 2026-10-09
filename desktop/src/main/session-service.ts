@@ -449,28 +449,20 @@ export class SessionService extends EventEmitter {
     // never shows the dialog, so neither the ack nor the pending-prompt
     // injection fires; falls back to manual typing.
     this.startupAckDetector.on('ack', ({ id }: StartupAckEvent) => {
-      // Card 4f0143ff review (MAJOR 3 follow-up): this dialog's text has no
-      // further reason to sit in AttentionDetector's retained buffer once
-      // it's confirmed dismissed -- purge it (buf only, not `waiting`; see
-      // purgeScreenMemory's own comment). Belt-and-suspenders alongside the
-      // tightened raise-side exemption: this event-driven purge ties the
-      // buffer's lifetime to a real fact instead of relying solely on the
-      // sliding MAX_BUF window.
       this.attentionDetector.purgeScreenMemory(id)
       setTimeout(() => {
         const r = this.runtime.get(id)
         if (!r || r.status === 'exited') return
-        this.pty.write(id, '\r')
+        if (!this.pty.write(id, '\r')) return
         const name = this.defs.find((d) => d.id === id)?.name
         this.emit('startup-ack', { id, name })
 
         const prompt = this.pendingPrompt.get(id)
         if (!prompt) return
-        this.pendingPrompt.delete(id)
         setTimeout(() => {
           const r2 = this.runtime.get(id)
           if (!r2 || r2.status === 'exited') return
-          this.pty.write(id, encodeInitialPromptKeystrokes(prompt))
+          if (this.pty.write(id, encodeInitialPromptKeystrokes(prompt))) this.pendingPrompt.delete(id)
         }, PROMPT_INJECT_SETTLE_MS)
       }, STARTUP_ACK_SETTLE_MS)
     })
@@ -920,20 +912,20 @@ export class SessionService extends EventEmitter {
   }
 
   /**
-   * Closes every session and clears the set; no-op when already empty.
+   * Closes every session and clears the set.
    * Emits 'removed' per destroyed def so the journal entry and token revocation
    * both fire for every closed tile, not only the single-remove path.
    * Caller is expected to have detached/saved the current workspace first; the
    * auto-save guard ignores this empty broadcast.
    */
   closeAll(): void {
-    if (this.defs.length === 0) return
     this.revokeAllPermissionLeases()
     for (const d of this.defs) {
       this.emit('removed', { id: d.id, name: d.name })
       if (d.sessionId) this.registry.release(d.sessionId)
     }
     this.pty.killAll()
+    if (this.defs.length === 0) return
     for (const d of this.defs) void this.cleanupSandbox(d.id, d.name)
     this.thinkingDetector.stop()
     this.quotaDetector.stop()
@@ -1278,8 +1270,6 @@ export class SessionService extends EventEmitter {
   }
 
   write(id: string, data: string): void {
-    // Writing into a dead PTY is a silent no-op at the pty layer; leave one
-    // trace per session so "I type and nothing happens" is diagnosable (O6).
     if (!this.pty.write(id, data) && !this.deadWriteReported.has(id)) {
       this.deadWriteReported.add(id)
       const name = this.defs.find((d) => d.id === id)?.name ?? id.slice(0, 8)
@@ -1669,16 +1659,14 @@ export class SessionService extends EventEmitter {
     const enabled = def.autoResume ?? this.getConfig().autoResumeQuota
     if (!enabled || !r.rateLimited || !this.pty.isAlive(id)) return
 
-    this.pty.write(id, '\x1b')
+    if (!this.pty.write(id, '\x1b')) return
     const t = setTimeout(() => {
       if (!this.pty.isAlive(id)) return
-      this.pty.write(id, 'continue')
-      this.pty.write(id, '\r')
+      if (!this.pty.write(id, 'continue')) return
+      if (!this.pty.write(id, '\r')) return
+      this.emit('quota', { id, limited: true, resetAt: r.resumeAt, resumed: true })
     }, 100)
     if (typeof t.unref === 'function') t.unref()
-    // The episode itself clears via the detector once the new turn's busy cues
-    // appear; this event only lets the renderer toast the injection.
-    this.emit('quota', { id, limited: true, resetAt: r.resumeAt, resumed: true })
   }
 
   /** Types a command into tile `id` once its earlier injections are done. */
@@ -1725,7 +1713,7 @@ export class SessionService extends EventEmitter {
         return 'refused-modal'
       }
     }
-    this.pty.write(id, '\x1b')
+    if (!this.pty.write(id, '\x1b')) return 'no-terminal'
     return 'interrupted'
   }
 
