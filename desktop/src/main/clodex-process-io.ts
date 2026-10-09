@@ -22,6 +22,7 @@ import {
   type WindowsProcessStamp
 } from "./clodex-process-identity";
 import { buildShellInvocation } from "./shell-command";
+import { CREATION_STAMP_RE, measurePosixProcessStamp, measureWindowsProcessStamp } from "./process-stamp";
 import { canonicalPath } from "./worktree-service";
 import { system32Dir } from "./windows-system-root";
 
@@ -31,18 +32,10 @@ const SCOPE = "clodex";
 /** Manifest clodex writes for every server it runs. */
 const RUNTIME_FILE = "server-runtime.json";
 
-/** `.ToString('o')` on a UTC DateTime: seven fraction digits, kept verbatim. */
-const CREATION_STAMP_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{1,9}Z$/;
-
 /** `startedAt` of a runtime record. */
 const RUNTIME_INSTANT_RE = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,9})?Z$/;
 
 const DAYS_IN_MONTH = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-
-/** A token of `ps -o lstart=` output, padded by the column width. */
-const PS_MEASUREMENT_RE = /^\s*(\d+)\s+(\S.*)$/;
-
-const DIGITS_RE = /^\d+$/;
 
 /** The command line is glued into a shell invocation: nothing else may reach it. */
 const COMMAND_TOKEN_RE = /^[A-Za-z0-9._-]+$/;
@@ -75,10 +68,6 @@ export function parseClodexProxyArgs(raw: unknown): string[] {
   }
   return tokens;
 }
-
-/** Fields of `/proc/<pid>/stat` are numbered from 1, and the first two go with `comm`. */
-const PROC_PGRP_INDEX = 5 - 3;
-const PROC_STARTTIME_INDEX = 22 - 3;
 
 const DEFAULT_REGISTER_ATTEMPTS = 40;
 const DEFAULT_REGISTER_INTERVAL_MS = 250;
@@ -318,20 +307,6 @@ function parseRuntimeRecord(value: unknown): RuntimeRecord | null {
   return { pid, port, mode: entry.mode, startedAt };
 }
 
-function parseProcStat(pid: number, raw: string): PosixMeasurement {
-  const close = raw.lastIndexOf(")");
-  if (close < 0) throw new Error(`Cannot read the state of pid ${pid}: malformed stat line`);
-  const fields = raw.slice(close + 1).trim().split(/\s+/);
-  const pgrp = fields[PROC_PGRP_INDEX];
-  const startToken = fields[PROC_STARTTIME_INDEX];
-  if (pgrp === undefined || !DIGITS_RE.test(pgrp) || startToken === undefined || !DIGITS_RE.test(startToken)) {
-    throw new Error(`Cannot read the group and start time of pid ${pid}: unexpected stat fields`);
-  }
-  const pgid = requirePositiveInteger(Number(pgrp));
-  if (pgid === null) throw new Error(`Cannot read the group of pid ${pid}: ${pgrp}`);
-  return { pid, startToken, pgid };
-}
-
 export function createClodexProcessIo(
   deps: ClodexProcessDeps,
   options: ClodexProcessOptions = {}
@@ -385,43 +360,14 @@ export function createClodexProcessIo(
   });
 
   const stampWin32 = async (pid: number): Promise<WindowsProcessStamp> => {
-    const target = requirePid(pid);
-    const { code, stdout, stderr } = await deps.run("powershell.exe", [
-      "-NoLogo",
-      "-NoProfile",
-      "-Command",
-      `(Get-Process -Id ${target}).StartTime.ToUniversalTime().ToString('o')`
-    ]);
-    const creationUtc = stdout.trim();
-    if (code !== 0 || !CREATION_STAMP_RE.test(creationUtc)) {
-      throw new Error(`Cannot measure the creation time of pid ${target} (exit ${code}): ${stderr.trim()}`);
-    }
-    return { pid: target, creationUtc };
+    const stamp = await measureWindowsProcessStamp(deps, pid);
+    return { pid: stamp.pid, creationUtc: stamp.creationUtc };
   };
 
-  /**
-   * linux reads jiffies; darwin has no `/proc` and only offers a one-second
-   * resolution, locale-dependent `lstart`. A locale that changes between the
-   * persisted token and the re-measured one makes them differ, which refuses
-   * a kill rather than allowing a wrong one.
-   */
   const measurePosix = async (pid: number): Promise<PosixMeasurement> => {
-    const target = requirePid(pid);
-    if (deps.platform === "linux") {
-      const raw = deps.readFile(`/proc/${target}/stat`);
-      if (raw === null) throw new Error(`Cannot measure the start time of pid ${target}: no stat entry`);
-      return parseProcStat(target, raw);
-    }
-    const { code, stdout, stderr } = await deps.run("ps", ["-o", "pgid=,lstart=", "-p", String(target)]);
-    const match = PS_MEASUREMENT_RE.exec(stdout.trim());
-    if (code !== 0 || !match) {
-      throw new Error(`Cannot measure the start time of pid ${target} (exit ${code}): ${stderr.trim()}`);
-    }
-    const pgid = requirePositiveInteger(Number(match[1]));
-    if (pgid === null) throw new Error(`Cannot read the group of pid ${target}: ${match[1]}`);
-    // Column padding depends on the widest value of the row set, so the token
-    // is collapsed the same way whether it is persisted or re-measured.
-    return { pid: target, startToken: match[2]!.replace(/\s+/g, " ").trim(), pgid };
+    if (deps.platform === "win32") throw new Error("Cannot measure a POSIX process on win32");
+    const stamp = await measurePosixProcessStamp(deps, deps.platform, pid);
+    return { pid: stamp.pid, startToken: stamp.startToken, pgid: stamp.pgid };
   };
 
   const isAlive = async (identity: ProcessIdentity): Promise<boolean> => {

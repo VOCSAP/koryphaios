@@ -79,10 +79,57 @@ function hasBoundedApprovalClose(source: string): boolean {
   return source.includes("{ label: 'approvals', timeoutMs: 2_000, run: () => approvals.close() }");
 }
 
+function extractServeShutdown(source: string): (deps: {
+  serve: { stop(): Promise<void> }
+  sessionDir: { close(): void }
+  removeSessionStateDir: (dir: string, groupId: string, report: unknown) => void
+  appStateDir: () => string
+  activeScope: { groupId: string }
+  reportSessionState: unknown
+}) => Promise<void> {
+  const match = /label: 'serve',\s*timeoutMs: 16_000,\s*run: async \(\) => \{([\s\S]*?)\n      \}/.exec(source)
+  if (!match) throw new Error('missing Serve shutdown effect')
+  return new Function('deps', `const { serve, sessionDir, removeSessionStateDir, appStateDir, activeScope, reportSessionState } = deps; return (async () => {${match[1]!}})()`) as (deps: {
+    serve: { stop(): Promise<void> }
+    sessionDir: { close(): void }
+    removeSessionStateDir: (dir: string, groupId: string, report: unknown) => void
+    appStateDir: () => string
+    activeScope: { groupId: string }
+    reportSessionState: unknown
+  }) => Promise<void>
+}
+
 test("the main process bounds and awaits approval revocation at quit", () => {
   const source = readFileSync(join(import.meta.dir, "..", "desktop", "src", "main", "index.ts"), "utf8");
   expect(hasBoundedApprovalClose(source)).toBe(true);
   expect(hasBoundedApprovalClose(source.replace("run: () => approvals.close()", "run: () => void approvals.close()"))).toBe(false);
+});
+
+test("Serve shutdown finishes before both session cleanup operations", async () => {
+  const source = readFileSync(join(import.meta.dir, "..", "desktop", "src", "main", "index.ts"), "utf8");
+  const run = extractServeShutdown(source)
+  const order: string[] = []
+  let releaseStop = (): void => {}
+  const stopped = new Promise<void>((resolve) => {
+    releaseStop = () => {
+      order.push('serve stopped')
+      resolve()
+    }
+  })
+
+  const pending = run({
+    serve: { stop: () => stopped },
+    sessionDir: { close: () => order.push('session dir closed') },
+    removeSessionStateDir: () => order.push('session state removed'),
+    appStateDir: () => 'C:/state',
+    activeScope: { groupId: 'group' },
+    reportSessionState: undefined
+  })
+  expect(order).toEqual([])
+  releaseStop()
+  await pending
+
+  expect(order).toEqual(['serve stopped', 'session dir closed', 'session state removed'])
 });
 
 test("the first pass prevents the default quit, runs every effect once and quits itself", async () => {

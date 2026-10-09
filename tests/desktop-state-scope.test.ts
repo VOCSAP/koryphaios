@@ -112,6 +112,13 @@ const STATE_SCOPES: Record<string, StateFileRule> = {
     wiring: [{ callee: "writeDemoScenarioFile", dirArg: 0 }],
     reason: "the operator's scenario text for this window's demo run; two concurrent demos at the root would swap scenarios",
   },
+  "serve.log": {
+    kind: "literal",
+    scope: "session",
+    module: "serve-service.ts",
+    wiring: [{ callee: "ServeService", dirArg: { prop: "sessionDir" } }],
+    reason: "child stdout and stderr of this window's served project; a shared root would mix output from a different Deck run",
+  },
 
   // ----- PROJECT: belongs to the repository, whatever the window -----
   "review-pending.json": {

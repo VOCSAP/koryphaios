@@ -175,6 +175,7 @@ import { startDesignEndpoint, type DesignEndpoint } from './design-endpoint'
 import { createClodexController, type ClodexController } from './clodex-lifecycle-controller'
 import { announceModelsChanged } from './model-registry'
 import { createBeforeQuitHandler } from './before-quit'
+import { ServeService } from './serve-service'
 import { createAvatarClient } from './avatar-client'
 import { boundedAvatarDetach, deckAvatarClientOptions } from './avatar-deck-link'
 import { avatarLaunchCommand, ensureAvatar, spawnDetachedAvatar } from './avatar-ensure'
@@ -330,6 +331,7 @@ const appStateDir = (): string => join(app.getPath('userData'), APP_STATE_SUBDIR
 // directory was removed throws into its own error sink instead of
 // recreating it.
 const sessionDir = createSessionDirAccessor({ stateDir: appStateDir, groupId: () => activeScope.groupId })
+const serve = new ServeService({ sessionDir })
 
 // Guard rules (TTSR): one compiled rules file per tile, under this window's
 // session dir so it dies with the window. Created before setConfig, which
@@ -3553,12 +3555,14 @@ const runBeforeQuit = createBeforeQuitHandler({
       }
     },
     { label: 'service', run: () => service.stop() },
-    // A stable group id does not make its peers stable, so session-scoped state
-    // dies with the window, ephemeral and custom scopes alike.
-    { label: 'sessionDir', run: () => sessionDir.close() },
     {
-      label: 'sessionState',
-      run: () => removeSessionStateDir(appStateDir(), activeScope.groupId, reportSessionState)
+      label: 'serve',
+      timeoutMs: 16_000,
+      run: async () => {
+        await serve.stop()
+        sessionDir.close()
+        removeSessionStateDir(appStateDir(), activeScope.groupId, reportSessionState)
+      }
     },
     { label: 'sandbox', run: () => sandbox.stopCurrentDetached() },
     { label: 'controlServer', run: () => controlServer?.close() },
