@@ -228,6 +228,38 @@ test('rejects a control or format character hidden in the command or an env valu
   }
 })
 
+test('holds url and health to the loopback host and port of the server the action starts', async () => {
+  const rejected: Array<{ field: 'url' | 'health'; value: string; port?: number }> = [
+    { field: 'url', value: 'http://192.168.1.10:${PORT}/' },
+    { field: 'health', value: 'http://169.254.169.254:${PORT}/latest/meta-data' },
+    { field: 'health', value: 'http://localhost.evil.test:${PORT}/' },
+    { field: 'health', value: 'http://[::1]:${PORT}/' },
+    { field: 'health', value: 'http://user@127.0.0.1:${PORT}/' },
+    { field: 'health', value: 'http://127.0.0.1:${PORT}@evil.test/' },
+    { field: 'health', value: 'http://127.0.0.1/health' },
+    { field: 'health', value: 'http://127.0.0.1:22/' },
+    { field: 'health', value: 'http://127.0.0.1:5000/', port: 4000 },
+    { field: 'url', value: 'file:///etc/passwd' },
+    { field: 'url', value: 'ftp://${HOST}:${PORT}/' }
+  ]
+  for (const { field, value, port } of rejected) {
+    const fixture = validServeJson()
+    actionOf(fixture)[field] = value
+    if (port !== undefined) actionOf(fixture).port = port
+    await expect(validateServeConfig(fixture, createProject()), `${field} = ${value}`).rejects.toThrow(`${field}: must be an http(s) URL on`)
+  }
+
+  const accepted: Array<{ url: string; health: string; port?: number }> = [
+    { url: 'http://${HOST}:${PORT}/', health: 'https://localhost:${PORT}/ready?x=1#y' },
+    { url: 'http://127.0.0.1:4000/', health: 'http://${HOST}:${PORT}/health', port: 4000 }
+  ]
+  for (const { url, health, port } of accepted) {
+    const fixture = validServeJson()
+    Object.assign(actionOf(fixture), { url, health }, port === undefined ? {} : { port })
+    expect((await validateServeConfig(fixture, createProject())).actions[0]).toMatchObject({ url, health })
+  }
+})
+
 test('rejects a bidi override hidden in the cwd', async () => {
   const fixture = validServeJson()
   actionOf(fixture).cwd = `web${String.fromCharCode(0x202e)}bin`

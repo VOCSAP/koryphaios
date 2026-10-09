@@ -166,6 +166,24 @@ function parseInheritedEnv(value: unknown): string[] {
   })
 }
 
+const DEV_SERVER_HOSTS = new Set(['${HOST}', '127.0.0.1', 'localhost'])
+const URL_AUTHORITY = /^https?:\/\/([^/?#]*)(?:[/?#]|$)/
+
+/**
+ * `health` is fetched by the Deck and neither url nor health is in the approval
+ * hash, so both are held to the server the action starts: loopback host, its port.
+ */
+function assertDevServerUrl(value: string, field: 'url' | 'health', port: 'auto' | number): void {
+  const authority = URL_AUTHORITY.exec(value)?.[1]
+  const separator = authority?.lastIndexOf(':') ?? -1
+  const host = authority?.slice(0, separator)
+  const declaredPort = authority?.slice(separator + 1)
+  const allowedPorts = port === 'auto' ? ['${PORT}'] : ['${PORT}', String(port)]
+  if (separator < 0 || !DEV_SERVER_HOSTS.has(host ?? '') || !allowedPorts.includes(declaredPort ?? '')) {
+    reject(field, `must be an http(s) URL on \${HOST}, 127.0.0.1 or localhost, port ${allowedPorts.join(' or ')}`)
+  }
+}
+
 async function parseAction(value: unknown, projectDir: string): Promise<ServeAction> {
   const action = requireRecord(value, 'actions[0]')
   assertKnownFields(action, SERVE_CONFIG_FIELD_NAMES.action)
@@ -181,14 +199,17 @@ async function parseAction(value: unknown, projectDir: string): Promise<ServeAct
   }
   const command = requireText(action.command, 'command')
   assertVisibleText(command, 'command', 'the command')
+  const port = parsePort(action.port)
   const url = requireText(action.url, 'url')
+  assertDevServerUrl(url, 'url', port)
   const health = action.health === undefined ? url : requireText(action.health, 'health')
+  assertDevServerUrl(health, 'health', port)
 
   return {
     name,
     cwd,
     command,
-    port: parsePort(action.port),
+    port,
     url,
     health,
     readyTimeoutSec: parseReadyTimeout(action.readyTimeoutSec),
