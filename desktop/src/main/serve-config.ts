@@ -1,6 +1,6 @@
 import { readFile } from 'node:fs/promises'
 import { isAbsolute, join } from 'node:path'
-import { commandHash, resolveApprovedLaunchCommand } from './launch-approval'
+import { approve, commandHash, isApproved } from './launch-approval'
 import { reportError } from './log'
 import { resolveWithin } from './explorer-service'
 
@@ -47,7 +47,8 @@ export interface ServeConfig {
   primary?: string
 }
 
-export type ServeConfigReadResult = { config: ServeConfig } | { error: string }
+/** `path` is the real serve.json path, contained in the project: the file shown to the operator is the one read. */
+export type ServeConfigReadResult = { config: ServeConfig; path: string } | { error: string }
 
 declare const APPROVED: unique symbol
 
@@ -245,9 +246,11 @@ export async function validateServeConfig(raw: unknown, projectDir: string): Pro
 }
 
 export async function readServeConfig(projectDir: string): Promise<ServeConfigReadResult> {
+  let path: string
   let text: string
   try {
-    text = await readFile(join(projectDir, ...SERVE_FILE), 'utf-8')
+    path = await resolveWithin(projectDir, join(...SERVE_FILE))
+    text = await readFile(path, 'utf-8')
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
       return { error: 'missing' }
@@ -265,7 +268,7 @@ export async function readServeConfig(projectDir: string): Promise<ServeConfigRe
   }
 
   try {
-    return { config: await validateServeConfig(raw, projectDir) }
+    return { config: await validateServeConfig(raw, projectDir), path }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     reportError('serve-config', `rejected serve.json: ${message}`, error)
@@ -293,23 +296,31 @@ export function serveApprovalHash(config: ServeConfig): string {
   return commandHash(serveApprovalPayload(config))
 }
 
-export function resolveApprovedServeConfig(opts: {
+/**
+ * Same approvals key and stored hash as the launch-command gate, so an approval
+ * granted before the dialog became asynchronous stays valid. A refusal or a
+ * failed dialog persists nothing.
+ */
+export async function resolveApprovedServeConfig(opts: {
   config: ServeConfig
   projectKey: string
   approvalsFile: string
-  confirm: (details: ServeApprovalPrompt) => boolean
-}): ServeApprovalResult {
+  confirm: (details: ServeApprovalPrompt) => Promise<boolean>
+}): Promise<ServeApprovalResult> {
   const action = structuredClone(opts.config.actions[0])
-  const decision = resolveApprovedLaunchCommand({
-    projectKey: `${opts.projectKey}::serve`,
-    projectCommand: serveApprovalPayload({ ...opts.config, actions: [action] }),
-    fallback: '',
-    approvalsFile: opts.approvalsFile,
-    confirm: () =>
-      opts.confirm({ command: action.command, cwd: action.cwd, env: action.env, inheritEnv: action.inheritEnv, port: action.port })
-  })
-  if (decision.source === 'project') {
-    return { config: opts.config, action: mint(action), prompted: decision.prompted }
+  const key = `${opts.projectKey}::serve`
+  const payload = serveApprovalPayload({ ...opts.config, actions: [action] })
+  if (isApproved(opts.approvalsFile, key, payload)) {
+    return { config: opts.config, action: mint(action), prompted: false }
   }
-  return { error: 'refused', prompted: true }
+  let granted: boolean
+  try {
+    granted = await opts.confirm({ command: action.command, cwd: action.cwd, env: action.env, inheritEnv: action.inheritEnv, port: action.port })
+  } catch (error) {
+    reportError('serve-config', 'the serve.json approval dialog failed; nothing was approved', error)
+    granted = false
+  }
+  if (!granted) return { error: 'refused', prompted: true }
+  approve(opts.approvalsFile, key, payload)
+  return { config: opts.config, action: mint(action), prompted: true }
 }

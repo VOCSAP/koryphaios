@@ -2,6 +2,7 @@ import { afterAll, afterEach, beforeAll, expect, test } from 'bun:test'
 import {
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   rmSync,
@@ -9,7 +10,8 @@ import {
   writeFileSync
 } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, relative } from 'node:path'
+import { approve, readApprovals } from '../desktop/src/main/launch-approval.ts'
 import { initDeckLog } from '../desktop/src/main/log.ts'
 import {
   SERVE_APPROVAL_FIELDS,
@@ -19,6 +21,7 @@ import {
   readServeConfig,
   resolveApprovedServeConfig,
   serveApprovalHash,
+  serveApprovalPayload,
   type ServeApprovalPrompt,
   type ServeConfig,
   type ServeConfigReadResult,
@@ -289,11 +292,11 @@ test('rejects a bidi override hidden in the cwd', async () => {
 test('mints a frozen copy of the approved action that the returned config does not share', async () => {
   const project = createProject()
   const config = await validConfig(project)
-  const approved = resolveApprovedServeConfig({
+  const approved = await resolveApprovedServeConfig({
     config,
     projectKey: 'github.com/acme/web',
     approvalsFile: join(project, 'launch-approvals.json'),
-    confirm: () => true
+    confirm: async () => true
   })
   if (!('action' in approved)) throw new Error('approval refused')
   const action = approved.action
@@ -411,11 +414,11 @@ test('requires one explicit approval before exposing a repository serve config',
   const approvalsFile = join(project, 'launch-approvals.json')
   let prompt: ServeApprovalPrompt | undefined
 
-  const refused = resolveApprovedServeConfig({
+  const refused = await resolveApprovedServeConfig({
     config,
     projectKey: 'github.com/acme/web',
     approvalsFile,
-    confirm: (details) => {
+    confirm: async (details) => {
       prompt = details
       return false
     }
@@ -432,11 +435,11 @@ test('requires one explicit approval before exposing a repository serve config',
     [...SERVE_APPROVAL_FIELDS].sort()
   )
 
-  const approved = resolveApprovedServeConfig({
+  const approved = await resolveApprovedServeConfig({
     config,
     projectKey: 'github.com/acme/web',
     approvalsFile,
-    confirm: () => true
+    confirm: async () => true
   })
   expect(approved).toMatchObject({ action, prompted: true })
 
@@ -444,16 +447,105 @@ test('requires one explicit approval before exposing a repository serve config',
     ...config,
     actions: [{ ...action, readyTimeoutSec: 45 }]
   }
-  const retainedApproval = resolveApprovedServeConfig({
+  const retainedApproval = await resolveApprovedServeConfig({
     config: changedTimeout,
     projectKey: 'github.com/acme/web',
     approvalsFile,
-    confirm: () => {
+    confirm: async () => {
       throw new Error('ready timeout must not require a new approval')
     }
   })
   expect('config' in retainedApproval).toBe(true)
   expect(retainedApproval.prompted).toBe(false)
+})
+
+test('honours an approval stored under the launch-command key without prompting again', async () => {
+  const project = createProject()
+  const config = await validConfig(project)
+  const approvalsFile = join(project, 'launch-approvals.json')
+  approve(approvalsFile, 'github.com/acme/web::serve', serveApprovalPayload(config))
+
+  const result = await resolveApprovedServeConfig({
+    config,
+    projectKey: 'github.com/acme/web',
+    approvalsFile,
+    confirm: async () => {
+      throw new Error('a stored approval must not prompt')
+    }
+  })
+
+  expect(result).toMatchObject({ prompted: false })
+  expect('action' in result).toBe(true)
+})
+
+test('persists nothing when the operator refuses or the dialog fails', async () => {
+  const project = createProject()
+  const config = await validConfig(project)
+  const approvalsFile = join(project, 'launch-approvals.json')
+
+  for (const confirm of [async () => false, async () => Promise.reject(new Error('dialog gone'))]) {
+    expect(await resolveApprovedServeConfig({ config, projectKey: 'github.com/acme/web', approvalsFile, confirm })).toEqual({
+      error: 'refused',
+      prompted: true
+    })
+  }
+  expect(readApprovals(approvalsFile)).toEqual({})
+
+  await resolveApprovedServeConfig({ config, projectKey: 'github.com/acme/web', approvalsFile, confirm: async () => true })
+  expect(readApprovals(approvalsFile)).toEqual({ 'github.com/acme/web::serve': serveApprovalHash(config) })
+})
+
+test('writes launch-approvals.json only from the three native-dialog gates', () => {
+  const root = join(import.meta.dir, '..', 'desktop', 'src')
+  const sites: string[] = []
+  const walk = (dir: string): void => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const path = join(dir, entry.name)
+      if (entry.isDirectory()) walk(path)
+      else if (/\.tsx?$/.test(entry.name)) {
+        readFileSync(path, 'utf8')
+          .split(/\r?\n/)
+          .forEach((line) => {
+            const code = line.trim()
+            if (code.startsWith('*') || code.startsWith('//') || code.startsWith('/*') || code.startsWith('export function approve(')) return
+            if (/\bapprove\(/.test(code)) sites.push(relative(root, path).replace(/\\/g, '/'))
+          })
+      }
+    }
+  }
+  walk(root)
+
+  expect(sites.sort(), 'approve( call sites: launch-command gate, shell-field gate, serve.json gate').toEqual([
+    'main/index.ts',
+    'main/launch-approval.ts',
+    'main/serve-config.ts'
+  ])
+})
+
+test('refuses a serve.json reached through a link that leaves the project', async () => {
+  const outer = realpathSync.native(mkdtempSync(join(tmpdir(), 'cp-serve-escape-')))
+  try {
+    const project = join(outer, 'project')
+    const elsewhere = join(outer, 'elsewhere')
+    mkdirSync(join(project, '.claude'), { recursive: true })
+    mkdirSync(join(project, 'web'), { recursive: true })
+    mkdirSync(elsewhere, { recursive: true })
+    writeFileSync(join(elsewhere, 'serve.json'), JSON.stringify(validServeJson()), 'utf-8')
+    symlinkSync(elsewhere, join(project, '.claude', 'claude-peers'), 'junction')
+
+    expect(await readServeConfig(project)).toEqual({ error: 'read' })
+  } finally {
+    rmSync(outer, { recursive: true, force: true })
+  }
+})
+
+test('reports the real, contained path of the serve.json it read', async () => {
+  const project = createProject()
+  writeServeJson(project, validServeJson())
+
+  const result = await readServeConfig(project)
+
+  expect('path' in result && result.path).toBe(realpathSync.native(servePath(project)))
 })
 
 test('canonicalizes a symlinked project prefix before accepting cwd', async () => {

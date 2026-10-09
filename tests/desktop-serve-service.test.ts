@@ -75,12 +75,12 @@ class FakeClock {
 const approvals = mkdtempSync(join(tmpdir(), 'cp-serve-service-approvals-'))
 afterAll(() => rmSync(approvals, { recursive: true, force: true }))
 
-function action(overrides: Partial<ServeAction> = {}): ApprovedServeAction {
-  const result = resolveApprovedServeConfig({
+async function action(overrides: Partial<ServeAction> = {}): Promise<ApprovedServeAction> {
+  const result = await resolveApprovedServeConfig({
     config: { version: 1, actions: [unapprovedAction(overrides)] },
     projectKey: 'github.com/acme/web',
     approvalsFile: join(approvals, 'launch-approvals.json'),
-    confirm: () => true
+    confirm: async () => true
   })
   if (!('action' in result)) throw new Error('test serve action was refused')
   return result.action
@@ -257,7 +257,7 @@ const ESCALATION: Array<{ pid: number; signal: NodeJS.Signals }> = [
 
 async function readyHarness(init: HarnessInit = {}): Promise<ReturnType<typeof harness>> {
   const h = harness({ statuses: [200], ...init })
-  await h.service.start(action())
+  await h.service.start(await action())
   await settle()
   expect(h.service.state().status).toBe('ready')
   return h
@@ -297,7 +297,7 @@ test('bounds a system command and keeps the failure message when stderr is empty
 test('launches the Windows shell through the System32 PowerShell path without detaching it', async () => {
   const h = harness({ platform: 'win32' })
 
-  await h.service.start(action())
+  await h.service.start(await action())
 
   expect(h.spawns[0]?.file).toBe(POWERSHELL)
   expect(h.spawns[0]?.options.detached).toBe(false)
@@ -306,7 +306,7 @@ test('launches the Windows shell through the System32 PowerShell path without de
 test('refuses to start on Windows when SystemRoot is not a canonical absolute path', async () => {
   const h = harness({ platform: 'win32', systemRoot: 'C:\\Windows\\..\\clone' })
 
-  await h.service.start(action())
+  await h.service.start(await action())
 
   expect(h.spawns).toEqual([])
   expect(h.service.state()).toEqual({ status: 'failed', error: 'cannot resolve Windows system executable: dot-dot' })
@@ -315,7 +315,7 @@ test('refuses to start on Windows when SystemRoot is not a canonical absolute pa
 test('starts a detached shell command with substituted action values', async () => {
   const h = harness()
 
-  await h.service.start(action())
+  await h.service.start(await action())
   await settle()
 
   expect(h.spawns).toHaveLength(1)
@@ -349,7 +349,7 @@ test('probes health without following redirects, a redirect counting as ready', 
     }
   })
 
-  await h.service.start(action())
+  await h.service.start(await action())
   await settle()
 
   expect(inits).toEqual([{ redirect: 'manual' }])
@@ -359,7 +359,7 @@ test('probes health without following redirects, a redirect counting as ready', 
 test('accepts readiness status 399', async () => {
   const h = harness({ statuses: [399] })
 
-  await h.service.start(action())
+  await h.service.start(await action())
   await settle()
 
   expect(h.service.state().status).toBe('ready')
@@ -377,7 +377,7 @@ test('aborts a health request when its readiness deadline expires', async () => 
     })
   })
 
-  await h.service.start(action())
+  await h.service.start(await action())
   h.clock.advance(1000)
   await settle()
 
@@ -395,7 +395,7 @@ test('cancels the health response body after reading its status', async () => {
     })
   })
 
-  await h.service.start(action())
+  await h.service.start(await action())
   await settle()
 
   expect(cancelled).toBe(1)
@@ -404,7 +404,7 @@ test('cancels the health response body after reading its status', async () => {
 test('does not restore ready after a health response resolves during stop', async () => {
   const response = deferred<ServeFetchResponse>()
   const h = harness({ fetch: async () => response.promise })
-  await h.service.start(action())
+  await h.service.start(await action())
   await settle()
 
   const stopping = h.service.stop()
@@ -426,7 +426,7 @@ test('reports a rejected health response body cancellation', async () => {
     })
   })
 
-  await h.service.start(action())
+  await h.service.start(await action())
   await settle()
 
   expect(h.errors).toEqual(['could not cancel serve health response body'])
@@ -451,7 +451,7 @@ test('reports a throwing state listener and still settles the quit', async () =>
 test('fails readiness after its timeout and stops the owned process', async () => {
   const h = harness({ statuses: [500, 500, 500] })
 
-  await h.service.start(action())
+  await h.service.start(await action())
   await settle()
   h.clock.advance(500)
   await settle()
@@ -480,13 +480,13 @@ test('stops the POSIX process group when the session log cannot open after spawn
     }
   })
 
-  await h.service.start(action())
+  await h.service.start(await action())
 
   expect(h.signals).toEqual([{ pid: -PID, signal: 'SIGINT' }])
   expect(h.child.killCalls).toBe(0)
   expect(h.clock.pending()).toEqual([])
   expect(h.service.state()).toMatchObject({ status: 'failed', error: 'could not open the serve log: session state unavailable' })
-  await h.service.start(action())
+  await h.service.start(await action())
   expect(h.spawns).toHaveLength(2)
 })
 
@@ -498,7 +498,7 @@ test('uses taskkill to stop a spawned Windows process whose session log cannot o
     }
   })
 
-  await h.service.start(action())
+  await h.service.start(await action())
   await settle()
 
   expect(h.runs).toEqual([{ file: TASKKILL, args: ['/T', '/F', '/PID', String(PID)] }])
@@ -512,7 +512,7 @@ test('subscribes to child exit and error before the spawn is reported', async ()
     createLog: (child) => listeners.push(child.listenerCount('exit'), child.listenerCount('error'))
   })
 
-  await h.service.start(action())
+  await h.service.start(await action())
 
   expect(listeners).toEqual([1, 1])
 })
@@ -525,7 +525,7 @@ test('reaps the POSIX group of a child that exits while readiness is pending', a
     }
   })
 
-  await h.service.start(action())
+  await h.service.start(await action())
   await settle()
   h.child.exit(17)
   await settle()
@@ -554,7 +554,7 @@ test('reports a signal when the ready process exits unexpectedly', async () => {
 test('reports an error when the session serve log cannot be written', async () => {
   const h = harness()
   const failure = new Error('disk is read-only')
-  await h.service.start(action())
+  await h.service.start(await action())
 
   h.triggerLogWriteFailure('C:/state/sessions/run/serve.log', failure)
 
@@ -578,12 +578,12 @@ test('stops the process group after an unexpected child error', async () => {
 
 test('creates a fresh session logger after an unexpected child exit', async () => {
   const h = harness({ platform: 'win32', statuses: [200, 200] })
-  await h.service.start(action())
+  await h.service.start(await action())
   await settle()
   h.child.exit(1)
   await settle()
 
-  await h.service.start(action())
+  await h.service.start(await action())
   await settle()
 
   expect(h.logDirs).toHaveLength(2)
@@ -592,8 +592,8 @@ test('creates a fresh session logger after an unexpected child exit', async () =
 test('does not spawn twice while a server is starting', async () => {
   const h = harness({ statuses: [500] })
 
-  await h.service.start(action())
-  await h.service.start(action({ command: 'must not spawn' }))
+  await h.service.start(await action())
+  await h.service.start(await action({ command: 'must not spawn' }))
 
   expect(h.spawns).toHaveLength(1)
 })
@@ -612,7 +612,7 @@ test('stopping while the port is allocated never spawns the server', async () =>
   const port = deferred<number>()
   const h = harness({ platform: 'win32', allocatePort: () => port.promise })
 
-  const started = h.service.start(action())
+  const started = h.service.start(await action())
   const stopped = h.service.stop()
   port.resolve(PORT)
   await completeWithin(started, 'start')
@@ -643,7 +643,7 @@ test('creates a fresh logger after a clean stop and restart', async () => {
   h.clock.advance(3000)
   h.clock.advance(3000)
   await stopping
-  await h.service.start(action())
+  await h.service.start(await action())
   await settle()
 
   expect(h.logDirs).toHaveLength(2)
@@ -669,7 +669,7 @@ test('does not write the output of a previous child into the log of the next run
     }
   })
   await h.service.stop()
-  await h.service.start(action())
+  await h.service.start(await action())
   await settle()
 
   h.children[0]!.stdout.emit('data', Buffer.from('previous run'))
@@ -817,7 +817,7 @@ test('keeps dispatching after an error escapes a queued event', async () => {
 })
 
 test('refuses to start an action that did not come from the operator approval', async () => {
-  const minted = action()
+  const minted = await action()
   const forged: unknown[] = [
     unapprovedAction({}),
     { ...minted },
@@ -836,7 +836,7 @@ test('refuses to start an action that did not come from the operator approval', 
 })
 
 test('an approved action cannot be changed between its approval and its spawn', async () => {
-  const approved = action()
+  const approved = await action()
   const h = harness()
 
   expect(() => {
@@ -855,7 +855,7 @@ test('an approved action cannot be changed between its approval and its spawn', 
 test('layers the login environment, inheritEnv, the action env, then HOST and PORT', async () => {
   const h = harness()
 
-  await h.service.start(action({ inheritEnv: ['PATH'], env: { NODE_ENV: 'development' } }))
+  await h.service.start(await action({ inheritEnv: ['PATH'], env: { NODE_ENV: 'development' } }))
 
   const env = h.spawns[0]!.options.env
   expect(env.LOGIN_ONLY, 'the login shell environment is the base').toBe('login')
@@ -869,7 +869,7 @@ test('layers the login environment, inheritEnv, the action env, then HOST and PO
 test('captures the login environment from the home directory with a minimal seed', async () => {
   const h = harness({ env: { ...DECK_ENV, LC_TIME: 'C', TMPDIR: '/tmp/op', LOGNAME: 'op' } })
 
-  await h.service.start(action())
+  await h.service.start(await action())
 
   expect(h.captures).toEqual([
     {
@@ -893,7 +893,7 @@ test('captures the login environment from the home directory with a minimal seed
 test('runs the approved command with /bin/sh without a login shell, whatever the operator shell', async () => {
   const h = harness()
 
-  await h.service.start(action())
+  await h.service.start(await action())
 
   expect(h.spawns[0]?.file).toBe('/bin/sh')
   expect(h.spawns[0]?.args).toEqual(['-c', 'bun run dev -- --host 127.0.0.1 --port 4317'])
@@ -906,7 +906,7 @@ test('fails the start without a partial environment when the login capture fails
     }
   })
 
-  await h.service.start(action())
+  await h.service.start(await action())
 
   expect(h.spawns).toEqual([])
   expect(h.service.state()).toEqual({ status: 'failed', error: 'login shell environment capture printed no end marker' })
@@ -915,7 +915,7 @@ test('fails the start without a partial environment when the login capture fails
 test('keeps the Deck environment as the Windows base without a login capture', async () => {
   const h = harness({ platform: 'win32' })
 
-  await h.service.start(action())
+  await h.service.start(await action())
 
   expect(h.captures).toEqual([])
   expect(h.spawns[0]?.options.env).toMatchObject({ DECK_ONLY: 'deck', HOST: '127.0.0.1', PORT: String(PORT) })
@@ -924,7 +924,7 @@ test('keeps the Deck environment as the Windows base without a login capture', a
 test('captures with /bin/sh and traces it when the operator shell is not listed in /etc/shells', async () => {
   const h = harness({ shell: '/opt/odd/fish', etcShells: '/bin/sh\n/bin/bash\n' })
 
-  await h.service.start(action())
+  await h.service.start(await action())
 
   expect(h.captures.map((request) => request.shell)).toEqual(['/bin/sh'])
   expect(h.errors).toEqual([
@@ -935,7 +935,7 @@ test('captures with /bin/sh and traces it when the operator shell is not listed 
 test('captures with /bin/sh when the operator shell is a relative name, even one /etc/shells lists', async () => {
   const h = harness({ shell: 'zsh', etcShells: 'zsh\n/bin/zsh\n' })
 
-  await h.service.start(action())
+  await h.service.start(await action())
 
   expect(h.captures.map((request) => request.shell)).toEqual(['/bin/sh'])
 })
@@ -954,7 +954,7 @@ async function startWithRealProfile(profile: string): Promise<ReturnType<typeof 
       homeDir: home,
       env: { HOME: home, USER: 'op', SHELL: REAL_BASH, DECK_ONLY: 'deck' }
     })
-    await h.service.start(action())
+    await h.service.start(await action())
     return h
   } finally {
     rmSync(home, { recursive: true, force: true })
@@ -987,7 +987,7 @@ test('refuses to start after quit', async () => {
   const h = harness()
 
   await h.service.quit()
-  const result = await h.service.start(action())
+  const result = await h.service.start(await action())
 
   expect(h.spawns).toEqual([])
   expect(result).toEqual({ outcome: 'quitting', state: { status: 'idle' } })
@@ -997,7 +997,7 @@ test('reports a second start while a server runs as busy, not as started', async
   const h = await readyHarness()
 
   const first = h.service.state()
-  const result = await h.service.start(action({ command: 'must not spawn' }))
+  const result = await h.service.start(await action({ command: 'must not spawn' }))
 
   expect(result).toEqual({ outcome: 'busy', state: first })
   expect(h.spawns).toHaveLength(1)
@@ -1009,9 +1009,10 @@ test('refuses a start requested from inside a state listener without queueing it
       if (signal === 'SIGINT') throw errno('ESRCH')
     }
   })
+  const nestedAction = await action({ command: 'nested start' })
   const nested: Array<Promise<{ outcome: string }>> = []
   h.service.on('changed', (state) => {
-    if (state.status === 'idle' && nested.length === 0) nested.push(h.service.start(action({ command: 'nested start' })))
+    if (state.status === 'idle' && nested.length === 0) nested.push(h.service.start(nestedAction))
   })
 
   await completeWithin(h.service.stop(), 'stop')
@@ -1023,7 +1024,7 @@ test('refuses a start requested from inside a state listener without queueing it
 
 test('writes child standard streams to the session serve log', async () => {
   const h = harness({ statuses: [500] })
-  await h.service.start(action())
+  await h.service.start(await action())
   await settle()
 
   h.child.stdout.emit('data', Buffer.from('server output\n'))

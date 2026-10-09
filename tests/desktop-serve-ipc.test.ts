@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { CHANNEL_TIERS, REMOTE_BLOCKED_CHANNELS, shouldForwardEvent } from '../desktop/src/shared/companion.ts'
 import { initDeckLog } from '../desktop/src/main/log.ts'
-import { isMintedServeAction, readServeConfig, type ServeAction } from '../desktop/src/main/serve-config.ts'
+import { isMintedServeAction, readServeConfig, type ServeAction, type ServeApprovalPrompt } from '../desktop/src/main/serve-config.ts'
 import { createServeIpc, type ServeIpcDeps } from '../desktop/src/main/serve-ipc.ts'
 import type { ServeStartOutcome, ServeState } from '../desktop/src/main/serve-service.ts'
 
@@ -35,15 +35,17 @@ function writeServe(dir: string, command: string): void {
 interface Init {
   allowed?: string[]
   sandbox?: boolean | (() => boolean)
-  confirm?: boolean
+  confirm?: boolean | ((prompt: ServeApprovalPrompt) => Promise<boolean>)
   outcome?: ServeStartOutcome['outcome']
   stateAfter?: ServeState
+  readPath?: string
 }
 
 function harness(init: Init = {}) {
   const started: ServeAction[] = []
   const reads: string[] = []
   const prompts: string[] = []
+  const servePaths: string[] = []
   const errors: string[] = []
   const approvals = mkdtempSync(join(tmpdir(), 'cp-serve-ipc-approvals-'))
   dirs.push(approvals)
@@ -56,13 +58,15 @@ function harness(init: Init = {}) {
     sandboxEnabled: () => (typeof init.sandbox === 'function' ? init.sandbox() : (init.sandbox ?? false)),
     readServeConfig: async (dir) => {
       reads.push(dir)
-      return readServeConfig(dir)
+      const read = await readServeConfig(dir)
+      return 'config' in read && init.readPath ? { ...read, path: init.readPath } : read
     },
     projectKey: (dir) => `github.com/acme/${dir.length}`,
     approvalsFile: () => join(approvals, 'launch-approvals.json'),
-    confirm: (prompt) => {
+    confirm: async (prompt, servePath) => {
       prompts.push(prompt.command)
-      return init.confirm ?? true
+      servePaths.push(servePath)
+      return typeof init.confirm === 'function' ? init.confirm(prompt) : (init.confirm ?? true)
     },
     serve: {
       start: async (action) => {
@@ -75,8 +79,31 @@ function harness(init: Init = {}) {
     },
     reportError: (_scope, message) => errors.push(message)
   }
-  return { ipc: createServeIpc(deps), started, reads, prompts, errors }
+  return { ipc: createServeIpc(deps), started, reads, prompts, servePaths, errors }
 }
+
+test('opens one approval dialog at a time and refuses a repeated start while it is open', async () => {
+  const dir = project()
+  const open: Array<(granted: boolean) => void> = []
+  const h = harness({ allowed: [dir], readPath: '/contained/serve.json', confirm: () => new Promise<boolean>((resolve) => open.push(resolve)) })
+  const within = <T>(promise: Promise<T>, label: string): Promise<T> =>
+    Promise.race([promise, Bun.sleep(1000).then(() => Promise.reject(new Error(`${label} did not settle`)))])
+
+  const first = h.ipc.start(dir)
+  await Bun.sleep(10)
+  const second = h.ipc.start(dir)
+  await Bun.sleep(10)
+  for (const answer of open.splice(0)) answer(true)
+
+  expect(await within(second, 'second start')).toMatchObject({ ok: false, reason: 'busy' })
+  expect(await within(first, 'first start')).toMatchObject({ ok: true })
+  expect(h.prompts).toHaveLength(1)
+  expect(h.servePaths, 'the dialog is pointed at the contained path readServeConfig resolved').toEqual(['/contained/serve.json'])
+  const third = h.ipc.start(dir)
+  await Bun.sleep(10)
+  for (const answer of open.splice(0)) answer(true)
+  expect(await within(third, 'third start'), 'the guard is released once the dialog closes').toMatchObject({ ok: true })
+})
 
 test('starts the approved serve.json action of an allowed directory', async () => {
   const dir = project()

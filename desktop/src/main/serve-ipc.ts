@@ -13,7 +13,8 @@ export interface ServeIpcDeps {
   readServeConfig(dir: string): Promise<ServeConfigReadResult>
   projectKey(dir: string): string
   approvalsFile(): string
-  confirm(prompt: ServeApprovalPrompt): boolean
+  /** Native approval dialog; `servePath` is the file the operator can be sent to when it does not fit. */
+  confirm(prompt: ServeApprovalPrompt, servePath: string): Promise<boolean>
   serve: Pick<ServeService, 'start' | 'stop' | 'state'>
   reportError(scope: string, message: string, error?: unknown): void
 }
@@ -28,6 +29,7 @@ const SANDBOX_REFUSAL = 'starting a host server is refused in sandbox mode'
  */
 export function createServeIpc(deps: ServeIpcDeps) {
   let servedDir: string | null = null
+  let approving = false
 
   const status = (): ServeChannelState => ({ ...deps.serve.state(), dir: servedDir })
 
@@ -49,12 +51,20 @@ export function createServeIpc(deps: ServeIpcDeps) {
     if (deps.sandboxEnabled()) return refuse('sandbox', SANDBOX_REFUSAL)
     const read = await deps.readServeConfig(dir)
     if ('error' in read) return refuse('config', `serve.json: ${read.error}`)
-    const approval = resolveApprovedServeConfig({
-      config: read.config,
-      projectKey: deps.projectKey(dir),
-      approvalsFile: deps.approvalsFile(),
-      confirm: deps.confirm
-    })
+    // One dialog at a time: a repeated start while it is open would stack prompts for the same command.
+    if (approving) return refuse('busy', 'an approval dialog for serve.json is already open')
+    approving = true
+    let approval: Awaited<ReturnType<typeof resolveApprovedServeConfig>>
+    try {
+      approval = await resolveApprovedServeConfig({
+        config: read.config,
+        projectKey: deps.projectKey(dir),
+        approvalsFile: deps.approvalsFile(),
+        confirm: (prompt) => deps.confirm(prompt, read.path)
+      })
+    } finally {
+      approving = false
+    }
     if ('error' in approval) return refuse('refused', 'the operator refused this serve command')
     // The approval dialog can stay open while the operator turns the sandbox on.
     if (deps.sandboxEnabled()) return refuse('sandbox', SANDBOX_REFUSAL)

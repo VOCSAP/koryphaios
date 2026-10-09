@@ -10,6 +10,7 @@ import {
   nativeTheme,
   Notification,
   safeStorage,
+  screen,
   shell
 } from 'electron'
 import type { AppConfig } from '@shared/types'
@@ -177,6 +178,7 @@ import { announceModelsChanged } from './model-registry'
 import { createBeforeQuitHandler } from './before-quit'
 import { ServeService } from './serve-service'
 import { SERVE_QUIT_DEADLINE_MS } from './serve-lifecycle'
+import { maxLinesFor, renderServeApproval, serveDialogSpec } from './serve-approval-dialog'
 import { createAvatarClient } from './avatar-client'
 import { boundedAvatarDetach, deckAvatarClientOptions } from './avatar-deck-link'
 import { avatarLaunchCommand, ensureAvatar, spawnDetachedAvatar } from './avatar-ensure'
@@ -3460,26 +3462,26 @@ app.whenReady().then(async () => {
     ttsr,
     serve,
     serveApprovalsFile: approvalsFile,
-    confirmServe: (prompt) => {
+    confirmServe: async (prompt, servePath) => {
       const isFr = isFrLocale()
-      const env = Object.entries(prompt.env).map(([name, value]) => `${name}=${value}`).join('\n')
-      const details = [
-        `command (${prompt.command.length}):\n${prompt.command}`,
-        `cwd: ${prompt.cwd}`,
-        `port: ${prompt.port}`,
-        `env:\n${env || '-'}`,
-        `inheritEnv: ${prompt.inheritEnv.join(', ') || '-'}`
-      ].join('\n\n')
-      const choice = dialog.showMessageBoxSync({
+      const win = mainWindow && !mainWindow.isDestroyed() ? mainWindow : null
+      const bounds = win?.getBounds()
+      const display = bounds
+        ? screen.getDisplayNearestPoint({ x: Math.round(bounds.x + bounds.width / 2), y: Math.round(bounds.y + bounds.height / 2) })
+        : screen.getPrimaryDisplay()
+      const spec = serveDialogSpec(renderServeApproval(prompt, { isFr, maxLines: maxLinesFor(display.workArea.height) }), isFr)
+      const options: Electron.MessageBoxOptions = {
         type: 'warning',
-        buttons: isFr ? ['Lancer ce serveur', 'Refuser'] : ['Run this server', 'Refuse'],
-        defaultId: 1,
-        cancelId: 1,
         title: 'Koryphaios',
-        message: isFr ? 'Ce projet définit un serveur de dev (serve.json).' : 'This project defines a dev server (serve.json).',
-        detail: details
-      })
-      return choice === 0
+        message: spec.message,
+        detail: spec.detail,
+        buttons: spec.buttons,
+        defaultId: spec.defaultId,
+        cancelId: spec.cancelId
+      }
+      const { response } = win ? await dialog.showMessageBox(win, options) : await dialog.showMessageBox(options)
+      if (response === spec.showFileIndex) shell.showItemInFolder(servePath)
+      return response === spec.approveIndex
     }
   })
   // Arm remote approvals BEFORE service.start(): restored sessions spawn there,

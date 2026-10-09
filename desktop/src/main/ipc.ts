@@ -274,7 +274,7 @@ interface IpcDeps {
   serve: ServeService
   serveApprovalsFile: () => string
   /** Main-side approval of a serve.json action, shown before its first run and after any change. */
-  confirmServe: (prompt: ServeApprovalPrompt) => boolean
+  confirmServe: (prompt: ServeApprovalPrompt, servePath: string) => Promise<boolean>
 }
 
 export function registerIpc({
