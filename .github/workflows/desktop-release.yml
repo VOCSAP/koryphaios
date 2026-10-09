@@ -23,7 +23,7 @@ jobs:
       matrix:
         os: [windows-latest, macos-latest, ubuntu-latest]
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       # Pinned via .bun-version (repo root, shared with desktop-build.yml and
       # commit-closure.yml) instead of "latest": this is the release
@@ -34,9 +34,9 @@ jobs:
         with:
           bun-version-file: .bun-version
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
-          node-version: '20'
+          node-version: '24'
 
       - name: Install desktop deps
         working-directory: desktop

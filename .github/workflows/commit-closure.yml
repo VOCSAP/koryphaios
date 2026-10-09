@@ -18,7 +18,7 @@ jobs:
       # fetch-depth: 0 (full history), not the default shallow clone -- the
       # check below walks base.sha..head.sha with `git rev-list`, which needs
       # those commits (and their parents) actually present locally.
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 

@@ -61,7 +61,7 @@ jobs:
       matrix:
         os: [windows-latest, macos-latest, ubuntu-latest]
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       # Pinned via .bun-version (repo root), not "latest": this same step ran
       # bun 1.3.14 at 09:36 and bun 1.4.0 at 14:25 on 2026-08-24 with no
@@ -78,9 +78,9 @@ jobs:
         with:
           bun-version-file: .bun-version
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
-          node-version: '20'
+          node-version: '24'
 
       # Root install: most of these suites still import with node builtins
       # only, but a renderer test harness (happy-dom + React) now also lives
@@ -111,9 +111,9 @@ jobs:
       # no commit in between. Scripts and optional dependencies stay enabled:
       # the postinstall copies the per-platform native binary over the bin/
       # stub, and --ignore-scripts or --omit=optional leaves a stub that cannot
-      # run. The package declares node >=22 while this job stays on node 20:
-      # npm only warns, the binary does not use node at run time, and the
-      # version guard below fails the job if that stops being true.
+      # run. The package declares node >=22, which this job's node 24 meets;
+      # the binary does not use node at run time, and the version guard below
+      # fails the job if the postinstall did not replace the stub.
       - name: Install Claude Code CLI (pinned)
         shell: bash
         run: |
