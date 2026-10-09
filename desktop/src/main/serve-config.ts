@@ -99,11 +99,15 @@ function requireRecord(value: unknown, field: string): Record<string, unknown> {
   return value
 }
 
-/** A newline or a bidi override would hide the end of a command or a value in the approval dialog. */
-const HIDDEN_TEXT = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u
+/**
+ * A newline or a bidi override would hide the end of a command or a value in the
+ * approval dialog, and a non-ASCII space (NBSP, EM, ideographic) would pad it out
+ * of sight; the plain ASCII space is the only separator kept.
+ */
+const HIDDEN_TEXT = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]|(?! )\p{Zs}/u
 
 function assertVisibleText(value: string, field: string, subject: string): void {
-  if (HIDDEN_TEXT.test(value)) reject(field, `${subject} contains a control or format character`)
+  if (HIDDEN_TEXT.test(value)) reject(field, `${subject} contains a control, format or non-ASCII space character`)
 }
 
 function requireText(value: unknown, field: string): string {

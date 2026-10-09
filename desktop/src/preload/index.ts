@@ -23,6 +23,7 @@ import type {
   SandboxContainerAction,
   SandboxSettingsPatch,
   SandboxStatus,
+  ServeChannelState,
   SessionAttentionEvent,
   SessionQuotaEvent,
   ApprovalNotAppliedEvent,
@@ -138,6 +139,11 @@ const api: DeckApi = {
   sandboxProjectionRemove: () => ipcRenderer.invoke('sandbox:projection-remove'),
   sandboxAuthProbe: () => ipcRenderer.invoke('sandbox:auth-probe'),
   onSandboxChanged: (cb: (status: SandboxStatus) => void) => subscribe('sandbox:changed', cb),
+
+  serveStatus: () => ipcRenderer.invoke('serve:status'),
+  serveStart: (dir: string) => ipcRenderer.invoke('serve:start', dir),
+  serveStop: () => ipcRenderer.invoke('serve:stop'),
+  onServeChanged: (cb: (state: ServeChannelState) => void) => subscribe('serve:changed', cb),
   onModelsChanged: (cb: () => void) => subscribe('models:changed', cb),
 
   listWorkspaces: () => ipcRenderer.invoke('workspace:list'),

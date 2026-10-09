@@ -3457,7 +3457,30 @@ app.whenReady().then(async () => {
     sandboxWarmTranscripts: warmSandboxTranscripts,
     purgeInboxSession,
     inboxDelete,
-    ttsr
+    ttsr,
+    serve,
+    serveApprovalsFile: approvalsFile,
+    confirmServe: (prompt) => {
+      const isFr = isFrLocale()
+      const env = Object.entries(prompt.env).map(([name, value]) => `${name}=${value}`).join('\n')
+      const details = [
+        `command (${prompt.command.length}):\n${prompt.command}`,
+        `cwd: ${prompt.cwd}`,
+        `port: ${prompt.port}`,
+        `env:\n${env || '-'}`,
+        `inheritEnv: ${prompt.inheritEnv.join(', ') || '-'}`
+      ].join('\n\n')
+      const choice = dialog.showMessageBoxSync({
+        type: 'warning',
+        buttons: isFr ? ['Lancer ce serveur', 'Refuser'] : ['Run this server', 'Refuse'],
+        defaultId: 1,
+        cancelId: 1,
+        title: 'Koryphaios',
+        message: isFr ? 'Ce projet définit un serveur de dev (serve.json).' : 'This project defines a dev server (serve.json).',
+        detail: details
+      })
+      return choice === 0
+    }
   })
   // Arm remote approvals BEFORE service.start(): restored sessions spawn there,
   // and a session spawned without the credential path would never produce an

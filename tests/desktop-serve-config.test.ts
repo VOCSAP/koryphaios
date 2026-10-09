@@ -217,13 +217,13 @@ test('rejects a control or format character hidden in the command or an env valu
     const inCommand = validServeJson()
     actionOf(inCommand).command = `bun run dev${char}rm -rf ~`
     await expect(validateServeConfig(inCommand, createProject()), `U+${char.charCodeAt(0).toString(16)} in command`).rejects.toThrow(
-      'command: the command contains a control or format character'
+      'command: the command contains a control, format or non-ASCII space character'
     )
 
     const inEnv = validServeJson()
     actionOf(inEnv).env = { MODE: `dev${char}x` }
     await expect(validateServeConfig(inEnv, createProject()), `U+${char.charCodeAt(0).toString(16)} in env`).rejects.toThrow(
-      'env: value for MODE contains a control or format character'
+      'env: value for MODE contains a control, format or non-ASCII space character'
     )
   }
 })
@@ -260,11 +260,29 @@ test('holds url and health to the loopback host and port of the server the actio
   }
 })
 
+test('rejects a non-ASCII space that would pad the command, cwd or an env value out of sight', async () => {
+  for (const code of [0x00a0, 0x2003, 0x3000]) {
+    const space = String.fromCharCode(code)
+    const cases: Array<[string, (fixture: Record<string, unknown>) => void]> = [
+      ['command: the command', (fixture) => { actionOf(fixture).command = `bun run dev${space}--port 1` }],
+      ['cwd: the directory', (fixture) => { actionOf(fixture).cwd = `web${space}` }],
+      ['env: value for MODE', (fixture) => { actionOf(fixture).env = { MODE: `dev${space}x` } }]
+    ]
+    for (const [subject, mutate] of cases) {
+      const fixture = validServeJson()
+      mutate(fixture)
+      await expect(validateServeConfig(fixture, createProject()), `U+${code.toString(16)} in ${subject}`).rejects.toThrow(
+        `${subject} contains a control, format or non-ASCII space character`
+      )
+    }
+  }
+})
+
 test('rejects a bidi override hidden in the cwd', async () => {
   const fixture = validServeJson()
   actionOf(fixture).cwd = `web${String.fromCharCode(0x202e)}bin`
   await expect(validateServeConfig(fixture, createProject())).rejects.toThrow(
-    'cwd: the directory contains a control or format character'
+    'cwd: the directory contains a control, format or non-ASCII space character'
   )
 })
 

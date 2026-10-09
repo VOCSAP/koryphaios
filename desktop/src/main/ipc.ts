@@ -29,6 +29,9 @@ import { inboxEntryKey } from '@shared/types'
 import { ROADMAP_SYNC_RESOLUTIONS } from '@shared/roadmap-sync'
 import { broadcastStop, lockTargets, STOP_MODES, stopTouchesLocks, toInterruptMode } from './agent-stop'
 import type { SandboxService } from './sandbox-service'
+import { readServeConfig, type ServeApprovalPrompt } from './serve-config'
+import { createServeIpc } from './serve-ipc'
+import type { ServeService } from './serve-service'
 import { buildAuthCommand, SANDBOX_AUTH_PTY_ID, SANDBOX_BUILD_PTY_ID } from './sandbox-command'
 import { APP_STATE_SUBDIR } from './migrate-data-dir'
 import { buildHelpPrompt, buildHelpSystemPrompt, sanitizeHelpSelection } from './help-assistant'
@@ -267,6 +270,11 @@ interface IpcDeps {
   ensureControlServer: () => Promise<unknown>
   /** Guard rules (Settings > Rules): sources, approvals, per-tile compile. */
   ttsr: TtsrService
+  /** The dev server of this Deck (serve.json); reached only through the serve:* handlers. */
+  serve: ServeService
+  serveApprovalsFile: () => string
+  /** Main-side approval of a serve.json action, shown before its first run and after any change. */
+  confirmServe: (prompt: ServeApprovalPrompt) => boolean
 }
 
 export function registerIpc({
@@ -302,7 +310,10 @@ export function registerIpc({
   inboxDelete,
   ensureControlServer,
   sessionStateDir,
-  ttsr
+  ttsr,
+  serve,
+  serveApprovalsFile,
+  confirmServe
 }: IpcDeps): void {
   // ----- sessions -----
   regHandle('sessions:list', () => service.list())
@@ -1004,6 +1015,22 @@ export function registerIpc({
     }
     return p
   }
+
+  // ----- dev server (serve.json) -----
+  const serveIpc = createServeIpc({
+    requireWorkDir,
+    sandboxEnabled: () => sandbox.isEnabled(),
+    readServeConfig,
+    projectKey: computeDeckProjectKey,
+    approvalsFile: serveApprovalsFile,
+    confirm: confirmServe,
+    serve,
+    reportError
+  })
+  regHandle('serve:status', () => serveIpc.status())
+  regHandle('serve:start', (_e, dir: unknown) => serveIpc.start(dir))
+  regHandle('serve:stop', () => serveIpc.stop())
+  serve.on('changed', () => broadcast('serve:changed', serveIpc.status()))
 
   // ----- diff / review (PLAN C13) -----
   // Base resolution: a NON-MAIN worktree of the project is compared to the

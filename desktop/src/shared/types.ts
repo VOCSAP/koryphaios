@@ -2050,6 +2050,23 @@ export type TtsrTestResult =
       pathMatched: boolean | null
     }
 
+/** The dev server this Deck runs (serve.json), with the directory it was last started for. */
+export interface ServeChannelState {
+  status: 'idle' | 'starting' | 'ready' | 'failed' | 'stopping'
+  url?: string
+  port?: number
+  pid?: number
+  error?: string
+  dir: string | null
+}
+
+export type ServeStartRefusal = 'dir' | 'sandbox' | 'config' | 'refused' | 'busy' | 'quitting' | 'failed'
+
+/** A refusal is never reported as a start: `ok` is true only when this call launched the run. */
+export type ServeChannelStartResult =
+  | { ok: true; dir: string; state: ServeChannelState }
+  | { ok: false; reason: ServeStartRefusal; message: string; state: ServeChannelState }
+
 export interface DeckApi {
   // sessions
   listSessions(): Promise<SessionRuntime[]>
@@ -2550,6 +2567,17 @@ export interface DeckApi {
   /** Poll the credentials probe (auth dialog, every ~2 s). */
   sandboxAuthProbe(): Promise<boolean | null>
   onSandboxChanged(cb: (status: SandboxStatus) => void): () => void
+
+  // dev server (serve.json)
+  serveStatus(): Promise<ServeChannelState>
+  /**
+   * Start the serve.json action of `dir`. Main re-validates `dir` against the
+   * work-dir allow-set, re-reads serve.json and re-approves it: the renderer
+   * never supplies the action itself.
+   */
+  serveStart(dir: string): Promise<ServeChannelStartResult>
+  serveStop(): Promise<ServeChannelState>
+  onServeChanged(cb: (state: ServeChannelState) => void): () => void
   /** The model catalogs a surface holds are stale; refetch on the next need. */
   onModelsChanged(cb: () => void): () => void
 

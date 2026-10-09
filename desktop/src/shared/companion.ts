@@ -179,6 +179,11 @@ export const COMPANION_MANIFEST = {
   companionRevokeAll: { kind: 'invoke', channel: 'companion:revoke-all' },
 
   // sandbox mode (PLAN-SANDBOX SBX2–SBX5, M2/M3)
+  serveStatus: { kind: 'invoke', channel: 'serve:status' },
+  serveStart: { kind: 'invoke', channel: 'serve:start' },
+  serveStop: { kind: 'invoke', channel: 'serve:stop' },
+  onServeChanged: { kind: 'event', channel: 'serve:changed' },
+
   sandboxStatus: { kind: 'invoke', channel: 'sandbox:status' },
   sandboxPatchSettings: { kind: 'invoke', channel: 'sandbox:patch-settings' },
   sandboxSetImage: { kind: 'invoke', channel: 'sandbox:set-image' },
@@ -273,6 +278,11 @@ const EXPLICIT_REMOTE_BLOCKED_CHANNELS: readonly string[] = [
   'approvals:connect',
   'approvals:disconnect',
   'approvals:enrolment-export',
+  // The dev server runs a repository command on the host: starting, stopping
+  // or watching it needs the operator at the host, never a paired phone.
+  'serve:status',
+  'serve:start',
+  'serve:stop',
   'approvals:enrolment-apply',
   'companion:start',
   'companion:stop',
@@ -475,6 +485,9 @@ export const CHANNEL_TIERS: Readonly<Record<string, 0 | 1 | 2 | 3>> = {
   'browser:review-save': 2,
   'browser:review-clear': 2,
 
+  'serve:status': 0,
+  'serve:start': 2,
+  'serve:stop': 2,
   'sandbox:status': 0,
   'sandbox:list': 0,
   'sandbox:auth-probe': 0,
@@ -642,7 +655,7 @@ export const LIGHT_MODE_BLOCKED_EVENTS: ReadonlySet<string> = new Set([
  * broker URL and token marker to the paired phone the moment the operator
  * ticks the checkbox on the PC.
  */
-export const REMOTE_BLOCKED_EVENTS: ReadonlySet<string> = new Set(['peersConfig:summary'])
+export const REMOTE_BLOCKED_EVENTS: ReadonlySet<string> = new Set(['peersConfig:summary', 'serve:changed'])
 
 /**
  * The single decision for the two reasons an event frame is withheld, so the
