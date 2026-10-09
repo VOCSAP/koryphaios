@@ -92,7 +92,9 @@ function requireInsideProject(p: string, what: string): string {
 async function validateRulesText(text: string): Promise<{ ok: true; rules: TtsrRule[] } | { ok: false; errors: string[] }> {
   const parsed = parseRulesFile(text);
   if (!parsed.ok) return { ok: false, errors: parsed.errors };
-  const slow = await probeRulesSpeed(parsed.file.rules);
+  const slow = await probeRulesSpeed(parsed.file.rules, {
+    onFallback: (message) => process.stderr.write(`warning: ${message}\n`),
+  });
   if (slow.length > 0) return { ok: false, errors: slow };
   return { ok: true, rules: parsed.file.rules };
 }

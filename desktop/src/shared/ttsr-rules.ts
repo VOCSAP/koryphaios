@@ -129,6 +129,8 @@ export interface TtsrEvaluateOptions {
   clock?: () => number
   regexBudgetMs?: number
   evaluateDeadlineMs?: number
+  /** Called once per applicable rule as soon as it is decided: its match, or null when it does not apply. */
+  onDecided?: (qualifiedId: string, match: TtsrMatch | null) => void
   /**
    * Current content of a Write target, null when it does not exist. When
    * given, an `added` rule on Write fires only if the new content holds more
@@ -812,24 +814,36 @@ export function evaluate(
     try {
       hit = fires(rule)
     } catch (e) {
-      result.errors.push(`${rule.qualifiedId}: ${(e as Error).message ?? String(e)}`)
-      continue
+      const error = (e as Error).message ?? String(e)
+      if (rule.mode !== 'deny') {
+        result.errors.push(`${rule.qualifiedId}: ${error}`)
+        opts.onDecided?.(rule.qualifiedId, null)
+        continue
+      }
+      // A deny that could not be evaluated (path, Write target) is not let through.
+      slow.entry = { ...where(rule, 0), reason: 'threw', ms: 0, error }
+      hit = false
     }
     let message = rule.message
     const suspect = slow.entry as TtsrOverBudget | null
     if (!hit && suspect) {
       result.overBudget.push(suspect)
-      if (rule.mode !== 'deny') continue
-      hit = true
-      const why = {
-        threw: 'rule evaluation failed',
-        budget: `rule evaluation exceeded the ${budgetMs} ms budget`,
-        deadline: `evaluation deadline of ${deadlineMs} ms exceeded`,
-      }[suspect.reason]
-      message = `${rule.message} (TTSR: ${why}; denied by default)`
+      if (rule.mode === 'deny') {
+        hit = true
+        const why = {
+          threw: 'rule evaluation failed',
+          budget: `rule evaluation exceeded the ${budgetMs} ms budget`,
+          deadline: `evaluation deadline of ${deadlineMs} ms exceeded`,
+        }[suspect.reason]
+        message = `${rule.message} (TTSR: ${why}; denied by default)`
+      }
     }
-    if (!hit) continue
+    if (!hit) {
+      opts.onDecided?.(rule.qualifiedId, null)
+      continue
+    }
     const match: TtsrMatch = { qualifiedId: rule.qualifiedId, mode: rule.mode, message }
+    opts.onDecided?.(rule.qualifiedId, match)
     if (rule.mode === 'deny') {
       result.denies.push(match)
       if (opts.stopAtFirstDeny) return result

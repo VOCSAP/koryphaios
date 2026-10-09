@@ -12,7 +12,9 @@
 // The worker body is an inline CommonJS string (worker_threads `eval`), so it
 // needs no separate bundle entry.
 
+import { spawn } from 'node:child_process'
 import { Worker } from 'node:worker_threads'
+import { TTSR_REGEX_BUDGET_MS, fieldCap } from './ttsr-rules'
 import type { TtsrRule } from './ttsr-types'
 
 /** Hard deadline of one isolated match, compile included. */
@@ -253,21 +255,29 @@ export interface ProbeOptions {
   deadlineMs?: number
   inputChars?: number
   onError?: WorkerErrorSink
+  /** Time every rule again at its real field size under bun, the hook's runtime. Default true. */
+  realSize?: boolean
+  /** Command that starts bun; default 'bun', resolved on PATH like the hook's own command. */
+  bunCommand?: string
+  /** Told once when bun cannot start and the real-size stage runs under V8 instead. */
+  onFallback?: (message: string) => void
 }
+
+type ProbeErrors = Array<[number, string]>
 
 /**
  * Times every rule's pattern against its adversarial inputs, in one worker
- * restarted after any rule that hits the hard deadline. Returns errors in the
- * parseRulesFile format (`rules[i] "id": pattern: ...`), empty when every
- * pattern is fast. A worker that cannot run at all rejects the rules too: an
- * unprobed pattern is not let through.
+ * restarted after any rule that hits the hard deadline, then times the rules
+ * that passed again at their real field size under bun: V8 runs these patterns
+ * 10 to 17 times faster than JavaScriptCore, and a quadratic pattern fast on
+ * 4 Ki can take seconds on 256 Ki. Returns errors in the parseRulesFile format
+ * (`rules[i] "id": pattern: ...`), empty when every pattern is fast. A runtime
+ * that cannot run at all rejects the rules too: an unprobed pattern is not let
+ * through.
  */
 export async function probeRulesSpeed(rules: readonly TtsrRule[], opts: ProbeOptions = {}): Promise<string[]> {
-  const slowMs = opts.slowMs ?? PROBE_SLOW_MS
   const deadlineMs = opts.deadlineMs ?? PROBE_RULE_DEADLINE_MS
   const onError = opts.onError ?? (() => undefined)
-  const errors: Array<[number, string]> = []
-  const done = new Set<number>()
   const label = (i: number): string => `rules[${i}] "${rules[i]!.id}": pattern`
   const jobs: ProbeJob[] = rules.map((r, index) => ({
     index,
@@ -275,6 +285,24 @@ export async function probeRulesSpeed(rules: readonly TtsrRule[], opts: ProbeOpt
     flags: r.flags ?? '',
     inputs: probeInputs(r.pattern, opts.inputChars, r.flags ?? '')
   }))
+  const errors = await probeInWorker(jobs, opts.slowMs ?? PROBE_SLOW_MS, deadlineMs, onError, label)
+  if (opts.realSize !== false) {
+    const rejected = new Set(errors.map(([i]) => i))
+    const passed = rules.map((r, index) => ({ r, index })).filter(({ index }) => !rejected.has(index))
+    errors.push(...(await probeRealSize(passed, deadlineMs, onError, label, opts)))
+  }
+  return errors.sort((a, b) => a[0] - b[0]).map(([, e]) => e)
+}
+
+async function probeInWorker(
+  jobs: ProbeJob[],
+  slowMs: number,
+  deadlineMs: number,
+  onError: WorkerErrorSink,
+  label: (i: number) => string
+): Promise<ProbeErrors> {
+  const errors: ProbeErrors = []
+  const done = new Set<number>()
   let pending = jobs
   while (pending.length > 0) {
     const batch = pending
@@ -321,5 +349,164 @@ export async function probeRulesSpeed(rules: readonly TtsrRule[], opts: ProbeOpt
     }
     pending = batch.filter((j) => j.index >= outcome.next)
   }
-  return errors.sort((a, b) => a[0] - b[0]).map(([, e]) => e)
+  return errors
+}
+
+// Inputs are rebuilt here from seeds and a length: a 256 Ki input per seed
+// and per rule would be hundreds of megabytes through a pipe. Writes are
+// synchronous so a 'start' line is out before a regex that never returns.
+const BUN_PROBE_SCRIPT = `
+const { writeSync } = require('node:fs')
+const say = (m) => writeSync(1, JSON.stringify(m) + '\\n')
+let raw = ''
+process.stdin.setEncoding('utf8')
+process.stdin.on('data', (c) => { raw += c })
+process.stdin.on('end', () => {
+  const { jobs, budgetMs } = JSON.parse(raw)
+  for (const job of jobs) {
+    say({ type: 'start', index: job.index })
+    let slow = null
+    let error = null
+    try {
+      const re = new RegExp(job.pattern, job.flags)
+      for (const seed of job.seeds) {
+        const s = seed.repeat(Math.max(1, Math.floor(job.length / seed.length))) + '\\u0001'
+        const t0 = performance.now()
+        re.test(s)
+        const ms = performance.now() - t0
+        if (ms > budgetMs) {
+          slow = { ms: Math.round(ms), seed: JSON.stringify(seed.slice(0, 8)) }
+          break
+        }
+      }
+    } catch (e) {
+      error = String(e && e.message ? e.message : e)
+    }
+    say({ type: 'done', index: job.index, slow, error })
+  }
+  say({ type: 'end' })
+})
+`
+
+interface BunJob {
+  index: number
+  pattern: string
+  flags: string
+  seeds: string[]
+  length: number
+}
+
+/** The real-size stage: under bun when it starts, else under V8 with the same inputs and budget. */
+async function probeRealSize(
+  passed: ReadonlyArray<{ r: TtsrRule; index: number }>,
+  deadlineMs: number,
+  onError: WorkerErrorSink,
+  label: (i: number) => string,
+  opts: ProbeOptions
+): Promise<ProbeErrors> {
+  if (passed.length === 0) return []
+  const jobs: BunJob[] = passed.map(({ r, index }) => ({
+    index,
+    pattern: r.pattern,
+    flags: r.flags ?? '',
+    seeds: probeSeeds(r.pattern, r.flags ?? ''),
+    length: fieldCap(r.field)
+  }))
+  const bun = await probeUnderBun(jobs, opts.bunCommand ?? 'bun', deadlineMs, label)
+  if (!('unavailable' in bun)) return bun.errors
+  opts.onFallback?.(
+    `bun could not be started (${bun.unavailable}): the real-size timing check ran under V8, which runs patterns 10 to 17 times faster than the hook's bun`
+  )
+  const v8Jobs: ProbeJob[] = passed.map(({ r, index }) => ({
+    index,
+    pattern: r.pattern,
+    flags: r.flags ?? '',
+    inputs: probeInputs(r.pattern, fieldCap(r.field), r.flags ?? '')
+  }))
+  return probeInWorker(v8Jobs, TTSR_REGEX_BUDGET_MS, deadlineMs, onError, label)
+}
+
+type BunOutcome = { next: number } | { failed: string } | { unavailable: string }
+
+async function probeUnderBun(
+  jobs: BunJob[],
+  command: string,
+  deadlineMs: number,
+  label: (i: number) => string
+): Promise<{ errors: ProbeErrors } | { unavailable: string }> {
+  const errors: ProbeErrors = []
+  const done = new Set<number>()
+  const lengthOf = (i: number): number => jobs.find((j) => j.index === i)?.length ?? 0
+  let pending = jobs
+  let started = false
+  while (pending.length > 0) {
+    const batch = pending
+    const outcome = await new Promise<BunOutcome>((resolve) => {
+      let settled = false
+      let current = -1
+      let buffer = ''
+      const child = spawn(command, ['-e', BUN_PROBE_SCRIPT], { stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true })
+      let timer = setTimeout(() => settle({ failed: 'the bun probe did not start' }), deadlineMs * 2)
+      const settle = (r: BunOutcome): void => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        child.kill()
+        resolve(r)
+      }
+      child.once('error', (e: NodeJS.ErrnoException) =>
+        settle(!started && e.code === 'ENOENT' ? { unavailable: e.message } : { failed: e.message })
+      )
+      child.once('close', (code) => settle({ failed: `the bun probe exited early (code ${code})` }))
+      child.stdin.on('error', () => undefined)
+      child.stdout.setEncoding('utf8')
+      child.stdout.on('data', (chunk: string) => {
+        started = true
+        buffer += chunk
+        let nl: number
+        while ((nl = buffer.indexOf('\n')) >= 0) {
+          const line = buffer.slice(0, nl)
+          buffer = buffer.slice(nl + 1)
+          let m: ProbeMessage
+          try {
+            m = JSON.parse(line) as ProbeMessage
+          } catch {
+            settle({ failed: `the bun probe printed an unreadable line: ${line.slice(0, 80)}` })
+            return
+          }
+          if (m.type === 'start') {
+            current = m.index
+            clearTimeout(timer)
+            timer = setTimeout(() => {
+              done.add(current)
+              errors.push([
+                current,
+                `${label(current)}: too slow under bun (the hook's runtime): one input of ${lengthOf(current)} chars did not finish within ${deadlineMs} ms`
+              ])
+              settle({ next: current + 1 })
+            }, deadlineMs)
+          } else if (m.type === 'done') {
+            done.add(m.index)
+            if (m.error !== null) errors.push([m.index, `${label(m.index)}: could not be timed under bun: ${m.error}`])
+            else if (m.slow !== null)
+              errors.push([
+                m.index,
+                `${label(m.index)}: too slow under bun (the hook's runtime): ${m.slow.ms} ms on a long run of ${m.slow.seed} at ${lengthOf(m.index)} chars (hook budget ${TTSR_REGEX_BUDGET_MS} ms); ` +
+                  'repetitions that rescan the text grow with its length, bound them or anchor the pattern'
+              ])
+          } else settle({ next: Number.POSITIVE_INFINITY })
+        }
+      })
+      child.stdin.end(JSON.stringify({ jobs: batch, budgetMs: TTSR_REGEX_BUDGET_MS }))
+    })
+    if ('unavailable' in outcome) return outcome
+    if ('failed' in outcome) {
+      for (const job of batch) {
+        if (!done.has(job.index)) errors.push([job.index, `${label(job.index)}: could not be timed under bun: ${outcome.failed}`])
+      }
+      break
+    }
+    pending = batch.filter((j) => j.index >= outcome.next)
+  }
+  return { errors }
 }

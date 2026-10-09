@@ -32,5 +32,5 @@ export function matchIsolated(
 
 /** Adversarial timing gate of a rules file's patterns; errors in the parseRulesFile format. */
 export function probeRulesSpeed(rules: readonly TtsrRule[]): Promise<string[]> {
-  return probeRulesSpeedShared(rules, { onError: onWorkerError })
+  return probeRulesSpeedShared(rules, { onError: onWorkerError, onFallback: (message) => reportError('ttsr', message) })
 }

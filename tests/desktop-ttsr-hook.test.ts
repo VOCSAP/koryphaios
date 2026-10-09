@@ -8,7 +8,20 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
-import { decide, overBudgetTraceLine, parseHookPayload, readExisting, runHook, trace, type HookPayload } from "../desktop/hooks/ttsr-hook.ts";
+import { pathToFileURL } from "node:url";
+import { Worker } from "node:worker_threads";
+import {
+  composeWallDecision,
+  decide,
+  overBudgetTraceLine,
+  parseHookPayload,
+  readExisting,
+  runHook,
+  runHookBounded,
+  trace,
+  type HookPayload,
+  type WorkerInput,
+} from "../desktop/hooks/ttsr-hook.ts";
 import { KORY_EFFECTIVE_RULES } from "../desktop/src/shared/ttsr-builtin";
 
 const DESKTOP_DIR = resolve(import.meta.dir, "..", "desktop");
@@ -115,7 +128,7 @@ test("runHook(): a decide() that throws fails open with a trace, never a decisio
   expect(readFileSync(logPath, "utf-8")).toContain("internal error, failing open: boom in decide");
 });
 
-test("decide(): a rule whose path cannot be resolved (ELOOP) is traced and skipped; another rule still denies", () => {
+test("decide(): a deny rule whose path cannot be resolved (ELOOP) denies by default, traced", () => {
   const dir = realpathSync.native(makeTmpDir("ttsr-eloop-"));
   symlinkSync(join(dir, "b"), join(dir, "a"));
   symlinkSync(join(dir, "a"), join(dir, "b"));
@@ -131,9 +144,10 @@ test("decide(): a rule whose path cannot be resolved (ELOOP) is traced and skipp
   // The failing rule is the Kory one, so it runs first in deny order.
   writeFileSync(eff, JSON.stringify({ version: 1, rules: [{ ...scoped, source: "kory", qualifiedId: "kory/scoped" }, { ...plain, source: "user", qualifiedId: "user/plain" }] }));
   const out = decide(payload) as { hookSpecificOutput: { permissionDecision?: string; permissionDecisionReason?: string } };
-  expect(out?.hookSpecificOutput.permissionDecision, "another rule's path failure must not cancel this deny").toBe("deny");
-  expect(out.hookSpecificOutput.permissionDecisionReason).toContain("user/plain");
-  expect(readFileSync(join(dir, "hook.log"), "utf-8")).toContain("rule not evaluated: kory/scoped");
+  expect(out?.hookSpecificOutput.permissionDecision, "a deny that could not be evaluated is not let through").toBe("deny");
+  expect(out.hookSpecificOutput.permissionDecisionReason).toContain("kory/scoped");
+  expect(out.hookSpecificOutput.permissionDecisionReason).toContain("rule evaluation failed; denied by default");
+  expect(readFileSync(join(dir, "hook.log"), "utf-8")).toContain("rule evaluation threw (deny, denied by default): kory/scoped");
 });
 
 test("decide(): a deny regex cut at the JavaScriptCore match limit denies, and the overrun is traced", () => {
@@ -165,7 +179,7 @@ test("overBudgetTraceLine(): one wording per reason, naming what was decided", (
     "regex over budget (deny, denied by default): user/r took 300 ms on added (12 chars), budget 50 ms"
   );
   expect(overBudgetTraceLine({ ...at, mode: "deny", reason: "threw", ms: 1, error: "boom" })).toBe(
-    "regex threw (deny, denied by default): user/r on added (12 chars): boom"
+    "rule evaluation threw (deny, denied by default): user/r on added (12 chars): boom"
   );
 });
 
@@ -287,6 +301,151 @@ async function runHookMjs(stdinText: string, envOverrides: Record<string, string
   const exitCode = await proc.exited;
   return { stdout, stderr, exitCode };
 }
+
+test("real .mjs, a deny regex that runs for tens of seconds is denied at the hook wall, in time", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ttsr-wall-"));
+  tmpDirs.push(dir);
+  const eff = join(dir, "eff.json");
+  const logPath = join(dir, "hook.log");
+  const rule = { id: "quadratic", event: "PreToolUse", tools: ["Write"], field: "added", pattern: "[a-z]+\\d+x",
+    mode: "deny", message: "No quadratic text.", source: "user", qualifiedId: "user/quadratic" };
+  writeFileSync(eff, JSON.stringify({ version: 1, rules: [rule] }));
+  const payload = JSON.stringify({
+    hook_event_name: "PreToolUse",
+    tool_name: "Write",
+    cwd: dir,
+    tool_input: { file_path: join(dir, "a.ts"), content: "a".repeat(262144) },
+  });
+  const t0 = performance.now();
+  const result = await runHookMjs(payload, { CLAUDE_PEERS_TTSR_FILE: eff, CLAUDE_PEERS_TTSR_LOG: logPath });
+  const elapsed = performance.now() - t0;
+  expect(result.exitCode).toBe(0);
+  expect(elapsed, "the call must be decided before Claude Code's 10 s hook timeout lets it through").toBeLessThan(7000);
+  const decision = JSON.parse(result.stdout) as { hookSpecificOutput: { permissionDecision?: string; permissionDecisionReason?: string } };
+  expect(decision.hookSpecificOutput.permissionDecision).toBe("deny");
+  expect(decision.hookSpecificOutput.permissionDecisionReason).toContain("hook wall of 6000 ms exceeded; denied by default");
+  expect(readFileSync(logPath, "utf-8")).toContain("hook wall of 6000 ms exceeded, undecided rules");
+}, 15000);
+
+test("real .mjs, a warn decided before the wall still reaches the session when a later warn hangs", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ttsr-wall-warn-"));
+  tmpDirs.push(dir);
+  const eff = join(dir, "eff.json");
+  const base = { event: "PreToolUse", tools: ["Write"], field: "added", mode: "warn", source: "user" };
+  const rules = [
+    { ...base, id: "fast", pattern: "aaaa", message: "Fast warn text.", qualifiedId: "user/fast" },
+    { ...base, id: "slow", pattern: "[a-z]+\\d+x", message: "Slow warn text.", qualifiedId: "user/slow" },
+  ];
+  writeFileSync(eff, JSON.stringify({ version: 1, rules }));
+  const payload = JSON.stringify({
+    hook_event_name: "PreToolUse",
+    tool_name: "Write",
+    cwd: dir,
+    tool_input: { file_path: join(dir, "a.ts"), content: "a".repeat(262144) },
+  });
+  const result = await runHookMjs(payload, { CLAUDE_PEERS_TTSR_FILE: eff, CLAUDE_PEERS_TTSR_LOG: join(dir, "hook.log") });
+  const decision = JSON.parse(result.stdout) as { hookSpecificOutput: { additionalContext?: string; permissionDecision?: string } };
+  expect(decision.hookSpecificOutput.permissionDecision).toBeUndefined();
+  expect(decision.hookSpecificOutput.additionalContext).toContain("Fast warn text.");
+  expect(decision.hookSpecificOutput.additionalContext).not.toContain("Slow warn text.");
+}, 15000);
+
+/** runHookBounded() over three applicable rules read on the main thread, with a stand-in worker. */
+async function boundedWith(
+  worker: string | (() => never),
+  wallMs: number
+): Promise<{ reason: string; decision: string | undefined; log: string }> {
+  const dir = makeTmpDir("ttsr-bounded-");
+  const eff = join(dir, "eff.json");
+  const base = { event: "PreToolUse", tools: ["Write"], field: "added", pattern: "never-matches-zz", source: "user" };
+  writeFileSync(eff, JSON.stringify({ version: 1, rules: [
+    { ...base, id: "decided-pass", mode: "deny", message: "Decided, did not match.", qualifiedId: "user/decided-pass" },
+    { ...base, id: "undecided", mode: "deny", message: "Not decided.", qualifiedId: "user/undecided" },
+    { ...base, id: "warn", mode: "warn", message: "Undecided warn.", qualifiedId: "user/warn" },
+  ] }));
+  process.env.CLAUDE_PEERS_TTSR_FILE = eff;
+  process.env.CLAUDE_PEERS_TTSR_LOG = join(dir, "hook.log");
+  const raw = JSON.stringify({ hook_event_name: "PreToolUse", tool_name: "Write", cwd: dir, tool_input: { file_path: join(dir, "a.ts"), content: "x" } });
+  const start =
+    typeof worker === "string"
+      ? (input: WorkerInput) => new Worker(pathToFileURL(fixturePath(worker)), { workerData: input })
+      : worker;
+  const out = await runHookBounded(raw, wallMs, start);
+  const parsed = JSON.parse(out) as { hookSpecificOutput: { permissionDecision?: string; permissionDecisionReason?: string } };
+  return {
+    reason: parsed.hookSpecificOutput.permissionDecisionReason ?? "",
+    decision: parsed.hookSpecificOutput.permissionDecision,
+    log: readFileSync(join(dir, "hook.log"), "utf-8"),
+  };
+}
+
+test("runHookBounded(): a worker that crashes mid-evaluation denies the deny rules it had not decided", async () => {
+  const { reason, decision, log } = await boundedWith("crashing-worker.mjs", 5000);
+  expect(decision).toBe("deny");
+  expect(reason).toContain("user/undecided");
+  expect(reason).toContain("evaluation worker crashed");
+  expect(reason, "a deny decided as not matching stays not matching").not.toContain("user/decided-pass");
+  expect(reason).not.toContain("user/warn");
+  expect(log).toContain("the evaluation worker crashed");
+});
+
+test("runHookBounded(): the wall before the worker's first message denies every applicable deny", async () => {
+  const { reason, decision, log } = await boundedWith("silent-worker.mjs", 300);
+  expect(decision).toBe("deny");
+  expect(reason).toContain("user/decided-pass");
+  expect(reason).toContain("user/undecided");
+  expect(reason).toContain("hook wall of 6000 ms exceeded; denied by default");
+  expect(log).toContain("hook wall of 6000 ms exceeded, undecided rules");
+});
+
+test("runHookBounded(): a crash before the worker's first message denies every applicable deny", async () => {
+  const { reason, decision } = await boundedWith("throwing-worker.mjs", 5000);
+  expect(decision).toBe("deny");
+  expect(reason).toContain("user/undecided");
+  expect(reason).toContain("evaluation worker crashed");
+});
+
+test("runHookBounded(): a worker whose module cannot be found denies every applicable deny", async () => {
+  const { reason, decision } = await boundedWith("no-such-worker-file.mjs", 5000);
+  expect(decision).toBe("deny");
+  expect(reason).toContain("user/undecided");
+  expect(reason).toContain("the evaluation worker crashed");
+});
+
+test("runHookBounded(): a Worker constructor that throws synchronously denies every applicable deny", async () => {
+  const { reason, decision, log } = await boundedWith(() => {
+    throw new Error("EMFILE: too many open files");
+  }, 5000);
+  expect(decision).toBe("deny");
+  expect(reason).toContain("user/undecided");
+  expect(reason).toContain("the evaluation worker could not start (EMFILE: too many open files)");
+  expect(log).toContain("the evaluation worker could not start");
+});
+
+test("runHookBounded(): an exception reported by the worker denies the undecided denies", async () => {
+  const { reason, decision, log } = await boundedWith("failing-worker.mjs", 5000);
+  expect(decision).toBe("deny");
+  expect(reason).toContain("internal error (simulated evaluation exception); denied by default");
+  expect(log).toContain("internal error (simulated evaluation exception), undecided rules");
+});
+
+test("composeWallDecision(): decided matches stand, an undecided deny denies, an undecided warn is dropped", () => {
+  const rule = (id: string, mode: "deny" | "warn") => ({ qualifiedId: id, mode, message: `${id} message` });
+  const applicable = [rule("kory/a", "deny"), rule("user/b", "deny"), rule("repo/w", "warn")];
+  const none = composeWallDecision("PreToolUse", applicable, new Map([["kory/a", null]]));
+  expect(none.undecided).toEqual(["user/b", "repo/w"]);
+  const out = none.output as { hookSpecificOutput: { permissionDecision?: string; permissionDecisionReason?: string } };
+  expect(out.hookSpecificOutput.permissionDecision).toBe("deny");
+  expect(out.hookSpecificOutput.permissionDecisionReason).toContain("user/b message (TTSR: hook wall of 6000 ms exceeded; denied by default)");
+  expect(out.hookSpecificOutput.permissionDecisionReason).not.toContain("repo/w");
+
+  const matched = composeWallDecision("PreToolUse", applicable, new Map([["kory/a", applicable[0]!]]));
+  const reason = (matched.output as { hookSpecificOutput: { permissionDecisionReason?: string } }).hookSpecificOutput.permissionDecisionReason;
+  expect(reason, "a deny decided before the wall keeps its own message").toContain("kory/a message");
+
+  const warnsOnly = composeWallDecision("PreToolUse", [rule("repo/w", "warn")], new Map());
+  expect(warnsOnly.output, "an undecided warn alone gives no decision").toBeNull();
+});
 
 test("real .mjs, no env var at all: exit 0, empty stdout", async () => {
   const payload = readFileSync(fixturePath("payload-deny-write.json"), "utf-8");

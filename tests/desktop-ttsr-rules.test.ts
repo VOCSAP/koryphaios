@@ -555,18 +555,25 @@ describe("evaluate: hook order, short-circuit, failures, Write over an existing 
     expect(calls, "resolved once for every rule of the call").toBe(1);
   });
 
-  test("a path that cannot be canonicalized (ELOOP) skips that rule with an error; the other rules still deny", () => {
+  test("a path that cannot be canonicalized (ELOOP): a deny denies by default, a warn is skipped with an error", () => {
     const dir = mkdtempSync(join(tmpdir(), "ttsr-loop-"));
     tmpRoots.push(dir);
     symlinkSync(join(dir, "b"), join(dir, "a"));
     symlinkSync(join(dir, "a"), join(dir, "b"));
-    const rules = [rule("scoped", { paths: ["src/**"] }), rule("plain", {}, "kory")];
+    const rules = [rule("scoped", { paths: ["src/**"] }), rule("scoped-warn", { paths: ["src/**"], mode: "warn" }), rule("plain", {}, "kory")];
     const res = evaluate(rules, write(join(dir, "a", "x.ts"), "foo"), dir);
-    expect(res.denies.map((d) => d.qualifiedId), "one rule's path failure must not cancel another rule's deny").toEqual([
-      "kory/plain",
-    ]);
+    expect(res.denies.map((d) => d.qualifiedId)).toEqual(["repo/scoped", "kory/plain"]);
+    expect(res.denies[0]!.message).toContain("(TTSR: rule evaluation failed; denied by default)");
+    expect(res.overBudget.map((o) => [o.qualifiedId, o.reason])).toEqual([["repo/scoped", "threw"]]);
+    expect(res.overBudget[0]!.error).toMatch(/ELOOP|loop/i);
     expect(res.errors).toHaveLength(1);
-    expect(res.errors[0]).toMatch(/^repo\/scoped: .*(ELOOP|loop)/i);
+    expect(res.errors[0]).toMatch(/^repo\/scoped-warn: .*(ELOOP|loop)/i);
+  });
+
+  test("a file_path whose path resolution throws denies on a deny rule with paths", () => {
+    const res = evaluate([rule("scoped", { paths: ["**"] })], write(`/x/a${String.fromCharCode(0)}b.ts`, "foo"), "/x");
+    expect(res.denies.map((d) => d.qualifiedId)).toEqual(["repo/scoped"]);
+    expect(res.overBudget.map((o) => o.reason)).toEqual(["threw"]);
   });
 
   test("Write over an existing file fires only on a match the file did not already hold", () => {
@@ -584,8 +591,12 @@ describe("evaluate: hook order, short-circuit, failures, Write over an existing 
         throw new Error("EISDIR: illegal operation on a directory");
       },
     });
-    expect(failing.errors.map((e) => e.split(":")[0])).toEqual(["repo/no-foo", "kory/other"]);
-    expect(failing.denies).toEqual([]);
+    expect(failing.errors, "an unreadable Write target is no longer 'not evaluated' for a deny").toEqual([]);
+    expect(failing.denies.map((d) => d.qualifiedId)).toEqual(["repo/no-foo", "kory/other"]);
+    expect(failing.overBudget.map((o) => [o.qualifiedId, o.reason])).toEqual([
+      ["repo/no-foo", "threw"],
+      ["kory/other", "threw"],
+    ]);
   });
 
   test("an exclusion-only rule still applies outside the project, its exclusions tested on the absolute path", () => {
@@ -912,5 +923,53 @@ describe("timing probe seeds", () => {
     const errors = await probeRulesSpeed([mk("\\p{Lu}{0,99}\\p{Lu}{0,99}\\p{Lu}{0,99};", "u"), mk("[A-Z]{0,200}[A-Z]{0,200}[A-Z]{0,200};")]);
     expect(errors, "both slow patterns must be refused by the timing gate").toHaveLength(2);
     for (const e of errors) expect(e).toContain("too slow");
+  }, 30000);
+
+  const quadratic = {
+    id: "quadratic",
+    event: "PreToolUse" as const,
+    tools: ["Write" as const],
+    field: "added" as const,
+    pattern: "[a-z]+\\d+x",
+    mode: "deny" as const,
+    message: "Do not do this; do the other thing instead.",
+  };
+
+  test("a quadratic pattern fast on 4 Ki passes the old V8 probe but not the real-size bun stage", async () => {
+    const { probeRulesSpeed } = await import("../desktop/src/shared/ttsr-probe");
+    expect(await probeRulesSpeed([quadratic], { realSize: false }), "control: the 4 Ki V8 stage alone lets it through").toEqual([]);
+    const errors = await probeRulesSpeed([quadratic]);
+    expect(errors, "the real-size stage under the hook's runtime must refuse it").toHaveLength(1);
+    expect(errors[0]).toContain("too slow under bun (the hook's runtime)");
+    expect(errors[0]).toContain("262144 chars");
+  }, 30000);
+
+  test("on a 16 Ki command the bun stage measures the overrun against the hook budget", async () => {
+    const { probeRulesSpeed } = await import("../desktop/src/shared/ttsr-probe");
+    const errors = await probeRulesSpeed([{ ...quadratic, tools: ["Bash" as const], field: "command" as const }]);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toMatch(/too slow under bun \(the hook's runtime\): \d+ ms on a long run of .* at 16384 chars \(hook budget 50 ms\)/);
+  }, 30000);
+
+  test("the built-in Kory rules pass the real-size bun stage", async () => {
+    const { probeRulesSpeed } = await import("../desktop/src/shared/ttsr-probe");
+    expect(await probeRulesSpeed(KORY_RULES)).toEqual([]);
+  }, 30000);
+
+  test("without bun, the real-size stage runs under V8 and says so", async () => {
+    const { probeRulesSpeed } = await import("../desktop/src/shared/ttsr-probe");
+    const notices: string[] = [];
+    const errors = await probeRulesSpeed([quadratic], {
+      bunCommand: "kory-no-such-bun-binary",
+      onFallback: (m) => notices.push(m),
+    });
+    expect(notices).toHaveLength(1);
+    expect(notices[0]).toContain("bun could not be started");
+    expect(notices[0]).toContain("V8");
+    expect(errors, "the V8 fallback still refuses the quadratic pattern at real size").toHaveLength(1);
+    const command = await probeRulesSpeed([{ ...quadratic, tools: ["Bash" as const], field: "command" as const }], {
+      bunCommand: "kory-no-such-bun-binary",
+    });
+    expect(command[0], "the fallback judges against the hook budget, not the 4 Ki probe's").toContain(`(budget ${TTSR_REGEX_BUDGET_MS} ms)`);
   }, 30000);
 });
