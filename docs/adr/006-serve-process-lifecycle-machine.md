@@ -105,6 +105,7 @@ Champs transverses : `quitting` (définitif), `logOpen` (op du journal ouvert), 
 | `TimerFired grace` | | | | | | POSIX : signal suivant ; Windows après `killLeader` : `-> idle(failure)` [report] |
 | `SignalResult sent` | | | | | | SIGKILL : `-> idle(issue)` ; sinon [armTimer grace] |
 | `SignalResult absent` (ESRCH) | | | | | | `-> idle(issue)` [cancelTimer] |
+| `SignalResult failed` (EPERM) ou `GroupProbed failed` (EPERM), darwin | | | | | | `-> idle(issue)` [cancelTimer], sans report : groupe vide ou zombie (§6, MESURÉ), que l'exit soit observé ou non ; résidu setuid au §8 |
 | `SignalResult failed` (EPERM…) | | | | | | [report] ; SIGINT/SIGTERM : signal suivant sans grâce ; SIGKILL : [probeGroup] |
 | `GroupProbed absent` | | | | | | `-> idle(issue)` [cancelTimer] |
 | `GroupProbed present`, `failed` | | | | | | pendant une grâce : none ; après l'échec de SIGKILL : `-> idle(failure « group unreachable »)` [report] |
@@ -145,10 +146,10 @@ Changement de comportement assumé : `ChildError` après le spawn et une sortie 
 | Arrêt | `kill(-pid, SIGINT/SIGTERM/SIGKILL)`, 3 s de grâce, sans mesure | `taskkill /T /F /PID`, sans pas gracieux (brief, décision 8.4) ; en cas d'échec, `child.kill()` par le handle |
 | Autorisation de signaler | le groupe existe (règle de réutilisation des PID) | `exit` non observé : `SUPPOSÉ`, le handle tenu par libuv empêche la réattribution du PID tant que son callback de sortie n'a pas tourné |
 | ESRCH | groupe vide : arrêt réussi | sans objet |
-| EPERM | avance vers le signal suivant, puis `probeGroup` (I1) | sans objet |
+| EPERM | avance vers le signal suivant, puis `probeGroup` (I1) ; sous darwin : groupe vide ou zombie, donc `idle(issue)` | sans objet |
 | Après la sortie du leader | groupe encore adressable par `-pid` | arbre inatteignable : `taskkill /T` part d'une racine morte, et un `taskkill` après `exit` observé pourrait viser un PID réattribué (I3) |
 
-**darwin, à mesurer avant le lot** : un groupe qui ne contient plus que des zombies rendrait `EPERM` à `killpg` (`SUPPOSÉ (challenger)`, trois sources web, dont le forum Apple 815194 et `killpg1` de XNU ; Linux rend `ok`, `MESURÉ (challenger)`). La table absorbe ce cas sans abandon : EPERM avance jusqu'à SIGKILL, puis `probeGroup`. Mais si c'est le chemin NORMAL sous darwin, chaque arrêt après la sortie du leader y produirait des `report` parasites. Sonde la moins chère, sur le job macOS de la CI : `python3 -c "import os,subprocess,time;p=subprocess.Popen(['sh','-c','exit 0'],start_new_session=True);time.sleep(.3);print(os.killpg(p.pid,15))"`. Selon le résultat, EPERM après `leaderExited` sous darwin vaut « groupe absent » ou reste un échec tracé.
+**darwin, MESURÉ** (run GitHub Actions `37953324666`, macOS 26.6.2 arm64, XNU 12377) : `killpg` sur un groupe composé seulement d'un zombie (`ps` STAT `Z<`, `pid == pgid`) rend `EPERM` (errno 1) AVANT le `waitpid`, puis `ESRCH` (errno 3) APRÈS. Linux rend un succès dans le même cas (`MESURÉ (challenger)`). Sous darwin, un `EPERM` sur notre groupe signifie donc « groupe vide ou zombie », que l'exit du leader soit observé ou non (arbitrage du lead, 2026-10-09). Justification : ce groupe est lancé par le Deck sous le même compte ; le seul vrai refus de droits possible vient d'un descendant setuid resté seul dans le groupe, résidu assumé au §8. Hors de ce cas, un `report` serait parasite. Cellule qui en découle (§5) : `SignalResult failed` (EPERM) et `GroupProbed failed` (EPERM) × `stopping`, plateforme `darwin` : `-> idle(issue)` [cancelTimer], sans `report`, exactement comme `SignalResult absent`. Hors de ce cas (autre plateforme ou autre errno), la ligne générale `SignalResult failed` s'applique.
 
 ## 7. Intégration au quit
 
@@ -183,6 +184,7 @@ Câblage cible :
 - **Réattribution d'un PID pendant un `taskkill` en vol** (Windows) : l'`exit` observé pendant que `taskkill.exe` tourne libère le handle. Résidu accepté, de l'ordre de la milliseconde.
 - **Orphelins Windows** après la sortie du leader : inatteignables sans Job Object. La variante `KILL_ON_JOB_CLOSE` est mesurée pour les tuiles PTY (Kleos #21057), pas pour un spawn à stdio en pipe : carte de suite à part.
 - **Évasions volontaires** : `setsid()` d'un descendant, `CREATE_BREAKAWAY_FROM_JOB`.
+- **Descendant setuid resté seul dans le groupe (darwin)** : il rend `EPERM` à `killpg` et serait pris pour un groupe vide (§6), donc laissé vivant. Assumé : un serveur de dev n'a aucune raison de lancer un binaire setuid.
 - **Crash du Deck** (pas de `before-quit`) : rien n'est persisté et aucun ramassage n'a lieu au démarrage suivant, conformément au caractère local d'un run.
 - **Contention de port** entre l'allocation et le `bind` : déjà acceptée par le brief.
 - **Santé** au-delà du code HTTP ; **plusieurs instances** (une par fenêtre Deck) ; **horloge** (les délais sont des minuteurs).
@@ -190,7 +192,7 @@ Câblage cible :
 
 ## 9. Coût et ordre des lots
 
-1. **Lot de migration** (carte à créer, absorbe `cb092ec2`). **Précondition** : la sonde darwin du §6. Contenu : `serve-lifecycle.ts`, `tests/desktop-serve-lifecycle.test.ts`, `serve-service.ts` réécrit en pilote avec sa file, puis B1, M3, M4, les NITs du pilote et le câblage du quit du §7. Les 38 tests actuels restent des tests d'intégration du pilote, moins ceux qui encodent une mesure de stamp ou un entrelacement, lesquels migrent vers la table. Effort : 1,5 à 2 jours plus une revue (§3).
+1. **Lot de migration** (carte à créer, absorbe `cb092ec2`). Comportement darwin de `killpg` : mesuré par le run GitHub Actions `37953324666` (§6). Contenu : `serve-lifecycle.ts`, `tests/desktop-serve-lifecycle.test.ts`, `serve-service.ts` réécrit en pilote avec sa file, puis B1, M3, M4, les NITs du pilote et le câblage du quit du §7. Les 38 tests actuels restent des tests d'intégration du pilote, moins ceux qui encodent une mesure de stamp ou un entrelacement, lesquels migrent vers la table. Effort : 1,5 à 2 jours plus une revue (§3).
 2. **LS2b** (`c206d3a5`) ensuite, sans toucher l'automate : la capture de l'environnement du shell de login vit dans l'effet `prepare`, déjà interruptible par `Stop` et `Quit`, et doit être bornée comme les autres effets ; `Start` exige `ApprovedServeAction`.
 3. **LS3** (`4d6ec4fb`) : contrat inchangé.
 
@@ -201,4 +203,4 @@ Câblage cible :
 1. **M2, TRANCHÉ par l'opérateur le 2026-10-09 (transmis par le lead)** : quand le leader POSIX sort de lui-même, le groupe est RÉCOLTÉ (`-> stopping(leaderExited)`, escalade sans mesure, arrêt au premier ESRCH), et non plus abandonné. Raison : sinon les descendants gardent le port et les fichiers au-delà du quit. Sous Windows, le résidu du §8 reste.
 2. **Identité, lead** : abandon du stamp dans Serve (§2), sur mesures du challenger. Cela contredit la lettre du brief §LS2 (« PID + spawn time ») : à acter en amendant le brief.
 3. **B contre C, lead** : B recommandé (§3). Si le coût prime, C couvre la même liste pour environ un jour de moins, avec le risque résiduel décrit.
-4. **darwin EPERM** : la sonde du §6 tranche le traitement de EPERM après `leaderExited`.
+4. **darwin EPERM, TRANCHÉ par la mesure** (§6) : EPERM sur notre groupe vaut « groupe vide ou zombie », exit observé ou non.
