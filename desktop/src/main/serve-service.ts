@@ -3,7 +3,7 @@ import { platform as hostPlatform } from 'node:os'
 import { EventEmitter } from 'node:events'
 import { win32 } from 'node:path'
 import { createRollingLogger, reportError } from './log'
-import { type ServeAction } from './serve-config'
+import { isMintedServeAction, type ApprovedServeAction, type ServeAction } from './serve-config'
 import {
   SERVE_QUIT_DEADLINE_MS,
   SYSTEM_COMMAND_TIMEOUT_MS,
@@ -206,7 +206,11 @@ export class ServeService extends EventEmitter {
     return { ...this.published }
   }
 
-  async start(action: ServeAction): Promise<ServeState> {
+  async start(action: ApprovedServeAction): Promise<ServeState> {
+    if (!isMintedServeAction(action)) {
+      this.reportError('serve', 'refused to start a serve action that did not come from the operator approval')
+      return this.state()
+    }
     this.dispatch({ kind: 'Start', action })
     await this.waitFor((state) => state.phase.kind !== 'preparing' && state.phase.kind !== 'spawning')
     return this.state()

