@@ -3107,6 +3107,179 @@ function handleDelegationsClose(body: DelegationsCloseRequest): TaskResult<Deleg
   return { task: toDelegatedTask(closeDelegatedTaskTx(task, sender, null).row) };
 }
 
+const DELEGATION_SWEEP_BATCH = 100;
+const delegationSweepSecEnv = Number(process.env.CLAUDE_PEERS_DELEGATION_SWEEP_SEC ?? 15);
+const DELEGATION_SWEEP_SEC =
+  Number.isSafeInteger(delegationSweepSecEnv) && delegationSweepSecEnv >= 1 && delegationSweepSecEnv <= 86_400
+    ? delegationSweepSecEnv
+    : 15;
+if (DELEGATION_SWEEP_SEC !== delegationSweepSecEnv) {
+  log.warn("CLAUDE_PEERS_DELEGATION_SWEEP_SEC is not an integer between 1 and 86400, using 15", {
+    value: process.env.CLAUDE_PEERS_DELEGATION_SWEEP_SEC,
+  });
+}
+
+type DeckPush = { token: InstanceToken; messageId: number; text: string; sentAt: string };
+type TaskSettlement = "escalated" | "orphaned";
+type TaskSettleReason = "rearms_exhausted" | "lead_silent" | "participant_gone";
+
+function describeDuration(ms: number): string {
+  const seconds = Math.max(0, Math.round(ms / 1000));
+  return seconds >= 60 ? `${Math.floor(seconds / 60)} min ${seconds % 60} s` : `${seconds} s`;
+}
+
+function taskPeerExists(token: InstanceToken, groupId: GroupId): boolean {
+  return db.query("SELECT 1 FROM peers WHERE instance_token = ? AND group_id = ?").get(token, groupId) != null;
+}
+
+/** Runs inside the caller's transaction; the caller pushes after commit. */
+function depositDeckMessage(token: InstanceToken, groupId: GroupId, text: string, sentAt: string): DeckPush {
+  const result = insertMessage.run(DECK_INSTANCE_TOKEN, token, groupId, text, sentAt);
+  updateLastActivity.run(sentAt, token);
+  return { token, messageId: Number(result.lastInsertRowid), text, sentAt };
+}
+
+function reserveDelegationEvent(
+  row: DelegatedTaskRow,
+  kind: "due" | "escalate",
+  destination: string,
+  payload: string,
+  at: string
+): void {
+  db.run(
+    `INSERT INTO delegation_events (
+       event_id, task_id, generation, kind, destination_binding, payload, transport_status, created_at, emitted_at
+     ) VALUES (?, ?, ?, ?, ?, ?, 'emitted', ?, ?)`,
+    [randomUUID(), row.task_id, row.generation, kind, destination, payload, at, at]
+  );
+}
+
+const markTaskOverdueTx = db.transaction((row: DelegatedTaskRow, nowMs: number): DeckPush | null => {
+  const decisionDueMs = (row.due_at_ms ?? nowMs) + row.lead_silence_sec * 1000;
+  const at = new Date(nowMs).toISOString();
+  const result = db.run(
+    `UPDATE delegated_tasks SET status = 'overdue', decision_due_at_ms = ?, updated_at = ?
+      WHERE task_id = ? AND group_id = ? AND status = 'armed' AND generation = ? AND due_at_ms <= ?`,
+    [decisionDueMs, at, row.task_id, row.group_id, row.generation, nowMs]
+  );
+  if (result.changes !== 1) return null;
+  const delegate = publicTaskPeerName(row.delegate_binding, row.group_id, row.delegate_peer_id_snapshot);
+  const text =
+    `No explicit closure from '${delegate}' for task ${row.task_id} ("${row.label}"); its deadline has passed. ` +
+    `Check the outcome, then close the task or rearm it with a new deadline (${row.max_rearms - row.rearm_count} rearm(s) left). ` +
+    `Escalation to the operator at ${new Date(decisionDueMs).toISOString()}, in ${describeDuration(decisionDueMs - nowMs)}, without a decision.`;
+  reserveDelegationEvent(row, "due", row.delegator_token, text, at);
+  return depositDeckMessage(row.delegator_token, row.group_id, text, at);
+});
+
+const PARTICIPANT_GONE_SQL = `(
+  NOT EXISTS (SELECT 1 FROM peers p WHERE p.instance_token = delegated_tasks.delegator_token AND p.group_id = delegated_tasks.group_id)
+  OR NOT EXISTS (SELECT 1 FROM peers p WHERE p.instance_token = delegated_tasks.delegate_binding AND p.group_id = delegated_tasks.group_id)
+)`;
+
+const SETTLE_REASON_TEXT: Record<TaskSettleReason, string> = {
+  rearms_exhausted: "the rearm limit was reached without a closure",
+  lead_silent: "the delegator did not decide before the escalation time",
+  participant_gone: "a participant no longer exists on this broker",
+};
+
+/**
+ * `emit` false settles the state alone: the fallback after a failed
+ * notification, so a persistent inbox error cannot make every tick retry.
+ */
+const settleTaskTx = db.transaction(
+  (row: DelegatedTaskRow, target: TaskSettlement, reason: TaskSettleReason, nowMs: number, emit: boolean): DeckPush[] | null => {
+    const at = new Date(nowMs).toISOString();
+    const timeGuard =
+      target === "orphaned" ? PARTICIPANT_GONE_SQL : row.status === "armed" ? "due_at_ms <= ?" : "decision_due_at_ms <= ?";
+    const result = db.run(
+      `UPDATE delegated_tasks SET status = ?, terminal_reason = ?, escalation_result = ?, updated_at = ?
+        WHERE task_id = ? AND group_id = ? AND status = ? AND generation = ? AND ${timeGuard}`,
+      [
+        target,
+        reason,
+        emit ? null : "failed",
+        at,
+        row.task_id,
+        row.group_id,
+        row.status,
+        row.generation,
+        ...(target === "orphaned" ? [] : [nowMs]),
+      ]
+    );
+    if (result.changes !== 1) return null;
+    if (!emit) return [];
+
+    const delegator = publicTaskPeerName(row.delegator_token, row.group_id, row.delegator_peer_id_snapshot);
+    const delegate = publicTaskPeerName(row.delegate_binding, row.group_id, row.delegate_peer_id_snapshot);
+    const text =
+      `Task ${row.task_id} ("${row.label}") from '${delegator}' to '${delegate}' is unresolved: ` +
+      `${SETTLE_REASON_TEXT[reason]} (${row.rearm_count}/${row.max_rearms} rearms used). ` +
+      `The broker will not follow this task up again; close it explicitly once it is settled.`;
+    const pushes: DeckPush[] = [];
+    insertMessage.run(DECK_INSTANCE_TOKEN, OPERATOR_INSTANCE_TOKEN, row.group_id, text, at);
+    reserveDelegationEvent(row, "escalate", OPERATOR_INSTANCE_TOKEN, text, at);
+    if (taskPeerExists(row.delegator_token, row.group_id)) {
+      pushes.push(depositDeckMessage(row.delegator_token, row.group_id, text, at));
+    }
+    const consumer = db.query(
+      "SELECT 1 FROM operator_inbox_sessions WHERE group_id = ? AND datetime(last_seen_at) >= datetime('now', ?) LIMIT 1"
+    ).get(row.group_id, `-${OPERATOR_INBOX_SESSION_TTL_MIN} minutes`);
+    db.run("UPDATE delegated_tasks SET escalation_result = ? WHERE task_id = ? AND group_id = ?", [
+      consumer ? "emitted" : "no_consumer",
+      row.task_id,
+      row.group_id,
+    ]);
+    return pushes;
+  }
+);
+
+function sweepDelegatedTasks(nowMs: number = Date.now()): void {
+  const pushes: DeckPush[] = [];
+  const settle = (row: DelegatedTaskRow, target: TaskSettlement, reason: TaskSettleReason): void => {
+    try {
+      pushes.push(...(settleTaskTx(row, target, reason, nowMs, true) ?? []));
+    } catch (e) {
+      log.error(`delegation sweep: notifying ${target} task ${row.task_id} failed, settling without notification`, e);
+      try {
+        settleTaskTx(row, target, reason, nowMs, false);
+      } catch (e2) {
+        log.error(`delegation sweep: settling ${target} task ${row.task_id} failed`, e2);
+      }
+    }
+  };
+
+  const orphans = db.query(
+    `SELECT * FROM delegated_tasks WHERE status IN ('armed', 'overdue') AND ${PARTICIPANT_GONE_SQL} ORDER BY task_id LIMIT ?`
+  ).all(DELEGATION_SWEEP_BATCH) as DelegatedTaskRow[];
+  for (const row of orphans) settle(row, "orphaned", "participant_gone");
+
+  const expired = db.query(
+    "SELECT * FROM delegated_tasks WHERE status = 'armed' AND due_at_ms <= ? ORDER BY due_at_ms, task_id LIMIT ?"
+  ).all(nowMs, DELEGATION_SWEEP_BATCH) as DelegatedTaskRow[];
+  for (const row of expired) {
+    if (row.rearm_count >= row.max_rearms) {
+      settle(row, "escalated", "rearms_exhausted");
+    } else if ((row.due_at_ms ?? nowMs) + row.lead_silence_sec * 1000 <= nowMs) {
+      settle(row, "escalated", "lead_silent");
+    } else {
+      try {
+        const push = markTaskOverdueTx(row, nowMs);
+        if (push) pushes.push(push);
+      } catch (e) {
+        log.error(`delegation sweep: alerting task ${row.task_id} failed`, e);
+      }
+    }
+  }
+
+  const silent = db.query(
+    "SELECT * FROM delegated_tasks WHERE status = 'overdue' AND decision_due_at_ms <= ? ORDER BY decision_due_at_ms, task_id LIMIT ?"
+  ).all(nowMs, DELEGATION_SWEEP_BATCH) as DelegatedTaskRow[];
+  for (const row of silent) settle(row, "escalated", "lead_silent");
+
+  for (const push of pushes) pushDeckMessage(push.token, push.messageId, push.text, push.sentAt);
+}
+
 /**
  * A half-closed socket makes ws.send throw; the polling fallback ships the
  * message, so the failure is traced once per socket rather than per message.
@@ -10958,6 +11131,14 @@ function handleGroupStats(): GroupStatsResponse {
 
 type WsData = { instance_token: InstanceToken | null };
 const wsPool = new Map<InstanceToken, import("bun").ServerWebSocket<WsData>>();
+
+// Alerts are pushed through wsPool, so the first sweep waits for its initialisation.
+try {
+  sweepDelegatedTasks();
+} catch (e) {
+  log.error("delegation sweep: initial pass failed", e);
+}
+guardedInterval("sweepDelegatedTasks", sweepDelegatedTasks, DELEGATION_SWEEP_SEC * 1000);
 
 // --- HTTP + WebSocket server ---
 
