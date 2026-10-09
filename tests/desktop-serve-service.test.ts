@@ -340,6 +340,22 @@ test('starts a detached shell command with substituted action values', async () 
   })
 })
 
+test('probes health without following redirects, a redirect counting as ready', async () => {
+  const inits: unknown[] = []
+  const h = harness({
+    fetch: async (_url, init) => {
+      inits.push({ redirect: init?.redirect })
+      return { status: 302 }
+    }
+  })
+
+  await h.service.start(action())
+  await settle()
+
+  expect(inits).toEqual([{ redirect: 'manual' }])
+  expect(h.service.state().status).toBe('ready')
+})
+
 test('accepts readiness status 399', async () => {
   const h = harness({ statuses: [399] })
 
@@ -811,10 +827,10 @@ test('refuses to start an action that did not come from the operator approval', 
   for (const candidate of forged) {
     const h = harness()
 
-    const state = await h.service.start(candidate as ApprovedServeAction)
+    const result = await h.service.start(candidate as ApprovedServeAction)
 
     expect(h.spawns).toEqual([])
-    expect(state).toEqual({ status: 'idle' })
+    expect(result).toEqual({ outcome: 'refused', state: { status: 'idle' } })
     expect(h.errors).toEqual(['refused to start a serve action that did not come from the operator approval'])
   }
 })
@@ -971,10 +987,38 @@ test('refuses to start after quit', async () => {
   const h = harness()
 
   await h.service.quit()
-  const state = await h.service.start(action())
+  const result = await h.service.start(action())
 
   expect(h.spawns).toEqual([])
-  expect(state).toEqual({ status: 'idle' })
+  expect(result).toEqual({ outcome: 'quitting', state: { status: 'idle' } })
+})
+
+test('reports a second start while a server runs as busy, not as started', async () => {
+  const h = await readyHarness()
+
+  const first = h.service.state()
+  const result = await h.service.start(action({ command: 'must not spawn' }))
+
+  expect(result).toEqual({ outcome: 'busy', state: first })
+  expect(h.spawns).toHaveLength(1)
+})
+
+test('refuses a start requested from inside a state listener without queueing it', async () => {
+  const h = await readyHarness({
+    onSignal: (_pid, signal) => {
+      if (signal === 'SIGINT') throw errno('ESRCH')
+    }
+  })
+  const nested: Array<Promise<{ outcome: string }>> = []
+  h.service.on('changed', (state) => {
+    if (state.status === 'idle' && nested.length === 0) nested.push(h.service.start(action({ command: 'nested start' })))
+  })
+
+  await completeWithin(h.service.stop(), 'stop')
+  await settle()
+
+  expect(await completeWithin(nested[0]!, 'nested start')).toMatchObject({ outcome: 'busy' })
+  expect(h.spawns, 'a start answered busy must not run later from the queue').toHaveLength(1)
 })
 
 test('writes child standard streams to the session serve log', async () => {

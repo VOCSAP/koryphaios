@@ -15,6 +15,7 @@ import {
   type ServeLifecycleEffect,
   type ServeLifecycleEvent,
   type ServeLifecycleState,
+  type ServeReply,
   type ServePosixSignal
 } from './serve-lifecycle'
 import {
@@ -36,6 +37,11 @@ export interface ServeState {
   port?: number
   pid?: number
   error?: string
+}
+
+export interface ServeStartOutcome {
+  outcome: 'started' | 'busy' | 'quitting' | 'refused'
+  state: ServeState
 }
 
 export interface ServeOutput {
@@ -84,7 +90,7 @@ export interface ServeServiceDeps {
   platform?: NodeJS.Platform
   systemRoot?: string
   allocatePort?: () => Promise<number>
-  fetch?: (url: string, init?: { signal?: AbortSignal }) => Promise<ServeFetchResponse>
+  fetch?: (url: string, init?: { signal?: AbortSignal; redirect?: 'manual' }) => Promise<ServeFetchResponse>
   setTimer?: (ms: number, fire: () => void) => unknown
   clearTimer?: (handle: unknown) => void
   spawn?: (file: string, args: string[], options: ServeSpawnOptions) => ServeChild
@@ -194,7 +200,7 @@ export class ServeService extends EventEmitter {
   private readonly platform: NodeJS.Platform
   private readonly systemRoot: string | undefined
   private readonly allocatePort: () => Promise<number>
-  private readonly fetch: (url: string, init?: { signal?: AbortSignal }) => Promise<ServeFetchResponse>
+  private readonly fetch: (url: string, init?: { signal?: AbortSignal; redirect?: 'manual' }) => Promise<ServeFetchResponse>
   private readonly setTimer: (ms: number, fire: () => void) => unknown
   private readonly clearTimer: (handle: unknown) => void
   private readonly spawn: (file: string, args: string[], options: ServeSpawnOptions) => ServeChild
@@ -244,14 +250,19 @@ export class ServeService extends EventEmitter {
     return { ...this.published }
   }
 
-  async start(action: ApprovedServeAction): Promise<ServeState> {
+  /** Only `started` means this call launched the run; its state may still end in `failed`. */
+  async start(action: ApprovedServeAction): Promise<ServeStartOutcome> {
     if (!isMintedServeAction(action)) {
       this.reportError('serve', 'refused to start a serve action that did not come from the operator approval')
-      return this.state()
+      return { outcome: 'refused', state: this.state() }
     }
-    this.dispatch({ kind: 'Start', action })
+    if (this.dispatching) return { outcome: 'busy', state: this.state() }
+    const reply = this.dispatch({ kind: 'Start', action })
+    if (reply?.kind !== 'accepted') {
+      return { outcome: reply?.kind === 'rejected' ? 'quitting' : 'busy', state: this.state() }
+    }
     await this.waitFor((state) => state.phase.kind !== 'preparing' && state.phase.kind !== 'spawning')
-    return this.state()
+    return { outcome: 'started', state: this.state() }
   }
 
   async stop(): Promise<void> {
@@ -275,14 +286,15 @@ export class ServeService extends EventEmitter {
     return new Promise((resolve) => this.waiters.push({ until, resolve }))
   }
 
-  private dispatch(event: ServeLifecycleEvent): void {
+  /** @returns the reply to `event`, or null when it was queued behind the event being processed. */
+  private dispatch(event: ServeLifecycleEvent): ServeReply | null {
     if (this.dispatching) {
       this.queue.push(event)
-      return
+      return null
     }
     this.dispatching = true
     try {
-      this.process(event)
+      return this.process(event)
     } finally {
       try {
         for (let next = this.queue.shift(); next !== undefined; next = this.queue.shift()) this.process(next)
@@ -292,15 +304,17 @@ export class ServeService extends EventEmitter {
     }
   }
 
-  private process(event: ServeLifecycleEvent): void {
+  private process(event: ServeLifecycleEvent): ServeReply | null {
     let effects: readonly ServeLifecycleEffect[]
+    let reply: ServeReply
     try {
       const reduction = reduce(this.machine, event)
       this.machine = reduction.state
       effects = reduction.effects
+      reply = reduction.reply
     } catch (error) {
       this.reportError('serve', `Serve lifecycle event ${event.kind} failed`, error)
-      return
+      return null
     }
     for (const effect of effects) {
       try {
@@ -310,6 +324,7 @@ export class ServeService extends EventEmitter {
       }
     }
     this.publish()
+    return reply
   }
 
   private publish(): void {
@@ -480,7 +495,8 @@ export class ServeService extends EventEmitter {
     this.probe = { op, controller }
     const signal = controller.signal
     void Promise.resolve()
-      .then(() => this.fetch(url, { signal }))
+      // Following a redirect would let the dev server send the Deck past the loopback rule of serve.json; a 3xx already counts as an answer.
+      .then(() => this.fetch(url, { signal, redirect: 'manual' }))
       .then(
         (response) => {
           if (response.body) {
