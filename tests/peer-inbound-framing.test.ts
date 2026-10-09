@@ -23,7 +23,7 @@ import { PEER_NO_REPLY_NOTE } from "../shared/message-framing.ts";
 const BODY = "Take the next card, then report to the team-lead when it lands.";
 
 describe("sender-class predicates", () => {
-  // Each predicate is compared against TWO forms on purpose. The three receive
+  // Each predicate is compared against TWO forms on purpose. The four receive
   // paths do not all hold the same one, and dropping either comparison
   // un-frames one path silently -- no error, no failing assertion elsewhere,
   // just a message that arrives naked.

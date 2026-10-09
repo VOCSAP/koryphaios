@@ -362,9 +362,9 @@ The current peer is parked as `dormant` (resume-able), and a fresh registration 
 | Tool             | What it does                                                                                                  |
 | ---------------- | ------------------------------------------------------------------------------------------------------------- |
 | `list_peers`     | Find other Claude Code instances in your group -- scoped to `machine`, `directory`, or `repo` (cross-PC)      |
-| `send_message`   | Send a message to another peer in your group by `peer_id` (push via WebSocket, fallback queues to poll); optional `expects_reply: false` waives the acknowledgement |
+| `send_message`   | Send a message to another peer in your group by `peer_id` (push via WebSocket, fallback queues to poll); optional `expects_reply: false` waives the acknowledgement; `deadline_sec`, `task_id`, `task_action` track a delegated task |
 | `set_summary`    | Describe what you're working on (visible to peers in your group)                                              |
-| `check_messages` | Manual poll fallback (rarely needed; messages normally arrive via WS push)                                    |
+| `check_messages` | Manual poll fallback (rarely needed; messages normally arrive via WS push); `open_tasks_with` lists your open delegated tasks instead |
 | `whoami`         | Show your `peer_id`, host, cwd, current group, summary, and `ws_connected` status                             |
 | `list_groups`    | Show available groups (from your user config) and how many active peers each has                              |
 | `switch_group`   | Move this session to another group by name. Disconnects the current peer (kept dormant) and re-registers      |
@@ -388,6 +388,18 @@ turn; omit it (or pass `true`) for anything that genuinely needs an answer.
 Omitting the field is byte-for-byte identical to today's behaviour. The
 waiver is never applied when the target is `operator`, since a reply is the
 whole point of that channel.
+
+**Delegated tasks.** `send_message` with `deadline_sec` makes the broker
+follow the request up: it returns a task id, and if the recipient has not
+closed the task by the deadline, the broker tells you, then escalates to the
+operator inbox once the rearms run out or you stay silent. Cite the id with
+`task_id`; add `deadline_sec` to rearm an overdue task; close it with
+`task_id` + `task_action: "close"`, with or without a message. An ACK never
+closes a task. `check_messages(open_tasks_with="<peer_id>")` (or `"*"`) lists
+your open tasks without draining the mail, and an uncited message from a peer
+holding open tasks of yours arrives with a reminder listing them. Tracked tasks need
+a group with a secret and two peers on the same broker. Design:
+`docs/adr/002-delegated-task-follow-up.md`; contract: `ARCHITECTURE.md`.
 
 ---
 
@@ -479,6 +491,10 @@ Every setting can be provided via an environment variable or via a JSON settings
 | `CLAUDE_PEERS_LOCK_TTL_SEC`          | (n/a)                  | `21600` (6h)                         | broker                | v0.8 (K2): a roadmap work-lock whose item saw no write for this long is released by `releaseStaleLocks` (item drops back to `planned`). |
 | `CLAUDE_PEERS_LOCK_GRACE_SEC`        | (n/a)                  | `600` (10 min)                       | broker                | v0.8 (K2): minimum lock age before an owner-less lock (no active peer with the owner's peer_id on the item's project) is released. |
 | `CLAUDE_PEERS_LOCK_SWEEP_SEC`        | (n/a)                  | `60`                                 | broker                | v0.8 (K2): interval (seconds) between `releaseStaleLocks` runs.        |
+| `CLAUDE_PEERS_DELEGATION_MAX_REARMS` | `delegation_max_rearms` | `3`                                 | broker                | Delegated tasks: rearms allowed before escalation, integer 0 to 10. Frozen into each task at creation; an invalid value refuses new tasks only (see `delegation_policy` in `/health`). |
+| `CLAUDE_PEERS_DELEGATION_LEAD_SILENCE_SEC` | `delegation_lead_silence_sec` | `300`                   | broker                | Delegated tasks: seconds the delegator has, after a deadline, to close or rearm before escalation, integer 15 to 3600. Same freezing and validation. |
+| `CLAUDE_PEERS_DELEGATION_MAX_DEADLINE_SEC` | `delegation_max_deadline_sec` | `14400` (4h)            | broker                | Delegated tasks: largest `deadline_sec` accepted, integer 1 to 86400. Same freezing and validation. |
+| `CLAUDE_PEERS_DELEGATION_SWEEP_SEC`  | (n/a)                  | `15`                                 | broker                | Delegated tasks: interval (seconds) between follow-up sweeps (overdue alerts, escalations, orphans), integer 1 to 86400; anything else falls back to 15 with a warning. |
 | `CLAUDE_PEERS_POLL_FALLBACK_SEC`     | (n/a)                  | `5`                                  | server                | Seconds between fallback polls when the WebSocket is down (uses `/peek-messages`, never marks delivered) |
 | `CLAUDE_PEERS_SUMMARY_PROVIDER`      | `summary_provider`     | `auto`                               | server                | `auto` / `anthropic` / `openai-compat` / `none`                        |
 | `CLAUDE_PEERS_SUMMARY_BASE_URL`      | `summary_base_url`     | (none)                               | server                | Base URL for `openai-compat`                                           |

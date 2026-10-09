@@ -6,7 +6,7 @@
 // red, while reception-side framing is fail-closed regardless of the emitter's
 // version.
 // Each predicate compares against both the public peer_id and the reserved
-// instance_token, since the three receive paths do not all see the same form.
+// instance_token, since the four receive paths do not all see the same form.
 
 import {
   DECK_PEER_ID,
