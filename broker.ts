@@ -127,6 +127,8 @@ import type {
   SendMessageRequest,
   SendMessageResponse,
   DelegatedTask,
+  DelegationContext,
+  DelegationTaskRef,
   DelegationsCloseRequest,
   DelegationsCloseResponse,
   DelegationsListRequest,
@@ -724,6 +726,13 @@ try {
 db.run(
   `CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_federation ON messages(federation_id) WHERE federation_id IS NOT NULL`
 );
+
+try {
+  db.run("ALTER TABLE messages ADD COLUMN task_id TEXT");
+} catch (e) {
+  const msg = e instanceof Error ? e.message : String(e);
+  if (!msg.includes("duplicate column name")) log.error(`migration: ${msg}`);
+}
 
 db.run(`
   CREATE TABLE IF NOT EXISTS peer_sessions (
@@ -2078,6 +2087,11 @@ const insertMessage = db.prepare(`
   VALUES (?, ?, ?, ?, ?, 0)
 `);
 
+const insertTaskMessage = db.prepare(`
+  INSERT INTO messages (from_token, to_token, group_id, text, sent_at, delivered, task_id)
+  VALUES (?, ?, ?, ?, ?, 0, ?)
+`);
+
 // Ordered by sent_at then id, not id alone: sent_at stays the primary sort key
 // so intended chronological order is preserved, while id only breaks a genuine
 // sent_at tie -- two sends can land in the same millisecond.
@@ -2206,8 +2220,18 @@ const ackPriorMessagesForSender = db.prepare(
      )`
 );
 
-function recordMessage(fromToken: string, toToken: string, groupId: string, text: string, sentAt: string): number {
-  const result = insertMessage.run(fromToken, toToken, groupId, text, sentAt);
+function recordMessage(
+  fromToken: string,
+  toToken: string,
+  groupId: string,
+  text: string,
+  sentAt: string,
+  taskId: string | null = null
+): number {
+  const result =
+    taskId === null
+      ? insertMessage.run(fromToken, toToken, groupId, text, sentAt)
+      : insertTaskMessage.run(fromToken, toToken, groupId, text, sentAt, taskId);
   const messageId = Number(result.lastInsertRowid);
   updateLastActivity.run(sentAt, fromToken);
   updateLastActivity.run(sentAt, toToken);
@@ -2851,10 +2875,79 @@ function taskForParticipant(taskId: string, sender: MessageSender): TaskResult<D
   return row;
 }
 
+const DELEGATION_CONTEXT_MAX_TASKS = 5;
+
+function toDelegationTaskRef(row: DelegatedTaskRow): DelegationTaskRef {
+  return {
+    task_id: row.task_id,
+    label: row.label,
+    due_at: row.due_at_ms === null ? null : new Date(row.due_at_ms).toISOString(),
+    status: row.status,
+  };
+}
+
+type DelegationContextSource = {
+  id: number;
+  from_token: string;
+  to_token: string;
+  group_id: string;
+  task_id: string | null;
+};
+
+function computeDelegationContext(message: DelegationContextSource): DelegationContext | undefined {
+  if (message.task_id !== null) {
+    const cited = taskRow(message.task_id, message.group_id);
+    if (cited?.delegator_token === message.from_token && cited.delegate_binding === message.to_token) {
+      return { task: { ...toDelegationTaskRef(cited), recipient_side: "delegate" } };
+    }
+    if (cited?.delegate_binding === message.from_token && cited.delegator_token === message.to_token) {
+      return { task: { ...toDelegationTaskRef(cited), recipient_side: "delegator" } };
+    }
+  }
+  // group_id leads both delegation indexes; without it the lookup scans every group's tasks.
+  // A non-closed task always has a due date: only closing clears due_at_ms.
+  const open = db.query(
+    `SELECT * FROM delegated_tasks
+      WHERE group_id = ? AND delegator_token = ? AND delegate_binding = ? AND status <> 'closed'
+      ORDER BY due_at_ms, task_id`
+  ).all(message.group_id, message.to_token, message.from_token) as DelegatedTaskRow[];
+  if (open.length === 0) return undefined;
+  return {
+    open_from_recipient_to_sender: {
+      total: open.length,
+      tasks: open.slice(0, DELEGATION_CONTEXT_MAX_TASKS).map(toDelegationTaskRef),
+    },
+  };
+}
+
+/** Never throws: a failed projection delivers the message without its context. */
+function delegationContextFor(message: DelegationContextSource): DelegationContext | undefined {
+  try {
+    return computeDelegationContext(message);
+  } catch (e) {
+    log.error(`delegation context: projection failed for message ${message.id}, delivered without it`, e);
+    return undefined;
+  }
+}
+
+/** Never throws, like delegationContextFor. */
+function messageDelegationContext(messageId: number): DelegationContext | undefined {
+  try {
+    const row = db.query("SELECT id, from_token, to_token, group_id, task_id FROM messages WHERE id = ?").get(messageId) as
+      | DelegationContextSource
+      | null;
+    return row ? computeDelegationContext(row) : undefined;
+  } catch (e) {
+    log.error(`delegation context: projection failed for message ${messageId}, delivered without it`, e);
+    return undefined;
+  }
+}
+
 async function sendOrdinaryMessage(
   sender: MessageSender,
   targetId: string,
-  text: string
+  text: string,
+  taskId: string | null = null
 ): Promise<SendMessageResponse> {
   if (text.length > MESSAGE_TEXT_MAX) {
     return { ok: false, error: `text must be a string of at most ${MESSAGE_TEXT_MAX} characters` };
@@ -2884,11 +2977,14 @@ async function sendOrdinaryMessage(
     }
     return { ok: false, error: `Peer '${targetId}' not found in your group` };
   }
+  if (taskId !== null && target.via !== null) {
+    return { ok: false, error: "A task citation cannot be relayed to a remote peer" };
+  }
   if (BROKER_MODE === "replica" && target.via !== null) {
     return relayOutboundMessage(sender, { ...target, upstream_peer_id: target.upstream_peer_id ?? target.peer_id }, text);
   }
   const sentAt = new Date().toISOString();
-  const messageId = recordMessageTx(sender.instance_token, target.instance_token, sender.group_id, text, sentAt);
+  const messageId = recordMessageTx(sender.instance_token, target.instance_token, sender.group_id, text, sentAt, taskId);
   pushPeerMessage(target.instance_token, messageId, sender, text, sentAt);
   return { ok: true };
 }
@@ -2945,7 +3041,7 @@ const createDelegatedTaskTx = db.transaction(
         now,
       ]
     );
-    const messageId = recordMessage(sender.instance_token, target.instance_token, sender.group_id, text, now);
+    const messageId = recordMessage(sender.instance_token, target.instance_token, sender.group_id, text, now, taskId);
     return { row: taskRow(taskId, sender.group_id)!, messageId, sentAt: now };
   }
 );
@@ -2962,7 +3058,7 @@ const closeDelegatedTaskTx = db.transaction(
       [now, now, sender.instance_token, row.task_id, row.group_id]
     );
     const messageId = report
-      ? recordMessage(sender.instance_token, report.target.instance_token, sender.group_id, report.text, now)
+      ? recordMessage(sender.instance_token, report.target.instance_token, sender.group_id, report.text, now, row.task_id)
       : null;
     return { row: taskRow(row.task_id, row.group_id)!, messageId, sentAt: report ? now : null };
   }
@@ -2979,7 +3075,7 @@ const rearmDelegatedTaskTx = db.transaction(
       [nowMs + deadlineSec * 1000, now, row.task_id, row.group_id, nowMs]
     );
     if (result.changes !== 1) return null;
-    const messageId = recordMessage(sender.instance_token, target.instance_token, sender.group_id, text, now);
+    const messageId = recordMessage(sender.instance_token, target.instance_token, sender.group_id, text, now, row.task_id);
     return { row: taskRow(row.task_id, row.group_id)!, messageId, sentAt: now };
   }
 );
@@ -3076,7 +3172,7 @@ async function handleSendMessage(body: SendMessageRequest): Promise<SendMessageR
 
   const report = messageForTask(body, task, sender);
   if ("error" in report) return { ok: false, error: report.error };
-  return sendOrdinaryMessage(sender, report.target.peer_id, report.text);
+  return sendOrdinaryMessage(sender, report.target.peer_id, report.text, task.task_id);
 }
 
 function handleDelegationsList(body: DelegationsListRequest): TaskResult<DelegationsListResponse> {
@@ -3304,6 +3400,7 @@ function pushPeerMessage(
 ): void {
   const ws = wsPool.get(token);
   if (!ws || ws.readyState !== 1) return;
+  const delegationContext = messageDelegationContext(messageId);
   try {
     ws.send(
       JSON.stringify({
@@ -3315,6 +3412,7 @@ function pushPeerMessage(
         from_cwd: sender.cwd,
         text,
         sent_at: sentAt,
+        ...(delegationContext ? { delegation_context: delegationContext } : {}),
       })
     );
   } catch (e) {
@@ -3414,7 +3512,7 @@ function handleAnnounce(body: AnnounceRequest): AnnounceResponse | { error: stri
 function flushPendingForToken(token: InstanceToken, group_id: string): void {
   const ws = wsPool.get(token);
   if (!ws || ws.readyState !== 1) return;
-  type MessageRow = Omit<Message, "delivered"> & { delivered: number };
+  type MessageRow = Omit<Message, "delivered"> & { delivered: number; task_id: string | null };
   // Capped replay: only the last FLUSH_MAX_COUNT messages within FLUSH_MAX_AGE_HOURS.
   // Beyond that, the LLM can still pull the full backlog via check_messages.
   const cutoff = `-${FLUSH_MAX_AGE_HOURS} hours`;
@@ -3431,6 +3529,7 @@ function flushPendingForToken(token: InstanceToken, group_id: string): void {
       | { peer_id: string; summary: string; host: string; cwd: string }
       | null;
     if (!sender) continue;
+    const delegationContext = delegationContextFor(row);
     try {
       ws.send(
         JSON.stringify({
@@ -3442,6 +3541,7 @@ function flushPendingForToken(token: InstanceToken, group_id: string): void {
           from_cwd: sender.cwd,
           text: row.text,
           sent_at: row.sent_at,
+          ...(delegationContext ? { delegation_context: delegationContext } : {}),
         })
       );
       // Do NOT markDelivered: same rationale as handleSendMessage.
@@ -3454,8 +3554,9 @@ function flushPendingForToken(token: InstanceToken, group_id: string): void {
 // NF-A: map an internal message row to the public DeliveredMessage — sender
 // resolved to peer_id + meta server-side, routing tokens dropped.
 function toDeliveredMessage(
-  r: Omit<Message, "delivered"> & { delivered: number }
+  r: Omit<Message, "delivered"> & { delivered: number; task_id: string | null }
 ): DeliveredMessage {
+  const delegationContext = delegationContextFor(r);
   return {
     id: r.id,
     ...resolveSenderMeta(r.from_token),
@@ -3463,6 +3564,7 @@ function toDeliveredMessage(
     text: r.text,
     sent_at: r.sent_at,
     delivered: Boolean(r.delivered),
+    ...(delegationContext ? { delegation_context: delegationContext } : {}),
   };
 }
 
@@ -3476,12 +3578,13 @@ function handlePollMessages(body: PollMessagesRequest): PollMessagesResponse {
     log.warn(`poll-messages: refused sentinel-shaped instance_token`, { instance_token: body.instance_token.slice(0, 64) });
     return { messages: [] };
   }
-  type MessageRow = Omit<Message, "delivered"> & { delivered: number };
+  type MessageRow = Omit<Message, "delivered"> & { delivered: number; task_id: string | null };
   const rows = selectUndelivered.all(body.instance_token) as MessageRow[];
+  const messages = rows.map(toDeliveredMessage);
   for (const row of rows) {
     markDelivered.run(row.id);
   }
-  return { messages: rows.map(toDeliveredMessage) };
+  return { messages };
 }
 
 // Like handlePollMessages but does NOT mark delivered.
@@ -3494,7 +3597,7 @@ function handlePeekMessages(body: PollMessagesRequest): PollMessagesResponse {
     log.warn(`peek-messages: refused sentinel-shaped instance_token`, { instance_token: body.instance_token.slice(0, 64) });
     return { messages: [] };
   }
-  type MessageRow = Omit<Message, "delivered"> & { delivered: number };
+  type MessageRow = Omit<Message, "delivered"> & { delivered: number; task_id: string | null };
   const rows = selectUndelivered.all(body.instance_token) as MessageRow[];
   return { messages: rows.map(toDeliveredMessage) };
 }

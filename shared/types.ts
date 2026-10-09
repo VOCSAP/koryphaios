@@ -219,6 +219,24 @@ export interface DelegatedTask {
   escalation_result: string | null;
 }
 
+export interface DelegationTaskRef {
+  task_id: string;
+  label: string;
+  due_at: string | null;
+  status: DelegationTaskStatus;
+}
+
+/**
+ * Recomputed at every delivery, never stored. `task` is the task the message
+ * validly cites; `open_from_recipient_to_sender` is set only on an uncited
+ * message from a delegate to its delegator, `tasks` capped while `total` stays
+ * exact.
+ */
+export interface DelegationContext {
+  task?: DelegationTaskRef & { recipient_side: "delegator" | "delegate" };
+  open_from_recipient_to_sender?: { total: number; tasks: DelegationTaskRef[] };
+}
+
 export interface DelegationsListRequest {
   from_token: InstanceToken;
   peer_id?: PeerId | "*";
@@ -272,6 +290,7 @@ export interface DeliveredMessage {
   text: string;
   sent_at: string;
   delivered: boolean;
+  delegation_context?: DelegationContext;
 }
 
 export interface PollMessagesResponse {
