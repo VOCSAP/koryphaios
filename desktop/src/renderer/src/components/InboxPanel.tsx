@@ -7,6 +7,8 @@ import type { AckableInboxEntry, InboxEntry } from '@shared/types'
 import { verdictAnswerKindFor } from './approval-verdict'
 import { resolveApprovalSender } from '../inbox-sender'
 import { HookApprovalAnswer } from './HookApprovalAnswer'
+import { ApprovalNavigate, ApprovalRequestBody } from './ApprovalRequestBody'
+import { displayApprovalText } from './approval-display'
 import { formQuestions } from './approval-answers'
 import { canAnswerVerdict as verdictAllowed } from './verdict-remote'
 
@@ -44,7 +46,7 @@ function listTimestamp(e: InboxEntry, today: Date): string {
 function entryText(e: InboxEntry): string {
   if (e.kind === 'message') return e.message.text
   if (e.kind === 'event') return e.text
-  return e.approval.question
+  return displayApprovalText(e.approval.question)
 }
 
 /** Stable React key across the three families (family 3 has no ack key). */
@@ -377,8 +379,21 @@ export function InboxPanel(): React.JSX.Element {
             {open.kind === 'approval' && open.approval.title && (
               <div className="inbox-modal-subject">{open.approval.title}</div>
             )}
-            {!(hookApproval && canAnswerVerdict && formQuestions(hookApproval)) && (
-              <div className="inbox-modal-text">{entryText(open)}</div>
+            {!(hookApproval && canAnswerVerdict && formQuestions(hookApproval)) &&
+              (open.kind === 'approval' ? (
+                <ApprovalRequestBody approval={open.approval} className="inbox-modal-text" />
+              ) : (
+                <div className="inbox-modal-text">{entryText(open)}</div>
+              ))}
+
+            {open.kind === 'approval' && (
+              <ApprovalNavigate
+                approval={open.approval}
+                onNavigated={() => {
+                  setOpenKey(null)
+                  openInbox(false)
+                }}
+              />
             )}
 
             {open.kind === 'approval' && !canAnswerVerdict && (

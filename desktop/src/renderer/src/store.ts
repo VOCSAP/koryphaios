@@ -318,6 +318,7 @@ interface DeckState {
   /** RoadmapView consumed the conflicts-filter request. */
   clearRoadmapConflictsSeed(): void
   setSelected(id: string | null): void
+  focusTile(id: string): void
   setMaximized(id: string | null): void
   openSearch(open: boolean): void
   openSettings(open: boolean): void
@@ -682,11 +683,7 @@ export const useDeck = create<DeckState>((set, get) => ({
     window.api.onApprovalNotApplied((e) => {
       get().showToast('toast.approvalNotApplied', 'error', { params: { tile: e.tile, reason: e.reason } })
     })
-    // System-notification click (PLAN C11): jump to the waiting session.
-    window.api.onFocusSession((id) => {
-      set({ view: 'agents', selectedId: id })
-    })
-    // Operator inbox (PLAN C12): batches drained by the main-process poll.
+    window.api.onFocusSession((id) => get().focusTile(id))
     window.api.onInboxMessages((batch) => {
       const { inboxMessages } = get()
       // Dedupe by broker id: the disk-history hydration below and the live
@@ -891,6 +888,7 @@ export const useDeck = create<DeckState>((set, get) => ({
   openRoadmapConflictsFilter: () => set({ roadmapConflictsSeed: true, view: 'roadmap' }),
   clearRoadmapConflictsSeed: () => set({ roadmapConflictsSeed: false }),
   setSelected: (id) => set({ selectedId: id }),
+  focusTile: (id) => set({ view: 'agents', selectedId: id }),
   setMaximized: (id) => set({ maximizedId: id }),
   openSearch: (open) => set({ searchOpen: open }),
   openSettings: (open) => set({ settingsOpen: open }),

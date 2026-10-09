@@ -5057,6 +5057,70 @@ body:has(.rm-modal) .rm-conflict-modal {
   gap: 6px;
 }
 
+.approval-command {
+  font-family: var(--mono);
+}
+
+.approval-command-head {
+  color: var(--fg);
+  font-weight: 600;
+}
+
+.approval-command-rest {
+  margin-top: 4px;
+  color: var(--fg-dim);
+}
+
+.approval-signal {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  margin-top: 6px;
+  font-size: 11px;
+}
+
+/* A hint, never a verdict: tinted outline like the other state badges, so it
+   cannot be read as the colour of Allow or Deny. */
+.approval-danger-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  padding: 1px 8px;
+  border: 1px solid color-mix(in srgb, var(--danger) 50%, transparent);
+  border-radius: 999px;
+  color: var(--danger);
+}
+
+.approval-danger-badge code {
+  font-family: var(--mono);
+  word-break: break-all;
+}
+
+.approval-signal-legend {
+  color: var(--fg-dim);
+}
+
+.inbox-modal-goto {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  margin-top: 10px;
+}
+
+.inbox-goto-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.inbox-goto-reason {
+  font-size: 11px;
+  color: var(--fg-dim);
+}
+
 /* One question per fieldset; the header is the short tag Claude Code shows on
    its own menu, so the operator recognises the question from the tile. */
 .aq {
