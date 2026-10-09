@@ -216,7 +216,10 @@ failure shape as a className matching no selector at all, different cause.
   render alike. A list mixing counted and uncounted lines therefore needs its
   groups TITLED, not merely separated.
 - **Toasts** (`.toast`): fixed bottom-center, white text, filled green
-  (success) or amber (info). Transient EVENTS only.
+  (success), amber (info) or red (error). Transient EVENTS only. Lifetime per
+  variant in `toast-timing.ts`: 3 s for success and info, 8 s for error,
+  because an error reports an action that did NOT happen and must outlast a
+  glance away. A click dismisses it: it covers a tall modal's footer.
 - **Status banner** (`.status-banner`): fixed top, full-width, filled dark red
   — persistent STATE (e.g. broker offline). Actions inside use
   `.status-banner-action` (translucent white outline). A dismissed banner must

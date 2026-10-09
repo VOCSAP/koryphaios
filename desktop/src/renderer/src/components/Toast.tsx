@@ -13,9 +13,12 @@ export function Toast(): React.JSX.Element | null {
   const variant = useDeck((s) => s.toastVariant)
   const raw = useDeck((s) => s.toastRaw)
   const params = useDeck((s) => s.toastParams)
+  const dismiss = useDeck((s) => s.dismissToast)
   if (!toast) return null
+  // A click dismisses: the toast covers a tall modal's footer (Save/Cancel)
+  // for its whole lifetime. Keyboard focus is never blocked by it.
   return (
-    <div className={`toast toast-${variant}`} role={variant === 'error' ? 'alert' : 'status'}>
+    <div className={`toast toast-${variant}`} role={variant === 'error' ? 'alert' : 'status'} onClick={dismiss}>
       {raw ? toast : t(toast, params ?? undefined)}
     </div>
   )

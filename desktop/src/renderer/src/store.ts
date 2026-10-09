@@ -33,6 +33,7 @@ import { countPendingInboxMessages } from '@shared/inbox-pending'
 import { shouldShowTemplateAppliedToast } from '@shared/template-apply-outcome'
 import { workspaceRestoreToastKeyFor } from '@shared/workspace-restore-outcome'
 import { keepDrafts, type QuestionDraft } from './components/approval-answers'
+import { TOAST_MS } from './toast-timing'
 
 /**
  * The blocking-question payload, DERIVED from the Courrier union instead of
@@ -358,6 +359,8 @@ interface DeckState {
     variant?: 'success' | 'info' | 'error',
     opts?: { raw?: boolean; params?: Record<string, string | number> }
   ): boolean
+  /** The toast sits over a tall modal's footer; a click hands it back. */
+  dismissToast(): void
   saveCurrent(): Promise<void>
   saveAs(name: string): Promise<void>
   requestRestore(id: string): void
@@ -1014,9 +1017,11 @@ export const useDeck = create<DeckState>((set, get) => ({
     const token = ++toastToken
     setTimeout(() => {
       if (toastToken === token) set({ toast: null })
-    }, 3000)
+    }, TOAST_MS[variant])
     return true
   },
+
+  dismissToast: () => set({ toast: null }),
 
   async saveCurrent() {
     await guarded('save workspace', async () => {

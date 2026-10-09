@@ -609,7 +609,7 @@
   "roadmap.fieldContextPlaceholder": "Objective / Constraints / Pointers (files) / Acceptance criteria — everything the next agent cannot rediscover alone",
   "roadmap.wandTitle": "Draft with AI: a read-only haiku pass grounds the briefing in the project files (nothing is saved until you hit Save)",
   "roadmap.wandBusy": "Drafting the briefing from the project files…",
-  "roadmap.contextExpiredBodyPrefix": "Save blocked: text before the first live append would be absorbed by expired context.",
+  "roadmap.contextExpiredBodyPrefix": "Save blocked: write below the first \"<<< append\" line. Text above it belongs to an expired part of the card and would be hidden. Your draft is kept.",
   "roadmap.contextChangedMarkers": "Save blocked: context markers were changed. Keep every live append header intact.",
   "roadmap.staleSave": "Stale revision: this card changed since you opened it. Your draft is kept; reload to carry it onto the current card, then save again.",
   "roadmap.staleSaveReload": "Reload",

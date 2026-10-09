@@ -1539,6 +1539,8 @@ textarea:disabled {
   text-align: center;
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
   z-index: 50;
+  /* A click dismisses it (Toast.tsx). */
+  cursor: pointer;
 }
 /* Green success (save). */
 .toast-success {

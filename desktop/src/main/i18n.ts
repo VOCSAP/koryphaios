@@ -792,7 +792,7 @@ export const EN_DEFAULTS: Record<string, string> = {
     'Draft with AI: a read-only haiku pass grounds the briefing in the project files (nothing is saved until you hit Save)',
   'roadmap.wandBusy': 'Drafting the briefing from the project files…',
   'roadmap.contextExpiredBodyPrefix':
-    'Save blocked: text before the first live append would be absorbed by expired context.',
+    'Save blocked: write below the first "<<< append" line. Text above it belongs to an expired part of the card and would be hidden. Your draft is kept.',
   'roadmap.contextChangedMarkers':
     'Save blocked: context markers were changed. Keep every live append header intact.',
   'roadmap.staleSave':
