@@ -3743,6 +3743,66 @@ function cleanList(v: unknown): string[] | null {
   return v.filter((x): x is string => typeof x === "string" && x.trim() !== "").map((x) => x.trim());
 }
 
+const DEPENDS_ON_PREFIX = /^[0-9a-f]{8}[0-9a-f-]*$/;
+
+type DependencyMatch = { id: string } | { unknown: true } | { ambiguous: number };
+
+/** The exact id, else the only id `entry` prefixes (8+ hex characters), `entry` case-folded. */
+function matchDependency(entry: string, ids: readonly string[]): DependencyMatch {
+  if (ids.includes(entry)) return { id: entry };
+  const prefix = entry.toLowerCase();
+  const exact = ids.filter((id) => id.toLowerCase() === prefix);
+  if (exact.length === 1) return { id: exact[0]! };
+  if (!DEPENDS_ON_PREFIX.test(prefix)) return { unknown: true };
+  const matches = ids.filter((id) => id.startsWith(prefix));
+  if (matches.length === 1) return { id: matches[0]! };
+  return matches.length === 0 ? { unknown: true } : { ambiguous: matches.length };
+}
+
+/** Every card id of the project, archived included. */
+function projectRoadmapIds(projectKey: string): string[] {
+  const rows = db.query("SELECT id FROM roadmap_items WHERE project_key = ?").all(projectKey) as { id: string }[];
+  return rows.map((row) => row.id);
+}
+
+/**
+ * depends_on as add/upsert store it: each entry becomes the full id it names.
+ * An unresolvable entry already in `kept` (the stored list) stays as stored,
+ * so a card carrying one can still be edited; a new one is refused.
+ */
+function resolveDependsOn(
+  entries: string[],
+  projectKey: string,
+  selfId: string | null,
+  kept: readonly string[]
+): { ids: string[] } | { error: string; status: number } {
+  const ids = projectRoadmapIds(projectKey);
+  const resolved: string[] = [];
+  const push = (id: string): void => {
+    if (!resolved.includes(id)) resolved.push(id);
+  };
+  for (const entry of entries) {
+    const match = matchDependency(entry, ids);
+    const stored = kept.find((k) => k.toLowerCase() === entry.toLowerCase());
+    if (stored !== undefined) {
+      push("id" in match ? match.id : stored);
+    } else if (!("id" in match)) {
+      return {
+        error:
+          "ambiguous" in match
+            ? `depends_on: ambiguous id prefix '${entry}' (${match.ambiguous} matches) -- use more characters`
+            : `depends_on: no roadmap item matches '${entry}' in this project`,
+        status: 400,
+      };
+    } else if (match.id === selfId) {
+      return { error: "depends_on: an item cannot depend on itself", status: 400 };
+    } else {
+      push(match.id);
+    }
+  }
+  return { ids: resolved };
+}
+
 /**
  * undefined means the file never mentioned the column, so the existing row's
  * value wins (or '' for a new card); anything else means the file did mention
@@ -4726,6 +4786,12 @@ function handleRoadmapUpsert(
 
     const updateTitleRefusal = body.title !== undefined ? roadmapTitleRefusal(body.title.trim()) : null;
     if (updateTitleRefusal) return { error: updateTitleRefusal, status: 400 };
+    const patchDependsOn = cleanList(body.depends_on);
+    const nextDependsOn =
+      patchDependsOn === null
+        ? null
+        : resolveDependsOn(patchDependsOn, existing.project_key, existing.id, existing.depends_on);
+    if (nextDependsOn && "error" in nextDependsOn) return nextDependsOn;
 
     const next: RoadmapItem = {
       ...existing,
@@ -4743,7 +4809,7 @@ function handleRoadmapUpsert(
       // role.
       triage: body.triage !== undefined ? body.triage : existing.triage,
       tags: cleanList(body.tags) ?? existing.tags,
-      depends_on: cleanList(body.depends_on) ?? existing.depends_on,
+      depends_on: nextDependsOn?.ids ?? existing.depends_on,
       directive: nextDirective,
       target_peer_ids: nextTargets,
       queue: body.queue !== undefined ? body.queue : existing.queue,
@@ -4950,6 +5016,8 @@ function handleRoadmapUpsert(
       status: 400,
     };
   }
+  const createDependsOn = resolveDependsOn(cleanList(body.depends_on) ?? [], projectKey, null, []);
+  if ("error" in createDependsOn) return createDependsOn;
 
   const id = randomUUID();
   db.run(
@@ -4974,7 +5042,7 @@ function handleRoadmapUpsert(
       createStatus,
       createTriage,
       JSON.stringify(cleanList(body.tags) ?? []),
-      JSON.stringify(cleanList(body.depends_on) ?? []),
+      JSON.stringify(createDependsOn.ids),
       by,
       by,
       body.queue ?? null,
@@ -5689,6 +5757,7 @@ function handleRoadmapImport(body: {
      VALUES (${ROADMAP_IMPORT_COLUMNS.map(() => "?").join(", ")})`
   );
   const importAll = db.transaction((rows: Partial<RoadmapItem>[]) => {
+    const dependencyIds = [...new Set([...projectRoadmapIds(projectKey), ...rows.map((it) => it.id!.trim())])];
     const skipped: string[] = [];
     let imported = 0;
     for (const it of rows) {
@@ -5832,7 +5901,10 @@ function handleRoadmapImport(body: {
         ),
         depends_on: JSON.stringify(
           it.depends_on !== undefined
-            ? (cleanList(it.depends_on) ?? [])
+            ? (cleanList(it.depends_on) ?? []).map((entry) => {
+                const match = matchDependency(entry, dependencyIds);
+                return "id" in match ? match.id : entry;
+              })
             : (existing?.depends_on ?? [])
         ),
         // Card 40ddf1f5 (defect 3): created_by/updated_by come from the

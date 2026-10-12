@@ -389,6 +389,12 @@ test("an unproven `by` impersonating a real registered peer refuses the whole ba
 // table default.
 
 async function seedRichCard(by: string): Promise<RoadmapItem> {
+  const dependency = await post<UpsertRes>(`${broker.url}/roadmap/upsert`, {
+    project_key: PK,
+    by,
+    title: "rich card dependency",
+  });
+  expect(dependency.status).toBe(200);
   const res = await post<UpsertRes>(`${broker.url}/roadmap/upsert`, {
     project_key: PK,
     by,
@@ -398,7 +404,7 @@ async function seedRichCard(by: string): Promise<RoadmapItem> {
     rationale: "the rationale that must survive",
     context: "the context that must survive",
     tags: ["alpha", "beta"],
-    depends_on: ["some-other-id"],
+    depends_on: [dependency.body.item.id],
     priority: "must",
     value: "high",
     effort: "high",
@@ -413,6 +419,7 @@ async function seedRichCard(by: string): Promise<RoadmapItem> {
   expect(card.rationale).toBe("the rationale that must survive");
   expect(card.context).toBe("the context that must survive");
   expect(card.tags).toEqual(["alpha", "beta"]);
+  expect(card.depends_on).toEqual([dependency.body.item.id]);
   expect(card.queue).toBe(3);
   expect(card.locked).toBe(false); // not locked -> the skip guard cannot answer for us
   return card;
@@ -439,11 +446,43 @@ test("card 8c1effca: a partial import (id/kind/title only) preserves description
   expect(after.rationale).toBe("the rationale that must survive");
   expect(after.context).toBe("the context that must survive");
   expect(after.tags).toEqual(["alpha", "beta"]);
-  expect(after.depends_on).toEqual(["some-other-id"]);
+  expect(after.depends_on).toEqual(card.depends_on);
   expect(after.queue).toBe(3);
   expect(after.priority).toBe("must");
   expect(after.value).toBe("high");
   expect(after.effort).toBe("high");
+});
+
+test("a depends_on entry matching no card: upsert refuses it, import keeps it verbatim, a partial import preserves it", async () => {
+  const refused = await post<ImportErr>(`${broker.url}/roadmap/upsert`, {
+    project_key: PK,
+    by: "dangling-seed-author",
+    title: "dangling dependency",
+    depends_on: ["some-other-id"],
+  });
+  expect(refused.status).toBe(400);
+  expect(refused.body.error).toContain("'some-other-id'");
+
+  const id = crypto.randomUUID();
+  const full = await post<ImportRes>(`${broker.url}/roadmap/import`, {
+    project_key: PK,
+    by: "dangling-importer",
+    items: [{ id, kind: "bug", title: "dangling dependency", depends_on: ["some-other-id"] }],
+  });
+  expect(full.status).toBe(200);
+  expect(full.body.imported).toBe(1);
+  expect((await listAll()).find((i) => i.id === id)!.depends_on).toEqual(["some-other-id"]);
+
+  const partial = await post<ImportRes>(`${broker.url}/roadmap/import`, {
+    project_key: PK,
+    by: "dangling-importer",
+    items: [{ id, kind: "bug", title: "renamed by partial import" }],
+  });
+  expect(partial.status).toBe(200);
+  expect(partial.body.imported).toBe(1);
+  const after = (await listAll()).find((i) => i.id === id)!;
+  expect(after.title).toBe("renamed by partial import");
+  expect(after.depends_on).toEqual(["some-other-id"]);
 });
 
 test("card 8c1effca: an explicit empty value in the file still takes effect (present wins over the existing row)", async () => {

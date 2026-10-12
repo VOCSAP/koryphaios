@@ -180,6 +180,16 @@ function passedFieldsLine(text: string): string {
   return m ? m[1]! : "";
 }
 
+/** Creates `count` cards and returns their id8s, valid depends_on entries. */
+async function seedCards(h: Harness, count: number): Promise<string[]> {
+  const ids: string[] = [];
+  for (let i = 0; i < count; i++) {
+    const created = await callTool(h, "roadmap_add", { title: `dependency ${i}` });
+    ids.push(ackText(created).match(/Roadmap item created: ([0-9a-f]{8})/)![1]!);
+  }
+  return ids;
+}
+
 describe("roadmap_add/roadmap_update MCP ack", () => {
   test("roadmap_update on a >1000 char context reports landed size, never the content", async () => {
     const h = await boot();
@@ -231,12 +241,16 @@ describe("roadmap_add/roadmap_update MCP ack", () => {
   test("reviewer's probe replayed: ack landed values match roadmap_get's real item, not the caller's raw args", async () => {
     const h = await boot();
     const rawTitle = "  padded probe title  ";
+    const refused = await callTool(h, "roadmap_add", { title: rawTitle, depends_on: ["b"] });
+    expect(refused.result?.isError).toBe(true);
+    expect(ackText(refused)).toContain("'b'");
+    const [depB, depC] = await seedCards(h, 2);
 
     const created = await callTool(h, "roadmap_add", {
       title: rawTitle,
       kind: "feature", // non-directive: target_peer_ids must be discarded broker-side
       tags: ["a", "", "  ", "b"], // reviewer's exact probe: 4 raw entries, 2 survive cleanList
-      depends_on: ["b", "   ", "c"], // same cleanList code path: 3 raw, 2 survive
+      depends_on: [depB, "   ", depC], // same cleanList code path: 3 raw, 2 survive
       target_peer_ids: ["probe-peer-a", "probe-peer-b"], // must land as 0, kind isn't 'directive'
       locked: true, // not in roadmap_add's domain/schema -- must never appear in the ack
     });
@@ -284,7 +298,7 @@ describe("roadmap_add/roadmap_update MCP ack", () => {
     const dependsOnAckMatch = ack.match(/depends_on -> (\d+) item\(s\)/);
     expect(dependsOnAckMatch).not.toBeNull();
     expect(Number(dependsOnAckMatch![1])).toBe(landedDependsOnCount);
-    expect(landedDependsOnCount).toBe(2); // "b" and "c" survive; "   " does not
+    expect(landedDependsOnCount).toBe(2); // the two real cards survive; "   " is filtered, not refused
 
     // target_peer_ids: non-directive kind -> broker discards them entirely.
     // Real proof of absence: neither probe id appears anywhere in roadmap_get's text.
@@ -297,6 +311,7 @@ describe("roadmap_add/roadmap_update MCP ack", () => {
 
   test("roadmap_add's ack names all 13 fields in its domain, each with its own distinct value", async () => {
     const h = await boot();
+    const dependsOn = await seedCards(h, 2);
     // Every same-category field gets a DISTINCT value/length/cardinality:
     // swapping any two extractors in ROADMAP_UPSERT_ACK_FIELDS (shared/types.ts)
     // must flip at least one of the hardcoded assertions below, not just leave
@@ -316,7 +331,7 @@ describe("roadmap_add/roadmap_update MCP ack", () => {
       triage: "ready-for-agent",
       directive: "clear",
       tags: ["t1"], // 1 item
-      depends_on: ["11111111-1111-1111-1111-111111111111", "22222222-2222-2222-2222-222222222222"], // 2
+      depends_on: dependsOn, // 2
       target_peer_ids: ["probe-full-a", "probe-full-b", "probe-full-c"], // 3
     });
     expect(created.result?.isError).toBeFalsy();
@@ -354,6 +369,7 @@ describe("roadmap_add/roadmap_update MCP ack", () => {
     const h = await boot();
     const created = await callTool(h, "roadmap_add", { title: "base card for update coverage" });
     const id = ackText(created).match(/Roadmap item created: ([0-9a-f]{8})/)![1]!;
+    const dependsOn = await seedCards(h, 2);
 
     const title = "full coverage update probe";
     const updated = await callTool(h, "roadmap_update", {
@@ -370,7 +386,7 @@ describe("roadmap_add/roadmap_update MCP ack", () => {
       triage: "needs-info",
       directive: "compact",
       tags: ["t2"], // 1 item
-      depends_on: ["33333333-3333-3333-3333-333333333333", "44444444-4444-4444-4444-444444444444"], // 2
+      depends_on: dependsOn, // 2
       target_peer_ids: ["probe-upd-a", "probe-upd-b", "probe-upd-c"], // 3
       locked: true,
       release: true,

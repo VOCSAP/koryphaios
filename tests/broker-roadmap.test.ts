@@ -313,6 +313,168 @@ test("export/import round-trips items with ids, statuses and timestamps intact",
   expect(badItem.status).toBe(400);
 });
 
+// ----- depends_on resolution -----
+
+type ErrRes = { error: string };
+
+async function importAs(projectKey: string, items: Record<string, unknown>[]): Promise<void> {
+  const res = await post(`${broker.url}/roadmap/import`, { project_key: projectKey, by: "dep-importer", items });
+  expect(res.status).toBe(200);
+}
+
+function importable(id: string, title: string, extra: Record<string, unknown> = {}) {
+  return { id, kind: "feature", title, ...extra };
+}
+
+/** A random id whose id8 holds a letter, so upper-casing it really changes it. */
+function idWithLetter(): string {
+  return `a${crypto.randomUUID().slice(1)}`;
+}
+
+test("depends_on: an 8-hex prefix, in any case, is stored as the full id it names", async () => {
+  const targetId = idWithLetter();
+  await importAs(PK, [importable(targetId, "dependency target")]);
+  const lower = await add({ title: "depends by id8", depends_on: [targetId.slice(0, 8)] });
+  expect(lower.depends_on).toEqual([targetId]);
+  const upper = await add({ title: "depends by upper id8", depends_on: [targetId.slice(0, 8).toUpperCase()] });
+  expect(upper.depends_on).toEqual([targetId]);
+  const full = await add({ title: "depends by full id", depends_on: [targetId] });
+  expect(full.depends_on).toEqual([targetId]);
+});
+
+test("depends_on: an upper-case full id and a prefix carrying a dash are both stored as the full id", async () => {
+  const targetId = idWithLetter();
+  await importAs(PK, [importable(targetId, "dash prefix target")]);
+  const upperFull = await add({ title: "depends by upper full id", depends_on: [targetId.toUpperCase()] });
+  expect(upperFull.depends_on).toEqual([targetId]);
+  const dashed = await add({ title: "depends by dashed prefix", depends_on: [targetId.slice(0, 13)] });
+  expect(dashed.depends_on).toEqual([targetId]);
+
+  const nonHexId = `imported-card-${crypto.randomUUID()}`;
+  await importAs(PK, [importable(nonHexId, "non-hex id target")]);
+  const upperNonHex = await add({ title: "depends by upper non-hex id", depends_on: [nonHexId.toUpperCase()] });
+  expect(upperNonHex.depends_on).toEqual([nonHexId]);
+});
+
+test("depends_on: two entries naming the same card store its id once", async () => {
+  const target = await add({ title: "named twice" });
+  const card = await add({ title: "depends twice", depends_on: [target.id.slice(0, 8), target.id] });
+  expect(card.depends_on).toEqual([target.id]);
+});
+
+test("depends_on: an unknown entry, a prefix under 8 characters or another project's id is refused with a 400 naming it", async () => {
+  const target = await add({ title: "short prefix target" });
+  const foreign = await post<UpsertRes>(`${broker.url}/roadmap/upsert`, {
+    project_key: OTHER_PK,
+    by: "test-peer",
+    title: "card of another project",
+  });
+  expect(foreign.status).toBe(200);
+  for (const entry of ["deadbeef-not-a-card", target.id.slice(0, 7), foreign.body.item.id.slice(0, 8), foreign.body.item.id]) {
+    const res = await post<ErrRes>(`${broker.url}/roadmap/upsert`, {
+      project_key: PK,
+      by: "test-peer",
+      title: "dangling dependency",
+      depends_on: [entry],
+    });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain(`'${entry}'`);
+  }
+});
+
+test("depends_on: a prefix two cards share is refused as ambiguous; the full id still resolves", async () => {
+  const prefix = crypto.randomUUID().slice(0, 8);
+  const first = `${prefix}-aaaa-4aaa-8aaa-000000000001`;
+  await importAs(PK, [importable(first, "twin one"), importable(`${prefix}-aaaa-4aaa-8aaa-000000000002`, "twin two")]);
+
+  const ambiguous = await post<ErrRes>(`${broker.url}/roadmap/upsert`, {
+    project_key: PK,
+    by: "test-peer",
+    title: "ambiguous dependency",
+    depends_on: [prefix],
+  });
+  expect(ambiguous.status).toBe(400);
+  expect(ambiguous.body.error).toContain(`ambiguous id prefix '${prefix}' (2 matches)`);
+
+  const exact = await add({ title: "exact twin dependency", depends_on: [first] });
+  expect(exact.depends_on).toEqual([first]);
+});
+
+test("depends_on: a card cannot depend on itself", async () => {
+  const card = await add({ title: "self dependent" });
+  const res = await post<ErrRes>(`${broker.url}/roadmap/upsert`, {
+    id: card.id,
+    by: "test-peer",
+    depends_on: [card.id.slice(0, 8)],
+  });
+  expect(res.status).toBe(400);
+  expect(res.body.error).toContain("cannot depend on itself");
+});
+
+test("depends_on: a patch may keep an unresolvable entry already stored, but not add a new one", async () => {
+  const id = crypto.randomUUID();
+  await importAs(PK, [importable(id, "carries a dangling dependency", { depends_on: ["deadbeef-stored"] })]);
+  const target = await add({ title: "new real dependency" });
+
+  const kept = await post<UpsertRes>(`${broker.url}/roadmap/upsert`, {
+    id,
+    by: "test-peer",
+    depends_on: ["deadbeef-stored", target.id.slice(0, 8)],
+  });
+  expect(kept.status).toBe(200);
+  expect(kept.body.item.depends_on).toEqual(["deadbeef-stored", target.id]);
+
+  const added = await post<ErrRes>(`${broker.url}/roadmap/upsert`, {
+    id,
+    by: "test-peer",
+    depends_on: ["deadbeef-stored", "deadbeef-new"],
+  });
+  expect(added.status).toBe(400);
+  expect(added.body.error).toContain("'deadbeef-new'");
+});
+
+test("depends_on: a stored unresolvable entry sent back in another case is still recognised as kept", async () => {
+  const id = crypto.randomUUID();
+  await importAs(PK, [importable(id, "carries an upper-case dangling dependency", { depends_on: ["DEADBEEF"] })]);
+  const res = await post<UpsertRes>(`${broker.url}/roadmap/upsert`, {
+    id,
+    by: "test-peer",
+    depends_on: ["deadbeef"],
+  });
+  expect(res.status).toBe(200);
+  expect(res.body.item.depends_on).toEqual(["DEADBEEF"]);
+});
+
+test("import resolves an id8 against the project and its own batch, and keeps an unresolvable entry verbatim", async () => {
+  const existing = await add({ title: "already in the project" });
+  const foreign = await post<UpsertRes>(`${broker.url}/roadmap/upsert`, {
+    project_key: OTHER_PK,
+    by: "test-peer",
+    title: "foreign card",
+  });
+  const twin = crypto.randomUUID().slice(0, 8);
+  const laterInBatch = idWithLetter();
+  const dependent = crypto.randomUUID();
+  const entries = [
+    existing.id.slice(0, 8),
+    laterInBatch.slice(0, 8).toUpperCase(),
+    twin,
+    foreign.body.item.id.slice(0, 8),
+    "deadbeef-unknown",
+  ];
+  await importAs(PK, [
+    importable(dependent, "imported dependent", { depends_on: entries }),
+    importable(existing.id, "already in the project, re-imported in the same batch"),
+    importable(laterInBatch, "imported after its dependent"),
+    importable(`${twin}-bbbb-4bbb-8bbb-000000000001`, "batch twin one"),
+    importable(`${twin}-bbbb-4bbb-8bbb-000000000002`, "batch twin two"),
+  ]);
+
+  const list = await post<ListRes>(`${broker.url}/roadmap/list`, { project_key: PK });
+  const stored = list.body.items.find((i) => i.id === dependent)!;
+  expect(stored.depends_on).toEqual([existing.id, laterInBatch, twin, foreign.body.item.id.slice(0, 8), "deadbeef-unknown"]);
+});
+
 // ----- lifecycle independence from peers -----
 
 test("items survive their author peer's unregister (no FK, plain-text attribution)", async () => {
