@@ -4,12 +4,14 @@ import { test, expect } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
+  autoDispatchHold,
   canAutoDispatchNext,
   composeAssignText,
   composeDispatchOutcome,
   composeDispatchText,
   composeMultiDispatchText,
   composeStopText,
+  dependencyHoldReason,
   dispatchNormalWave,
   firstQueued,
   nextBarrierPending,
@@ -17,6 +19,7 @@ import {
   nextQueuePosition,
   NO_TARGET_REQUESTED_NOTE,
   queuedItems,
+  resolveDependency,
   runDirectiveWave,
   runDispatchRequestPoll,
   splitWave,
@@ -233,9 +236,122 @@ test("canAutoDispatchNext: true when the head's dependency is done or archived",
   expect(canAutoDispatchNext(archivedItems, new Set())).toBe(true);
 });
 
-test("canAutoDispatchNext: a dependency missing from the roadmap counts as resolved", () => {
-  const items = [item({ id: "a", queue: 1, depends_on: ["deleted-long-ago"] })];
-  expect(canAutoDispatchNext(items, new Set())).toBe(true);
+test("canAutoDispatchNext: a dependency missing from the roadmap holds the queue", () => {
+  const items = [item({ id: "a", queue: 1, depends_on: ["3f9a1c2e"] })];
+  expect(canAutoDispatchNext(items, new Set())).toBe(false);
+  expect(autoDispatchHold(items, new Set())).toEqual({ kind: "dependency", head: items[0]!, unknown: ["3f9a1c2e"], pending: [] });
+});
+
+const DEP_ID = "3f9a1c2e-1111-4000-8000-000000000001";
+
+test("canAutoDispatchNext: an id8 dependency resolves to the card it prefixes", () => {
+  const head = item({ id: "a", queue: 1, depends_on: ["3f9a1c2e"] });
+  expect(canAutoDispatchNext([item({ id: DEP_ID, status: "done" }), head], new Set())).toBe(true);
+  expect(canAutoDispatchNext([item({ id: DEP_ID, status: "archived" }), head], new Set())).toBe(true);
+  const unfinished = item({ id: DEP_ID, status: "in_progress" });
+  expect(autoDispatchHold([unfinished, head], new Set())).toEqual({ kind: "dependency", head, unknown: [], pending: [unfinished] });
+});
+
+test("canAutoDispatchNext: an ambiguous, short or non-hex prefix holds the queue", () => {
+  const twins = [
+    item({ id: "3f9a1c2e-1111-4000-8000-000000000001", status: "done" }),
+    item({ id: "3f9a1c2e-2222-4000-8000-000000000002", status: "done" })
+  ];
+  for (const dep of ["3f9a1c2e", "3f9a1c2", "3f9a1c2g", "-3f9a1c2e"]) {
+    const head = item({ id: "a", queue: 1, depends_on: [dep] });
+    const items = dep === "3f9a1c2e" ? [...twins, head] : [twins[0]!, head];
+    expect(autoDispatchHold(items, new Set()), dep).toEqual({ kind: "dependency", head, unknown: [dep], pending: [] });
+  }
+});
+
+test("resolveDependency: an upper-case id8, an upper-case full id and a dashed prefix resolve", () => {
+  const dep = item({ id: DEP_ID, status: "done" });
+  for (const entry of ["3F9A1C2E", DEP_ID.toUpperCase(), "3f9a1c2e-1111"]) {
+    expect(resolveDependency([dep], entry), entry).toBe(dep);
+  }
+});
+
+/**
+ * matchDependency cut verbatim out of broker.ts (which starts its server at
+ * module load, so it cannot be imported) together with the prefix constant it
+ * reads, then evaluated alone.
+ */
+function brokerMatchDependency(): (entry: string, ids: readonly string[]) => { id: string } | { unknown: true } | { ambiguous: number } {
+  const src = readFileSync(join(import.meta.dir, "..", "broker.ts"), "utf-8").replace(/\r\n/g, "\n");
+  const start = src.indexOf("const DEPENDS_ON_PREFIX = ");
+  const fnStart = src.indexOf("function matchDependency(", start);
+  const end = src.indexOf("\n}\n", fnStart);
+  if (start < 0 || fnStart < 0 || end < 0) throw new Error("matchDependency not found in broker.ts");
+  const js = new Bun.Transpiler({ loader: "ts" }).transformSync(`${src.slice(start, end + 2)}\nexport { matchDependency }`);
+  return new Function(`${js.replace(/export\s*\{[^}]*\};?/, "")}\nreturn matchDependency`)();
+}
+
+test("resolveDependency and the broker's matchDependency give the same verdict on every entry shape", () => {
+  const matchDependency = brokerMatchDependency();
+  const ids = [
+    "3f9a1c2e-1111-4000-8000-000000000001",
+    "7b2c0d4e-1111-4000-8000-000000000001",
+    "7b2c0d4e-2222-4000-8000-000000000002",
+    "imported-card-alpha"
+  ];
+  const items = ids.map((id) => item({ id }));
+  const table = [
+    "3f9a1c2e",
+    "3F9A1C2E",
+    "3F9A1C2E-1111-4000-8000-000000000001",
+    "3f9a1c2e-1111",
+    "3f9a1c2",
+    "7b2c0d4e",
+    "IMPORTED-CARD-ALPHA",
+    "deadbeef",
+    "not-a-card"
+  ];
+  for (const entry of table) {
+    const broker = matchDependency(entry, ids);
+    const deck = resolveDependency(items, entry);
+    expect(deck?.id ?? null, entry).toBe("id" in broker ? broker.id : null);
+  }
+  // The table must exercise both verdicts, or the loop proves nothing.
+  expect(table.filter((e) => "id" in matchDependency(e, ids)).length).toBe(5);
+});
+
+test("resolveDependency: an exact id wins over a longer id it prefixes", () => {
+  const exact = item({ id: "3f9a1c2e", status: "done" });
+  const longer = item({ id: DEP_ID, status: "planned" });
+  expect(resolveDependency([longer, exact], "3f9a1c2e")).toBe(exact);
+});
+
+test("canAutoDispatchNext: one done and one unknown dependency still hold the queue", () => {
+  const head = item({ id: "a", queue: 1, depends_on: [DEP_ID, "deadbeef"] });
+  const hold = autoDispatchHold([item({ id: DEP_ID, status: "done" }), head], new Set());
+  expect(hold).toEqual({ kind: "dependency", head, unknown: ["deadbeef"], pending: [] });
+});
+
+test("dependencyHoldReason: names the head, every unknown id and every pending dependency by title", () => {
+  const head = item({ id: "a", title: "Head card", queue: 1 });
+  const pendingA = item({ id: "p1", title: "First prerequisite" });
+  const pendingB = item({ id: "p2", title: "Second prerequisite" });
+
+  const unknownOnly = dependencyHoldReason({ kind: "dependency", head, unknown: ["deadbeef", "3f9a1c2"], pending: [] });
+  expect(unknownOnly).toContain('"Head card"');
+  expect(unknownOnly).toContain("depends on an id that matches no card: deadbeef, 3f9a1c2");
+  expect(unknownOnly).toContain("fix the card's depends_on");
+  expect(unknownOnly).not.toContain("prerequisite");
+
+  const pendingOnly = dependencyHoldReason({ kind: "dependency", head, unknown: [], pending: [pendingA, pendingB] });
+  expect(pendingOnly).toContain('"Head card"');
+  expect(pendingOnly).toContain('"First prerequisite", "Second prerequisite"');
+  expect(pendingOnly).not.toContain("matches no card");
+
+  const both = dependencyHoldReason({ kind: "dependency", head, unknown: ["deadbeef"], pending: [pendingA] });
+  expect(both).toContain("matches no card: deadbeef");
+  expect(both).toContain('"First prerequisite"');
+  expect(both).toContain('"send first to team-lead"');
+});
+
+test("autoDispatchHold: names an in-flight wave and an empty queue", () => {
+  expect(autoDispatchHold([item({ id: "a", queue: 1 })], new Set(["x"]))).toEqual({ kind: "in-flight" });
+  expect(autoDispatchHold([item({ id: "a" })], new Set())).toEqual({ kind: "empty" });
 });
 
 // watchDispatched's removal paths cover done, archived and absent states;
@@ -981,4 +1097,69 @@ test("SOURCE SCAN (weak): DispatchResult.dispatched is produced AND reaches the 
   // green mutation, because pinning the push alone says nothing about whether
   // its result ever reaches the returned DispatchResult.
   expect(src).toContain("dispatched: announcedMembers");
+});
+
+type RetryRun = { barrierPending: boolean; dispatched: number; lines: string[] };
+
+/**
+ * Executes the REAL body of watchDispatched (index.ts, not importable under
+ * bun) from its roadmap fetch on, with the real dispatch.ts helpers, a
+ * recording dispatchNext / journal, and a list that hides archived cards
+ * unless asked for them, as the broker does. Only the names passed below are
+ * in scope: a body that goes back to a helper not listed here throws a
+ * ReferenceError instead of passing.
+ * One tracked item finishing on this tick is what makes the barrier re-check
+ * the head, so every run starts from that state.
+ */
+async function runWatchRetry(roadmap: RoadmapItem[]): Promise<RetryRun> {
+  const watch = sliceBetween(indexSource(), "const watchDispatched = async (): Promise<void> => {", "\n}");
+  const start = watch.indexOf("const items = await listRoadmap(");
+  const end = watch.lastIndexOf("} catch {");
+  if (start < 0 || end < start) throw new Error("watchDispatched body not found");
+  const fn = `async function watchBody(endpoint, key, listRoadmap, dispatchedIds, barrierPending, nextDispatchedState, autoDispatchHold, dependencyHoldReason, nextBarrierPending, firstQueued, dispatchNext, journal) {\n${watch.slice(start, end)}\nreturn barrierPending\n}`;
+  const js = new Bun.Transpiler({ loader: "ts" }).transformSync(fn);
+  const watchBody = new Function(`${js}\nreturn watchBody`)();
+  const finished = item({ id: "finished-wave-member", status: "done" });
+  const run: RetryRun = { barrierPending: false, dispatched: 0, lines: [] };
+  const listRoadmap = async (_endpoint: string, _key: string, opts: { include_archived?: boolean }) =>
+    [finished, ...roadmap].filter((i) => opts.include_archived || i.status !== "archived");
+  const dispatchNext = async (): Promise<DispatchResult> => {
+    run.dispatched++;
+    return { sent: true, title: "dispatched" } as DispatchResult;
+  };
+  const journal = { add: (_channel: string, line: string) => run.lines.push(line) };
+  run.barrierPending = await watchBody(
+    "endpoint", "key", listRoadmap, new Map([[finished.id, { claimed: true }]]), false,
+    nextDispatchedState, autoDispatchHold, dependencyHoldReason, nextBarrierPending, firstQueued, dispatchNext, journal
+  );
+  run.lines = run.lines.filter((l) => l.startsWith("wave barrier"));
+  return run;
+}
+
+test("watchDispatched: an unknown dependency holds the head and the journal names it", async () => {
+  const head = item({ id: "a", title: "Blocked head", queue: 1, depends_on: ["deadbeef"] });
+  const run = await runWatchRetry([head]);
+  expect(run.dispatched).toBe(0);
+  expect(run.barrierPending).toBe(true);
+  expect(run.lines).toHaveLength(1);
+  expect(run.lines[0]).toContain('"Blocked head"');
+  expect(run.lines[0]).toContain("depends on an id that matches no card: deadbeef");
+});
+
+test("watchDispatched: an unfinished dependency holds the head and the journal names it by title", async () => {
+  const dep = item({ id: DEP_ID, title: "Still running prerequisite", status: "in_progress" });
+  const head = item({ id: "a", title: "Waiting head", queue: 1, depends_on: ["3f9a1c2e"] });
+  const run = await runWatchRetry([dep, head]);
+  expect(run.dispatched).toBe(0);
+  expect(run.lines).toHaveLength(1);
+  expect(run.lines[0]).toContain('"Still running prerequisite"');
+  expect(run.lines[0]).not.toContain("matches no card");
+});
+
+test("watchDispatched: a dependency on an archived card lets the head dispatch", async () => {
+  const dep = item({ id: DEP_ID, status: "archived" });
+  const head = item({ id: "a", queue: 1, depends_on: [DEP_ID] });
+  const run = await runWatchRetry([dep, head]);
+  expect(run.dispatched).toBe(1);
+  expect(run.barrierPending).toBe(false);
 });

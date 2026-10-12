@@ -35,23 +35,69 @@ export function nextQueuePosition(items: RoadmapItem[]): number {
   return items.reduce((max, i) => (i.queue !== null && i.queue > max ? i.queue : max), 0) + 1
 }
 
+const DEPENDENCY_PREFIX = /^[0-9a-f]{8}[0-9a-f-]*$/
+
+/**
+ * The item a depends_on entry names: the item with that exact id, else the
+ * only one equal to it ignoring case, else the only item whose id it prefixes
+ * (8+ hex characters, the id8 agents copy from roadmap_list), the entry
+ * case-folded. Null when nothing or several items match. Same rule as the
+ * broker's matchDependency.
+ */
+export function resolveDependency(items: RoadmapItem[], dep: string): RoadmapItem | null {
+  const exact = items.find((i) => i.id === dep)
+  if (exact) return exact
+  const prefix = dep.toLowerCase()
+  const folded = items.filter((i) => i.id.toLowerCase() === prefix)
+  if (folded.length === 1) return folded[0]!
+  if (!DEPENDENCY_PREFIX.test(prefix)) return null
+  const matches = items.filter((i) => i.id.startsWith(prefix))
+  return matches.length === 1 ? matches[0]! : null
+}
+
+/** Why the automatic dispatch must not advance the queue this tick. */
+export type AutoDispatchHold =
+  | { kind: 'in-flight' }
+  | { kind: 'empty' }
+  | { kind: 'dependency'; head: RoadmapItem; unknown: string[]; pending: RoadmapItem[] }
+
 /**
  * Gates only the automatic dispatch timer; the operator's manual "send first"
  * button calls dispatchNext() directly and stays unguarded on purpose.
- * A missing dependency (deleted from the roadmap) counts as resolved, matching
- * watchDispatched's own completion check.
+ * `items` must include archived cards: a dependency that resolves to nothing
+ * holds the queue, because the broker never deletes a card and an unresolved
+ * entry is a mistyped or foreign id, not a finished prerequisite.
  * Second parameter is `{ size: number }` rather than a concrete collection type
  * because only the count of in-flight ids matters here.
  */
-export function canAutoDispatchNext(items: RoadmapItem[], dispatchedIds: { size: number }): boolean {
-  if (dispatchedIds.size > 0) return false
+export function autoDispatchHold(items: RoadmapItem[], dispatchedIds: { size: number }): AutoDispatchHold | null {
+  if (dispatchedIds.size > 0) return { kind: 'in-flight' }
   const head = firstQueued(items)
-  if (!head) return false
-  const byId = new Map(items.map((i) => [i.id, i]))
-  return head.depends_on.every((depId) => {
-    const dep = byId.get(depId)
-    return !dep || dep.status === 'done' || dep.status === 'archived'
-  })
+  if (!head) return { kind: 'empty' }
+  const unknown: string[] = []
+  const pending: RoadmapItem[] = []
+  for (const depId of head.depends_on) {
+    const dep = resolveDependency(items, depId)
+    if (!dep) unknown.push(depId)
+    else if (dep.status !== 'done' && dep.status !== 'archived') pending.push(dep)
+  }
+  return unknown.length > 0 || pending.length > 0 ? { kind: 'dependency', head, unknown, pending } : null
+}
+
+/** The journal reason for a queue held by the head's dependencies. */
+export function dependencyHoldReason(hold: Extract<AutoDispatchHold, { kind: 'dependency' }>): string {
+  const parts: string[] = []
+  if (hold.unknown.length > 0) {
+    parts.push(`depends on an id that matches no card: ${hold.unknown.join(', ')}; fix the card's depends_on`)
+  }
+  if (hold.pending.length > 0) {
+    parts.push(`waiting on unfinished dependencies: ${hold.pending.map((i) => `"${i.title}"`).join(', ')}`)
+  }
+  return `next queued item "${hold.head.title}" ${parts.join('; ')} (use "send first to team-lead" to override)`
+}
+
+export function canAutoDispatchNext(items: RoadmapItem[], dispatchedIds: { size: number }): boolean {
+  return autoDispatchHold(items, dispatchedIds) === null
 }
 
 /**

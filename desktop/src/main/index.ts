@@ -102,9 +102,10 @@ import {
 } from './roadmap-service'
 import { createCheckpoint, purgeCheckpoints, restoreCommand } from './checkpoint-service'
 import {
-  canAutoDispatchNext,
+  autoDispatchHold,
   composeAssignText,
   composeStopText,
+  dependencyHoldReason,
   dispatchNormalWave,
   firstQueued,
   nextBarrierPending,
@@ -1866,8 +1867,7 @@ const checkpointBeforeSpawn = async (dir: string): Promise<void> => {
 // early.
 const dispatchedIds = new Map<string, DispatchedEntry>()
 
-// Card 0e55a30b / 5852c074 acceptance criterion 4: canAutoDispatchNext can
-// stay false because the queued head depends on an item this Deck never
+// autoDispatchHold can keep holding because the queued head depends on an item this Deck never
 // dispatched (e.g. a locked in_progress item excluded from enqueueClosure's
 // "active work" filter) — dispatchedIds never changes in that case, so
 // watchDispatched's early bail on an empty Map would never retry once that
@@ -2086,7 +2086,8 @@ const watchDispatched = async (): Promise<void> => {
       let dispatchSucceeded = false
       let attempted = false
       let dispatchReason: DispatchResult['reason'] | undefined
-      if (canAutoDispatchNext(items, dispatchedIds)) {
+      const hold = autoDispatchHold(items, dispatchedIds)
+      if (hold === null) {
         attempted = true
         const r = await dispatchNext()
         dispatchSucceeded = r.sent
@@ -2108,9 +2109,9 @@ const watchDispatched = async (): Promise<void> => {
       const wasBarrierPending = barrierPending
       barrierPending = nextBarrierPending(barrierPending, dispatchedIds.size, dispatchSucceeded, firstQueued(items) !== null)
       if (barrierPending && !wasBarrierPending) {
-        // Two distinct diagnoses share this arming: canAutoDispatchNext
-        // returning false (the head's dependency hasn't resolved yet) vs.
-        // it returning true but the dispatch itself failing (attempted,
+        // Two distinct diagnoses share this arming: autoDispatchHold
+        // holding (the head's dependency is unknown or unfinished) vs.
+        // it clearing but the dispatch itself failing (attempted,
         // e.g. no team-lead connected). Report whichever actually happened,
         // not a fixed "unmet dependencies" string that would be wrong for
         // the second case. The "send first to team-lead" override is only
@@ -2123,7 +2124,9 @@ const watchDispatched = async (): Promise<void> => {
             ? dispatchReason === 'no-lead'
               ? 'no team-lead connected, waiting for a lead to connect'
               : `dispatch failed (${dispatchReason ?? 'unknown'}), will retry (use "send first to team-lead" to override)`
-            : 'next queued item has unmet dependencies, waiting (use "send first to team-lead" to override)'
+            : hold?.kind === 'dependency'
+              ? dependencyHoldReason(hold)
+              : 'next queued item has unmet dependencies, waiting (use "send first to team-lead" to override)'
         journal.add('dispatch', `wave barrier: ${reason}`)
       } else if (!barrierPending && wasBarrierPending && !dispatchSucceeded) {
         // The only other transition out of "pending": the head cleared from
