@@ -263,6 +263,28 @@ describe("effective file per tile", () => {
 });
 
 describe("repo rules and approvals", () => {
+  test("the approval request carries bunUnavailable exactly when the probe of that content fell back to V8", async () => {
+    for (const fellBack of [false, true]) {
+      for (const sync of [true, false]) {
+        const h = harness({
+          probeRules: (_rules, onFallback) => {
+            if (fellBack) onFallback?.("spawn bun ENOENT");
+            return sync ? [] : Promise.resolve([]);
+          },
+        });
+        const cwd = tmp();
+        writeRepoRules(cwd, fileOf(rule("r-one")));
+        h.svc.fileFor({ id: randomUUID(), cwd });
+        await flush();
+        h.svc.tick();
+        await flush();
+        const label = `fellBack=${fellBack} sync=${sync}`;
+        expect(h.prompts, label).toHaveLength(1);
+        expect(h.prompts[0]!.bunUnavailable, label).toBe(fellBack ? "spawn bun ENOENT" : undefined);
+      }
+    }
+  });
+
   test("a valid unapproved repo file stays out, prompts once; approval brings it in; any edit puts it back to pending", async () => {
     const h = harness();
     const cwd = tmp();

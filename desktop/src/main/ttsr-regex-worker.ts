@@ -30,7 +30,17 @@ export function matchIsolated(
   return matchIsolatedShared(pattern, flags, texts, timeoutMs, onWorkerError)
 }
 
-/** Adversarial timing gate of a rules file's patterns; errors in the parseRulesFile format. */
-export function probeRulesSpeed(rules: readonly TtsrRule[]): Promise<string[]> {
-  return probeRulesSpeedShared(rules, { onError: onWorkerError, onFallback: (message) => reportError('ttsr', message) })
+/**
+ * Adversarial timing gate of a rules file's patterns; errors in the
+ * parseRulesFile format. A bun that cannot start is reported here, then
+ * handed to `onFallback`.
+ */
+export function probeRulesSpeed(rules: readonly TtsrRule[], onFallback?: (message: string) => void): Promise<string[]> {
+  return probeRulesSpeedShared(rules, {
+    onError: onWorkerError,
+    onFallback: (message) => {
+      reportError('ttsr', message)
+      onFallback?.(message)
+    }
+  })
 }

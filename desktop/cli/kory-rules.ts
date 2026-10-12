@@ -13,6 +13,7 @@ import { readFileSync, realpathSync, statSync } from "node:fs";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { probeRulesSpeed } from "../src/shared/ttsr-probe.ts";
 import {
+  ambiguousAlternationWarnings,
   fieldCap,
   globToRegExp,
   parseEffectiveFile,
@@ -133,6 +134,7 @@ async function cmdCheck(args: string[]): Promise<void> {
   process.stdout.write(
     `valid: ${filePath} -- ${parsed.rules.length} rule(s) (${byMode.deny} deny, ${byMode.warn} warn)\n`
   );
+  for (const w of ambiguousAlternationWarnings(parsed.rules)) process.stderr.write(`warning: ${w}\n`);
 }
 
 // --- list ---

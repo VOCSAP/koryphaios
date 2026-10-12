@@ -46,7 +46,7 @@ import {
 } from './scope-secrets'
 import { applyProviderKeyPatch, sanitizeProviders } from './provider-secrets'
 import { GLOBAL_RULES_FILE, REPO_RULES_REL, TtsrService, type TtsrApprovalRequest } from './ttsr-service'
-import { approvalDialogBody, displaySafe } from './ttsr-dialog'
+import { approvalDialogBody, approvalWarnings, displaySafe } from './ttsr-dialog'
 import { sanitizeTtsrDisabled } from './ttsr-toggles'
 import {
   globalConfigDir,
@@ -822,7 +822,7 @@ function composeSandboxAppendPrompt(sessionId: string, command: string, launch: 
  */
 async function promptTtsrApproval(req: TtsrApprovalRequest): Promise<boolean> {
   const isFr = isFrLocale()
-  const body = approvalDialogBody(req.rules, isFr)
+  const body = approvalDialogBody(req.rules, isFr, approvalWarnings(req.rules, isFr, req.bunUnavailable))
   const where = isFr
     ? `Projet : ${displaySafe(req.projectDir)}\nFichier : ${REPO_RULES_REL}`
     : `Project: ${displaySafe(req.projectDir)}\nFile: ${REPO_RULES_REL}`

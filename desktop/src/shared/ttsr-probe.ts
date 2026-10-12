@@ -213,15 +213,27 @@ export function probeInputs(pattern: string, length: number = PROBE_INPUT_CHARS,
   return probeSeeds(pattern, flags).map((s) => s.repeat(Math.max(1, Math.floor(length / s.length))) + '\u0001')
 }
 
+// Composite inputs (every seed as a prefix of every seed's run) are built
+// here, one at a time: a pattern like x(?:ab|a|b)*$ only backtracks after a
+// prefix it must match first, and up to 32 x 32 runs of 4 Ki would be 4 MB
+// per rule to clone into the worker.
 const PROBE_WORKER = `
 const { parentPort, workerData } = require('node:worker_threads')
+function* inputsOf(job) {
+  yield* job.inputs
+  if (!job.composite) return
+  const { seeds, length } = job.composite
+  for (const head of seeds) {
+    for (const s of seeds) yield head + s.repeat(Math.max(1, Math.floor(length / s.length))) + '\\u0001'
+  }
+}
 for (const job of workerData.jobs) {
   parentPort.postMessage({ type: 'start', index: job.index })
   let slow = null
   let error = null
   try {
     const re = new RegExp(job.pattern, job.flags)
-    for (const s of job.inputs) {
+    for (const s of inputsOf(job)) {
       const t0 = performance.now()
       re.test(s)
       const ms = performance.now() - t0
@@ -243,6 +255,7 @@ interface ProbeJob {
   pattern: string
   flags: string
   inputs: string[]
+  composite?: { seeds: string[]; length: number }
 }
 
 type ProbeMessage =
@@ -283,7 +296,8 @@ export async function probeRulesSpeed(rules: readonly TtsrRule[], opts: ProbeOpt
     index,
     pattern: r.pattern,
     flags: r.flags ?? '',
-    inputs: probeInputs(r.pattern, opts.inputChars, r.flags ?? '')
+    inputs: probeInputs(r.pattern, opts.inputChars, r.flags ?? ''),
+    composite: { seeds: probeSeeds(r.pattern, r.flags ?? ''), length: opts.inputChars ?? PROBE_INPUT_CHARS }
   }))
   const errors = await probeInWorker(jobs, opts.slowMs ?? PROBE_SLOW_MS, deadlineMs, onError, label)
   if (opts.realSize !== false) {

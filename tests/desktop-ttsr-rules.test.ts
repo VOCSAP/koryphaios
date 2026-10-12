@@ -11,6 +11,8 @@ import {
   MAX_FILE_BYTES,
   MAX_HOOK_TEXT_CHARS,
   MAX_RULES,
+  AMBIGUOUS_REPEAT_MAX_BOUND,
+  ambiguousAlternationWarnings,
   buildHookOutput,
   evaluate,
   extractField,
@@ -179,6 +181,51 @@ describe("parseRulesFile: one case per rejection", () => {
     const res = parseRulesFile(fileOf([base(), { ...base(), id: "bad", mode: "x" }]));
     expect(res.ok).toBe(false);
     expect("file" in res).toBe(false);
+  });
+});
+
+describe("ambiguousAlternationWarnings advisory", () => {
+  const r = (id: string, pattern: string): TtsrRule => ({ ...(base() as unknown as TtsrRule), id, pattern });
+
+  test("a repeated group whose alternatives start alike is flagged, with its two alternatives", () => {
+    const warnings = ambiguousAlternationWarnings([r("abab", "(ab|a|b)*"), r("card", "x(?:ab|a|b)*$|DANGER"), r("cls", "(?:\\w+x|\\wy){2,}")]);
+    expect(warnings).toEqual([
+      'rules[0] "abab": pattern: the alternatives "ab" and "a" of a repeated group can start the same match; a long text can make it backtrack',
+      'rules[1] "card": pattern: the alternatives "ab" and "a" of a repeated group can start the same match; a long text can make it backtrack',
+      'rules[2] "cls": pattern: the alternatives "\\\\w+x" and "\\\\wy" of a repeated group can start the same match; a long text can make it backtrack',
+    ]);
+  });
+
+  test("no warning for a bounded repetition, distinct first atoms, classes, escapes or a single alternative", () => {
+    expect(ambiguousAlternationWarnings([
+      r("bounded", "(ab|a){0,3}"),
+      r("distinct", "(ab|cd)*"),
+      r("in-class", "[(a|a)]*"),
+      r("escaped", "\\(a|a\\)*"),
+      r("single", "(abc)+"),
+      r("top-level", "ab|a"),
+    ])).toEqual([]);
+  });
+
+  test("escapes compare as whole tokens: distinct property classes or code points do not overlap", () => {
+    expect(ambiguousAlternationWarnings([
+      r("props", "(\\p{L}|\\p{N})*"),
+      r("unicode", "(?:\\u0041b|\\u0042)+"),
+      r("hex", "(?:\\x41b|\\x42)+"),
+    ])).toEqual([]);
+    expect(ambiguousAlternationWarnings([r("same-prop", "(\\p{L}x|\\p{L})*")])).toHaveLength(1);
+  });
+
+  test("a bounded repetition past AMBIGUOUS_REPEAT_MAX_BOUND is flagged like *, one at the bound is not", () => {
+    const over = AMBIGUOUS_REPEAT_MAX_BOUND + 1;
+    expect(ambiguousAlternationWarnings([r("at", `(ab|a){0,${AMBIGUOUS_REPEAT_MAX_BOUND}}`)])).toEqual([]);
+    expect(ambiguousAlternationWarnings([r("over", `(ab|a){0,${over}}`)])).toEqual([
+      'rules[0] "over": pattern: the alternatives "ab" and "a" of a repeated group can start the same match; a long text can make it backtrack',
+    ]);
+  });
+
+  test("the built-in Kory rules raise no warning", () => {
+    expect(ambiguousAlternationWarnings(KORY_RULES)).toEqual([]);
   });
 });
 
@@ -949,6 +996,20 @@ describe("timing probe seeds", () => {
     const errors = await probeRulesSpeed([{ ...quadratic, tools: ["Bash" as const], field: "command" as const }]);
     expect(errors).toHaveLength(1);
     expect(errors[0]).toMatch(/too slow under bun \(the hook's runtime\): \d+ ms on a long run of .* at 16384 chars \(hook budget 50 ms\)/);
+  }, 30000);
+
+  test("the 4 Ki stage tries every seed as a prefix: a blow-up behind a required prefix is caught", async () => {
+    const { probeRulesSpeed, probeInputs } = await import("../desktop/src/shared/ttsr-probe");
+    const pattern = "x(?:ab|a|b)*$|DANGER";
+    const re = new RegExp(pattern);
+    for (const s of probeInputs(pattern)) {
+      const t0 = performance.now();
+      re.test(s);
+      expect(performance.now() - t0, "control: no seed-only input reaches the blow-up").toBeLessThan(50);
+    }
+    const errors = await probeRulesSpeed([{ ...quadratic, tools: ["Bash" as const], field: "command" as const, pattern }], { realSize: false });
+    expect(errors, "the composite inputs must refuse it without the real-size stage").toHaveLength(1);
+    expect(errors[0]).toContain("too slow");
   }, 30000);
 
   test("the built-in Kory rules pass the real-size bun stage", async () => {

@@ -222,6 +222,89 @@ export function hasNestedQuantifier(pattern: string): boolean {
   return false
 }
 
+/** First atom of an alternative: an escape, a class, or a literal character; null when unknown (a group, `.`, an anchor). */
+function firstAtom(alt: string): string | null {
+  const c = alt[0]
+  if (c === undefined || c === '(' || c === '.' || c === '^' || c === '$') return null
+  if (c === '\\') return /^\\(?:u\{[\da-fA-F]+\}|u[\da-fA-F]{4}|x[\da-fA-F]{2}|[pP]\{[^}]*\}|c[A-Za-z]|.)/.exec(alt)?.[0] ?? null
+  if (c === '[') {
+    const end = alt.indexOf(']', 1)
+    return end < 0 ? null : alt.slice(0, end + 1)
+  }
+  return c
+}
+
+/** Upper bound of `{n,m}` past which a repetition backtracks on a long text like `*` does. */
+export const AMBIGUOUS_REPEAT_MAX_BOUND = 10
+
+/** Whether the quantifier opening `rest` repeats without bound or past AMBIGUOUS_REPEAT_MAX_BOUND. */
+function repeatsLong(rest: string): boolean {
+  if (rest[0] === '*' || rest[0] === '+') return true
+  const m = /^\{\d+,(\d*)\}/.exec(rest)
+  return m !== null && (m[1] === '' || Number(m[1]) > AMBIGUOUS_REPEAT_MAX_BOUND)
+}
+
+/** The first pair of top-level alternatives of a group repeated without bound (or past a large bound) that can start the same match. */
+function overlappingAlternatives(pattern: string): [string, string] | null {
+  const stack: Array<{ start: number; splits: number[] }> = []
+  let inClass = false
+  for (let i = 0; i < pattern.length; i++) {
+    const c = pattern[i]
+    if (c === '\\') {
+      i++
+      continue
+    }
+    if (inClass) {
+      if (c === ']') inClass = false
+      continue
+    }
+    if (c === '[') {
+      inClass = true
+      continue
+    }
+    if (c === '(') {
+      const prefix = /^\(\?(?::|=|!|<=|<!|<[A-Za-z_$][\w$]*>)/.exec(pattern.slice(i))
+      stack.push({ start: i + (prefix ? prefix[0].length : 1), splits: [] })
+      continue
+    }
+    if (c === '|' && stack.length > 0) {
+      stack[stack.length - 1]!.splits.push(i)
+      continue
+    }
+    if (c !== ')') continue
+    const group = stack.pop()
+    if (!group || group.splits.length === 0) continue
+    if (!repeatsLong(pattern.slice(i + 1))) continue
+    const bounds = [group.start, ...group.splits.map((s) => s + 1)]
+    const alts = bounds.map((from, k) => pattern.slice(from, (group.splits[k] ?? i)))
+    for (let a = 0; a < alts.length; a++) {
+      for (let b = a + 1; b < alts.length; b++) {
+        const x = firstAtom(alts[a]!)
+        if (x !== null && x === firstAtom(alts[b]!)) return [alts[a]!, alts[b]!]
+      }
+    }
+  }
+  return null
+}
+
+/**
+ * Advisory, never a rejection: a repeated group whose alternatives can start
+ * the same match, e.g. `(ab|a|b)*`, gives a backtracking engine many ways to
+ * split one text, which the timing probe only catches on the inputs it tries.
+ */
+export function ambiguousAlternationWarnings(rules: readonly TtsrRule[]): string[] {
+  const out: string[] = []
+  rules.forEach((rule, i) => {
+    const pair = overlappingAlternatives(rule.pattern)
+    if (pair) {
+      out.push(
+        `rules[${i}] "${rule.id}": pattern: the alternatives ${JSON.stringify(pair[0])} and ${JSON.stringify(pair[1])} of a repeated group can start the same match; a long text can make it backtrack`
+      )
+    }
+  })
+  return out
+}
+
 function validateGlob(glob: string): string | null {
   if (glob.length === 0) return 'is empty'
   const body = glob.startsWith('!') ? glob.slice(1) : glob

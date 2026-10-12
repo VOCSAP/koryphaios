@@ -7,6 +7,8 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   approvalDialogBody,
+  approvalWarnings,
+  bunMissingNotice,
   describeRuleForApproval,
   displaySafe,
   TTSR_DIALOG_MAX_CHARS,
@@ -57,12 +59,49 @@ test("more rules than a dialog can hold: fits is false (no Approve offered in pl
   expect(body.fits, "content too long to review in a dialog must not be approvable there").toBe(false);
 });
 
+test("warnings are shown sanitized after the rules and count toward what fits", () => {
+  const rules = [rule("r-one")];
+  const body = approvalDialogBody(rules, false, ["first line\nforged line"]);
+  expect(body.text).toContain("warning: first line / forged line");
+  expect(body.text, "a warning cannot start a line of its own").not.toContain("\nforged line");
+  const crowded = approvalDialogBody(rules, false, Array.from({ length: 80 }, (_, i) => `w${i}`));
+  expect(crowded.fits, "warnings past the line limit must make the dialog unapprovable in place").toBe(false);
+  expect(approvalDialogBody(rules, true, ["x"]).text).toContain("avertissement: x");
+});
+
+test("approvalWarnings: the bun notice appears if and only if the probe reported bun unavailable", () => {
+  const rules = [rule("r-one")];
+  for (const isFr of [false, true]) {
+    expect(approvalWarnings(rules, isFr, undefined), "bun started: no notice").toEqual([]);
+    expect(approvalWarnings(rules, isFr, "spawn bun ENOENT"), "bun did not start: the notice alone").toEqual([bunMissingNotice(isFr)]);
+  }
+  expect(bunMissingNotice(false)).toContain("bun could not start when these rules were timed");
+  expect(bunMissingNotice(true)).toContain("bun n'a pas pu démarrer quand ces règles ont été chronométrées");
+});
+
+test("approvalWarnings: the ambiguity advisories follow the rules, before the bun notice", () => {
+  const ambiguous = rule("amb", { pattern: "(?:ab|a)+" });
+  expect(approvalWarnings([rule("r-one")], false, undefined), "unambiguous rules: no advisory").toEqual([]);
+  const warned = approvalWarnings([rule("r-one"), ambiguous], false, undefined);
+  expect(warned).toHaveLength(1);
+  expect(warned[0]).toContain('rules[1] "amb": pattern: the alternatives "ab" and "a"');
+  expect(approvalWarnings([ambiguous], false, "spawn bun ENOENT")).toEqual([
+    expect.stringContaining('rules[0] "amb"'),
+    bunMissingNotice(false),
+  ]);
+  const body = approvalDialogBody([ambiguous], false, approvalWarnings([ambiguous], false, "x"));
+  expect(body.text).toContain(`warning: ${bunMissingNotice(false)}`);
+});
+
 test("index.ts wiring: the dialog shows approvalDialogBody and offers no Approve when it does not fit", () => {
   const src = readFileSync(join(import.meta.dir, "..", "desktop", "src", "main", "index.ts"), "utf8");
   const anchor = src.indexOf("async function promptTtsrApproval(req: TtsrApprovalRequest): Promise<boolean>");
   expect(anchor, "promptTtsrApproval must exist in index.ts").toBeGreaterThan(-1);
   const fn = extractBracedBody(src, src.indexOf("{", anchor));
   expect(fn, "the dialog body must come from approvalDialogBody (every rule, full text)").toContain("approvalDialogBody(req.rules");
+  expect(fn, "the dialog shows the ambiguity advisories and the probe's bun verdict").toContain(
+    "approvalWarnings(req.rules, isFr, req.bunUnavailable)"
+  );
   expect(fn, "no truncation of the rule list").not.toContain("slice(0, 10)");
   const notFits = fn.indexOf("if (!body.fits)");
   expect(notFits, "a branch for content that does not fit").toBeGreaterThan(-1);

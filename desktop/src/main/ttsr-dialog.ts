@@ -6,6 +6,7 @@
 //
 // Pure module, no electron: unit-tested under bun.
 
+import { ambiguousAlternationWarnings } from '../shared/ttsr-rules'
 import type { TtsrRule } from '../shared/ttsr-types'
 
 /** Longest dialog body that still offers Approve in place. */
@@ -34,9 +35,31 @@ export function describeRuleForApproval(rule: TtsrRule, isFr: boolean): string[]
   return lines
 }
 
-/** The full list of rules for the dialog, and whether it fits a dialog. */
-export function approvalDialogBody(rules: readonly TtsrRule[], isFr: boolean): { text: string; fits: boolean } {
+export function bunMissingNotice(isFr: boolean): string {
+  return isFr
+    ? "bun n'a pas pu démarrer quand ces règles ont été chronométrées : elles l'ont été sous V8, et le hook qui les applique, lancé par bun, peut ne pas démarrer dans une tuile qui a le même PATH."
+    : "bun could not start when these rules were timed: they were timed under V8, and the hook that enforces them, launched by bun, may not start in a tile with the same PATH."
+}
+
+/**
+ * Warnings shown under the rules: the ambiguous-alternation advisories, then
+ * the bun notice when the timing probe could not start bun (`bunUnavailable`
+ * is the probe's reason, already reported by the probe itself).
+ */
+export function approvalWarnings(rules: readonly TtsrRule[], isFr: boolean, bunUnavailable: string | undefined): string[] {
+  const warnings = ambiguousAlternationWarnings(rules)
+  if (bunUnavailable !== undefined) warnings.push(bunMissingNotice(isFr))
+  return warnings
+}
+
+/** The full list of rules and their warnings for the dialog, and whether it fits a dialog. */
+export function approvalDialogBody(
+  rules: readonly TtsrRule[],
+  isFr: boolean,
+  warnings: readonly string[] = []
+): { text: string; fits: boolean } {
   const lines = rules.flatMap((r) => describeRuleForApproval(r, isFr))
+  for (const w of warnings) lines.push(`${isFr ? 'avertissement' : 'warning'}: ${displaySafe(w)}`)
   const text = lines.join('\n')
   return { text, fits: text.length <= TTSR_DIALOG_MAX_CHARS && lines.length <= TTSR_DIALOG_MAX_LINES }
 }

@@ -122,6 +122,17 @@ test("check: a valid rules file exits 0 with a short summary", async () => {
   expect(result.stdout).toContain("1 rule(s)");
 });
 
+test("check: a valid file with overlapping repeated alternatives exits 0 and warns on stderr", async () => {
+  const dir = await repoWith({
+    version: 1,
+    rules: [{ ...VALID_RULE.rules[0], id: "overlap", pattern: "q(?:ab|a)+z" }],
+  });
+  const result = await runCli(["check"], dir);
+  expect(result.exitCode, "an advisory never rejects a file the timing probe accepts").toBe(0);
+  expect(result.stdout).toContain("valid:");
+  expect(result.stderr).toContain('warning: rules[0] "overlap": pattern: the alternatives "ab" and "a" of a repeated group');
+});
+
 test("check: an invalid rules file (unknown field) lists every error and exits 1", async () => {
   const dir = await repoWith({
     version: 1,

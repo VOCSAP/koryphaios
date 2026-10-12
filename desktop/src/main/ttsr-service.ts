@@ -127,6 +127,8 @@ export interface TtsrApprovalRequest {
   projectKey: string
   hash: string
   rules: TtsrRule[]
+  /** Set when the timing probe could not start bun and timed the rules under V8: its reason. */
+  bunUnavailable?: string
 }
 
 export interface TtsrServiceDeps {
@@ -154,9 +156,10 @@ export interface TtsrServiceDeps {
   matchIsolated?: (pattern: string, flags: string, texts: readonly string[]) => Promise<IsolatedMatchResult>
   /**
    * Adversarial timing gate of a file's rules (errors, [] when fast); a
-   * synchronous result is applied at once. Defaults to the worker probe.
+   * synchronous result is applied at once. Defaults to the worker probe,
+   * which calls `onFallback` when bun could not start.
    */
-  probeRules?: (rules: readonly TtsrRule[]) => string[] | Promise<string[]>
+  probeRules?: (rules: readonly TtsrRule[], onFallback?: (message: string) => void) => string[] | Promise<string[]>
   /** Defers the approval prompt off the spawn path; defaults to setImmediate. */
   defer?: (fn: () => void) => void
   /** Clock of the dialog interval and the log rate limit; defaults to Date.now. */
@@ -202,7 +205,7 @@ interface LogTail {
   fault: string | null
 }
 
-type ProbeVerdict = { done: false; promise: Promise<string[]> } | { done: true; errors: string[] }
+type ProbeVerdict = { done: false; promise: Promise<string[]> } | { done: true; errors: string[]; bunUnavailable?: string }
 
 /** Hook log lines forwarded for one tile: per poll pass and per minute. */
 interface LogRate {
@@ -962,6 +965,8 @@ export class TtsrService {
     this.lastPromptAt.set(root, this.now())
     this.promptOpen.add(root)
     const req: TtsrApprovalRequest = { projectDir: root, projectKey: state.key, hash: snap.hash, rules: snap.rules }
+    const verdict = this.probes.get(snap.hash)
+    if (verdict?.done && verdict.bunUnavailable !== undefined) req.bunUnavailable = verdict.bunUnavailable
     const closed = (): void => {
       this.promptOpen.delete(root)
       if (!this.promptAgain.delete(root)) return
@@ -997,17 +1002,17 @@ export class TtsrService {
    * queues it: each asynchronous probe holds a worker thread for up to
    * seconds, and an agent can mint a new content every poll.
    */
-  private scheduleProbe(rules: readonly TtsrRule[]): string[] | Promise<string[]> {
-    if (this.probeActive < TTSR_PROBE_CONCURRENCY) return this.startProbe(rules)
+  private scheduleProbe(rules: readonly TtsrRule[], onFallback: (message: string) => void): string[] | Promise<string[]> {
+    if (this.probeActive < TTSR_PROBE_CONCURRENCY) return this.startProbe(rules, onFallback)
     return new Promise((resolve) => {
-      this.probeQueue.push(() => resolve(this.startProbe(rules)))
+      this.probeQueue.push(() => resolve(this.startProbe(rules, onFallback)))
     })
   }
 
-  private startProbe(rules: readonly TtsrRule[]): string[] | Promise<string[]> {
+  private startProbe(rules: readonly TtsrRule[], onFallback: (message: string) => void): string[] | Promise<string[]> {
     let out: string[] | Promise<string[]>
     try {
-      out = this.probeRules(rules)
+      out = this.probeRules(rules, onFallback)
     } catch (e) {
       this.deps.reportError('ttsr', 'guard rules timing check failed', e)
       return [`file: the pattern timing check failed: ${(e as Error).message}`]
@@ -1030,9 +1035,14 @@ export class TtsrService {
   private probeVerdict(hash: string, rules: readonly TtsrRule[]): ProbeVerdict {
     const known = this.probes.get(hash)
     if (known) return known
-    const out = this.scheduleProbe(rules)
+    let bunUnavailable: string | undefined
+    const settled = (errors: string[]): ProbeVerdict =>
+      bunUnavailable === undefined ? { done: true, errors } : { done: true, errors, bunUnavailable }
+    const out = this.scheduleProbe(rules, (message) => {
+      bunUnavailable = message
+    })
     if (Array.isArray(out)) {
-      const done: ProbeVerdict = { done: true, errors: out }
+      const done = settled(out)
       this.probes.set(hash, done)
       return done
     }
@@ -1042,7 +1052,7 @@ export class TtsrService {
         return [`file: the pattern timing check failed: ${(e as Error).message}`]
       })
       .then((errors) => {
-        this.probes.set(hash, { done: true, errors })
+        this.probes.set(hash, settled(errors))
         this.onProbed(hash)
         return errors
       })
