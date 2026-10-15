@@ -6,6 +6,7 @@ import {
   applyEnrolment,
   createOperatorIdentity,
   credentialWorks,
+  ensureOperatorIdentity,
   exportEnrolment,
   loadOperatorIdentity,
 } from "../desktop/src/main/operator-identity.ts";
@@ -46,10 +47,16 @@ const noCipher: SecretCipher = {
   },
 };
 
+function createInitialIdentity(dir: string, cipher: SecretCipher) {
+  const result = ensureOperatorIdentity(dir, cipher);
+  if (result.state !== "ready") throw new Error("initial identity unavailable");
+  return result.identity;
+}
+
 describe("operator identity", () => {
   test("first run mints a credential and persists it encrypted", () => {
     const dir = tmp();
-    const id = loadOperatorIdentity(dir, fakeCipher);
+    const id = createInitialIdentity(dir, fakeCipher);
     expect(id).not.toBeNull();
     expect(id?.operatorId).toMatch(/^[0-9a-f]{16}$/);
 
@@ -61,7 +68,7 @@ describe("operator identity", () => {
 
   test("the identity is stable across loads", () => {
     const dir = tmp();
-    const first = loadOperatorIdentity(dir, fakeCipher);
+    const first = createInitialIdentity(dir, fakeCipher);
     const second = loadOperatorIdentity(dir, fakeCipher);
     expect(second?.operatorId).toBe(first!.operatorId);
     expect(second?.privateKey).toBe(first!.privateKey);
@@ -70,20 +77,20 @@ describe("operator identity", () => {
   test("two app-state dirs (two OS accounts) yield two identities", () => {
     // This is the compartmentalisation guarantee: %APPDATA% is per OS user, so
     // account A and account B on the SAME machine cannot collide.
-    const a = loadOperatorIdentity(tmp(), fakeCipher);
-    const b = loadOperatorIdentity(tmp(), fakeCipher);
+    const a = createInitialIdentity(tmp(), fakeCipher);
+    const b = createInitialIdentity(tmp(), fakeCipher);
     expect(a?.operatorId).not.toBe(b?.operatorId);
     expect(a?.osUserHash).not.toBe(b?.osUserHash);
   });
 
   test("operator_id is the digest of the public key (self-certifying)", () => {
-    const id = loadOperatorIdentity(tmp(), fakeCipher);
+    const id = createInitialIdentity(tmp(), fakeCipher);
     expect(id?.operatorId).toBe(deriveOperatorId(id!.publicKey));
   });
 
   test("without OS encryption it still works, explicitly in the clear", () => {
     const dir = tmp();
-    const id = loadOperatorIdentity(dir, noCipher);
+    const id = createInitialIdentity(dir, noCipher);
     expect(id).not.toBeNull();
     expect(readFileSync(join(dir, "operator.json"), "utf8")).toContain("plain:");
     expect(loadOperatorIdentity(dir, noCipher)?.operatorId).toBe(id!.operatorId);
@@ -114,7 +121,7 @@ describe("multi-PC enrolment", () => {
   test("PC#2 adopting the payload shares the identity", () => {
     const pc1 = tmp();
     const pc2 = tmp();
-    const original = loadOperatorIdentity(pc1, fakeCipher);
+    const original = createInitialIdentity(pc1, fakeCipher);
 
     const payload = exportEnrolment(pc1, fakeCipher);
     expect(payload?.v).toBe(1);

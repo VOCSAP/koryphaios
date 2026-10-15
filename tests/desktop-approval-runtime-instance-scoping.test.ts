@@ -6,6 +6,8 @@ import { ApprovalRuntime, approvalCredFileName } from "../desktop/src/main/appro
 import type { SecretCipher } from "../desktop/src/main/scope-secrets.ts";
 import { teamLeadInstanceToken } from "../desktop/src/main/team-lead-mcp-sweep.ts";
 import { deriveTokenId } from "../desktop/src/main/approval-auth.ts";
+import { reachedWithin } from "./_bounded-await.ts";
+import { withOperatorTrustBroker } from "./_operator-trust-broker.ts";
 
 const dirs: string[] = [];
 afterAll(() => {
@@ -61,7 +63,7 @@ describe("ApprovalRuntime instance scoping", () => {
 
   test("a failed credential publication revokes the minted token before another arm", async () => {
     const requests: Array<{ path: string; body: Record<string, unknown> }> = [];
-    globalThis.fetch = (async (input, init) => {
+    globalThis.fetch = withOperatorTrustBroker((async (input, init) => {
       const path = new URL(String(input)).pathname;
       const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
       requests.push({ path, body });
@@ -69,7 +71,7 @@ describe("ApprovalRuntime instance scoping", () => {
         status: path === "/approval/token-revoke" ? 503 : 200,
         headers: { "content-type": "application/json" },
       });
-    }) as typeof fetch;
+    }) as typeof fetch);
 
     try {
       const stateDir = tmp();
@@ -105,14 +107,14 @@ describe("ApprovalRuntime instance scoping", () => {
 
   test("disarm removes its credential when remote revocation fails without touching legacy credentials", async () => {
     const requests: Array<{ path: string; body: Record<string, unknown> }> = [];
-    globalThis.fetch = (async (input, init) => {
+    globalThis.fetch = withOperatorTrustBroker((async (input, init) => {
       const path = new URL(String(input)).pathname;
       requests.push({ path, body: JSON.parse(String(init?.body)) as Record<string, unknown> });
       return new Response(JSON.stringify(path === "/approval/token-revoke" ? { error: "broker unavailable" } : { token_id: "ignored" }), {
         status: path === "/approval/token-revoke" ? 503 : 200,
         headers: { "content-type": "application/json" },
       });
-    }) as typeof fetch;
+    }) as typeof fetch);
 
     try {
       const stateDir = tmp();
@@ -150,7 +152,7 @@ describe("ApprovalRuntime instance scoping", () => {
 
   test("two concurrent arms share one minted credential", async () => {
     const requests: Array<{ path: string; body: Record<string, unknown> }> = [];
-    globalThis.fetch = (async (input, init) => {
+    globalThis.fetch = withOperatorTrustBroker((async (input, init) => {
       requests.push({
         path: new URL(String(input)).pathname,
         body: JSON.parse(String(init?.body)) as Record<string, unknown>,
@@ -159,7 +161,7 @@ describe("ApprovalRuntime instance scoping", () => {
         status: 200,
         headers: { "content-type": "application/json" },
       });
-    }) as typeof fetch;
+    }) as typeof fetch);
 
     try {
       const stateDir = tmp();
@@ -198,7 +200,7 @@ describe("ApprovalRuntime instance scoping", () => {
     const mintStarted = new Promise<void>((resolve) => {
       signalMintStarted = resolve;
     });
-    globalThis.fetch = (async (input, init) => {
+    globalThis.fetch = withOperatorTrustBroker((async (input, init) => {
       const path = new URL(String(input)).pathname;
       const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
       requests.push({ path, body });
@@ -210,7 +212,7 @@ describe("ApprovalRuntime instance scoping", () => {
         status: 200,
         headers: { "content-type": "application/json" },
       });
-    }) as typeof fetch;
+    }) as typeof fetch);
 
     try {
       const stateDir = tmp();
@@ -225,15 +227,19 @@ describe("ApprovalRuntime instance scoping", () => {
       });
 
       const arming = runtime.arm();
-      await mintStarted;
+      const firstEvent = await reachedWithin(
+        Promise.race([mintStarted.then(() => "mint-started" as const), arming.then(() => "arm-settled" as const)]),
+        "arm() sends its token-mint request",
+      );
+      expect(firstEvent, "arm() settled before the token-mint request, so there is no in-flight mint for close() to invalidate").toBe("mint-started");
       const closing = runtime.close();
       resolveMint(new Response(JSON.stringify({ token_id: "ignored" }), {
         status: 200,
         headers: { "content-type": "application/json" },
       }));
 
-      expect(await arming).toBe(false);
-      await closing;
+      expect(await reachedWithin(arming, "arm() settles once the in-flight mint resolves")).toBe(false);
+      await reachedWithin(closing, "close() settles once the in-flight mint resolves");
       const minted = requests.find((request) => request.path === "/approval/token-mint")!;
       const tokenId = deriveTokenId(minted.body.session_public_key as string);
       expect(requests.filter((request) => request.path === "/approval/token-revoke")).toEqual([
@@ -249,7 +255,7 @@ describe("ApprovalRuntime instance scoping", () => {
 
   test("disarm permits a later arm while close does not", async () => {
     const requests: Array<{ path: string; body: Record<string, unknown> }> = [];
-    globalThis.fetch = (async (input, init) => {
+    globalThis.fetch = withOperatorTrustBroker((async (input, init) => {
       requests.push({
         path: new URL(String(input)).pathname,
         body: JSON.parse(String(init?.body)) as Record<string, unknown>,
@@ -258,7 +264,7 @@ describe("ApprovalRuntime instance scoping", () => {
         status: 200,
         headers: { "content-type": "application/json" },
       });
-    }) as typeof fetch;
+    }) as typeof fetch);
 
     try {
       const stateDir = tmp();
@@ -285,7 +291,7 @@ describe("ApprovalRuntime instance scoping", () => {
 
   test("two runs of one project keep distinct credentials and disarm only their own token", async () => {
     const requests: Array<{ path: string; body: Record<string, unknown> }> = [];
-    globalThis.fetch = (async (input, init) => {
+    globalThis.fetch = withOperatorTrustBroker((async (input, init) => {
       requests.push({
         path: new URL(String(input)).pathname,
         body: JSON.parse(String(init?.body)) as Record<string, unknown>,
@@ -294,7 +300,7 @@ describe("ApprovalRuntime instance scoping", () => {
         status: 200,
         headers: { "content-type": "application/json" },
       });
-    }) as typeof fetch;
+    }) as typeof fetch);
 
     try {
       const stateDir = tmp();

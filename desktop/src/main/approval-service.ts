@@ -17,7 +17,11 @@ import {
   type ApprovalAddResponse
 } from './approval-auth'
 import type { OperatorIdentity } from './operator-identity'
-import type { BrokerEndpoint } from './broker-client'
+import {
+  fetchOperatorTrustHealth,
+  OPERATOR_TRUST_PROTOCOL_VERSION,
+  type BrokerEndpoint
+} from './broker-client'
 import { commandHash } from './launch-approval'
 import { reportError } from './log'
 
@@ -36,12 +40,12 @@ export interface ApprovalDeps {
   fetchImpl?: typeof fetch
 }
 
-async function signedPost<T>(
+async function signedRequest(
   deps: ApprovalDeps,
   path: string,
   payload: Record<string, unknown>,
   signal?: AbortSignal
-): Promise<T> {
+): Promise<Response> {
   const f = deps.fetchImpl ?? fetch
   const body = { ...payload, public_key: deps.identity.publicKey }
   const auth = buildAuthProof(deps.identity.privateKey, body, {
@@ -50,12 +54,21 @@ async function signedPost<T>(
   })
   const headers: Record<string, string> = { 'content-type': 'application/json' }
   if (deps.endpoint.token) headers.authorization = `Bearer ${deps.endpoint.token}`
-  const res = await f(`${deps.endpoint.url}${path}`, {
+  return f(`${deps.endpoint.url}${path}`, {
     method: 'POST',
     headers,
     body: JSON.stringify({ ...body, auth }),
     signal
   })
+}
+
+async function signedPost<T>(
+  deps: ApprovalDeps,
+  path: string,
+  payload: Record<string, unknown>,
+  signal?: AbortSignal
+): Promise<T> {
+  const res = await signedRequest(deps, path, payload, signal)
   if (!res.ok) {
     // The status stays last: callers match a lost race with /: 409$/.
     const raw = (await res.text()).trim()
@@ -69,6 +82,41 @@ async function signedPost<T>(
     throw new Error(detail ? `${path} failed: ${detail.slice(0, 300)}: ${res.status}` : `${path} failed: ${res.status}`)
   }
   return (await res.json()) as T
+}
+
+export type OperatorTrustStatus =
+  | 'compatible'
+  | 'unconfigured'
+  | 'not-trusted'
+  | 'incompatible'
+  | 'invalid'
+  | 'unreachable'
+
+export async function checkOperatorTrust(deps: ApprovalDeps): Promise<OperatorTrustStatus> {
+  const health = await fetchOperatorTrustHealth(deps.endpoint, deps.fetchImpl)
+  if (!health || health.protocolVersion !== OPERATOR_TRUST_PROTOCOL_VERSION) return 'incompatible'
+  if (health.state === 'unconfigured') return 'unconfigured'
+  if (health.state === 'invalid') return 'invalid'
+  if (health.state !== 'ready') return 'incompatible'
+
+  const res = await signedRequest(deps, '/operator/check', {}, AbortSignal.timeout(2000))
+  if (res.status === 403) return 'not-trusted'
+  if (res.status === 503) {
+    const body = (await res.json()) as { error?: unknown }
+    if (body.error === 'operator-trust-invalid') return 'invalid'
+    if (body.error === 'operator-trust-unconfigured') return 'unconfigured'
+    return 'incompatible'
+  }
+  if (!res.ok) return 'incompatible'
+
+  const body = (await res.json()) as { operator_id?: unknown; protocol_version?: unknown }
+  if (
+    body.operator_id !== deps.identity.operatorId ||
+    body.protocol_version !== OPERATOR_TRUST_PROTOCOL_VERSION
+  ) {
+    return 'incompatible'
+  }
+  return 'compatible'
 }
 
 /** Register a session's public key so its agent may raise approvals. */

@@ -1590,6 +1590,21 @@ export interface BrokerStatusEvent {
   lastError: string | null
 }
 
+export type OperatorTrustState =
+  | 'unknown'
+  | 'compatible'
+  | 'unconfigured'
+  | 'not-trusted'
+  | 'incompatible'
+  | 'identity-unreadable'
+  | 'invalid'
+  | 'unreachable'
+
+export interface OperatorTrustStatusEvent {
+  state: OperatorTrustState
+  fingerprint?: string
+}
+
 // ----- Activity journal (PLAN C14) -----
 // Mirror of main/journal.ts shapes (kept import-free for bun tests).
 
@@ -2203,6 +2218,8 @@ export interface DeckApi {
   /** Force an immediate broker poll (banner Retry button). */
   retryBroker(): Promise<void>
   onBrokerStatus(cb: (status: BrokerStatusEvent) => void): () => void
+  getOperatorTrustStatus(): Promise<OperatorTrustStatusEvent>
+  onOperatorTrustStatus(cb: (status: OperatorTrustStatusEvent) => void): () => void
 
   // diff / review (PLAN C13)
   /** Full diff picture of a dir (uncommitted + branch-vs-main for worktrees). */

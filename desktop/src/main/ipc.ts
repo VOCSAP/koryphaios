@@ -13,6 +13,7 @@ import type {
   I18nPayload,
   DeckGraphDraft,
   LaunchConfig,
+  OperatorTrustStatusEvent,
   RoadmapListFilters,
   RoadmapQuery,
   RoadmapSyncResolution,
@@ -199,6 +200,7 @@ interface IpcDeps {
   brokerStatus: () => BrokerStatusEvent
   /** Force an immediate broker poll (banner Retry button). */
   brokerRetry: () => void
+  operatorTrustStatus: () => OperatorTrustStatusEvent
   /**
    * deck-plugin dir (built hook/mcp/design assets), '' when the build was
    * skipped or has since gone missing. A GETTER (card d02c8e96 fix c), not a
@@ -295,6 +297,7 @@ export function registerIpc({
   resolveTemplateInputs,
   brokerStatus,
   brokerRetry,
+  operatorTrustStatus,
   deckPluginDir,
   sandbox,
   sandboxGate,
@@ -1178,6 +1181,7 @@ export function registerIpc({
   // ----- broker reachability (PLAN O5) -----
   regHandle('broker:status', () => brokerStatus())
   regHandle('broker:retry', () => brokerRetry())
+  regHandle('operator-trust:status', () => operatorTrustStatus())
 
   // ----- renderer error reporting (PLAN O4) -----
   // ErrorBoundaries and the window-level error/unhandledrejection handlers

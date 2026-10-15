@@ -96,6 +96,7 @@ export const COMPANION_MANIFEST = {
   // broker reachability
   getBrokerStatus: { kind: 'invoke', channel: 'broker:status' },
   retryBroker: { kind: 'invoke', channel: 'broker:retry' },
+  getOperatorTrustStatus: { kind: 'invoke', channel: 'operator-trust:status' },
 
   // diff / review
   collectDiff: { kind: 'invoke', channel: 'diff:collect' },
@@ -240,6 +241,7 @@ export const COMPANION_MANIFEST = {
   onMenuImportTemplate: { kind: 'event', channel: 'menu:import-template' },
   onWorkspaceCurrent: { kind: 'event', channel: 'workspace:current' },
   onBrokerStatus: { kind: 'event', channel: 'broker:status' },
+  onOperatorTrustStatus: { kind: 'event', channel: 'operator-trust:status' },
   approvalChannels: { kind: 'invoke', channel: 'approvals:channels' },
   approvalConnect: { kind: 'invoke', channel: 'approvals:connect' },
   approvalDisconnect: { kind: 'invoke', channel: 'approvals:disconnect' },
@@ -373,6 +375,7 @@ export const CHANNEL_TIERS: Readonly<Record<string, 0 | 1 | 2 | 3>> = {
   'worktree:list': 0,
   'journal:list': 0,
   'broker:status': 0,
+  'operator-trust:status': 0,
   'diff:collect': 0,
   'diff:collect-file': 0,
   'explorer:roots': 0,

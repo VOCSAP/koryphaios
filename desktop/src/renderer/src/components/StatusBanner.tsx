@@ -30,6 +30,7 @@ import { GLYPH_BADGES } from './icons'
 export function StatusBanner(): React.JSX.Element | null {
   const t = useT()
   const status = useDeck((s) => s.brokerStatus)
+  const operatorTrust = useDeck((s) => s.operatorTrustStatus)
   const dismissed = useDeck((s) => s.offlineBannerDismissed)
   const dismiss = useDeck((s) => s.dismissOfflineBanner)
   const sync = useDeck((s) => s.roadmapSync.status)
@@ -49,6 +50,7 @@ export function StatusBanner(): React.JSX.Element | null {
     // next one's (a new outage carries a new `since`). The NavRail red dot
     // stays as the residual indicator while hidden.
     brokerDismissed: status !== null && dismissed === status.since,
+    operatorTrust: operatorTrust.state,
     conflicts,
     status: sync
   })
@@ -69,6 +71,34 @@ export function StatusBanner(): React.JSX.Element | null {
         <button className="status-banner-action" onClick={dismiss}>
           {t('banner.dismiss')}
         </button>
+      </div>
+    )
+  }
+
+  const operatorTrustText =
+    kind === 'operator-unconfigured'
+      ? 'banner.operatorUnconfigured'
+      : kind === 'operator-not-trusted'
+        ? 'banner.operatorNotTrusted'
+        : kind === 'operator-incompatible'
+          ? 'banner.operatorIncompatible'
+          : kind === 'operator-identity-unreadable'
+            ? 'banner.operatorIdentityUnreadable'
+            : kind === 'operator-invalid'
+              ? 'banner.operatorInvalid'
+              : kind === 'operator-unreachable'
+                ? 'banner.operatorUnreachable'
+                : null
+  if (operatorTrustText) {
+    const unconfigured = kind === 'operator-unconfigured'
+    return (
+      <div className={`status-banner ${unconfigured ? 'status-banner-info' : 'status-banner-error'}`} role={unconfigured ? 'status' : 'alert'}>
+        <span className="status-banner-text">
+          {GLYPH_BADGES.warning} {t(operatorTrustText)}
+          {kind === 'operator-not-trusted' && operatorTrust.fingerprint ? (
+            <span className="status-banner-detail" title={operatorTrust.fingerprint}> {operatorTrust.fingerprint}</span>
+          ) : null}
+        </span>
       </div>
     )
   }

@@ -10,7 +10,7 @@
 // Enrolling a second machine copies the credential rather than minting a new
 // one, since an operator is a person, not a device.
 
-import { existsSync, mkdirSync, readFileSync, renameSync } from 'node:fs'
+import { existsSync, linkSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { createHash, randomBytes } from 'node:crypto'
 import { hostname, userInfo } from 'node:os'
 import { join } from 'node:path'
@@ -102,49 +102,65 @@ function computeOsUserHash(salt: string): string {
     .slice(0, 32)
 }
 
-/**
- * A null return means the identity file exists but could not be decrypted — not
- * proof the identity is gone, since this is equally likely to mean the OS
- * keychain is merely unavailable right now (locked, mid migration) as real
- * corruption.
- * Every caller except ApprovalRuntime.arm() must treat a null return
- * conservatively: surface a re-enrolment prompt, never silently start a new
- * identity. arm() self-heals on genuine corruption only because it's gated on
- * cipher.isAvailable(), so a transient outage never reaches it.
- */
 export function loadOperatorIdentity(dir: string, cipher: SecretCipher): OperatorIdentity | null {
   const file = identityPath(dir)
-  if (existsSync(file)) {
-    try {
-      const stored = JSON.parse(readFileSync(file, 'utf8')) as StoredIdentity
-      const privateKey = decrypt(cipher, stored.privateKeyEnc ?? '')
-      if (!privateKey || !stored.publicKey) return null
-      return {
-        operatorId: deriveOperatorId(stored.publicKey),
-        publicKey: stored.publicKey,
-        privateKey,
-        osUserHash: computeOsUserHash(stored.userSalt ?? '')
-      }
-    } catch (e) {
-      reportError('approvals', 'operator identity unreadable', e)
-      return null
+  if (!existsSync(file)) return null
+  try {
+    const stored = JSON.parse(readFileSync(file, 'utf8')) as StoredIdentity
+    const privateKey = decrypt(cipher, stored.privateKeyEnc ?? '')
+    if (!privateKey || !stored.publicKey) return null
+    return {
+      operatorId: deriveOperatorId(stored.publicKey),
+      publicKey: stored.publicKey,
+      privateKey,
+      osUserHash: computeOsUserHash(stored.userSalt ?? '')
     }
+  } catch (e) {
+    reportError('approvals', 'operator identity unreadable', e)
+    return null
   }
-  return createOperatorIdentity(dir, cipher, generateCredential())
 }
 
-/**
- * Write a credential to app-state and return the resolved identity.
- *
- * NEVER OVERWRITES an existing identity file in place (card 469f3176 review
- * finding, mutation Q1): a caller that reaches here to self-heal after a
- * decrypt failure may be looking at a merely UNAVAILABLE keychain rather than
- * a genuinely corrupt identity (see arm()'s cipher.isAvailable() check in
- * approval-runtime.ts). If that call is wrong, or a caller with no such guard
- * arrives here anyway, the old private key must still be recoverable rather
- * than destroyed: an existing file is renamed to a timestamped `.bak-*`
- * sibling before the new one is written, never deleted, never merged.
- */
+export type OperatorIdentityResolution =
+  | { state: 'ready'; identity: OperatorIdentity }
+  | { state: 'unreadable' }
+
+export function publishFirstIdentity(file: string, contents: string): void {
+  const tmp = `${file}.tmp-${randomBytes(16).toString('hex')}`
+  writeFileSync(tmp, contents, { mode: 0o600, flag: 'wx' })
+  try {
+    linkSync(tmp, file)
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e
+  } finally {
+    unlinkSync(tmp)
+  }
+}
+
+/** Resolves the persisted identity or creates the first one without replacement. */
+export function ensureOperatorIdentity(dir: string, cipher: SecretCipher): OperatorIdentityResolution {
+  const loaded = loadOperatorIdentity(dir, cipher)
+  if (loaded) return { state: 'ready', identity: loaded }
+
+  const file = identityPath(dir)
+  if (existsSync(file)) return { state: 'unreadable' }
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
+
+  const cred = generateCredential()
+  const salt = randomBytes(16).toString('base64url')
+  const stored: StoredIdentity = {
+    publicKey: cred.publicKey,
+    privateKeyEnc: encrypt(cipher, cred.privateKey),
+    userSalt: salt,
+    createdAt: new Date().toISOString()
+  }
+  publishFirstIdentity(file, JSON.stringify(stored, null, 2))
+
+  const identity = loadOperatorIdentity(dir, cipher)
+  return identity ? { state: 'ready', identity } : { state: 'unreadable' }
+}
+
+/** Writes an explicitly supplied credential, retaining an existing identity as a backup. */
 export function createOperatorIdentity(
   dir: string,
   cipher: SecretCipher,

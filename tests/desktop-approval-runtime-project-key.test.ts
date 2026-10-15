@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ApprovalRuntime, approvalCredFileName } from "../desktop/src/main/approval-runtime.ts";
 import type { SecretCipher } from "../desktop/src/main/scope-secrets.ts";
+import { withOperatorTrustBroker } from "./_operator-trust-broker.ts";
 
 const dirs: string[] = [];
 afterAll(() => {
@@ -24,11 +25,11 @@ const fakeCipher: SecretCipher = {
 
 const originalFetch = globalThis.fetch;
 function stubMintSuccess(): void {
-  globalThis.fetch = (async () =>
+  globalThis.fetch = withOperatorTrustBroker((async () =>
     new Response(JSON.stringify({ token_id: "tok_test", expires_at: new Date(Date.now() + 3600_000).toISOString() }), {
       status: 200,
       headers: { "content-type": "application/json" },
-    })) as typeof fetch;
+    })) as typeof fetch);
 }
 
 function readCredentialOrigin(stateDir: string, projectKey: string): Record<string, unknown> {

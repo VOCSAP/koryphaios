@@ -5,6 +5,8 @@ import { join } from "node:path";
 import { ApprovalRuntime, approvalCredFileName } from "../desktop/src/main/approval-runtime.ts";
 import { onDeckError } from "../desktop/src/main/log.ts";
 import type { SecretCipher } from "../desktop/src/main/scope-secrets.ts";
+import { reachedWithin } from "./_bounded-await.ts";
+import { withOperatorTrustBroker } from "./_operator-trust-broker.ts";
 
 const dirs: string[] = [];
 const originalFetch = globalThis.fetch;
@@ -91,11 +93,11 @@ describe("ApprovalRuntime token renewal", () => {
     const timing = clock();
     const errors: string[] = [];
     onDeckError((_scope, text) => errors.push(text));
-    globalThis.fetch = (async (input) => {
+    globalThis.fetch = withOperatorTrustBroker((async (input) => {
       const path = new URL(String(input)).pathname;
       expect(path).toBe("/approval/token-mint");
       return response({ token_id: "token-old-broker", expires_at: "2030-01-02T00:00:00.000Z" });
-    }) as typeof fetch;
+    }) as typeof fetch);
     const dir = stateDir();
     const instance = runtime(dir, "old-broker", timing);
 
@@ -116,7 +118,7 @@ describe("ApprovalRuntime token renewal", () => {
     const renewalResponse = new Promise<Response>((resolve) => {
       resolveRenewal = resolve;
     });
-    globalThis.fetch = (async (input, init) => {
+    globalThis.fetch = withOperatorTrustBroker((async (input, init) => {
       const path = new URL(String(input)).pathname;
       const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
       if (path === "/approval/token-mint" && body.renew_only === true) {
@@ -132,7 +134,7 @@ describe("ApprovalRuntime token renewal", () => {
         });
       }
       return response({ revoked: 1 });
-    }) as typeof fetch;
+    }) as typeof fetch);
     const dir = stateDir();
     const instance = runtime(dir, "renewing", timing);
 
@@ -142,7 +144,7 @@ describe("ApprovalRuntime token renewal", () => {
     expect(timing.planned).toEqual([expect.objectContaining({ delayMs: renewalDelayMs, cleared: false })]);
 
     timing.planned[0]!.callback();
-    await renewalStarted;
+    await reachedWithin(renewalStarted, "the renewal request reaches the broker");
     timing.planned[0]!.callback();
     expect(renewRequests).toBe(1);
     expect(readFileSync(credential, "utf8")).toBe(before);
@@ -167,7 +169,7 @@ describe("ApprovalRuntime token renewal", () => {
     const timing = clock();
     const errors: string[] = [];
     onDeckError((_scope, text) => errors.push(text));
-    globalThis.fetch = (async (input, init) => {
+    globalThis.fetch = withOperatorTrustBroker((async (input, init) => {
       const path = new URL(String(input)).pathname;
       const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
       if (path === "/approval/token-mint" && body.renew_only === true) {
@@ -181,7 +183,7 @@ describe("ApprovalRuntime token renewal", () => {
         });
       }
       return response({ revoked: 1 });
-    }) as typeof fetch;
+    }) as typeof fetch);
     const instance = runtime(stateDir(), "retry", timing);
 
     expect(await instance.arm()).toBe(true);
@@ -203,7 +205,7 @@ describe("ApprovalRuntime token renewal", () => {
   test("a renewal retry stops at expiry and keeps the same session public key", async () => {
     const timing = clock();
     const renewalPublicKeys: unknown[] = [];
-    globalThis.fetch = (async (input, init) => {
+    globalThis.fetch = withOperatorTrustBroker((async (input, init) => {
       const path = new URL(String(input)).pathname;
       const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
       if (path === "/approval/token-mint" && body.renew_only === true) {
@@ -218,7 +220,7 @@ describe("ApprovalRuntime token renewal", () => {
         });
       }
       return response({ revoked: 1 });
-    }) as typeof fetch;
+    }) as typeof fetch);
     const instance = runtime(stateDir(), "expired-retry", timing);
 
     expect(await instance.arm()).toBe(true);
@@ -242,7 +244,7 @@ describe("ApprovalRuntime token renewal", () => {
     const timing = clock();
     let currentProjectKey = projectKey;
     const renewalProjectKeys: unknown[] = [];
-    globalThis.fetch = (async (input, init) => {
+    globalThis.fetch = withOperatorTrustBroker((async (input, init) => {
       const path = new URL(String(input)).pathname;
       const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
       if (path === "/approval/token-mint" && body.renew_only === true) {
@@ -261,7 +263,7 @@ describe("ApprovalRuntime token renewal", () => {
         });
       }
       return response({ revoked: 1 });
-    }) as typeof fetch;
+    }) as typeof fetch);
     const instance = runtime(stateDir(), "frozen-project", timing, () => currentProjectKey);
 
     expect(await instance.arm()).toBe(true);
@@ -277,11 +279,11 @@ describe("ApprovalRuntime token renewal", () => {
     const errors: string[] = [];
     onDeckError((_scope, text) => errors.push(text));
     for (const [index, expiresAt] of [undefined, 7, "not-an-iso-date", "2030-01-02T00:00:00Z", "2029-12-31T23:59:59.999Z"].entries()) {
-      globalThis.fetch = (async (_input) => response({
+      globalThis.fetch = withOperatorTrustBroker((async (_input) => response({
         token_id: "token-invalid-initial-expiry",
         expires_at: expiresAt,
         capabilities: { renew_only: true }
-      })) as typeof fetch;
+      })) as typeof fetch);
       const instance = runtime(stateDir(), `invalid-initial-${index}`, timing);
 
       expect(await instance.arm()).toBe(true);
@@ -300,7 +302,7 @@ describe("ApprovalRuntime token renewal", () => {
     const timing = clock();
     const errors: string[] = [];
     onDeckError((_scope, text) => errors.push(text));
-    globalThis.fetch = (async (input, init) => {
+    globalThis.fetch = withOperatorTrustBroker((async (input, init) => {
       const path = new URL(String(input)).pathname;
       const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
       if (path === "/approval/token-mint" && body.renew_only === true) {
@@ -314,7 +316,7 @@ describe("ApprovalRuntime token renewal", () => {
         });
       }
       return response({ revoked: 1 });
-    }) as typeof fetch;
+    }) as typeof fetch);
     const instance = runtime(stateDir(), "invalid-renewal-expiry", timing);
 
     expect(await instance.arm()).toBe(true);
@@ -336,7 +338,7 @@ describe("ApprovalRuntime token renewal", () => {
     const renewalResponse = new Promise<Response>((resolve) => {
       resolveRenewal = resolve;
     });
-    globalThis.fetch = (async (input, init) => {
+    globalThis.fetch = withOperatorTrustBroker((async (input, init) => {
       const path = new URL(String(input)).pathname;
       const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
       if (path === "/approval/token-mint" && body.renew_only === true) {
@@ -359,7 +361,7 @@ describe("ApprovalRuntime token renewal", () => {
         });
       }
       return response({ revoked: 1 });
-    }) as typeof fetch;
+    }) as typeof fetch);
     const dir = stateDir();
     const instance = runtime(dir, "rearm", timing);
 
@@ -367,14 +369,14 @@ describe("ApprovalRuntime token renewal", () => {
     expect(timing.planned).toHaveLength(1);
     const staleTimer = timing.planned[0]!;
     staleTimer.callback();
-    await renewalStarted;
+    await reachedWithin(renewalStarted, "the renewal request reaches the broker");
     const disarming = instance.disarm();
     resolveRenewal(response({
       token_id: "token-rearmed",
       expires_at: "2030-01-03T00:00:00.000Z",
       capabilities: { renew_only: true }
     }));
-    await disarming;
+    await reachedWithin(disarming, "disarm settles once the in-flight renewal resolves");
     expect(timing.planned).toHaveLength(1);
 
     expect(await instance.arm()).toBe(true);
@@ -395,7 +397,7 @@ describe("ApprovalRuntime token renewal", () => {
     const renewalStarted = new Promise<void>((resolve) => {
       signalRenewalStarted = resolve;
     });
-    globalThis.fetch = (async (input, init) => {
+    globalThis.fetch = withOperatorTrustBroker((async (input, init) => {
       const path = new URL(String(input)).pathname;
       const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
       if (path === "/approval/token-mint" && body.renew_only === true) {
@@ -419,13 +421,13 @@ describe("ApprovalRuntime token renewal", () => {
         });
       }
       return response({ revoked: 1 });
-    }) as typeof fetch;
+    }) as typeof fetch);
     const dir = stateDir();
     const instance = runtime(dir, "hung-renewal", timing);
 
     expect(await instance.arm()).toBe(true);
     timing.planned[0]!.callback();
-    await renewalStarted;
+    await reachedWithin(renewalStarted, "the renewal request reaches the broker");
     await Promise.race([
       instance.disarm(),
       new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error("disarm timed out")), 50))

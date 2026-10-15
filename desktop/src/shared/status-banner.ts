@@ -7,15 +7,26 @@
 // No React, no electron, no @shared alias: importable by a relative path from
 // bun test.
 
-import type { RoadmapSyncOfflineReason, RoadmapSyncStatus } from './types'
+import type { OperatorTrustState, RoadmapSyncOfflineReason, RoadmapSyncStatus } from './types'
 
-export type StatusBannerKind = 'broker-down' | 'conflicts' | 'refused' | 'replica-offline'
+export type StatusBannerKind =
+  | 'broker-down'
+  | 'operator-unconfigured'
+  | 'operator-not-trusted'
+  | 'operator-incompatible'
+  | 'operator-identity-unreadable'
+  | 'operator-invalid'
+  | 'operator-unreachable'
+  | 'conflicts'
+  | 'refused'
+  | 'replica-offline'
 
 export interface StatusBannerInput {
   /** Reachability of the LOCAL broker; null until the first poll answers. */
   brokerUp: boolean | null
   /** The operator hid the banner of the outage currently open. */
   brokerDismissed: boolean
+  operatorTrust: OperatorTrustState
   /**
    * Conflicts of THIS project -- the same count as the Roadmap rail badge,
    * never `status.conflicts`, which the broker computes across every project.
@@ -27,17 +38,11 @@ export interface StatusBannerInput {
 /**
  * The ladder, most blocking first:
  *
- * 1. the local broker is unreachable -- nothing else can be acted on, and the
- *    operator's dismissal of THAT outage silences the whole strip (the rail
- *    keeps its red dot): a conflict cannot be arbitrated through a broker that
- *    does not answer, so promoting a lower banner here would offer an action
- *    that is guaranteed to fail;
- * 2. cards await arbitration -- the only state carrying an operator ACTION,
- *    and the one that appears exactly when the offline banner disappears;
- * 3. the upstream refused pushes -- the link is up, the changes are not
- *    leaving, and no button can fix it;
- * 4. the upstream is unreachable -- work continues locally, only the sharing
- *    is paused.
+ * 1. the local broker is unreachable;
+ * 2. cards await arbitration;
+ * 3. the upstream refused pushes;
+ * 4. operator trust is degraded, so privileged actions remain unavailable;
+ * 5. the upstream is unreachable.
  */
 export function bannerKind(input: StatusBannerInput): StatusBannerKind | null {
   if (input.brokerUp === false) return input.brokerDismissed ? null : 'broker-down'
@@ -46,6 +51,12 @@ export function bannerKind(input: StatusBannerInput): StatusBannerKind | null {
   // broker that never reported one, and a refusal counter without a link state
   // must not be read as a healthy link.
   if (input.status.online === true && (input.status.refused ?? 0) > 0) return 'refused'
+  if (input.operatorTrust === 'unconfigured') return 'operator-unconfigured'
+  if (input.operatorTrust === 'not-trusted') return 'operator-not-trusted'
+  if (input.operatorTrust === 'incompatible') return 'operator-incompatible'
+  if (input.operatorTrust === 'identity-unreadable') return 'operator-identity-unreadable'
+  if (input.operatorTrust === 'invalid') return 'operator-invalid'
+  if (input.operatorTrust === 'unreachable') return 'operator-unreachable'
   if (input.status.mode === 'replica' && input.status.online === false) return 'replica-offline'
   return null
 }

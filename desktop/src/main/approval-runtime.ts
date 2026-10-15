@@ -10,8 +10,15 @@ import { existsSync, mkdirSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { generateCredential, deriveTokenId } from './approval-auth'
 import { writeFileAtomic } from './atomic-write'
-import { loadOperatorIdentity, createOperatorIdentity, type OperatorIdentity } from './operator-identity'
-import { mintSessionToken, renewSessionToken, revokeSessionToken, type ApprovalDeps } from './approval-service'
+import { ensureOperatorIdentity, type OperatorIdentity } from './operator-identity'
+import {
+  checkOperatorTrust,
+  mintSessionToken,
+  renewSessionToken,
+  revokeSessionToken,
+  type ApprovalDeps,
+  type OperatorTrustStatus
+} from './approval-service'
 import { teamLeadInstanceToken } from './team-lead-mcp-sweep'
 import type { SecretCipher } from './scope-secrets'
 import type { BrokerEndpoint } from './broker-client'
@@ -36,12 +43,14 @@ export interface ApprovalRuntimeOptions {
   now?: () => number
   setTimeout?: (callback: () => void, delayMs: number) => unknown
   clearTimeout?: (timer: unknown) => void
+  onTrustStatus?: (status: OperatorTrustStatus | 'identity-unreadable', publicKey?: string) => void
 }
 
 export class ApprovalRuntime {
   private identity: OperatorIdentity | null = null
   private credPath: string | null = null
   private tokenId: string | null = null
+  private tokenDeps: ApprovalDeps | null = null
   private armed = false
   private generation = 0
   private closed = false
@@ -101,10 +110,11 @@ export class ApprovalRuntime {
   private async revokeStoredToken(): Promise<boolean> {
     const tokenId = this.tokenId
     if (!tokenId) return true
-    const deps = this.deps()!
+    const deps = this.tokenDeps!
     try {
       await revokeSessionToken(deps, tokenId)
       this.tokenId = null
+      this.tokenDeps = null
       return true
     } catch (e) {
       reportError('approvals', 'could not revoke the session credential', e)
@@ -227,40 +237,44 @@ export class ApprovalRuntime {
 
     try {
       if (!existsSync(this.opts.stateDir)) mkdirSync(this.opts.stateDir, { recursive: true })
-      // loadOperatorIdentity returning null does not by itself mean corruption:
-      // a locked or unavailable OS keychain produces the same null.
-      // Only regenerate the identity when cipher.isAvailable() confirms the
-      // cipher itself is working; otherwise leave the identity untouched and
-      // let a later arm() retry.
-      let identity = loadOperatorIdentity(this.opts.stateDir, this.opts.cipher)
-      if (!identity) {
-        if (!this.opts.cipher.isAvailable()) {
-          reportError(
-            'approvals',
-            'operator identity unreadable because the keychain is unavailable right now — remote approvals stay off until it returns (not regenerating: that would destroy the real identity and orphan pending approvals / phone pairings under the old operator id)'
-          )
-          return false
-        }
-        reportError(
-          'approvals',
-          'operator identity was unreadable — regenerating (this machine will re-enrol under a new operator id; the old identity file is kept as a .bak, never deleted)'
-        )
-        identity = createOperatorIdentity(this.opts.stateDir, this.opts.cipher, generateCredential())
+      const identityResult = ensureOperatorIdentity(this.opts.stateDir, this.opts.cipher)
+      if (identityResult.state !== 'ready') {
+        this.identity = null
+        this.opts.onTrustStatus?.('identity-unreadable')
+        reportError('approvals', 'operator identity is unavailable; remote approvals stay off')
+        return false
+      }
+      const identity = identityResult.identity
+
+      const projectKey = this.safeProjectKey()
+      const deps: ApprovalDeps = { endpoint: this.opts.endpoint(), identity, projectKey }
+      let trust: OperatorTrustStatus
+      try {
+        trust = await checkOperatorTrust(deps)
+      } catch (e) {
+        this.identity = null
+        this.opts.onTrustStatus?.('unreachable')
+        throw e
+      }
+      this.opts.onTrustStatus?.(trust, trust === 'not-trusted' ? identity.publicKey : undefined)
+      if (trust !== 'compatible') {
+        this.identity = null
+        return false
       }
       this.identity = identity
 
       const cred = generateCredential()
-      const projectKey = this.safeProjectKey()
       const sessionRef = `window-${this.opts.runId}`
       const tokenId = deriveTokenId(cred.publicKey)
-      const deps: ApprovalDeps = { endpoint: this.opts.endpoint(), identity, projectKey }
       const minted = await mintSessionToken(deps, {
         sessionPublicKey: cred.publicKey,
         sessionRef
       })
       this.tokenId = tokenId
+      this.tokenDeps = deps
       if (!this.isCurrentArm(generation)) {
         await this.revokeStoredToken()
+        this.identity = null
         return false
       }
 
@@ -299,6 +313,7 @@ export class ApprovalRuntime {
       // simply without remote approvals.
       reportError('approvals', 'could not arm remote approvals', e)
       await this.revokeStoredToken()
+      this.identity = null
       return false
     }
   }
@@ -339,6 +354,7 @@ export class ApprovalRuntime {
       }
     }
     await this.revokeStoredToken()
+    this.identity = null
   }
 }
 

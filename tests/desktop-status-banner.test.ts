@@ -1,8 +1,4 @@
-// The banner strip is a single fixed bar over four overlapping states, so the
-// PRIORITY between them is the whole behaviour: the moment a replica's upstream
-// comes back, the offline state clears and the conflicts it produced appear, in
-// the same broadcast. Before this, the only banner was the offline one, so the
-// reconnection read as "everything is fine" exactly when arbitration was due.
+// The banner strip renders one state, so its priority must preserve the operator's next action.
 
 import { expect, test } from "bun:test";
 import { bannerKind, replicaOfflineTextKey } from "../desktop/src/shared/status-banner.ts";
@@ -10,8 +6,10 @@ import type { RoadmapSyncStatus } from "../desktop/src/shared/types.ts";
 
 const LOCAL: RoadmapSyncStatus = { mode: "local" };
 
-function input(over: Partial<Parameters<typeof bannerKind>[0]> = {}) {
-  return { brokerUp: true, brokerDismissed: false, conflicts: 0, status: LOCAL, ...over };
+function input(
+  over: Partial<Parameters<typeof bannerKind>[0]> = {}
+): Parameters<typeof bannerKind>[0] {
+  return { brokerUp: true, brokerDismissed: false, operatorTrust: "compatible", conflicts: 0, status: LOCAL, ...over };
 }
 
 // ----- nothing to say -----
@@ -34,6 +32,30 @@ test("a replica whose upstream is online and clean raises no banner", () => {
 
 test("the local broker being down raises the outage banner", () => {
   expect(bannerKind(input({ brokerUp: false }))).toBe("broker-down");
+});
+
+test("an unconfigured broker raises the operator trust banner", () => {
+  expect(bannerKind(input({ operatorTrust: "unconfigured" }))).toBe("operator-unconfigured");
+});
+
+test("an untrusted operator raises the operator trust banner", () => {
+  expect(bannerKind(input({ operatorTrust: "not-trusted" }))).toBe("operator-not-trusted");
+});
+
+test("an incompatible broker raises the operator trust banner", () => {
+  expect(bannerKind(input({ operatorTrust: "incompatible" }))).toBe("operator-incompatible");
+});
+
+test("an unreadable identity raises the operator trust banner", () => {
+  expect(bannerKind(input({ operatorTrust: "identity-unreadable" }))).toBe("operator-identity-unreadable");
+});
+
+test("an invalid trust policy raises the operator trust banner", () => {
+  expect(bannerKind(input({ operatorTrust: "invalid" }))).toBe("operator-invalid");
+});
+
+test("an unreachable trust broker raises the operator trust banner", () => {
+  expect(bannerKind(input({ operatorTrust: "unreachable" }))).toBe("operator-unreachable");
 });
 
 test("conflicts of this project raise the arbitration banner", () => {
@@ -64,6 +86,29 @@ test("the outage outranks conflicts, refusals and the offline state at once", ()
       })
     )
   ).toBe("broker-down");
+});
+
+test("conflicts outrank operator trust, refusals and the offline state", () => {
+  expect(
+    bannerKind(
+      input({
+        operatorTrust: "not-trusted",
+        conflicts: 5,
+        status: { mode: "replica", online: false, refused: 2 },
+      })
+    )
+  ).toBe("conflicts");
+});
+
+test("refusals outrank operator trust while the link is up", () => {
+  expect(
+    bannerKind(
+      input({
+        operatorTrust: "not-trusted",
+        status: { mode: "replica", online: true, refused: 2 },
+      })
+    )
+  ).toBe("refused");
 });
 
 test("conflicts outrank refusals and the offline state", () => {

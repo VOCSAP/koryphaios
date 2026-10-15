@@ -5,6 +5,7 @@ import type {
   TtsrTestOptions,
   BrokerStatusEvent,
   CreateSessionInput,
+  OperatorTrustStatusEvent,
   DeckApi,
   DeckView,
   DesignPickEvent,
@@ -100,6 +101,7 @@ const api: DeckApi = {
 
   getBrokerStatus: () => ipcRenderer.invoke('broker:status'),
   retryBroker: () => ipcRenderer.invoke('broker:retry'),
+  getOperatorTrustStatus: () => ipcRenderer.invoke('operator-trust:status'),
 
   ptyInput: (id: string, data: string) => ipcRenderer.send('pty:input', id, data),
   ptyResize: (id: string, cols: number, rows: number) =>
@@ -300,7 +302,9 @@ const api: DeckApi = {
   onMenuImportTemplate: (cb: () => void) => subscribe('menu:import-template', () => cb()),
   onWorkspaceCurrent: (cb: (ws: WorkspaceSummary | null) => void) =>
     subscribe('workspace:current', cb),
-  onBrokerStatus: (cb: (status: BrokerStatusEvent) => void) => subscribe('broker:status', cb)
+  onBrokerStatus: (cb: (status: BrokerStatusEvent) => void) => subscribe('broker:status', cb),
+  onOperatorTrustStatus: (cb: (status: OperatorTrustStatusEvent) => void) =>
+    subscribe('operator-trust:status', cb)
 }
 
 contextBridge.exposeInMainWorld('api', api)

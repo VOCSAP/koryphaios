@@ -13,7 +13,8 @@ import {
   screen,
   shell
 } from 'electron'
-import type { AppConfig } from '@shared/types'
+import { publicKeyFingerprint } from '../../../shared/operator-trust'
+import type { AppConfig, OperatorTrustStatusEvent } from '@shared/types'
 import { sanitizeGlowColor } from '@shared/palette'
 import { loadConfig, saveConfig } from './store'
 import { buildAppMenu } from './menu'
@@ -215,13 +216,8 @@ import {
 } from './approval-service'
 import { createPendingApprovalsTick } from './hook-attention'
 import { matchPermissionDialog, permissionDialogShown } from './permission-dialog'
-import {
-  applyEnrolment,
-  createOperatorIdentity,
-  exportEnrolment,
-  loadOperatorIdentity
-} from './operator-identity'
-import { buildAuthProof, generateCredential, type Approval } from './approval-auth'
+import { applyEnrolment, ensureOperatorIdentity, exportEnrolment } from './operator-identity'
+import { buildAuthProof, type Approval } from './approval-auth'
 import { addEventSink, broadcast, regHandle } from './api-registry'
 import { CompanionServer } from './companion-server'
 import {
@@ -587,13 +583,28 @@ const applyClodexAutoStart = async (enabled: boolean): Promise<void> => {
 }
 
 const approvalRunId = randomUUID()
+let operatorTrustStatus: OperatorTrustStatusEvent = { state: 'unknown' }
+function setOperatorTrustStatus(state: OperatorTrustStatusEvent['state'], publicKey?: string): void {
+  if (state === 'not-trusted' && publicKey) {
+    try {
+      operatorTrustStatus = { state, fingerprint: publicKeyFingerprint(publicKey) }
+    } catch (err) {
+      reportError('approvals', 'could not fingerprint untrusted operator identity', err)
+      operatorTrustStatus = { state }
+    }
+  } else {
+    operatorTrustStatus = { state }
+  }
+  broadcast('operator-trust:status', operatorTrustStatus)
+}
 const approvals = new ApprovalRuntime({
   stateDir: join(app.getPath('userData'), APP_STATE_SUBDIR),
   cipher: secretCipher,
   endpoint: () => resolveBrokerEndpoint(),
   runId: approvalRunId,
   host: hostname(),
-  projectKey: () => computeDeckProjectKey(cliContext.projectDir)
+  projectKey: () => computeDeckProjectKey(cliContext.projectDir),
+  onTrustStatus: setOperatorTrustStatus
 })
 const permissionLeases = new PermissionLeaseRuntime({
   stateDir: join(app.getPath('userData'), APP_STATE_SUBDIR),
@@ -601,24 +612,12 @@ const permissionLeases = new PermissionLeaseRuntime({
   reportError: (message, error) => reportError('permission-lease', message, error)
 })
 
-// configureRoadmapSigner's loader runs lazily on the first write, not at boot,
-// and deliberately does not read identity from ApprovalRuntime, so roadmap
-// signing keeps working when arm() never runs or fails for an unrelated reason.
-// A machine with no identity file yet mints one on that first signature;
-// operator_id is the digest of the public key, so the credential self-certifies
-// with no separate enrolment step.
-// Known gap (card be4ae042): unlike arm(), this loader has no
-// cipher.isAvailable() guard, so it can swap the live identity even while the
-// cipher is unavailable.
 configureRoadmapSigner(() => {
   const stateDir = join(app.getPath('userData'), APP_STATE_SUBDIR)
-  const identity =
-    loadOperatorIdentity(stateDir, secretCipher) ??
-    createOperatorIdentity(stateDir, secretCipher, generateCredential())
+  const identityResult = ensureOperatorIdentity(stateDir, secretCipher)
+  if (identityResult.state !== 'ready') return null
+  const identity = identityResult.identity
   return (payload) => {
-    // public_key travels WITH the payload and is therefore covered by the
-    // signature: on first contact the broker has no row for this operator, and
-    // operator_id is the digest of that key, so the pair self-certifies.
     const signed = { ...payload, public_key: identity.publicKey }
     return {
       public_key: identity.publicKey,
@@ -3485,6 +3484,7 @@ app.whenReady().then(async () => {
     getWorktreeInit,
     resolveTemplateInputs,
     brokerStatus: () => brokerHealth.status,
+    operatorTrustStatus: () => operatorTrustStatus,
     brokerRetry: () => {
       void pollOperatorInbox()
       void pollGraphDrafts()

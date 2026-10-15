@@ -13,7 +13,7 @@ afterAll(async () => {
 
 import { afterAll, afterEach, beforeEach, expect, mock, test } from "bun:test";
 import type { Root } from "../desktop/tests-support/react-test-harness"; // type-only: erased, no runtime resolution
-import type { RoadmapItem, RoadmapQuery, RoadmapSyncStatus } from "../desktop/src/shared/types.ts";
+import type { OperatorTrustStatusEvent, RoadmapItem, RoadmapQuery, RoadmapSyncStatus } from "../desktop/src/shared/types.ts";
 import { mockStore, storeMockStubs } from "./_store-mock";
 import * as sharedWorkflow from "../desktop/src/shared/workflow.ts";
 import * as sharedTypes from "../desktop/src/shared/types.ts";
@@ -50,6 +50,7 @@ interface FakeState {
   sessions: unknown[];
   brokerStatus: { up: boolean; since: number; lastError: string | null };
   offlineBannerDismissed: number | null;
+  operatorTrustStatus: OperatorTrustStatusEvent;
   dismissOfflineBanner: () => void;
   roadmapSync: { status: RoadmapSyncStatus; conflicts: Array<{ local: { id: string } }> };
   showToast: () => boolean;
@@ -72,6 +73,7 @@ function initialFakeState(): FakeState {
     sessions: [],
     brokerStatus: { up: true, since: 0, lastError: null },
     offlineBannerDismissed: null,
+    operatorTrustStatus: { state: "unknown" },
     dismissOfflineBanner: () => {},
     roadmapSync: { status: { mode: "local" }, conflicts: [] },
     showToast: () => true,

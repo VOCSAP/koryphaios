@@ -31,6 +31,38 @@ export interface BrokerEndpoint {
   token: string | null
 }
 
+export const OPERATOR_TRUST_PROTOCOL_VERSION = 1
+
+export type BrokerOperatorTrustState = 'ready' | 'unconfigured' | 'invalid'
+
+export interface BrokerOperatorTrustHealth {
+  protocolVersion: number
+  state: BrokerOperatorTrustState
+}
+
+export function parseOperatorTrustHealth(value: unknown): BrokerOperatorTrustHealth | null {
+  if (!value || typeof value !== 'object') return null
+  const health = value as { operator_trust_version?: unknown; operator_trust_state?: unknown }
+  if (typeof health.operator_trust_version !== 'number') return null
+  if (
+    health.operator_trust_state !== 'ready' &&
+    health.operator_trust_state !== 'unconfigured' &&
+    health.operator_trust_state !== 'invalid'
+  ) {
+    return null
+  }
+  return { protocolVersion: health.operator_trust_version, state: health.operator_trust_state }
+}
+
+export async function fetchOperatorTrustHealth(
+  endpoint: BrokerEndpoint,
+  fetchImpl: typeof fetch = fetch
+): Promise<BrokerOperatorTrustHealth | null> {
+  const res = await fetchImpl(`${endpoint.url}/health`, { signal: AbortSignal.timeout(2000) })
+  if (!res.ok) return null
+  return parseOperatorTrustHealth(await res.json())
+}
+
 /**
  * The three deployment shapes, declared once in the renderer-facing types and
  * re-exported here: the Settings panel and this resolver must not each carry

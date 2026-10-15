@@ -5,6 +5,7 @@ import type {
   AppConfig,
   BrokerStatusEvent,
   CreateSessionInput,
+  OperatorTrustStatusEvent,
   DeckGraphDraft,
   DeckView,
   HelpSelection,
@@ -211,6 +212,7 @@ interface DeckState {
   initError: string | null
   /** Broker reachability (PLAN O5): null until main reports, drives the banner. */
   brokerStatus: BrokerStatusEvent | null
+  operatorTrustStatus: OperatorTrustStatusEvent
   /**
    * `since` of the outage whose banner the user dismissed. The banner hides
    * for THAT outage only (a new outage has a new `since`, so it reappears);
@@ -570,6 +572,7 @@ export const useDeck = create<DeckState>((set, get) => ({
   recordingSince: null,
   initError: null,
   brokerStatus: null,
+  operatorTrustStatus: { state: 'unknown' },
   offlineBannerDismissed: null,
   remote: false,
   mobile: false,
@@ -600,6 +603,7 @@ export const useDeck = create<DeckState>((set, get) => ({
       onRemoteRefresh(() => {
         void window.api.listSessions().then((sessions) => set({ sessions }))
         void window.api.getBrokerStatus().then((status) => set({ brokerStatus: status }))
+        void window.api.getOperatorTrustStatus().then((status) => set({ operatorTrustStatus: status }))
       })
     }
     let sessions: SessionRuntime[]
@@ -764,6 +768,7 @@ export const useDeck = create<DeckState>((set, get) => ({
     // Broker reachability (PLAN O5): transitions pushed by main + the current
     // state fetched once (covers a reloaded renderer during an outage).
     window.api.onBrokerStatus((status) => set({ brokerStatus: status }))
+    window.api.onOperatorTrustStatus((status) => set({ operatorTrustStatus: status }))
     window.api.onSandboxChanged((sandboxStatus) => set({ sandboxStatus }))
     // One hydration at boot so the rail glyph is truthful before the Docker
     // view has ever been opened. Best-effort: a failure here must not break
@@ -773,6 +778,7 @@ export const useDeck = create<DeckState>((set, get) => ({
       .then((sandboxStatus) => set({ sandboxStatus }))
       .catch(() => {})
     void window.api.getBrokerStatus().then((status) => set({ brokerStatus: status }))
+    void window.api.getOperatorTrustStatus().then((status) => set({ operatorTrustStatus: status }))
     // Companion server status (PLAN MB2): rail glyph glow while it runs. A
     // remote client is 'remote-blocked' on the status invoke — the event push
     // still keeps its flag honest (harmlessly unused there).

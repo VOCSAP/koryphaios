@@ -14,7 +14,7 @@ import { afterAll, afterEach, beforeEach, expect, mock, test } from "bun:test";
 import type { Root } from "../desktop/tests-support/react-test-harness"; // type-only: erased, no runtime resolution
 import { mockStore, storeMockStubs } from "./_store-mock";
 import { bannerKind, replicaOfflineTextKey } from "../desktop/src/shared/status-banner.ts";
-import type { RoadmapSyncStatus } from "../desktop/src/shared/types.ts";
+import type { OperatorTrustStatusEvent, RoadmapSyncStatus } from "../desktop/src/shared/types.ts";
 
 afterAll(async () => {
   await GlobalRegistrator.unregister();
@@ -25,6 +25,7 @@ const { act, React, createRoot, create } = await import("../desktop/tests-suppor
 interface FakeDeckState {
   dict: Record<string, string>;
   brokerStatus: { up: boolean; since: number; lastError: string | null } | null;
+  operatorTrustStatus: OperatorTrustStatusEvent;
   offlineBannerDismissed: number | null;
   dismissOfflineBanner(): void;
   roadmapSync: { status: RoadmapSyncStatus; conflicts: unknown[] };
@@ -39,6 +40,7 @@ function initialFakeState(): FakeDeckState {
     // the assertions below match on the literal key strings.
     dict: {},
     brokerStatus: { up: true, since: 0, lastError: null },
+    operatorTrustStatus: { state: "compatible" },
     offlineBannerDismissed: null,
     dismissOfflineBanner: () => {},
     roadmapSync: { status: { mode: "local" }, conflicts: [] },
@@ -90,6 +92,41 @@ function mountBanner(): void {
 function replicaOffline(overrides: Partial<RoadmapSyncStatus> = {}): RoadmapSyncStatus {
   return { mode: "replica", online: false, pending_push: 3, last_error: null, ...overrides };
 }
+
+test.each([
+  ["unconfigured", "banner.operatorUnconfigured"],
+  ["not-trusted", "banner.operatorNotTrusted"],
+  ["incompatible", "banner.operatorIncompatible"],
+  ["identity-unreadable", "banner.operatorIdentityUnreadable"],
+  ["invalid", "banner.operatorInvalid"],
+  ["unreachable", "banner.operatorUnreachable"],
+] as const)("operator trust state %s renders its dedicated banner", (state, textKey) => {
+  fakeUseDeck.setState({ operatorTrustStatus: { state } });
+  mountBanner();
+  expect(container.textContent).toContain(textKey);
+});
+
+test("an untrusted operator shows its full fingerprint in the detail title", () => {
+  const fingerprint = "b".repeat(64);
+  fakeUseDeck.setState({
+    dict: {
+      "banner.operatorNotTrusted": "Run bun cli.ts operator-trust export and update runbooks/operator-trust.md",
+    },
+    operatorTrustStatus: { state: "not-trusted", fingerprint },
+  });
+  mountBanner();
+
+  const detail = container.querySelector(".status-banner-detail");
+  expect(detail?.textContent).toContain(fingerprint);
+  expect(detail?.getAttribute("title")).toBe(fingerprint);
+  expect(container.textContent).toContain("bun cli.ts operator-trust export");
+});
+
+test("an unconfigured trust policy uses the neutral information tone", () => {
+  fakeUseDeck.setState({ operatorTrustStatus: { state: "unconfigured" } });
+  mountBanner();
+  expect(container.querySelector(".status-banner")?.className).toContain("status-banner-info");
+});
 
 test("a transport failure (no reason, or 'transport') renders the original wording", () => {
   fakeUseDeck.setState({ roadmapSync: { status: replicaOffline({ offline_reason: "transport" }), conflicts: [] } });

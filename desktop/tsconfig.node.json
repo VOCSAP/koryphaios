@@ -32,6 +32,7 @@
     "src/shared/**/*.ts",
     "electron.vite.config.ts",
     "../shared/approval.ts",
+    "../shared/operator-trust.ts",
     "../shared/text.ts",
     "../shared/context-timing.ts",
     "../shared/types.ts",
