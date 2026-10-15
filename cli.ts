@@ -7,11 +7,13 @@
  * for routing, which only a registered MCP peer holds.
  */
 
-import { loadConfig, brokerUrl } from "./shared/config.ts";
+import { loadConfig, brokerUrl, operatorTrustFilePath } from "./shared/config.ts";
 import type { Peer, GroupStatsResponse, RoadmapUpsertResponse } from "./shared/types.ts";
 import { computeProjectKey } from "./shared/summarize.ts";
 import { resolveProjectKey } from "./shared/project-key.ts";
-import { closeSync, constants as fsConstants, fstatSync, openSync, readSync } from "node:fs";
+import { closeSync, constants as fsConstants, fstatSync, mkdirSync, openSync, readFileSync, readSync, writeSync } from "node:fs";
+import { homedir } from "node:os";
+import { dirname, join } from "node:path";
 import {
   CONTEXT_DEPOSIT_MAX_INPUT_BYTES,
   DEPOSIT_CAPABILITY_ENV,
@@ -21,6 +23,12 @@ import {
   type ContextDepositRefusal,
   type ContextDepositResponse,
 } from "./shared/context-buffer.ts";
+import {
+  OPERATOR_TRUST_VERSION,
+  parseOperatorTrust,
+  publicKeyFingerprint,
+} from "./shared/operator-trust.ts";
+import { deriveOperatorId } from "./shared/approval.ts";
 
 const config = await loadConfig();
 const BROKER_URL = brokerUrl(config);
@@ -252,6 +260,142 @@ async function contextDeposit(args: string[]): Promise<void> {
   console.log(`head_at_deposit: ${stored.head_at_deposit ?? "none"}  branch: ${stored.branch ?? "none"}`);
   console.log("kept: memory of the broker only; dropped when this session disconnects or relaunches; never written to disk");
   console.log("next: give this deposit_id to the lead. Do not run /clear yourself.");
+}
+
+const OPERATOR_TRUST_USAGE = `Usage:
+  bun cli.ts operator-trust export [--identity <operator.json>]
+  bun cli.ts operator-trust init --public-key <base64-spki> [--label <label>]
+  bun cli.ts operator-trust validate [--input <prepared-policy.json>]
+  bun cli.ts operator-trust fingerprints`;
+
+type OperatorTrustFlags = { identity?: string; publicKey?: string; label?: string; input?: string };
+
+function operatorTrustExit(code: number, message: string): never {
+  console.error(`operator-trust: ${message}`);
+  process.exit(code);
+}
+
+function parseOperatorTrustFlags(args: string[], allowed: readonly (keyof OperatorTrustFlags)[]): OperatorTrustFlags {
+  const flags: OperatorTrustFlags = {};
+  for (let index = 0; index < args.length; index += 2) {
+    const flag = args[index];
+    const value = args[index + 1];
+    if (value === undefined) operatorTrustExit(2, OPERATOR_TRUST_USAGE);
+    const key = flag === "--identity" ? "identity" : flag === "--public-key" ? "publicKey" : flag === "--label" ? "label" : flag === "--input" ? "input" : null;
+    if (key === null || !allowed.includes(key) || flags[key] !== undefined) {
+      operatorTrustExit(2, OPERATOR_TRUST_USAGE);
+    }
+    flags[key] = value;
+  }
+  return flags;
+}
+
+function defaultDeckIdentityPath(): string {
+  if (process.platform === "win32") {
+    const appData = process.env.APPDATA ?? join(homedir(), "AppData", "Roaming");
+    return join(appData, "koryphaios", "config", "operator.json");
+  }
+  if (process.platform === "darwin") {
+    return join(homedir(), "Library", "Application Support", "koryphaios", "config", "operator.json");
+  }
+  const configDir = process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config");
+  return join(configDir, "koryphaios", "config", "operator.json");
+}
+
+function readDeckPublicKey(path: string): string {
+  try {
+    const value = JSON.parse(readFileSync(path, "utf-8"), (key, current) =>
+      key === "" || key === "publicKey" ? current : undefined
+    ) as { publicKey?: unknown };
+    if (typeof value.publicKey !== "string") {
+      operatorTrustExit(2, "identity file has no public key");
+    }
+    publicKeyFingerprint(value.publicKey);
+    return value.publicKey;
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith("operator-trust:")) throw error;
+    operatorTrustExit(2, "identity file has no usable Ed25519 public key");
+  }
+}
+
+function readOperatorTrust(path = operatorTrustFilePath()) {
+  try {
+    return parseOperatorTrust(readFileSync(path, "utf-8"));
+  } catch (error) {
+    operatorTrustExit(2, `cannot validate policy: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+function initializeOperatorTrust(publicKey: string, label: string | undefined): void {
+  const operator = label === undefined ? { public_key: publicKey } : { public_key: publicKey, label };
+  let policy: ReturnType<typeof parseOperatorTrust>;
+  try {
+    policy = parseOperatorTrust(JSON.stringify({ version: OPERATOR_TRUST_VERSION, operators: [operator] }));
+  } catch (error) {
+    operatorTrustExit(2, error instanceof Error ? error.message : String(error));
+  }
+
+  const path = operatorTrustFilePath();
+  mkdirSync(dirname(path), { recursive: true });
+  let fd: number;
+  try {
+    fd = openSync(path, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL, 0o600);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
+      operatorTrustExit(2, `cannot initialize policy: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    const existing = readOperatorTrust();
+    const operatorId = deriveOperatorId(publicKey);
+    const trusted = existing.trustedOperator(operatorId);
+    const detail = trusted?.publicKey === publicKey ? "requested key is already present" : "requested key differs from the existing policy";
+    operatorTrustExit(3, `policy already exists; ${detail}`);
+  }
+
+  try {
+    writeSync(fd, `${JSON.stringify({ version: OPERATOR_TRUST_VERSION, operators: [operator] }, null, 2)}\n`);
+  } finally {
+    closeSync(fd);
+  }
+  const trusted = policy.trustedOperator(deriveOperatorId(publicKey));
+  console.log("operator-trust: initialized");
+  console.log(`operator_id: ${trusted!.operatorId}`);
+  console.log(`fingerprint_sha256: ${publicKeyFingerprint(publicKey)}`);
+}
+
+function operatorTrust(args: string[]): void {
+  const command = args[0];
+  const flags = args.slice(1);
+  switch (command) {
+    case "export": {
+      const { identity } = parseOperatorTrustFlags(flags, ["identity"]);
+      const publicKey = readDeckPublicKey(identity ?? defaultDeckIdentityPath());
+      console.log(`operator_id: ${deriveOperatorId(publicKey)}`);
+      console.log(`public_key: ${publicKey}`);
+      console.log(`fingerprint_sha256: ${publicKeyFingerprint(publicKey)}`);
+      return;
+    }
+    case "init": {
+      const { publicKey, label } = parseOperatorTrustFlags(flags, ["publicKey", "label"]);
+      if (publicKey === undefined) operatorTrustExit(2, OPERATOR_TRUST_USAGE);
+      initializeOperatorTrust(publicKey, label);
+      return;
+    }
+    case "validate": {
+      const { input } = parseOperatorTrustFlags(flags, ["input"]);
+      const trust = readOperatorTrust(input);
+      console.log(`operator-trust: valid (${trust.trustedOperators().length} operator(s))`);
+      return;
+    }
+    case "fingerprints": {
+      if (flags.length !== 0) operatorTrustExit(2, OPERATOR_TRUST_USAGE);
+      for (const operator of readOperatorTrust().trustedOperators()) {
+        console.log(`${operator.operatorId}  ${publicKeyFingerprint(operator.publicKey)}${operator.label ? `  ${operator.label}` : ""}`);
+      }
+      return;
+    }
+    default:
+      operatorTrustExit(2, OPERATOR_TRUST_USAGE);
+  }
 }
 
 const cmd = process.argv[2];
@@ -496,6 +640,10 @@ switch (cmd) {
     await contextDeposit(flags);
     break;
 
+  case "operator-trust":
+    operatorTrust(flags);
+    break;
+
   default:
     console.log(`claude-peers CLI v0.4
 
@@ -515,6 +663,8 @@ Usage:
   bun cli.ts context-deposit --input <file|-> [--replace <deposit_id>]
                                           Deposit this session's context summary
                                           in the broker's memory (Kory launches)
+  bun cli.ts operator-trust <export|init|validate|fingerprints>
+                                          Administer the local static operator trust policy
 
 Note: 'send' is no longer available -- use the MCP send_message tool from
 within Claude Code (the broker requires a valid instance_token).

@@ -116,6 +116,10 @@ function settingsFilePath(): string {
   return join(homedir(), ".config", "claude-peers", "config.json");
 }
 
+export function operatorTrustFilePath(configPath = settingsFilePath()): string {
+  return join(dirname(configPath), "operator-trust.json");
+}
+
 // node:fs, not Bun.file: this module is bundled for node, where Bun is
 // undefined. Only the FF FE (UTF-16LE) BOM is sniffed, matching the one
 // non-UTF-8 encoding Bun.file().json() itself decodes.
