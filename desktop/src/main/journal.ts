@@ -23,6 +23,22 @@ export type JournalEntrySink = (entry: JournalEntry) => void
 
 export const JOURNAL_CAP = 500
 
+const carriageReturn = String.fromCharCode(13)
+const lineFeed = String.fromCharCode(10)
+const journalLineBreaks = new RegExp(
+  `${carriageReturn}${lineFeed}|[${carriageReturn}${lineFeed}${String.fromCodePoint(0x2028)}${String.fromCodePoint(0x2029)}]`,
+  'g'
+)
+const journalControls = new RegExp(
+  `[${String.fromCharCode(0)}-${String.fromCharCode(0x1f)}${String.fromCharCode(0x7f)}-${String.fromCharCode(0x9f)}${String.fromCodePoint(0x061c)}${String.fromCodePoint(0x200b)}-${String.fromCodePoint(0x200f)}${String.fromCodePoint(0x202a)}-${String.fromCodePoint(0x202e)}${String.fromCodePoint(0x2060)}-${String.fromCodePoint(0x2069)}${String.fromCodePoint(0xfeff)}]`,
+  'g'
+)
+const replacement = String.fromCharCode(0xfffd)
+
+function journalSafe(text: string): string {
+  return text.replace(journalLineBreaks, ' / ').replace(journalControls, replacement)
+}
+
 export class Journal {
   private entries: JournalEntry[] = []
   private seq = 0
@@ -34,7 +50,7 @@ export class Journal {
   ) {}
 
   add(kind: JournalKind, text: string): JournalEntry {
-    const entry: JournalEntry = { id: ++this.seq, at: this.now(), kind, text: redactSecrets(text.slice(0, MAX_LOGGED_CHARS)) }
+    const entry: JournalEntry = { id: ++this.seq, at: this.now(), kind, text: journalSafe(redactSecrets(text.slice(0, MAX_LOGGED_CHARS))).slice(0, MAX_LOGGED_CHARS) }
     this.entries.push(entry)
     if (this.entries.length > this.cap) {
       this.entries.splice(0, this.entries.length - this.cap)

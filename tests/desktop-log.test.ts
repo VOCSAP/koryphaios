@@ -77,6 +77,22 @@ test("persistent journal writes each added entry to disk", () => {
   expect(readFileSync(join(dir, file!), "utf-8")).toContain("[quota] session limited");
 });
 
+test("persistent journal writes agent text as one physical line", () => {
+  const journal = createPersistentJournal({
+    dir,
+    now: fixedNow,
+    entryNow: () => fixedNow().getTime(),
+  });
+  const unsafe = `title${String.fromCharCode(13, 10)}forged${String.fromCodePoint(0x2028)}line`
+
+  journal.add("dispatch", unsafe);
+
+  const file = readdirSync(dir).find((entry) => entry.startsWith("journal-"));
+  const text = readFileSync(join(dir, file!), "utf-8");
+  expect(text.split("\n").filter(Boolean)).toHaveLength(1);
+  expect(text).toContain("[dispatch] title / forged / line");
+});
+
 test("journal writer rotates its run file and prunes expired runs", () => {
   const stale = join(dir, "journal-old.log");
   writeFileSync(stale, "old run\n");

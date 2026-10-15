@@ -1,4 +1,5 @@
 import { test, expect } from "bun:test";
+import { MAX_LOGGED_CHARS } from "../shared/log-redact.ts";
 import { Journal, JOURNAL_CAP, type JournalEntry } from "../desktop/src/main/journal.ts";
 
 test("add/list accumulate in order with monotonic ids and the injected clock", () => {
@@ -45,10 +46,54 @@ test("the ring buffer caps at the configured size, dropping the oldest", () => {
   expect(j.list()[0]!.id).toBe(4)
 })
 
-test("toText renders one ISO line per entry", () => {
-  const j = new Journal(10, () => Date.UTC(2026, 0, 2, 3, 4, 5))
-  j.add("announce", "hello team")
-  expect(j.toText()).toBe("2026-01-02T03:04:05.000Z  [announce]  hello team")
+test("every agent-controlled separator is neutralized before reaching a journal sink", () => {
+  const replacement = String.fromCharCode(0xfffd)
+  const carriageReturn = String.fromCharCode(13)
+  const lineFeed = String.fromCharCode(10)
+  const range = (from: number, to: number) => Array.from({ length: to - from + 1 }, (_, index) => String.fromCharCode(from + index))
+  const controls = [...range(0, 0x1f), ...range(0x7f, 0x9f)].filter((value) => value !== carriageReturn && value !== lineFeed)
+  const bidi = [
+    String.fromCharCode(0x061c),
+    ...range(0x200b, 0x200f),
+    ...range(0x202a, 0x202e),
+    ...range(0x2060, 0x2069),
+    String.fromCharCode(0xfeff),
+  ]
+  const cases: Array<readonly [string, string]> = [
+    [carriageReturn, " / "],
+    [lineFeed, " / "],
+    [carriageReturn + lineFeed, " / "],
+    [String.fromCharCode(0x2028), " / "],
+    [String.fromCharCode(0x2029), " / "],
+    ...controls.map((value) => [value, replacement] as const),
+    ...bidi.map((value) => [value, replacement] as const),
+  ]
+
+  for (const [unsafe, safe] of cases) {
+    const written: JournalEntry[] = []
+    const journal = new Journal(10, () => 0, (entry) => written.push(entry))
+    const entry = journal.add("announce", unsafe)
+
+    expect(entry.text).toBe(safe)
+    expect(written).toEqual([entry])
+  }
+})
+
+test("caps expanded separators at the maximum logged length", () => {
+  const entry = new Journal(10, () => 0).add("announce", String.fromCharCode(10).repeat(MAX_LOGGED_CHARS))
+
+  expect(entry.text.length).toBeLessThanOrEqual(MAX_LOGGED_CHARS)
+  expect(entry.text).not.toContain(String.fromCharCode(10))
+})
+
+test("ordinary journal text reaches the sink unchanged", () => {
+  const written: JournalEntry[] = []
+  const j = new Journal(10, () => 0, (entry) => written.push(entry))
+
+  j.add("session", "session started")
+
+  expect(written[0]!.text).toBe("session started")
+  expect(j.toText()).toBe("1970-01-01T00:00:00.000Z  [session]  session started")
 })
 
 test("default cap constant is applied", () => {
