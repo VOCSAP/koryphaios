@@ -1,0 +1,4 @@
+import { join } from "node:path";
+
+const REPO = join(import.meta.dir, "..");
+export const WS_PACKAGE = join(REPO, "desktop", "node_modules", "ws");

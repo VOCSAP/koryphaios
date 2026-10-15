@@ -1,0 +1,4 @@
+import { join } from "node:path";
+
+const REPO = join(import.meta.dir, "..");
+export const proc = Bun.spawn(["bun", "build", "hooks/entry.ts"], { cwd: join(REPO, "desktop") });

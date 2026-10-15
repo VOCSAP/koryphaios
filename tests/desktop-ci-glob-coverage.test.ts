@@ -7,6 +7,7 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { expect, test } from "bun:test";
+import ts from "typescript6";
 import {
   EXEMPTIONS,
   isExempt,
@@ -26,7 +27,6 @@ import {
   auditExemptionLocations,
   DAEMON_REASON_MARKER,
   NATIVE_DEPS_REASON_MARKER,
-  NATIVE_DEPS_SOURCE_RE,
 } from "../scripts/pure-module-partition.ts";
 
 const REPO_ROOT = join(import.meta.dir, "..");
@@ -354,18 +354,16 @@ function unmetReasonClaims(file: string, reason: string, source: string): string
   if (claimsDaemon && !/startBroker|_helper/.test(source)) {
     unmet.push(`${file}: reason claims daemon/port but the source matches neither startBroker nor _helper`);
   }
-  if (claimsNativeDeps && !NATIVE_DEPS_SOURCE_RE.test(source)) {
+  if (claimsNativeDeps && !scanDesktopDependency(file, source).some((f) => DEFINITE_KINDS.has(f.kind))) {
     unmet.push(
-      `${file}: reason claims native desktop/node_modules dep but the source matches none of NATIVE_DEPS_SOURCE_RE's forms ` +
-        `(join triple, single joined path string) -- known gaps this regex does NOT cover: require.resolve(...), ` +
-        `createRequire("electron"|"typescript") (dropped: a mock.module("electron") elsewhere in the same bun test process ` +
-        `makes it return the mock, not the real path), node-pty's own binary resolution`,
+      `${file}: reason claims native desktop/node_modules dep but the path scanner finds no desktop dependency in the source ` +
+        `(a form it does not evaluate: see KNOWN_LIMITS)`,
     );
   }
   return unmet;
 }
 
-test("every exempted file proves the ONE property its reason claims (daemon/port via startBroker|_helper, or a native desktop/node_modules dep via NATIVE_DEPS_SOURCE_RE)", () => {
+test("every exempted file proves the ONE property its reason claims (daemon/port via startBroker|_helper, or a native desktop/node_modules dep via the path scanner)", () => {
   const files = exemptedFiles(EXEMPTIONS, REAL_FILES);
   expect(files.length).toBeGreaterThan(0);
   const allUnmet = files.flatMap((f) => {
@@ -388,7 +386,7 @@ test("mutation proof: an exempted file wrongly claiming the daemon/port property
 test("mutation proof: an exempted file wrongly claiming the native-deps property is caught (no desktop/node_modules path segment)", () => {
   const noNativeDepsFile = "logger.test.ts";
   const source = readFileSync(join(TESTS_DIR, noNativeDepsFile), "utf-8");
-  expect(source).not.toMatch(NATIVE_DEPS_SOURCE_RE);
+  expect(scanDesktopDependency(noNativeDepsFile, source)).toEqual([]);
   const reason = `${NATIVE_DEPS_REASON_MARKER}; placeholder location clause long enough to pass the length check`;
   const unmet = unmetReasonClaims(noNativeDepsFile, reason, source);
   expect(unmet.some((m) => m.startsWith(`${noNativeDepsFile}: reason claims native desktop/node_modules dep`))).toBe(true);
@@ -403,52 +401,9 @@ test("mutation proof: a reason naming NEITHER the daemon/port nor the native-dep
   );
 });
 
-test("mutation proof: the native-deps regex matches the real desktop-clodex-lifecycle-io.test.ts source (positive control)", () => {
-  const source = readFileSync(join(TESTS_DIR, "desktop-clodex-lifecycle-io.test.ts"), "utf-8");
-  expect(source).toMatch(NATIVE_DEPS_SOURCE_RE);
-});
-
-test("mutation proof: the native-deps regex does not false-positive on a bare word mention with no desktop/node_modules path segment", () => {
-  const decoy = "// this comment just talks about electron and typescript in prose, not a path";
-  expect(decoy).not.toMatch(NATIVE_DEPS_SOURCE_RE);
-});
-
-// Every fixture below is built by concatenation, broken mid-token, so this
-// guard file's own on-disk text never contains the contiguous pattern it
-// audits every other file against (see the inverse-audit mutation proof
-// further down for the same self-match trap on a different fixture).
-
-test("mutation proof: a bare createRequire('electron') resolution does not match the native-deps pattern", () => {
-  const onlyCreateRequire = 'const ELECTRON = createRequire(join(REPO, "desktop", "package.' + 'json"))("electron");';
-  expect(onlyCreateRequire).not.toMatch(NATIVE_DEPS_SOURCE_RE);
-});
-
-test("mutation proof: a single joined path string with a forward-slash separator matches", () => {
-  const forwardSlashPath = '"../desktop/node_' + 'modules/electron/dist/electron.exe"';
-  expect(forwardSlashPath).toMatch(NATIVE_DEPS_SOURCE_RE);
-});
-
-test("mutation proof: a single joined path string with a backslash separator matches", () => {
-  const backslashPath = '"..\\\\desktop\\\\node_' + 'modules\\\\electron\\\\dist\\\\electron.exe"';
-  expect(backslashPath).toMatch(NATIVE_DEPS_SOURCE_RE);
-});
-
-test("mutation proof: the single-quote form of the join triple matches", () => {
-  const singleQuoteJoin = "join(REPO, 'desktop', 'node_" + "modules', 'electron', 'dist')";
-  expect(singleQuoteJoin).toMatch(NATIVE_DEPS_SOURCE_RE);
-});
-
-test("mutation proof: this guard file's own real source does not itself match NATIVE_DEPS_SOURCE_RE (fixtures above must stay split, not contiguous)", () => {
-  const ownSource = readFileSync(join(TESTS_DIR, "desktop-ci-glob-coverage.test.ts"), "utf-8");
-  expect(ownSource).not.toMatch(NATIVE_DEPS_SOURCE_RE);
-});
-
-// A non-exempt file matching NATIVE_DEPS_SOURCE_RE for a reason other than
-// "belongs in the integration step" must be named here with a real reason,
-// or the inverse-audit test below refuses it. Neither entry is exempted:
-// each already skips its own affected tests, by name, when the dependency
-// is absent -- a different mechanism than moving the whole file to another
-// CI step.
+// A non-exempt file that reaches desktop/node_modules for a reason other than
+// "belongs in the integration step" is named here. Neither entry is exempted:
+// each skips its own affected tests, by name, when the dependency is absent.
 const NATIVE_DEPS_ALLOWED_NONEXEMPT: Record<string, string> = {
   "desktop-pty-coalescing.test.ts":
     "spawns desktop/node_modules/electron directly for a live ConPTY probe, itself skipped by name on a platform or node-pty build that cannot run it",
@@ -456,39 +411,741 @@ const NATIVE_DEPS_ALLOWED_NONEXEMPT: Record<string, string> = {
     "spawns desktop/node_modules/.bin/tsc directly for two compile-discipline tests, itself skipped by name when desktop/node_modules is not installed",
 };
 
-function wronglyNonExemptNativeDeps(
-  exemptions: Exemptions,
-  allowed: Record<string, string>,
-  files: string[],
-  readSource: (file: string) => string,
-): string[] {
-  return files.filter((f) => !isExempt(f, exemptions) && !(f in allowed) && NATIVE_DEPS_SOURCE_RE.test(readSource(f)));
-}
-
-test("the inverse holds: every non-exempt file matching NATIVE_DEPS_SOURCE_RE is either exempt or on the named allow-list (no silent third case)", () => {
-  const readSource = (f: string) => readFileSync(join(TESTS_DIR, f), "utf-8");
-  const offenders = wronglyNonExemptNativeDeps(EXEMPTIONS, NATIVE_DEPS_ALLOWED_NONEXEMPT, REAL_FILES, readSource);
-  expect(offenders).toEqual([]);
-});
-
-test("the allow-list itself carries no stale entry (each named file still exists and still matches the regex it was allow-listed for)", () => {
+test("the allow-list itself carries no stale entry (each named file still exists and still reaches desktop/node_modules)", () => {
   for (const f of Object.keys(NATIVE_DEPS_ALLOWED_NONEXEMPT)) {
     expect(REAL_FILES).toContain(f);
-    const source = readFileSync(join(TESTS_DIR, f), "utf-8");
-    expect(source).toMatch(NATIVE_DEPS_SOURCE_RE);
+    const findings = scanDesktopDependency(f, readFileSync(join(TESTS_DIR, f), "utf-8"));
+    expect(findings.some((x) => DEFINITE_KINDS.has(x.kind)), `${f}: allow-listed but the scanner finds no dependency`).toBe(true);
   }
 });
 
-test("mutation proof: a non-exempt, non-allow-listed file matching NATIVE_DEPS_SOURCE_RE is caught by the inverse audit", () => {
-  const fabricated = "a-brand-new-native-deps-file.test.ts";
-  // Built by concatenation, not written as one contiguous literal, so this
-  // guard file's own on-disk text does not itself match the pattern it
-  // audits every OTHER file against (the inverse-audit test above reads
-  // this very file's real bytes too).
-  const fabricatedSource = 'join(REPO, "desktop", "node_' + 'modules", "electron", "dist")';
-  const readSource = (f: string) => (f === fabricated ? fabricatedSource : readFileSync(join(TESTS_DIR, f), "utf-8"));
-  const offenders = wronglyNonExemptNativeDeps(EXEMPTIONS, NATIVE_DEPS_ALLOWED_NONEXEMPT, [...REAL_FILES, fabricated], readSource);
-  expect(offenders).toContain(fabricated);
+// Paths are evaluated, never pattern-matched. A path it cannot evaluate that
+// runs through node_modules, a call it cannot resolve handed a node_modules
+// literal, and an import() specifier it cannot read are findings; the forms it
+// does not read at all are the KNOWN_LIMITS fixtures.
+
+type FindingKind =
+  | "desktop-node-modules"
+  | "desktop-toolchain-config"
+  | "desktop-resolution-base"
+  | "desktop-package-runner"
+  | "unevaluable-node-modules"
+  | "unevaluable-resolution"
+  | "unparseable";
+
+const DEFINITE_KINDS: ReadonlySet<FindingKind> = new Set<FindingKind>([
+  "desktop-node-modules",
+  "desktop-toolchain-config",
+  "desktop-resolution-base",
+  "desktop-package-runner",
+]);
+
+interface Finding {
+  kind: FindingKind;
+  line: number;
+  expression: string;
+}
+
+type PathAlternatives = string[];
+interface Binding {
+  inits: ts.Node[] | null;
+}
+type BindingLookup = (id: ts.Identifier) => Binding | undefined;
+
+const UNKNOWN_SEGMENT = "<unknown>";
+const TEMP_ROOT = "<tmp>";
+const ALTERNATIVE_CAP = 64;
+
+/** An operand that would push the product past the cap is replaced by UNKNOWN_SEGMENT; the prefix built so far is kept. */
+function crossProduct(parts: PathAlternatives[], separator: string): PathAlternatives {
+  let acc: PathAlternatives = [""];
+  parts.forEach((part, index) => {
+    const operand = index > 0 && acc.length * part.length > ALTERNATIVE_CAP ? [UNKNOWN_SEGMENT] : part;
+    const next: PathAlternatives = [];
+    for (const head of acc) for (const tail of operand) next.push(index === 0 ? tail : head + separator + tail);
+    acc = next;
+  });
+  return acc;
+}
+
+/** Arguments with every spread of an array literal unfolded in place. */
+function unfoldSpreads(args: readonly ts.Node[], lookup: BindingLookup, depth = 0): ts.Node[] {
+  return args.flatMap((arg) => {
+    if (depth > 4 || !ts.isSpreadElement(arg)) return [arg];
+    const array = arrayLiteralOf(arg.expression, lookup);
+    return array === null ? [arg] : unfoldSpreads(array.elements, lookup, depth + 1);
+  });
+}
+
+function declareBindingNames(name: ts.BindingName, init: ts.Node | undefined, into: Map<string, Binding>): void {
+  if (ts.isIdentifier(name)) {
+    into.set(name.text, { inits: init === undefined ? [] : [init] });
+    return;
+  }
+  for (const element of name.elements) {
+    if (ts.isBindingElement(element)) declareBindingNames(element.name, undefined, into);
+  }
+  for (const element of name.elements) {
+    if (ts.isBindingElement(element) && ts.isIdentifier(element.name)) into.set(element.name.text, { inits: null });
+  }
+}
+
+/**
+ * Lexical lookup: the nearest enclosing declaration of an identifier, with the
+ * values assigned to it anywhere in the file. A parameter, a destructured name
+ * or a compound assignment has no known value (inits null).
+ */
+function makeBindingLookup(file: ts.SourceFile): BindingLookup {
+  const scopes = new Map<ts.Node, Map<string, Binding> | null>();
+  const statementsOf = (node: ts.Node): readonly ts.Statement[] | null => {
+    if (ts.isSourceFile(node) || ts.isBlock(node) || ts.isModuleBlock(node)) return node.statements;
+    if (ts.isCaseClause(node) || ts.isDefaultClause(node)) return node.statements;
+    return null;
+  };
+  const scopeOf = (node: ts.Node): Map<string, Binding> | null => {
+    if (scopes.has(node)) return scopes.get(node) ?? null;
+    const out = new Map<string, Binding>();
+    let declares = false;
+    const statements = statementsOf(node);
+    if (statements !== null) {
+      declares = true;
+      for (const statement of statements) {
+        if (ts.isVariableStatement(statement)) {
+          for (const d of statement.declarationList.declarations) declareBindingNames(d.name, d.initializer, out);
+        } else if (ts.isFunctionDeclaration(statement) && statement.name !== undefined) {
+          out.set(statement.name.text, { inits: [statement] });
+        }
+      }
+    }
+    if (ts.isFunctionLike(node)) {
+      declares = true;
+      for (const parameter of (node as ts.SignatureDeclaration).parameters) {
+        const names = new Map<string, Binding>();
+        declareBindingNames(parameter.name, undefined, names);
+        for (const key of names.keys()) out.set(key, { inits: null });
+      }
+    }
+    if ((ts.isForStatement(node) || ts.isForOfStatement(node) || ts.isForInStatement(node)) && node.initializer !== undefined) {
+      if (ts.isVariableDeclarationList(node.initializer)) {
+        declares = true;
+        for (const d of node.initializer.declarations) {
+          const names = new Map<string, Binding>();
+          declareBindingNames(d.name, ts.isForStatement(node) ? d.initializer : undefined, names);
+          for (const [key, value] of names) out.set(key, ts.isForStatement(node) ? value : { inits: null });
+        }
+      }
+    }
+    if (ts.isCatchClause(node) && node.variableDeclaration !== undefined) {
+      declares = true;
+      const names = new Map<string, Binding>();
+      declareBindingNames(node.variableDeclaration.name, undefined, names);
+      for (const key of names.keys()) out.set(key, { inits: null });
+    }
+    scopes.set(node, declares ? out : null);
+    return declares ? out : null;
+  };
+  const lookup: BindingLookup = (id) => {
+    for (let node: ts.Node | undefined = id.parent; node !== undefined; node = node.parent) {
+      const hit = scopeOf(node)?.get(id.text);
+      if (hit !== undefined) return hit;
+    }
+    return undefined;
+  };
+  const collectAssignments = (node: ts.Node): void => {
+    if (
+      ts.isBinaryExpression(node) &&
+      ts.isIdentifier(node.left) &&
+      node.operatorToken.kind >= ts.SyntaxKind.FirstAssignment &&
+      node.operatorToken.kind <= ts.SyntaxKind.LastAssignment
+    ) {
+      const target = lookup(node.left);
+      if (target !== undefined && target.inits !== null) {
+        if (node.operatorToken.kind === ts.SyntaxKind.EqualsToken) target.inits.push(node.right);
+        else target.inits = null;
+      }
+    }
+    ts.forEachChild(node, collectAssignments);
+  };
+  collectAssignments(file);
+  return lookup;
+}
+
+function arrayLiteralOf(expression: ts.Node, lookup: BindingLookup, depth = 0): ts.ArrayLiteralExpression | null {
+  if (depth > 8) return null;
+  if (ts.isArrayLiteralExpression(expression)) return expression;
+  if (ts.isIdentifier(expression)) {
+    const binding = lookup(expression);
+    return binding?.inits && binding.inits.length === 1 ? arrayLiteralOf(binding.inits[0]!, lookup, depth + 1) : null;
+  }
+  return null;
+}
+
+/** Every string a path expression can take; an operation it does not understand yields UNKNOWN_SEGMENT. */
+function evaluatePath(node: ts.Node, lookup: BindingLookup, file: ts.SourceFile, depth = 0): PathAlternatives {
+  if (depth > 16) return [UNKNOWN_SEGMENT];
+  const next = (child: ts.Node) => evaluatePath(child, lookup, file, depth + 1);
+  if (ts.isStringLiteralLike(node)) return [node.text];
+  if (ts.isTemplateExpression(node)) {
+    const parts: PathAlternatives[] = [[node.head.text]];
+    for (const span of node.templateSpans) {
+      parts.push(next(span.expression));
+      parts.push([span.literal.text]);
+    }
+    return crossProduct(parts, "");
+  }
+  if (ts.isBinaryExpression(node)) {
+    const operator = node.operatorToken.kind;
+    if (operator === ts.SyntaxKind.PlusToken) return crossProduct([next(node.left), next(node.right)], "");
+    return [UNKNOWN_SEGMENT];
+  }
+  if (ts.isConditionalExpression(node)) return [...next(node.whenTrue), ...next(node.whenFalse)];
+  if (ts.isIdentifier(node)) {
+    const binding = lookup(node);
+    if (binding !== undefined) {
+      if (binding.inits === null || binding.inits.length === 0) return [UNKNOWN_SEGMENT];
+      return binding.inits.flatMap((init) => next(init));
+    }
+    return [UNKNOWN_SEGMENT];
+  }
+  if (ts.isPropertyAccessExpression(node)) {
+    if (node.getText(file) === "import.meta.url") return ["tests/self.test.ts"];
+    const owner = node.expression;
+    if (
+      (node.name.text === "href" || node.name.text === "pathname") &&
+      ts.isCallExpression(owner) &&
+      ts.isIdentifier(owner.expression) &&
+      owner.expression.text === "pathToFileURL" &&
+      owner.arguments.length > 0
+    ) {
+      return next(owner.arguments[0]!);
+    }
+    return [UNKNOWN_SEGMENT];
+  }
+  if (ts.isCallExpression(node)) {
+    const callee = node.expression;
+    const name = ts.isIdentifier(callee) ? callee.text : ts.isPropertyAccessExpression(callee) ? callee.name.text : "";
+    const args = node.arguments;
+    if (ts.isPropertyAccessExpression(callee)) {
+      const array = arrayLiteralOf(callee.expression, lookup);
+      if (name === "join" && array !== null) {
+        const separators = args.length > 0 ? next(args[0]!) : [","];
+        const separator = separators.some((s) => s.includes(UNKNOWN_SEGMENT)) ? "/" : (separators[0] ?? "/");
+        return crossProduct(array.elements.map(next), separator);
+      }
+    }
+    const receiver = ts.isPropertyAccessExpression(callee) ? callee.expression.getText(file) : null;
+    if (ts.isIdentifier(callee) && lookup(callee) !== undefined) return [UNKNOWN_SEGMENT];
+    const isPathCall = receiver === null || receiver === "path";
+    if (isPathCall && (name === "join" || name === "resolve")) {
+      return crossProduct(unfoldSpreads(args, lookup).map(next), "/");
+    }
+    if (callee.getText(file) === "realpathSync.native" && args.length > 0) return next(args[0]!);
+    if (name === "mkdtempSync") return [TEMP_ROOT];
+    return [UNKNOWN_SEGMENT];
+  }
+  return [UNKNOWN_SEGMENT];
+}
+
+/** Lower-cased: NTFS and APFS do not distinguish case. It over-reports on case-sensitive Linux, the safe direction. */
+function pathSegments(alternative: string): string[] {
+  const out: string[] = [];
+  for (const raw of alternative.split(/[\\/]+/)) {
+    if (raw === "" || raw === ".") continue;
+    if (raw === "..") {
+      out.pop();
+      continue;
+    }
+    out.push(raw.toLowerCase());
+  }
+  return out;
+}
+
+const isUnknownSegment = (segment: string): boolean => segment.includes(UNKNOWN_SEGMENT);
+
+function classifyPath(alternative: string): FindingKind | null {
+  const segments = pathSegments(alternative);
+  const modules = segments.indexOf("node_modules");
+  if (modules >= 0) {
+    const prefix = segments.slice(0, modules);
+    if (prefix.includes("desktop")) return "desktop-node-modules";
+    if (prefix.some(isUnknownSegment)) return "unevaluable-node-modules";
+    return null;
+  }
+  const last = segments[segments.length - 1] ?? "";
+  if (/^electron\.vite\.config(?:\.[cm]?[jt]s)?$/.test(last) && segments.slice(0, -1).includes("desktop")) {
+    return "desktop-toolchain-config";
+  }
+  return null;
+}
+
+// Callees that compare a value or declare test data and never build a path.
+const NON_PATH_CALLEES = new Set([
+  "includes",
+  "startsWith",
+  "endsWith",
+  "indexOf",
+  "expect",
+  "toBe",
+  "toEqual",
+  "toStrictEqual",
+  "toContain",
+  "toMatch",
+  "toThrow",
+  "toHaveLength",
+  "each",
+]);
+const SPAWN_CALLEES = new Set(["spawn", "spawnSync", "exec", "execSync", "execFileSync"]);
+const PACKAGE_RUNNER_RE = /(?:^|[\\/\s])(?:npm|npx|tsc|electron)(?:\.cmd|\.exe)?(?:\s|$)/i;
+const DESKTOP_TOKEN_RE = /(?:^|[\\/\s=])desktop(?:$|[\\/\s])/i;
+
+/** Values handed to a call, arrays and objects opened. */
+function literalLeaves(node: ts.Node, lookup: BindingLookup, file: ts.SourceFile, out: PathAlternatives[] = [], depth = 0): PathAlternatives[] {
+  if (depth > 6) {
+    out.push([UNKNOWN_SEGMENT]);
+    return out;
+  }
+  if (ts.isArrayLiteralExpression(node)) {
+    for (const element of unfoldSpreads(node.elements, lookup)) literalLeaves(element, lookup, file, out, depth + 1);
+    return out;
+  }
+  if (ts.isObjectLiteralExpression(node)) {
+    for (const property of node.properties) {
+      if (ts.isPropertyAssignment(property)) literalLeaves(property.initializer, lookup, file, out, depth + 1);
+    }
+    return out;
+  }
+  out.push(evaluatePath(node, lookup, file));
+  return out;
+}
+
+function isPureLiteral(node: ts.Node): boolean {
+  if (ts.isStringLiteralLike(node)) return true;
+  if (ts.isTemplateExpression(node)) return node.templateSpans.every((span) => isPureLiteral(span.expression));
+  return ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.PlusToken && isPureLiteral(node.left) && isPureLiteral(node.right);
+}
+
+/** String literals written directly in an argument list, array literals opened; identifiers and calls are judged where they are defined. */
+function handedLiterals(node: ts.Node, lookup: BindingLookup, out: ts.Node[] = [], depth = 0): ts.Node[] {
+  if (depth > 4) return out;
+  if (ts.isArrayLiteralExpression(node)) {
+    for (const element of unfoldSpreads(node.elements, lookup)) handedLiterals(element, lookup, out, depth + 1);
+  } else if (isPureLiteral(node)) {
+    out.push(node);
+  }
+  return out;
+}
+
+function parseDiagnosticCount(file: ts.SourceFile): number {
+  const diagnostics = (file as unknown as { parseDiagnostics?: unknown }).parseDiagnostics;
+  if (!Array.isArray(diagnostics)) {
+    throw new Error("typescript6 no longer exposes SourceFile.parseDiagnostics: the scanner could not tell a broken file from an empty one");
+  }
+  return diagnostics.length;
+}
+
+function scanDesktopDependency(fileName: string, source: string): Finding[] {
+  const file = ts.createSourceFile(fileName, source, ts.ScriptTarget.Latest, true);
+  const lookup = makeBindingLookup(file);
+  const findings: Finding[] = [];
+  const seen = new Set<string>();
+  const report = (kind: FindingKind, node: ts.Node, expression?: string) => {
+    const at = node.getStart(file);
+    if (seen.has(`${kind}:${at}`)) return;
+    seen.add(`${kind}:${at}`);
+    findings.push({
+      kind,
+      line: file.getLineAndCharacterOfPosition(at).line + 1,
+      expression: expression ?? node.getText(file).replace(/\s+/g, ""),
+    });
+  };
+  if (parseDiagnosticCount(file) > 0) report("unparseable", file, "<unparseable>");
+
+  const visit = (node: ts.Node): void => {
+    const buildsPath =
+      ts.isStringLiteralLike(node) ||
+      ts.isTemplateExpression(node) ||
+      (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.PlusToken) ||
+      ts.isCallExpression(node);
+    const callArguments = ts.isCallExpression(node) ? unfoldSpreads(node.arguments, lookup) : [];
+    if (buildsPath) {
+      const kinds = evaluatePath(node, lookup, file).map(classifyPath).filter((k): k is FindingKind => k !== null);
+      const chosen = kinds.find((k) => DEFINITE_KINDS.has(k)) ?? kinds[0];
+      if (chosen !== undefined) report(chosen, node);
+    }
+    if (ts.isCallExpression(node)) {
+      const calleeText = node.expression.getText(file);
+      const first = callArguments[0];
+      const isCreateRequire = /(?:^|\.)createRequire$/.test(calleeText);
+      const isResolver = calleeText === "require.resolve";
+      const isDynamicLoad = node.expression.kind === ts.SyntaxKind.ImportKeyword;
+      if ((isCreateRequire || isResolver || isDynamicLoad) && first !== undefined) {
+        const leaves = callArguments.flatMap((a) => literalLeaves(a, lookup, file));
+        const desktopBase = leaves.some((alts) => alts.some((alt) => pathSegments(alt).includes("desktop")));
+        if (desktopBase && !isDynamicLoad) report("desktop-resolution-base", node);
+        if (evaluatePath(first, lookup, file).every((alt) => pathSegments(alt).every(isUnknownSegment))) {
+          report("unevaluable-resolution", node);
+        }
+      }
+      const calleeName = ts.isIdentifier(node.expression)
+        ? node.expression.text
+        : ts.isPropertyAccessExpression(node.expression)
+          ? node.expression.name.text
+          : "";
+      if (SPAWN_CALLEES.has(calleeName)) {
+        const leaves = callArguments.flatMap((a) => literalLeaves(a, lookup, file)).flat();
+        if (leaves.some((leaf) => PACKAGE_RUNNER_RE.test(leaf)) && leaves.some((leaf) => DESKTOP_TOKEN_RE.test(leaf))) {
+          report("desktop-package-runner", node);
+        }
+      }
+      // A call the scanner cannot resolve (local wrapper, aliased or namespaced
+      // join) that is handed a node_modules segment hides a path it cannot read.
+      const opaque = evaluatePath(node, lookup, file).every((alt) => alt === UNKNOWN_SEGMENT);
+      if (opaque && !NON_PATH_CALLEES.has(calleeName)) {
+        const hit = callArguments
+          .flatMap((a) => handedLiterals(a, lookup))
+          .find((literal) => evaluatePath(literal, lookup, file).some((alt) => pathSegments(alt).includes("node_modules")));
+        if (hit !== undefined) report("unevaluable-node-modules", node, `${calleeText}(${hit.getText(file).replace(/\s+/g, "")})`);
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(file);
+  return findings;
+}
+
+interface ReviewedOccurrence {
+  file: string;
+  expression: string;
+  count: number;
+  reason: string;
+}
+
+// Keyed by file + whitespace-free expression text, never by line. Each entry
+// is an unevaluable path the scanner cannot decide, read and judged not to
+// reach desktop/node_modules; count pins how many occurrences were reviewed.
+const UNEVALUABLE_REVIEWED: ReviewedOccurrence[] = [
+  {
+    file: "mock-module-guard.test.ts",
+    expression: 'join(root,"node_modules","pkg","index.ts")',
+    count: 1,
+    reason: "root comes from miniRepo(), a mkdtemp directory written by the test itself; nothing reads it from desktop/",
+  },
+  {
+    file: "mock-module-guard.test.ts",
+    expression: 'write("node_modules/pkg/index.ts")',
+    count: 1,
+    reason: "write() creates the file under the mkdtemp mini repo root returned by miniRepo()",
+  },
+  {
+    file: "mock-module-guard.test.ts",
+    expression: 'resolveMockTarget("../node_modules/pkg/index.ts")',
+    count: 1,
+    reason: "a specifier resolved against the mkdtemp mini repo; nothing under desktop/ is read",
+  },
+  {
+    file: "desktop-sandbox-copy.test.ts",
+    expression: 'planIgnoredCopy("node_modules/**")',
+    count: 1,
+    reason: "a deny-list glob given to planIgnoredCopy as input, matched against a mkdtemp directory",
+  },
+  {
+    file: "mock-module-guard.test.ts",
+    expression: "import(file)",
+    count: 1,
+    reason: "file ranges over repo project modules; one that transitively reaches electron or shiki is tolerated by MAY_BE_UNIMPORTABLE_IN_RUNNER, not read from desktop/node_modules",
+  },
+  {
+    file: "mock-module-guard.test.ts",
+    expression: "import(file(name))",
+    count: 1,
+    reason: "file(name) is join(SHARED_DIR, name + '.ts') over a fixed module list, all under desktop/src/shared",
+  },
+];
+
+interface DesktopDependencyAudit {
+  definiteOffenders: string[];
+  unevaluableOffenders: string[];
+  staleReviewed: string[];
+}
+
+function auditDesktopDependencies(options: {
+  files: string[];
+  exemptions: Exemptions;
+  allowedNonExempt: Record<string, string>;
+  reviewed: ReviewedOccurrence[];
+  readSource: (file: string) => string;
+}): DesktopDependencyAudit {
+  const definiteOffenders: string[] = [];
+  const occurrences = new Map<string, { file: string; kind: FindingKind; line: number; expression: string; count: number }>();
+  for (const file of options.files) {
+    if (isExempt(file, options.exemptions)) continue;
+    for (const finding of scanDesktopDependency(file, options.readSource(file))) {
+      if (DEFINITE_KINDS.has(finding.kind)) {
+        if (!(file in options.allowedNonExempt)) {
+          definiteOffenders.push(`${file}:${finding.line} [${finding.kind}] ${finding.expression}`);
+        }
+        continue;
+      }
+      const key = JSON.stringify([file, finding.expression]);
+      const known = occurrences.get(key);
+      if (known === undefined) occurrences.set(key, { file, ...finding, count: 1 });
+      else known.count += 1;
+    }
+  }
+  const reviewedByKey = new Map(options.reviewed.map((entry) => [JSON.stringify([entry.file, entry.expression]), entry]));
+  const unevaluableOffenders: string[] = [];
+  for (const [key, seen] of occurrences) {
+    const entry = reviewedByKey.get(key);
+    const where = `${seen.file}:${seen.line} [${seen.kind}] ${seen.expression}`;
+    if (entry === undefined) unevaluableOffenders.push(`${where} is not in UNEVALUABLE_REVIEWED`);
+    else if (entry.count !== seen.count) unevaluableOffenders.push(`${where} occurs ${seen.count} time(s), ${entry.count} reviewed`);
+  }
+  const staleReviewed = [...reviewedByKey]
+    .filter(([key]) => !occurrences.has(key))
+    .map(([, entry]) => `${entry.file}: ${entry.expression} no longer occurs`);
+  return { definiteOffenders, unevaluableOffenders, staleReviewed };
+}
+
+const FIXTURE_DIR = join(TESTS_DIR, "fixtures", "desktop-native-deps");
+const readFixture = (name: string): string => readFileSync(join(FIXTURE_DIR, `${name}.fixture.txt`), "utf-8");
+
+interface DetectedForm {
+  name: string;
+  kinds: FindingKind[];
+  findings?: number;
+}
+
+const DETECTED_FORMS: DetectedForm[] = [
+  { name: "join-triple-binary", kinds: ["desktop-node-modules"] },
+  { name: "join-third-segment-outside-regex", kinds: ["desktop-node-modules"] },
+  { name: "join-directory-only", kinds: ["desktop-node-modules"] },
+  { name: "join-through-desktop-variable", kinds: ["desktop-node-modules"] },
+  { name: "resolve-with-deep-parent-segments", kinds: ["desktop-node-modules"] },
+  { name: "single-string-third-segment", kinds: ["desktop-node-modules"] },
+  { name: "template-string", kinds: ["desktop-node-modules"] },
+  { name: "string-concatenation", kinds: ["desktop-node-modules"] },
+  { name: "name-held-in-constant", kinds: ["desktop-node-modules"] },
+  { name: "array-join-with-separator", kinds: ["desktop-node-modules"] },
+  { name: "parent-segment-normalised", kinds: ["desktop-node-modules"] },
+  { name: "mixed-case-segments", kinds: ["desktop-node-modules"] },
+  { name: "backslash-string", kinds: ["desktop-node-modules"] },
+  { name: "name-assigned-in-hook", kinds: ["desktop-node-modules"] },
+  { name: "alternation-inside-segment", kinds: ["desktop-node-modules"] },
+  { name: "create-require-from-desktop", kinds: ["desktop-resolution-base"] },
+  { name: "require-resolve-with-paths", kinds: ["desktop-resolution-base"] },
+  { name: "toolchain-config-import", kinds: ["desktop-toolchain-config"] },
+  { name: "package-runner-desktop-cwd", kinds: ["desktop-package-runner"] },
+  { name: "package-runner-prefix-argv", kinds: ["desktop-package-runner"] },
+  { name: "unevaluable-imported-root", kinds: ["unevaluable-node-modules"] },
+  { name: "unevaluable-parameter-root", kinds: ["unevaluable-node-modules"] },
+  { name: "unevaluable-function-return", kinds: ["unevaluable-node-modules"] },
+  { name: "unevaluable-dynamic-import", kinds: ["unevaluable-resolution"] },
+  { name: "unparseable-source", kinds: ["unparseable"] },
+  { name: "join-operand-explosion-keeps-prefix", kinds: ["desktop-node-modules"] },
+  { name: "definite-alternative-wins-over-unknown", kinds: ["desktop-node-modules"], findings: 1 },
+  { name: "spread-array-into-join", kinds: ["desktop-node-modules"] },
+  { name: "wrapper-local-helper", kinds: ["unevaluable-node-modules"] },
+  { name: "wrapper-aliased-import", kinds: ["unevaluable-node-modules"] },
+  { name: "wrapper-namespace-import", kinds: ["unevaluable-node-modules"] },
+  { name: "wrapper-single-string", kinds: ["desktop-node-modules", "unevaluable-node-modules"] },
+  { name: "shadowed-name-resolves-per-scope", kinds: ["unevaluable-node-modules"], findings: 1 },
+];
+
+const CLEAN_FORMS = [
+  "root-node-modules-binary",
+  "temp-directory-node-modules",
+  "temp-directory-assigned-in-hook",
+  "parent-segment-leaves-desktop",
+  "import-of-temp-file-url",
+  "name-comparison-only",
+  "desktop-source-path",
+  "create-require-from-test-file",
+  "prose-mention-with-spaces",
+  "commented-out-path",
+];
+
+// Forms the scanner does not see. Asserting no finding makes a limit that
+// stops being one go red, so this list cannot rot into a false claim.
+const KNOWN_LIMITS = [
+  "limit-cwd-desktop-script",
+  "limit-name-built-by-string-method",
+  "limit-path-built-in-imported-helper",
+  "limit-second-segment-computed",
+  "limit-bun-shell-template",
+];
+
+const kindsOf = (findings: Finding[]): FindingKind[] => [...new Set(findings.map((f) => f.kind))].sort();
+
+test("every fixture file under tests/fixtures/desktop-native-deps is named by exactly one form table, and every table entry has its file", () => {
+  const onDisk = readdirSync(FIXTURE_DIR)
+    .filter((f) => f.endsWith(".fixture.txt"))
+    .map((f) => f.slice(0, -".fixture.txt".length))
+    .sort();
+  const named = [...DETECTED_FORMS.map((f) => f.name), ...CLEAN_FORMS, ...KNOWN_LIMITS].sort();
+  expect(named, "a fixture without an expectation proves nothing, an expectation without a fixture is vacuous").toEqual(onDisk);
+});
+
+for (const form of DETECTED_FORMS) {
+  test(`scanner reports the ${form.name} form as ${form.kinds.join(", ")}`, () => {
+    const source = readFixture(form.name);
+    const findings = scanDesktopDependency(`${form.name}.fixture.txt`, source);
+    expect(kindsOf(findings), `${form.name}: the scanner missed or misclassified this form`).toEqual([...form.kinds].sort());
+    if (form.findings !== undefined) expect(findings.length, `${form.name}: wrong number of findings`).toBe(form.findings);
+  });
+}
+
+for (const name of CLEAN_FORMS) {
+  test(`scanner does not flag the ${name} form`, () => {
+    expect(scanDesktopDependency(`${name}.fixture.txt`, readFixture(name))).toEqual([]);
+  });
+}
+
+for (const name of KNOWN_LIMITS) {
+  test(`known limit: the ${name} form is not detected`, () => {
+    expect(
+      scanDesktopDependency(`${name}.fixture.txt`, readFixture(name)),
+      `${name}: the scanner now sees this form, so it is no longer a limit; move it to DETECTED_FORMS`,
+    ).toEqual([]);
+  });
+}
+
+test("a non-exempt test file that reaches desktop/node_modules through a variable-held join() path turns the audit red", () => {
+  const planted = "desktop-planted-toolchain.test.ts";
+  const audit = auditDesktopDependencies({
+    files: [planted],
+    exemptions: EXEMPTIONS,
+    allowedNonExempt: NATIVE_DEPS_ALLOWED_NONEXEMPT,
+    reviewed: UNEVALUABLE_REVIEWED,
+    readSource: () => readFixture("join-through-desktop-variable"),
+  });
+  expect(audit.definiteOffenders.some((o) => o.startsWith(`${planted}:`))).toBe(true);
+});
+
+test("the same planted file is accepted once it is exempt or allow-listed, so the audit is not red for everything", () => {
+  const planted = "desktop-planted-toolchain.test.ts";
+  const readSource = () => readFixture("join-through-desktop-variable");
+  const exempted = auditDesktopDependencies({
+    files: [planted],
+    exemptions: { familyPrefixes: {}, exactFiles: { [planted]: "placeholder reason, long enough" } },
+    allowedNonExempt: {},
+    reviewed: [],
+    readSource,
+  });
+  const allowed = auditDesktopDependencies({
+    files: [planted],
+    exemptions: { familyPrefixes: {}, exactFiles: {} },
+    allowedNonExempt: { [planted]: "placeholder reason, long enough" },
+    reviewed: [],
+    readSource,
+  });
+  expect(exempted.definiteOffenders).toEqual([]);
+  expect(allowed.definiteOffenders).toEqual([]);
+});
+
+const NO_EXEMPTIONS: Exemptions = { familyPrefixes: {}, exactFiles: {} };
+
+test("an unevaluable occurrence is refused until reviewed, and a reviewed one survives a line shift", () => {
+  const planted = "desktop-planted-unevaluable.test.ts";
+  const source = readFixture("unevaluable-imported-root");
+  const run = (text: string, reviewed: ReviewedOccurrence[]) =>
+    auditDesktopDependencies({
+      files: [planted],
+      exemptions: NO_EXEMPTIONS,
+      allowedNonExempt: {},
+      reviewed,
+      readSource: () => text,
+    });
+  const expression = 'join(TOOLCHAIN_ROOT,"node_modules",".bin","tsc")';
+  expect(run(source, []).unevaluableOffenders).toHaveLength(1);
+  const reviewed: ReviewedOccurrence[] = [{ file: planted, expression, count: 1, reason: "placeholder reason, long enough" }];
+  expect(run(source, reviewed)).toEqual({ definiteOffenders: [], unevaluableOffenders: [], staleReviewed: [] });
+  expect(run("\n\n\n" + source, reviewed).unevaluableOffenders, "a reviewed entry keyed by line would break on this shift").toEqual([]);
+});
+
+test("a second occurrence of an already reviewed unevaluable expression is refused (count pinned)", () => {
+  const planted = "desktop-planted-unevaluable.test.ts";
+  const source = readFixture("unevaluable-imported-root");
+  const doubled = `${source}\nexport const AGAIN = join(TOOLCHAIN_ROOT, "node_modules", ".bin", "tsc");\n`;
+  const audit = auditDesktopDependencies({
+    files: [planted],
+    exemptions: NO_EXEMPTIONS,
+    allowedNonExempt: {},
+    reviewed: [
+      {
+        file: planted,
+        expression: 'join(TOOLCHAIN_ROOT,"node_modules",".bin","tsc")',
+        count: 1,
+        reason: "placeholder reason, long enough",
+      },
+    ],
+    readSource: () => doubled,
+  });
+  expect(audit.unevaluableOffenders).toHaveLength(1);
+  expect(audit.unevaluableOffenders[0]).toContain("occurs 2 time(s), 1 reviewed");
+});
+
+test("a new unevaluable expression in a file that already has reviewed ones is refused", () => {
+  const file = "mock-module-guard.test.ts";
+  const real = readFileSync(join(TESTS_DIR, file), "utf-8");
+  const audit = auditDesktopDependencies({
+    files: [file],
+    exemptions: NO_EXEMPTIONS,
+    allowedNonExempt: {},
+    reviewed: UNEVALUABLE_REVIEWED,
+    readSource: () => `${real}\nexport const EXTRA = join(somewhereElse, "node_modules", "x");\n`,
+  });
+  expect(audit.unevaluableOffenders.some((o) => o.includes("somewhereElse"))).toBe(true);
+});
+
+test("a reviewed entry that matches nothing any more is reported stale", () => {
+  const audit = auditDesktopDependencies({
+    files: ["logger.test.ts"],
+    exemptions: NO_EXEMPTIONS,
+    allowedNonExempt: {},
+    reviewed: [{ file: "logger.test.ts", expression: "import(vanished)", count: 1, reason: "placeholder reason, long enough" }],
+    readSource: (f) => readFileSync(join(TESTS_DIR, f), "utf-8"),
+  });
+  expect(audit.staleReviewed).toEqual(["logger.test.ts: import(vanished) no longer occurs"]);
+});
+
+const vagueReviewedReasons = (reviewed: ReviewedOccurrence[]): string[] =>
+  reviewed.filter((entry) => entry.reason.length <= 15).map((entry) => `${entry.file}: ${entry.expression}`);
+
+test("every reviewed unevaluable occurrence carries a real reason, not a placeholder", () => {
+  expect(vagueReviewedReasons(UNEVALUABLE_REVIEWED)).toEqual([]);
+});
+
+test("a reviewed occurrence whose reason is a placeholder is refused", () => {
+  const placeholder: ReviewedOccurrence = { file: "logger.test.ts", expression: "import(x)", count: 1, reason: "reviewed, fine" };
+  expect(vagueReviewedReasons([placeholder])).toEqual(["logger.test.ts: import(x)"]);
+});
+
+test("every test file reaching desktop/node_modules is exempt or allow-listed, and every path the scanner cannot evaluate is reviewed (no entry stale)", () => {
+  const audit = auditDesktopDependencies({
+    files: REAL_FILES,
+    exemptions: EXEMPTIONS,
+    allowedNonExempt: NATIVE_DEPS_ALLOWED_NONEXEMPT,
+    reviewed: UNEVALUABLE_REVIEWED,
+    readSource: (f) => readFileSync(join(TESTS_DIR, f), "utf-8"),
+  });
+  expect(audit.definiteOffenders, "depend on desktop/node_modules but run before the desktop install step: exempt them or allow-list with a reason").toEqual([]);
+  expect(audit.unevaluableOffenders, "a path the scanner cannot evaluate runs through node_modules or a dynamic specifier: review it into UNEVALUABLE_REVIEWED").toEqual([]);
+  expect(audit.staleReviewed).toEqual([]);
+});
+
+test("the scanner sees the dependency in every file the exemption table claims to need a native desktop/node_modules dep", () => {
+  const claimed = exemptedFiles(EXEMPTIONS, REAL_FILES).filter((f) => reasonFor(f, EXEMPTIONS).includes(NATIVE_DEPS_REASON_MARKER));
+  expect(claimed.length).toBeGreaterThan(0);
+  const unseen = claimed.filter((f) => {
+    const findings = scanDesktopDependency(f, readFileSync(join(TESTS_DIR, f), "utf-8"));
+    return !findings.some((finding) => DEFINITE_KINDS.has(finding.kind));
+  });
+  expect(unseen, "the exemption claims a desktop/node_modules dependency the scanner cannot find: it is blind to that form").toEqual([]);
+});
+
+test("this guard file's own source holds no finding of the scanner (fixtures stay out of evaluable path shapes)", () => {
+  const own = "desktop-ci-glob-coverage.test.ts";
+  expect(scanDesktopDependency(own, readFileSync(join(TESTS_DIR, own), "utf-8"))).toEqual([]);
 });
 
 test("every on-disk tests/*.test.ts file is either exempt or included in the computed partition (clean + contaminated)", () => {

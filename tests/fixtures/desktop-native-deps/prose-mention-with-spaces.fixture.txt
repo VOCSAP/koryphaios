@@ -1,0 +1,1 @@
+export const MESSAGE = "the desktop/node_modules directory is absent until the install step has run";

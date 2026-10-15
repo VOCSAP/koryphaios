@@ -1,0 +1,8 @@
+import { join } from "node:path";
+
+const REPO = join(import.meta.dir, "..");
+const n = Number(process.env.VARIANT);
+const A = n === 1 ? "a" : n === 2 ? "b" : n === 3 ? "c" : n === 4 ? "d" : "e";
+const B = n === 1 ? "f" : n === 2 ? "g" : n === 3 ? "h" : n === 4 ? "i" : "j";
+const C = n === 1 ? "k" : n === 2 ? "l" : n === 3 ? "m" : n === 4 ? "o" : "p";
+export const TARGET = join(REPO, "desktop", "node_modules", A, B, C);

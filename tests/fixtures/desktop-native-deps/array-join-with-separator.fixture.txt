@@ -1,0 +1,3 @@
+import { sep } from "node:path";
+
+export const WS_PACKAGE = ["desktop", "node_modules", "ws"].join(sep);

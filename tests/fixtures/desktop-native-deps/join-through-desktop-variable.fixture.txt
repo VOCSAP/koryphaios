@@ -1,0 +1,5 @@
+import { join } from "node:path";
+
+const REPO = join(import.meta.dir, "..");
+const DESKTOP = join(REPO, "desktop");
+export const TSC_BIN = join(DESKTOP, "node_modules", ".bin", "tsc");

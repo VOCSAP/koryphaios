@@ -1,0 +1,17 @@
+import { beforeEach } from "bun:test";
+import { mkdirSync, mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { SKIP_DIRS } from "./_names";
+
+let dir: string;
+beforeEach(() => {
+  dir = mkdtempSync(join(tmpdir(), "scratch-"));
+});
+
+export function prepare(): void {
+  mkdirSync(join(dir, "node_modules", "pkg"), { recursive: true });
+}
+
+export const planted: string[] = [];
+for (const dir of SKIP_DIRS) planted.push(join(dir, "node_modules"));

@@ -1,0 +1,9 @@
+import { beforeAll } from "bun:test";
+import { join } from "node:path";
+
+const REPO = join(import.meta.dir, "..");
+let MODULES_DIR = "";
+beforeAll(() => {
+  MODULES_DIR = "node_modules";
+});
+export const tscBin = () => join(REPO, "desktop", MODULES_DIR, ".bin", "tsc");

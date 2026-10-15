@@ -1,0 +1,15 @@
+import { expect } from "bun:test";
+
+export function skipped(entry: { name: string }, segments: string[]): boolean {
+  return (
+    entry.name === "node_modules" ||
+    segments.includes("node_modules") ||
+    entry.name.startsWith("node_modules") ||
+    entry.name.endsWith("node_modules") ||
+    segments.indexOf("node_modules") >= 0
+  );
+}
+
+export function asserted(found: string[]): void {
+  expect(found).toEqual(["node_modules"]);
+}

@@ -167,6 +167,7 @@ test("the caps stay at the values their measurement justifies", () => {
 const CENSUS_THRESHOLD = 3;
 const ACCEPTED_UNMAPPED: Record<string, string> = {
   png: "binary asset, never highlighted",
+  txt: "plain text, no grammar to apply (also the extension of non-source fixtures that source scanners must skip)",
 };
 /**
  * The DOMAIN the scan must still cover, not its sensitivity. Raising

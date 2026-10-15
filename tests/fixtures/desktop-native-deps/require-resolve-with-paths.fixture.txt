@@ -1,0 +1,4 @@
+import { join } from "node:path";
+
+const REPO = join(import.meta.dir, "..");
+export const ELECTRON = require.resolve("electron", { paths: [join(REPO, "desktop")] });

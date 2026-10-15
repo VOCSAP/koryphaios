@@ -1,0 +1,4 @@
+import { resolve } from "node:path";
+
+const HERE = import.meta.dir;
+export const TSC_BIN = resolve(HERE, "..\\..\\desktop\\node_modules\\.bin\\tsc");

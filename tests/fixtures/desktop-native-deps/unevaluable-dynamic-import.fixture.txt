@@ -1,0 +1,3 @@
+import { MODULE_SPECIFIER } from "./_specifiers";
+
+export const loaded = await import(MODULE_SPECIFIER);

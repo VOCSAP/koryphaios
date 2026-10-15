@@ -1,0 +1,4 @@
+import { join } from "node:path";
+
+const REPO = join(import.meta.dir, "..");
+export const TSC_BIN = join(REPO, process.platform === "win32" ? "desktop" : "tools", "node_modules", ".bin", "tsc");

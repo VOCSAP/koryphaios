@@ -1,0 +1,1 @@
+export const result = Bun.spawnSync(["npm", "--prefix", "desktop", "run", "typecheck"]);

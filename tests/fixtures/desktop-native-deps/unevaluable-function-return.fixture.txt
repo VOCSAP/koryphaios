@@ -1,0 +1,7 @@
+import { join } from "node:path";
+
+const REPO = join(import.meta.dir, "..");
+function toolchainRoot(): string {
+  return join(REPO, "desktop");
+}
+export const TSC_BIN = join(toolchainRoot(), "node_modules", ".bin", "tsc");

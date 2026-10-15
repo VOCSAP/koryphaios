@@ -1,0 +1,4 @@
+import { join } from "node:path";
+import { TOOLCHAIN_ROOT } from "./_toolchain";
+
+export const TSC_BIN = join(TOOLCHAIN_ROOT, "node_modules", ".bin", "tsc");

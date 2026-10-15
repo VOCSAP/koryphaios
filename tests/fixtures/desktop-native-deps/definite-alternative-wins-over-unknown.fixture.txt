@@ -1,0 +1,6 @@
+import { join } from "node:path";
+import { OTHER_ROOT } from "./_roots";
+
+const REPO = join(import.meta.dir, "..");
+const ROOT = process.platform === "win32" ? OTHER_ROOT : join(REPO, "desktop");
+export const TSC_BIN = join(ROOT, "node_modules", ".bin", "tsc");

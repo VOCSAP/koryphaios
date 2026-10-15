@@ -1,0 +1,4 @@
+import { join as pjoin } from "node:path";
+import { ROOT } from "./_roots";
+
+export const TSC_BIN = pjoin(ROOT, "desktop", "node_modules", ".bin", "tsc");

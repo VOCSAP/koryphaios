@@ -1,0 +1,3 @@
+import { repoPath } from "./_roots";
+
+export const TSC_BIN = repoPath("desktop/node_modules/.bin/tsc");

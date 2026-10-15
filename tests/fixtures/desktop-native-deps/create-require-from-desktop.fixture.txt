@@ -1,0 +1,5 @@
+import { createRequire } from "node:module";
+import { join } from "node:path";
+
+const REPO = join(import.meta.dir, "..");
+export const ELECTRON = createRequire(join(REPO, "desktop", "package.json"))("electron");

@@ -1,0 +1,4 @@
+import { spawnSync } from "node:child_process";
+import { TSC_BIN } from "./_toolchain";
+
+export const result = spawnSync(process.execPath, [TSC_BIN, "--noEmit"]);

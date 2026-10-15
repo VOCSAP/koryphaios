@@ -1,0 +1,4 @@
+import * as p from "node:path";
+import { ROOT } from "./_roots";
+
+export const TSC_BIN = p.join(ROOT, "desktop", "node_modules", ".bin", "tsc");

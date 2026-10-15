@@ -1,0 +1,5 @@
+import { spawnSync } from "node:child_process";
+import { join } from "node:path";
+
+const REPO = join(import.meta.dir, "..");
+export const result = spawnSync("npx", ["tsc", "--noEmit"], { cwd: join(REPO, "desktop") });
