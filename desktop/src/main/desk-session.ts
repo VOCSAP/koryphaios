@@ -15,6 +15,7 @@ import { existsSync, readFileSync, rmSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { reportError } from './log'
+import { CONTEXT_CLEAR_ROTATION_WAIT_MS } from '../../../shared/context-timing'
 
 const PEERS_DIR = join(homedir(), '.claude', 'peers')
 
@@ -66,6 +67,17 @@ export interface DeskSessionRecord {
 const reportedCorruptTokens = new Set<string>()
 
 export const DESK_SESSION_SOURCES: ReadonlySet<string> = new Set(['register', 'startup', 'resume', 'clear', 'compact'])
+export const CLEAR_BACKCHANNEL_ROTATION_WAIT_MS = CONTEXT_CLEAR_ROTATION_WAIT_MS
+const CLEAR_BACKCHANNEL_POLL_MS = 100
+
+export interface ClearDeskSessionWaitOptions {
+  baselineSessionId?: string | null
+  timeoutMs?: number
+  pollMs?: number
+  read?: () => DeskSessionRecord | null
+  now?: () => number
+  sleep?: (ms: number) => Promise<void>
+}
 
 /**
  * The value and its writer. A legacy plain-text file reads as a register
@@ -98,6 +110,31 @@ export function readDeskSession(token: string, peersDir: string = PEERS_DIR): De
     return { sid: parsed.sid, source }
   } catch {
     return null
+  }
+}
+
+export async function waitForClearDeskSessionRotation(
+  token: string,
+  currentSessionId: string,
+  options: ClearDeskSessionWaitOptions = {}
+): Promise<string> {
+  const timeoutMs = options.timeoutMs ?? CLEAR_BACKCHANNEL_ROTATION_WAIT_MS
+  const pollMs = options.pollMs ?? CLEAR_BACKCHANNEL_POLL_MS
+  const read = options.read ?? (() => readDeskSession(token))
+  const now = options.now ?? Date.now
+  const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)))
+  const startedAt = now()
+
+  while (true) {
+    const record = read()
+    if (
+      record?.source === 'clear' &&
+      record.sid !== currentSessionId &&
+      record.sid !== options.baselineSessionId
+    ) return record.sid
+    const remainingMs = timeoutMs - (now() - startedAt)
+    if (remainingMs <= 0) throw new Error(`clear back-channel rotation timed out after ${timeoutMs} ms`)
+    await sleep(Math.min(pollMs, remainingMs))
   }
 }
 

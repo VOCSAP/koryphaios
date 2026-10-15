@@ -87,7 +87,7 @@ import {
   pendingInboxCounter
 } from './inbox-store'
 import { spawn as spawnProcess } from 'node:child_process'
-import { adoptedBrokerNotice, deckBrokerMode, peersConfigPath } from './broker-client'
+import { adoptedBrokerNotice, computeGroupSecretHash, deckBrokerMode, peersConfigPath } from './broker-client'
 import { ensureLoopbackBroker, locateBrokerScript, RespawnThrottle, withPathEntry } from './broker-spawn'
 import { createInboxSessionTracker, purgeInboxSessionCore } from './inbox-session'
 import {
@@ -1905,14 +1905,104 @@ const announceClearReloadFailure = (peerId: string, outcome: Exclude<DirectiveOu
     .catch((e) => reportError('announce', `clear_reload failure announce failed for "${peerId}"`, e))
 }
 
-const runClearReload = (tileId: string, peerId: string, workstream: string): Promise<DirectiveOutcome> =>
-  runClearReloadInTurn(service, (line) => journal.add('dispatch', line), tileId, peerId, workstream, announceClearReloadFailure)
+type ContextTransactionAction = 'reserve' | 'release'
+const CONTEXT_TRANSACTION_TIMEOUT_MS = 10_000
+
+async function contextTransaction(
+  action: ContextTransactionAction,
+  depositId: string,
+  targetPeerId: string,
+  attemptId?: string
+): Promise<{ attemptId?: string }> {
+  const identity = approvals.operator
+  if (!identity) throw new Error('operator identity is unavailable for context transaction')
+  const endpoint = resolveBrokerEndpoint()
+  const payload = {
+    group_id: activeScope.groupId,
+    group_secret_hash: computeGroupSecretHash(activeScope.secret),
+    target_peer_id: targetPeerId,
+    deposit_id: depositId,
+    action,
+    ...(attemptId ? { attempt_id: attemptId } : {})
+  }
+  const signed = { ...payload, public_key: identity.publicKey }
+  const body = {
+    ...signed,
+    auth: buildAuthProof(identity.privateKey, signed, {
+      kind: 'operator',
+      operator_id: identity.operatorId
+    })
+  }
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+  if (endpoint.token) headers['Authorization'] = `Bearer ${endpoint.token}`
+  const response = await fetch(`${endpoint.url}/context/transaction`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(CONTEXT_TRANSACTION_TIMEOUT_MS)
+  })
+  if (!response.ok) {
+    let detail = ''
+    try {
+      detail = ((await response.json()) as { error?: string }).error ?? ''
+    } catch {
+      /* non-json error body */
+    }
+    throw new Error(detail || `context transaction ${action} failed: ${response.status}`)
+  }
+  const result = (await response.json()) as { state?: unknown; attempt_id?: unknown }
+  if (action === 'reserve') {
+    if (result.state !== 'reserved' || typeof result.attempt_id !== 'string' || !/^[a-f0-9]{32}$/.test(result.attempt_id)) {
+      throw new Error('context transaction reserve returned an invalid response')
+    }
+    return { attemptId: result.attempt_id }
+  }
+  if (result.state !== 'held') throw new Error('context transaction release returned an invalid response')
+  return {}
+}
+
+const runClearReload = (
+  tileId: string,
+  peerId: string,
+  workstream: string,
+  contextDepositId?: string
+): Promise<DirectiveOutcome> =>
+  runClearReloadInTurn(
+    {
+      serializeTile: (id, fn) => service.serializeTile(id, fn),
+      currentSessionId: (id) => {
+        const session = service.list().find((candidate) => candidate.id === id)
+        if (!session) throw new Error(`tile "${id}" no longer exists`)
+        return session.sessionId
+      },
+      reserveContextDeposit: async (depositId, targetPeerId) => {
+        const result = await contextTransaction('reserve', depositId, targetPeerId)
+        if (!result.attemptId) throw new Error('context transaction reserve omitted attempt_id')
+        return result.attemptId
+      },
+      readClearBackchannelBaseline: (id) => service.readClearBackchannelBaseline(id),
+      waitForClearBackchannel: async (id, currentSessionId, baselineSessionId) => {
+        await service.waitForClearBackchannel(id, currentSessionId, baselineSessionId)
+      },
+      releaseContextDeposit: async (depositId, attemptId) => {
+        await contextTransaction('release', depositId, peerId, attemptId)
+      },
+      reportError: (message, error) => reportError('dispatch', message, error)
+    },
+    (line) => journal.add('dispatch', line),
+    tileId,
+    peerId,
+    workstream,
+    announceClearReloadFailure,
+    { contextDepositId }
+  )
 
 const directiveRunDeps: DirectiveRunDeps = {
   listSessions: () => service.list(),
   injectCommand: (tileId, keys) => service.injectCommand(tileId, keys),
   runMagicCompact: (tileId, peerId, useMagic, mode) => runMagicCompact(tileId, peerId, useMagic, mode),
-  runClearReload: (tileId, peerId, workstream) => runClearReload(tileId, peerId, workstream),
+  runClearReload: (tileId, peerId, workstream, contextDepositId) =>
+    runClearReload(tileId, peerId, workstream, contextDepositId),
   // CLAUDE_CONFIG_DIR is honored so a relocated ~/.claude is still probed.
   resolveMagic: () => {
     const mode = resolveFeatures(config.projectDir).magicCompact

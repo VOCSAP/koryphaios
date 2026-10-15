@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import {
   CONTEXT_DEPOSIT_MAX_CHARS,
+  CONTEXT_CLEAR_IDLE_WAIT_MS,
+  CONTEXT_CLEAR_ROTATION_WAIT_MS,
+  CONTEXT_RESERVATION_RELEASE_MARGIN_MS,
   CONTEXT_RESERVATION_TTL_MS,
   CONTEXT_DEPOSITS_PER_GROUP,
   CONTEXT_DEPOSITS_PER_OWNER,
@@ -13,6 +16,8 @@ import {
   validateGitFacts,
 } from "../shared/context-buffer.ts";
 import { ContextRegistry, LaunchBindings, type LiveOwner } from "../shared/context-registry.ts";
+import { DIRECTIVE_IDLE_WAIT_MS } from "../desktop/src/main/directive-run.ts";
+import { CLEAR_BACKCHANNEL_ROTATION_WAIT_MS } from "../desktop/src/main/desk-session.ts";
 
 const CAP_A = "a".repeat(64);
 const CAP_B = "b".repeat(64);
@@ -426,6 +431,14 @@ describe("ContextRegistry", () => {
     expect(second.attempt_id).not.toBe(first.attempt_id);
   });
 
+  test("the reservation budget uses the same idle and rotation waits as the Deck", () => {
+    expect(CONTEXT_CLEAR_IDLE_WAIT_MS).toBe(DIRECTIVE_IDLE_WAIT_MS);
+    expect(CONTEXT_CLEAR_ROTATION_WAIT_MS).toBe(CLEAR_BACKCHANNEL_ROTATION_WAIT_MS);
+    expect(CONTEXT_RESERVATION_TTL_MS).toBe(
+      DIRECTIVE_IDLE_WAIT_MS + CLEAR_BACKCHANNEL_ROTATION_WAIT_MS + CONTEXT_RESERVATION_RELEASE_MARGIN_MS
+    );
+  });
+
   test("the default quotas are the named constants", () => {
     const h = harness();
     expect(h.registry.limits).toEqual({
@@ -439,11 +452,11 @@ describe("ContextRegistry", () => {
 
   test("the registry and buffer modules import nothing that reaches a database or the network", () => {
     const transpiler = new Bun.Transpiler({ loader: "ts" });
-    for (const file of ["context-registry.ts", "context-buffer.ts"]) {
+    for (const file of ["context-registry.ts", "context-buffer.ts", "context-timing.ts"]) {
       const src = require("node:fs").readFileSync(require("node:path").join(import.meta.dir, "..", "shared", file), "utf8");
       const imports = transpiler.scanImports(src).map((i) => i.path).sort();
       for (const path of imports) {
-        expect({ file, path, allowed: ["node:crypto", "./context-buffer.ts"].includes(path) }).toEqual({ file, path, allowed: true });
+        expect({ file, path, allowed: ["node:crypto", "./context-buffer.ts", "./context-timing.ts"].includes(path) }).toEqual({ file, path, allowed: true });
       }
     }
   });

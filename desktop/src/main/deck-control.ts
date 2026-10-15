@@ -182,7 +182,8 @@ export interface DeckControlDeps {
     peerIds: string[],
     prompt: string | undefined,
     callerId: string,
-    excludeSupervisor?: boolean
+    excludeSupervisor?: boolean,
+    options?: { contextDepositId?: string }
   ): Promise<DeckDirectiveRunResult>
 }
 

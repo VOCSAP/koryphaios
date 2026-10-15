@@ -43,7 +43,7 @@ interface Recorder {
   journal: string[];
   typed: { tileId: string; keys: string }[];
   magic: { tileId: string; peerId: string; useMagic: boolean; mode: string }[];
-  clearReload: { tileId: string; peerId: string; workstream: string }[];
+  clearReload: { tileId: string; peerId: string; workstream: string; contextDepositId?: string }[];
   errors: { message: string; error: unknown }[];
   settle: () => Promise<void>;
 }
@@ -52,7 +52,7 @@ function recorder(sessions: SessionRuntime[]): Recorder {
   const journal: string[] = [];
   const typed: { tileId: string; keys: string }[] = [];
   const magic: { tileId: string; peerId: string; useMagic: boolean; mode: string }[] = [];
-  const clearReload: { tileId: string; peerId: string; workstream: string }[] = [];
+  const clearReload: { tileId: string; peerId: string; workstream: string; contextDepositId?: string }[] = [];
   const errors: { message: string; error: unknown }[] = [];
   const pending: Promise<unknown>[] = [];
   const deps: DirectiveRunDeps = {
@@ -67,8 +67,8 @@ function recorder(sessions: SessionRuntime[]): Recorder {
       magic.push({ tileId, peerId, useMagic, mode });
       return Promise.resolve("written" as const);
     },
-    runClearReload: (tileId, peerId, workstream) => {
-      clearReload.push({ tileId, peerId, workstream });
+    runClearReload: (tileId, peerId, workstream, contextDepositId) => {
+      clearReload.push({ tileId, peerId, workstream, ...(contextDepositId ? { contextDepositId } : {}) });
       return Promise.resolve("written" as const);
     },
     resolveMagic: () => ({ useMagic: true, mode: "auto" }),
@@ -179,12 +179,245 @@ test("clear_reload serializes clear then the fixed recovery order", async () => 
   expect(journal).toEqual(['clear_reload -> "lead-a1b2": written']);
 });
 
+test("internal context deposit id reaches clear_reload without widening MCP arguments", async () => {
+  const recorded = recorder([session("tile-1", "alpha")]);
+
+  await runDirectiveForCaller("clear_reload", ["alpha"], "night-shift", "lead", recorded.deps, {
+    contextDepositId: "deposit-1",
+    reportWaitMs: 500
+  });
+
+  expect(recorded.clearReload).toEqual([
+    { tileId: "tile-1", peerId: "alpha", workstream: "night-shift", contextDepositId: "deposit-1" }
+  ]);
+});
+
+test("context clear reserves, observes a new clear rotation, then releases without a recovery injection", async () => {
+  const typed: string[] = [];
+  const events: string[] = [];
+  const errors: unknown[] = [];
+  const outcome = await runClearReloadInTurn(
+    {
+      serializeTile: (_id, fn) => fn(async (keys) => {
+        typed.push(keys);
+        events.push(`inject:${keys}`);
+        return "written" as const;
+      }),
+      currentSessionId: () => "sid-before",
+      reserveContextDeposit: async (depositId, peerId) => {
+        events.push(`reserve:${depositId}:${peerId}`);
+        return "attempt-1";
+      },
+      readClearBackchannelBaseline: () => {
+        events.push("baseline");
+        return "previous-clear";
+      },
+      waitForClearBackchannel: async (tileId, sessionId, baselineSessionId) => {
+        events.push(`wait:${tileId}:${sessionId}:${baselineSessionId}`);
+      },
+      releaseContextDeposit: async (depositId, attemptId) => {
+        events.push(`release:${depositId}:${attemptId}`);
+      },
+      reportError: (_message, error) => errors.push(error)
+    },
+    () => {},
+    "tile-1",
+    "lead-a1b2",
+    "night-shift",
+    undefined,
+    { contextDepositId: "deposit-1" }
+  );
+
+  expect(outcome).toBe("written");
+  expect(typed).toEqual(["/clear"]);
+  expect(events).toEqual([
+    "reserve:deposit-1:lead-a1b2",
+    "baseline",
+    "inject:/clear",
+    "wait:tile-1:sid-before:previous-clear",
+    "release:deposit-1:attempt-1"
+  ]);
+  expect(errors).toEqual([]);
+});
+
+test("context clear rejects a host missing the baseline reader before reservation", async () => {
+  let reservations = 0;
+
+  await expect(
+    runClearReloadInTurn(
+      {
+        serializeTile: (_id, fn) => fn(async () => "written" as const),
+        currentSessionId: () => "sid-before",
+        reserveContextDeposit: async () => {
+          reservations += 1;
+          return "attempt-1";
+        },
+        waitForClearBackchannel: async () => {},
+        releaseContextDeposit: async () => {}
+      },
+      () => {},
+      "tile-1",
+      "lead-a1b2",
+      "night-shift",
+      undefined,
+      { contextDepositId: "deposit-1" }
+    )
+  ).rejects.toThrow("context clear host is incomplete");
+
+  expect(reservations).toBe(0);
+});
+
+test("context clear reports a refused /clear and releases its reservation", async () => {
+  const releases: string[] = [];
+  const errors: { message: string; error: unknown }[] = [];
+  const outcome = await runClearReloadInTurn(
+    {
+      serializeTile: (_id, fn) => fn(async () => "busy-timeout" as const),
+      currentSessionId: () => "sid-before",
+      reserveContextDeposit: async () => "attempt-1",
+      readClearBackchannelBaseline: () => "prior-clear",
+      waitForClearBackchannel: async () => { throw new Error("must not wait after refused clear"); },
+      releaseContextDeposit: async (depositId, attemptId) => { releases.push(`${depositId}:${attemptId}`); },
+      reportError: (message, error) => errors.push({ message, error })
+    },
+    () => {},
+    "tile-1",
+    "lead-a1b2",
+    "night-shift",
+    undefined,
+    { contextDepositId: "deposit-1" }
+  );
+
+  expect(outcome).toBe("busy-timeout");
+  expect(releases).toEqual(["deposit-1:attempt-1"]);
+  expect(errors).toHaveLength(1);
+  expect(errors[0]?.message).toContain("busy-timeout");
+});
+
+test("context clear releases after a rotation wait fails and reports the failure", async () => {
+  const releases: string[] = [];
+  const failure = new Error("clear rotation timed out");
+  const errors: { message: string; error: unknown }[] = [];
+
+  await expect(
+    runClearReloadInTurn(
+      {
+        serializeTile: (_id, fn) => fn(async () => "written" as const),
+        currentSessionId: () => "sid-before",
+        reserveContextDeposit: async () => "attempt-1",
+        readClearBackchannelBaseline: () => null,
+        waitForClearBackchannel: async () => { throw failure; },
+        releaseContextDeposit: async (depositId, attemptId) => { releases.push(`${depositId}:${attemptId}`); },
+        reportError: (message, error) => errors.push({ message, error })
+      },
+      () => {},
+      "tile-1",
+      "lead-a1b2",
+      "night-shift",
+      undefined,
+      { contextDepositId: "deposit-1" }
+    )
+  ).rejects.toBe(failure);
+
+  expect(releases).toEqual(["deposit-1:attempt-1"]);
+  expect(errors).toEqual([{ message: 'context clear failed for "lead-a1b2"', error: failure }]);
+});
+
+test("context clear releases after an injection error and reports the failure", async () => {
+  const releases: string[] = [];
+  const failure = new Error("pty write failed");
+  const errors: { message: string; error: unknown }[] = [];
+
+  await expect(
+    runClearReloadInTurn(
+      {
+        serializeTile: (_id, fn) => fn(async () => { throw failure; }),
+        currentSessionId: () => "sid-before",
+        reserveContextDeposit: async () => "attempt-1",
+        readClearBackchannelBaseline: () => null,
+        waitForClearBackchannel: async () => {},
+        releaseContextDeposit: async (depositId, attemptId) => { releases.push(`${depositId}:${attemptId}`); },
+        reportError: (message, error) => errors.push({ message, error })
+      },
+      () => {},
+      "tile-1",
+      "lead-a1b2",
+      "night-shift",
+      undefined,
+      { contextDepositId: "deposit-1" }
+    )
+  ).rejects.toBe(failure);
+
+  expect(releases).toEqual(["deposit-1:attempt-1"]);
+  expect(errors).toEqual([{ message: 'context clear failed for "lead-a1b2"', error: failure }]);
+});
+
+test("context clear reports a reservation refusal before injecting /clear", async () => {
+  const typed: string[] = [];
+  const failure = new Error("context transaction returned 409");
+  const errors: { message: string; error: unknown }[] = [];
+
+  await expect(
+    runClearReloadInTurn(
+      {
+        serializeTile: (_id, fn) => fn(async (keys) => { typed.push(keys); return "written" as const; }),
+        currentSessionId: () => "sid-before",
+        reserveContextDeposit: async () => { throw failure; },
+        readClearBackchannelBaseline: () => null,
+        waitForClearBackchannel: async () => {},
+        releaseContextDeposit: async () => {},
+        reportError: (message, error) => errors.push({ message, error })
+      },
+      () => {},
+      "tile-1",
+      "lead-a1b2",
+      "night-shift",
+      undefined,
+      { contextDepositId: "deposit-1" }
+    )
+  ).rejects.toBe(failure);
+
+  expect(typed).toEqual([]);
+  expect(errors).toEqual([{ message: 'context clear failed for "lead-a1b2"', error: failure }]);
+});
+
+test("context clear reports a release refusal after a verified rotation", async () => {
+  const failure = new Error("context transaction returned 409");
+  const errors: { message: string; error: unknown }[] = [];
+
+  await expect(
+    runClearReloadInTurn(
+      {
+        serializeTile: (_id, fn) => fn(async () => "written" as const),
+        currentSessionId: () => "sid-before",
+        reserveContextDeposit: async () => "attempt-1",
+        readClearBackchannelBaseline: () => null,
+        waitForClearBackchannel: async () => {},
+        releaseContextDeposit: async () => { throw failure; },
+        reportError: (message, error) => errors.push({ message, error })
+      },
+      () => {},
+      "tile-1",
+      "lead-a1b2",
+      "night-shift",
+      undefined,
+      { contextDepositId: "deposit-1" }
+    )
+  ).rejects.toBe(failure);
+
+  expect(errors).toEqual([{ message: 'context clear failed for "lead-a1b2"', error: failure }]);
+});
+
 test("clear_reload stops before the reload instruction and announces when clear is refused", async () => {
   const typed: string[] = [];
   const journal: string[] = [];
   const failures: { peerId: string; outcome: string }[] = [];
+  const errors: unknown[] = [];
   const outcome = await runClearReloadInTurn(
-    { serializeTile: (_id, fn) => fn(async (keys) => { typed.push(keys); return "busy-timeout" as const; }) },
+    {
+      serializeTile: (_id, fn) => fn(async (keys) => { typed.push(keys); return "busy-timeout" as const; }),
+      reportError: (_message, error) => errors.push(error)
+    },
     (line) => journal.push(line),
     "tile-1",
     "lead-a1b2",
@@ -196,6 +429,7 @@ test("clear_reload stops before the reload instruction and announces when clear 
   expect(typed).toEqual(["/clear"]);
   expect(journal).toEqual(['clear_reload -> "lead-a1b2": /clear not injected (busy-timeout)']);
   expect(failures).toEqual([{ peerId: "lead-a1b2", outcome: "busy-timeout" }]);
+  expect(errors).toEqual([]);
 });
 
 test("clear_reload reports its sequence outcome without a second direct injection", async () => {

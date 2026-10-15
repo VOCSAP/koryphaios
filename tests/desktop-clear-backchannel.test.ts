@@ -17,6 +17,7 @@ import {
   liveRotationId,
   readDeskSession,
   readDeskSessionId,
+  waitForClearDeskSessionRotation,
 } from "../desktop/src/main/desk-session.ts";
 import { transcriptExists, encodeProjectDir } from "../desktop/src/main/session-transcript.ts";
 
@@ -115,6 +116,60 @@ describe("writeDeskSessionFile", () => {
     const peers = join(home, ".claude", "peers");
     expect(readDeskSessionId("tile-X", peers)).toBe("minted-42");
     expect(readDeskSession("tile-X", peers)).toEqual({ sid: "minted-42", source: "compact" });
+  });
+});
+
+describe("bounded clear back-channel wait", () => {
+  test("ignores a stale id and another source until a changed clear record arrives", async () => {
+    const records: Array<{ sid: string; source: "clear" | "compact" }> = [
+      { sid: "same-id", source: "clear" },
+      { sid: "compact-id", source: "compact" },
+      { sid: "clear-id", source: "clear" }
+    ];
+    const waits: number[] = [];
+
+    const sid = await waitForClearDeskSessionRotation("tile-42", "same-id", {
+      timeoutMs: 30,
+      pollMs: 10,
+      read: () => records.shift() ?? null,
+      sleep: async (ms: number) => { waits.push(ms); }
+    });
+
+    expect(sid).toBe("clear-id");
+    expect(waits).toEqual([10, 10]);
+  });
+
+  test("ignores the clear record present before the new /clear command", async () => {
+    const records: Array<{ sid: string; source: "clear" }> = [
+      { sid: "prior-clear", source: "clear" },
+      { sid: "new-clear", source: "clear" }
+    ];
+    const waits: number[] = [];
+
+    const sid = await waitForClearDeskSessionRotation("tile-42", "persisted-sid", {
+      baselineSessionId: "prior-clear",
+      timeoutMs: 30,
+      pollMs: 10,
+      read: () => records.shift() ?? null,
+      sleep: async (ms: number) => { waits.push(ms); }
+    });
+
+    expect(sid).toBe("new-clear");
+    expect(waits).toEqual([10]);
+  });
+
+  test("fails at the named deadline when no changed clear record arrives", async () => {
+    let now = 0;
+
+    await expect(
+      waitForClearDeskSessionRotation("tile-42", "same-id", {
+        timeoutMs: 30,
+        pollMs: 10,
+        read: () => ({ sid: "same-id", source: "clear" }),
+        now: () => now,
+        sleep: async (ms: number) => { now += ms; }
+      })
+    ).rejects.toThrow("clear back-channel rotation timed out");
   });
 });
 

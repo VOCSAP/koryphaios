@@ -105,6 +105,7 @@ function makeDeps(state: { sessions: SessionRuntime[] }): DeckControlDeps & {
     prompt: string | undefined;
     callerId: string;
     excludeSupervisor?: boolean;
+    contextDepositId?: string;
   }[];
 } {
   const closed: string[] = [];
@@ -202,8 +203,14 @@ function makeDeps(state: { sessions: SessionRuntime[] }): DeckControlDeps & {
       revokedLeadCallerIds.push(callerId);
     },
     confirmSpawnShellFields: () => true,
-    runDirective: async (directive, peerIds, prompt, callerId) => {
-      directiveRuns.push({ directive, peerIds, prompt, callerId });
+    runDirective: async (directive, peerIds, prompt, callerId, _excludeSupervisor, options) => {
+      directiveRuns.push({
+        directive,
+        peerIds,
+        prompt,
+        callerId,
+        ...(options?.contextDepositId ? { contextDepositId: options.contextDepositId } : {})
+      });
       return {
         injected: peerIds.map((p) => ({ tileId: `tile-${p}`, peerId: p })),
         refused: [],
@@ -3026,6 +3033,26 @@ test("deck_run_directive forwards clear_reload's validated workstream without ca
     directive: "clear_reload",
     peer_ids: ["alpha"],
     workstream: "night-shift"
+  });
+
+  expect(res.status).toBe(200);
+  expect(deps.directiveRuns).toEqual([
+    { directive: "clear_reload", peerIds: ["alpha"], prompt: "night-shift", callerId: "supervisor" }
+  ]);
+});
+
+test("deck_run_directive drops context deposit aliases from agent arguments", async () => {
+  const deps = makeDeps({ sessions: [] });
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+
+  const res = await call(srv, "deck_run_directive", {
+    directive: "clear_reload",
+    peer_ids: ["alpha"],
+    workstream: "night-shift",
+    context_deposit_id: "deposit-snake",
+    contextDepositId: "deposit-camel",
+    deposit_id: "deposit-legacy"
   });
 
   expect(res.status).toBe(200);

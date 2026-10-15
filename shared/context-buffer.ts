@@ -1,4 +1,10 @@
 import { createHash } from "node:crypto";
+export {
+  CONTEXT_CLEAR_IDLE_WAIT_MS,
+  CONTEXT_CLEAR_ROTATION_WAIT_MS,
+  CONTEXT_RESERVATION_RELEASE_MARGIN_MS,
+  CONTEXT_RESERVATION_TTL_MS,
+} from "./context-timing.ts";
 
 /**
  * The env var carrying a launch's deposit capability. Its name must not end in
@@ -23,7 +29,6 @@ export const CONTEXT_DEPOSIT_MAX_INPUT_BYTES = CONTEXT_DEPOSIT_MAX_CHARS * 4;
 export const CONTEXT_DEPOSITS_PER_OWNER = 3;
 export const CONTEXT_DEPOSITS_PER_GROUP = 96;
 export const CONTEXT_DEPOSITS_TOTAL = 256;
-export const CONTEXT_RESERVATION_TTL_MS = 120_000;
 
 const HEX64 = /^[0-9a-f]{64}$/;
 const SHA = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;

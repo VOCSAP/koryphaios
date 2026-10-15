@@ -38,7 +38,13 @@ import {
   transcriptExists,
   type TranscriptEntry
 } from './session-transcript'
-import { clearDeskSessionId, liveRotationId, readDeskSession, readDeskSessionId } from './desk-session'
+import {
+  clearDeskSessionId,
+  liveRotationId,
+  readDeskSession,
+  readDeskSessionId,
+  waitForClearDeskSessionRotation
+} from './desk-session'
 import {
   clearStatusFile,
   clearStatusLineCache,
@@ -966,6 +972,25 @@ export class SessionService extends EventEmitter {
         this.adoptRealId(def, def.sessionId, back)
       }
     }
+  }
+
+  readClearBackchannelBaseline(tileId: string): string | null {
+    const def = this.defs.find((candidate) => candidate.id === tileId)
+    if (!def) throw new Error(`tile "${tileId}" no longer exists`)
+    return readDeskSession(tileId, this.peersDirFor(def))?.sid ?? null
+  }
+
+  async waitForClearBackchannel(
+    tileId: string,
+    currentSessionId: string,
+    baselineSessionId: string | null
+  ): Promise<void> {
+    const def = this.defs.find((candidate) => candidate.id === tileId)
+    if (!def) throw new Error(`tile "${tileId}" no longer exists`)
+    await waitForClearDeskSessionRotation(tileId, currentSessionId, {
+      baselineSessionId,
+      read: () => readDeskSession(tileId, this.peersDirFor(def))
+    })
   }
 
   /**

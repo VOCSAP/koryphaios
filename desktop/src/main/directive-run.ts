@@ -12,6 +12,7 @@ import {
   resolveDirectiveTargets
 } from './directive'
 import { unreachedTargets, unreachedTargetsText } from './directive-journal'
+import { CONTEXT_CLEAR_IDLE_WAIT_MS } from '../../../shared/context-timing'
 
 export const DIRECTIVE_PROMPT_MAX = 500
 export const DIRECTIVE_MAX_TARGETS = 16
@@ -24,14 +25,14 @@ export const CLEAR_RELOAD_WORKSTREAM_RE = /^[a-z0-9-]{1,64}$/
  */
 export const DIRECTIVE_REPORT_WAIT_MS = 5_000
 /** How long injectCommand waits for a busy tile to fall idle before 'busy-timeout'. */
-export const DIRECTIVE_IDLE_WAIT_MS = 120_000
+export const DIRECTIVE_IDLE_WAIT_MS = CONTEXT_CLEAR_IDLE_WAIT_MS
 
 export interface DirectiveRunDeps {
   listSessions(): SessionRuntime[]
   injectCommand(tileId: string, keys: string): Promise<DirectiveOutcome>
   /** Resolves with the outcome of the command that ends the sequence. */
   runMagicCompact(tileId: string, peerId: string, useMagic: boolean, mode: MagicCompactMode): Promise<DirectiveOutcome>
-  runClearReload(tileId: string, peerId: string, workstream: string): Promise<DirectiveOutcome>
+  runClearReload(tileId: string, peerId: string, workstream: string, contextDepositId?: string): Promise<DirectiveOutcome>
   /** Called once per run, and only for magic_compact. */
   resolveMagic(): { useMagic: boolean; mode: MagicCompactMode }
   journal(line: string): void
@@ -40,6 +41,16 @@ export interface DirectiveRunDeps {
 
 export interface ClearReloadHost {
   serializeTile<T>(id: string, fn: (inject: (keys: string) => Promise<DirectiveOutcome>) => Promise<T>): Promise<T>
+  currentSessionId?(tileId: string): string
+  reserveContextDeposit?(depositId: string, targetPeerId: string): Promise<string>
+  readClearBackchannelBaseline?(tileId: string): string | null
+  waitForClearBackchannel?(tileId: string, currentSessionId: string, baselineSessionId: string | null): Promise<void>
+  releaseContextDeposit?(depositId: string, attemptId: string): Promise<void>
+  reportError?(message: string, error?: unknown): void
+}
+
+interface ClearReloadOptions {
+  contextDepositId?: string
 }
 
 export function runClearReloadInTurn(
@@ -48,20 +59,63 @@ export function runClearReloadInTurn(
   tileId: string,
   peerId: string,
   workstream: string,
-  announceFailure?: (peerId: string, outcome: Exclude<DirectiveOutcome, 'written'>) => void
+  announceFailure?: (peerId: string, outcome: Exclude<DirectiveOutcome, 'written'>) => void,
+  options: ClearReloadOptions = {}
 ): Promise<DirectiveOutcome> {
   return host.serializeTile(tileId, async (inject) => {
-    const cleared = await inject('/clear')
-    if (cleared !== 'written') {
-      journal(`clear_reload -> "${peerId}": /clear not injected (${cleared})`)
-      announceFailure?.(peerId, cleared)
-      return cleared
+    if (!options.contextDepositId) {
+      const cleared = await inject('/clear')
+      if (cleared !== 'written') {
+        journal(`clear_reload -> "${peerId}": /clear not injected (${cleared})`)
+        announceFailure?.(peerId, cleared)
+        return cleared
+      }
+      const reloaded = await inject(
+        `Reprends le workstream "${workstream}". D’abord, appelle handoffs_latest(project, workstream) avec project et workstream="${workstream}". Ensuite, appelle check_messages et lis tous les messages reçus. Seulement après ces deux étapes, appelle send_message. Retrouve dans le handoff la prochaine tâche puis exécute-la.`
+      )
+      journal(`clear_reload -> "${peerId}": ${reloaded}`)
+      return reloaded
     }
-    const reloaded = await inject(
-      `Reprends le workstream "${workstream}". D’abord, appelle handoffs_latest(project, workstream) avec project et workstream="${workstream}". Ensuite, appelle check_messages et lis tous les messages reçus. Seulement après ces deux étapes, appelle send_message. Retrouve dans le handoff la prochaine tâche puis exécute-la.`
-    )
-    journal(`clear_reload -> "${peerId}": ${reloaded}`)
-    return reloaded
+
+    const readClearBackchannelBaseline = host.readClearBackchannelBaseline
+    if (
+      !host.currentSessionId ||
+      !host.reserveContextDeposit ||
+      !readClearBackchannelBaseline ||
+      !host.waitForClearBackchannel ||
+      !host.releaseContextDeposit
+    ) {
+      throw new Error('context clear host is incomplete')
+    }
+    const currentSessionId = host.currentSessionId(tileId)
+    let attemptId: string | undefined
+    try {
+      attemptId = await host.reserveContextDeposit(options.contextDepositId, peerId)
+      const baselineSessionId = readClearBackchannelBaseline(tileId)
+      const cleared = await inject('/clear')
+      if (cleared !== 'written') {
+        const error = new Error(`/clear not injected (${cleared})`)
+        journal(`clear_reload -> "${peerId}": /clear not injected (${cleared})`)
+        host.reportError?.(`context clear failed for "${peerId}": ${error.message}`, error)
+        announceFailure?.(peerId, cleared)
+        return cleared
+      }
+      await host.waitForClearBackchannel(tileId, currentSessionId, baselineSessionId)
+      journal(`clear_reload -> "${peerId}": written`)
+      return 'written'
+    } catch (error) {
+      host.reportError?.(`context clear failed for "${peerId}"`, error)
+      throw error
+    } finally {
+      if (attemptId) {
+        try {
+          await host.releaseContextDeposit(options.contextDepositId, attemptId)
+        } catch (error) {
+          host.reportError?.(`context clear failed for "${peerId}"`, error)
+          throw error
+        }
+      }
+    }
   })
 }
 
@@ -91,6 +145,7 @@ interface DirectiveLaunch {
 
 interface DirectiveRunOptions {
   reportWaitMs?: number
+  contextDepositId?: string
 }
 
 const LINE_BREAKS = new Set([0x0a, 0x0d, 0x09, 0x2028, 0x2029])
@@ -204,7 +259,8 @@ function launchDirective(
   peerIds: string[],
   prompt: string | undefined,
   label: string,
-  deps: DirectiveRunDeps
+  deps: DirectiveRunDeps,
+  options: DirectiveRunOptions
 ): DirectiveLaunch {
   const launched: DirectiveLaunch['launched'] = []
   try {
@@ -229,7 +285,7 @@ function launchDirective(
         })
         launched.push({ tileId: t.id, peerId: t.peerId, outcome })
       } else if (clearReloadWorkstream) {
-        const outcome = deps.runClearReload(t.id, t.peerId, clearReloadWorkstream).catch((e): 'error' => {
+        const outcome = deps.runClearReload(t.id, t.peerId, clearReloadWorkstream, options.contextDepositId).catch((e): 'error' => {
           reportDirectiveError(deps, `clear_reload failed for "${t.peerId}"`, e)
           return 'error'
         })
@@ -270,7 +326,7 @@ export async function runDirectiveOn(
   deps: DirectiveRunDeps,
   options: DirectiveRunOptions = {}
 ): Promise<DeckDirectiveRunResult> {
-  return settleLaunch(launchDirective(cmd, peerIds, prompt, label, deps), options.reportWaitMs ?? DIRECTIVE_REPORT_WAIT_MS)
+  return settleLaunch(launchDirective(cmd, peerIds, prompt, label, deps, options), options.reportWaitMs ?? DIRECTIVE_REPORT_WAIT_MS)
 }
 
 async function settleLaunch(run: DirectiveLaunch, waitMs: number): Promise<DeckDirectiveRunResult> {
@@ -324,7 +380,7 @@ export async function runDirectiveForCaller(
   try {
     const inputNote = prompt ? ` with ${cmd === 'clear_reload' ? 'workstream' : 'prompt'} ${JSON.stringify(prompt)}` : ''
     scopedDeps.journal(`directive ${directiveKeys(cmd)} requested by ${callerId} for ${peerIds.join(', ')}${inputNote}`)
-    run = launchDirective(cmd, peerIds, prompt, `deck_run_directive by ${callerId}`, scopedDeps)
+    run = launchDirective(cmd, peerIds, prompt, `deck_run_directive by ${callerId}`, scopedDeps, options)
   } catch (e) {
     return failedDeckDirectiveRun(scopedDeps, e)
   }
