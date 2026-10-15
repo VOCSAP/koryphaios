@@ -227,6 +227,7 @@ also why `stripControl`/`truncate` sit in `shared/text.ts` rather than beside
 - `instance_token` (UUID v4, immutable) -- internal routing key. FK target for `messages`, key of the WebSocket pool, key of `peer_sessions`. Never exposed to Claude.
 - `peer_id` (display, mutable via `set_id`) -- what `list_peers`, `whoami`, `send_message` speak. Unique per `(peer_id, group_id)`, all statuses included (renaming over a dormant peer's name is rejected with 409).
 - A peer has NO portable identity: there is no per-peer key pair (Ed25519 is the OPERATOR credential of the approval tables only), and across brokers a relayed peer is addressed by `relay_ref`, the digest of its token, under the `replica_id` that relays it (see "Peer federation").
+- The CLI has no peer identity, with one exception: a Kory launch's deposit capability proves "this launch" for `context-deposit` only (see "Context deposits").
 
 The default `peer_id` is derived from `(host, cwd, group_id)` via `deriveDefaultId` with a `MAX_SUFFIX=1000` guardrail. Typical defaults look like `<host>-<dir>` (e.g. `dev-pc-my-project`, `dev-pc-my-project-2` on collision).
 
@@ -242,6 +243,40 @@ this caller act on THAT object", never "who does this caller belong to".
 Shipped instances: a gateway table keyed by channel `kind` (second operator
 replaced and stopped the first), an address→operator lookup whose `.get()`
 picked one of two rows, `hostname()` used as identity.
+
+## Context deposits
+
+A peer can leave a short summary of its working context in the broker before a
+`/clear`, through `bun cli.ts context-deposit --input <file|->`. No MCP tool and
+no read route exist: the buffer is meant to be pushed back to its author only.
+
+- **Identity.** The Deck mints a 256-bit capability at every host Claude
+  `startPty` and exports it as `CLAUDE_PEERS_DEPOSIT_CAPABILITY` (empty for a
+  sandbox, a non-Claude launch or a utility PTY). The `server.ts` of that launch
+  sends its sha256 in both `/register` bodies (boot and `switch_group`); the
+  broker binds the hash, in RAM, to the `instance_token` it just returned. The
+  CLI presents the raw capability and the broker hashes it. The name avoids
+  every suffix `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB` strips (`_TOKEN`, `_KEY`,
+  `_SECRET`, ...).
+- **Owner = (`instance_token`, epoch).** Every `/register` mints a new epoch
+  for its token, so a relaunch, a reconnection or a resurrection drops the
+  earlier deposits. Liveness is derived on every call (owner row active and
+  local, epoch unchanged); nothing revokes it, so the sites that turn a peer
+  dormant need no hook. `/disconnect` and `/unregister` free the RAM at once, a
+  sweep on the `cleanStalePeers` cadence frees the rest. `peer_id` is never
+  part of the key, so `set_id` detaches nothing.
+- **Two peers behind one capability** (a nested `claude` or a teammate
+  inheriting the tile's env) answer `409 contested` and nothing is stored,
+  until one of them stops. A TOFU-exempt group never binds.
+- **Bounds.** `CONTEXT_DEPOSIT_MAX_CHARS` code points per deposit, one named
+  and tunable constant; quotas per owner, group and broker. Every bound
+  refuses, never truncates or evicts; `--replace <deposit_id>` is the only way
+  to remove one's own deposit. The body is bounded on `Content-Length` before
+  any parse. Any invalid capability answers the same `401`.
+- **Local by construction.** Deposits and bindings live in the broker's RAM
+  only: never in SQLite, never federated or synced, never logged, gone at a
+  broker restart (the next deposit then answers `401` until the session is
+  relaunched).
 
 ## Resume flow
 

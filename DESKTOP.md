@@ -65,6 +65,11 @@ Electron + React 19 + zustand, xterm terminals over node-pty. Sources in
   `sandbox.json` (operator-owned, never the repo). Design + jalons M2/M3:
   commits `32d2249` (M1) and `959c98f` (M2/M3); operator docs:
   `desktop/docs/sandbox.md`.
+- **Context deposit capability**: every host Claude `startPty` mints a fresh
+  `CLAUDE_PEERS_DEPOSIT_CAPABILITY` (`deposit-capability.ts`), held only in the
+  spawn env, never in the workspace or a log. Sandbox, non-Claude and utility
+  PTYs get `''`, and `pty-manager.ts` blanks a value inherited from the Deck's
+  own environment. The broker side is in `ARCHITECTURE.md`, "Context deposits".
 - **Remote approvals (opt-in, `mobileApprovals`)**: when a session blocks, the
   question is parked broker-side and can be answered from elsewhere; the Deck
   holds the ONLY credential able to settle one. Three producers, because the

@@ -142,6 +142,13 @@ export interface RegisterRequest {
    * by the caller, never an authorization proof.
    */
   cc_session_id?: string;
+  /**
+   * sha256 hex of this launch's CLAUDE_PEERS_DEPOSIT_CAPABILITY, never the raw
+   * value. The broker binds it in RAM to the instance_token it returns. Not an
+   * authorization proof on its own: a deposit needs the raw capability, and is
+   * refused while two active peers share this hash.
+   */
+  deposit_capability_hash?: string;
 }
 
 export interface RegisterResponse {

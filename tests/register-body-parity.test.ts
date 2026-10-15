@@ -28,6 +28,7 @@ const REQUIRED_IN_BOTH = [
   "role",
   "desk_session",
   "cc_session_id",
+  "deposit_capability_hash",
 ] as const;
 
 /** The ONE key allowed to appear in a single body. Grows only by decision. */

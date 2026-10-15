@@ -24,6 +24,17 @@ import { createLogger, coreLogDir } from "./shared/logger.ts";
 import { projectKeyCaseRefusal, validateProjectKey } from "./shared/project-key.ts";
 import { roadmapTitleRefusal } from "./shared/roadmap-title.ts";
 import {
+  CONTEXT_DEPOSIT_MAX_BODY_BYTES,
+  isCapabilityHashShape,
+  isCapabilityShape,
+  isDepositIdShape,
+  hashCapability,
+  validateGitFacts,
+  type ContextDepositRefusal,
+  type ContextDepositResponse,
+} from "./shared/context-buffer.ts";
+import { ContextRegistry } from "./shared/context-registry.ts";
+import {
   formatRoadmapContextDocumentHeader,
   formatRoadmapContextDocumentOmission,
   ROADMAP_CONTEXT_DOCUMENT_OUTPUT_MAX_CHARS,
@@ -1858,6 +1869,18 @@ function sweepInactivePeers(): void {
 }
 guardedInterval("sweepInactivePeers", sweepInactivePeers, SWEEP_INTERVAL_SEC * 1000);
 
+// --- Context deposits: RAM only, never persisted, federated or logged ---
+
+const selectLiveLocalOwner = db.query(
+  `SELECT peer_id, group_id FROM peers
+    WHERE instance_token = ? AND status = 'active' AND relay_id IS NULL AND via IS NULL`
+);
+const contextRegistry = new ContextRegistry({
+  ownerIfActive: (instanceToken) =>
+    selectLiveLocalOwner.get(instanceToken) as { peer_id: string; group_id: string } | null,
+});
+guardedInterval("sweepContextDeposits", () => contextRegistry.sweep(), CLEAN_INTERVAL_MS);
+
 /**
  * Routes off the card's own locked_group column, never re-derived by joining
  * locked_by against a live peers row -- the sweep fires precisely when no live
@@ -2647,6 +2670,126 @@ function handleSetId(body: SetIdRequest): SetIdResponse | { error: string; statu
     body.instance_token,
   ]);
   return { peer_id: body.new_peer_id, previous: me.peer_id };
+}
+
+/**
+ * The binding is posed here, after any successful /register, so the four
+ * return branches of handleRegister are covered by one call site. A
+ * TOFU-exempt group pins no secret and never binds.
+ */
+function bindDepositCapability(body: RegisterRequest, instanceToken: string): void {
+  const declared: unknown = body.deposit_capability_hash;
+  if (declared !== undefined && declared !== null && !isCapabilityHashShape(declared)) {
+    log.warn("register: malformed deposit_capability_hash, launch left without a deposit capability");
+  }
+  const hash = !isTofuExemptGroup(body.group_id) && isCapabilityHashShape(declared) ? declared : null;
+  contextRegistry.onRegister(instanceToken, hash);
+}
+
+const DEPOSIT_REFUSAL_TEXT: Record<ContextDepositRefusal["reason"], string> = {
+  bad_body: "malformed deposit body",
+  empty_text: "the deposit text is empty",
+  ill_formed_text: "the deposit text holds a lone surrogate",
+  forbidden_characters: "the deposit text holds a control, bidirectional or line-separator character",
+  bad_git_fact: "head, branch or git_root is malformed",
+  bad_replace_id: "replace is not a deposit id",
+  length_required: "a Content-Length header is required",
+  capability: "deposit capability refused",
+  replace_not_found: "no such deposit to replace",
+  contested: "several live sessions share this deposit capability",
+  too_long: "the deposit text exceeds the limit",
+  body_too_large: "the request body exceeds the limit",
+  quota_owner: "this session already holds its maximum of deposits",
+  quota_group: "this group already holds its maximum of deposits",
+  quota_total: "this broker already holds its maximum of deposits",
+};
+
+function refuse(status: number, reason: ContextDepositRefusal["reason"], extra: Partial<ContextDepositRefusal> = {}): Response {
+  const refusal: ContextDepositRefusal = { error: DEPOSIT_REFUSAL_TEXT[reason], reason, ...extra };
+  return Response.json(refusal, { status });
+}
+
+/**
+ * Bun leaves an unread chunked body on the keep-alive connection, where the
+ * client's next request then fails with an empty 400; Connection: close and
+ * cancel() do not prevent it, reading does. Bounded: the read stops at the
+ * first chunk past the body limit, so it overshoots by at most one chunk of
+ * Bun's stream (measured: 262144 bytes for a 4 MiB chunk).
+ */
+async function drainBounded(req: Request): Promise<void> {
+  const reader = req.body?.getReader();
+  if (!reader) return;
+  let read = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) return;
+    read += value.byteLength;
+    if (read > CONTEXT_DEPOSIT_MAX_BODY_BYTES) {
+      await reader.cancel();
+      return;
+    }
+  }
+}
+
+/**
+ * Bounded before parsing: the generic router parses every body first. A parse
+ * error is never logged with its cause, whose message can quote the body.
+ */
+async function handleContextDeposit(req: Request): Promise<Response> {
+  const declaredLength = req.headers.get("content-length");
+  if (declaredLength === null) {
+    await drainBounded(req);
+    return refuse(400, "length_required");
+  }
+  const length = Number(declaredLength);
+  if (!Number.isInteger(length) || length < 0) return refuse(400, "length_required");
+  if (length > CONTEXT_DEPOSIT_MAX_BODY_BYTES) return refuse(413, "body_too_large");
+  const raw = await req.arrayBuffer();
+  if (raw.byteLength > CONTEXT_DEPOSIT_MAX_BODY_BYTES) return refuse(413, "body_too_large");
+
+  let body: Record<string, unknown>;
+  try {
+    const parsed: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(raw));
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return refuse(400, "bad_body");
+    body = parsed as Record<string, unknown>;
+  } catch {
+    log.warn("/context/deposit: body is not valid UTF-8 JSON");
+    return refuse(400, "bad_body");
+  }
+
+  if (typeof body.text !== "string") return refuse(400, "bad_body");
+  const replace = body.replace ?? null;
+  if (replace !== null && !isDepositIdShape(replace)) return refuse(400, "bad_replace_id");
+  const facts = { head: body.head ?? null, branch: body.branch ?? null, git_root: body.git_root ?? null };
+  if (!validateGitFacts(facts)) return refuse(400, "bad_git_fact");
+  if (!isCapabilityShape(body.deposit_capability)) return refuse(401, "capability");
+
+  const outcome = contextRegistry.deposit({
+    capability_hash: hashCapability(body.deposit_capability),
+    text: body.text,
+    head: facts.head as string | null,
+    branch: facts.branch as string | null,
+    git_root: facts.git_root as string | null,
+    replace: replace as string | null,
+  });
+  if (!outcome.ok) {
+    const { ok: _ok, status, reason, ...extra } = outcome;
+    return refuse(status, reason, extra);
+  }
+  const response: ContextDepositResponse = {
+    ok: true,
+    deposit_id: outcome.deposit.deposit_id,
+    owner_peer_id: outcome.owner_peer_id,
+    chars: outcome.deposit.chars,
+    limit_chars: outcome.limit_chars,
+    deposited_at: outcome.deposit.deposited_at,
+    head_at_deposit: outcome.deposit.head_at_deposit,
+    branch: outcome.deposit.branch,
+    state: outcome.deposit.state,
+    ...(outcome.replaced ? { replaced: outcome.replaced } : {}),
+    held: outcome.held.map((d) => ({ deposit_id: d.deposit_id, chars: d.chars, deposited_at: d.deposited_at })),
+  };
+  return Response.json(response);
 }
 
 // B1: the shape of a peer row on the HTTP boundary, as a pick-list so that a
@@ -11482,6 +11625,17 @@ const server = Bun.serve<WsData>({
       return new Response("claude-peers broker", { status: 200 });
     }
 
+    if (path === "/context/deposit") {
+      try {
+        return await handleContextDeposit(req);
+      } catch (e) {
+        // Only the error class: a message could quote the deposit text.
+        const errorId = randomBytes(4).toString("hex");
+        log.error(`request /context/deposit failed with 500 error_id=${errorId}`, e instanceof Error ? e.name : typeof e);
+        return Response.json({ error: "internal error", error_id: errorId }, { status: 500 });
+      }
+    }
+
     let body: unknown;
     try {
       body = await req.json();
@@ -11497,6 +11651,7 @@ const server = Bun.serve<WsData>({
           if ("error" in result) {
             return Response.json({ error: result.error }, { status: result.status });
           }
+          bindDepositCapability(body as RegisterRequest, result.instance_token);
           return Response.json(result);
         }
         case "/heartbeat": {
@@ -11512,11 +11667,13 @@ const server = Bun.serve<WsData>({
         case "/disconnect": {
           const result = handleDisconnect(body as DisconnectRequest);
           if (result && "error" in result) return Response.json({ ok: false, error: result.error });
+          contextRegistry.forgetOwner((body as DisconnectRequest).instance_token);
           return Response.json({ ok: true });
         }
         case "/unregister": {
           const result = handleUnregister(body as UnregisterRequest);
           if (result && "error" in result) return Response.json({ ok: false, error: result.error });
+          contextRegistry.forgetOwner((body as UnregisterRequest).instance_token);
           return Response.json({ ok: true });
         }
         case "/set-id": {

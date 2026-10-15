@@ -41,6 +41,7 @@ export const EXPECTED_LAUNCHES: Readonly<Record<string, number>> = {
   "server-ask-operator.test.ts": 2,
   "server-cleanup-identity.test.ts": 1,
   "server-deck-reply-route.test.ts": 2,
+  "server-deposit-capability.test.ts": 1,
   "server-deck-token-authz.test.ts": 1,
   "server-deck-tools-parity.test.ts": 1,
   "server-delegated-task.test.ts": 2,

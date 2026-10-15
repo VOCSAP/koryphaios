@@ -44,7 +44,10 @@ function executeUtilitySpawn(source: string): Record<string, string> {
 }
 
 test("utility PTYs receive an empty permission lease environment", () => {
-  expect(executeUtilitySpawn(readFileSync(SESSION_SERVICE_PATH, "utf8"))).toEqual({ KORY_PERMISSION_LEASE: "" });
+  expect(executeUtilitySpawn(readFileSync(SESSION_SERVICE_PATH, "utf8"))).toEqual({
+    KORY_PERMISSION_LEASE: "",
+    CLAUDE_PEERS_DEPOSIT_CAPABILITY: "",
+  });
 });
 
 test("one-shot PTY commands clear an inherited permission lease", () => {

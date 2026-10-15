@@ -69,6 +69,7 @@ import { reconcileOrder } from '@shared/reorder'
 import type { JoinAnnounceIntent } from '@shared/announce'
 import { peerToolsEnvValue } from './session-env'
 import { PermissionLeaseRuntime, type PermissionLeaseHandle } from './permission-lease-runtime'
+import { mintDepositCapability } from './deposit-capability'
 
 interface RuntimeState {
   status: SessionStatus
@@ -585,7 +586,7 @@ export class SessionService extends EventEmitter {
    * inert (no runtime entry for the id).
    */
   spawnUtility(id: string, cwd: string, opts: { command: string; shell: string; interactive: boolean }): void {
-    this.pty.spawn(id, cwd, opts, { KORY_PERMISSION_LEASE: '' })
+    this.pty.spawn(id, cwd, opts, { KORY_PERMISSION_LEASE: '', CLAUDE_PEERS_DEPOSIT_CAPABILITY: '' })
   }
 
   private killWithTrace(id: string, reason: string): void {
@@ -1463,6 +1464,7 @@ export class SessionService extends EventEmitter {
       CLAUDE_PEERS_DESK_SESSION: def.id,
       CLAUDE_PEERS_ROLE: def.role ?? '',
       KORY_PERMISSION_LEASE: '',
+      CLAUDE_PEERS_DEPOSIT_CAPABILITY: '',
       KORY_APPROVAL_MODULE: koryModuleServed ? '1' : '',
       ...(fallbackInjected ? { KORY_STATUS_FALLBACK: '1' } : null)
     }
@@ -1540,6 +1542,7 @@ export class SessionService extends EventEmitter {
       r.liveStatusSilenceWarned = false
       r.liveStatusAttentionAt = 0
     }
+    if (!sandboxed && isClaudeLaunch(base)) sessionEnv.CLAUDE_PEERS_DEPOSIT_CAPABILITY = mintDepositCapability()
     let permissionLease: PermissionLeaseHandle | null = null
     if (!sandboxed && isClaudeLaunch(base) && this.permissionLeases) {
       try {

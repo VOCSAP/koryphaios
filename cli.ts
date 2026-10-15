@@ -11,6 +11,16 @@ import { loadConfig, brokerUrl } from "./shared/config.ts";
 import type { Peer, GroupStatsResponse, RoadmapUpsertResponse } from "./shared/types.ts";
 import { computeProjectKey } from "./shared/summarize.ts";
 import { resolveProjectKey } from "./shared/project-key.ts";
+import { closeSync, constants as fsConstants, fstatSync, openSync, readSync } from "node:fs";
+import {
+  CONTEXT_DEPOSIT_MAX_INPUT_BYTES,
+  DEPOSIT_CAPABILITY_ENV,
+  isCapabilityShape,
+  isDepositIdShape,
+  readGitFacts,
+  type ContextDepositRefusal,
+  type ContextDepositResponse,
+} from "./shared/context-buffer.ts";
 
 const config = await loadConfig();
 const BROKER_URL = brokerUrl(config);
@@ -77,6 +87,171 @@ function formatPeerLine(p: Peer): string {
   const statusTag = p.status === "active" ? "" : `  <${p.status}>`;
   const viaTag = p.via ? `  via:${p.via}` : "";
   return `${head}${statusTag}  ${p.cwd}${viaTag}`;
+}
+
+const DEPOSIT_USAGE = "Usage: bun cli.ts context-deposit --input <file|-> [--replace <deposit_id>]";
+
+function depositExit(code: number, lines: string[]): never {
+  for (const line of lines) console.error(line);
+  process.exit(code);
+}
+
+async function readDepositInput(input: string): Promise<string> {
+  let bytes: Uint8Array;
+  if (input === "-") {
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    for await (const chunk of Bun.stdin.stream()) {
+      total += chunk.byteLength;
+      if (total > CONTEXT_DEPOSIT_MAX_INPUT_BYTES) {
+        depositExit(2, [`context-deposit: stdin exceeds ${CONTEXT_DEPOSIT_MAX_INPUT_BYTES} bytes`]);
+      }
+      chunks.push(chunk);
+    }
+    bytes = new Uint8Array(total);
+    let at = 0;
+    for (const chunk of chunks) {
+      bytes.set(chunk, at);
+      at += chunk.byteLength;
+    }
+  } else {
+    let fd: number;
+    try {
+      // O_NONBLOCK: opening a FIFO with no writer would otherwise hang before fstat can refuse it.
+      fd = openSync(input, fsConstants.O_RDONLY | (fsConstants.O_NONBLOCK ?? 0));
+    } catch (e) {
+      depositExit(2, [`context-deposit: cannot read ${input}: ${e instanceof Error ? e.message : String(e)}`]);
+    }
+    try {
+      if (!fstatSync(fd).isFile()) depositExit(2, [`context-deposit: ${input} is not a regular file`]);
+      const buffer = new Uint8Array(CONTEXT_DEPOSIT_MAX_INPUT_BYTES + 1);
+      let total = 0;
+      for (;;) {
+        const n = readSync(fd, buffer, total, buffer.byteLength - total, null);
+        if (n === 0) break;
+        total += n;
+        if (total > CONTEXT_DEPOSIT_MAX_INPUT_BYTES) {
+          depositExit(2, [`context-deposit: ${input} exceeds ${CONTEXT_DEPOSIT_MAX_INPUT_BYTES} bytes`]);
+        }
+      }
+      bytes = buffer.subarray(0, total);
+    } finally {
+      closeSync(fd);
+    }
+  }
+  if (bytes.byteLength === 0) depositExit(2, ["context-deposit: the input is empty"]);
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    depositExit(2, ["context-deposit: the input is not valid UTF-8"]);
+  }
+}
+
+/** One line of remedy per refusal; the text, the capability and its hash are never printed. */
+function depositRemedy(refusal: Partial<ContextDepositRefusal>): { code: number; lines: string[] } {
+  switch (refusal.reason) {
+    case "too_long":
+      return {
+        code: 3,
+        lines: [
+          `got_chars: ${refusal.got_chars}  limit_chars: ${refusal.max_chars}`,
+          "shorten it and deposit again: next action first, then state, then decisions",
+        ],
+      };
+    case "empty_text":
+      return { code: 3, lines: ["the text is empty or blank"] };
+    case "ill_formed_text":
+    case "forbidden_characters":
+      return { code: 3, lines: ["the text holds a control, bidirectional or line-separator character; remove it and retry"] };
+    case "quota_owner":
+      return {
+        code: 4,
+        lines: [`held: ${(refusal.held_ids ?? []).join(" ")}`, "replace one of them: --replace <deposit_id>"],
+      };
+    case "quota_group":
+    case "quota_total":
+      return { code: 4, lines: ["the broker holds its maximum of deposits; retry later"] };
+    case "replace_not_found":
+      return { code: 4, lines: ["no live deposit of this session has that id"] };
+    case "capability":
+      return {
+        code: 5,
+        lines: [
+          "this session holds no usable deposit capability: it was not launched by Kory, runs in a sandbox,",
+          "its environment was scrubbed (CLAUDE_CODE_SUBPROCESS_ENV_SCRUB), or the broker restarted since its launch",
+        ],
+      };
+    case "contested":
+      return {
+        code: 5,
+        lines: ["a second live session shares this capability (a nested claude or a teammate): end it, then retry"],
+      };
+    default:
+      return { code: 1, lines: [refusal.error ?? "the broker refused the deposit"] };
+  }
+}
+
+async function contextDeposit(args: string[]): Promise<void> {
+  let input: string | undefined;
+  let replace: string | undefined;
+  for (let i = 0; i < args.length; i += 1) {
+    const flag = args[i];
+    const value = args[i + 1];
+    if ((flag !== "--input" && flag !== "--replace") || value === undefined) depositExit(2, [DEPOSIT_USAGE]);
+    if (flag === "--input") {
+      if (input !== undefined) depositExit(2, [DEPOSIT_USAGE]);
+      input = value;
+    } else {
+      if (replace !== undefined || !isDepositIdShape(value)) depositExit(2, [DEPOSIT_USAGE]);
+      replace = value;
+    }
+    i += 1;
+  }
+  if (input === undefined) depositExit(2, [DEPOSIT_USAGE]);
+
+  const capability = process.env[DEPOSIT_CAPABILITY_ENV];
+  if (!isCapabilityShape(capability)) {
+    depositExit(5, ["context-deposit: refused (capability)", ...depositRemedy({ reason: "capability" }).lines]);
+  }
+
+  const text = await readDepositInput(input);
+  const facts = await readGitFacts(process.cwd());
+
+  let res: Response;
+  try {
+    res = await fetch(`${BROKER_URL}/context/deposit`, {
+      method: "POST",
+      headers: authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ deposit_capability: capability, text, ...facts, ...(replace ? { replace } : {}) }),
+      signal: AbortSignal.timeout(5000),
+    });
+  } catch (e) {
+    depositExit(1, [`context-deposit: broker unreachable at ${BROKER_URL}: ${e instanceof Error ? e.message : String(e)}`]);
+  }
+
+  let payload: unknown = null;
+  try {
+    payload = await res.json();
+  } catch {
+    payload = null;
+  }
+  if (!res.ok) {
+    const refusal = (payload ?? {}) as Partial<ContextDepositRefusal>;
+    if (res.status >= 500 || !refusal.reason) {
+      depositExit(1, [`context-deposit: failed (HTTP ${res.status})`]);
+    }
+    const remedy = depositRemedy(refusal);
+    depositExit(remedy.code, [`context-deposit: refused (${refusal.reason})`, ...remedy.lines]);
+  }
+  const stored = payload as ContextDepositResponse;
+  console.log("context-deposit: stored");
+  console.log(`deposit_id: ${stored.deposit_id}`);
+  console.log(`peer_id: ${stored.owner_peer_id}`);
+  console.log(`chars: ${stored.chars} (limit ${stored.limit_chars})`);
+  console.log(`deposited_at: ${stored.deposited_at}`);
+  console.log(`head_at_deposit: ${stored.head_at_deposit ?? "none"}  branch: ${stored.branch ?? "none"}`);
+  console.log("kept: memory of the broker only; dropped when this session disconnects or relaunches; never written to disk");
+  console.log("next: give this deposit_id to the lead. Do not run /clear yourself.");
 }
 
 const cmd = process.argv[2];
@@ -317,6 +492,10 @@ switch (cmd) {
     break;
   }
 
+  case "context-deposit":
+    await contextDeposit(flags);
+    break;
+
   default:
     console.log(`claude-peers CLI v0.4
 
@@ -333,6 +512,9 @@ Usage:
                                           Create one roadmap item (fallback for
                                           roadmap_add when the MCP tool is
                                           absent from a session's tool-list)
+  bun cli.ts context-deposit --input <file|-> [--replace <deposit_id>]
+                                          Deposit this session's context summary
+                                          in the broker's memory (Kory launches)
 
 Note: 'send' is no longer available -- use the MCP send_message tool from
 within Claude Code (the broker requires a valid instance_token).

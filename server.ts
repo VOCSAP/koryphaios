@@ -86,6 +86,7 @@ import type {
   ApprovalAddResponse,
   ApprovalWaitResponse,
 } from "./shared/types.ts";
+import { depositCapabilityHashFromEnv } from "./shared/context-buffer.ts";
 import {
   buildAuthProof,
   loadSessionApprovalCredential,
@@ -2079,6 +2080,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
           // comparing the two bodies' identity keys as SETS.
           desk_session: process.env.CLAUDE_PEERS_DESK_SESSION,
           cc_session_id: process.env.CLAUDE_CODE_SESSION_ID,
+          deposit_capability_hash: depositCapabilityHashFromEnv(process.env),
         });
         myInstanceToken = reg.instance_token;
         myPeerId = reg.peer_id;
@@ -2556,6 +2558,7 @@ async function main() {
     // above (see the note there for why both sites must carry them).
     desk_session: process.env.CLAUDE_PEERS_DESK_SESSION,
     cc_session_id: process.env.CLAUDE_CODE_SESSION_ID,
+    deposit_capability_hash: depositCapabilityHashFromEnv(process.env),
   });
   myInstanceToken = reg.instance_token;
   myPeerId = reg.peer_id;
