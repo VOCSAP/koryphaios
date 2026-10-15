@@ -8,6 +8,8 @@
 
 import { afterAll, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   FIXTURE_OPERATOR,
   FIXTURE_OPERATOR_ID,
@@ -24,6 +26,7 @@ import {
   type ApprovalCredential,
 } from "../shared/approval.ts";
 import { decodePairingPayload, encodeAnswer, encodePair, parseClickUrl } from "../notify/ntfy-protocol.ts";
+import { OPERATOR_TRUST_VERSION } from "../shared/operator-trust.ts";
 import type { Approval } from "../shared/types.ts";
 
 const brokers: TestBroker[] = [];
@@ -986,6 +989,123 @@ describe("ntfy enrolment", () => {
       bob
     );
     expect(bobList.body.channels.find((x) => x.kind === "ntfy")!.configured).toBe(false);
+  }, 90_000);
+
+  test("does not restart or pair channels whose owner is no longer trusted", async () => {
+    const alice = newOperator();
+    const bob = otherOperator();
+    const source = await startBroker({}, { trustedOperators: [alice.cred.publicKey, bob.cred.publicKey] });
+    brokers.push(source);
+    const ntfy = startStubNtfy();
+    let restarted: TestBroker | null = null;
+    try {
+      const aliceConnect = await signedPost<{ pairing_code: string; mobile_payload: string }>(
+        source,
+        "/approval/channel-connect",
+        { kind: "ntfy", server: ntfy.url },
+        alice
+      );
+      const bobConnect = await signedPost<{ pairing_code: string }>(
+        source,
+        "/approval/channel-connect",
+        { kind: "ntfy", server: ntfy.url },
+        bob
+      );
+      expect([aliceConnect.status, bobConnect.status]).toEqual([200, 200]);
+      const aliceTopics = decodePairingPayload(aliceConnect.body.mobile_payload)!;
+
+      source.proc.kill();
+      await source.proc.exited;
+      writeFileSync(
+        join(source.tmpDir, "claude-peers", "operator-trust.json"),
+        JSON.stringify({ version: OPERATOR_TRUST_VERSION, operators: [{ public_key: alice.cred.publicKey }] })
+      );
+      restarted = await startBroker(
+        {
+          CLAUDE_PEERS_DB: source.dbPath,
+          APPDATA: source.tmpDir,
+          XDG_CONFIG_HOME: source.tmpDir,
+          HOME: source.tmpDir,
+          USERPROFILE: source.tmpDir,
+        },
+        { trustedOperators: null }
+      );
+      brokers.push(restarted);
+      expect(
+        await until(async () => (await Bun.file(join(restarted!.tmpDir, "logs", "broker.log")).text()).includes("ntfy started"))
+      ).toBe(true);
+      const bootLog = await Bun.file(join(restarted.tmpDir, "logs", "broker.log")).text();
+      expect(bootLog.match(/notify: ntfy started/g)).toHaveLength(1);
+
+      const db = new Database(source.dbPath);
+      try {
+        const aliceSecret = db
+          .query("SELECT secret_enc FROM approval_channel_secrets WHERE operator_id = ? AND kind = 'ntfy'")
+          .get(alice.id) as { secret_enc: string };
+        db.run(
+          "UPDATE approval_channel_secrets SET secret_enc = ? WHERE operator_id = ? AND kind = 'ntfy'",
+          [aliceSecret.secret_enc, bob.id]
+        );
+      } finally {
+        db.close();
+      }
+
+      await ntfy.publishRaw(aliceTopics.topic_replies, encodePair(bobConnect.body.pairing_code, "untrusted-phone"));
+      expect(
+        await until(async () => {
+          const db = new Database(source.dbPath, { readonly: true });
+          try {
+            const codeCount = (
+              db.query("SELECT COUNT(*) AS count FROM approval_pairing_codes WHERE code = ?")
+                .get(bobConnect.body.pairing_code) as { count: number }
+            ).count;
+            if (codeCount === 0) return true;
+          } finally {
+            db.close();
+          }
+          const log = await Bun.file(join(restarted!.tmpDir, "logs", "broker.log")).text();
+          return log.includes("ignored pairing code for an untrusted operator owner");
+        })
+      ).toBe(true);
+      await ntfy.publishRaw(aliceTopics.topic_replies, encodePair(aliceConnect.body.pairing_code, "trusted-phone"));
+      expect(
+        await until(() => {
+          const db = new Database(source.dbPath, { readonly: true });
+          try {
+            return (
+              db.query("SELECT COUNT(*) AS count FROM approval_channels WHERE operator_id = ? AND kind = 'ntfy'")
+                .get(alice.id) as { count: number }
+            ).count === 1;
+          } finally {
+            db.close();
+          }
+        })
+      ).toBe(true);
+
+      const dbAfter = new Database(source.dbPath, { readonly: true });
+      try {
+        const bobBindings = (
+          dbAfter.query("SELECT COUNT(*) AS count FROM approval_channels WHERE operator_id = ? AND kind = 'ntfy'")
+            .get(bob.id) as { count: number }
+        ).count;
+        const retainedCode = (
+          dbAfter.query("SELECT COUNT(*) AS count FROM approval_pairing_codes WHERE code = ?")
+            .get(bobConnect.body.pairing_code) as { count: number }
+        ).count;
+        expect([bobBindings, retainedCode]).toEqual([0, 1]);
+      } finally {
+        dbAfter.close();
+      }
+      const log = await Bun.file(join(restarted.tmpDir, "logs", "broker.log")).text();
+      expect(log).toContain("ignored pairing code for an untrusted operator owner");
+      expect(log).not.toContain(alice.id);
+      expect(log).not.toContain(bob.id);
+      expect(log).not.toContain(bob.cred.publicKey);
+      expect(log).not.toContain(bobConnect.body.pairing_code);
+    } finally {
+      if (restarted) await stopBroker(restarted);
+      await stopBroker(source);
+    }
   }, 90_000);
 
   test("ntfy needs no bot token: an anonymous server connects", async () => {

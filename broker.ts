@@ -1583,6 +1583,19 @@ try {
   if (!msg.includes("duplicate column name")) log.error(`migration: ${msg}`);
 }
 
+let revokedTokenCount = 0;
+for (const token of db.query("SELECT token_id, operator_id FROM approval_session_tokens WHERE revoked_at IS NULL").all() as Array<{ token_id: string; operator_id: string }>) {
+  if (isAuthError(resolveTrustedOperator(token.operator_id))) {
+    revokedTokenCount += db.run("UPDATE approval_session_tokens SET revoked_at = ? WHERE token_id = ?", [new Date().toISOString(), token.token_id]).changes;
+  }
+}
+if (revokedTokenCount > 0) {
+  log.warn("operator trust revoked active session tokens at startup", {
+    count: revokedTokenCount,
+    policy_state: operatorTrustSnapshot.state,
+  });
+}
+
 // Notification channels an operator can be reached on (Telegram/Discord/ntfy).
 db.run(`
   CREATE TABLE IF NOT EXISTS approval_channels (
@@ -10704,6 +10717,8 @@ function handleApprovalTokenMint(
   if (mintCaseRefusal) return { error: mintCaseRefusal, status: 400 };
   const projectKey = rawProjectKey;
   const tokenId = deriveTokenId(sessionPublicKey);
+  const existing = db.query("SELECT revoked_at FROM approval_session_tokens WHERE token_id = ?").get(tokenId) as { revoked_at: string | null } | null;
+  if (existing?.revoked_at) return { error: "session-token-revoked", status: 409 };
   const now = new Date();
   const nowIso = now.toISOString();
   const expiresAt = new Date(now.getTime() + ttlHours * 3600_000).toISOString();
@@ -10995,6 +11010,14 @@ const channelHost: ChannelHost = {
       db.run("DELETE FROM approval_pairing_codes WHERE code = ?", [code]);
       return null;
     }
+    const trust = resolveTrustedOperator(row.operator_id);
+    if (isAuthError(trust)) {
+      log.warn("notify: ignored pairing code for an untrusted operator owner", {
+        reason: trust.error,
+        status: trust.status,
+      });
+      return null;
+    }
     // For ntfy the ADDRESS is a topic WE minted, so it must be this operator's
     // own. Without the check, a pairing code published on somebody else's
     // replies topic would bind this operator to that topic — and an answer
@@ -11015,7 +11038,7 @@ const channelHost: ChannelHost = {
        ON CONFLICT(operator_id, kind, address) DO UPDATE SET enabled = 1, label = excluded.label`,
       [id, row.operator_id, kind, address, label.slice(0, 64), new Date().toISOString()]
     );
-    log.info(`notify: ${kind} paired for operator ${row.operator_id}`);
+    log.info(`notify: ${kind} paired`);
     return bindingFor(kind, address, row.operator_id);
   },
 
@@ -11161,6 +11184,14 @@ async function startChannel(
   kind: ChannelKind,
   candidate?: string
 ): Promise<{ label: string; appId?: string } | null> {
+  const trust = resolveTrustedOperator(operatorId);
+  if (isAuthError(trust)) {
+    log.warn("notify: skipped gateway for an untrusted operator owner", {
+      reason: trust.error,
+      status: trust.status,
+    });
+    return null;
+  }
   let token = candidate ?? "";
   if (!token) {
     const row = db

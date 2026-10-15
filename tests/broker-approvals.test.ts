@@ -699,11 +699,11 @@ describe("session token renewal", () => {
     expect(row.revoked_at).toEqual(expect.any(String));
   });
 
-  test("legacy mint revives the token and refreshes its project scope", async () => {
+  test("legacy mint cannot revive a revoked token or change its project scope", async () => {
     const b = await boot();
     const op = newOperator();
     const cred = generateCredential();
-    const first = await mintSessionToken(b, op, cred, "legacy-revive");
+    const first = await mintSessionToken(b, op, cred, "legacy-revoked");
     const revoke = await signedPost<{ revoked: number }>(
       b,
       "/approval/token-revoke",
@@ -711,14 +711,40 @@ describe("session token renewal", () => {
       { cred: op.cred, operator_id: op.id }
     );
     expect(revoke.body.revoked).toBe(1);
-
-    const reminted = await mintSessionToken(b, op, cred, "legacy-revive", "github.com/vocsap/refreshed-project");
-    expect(reminted.token_id).toBe(first.token_id);
-    const db = new Database(b.dbPath);
-    const row = db.query("SELECT revoked_at, project_key FROM approval_session_tokens WHERE token_id = ?").get(first.token_id) as {
-      revoked_at: string | null;
+    const before = new Database(b.dbPath);
+    const original = before.query("SELECT revoked_at, project_key FROM approval_session_tokens WHERE token_id = ?").get(first.token_id) as {
+      revoked_at: string;
       project_key: string;
     };
+    before.close();
+
+    const reminted = await signedPost<{ error: string }>(
+      b,
+      "/approval/token-mint",
+      {
+        session_public_key: cred.publicKey,
+        session_ref: "legacy-revoked",
+        project_key: "github.com/vocsap/refreshed-project"
+      },
+      { cred: op.cred, operator_id: op.id }
+    );
+    expect([reminted.status, reminted.body.error]).toEqual([409, "session-token-revoked"]);
+    const db = new Database(b.dbPath);
+    const row = db.query("SELECT revoked_at, project_key FROM approval_session_tokens WHERE token_id = ?").get(first.token_id);
+    db.close();
+    expect(row).toEqual(original);
+  });
+
+  test("legacy mint refreshes the project scope of an active token", async () => {
+    const b = await boot();
+    const op = newOperator();
+    const cred = generateCredential();
+    const first = await mintSessionToken(b, op, cred, "legacy-active");
+
+    const reminted = await mintSessionToken(b, op, cred, "legacy-active", "github.com/vocsap/refreshed-project");
+    expect(reminted.token_id).toBe(first.token_id);
+    const db = new Database(b.dbPath);
+    const row = db.query("SELECT revoked_at, project_key FROM approval_session_tokens WHERE token_id = ?").get(first.token_id);
     db.close();
     expect(row).toEqual({ revoked_at: null, project_key: "github.com/vocsap/refreshed-project" });
   });

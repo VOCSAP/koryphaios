@@ -107,6 +107,23 @@ describe("ApprovalRuntime.arm() without any mobile transport configured", () => 
     expect(runtime.operator?.operatorId).toMatch(/^[0-9a-f]{16}$/);
   });
 
+  test("returns false when the broker refuses minting with 503", async () => {
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ error: "operator-trust-unconfigured" }), {
+        status: 503,
+        headers: { "content-type": "application/json" },
+      })) as unknown as typeof fetch;
+    const runtime = new ApprovalRuntime({
+      stateDir: tmp(),
+      cipher: fakeCipher,
+      endpoint: () => ({ url: "http://broker.local", token: "" }),
+      runId: "run-test",
+      host: "test-host",
+    });
+
+    expect(await runtime.arm()).toBe(false);
+  });
+
   test("self-heals when the persisted identity is corrupt, instead of giving up", async () => {
     const stateDir = tmp();
     createOperatorIdentity(stateDir, fakeCipher, generateCredential());
