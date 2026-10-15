@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { startBroker, stopBroker, post, approvalListBody, type TestBroker } from "./_helper.ts";
+import { FIXTURE_OPERATOR, FIXTURE_OPERATOR_ID, startBroker, stopBroker, post, approvalListBody, type TestBroker } from "./_helper.ts";
 import {
   approvalWaitTimeoutSec,
   buildAuthProof,
@@ -22,14 +22,21 @@ afterAll(async () => {
   for (const b of brokers) await stopBroker(b);
 });
 
-async function boot(env: Record<string, string> = {}): Promise<TestBroker> {
-  const b = await startBroker(env);
+async function boot(
+  env: Record<string, string> = {},
+  trustedOperators: readonly string[] | undefined = undefined
+): Promise<TestBroker> {
+  const b = await startBroker(env, trustedOperators ? { trustedOperators } : undefined);
   brokers.push(b);
   return b;
 }
 
 /** An operator: a credential plus its self-certifying id. */
 function newOperator(): { cred: ApprovalCredential; id: string } {
+  return { cred: FIXTURE_OPERATOR, id: FIXTURE_OPERATOR_ID };
+}
+
+function otherOperator(): { cred: ApprovalCredential; id: string } {
   const cred = generateCredential();
   return { cred, id: deriveOperatorId(cred.publicKey) };
 }
@@ -267,9 +274,9 @@ describe("long poll (/approval/wait)", () => {
 
 describe("operator compartmentalisation", () => {
   test("operator B can neither see nor claim operator A's approval", async () => {
-    const b = await boot();
     const a = newOperator();
-    const other = newOperator();
+    const other = otherOperator();
+    const b = await boot({}, [a.cred.publicKey, other.cred.publicKey]);
     const approval = await addApproval(b, a);
 
     const list = await signedPost<{ approvals: Approval[] }>(
@@ -430,17 +437,21 @@ describe("authentication", () => {
     expect(replay.body.error).toBe("replayed-proof");
   });
 
-  test("an operator_id that does not match the presented key is refused", async () => {
+  test("an operator proof may not replace its trusted key material", async () => {
     const b = await boot();
     const op = newOperator();
-    // operator_id is a digest OF the public key: claiming another id fails.
-    const res = await signedPost(
-      b,
-      "/approval/add",
-      { kind: "permission", title: "t", question: "q" },
-      { cred: op.cred, operator_id: "0".repeat(16) }
-    );
-    expect(res.status).toBe(401);
+    const other = generateCredential();
+    const body = {
+      kind: "permission",
+      title: "t",
+      question: "q",
+      project_key: DEFAULT_PROJECT_KEY,
+      public_key: other.publicKey,
+    };
+    const auth = buildAuthProof(op.cred.privateKey, body, { kind: "operator", operator_id: op.id });
+    const res = await post<{ error: string }>(`${b.url}/approval/add`, { ...body, auth });
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe("operator-key-mismatch");
   });
 });
 
@@ -749,8 +760,9 @@ describe("session token renewal", () => {
   });
 
   test("renew_only rejects an absent, expired, foreign, or corrupted token", async () => {
-    const b = await boot();
     const op = newOperator();
+    const foreign = otherOperator();
+    const b = await boot({}, [op.cred.publicKey, foreign.cred.publicKey]);
     const cred = generateCredential();
     const absent = await signedPost<{ error: string }>(
       b,
@@ -770,7 +782,6 @@ describe("session token renewal", () => {
       expires_at: string;
     }).expires_at;
     beforeForeign.close();
-    const foreign = newOperator();
     const foreignRenew = await signedPost<{ error: string }>(
       b,
       "/approval/token-mint",

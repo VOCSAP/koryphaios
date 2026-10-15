@@ -36,10 +36,10 @@ async function sessionCredential(b: TestBroker, op: { cred: ApprovalCredential; 
 }
 
 test("helper add then wait against a real broker: pending at timeout, then the operator's verdict", async () => {
-  const b = await startBroker();
-  brokers.push(b);
   const opCred = generateCredential();
   const op = { cred: opCred, id: deriveOperatorId(opCred.publicKey) };
+  const b = await startBroker({}, { trustedOperators: [opCred.publicKey] });
+  brokers.push(b);
   const cfg = await sessionCredential(b, op, "tile-1");
 
   const added = await runApprovalClient(
@@ -105,10 +105,10 @@ test("helper combines the hook budget signal with its request timeout", async ()
 });
 
 test("helper withdraw against a real broker closes the module's own row without a verdict", async () => {
-  const b = await startBroker();
-  brokers.push(b);
   const opCred = generateCredential();
   const op = { cred: opCred, id: deriveOperatorId(opCred.publicKey) };
+  const b = await startBroker({}, { trustedOperators: [opCred.publicKey] });
+  brokers.push(b);
   const cfg = await sessionCredential(b, op, "tile-1");
   const added = await runApprovalClient("add", JSON.stringify({ kind: "permission", title: "t", question: "q" }), cfg, "tile-1");
   const id = String((added as Record<string, unknown>).id ?? "");

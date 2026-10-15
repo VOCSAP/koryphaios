@@ -5,7 +5,15 @@
 // string[]}.
 
 import { test, expect, beforeAll, afterAll } from "bun:test";
-import { startBroker, stopBroker, post, deckAuthored, FIXTURE_OPERATOR_ID, type TestBroker } from "./_helper.ts";
+import {
+  FIXTURE_OPERATOR,
+  FIXTURE_OPERATOR_ID,
+  startBroker,
+  stopBroker,
+  post,
+  deckAuthored,
+  type TestBroker,
+} from "./_helper.ts";
 import { Database } from "bun:sqlite";
 import type { RoadmapItem } from "../shared/types.ts";
 import { buildAuthProof, deriveOperatorId, generateCredential } from "../shared/approval.ts";
@@ -13,7 +21,9 @@ import { buildAuthProof, deriveOperatorId, generateCredential } from "../shared/
 let broker: TestBroker;
 
 beforeAll(async () => {
-  broker = await startBroker();
+  broker = await startBroker({}, {
+    trustedOperators: [FIXTURE_OPERATOR.publicKey, OPERATOR_A.publicKey, OPERATOR_B.publicKey],
+  });
 });
 
 afterAll(async () => {

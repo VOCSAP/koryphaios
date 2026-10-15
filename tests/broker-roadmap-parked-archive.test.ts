@@ -9,9 +9,10 @@ let broker: TestBroker;
 const PARK_TTL_SEC = 4;
 
 beforeAll(async () => {
-  broker = await startBroker({
-    CLAUDE_PEERS_LOCK_PARK_TTL_SEC: String(PARK_TTL_SEC),
-  });
+  broker = await startBroker(
+    { CLAUDE_PEERS_LOCK_PARK_TTL_SEC: String(PARK_TTL_SEC) },
+    { trustedOperators: [OPERATOR_A.publicKey, OPERATOR_B.publicKey] }
+  );
 });
 
 afterAll(async () => {

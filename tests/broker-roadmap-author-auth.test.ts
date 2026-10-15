@@ -8,7 +8,7 @@ import { test, expect, beforeAll, afterAll } from "bun:test";
 import { Database } from "bun:sqlite";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { startBroker, stopBroker, post, livePid, type TestBroker } from "./_helper.ts";
+import { FIXTURE_OPERATOR, FIXTURE_OPERATOR_ID, startBroker, stopBroker, post, livePid, type TestBroker } from "./_helper.ts";
 import * as sharedTypes from "../shared/types.ts";
 import type { RegisterResponse, RoadmapItem } from "../shared/types.ts";
 import { buildAuthProof, deriveOperatorId, deriveTokenId, generateCredential } from "../shared/approval.ts";
@@ -386,7 +386,7 @@ test("layer 2: the SAME writes signed with the operator credential are accepted"
   // Positive control, and it is what makes the refusals above mean something:
   // only the proof differs, so a red here would say the routes are broken for
   // everyone rather than closed for the unsigned.
-  const cred = generateCredential();
+  const cred = FIXTURE_OPERATOR;
   for (const entry of DECK_WRITE_ROUTES) {
     const { route, body } = entry;
     const item = await seed(`signed deck target for ${route}`);
@@ -406,9 +406,9 @@ test("layer 2: a SESSION credential may not sign a roadmap write", async () => {
   // roadmap-write is deliberately absent from SESSION_ALLOWED, so a sandboxed
   // agent holding a session token is refused by the operation table -- 403,
   // not 401: the signature is fine, the CREDENTIAL KIND is not.
-  const opCred = generateCredential();
+  const opCred = FIXTURE_OPERATOR;
   const sessionCred = generateCredential();
-  const operatorId = deriveOperatorId(opCred.publicKey);
+  const operatorId = FIXTURE_OPERATOR_ID;
 
   const mintBody = {
     session_public_key: sessionCred.publicKey,
@@ -488,6 +488,25 @@ test("layer 2 bypass: a peer can no longer be MINTED under a reserved name", asy
   const asOperator = await registerAs("operator", "/", nextGroup());
   expect(asOperator.status).toBe(200);
   expect(asOperator.body.peer_id).not.toBe("operator");
+});
+
+test("a policy refusal does not blame an older Deck", async () => {
+  const credential = generateCredential();
+  const body = {
+    project_key: PK,
+    by: "deck",
+    title: "untrusted reserved author",
+    public_key: credential.publicKey,
+  };
+  const auth = buildAuthProof(credential.privateKey, body, {
+    kind: "operator",
+    operator_id: deriveOperatorId(credential.publicKey),
+  });
+
+  const refusal = await post<UpsertRes>(`${broker.url}/roadmap/upsert`, { ...body, auth });
+  expect(refusal.status).toBe(403);
+  expect(refusal.body.error).toContain("operator-not-trusted");
+  expect(refusal.body.error).not.toContain("A Deck older than this broker");
 });
 
 test("layer 2: EVERY reserved author needs the signature, not just 'deck'", async () => {
@@ -754,7 +773,7 @@ test("layer 2 bypass: the lock of another peer survives the attack", async () =>
 });
 
 test("layer 2: a REPLAYED operator proof is refused, inherited from the nonce guard", async () => {
-  const cred = generateCredential();
+  const cred = FIXTURE_OPERATOR;
   const item = await seed("replay target");
   const body = signedBody({ project_key: PK, id: item.id, description: "first" }, cred);
 

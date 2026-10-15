@@ -1,7 +1,7 @@
 import { test, expect } from "bun:test";
 import { Database } from "bun:sqlite";
-import { startBroker, stopBroker, post, livePid, deckAuthored } from "./_helper.ts";
-import { buildAuthProof, deriveOperatorId, generateCredential } from "../shared/approval.ts";
+import { FIXTURE_OPERATOR, FIXTURE_OPERATOR_ID, startBroker, stopBroker, post, livePid, deckAuthored } from "./_helper.ts";
+import { buildAuthProof, generateCredential } from "../shared/approval.ts";
 import type { RoadmapItem } from "../shared/types.ts";
 
 const LOCAL_FALLBACK_KEY = "local:6c4c222bfb64bc07";
@@ -222,8 +222,8 @@ test("register: a legitimate non-ASCII project_key is stored verbatim (negative 
 test("mint (/approval/token-mint): a project_key over 256 chars is refused with 400, not silently truncated", async () => {
   const b = await startBroker();
   try {
-    const opCred = generateCredential();
-    const operatorId = deriveOperatorId(opCred.publicKey);
+    const opCred = FIXTURE_OPERATOR;
+    const operatorId = FIXTURE_OPERATOR_ID;
     const sessionCred = generateCredential();
     const mintBody = {
       session_public_key: sessionCred.publicKey,
@@ -257,8 +257,8 @@ test("mint (/approval/token-mint): a project_key over 256 chars is refused with 
 test("mint (/approval/token-mint): a project_key with a control character is refused with 400", async () => {
   const b = await startBroker();
   try {
-    const opCred = generateCredential();
-    const operatorId = deriveOperatorId(opCred.publicKey);
+    const opCred = FIXTURE_OPERATOR;
+    const operatorId = FIXTURE_OPERATOR_ID;
     const sessionCred = generateCredential();
     const mintBody = {
       session_public_key: sessionCred.publicKey,
@@ -281,8 +281,8 @@ test("mint (/approval/token-mint): a project_key with a control character is ref
 test("mint (/approval/token-mint): a miscased project_key, ASCII or not, is refused with 400; its lowercase form is minted", async () => {
   const b = await startBroker();
   try {
-    const opCred = generateCredential();
-    const operatorId = deriveOperatorId(opCred.publicKey);
+    const opCred = FIXTURE_OPERATOR;
+    const operatorId = FIXTURE_OPERATOR_ID;
     const mint = async (projectKey: string, sessionRef: string) => {
       const mintBody = {
         session_public_key: generateCredential().publicKey,

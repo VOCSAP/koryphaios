@@ -4,13 +4,17 @@
 // real WebSocket.
 
 import { test, expect, describe, afterAll } from "bun:test";
-import { startBroker, stopBroker, post, livePid, approvalListBody, type TestBroker } from "./_helper.ts";
 import {
-  buildAuthProof,
-  deriveOperatorId,
-  generateCredential,
-  type ApprovalCredential,
-} from "../shared/approval.ts";
+  FIXTURE_OPERATOR,
+  FIXTURE_OPERATOR_ID,
+  startBroker,
+  stopBroker,
+  post,
+  livePid,
+  approvalListBody,
+  type TestBroker,
+} from "./_helper.ts";
+import { buildAuthProof, type ApprovalCredential } from "../shared/approval.ts";
 import type { Approval } from "../shared/types.ts";
 
 const brokers: TestBroker[] = [];
@@ -27,8 +31,7 @@ afterAll(async () => {
 });
 
 function newOperator(): { cred: ApprovalCredential; id: string } {
-  const cred = generateCredential();
-  return { cred, id: deriveOperatorId(cred.publicKey) };
+  return { cred: FIXTURE_OPERATOR, id: FIXTURE_OPERATOR_ID };
 }
 
 async function signedPost<T>(

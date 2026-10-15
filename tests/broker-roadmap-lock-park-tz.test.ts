@@ -23,10 +23,13 @@ const PARK_TTL_SEC = 3600; // 1h, same order of magnitude as the measured repro
 let broker: TestBroker;
 
 beforeAll(async () => {
-  broker = await startBroker({
-    TZ: NON_UTC_TZ,
-    CLAUDE_PEERS_LOCK_PARK_TTL_SEC: String(PARK_TTL_SEC),
-  });
+  broker = await startBroker(
+    {
+      TZ: NON_UTC_TZ,
+      CLAUDE_PEERS_LOCK_PARK_TTL_SEC: String(PARK_TTL_SEC),
+    },
+    { trustedOperators: [OPERATOR_A.publicKey, OPERATOR_B.publicKey] }
+  );
 });
 
 afterAll(async () => {

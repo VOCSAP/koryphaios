@@ -4,13 +4,19 @@
 
 import { test, expect, beforeAll, afterAll } from "bun:test";
 import { Database } from "bun:sqlite";
-import { startBroker, stopBroker, post, get, livePid, groupId, sha256Hex, type TestBroker } from "./_helper.ts";
 import {
-  buildAuthProof,
-  deriveOperatorId,
-  generateCredential,
-  type ApprovalCredential,
-} from "../shared/approval.ts";
+  FIXTURE_OPERATOR,
+  FIXTURE_OPERATOR_ID,
+  startBroker,
+  stopBroker,
+  post,
+  get,
+  livePid,
+  groupId,
+  sha256Hex,
+  type TestBroker,
+} from "./_helper.ts";
+import { buildAuthProof, type ApprovalCredential } from "../shared/approval.ts";
 // The sentinel token is imported rather than re-typed, so seed and assertion
 // cannot silently agree with each other while testing an unrelated row.
 import { OPERATOR_INSTANCE_TOKEN, SENTINEL_DEFINITIONS, type Approval } from "../shared/types.ts";
@@ -440,8 +446,8 @@ test("coverage: the two exemptions hold live -- neither route reaches the inbox"
 
   // /approval/add: reply_peer_id='operator' downgrades to the pty route instead
   // of pinning the sentinel as the answer's destination.
-  const cred: ApprovalCredential = generateCredential();
-  const operatorId = deriveOperatorId(cred.publicKey);
+  const cred: ApprovalCredential = FIXTURE_OPERATOR;
+  const operatorId = FIXTURE_OPERATOR_ID;
   const addBody = {
     kind: "question",
     title: "coverage probe",

@@ -96,13 +96,13 @@ interface Harness {
 }
 
 async function boot(withCredential: boolean): Promise<Harness> {
-  const b = await startBroker();
+  const opCred = generateCredential();
+  const operatorId = deriveOperatorId(opCred.publicKey);
+  const b = await startBroker({}, { trustedOperators: [opCred.publicKey] });
   brokers.push(b);
   const dir = mkdtempSync(join(tmpdir(), "cp-ask-"));
   dirs.push(dir);
 
-  const opCred = generateCredential();
-  const operatorId = deriveOperatorId(opCred.publicKey);
   const sessionCred = generateCredential();
 
   const mintBody = {

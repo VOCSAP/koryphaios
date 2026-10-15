@@ -3,10 +3,18 @@
 // surface that reads a settled approval back.
 
 import { test, expect, describe, afterAll } from "bun:test";
-import { startBroker, stopBroker, post, livePid, approvalListBody, type TestBroker } from "./_helper.ts";
+import {
+  FIXTURE_OPERATOR,
+  FIXTURE_OPERATOR_ID,
+  startBroker,
+  stopBroker,
+  post,
+  livePid,
+  approvalListBody,
+  type TestBroker,
+} from "./_helper.ts";
 import {
   buildAuthProof,
-  deriveOperatorId,
   generateCredential,
   type ApprovalCredential,
 } from "../shared/approval.ts";
@@ -30,8 +38,7 @@ afterAll(async () => {
 type Operator = { cred: ApprovalCredential; id: string };
 
 function newOperator(): Operator {
-  const cred = generateCredential();
-  return { cred, id: deriveOperatorId(cred.publicKey) };
+  return { cred: FIXTURE_OPERATOR, id: FIXTURE_OPERATOR_ID };
 }
 
 async function signedPost<T>(

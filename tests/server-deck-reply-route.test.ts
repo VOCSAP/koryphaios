@@ -2,10 +2,18 @@ import { test, expect, describe, afterAll } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { startBroker, stopBroker, post, livePid, scrubEnv, type TestBroker } from "./_helper.ts";
+import {
+  FIXTURE_OPERATOR,
+  FIXTURE_OPERATOR_ID,
+  startBroker,
+  stopBroker,
+  post,
+  livePid,
+  scrubEnv,
+  type TestBroker,
+} from "./_helper.ts";
 import {
   buildAuthProof,
-  deriveOperatorId,
   deriveTokenId,
   generateCredential,
 } from "../shared/approval.ts";
@@ -164,8 +172,8 @@ async function bootDeck(
     );
   }
 
-  const opCred = generateCredential();
-  const operatorId = deriveOperatorId(opCred.publicKey);
+  const opCred = FIXTURE_OPERATOR;
+  const operatorId = FIXTURE_OPERATOR_ID;
   const sessionCred = generateCredential();
   const mintBody = {
     session_public_key: sessionCred.publicKey,

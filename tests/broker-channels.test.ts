@@ -1,13 +1,12 @@
 import { test, expect, describe, afterAll } from "bun:test";
-import { startBroker, stopBroker, post, type TestBroker } from "./_helper.ts";
-import { buildAuthProof, deriveOperatorId, generateCredential, type ApprovalCredential } from "../shared/approval.ts";
+import { FIXTURE_OPERATOR, FIXTURE_OPERATOR_ID, startBroker, stopBroker, post, type TestBroker } from "./_helper.ts";
+import { buildAuthProof, generateCredential, type ApprovalCredential } from "../shared/approval.ts";
 
 const brokers: TestBroker[] = [];
 afterAll(async () => { for (const b of brokers) await stopBroker(b); });
 
 function newOperator(): { cred: ApprovalCredential; id: string } {
-  const cred = generateCredential();
-  return { cred, id: deriveOperatorId(cred.publicKey) };
+  return { cred: FIXTURE_OPERATOR, id: FIXTURE_OPERATOR_ID };
 }
 async function signedPost<T>(b: TestBroker, path: string, payload: Record<string, unknown>, op: { cred: ApprovalCredential; id: string }) {
   const body = { ...payload, public_key: op.cred.publicKey };

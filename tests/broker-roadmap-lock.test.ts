@@ -4,10 +4,19 @@
 // in_progress, and the stale-lock sweep (TTL + owner gone).
 
 import { test, expect, beforeAll, afterAll } from "bun:test";
-import { startBroker, stopBroker, post, livePid, type TestBroker , deckAuthored } from "./_helper.ts";
+import {
+  FIXTURE_OPERATOR,
+  FIXTURE_OPERATOR_ID,
+  startBroker,
+  stopBroker,
+  post,
+  livePid,
+  type TestBroker,
+  deckAuthored,
+} from "./_helper.ts";
 import { Database } from "bun:sqlite";
 import { ROADMAP_IMPORT_COLUMNS, findUncoveredRoadmapColumns, type RoadmapItem } from "../shared/types.ts";
-import { buildAuthProof, deriveOperatorId, generateCredential } from "../shared/approval.ts";
+import { buildAuthProof } from "../shared/approval.ts";
 
 let broker: TestBroker;
 
@@ -402,8 +411,8 @@ test("TTL sweep clears operator_id alongside locked_by, but only after a signed 
     // same signed reserved-author branch of resolveRoadmapAuthor as "deck"
     // does, so operator_id still gets stamped -- but it isn't exempted from
     // claiming the lock, so it actually stays locked to poll a real release.
-    const credential = generateCredential();
-    const operatorId = deriveOperatorId(credential.publicKey);
+    const credential = FIXTURE_OPERATOR;
+    const operatorId = FIXTURE_OPERATOR_ID;
     const body = {
       project_key: PK,
       title: "stale-signed",
@@ -623,8 +632,8 @@ test("card e344fa79: rowToRoadmapItem's response covers every roadmap_items colu
   expect(schemaColumns.length).toBeGreaterThan(10);
   expect(schemaColumns).toContain("locked_group"); // the column this card added
 
-  const credential = generateCredential();
-  const operatorId = deriveOperatorId(credential.publicKey);
+  const credential = FIXTURE_OPERATOR;
+  const operatorId = FIXTURE_OPERATOR_ID;
   const createBody = {
     project_key: PK,
     title: "pick-list coverage probe",
@@ -1115,8 +1124,8 @@ test("force:true by a signed operator bypasses the lock guard on a card locked i
   });
   expect(item.body.item.locked).toBe(true);
 
-  const credential = generateCredential();
-  const operatorId = deriveOperatorId(credential.publicKey);
+  const credential = FIXTURE_OPERATOR;
+  const operatorId = FIXTURE_OPERATOR_ID;
   const body = {
     id: item.body.item.id,
     by: "operator",
@@ -1475,8 +1484,8 @@ test("card e344fa79, review round 3 (ROUTE-LEVEL): the Deck's ORDINARY signed wr
   // Neither `status` nor `locked` in this body -- THAT is what makes it
   // ORDINARY (no lock-relevant field moves, so resolveRoadmapLock's claim
   // branches never fire and `claimed` resolves to false).
-  const credential = generateCredential();
-  const operatorId = deriveOperatorId(credential.publicKey);
+  const credential = FIXTURE_OPERATOR;
+  const operatorId = FIXTURE_OPERATOR_ID;
   const ordinaryBody = {
     id: item.body.item.id,
     by: "deck",

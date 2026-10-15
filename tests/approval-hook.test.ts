@@ -1378,13 +1378,13 @@ describe("hook subprocess", () => {
     credFile: string;
     op: { privateKey: string; publicKey: string; id: string };
   }> {
-    const b = await startBroker();
+    const opCred = generateCredential();
+    const operatorId = deriveOperatorId(opCred.publicKey);
+    const b = await startBroker({}, { trustedOperators: [opCred.publicKey] });
     brokers.push(b);
     const dir = mkdtempSync(join(tmpdir(), "cp-hook-"));
     tmpDirs.push(dir);
 
-    const opCred = generateCredential();
-    const operatorId = deriveOperatorId(opCred.publicKey);
     const sessionCred = generateCredential();
 
     const mintBody = {

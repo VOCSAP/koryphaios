@@ -8,7 +8,15 @@
 
 import { afterAll, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { post, startBroker, stopBroker, approvalListBody, type TestBroker } from "./_helper.ts";
+import {
+  FIXTURE_OPERATOR,
+  FIXTURE_OPERATOR_ID,
+  post,
+  startBroker,
+  stopBroker,
+  approvalListBody,
+  type TestBroker,
+} from "./_helper.ts";
 import {
   buildAuthProof,
   deriveOperatorId,
@@ -26,6 +34,10 @@ afterAll(async () => {
 });
 
 function newOperator(): { cred: ApprovalCredential; id: string } {
+  return { cred: FIXTURE_OPERATOR, id: FIXTURE_OPERATOR_ID };
+}
+
+function otherOperator(): { cred: ApprovalCredential; id: string } {
   const cred = generateCredential();
   return { cred, id: deriveOperatorId(cred.publicKey) };
 }
@@ -760,11 +772,11 @@ describe("ntfy enrolment", () => {
   }, 60_000);
 
   test("an answer for ANOTHER operator's approval is refused (C-5)", async () => {
-    const b = await startBroker();
+    const mine = newOperator();
+    const theirs = otherOperator();
+    const b = await startBroker({}, { trustedOperators: [mine.cred.publicKey, theirs.cred.publicKey] });
     brokers.push(b);
     const ntfy = startStubNtfy();
-    const mine = newOperator();
-    const theirs = newOperator();
 
     const conn = await signedPost<{ mobile_payload: string }>(
       b,
@@ -820,11 +832,11 @@ describe("ntfy enrolment", () => {
     // replaced (and stopped) the first: their questions arrived — the topic
     // came from the binding — but the reply address came from the OTHER
     // operator's gateway, so their answers vanished in silence.
-    const b = await startBroker();
+    const alice = newOperator();
+    const bob = otherOperator();
+    const b = await startBroker({}, { trustedOperators: [alice.cred.publicKey, bob.cred.publicKey] });
     brokers.push(b);
     const ntfy = startStubNtfy();
-    const alice = newOperator();
-    const bob = newOperator();
 
     const aConn = await signedPost<{ mobile_payload: string }>(
       b,
@@ -913,11 +925,11 @@ describe("ntfy enrolment", () => {
     // on the transport it was issued for. Otherwise redeeming Alice's code on
     // Bob's topic would bind Alice to it — and an answer published there would
     // then authorise against Alice's approvals.
-    const b = await startBroker();
+    const alice = newOperator();
+    const bob = otherOperator();
+    const b = await startBroker({}, { trustedOperators: [alice.cred.publicKey, bob.cred.publicKey] });
     brokers.push(b);
     const ntfy = startStubNtfy();
-    const alice = newOperator();
-    const bob = newOperator();
 
     const aConn = await signedPost<{ pairing_code: string; mobile_payload: string }>(
       b,
@@ -950,11 +962,11 @@ describe("ntfy enrolment", () => {
   }, 90_000);
 
   test("one operator disconnecting does not cut the other", async () => {
-    const b = await startBroker();
+    const alice = newOperator();
+    const bob = otherOperator();
+    const b = await startBroker({}, { trustedOperators: [alice.cred.publicKey, bob.cred.publicKey] });
     brokers.push(b);
     const ntfy = startStubNtfy();
-    const alice = newOperator();
-    const bob = newOperator();
 
     await signedPost(b, "/approval/channel-connect", { kind: "ntfy", server: ntfy.url }, alice);
     await signedPost(b, "/approval/channel-connect", { kind: "ntfy", server: ntfy.url }, bob);

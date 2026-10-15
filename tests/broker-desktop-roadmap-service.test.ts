@@ -36,7 +36,7 @@ const tmpDirs: string[] = [];
 const deckOperator = generateCredential();
 
 beforeAll(async () => {
-  broker = await startBroker();
+  broker = await startBroker({}, { trustedOperators: [deckOperator.publicKey] });
   configureRoadmapSigner(() => (payload) => {
     const signed = { ...payload, public_key: deckOperator.publicKey };
     return {
