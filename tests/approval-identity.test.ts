@@ -154,14 +154,15 @@ describe("credential scope (PLAN §6.8)", () => {
     expect(isOperationAllowed("session", "claim")).toBe(false);
   });
 
-  test("a session token may not read the operator's approvals nor touch channels", () => {
+  test("a session token may not read the operator's approvals nor transact context", () => {
     expect(isOperationAllowed("session", "list")).toBe(false);
     expect(isOperationAllowed("session", "channels")).toBe(false);
     expect(isOperationAllowed("session", "mint-token")).toBe(false);
+    expect(isOperationAllowed("session", "context-transaction")).toBe(false);
   });
 
   test("the operator key may do everything", () => {
-    for (const op of ["add", "wait", "claim", "list", "channels", "mint-token"] as const) {
+    for (const op of ["add", "wait", "claim", "list", "channels", "mint-token", "context-transaction"] as const) {
       expect(isOperationAllowed("operator", op)).toBe(true);
     }
   });

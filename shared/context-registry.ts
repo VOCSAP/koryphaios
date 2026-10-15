@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import {
   CONTEXT_DEPOSIT_MAX_CHARS,
+  CONTEXT_RESERVATION_TTL_MS,
   CONTEXT_DEPOSITS_PER_GROUP,
   CONTEXT_DEPOSITS_PER_OWNER,
   CONTEXT_DEPOSITS_TOTAL,
@@ -54,6 +55,7 @@ export interface LiveOwner {
 
 export interface ContextRegistryLimits {
   maxChars: number;
+  reservationTtlMs: number;
   perOwner: number;
   perGroup: number;
   total: number;
@@ -63,6 +65,7 @@ export interface ContextRegistryDeps {
   ownerIfActive: (instanceToken: string) => LiveOwner | null;
   now?: () => Date;
   newDepositId?: () => string;
+  newAttemptId?: () => string;
   limits?: Partial<ContextRegistryLimits>;
 }
 
@@ -92,11 +95,18 @@ export type DepositOutcome =
   | { ok: false; status: 429; reason: "quota_owner"; held_ids: string[] }
   | { ok: false; status: 429; reason: "quota_group" | "quota_total" };
 
+export type ReservationOutcome =
+  | { ok: true; deposit: ContextDepositMeta; attempt_id: string }
+  | { ok: false; reason: "unavailable" };
+
 interface Entry extends ContextDepositMeta {
   group_id: string;
   owner_instance_token: string;
   epoch: number;
   text: string;
+  attempt_id: string | null;
+  released_attempt_id: string | null;
+  reserved_at_ms: number | null;
 }
 
 function meta(entry: Entry): ContextDepositMeta {
@@ -124,14 +134,17 @@ export class ContextRegistry {
   #ownerIfActive: (instanceToken: string) => LiveOwner | null;
   #now: () => Date;
   #newDepositId: () => string;
+  #newAttemptId: () => string;
   #limits: ContextRegistryLimits;
 
   constructor(deps: ContextRegistryDeps) {
     this.#ownerIfActive = deps.ownerIfActive;
     this.#now = deps.now ?? (() => new Date());
     this.#newDepositId = deps.newDepositId ?? (() => randomBytes(8).toString("hex"));
+    this.#newAttemptId = deps.newAttemptId ?? (() => randomBytes(16).toString("hex"));
     this.#limits = {
       maxChars: deps.limits?.maxChars ?? CONTEXT_DEPOSIT_MAX_CHARS,
+      reservationTtlMs: deps.limits?.reservationTtlMs ?? CONTEXT_RESERVATION_TTL_MS,
       perOwner: deps.limits?.perOwner ?? CONTEXT_DEPOSITS_PER_OWNER,
       perGroup: deps.limits?.perGroup ?? CONTEXT_DEPOSITS_PER_GROUP,
       total: deps.limits?.total ?? CONTEXT_DEPOSITS_TOTAL,
@@ -159,6 +172,7 @@ export class ContextRegistry {
 
   deposit(input: DepositInput): DepositOutcome {
     this.#sweepDead();
+    this.#releaseExpiredReservations();
     const candidates = this.#bindings
       .tokensFor(input.capability_hash)
       .map((token) => ({ token, owner: this.#ownerIfActive(token) }))
@@ -210,6 +224,9 @@ export class ContextRegistry {
       git_root: input.git_root,
       deposited_at: this.#now().toISOString(),
       state: "held",
+      attempt_id: null,
+      released_attempt_id: null,
+      reserved_at_ms: null,
     };
     if (replaced) this.#entries.delete(replaced.deposit_id);
     this.#entries.set(depositId, entry);
@@ -226,13 +243,50 @@ export class ContextRegistry {
   /** Metadata of a live deposit, never its text. */
   describe(depositId: string): ContextDepositMeta | null {
     this.#sweepDead();
+    this.#releaseExpiredReservations();
     const entry = this.#entries.get(depositId);
     return entry ? meta(entry) : null;
+  }
+
+  reserve(depositId: string, target: LiveOwner): ReservationOutcome {
+    this.#sweepDead();
+    this.#releaseExpiredReservations();
+    const entry = this.#entries.get(depositId);
+    if (!entry || entry.state !== "held") return { ok: false, reason: "unavailable" };
+    const owner = this.#ownerIfActive(entry.owner_instance_token);
+    if (!owner || owner.peer_id !== target.peer_id || owner.group_id !== target.group_id) {
+      return { ok: false, reason: "unavailable" };
+    }
+    const attempt_id = this.#newAttemptId();
+    entry.state = "reserved";
+    entry.attempt_id = attempt_id;
+    entry.released_attempt_id = null;
+    entry.reserved_at_ms = this.#now().getTime();
+    return { ok: true, deposit: meta(entry), attempt_id };
+  }
+
+  release(depositId: string, groupId: string, attemptId: string): ReservationOutcome {
+    this.#sweepDead();
+    this.#releaseExpiredReservations();
+    const entry = this.#entries.get(depositId);
+    if (!entry || entry.group_id !== groupId) return { ok: false, reason: "unavailable" };
+    if (entry.state === "reserved" && entry.attempt_id === attemptId) {
+      entry.state = "held";
+      entry.attempt_id = null;
+      entry.released_attempt_id = attemptId;
+      entry.reserved_at_ms = null;
+      return { ok: true, deposit: meta(entry), attempt_id: attemptId };
+    }
+    if (entry.state === "held" && entry.released_attempt_id === attemptId) {
+      return { ok: true, deposit: meta(entry), attempt_id: attemptId };
+    }
+    return { ok: false, reason: "unavailable" };
   }
 
   /** The live deposits of one owner, text included: reserved for the push path. */
   takeForPush(instanceToken: string): Array<ContextDepositMeta & { text: string }> {
     this.#sweepDead();
+    this.#releaseExpiredReservations();
     return [...this.#entries.values()]
       .filter((e) => e.owner_instance_token === instanceToken)
       .map((e) => ({ ...meta(e), text: e.text }));
@@ -240,7 +294,9 @@ export class ContextRegistry {
 
   /** Frees the entries of owners that are gone or re-bound; returns how many were dropped. */
   sweep(): number {
-    return this.#sweepDead();
+    const dropped = this.#sweepDead();
+    this.#releaseExpiredReservations();
+    return dropped;
   }
 
   #isLive(entry: Entry): boolean {
@@ -259,6 +315,18 @@ export class ContextRegistry {
       }
     }
     return dropped;
+  }
+
+  #releaseExpiredReservations(): void {
+    const now = this.#now().getTime();
+    for (const entry of this.#entries.values()) {
+      const reservedAt = entry.reserved_at_ms;
+      if (entry.state !== "reserved" || reservedAt === null || now - reservedAt < this.#limits.reservationTtlMs) continue;
+      entry.state = "held";
+      entry.attempt_id = null;
+      entry.released_attempt_id = null;
+      entry.reserved_at_ms = null;
+    }
   }
 
   #dropOwner(instanceToken: string): void {

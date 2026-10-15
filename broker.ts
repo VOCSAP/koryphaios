@@ -25,6 +25,7 @@ import { projectKeyCaseRefusal, validateProjectKey } from "./shared/project-key.
 import { roadmapTitleRefusal } from "./shared/roadmap-title.ts";
 import {
   CONTEXT_DEPOSIT_MAX_BODY_BYTES,
+  isAttemptIdShape,
   isCapabilityHashShape,
   isCapabilityShape,
   isDepositIdShape,
@@ -2785,11 +2786,62 @@ async function handleContextDeposit(req: Request): Promise<Response> {
     deposited_at: outcome.deposit.deposited_at,
     head_at_deposit: outcome.deposit.head_at_deposit,
     branch: outcome.deposit.branch,
-    state: outcome.deposit.state,
+    state: "held",
     ...(outcome.replaced ? { replaced: outcome.replaced } : {}),
     held: outcome.held.map((d) => ({ deposit_id: d.deposit_id, chars: d.chars, deposited_at: d.deposited_at })),
   };
   return Response.json(response);
+}
+
+function handleContextTransaction(body: unknown): Response {
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return Response.json({ error: "context transaction body must be an object" }, { status: 400 });
+  }
+  const input = body as Record<string, unknown>;
+  const groupId = typeof input.group_id === "string" ? input.group_id : "";
+  if (!groupId) return Response.json({ error: "group_id is required" }, { status: 400 });
+  if (isTofuExemptGroup(groupId)) {
+    return Response.json({ error: "context transaction group pins no secret on this broker" }, { status: 403 });
+  }
+  const group = db.query("SELECT secret_hash FROM groups WHERE group_id = ?").get(groupId) as { secret_hash: string | null } | null;
+  if (!group || group.secret_hash === null) {
+    return Response.json({ error: "context transaction group pins no secret on this broker" }, { status: 403 });
+  }
+  const secretError = checkGroupSecret(groupId, typeof input.group_secret_hash === "string" ? input.group_secret_hash : null);
+  if (secretError) return Response.json({ error: secretError.error }, { status: secretError.status });
+  const auth = approvalAuth.authenticateOperator(
+    input as { auth?: ApprovalAuthProof } & Record<string, unknown>,
+    "context-transaction"
+  );
+  if (isAuthError(auth)) return Response.json({ error: auth.error }, { status: auth.status });
+  if (typeof input.target_peer_id !== "string" || !input.target_peer_id) {
+    return Response.json({ error: "target_peer_id is required" }, { status: 400 });
+  }
+  if (!isDepositIdShape(input.deposit_id)) return Response.json({ error: "deposit_id is invalid" }, { status: 400 });
+  if (input.action !== "reserve" && input.action !== "release") {
+    return Response.json({ error: "action must be reserve or release" }, { status: 400 });
+  }
+  const attemptId = input.attempt_id;
+  if (input.action === "release" && !isAttemptIdShape(attemptId)) {
+    return Response.json({ error: "attempt_id is invalid" }, { status: 400 });
+  }
+
+  const outcome =
+    input.action === "reserve"
+      ? contextRegistry.reserve(input.deposit_id, { peer_id: input.target_peer_id, group_id: groupId })
+      : contextRegistry.release(input.deposit_id, groupId, attemptId as string);
+  if (!outcome.ok) return Response.json({ ok: false, reason: outcome.reason }, { status: 409 });
+  return Response.json({
+    ok: true,
+    deposit_id: outcome.deposit.deposit_id,
+    chars: outcome.deposit.chars,
+    deposited_at: outcome.deposit.deposited_at,
+    head_at_deposit: outcome.deposit.head_at_deposit,
+    branch: outcome.deposit.branch,
+    git_root: outcome.deposit.git_root,
+    state: outcome.deposit.state,
+    attempt_id: outcome.attempt_id,
+  });
 }
 
 // B1: the shape of a peer row on the HTTP boundary, as a pick-list so that a
@@ -11646,6 +11698,8 @@ const server = Bun.serve<WsData>({
 
     try {
       switch (path) {
+        case "/context/transaction":
+          return handleContextTransaction(body);
         case "/register": {
           const result = handleRegister(body as RegisterRequest);
           if ("error" in result) {

@@ -4,7 +4,7 @@ import { existsSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { hostname } from "node:os";
 import { join } from "node:path";
 import { Database } from "bun:sqlite";
-import { groupId, livePid, sha256Hex, startBroker, stopBroker, type TestBroker } from "./_helper.ts";
+import { deckAuthored, groupId, livePid, sha256Hex, startBroker, stopBroker, type TestBroker } from "./_helper.ts";
 import {
   CONTEXT_DEPOSIT_MAX_BODY_BYTES,
   CONTEXT_DEPOSIT_MAX_CHARS,
@@ -66,7 +66,7 @@ async function call(b: TestBroker, path: string, body: unknown, bearer?: string)
 async function register(
   b: TestBroker,
   group: Group | "default",
-  opts: { deskSession?: string; capability?: string | null; hash?: unknown; pid?: number; bearer?: string } = {}
+  opts: { deskSession?: string; capability?: string | null; hash?: unknown; groupSecretHash?: string | null; pid?: number; bearer?: string } = {}
 ): Promise<Peer> {
   const hash =
     "hash" in opts ? opts.hash : opts.capability === undefined || opts.capability === null ? undefined : hashCapability(opts.capability);
@@ -83,7 +83,7 @@ async function register(
       client_pid: 1,
       project_key: null,
       group_id: group === "default" ? "default" : group.id,
-      group_secret_hash: group === "default" ? null : group.secretHash,
+      group_secret_hash: group === "default" ? null : "groupSecretHash" in opts ? opts.groupSecretHash : group.secretHash,
       desk_session: opts.deskSession ?? randomUUID(),
       ...(hash === undefined ? {} : { deposit_capability_hash: hash }),
     },
@@ -105,6 +105,36 @@ async function deposit(
   bearer?: string
 ) {
   return call(b, "/context/deposit", depositBody(capability, text, extra), bearer);
+}
+
+function transactionBody(
+  group: Group,
+  targetPeerId: string,
+  depositId: string,
+  action: "reserve" | "release",
+  attemptId?: string
+): Record<string, unknown> {
+  return {
+    group_id: group.id,
+    group_secret_hash: group.secretHash,
+    target_peer_id: targetPeerId,
+    deposit_id: depositId,
+    action,
+    ...(attemptId ? { attempt_id: attemptId } : {}),
+  };
+}
+
+async function transaction(
+  b: TestBroker,
+  group: Group,
+  targetPeerId: string,
+  depositId: string,
+  action: "reserve" | "release",
+  attemptId?: string,
+  operatorAuth = true
+): Promise<Reply> {
+  const body = transactionBody(group, targetPeerId, depositId, action, attemptId);
+  return call(b, "/context/transaction", operatorAuth ? deckAuthored(body) : body);
 }
 
 function withDb<T>(b: TestBroker, fn: (db: Database) => T): T {
@@ -428,6 +458,138 @@ describe("POST /context/deposit on a real broker", () => {
       const text = await (await fetch(`${broker.url}${path}`)).text();
       expect({ path, leaks: [canary, cap, hashCapability(cap)].filter((s) => text.includes(s)) }).toEqual({ path, leaks: [] });
     }
+  });
+});
+
+describe("POST /context/transaction on a real broker", () => {
+  test("an operator credential is required for reservation and release", async () => {
+    const capA = newCapability();
+    const capB = newCapability();
+    const peerA = await register(broker, G, { capability: capA });
+    await register(broker, G, { capability: capB });
+    const deposited = await deposit(broker, capA, "operator-auth-canary");
+    const depositId = deposited.body.deposit_id as string;
+
+    expect(await transaction(broker, G, peerA.peer_id, depositId, "reserve", undefined, false)).toMatchObject({ status: 401 });
+    const reserved = await transaction(broker, G, peerA.peer_id, depositId, "reserve");
+    expect(reserved).toMatchObject({ status: 200, body: { ok: true, state: "reserved" } });
+    const attemptId = reserved.body.attempt_id as string;
+    expect(await transaction(broker, G, peerA.peer_id, depositId, "release", attemptId, false)).toMatchObject({ status: 401 });
+    expect(await transaction(broker, G, peerA.peer_id, depositId, "release", attemptId)).toMatchObject({
+      status: 200,
+      body: { ok: true, state: "held", attempt_id: attemptId },
+    });
+  });
+
+  test("a group whose broker row pins no secret cannot transact", async () => {
+    const unpinned = await makeGroup();
+    const cap = newCapability();
+    const peer = await register(broker, unpinned, { capability: cap, groupSecretHash: null });
+    const deposited = await deposit(broker, cap, "unpinned-group-canary");
+    const body = transactionBody(unpinned, peer.peer_id, deposited.body.deposit_id as string, "reserve");
+    body.group_secret_hash = null;
+
+    const refusal = await call(broker, "/context/transaction", deckAuthored(body));
+    expect(refusal).toMatchObject({ status: 403, body: { error: "context transaction group pins no secret on this broker" } });
+  });
+
+  test("a release rejects another group and a different attempt", async () => {
+    const cap = newCapability();
+    const peer = await register(broker, G, { capability: cap });
+    const deposited = await deposit(broker, cap, "release-binding-canary");
+    const depositId = deposited.body.deposit_id as string;
+    const reserved = await transaction(broker, G, peer.peer_id, depositId, "reserve");
+    const attemptId = reserved.body.attempt_id as string;
+    const otherGroup = await makeGroup();
+    const otherPeer = await register(broker, otherGroup, { capability: newCapability() });
+
+    expect(await transaction(broker, otherGroup, otherPeer.peer_id, depositId, "release", attemptId)).toMatchObject({
+      status: 409,
+      body: { ok: false, reason: "unavailable" },
+    });
+    expect(await transaction(broker, G, peer.peer_id, depositId, "release", "f".repeat(32))).toMatchObject({
+      status: 409,
+      body: { ok: false, reason: "unavailable" },
+    });
+    expect(await transaction(broker, G, peer.peer_id, depositId, "release", attemptId)).toMatchObject({
+      status: 200,
+      body: { ok: true, state: "held", attempt_id: attemptId },
+    });
+  });
+
+  test("a mismatched group secret cannot reserve a deposit", async () => {
+    const cap = newCapability();
+    const peer = await register(broker, G, { capability: cap });
+    const deposited = await deposit(broker, cap, "secret-canary");
+    const depositId = deposited.body.deposit_id as string;
+    const wrongSecret = { ...G, secretHash: randomBytes(32).toString("hex") };
+
+    expect(await transaction(broker, wrongSecret, peer.peer_id, depositId, "reserve")).toMatchObject({ status: 401 });
+    expect(await transaction(broker, G, peer.peer_id, depositId, "reserve")).toMatchObject({
+      status: 200,
+      body: { ok: true, state: "reserved" },
+    });
+  });
+
+  test("two reservations of one deposit return one reservation and one explicit refusal", async () => {
+    const cap = newCapability();
+    const peer = await register(broker, G, { capability: cap });
+    const deposited = await deposit(broker, cap, "transaction-canary");
+    const depositId = deposited.body.deposit_id as string;
+
+    const [first, second] = await Promise.all([
+      transaction(broker, G, peer.peer_id, depositId, "reserve"),
+      transaction(broker, G, peer.peer_id, depositId, "reserve"),
+    ]);
+    const reserved = [first, second].find((reply) => reply.status === 200);
+    const refused = [first, second].find((reply) => reply.status !== 200);
+    if (!reserved || !refused) throw new Error("reservation outcomes missing");
+
+    expect(reserved.body).toMatchObject({ ok: true, deposit_id: depositId, state: "reserved" });
+    expect(reserved.body.attempt_id).toMatch(/^[0-9a-f]{32}$/);
+    expect(reserved.text).not.toContain("transaction-canary");
+    expect(refused).toMatchObject({ status: 409, body: { ok: false, reason: "unavailable" } });
+  });
+
+  test("a matching release is idempotent and restores --replace", async () => {
+    const cap = newCapability();
+    const peer = await register(broker, G, { capability: cap });
+    const deposited = await deposit(broker, cap, "release-canary");
+    const depositId = deposited.body.deposit_id as string;
+    const reserved = await transaction(broker, G, peer.peer_id, depositId, "reserve");
+    const attemptId = reserved.body.attempt_id as string;
+
+    const released = await transaction(broker, G, peer.peer_id, depositId, "release", attemptId);
+    const replay = await transaction(broker, G, peer.peer_id, depositId, "release", attemptId);
+    expect(released).toMatchObject({ status: 200, body: { ok: true, deposit_id: depositId, state: "held", attempt_id: attemptId } });
+    expect(replay).toEqual(released);
+    expect((await deposit(broker, cap, "replacement", { replace: depositId })).status).toBe(200);
+  });
+
+  test("absent, replaced, wrong-owner and stale-epoch reservations share the unavailable refusal", async () => {
+    const capA = newCapability();
+    const capB = newCapability();
+    const deskA = randomUUID();
+    const peerA = await register(broker, G, { deskSession: deskA, capability: capA });
+    const peerB = await register(broker, G, { capability: capB });
+    const owned = await deposit(broker, capA, "owner-canary");
+    const depositId = owned.body.deposit_id as string;
+
+    const wrongOwner = await transaction(broker, G, peerB.peer_id, depositId, "reserve");
+    const absent = await transaction(broker, G, peerA.peer_id, "0123456789abcdef", "reserve");
+    const replacement = await deposit(broker, capA, "replacement-canary", { replace: depositId });
+    const replaced = await transaction(broker, G, peerA.peer_id, depositId, "reserve");
+    const stale = await deposit(broker, capA, "stale-canary");
+    await call(broker, "/disconnect", { instance_token: peerA.instance_token });
+    const rebound = await register(broker, G, { deskSession: deskA, capability: capA });
+    const staleEpoch = await transaction(broker, G, rebound.peer_id, stale.body.deposit_id as string, "reserve");
+
+    expect(replacement.status).toBe(200);
+    expect(wrongOwner).toMatchObject({ status: 409, body: { ok: false, reason: "unavailable" } });
+    expect(absent).toEqual(wrongOwner);
+    expect(replaced).toEqual(wrongOwner);
+    expect(staleEpoch).toEqual(wrongOwner);
+    expect(staleEpoch.text).not.toContain("owner-canary");
   });
 });
 

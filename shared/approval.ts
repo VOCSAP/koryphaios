@@ -241,7 +241,8 @@ export type ApprovalOperation =
   // verifier beside this one) so it inherits the signature check, the nonce
   // replay guard and this very table, and so that leaving it out of
   // SESSION_ALLOWED below is what refuses a sandboxed agent's session token.
-  | "roadmap-write";
+  | "roadmap-write"
+  | "context-transaction";
 
 /**
  * A session credential may only ASK. Every operation absent from this set is

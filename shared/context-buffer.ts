@@ -23,10 +23,12 @@ export const CONTEXT_DEPOSIT_MAX_INPUT_BYTES = CONTEXT_DEPOSIT_MAX_CHARS * 4;
 export const CONTEXT_DEPOSITS_PER_OWNER = 3;
 export const CONTEXT_DEPOSITS_PER_GROUP = 96;
 export const CONTEXT_DEPOSITS_TOTAL = 256;
+export const CONTEXT_RESERVATION_TTL_MS = 120_000;
 
 const HEX64 = /^[0-9a-f]{64}$/;
 const SHA = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 const DEPOSIT_ID = /^[0-9a-f]{16}$/;
+const ATTEMPT_ID = /^[0-9a-f]{32}$/;
 const MAX_BRANCH_CHARS = 255;
 const MAX_GIT_ROOT_CHARS = 4096;
 
@@ -40,6 +42,10 @@ export function isCapabilityHashShape(value: unknown): value is string {
 
 export function isDepositIdShape(value: unknown): value is string {
   return typeof value === "string" && DEPOSIT_ID.test(value);
+}
+
+export function isAttemptIdShape(value: unknown): value is string {
+  return typeof value === "string" && ATTEMPT_ID.test(value);
 }
 
 export function hashCapability(capability: string): string {
@@ -159,7 +165,7 @@ export interface ContextDepositMeta {
   head_at_deposit: string | null;
   branch: string | null;
   git_root: string | null;
-  state: "held";
+  state: "held" | "reserved";
 }
 
 export interface ContextDepositResponse {

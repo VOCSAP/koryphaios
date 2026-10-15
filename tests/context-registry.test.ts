@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   CONTEXT_DEPOSIT_MAX_CHARS,
+  CONTEXT_RESERVATION_TTL_MS,
   CONTEXT_DEPOSITS_PER_GROUP,
   CONTEXT_DEPOSITS_PER_OWNER,
   CONTEXT_DEPOSITS_TOTAL,
@@ -21,18 +22,19 @@ const HASH_B = hashCapability(CAP_B);
 interface Harness {
   registry: ContextRegistry;
   owners: Map<string, LiveOwner>;
+  now: { value: number };
 }
 
 function harness(limits: Partial<ConstructorParameters<typeof ContextRegistry>[0]["limits"]> = {}, ids?: () => string): Harness {
   const owners = new Map<string, LiveOwner>();
-  let n = 0;
+  const now = { value: Date.UTC(2026, 9, 12, 12, 0, 0) };
   const registry = new ContextRegistry({
     ownerIfActive: (token) => owners.get(token) ?? null,
-    now: () => new Date(Date.UTC(2026, 9, 12, 12, 0, n++)),
+    now: () => new Date(now.value),
     newDepositId: ids,
     limits,
   });
-  return { registry, owners };
+  return { registry, owners, now };
 }
 
 function deposit(registry: ContextRegistry, capabilityHash: string, text = "next: rerun the tests", replace?: string) {
@@ -326,6 +328,12 @@ describe("ContextRegistry", () => {
       describe: (h, id) => {
         expect(h.registry.describe(id)).toBeNull();
       },
+      reserve: (h, id) => {
+        expect(h.registry.reserve(id, { peer_id: "tok-a", group_id: "g1" })).toEqual({ ok: false, reason: "unavailable" });
+      },
+      release: (h, id) => {
+        expect(h.registry.release(id, "g1", "0".repeat(32))).toEqual({ ok: false, reason: "unavailable" });
+      },
       takeForPush: (h) => {
         expect(h.registry.takeForPush("tok-a")).toEqual([]);
       },
@@ -356,10 +364,73 @@ describe("ContextRegistry", () => {
     expect(deposit(q.registry, HASH_B).ok).toBe(true);
   });
 
+  test("only the first reservation of a held deposit wins, and releasing its attempt is idempotent", () => {
+    const h = harness();
+    liveOwner(h, "tok-a", HASH_A, "peer-a");
+    const deposited = deposit(h.registry, HASH_A, "context to keep");
+    if (!deposited.ok) throw new Error("deposit refused");
+
+    const first = h.registry.reserve(deposited.deposit.deposit_id, { peer_id: "peer-a", group_id: "g1" });
+    const rival = h.registry.reserve(deposited.deposit.deposit_id, { peer_id: "peer-a", group_id: "g1" });
+    if (!first.ok) throw new Error("first reservation refused");
+
+    expect(first.deposit.state).toBe("reserved");
+    expect(first.attempt_id).toMatch(/^[0-9a-f]{32}$/);
+    expect(rival).toEqual({ ok: false, reason: "unavailable" });
+    expect(deposit(h.registry, HASH_A, "replacement", deposited.deposit.deposit_id)).toEqual({
+      ok: false,
+      status: 404,
+      reason: "replace_not_found"
+    });
+
+    const released = h.registry.release(deposited.deposit.deposit_id, "g1", first.attempt_id);
+    const replay = h.registry.release(deposited.deposit.deposit_id, "g1", first.attempt_id);
+    expect(released).toMatchObject({ ok: true, deposit: { deposit_id: deposited.deposit.deposit_id, state: "held" } });
+    expect(replay).toEqual(released);
+    expect(deposit(h.registry, HASH_A, "replacement", deposited.deposit.deposit_id).ok).toBe(true);
+  });
+
+  test("a reservation refuses a different current owner and a re-registered deposit", () => {
+    const h = harness();
+    liveOwner(h, "tok-a", HASH_A, "peer-a");
+    const owned = deposit(h.registry, HASH_A, "owner-only");
+    if (!owned.ok) throw new Error("deposit refused");
+
+    expect(h.registry.reserve(owned.deposit.deposit_id, { peer_id: "peer-b", group_id: "g1" })).toEqual({
+      ok: false,
+      reason: "unavailable"
+    });
+
+    h.registry.onRegister("tok-a", HASH_A);
+    expect(h.registry.reserve(owned.deposit.deposit_id, { peer_id: "peer-a", group_id: "g1" })).toEqual({
+      ok: false,
+      reason: "unavailable"
+    });
+  });
+
+  test("a reservation expires to held, rejects its old attempt, and admits a new reservation", () => {
+    const h = harness({ reservationTtlMs: 10 });
+    liveOwner(h, "tok-a", HASH_A, "peer-a");
+    const deposited = deposit(h.registry, HASH_A, "context to keep");
+    if (!deposited.ok) throw new Error("deposit refused");
+    const first = h.registry.reserve(deposited.deposit.deposit_id, { peer_id: "peer-a", group_id: "g1" });
+    if (!first.ok) throw new Error("reservation refused");
+
+    expect(h.registry.release(deposited.deposit.deposit_id, "g2", first.attempt_id)).toEqual({ ok: false, reason: "unavailable" });
+    expect(h.registry.release(deposited.deposit.deposit_id, "g1", "f".repeat(32))).toEqual({ ok: false, reason: "unavailable" });
+    h.now.value += 11;
+    expect(h.registry.release(deposited.deposit.deposit_id, "g1", first.attempt_id)).toEqual({ ok: false, reason: "unavailable" });
+    const second = h.registry.reserve(deposited.deposit.deposit_id, { peer_id: "peer-a", group_id: "g1" });
+    expect(second).toMatchObject({ ok: true, deposit: { state: "reserved" } });
+    if (!second.ok) throw new Error("replacement reservation refused");
+    expect(second.attempt_id).not.toBe(first.attempt_id);
+  });
+
   test("the default quotas are the named constants", () => {
     const h = harness();
     expect(h.registry.limits).toEqual({
       maxChars: CONTEXT_DEPOSIT_MAX_CHARS,
+      reservationTtlMs: CONTEXT_RESERVATION_TTL_MS,
       perOwner: CONTEXT_DEPOSITS_PER_OWNER,
       perGroup: CONTEXT_DEPOSITS_PER_GROUP,
       total: CONTEXT_DEPOSITS_TOTAL,
