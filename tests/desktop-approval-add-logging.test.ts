@@ -37,6 +37,7 @@ function sliceAuth(): ReturnType<typeof createApprovalAuth> {
     queryOne: <T,>(): T => ({ public_key: op.publicKey }) as T,
     queryAll: <T,>(): T[] => [],
     run: (): void => {},
+    resolveTrustedOperator: (): string => op.publicKey,
     rememberNonce: (): boolean => true,
   });
   // The slice calls `authorizeCreate(body)` with the test's own draft body,

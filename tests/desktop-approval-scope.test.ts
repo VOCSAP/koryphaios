@@ -34,12 +34,17 @@ interface TokenRow {
  * INSERT. Deliberately dumb: the point is to exercise the DECISION, and a real
  * SQLite here would only re-test SQLite while dragging in a file handle.
  */
-function fakeDb(seed: { operators?: Record<string, string>; tokens?: Record<string, TokenRow> } = {}): {
+function fakeDb(seed: {
+  operators?: Record<string, string>;
+  tokens?: Record<string, TokenRow>;
+  trustedOperators?: Record<string, string>;
+} = {}): {
   deps: ApprovalAuthDeps;
   nonces: string[];
 } {
   const operators = seed.operators ?? {};
   const tokens = seed.tokens ?? {};
+  const trustedOperators = seed.trustedOperators ?? operators;
   const nonces: string[] = [];
   const deps: ApprovalAuthDeps = {
     queryOne<T>(sql: string, params: unknown[]): T | null {
@@ -57,6 +62,10 @@ function fakeDb(seed: { operators?: Record<string, string>; tokens?: Record<stri
     },
     run(): void {
       /* the last_seen_at upsert; nothing to observe */
+    },
+    resolveTrustedOperator(operatorId: string) {
+      const publicKey = trustedOperators[operatorId];
+      return publicKey ?? { error: "operator-not-trusted", status: 403 };
     },
     rememberNonce(nonce: string): boolean {
       if (nonces.includes(nonce)) return false;
@@ -161,6 +170,7 @@ describe("approvalWhere is the single clause producer", () => {
       queryOne: <T,>(): T => legacyRow as T,
       queryAll: <T,>(): T[] => [],
       run: (): void => {},
+      resolveTrustedOperator: (): string => "trusted",
       rememberNonce: (): boolean => true,
     });
     const got = auth.scopeForAnsweredRow("ap-old");
@@ -322,6 +332,76 @@ describe("the stamp keeps the credential's fields out of the handler", () => {
 });
 
 describe("authentication still refuses what it always refused", () => {
+  test("an operator absent from the trust policy is refused even with a valid self-derived id", () => {
+    const trusted = newOperator();
+    const untrusted = newOperator();
+    const { deps } = fakeDb({ trustedOperators: { [trusted.id]: trusted.cred.publicKey } });
+    const auth = createApprovalAuth(deps);
+
+    const accepted = auth.authorizeQuery(signed({ project_key: "repo-a" }, trusted), "list");
+    expect(isAuthError(accepted)).toBe(false);
+
+    const refused = auth.authorizeQuery(signed({ project_key: "repo-a" }, untrusted), "list");
+    expect(isAuthError(refused)).toBe(true);
+    if (isAuthError(refused)) {
+      expect(refused.status).toBe(403);
+      expect(refused.error).toBe("operator-not-trusted");
+    }
+  });
+
+  test("an operator proof may not replace policy key material", () => {
+    const setup = operatorSetup();
+    const other = newOperator();
+    const body = { project_key: "repo-a", public_key: other.cred.publicKey };
+    const auth = buildAuthProof(setup.op.cred.privateKey, body, {
+      kind: "operator",
+      operator_id: setup.op.id,
+    });
+
+    const refused = setup.auth.authorizeQuery({ ...body, auth }, "list");
+    expect(isAuthError(refused)).toBe(true);
+    if (isAuthError(refused)) {
+      expect(refused.status).toBe(403);
+      expect(refused.error).toBe("operator-key-mismatch");
+    }
+  });
+
+  test("a session token is refused when its owner is no longer trusted", () => {
+    const op = newOperator();
+    const sess = generateCredential();
+    const { deps } = fakeDb({
+      trustedOperators: {},
+      tokens: {
+        "tok-1": {
+          public_key: sess.publicKey,
+          operator_id: op.id,
+          session_ref: "tile-7",
+          project_key: "repo-owned",
+          revoked_at: null,
+          expires_at: FUTURE,
+        },
+      },
+    });
+    const auth = createApprovalAuth(deps);
+    const body = signed({}, { cred: sess, id: op.id, token_id: "tok-1", kind: "session" });
+
+    const refused = auth.authorizeCreate(body);
+    expect(isAuthError(refused)).toBe(true);
+    if (isAuthError(refused)) {
+      expect(refused.status).toBe(403);
+      expect(refused.error).toBe("operator-not-trusted");
+    }
+  });
+
+  test("a session credential may not use operator-check", () => {
+    const s = sessionSetup("repo-owned");
+    const body = signed({}, { cred: s.sess, id: s.op.id, token_id: s.tokenId, kind: "session" });
+    const refused = s.auth.authenticateOperator(body, "operator-check");
+
+    expect(isAuthError(refused)).toBe(true);
+    if (isAuthError(refused)) expect(refused.status).toBe(403);
+  });
+
   test("a replayed proof is rejected once the nonce is spent", () => {
     const op = newOperator();
     const { deps } = fakeDb({ operators: { [op.id]: op.cred.publicKey } });
@@ -377,7 +457,10 @@ describe("authentication still refuses what it always refused", () => {
 
 describe("the gateway path, the one scope with no credential", () => {
   /** A fake db that serves ONE approval row, plus a counter of reads. */
-  function withRow(row: { id: string; operator_id: string; project_key: string }): ReturnType<typeof createApprovalAuth> {
+  function withRow(
+    row: { id: string; operator_id: string; project_key: string },
+    trusted = true
+  ): ReturnType<typeof createApprovalAuth> {
     const deps: ApprovalAuthDeps = {
       queryOne<T>(sql: string, params: unknown[]): T | null {
         if (!sql.includes("pending_approvals")) throw new Error(`unexpected: ${sql}`);
@@ -385,6 +468,8 @@ describe("the gateway path, the one scope with no credential", () => {
       },
       queryAll: <T,>(): T[] => [],
       run: (): void => {},
+      resolveTrustedOperator: (): string | { error: string; status: number } =>
+        trusted ? "trusted" : { error: "operator-not-trusted", status: 403 },
       rememberNonce: (): boolean => true,
     };
     return createApprovalAuth(deps);
@@ -417,6 +502,11 @@ describe("the gateway path, the one scope with no credential", () => {
     // would match every legacy row at once.
     const auth = withRow({ id: "ap-1", operator_id: "op-1", project_key: "repo-a" });
     expect(auth.scopeForAnsweredRow("ap-does-not-exist")).toBeNull();
+  });
+
+  test("a gateway cannot obtain a scope for an operator removed from trust", () => {
+    const auth = withRow({ id: "ap-1", operator_id: "op-removed", project_key: "repo-a" }, false);
+    expect(auth.scopeForAnsweredRow("ap-1")).toBeNull();
   });
 
   test("the caller cannot smuggle its own operator or project through the id", () => {

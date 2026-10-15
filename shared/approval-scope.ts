@@ -10,7 +10,6 @@
 import {
   isOperationAllowed,
   verifyAuthProof,
-  deriveOperatorId,
   type ApprovalOperation,
 } from "./approval.ts";
 import type { ApprovalAuthProof } from "./types.ts";
@@ -167,6 +166,8 @@ export interface ApprovalAuthDeps {
   queryOne<T>(sql: string, params: unknown[]): T | null;
   queryAll<T>(sql: string, params: unknown[]): T[];
   run(sql: string, params: unknown[]): void;
+  resolveTrustedOperator(operatorId: string): AuthResult<string>;
+  onTrustRefused?: (refusal: AuthError) => void;
   /** The broker owns the bounded replay cache; skew alone would not stop one. */
   rememberNonce(nonce: string, nowSec: number): boolean;
 }
@@ -222,16 +223,10 @@ export function createApprovalAuth(deps: ApprovalAuthDeps): ApprovalAuth {
     let tokenProjectKey: string | null = null;
 
     if (proof.kind === "operator") {
-      const row = deps.queryOne<{ public_key: string }>(
-        "SELECT public_key FROM approval_operators WHERE operator_id = ?",
-        [proof.operator_id]
-      );
-      // First contact: the id IS the digest of the key, so the presented key
-      // self-certifies and there is no trust decision to make.
-      knownKey =
-        row?.public_key ??
-        (publicKey && deriveOperatorId(publicKey) === proof.operator_id ? publicKey : null);
-      if (!knownKey) return { error: "unknown operator", status: 401 };
+      const trusted = deps.resolveTrustedOperator(proof.operator_id);
+      if (isAuthError(trusted)) return trusted;
+      if (publicKey && publicKey !== trusted) return { error: "operator-key-mismatch", status: 403 };
+      knownKey = trusted;
     } else {
       if (!proof.token_id) return { error: "token_id required", status: 401 };
       const row = deps.queryOne<TokenRow>(
@@ -245,6 +240,8 @@ export function createApprovalAuth(deps: ApprovalAuthDeps): ApprovalAuth {
         return { error: "session token expired", status: 401 };
       }
       if (row.operator_id !== proof.operator_id) return { error: "token/operator mismatch", status: 401 };
+      const trusted = deps.resolveTrustedOperator(row.operator_id);
+      if (isAuthError(trusted)) return trusted;
       knownKey = row.public_key;
       sessionRef = row.session_ref;
       // Kept as '' rather than normalized to null: a token minted without
@@ -364,6 +361,11 @@ export function createApprovalAuth(deps: ApprovalAuthDeps): ApprovalAuth {
     ): { scope: ApprovalScope; row: R } | null {
       const row = deps.queryOne<R>("SELECT * FROM pending_approvals WHERE id = ?", [approvalId]);
       if (!row) return null;
+      const trust = deps.resolveTrustedOperator(row.operator_id);
+      if (isAuthError(trust)) {
+        deps.onTrustRefused?.(trust);
+        return null;
+      }
       return {
         scope: mintScope({
           operator_id: row.operator_id,

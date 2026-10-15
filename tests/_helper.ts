@@ -1,7 +1,9 @@
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { mkdtempSync, rmSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { buildAuthProof, deriveOperatorId, generateCredential } from "../shared/approval.ts";
+import { operatorTrustFilePath } from "../shared/config.ts";
+import { OPERATOR_TRUST_VERSION } from "../shared/operator-trust.ts";
 export { scrubEnv } from "./_scrub-env.ts";
 import { scrubEnv } from "./_scrub-env.ts";
 
@@ -39,6 +41,23 @@ export interface StartBrokerOptions {
   command?: string[];
   /** Wall-clock budget shared by every attempt. */
   budgetMs?: number;
+  /** null leaves the policy absent; [] writes a valid policy with no trusted operators. */
+  trustedOperators?: readonly string[] | null;
+}
+
+function provisionTestOperatorTrust(tmpDir: string, trustedOperators: readonly string[] | null | undefined): void {
+  if (trustedOperators === null) return;
+  const policyPath = operatorTrustFilePath(join(tmpDir, "claude-peers", "config.json"));
+  mkdirSync(dirname(policyPath), { recursive: true });
+  const publicKeys = trustedOperators ?? [FIXTURE_OPERATOR.publicKey];
+  writeFileSync(
+    policyPath,
+    JSON.stringify({
+      version: OPERATOR_TRUST_VERSION,
+      operators: publicKeys.map((public_key) => ({ public_key })),
+    }),
+    { mode: 0o600 }
+  );
 }
 
 // Shared by every attempt and kept under the integration step's 30 s
@@ -69,6 +88,7 @@ export async function startBroker(
   options: StartBrokerOptions = {}
 ): Promise<TestBroker> {
   const tmpDir = mkdtempSync(join(tmpdir(), "cp-test-"));
+  provisionTestOperatorTrust(tmpDir, options.trustedOperators);
   const dbPath = join(tmpDir, "peers.db");
   const command = options.command ?? ["bun", "broker.ts"];
   const deadline = Date.now() + (options.budgetMs ?? BOOT_BUDGET_MS);
@@ -212,7 +232,7 @@ export async function groupId(secret: string): Promise<string> {
  * One credential per test process: operator_id is the digest of the public key,
  * so every fixture in a run speaks as the same operator.
  */
-const FIXTURE_OPERATOR = generateCredential();
+export const FIXTURE_OPERATOR = generateCredential();
 
 /**
  * The operator_id digest `deckAuthored` writes stamp on a card (card

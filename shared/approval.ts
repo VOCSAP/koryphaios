@@ -242,7 +242,8 @@ export type ApprovalOperation =
   // replay guard and this very table, and so that leaving it out of
   // SESSION_ALLOWED below is what refuses a sandboxed agent's session token.
   | "roadmap-write"
-  | "context-transaction";
+  | "context-transaction"
+  | "operator-check";
 
 /**
  * A session credential may only ASK. Every operation absent from this set is

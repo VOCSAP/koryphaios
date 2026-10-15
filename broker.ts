@@ -7,10 +7,10 @@
 
 import { Database } from "bun:sqlite";
 import { dirname, join } from "node:path";
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import { brokerMode, isLoopbackBrokerUrl, loadConfig, upstreamUrl } from "./shared/config.ts";
+import { brokerMode, isLoopbackBrokerUrl, loadConfig, operatorTrustFilePath, upstreamUrl } from "./shared/config.ts";
 import {
   MAX_OPEN_DELEGATED_TASKS,
   isDelegationTaskAction,
@@ -106,16 +106,13 @@ import {
   APPROVAL_ANSWER_KINDS,
   APPROVAL_VIAS,
   approvalWaitTimeoutSec,
-  deriveOperatorId,
   deriveTokenId,
-  isOperationAllowed,
   sanitizeAnswerForPty,
   validateApprovalAnswers,
   validateApprovalDraft,
-  verifyAuthProof,
-  type ApprovalOperation,
 } from "./shared/approval.ts";
 import { settledOutcome } from "./shared/approval-outcome.ts";
+import { OPERATOR_TRUST_VERSION, parseOperatorTrust, type OperatorTrust } from "./shared/operator-trust.ts";
 import {
   createApprovalAuth,
   approvalWhere,
@@ -124,6 +121,7 @@ import {
   assertStampSessionRef,
   isAuthError,
   type ApprovalScope,
+  type AuthResult,
 } from "./shared/approval-scope.ts";
 // Card bf76d37f: the dispatch outcome is written by the Deck and READ BACK by
 // an agent, so it crosses the same boundary as an approval answer and gets the
@@ -401,6 +399,37 @@ const MIRROR_ROW_SQL = "(via IS NOT NULL AND relay_id IS NULL)";
 // outlives the stderr of whoever spawned it (server.ts spawns it detached), so
 // it must own its on-disk trail. Console mirroring keeps `bun broker.ts` usable.
 const log = createLogger({ dir: coreLogDir(), name: "broker" }).child("broker");
+
+type OperatorTrustSnapshot =
+  | { state: "ready"; trust: OperatorTrust }
+  | { state: "unconfigured" }
+  | { state: "invalid" };
+
+function loadOperatorTrustSnapshot(): OperatorTrustSnapshot {
+  const path = operatorTrustFilePath();
+  if (!existsSync(path)) return { state: "unconfigured" };
+  try {
+    return { state: "ready", trust: parseOperatorTrust(readFileSync(path, "utf8")) };
+  } catch (error) {
+    log.error("operator trust policy is invalid", error);
+    return { state: "invalid" };
+  }
+}
+
+const operatorTrustSnapshot = loadOperatorTrustSnapshot();
+
+function resolveTrustedOperator(operatorId: string): AuthResult<string> {
+  if (operatorTrustSnapshot.state === "unconfigured") {
+    return { error: "operator-trust-unconfigured", status: 503 };
+  }
+  if (operatorTrustSnapshot.state === "invalid") {
+    return { error: "operator-trust-invalid", status: 503 };
+  }
+  return operatorTrustSnapshot.trust.trustedOperator(operatorId)?.publicKey ?? {
+    error: "operator-not-trusted",
+    status: 403,
+  };
+}
 {
   const warning = mirrorStaleWarning(ACTIVE_STALE_SEC, SYNC_BACKOFF_MAX_MS, BROKER_MODE === "replica", SYNC_TICK_MS);
   if (warning) log.warn(warning);
@@ -4357,17 +4386,13 @@ function resolveRoadmapAuthor(
       "roadmap-write"
     );
     if (isAuthError(auth)) {
-      // LOUD, and specific enough to answer the question a silent refusal
-      // cannot: an operator reading this knows the guard EXISTS and fired.
-      // Silence here means the running broker predates this code -- a live
-      // process can be hours older than the commit, and the two cases look
-      // identical from the outside unless the refusal says so itself.
       log.warn(`${route}: refused an unsigned write claiming the reserved '${by}' author`, {
         reason: auth.error,
         status: auth.status,
       });
+      const deckUpgradeHint = auth.status === 401 ? " A Deck older than this broker does not sign yet -- update it." : "";
       return {
-        error: `author '${by}' is a reserved identity naming the operator: sign the write with the operator credential (${auth.error}). A Deck older than this broker does not sign yet -- update it.`,
+        error: `author '${by}' is a reserved identity naming the operator: sign the write with the operator credential (${auth.error}).${deckUpgradeHint}`,
         status: auth.status,
       };
     }
@@ -9641,6 +9666,13 @@ const approvalAuth = createApprovalAuth({
   run: (sql: string, params: unknown[]): void => {
     db.run(sql, params as never[]);
   },
+  resolveTrustedOperator,
+  onTrustRefused: (trust) => {
+    log.warn("notify: ignored answer for approval with an untrusted operator owner", {
+      reason: trust.error,
+      status: trust.status,
+    });
+  },
   rememberNonce,
 });
 
@@ -11621,6 +11653,8 @@ const server = Bun.serve<WsData>({
           .get() as { n: number }).n;
         return Response.json({
           status: "ok",
+          operator_trust_version: OPERATOR_TRUST_VERSION,
+          operator_trust_state: operatorTrustSnapshot.state,
           peers: total,
           ws_clients: wsPool.size,
           mode: BROKER_MODE,
@@ -11698,6 +11732,14 @@ const server = Bun.serve<WsData>({
 
     try {
       switch (path) {
+        case "/operator/check": {
+          const auth = approvalAuth.authenticateOperator(
+            body as { auth?: ApprovalAuthProof } & Record<string, unknown>,
+            "operator-check"
+          );
+          if (isAuthError(auth)) return Response.json({ error: auth.error }, { status: auth.status });
+          return Response.json({ operator_id: auth.operator_id, protocol_version: OPERATOR_TRUST_VERSION });
+        }
         case "/context/transaction":
           return handleContextTransaction(body);
         case "/register": {
