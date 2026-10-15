@@ -3229,9 +3229,19 @@ svg.glyph {
   border-style: dashed;
 }
 
+/* The base pill sits BEFORE every .rm-badge-* variant: equal specificity, so
+   source order decides, and a variant above it renders the dim default. */
+.rm-badge {
+  font-size: 10.5px;
+  padding: 1px 7px;
+  border-radius: 9px;
+  border: 1px solid var(--border);
+  color: var(--fg-dim);
+}
+
 .rm-badge-locked {
-  color: #e0b341;
-  border-color: color-mix(in srgb, #e0b341 50%, transparent);
+  color: var(--locked);
+  border-color: color-mix(in srgb, var(--locked) 50%, transparent);
 }
 
 /* Offline replica: a card that diverged from the upstream. Red ring, the
@@ -3270,8 +3280,8 @@ svg.glyph {
 /* Same amber family as .rm-badge-locked (it IS a lock), dimmer border so the
    two read as "held here" vs "held elsewhere" side by side. */
 .rm-badge-lock-remote {
-  color: #e0b341;
-  border-color: color-mix(in srgb, #e0b341 30%, transparent);
+  color: var(--locked);
+  border-color: color-mix(in srgb, var(--locked) 30%, transparent);
   border-style: dashed;
 }
 
@@ -3673,11 +3683,17 @@ body:has(.rm-modal) .rm-conflict-modal {
   color: var(--fg-dim);
 }
 
-/* MoSCoW section colours (also used as priority badges). */
+/* MoSCoW section colours, for the board chips and the priority menu. */
 .rm-prio-must { color: #e05a5a; }
 .rm-prio-should { color: #e0b341; }
 .rm-prio-could { color: #4f86ff; }
 .rm-prio-wont { color: var(--fg-dim); }
+
+/* The modal's priority badge stays a grey pill: the coloured chip on the board
+   already carries the priority, and its amber would read as the lock. */
+.rm-badge.rm-prio-must,
+.rm-badge.rm-prio-should,
+.rm-badge.rm-prio-could { color: var(--fg-dim); }
 
 .rm-card {
   display: flex;
@@ -3723,14 +3739,6 @@ body:has(.rm-modal) .rm-conflict-modal {
   display: flex;
   flex-wrap: wrap;
   gap: 5px;
-}
-
-.rm-badge {
-  font-size: 10.5px;
-  padding: 1px 7px;
-  border-radius: 9px;
-  border: 1px solid var(--border);
-  color: var(--fg-dim);
 }
 
 .rm-badge-value-high { color: #3ec46d; border-color: color-mix(in srgb, #3ec46d 50%, transparent); }
@@ -3811,7 +3819,7 @@ body:has(.rm-modal) .rm-conflict-modal {
 .rm-locked-note {
   margin: 0;
   font-size: 11.5px;
-  color: #e0b341;
+  color: var(--locked);
 }
 
 /* "Process now" dialog (PLAN K6): pick a live agent or spawn a new one. */
@@ -5890,7 +5898,7 @@ body:has(.rm-modal) .rm-conflict-modal {
 
 .wf-node.is-locked {
   opacity: 0.75;
-  border-left-color: #e0b341;
+  border-left-color: var(--locked);
   cursor: default;
 }
 

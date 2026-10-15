@@ -69,8 +69,13 @@ Colour is meaning. Do not repurpose these:
 - **Amber** — transient/warning states: `#e0b341` starting dot & "local"
   badge, `#9a6700` info toast.
 - **Amber `var(--locked)`**: held, an operator-locked session (sidebar row
-  frame `.row-locked` + padlock `.row-lock`). Same hue as a
-  claimed roadmap card, whose four sites still hardcode `#e0b341`. Not
+  frame `.row-locked` + padlock `.row-lock`) and a roadmap card claimed by an
+  agent (`.rm-badge-locked`, `.rm-badge-lock-remote`, `.rm-locked-note`,
+  `.wf-node.is-locked`). A lock rule never hardcodes the amber
+  (`tests/desktop-css-tokens.test.ts`); `.rm-card-contested` keeps the raw
+  `#e0b341` on purpose, it is the warning tone. The item modal's priority
+  pill (`.rm-badge.rm-prio-*`) stays `--fg-dim`: a "should" amber beside
+  the lock badge would read as a second lock. Not
   `--action-prompt`: that one already colours the context ring inside the
   same row. The light value is the info-toast amber `#9a6700`: a 1px
   outline needs 3:1 on both sides, and it measures 4.87 on white, 3.87 on

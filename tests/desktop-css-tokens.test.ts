@@ -182,6 +182,183 @@ test("the inbox panel stacks under the modal veil, never over an open modal", ()
   expect(panel.match(/zIndex|z-index/g) ?? [], "an inline z-index in InboxPanel.tsx outranks the stylesheet ladder").toEqual([]);
 });
 
+/**
+ * Rules with their enclosing at-rule/nesting preludes, in source order of their closing brace.
+ * Braces inside quoted strings are content. Throws on an orphan `}`, an unclosed block or an
+ * unterminated string: any of them would otherwise return a silent SUBSET of the sheet.
+ */
+function cssRules(css: string): { selector: string; body: string; context: string[]; order: number }[] {
+  const out: { selector: string; body: string; context: string[]; order: number }[] = [];
+  const stack: string[] = [];
+  let buf = "";
+  let quote: string | null = null;
+  for (let i = 0; i < css.length; i++) {
+    const ch = css[i]!;
+    if (quote) {
+      buf += ch;
+      if (ch === "\\") buf += css[++i] ?? "";
+      else if (ch === quote) quote = null;
+    } else if (ch === '"' || ch === "'") {
+      quote = ch;
+      buf += ch;
+    } else if (ch === "{") {
+      stack.push(buf.trim().replace(/\s+/g, " "));
+      buf = "";
+    } else if (ch === "}") {
+      const selector = stack.pop();
+      if (selector === undefined) throw new Error(`orphan "}" at offset ${i}`);
+      out.push({ selector, body: buf, context: [...stack], order: out.length });
+      buf = "";
+    } else buf += ch;
+  }
+  if (quote) throw new Error(`unterminated ${quote} string`);
+  if (stack.length > 0) throw new Error(`unclosed block: ${stack.join(" > ")}`);
+  return out;
+}
+
+/** Every `prop: value` of a rule body, in order (a later one wins). */
+function declarations(body: string): { prop: string; value: string }[] {
+  return body
+    .split(";")
+    .map((d) => d.match(/^\s*([\w-]+)\s*:\s*([\s\S]*?)\s*$/))
+    .filter((m): m is RegExpMatchArray => m !== null)
+    .map((m) => ({ prop: m[1]!.toLowerCase(), value: m[2]! }));
+}
+
+const classToken = (cls: string) => new RegExp(`\\.${cls.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\w-])`);
+
+const LOCK_WITNESSES: { selector: string; props: string[] }[] = [
+  { selector: ".rm-badge-locked", props: ["color", "border-color"] },
+  { selector: ".rm-badge-lock-remote", props: ["color", "border-color"] },
+  { selector: ".rm-locked-note", props: ["color"] },
+  { selector: ".wf-node.is-locked", props: ["border-left-color"] }
+];
+
+/** Lock witnesses whose colour is not drawn from --locked, in ANY rule that names them. */
+function lockAmberViolations(css: string): string[] {
+  const rules = cssRules(css);
+  const bad: string[] = [];
+  for (const w of LOCK_WITNESSES) {
+    // Every class of the witness in the same selector segment, in any order.
+    const tokens = w.selector.split(".").filter(Boolean).map(classToken);
+    const names = (p: string) => tokens.every((t) => t.test(p));
+    const naming = rules.filter((r) => r.selector.split(",").some((p) => names(p.trim())));
+    const base = naming.filter((r) => r.context.length === 0 && r.selector.split(",").some((p) => p.trim() === w.selector));
+    for (const prop of w.props) {
+      const own = base.flatMap((r) => declarations(r.body).filter((d) => d.prop === prop));
+      if (own.length === 0) bad.push(`${w.selector} declares no ${prop}`);
+    }
+    for (const r of naming) {
+      for (const d of declarations(r.body)) {
+        if (w.props.includes(d.prop) && !d.value.includes("var(--locked)")) bad.push(`${r.selector} { ${d.prop}: ${d.value} }`);
+        // A shorthand re-sets the colour the witness property guards.
+        if (/^(border|border-left|outline)$/.test(d.prop) && !d.value.includes("var(--locked)") && /#|rgb|hsl|var\(/i.test(d.value)) {
+          bad.push(`${r.selector} { ${d.prop}: ${d.value} }`);
+        }
+      }
+    }
+  }
+  return bad;
+}
+
+const PRIO_BADGE = /\.rm-badge(?![\w-])|\.rm-prio-(?:must|should|could|wont)(?![\w-])/;
+
+/**
+ * Winning `color` for an element carrying exactly `classes`, by specificity then order. Fails CLOSED:
+ * any rule naming .rm-badge or .rm-prio-<p> that this evaluator cannot place (combinator, pseudo,
+ * attribute, at-rule, nesting, !important) is returned in `unhandled` instead of being skipped.
+ */
+function badgeColor(css: string, classes: string[]): { value?: string; unhandled: string[] } {
+  let best: { spec: number; order: number; value: string } | undefined;
+  const unhandled: string[] = [];
+  for (const r of cssRules(css)) {
+    const colors = declarations(r.body).filter((d) => d.prop === "color");
+    const color = colors.at(-1)?.value;
+    if (color === undefined) continue;
+    const important = colors.some((d) => /!\s*important/i.test(d.value));
+    for (const part of r.selector.split(",").map((s) => s.trim())) {
+      const simple = /^(\.[\w-]+)+$/.test(part);
+      if (!simple || r.context.length > 0 || important) {
+        if (PRIO_BADGE.test(part)) unhandled.push([...r.context, part].join(" > "));
+        continue;
+      }
+      const own = part.slice(1).split(".");
+      if (!own.every((c) => classes.includes(c))) continue;
+      if (!best || own.length > best.spec || (own.length === best.spec && r.order > best.order)) {
+        best = { spec: own.length, order: r.order, value: color };
+      }
+    }
+  }
+  return { value: best?.value, unhandled };
+}
+
+test("every lock rule takes its amber from --locked, never a raw #e0b341", () => {
+  const { text } = readCss();
+  expect(lockAmberViolations(text), "a lock witness draws its colour from somewhere other than --locked").toEqual([]);
+  // A class segment "lock"/"locked" (.rm-badge-locked, .rm-badge-lock-remote, .is-locked, .row-lock),
+  // never "block" or "unlock". A lock rule named without that segment escapes this scan.
+  const lockToken = /\.(?:[\w-]*-)?lock(?:ed)?(?![a-z])/;
+  const lockRules = ruleBlocks(text).filter((r) => lockToken.test(r.selector));
+  const scanned = lockRules.map((r) => r.selector);
+  for (const sel of [".rm-badge-locked", ".rm-badge-lock-remote", ".rm-locked-note", ".wf-node.is-locked"]) {
+    expect(scanned, `the lock scan no longer reaches ${sel}`).toContain(sel);
+  }
+  const raw = lockRules.filter((r) => /#e0b341/i.test(r.body)).map((r) => r.selector);
+  expect(raw, "a lock rule hardcodes the dark amber, which fails 3:1 on the light theme").toEqual([]);
+});
+
+test("the base .rm-badge rule precedes every .rm-badge-* variant", () => {
+  // Equal specificity: a variant declared above the base pill loses its colour and border to it.
+  const rules = ruleBlocks(readCss().text);
+  const base = rules.map((r) => r.selector).indexOf(".rm-badge");
+  expect(base, "no .rm-badge base rule found").toBeGreaterThanOrEqual(0);
+  const variants = rules.filter((r) => /\.rm-badge-[\w-]/.test(r.selector));
+  expect(variants.length, "the variant scan reaches no .rm-badge-* rule").toBeGreaterThan(10);
+  const masked = rules.slice(0, base).filter((r) => /\.rm-badge-[\w-]/.test(r.selector)).map((r) => r.selector);
+  expect(masked, "these badge variants sit above .rm-badge and render as the dim default pill").toEqual([]);
+});
+
+test("the modal priority badge stays grey while the board chip keeps the MoSCoW colour", () => {
+  const { text } = readCss();
+  expect(badgeColor(text, ["rm-prio-chip", "rm-prio-must"]).value, "the board chip lost its priority colour").toBe("#e05a5a");
+  for (const p of ["must", "should", "could", "wont"]) {
+    const { value, unhandled } = badgeColor(text, ["rm-badge", `rm-prio-${p}`]);
+    expect(unhandled, "these rules may recolour the modal priority badge and the cascade check cannot place them").toEqual([]);
+    expect(value, `the modal badge for "${p}" is coloured, not grey`).toBe("var(--fg-dim)");
+  }
+});
+
+test("the badge and lock colour guards reject a faulty stylesheet", () => {
+  const { text } = readCss();
+  for (const faulty of [
+    "[data-theme='light'] .rm-badge.rm-prio-should { color: #e0b341; }",
+    ".rm-detail-badges .rm-prio-should { color: #e0b341; }",
+    ".rm-badge.rm-prio-must:hover { color: #e05a5a; }",
+    ".rm-prio-could { color: #4f86ff !important; }",
+    "@media (min-width: 1px) { .rm-badge.rm-prio-should { color: #e0b341; } }",
+    ".rm-badge.rm-prio-should { color: #e0b341 !important; color: var(--fg-dim); }"
+  ]) {
+    expect(badgeColor(`${text}\n${faulty}`, ["rm-badge", "rm-prio-should"]).unhandled, `not caught: ${faulty}`).not.toEqual([]);
+  }
+  expect(badgeColor(`${text}\n.rm-badge.rm-prio-should.rm-badge { color: #e0b341; }`, ["rm-badge", "rm-prio-should"]).value).toBe("#e0b341");
+  const braceInString = '.rm-badge.rm-prio-should { content: "}"; color: #e0b341; }';
+  expect(badgeColor(`${text}\n${braceInString}`, ["rm-badge", "rm-prio-should"]).value, `not caught: ${braceInString}`).toBe("#e0b341");
+  expect(() => badgeColor(`${text}\n.rm-badge.rm-prio-should { color: #e0b341;`, ["rm-badge"]), "an unclosed block parsed as a subset").toThrow(/unclosed block/);
+  expect(() => badgeColor(`${text}\n}`, ["rm-badge"]), "an orphan brace parsed as a subset").toThrow(/orphan/);
+  for (const faulty of [
+    ".rm-badge-locked { color: #9a6700; }",
+    ".rm-locked-note { color: var(--danger); }",
+    "[data-theme='light'] .rm-badge-lock-remote { border-color: #9a6700; }",
+    ".wf-node.is-locked { border-left: 3px solid #e0b341; }",
+    ".is-locked.wf-node { border-left-color: #e0b341; }"
+  ]) {
+    expect(lockAmberViolations(`${text}\n${faulty}`), `not caught: ${faulty}`).not.toEqual([]);
+  }
+  const stripped = text.replace(/(\.rm-locked-note\s*\{[^}]*?)color:\s*var\(--locked\);/, "$1");
+  expect(stripped, "the probe no longer finds the .rm-locked-note colour to remove").not.toBe(text);
+  expect(lockAmberViolations(stripped)).toContain(".rm-locked-note declares no color");
+});
+
 // Per-declaration keys prevent one exemption from masking another violation on the same selector.
 const BANNER_EXEMPT: Record<string, string> = {
   ".app { height: 100vh }": "its padding-top IS the reservation; the height stays the whole window",
