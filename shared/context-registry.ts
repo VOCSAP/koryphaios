@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import {
   CONTEXT_DEPOSIT_MAX_CHARS,
   CONTEXT_RESERVATION_TTL_MS,
+  CONTEXT_RESUME_ACK_TTL_MS,
   CONTEXT_DEPOSITS_PER_GROUP,
   CONTEXT_DEPOSITS_PER_OWNER,
   CONTEXT_DEPOSITS_TOTAL,
@@ -99,6 +100,16 @@ export type ReservationOutcome =
   | { ok: true; deposit: ContextDepositMeta; attempt_id: string }
   | { ok: false; reason: "unavailable" };
 
+export type ReleaseOutcome =
+  | { ok: true; deposit: ContextDepositMeta; attempt_id: string; released: boolean; resume_delivery: "pending" | "sent" | null }
+  | { ok: false; reason: "unavailable" | "contradictory" };
+
+export type ContextResumeDeposit = ContextDepositMeta & {
+  text: string;
+  owner_instance_token: string;
+  released_attempt_id: string;
+};
+
 interface Entry extends ContextDepositMeta {
   group_id: string;
   owner_instance_token: string;
@@ -107,6 +118,8 @@ interface Entry extends ContextDepositMeta {
   attempt_id: string | null;
   released_attempt_id: string | null;
   reserved_at_ms: number | null;
+  ack_deadline_ms: number | null;
+  resume_delivery: "pending" | "sent" | null;
 }
 
 function meta(entry: Entry): ContextDepositMeta {
@@ -173,6 +186,7 @@ export class ContextRegistry {
   deposit(input: DepositInput): DepositOutcome {
     this.#sweepDead();
     this.#releaseExpiredReservations();
+    this.#purgeExpiredAcknowledgedResumes();
     const candidates = this.#bindings
       .tokensFor(input.capability_hash)
       .map((token) => ({ token, owner: this.#ownerIfActive(token) }))
@@ -227,6 +241,8 @@ export class ContextRegistry {
       attempt_id: null,
       released_attempt_id: null,
       reserved_at_ms: null,
+      ack_deadline_ms: null,
+      resume_delivery: null,
     };
     if (replaced) this.#entries.delete(replaced.deposit_id);
     this.#entries.set(depositId, entry);
@@ -244,6 +260,7 @@ export class ContextRegistry {
   describe(depositId: string): ContextDepositMeta | null {
     this.#sweepDead();
     this.#releaseExpiredReservations();
+    this.#purgeExpiredAcknowledgedResumes();
     const entry = this.#entries.get(depositId);
     return entry ? meta(entry) : null;
   }
@@ -251,6 +268,7 @@ export class ContextRegistry {
   reserve(depositId: string, target: LiveOwner): ReservationOutcome {
     this.#sweepDead();
     this.#releaseExpiredReservations();
+    this.#purgeExpiredAcknowledgedResumes();
     const entry = this.#entries.get(depositId);
     if (!entry || entry.state !== "held") return { ok: false, reason: "unavailable" };
     const owner = this.#ownerIfActive(entry.owner_instance_token);
@@ -265,38 +283,90 @@ export class ContextRegistry {
     return { ok: true, deposit: meta(entry), attempt_id };
   }
 
-  release(depositId: string, groupId: string, attemptId: string): ReservationOutcome {
+  release(depositId: string, groupId: string, attemptId: string, cleared = false): ReleaseOutcome {
     this.#sweepDead();
     this.#releaseExpiredReservations();
+    this.#purgeExpiredAcknowledgedResumes();
     const entry = this.#entries.get(depositId);
     if (!entry || entry.group_id !== groupId) return { ok: false, reason: "unavailable" };
     if (entry.state === "reserved" && entry.attempt_id === attemptId) {
-      entry.state = "held";
+      entry.state = cleared ? "resuming" : "held";
       entry.attempt_id = null;
       entry.released_attempt_id = attemptId;
       entry.reserved_at_ms = null;
-      return { ok: true, deposit: meta(entry), attempt_id: attemptId };
+      entry.ack_deadline_ms = null;
+      entry.resume_delivery = cleared ? "pending" : null;
+      return { ok: true, deposit: meta(entry), attempt_id: attemptId, released: true, resume_delivery: entry.resume_delivery };
     }
-    if (entry.state === "held" && entry.released_attempt_id === attemptId) {
-      return { ok: true, deposit: meta(entry), attempt_id: attemptId };
+    if (entry.released_attempt_id === attemptId && (entry.state === "held" || entry.state === "resuming")) {
+      if ((entry.state === "resuming") !== cleared) return { ok: false, reason: "contradictory" };
+      return { ok: true, deposit: meta(entry), attempt_id: attemptId, released: false, resume_delivery: entry.resume_delivery };
     }
     return { ok: false, reason: "unavailable" };
   }
 
-  /** The live deposits of one owner, text included: reserved for the push path. */
-  takeForPush(instanceToken: string): Array<ContextDepositMeta & { text: string }> {
+  takeReleasedForResume(depositId: string, attemptId: string): ContextResumeDeposit | null {
     this.#sweepDead();
     this.#releaseExpiredReservations();
-    return [...this.#entries.values()]
-      .filter((e) => e.owner_instance_token === instanceToken)
-      .map((e) => ({ ...meta(e), text: e.text }));
+    this.#purgeExpiredAcknowledgedResumes();
+    const entry = this.#entries.get(depositId);
+    if (
+      !entry ||
+      entry.state !== "resuming" ||
+      entry.released_attempt_id !== attemptId ||
+      entry.ack_deadline_ms !== null
+    ) return null;
+    return { ...meta(entry), text: entry.text, owner_instance_token: entry.owner_instance_token, released_attempt_id: attemptId };
   }
+
+  markResumeSent(depositId: string, attemptId: string): void {
+    this.#sweepDead();
+    this.#releaseExpiredReservations();
+    this.#purgeExpiredAcknowledgedResumes();
+    const entry = this.#entries.get(depositId);
+    if (entry && entry.state === "resuming" && entry.released_attempt_id === attemptId && entry.ack_deadline_ms === null) {
+      entry.resume_delivery = "sent";
+    }
+  }
+
+  resumeDelivery(depositId: string, attemptId: string): "pending" | "sent" | null {
+    this.#sweepDead();
+    this.#releaseExpiredReservations();
+    this.#purgeExpiredAcknowledgedResumes();
+    const entry = this.#entries.get(depositId);
+    return entry?.state === "resuming" && entry.released_attempt_id === attemptId ? entry.resume_delivery : null;
+  }
+
+  pendingResumesForOwner(instanceToken: string): Array<{ deposit_id: string; attempt_id: string }> {
+    this.#sweepDead();
+    this.#releaseExpiredReservations();
+    this.#purgeExpiredAcknowledgedResumes();
+    return [...this.#entries.values()]
+      .filter((entry) => entry.owner_instance_token === instanceToken && entry.state === "resuming" && entry.released_attempt_id !== null && entry.ack_deadline_ms === null)
+      .map((entry) => ({ deposit_id: entry.deposit_id, attempt_id: entry.released_attempt_id! }));
+  }
+
+  acknowledgeResume(depositId: string, attemptId: string, instanceToken: string): { ok: true } | { ok: false; reason: "unavailable" } {
+    this.#sweepDead();
+    this.#releaseExpiredReservations();
+    this.#purgeExpiredAcknowledgedResumes();
+    const entry = this.#entries.get(depositId);
+    if (
+      !entry ||
+      entry.state !== "resuming" ||
+      entry.released_attempt_id !== attemptId ||
+      entry.owner_instance_token !== instanceToken
+    ) return { ok: false, reason: "unavailable" };
+    this.#armTechnicalAckDeadline(entry);
+    return { ok: true };
+  }
+
 
   /** Frees the entries of owners that are gone or re-bound; returns how many were dropped. */
   sweep(): number {
     const dropped = this.#sweepDead();
     this.#releaseExpiredReservations();
-    return dropped;
+    return dropped + this.#purgeExpiredAcknowledgedResumes();
   }
 
   #isLive(entry: Entry): boolean {
@@ -327,6 +397,22 @@ export class ContextRegistry {
       entry.released_attempt_id = null;
       entry.reserved_at_ms = null;
     }
+  }
+
+  #armTechnicalAckDeadline(entry: Entry): void {
+    if (entry.ack_deadline_ms === null) entry.ack_deadline_ms = this.#now().getTime() + CONTEXT_RESUME_ACK_TTL_MS;
+  }
+
+  #purgeExpiredAcknowledgedResumes(): number {
+    const now = this.#now().getTime();
+    let dropped = 0;
+    for (const [id, entry] of this.#entries) {
+      if (entry.ack_deadline_ms !== null && now >= entry.ack_deadline_ms) {
+        this.#entries.delete(id);
+        dropped += 1;
+      }
+    }
+    return dropped;
   }
 
   #dropOwner(instanceToken: string): void {

@@ -1557,7 +1557,18 @@ export interface WsMessageFrame {
   sent_at: string;
 }
 
-export type WsFrame = WsMessageFrame;
+export interface ContextResumeFrame {
+  type: "context_resume";
+  deposit_id: string;
+  attempt_id: string;
+  deposited_at: string;
+  head_at_deposit: string | null;
+  branch: string | null;
+  git_root: string | null;
+  text: string;
+}
+
+export type WsFrame = WsMessageFrame | ContextResumeFrame;
 
 // --- Graph drafts (agent-escalated questions opened in the Deck's graph view) ---
 // An agent (invited by the operator) prepares a graph-chat prompt draft; the

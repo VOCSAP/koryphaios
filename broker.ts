@@ -266,6 +266,7 @@ import type {
   RoadmapSyncStatus,
   FederatedMessage,
   FederatedPeer,
+  WsFrame,
   FederationRelayPeer,
   FederationSendRequest,
   FederationStatus,
@@ -2867,12 +2868,22 @@ function handleContextTransaction(body: unknown): Response {
   if (input.action === "release" && !isAttemptIdShape(attemptId)) {
     return Response.json({ error: "attempt_id is invalid" }, { status: 400 });
   }
+  if (input.action === "release" && input.cleared !== undefined && typeof input.cleared !== "boolean") {
+    return Response.json({ error: "cleared must be a boolean" }, { status: 400 });
+  }
+  const cleared = input.cleared === true;
 
   const outcome =
     input.action === "reserve"
       ? contextRegistry.reserve(input.deposit_id, { peer_id: input.target_peer_id, group_id: groupId })
-      : contextRegistry.release(input.deposit_id, groupId, attemptId as string);
+      : contextRegistry.release(input.deposit_id, groupId, attemptId as string, cleared);
   if (!outcome.ok) return Response.json({ ok: false, reason: outcome.reason }, { status: 409 });
+  if (input.action === "release" && cleared && "released" in outcome && outcome.released) {
+    pushContextResume(outcome.deposit.deposit_id, outcome.attempt_id);
+  }
+  const resumeDelivery = input.action === "release" && cleared
+    ? contextRegistry.resumeDelivery(outcome.deposit.deposit_id, outcome.attempt_id)
+    : null;
   return Response.json({
     ok: true,
     deposit_id: outcome.deposit.deposit_id,
@@ -2883,7 +2894,24 @@ function handleContextTransaction(body: unknown): Response {
     git_root: outcome.deposit.git_root,
     state: outcome.deposit.state,
     attempt_id: outcome.attempt_id,
+    ...(resumeDelivery ? { resume_delivery: resumeDelivery } : {}),
   });
+}
+
+function handleContextAck(body: unknown): Response {
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return Response.json({ error: "context acknowledgement body must be an object" }, { status: 400 });
+  }
+  const input = body as Record<string, unknown>;
+  if (!isDepositIdShape(input.deposit_id) || !isAttemptIdShape(input.attempt_id) || typeof input.instance_token !== "string") {
+    return Response.json({ error: "context acknowledgement is invalid" }, { status: 400 });
+  }
+  if (refuseSentinelInstanceToken("context-ack", input.instance_token) !== null) {
+    return Response.json({ ok: false, reason: "unavailable" }, { status: 409 });
+  }
+  const outcome = contextRegistry.acknowledgeResume(input.deposit_id, input.attempt_id, input.instance_token);
+  if (!outcome.ok) return Response.json(outcome, { status: 409 });
+  return Response.json(outcome);
 }
 
 // B1: the shape of a peer row on the HTTP boundary, as a pick-list so that a
@@ -3622,6 +3650,37 @@ function warnWsPushFailed(token: InstanceToken, e: unknown): void {
   if (wsPushWarned.has(token)) return;
   wsPushWarned.add(token);
   log.warn("ws push failed, polling fallback will deliver", { instance_token: token.slice(0, 8), error: e instanceof Error ? e.message : String(e) });
+}
+
+function pushContextResume(depositId: string, attemptId: string): boolean {
+  const resume = contextRegistry.takeReleasedForResume(depositId, attemptId);
+  if (!resume) return false;
+  const ws = wsPool.get(resume.owner_instance_token);
+  if (!ws || ws.readyState !== 1) return false;
+  const frame: WsFrame = {
+    type: "context_resume",
+    deposit_id: resume.deposit_id,
+    attempt_id: resume.released_attempt_id,
+    deposited_at: resume.deposited_at,
+    head_at_deposit: resume.head_at_deposit,
+    branch: resume.branch,
+    git_root: resume.git_root,
+    text: resume.text,
+  };
+  try {
+    ws.send(JSON.stringify(frame));
+    contextRegistry.markResumeSent(depositId, attemptId);
+    return true;
+  } catch {
+    log.warn("context resume ws push failed", { deposit_id: depositId, attempt_id: attemptId });
+    return false;
+  }
+}
+
+function flushContextResumesForToken(instanceToken: InstanceToken): void {
+  for (const { deposit_id, attempt_id } of contextRegistry.pendingResumesForOwner(instanceToken)) {
+    pushContextResume(deposit_id, attempt_id);
+  }
 }
 
 /** Upper bound of a message body, on the local route and the federation relay alike. */
@@ -11654,6 +11713,7 @@ const server = Bun.serve<WsData>({
       ws.data.instance_token = frame.instance_token;
       wsPool.set(frame.instance_token, ws);
       flushPendingForToken(frame.instance_token, ok.group_id);
+      flushContextResumesForToken(frame.instance_token);
     },
     close(ws) {
       const token = ws.data.instance_token;
@@ -11773,6 +11833,8 @@ const server = Bun.serve<WsData>({
         }
         case "/context/transaction":
           return handleContextTransaction(body);
+        case "/context/ack":
+          return handleContextAck(body);
         case "/register": {
           const result = handleRegister(body as RegisterRequest);
           if ("error" in result) {

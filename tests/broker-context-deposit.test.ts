@@ -112,7 +112,8 @@ function transactionBody(
   targetPeerId: string,
   depositId: string,
   action: "reserve" | "release",
-  attemptId?: string
+  attemptId?: string,
+  cleared?: boolean
 ): Record<string, unknown> {
   return {
     group_id: group.id,
@@ -121,6 +122,7 @@ function transactionBody(
     deposit_id: depositId,
     action,
     ...(attemptId ? { attempt_id: attemptId } : {}),
+    ...(cleared === undefined ? {} : { cleared }),
   };
 }
 
@@ -131,9 +133,10 @@ async function transaction(
   depositId: string,
   action: "reserve" | "release",
   attemptId?: string,
-  operatorAuth = true
+  operatorAuth = true,
+  cleared?: boolean
 ): Promise<Reply> {
-  const body = transactionBody(group, targetPeerId, depositId, action, attemptId);
+  const body = transactionBody(group, targetPeerId, depositId, action, attemptId, cleared);
   return call(b, "/context/transaction", operatorAuth ? deckAuthored(body) : body);
 }
 
@@ -564,6 +567,37 @@ describe("POST /context/transaction on a real broker", () => {
     expect(released).toMatchObject({ status: 200, body: { ok: true, deposit_id: depositId, state: "held", attempt_id: attemptId } });
     expect(replay).toEqual(released);
     expect((await deposit(broker, cap, "replacement", { replace: depositId })).status).toBe(200);
+  });
+
+  test("a cleared release resumes once, rejects contradiction, and lets only its owner acknowledge", async () => {
+    const cap = newCapability();
+    const peer = await register(broker, G, { capability: cap });
+    const deposited = await deposit(broker, cap, "resume-http-witness");
+    const depositId = deposited.body.deposit_id as string;
+    const reserved = await transaction(broker, G, peer.peer_id, depositId, "reserve");
+    const attemptId = reserved.body.attempt_id as string;
+
+    const released = await transaction(broker, G, peer.peer_id, depositId, "release", attemptId, true, true);
+    const duplicate = await transaction(broker, G, peer.peer_id, depositId, "release", attemptId, true, true);
+    const contradictory = await transaction(broker, G, peer.peer_id, depositId, "release", attemptId, true, false);
+    expect(released).toMatchObject({ status: 200, body: { ok: true, state: "resuming", attempt_id: attemptId, resume_delivery: "pending" } });
+    expect(duplicate).toEqual(released);
+    expect(contradictory).toMatchObject({ status: 409, body: { ok: false, reason: "contradictory" } });
+    expect((await deposit(broker, cap, "replacement", { replace: depositId })).status).toBe(404);
+
+    const wrongAttempt = await call(broker, "/context/ack", { instance_token: peer.instance_token, deposit_id: depositId, attempt_id: "f".repeat(32) });
+    const other = await register(broker, G, { capability: newCapability() });
+    const wrongOwner = await call(broker, "/context/ack", { instance_token: other.instance_token, deposit_id: depositId, attempt_id: attemptId });
+    expect(wrongAttempt).toMatchObject({ status: 409, body: { ok: false, reason: "unavailable" } });
+    expect(wrongOwner).toEqual(wrongAttempt);
+    const malformed = await call(broker, "/context/transaction", deckAuthored({
+      ...transactionBody(G, peer.peer_id, depositId, "release", attemptId),
+      cleared: "yes",
+    }));
+    expect(malformed).toMatchObject({ status: 400, body: { error: "cleared must be a boolean" } });
+    const accepted = await call(broker, "/context/ack", { instance_token: peer.instance_token, deposit_id: depositId, attempt_id: attemptId });
+    expect(accepted).toEqual({ status: 200, text: '{"ok":true}', body: { ok: true } });
+    expect(await call(broker, "/context/ack", { instance_token: peer.instance_token, deposit_id: depositId, attempt_id: attemptId })).toEqual(accepted);
   });
 
   test("absent, replaced, wrong-owner and stale-epoch reservations share the unavailable refusal", async () => {

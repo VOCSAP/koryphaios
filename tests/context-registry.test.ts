@@ -5,6 +5,7 @@ import {
   CONTEXT_CLEAR_ROTATION_WAIT_MS,
   CONTEXT_RESERVATION_RELEASE_MARGIN_MS,
   CONTEXT_RESERVATION_TTL_MS,
+  CONTEXT_RESUME_ACK_TTL_MS,
   CONTEXT_DEPOSITS_PER_GROUP,
   CONTEXT_DEPOSITS_PER_OWNER,
   CONTEXT_DEPOSITS_TOTAL,
@@ -51,9 +52,20 @@ function liveOwner(h: Harness, token: string, hash: string, peer_id = token, gro
   h.registry.onRegister(token, hash);
 }
 
-/** Every deposit currently visible, per owner, without the text. */
-function snapshot(h: Harness, tokens: string[]): unknown {
-  return tokens.map((t) => h.registry.takeForPush(t).map(({ text: _text, ...meta }) => meta));
+/**
+ * A valid deposit that reveals what the registry holds for one owner, text
+ * excluded: a refused call that had stored anything shows up here, or makes
+ * this valid deposit refuse.
+ */
+function probeHeld(registry: ContextRegistry, hash: string, replace?: string): { probe: string; held: string[] } {
+  const r = deposit(registry, hash, "probe", replace);
+  if (!r.ok) throw new Error(`probe refused: ${r.reason}`);
+  return { probe: r.deposit.deposit_id, held: r.held.map((d) => d.deposit_id).sort() };
+}
+
+function depositId(r: ReturnType<typeof deposit>): string {
+  if (!r.ok) throw new Error(`deposit refused: ${r.reason}`);
+  return r.deposit.deposit_id;
 }
 
 describe("shared constants", () => {
@@ -154,26 +166,27 @@ describe("ContextRegistry", () => {
     expect(r.deposit.deposit_id).toMatch(/^[0-9a-f]{16}$/);
     expect(r.held.map((d) => d.deposit_id)).toEqual([r.deposit.deposit_id]);
     expect(JSON.stringify(h.registry.describe(r.deposit.deposit_id))).not.toContain("witness-alpha");
-    expect(h.registry.takeForPush("tok-a").map((d) => d.text)).toEqual(["witness-alpha"]);
   });
 
   test("the cap is the injected limit, not a value fixed in the code", () => {
     const limit = 7;
     const h = harness({ maxChars: limit });
     liveOwner(h, "tok-a", HASH_A);
-    expect(deposit(h.registry, HASH_A, "x".repeat(limit)).ok).toBe(true);
+    const kept = depositId(deposit(h.registry, HASH_A, "x".repeat(limit)));
     const over = deposit(h.registry, HASH_A, "x".repeat(limit + 1));
     expect(over).toMatchObject({ ok: false, status: 413, reason: "too_long", max_chars: limit, got_chars: limit + 1 });
-    expect(h.registry.takeForPush("tok-a")).toHaveLength(1);
+    const after = probeHeld(h.registry, HASH_A);
+    expect(after.held).toEqual([kept, after.probe].sort());
   });
 
   test("the default cap is CONTEXT_DEPOSIT_MAX_CHARS, refused one over with nothing stored", () => {
     const h = harness();
     liveOwner(h, "tok-a", HASH_A);
-    expect(deposit(h.registry, HASH_A, "y".repeat(CONTEXT_DEPOSIT_MAX_CHARS)).ok).toBe(true);
+    const kept = depositId(deposit(h.registry, HASH_A, "y".repeat(CONTEXT_DEPOSIT_MAX_CHARS)));
     const r = deposit(h.registry, HASH_A, "y".repeat(CONTEXT_DEPOSIT_MAX_CHARS + 1));
     expect(r).toMatchObject({ ok: false, status: 413, reason: "too_long", max_chars: CONTEXT_DEPOSIT_MAX_CHARS });
-    expect(h.registry.takeForPush("tok-a")).toHaveLength(1);
+    const after = probeHeld(h.registry, HASH_A);
+    expect(after.held).toEqual([kept, after.probe].sort());
   });
 
   test("unknown capability, unbound token and inactive owner all answer the same 401", () => {
@@ -190,31 +203,33 @@ describe("ContextRegistry", () => {
   test("each quota refuses with its own reason and leaves the registry unchanged", () => {
     const owner = harness({ perOwner: 2, perGroup: 100, total: 100 });
     liveOwner(owner, "tok-a", HASH_A);
-    deposit(owner.registry, HASH_A, "one");
-    deposit(owner.registry, HASH_A, "two");
-    const before = snapshot(owner, ["tok-a"]);
+    const ownerOne = depositId(deposit(owner.registry, HASH_A, "one"));
+    const ownerTwo = depositId(deposit(owner.registry, HASH_A, "two"));
     const r = deposit(owner.registry, HASH_A, "three");
     expect(r).toMatchObject({ ok: false, status: 429, reason: "quota_owner" });
-    if (!r.ok && r.reason === "quota_owner") expect(r.held_ids).toHaveLength(2);
-    expect(snapshot(owner, ["tok-a"])).toEqual(before);
+    if (!r.ok && r.reason === "quota_owner") expect(r.held_ids.slice().sort()).toEqual([ownerOne, ownerTwo].sort());
+    const ownerAfter = probeHeld(owner.registry, HASH_A, ownerOne);
+    expect(ownerAfter.held).toEqual([ownerTwo, ownerAfter.probe].sort());
 
     const group = harness({ perOwner: 5, perGroup: 2, total: 100 });
     liveOwner(group, "tok-a", HASH_A, "a", "g1");
     liveOwner(group, "tok-b", HASH_B, "b", "g1");
-    deposit(group.registry, HASH_A);
-    deposit(group.registry, HASH_B);
-    const gBefore = snapshot(group, ["tok-a", "tok-b"]);
+    const groupA = depositId(deposit(group.registry, HASH_A));
+    const groupB = depositId(deposit(group.registry, HASH_B));
     expect(deposit(group.registry, HASH_A)).toMatchObject({ ok: false, status: 429, reason: "quota_group" });
-    expect(snapshot(group, ["tok-a", "tok-b"])).toEqual(gBefore);
+    const groupAfter = probeHeld(group.registry, HASH_A, groupA);
+    expect(groupAfter.held).toEqual([groupAfter.probe]);
+    expect(group.registry.describe(groupB)).not.toBeNull();
 
     const total = harness({ perOwner: 5, perGroup: 5, total: 2 });
     liveOwner(total, "tok-a", HASH_A, "a", "g1");
     liveOwner(total, "tok-b", HASH_B, "b", "g2");
-    deposit(total.registry, HASH_A);
-    deposit(total.registry, HASH_B);
-    const tBefore = snapshot(total, ["tok-a", "tok-b"]);
+    const totalA = depositId(deposit(total.registry, HASH_A));
+    const totalB = depositId(deposit(total.registry, HASH_B));
     expect(deposit(total.registry, HASH_A)).toMatchObject({ ok: false, status: 429, reason: "quota_total" });
-    expect(snapshot(total, ["tok-a", "tok-b"])).toEqual(tBefore);
+    const totalAfter = probeHeld(total.registry, HASH_A, totalA);
+    expect(totalAfter.held).toEqual([totalAfter.probe]);
+    expect(total.registry.describe(totalB)).not.toBeNull();
   });
 
   test("an explicit replace is atomic, evaluated after removal, and keeps the target on failure", () => {
@@ -229,7 +244,8 @@ describe("ContextRegistry", () => {
     if (!second.ok) throw new Error(`replace refused: ${second.reason}`);
     expect(second.replaced).toBe(first.deposit.deposit_id);
     expect(h.registry.describe(first.deposit.deposit_id)).toBeNull();
-    expect(h.registry.takeForPush("tok-a").map((d) => d.text)).toEqual(["second"]);
+    expect(second.held.map((d) => d.deposit_id)).toEqual([second.deposit.deposit_id]);
+    expect(h.registry.describe(second.deposit.deposit_id)?.chars).toBe("second".length);
   });
 
   test("replacing an unknown id and a foreign id give the identical 404", () => {
@@ -242,7 +258,6 @@ describe("ContextRegistry", () => {
     const stolen = deposit(h.registry, HASH_A, "mine", foreign.deposit.deposit_id);
     expect(unknown).toEqual({ ok: false, status: 404, reason: "replace_not_found" });
     expect(stolen).toEqual(unknown);
-    expect(h.registry.takeForPush("tok-b").map((d) => d.text)).toEqual(["theirs"]);
   });
 
   test("two active owners behind one hash are contested until one goes inactive", () => {
@@ -250,10 +265,10 @@ describe("ContextRegistry", () => {
     liveOwner(h, "tok-tile", HASH_A);
     liveOwner(h, "tok-nested", HASH_A);
     expect(deposit(h.registry, HASH_A)).toEqual({ ok: false, status: 409, reason: "contested" });
-    expect(h.registry.takeForPush("tok-tile")).toHaveLength(0);
     h.owners.delete("tok-nested");
     const r = deposit(h.registry, HASH_A);
     expect(r).toMatchObject({ ok: true, owner_peer_id: "tok-tile" });
+    if (r.ok) expect(r.held.map((d) => d.deposit_id)).toEqual([r.deposit.deposit_id]);
   });
 
   test("a rename does not detach a deposit, and the entry stores no peer_id", () => {
@@ -262,8 +277,8 @@ describe("ContextRegistry", () => {
     const r = deposit(h.registry, HASH_A, "kept");
     if (!r.ok) throw new Error("refused");
     h.owners.set("tok-a", { peer_id: "after-rename", group_id: "g1" });
-    const [held] = h.registry.takeForPush("tok-a");
-    expect(held?.text).toBe("kept");
+    const held = h.registry.describe(r.deposit.deposit_id);
+    expect(held).not.toBeNull();
     expect(Object.keys(held ?? {})).not.toContain("peer_id");
     expect(JSON.stringify(held)).not.toContain("before-rename");
   });
@@ -339,8 +354,21 @@ describe("ContextRegistry", () => {
       release: (h, id) => {
         expect(h.registry.release(id, "g1", "0".repeat(32))).toEqual({ ok: false, reason: "unavailable" });
       },
-      takeForPush: (h) => {
-        expect(h.registry.takeForPush("tok-a")).toEqual([]);
+      takeReleasedForResume: (h, id) => {
+        expect(h.registry.takeReleasedForResume(id, "0".repeat(32))).toBeNull();
+      },
+      markResumeSent: (h, id) => {
+        h.registry.markResumeSent(id, "0".repeat(32));
+        expect(h.registry.describe(id)).toBeNull();
+      },
+      resumeDelivery: (h, id) => {
+        expect(h.registry.resumeDelivery(id, "0".repeat(32))).toBeNull();
+      },
+      pendingResumesForOwner: (h) => {
+        expect(h.registry.pendingResumesForOwner("tok-a")).toEqual([]);
+      },
+      acknowledgeResume: (h, id) => {
+        expect(h.registry.acknowledgeResume(id, "0".repeat(32), "tok-a")).toEqual({ ok: false, reason: "unavailable" });
       },
       sweep: (h, id) => {
         expect(h.registry.sweep()).toBe(1);
@@ -390,8 +418,8 @@ describe("ContextRegistry", () => {
 
     const released = h.registry.release(deposited.deposit.deposit_id, "g1", first.attempt_id);
     const replay = h.registry.release(deposited.deposit.deposit_id, "g1", first.attempt_id);
-    expect(released).toMatchObject({ ok: true, deposit: { deposit_id: deposited.deposit.deposit_id, state: "held" } });
-    expect(replay).toEqual(released);
+    expect(released).toMatchObject({ ok: true, released: true, deposit: { deposit_id: deposited.deposit.deposit_id, state: "held" } });
+    expect(replay).toMatchObject({ ok: true, released: false, deposit: { deposit_id: deposited.deposit.deposit_id, state: "held" } });
     expect(deposit(h.registry, HASH_A, "replacement", deposited.deposit.deposit_id).ok).toBe(true);
   });
 
@@ -437,6 +465,80 @@ describe("ContextRegistry", () => {
     expect(CONTEXT_RESERVATION_TTL_MS).toBe(
       DIRECTIVE_IDLE_WAIT_MS + CLEAR_BACKCHANNEL_ROTATION_WAIT_MS + CONTEXT_RESERVATION_RELEASE_MARGIN_MS
     );
+  });
+
+  test("a cleared release holds its exact resume payload until its technical acknowledgement expires", () => {
+    const h = harness();
+    liveOwner(h, "tok-a", HASH_A, "peer-a");
+    const deposited = deposit(h.registry, HASH_A, "resume-witness");
+    if (!deposited.ok) throw new Error("deposit refused");
+    const reserved = h.registry.reserve(deposited.deposit.deposit_id, { peer_id: "peer-a", group_id: "g1" });
+    if (!reserved.ok) throw new Error("reservation refused");
+
+    const released = h.registry.release(deposited.deposit.deposit_id, "g1", reserved.attempt_id, true);
+    expect(released).toMatchObject({ ok: true, deposit: { state: "resuming" }, attempt_id: reserved.attempt_id });
+    expect(h.registry.takeReleasedForResume(deposited.deposit.deposit_id, reserved.attempt_id)).toMatchObject({
+      text: "resume-witness",
+      owner_instance_token: "tok-a",
+    });
+    expect(h.registry.takeReleasedForResume(deposited.deposit.deposit_id, "f".repeat(32))).toBeNull();
+
+    expect(h.registry.acknowledgeResume(deposited.deposit.deposit_id, reserved.attempt_id, "tok-a")).toEqual({ ok: true });
+    expect(h.registry.pendingResumesForOwner("tok-a")).toEqual([]);
+    h.now.value += CONTEXT_RESUME_ACK_TTL_MS - 1;
+    expect(h.registry.acknowledgeResume(deposited.deposit.deposit_id, reserved.attempt_id, "tok-a")).toEqual({ ok: true });
+    h.now.value += 1;
+    expect(h.registry.sweep()).toBe(1);
+    expect(h.registry.describe(deposited.deposit.deposit_id)).toBeNull();
+  });
+
+  test("describe lazily purges an expired acknowledged resume", () => {
+    const h = harness();
+    liveOwner(h, "tok-a", HASH_A, "peer-a");
+    const deposited = deposit(h.registry, HASH_A, "resume-witness");
+    if (!deposited.ok) throw new Error("deposit refused");
+    const reserved = h.registry.reserve(deposited.deposit.deposit_id, { peer_id: "peer-a", group_id: "g1" });
+    if (!reserved.ok) throw new Error("reservation refused");
+    h.registry.release(deposited.deposit.deposit_id, "g1", reserved.attempt_id, true);
+    expect(h.registry.acknowledgeResume(deposited.deposit.deposit_id, reserved.attempt_id, "tok-a")).toEqual({ ok: true });
+
+    h.now.value += CONTEXT_RESUME_ACK_TTL_MS;
+    expect(h.registry.describe(deposited.deposit.deposit_id)).toBeNull();
+  });
+
+  test("an expired acknowledged resume is purged before quota evaluation without a sweep", () => {
+    const h = harness({ perOwner: 1, perGroup: 1, total: 1 });
+    liveOwner(h, "tok-a", HASH_A, "peer-a");
+    const deposited = deposit(h.registry, HASH_A, "resume-witness");
+    if (!deposited.ok) throw new Error("deposit refused");
+    const reserved = h.registry.reserve(deposited.deposit.deposit_id, { peer_id: "peer-a", group_id: "g1" });
+    if (!reserved.ok) throw new Error("reservation refused");
+    h.registry.release(deposited.deposit.deposit_id, "g1", reserved.attempt_id, true);
+    expect(h.registry.acknowledgeResume(deposited.deposit.deposit_id, reserved.attempt_id, "tok-a")).toEqual({ ok: true });
+
+    h.now.value += CONTEXT_RESUME_ACK_TTL_MS;
+    expect(deposit(h.registry, HASH_A, "replacement").ok).toBe(true);
+    expect(h.registry.describe(deposited.deposit.deposit_id)).toBeNull();
+  });
+
+  test("a repeated or contradictory cleared result cannot change one released attempt", () => {
+    const h = harness();
+    liveOwner(h, "tok-a", HASH_A, "peer-a");
+    const deposited = deposit(h.registry, HASH_A, "release-witness");
+    if (!deposited.ok) throw new Error("deposit refused");
+    const reserved = h.registry.reserve(deposited.deposit.deposit_id, { peer_id: "peer-a", group_id: "g1" });
+    if (!reserved.ok) throw new Error("reservation refused");
+
+    h.registry.release(deposited.deposit.deposit_id, "g1", reserved.attempt_id, true);
+    const duplicate = h.registry.release(deposited.deposit.deposit_id, "g1", reserved.attempt_id, true);
+    const contradictory = h.registry.release(deposited.deposit.deposit_id, "g1", reserved.attempt_id, false);
+    expect(duplicate).toMatchObject({ ok: true, released: false, deposit: { state: "resuming" }, attempt_id: reserved.attempt_id });
+    expect(contradictory).toEqual({ ok: false, reason: "contradictory" });
+    expect(deposit(h.registry, HASH_A, "replacement", deposited.deposit.deposit_id)).toEqual({
+      ok: false,
+      status: 404,
+      reason: "replace_not_found",
+    });
   });
 
   test("the default quotas are the named constants", () => {

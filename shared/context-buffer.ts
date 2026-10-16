@@ -29,6 +29,7 @@ export const CONTEXT_DEPOSIT_MAX_INPUT_BYTES = CONTEXT_DEPOSIT_MAX_CHARS * 4;
 export const CONTEXT_DEPOSITS_PER_OWNER = 3;
 export const CONTEXT_DEPOSITS_PER_GROUP = 96;
 export const CONTEXT_DEPOSITS_TOTAL = 256;
+export const CONTEXT_RESUME_ACK_TTL_MS = 300_000;
 
 const HEX64 = /^[0-9a-f]{64}$/;
 const SHA = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
@@ -170,7 +171,7 @@ export interface ContextDepositMeta {
   head_at_deposit: string | null;
   branch: string | null;
   git_root: string | null;
-  state: "held" | "reserved";
+  state: "held" | "reserved" | "resuming";
 }
 
 export interface ContextDepositResponse {
