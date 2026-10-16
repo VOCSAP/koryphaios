@@ -63,6 +63,81 @@ export async function fetchOperatorTrustHealth(
   return parseOperatorTrustHealth(await res.json())
 }
 
+/** The broker, or the server owning the target, cannot resume a deposit: retrying the same call cannot succeed. */
+export class ContextResumeUnsupportedError extends Error {}
+
+const OWNER_LACKS_CONTEXT_RESUME = 'owner_lacks_context_resume'
+
+/**
+ * Refuses unless the broker answering now serves context resume. A broker that
+ * predates it would ignore `cleared` and strand the deposit after the clear, so
+ * a missing field and a version below 1 refuse as unsupported; an unreachable
+ * or unreadable /health rejects with its own error.
+ */
+export async function requireContextResumeSupport(
+  endpoint: BrokerEndpoint,
+  fetchImpl: typeof fetch = fetch
+): Promise<void> {
+  const res = await fetchImpl(`${endpoint.url}/health`, { signal: AbortSignal.timeout(2000) })
+  const body = res.ok ? ((await res.json()) as { context_resume_version?: unknown } | null) : null
+  const version = body?.context_resume_version
+  if (typeof version !== 'number' || !(version >= 1)) {
+    throw new ContextResumeUnsupportedError(
+      'broker does not serve context resume (context_resume_version missing or < 1); context clear refused'
+    )
+  }
+}
+
+export type ContextTransactionRequest =
+  | { action: 'reserve'; depositId: string; targetPeerId: string }
+  | { action: 'release'; depositId: string; targetPeerId: string; attemptId: string; cleared: boolean }
+
+/** The request-specific fields of POST /context/transaction, signed together with the group fields. */
+export function contextTransactionFields(request: ContextTransactionRequest): Record<string, unknown> {
+  return {
+    target_peer_id: request.targetPeerId,
+    deposit_id: request.depositId,
+    action: request.action,
+    ...(request.action === 'release' ? { attempt_id: request.attemptId, cleared: request.cleared } : {})
+  }
+}
+
+/** Throws the broker's named refusal; a successful release must report the state the `cleared` it signed implies. */
+export async function readContextTransactionResponse(
+  request: ContextTransactionRequest,
+  response: Response
+): Promise<{ attemptId?: string }> {
+  if (!response.ok) {
+    let body: { error?: unknown; reason?: unknown } = {}
+    try {
+      body = ((await response.json()) as typeof body | null) ?? {}
+    } catch {
+      /* non-json error body: the status below is the message */
+    }
+    if (body.reason === OWNER_LACKS_CONTEXT_RESUME) {
+      throw new ContextResumeUnsupportedError(`context transaction ${request.action} refused: ${OWNER_LACKS_CONTEXT_RESUME}`)
+    }
+    const detail =
+      typeof body.error === 'string'
+        ? body.error
+        : typeof body.reason === 'string'
+          ? `context transaction ${request.action} refused: ${body.reason}`
+          : ''
+    throw new Error(detail || `context transaction ${request.action} failed: ${response.status}`)
+  }
+  const result = (await response.json()) as { state?: unknown; attempt_id?: unknown }
+  if (request.action === 'reserve') {
+    if (result.state !== 'reserved' || typeof result.attempt_id !== 'string' || !/^[a-f0-9]{32}$/.test(result.attempt_id)) {
+      throw new Error('context transaction reserve returned an invalid response')
+    }
+    return { attemptId: result.attempt_id }
+  }
+  if (result.state !== (request.cleared ? 'resuming' : 'held')) {
+    throw new Error('context transaction release returned an invalid response')
+  }
+  return {}
+}
+
 /**
  * The three deployment shapes, declared once in the renderer-facing types and
  * re-exported here: the Settings panel and this resolver must not each carry

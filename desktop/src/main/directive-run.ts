@@ -12,7 +12,9 @@ import {
   PEER_ID_RE,
   resolveDirectiveTargets
 } from './directive'
+import { ContextResumeUnsupportedError } from './broker-client'
 import { unreachedTargets, unreachedTargetsText } from './directive-journal'
+import { isDepositIdShape } from '../../../shared/context-deposit-id'
 import { CONTEXT_CLEAR_IDLE_WAIT_MS } from '../../../shared/context-timing'
 
 export const DIRECTIVE_PROMPT_MAX = 500
@@ -45,10 +47,13 @@ export interface ClearReloadHost {
   currentSessionId?(tileId: string): string
   /** Asked afresh on every context clear: the broker answering now may not be the one checked at startup. */
   checkOperatorTrust?(): Promise<OperatorTrustStatus>
+  /** Throws unless the broker answering now serves context resume; asked afresh before every reservation. */
+  checkContextResumeSupport?(): Promise<void>
   reserveContextDeposit?(depositId: string, targetPeerId: string): Promise<string>
   readClearBackchannelBaseline?(tileId: string): string | null
   waitForClearBackchannel?(tileId: string, currentSessionId: string, baselineSessionId: string | null): Promise<void>
-  releaseContextDeposit?(depositId: string, attemptId: string): Promise<void>
+  /** `cleared` is true only once the new clear rotation has been observed. */
+  releaseContextDeposit?(depositId: string, attemptId: string, cleared: boolean): Promise<void>
   reportError?(message: string, error?: unknown): void
 }
 
@@ -84,6 +89,7 @@ export function runClearReloadInTurn(
     if (
       !host.currentSessionId ||
       !host.checkOperatorTrust ||
+      !host.checkContextResumeSupport ||
       !host.reserveContextDeposit ||
       !readClearBackchannelBaseline ||
       !host.waitForClearBackchannel ||
@@ -92,9 +98,11 @@ export function runClearReloadInTurn(
       throw new Error('context clear host is incomplete')
     }
     let attemptId: string | undefined
+    let rotationObserved = false
     try {
       const trust = await host.checkOperatorTrust()
       if (trust !== 'compatible') throw new Error(`operator trust is ${trust}; context clear refused`)
+      await host.checkContextResumeSupport()
       const currentSessionId = host.currentSessionId(tileId)
       attemptId = await host.reserveContextDeposit(options.contextDepositId, peerId)
       const baselineSessionId = readClearBackchannelBaseline(tileId)
@@ -107,6 +115,7 @@ export function runClearReloadInTurn(
         return cleared
       }
       await host.waitForClearBackchannel(tileId, currentSessionId, baselineSessionId)
+      rotationObserved = true
       journal(`clear_reload -> "${peerId}": written`)
       return 'written'
     } catch (error) {
@@ -115,7 +124,7 @@ export function runClearReloadInTurn(
     } finally {
       if (attemptId) {
         try {
-          await host.releaseContextDeposit(options.contextDepositId, attemptId)
+          await host.releaseContextDeposit(options.contextDepositId, attemptId, rotationObserved)
         } catch (error) {
           host.reportError?.(`context clear failed for "${peerId}"`, error)
           throw error
@@ -127,8 +136,13 @@ export function runClearReloadInTurn(
 
 type DirectiveTarget = { tileId: string; peerId: string }
 
-/** 'refused-modal' also covers needsAttention and rateLimited; 'error' is a rejected injection. */
-export type DirectiveRefusalReason = Exclude<DirectiveOutcome, 'written'> | 'error'
+/**
+ * 'refused-modal' also covers needsAttention and rateLimited; 'error' is a rejected injection;
+ * 'context_resume_unsupported' is a context clear the broker or the target's server cannot resume.
+ */
+export type DirectiveRefusalReason = Exclude<DirectiveOutcome, 'written'> | 'error' | 'context_resume_unsupported'
+
+type SettledOutcome = DirectiveOutcome | 'error' | 'context_resume_unsupported'
 
 /**
  * deck_run_directive's result: `injected` holds only targets whose command was
@@ -144,7 +158,7 @@ export interface DeckDirectiveRunResult {
 }
 
 interface DirectiveLaunch {
-  launched: (DirectiveTarget & { outcome: Promise<DirectiveOutcome | 'error'> })[]
+  launched: (DirectiveTarget & { outcome: Promise<SettledOutcome> })[]
   unreached: UnreachedDirectiveTarget[]
   error?: 'directive execution failed'
 }
@@ -196,10 +210,16 @@ export interface RunDirectiveArgs {
   peerIds: string[]
   prompt: string | undefined
   workstream: string | undefined
+  contextDepositId?: string
 }
+
+const CONTEXT_DEPOSIT_ALIASES = ['contextDepositId', 'deposit_id'] as const
 
 /** Validates deck_run_directive's raw arguments; throws a message meant for the calling agent. */
 export function parseRunDirectiveArgs(args: Record<string, unknown>): RunDirectiveArgs {
+  for (const alias of CONTEXT_DEPOSIT_ALIASES) {
+    if (alias in args) throw new Error(`${alias} is not accepted; use context_deposit_id`)
+  }
   const directive = args['directive']
   if (!isDirectiveCommand(directive)) {
     throw new Error(`directive must be one of: ${directiveCommands().join(', ')}`)
@@ -220,6 +240,14 @@ export function parseRunDirectiveArgs(args: Record<string, unknown>): RunDirecti
   ) {
     throw new Error('peer_ids must contain unique valid peer_id strings')
   }
+  const rawDepositId = args['context_deposit_id']
+  let contextDepositId: string | undefined
+  if (rawDepositId !== undefined) {
+    if (directive !== 'clear_reload') throw new Error('context_deposit_id is only valid for clear_reload')
+    if (normalizedPeerIds.length !== 1) throw new Error('context_deposit_id requires exactly one peer_id')
+    if (!isDepositIdShape(rawDepositId)) throw new Error('context_deposit_id is not a valid deposit id')
+    contextDepositId = rawDepositId
+  }
   const rawPrompt = args['prompt']
   const rawWorkstream = args['workstream']
   if (directive === 'clear_reload') {
@@ -231,7 +259,13 @@ export function parseRunDirectiveArgs(args: Record<string, unknown>): RunDirecti
         `workstream must be 1 to ${CLEAR_RELOAD_WORKSTREAM_MAX} lowercase letters, digits, or hyphens`
       )
     }
-    return { directive, peerIds: normalizedPeerIds, prompt: undefined, workstream: rawWorkstream }
+    return {
+      directive,
+      peerIds: normalizedPeerIds,
+      prompt: undefined,
+      workstream: rawWorkstream,
+      ...(contextDepositId ? { contextDepositId } : {})
+    }
   }
   if (rawWorkstream !== undefined && rawWorkstream !== null) {
     throw new Error('workstream is only valid for clear_reload')
@@ -291,9 +325,9 @@ function launchDirective(
         })
         launched.push({ tileId: t.id, peerId: t.peerId, outcome })
       } else if (clearReloadWorkstream) {
-        const outcome = deps.runClearReload(t.id, t.peerId, clearReloadWorkstream, options.contextDepositId).catch((e): 'error' => {
+        const outcome = deps.runClearReload(t.id, t.peerId, clearReloadWorkstream, options.contextDepositId).catch((e): SettledOutcome => {
           reportDirectiveError(deps, `clear_reload failed for "${t.peerId}"`, e)
-          return 'error'
+          return e instanceof ContextResumeUnsupportedError ? 'context_resume_unsupported' : 'error'
         })
         launched.push({ tileId: t.id, peerId: t.peerId, outcome })
       } else {
@@ -340,7 +374,7 @@ async function settleLaunch(run: DirectiveLaunch, waitMs: number): Promise<DeckD
   const cap = new Promise<null>((resolve) => {
     timer = setTimeout(() => resolve(null), waitMs)
   })
-  let outcomes: (DirectiveOutcome | 'error' | null)[]
+  let outcomes: (SettledOutcome | null)[]
   try {
     outcomes = await Promise.all(run.launched.map((t) => Promise.race([t.outcome, cap])))
   } finally {
@@ -368,7 +402,8 @@ export async function executeDirectiveItem(
     return { id: item.id, title: item.title, directive: null, injected: [], unreached: [] }
   }
   const run = await runDirectiveOn(cmd, item.target_peer_ids, undefined, item.title, deps, options)
-  return { id: item.id, title: item.title, directive: cmd, ...run }
+  // A card directive carries no deposit id, the only source of 'context_resume_unsupported'.
+  return { id: item.id, title: item.title, directive: cmd, ...run, refused: run.refused as NonNullable<DirectiveDispatch['refused']> }
 }
 
 export async function runDirectiveForCaller(
@@ -401,10 +436,14 @@ export function createRunDirectiveAdapter(
   peerIds: string[],
   prompt: string | undefined,
   callerId: string,
-  excludeSupervisor?: boolean
+  excludeSupervisor?: boolean,
+  options?: { contextDepositId?: string }
 ) => Promise<DeckDirectiveRunResult> {
-  return (directive, peerIds, prompt, callerId, excludeSupervisor = false) =>
-    run(directive, peerIds, prompt, callerId, deps, { excludeSupervisor })
+  return (directive, peerIds, prompt, callerId, excludeSupervisor = false, options) =>
+    run(directive, peerIds, prompt, callerId, deps, {
+      excludeSupervisor,
+      ...(options?.contextDepositId ? { contextDepositId: options.contextDepositId } : {})
+    })
 }
 
 export function createDirectiveBindings(

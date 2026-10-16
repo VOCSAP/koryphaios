@@ -4,6 +4,7 @@ import { join } from "node:path";
 import * as directiveRun from "../desktop/src/main/directive-run";
 import {
   createDirectiveBindings,
+  createRunDirectiveAdapter,
   executeDirectiveItem,
   parseRunDirectiveArgs,
   runClearReloadInTurn,
@@ -11,10 +12,18 @@ import {
   runDirectiveOn,
   sanitizeDirectivePrompt,
   DIRECTIVE_PROMPT_MAX,
+  type ClearReloadHost,
   type DirectiveRunDeps
 } from "../desktop/src/main/directive-run";
+import {
+  ContextResumeUnsupportedError,
+  contextTransactionFields,
+  readContextTransactionResponse,
+  requireContextResumeSupport
+} from "../desktop/src/main/broker-client";
 import { DIRECTIVE_ACCEPTS_PROMPT, directiveCommands, isDirectiveCommand } from "../desktop/src/main/directive";
 import { TOOLS } from "../server.ts";
+import { extractBracedBody } from "./_braced-body";
 import type { RoadmapDirective, SessionRuntime } from "../desktop/src/shared/types";
 
 function session(id: string, peerId: string | null, status: SessionRuntime["status"] = "running"): SessionRuntime {
@@ -204,6 +213,7 @@ test("context clear reserves, observes a new clear rotation, then releases witho
         return "written" as const;
       }),
       checkOperatorTrust: async () => "compatible" as const,
+      checkContextResumeSupport: async () => {},
       currentSessionId: () => "sid-before",
       reserveContextDeposit: async (depositId, peerId) => {
         events.push(`reserve:${depositId}:${peerId}`);
@@ -249,6 +259,7 @@ test("context clear rejects a host missing the baseline reader before reservatio
       {
         serializeTile: (_id, fn) => fn(async () => "written" as const),
         checkOperatorTrust: async () => "compatible" as const,
+        checkContextResumeSupport: async () => {},
         currentSessionId: () => "sid-before",
         reserveContextDeposit: async () => {
           reservations += 1;
@@ -276,6 +287,7 @@ test("context clear reports a refused /clear and releases its reservation", asyn
     {
       serializeTile: (_id, fn) => fn(async () => "busy-timeout" as const),
       checkOperatorTrust: async () => "compatible" as const,
+      checkContextResumeSupport: async () => {},
       currentSessionId: () => "sid-before",
       reserveContextDeposit: async () => "attempt-1",
       readClearBackchannelBaseline: () => "prior-clear",
@@ -307,6 +319,7 @@ test("context clear releases after a rotation wait fails and reports the failure
       {
         serializeTile: (_id, fn) => fn(async () => "written" as const),
         checkOperatorTrust: async () => "compatible" as const,
+        checkContextResumeSupport: async () => {},
         currentSessionId: () => "sid-before",
         reserveContextDeposit: async () => "attempt-1",
         readClearBackchannelBaseline: () => null,
@@ -337,6 +350,7 @@ test("context clear releases after an injection error and reports the failure", 
       {
         serializeTile: (_id, fn) => fn(async () => { throw failure; }),
         checkOperatorTrust: async () => "compatible" as const,
+        checkContextResumeSupport: async () => {},
         currentSessionId: () => "sid-before",
         reserveContextDeposit: async () => "attempt-1",
         readClearBackchannelBaseline: () => null,
@@ -367,6 +381,7 @@ test("context clear reports a reservation refusal before injecting /clear", asyn
       {
         serializeTile: (_id, fn) => fn(async (keys) => { typed.push(keys); return "written" as const; }),
         checkOperatorTrust: async () => "compatible" as const,
+        checkContextResumeSupport: async () => {},
         currentSessionId: () => "sid-before",
         reserveContextDeposit: async () => { throw failure; },
         readClearBackchannelBaseline: () => null,
@@ -396,6 +411,7 @@ test("context clear reports a release refusal after a verified rotation", async 
       {
         serializeTile: (_id, fn) => fn(async () => "written" as const),
         checkOperatorTrust: async () => "compatible" as const,
+        checkContextResumeSupport: async () => {},
         currentSessionId: () => "sid-before",
         reserveContextDeposit: async () => "attempt-1",
         readClearBackchannelBaseline: () => null,
@@ -427,6 +443,9 @@ test("context clear checks operator trust before reserving the deposit", async (
         events.push("trust");
         return "compatible" as const;
       },
+      checkContextResumeSupport: async () => {
+        events.push("support");
+      },
       currentSessionId: () => {
         events.push("session");
         return "sid-before";
@@ -450,7 +469,471 @@ test("context clear checks operator trust before reserving the deposit", async (
   );
 
   expect(outcome).toBe("written");
-  expect(events).toEqual(["trust", "session", "reserve", "inject:/clear", "release"]);
+  expect(events).toEqual(["trust", "support", "session", "reserve", "inject:/clear", "release"]);
+});
+
+test("context clear neither reserves nor types /clear when the broker does not serve context resume", async () => {
+  const typed: string[] = [];
+  const events: string[] = [];
+  const failure = new Error("broker does not serve context resume");
+  const errors: { message: string; error: unknown }[] = [];
+
+  await expect(
+    runClearReloadInTurn(
+      {
+        serializeTile: (_id, fn) => fn(async (keys) => { typed.push(keys); return "written" as const; }),
+        checkOperatorTrust: async () => "compatible" as const,
+        checkContextResumeSupport: async () => { throw failure; },
+        currentSessionId: () => "sid-before",
+        reserveContextDeposit: async () => {
+          events.push("reserve");
+          return "attempt-1";
+        },
+        readClearBackchannelBaseline: () => null,
+        waitForClearBackchannel: async () => {},
+        releaseContextDeposit: async () => {
+          events.push("release");
+        },
+        reportError: (message, error) => errors.push({ message, error })
+      },
+      () => {},
+      "tile-1",
+      "lead-a1b2",
+      "night-shift",
+      undefined,
+      { contextDepositId: "deposit-1" }
+    )
+  ).rejects.toBe(failure);
+
+  expect(events).toEqual([]);
+  expect(typed).toEqual([]);
+  expect(errors).toEqual([{ message: 'context clear failed for "lead-a1b2"', error: failure }]);
+});
+
+test("context clear rejects a host missing the context resume support check before reservation", async () => {
+  let reservations = 0;
+  const typed: string[] = [];
+
+  await expect(
+    runClearReloadInTurn(
+      {
+        serializeTile: (_id, fn) => fn(async (keys) => { typed.push(keys); return "written" as const; }),
+        checkOperatorTrust: async () => "compatible" as const,
+        currentSessionId: () => "sid-before",
+        reserveContextDeposit: async () => {
+          reservations += 1;
+          return "attempt-1";
+        },
+        readClearBackchannelBaseline: () => null,
+        waitForClearBackchannel: async () => {},
+        releaseContextDeposit: async () => {}
+      },
+      () => {},
+      "tile-1",
+      "lead-a1b2",
+      "night-shift",
+      undefined,
+      { contextDepositId: "deposit-1" }
+    )
+  ).rejects.toThrow("context clear host is incomplete");
+
+  expect(reservations).toBe(0);
+  expect(typed).toEqual([]);
+});
+
+test("context clear refuses a reservation the broker names as owner_lacks_context_resume and types nothing", async () => {
+  const typed: string[] = [];
+  const releases: boolean[] = [];
+  const failure = new Error("context transaction reserve refused: owner_lacks_context_resume");
+
+  await expect(
+    runClearReloadInTurn(
+      {
+        serializeTile: (_id, fn) => fn(async (keys) => { typed.push(keys); return "written" as const; }),
+        checkOperatorTrust: async () => "compatible" as const,
+        checkContextResumeSupport: async () => {},
+        currentSessionId: () => "sid-before",
+        reserveContextDeposit: async () => { throw failure; },
+        readClearBackchannelBaseline: () => null,
+        waitForClearBackchannel: async () => {},
+        releaseContextDeposit: async (_depositId, _attemptId, cleared) => { releases.push(cleared); },
+        reportError: () => {}
+      },
+      () => {},
+      "tile-1",
+      "lead-a1b2",
+      "night-shift",
+      undefined,
+      { contextDepositId: "deposit-1" }
+    )
+  ).rejects.toBe(failure);
+
+  expect(typed).toEqual([]);
+  expect(releases).toEqual([]);
+});
+
+function healthFetch(respond: () => Response | Promise<Response>, urls: string[] = []): typeof fetch {
+  return (async (input: string | URL | Request) => {
+    urls.push(String(input));
+    return respond();
+  }) as unknown as typeof fetch;
+}
+
+test("the context resume probe accepts a broker serving version 1 or later and asks /health of the transaction endpoint", async () => {
+  for (const version of [1, 2]) {
+    const urls: string[] = [];
+    await requireContextResumeSupport(
+      { url: "http://broker.local", token: "" },
+      healthFetch(() => Response.json({ status: "ok", context_resume_version: version }), urls)
+    );
+    expect(urls).toEqual(["http://broker.local/health"]);
+  }
+});
+
+test("the context resume probe refuses a missing, low, mistyped or unreadable context_resume_version", async () => {
+  const endpoint = { url: "http://broker.local", token: "" };
+  const bodies: unknown[] = [{ status: "ok" }, { context_resume_version: 0 }, { context_resume_version: "1" }, { context_resume_version: null }, { context_resume_version: Number.NaN }, null, []];
+  const message = "broker does not serve context resume (context_resume_version missing or < 1); context clear refused";
+  for (const body of bodies) {
+    const refusal = await requireContextResumeSupport(endpoint, healthFetch(() => Response.json(body))).then(
+      () => null,
+      (error: unknown) => error
+    );
+    expect(refusal, JSON.stringify(body)).toBeInstanceOf(ContextResumeUnsupportedError);
+    expect((refusal as Error).message, JSON.stringify(body)).toBe(message);
+  }
+  await expect(
+    requireContextResumeSupport(endpoint, healthFetch(() => new Response("down", { status: 503 })))
+  ).rejects.toBeInstanceOf(ContextResumeUnsupportedError);
+});
+
+test("the context resume probe fails closed when /health cannot be reached or read", async () => {
+  const endpoint = { url: "http://broker.local", token: "" };
+  const unreachable = await requireContextResumeSupport(
+    endpoint,
+    healthFetch(() => { throw new Error("connect ECONNREFUSED"); })
+  ).then(() => null, (error: unknown) => error);
+  expect((unreachable as Error).message).toBe("connect ECONNREFUSED");
+  expect(unreachable).not.toBeInstanceOf(ContextResumeUnsupportedError);
+  await expect(
+    requireContextResumeSupport(endpoint, healthFetch(() => new Response("<html>", { status: 200 })))
+  ).rejects.toThrow();
+});
+
+test("the context transaction names the broker's owner_lacks_context_resume refusal instead of a generic failure", async () => {
+  const request = { action: "reserve", depositId: "0123456789abcdef", targetPeerId: "alpha" } as const;
+  const refusal = await readContextTransactionResponse(
+    request,
+    Response.json({ ok: false, reason: "owner_lacks_context_resume" }, { status: 409 })
+  ).then(() => null, (error: unknown) => error);
+  expect(refusal).toBeInstanceOf(ContextResumeUnsupportedError);
+  expect((refusal as Error).message).toBe("context transaction reserve refused: owner_lacks_context_resume");
+  const otherReason = await readContextTransactionResponse(
+    request,
+    Response.json({ ok: false, reason: "contested" }, { status: 409 })
+  ).then(() => null, (error: unknown) => error);
+  expect((otherReason as Error).message).toBe("context transaction reserve refused: contested");
+  expect(otherReason).not.toBeInstanceOf(ContextResumeUnsupportedError);
+  await expect(
+    readContextTransactionResponse(request, Response.json({ error: "deposit_id is invalid" }, { status: 400 }))
+  ).rejects.toThrow("deposit_id is invalid");
+  await expect(readContextTransactionResponse(request, new Response("oops", { status: 502 }))).rejects.toThrow(
+    "context transaction reserve failed: 502"
+  );
+});
+
+test("the context transaction accepts the reserve attempt id and checks the state each release result implies", async () => {
+  const reserve = { action: "reserve", depositId: "0123456789abcdef", targetPeerId: "alpha" } as const;
+  const attemptId = "0123456789abcdef0123456789abcdef";
+  expect(await readContextTransactionResponse(reserve, Response.json({ state: "reserved", attempt_id: attemptId }))).toEqual({
+    attemptId
+  });
+  await expect(
+    readContextTransactionResponse(reserve, Response.json({ state: "reserved", attempt_id: "short" }))
+  ).rejects.toThrow("reserve returned an invalid response");
+
+  const release = { action: "release", depositId: "0123456789abcdef", targetPeerId: "alpha", attemptId } as const;
+  expect(await readContextTransactionResponse({ ...release, cleared: true }, Response.json({ state: "resuming" }))).toEqual({});
+  expect(await readContextTransactionResponse({ ...release, cleared: false }, Response.json({ state: "held" }))).toEqual({});
+  await expect(
+    readContextTransactionResponse({ ...release, cleared: true }, Response.json({ state: "held" }))
+  ).rejects.toThrow("release returned an invalid response");
+  await expect(
+    readContextTransactionResponse({ ...release, cleared: false }, Response.json({ state: "resuming" }))
+  ).rejects.toThrow("release returned an invalid response");
+});
+
+test("the signed release fields carry the boolean cleared and the reserve fields carry none", () => {
+  const attemptId = "0123456789abcdef0123456789abcdef";
+  const base = { depositId: "0123456789abcdef", targetPeerId: "alpha" };
+  expect(contextTransactionFields({ action: "reserve", ...base })).toEqual({
+    target_peer_id: "alpha",
+    deposit_id: "0123456789abcdef",
+    action: "reserve"
+  });
+  for (const cleared of [true, false]) {
+    expect(contextTransactionFields({ action: "release", ...base, attemptId, cleared })).toEqual({
+      target_peer_id: "alpha",
+      deposit_id: "0123456789abcdef",
+      action: "release",
+      attempt_id: attemptId,
+      cleared
+    });
+  }
+});
+
+function runClearReloadHostCallback(name: string): string {
+  const source = readFileSync(join(import.meta.dir, "..", "desktop", "src", "main", "index.ts"), "utf8").replace(/\r\n/g, "\n");
+  const anchor = source.indexOf("const runClearReload = (");
+  const marker = `      ${name}: `;
+  const start = anchor < 0 ? -1 : source.indexOf(marker, anchor);
+  if (start < 0) throw new Error(`index.ts: runClearReload host callback ${name} is unavailable`);
+  const exprStart = start + marker.length;
+  const arrow = source.indexOf("=>", exprStart);
+  const blockOpen = source.indexOf("{", arrow);
+  const isBlock = source.slice(arrow + 2, blockOpen).trim() === "";
+  if (isBlock) return `${source.slice(exprStart, blockOpen)}{${extractBracedBody(source, blockOpen, true)}}`;
+  return source.slice(exprStart, source.indexOf(",\n", exprStart));
+}
+
+function indexBrokerEndpointOnce(resolve: () => unknown): () => unknown {
+  const source = readFileSync(join(import.meta.dir, "..", "desktop", "src", "main", "index.ts"), "utf8").replace(/\r\n/g, "\n");
+  const start = source.indexOf("function brokerEndpointOnce(");
+  if (start < 0) throw new Error("index.ts: brokerEndpointOnce is unavailable");
+  const open = source.indexOf("{", source.indexOf("): () =>", start));
+  const fn = source.slice(start, open) + "{" + extractBracedBody(source, open, true) + "}";
+  const js = new Bun.Transpiler({ loader: "ts" }).transformSync(fn);
+  return new Function("resolveBrokerEndpoint", `${js}\nreturn brokerEndpointOnce();`)(resolve) as () => unknown;
+}
+
+function hostCallbacks(endpointOnce: () => unknown, transactions: unknown[][], probes: unknown[]) {
+  const evaluate = (name: string, params: string[], args: unknown[]) =>
+    new Function(...params, `return (${runClearReloadHostCallback(name)});`)(...args);
+  const contextTransaction = async (request: unknown, endpoint: unknown) => {
+    transactions.push([request, endpoint]);
+    return { attemptId: "a".repeat(32) };
+  };
+  const requireContextResumeSupport = async (endpoint: unknown) => {
+    probes.push(endpoint);
+  };
+  return {
+    release: evaluate("releaseContextDeposit", ["contextTransaction", "peerId", "endpointOnce"], [contextTransaction, "lead-a1b2", endpointOnce]) as (
+      depositId: string,
+      attemptId: string,
+      cleared: boolean
+    ) => Promise<void>,
+    reserve: evaluate("reserveContextDeposit", ["contextTransaction", "endpointOnce"], [contextTransaction, endpointOnce]) as (
+      depositId: string,
+      targetPeerId: string
+    ) => Promise<string>,
+    probe: evaluate("checkContextResumeSupport", ["requireContextResumeSupport", "endpointOnce"], [requireContextResumeSupport, endpointOnce]) as () => Promise<void>
+  };
+}
+
+test("the Deck host releases with the cleared flag it was given, for the peer it cleared", async () => {
+  const transactions: unknown[][] = [];
+  const endpoint = { url: "http://broker.local", token: "" };
+  const { release } = hostCallbacks(() => endpoint, transactions, []);
+
+  await release("0123456789abcdef", "a".repeat(32), true);
+  await release("0123456789abcdef", "a".repeat(32), false);
+
+  expect(transactions).toEqual([
+    [{ action: "release", depositId: "0123456789abcdef", targetPeerId: "lead-a1b2", attemptId: "a".repeat(32), cleared: true }, endpoint],
+    [{ action: "release", depositId: "0123456789abcdef", targetPeerId: "lead-a1b2", attemptId: "a".repeat(32), cleared: false }, endpoint]
+  ]);
+});
+
+test("the Deck host sends the probe, the reservation and the release to one endpoint resolved once per directive", async () => {
+  let resolutions = 0;
+  const transactions: unknown[][] = [];
+  const probes: unknown[] = [];
+  const endpointOnce = indexBrokerEndpointOnce(() => ({ url: `http://broker-${++resolutions}.local`, token: "" }));
+  const { probe, reserve, release } = hostCallbacks(endpointOnce, transactions, probes);
+
+  await probe();
+  const attemptId = await reserve("0123456789abcdef", "lead-a1b2");
+  await release("0123456789abcdef", attemptId, true);
+
+  expect(resolutions).toBe(1);
+  expect(probes).toEqual([{ url: "http://broker-1.local", token: "" }]);
+  expect(transactions.map(([, endpoint]) => endpoint)).toEqual([
+    { url: "http://broker-1.local", token: "" },
+    { url: "http://broker-1.local", token: "" }
+  ]);
+  expect(endpointOnce()).toBe(probes[0]);
+});
+
+test("a directive that asks twice resolves a fresh endpoint each time", () => {
+  let resolutions = 0;
+  const first = indexBrokerEndpointOnce(() => ({ n: ++resolutions }));
+  const second = indexBrokerEndpointOnce(() => ({ n: ++resolutions }));
+  expect([first(), second()]).toEqual([{ n: 1 }, { n: 2 }]);
+});
+
+test("the Deck host probes context resume support on the endpoint it was given", async () => {
+  const endpoint = { url: "http://broker.local", token: "" };
+  const probes: unknown[] = [];
+  const { probe } = hostCallbacks(() => endpoint, [], probes);
+
+  await probe();
+
+  expect(probes).toEqual([endpoint]);
+});
+
+test("a broker without context resume support is reported to the agent as context_resume_unsupported, not as a generic error", async () => {
+  const r = recorder([session("tile-1", "alpha")]);
+  const typed: string[] = [];
+  const errors: unknown[] = [];
+  r.deps.runClearReload = (tileId, peerId, workstream, contextDepositId) =>
+    runClearReloadInTurn(
+      {
+        serializeTile: (_id, fn) => fn(async (keys) => { typed.push(keys); return "written" as const; }),
+        checkOperatorTrust: async () => "compatible" as const,
+        checkContextResumeSupport: () =>
+          requireContextResumeSupport({ url: "http://broker.local", token: "" }, healthFetch(() => Response.json({ status: "ok" }))),
+        currentSessionId: () => "sid-before",
+        reserveContextDeposit: async () => { throw new Error("must not reserve"); },
+        readClearBackchannelBaseline: () => null,
+        waitForClearBackchannel: async () => {},
+        releaseContextDeposit: async () => {},
+        reportError: (_message, error) => errors.push(error)
+      },
+      () => {},
+      tileId,
+      peerId,
+      workstream,
+      undefined,
+      { contextDepositId }
+    );
+
+  const result = await runDirectiveForCaller("clear_reload", ["alpha"], "night-shift", "lead", r.deps, {
+    contextDepositId: "0123456789abcdef",
+    reportWaitMs: 500
+  });
+
+  expect(result.refused).toEqual([{ tileId: "tile-1", peerId: "alpha", reason: "context_resume_unsupported" }]);
+  expect(result.injected).toEqual([]);
+  expect(typed).toEqual([]);
+  expect(errors[0]).toBeInstanceOf(ContextResumeUnsupportedError);
+});
+
+test("an owner server without context resume support is reported as context_resume_unsupported and nothing is typed", async () => {
+  const r = recorder([session("tile-1", "alpha")]);
+  const typed: string[] = [];
+  r.deps.runClearReload = (tileId, peerId, workstream, contextDepositId) =>
+    runClearReloadInTurn(
+      {
+        serializeTile: (_id, fn) => fn(async (keys) => { typed.push(keys); return "written" as const; }),
+        checkOperatorTrust: async () => "compatible" as const,
+        checkContextResumeSupport: async () => {},
+        currentSessionId: () => "sid-before",
+        reserveContextDeposit: async (depositId, targetPeerId) => {
+          const reserved = await readContextTransactionResponse(
+            { action: "reserve", depositId, targetPeerId },
+            Response.json({ ok: false, reason: "owner_lacks_context_resume" }, { status: 409 })
+          );
+          return reserved.attemptId as string;
+        },
+        readClearBackchannelBaseline: () => null,
+        waitForClearBackchannel: async () => {},
+        releaseContextDeposit: async () => { throw new Error("must not release"); },
+        reportError: () => {}
+      },
+      () => {},
+      tileId,
+      peerId,
+      workstream,
+      undefined,
+      { contextDepositId }
+    );
+
+  const result = await runDirectiveForCaller("clear_reload", ["alpha"], "night-shift", "lead", r.deps, {
+    contextDepositId: "0123456789abcdef",
+    reportWaitMs: 500
+  });
+
+  expect(result.refused).toEqual([{ tileId: "tile-1", peerId: "alpha", reason: "context_resume_unsupported" }]);
+  expect(typed).toEqual([]);
+});
+
+test("any other clear_reload failure stays a generic error refusal", async () => {
+  const r = recorder([session("tile-1", "alpha")]);
+  r.deps.runClearReload = () => Promise.reject(new Error("connect ECONNREFUSED"));
+
+  const result = await runDirectiveForCaller("clear_reload", ["alpha"], "night-shift", "lead", r.deps, {
+    contextDepositId: "0123456789abcdef",
+    reportWaitMs: 500
+  });
+
+  expect(result.refused).toEqual([{ tileId: "tile-1", peerId: "alpha", reason: "error" }]);
+});
+
+test("context clear signs cleared true only after the clear rotation was observed", async () => {
+  const released: boolean[] = [];
+  const host = (overrides: Partial<ClearReloadHost>): ClearReloadHost => ({
+    serializeTile: (_id, fn) => fn(async () => "written" as const),
+    checkOperatorTrust: async () => "compatible" as const,
+    checkContextResumeSupport: async () => {},
+    currentSessionId: () => "sid-before",
+    reserveContextDeposit: async () => "attempt-1",
+    readClearBackchannelBaseline: () => null,
+    waitForClearBackchannel: async () => {},
+    releaseContextDeposit: async (_depositId, _attemptId, cleared) => { released.push(cleared); },
+    reportError: () => {},
+    ...overrides
+  });
+  const run = (h: ClearReloadHost) =>
+    runClearReloadInTurn(h, () => {}, "tile-1", "lead-a1b2", "night-shift", undefined, { contextDepositId: "deposit-1" });
+
+  await run(host({}));
+  expect(released).toEqual([true]);
+
+  released.length = 0;
+  await run(host({ serializeTile: (_id, fn) => fn(async () => "busy-timeout" as const) }));
+  expect(released).toEqual([false]);
+
+  released.length = 0;
+  await expect(
+    run(host({ waitForClearBackchannel: async () => { throw new Error("clear rotation timed out"); } }))
+  ).rejects.toThrow("clear rotation timed out");
+  expect(released).toEqual([false]);
+
+  released.length = 0;
+  await expect(
+    run(host({ serializeTile: (_id, fn) => fn(async () => { throw new Error("pty write failed"); }) }))
+  ).rejects.toThrow("pty write failed");
+  expect(released).toEqual([false]);
+});
+
+test("a rotation wait still pending never lets the release claim the clear happened", async () => {
+  const pending = deferred<void>();
+  const released: boolean[] = [];
+  const outcome = runClearReloadInTurn(
+    {
+      serializeTile: (_id, fn) => fn(async () => "written" as const),
+      checkOperatorTrust: async () => "compatible" as const,
+      checkContextResumeSupport: async () => {},
+      currentSessionId: () => "sid-before",
+      reserveContextDeposit: async () => "attempt-1",
+      readClearBackchannelBaseline: () => null,
+      waitForClearBackchannel: () => pending.promise,
+      releaseContextDeposit: async (_depositId, _attemptId, cleared) => { released.push(cleared); },
+      reportError: () => {}
+    },
+    () => {},
+    "tile-1",
+    "lead-a1b2",
+    "night-shift",
+    undefined,
+    { contextDepositId: "deposit-1" }
+  );
+
+  await Bun.sleep(20);
+  expect(released).toEqual([]);
+  pending.resolve();
+  await outcome;
+  expect(released).toEqual([true]);
 });
 
 test("context clear neither reserves nor types /clear when a fresh trust check is not compatible", async () => {
@@ -467,6 +950,7 @@ test("context clear neither reserves nor types /clear when a fresh trust check i
         {
           serializeTile: (_id, fn) => fn(async (keys) => { typed.push(keys); return "written" as const; }),
           checkOperatorTrust: async () => status,
+          checkContextResumeSupport: async () => {},
           currentSessionId: () => "sid-before",
           reserveContextDeposit: async () => {
             reservations += 1;
@@ -505,6 +989,7 @@ test("context clear neither reserves nor types /clear when the trust check throw
       {
         serializeTile: (_id, fn) => fn(async (keys) => { typed.push(keys); return "written" as const; }),
         checkOperatorTrust: async () => { throw failure; },
+        checkContextResumeSupport: async () => {},
         currentSessionId: () => "sid-before",
         reserveContextDeposit: async () => {
           reservations += 1;
@@ -851,6 +1336,51 @@ test("clear_reload accepts only a bounded lowercase workstream and no caller pro
   );
 });
 
+test("parseRunDirectiveArgs hands on a well-formed context_deposit_id for one clear_reload peer and omits the key otherwise", () => {
+  const base = { directive: "clear_reload", peer_ids: ["alpha"], workstream: "night-shift" };
+  expect(parseRunDirectiveArgs({ ...base, context_deposit_id: "0123456789abcdef" })).toEqual({
+    directive: "clear_reload",
+    peerIds: ["alpha"],
+    prompt: undefined,
+    workstream: "night-shift",
+    contextDepositId: "0123456789abcdef"
+  });
+  expect("contextDepositId" in parseRunDirectiveArgs(base)).toBe(false);
+  expect("contextDepositId" in parseRunDirectiveArgs({ directive: "clear", peer_ids: ["alpha"] })).toBe(false);
+});
+
+test("parseRunDirectiveArgs refuses both context deposit aliases, alone or beside the canonical name", () => {
+  const base = { directive: "clear_reload", peer_ids: ["alpha"], workstream: "night-shift" };
+  for (const alias of ["contextDepositId", "deposit_id"]) {
+    for (const value of ["0123456789abcdef", null, "", 7]) {
+      expect(() => parseRunDirectiveArgs({ ...base, [alias]: value }), `${alias}=${String(value)}`).toThrow(
+        `${alias} is not accepted; use context_deposit_id`
+      );
+      expect(
+        () => parseRunDirectiveArgs({ ...base, context_deposit_id: "0123456789abcdef", [alias]: value }),
+        `${alias}=${String(value)} with canonical`
+      ).toThrow(`${alias} is not accepted; use context_deposit_id`);
+    }
+  }
+});
+
+test("parseRunDirectiveArgs refuses a context_deposit_id that is mistyped, malformed, on another directive or on several peers", () => {
+  const base = { directive: "clear_reload", peer_ids: ["alpha"], workstream: "night-shift" };
+  for (const value of [null, "", 12, true, ["0123456789abcdef"], { id: "0123456789abcdef" }, "0123456789ABCDEF", "0123456789abcde", "0123456789abcdef0", " 0123456789abcdef"]) {
+    expect(() => parseRunDirectiveArgs({ ...base, context_deposit_id: value }), JSON.stringify(value)).toThrow(
+      "context_deposit_id is not a valid deposit id"
+    );
+  }
+  for (const directive of ["clear", "compact", "magic_compact"]) {
+    expect(() =>
+      parseRunDirectiveArgs({ directive, peer_ids: ["alpha"], context_deposit_id: "0123456789abcdef" }), directive
+    ).toThrow("context_deposit_id is only valid for clear_reload");
+  }
+  expect(() =>
+    parseRunDirectiveArgs({ ...base, peer_ids: ["alpha", "beta"], context_deposit_id: "0123456789abcdef" })
+  ).toThrow("context_deposit_id requires exactly one peer_id");
+});
+
 test("sanitizeDirectivePrompt folds line breaks to spaces and strips C0, C1, bidi and zero-width characters", () => {
   const c = String.fromCharCode;
   const raw = [
@@ -1028,6 +1558,23 @@ test("createRunDirectiveAdapter forwards the directive, ids, prompt and caller t
   expect(calls).toEqual([
     ["compact", ["alpha", "beta"], "keep the API", "team-lead-a1b2", {}, { excludeSupervisor: false }],
     ["compact", ["alpha"], undefined, "team-lead-a1b2", {}, { excludeSupervisor: true }]
+  ]);
+});
+
+test("createRunDirectiveAdapter carries the context deposit id to the runner and omits it otherwise", () => {
+  const calls: unknown[][] = [];
+  const result = { injected: [], refused: [], pending: [], unreached: [] };
+  const adapter = createRunDirectiveAdapter({} as DirectiveRunDeps, (...args) => {
+    calls.push(args);
+    return Promise.resolve(result);
+  });
+
+  void adapter("clear_reload", ["alpha"], "night-shift", "lead", false, { contextDepositId: "0123456789abcdef" });
+  void adapter("clear_reload", ["alpha"], "night-shift", "lead", true);
+
+  expect(calls).toEqual([
+    ["clear_reload", ["alpha"], "night-shift", "lead", {}, { excludeSupervisor: false, contextDepositId: "0123456789abcdef" }],
+    ["clear_reload", ["alpha"], "night-shift", "lead", {}, { excludeSupervisor: true }]
   ]);
 });
 

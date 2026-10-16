@@ -76,9 +76,14 @@ import {
   fetchGraphDrafts,
   fetchOperatorInbox,
   purgeOperatorInbox,
+  contextTransactionFields,
+  readContextTransactionResponse,
+  requireContextResumeSupport,
   resolveBrokerEndpoint,
   resolveDispatchRequest,
-  sendAnnounce
+  sendAnnounce,
+  type BrokerEndpoint,
+  type ContextTransactionRequest
 } from './broker-client'
 import {
   appendInboxHistory,
@@ -1904,25 +1909,24 @@ const announceClearReloadFailure = (peerId: string, outcome: Exclude<DirectiveOu
     .catch((e) => reportError('announce', `clear_reload failure announce failed for "${peerId}"`, e))
 }
 
-type ContextTransactionAction = 'reserve' | 'release'
 const CONTEXT_TRANSACTION_TIMEOUT_MS = 10_000
 
+/** One resolution per directive: the probe, the reservation and the release must reach the same broker. */
+function brokerEndpointOnce(): () => BrokerEndpoint {
+  let endpoint: BrokerEndpoint | undefined
+  return () => (endpoint ??= resolveBrokerEndpoint())
+}
+
 async function contextTransaction(
-  action: ContextTransactionAction,
-  depositId: string,
-  targetPeerId: string,
-  attemptId?: string
+  request: ContextTransactionRequest,
+  endpoint: BrokerEndpoint
 ): Promise<{ attemptId?: string }> {
   const identity = approvals.operator
   if (!identity) throw new Error('operator identity is unavailable for context transaction')
-  const endpoint = resolveBrokerEndpoint()
   const payload = {
     group_id: activeScope.groupId,
     group_secret_hash: computeGroupSecretHash(activeScope.secret),
-    target_peer_id: targetPeerId,
-    deposit_id: depositId,
-    action,
-    ...(attemptId ? { attempt_id: attemptId } : {})
+    ...contextTransactionFields(request)
   }
   const signed = { ...payload, public_key: identity.publicKey }
   const body = {
@@ -1940,31 +1944,15 @@ async function contextTransaction(
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(CONTEXT_TRANSACTION_TIMEOUT_MS)
   })
-  if (!response.ok) {
-    let detail = ''
-    try {
-      detail = ((await response.json()) as { error?: string }).error ?? ''
-    } catch {
-      /* non-json error body */
-    }
-    throw new Error(detail || `context transaction ${action} failed: ${response.status}`)
-  }
-  const result = (await response.json()) as { state?: unknown; attempt_id?: unknown }
-  if (action === 'reserve') {
-    if (result.state !== 'reserved' || typeof result.attempt_id !== 'string' || !/^[a-f0-9]{32}$/.test(result.attempt_id)) {
-      throw new Error('context transaction reserve returned an invalid response')
-    }
-    return { attemptId: result.attempt_id }
-  }
-  if (result.state !== 'held') throw new Error('context transaction release returned an invalid response')
-  return {}
+  return readContextTransactionResponse(request, response)
 }
 
 const runClearReload = (
   tileId: string,
   peerId: string,
   workstream: string,
-  contextDepositId?: string
+  contextDepositId?: string,
+  endpointOnce = brokerEndpointOnce()
 ): Promise<DirectiveOutcome> =>
   runClearReloadInTurn(
     {
@@ -1975,8 +1963,9 @@ const runClearReload = (
         return session.sessionId
       },
       checkOperatorTrust: () => approvals.checkTrustNow(),
+      checkContextResumeSupport: () => requireContextResumeSupport(endpointOnce()),
       reserveContextDeposit: async (depositId, targetPeerId) => {
-        const result = await contextTransaction('reserve', depositId, targetPeerId)
+        const result = await contextTransaction({ action: 'reserve', depositId, targetPeerId }, endpointOnce())
         if (!result.attemptId) throw new Error('context transaction reserve omitted attempt_id')
         return result.attemptId
       },
@@ -1984,8 +1973,11 @@ const runClearReload = (
       waitForClearBackchannel: async (id, currentSessionId, baselineSessionId) => {
         await service.waitForClearBackchannel(id, currentSessionId, baselineSessionId)
       },
-      releaseContextDeposit: async (depositId, attemptId) => {
-        await contextTransaction('release', depositId, peerId, attemptId)
+      releaseContextDeposit: async (depositId, attemptId, cleared) => {
+        await contextTransaction(
+          { action: 'release', depositId, targetPeerId: peerId, attemptId, cleared },
+          endpointOnce()
+        )
       },
       reportError: (message, error) => reportError('dispatch', message, error)
     } satisfies Required<ClearReloadHost>,

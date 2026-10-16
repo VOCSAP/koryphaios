@@ -178,7 +178,7 @@ const TOOLS = [
   {
     name: 'deck_run_directive',
     description:
-      'Run a directive on live peer tiles now, no roadmap card. clear is free, compact costs one inference, magic_compact uses the plugin, else compact. Result: injected = typed; refused = not typed (refused-modal|busy-timeout|no-terminal|error); pending = still queued; typed when the tile falls idle unless refused then (up to 120 s); do not resend; magic_compact is always pending; unreached = no single live tile carries that peer_id.',
+      'Run a directive on live peer tiles now, no card. clear is free, compact costs one inference, magic_compact uses the plugin, else compact. Result: injected = typed; refused = not typed (refused-modal|busy-timeout|no-terminal|error|context_resume_unsupported); pending = still queued; typed when the tile falls idle unless refused then (up to 120 s); do not resend; magic_compact is always pending; unreached = no single live tile carries that peer_id.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -202,6 +202,11 @@ const TOOLS = [
           maxLength: CLEAR_RELOAD_WORKSTREAM_MAX,
           pattern: CLEAR_RELOAD_WORKSTREAM_RE.source,
           description: 'Required only for clear_reload; selects its fixed recovery instruction.'
+        },
+        context_deposit_id: {
+          type: 'string',
+          description:
+            'clear_reload with one peer_id only: the deposit_id of context that peer deposited, pushed back after the clear. On context_resume_unsupported nothing was cleared: do not retry; clear_reload without it, or ask the operator.'
         }
       },
       required: ['directive', 'peer_ids']

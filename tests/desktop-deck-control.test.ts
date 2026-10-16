@@ -3041,7 +3041,7 @@ test("deck_run_directive forwards clear_reload's validated workstream without ca
   ]);
 });
 
-test("deck_run_directive drops context deposit aliases from agent arguments", async () => {
+test("deck_run_directive passes the canonical context_deposit_id to the run", async () => {
   const deps = makeDeps({ sessions: [] });
   const srv = await startDeckControl(deps);
   servers.push(srv);
@@ -3050,15 +3050,66 @@ test("deck_run_directive drops context deposit aliases from agent arguments", as
     directive: "clear_reload",
     peer_ids: ["alpha"],
     workstream: "night-shift",
-    context_deposit_id: "deposit-snake",
-    contextDepositId: "deposit-camel",
-    deposit_id: "deposit-legacy"
+    context_deposit_id: "0123456789abcdef"
   });
 
   expect(res.status).toBe(200);
   expect(deps.directiveRuns).toEqual([
-    { directive: "clear_reload", peerIds: ["alpha"], prompt: "night-shift", callerId: "supervisor" }
+    {
+      directive: "clear_reload",
+      peerIds: ["alpha"],
+      prompt: "night-shift",
+      callerId: "supervisor",
+      contextDepositId: "0123456789abcdef"
+    }
   ]);
+});
+
+test("deck_run_directive refuses a context deposit alias with 400 and never runs the directive", async () => {
+  const deps = makeDeps({ sessions: [] });
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+  const base = { directive: "clear_reload", peer_ids: ["alpha"], workstream: "night-shift" };
+
+  for (const extra of [
+    { contextDepositId: "0123456789abcdef" },
+    { deposit_id: "0123456789abcdef" },
+    { contextDepositId: null },
+    { context_deposit_id: "0123456789abcdef", contextDepositId: "0123456789abcdef" },
+    { context_deposit_id: "0123456789abcdef", deposit_id: "0123456789abcdef" }
+  ]) {
+    const res = await call(srv, "deck_run_directive", { ...base, ...extra });
+    expect(res.status, JSON.stringify(extra)).toBe(400);
+    expect(res.body.error, JSON.stringify(extra)).toContain("use context_deposit_id");
+  }
+  expect(deps.directiveRuns).toEqual([]);
+});
+
+test("deck_run_directive refuses an invalid context_deposit_id before running anything", async () => {
+  const deps = makeDeps({ sessions: [] });
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+  const valid = "0123456789abcdef";
+  const cases: [Record<string, unknown>, string][] = [
+    [{ directive: "clear", peer_ids: ["alpha"], context_deposit_id: valid }, "only valid for clear_reload"],
+    [{ directive: "compact", peer_ids: ["alpha"], context_deposit_id: valid }, "only valid for clear_reload"],
+    [
+      { directive: "clear_reload", peer_ids: ["alpha", "beta"], workstream: "night-shift", context_deposit_id: valid },
+      "exactly one peer_id"
+    ],
+    ...[null, "", 12, ["0123456789abcdef"], "0123456789ABCDEF", "0123456789abcde", "0123456789abcdef0"].map(
+      (value): [Record<string, unknown>, string] => [
+        { directive: "clear_reload", peer_ids: ["alpha"], workstream: "night-shift", context_deposit_id: value },
+        "not a valid deposit id"
+      ]
+    )
+  ];
+  for (const [args, reason] of cases) {
+    const res = await call(srv, "deck_run_directive", args);
+    expect(res.status, JSON.stringify(args)).toBe(400);
+    expect(res.body.error, JSON.stringify(args)).toContain(reason);
+  }
+  expect(deps.directiveRuns).toEqual([]);
 });
 
 test("deck_run_directive refuses a hostile directive, a prompt on clear, and bad peer_ids before running anything", async () => {
@@ -3161,6 +3212,31 @@ test("a restricted caller can clear_reload only its own tile", async () => {
   expect(multiTarget.status).toBe(400);
   expect(multiTarget.body.error).toBe("refused: a team-lead may clear_reload only its own tile");
   expect(deps.directiveRuns).toHaveLength(2);
+
+  const depositOnOther = await call(
+    srv,
+    "deck_run_directive",
+    { directive: "clear_reload", peer_ids: ["other-lead-peer"], workstream: "night-shift", context_deposit_id: "0123456789abcdef" },
+    selfToken
+  );
+  expect(depositOnOther.status).toBe(400);
+  expect(depositOnOther.body.error).toBe("refused: a team-lead may clear_reload only its own tile");
+  expect(deps.directiveRuns).toHaveLength(2);
+
+  const depositOnSelf = await call(
+    srv,
+    "deck_run_directive",
+    { directive: "clear_reload", peer_ids: [self.peer_id], workstream: "night-shift", context_deposit_id: "0123456789abcdef" },
+    selfToken
+  );
+  expect(depositOnSelf.status).toBe(200);
+  expect(deps.directiveRuns.at(-1)).toEqual({
+    directive: "clear_reload",
+    peerIds: [self.peer_id],
+    prompt: "night-shift",
+    callerId: deps.leadMcpCalls[0]!.callerId,
+    contextDepositId: "0123456789abcdef"
+  });
 
   const supervisorReload = await call(srv, "deck_run_directive", {
     directive: "clear_reload",

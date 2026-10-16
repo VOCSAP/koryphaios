@@ -35,6 +35,7 @@
     "../shared/operator-trust.ts",
     "../shared/text.ts",
     "../shared/context-timing.ts",
+    "../shared/context-deposit-id.ts",
     "../shared/types.ts",
     "../shared/delegated-task.ts",
     "../shared/project-key.ts",

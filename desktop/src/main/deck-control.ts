@@ -784,7 +784,7 @@ export function startDeckControl(
       }
 
       case 'deck_run_directive': {
-        const { directive, peerIds, prompt, workstream } = parseRunDirectiveArgs(args)
+        const { directive, peerIds, prompt, workstream, contextDepositId } = parseRunDirectiveArgs(args)
         if (restricted && directive === 'clear_reload') {
           const { matched } = resolveDirectiveTargets(peerIds, deps.listSessions())
           const target = matched[0]
@@ -797,7 +797,8 @@ export function startDeckControl(
           peerIds,
           directive === 'clear_reload' ? workstream : prompt,
           callerId,
-          restricted
+          restricted,
+          contextDepositId ? { contextDepositId } : undefined
         )
         return {
           directive,
