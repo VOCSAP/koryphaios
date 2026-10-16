@@ -366,7 +366,7 @@ Garde-fous de couverture (`CLAUDE.md`, « A guard needs its COVERAGE audited »)
 Contrat A2 :
 
 - Le Deck initialise `cleared = false` et ne le passe à `true` **qu'après la résolution de `waitForClearBackchannel`**. Le `finally` transmet ce booléen avec le dépôt et la tentative, couvert par la signature opérateur. Pas de réservation = pas de release. Une erreur après le `/clear` ne permet ni de l'annuler ni de prétendre que le contexte a été restauré.
-- Le broker valide le type booléen. Pour la compatibilité avec un ancien Deck, un champ absent signifie **abandon sans push**, jamais succès ; `null`/chaîne/nombre sont refusés en 400. L'activation d'un nouveau Deck exige néanmoins le broker L3, sinon son `cleared:true` serait ignoré par l'ancien contrat.
+- Le broker valide le type booléen. Pour la compatibilité avec un ancien Deck, un champ absent signifie **abandon sans push**, jamais succès ; `null`/chaîne/nombre sont refusés en 400. L'activation d'un nouveau Deck exige néanmoins le broker L3, sinon son `cleared:true` serait ignoré par l'ancien contrat ; c'est la sonde `/health` du §18.4 qui ferme ce cas avant la réservation, et le 409 de réservation qui ferme celui d'un propriétaire sans consommateur.
 - Une première libération valide fige son résultat : `false` rend `held`, `true` rend `resuming` et conserve `released_attempt_id`. Un doublon de même tentative et même résultat est idempotent. Changer `false` en `true` ou l'inverse pour la même tentative répond 409, sans push ni modification. Tentative expirée/supplantée et dépôt disparu répondent 409 ; une expiration de réservation ne fabrique jamais de succès.
 - Seul `takeReleasedForResume(deposit_id, released_attempt_id)` donne accès au texte **du dépôt et de sa tentative libérée**, filtré par vivacité/époque, résultat `cleared:true`, état `resuming` et absence d'ACK. L'accès large `takeForPush` est supprimé. Résoudre le jeton propriétaire depuis l'entrée, pas depuis une cible fournie au push. Une énumération de reprise à l'auth WS ne rend que des identifiants admissibles ; chaque lecture de texte repasse par cet accès exact.
 - Après la transition réussie, tenter l'envoi dédié (§17.B). Un doublon HTTP de release ne déclenche pas une seconde notification à lui seul. `resuming` bloque `replace` et une seconde réservation pendant toute la rétention : un ACK tardif ne peut donc effacer un nouveau cycle du même dépôt.
@@ -436,8 +436,54 @@ Ordre L1 : broker, puis core (server.ts et cli.ts), puis Deck ; une version sans
 1. Appliquer les décisions ratifiées B2 (reprise différée) et C1 seul (§19.7-8), avec leur limite de lecture écrite au journal. L'arbitrage produit est clos ; le contrôle de compatibilité avant activation reste requis.
 2. Livrer le registre et le broker : release signé avec `cleared`, état `resuming`, accès exact, transport RAM dédié, rejeu à auth WS et ACK authentifié. Avec un ancien release sans `cleared`, aucun push. Aucun dépôt dormant/abandonné ne devient éligible par défaut.
 3. Livrer server.ts : réception `context_resume`, cadrage sans log du texte, déduplication et ACK. Ne livrer ni outil de lecture ni chemin pull. Pas de garantie de lecture déduite du seul succès de `notification`.
-4. Activer seulement ensuite le producteur Deck et le schéma agent `context_deposit_id`, avec validation avant injection. Le support du protocole L3 par le broker **et le server propriétaire** doit être vérifié avant le premier clear ; une réservation L2 réussie n'est pas cette preuve. **DÉDUIT**, `broker.ts:2863-2885` ne traite pas `cleared`, et `server.ts:362-409` traite la trame ordinaire `message` : déployer le producteur seul peut donc déclencher un clear sans consommateur L3. Le mécanisme de vérification de compatibilité doit être fixé dans le brief d'implémentation, pas remplacé par un succès HTTP générique.
+4. Activer seulement ensuite le producteur Deck et le schéma agent `context_deposit_id`, avec validation avant injection. Le support du protocole L3 par le broker **et le server propriétaire** doit être vérifié avant le premier clear ; une réservation L2 réussie n'est pas cette preuve, et un succès HTTP générique non plus. Le mécanisme est fixé par le lead le 2026-10-16 (§18.4 ci-dessous) : deux contrôles, un par composant, parce que seul le broker connaît le couple cible → propriétaire.
 5. Faire les tests ciblés du §17 et le scénario réel, puis le gate unique du lead. Les tests du futur transport et le scénario de perte MCP restent à exécuter ; le run `broker-websocket.test.ts` documenté en §17.B n'en tient pas lieu.
+
+### 18.4. Contrôle de compatibilité L3 avant le premier clear avec dépôt
+
+**Statut : mécanisme fixé par le lead le 2026-10-16.** Il remplace la mention « au brief » du point 4. Il ne modifie aucune des décisions B2/C1 (§17) ni le contrat de release A2 ; il ajoute un refus **avant** la réservation et un refus **à** la réservation.
+
+**Pourquoi deux contrôles.** Le producteur Deck parle au broker, jamais au server.ts propriétaire de la cible ; seul le broker sait quel `instance_token` possède le pair visé par la directive. Un contrôle unique côté Deck ne peut donc prouver que le broker. Le second contrôle vit là où l'information existe : dans la phase `reserve` de `/context/transaction`, qui résout déjà le dépôt puis son propriétaire.
+
+**(a) Le broker annonce sa version de reprise sur `GET /health`.** Champ `context_resume_version: 1`, de type nombre. Précédent exact : **DÉDUIT**, `broker.ts:11742-11751` (arbre de travail) sert déjà sur `/health`, sans Origin ni Bearer (`:11727-11732`), le couple `operator_trust_version` / `operator_trust_state` que le Deck lit avant un clear ; et `desktop/src/main/broker-client.ts:57-64` fait cette lecture avec `AbortSignal.timeout(2000)`, sans cache. La sonde L3 reprend cette forme :
+
+- À **chaque** directive portant `context_deposit_id`, le Deck sonde `/health` sur le **même endpoint** que celui qui recevra la transaction (local ou `broker_url` distant, §19.1), avec un timeout de **2 s** et **sans cache**. Une valeur lue à la directive précédente ne vaut rien pour celle-ci : le broker a pu redémarrer dans une autre version entre les deux.
+- Refus fermé, **avant la réservation et avant `/clear`**, si le champ manque, si sa valeur n'est pas un nombre `>= 1`, si la réponse n'est pas `2xx`, ou en cas d'erreur réseau ou de timeout. Le refus est tracé par `reportError`/journal sans contenu du dépôt. Pas de réservation signifie pas de release (§17.A), donc aucune trace broker n'est laissée par ce refus.
+- Le champ est une **version de protocole**, pas un drapeau de fonctionnalité : une rupture ultérieure du contrat de reprise l'incrémente, et le Deck refuse ce qu'il ne connaît pas. `/health` reste non authentifiée et ne sérialise toujours pas le registre (§7, classe 2) ; ce nombre ne révèle rien sur les dépôts.
+
+**(b) Le server.ts annonce son support au broker, qui refuse la réservation d'une cible dont le propriétaire ne l'a pas annoncé.**
+
+- Le server.ts qui consomme la trame `context_resume` l'annonce dans le corps de `/register`, aux **deux** sites qui construisent ce corps (boot et `switch_group`), selon la règle « les deux sites ou aucun » déjà appliquée à `deposit_capability_hash` (§10). Nom proposé pour le lot L3d, non arbitré : `context_resume_version: 1` (nombre), le même nom que sur `/health` pour qu'une seule constante serve aux deux annonces.
+- Le broker garde l'annonce **en RAM, par `instance_token`**, posée après tout `/register` réussi au même site que la liaison de capacité : **DÉDUIT**, `broker.ts:2724-2731` (`bindDepositCapability`) couvre les quatre branches de retour de `handleRegister` par un seul appel. Un nouveau `/register` du même jeton remplace l'annonce ; un redémarrage du broker la perd, comme il perd les dépôts, donc aucune incohérence entre les deux ne peut survivre. Une annonce absente ou mal typée vaut « non annoncé », jamais « annoncé ».
+- En phase **`reserve`**, après résolution du dépôt et de son propriétaire, le broker répond **409 `{ ok:false, reason:"owner_lacks_context_resume" }`** si le propriétaire **de la cible** n'a pas annoncé le support. Le contrôle est **par cible et au moment de la réservation**, pas par groupe ni par broker. **DÉDUIT**, `broker.ts:2876-2880` (arbre de travail) rend déjà `{ ok:false, reason }` en 409 depuis le résultat du registre : le nouveau motif s'ajoute à cette forme. Le Deck traite ce 409 comme tout refus de réservation : directive refusée avant `/clear`, trace sans contenu, aucun release.
+- Le contrôle **ne porte pas** sur le server.ts qui a déposé : seul le propriétaire **courant** de la cible recevra la trame, et c'est lui que la réservation vérifie.
+
+**Fenêtre de course acceptée.** Entre la réservation et le `/clear`, le propriétaire peut se réenregistrer dans une version sans annonce, ou le broker redémarrer. Cette fenêtre est **acceptée** : la purge propriétaire ou la perte du dépôt rend alors un release 409 (§17.A), sans push ; le contexte est effacé sans reprise, ce que le journal rapporte comme une reprise non effectuée, jamais comme une restauration. Fermer cette fenêtre demanderait un verrou sur `/register` que rien d'autre ne justifie.
+
+**Matrice de déploiement.** Le flux est **fermé par défaut** tant que l'un des deux contrôles n'a pas de quoi répondre :
+
+| Deck | Broker | Server propriétaire | Résultat |
+|---|---|---|---|
+| L3c | sans L3d | quelconque | `/health` sans champ : refus Deck avant réservation |
+| L3c | L3d | sans L3d | 409 `owner_lacks_context_resume` à la réservation |
+| L3c | L3d | L3d | réservation acceptée, flux L3 nominal |
+| sans L3c | L3d | quelconque | pas de `context_deposit_id` dans le schéma agent : chemin historique sans dépôt |
+
+**Ce qui a été écarté.**
+
+| Option | Pourquoi |
+|---|---|
+| (a) seul : sonder `/health` sans contrôle du propriétaire | Un broker L3d devant un server.ts ancien accepte la réservation, le Deck exécute `/clear`, et la trame n'a aucun consommateur : le dépôt est purgé par le propriétaire ou immobilisé, le contexte perdu. C'est exactement le cas que le point 4 interdit. |
+| Cache de la sonde `/health` (par endpoint ou par run) | Un broker redémarré dans une autre version entre deux directives rend le cache périmé ; la directive suivante passerait sur une valeur fausse. Le coût d'une requête locale de 2 s maximum par directive avec dépôt est inférieur à celui d'un `/clear` sans reprise. |
+| Contrôle du propriétaire côté Deck (lire le propriétaire puis sa version) | Exigerait une route Deck exposant le couple cible → `instance_token`, ou une version par pair dans `list_peers` ; ouvre une surface de plus pour une information que le broker possède déjà au bon moment. |
+
+**Répartition des lots.**
+
+- **L3c (Deck)** : la sonde `/health` avant réservation, le refus fermé sur champ absent, valeur `< 1`, erreur ou timeout, et le traitement du 409 `owner_lacks_context_resume` comme refus avant `/clear`. Tant que L3d n'est pas déployé, un Deck L3c refuse chaque directive avec dépôt : c'est le comportement voulu.
+- **L3d (core)** : le champ `context_resume_version` sur `/health`, l'annonce du server.ts aux deux sites de `/register`, sa conservation par `instance_token` au site de `bindDepositCapability`, et le 409 de réservation.
+- Ordre de déploiement : L3c et L3d sont indépendants parce que le flux est fermé par défaut dans toute combinaison partielle ; un déploiement L3d seul n'active rien sans le producteur.
+
+**Critères de clôture à ajouter à ceux du §17 :** Deck : `/health` sans champ, champ `0`, champ chaîne `"1"`, réponse 500, timeout simulé à 2 s, chacun refusé avant toute requête `/context/transaction` (faux broker qui compte ses requêtes) ; deux directives successives font deux sondes. Broker : réservation sur une cible dont le propriétaire n'a pas annoncé rend 409 avec le motif exact et ne change pas l'état du dépôt ; le même propriétaire réenregistré avec l'annonce rend la réservation possible ; un `/register` sans le champ efface une annonce antérieure du même jeton ; `/health` porte le champ en nombre dans les trois modes de broker ; le corps de `/health` ne contient aucun identifiant de dépôt.
 
 ## 19. Questions encore ouvertes
 
@@ -458,7 +504,7 @@ Pour le lead, sans bloquer L1 :
 7. **Garantie de reprise (C) : C1 seul, retenu et ratifié.** Maintenir « sans outil MCP/aucune lecture », avec notification potentiellement perdue et purge 300 s après le premier ACK technique. La limite de perte silencieuse est acceptée, écrite au journal et jamais appelée « modèle a lu ». **C3 rejetée** : « un outil de lecture se paie en description à chaque tour alors qu'il servirait rarement, puisque la reprise vient d'un flux amont (la directive clear_reload) qui en déclenche l'usage. » Les exclusions des §0/2/4/5 restent inchangées ; détails des garanties : §17.C.
 8. **Reprise différée (B) : B2 retenue et ratifiée** au titre de la décision opérateur du **2026-10-12** : garde jusqu'à la déconnexion, sous quotas, sans TTL avant ACK. Conserver en RAM la tentative libérée jusqu'à auth WS et ACK tant que le propriétaire vit ; sa place de quota reste immobilisée. Aucune survie à `/disconnect`, changement d'époque ou redémarrage broker. Cette récupération de transport ne résout pas la perte entre notification MCP et modèle.
 
-**Pour le lead avant dispatch de code :** préciser le contrôle de compatibilité L3 broker/server avant activation du producteur (§18). La ratification de C1/B2 ne dispense pas de ce contrôle.
+9. **Contrôle de compatibilité L3 avant activation du producteur : fixé par le lead le 2026-10-16** (§18.4). Sonde `/health` par le Deck à chaque directive avec dépôt (`context_resume_version >= 1`, 2 s, sans cache, refus fermé avant réservation), et 409 `owner_lacks_context_resume` en phase `reserve` quand le propriétaire de la cible n'a pas annoncé son support au `/register`. Écartés : la sonde seule, le cache de la sonde. La ratification de C1/B2 ne dispensait pas de ce contrôle ; il est désormais une exigence de L3c et L3d. Reste au lot L3d le seul nom du champ d'annonce au `/register`, proposé identique à celui de `/health`.
 
 ## 20. Risques résiduels
 
