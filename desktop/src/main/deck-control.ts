@@ -786,10 +786,25 @@ export function startDeckControl(
       case 'deck_run_directive': {
         const { directive, peerIds, prompt, workstream, contextDepositId } = parseRunDirectiveArgs(args)
         if (restricted && directive === 'clear_reload') {
-          const { matched } = resolveDirectiveTargets(peerIds, deps.listSessions())
+          const sessions = deps.listSessions()
+          const { matched } = resolveDirectiveTargets(peerIds, sessions)
           const target = matched[0]
-          if (peerIds.length !== 1 || matched.length !== 1 || !target || callerForSession(target.id) !== callerId) {
-            throw new Error('refused: a team-lead may clear_reload only its own tile')
+          if (peerIds.length !== 1 || matched.length !== 1 || !target) {
+            throw new Error('refused: a team-lead may clear_reload exactly one live tile')
+          }
+          if (callerForSession(target.id) !== callerId) {
+            const targetSession = sessions.find((session) => session.id === target.id)
+            if (!targetSession) throw new Error(`refused: no live session carries id "${target.id}"`)
+            if (targetSession.locked) {
+              deps.journal(`deck_run_directive refused: peer verrouillé (${target.id})`)
+              throw new Error('refused: peer verrouillé')
+            }
+            if (targetSession.lead || targetSession.supervisor || callerForSession(target.id) !== null) {
+              throw new Error('refused: a team-lead cannot clear_reload a lead or supervisor tile')
+            }
+            if (!contextDepositId) {
+              throw new Error("refused: a team-lead may clear_reload another peer only with that peer's context_deposit_id")
+            }
           }
         }
         const run = await deps.runDirective(

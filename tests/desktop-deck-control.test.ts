@@ -3149,107 +3149,120 @@ test("deck_run_directive is refused at POST /call to a caller whose allow-list o
   expect(deps.directiveRuns.map((r) => r.callerId)).toEqual([lead.callerId]);
 });
 
-test("a restricted caller can clear_reload only its own tile", async () => {
+const CLEAR_RELOAD_DEPOSIT = "0123456789abcdef";
+const LEAD_OR_SUPERVISOR_REFUSAL = "refused: a team-lead cannot clear_reload a lead or supervisor tile";
+const MISSING_DEPOSIT_REFUSAL = "refused: a team-lead may clear_reload another peer only with that peer's context_deposit_id";
+
+async function clearReloadRig() {
   const state = {
     sessions: [fakeSession("operator", { peerId: "operator-peer", supervisor: true })] as SessionRuntime[]
   };
   const deps = makeDeps(state);
   const srv = await startDeckControl(deps);
   servers.push(srv);
-
   const spawned = await call(srv, "deck_spawn_session", { name: "self", embedded_agent: "team-lead" });
   const self = (spawned.body.result as { session: { peer_id: string } }).session;
   const selfToken = deps.leadMcpCalls[0]!.token;
-  const other = srv.mintCaller("team-lead", TEAM_LEAD_DECK_TOOLS);
-  const runtimeLead = srv.mintCaller("team-lead", TEAM_LEAD_DECK_TOOLS);
+  const selfCallerId = deps.leadMcpCalls[0]!.callerId;
   state.sessions.push(
-    fakeSession("other-lead", { peerId: "other-lead-peer", mintedCallerId: other.callerId }),
-    fakeSession("runtime-self", { peerId: "runtime-self-peer", mintedCallerId: runtimeLead.callerId }),
-    fakeSession("ordinary-operator", { peerId: "ordinary-operator-peer" })
+    fakeSession("other-lead", { peerId: "other-lead-peer", lead: true }),
+    fakeSession("worker", { peerId: "worker-peer" }),
+    fakeSession("locked-worker", { peerId: "locked-worker-peer", locked: true }),
+    fakeSession("locked-lead", { peerId: "locked-lead-peer", lead: true, locked: true })
   );
+  const reload = (peerIds: string[], extra: Record<string, unknown> = {}, token: string = selfToken) =>
+    call(srv, "deck_run_directive", { directive: "clear_reload", peer_ids: peerIds, workstream: "night-shift", ...extra }, token);
+  return { state, deps, srv, self, selfCallerId, reload };
+}
 
-  const selfReload = await call(
-    srv,
-    "deck_run_directive",
-    { directive: "clear_reload", peer_ids: [self.peer_id], workstream: "night-shift" },
-    selfToken
-  );
-  expect(selfReload.status).toBe(200);
+test("a team-lead clear_reloads an ordinary peer with that peer's deposit", async () => {
+  const { deps, selfCallerId, reload } = await clearReloadRig();
+  const res = await reload(["worker-peer"], { context_deposit_id: CLEAR_RELOAD_DEPOSIT });
+  expect(res.status).toBe(200);
   expect(deps.directiveRuns).toEqual([
-    { directive: "clear_reload", peerIds: [self.peer_id], prompt: "night-shift", callerId: deps.leadMcpCalls[0]!.callerId }
+    { directive: "clear_reload", peerIds: ["worker-peer"], prompt: "night-shift", callerId: selfCallerId, contextDepositId: CLEAR_RELOAD_DEPOSIT }
   ]);
+});
 
-  const runtimeSelfReload = await call(
-    srv,
-    "deck_run_directive",
-    { directive: "clear_reload", peer_ids: ["runtime-self-peer"], workstream: "night-shift" },
-    runtimeLead.token
-  );
-  expect(runtimeSelfReload.status).toBe(200);
-  expect(deps.directiveRuns.at(-1)).toEqual({
-    directive: "clear_reload",
-    peerIds: ["runtime-self-peer"],
-    prompt: "night-shift",
-    callerId: runtimeLead.callerId
-  });
+test("a team-lead clear_reload of another peer without a deposit is refused and runs nothing", async () => {
+  const { deps, reload } = await clearReloadRig();
+  const res = await reload(["worker-peer"]);
+  expect(res.status).toBe(400);
+  expect(res.body.error).toBe(MISSING_DEPOSIT_REFUSAL);
+  expect(deps.directiveRuns).toEqual([]);
+});
 
-  for (const peerId of ["other-lead-peer", "operator-peer", "ordinary-operator-peer"]) {
-    const refused = await call(
-      srv,
-      "deck_run_directive",
-      { directive: "clear_reload", peer_ids: [peerId], workstream: "night-shift" },
-      selfToken
-    );
-    expect(refused.status, peerId).toBe(400);
-    expect(refused.body.error, peerId).toBe("refused: a team-lead may clear_reload only its own tile");
+test("a team-lead clear_reload of a locked peer is refused like a close, journaled, and checked before anything else", async () => {
+  const { deps, reload } = await clearReloadRig();
+  const locked = await reload(["locked-worker-peer"], { context_deposit_id: CLEAR_RELOAD_DEPOSIT });
+  expect(locked.status).toBe(400);
+  expect(locked.body.error).toBe("refused: peer verrouillé");
+  expect(deps.journalEntries).toContain("deck_run_directive refused: peer verrouillé (locked-worker)");
+
+  const lockedLeadWithoutDeposit = await reload(["locked-lead-peer"]);
+  expect(lockedLeadWithoutDeposit.body.error, "the lock is checked before the role and the deposit").toBe("refused: peer verrouillé");
+  expect(deps.directiveRuns).toEqual([]);
+});
+
+test("a team-lead cannot clear_reload another lead tile, with or without a deposit", async () => {
+  const { deps, reload } = await clearReloadRig();
+  const withDeposit = await reload(["other-lead-peer"], { context_deposit_id: CLEAR_RELOAD_DEPOSIT });
+  expect(withDeposit.status).toBe(400);
+  expect(withDeposit.body.error).toBe(LEAD_OR_SUPERVISOR_REFUSAL);
+  const withoutDeposit = await reload(["other-lead-peer"]);
+  expect(withoutDeposit.body.error, "the role is checked before the deposit").toBe(LEAD_OR_SUPERVISOR_REFUSAL);
+  expect(deps.directiveRuns).toEqual([]);
+});
+
+test("a team-lead cannot clear_reload a tile piloted by another runtime team-lead without the lead flag", async () => {
+  const { state, deps, srv, reload } = await clearReloadRig();
+  const otherLead = srv.mintCaller("team-lead", TEAM_LEAD_DECK_TOOLS);
+  state.sessions.push(fakeSession("runtime-other", { peerId: "runtime-other-peer", mintedCallerId: otherLead.callerId }));
+  const res = await reload(["runtime-other-peer"], { context_deposit_id: CLEAR_RELOAD_DEPOSIT });
+  expect(res.status).toBe(400);
+  expect(res.body.error).toBe(LEAD_OR_SUPERVISOR_REFUSAL);
+  expect(deps.directiveRuns).toEqual([]);
+});
+
+test("a team-lead cannot clear_reload the supervisor tile", async () => {
+  const { deps, reload } = await clearReloadRig();
+  const res = await reload(["operator-peer"], { context_deposit_id: CLEAR_RELOAD_DEPOSIT });
+  expect(res.status).toBe(400);
+  expect(res.body.error).toBe(LEAD_OR_SUPERVISOR_REFUSAL);
+  expect(deps.directiveRuns).toEqual([]);
+});
+
+test("a team-lead clear_reload naming several tiles or an unknown one is refused", async () => {
+  const { deps, self, reload } = await clearReloadRig();
+  for (const peerIds of [[self.peer_id, "worker-peer"], ["no-such-peer"]]) {
+    const res = await reload(peerIds);
+    expect(res.status, peerIds.join(",")).toBe(400);
+    expect(res.body.error, peerIds.join(",")).toBe("refused: a team-lead may clear_reload exactly one live tile");
   }
-  const multiTarget = await call(
-    srv,
-    "deck_run_directive",
-    { directive: "clear_reload", peer_ids: [self.peer_id, "other-lead-peer"], workstream: "night-shift" },
-    selfToken
-  );
-  expect(multiTarget.status).toBe(400);
-  expect(multiTarget.body.error).toBe("refused: a team-lead may clear_reload only its own tile");
-  expect(deps.directiveRuns).toHaveLength(2);
+  expect(deps.directiveRuns).toEqual([]);
+});
 
-  const depositOnOther = await call(
-    srv,
-    "deck_run_directive",
-    { directive: "clear_reload", peer_ids: ["other-lead-peer"], workstream: "night-shift", context_deposit_id: "0123456789abcdef" },
-    selfToken
-  );
-  expect(depositOnOther.status).toBe(400);
-  expect(depositOnOther.body.error).toBe("refused: a team-lead may clear_reload only its own tile");
-  expect(deps.directiveRuns).toHaveLength(2);
+test("a team-lead clear_reloads its own tile with or without a deposit", async () => {
+  const { state, deps, srv, self, selfCallerId, reload } = await clearReloadRig();
+  expect((await reload([self.peer_id])).status).toBe(200);
+  expect((await reload([self.peer_id], { context_deposit_id: CLEAR_RELOAD_DEPOSIT })).status).toBe(200);
+  const runtimeLead = srv.mintCaller("team-lead", TEAM_LEAD_DECK_TOOLS);
+  state.sessions.push(fakeSession("runtime-self", { peerId: "runtime-self-peer", mintedCallerId: runtimeLead.callerId }));
+  expect((await reload(["runtime-self-peer"], {}, runtimeLead.token)).status).toBe(200);
+  expect(deps.directiveRuns).toEqual([
+    { directive: "clear_reload", peerIds: [self.peer_id], prompt: "night-shift", callerId: selfCallerId },
+    { directive: "clear_reload", peerIds: [self.peer_id], prompt: "night-shift", callerId: selfCallerId, contextDepositId: CLEAR_RELOAD_DEPOSIT },
+    { directive: "clear_reload", peerIds: ["runtime-self-peer"], prompt: "night-shift", callerId: runtimeLead.callerId }
+  ]);
+});
 
-  const depositOnSelf = await call(
-    srv,
-    "deck_run_directive",
-    { directive: "clear_reload", peer_ids: [self.peer_id], workstream: "night-shift", context_deposit_id: "0123456789abcdef" },
-    selfToken
-  );
-  expect(depositOnSelf.status).toBe(200);
-  expect(deps.directiveRuns.at(-1)).toEqual({
-    directive: "clear_reload",
-    peerIds: [self.peer_id],
-    prompt: "night-shift",
-    callerId: deps.leadMcpCalls[0]!.callerId,
-    contextDepositId: "0123456789abcdef"
-  });
-
-  const supervisorReload = await call(srv, "deck_run_directive", {
-    directive: "clear_reload",
-    peer_ids: ["operator-peer"],
-    workstream: "night-shift"
-  });
-  expect(supervisorReload.status).toBe(200);
-  expect(deps.directiveRuns.at(-1)).toEqual({
-    directive: "clear_reload",
-    peerIds: ["operator-peer"],
-    prompt: "night-shift",
-    callerId: "supervisor"
-  });
+test("the supervisor clear_reload stays unrestricted", async () => {
+  const { deps, srv } = await clearReloadRig();
+  const res = await call(srv, "deck_run_directive", { directive: "clear_reload", peer_ids: ["operator-peer"], workstream: "night-shift" });
+  expect(res.status).toBe(200);
+  expect(deps.directiveRuns).toEqual([
+    { directive: "clear_reload", peerIds: ["operator-peer"], prompt: "night-shift", callerId: "supervisor" }
+  ]);
 });
 
 test("a restricted caller leaves the supervisor unreached while the unrestricted supervisor can target it", async () => {

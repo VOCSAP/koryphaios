@@ -206,7 +206,7 @@ const TOOLS = [
         context_deposit_id: {
           type: 'string',
           description:
-            'clear_reload with one peer_id only: the deposit_id of context that peer deposited, pushed back after the clear. On context_resume_unsupported nothing was cleared: do not retry; clear_reload without it, or ask the operator.'
+            'clear_reload with one peer_id only: the deposit_id that peer deposited, pushed back after the clear; a team-lead needs it for any peer but itself. On context_resume_unsupported nothing was cleared: do not retry; ask the operator.'
         }
       },
       required: ['directive', 'peer_ids']
