@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { scrubEnv, startBroker, stopBroker, type TestBroker } from "./_helper.ts";
-import { DEPOSIT_CAPABILITY_ENV, depositCapabilityHashFromEnv, hashCapability } from "../shared/context-buffer.ts";
+import { CONTEXT_RESUME_VERSION, DEPOSIT_CAPABILITY_ENV, depositCapabilityHashFromEnv, hashCapability } from "../shared/context-buffer.ts";
 
 const SERVER_PATH = resolve(import.meta.dir, "..", "server.ts");
 
@@ -172,6 +172,7 @@ test(
 
     expect(registerBodies).toHaveLength(2);
     for (const body of registerBodies) expect(body.deposit_capability_hash).toBe(hashCapability(cap));
+    for (const body of registerBodies) expect(body.context_resume_version).toBe(CONTEXT_RESUME_VERSION);
     const [boot, sw] = registerBodies.map((body) => new Set(Object.keys(body)));
     const onlyOne = [...boot!].filter((k) => !sw!.has(k)).concat([...sw!].filter((k) => !boot!.has(k)));
     expect(onlyOne.sort()).toEqual(["claude_cli_pid"]);

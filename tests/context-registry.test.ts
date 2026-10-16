@@ -6,12 +6,14 @@ import {
   CONTEXT_RESERVATION_RELEASE_MARGIN_MS,
   CONTEXT_RESERVATION_TTL_MS,
   CONTEXT_RESUME_ACK_TTL_MS,
+  CONTEXT_RESUME_VERSION,
   CONTEXT_DEPOSITS_PER_GROUP,
   CONTEXT_DEPOSITS_PER_OWNER,
   CONTEXT_DEPOSITS_TOTAL,
   DEPOSIT_CAPABILITY_ENV,
   hashCapability,
   isCapabilityShape,
+  isDepositIdShape,
   readGitFacts,
   validateDepositText,
   validateGitFacts,
@@ -47,9 +49,16 @@ function deposit(registry: ContextRegistry, capabilityHash: string, text = "next
   return registry.deposit({ capability_hash: capabilityHash, text, head: null, branch: null, git_root: null, replace });
 }
 
-function liveOwner(h: Harness, token: string, hash: string, peer_id = token, group_id = "g1"): void {
+function liveOwner(
+  h: Harness,
+  token: string,
+  hash: string,
+  peer_id = token,
+  group_id = "g1",
+  resumeVersion: number | null = CONTEXT_RESUME_VERSION
+): void {
   h.owners.set(token, { peer_id, group_id });
-  h.registry.onRegister(token, hash);
+  h.registry.onRegister(token, hash, resumeVersion);
 }
 
 /**
@@ -423,6 +432,36 @@ describe("ContextRegistry", () => {
     expect(deposit(h.registry, HASH_A, "replacement", deposited.deposit.deposit_id).ok).toBe(true);
   });
 
+  test("a reservation needs the owner's announced resume support, checked after ownership", () => {
+    const h = harness();
+    liveOwner(h, "tok-a", HASH_A, "peer-a", "g1", null);
+    liveOwner(h, "tok-b", HASH_B, "peer-b", "g1");
+    const lacking = depositId(deposit(h.registry, HASH_A, "lacking"));
+    const supported = depositId(deposit(h.registry, HASH_B, "supported"));
+
+    expect(h.registry.reserve(lacking, { peer_id: "peer-a", group_id: "g1" })).toEqual({ ok: false, reason: "owner_lacks_context_resume" });
+    expect(h.registry.reserve(lacking, { peer_id: "peer-b", group_id: "g1" })).toEqual({ ok: false, reason: "unavailable" });
+    expect(h.registry.reserve(lacking, { peer_id: "peer-a", group_id: "other" })).toEqual({ ok: false, reason: "unavailable" });
+    expect(h.registry.reserve("0123456789abcdef", { peer_id: "peer-a", group_id: "g1" })).toEqual({ ok: false, reason: "unavailable" });
+    expect(h.registry.reserve(supported, { peer_id: "peer-b", group_id: "g1" })).toMatchObject({ ok: true });
+    expect(h.registry.describe(lacking)?.state).toBe("held");
+  });
+
+  test("the resume announcement is per launch: a later register without a usable version withdraws it", () => {
+    const h = harness();
+    liveOwner(h, "tok-a", HASH_A, "peer-a");
+    const first = depositId(deposit(h.registry, HASH_A, "first"));
+    expect(h.registry.reserve(first, { peer_id: "peer-a", group_id: "g1" })).toMatchObject({ ok: true });
+
+    liveOwner(h, "tok-a", HASH_A, "peer-a", "g1", null);
+    const second = depositId(deposit(h.registry, HASH_A, "second"));
+    expect(h.registry.reserve(second, { peer_id: "peer-a", group_id: "g1" })).toEqual({ ok: false, reason: "owner_lacks_context_resume" });
+
+    liveOwner(h, "tok-a", HASH_A, "peer-a", "g1", 0);
+    const zero = depositId(deposit(h.registry, HASH_A, "zero"));
+    expect(h.registry.reserve(zero, { peer_id: "peer-a", group_id: "g1" })).toEqual({ ok: false, reason: "owner_lacks_context_resume" });
+  });
+
   test("a reservation refuses a different current owner and a re-registered deposit", () => {
     const h = harness();
     liveOwner(h, "tok-a", HASH_A, "peer-a");
@@ -552,13 +591,20 @@ describe("ContextRegistry", () => {
     });
   });
 
+  test("the deposit id leaf imports nothing and keeps the id shape the buffer re-exports", () => {
+    const src = require("node:fs").readFileSync(require("node:path").join(import.meta.dir, "..", "shared", "context-deposit-id.ts"), "utf8");
+    expect(new Bun.Transpiler({ loader: "ts" }).scanImports(src)).toEqual([]);
+    expect(isDepositIdShape("0123456789abcdef")).toBe(true);
+    for (const bad of ["0123456789ABCDEF", "0123456789abcde", "0123456789abcdef0", 12, null, undefined]) expect(isDepositIdShape(bad)).toBe(false);
+  });
+
   test("the registry and buffer modules import nothing that reaches a database or the network", () => {
     const transpiler = new Bun.Transpiler({ loader: "ts" });
-    for (const file of ["context-registry.ts", "context-buffer.ts", "context-timing.ts"]) {
+    for (const file of ["context-registry.ts", "context-buffer.ts", "context-timing.ts", "context-deposit-id.ts"]) {
       const src = require("node:fs").readFileSync(require("node:path").join(import.meta.dir, "..", "shared", file), "utf8");
       const imports = transpiler.scanImports(src).map((i) => i.path).sort();
       for (const path of imports) {
-        expect({ file, path, allowed: ["node:crypto", "./context-buffer.ts", "./context-timing.ts"].includes(path) }).toEqual({ file, path, allowed: true });
+        expect({ file, path, allowed: ["node:crypto", "./context-buffer.ts", "./context-timing.ts", "./context-deposit-id.ts"].includes(path) }).toEqual({ file, path, allowed: true });
       }
     }
   });

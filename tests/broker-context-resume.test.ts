@@ -3,7 +3,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { resolve } from "node:path";
-import { hashCapability } from "../shared/context-buffer.ts";
+import { CONTEXT_RESUME_VERSION, hashCapability } from "../shared/context-buffer.ts";
 import { deckAuthored, groupId, livePid, post, sha256Hex, startBroker, stopBroker, type TestBroker } from "./_helper.ts";
 
 let broker: TestBroker;
@@ -82,6 +82,7 @@ test("a cleared context resume delivers only before acknowledgement", async () =
     group_secret_hash: groupSecretHash,
     desk_session: randomUUID(),
     deposit_capability_hash: hashCapability(capability),
+    context_resume_version: CONTEXT_RESUME_VERSION,
   });
   expect(registered.status).toBe(200);
 

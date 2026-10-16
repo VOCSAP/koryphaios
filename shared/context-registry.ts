@@ -18,6 +18,7 @@ import {
 export class LaunchBindings {
   #byToken = new Map<string, { capability_hash: string; epoch: number }>();
   #byHash = new Map<string, Set<string>>();
+  #resumeVersions = new Map<string, number>();
   #lastEpoch = 0;
 
   bind(instanceToken: string, capabilityHash: string): number {
@@ -30,7 +31,16 @@ export class LaunchBindings {
     return epoch;
   }
 
+  setResumeVersion(instanceToken: string, version: number): void {
+    if (this.#byToken.has(instanceToken)) this.#resumeVersions.set(instanceToken, version);
+  }
+
+  resumeVersionOf(instanceToken: string): number | undefined {
+    return this.#resumeVersions.get(instanceToken);
+  }
+
   unbind(instanceToken: string): void {
+    this.#resumeVersions.delete(instanceToken);
     const previous = this.#byToken.get(instanceToken);
     if (!previous) return;
     this.#byToken.delete(instanceToken);
@@ -98,7 +108,7 @@ export type DepositOutcome =
 
 export type ReservationOutcome =
   | { ok: true; deposit: ContextDepositMeta; attempt_id: string }
-  | { ok: false; reason: "unavailable" };
+  | { ok: false; reason: "unavailable" | "owner_lacks_context_resume" };
 
 export type ReleaseOutcome =
   | { ok: true; deposit: ContextDepositMeta; attempt_id: string; released: boolean; resume_delivery: "pending" | "sent" | null }
@@ -168,11 +178,18 @@ export class ContextRegistry {
     return { ...this.#limits };
   }
 
-  /** Called after every successful /register; a null hash (absent, malformed, exempt group) leaves the token unbound. */
-  onRegister(instanceToken: string, capabilityHash: string | null): void {
+  /**
+   * Called after every successful /register; a null hash (absent, malformed,
+   * exempt group) leaves the token unbound. The resume version counts only
+   * when it is a positive safe integer on a bound token.
+   */
+  onRegister(instanceToken: string, capabilityHash: string | null, resumeVersion: number | null = null): void {
     this.#dropOwner(instanceToken);
     if (capabilityHash === null) this.#bindings.unbind(instanceToken);
     else this.#bindings.bind(instanceToken, capabilityHash);
+    if (resumeVersion !== null && Number.isSafeInteger(resumeVersion) && resumeVersion >= 1) {
+      this.#bindings.setResumeVersion(instanceToken, resumeVersion);
+    }
     this.#sweepDead();
   }
 
@@ -274,6 +291,9 @@ export class ContextRegistry {
     const owner = this.#ownerIfActive(entry.owner_instance_token);
     if (!owner || owner.peer_id !== target.peer_id || owner.group_id !== target.group_id) {
       return { ok: false, reason: "unavailable" };
+    }
+    if (this.#bindings.resumeVersionOf(entry.owner_instance_token) === undefined) {
+      return { ok: false, reason: "owner_lacks_context_resume" };
     }
     const attempt_id = this.#newAttemptId();
     entry.state = "reserved";

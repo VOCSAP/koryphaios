@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+export { isDepositIdShape } from "./context-deposit-id.ts";
 export {
   CONTEXT_CLEAR_IDLE_WAIT_MS,
   CONTEXT_CLEAR_ROTATION_WAIT_MS,
@@ -31,9 +32,11 @@ export const CONTEXT_DEPOSITS_PER_GROUP = 96;
 export const CONTEXT_DEPOSITS_TOTAL = 256;
 export const CONTEXT_RESUME_ACK_TTL_MS = 300_000;
 
+/** Advertised by the broker on /health and announced by the server at /register: both must support context resume. */
+export const CONTEXT_RESUME_VERSION = 1;
+
 const HEX64 = /^[0-9a-f]{64}$/;
 const SHA = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
-const DEPOSIT_ID = /^[0-9a-f]{16}$/;
 const ATTEMPT_ID = /^[0-9a-f]{32}$/;
 const MAX_BRANCH_CHARS = 255;
 const MAX_GIT_ROOT_CHARS = 4096;
@@ -44,10 +47,6 @@ export function isCapabilityShape(value: unknown): value is string {
 
 export function isCapabilityHashShape(value: unknown): value is string {
   return typeof value === "string" && HEX64.test(value);
-}
-
-export function isDepositIdShape(value: unknown): value is string {
-  return typeof value === "string" && DEPOSIT_ID.test(value);
 }
 
 export function isAttemptIdShape(value: unknown): value is string {

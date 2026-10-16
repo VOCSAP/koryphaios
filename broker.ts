@@ -25,6 +25,7 @@ import { projectKeyCaseRefusal, validateProjectKey } from "./shared/project-key.
 import { roadmapTitleRefusal } from "./shared/roadmap-title.ts";
 import {
   CONTEXT_DEPOSIT_MAX_BODY_BYTES,
+  CONTEXT_RESUME_VERSION,
   isAttemptIdShape,
   isCapabilityHashShape,
   isCapabilityShape,
@@ -2727,7 +2728,8 @@ function bindDepositCapability(body: RegisterRequest, instanceToken: string): vo
     log.warn("register: malformed deposit_capability_hash, launch left without a deposit capability");
   }
   const hash = !isTofuExemptGroup(body.group_id) && isCapabilityHashShape(declared) ? declared : null;
-  contextRegistry.onRegister(instanceToken, hash);
+  const resume: unknown = body.context_resume_version;
+  contextRegistry.onRegister(instanceToken, hash, typeof resume === "number" ? resume : null);
 }
 
 const DEPOSIT_REFUSAL_TEXT: Record<ContextDepositRefusal["reason"], string> = {
@@ -11744,6 +11746,7 @@ const server = Bun.serve<WsData>({
           .get() as { n: number }).n;
         return Response.json({
           status: "ok",
+          context_resume_version: CONTEXT_RESUME_VERSION,
           operator_trust_version: OPERATOR_TRUST_VERSION,
           operator_trust_state: operatorTrustSnapshot.state,
           peers: total,

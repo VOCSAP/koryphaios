@@ -149,6 +149,12 @@ export interface RegisterRequest {
    * refused while two active peers share this hash.
    */
   deposit_capability_hash?: string;
+  /**
+   * Context resume protocol version this server speaks. A self-declaration
+   * kept in RAM next to the capability binding, never stored or published; a
+   * context reserve is refused while the owner has not announced it.
+   */
+  context_resume_version?: number;
 }
 
 export interface RegisterResponse {

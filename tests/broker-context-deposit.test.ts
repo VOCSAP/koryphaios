@@ -9,6 +9,7 @@ import {
   CONTEXT_DEPOSIT_MAX_BODY_BYTES,
   CONTEXT_DEPOSIT_MAX_CHARS,
   CONTEXT_DEPOSITS_PER_OWNER,
+  CONTEXT_RESUME_VERSION,
   hashCapability,
 } from "../shared/context-buffer.ts";
 
@@ -66,10 +67,19 @@ async function call(b: TestBroker, path: string, body: unknown, bearer?: string)
 async function register(
   b: TestBroker,
   group: Group | "default",
-  opts: { deskSession?: string; capability?: string | null; hash?: unknown; groupSecretHash?: string | null; pid?: number; bearer?: string } = {}
+  opts: {
+    deskSession?: string;
+    capability?: string | null;
+    hash?: unknown;
+    groupSecretHash?: string | null;
+    pid?: number;
+    bearer?: string;
+    resume?: unknown;
+  } = {}
 ): Promise<Peer> {
   const hash =
     "hash" in opts ? opts.hash : opts.capability === undefined || opts.capability === null ? undefined : hashCapability(opts.capability);
+  const resume = "resume" in opts ? opts.resume : CONTEXT_RESUME_VERSION;
   const r = await call(
     b,
     "/register",
@@ -86,6 +96,7 @@ async function register(
       group_secret_hash: group === "default" ? null : "groupSecretHash" in opts ? opts.groupSecretHash : group.secretHash,
       desk_session: opts.deskSession ?? randomUUID(),
       ...(hash === undefined ? {} : { deposit_capability_hash: hash }),
+      ...(resume === undefined ? {} : { context_resume_version: resume }),
     },
     opts.bearer
   );
@@ -624,6 +635,87 @@ describe("POST /context/transaction on a real broker", () => {
     expect(replaced).toEqual(wrongOwner);
     expect(staleEpoch).toEqual(wrongOwner);
     expect(staleEpoch.text).not.toContain("owner-canary");
+  });
+});
+
+describe("context resume compatibility", () => {
+  test("GET /health advertises the resume version as a number", async () => {
+    const health = (await (await fetch(`${broker.url}/health`)).json()) as Record<string, unknown>;
+    expect(health.context_resume_version).toBe(CONTEXT_RESUME_VERSION);
+    expect(typeof health.context_resume_version).toBe("number");
+  });
+
+  test("reserve refuses an owner whose server did not announce resume support, and any valid announcement lets it through", async () => {
+    const invalid: unknown[] = [undefined, 0, -1, 1.5, "1", null, true, Number.MAX_SAFE_INTEGER + 2];
+    for (const resume of invalid) {
+      const cap = newCapability();
+      const peer = await register(broker, G, { capability: cap, resume });
+      const deposited = await deposit(broker, cap, "resume-lacking-canary");
+      const reply = await transaction(broker, G, peer.peer_id, deposited.body.deposit_id as string, "reserve");
+      expect({ resume, reply: { status: reply.status, body: reply.body } }).toEqual({
+        resume,
+        reply: { status: 409, body: { ok: false, reason: "owner_lacks_context_resume" } },
+      });
+      expect(reply.text).not.toContain("resume-lacking-canary");
+    }
+    for (const resume of [1, 2]) {
+      const cap = newCapability();
+      const peer = await register(broker, G, { capability: cap, resume });
+      const deposited = await deposit(broker, cap, "resume-ok-canary");
+      expect(await transaction(broker, G, peer.peer_id, deposited.body.deposit_id as string, "reserve")).toMatchObject({
+        status: 200,
+        body: { ok: true, state: "reserved" },
+      });
+    }
+  });
+
+  test("the compatibility refusal comes after the operator, secret and ownership guards, so it is no oracle", async () => {
+    const capLacking = newCapability();
+    const lacking = await register(broker, G, { capability: capLacking, resume: undefined });
+    const other = await register(broker, G, { capability: newCapability() });
+    const depositId = (await deposit(broker, capLacking, "oracle-canary")).body.deposit_id as string;
+
+    expect(await transaction(broker, G, lacking.peer_id, depositId, "reserve", undefined, false)).toMatchObject({ status: 401 });
+    const wrongSecret = { ...G, secretHash: randomBytes(32).toString("hex") };
+    expect(await transaction(broker, wrongSecret, lacking.peer_id, depositId, "reserve")).toMatchObject({ status: 401 });
+    const wrongOwner = await transaction(broker, G, other.peer_id, depositId, "reserve");
+    const absent = await transaction(broker, G, lacking.peer_id, "0123456789abcdef", "reserve");
+    expect(wrongOwner).toMatchObject({ status: 409, body: { ok: false, reason: "unavailable" } });
+    expect(absent).toEqual(wrongOwner);
+    expect(await transaction(broker, G, lacking.peer_id, depositId, "reserve")).toMatchObject({
+      status: 409,
+      body: { ok: false, reason: "owner_lacks_context_resume" },
+    });
+  });
+
+  test("a re-register without the field withdraws an earlier announcement", async () => {
+    const desk = randomUUID();
+    const cap = newCapability();
+    const first = await register(broker, G, { deskSession: desk, capability: cap });
+    await call(broker, "/disconnect", { instance_token: first.instance_token });
+    const again = await register(broker, G, { deskSession: desk, capability: cap, resume: undefined });
+    const deposited = await deposit(broker, cap, "withdrawn-canary");
+    expect(await transaction(broker, G, again.peer_id, deposited.body.deposit_id as string, "reserve")).toMatchObject({
+      status: 409,
+      body: { ok: false, reason: "owner_lacks_context_resume" },
+    });
+  });
+
+  test("the announcement is never published: list_peers, admin and register answers do not carry it", async () => {
+    const observer = await register(broker, G, { capability: newCapability() });
+    const announcing = await register(broker, G, { capability: newCapability() });
+    const listed = await call(broker, "/list-peers", { scope: "machine", instance_token: observer.instance_token, cwd: CWD, git_root: null });
+    expect(listed.status).toBe(200);
+    expect(listed.text).toContain(announcing.peer_id);
+    expect(listed.text).not.toContain("context_resume");
+    const admin = await (await fetch(`${broker.url}/admin/peers?include_dormant=1`)).text();
+    expect(admin).not.toContain("context_resume");
+    const registered = await call(broker, "/register", {
+      pid: livePid(), cwd: CWD, git_root: null, tty: null, summary: "", host: HOST, client_pid: 1, project_key: null,
+      group_id: G.id, group_secret_hash: G.secretHash, desk_session: randomUUID(),
+      deposit_capability_hash: hashCapability(newCapability()), context_resume_version: CONTEXT_RESUME_VERSION,
+    });
+    expect(registered.text).not.toContain("context_resume");
   });
 });
 

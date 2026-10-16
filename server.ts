@@ -87,7 +87,7 @@ import type {
   ApprovalAddResponse,
   ApprovalWaitResponse,
 } from "./shared/types.ts";
-import { CONTEXT_RESUME_ACK_TTL_MS, depositCapabilityHashFromEnv } from "./shared/context-buffer.ts";
+import { CONTEXT_RESUME_ACK_TTL_MS, CONTEXT_RESUME_VERSION, depositCapabilityHashFromEnv } from "./shared/context-buffer.ts";
 import {
   buildAuthProof,
   loadSessionApprovalCredential,
@@ -2154,6 +2154,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
           desk_session: process.env.CLAUDE_PEERS_DESK_SESSION,
           cc_session_id: process.env.CLAUDE_CODE_SESSION_ID,
           deposit_capability_hash: depositCapabilityHashFromEnv(process.env),
+          context_resume_version: CONTEXT_RESUME_VERSION,
         });
         myInstanceToken = reg.instance_token;
         myPeerId = reg.peer_id;
@@ -2632,6 +2633,7 @@ async function main() {
     desk_session: process.env.CLAUDE_PEERS_DESK_SESSION,
     cc_session_id: process.env.CLAUDE_CODE_SESSION_ID,
     deposit_capability_hash: depositCapabilityHashFromEnv(process.env),
+    context_resume_version: CONTEXT_RESUME_VERSION,
   });
   myInstanceToken = reg.instance_token;
   myPeerId = reg.peer_id;
