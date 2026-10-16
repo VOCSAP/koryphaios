@@ -181,6 +181,29 @@ Electron + React 19 + zustand, xterm terminals over node-pty. Sources in
   deciding it. Hooks fail CLOSED: no credential, broker down, an unusable
   answer or a spent budget yields no decision at all (exit 0, no stdout),
   leaving the native dialog up.
+- **Operator identity and broker trust**: one Ed25519 identity per OS user,
+  `operator.json` in the app-state dir (`operator-identity.ts`), shared by
+  approval arming and roadmap signing. It is created once and published by an
+  exclusive link, so two processes sharing one `userData` keep the same key; an
+  existing file that does not decrypt or parse yields `identity-unreadable`,
+  never a new key. Creating it authorises nothing: its public key must be
+  listed in the broker's `operator-trust.json` (`bun cli.ts operator-trust
+  export` prints it; broker side in `ARCHITECTURE.md`, "Operator trust policy").
+  `ApprovalRuntime.arm()` runs `checkOperatorTrust` (`/health` protocol version
+  and state, then a signed `POST /operator/check`) before minting any session
+  token, and only `compatible` arms. The verdict reaches the renderer as
+  `operator-trust:status` and `StatusBanner` shows `unconfigured`,
+  `not-trusted` (with the key fingerprint), `incompatible`,
+  `identity-unreadable`, `invalid` or `unreachable`, below broker-down,
+  conflicts and refused pushes. A context clear (`/clear` with a deposit,
+  `runClearReloadInTurn`) asks `ApprovalRuntime.checkTrustNow()` afresh, before
+  reserving the deposit and before any keystroke: arm's verdict does not
+  survive a broker respawned or adopted after an outage. Anything but
+  `compatible` refuses the clear through `reportError`. A failed request
+  publishes nothing, so a transient outage never pins the banner; the other
+  states are published because they hold until the broker restarts. `clear` and
+  `clear_reload` without a deposit stay outside this lock: they use no broker
+  authority and put no deposit at stake.
 - **Supervisor (Home rail)**: a Claude session piloting the app through a
   loopback deck-control endpoint + dependency-free MCP stdio bridge, injected
   only into the supervisor via a generated `--mcp-config`.
