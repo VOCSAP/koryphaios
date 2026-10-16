@@ -142,9 +142,6 @@ const BROKER_TOKEN = config.broker_token ?? null;
 const HEARTBEAT_INTERVAL_MS = 15_000;
 const WS_RECONNECT_INITIAL_MS = 1000;
 const WS_RECONNECT_MAX_MS = 30_000;
-// Fallback poll interval used when the WebSocket connection is down.
-// Does NOT mark messages as delivered -- only check_messages does that.
-const POLL_FALLBACK_INTERVAL_MS = parseInt(process.env.CLAUDE_PEERS_POLL_FALLBACK_SEC ?? "5", 10) * 1000;
 const BROKER_SCRIPT = join(dirname(fileURLToPath(import.meta.url)), "broker.ts");
 
 // --- Broker HTTP communication ---
@@ -306,6 +303,26 @@ const contextResumeKeyTtlRaw = process.env.CLAUDE_PEERS_CONTEXT_RESUME_KEY_TTL_M
 const CONTEXT_RESUME_KEY_TTL_MS = contextResumeKeyTtlMs(contextResumeKeyTtlRaw);
 if (contextResumeKeyTtlRaw !== undefined && String(CONTEXT_RESUME_KEY_TTL_MS) !== contextResumeKeyTtlRaw) {
   logError("CLAUDE_PEERS_CONTEXT_RESUME_KEY_TTL_MS invalid, using default");
+}
+
+const POLL_FALLBACK_DEFAULT_MS = 5_000;
+// A timer delay above 2^31-1 ms overflows and fires at once.
+const POLL_FALLBACK_MAX_SEC = Math.floor(2_147_483_647 / 1000);
+
+/** Accepts only a canonical decimal integer of seconds in [1, POLL_FALLBACK_MAX_SEC]; anything else is the default, in ms. */
+export function pollFallbackIntervalMs(raw: string | undefined): number {
+  if (raw === undefined) return POLL_FALLBACK_DEFAULT_MS;
+  const sec = Number(raw);
+  const valid = String(sec) === raw && Number.isSafeInteger(sec) && sec >= 1 && sec <= POLL_FALLBACK_MAX_SEC;
+  return valid ? sec * 1000 : POLL_FALLBACK_DEFAULT_MS;
+}
+
+// Fallback poll interval used when the WebSocket connection is down.
+// Does NOT mark messages as delivered -- only check_messages does that.
+const pollFallbackRaw = process.env.CLAUDE_PEERS_POLL_FALLBACK_SEC;
+const POLL_FALLBACK_INTERVAL_MS = pollFallbackIntervalMs(pollFallbackRaw);
+if (pollFallbackRaw !== undefined && String(POLL_FALLBACK_INTERVAL_MS / 1000) !== pollFallbackRaw) {
+  logError("CLAUDE_PEERS_POLL_FALLBACK_SEC invalid, using default");
 }
 
 // A final acknowledgement keeps the key for the broker's own purge window: a

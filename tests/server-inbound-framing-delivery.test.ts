@@ -403,7 +403,7 @@ describe("the team-lead directive note reaches team-lead recipients", () => {
     const sender = await spawnPeer(b);
     const recipient = await spawnPeer(b, {
       CLAUDE_PEERS_ROLE: "team-lead",
-      CLAUDE_PEERS_POLL_FALLBACK_SEC: "0",
+      CLAUDE_PEERS_POLL_FALLBACK_SEC: "1",
     });
     const recipientId = await peerIdOf(recipient);
     await peerIdOf(sender);

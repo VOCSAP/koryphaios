@@ -373,7 +373,7 @@ describe("a broker that answers ok without a task is an error, never a tracked t
 
 describe("the delegator reminder survives every other arrival path", () => {
   test("fallback poll", async () => {
-    const p = await pair({ CLAUDE_PEERS_POLL_FALLBACK_SEC: "0" });
+    const p = await pair({ CLAUDE_PEERS_POLL_FALLBACK_SEC: "1" });
     const taskId = await delegate(p, "Check the fallback path.");
     await killAndRestartBroker(p.broker);
     const ack = "fallback: ACK";
@@ -385,7 +385,7 @@ describe("the delegator reminder survives every other arrival path", () => {
   }, 90_000);
 
   test("wait_for_message whose waiter is resolved by the fallback poll", async () => {
-    const p = await pair({ CLAUDE_PEERS_POLL_FALLBACK_SEC: "0" });
+    const p = await pair({ CLAUDE_PEERS_POLL_FALLBACK_SEC: "1" });
     const taskId = await delegate(p, "Check the polled waiter.");
     // Same window as the peek test below: the WS stays down while the poll runs.
     await killAndRestartBroker(p.broker, 3500);

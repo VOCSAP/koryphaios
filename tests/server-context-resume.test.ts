@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { Database } from "bun:sqlite";
 import { CONTEXT_RESUME_ACK_TTL_MS, hashCapability } from "../shared/context-buffer.ts";
-import { contextResumeKeyTtlMs } from "../server.ts";
+import { contextResumeKeyTtlMs, pollFallbackIntervalMs } from "../server.ts";
 import { deckAuthored, groupId, post, scrubEnv, sha256Hex, startBroker, stopBroker, type TestBroker } from "./_helper.ts";
 
 const SERVER_PATH = resolve(import.meta.dir, "..", "server.ts");
@@ -184,6 +184,11 @@ async function waitForLog(stderr: { text: string }, expected: string): Promise<v
   if (!stderr.text.includes(expected)) throw new Error(`missing log: ${expected}`);
 }
 
+function serverLogs(stderr: { text: string }, logDir: string): { stderr: string; file: string } {
+  const file = existsSync(logDir) ? readdirSync(logDir).map((name) => readFileSync(join(logDir, name), "utf8")).join("\n") : "";
+  return { stderr: stderr.text, file };
+}
+
 async function noContextResume(broker: TestBroker, instanceToken: string): Promise<void> {
   const frames: Array<Record<string, unknown>> = [];
   const ws = new WebSocket(broker.wsUrl);
@@ -225,11 +230,12 @@ for (const [label, value, expectsLog] of [["invalid", "1500abc", true], ["valid"
     brokers.push(broker);
     const settingsDir = mkdtempSync(join(tmpdir(), "cp-context-ttl-env-"));
     dirs.push(settingsDir);
+    const logDir = join(settingsDir, "logs");
     const session = await launchServer(
       broker.url,
       settingsDir,
       randomBytes(32).toString("hex"),
-      join(settingsDir, "logs"),
+      logDir,
       { CLAUDE_PEERS_CONTEXT_RESUME_KEY_TTL_MS: value }
     );
     session.send({
@@ -246,7 +252,65 @@ for (const [label, value, expectsLog] of [["invalid", "1500abc", true], ["valid"
     await Bun.sleep(300);
     session.proc.kill();
     await session.proc.exited;
-    expect(session.stderr.text.includes(INVALID_TTL_LOG)).toBe(expectsLog);
+    const logs = serverLogs(session.stderr, logDir);
+    expect(logs.file.length, "the server journal must exist for the file assertion to mean anything").toBeGreaterThan(0);
+    expect({ stderr: logs.stderr.includes(INVALID_TTL_LOG), file: logs.file.includes(INVALID_TTL_LOG) }).toEqual({
+      stderr: expectsLog,
+      file: expectsLog,
+    });
+  }, 40_000);
+}
+
+test("the fallback poll interval is the 5 s default when absent and for every value outside [1, 2147483] s", () => {
+  expect(pollFallbackIntervalMs(undefined)).toBe(5_000);
+  for (const raw of ["abc", "", "0", "-5", "2147484", "9999999999", "5abc", "1e3", "05", " 5", "2.5", "NaN", "Infinity"]) {
+    expect({ raw, ms: pollFallbackIntervalMs(raw) }).toEqual({ raw, ms: 5_000 });
+  }
+});
+
+test("the fallback poll interval accepts the whole closed range", () => {
+  expect(pollFallbackIntervalMs("1")).toBe(1_000);
+  expect(pollFallbackIntervalMs("5")).toBe(5_000);
+  expect(pollFallbackIntervalMs("3600")).toBe(3_600_000);
+  expect(pollFallbackIntervalMs("2147483")).toBe(2_147_483_000);
+});
+
+const INVALID_POLL_LOG = "CLAUDE_PEERS_POLL_FALLBACK_SEC invalid, using default";
+
+for (const [label, value, expectsLog] of [["invalid", "abc", true], ["invalid", "0", true], ["valid", "5", false]] as const) {
+  test(`a ${label} fallback poll interval "${value}" ${expectsLog ? "is reported" : "is silent"} at startup`, async () => {
+    const broker = await startBroker();
+    brokers.push(broker);
+    const settingsDir = mkdtempSync(join(tmpdir(), "cp-poll-fallback-env-"));
+    dirs.push(settingsDir);
+    const logDir = join(settingsDir, "logs");
+    const session = await launchServer(
+      broker.url,
+      settingsDir,
+      randomBytes(32).toString("hex"),
+      logDir,
+      { CLAUDE_PEERS_POLL_FALLBACK_SEC: value }
+    );
+    session.send({
+      jsonrpc: "2.0",
+      id: 0,
+      method: "initialize",
+      params: {
+        protocolVersion: "2025-11-25",
+        capabilities: { roots: {}, elicitation: {} },
+        clientInfo: { name: "test-harness", version: "0.0.1" },
+      },
+    });
+    await session.read(0);
+    await Bun.sleep(300);
+    session.proc.kill();
+    await session.proc.exited;
+    const logs = serverLogs(session.stderr, logDir);
+    expect(logs.file.length, "the server journal must exist for the file assertion to mean anything").toBeGreaterThan(0);
+    expect({ stderr: logs.stderr.includes(INVALID_POLL_LOG), file: logs.file.includes(INVALID_POLL_LOG) }).toEqual({
+      stderr: expectsLog,
+      file: expectsLog,
+    });
   }, 40_000);
 }
 
@@ -321,6 +385,17 @@ test("a context resume is framed to MCP, acknowledged after notification, and ab
     (existsSync(logDir) ? readdirSync(logDir).map((file) => readFileSync(join(logDir, file), "utf8")).join("\n") : "");
   expect(logs).not.toContain(canary);
   expect(logs).not.toContain(hashCapability(capability));
+
+  const journal = serverLogs(session.stderr, logDir);
+  for (const [sink, text] of Object.entries(journal)) {
+    const resumeLines = text.split("\n").filter((line) => line.includes("Context resume notified"));
+    expect({ sink, lines: resumeLines.length }, "every sink must record the C1 limit once the notification resolved").toEqual({ sink, lines: 1 });
+    const [line] = resumeLines;
+    expect(line, `${sink}: the line states the limit`).toContain("model read is not guaranteed");
+    expect(line, `${sink}: the line states the loss is possible`).toContain("silent loss is possible");
+    expect(line, `${sink}: the line states the purge follows the technical acknowledgement`).toContain("technical acknowledgement");
+    expect(line, `${sink}: the line never claims the model read the context`).not.toMatch(/model (?:has |did )?(?:read|receiv\w*)(?! is not)|restored|delivered to the model/i);
+  }
 }, 40_000);
 
 test("a replayed context resume sends a second acknowledgement without a second notification", async () => {
