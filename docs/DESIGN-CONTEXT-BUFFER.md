@@ -215,7 +215,7 @@ Refus (corps `{ "error": "<phrase>", "reason": "<code>", ... }`) :
 
 Le texte, la capacité et ses empreintes n'apparaissent dans AUCUN message d'erreur ni journal.
 
-Interface interne laissée à L2 et L3 (module, pas route) : `describe(deposit_id)` qui rend les métadonnées d'un dépôt vivant sans le texte, et un accès `takeForPush(owner)` réservé au futur chemin de push. Aucune route Deck n'est ajoutée en L1.
+Interface interne de L2 et L3 (module, pas route) : `describe(deposit_id)` rend les métadonnées d'un dépôt vivant sans le texte ; seul `takeReleasedForResume(deposit_id, released_attempt_id)` donne accès au texte, pour la reprise corrélée et non acquittée d'un dépôt vivant. L'accès large `takeForPush` est supprimé. Aucune route Deck n'est ajoutée en L1.
 
 ## 10. Liaison côté server.ts
 
@@ -338,23 +338,90 @@ Garde-fous de couverture (`CLAUDE.md`, « A guard needs its COVERAGE audited »)
 - **M3.** Lecture de `--input -` et fins de ligne CRLF sous Windows.
 - **M4 (coût).** Taille réelle du pire dépôt (plafond de points de code d'un texte très astral) dans le registre, pour confirmer que les quotas §8.4 tiennent en quelques mégaoctets.
 
-## 17. Contraintes que L1 laisse à L2 et L3
+## 17. Contrat de reprise L3 : déclenchement, transport et garantie
 
-Ce que L1 fige et que L2 et L3 doivent respecter :
+**Statut : contrat de conception ratifié sur B2 et C1, pas constat de livraison.** Décision opérateur transmise par le lead le 2026-10-16 : **C1 seul**, push sans outil de lecture, ACK technique puis purge à +300 s ; C3 est rejetée. B2 (rejeu à la reconnexion WS tant que le propriétaire reste actif) est ratifiée au titre de la décision opérateur du 2026-10-12 : garde jusqu'à la déconnexion, sous quotas, sans TTL avant ACK. **Garantie limitée :** une perte silencieuse entre notification et modèle reste possible ; cette limite doit être écrite au journal sans contenu du dépôt, jamais présentée comme « modèle a lu ». Le journal documente la limite, il ne détecte pas une perte que le protocole ne signale pas.
 
-1. **Le propriétaire est `(owner_instance_token, epoch)`.** L2 compare le pair visé par la directive au propriétaire du dépôt en résolvant d'abord l'OBJET (le dépôt), puis « ce pair peut-il agir sur lui ». Jamais « à quel groupe appartient l'appelant ».
-2. **Accès aux métadonnées seulement par le module.** L2 ajoute sa route d'inspection (existence, taille, `deposited_at`, `head_at_deposit`, état, sans texte), qui exige le credential opérateur du Deck et le secret du groupe. Le Deck ne reçoit jamais le texte.
-3. **`state: "held"` est le seul état de L1.** L2 ajoute `reserved` (avec `attempt_id`) pour que ni un `--replace`, ni un balayage de quota n'enlève un dépôt entre l'acceptation de la directive et l'injection du `/clear`. La règle « `replace` n'agit que sur `held` » est écrite maintenant. Libération idempotente par `attempt_id`. La purge à la déconnexion ou à la dormance prime : un dépôt réservé est supprimé, et L2b refuse alors proprement le `/clear`.
-4. **Signal d'injection réelle.** Le signal retenu par la mesure est une NOUVELLE rotation `SessionStart source=clear` (nouveau `session_id`) écrite par `desk-backchannel-hook` (`desktop/hooks/desk-backchannel-hook.ts:56-71`). `pty.write` ne prouve rien. Aucun SessionEnd n'est câblé et `/clear` ne déconnecte pas le pair, donc l'époque du dépôt survit au `/clear` : c'est ce qui rend la reprise possible.
-5. **Push L3 : au seul propriétaire, par `wsPool.get(owner_instance_token)`** (`broker.ts:11297-11298`), jamais par `peer_id`, hors de la file de messages persistante (`messages` est en SQLite et répliquée). Trame dédiée de type `context_resume`, à ajouter à l'union `WsFrame` (`shared/types.ts:1553`, aujourd'hui `WsMessageFrame` seul). Le texte n'est jamais logué : `server.ts:403` logue aujourd'hui les 80 premiers caractères des messages ordinaires, le chemin du push doit y échapper.
-6. **ACK technique** : émis par server.ts une fois la notification MCP résolue ; le broker le valide pour `(owner, deposit_id, attempt_id)`. Premier ACK : suppression à +300 s, sans prolongation par un ACK ultérieur. Il faut donc un champ d'échéance dans l'entrée et que le balayage de L1 l'honore ; la purge à la déconnexion reste prioritaire.
-7. **Cadrage du contenu poussé** : message de canal « contexte sauvegardé par vous le `<deposited_at>`, `head_at_deposit` = `<sha>`, état antérieur à ce moment, revérifier git avant d'agir », jamais une consigne opérateur, jamais frappé dans le PTY (§7, classe 4).
-8. **Dépôt inexistant au moment de la directive** (broker redémarré, pair relancé, dépôt remplacé) : refus explicite de la directive, jamais un `/clear` sans reprise. C'est le seul garde-fou contre le « contexte vide rechargé en silence » que l'opérateur a écarté en refusant tout TTL.
-9. **Teams et imbriqués** : le cas « contesté » peut bloquer le dépôt d'un lead qui a des coéquipiers vivants. La directive L2 doit refuser proprement dans ce cas.
+### Contraintes communes (numérotation conservée)
+
+1. **Le propriétaire est `(owner_instance_token, epoch)`.** Résoudre d'abord l'OBJET (le dépôt), puis vérifier le droit sur cet objet. Le `peer_id` sert à désigner la cible de la directive, jamais à router le texte, acquitter ou conserver un dépôt.
+2. **Le Deck ne reçoit que les métadonnées.** La transaction exige le credential opérateur signé et le secret du groupe ; aucune réponse de transaction, erreur ou journal ne contient le texte. Aucun outil de lecture ni chemin pull n'est ajouté.
+3. **Réservation et reprise sont deux protections différentes.** `held` est remplaçable ; `reserved` protège la tentative avant la barrière. L3 ajoute `resuming`, non remplaçable et non réservable, pour protéger la tentative libérée avec succès jusqu'à sa purge. Le TTL de réservation ne s'applique pas à `resuming`. La purge du propriétaire (fin, dormance, changement d'époque) reste prioritaire ; la seule perte de WS n'est pas une fin de propriétaire (§17.B).
+4. **Barrière de clear.** Le Deck doit observer la nouvelle rotation `SessionStart source=clear`, corrélée à la tuile et aux identifiants de session de référence. **DÉDUIT**, `desktop/src/main/directive-run.ts:98-109` : la baseline est lue avant l'injection et `waitForClearBackchannel` est attendu après ; le broker ne reçoit pas ce résultat dans le release actuel (`:118`). L3 transporte cette attestation par `cleared`, pas par `pty.write` ni par un délai.
+5. **Transport dédié au seul propriétaire.** `wsPool.get(owner_instance_token)` est le modèle de routage, pas `pushPeerMessage` : **DÉDUIT**, `broker.ts:3638-3653` et `:3668-3680` utilisent le jeton mais fabriquent des messages ordinaires. Ajouter une variante `context_resume` à `WsFrame` (**DÉDUIT**, `shared/types.ts:1560` ne contient que `WsMessageFrame`). La trame porte `deposit_id`, `attempt_id` (la tentative libérée), les métadonnées de cadrage et le texte, jamais le jeton. Aucun passage dans `messages`, la réplication, le fallback de messages ou leurs logs. **DÉDUIT**, `server.ts:405` logue les 80 premiers caractères d'un message ordinaire : une branche dédiée doit l'éviter, y compris en erreur.
+6. **ACK technique, pas ACK de lecture.** Après résolution de `await mcp.notification`, server.ts envoie un ACK authentifié par son `instance_token`, portant `deposit_id` et `attempt_id`. Le broker résout le dépôt puis vérifie propriétaire actif, époque courante, état `resuming`, succès de la libération et égalité avec **`released_attempt_id`**, jamais avec `attempt_id` vidé au release. Aucun ACK inconnu, étranger, précoce ou d'une ancienne tentative ne modifie le registre. Contrat C1 ratifié : premier ACK accepté à `t0`, purge à `t0 + 300 s`, échéance immuable malgré doublons/rejeux ; avant le premier ACK, pas de TTL du dépôt. Cet ACK autorise la purge même sans preuve de lecture modèle ; la limite de perte silencieuse acceptée figure au journal (§17.C).
+7. **Cadrage du texte.** Message de canal « contexte sauvegardé par vous le `<deposited_at>`, `head_at_deposit` = `<sha>`, état antérieur à ce moment, revérifier git avant d'agir », jamais une consigne opérateur, jamais du texte frappé dans le PTY.
+8. **Entrée agent et refus avant tout clear.** Le nom canonique agent-facing est **`context_deposit_id`** (snake_case comme `peer_ids`/`workstream`). Dans **`parseRunDirectiveArgs` côté Deck**, la présence des alias **`contextDepositId` ou `deposit_id` est refusée en 400**, même si le nom canonique est aussi fourni ; ne jamais les jeter en silence. Si `context_deposit_id` est présent, refuser en 400 si `directive != clear_reload`, si `peer_ids.length != 1` ou si la valeur ne satisfait pas `isDepositIdShape` (y compris `null`, chaîne vide, mauvais type). Valider avant toute réservation/injection. `workstream` garde sa validation existante. Une absence véritable conserve le chemin historique sans dépôt ; une valeur invalide ne doit jamais y retomber. Le nom interne `contextDepositId` et le champ `deposit_id` de la transaction broker ne sont pas des alias agent-facing. Un dépôt absent/inaccessible à la réservation refuse explicitement la directive. **Limite :** ce refus avant clear ne garantit pas la lecture du push après clear (§17.C).
+9. **Teams et imbriqués.** La capacité contestée reste un refus, pas un choix arbitraire de propriétaire. Aucun rejeu WS ou ACK ne doit contourner les invariants de propriété/époque.
+
+### 17.A. Déclencheur : le résultat signé de la barrière
+
+**Structure actuelle, DÉDUIT :** `directive-run.ts:94-123` libère dans un `finally` si `attemptId` a été obtenu ; cette libération arrive après succès, injection refusée ou échec de la barrière. Correction du diagnostic initial : un refus de confiance (`:96-97`) précède la réservation (`:99`), donc il n'émet **pas** de release. `broker.ts:2866-2875` n'exige actuellement que l'identifiant de tentative au release. `shared/context-registry.ts:273-277` vide `attempt_id` et conserve `released_attempt_id` ; `:287-293` sélectionne tous les dépôts vivants d'un propriétaire sans filtrer leur état.
+
+| Option | Coût, risque, réversibilité et portée | Décision |
+|---|---|---|
+| A1. Déduire le succès de tout release, ou pousser dès l'injection PTY | Peu de modifications, mais confond abandon et clear confirmé ; texte envoyé dans l'ancien contexte. Portée : chaque chemin d'échec. Retirer ce comportement ne récupère pas un contexte déjà effacé. | Rejetée. |
+| A2. Attestation `cleared` dans le release signé existant | Modification du contrat Deck, transaction et registre ; aucune nouvelle autorité ni nouveau signal hook. Échec fermé possible en cas de version incompatible. | **Retenue.** La barrière reste au composant qui la voit. |
+
+Contrat A2 :
+
+- Le Deck initialise `cleared = false` et ne le passe à `true` **qu'après la résolution de `waitForClearBackchannel`**. Le `finally` transmet ce booléen avec le dépôt et la tentative, couvert par la signature opérateur. Pas de réservation = pas de release. Une erreur après le `/clear` ne permet ni de l'annuler ni de prétendre que le contexte a été restauré.
+- Le broker valide le type booléen. Pour la compatibilité avec un ancien Deck, un champ absent signifie **abandon sans push**, jamais succès ; `null`/chaîne/nombre sont refusés en 400. L'activation d'un nouveau Deck exige néanmoins le broker L3, sinon son `cleared:true` serait ignoré par l'ancien contrat.
+- Une première libération valide fige son résultat : `false` rend `held`, `true` rend `resuming` et conserve `released_attempt_id`. Un doublon de même tentative et même résultat est idempotent. Changer `false` en `true` ou l'inverse pour la même tentative répond 409, sans push ni modification. Tentative expirée/supplantée et dépôt disparu répondent 409 ; une expiration de réservation ne fabrique jamais de succès.
+- Seul `takeReleasedForResume(deposit_id, released_attempt_id)` donne accès au texte **du dépôt et de sa tentative libérée**, filtré par vivacité/époque, résultat `cleared:true`, état `resuming` et absence d'ACK. L'accès large `takeForPush` est supprimé. Résoudre le jeton propriétaire depuis l'entrée, pas depuis une cible fournie au push. Une énumération de reprise à l'auth WS ne rend que des identifiants admissibles ; chaque lecture de texte repasse par cet accès exact.
+- Après la transition réussie, tenter l'envoi dédié (§17.B). Un doublon HTTP de release ne déclenche pas une seconde notification à lui seul. `resuming` bloque `replace` et une seconde réservation pendant toute la rétention : un ACK tardif ne peut donc effacer un nouveau cycle du même dépôt.
+
+### 17.B. Propriétaire actif sans socket : attendre l'auth WS, sans ressusciter un dépôt
+
+**MESURÉ :** `bun test ./tests/broker-websocket.test.ts` donne `4 pass`, `0 fail`, `9 expect() calls`. Le cas `pending messages flush on reconnect` (`tests/broker-websocket.test.ts:90-125`) enregistre un pair, lui adresse deux messages sans WS, puis authentifie sa WS et les reçoit. Cette mesure prouve le cas « pair enregistré sans WS » pour les messages ordinaires ; elle ne prouve ni une coupure au milieu d'un vrai `/clear`, ni le futur rejeu de contexte L3.
+
+**DÉDUIT :** `broker.ts:11654-11661` ajoute la socket au pool lors de la trame **`auth` WS** puis, sur `close`, retire seulement cette socket. Ce n'est pas une route HTTP `/auth`. Les appels `forgetOwner` visent `/disconnect` et `/unregister` (`:11794-11803`). `server.ts:412-416` programme une reconnexion WS après fermeture et `:348-349` réauthentifie le même jeton. Une coupure WS peut donc laisser un propriétaire actif et un dépôt vivant ; assimiler toute fermeture WS à `forgetOwner` serait incorrect.
+
+| Option | Coût, risque, réversibilité et portée | Décision |
+|---|---|---|
+| B1. Refuser la reprise dès que la socket est absente | Moins de logique de rejeu ; erreur visible, mais après la barrière le clear a déjà eu lieu. Un précontrôle WS ne ferme pas la course entre contrôle et envoi. | Rejetée comme seul mécanisme. |
+| B2. Garder la reprise en RAM et la retenter à la prochaine auth WS du propriétaire | Ajoute un point de flush dédié et des métadonnées d'ACK ; peut produire un doublon si l'ACK se perd. Ne change pas la durée de vie du propriétaire ni les quotas. | **Retenue et ratifiée**, au titre de la décision opérateur du 2026-10-12. Une panne de transport n'est pas une fin de lancement. |
+
+Contrat B2 :
+
+- Au release réussi, socket absente/non ouverte ou envoi échoué = dépôt `resuming`, **en attente**, sans ACK synthétique ni perte de texte. La réponse de transaction reste sans contenu et distingue « en attente de transport » de « trame envoyée » ; aucune des deux ne signifie « modèle a lu ». Un échec d'envoi est tracé sans texte dans le log broker ; le Deck rapporte la reprise différée via son `reportError`/journal, pas comme une restauration réussie.
+- Après une trame `auth` WS validée et `wsPool.set`, lancer le flush **RAM dédié** des reprises non acquittées de CE jeton. Ne pas les insérer dans `flushPendingForToken`, qui reste le chemin des messages ordinaires. Revalider le dépôt et `released_attempt_id` juste avant de lire/envoyer ; jamais de diffusion au groupe.
+- Un ACK perdu autorise un rejeu au prochain auth WS. Le server garde une déduplication en RAM par `(deposit_id, attempt_id)` : après une notification déjà résolue, il renvoie l'ACK sans réémettre le texte ; si la notification a échoué, il ne mémorise pas le succès et n'acquitte pas. Le broker cesse les rejeux automatiques après le premier ACK technique. Cette déduplication n'améliore PAS la garantie de lecture modèle (§17.C).
+- Pas de nouveau TTL avant ACK, ni de timer de notification ajouté en L3. Si le propriétaire devient dormant, se déconnecte par HTTP, se réenregistre avec une nouvelle époque, ou si le broker redémarre, la purge prime. Une nouvelle WS ne ressuscite rien. Un dépôt en attente compte toujours dans les quotas et reste non remplaçable ; un propriétaire vivant dont la WS ne revient jamais peut donc immobiliser sa place.
+
+**Ratification produit :** selon la décision opérateur du 2026-10-12, confirmée par le lead le 2026-10-16, la garde jusqu'à la déconnexion, sous quotas et sans TTL avant ACK, couvre B2. La reprise différée après une coupure WS et l'immobilisation correspondante du quota sont donc retenues ; ce n'est pas la promesse d'un succès immédiat. **SUPPOSÉ :** fréquence et durée réelles des coupures pendant un clear non mesurées ici. Ne pas les utiliser pour déclarer le risque négligeable.
+
+### 17.C. ACK et lecture : C1 seul, ratifié avec sa limite
+
+**DÉDUIT :** `server.ts:391-405` attend `mcp.notification` puis note l'id comme notifié ; ce code ne reçoit aucune preuve de lecture du modèle. La règle locale `~/.claude/claude-config/rules/mcp.md`, section « mcp.notification() est fire-and-forget », consigne une perte possible entre deux tours et distingue notification et pull explicite. Le push L3 n'est pas livré par cette analyse et cette perte n'est **pas remesurée** ici. Avec le contrat initial (aucun pull, purge à +300 s du premier ACK), une notification perdue peut ainsi conduire à la destruction du seul dépôt sans que le modèle ait reçu le contexte. Un scénario nominal par mot témoin ne prouve pas l'absence de cette course.
+
+| Option | Garantie et coût proposés | Risque, réversibilité et portée |
+|---|---|---|
+| C1. Conserver push seul, ACK technique puis purge à +300 s | **Retenue et ratifiée par l'opérateur le 2026-10-16.** Pas de nouvelle surface agent, notification **best-effort**, aucune garantie de lecture ou de récupération. Documenter explicitement « envoyé » plutôt que « restauré ». | La perte silencieuse possible est acceptée et sa limite écrite au journal. Irréversible après purge ; le journal ne détecte pas une perte que le protocole ne signale pas. |
+| C2. Garder jusqu'à une « lecture prouvée », sans chemin de lecture/confirmation supplémentaire | Retarder la purge ne crée ni accès au texte ni signal de lecture. Il faudrait définir un nouvel événement corrélé, et non assimiler une activité quelconque du pair à une preuve. | Rétention et quota bloqués pour une garantie non définie. Rejetée comme formulation de contrat exécutable. |
+| C3. Ajouter un pull explicite réservé au propriétaire ; notification comme indice | **Alternative rejetée par l'opérateur.** Elle offrirait un autre accès en cas de notification perdue, au prix d'un outil décrit à chaque tour pour un usage rare déclenché par la directive amont. | Ne pas ajouter de route de lecture, d'outil MCP ni d'instruction de pull ; ne pas déplacer la purge vers une lecture. La raison opérateur est reproduite ci-dessous. |
+
+**Contre-avis indépendant (lecture seule, non mesure d'exécution) :** le reviewer conclut « TIENT » sur le déclenchement signé et le rejeu RAM, avec ratification explicite nécessaire de la limite MCP ; cette ratification est désormais acquise pour C1. Ses deux réserves sont incorporées ici : état protégé `resuming` distinct de `held`, et déduplication/ré-ACK par `(deposit_id, attempt_id)`. La tentative corrélée est conservée dans `released_attempt_id` ; aucune recherche sur le `attempt_id` vidé au release. L'échéance C1 doit nommer son unité : `ack_expires_at_ms = now().getTime() + 300_000`, jamais un mélange secondes/millisecondes.
+
+**Décision opérateur : C1 seul.** Raison transmise par le lead le 2026-10-16 : « un outil de lecture se paie en description à chaque tour alors qu'il servirait rarement, puisque la reprise vient d'un flux amont (la directive clear_reload) qui en déclenche l'usage. » Le coût récurrent de description de l'outil, et non le seul coût d'implémentation, décide contre C3. Les exclusions des §0/2/4/5 restent donc inchangées.
+
+**Garanties C1 à afficher et journaliser :** le clear est confirmé par sa barrière ; le transport vise seulement le propriétaire ; l'ACK atteste une notification techniquement émise et arrête les rejeux. Il **ne prouve pas que le modèle a lu**. Une notification peut être perdue silencieusement, puis le dépôt purgé 300 s après le premier ACK, sans chemin pull de récupération. Le journal de la reprise doit nommer cette limite, sans le texte du dépôt, par exemple : « Reprise par notification uniquement ; lecture par le modèle non garantie, perte silencieuse possible ; purge 300 s après le premier ACK technique. » Cette mention décrit la garantie du mécanisme, pas un échec observé ; ne jamais écrire « modèle a lu » ni déclarer une perte particulière sans preuve. Les erreurs détectables de transport gardent leur trace propre (§17.B).
+
+**Coût estimé, SUPPOSÉ (pas une mesure de livraison) :** C1 ajoute environ 2 à 4 h de cadrage/tests de limites au lot de transport A/B. L'implémentation de C3 est hors périmètre, et aucun contrat de pull n'est à préparer pour ce lot.
+
+### Critères de clôture L3, à exécuter par le développeur
+
+- **Producteur :** rejet 400 des deux alias (seuls ou avec canonique), mauvaise directive, plusieurs pairs, valeur absente vs `null`/mal formée ; aucun appel d'injection sur refus. Un dépôt valide parvient de `parseRunDirectiveArgs` au chemin réservé, sans changer le chemin sans dépôt.
+- **A :** confiance refusée = ni réservation ni release ; injection refusée/barrière échouée = release `false`, aucun push ; barrière résolue = release `true`, un seul dépôt ; doublons identiques idempotents, booléen contradictoire et ancienne tentative refusés. `replace`/reserve refusés sur `resuming`.
+- **B :** paire de contrôles « fermeture WS seule, propriétaire vivant » et « `/disconnect`, propriétaire purgé » ; release réussi sans WS puis auth = rejeu du bon dépôt uniquement ; aucune reprise pour tentative abandonnée/expirée, autre propriétaire, autre époque ou dépôt purgé. Envoi échoué = conservation et trace sans contenu. ACK perdu = ré-ACK sans seconde notification dans le même server.
+- **ACK/rétention :** ACK étranger, avant release, mauvaise tentative refusés ; premier ACK fixe l'échéance C1, aucun doublon ne la prolonge. Horloge injectée aux limites 299/300 s ; purge propriétaire prioritaire dans tous les états. Aucun outil de lecture ni changement de déclencheur de purge.
+- **Garantie produit :** scénario réel par mot témoin, plus simulation d'une notification résolue mais non remise au modèle. C1 doit écrire au journal la possibilité de perte silencieuse, sans inventer un succès modèle ni prétendre détecter cette perte ; la purge reste déclenchée par l'ACK technique. Canari absent des logs, SQLite/WAL, réplication et réponses Deck dans tous les chemins, y compris échec.
 
 ## 18. Ordre de livraison et déploiement
 
-Chaque pas est livrable et inoffensif seul.
+### L1 : dépôt sans activation de la reprise
+
+Chaque pas ci-dessous concerne L1, pas la compatibilité du protocole de reprise L3.
 
 1. `shared/context-buffer.ts`, `shared/context-registry.ts` et leurs tests purs.
 2. Broker : liaison au register, route, purges, balayage ; tests broker. Sans server.ts à jour, aucune liaison : tout dépôt répond 401.
@@ -362,7 +429,15 @@ Chaque pas est livrable et inoffensif seul.
 4. `cli.ts` : le verbe. Sans capacité, code 5, aucun appel réseau.
 5. Deck : minage, neutralisation. C'est l'interrupteur d'activation : tant qu'il n'est pas livré, la fonction est dormante partout.
 
-Ordre de mise en production : broker, puis core (server.ts et cli.ts), puis Deck. Chaque combinaison de versions (ancien ou nouveau de chaque côté) dégrade en refus explicite et non en dépôt anonyme.
+Ordre L1 : broker, puis core (server.ts et cli.ts), puis Deck ; une version sans capacité/liaison doit refuser le dépôt plutôt que le rendre anonyme.
+
+### L3 : décision de garantie, transport, puis producteur
+
+1. Appliquer les décisions ratifiées B2 (reprise différée) et C1 seul (§19.7-8), avec leur limite de lecture écrite au journal. L'arbitrage produit est clos ; le contrôle de compatibilité avant activation reste requis.
+2. Livrer le registre et le broker : release signé avec `cleared`, état `resuming`, accès exact, transport RAM dédié, rejeu à auth WS et ACK authentifié. Avec un ancien release sans `cleared`, aucun push. Aucun dépôt dormant/abandonné ne devient éligible par défaut.
+3. Livrer server.ts : réception `context_resume`, cadrage sans log du texte, déduplication et ACK. Ne livrer ni outil de lecture ni chemin pull. Pas de garantie de lecture déduite du seul succès de `notification`.
+4. Activer seulement ensuite le producteur Deck et le schéma agent `context_deposit_id`, avec validation avant injection. Le support du protocole L3 par le broker **et le server propriétaire** doit être vérifié avant le premier clear ; une réservation L2 réussie n'est pas cette preuve. **DÉDUIT**, `broker.ts:2863-2885` ne traite pas `cleared`, et `server.ts:362-409` traite la trame ordinaire `message` : déployer le producteur seul peut donc déclencher un clear sans consommateur L3. Le mécanisme de vérification de compatibilité doit être fixé dans le brief d'implémentation, pas remplacé par un succès HTTP générique.
+5. Faire les tests ciblés du §17 et le scénario réel, puis le gate unique du lead. Les tests du futur transport et le scénario de perte MCP restent à exécuter ; le run `broker-websocket.test.ts` documenté en §17.B n'en tient pas lieu.
 
 ## 19. Questions encore ouvertes
 
@@ -376,7 +451,14 @@ Pour le lead, sans bloquer L1 :
 3. **Re-lien sur heartbeat** après redémarrage du broker (le heartbeat porterait l'empreinte). Recommandation de l'architecte : ne pas l'inclure en L1 ; un redémarrage du broker est un événement visible, le refus 401 est explicite. À réévaluer si l'usage montre des redémarrages fréquents.
 4. **`--replace`** : ajout de l'architecte, absent des décisions opérateur. Sans lui, un pair qui a atteint son quota ne peut libérer de place qu'en se relançant. Retirable seul.
 5. **Valeurs des trois quotas** (3, 96, 256) : valeurs de conception non mesurées (M4).
-6. **Instruction à l'agent** (skill du `deck-plugin`, découverte du chemin de `cli.ts` : `roadmap-card/SKILL.md:71-74` suppose `<repo>/cli.ts`). Non couvert par L1 ; à rattacher à L2 puisque c'est la directive du lead qui dit à l'agent de déposer.
+6. **Instruction à l'agent** (skill du `deck-plugin`, découverte du chemin de `cli.ts` : `roadmap-card/SKILL.md:71-74` suppose `<repo>/cli.ts`). Non couvert par L1 ; à rattacher à L2 puisque c'est la directive du lead qui dit à l'agent de déposer. Aucun outil ni instruction de pull à ajouter pour L3.
+
+**Arbitrages opérateur L3 clos, décisions transmises par le lead le 2026-10-16 :**
+
+7. **Garantie de reprise (C) : C1 seul, retenu et ratifié.** Maintenir « sans outil MCP/aucune lecture », avec notification potentiellement perdue et purge 300 s après le premier ACK technique. La limite de perte silencieuse est acceptée, écrite au journal et jamais appelée « modèle a lu ». **C3 rejetée** : « un outil de lecture se paie en description à chaque tour alors qu'il servirait rarement, puisque la reprise vient d'un flux amont (la directive clear_reload) qui en déclenche l'usage. » Les exclusions des §0/2/4/5 restent inchangées ; détails des garanties : §17.C.
+8. **Reprise différée (B) : B2 retenue et ratifiée** au titre de la décision opérateur du **2026-10-12** : garde jusqu'à la déconnexion, sous quotas, sans TTL avant ACK. Conserver en RAM la tentative libérée jusqu'à auth WS et ACK tant que le propriétaire vit ; sa place de quota reste immobilisée. Aucune survie à `/disconnect`, changement d'époque ou redémarrage broker. Cette récupération de transport ne résout pas la perte entre notification MCP et modèle.
+
+**Pour le lead avant dispatch de code :** préciser le contrôle de compatibilité L3 broker/server avant activation du producteur (§18). La ratification de C1/B2 ne dispense pas de ce contrôle.
 
 ## 20. Risques résiduels
 
