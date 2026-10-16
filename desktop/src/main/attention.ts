@@ -57,21 +57,33 @@ function afterTrustPrompt(text: string): string | null {
   return null
 }
 
-// Waiting screens, deliberately narrow: ONLY strong screen-level cues, since
-// a running turn can stream prose/code containing question-like sentences.
-// The numbered-chooser selector ("\u276f 1.") covers tool-permission prompts,
-// plan approvals and AskUserQuestion menus; the trust prompt has its own.
+const SELECTOR = '\u276f'
+const BORDER = '\u2500'
+
+// A numbered chooser (tool permission, plan approval, AskUserQuestion, resume)
+// raises by default: footers and questions vary too much to list. Its selected
+// option shares the glyph with the echo of a submitted prompt and with the
+// composer, so only the LAST glyph in the buffer counts, since the empty
+// composer is painted below an echo once a turn settles. The period is not
+// required: a selection repaint redraws only changed cells ("\u276f1Yes"). A
+// glyph right under a border is the composer holding a numbered draft, and
+// "esc to interrupt" after it is a running turn.
 // Free-text questions without a menu are NOT detected (accepted v1 limit).
-const WAITING_PATTERNS = [
-  /\u276f\s*1\./, // selected first option of a numbered chooser
-  ...TRUST_PATTERNS
-]
+function detectChooser(text: string): boolean {
+  const at = text.lastIndexOf(SELECTOR)
+  if (at < 0) return false
+  const tail = text.slice(at + 1)
+  if (!/^\s*1/.test(tail) || /esc\s*to\s*interrupt/i.test(tail)) return false
+  return !text.slice(0, at).trimEnd().endsWith(BORDER)
+}
+
+const isWaitingScreen = (text: string): boolean => detectChooser(text) || TRUST_PATTERNS.some((re) => re.test(text))
 
 // Exempts only the dev-channels startup warning's own two-cue screen (title and
 // accept-option wording, both required via detectChannelsWarning), not any
 // other auto-advancing single-option chooser.
 // If either cue's wording changes, the exemption silently stops matching and
-// this falls back to WAITING_PATTERNS with no error.
+// this falls back to the waiting-screen rule with no error.
 // purgeScreenMemory, called when startup-ack answers the dialog, is the actual
 // guarantee against a stuck false exemption; the re-scan fallback only bounds
 // it.
@@ -79,16 +91,23 @@ export function detectWaiting(text: string): boolean {
   if (detectChannelsWarning(text)) {
     return TRUST_PATTERNS.some((re) => re.test(text))
   }
-  return WAITING_PATTERNS.some((re) => re.test(text))
+  return isWaitingScreen(text)
 }
 
 // Deliberately does not reuse detectWaiting's exemption: raising and clearing
 // are opposite decisions under uncertainty, and reusing it let a real chooser's
 // flag get cleared by unrelated dev-channels text entering the buffer
 // afterward.
-// Only clears on positive evidence the raising pattern itself is gone.
+// Only clears on positive evidence the chooser is gone: a running turn, the
+// composer box, or no glyph left in the window. Moving the selection off
+// option 1 leaves the glyph on another option, which is still a chooser; and a
+// non-manual clear settles the tile's approvals as answered in the terminal.
 function stillWaiting(text: string): boolean {
-  return WAITING_PATTERNS.some((re) => re.test(text))
+  if (TRUST_PATTERNS.some((re) => re.test(text))) return true
+  const at = text.lastIndexOf(SELECTOR)
+  if (at < 0) return false
+  if (/esc\s*to\s*interrupt/i.test(text.slice(at + 1))) return false
+  return !text.slice(0, at).trimEnd().endsWith(BORDER)
 }
 
 // Load-bearing for one of five ways a raised flag clears: a busy cue,

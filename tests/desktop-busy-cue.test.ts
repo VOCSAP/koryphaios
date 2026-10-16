@@ -26,7 +26,7 @@ const turnStart = chunks.findIndex((c) => c.data.includes("\x1b]0;◐"));
 const turnEnd = chunks.findIndex((c, i) => i > turnStart && c.data.includes("\x1b]0;✳"));
 const turn = chunks.slice(turnStart, turnEnd);
 const spinnerRow = chunks.find((c) => c.data.includes("26 tokens)"))!;
-const statusLineRow = chunks.find((c) => c.data.includes("Opus"))!;
+const statusLineRow = chunks.find((c) => c.data.includes("⏳"))!;
 
 const LIMIT = "You've hit your limit · resets 10pm (Europe/London)\r\n";
 const PERMISSION = "Do you want to proceed?\r\n❯ 1. Yes\r\n  2. No\r\n";

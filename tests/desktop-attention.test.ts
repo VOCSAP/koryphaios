@@ -3,7 +3,7 @@
 // prompt); prose/code containing question-like text must NOT trigger.
 
 import { test, expect } from "bun:test";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   AttentionDetector,
@@ -11,6 +11,7 @@ import {
   stripAnsi,
   type AttentionEvent
 } from "../desktop/src/main/attention.ts";
+import { inspectInjectGuard, makeScreen } from "../desktop/src/main/screen-model.ts";
 
 const PERMISSION_SCREEN = `
 Bash command: rm -rf node_modules
@@ -98,7 +99,8 @@ const DEV_CHANNELS_TITLE_ONLY = "Loading development channels...\n";
 const CHANNELS_WARNING = `WARNING: Loading development channels
 This uses unreleased code.
 ❯ 1. I am using this for local development
-  2. Cancel`;
+  2. Cancel
+Enter to confirm · Esc to cancel`;
 
 test("a bare dev-channels title (no accept line) does not suppress a later real chooser", () => {
   const d = new AttentionDetector();
@@ -128,7 +130,8 @@ test("a genuinely raised flag is NOT cleared by a bare dev-channels title arrivi
 test("the channels exemption needs BOTH cues, so a reworded accept option stops exempting", () => {
   const titleOnly = `WARNING: Loading development channels
 ❯ 1. Continue anyway
-  2. Cancel`;
+  2. Cancel
+Enter to confirm · Esc to cancel`;
   expect(detectWaiting(CHANNELS_WARNING)).toBe(false);
   expect(detectWaiting(titleOnly)).toBe(true);
 });
@@ -136,7 +139,8 @@ test("the channels exemption needs BOTH cues, so a reworded accept option stops 
 test("the accept option alone, with the title scrolled off, does not exempt", () => {
   const acceptOnly = `This uses unreleased code.
 ❯ 1. I am using this for local development
-  2. Cancel`;
+  2. Cancel
+Enter to confirm · Esc to cancel`;
   expect(detectWaiting(acceptOnly)).toBe(true);
 });
 
@@ -151,7 +155,8 @@ Do you want to proceed?
 
 test("a reworded title upstream falls back to raising, never to silence", () => {
   const reworded = `WARNING: Loading dev channels
-❯ 1. I am using this for local development`;
+❯ 1. I am using this for local development
+Enter to confirm · Esc to cancel`;
   expect(detectWaiting(reworded)).toBe(true);
 });
 
@@ -480,4 +485,105 @@ test("the current trust prompt painted after the dev-channels warning raises (de
   expect(events, "the warning alone is exempted").toEqual([]);
   d.feed("s", dialog.data);
   expect(events).toEqual([{ id: "s", waiting: true }]);
+});
+
+// ----- numbered chooser versus the echo of a submitted prompt -----
+
+const SELECTOR = String.fromCodePoint(0x276f);
+const BORDER = String.fromCodePoint(0x2500).repeat(60);
+const isMarker = (c: Chunk): boolean => c.data.startsWith("\n########## ");
+
+/** Captures of a numbered prompt typed, pasted, resized or submitted in the composer: never a chooser. */
+const NUMBERED_COMPOSER_CAPTURES: Record<string, string> = {
+  "draft-numbered-2.1.301.json": "draft typed",
+  "typing-numbered-2.1.301.json": "typing starts",
+  "resize-numbered-draft-2.1.301.json": "typing starts",
+};
+
+/** Every capture whose final screen shows a numbered picker, except the composer captures above. */
+const REAL_CHOOSERS = readdirSync(join(import.meta.dir, "pty-harness", "fixtures"))
+  .filter((name) => name.endsWith(".json") && !(name in NUMBERED_COMPOSER_CAPTURES))
+  .filter((name) => {
+    const screen = makeScreen(120, 40);
+    for (const c of loadFixture(name)) if (!isMarker(c)) screen.feed(c.data);
+    const inspection = inspectInjectGuard(screen);
+    return inspection.state === "modal" && inspection.rule === "picker";
+  })
+  .sort();
+
+/** The attention events of a whole capture, each tagged with the index of the chunk that emitted it. */
+const replayEvents = (name: string): { at: number; waiting: boolean }[] => {
+  const d = new AttentionDetector();
+  const events: { at: number; waiting: boolean }[] = [];
+  let at = -1;
+  d.on("attention", (e: AttentionEvent) => events.push({ at, waiting: e.waiting }));
+  loadFixture(name).forEach((c, i) => {
+    at = i;
+    if (!isMarker(c)) d.feed("s", c.data);
+  });
+  return events;
+};
+
+test("the numbered pickers derived from the captures include the permission, AskUserQuestion and plan choosers", () => {
+  for (const name of ["ask-user-question-2.1.301.json", "permission-write-2.1.291.json", "plan-approval-2.1.301.json"]) {
+    expect(REAL_CHOOSERS, name).toContain(name);
+  }
+});
+
+test("every captured numbered chooser raises and still holds at the end of its capture", () => {
+  for (const name of REAL_CHOOSERS) {
+    const events = replayEvents(name);
+    expect(events.at(-1), name).toEqual({ at: expect.any(Number), waiting: true });
+  }
+});
+
+test("a numbered prompt pasted, typed, resized or submitted in the composer never raises (real captures)", () => {
+  for (const [name, marker] of Object.entries(NUMBERED_COMPOSER_CAPTURES)) {
+    const start = loadFixture(name).findIndex((c) => isMarker(c) && c.data.includes(marker));
+    expect(start, `${name} holds its "${marker}" marker`).toBeGreaterThan(0);
+    const raises = replayEvents(name).filter((e) => e.waiting && e.at > start);
+    expect(raises, name).toEqual([]);
+  }
+});
+
+test("the echo of a submitted numbered prompt does not raise, during the turn or once it settles", () => {
+  const echo = `${SELECTOR} 1. rename the helper\n  2. run its tests\n`;
+  expect(detectWaiting(`${echo}· Noodling… (3s · esc to interrupt)`), "running turn").toBe(false);
+  expect(detectWaiting(`${echo}● Done.\n${BORDER}\n${SELECTOR} \n${BORDER}\n? for shortcuts`), "settled turn").toBe(false);
+});
+
+test("a numbered draft painted inside the composer box does not raise", () => {
+  expect(detectWaiting(`${BORDER}\n${SELECTOR} 1. rename the helper\n${BORDER}\n? for shortcuts`)).toBe(false);
+});
+
+const CHOOSER = `Do you want to proceed?\r\n${SELECTOR} 1. Yes\r\n  2. Yes, and don't ask again\r\n  3. No\r\nEsc to cancel\r\n`;
+const COMPOSER = `${BORDER}\r\n${SELECTOR} \r\n${BORDER}\r\n? for shortcuts`;
+
+for (const [label, toOption2, toOption1] of [
+  ["its rows rewritten", `\x1b[4;1H  1. Yes\x1b[K\r\n${SELECTOR} 2. Yes, and don't ask again`, `\x1b[4;1H${SELECTOR} 1. Yes\x1b[K\r\n  2. Yes, and don't ask again`],
+  ["the glyph alone moved", `\x1b[4;1H \x1b[5;1H${SELECTOR}`, `\x1b[5;1H \x1b[4;1H${SELECTOR}`],
+] as const) {
+  test(`moving a raised chooser's selection (${label}) holds the flag until the composer is painted`, () => {
+    const d = new AttentionDetector();
+    const events = collect(d);
+    d.feed("s", CHOOSER);
+    expect(events, "the chooser raises").toEqual([{ id: "s", waiting: true }]);
+    d.feed("s", toOption2);
+    expect(events, "selection moved to option 2").toEqual([{ id: "s", waiting: true }]);
+    d.feed("s", toOption1);
+    expect(events, "selection back on option 1").toEqual([{ id: "s", waiting: true }]);
+    d.feed("s", COMPOSER);
+    expect(events, "the composer replaces the chooser").toEqual([
+      { id: "s", waiting: true },
+      { id: "s", waiting: false },
+    ]);
+  });
+}
+
+test("a chooser raises whatever its footer or question says", () => {
+  expect(detectWaiting(`Resume this conversation?\n${SELECTOR} 1. Resume\n  2. Start a new conversation\nEsc to resume`), "resume").toBe(true);
+  expect(detectWaiting(`How should the plan be implemented?\n${SELECTOR} 1. Here\n  2. In a new session`), "no cue").toBe(true);
+  expect(detectWaiting(`${SELECTOR} 1. A\n${"preview ".repeat(250)}\nEsc to cancel`), "long preview").toBe(true);
+  expect(detectWaiting(`Pick one\n${SELECTOR} 1. A\n  2. B\nEsc to go back`), "Esc to go back").toBe(true);
+  expect(detectWaiting(`${SELECTOR}1Yes2. No`), "selection repaint without the period").toBe(true);
 });

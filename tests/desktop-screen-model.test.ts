@@ -57,10 +57,12 @@ function fixtureVerdicts(fixture: string): { checkpoints: readonly ('clear' | 'm
 }
 
 const EXPECTED_FIXTURE_VERDICTS: Record<string, { checkpoints: readonly ('clear' | 'modal')[]; final: 'clear' | 'modal' }> = {
+  'ask-user-question-2.1.301.json': { checkpoints: ['modal', 'clear', 'modal', 'modal'], final: 'modal' },
   'channels-warning-conpty-win.json': { checkpoints: [], final: 'modal' },
   'composer-2.1.283-reduced.json': { checkpoints: [], final: 'clear' },
   'dialog-open-no-esc.json': { checkpoints: ['modal', 'modal'], final: 'modal' },
   'dialog-open-with-esc.json': { checkpoints: ['modal', 'modal'], final: 'modal' },
+  'draft-numbered-2.1.301.json': { checkpoints: ['modal', 'clear', 'modal', 'modal', 'modal'], final: 'modal' },
   'draft-typed-with-esc.json': { checkpoints: ['clear', 'clear', 'clear', 'clear', 'clear'], final: 'clear' },
   'permission-bash-2.1.291.json': { checkpoints: ['modal'], final: 'modal' },
   'permission-bash-ba116-2.1.291.json': { checkpoints: [], final: 'modal' },
@@ -73,7 +75,9 @@ const EXPECTED_FIXTURE_VERDICTS: Record<string, { checkpoints: readonly ('clear'
   'permission-bash-touchsp-2.1.291.json': { checkpoints: [], final: 'modal' },
   'permission-bash-wrapped-2.1.291.json': { checkpoints: ['modal'], final: 'modal' },
   'permission-write-2.1.291.json': { checkpoints: ['modal'], final: 'modal' },
+  'plan-approval-2.1.301.json': { checkpoints: ['modal', 'clear', 'modal'], final: 'modal' },
   'prompt-idle-with-esc.json': { checkpoints: ['clear', 'clear', 'clear', 'clear'], final: 'clear' },
+  'resize-numbered-draft-2.1.301.json': { checkpoints: ['modal', 'clear', 'modal', 'modal', 'modal'], final: 'modal' },
   'scroll-context-2.1.284-reduced.json': { checkpoints: [], final: 'modal' },
   'slash-menu-with-esc.json': { checkpoints: ['clear', 'clear', 'clear', 'clear', 'clear'], final: 'clear' },
   'trust-dialog-quick-safety-check.json': { checkpoints: [], final: 'modal' },
@@ -82,7 +86,8 @@ const EXPECTED_FIXTURE_VERDICTS: Record<string, { checkpoints: readonly ('clear'
   'turn-no-statusline-count.json': { checkpoints: [], final: 'clear' },
   'turn-no-statusline-hi.json': { checkpoints: [], final: 'clear' },
   'turn-with-statusline-count.json': { checkpoints: [], final: 'clear' },
-  'turn-with-statusline-hi.json': { checkpoints: [], final: 'clear' }
+  'turn-with-statusline-hi.json': { checkpoints: [], final: 'clear' },
+  'typing-numbered-2.1.301.json': { checkpoints: ['modal', 'clear', 'modal', 'modal'], final: 'modal' }
 }
 
 describe('classifyInjectGuard against real captures (tests/pty-harness/fixtures)', () => {
