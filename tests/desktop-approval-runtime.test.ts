@@ -4,6 +4,7 @@ import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSy
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ApprovalRuntime, armApprovalsAtStartup, retryOperatorTrust } from "../desktop/src/main/approval-runtime.ts";
+import { onDeckError } from "../desktop/src/main/log.ts";
 import {
   createOperatorIdentity,
   ensureOperatorIdentity,
@@ -58,6 +59,7 @@ const unavailableCipher: SecretCipher = {
 const originalFetch = globalThis.fetch;
 afterEach(() => {
   globalThis.fetch = originalFetch;
+  onDeckError(() => {});
 });
 
 function registerOperatorTrustStatusSetter(
@@ -453,6 +455,139 @@ describe("retryOperatorTrust()", () => {
     expect(statuses).toHaveLength(publicationCount);
     releaseRevoke(new Response("{}", { status: 200 }));
     await disarming;
+  });
+});
+
+type TrustOutcome = "compatible" | "unconfigured" | "invalid" | "not-trusted" | "incompatible";
+
+function trustBroker(outcome: () => TrustOutcome): typeof fetch {
+  return (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input);
+    const json = (body: unknown, status = 200) =>
+      new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+    const current = outcome();
+    if (url.endsWith("/health")) {
+      if (current === "incompatible") return json({ status: "ok" });
+      const state = current === "unconfigured" || current === "invalid" ? current : "ready";
+      return json({ operator_trust_version: 1, operator_trust_state: state });
+    }
+    if (url.endsWith("/operator/check")) {
+      if (current === "not-trusted") return json({ error: "operator-not-trusted" }, 403);
+      const body = JSON.parse(String(init?.body)) as { public_key: string };
+      return json({ operator_id: deriveOperatorId(body.public_key), protocol_version: 1 });
+    }
+    return json({ token_id: "tok_test", expires_at: new Date(Date.now() + 3600_000).toISOString() });
+  }) as unknown as typeof fetch;
+}
+
+describe("operator trust refusals reach the Deck error channel", () => {
+  test.each(["unconfigured", "invalid", "not-trusted", "incompatible"] as const)(
+    "arming refused as %s is reported once, without the key or the state dir",
+    async (refusal) => {
+      const errors: { scope: string; text: string }[] = [];
+      onDeckError((scope, text) => errors.push({ scope, text }));
+      globalThis.fetch = trustBroker(() => refusal);
+      const stateDir = tmp();
+      let publicKey: string | undefined;
+      const runtime = new ApprovalRuntime({
+        stateDir,
+        cipher: fakeCipher,
+        endpoint: () => ({ url: "http://broker.local", token: "" }),
+        runId: "run-test",
+        host: "test-host",
+        onTrustStatus: (_state, key) => { publicKey = key; },
+      });
+
+      expect(await runtime.arm()).toBe(false);
+      expect(await runtime.retryTrust()).toBe(false);
+
+      expect(errors).toHaveLength(1);
+      expect(errors[0]!.scope).toBe("approvals");
+      expect(errors[0]!.text).toContain(refusal);
+      expect(publicKey).toEqual(expect.any(String));
+      expect(errors[0]!.text).not.toContain(publicKey!);
+      expect(errors[0]!.text).not.toContain(stateDir);
+    },
+  );
+
+  test("a retry on an armed runtime reports each new refusal, not a repeated one", async () => {
+    const errors: string[] = [];
+    onDeckError((_scope, text) => {
+      if (text.includes("refused operator trust")) errors.push(text);
+    });
+    let outcome: TrustOutcome = "compatible";
+    globalThis.fetch = trustBroker(() => outcome);
+    const runtime = new ApprovalRuntime({
+      stateDir: tmp(),
+      cipher: fakeCipher,
+      endpoint: () => ({ url: "http://broker.local", token: "" }),
+      runId: "run-test",
+      host: "test-host",
+    });
+    expect(await runtime.arm()).toBe(true);
+    expect(errors).toEqual([]);
+
+    outcome = "not-trusted";
+    expect(await runtime.retryTrust()).toBe(true);
+    expect(await runtime.retryTrust()).toBe(true);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain("not-trusted");
+
+    outcome = "invalid";
+    expect(await runtime.retryTrust()).toBe(true);
+    expect(errors).toHaveLength(2);
+    expect(errors[1]).toContain("invalid");
+
+    outcome = "compatible";
+    expect(await runtime.retryTrust()).toBe(true);
+    outcome = "invalid";
+    expect(await runtime.retryTrust()).toBe(true);
+    expect(errors).toHaveLength(3);
+  });
+
+  test("a refusal after disarm and rearm is reported again with the same state", async () => {
+    const errors: string[] = [];
+    onDeckError((_scope, text) => {
+      if (text.includes("refused operator trust")) errors.push(text);
+    });
+    globalThis.fetch = trustBroker(() => "not-trusted");
+    const runtime = new ApprovalRuntime({
+      stateDir: tmp(),
+      cipher: fakeCipher,
+      endpoint: () => ({ url: "http://broker.local", token: "" }),
+      runId: "run-test",
+      host: "test-host",
+    });
+
+    expect(await runtime.arm()).toBe(false);
+    await runtime.disarm();
+    expect(await runtime.arm()).toBe(false);
+    expect(errors).toHaveLength(2);
+  });
+
+  test("a compatible check between two refusals lets the second one be reported", async () => {
+    const errors: string[] = [];
+    onDeckError((_scope, text) => {
+      if (text.includes("refused operator trust")) errors.push(text);
+    });
+    let outcome: TrustOutcome = "compatible";
+    globalThis.fetch = trustBroker(() => outcome);
+    const runtime = new ApprovalRuntime({
+      stateDir: tmp(),
+      cipher: fakeCipher,
+      endpoint: () => ({ url: "http://broker.local", token: "" }),
+      runId: "run-test",
+      host: "test-host",
+    });
+    expect(await runtime.arm()).toBe(true);
+
+    outcome = "not-trusted";
+    expect(await runtime.retryTrust()).toBe(true);
+    outcome = "compatible";
+    expect(await runtime.checkTrustNow()).toBe("compatible");
+    outcome = "not-trusted";
+    expect(await runtime.retryTrust()).toBe(true);
+    expect(errors).toHaveLength(2);
   });
 });
 

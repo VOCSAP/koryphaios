@@ -696,6 +696,11 @@ function runClearReloadHostCallback(name: string): string {
   return source.slice(exprStart, source.indexOf(",\n", exprStart));
 }
 
+function evaluateHostCallback(name: string, params: string[], args: unknown[]): unknown {
+  const js = new Bun.Transpiler({ loader: "ts" }).transformSync(`const hostCallback = ${runClearReloadHostCallback(name)};`);
+  return new Function(...params, `${js}\nreturn hostCallback;`)(...args);
+}
+
 function indexBrokerEndpointOnce(resolve: () => unknown): () => unknown {
   const source = readFileSync(join(import.meta.dir, "..", "desktop", "src", "main", "index.ts"), "utf8").replace(/\r\n/g, "\n");
   const start = source.indexOf("function brokerEndpointOnce(");
@@ -707,8 +712,7 @@ function indexBrokerEndpointOnce(resolve: () => unknown): () => unknown {
 }
 
 function hostCallbacks(endpointOnce: () => unknown, transactions: unknown[][], probes: unknown[]) {
-  const evaluate = (name: string, params: string[], args: unknown[]) =>
-    new Function(...params, `return (${runClearReloadHostCallback(name)});`)(...args);
+  const evaluate = evaluateHostCallback;
   const contextTransaction = async (request: unknown, endpoint: unknown) => {
     transactions.push([request, endpoint]);
     return { attemptId: "a".repeat(32) };
@@ -779,6 +783,99 @@ test("the Deck host probes context resume support on the endpoint it was given",
   await probe();
 
   expect(probes).toEqual([endpoint]);
+});
+
+function indexTrustCallback(approvals: unknown): () => Promise<unknown> {
+  return evaluateHostCallback("checkOperatorTrust", ["approvals"], [approvals]) as () => Promise<unknown>;
+}
+
+const TRUST_VERDICTS = ["not-trusted", "unconfigured", "incompatible", "invalid", "unreachable", "compatible"] as const;
+
+test("the Deck host answers every trust check with the approval runtime's fresh verdict, never a cached or fixed one", async () => {
+  const queue = [...TRUST_VERDICTS];
+  let fresh = 0;
+  const approvals = {
+    checkTrustNow: async () => {
+      fresh += 1;
+      return queue.shift();
+    },
+    operatorTrust: "compatible",
+    status: "compatible"
+  };
+  const check = indexTrustCallback(approvals);
+
+  const answers: unknown[] = [];
+  for (let i = 0; i < TRUST_VERDICTS.length; i++) answers.push(await check());
+
+  expect({ answers, fresh }, "each context clear must query the broker again and return its verdict as is").toEqual({
+    answers: [...TRUST_VERDICTS],
+    fresh: TRUST_VERDICTS.length
+  });
+});
+
+test("the Deck host's real trust callback stops a context clear before any reservation or keystroke when the broker does not trust the Deck", async () => {
+  for (const verdict of TRUST_VERDICTS.filter((candidate) => candidate !== "compatible")) {
+    const calls: string[] = [];
+    const check = indexTrustCallback({ checkTrustNow: async () => verdict, operatorTrust: "compatible" });
+
+    const outcome = runClearReloadInTurn(
+      {
+        serializeTile: (_id, fn) => fn(async (keys) => { calls.push(`inject ${keys}`); return "written" as const; }),
+        checkOperatorTrust: check as ClearReloadHost["checkOperatorTrust"],
+        checkContextResumeSupport: async () => { calls.push("probe"); },
+        currentSessionId: () => "sid-before",
+        reserveContextDeposit: async () => { calls.push("reserve"); return "a".repeat(32); },
+        readClearBackchannelBaseline: () => null,
+        waitForClearBackchannel: async () => { calls.push("wait"); },
+        releaseContextDeposit: async () => { calls.push("release"); },
+        reportError: () => {}
+      },
+      () => {},
+      "tile-1",
+      "alpha",
+      "ws",
+      undefined,
+      { contextDepositId: "0123456789abcdef" }
+    );
+
+    await expect(outcome, `verdict ${verdict}`).rejects.toThrow(`operator trust is ${verdict}`);
+    expect({ verdict, calls }, "nothing may be probed, reserved, typed or released after a refused trust check").toEqual({ verdict, calls: [] });
+  }
+});
+
+test("a trust check that fails is a refusal of the context clear, never an authorization", async () => {
+  const calls: string[] = [];
+  const reported: string[] = [];
+  const failure = new Error("operator identity is unavailable");
+  const check = indexTrustCallback({ checkTrustNow: async () => { throw failure; }, operatorTrust: "compatible" });
+
+  await expect(check(), "the callback must let the failure through unchanged").rejects.toBe(failure);
+
+  const outcome = runClearReloadInTurn(
+    {
+      serializeTile: (_id, fn) => fn(async (keys) => { calls.push(`inject ${keys}`); return "written" as const; }),
+      checkOperatorTrust: check as ClearReloadHost["checkOperatorTrust"],
+      checkContextResumeSupport: async () => { calls.push("probe"); },
+      currentSessionId: () => "sid-before",
+      reserveContextDeposit: async () => { calls.push("reserve"); return "a".repeat(32); },
+      readClearBackchannelBaseline: () => null,
+      waitForClearBackchannel: async () => { calls.push("wait"); },
+      releaseContextDeposit: async () => { calls.push("release"); },
+      reportError: (message) => { reported.push(message); }
+    },
+    () => {},
+    "tile-1",
+    "alpha",
+    "ws",
+    undefined,
+    { contextDepositId: "0123456789abcdef" }
+  );
+
+  await expect(outcome).rejects.toThrow("operator identity is unavailable");
+  expect({ calls, reported }, "no probe, reservation or keystroke after a failed check, and the failure is reported").toEqual({
+    calls: [],
+    reported: ['context clear failed for "alpha"']
+  });
 });
 
 test("a broker without context resume support is reported to the agent as context_resume_unsupported, not as a generic error", async () => {

@@ -62,6 +62,7 @@ export class ApprovalRuntime {
   private renewalTimer: unknown | null = null
   private renewalAbort: AbortController | null = null
   private renewalInFlight: Promise<void> | null = null
+  private reportedRefusal: OperatorTrustStatus | null = null
 
   constructor(private readonly opts: ApprovalRuntimeOptions) {}
 
@@ -115,6 +116,7 @@ export class ApprovalRuntime {
   async checkTrustNow(): Promise<OperatorTrustStatus> {
     const { trust, identity } = await this.requestTrust()
     if (trust !== 'unreachable') this.publishTrust(trust, identity)
+    if (trust === 'compatible') this.reportedRefusal = null
     return trust
   }
 
@@ -140,6 +142,7 @@ export class ApprovalRuntime {
       const trust = await this.requestTrust()
       if (!this.isCurrentArm(generation) || !this.armed) return false
       if (trust.trust !== 'unreachable') this.publishTrust(trust.trust, trust.identity)
+      this.reportTrustRefusal(trust.trust)
       return true
     } catch (e) {
       reportError('approvals', 'could not recheck operator trust', e)
@@ -152,6 +155,17 @@ export class ApprovalRuntime {
 
   private publishTrust(trust: OperatorTrustStatus, identity: OperatorIdentity): void {
     this.opts.onTrustStatus?.(trust, identity.publicKey)
+  }
+
+  /** Reports a refusal once per distinct refused state; a compatible answer re-arms the report. */
+  private reportTrustRefusal(trust: OperatorTrustStatus): void {
+    if (trust === 'compatible') {
+      this.reportedRefusal = null
+      return
+    }
+    if (trust === 'unreachable' || trust === this.reportedRefusal) return
+    this.reportedRefusal = trust
+    reportError('approvals', `broker refused operator trust (${trust}); remote approvals are unavailable`)
   }
 
   /** Env vars merged into every spawned session. Empty when disarmed. */
@@ -312,6 +326,7 @@ export class ApprovalRuntime {
         throw e
       }
       this.publishTrust(trust, identity)
+      this.reportTrustRefusal(trust)
       if (trust !== 'compatible') {
         this.identity = null
         return false
@@ -398,6 +413,7 @@ export class ApprovalRuntime {
 
   private async finishDisarm(): Promise<void> {
     await this.armInFlight
+    this.reportedRefusal = null
 
     const path = this.credPath
     this.credPath = null
