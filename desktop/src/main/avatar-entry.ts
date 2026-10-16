@@ -1,6 +1,26 @@
+import { spawn as spawnProcess } from 'node:child_process'
 import { randomBytes, randomUUID } from 'node:crypto'
+import { existsSync, readFileSync } from 'node:fs'
+import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { app, BrowserWindow, ipcMain, Menu, nativeTheme, screen } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, screen } from 'electron'
+import {
+  brokerStopMarkerPath,
+  clearBrokerStopMarker,
+  readBrokerStopMarker,
+  writeBrokerStopMarker
+} from '../../../shared/broker-stop-marker'
+import { avatarManualStop, avatarTrayBroker, createAvatarBrokerControl } from './avatar-broker-control'
+import {
+  avatarBrokerProbeUrls,
+  brokerListenerEnds,
+  brokerStopDialogOptions,
+  confirmedStop,
+  fetchBrokerHealth,
+  manualStopRefresher,
+  probeBrokerUrls,
+  trayBrokerSummary
+} from './avatar-broker-wiring'
 import { startAvatarBrokerProbe, type AvatarBrokerProbe } from './avatar-broker-probe'
 import { generateAvatarRunCertificate } from './avatar-certificate'
 import { createAvatarClickGesture } from './avatar-click-gesture'
@@ -20,7 +40,9 @@ import { finishAvatarStartup } from './avatar-startup'
 import { avatarDeckStateDir, readAvatarLocale } from './avatar-locale'
 import { selectWindowShown, type AvatarGeometry } from './avatar-window-state'
 import { createAvatarQuitHandler } from './avatar-quit-handler'
-import { resolveBrokerEndpoint } from './broker-client'
+import { AVATAR_TRAY_COPY } from './avatar-tray-copy'
+import { deckBrokerMode, peersConfigPath, resolveBrokerEndpoint } from './broker-client'
+import { ensureLoopbackBroker, locateBrokerScript, withPathEntry } from './broker-spawn'
 import { initDeckLog, logInfo, logWarn, reportError } from './log'
 import { installProcessFailureGuard } from './process-failure-guard'
 
@@ -40,6 +62,17 @@ let tray: AvatarTray | null = null
 let brokerProbe: AvatarBrokerProbe | null = null
 let avatarAssembly: AvatarAssembly | null = null
 let stopFollowers: (() => void) | null = null
+
+const brokerMarkerPath = (): string => brokerStopMarkerPath(peersConfigPath())
+const brokerStoppedManually = (): boolean => avatarManualStop(deckBrokerMode(), readBrokerStopMarker(brokerMarkerPath()))
+
+async function brokerAnswers(url: string): Promise<boolean> {
+  try {
+    return (await fetch(`${url}/health`, { signal: AbortSignal.timeout(2000) })).ok
+  } catch {
+    return false
+  }
+}
 
 function avatarGeometry(): AvatarGeometry {
   return {
@@ -85,10 +118,60 @@ async function startAvatar(): Promise<void> {
   })
   avatarAssembly = assembly
   server = await startAvatarServer({ avatarRunId, certificate, state: assembly.state, token })
+  const refreshManualStop = manualStopRefresher(
+    brokerStoppedManually,
+    (stopped) => assembly.state.setManualStop(stopped),
+    () => assembly.controller.dispatch({ kind: 'RefreshRequested' })
+  )
   brokerProbe = startAvatarBrokerProbe({
-    brokerUrls: () => server?.attachedDecks().map((deck) => deck.broker_url) ?? [],
+    brokerUrls: probeBrokerUrls(refreshManualStop, () =>
+      avatarBrokerProbeUrls(server?.attachedDecks().map((deck) => deck.broker_url) ?? [], deckBrokerMode(), resolveBrokerEndpoint().url)
+    ),
     knownBrokerUrls: () => [resolveBrokerEndpoint().url],
     setBrokerReachable: (brokerUrl, reachable) => assembly.state.setBrokerReachable(brokerUrl, reachable)
+  })
+
+  const brokerControl = createAvatarBrokerControl({
+    url: () => resolveBrokerEndpoint().url,
+    selfPid: process.pid,
+    listenerPid: (port) => {
+      const ends = brokerListenerEnds(port)
+      return loopbackSocketOwner(ends.local, ends.remote, { env: process.env, run: runSocketOwnerHelper })
+    },
+    isAlive: deckProcessIsAlive,
+    brokerHealth: (port) => fetchBrokerHealth(port, fetch),
+    attachedBrokerUrls: () => server?.attachedDecks().map((deck) => deck.broker_url) ?? [],
+    confirm: async (details) => {
+      const answer = await dialog.showMessageBox(brokerStopDialogOptions(AVATAR_TRAY_COPY[locale].brokerStopConfirm(details)))
+      return confirmedStop(answer.response)
+    },
+    writeMarker: (marker) => writeBrokerStopMarker(brokerMarkerPath(), marker),
+    clearMarker: () => clearBrokerStopMarker(brokerMarkerPath()),
+    kill: (pid) => process.kill(pid),
+    sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+    now: () => new Date().toISOString(),
+    health: () => brokerAnswers(resolveBrokerEndpoint().url),
+    ensure: () =>
+      ensureLoopbackBroker(deckBrokerMode(), resolveBrokerEndpoint().url, {
+        isAlive: brokerAnswers,
+        stopped: () => readBrokerStopMarker(brokerMarkerPath()).stopped,
+        locate: () =>
+          locateBrokerScript(join(homedir(), '.claude.json'), app.getAppPath(), {
+            readFile: (path) => (existsSync(path) ? readFileSync(path, 'utf8') : null),
+            exists: (path) => existsSync(path),
+            homeDir: homedir(),
+            warn: (message) => reportError('avatar-broker', message)
+          }),
+        spawn: (command, script, entryEnv) => {
+          const env = withPathEntry({ ...process.env, ...entryEnv }, join(homedir(), '.bun', 'bin'), process.platform === 'win32' ? ';' : ':')
+          const child = spawnProcess(command, [script], { detached: true, stdio: 'ignore', env })
+          child.on('error', (error) => reportError('avatar-broker', `local broker process failed to start (${command} ${script})`, error))
+          child.unref()
+        },
+        sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+      }),
+    refresh: refreshManualStop,
+    report: reportError
   })
 
   const currentLifetime = lifetime
@@ -125,7 +208,7 @@ async function startAvatar(): Promise<void> {
     },
     createTray: () => {
       tray = createAvatarTray({
-        summary: assembly.traySummary,
+        summary: trayBrokerSummary(refreshManualStop, assembly.traySummary),
         iconDir: avatarTrayIconDir(app.isPackaged, process.resourcesPath, app.getAppPath()),
         locale,
         attachedDecks: () => server?.attachedDecks() ?? [],
@@ -137,7 +220,12 @@ async function startAvatar(): Promise<void> {
         onDeckMenuClick: (identity) => {
           void focusFromTray(identity, 'focus').catch((error: unknown) => reportError('avatar-focus', 'Tray focus gesture failed', error))
         },
-        onQuit: () => app.quit()
+        onQuit: () => app.quit(),
+        broker: () =>
+          avatarTrayBroker(deckBrokerMode(), brokerStoppedManually(), assembly.state.brokerReachable(resolveBrokerEndpoint().url)),
+        onBroker: (value) => {
+          void (value === 'stop' ? brokerControl.stop() : brokerControl.start())
+        }
       })
     },
     theme: nativeTheme,

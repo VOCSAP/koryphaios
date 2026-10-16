@@ -18,8 +18,18 @@ function deck(patch: Partial<AvatarDeckStatus> = {}): AvatarDeckStatus {
 }
 
 function summary(face: AvatarFace, patch: Partial<AvatarSummary> = {}): AvatarSummary {
-  return { face, counters: { ...ZERO }, unread: 0, decks: [deck()], ...patch }
+  return { face, counters: { ...ZERO }, unread: 0, decks: [deck()], manualStop: false, ...patch }
 }
+
+test('a manual broker stop names itself instead of counting silent Decks, in English and French', () => {
+  const stopped = summary('panne', { manualStop: true, decks: [deck({ torchOut: true }), deck({ torchOut: true })] })
+  const en = avatarFaceCopy(stopped, 'en').title
+  const fr = avatarFaceCopy(stopped, 'fr').title
+
+  expect(en).toBe('The local broker was stopped manually')
+  expect(fr).toBe('Broker local arrêté manuellement')
+  expect(en).not.toBe(avatarFaceCopy({ ...stopped, manualStop: false }, 'en').title)
+})
 
 const SEVEN: Record<AvatarFace, AvatarSummary> = {
   panne: summary('panne', { decks: [deck({ torchOut: true }), deck({ torchOut: true }), deck()] }),

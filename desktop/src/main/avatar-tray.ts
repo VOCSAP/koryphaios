@@ -10,6 +10,7 @@ import {
   type AvatarDndState,
   type AvatarTrayAction,
   type AvatarTrayAppearance,
+  type AvatarTrayBroker,
   type AvatarTrayMenuItem
 } from './avatar-tray-menu'
 import { avatarTrayIconPath, avatarTrayTaskbar, avatarTrayVariant, type AvatarTrayTaskbar, type AvatarTrayVariant } from './avatar-tray-icon'
@@ -34,6 +35,8 @@ export interface AvatarTrayOptions {
   onDnd(choice: AvatarDndState['choice']): void
   onDeckMenuClick(identity: AvatarDeckIdentity): void
   onQuit(): void
+  broker(): AvatarTrayBroker | null
+  onBroker(value: 'start' | 'stop'): void
 }
 
 export interface AvatarTrayNative {
@@ -157,7 +160,16 @@ export function createAvatarTray(options: AvatarTrayOptions, dependencies: Avata
     try {
       const summary = options.summary()
       syncIcon(avatarTrayVariant(summary.face), currentTaskbar())
-      const menu = buildAvatarTrayMenu(summary, options.attachedDecks(), options.getDnd(), dependencies.now(), options.appearance(), options.windowShown(), options.locale)
+      const menu = buildAvatarTrayMenu(
+        summary,
+        options.attachedDecks(),
+        options.getDnd(),
+        dependencies.now(),
+        options.appearance(),
+        options.windowShown(),
+        options.locale,
+        options.broker()
+      )
       tray.setToolTip(menu.tooltip)
       tray.setContextMenu(dependencies.buildMenu(menu.items.map((item) => nativeMenuItem(item, invoke))))
     } catch (error) {
@@ -173,6 +185,10 @@ export function createAvatarTray(options: AvatarTrayOptions, dependencies: Avata
         return
       case 'deck-focus':
         options.onDeckMenuClick(action.identity)
+        return
+      case 'broker':
+        options.onBroker(action.value)
+        refresh()
         return
       case 'quit':
         options.onQuit()

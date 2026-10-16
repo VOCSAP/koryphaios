@@ -63,12 +63,18 @@ const AVATAR_FACE_TITLES = {
   }
 } as const satisfies FaceTitles
 
+const MANUAL_STOP_TITLE = {
+  en: 'The local broker was stopped manually',
+  fr: 'Broker local arrêté manuellement'
+} as const satisfies Record<SupportedLocale, string>
+
 const ARIA_PREFIX = {
   en: 'Koryphaios avatar: ',
   fr: 'Avatar Koryphaios : '
 } as const satisfies Record<SupportedLocale, string>
 
 function faceTitle(summary: AvatarSummary, locale: SupportedLocale): string {
+  if (summary.manualStop) return MANUAL_STOP_TITLE[locale]
   switch (summary.face) {
     case 'panne':
       return AVATAR_FACE_TITLES.panne[locale]({ count: summary.decks.filter((deck) => deck.torchOut).length })

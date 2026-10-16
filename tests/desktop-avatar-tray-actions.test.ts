@@ -178,14 +178,16 @@ async function setup(appearanceOverride: Partial<AvatarAppearance> = {}) {
     getDnd: assembly.trayDnd,
     onDnd: assembly.chooseDnd,
     onDeckMenuClick: () => {},
-    onQuit: () => {}
+    onQuit: () => {},
+    broker: () => ({ running: true }),
+    onBroker: () => {}
   }, dependencies)
   assembly.controller.dispatch({ kind: 'RestoreRequested' })
   await flush()
 
   const appearance = () => assembly.controller.snapshot().appearance
   const pureMenu = (): AvatarTrayMenuItem[] =>
-    buildAvatarTrayMenu(assembly.traySummary(), [DECK], assembly.trayDnd(), NOW, appearance(), selectWindowShown(assembly.controller.snapshot()), 'en').items
+    buildAvatarTrayMenu(assembly.traySummary(), [DECK], assembly.trayDnd(), NOW, appearance(), selectWindowShown(assembly.controller.snapshot()), 'en', { running: true }).items
   const locate = (match: (action: AvatarTrayAction) => boolean): { pure: AvatarTrayMenuItem; native: NativeItem } => {
     const walk = (pure: AvatarTrayMenuItem[], native: NativeItem[]): { pure: AvatarTrayMenuItem; native: NativeItem } | null => {
       for (const [index, item] of pure.entries()) {

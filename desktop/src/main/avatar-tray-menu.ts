@@ -26,6 +26,7 @@ export type AvatarTrayAction =
   | { kind: 'motion'; value: AvatarAppearance['motion'] }
   | { kind: 'size'; value: AvatarAppearance['size'] }
   | { kind: 'frame'; value: AvatarAppearance['frame'] }
+  | { kind: 'broker'; value: 'start' | 'stop' }
   | { kind: 'quit' }
 
 export const AVATAR_TRAY_ACTION_KINDS = {
@@ -38,8 +39,14 @@ export const AVATAR_TRAY_ACTION_KINDS = {
   motion: true,
   size: true,
   frame: true,
+  broker: true,
   quit: true
 } as const satisfies Record<AvatarTrayAction['kind'], true>
+
+/** The local broker the Avatar may start or stop; null when the configured broker is remote. */
+export interface AvatarTrayBroker {
+  running: boolean
+}
 
 export interface AvatarTrayMenuItem {
   type?: 'separator' | 'radio' | 'checkbox'
@@ -165,7 +172,8 @@ export function buildAvatarTrayMenu(
   now: number,
   appearance: AvatarTrayAppearance,
   windowShown: boolean,
-  locale: SupportedLocale
+  locale: SupportedLocale,
+  broker: AvatarTrayBroker | null = null
 ): AvatarTrayMenu {
   const copy = AVATAR_TRAY_COPY[locale]
   const statuses = new Map(summary.decks.map((deck) => [deckKey(deck.identity), deck]))
@@ -184,6 +192,14 @@ export function buildAvatarTrayMenu(
       ...windowMenuItems(copy, appearance, windowShown),
       dndMenuItem(copy, dnd, now),
       { type: 'separator' },
+      ...(broker === null
+        ? []
+        : [
+            broker.running
+              ? { label: copy.brokerStop, action: { kind: 'broker', value: 'stop' } }
+              : { label: copy.brokerStart, action: { kind: 'broker', value: 'start' } },
+            { type: 'separator' }
+          ] satisfies AvatarTrayMenuItem[]),
       { label: copy.quit, action: { kind: 'quit' } }
     ]
   }

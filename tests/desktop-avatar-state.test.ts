@@ -226,3 +226,26 @@ test('no attention target without an attached Deck that waits', () => {
 
   expect(selectAvatarAttentionDeck(state.summary().decks, [working])).toBeNull()
 })
+
+test('a manual broker stop shows the panne face, even with no Deck attached, until it is lifted', () => {
+  const state = new AvatarState({ now: () => 0 })
+  expect(state.summary()).toMatchObject({ face: 'seul', manualStop: false })
+
+  state.setManualStop(true)
+  expect(state.summary()).toMatchObject({ face: 'panne', manualStop: true })
+
+  state.receiveSnapshot(snapshot('waiting', { waiting: 2 }))
+  expect(state.summary()).toMatchObject({ face: 'panne', manualStop: true })
+
+  state.setManualStop(false)
+  expect(state.summary()).toMatchObject({ face: 'reclame', manualStop: false })
+})
+
+test('the reachability of a broker URL is readable back, reachable until a probe says otherwise', () => {
+  const state = new AvatarState({ now: () => 0 })
+  expect(state.brokerReachable('http://127.0.0.1:7899')).toBe(true)
+
+  state.setBrokerReachable('http://127.0.0.1:7899', false)
+  expect(state.brokerReachable('http://127.0.0.1:7899')).toBe(false)
+  expect(state.brokerReachable('http://127.0.0.1:7900')).toBe(true)
+})

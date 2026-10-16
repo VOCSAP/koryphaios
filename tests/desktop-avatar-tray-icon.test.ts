@@ -276,7 +276,9 @@ function startTray(
     getDnd: () => null,
     onDnd: () => {},
     onDeckMenuClick: () => {},
-    onQuit: () => {}
+    onQuit: () => {},
+    broker: () => null,
+    onBroker: () => {}
   }, {
     ...electronAvatarTrayDependencies(() => fake.module),
     setInterval: (callback: () => void) => { tick = callback; return 'timer' as unknown as ReturnType<typeof setInterval> },

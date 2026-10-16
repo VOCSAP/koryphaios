@@ -30,7 +30,24 @@ interface AvatarTrayCopy {
   dnd30m: string
   dnd1h: string
   dndTomorrow: string
+  brokerStart: string
+  brokerStop: string
+  brokerStopConfirm: (details: AvatarBrokerStopDetails) => AvatarBrokerStopConfirmCopy
   quit: string
+}
+
+export interface AvatarBrokerStopDetails {
+  url: string
+  pid: number
+  decks: number
+}
+
+export interface AvatarBrokerStopConfirmCopy {
+  title: string
+  message: string
+  detail: string
+  confirm: string
+  cancel: string
 }
 
 export const AVATAR_TRAY_COPY = {
@@ -58,6 +75,15 @@ export const AVATAR_TRAY_COPY = {
     dnd30m: '30 minutes',
     dnd1h: '1 hour',
     dndTomorrow: 'Until tomorrow',
+    brokerStart: 'Start the local broker',
+    brokerStop: 'Stop the local broker',
+    brokerStopConfirm: ({ url, pid, decks }) => ({
+      title: 'Stop the local broker?',
+      message: `Stop the broker at ${url} (process ${pid})?`,
+      detail: `This cuts claude-peers for every session on this machine (${decks} attached ${decks === 1 ? 'Deck' : 'Decks'}). The broker stays stopped until you start it again from this menu or from a Deck banner.`,
+      confirm: 'Stop the broker',
+      cancel: 'Cancel'
+    }),
     quit: 'Quit Avatar'
   },
   fr: {
@@ -84,6 +110,15 @@ export const AVATAR_TRAY_COPY = {
     dnd30m: 'Pendant 30 minutes',
     dnd1h: 'Pendant 1 heure',
     dndTomorrow: "Jusqu'à demain",
+    brokerStart: 'Démarrer le broker local',
+    brokerStop: 'Arrêter le broker local',
+    brokerStopConfirm: ({ url, pid, decks }) => ({
+      title: 'Arrêter le broker local ?',
+      message: `Arrêter le broker ${url} (processus ${pid}) ?`,
+      detail: `Cela coupe claude-peers pour toutes les sessions de ce poste (${decks} ${decks < 2 ? 'Deck attaché' : 'Decks attachés'}). Le broker reste arrêté jusqu'à ce que vous le redémarriez depuis ce menu ou depuis le bandeau d'un Deck.`,
+      confirm: 'Arrêter le broker',
+      cancel: 'Annuler'
+    }),
     quit: "Quitter l'avatar"
   }
 } as const satisfies Record<SupportedLocale, AvatarTrayCopy>

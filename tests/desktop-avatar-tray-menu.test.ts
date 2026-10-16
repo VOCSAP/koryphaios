@@ -194,7 +194,9 @@ test('translates every native label, drives actions, refreshes, reports errors a
     getDnd: () => currentDnd,
     onDnd: (choice) => { currentDnd = chooseAvatarDnd(choice, currentNow) },
     onDeckMenuClick: (identity) => focused.push(identity.deckRunId),
-    onQuit: () => { quit += 1 }
+    onQuit: () => { quit += 1 },
+    broker: () => null,
+    onBroker: () => {}
   }, dependencies)
 
   expect(tooltips).toEqual(['Koryphaios avatar: 2 sessions are waiting for you'])
@@ -254,7 +256,9 @@ test('reports a native refresh failure without preventing disposal', () => {
     getDnd: () => null,
     onDnd: () => {},
     onDeckMenuClick: () => {},
-    onQuit: () => {}
+    onQuit: () => {},
+    broker: () => null,
+    onBroker: () => {}
   }, {
     now: () => now,
     loadImage: () => ({ isEmpty: () => false }),
@@ -276,6 +280,73 @@ test('reports a native refresh failure without preventing disposal', () => {
   expect(errors).toEqual([boom])
   tray.dispose()
   expect(destroyed).toBe(1)
+})
+
+test('the local broker entry is absent for a remote broker and follows the broker state otherwise', () => {
+  const brokerItems = (menu: ReturnType<typeof buildAvatarTrayMenu>) => menu.items.filter((item) => item.action?.kind === 'broker')
+
+  expect(brokerItems(buildAvatarTrayMenu(summary, attached, null, now, APPEARANCE, true, 'en', null))).toEqual([])
+  expect(brokerItems(buildAvatarTrayMenu(summary, attached, null, now, APPEARANCE, true, 'en', { running: true }))).toEqual([
+    { label: 'Stop the local broker', action: { kind: 'broker', value: 'stop' } }
+  ])
+  expect(brokerItems(buildAvatarTrayMenu(summary, attached, null, now, APPEARANCE, true, 'fr', { running: false }))).toEqual([
+    { label: AVATAR_TRAY_COPY.fr.brokerStart, action: { kind: 'broker', value: 'start' } }
+  ])
+})
+
+test('the broker confirmation names the URL, the process and the attached Decks, in both locales', () => {
+  for (const locale of ['en', 'fr'] as const) {
+    const text = AVATAR_TRAY_COPY[locale].brokerStopConfirm({ url: 'http://127.0.0.1:7899', pid: 4242, decks: 2 })
+    const all = `${text.title} ${text.message} ${text.detail}`
+    expect(all).toContain('http://127.0.0.1:7899')
+    expect(all).toContain('4242')
+    expect(all).toContain('2')
+    expect(text.confirm.length).toBeGreaterThan(0)
+    expect(text.cancel.length).toBeGreaterThan(0)
+  }
+  expect(AVATAR_TRAY_COPY.fr.brokerStopConfirm({ url: 'u', pid: 1, decks: 0 }).title).not.toBe(
+    AVATAR_TRAY_COPY.en.brokerStopConfirm({ url: 'u', pid: 1, decks: 0 }).title
+  )
+})
+
+test('clicking the broker entry hands its value to the Avatar', () => {
+  const menus: NativeItem[][] = []
+  const chosen: string[] = []
+  let running = true
+  createAvatarTray({
+    summary: () => summary,
+    iconDir: 'icons',
+    locale: 'en',
+    attachedDecks: () => attached,
+    appearance: () => APPEARANCE,
+    windowShown: () => true,
+    dispatch: () => {},
+    getDnd: () => null,
+    onDnd: () => {},
+    onDeckMenuClick: () => {},
+    onQuit: () => {},
+    broker: () => ({ running }),
+    onBroker: (value) => {
+      chosen.push(value)
+      running = value === 'start'
+    }
+  }, {
+    now: () => now,
+    loadImage: () => ({ isEmpty: () => false }),
+    createTray: () => ({ setToolTip: () => {}, setContextMenu: (menu) => menus.push(menu as NativeItem[]), setImage: () => {}, destroy: () => {} }),
+    buildMenu: (template) => template,
+    setInterval: () => 'timer' as unknown as ReturnType<typeof setInterval>,
+    clearInterval: () => {},
+    reportError: () => {},
+    platform: 'win32',
+    systemIntegratedUiDark: () => true,
+    onSystemThemeUpdated: () => () => {}
+  })
+
+  requireNativeItem(menus[0]!, 'Stop the local broker').click?.()
+  expect(chosen).toEqual(['stop'])
+  requireNativeItem(menus[1]!, 'Start the local broker').click?.()
+  expect(chosen).toEqual(['stop', 'start'])
 })
 
 test('keeps the tray usable with no attached Deck', () => {
@@ -324,8 +395,13 @@ test('every menu text has a French version distinct from the English one', () =>
   const keys = Object.keys(AVATAR_TRAY_COPY.en) as (keyof typeof AVATAR_TRAY_COPY.en)[]
   expect(Object.keys(AVATAR_TRAY_COPY.fr).sort()).toEqual([...keys].sort())
   for (const key of keys) {
-    const en = key === 'project' || key === 'broker' ? AVATAR_TRAY_COPY.en[key]('X') : sample(AVATAR_TRAY_COPY.en[key])
-    const fr = key === 'project' || key === 'broker' ? AVATAR_TRAY_COPY.fr[key]('X') : sample(AVATAR_TRAY_COPY.fr[key])
+    const confirmDetails = { url: 'X', pid: 1, decks: 2 }
+    const en = key === 'project' || key === 'broker'
+      ? AVATAR_TRAY_COPY.en[key]('X')
+      : key === 'brokerStopConfirm' ? JSON.stringify(AVATAR_TRAY_COPY.en[key](confirmDetails)) : sample(AVATAR_TRAY_COPY.en[key])
+    const fr = key === 'project' || key === 'broker'
+      ? AVATAR_TRAY_COPY.fr[key]('X')
+      : key === 'brokerStopConfirm' ? JSON.stringify(AVATAR_TRAY_COPY.fr[key](confirmDetails)) : sample(AVATAR_TRAY_COPY.fr[key])
     expect(fr.length, `${key} fr`).toBeGreaterThan(0)
     expect(fr, `${key} must be translated`).not.toBe(en)
   }

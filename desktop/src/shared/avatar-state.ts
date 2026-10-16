@@ -45,6 +45,11 @@ export interface AvatarSummary {
   counters: AvatarDeckCounters
   unread: number
   decks: AvatarDeckStatus[]
+  /**
+   * The operator stopped the local broker on purpose: shown as panne whatever the Decks say.
+   * Always set by AvatarState.summary(); optional because the renderer's view summary does not carry it.
+   */
+  manualStop?: boolean
 }
 
 interface StoredDeck {
@@ -137,6 +142,7 @@ export class AvatarState {
   readonly timing: AvatarStateTiming
   private readonly decks = new Map<string, StoredDeck>()
   private readonly brokers = new Map<string, boolean>()
+  private manualStop = false
 
   constructor(private readonly options: AvatarStateOptions) {
     this.timing = {
@@ -154,6 +160,14 @@ export class AvatarState {
 
   setBrokerReachable(brokerUrl: string, reachable: boolean): void {
     this.brokers.set(brokerUrl, reachable)
+  }
+
+  brokerReachable(brokerUrl: string): boolean {
+    return this.brokers.get(brokerUrl) ?? true
+  }
+
+  setManualStop(stopped: boolean): void {
+    this.manualStop = stopped
   }
 
   detach(identity: AvatarDeckIdentity): boolean {
@@ -178,12 +192,14 @@ export class AvatarState {
     })
     const counters = decks.reduce((total, deck) => addCounters(total, deck.counters), { ...ZERO_COUNTERS })
     const unread = decks.reduce((total, deck) => total + deck.unread, 0)
+    const manualStop = this.manualStop
 
-    if (decks.length === 0) return { face: 'seul', counters, unread, decks }
+    if (manualStop) return { face: 'panne', counters, unread, decks, manualStop }
+    if (decks.length === 0) return { face: 'seul', counters, unread, decks, manualStop }
     const urgent = urgentRule(decks)
-    if (urgent !== null) return { face: urgent[0], counters, unread, decks }
-    if (unread > 0) return { face: 'courrier', counters, unread, decks }
-    if (counters.working > 0) return { face: 'travaille', counters, unread, decks }
-    return { face: 'endormi', counters, unread, decks }
+    if (urgent !== null) return { face: urgent[0], counters, unread, decks, manualStop }
+    if (unread > 0) return { face: 'courrier', counters, unread, decks, manualStop }
+    if (counters.working > 0) return { face: 'travaille', counters, unread, decks, manualStop }
+    return { face: 'endormi', counters, unread, decks, manualStop }
   }
 }
