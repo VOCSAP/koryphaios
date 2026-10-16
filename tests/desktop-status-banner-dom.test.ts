@@ -24,7 +24,12 @@ const { act, React, createRoot, create } = await import("../desktop/tests-suppor
 
 interface FakeDeckState {
   dict: Record<string, string>;
-  brokerStatus: { up: boolean; since: number; lastError: string | null } | null;
+  brokerStatus: {
+    up: boolean;
+    since: number;
+    lastError: string | null;
+    manualStop?: { stopped_at: string | null } | null;
+  } | null;
   operatorTrustStatus: OperatorTrustStatusEvent;
   offlineBannerDismissed: number | null;
   dismissOfflineBanner(): void;
@@ -240,6 +245,116 @@ test("desktop: the conflicts banner button opens the roadmap FILTERED on the con
   mountBanner();
   clickConflictsButton();
   expect(calls).toEqual(["openRoadmapConflictsFilter"]);
+});
+
+// ----- manual broker stop -----
+
+type StartResult = { ok: true } | { ok: false; error: string };
+
+function stubApi(startBroker: () => Promise<StartResult>): string[] {
+  const calls: string[] = [];
+  (window as unknown as { api: unknown }).api = {
+    startBroker: () => {
+      calls.push("startBroker");
+      return startBroker();
+    },
+    retryBroker: async () => {
+      calls.push("retryBroker");
+    },
+    reportError: (scope: string, message: string) => calls.push(`reportError:${scope}:${message}`),
+  };
+  return calls;
+}
+
+function stoppedStatus(over: { up?: boolean } = {}): FakeDeckState["brokerStatus"] {
+  return { up: over.up ?? false, since: 5, lastError: "ECONNREFUSED", manualStop: { stopped_at: "2026-10-16T19:00:00.000Z" } };
+}
+
+afterEach(() => {
+  delete (window as unknown as { api?: unknown }).api;
+});
+
+function startControl(): HTMLButtonElement {
+  const buttons = [...container.querySelectorAll<HTMLButtonElement>("button")];
+  expect(buttons, "the stopped banner is ONE control, sentence and label together").toHaveLength(1);
+  return buttons[0]!;
+}
+
+test("a manual stop shows its own banner as one Start control, with no Dismiss, over the outage it causes", () => {
+  stubApi(async () => ({ ok: true }));
+  fakeUseDeck.setState({ brokerStatus: stoppedStatus() });
+  mountBanner();
+  expect(container.textContent).not.toContain("banner.brokerDown");
+  const control = startControl();
+  expect(control.type).toBe("button");
+  expect(control.textContent).toContain("banner.brokerStopped");
+  expect(control.textContent).toContain("banner.brokerStart");
+  expect(container.textContent).not.toContain("banner.dismiss");
+});
+
+test("clicking the sentence itself starts the broker", async () => {
+  const calls = stubApi(async () => ({ ok: true }));
+  fakeUseDeck.setState({ brokerStatus: stoppedStatus() });
+  mountBanner();
+  const sentence = container.querySelector<HTMLElement>(".status-banner-text");
+  expect(sentence?.textContent).toContain("banner.brokerStopped");
+  await act(async () => {
+    sentence!.click();
+  });
+  expect(calls).toEqual(["startBroker"]);
+});
+
+test("the Start control calls broker:start, never the Retry poll, and is disabled while it runs", async () => {
+  let release!: (r: StartResult) => void;
+  const calls = stubApi(() => new Promise<StartResult>((resolve) => { release = resolve; }));
+  fakeUseDeck.setState({ brokerStatus: stoppedStatus() });
+  mountBanner();
+  act(() => {
+    startControl().click();
+  });
+  expect(calls).toEqual(["startBroker"]);
+  expect(startControl().disabled).toBe(true);
+  expect(startControl().textContent).toContain("banner.brokerStarting");
+  act(() => {
+    startControl().click();
+  });
+  expect(calls, "a disabled control must not start twice").toEqual(["startBroker"]);
+  await act(async () => {
+    release({ ok: true });
+  });
+  expect(startControl().disabled).toBe(false);
+  expect(startControl().textContent).toContain("banner.brokerStart");
+});
+
+test("a failed Start stays visible, on the stopped banner and on the outage banner that follows it", async () => {
+  stubApi(async () => ({ ok: false, error: "no broker.ts to start" }));
+  fakeUseDeck.setState({ brokerStatus: stoppedStatus() });
+  mountBanner();
+  await act(async () => {
+    startControl().click();
+  });
+  expect(container.textContent).toContain("no broker.ts to start");
+
+  act(() => {
+    fakeUseDeck.setState({ brokerStatus: { up: false, since: 5, lastError: "ECONNREFUSED", manualStop: null } });
+  });
+  expect(container.textContent).toContain("banner.brokerDown");
+  expect(container.textContent, "the marker is gone, the start error must survive the switch").toContain(
+    "no broker.ts to start"
+  );
+});
+
+test("a Start that throws is reported and shown", async () => {
+  const calls = stubApi(async () => {
+    throw new Error("remote-blocked");
+  });
+  fakeUseDeck.setState({ brokerStatus: stoppedStatus() });
+  mountBanner();
+  await act(async () => {
+    startControl().click();
+  });
+  expect(calls.some((c) => c.startsWith("reportError:banner:") && c.includes("remote-blocked"))).toBe(true);
+  expect(container.textContent).toContain("remote-blocked");
 });
 
 test("mobile: the conflicts banner button only switches view, RoadmapList has no filter row to show a narrowing", () => {

@@ -10,6 +10,7 @@
 import type { OperatorTrustState, RoadmapSyncOfflineReason, RoadmapSyncStatus } from './types'
 
 export type StatusBannerKind =
+  | 'broker-stopped'
   | 'broker-down'
   | 'operator-unconfigured'
   | 'operator-not-trusted'
@@ -22,6 +23,8 @@ export type StatusBannerKind =
   | 'replica-offline'
 
 export interface StatusBannerInput {
+  /** The operator stopped the local broker on purpose: not dismissable, only Start clears it. */
+  brokerManualStop: boolean
   /** Reachability of the LOCAL broker; null until the first poll answers. */
   brokerUp: boolean | null
   /** The operator hid the banner of the outage currently open. */
@@ -38,13 +41,15 @@ export interface StatusBannerInput {
 /**
  * The ladder, most blocking first:
  *
- * 1. the local broker is unreachable;
- * 2. cards await arbitration;
- * 3. the upstream refused pushes;
- * 4. operator trust is degraded, so privileged actions remain unavailable;
- * 5. the upstream is unreachable.
+ * 1. the operator stopped the local broker on purpose;
+ * 2. the local broker is unreachable;
+ * 3. cards await arbitration;
+ * 4. the upstream refused pushes;
+ * 5. operator trust is degraded, so privileged actions remain unavailable;
+ * 6. the upstream is unreachable.
  */
 export function bannerKind(input: StatusBannerInput): StatusBannerKind | null {
+  if (input.brokerManualStop) return 'broker-stopped'
   if (input.brokerUp === false) return input.brokerDismissed ? null : 'broker-down'
   if (input.conflicts > 0) return 'conflicts'
   // `online === true` and not merely "not false": an undefined online is a

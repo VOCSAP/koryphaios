@@ -123,6 +123,14 @@ test('regHandle domain is discovered across main/ (not hardcoded), and unparseab
   expect(unmanifested).toEqual([])
 })
 
+test('broker:start (undoes an operator stop) is remote-blocked by its tier; broker:retry (a poll) is not', () => {
+  expect(COMPANION_MANIFEST.startBroker).toEqual({ kind: 'invoke', channel: 'broker:start' })
+  expect(CHANNEL_TIERS['broker:start']).toBe(3)
+  expect(REMOTE_BLOCKED_CHANNELS.has('broker:start'), 'a paired phone must not restart a broker stopped at the machine').toBe(true)
+  expect(CHANNEL_TIERS['broker:retry']).toBe(1)
+  expect(REMOTE_BLOCKED_CHANNELS.has('broker:retry')).toBe(false)
+})
+
 test('agents:stop (trust-changing) is remote-blocked; agents:stop-state (read) is not', () => {
   expect(CHANNEL_TIERS['agents:stop']).toBe(3)
   expect(REMOTE_BLOCKED_CHANNELS.has('agents:stop')).toBe(true)

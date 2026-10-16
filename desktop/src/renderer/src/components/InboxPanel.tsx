@@ -76,6 +76,8 @@ export function InboxPanel(): React.JSX.Element {
   const replyDrafts = useDeck((s) => s.inboxReplyDrafts)
   const drafts = useDeck((s) => s.graphDrafts)
   const openInbox = useDeck((s) => s.openInbox)
+  const seed = useDeck((s) => s.inboxSeed)
+  const clearInboxSeed = useDeck((s) => s.clearInboxSeed)
   const openGraphDraft = useDeck((s) => s.openGraphDraft)
   const markInboxSeen = useDeck((s) => s.markInboxSeen)
   const ackInboxEntry = useDeck((s) => s.ackInboxEntry)
@@ -130,6 +132,14 @@ export function InboxPanel(): React.JSX.Element {
     if (a) markInboxSeen(a)
     setOpenKey(reactKey(e))
   }
+
+  // A seed naming a question already settled opens the panel alone.
+  useEffect(() => {
+    if (!seed) return
+    const seeded = entries.find((e) => e.kind === 'approval' && e.approval.id === seed)
+    if (seeded) setOpenKey(reactKey(seeded))
+    clearInboxSeed()
+  }, [seed, entries, clearInboxSeed])
 
   const senderOf = (e: InboxEntry): React.ReactNode => {
     if (e.kind === 'message') return e.message.from

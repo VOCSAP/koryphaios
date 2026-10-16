@@ -41,6 +41,7 @@ import { runUtilityInference, type UtilityDeps } from './utility-inference'
 import { markGraphDraftOpened, peersConfigPath, resolveBrokerEndpoint } from './broker-client'
 import { readPeersConfigSummary, writeOfflineReplica } from './peers-config-store'
 import type { BrokerStatusEvent } from './broker-client'
+import type { BrokerStartResult } from './broker-start'
 import {
   appendAckedKey,
   appendSeenKey,
@@ -200,6 +201,8 @@ interface IpcDeps {
   brokerStatus: () => BrokerStatusEvent
   /** Force an immediate broker poll (banner Retry button). */
   brokerRetry: () => void
+  /** Clear the stop marker and start the loopback broker (banner Start button). */
+  brokerStart: () => Promise<BrokerStartResult>
   operatorTrustStatus: () => OperatorTrustStatusEvent
   retryOperatorTrust: () => Promise<OperatorTrustStatusEvent>
   /**
@@ -298,6 +301,7 @@ export function registerIpc({
   resolveTemplateInputs,
   brokerStatus,
   brokerRetry,
+  brokerStart,
   operatorTrustStatus,
   retryOperatorTrust,
   deckPluginDir,
@@ -1183,6 +1187,7 @@ export function registerIpc({
   // ----- broker reachability (PLAN O5) -----
   regHandle('broker:status', () => brokerStatus())
   regHandle('broker:retry', () => brokerRetry())
+  regHandle('broker:start', () => brokerStart())
   regHandle('operator-trust:status', () => operatorTrustStatus())
   regHandle('operator-trust:retry', async () => {
     return retryOperatorTrust()

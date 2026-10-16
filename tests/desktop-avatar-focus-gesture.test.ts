@@ -55,7 +55,7 @@ function harness(overrides: Partial<DeckFocusGestureDeps> = {}) {
 
 test('cedes the foreground to the Deck pid before sending the focus command', async () => {
   const { gesture, calls, reports, infos } = harness()
-  await gesture(identity)
+  await gesture(identity, 'focus')
   expect(calls).toEqual(['owner', 'allow:4242', 'focus:deck-run-1'])
   expect(reports).toEqual([])
   expect(infos).toEqual(['Deck deck-run-1 brought to front'])
@@ -63,7 +63,7 @@ test('cedes the foreground to the Deck pid before sending the focus command', as
 
 test('refuses and traces a Deck whose WebSocket another process owns, ceding nothing', async () => {
   const { gesture, calls, reports } = harness({ socketOwnerPid: async () => 5151 })
-  await gesture(identity)
+  await gesture(identity, 'focus')
   expect(calls, 'the declared pid must never receive the foreground right').toEqual([])
   expect(reports).toEqual([
     'refused to focus Deck deck-run-1: its WebSocket belongs to process 5151, not to the declared 4242'
@@ -72,14 +72,14 @@ test('refuses and traces a Deck whose WebSocket another process owns, ceding not
 
 test('refuses when the owner of the WebSocket cannot be told, or cannot be read', async () => {
   const unknown = harness({ socketOwnerPid: async () => null })
-  await unknown.gesture(identity)
+  await unknown.gesture(identity, 'focus')
   expect(unknown.calls).toEqual([])
   expect(unknown.reports).toEqual([
     'refused to focus Deck deck-run-1: its WebSocket belongs to process unknown, not to the declared 4242'
   ])
 
   const unreadable = harness({ socketOwnerPid: () => Promise.reject(new Error('netstat timed out')) })
-  await unreadable.gesture(identity)
+  await unreadable.gesture(identity, 'focus')
   expect(unreadable.calls).toEqual([])
   expect(unreadable.reports).toEqual([
     'refused to focus Deck deck-run-1: the owner of its WebSocket could not be read'
@@ -88,7 +88,7 @@ test('refuses when the owner of the WebSocket cannot be told, or cannot be read'
 
 test('refuses and traces a Deck detached since the menu was built', async () => {
   const { gesture, calls, reports } = harness({ attachedDecks: () => [] })
-  await gesture(identity)
+  await gesture(identity, 'focus')
   expect(calls).toEqual([])
   expect(reports).toEqual(['refused to focus Deck deck-run-1: it is no longer attached'])
 })
@@ -96,21 +96,21 @@ test('refuses and traces a Deck detached since the menu was built', async () => 
 test('never focuses another attached Deck in place of the one clicked', async () => {
   const other = { ...deck, deckRunId: 'deck-run-2', deckPid: 5151 }
   const { gesture, calls, reports } = harness({ attachedDecks: () => [other] })
-  await gesture(identity)
+  await gesture(identity, 'focus')
   expect(calls).toEqual([])
   expect(reports).toEqual(['refused to focus Deck deck-run-1: it is no longer attached'])
 })
 
 test('refuses and traces a Deck whose process is not alive', async () => {
   const { gesture, calls, reports } = harness({ isAlive: () => false })
-  await gesture(identity)
+  await gesture(identity, 'focus')
   expect(calls).toEqual([])
   expect(reports).toEqual(['refused to focus Deck deck-run-1: its process 4242 is not alive'])
 })
 
 test('refuses and traces an unbound Deck before ceding anything', async () => {
   const { gesture, calls, reports } = harness({ isDeckBound: () => false })
-  await gesture(identity)
+  await gesture(identity, 'focus')
   expect(calls).toEqual([])
   expect(reports).toEqual(['refused to focus Deck deck-run-1: it is not bound to the Avatar'])
 })
@@ -126,14 +126,14 @@ test('refuses and traces a second click while a focus is in flight, then accepts
       })
     }
   })
-  const first = gesture(identity)
+  const first = gesture(identity, 'focus')
   await new Promise((resolve) => setTimeout(resolve, 0))
-  await settledWithin(gesture(identity))
+  await settledWithin(gesture(identity, 'focus'))
   expect(focusCalls).toBe(1)
   expect(reports).toEqual(['refused to focus Deck deck-run-1: a focus is already in flight'])
   finish({ requestId: 'request-1', ok: true })
   await settledWithin(first)
-  const third = gesture(identity)
+  const third = gesture(identity, 'focus')
   await new Promise((resolve) => setTimeout(resolve, 0))
   finish({ requestId: 'request-2', ok: true })
   await settledWithin(third)
@@ -142,7 +142,7 @@ test('refuses and traces a second click while a focus is in flight, then accepts
 
 test('does not cede the foreground outside Windows but still sends the focus', async () => {
   const { gesture, calls } = harness({ platform: 'darwin' })
-  await gesture(identity)
+  await gesture(identity, 'focus')
   expect(calls).toEqual(['focus:deck-run-1'])
 })
 
@@ -155,21 +155,81 @@ test('traces a failed cession and still sends the focus', async () => {
       return { requestId: 'request-1', ok: true }
     }
   })
-  await gesture(identity)
+  await gesture(identity, 'focus')
   expect(calls).toEqual(['focus'])
   expect(reports).toEqual(['could not cede the foreground to Deck deck-run-1; its window may only flash'])
 })
 
 test('traces a refused or failed focus, never as a success', async () => {
   const refused = harness({ focusDeck: async () => ({ requestId: 'request-1', ok: false, error: 'focus_failed' }) })
-  await refused.gesture(identity)
+  await refused.gesture(identity, 'focus')
   expect(refused.reports).toEqual(['Deck deck-run-1 refused the focus: focus_failed'])
   expect(refused.infos).toEqual([])
 
   const failed = harness({ focusDeck: () => Promise.reject(new Error('Avatar command result timed out')) })
-  await failed.gesture(identity)
+  await failed.gesture(identity, 'focus')
   expect(failed.reports).toEqual(['focus of Deck deck-run-1 failed'])
   expect(failed.infos).toEqual([])
+})
+
+function commandHarness(results: Record<string, AvatarCommandResult>, overrides: Partial<DeckFocusGestureDeps> = {}) {
+  const sent: string[] = []
+  const context = harness({
+    focusDeck: async (_target, command) => {
+      sent.push(command)
+      return results[command] ?? { requestId: 'request-x', ok: true }
+    },
+    ...overrides
+  })
+  return { ...context, sent }
+}
+
+test('sends open_question after the same checks and cession as a focus', async () => {
+  const { gesture, calls, sent, reports } = commandHarness({})
+  await gesture(identity, 'open_question')
+  expect(calls).toEqual(['owner', 'allow:4242'])
+  expect(sent).toEqual(['open_question'])
+  expect(reports).toEqual([])
+})
+
+test('an older Deck refusing open_question as unsupported gets one plain focus instead', async () => {
+  const { gesture, sent, reports, infos } = commandHarness({
+    open_question: { requestId: 'request-1', ok: false, error: 'unsupported_command' }
+  })
+  await gesture(identity, 'open_question')
+  expect(sent).toEqual(['open_question', 'focus'])
+  expect(reports).toEqual([])
+  expect(infos).toEqual([
+    'Deck deck-run-1 does not support open_question, falling back to focus',
+    'Deck deck-run-1 brought to front'
+  ])
+})
+
+test('open_question refused for another reason is reported, never downgraded to a focus', async () => {
+  const { gesture, sent, reports, infos } = commandHarness({
+    open_question: { requestId: 'request-1', ok: false, error: 'open_question_failed' }
+  })
+  await gesture(identity, 'open_question')
+  expect(sent).toEqual(['open_question'])
+  expect(reports).toEqual(['Deck deck-run-1 refused open_question: open_question_failed'])
+  expect(infos).toEqual([])
+})
+
+test('a focus refused as unsupported is reported, never retried', async () => {
+  const { gesture, sent, reports } = commandHarness({ focus: { requestId: 'request-1', ok: false, error: 'unsupported_command' } })
+  await gesture(identity, 'focus')
+  expect(sent).toEqual(['focus'])
+  expect(reports).toEqual(['Deck deck-run-1 refused the focus: unsupported_command'])
+})
+
+test('open_question is refused by the same socket owner check as a focus, nothing sent', async () => {
+  const { gesture, calls, sent, reports } = commandHarness({}, { socketOwnerPid: async () => 5151 })
+  await gesture(identity, 'open_question')
+  expect(calls).toEqual([])
+  expect(sent).toEqual([])
+  expect(reports).toEqual([
+    'refused to focus Deck deck-run-1: its WebSocket belongs to process 5151, not to the declared 4242'
+  ])
 })
 
 test('a process is alive only when this user may signal it', () => {

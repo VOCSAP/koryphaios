@@ -101,6 +101,7 @@ function ensureDeps(overrides: Partial<EnsureDeps> & { aliveAfterPolls?: number 
       polls += 1;
       return polls > aliveAfter;
     },
+    stopped: () => false,
     locate: () => ({ script: "/x/broker.ts", command: "bun", env: {}, source: "claude-json" }),
     spawn: (command, script, env) => {
       spawned.push(`${command} ${script}${Object.keys(env).length ? ` ${JSON.stringify(env)}` : ""}`);
@@ -147,6 +148,27 @@ test("no script, a spawn that throws, or a broker that never answers are three d
   const mute = ensureDeps({});
   const outcome = await ensureLoopbackBroker("local", "http://127.0.0.1:7899", mute.deps);
   expect([outcome.action, mute.polls()], "the poll budget is spent then the failure is named").toEqual(["failed", 4]);
+});
+
+test("a manually stopped broker is never spawned, in local and replica modes", async () => {
+  for (const mode of ["local", "replica"] as const) {
+    let located = 0;
+    const { deps, spawned } = ensureDeps({
+      stopped: () => true,
+      locate: () => {
+        located += 1;
+        return { script: "/x/broker.ts", command: "bun", env: {}, source: "claude-json" };
+      },
+    });
+    expect(await ensureLoopbackBroker(mode, "http://127.0.0.1:7899", deps)).toEqual({ action: "skipped", reason: "manual-stop" });
+    expect([spawned, located], "the stop marker is checked before anything is located or spawned").toEqual([[], 0]);
+  }
+});
+
+test("an answering broker is left alone even while a stop marker exists", async () => {
+  const { deps, spawned } = ensureDeps({ aliveAfterPolls: 0, stopped: () => true });
+  expect(await ensureLoopbackBroker("local", "http://127.0.0.1:7899", deps)).toEqual({ action: "already-running" });
+  expect(spawned).toEqual([]);
 });
 
 test("a respawn is allowed once per interval, never on every failing poll", () => {

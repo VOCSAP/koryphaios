@@ -101,7 +101,7 @@ interface FileConfigResult {
 
 const DEFAULT_ANTHROPIC_MODEL = "claude-haiku-4-5-20251001";
 
-function settingsFilePath(): string {
+export function settingsFilePath(): string {
   if (process.platform === "win32") {
     const appdata = process.env.APPDATA;
     if (appdata) {

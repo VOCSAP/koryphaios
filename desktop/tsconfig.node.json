@@ -44,6 +44,7 @@
     "../shared/peer-cache.ts",
     "../shared/logger.ts",
     "../shared/log-redact.ts",
+    "../shared/broker-stop-marker.ts",
     "hooks/**/*.ts",
     "mcp/**/*.ts",
     "scripts/win-verify/**/*.ts",

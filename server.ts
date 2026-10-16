@@ -60,7 +60,9 @@ import {
   resolveGroup,
   computeGroupId,
   computeGroupSecretHash,
+  settingsFilePath,
 } from "./shared/config.ts";
+import { brokerStopMarkerPath, readBrokerStopMarker } from "./shared/broker-stop-marker.ts";
 import {
   formatInboundLine,
   isDeckSender,
@@ -202,6 +204,15 @@ async function ensureBroker(): Promise<void> {
     throw new Error(
       `Broker at ${BROKER_URL} is unreachable. Remote brokers (HTTP mode) must be started manually; refusing to spawn a local broker that would not serve this URL. If this machine must keep working while the broker is unreachable, set offline_replica: true in ~/.config/claude-peers/config.json (%APPDATA%\\claude-peers\\config.json on Windows) (or CLAUDE_PEERS_OFFLINE_REPLICA=1) to run a local replica.`
     );
+  }
+
+  const markerPath = brokerStopMarkerPath(settingsFilePath());
+  const stop = readBrokerStopMarker(markerPath);
+  if (stop.stopped) {
+    const detail = stop.marker ? ` at ${stop.marker.stopped_at}` : `, marker unreadable: ${stop.problem}`;
+    const message = `the local broker was stopped manually; start it again from the Avatar Tray or the Deck banner, or delete ${markerPath} (stopped${detail})`;
+    logError(message);
+    throw new Error(message);
   }
 
   log("Starting broker daemon...");

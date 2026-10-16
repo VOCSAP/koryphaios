@@ -60,6 +60,24 @@ test("one success flips back up and clears lastError", () => {
   expect(events[1]!.since).toBeGreaterThan(events[0]!.since);
 });
 
+test("a manual stop is broadcast at once, once per change, and kept across reachability transitions", () => {
+  const { tracker, events } = make();
+  expect(tracker.status.manualStop).toBeNull();
+  tracker.setManualStop({ stopped_at: "2026-10-16T19:00:00.000Z" });
+  tracker.setManualStop({ stopped_at: "2026-10-16T19:00:00.000Z" });
+  expect(events.map((e) => e.manualStop)).toEqual([{ stopped_at: "2026-10-16T19:00:00.000Z" }]);
+
+  tracker.recordFailure(new Error("down"));
+  tracker.recordFailure(new Error("down"));
+  expect(events.at(-1)!.manualStop, "the outage event must not drop the stop").toEqual({ stopped_at: "2026-10-16T19:00:00.000Z" });
+
+  tracker.setManualStop({ stopped_at: null });
+  tracker.setManualStop(null);
+  tracker.setManualStop(null);
+  expect(events.slice(-2).map((e) => e.manualStop)).toEqual([{ stopped_at: null }, null]);
+  expect(events).toHaveLength(4);
+});
+
 test("non-Error failures are stringified", () => {
   const { tracker } = make();
   tracker.recordFailure("http 500");

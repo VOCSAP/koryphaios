@@ -119,6 +119,7 @@ export function withPathEntry(
 
 export type EnsureOutcome =
   | { action: 'skipped'; reason: 'remote-mode' }
+  | { action: 'skipped'; reason: 'manual-stop' }
   | { action: 'already-running' }
   | { action: 'not-found' }
   | { action: 'started'; script: string; source: BrokerScriptLocation['source'] }
@@ -127,6 +128,8 @@ export type EnsureOutcome =
 export interface EnsureDeps {
   /** GET <url>/health: true when the broker answers 2xx. */
   isAlive: (url: string) => Promise<boolean>
+  /** True while the operator's broker stop marker is present, malformed included. */
+  stopped: () => boolean
   locate: () => BrokerScriptLocation | null
   /** Spawn detached, stdio ignored, unref'd; throws when the executable is missing. */
   spawn: (command: string, script: string, env: Record<string, string>) => void
@@ -148,6 +151,7 @@ export async function ensureLoopbackBroker(
 ): Promise<EnsureOutcome> {
   if (mode === 'remote') return { action: 'skipped', reason: 'remote-mode' }
   if (await deps.isAlive(url)) return { action: 'already-running' }
+  if (deps.stopped()) return { action: 'skipped', reason: 'manual-stop' }
   const located = deps.locate()
   if (!located) return { action: 'not-found' }
   try {

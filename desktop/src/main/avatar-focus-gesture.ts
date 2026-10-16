@@ -1,4 +1,4 @@
-import type { AvatarAttachRequest } from '../shared/avatar-protocol'
+import type { AvatarAttachRequest, AvatarCommand } from '../shared/avatar-protocol'
 import type { AvatarDeckIdentity } from '../shared/avatar-state'
 import type { AvatarCommandResult } from './avatar-server'
 import { logInfo, reportError } from './log'
@@ -11,7 +11,7 @@ export interface DeckFocusGestureDeps {
   /** The process owning the Deck's bound WebSocket; null when it cannot be told. Windows only. */
   socketOwnerPid(identity: AvatarDeckIdentity): Promise<number | null>
   allowForeground(pid: number): Promise<boolean>
-  focusDeck(identity: AvatarDeckIdentity): Promise<AvatarCommandResult>
+  focusDeck(identity: AvatarDeckIdentity, command: AvatarCommand): Promise<AvatarCommandResult>
   report?: typeof reportError
   info?: typeof logInfo
 }
@@ -30,12 +30,14 @@ function deckKey(identity: AvatarDeckIdentity): string {
   return JSON.stringify([identity.deckRunId, identity.broker_url])
 }
 
-export function createDeckFocusGesture(deps: DeckFocusGestureDeps): (identity: AvatarDeckIdentity) => Promise<void> {
+export function createDeckFocusGesture(
+  deps: DeckFocusGestureDeps
+): (identity: AvatarDeckIdentity, command: AvatarCommand) => Promise<void> {
   const report = deps.report ?? reportError
   const info = deps.info ?? logInfo
   const inFlight = new Set<string>()
 
-  const run = async (identity: AvatarDeckIdentity): Promise<void> => {
+  const run = async (identity: AvatarDeckIdentity, command: AvatarCommand): Promise<void> => {
     const deck = deps.attachedDecks().find((candidate) => deckKey(candidate) === deckKey(identity))
     if (!deck) {
       report('avatar-focus', `refused to focus Deck ${identity.deckRunId}: it is no longer attached`)
@@ -69,15 +71,22 @@ export function createDeckFocusGesture(deps: DeckFocusGestureDeps): (identity: A
       }
     }
     try {
-      const result = await deps.focusDeck(identity)
+      let sent = command
+      let result = await deps.focusDeck(identity, sent)
+      if (!result.ok && result.error === 'unsupported_command' && sent !== 'focus') {
+        info('avatar-focus', `Deck ${identity.deckRunId} does not support ${sent}, falling back to focus`)
+        sent = 'focus'
+        result = await deps.focusDeck(identity, sent)
+      }
+      const action = sent === 'focus' ? 'the focus' : sent
       if (result.ok) info('avatar-focus', `Deck ${identity.deckRunId} brought to front`)
-      else report('avatar-focus', `Deck ${identity.deckRunId} refused the focus: ${result.error ?? 'no reason given'}`)
+      else report('avatar-focus', `Deck ${identity.deckRunId} refused ${action}: ${result.error ?? 'no reason given'}`)
     } catch (error) {
       report('avatar-focus', `focus of Deck ${identity.deckRunId} failed`, error)
     }
   }
 
-  return async (identity) => {
+  return async (identity, command) => {
     const key = deckKey(identity)
     if (inFlight.has(key)) {
       report('avatar-focus', `refused to focus Deck ${identity.deckRunId}: a focus is already in flight`)
@@ -85,7 +94,7 @@ export function createDeckFocusGesture(deps: DeckFocusGestureDeps): (identity: A
     }
     inFlight.add(key)
     try {
-      await run(identity)
+      await run(identity, command)
     } finally {
       inFlight.delete(key)
     }

@@ -3,6 +3,7 @@ import {
   AVATAR_HEARTBEAT_MS,
   AVATAR_SUSPECT_AFTER_MS,
   AvatarState,
+  selectAvatarAttentionDeck,
   selectAvatarFocusDeck,
   type AvatarDeckIdentity,
   type AvatarDeckSnapshot
@@ -175,4 +176,53 @@ test('selects no Deck when no Deck produces an urgent face', () => {
   state.receiveSnapshot({ ...snapshot(working.deckRunId, { working: 1 }), identity: working })
 
   expect(selectAvatarFocusDeck(state.summary().decks, [working])).toBeNull()
+})
+
+test('the attention target is the waiting Deck even while another Deck shows the panne face', () => {
+  const state = new AvatarState({ now: () => 0 })
+  const failedBroker = 'http://broker-failed.example:7899'
+  const waiting = identity('waiting')
+  const panne = identity('panne', failedBroker)
+  state.receiveSnapshot({ ...snapshot(waiting.deckRunId, { waiting: 1 }), identity: waiting })
+  state.receiveSnapshot({ ...snapshot(panne.deckRunId, { exited: 1 }, failedBroker), identity: panne })
+  state.setBrokerReachable(failedBroker, false)
+
+  const summary = state.summary()
+  expect(summary.face).toBe('panne')
+  expect(selectAvatarAttentionDeck(summary.decks, [waiting, panne])).toEqual(waiting)
+})
+
+test('the attention target is the first waiting attached Deck by identity, not attach order', () => {
+  const state = new AvatarState({ now: () => 0 })
+  const later = identity('run-z')
+  const first = identity('run-a', 'http://broker-z.example:7899')
+  const firstByBroker = identity('run-a', 'http://broker-a.example:7899')
+  const notAttached = identity('run-0')
+  state.receiveSnapshot({ ...snapshot(later.deckRunId, { waiting: 1 }), identity: later })
+  state.receiveSnapshot({ ...snapshot(first.deckRunId, { waiting: 2 }, first.broker_url), identity: first })
+  state.receiveSnapshot({ ...snapshot(firstByBroker.deckRunId, { waiting: 1 }, firstByBroker.broker_url), identity: firstByBroker })
+  state.receiveSnapshot({ ...snapshot(notAttached.deckRunId, { waiting: 1 }), identity: notAttached })
+
+  expect(selectAvatarAttentionDeck(state.summary().decks, [later, first, firstByBroker])).toEqual(firstByBroker)
+})
+
+test('the attention target follows identity order whatever order the waiting Decks arrive in', () => {
+  const first = identity('run-a')
+  const second = identity('run-b')
+  for (const arrival of [[second, first], [first, second]]) {
+    const state = new AvatarState({ now: () => 0 })
+    for (const deck of arrival) state.receiveSnapshot({ ...snapshot(deck.deckRunId, { waiting: 1 }), identity: deck })
+
+    expect(selectAvatarAttentionDeck(state.summary().decks, arrival)).toEqual(first)
+  }
+})
+
+test('no attention target without an attached Deck that waits', () => {
+  const state = new AvatarState({ now: () => 0 })
+  const working = identity('working')
+  const waiting = identity('waiting')
+  state.receiveSnapshot({ ...snapshot(working.deckRunId, { working: 1, exited: 1 }), identity: working })
+  state.receiveSnapshot({ ...snapshot(waiting.deckRunId, { waiting: 1 }), identity: waiting })
+
+  expect(selectAvatarAttentionDeck(state.summary().decks, [working])).toBeNull()
 })

@@ -107,7 +107,7 @@ async function focusOnceBound(server) {
   const deadline = Date.now() + 5_000
   for (;;) {
     try {
-      return await server.focusDeck({ deckRunId: deck.deckRunId, broker_url: deck.broker_url })
+      return await server.focusDeck({ deckRunId: deck.deckRunId, broker_url: deck.broker_url }, 'focus')
     } catch (error) {
       const notReady = error.message === 'Avatar Deck is not attached' || error.message === 'Avatar Deck is not bound'
       if (!notReady || Date.now() > deadline) throw error

@@ -454,11 +454,25 @@ test('binds an attached Deck then relays its focus command result', async () => 
   const socket = boundSocket(hub)
   try {
     expect(socket.sent).toEqual([{ type: 'bound' }])
-    const focus = hub.focusDeck(deck)
+    const focus = hub.focusDeck(deck, 'focus')
     expect(socket.sent[1]).toMatchObject({ type: 'command', command: 'focus', ...deck })
     const requestId = lastRequestId(socket)
     socket.receive({ type: 'command_result', requestId, ok: false, error: 'window gone' })
     await expect(settledWithin(focus)).resolves.toEqual({ requestId, ok: false, error: 'window gone' })
+  } finally {
+    socket.close(1000, 'test done')
+  }
+})
+
+test('sends the command it is given, and relays its result', async () => {
+  const { hub } = openHub()
+  const socket = boundSocket(hub)
+  try {
+    const opening = hub.focusDeck(deck, 'open_question')
+    expect(socket.sent[1]).toMatchObject({ type: 'command', command: 'open_question', ...deck })
+    const requestId = lastRequestId(socket)
+    socket.receive({ type: 'command_result', requestId, ok: true })
+    await expect(settledWithin(opening)).resolves.toEqual({ requestId, ok: true })
   } finally {
     socket.close(1000, 'test done')
   }
@@ -506,7 +520,7 @@ test('rejects a focus whose command_result misses its deadline', async () => {
   const { hub } = openHub({ commandResultTimeoutMs: 10 })
   const socket = boundSocket(hub)
   try {
-    await expect(settledWithin(hub.focusDeck(deck))).rejects.toThrow('Avatar command result timed out')
+    await expect(settledWithin(hub.focusDeck(deck, 'focus'))).rejects.toThrow('Avatar command result timed out')
   } finally {
     socket.close(1000, 'test done')
   }
@@ -515,7 +529,7 @@ test('rejects a focus whose command_result misses its deadline', async () => {
 test('never replays a command to the socket that reconnects after a disconnect', async () => {
   const { hub } = openHub()
   const first = boundSocket(hub)
-  const focus = hub.focusDeck(deck)
+  const focus = hub.focusDeck(deck, 'focus')
   first.close(1006, 'lost')
   await expect(settledWithin(focus)).rejects.toThrow('Avatar Deck WebSocket disconnected')
 
@@ -531,13 +545,13 @@ test('never replays a command to the socket that reconnects after a disconnect',
 test('a second bind of the same Deck supersedes the first socket, traced, with its own close code', async () => {
   const { hub, reports } = openHub()
   const first = boundSocket(hub)
-  const stranded = hub.focusDeck(deck)
+  const stranded = hub.focusDeck(deck, 'focus')
   const second = boundSocket(hub)
   try {
     expect(first.closed).toEqual({ code: 4410, reason: 'superseded' })
     expect(reports).toEqual(['replaced the Avatar WebSocket of a Deck that bound again'])
     await expect(settledWithin(stranded)).rejects.toThrow('Avatar Deck WebSocket superseded')
-    const focus = hub.focusDeck(deck)
+    const focus = hub.focusDeck(deck, 'focus')
     expect(first.sent).toHaveLength(2)
     const requestId = lastRequestId(second)
     second.receive({ type: 'command_result', requestId, ok: true })
@@ -551,10 +565,10 @@ test('traces and ignores a late or unknown command_result without closing the ch
   const { hub, reports } = openHub({ commandResultTimeoutMs: 10 })
   const socket = boundSocket(hub)
   try {
-    const expired = hub.focusDeck(deck)
+    const expired = hub.focusDeck(deck, 'focus')
     const expiredId = lastRequestId(socket)
     await expect(settledWithin(expired)).rejects.toThrow('Avatar command result timed out')
-    const live = hub.focusDeck(deck)
+    const live = hub.focusDeck(deck, 'focus')
     const liveId = lastRequestId(socket)
     socket.receive({ type: 'command_result', requestId: expiredId, ok: true })
     socket.receive({ type: 'command_result', requestId: 'never-issued', ok: true })
@@ -573,12 +587,12 @@ test('traces and ignores a late or unknown command_result without closing the ch
 test('detach closes the bound socket, rejects its pending commands, and focusDeck then refuses the Deck', async () => {
   const { hub, attachedDecks } = openHub()
   const socket = boundSocket(hub)
-  const pending = hub.focusDeck(deck)
+  const pending = hub.focusDeck(deck, 'focus')
   attachedDecks.splice(attachedDecks.indexOf(deck), 1)
   hub.detach(deck)
   expect(socket.closed).toEqual({ code: 4410, reason: 'detached' })
   await expect(settledWithin(pending)).rejects.toThrow('Avatar Deck detached')
-  await expect(settledWithin(hub.focusDeck(deck))).rejects.toThrow('Avatar Deck is not attached')
+  await expect(settledWithin(hub.focusDeck(deck, 'focus'))).rejects.toThrow('Avatar Deck is not attached')
 })
 
 test('focusDeck refuses a Deck no longer attached even while its socket is still bound', async () => {
@@ -586,7 +600,7 @@ test('focusDeck refuses a Deck no longer attached even while its socket is still
   const socket = boundSocket(hub)
   try {
     attachedDecks.splice(attachedDecks.indexOf(deck), 1)
-    await expect(settledWithin(hub.focusDeck(deck))).rejects.toThrow('Avatar Deck is not attached')
+    await expect(settledWithin(hub.focusDeck(deck, 'focus'))).rejects.toThrow('Avatar Deck is not attached')
     expect(socket.sent).toEqual([{ type: 'bound' }])
   } finally {
     socket.close(1000, 'test done')

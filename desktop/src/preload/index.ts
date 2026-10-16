@@ -12,6 +12,7 @@ import type {
   HelpExchange,
   HelpSelection,
   InboxMessage,
+  InboxOpenTarget,
   LaunchConfig,
   PeersConfigSummary,
   PtyDataEvent,
@@ -101,6 +102,7 @@ const api: DeckApi = {
 
   getBrokerStatus: () => ipcRenderer.invoke('broker:status'),
   retryBroker: () => ipcRenderer.invoke('broker:retry'),
+  startBroker: () => ipcRenderer.invoke('broker:start'),
   getOperatorTrustStatus: () => ipcRenderer.invoke('operator-trust:status'),
   retryOperatorTrust: () => ipcRenderer.invoke('operator-trust:retry'),
 
@@ -287,7 +289,8 @@ const api: DeckApi = {
   onGraphDrafts: (cb) => subscribe('graphDrafts:update', cb),
   onRoadmapSync: (cb: (event: RoadmapSyncEvent) => void) => subscribe('roadmap:sync', cb),
   onPeersConfig: (cb: (summary: PeersConfigSummary) => void) => subscribe('peersConfig:summary', cb),
-  onInboxOpen: (cb: () => void) => subscribe('inbox:open', () => cb()),
+  onInboxOpen: (cb: (target?: InboxOpenTarget) => void) =>
+    subscribe<InboxOpenTarget | undefined>('inbox:open', (target) => cb(target)),
   onFocusSession: (cb: (id: string) => void) => subscribe('session:focus', cb),
   onDesignPick: (cb: (event: DesignPickEvent) => void) => subscribe('design:pick', cb),
   onConfigChanged: (cb: (config: AppConfig) => void) => subscribe('config:changed', cb),

@@ -1639,6 +1639,40 @@ textarea:disabled {
   outline-color: #fff;
 }
 
+/* Manual broker stop: the sentence says "click here", so the sentence and the
+   Start pill are ONE button; the pill is a span keeping the action look. */
+.status-banner-cta {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: none;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.status-banner-cta:disabled {
+  cursor: default;
+}
+
+.status-banner-cta:hover:not(:disabled) .status-banner-action {
+  background: rgba(255, 255, 255, 0.25);
+}
+
+.status-banner-cta:disabled .status-banner-action {
+  opacity: 0.4;
+}
+
+.status-banner-warn .status-banner-cta:focus-visible {
+  outline-color: #fff;
+}
+
 /* The neutral strip has the theme's text colour, so white-on-translucent would
    vanish in the light theme: its actions take the Secondary archetype. */
 .status-banner-info .status-banner-action {

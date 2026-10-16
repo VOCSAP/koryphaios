@@ -4,7 +4,8 @@ import type { AvatarDeckCounters, AvatarDeckIdentity, AvatarDeckSnapshot } from 
 export const AVATAR_PROTOCOL_VERSION = 1
 export const MAX_AVATAR_COUNTER = 1_000_000
 export const MAX_AVATAR_ATTACHMENTS = 64
-export const AVATAR_COMMANDS = ['focus'] as const
+export const AVATAR_COMMANDS = ['focus', 'open_question'] as const
+export type AvatarCommand = (typeof AVATAR_COMMANDS)[number]
 
 const MAX_DECK_RUN_ID_LENGTH = 64
 const MAX_AVATAR_REQUEST_ID_LENGTH = 64
@@ -34,7 +35,7 @@ export interface AvatarBoundFrame {
 export interface AvatarCommandFrame extends AvatarDeckIdentity {
   type: 'command'
   requestId: string
-  command: (typeof AVATAR_COMMANDS)[number]
+  command: AvatarCommand
 }
 
 export interface AvatarCommandResultFrame {

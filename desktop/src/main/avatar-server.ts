@@ -11,7 +11,8 @@ import {
   parseAvatarDeckFrame,
   parseAvatarDetachRequest,
   parseAvatarStateRequest,
-  type AvatarAttachRequest
+  type AvatarAttachRequest,
+  type AvatarCommand
 } from '../shared/avatar-protocol'
 import type { AvatarRunCertificate } from './avatar-certificate'
 import type { TcpEndpoint } from './avatar-socket-owner'
@@ -45,7 +46,7 @@ export interface AvatarServer {
   readonly host: string
   readonly port: number
   attachedDecks(): AvatarAttachedDeck[]
-  focusDeck(identity: AvatarDeckIdentity): Promise<AvatarCommandResult>
+  focusDeck(identity: AvatarDeckIdentity, command: AvatarCommand): Promise<AvatarCommandResult>
   isDeckBound(identity: AvatarDeckIdentity): boolean
   /** The Deck-side port of the Deck's open bound WebSocket, or null. */
   boundRemotePort(identity: AvatarDeckIdentity): number | null
@@ -90,7 +91,7 @@ export interface AvatarSocketHubOptions {
 export interface AvatarSocketHub {
   /** `remotePort` is the Deck-side TCP port of the upgraded connection, null when the transport has none. */
   accept(socket: AvatarDeckSocket, remotePort: number | null): void
-  focusDeck(identity: AvatarDeckIdentity): Promise<AvatarCommandResult>
+  focusDeck(identity: AvatarDeckIdentity, command: AvatarCommand): Promise<AvatarCommandResult>
   detach(identity: AvatarDeckIdentity): void
   isDeckBound(identity: AvatarDeckIdentity): boolean
   boundRemotePort(identity: AvatarDeckIdentity): number | null
@@ -479,7 +480,7 @@ export function createAvatarSocketHub(options: AvatarSocketHubOptions): AvatarSo
     socket.on('error', (error) => report('avatar-server', 'Avatar WebSocket error', error))
   }
 
-  const focusDeck = (identity: AvatarDeckIdentity): Promise<AvatarCommandResult> => {
+  const focusDeck = (identity: AvatarDeckIdentity, command: AvatarCommand): Promise<AvatarCommandResult> => {
     if (!options.isAttached(identity)) return Promise.reject(new Error('Avatar Deck is not attached'))
     const bound = boundSockets.get(deckKey(identity))
     if (!bound || bound.ws.readyState !== WebSocket.OPEN) {
@@ -495,7 +496,7 @@ export function createAvatarSocketHub(options: AvatarSocketHubOptions): AvatarSo
       bound.pending.set(requestId, { resolve, reject, timeout })
       try {
         bound.ws.send(
-          JSON.stringify({ type: 'command', requestId, command: 'focus', deckRunId: identity.deckRunId, broker_url: identity.broker_url }),
+          JSON.stringify({ type: 'command', requestId, command, deckRunId: identity.deckRunId, broker_url: identity.broker_url }),
           (error) => {
             if (!error) return
             const pending = bound.pending.get(requestId)

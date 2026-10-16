@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from 'bun:test'
 import { EventEmitter } from 'node:events'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -101,6 +101,8 @@ class MiniWindow implements AvatarBrowserWindow {
   showInactive(): void {
     this.calls.push('show')
   }
+
+  moveTop(): void {}
 }
 
 const flush = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0))
@@ -202,8 +204,52 @@ describe('Avatar assembly', () => {
     expect(s.gestures).toEqual(['single'])
 
     await s.invoke(AVATAR_VIEW_CHANNELS.gesture, window, 'double')
-    expect(s.stored().visible).toBe(false)
     expect(s.gestures).toEqual(['single'])
+  })
+
+  test('a double-click outside attention neither hides the Avatar nor focuses a Deck', async () => {
+    const s = setup()
+    const window = await s.open()
+
+    await s.invoke(AVATAR_VIEW_CHANNELS.gesture, window, 'double')
+
+    expect(s.assembly.controller.snapshot().appearance.visible).toBe(true)
+    expect(existsSync(s.target.file)).toBe(false)
+    expect(window.destroyed).toBe(false)
+    expect(s.gestures).toEqual([])
+  })
+
+  test('a double-click while a Deck waits on the operator is forwarded, without hiding the Avatar', async () => {
+    const s = setup()
+    const window = await s.open()
+    s.assembly.state.receiveSnapshot({
+      identity: { deckRunId: 'deck-run-1', broker_url: 'http://127.0.0.1:7899' },
+      counters: { working: 0, idle: 0, unknown: 0, waiting: 1, exited: 0, rateLimited: 0 },
+      unread: 0
+    })
+
+    await s.invoke(AVATAR_VIEW_CHANNELS.gesture, window, 'double')
+
+    expect(s.gestures).toEqual(['double'])
+    expect(s.assembly.controller.snapshot().appearance.visible).toBe(true)
+  })
+
+  test('a double-click is forwarded while a Deck waits even if another Deck shows the panne face', async () => {
+    const s = setup()
+    const window = await s.open()
+    const counters = { working: 0, idle: 0, unknown: 0, waiting: 0, exited: 0, rateLimited: 0 }
+    s.assembly.state.receiveSnapshot({
+      identity: { deckRunId: 'deck-waiting', broker_url: 'http://127.0.0.1:7899' },
+      counters: { ...counters, waiting: 1 },
+      unread: 0
+    })
+    s.assembly.state.receiveSnapshot({ identity: { deckRunId: 'deck-down', broker_url: 'http://127.0.0.1:7900' }, counters, unread: 0 })
+    s.assembly.state.setBrokerReachable('http://127.0.0.1:7900', false)
+    expect(s.assembly.state.summary().face).toBe('panne')
+
+    await s.invoke(AVATAR_VIEW_CHANNELS.gesture, window, 'double')
+
+    expect(s.gestures).toEqual(['double'])
   })
 
   test('the persisted file is a pure output: tampering with it mid-run is overwritten, never merged back', async () => {

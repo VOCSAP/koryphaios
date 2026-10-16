@@ -68,6 +68,7 @@ function harness(overrides: Partial<AvatarClientOptions> = {}) {
     rendezvous: rendezvous(),
     sessions: [] as SessionRuntime[],
     focusCalls: 0,
+    openQuestionCalls: 0,
     status: {} as Record<string, number>,
     deck: { ...deck }
   }
@@ -78,6 +79,9 @@ function harness(overrides: Partial<AvatarClientOptions> = {}) {
     sessions: () => live.sessions,
     focus: async () => {
       live.focusCalls += 1
+    },
+    openQuestion: async () => {
+      live.openQuestionCalls += 1
     },
     post: async (_rendezvous, path, body) => {
       posts.push({ path, body })
@@ -220,6 +224,26 @@ test('focuses on a bound command and answers its result', async () => {
   await flush()
   expect(live.focusCalls).toBe(1)
   expect(socket.sent.at(-1)).toEqual({ type: 'command_result', requestId: 'request-1', ok: true })
+  await client.stop()
+})
+
+test('an open_question command opens the question, not a plain focus', async () => {
+  const { client, socket, live } = await boundHarness()
+  socket.receive(command({ command: 'open_question' }))
+  await flush()
+  expect(live.openQuestionCalls).toBe(1)
+  expect(live.focusCalls).toBe(0)
+  expect(socket.sent.at(-1)).toEqual({ type: 'command_result', requestId: 'request-1', ok: true })
+  await client.stop()
+})
+
+test('answers and traces an open_question that fails, naming the command', async () => {
+  const { client, socket, reports, live } = await boundHarness({ openQuestion: () => Promise.reject(new Error('window gone')) })
+  socket.receive(command({ command: 'open_question' }))
+  await flush()
+  expect(socket.sent.at(-1)).toEqual({ type: 'command_result', requestId: 'request-1', ok: false, error: 'open_question_failed' })
+  expect(reports).toEqual(['Avatar open_question command failed'])
+  expect(live.focusCalls).toBe(0)
   await client.stop()
 })
 

@@ -96,6 +96,7 @@ export const COMPANION_MANIFEST = {
   // broker reachability
   getBrokerStatus: { kind: 'invoke', channel: 'broker:status' },
   retryBroker: { kind: 'invoke', channel: 'broker:retry' },
+  startBroker: { kind: 'invoke', channel: 'broker:start' },
   getOperatorTrustStatus: { kind: 'invoke', channel: 'operator-trust:status' },
   retryOperatorTrust: { kind: 'invoke', channel: 'operator-trust:retry' },
 
@@ -517,6 +518,9 @@ export const CHANNEL_TIERS: Readonly<Record<string, 0 | 1 | 2 | 3>> = {
   // floor by construction, which is the intent: a paired phone must never
   // repoint the machine's brokers.
   'peersConfig:setOfflineReplica': 3,
+  // Overrides a stop the operator made on purpose at the machine and spawns a
+  // process from the host config: only someone in front of it may undo that.
+  'broker:start': 3,
   'launch:set-global': 3,
   // Trust-changing: stops every live tile at once (pause/soft/hard), the
   // remote-companion equivalent of pulling the plug on the whole session.

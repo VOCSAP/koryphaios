@@ -121,6 +121,18 @@ export function selectAvatarFocusDeck(
   return winner ? { ...winner.identity } : null
 }
 
+/** Unlike selectAvatarFocusDeck, a Deck that waits on the operator wins even while another Deck shows the panne face. */
+export function selectAvatarAttentionDeck(
+  decks: readonly AvatarDeckStatus[],
+  attached: readonly AvatarDeckIdentity[]
+): AvatarDeckIdentity | null {
+  const attachedKeys = new Set(attached.map(deckKey))
+  const winner = decks
+    .filter((deck) => attachedKeys.has(deckKey(deck.identity)) && deck.counters.waiting > 0)
+    .sort((left, right) => compareIdentity(left.identity, right.identity))[0]
+  return winner ? { ...winner.identity } : null
+}
+
 export class AvatarState {
   readonly timing: AvatarStateTiming
   private readonly decks = new Map<string, StoredDeck>()

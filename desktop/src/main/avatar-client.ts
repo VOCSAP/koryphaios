@@ -15,7 +15,7 @@ import { avatarHttpsRequestOptions, connectAvatarWss } from './avatar-transport'
 import { logInfo, reportError } from './log'
 
 export const AVATAR_REQUEST_TIMEOUT_MS = 3_000
-export const AVATAR_FOCUS_TIMEOUT_MS = 2_000
+export const AVATAR_COMMAND_TIMEOUT_MS = 2_000
 
 export interface AvatarClientSocket {
   send(data: string): void
@@ -39,6 +39,7 @@ export interface AvatarClientOptions {
   /** Unread operator inbox messages; absent reads as zero. */
   inboxUnread?(): number
   focus(): Promise<void>
+  openQuestion(): Promise<void>
   post?: AvatarPost
   connect?: (rendezvous: AvatarRendezvous) => AvatarClientSocket
   every?: (ms: number, tick: () => void) => () => void
@@ -96,6 +97,10 @@ function failureEpisode(report: typeof reportError, info: typeof logInfo, restor
       info('avatar-client', restored)
     }
   }
+}
+
+function assertNever(value: never): never {
+  throw new Error(`Unclassified Avatar command: ${JSON.stringify(value)}`)
 }
 
 function rawText(data: RawData): string {
@@ -168,7 +173,7 @@ export function createAvatarClient(options: AvatarClientOptions): AvatarClient {
         reply(current, frame.requestId, false, 'wrong_deck')
         return
       }
-      const { requestId } = frame
+      const { requestId, command } = frame
       let answered = false
       const answer = (ok: boolean, error?: string): void => {
         if (answered) return
@@ -176,15 +181,25 @@ export function createAvatarClient(options: AvatarClientOptions): AvatarClient {
         cancelDeadline()
         reply(current, requestId, ok, error)
       }
-      const cancelDeadline = after(AVATAR_FOCUS_TIMEOUT_MS, () => {
-        report('avatar-client', `Avatar focus command timed out after ${AVATAR_FOCUS_TIMEOUT_MS} ms`)
-        answer(false, 'focus_timeout')
+      const cancelDeadline = after(AVATAR_COMMAND_TIMEOUT_MS, () => {
+        report('avatar-client', `Avatar ${command} command timed out after ${AVATAR_COMMAND_TIMEOUT_MS} ms`)
+        answer(false, `${command}_timeout`)
       })
-      Promise.resolve().then(() => options.focus()).then(
+      const run = (): Promise<void> => {
+        switch (command) {
+          case 'focus':
+            return options.focus()
+          case 'open_question':
+            return options.openQuestion()
+          default:
+            return assertNever(command)
+        }
+      }
+      Promise.resolve().then(run).then(
         () => answer(true),
         (error: unknown) => {
-          report('avatar-client', 'Avatar focus command failed', error)
-          answer(false, 'focus_failed')
+          report('avatar-client', `Avatar ${command} command failed`, error)
+          answer(false, `${command}_failed`)
         }
       )
     })

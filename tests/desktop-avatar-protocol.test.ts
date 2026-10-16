@@ -125,7 +125,14 @@ test('escapes every ampersand in a validated Deck name for the Tray menu', () =>
 
 test('accepts versioned bind, focus command, and command result frames', () => {
   const identity = { deckRunId: validAttach.deckRunId, broker_url: validAttach.broker_url }
-  expect(AVATAR_COMMANDS).toEqual(['focus'])
+  expect(AVATAR_COMMANDS).toEqual(['focus', 'open_question'])
+  expect(parseAvatarServerFrame({ type: 'command', requestId: 'request-2', command: 'open_question', ...identity })).toEqual({
+    type: 'command',
+    requestId: 'request-2',
+    command: 'open_question',
+    ...identity
+  })
+  expect(unsupportedAvatarCommandRequestId({ type: 'command', requestId: 'request-2', command: 'open_question', ...identity })).toBeNull()
   expect(parseAvatarDeckFrame({ type: 'bind', protocol_version: 1, ...identity })).toEqual({
     type: 'bind',
     protocol_version: 1,

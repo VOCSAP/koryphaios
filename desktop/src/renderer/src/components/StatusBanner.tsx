@@ -1,5 +1,6 @@
+import { useEffect, useState } from 'react'
 import { bannerKind, replicaOfflineTextKey } from '@shared/status-banner'
-import { roadmapConflictCount, useDeck } from '../store'
+import { errorText, roadmapConflictCount, useDeck } from '../store'
 import { useT } from '../i18n'
 import { GLYPH_BADGES } from './icons'
 import { OPERATOR_TRUST_TEXT } from './OperatorTrustDialog'
@@ -47,8 +48,31 @@ export function StatusBanner(): React.JSX.Element | null {
   const openTrustDialog = useDeck((s) => s.openOperatorTrustDialog)
   const retryTrust = useDeck((s) => s.retryOperatorTrust)
   const trustRetrying = useDeck((s) => s.operatorTrustRetrying)
+  const [brokerStarting, setBrokerStarting] = useState(false)
+  // Kept after a failed Start: the marker is already gone by then, so the strip
+  // falls back to broker-down, which must still say why the broker is not up.
+  const [brokerStartError, setBrokerStartError] = useState<string | null>(null)
+  const brokerUp = status?.up ?? null
+  useEffect(() => {
+    if (brokerUp) setBrokerStartError(null)
+  }, [brokerUp])
+
+  const startBroker = async (): Promise<void> => {
+    setBrokerStarting(true)
+    setBrokerStartError(null)
+    try {
+      const result = await window.api.startBroker()
+      if (!result.ok) setBrokerStartError(result.error)
+    } catch (e) {
+      window.api.reportError('banner', `broker start: ${errorText(e)}`)
+      setBrokerStartError(errorText(e))
+    } finally {
+      setBrokerStarting(false)
+    }
+  }
 
   const kind = bannerKind({
+    brokerManualStop: status?.manualStop != null,
     brokerUp: status === null ? null : status.up,
     // Dismiss is per-outage: hiding this outage's banner must not hide the
     // next one's (a new outage carries a new `since`). The NavRail red dot
@@ -59,15 +83,38 @@ export function StatusBanner(): React.JSX.Element | null {
     status: sync
   })
 
+  // The operator's own choice, so the amber of a state only they can move, not
+  // the red of an outage; no Dismiss, since only Start ends it.
+  if (kind === 'broker-stopped') {
+    return (
+      <div className="status-banner status-banner-warn" role="status">
+        <button
+          type="button"
+          className="status-banner-cta"
+          disabled={brokerStarting}
+          title={brokerStartError ?? undefined}
+          onClick={() => void startBroker()}
+        >
+          <span className="status-banner-text">
+            {GLYPH_BADGES.warning} {t('banner.brokerStopped')}
+            {brokerStartError ? <span className="status-banner-detail">: {brokerStartError}</span> : null}
+          </span>
+          <span className="status-banner-action">
+            {brokerStarting ? t('banner.brokerStarting') : t('banner.brokerStart')}
+          </span>
+        </button>
+      </div>
+    )
+  }
+
   if (kind === 'broker-down' && status !== null) {
     const since = new Date(status.since).toLocaleTimeString()
+    const detail = brokerStartError ?? status.lastError
     return (
       <div className="status-banner status-banner-error" role="alert">
-        <span className="status-banner-text" title={status.lastError ?? undefined}>
+        <span className="status-banner-text" title={detail ?? undefined}>
           {GLYPH_BADGES.warning} {t('banner.brokerDown', { time: since })}
-          {status.lastError ? (
-            <span className="status-banner-detail"> — {status.lastError}</span>
-          ) : null}
+          {detail ? <span className="status-banner-detail"> — {detail}</span> : null}
         </span>
         <button className="status-banner-action" onClick={() => void window.api.retryBroker()}>
           {t('banner.retry')}

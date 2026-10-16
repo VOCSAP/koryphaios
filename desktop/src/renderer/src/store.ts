@@ -115,6 +115,8 @@ interface DeckState {
   /** Operator inbox (PLAN C12): drained agent messages, newest LAST. */
   inboxMessages: InboxMessage[]
   inboxOpen: boolean
+  /** One-shot: the pending question whose modal the inbox panel opens on its next render. */
+  inboxSeed: string | null
   /**
    * Family-3 Courrier entries: blocking questions an agent is STOPPED on,
    * pushed whole by 'approvals:pending' (a full list, not a delta). Held in
@@ -283,6 +285,8 @@ interface DeckState {
   setRecordingSince(at: number | null): void
   /** Open/close the operator inbox panel (opening clears the unread count). */
   openInbox(open: boolean): void
+  /** Drop the one-shot inbox seed once the panel consumed it. */
+  clearInboxSeed(): void
   /**
    * Mark a family 1/2 entry as seen (opened, still to be handled). Never
    * downgrades an acked entry — closing a modal must not undo an ack, and
@@ -563,6 +567,7 @@ export const useDeck = create<DeckState>((set, get) => ({
   pickContextPrompt: true,
   inboxMessages: [],
   inboxOpen: false,
+  inboxSeed: null,
   pendingApprovals: [],
   inboxAckState: {},
   inboxReplyDrafts: {},
@@ -778,8 +783,14 @@ export const useDeck = create<DeckState>((set, get) => ({
     // Core-config summary, re-broadcast by main after a successful write so
     // every open surface shows the file rather than its own optimistic guess.
     window.api.onPeersConfig((peersConfig) => set({ peersConfig }))
-    // Notification click on an inbox message: surface the panel.
-    window.api.onInboxOpen(() => get().openInbox(true))
+    // Surface the panel; a target (the Avatar's double-click) also seeds the
+    // question to open, in the same set so the panel mounts with it present.
+    window.api.onInboxOpen((target) =>
+      set({
+        inboxOpen: true,
+        ...(typeof target?.approvalId === 'string' ? { inboxSeed: target.approvalId } : null)
+      })
+    )
     // Broker reachability (PLAN O5): transitions pushed by main + the current
     // state fetched once (covers a reloaded renderer during an outage).
     window.api.onBrokerStatus((status) => set({ brokerStatus: status }))
@@ -828,6 +839,7 @@ export const useDeck = create<DeckState>((set, get) => ({
   // Opening the panel does not zero anything: an entry leaves the badge only
   // when it is acked, not when it is glanced at.
   openInbox: (open) => set({ inboxOpen: open }),
+  clearInboxSeed: () => set({ inboxSeed: null }),
   // Opening an entry is NOT acknowledging it: 'seen' is the middle state, and
   // it must never overwrite an 'acked' one (a re-opened acked entry stays
   // acked). Optimistic locally, durable main-side.

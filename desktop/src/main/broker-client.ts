@@ -301,6 +301,12 @@ export interface BrokerStatusEvent {
   since: number
   /** Message of the failure that opened the outage (null while up). */
   lastError: string | null
+  /** The operator stopped the local broker on purpose; stopped_at is null when the marker is unreadable. */
+  manualStop: BrokerManualStop | null
+}
+
+export interface BrokerManualStop {
+  stopped_at: string | null
 }
 
 /**
@@ -314,6 +320,7 @@ export class BrokerHealthTracker {
   private up = true
   private since: number
   private lastError: string | null = null
+  private manualStop: BrokerManualStop | null = null
 
   constructor(
     private onChange: (status: BrokerStatusEvent) => void,
@@ -324,7 +331,18 @@ export class BrokerHealthTracker {
   }
 
   get status(): BrokerStatusEvent {
-    return { up: this.up, since: this.since, lastError: this.lastError }
+    return { up: this.up, since: this.since, lastError: this.lastError, manualStop: this.manualStop }
+  }
+
+  /** Read from the stop marker, not from a poll: a change is broadcast at once, with no hysteresis. */
+  setManualStop(manualStop: BrokerManualStop | null): void {
+    const same =
+      manualStop === null
+        ? this.manualStop === null
+        : this.manualStop !== null && this.manualStop.stopped_at === manualStop.stopped_at
+    if (same) return
+    this.manualStop = manualStop
+    this.onChange(this.status)
   }
 
   recordSuccess(): void {

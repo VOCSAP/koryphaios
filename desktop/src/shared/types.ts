@@ -267,6 +267,11 @@ export interface ApprovalQuestion {
 /** Per question text: chosen labels in display order, then at most one free text. */
 export type ApprovalAnswers = Record<string, string[]>
 
+/** The pending question an 'inbox:open' asks the panel to open. */
+export interface InboxOpenTarget {
+  approvalId: string
+}
+
 export interface ApprovalOrigin {
   host: string
   os_user_hash: string
@@ -1588,7 +1593,16 @@ export interface BrokerStatusEvent {
   since: number
   /** Message of the failure that opened the outage (null while up). */
   lastError: string | null
+  /** The operator stopped the local broker on purpose; stopped_at is null when the marker is unreadable. */
+  manualStop: BrokerManualStop | null
 }
+
+export interface BrokerManualStop {
+  stopped_at: string | null
+}
+
+/** Outcome of the banner's Start button; the error is already in the journal. */
+export type BrokerStartResult = { ok: true } | { ok: false; error: string }
 
 export type OperatorTrustState =
   | 'unknown'
@@ -2217,6 +2231,8 @@ export interface DeckApi {
   getBrokerStatus(): Promise<BrokerStatusEvent>
   /** Force an immediate broker poll (banner Retry button). */
   retryBroker(): Promise<void>
+  /** Clear the operator's stop marker and start the loopback broker (banner Start button). */
+  startBroker(): Promise<BrokerStartResult>
   onBrokerStatus(cb: (status: BrokerStatusEvent) => void): () => void
   getOperatorTrustStatus(): Promise<OperatorTrustStatusEvent>
   retryOperatorTrust(): Promise<OperatorTrustStatusEvent>
@@ -2633,8 +2649,8 @@ export interface DeckApi {
   onRoadmapSync(cb: (event: RoadmapSyncEvent) => void): () => void
   /** Core-config summary, re-broadcast after the replica opt-in is written. */
   onPeersConfig(cb: (summary: PeersConfigSummary) => void): () => void
-  /** Notification click on an inbox message: open the inbox panel. */
-  onInboxOpen(cb: () => void): () => void
+  /** Open the inbox panel; with a target, open that pending question's modal too. */
+  onInboxOpen(cb: (target?: InboxOpenTarget) => void): () => void
   /** Notification click: bring a session into view (agents view + selection). */
   onFocusSession(cb: (id: string) => void): () => void
   /** External-app element pick received by the design endpoint (D2b). */

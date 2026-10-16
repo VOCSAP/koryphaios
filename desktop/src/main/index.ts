@@ -14,7 +14,7 @@ import {
   shell
 } from 'electron'
 import { publicKeyFingerprint } from '../../../shared/operator-trust'
-import type { AppConfig, OperatorTrustStatusEvent } from '@shared/types'
+import type { AppConfig, InboxOpenTarget, OperatorTrustStatusEvent } from '@shared/types'
 import { sanitizeGlowColor } from '@shared/palette'
 import { loadConfig, saveConfig } from './store'
 import { buildAppMenu } from './menu'
@@ -93,8 +93,26 @@ import {
   pendingInboxCounter
 } from './inbox-store'
 import { spawn as spawnProcess } from 'node:child_process'
-import { adoptedBrokerNotice, computeGroupSecretHash, deckBrokerMode, peersConfigPath } from './broker-client'
-import { ensureLoopbackBroker, locateBrokerScript, RespawnThrottle, withPathEntry } from './broker-spawn'
+import {
+  adoptedBrokerNotice,
+  computeGroupSecretHash,
+  deckBrokerMode,
+  peersConfigPath,
+  type BrokerManualStop
+} from './broker-client'
+import {
+  ensureLoopbackBroker,
+  locateBrokerScript,
+  RespawnThrottle,
+  withPathEntry,
+  type EnsureOutcome
+} from './broker-spawn'
+import { createBrokerStart } from './broker-start'
+import {
+  brokerStopMarkerPath,
+  clearBrokerStopMarker,
+  readBrokerStopMarker
+} from '../../../shared/broker-stop-marker'
 import { createInboxSessionTracker, purgeInboxSessionCore } from './inbox-session'
 import {
   appendRoadmapContext,
@@ -187,7 +205,7 @@ import { ServeService } from './serve-service'
 import { SERVE_QUIT_DEADLINE_MS } from './serve-lifecycle'
 import { maxLinesFor, renderServeApproval, serveDialogSpec } from './serve-approval-dialog'
 import { createAvatarClient } from './avatar-client'
-import { boundedAvatarDetach, deckAvatarClientOptions } from './avatar-deck-link'
+import { boundedAvatarDetach, deckAvatarClientOptions, focusDeckWindow } from './avatar-deck-link'
 import { avatarLaunchCommand, ensureAvatar, spawnDetachedAvatar } from './avatar-ensure'
 import {
   createClodexControllerDeps,
@@ -220,6 +238,7 @@ import {
   type SpawnGrantStore
 } from './approval-service'
 import { createPendingApprovalsTick } from './hook-attention'
+import { pendingQuestionTarget } from './pending-question-target'
 import { matchPermissionDialog, permissionDialogShown } from './permission-dialog'
 import { applyEnrolment, ensureOperatorIdentity, exportEnrolment } from './operator-identity'
 import { buildAuthProof, type Approval } from './approval-auth'
@@ -1421,21 +1440,55 @@ const currentInboxSessionId = createInboxSessionTracker(() => activeScope.groupI
 // tick -- pollGraphDrafts runs the same tick, feeding both would collapse the
 // 2-failure hysteresis into a single tick). Transitions drive the renderer's
 // red banner + the log/journal.
+// The tracker also fires when only the stop marker changed, hence the edge
+// test before the reachability side effects.
+let brokerWasUp = true
 const brokerHealth = new BrokerHealthTracker((status) => {
-  if (status.up) {
-    logInfo('broker', 'broker reachable again')
-    // A broker that just came back may be a different one (reconfigured,
-    // restarted as a replica): re-probe the replication mode once instead of
-    // trusting what the previous process answered.
-    roadmapSyncProbeDue = true
-  } else {
-    reportError('broker', `broker unreachable: ${status.lastError ?? 'unknown error'}`)
-    // A loopback broker that stopped answering may simply have died with the
-    // session that spawned it: relaunch it, at most once a minute.
-    if (brokerRespawn.allow()) void startLoopbackBroker('outage')
+  if (status.up !== brokerWasUp) {
+    brokerWasUp = status.up
+    if (status.up) {
+      logInfo('broker', 'broker reachable again')
+      // A broker that just came back may be a different one (reconfigured,
+      // restarted as a replica): re-probe the replication mode once instead of
+      // trusting what the previous process answered.
+      roadmapSyncProbeDue = true
+    } else if (status.manualStop) {
+      // A stop the operator chose is not a failure: the banner carries it.
+      logInfo('broker', 'broker unreachable after a manual stop; not relaunched')
+    } else {
+      reportError('broker', `broker unreachable: ${status.lastError ?? 'unknown error'}`)
+      // A loopback broker that stopped answering may simply have died with the
+      // session that spawned it: relaunch it, at most once a minute.
+      if (brokerRespawn.allow()) void startLoopbackBroker('outage')
+    }
   }
   broadcast('broker:status', status)
 })
+
+let brokerStopProblem: string | null = null
+
+/** A marker that cannot be read still means stopped; its problem is reported once until it changes. */
+function readManualStop(): BrokerManualStop | null {
+  const reading = readBrokerStopMarker(brokerStopMarkerPath(peersConfigPath()))
+  if (!reading.stopped || reading.marker) {
+    brokerStopProblem = null
+    return reading.stopped ? { stopped_at: reading.marker.stopped_at } : null
+  }
+  if (reading.problem !== brokerStopProblem) {
+    brokerStopProblem = reading.problem
+    reportError('broker', `broker stop marker ${reading.problem}; the broker is treated as stopped`)
+  }
+  return { stopped_at: null }
+}
+
+async function brokerAlive(url: string): Promise<boolean> {
+  try {
+    const res = await fetch(`${url}/health`, { signal: AbortSignal.timeout(2000) })
+    return res.ok
+  } catch {
+    return false
+  }
+}
 
 const brokerRespawn = new RespawnThrottle(60_000)
 
@@ -1445,17 +1498,11 @@ const brokerRespawn = new RespawnThrottle(60_000)
  * script comes from the user's own ~/.claude.json MCP entry or from the
  * repository the Deck runs from -- never from a project's files.
  */
-async function startLoopbackBroker(reason: 'startup' | 'outage'): Promise<void> {
+async function startLoopbackBroker(reason: 'startup' | 'outage' | 'manual'): Promise<EnsureOutcome> {
   const endpoint = resolveBrokerEndpoint()
   const outcome = await ensureLoopbackBroker(deckBrokerMode(), endpoint.url, {
-    isAlive: async (url) => {
-      try {
-        const res = await fetch(`${url}/health`, { signal: AbortSignal.timeout(2000) })
-        return res.ok
-      } catch {
-        return false
-      }
-    },
+    isAlive: brokerAlive,
+    stopped: () => readManualStop() !== null,
     locate: () =>
       locateBrokerScript(join(homedir(), '.claude.json'), app.getAppPath(), {
         readFile: (p) => (existsSync(p) ? readFileSync(p, 'utf8') : null),
@@ -1480,7 +1527,12 @@ async function startLoopbackBroker(reason: 'startup' | 'outage'): Promise<void> 
   })
   switch (outcome.action) {
     case 'skipped':
-      journal.add('session', 'broker: remote mode, nothing to start locally')
+      journal.add(
+        'session',
+        outcome.reason === 'manual-stop'
+          ? 'broker: stopped manually by the operator, not relaunched until Start (Deck banner or Avatar tray)'
+          : 'broker: remote mode, nothing to start locally'
+      )
       break
     case 'already-running': {
       if (reason === 'startup') journal.add('session', 'broker: loopback broker already running')
@@ -1497,17 +1549,29 @@ async function startLoopbackBroker(reason: 'startup' | 'outage'): Promise<void> 
     case 'started':
       journal.add('session', `broker: loopback broker started from ${outcome.script} (${outcome.source})`)
       break
+    // A manual start reports its own failure (createBrokerStart), once.
     case 'not-found':
-      reportError(
-        'broker',
-        'no broker.ts to start: add the claude-peers MCP entry to ~/.claude.json (claude mcp add --scope user ...) or run the Deck from its repository'
-      )
+      if (reason !== 'manual') {
+        reportError(
+          'broker',
+          'no broker.ts to start: add the claude-peers MCP entry to ~/.claude.json (claude mcp add --scope user ...) or run the Deck from its repository'
+        )
+      }
       break
     case 'failed':
-      reportError('broker', `loopback broker did not start from ${outcome.script}: ${outcome.reason}`)
+      if (reason !== 'manual') reportError('broker', `loopback broker did not start from ${outcome.script}: ${outcome.reason}`)
       break
   }
+  return outcome
 }
+
+const startBrokerFromBanner = createBrokerStart({
+  clearMarker: () => clearBrokerStopMarker(brokerStopMarkerPath(peersConfigPath())),
+  isAlive: () => brokerAlive(resolveBrokerEndpoint().url),
+  ensure: () => startLoopbackBroker('manual'),
+  refresh: () => brokerHealth.setManualStop(readManualStop()),
+  report: reportError
+})
 
 const notifyInbox = (batch: { from: string; text: string }[]): void => {
   if (!Notification.isSupported() || batch.length === 0) return
@@ -1530,6 +1594,7 @@ const notifyInbox = (batch: { from: string; text: string }[]): void => {
 }
 
 const pollOperatorInbox = async (): Promise<void> => {
+  brokerHealth.setManualStop(readManualStop())
   try {
     const messages = await fetchOperatorInbox(
       {
@@ -3130,10 +3195,27 @@ const avatarOptions = deckAvatarClientOptions({
   window: () => mainWindow,
   workspaceName: () => workspaces.currentWorkspaceName
 })
+/**
+ * The Avatar's double-click in attention: bring this Deck forward on its
+ * oldest pending question. Resolves once the window is shown and the event
+ * sent, never on a renderer acknowledgement: the Avatar's command deadline is
+ * AVATAR_COMMAND_TIMEOUT_MS.
+ */
+async function openOldestPendingQuestion(): Promise<void> {
+  const target = pendingQuestionTarget(lastPendingApprovals, service.list())
+  await focusDeckWindow(mainWindow)
+  if (target.kind === 'tile') {
+    mainWindow?.webContents.send('session:focus', target.id)
+  } else if (target.kind === 'inbox') {
+    mainWindow?.webContents.send('inbox:open', { approvalId: target.approvalId } satisfies InboxOpenTarget)
+  }
+}
+
 const avatarClient = createAvatarClient({
   ...avatarOptions,
   pendingApprovals: () => lastPendingApprovals,
-  inboxUnread: pendingInboxCounter(sessionDir, () => pendingInboxWrites)
+  inboxUnread: pendingInboxCounter(sessionDir, () => pendingInboxWrites),
+  openQuestion: () => openOldestPendingQuestion()
 })
 let avatarDetach: Promise<void> = Promise.resolve()
 service.on('changed', () => avatarClient.sessionsChanged())
@@ -3477,6 +3559,7 @@ app.whenReady().then(async () => {
     getWorktreeInit,
     resolveTemplateInputs,
     brokerStatus: () => brokerHealth.status,
+    brokerStart: () => startBrokerFromBanner(),
     operatorTrustStatus: () => operatorTrustStatus,
     retryOperatorTrust: () => retryOperatorTrust(approvals, () => operatorTrustStatus),
     brokerRetry: () => {
@@ -3579,7 +3662,10 @@ app.whenReady().then(async () => {
   // is ALSO relayed to Telegram/Discord/ntfy, never whether it can be asked at
   // all. A failure only means the feature stays off; the app starts anyway.
   // The broker first: everything below it polls the loopback endpoint, and a
-  // replica only replicates once its broker runs.
+  // replica only replicates once its broker runs. The stop marker is read
+  // before it: the health tracker starts up, so a stopped broker would
+  // otherwise wait two failed polls for its banner.
+  brokerHealth.setManualStop(readManualStop())
   await startLoopbackBroker('startup')
   const armed = await armApprovalsAtStartup(approvals)
   journal.add('session', armed ? 'remote approvals armed' : 'remote approvals unavailable')

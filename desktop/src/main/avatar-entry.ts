@@ -1,9 +1,9 @@
 import { randomBytes, randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 import { app, BrowserWindow, ipcMain, Menu, nativeTheme, screen } from 'electron'
-import { selectAvatarFocusDeck } from '../shared/avatar-state'
 import { startAvatarBrokerProbe, type AvatarBrokerProbe } from './avatar-broker-probe'
 import { generateAvatarRunCertificate } from './avatar-certificate'
+import { createAvatarClickGesture } from './avatar-click-gesture'
 import { createDeckFocusGesture, deckProcessIsAlive } from './avatar-focus-gesture'
 import { allowForegroundWindow, runForegroundHelper } from './avatar-foreground'
 import { configureAvatarLifetime, type AvatarLifetimeLease } from './avatar-lifetime'
@@ -73,14 +73,13 @@ async function startAvatar(): Promise<void> {
     locale,
     now: Date.now,
     reportError,
-    gesture: () => {
-      const target = selectAvatarFocusDeck(avatarAssembly?.state.summary().decks ?? [], server?.attachedDecks() ?? [])
-      if (target === null) {
-        logInfo('avatar-focus', 'Avatar click ignored because no attached Deck produces an urgent face')
-        return
-      }
-      void focusFromTray(target).catch((error: unknown) => reportError('avatar-focus', 'Avatar click focus gesture failed', error))
-    },
+    gesture: createAvatarClickGesture({
+      decks: () => avatarAssembly?.state.summary().decks ?? [],
+      attached: () => server?.attachedDecks() ?? [],
+      send: (identity, command) => focusFromTray(identity, command),
+      info: logInfo,
+      report: reportError
+    }),
     setTimeout: (callback, delayMs) => setTimeout(callback, delayMs),
     clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>)
   })
@@ -104,7 +103,8 @@ async function startAvatar(): Promise<void> {
       return loopbackSocketOwner(ends.local, ends.remote, { env: process.env, run: runSocketOwnerHelper })
     },
     allowForeground: (pid) => allowForegroundWindow(pid, { platform: process.platform, env: process.env, run: runForegroundHelper }),
-    focusDeck: (identity) => (server ? server.focusDeck(identity) : Promise.reject(new Error('Avatar server stopped')))
+    focusDeck: (identity, command) =>
+      server ? server.focusDeck(identity, command) : Promise.reject(new Error('Avatar server stopped'))
   })
   stopFollowers = finishAvatarStartup({
     claimRegistry: () => {
@@ -135,7 +135,7 @@ async function startAvatar(): Promise<void> {
         getDnd: assembly.trayDnd,
         onDnd: assembly.chooseDnd,
         onDeckMenuClick: (identity) => {
-          void focusFromTray(identity).catch((error: unknown) => reportError('avatar-focus', 'Tray focus gesture failed', error))
+          void focusFromTray(identity, 'focus').catch((error: unknown) => reportError('avatar-focus', 'Tray focus gesture failed', error))
         },
         onQuit: () => app.quit()
       })

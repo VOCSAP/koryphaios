@@ -80,10 +80,7 @@ export function assembleAvatar(options: AvatarAssemblyOptions): AvatarAssembly {
     setPosition: controller.setPosition,
     setPointerInside: controller.setPointerInside,
     gesture: (kind) => {
-      if (kind === 'double') {
-        controller.dispatch({ kind: 'HideRequested' })
-        return
-      }
+      if (kind === 'double' && state.summary().counters.waiting === 0) return
       return options.gesture(kind)
     },
     reportError: (message) => options.reportError('avatar-renderer', message)

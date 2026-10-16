@@ -9,7 +9,15 @@ const LOCAL: RoadmapSyncStatus = { mode: "local" };
 function input(
   over: Partial<Parameters<typeof bannerKind>[0]> = {}
 ): Parameters<typeof bannerKind>[0] {
-  return { brokerUp: true, brokerDismissed: false, operatorTrust: "compatible", conflicts: 0, status: LOCAL, ...over };
+  return {
+    brokerManualStop: false,
+    brokerUp: true,
+    brokerDismissed: false,
+    operatorTrust: "compatible",
+    conflicts: 0,
+    status: LOCAL,
+    ...over
+  };
 }
 
 // ----- nothing to say -----
@@ -32,6 +40,25 @@ test("a replica whose upstream is online and clean raises no banner", () => {
 
 test("the local broker being down raises the outage banner", () => {
   expect(bannerKind(input({ brokerUp: false }))).toBe("broker-down");
+});
+
+test("a manual stop outranks every other state, the outage it causes included", () => {
+  expect(bannerKind(input({ brokerManualStop: true }))).toBe("broker-stopped");
+  expect(
+    bannerKind(
+      input({
+        brokerManualStop: true,
+        brokerUp: false,
+        conflicts: 3,
+        operatorTrust: "not-trusted",
+        status: { mode: "replica", online: false },
+      })
+    )
+  ).toBe("broker-stopped");
+});
+
+test("a manual stop cannot be dismissed: the outage dismissal does not hide it", () => {
+  expect(bannerKind(input({ brokerManualStop: true, brokerUp: false, brokerDismissed: true }))).toBe("broker-stopped");
 });
 
 test("an unconfigured broker raises the operator trust banner", () => {
