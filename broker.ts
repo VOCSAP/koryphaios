@@ -3670,7 +3670,11 @@ function pushContextResume(depositId: string, attemptId: string): boolean {
     text: resume.text,
   };
   try {
-    ws.send(JSON.stringify(frame));
+    // Bun: 0 = frame dropped, -1 = enqueued under backpressure and still flushed later.
+    if (ws.send(JSON.stringify(frame)) === 0) {
+      log.warn("context resume ws push failed", { deposit_id: depositId, attempt_id: attemptId });
+      return false;
+    }
     contextRegistry.markResumeSent(depositId, attemptId);
     return true;
   } catch {

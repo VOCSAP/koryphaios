@@ -188,3 +188,58 @@ test("a failed context resume push logs only its deposit and attempt", () => {
   }]);
   expect(JSON.stringify(warnings)).not.toContain(token);
 });
+
+function pushWith(sendOutcome: number) {
+  const source = readFileSync(resolve(import.meta.dir, "..", "broker.ts"), "utf8");
+  const body = functionBody(source, "function pushContextResume").replace("const frame: WsFrame", "const frame");
+  const token = "secret-owner-token";
+  const marked: Array<[string, string]> = [];
+  const warnings: Array<{ message: string; fields: Record<string, unknown> }> = [];
+  const push = new Function("contextRegistry", "wsPool", "log", `return function(depositId, attemptId) ${body}`)(
+    {
+      takeReleasedForResume: () => ({
+        deposit_id: "0123456789abcdef",
+        released_attempt_id: "a".repeat(32),
+        deposited_at: "2026-10-16T10:00:00.000Z",
+        head_at_deposit: null,
+        branch: null,
+        git_root: null,
+        text: "resume-witness",
+        owner_instance_token: token,
+      }),
+      markResumeSent: (depositId: string, attemptId: string) => marked.push([depositId, attemptId]),
+    },
+    new Map([[token, {
+      readyState: 1,
+      send: () => sendOutcome,
+    }]]),
+    { warn: (message: string, fields: Record<string, unknown>) => warnings.push({ message, fields }) },
+  ) as (depositId: string, attemptId: string) => boolean;
+  return { push: () => push("0123456789abcdef", "a".repeat(32)), marked, warnings, token };
+}
+
+test("a socket that accepts bytes marks the resume sent", () => {
+  const probe = pushWith(25);
+  expect(probe.push()).toBe(true);
+  expect(probe.marked).toEqual([["0123456789abcdef", "a".repeat(32)]]);
+  expect(probe.warnings).toEqual([]);
+});
+
+test("a socket that enqueues the frame under backpressure (send returns -1) marks the resume sent without a warning", () => {
+  const probe = pushWith(-1);
+  expect({ delivered: probe.push(), marked: probe.marked, warnings: probe.warnings }, "an enqueued frame will be sent: it is neither dropped nor to be retraced").toEqual({
+    delivered: true,
+    marked: [["0123456789abcdef", "a".repeat(32)]],
+    warnings: [],
+  });
+});
+
+test("a socket that drops the frame (send returns 0) is not marked sent and is traced without any secret", () => {
+  const probe = pushWith(0);
+  const delivered = probe.push();
+  expect({ delivered, marked: probe.marked }, "a dropped frame must stay pending so the next authentication replays it").toEqual({ delivered: false, marked: [] });
+  expect(probe.warnings).toHaveLength(1);
+  expect(probe.warnings[0]!.fields).toEqual({ deposit_id: "0123456789abcdef", attempt_id: "a".repeat(32) });
+  expect(JSON.stringify(probe.warnings)).not.toContain(probe.token);
+  expect(JSON.stringify(probe.warnings)).not.toContain("resume-witness");
+});

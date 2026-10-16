@@ -5,6 +5,7 @@ import { hostname } from "node:os";
 import { join } from "node:path";
 import { Database } from "bun:sqlite";
 import { deckAuthored, groupId, livePid, sha256Hex, startBroker, stopBroker, type TestBroker } from "./_helper.ts";
+import { buildAuthProof, deriveOperatorId, generateCredential } from "../shared/approval.ts";
 import {
   CONTEXT_DEPOSIT_MAX_BODY_BYTES,
   CONTEXT_DEPOSIT_MAX_CHARS,
@@ -717,6 +718,235 @@ describe("context resume compatibility", () => {
     });
     expect(registered.text).not.toContain("context_resume");
   });
+});
+
+interface OwnerSocket {
+  ws: WebSocket;
+  frames: Record<string, unknown>[];
+}
+
+async function openOwnerSocket(b: TestBroker, token: string): Promise<OwnerSocket> {
+  const frames: Record<string, unknown>[] = [];
+  const ws = new WebSocket(b.wsUrl);
+  await new Promise<void>((resolve, reject) => {
+    ws.addEventListener("message", (event) => {
+      const text = typeof event.data === "string" ? event.data : new TextDecoder().decode(event.data as ArrayBuffer);
+      frames.push(JSON.parse(text) as Record<string, unknown>);
+    });
+    ws.addEventListener("open", () => {
+      ws.send(JSON.stringify({ type: "auth", instance_token: token }));
+      resolve();
+    });
+    ws.addEventListener("error", () => reject(new Error("ws error")));
+    setTimeout(() => reject(new Error("ws open timeout")), 2_000);
+  });
+  return { ws, frames };
+}
+
+async function resumeFrame(socket: OwnerSocket): Promise<Record<string, unknown>> {
+  let found: Record<string, unknown> | undefined;
+  await waitFor("a context_resume frame", 3_000, async () => {
+    found = socket.frames.find((frame) => frame.type === "context_resume");
+    return found !== undefined;
+  });
+  return found!;
+}
+
+async function toResuming(b: TestBroker, group: Group, peer: Peer, capability: string, text: string): Promise<{ depositId: string; attemptId: string }> {
+  const deposited = await deposit(b, capability, text);
+  const depositId = deposited.body.deposit_id as string;
+  const reserved = await transaction(b, group, peer.peer_id, depositId, "reserve");
+  const attemptId = reserved.body.attempt_id as string;
+  const released = await transaction(b, group, peer.peer_id, depositId, "release", attemptId, true, true);
+  expect(released).toMatchObject({ status: 200, body: { state: "resuming" } });
+  return { depositId, attemptId };
+}
+
+function signedBy(key: { publicKey: string; privateKey: string }, payload: Record<string, unknown>): Record<string, unknown> {
+  const body = { ...payload, by: "deck", public_key: key.publicKey };
+  return {
+    ...body,
+    auth: buildAuthProof(key.privateKey, body, { kind: "operator", operator_id: deriveOperatorId(key.publicKey) }),
+  };
+}
+
+describe("a key outside the operator trust policy cannot transact on a deposit", () => {
+  test("a fresh key signing with the right group secret is refused on reserve and release, and the policy key still transacts", async () => {
+    const cap = newCapability();
+    const peer = await register(broker, G, { capability: cap });
+    const depositId = (await deposit(broker, cap, "forged-key-witness")).body.deposit_id as string;
+    const forger = generateCredential();
+
+    const forgedReserve = await call(broker, "/context/transaction", signedBy(forger, transactionBody(G, peer.peer_id, depositId, "reserve")));
+    expect({ status: forgedReserve.status, error: forgedReserve.body.error }).toEqual({ status: 403, error: "operator-not-trusted" });
+
+    const reserved = await transaction(broker, G, peer.peer_id, depositId, "reserve");
+    expect(reserved, "the refused reserve must leave the deposit free for the Deck").toMatchObject({ status: 200, body: { ok: true, state: "reserved" } });
+    const attemptId = reserved.body.attempt_id as string;
+
+    const forgedRelease = await call(broker, "/context/transaction", signedBy(forger, transactionBody(G, peer.peer_id, depositId, "release", attemptId, true)));
+    expect({ status: forgedRelease.status, error: forgedRelease.body.error }).toEqual({ status: 403, error: "operator-not-trusted" });
+
+    const released = await transaction(broker, G, peer.peer_id, depositId, "release", attemptId, true, false);
+    expect(released, "the refused release must not have moved the deposit out of reserved").toMatchObject({
+      status: 200,
+      body: { ok: true, state: "held", attempt_id: attemptId },
+    });
+  });
+
+  test("the same forged proof is accepted once the policy lists its key, so the refusal is the policy's and not a malformed proof", async () => {
+    const forger = generateCredential();
+    const b = await startBroker({}, { trustedOperators: [forger.publicKey] });
+    try {
+      const FG = await makeGroup();
+      const cap = newCapability();
+      const peer = await register(b, FG, { capability: cap });
+      const depositId = (await deposit(b, cap, "listed-key-witness")).body.deposit_id as string;
+
+      const reserve = await call(b, "/context/transaction", signedBy(forger, transactionBody(FG, peer.peer_id, depositId, "reserve")));
+      expect(reserve).toMatchObject({ status: 200, body: { ok: true, state: "reserved" } });
+
+      const release = await call(b, "/context/transaction", signedBy(forger, transactionBody(FG, peer.peer_id, depositId, "release", reserve.body.attempt_id as string, false)));
+      expect(release).toMatchObject({ status: 200, body: { ok: true, state: "held", attempt_id: reserve.body.attempt_id } });
+
+      const stranger = await transaction(b, FG, peer.peer_id, depositId, "reserve");
+      expect({ status: stranger.status, error: stranger.body.error }, "the fixture key is not in this policy").toEqual({
+        status: 403,
+        error: "operator-not-trusted",
+      });
+    } finally {
+      await stopBroker(b);
+    }
+  }, 30_000);
+});
+
+describe("a resuming deposit follows its owner's lifetime", () => {
+  const ackOf = (b: TestBroker, token: string, ids: { depositId: string; attemptId: string }) =>
+    call(b, "/context/ack", { instance_token: token, deposit_id: ids.depositId, attempt_id: ids.attemptId });
+
+  test("an active owner can acknowledge its resuming deposit", async () => {
+    const cap = newCapability();
+    const peer = await register(broker, G, { capability: cap });
+    const ids = await toResuming(broker, G, peer, cap, "alive-owner-witness");
+    expect(await ackOf(broker, peer.instance_token, ids)).toMatchObject({ status: 200, body: { ok: true } });
+  });
+
+  for (const route of ["/disconnect", "/unregister"] as const) {
+    test(`${route} of the owner purges its resuming deposit at once`, async () => {
+      const cap = newCapability();
+      const peer = await register(broker, G, { capability: cap });
+      const ids = await toResuming(broker, G, peer, cap, `purge-${route}-witness`);
+
+      await call(broker, route, { instance_token: peer.instance_token });
+
+      expect(await ackOf(broker, peer.instance_token, ids)).toMatchObject({ status: 409, body: { ok: false, reason: "unavailable" } });
+    });
+  }
+
+  test("a dormant owner revived under the same token finds no resuming deposit of its earlier life", async () => {
+    const desk = randomUUID();
+    const cap = newCapability();
+    const peer = await register(broker, G, { deskSession: desk, capability: cap });
+    const ids = await toResuming(broker, G, peer, cap, "epoch-witness");
+    await call(broker, "/disconnect", { instance_token: peer.instance_token });
+
+    const revived = await register(broker, G, { deskSession: desk, capability: cap });
+
+    expect(revived.instance_token, "the control is only valid when the same token comes back").toBe(peer.instance_token);
+    expect(await ackOf(broker, revived.instance_token, ids)).toMatchObject({ status: 409, body: { reason: "unavailable" } });
+    const socket = await openOwnerSocket(broker, revived.instance_token);
+    await Bun.sleep(200);
+    expect(socket.frames.filter((frame) => frame.type === "context_resume")).toEqual([]);
+    socket.ws.close();
+  });
+
+  test("an acknowledgement before any release is refused and the deposit is still reservable", async () => {
+    const cap = newCapability();
+    const peer = await register(broker, G, { capability: cap });
+    const depositId = (await deposit(broker, cap, "ack-before-release-witness")).body.deposit_id as string;
+    const reserved = await transaction(broker, G, peer.peer_id, depositId, "reserve");
+    const attemptId = reserved.body.attempt_id as string;
+
+    const early = await ackOf(broker, peer.instance_token, { depositId, attemptId });
+    expect(early).toMatchObject({ status: 409, body: { ok: false, reason: "unavailable" } });
+
+    const released = await transaction(broker, G, peer.peer_id, depositId, "release", attemptId, true, true);
+    expect(released).toMatchObject({ status: 200, body: { state: "resuming" } });
+    expect(await ackOf(broker, peer.instance_token, { depositId, attemptId })).toMatchObject({ status: 200, body: { ok: true } });
+  });
+});
+
+describe("the resumed text stays on the owner's socket", () => {
+  const logsOf = (b: TestBroker): string =>
+    [join(b.tmpDir, "logs"), b.tmpDir]
+      .filter((d) => existsSync(d))
+      .flatMap((d) => readdirSync(d).filter((f) => f.endsWith(".log")).map((f) => readFileSync(join(d, f), "utf8")))
+      .join("\n");
+
+  test("neither SQLite, its WAL, any answer the Deck can read, nor the broker logs carry a resumed deposit", async () => {
+    const b = await startBroker();
+    const CG = await makeGroup();
+    try {
+      const capLive = newCapability();
+      const capPending = newCapability();
+      const live = await register(b, CG, { capability: capLive });
+      const pending = await register(b, CG, { capability: capPending });
+      const canaryLive = `resume-canary-live-${randomUUID()}`;
+      const canaryPending = `resume-canary-pending-${randomUUID()}`;
+      const control = `resume-control-${randomUUID()}`;
+      const answersFrom = seenResponses.length;
+
+      const bystander = await register(b, CG, { capability: newCapability() });
+      const socket = await openOwnerSocket(b, live.instance_token);
+      const bystanderSocket = await openOwnerSocket(b, bystander.instance_token);
+      const liveIds = await toResuming(b, CG, live, capLive, canaryLive);
+      const pendingIds = await toResuming(b, CG, pending, capPending, canaryPending);
+      const frame = await resumeFrame(socket);
+      expect(frame.text, "the websocket is the one channel that must carry the text").toBe(canaryLive);
+      await call(b, "/context/ack", { instance_token: live.instance_token, deposit_id: liveIds.depositId, attempt_id: liveIds.attemptId });
+      await call(b, "/set-summary", { instance_token: live.instance_token, summary: control });
+
+      const surfaces: Record<string, string> = {};
+      for (const path of ["/admin/peers?include_dormant=1", "/health", "/group-stats"]) {
+        surfaces[path] = await (await fetch(`${b.url}${path}`)).text();
+      }
+      surfaces["/list-peers"] = (await call(b, "/list-peers", { scope: "machine", instance_token: pending.instance_token, cwd: CWD, git_root: null })).text;
+      surfaces["/poll-messages live"] = (await call(b, "/poll-messages", { instance_token: live.instance_token })).text;
+      surfaces["/poll-messages pending"] = (await call(b, "/poll-messages", { instance_token: pending.instance_token })).text;
+      surfaces["transaction and ack answers"] = seenResponses.slice(answersFrom).join("\n");
+      expect(surfaces["/admin/peers?include_dormant=1"], "the surface scan must read real data").toContain(control);
+
+      const forbidden = [canaryLive, canaryPending, capLive, capPending, hashCapability(capLive), hashCapability(capPending)];
+      for (const [surface, text] of Object.entries(surfaces)) {
+        expect({ surface, leaks: forbidden.filter((s) => text.includes(s)) }).toEqual({ surface, leaks: [] });
+      }
+
+      const dump = [b.dbPath, `${b.dbPath}-wal`]
+        .filter((p) => existsSync(p))
+        .map((p) => readFileSync(p).toString("latin1"))
+        .join("\n");
+      expect(dump.includes(control), "the SQLite dump must read real data").toBe(true);
+      expect(forbidden.filter((s) => dump.includes(s))).toEqual([]);
+
+      await Bun.sleep(150);
+      const seenByBystander = JSON.stringify(bystanderSocket.frames);
+      expect(
+        [canaryLive, canaryPending].filter((s) => seenByBystander.includes(s)),
+        "a connected socket of another peer in the same group must receive neither resumed text"
+      ).toEqual([]);
+
+      socket.ws.close();
+      bystanderSocket.ws.close();
+      b.proc.kill();
+      await b.proc.exited;
+      const logs = logsOf(b);
+      expect(logs.length).toBeGreaterThan(0);
+      expect(forbidden.filter((s) => logs.includes(s))).toEqual([]);
+      expect(pendingIds.depositId).not.toBe(liveIds.depositId);
+    } finally {
+      await stopBroker(b);
+    }
+  }, 40_000);
 });
 
 describe("liveness sweeps", () => {

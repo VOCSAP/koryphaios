@@ -580,6 +580,128 @@ describe("ContextRegistry", () => {
     });
   });
 
+  describe("owner purge outranks every deposit state", () => {
+    const STATES = ["held", "reserved", "resuming pending", "resuming sent", "resuming acknowledged"] as const;
+    type State = (typeof STATES)[number];
+
+    function depositIn(h: Harness, state: State): { id: string; attempt: string | null } {
+      const deposited = deposit(h.registry, HASH_A, "state-witness");
+      if (!deposited.ok) throw new Error("deposit refused");
+      const id = deposited.deposit.deposit_id;
+      if (state === "held") return { id, attempt: null };
+      const reserved = h.registry.reserve(id, { peer_id: "peer-a", group_id: "g1" });
+      if (!reserved.ok) throw new Error("reservation refused");
+      if (state === "reserved") return { id, attempt: reserved.attempt_id };
+      h.registry.release(id, "g1", reserved.attempt_id, true);
+      if (state === "resuming sent") h.registry.markResumeSent(id, reserved.attempt_id);
+      if (state === "resuming acknowledged") h.registry.acknowledgeResume(id, reserved.attempt_id, "tok-a");
+      return { id, attempt: reserved.attempt_id };
+    }
+
+    const TRIGGERS: Record<string, (h: Harness) => void> = {
+      "forgetOwner (disconnect or unregister)": (h) => h.registry.forgetOwner("tok-a"),
+      "a re-register of the same token with another capability": (h) => h.registry.onRegister("tok-a", HASH_B, CONTEXT_RESUME_VERSION),
+      "a re-register of the same token with the same capability": (h) => h.registry.onRegister("tok-a", HASH_A, CONTEXT_RESUME_VERSION),
+      "an owner that stopped being active, then a sweep": (h) => {
+        h.owners.delete("tok-a");
+        expect(h.registry.sweep()).toBe(1);
+        h.owners.set("tok-a", { peer_id: "peer-a", group_id: "g1" });
+      },
+    };
+
+    for (const [trigger, purge] of Object.entries(TRIGGERS)) {
+      for (const state of STATES) {
+        test(`${trigger} frees a ${state} deposit and leaves nothing to replay or acknowledge`, () => {
+          const h = harness();
+          liveOwner(h, "tok-a", HASH_A, "peer-a");
+          const { id, attempt } = depositIn(h, state);
+          expect(h.registry.describe(id), `the ${state} deposit must exist before the purge`).not.toBeNull();
+
+          purge(h);
+
+          expect({ trigger, state, after: h.registry.describe(id) }).toEqual({ trigger, state, after: null });
+          expect(h.registry.pendingResumesForOwner("tok-a")).toEqual([]);
+          if (attempt !== null) {
+            expect(h.registry.takeReleasedForResume(id, attempt)).toBeNull();
+            expect(h.registry.acknowledgeResume(id, attempt, "tok-a")).toEqual({ ok: false, reason: "unavailable" });
+          }
+        });
+      }
+    }
+  });
+
+  test("an acknowledgement outside the resuming state is refused and arms no purge deadline", () => {
+    const h = harness({ reservationTtlMs: 10 * CONTEXT_RESUME_ACK_TTL_MS });
+    liveOwner(h, "tok-a", HASH_A, "peer-a");
+    const never = deposit(h.registry, HASH_A, "never reserved");
+    const abandoned = deposit(h.registry, HASH_A, "abandoned release");
+    const inFlight = deposit(h.registry, HASH_A, "reserved, not released");
+    if (!never.ok || !abandoned.ok || !inFlight.ok) throw new Error("deposit refused");
+
+    const abandonedAttempt = h.registry.reserve(abandoned.deposit.deposit_id, { peer_id: "peer-a", group_id: "g1" });
+    const inFlightAttempt = h.registry.reserve(inFlight.deposit.deposit_id, { peer_id: "peer-a", group_id: "g1" });
+    if (!abandonedAttempt.ok || !inFlightAttempt.ok) throw new Error("reservation refused");
+    h.registry.release(abandoned.deposit.deposit_id, "g1", abandonedAttempt.attempt_id, false);
+
+    const refused = { ok: false, reason: "unavailable" } as const;
+    expect(h.registry.acknowledgeResume(never.deposit.deposit_id, "e".repeat(32), "tok-a")).toEqual(refused);
+    expect(h.registry.acknowledgeResume(abandoned.deposit.deposit_id, abandonedAttempt.attempt_id, "tok-a")).toEqual(refused);
+    expect(h.registry.acknowledgeResume(inFlight.deposit.deposit_id, inFlightAttempt.attempt_id, "tok-a")).toEqual(refused);
+
+    h.now.value += CONTEXT_RESUME_ACK_TTL_MS + 1;
+    expect(h.registry.describe(never.deposit.deposit_id)?.state).toBe("held");
+    expect(h.registry.describe(abandoned.deposit.deposit_id)?.state).toBe("held");
+    expect(h.registry.describe(inFlight.deposit.deposit_id)?.state).toBe("reserved");
+
+    h.registry.release(inFlight.deposit.deposit_id, "g1", inFlightAttempt.attempt_id, true);
+    expect(h.registry.acknowledgeResume(inFlight.deposit.deposit_id, inFlightAttempt.attempt_id, "tok-a")).toEqual({ ok: true });
+    h.now.value += CONTEXT_RESUME_ACK_TTL_MS - 1;
+    expect(h.registry.describe(inFlight.deposit.deposit_id)?.state).toBe("resuming");
+    h.now.value += 1;
+    expect(h.registry.describe(inFlight.deposit.deposit_id)).toBeNull();
+  });
+
+  test("an acknowledgement for another attempt or from another owner changes nothing and arms no deadline", () => {
+    const h = harness();
+    liveOwner(h, "tok-a", HASH_A, "peer-a");
+    liveOwner(h, "tok-b", HASH_B, "peer-b");
+    const deposited = deposit(h.registry, HASH_A, "ownership-witness");
+    if (!deposited.ok) throw new Error("deposit refused");
+    const id = deposited.deposit.deposit_id;
+    const reserved = h.registry.reserve(id, { peer_id: "peer-a", group_id: "g1" });
+    if (!reserved.ok) throw new Error("reservation refused");
+    h.registry.release(id, "g1", reserved.attempt_id, true);
+
+    const refused = { ok: false, reason: "unavailable" } as const;
+    expect(h.registry.acknowledgeResume(id, "e".repeat(32), "tok-a")).toEqual(refused);
+    expect(h.registry.acknowledgeResume(id, reserved.attempt_id, "tok-b")).toEqual(refused);
+    expect(h.registry.pendingResumesForOwner("tok-a")).toEqual([{ deposit_id: id, attempt_id: reserved.attempt_id }]);
+
+    h.now.value += CONTEXT_RESUME_ACK_TTL_MS + 1;
+    expect(h.registry.describe(id)?.state, "a refused acknowledgement must not start the 300 s purge").toBe("resuming");
+  });
+
+  test("a resume pushed but not acknowledged is listed again for the owner's next authentication", () => {
+    const h = harness();
+    liveOwner(h, "tok-a", HASH_A, "peer-a");
+    const deposited = deposit(h.registry, HASH_A, "replay-witness");
+    if (!deposited.ok) throw new Error("deposit refused");
+    const id = deposited.deposit.deposit_id;
+    const reserved = h.registry.reserve(id, { peer_id: "peer-a", group_id: "g1" });
+    if (!reserved.ok) throw new Error("reservation refused");
+    h.registry.release(id, "g1", reserved.attempt_id, true);
+
+    const listed = [{ deposit_id: id, attempt_id: reserved.attempt_id }];
+    expect(h.registry.pendingResumesForOwner("tok-a")).toEqual(listed);
+    h.registry.markResumeSent(id, reserved.attempt_id);
+    expect(h.registry.resumeDelivery(id, reserved.attempt_id)).toBe("sent");
+    expect(h.registry.pendingResumesForOwner("tok-a")).toEqual(listed);
+    expect(h.registry.pendingResumesForOwner("tok-other")).toEqual([]);
+
+    h.registry.acknowledgeResume(id, reserved.attempt_id, "tok-a");
+    expect(h.registry.pendingResumesForOwner("tok-a")).toEqual([]);
+  });
+
   test("the default quotas are the named constants", () => {
     const h = harness();
     expect(h.registry.limits).toEqual({
