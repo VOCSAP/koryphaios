@@ -117,7 +117,7 @@ import {
   unresolvedDirectiveNote,
   type DispatchedEntry
 } from './dispatch'
-import { createDirectiveBindings, runClearReloadInTurn, type DirectiveRunDeps } from './directive-run'
+import { createDirectiveBindings, runClearReloadInTurn, type ClearReloadHost, type DirectiveRunDeps } from './directive-run'
 import { decidePeerAnnounce } from './peer-rotation'
 import { lockReleasePatch, ownsIdleLock } from './idle-lock'
 import type {
@@ -1974,6 +1974,7 @@ const runClearReload = (
         if (!session) throw new Error(`tile "${id}" no longer exists`)
         return session.sessionId
       },
+      checkOperatorTrust: () => approvals.checkTrustNow(),
       reserveContextDeposit: async (depositId, targetPeerId) => {
         const result = await contextTransaction('reserve', depositId, targetPeerId)
         if (!result.attemptId) throw new Error('context transaction reserve omitted attempt_id')
@@ -1987,7 +1988,7 @@ const runClearReload = (
         await contextTransaction('release', depositId, peerId, attemptId)
       },
       reportError: (message, error) => reportError('dispatch', message, error)
-    },
+    } satisfies Required<ClearReloadHost>,
     (line) => journal.add('dispatch', line),
     tileId,
     peerId,

@@ -604,6 +604,86 @@ describe("ApprovalRuntime.arm() without any mobile transport configured", () => 
   });
 });
 
+describe("ApprovalRuntime.checkTrustNow()", () => {
+  beforeEach(() => stubMintSuccess());
+
+  function runtimeWith(states: { state: string; publicKey?: string }[]): ApprovalRuntime {
+    return new ApprovalRuntime({
+      stateDir: tmp(),
+      cipher: fakeCipher,
+      endpoint: () => ({ url: "http://broker.local", token: "" }),
+      runId: "run-test",
+      host: "test-host",
+      onTrustStatus: (state: string, publicKey?: string) => states.push({ state, publicKey }),
+    });
+  }
+
+  test("asks the broker answering now, not the verdict reached when arming", async () => {
+    const states: { state: string; publicKey?: string }[] = [];
+    const runtime = runtimeWith(states);
+    expect(await runtime.arm()).toBe(true);
+
+    // A broker respawned or adopted after an outage, older than the trust handshake.
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ status: "ok" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      })) as unknown as typeof fetch;
+
+    expect(await runtime.checkTrustNow()).toBe("incompatible");
+    expect(runtime.operator).not.toBeNull();
+    expect(states.map((s) => s.state)).toEqual(["compatible", "incompatible"]);
+  });
+
+  test("publishes the public key of an operator the broker no longer trusts", async () => {
+    const states: { state: string; publicKey?: string }[] = [];
+    const runtime = runtimeWith(states);
+    expect(await runtime.arm()).toBe(true);
+
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      if (String(input).endsWith("/health")) {
+        return new Response(JSON.stringify({ operator_trust_version: 1, operator_trust_state: "ready" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      return new Response(JSON.stringify({ error: "operator-not-trusted" }), {
+        status: 403,
+        headers: { "content-type": "application/json" },
+      });
+    }) as unknown as typeof fetch;
+
+    expect(await runtime.checkTrustNow()).toBe("not-trusted");
+    expect(states.at(-1)).toEqual({ state: "not-trusted", publicKey: runtime.operator!.publicKey });
+  });
+
+  test("an unreachable broker rejects the check without publishing a banner state", async () => {
+    const states: { state: string; publicKey?: string }[] = [];
+    const runtime = runtimeWith(states);
+    expect(await runtime.arm()).toBe(true);
+
+    const failure = new Error("connect ECONNREFUSED");
+    globalThis.fetch = (async () => {
+      throw failure;
+    }) as unknown as typeof fetch;
+
+    await expect(runtime.checkTrustNow()).rejects.toBe(failure);
+    expect(states.map((s) => s.state)).toEqual(["compatible"]);
+  });
+
+  test("refuses before any request when no operator identity was armed", async () => {
+    const requests: string[] = [];
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      requests.push(String(input));
+      return new Response("{}", { status: 200 });
+    }) as unknown as typeof fetch;
+    const runtime = runtimeWith([]);
+
+    await expect(runtime.checkTrustNow()).rejects.toThrow("operator identity is unavailable for the operator trust check");
+    expect(requests).toEqual([]);
+  });
+});
+
 describe("ApprovalRuntime.arm() when the keychain is merely unavailable (not corrupt)", () => {
   beforeEach(() => stubMintSuccess());
 

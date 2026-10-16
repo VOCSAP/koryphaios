@@ -203,6 +203,7 @@ test("context clear reserves, observes a new clear rotation, then releases witho
         events.push(`inject:${keys}`);
         return "written" as const;
       }),
+      checkOperatorTrust: async () => "compatible" as const,
       currentSessionId: () => "sid-before",
       reserveContextDeposit: async (depositId, peerId) => {
         events.push(`reserve:${depositId}:${peerId}`);
@@ -247,6 +248,7 @@ test("context clear rejects a host missing the baseline reader before reservatio
     runClearReloadInTurn(
       {
         serializeTile: (_id, fn) => fn(async () => "written" as const),
+        checkOperatorTrust: async () => "compatible" as const,
         currentSessionId: () => "sid-before",
         reserveContextDeposit: async () => {
           reservations += 1;
@@ -273,6 +275,7 @@ test("context clear reports a refused /clear and releases its reservation", asyn
   const outcome = await runClearReloadInTurn(
     {
       serializeTile: (_id, fn) => fn(async () => "busy-timeout" as const),
+      checkOperatorTrust: async () => "compatible" as const,
       currentSessionId: () => "sid-before",
       reserveContextDeposit: async () => "attempt-1",
       readClearBackchannelBaseline: () => "prior-clear",
@@ -303,6 +306,7 @@ test("context clear releases after a rotation wait fails and reports the failure
     runClearReloadInTurn(
       {
         serializeTile: (_id, fn) => fn(async () => "written" as const),
+        checkOperatorTrust: async () => "compatible" as const,
         currentSessionId: () => "sid-before",
         reserveContextDeposit: async () => "attempt-1",
         readClearBackchannelBaseline: () => null,
@@ -332,6 +336,7 @@ test("context clear releases after an injection error and reports the failure", 
     runClearReloadInTurn(
       {
         serializeTile: (_id, fn) => fn(async () => { throw failure; }),
+        checkOperatorTrust: async () => "compatible" as const,
         currentSessionId: () => "sid-before",
         reserveContextDeposit: async () => "attempt-1",
         readClearBackchannelBaseline: () => null,
@@ -361,6 +366,7 @@ test("context clear reports a reservation refusal before injecting /clear", asyn
     runClearReloadInTurn(
       {
         serializeTile: (_id, fn) => fn(async (keys) => { typed.push(keys); return "written" as const; }),
+        checkOperatorTrust: async () => "compatible" as const,
         currentSessionId: () => "sid-before",
         reserveContextDeposit: async () => { throw failure; },
         readClearBackchannelBaseline: () => null,
@@ -389,6 +395,7 @@ test("context clear reports a release refusal after a verified rotation", async 
     runClearReloadInTurn(
       {
         serializeTile: (_id, fn) => fn(async () => "written" as const),
+        checkOperatorTrust: async () => "compatible" as const,
         currentSessionId: () => "sid-before",
         reserveContextDeposit: async () => "attempt-1",
         readClearBackchannelBaseline: () => null,
@@ -406,6 +413,173 @@ test("context clear reports a release refusal after a verified rotation", async 
   ).rejects.toBe(failure);
 
   expect(errors).toEqual([{ message: 'context clear failed for "lead-a1b2"', error: failure }]);
+});
+
+test("context clear checks operator trust before reserving the deposit", async () => {
+  const events: string[] = [];
+  const outcome = await runClearReloadInTurn(
+    {
+      serializeTile: (_id, fn) => fn(async (keys) => {
+        events.push(`inject:${keys}`);
+        return "written" as const;
+      }),
+      checkOperatorTrust: async () => {
+        events.push("trust");
+        return "compatible" as const;
+      },
+      currentSessionId: () => {
+        events.push("session");
+        return "sid-before";
+      },
+      reserveContextDeposit: async () => {
+        events.push("reserve");
+        return "attempt-1";
+      },
+      readClearBackchannelBaseline: () => null,
+      waitForClearBackchannel: async () => {},
+      releaseContextDeposit: async () => {
+        events.push("release");
+      }
+    },
+    () => {},
+    "tile-1",
+    "lead-a1b2",
+    "night-shift",
+    undefined,
+    { contextDepositId: "deposit-1" }
+  );
+
+  expect(outcome).toBe("written");
+  expect(events).toEqual(["trust", "session", "reserve", "inject:/clear", "release"]);
+});
+
+test("context clear neither reserves nor types /clear when a fresh trust check is not compatible", async () => {
+  // The reservation would succeed: the identity armed at startup is still
+  // there, only the broker answering now is not a compatible one.
+  for (const status of ["unconfigured", "not-trusted", "incompatible", "invalid", "unreachable"] as const) {
+    const typed: string[] = [];
+    let reservations = 0;
+    let releases = 0;
+    const errors: { message: string; error: unknown }[] = [];
+
+    await expect(
+      runClearReloadInTurn(
+        {
+          serializeTile: (_id, fn) => fn(async (keys) => { typed.push(keys); return "written" as const; }),
+          checkOperatorTrust: async () => status,
+          currentSessionId: () => "sid-before",
+          reserveContextDeposit: async () => {
+            reservations += 1;
+            return "attempt-1";
+          },
+          readClearBackchannelBaseline: () => null,
+          waitForClearBackchannel: async () => {},
+          releaseContextDeposit: async () => {
+            releases += 1;
+          },
+          reportError: (message, error) => errors.push({ message, error })
+        },
+        () => {},
+        "tile-1",
+        "lead-a1b2",
+        "night-shift",
+        undefined,
+        { contextDepositId: "deposit-1" }
+      )
+    ).rejects.toThrow(`operator trust is ${status}`);
+
+    expect([status, reservations, releases, typed]).toEqual([status, 0, 0, []]);
+    expect([status, errors.map((e) => e.message)]).toEqual([status, ['context clear failed for "lead-a1b2"']]);
+  }
+});
+
+test("context clear neither reserves nor types /clear when the trust check throws", async () => {
+  const typed: string[] = [];
+  let reservations = 0;
+  let releases = 0;
+  const failure = new Error("broker unreachable");
+  const errors: { message: string; error: unknown }[] = [];
+
+  await expect(
+    runClearReloadInTurn(
+      {
+        serializeTile: (_id, fn) => fn(async (keys) => { typed.push(keys); return "written" as const; }),
+        checkOperatorTrust: async () => { throw failure; },
+        currentSessionId: () => "sid-before",
+        reserveContextDeposit: async () => {
+          reservations += 1;
+          return "attempt-1";
+        },
+        readClearBackchannelBaseline: () => null,
+        waitForClearBackchannel: async () => {},
+        releaseContextDeposit: async () => {
+          releases += 1;
+        },
+        reportError: (message, error) => errors.push({ message, error })
+      },
+      () => {},
+      "tile-1",
+      "lead-a1b2",
+      "night-shift",
+      undefined,
+      { contextDepositId: "deposit-1" }
+    )
+  ).rejects.toBe(failure);
+
+  expect(reservations).toBe(0);
+  expect(releases).toBe(0);
+  expect(typed).toEqual([]);
+  expect(errors).toEqual([{ message: 'context clear failed for "lead-a1b2"', error: failure }]);
+});
+
+test("context clear rejects a host missing the operator trust check before reservation", async () => {
+  let reservations = 0;
+  const typed: string[] = [];
+
+  await expect(
+    runClearReloadInTurn(
+      {
+        serializeTile: (_id, fn) => fn(async (keys) => { typed.push(keys); return "written" as const; }),
+        currentSessionId: () => "sid-before",
+        reserveContextDeposit: async () => {
+          reservations += 1;
+          return "attempt-1";
+        },
+        readClearBackchannelBaseline: () => null,
+        waitForClearBackchannel: async () => {},
+        releaseContextDeposit: async () => {}
+      },
+      () => {},
+      "tile-1",
+      "lead-a1b2",
+      "night-shift",
+      undefined,
+      { contextDepositId: "deposit-1" }
+    )
+  ).rejects.toThrow("context clear host is incomplete");
+
+  expect(reservations).toBe(0);
+  expect(typed).toEqual([]);
+});
+
+test("clear_reload without a deposit does not consult operator trust", async () => {
+  let checks = 0;
+  const outcome = await runClearReloadInTurn(
+    {
+      serializeTile: (_id, fn) => fn(async () => "written" as const),
+      checkOperatorTrust: async () => {
+        checks += 1;
+        return "not-trusted" as const;
+      }
+    },
+    () => {},
+    "tile-1",
+    "lead-a1b2",
+    "night-shift"
+  );
+
+  expect(outcome).toBe("written");
+  expect(checks).toBe(0);
 });
 
 test("clear_reload stops before the reload instruction and announces when clear is refused", async () => {

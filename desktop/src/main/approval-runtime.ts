@@ -99,6 +99,24 @@ export class ApprovalRuntime {
     return { endpoint: this.opts.endpoint(), identity: this.identity, projectKey: this.safeProjectKey() }
   }
 
+  /**
+   * Re-runs the trust handshake against the broker answering now: the verdict
+   * reached by arm() does not survive a broker respawned or adopted after an
+   * outage. A failed request rejects without publishing, so a transient outage
+   * never pins the banner.
+   */
+  async checkTrustNow(): Promise<OperatorTrustStatus> {
+    const deps = this.deps()
+    if (!deps) throw new Error('operator identity is unavailable for the operator trust check')
+    const trust = await checkOperatorTrust(deps)
+    if (trust !== 'unreachable') this.publishTrust(trust, deps.identity)
+    return trust
+  }
+
+  private publishTrust(trust: OperatorTrustStatus, identity: OperatorIdentity): void {
+    this.opts.onTrustStatus?.(trust, trust === 'not-trusted' ? identity.publicKey : undefined)
+  }
+
   /** Env vars merged into every spawned session. Empty when disarmed. */
   env(): Record<string, string> {
     // Always emit the key so a value inherited from the parent process cannot
@@ -256,7 +274,7 @@ export class ApprovalRuntime {
         this.opts.onTrustStatus?.('unreachable')
         throw e
       }
-      this.opts.onTrustStatus?.(trust, trust === 'not-trusted' ? identity.publicKey : undefined)
+      this.publishTrust(trust, identity)
       if (trust !== 'compatible') {
         this.identity = null
         return false

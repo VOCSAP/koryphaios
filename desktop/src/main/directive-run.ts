@@ -1,4 +1,5 @@
 import type { DirectiveDispatch, SessionRuntime, UnreachedDirectiveTarget } from '../shared/types'
+import type { OperatorTrustStatus } from './approval-service'
 import type { MagicCompactMode } from './launch-config'
 import type { DirectiveOutcome } from './session-service'
 import {
@@ -42,6 +43,8 @@ export interface DirectiveRunDeps {
 export interface ClearReloadHost {
   serializeTile<T>(id: string, fn: (inject: (keys: string) => Promise<DirectiveOutcome>) => Promise<T>): Promise<T>
   currentSessionId?(tileId: string): string
+  /** Asked afresh on every context clear: the broker answering now may not be the one checked at startup. */
+  checkOperatorTrust?(): Promise<OperatorTrustStatus>
   reserveContextDeposit?(depositId: string, targetPeerId: string): Promise<string>
   readClearBackchannelBaseline?(tileId: string): string | null
   waitForClearBackchannel?(tileId: string, currentSessionId: string, baselineSessionId: string | null): Promise<void>
@@ -80,6 +83,7 @@ export function runClearReloadInTurn(
     const readClearBackchannelBaseline = host.readClearBackchannelBaseline
     if (
       !host.currentSessionId ||
+      !host.checkOperatorTrust ||
       !host.reserveContextDeposit ||
       !readClearBackchannelBaseline ||
       !host.waitForClearBackchannel ||
@@ -87,9 +91,11 @@ export function runClearReloadInTurn(
     ) {
       throw new Error('context clear host is incomplete')
     }
-    const currentSessionId = host.currentSessionId(tileId)
     let attemptId: string | undefined
     try {
+      const trust = await host.checkOperatorTrust()
+      if (trust !== 'compatible') throw new Error(`operator trust is ${trust}; context clear refused`)
+      const currentSessionId = host.currentSessionId(tileId)
       attemptId = await host.reserveContextDeposit(options.contextDepositId, peerId)
       const baselineSessionId = readClearBackchannelBaseline(tileId)
       const cleared = await inject('/clear')
