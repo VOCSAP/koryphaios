@@ -41,6 +41,12 @@ test('every invoke/send channel carries a sensitivity tier', () => {
   }
 })
 
+test('operator-trust:retry is a tier-1 companion action and remains remote-reachable', () => {
+  expect(COMPANION_MANIFEST.retryOperatorTrust).toEqual({ kind: 'invoke', channel: 'operator-trust:retry' })
+  expect(CHANNEL_TIERS['operator-trust:retry']).toBe(1)
+  expect(REMOTE_BLOCKED_CHANNELS.has('operator-trust:retry')).toBe(false)
+})
+
 test('blocked channels all exist in the manifest', () => {
   // Positive side-effect (review round, correction 8): because
   // REMOTE_BLOCKED_CHANNELS is the union of EXPLICIT_REMOTE_BLOCKED_CHANNELS

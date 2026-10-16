@@ -56,6 +56,7 @@ export class ApprovalRuntime {
   private closed = false
   private disarming = false
   private armInFlight: Promise<boolean> | null = null
+  private retryInFlight: Promise<boolean> | null = null
   private disarmInFlight: Promise<void> | null = null
   private renewal: { publicKey: string; sessionRef: string; projectKey: string; expiresAt: string } | null = null
   private renewalTimer: unknown | null = null
@@ -105,16 +106,52 @@ export class ApprovalRuntime {
    * outage. A failed request rejects without publishing, so a transient outage
    * never pins the banner.
    */
-  async checkTrustNow(): Promise<OperatorTrustStatus> {
+  private async requestTrust(): Promise<{ trust: OperatorTrustStatus; identity: OperatorIdentity }> {
     const deps = this.deps()
     if (!deps) throw new Error('operator identity is unavailable for the operator trust check')
-    const trust = await checkOperatorTrust(deps)
-    if (trust !== 'unreachable') this.publishTrust(trust, deps.identity)
+    return { trust: await checkOperatorTrust(deps), identity: deps.identity }
+  }
+
+  async checkTrustNow(): Promise<OperatorTrustStatus> {
+    const { trust, identity } = await this.requestTrust()
+    if (trust !== 'unreachable') this.publishTrust(trust, identity)
     return trust
   }
 
+  async retryTrust(): Promise<boolean> {
+    if (this.closed || this.disarming) return false
+    if (this.retryInFlight) return this.retryInFlight
+
+    const pending = this.retryTrustNow()
+    this.retryInFlight = pending
+    try {
+      return await pending
+    } finally {
+      if (this.retryInFlight === pending) this.retryInFlight = null
+    }
+  }
+
+  private async retryTrustNow(): Promise<boolean> {
+    if (!this.armed) return this.arm()
+
+    const generation = this.generation
+    const identity = this.identity
+    try {
+      const trust = await this.requestTrust()
+      if (!this.isCurrentArm(generation) || !this.armed) return false
+      if (trust.trust !== 'unreachable') this.publishTrust(trust.trust, trust.identity)
+      return true
+    } catch (e) {
+      reportError('approvals', 'could not recheck operator trust', e)
+      if (identity && this.isCurrentArm(generation) && this.armed) {
+        this.opts.onTrustStatus?.('unreachable', identity.publicKey)
+      }
+      return false
+    }
+  }
+
   private publishTrust(trust: OperatorTrustStatus, identity: OperatorIdentity): void {
-    this.opts.onTrustStatus?.(trust, trust === 'not-trusted' ? identity.publicKey : undefined)
+    this.opts.onTrustStatus?.(trust, identity.publicKey)
   }
 
   /** Env vars merged into every spawned session. Empty when disarmed. */
@@ -271,7 +308,7 @@ export class ApprovalRuntime {
         trust = await checkOperatorTrust(deps)
       } catch (e) {
         this.identity = null
-        this.opts.onTrustStatus?.('unreachable')
+        this.opts.onTrustStatus?.('unreachable', identity.publicKey)
         throw e
       }
       this.publishTrust(trust, identity)
@@ -383,4 +420,12 @@ export class ApprovalRuntime {
  */
 export async function armApprovalsAtStartup(approvals: ApprovalRuntime): Promise<boolean> {
   return approvals.arm()
+}
+
+export async function retryOperatorTrust<T>(
+  approvals: ApprovalRuntime,
+  currentStatus: () => T
+): Promise<T> {
+  await approvals.retryTrust()
+  return currentStatus()
 }

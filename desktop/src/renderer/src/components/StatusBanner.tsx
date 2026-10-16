@@ -2,6 +2,7 @@ import { bannerKind, replicaOfflineTextKey } from '@shared/status-banner'
 import { roadmapConflictCount, useDeck } from '../store'
 import { useT } from '../i18n'
 import { GLYPH_BADGES } from './icons'
+import { OPERATOR_TRUST_TEXT } from './OperatorTrustDialog'
 
 /**
  * Persistent full-width banner at the top of the window (PLAN O5): shown while
@@ -43,6 +44,9 @@ export function StatusBanner(): React.JSX.Element | null {
   // on, so there the button only switches view.
   const mobile = useDeck((s) => s.mobile)
   const openConflicts = useDeck((s) => s.openRoadmapConflictsFilter)
+  const openTrustDialog = useDeck((s) => s.openOperatorTrustDialog)
+  const retryTrust = useDeck((s) => s.retryOperatorTrust)
+  const trustRetrying = useDeck((s) => s.operatorTrustRetrying)
 
   const kind = bannerKind({
     brokerUp: status === null ? null : status.up,
@@ -75,30 +79,26 @@ export function StatusBanner(): React.JSX.Element | null {
     )
   }
 
-  const operatorTrustText =
-    kind === 'operator-unconfigured'
-      ? 'banner.operatorUnconfigured'
-      : kind === 'operator-not-trusted'
-        ? 'banner.operatorNotTrusted'
-        : kind === 'operator-incompatible'
-          ? 'banner.operatorIncompatible'
-          : kind === 'operator-identity-unreadable'
-            ? 'banner.operatorIdentityUnreadable'
-            : kind === 'operator-invalid'
-              ? 'banner.operatorInvalid'
-              : kind === 'operator-unreachable'
-                ? 'banner.operatorUnreachable'
-                : null
+  // The remedy (command, runbook, fingerprint) does not fit a 38px line, so the
+  // banner keeps one short sentence and the dialog carries the rest.
+  const operatorTrustText = kind?.startsWith('operator-') ? OPERATOR_TRUST_TEXT[operatorTrust.state] : undefined
   if (operatorTrustText) {
     const unconfigured = kind === 'operator-unconfigured'
     return (
       <div className={`status-banner ${unconfigured ? 'status-banner-info' : 'status-banner-error'}`} role={unconfigured ? 'status' : 'alert'}>
         <span className="status-banner-text">
           {GLYPH_BADGES.warning} {t(operatorTrustText)}
-          {kind === 'operator-not-trusted' && operatorTrust.fingerprint ? (
-            <span className="status-banner-detail" title={operatorTrust.fingerprint}> {operatorTrust.fingerprint}</span>
-          ) : null}
         </span>
+        <button className="status-banner-action" onClick={() => openTrustDialog(true)}>
+          {t('banner.operatorDetails')}
+        </button>
+        <button
+          className="status-banner-action"
+          disabled={trustRetrying}
+          onClick={() => void retryTrust()}
+        >
+          {trustRetrying ? t('operatorTrust.retrying') : t('banner.retry')}
+        </button>
       </div>
     )
   }

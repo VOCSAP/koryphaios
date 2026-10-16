@@ -2219,6 +2219,7 @@ export interface DeckApi {
   retryBroker(): Promise<void>
   onBrokerStatus(cb: (status: BrokerStatusEvent) => void): () => void
   getOperatorTrustStatus(): Promise<OperatorTrustStatusEvent>
+  retryOperatorTrust(): Promise<OperatorTrustStatusEvent>
   onOperatorTrustStatus(cb: (status: OperatorTrustStatusEvent) => void): () => void
 
   // diff / review (PLAN C13)

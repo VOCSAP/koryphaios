@@ -18,6 +18,7 @@ import { GraphView } from './GraphView'
 import { WorktreesView } from './WorktreesView'
 import { SandboxView } from './SandboxView'
 import { SandboxAuthDialog } from './SandboxAuthDialog'
+import { OperatorTrustDialog } from './OperatorTrustDialog'
 import { SandboxBuildDialog } from './SandboxBuildDialog'
 import { JournalView } from './JournalView'
 import { HomeView } from './HomeView'
@@ -153,6 +154,7 @@ export function App(): React.JSX.Element {
   const companionOpen = useDeck((s) => s.companionOpen)
   const usageOpen = useDeck((s) => s.usageOpen)
   const sandboxAuthOpen = useDeck((s) => s.sandboxAuthOpen)
+  const operatorTrustDialogOpen = useDeck((s) => s.operatorTrustDialogOpen)
   const sandboxBuildOpen = useDeck((s) => s.sandboxBuildOpen)
   const supervisorId = useDeck((s) => s.sessions.find((x) => x.supervisor)?.id ?? null)
 
@@ -308,13 +310,16 @@ export function App(): React.JSX.Element {
     return <div className="loading" aria-busy="true" />
   }
 
-  // Mobile shell (PLAN MB3): same views/stores/IPC, alternative chrome —
-  // bottom tabs, pager, one-column roadmap. Presentation only, no fork.
   if (mobile) {
     return (
       <div className="app app-mobile">
         <StatusBanner />
         <RemoteLinkOverlay />
+        {operatorTrustDialogOpen && (
+          <ErrorBoundary scope="operator-trust">
+            <OperatorTrustDialog />
+          </ErrorBoundary>
+        )}
         {pendingDesignPick && (
           <PickContextDialog
             pick={pendingDesignPick.pick}
@@ -469,6 +474,11 @@ export function App(): React.JSX.Element {
       {sandboxAuthOpen && !remote && (
         <ErrorBoundary scope="sandbox">
           <SandboxAuthDialog />
+        </ErrorBoundary>
+      )}
+      {operatorTrustDialogOpen && (
+        <ErrorBoundary scope="operator-trust">
+          <OperatorTrustDialog />
         </ErrorBoundary>
       )}
       {sandboxBuildOpen && !remote && (

@@ -97,6 +97,7 @@ export const COMPANION_MANIFEST = {
   getBrokerStatus: { kind: 'invoke', channel: 'broker:status' },
   retryBroker: { kind: 'invoke', channel: 'broker:retry' },
   getOperatorTrustStatus: { kind: 'invoke', channel: 'operator-trust:status' },
+  retryOperatorTrust: { kind: 'invoke', channel: 'operator-trust:retry' },
 
   // diff / review
   collectDiff: { kind: 'invoke', channel: 'diff:collect' },
@@ -376,6 +377,7 @@ export const CHANNEL_TIERS: Readonly<Record<string, 0 | 1 | 2 | 3>> = {
   'journal:list': 0,
   'broker:status': 0,
   'operator-trust:status': 0,
+  'operator-trust:retry': 1,
   'diff:collect': 0,
   'diff:collect-file': 0,
   'explorer:roots': 0,

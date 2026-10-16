@@ -189,7 +189,7 @@ import {
   releaseBeforeQuit,
   RELEASE_DEADLINE_MS
 } from './clodex-lifecycle-deps'
-import { ApprovalRuntime, armApprovalsAtStartup } from './approval-runtime'
+import { ApprovalRuntime, armApprovalsAtStartup, retryOperatorTrust } from './approval-runtime'
 import { remoteApprovalsEnabled } from './approval-store'
 import {
   ackApproval,
@@ -585,11 +585,11 @@ const applyClodexAutoStart = async (enabled: boolean): Promise<void> => {
 const approvalRunId = randomUUID()
 let operatorTrustStatus: OperatorTrustStatusEvent = { state: 'unknown' }
 function setOperatorTrustStatus(state: OperatorTrustStatusEvent['state'], publicKey?: string): void {
-  if (state === 'not-trusted' && publicKey) {
+  if (publicKey) {
     try {
       operatorTrustStatus = { state, fingerprint: publicKeyFingerprint(publicKey) }
     } catch (err) {
-      reportError('approvals', 'could not fingerprint untrusted operator identity', err)
+      reportError('approvals', 'could not fingerprint operator identity', err)
       operatorTrustStatus = { state }
     }
   } else {
@@ -3486,6 +3486,7 @@ app.whenReady().then(async () => {
     resolveTemplateInputs,
     brokerStatus: () => brokerHealth.status,
     operatorTrustStatus: () => operatorTrustStatus,
+    retryOperatorTrust: () => retryOperatorTrust(approvals, () => operatorTrustStatus),
     brokerRetry: () => {
       void pollOperatorInbox()
       void pollGraphDrafts()

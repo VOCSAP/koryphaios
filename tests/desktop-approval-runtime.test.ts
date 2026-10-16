@@ -3,7 +3,7 @@ import { test, expect, describe, afterAll, beforeEach, afterEach } from "bun:tes
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ApprovalRuntime, armApprovalsAtStartup } from "../desktop/src/main/approval-runtime.ts";
+import { ApprovalRuntime, armApprovalsAtStartup, retryOperatorTrust } from "../desktop/src/main/approval-runtime.ts";
 import {
   createOperatorIdentity,
   ensureOperatorIdentity,
@@ -81,6 +81,22 @@ function registerOperatorTrustStatusSetter(
   ) as (state: string, publicKey?: string) => void;
 }
 
+function retryOperatorTrustHandler(
+  approvals: ApprovalRuntime,
+  operatorTrustStatus: { state: string },
+): () => Promise<{ state: string }> {
+  const source = readFileSync(join(import.meta.dir, "..", "desktop", "src", "main", "index.ts"), "utf8").replace(/\r\n/g, "\n");
+  const start = source.indexOf("    retryOperatorTrust: ");
+  const end = source.indexOf(",\n", start);
+  if (start < 0 || end < 0) throw new Error("index.ts: retry operator trust callback is unavailable");
+  const callback = source.slice(start + "    retryOperatorTrust: ".length, end);
+  return new Function("retryOperatorTrust", "approvals", "operatorTrustStatus", `return (${callback});`)(
+    retryOperatorTrust,
+    approvals,
+    operatorTrustStatus,
+  ) as () => Promise<{ state: string }>;
+}
+
 function registerRoadmapSigner(
   ensureIdentity: () => { state: string },
   configure: (loader: () => unknown) => void,
@@ -120,7 +136,7 @@ test("roadmap signing is disabled when the operator identity is unavailable", ()
   expect(loader!()).toBeNull();
 });
 
-test("operator trust status publishes the shared fingerprint", () => {
+test.each(["compatible", "unconfigured", "not-trusted", "incompatible", "invalid", "unreachable"])("operator trust status publishes the shared fingerprint for %s", (state) => {
   const indexSource = readFileSync(join(import.meta.dir, "..", "desktop", "src", "main", "index.ts"), "utf8");
   expect(indexSource).toContain("import { publicKeyFingerprint } from '../../../shared/operator-trust'");
   expect(indexSource).not.toContain("function publicKeyFingerprint(");
@@ -132,8 +148,8 @@ test("operator trust status publishes the shared fingerprint", () => {
   );
   const publicKey = generateCredential().publicKey;
 
-  setStatus("not-trusted", publicKey);
-  expect(events).toEqual([{ state: "not-trusted", fingerprint: publicKeyFingerprint(publicKey) }]);
+  setStatus(state, publicKey);
+  expect(events).toEqual([{ state, fingerprint: publicKeyFingerprint(publicKey) }]);
 });
 
 test("operator trust status reports and contains malformed public keys", () => {
@@ -192,6 +208,251 @@ describe("armApprovalsAtStartup()", () => {
     expect(armed).toBe(true);
     expect(runtime.deps()).not.toBeNull();
     expect(runtime.operator?.operatorId).toMatch(/^[0-9a-f]{16}$/);
+  });
+});
+
+describe("retryOperatorTrust()", () => {
+  beforeEach(() => stubMintSuccess());
+
+  test("rechecks an armed runtime after the broker removes then restores its operator key", async () => {
+    let trusted = true;
+    const statuses: { state: string }[] = [];
+    const current = { state: "unknown" };
+    const runtime = new ApprovalRuntime({
+      stateDir: tmp(),
+      cipher: fakeCipher,
+      endpoint: () => ({ url: "http://broker.local", token: "" }),
+      runId: "run-test",
+      host: "test-host",
+      onTrustStatus: (state) => {
+        current.state = state;
+        statuses.push({ state });
+      },
+    });
+    const retry = retryOperatorTrustHandler(runtime, current);
+
+    expect(await runtime.arm()).toBe(true);
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      if (String(input).endsWith("/health")) {
+        return new Response(JSON.stringify({ operator_trust_version: 1, operator_trust_state: "ready" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      if (!trusted) {
+        return new Response(JSON.stringify({ error: "operator-not-trusted" }), {
+          status: 403,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      const body = JSON.parse(String(init?.body)) as { public_key: string };
+      return new Response(JSON.stringify({ operator_id: deriveOperatorId(body.public_key), protocol_version: 1 }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as unknown as typeof fetch;
+
+    trusted = false;
+    expect(await retry()).toEqual({ state: "not-trusted" });
+    expect(runtime.operator).not.toBeNull();
+
+    trusted = true;
+    expect(await retry()).toEqual({ state: "compatible" });
+    expect(statuses.map((status) => status.state)).toEqual(["compatible", "not-trusted", "compatible"]);
+  });
+
+  test("publishes unreachable instead of throwing when an armed retry cannot reach the broker", async () => {
+    const statuses: string[] = [];
+    const current = { state: "unknown" };
+    const runtime = new ApprovalRuntime({
+      stateDir: tmp(),
+      cipher: fakeCipher,
+      endpoint: () => ({ url: "http://broker.local", token: "" }),
+      runId: "run-test",
+      host: "test-host",
+      onTrustStatus: (state) => {
+        current.state = state;
+        statuses.push(state);
+      },
+    });
+    const retry = retryOperatorTrustHandler(runtime, current);
+    expect(await runtime.arm()).toBe(true);
+    globalThis.fetch = (async () => {
+      throw new Error("connect ECONNREFUSED");
+    }) as unknown as typeof fetch;
+
+    expect(await retry()).toEqual({ state: "unreachable" });
+    expect(statuses).toEqual(["compatible", "unreachable"]);
+  });
+
+  test("shares one in-flight handshake across concurrent retries", async () => {
+    const current = { state: "unknown" };
+    const runtime = new ApprovalRuntime({
+      stateDir: tmp(),
+      cipher: fakeCipher,
+      endpoint: () => ({ url: "http://broker.local", token: "" }),
+      runId: "run-test",
+      host: "test-host",
+      onTrustStatus: (state) => { current.state = state; },
+    });
+    const retry = retryOperatorTrustHandler(runtime, current);
+    expect(await runtime.arm()).toBe(true);
+
+    let releaseHealth!: (response: Response) => void;
+    let signalHealth!: () => void;
+    const healthStarted = new Promise<void>((resolve) => { signalHealth = resolve; });
+    const healthResponse = new Promise<Response>((resolve) => { releaseHealth = resolve; });
+    let requests = 0;
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      requests += 1;
+      if (String(input).endsWith("/health")) {
+        signalHealth();
+        return healthResponse;
+      }
+      const body = JSON.parse(String(init?.body)) as { public_key: string };
+      return new Response(JSON.stringify({ operator_id: deriveOperatorId(body.public_key), protocol_version: 1 }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as unknown as typeof fetch;
+
+    const first = retry();
+    const second = retry();
+    let healthTimeout: ReturnType<typeof setTimeout> | null = null;
+    const started = await Promise.race([
+      healthStarted.then(() => "started" as const),
+      new Promise<"timed-out">((resolve) => { healthTimeout = setTimeout(() => resolve("timed-out"), 50); }),
+    ]);
+    if (healthTimeout) clearTimeout(healthTimeout);
+    expect(started).toBe("started");
+    expect(requests).toBe(1);
+    releaseHealth(new Response(JSON.stringify({ operator_trust_version: 1, operator_trust_state: "ready" }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }));
+    await expect(Promise.all([first, second])).resolves.toEqual([{ state: "compatible" }, { state: "compatible" }]);
+  });
+
+  test("returns the prior status without publishing after the runtime closes", async () => {
+    const statuses: string[] = [];
+    const runtime = new ApprovalRuntime({
+      stateDir: tmp(),
+      cipher: fakeCipher,
+      endpoint: () => ({ url: "http://broker.local", token: "" }),
+      runId: "run-test",
+      host: "test-host",
+      onTrustStatus: (state) => statuses.push(state),
+    });
+    const prior = { state: "not-trusted" };
+    const retry = retryOperatorTrustHandler(runtime, prior);
+
+    await runtime.close();
+
+    expect(await retry()).toBe(prior);
+    expect(statuses).toEqual([]);
+  });
+
+  test("returns the prior status without publishing while disarming", async () => {
+    const statuses: string[] = [];
+    const current = { state: "unknown" };
+    const runtime = new ApprovalRuntime({
+      stateDir: tmp(),
+      cipher: fakeCipher,
+      endpoint: () => ({ url: "http://broker.local", token: "" }),
+      runId: "run-test",
+      host: "test-host",
+      onTrustStatus: (state) => {
+        current.state = state;
+        statuses.push(state);
+      },
+    });
+    const retry = retryOperatorTrustHandler(runtime, current);
+    expect(await runtime.arm()).toBe(true);
+
+    let beginRevoke!: () => void;
+    let finishRevoke!: (response: Response) => void;
+    const revokeStarted = new Promise<void>((resolve) => { beginRevoke = resolve; });
+    const revokeResponse = new Promise<Response>((resolve) => { finishRevoke = resolve; });
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      if (String(input).endsWith("/approval/token-revoke")) {
+        beginRevoke();
+        return revokeResponse;
+      }
+      throw new Error(`unexpected request: ${String(input)}`);
+    }) as unknown as typeof fetch;
+
+    const disarming = runtime.disarm();
+    const prior = current;
+    const publicationCount = statuses.length;
+
+    expect(await retry()).toBe(prior);
+    expect(statuses).toHaveLength(publicationCount);
+
+    await revokeStarted;
+    finishRevoke(new Response("{}", { status: 200 }));
+    await disarming;
+  });
+
+  test("does not publish a late retry after disarming begins", async () => {
+    const statuses: string[] = [];
+    const current = { state: "unknown" };
+    const runtime = new ApprovalRuntime({
+      stateDir: tmp(),
+      cipher: fakeCipher,
+      endpoint: () => ({ url: "http://broker.local", token: "" }),
+      runId: "run-test",
+      host: "test-host",
+      onTrustStatus: (state) => {
+        current.state = state;
+        statuses.push(state);
+      },
+    });
+    const retry = retryOperatorTrustHandler(runtime, current);
+    expect(await runtime.arm()).toBe(true);
+
+    let releaseHealth!: (response: Response) => void;
+    let signalHealth!: () => void;
+    let releaseRevoke!: (response: Response) => void;
+    let signalRevoke!: () => void;
+    const healthStarted = new Promise<void>((resolve) => { signalHealth = resolve; });
+    const healthResponse = new Promise<Response>((resolve) => { releaseHealth = resolve; });
+    const revokeStarted = new Promise<void>((resolve) => { signalRevoke = resolve; });
+    const revokeResponse = new Promise<Response>((resolve) => { releaseRevoke = resolve; });
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      if (String(input).endsWith("/health")) {
+        signalHealth();
+        return healthResponse;
+      }
+      if (String(input).endsWith("/approval/token-revoke")) {
+        signalRevoke();
+        return revokeResponse;
+      }
+      const body = JSON.parse(String(init?.body)) as { public_key: string };
+      return new Response(JSON.stringify({ operator_id: deriveOperatorId(body.public_key), protocol_version: 1 }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as unknown as typeof fetch;
+
+    const retrying = retry();
+    let healthTimeout: ReturnType<typeof setTimeout> | null = null;
+    const started = await Promise.race([
+      healthStarted.then(() => "started" as const),
+      new Promise<"timed-out">((resolve) => { healthTimeout = setTimeout(() => resolve("timed-out"), 50); }),
+    ]);
+    if (healthTimeout) clearTimeout(healthTimeout);
+    expect(started).toBe("started");
+    const disarming = runtime.disarm();
+    await revokeStarted;
+    const publicationCount = statuses.length;
+    releaseHealth(new Response(JSON.stringify({ operator_trust_version: 1, operator_trust_state: "ready" }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }));
+    expect(await retrying).toBe(current);
+    expect(statuses).toHaveLength(publicationCount);
+    releaseRevoke(new Response("{}", { status: 200 }));
+    await disarming;
   });
 });
 
@@ -269,9 +530,10 @@ describe("ApprovalRuntime.arm() without any mobile transport configured", () => 
     expect(states).toEqual(["incompatible"]);
   });
 
-  test("reports an unconfigured broker without signing a check", async () => {
+  test("reports an unconfigured broker with its local public key without signing a check", async () => {
     const requests: string[] = [];
     const states: string[] = [];
+    let reportedPublicKey: string | undefined;
     globalThis.fetch = (async (input: string | URL | Request) => {
       requests.push(String(input));
       return new Response(JSON.stringify({ operator_trust_version: 1, operator_trust_state: "unconfigured" }), {
@@ -285,12 +547,16 @@ describe("ApprovalRuntime.arm() without any mobile transport configured", () => 
       endpoint: () => ({ url: "http://broker.local", token: "" }),
       runId: "run-test",
       host: "test-host",
-      onTrustStatus: (state: string) => states.push(state),
+      onTrustStatus: (state: string, publicKey?: string) => {
+        states.push(state);
+        reportedPublicKey = publicKey;
+      },
     });
 
     expect(await runtime.arm()).toBe(false);
     expect(requests).toEqual(["http://broker.local/health"]);
     expect(states).toEqual(["unconfigured"]);
+    expect(reportedPublicKey).toEqual(expect.any(String));
   });
 
   test("reports an untrusted operator after the signed check", async () => {
@@ -542,26 +808,30 @@ describe("ApprovalRuntime.arm() without any mobile transport configured", () => 
     expect(requests[0]).toBe("http://broker.local/approval/token-revoke");
   });
 
-  test("reports an unreachable broker without claiming incompatibility", async () => {
+  test("reports an unreachable broker with its local public key without claiming incompatibility", async () => {
     const stateDir = tmp();
-    const states: string[] = [];
+    const states: { state: string; publicKey?: string }[] = [];
     const runtime = new ApprovalRuntime({
       stateDir,
       cipher: fakeCipher,
       endpoint: () => ({ url: "http://broker.local", token: "" }),
       runId: "run-test",
       host: "test-host",
-      onTrustStatus: (state: string) => states.push(state),
+      onTrustStatus: (state: string, publicKey?: string) => states.push({ state, publicKey }),
     });
 
     expect(await runtime.arm()).toBe(true);
+    const publicKey = runtime.operator!.publicKey;
     await runtime.disarm();
     globalThis.fetch = (async () => {
       throw new Error("connection refused");
     }) as unknown as typeof fetch;
 
     expect(await runtime.arm()).toBe(false);
-    expect(states).toEqual(["compatible", "unreachable"]);
+    expect(states).toEqual([
+      { state: "compatible", publicKey },
+      { state: "unreachable", publicKey },
+    ]);
     expect(runtime.deps()).toBeNull();
   });
 

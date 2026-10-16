@@ -102,6 +102,7 @@ const api: DeckApi = {
   getBrokerStatus: () => ipcRenderer.invoke('broker:status'),
   retryBroker: () => ipcRenderer.invoke('broker:retry'),
   getOperatorTrustStatus: () => ipcRenderer.invoke('operator-trust:status'),
+  retryOperatorTrust: () => ipcRenderer.invoke('operator-trust:retry'),
 
   ptyInput: (id: string, data: string) => ipcRenderer.send('pty:input', id, data),
   ptyResize: (id: string, cols: number, rows: number) =>

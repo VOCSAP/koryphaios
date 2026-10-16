@@ -1623,8 +1623,89 @@ textarea:disabled {
   cursor: pointer;
 }
 
-.status-banner-action:hover {
+.status-banner-action:hover:not(:disabled) {
   background: rgba(255, 255, 255, 0.25);
+}
+
+.status-banner-action:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* The global accent ring sits poorly on the filled tones; white is the strip's
+   own outline colour. */
+.status-banner-error .status-banner-action:focus-visible,
+.status-banner-warn .status-banner-action:focus-visible {
+  outline-color: #fff;
+}
+
+/* The neutral strip has the theme's text colour, so white-on-translucent would
+   vanish in the light theme: its actions take the Secondary archetype. */
+.status-banner-info .status-banner-action {
+  background: var(--bg-2);
+  color: var(--fg);
+  border-color: var(--border);
+}
+
+.status-banner-info .status-banner-action:hover:not(:disabled) {
+  background: var(--bg);
+}
+
+/* Operator trust dialog: the remedy the 38px banner line cannot hold. */
+.operator-trust-state {
+  margin: 0 0 10px;
+  color: var(--danger);
+  font-weight: 500;
+}
+
+.operator-trust-state-unconfigured {
+  color: var(--fg);
+}
+
+.operator-trust-help,
+.operator-trust-note {
+  color: var(--fg-dim);
+  font-size: 12px;
+  line-height: 1.5;
+  margin: 0 0 12px;
+  user-select: text;
+}
+
+.operator-trust-fingerprint {
+  margin: 0 0 12px;
+}
+
+.operator-trust-label {
+  display: block;
+  color: var(--fg-dim);
+  font-size: 11px;
+  margin-bottom: 4px;
+}
+
+.operator-trust-fingerprint-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.operator-trust-fingerprint-value {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--mono);
+  font-size: 12px;
+  padding: 6px 8px;
+  background: var(--bg-3);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  /* Selectable and wrapped: 64 hex characters must never widen the modal. */
+  user-select: text;
+  overflow-wrap: anywhere;
+}
+
+.operator-trust-unchanged {
+  margin: 0 0 12px;
+  font-size: 12px;
+  color: var(--fg);
 }
 
 /* In-frame page failure overlay (PLAN O6): a dead webview is no longer a

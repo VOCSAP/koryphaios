@@ -32,6 +32,9 @@ interface FakeDeckState {
   setView(view: string): void;
   mobile: boolean;
   openRoadmapConflictsFilter(): void;
+  operatorTrustRetrying: boolean;
+  openOperatorTrustDialog(open: boolean): void;
+  retryOperatorTrust(): Promise<unknown>;
 }
 
 function initialFakeState(): FakeDeckState {
@@ -47,6 +50,9 @@ function initialFakeState(): FakeDeckState {
     setView: () => {},
     mobile: false,
     openRoadmapConflictsFilter: () => {},
+    operatorTrustRetrying: false,
+    openOperatorTrustDialog: () => {},
+    retryOperatorTrust: async () => null,
   };
 }
 
@@ -106,20 +112,60 @@ test.each([
   expect(container.textContent).toContain(textKey);
 });
 
-test("an untrusted operator shows its full fingerprint in the detail title", () => {
+function bannerButton(label: string): HTMLButtonElement {
+  const button = [...container.querySelectorAll<HTMLButtonElement>(".status-banner-action")].find(
+    (b) => b.textContent === label
+  );
+  expect(button, `the operator trust banner must carry a "${label}" action`).toBeDefined();
+  return button!;
+}
+
+test.each(["unconfigured", "not-trusted", "incompatible", "identity-unreadable", "invalid", "unreachable"] as const)(
+  "operator trust state %s offers Details and Retry, and nothing else",
+  (state) => {
+    fakeUseDeck.setState({ operatorTrustStatus: { state, fingerprint: "b".repeat(64) } });
+    mountBanner();
+    const labels = [...container.querySelectorAll(".status-banner > *")].map((el) =>
+      el.tagName === "BUTTON" ? `button:${el.textContent}` : el.className
+    );
+    expect(labels).toEqual(["status-banner-text", "button:banner.operatorDetails", "button:banner.retry"]);
+  }
+);
+
+test("the fingerprint lives in the dialog, never in the truncated banner line", () => {
   const fingerprint = "b".repeat(64);
+  fakeUseDeck.setState({ operatorTrustStatus: { state: "not-trusted", fingerprint } });
+  mountBanner();
+  expect(container.textContent).not.toContain(fingerprint);
+});
+
+test("Details opens the operator trust dialog", () => {
+  const calls: unknown[] = [];
   fakeUseDeck.setState({
-    dict: {
-      "banner.operatorNotTrusted": "Run bun cli.ts operator-trust export and update runbooks/operator-trust.md",
-    },
-    operatorTrustStatus: { state: "not-trusted", fingerprint },
+    operatorTrustStatus: { state: "not-trusted" },
+    openOperatorTrustDialog: (open) => calls.push(open),
   });
   mountBanner();
+  act(() => bannerButton("banner.operatorDetails").click());
+  expect(calls).toEqual([true]);
+});
 
-  const detail = container.querySelector(".status-banner-detail");
-  expect(detail?.textContent).toContain(fingerprint);
-  expect(detail?.getAttribute("title")).toBe(fingerprint);
-  expect(container.textContent).toContain("bun cli.ts operator-trust export");
+test("Retry runs the store re-check, and is disabled with its own label while one is in flight", () => {
+  let retries = 0;
+  fakeUseDeck.setState({
+    operatorTrustStatus: { state: "unreachable" },
+    retryOperatorTrust: async () => {
+      retries++;
+      return null;
+    },
+  });
+  mountBanner();
+  act(() => bannerButton("banner.retry").click());
+  expect(retries).toBe(1);
+
+  act(() => fakeUseDeck.setState({ operatorTrustRetrying: true }));
+  const busy = bannerButton("operatorTrust.retrying");
+  expect(busy.disabled).toBe(true);
 });
 
 test("an unconfigured trust policy uses the neutral information tone", () => {

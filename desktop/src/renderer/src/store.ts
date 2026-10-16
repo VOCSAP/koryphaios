@@ -213,6 +213,9 @@ interface DeckState {
   /** Broker reachability (PLAN O5): null until main reports, drives the banner. */
   brokerStatus: BrokerStatusEvent | null
   operatorTrustStatus: OperatorTrustStatusEvent
+  operatorTrustDialogOpen: boolean
+  /** A trust re-check is in flight; shared by the banner and the dialog so neither fires a second one. */
+  operatorTrustRetrying: boolean
   /**
    * `since` of the outage whose banner the user dismissed. The banner hides
    * for THAT outage only (a new outage has a new `since`, so it reappears);
@@ -391,6 +394,16 @@ interface DeckState {
   patchSandbox(patch: SandboxSettingsPatch): Promise<void>
   openSandboxAuth(open: boolean): void
   openSandboxBuild(open: boolean): void
+  openOperatorTrustDialog(open: boolean): void
+  /**
+   * Re-runs the operator trust check main-side. 'unchanged' when the broker
+   * still answers the state shown before the click, so a refusal never reads
+   * as a success; null when the call failed (already toasted) or one was
+   * already in flight.
+   */
+  retryOperatorTrust(): Promise<'compatible' | 'unchanged' | 'changed' | null>
+  /** Success toast only once the clipboard resolved; any failure, even synchronous, goes through guarded(). */
+  copyOperatorFingerprint(value: string): Promise<void>
   /** Open the build modal and spawn the build (no-op if one already runs). */
   startSandboxBuild(thenAuth: boolean, custom?: boolean): Promise<void>
   /** The build PTY exited: clear the flag, refresh, and chain the login. */
@@ -573,6 +586,8 @@ export const useDeck = create<DeckState>((set, get) => ({
   initError: null,
   brokerStatus: null,
   operatorTrustStatus: { state: 'unknown' },
+  operatorTrustDialogOpen: false,
+  operatorTrustRetrying: false,
   offlineBannerDismissed: null,
   remote: false,
   mobile: false,
@@ -1193,6 +1208,39 @@ export const useDeck = create<DeckState>((set, get) => ({
 
   openSandboxAuth: (open) => set({ sandboxAuthOpen: open }),
   openSandboxBuild: (open) => set({ sandboxBuildOpen: open }),
+  openOperatorTrustDialog: (open) => set({ operatorTrustDialogOpen: open }),
+
+  async retryOperatorTrust() {
+    if (get().operatorTrustRetrying) return null
+    const before = get().operatorTrustStatus.state
+    set({ operatorTrustRetrying: true })
+    let after = null as OperatorTrustStatusEvent | null
+    try {
+      await guarded('operator trust check', async () => {
+        after = await window.api.retryOperatorTrust()
+      })
+    } finally {
+      set({ operatorTrustRetrying: false })
+    }
+    if (!after) return null
+    set({ operatorTrustStatus: after })
+    if (after.state === 'compatible') {
+      get().showToast('toast.operatorTrusted')
+      return 'compatible'
+    }
+    if (after.state === before) {
+      get().showToast('toast.operatorTrustUnchanged', 'info')
+      return 'unchanged'
+    }
+    return 'changed'
+  },
+
+  async copyOperatorFingerprint(value) {
+    const copied = await guarded('copy fingerprint', async () => {
+      await navigator.clipboard.writeText(value)
+    })
+    if (copied) get().showToast('toast.fingerprintCopied')
+  },
 
   async startSandboxBuild(thenAuth, custom) {
     // The build keeps running when the modal is HIDDEN, so ownership of its
