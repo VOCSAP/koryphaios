@@ -404,6 +404,10 @@ function assertInvariants(state: AvatarMachineState): void {
   }
   expect(state.appearanceRevision).toBeGreaterThanOrEqual(state.persistedRevision)
   if (selectCanMove(state)) expect(lifecycle.kind).toBe('ready')
+  if (state.pendingRaise) {
+    expect(['loading', 'promoting', 'retiring', 'stopped'], 'a pending raise waits for a promotion').toContain(lifecycle.kind)
+    if (lifecycle.kind === 'promoting') expect(lifecycle.step, 'the promotion show consumes the pending raise').not.toBe('show')
+  }
 }
 
 function readyHarness(init: HarnessInit = {}): Harness {
@@ -899,6 +903,111 @@ describe('lifecycle reduction, cases a to g', () => {
     expect(h.state.permits.some((permit) => permit.species === 'show')).toBe(false)
     expect(h.shows).toBe(1)
     expect(h.state.appearance.visible).toBe(false)
+  })
+})
+
+describe('only an operator Show raises the window', () => {
+  const raises = (h: Harness): boolean[] => h.executed.flatMap((effect) => (effect.kind === 'show' ? [effect.raise] : []))
+
+  test('Show from absent raises the window it creates', () => {
+    expect(raises(readyHarness())).toEqual([true])
+  })
+
+  test('Show on a ready window raises it again', () => {
+    const h = readyHarness()
+    h.dispatch({ kind: 'ShowRequested' })
+    expect(raises(h)).toEqual([true, true])
+  })
+
+  for (const hold of ['load', 'prepare', 'promotion'] as const) {
+    test(`Show while the restored window waits on ${hold} raises it at promotion`, () => {
+      const h = new Harness().hold(hold)
+      h.dispatch({ kind: 'RestoreRequested' })
+      expect(raises(h)).toEqual([])
+      h.dispatch({ kind: 'ShowRequested' })
+      h.release(hold)
+      h.deliverOne()
+      expect(h.kind).toBe('ready')
+      expect(raises(h)).toEqual([true])
+    })
+  }
+
+  test('Show while a restored window is being shown adds a raising show', () => {
+    const h = new Harness().hold('show')
+    h.dispatch({ kind: 'RestoreRequested' })
+    expect(h.state.lifecycle).toMatchObject({ kind: 'promoting', step: 'show' })
+    h.dispatch({ kind: 'ShowRequested' })
+    expect(raises(h)).toEqual([false, true])
+  })
+
+  test('Show while the window is retiring for a reload raises its replacement', () => {
+    const h = readyHarness().hold('destroy')
+    h.dispatch({ kind: 'ReloadRequested' })
+    expect(h.kind).toBe('retiring')
+    h.dispatch({ kind: 'ShowRequested' })
+    h.release('destroy')
+    h.deliverOne()
+    expect(h.kind).toBe('ready')
+    expect(raises(h)).toEqual([true, true])
+  })
+
+  test('Show is refused without a window platform and once stopped, and raises nothing', () => {
+    const unavailable = new Harness({ available: false })
+    unavailable.dispatch({ kind: 'ShowRequested' })
+    expect(raises(unavailable)).toEqual([])
+    const stopped = readyHarness()
+    stopped.dispatch({ kind: 'QuitRequested' })
+    expect(stopped.kind).toBe('stopped')
+    const before = raises(stopped).length
+    stopped.dispatch({ kind: 'ShowRequested' })
+    expect(raises(stopped)).toHaveLength(before)
+  })
+
+  test('a Show undone by Hide before its promotion leaves no raise for a later geometry change', () => {
+    const h = new Harness().hold('load')
+    h.dispatch({ kind: 'ShowRequested' })
+    h.dispatch({ kind: 'HideRequested' })
+    h.release('load')
+    h.deliverOne()
+    expect(h.kind).toBe('ready')
+    h.dispatch({ kind: 'ShowRequested' })
+    h.dispatch({ kind: 'GeometryChanged', geometry: { displays: [DISPLAY_B] } })
+    expect(raises(h)).toEqual([true, false])
+  })
+
+  test('a reload drops the raise of a Show still waiting on its window', () => {
+    const h = new Harness().hold('load')
+    h.dispatch({ kind: 'RestoreRequested' })
+    h.dispatch({ kind: 'ShowRequested' })
+    h.release('load')
+    h.dispatch({ kind: 'ReloadRequested' })
+    expect(h.kind).toBe('ready')
+    expect(raises(h)).toEqual([false])
+  })
+
+  test('a startup restore shows without raising', () => {
+    const h = new Harness()
+    h.dispatch({ kind: 'RestoreRequested' })
+    expect(raises(h)).toEqual([false])
+  })
+
+  test('a geometry change, a size change and a reload show again without raising', () => {
+    const h = readyHarness()
+    h.dispatch({ kind: 'GeometryChanged', geometry: { displays: [DISPLAY_B] } })
+    h.dispatch({ kind: 'AppearanceChanged', patch: { size: 'l' } })
+    h.dispatch({ kind: 'ReloadRequested' })
+    expect(h.kind).toBe('ready')
+    expect(raises(h)).toEqual([true, false, false, false])
+  })
+
+  test('a Show whose window never came up leaves no raise for a later reload', () => {
+    const h = new Harness().fail('load')
+    h.dispatch({ kind: 'ShowRequested' })
+    expect(h.kind).toBe('absent')
+    h.failures.delete('load')
+    h.dispatch({ kind: 'ReloadRequested' })
+    expect(h.kind).toBe('ready')
+    expect(raises(h)).toEqual([false])
   })
 })
 

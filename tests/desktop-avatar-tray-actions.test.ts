@@ -96,6 +96,13 @@ class MiniWindow implements AvatarBrowserWindow {
   showInactive(): void {
     this.calls.push('show')
   }
+
+  failMoveTop = false
+
+  moveTop(): void {
+    if (this.failMoveTop) throw new Error('moveTop refused')
+    this.calls.push('moveTop')
+  }
 }
 
 interface NativeItem {
@@ -106,10 +113,12 @@ interface NativeItem {
 
 const flush = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0))
 
-async function setup() {
+async function setup(appearanceOverride: Partial<AvatarAppearance> = {}) {
   const windows: MiniWindow[] = []
   const menus: NativeItem[][] = []
+  const windowErrors: string[] = []
   let heartbeat: (() => void) | null = null
+  let doubleClick: (() => void) | null = null
   const assembly = assembleAvatar({
     ipc: { handle: () => {}, removeHandler: () => {} },
     available: true,
@@ -120,13 +129,15 @@ async function setup() {
       windows.push(window)
       return window
     },
-    appearance: { ...APPEARANCE, positions: {} },
+    appearance: { ...APPEARANCE, ...appearanceOverride, positions: {} },
     writeSnapshot: () => {},
     geometry: () => ({ displays: [{ id: '1', workArea: { x: 0, y: 0, width: 1000, height: 800 } }] }),
     theme: () => 'dark',
     locale: 'en',
     now: () => NOW,
-    reportError: () => {},
+    reportError: (_scope, message) => {
+      windowErrors.push(message)
+    },
     gesture: () => {},
     setTimeout: () => ({}),
     clearTimeout: () => {}
@@ -139,7 +150,10 @@ async function setup() {
   const dependencies: AvatarTrayDependencies = {
     now: () => NOW,
     loadImage: () => ({ isEmpty: () => false }),
-    createTray: () => ({ setToolTip: () => {}, setContextMenu: (menu) => menus.push(menu as NativeItem[]), setImage: () => {}, destroy: () => {} }),
+    createTray: (_image, onDoubleClick) => {
+      doubleClick = onDoubleClick
+      return { setToolTip: () => {}, setContextMenu: (menu) => menus.push(menu as NativeItem[]), setImage: () => {}, destroy: () => {} }
+    },
     buildMenu: (template) => template,
     setInterval: (callback) => {
       heartbeat = callback
@@ -199,9 +213,56 @@ async function setup() {
     if (heartbeat === null) throw new Error('the Tray armed no heartbeat')
     heartbeat()
   }
+  const doubleClickIcon = (): void => {
+    if (doubleClick === null) throw new Error('the Tray registered no double-click handler')
+    doubleClick()
+  }
   tick()
-  return { assembly, tray, windows, menus, appearance, locate, checkedIn, pureMenu, tick }
+  return { assembly, tray, windows, menus, windowErrors, appearance, locate, checkedIn, pureMenu, tick, doubleClickIcon }
 }
+
+test('a Tray double-click raises a visible avatar after showing it, without touching Always on top', async () => {
+  const s = await setup({ alwaysOnTop: false })
+  const window = s.windows.at(-1)!
+  window.calls.length = 0
+
+  s.doubleClickIcon()
+  await flush()
+  expect(window.calls, 'moveTop must follow showInactive').toEqual(['show', 'moveTop'])
+  expect(s.appearance().alwaysOnTop).toBe(false)
+  expect(s.appearance().visible).toBe(true)
+})
+
+test('a Tray double-click shows and raises a hidden avatar', async () => {
+  const s = await setup()
+  s.locate((a) => a.kind === 'visible').native.click!()
+  expect(s.appearance().visible).toBe(false)
+  const window = s.windows.at(-1)!
+  window.calls.length = 0
+
+  s.doubleClickIcon()
+  await flush()
+  expect(s.appearance().visible).toBe(true)
+  expect(s.appearance().alwaysOnTop, 'the stored setting must not change').toBe(true)
+  expect(window.calls).toEqual(['show', 'moveTop'])
+  expect(s.locate((a) => a.kind === 'visible').native.checked, 'the menu must follow the double-click without a heartbeat').toBe(true)
+})
+
+test('a Tray double-click whose raise fails is reported and keeps the window shown', async () => {
+  const s = await setup()
+  const window = s.windows.at(-1)!
+  window.failMoveTop = true
+  window.calls.length = 0
+
+  s.doubleClickIcon()
+  await flush()
+  expect(s.windowErrors).toContain('Avatar window could not be raised')
+  expect(s.windows.at(-1), 'a failed raise must not replace the window').toBe(window)
+  expect(window.destroyed).toBe(false)
+  expect(window.calls).toEqual(['show'])
+  expect(s.appearance().visible).toBe(true)
+  expect(selectWindowShown(s.assembly.controller.snapshot())).toBe(true)
+})
 
 test('Show the avatar hides and shows the window through the machine, and its tick follows the snapshot', async () => {
   const s = await setup()

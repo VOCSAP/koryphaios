@@ -22,6 +22,7 @@ import {
   type AvatarTrayImage,
   type ElectronTrayModule
 } from '../desktop/src/main/avatar-tray.ts'
+import type { AvatarEvent } from '../desktop/src/main/avatar-window-state.ts'
 import type { AvatarFace } from '../desktop/src/shared/avatar-state.ts'
 import type { AvatarViewSummary } from '../desktop/src/shared/avatar-view.ts'
 import { MASK_OUTLINE } from '../desktop/src/shared/avatar-mask-geometry.ts'
@@ -198,6 +199,7 @@ interface FakeElectron {
   emptyCalls: number
   systemDark: boolean | undefined
   themeListeners: Set<() => void>
+  trayListeners: Map<string, () => void>
 }
 
 function fakeElectron(load: (path: string) => AvatarTrayImage): FakeElectron {
@@ -208,10 +210,12 @@ function fakeElectron(load: (path: string) => AvatarTrayImage): FakeElectron {
     setImages: [],
     emptyCalls: 0,
     systemDark: true,
-    themeListeners: new Set()
+    themeListeners: new Set(),
+    trayListeners: new Map()
   }
   class Tray {
     constructor(image: unknown) { fake.trayImages.push(image) }
+    on(event: string, listener: () => void): void { fake.trayListeners.set(event, listener) }
     setToolTip(): void {}
     setContextMenu(): void {}
     setImage(image: unknown): void { fake.setImages.push(image) }
@@ -236,6 +240,8 @@ function fakeElectron(load: (path: string) => AvatarTrayImage): FakeElectron {
 interface TrayHarness {
   fake: FakeElectron
   errors: string[]
+  dispatched: AvatarEvent[]
+  failDispatch(): void
   setFace(face: AvatarFace): void
   setSystemDark(dark: boolean | undefined, notify: boolean): void
   tick(): void
@@ -252,6 +258,8 @@ function startTray(
   const fake = fakeElectron(load)
   fake.systemDark = initialSystemDark
   const errors: string[] = []
+  const dispatched: AvatarEvent[] = []
+  let dispatchFails = false
   let face = initialFace
   let tick: (() => void) | null = null
   const tray = createAvatarTray({
@@ -261,7 +269,10 @@ function startTray(
     attachedDecks: () => [],
     appearance: () => ({ positionLocked: false, alwaysOnTop: true, motion: 'continuous', size: 'm', frame: 'normal' }),
     windowShown: () => true,
-    dispatch: () => {},
+    dispatch: (event) => {
+      if (dispatchFails) throw new Error('dispatch refused')
+      dispatched.push(event)
+    },
     getDnd: () => null,
     onDnd: () => {},
     onDeckMenuClick: () => {},
@@ -276,6 +287,8 @@ function startTray(
   return {
     fake,
     errors,
+    dispatched,
+    failDispatch: () => { dispatchFails = true },
     setFace: (next) => { face = next },
     setSystemDark: (dark, notify) => {
       fake.systemDark = dark
@@ -301,6 +314,27 @@ test('the Tray is built from the icon of the variant of the current face, never 
   expect(harness.fake.trayImages.map(String)).toEqual([avatarTrayIconPath('icons-dir', 'panne', 'dark')])
   expect(harness.fake.emptyCalls, 'the Tray fell back to nativeImage.createEmpty(), the blank-square icon').toBe(0)
   expect(harness.errors).toEqual([])
+})
+
+test('the native Tray double-click asks the machine to show the avatar', () => {
+  const harness = startTray('icons-dir', 'seul', imageFor)
+  const doubleClick = harness.fake.trayListeners.get('double-click')
+  expect(doubleClick, 'the Electron Tray must listen to double-click').toBeDefined()
+
+  doubleClick!()
+  harness.dispose()
+  expect(harness.dispatched).toEqual([{ kind: 'ShowRequested' }])
+  expect(harness.errors).toEqual([])
+})
+
+test('a Tray double-click whose dispatch throws is reported instead of escaping the listener', () => {
+  const harness = startTray('icons-dir', 'seul', imageFor)
+  harness.failDispatch()
+  const doubleClick = harness.fake.trayListeners.get('double-click')!
+
+  expect(() => doubleClick()).not.toThrow()
+  harness.dispose()
+  expect(harness.errors).toEqual(['cannot bring the avatar forward'])
 })
 
 test('a refresh swaps the icon only when the variant changes', () => {

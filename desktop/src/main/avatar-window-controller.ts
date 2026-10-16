@@ -180,6 +180,13 @@ export function createAvatarWindowController(options: AvatarWindowControllerOpti
       case 'show': {
         const { token, op } = effect
         const ok = attempt(() => native.show(token), 'Avatar window could not be shown')
+        if (ok && effect.raise) {
+          try {
+            native.raise(token)
+          } catch (error) {
+            options.reportError('avatar-window', 'Avatar window could not be raised', error)
+          }
+        }
         settle({ kind: ok ? 'ShowSucceeded' : 'ShowFailed', token, op })
         return
       }

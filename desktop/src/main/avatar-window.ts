@@ -76,6 +76,7 @@ export interface AvatarBrowserWindow {
   setContentSize(width: number, height: number): void
   getSize(): number[]
   showInactive(): void
+  moveTop(): void
 }
 
 export interface AvatarNativeCallbacks {
@@ -98,6 +99,7 @@ export interface AvatarNativeAdapter {
   prepare(token: number, x: number, y: number, size: AvatarWindowSize, alwaysOnTop: boolean): void
   send(token: number, state: AvatarViewState): void
   show(token: number): void
+  raise(token: number): void
   hide(token: number): void
   setPointerMode(token: number, inside: boolean): void
   setAlwaysOnTop(token: number, alwaysOnTop: boolean): void
@@ -314,6 +316,9 @@ export function createAvatarNativeAdapter(options: AvatarNativeAdapterOptions): 
     },
     show(token) {
       resource(token).showInactive()
+    },
+    raise(token) {
+      resource(token).moveTop()
     },
     hide(token) {
       resource(token).hide()

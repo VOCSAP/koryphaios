@@ -108,6 +108,8 @@ export interface AvatarMachineState {
   readonly timers: AvatarTimers
   readonly write: { readonly writeId: number; readonly revision: number } | null
   readonly initialWaiter: number | null
+  /** Set by a Show whose window is not promoted yet; consumed by the next promotion, which raises only if the window is visible. */
+  readonly pendingRaise: boolean
 }
 
 const APPEARANCE_FIELD_OWNER = {
@@ -204,7 +206,7 @@ export type AvatarEffect =
       readonly op: number
       readonly snapshot: AvatarPublication
     }
-  | { readonly kind: 'show'; readonly token: number; readonly op: number }
+  | { readonly kind: 'show'; readonly token: number; readonly op: number; readonly raise: boolean }
   | { readonly kind: 'hide'; readonly token: number; readonly op: number }
   | { readonly kind: 'setPointerMode'; readonly token: number; readonly op: number; readonly inside: boolean }
   | { readonly kind: 'setAlwaysOnTop'; readonly token: number; readonly op: number; readonly alwaysOnTop: boolean }
@@ -265,7 +267,8 @@ export function createAvatarMachineState(init: AvatarMachineInit): AvatarMachine
     permits: [],
     timers: { move: null, persist: null, loadWatchdog: null, destroyWatchdog: null },
     write: null,
-    initialWaiter: null
+    initialWaiter: null,
+    pendingRaise: false
   }
 }
 
@@ -568,7 +571,7 @@ function acknowledgeDisappearance(d: Draft): void {
   dropPermits(d, lifecycle.token)
   if (lifecycle.destination === 'stop') enterStopped(d)
   else if (lifecycle.destination === 'replacement') startAllocation(d)
-  else set(d, { lifecycle: { kind: 'absent' } })
+  else set(d, { lifecycle: { kind: 'absent' }, pendingRaise: false })
 }
 
 function loseResource(d: Draft, token: number): void {
@@ -576,7 +579,7 @@ function loseResource(d: Draft, token: number): void {
   disarm(d, 'loadWatchdog')
   dropPermits(d, token)
   rejectInitialWaiter(d, token)
-  set(d, { pointerInside: false, lifecycle: { kind: 'absent' } })
+  set(d, { pointerInside: false, lifecycle: { kind: 'absent' }, pendingRaise: false })
 }
 
 function retryCleanup(d: Draft): void {
@@ -646,20 +649,26 @@ function onShow(d: Draft): void {
   switch (lifecycle.kind) {
     case 'absent':
       commit(d, changed)
+      set(d, { pendingRaise: true })
       startAllocation(d)
       return
     case 'loading':
+      commit(d, changed)
+      set(d, { pendingRaise: true })
+      return
     case 'promoting':
       commit(d, changed)
+      if (lifecycle.step === 'show') emit(d, { kind: 'show', token: lifecycle.token, op: grant(d, lifecycle.token, 'show'), raise: true })
+      else set(d, { pendingRaise: true })
       return
     case 'ready':
       requestWrite(d)
       publish(d)
-      emit(d, { kind: 'show', token: lifecycle.token, op: grant(d, lifecycle.token, 'show') })
+      emit(d, { kind: 'show', token: lifecycle.token, op: grant(d, lifecycle.token, 'show'), raise: true })
       return
     case 'retiring':
       commit(d, changed)
-      set(d, { lifecycle: { ...lifecycle, destination: 'replacement' } })
+      set(d, { lifecycle: { ...lifecycle, destination: 'replacement' }, pendingRaise: true })
       retryCleanup(d)
       return
     default:
@@ -696,6 +705,7 @@ function onReload(d: Draft): void {
   if (lifecycle.kind === 'unavailable' || lifecycle.kind === 'stopped') return reject(d, 'Avatar window is unavailable')
   if (lifecycle.kind === 'retiring' && lifecycle.destination === 'stop') return reject(d, 'Avatar is stopping')
   d.reply = ACCEPTED
+  set(d, { pendingRaise: false })
   switch (lifecycle.kind) {
     case 'absent':
       startAllocation(d)
@@ -933,9 +943,11 @@ function onPromotionPublished(d: Draft, token: number, op: number): void {
     set(d, { initialWaiter: null })
     emit(d, { kind: 'resolveInitialState', token })
   }
+  const raise = d.s.pendingRaise
+  set(d, { pendingRaise: false })
   if (d.s.appearance.visible) {
     set(d, { lifecycle: { kind: 'promoting', token, step: 'show' } })
-    emit(d, { kind: 'show', token, op: grant(d, token, 'show') })
+    emit(d, { kind: 'show', token, op: grant(d, token, 'show'), raise })
   } else {
     set(d, { lifecycle: { kind: 'ready', token } })
   }

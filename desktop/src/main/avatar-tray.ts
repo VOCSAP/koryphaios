@@ -50,7 +50,7 @@ export interface AvatarTrayImage {
 export interface AvatarTrayDependencies {
   now(): number
   loadImage(path: string): AvatarTrayImage
-  createTray(image: AvatarTrayImage): AvatarTrayNative
+  createTray(image: AvatarTrayImage, onDoubleClick: () => void): AvatarTrayNative
   buildMenu(template: MenuItemConstructorOptions[]): unknown
   setInterval(callback: () => void, delay: number): ReturnType<typeof setInterval>
   clearInterval(timer: ReturnType<typeof setInterval>): void
@@ -69,8 +69,9 @@ export function electronAvatarTrayDependencies(electron: () => ElectronTrayModul
   return {
     now: Date.now,
     loadImage: (path) => electron().nativeImage.createFromPath(path),
-    createTray: (image) => {
+    createTray: (image, onDoubleClick) => {
       const tray = new (electron().Tray)(image as import('electron').NativeImage)
+      tray.on('double-click', onDoubleClick)
       return {
         setToolTip: (tooltip) => tray.setToolTip(tooltip),
         setContextMenu: (menu) => tray.setContextMenu(menu as import('electron').Menu),
@@ -122,7 +123,15 @@ export function createAvatarTray(options: AvatarTrayOptions, dependencies: Avata
   const currentTaskbar = (): AvatarTrayTaskbar => avatarTrayTaskbar(dependencies.platform, dependencies.systemIntegratedUiDark())
   let variant = avatarTrayVariant(options.summary().face)
   let taskbar = currentTaskbar()
-  const tray = dependencies.createTray(loadIcon(variant, taskbar))
+  const onDoubleClick = (): void => {
+    try {
+      options.dispatch({ kind: 'ShowRequested' })
+      refresh()
+    } catch (error) {
+      dependencies.reportError('avatar-tray', 'cannot bring the avatar forward', error)
+    }
+  }
+  const tray = dependencies.createTray(loadIcon(variant, taskbar), onDoubleClick)
 
   // The pair is recorded even when its image is unreadable, so a missing file
   // is reported once per change instead of on every heartbeat.

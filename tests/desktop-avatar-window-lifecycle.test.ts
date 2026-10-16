@@ -203,6 +203,10 @@ class FakeWindow implements AvatarBrowserWindow {
     this.log.push(`w${this.index}:show`)
   }
 
+  moveTop(): void {
+    this.step('moveTop')
+  }
+
   die(): void {
     this.destroyed = true
     this.gone = true
