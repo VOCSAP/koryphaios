@@ -214,67 +214,6 @@ describe("delegated task sweep", () => {
     expect((await rearm(main, bob, alice, task.task_id)).ok).toBeFalse();
   }, 40_000);
 
-  test("escalates at the first deadline when the profile allows zero rearms", async () => {
-    const zero = await startBroker({ ...TICK_ENV, CLAUDE_PEERS_DELEGATION_MAX_REARMS: "0" });
-    try {
-      const group = await newGroup();
-      const bob = await registerIn(zero, group, "sweep-zero-bob");
-      const alice = await registerIn(zero, group, "sweep-zero-alice");
-      const task = await createTask(zero, bob, alice, "Zero rearms");
-      expect(task.policy.max_rearms).toBe(0);
-      const stale = new Date(Date.now() - 3 * 86_400_000).toISOString();
-      edit(zero, "INSERT INTO operator_inbox_sessions (session_id, group_id, last_id, started_at, last_seen_at) VALUES (?, ?, 0, ?, ?)", [
-        randomUUID(), group.id, stale, stale,
-      ]);
-      pastDue(zero, task.task_id);
-      const escalated = await waitFor(() => state(zero, task.task_id), (s) => s.status === "escalated", "direct escalation");
-      expect(escalated).toMatchObject({ terminal_reason: "rearms_exhausted", escalation_result: "no_consumer" });
-      expect(deckMessagesTo(zero, bob.instance_token, task.task_id, ALERT)).toBe(0);
-      expect(eventGenerations(zero, task.task_id, "due")).toEqual([]);
-      expect(operatorMessages(zero, task.task_id)).toBe(1);
-      expect(deckMessagesTo(zero, bob.instance_token, task.task_id, SETTLED)).toBe(1);
-    } finally {
-      await stopBroker(zero);
-    }
-  }, 30_000);
-
-  test("falls back to the default sweep period for a value outside 1..86400, and says so", async () => {
-    const warning = "CLAUDE_PEERS_DELEGATION_SWEEP_SEC is not an integer between 1 and 86400";
-    const logOf = (b: TestBroker): string => readFileSync(join(b.tmpDir, "logs", "broker.log"), "utf8");
-    for (const [value, warned] of [["86401", true], ["3000000000", true], ["0", true], ["86400", false], ["1", false]] as const) {
-      const probe = await startBroker({ CLAUDE_PEERS_DELEGATION_SWEEP_SEC: value });
-      try {
-        expect(logOf(probe).includes(warning), `value ${value}`).toBe(warned);
-      } finally {
-        await stopBroker(probe);
-      }
-    }
-  }, 60_000);
-
-  test("allows the tenth rearm and escalates at the eleventh expiry when the profile allows ten", async () => {
-    const ten = await startBroker({ ...TICK_ENV, CLAUDE_PEERS_DELEGATION_MAX_REARMS: "10", CLAUDE_PEERS_DELEGATION_LEAD_SILENCE_SEC: "15" });
-    try {
-      const group = await newGroup();
-      const bob = await registerIn(ten, group, "sweep-ten-bob");
-      const alice = await registerIn(ten, group, "sweep-ten-alice");
-      const task = await createTask(ten, bob, alice, "Ten rearms");
-      expect(task.policy).toMatchObject({ max_rearms: 10, lead_silence_sec: 15 });
-      edit(ten, "UPDATE delegated_tasks SET rearm_count = 9, generation = 9 WHERE task_id = ?", [task.task_id]);
-
-      pastDue(ten, task.task_id);
-      await waitFor(() => state(ten, task.task_id), (s) => s.status === "overdue", "ninth overdue");
-      expect((await rearm(ten, bob, alice, task.task_id)).ok).toBeTrue();
-      expect(state(ten, task.task_id)).toMatchObject({ status: "armed", rearm_count: 10, generation: 10 });
-
-      pastDue(ten, task.task_id);
-      const escalated = await waitFor(() => state(ten, task.task_id), (s) => s.status === "escalated", "tenth escalation");
-      expect(escalated.terminal_reason).toBe("rearms_exhausted");
-      expect(operatorMessages(ten, task.task_id)).toBe(1);
-    } finally {
-      await stopBroker(ten);
-    }
-  }, 30_000);
-
   test("leaves terminal and not-yet-due tasks untouched", async () => {
     const group = await newGroup();
     const bob = await registerIn(main, group, "sweep-control-bob");
@@ -412,59 +351,6 @@ describe("delegated task sweep", () => {
     }
   });
 
-  test("refuses a rearm after the decision window even before the next tick, then escalates directly after a restart", async () => {
-    const first = await startBroker({ CLAUDE_PEERS_DELEGATION_SWEEP_SEC: "3600" });
-    let second: TestBroker | null = null;
-    let third: TestBroker | null = null;
-    try {
-      const group = await newGroup();
-      const bob = await registerIn(first, group, "sweep-restart-bob");
-      const alice = await registerIn(first, group, "sweep-restart-alice");
-      const silent = await createTask(first, bob, alice, "Overdue past decision");
-      const longGone = await createTask(first, bob, alice, "Armed past both windows");
-      const already = await createTask(first, bob, alice, "Already escalated");
-      const now = Date.now();
-      edit(first, "UPDATE delegated_tasks SET status = 'overdue', due_at_ms = ?, decision_due_at_ms = ? WHERE task_id = ?", [
-        now - 400_000, now - 100_000, silent.task_id,
-      ]);
-      edit(first, "UPDATE delegated_tasks SET due_at_ms = ? WHERE task_id = ?", [now - 400_000, longGone.task_id]);
-      edit(
-        first,
-        `UPDATE delegated_tasks SET status = 'escalated', terminal_reason = 'lead_silent', escalation_result = 'emitted',
-           due_at_ms = ? WHERE task_id = ?`,
-        [now - 400_000, already.task_id]
-      );
-
-      expect((await rearm(first, bob, alice, silent.task_id)).ok).toBeFalse();
-      expect(state(first, silent.task_id)).toMatchObject({ status: "overdue", rearm_count: 0, generation: 0 });
-
-      first.proc.kill();
-      await first.proc.exited;
-      second = await startBroker({ CLAUDE_PEERS_DB: first.dbPath, CLAUDE_PEERS_DELEGATION_SWEEP_SEC: "3600" });
-      second.dbPath = first.dbPath;
-      for (const id of [silent.task_id, longGone.task_id]) {
-        expect(state(second, id)).toMatchObject({ status: "escalated", terminal_reason: "lead_silent", escalation_result: "no_consumer" });
-        expect(operatorMessages(second, id)).toBe(1);
-        expect(deckMessagesTo(second, bob.instance_token, id, ALERT)).toBe(0);
-        expect(eventGenerations(second, id, "due")).toEqual([]);
-      }
-      expect(operatorMessages(second, already.task_id)).toBe(0);
-      expect(state(second, already.task_id).escalation_result).toBe("emitted");
-
-      second.proc.kill();
-      await second.proc.exited;
-      third = await startBroker({ ...TICK_ENV, CLAUDE_PEERS_DB: first.dbPath });
-      third.dbPath = first.dbPath;
-      await barrier(third);
-      for (const id of [silent.task_id, longGone.task_id]) expect(operatorMessages(third, id)).toBe(1);
-      expect(operatorMessages(third, already.task_id)).toBe(0);
-    } finally {
-      if (third) await stopBroker(third);
-      if (second) await stopBroker(second);
-      await stopBroker(first);
-    }
-  }, 60_000);
-
   test("orphans a task whose participant was purged or unregistered and never routes it to a namesake", async () => {
     const group = await newGroup();
     const bob = await registerIn(main, group, "sweep-orphan-bob");
@@ -527,7 +413,127 @@ describe("delegated task sweep", () => {
     expect(deckMessagesTo(main, bob.instance_token, task.task_id, renamed.body.peer_id!)).toBe(1);
   }, 30_000);
 
-  test("settles an escalation whose notification fails without retrying it on later ticks", async () => {
+  // Tests on a broker of their own run concurrently with each other. The
+  // tests on main stay serial: their direct writes to its database, racing
+  // its own deferred transactions, fail requests with "database is locked".
+  test.concurrent("escalates at the first deadline when the profile allows zero rearms", async () => {
+    const zero = await startBroker({ ...TICK_ENV, CLAUDE_PEERS_DELEGATION_MAX_REARMS: "0" });
+    try {
+      const group = await newGroup();
+      const bob = await registerIn(zero, group, "sweep-zero-bob");
+      const alice = await registerIn(zero, group, "sweep-zero-alice");
+      const task = await createTask(zero, bob, alice, "Zero rearms");
+      expect(task.policy.max_rearms).toBe(0);
+      const stale = new Date(Date.now() - 3 * 86_400_000).toISOString();
+      edit(zero, "INSERT INTO operator_inbox_sessions (session_id, group_id, last_id, started_at, last_seen_at) VALUES (?, ?, 0, ?, ?)", [
+        randomUUID(), group.id, stale, stale,
+      ]);
+      pastDue(zero, task.task_id);
+      const escalated = await waitFor(() => state(zero, task.task_id), (s) => s.status === "escalated", "direct escalation");
+      expect(escalated).toMatchObject({ terminal_reason: "rearms_exhausted", escalation_result: "no_consumer" });
+      expect(deckMessagesTo(zero, bob.instance_token, task.task_id, ALERT)).toBe(0);
+      expect(eventGenerations(zero, task.task_id, "due")).toEqual([]);
+      expect(operatorMessages(zero, task.task_id)).toBe(1);
+      expect(deckMessagesTo(zero, bob.instance_token, task.task_id, SETTLED)).toBe(1);
+    } finally {
+      await stopBroker(zero);
+    }
+  }, 30_000);
+
+  test.concurrent("falls back to the default sweep period for a value outside 1..86400, and says so", async () => {
+    const warning = "CLAUDE_PEERS_DELEGATION_SWEEP_SEC is not an integer between 1 and 86400";
+    const logOf = (b: TestBroker): string => readFileSync(join(b.tmpDir, "logs", "broker.log"), "utf8");
+    const cases = [["86401", true], ["3000000000", true], ["0", true], ["86400", false], ["1", false]] as const;
+    const probes = await Promise.allSettled(cases.map(([value]) => startBroker({ CLAUDE_PEERS_DELEGATION_SWEEP_SEC: value })));
+    try {
+      cases.forEach(([value, warned], index) => {
+        const probe = probes[index]!;
+        if (probe.status === "rejected") throw probe.reason;
+        expect(logOf(probe.value).includes(warning), `value ${value}`).toBe(warned);
+      });
+    } finally {
+      await Promise.all(probes.map((probe) => (probe.status === "fulfilled" ? stopBroker(probe.value) : undefined)));
+    }
+  }, 60_000);
+
+  test.concurrent("allows the tenth rearm and escalates at the eleventh expiry when the profile allows ten", async () => {
+    const ten = await startBroker({ ...TICK_ENV, CLAUDE_PEERS_DELEGATION_MAX_REARMS: "10", CLAUDE_PEERS_DELEGATION_LEAD_SILENCE_SEC: "15" });
+    try {
+      const group = await newGroup();
+      const bob = await registerIn(ten, group, "sweep-ten-bob");
+      const alice = await registerIn(ten, group, "sweep-ten-alice");
+      const task = await createTask(ten, bob, alice, "Ten rearms");
+      expect(task.policy).toMatchObject({ max_rearms: 10, lead_silence_sec: 15 });
+      edit(ten, "UPDATE delegated_tasks SET rearm_count = 9, generation = 9 WHERE task_id = ?", [task.task_id]);
+
+      pastDue(ten, task.task_id);
+      await waitFor(() => state(ten, task.task_id), (s) => s.status === "overdue", "ninth overdue");
+      expect((await rearm(ten, bob, alice, task.task_id)).ok).toBeTrue();
+      expect(state(ten, task.task_id)).toMatchObject({ status: "armed", rearm_count: 10, generation: 10 });
+
+      pastDue(ten, task.task_id);
+      const escalated = await waitFor(() => state(ten, task.task_id), (s) => s.status === "escalated", "tenth escalation");
+      expect(escalated.terminal_reason).toBe("rearms_exhausted");
+      expect(operatorMessages(ten, task.task_id)).toBe(1);
+    } finally {
+      await stopBroker(ten);
+    }
+  }, 30_000);
+
+  test.concurrent("refuses a rearm after the decision window even before the next tick, then escalates directly after a restart", async () => {
+    const first = await startBroker({ CLAUDE_PEERS_DELEGATION_SWEEP_SEC: "3600" });
+    let second: TestBroker | null = null;
+    let third: TestBroker | null = null;
+    try {
+      const group = await newGroup();
+      const bob = await registerIn(first, group, "sweep-restart-bob");
+      const alice = await registerIn(first, group, "sweep-restart-alice");
+      const silent = await createTask(first, bob, alice, "Overdue past decision");
+      const longGone = await createTask(first, bob, alice, "Armed past both windows");
+      const already = await createTask(first, bob, alice, "Already escalated");
+      const now = Date.now();
+      edit(first, "UPDATE delegated_tasks SET status = 'overdue', due_at_ms = ?, decision_due_at_ms = ? WHERE task_id = ?", [
+        now - 400_000, now - 100_000, silent.task_id,
+      ]);
+      edit(first, "UPDATE delegated_tasks SET due_at_ms = ? WHERE task_id = ?", [now - 400_000, longGone.task_id]);
+      edit(
+        first,
+        `UPDATE delegated_tasks SET status = 'escalated', terminal_reason = 'lead_silent', escalation_result = 'emitted',
+           due_at_ms = ? WHERE task_id = ?`,
+        [now - 400_000, already.task_id]
+      );
+
+      expect((await rearm(first, bob, alice, silent.task_id)).ok).toBeFalse();
+      expect(state(first, silent.task_id)).toMatchObject({ status: "overdue", rearm_count: 0, generation: 0 });
+
+      first.proc.kill();
+      await first.proc.exited;
+      second = await startBroker({ CLAUDE_PEERS_DB: first.dbPath, CLAUDE_PEERS_DELEGATION_SWEEP_SEC: "3600" });
+      second.dbPath = first.dbPath;
+      for (const id of [silent.task_id, longGone.task_id]) {
+        expect(state(second, id)).toMatchObject({ status: "escalated", terminal_reason: "lead_silent", escalation_result: "no_consumer" });
+        expect(operatorMessages(second, id)).toBe(1);
+        expect(deckMessagesTo(second, bob.instance_token, id, ALERT)).toBe(0);
+        expect(eventGenerations(second, id, "due")).toEqual([]);
+      }
+      expect(operatorMessages(second, already.task_id)).toBe(0);
+      expect(state(second, already.task_id).escalation_result).toBe("emitted");
+
+      second.proc.kill();
+      await second.proc.exited;
+      third = await startBroker({ ...TICK_ENV, CLAUDE_PEERS_DB: first.dbPath });
+      third.dbPath = first.dbPath;
+      await barrier(third);
+      for (const id of [silent.task_id, longGone.task_id]) expect(operatorMessages(third, id)).toBe(1);
+      expect(operatorMessages(third, already.task_id)).toBe(0);
+    } finally {
+      if (third) await stopBroker(third);
+      if (second) await stopBroker(second);
+      await stopBroker(first);
+    }
+  }, 60_000);
+
+  test.concurrent("settles an escalation whose notification fails without retrying it on later ticks", async () => {
     const failing = await startBroker(TICK_ENV);
     try {
       const group = await newGroup();

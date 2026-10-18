@@ -5,8 +5,9 @@ import { Database } from "bun:sqlite";
 let broker: TestBroker;
 
 beforeAll(async () => {
-  // Use a tighter dormant TTL so we can exercise purge in-test.
-  broker = await startBroker({ CLAUDE_PEERS_DORMANT_TTL_HOURS: "0" });
+  // A zero dormant TTL and the cleanup timer at its 1 s floor, so the purge
+  // is exercised in-test.
+  broker = await startBroker({ CLAUDE_PEERS_DORMANT_TTL_HOURS: "0", CLAUDE_PEERS_CLEAN_INTERVAL_SEC: "1" });
 });
 afterAll(async () => { await stopBroker(broker); });
 
@@ -58,17 +59,13 @@ test("dormant peers past TTL are purged by cleanStalePeers", async () => {
   ]);
   db.close();
 
-  // Wait for the next cleanStalePeers tick (interval is 30s), but invoking
-  // /register on a fresh peer is enough to keep the broker active. We wait up
-  // to 32s; in CI this is acceptable, locally use a shorter window via a hint.
-  // For this test we rely on the fact that the very next register() call also
-  // walks through cleanStalePeers via the periodic timer; we'll trigger one
-  // and then poll admin/peers.
+  // The next cleanStalePeers tick purges it.
+  const deadline = Date.now() + 10_000;
   let stillThere = true;
-  for (let i = 0; i < 65 && stillThere; i++) {
-    await Bun.sleep(500);
+  while (stillThere && Date.now() < deadline) {
     const peers = await get<any[]>(`${broker.url}/admin/peers?include_dormant=1`);
     stillThere = !!peers.body.find((p) => p.peer_id === a.body.peer_id);
+    if (stillThere) await Bun.sleep(50);
   }
   expect(stillThere).toBe(false);
 }, 40_000);
