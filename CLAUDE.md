@@ -54,8 +54,8 @@ Read only the file/skill matching the area you touch:
 - **Bun, not Node**: `bun <file>`, `bun test`, `bun install`, `bunx`.
   Exception: `desktop/` builds with electron-vite/npm (native `node-pty`).
 
-- **Who runs which tests.** The full gate (`bun test` ~113s, smoke build,
-  desktop typecheck) runs ONCE, by whoever sequences the commits, right before
+- **Who runs which tests.** The full gate (`bun test`, smoke build, desktop
+  typecheck) runs ONCE, by whoever sequences the commits, right before
   committing. **If you do not commit, you do not run it**: run the targeted
   file (`bun test tests/<file>.test.ts`) and report that exact command. A hook
   enforces this; suspected cross-file breakage is raised as an open item.
@@ -73,6 +73,50 @@ Read only the file/skill matching the area you touch:
   `progress.md`, `progress-archive.md`, `BACKLOG-ORDER.md`,
   `WORKFLOW-LOTS-DESIGN.md` and `.claude/session-checkpoint.md` at every depth:
   do not name a doc you intend to commit that way.
+
+## Rules for tests
+
+The gate is paid in minutes by every committer, and most of those minutes
+are the files that spawn a broker or `server.ts`, not the pure-module files
+(`TESTING.md`, "Cost budget"). Hence, before writing a test:
+
+- **Name the mutation first.** State the edit of the SOURCE that turns the
+  test red (the "mutations sur miroir" of the commit body). No realistic edit,
+  no test: a test that only re-states the code, a comment, a doc or a CSS rule
+  as text is not a guard.
+
+- **Cheapest shape that proves it**, in this order: a pure-module test
+  (milliseconds) → a happy-dom test (< 300 ms) → a file that spawns a broker,
+  started ONCE in `beforeAll` and shared by every test of the file → a child
+  `bun`/electron process, only for what no in-process form can prove. Never
+  `Bun.sleep` on real time for a TTL, sweep or poll: inject the clock, or set
+  the interval env to its floor and wait on the CONDITION, bounded, not on a
+  duration. A file over 5 s, or a test over 1 s, says in the commit body what
+  it buys.
+
+- **Extend the module's EXISTING test file.** A new file is for a new source
+  module or a new harness, never for a new card, a new lot or a review
+  finding. One `tests/desktop-<module>.test.ts` per `desktop/src` module is
+  the shape; `tests/desktop-avatar-*` follows it.
+
+- **A text scan of the source is a last resort, not a pattern to imitate**
+  (`readFileSync` + `toContain`, brace-body extraction, `Bun.Transpiler` on a
+  slice, a `--tsconfig-override` child probe). Allowed only for a wiring in a
+  file bun cannot import (electron `index.ts`), bounded to one anchor, when the
+  commit body says why making the wiring pure and executable was not possible.
+  Those probes turn red on a rename with nothing broken, and a child probe
+  that imports the renderer tree needs `desktop/node_modules`, which the
+  cross-platform pure-module job does not have: it belongs in the
+  `EXEMPTIONS` table or does not exist.
+
+- **The suite's own guards already exist** (partition coverage, import
+  hygiene, manifest parity, closure check): extend the one in place, do not
+  add a file beside it.
+
+- **No measured count or duration in a doc, hook or skill text** outside
+  `TESTING.md`'s dated "Cost budget" table: three different figures for the
+  same suite were found rotting at once. The measurement goes in the commit
+  body.
 
 ## Rules for code
 

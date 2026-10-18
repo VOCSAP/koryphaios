@@ -12,8 +12,8 @@ If you are not the one committing, run only the targeted file:
 bun test tests/<your-file>.test.ts
 ```
 
-and report that exact command with its result. The full suite is ~113s over
-1300+ tests with a large output; replaying it after every edit, or to
+and report that exact command with its result. The full suite takes minutes
+("Cost budget" below) with a large output; replaying it after every edit, or to
 re-confirm a green someone else already reported, buys nothing. A targeted run
 does miss cross-file breakage: that is deliberate, and the batch gate restores
 the guarantee before anything lands. If you suspect a cross-file breakage,
@@ -80,6 +80,75 @@ test("hello world", () => {
 
 The `desktop-precommit` skill (`.claude/skills/`) walks this checklist with
 the workarounds for the known environment quirks below.
+
+## Cost budget (measured 2026-10-18)
+
+Every file of `tests/` run in its own `bun test` process on a Linux
+container (HEAD 3899f02), so the per-file figures include ~100 ms of process
+start and the sum overstates the shared-process gate; the RANKING is what
+matters. CLAUDE.md, "Rules for tests", holds the rules this table justifies.
+
+| Family | Files | Tests | Wall | Per test |
+|---|---|---|---|---|
+| `broker-*`, `server-*`, `approval-hook`, `mcp-roadmap-ack` (spawn a broker) | 93 | 1 108 | 535 s | 483 ms |
+| everything else (pure modules, happy-dom, hooks) | 370 | 9 481 | 118 s | 12 ms |
+
+Of the 370 pure files, 315 finish under 300 ms (18 s in all); eight files
+(`desktop-ttsr-*`, `desktop-statusline-hook`, `desktop-commit-closure-check`)
+cost 65 s, all by spawning child processes or measuring wall-clock budgets.
+Of the 93 broker files, ten cost 330 s; the slowest have the fewest tests:
+
+| File | Wall | Tests | Why |
+|---|---|---|---|
+| `broker-delegated-sweep` | 65 s | 22 | fresh broker per test + waits on a 1 s sweep tick |
+| `broker-roadmap-replica` | 48 s | 47 | two brokers (upstream + replica) per test |
+| `broker-approvals` | 39 s | 92 | fresh broker per test |
+| `broker-sweep-inactive` | 38 s | 4 | `Bun.sleep(12_000)` twice on a 10 s dormant sweep |
+| `broker-status` | 30 s | 3 | real-time waits on the status clock |
+| `server-deck-token-authz` | 28 s | 6 | 30 s polling deadline on a spawned `server.ts` |
+| `broker-peer-federation` | 21 s | 10 | two brokers per test |
+| `broker-roadmap-sync-offline-reason` | 15 s | 5 | 2 s sync tick, waited for in real time |
+| `broker-roadmap-lock-sweep-replicated` | 14 s | 5 | two brokers + sweep tick |
+
+The same measurement on CI (run 426, the last green one): the pure-module
+step takes 1.5 min (ubuntu) to 3 min (windows); the integration step 8 min
+(ubuntu) to 17 min (windows). The integration step, not the number of tests,
+is the length of the gate.
+
+**What the measurement rules out.** The volume of pure tests is NOT the
+problem: 9 500 of them run in two minutes, and `desktop-avatar-*`'s 44
+files are one file per source module, the shape to keep. Cutting test COUNT
+buys nothing; cutting real-time waits and brokers-per-test buys most of the
+gate.
+
+**Rework, cheapest first (open items, `BACKLOG.md` §4):**
+
+1. A file that starts a broker in every `test()` starts it once in
+   `beforeAll` and isolates state by group/project key instead
+   (`broker-approvals`, `broker-roadmap-sync-routes`, `broker-ntfy-channel`,
+   `broker-project-key-alignment`, `broker-approval-ack`: 38, 21, 19, 12
+   `startBroker(` calls). `tests/_helper.ts` boots a broker in ~300 ms, so
+   each avoided start is ~300 ms plus the test's own waits.
+2. A test that waits a fixed duration for a sweep or TTL (`Bun.sleep(12_000)`
+   in `broker-sweep-inactive`, 2 000 ms ticks in
+   `broker-roadmap-sync-offline-reason`) sets the interval env to its floor
+   and polls the CONDITION with a bounded deadline, or the sweep gets a
+   test-only trigger route; `broker-delegated-sweep`'s `waitFor` helper is
+   the shape, its 1 s tick the remaining cost.
+3. Two-broker topologies (`broker-roadmap-replica`, `broker-peer-federation`,
+   `broker-roadmap-lock-sweep-replicated`) share the pair across the file.
+4. `desktop-ttsr-budget-margin` (8 s for 2 tests) and `desktop-ttsr-rules`'s
+   "past its time budget" block measure wall-clock regex budgets; they are
+   benchmarks, not regressions, and belong behind an opt-in env or in the
+   integration step.
+
+**What a new test must not add**: a `--tsconfig-override` child probe that
+imports the renderer tree (`desktop-operator-trust-dialog.test.ts` imports
+`App.tsx`, which needs `qrcode-generator` from `desktop/node_modules`; the
+cross-platform pure-module job installs no desktop deps, so the step has been
+red on all three OSes since run 427). Such a probe is listed in
+`scripts/pure-module-partition.ts`'s `EXEMPTIONS` with the native-deps
+marker, or it is rewritten against an importable module.
 
 ## Reviewing a commit and auditing a guard
 

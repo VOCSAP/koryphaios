@@ -2,7 +2,7 @@
 # PreToolUse gate on Bash: refuses the FULL bun test suite unless the caller is
 # sequencing commits. Project-scoped (koryphaios), registered in
 # .claude/settings.json -- deliberately NOT in the global settings, because the
-# cost being avoided is specific to this suite (~113s, 1370+ tests).
+# cost being avoided is specific to this suite (minutes, 10 000+ tests).
 #
 # Rationale: workers do not commit, so they must run only a targeted test file.
 # The full gate is run ONCE by whoever sequences the commits. See TESTING.md,
@@ -127,7 +127,7 @@ if command -v git >/dev/null 2>&1; then
 fi
 
 cat >&2 <<EOF
-BLOCKED: that runs the FULL test suite (~113s, 1370+ tests, large output).
+BLOCKED: that runs the FULL test suite (several minutes, 10 000+ tests, large output).
 
   refused: ${FULL_SUITE_FORM}
 

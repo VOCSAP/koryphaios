@@ -1240,6 +1240,39 @@ configs MCP par lancement (`supervisor-mcp.json`, `demo-mcp.json`,
 
 ## 4. Maintenance / dette technique
 
+### 4.0 Coût de la suite de tests (mesuré le 2026-10-18, `TESTING.md` « Cost budget »)
+
+Le gate dure plusieurs minutes ; 82 % du temps vient des 93 fichiers qui
+lancent un broker ou `server.ts` (535 s pour 1 108 tests), pas des 9 481 tests
+purs (118 s). Dix fichiers font 330 s. Rien à supprimer en volume : à
+retravailler en forme.
+
+- [ ] **Un broker par fichier, pas par test** : `broker-approvals` (92 tests,
+      39 s), `broker-roadmap-sync-routes`, `broker-ntfy-channel`,
+      `broker-project-key-alignment`, `broker-approval-ack` — `startBroker` en
+      `beforeAll`, isolation par groupe/clé projet.
+- [ ] **Attentes en temps réel sur un sweep/TTL** : `broker-sweep-inactive`
+      (2 × `Bun.sleep(12_000)` pour 4 tests), `broker-status` (30 s / 3 tests),
+      `server-deck-token-authz` (28 s / 6 tests),
+      `broker-roadmap-sync-offline-reason` (tick 2 s) — plancher d'intervalle +
+      attente bornée sur la CONDITION, ou route de déclenchement du sweep
+      réservée aux tests.
+- [ ] **Topologies à deux brokers partagées par fichier** :
+      `broker-roadmap-replica` (48 s), `broker-peer-federation`,
+      `broker-roadmap-lock-sweep-replicated`.
+- [ ] **Benchmarks déguisés en tests** : `desktop-ttsr-budget-margin` (8 s pour
+      2 tests), bloc « past its time budget » de `desktop-ttsr-rules` — derrière
+      un env opt-in ou dans l'étape intégration.
+- [ ] **CI rouge depuis le run 427** : `desktop-operator-trust-dialog.test.ts`
+      (sonde `--tsconfig-override` important `App.tsx` → `qrcode-generator`
+      absent de l'étape pure-module). À inscrire dans `EXEMPTIONS` avec le
+      marqueur native-deps, ou à réécrire contre un module importable.
+- [ ] **Cinquante fichiers scannent le source en texte** (brace-body,
+      `Bun.Transpiler`, `toContain` sur `readFileSync`) : pas de suppression
+      en bloc, mais chaque retouche d'un module concerné remplace la sonde
+      textuelle par un câblage pur exécutable (règle CLAUDE.md « Rules for
+      tests »).
+
 - [ ] **M-MNT-1** — la suite broker/serveur (~76 cas `tests/broker-*`,
       `server-*`, `config-*`) **ne tourne jamais en CI** (seul `desktop-*` y
       passe). *Fort ROI, faible coût.* Ajouter un job `bun test` cœur + smoke
