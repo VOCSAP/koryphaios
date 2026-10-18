@@ -1,4 +1,4 @@
-import { afterAll, expect, test } from "bun:test";
+import { afterAll, beforeAll, expect, test } from "bun:test";
 import { randomBytes, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -10,10 +10,14 @@ import { deckAuthored, groupId, post, scrubEnv, sha256Hex, startBroker, stopBrok
 
 const SERVER_PATH = resolve(import.meta.dir, "..", "server.ts");
 
-const brokers: TestBroker[] = [];
+let sharedBroker: TestBroker;
 const procs: ReturnType<typeof Bun.spawn>[] = [];
 const dirs: string[] = [];
 const proxies: Array<ReturnType<typeof Bun.serve>> = [];
+
+beforeAll(async () => {
+  sharedBroker = await startBroker();
+}, 30_000);
 
 afterAll(async () => {
   for (const proc of procs) {
@@ -25,7 +29,7 @@ afterAll(async () => {
     }
   }
   for (const proxy of proxies) proxy.stop(true);
-  for (const broker of brokers) await stopBroker(broker);
+  if (sharedBroker) await stopBroker(sharedBroker);
   for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
 });
 
@@ -35,6 +39,7 @@ interface Session {
   send: (message: unknown) => void;
   read: (id: number) => Promise<void>;
   readNotification: () => Promise<Record<string, unknown>>;
+  pollNotification: (timeoutMs: number) => Promise<Record<string, unknown> | null>;
   expectNoNotification: () => Promise<void>;
 }
 
@@ -103,10 +108,12 @@ async function launchServer(
     if (!message) throw new Error("no context resume notification");
     return message;
   };
+  const pollNotification = (timeoutMs: number): Promise<Record<string, unknown> | null> =>
+    take((item) => item.method === "notifications/claude/channel", timeoutMs);
   const expectNoNotification = async (): Promise<void> => {
     expect(await take((item) => item.method === "notifications/claude/channel", 250)).toBeNull();
   };
-  return { proc, stderr, send, read, readNotification, expectNoNotification };
+  return { proc, stderr, send, read, readNotification, pollNotification, expectNoNotification };
 }
 
 function instanceToken(broker: TestBroker, cwd: string): string | null {
@@ -226,8 +233,7 @@ const INVALID_TTL_LOG ="CLAUDE_PEERS_CONTEXT_RESUME_KEY_TTL_MS invalid, using de
 
 for (const [label, value, expectsLog] of [["invalid", "1500abc", true], ["valid", "1500", false]] as const) {
   test(`a ${label} resume key lifetime ${expectsLog ? "is reported" : "is silent"} at startup`, async () => {
-    const broker = await startBroker();
-    brokers.push(broker);
+    const broker = sharedBroker;
     const settingsDir = mkdtempSync(join(tmpdir(), "cp-context-ttl-env-"));
     dirs.push(settingsDir);
     const logDir = join(settingsDir, "logs");
@@ -249,7 +255,7 @@ for (const [label, value, expectsLog] of [["invalid", "1500abc", true], ["valid"
       },
     });
     await session.read(0);
-    await Bun.sleep(300);
+    await waitForLog(session.stderr, "Registered as peer");
     session.proc.kill();
     await session.proc.exited;
     const logs = serverLogs(session.stderr, logDir);
@@ -279,8 +285,7 @@ const INVALID_POLL_LOG = "CLAUDE_PEERS_POLL_FALLBACK_SEC invalid, using default"
 
 for (const [label, value, expectsLog] of [["invalid", "abc", true], ["invalid", "0", true], ["valid", "5", false]] as const) {
   test(`a ${label} fallback poll interval "${value}" ${expectsLog ? "is reported" : "is silent"} at startup`, async () => {
-    const broker = await startBroker();
-    brokers.push(broker);
+    const broker = sharedBroker;
     const settingsDir = mkdtempSync(join(tmpdir(), "cp-poll-fallback-env-"));
     dirs.push(settingsDir);
     const logDir = join(settingsDir, "logs");
@@ -302,7 +307,7 @@ for (const [label, value, expectsLog] of [["invalid", "abc", true], ["invalid", 
       },
     });
     await session.read(0);
-    await Bun.sleep(300);
+    await waitForLog(session.stderr, "Registered as peer");
     session.proc.kill();
     await session.proc.exited;
     const logs = serverLogs(session.stderr, logDir);
@@ -315,8 +320,7 @@ for (const [label, value, expectsLog] of [["invalid", "abc", true], ["invalid", 
 }
 
 test("a context resume is framed to MCP, acknowledged after notification, and absent from server logs", async () => {
-  const broker = await startBroker();
-  brokers.push(broker);
+  const broker = sharedBroker;
   const secret = randomUUID();
   const groupIdValue = await groupId(secret);
   const groupSecretHash = await sha256Hex(secret);
@@ -399,8 +403,7 @@ test("a context resume is framed to MCP, acknowledged after notification, and ab
 }, 40_000);
 
 test("a replayed context resume sends a second acknowledgement without a second notification", async () => {
-  const broker = await startBroker();
-  brokers.push(broker);
+  const broker = sharedBroker;
   const gateway = startResumeGateway(broker, [500, 409]);
   const settingsDir = mkdtempSync(join(tmpdir(), "cp-context-replay-"));
   dirs.push(settingsDir);
@@ -454,8 +457,7 @@ test("a replayed context resume sends a second acknowledgement without a second 
 }, 40_000);
 
 test("concurrent duplicate context resumes emit one notification and acknowledge each replay", async () => {
-  const broker = await startBroker();
-  brokers.push(broker);
+  const broker = sharedBroker;
   const gateway = startResumeGateway(broker, [500]);
   const settingsDir = mkdtempSync(join(tmpdir(), "cp-context-concurrent-"));
   dirs.push(settingsDir);
@@ -497,8 +499,7 @@ test("concurrent duplicate context resumes emit one notification and acknowledge
 for (const finalStatus of [200, 409]) {
   test(`a replay after a final ${finalStatus} acknowledgement re-acknowledges without notifying, until the key expires`, async () => {
     const keyTtlMs = 1_500;
-    const broker = await startBroker();
-    brokers.push(broker);
+    const broker = sharedBroker;
     const gateway = startResumeGateway(broker, [finalStatus]);
     const settingsDir = mkdtempSync(join(tmpdir(), "cp-context-final-ack-"));
     dirs.push(settingsDir);
@@ -541,15 +542,24 @@ for (const finalStatus of [200, 409]) {
     expect((await session.readNotification()).params).toMatchObject({ content: expect.stringContaining(frame.text) });
     await waitForAcknowledgements(1);
     const acknowledgedAt = Date.now();
-    await Bun.sleep(150);
+    await waitForLog(
+      session.stderr,
+      finalStatus === 200
+        ? `Context resume technical acknowledgement sent for ${frame.deposit_id}`
+        : `context resume acknowledgement failed for ${frame.deposit_id}`
+    );
 
     gateway.sendResume(frame);
     await waitForAcknowledgements(2);
     await session.expectNoNotification();
 
-    await Bun.sleep(Math.max(0, acknowledgedAt + keyTtlMs + 500 - Date.now()));
-    gateway.sendResume(frame);
-    expect((await session.readNotification()).params).toMatchObject({ content: expect.stringContaining(frame.text) });
+    // Replays re-acknowledge until the key expires; the first one after that notifies.
+    let afterExpiry: Record<string, unknown> | null = null;
+    for (const giveUpAt = acknowledgedAt + keyTtlMs + 5_000; !afterExpiry && Date.now() < giveUpAt; ) {
+      gateway.sendResume(frame);
+      afterExpiry = await session.pollNotification(100);
+    }
+    expect(afterExpiry?.params).toMatchObject({ content: expect.stringContaining(frame.text) });
 
     session.proc.kill();
     await session.proc.exited;

@@ -1,4 +1,4 @@
-import { test, expect, describe, afterAll } from "bun:test";
+import { test, expect, describe, beforeAll, afterAll } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -130,127 +130,93 @@ async function bootDeck(
   return { reader, buffer, send };
 }
 
-describe("server-deck.ts token authz", () => {
-  test("PREDICTION (graph_draft_send): a matching identity file is ACCEPTED broker-side", async () => {
-    const b = await startBroker();
-    brokers.push(b);
-    const { peerId, instanceToken } = await registerTestPeer(b, "authz-group-1", "authz-project-1");
+type Deck = Awaited<ReturnType<typeof bootDeck>>;
 
-    const h = await bootDeck(b, {
-      deskSession: "authz-positive-graph",
-      identity: { peerId, groupId: "authz-group-1", instanceToken },
-    });
-    h.send({
-      jsonrpc: "2.0",
-      id: 1,
-      method: "tools/call",
-      params: { name: "graph_draft_send", arguments: { title: "t", prompt: "p" } },
-    });
-    const res = await readUntil(h.reader, 1, h.buffer);
+function callDeckTool(h: Deck, name: string, args: Record<string, unknown>): Promise<JsonRpcResponse> {
+  h.send({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } });
+  return readUntil(h.reader, 1, h.buffer);
+}
+
+describe("server-deck.ts token authz", () => {
+  // The identity file is read at call time, so each deck process is keyed by
+  // the principal it holds: one live peer, none at all, one dormant peer. The
+  // broker caps the dispatch long-poll (hard-coded to 25 s by server.ts) at 1 s.
+  let b: TestBroker;
+  let live: { deck: Deck; instanceToken: string };
+  let absent: Deck;
+  let dormant: Deck;
+
+  beforeAll(async () => {
+    b = await startBroker({ CLAUDE_PEERS_DISPATCH_WAIT_MAX_SEC: "1" });
+    brokers.push(b);
+
+    const livePeer = await registerTestPeer(b, "authz-group-1", "authz-project-1");
+    const dormantPeer = await registerTestPeer(b, "authz-group-3", "authz-project-3");
+    expect((await post(`${b.url}/disconnect`, { instance_token: dormantPeer.instanceToken })).status).toBe(200);
+
+    const [liveDeck, absentDeck, dormantDeck] = await Promise.all([
+      bootDeck(b, {
+        deskSession: "authz-positive",
+        identity: { peerId: livePeer.peerId, groupId: "authz-group-1", instanceToken: livePeer.instanceToken },
+      }),
+      bootDeck(b, { deskSession: "authz-negative", identity: null }),
+      bootDeck(b, {
+        deskSession: "authz-stale-live-file",
+        identity: { peerId: dormantPeer.peerId, groupId: "authz-group-3", instanceToken: dormantPeer.instanceToken },
+      }),
+    ]);
+    live = { deck: liveDeck, instanceToken: livePeer.instanceToken };
+    absent = absentDeck;
+    dormant = dormantDeck;
+  }, 30_000);
+
+  test("PREDICTION (graph_draft_send): a matching identity file is ACCEPTED broker-side", async () => {
+    const res = await callDeckTool(live.deck, "graph_draft_send", { title: "t", prompt: "p" });
     expect(res.result?.isError).toBeFalsy();
     expect(res.result?.content?.[0]?.text).toContain("sent to the operator's Deck");
   }, 30_000);
 
   test("PREDICTION (roadmap_dispatch): a matching identity file is ACCEPTED broker-side (not an auth refusal)", async () => {
-    const b = await startBroker();
-    brokers.push(b);
-    const { peerId, instanceToken } = await registerTestPeer(b, "authz-group-2", "authz-project-2");
-
-    const h = await bootDeck(b, {
-      deskSession: "authz-positive-dispatch",
-      identity: { peerId, groupId: "authz-group-2", instanceToken },
-    });
-    h.send({
-      jsonrpc: "2.0",
-      id: 1,
-      method: "tools/call",
-      params: { name: "roadmap_dispatch", arguments: {} },
-    });
-    const res = await readUntil(h.reader, 1, h.buffer);
+    const res = await callDeckTool(live.deck, "roadmap_dispatch", {});
     // No peer/tile to actually dispatch to -- the outcome text is whatever
     // renderDispatchOutcome says for an empty wave, but it must NOT be the
     // auth-refusal shape ("instance_token is required" / "unknown instance_token").
     // Checked against the raw TOKEN VALUE, not the field name: a message
     // that leaked the credential itself would still pass a name-only check.
     expect(res.result?.isError).toBeFalsy();
-    expect(res.result?.content?.[0]?.text ?? "").not.toContain(instanceToken);
+    expect(res.result?.content?.[0]?.text ?? "").not.toContain(live.instanceToken);
   }, 30_000);
 
   test("NEGATIVE CONTROL (graph_draft_send): an absent identity file is refused explicitly, never a silent success", async () => {
-    const b = await startBroker();
-    brokers.push(b);
-
-    const h = await bootDeck(b, { deskSession: "authz-negative-graph", identity: null });
-    h.send({
-      jsonrpc: "2.0",
-      id: 1,
-      method: "tools/call",
-      params: { name: "graph_draft_send", arguments: { title: "t", prompt: "p" } },
-    });
-    const res = await readUntil(h.reader, 1, h.buffer);
+    const res = await callDeckTool(absent, "graph_draft_send", { title: "t", prompt: "p" });
     expect(res.result?.isError).toBe(true);
     expect(res.result?.content?.[0]?.text).toContain("instance_token is required");
   }, 30_000);
 
   test("NEGATIVE CONTROL (roadmap_dispatch): an absent identity file is refused explicitly, never a silent success", async () => {
-    const b = await startBroker();
-    brokers.push(b);
-
-    const h = await bootDeck(b, { deskSession: "authz-negative-dispatch", identity: null });
-    h.send({
-      jsonrpc: "2.0",
-      id: 1,
-      method: "tools/call",
-      params: { name: "roadmap_dispatch", arguments: {} },
-    });
-    const res = await readUntil(h.reader, 1, h.buffer);
+    const res = await callDeckTool(absent, "roadmap_dispatch", {});
     expect(res.result?.isError).toBe(true);
     expect(res.result?.content?.[0]?.text).toContain("instance_token is required");
   }, 30_000);
 
   test("NEGATIVE CONTROL (post-cleanup): once server.ts's boot-time and cleanup() deletion have run, no file remains for a dead principal's token to be read from", async () => {
-    const b = await startBroker();
-    brokers.push(b);
-
     // Simulates the post-cleanup() state DIRECTLY: no file at all, which is
     // what main()'s boot-time delete and cleanup()'s own delete both
     // guarantee for a normally-exited or normally-restarted tile. graph_draft
     // -send has nothing to read and refuses the same way as the plain
     // absent-file control above.
-    const h = await bootDeck(b, { deskSession: "authz-negative-stale", identity: null });
-    h.send({
-      jsonrpc: "2.0",
-      id: 1,
-      method: "tools/call",
-      params: { name: "graph_draft_send", arguments: { title: "t", prompt: "p" } },
-    });
-    const res = await readUntil(h.reader, 1, h.buffer);
+    const res = await callDeckTool(absent, "graph_draft_send", { title: "t", prompt: "p" });
     expect(res.result?.isError).toBe(true);
   }, 30_000);
 
   test("KNOWN LIMITATION, pinned not hidden: a STALE file (written before disconnect, never cleaned up) for a now-dormant principal is still ACCEPTED broker-side", async () => {
-    const b = await startBroker();
-    brokers.push(b);
-    const { peerId, instanceToken } = await registerTestPeer(b, "authz-group-3", "authz-project-3");
-    expect((await post(`${b.url}/disconnect`, { instance_token: instanceToken })).status).toBe(200);
-
     // This is exactly the window MAJOR 1 (boot-time deletion) closes for the
     // tile's OWN next restart, but does NOT close for a tile that never
     // restarts at all (crash with no respawn): findPeerByInstanceToken
     // (broker.ts) has no status filter, so a dormant peer's token still
     // resolves. Measuring and pinning the real behavior rather than
     // asserting a refusal that does not exist.
-    const h = await bootDeck(b, {
-      deskSession: "authz-stale-live-file",
-      identity: { peerId, groupId: "authz-group-3", instanceToken },
-    });
-    h.send({
-      jsonrpc: "2.0",
-      id: 1,
-      method: "tools/call",
-      params: { name: "graph_draft_send", arguments: { title: "t", prompt: "p" } },
-    });
-    const res = await readUntil(h.reader, 1, h.buffer);
+    const res = await callDeckTool(dormant, "graph_draft_send", { title: "t", prompt: "p" });
     expect(res.result?.isError).toBeFalsy();
   }, 30_000);
 });

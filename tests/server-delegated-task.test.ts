@@ -1,7 +1,7 @@
 // End to end: a real broker and real server.ts processes over stdio, asserting
 // on the text each agent actually reads on every arrival path.
 
-import { afterAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { startBroker, stopBroker, scrubEnv, type TestBroker } from "./_helper.ts";
 import { DELEGATE_CLOSE_NOTE, DELEGATOR_CHECK_NOTE } from "../shared/inbound-framing.ts";
@@ -163,12 +163,42 @@ interface Pair {
   aliceId: string;
 }
 
+async function pairOn(broker: TestBroker, bobEnv: Record<string, string> = {}, aliceEnv: Record<string, string> = {}): Promise<Pair> {
+  const [bob, alice] = await Promise.all([spawnPeer(broker, bobEnv), spawnPeer(broker, aliceEnv)]);
+  const [bobId, aliceId] = await Promise.all([peerIdOf(bob), peerIdOf(alice)]);
+  return { broker, bob, alice, bobId, aliceId };
+}
+
+/** A fresh broker and fresh servers: for what restarts the broker or boots with its own env. */
 async function pair(bobEnv: Record<string, string> = {}): Promise<Pair> {
   const broker = await startBroker();
   brokers.push(broker);
-  const bob = await spawnPeer(broker, bobEnv);
-  const alice = await spawnPeer(broker);
-  return { broker, bob, alice, bobId: await peerIdOf(bob), aliceId: await peerIdOf(alice) };
+  return pairOn(broker, bobEnv);
+}
+
+let shared: Pair;
+
+beforeAll(async () => {
+  const broker = await startBroker();
+  brokers.push(broker);
+  shared = await pairOn(broker);
+}, 60_000);
+
+/**
+ * The shared pair, with no open task and no unread mail left by an earlier
+ * test: several assertions count the delegator's open tasks or compare the
+ * whole task listing.
+ */
+async function sharedPair(): Promise<Pair> {
+  const db = new Database(shared.broker.dbPath);
+  try {
+    db.run("PRAGMA busy_timeout = 3000");
+    db.run("DELETE FROM delegated_tasks");
+  } finally {
+    db.close();
+  }
+  await Promise.all([callTool(shared.bob, "check_messages", {}), callTool(shared.alice, "check_messages", {})]);
+  return shared;
 }
 
 async function delegate(p: Pair, message: string): Promise<string> {
@@ -200,8 +230,7 @@ function taskIdByLabel(b: TestBroker, label: string): string {
 
 /** Stands in for a broker older than delegated tasks: the same answers, minus `task`. */
 async function oldBrokerPair(): Promise<Pair & { stop: () => void }> {
-  const broker = await startBroker();
-  brokers.push(broker);
+  const broker = shared.broker;
   const proxy = Bun.serve({
     port: 0,
     hostname: "127.0.0.1",
@@ -221,9 +250,8 @@ async function oldBrokerPair(): Promise<Pair & { stop: () => void }> {
     },
   });
   const viaProxy = { CLAUDE_PEERS_BROKER_URL: `http://127.0.0.1:${proxy.port}` };
-  const bob = await spawnPeer(broker, viaProxy);
-  const alice = await spawnPeer(broker, viaProxy);
-  return { broker, bob, alice, bobId: await peerIdOf(bob), aliceId: await peerIdOf(alice), stop: () => proxy.stop(true) };
+  const { bob, alice, bobId, aliceId } = await pairOn(broker, viaProxy, viaProxy);
+  return { broker, bob, alice, bobId, aliceId, stop: () => proxy.stop(true) };
 }
 
 function delivered(b: TestBroker, text: string): number {
@@ -237,7 +265,7 @@ function delivered(b: TestBroker, text: string): number {
 
 describe("delegating through the MCP surface", () => {
   test("the delegate is told its task id on the WS push, and the delegator can keep working", async () => {
-    const p = await pair();
+    const p = await sharedPair();
     const body = "Audit the resume flow.";
     const taskId = await delegate(p, body);
 
@@ -248,7 +276,7 @@ describe("delegating through the MCP surface", () => {
   }, 90_000);
 
   test("an ACK without the task id closes nothing and reminds the delegator on the WS push and in check_messages", async () => {
-    const p = await pair();
+    const p = await sharedPair();
     const taskId = await delegate(p, "Write the migration test.");
     const ack = "ACK, on it";
     const sent = await callTool(p.alice, "send_message", { to_peer_id: p.bobId, message: ack });
@@ -270,7 +298,7 @@ describe("delegating through the MCP surface", () => {
   }, 90_000);
 
   test("a close without a message closes the task and is not reported as a sent message", async () => {
-    const p = await pair();
+    const p = await sharedPair();
     const taskId = await delegate(p, "Rename the flag.");
     const res = await callTool(p.bob, "send_message", { task_id: taskId, task_action: "close" });
     expect(res.result?.isError).toBeFalsy();
@@ -279,7 +307,7 @@ describe("delegating through the MCP surface", () => {
   }, 90_000);
 
   test("a report that cites and closes the task draws no reminder", async () => {
-    const p = await pair();
+    const p = await sharedPair();
     const taskId = await delegate(p, "Measure the cold start.");
     const report = "Cold start measured: 412 ms.";
     const res = await callTool(p.alice, "send_message", {
@@ -295,7 +323,7 @@ describe("delegating through the MCP surface", () => {
   }, 90_000);
 
   test("a rearm through send_message rearms the same task and says so", async () => {
-    const p = await pair();
+    const p = await sharedPair();
     const taskId = await delegate(p, "Rearm me.");
     makeOverdue(p.broker, taskId);
     const res = await callTool(p.bob, "send_message", {
@@ -310,7 +338,7 @@ describe("delegating through the MCP surface", () => {
   }, 90_000);
 
   test("a close carrying a message but no to_peer_id is refused and leaves the task open", async () => {
-    const p = await pair();
+    const p = await sharedPair();
     const taskId = await delegate(p, "Keep me open.");
     const res = await callTool(p.alice, "send_message", { message: "Report without a recipient.", task_id: taskId, task_action: "close" });
     expect(res.result?.isError).toBeTrue();
@@ -319,7 +347,7 @@ describe("delegating through the MCP surface", () => {
   }, 90_000);
 
   test("a close without a message refuses a deadline instead of ignoring it", async () => {
-    const p = await pair();
+    const p = await sharedPair();
     const taskId = await delegate(p, "Do not close me.");
     const res = await callTool(p.bob, "send_message", { task_id: taskId, task_action: "close", deadline_sec: 60 });
     expect(res.result?.isError).toBeTrue();
@@ -328,7 +356,7 @@ describe("delegating through the MCP surface", () => {
   }, 90_000);
 
   test("open_tasks_with that is not a peer id is refused without touching the mail", async () => {
-    const p = await pair();
+    const p = await sharedPair();
     const res = await callTool(p.bob, "check_messages", { open_tasks_with: 42 });
     expect(res.result?.isError).toBeTrue();
     expect(toolText(res)).toBe("open_tasks_with must be a peer_id or '*'");
@@ -400,7 +428,7 @@ describe("the delegator reminder survives every other arrival path", () => {
   }, 90_000);
 
   test("wait_for_message with a waiter already registered", async () => {
-    const p = await pair();
+    const p = await sharedPair();
     const taskId = await delegate(p, "Check the waiter path.");
     const waiting = callTool(p.bob, "wait_for_message", { timeout_sec: 20 });
     await Bun.sleep(500);
