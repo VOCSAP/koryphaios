@@ -7,7 +7,7 @@
 // mock would keep passing after the status code it exercises drifted from
 // what the real route actually sends.
 
-import { test, expect } from "bun:test";
+import { test, expect, beforeAll, afterAll } from "bun:test";
 import { startBroker, stopBroker, type TestBroker } from "./_helper.ts";
 import { startUpstreamProxy } from "./_upstream-proxy.ts";
 import type { RoadmapSyncStatus } from "../shared/types.ts";
@@ -32,7 +32,8 @@ async function syncStatus(replica: TestBroker): Promise<RoadmapSyncStatus> {
 async function pollUntil<T>(
   label: string,
   check: () => Promise<{ done: boolean; value: T }>,
-  budgetMs = 15_000
+  budgetMs = 15_000,
+  intervalMs = 60
 ): Promise<T> {
   const deadline = Date.now() + budgetMs;
   let last: T | undefined;
@@ -40,7 +41,7 @@ async function pollUntil<T>(
     const { done, value } = await check();
     last = value;
     if (done) return value;
-    await Bun.sleep(60);
+    await Bun.sleep(intervalMs);
   }
   throw new Error(`${label}: timed out after ${budgetMs}ms; last observed ${JSON.stringify(last)}`);
 }
@@ -69,6 +70,19 @@ function reserveClosedPort(): number {
   return port;
 }
 
+// One upstream serving replicas, shared by the tests that put a proxy in
+// front of a healthy broker: each replica below is its own broker, the
+// upstream behind its proxy is never mutated.
+let servingUpstream: TestBroker;
+
+beforeAll(async () => {
+  servingUpstream = await startBroker({ CLAUDE_PEERS_BROKER_TOKEN: AUTH, CLAUDE_PEERS_SERVE_REPLICAS: "1" });
+});
+
+afterAll(async () => {
+  await stopBroker(servingUpstream);
+});
+
 test("a real transport failure (connection refused on a closed port) reports offline_reason 'transport'", async () => {
   const closedPort = reserveClosedPort();
   const replica = await startBroker({
@@ -89,7 +103,7 @@ test("a real transport failure (connection refused on a closed port) reports off
 }, 30_000);
 
 test("an upstream answering 404 on the pull route reports offline_reason 'stale_upstream'", async () => {
-  const upstream = await startBroker({ CLAUDE_PEERS_BROKER_TOKEN: AUTH, CLAUDE_PEERS_SERVE_REPLICAS: "1" });
+  const upstream = servingUpstream;
   const proxy = startUpstreamProxy(upstream.url);
   // The same shape broker-peer-federation.test.ts already uses for "an
   // upstream of an older version": the one route this replica always calls,
@@ -111,12 +125,11 @@ test("an upstream answering 404 on the pull route reports offline_reason 'stale_
   } finally {
     proxy.stop();
     await stopBroker(replica);
-    await stopBroker(upstream);
   }
 }, 30_000);
 
 test("a 404 rendered as HTML (a reverse proxy's default error page, not JSON) still reports offline_reason 'stale_upstream'", async () => {
-  const upstream = await startBroker({ CLAUDE_PEERS_BROKER_TOKEN: AUTH, CLAUDE_PEERS_SERVE_REPLICAS: "1" });
+  const upstream = servingUpstream;
   const proxy = startUpstreamProxy(upstream.url);
   proxy.intercept = (path) =>
     path === "/roadmap/sync/pull"
@@ -140,7 +153,6 @@ test("a 404 rendered as HTML (a reverse proxy's default error page, not JSON) st
   } finally {
     proxy.stop();
     await stopBroker(replica);
-    await stopBroker(upstream);
   }
 }, 30_000);
 
@@ -167,14 +179,15 @@ test("a reachable upstream not configured to serve replicas reports offline_reas
 }, 30_000);
 
 test("a transition (online, then stale upstream, then a real outage) reports each reason truthfully -- never a stuck one, never published while still online", async () => {
-  const upstream = await startBroker({ CLAUDE_PEERS_BROKER_TOKEN: AUTH, CLAUDE_PEERS_SERVE_REPLICAS: "1" });
+  const upstream = servingUpstream;
   const proxy = startUpstreamProxy(upstream.url);
-  // A slow tick, deliberately: the window this test asserts on -- the first
-  // failed pass, before the second one flips online false -- is only as wide
-  // as one tick, and a fast one risks a poll landing after the flip instead
-  // of inside it, which would pass even a mutant that publishes the reason
-  // unconditionally.
-  const SLOW_TICK_MS = "2000";
+  // A tick wider than the floor, deliberately: the window this test asserts
+  // on -- the first failed pass, before the second one flips online false --
+  // is only as wide as one tick, and it is polled every WINDOW_POLL_MS. A
+  // window missed by the poll times the test out (red), it never passes a
+  // mutant that publishes the reason unconditionally.
+  const SLOW_TICK_MS = "1000";
+  const WINDOW_POLL_MS = 10;
   const replica = await startBroker({
     CLAUDE_PEERS_BROKER_URL: proxy.url,
     CLAUDE_PEERS_BROKER_TOKEN: AUTH,
@@ -209,7 +222,9 @@ test("a transition (online, then stale upstream, then a real outage) reports eac
       async () => {
         const status = await syncStatus(replica);
         return { done: status.online === true && status.last_error != null, value: status };
-      }
+      },
+      15_000,
+      WINDOW_POLL_MS
     );
     expect(
       firstFailure.offline_reason,
@@ -225,11 +240,9 @@ test("a transition (online, then stale upstream, then a real outage) reports eac
     // mutant that keeps the FIRST reason forever (never re-reads the fresh
     // exception) would still report 'stale_upstream' here.
     proxy.stop();
-    // A generous budget: by this point the replica has been offline for a
-    // few passes already, and the exponential backoff (untouched by this
-    // lot, capped at SYNC_BACKOFF_MAX_MS = 60s) may have grown well past this
-    // test's own tick, so the next attempt can legitimately be tens of
-    // seconds away.
+    // A generous budget: once offline the exponential backoff (capped at
+    // SYNC_BACKOFF_MAX_MS = 60s) governs the next attempt, which can be
+    // several ticks away.
     const cut = await pollUntil(
       "replica reports the real outage that followed",
       async () => {
@@ -243,6 +256,5 @@ test("a transition (online, then stale upstream, then a real outage) reports eac
     );
   } finally {
     await stopBroker(replica);
-    await stopBroker(upstream);
   }
-}, 100_000);
+}, 60_000);
