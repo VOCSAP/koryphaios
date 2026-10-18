@@ -1141,6 +1141,39 @@ test("force:true by a signed operator bypasses the lock guard on a card locked i
   expect(forced.body.item.status).toBe("planned");
 });
 
+test("release:true by a signed operator across groups is refused with the operator-specific message", async () => {
+  const owner = await post<{ instance_token: string; peer_id: string }>(`${broker.url}/register`, {
+    pid: livePid(), cwd: "/tmp/operator-release-crossgroup-owner", git_root: null, tty: null,
+    summary: "", host: "h-operator-release-crossgroup-owner", client_pid: livePid(), claude_cli_pid: 1,
+    project_key: PK, group_id: "operator-release-crossgroup-owner", group_secret_hash: null,
+  });
+  const item = await post<UpsertRes>(`${broker.url}/roadmap/upsert`, {
+    project_key: PK,
+    by: owner.body.peer_id,
+    instance_token: owner.body.instance_token,
+    title: "locked by its owner, release attempted by a signed operator",
+    status: "in_progress",
+  });
+
+  const credential = FIXTURE_OPERATOR;
+  const body = {
+    id: item.body.item.id,
+    by: "operator",
+    status: "planned",
+    release: true,
+    public_key: credential.publicKey,
+  };
+  const refused = await post<UpsertRes & { error?: string }>(`${broker.url}/roadmap/upsert`, {
+    ...body,
+    auth: buildAuthProof(credential.privateKey, body, { kind: "operator", operator_id: FIXTURE_OPERATOR_ID }),
+  });
+
+  expect(refused.status).toBe(409);
+  expect(refused.body.error).toBe(
+    `item is locked by '${owner.body.peer_id}' in a different group -- release does not cross groups; a signed operator may use force:true`
+  );
+});
+
 // release/reclaim under matchesLockScope (same group only, fail-closed on
 // null). Negative control included per each polarity so a fail-open
 // regression on either predicate would be caught.
@@ -1211,11 +1244,9 @@ test("release:true from a peer in a DIFFERENT group is refused with the release-
     release: true,
   });
   expect(refused.status).toBe(409);
-  // Negative control: this is the RELEASE-specific message, not the ordinary
-  // lock message -- a regression that merged the two branches back into one
-  // would still refuse (status 409) but lose this distinction silently.
-  expect(refused.body.error).toContain("different group");
-  expect(refused.body.error).not.toContain("force:true");
+  expect(refused.body.error).toBe(
+    `item is locked by '${item.owner.body.peer_id}' in a different group -- force and release do not cross groups`
+  );
 
   const stillOwned = await post<UpsertRes>(`${broker.url}/roadmap/upsert`, {
     id: item.item.id,
@@ -1252,6 +1283,42 @@ test("release:true on a card with no locked_group recorded gets the no-group mes
   expect(refused.status).toBe(409);
   expect(refused.body.error).toContain("no group recorded");
   expect(refused.body.error).not.toContain("different group");
+});
+
+test("release:true by a signed operator on a no-group lock names force:true as the available path", async () => {
+  const item = await add({ title: "no-group lock released by signed operator", status: "in_progress" });
+  expect(item.locked_group).toBeNull();
+
+  const credential = FIXTURE_OPERATOR;
+  const releaseBody = {
+    id: item.id,
+    by: "operator",
+    status: "planned",
+    release: true,
+    public_key: credential.publicKey,
+  };
+  const refused = await post<UpsertRes & { error?: string }>(`${broker.url}/roadmap/upsert`, {
+    ...releaseBody,
+    auth: buildAuthProof(credential.privateKey, releaseBody, { kind: "operator", operator_id: FIXTURE_OPERATOR_ID }),
+  });
+  expect(refused.status).toBe(409);
+  expect(refused.body.error).toBe(
+    `item is locked by 'test-peer' with no group recorded -- release cannot verify a group match and is refused; a signed operator may use force:true`
+  );
+
+  const forceBody = {
+    id: item.id,
+    by: "operator",
+    status: "planned",
+    force: true,
+    public_key: credential.publicKey,
+  };
+  const forced = await post<UpsertRes & { error?: string }>(`${broker.url}/roadmap/upsert`, {
+    ...forceBody,
+    auth: buildAuthProof(credential.privateKey, forceBody, { kind: "operator", operator_id: FIXTURE_OPERATOR_ID }),
+  });
+  expect(forced.status).toBe(200);
+  expect(forced.body.item.locked).toBe(false);
 });
 
 // release:true ALONE (no status, no locked) must actually release -- not a

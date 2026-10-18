@@ -4992,11 +4992,8 @@ function handleRoadmapUpsert(
       !ownerMatches &&
       by !== "deck"
     ) {
-      // force and release share matchesLockScope (same group only, fail-
-      // closed on a null locked_group): neither crosses a group boundary by
-      // adding one field. force keeps its full reach inside the group (any
-      // status); release is additionally restricted to a target status of
-      // planned or in_progress, checked below.
+      // release always needs a same-group scope. Force does too for an ordinary
+      // peer, while a signed operator has no group identity and bypasses it below.
       const sameGroupScope = matchesLockScope(existing.locked_group, authorLockedGroup);
       const defaultLockedMessage = `item is locked by '${existing.locked_by}' (actively working on it) -- pick another item, or pass force:true if you are certain`;
       // A row with no locked_group recorded is not known to be in a
@@ -5006,9 +5003,16 @@ function handleRoadmapUpsert(
         existing.locked_group === null
           ? `item is locked by '${existing.locked_by}' with no group recorded -- force and release cannot verify a match and are refused`
           : `item is locked by '${existing.locked_by}' in a different group -- force and release do not cross groups`;
+      const operatorReleaseBoundaryMessage =
+        existing.locked_group === null
+          ? `item is locked by '${existing.locked_by}' with no group recorded -- release cannot verify a group match and is refused; a signed operator may use force:true`
+          : `item is locked by '${existing.locked_by}' in a different group -- release does not cross groups; a signed operator may use force:true`;
       if (body.release === true) {
         if (!sameGroupScope) {
-          return { error: groupBoundaryMessage, status: 409 };
+          return {
+            error: author.operator_id !== undefined ? operatorReleaseBoundaryMessage : groupBoundaryMessage,
+            status: 409,
+          };
         }
         // A release changes custody, never a card's fate -- it may hand the
         // card back (planned) or on (in_progress), never close or archive it
