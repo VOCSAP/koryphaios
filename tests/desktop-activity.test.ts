@@ -1,4 +1,4 @@
-import { test, expect } from "bun:test";
+import { test, expect, spyOn } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
@@ -245,7 +245,7 @@ function extractPtyDataHandlerBody(src: string): string {
   throw new Error("PTY_DATA_HANDLER_ANCHOR found but its brace block never closed");
 }
 
-test("pty.on('data') wires activityTrackerFor(e.id).observe(...) with the EXACT titleSeq oscParserFor(e.id).feed(e.data) returned -- not e.id, not discarded, not a literal", () => {
+function makePtyDataHandler() {
   const src = readFileSync(SESSION_SERVICE_PATH, "utf-8");
   const handlerBody = extractPtyDataHandlerBody(src);
   // A regular `function`, NOT an arrow: the extracted body reads `this.*`
@@ -255,18 +255,29 @@ test("pty.on('data') wires activityTrackerFor(e.id).observe(...) with the EXACT 
   // of exercising the stub.
   const fnSrc = `function(e) ${handlerBody}`;
   // eslint-disable-next-line no-new-func -- extracted from the real source text, not user input
-  const handler = new Function("return " + fnSrc)() as (this: unknown, e: { id: string; data: string }) => void;
+  return new Function("return " + fnSrc)() as (this: unknown, e: { id: string; data: string }) => void;
+}
 
-  const observeCalls: Array<{ id: string; seq: number }> = [];
-  const self = {
+function ptyDataSelf(outputAt: { set: (id: string, at: number) => unknown }, overrides: Record<string, unknown> = {}) {
+  return {
     emit: () => {},
-    outputAt: { set: () => {} },
+    outputAt,
     thinkingDetector: { feed: () => {} },
     quotaGateActive: () => false,
     quotaDetector: { feed: () => {} },
     attentionDetector: { feed: () => {} },
     startupAckDetector: { feed: () => {} },
     screenGuard: { feed: () => {} },
+    oscParserFor: (_id: string) => ({ feed: (_data: string) => ({ title: null, progress: null, notify: null, titleSeq: 0 }) }),
+    activityTrackerFor: (_id: string) => ({ observe: (_seq: number) => {} }),
+    ...overrides
+  };
+}
+
+test("pty.on('data') wires activityTrackerFor(e.id).observe(...) with the EXACT titleSeq oscParserFor(e.id).feed(e.data) returned -- not e.id, not discarded, not a literal", () => {
+  const handler = makePtyDataHandler();
+  const observeCalls: Array<{ id: string; seq: number }> = [];
+  const self = ptyDataSelf({ set: () => {} }, {
     oscParserFor: (_id: string) => ({
       // Sentinel value distinguishable from e.id, from 0, and from any small literal.
       feed: (_data: string) => ({ title: null, progress: null, notify: null, titleSeq: 4242 })
@@ -274,11 +285,26 @@ test("pty.on('data') wires activityTrackerFor(e.id).observe(...) with the EXACT 
     activityTrackerFor: (id: string) => ({
       observe: (seq: number) => observeCalls.push({ id, seq })
     })
-  };
+  });
 
   handler.call(self, { id: "session-under-test", data: "irrelevant bytes" });
 
   expect(observeCalls).toEqual([{ id: "session-under-test", seq: 4242 }]);
+});
+
+test("pty.on('data') records the arrival time of a byte under the event's session id", () => {
+  const handler = makePtyDataHandler();
+  const outputAt = new Map<string, number>();
+  const before = Date.now();
+
+  handler.call(ptyDataSelf(outputAt), { id: "session-under-test", data: "a byte" });
+  const after = Date.now();
+
+  const recorded = outputAt.get("session-under-test");
+  expect(typeof recorded, "the handler must write outputAt[e.id]; no entry means lastOutputAt stays null and waitIdle never waits").toBe("number");
+  expect(recorded).toBeGreaterThanOrEqual(before);
+  expect(recorded, "a timestamp in the future would keep the waitIdle gate closed for good").toBeLessThanOrEqual(after);
+  expect([...outputAt.keys()]).toEqual(["session-under-test"]);
 });
 
 // Balances braces from openIdx (which must point at an opening brace) and
@@ -424,6 +450,38 @@ test("B2: a session with a PRESENT runtime entry that has never produced a byte 
   const result = await waitIdle(self, "a", 500);
   expect(result).toBe(true);
   expect(Date.now() - start).toBeLessThan(200); // first tick, no polling
+});
+
+const LAST_OUTPUT_AT_ANCHOR = "lastOutputAt(id: string): number | null {";
+
+test("B2: a byte through the pty data handler is what closes the waitIdle gate -- handler, lastOutputAt and waitIdle chained on one map", async () => {
+  const waitIdle = makeWaitIdle();
+  const lastOutputAtBody = extractByAnchor(readFileSync(SESSION_SERVICE_PATH, "utf-8"), LAST_OUTPUT_AT_ANCHOR, "lastOutputAt()");
+  // eslint-disable-next-line no-new-func -- extracted from the real source text, not user input
+  const lastOutputAt = new Function("return function(id) " + lastOutputAtBody)() as (this: unknown, id: string) => number | null;
+  const outputAt = new Map<string, number>();
+  const self = {
+    ...ptyDataSelf(outputAt),
+    lastOutputAt,
+    runtime: new Map([["a", { activity: "unknown" as Activity }]]),
+    timing: { activityIdleMs: ACTIVITY_IDLE_MS, idlePollMs: 10 }
+  };
+  const arrivedAt = 1_000_000;
+  const clock = spyOn(Date, "now");
+  try {
+    clock.mockReturnValue(arrivedAt);
+    expect(await waitIdle(self, "a", 0), "control: with no byte yet the gate is open").toBe(true);
+
+    makePtyDataHandler().call(self, { id: "a", data: "a byte" });
+
+    expect(outputAt.get("a"), "the handler must record the arrival instant itself").toBe(arrivedAt);
+    expect(await waitIdle(self, "a", 0), "a byte just received must keep the gate closed until the deadline").toBe(false);
+
+    clock.mockReturnValue(arrivedAt + ACTIVITY_IDLE_MS);
+    expect(await waitIdle(self, "a", 0), "once the activity idle time has passed with no further byte the gate reopens").toBe(true);
+  } finally {
+    clock.mockRestore();
+  }
 });
 
 // ----- 7. activityTrackerFor's `.on()` callback wiring (B3) ---------------
