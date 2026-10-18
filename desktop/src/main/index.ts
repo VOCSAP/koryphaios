@@ -1291,13 +1291,15 @@ const pollApprovalVerdicts = async (): Promise<void> => {
       // A verdict names no dialog: a newer one, or one an agent raised under a
       // benign title, may be what the keystrokes would land in now. Any other
       // kind is typed at the composer, never into a permission chooser.
-      const screen = service.screenLines(tile)
+      const screen = service.screenRead(tile)
       const match =
-        approval.kind === 'permission'
-          ? matchPermissionDialog(approval, screen, { cwd: live?.cwd ?? null, canonical: canonicalPath })
-          : permissionDialogShown(screen)
-            ? { ok: false as const, absent: false, reason: 'a permission dialog is on screen, and this answer is not for it' }
-            : { ok: true as const }
+        screen.status === 'unavailable'
+          ? { ok: false as const, absent: true, reason: `screen unavailable ${screen.reason}` }
+          : approval.kind === 'permission'
+            ? matchPermissionDialog(approval, screen.snapshot.lines, { cwd: live?.cwd ?? null, canonical: canonicalPath })
+            : permissionDialogShown(screen.snapshot.lines)
+              ? { ok: false as const, absent: false, reason: 'a permission dialog is on screen, and this answer is not for it' }
+              : { ok: true as const }
       if (!match.ok) {
         if (match.absent && withinDeferWindow(approval)) {
           if (!heldVerdicts.has(approval.id)) {

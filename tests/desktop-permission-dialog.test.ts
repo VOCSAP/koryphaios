@@ -2,28 +2,27 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, posix, win32 } from "node:path";
-import { ScreenGuard } from "../desktop/src/main/screen-model.ts";
+import { createXtermScreen } from "../desktop/src/main/xterm-screen.ts";
 import { matchPermissionDialog, permissionDialogShown } from "../desktop/src/main/permission-dialog.ts";
 import { TITLE_DETAIL_MAX, buildApprovalRequest, type HookPayload } from "../desktop/hooks/approval-hook.ts";
 import { canonicalPath } from "../desktop/src/main/worktree-service.ts";
 
-// Real Claude Code 2.1.291 byte streams, captured in a 120x40 PTY up to the
-// moment the permission dialog was on screen.
-function screenOf(fixture: string): string[] {
+async function screenOf(fixture: string): Promise<string[]> {
   const chunks = JSON.parse(
     readFileSync(join(import.meta.dir, "pty-harness", "fixtures", fixture), "utf8")
   ) as { data: string }[];
-  const guard = new ScreenGuard();
-  guard.resize("t", 120, 40);
-  for (const c of chunks) if (!c.data.startsWith("\n##########")) guard.feed("t", c.data);
-  const lines = guard.lines("t");
-  if (!lines) throw new Error(`${fixture}: the screen model recorded nothing`);
-  return lines;
+  const screen = createXtermScreen({ cols: 120, rows: 40, reportError: () => undefined });
+  for (const chunk of chunks) if (!chunk.data.startsWith("\n##########")) screen.feed(chunk.data);
+  await screen.drain();
+  const read = screen.read();
+  screen.dispose();
+  if (read.status !== "ready") throw new Error(`${fixture}: xterm screen unavailable: ${read.reason}`);
+  return read.snapshot.lines;
 }
 
-const BASH = screenOf("permission-bash-2.1.291.json");
-const WRAPPED = screenOf("permission-bash-wrapped-2.1.291.json");
-const WRITE = screenOf("permission-write-2.1.291.json");
+const BASH = await screenOf("permission-bash-2.1.291.json");
+const WRAPPED = await screenOf("permission-bash-wrapped-2.1.291.json");
+const WRITE = await screenOf("permission-write-2.1.291.json");
 const BASH_CMD = "mkdir probe-4122-dir && echo created";
 const WRAPPED_CMD =
   `mkdir d${"w".repeat(150)} && echo alpha bravo charlie delta echo foxtrot golf hotel india juliett kilo lima mike ` +
@@ -174,7 +173,6 @@ describe("matchPermissionDialog on captured CLI screens", () => {
   });
 
   test("fail closed, and says whether a dialog may still appear", () => {
-    expect(matchPermissionDialog(bash(BASH_CMD), null, ctx)).toMatchObject({ ok: false, absent: true });
     expect(matchPermissionDialog(bash(BASH_CMD), BASH.slice(0, 5), ctx)).toMatchObject({ ok: false, absent: true });
     expect(matchPermissionDialog({ title: "Bash", question: "" }, BASH, ctx)).toMatchObject({ ok: false, absent: false });
     expect(matchPermissionDialog(row("Edit", { file_path: "probe-note.txt" }), WRITE, ctx)).toMatchObject({ ok: false, absent: false });
@@ -187,7 +185,6 @@ describe("matchPermissionDialog on captured CLI screens", () => {
     expect(permissionDialogShown(WRITE)).toBe(true);
     expect(permissionDialogShown(onOption2(BASH))).toBe(true);
     expect(permissionDialogShown(BASH.slice(0, 5))).toBe(false);
-    expect(permissionDialogShown(null)).toBe(false);
   });
 });
 
@@ -200,14 +197,14 @@ function dialog(body: string[], columns = 120): string[] {
 const GIT_LINE = "git commit --allow-empty -m chore-update-permission-dialog-layout-notes-for-windows-terminal-sessions-and-wrap-rul";
 const TOUCH_LINE =
   "touch quarterly-report-final-versions.txt meeting-minutes-and-action-items.txt release-checklist-for-desktop.txt";
-const GIT_NL = screenOf("permission-bash-gitnl-2.1.291.json");
-const TOUCH_SP = screenOf("permission-bash-touchsp-2.1.291.json");
-const TOUCH_NL = screenOf("permission-bash-touchnl-2.1.291.json");
-const HEREDOC = screenOf("permission-bash-heredoc-2.1.291.json");
-const BASH_INDENT = screenOf("permission-bash-bashindent-2.1.291.json");
-const BA_81 = screenOf("permission-bash-ba81-2.1.291.json");
-const BA_116 = screenOf("permission-bash-ba116-2.1.291.json");
-const BEMOJI = screenOf("permission-bash-bemoji-2.1.291.json");
+const GIT_NL = await screenOf("permission-bash-gitnl-2.1.291.json");
+const TOUCH_SP = await screenOf("permission-bash-touchsp-2.1.291.json");
+const TOUCH_NL = await screenOf("permission-bash-touchnl-2.1.291.json");
+const HEREDOC = await screenOf("permission-bash-heredoc-2.1.291.json");
+const BASH_INDENT = await screenOf("permission-bash-bashindent-2.1.291.json");
+const BA_81 = await screenOf("permission-bash-ba81-2.1.291.json");
+const BA_116 = await screenOf("permission-bash-ba116-2.1.291.json");
+const BEMOJI = await screenOf("permission-bash-bemoji-2.1.291.json");
 const bodyOf = (lines: string[]) => lines.filter((l) => l.startsWith(gutter));
 
 describe("matchPermissionDialog checks only a command shown on one row", () => {

@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { beforeAll, describe, expect, test } from "bun:test";
 import { EventEmitter } from "node:events";
 import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
@@ -16,24 +16,13 @@ import { matchPermissionDialog, permissionDialogShown } from "../desktop/src/mai
 import { withinDeferWindow } from "../desktop/src/main/approval-service";
 import { canonicalPath } from "../desktop/src/main/worktree-service";
 import { buildApprovalRequest } from "../desktop/hooks/approval-hook";
-import { ScreenGuard } from "../desktop/src/main/screen-model";
+import { createXtermScreen, type XtermScreenRead } from "../desktop/src/main/xterm-screen";
 import { deriveOperatorId, generateCredential } from "../shared/approval.ts";
 import type { Approval } from "../desktop/src/main/approval-auth";
 
-// KORY_INDEX_TS overrides which index.ts copy is sliced, letting this suite
-// replay against an older revision to confirm the defect assertions fail there
-// and are not vacuous.
 const INDEX =
   process.env.KORY_INDEX_TS || join(import.meta.dir, "..", "desktop", "src", "main", "index.ts");
-// index.ts is CRLF on disk; normalise line endings only (no other rewriting)
-// so a \n-based indexOf finds the anchors and the slice stays stable.
 const SRC = readFileSync(INDEX, "utf8").replace(/\r\n/g, "\n");
-
-/**
- * Cut one top-level statement out of index.ts, from `anchor` to the first
- * column-0 terminator line. A paren-counting walker looks smarter but breaks
- * on apostrophes inside the comments this file is full of.
- */
 function slice(anchor: string, terminators: string[], label: string): string {
   const start = SRC.indexOf(anchor);
   if (start < 0) throw new Error(`${label}: anchor not found -- index.ts changed shape`);
@@ -50,10 +39,6 @@ function slice(anchor: string, terminators: string[], label: string): string {
   );
   return body;
 }
-// Un repertoire temporaire neuf par tranche : bun ne retrouve pas un fichier
-// ecrit dans un repertoire deja liste par un import precedent.
-// realpathSync.native canonicalise le chemin ecrit et le chemin resolu (macOS
-// symlinke /var vers /private/var, Windows rend un nom court 8.3).
 async function evaluate<T>(wrapper: string, name: string): Promise<(env: Record<string, unknown>) => T> {
   const dir = realpathSync.native(mkdtempSync(join(tmpdir(), "kory-slice-")));
   const file = join(dir, `${name}-${createHash("sha256").update(wrapper).digest("hex").slice(0, 8)}.ts`);
@@ -113,14 +98,17 @@ function verdict(over: Partial<Approval> & { tile?: string } = {}): Approval {
   } as unknown as Approval;
 }
 
+const blankScreen = (): XtermScreenRead => ({
+  status: "ready",
+  snapshot: { revision: 0, cols: 120, rows: 40, lines: Array(40).fill(""), cursor: { x: 0, y: 0 } },
+});
+
 function pollerEnv(opts: {
   settled: Approval[];
   tiles?: string[];
   waiting?: string[];
-  /** Card 7394e2f8: overridable so a test can force it false and still expect delivery. */
   approvalsEnabled?: () => boolean;
-  /** What each tile's screen model holds; an absent tile has never painted. */
-  screens?: Record<string, string[]>;
+  screens?: Record<string, XtermScreenRead>;
 }) {
   const calls: Call[] = [];
   const waitingTiles = new Set<string>(opts.waiting ?? []);
@@ -134,13 +122,10 @@ function pollerEnv(opts: {
     service: {
       list: () => (opts.tiles ?? ["s1"]).map((id) => ({ id, name: `tile ${id}`, peerId: null, cwd: "C:\\proj" })),
       write: (tile: string, keys: string) => written.push({ tile, keys }),
-      screenLines: (tile: string) => opts.screens?.[tile] ?? null,
+      screenRead: (tile: string) => opts.screens?.[tile] ?? blankScreen(),
     },
     waitingTiles,
     openApprovals,
-    // Poll-to-poll bookkeeping lives at index.ts module scope, i.e. OUTSIDE
-    // the sliced statement, so the test owns it -- which is also what makes
-    // "one journal line per held verdict, not one per tick" observable here.
     heldVerdicts: new Set<string>(),
     canApplyVerdict,
     classifyVerdict,
@@ -158,11 +143,6 @@ function pollerEnv(opts: {
     reportError: (...args: unknown[]) => calls.push({ fn: "reportError", args }),
   };
   const { poll: rawPoll } = registerPoller(env);
-  // The poller swallows its own exceptions into reportError, so a free
-  // identifier this harness forgot to inject would show up as an assertion
-  // passing for the WRONG reason (a ReferenceError also "leaves a trace").
-  // Measured once, for real: heldVerdicts was missing, and the very first
-  // defect assertion went green on the swallowed error. Fail loudly instead.
   const poll = async (): Promise<void> => {
     await rawPoll();
     const crash = calls.find(
@@ -173,7 +153,6 @@ function pollerEnv(opts: {
   return { poll, calls, written, marked, waitingTiles, openApprovals };
 }
 
-/** Every id the poller told the broker to stop re-sending, across all calls. */
 const flat = (marked: string[][]) => marked.flat();
 
 describe("classifyVerdict (pure)", () => {
@@ -182,8 +161,6 @@ describe("classifyVerdict (pure)", () => {
   });
 
   test("a tile that is alive but no longer flagged DEFERS, it is not settled", () => {
-    // The operator dismissed the badge; the agent may still be sitting at the
-    // very same prompt. Marking it delivered here is what lost the answer.
     expect(classifyVerdict(verdict(), { exists: true, waiting: false })).toBe("defer");
   });
 
@@ -238,16 +215,14 @@ describe("classifyVerdict (pure)", () => {
   });
 });
 
-describe("pollApprovalVerdicts (sliced verbatim from index.ts)", () => {
+describe("pollApprovalVerdicts delivery rules", () => {
   test("a dismissed-but-live tile keeps its verdict pending instead of burning it", async () => {
     const { poll, written, marked, calls } = pollerEnv({ settled: [verdict()], tiles: ["s1"], waiting: [] });
     await poll();
     expect(written).toEqual([]);
     expect(flat(marked)).not.toContain("appr-42");
-    // Not silent either: the operator must be able to see why nothing landed.
     const held = calls.filter((c) => c.fn === "journal.add" && /holding/i.test(String(c.args[1])));
     expect(held).toHaveLength(1);
-    // ...and exactly ONE line, not one per poll tick (10s apart in the app).
     await poll();
     await poll();
     expect(calls.filter((c) => c.fn === "journal.add" && /holding/i.test(String(c.args[1])))).toHaveLength(1);
@@ -258,7 +233,7 @@ describe("pollApprovalVerdicts (sliced verbatim from index.ts)", () => {
     const { poll, written, marked, waitingTiles } = pollerEnv({ settled, tiles: ["s1"], waiting: [] });
     await poll();
     expect(flat(marked)).not.toContain("appr-42");
-    waitingTiles.add("s1"); // a repaint of the same still-blocked prompt re-arms the flag
+    waitingTiles.add("s1");
     await poll();
     expect(written).toEqual([{ tile: "s1", keys: "\r" }]);
     expect(flat(marked)).toContain("appr-42");
@@ -273,7 +248,22 @@ describe("pollApprovalVerdicts (sliced verbatim from index.ts)", () => {
     expect(calls.some((c) => c.fn === "reportError")).toBe(true);
   });
 
-  // --- untouched paths: these must keep behaving exactly as before the fix.
+  test.each([
+    ["a question", verdict({ kind: "question", answer_kind: "text", answer_text: "go on" } as Partial<Approval>)],
+    ["a permission", verdict({ kind: "permission" } as Partial<Approval>)],
+  ])("%s verdict remains pending when the screen is unavailable", async (_kind, settled) => {
+    const { poll, written, marked, calls } = pollerEnv({
+      settled: [settled],
+      waiting: ["s1"],
+      screens: { s1: { status: "unavailable", reason: "screen-pending" } },
+    });
+
+    await poll();
+    expect(written).toEqual([]);
+    expect(flat(marked)).toEqual([]);
+    expect(calls.filter((call) => call.fn === "journal.add" && /holding/.test(String(call.args[1])))).toHaveLength(1);
+  });
+
   test("a waiting tile still gets the keystrokes and is still marked delivered", async () => {
     const { poll, written, marked } = pollerEnv({ settled: [verdict()], tiles: ["s1"], waiting: ["s1"] });
     await poll();
@@ -281,7 +271,7 @@ describe("pollApprovalVerdicts (sliced verbatim from index.ts)", () => {
     expect(flat(marked)).toEqual(["appr-42"]);
   });
 
-  test("card 7394e2f8: with mobileApprovals OFF (approvalsEnabled() false), a waiting tile's verdict still gets typed into the pty", async () => {
+  test("a waiting tile receives its verdict while approvals are disabled", async () => {
     const { poll, written, marked } = pollerEnv({
       settled: [verdict()],
       tiles: ["s1"],
@@ -289,10 +279,7 @@ describe("pollApprovalVerdicts (sliced verbatim from index.ts)", () => {
       approvalsEnabled: () => false,
     });
     await poll();
-    expect(
-      written,
-      "the LOCAL delivery leg must not read mobileApprovals -- that setting governs the phone relay only, never a Deck-local Allow click",
-    ).toEqual([{ tile: "s1", keys: "\r" }]);
+    expect(written).toEqual([{ tile: "s1", keys: "\r" }]);
     expect(flat(marked)).toEqual(["appr-42"]);
   });
 
@@ -323,16 +310,23 @@ describe("pollApprovalVerdicts (sliced verbatim from index.ts)", () => {
 });
 
 describe("pollApprovalVerdicts types a permission verdict only into the dialog it describes", () => {
-  // Claude Code 2.1.291 captured with `mkdir probe-4122-dir && echo created`
-  // waiting in its permission dialog.
-  const chunks = JSON.parse(
-    readFileSync(join(import.meta.dir, "pty-harness", "fixtures", "permission-bash-2.1.291.json"), "utf8")
-  ) as { data: string }[];
-  const guard = new ScreenGuard();
-  guard.resize("s1", 120, 40);
-  for (const c of chunks) if (!c.data.startsWith("\n##########")) guard.feed("s1", c.data);
-  const SCREEN = guard.lines("s1")!;
-  /** A permission verdict on the row the hook raises for `command`. */
+  let SCREEN: XtermScreenRead;
+  beforeAll(async () => {
+    const chunks = JSON.parse(
+      readFileSync(join(import.meta.dir, "pty-harness", "fixtures", "permission-bash-2.1.291.json"), "utf8")
+    ) as { data: string }[];
+    const screen = createXtermScreen({ cols: 120, rows: 40, reportError: () => undefined });
+    for (const chunk of chunks) if (!chunk.data.startsWith("\n##########")) screen.feed(chunk.data);
+    await screen.drain();
+    SCREEN = screen.read();
+    if (SCREEN.status !== "ready") throw new Error(`permission fixture screen unavailable: ${SCREEN.reason}`);
+    screen.dispose();
+  });
+  const truncatedScreen = (lineCount: number): XtermScreenRead => {
+    if (SCREEN.status !== "ready") throw new Error("permission fixture screen did not become ready");
+    return { status: "ready", snapshot: { ...SCREEN.snapshot, lines: SCREEN.snapshot.lines.slice(0, lineCount) } };
+  };
+
   const permission = (command: string, over: Partial<Approval> = {}) => {
     const body = buildApprovalRequest(
       { hook_event_name: "PermissionRequest", tool_name: "Bash", tool_input: { command } },
@@ -356,7 +350,6 @@ describe("pollApprovalVerdicts types a permission verdict only into the dialog i
   });
 
   test("a verdict describing another dialog types NOTHING, is consumed, traced and toasted", async () => {
-    // Planted row (benign title) answered while the tile shows a real dialog.
     const { poll, written, marked, calls } = pollerEnv({
       settled: [permission("ls")],
       waiting: ["s1"],
@@ -372,7 +365,6 @@ describe("pollApprovalVerdicts types a permission verdict only into the dialog i
   });
 
   test("no dialog on screen yet: the verdict is HELD, not burnt, then given up with a trace", async () => {
-    // A resize rebuilds the grid blank; a legitimate Allow must survive it.
     const { poll, written, marked, calls } = pollerEnv({
       settled: [permission("mkdir probe-4122-dir && echo created")],
       waiting: ["s1"],
@@ -388,12 +380,12 @@ describe("pollApprovalVerdicts types a permission verdict only into the dialog i
     const late = pollerEnv({ settled: [stale], waiting: ["s1"] });
     await late.poll();
     expect(flat(late.marked)).toEqual(["appr-42"]);
-    expect(late.calls.some((c) => c.fn === "reportError" && /no screen recorded/.test(String(c.args[1])))).toBe(true);
+    expect(late.calls.some((c) => c.fn === "reportError" && /no permission dialog/.test(String(c.args[1])))).toBe(true);
     expect(notApplied(late.calls)).toHaveLength(1);
   });
 
   test("a held verdict lands once its dialog is painted", async () => {
-    const screens: Record<string, string[]> = {};
+    const screens: Record<string, XtermScreenRead> = {};
     const { poll, written } = pollerEnv({
       settled: [permission("mkdir probe-4122-dir && echo created")],
       waiting: ["s1"],
@@ -407,8 +399,6 @@ describe("pollApprovalVerdicts types a permission verdict only into the dialog i
   });
 
   test("a question's text answer is never typed into a permission chooser", async () => {
-    // A question raised by the session's own credential, answered "1": typed
-    // into the Bash dialog, that would select Yes.
     const question = verdict({ kind: "question", answer_kind: "text", answer_text: "1" } as Partial<Approval>);
     const { poll, written, marked, calls } = pollerEnv({ settled: [question], waiting: ["s1"], screens: { s1: SCREEN } });
     await poll();
@@ -419,13 +409,13 @@ describe("pollApprovalVerdicts types a permission verdict only into the dialog i
 
   test("a question's answer still reaches a tile showing no chooser", async () => {
     const question = verdict({ kind: "question", answer_kind: "text", answer_text: "go on" } as Partial<Approval>);
-    const { poll, written } = pollerEnv({ settled: [question], waiting: ["s1"], screens: { s1: SCREEN.slice(0, 5) } });
+    const { poll, written } = pollerEnv({ settled: [question], waiting: ["s1"], screens: { s1: truncatedScreen(5) } });
     await poll();
     expect(written).toEqual([{ tile: "s1", keys: "go on\r" }]);
   });
 });
 
-describe("attention listener (sliced verbatim from index.ts)", () => {
+describe("attention listener settlement rules", () => {
   function listenerEnv(
     sweepResult: { settled: string[]; lost: string[]; delivered: string[] } = {
       settled: ["appr-42"],
@@ -471,9 +461,7 @@ describe("attention listener (sliced verbatim from index.ts)", () => {
     service.emit("attention", { id: "s1", waiting: false, manual: true });
     await Bun.sleep(20);
     expect(calls.some((c) => c.fn === "reportError")).toBe(true);
-    // 4f0143ff must stay closed: a dismiss still answers nothing on its own.
     expect(calls.some((c) => c.fn === "settleTileAnsweredInTerminal")).toBe(false);
-    // ...and the approval stays open, so the poller can still deliver it.
     expect(openApprovals.get("s1")).toBe("appr-42");
   });
 

@@ -1,14 +1,3 @@
-// Discovers every detector fed real PTY bytes via
-// `<receiver-or-alias>.feed(e.id, ...)` inside session-service.ts's one
-// pty.on('data', ...) handler, from real source text with a named, reasoned
-// exemption map -- not a hardcoded file list.
-// Narrower than every live PTY-data consumer: magic-compact.ts reads bytes
-// through a separate onData callback (own regression tests in
-// desktop-magic-compact.test.ts), and this handler's own
-// `this.oscParserFor(e.id).feed(e.data)` call is invisible to the discovery
-// regex (method-call receiver, e.data not e.id) -- both deliberately out of
-// scope rather than widening the anchor for one or two sites.
-
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { expect, test } from "bun:test";
@@ -17,7 +6,7 @@ import { stripAnsi as attentionStripAnsi } from "../desktop/src/main/attention.t
 import { stripAnsi as quotaStripAnsi } from "../desktop/src/main/quota.ts";
 import { stripAnsi as startupAckStripAnsi } from "../desktop/src/main/startup-ack.ts";
 import { stripAnsi as thinkingStripAnsi } from "../desktop/src/main/thinking.ts";
-import { makeScreen } from "../desktop/src/main/screen-model.ts";
+import { createXtermScreen } from "../desktop/src/main/xterm-screen.ts";
 
 const ESC = "\x1b";
 const BEL = "\x07";
@@ -43,18 +32,12 @@ test("OSC 2 also sets title, same as OSC 0", () => {
   expect(snap.title).toBe("window title via OSC 2");
 });
 
-// titleSeq must increment on OSC 2 exactly like OSC 0; a guard checking only ps
-// === '0' would pass every prior test since none read titleSeq off an
-// OSC-2-only feed.
 test("titleSeq increments on OSC 2 exactly like OSC 0, not just OSC 0", () => {
   const p = createOscParser();
   const snap = p.feed(osc("2", "window title via OSC 2"));
   expect(snap.titleSeq).toBe(1);
 });
 
-// titleSeq must not increment on OSC 9;4 (progress) or OSC 777 (notify) -- only
-// title (0/2) counts. The CLI emits both for real, so an unguarded increment
-// would paint 'working' forever with no title ever shown.
 test("titleSeq does NOT increment on OSC 9;4 (progress) or OSC 777 (notify) -- only title (0/2) counts", () => {
   const progress = createOscParser();
   expect(progress.feed(osc("9", "4;42")).titleSeq).toBe(0);
@@ -63,7 +46,7 @@ test("titleSeq does NOT increment on OSC 9;4 (progress) or OSC 777 (notify) -- o
   expect(notify.feed(osc("777", "notify;Claude Code;Claude needs your permission")).titleSeq).toBe(0);
 });
 
-test("OSC 777 notify body is surfaced -- the quadruplet extension over the original title/progress pair (card 1aa69066, 2026-08-26 amendment, unblocks f8082208)", () => {
+test("OSC 777 exposes the notify body", () => {
   const p = createOscParser();
   const snap = p.feed(osc("777", "notify;Claude Code;Claude needs your permission"));
   expect(snap.notify).toEqual({ body: "Claude needs your permission" });
@@ -186,29 +169,12 @@ test("cap overflow triggered from 'in-osc-esc-seen' (a pending held-back ESC pus
   expect(snap.title).toBe("after");
 });
 
-// Review round 2: a deliberate, now-documented tradeoff (see OSC_MAX_LEN's
-// own doc comment) -- resuming 'idle' immediately on abandon means a
-// well-formed OSC sequence EMBEDDED inside the abandoned over-length
-// payload is parsed fresh and its payload APPLIED, not discarded along
-// with the rest of the hostile/oversized payload. This test both PINS that
-// behavior (a future change to it must be a conscious edit here) and
-// documents it as intentional, same purpose as safe-strip.ts's own
-// abandon-posture tests.
-test("a well-formed OSC sequence embedded inside an abandoned over-length payload is applied, not discarded (documented tradeoff, same posture as safe-strip.ts)", () => {
+test("a well-formed OSC nested after an oversized payload is applied", () => {
   const p = createOscParser();
   const snap = p.feed(`${ESC}]0;${"y".repeat(9000)}${osc("0", "EVIL")}`);
   expect(snap.title).toBe("EVIL");
 });
 
-// Card 5b324e11 (roadmap): unlike safe-strip.ts's CSI/OSC abandon branches
-// (card 1aa69066 review round 3, blocker T2), osc.ts's cap-overflow handling
-// only set a `capped` flag and left `mode` stuck in 'in-osc'/'in-osc-esc-seen'
-// -- so a wholly separate, well-formed OSC sequence arriving with NO explicit
-// terminator ever sent for the abandoned head got consumed as if it were
-// still part of that head's search for a terminator, and its own terminator
-// then failed to apply (capped was still true). Behavioural probe, not a
-// text-scan: feeds the real exported createOscParser(), requires the real
-// title to come through.
 test("a never-terminated, over-cap OSC head does NOT swallow the next well-formed OSC sequence that follows with no terminator sent for the abandoned one", () => {
   const p = createOscParser();
   p.feed(`${ESC}]0;${"x".repeat(20_000)}`); // never terminated, well past OSC_MAX_LEN
@@ -256,13 +222,6 @@ test("two instances constructed from the SAME factory function do not share the 
   expect(snapB.title).toBeNull();
 });
 
-// oscSnapshot()'s own doc comment asserts that feeding an empty chunk reads the
-// snapshot without mutating any in-progress continuation state -- true by
-// construction, but wired to no proof until this test.
-// Its owning module imports node-pty and cannot be imported directly under bun
-// test, so this extracts the one-line method body and executes it against a
-// stub this.
-
 const REPO_ROOT = join(import.meta.dir, "..");
 const SESSION_SERVICE_PATH = join(REPO_ROOT, "desktop/src/main/session-service.ts");
 
@@ -298,8 +257,6 @@ test("SessionService.oscSnapshot(id): returns null for an unknown session, and f
     notify: null,
     titleSeq: 1
   });
-  // Reading again must not have mutated anything -- same snapshot, not null
-  // or altered by the read itself.
   expect(fn.call(self, "s1")).toEqual({
     title: "a real title",
     progress: null,
@@ -308,12 +265,6 @@ test("SessionService.oscSnapshot(id): returns null for an unknown session, and f
   });
 });
 
-// ----- 4. Discovery-based coverage: no live PTY-data consumer left --------
-// -----    stripping ANSI without also stripping OSC -----------------------
-
-// Pinned literal anchor: if this handler is ever renamed or reshaped, the test
-// must fail loudly naming the anchor, never silently discover an empty domain
-// and report a clean '0 violations'.
 const PTY_DATA_HANDLER_ANCHOR = "this.pty.on('data', (e: { id: string; data: string }) => {";
 
 function extractPtyDataHandlerBody(src: string): string {
@@ -336,26 +287,13 @@ function extractPtyDataHandlerBody(src: string): string {
   throw new Error("PTY_DATA_HANDLER_ANCHOR found but its brace block never closed");
 }
 
-// Discovers detector fields by parsing `<receiver>.feed(e.id` inside the
-// handler body -- anchored on the e.id argument, not the payload's exact shape,
-// because anchoring on the literal 'e.data' text let a synthetic `feed(e.id,
-// String(e.data))` call go entirely undiscovered.
-// Also resolves an intermediate local variable (`const p = this.field;
-// p.feed(...)`) and destructuring (`const { field } = this; field.feed(...)`)
-// back to the underlying `this.<field>` before the scan.
 function discoverFeedFields(handlerBody: string): string[] {
   const fields = new Set<string>();
   let m: RegExpExecArray | null;
 
-  // Direct: this.<field>.feed(e.id, ...) or this.<field>?.feed(e.id, ...).
   const direct = /this\.(\w+)\??\.feed\(\s*e\.id\b/g;
   while ((m = direct.exec(handlerBody))) fields.add(m[1]!);
 
-  // Local variables that alias a `this.<field>` (plain reference or a
-  // method call shaped `this.<field>(...)`), and destructured names pulled
-  // directly off `this` (the destructured name IS the field name -- a
-  // rename via `{ field: alias }` is not a shape this repo's convention
-  // produces anywhere today).
   const localToField = new Map<string, string>();
   const assign = /(?:const|let)\s+(\w+)\s*=\s*this\.(\w+)\b/g;
   while ((m = assign.exec(handlerBody))) localToField.set(m[1]!, m[2]!);
@@ -367,9 +305,6 @@ function discoverFeedFields(handlerBody: string): string[] {
     }
   }
 
-  // Any `<localVar>.feed(e.id` (or `?.feed`) resolved through the alias map
-  // above -- an unresolved local (not a `this`-derived alias) is ignored,
-  // never mistaken for a field name.
   const viaLocal = /(\w+)\??\.feed\(\s*e\.id\b/g;
   while ((m = viaLocal.exec(handlerBody))) {
     const field = localToField.get(m[1]!);
@@ -379,10 +314,6 @@ function discoverFeedFields(handlerBody: string): string[] {
   return [...fields].sort();
 }
 
-// Resolves a field name to its repo-root-relative source file by reading
-// session-service.ts's own "private <field> = new <Class>(...)" and
-// "import { <Class> } from '<path>'" lines, so a detector wired under a new
-// field/class name is still followed with no test edit required.
 function resolveFieldToFile(sessionServiceSrc: string, field: string): string {
   const ctorRe = new RegExp(`private ${field}(?:\\s*:\\s*\\w+)?\\s*=\\s*new\\s+(\\w+)\\(`);
   const ctorMatch = ctorRe.exec(sessionServiceSrc);
@@ -399,74 +330,47 @@ function resolveFieldToFile(sessionServiceSrc: string, field: string): string {
   return `desktop/src/main/${relFromMain}.ts`;
 }
 
-// Feeds `ESC]0;<marker>BEL` to each detector's real strip mechanism and
-// requires the marker to disappear -- a behavioural proof, since a text scan
-// for OSC-stripping bytes can be satisfied by an unrelated comment, string
-// literal, or byte pair without the function ever stripping anything.
-// The five detectors don't share one calling surface (four export stripAnsi;
-// screen-model.ts strips inside Screen.feed() via makeScreen(), no exported
-// function), so each gets its own adapter in DETECTOR_ADAPTERS, and a
-// discovered path with no registered adapter is reported as a violation rather
-// than silently skipped.
 const OSC_PROBE_MARKER = "OSC_COVERAGE_PROBE_MARKER";
 function oscProbeChunk(): string {
   return `before${ESC}]0;${OSC_PROBE_MARKER}${BEL}after`;
 }
 
 interface DetectorAdapter {
-  /** Runs `chunk` through the file's REAL OSC-handling mechanism and
-   * returns the resulting visible/consumed text. */
-  strip(chunk: string): string;
+  strip(chunk: string): string | Promise<string>;
 }
 
 const DETECTOR_ADAPTERS: Record<string, DetectorAdapter> = {
   "desktop/src/main/attention.ts": { strip: attentionStripAnsi },
   "desktop/src/main/quota.ts": { strip: quotaStripAnsi },
   "desktop/src/main/startup-ack.ts": { strip: startupAckStripAnsi },
-  "desktop/src/main/screen-model.ts": {
-    // No exported strip function -- the real mechanism is Screen.feed()'s
-    // own OSC-skip branch, exercised via the same makeScreen()/text() pair
-    // production code (ScreenGuard) uses.
-    strip: (chunk) => {
-      const screen = makeScreen();
+  "desktop/src/main/xterm-screen.ts": {
+    strip: async (chunk) => {
+      const screen = createXtermScreen({ cols: 120, rows: 40, reportError: () => undefined });
       screen.feed(chunk);
-      return screen.text();
+      await screen.drain();
+      const read = screen.read();
+      screen.dispose();
+      if (read.status !== "ready") throw new Error(`xterm screen unavailable: ${read.reason}`);
+      return read.snapshot.lines.join("\n");
     }
   }
-  // thinking.ts deliberately has NO entry here -- see EXEMPT_DETECTORS
-  // below. Its own staleness proof uses thinkingStripAnsi directly, not
-  // this registry (an exempted file must never need an adapter to prove
-  // the exemption is still necessary).
 };
 
 interface DetectorExemption {
   reason: string;
 }
 
-// thinking.ts is wired into the live PTY-data handler but its stripAnsi
-// genuinely doesn't remove OSC -- live in wiring, dead in signal. The only
-// predicate its stripped text feeds (BUSY_RE) has been dead in production since
-// a CLI update, and its repair was explicitly halted for insufficient product
-// value, so cleaning OSC out of a predicate that matches nothing is not
-// pursued.
 const EXEMPT_DETECTORS: Record<string, DetectorExemption> = {
   "desktop/src/main/thinking.ts": {
-    reason:
-      "BUSY_RE measured dead in production since the CLI's 2026-08-11 update; its repair (card " +
-      "bbc849f7) was explicitly halted by the operator on 2026-08-13 for insufficient product " +
-      "value. Cleaning OSC out of a predicate's input that matches nothing is noise on a stopped " +
-      "workstream, not a fix."
+    reason: "BUSY_RE does not match live signals, so its input cannot affect attention state."
   }
 };
 
-// `adapters` is a parameter (defaulting to the real registry) so fixture
-// tests below can exercise the audit logic against SYNTHETIC adapters
-// without ever touching DETECTOR_ADAPTERS itself.
-function auditDetectors(
+async function auditDetectors(
   paths: string[],
   exemptions: Record<string, DetectorExemption>,
   adapters: Record<string, DetectorAdapter> = DETECTOR_ADAPTERS
-): string[] {
+): Promise<string[]> {
   const violations: string[] = [];
   const chunk = oscProbeChunk();
   for (const path of paths) {
@@ -479,15 +383,12 @@ function auditDetectors(
       );
       continue;
     }
-    const out = adapter.strip(chunk);
+    const out = await adapter.strip(chunk);
     if (out.includes(OSC_PROBE_MARKER)) {
       violations.push(`${path}: the OSC payload survived its real strip mechanism (behavioural probe)`);
       continue;
     }
-    // Checking only whether the marker survives misses a strip that swallows
-    // the entire chunk (e.g. `return ''`), which drops the marker along with
-    // everything else and would report no violation. Also requires the ordinary
-    // text around the OSC sequence to survive.
+    // Require ordinary text so a marker-only check cannot accept a swallowed chunk.
     if (!(out.includes("before") && out.includes("after"))) {
       violations.push(`${path}: ordinary text around the OSC sequence did not survive its real strip mechanism (behavioural probe)`);
     }
@@ -495,24 +396,15 @@ function auditDetectors(
   return violations;
 }
 
-test("every live PTY-data consumer shaped as `<receiver>.feed(e.id, ...)` (discovered from session-service.ts's own handler, not a hardcoded list -- NOT every consumer of that handler's bytes by any call shape, see the file header for the oscParserFor(e.id).feed(e.data) gap) either strips OSC (proven BEHAVIOURALLY, not by text-scan) or is a named, reasoned exemption", () => {
+test("every discovered live PTY detector strips OSC or has an explicit exemption", async () => {
   const sessionServiceSrc = readFileSync(SESSION_SERVICE_PATH, "utf-8");
   const handlerBody = extractPtyDataHandlerBody(sessionServiceSrc);
   const fields = discoverFeedFields(handlerBody);
 
-  // Anchor, not just a floor -- the same reasoning as tsconfig-flags.test.ts:
-  // pin the fields known to be wired as of this card (all 5, including
-  // `screenGuard`), so losing OR gaining one fails loudly. `toEqual` on the
-  // full array already subsumes a length check, so no separate floor
-  // assertion is needed (review round 3, nit T7). If this fails because a
-  // NEW field legitimately joined the set: add its file to
-  // DETECTOR_ADAPTERS (or EXEMPT_DETECTORS with a written reason) before
-  // updating this array, not after -- the point of this test failing loudly
-  // is to force that decision at review time.
   expect(fields).toEqual(["attentionDetector", "quotaDetector", "screenGuard", "startupAckDetector", "thinkingDetector"]);
 
   const paths = fields.map((field) => resolveFieldToFile(sessionServiceSrc, field));
-  const violations = auditDetectors(paths, EXEMPT_DETECTORS);
+  const violations = await auditDetectors(paths, EXEMPT_DETECTORS);
   expect(violations).toEqual([]);
 });
 
@@ -526,81 +418,62 @@ test("EXEMPT_DETECTORS only names a field that is actually discovered and whose 
     expect(discoveredPaths.has(path), `EXEMPT_DETECTORS names ${path}, which discovery did not find wired to live PTY data`).toBe(true);
     expect(entry.reason.trim().length, `EXEMPT_DETECTORS["${path}"] reason is too short`).toBeGreaterThan(20);
   }
-  // thinking.ts specifically: its real stripAnsi, run behaviourally, must
-  // still let the OSC probe marker through -- if a future edit ever fixes
-  // it, this assertion fails and names the exemption as unnecessary.
   expect(
     thinkingStripAnsi(oscProbeChunk()).includes(OSC_PROBE_MARKER),
     'EXEMPT_DETECTORS["desktop/src/main/thinking.ts"] is unnecessary: its stripAnsi now removes OSC'
   ).toBe(true);
 });
 
-test("auditDetectors: a synthetic file whose strip does NOT remove the OSC probe is reported unless exempted", () => {
+test("auditDetectors: a synthetic file whose strip does NOT remove the OSC probe is reported unless exempted", async () => {
   const fakePath = "desktop/src/main/fake-detector.ts";
   // eslint-disable-next-line no-control-regex -- CSI-only, genuinely does not touch OSC
   const csiOnly = (s: string) => s.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "");
   const adapters = { [fakePath]: { strip: csiOnly } };
-  expect(auditDetectors([fakePath], {}, adapters)).toEqual([
+  expect(await auditDetectors([fakePath], {}, adapters)).toEqual([
     `${fakePath}: the OSC payload survived its real strip mechanism (behavioural probe)`
   ]);
-  expect(auditDetectors([fakePath], { [fakePath]: { reason: "synthetic fixture" } }, adapters)).toEqual([]);
+  expect(await auditDetectors([fakePath], { [fakePath]: { reason: "synthetic fixture" } }, adapters)).toEqual([]);
 });
 
-test("auditDetectors: a strip that swallows the WHOLE chunk (return '') drops the marker too, but also drops the surrounding ordinary text -- must still be reported", () => {
+test("auditDetectors: a strip that swallows the WHOLE chunk (return '') drops the marker too, but also drops the surrounding ordinary text -- must still be reported", async () => {
   const fakePath = "desktop/src/main/fake-detector.ts";
   const swallowAll: DetectorAdapter["strip"] = () => "";
-  expect(auditDetectors([fakePath], {}, { [fakePath]: { strip: swallowAll } })).toEqual([
+  expect(await auditDetectors([fakePath], {}, { [fakePath]: { strip: swallowAll } })).toEqual([
     `${fakePath}: ordinary text around the OSC sequence did not survive its real strip mechanism (behavioural probe)`
   ]);
 });
 
-// The core of T3: text tricks that defeated the OLD text-scan check
-// (comment naming both bytes, unrelated regex + string literal nearby) do
-// NOTHING against a behavioural probe -- there is no source text for them
-// to fool, only a function call and its return value.
-test("auditDetectors: no text trick (comment, unrelated regex, string literal) can pass a CSI-only strip -- only real OSC removal does", () => {
+test("auditDetectors: no text trick (comment, unrelated regex, string literal) can pass a CSI-only strip -- only real OSC removal does", async () => {
   const fakePath = "desktop/src/main/fake-detector.ts";
-  // eslint-disable-next-line no-control-regex
   const csiOnlyWithDecoys = (s: string) =>
-    // The decoys (JSDoc naming \x07 and \], an unrelated BELL_RE, a string
-    // literal) are pure text that a RUNTIME probe never reads -- only this
-    // regex's actual behaviour matters, and it is still CSI-only.
     s.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "");
   const adapters = { [fakePath]: { strip: csiOnlyWithDecoys } };
-  expect(auditDetectors([fakePath], {}, adapters)).toEqual([
+  expect(await auditDetectors([fakePath], {}, adapters)).toEqual([
     `${fakePath}: the OSC payload survived its real strip mechanism (behavioural probe)`
   ]);
 });
 
-test("auditDetectors: a genuinely OSC-aware strip (regex, \\x1b factored out of the alternation -- the shape attention.ts/quota.ts/startup-ack.ts actually ship) is not reported", () => {
+test("auditDetectors: a genuinely OSC-aware strip (regex, \\x1b factored out of the alternation -- the shape attention.ts/quota.ts/startup-ack.ts actually ship) is not reported", async () => {
   const fakePath = "desktop/src/main/fake-detector.ts";
   // eslint-disable-next-line no-control-regex
   const realShape = (s: string) =>
     s.replace(/\x1b(?:\[[0-9;?]*[ -/]*[@-~]|\][^\x07\x1b\n]{0,4096}(?:\x07|\x1b\\))/g, "");
-  expect(auditDetectors(["desktop/src/main/fake-detector.ts"], {}, { [fakePath]: { strip: realShape } })).toEqual([]);
+  expect(await auditDetectors(["desktop/src/main/fake-detector.ts"], {}, { [fakePath]: { strip: realShape } })).toEqual([]);
 });
 
-test("auditDetectors: the REAL screen-model.ts adapter (char comparisons, no regex) genuinely removes the OSC probe", () => {
-  expect(auditDetectors(["desktop/src/main/screen-model.ts"], {})).toEqual([]);
+test("auditDetectors: the real xterm-screen.ts adapter removes the OSC probe", async () => {
+  expect(await auditDetectors(["desktop/src/main/xterm-screen.ts"], {})).toEqual([]);
 });
 
-// The point of T3: a discovered path with NO registered adapter fails
-// CLOSED (named, reported), never silently skipped -- this is what makes
-// the check hold under DOMAIN GROWTH (a sixth detector added later).
-test("auditDetectors: a discovered path with no registered adapter is reported by name, not silently skipped", () => {
+test("auditDetectors: a discovered path with no registered adapter is reported by name, not silently skipped", async () => {
   const newPath = "desktop/src/main/a-brand-new-detector.ts";
-  expect(auditDetectors([newPath], {})).toEqual([
+  expect(await auditDetectors([newPath], {})).toEqual([
     `${newPath}: no behavioural adapter registered in DETECTOR_ADAPTERS -- a newly discovered live PTY-data consumer fails CLOSED until one is added, it is never silently skipped`
   ]);
-  // An exemption also satisfies it -- the two sanctioned outcomes are
-  // "adapter proves it strips OSC" or "named, reasoned exemption", nothing
-  // else.
-  expect(auditDetectors([newPath], { [newPath]: { reason: "not a real detector, test fixture" } })).toEqual([]);
+  expect(await auditDetectors([newPath], { [newPath]: { reason: "not a real detector, test fixture" } })).toEqual([]);
 });
 
-// ----- discoverFeedFields: the three evasions/widenings from review F4 ----
-
-test("discoverFeedFields: a transformed second argument (String(e.data)) no longer makes the field invisible to discovery (the third evasion measured in review)", () => {
+test("discoverFeedFields discovers a transformed payload argument", () => {
   const handlerBody = "this.fakeDetector.feed(e.id, String(e.data))\n";
   expect(discoverFeedFields(handlerBody)).toEqual(["fakeDetector"]);
 });

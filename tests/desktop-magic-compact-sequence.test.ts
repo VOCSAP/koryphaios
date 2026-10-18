@@ -7,15 +7,23 @@ const RESUME_ID = '0f0e0d0c-0b0a-4090-8070-605040302010'
 /** A real TileInjector as host, a fake terminal, and a banner the test releases by hand. */
 function fixture(banner: string | null) {
   const writes: string[] = []
+  const terminalId = 't1'
+  const terminalLife = {}
   const injector = new TileInjector(
     {
-      isAlive: () => true,
+      isAlive: (id) => id === terminalId,
+      life: (id) => (id === terminalId ? terminalLife : null),
       write: (_id, data) => {
         writes.push(data === '\x1b' ? 'ESC' : (/\/(magic-compact|compact|resume|clear)/.exec(data)?.[0] ?? data))
         return true
       }
     },
-    { inspect: () => ({ state: 'clear' as const }), classify: () => 'clear' },
+    {
+      read: () => ({
+        status: 'ready' as const,
+        snapshot: { revision: 1, cols: 3, rows: 3, lines: ['───', '❯', '───'], cursor: { x: 0, y: 1 } }
+      })
+    },
     { get: () => ({}) },
     () => null,
     { activityIdleMs: 500, settleMs: 5, idlePollMs: 5 },

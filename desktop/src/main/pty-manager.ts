@@ -43,6 +43,10 @@ const MARKER_BUFFER_CAP_CODE_UNITS = 65536
  */
 const CONPTY_KICK_DELAYS_MS = [1500, 4000, 8000, 15000]
 const KILL_ACK_TIMEOUT_MS = 3000
+const MAX_PTY_CELLS = 1024 * 1024
+
+const validDimensions = (cols: number, rows: number): boolean =>
+  Number.isSafeInteger(cols) && Number.isSafeInteger(rows) && cols > 0 && rows > 0 && cols * rows <= MAX_PTY_CELLS
 
 type PtyAdapter = {
   spawn: typeof import('node-pty').spawn
@@ -58,6 +62,7 @@ interface SpawnRequest {
 
 interface Spawned {
   proc: IPty
+  life: object
   cols: number
   rows: number
   /** Start marker to strip (interactive mode), or null. */
@@ -160,6 +165,7 @@ export class PtyManager extends EventEmitter {
 
     const state: Spawned = {
       proc,
+      life: {},
       cols: request.cols,
       rows: request.rows,
       marker,
@@ -263,20 +269,26 @@ export class PtyManager extends EventEmitter {
     return true
   }
 
-  resize(id: string, cols: number, rows: number): void {
+  resize(id: string, cols: number, rows: number): boolean {
     const s = this.procs.get(id)
-    if (!s || cols < 1 || rows < 1) return
-    s.cols = cols
-    s.rows = rows
+    if (!s || !validDimensions(cols, rows)) return false
     try {
       s.proc.resize(cols, rows)
-    } catch {
-      // PTY may have just exited; ignore.
+      s.cols = cols
+      s.rows = rows
+      return true
+    } catch (error) {
+      this.reportError('pty', `failed to resize PTY for tile ${id}`, error)
+      return false
     }
   }
 
   isAlive(id: string): boolean {
     return this.procs.has(id)
+  }
+
+  life(id: string): object | null {
+    return this.procs.get(id)?.life ?? null
   }
 
   pid(id: string): number | null {

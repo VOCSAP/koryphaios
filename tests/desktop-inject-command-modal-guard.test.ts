@@ -1,278 +1,52 @@
-import { test, expect, describe } from 'bun:test'
+import { expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { makeScreen, classifyInjectGuard, ScreenGuard } from '../desktop/src/main/screen-model.ts'
 import { extractBracedBody } from './_braced-body'
-
-// SessionService isn't bun-test-importable (PtyManager -> node-pty, plus
-// unresolved @shared/* aliases outside desktop's own tsconfig); this reads the
-// real file text and asserts on injectCommand's body shape rather than
-// instantiating the class.
 
 const SESSION_SERVICE_PATH = join(import.meta.dir, '..', 'desktop', 'src', 'main', 'session-service.ts')
 const TILE_INJECTOR_PATH = join(import.meta.dir, '..', 'desktop', 'src', 'main', 'tile-injector.ts')
 
-function extractInjectCommandBody(src: string): string {
-  const fnMatch = /async injectCommand\([^)]*\)[^{]*\{/.exec(src)
-  if (!fnMatch) throw new Error('injectCommand() not found in tile-injector.ts -- has it been renamed?')
-  return extractBracedBody(src, fnMatch.index + fnMatch[0].length - 1)
+function extractBody(src: string, signature: RegExp, name: string): string {
+  const match = signature.exec(src)
+  if (!match || match.index === undefined) throw new Error(`${name} not found`)
+  return extractBracedBody(src, match.index + match[0].length - 1)
 }
 
-function extractRemoveBody(src: string): string {
-  const fnMatch = /async remove\(id: string\): Promise<void> \{/.exec(src)
-  if (!fnMatch) throw new Error('remove() not found in session-service.ts -- has it been renamed?')
-  return extractBracedBody(src, fnMatch.index + fnMatch[0].length - 1)
+function twoSynchronousScreenReadsGuardBothWrites(body: string): boolean {
+  const firstRead = body.indexOf('const firstRefusal = this.refusal(id)')
+  const escape = body.indexOf("this.pty.write(id, '\\x1b')")
+  const secondRead = body.indexOf('const secondRefusal = this.refusal(id)')
+  const submit = body.indexOf('this.pty.write(id, encodeSubmittedKeystrokes(command))')
+  if (firstRead < 0 || escape < 0 || secondRead < 0 || submit < 0) return false
+  return firstRead < escape && escape < secondRead && secondRead < submit && !body.slice(secondRead, submit).includes('await')
 }
 
-function extractKillWithTraceBody(src: string): string {
-  const fnMatch = /private killWithTrace\(id: string, reason: string\): void \{/.exec(src)
-  if (!fnMatch) throw new Error('killWithTrace() not found in session-service.ts')
-  return extractBracedBody(src, fnMatch.index + fnMatch[0].length - 1)
-}
-
-const ESC_WRITE = /this\.pty\.write\(id,\s*'\\x1b'\)/
-const SCREEN_GUARD_CHECK = /this\.screenGuard\.inspect\(id\)/
-const ATTENTION_CHECK = /this\.runtime\.get\(id\)\?\.needsAttention/
-const RATE_LIMITED_CHECK = /this\.runtime\.get\(id\)\?\.rateLimited/
-const REFUSAL_RETURN = /return\s+'refused-modal'/g
-
-/**
- * All three signals must be checked, and each check must return the refusal
- * before the Escape write -- a check present but placed after the write (or
- * present without its own `return 'refused-modal'`) would compile and read
- * fine while doing nothing.
- */
-function guardIsWiredBeforeEscape(body: string): boolean {
-  const escIdx = body.search(ESC_WRITE)
-  if (escIdx === -1) return false
-  const before = body.slice(0, escIdx)
-  const refusals = before.match(REFUSAL_RETURN) ?? []
-  return (
-    SCREEN_GUARD_CHECK.test(before) &&
-    ATTENTION_CHECK.test(before) &&
-    RATE_LIMITED_CHECK.test(before) &&
-    refusals.length >= 3
-  )
-}
-
-test("injectCommand's screen-state guard runs BEFORE the Escape write and refuses on either signal (real file)", () => {
-  const body = extractInjectCommandBody(readFileSync(TILE_INJECTOR_PATH, 'utf-8'))
-  expect(guardIsWiredBeforeEscape(body)).toBe(true)
+test('injectCommand re-reads the xterm screen before each physical write', () => {
+  const body = extractBody(readFileSync(TILE_INJECTOR_PATH, 'utf-8'), /async injectCommand\([^)]*\)[^{]*\{/, 'injectCommand()')
+  expect(twoSynchronousScreenReadsGuardBothWrites(body)).toBe(true)
 })
 
-test('every modal refusal and SessionService kill path logs a reason before acting (real file)', () => {
+test('the injection refusal treats unavailable xterm reads as modal and logs their reason', () => {
+  const src = readFileSync(TILE_INJECTOR_PATH, 'utf-8')
+  const body = extractBody(src, /private refusal\(id: string\): DirectiveOutcome \| null \{/, 'refusal()')
+  expect(body).toContain("screen.status === 'unavailable'")
+  expect(body).toContain('screen unavailable ${screen.reason}')
+  expect(body).toContain('inspectInjectGuard(screen.snapshot)')
+  expect(body).toContain('needsAttention')
+  expect(body).toContain('rateLimited')
+})
+
+test("'refused-modal' is a member of DirectiveOutcome and its agent-stop mirror", () => {
+  const session = readFileSync(SESSION_SERVICE_PATH, 'utf-8')
+  const agentStop = readFileSync(join(import.meta.dir, '..', 'desktop', 'src', 'main', 'agent-stop.ts'), 'utf-8')
+  expect(/export type DirectiveOutcome = ([^\n]+)/.exec(session)?.[1]).toContain("'refused-modal'")
+  expect(/export type InjectOutcome = ([^\n]+)/.exec(agentStop)?.[1]).toContain("'refused-modal'")
+})
+
+test('SessionService feeds xterm before publishing data and invalidates it when PTY resize fails', () => {
   const src = readFileSync(SESSION_SERVICE_PATH, 'utf-8')
-  const tileBody = extractInjectCommandBody(readFileSync(TILE_INJECTOR_PATH, 'utf-8'))
-  const removeBody = extractRemoveBody(src)
-  const killBody = extractKillWithTraceBody(src)
-  const sessionRefusals = [...src.matchAll(/return 'refused-modal'/g)]
-  const sessionRefusalBlocks = [
-    ...src.matchAll(
-      /if \((?:[^()]|\([^()]*\))*\) \{\s*logInfo\('session', `[^$`]*refused-modal for \$\{id\}: [^$`]+`\)\s*return 'refused-modal'/g
-    )
-  ]
-
-  const structuredPauseRefusal =
-    src.includes("const guard = this.screenGuard.inspect(id)") &&
-    src.includes("const line = guard.line === undefined ? '' : ` at line ${guard.line}`") &&
-    src.includes("logInfo('session', `pause interruption refused-modal for ${id}: screen guard ${guard.rule}${line}`)")
-
-  expect(sessionRefusals.length).toBeGreaterThan(0)
-  expect(structuredPauseRefusal).toBe(true)
-  expect(sessionRefusalBlocks.length + Number(structuredPauseRefusal)).toBe(sessionRefusals.length)
-  expect(tileBody).toContain("const guard = this.screenGuard.inspect(id)")
-  expect(tileBody).toContain("this.info('session', `command injection refused-modal for ${id}: screen guard ${guard.rule}${line}`)")
-
-  expect(killBody.indexOf('logInfo')).toBeGreaterThan(-1)
-  expect(killBody.indexOf('logInfo')).toBeLessThan(killBody.indexOf('this.pty.kill(id)'))
-  expect([...src.matchAll(/this\.pty\.kill\(id\)/g)]).toHaveLength(1)
-  expect(removeBody).toContain("this.killWithTrace(id, 'force cleanup')")
-  expect(removeBody).toContain("kill: () => this.killWithTrace(id, 'close escalation')")
-  expect(src).toContain("this.killWithTrace(id, 'utility terminal')")
-})
-
-test("'refused-modal' is a member of DirectiveOutcome (real file)", () => {
-  const src = readFileSync(SESSION_SERVICE_PATH, 'utf-8')
-  const typeMatch = /export type DirectiveOutcome = ([^\n]+)/.exec(src)
-  expect(typeMatch).not.toBeNull()
-  expect(typeMatch![1]).toContain("'refused-modal'")
-})
-
-test("agent-stop.ts's mirrored InjectOutcome carries the same new member (real file)", () => {
-  const AGENT_STOP_PATH = join(import.meta.dir, '..', 'desktop', 'src', 'main', 'agent-stop.ts')
-  const src = readFileSync(AGENT_STOP_PATH, 'utf-8')
-  const typeMatch = /export type InjectOutcome = ([^\n]+)/.exec(src)
-  expect(typeMatch).not.toBeNull()
-  expect(typeMatch![1]).toContain("'refused-modal'")
-})
-
-// Synthetic bodies isolate the guard check without mutating production sources.
-
-test('the guard REJECTS a body with no screen-state check at all (the pre-A2-1 shape)', () => {
-  const body = `
-    if (!this.pty.isAlive(id)) return 'no-terminal'
-    const idle = await this.waitIdle(id, idleWaitMs)
-    if (!this.pty.isAlive(id)) return 'no-terminal'
-    if (!idle) return 'busy-timeout'
-    this.pty.write(id, '\\x1b')
-    await new Promise((res) => setTimeout(res, DIRECTIVE_SETTLE_MS))
-    if (!this.pty.write(id, encodeSubmittedKeystrokes(command))) return 'no-terminal'
-    return 'written'
-  `
-  expect(guardIsWiredBeforeEscape(body)).toBe(false)
-})
-
-test('the guard REJECTS a body with only the geometric check, missing the attention union (half the union removed)', () => {
-  const body = `
-    if (!idle) return 'busy-timeout'
-    if (this.screenGuard.classify(id) === 'modal') return 'refused-modal'
-    this.pty.write(id, '\\x1b')
-    if (!this.pty.write(id, encodeSubmittedKeystrokes(command))) return 'no-terminal'
-    return 'written'
-  `
-  expect(guardIsWiredBeforeEscape(body)).toBe(false)
-})
-
-test('the guard REJECTS a body with only the attention check, missing the geometric signal (the other half removed)', () => {
-  const body = `
-    if (!idle) return 'busy-timeout'
-    if (this.runtime.get(id)?.needsAttention) return 'refused-modal'
-    this.pty.write(id, '\\x1b')
-    if (!this.pty.write(id, encodeSubmittedKeystrokes(command))) return 'no-terminal'
-    return 'written'
-  `
-  expect(guardIsWiredBeforeEscape(body)).toBe(false)
-})
-
-test('the guard REJECTS a body with screenGuard and attention but missing rateLimited (the exact gap card 63ca372f/120148eb closes)', () => {
-  const body = `
-    if (!idle) return 'busy-timeout'
-    if (this.screenGuard.classify(id) === 'modal') return 'refused-modal'
-    if (this.runtime.get(id)?.needsAttention) return 'refused-modal'
-    this.pty.write(id, '\\x1b')
-    if (!this.pty.write(id, encodeSubmittedKeystrokes(command))) return 'no-terminal'
-    return 'written'
-  `
-  expect(guardIsWiredBeforeEscape(body)).toBe(false)
-})
-
-test('the guard REJECTS a check placed AFTER the Escape write (too late to prevent it)', () => {
-  const body = `
-    if (!idle) return 'busy-timeout'
-    this.pty.write(id, '\\x1b')
-    if (this.screenGuard.classify(id) === 'modal') return 'refused-modal'
-    if (this.runtime.get(id)?.needsAttention) return 'refused-modal'
-    if (this.runtime.get(id)?.rateLimited) return 'refused-modal'
-    if (!this.pty.write(id, encodeSubmittedKeystrokes(command))) return 'no-terminal'
-    return 'written'
-  `
-  expect(guardIsWiredBeforeEscape(body)).toBe(false)
-})
-
-test('the guard ACCEPTS the fixed shape: all three signals checked, all refusing before the Escape write', () => {
-  const body = `
-    if (!idle) return 'busy-timeout'
-    const guard = this.screenGuard.inspect(id)
-    if (guard.state === 'modal') return 'refused-modal'
-    if (this.runtime.get(id)?.needsAttention) return 'refused-modal'
-    if (this.runtime.get(id)?.rateLimited) return 'refused-modal'
-    this.pty.write(id, '\\x1b')
-    if (!this.pty.write(id, encodeSubmittedKeystrokes(command))) return 'no-terminal'
-    return 'written'
-  `
-  expect(guardIsWiredBeforeEscape(body)).toBe(true)
-})
-
-// ----- ScreenGuard lifecycle: fed and cleared alongside the sibling
-// detectors (thinking/quota/attention/startupAck), same convention -- source
-// scan of the whole file, since the wiring spans multiple methods.
-
-test('screenGuard.feed is wired into the central pty data handler alongside the other four detectors', () => {
-  const src = readFileSync(SESSION_SERVICE_PATH, 'utf-8')
-  const feedBlockMatch =
-    /this\.thinkingDetector\.feed\(e\.id, e\.data\)[\s\S]{0,400}?this\.screenGuard\.feed\(e\.id, e\.data\)/.exec(src)
-  expect(feedBlockMatch).not.toBeNull()
-  expect(feedBlockMatch![0]).toContain('this.startupAckDetector.feed(e.id, e.data)')
-})
-
-// Directly exercises reused tile IDs because source scans cannot prove lifecycle behaviour.
-test('a tile id reused after ScreenGuard.clear() gets a fresh classification', () => {
-  const guard = new ScreenGuard()
-  const id = 'tile-reused'
-  const esc = String.fromCharCode(27)
-  const chevron = String.fromCodePoint(0x276f)
-  const border = String.fromCodePoint(0x2500).repeat(120)
-
-  guard.resize(id, 120, 40)
-  guard.feed(id, `${esc}[5;1H${border}${esc}[6;1H${chevron}old draft${esc}[7;1H${border}${esc}[6;10H`)
-  expect(guard.classify(id)).toBe('clear')
-
-  guard.clear(id)
-
-  guard.resize(id, 120, 40)
-  guard.feed(id, `${esc}[20;1H${border}${esc}[21;1H${chevron}new draft${esc}[22;1H${border}${esc}[21;10H`)
-  expect(guard.classify(id)).toBe('clear')
-})
-
-describe('ScreenGuard.resize', () => {
-  const TOP_ROW = 101
-  const CHEVRON_ROW = 102
-  const TALL_TOP_ROW = 250
-  const TALL_CHEVRON_ROW = 251
-  const esc = String.fromCharCode(27)
-  const chevron = String.fromCodePoint(0x276f)
-  const border = String.fromCodePoint(0x2500).repeat(120)
-  const feedComposer = (feed: (data: string) => void, topRow: number, chevronRow: number): void => {
-    feed(`${esc}[${topRow};1H${border}`)
-    feed(`${esc}[${chevronRow};1H${chevron}draft`)
-    feed(`${esc}[${chevronRow + 1};1H${border}`)
-    feed(`${esc}[${chevronRow};5H`)
-  }
-  const feedDefaultComposer = (feed: (data: string) => void): void => feedComposer(feed, TOP_ROW, CHEVRON_ROW)
-  const feedTallComposer = (feed: (data: string) => void): void => feedComposer(feed, TALL_TOP_ROW, TALL_CHEVRON_ROW)
-
-  test('a 120x40 Screen classifies an out-of-bounds composer as modal', () => {
-    const screen = makeScreen(120, 40)
-    feedDefaultComposer(screen.feed)
-    expect(classifyInjectGuard(screen)).toBe('modal')
-  })
-
-  test('a composer is clear when the Screen covers its rows', () => {
-    const screen = makeScreen(120, 300)
-    feedDefaultComposer(screen.feed)
-    expect(classifyInjectGuard(screen)).toBe('clear')
-  })
-
-  test('the default Screen refuses a composer until its terminal width is configured', () => {
-    const screen = makeScreen()
-    feedDefaultComposer(screen.feed)
-    expect(classifyInjectGuard(screen)).toBe('modal')
-  })
-
-  test('ScreenGuard.resize classifies a composer at the configured size', () => {
-    const guard = new ScreenGuard()
-    guard.resize('tile-tall', 120, 300)
-    feedTallComposer((data) => guard.feed('tile-tall', data))
-    expect(guard.classify('tile-tall')).toBe('clear')
-  })
-
-  test('SessionService.resize forwards its cols/rows into screenGuard.resize (real file) -- without this call, PtyManager and ScreenGuard silently diverge the moment the renderer ever resizes a tile', () => {
-    const src = readFileSync(SESSION_SERVICE_PATH, 'utf-8')
-    const fnMatch = /resize\(id: string, cols: number, rows: number\): void \{([\s\S]*?)\n  \}/.exec(src)
-    expect(fnMatch).not.toBeNull()
-    expect(fnMatch![1]).toContain('this.pty.resize(id, cols, rows)')
-    expect(fnMatch![1]).toContain('this.screenGuard.resize(id, cols, rows)')
-  })
-
-  test('resize() rejects non-finite/invalid dims explicitly, leaving the tracked Screen untouched (cols/rows are IPC-sourced -- a bare `cols < 1` comparison against NaN is false and would let it through into `new Array(NaN)`, which throws)', () => {
-    const guard = new ScreenGuard()
-    guard.resize('tile-x', 120, 300)
-    feedTallComposer((data) => guard.feed('tile-x', data))
-    expect(guard.classify('tile-x')).toBe('clear')
-    guard.resize('tile-x', Number.NaN, 300)
-    guard.resize('tile-x', 120, Number.NaN)
-    guard.resize('tile-x', 0, 300)
-    guard.resize('tile-x', 120, -5)
-    expect(guard.classify('tile-x')).toBe('clear')
-  })
+  expect(src.indexOf('this.screenGuard.feed(e.id, e.data)')).toBeLessThan(src.indexOf("this.emit('data', e)"))
+  const resize = extractBody(src, /resize\(id: string, cols: number, rows: number\): void \{/, 'resize()')
+  expect(resize).toContain('this.screenGuard.resize(id, cols, rows)')
+  expect(resize).toContain("this.screenGuard.invalidate(id, 'PTY resize failed')")
 })

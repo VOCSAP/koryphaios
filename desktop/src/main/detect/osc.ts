@@ -120,10 +120,7 @@ export function createOscParser(): { feed(chunk: string): OscSnapshot } {
             mode = 'in-osc'
             buf = ''
           } else if (c === ESC) {
-            // Stay here: a second ESC could still be followed by ']'. This
-            // does not need to be a general escape-sequence parser (unlike
-            // screen-model.ts) -- it only has to avoid losing a genuine
-            // "ESC ]" that happens to be preceded by an unrelated ESC.
+            // Preserve the second ESC because resetting would lose an immediately following OSC.
           } else {
             mode = 'idle'
           }

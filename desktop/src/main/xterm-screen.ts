@@ -16,8 +16,8 @@ export type XtermScreenSnapshot = {
 }
 
 export type XtermScreenRead =
-  | { state: 'ready'; snapshot: XtermScreenSnapshot }
-  | { state: 'unavailable'; reason: XtermScreenUnavailableReason }
+  | { status: 'ready'; snapshot: XtermScreenSnapshot }
+  | { status: 'unavailable'; reason: XtermScreenUnavailableReason }
 
 type TerminalOptions = {
   cols: number
@@ -57,6 +57,13 @@ export type XtermScreenOptions = {
   reportError(scope: string, message: string, error?: unknown): void
   budgets?: Partial<BudgetOptions>
   terminalFactory?: (options: TerminalOptions) => HeadlessTerminal
+  reservePending?(codeUnits: number, chunks: number): boolean
+  releasePending?(codeUnits: number, chunks: number): void
+}
+
+export type ScreenGuardOptions = {
+  globalBudgets?: { pendingCodeUnits?: number; pendingChunks?: number }
+  screenOptions?: Pick<XtermScreenOptions, 'budgets' | 'terminalFactory'>
 }
 
 export type XtermScreen = {
@@ -64,8 +71,15 @@ export type XtermScreen = {
   resize(cols: number, rows: number): void
   read(): XtermScreenRead
   drain(): Promise<void>
+  invalidate(message: string, error?: unknown): void
   dispose(): void
 }
+
+export type InjectGuardState = 'clear' | 'modal'
+export type InjectGuardRule = 'empty-grid' | 'picker' | 'dialog' | 'composer-geometry'
+export type InjectGuardInspection =
+  | { state: 'clear' }
+  | { state: 'modal'; rule: InjectGuardRule; line?: number }
 
 const DEFAULT_BUDGETS: BudgetOptions = {
   pendingCodeUnits: 1024 * 1024,
@@ -74,12 +88,25 @@ const DEFAULT_BUDGETS: BudgetOptions = {
   cells: 1024 * 1024
 }
 
+const DEFAULT_GLOBAL_BUDGETS = {
+  pendingCodeUnits: 8 * 1024 * 1024,
+  pendingChunks: 8 * 4096
+}
+
 const validPositiveInteger = (value: number): boolean => Number.isSafeInteger(value) && value > 0
 
 const resolveBudgets = (overrides: Partial<BudgetOptions> | undefined): BudgetOptions => {
   const budgets = { ...DEFAULT_BUDGETS, ...overrides }
   for (const value of Object.values(budgets)) {
     if (!validPositiveInteger(value)) throw new RangeError('xterm screen budget must be a positive safe integer')
+  }
+  return budgets
+}
+
+const resolveGlobalBudgets = (overrides: ScreenGuardOptions['globalBudgets']) => {
+  const budgets = { ...DEFAULT_GLOBAL_BUDGETS, ...overrides }
+  if (!validPositiveInteger(budgets.pendingCodeUnits) || !validPositiveInteger(budgets.pendingChunks)) {
+    throw new RangeError('xterm screen global budget must be a positive safe integer')
   }
   return budgets
 }
@@ -115,10 +142,13 @@ export function createXtermScreen(options: XtermScreenOptions): XtermScreen {
 
   const abandonPending = (): void => {
     const owner = terminal
+    const releasedCodeUnits = pendingCodeUnits
+    const releasedChunks = pendingChunks
     terminal = null
     pendingCodeUnits = 0
     pendingChunks = 0
     unsettledCodeUnits = 0
+    options.releasePending?.(releasedCodeUnits, releasedChunks)
     settleDrain()
     try {
       owner?.dispose()
@@ -175,7 +205,7 @@ export function createXtermScreen(options: XtermScreenOptions): XtermScreen {
         fault('xterm active buffer line is unavailable')
         return null
       }
-      lines.push(line.translateToString(true))
+      lines.push(line.translateToString(true).replace(/\s+$/, ''))
     }
     return { revision: submitted, cols, rows, lines, cursor: { x: active.cursorX, y: active.cursorY } }
   }
@@ -197,6 +227,10 @@ export function createXtermScreen(options: XtermScreenOptions): XtermScreen {
       fault('xterm screen is unavailable')
       return
     }
+    if (options.reservePending && !options.reservePending(data.length, 1)) {
+      fault('xterm screen global input budget exceeded')
+      return
+    }
     cache = null
     submitted++
     pendingChunks++
@@ -209,6 +243,7 @@ export function createXtermScreen(options: XtermScreenOptions): XtermScreen {
           applied++
           pendingChunks--
           pendingCodeUnits -= data.length
+          options.releasePending?.(data.length, 1)
           if (parserIsAtRest()) unsettledCodeUnits = 0
           settleDrain()
         } catch (error) {
@@ -241,25 +276,29 @@ export function createXtermScreen(options: XtermScreenOptions): XtermScreen {
 
   const read = (): XtermScreenRead => {
     try {
-      if (disposed) return { state: 'unavailable', reason: 'disposed' }
-      if (faulted || !terminal) return { state: 'unavailable', reason: 'screen-fault' }
-      if (pendingChunks !== 0 || applied !== submitted) return { state: 'unavailable', reason: 'screen-pending' }
-      if (resizeSubmitted !== null && submitted <= resizeSubmitted) return { state: 'unavailable', reason: 'resize-pending' }
+      if (disposed) return { status: 'unavailable', reason: 'disposed' }
+      if (faulted || !terminal) return { status: 'unavailable', reason: 'screen-fault' }
+      if (pendingChunks !== 0 || applied !== submitted) return { status: 'unavailable', reason: 'screen-pending' }
+      if (resizeSubmitted !== null && submitted <= resizeSubmitted) return { status: 'unavailable', reason: 'resize-pending' }
       const atRest = parserIsAtRest()
-      if (atRest === null) return { state: 'unavailable', reason: 'screen-fault' }
-      if (!atRest) return { state: 'unavailable', reason: 'sequence-incomplete' }
+      if (atRest === null) return { status: 'unavailable', reason: 'screen-fault' }
+      if (!atRest) return { status: 'unavailable', reason: 'sequence-incomplete' }
       if (resizeSubmitted !== null) resizeSubmitted = null
       cache ??= snapshot()
-      return cache ? { state: 'ready', snapshot: cache } : { state: 'unavailable', reason: 'screen-fault' }
+      return cache ? { status: 'ready', snapshot: cache } : { status: 'unavailable', reason: 'screen-fault' }
     } catch (error) {
       fault('xterm screen read failed', error)
-      return { state: 'unavailable', reason: 'screen-fault' }
+      return { status: 'unavailable', reason: 'screen-fault' }
     }
   }
 
   const drain = (): Promise<void> => {
     if (pendingChunks === 0 || disposed || faulted) return Promise.resolve()
     return new Promise((resolve) => drainWaiters.push(resolve))
+  }
+
+  const invalidate = (message: string, error?: unknown): void => {
+    fault(message, error)
   }
 
   const dispose = (): void => {
@@ -269,5 +308,141 @@ export function createXtermScreen(options: XtermScreenOptions): XtermScreen {
     abandonPending()
   }
 
-  return { feed, resize, read, drain, dispose }
+  return { feed, resize, read, drain, invalidate, dispose }
+}
+
+export function inspectInjectGuard(snapshot: XtermScreenSnapshot): InjectGuardInspection {
+  const horizontal = String.fromCodePoint(0x2500)
+  const chevron = String.fromCodePoint(0x276f)
+  const dialogTopLeft = String.fromCodePoint(0x256d)
+  const dialogTopRight = String.fromCodePoint(0x256e)
+  const dialogBottomLeft = String.fromCodePoint(0x2570)
+  const dialogBottomRight = String.fromCodePoint(0x256f)
+  const { lines, cols, cursor } = snapshot
+  const isPureBorder = (line: string): boolean => [...line].length === cols && [...line].every((character) => character === horizontal)
+  const isTopBorder = (line: string): boolean => {
+    if ([...line].length !== cols) return false
+    const labelStart = line.indexOf(' ')
+    if (labelStart < 0) return isPureBorder(line)
+    const labelEnd = line.lastIndexOf(' ')
+    const beforeLabel = line.slice(0, labelStart)
+    const label = line.slice(labelStart + 1, labelEnd)
+    const afterLabel = line.slice(labelEnd + 1)
+    return (
+      beforeLabel.length > 0 &&
+      afterLabel.length > 0 &&
+      label.length > 0 &&
+      label.trim() === label &&
+      !label.includes(horizontal) &&
+      [...beforeLabel].every((character) => character === horizontal) &&
+      [...afterLabel].every((character) => character === horizontal)
+    )
+  }
+  const isPicker = (line: string): boolean => new RegExp(`^\\s*${chevron}\\s+\\d+\\.`).test(line)
+  const isDialogTop = (line: string): boolean => line.trimStart().startsWith(dialogTopLeft) && line.trimEnd().endsWith(dialogTopRight)
+  const isDialogBottom = (line: string): boolean =>
+    line.trimStart().startsWith(dialogBottomLeft) && line.trimEnd().endsWith(dialogBottomRight)
+
+  if (lines.every((line) => line.length === 0)) return { state: 'modal', rule: 'empty-grid' }
+
+  const pickerLine = lines.findIndex(isPicker)
+  if (pickerLine >= 0) return { state: 'modal', rule: 'picker', line: pickerLine + 1 }
+
+  const dialogTopLine = lines.findIndex(isDialogTop)
+  if (dialogTopLine >= 0 && lines.some(isDialogBottom)) return { state: 'modal', rule: 'dialog', line: dialogTopLine + 1 }
+
+  const top = lines[cursor.y - 1]
+  const composer = lines[cursor.y]
+  const bottom = lines[cursor.y + 1]
+  if (
+    top !== undefined &&
+    composer !== undefined &&
+    bottom !== undefined &&
+    isTopBorder(top) &&
+    composer.trimStart().startsWith(chevron) &&
+    isPureBorder(bottom)
+  ) {
+    return { state: 'clear' }
+  }
+
+  return { state: 'modal', rule: 'composer-geometry', line: cursor.y + 1 }
+}
+
+export function classifyInjectGuard(snapshot: XtermScreenSnapshot): InjectGuardState {
+  return inspectInjectGuard(snapshot).state
+}
+
+export class ScreenGuard {
+  private screens = new Map<string, XtermScreen>()
+  private pendingCodeUnits = 0
+  private pendingChunks = 0
+  private readonly globalBudgets
+  private readonly screenOptions
+
+  constructor(
+    private readonly reportError: XtermScreenOptions['reportError'],
+    options: ScreenGuardOptions = {}
+  ) {
+    this.globalBudgets = resolveGlobalBudgets(options.globalBudgets)
+    this.screenOptions = options.screenOptions
+  }
+
+  start(id: string, cols: number, rows: number): void {
+    this.clear(id)
+    this.screens.set(
+      id,
+      createXtermScreen({
+        cols,
+        rows,
+        reportError: this.reportError,
+        ...this.screenOptions,
+        reservePending: (codeUnits, chunks) => this.reservePending(codeUnits, chunks),
+        releasePending: (codeUnits, chunks) => this.releasePending(codeUnits, chunks)
+      })
+    )
+  }
+
+  feed(id: string, data: string): void {
+    this.screens.get(id)?.feed(data)
+  }
+
+  resize(id: string, cols: number, rows: number): void {
+    this.screens.get(id)?.resize(cols, rows)
+  }
+
+  invalidate(id: string, message: string, error?: unknown): void {
+    this.screens.get(id)?.invalidate(message, error)
+  }
+
+  private reservePending(codeUnits: number, chunks: number): boolean {
+    if (
+      this.pendingCodeUnits + codeUnits > this.globalBudgets.pendingCodeUnits ||
+      this.pendingChunks + chunks > this.globalBudgets.pendingChunks
+    ) {
+      return false
+    }
+    this.pendingCodeUnits += codeUnits
+    this.pendingChunks += chunks
+    return true
+  }
+
+  private releasePending(codeUnits: number, chunks: number): void {
+    this.pendingCodeUnits -= codeUnits
+    this.pendingChunks -= chunks
+  }
+
+  read(id: string): XtermScreenRead {
+    return this.screens.get(id)?.read() ?? { status: 'unavailable', reason: 'disposed' }
+  }
+
+  clear(id: string): void {
+    const screen = this.screens.get(id)
+    this.screens.delete(id)
+    screen?.dispose()
+  }
+
+  stop(): void {
+    for (const screen of this.screens.values()) screen.dispose()
+    this.screens.clear()
+  }
 }

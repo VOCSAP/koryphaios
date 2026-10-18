@@ -1,9 +1,3 @@
-// Proves the new options (isModal, isClosingForced, cleanup,
-// absoluteDeadlineMs) that remove() now supplies, against the real
-// gracefulClose.
-// The actual call site inside remove() is verified only by a source scan below,
-// since SessionService isn't bun-test-importable.
-
 import { test, expect } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -15,9 +9,7 @@ const ESC = "\x1b";
 const CTRL_C = "\x03";
 const noDelay = (): Promise<void> => Promise.resolve();
 
-// ----- P1: modal pre-check, t0 only, zero writes -----
-
-test("P1 -- isModal() true skips the whole escalation: zero writes, kill() called once", async () => {
+test("a modal screen kills without PTY writes", async () => {
   const writes: string[] = [];
   let killed = 0;
   const outcome = await gracefulClose({
@@ -34,11 +26,10 @@ test("P1 -- isModal() true skips the whole escalation: zero writes, kill() calle
   expect(killed).toBe(1);
 });
 
-// ----- P2: nominal, dies on the first /exit, kill() never reached -----
-
-test("P2 -- nominal: '/exit\\n' written, isAlive false after, kill() never called", async () => {
+test("a session exiting after /exit is not killed", async () => {
   const writes: string[] = [];
   let alive = true;
+  let isModalCalls = 0;
   const outcome = await gracefulClose({
     write: (d) => {
       writes.push(d);
@@ -49,16 +40,17 @@ test("P2 -- nominal: '/exit\\n' written, isAlive false after, kill() never calle
       throw new Error("should not kill");
     },
     delay: noDelay,
-    isModal: () => false
+    isModal: () => {
+      isModalCalls++;
+      return false;
+    }
   });
   expect(outcome).toBe("exit");
   expect(writes).toEqual([EXIT]);
+  expect(isModalCalls).toBe(1);
 });
 
-// ----- P3: never dies on its own -- both sequences, in order, then ONE kill,
-// bounded real wall-clock time (small real budgets + real setTimeout delay).
-
-test("P3 -- a tile that never dies gets both escalation sequences in order, then exactly one kill(), within budget", async () => {
+test("a live session receives the exit and interrupt sequence before one kill", async () => {
   const writes: string[] = [];
   let killed = 0;
   const started = Date.now();
@@ -77,17 +69,34 @@ test("P3 -- a tile that never dies gets both escalation sequences in order, then
   expect(outcome).toBe("sigterm");
   expect(writes).toEqual([EXIT, ESC, CTRL_C, EXIT]);
   expect(killed).toBe(1);
-  // Budget is 40+40=80ms of grace; generous real-clock ceiling to absorb CI
-  // jitter without being able to pass on a design that silently reverted to
-  // the OLD single-check-after-full-delay shape (that would still finish
-  // near the same total, so this is a sanity bound, not the load-bearing
-  // assertion -- the write-order + single-kill assertions above are).
   expect(elapsedMs).toBeLessThan(2000);
 });
 
-// ----- P4: write() throws -- filet (a) still kills -----
+test("a screen that becomes modal after /exit receives no deferred bytes", async () => {
+  const writes: string[] = [];
+  let modal = false;
+  let killed = 0;
+  const outcome = await gracefulClose({
+    write: (data) => writes.push(data),
+    isAlive: () => true,
+    kill: () => {
+      killed++;
+    },
+    delay: async () => {
+      modal = true;
+    },
+    isModal: () => modal,
+    exitGraceMs: 1,
+    interruptGraceMs: 1,
+    pollMs: 1
+  });
 
-test("P4 -- a thrown write() still reaches kill() (filet a)", async () => {
+  expect(outcome).toBe("modal");
+  expect(writes).toEqual([EXIT]);
+  expect(killed).toBe(1);
+});
+
+test("a write failure forces a kill", async () => {
   let killed = 0;
   const outcome = await gracefulClose({
     write: () => {
@@ -103,26 +112,17 @@ test("P4 -- a thrown write() still reaches kill() (filet a)", async () => {
   expect(killed).toBe(1);
 });
 
-// ----- P5: delay() never resolves -- ONLY the absolute-deadline timer (filet
-// b) can save this; this is the probe that catches its absence, not a
-// redundant one, since the escalation's own try/finally is permanently stuck
-// awaiting that promise and never runs its own cleanup.
-
-// A per-test timeout does not rescue a promise that never settles and arms no
-// timer -- measured to hang past 90s regardless.
-// The test races the call against its own timer and asserts the winner, so a
-// missing safety net reads as HUNG instead of stalling the runner.
-test("P5 -- delay() that never resolves is rescued ONLY by the absolute-deadline safety net", async () => {
+test("an unresolved delay reaches the absolute deadline", async () => {
   let killed = 0;
   let cleaned = 0;
   const outcome = await Promise.race([
     gracefulClose({
       write: () => {},
-      isAlive: () => true, // never dies on its own
+      isAlive: () => true,
       kill: () => {
         killed++;
       },
-      delay: () => new Promise(() => {}), // never resolves, ever
+      delay: () => new Promise(() => {}),
       absoluteDeadlineMs: 40,
       cleanup: () => {
         cleaned++;
@@ -130,27 +130,21 @@ test("P5 -- delay() that never resolves is rescued ONLY by the absolute-deadline
     }),
     new Promise<string>((resolve) => setTimeout(() => resolve("HUNG"), 1000))
   ]);
-  // "HUNG" here means the escalation never settled: the deadline net is gone.
   expect(outcome).toBe("deadline");
   expect(killed).toBe(1);
   expect(cleaned).toBe(1);
 }, 5000);
 
-// ----- P6: a second, concurrent close forces immediate exit -- exactly one
-// '/exit' write total, never the second stage.
-
-test("P6 -- isClosingForced() flipping true mid-escalation stops further writes and kills immediately", async () => {
+test("a forced close stops deferred writes and kills the PTY", async () => {
   const writes: string[] = [];
   let killed = 0;
   let forced = false;
   const outcome = await gracefulClose({
     write: (d) => writes.push(d),
-    isAlive: () => true, // never dies on its own -- only the forced flag ends this
+    isAlive: () => true,
     kill: () => {
       killed++;
     },
-    // Flips true the first time the poll loop actually waits, simulating a
-    // second remove() call landing while this escalation is mid-flight.
     delay: async () => {
       forced = true;
     },
@@ -160,10 +154,6 @@ test("P6 -- isClosingForced() flipping true mid-escalation stops further writes 
   expect(writes).toEqual([EXIT]);
   expect(killed).toBe(1);
 });
-
-// Source scan only, since SessionService isn't bun-test-importable: proves the
-// escalation is wired and awaited and the second-click state is referenced, but
-// not that kill() is unreachable on the nominal path.
 
 const SESSION_SERVICE_PATH = join(
   import.meta.dir,
@@ -185,32 +175,25 @@ function extractRemoveBody(src: string): string {
   return extractBracedBody(src, fnMatch.index + fnMatch[0].length - 1);
 }
 
-/**
- * Weak by design (source scan only): proves the escalation call is present,
- * awaited, and that the modal pre-check reads all three signals (isModal,
- * needsAttention, rateLimited) -- not that kill() is unreachable on any given
- * path.
- */
 function removeIsWiredToEscalation(body: string): boolean {
   return (
     /await gracefulClose\(/.test(body) &&
     /closingInFlight/.test(body) &&
-    /screenGuard\.classify\(id\) === 'modal'/.test(body) &&
+    /screenGuard\.read\(id\)/.test(body) &&
+    /screen\.status === 'unavailable'/.test(body) &&
+    /classifyInjectGuard\(screen\.snapshot\) === 'modal'/.test(body) &&
     /needsAttention/.test(body) &&
     /rateLimited/.test(body)
   );
 }
 
-test("remove() awaits gracefulClose, holds the second-click state, and composes all three modal signals (real file)", () => {
+test("remove waits for closing while all modal signals are present", () => {
   const body = extractRemoveBody(readFileSync(SESSION_SERVICE_PATH, "utf-8"));
   expect(removeIsWiredToEscalation(body)).toBe(true);
 });
 
-// RED-proof: the checker itself, against synthetic bodies -- immune to
-// source drift in session-service.ts.
-
-test("the checker REJECTS the pre-fix shape (bare pty.kill, no escalation, no second-click state)", () => {
-  const oldBody = `
+test("the remove wiring check rejects a bare PTY kill", () => {
+  const bareKillBody = `
     const def = this.defs.find((d) => d.id === id)
     if (def) this.emit('removed', { id: def.id, name: def.name })
     if (def?.sessionId) this.registry.release(def.sessionId)
@@ -221,10 +204,10 @@ test("the checker REJECTS the pre-fix shape (bare pty.kill, no escalation, no se
     this.persist()
     this.broadcast()
   `;
-  expect(removeIsWiredToEscalation(oldBody)).toBe(false);
+  expect(removeIsWiredToEscalation(bareKillBody)).toBe(false);
 });
 
-test("the checker REJECTS a fire-and-forget call (gracefulClose present but not awaited)", () => {
+test("the remove wiring check requires awaiting gracefulClose", () => {
   const notAwaited = `
     if (this.closingInFlight.has(id)) { return }
     this.closingInFlight.add(id)
@@ -233,17 +216,19 @@ test("the checker REJECTS a fire-and-forget call (gracefulClose present but not 
   expect(removeIsWiredToEscalation(notAwaited)).toBe(false);
 });
 
-// The full shape the checker must accept, reused by the three rejection
-// probes below so each one differs from it by exactly ONE removed signal --
-// otherwise a probe could go green for the wrong reason.
-const WIRED_BODY = `
+const CLOSING_BODY = `
   if (this.closingInFlight.has(id)) { forceCleanup(); return }
   this.closingInFlight.add(id)
   try {
-    const isModal = (): boolean =>
-      this.screenGuard.classify(id) === 'modal' ||
-      !!this.runtime.get(id)?.needsAttention ||
-      !!this.runtime.get(id)?.rateLimited
+    const isModal = (): boolean => {
+      const screen = this.screenGuard.read(id)
+      if (screen.status === 'unavailable') return true
+      return (
+        classifyInjectGuard(screen.snapshot) === 'modal' ||
+        !!this.runtime.get(id)?.needsAttention ||
+        !!this.runtime.get(id)?.rateLimited
+      )
+    }
     if (isModal()) { forceCleanup(); return }
     await gracefulClose({ write: () => {}, isAlive: () => true, kill: () => {}, delay: async () => {} })
   } finally {
@@ -251,28 +236,24 @@ const WIRED_BODY = `
   }
 `;
 
-test("the checker ACCEPTS the new shape (awaited gracefulClose + closingInFlight + all three modal signals)", () => {
-  expect(removeIsWiredToEscalation(WIRED_BODY)).toBe(true);
+test("the remove wiring check accepts awaited closing with all modal signals", () => {
+  expect(removeIsWiredToEscalation(CLOSING_BODY)).toBe(true);
 });
 
-// Card 6c380073 (review round 2, point 7): one probe per DROPPED signal.
-// This is the exact mutation measured as leaving the whole file green before
-// the checker was extended.
-
-test("the checker REJECTS a modal pre-check reduced to the screen guard alone", () => {
-  const screenOnly = WIRED_BODY.replace(/\|\|\s*!!this\.runtime\.get\(id\)\?\.needsAttention\s*\|\|\s*!!this\.runtime\.get\(id\)\?\.rateLimited/, "");
+test("the remove wiring check requires attention and rate-limit signals", () => {
+  const screenOnly = CLOSING_BODY.replace(/\|\|\s*!!this\.runtime\.get\(id\)\?\.needsAttention\s*\|\|\s*!!this\.runtime\.get\(id\)\?\.rateLimited/, "");
   expect(screenOnly).not.toContain("needsAttention");
   expect(removeIsWiredToEscalation(screenOnly)).toBe(false);
 });
 
-test("the checker REJECTS a modal pre-check that drops needsAttention only", () => {
-  const noAttention = WIRED_BODY.replace("!!this.runtime.get(id)?.needsAttention ||", "");
+test("the remove wiring check requires the attention signal", () => {
+  const noAttention = CLOSING_BODY.replace("!!this.runtime.get(id)?.needsAttention ||", "");
   expect(noAttention).not.toContain("needsAttention");
   expect(removeIsWiredToEscalation(noAttention)).toBe(false);
 });
 
-test("the checker REJECTS a modal pre-check that drops rateLimited only", () => {
-  const noRateLimit = WIRED_BODY.replace("||\n      !!this.runtime.get(id)?.rateLimited", "");
+test("the remove wiring check requires the rate-limit signal", () => {
+  const noRateLimit = CLOSING_BODY.replace(/\|\|\s*!!this\.runtime\.get\(id\)\?\.rateLimited/, "");
   expect(noRateLimit).not.toContain("rateLimited");
   expect(removeIsWiredToEscalation(noRateLimit)).toBe(false);
 });

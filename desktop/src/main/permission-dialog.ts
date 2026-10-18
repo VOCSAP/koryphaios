@@ -49,7 +49,7 @@ const isRule = (line: string, ch: string): boolean => {
   return t.length >= 8 && [...t].every((c) => c === ch)
 }
 
-const lastIndex = (lines: string[], before: number, test: (line: string) => boolean): number => {
+const lastIndex = (lines: readonly string[], before: number, test: (line: string) => boolean): number => {
   for (let i = before - 1; i >= 0; i--) if (test(lines[i] ?? '')) return i
   return -1
 }
@@ -60,7 +60,7 @@ const OPTION_RE = /^\s+\d+\.\s/
 const CHOOSER_HINT = 'Esc to cancel · Tab to amend'
 
 /** Below the last rule only: the conversation above it echoes the same command. */
-function dialogRegion(lines: string[]): { region: string[]; columns: number; selected: number; tail: string[] } | null {
+function dialogRegion(lines: readonly string[]): { region: string[]; columns: number; selected: number; tail: string[] } | null {
   const chooser = lastIndex(lines, lines.length, (l) => CHOOSER_RE.test(l))
   if (chooser < 0) return null
   const rule = lastIndex(lines, chooser, (l) => isRule(l, RULE))
@@ -74,8 +74,8 @@ function dialogRegion(lines: string[]): { region: string[]; columns: number; sel
 }
 
 /** Whether a numbered chooser is on screen, on any option, under a rule or not. */
-export function permissionDialogShown(lines: string[] | null): boolean {
-  return lines !== null && lines.some((l) => CHOOSER_RE.test(l))
+export function permissionDialogShown(lines: readonly string[]): boolean {
+  return lines.some((line) => CHOOSER_RE.test(line))
 }
 
 type QuestionInput = { kind: 'none' } | { kind: 'ambiguous' } | { kind: 'ok'; value: string }
@@ -137,7 +137,7 @@ function commandMatches(line: string, command: string, columns: number): boolean
 
 export function matchPermissionDialog(
   approval: { title: string; question: string },
-  lines: string[] | null,
+  lines: readonly string[],
   ctx: DialogContext
 ): DialogMatch {
   const sep = approval.title.indexOf(': ')

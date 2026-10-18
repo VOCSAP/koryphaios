@@ -13,6 +13,7 @@ class FakePty {
   readonly resizes: Array<[number, number]> = [];
   killCalls = 0;
   killError: unknown = null;
+  resizeError: unknown = null;
 
   constructor(readonly pid: number) {}
 
@@ -29,6 +30,7 @@ class FakePty {
   }
 
   resize(cols: number, rows: number): void {
+    if (this.resizeError) throw this.resizeError;
     this.resizes.push([cols, rows]);
   }
 
@@ -131,6 +133,11 @@ function createManager(adapter: FakePtyAdapter, timers = new FakeTimers()) {
 
 function retiredOf(manager: PtyManager): Map<IPty, unknown> {
   return (manager as unknown as { retired: Map<IPty, unknown> }).retired;
+}
+
+function dimensionsOf(manager: PtyManager, id: string): { cols: number; rows: number } | undefined {
+  const state = (manager as unknown as { procs: Map<string, { cols: number; rows: number }> }).procs.get(id);
+  return state && { cols: state.cols, rows: state.rows };
 }
 
 test("PtyManager makes a killed tile unavailable while retaining its process by identity", () => {
@@ -250,4 +257,52 @@ test("PtyManager applies terminal JobStartup status updates through handleData",
   expect(scans[1]).toBe(marker);
   expect(scans[2]).toBeNull();
   expect(reports).toEqual([["pty", "kory-job: tree kill disabled for tile tile-7", undefined]]);
+});
+
+test("PtyManager gives a replacement PTY a distinct life identity", () => {
+  const adapter = new FakePtyAdapter();
+  const { manager } = createManager(adapter);
+
+  manager.spawn("tile-7", "C:/first", opts("first"));
+  const firstLife = manager.life("tile-7");
+  expect(manager.life("tile-7")).toBe(firstLife);
+  manager.spawn("tile-7", "C:/second", opts("second"));
+  const secondLife = manager.life("tile-7");
+
+  expect(firstLife).not.toBeNull();
+  expect(secondLife).not.toBeNull();
+  expect(secondLife).not.toBe(firstLife);
+});
+
+test("PtyManager rejects invalid sizes and preserves dimensions when native resize fails", () => {
+  const adapter = new FakePtyAdapter();
+  const { manager, reports } = createManager(adapter);
+
+  manager.spawn("tile-7", "C:/work", opts("first"));
+  const proc = adapter.calls[0]!.proc;
+  expect(manager.resize("tile-7", 100, 30)).toBe(true);
+  expect(dimensionsOf(manager, "tile-7")).toEqual({ cols: 100, rows: 30 });
+
+  for (const [cols, rows] of [
+    [Number.NaN, 30],
+    [Number.POSITIVE_INFINITY, 30],
+    [80.5, 30],
+    [0, 30],
+    [-1, 30],
+    [80, Number.NaN],
+    [80, Number.POSITIVE_INFINITY],
+    [80, 30.5],
+    [80, 0],
+    [80, -1],
+    [1025, 1024]
+  ]) {
+    expect(manager.resize("tile-7", cols!, rows!)).toBe(false);
+  }
+  expect(proc.resizes).toEqual([[100, 30]]);
+
+  const failure = new Error("resize rejected");
+  proc.resizeError = failure;
+  expect(manager.resize("tile-7", 120, 40)).toBe(false);
+  expect(dimensionsOf(manager, "tile-7")).toEqual({ cols: 100, rows: 30 });
+  expect(reports).toEqual([["pty", "failed to resize PTY for tile tile-7", failure]]);
 });

@@ -1,16 +1,25 @@
 import { expect, test } from 'bun:test'
 import { TileInjector, type InjectorScreen } from '../desktop/src/main/tile-injector.ts'
 import { DIRECTIVE_IDLE_WAIT_MS, runClearReloadInTurn } from '../desktop/src/main/directive-run.ts'
-import { ScreenGuard, type InjectGuardState } from '../desktop/src/main/screen-model.ts'
+import type { XtermScreenRead } from '../desktop/src/main/xterm-screen.ts'
 
 const ESC = '\x1b'
 
+const clearScreen = (): XtermScreenRead => {
+  const lines = Array<string>(40).fill('')
+  lines[0] = String.fromCodePoint(0x2500).repeat(120)
+  lines[1] = String.fromCodePoint(0x276f)
+  lines[2] = String.fromCodePoint(0x2500).repeat(120)
+  return { status: 'ready', snapshot: { cols: 120, rows: 40, lines, cursor: { x: 0, y: 1 }, revision: 1 } }
+}
+
 function fixture(
   options: {
-    classify?: InjectGuardState
+    reads?: readonly XtermScreenRead[]
     screen?: InjectorScreen
     runtime?: { needsAttention?: boolean; rateLimited?: boolean }
     lastOutputAt?: number | null
+    replaceLifeAfterEscape?: boolean
     turnCeilingMs?: number
   } = {}
 ) {
@@ -18,18 +27,21 @@ function fixture(
   const reports: string[] = []
   const logs: string[] = []
   const alive = new Set(['t1'])
+  let life: object | null = {}
+  const reads = [...(options.reads ?? [clearScreen()])]
   const injector = new TileInjector(
     {
       isAlive: (id) => alive.has(id),
+      life: (id) => (alive.has(id) ? life : null),
       write: (id, data) => {
         if (!alive.has(id)) return false
         writes.push(data === ESC ? 'ESC' : data)
+        if (data === ESC && options.replaceLifeAfterEscape) life = {}
         return true
       }
     },
     options.screen ?? {
-      classify: () => options.classify ?? 'clear',
-      inspect: () => (options.classify === 'modal' ? { state: 'modal', rule: 'composer-geometry' } : { state: 'clear' })
+      read: () => reads.shift() ?? clearScreen()
     },
     { get: (id) => (alive.has(id) ? options.runtime ?? {} : undefined) },
     () => options.lastOutputAt ?? null,
@@ -49,15 +61,34 @@ function withinMs<T>(promise: Promise<T>, ms: number, what: string): Promise<T> 
 
 test('a screen guard modal refusal logs its rule and line without rendered screen text', async () => {
   const hiddenScreenText = 'untrusted screen content'
-  const screen = new ScreenGuard()
-  screen.resize('t1', 120, 40)
-  screen.feed('t1', `${ESC}[6;1H${String.fromCodePoint(0x276f)} 1. ${hiddenScreenText}`)
+  const lines = Array<string>(40).fill('')
+  lines[5] = `${String.fromCodePoint(0x276f)} 1. ${hiddenScreenText}`
+  const screen: InjectorScreen = {
+    read: () => ({ status: 'ready', snapshot: { cols: 120, rows: 40, lines, cursor: { x: 0, y: 5 }, revision: 1 } })
+  }
   const { injector, writes, logs } = fixture({ screen })
 
   expect(await injector.injectCommand('t1', '/clear')).toBe('refused-modal')
   expect(writes).toEqual([])
   expect(logs).toEqual(['command injection refused-modal for t1: screen guard picker at line 6'])
   expect(logs.join('\n')).not.toContain(hiddenScreenText)
+})
+
+test('an unavailable screen after Escape refuses the text submission', async () => {
+  const { injector, writes, logs } = fixture({
+    reads: [clearScreen(), { status: 'unavailable', reason: 'screen-pending' }]
+  })
+
+  expect(await injector.injectCommand('t1', '/clear')).toBe('refused-modal')
+  expect(commands(writes)).toEqual(['ESC'])
+  expect(logs).toEqual(['command injection refused-modal for t1: screen unavailable screen-pending'])
+})
+
+test('a replaced PTY life after Escape receives no command text', async () => {
+  const { injector, writes } = fixture({ replaceLifeAfterEscape: true })
+
+  expect(await injector.injectCommand('t1', '/clear')).toBe('no-terminal')
+  expect(commands(writes)).toEqual(['ESC'])
 })
 
 test('two injections outside of any turn interleave their Escape and command writes', async () => {
@@ -186,7 +217,7 @@ test('an injection inside a sequence never waits for another turn of its own til
 
 test('each refusal writes nothing and names its outcome', async () => {
   for (const [options, expected] of [
-    [{ classify: 'modal' as const }, 'refused-modal'],
+    [{ reads: [{ status: 'unavailable' as const, reason: 'screen-fault' as const }] }, 'refused-modal'],
     [{ runtime: { needsAttention: true } }, 'refused-modal'],
     [{ runtime: { rateLimited: true } }, 'refused-modal'],
     [{ lastOutputAt: Date.now() + 60_000 }, 'busy-timeout']

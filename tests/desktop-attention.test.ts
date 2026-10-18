@@ -2,7 +2,7 @@
 // Fixtures mirror Claude Code's waiting screens (numbered chooser, trust
 // prompt); prose/code containing question-like text must NOT trigger.
 
-import { test, expect } from "bun:test";
+import { beforeAll, test, expect } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
@@ -13,7 +13,7 @@ import {
   type AttentionEvent
 } from "../desktop/src/main/attention.ts";
 import { EXPECTED_FIXTURE_VERDICTS } from "./_fixture-verdicts.ts";
-import { inspectInjectGuard, makeScreen } from "../desktop/src/main/screen-model.ts";
+import { createXtermScreen, inspectInjectGuard } from "../desktop/src/main/xterm-screen.ts";
 
 const PERMISSION_SCREEN = `
 Bash command: rm -rf node_modules
@@ -200,7 +200,6 @@ test("a wait screen split across chunks is caught by the rolling buffer", () => 
 test("busy output in the same chunk resets stale context but keeps what follows", () => {
   const d = detector();
   const events = collect(d);
-  // Old prose accumulates, then a chunk ends the turn AND prints the chooser.
   d.feed("s1", "streaming some prose with ❯ nothing conclusive");
   d.feed("s1", "⠹ esc to interrupt … done.\nDo you want to proceed?\n❯ 1. Yes");
   expect(events).toEqual([{ id: "s1", waiting: true }]);
@@ -218,12 +217,6 @@ test("clear() drops the session state entirely", () => {
   d.stop();
 });
 
-// Card 4f0143ff review, MAJOR 3/4: the dev-channels startup dialog
-// ("❯ 1. I am using this for local development") is a numbered chooser by
-// construction and must NOT raise the flag, but the exemption must require
-// BOTH of startup-ack.ts's cues (title + accept wording), not the title
-// alone -- a bare title floating through the buffer must not suppress a
-// real, unrelated wait.
 const DEV_CHANNELS_TITLE_ONLY = "Loading development channels...\n";
 const CHANNELS_WARNING = `WARNING: Loading development channels
 This uses unreleased code.
@@ -301,10 +294,6 @@ test("the exempted screen arriving later does not clear a raised flag", () => {
 });
 
 test("streamed prose mentioning the exempted wording does not clear a raised flag", () => {
-  // The case that matters most: on the intermediate (title-only exemption)
-  // version, a single streamed SENTENCE -- not a screen, not a repaint --
-  // could wipe a real chooser's flag. An agent narrating its own actions in
-  // prose could silently erase the operator's attention request.
   const d = detector();
   const events = collect(d);
   d.feed("s1", PERMISSION_SCREEN);
@@ -327,18 +316,6 @@ const CHANNELS_FIELD_CAPTURE: ChannelsChunk[] = JSON.parse(
   )
 );
 
-/**
- * The recorded chunks that belong to the channels screen itself, first paint
- * through last repaint. SCOPED DELIBERATELY, and the bound is load-bearing:
- * the capture runs on past the auto-Enter into Claude Code's own welcome
- * screen, whose arrival (chunk 23, the banner plus supervisor.ts's `Start
- * now:` starter prompt) DOES raise attention for ~7 s before clearing itself
- * -- not because that screen matches (it does not, fed alone) but because the
- * channels screen is still in the accumulated buffer and recombines with it.
- * Measured and filed as card d3a4021a; feeding those chunks here would
- * silently turn this exemption test into a red assertion about that bug
- * instead.
- */
 const CHANNELS_SCREEN_CHUNKS = (() => {
   const hasCue = (c: ChannelsChunk) =>
     /Loading.{0,8}development.{0,8}channels/.test(stripAnsi(c.data));
@@ -388,13 +365,6 @@ test("the buffer-slide clearer clears after the waiting pattern leaves the retai
   d.feed("s1", PERMISSION_SCREEN);
   expect(events).toEqual([{ id: "s1", waiting: true }]);
 
-  // MAX_BUF is 4096 (attention.ts); one feed() chunk over that size, with no
-  // busy cue and no waiting-pattern text of its own, fully evicts the
-  // retained PERMISSION_SCREEN text from st.buf's trailing window regardless
-  // of exactly how many characters the screen fixture itself contributed
-  // (slice(-MAX_BUF) on a chunk already longer than MAX_BUF drops the old
-  // content outright). This is path D of the MAX_BUF comment: no busy cue,
-  // no purge, no manual clear -- only the window sliding past the pattern.
   const ORDINARY_LINE = "The build compiled successfully; no errors were found in the log.\n";
   const filler = ORDINARY_LINE.repeat(Math.ceil(4200 / ORDINARY_LINE.length));
   expect(filler.length).toBeGreaterThan(4096);
@@ -425,9 +395,6 @@ test("purgeScreenMemory clears retained waiting text without a busy cue", () => 
   d.stop();
 });
 
-// OSC sequences are not screen content: busy text carried inside a title
-// must not clear a waiting episode, whole or fragmented (the incremental
-// stripper holds back an unterminated sequence instead of leaking its bytes).
 test("stripAnsi removes an OSC sequence, not just CSI", () => {
   const withOsc = "\x1b]0;⣋title\x07plain screen text";
   expect(stripAnsi(withOsc)).toBe("plain screen text");
@@ -619,37 +586,43 @@ test("the current trust prompt painted after the dev-channels warning raises (de
   expect(events).toEqual([{ id: "s", waiting: true }]);
 });
 
-// ----- numbered chooser versus the echo of a submitted prompt -----
-
 const SELECTOR = String.fromCodePoint(0x276f);
 const BORDER = String.fromCodePoint(0x2500).repeat(60);
 const isMarker = (c: Chunk): boolean => c.data.startsWith("\n########## ");
 
-/** Captures of a numbered prompt typed, pasted, resized or submitted in the composer: never a chooser. */
 const NUMBERED_COMPOSER_CAPTURES: Record<string, string> = {
   "draft-numbered-2.1.301.json": "draft typed",
   "typing-numbered-2.1.301.json": "typing starts",
   "resize-numbered-draft-2.1.301.json": "typing starts",
 };
 
-/** Every capture whose final screen shows a numbered picker, except the composer captures above. */
-const REAL_CHOOSERS = readdirSync(join(import.meta.dir, "pty-harness", "fixtures"))
-  .filter((name) => name.endsWith(".json") && !(name in NUMBERED_COMPOSER_CAPTURES))
-  .filter((name) => {
-    const screen = makeScreen(120, 40);
-    for (const c of loadFixture(name)) if (!isMarker(c)) screen.feed(c.data);
-    const inspection = inspectInjectGuard(screen);
-    return inspection.state === "modal" && inspection.rule === "picker";
-  })
-  .sort();
+let REAL_CHOOSERS: string[] = [];
+
+beforeAll(async () => {
+  const fixtures = readdirSync(join(import.meta.dir, "pty-harness", "fixtures"))
+    .filter((name) => name.endsWith(".json") && !(name in NUMBERED_COMPOSER_CAPTURES));
+
+  const pickers = await Promise.all(
+    fixtures.map(async (name) => {
+      const screen = createXtermScreen({ cols: 120, rows: 40, reportError: () => undefined });
+      for (const chunk of loadFixture(name)) if (!isMarker(chunk)) screen.feed(chunk.data);
+      await screen.drain();
+      const read = screen.read();
+      screen.dispose();
+      if (read.status !== "ready") throw new Error(`${name}: xterm screen unavailable: ${read.reason}`);
+      const inspection = inspectInjectGuard(read.snapshot);
+      return inspection.state === "modal" && inspection.rule === "picker" ? name : null;
+    })
+  );
+
+  REAL_CHOOSERS = pickers.filter((name): name is string => name !== null).sort();
+});
 
 const MODAL_ATTENTION_EXEMPTIONS = new Set([
   "channels-warning-conpty-win.json",
-  // The screen guard fails closed on a numbered prompt echo; it is not a wait screen.
   "draft-numbered-2.1.301.json",
   "typing-numbered-2.1.301.json",
   "resize-numbered-draft-2.1.301.json",
-  // Fail-closed modal of the screen guard, not a wait screen.
   "scroll-context-2.1.284-reduced.json",
   "turn-chunks-inherited-env.json",
   "turn-chunks-scrubbed-env.json",
@@ -661,7 +634,6 @@ const MODAL_ATTENTION_FIXTURES = Object.entries(EXPECTED_FIXTURE_VERDICTS)
   .filter((name) => !MODAL_ATTENTION_EXEMPTIONS.has(name))
   .sort();
 
-/** The attention events of a whole capture, each tagged with the index of the chunk that emitted it. */
 const replayEvents = (name: string): { at: number; waiting: boolean }[] => {
   const d = detector();
   const events: { at: number; waiting: boolean }[] = [];

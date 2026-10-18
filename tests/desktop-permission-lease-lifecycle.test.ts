@@ -210,6 +210,7 @@ function executeLeaseCreationFailure(source: string) {
     revokePermissionLeaseHandle: () => {},
     cleanupSandbox: () => Promise.resolve(),
     deadWriteReported: { delete: () => {} },
+    screenGuard: { start: () => {}, clear: () => {} },
   };
   const sessionEnv = { KORY_PERMISSION_LEASE: "" };
   run.call(

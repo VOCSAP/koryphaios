@@ -6,7 +6,7 @@ import { logInfo, reportError } from './log'
 import { encodeSubmittedKeystrokes } from './session-command'
 import { DIRECTIVE_IDLE_WAIT_MS } from './directive-run'
 import { MAGIC_TIMEOUT_MS } from './magic-compact'
-import type { InjectGuardInspection, InjectGuardState } from './screen-model'
+import { inspectInjectGuard, type XtermScreenRead } from './xterm-screen'
 import type { DirectiveOutcome } from './session-service'
 
 const DIRECTIVE_IDLE_POLL_MS = 500
@@ -21,12 +21,12 @@ export const TURN_CEILING_MS = 2 * DIRECTIVE_IDLE_WAIT_MS + MAGIC_TIMEOUT_MS + 6
 
 export interface InjectorTerminal {
   isAlive(id: string): boolean
+  life(id: string): object | null
   write(id: string, data: string): boolean
 }
 
 export interface InjectorScreen {
-  inspect(id: string): InjectGuardInspection
-  classify(id: string): InjectGuardState
+  read(id: string): XtermScreenRead
 }
 
 export interface InjectorRuntime {
@@ -122,37 +122,40 @@ export class TileInjector {
     const idle = await this.waitIdle(id, idleWaitMs)
     if (!this.pty.isAlive(id)) return 'no-terminal'
     if (!idle) return 'busy-timeout'
-    // Escape or pasted text can change a modal selection, so every refusal blocks both writes.
-    const guard = this.screenGuard.inspect(id)
+    const life = this.pty.life(id)
+    if (!life) return 'no-terminal'
+    const firstRefusal = this.refusal(id)
+    if (firstRefusal) return firstRefusal
+    if (!this.pty.write(id, '\x1b')) return 'no-terminal'
+    await new Promise((res) => setTimeout(res, this.timing.settleMs))
+    if (!this.pty.isAlive(id) || this.pty.life(id) !== life) return 'no-terminal'
+    const secondRefusal = this.refusal(id)
+    if (secondRefusal) return secondRefusal
+    if (!this.pty.write(id, encodeSubmittedKeystrokes(command))) return 'no-terminal'
+    return 'written'
+  }
+
+  private refusal(id: string): DirectiveOutcome | null {
+    const screen = this.screenGuard.read(id)
+    if (screen.status === 'unavailable') {
+      this.info('session', `command injection refused-modal for ${id}: screen unavailable ${screen.reason}`)
+      return 'refused-modal'
+    }
+    const guard = inspectInjectGuard(screen.snapshot)
     if (guard.state === 'modal') {
       const line = guard.line === undefined ? '' : ` at line ${guard.line}`
       this.info('session', `command injection refused-modal for ${id}: screen guard ${guard.rule}${line}`)
       return 'refused-modal'
     }
     if (this.runtime.get(id)?.needsAttention) {
-      logInfo('session', `command injection refused-modal for ${id}: needs attention`)
+      this.info('session', `command injection refused-modal for ${id}: needs attention`)
       return 'refused-modal'
     }
     if (this.runtime.get(id)?.rateLimited) {
-      logInfo('session', `command injection refused-modal for ${id}: rate limited`)
+      this.info('session', `command injection refused-modal for ${id}: rate limited`)
       return 'refused-modal'
     }
-    this.pty.write(id, '\x1b')
-    await new Promise((res) => setTimeout(res, this.timing.settleMs))
-    if (!this.pty.isAlive(id)) return 'no-terminal'
-    // One write, bracketed-paste wrapped, with the CR inside the same string:
-    // two separate writes did not submit, because ConPTY coalesces them into
-    // one read and the CLI only turns a control byte into Enter when the whole
-    // read is under 64 characters. Do not split it or add a delay.
-    // write()'s own return value is consulted: isAlive only proves liveness at
-    // that instant, not for this write.
-    if (!this.pty.write(id, encodeSubmittedKeystrokes(command))) return 'no-terminal'
-    // 'written' means pty.write() returned true for bytes shaped like a main-prompt
-    // submission, not that the terminal accepted them in every UI state.
-    // On a modal dialog, a bare Escape quits the CLI outright, while the paste
-    // alone confirms whichever option is highlighted; the screen-state guard
-    // above is what stops both from reaching the dialog.
-    return 'written'
+    return null
   }
 
   /**

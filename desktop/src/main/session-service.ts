@@ -55,7 +55,7 @@ import {
   sweepStaleStatusFiles
 } from './session-status-file'
 import { sameLiveStatus } from '@shared/session-status'
-import { ScreenGuard } from './screen-model'
+import { classifyInjectGuard, inspectInjectGuard, ScreenGuard } from './xterm-screen'
 import { TileInjector, type InTurnInject } from './tile-injector'
 import { DIRECTIVE_IDLE_WAIT_MS } from './directive-run'
 import { gracefulClose } from './session-close'
@@ -249,11 +249,7 @@ export class SessionService extends EventEmitter {
   private quotaDetector = new QuotaDetector()
   private attentionDetector = new AttentionDetector()
   private startupAckDetector = new StartupAckDetector()
-  /**
-   * Screen-state guard for injectCommand (Vague 10 A2-1, screen-model.ts).
-   * Fed and cleared alongside the four detectors above, same convention.
-   */
-  private screenGuard = new ScreenGuard()
+  private screenGuard = new ScreenGuard(reportError)
   private injector = new TileInjector(this.pty, this.screenGuard, this.runtime, (id) => this.lastOutputAt(id), {
     activityIdleMs: ACTIVITY_IDLE_MS
   })
@@ -352,13 +348,13 @@ export class SessionService extends EventEmitter {
     this.defs = []
 
     this.pty.on('data', (e: { id: string; data: string }) => {
+      this.screenGuard.feed(e.id, e.data)
       this.emit('data', e)
       this.outputAt.set(e.id, Date.now())
       this.thinkingDetector.feed(e.id, e.data)
       if (!this.quotaGateActive(e.id)) this.quotaDetector.feed(e.id, e.data)
       this.attentionDetector.feed(e.id, e.data)
       this.startupAckDetector.feed(e.id, e.data)
-      this.screenGuard.feed(e.id, e.data)
       const oscSnap = this.oscParserFor(e.id).feed(e.data)
       this.activityTrackerFor(e.id).observe(oscSnap.titleSeq)
     })
@@ -888,22 +884,32 @@ export class SessionService extends EventEmitter {
 
     this.closingInFlight.add(id)
     try {
-      const isModal = (): boolean =>
-        this.screenGuard.classify(id) === 'modal' ||
-        !!this.runtime.get(id)?.needsAttention ||
-        !!this.runtime.get(id)?.rateLimited
+      const isModal = (): boolean => {
+        const screen = this.screenGuard.read(id)
+        if (screen.status === 'unavailable') {
+          logInfo('session', `close escalation refused for ${id}: screen unavailable ${screen.reason}`)
+          return true
+        }
+        return (
+          classifyInjectGuard(screen.snapshot) === 'modal' ||
+          !!this.runtime.get(id)?.needsAttention ||
+          !!this.runtime.get(id)?.rateLimited
+        )
+      }
       if (isModal()) {
         forceCleanup()
         return
       }
+      const life = this.pty.life(id)
       await gracefulClose({
         write: (data) => this.pty.write(id, data),
-        isAlive: () => this.pty.isAlive(id),
+        isAlive: () => life !== null && this.pty.isAlive(id) && this.pty.life(id) === life,
         kill: () => this.killWithTrace(id, 'close escalation'),
         delay: (ms) => new Promise((res) => setTimeout(res, ms)),
         exitGraceMs: CLOSE_EXIT_GRACE_MS,
         interruptGraceMs: CLOSE_INTERRUPT_GRACE_MS,
         pollMs: CLOSE_POLL_MS,
+        isModal,
         isClosingForced: () => this.forcedClose.has(id),
         cleanup: forceCleanup,
         absoluteDeadlineMs: CLOSE_HARD_DEADLINE_MS
@@ -1303,19 +1309,13 @@ export class SessionService extends EventEmitter {
     }
   }
 
-  /** The tile's screen as the inject guard sees it; null before any output. */
-  screenLines(id: string): string[] | null {
-    return this.screenGuard.lines(id)
+  screenRead(id: string) {
+    return this.screenGuard.read(id)
   }
 
   resize(id: string, cols: number, rows: number): void {
-    this.pty.resize(id, cols, rows)
-    // Card 63ca372f/120148eb review finding: ScreenGuard's own Screen was
-    // never told about a real resize, so it stayed frozen at makeScreen's
-    // default forever -- a tile taller than that froze classifyInjectGuard
-    // at 'modal' permanently. ScreenGuard.resize rejects NaN/invalid dims
-    // itself (cols/rows are IPC-sourced, see that method's own doc).
     this.screenGuard.resize(id, cols, rows)
+    if (!this.pty.resize(id, cols, rows)) this.screenGuard.invalidate(id, 'PTY resize failed')
   }
 
   // ----- internals -----
@@ -1579,6 +1579,7 @@ export class SessionService extends EventEmitter {
         reportError('session', `permission lease setup failed for "${def.name}"`, e)
       }
     }
+    this.screenGuard.start(def.id, 80, 24)
     try {
       this.pty.spawn(
         def.id,
@@ -1589,6 +1590,7 @@ export class SessionService extends EventEmitter {
       )
       this.deadWriteReported.delete(def.id)
     } catch (e) {
+      this.screenGuard.clear(def.id)
       // Keep a synchronous spawn failure visible as an exited tile.
       reportError('session', `spawn failed for "${def.name}" (cwd: ${def.cwd})`, e)
       this.revokePermissionLeaseHandle(permissionLease)
@@ -1726,7 +1728,12 @@ export class SessionService extends EventEmitter {
   interrupt(id: string, mode: 'pause' | 'hard'): 'interrupted' | 'no-terminal' | 'refused-modal' {
     if (!this.pty.isAlive(id)) return 'no-terminal'
     if (mode === 'pause') {
-      const guard = this.screenGuard.inspect(id)
+      const screen = this.screenGuard.read(id)
+      if (screen.status === 'unavailable') {
+        logInfo('session', `pause interruption refused-modal for ${id}: screen unavailable ${screen.reason}`)
+        return 'refused-modal'
+      }
+      const guard = inspectInjectGuard(screen.snapshot)
       if (guard.state === 'modal') {
         const line = guard.line === undefined ? '' : ` at line ${guard.line}`
         logInfo('session', `pause interruption refused-modal for ${id}: screen guard ${guard.rule}${line}`)
