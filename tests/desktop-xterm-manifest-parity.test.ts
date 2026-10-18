@@ -56,6 +56,40 @@ function divergentRanges(a: PackageManifest, b: PackageManifest, names: readonly
   });
 }
 
+const XTERM = "@xterm/xterm";
+const HEADLESS = "@xterm/headless";
+const EXACT_VERSION = /^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/;
+
+// headless is a runtime dependency in desktop and a devDependency in root, so
+// the lookup covers both sections.
+function declaredRanges(manifest: PackageManifest, name: string): string[] {
+  return [manifest.dependencies?.[name], manifest.devDependencies?.[name]].filter(
+    (range): range is string => range !== undefined,
+  );
+}
+
+/**
+ * The renderer xterm and the headless screen model must parse the same bytes the
+ * same way, so both are exact versions and equal inside one manifest. An empty
+ * list is the only passing answer.
+ */
+function pinProblems(manifest: PackageManifest): string[] {
+  const problems: string[] = [];
+  const xterm = declaredRanges(manifest, XTERM);
+  const headless = declaredRanges(manifest, HEADLESS);
+  if (xterm.length !== 1) problems.push(`${XTERM} is declared ${xterm.length} times`);
+  if (headless.length !== 1) problems.push(`${HEADLESS} is declared ${headless.length} times`);
+  for (const [name, ranges] of [[XTERM, xterm], [HEADLESS, headless]] as const) {
+    for (const range of ranges) {
+      if (!EXACT_VERSION.test(range)) problems.push(`${name} is the range ${range}, not an exact version`);
+    }
+  }
+  if (xterm.length === 1 && headless.length === 1 && xterm[0] !== headless[0]) {
+    problems.push(`${HEADLESS} ${headless[0]} differs from ${XTERM} ${xterm[0]}`);
+  }
+  return problems;
+}
+
 const REAL_ROOT_MANIFEST = readManifest(ROOT_PACKAGE_JSON_PATH);
 const REAL_DESKTOP_MANIFEST = readManifest(DESKTOP_PACKAGE_JSON_PATH);
 
@@ -76,17 +110,47 @@ test("root and desktop declare byte-identical version ranges for every shared xt
   expect(offenders).toEqual([]);
 });
 
-test("the three shared ranges match the exact values measured 2026-08-28 (^5.5.0 / ^0.10.0 / ^0.11.0) -- pins the assertion to a concrete value, not just cross-manifest equality", () => {
-  expect(devRange(REAL_ROOT_MANIFEST, "@xterm/xterm")).toBe("^5.5.0");
+test("the shared xterm packages keep the declared pin and ranges, not just cross-manifest equality", () => {
+  expect(devRange(REAL_ROOT_MANIFEST, "@xterm/xterm")).toBe("5.5.0");
   expect(devRange(REAL_ROOT_MANIFEST, "@xterm/addon-fit")).toBe("^0.10.0");
   expect(devRange(REAL_ROOT_MANIFEST, "@xterm/addon-web-links")).toBe("^0.11.0");
+});
+
+test("xterm and headless are the same exact version inside root and inside desktop", () => {
+  expect(pinProblems(REAL_ROOT_MANIFEST), "root package.json").toEqual([]);
+  expect(pinProblems(REAL_DESKTOP_MANIFEST), "desktop/package.json").toEqual([]);
+});
+
+test("headless is declared at the same version in root and desktop", () => {
+  expect(declaredRanges(REAL_ROOT_MANIFEST, HEADLESS), "a bump of one manifest without the other").toEqual(
+    declaredRanges(REAL_DESKTOP_MANIFEST, HEADLESS),
+  );
+});
+
+test("pinProblems names a caret xterm, a drifted headless, a missing headless and a double declaration", () => {
+  const manifest = (dependencies: Record<string, string>, devDependencies: Record<string, string> = {}): PackageManifest => ({
+    dependencies,
+    devDependencies,
+  });
+  expect(pinProblems(manifest({ [XTERM]: "^5.5.0", [HEADLESS]: "5.5.0" }))).toEqual([
+    `${XTERM} is the range ^5.5.0, not an exact version`,
+    `${HEADLESS} 5.5.0 differs from ${XTERM} ^5.5.0`,
+  ]);
+  expect(pinProblems(manifest({ [XTERM]: "5.5.0", [HEADLESS]: "5.5.1" }))).toEqual([
+    `${HEADLESS} 5.5.1 differs from ${XTERM} 5.5.0`,
+  ]);
+  expect(pinProblems(manifest({ [XTERM]: "5.5.0" }))).toEqual([`${HEADLESS} is declared 0 times`]);
+  expect(pinProblems(manifest({ [XTERM]: "5.5.0", [HEADLESS]: "5.5.0" }, { [HEADLESS]: "5.5.1" }))).toEqual([
+    `${HEADLESS} is declared 2 times`,
+  ]);
+  expect(pinProblems(manifest({ [XTERM]: "5.5.0", [HEADLESS]: "5.5.0" }))).toEqual([]);
 });
 
 test("mutation proof, RED-FIRST: a synthetic root manifest with one diverging range is caught by name", () => {
   const mutatedRoot: PackageManifest = {
     devDependencies: {
       ...REAL_ROOT_MANIFEST.devDependencies,
-      "@xterm/xterm": "^5.4.0", // deliberately one patch/minor behind desktop's ^5.5.0
+      "@xterm/xterm": "5.4.0",
     },
   };
   const offenders = divergentRanges(mutatedRoot, REAL_DESKTOP_MANIFEST, SHARED_XTERM_PACKAGES);

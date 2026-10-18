@@ -52,6 +52,8 @@ export const EXEMPTIONS: Exemptions = {
       `${NATIVE_DEPS_REASON_MARKER} (its --tsconfig-override child probe imports the renderer App.tsx, whose CompanionDialog needs qrcode-generator from desktop/node_modules); run by the '${INTEGRATION_STEP_NAME}' step in desktop-build.yml, not the pure-module matrix`,
     "desktop-avatar-wss.test.ts":
       `${NATIVE_DEPS_REASON_MARKER} (spawns desktop/node_modules/electron for its end-to-end TLS WebSocket regression); run by the '${INTEGRATION_STEP_NAME}' step in desktop-build.yml, not the pure-module matrix`,
+    "desktop-xterm-screen-electron.test.ts":
+      `${NATIVE_DEPS_REASON_MARKER} (spawns desktop/node_modules/electron to verify the xterm CommonJS bridge); run by the '${INTEGRATION_STEP_NAME}' step in desktop-build.yml, not the pure-module matrix`,
   },
 };
 
