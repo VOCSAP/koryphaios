@@ -2,7 +2,7 @@
 // add. The agent must be able to tell that apart from a refusal, on every
 // surface that reads a settled approval back.
 
-import { test, expect, describe, afterAll } from "bun:test";
+import { test, expect, describe, beforeAll, afterAll } from "bun:test";
 import {
   FIXTURE_OPERATOR,
   FIXTURE_OPERATOR_ID,
@@ -22,8 +22,15 @@ import { askOperatorWaitReply, settledOutcome } from "../shared/approval-outcome
 import { renderSettled } from "../notify/format.ts";
 import type { Approval } from "../shared/types.ts";
 
+// One broker serves every test that runs on the default configuration; each
+// test isolates itself with its own tile refs and its own connected peer.
+let shared: TestBroker;
 const brokers: TestBroker[] = [];
 const sockets: WebSocket[] = [];
+beforeAll(async () => {
+  shared = await startBroker();
+  brokers.push(shared);
+});
 afterAll(async () => {
   for (const ws of sockets) {
     try {
@@ -52,6 +59,19 @@ async function signedPost<T>(
   return post<T>(`${b.url}${path}`, { ...body, auth });
 }
 
+async function wsClients(b: TestBroker): Promise<number> {
+  const res = await fetch(`${b.url}/health`);
+  return ((await res.json()) as { ws_clients: number }).ws_clients;
+}
+
+async function waitForWsClients(b: TestBroker, atLeast: number): Promise<void> {
+  for (let i = 0; i < 100; i++) {
+    if ((await wsClients(b)) >= atLeast) return;
+    await Bun.sleep(20);
+  }
+  throw new Error(`broker never reported ${atLeast} authenticated socket(s)`);
+}
+
 async function connectPeer(b: TestBroker, cwd: string): Promise<{ peerId: string; frames: unknown[] }> {
   const reg = await post<{ peer_id: string; instance_token: string }>(`${b.url}/register`, {
     pid: livePid(),
@@ -67,6 +87,7 @@ async function connectPeer(b: TestBroker, cwd: string): Promise<{ peerId: string
   });
   expect(reg.status).toBe(200);
   const frames: unknown[] = [];
+  const before = await wsClients(b);
   const ws = new WebSocket(b.wsUrl);
   sockets.push(ws);
   await new Promise<void>((resolve, reject) => {
@@ -84,7 +105,7 @@ async function connectPeer(b: TestBroker, cwd: string): Promise<{ peerId: string
       /* ignore non-JSON */
     }
   });
-  await Bun.sleep(200);
+  await waitForWsClients(b, before + 1);
   return { peerId: reg.body.peer_id, frames };
 }
 
@@ -144,8 +165,7 @@ async function pendingIds(b: TestBroker, op: Operator): Promise<string[]> {
 
 describe("acknowledging a channel-route question", () => {
   test("ack and deny reach the agent as two distinguishable outcomes", async () => {
-    const b = await startBroker();
-    brokers.push(b);
+    const b = shared;
     const op = newOperator();
     const peer = await connectPeer(b, "/tmp/ack-proj-a");
 
@@ -194,8 +214,7 @@ describe("acknowledging a channel-route question", () => {
   }, 30_000);
 
   test("a keystroke-route question cannot be acknowledged and stays pending", async () => {
-    const b = await startBroker();
-    brokers.push(b);
+    const b = shared;
     const op = newOperator();
     const approval = await raise(b, op, { tile_ref: "t-pty" });
     expect(approval.reply_route).toBe("pty");
@@ -206,8 +225,7 @@ describe("acknowledging a channel-route question", () => {
   }, 30_000);
 
   test("a permission approval cannot be acknowledged even on the channel route", async () => {
-    const b = await startBroker();
-    brokers.push(b);
+    const b = shared;
     const op = newOperator();
     const peer = await connectPeer(b, "/tmp/ack-proj-b");
     const approval = await raise(b, op, {
@@ -224,8 +242,7 @@ describe("acknowledging a channel-route question", () => {
   }, 30_000);
 
   test("a mergeable question that absorbed a permission raise for the same tile cannot be acknowledged", async () => {
-    const b = await startBroker();
-    brokers.push(b);
+    const b = shared;
     const op = newOperator();
     const peer = await connectPeer(b, "/tmp/ack-proj-merge");
     const question = await raise(b, op, {
@@ -249,8 +266,7 @@ describe("acknowledging a channel-route question", () => {
   }, 30_000);
 
   test("acknowledge with an answer is ambiguous and refused; a second ack is already-settled", async () => {
-    const b = await startBroker();
-    brokers.push(b);
+    const b = shared;
     const op = newOperator();
     const peer = await connectPeer(b, "/tmp/ack-proj-c");
     const approval = await raise(b, op, { reply_route: "channel", reply_peer_id: peer.peerId, tile_ref: "t-dup" });
@@ -293,8 +309,7 @@ describe("a permission raise merged into a tile's channel question", () => {
   };
 
   test("attention first: the permission gets its own answerable row, the question is absorbed and takes no verdict", async () => {
-    const b = await startBroker();
-    brokers.push(b);
+    const b = shared;
     const op = newOperator();
     const peer = await connectPeer(b, "/tmp/merge-proj-a");
 
@@ -367,8 +382,7 @@ describe("a permission raise merged into a tile's channel question", () => {
   }, 30_000);
 
   test("hook first: the attention question merges into the permission", async () => {
-    const b = await startBroker();
-    brokers.push(b);
+    const b = shared;
     const op = newOperator();
     const peer = await connectPeer(b, "/tmp/merge-proj-hook-first");
 
@@ -385,8 +399,7 @@ describe("a permission raise merged into a tile's channel question", () => {
   }, 30_000);
 
   test("a terminal answer closes a row without relaying a verdict, and a late Approve is refused", async () => {
-    const b = await startBroker();
-    brokers.push(b);
+    const b = shared;
     const op = newOperator();
     const peer = await connectPeer(b, "/tmp/merge-proj-terminal");
 
@@ -439,8 +452,7 @@ describe("a permission raise merged into a tile's channel question", () => {
   }, 30_000);
 
   test("the hook's SESSION credential marks the Deck's OPERATOR-raised question as absorbed", async () => {
-    const b = await startBroker();
-    brokers.push(b);
+    const b = shared;
     const op = newOperator();
     const peer = await connectPeer(b, "/tmp/merge-proj-cross");
     const tile = "t-cross";
@@ -487,8 +499,7 @@ describe("a permission raise merged into a tile's channel question", () => {
   }, 30_000);
 
   test("a text answer on a permission is refused with 422 and the row stays pending", async () => {
-    const b = await startBroker();
-    brokers.push(b);
+    const b = shared;
     const op = newOperator();
     const peer = await connectPeer(b, "/tmp/merge-proj-text");
 
@@ -515,8 +526,7 @@ describe("a permission raise merged into a tile's channel question", () => {
   }, 30_000);
 
   test("a question merging into an existing permission leaves the permission unchanged", async () => {
-    const b = await startBroker();
-    brokers.push(b);
+    const b = shared;
     const op = newOperator();
     const peer = await connectPeer(b, "/tmp/merge-proj-b");
 

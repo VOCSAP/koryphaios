@@ -6,13 +6,11 @@
 // real route end to end: mint topics, probe the server, seal the config, hand
 // back the QR payload — without ever leaving 127.0.0.1.
 
-import { afterAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
-  FIXTURE_OPERATOR,
-  FIXTURE_OPERATOR_ID,
   post,
   startBroker,
   stopBroker,
@@ -29,27 +27,39 @@ import { decodePairingPayload, encodeAnswer, encodePair, parseClickUrl } from ".
 import { OPERATOR_TRUST_VERSION } from "../shared/operator-trust.ts";
 import type { Approval } from "../shared/types.ts";
 
+type Operator = { cred: ApprovalCredential; id: string };
+
+// Channels, bindings, pairing codes and approvals are all keyed by operator,
+// so a test isolates itself on the shared broker by taking operators nobody
+// else uses. The pool is trusted by that broker at boot.
+const operatorPool: Operator[] = Array.from({ length: 40 }, () => {
+  const cred = generateCredential();
+  return { cred, id: deriveOperatorId(cred.publicKey) };
+});
+
+function freshOperator(): Operator {
+  const op = operatorPool.pop();
+  if (!op) throw new Error("operator pool exhausted: grow it");
+  return op;
+}
+
+let shared: TestBroker;
 const brokers: TestBroker[] = [];
 const stubs: StubNtfy[] = [];
+beforeAll(async () => {
+  shared = await startBroker({}, { trustedOperators: operatorPool.map((o) => o.cred.publicKey) });
+  brokers.push(shared);
+});
 afterAll(async () => {
   for (const b of brokers) await stopBroker(b);
   for (const s of stubs) s.stop();
 });
 
-function newOperator(): { cred: ApprovalCredential; id: string } {
-  return { cred: FIXTURE_OPERATOR, id: FIXTURE_OPERATOR_ID };
-}
-
-function otherOperator(): { cred: ApprovalCredential; id: string } {
-  const cred = generateCredential();
-  return { cred, id: deriveOperatorId(cred.publicKey) };
-}
-
 async function signedPost<T>(
   b: TestBroker,
   path: string,
   payload: Record<string, unknown>,
-  op: { cred: ApprovalCredential; id: string }
+  op: Operator
 ): Promise<{ status: number; body: T }> {
   // The default project_key mirrors the payload's own origin.project_key rather
   // than a fixed literal, since this file's approvals are filed under two
@@ -187,10 +197,9 @@ async function until(check: () => Promise<boolean> | boolean, ms = 5000): Promis
 
 describe("ntfy enrolment", () => {
   test("connect mints two topics and hands back a scannable payload", async () => {
-    const b = await startBroker();
-    brokers.push(b);
+    const b = shared;
     const ntfy = startStubNtfy();
-    const op = newOperator();
+    const op = freshOperator();
 
     const res = await signedPost<{
       kind: string;
@@ -215,10 +224,9 @@ describe("ntfy enrolment", () => {
   }, 60_000);
 
   test("the row shows connected, and disconnect clears it", async () => {
-    const b = await startBroker();
-    brokers.push(b);
+    const b = shared;
     const ntfy = startStubNtfy();
-    const op = newOperator();
+    const op = freshOperator();
 
     await signedPost(b, "/approval/channel-connect", { kind: "ntfy", server: ntfy.url }, op);
     const list = await signedPost<{ channels: Array<Record<string, unknown>> }>(
@@ -244,10 +252,9 @@ describe("ntfy enrolment", () => {
   }, 60_000);
 
   test("reconnecting mints FRESH topics, so a revoked phone goes deaf", async () => {
-    const b = await startBroker();
-    brokers.push(b);
+    const b = shared;
     const ntfy = startStubNtfy();
-    const op = newOperator();
+    const op = freshOperator();
 
     const first = await signedPost<{ mobile_payload: string }>(
       b,
@@ -268,10 +275,9 @@ describe("ntfy enrolment", () => {
   }, 60_000);
 
   test("reconnecting drops the old binding — this IS the lost-phone kill switch", async () => {
-    const b = await startBroker();
-    brokers.push(b);
+    const b = shared;
     const ntfy = startStubNtfy();
-    const op = newOperator();
+    const op = freshOperator();
 
     const first = await signedPost<{ mobile_payload: string }>(
       b,
@@ -293,7 +299,13 @@ describe("ntfy enrolment", () => {
     expect(paired).toBe(true);
 
     // The operator reconnects after losing the phone.
-    await signedPost(b, "/approval/channel-connect", { kind: "ntfy", server: ntfy.url }, op);
+    const reconnect = await signedPost<{ mobile_payload: string }>(
+      b,
+      "/approval/channel-connect",
+      { kind: "ntfy", server: ntfy.url },
+      op
+    );
+    const fresh = decodePairingPayload(reconnect.body.mobile_payload)!;
     const list = await signedPost<{ channels: Array<Record<string, unknown>> }>(
       b,
       "/approval/channel-list",
@@ -302,8 +314,23 @@ describe("ntfy enrolment", () => {
     );
     expect(list.body.channels.find((c) => c.kind === "ntfy")!.paired).toBe(0);
 
+    // A new phone pairs on the fresh topics: once the fan-out has reached it,
+    // the same fan-out has had its chance to reach the old topic.
+    await ntfy.publishRaw(fresh.topic_replies, encodePair(fresh.code, "New phone"));
+    expect(
+      await until(async () => {
+        const rows = await signedPost<{ channels: Array<Record<string, unknown>> }>(
+          b,
+          "/approval/channel-list",
+          {},
+          op
+        );
+        return rows.body.channels.find((c) => c.kind === "ntfy")!.paired === 1;
+      })
+    ).toBe(true);
+
     const before = (ntfy.published.get(old.topic_notif) ?? []).length;
-    await signedPost(
+    const added = await signedPost<{ approval: Approval }>(
       b,
       "/approval/add",
       {
@@ -314,15 +341,18 @@ describe("ntfy enrolment", () => {
       },
       op
     );
-    await Bun.sleep(400);
+    expect(
+      await until(() =>
+        (ntfy.published.get(fresh.topic_notif) ?? []).some((m) => String(m.click).includes(added.body.approval.id))
+      )
+    ).toBe(true);
     expect((ntfy.published.get(old.topic_notif) ?? []).length).toBe(before);
   }, 60_000);
 
   test("the access token is used and never comes back", async () => {
-    const b = await startBroker();
-    brokers.push(b);
+    const b = shared;
     const ntfy = startStubNtfy({ requireToken: "tk_right" });
-    const op = newOperator();
+    const op = freshOperator();
 
     const ok = await signedPost<{ mobile_payload: string; hint: string }>(
       b,
@@ -345,10 +375,9 @@ describe("ntfy enrolment", () => {
   }, 60_000);
 
   test("a token the server rejects leaves nothing configured behind", async () => {
-    const b = await startBroker();
-    brokers.push(b);
+    const b = shared;
     const ntfy = startStubNtfy({ requireToken: "tk_right" });
-    const op = newOperator();
+    const op = freshOperator();
 
     const res = await signedPost<{ error: string }>(
       b,
@@ -371,10 +400,9 @@ describe("ntfy enrolment", () => {
     // gateway, then delete the row on failure. One Connect click with the relay
     // briefly unreachable therefore destroyed a working, paired channel — and
     // left `configured: false, paired: 1`, an inconsistency needing a re-scan.
-    const b = await startBroker();
-    brokers.push(b);
+    const b = shared;
     const ntfy = startStubNtfy();
-    const op = newOperator();
+    const op = freshOperator();
 
     const first = await signedPost<{ mobile_payload: string }>(
       b,
@@ -437,10 +465,9 @@ describe("ntfy enrolment", () => {
   }, 90_000);
 
   test("a server that is not an ntfy is refused", async () => {
-    const b = await startBroker();
-    brokers.push(b);
+    const b = shared;
     const ntfy = startStubNtfy({ unhealthy: true });
-    const op = newOperator();
+    const op = freshOperator();
     const res = await signedPost<{ error: string }>(
       b,
       "/approval/channel-connect",
@@ -451,9 +478,8 @@ describe("ntfy enrolment", () => {
   }, 60_000);
 
   test("the server is validated before anything is sealed", async () => {
-    const b = await startBroker();
-    brokers.push(b);
-    const op = newOperator();
+    const b = shared;
+    const op = freshOperator();
     // Missing, malformed, and — the one that matters — plain http towards the
     // internet, which would put an agent's question on the wire in the clear.
     expect((await signedPost(b, "/approval/channel-connect", { kind: "ntfy" }, op)).status).toBe(400);
@@ -471,10 +497,9 @@ describe("ntfy enrolment", () => {
   }, 60_000);
 
   test("the pairing message from the phone binds the topic, and is confirmed", async () => {
-    const b = await startBroker();
-    brokers.push(b);
+    const b = shared;
     const ntfy = startStubNtfy();
-    const op = newOperator();
+    const op = freshOperator();
 
     const conn = await signedPost<{ mobile_payload: string }>(
       b,
@@ -511,10 +536,9 @@ describe("ntfy enrolment", () => {
   }, 60_000);
 
   test("a pending approval reaches the phone, and the phone's answer settles it", async () => {
-    const b = await startBroker();
-    brokers.push(b);
+    const b = shared;
     const ntfy = startStubNtfy();
-    const op = newOperator();
+    const op = freshOperator();
 
     const conn = await signedPost<{ mobile_payload: string }>(
       b,
@@ -603,10 +627,9 @@ describe("ntfy enrolment", () => {
   }, 60_000);
 
   test("a phone answer on a hook request whose session stopped waiting is refused, never recorded", async () => {
-    const b = await startBroker();
-    brokers.push(b);
+    const b = shared;
     const ntfy = startStubNtfy();
-    const op = newOperator();
+    const op = freshOperator();
     const project = "github.com/vocsap/koryphaios";
 
     const conn = await signedPost<{ mobile_payload: string }>(b, "/approval/channel-connect", { kind: "ntfy", server: ntfy.url }, op);
@@ -635,6 +658,7 @@ describe("ntfy enrolment", () => {
     expect(added.body.approval.reply_route).toBe("hook");
     // The Claude Code session that raised it is gone: no wait for 46 s.
     const db = new Database(b.dbPath);
+    db.run("PRAGMA busy_timeout = 5000");
     const past = new Date(Date.now() - 46_000).toISOString();
     db.run("UPDATE pending_approvals SET created_at = ?, last_wait_at = ? WHERE id = ?", [past, past, approvalId]);
     db.close();
@@ -652,10 +676,9 @@ describe("ntfy enrolment", () => {
   }, 60_000);
 
   test("a tapped option settles a hook question as its answer; text and an out-of-range index settle nothing", async () => {
-    const b = await startBroker();
-    brokers.push(b);
+    const b = shared;
     const ntfy = startStubNtfy();
-    const op = newOperator();
+    const op = freshOperator();
     const project = "github.com/vocsap/koryphaios";
 
     const conn = await signedPost<{ mobile_payload: string }>(b, "/approval/channel-connect", { kind: "ntfy", server: ntfy.url }, op);
@@ -713,10 +736,9 @@ describe("ntfy enrolment", () => {
   }, 60_000);
 
   test("answering twice is refused, and the phone is told so (C-1 arbitration)", async () => {
-    const b = await startBroker();
-    brokers.push(b);
+    const b = shared;
     const ntfy = startStubNtfy();
-    const op = newOperator();
+    const op = freshOperator();
 
     const conn = await signedPost<{ mobile_payload: string }>(
       b,
@@ -775,10 +797,9 @@ describe("ntfy enrolment", () => {
   }, 60_000);
 
   test("an answer for ANOTHER operator's approval is refused (C-5)", async () => {
-    const mine = newOperator();
-    const theirs = otherOperator();
-    const b = await startBroker({}, { trustedOperators: [mine.cred.publicKey, theirs.cred.publicKey] });
-    brokers.push(b);
+    const mine = freshOperator();
+    const theirs = freshOperator();
+    const b = shared;
     const ntfy = startStubNtfy();
 
     const conn = await signedPost<{ mobile_payload: string }>(
@@ -815,7 +836,12 @@ describe("ntfy enrolment", () => {
 
     // My phone tries to answer it.
     await ntfy.publishRaw(payload.topic_replies, encodeAnswer(foreignId, "allow"));
-    await Bun.sleep(400);
+    expect(
+      await until(() =>
+        (ntfy.published.get(payload.topic_notif) ?? []).some((m) => String(m.message).includes("already handled"))
+      ),
+      "the refusal notice is the proof the answer was processed"
+    ).toBe(true);
 
     const list = await signedPost<{ approvals: Approval[] }>(b, "/approval/list", approvalListBody("p"), theirs);
     expect(list.body.approvals.find((a) => a.id === foreignId)!.status).toBe("pending");
@@ -835,10 +861,9 @@ describe("ntfy enrolment", () => {
     // replaced (and stopped) the first: their questions arrived — the topic
     // came from the binding — but the reply address came from the OTHER
     // operator's gateway, so their answers vanished in silence.
-    const alice = newOperator();
-    const bob = otherOperator();
-    const b = await startBroker({}, { trustedOperators: [alice.cred.publicKey, bob.cred.publicKey] });
-    brokers.push(b);
+    const alice = freshOperator();
+    const bob = freshOperator();
+    const b = shared;
     const ntfy = startStubNtfy();
 
     const aConn = await signedPost<{ mobile_payload: string }>(
@@ -928,10 +953,9 @@ describe("ntfy enrolment", () => {
     // on the transport it was issued for. Otherwise redeeming Alice's code on
     // Bob's topic would bind Alice to it — and an answer published there would
     // then authorise against Alice's approvals.
-    const alice = newOperator();
-    const bob = otherOperator();
-    const b = await startBroker({}, { trustedOperators: [alice.cred.publicKey, bob.cred.publicKey] });
-    brokers.push(b);
+    const alice = freshOperator();
+    const bob = freshOperator();
+    const b = shared;
     const ntfy = startStubNtfy();
 
     const aConn = await signedPost<{ pairing_code: string; mobile_payload: string }>(
@@ -950,7 +974,18 @@ describe("ntfy enrolment", () => {
 
     // Alice's code, redeemed on Bob's replies topic.
     await ntfy.publishRaw(bobTopics.topic_replies, encodePair(aConn.body.pairing_code, "attacker"));
-    await Bun.sleep(500);
+    // Replies on a topic are handled in order, each one answered on the
+    // notification topic: two answers there mean the attacker's code was
+    // handled.
+    await ntfy.publishRaw(bobTopics.topic_replies, encodePair("no-such-code", "Pixel 8"));
+    expect(
+      await until(
+        () =>
+          (ntfy.published.get(bobTopics.topic_notif) ?? []).filter((m) =>
+            /Paired\.|unknown or expired/.test(String(m.message))
+          ).length >= 2
+      )
+    ).toBe(true);
 
     // Alice gained nothing, and Bob's own pairing is untouched.
     for (const op of [alice, bob]) {
@@ -965,10 +1000,9 @@ describe("ntfy enrolment", () => {
   }, 90_000);
 
   test("one operator disconnecting does not cut the other", async () => {
-    const alice = newOperator();
-    const bob = otherOperator();
-    const b = await startBroker({}, { trustedOperators: [alice.cred.publicKey, bob.cred.publicKey] });
-    brokers.push(b);
+    const alice = freshOperator();
+    const bob = freshOperator();
+    const b = shared;
     const ntfy = startStubNtfy();
 
     await signedPost(b, "/approval/channel-connect", { kind: "ntfy", server: ntfy.url }, alice);
@@ -992,8 +1026,8 @@ describe("ntfy enrolment", () => {
   }, 90_000);
 
   test("does not restart or pair channels whose owner is no longer trusted", async () => {
-    const alice = newOperator();
-    const bob = otherOperator();
+    const alice = freshOperator();
+    const bob = freshOperator();
     const source = await startBroker({}, { trustedOperators: [alice.cred.publicKey, bob.cred.publicKey] });
     brokers.push(source);
     const ntfy = startStubNtfy();
@@ -1109,10 +1143,9 @@ describe("ntfy enrolment", () => {
   }, 90_000);
 
   test("ntfy needs no bot token: an anonymous server connects", async () => {
-    const b = await startBroker();
-    brokers.push(b);
+    const b = shared;
     const ntfy = startStubNtfy();
-    const op = newOperator();
+    const op = freshOperator();
     const res = await signedPost<{ mobile_payload: string }>(
       b,
       "/approval/channel-connect",
