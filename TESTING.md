@@ -101,12 +101,12 @@ Of the 93 broker files, ten cost 330 s; the slowest have the fewest tests:
 | File | Wall | Tests | Why |
 |---|---|---|---|
 | `broker-delegated-sweep` | 65 s | 22 | fresh broker per test + waits on a 1 s sweep tick |
-| `broker-roadmap-replica` | 48 s | 47 | two brokers (upstream + replica) per test |
+| `broker-roadmap-replica` | 48 s | 47 | one shared pair already; ~25 s is the replica noticing an outage then waiting out its retry backoff, which no env caps |
 | `broker-approvals` | 39 s | 92 | fresh broker per test |
 | `broker-sweep-inactive` | 38 s | 4 | `Bun.sleep(12_000)` twice on a 10 s dormant sweep |
 | `broker-status` | 30 s | 3 | real-time waits on the status clock |
 | `server-deck-token-authz` | 28 s | 6 | 30 s polling deadline on a spawned `server.ts` |
-| `broker-peer-federation` | 21 s | 10 | two brokers per test |
+| `broker-peer-federation` | 21 s | 10 | one shared topology already; the federation grace is checked on failed passes, so the long-outage test waits for the backoff |
 | `broker-roadmap-sync-offline-reason` | 15 s | 5 | 2 s sync tick, waited for in real time |
 | `broker-roadmap-lock-sweep-replicated` | 14 s | 5 | two brokers + sweep tick |
 
@@ -114,6 +114,18 @@ The same measurement on CI (run 426, the last green one): the pure-module
 step takes 1.5 min (ubuntu) to 3 min (windows); the integration step 8 min
 (ubuntu) to 17 min (windows). The integration step, not the number of tests,
 is the length of the gate.
+
+**After the rework of 2026-10-18** (same container, CI partition scripts,
+`desktop/node_modules` installed): the integration step 541 s → 359 s
+(1 135 tests, 102 files, the "before" run having its 8 electron files red
+for lack of desktop deps, which fail fast); the pure-module step 89 s for
+49 invocations (8 738 tests in the shared batch). Per file, the ten slowest
+above went: delegated-sweep 65 → 59 s (ticks already at their 1 s floor),
+replica 48 → 48 s (retry backoff, no env), approvals 39 → 15 s,
+sweep-inactive 38 → 6 s, status 30 → 1 s, deck-token-authz 28 → 2 s,
+peer-federation 21 → 15 s, sync-routes 19 → 4 s, sync-offline-reason
+15 → 6 s, lock-sweep-replicated 14 → 9 s. The remaining cost is now in
+`broker.ts` knobs, not in test shape (`BACKLOG.md` §4.0).
 
 **What the measurement rules out.** The volume of pure tests is NOT the
 problem: 9 500 of them run in two minutes, and `desktop-avatar-*`'s 44
@@ -135,8 +147,11 @@ gate.
    and polls the CONDITION with a bounded deadline, or the sweep gets a
    test-only trigger route; `broker-delegated-sweep`'s `waitFor` helper is
    the shape, its 1 s tick the remaining cost.
-3. Two-broker topologies (`broker-roadmap-replica`, `broker-peer-federation`,
-   `broker-roadmap-lock-sweep-replicated`) share the pair across the file.
+3. `broker-roadmap-lock-sweep-replicated` shares its pair across the file;
+   `broker-roadmap-replica` and `broker-peer-federation` already did, and
+   their remaining cost is the sync retry backoff (`SYNC_BACKOFF_MAX_MS`,
+   not settable by env): a `CLAUDE_PEERS_SYNC_BACKOFF_MAX_MS` floored at
+   the tick would take ~12 s off the replica file.
 4. `desktop-ttsr-budget-margin` (8 s for 2 tests) and `desktop-ttsr-rules`'s
    "past its time budget" block measure wall-clock regex budgets; they are
    benchmarks, not regressions, and belong behind an opt-in env or in the

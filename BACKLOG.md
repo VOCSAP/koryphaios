@@ -1267,6 +1267,34 @@ retravailler en forme.
       (sonde `--tsconfig-override` important `App.tsx` → `qrcode-generator`
       absent de l'étape pure-module). À inscrire dans `EXEMPTIONS` avec le
       marqueur native-deps, ou à réécrire contre un module importable.
+- [ ] **Trouvé en retravaillant les tests, côté broker (hors lot tests)** :
+      (a) `broker.ts` ligne ~1880, purge des pairs dormants : `last_seen <
+      datetime('now', ?)` compare un ISO `…T…Z` à un `YYYY-MM-DD HH:MM:SS`
+      SQLite ; le `T` trie après l'espace, donc un pair dormant n'est purgé
+      que le jour suivant (jusqu'à 24 h de retard). Correction proposée :
+      `datetime(last_seen) < datetime('now', ?)`, avec un test qui pose une
+      ligne vieille d'une heure et attend sa purge. (b) 19 `db.transaction(`
+      en mode différé : deux écrivains sur une même base (deux brokers,
+      test + broker) donnent des 500 « database is locked » que
+      `busy_timeout` n'absorbe pas, puisque le verrou n'est pris qu'au
+      premier write ; en `.immediate(...)`, mesuré sur miroir : 0 erreur sur
+      100 appels concurrents au lieu de 9 à 15, et `broker-delegated-sweep`
+      passe de 59 s à 10 s en concurrent. (c) Un
+      `CLAUDE_PEERS_DELEGATION_SWEEP_MS` de test (plancher ~50 ms) diviserait
+      par 10 les attentes de tick de ce même fichier. (d) Un
+      `CLAUDE_PEERS_SYNC_BACKOFF_MAX_MS` (plancher : le tick) retirerait
+      ~12 s à `broker-roadmap-replica`, dont la moitié du temps est la
+      reconnexion après panne ; `broker-peer-federation` et
+      `broker-roadmap-lock-sweep-replicated` en profiteraient aussi.
+- [ ] **À vérifier : `bun test` nu en un seul processus** s'est terminé sans
+      ligne de bilan (« Ran N tests ») après ~3 min sur cet arbre (Linux,
+      bun 1.4.2), code de sortie non observable derrière un pipe. Les deux
+      scripts de partition de la CI (`scripts/partition-pure-tests.ts`,
+      `scripts/partition-integration-tests.ts`), qui refusent un bilan
+      manquant, sont verts sur le même arbre. Rejouer `bun test` nu en
+      capturant son code de sortie ; si l'arrêt se reproduit, identifier le
+      fichier (process.exit en cours de suite, contamination happy-dom) et
+      faire des deux scripts la forme documentée de la gate locale.
 - [ ] **Cinquante fichiers scannent le source en texte** (brace-body,
       `Bun.Transpiler`, `toContain` sur `readFileSync`) : pas de suppression
       en bloc, mais chaque retouche d'un module concerné remplace la sonde
