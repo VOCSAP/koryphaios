@@ -7,6 +7,7 @@ import { test, expect, mock, afterEach } from "bun:test";
 import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync, rmSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { ATTENTION_CONFIRMATION_DELAY_MS } from "../desktop/src/main/attention.ts";
 
 const SHARED = join(import.meta.dir, "..", "desktop", "src", "shared");
 for (const name of ["session-status", "palette", "role", "reorder", "workflow", "announce", "types"]) {
@@ -871,8 +872,27 @@ test("silent statusLine: no warning while the tile waits on the operator; clock 
     readFileSync(join(import.meta.dir, "pty-harness", "fixtures", "trust-dialog-quick-safety-check.json"), "utf-8"),
   );
   const pty = spawned.at(-1)!;
-  for (const c of trustCapture.slice(0, 4)) pty.output(c.data);
-  expect(svc.list().find((s) => s.id === rt.id)!.needsAttention, "the real trust dialog bytes raise attention").toBe(true);
+  const originalSetTimeout = globalThis.setTimeout;
+  const originalClearTimeout = globalThis.clearTimeout;
+  const timers: Array<{ callback: () => void; delayMs: number; cleared: boolean }> = [];
+  globalThis.setTimeout = ((callback: () => void, delayMs?: number) => {
+    const timer = { callback, delayMs: delayMs ?? 0, cleared: false };
+    timers.push(timer);
+    return timer;
+  }) as unknown as typeof globalThis.setTimeout;
+  globalThis.clearTimeout = ((timer: { cleared?: boolean }) => {
+    timer.cleared = true;
+  }) as unknown as typeof globalThis.clearTimeout;
+  try {
+    for (const c of trustCapture.slice(0, 4)) pty.output(c.data);
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+    globalThis.clearTimeout = originalClearTimeout;
+  }
+  const confirmation = timers.find((timer) => timer.delayMs === ATTENTION_CONFIRMATION_DELAY_MS);
+  expect(confirmation, "the real trust dialog schedules attention confirmation").toBeDefined();
+  confirmation!.callback();
+  expect(svc.list().find((s) => s.id === rt.id)!.needsAttention, "the real trust dialog bytes raise attention after confirmation").toBe(true);
   poll(svc);
   expect(silent(), "trust dialog on screen: no warning though the spawn is old").toEqual([]);
   internals.runtime.get(rt.id)!.liveStatusAttentionAt = Date.now() - 2 * STATUS_SILENCE_MS;

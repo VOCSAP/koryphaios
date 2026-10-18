@@ -7,10 +7,12 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   AttentionDetector,
+  ATTENTION_CONFIRMATION_DELAY_MS,
   detectWaiting,
   stripAnsi,
   type AttentionEvent
 } from "../desktop/src/main/attention.ts";
+import { EXPECTED_FIXTURE_VERDICTS } from "./_fixture-verdicts.ts";
 import { inspectInjectGuard, makeScreen } from "../desktop/src/main/screen-model.ts";
 
 const PERMISSION_SCREEN = `
@@ -29,6 +31,133 @@ function collect(d: AttentionDetector): AttentionEvent[] {
   return events;
 }
 
+interface PlannedTimer {
+  callback: () => void;
+  dueAt: number;
+  delayMs: number;
+  cleared: boolean;
+  fired: boolean;
+}
+
+function confirmationClock() {
+  const planned: PlannedTimer[] = [];
+  let now = 0;
+  const advanceTo = (target: number): void => {
+    if (target < now) throw new Error(`clock moved backward from ${now} to ${target}`);
+    while (true) {
+      const due = planned
+        .filter((timer) => !timer.cleared && !timer.fired && timer.dueAt <= target)
+        .sort((a, b) => a.dueAt - b.dueAt)[0];
+      if (!due) break;
+      now = due.dueAt;
+      due.fired = true;
+      due.callback();
+    }
+    now = target;
+  };
+  return {
+    planned,
+    get now(): number {
+      return now;
+    },
+    advanceTo,
+    advanceBy(delayMs: number): void {
+      advanceTo(now + delayMs);
+    },
+    options: {
+      setTimeout(callback: () => void, delayMs: number): PlannedTimer {
+        const timer = { callback, dueAt: now + delayMs, delayMs, cleared: false, fired: false };
+        planned.push(timer);
+        return timer;
+      },
+      clearTimeout(timer: unknown): void {
+        (timer as PlannedTimer).cleared = true;
+      }
+    }
+  };
+}
+
+function detector(): AttentionDetector {
+  return new AttentionDetector({
+    setTimeout(callback: () => void): undefined {
+      callback();
+      return undefined;
+    },
+    clearTimeout(): void {}
+  });
+}
+
+test("a waiting screen raises only after the confirmation delay", () => {
+  const clock = confirmationClock();
+  const d = new AttentionDetector(clock.options);
+  const events = collect(d);
+
+  d.feed("s1", PERMISSION_SCREEN);
+
+  expect(events).toEqual([]);
+  expect(clock.planned).toHaveLength(1);
+  expect(clock.planned[0]!.delayMs).toBe(ATTENTION_CONFIRMATION_DELAY_MS);
+  clock.advanceBy(ATTENTION_CONFIRMATION_DELAY_MS - 1);
+  expect(events).toEqual([]);
+  clock.advanceBy(1);
+  expect(events).toEqual([{ id: "s1", waiting: true }]);
+});
+
+test("a repainting waiting screen confirms from its first detection", () => {
+  const clock = confirmationClock();
+  const d = new AttentionDetector(clock.options);
+  const events: Array<{ t: number; waiting: boolean }> = [];
+  d.on("attention", (event: AttentionEvent) => events.push({ t: clock.now, waiting: event.waiting }));
+
+  d.feed("s1", PERMISSION_SCREEN);
+  const repaintIntervalMs = 400;
+  const lastRepaintAt = ATTENTION_CONFIRMATION_DELAY_MS * 4;
+  for (let t = repaintIntervalMs; t <= lastRepaintAt; t += repaintIntervalMs) {
+    clock.advanceTo(t);
+    d.feed("s1", PERMISSION_SCREEN);
+  }
+  clock.advanceTo(lastRepaintAt + ATTENTION_CONFIRMATION_DELAY_MS);
+
+  expect(events).toEqual([{ t: ATTENTION_CONFIRMATION_DELAY_MS, waiting: true }]);
+});
+
+test("a busy cue or waiting-screen fallback cancels a pending confirmation", () => {
+  for (const [label, data] of [
+    ["busy cue", "⠹ running… esc to interrupt"],
+    ["composer fallback", "────────────────\n❯ \n────────────────\n? for shortcuts"],
+  ] as const) {
+    const clock = confirmationClock();
+    const d = new AttentionDetector(clock.options);
+    const events = collect(d);
+
+    d.feed("s1", PERMISSION_SCREEN);
+    d.feed("s1", data);
+
+    expect(clock.planned[0]!.cleared, label).toBe(true);
+    clock.planned[0]!.callback();
+    expect(events, label).toEqual([]);
+  }
+});
+
+test("clearing, purging, or stopping cancels a pending confirmation", () => {
+  for (const [label, action] of [
+    ["clear", (d: AttentionDetector) => d.clear("s1")],
+    ["purge", (d: AttentionDetector) => d.purgeScreenMemory("s1")],
+    ["stop", (d: AttentionDetector) => d.stop()],
+  ] as const) {
+    const clock = confirmationClock();
+    const d = new AttentionDetector(clock.options);
+    const events = collect(d);
+
+    d.feed("s1", PERMISSION_SCREEN);
+    action(d);
+
+    expect(clock.planned[0]!.cleared, label).toBe(true);
+    clock.planned[0]!.callback();
+    expect(events, label).toEqual([]);
+  }
+});
+
 test("detectWaiting matches the numbered chooser and the trust prompt only", () => {
   expect(detectWaiting(PERMISSION_SCREEN)).toBe(true);
   expect(detectWaiting(TRUST_SCREEN)).toBe(true);
@@ -38,7 +167,7 @@ test("detectWaiting matches the numbered chooser and the trust prompt only", () 
 });
 
 test("one episode per wait screen; busy output closes it and re-arms", () => {
-  const d = new AttentionDetector();
+  const d = detector();
   const events = collect(d);
 
   d.feed("s1", PERMISSION_SCREEN);
@@ -59,7 +188,7 @@ test("one episode per wait screen; busy output closes it and re-arms", () => {
 });
 
 test("a wait screen split across chunks is caught by the rolling buffer", () => {
-  const d = new AttentionDetector();
+  const d = detector();
   const events = collect(d);
   d.feed("s1", "Do you want to proceed?\n❯ ");
   expect(events.length).toBe(0);
@@ -69,7 +198,7 @@ test("a wait screen split across chunks is caught by the rolling buffer", () => 
 });
 
 test("busy output in the same chunk resets stale context but keeps what follows", () => {
-  const d = new AttentionDetector();
+  const d = detector();
   const events = collect(d);
   // Old prose accumulates, then a chunk ends the turn AND prints the chooser.
   d.feed("s1", "streaming some prose with ❯ nothing conclusive");
@@ -79,7 +208,7 @@ test("busy output in the same chunk resets stale context but keeps what follows"
 });
 
 test("clear() drops the session state entirely", () => {
-  const d = new AttentionDetector();
+  const d = detector();
   const events = collect(d);
   d.feed("s1", PERMISSION_SCREEN);
   d.clear("s1");
@@ -103,7 +232,7 @@ This uses unreleased code.
 Enter to confirm · Esc to cancel`;
 
 test("a bare dev-channels title (no accept line) does not suppress a later real chooser", () => {
-  const d = new AttentionDetector();
+  const d = detector();
   const events = collect(d);
   d.feed("s1", DEV_CHANNELS_TITLE_ONLY);
   d.feed("s1", PERMISSION_SCREEN);
@@ -112,14 +241,7 @@ test("a bare dev-channels title (no accept line) does not suppress a later real 
 });
 
 test("a genuinely raised flag is NOT cleared by a bare dev-channels title arriving after it (reverse-order, minimal cue)", () => {
-  // Team-lead's asymmetry finding (review of 4f0143ff): the re-scan clearer
-  // must never reuse the raise-side exemption. Before the fix this cleared
-  // a real chooser's flag the moment the dev-channels title text entered
-  // the retained buffer, even though "❯ 1." (the pattern that raised it)
-  // never left the screen. Deliberately the WEAKEST possible trigger (title
-  // only, no accept wording): see the debugger's full-dialog variant below
-  // for the realistic-screen case.
-  const d = new AttentionDetector();
+  const d = detector();
   const events = collect(d);
   d.feed("s1", PERMISSION_SCREEN);
   d.feed("s1", DEV_CHANNELS_TITLE_ONLY);
@@ -161,7 +283,7 @@ Enter to confirm · Esc to cancel`;
 });
 
 test("a pure-ANSI repaint does not clear a raised flag", () => {
-  const d = new AttentionDetector();
+  const d = detector();
   const events = collect(d);
   d.feed("s1", PERMISSION_SCREEN);
   d.feed("s1", "\x1b[2J\x1b[1;1H\x1b[?25l\x1b[?25h");
@@ -170,7 +292,7 @@ test("a pure-ANSI repaint does not clear a raised flag", () => {
 });
 
 test("the exempted screen arriving later does not clear a raised flag", () => {
-  const d = new AttentionDetector();
+  const d = detector();
   const events = collect(d);
   d.feed("s1", PERMISSION_SCREEN);
   d.feed("s1", CHANNELS_WARNING);
@@ -183,7 +305,7 @@ test("streamed prose mentioning the exempted wording does not clear a raised fla
   // version, a single streamed SENTENCE -- not a screen, not a repaint --
   // could wipe a real chooser's flag. An agent narrating its own actions in
   // prose could silently erase the operator's attention request.
-  const d = new AttentionDetector();
+  const d = detector();
   const events = collect(d);
   d.feed("s1", PERMISSION_SCREEN);
   d.feed(
@@ -236,7 +358,7 @@ test("the ConPTY repaint frame of the channels screen is still exempted (real ca
   expect(joined).toContain("WARNING:\x1b[1CLoading\x1b[1Cdevelopment\x1b[1Cchannels");
   expect(stripAnsi(joined)).toContain("WARNING: Loading development channels");
 
-  const d = new AttentionDetector();
+  const d = detector();
   const events = collect(d);
   // Replayed chunk by chunk, exactly as node-pty delivered them: the
   // compressed first paint AND the literal-space repaints go through.
@@ -246,7 +368,7 @@ test("the ConPTY repaint frame of the channels screen is still exempted (real ca
 });
 
 test("purgeScreenMemory clears the retained buffer without touching a live waiting state", () => {
-  const d = new AttentionDetector();
+  const d = detector();
   const events = collect(d);
   d.feed("s1", PERMISSION_SCREEN);
   d.purgeScreenMemory("s1");
@@ -260,13 +382,8 @@ test("purgeScreenMemory clears the retained buffer without touching a live waiti
   d.stop();
 });
 
-// The two tests below are the only ones in this file that exercise the re-scan
-// fallback and purgeScreenMemory specifically.
-// Every test above raises and clears via the unconditional busy-cue branch,
-// which proves nothing about either mechanism.
-
-test("card c8d69928 residu 1a: the buffer-slide clearer (path D) actually clears once the raising pattern leaves the MAX_BUF window", () => {
-  const d = new AttentionDetector();
+test("the buffer-slide clearer clears after the waiting pattern leaves the retained window", () => {
+  const d = detector();
   const events = collect(d);
   d.feed("s1", PERMISSION_SCREEN);
   expect(events).toEqual([{ id: "s1", waiting: true }]);
@@ -290,8 +407,8 @@ test("card c8d69928 residu 1a: the buffer-slide clearer (path D) actually clears
   d.stop();
 });
 
-test("card c8d69928 residu 1b: purgeScreenMemory actually empties the buffer, observed without a busy cue", () => {
-  const d = new AttentionDetector();
+test("purgeScreenMemory clears retained waiting text without a busy cue", () => {
+  const d = detector();
   const events = collect(d);
   d.feed("s1", PERMISSION_SCREEN);
   expect(events).toEqual([{ id: "s1", waiting: true }]);
@@ -317,7 +434,7 @@ test("stripAnsi removes an OSC sequence, not just CSI", () => {
 });
 
 test("busy text carried inside an OSC title does not spuriously clear a real waiting episode", () => {
-  const d = new AttentionDetector();
+  const d = detector();
   const events = collect(d);
 
   d.feed("s1", PERMISSION_SCREEN);
@@ -339,7 +456,7 @@ test("busy text carried inside an OSC title does not spuriously clear a real wai
 });
 
 test("busy text carried inside an OSC title FRAGMENTED across two chunks still does not spuriously clear a real waiting episode", () => {
-  const d = new AttentionDetector();
+  const d = detector();
   const events = collect(d);
 
   d.feed("s1", PERMISSION_SCREEN);
@@ -363,7 +480,7 @@ test("the current trust prompt raises attention (real Claude Code 2.1.282 captur
   const chunks = loadFixture("trust-dialog-quick-safety-check.json");
   const dialog = chunks.findIndex((c) => stripAnsi(c.data).includes("safety"));
   expect(dialog, "the capture holds the dialog paint").toBeGreaterThanOrEqual(0);
-  const d = new AttentionDetector();
+  const d = detector();
   const events = collect(d);
   chunks.slice(0, dialog).forEach((c) => d.feed("s", c.data));
   expect(events, "nothing before the dialog is painted").toEqual([]);
@@ -386,7 +503,7 @@ test("prose about trusting a folder does not raise", () => {
     "No, exit codes are ignored here.",
   ]) {
     expect(detectWaiting(prose), prose).toBe(false);
-    const d = new AttentionDetector();
+    const d = detector();
     const events = collect(d);
     d.feed("s", `● ${prose}\r\n`);
     expect(events, `streamed: ${prose}`).toEqual([]);
@@ -400,11 +517,26 @@ test("whole real turns (with and without a statusLine) never raise attention", (
     "turn-no-statusline-count.json",
     "turn-no-statusline-hi.json",
   ]) {
-    const d = new AttentionDetector();
+    const d = detector();
     const events = collect(d);
     for (const c of loadFixture(name)) d.feed("s", c.data);
     expect(events, name).toEqual([]);
   }
+});
+
+test("the transient numbered full-screen repaint does not confirm attention", () => {
+  const clock = confirmationClock();
+  const d = new AttentionDetector(clock.options);
+  const events = collect(d);
+
+  for (const c of loadFixture("turn-with-statusline-count.json")) {
+    clock.advanceTo(c.t);
+    d.feed("s", c.data.replace("count slowly", "1. count slowly"));
+  }
+  clock.advanceBy(ATTENTION_CONFIRMATION_DELAY_MS);
+
+  expect(clock.planned.length).toBeGreaterThan(0);
+  expect(events).toEqual([]);
 });
 
 // ----- accepted trust prompt: the welcome screen clears the flag -----
@@ -429,7 +561,7 @@ const WELCOME_PAINT: Chunk[] = (() => {
 
 test("accepting the trust prompt clears the flag once the welcome screen is painted (real captures)", () => {
   const { before, dialog, after } = trustDialogChunks();
-  const d = new AttentionDetector();
+  const d = detector();
   const events = collect(d);
   for (const c of [...before, dialog, ...after]) d.feed("s", c.data);
   expect(events, "the dialog raises").toEqual([{ id: "s", waiting: true }]);
@@ -446,7 +578,7 @@ test("accepting the trust prompt clears the flag once the welcome screen is pain
 test("a repaint of the trust prompt does not clear it, even with the banner painted above it", () => {
   const { before, dialog, after } = trustDialogChunks();
   for (const lead of [[], WELCOME_PAINT]) {
-    const d = new AttentionDetector();
+    const d = detector();
     const events = collect(d);
     for (const c of [...lead, ...before, dialog, ...after]) d.feed("s", c.data);
     expect(events, `dialog's own tail, banner first: ${lead.length > 0}`).toEqual([{ id: "s", waiting: true }]);
@@ -460,7 +592,7 @@ test("a repaint of the trust prompt does not clear it, even with the banner pain
 
 test("a chooser painted after the welcome screen still holds the flag", () => {
   const { before, dialog } = trustDialogChunks();
-  const d = new AttentionDetector();
+  const d = detector();
   const events = collect(d);
   for (const c of [...before, dialog]) d.feed("s", c.data);
   d.feed("s", WELCOME_PAINT.map((c) => c.data).join("") + PERMISSION_SCREEN);
@@ -479,7 +611,7 @@ test("with the dev-channels warning in the window, both trust wordings still rai
 
 test("the current trust prompt painted after the dev-channels warning raises (detector)", () => {
   const { dialog } = trustDialogChunks();
-  const d = new AttentionDetector();
+  const d = detector();
   const events = collect(d);
   d.feed("s", CHANNELS_WARNING);
   expect(events, "the warning alone is exempted").toEqual([]);
@@ -511,9 +643,27 @@ const REAL_CHOOSERS = readdirSync(join(import.meta.dir, "pty-harness", "fixtures
   })
   .sort();
 
+const MODAL_ATTENTION_EXEMPTIONS = new Set([
+  "channels-warning-conpty-win.json",
+  // The screen guard fails closed on a numbered prompt echo; it is not a wait screen.
+  "draft-numbered-2.1.301.json",
+  "typing-numbered-2.1.301.json",
+  "resize-numbered-draft-2.1.301.json",
+  // Fail-closed modal of the screen guard, not a wait screen.
+  "scroll-context-2.1.284-reduced.json",
+  "turn-chunks-inherited-env.json",
+  "turn-chunks-scrubbed-env.json",
+]);
+
+const MODAL_ATTENTION_FIXTURES = Object.entries(EXPECTED_FIXTURE_VERDICTS)
+  .filter(([, verdict]) => verdict.final === "modal")
+  .map(([name]) => name)
+  .filter((name) => !MODAL_ATTENTION_EXEMPTIONS.has(name))
+  .sort();
+
 /** The attention events of a whole capture, each tagged with the index of the chunk that emitted it. */
 const replayEvents = (name: string): { at: number; waiting: boolean }[] => {
-  const d = new AttentionDetector();
+  const d = detector();
   const events: { at: number; waiting: boolean }[] = [];
   let at = -1;
   d.on("attention", (e: AttentionEvent) => events.push({ at, waiting: e.waiting }));
@@ -524,16 +674,65 @@ const replayEvents = (name: string): { at: number; waiting: boolean }[] => {
   return events;
 };
 
+test("an accepted trust prompt emits nothing before the later AskUserQuestion chooser", () => {
+  const clock = confirmationClock();
+  const d = new AttentionDetector(clock.options);
+  const events: { at: number; waiting: boolean }[] = [];
+  let at = -1;
+  d.on("attention", (e: AttentionEvent) => events.push({ at, waiting: e.waiting }));
+  const chunks = loadFixture("ask-user-question-2.1.301.json");
+  const chooser = chunks.findIndex((c) => stripAnsi(c.data).includes("Which color do you prefer?"));
+  expect(chooser, "the capture paints the real chooser").toBeGreaterThanOrEqual(0);
+
+  chunks.forEach((c, i) => {
+    clock.advanceTo(c.t);
+    at = i;
+    if (!isMarker(c)) d.feed("s", c.data);
+  });
+
+  expect(events.filter((event) => event.waiting && event.at < chooser)).toEqual([]);
+  expect(events.filter((event) => event.waiting && event.at >= chooser)).toHaveLength(1);
+});
+
 test("the numbered pickers derived from the captures include the permission, AskUserQuestion and plan choosers", () => {
   for (const name of ["ask-user-question-2.1.301.json", "permission-write-2.1.291.json", "plan-approval-2.1.301.json"]) {
     expect(REAL_CHOOSERS, name).toContain(name);
   }
 });
 
-test("every captured numbered chooser raises and still holds at the end of its capture", () => {
+test("every captured numbered chooser raises after confirmation and still holds", () => {
   for (const name of REAL_CHOOSERS) {
-    const events = replayEvents(name);
-    expect(events.at(-1), name).toEqual({ at: expect.any(Number), waiting: true });
+    const clock = confirmationClock();
+    const d = new AttentionDetector(clock.options);
+    const events = collect(d);
+    for (const c of loadFixture(name)) if (!isMarker(c)) d.feed("s", c.data);
+
+    const pending = clock.planned.filter((timer) => !timer.cleared);
+    expect(pending.length, name).toBeGreaterThan(0);
+    for (const timer of pending) timer.callback();
+    expect(events, name).toEqual([{ id: "s", waiting: true }]);
+  }
+});
+
+test("every non-exempt modal fixture raises at the confirmation deadline", () => {
+  for (const name of MODAL_ATTENTION_FIXTURES) {
+    const clock = confirmationClock();
+    const d = new AttentionDetector(clock.options);
+    const events: Array<{ waiting: boolean; t: number }> = [];
+    d.on("attention", (event: AttentionEvent) => events.push({ waiting: event.waiting, t: clock.now }));
+
+    for (const chunk of loadFixture(name)) {
+      if (chunk.t !== undefined) clock.advanceTo(chunk.t);
+      if (!isMarker(chunk)) d.feed("s", chunk.data);
+    }
+    clock.advanceBy(ATTENTION_CONFIRMATION_DELAY_MS);
+
+    const raised = events.filter((event) => event.waiting);
+    expect(raised, name).toHaveLength(1);
+    const confirmingTimer = clock.planned.find(
+      (timer) => timer.fired && timer.dueAt === raised[0]!.t
+    );
+    expect(confirmingTimer?.delayMs, name).toBe(ATTENTION_CONFIRMATION_DELAY_MS);
   }
 });
 
@@ -564,7 +763,7 @@ for (const [label, toOption2, toOption1] of [
   ["the glyph alone moved", `\x1b[4;1H \x1b[5;1H${SELECTOR}`, `\x1b[5;1H \x1b[4;1H${SELECTOR}`],
 ] as const) {
   test(`moving a raised chooser's selection (${label}) holds the flag until the composer is painted`, () => {
-    const d = new AttentionDetector();
+    const d = detector();
     const events = collect(d);
     d.feed("s", CHOOSER);
     expect(events, "the chooser raises").toEqual([{ id: "s", waiting: true }]);

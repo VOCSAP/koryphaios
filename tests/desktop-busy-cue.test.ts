@@ -39,6 +39,29 @@ function quotaHarness(): { d: QuotaDetector; clears: string[]; advance: (ms: num
   return { d, clears, advance: (ms) => (now += ms) };
 }
 
+function attentionHarness(): { d: AttentionDetector; events: AttentionEvent[]; confirm: () => void } {
+  const timers: Array<{ callback: () => void; cleared: boolean }> = [];
+  const d = new AttentionDetector({
+    setTimeout(callback: () => void) {
+      const timer = { callback, cleared: false };
+      timers.push(timer);
+      return timer;
+    },
+    clearTimeout(timer: unknown) {
+      (timer as { cleared: boolean }).cleared = true;
+    }
+  });
+  const events: AttentionEvent[] = [];
+  d.on("attention", (e: AttentionEvent) => events.push(e));
+  return {
+    d,
+    events,
+    confirm: () => {
+      for (const timer of timers) if (!timer.cleared) timer.callback();
+    }
+  };
+}
+
 test("fixture precondition: the captured turn has a statusLine and no footer hint", () => {
   expect(turnStart, "fixture lost its working title").toBeGreaterThan(0);
   expect(turnEnd, "fixture lost its end-of-turn idle title").toBeGreaterThan(turnStart);
@@ -95,11 +118,19 @@ test("the limit screen, its turn's trailing frames and idle repaints never end t
   d.stop();
 });
 
-test("a real spinner-row frame WITHOUT 'esc to interrupt' clears a waiting flag", () => {
-  const d = new AttentionDetector();
-  const events: AttentionEvent[] = [];
-  d.on("attention", (e: AttentionEvent) => events.push(e));
+test("a busy cue cancels a pending confirmation even when the same chunk retains option 2", () => {
+  const { d, events, confirm } = attentionHarness();
   d.feed("s1", PERMISSION);
+  d.feed("s1", "⠹ running… esc to interrupt\n❯ 2. No");
+  confirm();
+  expect(events).toEqual([]);
+  d.stop();
+});
+
+test("a real spinner-row frame WITHOUT 'esc to interrupt' clears a waiting flag", () => {
+  const { d, events, confirm } = attentionHarness();
+  d.feed("s1", PERMISSION);
+  confirm();
   d.feed("s1", "\x1b]0;✳ Claude Code\x07");
   d.feed("s1", statusLineRow.data);
   expect(events, "an idle title or a statusLine refresh cleared the waiting flag").toEqual([
@@ -206,10 +237,9 @@ test("real with-statusLine turns: exactly these frames read as busy", () => {
 });
 
 test("a chooser whose diff shows a timer or token counter keeps its waiting flag", () => {
-  const d = new AttentionDetector();
-  const events: AttentionEvent[] = [];
-  d.on("attention", (e: AttentionEvent) => events.push(e));
+  const { d, events, confirm } = attentionHarness();
   d.feed("s1", PERMISSION);
+  confirm();
   d.feed("s1", "\x1b[5;1H  12 +  const t = wait(3s \u00b7 x)\x1b[K\r\n  13 +  // \u2193 12 tokens\x1b[K");
   d.feed("s1", "\x1b[40;1H  Opus 5 \u2502 \u2193 3.4k tokens");
   expect(events, "diff or statusLine text cleared the waiting flag").toEqual([{ id: "s1", waiting: true }]);

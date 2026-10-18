@@ -118,25 +118,67 @@ function stillWaiting(text: string): boolean {
 // here.
 const MAX_BUF = 4096
 
+// Full-screen repaints take roughly 300 ms; 1.5 s filters them before raising attention.
+export const ATTENTION_CONFIRMATION_DELAY_MS = 1_500
+
+export interface AttentionDetectorOptions {
+  confirmationDelayMs?: number
+  setTimeout?: (callback: () => void, delayMs: number) => unknown
+  clearTimeout?: (timer: unknown) => void
+}
+
 interface SessionState {
   buf: string
   waiting: boolean
+  pending: object | null
+  timer?: unknown
   /** A running turn means the operator answered (or the wait screen is gone). */
   busy: BusyCue
 }
 
 /**
  * Tracks per-session "waiting for the operator" episodes from PTY output.
- * Emits 'attention' (AttentionEvent) on transitions only: waiting=true when a
- * wait screen is detected, waiting=false when a turn runs again.
+ * Emits 'attention' on transitions: waiting=true after a screen persists for
+ * the confirmation delay, waiting=false immediately when the screen clears.
  */
 export class AttentionDetector extends EventEmitter {
   private sessions = new Map<string, SessionState>()
+  private readonly confirmationDelayMs: number
+  private readonly setTimer: (callback: () => void, delayMs: number) => unknown
+  private readonly clearTimer: (timer: unknown) => void
+
+  constructor(options: AttentionDetectorOptions = {}) {
+    super()
+    this.confirmationDelayMs = options.confirmationDelayMs ?? ATTENTION_CONFIRMATION_DELAY_MS
+    this.setTimer = options.setTimeout ?? ((callback, delayMs) => globalThis.setTimeout(callback, delayMs))
+    this.clearTimer = options.clearTimeout ?? ((timer) => globalThis.clearTimeout(timer as ReturnType<typeof globalThis.setTimeout>))
+  }
+
+  private cancelPending(st: SessionState): void {
+    if (st.pending === null) return
+    if (st.timer !== undefined) this.clearTimer(st.timer)
+    st.pending = null
+    st.timer = undefined
+  }
+
+  private scheduleConfirmation(id: string, st: SessionState): void {
+    const pending = {}
+    st.pending = pending
+    const timer = this.setTimer(() => {
+      if (st.pending !== pending) return
+      st.pending = null
+      st.timer = undefined
+      if (this.sessions.get(id) !== st || st.waiting || !stillWaiting(st.buf)) return
+      st.waiting = true
+      this.emit('attention', { id, waiting: true } satisfies AttentionEvent)
+    }, this.confirmationDelayMs)
+    if (st.pending === pending) st.timer = timer
+  }
 
   feed(id: string, data: string): void {
     let st = this.sessions.get(id)
     if (!st) {
-      st = { buf: '', waiting: false, busy: createBusyCue({ title: false }) }
+      st = { buf: '', waiting: false, pending: null, busy: createBusyCue({ title: false }) }
       this.sessions.set(id, st)
     }
     const stripped = stripAnsi(data)
@@ -176,43 +218,29 @@ export class AttentionDetector extends EventEmitter {
     if (busy) st.buf = ''
     // Re-strip the accumulated buffer, same reasoning as the branch above.
     st.buf = stripAnsi((st.buf + stripped).slice(-MAX_BUF))
-    if (detectWaiting(st.buf)) {
-      st.waiting = true
-      // Do NOT reset buf here (BLOCKER 1, review of 4f0143ff): the re-scan
-      // fallback above reads st.buf, not the raw screen, so the buffer at
-      // the moment of raising IS "the retained screen" the fallback's own
-      // comment promises. Wiping it made the first waiting-branch feed()
-      // re-scan an empty-or-near-empty string instead -- a chunk that
-      // stripped to pure ANSI (cursor moves, no visible text) cleared the
-      // flag on the very next feed() while the wait screen was still fully
-      // on screen, just not retransmitted. Keeping buf lets the sliding
-      // MAX_BUF window carry the matched content forward exactly like it
-      // does for every other feed() call.
-      this.emit('attention', { id, waiting: true } satisfies AttentionEvent)
-    }
+    const afterWelcome = afterTrustPrompt(st.buf)
+    if (afterWelcome !== null && WELCOME_BANNER_RE.test(afterWelcome)) st.buf = afterWelcome
+    if (st.pending !== null && (busy || !stillWaiting(st.buf))) this.cancelPending(st)
+    if (st.pending === null && detectWaiting(st.buf)) this.scheduleConfirmation(id, st)
   }
 
   clear(id: string): void {
+    const st = this.sessions.get(id)
+    if (st) this.cancelPending(st)
     this.sessions.delete(id)
   }
 
-  /**
-   * Purge the retained screen buffer for a session WITHOUT touching its
-   * `waiting` state (card 4f0143ff review, MAJOR 3 follow-up). Wired from
-   * session-service.ts's startup-ack `ack` handler: once that dialog is
-   * confirmed dismissed, its text has no further reason to sit in this
-   * detector's window and influence either predicate above. Never call
-   * `clear()` for this -- clear() also drops `waiting`, which would silently
-   * un-raise a genuine, unrelated wait that happens to be active at the same
-   * moment (rare, but dropping a real flag with no emitted event is worse
-   * than leaving a few stale bytes for one more feed() cycle).
-   */
+  /** Clears retained screen data and cancels an unconfirmed raise without changing confirmed attention. */
   purgeScreenMemory(id: string): void {
     const st = this.sessions.get(id)
-    if (st) st.buf = ''
+    if (st) {
+      this.cancelPending(st)
+      st.buf = ''
+    }
   }
 
   stop(): void {
+    for (const st of this.sessions.values()) this.cancelPending(st)
     this.sessions.clear()
   }
 }
