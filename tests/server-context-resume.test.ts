@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { randomBytes, randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { Database } from "bun:sqlite";
@@ -119,7 +119,11 @@ async function launchServer(
 function instanceToken(broker: TestBroker, cwd: string): string | null {
   const db = new Database(broker.dbPath, { readonly: true });
   try {
-    return (db.query("SELECT instance_token FROM peers WHERE cwd = ?").get(cwd) as { instance_token?: string } | null)?.instance_token ?? null;
+    // The server records process.cwd(), resolved by the kernel on POSIX and
+    // left as spelled on Windows: both spellings of the directory are asked.
+    return (
+      db.query("SELECT instance_token FROM peers WHERE cwd IN (?, ?)").get(cwd, realpathSync(cwd)) as { instance_token?: string } | null
+    )?.instance_token ?? null;
   } finally {
     db.close();
   }
@@ -325,8 +329,14 @@ test("a context resume is framed to MCP, acknowledged after notification, and ab
   const groupIdValue = await groupId(secret);
   const groupSecretHash = await sha256Hex(secret);
   const capability = randomBytes(32).toString("hex");
-  const settingsDir = mkdtempSync(join(tmpdir(), "cp-context-resume-"));
-  dirs.push(settingsDir);
+  // The server registers process.cwd(), which the kernel hands back resolved
+  // (macOS /var -> /private/var): the settings dir is reached through a
+  // symlink so the lookup by cwd meets that condition on every OS.
+  const realSettingsDir = mkdtempSync(join(tmpdir(), "cp-context-resume-"));
+  const linkParent = mkdtempSync(join(tmpdir(), "cp-context-resume-link-"));
+  const settingsDir = join(linkParent, "settings");
+  symlinkSync(realSettingsDir, settingsDir, "junction");
+  dirs.push(realSettingsDir, linkParent);
   mkdirSync(join(settingsDir, "claude-peers"), { recursive: true });
   writeFileSync(join(settingsDir, "claude-peers", "config.json"), JSON.stringify({
     groups: { alpha: secret },
