@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { FIXTURE_OPERATOR, FIXTURE_OPERATOR_ID, startBroker, stopBroker, post, approvalListBody, type TestBroker } from "./_helper.ts";
+import { startBroker, stopBroker, post, approvalListBody, type TestBroker } from "./_helper.ts";
 import {
   approvalWaitTimeoutSec,
   buildAuthProof,
@@ -22,23 +22,47 @@ afterAll(async () => {
   for (const b of brokers) await stopBroker(b);
 });
 
-async function boot(
-  env: Record<string, string> = {},
-  trustedOperators: readonly string[] | undefined = undefined
-): Promise<TestBroker> {
-  const b = await startBroker(env, trustedOperators ? { trustedOperators } : undefined);
-  brokers.push(b);
-  return b;
+interface Operator {
+  cred: ApprovalCredential;
+  id: string;
 }
 
-/** An operator: a credential plus its self-certifying id. */
-function newOperator(): { cred: ApprovalCredential; id: string } {
-  return { cred: FIXTURE_OPERATOR, id: FIXTURE_OPERATOR_ID };
-}
-
-function otherOperator(): { cred: ApprovalCredential; id: string } {
+// Every test acts as its own operator, so rows, tokens, tiles and caps never
+// meet across tests and one broker per env serves the whole file. All of them
+// are trusted at boot; the trust policy is fixed for the broker's lifetime.
+const OPERATOR_POOL_SIZE = 160;
+const operatorPool: Operator[] = Array.from({ length: OPERATOR_POOL_SIZE }, () => {
   const cred = generateCredential();
   return { cred, id: deriveOperatorId(cred.publicKey) };
+});
+let nextOperator = 0;
+
+// One broker per distinct env, started on first use and shared by every test.
+const booted = new Map<string, Promise<TestBroker>>();
+
+function boot(env: Record<string, string> = {}): Promise<TestBroker> {
+  const key = JSON.stringify(env);
+  let started = booted.get(key);
+  if (!started) {
+    started = startBroker(env, { trustedOperators: operatorPool.map((o) => o.cred.publicKey) }).then((b) => {
+      brokers.push(b);
+      return b;
+    });
+    booted.set(key, started);
+  }
+  return started;
+}
+
+/** A fresh trusted operator: a credential plus its self-certifying id. */
+function newOperator(): Operator {
+  const op = operatorPool[nextOperator++];
+  if (!op) throw new Error(`operator pool of ${OPERATOR_POOL_SIZE} exhausted: raise OPERATOR_POOL_SIZE`);
+  return op;
+}
+
+/** A second trusted operator, for a test that needs two identities. */
+function otherOperator(): Operator {
+  return newOperator();
 }
 
 /** Sign `payload` and POST it — the proof never covers itself. */
@@ -276,7 +300,7 @@ describe("operator compartmentalisation", () => {
   test("operator B can neither see nor claim operator A's approval", async () => {
     const a = newOperator();
     const other = otherOperator();
-    const b = await boot({}, [a.cred.publicKey, other.cred.publicKey]);
+    const b = await boot();
     const approval = await addApproval(b, a);
 
     const list = await signedPost<{ approvals: Approval[] }>(
@@ -788,7 +812,7 @@ describe("session token renewal", () => {
   test("renew_only rejects an absent, expired, foreign, or corrupted token", async () => {
     const op = newOperator();
     const foreign = otherOperator();
-    const b = await boot({}, [op.cred.publicKey, foreign.cred.publicKey]);
+    const b = await boot();
     const cred = generateCredential();
     const absent = await signedPost<{ error: string }>(
       b,
@@ -798,7 +822,7 @@ describe("session token renewal", () => {
     );
     expect(absent.status).toBe(409);
     const absentDb = new Database(b.dbPath);
-    const absentRows = (absentDb.query("SELECT COUNT(*) AS count FROM approval_session_tokens").get() as { count: number }).count;
+    const absentRows = (absentDb.query("SELECT COUNT(*) AS count FROM approval_session_tokens WHERE public_key = ? OR operator_id = ?").get(cred.publicKey, op.id) as { count: number }).count;
     absentDb.close();
     expect(absentRows).toBe(0);
 
@@ -865,10 +889,16 @@ describe("notification expiry (C-4: the notif expires, the session does not)", (
       new Date(Date.now() - 3600_000).toISOString(),
       approval.id,
     ]);
+    // The broker is shared with the other tests of this file, so the purge
+    // counter is compared to the overdue rows present, not to a literal 1.
+    const overdue = (
+      db.query("SELECT COUNT(*) AS n FROM pending_approvals WHERE status = 'pending' AND notif_expires_at < ?").get(new Date().toISOString()) as { n: number }
+    ).n;
     db.close();
+    expect(overdue, "this test's backdated row is among the overdue ones").toBeGreaterThanOrEqual(1);
 
     const admin = await fetch(`${b.url}/admin/purge-messages`);
-    expect((await admin.json()).expired_approvals).toBe(1);
+    expect((await admin.json()).expired_approvals, "the purge flips every overdue row and nothing else").toBe(overdue);
 
     const list = await signedPost<{ approvals: Approval[] }>(
       b,
