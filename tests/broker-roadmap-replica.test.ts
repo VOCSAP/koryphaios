@@ -261,6 +261,26 @@ async function createOn(broker: TestBroker, body: Record<string, unknown>): Prom
   return res.body.item;
 }
 
+/**
+ * Teardown for a test whose cards the upstream keeps refusing: the counters it
+ * leaves behind are broker-lifetime state that other tests assert exactly.
+ * Removed locally, the cards stop being pending or claimed, and the next pass
+ * drops them from both refusal counts.
+ */
+async function forgetRefusedCards(ids: string[]): Promise<void> {
+  const db = new Database(replica.dbPath);
+  try {
+    db.run("PRAGMA busy_timeout = 3000");
+    db.run(`DELETE FROM roadmap_items WHERE id IN (${ids.map(() => "?").join(", ")})`, ids);
+  } finally {
+    db.close();
+  }
+  await pollUntil("the refusal counters return to zero", 15_000, async () => {
+    const s = await syncStatus();
+    return { done: (s.refused ?? 0) === 0 && (s.refused_locks ?? 0) === 0, value: s };
+  });
+}
+
 test("a broker asked to replicate ITSELF refuses to start, loudly", async () => {
   // The one topology that cannot work: the upstream is this very process, so
   // the pass would pull back its own rows. Two brokers on one machine are NOT
@@ -1753,6 +1773,7 @@ test("a lock claim the upstream refuses stops that claim only, not the pass", as
     status.online,
     status.refused_locks,
   ]).toEqual(["a refused claim is counted on its own, and is not an outage either", true, 1]);
+  await forgetRefusedCards([first.id]);
 }, 60_000);
 
 test("a claim the upstream refuses because the card is inactive is not read as contested", async () => {
@@ -1805,6 +1826,7 @@ test("a claim the upstream refuses because the card is inactive is not read as c
     held!.locked,
     held!.lock_scope,
   ]).toEqual(["a card nobody else holds is never shown as contested", true, "local"]);
+  await forgetRefusedCards([card.id]);
 }, 60_000);
 
 test("an arbitration carries no credential and no operator proof, on either side", async () => {
@@ -1964,6 +1986,7 @@ test("a batch full of rows the upstream refuses never starves the row behind the
     poison.length,
     true,
   ]);
+  await forgetRefusedCards(poison);
 }, 90_000);
 
 test("CREATION: a card born on the replica with a rank keeps that rank through its first push", async () => {

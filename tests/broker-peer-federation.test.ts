@@ -5,7 +5,7 @@
 // against the local mechanic A, the name collision, and an upstream of an
 // older version that does not federate.
 
-import { test, expect, beforeAll, afterAll } from "bun:test";
+import { test, expect, beforeAll, afterAll, beforeEach } from "bun:test";
 import { Database } from "bun:sqlite";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -30,8 +30,12 @@ import type {
 const TOKEN = "peer-federation-token";
 const SECRET = "peer-federation-secret";
 const PK = "github.com/vocsap/federation-repo";
-/** The replicas answer the grace expiry within this many failed passes' backoff. */
-const GRACE_SEC = 3;
+/**
+ * A failed pass only checks the grace, and an offline replica's passes back off
+ * to 0.8 s then 2.4 s after the transition: a 2 s grace expires on the second
+ * of them, and the short outage reconnects well before it.
+ */
+const GRACE_SEC = 2;
 
 let G: string;
 let H: string;
@@ -92,7 +96,7 @@ function startReplica(proxy: UpstreamProxy): Promise<TestBroker> {
     CLAUDE_PEERS_BROKER_URL: proxy.url,
     CLAUDE_PEERS_BROKER_TOKEN: TOKEN,
     CLAUDE_PEERS_OFFLINE_REPLICA: "1",
-    CLAUDE_PEERS_SYNC_TICK_MS: "150",
+    CLAUDE_PEERS_SYNC_TICK_MS: "200",
     CLAUDE_PEERS_FEDERATION_GRACE_SEC: String(GRACE_SEC),
   });
 }
@@ -155,6 +159,26 @@ async function receive(label: string, b: TestBroker, token: string, text: string
 
 async function syncStatus(b: TestBroker): Promise<RoadmapSyncStatus> {
   return (await post<RoadmapSyncStatus>(`${b.url}/roadmap/sync/status`, {})).body;
+}
+
+/** Waits until the replica has completed `n` more sync passes. */
+async function waitPasses(b: TestBroker, n: number): Promise<void> {
+  let seen = (await syncStatus(b)).last_sync_at;
+  let count = 0;
+  await pollUntil(`${n} sync passes`, async () => {
+    const now = (await syncStatus(b)).last_sync_at;
+    if (now !== seen) {
+      seen = now;
+      count += 1;
+    }
+    return { done: count >= n, value: count };
+  });
+}
+
+/** Waits until a whole pass of each replica has run, R1's first, then R2's. */
+async function settleBothReplicas(): Promise<void> {
+  await waitPasses(R1, 2);
+  await waitPasses(R2, 2);
 }
 
 async function goOffline(proxy: UpstreamProxy, replica: TestBroker): Promise<void> {
@@ -223,6 +247,21 @@ beforeAll(async () => {
   await setId(R1, A.instance_token, "alice");
   await setId(R2, B.instance_token, "bob");
   await setId(U, C.instance_token, "carol");
+});
+
+// Every test starts from the directory the topology settles on, whatever ran
+// before it: each agent under its own name, seeing exactly the two others.
+beforeEach(async () => {
+  for (const [label, b, token, expected] of [
+    ["A sees bob and carol", () => R1, () => A, "bob,carol"],
+    ["B sees alice and carol", () => R2, () => B, "alice,carol"],
+    ["C sees alice and bob", () => U, () => C, "alice,bob"],
+  ] as const) {
+    await pollUntil(label, async () => {
+      const peers = await listPeers(b(), token().instance_token);
+      return { done: names(peers).join() === expected, value: names(peers) };
+    });
+  }
 });
 
 afterAll(async () => {
@@ -294,7 +333,7 @@ test("messaging: replica to replica, replica to upstream and back, delivered onc
       "the polled copy carries the same sender",
       "alice",
     ]);
-    await Bun.sleep(500);
+    await waitPasses(R2, 2);
     expect([
       "a message pulled twice is inserted once (federation_id is unique)",
       (await poll(R2, B.instance_token)).filter((m) => m.text === "hello bob from alice"),
@@ -331,7 +370,7 @@ test("messaging: replica to replica, replica to upstream and back, delivered onc
 test("the operator inbox and the Deck's announcements never leave their broker", async () => {
   const toOperator = await send(R1, A.instance_token, "operator", "a question for my operator");
   expect(["operator is a local deposit", toOperator]).toEqual(["operator is a local deposit", { ok: true }]);
-  await Bun.sleep(600);
+  await settleBothReplicas();
   const drain = (b: TestBroker) =>
     post<{ messages: { text: string }[] }>(`${b.url}/operator-inbox`, { group_id: G, group_secret_hash: H });
   expect([
@@ -357,7 +396,7 @@ test("the operator inbox and the Deck's announcements never leave their broker",
     "a targeted announce to a mirror is a missing peer",
     404,
   ]);
-  await Bun.sleep(600);
+  await settleBothReplicas();
   expect([
     "no announcement reaches the upstream or B",
     countMessages(U, "text LIKE 'deck %'"),
@@ -478,7 +517,7 @@ test("an outage longer than the grace: mirrors go dormant, the queue is dropped 
     const peers = await listPeers(U, C.instance_token);
     return { done: names(peers).includes("alice"), value: names(peers) };
   });
-  await Bun.sleep(600);
+  await settleBothReplicas();
   expect([
     "nothing dropped is ever delivered",
     (await poll(R2, B.instance_token)).map((m) => m.text),
@@ -487,35 +526,40 @@ test("an outage longer than the grace: mirrors go dormant, the queue is dropped 
 }, 40_000);
 
 test("two replicas naming their agent alike: one is suffixed upstream, both stay reachable by their upstream names", async () => {
-  await setId(R1, A.instance_token, "same");
-  await setId(R2, B.instance_token, "same");
-  const seen = await pollUntil("C sees same and same-2", async () => {
-    const peers = await listPeers(U, C.instance_token);
-    return { done: names(peers).join() === "same,same-2", value: names(peers) };
-  });
-  expect(seen).toEqual(["same", "same-2"]);
+  try {
+    await setId(R1, A.instance_token, "same");
+    await setId(R2, B.instance_token, "same");
+    const seen = await pollUntil("C sees same and same-2", async () => {
+      const peers = await listPeers(U, C.instance_token);
+      return { done: names(peers).join() === "same,same-2", value: names(peers) };
+    });
+    expect(seen).toEqual(["same", "same-2"]);
 
-  const aliasOf = async (b: TestBroker, token: string): Promise<string | null | undefined> => {
-    const rows = await getAuth<PublicPeer[]>(`${b.url}/admin/peers`);
-    return rows.find((p) => p.peer_id === "same" && p.via === null)?.upstream_peer_id;
-  };
-  const aliases = await pollUntil("each replica records the name its peer carries upstream", async () => {
-    const value = [await aliasOf(R1, A.instance_token), await aliasOf(R2, B.instance_token)].sort();
-    return { done: value.join() === "same,same-2", value };
-  });
-  expect(["exactly one of the two carries the suffixed alias", aliases]).toEqual([
-    "exactly one of the two carries the suffixed alias",
-    ["same", "same-2"],
-  ]);
+    const aliasOf = async (b: TestBroker, token: string): Promise<string | null | undefined> => {
+      const rows = await getAuth<PublicPeer[]>(`${b.url}/admin/peers`);
+      return rows.find((p) => p.peer_id === "same" && p.via === null)?.upstream_peer_id;
+    };
+    const aliases = await pollUntil("each replica records the name its peer carries upstream", async () => {
+      const value = [await aliasOf(R1, A.instance_token), await aliasOf(R2, B.instance_token)].sort();
+      return { done: value.join() === "same,same-2", value };
+    });
+    expect(["exactly one of the two carries the suffixed alias", aliases]).toEqual([
+      "exactly one of the two carries the suffixed alias",
+      ["same", "same-2"],
+    ]);
 
-  expect(await send(U, C.instance_token, "same", "for the one called same")).toEqual({ ok: true });
-  expect(await send(U, C.instance_token, "same-2", "for the one called same-2")).toEqual({ ok: true });
-  const suffixedIsA = (await aliasOf(R1, A.instance_token)) === "same-2";
-  const [forA, forB] = suffixedIsA
-    ? ["for the one called same-2", "for the one called same"]
-    : ["for the one called same", "for the one called same-2"];
-  await receive("A gets the message addressed to its upstream name", R1, A.instance_token, forA);
-  await receive("B gets the message addressed to its upstream name", R2, B.instance_token, forB);
+    expect(await send(U, C.instance_token, "same", "for the one called same")).toEqual({ ok: true });
+    expect(await send(U, C.instance_token, "same-2", "for the one called same-2")).toEqual({ ok: true });
+    const suffixedIsA = (await aliasOf(R1, A.instance_token)) === "same-2";
+    const [forA, forB] = suffixedIsA
+      ? ["for the one called same-2", "for the one called same"]
+      : ["for the one called same", "for the one called same-2"];
+    await receive("A gets the message addressed to its upstream name", R1, A.instance_token, forA);
+    await receive("B gets the message addressed to its upstream name", R2, B.instance_token, forB);
+  } finally {
+    await setId(R1, A.instance_token, "alice");
+    await setId(R2, B.instance_token, "bob");
+  }
 }, 30_000);
 
 test("an upstream without the federation routes: the roadmap still replicates, federation is off, said once", async () => {
@@ -548,7 +592,7 @@ test("an upstream without the federation routes: the roadmap still replicates, f
       "/health says the upstream does not federate",
       "unsupported",
     ]);
-    await Bun.sleep(1_000);
+    await waitPasses(R3, 3);
     const lines = readFileSync(join(R3.tmpDir, "logs", "broker.log"), "utf8").split("\n");
     expect([
       "the absence of federation is logged once, then never again",
@@ -640,7 +684,12 @@ test("an inbound message reusing an old upstream id after an upstream reset is d
     await receive("alice receives the second message despite the reused id", R1, A.instance_token, text);
     expect([
       "both messages are stored under distinct upstream-qualified ids",
-      countMessages(R1, "federation_id LIKE '%:1'"),
+      countMessages(
+        R1,
+        "federation_id IN (?, ?)",
+        "aaaaaaaa-1111-4111-8111-111111111111:1",
+        "bbbbbbbb-2222-4222-8222-222222222222:1"
+      ),
     ]).toEqual(["both messages are stored under distinct upstream-qualified ids", 2]);
   } finally {
     P1.intercept = null;
