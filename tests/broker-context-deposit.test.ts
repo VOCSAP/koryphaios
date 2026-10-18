@@ -639,11 +639,29 @@ describe("POST /context/transaction on a real broker", () => {
   });
 });
 
+/** The broker's own reported mode rides along, so a reply from a broker in another mode cannot satisfy a case. */
+async function resumeAdvertisement(b: TestBroker): Promise<{ mode: unknown; version: unknown; type: string }> {
+  const health = (await (await fetch(`${b.url}/health`)).json()) as Record<string, unknown>;
+  return { mode: health.mode, version: health.context_resume_version, type: typeof health.context_resume_version };
+}
+
 describe("context resume compatibility", () => {
+  let remote: TestBroker;
+
+  beforeAll(async () => {
+    remote = await startBroker({ CLAUDE_PEERS_BROKER_URL: "http://127.0.0.1:9" });
+  });
+
+  afterAll(async () => {
+    await stopBroker(remote);
+  });
+
   test("GET /health advertises the resume version as a number", async () => {
-    const health = (await (await fetch(`${broker.url}/health`)).json()) as Record<string, unknown>;
-    expect(health.context_resume_version).toBe(CONTEXT_RESUME_VERSION);
-    expect(typeof health.context_resume_version).toBe("number");
+    expect(await resumeAdvertisement(broker)).toEqual({ mode: "local", version: CONTEXT_RESUME_VERSION, type: "number" });
+  });
+
+  test("GET /health of a remote-mode broker advertises the resume version as a number", async () => {
+    expect(await resumeAdvertisement(remote)).toEqual({ mode: "remote", version: CONTEXT_RESUME_VERSION, type: "number" });
   });
 
   test("reserve refuses an owner whose server did not announce resume support, and any valid announcement lets it through", async () => {
@@ -1092,6 +1110,10 @@ describe("federation", () => {
     proxy.stop(true);
     await stopBroker(replica);
     await stopBroker(upstream);
+  });
+
+  test("GET /health of a replica advertises the resume version as a number", async () => {
+    expect(await resumeAdvertisement(replica)).toEqual({ mode: "replica", version: CONTEXT_RESUME_VERSION, type: "number" });
   });
 
   test("a replica keeps the deposit local: no upstream call carries its text or hash", async () => {

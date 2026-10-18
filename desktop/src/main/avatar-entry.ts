@@ -42,7 +42,7 @@ import { selectWindowShown, type AvatarGeometry } from './avatar-window-state'
 import { createAvatarQuitHandler } from './avatar-quit-handler'
 import { AVATAR_TRAY_COPY } from './avatar-tray-copy'
 import { deckBrokerMode, peersConfigPath, resolveBrokerEndpoint } from './broker-client'
-import { ensureLoopbackBroker, locateBrokerScript, withPathEntry } from './broker-spawn'
+import { ensureLoopbackBroker, locateUserBrokerScript, spawnDetachedBroker } from './broker-spawn'
 import { initDeckLog, logInfo, logWarn, reportError } from './log'
 import { installProcessFailureGuard } from './process-failure-guard'
 
@@ -156,18 +156,20 @@ async function startAvatar(): Promise<void> {
         isAlive: brokerAnswers,
         stopped: () => readBrokerStopMarker(brokerMarkerPath()).stopped,
         locate: () =>
-          locateBrokerScript(join(homedir(), '.claude.json'), app.getAppPath(), {
+          locateUserBrokerScript(app.getAppPath(), {
             readFile: (path) => (existsSync(path) ? readFileSync(path, 'utf8') : null),
             exists: (path) => existsSync(path),
             homeDir: homedir(),
             warn: (message) => reportError('avatar-broker', message)
           }),
-        spawn: (command, script, entryEnv) => {
-          const env = withPathEntry({ ...process.env, ...entryEnv }, join(homedir(), '.bun', 'bin'), process.platform === 'win32' ? ';' : ':')
-          const child = spawnProcess(command, [script], { detached: true, stdio: 'ignore', env })
-          child.on('error', (error) => reportError('avatar-broker', `local broker process failed to start (${command} ${script})`, error))
-          child.unref()
-        },
+        spawn: (command, script, entryEnv) =>
+          spawnDetachedBroker(command, script, entryEnv, {
+            env: process.env,
+            homeDir: homedir(),
+            platform: process.platform,
+            spawn: spawnProcess,
+            report: (message, error) => reportError('avatar-broker', message, error)
+          }),
         sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms))
       }),
     refresh: refreshManualStop,

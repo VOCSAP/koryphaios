@@ -3,17 +3,25 @@
 // how often a dead broker is relaunched.
 
 import { test, expect } from "bun:test";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 import {
   ensureLoopbackBroker,
   locateBrokerScript,
+  locateUserBrokerScript,
   RespawnThrottle,
+  spawnDetachedBroker,
   withPathEntry,
   type EnsureDeps,
 } from "../desktop/src/main/broker-spawn";
 
 const CLAUDE_JSON = "/home/op/.claude.json";
 const APP_ROOT = "/opt/koryphaios/desktop";
+
+type DetachedSpawnOptions = {
+  detached: true;
+  stdio: "ignore";
+  env: Record<string, string | undefined>;
+};
 
 function locateDeps(files: Record<string, string>, existing: string[]) {
   const reads: string[] = [];
@@ -227,4 +235,65 @@ test("the bun directory is appended to the PATH key that already exists, whateve
   expect(posix.PATH, "the posix key is extended the same way").toBe("/usr/bin:/home/op/.bun/bin");
   const empty = withPathEntry({}, "/home/op/.bun/bin", ":");
   expect(empty.PATH, "an environment with no PATH at all gets one, without a leading separator").toBe("/home/op/.bun/bin");
+});
+
+test("the user-scope helper locates the configured broker and returns null when no script exists", () => {
+  const userConfig = join("/home/op", ".claude.json");
+  const configured = locateDeps(
+    { [userConfig]: JSON.stringify({ mcpServers: { "claude-peers": { command: "bun", args: ["/home/op/koryphaios/server.ts"] } } }) },
+    ["/home/op/koryphaios/broker.ts"]
+  );
+  expect(locateUserBrokerScript(APP_ROOT, configured.deps)?.script).toBe("/home/op/koryphaios/broker.ts");
+  const missing = locateDeps({}, []);
+  expect(locateUserBrokerScript(APP_ROOT, missing.deps)).toBeNull();
+  expect(missing.reads).toEqual([userConfig]);
+});
+
+test("the detached spawn adds bun to PATH, unreferences its child, and reports child errors", () => {
+  let errorListener: ((error: unknown) => void) | undefined;
+  let unrefCalls = 0;
+  const calls: Array<[string, string[], DetachedSpawnOptions]> = [];
+  const reports: Array<[string, unknown]> = [];
+  spawnDetachedBroker("bun", "/opt/koryphaios/broker.ts", { CLAUDE_PEERS_GROUP: "local" }, {
+    env: { PATH: "/usr/bin", CLAUDE_PEERS_GROUP: "deck" },
+    homeDir: "/home/op",
+    platform: "linux",
+    spawn: (command: string, args: string[], options: DetachedSpawnOptions) => {
+      calls.push([command, args, options]);
+      return {
+        on: (event: "error", listener: (error: unknown) => void) => {
+          expect(event).toBe("error");
+          errorListener = listener;
+        },
+        unref: () => {
+          unrefCalls += 1;
+        },
+      };
+    },
+    report: (message: string, error: unknown) => reports.push([message, error]),
+  });
+  expect(calls).toEqual([[
+    "bun",
+    ["/opt/koryphaios/broker.ts"],
+    { detached: true, stdio: "ignore", env: { PATH: "/usr/bin:/home/op/.bun/bin", CLAUDE_PEERS_GROUP: "local" } },
+  ]]);
+  expect(unrefCalls).toBe(1);
+  const error = new Error("ENOENT");
+  errorListener!(error);
+  expect(reports).toEqual([["local broker process failed to start (bun /opt/koryphaios/broker.ts)", error]]);
+});
+
+test("the detached spawn uses the Windows separator and preserves the Path key", () => {
+  let environment: Record<string, string | undefined> | undefined;
+  spawnDetachedBroker("bun.exe", "C:\\repo\\broker.ts", {}, {
+    env: { Path: "C:\\Windows" },
+    homeDir: "C:\\Users\\op",
+    platform: "win32",
+    spawn: (_command: string, _args: string[], options: DetachedSpawnOptions) => {
+      environment = options.env;
+      return { on: (_event: "error", _listener: (error: unknown) => void) => {}, unref: () => {} };
+    },
+    report: (_message: string, _error: unknown) => {},
+  });
+  expect(environment).toEqual({ Path: "C:\\Windows;C:\\Users\\op\\.bun\\bin" });
 });

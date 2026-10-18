@@ -12,7 +12,7 @@ import {
   PEER_ID_RE,
   resolveDirectiveTargets
 } from './directive'
-import { ContextResumeUnsupportedError } from './broker-client'
+import { ContextResumeUnsupportedError, type ContextResumeDelivery } from './broker-client'
 import { unreachedTargets, unreachedTargetsText } from './directive-journal'
 import { isDepositIdShape } from '../../../shared/context-deposit-id'
 import { CONTEXT_CLEAR_IDLE_WAIT_MS } from '../../../shared/context-timing'
@@ -53,7 +53,7 @@ export interface ClearReloadHost {
   readClearBackchannelBaseline?(tileId: string): string | null
   waitForClearBackchannel?(tileId: string, currentSessionId: string, baselineSessionId: string | null): Promise<void>
   /** `cleared` is true only once the new clear rotation has been observed. */
-  releaseContextDeposit?(depositId: string, attemptId: string, cleared: boolean): Promise<void>
+  releaseContextDeposit?(depositId: string, attemptId: string, cleared: boolean): Promise<ContextResumeDelivery | void>
   reportError?(message: string, error?: unknown): void
 }
 
@@ -116,7 +116,6 @@ export function runClearReloadInTurn(
       }
       await host.waitForClearBackchannel(tileId, currentSessionId, baselineSessionId)
       rotationObserved = true
-      journal(`clear_reload -> "${peerId}": written`)
       return 'written'
     } catch (error) {
       host.reportError?.(`context clear failed for "${peerId}"`, error)
@@ -124,9 +123,21 @@ export function runClearReloadInTurn(
     } finally {
       if (attemptId) {
         try {
-          await host.releaseContextDeposit(options.contextDepositId, attemptId, rotationObserved)
+          const resumeDelivery = await host.releaseContextDeposit(options.contextDepositId, attemptId, rotationObserved)
+          if (rotationObserved && resumeDelivery === 'pending') {
+            journal(`clear_reload -> "${peerId}": resume delivery pending until WebSocket reconnects`)
+            host.reportError?.(`context resume for "${peerId}" is pending until WebSocket reconnects`)
+          } else if (rotationObserved && resumeDelivery === 'sent') {
+            journal(`clear_reload -> "${peerId}": written`)
+          } else if (rotationObserved) {
+            const error = new Error('context resume status unknown')
+            host.reportError?.(`context resume status unknown for "${peerId}"`, error)
+          }
         } catch (error) {
-          host.reportError?.(`context clear failed for "${peerId}"`, error)
+          host.reportError?.(
+            rotationObserved ? `context resume status unknown for "${peerId}"` : `context clear failed for "${peerId}"`,
+            error
+          )
           throw error
         }
       }

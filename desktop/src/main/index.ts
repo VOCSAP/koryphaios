@@ -83,7 +83,8 @@ import {
   resolveDispatchRequest,
   sendAnnounce,
   type BrokerEndpoint,
-  type ContextTransactionRequest
+  type ContextTransactionRequest,
+  type ContextTransactionResponse
 } from './broker-client'
 import {
   appendInboxHistory,
@@ -102,9 +103,9 @@ import {
 } from './broker-client'
 import {
   ensureLoopbackBroker,
-  locateBrokerScript,
+  locateUserBrokerScript,
   RespawnThrottle,
-  withPathEntry,
+  spawnDetachedBroker,
   type EnsureOutcome
 } from './broker-spawn'
 import { createBrokerStart } from './broker-start'
@@ -1504,25 +1505,20 @@ async function startLoopbackBroker(reason: 'startup' | 'outage' | 'manual'): Pro
     isAlive: brokerAlive,
     stopped: () => readManualStop() !== null,
     locate: () =>
-      locateBrokerScript(join(homedir(), '.claude.json'), app.getAppPath(), {
+      locateUserBrokerScript(app.getAppPath(), {
         readFile: (p) => (existsSync(p) ? readFileSync(p, 'utf8') : null),
         exists: (p) => existsSync(p),
         homeDir: homedir(),
         warn: (m) => reportError('broker', m)
       }),
-    spawn: (command, script, entryEnv) => {
-      // A GUI launch does not carry the login shell's PATH: bun's default
-      // install dir is added so the plain `bun` of an MCP entry resolves.
-      const bunDir = join(homedir(), '.bun', 'bin')
-      const env = withPathEntry(
-        { ...process.env, ...entryEnv },
-        bunDir,
-        process.platform === 'win32' ? ';' : ':'
-      )
-      const child = spawnProcess(command, [script], { detached: true, stdio: 'ignore', env })
-      child.on('error', (e) => reportError('broker', `loopback broker process failed to start (${command} ${script})`, e))
-      child.unref()
-    },
+    spawn: (command, script, entryEnv) =>
+      spawnDetachedBroker(command, script, entryEnv, {
+        env: process.env,
+        homeDir: homedir(),
+        platform: process.platform,
+        spawn: spawnProcess,
+        report: (message, error) => reportError('broker', message, error)
+      }),
     sleep: (ms) => new Promise((r) => setTimeout(r, ms))
   })
   switch (outcome.action) {
@@ -1985,7 +1981,7 @@ function brokerEndpointOnce(): () => BrokerEndpoint {
 async function contextTransaction(
   request: ContextTransactionRequest,
   endpoint: BrokerEndpoint
-): Promise<{ attemptId?: string }> {
+): Promise<ContextTransactionResponse> {
   const identity = approvals.operator
   if (!identity) throw new Error('operator identity is unavailable for context transaction')
   const payload = {
@@ -2039,10 +2035,11 @@ const runClearReload = (
         await service.waitForClearBackchannel(id, currentSessionId, baselineSessionId)
       },
       releaseContextDeposit: async (depositId, attemptId, cleared) => {
-        await contextTransaction(
+        const result = await contextTransaction(
           { action: 'release', depositId, targetPeerId: peerId, attemptId, cleared },
           endpointOnce()
         )
+        return result.resumeDelivery
       },
       reportError: (message, error) => reportError('dispatch', message, error)
     } satisfies Required<ClearReloadHost>,

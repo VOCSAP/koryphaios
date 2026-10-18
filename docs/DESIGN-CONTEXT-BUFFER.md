@@ -240,7 +240,7 @@ Codes de retour :
 | Code | Sens |
 |---|---|
 | 0 | Dépôt stocké |
-| 1 | Broker injoignable, erreur réseau ou 5xx |
+| 1 | Broker injoignable, erreur réseau, 5xx ou 401 d'authentification bearer du broker (distinct du refus `capability`) |
 | 2 | Usage : drapeau inconnu, entrée absente, illisible, vide, non régulière, trop volumineuse en octets |
 | 3 | Texte trop long (`too_long`) ou contenu refusé (`empty_text`, `ill_formed_text`, `forbidden_characters`) |
 | 4 | Quota (`quota_owner`, `quota_group`, `quota_total`) ou `replace_not_found` |
@@ -259,7 +259,7 @@ kept: memory of the broker only; dropped when this session disconnects or relaun
 next: give this deposit_id to the lead. Do not run /clear yourself.
 ```
 
-Refus sur stderr, première ligne `context-deposit: refused (<reason>)` puis une ligne de remède propre à la cause. Exemples : `too_long` indique `got_chars` et `limit_chars` et demande de raccourcir (ordre de la consigne mesurée : prochaine action, état, décisions) ; `quota_owner` liste les identifiants détenus et propose `--replace` ; `capability` explique que la session n'a pas été lancée par Kory avec une capacité, qu'elle est en sandbox, ou que l'env a été purgé (`CLAUDE_CODE_SUBPROCESS_ENV_SCRUB`) ; `contested` dit qu'une seconde session vivante partage cette capacité (session imbriquée ou coéquipier) et qu'il faut la terminer. La capacité, le texte et l'empreinte ne sont JAMAIS imprimés.
+Refus sur stderr, première ligne `context-deposit: refused (<reason>)` puis une ligne de remède propre à la cause. Exemples : `too_long` indique `got_chars` et `limit_chars` et demande de raccourcir (ordre de la consigne mesurée : prochaine action, état, décisions) ; `quota_owner` liste les identifiants détenus et propose `--replace` ; `capability` explique que la capacité est absente ou invalide, ou que sa liaison à un pair actif manque (notamment hors lancement Kory ou en sandbox) ; `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB` conserve la variable `_CAPABILITY` et ne suffit donc pas à expliquer ce refus (§16 M1) ; `contested` dit qu'une seconde session vivante partage cette capacité (session imbriquée ou coéquipier) et qu'il faut la terminer. La capacité, le texte et l'empreinte ne sont JAMAIS imprimés.
 
 ## 12. Côté Deck
 
@@ -333,7 +333,11 @@ Garde-fous de couverture (`CLAUDE.md`, « A guard needs its COVERAGE audited »)
 
 ## 16. Mesures à faire pendant l'implémentation
 
-- **M1.** Dans une vraie tuile Kory, depuis la commande Bash de l'agent : `env` montre `CLAUDE_PEERS_DESK_SESSION` et `CLAUDE_PEERS_DEPOSIT_CAPABILITY`, et `bun cli.ts context-deposit --input <fichier>` aboutit. Comparer avec `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1` : le résultat attendu est le refus 401 explicite, jamais un dépôt anonyme.
+- **M1.** Dans une vraie tuile Kory, depuis la commande Bash de l'agent : vérifier la présence de `CLAUDE_PEERS_DESK_SESSION` et `CLAUDE_PEERS_DEPOSIT_CAPABILITY` sans afficher leurs valeurs, puis vérifier que `bun cli.ts context-deposit --input <fichier>` aboutit.
+  Comparer avec `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1` : le suffixe `_CAPABILITY` est volontaire pour conserver la capacité de dépôt dans les sous-processus malgré le scrub, contrairement au suffixe `_TOKEN`.
+  Sur un broker distant exigeant un bearer, le retrait de `CLAUDE_PEERS_BROKER_TOKEN` produit `failed (HTTP 401)` (sortie 1), pas le refus `capability` (sortie 5).
+  Sur un broker local sans bearer, le scrub n'empêche pas le dépôt si la capacité reste liée à un unique pair actif : le dépôt appartient à ce pair, il n'est pas anonyme ; les refus des §9 et §14.6 restent applicables si la capacité est invalide.
+  Risque accepté (contrainte de sécurité L3, carte `b7ee3194`) : tout processus héritant de l'env peut déposer ou remplacer au nom de la tuile, donc injecter un texte survivant au `/clear` ; le push le cadre comme une donnée datée à revérifier, avec `deposited_at` et l'identifiant du dépôt (§17.7).
 - **M2.** Dans une tuile, démarrer un `claude` imbriqué et, si possible, un coéquipier d'agent-teams : confirmer qu'ils s'enregistrent comme pairs actifs avec la même empreinte (donc 409 `contested`), et qu'après leur arrêt la tuile redépose.
 - **M3.** Lecture de `--input -` et fins de ligne CRLF sous Windows.
 - **M4 (coût).** Taille réelle du pire dépôt (plafond de points de code d'un texte très astral) dans le registre, pour confirmer que les quotas §8.4 tiennent en quelques mégaoctets.

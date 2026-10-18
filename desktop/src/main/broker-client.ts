@@ -76,9 +76,10 @@ const OWNER_LACKS_CONTEXT_RESUME = 'owner_lacks_context_resume'
  */
 export async function requireContextResumeSupport(
   endpoint: BrokerEndpoint,
-  fetchImpl: typeof fetch = fetch
+  fetchImpl: typeof fetch = fetch,
+  timeoutSignal: (ms: number) => AbortSignal = AbortSignal.timeout
 ): Promise<void> {
-  const res = await fetchImpl(`${endpoint.url}/health`, { signal: AbortSignal.timeout(2000) })
+  const res = await fetchImpl(`${endpoint.url}/health`, { signal: timeoutSignal(2000) })
   const body = res.ok ? ((await res.json()) as { context_resume_version?: unknown } | null) : null
   const version = body?.context_resume_version
   if (typeof version !== 'number' || !(version >= 1)) {
@@ -91,6 +92,13 @@ export async function requireContextResumeSupport(
 export type ContextTransactionRequest =
   | { action: 'reserve'; depositId: string; targetPeerId: string }
   | { action: 'release'; depositId: string; targetPeerId: string; attemptId: string; cleared: boolean }
+
+export type ContextResumeDelivery = 'pending' | 'sent'
+
+export interface ContextTransactionResponse {
+  attemptId?: string
+  resumeDelivery?: ContextResumeDelivery
+}
 
 /** The request-specific fields of POST /context/transaction, signed together with the group fields. */
 export function contextTransactionFields(request: ContextTransactionRequest): Record<string, unknown> {
@@ -106,7 +114,7 @@ export function contextTransactionFields(request: ContextTransactionRequest): Re
 export async function readContextTransactionResponse(
   request: ContextTransactionRequest,
   response: Response
-): Promise<{ attemptId?: string }> {
+): Promise<ContextTransactionResponse> {
   if (!response.ok) {
     let body: { error?: unknown; reason?: unknown } = {}
     try {
@@ -125,7 +133,7 @@ export async function readContextTransactionResponse(
           : ''
     throw new Error(detail || `context transaction ${request.action} failed: ${response.status}`)
   }
-  const result = (await response.json()) as { state?: unknown; attempt_id?: unknown }
+  const result = (await response.json()) as { state?: unknown; attempt_id?: unknown; resume_delivery?: unknown }
   if (request.action === 'reserve') {
     if (result.state !== 'reserved' || typeof result.attempt_id !== 'string' || !/^[a-f0-9]{32}$/.test(result.attempt_id)) {
       throw new Error('context transaction reserve returned an invalid response')
@@ -134,6 +142,12 @@ export async function readContextTransactionResponse(
   }
   if (result.state !== (request.cleared ? 'resuming' : 'held')) {
     throw new Error('context transaction release returned an invalid response')
+  }
+  if (request.cleared) {
+    if (result.resume_delivery !== 'pending' && result.resume_delivery !== 'sent') {
+      throw new Error('context transaction release returned an invalid response')
+    }
+    return { resumeDelivery: result.resume_delivery }
   }
   return {}
 }

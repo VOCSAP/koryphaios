@@ -9,7 +9,7 @@
 // in. A project's .mcp.json is never read: a cloned repo must not decide what
 // this process executes.
 
-import { resolve } from 'node:path'
+import { join, posix, resolve, win32 } from 'node:path'
 
 export type DeckBrokerModeLike = 'local' | 'remote' | 'replica'
 
@@ -77,6 +77,10 @@ export function locateBrokerScript(
   return null
 }
 
+export function locateUserBrokerScript(appRoot: string, deps: LocateDeps): BrokerScriptLocation | null {
+  return locateBrokerScript(join(deps.homeDir, '.claude.json'), appRoot, deps)
+}
+
 function mcpEntry(
   parsed: unknown,
   name: string
@@ -115,6 +119,33 @@ export function withPathEntry(
   const key = Object.keys(base).find((k) => k.toLowerCase() === 'path') ?? 'PATH'
   const current = base[key] ?? ''
   return { ...base, [key]: current ? `${current}${separator}${dir}` : dir }
+}
+
+export interface SpawnDetachedBrokerDeps {
+  env: Record<string, string | undefined>
+  homeDir: string
+  platform: string
+  spawn: (
+    command: string,
+    args: string[],
+    options: { detached: true; stdio: 'ignore'; env: Record<string, string | undefined> }
+  ) => { on: (event: 'error', listener: (error: unknown) => void) => void; unref: () => void }
+  report: (message: string, error: unknown) => void
+}
+
+// A GUI launch lacks the login shell's PATH, so bun's default install dir is appended.
+export function spawnDetachedBroker(
+  command: string,
+  script: string,
+  entryEnv: Record<string, string>,
+  deps: SpawnDetachedBrokerDeps
+): void {
+  const pathSeparator = deps.platform === 'win32' ? ';' : ':'
+  const bunDir = (deps.platform === 'win32' ? win32 : posix).join(deps.homeDir, '.bun', 'bin')
+  const env = withPathEntry({ ...deps.env, ...entryEnv }, bunDir, pathSeparator)
+  const child = deps.spawn(command, [script], { detached: true, stdio: 'ignore', env })
+  child.on('error', (error) => deps.report(`local broker process failed to start (${command} ${script})`, error))
+  child.unref()
 }
 
 export type EnsureOutcome =

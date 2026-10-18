@@ -228,6 +228,7 @@ test("context clear reserves, observes a new clear rotation, then releases witho
       },
       releaseContextDeposit: async (depositId, attemptId) => {
         events.push(`release:${depositId}:${attemptId}`);
+        return "sent" as const;
       },
       reportError: (_message, error) => errors.push(error)
     },
@@ -428,7 +429,7 @@ test("context clear reports a release refusal after a verified rotation", async 
     )
   ).rejects.toBe(failure);
 
-  expect(errors).toEqual([{ message: 'context clear failed for "lead-a1b2"', error: failure }]);
+  expect(errors).toEqual([{ message: 'context resume status unknown for "lead-a1b2"', error: failure }]);
 });
 
 test("context clear checks operator trust before reserving the deposit", async () => {
@@ -620,6 +621,87 @@ test("the context resume probe fails closed when /health cannot be reached or re
   ).rejects.toThrow();
 });
 
+test("a timed out context resume probe refuses before reservation without waiting two real seconds", async () => {
+  const timeout = new Error("simulated health timeout");
+  const timeoutCalls: number[] = [];
+  const immediateTimeout = (ms: number): AbortSignal => {
+    timeoutCalls.push(ms);
+    const controller = new AbortController();
+    controller.abort(timeout);
+    return controller.signal;
+  };
+  const neverRespondingHealth = ((_: string | URL | Request, init?: RequestInit) =>
+    new Promise<Response>((_resolve, reject) => {
+      const signal = init?.signal;
+      if (!signal) return;
+      if (signal.aborted) {
+        reject(signal.reason);
+        return;
+      }
+      signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+    })) as typeof fetch;
+  let reservations = 0;
+  const typed: string[] = [];
+  const timedOut = runClearReloadInTurn(
+    {
+      serializeTile: (_id, fn) => fn(async (keys) => { typed.push(keys); return "written" as const; }),
+      checkOperatorTrust: async () => "compatible" as const,
+      checkContextResumeSupport: () =>
+        requireContextResumeSupport({ url: "http://broker.local", token: "" }, neverRespondingHealth, immediateTimeout),
+      currentSessionId: () => "sid-before",
+      reserveContextDeposit: async () => { reservations += 1; return "attempt-1"; },
+      readClearBackchannelBaseline: () => null,
+      waitForClearBackchannel: async () => {},
+      releaseContextDeposit: async () => {},
+      reportError: () => {}
+    },
+    () => {},
+    "tile-1",
+    "lead-a1b2",
+    "night-shift",
+    undefined,
+    { contextDepositId: "deposit-1" }
+  );
+  const result = await Promise.race([
+    timedOut.then(
+      () => ({ state: "resolved" as const }),
+      (error: unknown) => ({ state: "rejected" as const, error })
+    ),
+    new Promise<{ state: "test-timeout" }>((resolve) => setTimeout(() => resolve({ state: "test-timeout" }), 100))
+  ]);
+
+  expect(result).toEqual({ state: "rejected", error: timeout });
+  expect({ timeoutCalls, reservations, typed }).toEqual({ timeoutCalls: [2000], reservations: 0, typed: [] });
+});
+
+test("two context clear directives each probe the broker health", async () => {
+  const urls: string[] = [];
+  const endpoint = { url: "http://broker.local", token: "" };
+  const fetchImpl = healthFetch(() => Response.json({ context_resume_version: 1 }), urls);
+  let reservations = 0;
+  const host: ClearReloadHost = {
+    serializeTile: (_id, fn) => fn(async () => "written" as const),
+    checkOperatorTrust: async () => "compatible" as const,
+    checkContextResumeSupport: () => requireContextResumeSupport(endpoint, fetchImpl),
+    currentSessionId: () => "sid-before",
+    reserveContextDeposit: async () => `attempt-${++reservations}`,
+    readClearBackchannelBaseline: () => null,
+    waitForClearBackchannel: async () => {},
+    releaseContextDeposit: async () => "sent" as const,
+    reportError: () => {}
+  };
+  const run = () =>
+    runClearReloadInTurn(host, () => {}, "tile-1", "lead-a1b2", "night-shift", undefined, { contextDepositId: "deposit-1" });
+
+  await run();
+  await run();
+
+  expect({ urls, reservations }).toEqual({
+    urls: ["http://broker.local/health", "http://broker.local/health"],
+    reservations: 2
+  });
+});
+
 test("the context transaction names the broker's owner_lacks_context_resume refusal instead of a generic failure", async () => {
   const request = { action: "reserve", depositId: "0123456789abcdef", targetPeerId: "alpha" } as const;
   const refusal = await readContextTransactionResponse(
@@ -653,8 +735,18 @@ test("the context transaction accepts the reserve attempt id and checks the stat
   ).rejects.toThrow("reserve returned an invalid response");
 
   const release = { action: "release", depositId: "0123456789abcdef", targetPeerId: "alpha", attemptId } as const;
-  expect(await readContextTransactionResponse({ ...release, cleared: true }, Response.json({ state: "resuming" }))).toEqual({});
+  for (const resumeDelivery of ["pending", "sent"] as const) {
+    expect(
+      await readContextTransactionResponse(
+        { ...release, cleared: true },
+        Response.json({ state: "resuming", resume_delivery: resumeDelivery })
+      )
+    ).toEqual({ resumeDelivery });
+  }
   expect(await readContextTransactionResponse({ ...release, cleared: false }, Response.json({ state: "held" }))).toEqual({});
+  await expect(
+    readContextTransactionResponse({ ...release, cleared: true }, Response.json({ state: "resuming" }))
+  ).rejects.toThrow("release returned an invalid response");
   await expect(
     readContextTransactionResponse({ ...release, cleared: true }, Response.json({ state: "held" }))
   ).rejects.toThrow("release returned an invalid response");
@@ -746,6 +838,18 @@ test("the Deck host releases with the cleared flag it was given, for the peer it
     [{ action: "release", depositId: "0123456789abcdef", targetPeerId: "lead-a1b2", attemptId: "a".repeat(32), cleared: true }, endpoint],
     [{ action: "release", depositId: "0123456789abcdef", targetPeerId: "lead-a1b2", attemptId: "a".repeat(32), cleared: false }, endpoint]
   ]);
+});
+
+test("the Deck host forwards the release delivery to clear_reload", async () => {
+  const endpointOnce = () => ({ url: "http://broker.local", token: "" });
+  const contextTransaction = async () => ({ resumeDelivery: "pending" as const });
+  const release = evaluateHostCallback(
+    "releaseContextDeposit",
+    ["contextTransaction", "peerId", "endpointOnce"],
+    [contextTransaction, "lead-a1b2", endpointOnce]
+  ) as (depositId: string, attemptId: string, cleared: boolean) => Promise<unknown>;
+
+  expect(await release("0123456789abcdef", "a".repeat(32), true)).toBe("pending");
 });
 
 test("the Deck host sends the probe, the reservation and the release to one endpoint resolved once per directive", async () => {
@@ -1001,6 +1105,149 @@ test("context clear signs cleared true only after the clear rotation was observe
     run(host({ serializeTile: (_id, fn) => fn(async () => { throw new Error("pty write failed"); }) }))
   ).rejects.toThrow("pty write failed");
   expect(released).toEqual([false]);
+});
+
+test("a pending resume delivery is reported separately from a sent clear", async () => {
+  for (const resumeDelivery of ["pending", "sent"] as const) {
+    const lines: string[] = [];
+    const reports: string[] = [];
+    await runClearReloadInTurn(
+      {
+        serializeTile: (_id, fn) => fn(async () => "written" as const),
+        checkOperatorTrust: async () => "compatible" as const,
+        checkContextResumeSupport: async () => {},
+        currentSessionId: () => "sid-before",
+        reserveContextDeposit: async () => "attempt-1",
+        readClearBackchannelBaseline: () => null,
+        waitForClearBackchannel: async () => {},
+        releaseContextDeposit: async () => resumeDelivery,
+        reportError: (message) => { reports.push(message); }
+      },
+      (line) => { lines.push(line); },
+      "tile-1",
+      "lead-a1b2",
+      "night-shift",
+      undefined,
+      { contextDepositId: "deposit-1" }
+    );
+
+    expect({ resumeDelivery, lines, reports }).toEqual(
+      resumeDelivery === "pending"
+        ? {
+            resumeDelivery,
+            lines: ['clear_reload -> "lead-a1b2": resume delivery pending until WebSocket reconnects'],
+            reports: ['context resume for "lead-a1b2" is pending until WebSocket reconnects']
+          }
+        : {
+            resumeDelivery,
+            lines: ['clear_reload -> "lead-a1b2": written'],
+            reports: []
+          }
+    );
+  }
+
+  const barrierLines: string[] = [];
+  await expect(
+    runClearReloadInTurn(
+      {
+        serializeTile: (_id, fn) => fn(async () => "written" as const),
+        checkOperatorTrust: async () => "compatible" as const,
+        checkContextResumeSupport: async () => {},
+        currentSessionId: () => "sid-before",
+        reserveContextDeposit: async () => "attempt-1",
+        readClearBackchannelBaseline: () => null,
+        waitForClearBackchannel: async () => { throw new Error("clear rotation timed out"); },
+        releaseContextDeposit: async () => {},
+        reportError: () => {}
+      },
+      (line) => { barrierLines.push(line); },
+      "tile-1",
+      "lead-a1b2",
+      "night-shift",
+      undefined,
+      { contextDepositId: "deposit-1" }
+    )
+  ).rejects.toThrow("clear rotation timed out");
+
+  const rejectedClearLines: string[] = [];
+  expect(
+    await runClearReloadInTurn(
+      {
+        serializeTile: (_id, fn) => fn(async () => "busy-timeout" as const),
+        checkOperatorTrust: async () => "compatible" as const,
+        checkContextResumeSupport: async () => {},
+        currentSessionId: () => "sid-before",
+        reserveContextDeposit: async () => "attempt-1",
+        readClearBackchannelBaseline: () => null,
+        waitForClearBackchannel: async () => {},
+        releaseContextDeposit: async () => {},
+        reportError: () => {}
+      },
+      (line) => { rejectedClearLines.push(line); },
+      "tile-1",
+      "lead-a1b2",
+      "night-shift",
+      undefined,
+      { contextDepositId: "deposit-1" }
+    )
+  ).toBe("busy-timeout");
+  expect([...barrierLines, ...rejectedClearLines]).not.toContain('clear_reload -> "lead-a1b2": written');
+});
+
+test("an unknown resume status is reported without a sent journal", async () => {
+  const lines: string[] = [];
+  const reports: Array<{ message: string; error: unknown }> = [];
+  await runClearReloadInTurn(
+    {
+      serializeTile: (_id, fn) => fn(async () => "written" as const),
+      checkOperatorTrust: async () => "compatible" as const,
+      checkContextResumeSupport: async () => {},
+      currentSessionId: () => "sid-before",
+      reserveContextDeposit: async () => "attempt-1",
+      readClearBackchannelBaseline: () => null,
+      waitForClearBackchannel: async () => {},
+      releaseContextDeposit: async () => undefined,
+      reportError: (message, error) => { reports.push({ message, error }); }
+    },
+    (line) => { lines.push(line); },
+    "tile-1",
+    "lead-a1b2",
+    "night-shift",
+    undefined,
+    { contextDepositId: "deposit-1" }
+  );
+
+  expect(lines).not.toContain('clear_reload -> "lead-a1b2": written');
+  expect(reports).toEqual([
+    { message: 'context resume status unknown for "lead-a1b2"', error: new Error("context resume status unknown") }
+  ]);
+});
+
+test("a release failure after rotation reports an unknown resume status", async () => {
+  const failure = new Error("context transaction release returned an invalid response");
+  const reports: Array<{ message: string; error: unknown }> = [];
+  await expect(
+    runClearReloadInTurn(
+      {
+        serializeTile: (_id, fn) => fn(async () => "written" as const),
+        checkOperatorTrust: async () => "compatible" as const,
+        checkContextResumeSupport: async () => {},
+        currentSessionId: () => "sid-before",
+        reserveContextDeposit: async () => "attempt-1",
+        readClearBackchannelBaseline: () => null,
+        waitForClearBackchannel: async () => {},
+        releaseContextDeposit: async () => { throw failure; },
+        reportError: (message, error) => { reports.push({ message, error }); }
+      },
+      () => {},
+      "tile-1",
+      "lead-a1b2",
+      "night-shift",
+      undefined,
+      { contextDepositId: "deposit-1" }
+    )
+  ).rejects.toBe(failure);
+  expect(reports).toEqual([{ message: 'context resume status unknown for "lead-a1b2"', error: failure }]);
 });
 
 test("a rotation wait still pending never lets the release claim the clear happened", async () => {
