@@ -1,4 +1,4 @@
-import { test, expect, afterEach } from "bun:test";
+import { test, expect, afterAll, afterEach, beforeAll } from "bun:test";
 import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
@@ -311,14 +311,44 @@ test.skipIf(process.platform === "win32")("real script: large operator output is
   expect(res.stdout.length, "every byte of the operator's stdout reaches the status bar").toBe(300000);
 }, 20000);
 
-test.skipIf(process.platform === "win32")("real script: a timed-out operator command is killed with its whole process group", async () => {
-  const home = tmpDir();
+interface TimedOutChain {
+  res: Run;
+  elapsed: number;
+  pidFile: string;
+}
+
+// The chain timeout is a 4 s constant of the script: started before the first test, the run
+// overlaps the rest of the file instead of adding to it. Its directory is removed in afterAll,
+// since the per-test afterEach drains tmpDirs.
+const suiteDirs: string[] = [];
+afterAll(() => {
+  for (const d of suiteDirs.splice(0)) rmSync(d, { recursive: true, force: true });
+});
+let timedOutChainRun: Promise<{ value: TimedOutChain } | { error: unknown }> | undefined;
+beforeAll(() => {
+  if (process.platform === "win32") return;
+  timedOutChainRun = runTimedOutChain().then(
+    (value) => ({ value }),
+    (error: unknown) => ({ error }),
+  );
+});
+
+async function runTimedOutChain(): Promise<TimedOutChain> {
+  const home = mkdtempSync(join(tmpdir(), "kory-statusline-timeout-"));
+  suiteDirs.push(home);
   const pidFile = join(home, "sleep.pid");
   operatorSettings(home, `sleep 30 & echo $! > "${pidFile}"; wait`);
   const started = Date.now();
   const res = await runHook(home, {}, PAYLOAD);
+  return { res, elapsed: Date.now() - started, pidFile };
+}
+
+test.skipIf(process.platform === "win32")("real script: a timed-out operator command is killed with its whole process group", async () => {
+  const run = await timedOutChainRun!;
+  if ("error" in run) throw run.error;
+  const { res, elapsed, pidFile } = run.value;
   expect(res.exitCode, "exits 0 after the timeout").toBe(0);
-  expect(Date.now() - started, "returns shortly after the chain timeout").toBeLessThan(10000);
+  expect(elapsed, "returns shortly after the chain timeout").toBeLessThan(10000);
   const pid = Number(readFileSync(pidFile, "utf-8").trim());
   // A killed orphan may linger as a zombie where PID 1 does not reap (containers): that counts as dead.
   const state = spawnSync("ps", ["-o", "stat=", "-p", String(pid)], { encoding: "utf-8" }).stdout.trim();
@@ -597,7 +627,10 @@ test.skipIf(process.platform === "win32")("real script: the operator's refreshIn
   await runHook(home, env, PAYLOAD);
   await runHook(home, env, PAYLOAD);
   expect(runs(counter), "inside the operator's interval: served from cache").toBe(1);
-  await Bun.sleep(1100);
+  // The interval is judged against the cached run's own timestamp: ageing it stands for waiting it out.
+  const cache = join(home, ".claude", "peers", "desk-statusline-cache-tile-c2.json");
+  const aged = JSON.parse(readFileSync(cache, "utf-8")) as { at: number };
+  writeFileSync(cache, JSON.stringify({ ...aged, at: aged.at - 1100 }));
   await runHook(home, env, PAYLOAD);
   expect(runs(counter), "operator interval elapsed: re-run").toBe(2);
 }, 30000);

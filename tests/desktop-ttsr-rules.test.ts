@@ -942,6 +942,18 @@ describe("buildHookOutput", () => {
 });
 
 describe("timing probe seeds", () => {
+  // The cubic patterns below run 4.8 s and 20 s on the 4 Ki uppercase run, so a
+  // 500 ms deadline refuses them with a wide margin and without waiting 2 s each.
+  const CUBIC_DEADLINE_MS = 500;
+  // A quadratic pattern costs ~2 s per default 4 Ki probe; the stage under test
+  // there is the real-size one, so the small stage runs on 1 Ki (~1 ms).
+  const SMALL_STAGE = { inputChars: 1024 };
+  // The real-size quadratic input never ends (minutes), so 1 s refuses it as surely as 2 s.
+  const REAL_SIZE_DEADLINE_MS = 1000;
+  // The default 4 Ki stage of that pattern takes ~1.9 s, a hair under the 2 s rule deadline; the
+  // control asserts that no single input is slow, so the whole-rule deadline is out of its way.
+  const CONTROL_DEADLINE_MS = 10_000;
+
   test("a Unicode property yields characters it accepts; defaults include an uppercase letter and a digit", async () => {
     const { probeSeeds } = await import("../desktop/src/shared/ttsr-probe");
     expect(probeSeeds("\\p{Lu}+x", "u"), "\\p{Lu} must be probed with uppercase runs, the only ones it accepts").toContain("A");
@@ -967,7 +979,9 @@ describe("timing probe seeds", () => {
       mode: "deny" as const,
       message: "Do not do this; do the other thing instead.",
     });
-    const errors = await probeRulesSpeed([mk("\\p{Lu}{0,99}\\p{Lu}{0,99}\\p{Lu}{0,99};", "u"), mk("[A-Z]{0,200}[A-Z]{0,200}[A-Z]{0,200};")]);
+    const errors = await probeRulesSpeed([mk("\\p{Lu}{0,99}\\p{Lu}{0,99}\\p{Lu}{0,99};", "u"), mk("[A-Z]{0,200}[A-Z]{0,200}[A-Z]{0,200};")], {
+      deadlineMs: CUBIC_DEADLINE_MS,
+    });
     expect(errors, "both slow patterns must be refused by the timing gate").toHaveLength(2);
     for (const e of errors) expect(e).toContain("too slow");
   }, 30000);
@@ -984,8 +998,8 @@ describe("timing probe seeds", () => {
 
   test("a quadratic pattern fast on 4 Ki passes the old V8 probe but not the real-size bun stage", async () => {
     const { probeRulesSpeed } = await import("../desktop/src/shared/ttsr-probe");
-    expect(await probeRulesSpeed([quadratic], { realSize: false }), "control: the 4 Ki V8 stage alone lets it through").toEqual([]);
-    const errors = await probeRulesSpeed([quadratic]);
+    expect(await probeRulesSpeed([quadratic], { realSize: false, deadlineMs: CONTROL_DEADLINE_MS }), "control: the 4 Ki V8 stage alone lets it through").toEqual([]);
+    const errors = await probeRulesSpeed([quadratic], { ...SMALL_STAGE, deadlineMs: REAL_SIZE_DEADLINE_MS });
     expect(errors, "the real-size stage under the hook's runtime must refuse it").toHaveLength(1);
     expect(errors[0]).toContain("too slow under bun (the hook's runtime)");
     expect(errors[0]).toContain("262144 chars");
@@ -993,7 +1007,7 @@ describe("timing probe seeds", () => {
 
   test("on a 16 Ki command the bun stage measures the overrun against the hook budget", async () => {
     const { probeRulesSpeed } = await import("../desktop/src/shared/ttsr-probe");
-    const errors = await probeRulesSpeed([{ ...quadratic, tools: ["Bash" as const], field: "command" as const }]);
+    const errors = await probeRulesSpeed([{ ...quadratic, tools: ["Bash" as const], field: "command" as const }], SMALL_STAGE);
     expect(errors).toHaveLength(1);
     expect(errors[0]).toMatch(/too slow under bun \(the hook's runtime\): \d+ ms on a long run of .* at 16384 chars \(hook budget 50 ms\)/);
   }, 30000);
@@ -1021,6 +1035,8 @@ describe("timing probe seeds", () => {
     const { probeRulesSpeed } = await import("../desktop/src/shared/ttsr-probe");
     const notices: string[] = [];
     const errors = await probeRulesSpeed([quadratic], {
+      ...SMALL_STAGE,
+      deadlineMs: REAL_SIZE_DEADLINE_MS,
       bunCommand: "kory-no-such-bun-binary",
       onFallback: (m) => notices.push(m),
     });
@@ -1029,6 +1045,7 @@ describe("timing probe seeds", () => {
     expect(notices[0]).toContain("V8");
     expect(errors, "the V8 fallback still refuses the quadratic pattern at real size").toHaveLength(1);
     const command = await probeRulesSpeed([{ ...quadratic, tools: ["Bash" as const], field: "command" as const }], {
+      ...SMALL_STAGE,
       bunCommand: "kory-no-such-bun-binary",
     });
     expect(command[0], "the fallback judges against the hook budget, not the 4 Ki probe's").toContain(`(budget ${TTSR_REGEX_BUDGET_MS} ms)`);

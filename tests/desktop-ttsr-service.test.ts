@@ -760,7 +760,7 @@ describe("pattern timing gate (worker probe)", () => {
   };
   const real = { probeRules: undefined } as Partial<TtsrServiceDeps>;
 
-  test("saveGlobal and saveRepo refuse a slow pattern the parser accepts, and write nothing", async () => {
+  test.concurrent("saveGlobal and saveRepo refuse a slow pattern the parser accepts, and write nothing", async () => {
     const h = harness(real);
     const text = fileOf(rule("g-slow", { pattern: SLOW }));
     expect(parseRulesFile(text).ok, "precondition: the synchronous parser accepts it").toBe(true);
@@ -774,7 +774,7 @@ describe("pattern timing gate (worker probe)", () => {
     expect(existsSync(join(cwd, REPO_RULES_REL))).toBe(false);
   }, 20000);
 
-  test("a slow repo file on disk is never compiled nor prompted; a fast one is, once timed", async () => {
+  test.concurrent("a slow repo file on disk is never compiled nor prompted; a fast one is, once timed", async () => {
     const h = harness(real);
     h.answer.value = true;
     const slowDir = tmp();

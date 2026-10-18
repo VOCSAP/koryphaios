@@ -250,6 +250,8 @@ test("trace(): writes to $CLAUDE_PEERS_TTSR_LOG when set, and never throws when 
 
 let builtMjsPath: string;
 let buildScratchDir: string;
+let wallDenyRun: Promise<Settled<WallRun>>;
+let wallWarnRun: Promise<Settled<WallRun>>;
 beforeAll(async () => {
   // Deliberately NOT pushed to `tmpDirs`: that array is drained by the
   // per-test afterEach above, which would delete this build directory (and
@@ -266,6 +268,10 @@ beforeAll(async () => {
     const stderr = await new Response(proc.stderr).text();
     throw new Error(`self-build of ttsr-hook.mjs failed (exit ${exitCode}): ${stderr}`);
   }
+  // Both wall tests wait out the hook's real 6 s wall; started here they overlap each other and
+  // the rest of the file instead of adding 12 s in sequence.
+  wallDenyRun = settled(runWallDeny());
+  wallWarnRun = settled(runWallWarn());
 });
 
 afterAll(() => {
@@ -302,9 +308,32 @@ async function runHookMjs(stdinText: string, envOverrides: Record<string, string
   return { stdout, stderr, exitCode };
 }
 
-test("real .mjs, a deny regex that runs for tens of seconds is denied at the hook wall, in time", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "ttsr-wall-"));
-  tmpDirs.push(dir);
+interface WallRun {
+  result: RunResult;
+  elapsed: number;
+  logPath: string;
+}
+
+type Settled<T> = { value: T } | { error: unknown };
+
+/** A promise that never rejects, so a run started in beforeAll cannot surface as unhandled before its test awaits it. */
+function settled<T>(p: Promise<T>): Promise<Settled<T>> {
+  return p.then(
+    (value) => ({ value }),
+    (error: unknown) => ({ error })
+  );
+}
+
+async function awaited<T>(run: Promise<Settled<T>>): Promise<T> {
+  const r = await run;
+  if ("error" in r) throw r.error;
+  return r.value;
+}
+
+// The directories live under buildScratchDir: the per-test afterEach drains tmpDirs, which would
+// delete them while the run started in beforeAll is still going.
+async function runWallDeny(): Promise<WallRun> {
+  const dir = mkdtempSync(join(buildScratchDir, "ttsr-wall-"));
   const eff = join(dir, "eff.json");
   const logPath = join(dir, "hook.log");
   const rule = { id: "quadratic", event: "PreToolUse", tools: ["Write"], field: "added", pattern: "[a-z]+\\d+x",
@@ -318,19 +347,13 @@ test("real .mjs, a deny regex that runs for tens of seconds is denied at the hoo
   });
   const t0 = performance.now();
   const result = await runHookMjs(payload, { CLAUDE_PEERS_TTSR_FILE: eff, CLAUDE_PEERS_TTSR_LOG: logPath });
-  const elapsed = performance.now() - t0;
-  expect(result.exitCode).toBe(0);
-  expect(elapsed, "the call must be decided before Claude Code's 10 s hook timeout lets it through").toBeLessThan(7000);
-  const decision = JSON.parse(result.stdout) as { hookSpecificOutput: { permissionDecision?: string; permissionDecisionReason?: string } };
-  expect(decision.hookSpecificOutput.permissionDecision).toBe("deny");
-  expect(decision.hookSpecificOutput.permissionDecisionReason).toContain("hook wall of 6000 ms exceeded; denied by default");
-  expect(readFileSync(logPath, "utf-8")).toContain("hook wall of 6000 ms exceeded, undecided rules");
-}, 15000);
+  return { result, elapsed: performance.now() - t0, logPath };
+}
 
-test("real .mjs, a warn decided before the wall still reaches the session when a later warn hangs", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "ttsr-wall-warn-"));
-  tmpDirs.push(dir);
+async function runWallWarn(): Promise<WallRun> {
+  const dir = mkdtempSync(join(buildScratchDir, "ttsr-wall-warn-"));
   const eff = join(dir, "eff.json");
+  const logPath = join(dir, "hook.log");
   const base = { event: "PreToolUse", tools: ["Write"], field: "added", mode: "warn", source: "user" };
   const rules = [
     { ...base, id: "fast", pattern: "aaaa", message: "Fast warn text.", qualifiedId: "user/fast" },
@@ -343,7 +366,23 @@ test("real .mjs, a warn decided before the wall still reaches the session when a
     cwd: dir,
     tool_input: { file_path: join(dir, "a.ts"), content: "a".repeat(262144) },
   });
-  const result = await runHookMjs(payload, { CLAUDE_PEERS_TTSR_FILE: eff, CLAUDE_PEERS_TTSR_LOG: join(dir, "hook.log") });
+  const t0 = performance.now();
+  const result = await runHookMjs(payload, { CLAUDE_PEERS_TTSR_FILE: eff, CLAUDE_PEERS_TTSR_LOG: logPath });
+  return { result, elapsed: performance.now() - t0, logPath };
+}
+
+test("real .mjs, a deny regex that runs for tens of seconds is denied at the hook wall, in time", async () => {
+  const { result, elapsed, logPath } = await awaited(wallDenyRun);
+  expect(result.exitCode).toBe(0);
+  expect(elapsed, "the call must be decided before Claude Code's 10 s hook timeout lets it through").toBeLessThan(7000);
+  const decision = JSON.parse(result.stdout) as { hookSpecificOutput: { permissionDecision?: string; permissionDecisionReason?: string } };
+  expect(decision.hookSpecificOutput.permissionDecision).toBe("deny");
+  expect(decision.hookSpecificOutput.permissionDecisionReason).toContain("hook wall of 6000 ms exceeded; denied by default");
+  expect(readFileSync(logPath, "utf-8")).toContain("hook wall of 6000 ms exceeded, undecided rules");
+}, 15000);
+
+test("real .mjs, a warn decided before the wall still reaches the session when a later warn hangs", async () => {
+  const { result } = await awaited(wallWarnRun);
   const decision = JSON.parse(result.stdout) as { hookSpecificOutput: { additionalContext?: string; permissionDecision?: string } };
   expect(decision.hookSpecificOutput.permissionDecision).toBeUndefined();
   expect(decision.hookSpecificOutput.additionalContext).toContain("Fast warn text.");

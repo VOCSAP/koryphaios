@@ -2,7 +2,7 @@
 // contract is its stdout/exit code from a real process in a real git repo,
 // exactly how the repo-rules skill invokes it.
 
-import { afterEach, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
@@ -77,23 +77,53 @@ function writeRules(dir: string, rules: unknown): void {
 }
 
 const tmpDirs: string[] = [];
+// Directories shared by several tests live here: the per-test afterEach drains tmpDirs.
+const suiteDirs: string[] = [];
 afterEach(() => {
   for (const d of tmpDirs.splice(0)) rmSync(d, { recursive: true, force: true });
 });
+afterAll(() => {
+  for (const d of suiteDirs.splice(0)) rmSync(d, { recursive: true, force: true });
+});
 
-async function repoWith(rules: unknown): Promise<string> {
+async function repoIn(owner: string[], rules: unknown): Promise<string> {
   const dir = await makeRepo();
-  tmpDirs.push(dir);
+  owner.push(dir);
   writeRules(dir, rules);
   await git(dir, "add", ".");
   await git(dir, "commit", "-q", "-m", "init");
   return dir;
 }
 
+async function repoWith(rules: unknown): Promise<string> {
+  return repoIn(tmpDirs, rules);
+}
+
+// One repository holding VALID_RULE for every test that only reads it (or adds an untracked
+// file the CLI never lists): building it costs five git spawns, more than the CLI run itself.
+let validRepoRun: Promise<string> | undefined;
+function validRepo(): Promise<string> {
+  validRepoRun ??= repoIn(suiteDirs, VALID_RULE);
+  return validRepoRun;
+}
+
+// The timing probe of `check` waits out its whole 2 s rule deadline on this pattern; started
+// before the first test, that wait overlaps the rest of the file.
+const BACKTRACKING_RULES = { version: 1, rules: [{ ...VALID_RULE.rules[0], pattern: "\\w+\\w+\\w+x" }] };
+let backtrackingCheckRun: Promise<{ value: RunResult } | { error: unknown }>;
+beforeAll(() => {
+  backtrackingCheckRun = repoIn(suiteDirs, BACKTRACKING_RULES)
+    .then((dir) => runCli(["check"], dir))
+    .then(
+      (value) => ({ value }),
+      (error: unknown) => ({ error })
+    );
+});
+
 // --- --help / usage ---
 
 test("--help prints usage and exits 0", async () => {
-  const dir = await repoWith(VALID_RULE);
+  const dir = await validRepo();
   const result = await runCli(["--help"], dir);
   expect(result.exitCode).toBe(0);
   expect(result.stdout).toContain("kory-rules");
@@ -101,13 +131,13 @@ test("--help prints usage and exits 0", async () => {
 });
 
 test("no command at all is a usage error: exit 2", async () => {
-  const dir = await repoWith(VALID_RULE);
+  const dir = await validRepo();
   const result = await runCli([], dir);
   expect(result.exitCode).toBe(2);
 });
 
 test("an unknown command is a usage error: exit 2", async () => {
-  const dir = await repoWith(VALID_RULE);
+  const dir = await validRepo();
   const result = await runCli(["frobnicate"], dir);
   expect(result.exitCode).toBe(2);
 });
@@ -115,7 +145,7 @@ test("an unknown command is a usage error: exit 2", async () => {
 // --- check ---
 
 test("check: a valid rules file exits 0 with a short summary", async () => {
-  const dir = await repoWith(VALID_RULE);
+  const dir = await validRepo();
   const result = await runCli(["check"], dir);
   expect(result.exitCode).toBe(0);
   expect(result.stdout).toContain("valid:");
@@ -155,7 +185,7 @@ test("check: a missing file exits 1 (not a crash)", async () => {
 // --- test ---
 
 test("test: a matching case with --expect match exits 0 and prints match", async () => {
-  const dir = await repoWith(VALID_RULE);
+  const dir = await validRepo();
   const result = await runCli(
     ["test", "no-emoji-ui", "--text", "here is an EMOJI_MARK", "--path", "src/a.txt", "--expect", "match"],
     dir
@@ -165,7 +195,7 @@ test("test: a matching case with --expect match exits 0 and prints match", async
 });
 
 test("test: a non-matching case with --expect none exits 0 and prints none", async () => {
-  const dir = await repoWith(VALID_RULE);
+  const dir = await validRepo();
   const result = await runCli(
     ["test", "no-emoji-ui", "--text", "nothing here", "--path", "src/a.txt", "--expect", "none"],
     dir
@@ -175,7 +205,7 @@ test("test: a non-matching case with --expect none exits 0 and prints none", asy
 });
 
 test("test: a result that contradicts --expect exits 1", async () => {
-  const dir = await repoWith(VALID_RULE);
+  const dir = await validRepo();
   const result = await runCli(
     ["test", "no-emoji-ui", "--text", "here is an EMOJI_MARK", "--path", "src/a.txt", "--expect", "none"],
     dir
@@ -185,13 +215,13 @@ test("test: a result that contradicts --expect exits 1", async () => {
 });
 
 test("test: an unknown rule id is a usage error, exit 2", async () => {
-  const dir = await repoWith(VALID_RULE);
+  const dir = await validRepo();
   const result = await runCli(["test", "does-not-exist", "--text", "x"], dir);
   expect(result.exitCode).toBe(2);
 });
 
 test("test: --path outside the rule's paths filter does not match", async () => {
-  const dir = await repoWith(VALID_RULE);
+  const dir = await validRepo();
   const result = await runCli(
     ["test", "no-emoji-ui", "--text", "EMOJI_MARK", "--path", "docs/readme.md", "--expect", "none"],
     dir
@@ -201,7 +231,7 @@ test("test: --path outside the rule's paths filter does not match", async () => 
 });
 
 test("test: --file reads the tested text from a file", async () => {
-  const dir = await repoWith(VALID_RULE);
+  const dir = await validRepo();
   const fixture = join(dir, "snippet.txt");
   writeFileSync(fixture, "contains EMOJI_MARK inline");
   const result = await runCli(
@@ -214,7 +244,7 @@ test("test: --file reads the tested text from a file", async () => {
 // --- scan ---
 
 test("scan: counts matching files/lines restricted to the rule's paths, and warns on a deny/Write hit", async () => {
-  const dir = await repoWith(VALID_RULE);
+  const dir = await validRepo();
   const result = await runCli(["scan", "no-emoji-ui"], dir);
   expect(result.exitCode).toBe(0);
   expect(result.stdout).toContain("1 file(s) match");
@@ -223,7 +253,7 @@ test("scan: counts matching files/lines restricted to the rule's paths, and warn
 });
 
 test("scan: an unknown rule id is a usage error, exit 2", async () => {
-  const dir = await repoWith(VALID_RULE);
+  const dir = await validRepo();
   const result = await runCli(["scan", "does-not-exist"], dir);
   expect(result.exitCode).toBe(2);
 });
@@ -231,7 +261,7 @@ test("scan: an unknown rule id is a usage error, exit 2", async () => {
 // --- list ---
 
 test("list: without $CLAUDE_PEERS_TTSR_FILE, says so and reports repo rules as status unknown", async () => {
-  const dir = await repoWith(VALID_RULE);
+  const dir = await validRepo();
   const result = await runCli(["list"], dir, { CLAUDE_PEERS_TTSR_FILE: undefined });
   expect(result.exitCode).toBe(0);
   expect(result.stdout).toContain("is not set");
@@ -240,7 +270,7 @@ test("list: without $CLAUDE_PEERS_TTSR_FILE, says so and reports repo rules as s
 });
 
 test("list: with a matching effective file, the repo rule reads active, plus kory rules active", async () => {
-  const dir = await repoWith(VALID_RULE);
+  const dir = await validRepo();
   const effectivePath = join(dir, "effective.json");
   writeFileSync(
     effectivePath,
@@ -269,7 +299,7 @@ test("list: with a matching effective file, the repo rule reads active, plus kor
 });
 
 test("list: an edited-since-approval repo rule reads inactive, not active", async () => {
-  const dir = await repoWith(VALID_RULE);
+  const dir = await validRepo();
   const effectivePath = join(dir, "effective.json");
   const staleRule = { ...VALID_RULE.rules[0], message: "a different, older message" };
   writeFileSync(
@@ -284,7 +314,7 @@ test("list: an edited-since-approval repo rule reads inactive, not active", asyn
 });
 
 test("list: an effective file named but missing exits 0 with a note", async () => {
-  const dir = await repoWith(VALID_RULE);
+  const dir = await validRepo();
   const result = await runCli(["list"], dir, { CLAUDE_PEERS_TTSR_FILE: join(dir, "gone.json") });
   expect(result.exitCode).toBe(0);
   expect(result.stdout).toContain("does not exist");
@@ -294,7 +324,7 @@ test("list: an effective file named but missing exits 0 with a note", async () =
 // --- read containment, argument errors, paths without --path ---
 
 test("check and test --file refuse a file outside the repository (exit 2), even through a symlink", async () => {
-  const dir = await repoWith(VALID_RULE);
+  const dir = await validRepo();
   const outside = mkdtempSync(join(tmpdir(), "kory-rules-outside-"));
   tmpDirs.push(outside);
   writeFileSync(join(outside, "secret.txt"), "EMOJI_MARK");
@@ -312,14 +342,14 @@ test("check and test --file refuse a file outside the repository (exit 2), even 
 });
 
 test("test: --text without a value is a usage error naming --text", async () => {
-  const dir = await repoWith(VALID_RULE);
+  const dir = await validRepo();
   const result = await runCli(["test", "no-emoji-ui", "--text"], dir);
   expect(result.exitCode).toBe(2);
   expect(result.stderr).toContain("--text requires a value");
 });
 
 test("test: a rule with paths and no --path is a usage error, not a silent none", async () => {
-  const dir = await repoWith(VALID_RULE);
+  const dir = await validRepo();
   const result = await runCli(["test", "no-emoji-ui", "--text", "EMOJI_MARK", "--expect", "none"], dir);
   expect(result.exitCode, "without a target the paths filter would drop the rule and every test would read none").toBe(2);
   expect(result.stderr).toContain("--path <repo-relative file>");
@@ -334,8 +364,9 @@ test("test: a rule with paths and no --path is a usage error, not a silent none"
 });
 
 test("check: a pattern that backtracks is rejected as too slow (exit 1)", async () => {
-  const dir = await repoWith({ version: 1, rules: [{ ...VALID_RULE.rules[0], pattern: "\\w+\\w+\\w+x" }] });
-  const result = await runCli(["check"], dir);
+  const run = await backtrackingCheckRun;
+  if ("error" in run) throw run.error;
+  const result = run.value;
   expect(result.exitCode, "check must run the timing probe, not only the parser").toBe(1);
   expect(result.stdout).toContain('rules[0] "no-emoji-ui": pattern: too slow');
 }, 20000);
