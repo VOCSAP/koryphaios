@@ -144,44 +144,35 @@ async function spawnPeer(b: TestBroker, extraEnv: Record<string, string> = {}): 
 }
 
 /**
- * Kills the broker process outright rather than relying on the WS idle-timeout
- * knob: the underlying websocket server keeps the connection alive across that
- * window regardless, so only a hard TCP close reliably triggers the peer's
- * close handler and its reconnect.
+ * Fronts `b` and answers 503 to /ws, so a server behind it never sees its
+ * WebSocket up: its mail reaches it by HTTP only. Neither the idle-timeout knob
+ * nor a broker restart gives that guarantee, the reconnect backoff decides
+ * when the WS wins the race.
  */
-async function killAndRestartBroker(b: TestBroker): Promise<void> {
-  try {
-    b.proc.kill();
-    await b.proc.exited;
-  } catch {
-    /* already gone */
-  }
-  const proc = Bun.spawn(["bun", "broker.ts"], {
-    env: scrubEnv(b.tmpDir, {
-      CLAUDE_PEERS_PORT: String(b.port),
-      CLAUDE_PEERS_DB: b.dbPath,
-      CLAUDE_PEERS_LOG_DIR: `${b.tmpDir}/logs`,
-      CLAUDE_PEERS_DORMANT_TTL_HOURS: "24",
-    }),
-    stdio: ["ignore", "ignore", "ignore"],
+function wsRefusingFront(b: TestBroker) {
+  const server = Bun.serve({
+    port: 0,
+    hostname: "127.0.0.1",
+    async fetch(req) {
+      const url = new URL(req.url);
+      if (url.pathname === "/ws") return new Response("WebSocket refused by the test front", { status: 503 });
+      const res = await fetch(`${b.url}${url.pathname}${url.search}`, {
+        method: req.method,
+        headers: { "Content-Type": "application/json" },
+        body: req.method === "GET" ? undefined : await req.text(),
+      });
+      return new Response(await res.text(), { status: res.status, headers: { "Content-Type": "application/json" } });
+    },
   });
-  const deadline = Date.now() + 15_000;
-  let ready = false;
-  while (Date.now() < deadline) {
-    if (proc.exitCode !== null) break;
-    try {
-      const res = await fetch(`${b.url}/health`, { signal: AbortSignal.timeout(500) });
-      if (res.ok) {
-        ready = true;
-        break;
-      }
-    } catch {
-      /* retry */
-    }
-    await Bun.sleep(20);
-  }
-  if (!ready) throw new Error("could not restart broker on the same port");
-  b.proc = proc;
+  return { url: `http://127.0.0.1:${server.port}`, stop: () => server.stop(true) };
+}
+
+function bounded<T>(work: Promise<T>, ms: number, what: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const limit = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`no ${what} within ${ms} ms`)), ms);
+  });
+  return Promise.race([work, limit]).finally(() => clearTimeout(timer));
 }
 
 async function callTool(
@@ -400,24 +391,32 @@ describe("the team-lead directive note reaches team-lead recipients", () => {
   test("a fallback poll delivers the team-lead note", async () => {
     const b = await startBroker();
     brokers.push(b);
-    const sender = await spawnPeer(b);
-    const recipient = await spawnPeer(b, {
-      CLAUDE_PEERS_ROLE: "team-lead",
-      CLAUDE_PEERS_POLL_FALLBACK_SEC: "1",
-    });
-    const recipientId = await peerIdOf(recipient);
-    await peerIdOf(sender);
+    const front = wsRefusingFront(b);
+    try {
+      const sender = await spawnPeer(b);
+      const recipient = await spawnPeer(b, {
+        CLAUDE_PEERS_BROKER_URL: front.url,
+        CLAUDE_PEERS_ROLE: "team-lead",
+        CLAUDE_PEERS_POLL_FALLBACK_SEC: "1",
+      });
+      const recipientId = await peerIdOf(recipient);
+      await peerIdOf(sender);
 
-    await killAndRestartBroker(b);
+      const body = "Fallback-poll delivery of the team-lead directive note.";
+      const sent = await callTool(sender, "send_message", { to_peer_id: recipientId, message: body });
+      expect(sent.result?.isError).toBeFalsy();
 
-    const body = "Fallback-poll delivery of the team-lead directive note.";
-    const sent = await callTool(sender, "send_message", { to_peer_id: recipientId, message: body });
-    expect(sent.result?.isError).toBeFalsy();
-
-    const pushed = await readNotification(recipient, "notifications/claude/channel");
-    const content = pushed.params?.content ?? "";
-    expect(content).toContain(body);
-    expect(content).toContain(LEAD_DIRECTIVE_NOTE.trim());
+      const pushed = await bounded(
+        readNotification(recipient, "notifications/claude/channel"),
+        15_000,
+        "channel notification from the fallback poll"
+      );
+      const content = pushed.params?.content ?? "";
+      expect(content).toContain(body);
+      expect(content).toContain(LEAD_DIRECTIVE_NOTE.trim());
+    } finally {
+      front.stop();
+    }
   }, 90_000);
 
   test("check_messages delivers the team-lead note", async () => {

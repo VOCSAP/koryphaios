@@ -254,6 +254,71 @@ async function oldBrokerPair(): Promise<Pair & { stop: () => void }> {
   return { broker, bob, alice, bobId, aliceId, stop: () => proxy.stop(true) };
 }
 
+function bounded<T>(work: Promise<T>, ms: number, what: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const limit = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`no ${what} within ${ms} ms`)), ms);
+  });
+  return Promise.race([work, limit]).finally(() => clearTimeout(timer));
+}
+
+/**
+ * Fronts `broker` and answers 503 to /ws, so a server behind it never sees
+ * its WebSocket up: its mail reaches it by HTTP only (the fallback poll, or a
+ * tool call). A broker restart cannot give that guarantee, the reconnect backoff
+ * decides when the WS wins the race.
+ */
+function wsRefusingFront(broker: TestBroker) {
+  let peeked = 0;
+  const watchers: Array<{ above: number; wake: () => void }> = [];
+  const server = Bun.serve({
+    port: 0,
+    hostname: "127.0.0.1",
+    async fetch(req) {
+      const url = new URL(req.url);
+      if (url.pathname === "/ws") return new Response("WebSocket refused by the test front", { status: 503 });
+      const res = await fetch(`${broker.url}${url.pathname}${url.search}`, {
+        method: req.method,
+        headers: { "Content-Type": "application/json" },
+        body: req.method === "GET" ? undefined : await req.text(),
+      });
+      const text = await res.text();
+      if (url.pathname === "/peek-messages") {
+        peeked++;
+        for (const w of watchers) if (peeked > w.above) w.wake();
+      }
+      return new Response(text, { status: res.status, headers: { "Content-Type": "application/json" } });
+    },
+  });
+  return {
+    url: `http://127.0.0.1:${server.port}`,
+    peeks: () => peeked,
+    peeksAbove: (above: number): Promise<void> =>
+      bounded(
+        new Promise<void>((wake) => {
+          if (peeked > above) wake();
+          else watchers.push({ above, wake });
+        }),
+        10_000,
+        `/peek-messages answer past #${above}`
+      ),
+    stop: () => server.stop(true),
+  };
+}
+
+/** A fresh delegator whose WebSocket can never connect, delegating to the shared alice. */
+async function pollOnlyPair(): Promise<Pair & { front: ReturnType<typeof wsRefusingFront> }> {
+  const base = await sharedPair();
+  const front = wsRefusingFront(base.broker);
+  try {
+    const bob = await spawnPeer(base.broker, { CLAUDE_PEERS_BROKER_URL: front.url, CLAUDE_PEERS_POLL_FALLBACK_SEC: "1" });
+    return { ...base, bob, bobId: await peerIdOf(bob), front };
+  } catch (e) {
+    front.stop();
+    throw e;
+  }
+}
+
 function delivered(b: TestBroker, text: string): number {
   const db = new Database(b.dbPath, { readonly: true });
   try {
@@ -400,31 +465,38 @@ describe("a broker that answers ok without a task is an error, never a tracked t
 });
 
 describe("the delegator reminder survives every other arrival path", () => {
-  test("fallback poll", async () => {
-    const p = await pair({ CLAUDE_PEERS_POLL_FALLBACK_SEC: "1" });
-    const taskId = await delegate(p, "Check the fallback path.");
-    await killAndRestartBroker(p.broker);
-    const ack = "fallback: ACK";
-    const sent = await callTool(p.alice, "send_message", { to_peer_id: p.bobId, message: ack });
-    expect(sent.result?.isError).toBeFalsy();
-    const pushed = await readChannel(p.bob, ack);
-    expect(pushed).toContain(`- ${taskId} "Check the fallback path."`);
-    expect(pushed).toContain(DELEGATOR_CHECK_NOTE);
+  test("fallback poll delivers the reminder to a server whose WebSocket never connects", async () => {
+    const p = await pollOnlyPair();
+    try {
+      const taskId = await delegate(p, "Check the fallback path.");
+      const ack = "fallback: ACK";
+      const sent = await callTool(p.alice, "send_message", { to_peer_id: p.bobId, message: ack });
+      expect(sent.result?.isError).toBeFalsy();
+      const pushed = await bounded(readChannel(p.bob, ack), 15_000, "channel notification from the fallback poll");
+      expect(pushed).toContain(`- ${taskId} "Check the fallback path."`);
+      expect(pushed).toContain(DELEGATOR_CHECK_NOTE);
+    } finally {
+      p.front.stop();
+    }
   }, 90_000);
 
   test("wait_for_message whose waiter is resolved by the fallback poll", async () => {
-    const p = await pair({ CLAUDE_PEERS_POLL_FALLBACK_SEC: "1" });
-    const taskId = await delegate(p, "Check the polled waiter.");
-    // Same window as the peek test below: the WS stays down while the poll runs.
-    await killAndRestartBroker(p.broker, 3500);
-    const waiting = callTool(p.bob, "wait_for_message", { timeout_sec: 10 });
-    await Bun.sleep(300);
-    const ack = "polled waiter: ACK";
-    const sent = await callTool(p.alice, "send_message", { to_peer_id: p.bobId, message: ack });
-    expect(sent.result?.isError).toBeFalsy();
-    const text = toolText(await waiting);
-    expect(text).toContain(ack);
-    expect(text).toContain(`- ${taskId} "Check the polled waiter."`);
+    const p = await pollOnlyPair();
+    try {
+      const taskId = await delegate(p, "Check the polled waiter.");
+      const waiting = callTool(p.bob, "wait_for_message", { timeout_sec: 10 });
+      // The waiter registers right after its own empty peek is answered, so the
+      // message goes out only once a peek answer has passed through the front.
+      await p.front.peeksAbove(p.front.peeks());
+      const ack = "polled waiter: ACK";
+      const sent = await callTool(p.alice, "send_message", { to_peer_id: p.bobId, message: ack });
+      expect(sent.result?.isError).toBeFalsy();
+      const text = toolText(await waiting);
+      expect(text).toContain(ack);
+      expect(text).toContain(`- ${taskId} "Check the polled waiter."`);
+    } finally {
+      p.front.stop();
+    }
   }, 90_000);
 
   test("wait_for_message with a waiter already registered", async () => {
