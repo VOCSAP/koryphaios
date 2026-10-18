@@ -29,7 +29,7 @@ at the top of `scripts/check-commit-closure.ts`). See `TESTING.md` for the
 ## 2. Full test suite
 
 ```bash
-bun test          # several minutes, 10 000+ tests; the broker files are the cost (TESTING.md, "Cost budget")
+bun test          # the whole suite; the broker files are the cost (TESTING.md, "Cost budget")
 ```
 
 - **A failure is not a regression until re-run in isolation**:

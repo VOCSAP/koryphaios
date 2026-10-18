@@ -5,9 +5,8 @@ import { Database } from "bun:sqlite";
 let broker: TestBroker;
 
 beforeAll(async () => {
-  // A zero dormant TTL and the cleanup timer at its 1 s floor, so the purge
-  // is exercised in-test.
-  broker = await startBroker({ CLAUDE_PEERS_DORMANT_TTL_HOURS: "0", CLAUDE_PEERS_CLEAN_INTERVAL_SEC: "1" });
+  // The TTL stays positive so no dormant row but a backdated one is eligible to the sweep.
+  broker = await startBroker({ CLAUDE_PEERS_CLEAN_INTERVAL_SEC: "1" });
 });
 afterAll(async () => { await stopBroker(broker); });
 
@@ -48,10 +47,8 @@ test("admin/peers exposes dormant when ?include_dormant=1", async () => {
 
 test("dormant peers past TTL are purged by cleanStalePeers", async () => {
   const a = await register("hs3", "/hs3", livePid());
-  // Force disconnect (dormant) and backdate last_seen so it's past TTL=0.
   await post(`${broker.url}/disconnect`, { instance_token: a.body.instance_token });
 
-  // Reach into the broker DB directly to backdate.
   const db = new Database(broker.dbPath);
   db.run("UPDATE peers SET last_seen = ? WHERE instance_token = ?", [
     "2000-01-01T00:00:00Z",

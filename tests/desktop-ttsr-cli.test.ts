@@ -99,16 +99,14 @@ async function repoWith(rules: unknown): Promise<string> {
   return repoIn(tmpDirs, rules);
 }
 
-// One repository holding VALID_RULE for every test that only reads it (or adds an untracked
-// file the CLI never lists): building it costs five git spawns, more than the CLI run itself.
+// One repository holding VALID_RULE for every test that only reads it: building one per test costs more than the CLI run.
 let validRepoRun: Promise<string> | undefined;
 function validRepo(): Promise<string> {
   validRepoRun ??= repoIn(suiteDirs, VALID_RULE);
   return validRepoRun;
 }
 
-// The timing probe of `check` waits out its whole 2 s rule deadline on this pattern; started
-// before the first test, that wait overlaps the rest of the file.
+// The timing probe of `check` waits out its whole rule deadline on this pattern; started before the first test, that wait overlaps the rest of the file.
 const BACKTRACKING_RULES = { version: 1, rules: [{ ...VALID_RULE.rules[0], pattern: "\\w+\\w+\\w+x" }] };
 let backtrackingCheckRun: Promise<{ value: RunResult } | { error: unknown }>;
 beforeAll(() => {

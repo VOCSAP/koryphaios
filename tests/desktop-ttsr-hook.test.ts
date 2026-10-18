@@ -268,8 +268,7 @@ beforeAll(async () => {
     const stderr = await new Response(proc.stderr).text();
     throw new Error(`self-build of ttsr-hook.mjs failed (exit ${exitCode}): ${stderr}`);
   }
-  // Both wall tests wait out the hook's real 6 s wall; started here they overlap each other and
-  // the rest of the file instead of adding 12 s in sequence.
+  // Both wall tests wait out the hook's real wall; started here they overlap each other and the rest of the file.
   wallDenyRun = settled(runWallDeny());
   wallWarnRun = settled(runWallWarn());
 });

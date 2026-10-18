@@ -942,16 +942,13 @@ describe("buildHookOutput", () => {
 });
 
 describe("timing probe seeds", () => {
-  // The cubic patterns below run 4.8 s and 20 s on the 4 Ki uppercase run, so a
-  // 500 ms deadline refuses them with a wide margin and without waiting 2 s each.
+  // The cubic patterns refuse a short deadline with a wide margin, without waiting out the default one.
   const CUBIC_DEADLINE_MS = 500;
-  // A quadratic pattern costs ~2 s per default 4 Ki probe; the stage under test
-  // there is the real-size one, so the small stage runs on 1 Ki (~1 ms).
+  // The stage under test is the real-size one, so the small stage runs on a tiny input.
   const SMALL_STAGE = { inputChars: 1024 };
-  // The real-size quadratic input never ends (minutes), so 1 s refuses it as surely as 2 s.
+  // The real-size quadratic input never ends, so a short deadline refuses it as surely as the default.
   const REAL_SIZE_DEADLINE_MS = 1000;
-  // The default 4 Ki stage of that pattern takes ~1.9 s, a hair under the 2 s rule deadline; the
-  // control asserts that no single input is slow, so the whole-rule deadline is out of its way.
+  // The control asserts that no single input is slow, so the whole-rule deadline stays out of its way.
   const CONTROL_DEADLINE_MS = 10_000;
 
   test("a Unicode property yields characters it accepts; defaults include an uppercase letter and a digit", async () => {

@@ -1240,33 +1240,16 @@ configs MCP par lancement (`supervisor-mcp.json`, `demo-mcp.json`,
 
 ## 4. Maintenance / dette technique
 
-### 4.0 Coût de la suite de tests (mesuré le 2026-10-18, `TESTING.md` « Cost budget »)
+### 4.0 Coût de la suite de tests (`TESTING.md` « Cost budget »)
 
-Le gate dure plusieurs minutes ; 82 % du temps vient des 93 fichiers qui
-lancent un broker ou `server.ts` (535 s pour 1 108 tests), pas des 9 481 tests
-purs (118 s). Dix fichiers font 330 s. Rien à supprimer en volume : à
-retravailler en forme.
+Les leviers restants visent les fichiers qui lancent un broker ou `server.ts`,
+dont les attentes de tick, de reconnexion et de verrou dominent le temps du
+gate, et quelques benchmarks déguisés en tests. Rien à supprimer en volume :
+à retravailler en forme. Les chiffres vivent dans `TESTING.md` « Cost budget ».
 
-- [ ] **Un broker par fichier, pas par test** : `broker-approvals` (92 tests,
-      39 s), `broker-roadmap-sync-routes`, `broker-ntfy-channel`,
-      `broker-project-key-alignment`, `broker-approval-ack` — `startBroker` en
-      `beforeAll`, isolation par groupe/clé projet.
-- [ ] **Attentes en temps réel sur un sweep/TTL** : `broker-sweep-inactive`
-      (2 × `Bun.sleep(12_000)` pour 4 tests), `broker-status` (30 s / 3 tests),
-      `server-deck-token-authz` (28 s / 6 tests),
-      `broker-roadmap-sync-offline-reason` (tick 2 s) — plancher d'intervalle +
-      attente bornée sur la CONDITION, ou route de déclenchement du sweep
-      réservée aux tests.
-- [ ] **Topologies à deux brokers partagées par fichier** :
-      `broker-roadmap-replica` (48 s), `broker-peer-federation`,
-      `broker-roadmap-lock-sweep-replicated`.
 - [ ] **Benchmarks déguisés en tests** : `desktop-ttsr-budget-margin` (8 s pour
       2 tests), bloc « past its time budget » de `desktop-ttsr-rules` — derrière
       un env opt-in ou dans l'étape intégration.
-- [ ] **CI rouge depuis le run 427** : `desktop-operator-trust-dialog.test.ts`
-      (sonde `--tsconfig-override` important `App.tsx` → `qrcode-generator`
-      absent de l'étape pure-module). À inscrire dans `EXEMPTIONS` avec le
-      marqueur native-deps, ou à réécrire contre un module importable.
 - [ ] **Trouvé en retravaillant les tests, côté broker (hors lot tests)** :
       (a) `broker.ts` ligne ~1880, purge des pairs dormants : `last_seen <
       datetime('now', ?)` compare un ISO `…T…Z` à un `YYYY-MM-DD HH:MM:SS`
@@ -1280,8 +1263,8 @@ retravailler en forme.
       premier write ; en `.immediate(...)`, mesuré sur miroir : 0 erreur sur
       100 appels concurrents au lieu de 9 à 15, et `broker-delegated-sweep`
       passe de 59 s à 10 s en concurrent. (c) Un
-      `CLAUDE_PEERS_DELEGATION_SWEEP_MS` de test (plancher ~50 ms) diviserait
-      par 10 les attentes de tick de ce même fichier. (d) Un
+      `CLAUDE_PEERS_DELEGATION_SWEEP_MS` de test (plancher ~50 ms) réduirait
+      nettement les attentes de tick de ce même fichier. (d) Un
       `CLAUDE_PEERS_SYNC_BACKOFF_MAX_MS` (plancher : le tick) retirerait
       ~12 s à `broker-roadmap-replica`, dont la moitié du temps est la
       reconnexion après panne ; `broker-peer-federation` et

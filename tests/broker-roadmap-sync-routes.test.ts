@@ -76,6 +76,7 @@ function pushItem(overrides: Partial<RoadmapSyncPushItem> & { id: string }): Roa
     value: "medium",
     effort: "medium",
     status: "planned",
+    triage: null,
     tags: [],
     depends_on: [],
     deleted_at: null,
@@ -151,15 +152,7 @@ async function pollUntil<T>(
   throw new Error(`pollUntil timed out after ${budgetMs}ms; last observed: ${JSON.stringify(last)}`);
 }
 
-// Brokers started once for the whole file. A test below isolates itself by its
-// own card ids, replica ids and peers instead of by a fresh process; only a
-// test that asserts on a different env, on a table it must find empty, or on a
-// sweep it has to wait for starts its own broker.
-//   shared      the default upstream (token + serve_replicas)
-//   openUpstream serve_replicas without a token
-//   noRole      a token without serve_replicas
-//   bare        neither
-//   deadReplica a replica whose upstream never answers
+// Started once for the file: a test isolates itself by its own ids, and starts its own broker only for a different env, an empty table or a sweep it waits for.
 let shared: TestBroker;
 let openUpstream: TestBroker;
 let noRole: TestBroker;

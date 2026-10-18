@@ -1,11 +1,3 @@
-// Card 8d74c669: applyPulledRow's stale-lock-sweep protection
-// (isSweepOnlyStatusChange) only ran in the DIRTY branch, but a lock that
-// replicated without a hitch is CLEAN (sync_dirty reset to 0 by a successful
-// push) and took the plain overwrite branch instead -- so the upstream
-// sweep's status=planned landed locally while `locked` stayed 1. The
-// discriminant the bug turns on is exactly sync_dirty: two locks held by the
-// same agent through the same outage, one edited and one merely held.
-
 import { test, expect, beforeAll, afterAll } from "bun:test";
 import { Database } from "bun:sqlite";
 import { startBroker, stopBroker, livePid, type TestBroker } from "./_helper.ts";
@@ -18,13 +10,7 @@ const AUTH = "lock-sweep-suite-marker";
 type UpsertRes = { item: RoadmapItem };
 type ListRes = { items: RoadmapItem[] };
 
-// One pair for the whole file; every test works on its own cards and peers.
-// The upstream's sweep is driven down so a silent replica's relayed lock falls
-// within seconds, the grace at its floor so the sweep lands before the
-// replica's offline backoff reaches its 3.2 s step; the TTL stays at production scale so it is never the clause
-// that bites here (card 8d74c669's own measurement: the real trigger is
-// grace/active-stale, not TTL). The replica's own lock sweep never runs during
-// the file: only the upstream's sweep may release anything.
+// Sweep and grace at their floor so the upstream releases a silent replica's lock before the replica's offline backoff outgrows them; the TTL stays high so it is never the clause that bites.
 let upstream: TestBroker;
 let proxy: UpstreamProxy;
 let replica: TestBroker;

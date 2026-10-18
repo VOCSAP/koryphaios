@@ -138,9 +138,7 @@ function callDeckTool(h: Deck, name: string, args: Record<string, unknown>): Pro
 }
 
 describe("server-deck.ts token authz", () => {
-  // The identity file is read at call time, so each deck process is keyed by
-  // the principal it holds: one live peer, none at all, one dormant peer. The
-  // broker caps the dispatch long-poll (hard-coded to 25 s by server.ts) at 1 s.
+  // The identity file is read at call time, so each deck process is keyed by the principal it holds.
   let b: TestBroker;
   let live: { deck: Deck; instanceToken: string };
   let absent: Deck;

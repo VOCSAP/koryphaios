@@ -1,9 +1,3 @@
-// The two App-shell probes of the operator-trust dialog: a child bun process
-// imports the whole renderer tree (App.tsx, hence CompanionDialog and its
-// qrcode-generator), which lives in desktop/node_modules. The cross-platform
-// pure-module job installs no desktop deps, so this file is exempted to the
-// integration step; the dialog's own happy-dom tests stay in
-// desktop-operator-trust-dialog.test.ts, where no desktop dep is needed.
 import { expect, test } from "bun:test";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";

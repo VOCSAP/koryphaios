@@ -135,35 +135,26 @@ gate.
 
 **Rework, cheapest first (open items, `BACKLOG.md` §4):**
 
-1. A file that starts a broker in every `test()` starts it once in
-   `beforeAll` and isolates state by group/project key instead
-   (`broker-approvals`, `broker-roadmap-sync-routes`, `broker-ntfy-channel`,
-   `broker-project-key-alignment`, `broker-approval-ack`: 38, 21, 19, 12
-   `startBroker(` calls). `tests/_helper.ts` boots a broker in ~300 ms, so
-   each avoided start is ~300 ms plus the test's own waits.
-2. A test that waits a fixed duration for a sweep or TTL (`Bun.sleep(12_000)`
-   in `broker-sweep-inactive`, 2 000 ms ticks in
-   `broker-roadmap-sync-offline-reason`) sets the interval env to its floor
-   and polls the CONDITION with a bounded deadline, or the sweep gets a
-   test-only trigger route; `broker-delegated-sweep`'s `waitFor` helper is
-   the shape, its 1 s tick the remaining cost.
-3. `broker-roadmap-lock-sweep-replicated` shares its pair across the file;
-   `broker-roadmap-replica` and `broker-peer-federation` already did, and
-   their remaining cost is the sync retry backoff (`SYNC_BACKOFF_MAX_MS`,
-   not settable by env): a `CLAUDE_PEERS_SYNC_BACKOFF_MAX_MS` floored at
-   the tick would take ~12 s off the replica file.
-4. `desktop-ttsr-budget-margin` (8 s for 2 tests) and `desktop-ttsr-rules`'s
-   "past its time budget" block measure wall-clock regex budgets; they are
-   benchmarks, not regressions, and belong behind an opt-in env or in the
-   integration step.
+1. `broker-delegated-sweep` already polls the CONDITION with a bounded
+   deadline (its `waitFor` helper); the cost left there is the sweep tick
+   itself. A test-only `CLAUDE_PEERS_DELEGATION_SWEEP_MS` with a low floor
+   would shorten it (`BACKLOG.md` §4.0).
+2. `broker-roadmap-replica` and `broker-peer-federation` share their broker
+   pair across the file; their remaining cost is the sync retry backoff
+   (`SYNC_BACKOFF_MAX_MS`, not settable by env). A
+   `CLAUDE_PEERS_SYNC_BACKOFF_MAX_MS` floored at the tick would shorten the
+   reconnection after an outage.
+3. `desktop-ttsr-budget-margin` and `desktop-ttsr-rules`'s "past its time
+   budget" block measure wall-clock regex budgets; they are benchmarks, not
+   regressions, and belong behind an opt-in env or in the integration step.
 
 **What a new test must not add**: a `--tsconfig-override` child probe that
-imports the renderer tree (`desktop-operator-trust-dialog.test.ts` imports
-`App.tsx`, which needs `qrcode-generator` from `desktop/node_modules`; the
-cross-platform pure-module job installs no desktop deps, so the step has been
-red on all three OSes since run 427). Such a probe is listed in
+imports the renderer tree. The pure-module job installs no desktop deps, so a
+test importing `App.tsx` (which needs `qrcode-generator` from
+`desktop/node_modules`), such as
+`tests/desktop-operator-trust-dialog-app.test.ts`, is listed in
 `scripts/pure-module-partition.ts`'s `EXEMPTIONS` with the native-deps
-marker, or it is rewritten against an importable module.
+marker, or the probe is rewritten against an importable module.
 
 ## Reviewing a commit and auditing a guard
 

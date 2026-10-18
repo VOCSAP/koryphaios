@@ -317,9 +317,8 @@ interface TimedOutChain {
   pidFile: string;
 }
 
-// The chain timeout is a 4 s constant of the script: started before the first test, the run
-// overlaps the rest of the file instead of adding to it. Its directory is removed in afterAll,
-// since the per-test afterEach drains tmpDirs.
+// Started before the first test so the run overlaps the rest of the file; its directory is removed
+// in afterAll because the per-test afterEach drains tmpDirs.
 const suiteDirs: string[] = [];
 afterAll(() => {
   for (const d of suiteDirs.splice(0)) rmSync(d, { recursive: true, force: true });
