@@ -1,7 +1,7 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { deriveOperatorId, generateCredential } from "../shared/approval.ts";
 import { OPERATOR_TRUST_VERSION, publicKeyFingerprint } from "../shared/operator-trust.ts";
 import { scrubEnv } from "./_scrub-env.ts";
@@ -104,6 +104,21 @@ describe("bun cli.ts operator-trust", () => {
     expect([first.code, second.code].sort()).toEqual([0, 3]);
     const policy = JSON.parse(readFileSync(trustPath(settingsDir), "utf8")) as { operators: { public_key: string }[] };
     expect(policy.operators).toEqual([{ public_key: credential.publicKey }]);
+  });
+
+  test("a second init that reads between the creator's open and its write waits for the document, then refuses as already present", async () => {
+    const settingsDir = scratch();
+    const credential = generateCredential();
+    mkdirSync(dirname(trustPath(settingsDir)), { recursive: true });
+    writeFileSync(trustPath(settingsDir), "");
+    const document = `${JSON.stringify({ version: OPERATOR_TRUST_VERSION, operators: [{ public_key: credential.publicKey }] }, null, 2)}\n`;
+    const [run] = await Promise.all([
+      runCli(["init", "--public-key", credential.publicKey], settingsDir),
+      Bun.sleep(150).then(() => writeFileSync(trustPath(settingsDir), document)),
+    ]);
+
+    expect(run.code, run.stderr).toBe(3);
+    expect(run.stderr).toContain("requested key is already present");
   });
 
   test("refuses invalid prepared policies for validation and fingerprint display", async () => {

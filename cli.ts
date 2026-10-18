@@ -344,6 +344,19 @@ function initializeOperatorTrust(publicKey: string, label: string | undefined): 
     if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
       operatorTrustExit(2, `cannot initialize policy: ${error instanceof Error ? error.message : String(error)}`);
     }
+    // O_EXCL decides who creates the file, but the creator's write lands a
+    // moment later: a concurrent loser that reads at once sees an empty file.
+    // The creator writes the whole document, newline included, in one call.
+    for (let attempt = 0; attempt < 200; attempt++) {
+      let text = "";
+      try {
+        text = readFileSync(path, "utf-8");
+      } catch (readError) {
+        operatorTrustExit(2, `cannot read policy: ${readError instanceof Error ? readError.message : String(readError)}`);
+      }
+      if (text.endsWith("\n")) break;
+      Bun.sleepSync(10);
+    }
     const existing = readOperatorTrust();
     const operatorId = deriveOperatorId(publicKey);
     const trusted = existing.trustedOperator(operatorId);
