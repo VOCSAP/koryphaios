@@ -275,6 +275,14 @@ Shipped instances: a gateway table keyed by channel `kind` (second operator
 replaced and stopped the first), an address→operator lookup whose `.get()`
 picked one of two rows, `hostname()` used as identity.
 
+### Deck-control : deux définitions de la tuile lead
+
+Dans `desktop/src/main/deck-control.ts`, `callerForSession` résout le caller minté d'une tuile depuis `mintedCallerId`, puis `sessionMintedCallerId` ; ce rôle runtime est distinct du flag `lead`.
+Pour un appelant team-lead, `deck_close_session` protège les tuiles portant `lead` ou `supervisor`, ainsi que sa propre tuile ; toute tuile verrouillée reste protégée.
+Un autre team-lead minté au runtime sans ces flags reste donc fermable : le lead qui délègue une partie du travail à un second team-lead doit pouvoir fermer sa tuile, même si celui-ci gère sa propre équipe ; cette permission n'est pas conditionnée au fait d'avoir créé la cible.
+`deck_close_all`, réservé au superviseur, utilise `isLeadTile` (`lead` OU `callerForSession` non nul) pour fermer les workers avant les leads, y compris ceux mintés au runtime ; les tuiles superviseur et verrouillées sont exclues, pas les leads runtime.
+Dans `deck_run_directive`, la garde `clear_reload` d'un team-lead vers une AUTRE tuile applique le même prédicat élargi, écrit en ligne, et refuse aussi le superviseur : pas de repli permissif vers un worker ; la reprise de sa propre tuile est un cas distinct.
+
 ## Context deposits
 
 A peer can leave a short summary of its working context in the broker before a
