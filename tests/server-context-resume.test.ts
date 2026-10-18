@@ -122,7 +122,7 @@ function instanceToken(broker: TestBroker, cwd: string): string | null {
     // The server records process.cwd(), resolved by the kernel on POSIX and
     // left as spelled on Windows: both spellings of the directory are asked.
     return (
-      db.query("SELECT instance_token FROM peers WHERE cwd IN (?, ?)").get(cwd, realpathSync(cwd)) as { instance_token?: string } | null
+      db.query("SELECT instance_token FROM peers WHERE cwd IN (?, ?)").get(cwd, realpathSync.native(cwd)) as { instance_token?: string } | null
     )?.instance_token ?? null;
   } finally {
     db.close();
