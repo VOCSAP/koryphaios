@@ -114,4 +114,7 @@ console.log(
   `[partition-pure-tests] ${results.length} invocation(s), ${totalMs}ms total: ${anyFailed ? "FAIL" : "PASS"}`,
 );
 
-process.exit(anyFailed ? 1 : 0);
+// exitCode, not process.exit(): the test output written above is still
+// draining to the pipe, and an exit here would truncate it, losing the
+// failing test's name exactly when it is needed.
+process.exitCode = anyFailed ? 1 : 0;

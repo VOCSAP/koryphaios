@@ -86,4 +86,7 @@ const ranNote =
     : `${result.testsRan} test${result.testsRan === 1 ? "" : "s"} ran across ${result.filesRan} file${result.filesRan === 1 ? "" : "s"}`;
 console.log(`[partition-integration-tests] ${result.exitCode === 0 ? "PASS" : "FAIL"} (${files.length} files, ${ranNote}, ${result.ms}ms)`);
 
-process.exit(result.exitCode === 0 ? 0 : 1);
+// exitCode, not process.exit(): the test output written above is still
+// draining to the pipe, and an exit here would truncate it, losing the
+// failing test's name exactly when it is needed.
+process.exitCode = result.exitCode === 0 ? 0 : 1;
