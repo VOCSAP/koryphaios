@@ -730,5 +730,30 @@ describe('ScreenGuard xterm lifecycle', () => {
     expect(guard.read('second')).toMatchObject({ status: 'unavailable', reason: 'screen-pending' })
     guard.stop()
   })
+
+  test('keeps the global reservation balance when a cleared life callback settles late', () => {
+    const first = deferredTerminal()
+    const terminals = [first, deferredTerminal(), deferredTerminal()]
+    const guard = new ScreenGuard(() => undefined, {
+      globalBudgets: { pendingCodeUnits: 1, pendingChunks: 1 },
+      screenOptions: { terminalFactory: () => terminals.shift()!.terminal as never }
+    })
+
+    guard.start('first', 20, 4)
+    guard.feed('first', 'a')
+    guard.clear('first')
+    first.flushNext()
+    guard.start('second', 20, 4)
+    guard.start('third', 20, 4)
+    guard.feed('second', 'a')
+    guard.feed('third', 'a')
+
+    expect(guard.read('second')).toMatchObject({ status: 'unavailable', reason: 'screen-pending' })
+    expect(guard.read('third'), 'a late callback of a cleared life released its reservation a second time').toEqual({
+      status: 'unavailable',
+      reason: 'screen-fault'
+    })
+    guard.stop()
+  })
 })
 

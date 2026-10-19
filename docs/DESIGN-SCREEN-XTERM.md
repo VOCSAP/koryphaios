@@ -157,6 +157,26 @@ Les volumes comptent les caractères du corpus, pas une mesure du débit réseau
 3. **Seuils proposés à ratifier** : zéro donnée perdue silencieusement, zéro ouverture sur état indisponible, zéro divergence de verdict non expliquée ; à charge interactive 8 tuiles, p99 réception->prêt et retard main < 50 ms ; à 32 tuiles, < 100 ms. Pour le corpus borné ci-dessus, sur la même machine : CPU total ≤ 1,5 fois le modèle à dimensions égales, delta RSS supplémentaire ≤ 96 MiB à 32 tuiles. Après échauffement de cycles identiques : hausse heap retenu ≤ 1 MiB par 100 cycles sur trois lots. Ne pas imposer ces temps à la CI comme des sleeps/timeout métier.
 4. Si budget dépassé : optimiser fréquence de snapshot et admission avant d'introduire un worker. **Alternative** worker par service, non par tuile : protège la boucle main mais ajoute protocole, identité et retard de publication. À ouvrir uniquement sur mesure ; ce serait un lot architectural supplémentaire, pas un détail du remplacement.
 
+### Qualification du lot 3
+
+Les seuils proposés ci-dessus sont ratifiés par l'opérateur. Le plan a été exécuté avec le vrai `xterm-screen.ts` (`ScreenGuard`, copie des snapshots, lecture par `classifyInjectGuard`) sous Electron 43.1.1, cinq répétitions entrelacées après échauffement, 1/8/32 tuiles, 120×40 et 240×80. Le bruit de fond de la machine était de 11 à 97 % et a été consigné par run. Règle de verdict : un seuil qui tient sous bruit est conservatif et valide ; un seuil limite ou dépassé est « non conclu sous bruit ». Aucun seuil n'est établi comme dépassé.
+
+- **Délai réception → snapshot prêt** (< 50 ms à 8 tuiles, < 100 ms à 32) : tient, p99 d'environ 16 ms aux deux tailles de parc.
+- **Retard de boucle main** (mêmes seuils), renderer `@xterm/xterm` WebGL actif : tient, p99 d'environ 16 ms, à 0,1 ms près de la même charge sans adaptateur.
+- **CPU ≤ 1,5 fois le modèle à dimensions égales** : tient à 32 tuiles (ratio proche de 1,0) ; à 1 et 8 tuiles, non conclu sous bruit de fond, accepté par l'opérateur comme limite nommée (coût fixe probable de chauffe JIT, pas par tuile).
+- **Delta RSS supplémentaire ≤ 96 MiB à 32 tuiles** : tient dans les deux lectures, adaptateur moins modèle (environ +1 MiB) et adaptateur moins base process (environ 80 MiB).
+- **Heap retenu ≤ 1 MiB par 100 cycles** : tient, 0,7 MiB au premier lot puis 0, aucun terminal disposé retenu (`WeakRef`) ; un contrôle qui retient volontairement les terminaux dépasse le seuil. La rétention par le harnais et le GC différé sont départagés : le GC différé n'explique rien.
+- **Zéro donnée perdue, zéro ouverture sur état indisponible, zéro divergence** : tient, aucune divergence contre un écran de référence sur les points comparables, aucun `ready` aux dimensions périmées, solde du budget global à zéro après arrêt. Un flux synthétique au-delà du budget global de 8 MiB ferme la garde en traçant `xterm screen global input budget exceeded`, ce qui est le comportement attendu et non une perte silencieuse.
+
+Limites de cette qualification :
+
+- Le substitut est un main Electron jetable avec une fenêtre hébergeant N terminaux, pas le Deck. `SessionService`, `node-pty`, le décodage, l'IPC `pty:data` réel et `TileInjector` sont hors de la boucle mesurée.
+- La production n'a pas de contre-pression : la file xterm n'est bornée que par le budget global. Les mesures de RSS bornent la file par tours de rejeu et peuvent sous-estimer le pic réel.
+- Le 240×80 n'est pas un flux PTY réel : c'est un flux capturé à 120 colonnes rejoué dans une grille plus grande, ou un redessin plein écran synthétique. Huit fixtures n'ont pas de chronologie `t` et sont rejouées à 100 ms par chunk.
+- Sous Windows, la latence et le retard de boucle sont quantifiés par pas d'environ 15,6 ms (granularité du timer) : une valeur proche de ce plancher ne distingue pas 1 ms de 4 ms.
+- Le délai resize → prêt dépend du prochain chunk du PTY : l'écran reste `resize-pending` tant qu'aucun repaint ne suit. C'est la fermeture voulue, pas un coût de calcul.
+- Un pic isolé de retard de boucle d'environ 114 ms a été vu une fois sur un run de fumée hors série, non reproduit sur les runs notés ; sa cause n'est pas établie.
+
 ## 9. Acceptation fonctionnelle et suite des cartes
 
 **Contrat proposé** : conserver `tests/_fixture-verdicts.ts` comme oracle explicite de HEAD. Tout écart est listé fixture/checkpoint/avant/après/raison et validé séparément, jamais accepté par régénération massive du manifeste. Vérifier la totalité du domaine de fixtures, dont les exclusions intentionnelles ; un nouveau fichier non classé doit faire échouer le test de couverture.
