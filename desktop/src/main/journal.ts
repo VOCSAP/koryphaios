@@ -39,6 +39,19 @@ function journalSafe(text: string): string {
   return text.replace(journalLineBreaks, ' / ').replace(journalControls, replacement)
 }
 
+function withoutSeparators(text: string): string {
+  return text.replace(journalLineBreaks, '').replace(journalControls, '')
+}
+
+// The joined form is never emitted: joining drops the boundary the patterns
+// anchor on, so it redacts less than the direct pass. It only shows a piece was missed.
+function redactAcrossBreaks(text: string): string {
+  const direct = redactSecrets(text)
+  const flat = withoutSeparators(direct)
+  if (redactSecrets(withoutSeparators(text)) === flat) return direct
+  return redactSecrets(flat).replace(/\[redacted\][A-Za-z0-9._~+/=-]+/g, '[redacted]')
+}
+
 export class Journal {
   private entries: JournalEntry[] = []
   private seq = 0
@@ -50,7 +63,7 @@ export class Journal {
   ) {}
 
   add(kind: JournalKind, text: string): JournalEntry {
-    const entry: JournalEntry = { id: ++this.seq, at: this.now(), kind, text: journalSafe(redactSecrets(text.slice(0, MAX_LOGGED_CHARS))).slice(0, MAX_LOGGED_CHARS) }
+    const entry: JournalEntry = { id: ++this.seq, at: this.now(), kind, text: journalSafe(redactAcrossBreaks(text.slice(0, MAX_LOGGED_CHARS))).slice(0, MAX_LOGGED_CHARS) }
     this.entries.push(entry)
     if (this.entries.length > this.cap) {
       this.entries.splice(0, this.entries.length - this.cap)
