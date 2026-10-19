@@ -146,6 +146,16 @@ test("form A: a hook permission offers hand back, Deny and Allow, with the comma
   expect(container.querySelector(".tile-approval-title")?.textContent).toBe("Bash: rm -rf build");
 });
 
+test("a hook question or plan links its URLs, a hook permission command does not", () => {
+  mount([row({ id: "p1", kind: "question", title: "Plan", question: "Plan: see https://example.com/plan", options: [] })]);
+  expect([...container.querySelectorAll(".tile-approval-text .text-link")].map((l) => l.textContent)).toEqual([
+    "https://example.com/plan"
+  ]);
+
+  mount([row({ question: "curl https://example.com/x" })]);
+  expect(container.querySelectorAll(".tile-approval-text .text-link").length).toBe(0);
+});
+
 for (const [label, method] of [
   ["inbox.permissionAllow", "approvalAllow"],
   ["inbox.permissionDeny", "approvalDecline"],

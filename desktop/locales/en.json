@@ -711,6 +711,8 @@
   "inbox.senderUnresolved": "Unresolved sender —",
   "inbox.senderUnresolvedEmpty": "Unresolved sender",
   "inbox.verdictRemoteBlocked": "Answering a blocking question requires the desktop app: a remote companion cannot render the human verdict an agent is waiting for.",
+  "inbox.linkFileTitle": "Click: show in its folder. Ctrl+click: open (listed file types only)",
+  "inbox.linkWebTitle": "Open in the browser",
   "inbox.dangerBadge": "Risky pattern:",
   "inbox.signalLegend": "Indicative signal: a request without a badge is never guaranteed safe.",
   "inbox.navigate": "Go to the tile",

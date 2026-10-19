@@ -205,6 +205,41 @@ test("a question is plain text: no command block, no signal row", () => {
   expect(shape()).toEqual(["plain:inbox-modal-text=Which branch?\nmain or dev"]);
 });
 
+test("a question's URL is a link inside the host box", () => {
+  render(React.createElement(ApprovalRequestBody, {
+    approval: { kind: "question", question: "Is https://example.com/x right?" },
+    className: "inbox-modal-text"
+  }));
+  expect(shape()).toEqual(["plain:inbox-modal-text=Is https://example.com/x right?"]);
+  expect([...container.querySelectorAll(".inbox-modal-text > .text-link")].map((b) => b.textContent)).toEqual([
+    "https://example.com/x"
+  ]);
+});
+
+test("a permission command stays plain text on every line: the operator judges it as written", () => {
+  render(React.createElement(ApprovalRequestBody, {
+    approval: { kind: "permission", question: "Run curl https://example.com/a\nthen https://example.com/b" },
+    className: "inbox-modal-text"
+  }));
+  expect(container.querySelector(".approval-command-head")!.textContent).toBe("Run curl https://example.com/a");
+  expect(container.querySelector(".approval-command-rest")!.textContent).toBe("then https://example.com/b");
+  expect(container.querySelectorAll(".text-link").length).toBe(0);
+});
+
+test("the Courrier modal links a message's URL while the list excerpt stays plain text", () => {
+  fakeUseDeck.setState({
+    inboxMessages: [{ id: 1, from: "peer-x", text: "see https://example.com/x", sentAt: "2026-10-09T12:00:00.000Z" }]
+  });
+  render(React.createElement(InboxPanel));
+  expect(container.querySelectorAll(".text-link").length, "the list row is itself a control").toBe(0);
+  act(() => {
+    (container.querySelector(".inbox-entry") as HTMLElement).click();
+  });
+  expect([...container.querySelectorAll(".inbox-modal .inbox-modal-text .text-link")].map((b) => b.textContent)).toEqual([
+    "https://example.com/x"
+  ]);
+});
+
 test("markup in the agent's text renders as literal text: no element injected, no handler run", () => {
   const g = globalThis as Record<string, unknown>;
   delete g.__approvalPwned;

@@ -7,6 +7,7 @@ import type { AckableInboxEntry, InboxEntry } from '@shared/types'
 import { verdictAnswerKindFor } from './approval-verdict'
 import { resolveApprovalSender } from '../inbox-sender'
 import { HookApprovalAnswer } from './HookApprovalAnswer'
+import { LinkedText } from './LinkedText'
 import { ApprovalNavigate, ApprovalRequestBody } from './ApprovalRequestBody'
 import { displayApprovalText } from './approval-display'
 import { formQuestions } from './approval-answers'
@@ -393,7 +394,9 @@ export function InboxPanel(): React.JSX.Element {
               (open.kind === 'approval' ? (
                 <ApprovalRequestBody approval={open.approval} className="inbox-modal-text" />
               ) : (
-                <div className="inbox-modal-text">{entryText(open)}</div>
+                <div className="inbox-modal-text">
+                  <LinkedText text={entryText(open)} />
+                </div>
               ))}
 
             {open.kind === 'approval' && (

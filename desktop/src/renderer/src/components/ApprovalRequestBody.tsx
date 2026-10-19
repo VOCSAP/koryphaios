@@ -4,6 +4,7 @@ import { useT } from '../i18n'
 import { resolveApprovalSender } from '../inbox-sender'
 import { GLYPH_ACTIONS, GLYPH_BADGES } from './icons'
 import { displayApprovalText, splitCommandLine } from './approval-display'
+import { LinkedText } from './LinkedText'
 
 interface Props {
   approval: Pick<Approval, 'kind' | 'question'>
@@ -14,7 +15,13 @@ interface Props {
 export function ApprovalRequestBody({ approval, danger, className }: Props): React.JSX.Element {
   const t = useT()
   const text = displayApprovalText(approval.question)
-  if (approval.kind !== 'permission') return <div className={className}>{text}</div>
+  if (approval.kind !== 'permission') {
+    return (
+      <div className={className}>
+        <LinkedText text={text} />
+      </div>
+    )
+  }
 
   const { head, rest } = splitCommandLine(text)
   return (

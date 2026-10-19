@@ -26,33 +26,40 @@ export interface LinkTerminal {
   registerLinkProvider(provider: ILinkProvider): { dispose(): void }
 }
 
-const WEB_URL_RE = /^https?:/i
+export const WEB_URL_RE = /^https?:/i
+
+/** Click reveals, Ctrl/Cmd+click opens; main decides what either may do. */
+export function activateLink(
+  deps: TerminalLinkDeps,
+  target: string,
+  event: Pick<MouseEvent, 'button' | 'ctrlKey' | 'metaKey'>
+): void {
+  // Right and middle clicks belong to copy and paste.
+  if (event.button !== 0) return
+  if (!WEB_URL_RE.test(target) && !deps.fileLinks()) {
+    deps.report(`file link refused on a sandbox tile: ${target.slice(0, 200)}`)
+    deps.onRefused('sandbox')
+    return
+  }
+  const intent: LinkIntent = event.ctrlKey || event.metaKey ? 'open' : 'reveal'
+  deps.open(target, intent).then(
+    (outcome) => {
+      if (!outcome.ok) deps.onRefused(outcome.reason)
+    },
+    (e: unknown) => {
+      deps.report(`open link failed: ${e instanceof Error ? e.message : String(e)}`)
+      deps.onRefused('failed')
+    }
+  )
+}
 
 /**
  * One click path for every link of a session terminal: OSC 8 hyperlinks (via
- * xterm's linkHandler) and links found in the printed text. Click reveals,
- * Ctrl/Cmd+click opens; main decides what either may do.
+ * xterm's linkHandler) and links found in the printed text.
  */
 export function installTerminalLinks(term: LinkTerminal, deps: TerminalLinkDeps): void {
-  const activate = (target: string, event: Pick<MouseEvent, 'button' | 'ctrlKey' | 'metaKey'>): void => {
-    // Right and middle clicks belong to copy and paste.
-    if (event.button !== 0) return
-    if (!WEB_URL_RE.test(target) && !deps.fileLinks()) {
-      deps.report(`file link refused on a sandbox tile: ${target.slice(0, 200)}`)
-      deps.onRefused('sandbox')
-      return
-    }
-    const intent: LinkIntent = event.ctrlKey || event.metaKey ? 'open' : 'reveal'
-    deps.open(target, intent).then(
-      (outcome) => {
-        if (!outcome.ok) deps.onRefused(outcome.reason)
-      },
-      (e: unknown) => {
-        deps.report(`open link failed: ${e instanceof Error ? e.message : String(e)}`)
-        deps.onRefused('failed')
-      }
-    )
-  }
+  const activate = (target: string, event: Pick<MouseEvent, 'button' | 'ctrlKey' | 'metaKey'>): void =>
+    activateLink(deps, target, event)
 
   term.options.linkHandler = {
     allowNonHttpProtocols: true,
