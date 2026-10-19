@@ -90,7 +90,12 @@ test('opens one approval dialog at a time and refuses a repeated start while it 
     Promise.race([promise, Bun.sleep(1000).then(() => Promise.reject(new Error(`${label} did not settle`)))])
 
   const first = h.ipc.start(dir)
-  await Bun.sleep(10)
+  // The busy guard is only set after two awaits, so wait on the dialog, not on a delay.
+  const deadline = Date.now() + 1000
+  while (open.length < 1) {
+    if (Date.now() > deadline) throw new Error('the first start never opened its approval dialog')
+    await Bun.sleep(1)
+  }
   const second = h.ipc.start(dir)
   await Bun.sleep(10)
   for (const answer of open.splice(0)) answer(true)
