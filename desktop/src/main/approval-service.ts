@@ -174,6 +174,8 @@ export async function addApproval(
      * than defaulting silently.
      */
     merge: 'tile' | 'never'
+    /** The answer belongs on the tile: the broker refuses every remote verdict on this row. */
+    tileOnly?: boolean
   }
 ): Promise<ApprovalAddResponse['approval']> {
   const res = await signedPost<ApprovalAddResponse>(deps, '/approval/add', {
@@ -188,6 +190,7 @@ export async function addApproval(
     session_ref: args.sessionRef,
     tile_ref: args.tileRef ?? args.sessionRef,
     merge: args.merge,
+    ...(args.tileOnly ? { tile_only: true } : {}),
     // A resolved peer means the broker can deliver the answer as a message and
     // nothing has to be typed. Without one (peer not resolved yet, or a CLI
     // with no push channel) the broker downgrades to 'pty' on its own.
@@ -491,6 +494,21 @@ export function buildKeystrokes(approval: Approval): string | null {
     default:
       return null
   }
+}
+
+const NOT_TYPED_ASKED_MAX = 200
+
+/** The text of the question raised when an answer was consumed without being typed. */
+export function notTypedQuestion(
+  approval: Pick<Approval, 'title' | 'question' | 'answered_via'>,
+  tileName: string,
+  reason: string
+): string {
+  const asked = approval.question.slice(0, NOT_TYPED_ASKED_MAX)
+  return (
+    `Your answer to "${approval.title}" (from ${approval.answered_via}) was not typed into "${tileName}": ${reason}. ` +
+    `It asked: "${asked}". Answer it in the terminal.`
+  )
 }
 
 /**

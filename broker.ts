@@ -9990,6 +9990,15 @@ function handleApprovalAdd(
     } | null;
     if (existing) {
       log.info(`approval: duplicate raise for tile ${draft.value.tile_ref} — reusing ${existing.id}`);
+      // A permission row is excluded: it takes its own Allow.
+      if (draft.value.tile_only) {
+        db.run(
+          `UPDATE pending_approvals SET absorbed_permission = 1
+            WHERE ${tileWhere.sql} AND tile_ref = ? AND mergeable = 1 AND status = 'pending'
+              AND kind <> 'permission' AND id = ?`,
+          [...(tileWhere.params as never[]), draft.value.tile_ref, existing.id]
+        );
+      }
       // Only id + status: this branch can now match a row from a DIFFERENT
       // credential kind, so the caller must not read another producer's
       // title/question off it.
@@ -10042,9 +10051,9 @@ function handleApprovalAdd(
     db.run(
       `INSERT INTO pending_approvals
          (id, ${stamped.columns.join(", ")}, origin_host, origin_user, group_id, from_peer,
-          tile_ref, mergeable, reply_route, reply_token, reply_group, producer_secret_hash,
+          tile_ref, mergeable, absorbed_permission, reply_route, reply_token, reply_group, producer_secret_hash,
           kind, title, question, options_json, questions_json, status, created_at, notif_expires_at)
-       VALUES (?, ${stamped.columns.map(() => "?").join(", ")}, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
+       VALUES (?, ${stamped.columns.map(() => "?").join(", ")}, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
       [
         id,
         ...stamped.values,
@@ -10054,6 +10063,7 @@ function handleApprovalAdd(
         pick("from_peer").slice(0, 128),
         draft.value.tile_ref,
         draft.value.merge === "tile" ? 1 : 0,
+        draft.value.tile_only ? 1 : 0,
         reply.route,
         reply.token,
         reply.group,
@@ -10227,7 +10237,7 @@ function settleApproval(
       return { error: "a permission takes allow or deny, not a text answer", status: 422, refused: "verdict-only" };
     }
     if (existing.absorbed_permission !== 0 && answerKind !== null && settleable) {
-      return { error: "this question absorbed a permission dialog: answer it on its tile", status: 422, refused: "on-tile" };
+      return { error: "this question is answered on its tile", status: 422, refused: "on-tile" };
     }
     if (
       existing.kind === "question" &&

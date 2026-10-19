@@ -137,10 +137,11 @@ export function approvalWhere(scope: ApprovalScope): { sql: string; params: unkn
  * (handleApprovalAdd): the de-duplication SELECT a question merges through;
  * the closing UPDATE that marks a tile's older permissions 'abandoned' when a
  * new one is raised, the one call that WRITES to rows another credential
- * created; and the UPDATE that marks the tile's questions as having absorbed
- * a permission. Not an optional parameter on approvalWhere (D2, classed
- * Fatal, just above) -- a second NAMED mint so its callers stay greppable
- * instead of a flag any caller could flip.
+ * created; the UPDATE that marks the tile's questions as having absorbed
+ * a permission; and the UPDATE that marks the reused pending question as
+ * tile-only, which writes to such a row too. Not an optional parameter on
+ * approvalWhere (D2, classed Fatal, just above) -- a second NAMED mint so its
+ * callers stay greppable instead of a flag any caller could flip.
  */
 export function approvalTileWhere(scope: ApprovalScope): { sql: string; params: unknown[] } {
   const f = scopeFields.get(scope);

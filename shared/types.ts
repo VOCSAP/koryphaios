@@ -1906,6 +1906,12 @@ export interface ApprovalAddRequest {
   /** Absent, null or unrecognised normalises to 'tile' broker-side. */
   merge?: ApprovalMerge;
   /**
+   * The answer belongs on the tile: the row is created absorbed (or marked so
+   * when it merges into a pending non-permission row), and a remote verdict is
+   * refused. Absent or null reads as false; an older broker ignores it.
+   */
+  tile_only?: boolean;
+  /**
    * AskUserQuestion questions: kind 'question', merge 'never', and a hook route
    * or a channel route to an active peer. `multi_select` defaults to false.
    */

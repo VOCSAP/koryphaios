@@ -79,7 +79,8 @@ export interface NotificationChannel {
 /**
  * Why the broker refused an answer:
  * `verdict-only` -- a permission takes allow or deny, never free text;
- * `on-tile` -- the question absorbed a permission dialog, answered on its tile;
+ * `on-tile` -- the question absorbed a permission dialog or was raised
+ * tile-only, answered on its tile;
  * `session-gone` -- the session that waited for it is gone, and the request
  * was closed by this very refusal;
  * `answers-only` -- a module waits on these questions and reads only their answers;

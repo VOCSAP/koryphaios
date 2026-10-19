@@ -398,6 +398,94 @@ describe("a permission raise merged into a tile's channel question", () => {
     expect([row.kind, row.reply_route, row.absorbed_permission]).toEqual(["permission", "pty", false]);
   }, 30_000);
 
+  test("a tile-only raise is created absorbed: every remote verdict is refused, the terminal answer closes it", async () => {
+    const b = shared;
+    const op = newOperator();
+
+    const question = await raise(b, op, { reply_route: "pty", tile_ref: "t-tile-only", merge: "tile", tile_only: true });
+    expect(question.absorbed_permission, "mutation: the INSERT writes 0 for tile_only").toBe(true);
+    for (const via of ["deck", "telegram"]) {
+      for (const verdict of [
+        { answer_kind: "text", answer_text: "yes" },
+        { answer_kind: "allow" },
+        { answer_kind: "deny" },
+      ]) {
+        const res = await signedPost(b, "/approval/claim", { id: question.id, via, ...verdict }, op);
+        expect(res.status, `${via} ${JSON.stringify(verdict)} would be dropped by the poller after the phone read "Sent."`).toBe(422);
+        expect((await pendingRow(b, op, question.id)).status).toBe("pending");
+      }
+    }
+    const closed = await signedPost<{ approval: Approval }>(
+      b,
+      "/approval/claim",
+      { id: question.id, via: "deck", terminal: true },
+      op
+    );
+    expect([closed.status, closed.body.approval.status]).toEqual([200, "answered_terminal"]);
+  }, 30_000);
+
+  test("a tile-only raise that merges into a pending question marks that row, and never marks a permission row", async () => {
+    const b = shared;
+    const op = newOperator();
+
+    const earlier = await raise(b, op, { reply_route: "pty", tile_ref: "t-tile-only-merge", merge: "tile" });
+    expect(earlier.absorbed_permission).toBe(false);
+    const merged = await raise(b, op, { reply_route: "pty", tile_ref: "t-tile-only-merge", merge: "tile", tile_only: true });
+    expect(merged.id, "the raise reuses the pending row").toBe(earlier.id);
+    expect(
+      (await pendingRow(b, op, earlier.id)).absorbed_permission,
+      "mutation: drop the UPDATE of the reuse branch"
+    ).toBe(true);
+    const refused = await signedPost(b, "/approval/claim", { id: earlier.id, via: "telegram", answer_kind: "text", answer_text: "yes" }, op);
+    expect(refused.status).toBe(422);
+
+    const permission = await raise(b, op, { ...hookPermission, tile_ref: "t-tile-only-perm" });
+    const joined = await raise(b, op, { reply_route: "pty", tile_ref: "t-tile-only-perm", merge: "tile", tile_only: true });
+    expect(joined.id).toBe(permission.id);
+    expect(
+      (await pendingRow(b, op, permission.id)).absorbed_permission,
+      "mutation: drop `kind <> 'permission'` from the UPDATE"
+    ).toBe(false);
+    const allow = await signedPost(b, "/approval/claim", { id: permission.id, via: "deck", answer_kind: "allow" }, op);
+    expect(allow.status, "the permission's own row keeps its Allow").toBe(200);
+  }, 30_000);
+
+  test("an ordinary re-raise of a tile leaves the pending question answerable remotely", async () => {
+    const b = shared;
+    const op = newOperator();
+
+    const first = await raise(b, op, { reply_route: "pty", tile_ref: "t-plain-reraise", merge: "tile" });
+    const again = await raise(b, op, { reply_route: "pty", tile_ref: "t-plain-reraise", merge: "tile" });
+    expect(again.id, "the raise reuses the pending row").toBe(first.id);
+    expect(
+      (await pendingRow(b, op, first.id)).absorbed_permission,
+      "mutation: the reuse UPDATE marks every merged raise, not only tile_only"
+    ).toBe(false);
+    const answered = await signedPost(b, "/approval/claim", { id: first.id, via: "telegram", answer_kind: "text", answer_text: "yes" }, op);
+    expect(answered.status).toBe(200);
+  }, 30_000);
+
+  test.each([
+    ["a non-boolean", { tile_only: "yes", merge: "tile" }],
+    ["a guarded request", { tile_only: true, merge: "never" }],
+    ["a permission", { ...hookPermission, tile_only: true, merge: "tile" }],
+  ])("tile_only on %s is refused 400, never folded to false", async (_what, extra) => {
+    const res = await signedPost(
+      shared,
+      "/approval/add",
+      {
+        kind: "question",
+        title: "Finding",
+        question: "Read this.",
+        tile_ref: "t-tile-only-bad",
+        origin: { host: "test-host", project_key: "p", group_id: "default" },
+        ...extra,
+      },
+      newOperator()
+    );
+    expect(res.status).toBe(400);
+  }, 30_000);
+
   test("a terminal answer closes a row without relaying a verdict, and a late Approve is refused", async () => {
     const b = shared;
     const op = newOperator();

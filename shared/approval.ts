@@ -274,6 +274,8 @@ export interface ApprovalDraft {
    * this field.
    */
   merge: ApprovalMerge;
+  /** The answer belongs on the tile: the row takes no remote verdict. */
+  tile_only: boolean;
   /** AskUserQuestion questions, null when the body carries none. */
   questions: ApprovalQuestion[] | null;
 }
@@ -430,6 +432,7 @@ export function validateApprovalDraft(body: {
   session_ref?: unknown;
   tile_ref?: unknown;
   merge?: unknown;
+  tile_only?: unknown;
   questions?: unknown;
 }): ValidationResult<ApprovalDraft> {
   const kind = str(body.kind) as ApprovalKind;
@@ -461,6 +464,16 @@ export function validateApprovalDraft(body: {
   }
   const merge: ApprovalMerge = body.merge === "never" ? "never" : "tile";
 
+  if (body.tile_only !== undefined && body.tile_only !== null && typeof body.tile_only !== "boolean") {
+    return { ok: false, error: "tile_only must be a boolean" };
+  }
+  const tile_only = body.tile_only === true;
+  // A guarded request gates an action on its verdict, and a permission takes
+  // its own Allow: neither can be refused every remote answer.
+  if (tile_only && (merge !== "tile" || kind === "permission")) {
+    return { ok: false, error: "tile_only needs merge tile and a non-permission kind" };
+  }
+
   let questions: ApprovalQuestion[] | null = null;
   if (body.questions !== undefined && body.questions !== null) {
     if (kind !== "question") return { ok: false, error: "questions belong to kind question" };
@@ -472,7 +485,7 @@ export function validateApprovalDraft(body: {
     questions = parsed.value;
   }
 
-  return { ok: true, value: { kind, title, question, options, session_ref, tile_ref, merge, questions } };
+  return { ok: true, value: { kind, title, question, options, session_ref, tile_ref, merge, tile_only, questions } };
 }
 
 // --- Sanitisers ---

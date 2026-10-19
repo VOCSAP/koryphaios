@@ -231,6 +231,7 @@ import {
   fetchUndeliveredVerdicts,
   listChannels,
   markVerdictsDelivered,
+  notTypedQuestion,
   settleTileAnsweredInTerminal,
   spawnPlanFootprint,
   waitApproval,
@@ -1213,6 +1214,40 @@ const openApprovals = new Map<string, string>()
 const heldVerdicts = new Set<string>()
 
 /**
+ * Raises the Deck's question for a tile. `tileOnly` makes the broker refuse
+ * every remote answer to it: it is a notice to answer on the screen, and a
+ * verdict would only be dropped by the poller after the phone was told "Sent.".
+ */
+function raiseTileQuestion(
+  session: { id: string; name: string; peerId?: string | null },
+  question: string,
+  tileOnly: boolean
+): void {
+  const deps = approvals.deps()
+  if (!deps) return
+  void addApproval(deps, {
+    kind: 'question',
+    title: session.name,
+    question,
+    sessionRef: session.id,
+    tileRef: session.id,
+    projectKey: computeDeckProjectKey(cliContext.projectDir),
+    host: hostname(),
+    // When the tile's peer has resolved, the broker delivers the answer as a
+    // message (C-9) and nothing is typed. Non-Claude CLIs and not-yet-registered
+    // tiles fall back to keystrokes.
+    replyPeerId: session.peerId ?? undefined,
+    groupId: activeScope.groupId,
+    // A NOTIFICATION: the verdict applies to the screen, so it may merge with
+    // the hook's own raise for the same tile (4c2b2cf).
+    merge: 'tile',
+    tileOnly
+  })
+    .then((a) => openApprovals.set(session.id, a.id))
+    .catch((e) => reportError('approvals', 'could not raise an approval', e))
+}
+
+/**
  * Only the fallback path lands here: a hook or ask_operator verdict returning
  * through its own call is handled elsewhere. Guarded twice — the tile must
  * still exist and still be waiting — since an answer arriving after the
@@ -1275,6 +1310,11 @@ const pollApprovalVerdicts = async (): Promise<void> => {
           'approvals',
           `the answer to "${approval.title}" (from ${approval.answered_via}) was never typed into "${live?.name ?? tile}": the session stopped asking. Answer it in the terminal.`
         )
+        broadcast('approvals:not-applied', {
+          tile: live?.name ?? tile,
+          title: approval.title,
+          reason: 'the session stopped asking'
+        })
         continue
       }
       const keys = buildKeystrokes(approval)
@@ -1283,10 +1323,13 @@ const pollApprovalVerdicts = async (): Promise<void> => {
         // the session, so this must not be silent either.
         applied.push(approval.id)
         heldVerdicts.delete(approval.id)
+        const reason = `nothing safe to send for a ${approval.answer_kind} answer`
         reportError(
           'approvals',
-          `the answer to "${approval.title}" could not be typed into "${live?.name ?? tile}": nothing safe to send for a ${approval.answer_kind} answer`
+          `the answer to "${approval.title}" could not be typed into "${live?.name ?? tile}": ${reason}`
         )
+        broadcast('approvals:not-applied', { tile: live?.name ?? tile, title: approval.title, reason })
+        if (live && approvalsEnabled()) raiseTileQuestion(live, notTypedQuestion(approval, live.name, reason), true)
         continue
       }
       // A verdict names no dialog: a newer one, or one an agent raised under a
@@ -1321,6 +1364,9 @@ const pollApprovalVerdicts = async (): Promise<void> => {
           `the answer to "${approval.title}" (from ${approval.answered_via}) was NOT typed into "${live?.name ?? tile}": ${match.reason}. Answer the dialog in the terminal.`
         )
         broadcast('approvals:not-applied', { tile: live?.name ?? tile, title: approval.title, reason: match.reason })
+        if (live && approvalsEnabled()) {
+          raiseTileQuestion(live, notTypedQuestion(approval, live.name, match.reason), true)
+        }
         continue
       }
       service.write(tile, keys)
@@ -1386,28 +1432,11 @@ service.on(
     // Fallback producer: sessions no hook covers (non-Claude CLIs, and open
     // questions detected on screen). Best-effort — never block the UI path.
     if (session && approvalsEnabled()) {
-      const deps = approvals.deps()
-      if (deps) {
-        void addApproval(deps, {
-          kind: 'question',
-          title: session.name,
-          question: `The session "${session.name}" is waiting for an answer on screen.`,
-          sessionRef: id,
-          tileRef: id,
-          projectKey: computeDeckProjectKey(cliContext.projectDir),
-          host: hostname(),
-          // When the tile's peer has resolved, the broker delivers the answer as
-          // a message (C-9) and nothing is typed. Non-Claude CLIs and
-          // not-yet-registered tiles fall back to keystrokes.
-          replyPeerId: session.peerId ?? undefined,
-          groupId: activeScope.groupId,
-          // A NOTIFICATION: the verdict applies to the screen, so it may
-          // merge with the hook's own raise for the same tile (4c2b2cf).
-          merge: 'tile'
-        })
-          .then((a) => openApprovals.set(id, a.id))
-          .catch((e) => reportError('approvals', 'could not raise an approval', e))
-      }
+      // An unavailable screen leaves the question answerable remotely: the
+      // poller still refuses a verdict typed into a trust prompt.
+      const screen = service.screenRead(id)
+      const tileOnly = screen.status !== 'unavailable' && trustPromptShown(screen.snapshot.lines)
+      raiseTileQuestion(session, `The session "${session.name}" is waiting for an answer on screen.`, tileOnly)
     }
   }
 )

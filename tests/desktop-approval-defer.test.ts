@@ -10,6 +10,7 @@ import {
   buildKeystrokes,
   canApplyVerdict,
   classifyVerdict,
+  notTypedQuestion,
   settleTileAnsweredInTerminal,
 } from "../desktop/src/main/approval-service";
 import { matchPermissionDialog, permissionDialogShown } from "../desktop/src/main/permission-dialog";
@@ -54,13 +55,15 @@ const POLLER = slice(
   "poller",
 );
 const LISTENER = slice("service.on(\n  'attention',", ["\n)\n", "\n})\n"], "attention listener");
+const RAISE = slice("function raiseTileQuestion(", ["\n}\n"], "raiseTileQuestion");
 
 const registerPoller = await evaluate<{ poll: () => Promise<void> }>(
   `export function register(env) {
   const { approvals, approvalsEnabled, fetchUndeliveredVerdicts, service, waitingTiles,
           openApprovals, heldVerdicts, canApplyVerdict, classifyVerdict, buildKeystrokes,
           journal, markVerdictsDelivered, reportError, matchPermissionDialog, permissionDialogShown,
-          trustPromptShown, withinDeferWindow, canonicalPath, broadcast } = env
+          trustPromptShown, withinDeferWindow, canonicalPath, broadcast, raiseTileQuestion,
+          notTypedQuestion } = env
 ${POLLER}
   return { poll: pollApprovalVerdicts }
 }
@@ -71,12 +74,22 @@ ${POLLER}
 const registerListener = await evaluate<void>(
   `export function register(env) {
   const { service, waitingTiles, openApprovals, approvals, settleTileAnsweredInTerminal, reportError, journal,
-          addApproval, approvalsEnabled, computeDeckProjectKey, cliContext, activeScope, hostname,
-          config, Notification, app } = env
+          approvalsEnabled, raiseTileQuestion, trustPromptShown, config, Notification, app } = env
 ${LISTENER}
 }
 `,
   "listener",
+);
+
+const registerRaise = await evaluate<{ raise: (session: unknown, question: string, tileOnly: boolean) => void }>(
+  `export function register(env) {
+  const { approvals, addApproval, computeDeckProjectKey, cliContext, hostname, activeScope,
+          openApprovals, reportError } = env
+${RAISE}
+  return { raise: raiseTileQuestion }
+}
+`,
+  "raise",
 );
 
 interface Call {
@@ -88,6 +101,8 @@ function verdict(over: Partial<Approval> & { tile?: string } = {}): Approval {
   const { tile = "s1", ...rest } = over;
   return {
     id: "appr-42",
+    title: "Finding",
+    question: "Which one?",
     status: "answered",
     answer_kind: "allow",
     answer_text: null,
@@ -139,6 +154,8 @@ function pollerEnv(opts: {
     withinDeferWindow,
     canonicalPath,
     broadcast: (...args: unknown[]) => calls.push({ fn: "broadcast", args }),
+    raiseTileQuestion: (...args: unknown[]) => calls.push({ fn: "raiseTileQuestion", args }),
+    notTypedQuestion,
     journal: { add: (...args: unknown[]) => calls.push({ fn: "journal.add", args }) },
     markVerdictsDelivered: async (_deps: unknown, ids: string[]) => {
       marked.push([...ids]);
@@ -158,6 +175,36 @@ function pollerEnv(opts: {
 }
 
 const flat = (marked: string[][]) => marked.flat();
+const raised = (calls: Call[]) => calls.filter((c) => c.fn === "raiseTileQuestion");
+const drain = async () => {
+  for (let i = 0; i < 20; i++) await Promise.resolve();
+};
+const linesScreen = (...text: string[]): XtermScreenRead => {
+  const lines = Array<string>(40).fill("");
+  text.forEach((t, i) => (lines[i] = t));
+  return { status: "ready", snapshot: { revision: 0, cols: 120, rows: 40, lines, cursor: { x: 0, y: 0 } } };
+};
+
+describe("notTypedQuestion (pure)", () => {
+  test("recalls the original question, the channel and the reason, and ends by sending the operator to the terminal", () => {
+    const text = notTypedQuestion(
+      { title: "Bash: ls", question: "The agent wants to use Bash.", answered_via: "telegram" },
+      "tile one",
+      "screen blank",
+    );
+    expect(text).toContain('"Bash: ls"');
+    expect(text).toContain("telegram");
+    expect(text).toContain("The agent wants to use Bash.");
+    expect(text).toContain("screen blank");
+    expect(text.endsWith("Answer it in the terminal.")).toBe(true);
+  });
+
+  test("a long original question is cut, the closing instruction always survives", () => {
+    const text = notTypedQuestion({ title: "t", question: "q".repeat(5000), answered_via: "deck" }, "tile", "reason");
+    expect(text.length, "the notice must stay a notice, not repost the whole original").toBeLessThan(600);
+    expect(text.endsWith("Answer it in the terminal.")).toBe(true);
+  });
+});
 
 describe("classifyVerdict (pure)", () => {
   test("a waiting tile applies", () => {
@@ -250,6 +297,48 @@ describe("pollApprovalVerdicts delivery rules", () => {
     expect(written).toEqual([]);
     expect(flat(marked)).toContain("appr-42");
     expect(calls.some((c) => c.fn === "reportError")).toBe(true);
+    const toast = calls.filter((c) => c.fn === "broadcast" && c.args[0] === "approvals:not-applied");
+    expect(toast, "mutation: drop the abandon broadcast").toHaveLength(1);
+    expect(
+      raised(calls),
+      "the tile stopped asking, so no attention drop would ever close a new question: it would sit in the inbox until it expires",
+    ).toEqual([]);
+  });
+
+  test("an answer whose text sanitises to nothing is consumed, traced, toasted and re-raised tile-only", async () => {
+    const unsafe = verdict({ kind: "question", answer_kind: "text", answer_text: "\x01" } as Partial<Approval>);
+    const { poll, written, marked, calls } = pollerEnv({ settled: [unsafe], waiting: ["s1"] });
+    await poll();
+    expect(written).toEqual([]);
+    expect(flat(marked)).toEqual(["appr-42"]);
+    expect(
+      calls.filter((c) => c.fn === "broadcast" && c.args[0] === "approvals:not-applied"),
+      "mutation: drop the keys-null broadcast",
+    ).toHaveLength(1);
+    const asks = raised(calls);
+    expect(asks, "mutation: drop the keys-null raise").toHaveLength(1);
+    expect(asks[0]!.args[0]).toMatchObject({ id: "s1", name: "tile s1" });
+    expect(asks[0]!.args[1]).toContain("nothing safe to send");
+    expect(asks[0]!.args[2]).toBe(true);
+  });
+
+  test("a consumed answer still reports and toasts when approvals are disabled, but raises no question", async () => {
+    const unsafe = verdict({ kind: "question", answer_kind: "text", answer_text: "\x01" } as Partial<Approval>);
+    const { poll, calls } = pollerEnv({ settled: [unsafe], waiting: ["s1"], approvalsEnabled: () => false });
+    await poll();
+    expect(calls.filter((c) => c.fn === "broadcast" && c.args[0] === "approvals:not-applied")).toHaveLength(1);
+    expect(raised(calls), "mutation: drop the approvalsEnabled gate").toEqual([]);
+  });
+
+  test("an answer that is typed, settled or held raises nothing", async () => {
+    const typed = pollerEnv({ settled: [verdict()], waiting: ["s1"] });
+    await typed.poll();
+    expect(typed.written).toEqual([{ tile: "s1", keys: "\r" }]);
+    const hook = pollerEnv({ settled: [verdict({ reply_route: "hook" })], waiting: ["s1"] });
+    await hook.poll();
+    const held = pollerEnv({ settled: [verdict()], waiting: [] });
+    await held.poll();
+    for (const env of [typed, hook, held]) expect(raised(env.calls)).toEqual([]);
   });
 
   test.each([
@@ -366,6 +455,10 @@ describe("pollApprovalVerdicts types a permission verdict only into the dialog i
     const toast = notApplied(calls);
     expect(toast, "the operator who answered must see it was not applied").toHaveLength(1);
     expect(toast[0]!.args[1]).toMatchObject({ tile: "tile s1", title: "Bash: ls" });
+    const asks = raised(calls);
+    expect(asks, "mutation: drop the raise of the mismatch branch").toHaveLength(1);
+    expect(asks[0]!.args[1]).toContain("Bash: ls");
+    expect(asks[0]!.args[2]).toBe(true);
   });
 
   test("no dialog on screen yet: the verdict is HELD, not burnt, then given up with a trace", async () => {
@@ -386,6 +479,8 @@ describe("pollApprovalVerdicts types a permission verdict only into the dialog i
     expect(flat(late.marked)).toEqual(["appr-42"]);
     expect(late.calls.some((c) => c.fn === "reportError" && /no permission dialog/.test(String(c.args[1])))).toBe(true);
     expect(notApplied(late.calls)).toHaveLength(1);
+    expect(raised(late.calls), "an absent permission dialog past the window raises one tile-only question").toHaveLength(1);
+    expect(raised(late.calls)[0]!.args[2]).toBe(true);
   });
 
   test("a held verdict lands once its dialog is painted", async () => {
@@ -409,6 +504,8 @@ describe("pollApprovalVerdicts types a permission verdict only into the dialog i
     expect(written).toEqual([]);
     expect(flat(marked)).toEqual(["appr-42"]);
     expect(notApplied(calls)).toHaveLength(1);
+    expect(raised(calls), "a question answered into a permission chooser is re-raised tile-only").toHaveLength(1);
+    expect(raised(calls)[0]!.args[2]).toBe(true);
   });
 
   test("a question's answer still reaches a tile showing no chooser", async () => {
@@ -462,9 +559,26 @@ describe("pollApprovalVerdicts types no remote answer into a trust prompt", () =
         expect(flat(marked), "refused for good, not held").toEqual(["appr-42"]);
         expect(calls.filter((c) => c.fn === "reportError" && /trust prompt is on screen/.test(String(c.args[1])))).toHaveLength(1);
         expect(notApplied(calls)).toHaveLength(1);
+        const asks = raised(calls);
+        expect(asks, "the phone was told the answer was handled: the session still waits, say so").toHaveLength(1);
+        expect(asks[0]!.args[1]).toContain("a trust prompt is on screen");
+        expect(asks[0]!.args[2], "tile-only: a remote reply to this notice must not come back to the poller").toBe(true);
       });
     }
   }
+
+  test("with approvals disabled a refused trust-prompt answer is toasted but raises no question", async () => {
+    const screen = await screenBefore("trust-dialog-glued-folder-2.1.303.json", 6);
+    const { poll, calls } = pollerEnv({
+      settled: [answers["a text answer"]],
+      waiting: ["s1"],
+      screens: { s1: screen },
+      approvalsEnabled: () => false,
+    });
+    await poll();
+    expect(notApplied(calls)).toHaveLength(1);
+    expect(raised(calls), "mutation: drop the approvalsEnabled gate of the mismatch branch").toEqual([]);
+  });
 
   test("a question answer still reaches a real composer screen", async () => {
     const composer = await screenBefore("prompt-idle-with-esc.json");
@@ -474,6 +588,7 @@ describe("pollApprovalVerdicts types no remote answer into a trust prompt", () =
     await poll();
     expect(written).toEqual([{ tile: "s1", keys: "go on\r" }]);
     expect(notApplied(calls)).toEqual([]);
+    expect(raised(calls)).toEqual([]);
   });
 
   test("prose that only says it trusts a folder is not a trust prompt", () => {
@@ -501,6 +616,9 @@ describe("pollApprovalVerdicts types no remote answer into a trust prompt", () =
     expect(late.written).toEqual([]);
     expect(flat(late.marked), "refused for good once the window is over").toEqual(["appr-42"]);
     expect(late.calls.filter((c) => c.fn === "reportError" && /screen blank/.test(String(c.args[1])))).toHaveLength(1);
+    expect(raised(held.calls), "held, so nothing was consumed and nothing is raised").toEqual([]);
+    expect(raised(late.calls), "mutation: drop the raise of the blank-screen branch").toHaveLength(1);
+    expect(raised(late.calls)[0]!.args[1]).toContain("screen blank");
   });
 });
 
@@ -511,10 +629,12 @@ describe("attention listener settlement rules", () => {
       lost: [],
       delivered: [],
     },
+    opts: { screen?: XtermScreenRead; approvalsEnabled?: boolean } = {},
   ) {
     const calls: Call[] = [];
-    const service = new EventEmitter() as EventEmitter & { list: () => unknown[] };
+    const service = new EventEmitter() as EventEmitter & { list: () => unknown[]; screenRead: (id: string) => XtermScreenRead };
     service.list = () => [{ id: "s1", name: "tile one", peerId: null }];
+    service.screenRead = () => opts.screen ?? composerScreen();
     const waitingTiles = new Set<string>();
     const openApprovals = new Map<string, string>();
     registerListener({
@@ -526,17 +646,11 @@ describe("attention listener settlement rules", () => {
         calls.push({ fn: "settleTileAnsweredInTerminal", args });
         return Promise.resolve(sweepResult);
       },
-      addApproval: (...args: unknown[]) => {
-        calls.push({ fn: "addApproval", args });
-        return Promise.resolve({ id: "appr-new" });
-      },
-      approvalsEnabled: () => true,
+      raiseTileQuestion: (...args: unknown[]) => calls.push({ fn: "raiseTileQuestion", args }),
+      trustPromptShown,
+      approvalsEnabled: () => opts.approvalsEnabled ?? true,
       reportError: (...args: unknown[]) => calls.push({ fn: "reportError", args }),
       journal: { add: (...args: unknown[]) => calls.push({ fn: "journal.add", args }) },
-      computeDeckProjectKey: () => "proj",
-      cliContext: { projectDir: "C:/tmp" },
-      activeScope: { groupId: "g1" },
-      hostname: () => "host",
       config: { notifyAttention: false, locale: "en" },
       Notification: Object.assign(function () {}, { isSupported: () => false }),
       app: { getLocale: () => "en" },
@@ -585,6 +699,91 @@ describe("attention listener settlement rules", () => {
       calls.filter((c) => c.fn === "journal.add" && c.args[0] === "attention" && String(c.args[1]).includes(id));
     expect(traced("appr-42"), "a remote verdict overridden by the terminal answer must leave one journal line").toHaveLength(1);
     expect(traced("appr-43")).toHaveLength(1);
+  });
+
+  const lift = async (opts: Parameters<typeof listenerEnv>[1]) => {
+    const env = listenerEnv(undefined, opts);
+    env.service.emit("attention", { id: "s1", waiting: true });
+    await drain();
+    return raised(env.calls);
+  };
+
+  test("a trust prompt on the tile at the lift raises the question tile-only", async () => {
+    const asks = await lift({ screen: linesScreen("Do you trust the files in this folder?") });
+    expect(asks).toHaveLength(1);
+    expect(asks[0]!.args[0]).toMatchObject({ id: "s1", name: "tile one" });
+    expect(asks[0]!.args[2], "mutation: pass false, or drop the trustPromptShown read").toBe(true);
+  });
+
+  test.each([
+    ["a composer screen", { screen: composerScreen() }],
+    ["an unavailable screen", { screen: { status: "unavailable", reason: "screen-pending" } as XtermScreenRead }],
+  ])("%s at the lift keeps the question answerable remotely", async (_what, opts) => {
+    const asks = await lift(opts);
+    expect(asks).toHaveLength(1);
+    expect(asks[0]!.args[2], "mutation: treat an unavailable screen as a trust prompt").toBe(false);
+  });
+
+  test("with approvals disabled the lift raises nothing", async () => {
+    expect(await lift({ approvalsEnabled: false })).toEqual([]);
+  });
+});
+
+describe("raiseTileQuestion", () => {
+  function raiseEnv(opts: { deps?: boolean; rejects?: boolean } = {}) {
+    const calls: Call[] = [];
+    const openApprovals = new Map<string, string>();
+    const { raise } = registerRaise({
+      approvals: { deps: () => (opts.deps === false ? null : { fake: true }) },
+      addApproval: (...args: unknown[]) => {
+        calls.push({ fn: "addApproval", args });
+        return opts.rejects ? Promise.reject(new Error("broker down")) : Promise.resolve({ id: "appr-new" });
+      },
+      computeDeckProjectKey: () => "proj",
+      cliContext: { projectDir: "C:/tmp" },
+      hostname: () => "host",
+      activeScope: { groupId: "g1" },
+      openApprovals,
+      reportError: (...args: unknown[]) => calls.push({ fn: "reportError", args }),
+    });
+    return { raise, calls, openApprovals };
+  }
+  const session = { id: "s1", name: "tile one", peerId: "peer-1" };
+
+  test.each([true, false])("tileOnly %p reaches addApproval as a mergeable tile notification", async (tileOnly) => {
+    const { raise, calls, openApprovals } = raiseEnv();
+    raise(session, "Waiting.", tileOnly);
+    await drain();
+    const call = calls.find((c) => c.fn === "addApproval")!;
+    expect(call.args[1]).toMatchObject({
+      kind: "question",
+      title: "tile one",
+      question: "Waiting.",
+      tileRef: "s1",
+      sessionRef: "s1",
+      replyPeerId: "peer-1",
+      projectKey: "proj",
+      host: "host",
+      groupId: "g1",
+      merge: "tile",
+      tileOnly,
+    });
+    expect(openApprovals.get("s1"), "the Deck's own open question for the tile is the raised one").toBe("appr-new");
+  });
+
+  test("a refused raise is reported, not swallowed", async () => {
+    const { raise, calls, openApprovals } = raiseEnv({ rejects: true });
+    raise(session, "Waiting.", true);
+    await drain();
+    expect(calls.some((c) => c.fn === "reportError" && String(c.args[1]).includes("could not raise"))).toBe(true);
+    expect(openApprovals.size).toBe(0);
+  });
+
+  test("with no operator identity nothing is sent", async () => {
+    const { raise, calls } = raiseEnv({ deps: false });
+    raise(session, "Waiting.", true);
+    await drain();
+    expect(calls).toEqual([]);
   });
 });
 

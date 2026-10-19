@@ -151,6 +151,16 @@ test("addApproval sends project_key TOP-LEVEL on its /approval/add request", asy
   expect(calls[0]!.body.project_key).toBe("proj-add");
 });
 
+test("addApproval sends tile_only only when the answer belongs on the tile", async () => {
+  const base = { kind: "question", title: "t", question: "q?", sessionRef: "s", projectKey: "p", host: "h", merge: "tile" } as const;
+  await addApproval(makeDeps("proj-tile-only"), { ...base, tileOnly: true });
+  await addApproval(makeDeps("proj-tile-only"), { ...base, tileOnly: false });
+  await addApproval(makeDeps("proj-tile-only"), base);
+  expect(calls[0]!.body.tile_only, "mutation: drop the spread of tile_only").toBe(true);
+  expect("tile_only" in calls[1]!.body, "a false flag is not sent: an older broker sees today's body").toBe(false);
+  expect("tile_only" in calls[2]!.body).toBe(false);
+});
+
 test("claimApproval sends project_key on its /approval/claim request", async () => {
   const deps = makeDeps("proj-claim");
   await claimApproval(deps, { id: "appr-1", answerKind: "allow" });
