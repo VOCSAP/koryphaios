@@ -13,8 +13,8 @@ import {
   livePid,
   type TestBroker,
   deckAuthored,
+  openBrokerDb,
 } from "./_helper.ts";
-import { Database } from "bun:sqlite";
 import { ROADMAP_IMPORT_COLUMNS, findUncoveredRoadmapColumns, type RoadmapItem } from "../shared/types.ts";
 import { buildAuthProof } from "../shared/approval.ts";
 
@@ -160,7 +160,7 @@ test("same-owner re-claim keeps the original locked_at", async () => {
 // import writes locked as-is). A Deck write about something else must not
 // release it as a side effect.
 function holdOutsideInProgress(id: string, holder: string): void {
-  const db = new Database(broker.dbPath);
+  const db = openBrokerDb(broker.dbPath);
   db.run(
     `UPDATE roadmap_items SET locked = 1, locked_by = ?, locked_group = 'grp-held', locked_by_token = 'tok-held',
        locked_at = datetime('now'), status = 'planned' WHERE id = ?`,
@@ -170,7 +170,7 @@ function holdOutsideInProgress(id: string, holder: string): void {
 }
 
 function heldLockColumns(id: string): Record<string, unknown> {
-  const db = new Database(broker.dbPath);
+  const db = openBrokerDb(broker.dbPath);
   const row = db
     .query("SELECT locked, locked_by, locked_group, locked_by_token FROM roadmap_items WHERE id = ?")
     .get(id) as Record<string, unknown>;
@@ -367,7 +367,7 @@ test("TTL sweep releases a lock with no recent write and drops status to planned
     // Poll the real condition instead (pollUntil above, same discipline as
     // the owner-gone tests below): costs only the wall time actually used,
     // so a generous budget is free when the tick lands promptly.
-    const db = new Database(b.dbPath);
+    const db = openBrokerDb(b.dbPath);
     db.run("UPDATE roadmap_items SET updated_at = datetime('now', '-60 seconds') WHERE id = ?", [
       res.body.item.id,
     ]);
@@ -430,7 +430,7 @@ test("TTL sweep clears operator_id alongside locked_by, but only after a signed 
     expect(res.body.item.locked).toBe(true);
     expect(res.body.item.operator_id).toBe(operatorId);
 
-    const db = new Database(b.dbPath);
+    const db = openBrokerDb(b.dbPath);
     db.run("UPDATE roadmap_items SET updated_at = datetime('now', '-60 seconds') WHERE id = ?", [
       res.body.item.id,
     ]);
@@ -547,7 +547,7 @@ test("owner-gone sweep (site c): a live homonym peer in a DIFFERENT group does n
     // Same discipline as the TTL/park tests above backdating columns no HTTP
     // route lets a caller set directly -- this test is about the OWNER-GONE
     // check alone, not about how a peer eventually becomes dormant.
-    const db = new Database(b.dbPath);
+    const db = openBrokerDb(b.dbPath);
     db.run(
       "UPDATE peers SET status = 'dormant', last_seen = datetime('now', '-3600 seconds') WHERE instance_token = ?",
       [trueOwner.body.instance_token]
@@ -590,7 +590,7 @@ test("owner-gone sweep (site c): a legacy row (locked_group NULL, pre-migration)
     // Simulate a row written before locked_group existed: force it back to
     // NULL directly, the same way the TTL/park tests above backdate columns
     // no HTTP route lets a caller set directly.
-    const db = new Database(b.dbPath);
+    const db = openBrokerDb(b.dbPath);
     db.run("UPDATE roadmap_items SET locked_group = NULL WHERE id = ?", [item.body.item.id]);
     db.close();
 
@@ -619,7 +619,7 @@ test("owner-gone sweep (site c): a legacy row (locked_group NULL, pre-migration)
 // drops an undefined key, which would otherwise read as a false positive on any
 // ordinary agent-authored card.
 test("card e344fa79: rowToRoadmapItem's response covers every roadmap_items column (pick-list coverage, not a rest-spread)", async () => {
-  const db = new Database(broker.dbPath, { readonly: true });
+  const db = openBrokerDb(broker.dbPath, { readonly: true });
   let schemaColumns: string[];
   try {
     schemaColumns = (
@@ -704,7 +704,7 @@ test("park TTL sweep (clause 3): releases an EXPIRED park (T-(ttl+1s)) but leave
     expect(inside.body.item.locked).toBe(true);
     expect(outside.body.item.locked).toBe(true);
 
-    const db = new Database(b.dbPath);
+    const db = openBrokerDb(b.dbPath);
     // T-(ttl-1s): parked 3s ago against a 4s TTL -- 1s still remains, must
     // stay parked/locked.
     db.run(
@@ -756,7 +756,7 @@ test("park immunity: clauses 1/2 (TTL, owner-gone) do not release a parked card 
     });
     expect(item.body.item.locked).toBe(true);
 
-    const db = new Database(b.dbPath);
+    const db = openBrokerDb(b.dbPath);
     // Both updated_at and locked_at pushed well past LOCK_TTL_SEC/
     // LOCK_GRACE_SEC=1s -- clauses 1 and 2 would release this on the very
     // next tick if the park-immunity prefix were not there.
@@ -783,7 +783,7 @@ test("park immunity: clauses 1/2 (TTL, owner-gone) do not release a parked card 
 
     // Now expire the park itself and confirm clause 3 (the ONLY clause that
     // may release a parked row) takes over.
-    const db2 = new Database(b.dbPath);
+    const db2 = openBrokerDb(b.dbPath);
     db2.run("UPDATE roadmap_items SET lock_parked_at = datetime('now', '-5 seconds') WHERE id = ?", [
       item.body.item.id,
     ]);

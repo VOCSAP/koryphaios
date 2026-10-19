@@ -1,6 +1,5 @@
 import { test, expect, beforeAll, afterAll } from "bun:test";
-import { Database } from "bun:sqlite";
-import { startBroker, stopBroker, livePid, type TestBroker } from "./_helper.ts";
+import { startBroker, stopBroker, livePid, openBrokerDb, type TestBroker } from "./_helper.ts";
 import { startUpstreamProxy, type UpstreamProxy } from "./_upstream-proxy.ts";
 import type { RoadmapItem } from "../shared/types.ts";
 
@@ -73,12 +72,6 @@ async function setLink(online: boolean): Promise<void> {
     const status = (await post<{ online: boolean }>(`${replica.url}/roadmap/sync/status`, {})).body;
     return { done: status.online === online, value: status.online };
   });
-}
-
-function openBrokerDb(path: string): Database {
-  const db = new Database(path);
-  db.run("PRAGMA busy_timeout = 3000");
-  return db;
 }
 
 async function itemOn(broker: TestBroker, id: string): Promise<RoadmapItem | undefined> {

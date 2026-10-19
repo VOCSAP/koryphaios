@@ -5,10 +5,9 @@
 // since sentinels are public exported constants.
 
 import { test, expect, beforeAll, afterAll } from "bun:test";
-import { Database } from "bun:sqlite";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { FIXTURE_OPERATOR, FIXTURE_OPERATOR_ID, startBroker, stopBroker, post, livePid, type TestBroker } from "./_helper.ts";
+import { FIXTURE_OPERATOR, FIXTURE_OPERATOR_ID, startBroker, stopBroker, post, livePid, type TestBroker, openBrokerDb } from "./_helper.ts";
 import * as sharedTypes from "../shared/types.ts";
 import type { RegisterResponse, RoadmapItem } from "../shared/types.ts";
 import { buildAuthProof, deriveOperatorId, deriveTokenId, generateCredential } from "../shared/approval.ts";
@@ -648,7 +647,7 @@ test("layer 2 bypass, MIGRATION: a pre-existing peer row named 'deck' cannot aut
   expect(legacy.status).toBe(200);
   const legacyToken = legacy.body.instance_token;
 
-  const db = new Database(broker.dbPath);
+  const db = openBrokerDb(broker.dbPath);
   try {
     db.query("UPDATE peers SET peer_id = 'deck' WHERE instance_token = ?").run(legacyToken);
   } finally {
@@ -657,7 +656,7 @@ test("layer 2 bypass, MIGRATION: a pre-existing peer row named 'deck' cannot aut
 
   // The probe SEES: the row is really there and really resolvable, otherwise
   // the refusal below would prove nothing.
-  const check = new Database(broker.dbPath, { readonly: true });
+  const check = openBrokerDb(broker.dbPath, { readonly: true });
   try {
     const row = check.query("SELECT peer_id FROM peers WHERE instance_token = ?").get(legacyToken);
     expect(row).toEqual({ peer_id: "deck" });

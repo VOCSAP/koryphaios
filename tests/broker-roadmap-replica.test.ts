@@ -5,7 +5,6 @@
 // asserted after it reopens, with no fixed sleeps anywhere.
 
 import { test, expect, beforeAll, afterAll } from "bun:test";
-import { Database } from "bun:sqlite";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
@@ -15,6 +14,7 @@ import {
   deckAuthored,
   scrubEnv,
   type TestBroker,
+  openBrokerDb,
 } from "./_helper.ts";
 import { ROADMAP_TITLE_MAX } from "../shared/roadmap-title.ts";
 import type {
@@ -136,7 +136,7 @@ beforeAll(async () => {
     CLAUDE_PEERS_OFFLINE_REPLICA: "1",
     CLAUDE_PEERS_SYNC_TICK_MS: "150",
   });
-  const db = new Database(replica.dbPath);
+  const db = openBrokerDb(replica.dbPath);
   replicaId = (
     db.query("SELECT value FROM roadmap_sync_meta WHERE key = 'replica_id'").get() as {
       value: string;
@@ -173,7 +173,7 @@ async function itemOn(broker: TestBroker, id: string): Promise<RoadmapItem | und
 }
 
 function localDocumentCounts(broker: TestBroker, documentId: string): { documents: number; units: number } {
-  const db = new Database(broker.dbPath);
+  const db = openBrokerDb(broker.dbPath);
   try {
     const documents = (
       db.query("SELECT COUNT(*) AS n FROM roadmap_context_documents WHERE id = ?").get(documentId) as { n: number }
@@ -188,7 +188,7 @@ function localDocumentCounts(broker: TestBroker, documentId: string): { document
 }
 
 function localDocumentState(broker: TestBroker, documentId: string): { createdBy: string; syncDirty: number } | undefined {
-  const db = new Database(broker.dbPath);
+  const db = openBrokerDb(broker.dbPath);
   try {
     const row = db
       .query("SELECT created_by, sync_dirty FROM roadmap_context_documents WHERE id = ?")
@@ -200,7 +200,7 @@ function localDocumentState(broker: TestBroker, documentId: string): { createdBy
 }
 
 function localContentRev(broker: TestBroker, id: string): number {
-  const db = new Database(broker.dbPath);
+  const db = openBrokerDb(broker.dbPath);
   try {
     return (db.query("SELECT content_rev FROM roadmap_items WHERE id = ?").get(id) as { content_rev: number }).content_rev;
   } finally {
@@ -209,7 +209,7 @@ function localContentRev(broker: TestBroker, id: string): number {
 }
 
 function localSyncMeta(broker: TestBroker, key: string): number {
-  const db = new Database(broker.dbPath);
+  const db = openBrokerDb(broker.dbPath);
   try {
     return Number((db.query("SELECT value FROM roadmap_sync_meta WHERE key = ?").get(key) as { value: string }).value);
   } finally {
@@ -268,9 +268,8 @@ async function createOn(broker: TestBroker, body: Record<string, unknown>): Prom
  * drops them from both refusal counts.
  */
 async function forgetRefusedCards(ids: string[]): Promise<void> {
-  const db = new Database(replica.dbPath);
+  const db = openBrokerDb(replica.dbPath);
   try {
-    db.run("PRAGMA busy_timeout = 3000");
     db.run(`DELETE FROM roadmap_items WHERE id IN (${ids.map(() => "?").join(", ")})`, ids);
   } finally {
     db.close();
@@ -588,11 +587,11 @@ test("a pulled document survives before its card and its repeated units remain a
     ]);
 
     const contentRevBeforeDuplicatePull = localContentRev(replica, card.id);
-    const db = new Database(replica.dbPath);
+    const db = openBrokerDb(replica.dbPath);
     db.run("UPDATE roadmap_sync_meta SET value = '0' WHERE key = 'upstream_context_document_cursor'");
     db.close();
     const repeated = await pollUntil("the replica re-pulls the document without duplication", 15_000, async () => {
-      const connection = new Database(replica.dbPath);
+      const connection = openBrokerDb(replica.dbPath);
       try {
         const cursor = (
           connection.query("SELECT value FROM roadmap_sync_meta WHERE key = 'upstream_context_document_cursor'").get() as {
@@ -783,7 +782,7 @@ test("both sides editing one card yields a conflict the operator resolves three 
   );
   expect(remoteChoice.status).toBe(200);
   expect(remoteChoice.body.item.description).toBe("the upstream's version");
-  const resolvedDb = new Database(replica.dbPath, { readonly: true });
+  const resolvedDb = openBrokerDb(replica.dbPath, { readonly: true });
   const resolvedBase = resolvedDb
     .query("SELECT sync_base, sync_base_rev FROM roadmap_items WHERE id = ?")
     .get(cards[0]!.id) as { sync_base: string | null; sync_base_rev: number | null };
@@ -862,8 +861,7 @@ test("an upstream change made by the lock sweep resolves itself in favour of the
   await createOn(replica, { id: card.id, by: "agent-local", description: "still working on it" });
   // Exactly what releaseStaleLocks writes when it reclaims an abandoned card,
   // reproduced by hand because the replica's agents are invisible upstream.
-  const db = new Database(upstream.dbPath);
-  db.run("PRAGMA busy_timeout = 3000");
+  const db = openBrokerDb(upstream.dbPath);
   db.run(
     "UPDATE roadmap_items SET status = 'planned', locked = 0, updated_by = 'lock-sweep', updated_at = datetime('now') WHERE id = ?",
     [card.id]
@@ -909,8 +907,7 @@ test("a real upstream edit the sweep later stamped over is a conflict, never a s
     rationale: "why this card matters, written by a human",
   });
   // ...and only THEN does the sweep reclaim it, becoming the last writer.
-  const db = new Database(upstream.dbPath);
-  db.run("PRAGMA busy_timeout = 3000");
+  const db = openBrokerDb(upstream.dbPath);
   db.run(
     "UPDATE roadmap_items SET status = 'planned', locked = 0, updated_by = 'lock-sweep', updated_at = datetime('now') WHERE id = ?",
     [card.id]
@@ -1047,8 +1044,7 @@ test("a lock-sweep divergence under a lock held upstream is still reported, neve
 
   await goOffline();
   await createOn(replica, { id: card.id, by: "agent-local", description: "still working on it" });
-  const db = new Database(upstream.dbPath);
-  db.run("PRAGMA busy_timeout = 3000");
+  const db = openBrokerDb(upstream.dbPath);
   db.run(
     "UPDATE roadmap_items SET status = 'planned', locked = 0, locked_by = NULL, updated_by = 'lock-sweep', updated_at = datetime('now') WHERE id = ?",
     [card.id]
@@ -1427,7 +1423,7 @@ test("a lock taken on the replica is relayed upstream, and one taken upstream bl
     (i) => i.locked
   );
   expect(upstreamView.locked_by).toBe(localPeer.body.peer_id);
-  const upstreamDb = new Database(upstream.dbPath);
+  const upstreamDb = openBrokerDb(upstream.dbPath);
   const relayRow = upstreamDb
     .query("SELECT lock_relay, locked_by_token FROM roadmap_items WHERE id = ?")
     .get(relayed.id) as { lock_relay: string | null; locked_by_token: string | null };
@@ -1559,8 +1555,7 @@ test("an author relayed through the upstream comes back stripped of the relay th
   // Forget the card locally and rewind the cursor: the replica pulls it back as
   // a card it has never seen, which is exactly how a re-cloned replica meets its
   // own past writes.
-  const db = new Database(replica.dbPath);
-  db.run("PRAGMA busy_timeout = 3000");
+  const db = openBrokerDb(replica.dbPath);
   db.run("DELETE FROM roadmap_items WHERE id = ?", [card.id]);
   db.run("UPDATE roadmap_sync_meta SET value = '0' WHERE key = 'upstream_cursor'");
   db.close();
@@ -1669,8 +1664,7 @@ test("one row the upstream refuses does not stop the pass, and never reads as an
   // the operator sees an outage that does not exist while their work piles up.
   await goOffline();
   const poison = await createOn(replica, { by: "agent-local", title: "the upstream will refuse this" });
-  const db = new Database(replica.dbPath);
-  db.run("PRAGMA busy_timeout = 3000");
+  const db = openBrokerDb(replica.dbPath);
   // An author no upstream accepts: the identity charset refuses the empty
   // string, and every push of this card is answered 400 for as long as it says
   // so. Written straight to the column because no route would accept it.
@@ -1711,8 +1705,7 @@ test("one row the upstream refuses does not stop the pass, and never reads as an
 
   // Fixing the card upstream-acceptable clears the refusal: the count is live
   // state, not a tally of everything that ever failed.
-  const db2 = new Database(replica.dbPath);
-  db2.run("PRAGMA busy_timeout = 3000");
+  const db2 = openBrokerDb(replica.dbPath);
   db2.run("UPDATE roadmap_items SET created_by = 'agent-local' WHERE id = ?", [poison.id]);
   db2.close();
   await waitForItem("the fixed row departs on its own", upstream, poison.id, (i) => i.title === "the upstream will refuse this");
@@ -1744,8 +1737,7 @@ test("a lock claim the upstream refuses stops that claim only, not the pass", as
   });
   await waitForItem("the first lock is asserted upstream", replica, first.id, (i) => i.lock_scope === "global");
 
-  const db = new Database(replica.dbPath);
-  db.run("PRAGMA busy_timeout = 3000");
+  const db = openBrokerDb(replica.dbPath);
   // An owner name outside the identity charset: every claim carrying it is
   // answered 400, and this card is claimed before the next one on every pass.
   db.run("UPDATE roadmap_items SET locked_by = 'agent@bad' WHERE id = ?", [first.id]);
@@ -1876,7 +1868,7 @@ test("an arbitration carries no credential and no operator proof, on either side
     return { done: found !== undefined, value: found };
   });
 
-  const db = new Database(replica.dbPath);
+  const db = openBrokerDb(replica.dbPath);
   const stored = db
     .query("SELECT locked_by_token, operator_id FROM roadmap_items WHERE id = ?")
     .get(card.id) as { locked_by_token: string | null; operator_id: string | null };
@@ -1908,8 +1900,7 @@ test("an arbitration carries no credential and no operator proof, on either side
   // The remote side is a blob read back from a column: give it the two fields
   // and the response must still not carry them. Without the pick-list this
   // stored object would be handed to the Deck as it stands.
-  const poisoned = new Database(replica.dbPath);
-  poisoned.run("PRAGMA busy_timeout = 3000");
+  const poisoned = openBrokerDb(replica.dbPath);
   const rawRemote = JSON.parse(
     (
       poisoned.query("SELECT sync_remote FROM roadmap_items WHERE id = ?").get(card.id) as {
@@ -1952,8 +1943,7 @@ test("a batch full of rows the upstream refuses never starves the row behind the
     const card = await createOn(replica, { by: "agent-local", title: `refused row ${i}` });
     poison.push(card.id);
   }
-  const db = new Database(replica.dbPath);
-  db.run("PRAGMA busy_timeout = 3000");
+  const db = openBrokerDb(replica.dbPath);
   db.run(
     `UPDATE roadmap_items SET created_by = '' WHERE id IN (${poison.map(() => "?").join(", ")})`,
     poison
@@ -2088,8 +2078,7 @@ test("local-rank: a live local reorder is pushed and acknowledged, sync_dirty se
     onUpstream.queue,
   ]).toEqual(["the rank reached the upstream on its own, not by the pull's unconditional overwrite", expectedRank]);
 
-  const db = new Database(replica.dbPath);
-  db.run("PRAGMA busy_timeout = 3000");
+  const db = openBrokerDb(replica.dbPath);
   await pollUntil("sync_dirty settles back to 0 once the push is acknowledged", 15_000, async () => {
     const row = db.query("SELECT sync_dirty FROM roadmap_items WHERE id = ?").get(a.id) as {
       sync_dirty: number;
@@ -2222,8 +2211,7 @@ test("an upstream reorder applied by the pull never re-triggers the queue-dirty 
     // not, this row would be marked dirty by a change that came FROM the
     // upstream, not from a local agent -- and with push still blocked, nothing
     // can have cleared that flag behind this test's back.
-    const replicaDb = new Database(replica.dbPath);
-    replicaDb.run("PRAGMA busy_timeout = 3000");
+    const replicaDb = openBrokerDb(replica.dbPath);
     row = replicaDb.query("SELECT sync_dirty FROM roadmap_items WHERE id = ?").get(card.id) as {
       sync_dirty: number;
     };
@@ -2246,8 +2234,7 @@ test("a pulled card with a miscased project_key is skipped and logged, its page 
   let neighbour: RoadmapItem;
   try {
     skipped = await createOn(upstream, { by: "agent-upstream", title: "miscased upstream key" });
-    const upstreamDb = new Database(upstream.dbPath);
-    upstreamDb.run("PRAGMA busy_timeout = 3000");
+    const upstreamDb = openBrokerDb(upstream.dbPath);
     upstreamDb.run("UPDATE roadmap_items SET project_key = ? WHERE id = ?", [miscased, skipped.id]);
     upstreamDb.close();
     neighbour = await createOn(upstream, { by: "agent-upstream", title: "canonical neighbour" });
@@ -2256,7 +2243,7 @@ test("a pulled card with a miscased project_key is skipped and logged, its page 
   }
 
   await waitForItem("the canonical neighbour reaches the replica", replica, neighbour.id, (i) => i.title === "canonical neighbour");
-  const upstreamDb = new Database(upstream.dbPath, { readonly: true });
+  const upstreamDb = openBrokerDb(upstream.dbPath, { readonly: true });
   const upstreamMaxRev = (upstreamDb.query("SELECT MAX(rev) AS rev FROM roadmap_items").get() as { rev: number }).rev;
   upstreamDb.close();
   await pollUntil("the replica cursor passes the skipped card", 15_000, async () => {
@@ -2264,7 +2251,7 @@ test("a pulled card with a miscased project_key is skipped and logged, its page 
     return { done: cursor >= upstreamMaxRev, value: cursor };
   });
 
-  const replicaDb = new Database(replica.dbPath, { readonly: true });
+  const replicaDb = openBrokerDb(replica.dbPath, { readonly: true });
   const stored = replicaDb.query("SELECT COUNT(*) AS n FROM roadmap_items WHERE id = ?").get(skipped.id) as { n: number };
   replicaDb.close();
   expect(["the miscased card never lands on the replica", stored.n]).toEqual(["the miscased card never lands on the replica", 0]);
@@ -2284,8 +2271,7 @@ test("a pulled card whose title exceeds the bound is skipped and logged, new or 
   let neighbour: RoadmapItem;
   try {
     fresh = await createOn(upstream, { by: "agent-upstream", title: "placeholder" });
-    const upstreamDb = new Database(upstream.dbPath);
-    upstreamDb.run("PRAGMA busy_timeout = 3000");
+    const upstreamDb = openBrokerDb(upstream.dbPath);
     upstreamDb.run("UPDATE roadmap_items SET title = ? WHERE id IN (?, ?)", [overBound, fresh.id, existing.id]);
     upstreamDb.close();
     neighbour = await createOn(upstream, { by: "agent-upstream", title: "canonical neighbour of the long titles" });
@@ -2294,7 +2280,7 @@ test("a pulled card whose title exceeds the bound is skipped and logged, new or 
   }
 
   await waitForItem("the neighbour reaches the replica", replica, neighbour.id, (i) => i.title === neighbour.title);
-  const upstreamDb = new Database(upstream.dbPath, { readonly: true });
+  const upstreamDb = openBrokerDb(upstream.dbPath, { readonly: true });
   const upstreamMaxRev = (upstreamDb.query("SELECT MAX(rev) AS rev FROM roadmap_items").get() as { rev: number }).rev;
   upstreamDb.close();
   await pollUntil("the replica cursor passes the long titles", 15_000, async () => {
@@ -2302,7 +2288,7 @@ test("a pulled card whose title exceeds the bound is skipped and logged, new or 
     return { done: cursor >= upstreamMaxRev, value: cursor };
   });
 
-  const replicaDb = new Database(replica.dbPath, { readonly: true });
+  const replicaDb = openBrokerDb(replica.dbPath, { readonly: true });
   const freshRows = (replicaDb.query("SELECT COUNT(*) AS n FROM roadmap_items WHERE id = ?").get(fresh.id) as { n: number }).n;
   const kept = replicaDb.query("SELECT title, sync_remote FROM roadmap_items WHERE id = ?").get(existing.id) as {
     title: string;
@@ -2329,7 +2315,7 @@ test("a pulled row whose title is not a string is skipped and logged without abo
   } finally {
     roadmapPullExtra = [];
   }
-  const replicaDb = new Database(replica.dbPath, { readonly: true });
+  const replicaDb = openBrokerDb(replica.dbPath, { readonly: true });
   const stored = (replicaDb.query("SELECT COUNT(*) AS n FROM roadmap_items WHERE id = ?").get(bogusId) as { n: number }).n;
   replicaDb.close();
   expect(["the bogus row never lands", stored]).toEqual(["the bogus row never lands", 0]);
@@ -2359,7 +2345,7 @@ test("a pulled row whose project_key is not a string is skipped and logged witho
   } finally {
     roadmapPullExtra = [];
   }
-  const replicaDb = new Database(replica.dbPath, { readonly: true });
+  const replicaDb = openBrokerDb(replica.dbPath, { readonly: true });
   const stored = (replicaDb.query("SELECT COUNT(*) AS n FROM roadmap_items WHERE id = ?").get(bogusId) as { n: number }).n;
   replicaDb.close();
   expect(["the bogus row never lands", stored]).toEqual(["the bogus row never lands", 0]);
@@ -2373,8 +2359,7 @@ test("resolving 'remote' onto an upstream row parked by a refused push is refuse
 
   await goOffline();
   await createOn(replica, { id: card.id, by: "agent-local", description: "edited offline on the replica" });
-  const upstreamDb = new Database(upstream.dbPath);
-  upstreamDb.run("PRAGMA busy_timeout = 3000");
+  const upstreamDb = openBrokerDb(upstream.dbPath);
   upstreamDb.run("UPDATE roadmap_items SET title = ? WHERE id = ?", [overBound, card.id]);
   upstreamDb.close();
   pullSuppressed = true;
@@ -2410,7 +2395,7 @@ test("resolving 'remote' onto an upstream row parked by a refused push is refuse
  * pull will never touch again, since the upstream row does not move.
  */
 function parkStaleConflict(id: string, remoteOver: Record<string, unknown> = {}): Record<string, unknown> {
-  const db = new Database(replica.dbPath);
+  const db = openBrokerDb(replica.dbPath);
   try {
     const row = db
       .query("SELECT project_key, sync_base, sync_base_rev FROM roadmap_items WHERE id = ?")
@@ -2481,7 +2466,7 @@ for (const edit of [
     try {
       upstreamBlocked = false;
       base = await pollUntil("the stale conflict resolves", 15_000, async () => {
-        const db = new Database(replica.dbPath, { readonly: true });
+        const db = openBrokerDb(replica.dbPath, { readonly: true });
         try {
           const row = db
             .query("SELECT sync_state, sync_base, sync_base_rev FROM roadmap_items WHERE id = ?")
@@ -2504,7 +2489,7 @@ for (const edit of [
     // Read from the upstream's own table: the list route hides an archived card.
     const expected = edit.body[edit.field as keyof typeof edit.body] as string;
     const pushed = await pollUntil("the local edit reaches the upstream once the stale conflict resolves", 15_000, async () => {
-      const db = new Database(upstream.dbPath, { readonly: true });
+      const db = openBrokerDb(upstream.dbPath, { readonly: true });
       try {
         const row = db.query(`SELECT ${edit.field} AS v FROM roadmap_items WHERE id = ?`).get(card.id) as { v: string };
         return { done: row.v === expected, value: row.v };
@@ -2674,7 +2659,7 @@ test("an unreadable stored upstream row is reported once, not on every pass", as
   await waitForItem("the card reaches the replica", replica, card.id, (i) => i.description === "common base");
   await goOffline();
   await createOn(replica, { id: card.id, by: "agent-local", description: "the replica's version" });
-  const db = new Database(replica.dbPath);
+  const db = openBrokerDb(replica.dbPath);
   try {
     const base = (db.query("SELECT sync_base_rev FROM roadmap_items WHERE id = ?").get(card.id) as { sync_base_rev: number })
       .sync_base_rev;

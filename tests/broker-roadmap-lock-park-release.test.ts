@@ -13,8 +13,8 @@ import {
   post,
   deckAuthored,
   type TestBroker,
+  openBrokerDb,
 } from "./_helper.ts";
-import { Database } from "bun:sqlite";
 import type { RoadmapItem } from "../shared/types.ts";
 import { buildAuthProof, deriveOperatorId, generateCredential } from "../shared/approval.ts";
 
@@ -51,7 +51,7 @@ async function createItem(title: string): Promise<string> {
 // broker-roadmap-parked-archive.test.ts's lockDirectly/parkDirectly: direct
 // SQL, mirroring the exact columns the production write path touches.
 function lockDirectly(id: string, lockedByPeerId: string): void {
-  const db = new Database(broker.dbPath);
+  const db = openBrokerDb(broker.dbPath);
   db.run(`UPDATE roadmap_items SET locked = 1, locked_by = ?, status = 'in_progress' WHERE id = ?`, [
     lockedByPeerId,
     id,
@@ -60,7 +60,7 @@ function lockDirectly(id: string, lockedByPeerId: string): void {
 }
 
 function readItem(id: string): RoadmapItem {
-  const db = new Database(broker.dbPath);
+  const db = openBrokerDb(broker.dbPath);
   const row = db.query(`SELECT * FROM roadmap_items WHERE id = ?`).get(id) as RoadmapItem;
   db.close();
   return row;
@@ -481,7 +481,7 @@ test("lock-park: a card already parked by operator A is REFUSED when operator B 
 // ---------------------------------------------------------------------------
 
 function backdatePark(id: string, secondsAgo: number): void {
-  const db = new Database(broker.dbPath);
+  const db = openBrokerDb(broker.dbPath);
   const backdated = new Date(Date.now() - secondsAgo * 1000).toISOString();
   db.run(`UPDATE roadmap_items SET lock_parked_at = ? WHERE id = ?`, [backdated, id]);
   db.close();

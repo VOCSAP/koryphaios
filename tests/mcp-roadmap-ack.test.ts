@@ -7,9 +7,8 @@
 // raw-args ack lies on all five.
 
 import { test, expect, describe, afterAll } from "bun:test";
-import { Database } from "bun:sqlite";
 import { join } from "node:path";
-import { startBroker, stopBroker, scrubEnv, type TestBroker } from "./_helper.ts";
+import { startBroker, stopBroker, scrubEnv, type TestBroker, openBrokerDb } from "./_helper.ts";
 import {
   ROADMAP_ADD_ACK_FIELDS,
   ROADMAP_CONTEXT_DOCUMENT_OUTPUT_MAX_CHARS,
@@ -658,7 +657,7 @@ describe("roadmap_add/roadmap_update MCP ack", () => {
     const h = await boot();
     const created = await callTool(h, "roadmap_add", { title: "document read probe", context: "live context" });
     const prefix = ackText(created).match(/Roadmap item created: ([0-9a-f]{8})/)![1]!;
-    const db = new Database(h.b.dbPath);
+    const db = openBrokerDb(h.b.dbPath);
     try {
       const parent = db.query("SELECT id, project_key FROM roadmap_items WHERE id LIKE ?").get(`${prefix}%`) as {
         id: string;
@@ -705,7 +704,7 @@ describe("roadmap_add/roadmap_update MCP ack", () => {
     const h = await boot();
     const created = await callTool(h, "roadmap_add", { title: "document output cap" });
     const prefix = ackText(created).match(/Roadmap item created: ([0-9a-f]{8})/)![1]!;
-    const db = new Database(h.b.dbPath);
+    const db = openBrokerDb(h.b.dbPath);
     const firstId = "30000000-0000-4000-8000-000000000003";
     const omittedIds = Array.from(
       { length: 21 },
@@ -756,7 +755,7 @@ describe("roadmap_add/roadmap_update MCP ack", () => {
     const createdAt = "2026-09-24T00:00:00.000Z";
     const header = `context document ${documentId.slice(0, 8)} (created ${createdAt} by probe):`;
     const raw = `😀${"a".repeat(ROADMAP_CONTEXT_DOCUMENT_OUTPUT_MAX_CHARS - header.length - 2)}`;
-    const db = new Database(h.b.dbPath);
+    const db = openBrokerDb(h.b.dbPath);
     try {
       const parent = db.query("SELECT id, project_key FROM roadmap_items WHERE id LIKE ?").get(`${prefix}%`) as {
         id: string;
@@ -785,7 +784,7 @@ describe("roadmap_add/roadmap_update MCP ack", () => {
     const h = await boot();
     const created = await callTool(h, "roadmap_add", { title: "document read failure" });
     const prefix = ackText(created).match(/Roadmap item created: ([0-9a-f]{8})/)![1]!;
-    const db = new Database(h.b.dbPath);
+    const db = openBrokerDb(h.b.dbPath);
     try {
       db.run("DROP TABLE roadmap_context_document_units");
     } finally {

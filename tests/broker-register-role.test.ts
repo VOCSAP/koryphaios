@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { mkdtempSync, realpathSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { Database } from "bun:sqlite";
 import { test, expect, afterAll } from "bun:test";
-import { startBroker, stopBroker, scrubEnv, type TestBroker } from "./_helper.ts";
+import { startBroker, stopBroker, scrubEnv, type TestBroker, openBrokerDb } from "./_helper.ts";
 
 interface JsonRpcResponse {
   id?: number;
@@ -142,7 +142,7 @@ test(
 
     spawnServer(b, sessionCwd, "lead");
 
-    const db = new Database(b.dbPath);
+    const db = openBrokerDb(b.dbPath);
     const row = await pollForRow(db, sessionCwd, () => true);
     db.close();
 
@@ -160,7 +160,7 @@ test(
     tmpDirs.push(sessionCwd);
 
     const proc1 = spawnServer(b, sessionCwd, "lead");
-    const db = new Database(b.dbPath);
+    const db = openBrokerDb(b.dbPath);
     const first = await pollForRow(db, sessionCwd, () => true);
     expect(first.role).toBe("lead");
 
@@ -195,7 +195,7 @@ test(
     tmpDirs.push(sessionCwd);
 
     const proc1 = spawnServer(b, sessionCwd, "lead");
-    const db = new Database(b.dbPath);
+    const db = openBrokerDb(b.dbPath);
     const first = await pollForRow(db, sessionCwd, () => true);
     expect(first.role).toBe("lead");
 
@@ -230,7 +230,7 @@ test(
     // rejecting the internal space, not by an empty-string check.
     spawnServer(b, sessionCwd, "team lead");
 
-    const db = new Database(b.dbPath);
+    const db = openBrokerDb(b.dbPath);
     const row = await pollForRow(db, sessionCwd, () => true);
     db.close();
 
@@ -253,7 +253,7 @@ test(
 
     spawnServer(b, sessionCwd, ""); // CLAUDE_PEERS_ROLE="" -- present but empty
 
-    const db = new Database(b.dbPath);
+    const db = openBrokerDb(b.dbPath);
     const row = await pollForRow(db, sessionCwd, () => true);
     db.close();
 
@@ -271,7 +271,7 @@ test(
     tmpDirs.push(sessionCwd);
 
     const proc1 = spawnServer(b, sessionCwd, "lead");
-    const db = new Database(b.dbPath);
+    const db = openBrokerDb(b.dbPath);
     const first = await pollForRow(db, sessionCwd, () => true);
     expect(first.role).toBe("lead");
 
@@ -357,7 +357,7 @@ test(
       APPDATA: appDataDir,
       XDG_CONFIG_HOME: appDataDir,
     });
-    const db = new Database(b.dbPath);
+    const db = openBrokerDb(b.dbPath);
     const first = await pollForRow(db, sessionCwd, () => true);
     expect(first.role).toBe("lead");
 

@@ -2,8 +2,7 @@
 // on the text each agent actually reads on every arrival path.
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { Database } from "bun:sqlite";
-import { startBroker, stopBroker, scrubEnv, type TestBroker } from "./_helper.ts";
+import { startBroker, stopBroker, scrubEnv, type TestBroker, openBrokerDb } from "./_helper.ts";
 import { DELEGATE_CLOSE_NOTE, DELEGATOR_CHECK_NOTE } from "../shared/inbound-framing.ts";
 
 const FORCED_GROUP = "delegated-task-e2e-ba30b865";
@@ -190,9 +189,8 @@ beforeAll(async () => {
  * whole task listing.
  */
 async function sharedPair(): Promise<Pair> {
-  const db = new Database(shared.broker.dbPath);
+  const db = openBrokerDb(shared.broker.dbPath);
   try {
-    db.run("PRAGMA busy_timeout = 3000");
     db.run("DELETE FROM delegated_tasks");
   } finally {
     db.close();
@@ -210,9 +208,8 @@ async function delegate(p: Pair, message: string): Promise<string> {
 }
 
 function makeOverdue(b: TestBroker, taskId: string): void {
-  const db = new Database(b.dbPath);
+  const db = openBrokerDb(b.dbPath);
   try {
-    db.run("PRAGMA busy_timeout = 3000");
     db.run("UPDATE delegated_tasks SET status = 'overdue', decision_due_at_ms = ? WHERE task_id = ?", [Date.now() + 600_000, taskId]);
   } finally {
     db.close();
@@ -220,7 +217,7 @@ function makeOverdue(b: TestBroker, taskId: string): void {
 }
 
 function taskIdByLabel(b: TestBroker, label: string): string {
-  const db = new Database(b.dbPath, { readonly: true });
+  const db = openBrokerDb(b.dbPath, { readonly: true });
   try {
     return (db.query("SELECT task_id FROM delegated_tasks WHERE label = ?").get(label) as { task_id: string }).task_id;
   } finally {
@@ -320,7 +317,7 @@ async function pollOnlyPair(): Promise<Pair & { front: ReturnType<typeof wsRefus
 }
 
 function delivered(b: TestBroker, text: string): number {
-  const db = new Database(b.dbPath, { readonly: true });
+  const db = openBrokerDb(b.dbPath, { readonly: true });
   try {
     return (db.query("SELECT delivered FROM messages WHERE text = ?").get(text) as { delivered: number }).delivered;
   } finally {

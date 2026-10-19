@@ -1,8 +1,7 @@
 import { test, expect, beforeAll, afterAll } from "bun:test";
 import { hostname } from "node:os";
 import { createHash } from "node:crypto";
-import { Database } from "bun:sqlite";
-import { startBroker, stopBroker, post, livePid, type TestBroker } from "./_helper.ts";
+import { startBroker, stopBroker, post, livePid, type TestBroker, openBrokerDb } from "./_helper.ts";
 
 let broker: TestBroker;
 const brokers: TestBroker[] = [];
@@ -37,7 +36,7 @@ async function disconnect(token: string): Promise<void> {
 }
 
 function sessionRows(host: string, cwd: string): { session_key: string; instance_token: string; cc_session_id: string }[] {
-  const db = new Database(broker.dbPath, { readonly: true });
+  const db = openBrokerDb(broker.dbPath, { readonly: true });
   const rows = db.query(
     "SELECT session_key, instance_token, cc_session_id FROM peer_sessions WHERE host = ? AND cwd = ? ORDER BY session_key"
   ).all(host, cwd) as { session_key: string; instance_token: string; cc_session_id: string }[];
@@ -112,7 +111,7 @@ test("resume preserves claude_cli_pid through dormant cycle", async () => {
   expect(second.status).toBe(200);
   expect(second.body.instance_token).toBe(first.body.instance_token);
 
-  const db = new Database(b.dbPath, { readonly: true });
+  const db = openBrokerDb(b.dbPath, { readonly: true });
   const row = db.query(
     "SELECT claude_cli_pid FROM peers WHERE instance_token = ?"
   ).get(first.body.instance_token) as { claude_cli_pid: number };

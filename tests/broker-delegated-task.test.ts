@@ -1,7 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { Database } from "bun:sqlite";
 import { randomUUID } from "node:crypto";
-import { get, groupId, livePid, post, sha256Hex, startBroker, stopBroker, type TestBroker } from "./_helper.ts";
+import { get, groupId, livePid, post, sha256Hex, startBroker, stopBroker, type TestBroker, openBrokerDb } from "./_helper.ts";
 
 interface Peer {
   peer_id: string;
@@ -69,7 +68,7 @@ async function createTask(delegator: Peer, delegate: Peer, label: string): Promi
 }
 
 function taskRow(taskId: string): { status: string; rearm_count: number; generation: number; closed_at: string | null } {
-  const db = new Database(broker.dbPath, { readonly: true });
+  const db = openBrokerDb(broker.dbPath, { readonly: true });
   try {
     return db.query(
       "SELECT status, rearm_count, generation, closed_at FROM delegated_tasks WHERE task_id = ?"
@@ -80,7 +79,7 @@ function taskRow(taskId: string): { status: string; rearm_count: number; generat
 }
 
 function countMessagesWithText(text: string): number {
-  const db = new Database(broker.dbPath, { readonly: true });
+  const db = openBrokerDb(broker.dbPath, { readonly: true });
   try {
     return (db.query("SELECT COUNT(*) AS count FROM messages WHERE text = ?").get(text) as { count: number }).count;
   } finally {
@@ -89,7 +88,7 @@ function countMessagesWithText(text: string): number {
 }
 
 function countTasksWithLabel(label: string): number {
-  const db = new Database(broker.dbPath, { readonly: true });
+  const db = openBrokerDb(broker.dbPath, { readonly: true });
   try {
     return (db.query("SELECT COUNT(*) AS count FROM delegated_tasks WHERE label = ?").get(label) as { count: number }).count;
   } finally {
@@ -225,7 +224,7 @@ describe("delegated tasks", () => {
     const delegate = await register("delegation-create-guards-alice", "/delegation-create-guards-alice");
     const isolatedGroup = randomUUID();
     const sharedPeerId = randomUUID();
-    const homonymDb = new Database(broker.dbPath);
+    const homonymDb = openBrokerDb(broker.dbPath);
     try {
       homonymDb.run("UPDATE peers SET group_id = ?, peer_id = ? WHERE instance_token = ?", [isolatedGroup, sharedPeerId, homonym.body.instance_token]);
       const relocated = homonymDb.query("SELECT group_id FROM peers WHERE instance_token = ?").get(homonym.body.instance_token) as { group_id: string };
@@ -240,7 +239,7 @@ describe("delegated tasks", () => {
       deadline_sec: 60, task_label: "Group binding",
     });
     expect(crossGroup.body.ok).toBeTrue();
-    const groupBound = new Database(broker.dbPath, { readonly: true });
+    const groupBound = openBrokerDb(broker.dbPath, { readonly: true });
     try {
       expect(
         (groupBound.query("SELECT delegate_binding FROM delegated_tasks WHERE label = ?").get("Group binding") as { delegate_binding: string }).delegate_binding
@@ -251,7 +250,7 @@ describe("delegated tasks", () => {
 
     const relayLabel = "Relay refusal";
     const relayText = "must not reach a relay";
-    const relayDb = new Database(broker.dbPath);
+    const relayDb = openBrokerDb(broker.dbPath);
     try {
       relayDb.run("UPDATE peers SET via = 'test-relay' WHERE instance_token = ?", [delegate.instance_token]);
       const relayed = await post<{ ok: boolean }>(`${broker.url}/send-message`, {
@@ -330,7 +329,7 @@ describe("delegated tasks", () => {
     const delegate = await register("delegation-create-rollback-alice", "/delegation-create-rollback-alice");
     const label = "Create rollback";
     const text = "initial-message-that-trigger-rejects";
-    const db = new Database(broker.dbPath);
+    const db = openBrokerDb(broker.dbPath);
     try {
       db.run(
         `CREATE TRIGGER reject_delegated_task_initial BEFORE INSERT ON messages
@@ -358,7 +357,7 @@ describe("delegated tasks", () => {
     const delegate = await register("delegation-close-alice", "/delegation-close-alice");
     const task = await createTask(delegator, delegate, "Atomic close");
     const report = "report-that-trigger-rejects";
-    const db = new Database(broker.dbPath);
+    const db = openBrokerDb(broker.dbPath);
     try {
       db.run(
         `CREATE TRIGGER reject_delegated_task_report BEFORE INSERT ON messages
@@ -404,7 +403,7 @@ describe("delegated tasks", () => {
     });
     expect(first.body.task.status).toBe("closed");
 
-    const db = new Database(broker.dbPath);
+    const db = openBrokerDb(broker.dbPath);
     try {
       db.run("UPDATE peers SET status = 'dormant' WHERE instance_token = ?", [delegator.instance_token]);
     } finally {
@@ -420,7 +419,7 @@ describe("delegated tasks", () => {
     expect(dormantRepeat.body).toMatchObject({ ok: true, task: { task_id: task.task_id, status: "closed" } });
 
     const renamed = "delegation-repeat-close-bob-renamed";
-    const renameDb = new Database(broker.dbPath);
+    const renameDb = openBrokerDb(broker.dbPath);
     try {
       renameDb.run("UPDATE peers SET peer_id = ?, status = 'active' WHERE instance_token = ?", [renamed, delegator.instance_token]);
     } finally {
@@ -460,7 +459,7 @@ describe("delegated tasks", () => {
     const delegator = await register("delegation-rearm-bob", "/delegation-rearm-bob");
     const delegate = await register("delegation-rearm-alice", "/delegation-rearm-alice");
     const task = await createTask(delegator, delegate, "Rearm task");
-    const db = new Database(broker.dbPath);
+    const db = openBrokerDb(broker.dbPath);
     try {
       db.run(
         "UPDATE delegated_tasks SET status = 'overdue', decision_due_at_ms = ? WHERE task_id = ?",
@@ -471,7 +470,7 @@ describe("delegated tasks", () => {
     }
 
     const rearmText = "Please continue the assigned work";
-    const rejectDb = new Database(broker.dbPath);
+    const rejectDb = openBrokerDb(broker.dbPath);
     try {
       rejectDb.run(
         `CREATE TRIGGER reject_delegated_task_rearm BEFORE INSERT ON messages

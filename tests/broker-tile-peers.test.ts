@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { Database } from "bun:sqlite";
-import { startBroker, stopBroker, post, livePid, sha256Hex, groupId, type TestBroker } from "./_helper.ts";
+import { startBroker, stopBroker, post, livePid, sha256Hex, groupId, type TestBroker, openBrokerDb } from "./_helper.ts";
 import { fetchTilePeers, TILE_PEERS_TIMEOUT_MS } from "../desktop/src/main/broker-client.ts";
 import { PEER_POLL_MS, TilePeerPoller, type TilePeerBinding } from "../desktop/src/main/peer-state.ts";
 
@@ -53,7 +53,7 @@ async function tilePeers(deskSessions: unknown[], overrides: Record<string, unkn
 }
 
 function withDb<T>(fn: (db: Database) => T): T {
-  const db = new Database(broker.dbPath);
+  const db = openBrokerDb(broker.dbPath);
   try {
     return fn(db);
   } finally {

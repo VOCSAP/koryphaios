@@ -1,6 +1,5 @@
 import { test, expect, afterEach } from "bun:test";
-import { Database } from "bun:sqlite";
-import { startBroker, stopBroker, type TestBroker } from "./_helper.ts";
+import { startBroker, stopBroker, type TestBroker, openBrokerDb } from "./_helper.ts";
 import { SENTINEL_INSTANCE_TOKENS } from "../shared/types.ts";
 
 let broker: TestBroker | undefined;
@@ -73,7 +72,7 @@ test("WS auth: refuses a sentinel-shaped instance_token even if its peers row is
   broker = await startBroker();
   const sentinel = firstSentinel;
 
-  const db = new Database(broker.dbPath);
+  const db = openBrokerDb(broker.dbPath);
   try {
     const res = db.run("UPDATE peers SET status = 'active' WHERE instance_token = ?", [sentinel]);
     // Premise check: if this ever matches 0 rows (sentinel renamed, seed

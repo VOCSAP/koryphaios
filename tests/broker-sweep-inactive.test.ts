@@ -1,6 +1,5 @@
 import { test, expect, beforeAll, afterAll } from "bun:test";
-import { startBroker, stopBroker, post, livePid, type TestBroker } from "./_helper.ts";
-import { Database } from "bun:sqlite";
+import { startBroker, stopBroker, post, livePid, type TestBroker, openBrokerDb } from "./_helper.ts";
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -44,7 +43,7 @@ async function waitFor<T>(read: () => T | Promise<T>, done: (value: T) => boolea
 }
 
 function statusOf(b: TestBroker, token: string): string {
-  const db = new Database(b.dbPath, { readonly: true });
+  const db = openBrokerDb(b.dbPath, { readonly: true });
   try {
     return (db.query("SELECT status FROM peers WHERE instance_token = ?").get(token) as { status: string }).status;
   } finally {
@@ -61,7 +60,7 @@ test("active peer with stale last_seen is swept to dormant", async () => {
   expect(r.status).toBe(200);
 
   // Manipulate last_seen to be 1 hour ago so the sweep catches it on next tick.
-  const oldDb = new Database(shared.dbPath);
+  const oldDb = openBrokerDb(shared.dbPath);
   oldDb.run(
     "UPDATE peers SET last_seen = ? WHERE instance_token = ?",
     [new Date(Date.now() - 3600_000).toISOString(), r.body.instance_token]
@@ -124,7 +123,7 @@ test("mirror rows get a longer, backoff-derived floor than local/relayed rows", 
   const ninetySecAgo = new Date(Date.now() - 90_000).toISOString();
   const oneHourAgo = new Date(Date.now() - 3600_000).toISOString();
 
-  const setupDb = new Database(shared.dbPath);
+  const setupDb = openBrokerDb(shared.dbPath);
   // One transaction: a sweep pass sees every row below or none of them.
   setupDb.transaction(() => {
     setupDb.run(
@@ -169,7 +168,7 @@ test("mirror rows get a longer, backoff-derived floor than local/relayed rows", 
   // every row above.
   await waitFor(() => statusOf(shared, mirrorStale), (s) => s === "dormant", "a full sweep pass over the setup rows");
 
-  const checkDb = new Database(shared.dbPath, { readonly: true });
+  const checkDb = openBrokerDb(shared.dbPath, { readonly: true });
   const statusIn = (token: string) =>
     (checkDb.query("SELECT status FROM peers WHERE instance_token = ?").get(token) as { status: string }).status;
   const localStatus = statusIn(r.body.instance_token);

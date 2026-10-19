@@ -1,6 +1,5 @@
 import { test, expect, afterAll } from "bun:test";
-import { startBroker, stopBroker, scrubEnv, type TestBroker } from "./_helper.ts";
-import { Database } from "bun:sqlite";
+import { startBroker, stopBroker, scrubEnv, type TestBroker, openBrokerDb } from "./_helper.ts";
 
 const brokers: TestBroker[] = [];
 afterAll(async () => { for (const b of brokers) await stopBroker(b); });
@@ -31,7 +30,7 @@ test("server.ts exits when stdin closes and marks peer dormant", async () => {
 
   let registered = false;
   for (let i = 0; i < 40; i++) {
-    const db = new Database(b.dbPath, { readonly: true });
+    const db = openBrokerDb(b.dbPath, { readonly: true });
     const n = db.query("SELECT COUNT(*) AS n FROM peers WHERE status='active'").get() as { n: number };
     db.close();
     if (n.n > 0) { registered = true; break; }
@@ -44,7 +43,7 @@ test("server.ts exits when stdin closes and marks peer dormant", async () => {
   const code = await proc.exited;
   expect(code).toBe(0);
 
-  const db = new Database(b.dbPath, { readonly: true });
+  const db = openBrokerDb(b.dbPath, { readonly: true });
   const row = db.query(
     "SELECT status FROM peers WHERE status IN ('active','dormant') LIMIT 1"
   ).get() as { status: string };

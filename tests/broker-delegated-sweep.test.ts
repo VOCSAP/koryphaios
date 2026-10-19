@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { DECK_INSTANCE_TOKEN, OPERATOR_INSTANCE_TOKEN } from "../shared/types.ts";
-import { groupId, livePid, post, sha256Hex, startBroker, stopBroker, type TestBroker } from "./_helper.ts";
+import { groupId, livePid, post, sha256Hex, startBroker, stopBroker, type TestBroker, openBrokerDb } from "./_helper.ts";
 
 interface Peer {
   peer_id: string;
@@ -77,9 +77,8 @@ async function rearm(b: TestBroker, bob: Peer, alice: Peer, taskId: string): Pro
 }
 
 function withDb<T>(b: TestBroker, fn: (db: Database) => T): T {
-  const db = new Database(b.dbPath);
+  const db = openBrokerDb(b.dbPath);
   try {
-    db.run("PRAGMA busy_timeout = 3000");
     return fn(db);
   } finally {
     db.close();

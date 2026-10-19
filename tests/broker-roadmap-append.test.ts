@@ -1,6 +1,6 @@
 import { test, expect, beforeAll, afterAll } from "bun:test";
 import { Database } from "bun:sqlite";
-import { startBroker, stopBroker, post, type TestBroker } from "./_helper.ts";
+import { startBroker, stopBroker, post, type TestBroker, openBrokerDb } from "./_helper.ts";
 import type { RoadmapItem } from "../shared/types.ts";
 import { ROADMAP_STALE_SAVE_MARKER } from "../shared/roadmap-append.ts";
 import {
@@ -226,7 +226,7 @@ test("CAS replans targets after a stale revision", () => {
 test("appending leaves the lock TTL timestamp and author unchanged", async () => {
   const item = await seed({ status: "in_progress" });
   const expectedUpdatedAt = "2000-01-01 00:00:00";
-  const db = new Database(broker.dbPath);
+  const db = openBrokerDb(broker.dbPath);
   try {
     db.run("UPDATE roadmap_items SET updated_at = ? WHERE id = ?", [expectedUpdatedAt, item.id]);
   } finally {
@@ -279,7 +279,7 @@ test("SQLite and JavaScript code-point lengths agree for U+1F600", () => {
 
 test("an append increments content_rev, the comparison key used by the route", async () => {
   const item = await seed();
-  const db = new Database(broker.dbPath, { readonly: true });
+  const db = openBrokerDb(broker.dbPath, { readonly: true });
   try {
     const before = db.query("SELECT content_rev FROM roadmap_items WHERE id = ?").get(item.id) as { content_rev: number };
     const res = await append({ id: item.id, by: "author", text: "a note" });
@@ -294,7 +294,7 @@ test("an append increments content_rev, the comparison key used by the route", a
 
 test("a stale context save returns 409 and preserves the intervening append", async () => {
   const opened = await seed({ context: "operator context at open" });
-  const db = new Database(broker.dbPath, { readonly: true });
+  const db = openBrokerDb(broker.dbPath, { readonly: true });
   let expectedContentRev: number;
   try {
     expectedContentRev = (db.query("SELECT content_rev FROM roadmap_items WHERE id = ?").get(opened.id) as {
@@ -524,7 +524,7 @@ test("a saturated live context accepts an append that supersedes more than it ad
 });
 
 test("roadmap context column is non-null", () => {
-  const db = new Database(broker.dbPath, { readonly: true });
+  const db = openBrokerDb(broker.dbPath, { readonly: true });
   try {
     const columns = db.query("PRAGMA table_info(roadmap_items)").all() as {
       name: string;
@@ -573,7 +573,7 @@ test("appending to an archived card succeeds -- deleted_at is not checked", asyn
 
 test("appending to an inactive card succeeds without changing inactive", async () => {
   const item = await seed();
-  const db = new Database(broker.dbPath);
+  const db = openBrokerDb(broker.dbPath);
   try {
     db.run("UPDATE roadmap_items SET inactive = 1 WHERE id = ?", [item.id]);
   } finally {

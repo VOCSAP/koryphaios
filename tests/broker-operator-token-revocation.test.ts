@@ -1,7 +1,6 @@
 import { expect, test } from "bun:test";
-import { Database } from "bun:sqlite";
 import { generateCredential } from "../shared/approval.ts";
-import { deckAuthored, FIXTURE_OPERATOR_ID, post, startBroker, stopBroker, type TestBroker } from "./_helper.ts";
+import { deckAuthored, FIXTURE_OPERATOR_ID, post, startBroker, stopBroker, type TestBroker, openBrokerDb } from "./_helper.ts";
 
 type MintResult = { token_id?: string; error?: string };
 
@@ -19,7 +18,7 @@ async function mint(broker: TestBroker, sessionPublicKey: string, sessionRef: st
 }
 
 function tokenRevokedAt(dbPath: string, tokenId: string): string | null {
-  const db = new Database(dbPath, { readonly: true });
+  const db = openBrokerDb(dbPath, { readonly: true });
   try {
     const row = db.query("SELECT revoked_at FROM approval_session_tokens WHERE token_id = ?").get(tokenId) as TokenRow | null;
     if (!row) throw new Error("minted session token row is missing");

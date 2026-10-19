@@ -1,6 +1,5 @@
 import { test, expect, beforeAll, afterAll } from "bun:test";
-import { Database } from "bun:sqlite";
-import { startBroker, stopBroker, post, livePid, groupId, sha256Hex, type TestBroker } from "./_helper.ts";
+import { startBroker, stopBroker, post, livePid, groupId, sha256Hex, type TestBroker, openBrokerDb } from "./_helper.ts";
 
 let broker: TestBroker;
 
@@ -27,7 +26,7 @@ async function send(from_token: string, to_peer_id: string, text: string) {
 }
 
 function readDb<T = unknown>(sql: string, ...params: unknown[]): T[] {
-  const db = new Database(broker.dbPath, { readonly: true });
+  const db = openBrokerDb(broker.dbPath, { readonly: true });
   try {
     return db.query(sql).all(...(params as any[])) as T[];
   } finally {
@@ -144,10 +143,9 @@ function insertMessageAtSameMs(
   text: string,
   sentAtIso: string
 ) {
-  const db = new Database(broker.dbPath);
+  const db = openBrokerDb(broker.dbPath);
   try {
     db.run("PRAGMA journal_mode = WAL");
-    db.run("PRAGMA busy_timeout = 3000");
     const group_id = db
       .query("SELECT group_id FROM peers WHERE instance_token = ?")
       .get(from_token) as { group_id: string };

@@ -1,6 +1,5 @@
 import { test, expect, beforeAll, afterAll } from "bun:test";
-import { Database } from "bun:sqlite";
-import { startBroker, stopBroker, post, get, livePid, type TestBroker } from "./_helper.ts";
+import { startBroker, stopBroker, post, get, livePid, type TestBroker, openBrokerDb } from "./_helper.ts";
 
 let broker: TestBroker;
 
@@ -23,10 +22,9 @@ async function register(host: string, cwd: string, projectKey: string | null = n
 }
 
 function insertMessageAt(from_token: string, to_token: string, text: string, sentAtIso: string, delivered: 0 | 1 = 0) {
-  const db = new Database(broker.dbPath);
+  const db = openBrokerDb(broker.dbPath);
   try {
     db.run("PRAGMA journal_mode = WAL");
-    db.run("PRAGMA busy_timeout = 3000");
     const group_id = (db.query("SELECT group_id FROM peers WHERE instance_token = ?").get(from_token) as { group_id: string }).group_id;
     db.run(
       `INSERT INTO messages (from_token, to_token, group_id, text, sent_at, delivered)
@@ -39,7 +37,7 @@ function insertMessageAt(from_token: string, to_token: string, text: string, sen
 }
 
 function countMessages(filter: string = "1=1", ...params: unknown[]): number {
-  const db = new Database(broker.dbPath, { readonly: true });
+  const db = openBrokerDb(broker.dbPath, { readonly: true });
   try {
     const r = db.query(`SELECT COUNT(*) AS c FROM messages WHERE ${filter}`).get(...(params as any[])) as { c: number };
     return r.c;
@@ -74,7 +72,7 @@ test("purge supprime les messages non-livres plus vieux que MESSAGE_TTL_DAYS", a
   const remaining = countMessages();
   expect(remaining).toBe(5);
   // Tous les restants doivent etre FRESH#*
-  const db = new Database(broker.dbPath, { readonly: true });
+  const db = openBrokerDb(broker.dbPath, { readonly: true });
   try {
     const texts = (db.query("SELECT text FROM messages ORDER BY sent_at DESC").all() as { text: string }[]).map((r) => r.text);
     expect(texts.every((t) => t.startsWith("FRESH#"))).toBe(true);
@@ -128,9 +126,8 @@ test("purge des graph drafts : opened au-dela du TTL supprime, pending jamais", 
   await get(`${broker.url}/admin/purge-messages`); // no-op baseline
 
   const old = new Date(Date.now() - 72 * 3600 * 1000).toISOString();
-  const db = new Database(broker.dbPath);
+  const db = openBrokerDb(broker.dbPath);
   try {
-    db.run("PRAGMA busy_timeout = 3000");
     db.run("UPDATE graph_drafts SET status='opened', opened_at=? WHERE id=?", [old, openedOld]);
     db.run("UPDATE graph_drafts SET created_at=? WHERE id=?", [old, pendingOld]);
     db.run("UPDATE graph_drafts SET status='opened', opened_at=? WHERE id=?", [
@@ -147,7 +144,7 @@ test("purge des graph drafts : opened au-dela du TTL supprime, pending jamais", 
   expect(purge.body.draft_cutoff_days).toBe(1);
   expect(purge.body.purged_drafts).toBe(1);
 
-  const check = new Database(broker.dbPath, { readonly: true });
+  const check = openBrokerDb(broker.dbPath, { readonly: true });
   try {
     const ids = (check.query("SELECT id FROM graph_drafts").all() as { id: string }[]).map((r) => r.id);
     expect(ids).not.toContain(openedOld); // opened + vieux -> purge
@@ -172,7 +169,7 @@ test("purge run au boot du broker (initial call)", async () => {
   });
 
   // Insert manuellement 2 anciens et 1 frais directement en SQLite
-  const db = new Database(b1.dbPath);
+  const db = openBrokerDb(b1.dbPath);
   try {
     db.run("PRAGMA journal_mode = WAL");
     const gid = (db.query("SELECT group_id FROM peers WHERE instance_token = ?").get(reg.body.instance_token) as { group_id: string }).group_id;
@@ -196,7 +193,7 @@ test("purge run au boot du broker (initial call)", async () => {
   const purge = await get<{ purged: number }>(`${b1.url}/admin/purge-messages`);
   expect(purge.body.purged).toBe(2);
 
-  const db2 = new Database(b1.dbPath, { readonly: true });
+  const db2 = openBrokerDb(b1.dbPath, { readonly: true });
   try {
     const remaining = (db2.query("SELECT text FROM messages").all() as { text: string }[]).map((r) => r.text);
     expect(remaining).toEqual(["FRESH"]);

@@ -4,7 +4,7 @@ import { existsSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { hostname } from "node:os";
 import { join } from "node:path";
 import { Database } from "bun:sqlite";
-import { deckAuthored, groupId, livePid, sha256Hex, startBroker, stopBroker, type TestBroker } from "./_helper.ts";
+import { deckAuthored, groupId, livePid, sha256Hex, startBroker, stopBroker, type TestBroker, openBrokerDb } from "./_helper.ts";
 import { buildAuthProof, deriveOperatorId, generateCredential } from "../shared/approval.ts";
 import {
   CONTEXT_DEPOSIT_MAX_BODY_BYTES,
@@ -153,7 +153,7 @@ async function transaction(
 }
 
 function withDb<T>(b: TestBroker, fn: (db: Database) => T): T {
-  const db = new Database(b.dbPath);
+  const db = openBrokerDb(b.dbPath);
   try {
     return fn(db);
   } finally {
@@ -1048,8 +1048,7 @@ describe("500 path", () => {
     const cap = newCapability();
     await register(b, LG, { capability: cap });
     // With the peers table renamed under it, the broker's owner lookup throws.
-    const db = new Database(b.dbPath);
-    db.run("PRAGMA busy_timeout = 5000");
+    const db = openBrokerDb(b.dbPath);
     db.run("ALTER TABLE peers RENAME TO peers_hidden");
     const canary = `failure-canary-${randomUUID()}`;
     let failed: Reply;

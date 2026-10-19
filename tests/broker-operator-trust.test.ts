@@ -1,5 +1,4 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { Database } from "bun:sqlite";
 import { buildAuthProof, deriveOperatorId, generateCredential } from "../shared/approval.ts";
 import {
   FIXTURE_OPERATOR_ID,
@@ -10,6 +9,7 @@ import {
   stopBroker,
   type StartBrokerOptions,
   type TestBroker,
+  openBrokerDb,
 } from "./_helper.ts";
 
 const brokers: TestBroker[] = [];
@@ -60,7 +60,7 @@ describe("operator trust at broker startup", () => {
     const broker = await boot();
     const credential = generateCredential();
     const operatorId = deriveOperatorId(credential.publicKey);
-    const db = new Database(broker.dbPath);
+    const db = openBrokerDb(broker.dbPath);
     db.run(
       `INSERT INTO approval_operators (operator_id, public_key, label, created_at, last_seen_at)
        VALUES (?, ?, '', datetime('now'), datetime('now'))`,

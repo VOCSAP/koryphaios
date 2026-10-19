@@ -5,7 +5,6 @@
 // across the boundary.
 
 import { test, expect, beforeAll, afterAll } from "bun:test";
-import { Database } from "bun:sqlite";
 import { join } from "node:path";
 import {
   startBroker as startPlainBroker,
@@ -14,6 +13,7 @@ import {
   deckAuthored,
   FIXTURE_OPERATOR_ID,
   type TestBroker,
+  openBrokerDb,
 } from "./_helper.ts";
 import { buildRoadmapAppendHeader } from "../shared/roadmap-append.ts";
 import { ROADMAP_TITLE_MAX } from "../shared/roadmap-title.ts";
@@ -207,8 +207,7 @@ test.concurrent("pull pages by rev, answers a cursor, and caps the page size at 
 
     // 520 rows written straight into the table so the cap is measured, not
     // assumed: the triggers stamp them exactly as a route write would.
-    const db = new Database(b.dbPath);
-    db.run("PRAGMA busy_timeout = 3000");
+    const db = openBrokerDb(b.dbPath);
     const insert = db.prepare(
       "INSERT INTO roadmap_items (id, project_key, kind, title, created_at, updated_at) VALUES (?, ?, 'feature', ?, datetime('now'), datetime('now'))"
     );
@@ -280,8 +279,7 @@ test.concurrent("a relayed lock survives the owner-gone sweep while its relay is
 
     // The replica goes quiet: the relay ages past the grace window exactly
     // like an owner's own silence would.
-    const db = new Database(b.dbPath);
-    db.run("PRAGMA busy_timeout = 3000");
+    const db = openBrokerDb(b.dbPath);
     db.run("UPDATE roadmap_items SET lock_relay_seen = datetime('now', '-120 seconds') WHERE id = ?", [id]);
     db.close();
 
@@ -404,8 +402,7 @@ test.concurrent("a relayed lock survives the TTL clause too, while its relay kee
     });
     expect(ghost.body.item.locked).toBe(true);
 
-    const db = new Database(b.dbPath);
-    db.run("PRAGMA busy_timeout = 3000");
+    const db = openBrokerDb(b.dbPath);
     db.run(
       "UPDATE roadmap_items SET updated_at = datetime('now', '-600 seconds') WHERE id IN (?, ?)",
       [relayed.body.item.id, ghost.body.item.id]
@@ -425,8 +422,7 @@ test.concurrent("a relayed lock survives the TTL clause too, while its relay kee
     expect(fallen.updated_by).toBe("lock-sweep");
 
     // The relay goes quiet: the row is stale AND unrelayed, and falls.
-    const db2 = new Database(b.dbPath);
-    db2.run("PRAGMA busy_timeout = 3000");
+    const db2 = openBrokerDb(b.dbPath);
     db2.run("UPDATE roadmap_items SET lock_relay_seen = datetime('now', '-120 seconds') WHERE id = ?", [
       relayed.body.item.id,
     ]);
@@ -469,8 +465,7 @@ test.concurrent("a relay the sweep released leaves nothing behind, and cannot wr
 
     // The replica goes away for good: its heartbeat ages past the grace window
     // and the sweep reclaims the card.
-    const db = new Database(b.dbPath);
-    db.run("PRAGMA busy_timeout = 3000");
+    const db = openBrokerDb(b.dbPath);
     db.run("UPDATE roadmap_items SET lock_relay_seen = datetime('now', '-120 seconds') WHERE id = ?", [id]);
     db.close();
     await pollUntil(12_000, 200, async () => {
@@ -478,7 +473,7 @@ test.concurrent("a relay the sweep released leaves nothing behind, and cannot wr
       return { done: !page.body.items.find((i) => i.id === id)!.locked, value: null };
     });
 
-    const swept = new Database(b.dbPath);
+    const swept = openBrokerDb(b.dbPath);
     const after = swept
       .query("SELECT lock_relay, lock_relay_seen, lock_contested_by FROM roadmap_items WHERE id = ?")
       .get(id) as { lock_relay: string | null; lock_relay_seen: string | null; lock_contested_by: string };
@@ -590,8 +585,7 @@ test.concurrent("a push behind a relay whose heartbeat has gone stale is refused
       200,
     ]);
 
-    const db = new Database(b.dbPath);
-    db.run("PRAGMA busy_timeout = 3000");
+    const db = openBrokerDb(b.dbPath);
     db.run("UPDATE roadmap_items SET lock_relay_seen = datetime('now', '-120 seconds') WHERE id = ?", [id]);
     db.close();
     const stale = await post<RoadmapSyncPushConflict>(`${b.url}/roadmap/sync/push`, {
@@ -660,7 +654,7 @@ test("a pulled row never carries locked_by_token or operator_id, which the store
 
   // The guarantee is only worth asserting if the columns are actually
   // populated: read them back before checking they do not travel.
-  const db = new Database(b.dbPath);
+  const db = openBrokerDb(b.dbPath);
   const stored = db
     .query("SELECT locked_by_token, operator_id FROM roadmap_items WHERE id = ?")
     .get(id) as { locked_by_token: string | null; operator_id: string | null };
@@ -804,7 +798,7 @@ test("push is refused on a card the upstream work-locks for a holder this replic
     "held by a native peer",
   ]);
   const afterRefusal = (await pull(b, 0)).body.items.find((i) => i.id === held.body.item.id)!;
-  const db = new Database(b.dbPath);
+  const db = openBrokerDb(b.dbPath);
   const heldToken = (
     db.query("SELECT locked_by_token FROM roadmap_items WHERE id = ?").get(held.body.item.id) as {
       locked_by_token: string | null;
@@ -896,7 +890,7 @@ test("push writes the queue but never the lock columns or operator_id", async ()
   expect(pushed.status).toBe(200);
   expect(pushed.body.item.title).toBe("edited on the replica");
 
-  const db = new Database(b.dbPath);
+  const db = openBrokerDb(b.dbPath);
   const stored = db
     .query(
       "SELECT queue, locked, locked_by, locked_by_token, lock_relay, operator_id FROM roadmap_items WHERE id = ?"
@@ -937,7 +931,7 @@ test("a push omitting queue entirely leaves the upstream rank untouched", async 
   );
   expect(signed.status).toBe(200);
   const id = signed.body.item.id;
-  const preDb = new Database(b.dbPath);
+  const preDb = openBrokerDb(b.dbPath);
   const contentRev = (
     preDb.query("SELECT content_rev FROM roadmap_items WHERE id = ?").get(id) as { content_rev: number }
   ).content_rev;
@@ -957,7 +951,7 @@ test("a push omitting queue entirely leaves the upstream rank untouched", async 
   });
   expect(pushed.status).toBe(200);
 
-  const db = new Database(b.dbPath);
+  const db = openBrokerDb(b.dbPath);
   const stored = db.query("SELECT queue FROM roadmap_items WHERE id = ?").get(id) as { queue: number | null };
   db.close();
   expect([
@@ -974,7 +968,7 @@ test("a push with queue: null explicitly clears the upstream rank", async () => 
   );
   expect(signed.status).toBe(200);
   const id = signed.body.item.id;
-  const preDb = new Database(b.dbPath);
+  const preDb = openBrokerDb(b.dbPath);
   const contentRev = (
     preDb.query("SELECT content_rev FROM roadmap_items WHERE id = ?").get(id) as { content_rev: number }
   ).content_rev;
@@ -989,7 +983,7 @@ test("a push with queue: null explicitly clears the upstream rank", async () => 
   });
   expect(pushed.status).toBe(200);
 
-  const db = new Database(b.dbPath);
+  const db = openBrokerDb(b.dbPath);
   const stored = db.query("SELECT queue FROM roadmap_items WHERE id = ?").get(id) as { queue: number | null };
   db.close();
   expect([
@@ -1133,7 +1127,7 @@ test("push refuses a miscased project_key with 400 naming the lowercase form, no
   expect(res.status).toBe(400);
   expect(res.body.error).toContain("github.com/vocsap/sync-routes-repo");
 
-  const db = new Database(b.dbPath, { readonly: true });
+  const db = openBrokerDb(b.dbPath, { readonly: true });
   try {
     const row = db.query("SELECT COUNT(*) AS n FROM roadmap_items WHERE id = ?").get("card-miscased-key") as { n: number };
     expect(row.n).toBe(0);
@@ -1166,7 +1160,7 @@ test("push refuses a title over the roadmap bound with 400, and stores one at th
   });
   expect(atBound.status).toBe(200);
 
-  const db = new Database(b.dbPath, { readonly: true });
+  const db = openBrokerDb(b.dbPath, { readonly: true });
   try {
     const rows = db.query("SELECT id FROM roadmap_items WHERE id IN ('card-title-over', 'card-title-at-bound')").all() as { id: string }[];
     expect(rows.map((r) => r.id)).toEqual(["card-title-at-bound"]);
@@ -1247,7 +1241,7 @@ test("lock relay: claim, re-assert, contested annotation, and who may release", 
   expect(claim.body.item.locked).toBe(true);
   expect(claim.body.item.locked_by).toBe("agent-a");
 
-  const db = new Database(b.dbPath);
+  const db = openBrokerDb(b.dbPath);
   const relayRow = db
     .query("SELECT lock_relay, lock_relay_seen, locked_by_token FROM roadmap_items WHERE id = ?")
     .get(id) as { lock_relay: string; lock_relay_seen: string; locked_by_token: string | null };
@@ -1441,7 +1435,7 @@ test("releasing a natively-held card drops the contest annotation, relayed or no
   ]);
   // No relay anywhere on this card: the holder is one of this broker's own
   // agents, which is exactly the shape the old condition skipped.
-  const db = new Database(b.dbPath);
+  const db = openBrokerDb(b.dbPath);
   const relayed = db
     .query("SELECT lock_relay FROM roadmap_items WHERE id = ?")
     .get(held.body.item.id) as { lock_relay: string | null };
@@ -1970,7 +1964,7 @@ test("context document sync push refuses a miscased project_key, ASCII or not, a
     expect([miscased, refused.status]).toEqual([miscased, 400]);
     expect(refused.body.error).toContain(lower!);
   }
-  const db = new Database(b.dbPath, { readonly: true });
+  const db = openBrokerDb(b.dbPath, { readonly: true });
   try {
     const row = db
       .query("SELECT COUNT(*) AS n FROM roadmap_context_documents WHERE id LIKE 'document-case-%'")
@@ -2049,7 +2043,7 @@ test("local deportation refuses more than 64 selected units without changing the
     by: "agent-local",
     targets: source.targets,
   });
-  const db = new Database(b.dbPath, { readonly: true });
+  const db = openBrokerDb(b.dbPath, { readonly: true });
   try {
     const stored = db.query("SELECT context FROM roadmap_items WHERE id = ?").get(created.body.item.id) as { context: string };
     const documents = db.query("SELECT COUNT(*) AS n FROM roadmap_context_documents WHERE roadmap_item_id = ?")
@@ -2080,7 +2074,7 @@ test("local deportation refuses raw document text above 65536 characters without
     by: "agent-local",
     targets: source.targets,
   });
-  const db = new Database(b.dbPath, { readonly: true });
+  const db = openBrokerDb(b.dbPath, { readonly: true });
   try {
     const stored = db.query("SELECT context FROM roadmap_items WHERE id = ?").get(created.body.item.id) as { context: string };
     const documents = db.query("SELECT COUNT(*) AS n FROM roadmap_context_documents WHERE roadmap_item_id = ?")

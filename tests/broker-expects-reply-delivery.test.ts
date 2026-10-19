@@ -1,6 +1,5 @@
 import { test, expect, describe, afterAll } from "bun:test";
-import { Database } from "bun:sqlite";
-import { startBroker, stopBroker, scrubEnv, type TestBroker } from "./_helper.ts";
+import { startBroker, stopBroker, scrubEnv, type TestBroker, openBrokerDb } from "./_helper.ts";
 import { OPERATOR_INSTANCE_TOKEN, OPERATOR_PEER_ID } from "../shared/types.ts";
 import { PEER_NO_REPLY_NOTE } from "../shared/message-framing.ts";
 
@@ -234,7 +233,7 @@ describe("send_message expects_reply, end to end", () => {
     // instance_tokens outright (card 37a2b8c7), and POST /operator-inbox needs
     // the group secret this harness has no reason to hold. The row IS the
     // ground truth for "what would a human be shown".
-    const db = new Database(b.dbPath, { readonly: true });
+    const db = openBrokerDb(b.dbPath, { readonly: true });
     try {
       const rows = db
         .query("SELECT text FROM messages WHERE to_token = ? ORDER BY id DESC")

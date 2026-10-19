@@ -7,7 +7,7 @@
 
 import { test, expect, beforeAll, afterAll } from "bun:test";
 import { Database } from "bun:sqlite";
-import { startBroker, stopBroker, post, livePid, groupId, sha256Hex, type TestBroker } from "./_helper.ts";
+import { startBroker, stopBroker, post, livePid, groupId, sha256Hex, type TestBroker, openBrokerDb } from "./_helper.ts";
 import * as sharedTypes from "../shared/types.ts";
 import {
   SENTINEL_DEFINITIONS,
@@ -43,7 +43,7 @@ async function register(host: string, cwd: string, group: { id: string; hash: st
 }
 
 function db(): Database {
-  return new Database(broker.dbPath, { readonly: true });
+  return openBrokerDb(broker.dbPath, { readonly: true });
 }
 
 // ---------------------------------------------------------------------------
@@ -74,7 +74,7 @@ test("send-message refuses a sentinel-shaped from_token", async () => {
 // what makes the probe independent of volet 2's OWN send-message guard: this
 // test must fail if poll/peek's guard is missing, regardless of send-message's.
 async function plantMessageTo(instanceToken: string, text: string): Promise<void> {
-  const conn = new Database(broker.dbPath);
+  const conn = openBrokerDb(broker.dbPath);
   try {
     // FK requires a peers row for a non-seeded token like "__anything__".
     conn.run(
@@ -176,7 +176,7 @@ const guardProbes: ReadonlyArray<{ peerId: string; instanceToken: string }> = [
 ];
 
 async function ensureDormantRow(instanceToken: string): Promise<void> {
-  const conn = new Database(broker.dbPath);
+  const conn = openBrokerDb(broker.dbPath);
   try {
     conn.run(
       `INSERT OR IGNORE INTO peers
@@ -324,7 +324,7 @@ test("every SENTINEL_DEFINITIONS row survives cleanStalePeers regardless of TTL"
   // way, then confirm cleanStalePeers's own reserved-token exemption (broker.ts,
   // "Phase 2") -- built from SENTINEL_INSTANCE_TOKENS, not a hardcoded pair --
   // still leaves every entry standing after several sweeps.
-  const conn = new Database(broker.dbPath);
+  const conn = openBrokerDb(broker.dbPath);
   try {
     for (const sentinel of SENTINEL_DEFINITIONS) {
       conn.run("UPDATE peers SET last_seen = ? WHERE instance_token = ?", [
@@ -359,7 +359,7 @@ test("resolveSenderMeta maps every SENTINEL_DEFINITIONS entry's instance_token t
   const g = { id: await groupId("sentinel-meta"), hash: await sha256Hex("sentinel-meta") };
   const target = await register("hsp-meta", "/sp-meta", g);
 
-  const conn = new Database(broker.dbPath);
+  const conn = openBrokerDb(broker.dbPath);
   try {
     for (const sentinel of SENTINEL_DEFINITIONS) {
       conn.run(

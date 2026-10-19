@@ -1,3 +1,4 @@
+import { Database } from "bun:sqlite";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -168,6 +169,21 @@ export async function startBroker(
   throw new Error(
     `could not start broker on any port (${command.join(" ")}, ${failures.length} attempt(s)):\n${failures.join("\n")}`
   );
+}
+
+/**
+ * Upper bound a test connection waits for the broker's writer lock. bun:sqlite
+ * opens with no busy handler, so a second connection on a running broker's WAL
+ * database fails at once with "database is locked" whenever the broker is mid
+ * write.
+ */
+export const BROKER_DB_BUSY_TIMEOUT_MS = 5000;
+
+/** The only way a test opens the database file of a broker that may be running. */
+export function openBrokerDb(dbPath: string, options: { readonly?: boolean } = {}): Database {
+  const db = options.readonly ? new Database(dbPath, { readonly: true }) : new Database(dbPath);
+  db.run(`PRAGMA busy_timeout = ${BROKER_DB_BUSY_TIMEOUT_MS}`);
+  return db;
 }
 
 export async function stopBroker(b: TestBroker): Promise<void> {

@@ -1,9 +1,8 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { Database } from "bun:sqlite";
 import { randomUUID } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { groupId, livePid, post, sha256Hex, startBroker, stopBroker, type TestBroker } from "./_helper.ts";
+import { groupId, livePid, post, sha256Hex, startBroker, stopBroker, type TestBroker, openBrokerDb } from "./_helper.ts";
 
 interface Peer {
   peer_id: string;
@@ -123,7 +122,7 @@ async function frameWithText(frames: Frame[], text: string): Promise<Frame> {
 }
 
 function storedTaskId(text: string): string | null {
-  const db = new Database(broker.dbPath, { readonly: true });
+  const db = openBrokerDb(broker.dbPath, { readonly: true });
   try {
     const row = db.query("SELECT task_id FROM messages WHERE text = ?").get(text) as { task_id: string | null } | null;
     if (!row) throw new Error(`message ${JSON.stringify(text)} not stored`);
@@ -134,9 +133,8 @@ function storedTaskId(text: string): string | null {
 }
 
 function makeOverdue(taskId: string): void {
-  const db = new Database(broker.dbPath);
+  const db = openBrokerDb(broker.dbPath);
   try {
-    db.run("PRAGMA busy_timeout = 3000");
     db.run("UPDATE delegated_tasks SET status = 'overdue', decision_due_at_ms = ? WHERE task_id = ?", [
       Date.now() + 600_000,
       taskId,
@@ -147,7 +145,7 @@ function makeOverdue(taskId: string): void {
 }
 
 function dueAtFromDb(taskId: string): string {
-  const db = new Database(broker.dbPath, { readonly: true });
+  const db = openBrokerDb(broker.dbPath, { readonly: true });
   try {
     const row = db.query("SELECT due_at_ms FROM delegated_tasks WHERE task_id = ?").get(taskId) as { due_at_ms: number };
     return new Date(row.due_at_ms).toISOString();
@@ -316,9 +314,8 @@ describe("immediate WS push projects the delegation context", () => {
     const alice = await register("pair-alice");
     const carol = await register("pair-carol");
     const taskId = await delegate(bob, alice, "pair-secret-label");
-    const db = new Database(broker.dbPath);
+    const db = openBrokerDb(broker.dbPath);
     try {
-      db.run("PRAGMA busy_timeout = 3000");
       db.run(
         "INSERT INTO messages (from_token, to_token, group_id, text, sent_at, delivered, task_id) VALUES (?, ?, ?, ?, ?, 0, ?)",
         [bob.instance_token, carol.instance_token, group, "pair: forged citation", new Date().toISOString(), taskId]
@@ -386,9 +383,8 @@ describe("sweep notifications quote the label", () => {
       };
       const due = await create("label: due");
       const escalated = await create("label: escalated");
-      const db = new Database(swept.dbPath);
+      const db = openBrokerDb(swept.dbPath);
       try {
-        db.run("PRAGMA busy_timeout = 3000");
         db.run("UPDATE delegated_tasks SET due_at_ms = ? WHERE task_id = ?", [Date.now() - 1000, due]);
         db.run("UPDATE delegated_tasks SET due_at_ms = 1, rearm_count = max_rearms WHERE task_id = ?", [escalated]);
       } finally {
@@ -397,7 +393,7 @@ describe("sweep notifications quote the label", () => {
 
       const quoted = `(${JSON.stringify(label)})`;
       const texts = async (): Promise<string[]> => {
-        const read = new Database(swept.dbPath, { readonly: true });
+        const read = openBrokerDb(swept.dbPath, { readonly: true });
         try {
           return (read.query("SELECT text FROM messages WHERE text LIKE ? OR text LIKE ?").all(`%${due}%`, `%${escalated}%`) as {
             text: string;
@@ -449,9 +445,8 @@ describe("a failed projection never costs the message", () => {
       const bob = await registerFailing("failing-bob");
       const alice = await registerFailing("failing-alice");
 
-      const db = new Database(failing.dbPath);
+      const db = openBrokerDb(failing.dbPath);
       try {
-        db.run("PRAGMA busy_timeout = 3000");
         db.run("DROP TABLE delegated_tasks");
       } finally {
         db.close();

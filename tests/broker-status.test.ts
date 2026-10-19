@@ -1,6 +1,5 @@
 import { test, expect, beforeAll, afterAll } from "bun:test";
-import { startBroker, stopBroker, post, get, livePid, type TestBroker } from "./_helper.ts";
-import { Database } from "bun:sqlite";
+import { startBroker, stopBroker, post, get, livePid, type TestBroker, openBrokerDb } from "./_helper.ts";
 
 let broker: TestBroker;
 
@@ -49,7 +48,7 @@ test("dormant peers past TTL are purged by cleanStalePeers", async () => {
   const a = await register("hs3", "/hs3", livePid());
   await post(`${broker.url}/disconnect`, { instance_token: a.body.instance_token });
 
-  const db = new Database(broker.dbPath);
+  const db = openBrokerDb(broker.dbPath);
   db.run("UPDATE peers SET last_seen = ? WHERE instance_token = ?", [
     "2000-01-01T00:00:00Z",
     a.body.instance_token,

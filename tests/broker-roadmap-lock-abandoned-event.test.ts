@@ -6,8 +6,7 @@
 // where anyone holding the shared BROKER_TOKEN could read it.
 
 import { test, expect } from "bun:test";
-import { Database } from "bun:sqlite";
-import { startBroker, stopBroker, post, livePid, groupId, sha256Hex, type TestBroker } from "./_helper.ts";
+import { startBroker, stopBroker, post, livePid, groupId, sha256Hex, type TestBroker, openBrokerDb } from "./_helper.ts";
 import { OPERATOR_INSTANCE_TOKEN, DECK_INSTANCE_TOKEN, type RoadmapItem } from "../shared/types.ts";
 
 const PK = "github.com/vocsap/lock-abandoned-event-repo";
@@ -54,7 +53,7 @@ test("releaseStaleLocks: a lock swept for TTL in a secret group deposits exactly
 
     // TTL alone (no owner-gone condition needed): the peer stays 'active',
     // only `updated_at`/`locked_at` age past LOCK_TTL_SEC.
-    const db = new Database(b.dbPath);
+    const db = openBrokerDb(b.dbPath);
     db.run("UPDATE roadmap_items SET locked_at = datetime('now', '-60 seconds'), updated_at = datetime('now', '-60 seconds') WHERE id = ?", [
       held.body.item.id,
     ]);
@@ -111,7 +110,7 @@ test("releaseStaleLocks: a card reclaimed and abandoned twice produces TWO event
     });
     expect(held.body.item.locked).toBe(true);
 
-    const db = new Database(b.dbPath);
+    const db = openBrokerDb(b.dbPath);
     db.run("UPDATE roadmap_items SET locked_at = datetime('now', '-60 seconds'), updated_at = datetime('now', '-60 seconds') WHERE id = ?", [
       held.body.item.id,
     ]);
@@ -130,7 +129,7 @@ test("releaseStaleLocks: a card reclaimed and abandoned twice produces TWO event
     });
     expect(reheld.body.item.locked).toBe(true);
 
-    const db2 = new Database(b.dbPath);
+    const db2 = openBrokerDb(b.dbPath);
     db2.run("UPDATE roadmap_items SET locked_at = datetime('now', '-60 seconds'), updated_at = datetime('now', '-60 seconds') WHERE id = ?", [
       held.body.item.id,
     ]);
@@ -172,7 +171,7 @@ test("releaseStaleLocks: a lock in the secret-less 'default' group drops the eve
     expect(held.body.item.locked).toBe(true);
     expect(held.body.item.locked_group).toBe("default");
 
-    const db = new Database(b.dbPath);
+    const db = openBrokerDb(b.dbPath);
     db.run("UPDATE roadmap_items SET locked_at = datetime('now', '-60 seconds'), updated_at = datetime('now', '-60 seconds') WHERE id = ?", [
       held.body.item.id,
     ]);
@@ -188,7 +187,7 @@ test("releaseStaleLocks: a lock in the secret-less 'default' group drops the eve
     // (groupMayCarryOperatorInbox's other half) -- this asserts the SWEEP
     // never routed a message there in the first place, straight off the
     // messages table, not through the (deliberately refused) drain route.
-    const db2 = new Database(b.dbPath, { readonly: true });
+    const db2 = openBrokerDb(b.dbPath, { readonly: true });
     try {
       const rows = db2.query(
         "SELECT COUNT(*) AS n FROM messages WHERE from_token = ? AND to_token = ?"
@@ -234,7 +233,7 @@ test("releaseStaleLocks: a lock swept by clause 2 (owner-gone, not TTL) deposits
     expect(held.body.item.locked).toBe(true);
     expect(held.body.item.locked_group).toBe(g.id);
 
-    const db0 = new Database(b.dbPath);
+    const db0 = openBrokerDb(b.dbPath);
     db0.run(
       "UPDATE peers SET status = 'dormant', last_seen = datetime('now', '-3600 seconds') WHERE instance_token = ?",
       [reg.body.instance_token]
@@ -290,7 +289,7 @@ test("releaseStaleLocks: emitLockAbandonedEvent's first guard drops a migration-
     expect(held.body.item.locked).toBe(true);
     expect(held.body.item.locked_group).toBe(g.id);
 
-    const db = new Database(b.dbPath);
+    const db = openBrokerDb(b.dbPath);
     db.run(
       "UPDATE roadmap_items SET locked_group = NULL, locked_at = datetime('now', '-60 seconds'), updated_at = datetime('now', '-60 seconds') WHERE id = ?",
       [held.body.item.id]
@@ -309,7 +308,7 @@ test("releaseStaleLocks: emitLockAbandonedEvent's first guard drops a migration-
     // Real proof of absence, off the messages table itself (the drain route
     // would work fine here since g.id/g.hash are a real, TOFU-eligible
     // group -- the point is that nothing was ever inserted to drain).
-    const db2 = new Database(b.dbPath, { readonly: true });
+    const db2 = openBrokerDb(b.dbPath, { readonly: true });
     try {
       const rows = db2.query(
         "SELECT COUNT(*) AS n FROM messages WHERE from_token = ? AND to_token = ?"

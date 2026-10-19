@@ -8,9 +8,8 @@
 import { resolve, join } from "node:path";
 import { tmpdir } from "node:os";
 import { mkdtempSync, rmSync } from "node:fs";
-import { Database } from "bun:sqlite";
 import { test, expect, afterAll } from "bun:test";
-import { startBroker, stopBroker, scrubEnv, type TestBroker } from "./_helper.ts";
+import { startBroker, stopBroker, scrubEnv, type TestBroker, openBrokerDb } from "./_helper.ts";
 import { resolveProjectKey } from "../shared/project-key.ts";
 
 interface JsonRpcResponse {
@@ -107,7 +106,7 @@ test(
     const rpcBuffer = { text: "" };
     let nextRpcId = 1;
 
-    const db = new Database(b.dbPath);
+    const db = openBrokerDb(b.dbPath);
     const deadline = Date.now() + 10_000;
     let row: PeerRow | undefined;
     while (Date.now() < deadline) {

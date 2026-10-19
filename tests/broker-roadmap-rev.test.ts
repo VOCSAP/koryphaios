@@ -12,7 +12,7 @@
 
 import { test, expect } from "bun:test";
 import { Database } from "bun:sqlite";
-import { startBroker, stopBroker, post, type TestBroker } from "./_helper.ts";
+import { startBroker, stopBroker, post, type TestBroker, openBrokerDb } from "./_helper.ts";
 import type { RoadmapItem } from "../shared/types.ts";
 
 const PK = "github.com/vocsap/rev-repo";
@@ -30,8 +30,7 @@ interface RevRow {
 }
 
 function openDb(b: TestBroker): Database {
-  const db = new Database(b.dbPath);
-  db.run("PRAGMA busy_timeout = 3000");
+  const db = openBrokerDb(b.dbPath);
   return db;
 }
 

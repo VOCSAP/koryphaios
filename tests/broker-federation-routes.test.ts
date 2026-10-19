@@ -5,7 +5,6 @@
 // mechanic-A exemption, the send relay, and the per-group TOFU.
 
 import { test, expect, beforeAll, afterAll } from "bun:test";
-import { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
 import { hostname } from "node:os";
 import {
@@ -15,6 +14,7 @@ import {
   sha256Hex,
   groupId,
   type TestBroker,
+  openBrokerDb,
 } from "./_helper.ts";
 import type {
   FederationRelayPeer,
@@ -127,7 +127,7 @@ async function adminPeers(b: TestBroker): Promise<Record<string, unknown>[]> {
 }
 
 function messageRow(b: TestBroker, id: number): { delivered: number } | null {
-  const db = new Database(b.dbPath, { readonly: true });
+  const db = openBrokerDb(b.dbPath, { readonly: true });
   try {
     return db.query("SELECT delivered FROM messages WHERE id = ?").get(id) as { delivered: number } | null;
   } finally {
@@ -137,7 +137,7 @@ function messageRow(b: TestBroker, id: number): { delivered: number } | null {
 
 /** The id of the one undelivered message a native peer just sent (poll-free read). */
 function lastMessageId(b: TestBroker): number {
-  const db = new Database(b.dbPath, { readonly: true });
+  const db = openBrokerDb(b.dbPath, { readonly: true });
   try {
     return (db.query("SELECT MAX(id) AS id FROM messages").get() as { id: number }).id;
   } finally {
@@ -274,7 +274,7 @@ test("toPublicPeer is a pick-list: every live column of peers is either publishe
     true,
   ]);
   const published = new Set(rows.flatMap((r) => Object.keys(r)));
-  const db = new Database(upstream.dbPath, { readonly: true });
+  const db = openBrokerDb(upstream.dbPath, { readonly: true });
   const columns = (db.query("PRAGMA table_info(peers)").all() as { name: string }[]).map((c) => c.name);
   db.close();
   for (const column of columns) {
@@ -717,7 +717,7 @@ test("groups are capped and validated by shape, and a group with no presented pe
     "a well-formed group without peers is accepted",
     200,
   ]);
-  const db = new Database(upstream.dbPath, { readonly: true });
+  const db = openBrokerDb(upstream.dbPath, { readonly: true });
   try {
     expect([
       "a group nobody presents a peer for is never pinned",

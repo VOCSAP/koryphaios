@@ -2,7 +2,7 @@ import { test, expect, afterAll } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { startBroker, stopBroker, post, type TestBroker } from "./_helper.ts";
+import { startBroker, stopBroker, post, type TestBroker, openBrokerDb } from "./_helper.ts";
 import { Database } from "bun:sqlite";
 import type { RoadmapItem } from "../shared/types.ts";
 
@@ -26,7 +26,7 @@ test("broker boots on a db whose roadmap_context_documents predates the sync col
   const b = await startBroker({ CLAUDE_PEERS_DB: dbPath });
   brokers.push(b);
 
-  const db = new Database(dbPath, { readonly: true });
+  const db = openBrokerDb(dbPath, { readonly: true });
   const cols = (db.query("PRAGMA table_info(roadmap_context_documents)").all() as { name: string }[]).map(
     (c) => c.name
   );
@@ -43,7 +43,7 @@ test("broker boots on a db whose roadmap_context_documents predates the sync col
 test("migration adds claude_cli_pid column to peers", async () => {
   const b = await startBroker();
   brokers.push(b);
-  const db = new Database(b.dbPath, { readonly: true });
+  const db = openBrokerDb(b.dbPath, { readonly: true });
   const cols = db.query("PRAGMA table_info(peers)").all() as { name: string }[];
   db.close();
   expect(cols.some((c) => c.name === "claude_cli_pid")).toBe(true);
@@ -87,7 +87,7 @@ test("first card in an empty roadmap survives a 2nd broker startup (card 5ce394c
 test("roadmap_fts_au's AFTER UPDATE OF columns match the fts5 DDL columns (card 5ce394ca)", async () => {
   const b = await startBroker();
   brokers.push(b);
-  const db = new Database(b.dbPath, { readonly: true });
+  const db = openBrokerDb(b.dbPath, { readonly: true });
   const tableSql = (
     db.query("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'roadmap_fts'").get() as {
       sql: string;

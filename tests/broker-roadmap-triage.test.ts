@@ -10,7 +10,7 @@ import { Database } from "bun:sqlite";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { startBroker, stopBroker, post, type TestBroker } from "./_helper.ts";
+import { startBroker, stopBroker, post, type TestBroker, openBrokerDb } from "./_helper.ts";
 import type { RoadmapItem, RoadmapListResponse } from "../shared/types.ts";
 
 const PK = "github.com/vocsap/triage-repo";
@@ -18,8 +18,7 @@ const PK = "github.com/vocsap/triage-repo";
 type UpsertRes = { item: RoadmapItem };
 
 function openDb(b: TestBroker): Database {
-  const db = new Database(b.dbPath);
-  db.run("PRAGMA busy_timeout = 3000");
+  const db = openBrokerDb(b.dbPath);
   return db;
 }
 
@@ -210,11 +209,7 @@ test("the startup migration promotes a role tag into the column, once, and resol
   // contents included.
   const carried = mkdtempSync(join(tmpdir(), "triage-migration-"));
   const dbPath = join(carried, "peers.db");
-  const reopen = (): Database => {
-    const handle = new Database(dbPath);
-    handle.run("PRAGMA busy_timeout = 3000");
-    return handle;
-  };
+  const reopen = (): Database => openBrokerDb(dbPath);
   try {
     // Cards as they existed before the column: the role lives in the free-text
     // tag list, alongside ordinary tags that must survive untouched.

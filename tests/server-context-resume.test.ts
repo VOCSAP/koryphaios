@@ -3,10 +3,9 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { Database } from "bun:sqlite";
 import { CONTEXT_RESUME_ACK_TTL_MS, hashCapability } from "../shared/context-buffer.ts";
 import { contextResumeKeyTtlMs, pollFallbackIntervalMs } from "../server.ts";
-import { deckAuthored, groupId, post, scrubEnv, sha256Hex, startBroker, stopBroker, type TestBroker } from "./_helper.ts";
+import { deckAuthored, groupId, post, scrubEnv, sha256Hex, startBroker, stopBroker, type TestBroker, openBrokerDb } from "./_helper.ts";
 
 const SERVER_PATH = resolve(import.meta.dir, "..", "server.ts");
 
@@ -117,7 +116,7 @@ async function launchServer(
 }
 
 function instanceToken(broker: TestBroker, cwd: string): string | null {
-  const db = new Database(broker.dbPath, { readonly: true });
+  const db = openBrokerDb(broker.dbPath, { readonly: true });
   try {
     // The server records process.cwd(), resolved by the kernel on POSIX and
     // left as spelled on Windows: both spellings of the directory are asked.

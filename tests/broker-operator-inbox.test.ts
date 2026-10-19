@@ -15,6 +15,7 @@ import {
   groupId,
   sha256Hex,
   type TestBroker,
+  openBrokerDb,
 } from "./_helper.ts";
 import { buildAuthProof, type ApprovalCredential } from "../shared/approval.ts";
 // The sentinel token is imported rather than re-typed, so seed and assertion
@@ -112,7 +113,7 @@ test("send_message to 'operator' lands in the group inbox; drain marks delivered
   const second = await drain(g);
   expect((second.body as { messages: unknown[] }).messages.length).toBe(0);
 
-  const db = new Database(broker.dbPath, { readonly: true });
+  const db = openBrokerDb(broker.dbPath, { readonly: true });
   try {
     const rows = db.query(
       "SELECT delivered FROM messages WHERE to_token = ? AND group_id = ?"
@@ -183,7 +184,7 @@ test("volet 1 deposit: send_message to 'operator' is refused from the 'default' 
   expect(body.error ?? "").toContain("default");
 
   // The refusal must be a refusal to STORE, not a silent accept: nothing landed.
-  const db = new Database(broker.dbPath, { readonly: true });
+  const db = openBrokerDb(broker.dbPath, { readonly: true });
   try {
     const rows = db.query(
       "SELECT id FROM messages WHERE to_token = ? AND group_id = 'default'"
@@ -210,7 +211,7 @@ test("volet 1 drain: /operator-inbox on 'default' is refused with 403 and consum
   // nothing" half would be vacuous). The seed is what makes the drain have
   // something to steal.
   const a = await register("hOpX1", "/opX1"); // 'default'
-  const seed = new Database(broker.dbPath);
+  const seed = openBrokerDb(broker.dbPath);
   try {
     seed.query(
       `INSERT INTO messages (from_token, to_token, group_id, text, sent_at, delivered)
@@ -232,7 +233,7 @@ test("volet 1 drain: /operator-inbox on 'default' is refused with 403 and consum
   // Disclosure AND suppression are both closed: the row is still there, and
   // still undelivered (a successful drain marks delivered, hiding it from the
   // real Deck).
-  const db = new Database(broker.dbPath, { readonly: true });
+  const db = openBrokerDb(broker.dbPath, { readonly: true });
   try {
     const rows = db.query(
       "SELECT delivered, text FROM messages WHERE to_token = ? AND group_id = 'default'"
@@ -410,7 +411,7 @@ test("coverage: the two exemptions hold live -- neither route reaches the inbox"
   await register("hOpC1", "/opC1", g);
 
   const inboxRows = (group: string): number => {
-    const db = new Database(broker.dbPath, { readonly: true });
+    const db = openBrokerDb(broker.dbPath, { readonly: true });
     try {
       return (
         db.query(
@@ -485,7 +486,7 @@ test("coverage: both exemptions lean on dormant sentinel rows -- pinned here", a
       | { peer_id: string; status: string }
       | null;
 
-  const db = new Database(broker.dbPath, { readonly: true });
+  const db = openBrokerDb(broker.dbPath, { readonly: true });
   try {
     expect(SENTINEL_DEFINITIONS.length).toBeGreaterThan(0);
     for (const sentinel of SENTINEL_DEFINITIONS) {
@@ -504,7 +505,7 @@ test("coverage: both exemptions lean on dormant sentinel rows -- pinned here", a
   // holds by derivation on BOTH sides, which is why the falsification has to
   // attack the PROPERTY instead: flip one sentinel to 'active' and prove the
   // assertion observes it, rather than passing against a constant.
-  const rw = new Database(broker.dbPath);
+  const rw = openBrokerDb(broker.dbPath);
   const probe = SENTINEL_DEFINITIONS[0]!;
   try {
     rw.query("UPDATE peers SET status = 'active' WHERE instance_token = ?").run(probe.instanceToken);
@@ -563,7 +564,7 @@ test("lot 1A: session_id absent is byte-identical to legacy -- no operator_inbox
     "legacy path",
   ]);
 
-  const db = new Database(broker.dbPath, { readonly: true });
+  const db = openBrokerDb(broker.dbPath, { readonly: true });
   try {
     const rows = db.query(
       "SELECT session_id FROM operator_inbox_sessions WHERE group_id = ?"
@@ -590,7 +591,7 @@ test("lot 1A: a session_id reaped by the purge GC re-seeds as brand-new (no repl
   // arbitrage), so a '-1 day' offset landed within a second of the cutoff --
   // datetime()'s 1-second resolution then made this flaky against the very
   // TTL it exercises. Two days keeps a comfortable margin either side.
-  const rw = new Database(broker.dbPath);
+  const rw = openBrokerDb(broker.dbPath);
   try {
     rw.query(
       "UPDATE operator_inbox_sessions SET last_seen_at = datetime('now', '-2 days') WHERE session_id = ? AND group_id = ?"
@@ -605,7 +606,7 @@ test("lot 1A: a session_id reaped by the purge GC re-seeds as brand-new (no repl
   await drainAs(g, "sess-fresh"); // must exist to be a valid purge caller
   await purge(g, "sess-fresh", "session");
 
-  const afterReap = new Database(broker.dbPath, { readonly: true });
+  const afterReap = openBrokerDb(broker.dbPath, { readonly: true });
   try {
     // AND group_id = ?: the exact "SELECT keyed on too few" trap this
     // convention warns about, in the test meant to prove it (card 1e81ee7b).
@@ -655,7 +656,7 @@ test("lot 1C purge scope=session: bounded by the slowest LIVE session, even when
   expect((fastRead.body as { messages: unknown[] }).messages.length).toBe(3);
 
   const countRows = (): number => {
-    const db = new Database(broker.dbPath, { readonly: true });
+    const db = openBrokerDb(broker.dbPath, { readonly: true });
     try {
       return (
         db.query(
@@ -693,7 +694,7 @@ test("lot 1C purge scope=ids: deletes only the named ids, and only within the ca
   await sendToOperator(a.body.instance_token, "group A message");
   await sendToOperator(b.body.instance_token, "group B message");
 
-  const db = new Database(broker.dbPath, { readonly: true });
+  const db = openBrokerDb(broker.dbPath, { readonly: true });
   let idA: number, idB: number;
   try {
     idA = (
@@ -714,7 +715,7 @@ test("lot 1C purge scope=ids: deletes only the named ids, and only within the ca
   const crossGroup = await purge(gA, "sess-ids-A", "ids", [idB]);
   expect((crossGroup.body as { deleted: number }).deleted).toBe(0);
 
-  const stillThere = new Database(broker.dbPath, { readonly: true });
+  const stillThere = openBrokerDb(broker.dbPath, { readonly: true });
   try {
     expect(
       (stillThere.query("SELECT COUNT(*) AS n FROM messages WHERE id = ?").get(idB) as { n: number }).n
@@ -727,7 +728,7 @@ test("lot 1C purge scope=ids: deletes only the named ids, and only within the ca
   const inGroup = await purge(gA, "sess-ids-A", "ids", [idA]);
   expect((inGroup.body as { deleted: number }).deleted).toBe(1);
 
-  const gone = new Database(broker.dbPath, { readonly: true });
+  const gone = openBrokerDb(broker.dbPath, { readonly: true });
   try {
     expect(
       (gone.query("SELECT COUNT(*) AS n FROM messages WHERE id = ?").get(idA) as { n: number }).n
@@ -819,7 +820,7 @@ test("purge BLOCKER 2: an unauthenticated caller on a never-registered group can
     await drainAs(g, "victim-sess", cellBroker);
 
     // 5x shortTtlMin: comfortably past the TTL this test itself configured.
-    const rw = new Database(cellBroker.dbPath);
+    const rw = openBrokerDb(cellBroker.dbPath);
     try {
       rw.query(
         "UPDATE operator_inbox_sessions SET last_seen_at = datetime('now', '-10 minutes') WHERE session_id = ? AND group_id = ?"
@@ -836,7 +837,7 @@ test("purge BLOCKER 2: an unauthenticated caller on a never-registered group can
     const ghost = await purge({ id: ghostGroupId, hash: null }, "any-session", "session", undefined, cellBroker);
     expect(ghost.status).toBe(403);
 
-    const row = new Database(cellBroker.dbPath, { readonly: true });
+    const row = openBrokerDb(cellBroker.dbPath, { readonly: true });
     try {
       const found = row.query(
         "SELECT session_id FROM operator_inbox_sessions WHERE session_id = ? AND group_id = ?"
@@ -864,7 +865,7 @@ test("cursor drain marks delivered too (MAJOR 2): the TTL sweep must not treat c
     "cursor-read message",
   ]);
 
-  const db = new Database(broker.dbPath, { readonly: true });
+  const db = openBrokerDb(broker.dbPath, { readonly: true });
   try {
     const row = db.query(
       "SELECT delivered FROM messages WHERE to_token = ? AND group_id = ?"
@@ -890,7 +891,7 @@ test("purge scope=session (MAJOR 3): the GC reap raises the floor within the SAM
   await drainAs(g, "sess-live");
 
   // Age sess-dead past the GC TTL.
-  const rw = new Database(broker.dbPath);
+  const rw = openBrokerDb(broker.dbPath);
   try {
     rw.query(
       "UPDATE operator_inbox_sessions SET last_seen_at = datetime('now', '-2 days') WHERE session_id = ? AND group_id = ?"
@@ -923,7 +924,7 @@ test("drain MAJOR 4: a non-string session_id is refused, never silently falls ba
 
 test("drain MAJOR 5 / part 4: a never-registered group creates no operator_inbox_sessions row", async () => {
   const countSessions = (): number => {
-    const db = new Database(broker.dbPath, { readonly: true });
+    const db = openBrokerDb(broker.dbPath, { readonly: true });
     try {
       return (
         db.query("SELECT COUNT(*) AS n FROM operator_inbox_sessions").get() as { n: number }
@@ -993,7 +994,7 @@ test("cursor session_id is scoped per group (MAJOR 1, composite PK): the same se
   expect(textsOf(secondA)).toEqual(["A msg"]);
   expect(textsOf(secondB)).toEqual([]);
 
-  const db = new Database(broker.dbPath, { readonly: true });
+  const db = openBrokerDb(broker.dbPath, { readonly: true });
   try {
     const rowCount = (
       db.query("SELECT COUNT(*) AS n FROM operator_inbox_sessions WHERE session_id = ?").get(SESSION) as {

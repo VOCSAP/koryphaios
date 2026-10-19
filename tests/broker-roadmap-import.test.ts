@@ -12,8 +12,7 @@
 // as the only override -- see the negative control below.
 
 import { test, expect, beforeAll, afterAll } from "bun:test";
-import { Database } from "bun:sqlite";
-import { startBroker, stopBroker, post, livePid, type TestBroker , deckAuthored } from "./_helper.ts";
+import { startBroker, stopBroker, post, livePid, type TestBroker , deckAuthored, openBrokerDb } from "./_helper.ts";
 import {
   ROADMAP_IMPORT_COLUMNS,
   findUncoveredRoadmapColumns,
@@ -545,7 +544,7 @@ test("a duplicate id in one import: the later entry wins, unless an earlier entr
 // import.
 
 test("card aad5e954: the import writes every column the live roadmap_items schema has", () => {
-  const db = new Database(broker.dbPath, { readonly: true });
+  const db = openBrokerDb(broker.dbPath, { readonly: true });
   try {
     const schemaColumns = (
       db.query("PRAGMA table_info(roadmap_items)").all() as { name: string }[]

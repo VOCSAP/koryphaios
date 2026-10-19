@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { startBroker, stopBroker, post, approvalListBody, type TestBroker } from "./_helper.ts";
+import { startBroker, stopBroker, post, approvalListBody, type TestBroker, openBrokerDb } from "./_helper.ts";
 import {
   approvalWaitTimeoutSec,
   buildAuthProof,
@@ -623,7 +623,7 @@ describe("session token renewal", () => {
     const cred = generateCredential();
     const first = await mintSessionToken(b, op, cred, "renew-live");
     const priorExpiresAt = new Date(Date.now() + 3_600_000).toISOString();
-    const seeded = new Database(b.dbPath);
+    const seeded = openBrokerDb(b.dbPath);
     seeded.run("UPDATE approval_session_tokens SET expires_at = ? WHERE token_id = ?", [priorExpiresAt, first.token_id]);
     seeded.close();
 
@@ -641,7 +641,7 @@ describe("session token renewal", () => {
       capabilities: { renew_only: true }
     });
     expect(Date.parse(renew.body.expires_at)).toBeGreaterThan(Date.parse(priorExpiresAt));
-    const db = new Database(b.dbPath);
+    const db = openBrokerDb(b.dbPath);
     const row = db
       .query("SELECT operator_id, public_key, session_ref, project_key, revoked_at FROM approval_session_tokens WHERE token_id = ?")
       .get(first.token_id) as {
@@ -715,7 +715,7 @@ describe("session token renewal", () => {
     );
 
     expect(renew.status).toBe(409);
-    const db = new Database(b.dbPath);
+    const db = openBrokerDb(b.dbPath);
     const row = db.query("SELECT revoked_at FROM approval_session_tokens WHERE token_id = ?").get(first.token_id) as {
       revoked_at: string | null;
     };
@@ -735,7 +735,7 @@ describe("session token renewal", () => {
       { cred: op.cred, operator_id: op.id }
     );
     expect(revoke.body.revoked).toBe(1);
-    const before = new Database(b.dbPath);
+    const before = openBrokerDb(b.dbPath);
     const original = before.query("SELECT revoked_at, project_key FROM approval_session_tokens WHERE token_id = ?").get(first.token_id) as {
       revoked_at: string;
       project_key: string;
@@ -753,7 +753,7 @@ describe("session token renewal", () => {
       { cred: op.cred, operator_id: op.id }
     );
     expect([reminted.status, reminted.body.error]).toEqual([409, "session-token-revoked"]);
-    const db = new Database(b.dbPath);
+    const db = openBrokerDb(b.dbPath);
     const row = db.query("SELECT revoked_at, project_key FROM approval_session_tokens WHERE token_id = ?").get(first.token_id);
     db.close();
     expect(row).toEqual(original);
@@ -767,7 +767,7 @@ describe("session token renewal", () => {
 
     const reminted = await mintSessionToken(b, op, cred, "legacy-active", "github.com/vocsap/refreshed-project");
     expect(reminted.token_id).toBe(first.token_id);
-    const db = new Database(b.dbPath);
+    const db = openBrokerDb(b.dbPath);
     const row = db.query("SELECT revoked_at, project_key FROM approval_session_tokens WHERE token_id = ?").get(first.token_id);
     db.close();
     expect(row).toEqual({ revoked_at: null, project_key: "github.com/vocsap/refreshed-project" });
@@ -778,7 +778,7 @@ describe("session token renewal", () => {
     const op = newOperator();
     const cred = generateCredential();
     const first = await mintSessionToken(b, op, cred, "renew-original");
-    const before = new Database(b.dbPath);
+    const before = openBrokerDb(b.dbPath);
     const beforeExpiresAt = (before.query("SELECT expires_at FROM approval_session_tokens WHERE token_id = ?").get(first.token_id) as {
       expires_at: string;
     }).expires_at;
@@ -801,7 +801,7 @@ describe("session token renewal", () => {
       );
       expect(renew.status).toBe(409);
     }
-    const db = new Database(b.dbPath);
+    const db = openBrokerDb(b.dbPath);
     const row = db
       .query("SELECT session_ref, project_key, expires_at FROM approval_session_tokens WHERE token_id = ?")
       .get(first.token_id) as { session_ref: string; project_key: string; expires_at: string };
@@ -821,13 +821,13 @@ describe("session token renewal", () => {
       { cred: op.cred, operator_id: op.id }
     );
     expect(absent.status).toBe(409);
-    const absentDb = new Database(b.dbPath);
+    const absentDb = openBrokerDb(b.dbPath);
     const absentRows = (absentDb.query("SELECT COUNT(*) AS count FROM approval_session_tokens WHERE public_key = ? OR operator_id = ?").get(cred.publicKey, op.id) as { count: number }).count;
     absentDb.close();
     expect(absentRows).toBe(0);
 
     const first = await mintSessionToken(b, op, cred, "renew-checked");
-    const beforeForeign = new Database(b.dbPath);
+    const beforeForeign = openBrokerDb(b.dbPath);
     const expiresBeforeForeign = (beforeForeign.query("SELECT expires_at FROM approval_session_tokens WHERE token_id = ?").get(first.token_id) as {
       expires_at: string;
     }).expires_at;
@@ -839,14 +839,14 @@ describe("session token renewal", () => {
       { cred: foreign.cred, operator_id: foreign.id }
     );
     expect(foreignRenew.status).toBe(409);
-    const afterForeign = new Database(b.dbPath);
+    const afterForeign = openBrokerDb(b.dbPath);
     const expiresAfterForeign = (afterForeign.query("SELECT expires_at FROM approval_session_tokens WHERE token_id = ?").get(first.token_id) as {
       expires_at: string;
     }).expires_at;
     afterForeign.close();
     expect(expiresAfterForeign).toBe(expiresBeforeForeign);
 
-    const db = new Database(b.dbPath);
+    const db = openBrokerDb(b.dbPath);
     db.run("UPDATE approval_session_tokens SET expires_at = ? WHERE token_id = ?", [
       new Date(Date.now() - 1_000).toISOString(),
       first.token_id
@@ -860,7 +860,7 @@ describe("session token renewal", () => {
     );
     expect(expired.status).toBe(409);
 
-    const altered = new Database(b.dbPath);
+    const altered = openBrokerDb(b.dbPath);
     altered.run("UPDATE approval_session_tokens SET expires_at = ?, public_key = ? WHERE token_id = ?", [
       "2030-01-02T00:00:00.000Z",
       "different-public-key",
@@ -884,7 +884,7 @@ describe("notification expiry (C-4: the notif expires, the session does not)", (
     const approval = await addApproval(b, op);
 
     // Backdate the deadline directly in SQLite (same trick as the message-TTL suite).
-    const db = new Database(b.dbPath);
+    const db = openBrokerDb(b.dbPath);
     db.run("UPDATE pending_approvals SET notif_expires_at = ? WHERE id = ?", [
       new Date(Date.now() - 3600_000).toISOString(),
       approval.id,
@@ -931,13 +931,13 @@ describe("notification expiry (C-4: the notif expires, the session does not)", (
     );
     expect(closed.status).toBe(200);
 
-    const db = new Database(b.dbPath);
+    const db = openBrokerDb(b.dbPath);
     const longAgo = new Date(Date.now() - 400 * 86400_000).toISOString();
     db.run("UPDATE pending_approvals SET created_at = ? WHERE id IN (?, ?)", [longAgo, terminal.id, pending.id]);
     db.close();
 
     await fetch(`${b.url}/admin/purge-messages`);
-    const check = new Database(b.dbPath);
+    const check = openBrokerDb(b.dbPath);
     const left = (check.query("SELECT id FROM pending_approvals").all() as { id: string }[]).map((r) => r.id);
     check.close();
     expect(left, "a status missing from the purge list keeps its rows forever").not.toContain(terminal.id);
@@ -949,7 +949,7 @@ describe("notification expiry (C-4: the notif expires, the session does not)", (
     const op = newOperator();
     const approval = await addApproval(b, op);
 
-    const db = new Database(b.dbPath);
+    const db = openBrokerDb(b.dbPath);
     db.run("UPDATE pending_approvals SET status = 'expired_notif' WHERE id = ?", [approval.id]);
     db.close();
 
@@ -1357,7 +1357,7 @@ describe("merge species (chantier 3189b002+874e9053)", () => {
     // Simulate a row inserted before `mergeable` existed: every NOT-NULL
     // column this INSERT needs EXCEPT mergeable, relying on the column's own
     // DEFAULT 1 rather than setting it explicitly.
-    const db = new Database(b.dbPath);
+    const db = openBrokerDb(b.dbPath);
     const legacyId = "legacy-row-id";
     const now = new Date().toISOString();
     db.run(
@@ -1510,7 +1510,7 @@ describe("a permission raise never inherits another dialog's row", () => {
     const op = newOperator();
     const { hookRaise } = await windowSession(b, op, "window-expired");
     const first = await hookRaise("tile-expired", "Bash", { command: "ls" });
-    const db = new Database(b.dbPath);
+    const db = openBrokerDb(b.dbPath);
     db.run(`UPDATE pending_approvals SET status = 'expired_notif' WHERE id = ?`, [first.body.approval.id]);
     db.close();
     await hookRaise("tile-expired", "Bash", { command: "pwd" });
@@ -1608,7 +1608,7 @@ describe("the hook route: a verdict the Claude Code module returns itself", () =
 
   /** Pushes the row's liveness stamps back in time, as if the module stopped waiting. */
   function age(b: TestBroker, id: string, ms: number): void {
-    const db = new Database(b.dbPath);
+    const db = openBrokerDb(b.dbPath);
     const past = new Date(Date.now() - ms).toISOString();
     db.run("UPDATE pending_approvals SET last_wait_at = ?, created_at = ? WHERE id = ?", [past, past, id]);
     db.close();
@@ -1644,7 +1644,7 @@ describe("the hook route: a verdict the Claude Code module returns itself", () =
     const op = newOperator();
     const s = await session(b, op, "window-hook");
     const row = await hook(b, s);
-    const db = new Database(b.dbPath);
+    const db = openBrokerDb(b.dbPath);
     db.run("UPDATE pending_approvals SET reply_route = 'carrier-pigeon' WHERE id = ?", [row.id]);
     db.close();
 
@@ -1706,7 +1706,7 @@ describe("the hook route: a verdict the Claude Code module returns itself", () =
     const s = await session(b, op, "window-hook");
     const row = await hook(b, s);
     const read = (): string | null => {
-      const db = new Database(b.dbPath);
+      const db = openBrokerDb(b.dbPath);
       const r = db.query("SELECT last_wait_at FROM pending_approvals WHERE id = ?").get(row.id) as {
         last_wait_at: string | null;
       };
@@ -1726,7 +1726,7 @@ describe("the hook route: a verdict the Claude Code module returns itself", () =
     const op = newOperator();
     const s = await session(b, op, "window-hook");
     const row = await hook(b, s);
-    const db = new Database(b.dbPath);
+    const db = openBrokerDb(b.dbPath);
     db.run(
       "UPDATE pending_approvals SET created_at = ?, last_wait_at = ? WHERE id = ?",
       [new Date(Date.now() - 30 * 60_000 - 1).toISOString(), new Date().toISOString(), row.id]
@@ -1744,7 +1744,7 @@ describe("the hook route: a verdict the Claude Code module returns itself", () =
     const op = newOperator();
     const s = await session(b, op, "window-hook");
     const row = await hook(b, s);
-    const db = new Database(b.dbPath);
+    const db = openBrokerDb(b.dbPath);
     db.run(
       "UPDATE pending_approvals SET created_at = ? WHERE id = ?",
       [new Date(Date.now() - 30 * 60_000 - 1).toISOString(), row.id]
@@ -1829,7 +1829,7 @@ describe("the hook route: a verdict the Claude Code module returns itself", () =
       const wd = await withdraw(b, s, row.id, secret);
       expect([wd.status, wd.body]).toEqual([unknown.status, unknown.body]);
     }
-    const db = new Database(b.dbPath);
+    const db = openBrokerDb(b.dbPath);
     const stamp = db.query("SELECT last_wait_at FROM pending_approvals WHERE id = ?").get(row.id) as {
       last_wait_at: string | null;
     };
@@ -1966,7 +1966,7 @@ describe("the hook route: a verdict the Claude Code module returns itself", () =
     const op = newOperator();
     const s = await session(b, op, "window-hook");
     const row = await hook(b, s);
-    const db = new Database(b.dbPath);
+    const db = openBrokerDb(b.dbPath);
     db.run("UPDATE pending_approvals SET status = 'expired_notif' WHERE id = ?", [row.id]);
     db.close();
 
@@ -1992,7 +1992,7 @@ describe("the hook route: a verdict the Claude Code module returns itself", () =
     );
     expect(res.status).toBe(400);
     // Read straight from the table: /approval/list would itself close the orphan.
-    const db = new Database(b.dbPath);
+    const db = openBrokerDb(b.dbPath);
     const stored = db.query("SELECT status FROM pending_approvals WHERE id = ?").get(row.id) as { status: string };
     db.close();
     expect(stored.status).toBe("pending");
@@ -2003,7 +2003,7 @@ describe("the hook route: a verdict the Claude Code module returns itself", () =
     const op = newOperator();
     const s = await session(b, op, "window-hook");
     const stampOf = (id: string): number => {
-      const db = new Database(b.dbPath);
+      const db = openBrokerDb(b.dbPath);
       const r = db.query("SELECT last_wait_at FROM pending_approvals WHERE id = ?").get(id) as { last_wait_at: string };
       db.close();
       return Date.parse(r.last_wait_at);
@@ -2043,7 +2043,7 @@ describe("the hook route: a verdict the Claude Code module returns itself", () =
     await Bun.sleep(100);
     age(b, parkedRow.id, 46_000);
     const ptyRow = await addApproval(b, op);
-    const db = new Database(b.dbPath);
+    const db = openBrokerDb(b.dbPath);
     db.run("UPDATE pending_approvals SET created_at = ? WHERE id = ?", [new Date(Date.now() - 46_000).toISOString(), ptyRow.id]);
     db.close();
 
@@ -2182,7 +2182,7 @@ describe("AskUserQuestion: questions on add, answers on claim", () => {
     const b = await boot();
     const op = newOperator();
     const row = await raiseQuestions(b, op);
-    const db = new Database(b.dbPath);
+    const db = openBrokerDb(b.dbPath);
     db.run("UPDATE pending_approvals SET absorbed_permission = 1 WHERE id = ?", [row.id]);
     db.close();
     const res = await claimAnswers(b, op, row.id, {
@@ -2225,7 +2225,7 @@ describe("AskUserQuestion: questions on add, answers on claim", () => {
     const b = await boot();
     const op = newOperator();
     const row = await raiseQuestions(b, op);
-    const db = new Database(b.dbPath);
+    const db = openBrokerDb(b.dbPath);
     db.run("UPDATE pending_approvals SET reply_route = 'pty' WHERE id = ?", [row.id]);
     db.close();
     const res = await claimAnswers(b, op, row.id, { answer_kind: "text", answer_text: "Red" });
@@ -2238,7 +2238,7 @@ describe("AskUserQuestion: questions on add, answers on claim", () => {
     const op = newOperator();
     const row = await addApproval(b, op, { kind: "question", title: "Q", question: "Which?", options: [], tile_ref: "t-route-x" });
     expect(row.reply_route).toBe("pty");
-    const db = new Database(b.dbPath);
+    const db = openBrokerDb(b.dbPath);
     db.run("UPDATE pending_approvals SET reply_route = 'x' WHERE id = ?", [row.id]);
     db.close();
     const res = await claimAnswers(b, op, row.id, { answer_kind: "allow" });

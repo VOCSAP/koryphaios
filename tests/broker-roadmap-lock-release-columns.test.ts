@@ -5,8 +5,7 @@
 import { test, expect, beforeAll, afterAll } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { Database } from "bun:sqlite";
-import { startBroker, stopBroker, deckAuthored, type TestBroker } from "./_helper.ts";
+import { startBroker, stopBroker, deckAuthored, type TestBroker, openBrokerDb } from "./_helper.ts";
 
 const AUTH = "lock-release-columns-marker";
 const PK = "github.com/vocsap/lock-release-columns-repo";
@@ -46,7 +45,7 @@ async function createCard(b: TestBroker, title: string): Promise<string> {
 }
 
 function lockFully(b: TestBroker, id: string, holder: string, extraSet: string, extraParams: string[]): void {
-  const db = new Database(b.dbPath);
+  const db = openBrokerDb(b.dbPath);
   db.run(
     `UPDATE roadmap_items SET locked = 1, locked_by = ?, locked_group = 'grp-held', locked_by_token = 'tok-held',
        locked_at = datetime('now'), status = 'in_progress'${extraSet} WHERE id = ?`,
@@ -56,7 +55,7 @@ function lockFully(b: TestBroker, id: string, holder: string, extraSet: string, 
 }
 
 function lockColumns(b: TestBroker, id: string): Record<string, unknown> {
-  const db = new Database(b.dbPath);
+  const db = openBrokerDb(b.dbPath);
   const row = db
     .query("SELECT locked, locked_by, locked_group, locked_by_token, locked_at FROM roadmap_items WHERE id = ?")
     .get(id) as Record<string, unknown>;

@@ -1,5 +1,4 @@
 import { test, expect, beforeAll, afterAll } from "bun:test";
-import { Database } from "bun:sqlite";
 import {
   FIXTURE_OPERATOR,
   FIXTURE_OPERATOR_ID,
@@ -9,6 +8,7 @@ import {
   livePid,
   deckAuthored,
   type TestBroker,
+  openBrokerDb,
 } from "./_helper.ts";
 import { buildAuthProof, generateCredential } from "../shared/approval.ts";
 import type { RoadmapItem } from "../shared/types.ts";
@@ -36,7 +36,7 @@ afterAll(async () => {
 });
 
 function rowCount(dbPath: string, sql: string, ...params: string[]): number {
-  const db = new Database(dbPath, { readonly: true });
+  const db = openBrokerDb(dbPath, { readonly: true });
   try {
     return (db.query(sql).get(...params) as { n: number }).n;
   } finally {
@@ -174,7 +174,7 @@ test.concurrent("register: an invalid project_key's NULL collapse costs this pee
 }, 20_000);
 
 function peerProjectKeyByToken(dbPath: string, instanceToken: string): string | null {
-  const db = new Database(dbPath, { readonly: true });
+  const db = openBrokerDb(dbPath, { readonly: true });
   try {
     const row = db
       .query("SELECT project_key FROM peers WHERE instance_token = ?")
@@ -241,7 +241,7 @@ test("mint (/approval/token-mint): a project_key over 256 chars is refused with 
   expect(res.body.error).toContain("invalid");
 
   // The proof that matters: nothing landed under a truncated 256-char key.
-  const db = new Database(b.dbPath, { readonly: true });
+  const db = openBrokerDb(b.dbPath, { readonly: true });
   try {
     const row = db
       .query("SELECT COUNT(*) AS n FROM approval_session_tokens WHERE project_key = ?")
@@ -375,7 +375,7 @@ test("roadmap/import: a miscased project_key refuses the whole batch with 400 na
   expect(res.status).toBe(400);
   expect(res.body.error).toContain("github.com/vocsap/project-key-probe");
 
-  const db = new Database(b.dbPath, { readonly: true });
+  const db = openBrokerDb(b.dbPath, { readonly: true });
   try {
     const row = db.query("SELECT COUNT(*) AS n FROM roadmap_items WHERE id = ?").get(id) as { n: number };
     expect(row.n).toBe(0);
@@ -397,7 +397,7 @@ test("roadmap/import: a project_key with a control character refuses the whole b
   expect(res.status).toBe(400);
   expect(res.body.error).toContain("invalid");
 
-  const db = new Database(b.dbPath, { readonly: true });
+  const db = openBrokerDb(b.dbPath, { readonly: true });
   try {
     const row = db.query("SELECT COUNT(*) AS n FROM roadmap_items WHERE id = ?").get(id) as { n: number };
     expect(row.n).toBe(0);

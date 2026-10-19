@@ -6,8 +6,7 @@
 // once last_seen itself ages past grace.
 
 import { test, expect } from "bun:test";
-import { startBroker, stopBroker, post, livePid } from "./_helper.ts";
-import { Database } from "bun:sqlite";
+import { startBroker, stopBroker, post, livePid, openBrokerDb } from "./_helper.ts";
 import type { RoadmapItem } from "../shared/types.ts";
 
 const PK = "github.com/vocsap/lock-grace-repo";
@@ -63,7 +62,7 @@ test("owner-gone sweep: a lock held past LOCK_GRACE_SEC survives a RECENT discon
     });
     expect(ghost.body.item.locked).toBe(true);
 
-    const db = new Database(b.dbPath);
+    const db = openBrokerDb(b.dbPath);
     // Simulate "held longer than the grace window" (the ordinary case): push
     // locked_at well into the past. Under the pre-fix clause (anchored on
     // locked_at) this alone is enough to make the item eligible for release
@@ -96,7 +95,7 @@ test("owner-gone sweep: a lock held past LOCK_GRACE_SEC survives a RECENT discon
 
     // Now age the disconnect itself past the grace window and confirm the
     // clause still releases -- the fix changes the ANCHOR, not the outcome.
-    const db2 = new Database(b.dbPath);
+    const db2 = openBrokerDb(b.dbPath);
     db2.run("UPDATE peers SET last_seen = datetime('now', '-60 seconds') WHERE instance_token = ?", [
       reg.body.instance_token,
     ]);
@@ -145,7 +144,7 @@ test("owner-gone sweep: a STILL-ACTIVE owner keeps the lock even once its last_s
     });
     expect(held.body.item.locked).toBe(true);
 
-    const db = new Database(b.dbPath);
+    const db = openBrokerDb(b.dbPath);
     // status stays 'active' -- only last_seen is aged past LOCK_GRACE_SEC.
     db.run("UPDATE peers SET last_seen = datetime('now', '-60 seconds') WHERE instance_token = ?", [
       reg.body.instance_token,

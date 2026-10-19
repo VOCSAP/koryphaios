@@ -14,7 +14,7 @@ import { readdirSync, readFileSync, copyFileSync, existsSync, mkdtempSync, rmSyn
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { Database } from "bun:sqlite";
-import { startBroker, stopBroker, post, livePid, type TestBroker } from "./_helper.ts";
+import { startBroker, stopBroker, post, livePid, type TestBroker, openBrokerDb } from "./_helper.ts";
 
 const brokers: TestBroker[] = [];
 const tmpDirs: string[] = [];
@@ -99,7 +99,7 @@ test(
     const second = await startBroker({ CLAUDE_PEERS_DB: dbPath });
     brokers.push(second);
 
-    const db = new Database(dbPath, { readonly: true });
+    const db = openBrokerDb(dbPath, { readonly: true });
     const sessionsAfter = (db.query("SELECT COUNT(*) AS n FROM peer_sessions").get() as { n: number }).n;
     const peersAfter = (db.query("SELECT COUNT(*) AS n FROM peers WHERE cwd <> ''").get() as { n: number }).n;
     const stillThere = db.query("SELECT instance_token FROM peers WHERE instance_token = ?")
@@ -141,7 +141,7 @@ test(
     const second = await startBroker({ CLAUDE_PEERS_DB: dbPath });
     brokers.push(second);
 
-    const db = new Database(dbPath, { readonly: true });
+    const db = openBrokerDb(dbPath, { readonly: true });
     const sessions = (db.query("SELECT COUNT(*) AS n FROM peer_sessions").get() as { n: number }).n;
     db.close();
     expect(sessions).toBe(1);

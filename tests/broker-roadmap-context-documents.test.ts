@@ -1,6 +1,6 @@
 import { test, expect, beforeAll, afterAll } from "bun:test";
 import { Database } from "bun:sqlite";
-import { startBroker, stopBroker, post, type TestBroker } from "./_helper.ts";
+import { startBroker, stopBroker, post, type TestBroker, openBrokerDb } from "./_helper.ts";
 import {
   buildRoadmapAppendHeader,
   planRoadmapContextAppend,
@@ -101,7 +101,7 @@ test("deportation stores an immutable document, rewrites context, and links the 
   expect(persisted.status).toBe(200);
   expect((persisted.body as DocumentGetResponse).document).toEqual(created.document);
 
-  const db = new Database(broker.dbPath, { readonly: true });
+  const db = openBrokerDb(broker.dbPath, { readonly: true });
   try {
     const count = db
       .query("SELECT COUNT(*) AS count FROM roadmap_context_document_units WHERE document_id = ?")
@@ -114,7 +114,7 @@ test("deportation stores an immutable document, rewrites context, and links the 
 
 test("documents are read in creation order with an id tie-break without the read index", async () => {
   const item = await seed();
-  const db = new Database(broker.dbPath);
+  const db = openBrokerDb(broker.dbPath);
   const documents = [
     ["20000000-0000-4000-8000-000000000002", "2026-09-24T00:00:00.000Z"],
     ["30000000-0000-4000-8000-000000000003", "2026-09-24T00:00:01.000Z"],
@@ -141,7 +141,7 @@ test("documents are read in creation order with an id tie-break without the read
       "30000000-0000-4000-8000-000000000003",
     ]);
   } finally {
-    const restore = new Database(broker.dbPath);
+    const restore = openBrokerDb(broker.dbPath);
     try {
       restore.run(
         "CREATE INDEX idx_roadmap_context_documents_read ON roadmap_context_documents(roadmap_item_id, project_key, created_at, id)",
@@ -156,7 +156,7 @@ test("units are read in position order without the unit index", async () => {
   const item = await seed();
   const documentId = "21000000-0000-4000-8000-000000000002";
   const createdAt = "2026-09-24T00:00:00.000Z";
-  const db = new Database(broker.dbPath);
+  const db = openBrokerDb(broker.dbPath);
   try {
     db.run(
       "INSERT INTO roadmap_context_documents (id, roadmap_item_id, project_key, created_by, created_at) VALUES (?, ?, ?, ?, ?)",
@@ -183,7 +183,7 @@ test("units are read in position order without the unit index", async () => {
       { raw: "second", position: 1 },
     ]);
   } finally {
-    const restore = new Database(broker.dbPath);
+    const restore = openBrokerDb(broker.dbPath);
     try {
       restore.run(
         "CREATE INDEX idx_roadmap_context_document_units_document ON roadmap_context_document_units(document_id, position)",
@@ -196,7 +196,7 @@ test("units are read in position order without the unit index", async () => {
 
 test("document listing omits documents that exceed its output budget", async () => {
   const item = await seed();
-  const db = new Database(broker.dbPath);
+  const db = openBrokerDb(broker.dbPath);
   const firstId = "70000000-0000-4000-8000-000000000007";
   const secondId = "80000000-0000-4000-8000-000000000008";
   try {
@@ -229,7 +229,7 @@ test("document listing omits documents that exceed its output budget", async () 
 
 test("document listing reserves the omission trailer before it includes a document", async () => {
   const item = await seed();
-  const db = new Database(broker.dbPath);
+  const db = openBrokerDb(broker.dbPath);
   const firstId = "81000000-0000-4000-8000-000000000008";
   const secondId = "82000000-0000-4000-8000-000000000008";
   const firstCreatedAt = "2026-09-24T00:00:00.000Z";
@@ -275,7 +275,7 @@ test("document listing reserves the omission trailer before it includes a docume
 
 test("document listing bounds omitted identifiers while keeping their count exact", async () => {
   const item = await seed();
-  const db = new Database(broker.dbPath);
+  const db = openBrokerDb(broker.dbPath);
   const ids = Array.from(
     { length: 21 },
     (_, index) => `90000000-0000-4000-8000-${String(index + 9).padStart(12, "0")}`,
@@ -397,7 +397,7 @@ test("deportation refuses a selected unit that supersedes an unselected unit", a
   expect(refused.status).toBe(400);
   expect((refused.body as ErrorResponse).error).toContain("supersedes a unit that remains");
 
-  const db = new Database(broker.dbPath, { readonly: true });
+  const db = openBrokerDb(broker.dbPath, { readonly: true });
   try {
     const row = db.query("SELECT context FROM roadmap_items WHERE id = ?").get(item.id) as { context: string };
     expect(row.context).toBe(planned.result);

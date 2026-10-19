@@ -1,6 +1,5 @@
 import { test, expect, beforeAll, afterAll } from "bun:test";
-import { Database } from "bun:sqlite";
-import { startBroker, stopBroker, post, livePid, groupId, sha256Hex, type TestBroker } from "./_helper.ts";
+import { startBroker, stopBroker, post, livePid, groupId, sha256Hex, type TestBroker, openBrokerDb } from "./_helper.ts";
 
 let broker: TestBroker;
 const brokers: TestBroker[] = [];
@@ -121,7 +120,7 @@ test("/register stores claude_cli_pid on fresh registration", async () => {
     }
   );
   expect(status).toBe(200);
-  const db = new Database(b.dbPath, { readonly: true });
+  const db = openBrokerDb(b.dbPath, { readonly: true });
   const row = db.query(
     "SELECT claude_cli_pid FROM peers WHERE instance_token = ?"
   ).get(body.instance_token) as { claude_cli_pid: number };

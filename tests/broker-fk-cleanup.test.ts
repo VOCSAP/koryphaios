@@ -1,6 +1,5 @@
 import { test, expect, beforeAll, afterAll } from "bun:test";
-import { startBroker, stopBroker, post, get, livePid, type TestBroker } from "./_helper.ts";
-import { Database } from "bun:sqlite";
+import { startBroker, stopBroker, post, get, livePid, type TestBroker, openBrokerDb } from "./_helper.ts";
 
 // Regression for v0.3.2 crash-loop on LXC 123: cleanStalePeers tried to DELETE
 // a dormant peer that still had rows in `messages.from_token`, which violates
@@ -38,7 +37,7 @@ test("cleanStalePeers purges a dormant peer that has messages.from_token rows (F
 
   // Flip A to dormant and backdate last_seen past the TTL=0 cutoff.
   await post(`${broker.url}/disconnect`, { instance_token: a.body.instance_token });
-  const db = new Database(broker.dbPath);
+  const db = openBrokerDb(broker.dbPath);
   db.run("UPDATE peers SET last_seen = ? WHERE instance_token = ?", [
     "2000-01-01T00:00:00Z",
     a.body.instance_token,

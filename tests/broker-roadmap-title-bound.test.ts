@@ -2,8 +2,7 @@
 // upsert update and import. The replication doors are covered with their own
 // suites (sync push, replica pull).
 import { test, expect } from "bun:test";
-import { Database } from "bun:sqlite";
-import { startBroker, stopBroker, post } from "./_helper.ts";
+import { startBroker, stopBroker, post, openBrokerDb } from "./_helper.ts";
 import { ROADMAP_TITLE_MAX } from "../shared/roadmap-title.ts";
 import type { RoadmapItem } from "../shared/types.ts";
 
@@ -14,7 +13,7 @@ const OVER_BOUND = "t".repeat(ROADMAP_TITLE_MAX + 1);
 type UpsertRes = { item: RoadmapItem };
 
 function countRows(dbPath: string, id?: string): number {
-  const db = new Database(dbPath, { readonly: true });
+  const db = openBrokerDb(dbPath, { readonly: true });
   try {
     const row = id
       ? (db.query("SELECT COUNT(*) AS n FROM roadmap_items WHERE id = ?").get(id) as { n: number })

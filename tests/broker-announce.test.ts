@@ -1,6 +1,5 @@
 import { test, expect, beforeAll, afterAll } from "bun:test";
-import { Database } from "bun:sqlite";
-import { startBroker, stopBroker, post, get, livePid, groupId, sha256Hex, type TestBroker } from "./_helper.ts";
+import { startBroker, stopBroker, post, get, livePid, groupId, sha256Hex, type TestBroker, openBrokerDb } from "./_helper.ts";
 
 let broker: TestBroker;
 
@@ -32,7 +31,7 @@ async function announce(group: { id: string; hash: string | null }, text: string
 }
 
 function readDb<T = unknown>(sql: string, ...params: unknown[]): T[] {
-  const db = new Database(broker.dbPath, { readonly: true });
+  const db = openBrokerDb(broker.dbPath, { readonly: true });
   try {
     return db.query(sql).all(...(params as any[])) as T[];
   } finally {

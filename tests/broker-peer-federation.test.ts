@@ -6,7 +6,6 @@
 // older version that does not federate.
 
 import { test, expect, beforeAll, afterAll, beforeEach } from "bun:test";
-import { Database } from "bun:sqlite";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
@@ -16,6 +15,7 @@ import {
   sha256Hex,
   groupId,
   type TestBroker,
+  openBrokerDb,
 } from "./_helper.ts";
 import { startUpstreamProxy, type UpstreamProxy } from "./_upstream-proxy.ts";
 import type {
@@ -82,7 +82,7 @@ async function pollUntil<T>(
 }
 
 function replicaLabel(b: TestBroker): string {
-  const db = new Database(b.dbPath, { readonly: true });
+  const db = openBrokerDb(b.dbPath, { readonly: true });
   try {
     const row = db.query("SELECT value FROM roadmap_sync_meta WHERE key = 'replica_id'").get() as { value: string };
     return row.value.slice(0, 8);
@@ -214,7 +214,7 @@ function openWs(b: TestBroker, token: string): Promise<{ ws: WebSocket; frames: 
 }
 
 function countMessages(b: TestBroker, where: string, ...params: (string | number)[]): number {
-  const db = new Database(b.dbPath, { readonly: true });
+  const db = openBrokerDb(b.dbPath, { readonly: true });
   try {
     return (db.query(`SELECT COUNT(*) AS n FROM messages WHERE ${where}`).get(...params) as { n: number }).n;
   } finally {
@@ -482,7 +482,7 @@ test("an outage longer than the grace: mirrors go dormant, the queue is dropped 
   });
   expect(aView).toEqual([]);
   const notice = await receive("A is told its message was dropped", R1, A.instance_token, await pollUntil("the deck notice lands", async () => {
-    const db = new Database(R1.dbPath, { readonly: true });
+    const db = openBrokerDb(R1.dbPath, { readonly: true });
     try {
       const row = db.query("SELECT text FROM messages WHERE text LIKE 'Your message to %dropped%' ORDER BY id DESC LIMIT 1").get() as { text: string } | null;
       return { done: row !== null, value: row?.text ?? "" };

@@ -1,6 +1,5 @@
 import { test, expect, beforeAll, afterAll } from "bun:test";
-import { startBroker, stopBroker, post, type TestBroker } from "./_helper.ts";
-import { Database } from "bun:sqlite";
+import { startBroker, stopBroker, post, type TestBroker, openBrokerDb } from "./_helper.ts";
 import type { RoadmapItem } from "../shared/types.ts";
 import { buildAuthProof, deriveOperatorId, generateCredential } from "../shared/approval.ts";
 
@@ -62,7 +61,7 @@ async function createItem(title: string): Promise<string> {
 // write path.
 function parkDirectly(id: string, parkedByOperatorId: string, ageSeconds: number): void {
   const parkedAt = new Date(Date.now() - ageSeconds * 1000).toISOString();
-  const db = new Database(broker.dbPath);
+  const db = openBrokerDb(broker.dbPath);
   db.run(`UPDATE roadmap_items SET lock_parked_at = ?, lock_parked_by = ? WHERE id = ?`, [
     parkedAt,
     parkedByOperatorId,
@@ -136,7 +135,7 @@ function signedUpsertArchive(id: string, credential: typeof OPERATOR_A): Record<
 // same discipline as parkDirectly's doc comment: direct SQL because there is
 // no HTTP path in this suite that claims a lock for a specific peer_id.
 function lockDirectly(id: string, lockedByPeerId: string): void {
-  const db = new Database(broker.dbPath);
+  const db = openBrokerDb(broker.dbPath);
   db.run(`UPDATE roadmap_items SET locked = 1, locked_by = ?, status = 'in_progress' WHERE id = ?`, [
     lockedByPeerId,
     id,

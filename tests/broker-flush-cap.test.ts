@@ -1,6 +1,5 @@
 import { test, expect, beforeAll, afterAll } from "bun:test";
-import { Database } from "bun:sqlite";
-import { startBroker, stopBroker, post, livePid, groupId, sha256Hex, type TestBroker } from "./_helper.ts";
+import { startBroker, stopBroker, post, livePid, groupId, sha256Hex, type TestBroker, openBrokerDb } from "./_helper.ts";
 
 let broker: TestBroker;
 
@@ -23,10 +22,9 @@ async function register(host: string, cwd: string) {
 
 function insertMessageAt(from_token: string, to_token: string, text: string, sentAtIso: string) {
   // Same DB file used by the broker process; WAL mode permits concurrent writers.
-  const db = new Database(broker.dbPath);
+  const db = openBrokerDb(broker.dbPath);
   try {
     db.run("PRAGMA journal_mode = WAL");
-    db.run("PRAGMA busy_timeout = 3000");
     const group_id = db.query("SELECT group_id FROM peers WHERE instance_token = ?").get(from_token) as { group_id: string };
     db.run(
       `INSERT INTO messages (from_token, to_token, group_id, text, sent_at, delivered)
@@ -138,7 +136,7 @@ test("/peek-messages also returns the full backlog without marking delivered", a
   expect(peek.body.messages.length).toBe(7);
 
   // delivered must still be 0 after peek
-  const db = new Database(broker.dbPath, { readonly: true });
+  const db = openBrokerDb(broker.dbPath, { readonly: true });
   try {
     const rows = db.query("SELECT delivered FROM messages WHERE to_token = ?").all(y.body.instance_token) as { delivered: number }[];
     expect(rows.length).toBe(7);
@@ -175,7 +173,7 @@ test("flush WS withholds a cross-group message and still delivers a same-group o
 
   // The withheld row must still exist, undelivered -- proof it was correctly
   // scoped out, not silently dropped/deleted.
-  const db = new Database(broker.dbPath, { readonly: true });
+  const db = openBrokerDb(broker.dbPath, { readonly: true });
   try {
     const row = db
       .query("SELECT delivered FROM messages WHERE to_token = ? AND text = ?")

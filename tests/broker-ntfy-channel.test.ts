@@ -7,7 +7,6 @@
 // back the QR payload — without ever leaving 127.0.0.1.
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { Database } from "bun:sqlite";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
@@ -16,6 +15,7 @@ import {
   stopBroker,
   approvalListBody,
   type TestBroker,
+  openBrokerDb,
 } from "./_helper.ts";
 import {
   buildAuthProof,
@@ -657,8 +657,7 @@ describe("ntfy enrolment", () => {
     const approvalId = added.body.approval.id;
     expect(added.body.approval.reply_route).toBe("hook");
     // The Claude Code session that raised it is gone: no wait for 46 s.
-    const db = new Database(b.dbPath);
-    db.run("PRAGMA busy_timeout = 5000");
+    const db = openBrokerDb(b.dbPath);
     const past = new Date(Date.now() - 46_000).toISOString();
     db.run("UPDATE pending_approvals SET created_at = ?, last_wait_at = ? WHERE id = ?", [past, past, approvalId]);
     db.close();
@@ -1084,7 +1083,7 @@ describe("ntfy enrolment", () => {
       const bootLog = await Bun.file(join(restarted.tmpDir, "logs", "broker.log")).text();
       expect(bootLog.match(/notify: ntfy started/g)).toHaveLength(1);
 
-      const db = new Database(source.dbPath);
+      const db = openBrokerDb(source.dbPath);
       try {
         const aliceSecret = db
           .query("SELECT secret_enc FROM approval_channel_secrets WHERE operator_id = ? AND kind = 'ntfy'")
@@ -1100,7 +1099,7 @@ describe("ntfy enrolment", () => {
       await ntfy.publishRaw(aliceTopics.topic_replies, encodePair(bobConnect.body.pairing_code, "untrusted-phone"));
       expect(
         await until(async () => {
-          const db = new Database(source.dbPath, { readonly: true });
+          const db = openBrokerDb(source.dbPath, { readonly: true });
           try {
             const codeCount = (
               db.query("SELECT COUNT(*) AS count FROM approval_pairing_codes WHERE code = ?")
@@ -1117,7 +1116,7 @@ describe("ntfy enrolment", () => {
       await ntfy.publishRaw(aliceTopics.topic_replies, encodePair(aliceConnect.body.pairing_code, "trusted-phone"));
       expect(
         await until(() => {
-          const db = new Database(source.dbPath, { readonly: true });
+          const db = openBrokerDb(source.dbPath, { readonly: true });
           try {
             return (
               db.query("SELECT COUNT(*) AS count FROM approval_channels WHERE operator_id = ? AND kind = 'ntfy'")
@@ -1129,7 +1128,7 @@ describe("ntfy enrolment", () => {
         })
       ).toBe(true);
 
-      const dbAfter = new Database(source.dbPath, { readonly: true });
+      const dbAfter = openBrokerDb(source.dbPath, { readonly: true });
       try {
         const bobBindings = (
           dbAfter.query("SELECT COUNT(*) AS count FROM approval_channels WHERE operator_id = ? AND kind = 'ntfy'")

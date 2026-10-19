@@ -8,8 +8,7 @@
 // other producers are covered too.
 
 import { test, expect, beforeAll, afterAll } from "bun:test";
-import { startBroker, stopBroker, post, type TestBroker } from "./_helper.ts";
-import { Database } from "bun:sqlite";
+import { startBroker, stopBroker, post, type TestBroker, openBrokerDb } from "./_helper.ts";
 import type { RoadmapItem } from "../shared/types.ts";
 import { buildAuthProof, deriveOperatorId, generateCredential } from "../shared/approval.ts";
 
@@ -53,7 +52,7 @@ async function createItem(title: string): Promise<string> {
 }
 
 function lockDirectly(id: string, lockedByPeerId: string): void {
-  const db = new Database(broker.dbPath);
+  const db = openBrokerDb(broker.dbPath);
   db.run(`UPDATE roadmap_items SET locked = 1, locked_by = ?, status = 'in_progress' WHERE id = ?`, [
     lockedByPeerId,
     id,
@@ -66,7 +65,7 @@ function lockDirectly(id: string, lockedByPeerId: string): void {
 // but with no timezone marker at all -- rather than going through the route.
 function parkDirectlyMarkerless(id: string, parkedByOperatorId: string): void {
   const nowMarkerless = new Date().toISOString().replace("T", " ").split(".")[0];
-  const db = new Database(broker.dbPath);
+  const db = openBrokerDb(broker.dbPath);
   db.run(`UPDATE roadmap_items SET lock_parked_at = ?, lock_parked_by = ? WHERE id = ?`, [
     nowMarkerless,
     parkedByOperatorId,
@@ -76,7 +75,7 @@ function parkDirectlyMarkerless(id: string, parkedByOperatorId: string): void {
 }
 
 function readItem(id: string): RoadmapItem {
-  const db = new Database(broker.dbPath);
+  const db = openBrokerDb(broker.dbPath);
   const row = db.query(`SELECT * FROM roadmap_items WHERE id = ?`).get(id) as RoadmapItem;
   db.close();
   return row;

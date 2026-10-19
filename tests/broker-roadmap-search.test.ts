@@ -1,6 +1,5 @@
-import { Database } from "bun:sqlite";
 import { test, expect, beforeAll, afterAll } from "bun:test";
-import { startBroker, stopBroker, post } from "./_helper.ts";
+import { startBroker, stopBroker, post, openBrokerDb } from "./_helper.ts";
 import type { RoadmapItem, RoadmapListResponse } from "../shared/types.ts";
 
 let broker: Awaited<ReturnType<typeof startBroker>>;
@@ -119,7 +118,7 @@ test("MATCH is scoped by project_key: a card in project 2 never appears in proje
   // project_key join dropped leaks BOTH projects' cards. This is what the
   // "AND t.project_key = ?" clause in handleRoadmapList's FTS branch exists
   // to prevent.
-  const db = new Database(broker.dbPath, { readonly: true });
+  const db = openBrokerDb(broker.dbPath, { readonly: true });
   try {
     const leaked = db
       .query(
