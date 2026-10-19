@@ -20,6 +20,8 @@ interface FakeProc {
   file: string;
   args: string[];
   env: Record<string, string | undefined>;
+  cols: number;
+  rows: number;
   exit(code: number): void;
   /** Deliver PTY output as node-pty's onData would. */
   output(data: string): void;
@@ -28,7 +30,7 @@ const spawned: FakeProc[] = [];
 let nextPid = 40000;
 
 mock.module("node-pty", () => ({
-  spawn(file: string, args: string[], opts: { env: Record<string, string | undefined> }) {
+  spawn(file: string, args: string[], opts: { env: Record<string, string | undefined>; cols: number; rows: number }) {
     let onExit: ((e: { exitCode: number }) => void) | null = null;
     let onData: ((d: string) => void) | null = null;
     const proc: FakeProc & Record<string, unknown> = {
@@ -36,6 +38,8 @@ mock.module("node-pty", () => ({
       file,
       args,
       env: opts.env,
+      cols: opts.cols,
+      rows: opts.rows,
       exit: (code: number) => onExit?.({ exitCode: code }),
       output: (d: string) => onData?.(d),
       onData: (cb: (d: string) => void) => {
@@ -999,4 +1003,24 @@ test("a raise whose dialog the tile's own xterm screen no longer shows is droppe
   } finally {
     clockSpy.mockRestore();
   }
+});
+
+test("a tile no renderer has resized reads a screen laid out on the grid its PTY was spawned with", async () => {
+  const { svc } = setup();
+  const rt = svc.create({ name: "never-shown" });
+  const pty = spawned.at(-1)!;
+  const overflow = 5;
+  pty.output("x".repeat(pty.cols + overflow));
+  const until = Date.now() + 2000;
+  while (svc.screenRead(rt.id).status !== "ready" && Date.now() < until) await new Promise((r) => setTimeout(r, 5));
+  const read = svc.screenRead(rt.id);
+  if (read.status !== "ready") throw new Error(`the never-resized tile screen is not readable: ${read.reason}`);
+  expect(
+    [read.snapshot.cols, read.snapshot.rows],
+    "the guard grid of a tile that never got a ptyResize is the grid its PTY runs at",
+  ).toEqual([pty.cols, pty.rows]);
+  expect(
+    [read.snapshot.lines[0]!.length, read.snapshot.lines[1]],
+    "a row wraps at the PTY width, as the CLI drew it for that width",
+  ).toEqual([pty.cols, "x".repeat(overflow)]);
 });
