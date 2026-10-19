@@ -4,7 +4,7 @@ export const EXPECTED_FIXTURE_VERDICTS: Record<string, { checkpoints: readonly (
   'composer-2.1.283-reduced.json': { checkpoints: [], final: 'clear' },
   'dialog-open-no-esc.json': { checkpoints: ['modal', 'modal'], final: 'modal' },
   'dialog-open-with-esc.json': { checkpoints: ['modal', 'modal'], final: 'modal' },
-  'draft-numbered-2.1.301.json': { checkpoints: ['modal', 'clear', 'modal', 'modal', 'modal'], final: 'modal' },
+  'draft-numbered-2.1.301.json': { checkpoints: ['modal', 'clear', 'modal', 'modal', 'clear'], final: 'clear' },
   'draft-typed-with-esc.json': { checkpoints: ['clear', 'clear', 'clear', 'clear', 'clear'], final: 'clear' },
   'permission-bash-2.1.291.json': { checkpoints: ['modal'], final: 'modal' },
   'permission-bash-ba116-2.1.291.json': { checkpoints: [], final: 'modal' },

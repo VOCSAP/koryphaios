@@ -95,6 +95,7 @@ function deferredTerminal() {
       }
     },
     _core: {
+      coreService: { isCursorHidden: false },
       _inputHandler: {
         _parser: { currentState: 0 },
         _stringDecoder: { _interim: 0 }
@@ -437,6 +438,60 @@ describe('xterm main-process screen adapter', () => {
     missingScreen.dispose()
   })
 
+  // mutation: return `hidden` without the `typeof hidden !== 'boolean'` fault in cursorIsHidden
+  test.each([
+    ['missing', undefined],
+    ['a string', 'false'],
+    ['a number', 0]
+  ] as const)('faults the screen when the private cursor visibility is %s', (_shape, value) => {
+    const deferred = deferredTerminal()
+    deferred.terminal._core.coreService.isCursorHidden = value as never
+    const reports: string[] = []
+    const screen = createXtermScreen({
+      cols: 20,
+      rows: 4,
+      terminalFactory: () => deferred.terminal as never,
+      reportError: (_scope: string, message: string) => reports.push(message)
+    })
+
+    screen.feed('data')
+    deferred.flushNext()
+
+    expect(screen.read()).toMatchObject({ status: 'unavailable', reason: 'screen-fault' })
+    expect(reports).toEqual(['xterm private cursor visibility has an unsupported shape'])
+    screen.dispose()
+  })
+
+  // mutation: drop the `chars === CHEVRON` test, or `if (!cell) return null`, in chevronStyle
+  test.each([
+    ['a missing cell', undefined],
+    ['only blank cells', ' '],
+    ['another character first', 'x']
+  ] as const)('leaves the chevron style unresolved for %s', async (_shape, chars) => {
+    const getCell = () => (chars === undefined ? undefined : { getChars: () => chars, isBgDefault: () => false, isInverse: () => 0 })
+    const deferred = deferredTerminal()
+    const screen = createScreen({ cols: 20, rows: 4, terminalFactory: () => deferred.terminal as never })
+    screen.feed('data')
+    deferred.flushNext()
+    Object.defineProperty(deferred.terminal, 'buffer', {
+      get: () => ({
+        active: {
+          baseY: 0,
+          cursorX: 0,
+          cursorY: 0,
+          getLine: () => ({ translateToString: () => '❯ 1. Yes', getCell })
+        }
+      })
+    })
+
+    const read = screen.read()
+    expect(read).toMatchObject({ status: 'ready' })
+    if (read.status !== 'ready') throw new Error('screen did not become ready')
+    expect(read.snapshot.lines[0]).toBe('❯ 1. Yes')
+    expect(read.snapshot.chevrons).toEqual([null, null, null, null])
+    screen.dispose()
+  })
+
   test('faults without throwing when xterm rejects a write synchronously', () => {
     const deferred = deferredTerminal()
     deferred.terminal.write = () => {
@@ -519,6 +574,11 @@ describe('xterm main-process screen adapter', () => {
       if (!expected) throw new Error(`missing baseline verdict for ${fixture}`)
       expect(await fixtureVerdicts(fixture), fixture).toEqual(expected)
     }
+  })
+
+  // mutation: drop `!style.bgDefault` from isEchoRow; this capture's selector row is then skipped and the rule becomes composer-geometry
+  test('classifies the selector of a captured dialog on the picker rule', async () => {
+    expect(inspectInjectGuard(await fixtureSnapshot('dialog-open-with-esc.json'))).toMatchObject({ state: 'modal', rule: 'picker' })
   })
 })
 
@@ -603,6 +663,157 @@ describe('xterm injection guard rules', () => {
   ] as const)('guard %s [%s]', async (_shape, _mutant, expected, snapshot) => {
     expect(classifyInjectGuard(await snapshot())).toBe(expected)
   })
+
+  const composerFixture = 'composer-2.1.283-reduced.json'
+  const echoPaint = `${esc}[48;2;55;55;55m${esc}[38;2;153;153;153m`
+  const selectorPaint = `${esc}[38;2;177;185;249m`
+  const reset = `${esc}[0m`
+  const parkOnComposer = `${esc}[15;3H`
+  const hideCursor = `${esc}[?25l`
+  const numberedRow = (row: number, paint: string, text = '1. Yes', indent = '') =>
+    `${esc}[${row};1H${indent}${paint}${chevron} ${text}${reset}`
+  const aboveComposer = (data: string) => fixtureSnapshotAfter(composerFixture, `${data}${parkOnComposer}`)
+  const withoutNumberedRows = (snapshot: Awaited<ReturnType<typeof fixtureSnapshot>>) => ({
+    ...snapshot,
+    lines: snapshot.lines.map((line) => (/^\s*❯\s+\d+\./.test(line) ? '' : line))
+  })
+
+  // mutation: delete the `!isEchoRow(y)` term of the picker search
+  test('exempts the echo of a submitted prompt painted above the composer', async () => {
+    const snapshot = await aboveComposer(numberedRow(6, echoPaint))
+    expect(snapshot.cursor.y).toBe(14)
+    expect(snapshot.cursorHidden).toBe(false)
+    expect(snapshot.chevrons).toHaveLength(snapshot.lines.length)
+    expect(snapshot.chevrons?.[5]).toEqual({ bgDefault: false, inverse: false })
+    expect(inspectInjectGuard(snapshot)).toEqual({ state: 'clear' })
+  })
+
+  const echoThenSelector = (hidden: string) =>
+    aboveComposer(`${numberedRow(6, echoPaint, '1. hi')}${numberedRow(10, selectorPaint, '2. second', '   ')}${hidden}`)
+
+  // Each row names the edit of xterm-screen.ts that turns it red:
+  //   echo-ignores-background          drop `!style.bgDefault` from isEchoRow
+  //   echo-ignores-cursor-visibility   drop `snapshot.cursorHidden === false` from isEchoRow
+  //   echo-ignores-row-position        drop `y < cursor.y - 1` from isEchoRow
+  //   echo-ignores-inverse             drop `!style.inverse` from isEchoRow
+  //   chevron-column-from-string-index read the style at the string index of the chevron instead of walking cells
+  test.each([
+    ['a plain picker above the composer', 'echo-ignores-background', () => aboveComposer(numberedRow(6, '')), { bgDefault: true, inverse: false }, false, 6],
+    [
+      'a plain picker below a full border',
+      'echo-ignores-background',
+      () => aboveComposer(`${esc}[5;1H${horizontal.repeat(120)}${numberedRow(6, '')}`),
+      { bgDefault: true, inverse: false },
+      false,
+      6
+    ],
+    [
+      'a plain picker followed by a body write on the composer row',
+      'echo-ignores-background',
+      () => fixtureSnapshotAfter(composerFixture, `${numberedRow(6, '')}${esc}[15;3Hx`),
+      { bgDefault: true, inverse: false },
+      false,
+      6
+    ],
+    ['a picker in the selection foreground', 'echo-ignores-background', () => aboveComposer(numberedRow(6, selectorPaint)), { bgDefault: true, inverse: false }, false, 6],
+    [
+      'a picker in the selection foreground with the cursor hidden',
+      'echo-ignores-background',
+      () => aboveComposer(`${numberedRow(6, selectorPaint)}${hideCursor}`),
+      { bgDefault: true, inverse: false },
+      true,
+      6
+    ],
+    [
+      'the same picker painted again after the composer',
+      'echo-ignores-background',
+      () =>
+        snapshotFromChunks([
+          { t: 0, data: numberedRow(6, '') },
+          ...loadFixture(composerFixture),
+          { t: 0, data: `${numberedRow(6, '')}${parkOnComposer}` }
+        ]),
+      { bgDefault: true, inverse: false },
+      false,
+      6
+    ],
+    [
+      'an echo painted while the cursor is hidden',
+      'echo-ignores-cursor-visibility',
+      () => aboveComposer(`${numberedRow(6, echoPaint)}${hideCursor}`),
+      { bgDefault: false, inverse: false },
+      true,
+      6
+    ],
+    ['an echo painted below the composer', 'echo-ignores-row-position', () => aboveComposer(numberedRow(20, echoPaint)), { bgDefault: false, inverse: false }, false, 20],
+    ['an inverse echo', 'echo-ignores-inverse', () => aboveComposer(numberedRow(6, `${esc}[7m${echoPaint}`)), { bgDefault: false, inverse: true }, false, 6],
+    [
+      'a plain picker and a styled echo above the composer',
+      'echo-ignores-background',
+      () => aboveComposer(`${numberedRow(6, '')}${numberedRow(8, echoPaint)}`),
+      { bgDefault: true, inverse: false },
+      false,
+      6
+    ],
+    [
+      'a real selector under a styled echo',
+      'echo-ignores-background',
+      () => echoThenSelector(''),
+      { bgDefault: true, inverse: false },
+      false,
+      10
+    ],
+    [
+      'a real selector under a styled echo with the cursor hidden',
+      'echo-ignores-cursor-visibility',
+      () => echoThenSelector(hideCursor),
+      { bgDefault: false, inverse: false },
+      true,
+      6
+    ],
+    [
+      'a plain chevron after a double-width character on the echo background',
+      'chevron-column-from-string-index',
+      () => aboveComposer(`${esc}[6;1H${echoPaint}${String.fromCodePoint(0x3000)}${reset}${chevron} 1. Yes${reset}`),
+      { bgDefault: true, inverse: false },
+      false,
+      6
+    ]
+  ] as const)('keeps %s on the picker rule [%s]', async (_shape, _mutant, snapshotOf, style, hidden, line) => {
+    const snapshot = await snapshotOf()
+    expect(snapshot.cursorHidden).toBe(hidden)
+    expect(snapshot.chevrons?.[line - 1]).toEqual(style)
+    expect(inspectInjectGuard(snapshot)).toEqual({ state: 'modal', rule: 'picker', line })
+    expect(inspectInjectGuard(withoutNumberedRows(snapshot))).toEqual({ state: 'clear' })
+  })
+
+  // mutation: drop `!style.bgDefault` from isEchoRow; the picker row is then skipped and the verdict becomes a geometry or empty-grid one
+  const smallComposer = (row: number) =>
+    `${esc}[${row};1H${horizontal.repeat(20)}${esc}[${row + 1};1H${chevron}${esc}[${row + 2};1H${horizontal.repeat(20)}`
+  const smallPicker = `${esc}[3;1H${chevron} 1. Yes`
+  test.each([
+    ['ED0', [smallComposer(6), `${smallPicker}${esc}[3;9H${esc}[J${esc}[7;3H`]],
+    ['ED1', [smallComposer(6), `${esc}[3;4H${chevron} 1. Yes${esc}[3;2H${esc}[1J${esc}[7;3H`]],
+    ['IL', [smallPicker, smallComposer(6), `${esc}[5;1H${esc}[L${esc}[7;3H`]],
+    ['DL', [smallPicker, smallComposer(7), `${esc}[5;1H${esc}[M${esc}[8;3H`]],
+    ['the alternate screen', [`${smallPicker}${esc}[?1049h`, smallComposer(6), `${esc}[7;3H${esc}[?1049l`]]
+  ] as const)('keeps a plain picker on the picker rule after %s', async (_operation, feeds) => {
+    const snapshot = await snapshotFromChunks(feeds.map((data) => ({ t: 0, data })), 20, 10)
+    expect(snapshot.lines[2]).toContain('❯ 1. Yes')
+    expect(snapshot.chevrons?.[2]).toEqual({ bgDefault: true, inverse: false })
+    expect(inspectInjectGuard(snapshot)).toEqual({ state: 'modal', rule: 'picker', line: 3 })
+  })
+
+  // mutation: exempt the row at the cursor (`y === cursor.y`) in isEchoRow
+  test.each(['typing-numbered-2.1.301.json', 'resize-numbered-draft-2.1.301.json'])(
+    'keeps a numbered draft typed in the composer on the picker rule (%s)',
+    async (fixture) => {
+      const snapshot = await fixtureSnapshot(fixture)
+      expect(snapshot.chevrons?.[snapshot.cursor.y]).toEqual({ bgDefault: true, inverse: false })
+      expect(snapshot.cursorHidden).toBe(false)
+      expect(inspectInjectGuard(snapshot)).toEqual({ state: 'modal', rule: 'picker', line: snapshot.cursor.y + 1 })
+    }
+  )
 })
 
 describe('ScreenGuard xterm lifecycle', () => {

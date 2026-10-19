@@ -7,12 +7,18 @@ export type XtermScreenUnavailableReason =
   | 'screen-pending'
   | 'sequence-incomplete'
 
+export type ChevronStyle = { bgDefault: boolean; inverse: boolean }
+
 export type XtermScreenSnapshot = {
   revision: number
   cols: number
   rows: number
   lines: string[]
   cursor: { x: number; y: number }
+  cursorHidden?: boolean
+  // Parallel to `lines`: the chevron cell of a numbered prompt row, null when the row is not one or its column is unresolved.
+  // Absent on a hand-built snapshot, which then exempts nothing.
+  chevrons?: ReadonlyArray<ChevronStyle | null>
 }
 
 export type XtermScreenRead =
@@ -26,8 +32,15 @@ type TerminalOptions = {
   allowProposedApi: boolean
 }
 
+type BufferCell = {
+  getChars(): string
+  isBgDefault(): boolean
+  isInverse(): number
+}
+
 type BufferLine = {
   translateToString(trimRight?: boolean): string
+  getCell(x: number): BufferCell | undefined
 }
 
 type HeadlessTerminal = {
@@ -92,6 +105,9 @@ const DEFAULT_GLOBAL_BUDGETS = {
   pendingCodeUnits: 8 * 1024 * 1024,
   pendingChunks: 8 * 4096
 }
+
+const CHEVRON = String.fromCodePoint(0x276f)
+const NUMBERED_PROMPT = new RegExp(`^\\s*${CHEVRON}\\s+\\d+\\.`)
 
 const validPositiveInteger = (value: number): boolean => Number.isSafeInteger(value) && value > 0
 
@@ -191,6 +207,29 @@ export function createXtermScreen(options: XtermScreenOptions): XtermScreen {
     return parserState === 0 && decoderInterim === 0
   }
 
+  const cursorIsHidden = (): boolean | null => {
+    if (!terminal) return null
+    const hidden = (terminal as unknown as { _core?: { coreService?: { isCursorHidden?: unknown } } })._core?.coreService?.isCursorHidden
+    if (typeof hidden !== 'boolean') {
+      fault('xterm private cursor visibility has an unsupported shape')
+      return null
+    }
+    return hidden
+  }
+
+  // The column comes from walking cells: a wide character before the chevron makes its string index differ from its column.
+  const chevronStyle = (line: BufferLine, text: string): ChevronStyle | null => {
+    if (!NUMBERED_PROMPT.test(text)) return null
+    for (let x = 0; x < cols; x++) {
+      const cell = line.getCell(x)
+      if (!cell) return null
+      const chars = cell.getChars()
+      if (chars.trim() === '') continue
+      return chars === CHEVRON ? { bgDefault: cell.isBgDefault(), inverse: cell.isInverse() !== 0 } : null
+    }
+    return null
+  }
+
   const snapshot = (): XtermScreenSnapshot | null => {
     if (!terminal) return null
     const active = terminal.buffer.active
@@ -198,16 +237,21 @@ export function createXtermScreen(options: XtermScreenOptions): XtermScreen {
       fault('xterm active buffer has an unsupported shape')
       return null
     }
+    const cursorHidden = cursorIsHidden()
+    if (cursorHidden === null) return null
     const lines: string[] = []
+    const chevrons: Array<ChevronStyle | null> = []
     for (let y = 0; y < rows; y++) {
       const line = active.getLine(active.baseY + y)
       if (!line) {
         fault('xterm active buffer line is unavailable')
         return null
       }
-      lines.push(line.translateToString(true).replace(/\s+$/, ''))
+      const text = line.translateToString(true).replace(/\s+$/, '')
+      lines.push(text)
+      chevrons.push(chevronStyle(line, text))
     }
-    return { revision: submitted, cols, rows, lines, cursor: { x: active.cursorX, y: active.cursorY } }
+    return { revision: submitted, cols, rows, lines, cursor: { x: active.cursorX, y: active.cursorY }, cursorHidden, chevrons }
   }
 
   const feed = (data: string): void => {
@@ -338,14 +382,20 @@ export function inspectInjectGuard(snapshot: XtermScreenSnapshot): InjectGuardIn
       [...afterLabel].every((character) => character === horizontal)
     )
   }
-  const isPicker = (line: string): boolean => new RegExp(`^\\s*${chevron}\\s+\\d+\\.`).test(line)
+  const isPicker = (line: string): boolean => NUMBERED_PROMPT.test(line)
+  // The echo of a submitted prompt is painted on the message background; a selector's chevron carries only a
+  // foreground colour. A visible cursor alone does not tell them apart: a selector can leave it visible.
+  const isEchoRow = (y: number): boolean => {
+    const style = snapshot.chevrons?.[y]
+    return !!style && !style.bgDefault && !style.inverse && y < cursor.y - 1 && snapshot.cursorHidden === false
+  }
   const isDialogTop = (line: string): boolean => line.trimStart().startsWith(dialogTopLeft) && line.trimEnd().endsWith(dialogTopRight)
   const isDialogBottom = (line: string): boolean =>
     line.trimStart().startsWith(dialogBottomLeft) && line.trimEnd().endsWith(dialogBottomRight)
 
   if (lines.every((line) => line.length === 0)) return { state: 'modal', rule: 'empty-grid' }
 
-  const pickerLine = lines.findIndex(isPicker)
+  const pickerLine = lines.findIndex((line, y) => isPicker(line) && !isEchoRow(y))
   if (pickerLine >= 0) return { state: 'modal', rule: 'picker', line: pickerLine + 1 }
 
   const dialogTopLine = lines.findIndex(isDialogTop)
