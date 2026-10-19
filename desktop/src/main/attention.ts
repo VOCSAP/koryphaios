@@ -38,10 +38,10 @@ export function stripAnsi(s: string): string {
 // is an unnumbered chooser whose words, and on ConPTY whose rows, are placed by
 // cursor moves the stripper deletes, hence `\s*` and no required line break;
 // both options are required, in order, so prose saying "I trust this folder"
-// does not raise.
+// does not raise. No `\b` after "folder": ConPTY glues it to the next row.
 const TRUST_PATTERNS = [
   /\bdo you trust the files\b/i,
-  /No,\s*exit\s*(?:\u276f\s*)?Yes,\s*I\s*trust\s*this\s*folder\b/i
+  /No,\s*exit\s*(?:\u276f\s*)?Yes,\s*I\s*trust\s*this\s*folder/i
 ]
 
 // The welcome banner ("Claude Code v2.1.282"; cursor moves may eat the spaces)

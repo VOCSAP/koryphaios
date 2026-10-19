@@ -641,6 +641,13 @@ const MODAL_ATTENTION_FIXTURES = Object.entries(EXPECTED_FIXTURE_VERDICTS)
   .filter((name) => !MODAL_ATTENTION_EXEMPTIONS.has(name))
   .sort();
 
+/** Captures whose trust prompt stays unanswered past the delay: it raises, then drops when answered, then the dialog raises. */
+const TRUST_LEFT_UNANSWERED: Record<string, string> = {
+  "permission-bash-2.1.291.json": "+1777 -7510 +17026",
+  "permission-bash-wrapped-2.1.291.json": "+1855 -7469 +21578",
+  "permission-write-2.1.291.json": "+1774 -7642 +17755",
+};
+
 const replayEvents = (name: string): { at: number; waiting: boolean }[] => {
   const d = detector();
   const events: { at: number; waiting: boolean }[] = [];
@@ -653,24 +660,53 @@ const replayEvents = (name: string): { at: number; waiting: boolean }[] => {
   return events;
 };
 
-test("an accepted trust prompt emits nothing before the later AskUserQuestion chooser", () => {
-  const clock = confirmationClock();
-  const d = new AttentionDetector(clock.options);
-  const events: { at: number; waiting: boolean }[] = [];
-  let at = -1;
-  d.on("attention", (e: AttentionEvent) => events.push({ at, waiting: e.waiting }));
-  const chunks = loadFixture("ask-user-question-2.1.301.json");
+test("an accepted trust prompt emits nothing before the later AskUserQuestion chooser", async () => {
+  const name = "ask-user-question-2.1.301.json";
+  const chunks = loadFixture(name);
   const chooser = chunks.findIndex((c) => stripAnsi(c.data).includes("Which color do you prefer?"));
   expect(chooser, "the capture paints the real chooser").toBeGreaterThanOrEqual(0);
+  const chooserAt = chunks[chooser]!.t;
 
-  chunks.forEach((c, i) => {
-    clock.advanceTo(c.t);
-    at = i;
-    if (!isMarker(c)) d.feed("s", c.data);
-  });
+  const { witnessed } = await replayWithScreen(name);
+  expect(witnessed[0]!.filter((event) => event.waiting && event.at < chooserAt)).toEqual([]);
+  expect(witnessed[0]!.filter((event) => event.waiting && event.at >= chooserAt)).toHaveLength(1);
+});
 
-  expect(events.filter((event) => event.waiting && event.at < chooser)).toEqual([]);
-  expect(events.filter((event) => event.waiting && event.at >= chooser)).toHaveLength(1);
+test("the first real paint of a 2.1.301 trust prompt, folder glued to Enter, raises within the delay", () => {
+  for (const name of [
+    "ask-user-question-2.1.301.json",
+    "draft-numbered-2.1.301.json",
+    "plan-approval-2.1.301.json",
+    "resize-numbered-draft-2.1.301.json",
+    "typing-numbered-2.1.301.json",
+  ]) {
+    const chunks = loadFixture(name);
+    const accepted = chunks.findIndex((c) => isMarker(c) && c.data.includes("trust accepted"));
+    expect(accepted, `${name} holds its trust accepted marker`).toBeGreaterThan(0);
+
+    const clock = confirmationClock();
+    const d = new AttentionDetector(clock.options);
+    const events: RaiseEvent[] = [];
+    d.on("attention", (e: AttentionEvent) => events.push({ at: clock.now, waiting: e.waiting }));
+    let painted = "";
+    let paintedAt = -1;
+    for (const c of chunks.slice(0, accepted)) {
+      clock.advanceTo(c.t);
+      if (isMarker(c)) continue;
+      d.feed("s", c.data);
+      painted += c.data;
+      if (/Enter\s*to\s*confirm/i.test(stripAnsi(painted))) {
+        paintedAt = clock.now;
+        break;
+      }
+    }
+    expect(paintedAt, `${name} paints the whole prompt before it is answered`).toBeGreaterThanOrEqual(0);
+    expect(events, `${name}: nothing before the delay`).toEqual([]);
+
+    clock.advanceBy(D);
+    expect(events.map((event) => event.waiting), name).toEqual([true]);
+    expect(events[0]!.at, name).toBeLessThanOrEqual(paintedAt + D);
+  }
 });
 
 test("the numbered pickers derived from the captures include the permission, AskUserQuestion and plan choosers", () => {
@@ -693,24 +729,12 @@ test("every captured numbered chooser raises after confirmation and still holds"
   }
 });
 
-test("every non-exempt modal fixture raises at the confirmation deadline", () => {
-  for (const name of MODAL_ATTENTION_FIXTURES) {
-    const clock = confirmationClock();
-    const d = new AttentionDetector(clock.options);
-    const events: Array<{ waiting: boolean; t: number }> = [];
-    d.on("attention", (event: AttentionEvent) => events.push({ waiting: event.waiting, t: clock.now }));
-
-    for (const chunk of loadFixture(name)) {
-      if (chunk.t !== undefined) clock.advanceTo(chunk.t);
-      if (!isMarker(chunk)) d.feed("s", chunk.data);
-    }
-    clock.advanceBy(ATTENTION_CONFIRMATION_DELAY_MS);
-
-    const raised = events.filter((event) => event.waiting);
-    expect(raised, name).toHaveLength(1);
-    const confirmingTimer = clock.planned.find(
-      (timer) => timer.fired && timer.dueAt === raised[0]!.t
-    );
+test("every non-exempt modal fixture raises at the confirmation deadline, with the screen witness reading", async () => {
+  const replays = await Promise.all(MODAL_ATTENTION_FIXTURES.map(async (name) => ({ name, ...(await replayWithScreen(name)) })));
+  for (const { name, witnessed, clocks } of replays) {
+    const raised = witnessed[0]!.filter((event) => event.waiting);
+    expect(raised, name).toHaveLength(name in TRUST_LEFT_UNANSWERED ? 2 : 1);
+    const confirmingTimer = clocks[0]!.planned.find((timer) => timer.fired && timer.dueAt === raised.at(-1)!.at);
     expect(confirmingTimer?.delayMs, name).toBe(ATTENTION_CONFIRMATION_DELAY_MS);
   }
 });
@@ -1051,9 +1075,17 @@ function screenStates(name: string): Promise<{ initial: XtermScreenRead; after: 
 type RaiseEvent = { at: number; waiting: boolean };
 const showsAt = (events: RaiseEvent[]): string => events.map((e) => `${e.waiting ? "+" : "-"}${e.at}`).join(" ");
 
-/** Events of the stream-only detector and, per read lag, of the same detector with the witness reading the real screen. */
-async function replayWithScreen(name: string): Promise<{ head: RaiseEvent[]; witnessed: Record<number, RaiseEvent[]> }> {
+/**
+ * Events of the stream-only detector and, per read lag, of the same detector with the witness reading the real screen.
+ * With `detectorFromMarker`, the detectors skip the chunks before the first marker holding that text; the screen reads them all.
+ */
+async function replayWithScreen(
+  name: string,
+  detectorFromMarker?: string
+): Promise<{ head: RaiseEvent[]; witnessed: Record<number, RaiseEvent[]>; clocks: Record<number, ReturnType<typeof confirmationClock>> }> {
   const { initial, after } = await screenStates(name);
+  const detectorFrom = detectorFromMarker === undefined ? 0 : loadFixture(name).findIndex((c) => isMarker(c) && c.data.includes(detectorFromMarker));
+  expect(detectorFrom, `${name} holds a "${detectorFromMarker}" marker`).toBeGreaterThanOrEqual(0);
   let current = initial;
   let chunkAt = -Infinity;
   const runs = [undefined, ...LAGS].map((lag) => {
@@ -1082,6 +1114,7 @@ async function replayWithScreen(name: string): Promise<{ head: RaiseEvent[]; wit
     if (state) current = state;
     if (isMarker(chunk) || chunk.data.length === 0) return;
     chunkAt = runs[0]!.clock.now;
+    if (index < detectorFrom) return;
     for (const run of runs) run.d.feed("s", chunk.data);
   });
   for (const run of runs) run.clock.advanceBy(D);
@@ -1089,6 +1122,7 @@ async function replayWithScreen(name: string): Promise<{ head: RaiseEvent[]; wit
   return {
     head: runs[0]!.events,
     witnessed: Object.fromEntries(runs.slice(1).map((run) => [run.lag, run.events])),
+    clocks: Object.fromEntries(runs.slice(1).map((run) => [run.lag, run.clock])),
   };
 }
 
@@ -1105,10 +1139,29 @@ test("replaying every capture through a real screen, the witness changes no verd
     }
   }
 
-  expect(deviations).toEqual({
-    "resize-numbered-draft-2.1.301.json @0ms": { head: "+7838 -7889", witnessed: "" },
-    "resize-numbered-draft-2.1.301.json @16ms": { head: "+7838 -7889", witnessed: "" },
-  });
+  // The stream alone raises on the first paint of the trust prompt; the screen shows it answered by the deadline.
+  const vetoedTrustRaises: Record<string, { head: string; witnessed: string }> = {
+    "ask-user-question-2.1.301.json": { head: "+2354 -3118 +11121", witnessed: "+11121" },
+    "draft-numbered-2.1.301.json": { head: "+1942 -2779", witnessed: "" },
+    "plan-approval-2.1.301.json": { head: "+1801 -2986 +23415", witnessed: "+23415" },
+    "resize-numbered-draft-2.1.301.json": { head: "+6898 -7897", witnessed: "" },
+    "typing-numbered-2.1.301.json": { head: "+1810 -2359", witnessed: "" },
+  };
+  expect(deviations).toEqual(
+    Object.fromEntries(Object.entries(vetoedTrustRaises).flatMap(([name, shows]) => LAGS.map((lag) => [`${name} @${lag}ms`, shows])))
+  );
+
+  const trustRaises: Record<string, string> = { ...TRUST_LEFT_UNANSWERED, "trust-dialog-glued-folder-2.1.303.json": "+1824" };
+  for (const { name, witnessed } of replays) {
+    if (!(name in trustRaises)) continue;
+    for (const lag of LAGS) expect(showsAt(witnessed[lag]!), `${name} @${lag}ms`).toBe(trustRaises[name]!);
+  }
+});
+
+test("the witness vetoes the raise on a numbered draft of a real capture once its answered trust prompt is out of the stream", async () => {
+  const { head, witnessed } = await replayWithScreen("resize-numbered-draft-2.1.301.json", "trust accepted");
+  expect(showsAt(head)).toBe("+7838 -7889");
+  for (const lag of LAGS) expect(showsAt(witnessed[lag]!), `@${lag}ms`).toBe("");
 });
 
 /** The screen as a reader sees it at `at`: settled chunk states, pending right after a chunk, resize-pending after a resize. */

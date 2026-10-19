@@ -26,6 +26,7 @@ export const EXPECTED_FIXTURE_VERDICTS: Record<string, { checkpoints: readonly (
   },
   'scroll-context-2.1.284-reduced.json': { checkpoints: [], final: 'modal' },
   'slash-menu-with-esc.json': { checkpoints: ['clear', 'clear', 'clear', 'clear', 'clear'], final: 'clear' },
+  'trust-dialog-glued-folder-2.1.303.json': { checkpoints: ['modal', 'modal', 'modal', 'modal', 'modal', 'modal'], final: 'modal' },
   'trust-dialog-quick-safety-check.json': { checkpoints: [], final: 'modal' },
   'turn-chunks-inherited-env.json': { checkpoints: [], final: 'modal' },
   'turn-chunks-scrubbed-env.json': { checkpoints: [], final: 'modal' },
