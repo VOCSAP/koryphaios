@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { startBroker, stopBroker, post, approvalListBody, scrubEnv, type TestBroker } from "./_helper.ts";
 import {
+  APPROVAL_OPTIONS_MAX,
   buildAuthProof,
   deriveOperatorId,
   deriveTokenId,
@@ -55,7 +56,11 @@ afterAll(async () => {
 
 interface JsonRpcResponse {
   id?: number;
-  result?: { content?: Array<{ text?: string }>; isError?: boolean; tools?: Array<{ name: string }> };
+  result?: {
+    content?: Array<{ text?: string }>;
+    isError?: boolean;
+    tools?: Array<{ name: string; inputSchema?: { properties?: Record<string, { maxItems?: number }> } }>;
+  };
 }
 
 /** Read stdout until a JSON-RPC message with the wanted id shows up. */
@@ -215,6 +220,8 @@ describe("ask_operator over MCP stdio", () => {
     const names = (res.result?.tools ?? []).map((t) => t.name);
     expect(names).toContain("ask_operator");
     expect(names).toContain("ask_operator_wait");
+    const ask = res.result?.tools?.find((t) => t.name === "ask_operator");
+    expect(ask?.inputSchema?.properties?.options?.maxItems).toBe(APPROVAL_OPTIONS_MAX);
   }, 60_000);
 
   test("without a credential the tool refuses instead of hanging, naming the real cause", async () => {
@@ -284,6 +291,43 @@ describe("ask_operator over MCP stdio", () => {
     });
     const approval = await firstApproval(h);
     expect(approval?.question.endsWith("[truncated from 5000 characters]"), approval?.question.slice(-60)).toBe(true);
+  }, 60_000);
+
+  test("an eleventh option is refused with the broker's limit instead of being cut, ten are accepted", async () => {
+    const h = await boot(true);
+    const ask = (id: number, count: number) =>
+      h.send({
+        jsonrpc: "2.0",
+        id,
+        method: "tools/call",
+        params: {
+          name: "ask_operator",
+          arguments: {
+            title: "Pick",
+            question: "Which one?",
+            options: Array.from({ length: count }, (_, i) => `option ${i + 1}`),
+          },
+        },
+      });
+    const settled = <T>(p: Promise<T>): Promise<T> => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const limit = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error("ask_operator neither refused nor answered within 15 s")), 15_000);
+      });
+      return Promise.race([p, limit]).finally(() => clearTimeout(timer));
+    };
+
+    ask(1, APPROVAL_OPTIONS_MAX + 1);
+    const refused = await settled(readUntil(h.reader, 1, h.buffer));
+    expect(refused.result?.isError).toBe(true);
+    expect(refused.result?.content?.[0]?.text).toContain(`at most ${APPROVAL_OPTIONS_MAX} options`);
+
+    ask(2, APPROVAL_OPTIONS_MAX);
+    const approval = await firstApproval(h);
+    expect(approval?.options).toEqual(Array.from({ length: APPROVAL_OPTIONS_MAX }, (_, i) => `option ${i + 1}`));
+    expect(await claim(h, approval!.id, "deny")).toBe(200);
+    const accepted = await settled(readUntil(h.reader, 2, h.buffer));
+    expect(accepted.result?.isError).toBeFalsy();
   }, 60_000);
 
   test("ask_operator_wait on an unknown ticket errors rather than blocking", async () => {

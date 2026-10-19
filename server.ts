@@ -90,6 +90,7 @@ import type {
   ApprovalWaitResponse,
 } from "./shared/types.ts";
 import { CONTEXT_RESUME_ACK_TTL_MS, CONTEXT_RESUME_VERSION, depositCapabilityHashFromEnv } from "./shared/context-buffer.ts";
+import { APPROVAL_OPTIONS_MAX } from "./shared/approval.ts";
 import {
   buildAuthProof,
   loadSessionApprovalCredential,
@@ -1071,6 +1072,7 @@ const DECK_ONLY_TOOLS = [
         options: {
           type: "array" as const,
           items: { type: "string" as const },
+          maxItems: APPROVAL_OPTIONS_MAX,
           description: "Optional suggested answers, offered as one-tap buttons.",
         },
       },
@@ -1586,7 +1588,7 @@ async function handleAskOperator(name: string, args: unknown, identity: Companio
         kind: "question",
         title,
         question,
-        options: Array.isArray(rawOptions) ? rawOptions.slice(0, 10).map(String) : [],
+        options: Array.isArray(rawOptions) ? rawOptions.map(String) : [],
         session_ref: cred.sessionRef,
         // The caller may only wait on its own new approval.
         merge: "never",
