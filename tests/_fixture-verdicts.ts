@@ -20,6 +20,10 @@ export const EXPECTED_FIXTURE_VERDICTS: Record<string, { checkpoints: readonly (
   'plan-approval-2.1.301.json': { checkpoints: ['modal', 'clear', 'modal'], final: 'modal' },
   'prompt-idle-with-esc.json': { checkpoints: ['clear', 'clear', 'clear', 'clear'], final: 'clear' },
   'resize-numbered-draft-2.1.301.json': { checkpoints: ['modal', 'clear', 'modal', 'modal', 'modal'], final: 'modal' },
+  'resize-storm-write-perm-2.1.303.json': {
+    checkpoints: ['clear', 'clear', 'clear', 'modal', 'modal', 'modal', 'modal', 'modal', 'modal', 'modal', 'modal', 'modal', 'modal', 'modal', 'modal', 'modal', 'clear'],
+    final: 'clear'
+  },
   'scroll-context-2.1.284-reduced.json': { checkpoints: [], final: 'modal' },
   'slash-menu-with-esc.json': { checkpoints: ['clear', 'clear', 'clear', 'clear', 'clear'], final: 'clear' },
   'trust-dialog-quick-safety-check.json': { checkpoints: [], final: 'modal' },
@@ -31,3 +35,5 @@ export const EXPECTED_FIXTURE_VERDICTS: Record<string, { checkpoints: readonly (
   'turn-with-statusline-hi.json': { checkpoints: [], final: 'clear' },
   'typing-numbered-2.1.301.json': { checkpoints: ['modal', 'clear', 'modal', 'modal'], final: 'modal' }
 }
+
+export const RESIZE_MARKER = /^\n########## RESIZE \[(\d+),(\d+)\] ##########/

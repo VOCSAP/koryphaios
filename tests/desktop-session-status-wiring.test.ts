@@ -3,7 +3,7 @@
 // from the status file. node-pty is replaced by a fake that records the spawn
 // line, store.ts (electron) by a no-op persist; the `@shared/*` aliases, which
 // bun does not resolve from desktop/, are pointed at the real modules.
-import { test, expect, mock, afterEach } from "bun:test";
+import { test, expect, mock, afterEach, spyOn } from "bun:test";
 import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync, rmSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -939,4 +939,64 @@ test("start and restore sweep old status leftovers of unknown tiles, keep fresh 
   svc.restoreFrom([restored as never]);
   expect(existsSync(oldForeign2), "old foreign cache swept at restore").toBe(false);
   expect(existsSync(ownOld), "a restored tile's own file is never swept").toBe(true);
+});
+
+test("a raise whose dialog the tile's own xterm screen no longer shows is dropped at the deadline, then lands once it is painted again", async () => {
+  const { svc } = setup();
+  const internals = svc as unknown as {
+    attentionDetector: { setTimer: unknown; clearTimer: unknown };
+    screenGuard: { read(id: string): { status: string; reason?: string } };
+  };
+  const planned: Array<{ callback: () => void; dueAt: number; cleared: boolean }> = [];
+  let now = 0;
+  internals.attentionDetector.setTimer = (callback: () => void, delayMs: number) => {
+    const timer = { callback, dueAt: now + delayMs, cleared: false };
+    planned.push(timer);
+    return timer;
+  };
+  internals.attentionDetector.clearTimer = (timer: { cleared: boolean }) => {
+    timer.cleared = true;
+  };
+  const advanceTo = (target: number): void => {
+    for (;;) {
+      const due = planned.filter((t) => !t.cleared && t.dueAt <= target).sort((a, b) => a.dueAt - b.dueAt)[0];
+      if (!due) break;
+      now = due.dueAt;
+      due.cleared = true;
+      due.callback();
+    }
+    now = target;
+  };
+  const settled = async (id: string): Promise<void> => {
+    const until = Date.now() + 2000;
+    while (internals.screenGuard.read(id).status !== "ready" && Date.now() < until) await new Promise((r) => setTimeout(r, 5));
+    expect(internals.screenGuard.read(id), "the tile screen settles").toEqual(expect.objectContaining({ status: "ready" }));
+  };
+
+  const raised: unknown[] = [];
+  svc.on("attention", (e: unknown) => raised.push(e));
+  const rt = svc.create({ name: "erased-dialog" });
+  const pty = spawned.at(-1)!;
+  const dialog: Array<{ data: string }> = JSON.parse(
+    readFileSync(join(import.meta.dir, "pty-harness", "fixtures", "trust-dialog-quick-safety-check.json"), "utf-8"),
+  ).slice(0, 4);
+  const esc = String.fromCharCode(27);
+
+  // The witness stamps its reads with Date.now: the virtual deadline must move it too.
+  const realNow = Date.now;
+  const clockSpy = spyOn(Date, "now").mockImplementation(() => realNow() + now);
+  try {
+    for (const c of dialog) pty.output(c.data);
+    pty.output(`${esc}[2J${esc}[H`);
+    await settled(rt.id);
+    advanceTo(ATTENTION_CONFIRMATION_DELAY_MS);
+    expect(raised, "the stream still holds the dialog but the screen is blank: vetoed").toEqual([]);
+
+    for (const c of dialog) pty.output(c.data);
+    await settled(rt.id);
+    advanceTo(2 * ATTENTION_CONFIRMATION_DELAY_MS);
+    expect(raised, "the screen shows the dialog again: raised").toEqual([{ id: rt.id, waiting: true }]);
+  } finally {
+    clockSpy.mockRestore();
+  }
 });

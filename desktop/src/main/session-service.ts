@@ -29,7 +29,8 @@ import {
   type QuotaLimitEvent,
   type QuotaResumeDueEvent
 } from './quota'
-import { AttentionDetector, type AttentionEvent } from './attention'
+import { AttentionDetector, screenShowsWait, type AttentionEvent } from './attention'
+import { createScreenWitness } from './attention-screen-witness'
 import { StartupAckDetector, type StartupAckEvent } from './startup-ack'
 import { OpenIdRegistry } from './open-id-registry'
 import {
@@ -247,7 +248,14 @@ export class SessionService extends EventEmitter {
   private pty = new PtyManager()
   private thinkingDetector = new ThinkingDetector()
   private quotaDetector = new QuotaDetector()
-  private attentionDetector = new AttentionDetector()
+  private attentionDetector = new AttentionDetector({
+    screenWitness: createScreenWitness({
+      read: (id) => this.screenGuard.read(id),
+      now: () => Date.now(),
+      showsWait: screenShowsWait,
+      reportError
+    })
+  })
   private startupAckDetector = new StartupAckDetector()
   private screenGuard = new ScreenGuard(reportError)
   private injector = new TileInjector(this.pty, this.screenGuard, this.runtime, (id) => this.lastOutputAt(id), {

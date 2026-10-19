@@ -8,6 +8,7 @@
 import { EventEmitter } from 'node:events'
 import { detectChannelsWarning } from './startup-ack'
 import { createBusyCue, type BusyCue } from './detect/busy'
+import type { ScreenWitness, ScreenWitnessWindow } from './attention-screen-witness'
 
 export interface AttentionEvent {
   id: string
@@ -110,6 +111,8 @@ function stillWaiting(text: string): boolean {
   return !text.slice(0, at).trimEnd().endsWith(BORDER)
 }
 
+export const screenShowsWait = (text: string): boolean => detectWaiting(text) || stillWaiting(text)
+
 // Load-bearing for one of five ways a raised flag clears: a busy cue,
 // purgeScreenMemory on the dev-channels ack, the welcome screen following a
 // trust prompt, the operator dismissing it by hand, or the raising pattern
@@ -121,10 +124,14 @@ const MAX_BUF = 4096
 // Full-screen repaints take roughly 300 ms; 1.5 s filters them before raising attention.
 export const ATTENTION_CONFIRMATION_DELAY_MS = 1_500
 
+const MAX_CONSECUTIVE_VETOES = 3
+
 export interface AttentionDetectorOptions {
   confirmationDelayMs?: number
   setTimeout?: (callback: () => void, delayMs: number) => unknown
   clearTimeout?: (timer: unknown) => void
+  /** Can only drop a raise at its deadline; never raises and never clears. */
+  screenWitness?: ScreenWitness
 }
 
 interface SessionState {
@@ -132,6 +139,7 @@ interface SessionState {
   waiting: boolean
   pending: object | null
   timer?: unknown
+  witness?: ScreenWitnessWindow
   /** A running turn means the operator answered (or the wait screen is gone). */
   busy: BusyCue
 }
@@ -146,9 +154,11 @@ export class AttentionDetector extends EventEmitter {
   private readonly confirmationDelayMs: number
   private readonly setTimer: (callback: () => void, delayMs: number) => unknown
   private readonly clearTimer: (timer: unknown) => void
+  private readonly screenWitness: ScreenWitness | undefined
 
   constructor(options: AttentionDetectorOptions = {}) {
     super()
+    this.screenWitness = options.screenWitness
     this.confirmationDelayMs = options.confirmationDelayMs ?? ATTENTION_CONFIRMATION_DELAY_MS
     this.setTimer = options.setTimeout ?? ((callback, delayMs) => globalThis.setTimeout(callback, delayMs))
     this.clearTimer = options.clearTimeout ?? ((timer) => globalThis.clearTimeout(timer as ReturnType<typeof globalThis.setTimeout>))
@@ -157,18 +167,29 @@ export class AttentionDetector extends EventEmitter {
   private cancelPending(st: SessionState): void {
     if (st.pending === null) return
     if (st.timer !== undefined) this.clearTimer(st.timer)
+    st.witness?.cancel()
     st.pending = null
     st.timer = undefined
+    st.witness = undefined
   }
 
-  private scheduleConfirmation(id: string, st: SessionState): void {
+  private scheduleConfirmation(id: string, st: SessionState, vetoes = 0): void {
     const pending = {}
     st.pending = pending
+    st.witness = this.screenWitness?.arm(id, this.confirmationDelayMs, { setTimeout: this.setTimer, clearTimeout: this.clearTimer })
     const timer = this.setTimer(() => {
       if (st.pending !== pending) return
+      const witness = st.witness
       st.pending = null
       st.timer = undefined
+      st.witness = undefined
       if (this.sessions.get(id) !== st || st.waiting || !stillWaiting(st.buf)) return
+      // The buffer is kept and the check re-armed, so a wrong veto only delays the raise;
+      // the bound stops a stale buffer from re-arming for ever.
+      if (witness?.decide()) {
+        if (vetoes + 1 < MAX_CONSECUTIVE_VETOES) this.scheduleConfirmation(id, st, vetoes + 1)
+        return
+      }
       st.waiting = true
       this.emit('attention', { id, waiting: true } satisfies AttentionEvent)
     }, this.confirmationDelayMs)

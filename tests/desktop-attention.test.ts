@@ -9,11 +9,18 @@ import {
   AttentionDetector,
   ATTENTION_CONFIRMATION_DELAY_MS,
   detectWaiting,
+  screenShowsWait,
   stripAnsi,
   type AttentionEvent
 } from "../desktop/src/main/attention.ts";
-import { EXPECTED_FIXTURE_VERDICTS } from "./_fixture-verdicts.ts";
-import { createXtermScreen, inspectInjectGuard } from "../desktop/src/main/xterm-screen.ts";
+import { createScreenWitness } from "../desktop/src/main/attention-screen-witness.ts";
+import { EXPECTED_FIXTURE_VERDICTS, RESIZE_MARKER } from "./_fixture-verdicts.ts";
+import {
+  createXtermScreen,
+  inspectInjectGuard,
+  type XtermScreenRead,
+  type XtermScreenUnavailableReason
+} from "../desktop/src/main/xterm-screen.ts";
 
 const PERMISSION_SCREEN = `
 Bash command: rm -rf node_modules
@@ -757,4 +764,417 @@ test("a chooser raises whatever its footer or question says", () => {
   expect(detectWaiting(`${SELECTOR} 1. A\n${"preview ".repeat(250)}\nEsc to cancel`), "long preview").toBe(true);
   expect(detectWaiting(`Pick one\n${SELECTOR} 1. A\n  2. B\nEsc to go back`), "Esc to go back").toBe(true);
   expect(detectWaiting(`${SELECTOR}1Yes2. No`), "selection repaint without the period").toBe(true);
+});
+
+// ----- screen witness: may only veto a raise at its deadline, from the rendered screen -----
+
+const D = ATTENTION_CONFIRMATION_DELAY_MS;
+const ESC = String.fromCodePoint(0x1b);
+const screenOf = (text: string): XtermScreenRead => ({
+  status: "ready",
+  snapshot: { revision: 0, cols: 120, rows: 40, lines: text.split("\n"), cursor: { x: 0, y: 0 } },
+});
+const WAIT_READ = screenOf(PERMISSION_SCREEN);
+const BLANK_READ = screenOf("");
+const unavailable = (reason: XtermScreenUnavailableReason): XtermScreenRead => ({ status: "unavailable", reason });
+const READ_TIMES = Array.from({ length: 11 }, (_, k) => D - 100 + k * 10);
+
+function witnessRig(
+  read: (at: number) => XtermScreenRead,
+  reportError: (scope: string, message: string, error?: unknown) => void = () => undefined
+) {
+  const clock = confirmationClock();
+  const reads: Array<{ at: number; id: string }> = [];
+  const d = new AttentionDetector({
+    ...clock.options,
+    screenWitness: createScreenWitness({
+      read: (id) => {
+        reads.push({ at: clock.now, id });
+        return read(clock.now);
+      },
+      now: () => clock.now,
+      showsWait: screenShowsWait,
+      reportError,
+    }),
+  });
+  const events: Array<{ at: number; waiting: boolean }> = [];
+  d.on("attention", (e: AttentionEvent) => events.push({ at: clock.now, waiting: e.waiting }));
+  return { clock, d, reads, events };
+}
+
+const readyAt = (times: readonly number[], otherwise: XtermScreenRead = unavailable("screen-pending")) => (at: number) =>
+  times.includes(at) ? BLANK_READ : otherwise;
+
+test("the witness reads the screen every 10 ms over the last 100 ms before the deadline, plus once at it, then vetoes a blank screen", () => {
+  const { clock, d, reads, events } = witnessRig(() => BLANK_READ);
+  d.feed("s1", PERMISSION_SCREEN);
+
+  clock.advanceTo(D - 101);
+  expect(reads, "nothing is read before the window opens").toEqual([]);
+  clock.advanceTo(D);
+
+  expect(reads.map((r) => r.at)).toEqual(READ_TIMES);
+  expect(reads.every((r) => r.id === "s1")).toBe(true);
+  expect(events, "a blank screen is no wait screen").toEqual([]);
+});
+
+test("a detector without a witness raises at the deadline whatever a screen would show", () => {
+  const clock = confirmationClock();
+  const d = new AttentionDetector(clock.options);
+  const events = collect(d);
+  d.feed("s1", PERMISSION_SCREEN);
+  clock.advanceTo(D);
+  expect(events).toEqual([{ id: "s1", waiting: true }]);
+});
+
+for (const [reason, ignored] of [
+  ["screen-pending", true],
+  ["sequence-incomplete", true],
+  ["resize-pending", false],
+  ["screen-fault", false],
+  ["disposed", false],
+] as const) {
+  test(`a ${reason} read ${ignored ? "is ignored, the other reads still veto" : "makes the witness abstain, the raise stands"}`, () => {
+    const { clock, d, events } = witnessRig((at) => (at === 1450 ? unavailable(reason) : BLANK_READ));
+    d.feed("s1", PERMISSION_SCREEN);
+    clock.advanceTo(D);
+    expect(events).toEqual(ignored ? [] : [{ at: D, waiting: true }]);
+  });
+}
+
+test("a veto needs six ready reads, one of them among the last three", () => {
+  const cases: Array<[string, readonly number[], boolean]> = [
+    ["six ready reads ending at the deadline", [1420, 1440, 1460, 1480, 1490, 1500], true],
+    ["five ready reads", [1440, 1460, 1480, 1490, 1500], false],
+    ["six ready reads, none among the last three", [1400, 1410, 1420, 1430, 1440, 1450], false],
+    ["six ready reads, the third from last is the only recent one", [1400, 1410, 1420, 1430, 1440, 1480], true],
+    ["six ready reads, the fourth from last is the only recent one", [1400, 1410, 1420, 1430, 1440, 1470], false],
+  ];
+  for (const [label, times, vetoed] of cases) {
+    const { clock, d, events } = witnessRig(readyAt(times));
+    d.feed("s1", PERMISSION_SCREEN);
+    clock.advanceTo(D);
+    expect(events, label).toEqual(vetoed ? [] : [{ at: D, waiting: true }]);
+  }
+});
+
+test("a wait screen seen anywhere in the window, by either rule, lets the raise stand", () => {
+  const stillOnly = "some output\n❯ typed text";
+  expect(detectWaiting(stillOnly), "premise: the raising rule ignores this screen").toBe(false);
+  expect(screenShowsWait(stillOnly), "premise: the holding rule keeps it").toBe(true);
+
+  const shownAt: Array<[string, number]> = [
+    ["first read", 1400],
+    ["middle read", 1450],
+    ["deadline read", 1500],
+  ];
+  for (const [label, shown] of shownAt) {
+    for (const [kind, screen] of [["raising rule", WAIT_READ], ["holding rule", screenOf(stillOnly)]] as const) {
+      const { clock, d, events } = witnessRig((at) => (at === shown ? screen : BLANK_READ));
+      d.feed("s1", PERMISSION_SCREEN);
+      clock.advanceTo(D);
+      expect(events, `${label}, ${kind}`).toEqual([{ at: D, waiting: true }]);
+    }
+  }
+});
+
+test("a chunk every 10 ms keeps the screen pending, so nothing vetoes; every 40 ms leaves enough settled reads", () => {
+  for (const [period, vetoed] of [[10, false], [40, true]] as const) {
+    let chunkAt = -Infinity;
+    const { clock, d, events } = witnessRig((at) => (at - chunkAt < 16 ? unavailable("screen-pending") : BLANK_READ));
+    for (let at = 0; at < D; at += period) {
+      clock.advanceTo(at);
+      chunkAt = at;
+      d.feed("s1", PERMISSION_SCREEN);
+    }
+    clock.advanceTo(D);
+    expect(events, `a chunk every ${period} ms`).toEqual(vetoed ? [] : [{ at: D, waiting: true }]);
+  }
+});
+
+test("a dialog visible for 30 ms between 16 ms blanks is seen by the 10 ms reads", () => {
+  // 46 ms cycle, blank for its first 16 ms; aligned so that reads 50 ms apart would all land in a blank.
+  const cycle = (at: number): XtermScreenRead => ((at - 1398) % 46 < 16 ? BLANK_READ : WAIT_READ);
+  const { clock, d, events } = witnessRig(cycle);
+  d.feed("s1", PERMISSION_SCREEN);
+  clock.advanceTo(D);
+  expect(events).toEqual([{ at: D, waiting: true }]);
+});
+
+test("a veto on a screen painted later re-checks one delay on and raises, though the stream stays silent", () => {
+  let dialogUp = false;
+  const { clock, d, events } = witnessRig(() => (dialogUp ? WAIT_READ : BLANK_READ));
+  d.feed("s1", PERMISSION_SCREEN);
+  clock.advanceTo(D);
+  expect(events, "vetoed").toEqual([]);
+
+  dialogUp = true;
+  clock.advanceTo(2 * D - 1);
+  expect(events, "not before one delay").toEqual([]);
+  clock.advanceTo(60_000);
+  expect(events).toEqual([{ at: 2 * D, waiting: true }]);
+});
+
+test("three vetoes in a row end the re-checks; the next chunk starts a fresh episode", () => {
+  let dialogUp = false;
+  const { clock, d, reads, events } = witnessRig(() => (dialogUp ? WAIT_READ : BLANK_READ));
+  d.feed("s1", PERMISSION_SCREEN);
+  clock.advanceTo(60_000);
+  expect(events, "a screen that never shows the dialog never raises").toEqual([]);
+  expect(reads, "three windows of eleven reads, then nothing").toHaveLength(33);
+  expect(clock.planned.filter((timer) => !timer.cleared && !timer.fired), "no timer left armed").toEqual([]);
+
+  dialogUp = true;
+  d.feed("s1", `${ESC}[?25l`);
+  clock.advanceTo(60_000 + D);
+  expect(events).toEqual([{ at: 60_000 + D, waiting: true }]);
+});
+
+test("ready reads stamped less than half the window apart never veto", () => {
+  const stamps = (first: number, step: number): number[] => Array.from({ length: 11 }, (_, k) => first + k * step);
+  const pendingThenBunched = [...stamps(1400, 10).slice(0, 5), ...Array<number>(6).fill(1480)];
+  const cases: Array<[string, number[], number, boolean]> = [
+    ["all at one instant", stamps(1450, 0), 0, false],
+    ["spread over 40 ms", stamps(1460, 4), 0, false],
+    ["spread over 50 ms", stamps(1450, 5), 0, true],
+    ["five spread pending reads, then six ready reads at one instant", pendingThenBunched, 5, false],
+  ];
+  for (const [label, times, pending, vetoed] of cases) {
+    let taken = 0;
+    const witness = createScreenWitness({
+      read: () => (taken < pending ? unavailable("screen-pending") : BLANK_READ),
+      now: () => times[taken++]!,
+      showsWait: screenShowsWait,
+      reportError: () => undefined,
+    });
+    const window = witness.arm("s1", D, {
+      setTimeout: (callback) => {
+        callback();
+        return undefined;
+      },
+      clearTimeout: () => undefined,
+    });
+    expect(window.decide(), label).toBe(vetoed);
+  }
+});
+
+test("a clear, purge, stop or busy cue inside the window ends every read and the raise", () => {
+  for (const [label, act] of [
+    ["clear", (d: AttentionDetector) => d.clear("s1")],
+    ["purge", (d: AttentionDetector) => d.purgeScreenMemory("s1")],
+    ["stop", (d: AttentionDetector) => d.stop()],
+    ["busy cue", (d: AttentionDetector) => d.feed("s1", "⠹ running… esc to interrupt")],
+  ] as const) {
+    const { clock, d, reads, events } = witnessRig(() => BLANK_READ);
+    d.feed("s1", PERMISSION_SCREEN);
+    clock.advanceTo(1450);
+    expect(reads.length, `${label}: reads taken before`).toBe(6);
+    act(d);
+    clock.advanceTo(3 * D);
+    expect(reads.length, `${label}: no read afterwards`).toBe(6);
+    expect(events, label).toEqual([]);
+  }
+});
+
+test("a reader that throws is reported on every read and the raise stands", () => {
+  const failure = new Error("screen gone");
+  const reported: Array<{ scope: string; message: string; error: unknown }> = [];
+  const { clock, d, events } = witnessRig(
+    () => {
+      throw failure;
+    },
+    (scope, message, error) => reported.push({ scope, message, error })
+  );
+  d.feed("s1", PERMISSION_SCREEN);
+  clock.advanceTo(D);
+  expect(reported).toHaveLength(11);
+  expect(reported[0]).toEqual({ scope: "attention", message: "screen witness read failed", error: failure });
+  expect(events).toEqual([{ at: D, waiting: true }]);
+});
+
+test("one read that throws among blank reads keeps the raise", () => {
+  const failure = new Error("screen gone");
+  const reported: unknown[] = [];
+  const { clock, d, events } = witnessRig(
+    (at) => {
+      if (at === 1450) throw failure;
+      return BLANK_READ;
+    },
+    (_scope, _message, error) => reported.push(error)
+  );
+  d.feed("s1", PERMISSION_SCREEN);
+  clock.advanceTo(D);
+  expect(reported).toEqual([failure]);
+  expect(events).toEqual([{ at: D, waiting: true }]);
+});
+
+// ----- screen witness replayed on the captures, through a real xterm screen -----
+
+const LAGS = [0, 16] as const;
+
+/**
+ * What a reader of the real xterm screen gets right after each chunk of a capture, and right after each RESIZE marker.
+ * The next chunk is fed from the release hook of the previous one, so xterm's write timer is paid once per capture
+ * instead of once per chunk (a timer tick per chunk on Windows), and the replay itself runs on the virtual clock.
+ */
+function screenStates(name: string): Promise<{ initial: XtermScreenRead; after: Array<XtermScreenRead | undefined> }> {
+  const chunks = loadFixture(name);
+  const after: Array<XtermScreenRead | undefined> = new Array(chunks.length).fill(undefined);
+  return new Promise((resolve) => {
+    let next = 0;
+    let fed = -1;
+    const advance = (): void => {
+      if (fed >= 0) after[fed] = screen.read();
+      fed = -1;
+      while (next < chunks.length) {
+        const chunk = chunks[next]!;
+        const index = next++;
+        const resize = RESIZE_MARKER.exec(chunk.data);
+        if (resize) {
+          screen.resize(Number(resize[1]), Number(resize[2]));
+          after[index] = screen.read();
+        } else if (!isMarker(chunk) && chunk.data.length > 0) {
+          fed = index;
+          screen.feed(chunk.data);
+          return;
+        }
+      }
+      screen.dispose();
+      resolve({ initial, after });
+    };
+    const screen = createXtermScreen({ cols: 120, rows: 40, reportError: () => undefined, releasePending: advance });
+    const initial = screen.read();
+    advance();
+  });
+}
+
+type RaiseEvent = { at: number; waiting: boolean };
+const showsAt = (events: RaiseEvent[]): string => events.map((e) => `${e.waiting ? "+" : "-"}${e.at}`).join(" ");
+
+/** Events of the stream-only detector and, per read lag, of the same detector with the witness reading the real screen. */
+async function replayWithScreen(name: string): Promise<{ head: RaiseEvent[]; witnessed: Record<number, RaiseEvent[]> }> {
+  const { initial, after } = await screenStates(name);
+  let current = initial;
+  let chunkAt = -Infinity;
+  const runs = [undefined, ...LAGS].map((lag) => {
+    const clock = confirmationClock();
+    const events: RaiseEvent[] = [];
+    const d = new AttentionDetector({
+      ...clock.options,
+      ...(lag === undefined
+        ? {}
+        : {
+            screenWitness: createScreenWitness({
+              read: () => (clock.now - chunkAt < lag ? unavailable("screen-pending") : current),
+              now: () => clock.now,
+              showsWait: screenShowsWait,
+              reportError: () => undefined,
+            }),
+          }),
+    });
+    d.on("attention", (e: AttentionEvent) => events.push({ at: clock.now, waiting: e.waiting }));
+    return { lag, clock, d, events };
+  });
+
+  loadFixture(name).forEach((chunk, index) => {
+    for (const run of runs) if (chunk.t !== undefined) run.clock.advanceTo(chunk.t);
+    const state = after[index];
+    if (state) current = state;
+    if (isMarker(chunk) || chunk.data.length === 0) return;
+    chunkAt = runs[0]!.clock.now;
+    for (const run of runs) run.d.feed("s", chunk.data);
+  });
+  for (const run of runs) run.clock.advanceBy(D);
+
+  return {
+    head: runs[0]!.events,
+    witnessed: Object.fromEntries(runs.slice(1).map((run) => [run.lag, run.events])),
+  };
+}
+
+test("replaying every capture through a real screen, the witness changes no verdict but the named one", async () => {
+  const names = readdirSync(join(import.meta.dir, "pty-harness", "fixtures")).filter((name) => name.endsWith(".json")).sort();
+  const deviations: Record<string, { head: string; witnessed: string }> = {};
+
+  const replays = await Promise.all(names.map(async (name) => ({ name, ...(await replayWithScreen(name)) })));
+  for (const { name, head, witnessed } of replays) {
+    for (const lag of LAGS) {
+      if (showsAt(witnessed[lag]!) !== showsAt(head)) {
+        deviations[`${name} @${lag}ms`] = { head: showsAt(head), witnessed: showsAt(witnessed[lag]!) };
+      }
+    }
+  }
+
+  expect(deviations).toEqual({
+    "resize-numbered-draft-2.1.301.json @0ms": { head: "+7838 -7889", witnessed: "" },
+    "resize-numbered-draft-2.1.301.json @16ms": { head: "+7838 -7889", witnessed: "" },
+  });
+});
+
+/** The screen as a reader sees it at `at`: settled chunk states, pending right after a chunk, resize-pending after a resize. */
+async function stormTimeline() {
+  const name = "resize-storm-write-perm-2.1.303.json";
+  const { after } = await screenStates(name);
+  const samples: Array<{ at: number; chunk: boolean; read: XtermScreenRead }> = [];
+  let escWrittenAt = -1;
+  loadFixture(name).forEach((chunk, index) => {
+    const read = after[index];
+    if (read) samples.push({ at: chunk.t, chunk: !isMarker(chunk), read });
+    else if (chunk.data.includes("\\u001b")) escWrittenAt = chunk.t;
+  });
+  const readAt = (at: number, lag: number): XtermScreenRead => {
+    let found: (typeof samples)[number] | undefined;
+    for (const sample of samples) if (sample.at <= at) found = sample;
+    if (!found) return unavailable("disposed");
+    return found.chunk && at - found.at < lag ? unavailable("screen-pending") : found.read;
+  };
+  const firstWaitAt = samples.find(
+    (s) => s.read.status === "ready" && screenShowsWait(s.read.snapshot.lines.join("\n"))
+  )!.at;
+  const resizeAts = samples.filter((s) => !s.chunk).map((s) => s.at);
+  return {
+    readAt,
+    firstWaitAt,
+    escWrittenAt,
+    lastAt: samples[samples.length - 1]!.at,
+    stormFrom: resizeAts[0]! - 100,
+    stormTo: resizeAts[resizeAts.length - 1]! + 400,
+  };
+}
+
+/** Whether the witness vetoes a raise whose deadline falls at `deadlineAt`, reading the timeline through its own clock. */
+function vetoesAt(readAt: (at: number) => XtermScreenRead, deadlineAt: number): boolean {
+  const clock = confirmationClock();
+  const witness = createScreenWitness({
+    read: () => readAt(deadlineAt - D + clock.now),
+    now: () => clock.now,
+    showsWait: screenShowsWait,
+    reportError: () => undefined,
+  });
+  const window = witness.arm("s", D, clock.options);
+  clock.advanceTo(D);
+  return window.decide();
+}
+
+test("a real resize storm over an open dialog never vetoes, whatever the read lag; the same screen vetoes once the dialog is gone", async () => {
+  const { readAt, firstWaitAt, escWrittenAt, lastAt, stormFrom, stormTo } = await stormTimeline();
+  expect(firstWaitAt, "the capture paints the dialog before the storm").toBeGreaterThan(0);
+  expect(escWrittenAt, "the capture records the Esc that closes the dialog").toBeGreaterThan(firstWaitAt);
+  expect(stormFrom, "the storm lies inside the open dialog").toBeGreaterThan(firstWaitAt + 100);
+  expect(stormTo, "the storm ends before the Esc").toBeLessThan(escWrittenAt);
+
+  // The screen only changes at chunks: every millisecond across the storm, sparser where it is static.
+  const deadlines = (from: number, to: number): number[] => {
+    const at: number[] = [];
+    for (let t = from; t <= to; t += t >= stormFrom && t <= stormTo ? 1 : 13) at.push(t);
+    return at;
+  };
+  for (const lag of [0, 8, 16]) {
+    const read = (at: number): XtermScreenRead => readAt(at, lag);
+    const falseVetoes = deadlines(firstWaitAt + 100, escWrittenAt).filter((at) => vetoesAt(read, at));
+    expect(falseVetoes, `lag ${lag} ms`).toEqual([]);
+
+    const missed = deadlines(escWrittenAt + 400, lastAt).filter((at) => !vetoesAt(read, at));
+    expect(missed, `lag ${lag} ms, dialog gone`).toEqual([]);
+  }
 });

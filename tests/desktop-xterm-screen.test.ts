@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { classifyInjectGuard, createXtermScreen, inspectInjectGuard, ScreenGuard } from '../desktop/src/main/xterm-screen'
-import { EXPECTED_FIXTURE_VERDICTS } from './_fixture-verdicts'
+import { EXPECTED_FIXTURE_VERDICTS, RESIZE_MARKER } from './_fixture-verdicts'
 
 const esc = String.fromCharCode(27)
 const createScreen = (
@@ -45,6 +45,8 @@ async function fixtureVerdicts(fixture: string): Promise<{ checkpoints: readonly
       const read = screen.read()
       if (read.status !== 'ready') throw new Error(`${fixture}: xterm screen unavailable: ${read.reason}`)
       checkpoints.push(classifyInjectGuard(read.snapshot))
+      const resize = RESIZE_MARKER.exec(chunk.data)
+      if (resize) screen.resize(Number(resize[1]), Number(resize[2]))
       continue
     }
     screen.feed(chunk.data)
