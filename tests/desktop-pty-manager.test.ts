@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import type { IPty } from "node-pty";
-import { PtyManager } from "../desktop/src/main/pty-manager.ts";
+import { PtyManager, validPtyDimensions } from "../desktop/src/main/pty-manager.ts";
 
 type DataListener = (data: string) => void;
 type ExitListener = (event: { exitCode: number }) => void;
@@ -15,14 +15,23 @@ class FakePty {
   killError: unknown = null;
   resizeError: unknown = null;
 
-  constructor(readonly pid: number) {}
+  constructor(readonly pid: number, private readonly dataOnRegistration: string | null = null) {}
 
   onData(listener: DataListener): void {
     this.dataListener = listener;
+    if (this.dataOnRegistration !== null) listener(this.dataOnRegistration);
   }
 
   onExit(listener: ExitListener): void {
     this.exitListener = listener;
+  }
+
+  dataRegistered(): boolean {
+    return this.dataListener !== null;
+  }
+
+  exitRegistered(): boolean {
+    return this.exitListener !== null;
   }
 
   write(data: string): void {
@@ -63,8 +72,10 @@ class FakePtyAdapter {
     proc: FakePty;
   }> = [];
 
+  constructor(private readonly dataOnRegistration: string | null = null) {}
+
   spawn(...[file, args, options]: SpawnArgs): IPty {
-    const proc = new FakePty(this.calls.length + 1);
+    const proc = new FakePty(this.calls.length + 1, this.dataOnRegistration);
     this.calls.push({
       file,
       args: typeof args === "string" ? [args] : args,
@@ -272,6 +283,50 @@ test("PtyManager gives a replacement PTY a distinct life identity", () => {
   expect(firstLife).not.toBeNull();
   expect(secondLife).not.toBeNull();
   expect(secondLife).not.toBe(firstLife);
+});
+
+test("PtyManager announces a live terminal's initial dimensions", () => {
+  const adapter = new FakePtyAdapter();
+  const { manager } = createManager(adapter);
+  const starts: Array<{ id: string; cols: number; rows: number; life: object | null }> = [];
+
+  manager.spawn("tile-7", "C:/work", opts("claude"), undefined, ({ id, cols, rows }: { id: string; cols: number; rows: number }) => {
+    starts.push({ id, cols, rows, life: manager.life(id) });
+  });
+
+  expect(starts).toEqual([{ id: "tile-7", cols: 80, rows: 24, life: expect.any(Object) }]);
+});
+
+test("PtyManager registers terminal data after its start callback", () => {
+  const adapter = new FakePtyAdapter("initial output");
+  const { manager } = createManager(adapter);
+  const events: string[] = [];
+  manager.on("data", () => events.push("data"));
+
+  manager.spawn("tile-7", "C:/work", opts("bash"), undefined, () => events.push("start"));
+
+  expect(events).toEqual(["start", "data"]);
+});
+
+test("PtyManager retires a live PTY when its start callback fails", () => {
+  const adapter = new FakePtyAdapter();
+  const { manager } = createManager(adapter);
+  const failure = new Error("screen setup failed");
+
+  expect(() => manager.spawn("tile-7", "C:/work", opts("bash"), undefined, () => { throw failure; })).toThrow(failure);
+
+  const proc = adapter.calls[0]!.proc;
+  expect(manager.isAlive("tile-7")).toBe(false);
+  expect(proc.killCalls).toBe(1);
+  expect(proc.dataRegistered()).toBe(false);
+  expect(proc.exitRegistered()).toBe(true);
+});
+
+test("validPtyDimensions rejects NaN and zero", () => {
+  expect(validPtyDimensions(Number.NaN, 24)).toBe(false);
+  expect(validPtyDimensions(80, Number.NaN)).toBe(false);
+  expect(validPtyDimensions(0, 24)).toBe(false);
+  expect(validPtyDimensions(80, 0)).toBe(false);
 });
 
 test("PtyManager rejects invalid sizes and preserves dimensions when native resize fails", () => {

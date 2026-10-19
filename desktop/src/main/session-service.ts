@@ -10,7 +10,7 @@ import type {
   SessionRuntime,
   SessionStatus
 } from '@shared/types'
-import { PtyManager } from './pty-manager'
+import { PtyManager, validPtyDimensions } from './pty-manager'
 import { saveSessions } from './store'
 import { fetchTilePeers, type BrokerEndpoint } from './broker-client'
 import { PEER_POLL_MS, TilePeerPoller } from './peer-state'
@@ -1314,6 +1314,10 @@ export class SessionService extends EventEmitter {
   }
 
   resize(id: string, cols: number, rows: number): void {
+    if (!validPtyDimensions(cols, rows)) {
+      reportError('session', `ignored invalid terminal dimensions for tile "${id}"`)
+      return
+    }
     this.screenGuard.resize(id, cols, rows)
     if (!this.pty.resize(id, cols, rows)) this.screenGuard.invalidate(id, 'PTY resize failed')
   }
@@ -1579,14 +1583,13 @@ export class SessionService extends EventEmitter {
         reportError('session', `permission lease setup failed for "${def.name}"`, e)
       }
     }
-    this.screenGuard.start(def.id, 80, 24)
     try {
       this.pty.spawn(
         def.id,
         def.cwd,
         { command, shell: cfg.shell, interactive: cfg.interactiveShell },
-        // Per-tile token: server.ts writes the real session id keyed by it (D1/D2/D10).
-        sessionEnv
+        sessionEnv,
+        ({ id, cols, rows }) => this.screenGuard.start(id, cols, rows)
       )
       this.deadWriteReported.delete(def.id)
     } catch (e) {

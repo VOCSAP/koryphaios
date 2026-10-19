@@ -58,7 +58,7 @@ Une entrée `ScreenGuard` représente **une vie PTY d'une tuile**, avec un objet
 Séparer trois surfaces :
 
 1. **Écrivain** : création avec dimensions réelles, `feed(id, string)`, demande de resize, destruction. Une entrée absente ne renaît pas par un callback ancien. Tout flux d'une vie non initialisée reste indisponible.
-2. **Lecture** : union explicite `ready(snapshot)` ou `unavailable(reason)`. Un snapshot contient génération, révision, dimensions, lignes copiées et curseur. Ne pas exposer les objets `IBufferLine` vivants.
+2. **Lecture** : union explicite `ready(snapshot)` ou `unavailable(reason)`. Un snapshot contient une révision, des dimensions, les lignes copiées et le curseur. L’identité stable de l’objet `life` du PTY sert de génération hors snapshot : toute opération asynchrone la capture à son entrée et la compare avant d’écrire. Ne pas exposer les objets `IBufferLine` vivants.
 3. **Règles** : `inspectInjectGuard(snapshot)` reste synchrone et conserve la décision métier de HEAD. La façade transforme `unavailable` en `modal` avec raison technique (`screen-pending`, `sequence-incomplete`, `resize-pending`, `screen-fault`, etc.).
 
 `feed` invalide d'abord le cache et augmente `submitted`, avant tout événement externe. `Terminal.write` reçoit un callback capturant propriétaire et révision. Le callback d'une ancienne vie ne publie rien. Une lecture n'est `ready` que si : vie actuelle, aucune faute, `submitted === applied`, aucun resize en attente, parseur au repos et décodeur sans continuation. La copie des lignes peut être paresseuse, une seule fois par révision, plutôt que reconstruite à chaque chunk.

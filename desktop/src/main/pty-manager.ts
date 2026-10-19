@@ -28,6 +28,11 @@ export interface PtyExitPayload {
   id: string
   exitCode: number
 }
+export interface PtyStartedPayload {
+  id: string
+  cols: number
+  rows: number
+}
 
 /** Give up stripping the interactive start marker after this many buffered UTF-16 code units. */
 const MARKER_BUFFER_CAP_CODE_UNITS = 65536
@@ -45,7 +50,7 @@ const CONPTY_KICK_DELAYS_MS = [1500, 4000, 8000, 15000]
 const KILL_ACK_TIMEOUT_MS = 3000
 const MAX_PTY_CELLS = 1024 * 1024
 
-const validDimensions = (cols: number, rows: number): boolean =>
+export const validPtyDimensions = (cols: number, rows: number): boolean =>
   Number.isSafeInteger(cols) && Number.isSafeInteger(rows) && cols > 0 && rows > 0 && cols * rows <= MAX_PTY_CELLS
 
 type PtyAdapter = {
@@ -58,6 +63,7 @@ interface SpawnRequest {
   extraEnv?: Record<string, string>
   cols: number
   rows: number
+  onStarted?: (payload: PtyStartedPayload) => void
 }
 
 interface Spawned {
@@ -128,13 +134,18 @@ export class PtyManager extends EventEmitter {
   /**
    * Spawn a peer terminal for `id`. A replacement immediately takes the tile's
    * public identity while the old process stays separately observable until exit.
-   * `extraEnv` (the scope env from scope.ts) is merged last so its forced-group
-   * vars win over anything inherited from the parent process. In interactive mode
+   * `extraEnv` is merged last so its forced-group vars win over inherited values. In interactive mode
    * the rc/profile noise before the start marker is stripped from output.
    */
-  spawn(id: string, cwd: string, opts: SpawnOpts, extraEnv?: Record<string, string>): number {
+  spawn(
+    id: string,
+    cwd: string,
+    opts: SpawnOpts,
+    extraEnv?: Record<string, string>,
+    onStarted?: (payload: PtyStartedPayload) => void
+  ): number {
     this.kill(id)
-    return this.spawnNow(id, { cwd, opts, extraEnv, cols: 80, rows: 24 })
+    return this.spawnNow(id, { cwd, opts, extraEnv, cols: 80, rows: 24, onStarted })
   }
 
   private spawnNow(id: string, request: SpawnRequest): number {
@@ -175,6 +186,24 @@ export class PtyManager extends EventEmitter {
       kickTimers: []
     }
     this.procs.set(id, state)
+    proc.onExit(({ exitCode }) => {
+      const retired = this.retired.get(proc)
+      if (retired) {
+        this.retired.delete(proc)
+        if (retired.killTimer) this.cancel(retired.killTimer)
+        return
+      }
+      if (this.procs.get(id) !== state) return
+      this.procs.delete(id)
+      for (const t of state.kickTimers) this.cancel(t)
+      this.emit('exit', { id, exitCode } satisfies PtyExitPayload)
+    })
+    try {
+      request.onStarted?.({ id, cols: state.cols, rows: state.rows })
+    } catch (error) {
+      this.kill(id)
+      throw error
+    }
 
     // See CONPTY_KICK_DELAYS_MS: force ConPTY to flush the withheld first
     // frame. Same-dims resize -- dims may have been updated by resize() by the
@@ -196,18 +225,6 @@ export class PtyManager extends EventEmitter {
       if (this.procs.get(id) !== state) return
       if (RAW_CAPTURE_FILE && rawCaptureCount < RAW_CAPTURE_LIMIT) this.captureRawChunk(id, data)
       this.handleData(id, data)
-    })
-    proc.onExit(({ exitCode }) => {
-      const retired = this.retired.get(proc)
-      if (retired) {
-        this.retired.delete(proc)
-        if (retired.killTimer) this.cancel(retired.killTimer)
-        return
-      }
-      if (this.procs.get(id) !== state) return
-      this.procs.delete(id)
-      for (const t of state.kickTimers) this.cancel(t)
-      this.emit('exit', { id, exitCode } satisfies PtyExitPayload)
     })
 
     return proc.pid
@@ -271,7 +288,7 @@ export class PtyManager extends EventEmitter {
 
   resize(id: string, cols: number, rows: number): boolean {
     const s = this.procs.get(id)
-    if (!s || !validDimensions(cols, rows)) return false
+    if (!s || !validPtyDimensions(cols, rows)) return false
     try {
       s.proc.resize(cols, rows)
       s.cols = cols

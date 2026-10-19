@@ -20,6 +20,7 @@ function fixture(
     runtime?: { needsAttention?: boolean; rateLimited?: boolean }
     lastOutputAt?: number | null
     replaceLifeAfterEscape?: boolean
+    replaceLifeDuringIdleWait?: boolean
     turnCeilingMs?: number
   } = {}
 ) {
@@ -44,7 +45,10 @@ function fixture(
       read: () => reads.shift() ?? clearScreen()
     },
     { get: (id) => (alive.has(id) ? options.runtime ?? {} : undefined) },
-    () => options.lastOutputAt ?? null,
+    () => {
+      if (options.replaceLifeDuringIdleWait) life = {}
+      return options.lastOutputAt ?? null
+    },
     { activityIdleMs: 500, settleMs: 5, idlePollMs: 5, ...(options.turnCeilingMs ? { turnCeilingMs: options.turnCeilingMs } : {}) },
     (message) => reports.push(message),
     (_scope, message) => logs.push(message)
@@ -89,6 +93,20 @@ test('a replaced PTY life after Escape receives no command text', async () => {
 
   expect(await injector.injectCommand('t1', '/clear')).toBe('no-terminal')
   expect(commands(writes)).toEqual(['ESC'])
+})
+
+test('a life replacement while injection waits writes nothing', async () => {
+  const { injector, writes } = fixture({ replaceLifeDuringIdleWait: true })
+
+  expect(await injector.injectCommand('t1', '/clear')).toBe('no-terminal')
+  expect(commands(writes)).toEqual([])
+})
+
+test('a life replacement during an expired idle wait writes nothing', async () => {
+  const { injector, writes } = fixture({ replaceLifeDuringIdleWait: true, lastOutputAt: Date.now() + 60_000 })
+
+  expect(await injector.injectCommand('t1', '/clear', 0)).toBe('no-terminal')
+  expect(commands(writes)).toEqual([])
 })
 
 test('two injections outside of any turn interleave their Escape and command writes', async () => {

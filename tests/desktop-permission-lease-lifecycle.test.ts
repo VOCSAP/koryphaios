@@ -193,6 +193,7 @@ function executeLeaseCreationFailure(source: string) {
   ) => Record<string, string>;
   const failure = new Error("lease write failed");
   const calls: string[] = [];
+  const screenStarts: Array<[string, number, number]> = [];
   const reports: unknown[] = [];
   const context = {
     permissionLeases: {
@@ -203,14 +204,24 @@ function executeLeaseCreationFailure(source: string) {
     },
     permissionLeaseHandles: new Map<string, TestLeaseHandle>(),
     pty: {
-      spawn: (_id: string, _cwd: string, _opts: unknown, env: Record<string, string>) => {
+      spawn: (
+        id: string,
+        _cwd: string,
+        _opts: unknown,
+        env: Record<string, string>,
+        onStarted?: (started: { id: string; cols: number; rows: number }) => void
+      ) => {
         calls.push(`spawn:${env.KORY_PERMISSION_LEASE}`);
+        onStarted?.({ id, cols: 91, rows: 31 });
       },
     },
     revokePermissionLeaseHandle: () => {},
     cleanupSandbox: () => Promise.resolve(),
     deadWriteReported: { delete: () => {} },
-    screenGuard: { start: () => {}, clear: () => {} },
+    screenGuard: {
+      start: (id: string, cols: number, rows: number) => screenStarts.push([id, cols, rows]),
+      clear: () => {}
+    },
   };
   const sessionEnv = { KORY_PERMISSION_LEASE: "" };
   run.call(
@@ -224,13 +235,14 @@ function executeLeaseCreationFailure(source: string) {
     (value) => value === "claude",
     (_scope, _message, error) => reports.push(error)
   );
-  return { calls, reports, failure };
+  return { calls, screenStarts, reports, failure };
 }
 
 test("a failed lease write still launches the host Claude tile without a descriptor", () => {
   const result = executeLeaseCreationFailure(readFileSync(SESSION_SERVICE_PATH, "utf8"));
 
   expect(result.calls).toEqual(["spawn:"]);
+  expect(result.screenStarts).toEqual([["tile-1", 91, 31]]);
   expect(result.reports).toEqual([result.failure]);
 });
 

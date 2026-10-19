@@ -3,6 +3,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { extractBracedBody } from "./_braced-body";
+import { validPtyDimensions } from "../desktop/src/main/pty-manager.ts";
 
 const SESSION_SERVICE_PATH = join(import.meta.dir, "..", "desktop", "src", "main", "session-service.ts");
 const SHARED = join(import.meta.dir, "..", "desktop", "src", "shared");
@@ -80,6 +81,34 @@ function interrupt(id: string, mode: "pause" | "hard", self: object): string {
   return run.call(self, id, mode, () => {});
 }
 
+function resize(
+  id: string,
+  cols: number,
+  rows: number,
+  self: object,
+  reportError: (scope: string, message: string) => void,
+  validate: (cols: number, rows: number) => boolean = validPtyDimensions
+): void {
+  const source = readFileSync(SESSION_SERVICE_PATH, "utf-8");
+  const body = extractBody(source, /resize\(id: string, cols: number, rows: number\): void \{/, "resize()");
+  const run = new Function("id", "cols", "rows", "reportError", "validPtyDimensions", body) as (
+    this: object,
+    id: string,
+    cols: number,
+    rows: number,
+    reportError: (scope: string, message: string) => void,
+    validPtyDimensions: (cols: number, rows: number) => boolean
+  ) => void;
+  run.call(
+    self,
+    id,
+    cols,
+    rows,
+    reportError,
+    validate
+  );
+}
+
 class Timers {
   private readonly callbacks = new Map<number, Array<() => void>>();
 
@@ -136,11 +165,43 @@ function startupAck(id: string, self: object, timers: Timers): void {
 test("interrupt reports no-terminal when a live PTY rejects Escape", () => {
   const self = {
     pty: { isAlive: () => true, write: () => false },
-    screenGuard: { inspect: () => ({ state: "clear" }) },
+    screenGuard: { read: () => ({ status: "ready" }) },
     runtime: new Map()
   };
 
   expect(interrupt("tile", "hard", self)).toBe("no-terminal");
+});
+
+test("resize rejects every invalid dimension before resizing the screen or PTY", () => {
+  const validations: Array<[number, number]> = [];
+  const reports: Array<[string, string]> = [];
+  let screenResizes = 0;
+  let ptyResizes = 0;
+  const self = {
+    screenGuard: {
+      resize: () => screenResizes++,
+      invalidate: () => {}
+    },
+    pty: { resize: () => (ptyResizes++, true) }
+  };
+  const invalid: Array<[number, number]> = [
+    [Number.NaN, 24],
+    [80, Number.NaN],
+    [0, 24],
+    [80, 0],
+    [1025, 1024]
+  ];
+  const validate = (cols: number, rows: number): boolean => {
+    validations.push([cols, rows]);
+    return validPtyDimensions(cols, rows);
+  };
+
+  for (const [cols, rows] of invalid) resize("tile", cols, rows, self, (scope, message) => reports.push([scope, message]), validate);
+
+  expect(validations).toEqual(invalid);
+  expect(screenResizes).toBe(0);
+  expect(ptyResizes).toBe(0);
+  expect(reports).toEqual(invalid.map(() => ["session", 'ignored invalid terminal dimensions for tile "tile"']));
 });
 
 test("SessionService.write treats a rejected write as the terminal authority", () => {

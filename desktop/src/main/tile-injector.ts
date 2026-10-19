@@ -119,11 +119,11 @@ export class TileInjector {
     idleWaitMs: number = DIRECTIVE_IDLE_WAIT_MS
   ): Promise<DirectiveOutcome> {
     if (!this.pty.isAlive(id)) return 'no-terminal'
-    const idle = await this.waitIdle(id, idleWaitMs)
-    if (!this.pty.isAlive(id)) return 'no-terminal'
-    if (!idle) return 'busy-timeout'
     const life = this.pty.life(id)
     if (!life) return 'no-terminal'
+    const idle = await this.waitIdle(id, idleWaitMs)
+    if (!this.pty.isAlive(id) || this.pty.life(id) !== life) return 'no-terminal'
+    if (!idle) return 'busy-timeout'
     const firstRefusal = this.refusal(id)
     if (firstRefusal) return firstRefusal
     if (!this.pty.write(id, '\x1b')) return 'no-terminal'
