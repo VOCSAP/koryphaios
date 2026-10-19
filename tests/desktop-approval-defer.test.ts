@@ -13,6 +13,7 @@ import {
   settleTileAnsweredInTerminal,
 } from "../desktop/src/main/approval-service";
 import { matchPermissionDialog, permissionDialogShown } from "../desktop/src/main/permission-dialog";
+import { trustPromptShown } from "../desktop/src/main/attention";
 import { withinDeferWindow } from "../desktop/src/main/approval-service";
 import { canonicalPath } from "../desktop/src/main/worktree-service";
 import { buildApprovalRequest } from "../desktop/hooks/approval-hook";
@@ -59,7 +60,7 @@ const registerPoller = await evaluate<{ poll: () => Promise<void> }>(
   const { approvals, approvalsEnabled, fetchUndeliveredVerdicts, service, waitingTiles,
           openApprovals, heldVerdicts, canApplyVerdict, classifyVerdict, buildKeystrokes,
           journal, markVerdictsDelivered, reportError, matchPermissionDialog, permissionDialogShown,
-          withinDeferWindow, canonicalPath, broadcast } = env
+          trustPromptShown, withinDeferWindow, canonicalPath, broadcast } = env
 ${POLLER}
   return { poll: pollApprovalVerdicts }
 }
@@ -98,10 +99,12 @@ function verdict(over: Partial<Approval> & { tile?: string } = {}): Approval {
   } as unknown as Approval;
 }
 
-const blankScreen = (): XtermScreenRead => ({
-  status: "ready",
-  snapshot: { revision: 0, cols: 120, rows: 40, lines: Array(40).fill(""), cursor: { x: 0, y: 0 } },
-});
+const composerScreen = (): XtermScreenRead => {
+  const border = String.fromCharCode(0x2500).repeat(120);
+  const lines = Array<string>(40).fill("");
+  lines.splice(36, 3, border, `${String.fromCharCode(0x276f)} `, border);
+  return { status: "ready", snapshot: { revision: 0, cols: 120, rows: 40, lines, cursor: { x: 2, y: 37 } } };
+};
 
 function pollerEnv(opts: {
   settled: Approval[];
@@ -122,7 +125,7 @@ function pollerEnv(opts: {
     service: {
       list: () => (opts.tiles ?? ["s1"]).map((id) => ({ id, name: `tile ${id}`, peerId: null, cwd: "C:\\proj" })),
       write: (tile: string, keys: string) => written.push({ tile, keys }),
-      screenRead: (tile: string) => opts.screens?.[tile] ?? blankScreen(),
+      screenRead: (tile: string) => opts.screens?.[tile] ?? composerScreen(),
     },
     waitingTiles,
     openApprovals,
@@ -132,6 +135,7 @@ function pollerEnv(opts: {
     buildKeystrokes,
     matchPermissionDialog,
     permissionDialogShown,
+    trustPromptShown,
     withinDeferWindow,
     canonicalPath,
     broadcast: (...args: unknown[]) => calls.push({ fn: "broadcast", args }),
@@ -412,6 +416,91 @@ describe("pollApprovalVerdicts types a permission verdict only into the dialog i
     const { poll, written } = pollerEnv({ settled: [question], waiting: ["s1"], screens: { s1: truncatedScreen(5) } });
     await poll();
     expect(written).toEqual([{ tile: "s1", keys: "go on\r" }]);
+  });
+});
+
+describe("pollApprovalVerdicts types no remote answer into a trust prompt", () => {
+  const FIXTURES = join(import.meta.dir, "pty-harness", "fixtures");
+  /** The screen after the first `count` chunks of a capture (all of them when omitted), markers not fed, then `after`. */
+  async function screenBefore(name: string, count?: number, after = ""): Promise<Extract<XtermScreenRead, { status: "ready" }>> {
+    const chunks = JSON.parse(readFileSync(join(FIXTURES, name), "utf8")) as { data: string }[];
+    const screen = createXtermScreen({ cols: 120, rows: 40, reportError: () => undefined });
+    for (const chunk of chunks.slice(0, count)) if (!chunk.data.startsWith("\n##########")) screen.feed(chunk.data);
+    if (after) screen.feed(after);
+    await screen.drain();
+    const read = screen.read();
+    screen.dispose();
+    if (read.status !== "ready") throw new Error(`${name}: screen unavailable: ${read.reason}`);
+    return read;
+  }
+
+  // The chunk count stops each capture while its trust prompt is open and unanswered.
+  const TRUST_SCREENS: Array<[string, string, number?]> = [
+    ["2.1.303 glued folder", "trust-dialog-glued-folder-2.1.303.json", 6],
+    ["2.1.291", "permission-bash-2.1.291.json", 13],
+    ["2.1.282 quick safety check", "trust-dialog-quick-safety-check.json"],
+    ["2.1.229 numbered, Yes highlighted", "dialog-open-with-esc.json", 7],
+  ];
+  const answers = {
+    "a text answer": verdict({ kind: "question", answer_kind: "text", answer_text: "j" } as Partial<Approval>),
+    "an allow": verdict({ kind: "question", answer_kind: "allow" } as Partial<Approval>),
+    "a deny": verdict({ kind: "question", answer_kind: "deny" } as Partial<Approval>),
+  };
+  const notApplied = (calls: Call[]) => calls.filter((c) => c.fn === "broadcast" && c.args[0] === "approvals:not-applied");
+
+  for (const [label, name, stopAt] of TRUST_SCREENS) {
+    test(`${label}: trustPromptShown reads the screen`, async () => {
+      expect(trustPromptShown((await screenBefore(name, stopAt)).snapshot.lines)).toBe(true);
+    });
+
+    for (const [what, settled] of Object.entries(answers)) {
+      test(`${label}: ${what} is refused at once, traced and toasted, never typed`, async () => {
+        const screen = await screenBefore(name, stopAt);
+        const { poll, written, marked, calls } = pollerEnv({ settled: [settled], waiting: ["s1"], screens: { s1: screen } });
+        await poll();
+        expect(written, "Enter on a trust prompt selects the highlighted option").toEqual([]);
+        expect(flat(marked), "refused for good, not held").toEqual(["appr-42"]);
+        expect(calls.filter((c) => c.fn === "reportError" && /trust prompt is on screen/.test(String(c.args[1])))).toHaveLength(1);
+        expect(notApplied(calls)).toHaveLength(1);
+      });
+    }
+  }
+
+  test("a question answer still reaches a real composer screen", async () => {
+    const composer = await screenBefore("prompt-idle-with-esc.json");
+    expect(trustPromptShown(composer.snapshot.lines)).toBe(false);
+    const question = verdict({ kind: "question", answer_kind: "text", answer_text: "go on" } as Partial<Approval>);
+    const { poll, written, calls } = pollerEnv({ settled: [question], waiting: ["s1"], screens: { s1: composer } });
+    await poll();
+    expect(written).toEqual([{ tile: "s1", keys: "go on\r" }]);
+    expect(notApplied(calls)).toEqual([]);
+  });
+
+  test("prose that only says it trusts a folder is not a trust prompt", () => {
+    expect(trustPromptShown(["I trust this folder", "No, exit is what I would never pick"])).toBe(false);
+  });
+
+  test("the 'Do you trust the files' wording is a trust prompt", () => {
+    expect(trustPromptShown(["Do you trust the files in this folder?"])).toBe(true);
+  });
+
+  test.each(Object.entries(answers))("%s is held, not typed, when a resize clears the screen under the trust prompt", async (_what, settled) => {
+    const blank = await screenBefore("trust-dialog-glued-folder-2.1.303.json", 6, "\x1b[2J");
+    expect(blank.snapshot.lines.every((l) => l === ""), "ConPTY emits ESC[2J right after a resize").toBe(true);
+    const held = pollerEnv({ settled: [settled], waiting: ["s1"], screens: { s1: blank } });
+    await held.poll();
+    expect(held.written, "the clear hid the prompt, so the Enter would still land in it").toEqual([]);
+    expect(flat(held.marked), "held for the next poll, not consumed").toEqual([]);
+
+    const late = pollerEnv({
+      settled: [{ ...settled, answered_at: new Date(Date.now() - VERDICT_DEFER_MS - 1_000).toISOString() } as Approval],
+      waiting: ["s1"],
+      screens: { s1: blank },
+    });
+    await late.poll();
+    expect(late.written).toEqual([]);
+    expect(flat(late.marked), "refused for good once the window is over").toEqual(["appr-42"]);
+    expect(late.calls.filter((c) => c.fn === "reportError" && /screen blank/.test(String(c.args[1])))).toHaveLength(1);
   });
 });
 

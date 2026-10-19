@@ -58,6 +58,16 @@ function afterTrustPrompt(text: string): string | null {
   return null
 }
 
+// The 2.1.229 prompt numbers its options with "Yes" first and highlighted, so no
+// TRUST_PATTERNS entry (which expects "No, exit" first) matches it.
+const NUMBERED_TRUST_RE = /Yes,\s*I\s*trust\s*this\s*folder\s*(?:\u276f\s*)?2\.\s*No,\s*exit/i
+
+/** Whether a trust prompt is on the screen `lines` (rows of the visible snapshot). */
+export function trustPromptShown(lines: readonly string[]): boolean {
+  const text = lines.join('\n')
+  return TRUST_PATTERNS.some((re) => re.test(text)) || NUMBERED_TRUST_RE.test(text)
+}
+
 const SELECTOR = '\u276f'
 const BORDER = '\u2500'
 
