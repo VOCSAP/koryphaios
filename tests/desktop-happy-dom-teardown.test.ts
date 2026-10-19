@@ -77,7 +77,7 @@ test("CONTAMINATION_MARKERS est epingle a la table canonique (D4, reviewer 2026-
   // dans le lot partage, et cette garde restait 31 pass / 0 fail. Epingler
   // contre un litteral independant de la constante de production rend un
   // marqueur retire visible, peu importe ce que fait le reste du fichier.
-  expect([...CONTAMINATION_MARKERS].sort()).toEqual(["GlobalRegistrator.register(", "mock.module("].sort())
+  expect([...CONTAMINATION_MARKERS].sort()).toEqual(["GlobalRegistrator.register(", "mock.module(", "mockStore("].sort())
 })
 
 test("chaque marqueur de contamination matche au moins un fichier reel sur disque (un marqueur mort ou mal orthographie serait un no-op gratuit)", () => {

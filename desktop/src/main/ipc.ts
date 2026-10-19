@@ -2,6 +2,8 @@ import { join } from 'node:path'
 import { app, BrowserWindow, desktopCapturer, dialog, shell, webContents } from 'electron'
 import { broadcast, isLocalIpcEvent, regHandle, regOn } from './api-registry'
 import { safeExternalUrl } from './external-url'
+import { createLinkOpener, nodeLinkFs } from './link-opener'
+import { homedir } from 'node:os'
 import { handleAnswersIpc } from './approval-service'
 import type {
   AckableInboxEntry,
@@ -76,6 +78,7 @@ import { collectDiff, collectFileDiff, composeDiffReviewPrompt } from './diff-se
 import { clearReviewState, readReviewState, validatePersistedReview, writeReviewState } from './review-state-service'
 import { recordingFileName } from '@shared/recording'
 import { DEFAULT_DEMO_TARGET, sanitizeTarget } from '@shared/models'
+import { linkPolicyOf } from '@shared/link-policy'
 import { startDemoControl } from './demo-control'
 import { createBrowserDriver } from './browser-drive'
 import {
@@ -1024,6 +1027,16 @@ export function registerIpc({
     }
     return p
   }
+
+  const linkOpener = createLinkOpener({
+    shell,
+    fs: nodeLinkFs(),
+    policy: () => linkPolicyOf(getConfig()),
+    home: homedir(),
+    platform: process.platform,
+    reportError
+  })
+  regHandle('shell:open-link', (_e, target: unknown, intent: unknown) => linkOpener.open(target, intent))
 
   // ----- dev server (serve.json) -----
   const serveIpc = createServeIpc({

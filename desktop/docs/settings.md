@@ -36,6 +36,8 @@ change, free-text inputs on blur.
 | **Launch command** | Command run in each terminal, with `--session-id` appended. Saved to the **global** launch config; a project config overrides it (see below) |
 | **Shell override** | Empty = auto (`$SHELL` on Unix, `powershell.exe` on Windows) |
 | **Interactive shell** | Load rc/profile so shell aliases resolve (start-marker noise stripping applied) |
+| **File types opened by Ctrl+click** | Extensions a Ctrl/Cmd+click on a terminal link may launch in the default application, anywhere on disk (default: png, jpg, jpeg, gif, webp, bmp, md, txt, log, json). A plain click only shows the path in its folder. Executable, script and installer types (exe, sh, html, pdf and the like) are refused here, and a Ctrl+click only shows them in their folder. Comma-separated; an invalid value is refused |
+| **Locations a terminal link never opens** | Bare names (`.ssh`) match any path segment; `~/` or absolute paths match that file or folder and what is under it (default: `.ssh`, `.aws`, `.gnupg`, `.kube`, `.docker`, `.credentials.json`, `operator.json`, `companion-cert.json`). A comma always separates two entries, so a path containing a comma cannot be excluded. Checked on the resolved real path, so a link into an excluded place is refused too |
 
 ### Models
 

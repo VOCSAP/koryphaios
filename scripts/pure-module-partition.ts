@@ -73,7 +73,7 @@ export function exemptedFiles(files: string[], exemptions: Exemptions = EXEMPTIO
  * silently reopen the exact contamination chain this partition exists to
  * close, so the scan is never narrowed to reduce false positives.
  */
-export const CONTAMINATION_MARKERS = ["GlobalRegistrator.register(", "mock.module("] as const;
+export const CONTAMINATION_MARKERS = ["GlobalRegistrator.register(", "mock.module(", "mockStore("] as const;
 
 /** True if `file` (a bare filename under tests/) matches an exemption. */
 export function isExempt(file: string, exemptions: Exemptions = EXEMPTIONS): boolean {

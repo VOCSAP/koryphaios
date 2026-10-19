@@ -12,6 +12,7 @@ import {
 import { ModelPicker } from './ModelPicker'
 import { DEFAULT_GLOW, DEFAULT_PALETTE } from '@shared/palette'
 import { SPAWN_CAP_MAX, SPAWN_CAP_MIN } from '@shared/spawn-cap-limits'
+import { sanitizeLinkExclusions, sanitizeLinkExtensions } from '@shared/link-policy'
 import { GLYPH_ACTIONS } from './icons'
 import { graphId } from '@shared/graph'
 import { useDeck } from '../store'
@@ -69,6 +70,23 @@ export function SettingsView(): React.JSX.Element {
     } else {
       setAgentSpawnCap(String(config.agentSpawnCap))
     }
+  }
+
+  const listText = (list: string[]): string => list.join(', ')
+  const [linkExtensions, setLinkExtensions] = useState(listText(config.linkOpenExtensions))
+  useEffect(() => setLinkExtensions(listText(config.linkOpenExtensions)), [config.linkOpenExtensions])
+  const [linkExclusions, setLinkExclusions] = useState(listText(config.linkOpenExclusions))
+  useEffect(() => setLinkExclusions(listText(config.linkOpenExclusions)), [config.linkOpenExclusions])
+  // An unusable list is not sent: the field goes back to what is stored, as for the spawn cap.
+  const commitLinkList = (key: 'linkOpenExtensions' | 'linkOpenExclusions', text: string): void => {
+    const parsed = text.split(',').map((entry) => entry.trim()).filter((entry) => entry !== '')
+    const clean = key === 'linkOpenExtensions' ? sanitizeLinkExtensions(parsed) : sanitizeLinkExclusions(parsed)
+    const setText = key === 'linkOpenExtensions' ? setLinkExtensions : setLinkExclusions
+    if (clean === null || listText(clean) === listText(config[key])) {
+      setText(listText(config[key]))
+      return
+    }
+    set(key, clean)
   }
 
   // launchCommand lives in the (global) launch config, not AppConfig. presets +
@@ -470,6 +488,32 @@ export function SettingsView(): React.JSX.Element {
                   onChange={(e) => set('interactiveShell', e.target.checked)}
                 />
                 <span>{t('settings.interactiveShell')}</span>
+              </label>
+
+              <label className="field">
+                <span>{t('settings.linkOpenExtensions')}</span>
+                <input
+                  value={linkExtensions}
+                  onChange={(e) => setLinkExtensions(e.target.value)}
+                  onBlur={() => commitLinkList('linkOpenExtensions', linkExtensions)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') commitLinkList('linkOpenExtensions', linkExtensions)
+                  }}
+                />
+                <small>{t('settings.linkOpenExtensionsHelp')}</small>
+              </label>
+
+              <label className="field">
+                <span>{t('settings.linkOpenExclusions')}</span>
+                <input
+                  value={linkExclusions}
+                  onChange={(e) => setLinkExclusions(e.target.value)}
+                  onBlur={() => commitLinkList('linkOpenExclusions', linkExclusions)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') commitLinkList('linkOpenExclusions', linkExclusions)
+                  }}
+                />
+                <small>{t('settings.linkOpenExclusionsHelp')}</small>
               </label>
             </>
           )}

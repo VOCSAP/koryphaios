@@ -1,4 +1,5 @@
 import { Terminal, type ITerminalInitOnlyOptions, type ITerminalOptions } from '@xterm/xterm'
+import { installTerminalLinks, type TerminalLinkDeps } from './terminal-links'
 
 export const FOCUS_REPORTING_MODE = 1004
 
@@ -42,12 +43,14 @@ export function suppressFocusReporting(
   })
 }
 
-/** The only way a session terminal is built, so the focus guard cannot be forgotten at a call site. */
+/** The only way a session terminal is built, so neither the focus guard nor the link gate can be forgotten at a call site. */
 export function createSessionTerminal(
   options: ITerminalOptions & ITerminalInitOnlyOptions,
-  report: (message: string) => void
+  report: (message: string) => void,
+  links: TerminalLinkDeps
 ): Terminal {
   const term = new Terminal(options)
   suppressFocusReporting(term, report)
+  installTerminalLinks(term, links)
   return term
 }

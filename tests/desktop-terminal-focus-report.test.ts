@@ -1,13 +1,21 @@
 import { describe, expect, test } from 'bun:test'
 import { Terminal } from '@xterm/xterm'
 import { createSessionTerminal } from '../desktop/src/renderer/src/terminal-focus-report'
+import type { TerminalLinkDeps } from '../desktop/src/renderer/src/terminal-links'
 
 const FOCUS_OUT = '\x1b[O'
 const FOCUS_IN = '\x1b[I'
 
+const inertLinks: TerminalLinkDeps = {
+  open: async () => ({ ok: true }),
+  onRefused: () => {},
+  report: () => {},
+  fileLinks: () => true
+}
+
 function guardedTerminal(): { term: Terminal; sent: string[]; reports: string[] } {
   const reports: string[] = []
-  const term = createSessionTerminal({ allowProposedApi: true }, (message) => reports.push(message))
+  const term = createSessionTerminal({ allowProposedApi: true }, (message) => reports.push(message), inertLinks)
   const sent: string[] = []
   term.onData((data) => sent.push(data))
   return { term, sent, reports }
@@ -59,5 +67,12 @@ describe('createSessionTerminal suppresses standalone focus reporting on a real 
     await write(term, '\x1b[?1004h\x1b[?1004l')
     expect(term.modes.sendFocusMode).toBe(false)
     expect(sent).toEqual([])
+  })
+})
+
+describe('createSessionTerminal installs the link gate', () => {
+  test('OSC 8 links with a non-http scheme reach the handler instead of being dropped by xterm', () => {
+    const { term } = guardedTerminal()
+    expect(term.options.linkHandler?.allowNonHttpProtocols, 'xterm drops file: hyperlinks without this flag').toBe(true)
   })
 })

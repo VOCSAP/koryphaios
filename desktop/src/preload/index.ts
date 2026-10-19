@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import type {
   AppConfig,
+  LinkIntent,
   TtsrRulesList,
   TtsrTestOptions,
   BrokerStatusEvent,
@@ -127,6 +128,7 @@ const api: DeckApi = {
     ipcRenderer.invoke('sandbox:image-build', variant),
   sandboxImageRemove: () => ipcRenderer.invoke('sandbox:image-remove'),
   openExternal: (url: string) => ipcRenderer.invoke('shell:open-external', url),
+  openLink: (target: string, intent: LinkIntent) => ipcRenderer.invoke('shell:open-link', target, intent),
   sandboxBuildStop: () => ipcRenderer.invoke('sandbox:build-stop'),
   sandboxAuthPurge: () => ipcRenderer.invoke('sandbox:auth-purge'),
   sandboxResetCopy: () => ipcRenderer.invoke('sandbox:reset-copy'),

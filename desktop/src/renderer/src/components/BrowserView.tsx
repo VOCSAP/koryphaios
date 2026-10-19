@@ -13,6 +13,7 @@ import { useEffect, useRef, useState } from 'react'
 import type { ITheme, Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { createSessionTerminal } from '../terminal-focus-report'
+import { sessionLinkDeps } from '../terminal-link-deps'
 import type {
   ElementPick,
   PickAnnotation,
@@ -181,7 +182,8 @@ function DockTerminal({ session, active }: { session: SessionRuntime; active: bo
         scrollback: 8000,
         theme: THEMES[config.theme]
       },
-      (message) => window.api.reportError('terminal', message)
+      (message) => window.api.reportError('terminal', message),
+      sessionLinkDeps()
     )
     const fit = new FitAddon()
     term.loadAddon(fit)

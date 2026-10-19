@@ -802,7 +802,7 @@ export const useDeck = create<DeckState>((set, get) => ({
     void window.api
       .sandboxStatus()
       .then((sandboxStatus) => set({ sandboxStatus }))
-      .catch(() => {})
+      .catch((e) => window.api.reportError('sandbox', `status hydration failed: ${errorText(e)}`))
     void window.api.getBrokerStatus().then((status) => set({ brokerStatus: status }))
     void window.api.getOperatorTrustStatus().then((status) => set({ operatorTrustStatus: status }))
     // Companion server status (PLAN MB2): rail glyph glow while it runs. A

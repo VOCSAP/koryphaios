@@ -24,6 +24,7 @@ import { reportError } from './log'
 import { WF_LANE_H_DEFAULT, WF_LANE_H_MIN } from '@shared/workflow'
 import { sanitizeTtsrDisabled } from './ttsr-toggles'
 import { SPAWN_CAP, sanitizeSpawnCap } from './spawn-cap'
+import { DEFAULT_LINK_EXCLUSIONS, DEFAULT_LINK_EXTENSIONS, linkListsFromStored } from '@shared/link-policy'
 
 const DEFAULT_CONFIG: AppConfig = {
   projectDir: homedir(),
@@ -75,6 +76,8 @@ const DEFAULT_CONFIG: AppConfig = {
   // nothing. 'team-review' / 'full-control' add native approval dialogs.
   supervisorSpawnMode: 'hands-free',
   agentSpawnCap: SPAWN_CAP,
+  linkOpenExtensions: [...DEFAULT_LINK_EXTENSIONS],
+  linkOpenExclusions: [...DEFAULT_LINK_EXCLUSIONS],
   // Join-announce gate (card 8cb54a0f): off by default -- the operator opts
   // into either the lead-only note or the full historical broadcast.
   joinAnnounceLevel: 'off',
@@ -152,6 +155,8 @@ export function loadConfig(): AppConfig {
     reportError('store', `invalid agentSpawnCap (${String(raw.agentSpawnCap).slice(0, 40)}) in config.json, using ${SPAWN_CAP}`)
   }
   cfg.agentSpawnCap = agentSpawnCap ?? SPAWN_CAP
+  // What a terminal link may launch is not decided by a stray value in the file.
+  Object.assign(cfg, linkListsFromStored(raw, (message) => reportError('store', message)))
   // Unknown/absent join-announce level (older config, hand-edited file) -> default.
   if (!JOIN_ANNOUNCE_LEVELS.includes(cfg.joinAnnounceLevel)) {
     cfg.joinAnnounceLevel = 'off'

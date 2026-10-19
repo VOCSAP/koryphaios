@@ -16,6 +16,7 @@ import {
 import { publicKeyFingerprint } from '../../../shared/operator-trust'
 import type { AppConfig, InboxOpenTarget, OperatorTrustStatusEvent } from '@shared/types'
 import { sanitizeGlowColor } from '@shared/palette'
+import { sanitizeLinkPatch } from '@shared/link-policy'
 import { loadConfig, saveConfig } from './store'
 import { buildAppMenu } from './menu'
 import { safeExternalUrl } from './external-url'
@@ -485,6 +486,7 @@ const setConfig = (patch: Partial<AppConfig>): AppConfig => {
     const { agentSpawnCap: _ignored, ...rest } = patch
     patch = rest
   }
+  patch = sanitizeLinkPatch(patch, (message) => reportError('config', message))
   // Local-provider API keys never persist in clear (C29): a renderer patch
   // carries transient `apiKey` fields that are encrypted (safeStorage) into
   // `apiKeyEnc` here, and the renderer echo below only ever sees `hasKey`.

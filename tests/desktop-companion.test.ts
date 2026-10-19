@@ -131,6 +131,14 @@ test('broker:start (undoes an operator stop) is remote-blocked by its tier; brok
   expect(REMOTE_BLOCKED_CHANNELS.has('broker:retry')).toBe(false)
 })
 
+test('shell:open-link is remote-blocked: a paired device could make the PC open a path', () => {
+  expect(COMPANION_MANIFEST.openLink).toEqual({ kind: 'invoke', channel: 'shell:open-link' })
+  expect(
+    REMOTE_BLOCKED_CHANNELS.has('shell:open-link'),
+    'a paired device could make the PC open a path or reveal one in the file manager'
+  ).toBe(true)
+})
+
 test('agents:stop (trust-changing) is remote-blocked; agents:stop-state (read) is not', () => {
   expect(CHANNEL_TIERS['agents:stop']).toBe(3)
   expect(REMOTE_BLOCKED_CHANNELS.has('agents:stop')).toBe(true)

@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import type { ITheme, Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
-import { WebLinksAddon } from '@xterm/addon-web-links'
 import type { SessionRuntime, SnippetSummary } from '@shared/types'
 import { GLYPHS, GLYPH_ACTIONS, GLYPH_BADGES } from './icons'
 import { useDeck } from '../store'
@@ -9,6 +8,7 @@ import { formatClock, useT } from '../i18n'
 import { registerTerminal, unregisterTerminal } from '../terminal-registry'
 import { copySelection, pasteFromClipboard } from '../terminal-clipboard'
 import { createSessionTerminal } from '../terminal-focus-report'
+import { sessionLinkDeps } from '../terminal-link-deps'
 import { ConfirmDialog } from './ConfirmDialog'
 import { ContextMenu, type ContextMenuItem } from './ContextMenu'
 import { SnippetsDialog } from './SnippetsDialog'
@@ -77,11 +77,11 @@ export function TerminalTile({
         scrollback: 8000,
         theme: THEMES[config.theme]
       },
-      (message) => window.api.reportError('terminal', message)
+      (message) => window.api.reportError('terminal', message),
+      sessionLinkDeps()
     )
     const fit = new FitAddon()
     term.loadAddon(fit)
-    term.loadAddon(new WebLinksAddon((_e, uri) => window.open(uri)))
     if (hostRef.current) term.open(hostRef.current)
     termRef.current = term
     fitRef.current = fit

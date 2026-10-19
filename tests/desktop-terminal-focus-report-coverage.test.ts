@@ -6,7 +6,8 @@ const RENDERER_ROOT = join(import.meta.dir, '..', 'desktop', 'src', 'renderer')
 const SPECIFIER = '@xterm/xterm'
 const FACTORY = 'src/terminal-focus-report.ts'
 const EXEMPTIONS: Readonly<Record<string, string>> = {
-  'src/components/SandboxTerminal.tsx': 'utility PTYs with no tracked session, so no activity predicate reads them'
+  'src/components/SandboxTerminal.tsx':
+    'utility PTYs with no tracked session: no activity predicate reads them, and their links stay http(s) opened through openExternal, never a file path'
 }
 
 // Only these two statement shapes are proven to carry no runtime Terminal; any
@@ -52,7 +53,7 @@ function auditTerminalImporters(
     if (path === factory || exemptions[path] !== undefined) continue
     violations.push(
       `${path} imports ${SPECIFIER} as a value: build session terminals with createSessionTerminal from ${factory}, ` +
-        'or the terminal reports focus and the activity predicate reads it idle'
+        'or the terminal reports focus (the activity predicate reads it idle) and its links skip the link gate'
     )
   }
   return violations

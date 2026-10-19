@@ -206,6 +206,12 @@ export const EN_DEFAULTS: Record<string, string> = {
   'settings.shellOverride': 'Shell override',
   'settings.shellPlaceholder': 'auto ($SHELL / powershell.exe)',
   'settings.shellHelp': 'Leave empty to auto-detect per OS.',
+  'settings.linkOpenExtensions': 'File types opened by Ctrl+click on a terminal link',
+  'settings.linkOpenExtensionsHelp':
+    'Comma-separated, for example png, md, json. A plain click only shows the file in its folder. Executable, script and installer types (exe, sh, html, pdf…) are refused, and a Ctrl+click only shows them in their folder. At least one entry.',
+  'settings.linkOpenExclusions': 'Locations a terminal link never opens',
+  'settings.linkOpenExclusionsHelp':
+    'Comma-separated. A bare name (.ssh) matches any folder of that name; a ~/… or absolute path matches that file or folder and what is under it. A comma always separates two entries, so a path containing a comma cannot be excluded. At least one entry.',
   'settings.interactiveShell': 'Interactive shell (load rc/profile for aliases)',
   'settings.displayMode': 'Display mode',
   'settings.fontSize': 'Font size',
@@ -934,6 +940,13 @@ export const EN_DEFAULTS: Record<string, string> = {
   'toast.inboxAnsweredElsewhere': 'Already answered from another channel',
   'toast.approvalNotApplied': 'Your answer was NOT typed into "{tile}": {reason}. Answer it in the terminal.',
   'toast.inboxDeleted': 'Message deleted',
+  'toast.linkInvalid': 'Link not opened: this is not a link the Deck can follow',
+  'toast.linkNetworkPath': 'Link not opened: network paths are refused',
+  'toast.linkNotFound': 'Link not opened: that path does not exist on this machine',
+  'toast.linkNotAllowed':
+    'Link not opened: this file type is not on the Ctrl+click list, or its location is excluded (Settings > Terminal)',
+  'toast.linkFailed': 'Link not opened: the system could not open it',
+  'toast.linkSandbox': "Link not opened: a sandboxed project's files live in the container, only web links open here",
   'worktrees.diff': 'Diff',
   'sidebar.viewDiff': 'View diff',
   'sidebar.modelBadgeTitle': 'Model: {model} ({modelId})',

@@ -405,6 +405,10 @@ export interface AppConfig {
   supervisorSpawnMode: SupervisorSpawnMode
   /** Live-session ceiling for agent-initiated spawns (deck-control); operator gestures are not capped. */
   agentSpawnCap: number
+  /** File types Ctrl/Cmd+click on a terminal link may launch (dot-prefixed, lower case). */
+  linkOpenExtensions: string[]
+  /** Never launched by a terminal link: a bare name matches any path segment, a `~/` or absolute path matches that file or directory and what is under it. */
+  linkOpenExclusions: string[]
   /** Gate for the peer-join announcement broadcast; default 'off'. */
   joinAnnounceLevel: JoinAnnounceLevel
   /** Show the floating "?" help-assistant button (PLAN C9). */
@@ -1325,6 +1329,11 @@ export const SANDBOX_IMAGE_CUSTOM_TAG = `${SANDBOX_IMAGE_DEFAULT_TAG}-custom`
 export type SandboxProtectionStatus =
   | { status: 'not-applicable' }
   | { status: 'applied'; appliedCount: number; skipped: { rel: string; reason: string }[] }
+
+/** `reveal` shows the target in the file manager; `open` launches its default app (files only). */
+export type LinkIntent = 'reveal' | 'open'
+export type LinkRefusal = 'invalid' | 'network-path' | 'not-found' | 'not-allowed' | 'failed'
+export type LinkOutcome = { ok: true } | { ok: false; reason: LinkRefusal }
 
 /** Full sandbox state of THIS window's project (Docker rail view + gates). */
 export interface SandboxStatus {
@@ -2576,6 +2585,12 @@ export interface DeckApi {
    * remote pages and shell.openExternal launches any registered handler.
    */
   openExternal(url: string): Promise<void>
+  /**
+   * Act on a link a terminal printed: http(s), `file:`, an absolute path or
+   * `~/`. The target is text an agent wrote, so main parses, expands and
+   * validates it on every call; a refusal is a value, never a throw.
+   */
+  openLink(target: string, intent: LinkIntent): Promise<LinkOutcome>
   /** Kill the image-build terminal (dialog closed mid-build). */
   sandboxBuildStop(): Promise<void>
   /** Wipe the credentials in the shared auth volume ("disconnect"). */
