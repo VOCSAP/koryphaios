@@ -213,7 +213,7 @@ export function templateApproval(tpl: SessionTemplate): {
     })),
     previewLines: tpl.sessions
       .filter((s) => (s.command && s.command.trim()) || (s.args && s.args.trim()) || s.bridge === 'clodex')
-      .map((s) => `• ${[s.bridge === 'clodex' ? '[clodex]' : undefined, s.command, s.args].filter(Boolean).join(' ')}`)
+      .map((s) => [s.bridge === 'clodex' ? '[clodex]' : undefined, s.command, s.args].filter(Boolean).join(' '))
   }
 }
 

@@ -249,7 +249,7 @@ test("template approval payload preserves legacy shape and records a clodex brid
   };
   expect(templateApproval(plain)).toEqual({
     hashPayload: [{ command: "", args: "--agent dev" }],
-    previewLines: ["• --agent dev"],
+    previewLines: ["--agent dev"],
   });
   expect(JSON.stringify(templateApproval(plain).hashPayload)).toBe('[{"command":"","args":"--agent dev"}]');
 
@@ -260,7 +260,7 @@ test("template approval payload preserves legacy shape and records a clodex brid
   };
   expect(templateApproval(bridged)).toEqual({
     hashPayload: [{ command: "", args: "", bridge: "clodex" }],
-    previewLines: ["• [clodex]"],
+    previewLines: ["[clodex]"],
   });
   expect(JSON.stringify(templateApproval(bridged).hashPayload)).toBe('[{"command":"","args":"","bridge":"clodex"}]');
 });

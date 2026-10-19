@@ -205,7 +205,16 @@ import { announceModelsChanged } from './model-registry'
 import { createBeforeQuitHandler } from './before-quit'
 import { ServeService } from './serve-service'
 import { SERVE_QUIT_DEADLINE_MS } from './serve-lifecycle'
-import { maxLinesFor, renderServeApproval, serveDialogSpec } from './serve-approval-dialog'
+import {
+  isApprovalAnswer,
+  launchCommandDialog,
+  maxLinesFor,
+  renderServeApproval,
+  serveDialogSpec,
+  shellFieldDialog,
+  worktreeInitDialog,
+  type ApprovalDialogSpec
+} from './serve-approval-dialog'
 import { createAvatarClient } from './avatar-client'
 import { boundedAvatarDetach, deckAvatarClientOptions, focusDeckWindow } from './avatar-deck-link'
 import { avatarLaunchCommand, ensureAvatar, spawnDetachedAvatar } from './avatar-ensure'
@@ -2518,24 +2527,47 @@ const isShellFieldPreApproved = (opts: ShellFieldApprovalOpts): boolean => {
   return isApproved(approvalsFile(), key, value)
 }
 
+/** Lines the approval dialogs may use on the display the Deck window is on, the primary one before it exists. */
+const approvalDialogMaxLines = (): number => {
+  const bounds = mainWindow && !mainWindow.isDestroyed() ? mainWindow.getBounds() : null
+  const display = bounds
+    ? screen.getDisplayNearestPoint({ x: Math.round(bounds.x + bounds.width / 2), y: Math.round(bounds.y + bounds.height / 2) })
+    : screen.getPrimaryDisplay()
+  return maxLinesFor(display.workArea.height)
+}
+
+/** True only when the operator pressed the Approve button; a spec that does not fit has none. */
+const showApprovalDialogSync = (spec: ApprovalDialogSpec): boolean => {
+  if (spec.approveIndex === null) journal.add('session', `approval dialog offers no Approve, its text does not fit: ${spec.message}`)
+  const win = mainWindow && !mainWindow.isDestroyed() ? mainWindow : null
+  const options: Electron.MessageBoxSyncOptions = {
+    type: 'warning',
+    title: 'Koryphaios',
+    message: spec.message,
+    detail: spec.detail,
+    buttons: spec.buttons,
+    defaultId: spec.defaultId,
+    cancelId: spec.cancelId
+  }
+  return isApprovalAnswer(spec, win ? dialog.showMessageBoxSync(win, options) : dialog.showMessageBoxSync(options))
+}
+
 const confirmShellFieldApproval = (opts: ShellFieldApprovalOpts): boolean => {
   const { key, value } = shellFieldApprovalCacheKey(opts)
   const file = approvalsFile()
   if (isApproved(file, key, value)) return true
   const isFr = isFrLocale()
-  const preview = opts.previewLines.join('\n')
-  const ok =
-    dialog.showMessageBoxSync({
-      type: 'warning',
-      buttons: isFr ? opts.buttonsFr : opts.buttonsEn,
-      defaultId: 1,
-      cancelId: 1,
-      title: 'Koryphaios',
+  const ok = showApprovalDialogSync(
+    shellFieldDialog({
+      isFr,
+      maxLines: approvalDialogMaxLines(),
       message: isFr ? opts.messageFr : opts.messageEn,
-      detail: isFr
-        ? `${opts.labelFr} : ${opts.basename}\n\n${preview}\n\nAccepte uniquement si tu fais confiance à ce dépôt.`
-        : `${opts.labelEn}: ${opts.basename}\n\n${preview}\n\nAccept only if you trust this repository.`
-    }) === 0
+      label: isFr ? opts.labelFr : opts.labelEn,
+      basename: opts.basename,
+      items: opts.previewLines,
+      buttons: isFr ? opts.buttonsFr : opts.buttonsEn
+    })
+  )
   if (!ok) {
     journal.add('session', `${opts.keyPart} refused: ${opts.basename}`)
     return false
@@ -2588,9 +2620,7 @@ const confirmSpawnShellFields = (
     keyPart: DECK_SPAWN_SHELL_FIELD_KEYPART,
     basename,
     hashPayload,
-    previewLines: [hashPayload.command, hashPayload.args]
-      .filter((v) => v.trim())
-      .map((v) => `• ${v}`),
+    previewLines: [hashPayload.command, hashPayload.args].filter((v) => v.trim()),
     labelEn: 'Agent spawn',
     labelFr: 'Lancement agent',
     messageEn: 'This agent-requested session spawn runs custom launch arguments, executed in a shell.',
@@ -2688,7 +2718,7 @@ const confirmWorkspaceShellFields = (
     })),
     previewLines: ws.sessions
       .filter((s) => s.args.length > 0 || s.bridge)
-      .map((s) => `• ${s.name}: ${[s.bridge && `[${s.bridge}]`, ...s.args].filter(Boolean).join(' ')}`),
+      .map((s) => `${s.name}: ${[s.bridge && `[${s.bridge}]`, ...s.args].filter(Boolean).join(' ')}`),
     labelEn: 'Workspace',
     labelFr: 'Espace de travail',
     messageEn:
@@ -2724,7 +2754,7 @@ const confirmWorkspaceUntrustedCwd = (
     hashPayload: ws.sessions.map((s) => ({ cwd: s.cwd ?? '' })),
     previewLines: ws.sessions
       .filter((s) => s.cwd && s.cwd.trim())
-      .map((s) => `• ${s.name}: ${s.cwd}`),
+      .map((s) => `${s.name}: ${s.cwd}`),
     labelEn: 'Workspace',
     labelFr: 'Espace de travail',
     messageEn: 'This project workspace opens a session outside your project folder.',
@@ -3406,19 +3436,7 @@ app.whenReady().then(async () => {
       fallback: safeLaunchCommand,
       approvalsFile: approvalsFile(),
       confirm: (command) =>
-        dialog.showMessageBoxSync({
-          type: 'warning',
-          buttons: isFr ? ['Utiliser cette commande', 'Refuser'] : ['Use this command', 'Refuse'],
-          defaultId: 1,
-          cancelId: 1,
-          title: 'Koryphaios',
-          message: isFr
-            ? 'Ce projet définit sa propre commande de lancement des sessions.'
-            : 'This project defines its own session launch command.',
-          detail: isFr
-            ? `Commande (config du projet) :\n\n${command}\n\nElle sera exécutée dans chaque terminal de session de ce projet. N'accepte que si tu fais confiance à ce dépôt. Refuser garde la commande globale.`
-            : `Command (project config):\n\n${command}\n\nIt will run in every session terminal of this project. Accept only if you trust this repository. Refusing keeps the global command.`
-        }) === 0
+        showApprovalDialogSync(launchCommandDialog(command, { isFr, maxLines: approvalDialogMaxLines() }))
     })
     if (decision.source === 'project') {
       service.setLaunchCommand(decision.command)
@@ -3442,19 +3460,7 @@ app.whenReady().then(async () => {
         fallback: globalWti ?? '',
         approvalsFile: approvalsFile(),
         confirm: (command) =>
-          dialog.showMessageBoxSync({
-            type: 'warning',
-            buttons: isFr ? ['Exécuter ce hook', 'Refuser'] : ['Run this hook', 'Refuse'],
-            defaultId: 1,
-            cancelId: 1,
-            title: 'Koryphaios',
-            message: isFr
-              ? 'Ce projet définit un hook exécuté à la création de worktree.'
-              : 'This project defines a worktree-creation init hook.',
-            detail: isFr
-              ? `Hook (config du projet) :\n\n${command}\n\nIl sera exécuté dans un shell à chaque création de worktree de ce projet. N'accepte que si tu fais confiance à ce dépôt. Refuser désactive ce hook.`
-              : `Hook (project config):\n\n${command}\n\nIt will run in a shell on every worktree creation for this project. Accept only if you trust this repository. Refusing disables the hook.`
-          }) === 0
+          showApprovalDialogSync(worktreeInitDialog(command, { isFr, maxLines: approvalDialogMaxLines() }))
       })
       approvedWorktreeInit = decision.source === 'project' ? decision.command : globalWti || undefined
       journal.add(
@@ -3671,11 +3677,7 @@ app.whenReady().then(async () => {
     confirmServe: async (prompt, servePath) => {
       const isFr = isFrLocale()
       const win = mainWindow && !mainWindow.isDestroyed() ? mainWindow : null
-      const bounds = win?.getBounds()
-      const display = bounds
-        ? screen.getDisplayNearestPoint({ x: Math.round(bounds.x + bounds.width / 2), y: Math.round(bounds.y + bounds.height / 2) })
-        : screen.getPrimaryDisplay()
-      const spec = serveDialogSpec(renderServeApproval(prompt, { isFr, maxLines: maxLinesFor(display.workArea.height) }), isFr)
+      const spec = serveDialogSpec(renderServeApproval(prompt, { isFr, maxLines: approvalDialogMaxLines() }), isFr)
       const options: Electron.MessageBoxOptions = {
         type: 'warning',
         title: 'Koryphaios',
@@ -3687,7 +3689,7 @@ app.whenReady().then(async () => {
       }
       const { response } = win ? await dialog.showMessageBox(win, options) : await dialog.showMessageBox(options)
       if (response === spec.showFileIndex) shell.showItemInFolder(servePath)
-      return response === spec.approveIndex
+      return isApprovalAnswer(spec, response)
     }
   })
   // Arm remote approvals BEFORE service.start(): restored sessions spawn there,

