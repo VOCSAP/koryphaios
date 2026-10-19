@@ -2233,6 +2233,20 @@ describe("AskUserQuestion: questions on add, answers on claim", () => {
     expect(res.body.approval?.answer_kind).toBe("text");
   });
 
+  test("an allow on a question whose route nobody recognises is refused like a pty one", async () => {
+    const b = await boot();
+    const op = newOperator();
+    const row = await addApproval(b, op, { kind: "question", title: "Q", question: "Which?", options: [], tile_ref: "t-route-x" });
+    expect(row.reply_route).toBe("pty");
+    const db = new Database(b.dbPath);
+    db.run("UPDATE pending_approvals SET reply_route = 'x' WHERE id = ?", [row.id]);
+    db.close();
+    const res = await claimAnswers(b, op, row.id, { answer_kind: "allow" });
+    expect(res.status, "an unknown route reads as pty, so an Approve is refused").toBe(422);
+    const still = await signedPost<{ approvals: Approval[] }>(b, "/approval/list", approvalListBody(DEFAULT_PROJECT_KEY), asOp(op));
+    expect(still.body.approvals.find((a) => a.id === row.id)?.status, "a refused allow settles nothing").toBe("pending");
+  });
+
   test("questions named like Object.prototype members survive the round trip", async () => {
     const b = await boot();
     const op = newOperator();

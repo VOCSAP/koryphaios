@@ -82,9 +82,10 @@ export interface NotificationChannel {
  * `on-tile` -- the question absorbed a permission dialog, answered on its tile;
  * `session-gone` -- the session that waited for it is gone, and the request
  * was closed by this very refusal;
- * `answers-only` -- a module waits on these questions and reads only their answers.
+ * `answers-only` -- a module waits on these questions and reads only their answers;
+ * `text-only` -- a question typed into a tile takes a written answer, never an allow.
  */
-export type AnswerRefusal = "verdict-only" | "on-tile" | "session-gone" | "answers-only";
+export type AnswerRefusal = "verdict-only" | "on-tile" | "session-gone" | "answers-only" | "text-only";
 
 /** What a gateway needs from the broker, injected so adapters stay testable. */
 export interface ChannelHost {

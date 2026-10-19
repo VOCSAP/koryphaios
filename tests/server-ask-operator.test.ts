@@ -260,7 +260,7 @@ describe("ask_operator over MCP stdio", () => {
     expect(res.result?.content?.[0]?.text).toContain("telegram");
   }, 60_000);
 
-  test("an allow verdict is rendered as an approval, not raw JSON", async () => {
+  test("a deny verdict is rendered as a rejection, not raw JSON", async () => {
     const h = await boot(true);
     h.send({
       jsonrpc: "2.0",
@@ -269,9 +269,9 @@ describe("ask_operator over MCP stdio", () => {
       params: { name: "ask_operator", arguments: { title: "Deploy", question: "Ship it?" } },
     });
     const approval = await firstApproval(h);
-    expect(await claim(h, approval!.id, "allow")).toBe(200);
+    expect(await claim(h, approval!.id, "deny")).toBe(200);
     const res = await readUntil(h.reader, 1, h.buffer);
-    expect(res.result?.content?.[0]?.text).toContain("approved");
+    expect(res.result?.content?.[0]?.text).toContain("rejected");
   }, 60_000);
 
   test("an over-long question reaches the broker whole and is stored with the truncation marker", async () => {

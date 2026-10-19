@@ -525,6 +525,44 @@ describe("a permission raise merged into a tile's channel question", () => {
     expect(deny.status, "a permission still takes deny").toBe(200);
   }, 30_000);
 
+  test("an allow on a question typed into a tile is refused with 422, deny and text still settle it", async () => {
+    const b = shared;
+    const op = newOperator();
+    const peer = await connectPeer(b, "/tmp/merge-proj-text-only");
+
+    const typed = await raise(b, op, { tile_ref: "t-typed" });
+    expect([typed.kind, typed.reply_route]).toEqual(["question", "pty"]);
+    const allow = await signedPost<{ error?: string }>(
+      b,
+      "/approval/claim",
+      { id: typed.id, via: "deck", answer_kind: "allow" },
+      op
+    );
+    expect(allow.status, "an Approve would be typed as Enter into a tile that may show a trust prompt").toBe(422);
+    expect(allow.body.error).toContain("written answer");
+    expect((await pendingRow(b, op, typed.id)).status).toBe("pending");
+
+    const declined = await signedPost(b, "/approval/claim", { id: typed.id, via: "deck", answer_kind: "deny" }, op);
+    expect(declined.status, "Decline stays a legitimate answer to a tile question").toBe(200);
+    const texted = await raise(b, op, { tile_ref: "t-typed-text" });
+    const text = await signedPost(
+      b,
+      "/approval/claim",
+      { id: texted.id, via: "deck", answer_kind: "text", answer_text: "go ahead" },
+      op
+    );
+    expect(text.status).toBe(200);
+
+    const ticket = await raise(b, op, { reply_route: "channel", reply_peer_id: peer.peerId, tile_ref: "t-typed-channel" });
+    const approved = await signedPost(b, "/approval/claim", { id: ticket.id, via: "deck", answer_kind: "allow" }, op);
+    expect(approved.status, "a channel-route question reaches the agent as a message and still takes allow").toBe(200);
+
+    const hooked = await raise(b, op, { reply_route: "hook", tile_ref: "t-typed-hook" });
+    expect(hooked.reply_route).toBe("hook");
+    const hookAllow = await signedPost(b, "/approval/claim", { id: hooked.id, via: "deck", answer_kind: "allow" }, op);
+    expect(hookAllow.status, "a hook-route question is read back by its module, never typed into a tile").toBe(200);
+  }, 30_000);
+
   test("a question merging into an existing permission leaves the permission unchanged", async () => {
     const b = shared;
     const op = newOperator();
@@ -562,6 +600,15 @@ describe("settledOutcome and its readers", () => {
     expect(settledOutcome({ ...base, status: "abandoned", answer_kind: null })).toEqual({ kind: "gone" });
     expect(settledOutcome({ ...base, status: "expired_notif", answer_kind: null })).toEqual({ kind: "gone" });
     expect(settledOutcome({ ...base, status: "pending", answer_kind: null })).toEqual({ kind: "pending" });
+  });
+
+  test("an allow reads as approved and a deny as rejected in the ask_operator reply", () => {
+    const allow = askOperatorWaitReply({ ...base, status: "answered", answer_kind: "allow" });
+    expect(allow?.isError).toBe(false);
+    expect(allow?.text).toContain("approved");
+    const deny = askOperatorWaitReply({ ...base, status: "answered", answer_kind: "deny" });
+    expect(deny?.isError).toBe(false);
+    expect(deny?.text).toContain("rejected");
   });
 
   test("a withdrawn question is still an error, distinct from an acknowledgement", () => {

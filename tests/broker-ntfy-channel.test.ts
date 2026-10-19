@@ -713,6 +713,15 @@ describe("ntfy enrolment", () => {
 
     await ntfy.publishRaw(payload.topic_replies, encodeAnswer(approvalId, "text", "Green"));
     await ntfy.publishRaw(payload.topic_replies, encodeAnswer(approvalId, "allow"));
+    const typed = await signedPost<{ approval: Approval }>(
+      b,
+      "/approval/add",
+      { kind: "question", title: "Trust", question: "Do you trust this folder?", origin: { host: "bureau", project_key: project } },
+      op
+    );
+    const typedId = typed.body.approval.id;
+    expect(typed.body.approval.reply_route).toBe("pty");
+    await ntfy.publishRaw(payload.topic_replies, encodeAnswer(typedId, "allow"));
     await ntfy.publishRaw(payload.topic_replies, encodeAnswer(approvalId, "option", "", "", 3));
     await ntfy.publishRaw(payload.topic_replies, encodePair("no-such-code", "Pixel 8"));
     const fenced = await until(() =>
@@ -723,6 +732,10 @@ describe("ntfy enrolment", () => {
     expect(pending.body.approvals.find((a) => a.id === approvalId)?.status, "text, allow and index 3 settle nothing").toBe(
       "pending"
     );
+    expect(
+      pending.body.approvals.find((a) => a.id === typedId)?.status,
+      "a forged allow would be typed as Enter into the tile of a question"
+    ).toBe("pending");
 
     await ntfy.publishRaw(payload.topic_replies, encodeAnswer(approvalId, "option", "", "", 1));
     const settled = await until(async () => {

@@ -293,7 +293,8 @@ describe("de-duplication", () => {
     brokers.push(b);
     const op = newOperator();
     const first = await raise(b, op, { tile_ref: "tile-z" });
-    await signedPost(b, "/approval/claim", { id: first.id, via: "deck", answer_kind: "allow" }, op);
+    const claim = await signedPost(b, "/approval/claim", { id: first.id, via: "deck", answer_kind: "deny" }, op);
+    expect(claim.status, "Decline must settle a tile question").toBe(200);
     const second = await raise(b, op, { tile_ref: "tile-z" });
     expect(second.id).not.toBe(first.id);
   }, 30_000);

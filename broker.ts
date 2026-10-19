@@ -10180,14 +10180,16 @@ function settleApproval(
   // typed into the chooser. A row that absorbed a permission takes no verdict
   // at all: its dialog has its own row, and only a terminal answer closes it.
   // Checked inside the UPDATE so a permission absorbed between a read and this
-  // write is refused too.
+  // write is refused too. A question typed into a tile takes text, never an
+  // Approve: nothing offers one, so a forged one is refused.
   const res = db.run(
     `UPDATE pending_approvals
         SET status = ?, answered_via = ?, answer_kind = ?, answer_text = ?, answers_json = ?, answered_at = ?
       WHERE id = ? AND ${where.sql} AND status IN ${allowed}
         AND NOT (kind = 'permission' AND COALESCE(?, '') = 'text')
         AND NOT (absorbed_permission = 1 AND COALESCE(?, '') IN ('allow', 'deny', 'text', 'answers'))
-        AND NOT (reply_route = 'hook' AND questions_json IS NOT NULL AND COALESCE(?, '') IN ('allow', 'deny', 'text'))`,
+        AND NOT (reply_route = 'hook' AND questions_json IS NOT NULL AND COALESCE(?, '') IN ('allow', 'deny', 'text'))
+        AND NOT (kind = 'question' AND reply_route NOT IN ('channel', 'hook') AND COALESCE(?, '') = 'allow')`,
     [
       status,
       via,
@@ -10197,6 +10199,7 @@ function settleApproval(
       now,
       id,
       ...(where.params as never[]),
+      answerKind,
       answerKind,
       answerKind,
       answerKind,
@@ -10225,6 +10228,15 @@ function settleApproval(
     }
     if (existing.absorbed_permission !== 0 && answerKind !== null && settleable) {
       return { error: "this question absorbed a permission dialog: answer it on its tile", status: 422, refused: "on-tile" };
+    }
+    if (
+      existing.kind === "question" &&
+      existing.reply_route !== "channel" &&
+      existing.reply_route !== "hook" &&
+      answerKind === "allow" &&
+      settleable
+    ) {
+      return { error: "a question takes a written answer, not an allow", status: 422, refused: "text-only" };
     }
     if (
       existing.reply_route === "hook" &&

@@ -182,8 +182,11 @@ describe("rendering", () => {
     const onTile = answerNotice({ refused: "on-tile" });
     expect(verdictOnly, "a refusal leaves the request pending: it must not read as handled").not.toBe(ALREADY_HANDLED_NOTICE);
     expect(onTile).not.toBe(ALREADY_HANDLED_NOTICE);
+    const textOnly = answerNotice({ refused: "text-only" });
+    expect(textOnly, "a refused allow leaves the question pending: it must not read as handled").not.toBe(ALREADY_HANDLED_NOTICE);
     expect(verdictOnly).toContain("Approve or Reject");
     expect(onTile).toContain("tile");
+    expect(textOnly).toContain("written answer");
   });
 });
 
