@@ -21,15 +21,20 @@ import {
 } from "../desktop/mobile-shell/src/approval-pairing.ts";
 import {
   acceptsFreeText,
+  ANSWER_GRACE_MS,
+  answerRequest,
   applyEffect,
+  awaitingBroker,
   classify,
   createLineSplitter,
   INBOX_KEY,
   loadInbox,
   MAX_PENDING,
+  nextGraceDelay,
   parseStreamLine,
   PENDING_TTL_MS,
   prune,
+  receive,
   saveInbox,
   type PendingApproval,
 } from "../desktop/mobile-shell/src/approval-inbox.ts";
@@ -193,7 +198,7 @@ describe("the inbox", () => {
   test("only a question offers free text: a permission takes Approve or Reject", () => {
     const [permission] = applyEffect([], classify(request("appr-p"), T0), T0);
     const [question] = applyEffect([], classify(request("appr-q", false), T0), T0);
-    expect(acceptsFreeText(permission!), "the broker refuses text on a permission, after the row was dropped as sent").toBe(false);
+    expect(acceptsFreeText(permission!), "the broker refuses text on a permission").toBe(false);
     expect(acceptsFreeText(question!)).toBe(true);
   });
 
@@ -226,6 +231,165 @@ describe("the inbox", () => {
   test("a closing message for something else leaves the list alone", () => {
     const pending = applyEffect([], classify(request("appr-1"), T0), T0);
     expect(applyEffect(pending, classify({ click: settledClickUrl("other") }, T0), T0)).toHaveLength(1);
+  });
+
+  const holder = (initial: PendingApproval[]) => {
+    let rows = initial;
+    return {
+      get: () => rows,
+      set: (next: PendingApproval[]) => {
+        rows = next;
+      },
+    };
+  };
+  const inboxWith = (...ids: string[]) =>
+    holder(ids.reduce<PendingApproval[]>((rows, id) => applyEffect(rows, classify(request(id), T0), T0), []));
+  const refusal = (id: string) =>
+    classify({ click: noticeClickUrl(id), message: "Not sent: this request takes one of its options." }, T0);
+  const ids = (rows: PendingApproval[]) => rows.map((p) => p.id);
+
+  test("a sent answer keeps the request, waiting for the broker, across a restart", async () => {
+    const inbox = inboxWith("appr-1");
+    expect(await answerRequest("appr-1", async () => true, inbox, () => T0 + 1)).toBe(true);
+    expect(ids(inbox.get()), "the request stays until the broker settles or refuses it").toEqual(["appr-1"]);
+    expect(awaitingBroker(inbox.get()[0]!, T0 + 2)).toBe(true);
+    const store = new MemoryStore();
+    saveInbox(store, inbox.get());
+    expect(awaitingBroker(loadInbox(store, T0 + 2)[0]!, T0 + 2)).toBe(true);
+  });
+
+  test("a refused answer leaves the request on the phone, answerable again", async () => {
+    const inbox = inboxWith("appr-1");
+    await answerRequest("appr-1", async () => true, inbox, () => T0);
+    const after = applyEffect(inbox.get(), refusal("appr-1"), T0 + 5);
+    expect(ids(after)).toEqual(["appr-1"]);
+    expect(awaitingBroker(after[0]!, T0 + 5), "a refusal hands the request back to the operator").toBe(false);
+    expect(after[0]!.hasButtons).toBe(true);
+  });
+
+  test("a refusal of another request leaves this one waiting", async () => {
+    const inbox = inboxWith("appr-1", "appr-2");
+    await answerRequest("appr-1", async () => true, inbox, () => T0);
+    const after = applyEffect(inbox.get(), refusal("appr-2"), T0 + 5);
+    expect(awaitingBroker(after.find((p) => p.id === "appr-1")!, T0 + 5)).toBe(true);
+  });
+
+  test("an accepted answer leaves the phone when the broker's closing message arrives", async () => {
+    const inbox = inboxWith("appr-1");
+    await answerRequest("appr-1", async () => true, inbox, () => T0);
+    expect(applyEffect(inbox.get(), classify({ click: settledClickUrl("appr-1") }, T0), T0 + 5)).toEqual([]);
+  });
+
+  test("an answer that could not be published leaves the request answerable", async () => {
+    const inbox = inboxWith("appr-1");
+    expect(await answerRequest("appr-1", async () => false, inbox, () => T0)).toBe(false);
+    expect(awaitingBroker(inbox.get()[0]!, T0)).toBe(false);
+  });
+
+  test("a request settled while its answer was in flight is not brought back", async () => {
+    const inbox = inboxWith("appr-1");
+    await answerRequest(
+      "appr-1",
+      async () => {
+        inbox.set(applyEffect(inbox.get(), classify({ click: settledClickUrl("appr-1") }, T0), T0));
+        return true;
+      },
+      inbox,
+      () => T0
+    );
+    expect(inbox.get()).toEqual([]);
+  });
+
+  test("ntfy replaying the request does not make it answerable again", async () => {
+    const inbox = inboxWith("appr-1");
+    await answerRequest("appr-1", async () => true, inbox, () => T0);
+    const replayed = applyEffect(inbox.get(), classify(request("appr-1"), T0 + 3), T0 + 3);
+    expect(awaitingBroker(replayed[0]!, T0 + 3)).toBe(true);
+  });
+
+  test("with no word from the broker, the request is answerable again after the grace period", async () => {
+    const inbox = inboxWith("appr-1");
+    await answerRequest("appr-1", async () => true, inbox, () => T0);
+    const row = inbox.get()[0]!;
+    expect(awaitingBroker(row, T0 + ANSWER_GRACE_MS - 1)).toBe(true);
+    expect(awaitingBroker(row, T0 + ANSWER_GRACE_MS)).toBe(false);
+  });
+
+  test("a waiting row restored after a restart is re-rendered when its grace period ends", async () => {
+    const inbox = inboxWith("appr-1");
+    await answerRequest("appr-1", async () => true, inbox, () => T0);
+    const store = new MemoryStore();
+    saveInbox(store, inbox.get());
+    const restored = loadInbox(store, T0 + 20_000);
+    expect(nextGraceDelay(restored, T0 + 20_000), "the restored row's remaining grace, not a fresh one").toBe(
+      ANSWER_GRACE_MS - 20_000
+    );
+    expect(awaitingBroker(restored[0]!, T0 + 20_000 + nextGraceDelay(restored, T0 + 20_000)!)).toBe(false);
+  });
+
+  test("a row whose grace period ran out while the app was closed is answerable on restore", async () => {
+    const inbox = inboxWith("appr-1");
+    await answerRequest("appr-1", async () => true, inbox, () => T0);
+    const store = new MemoryStore();
+    saveInbox(store, inbox.get());
+    const restored = loadInbox(store, T0 + ANSWER_GRACE_MS + 5);
+    expect(awaitingBroker(restored[0]!, T0 + ANSWER_GRACE_MS + 5)).toBe(false);
+    expect(nextGraceDelay(restored, T0 + ANSWER_GRACE_MS + 5)).toBeNull();
+  });
+
+  test("a row sent 'in the future' after the clock moved back is answerable, with no re-render beyond the grace", async () => {
+    const inbox = inboxWith("appr-1");
+    await answerRequest("appr-1", async () => true, inbox, () => T0 + 10 * ANSWER_GRACE_MS);
+    expect(awaitingBroker(inbox.get()[0]!, T0)).toBe(false);
+    expect(nextGraceDelay(inbox.get(), T0)).toBeNull();
+  });
+
+  test("the re-render waits for the first waiting row only", async () => {
+    const inbox = inboxWith("appr-1", "appr-2", "appr-3");
+    await answerRequest("appr-1", async () => true, inbox, () => T0 + 30_000);
+    await answerRequest("appr-2", async () => true, inbox, () => T0);
+    expect(nextGraceDelay(inbox.get(), T0 + 10_000)).toBe(ANSWER_GRACE_MS - 10_000);
+    expect(nextGraceDelay(inboxWith("appr-1").get(), T0), "nothing sent, nothing to wait for").toBeNull();
+  });
+
+  test("a received refusal makes the request answerable and shows why", async () => {
+    const inbox = inboxWith("appr-1");
+    await answerRequest("appr-1", async () => true, inbox, () => T0);
+    const message = "Not sent: this request takes one of its options.";
+    const step = receive(inbox.get(), { click: noticeClickUrl("appr-1"), message }, T0 + 5, true);
+    expect(step?.notice).toBe(message);
+    expect(ids(step?.pending ?? [])).toEqual(["appr-1"]);
+    expect(awaitingBroker(step!.pending![0]!, T0 + 5), "the refusal hands the request back").toBe(false);
+  });
+
+  test("a received closing message removes the request", async () => {
+    const inbox = inboxWith("appr-1", "appr-2");
+    await answerRequest("appr-1", async () => true, inbox, () => T0);
+    const step = receive(inbox.get(), { click: settledClickUrl("appr-1") }, T0 + 5, true);
+    expect(ids(step?.pending ?? [])).toEqual(["appr-2"]);
+    expect(step?.notice, "a closing message leaves the notice line alone").toBeNull();
+  });
+
+  test("a received request confirms a pairing whose acknowledgement was lost", () => {
+    const unconfirmed = receive([], request("appr-1"), T0, false);
+    expect(unconfirmed).toMatchObject({ confirmsPairing: true, notice: "" });
+    expect(ids(unconfirmed!.pending!)).toEqual(["appr-1"]);
+    expect(receive([], request("appr-1"), T0, true)).toMatchObject({ confirmsPairing: false, notice: null });
+  });
+
+  test("a pairing reply touches the notice and the pairing, never the inbox", () => {
+    const rows = inboxWith("appr-1").get();
+    expect(receive(rows, { click: pairedClickUrl(true), message: "Paired." }, T0, false)).toEqual({
+      pending: null,
+      notice: "",
+      confirmsPairing: true,
+    });
+    expect(receive(rows, { click: pairedClickUrl(false), message: "Refused." }, T0, false)).toEqual({
+      pending: null,
+      notice: "Refused.",
+      confirmsPairing: false,
+    });
+    expect(receive(rows, { event: "keepalive" }, T0, false)).toBeNull();
   });
 
   test("a replayed push does not produce two rows", () => {

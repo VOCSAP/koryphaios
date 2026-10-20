@@ -20,6 +20,12 @@ export const INBOX_KEY = "koryphaios.approvals.inbox";
 export const MAX_PENDING = 50;
 /** The broker expires a notification after 24 h; match it locally. */
 export const PENDING_TTL_MS = 24 * 60 * 60 * 1000;
+/**
+ * How long a sent answer waits for the broker's closing message or refusal
+ * before the request can be answered again. ntfy does not guarantee delivery,
+ * and answering twice is harmless: the second one reads as already handled.
+ */
+export const ANSWER_GRACE_MS = 60 * 1000;
 
 export interface PendingApproval {
   id: string;
@@ -28,6 +34,8 @@ export interface PendingApproval {
   /** True when the request offered Approve/Reject — i.e. a permission. */
   hasButtons: boolean;
   receivedAt: number;
+  /** When this phone sent an answer the broker has neither settled nor refused. */
+  sentAt?: number;
 }
 
 /** One message as ntfy's stream and its push payload both shape it. */
@@ -94,16 +102,104 @@ export function applyEffect(
   effect: InboxEffect,
   now: number
 ): PendingApproval[] {
-  if (effect.kind === "ignore" || effect.kind === "paired" || effect.kind === "notice") return pending;
+  if (effect.kind === "ignore" || effect.kind === "paired") return pending;
   if (effect.kind === "settle") return pending.filter((p) => p.id !== effect.id);
+  if (effect.kind === "notice") {
+    return pending.map((p) => {
+      if (p.id !== effect.id) return p;
+      const { sentAt: _answered, ...answerable } = p;
+      return answerable;
+    });
+  }
+  const prior = pending.find((p) => p.id === effect.approval.id);
   const without = pending.filter((p) => p.id !== effect.approval.id);
-  return prune([effect.approval, ...without], now);
+  const row = prior?.sentAt === undefined ? effect.approval : { ...effect.approval, sentAt: prior.sentAt };
+  return prune([row, ...without], now);
+}
+
+/**
+ * Publish an answer and mark its row as waiting for the broker.
+ *
+ * The row stays: removing it here would hide a request the broker then
+ * refuses. The list is read again after the publish, so a row settled while
+ * the answer was in flight is not brought back.
+ */
+export async function answerRequest(
+  approvalId: string,
+  publishAnswer: () => Promise<boolean>,
+  inbox: { get(): PendingApproval[]; set(next: PendingApproval[]): void },
+  now: () => number
+): Promise<boolean> {
+  if (!(await publishAnswer())) return false;
+  const sentAt = now();
+  inbox.set(inbox.get().map((p) => (p.id === approvalId ? { ...p, sentAt } : p)));
+  return true;
+}
+
+/**
+ * True while a sent answer is still within its grace period. A sentAt in the
+ * future (the clock moved back) does not count as waiting.
+ */
+export function awaitingBroker(approval: PendingApproval, now: number): boolean {
+  if (approval.sentAt === undefined) return false;
+  const elapsed = now - approval.sentAt;
+  return elapsed >= 0 && elapsed < ANSWER_GRACE_MS;
+}
+
+/**
+ * Milliseconds until the first waiting row becomes answerable again, or null
+ * when none is waiting. Read from the rows rather than from the moment of
+ * sending, so a row restored after a restart gets its re-render too.
+ */
+export function nextGraceDelay(pending: PendingApproval[], now: number): number | null {
+  let delay: number | null = null;
+  for (const p of pending) {
+    if (!awaitingBroker(p, now)) continue;
+    const left = p.sentAt! + ANSWER_GRACE_MS - now;
+    if (delay === null || left < delay) delay = left;
+  }
+  return delay;
+}
+
+/** What one received message changes in the app's state. */
+export interface InboundStep {
+  /** The inbox to show and save, or null when the message leaves it alone. */
+  pending: PendingApproval[] | null;
+  /** The notice line to show, or null to keep the current one. */
+  notice: string | null;
+  /** The message proves the broker accepted this device's pairing. */
+  confirmsPairing: boolean;
+}
+
+/** Fold one received message into the inbox; null when it is not for us. */
+export function receive(
+  pending: PendingApproval[],
+  msg: NtfyMessage,
+  now: number,
+  pairingConfirmed: boolean
+): InboundStep | null {
+  const effect = classify(msg, now);
+  if (effect.kind === "ignore") return null;
+  // A refusal has to be shown as a refusal: a silent one left the operator
+  // staring at a spinner.
+  if (effect.kind === "paired") {
+    return { pending: null, notice: effect.ok ? "" : effect.text, confirmsPairing: effect.ok };
+  }
+  if (effect.kind === "notice") {
+    return { pending: applyEffect(pending, effect, now), notice: effect.text, confirmsPairing: false };
+  }
+  // An approval arriving at all proves the pairing took, even if the ack was
+  // lost: ntfy has no delivery guarantee.
+  return {
+    pending: applyEffect(pending, effect, now),
+    notice: pairingConfirmed ? null : "",
+    confirmsPairing: !pairingConfirmed,
+  };
 }
 
 /**
  * Whether the card offers a free-text answer. A permission takes Approve or
- * Reject only: the broker refuses text on it, and the answer path drops the
- * row as sent before that refusal could reach the phone.
+ * Reject only: the broker refuses text on it.
  */
 export function acceptsFreeText(approval: PendingApproval): boolean {
   return !approval.hasButtons;

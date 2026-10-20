@@ -9,10 +9,13 @@
 
 import {
   acceptsFreeText,
-  applyEffect,
-  classify,
+  answerRequest,
+  awaitingBroker,
   loadInbox,
+  nextGraceDelay,
+  receive,
   saveInbox,
+  type NtfyMessage,
   type PendingApproval,
 } from "./approval-inbox.ts";
 import {
@@ -59,6 +62,7 @@ let pairing: ApprovalPairing | null = null;
 let stream: Subscription | null = null;
 let device = "phone";
 let notice = "";
+let graceTimer: ReturnType<typeof setTimeout> | undefined;
 /** URL -> fresh QR token, held in memory only: it is single use. */
 const tokens = new Map<string, string>();
 
@@ -139,31 +143,15 @@ async function startStream(): Promise<void> {
   });
 }
 
-function onMessage(msg: Parameters<typeof classify>[0]): void {
-  const effect = classify(msg, Date.now());
-  if (effect.kind === "ignore") return;
-
-  // The broker's answer to our handshake. It is its own message kind rather
-  // than "whatever arrives first after a scan": a refusal has to be shown as a
-  // refusal, and a silent one left the operator staring at a spinner.
-  if (effect.kind === "paired") {
-    if (effect.ok && pairing) pairing = confirmPairing(store) ?? pairing;
-    setNotice(effect.ok ? "" : effect.text);
-    return;
+function onMessage(msg: NtfyMessage): void {
+  const step = receive(pending, msg, Date.now(), pairing?.confirmed ?? true);
+  if (!step) return;
+  if (step.confirmsPairing && pairing) pairing = confirmPairing(store) ?? pairing;
+  if (step.notice !== null) notice = step.notice;
+  if (step.pending) {
+    pending = step.pending;
+    saveInbox(store, pending);
   }
-  if (effect.kind === "notice") {
-    setNotice(effect.text);
-    return;
-  }
-
-  // An approval arriving at all proves the pairing took, even if the ack was
-  // lost — ntfy has no delivery guarantee, so this is the belt to that brace.
-  if (pairing && !pairing.confirmed) {
-    pairing = confirmPairing(store) ?? pairing;
-    notice = "";
-  }
-  pending = applyEffect(pending, effect, Date.now());
-  saveInbox(store, pending);
   render();
 }
 
@@ -172,17 +160,22 @@ async function answer(
   kind: "allow" | "deny" | "text",
   text = ""
 ): Promise<void> {
-  if (!pairing) return;
-  const ok = await publish(pairing, answerBody(pairing, approval.id, kind, text), {
-    onError: setNotice,
-  });
-  if (!ok) return;
-  // Optimistic removal: the broker settles it and publishes the closing
-  // message, but the row must not sit there looking unanswered meanwhile. If
-  // the answer lost the race, the closing message says so — and it is already
-  // gone from the list either way.
-  pending = pending.filter((p) => p.id !== approval.id);
-  saveInbox(store, pending);
+  const paired = pairing;
+  if (!paired) return;
+  const inbox = {
+    get: () => pending,
+    set: (next: PendingApproval[]) => {
+      pending = next;
+      saveInbox(store, next);
+    },
+  };
+  const sent = await answerRequest(
+    approval.id,
+    () => publish(paired, answerBody(paired, approval.id, kind, text), { onError: setNotice }),
+    inbox,
+    Date.now
+  );
+  if (!sent) return;
   setNotice("Sent.");
 }
 
@@ -284,10 +277,17 @@ function renderApprovals(root: HTMLElement): void {
   }
 
   const list = el("ul", "list");
+  const now = Date.now();
   for (const approval of pending) {
     const card = el("li", "card");
     card.append(el("strong", "", approval.title));
     card.append(el("pre", "body", approval.body));
+
+    if (awaitingBroker(approval, now)) {
+      card.append(el("small", "hint", "Answer sent, waiting for the Deck…"));
+      list.append(card);
+      continue;
+    }
 
     if (approval.hasButtons) {
       const actions = el("div", "row");
@@ -339,6 +339,10 @@ function render(): void {
   if (notice) root.append(el("p", "notice", notice));
   if (mode === "companion") renderCompanion(root);
   else renderApprovals(root);
+
+  clearTimeout(graceTimer);
+  const delay = nextGraceDelay(pending, Date.now());
+  graceTimer = delay === null ? undefined : setTimeout(render, delay);
 }
 
 /**
