@@ -125,9 +125,11 @@ const READY = "Boolean(document.querySelector('pre.approval-text') && document.q
 const rendered = (win) => until('reader rendered', () => js(win.webContents, READY), (ready) => ready === true, 10000)
 const STATE = "(() => { const scroll = document.querySelector('.approval-scroll'); return { scrollHeight: scroll.scrollHeight, clientHeight: scroll.clientHeight, disabled: document.querySelector('button.primary').disabled, theme: document.documentElement.dataset.theme, background: getComputedStyle(document.querySelector('.approval-root')).backgroundColor, dpr: devicePixelRatio } })()"
 const TEXT = "document.querySelector('pre.approval-text').textContent"
-const LAST_CHARACTER = "(() => { const box = document.querySelector('.approval-scroll').getBoundingClientRect(); const text = document.querySelector('pre.approval-text').firstChild; const range = document.createRange(); range.setStart(text, text.length - 1); range.setEnd(text, text.length); const last = range.getBoundingClientRect(); return { top: last.top, bottom: last.bottom, boxTop: box.top, boxBottom: box.bottom } })()"
+// Button state and last-character geometry in one evaluation: the first reader's viewport can shrink after layout settles.
+const END_SAMPLE = "(() => { const box = document.querySelector('.approval-scroll').getBoundingClientRect(); const text = document.querySelector('pre.approval-text').firstChild; const range = document.createRange(); range.setStart(text, text.length - 1); range.setEnd(text, text.length); const last = range.getBoundingClientRect(); return { enabled: !document.querySelector('button.primary').disabled, top: last.top, bottom: last.bottom, boxTop: box.top, boxBottom: box.bottom } })()"
 const SCROLL_TO_END = "(() => { const scroll = document.querySelector('.approval-scroll'); scroll.scrollTop = scroll.scrollHeight; return scroll.scrollTop })()"
 const UNLOCKED = "!document.querySelector('button.primary').disabled"
+const endHidden = (sample) => sample.top < sample.boxTop || sample.bottom > sample.boxBottom
 // A verdict destroys the window, and an executeJavaScript still pending on a destroyed webContents never settles.
 const CLICK = (selector) => "setTimeout(() => document.querySelector('" + selector + "').click(), 0); true"
 const CALL_STATE ="window.api.getState().then(() => 'accepted', (error) => 'rejected: ' + error.message)"
@@ -179,9 +181,14 @@ async function scenario() {
     await sleep(100)
     const before = await js(win.webContents, STATE)
     const text = await js(win.webContents, TEXT)
-    await js(win.webContents, SCROLL_TO_END)
-    const unlocked = await until('approve unlocked', () => js(win.webContents, UNLOCKED), (value) => value === true, 5000).then(() => true, () => false)
-    const end = await js(win.webContents, LAST_CHARACTER)
+    const samples = []
+    const end = await until('approve unlocked at the end', async () => {
+      await js(win.webContents, SCROLL_TO_END)
+      const sample = await js(win.webContents, END_SAMPLE)
+      samples.push(sample)
+      return sample
+    }, (sample) => sample.enabled, 5000).then((sample) => sample, () => samples[samples.length - 1])
+    const unlocked = end.enabled
     if (unlocked) await js(win.webContents, CLICK('button.primary'))
     else win.close()
     const verdict = await verdictAfter(count)
@@ -197,6 +204,7 @@ async function scenario() {
       textIntact: text === document.detail,
       unlocked,
       end,
+      enabledWithEndHidden: samples.filter((sample) => sample.enabled && endHidden(sample)).length,
       verdict
     })
   }
@@ -221,7 +229,12 @@ async function scenario() {
   const unlockedByResize = await until('approve unlocked by resize', () => js(resized.win.webContents, UNLOCKED), (value) => value === true, 3000).then(() => true, () => false)
   if (unlockedByResize) await js(resized.win.webContents, CLICK('button.primary'))
   else resized.win.close()
-  result.resize = { overflowBefore: small.scrollHeight > small.clientHeight, disabledBefore: small.disabled, unlockedByResize, verdict: await verdictAfter(resized.count) }
+  const resizeVerdict = await verdictAfter(resized.count)
+  if (resizeVerdict.startsWith('none')) {
+    resized.win.close()
+    await verdictAfter(resized.count)
+  }
+  result.resize = { overflowBefore: small.scrollHeight > small.clientHeight, disabledBefore: small.disabled, unlockedByResize, verdict: resizeVerdict }
 
   const themed = openReader(workspace(15))
   await rendered(themed.win)
@@ -275,6 +288,7 @@ interface DocumentResult {
   textIntact: boolean;
   unlocked: boolean;
   end: Rect;
+  enabledWithEndHidden: number;
   verdict: string;
 }
 
@@ -446,6 +460,7 @@ for (const dpr of DPRS) {
         expect(document.textIntact, label).toBe(true);
         expect(document.disabledBefore, label).toBe(true);
         expect(document.unlocked, label).toBe(true);
+        expect(document.enabledWithEndHidden, `${label}: Approve was enabled while the last character was outside the region`).toBe(0);
         expect(document.end.top, label).toBeGreaterThanOrEqual(document.end.boxTop);
         expect(document.end.bottom, label).toBeLessThanOrEqual(document.end.boxBottom);
         expect(document.verdict, label).toBe("approve");
