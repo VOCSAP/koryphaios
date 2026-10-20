@@ -153,7 +153,11 @@ export const REFUSAL_NOTICES: Record<AnswerRefusal, string> = {
   "on-tile": "Not sent: this request is waiting on its tile, answer it in Koryphaios.",
   "session-gone": "Not sent: the session is no longer waiting for this answer, answer it in its terminal.",
   "answers-only": `Not sent: this request takes one of its options. ${QUESTIONS_POINTER}`,
-  "text-only": "Not sent: this question takes a written answer, not an Approve.",};
+  "text-only": "Not sent: this question takes a written answer, not an Approve.",
+  "invalid-option": "Not sent: that option is not one of this request's choices.",
+  "invalid-answer": "Not sent: this option could not be applied, answer it in Koryphaios.",
+  "empty-answer": "Not sent: the answer was empty.",
+};
 
 /**
  * What to tell the sender after `onAnswer`: null when the answer settled the

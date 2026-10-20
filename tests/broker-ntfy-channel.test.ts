@@ -23,7 +23,7 @@ import {
   generateCredential,
   type ApprovalCredential,
 } from "../shared/approval.ts";
-import { REFUSAL_NOTICES } from "../notify/format.ts";
+import { ALREADY_HANDLED_NOTICE, REFUSAL_NOTICES } from "../notify/format.ts";
 import { decodePairingPayload, encodeAnswer, encodePair, parseClickUrl } from "../notify/ntfy-protocol.ts";
 import { OPERATOR_TRUST_VERSION } from "../shared/operator-trust.ts";
 import type { Approval } from "../shared/types.ts";
@@ -675,7 +675,7 @@ describe("ntfy enrolment", () => {
     expect([row.status, row.answer_kind], "an allow nobody receives must not be recorded").toEqual(["abandoned", null]);
   }, 60_000);
 
-  test("a tapped option settles a hook question as its answer; text and an out-of-range index settle nothing", async () => {
+  test("a tapped option settles a hook question as its answer; text and an out-of-range index are refused and settle nothing", async () => {
     const b = shared;
     const ntfy = startStubNtfy();
     const op = freshOperator();
@@ -744,6 +744,23 @@ describe("ntfy enrolment", () => {
       pending.body.approvals.find((a) => a.id === typedId)?.status,
       "a forged allow would be typed as Enter into the tile of a question"
     ).toBe("pending");
+    const views = () => aboutRequest().map((m) => parseClickUrl(String(m.click))?.view);
+    expect(
+      await until(() => aboutRequest().some((m) => m.message === REFUSAL_NOTICES["invalid-option"])),
+      "the phone must be told its option is not one of the choices"
+    ).toBe(true);
+    expect(views(), "an out-of-range option must never retire the still-pending request from the phone").toEqual([
+      "approval",
+      "notice",
+      "notice",
+      "notice",
+    ]);
+    await ntfy.publishRaw(payload.topic_replies, encodeAnswer(approvalId, "text", String.fromCharCode(0x1b)));
+    expect(
+      await until(() => aboutRequest().some((m) => m.message === REFUSAL_NOTICES["empty-answer"])),
+      "a text that is only control characters is refused as empty"
+    ).toBe(true);
+    expect(views()).toEqual(["approval", "notice", "notice", "notice", "notice"]);
 
     await ntfy.publishRaw(payload.topic_replies, encodeAnswer(approvalId, "option", "", "", 1));
     const settled = await until(async () => {
@@ -754,6 +771,14 @@ describe("ntfy enrolment", () => {
     const list = await signedPost<{ approvals: Approval[] }>(b, "/approval/list", approvalListBody(project), op);
     const row = list.body.approvals.find((a) => a.id === approvalId)!;
     expect([row.answered_via, row.answer_kind, row.answers]).toEqual(["ntfy", "answers", { "Which colour?": ["Green"] }]);
+
+    await ntfy.publishRaw(payload.topic_replies, encodeAnswer(approvalId, "option", "", "", 3));
+    const late = () => aboutRequest().filter((m) => m.message === ALREADY_HANDLED_NOTICE);
+    expect(
+      await until(() => late().length === 1),
+      "an invalid option on a request already answered is a late answer, not a refusal of a pending one"
+    ).toBe(true);
+    expect(parseClickUrl(String(late()[0]!.click))?.view).toBe("settled");
   }, 60_000);
 
   test("answering twice is refused, and the phone is told so (C-1 arbitration)", async () => {

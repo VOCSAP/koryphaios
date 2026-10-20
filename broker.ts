@@ -11051,14 +11051,18 @@ const channelHost: ChannelHost = {
       // acknowledged its own user.
       void notifyRegistry.settle(approval, kind, kind);
     };
+    // Only a pending row earns a reason: an invalid answer to a settled one is a
+    // late answer, and a reason there would keep a dead request on the phone.
+    const refusedIfPending = (refused: AnswerRefusal): { refused: AnswerRefusal } | null =>
+      row.status === "pending" ? { refused } : null;
     if (answer.answerKind === "option") {
       const questions = parseStoredJson<ApprovalQuestion[]>(row, "questions_json", row.questions_json ?? null);
       const label = questions ? optionButtons({ questions }, Number.POSITIVE_INFINITY)?.[answer.optionIndex ?? -1] : undefined;
-      if (!questions || label === undefined) return null;
+      if (!questions || label === undefined) return refusedIfPending("invalid-option");
       const valid = validateApprovalAnswers(questions, { [questions[0]!.question]: [label] });
       if (!valid.ok) {
         log.error(`notify: option ${answer.optionIndex} of approval ${row.id} failed answers validation: ${valid.error}`);
-        return null;
+        return refusedIfPending("invalid-answer");
       }
       const settled = settleApproval(
         answer.approvalId,
@@ -11075,7 +11079,7 @@ const channelHost: ChannelHost = {
     let answerText: string | null = null;
     if (answer.answerText) {
       const clean = sanitizeAnswerForPty(answer.answerText);
-      if (!clean.ok) return null;
+      if (!clean.ok) return refusedIfPending("empty-answer");
       answerText = clean.value;
     }
     // No credential here: the pairing proves ownership, and the scope comes from the resolved row, never from sender input.

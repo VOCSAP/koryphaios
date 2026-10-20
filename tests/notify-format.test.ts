@@ -10,11 +10,13 @@ import {
   encodeCallback,
   escapeHtml,
   originLabel,
+  REFUSAL_NOTICES,
   renderDiscord,
   renderSettled,
   renderTelegram,
   truncate,
 } from "../notify/format.ts";
+import type { AnswerRefusal } from "../notify/types.ts";
 import { loadOrCreateSecretKey, openSecret, sealSecret, secretHint } from "../shared/secret-box.ts";
 import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -204,6 +206,17 @@ describe("rendering", () => {
     expect(verdictOnly).toContain("Approve or Reject");
     expect(onTile).toContain("tile");
     expect(textOnly).toContain("written answer");
+  });
+
+  test("every refusal reason reaches Telegram and Discord as its own notice, never as already handled", () => {
+    const reasons = Object.keys(REFUSAL_NOTICES) as AnswerRefusal[];
+    expect(reasons).toEqual(expect.arrayContaining(["invalid-option", "invalid-answer", "empty-answer"]));
+    const notices = reasons.map((refused) => answerNotice({ refused }));
+    for (const [i, notice] of notices.entries()) {
+      expect(notice, reasons[i]).toBeTruthy();
+      expect(notice, reasons[i]).not.toBe(ALREADY_HANDLED_NOTICE);
+    }
+    expect(new Set(notices).size, "two reasons sharing a text tell the operator nothing").toBe(reasons.length);
   });
 });
 

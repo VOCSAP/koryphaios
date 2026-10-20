@@ -84,9 +84,20 @@ export interface NotificationChannel {
  * `session-gone` -- the session that waited for it is gone, and the request
  * was closed by this very refusal;
  * `answers-only` -- a module waits on these questions and reads only their answers;
- * `text-only` -- a question typed into a tile takes a written answer, never an allow.
+ * `text-only` -- a question typed into a tile takes a written answer, never an allow;
+ * `invalid-option` -- the tapped option is not one of the request's choices;
+ * `invalid-answer` -- the tapped option failed the request's answers validation;
+ * `empty-answer` -- the written answer is empty once controls are stripped.
  */
-export type AnswerRefusal = "verdict-only" | "on-tile" | "session-gone" | "answers-only" | "text-only";
+export type AnswerRefusal =
+  | "verdict-only"
+  | "on-tile"
+  | "session-gone"
+  | "answers-only"
+  | "text-only"
+  | "invalid-option"
+  | "invalid-answer"
+  | "empty-answer";
 
 /** What a gateway needs from the broker, injected so adapters stay testable. */
 export interface ChannelHost {
