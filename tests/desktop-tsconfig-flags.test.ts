@@ -305,7 +305,19 @@ interface SourceExemption {
   nature: SourceExemptionNature;
 }
 
+const CHOREGOS_COPY_EXEMPTION: SourceExemption = {
+  reason:
+    "docs/DESIGN-READABLE-PLUGIN.md lays out this plugin file and types it against .claude-plugin/types, which only " +
+    "a live Claude Code session writes. Vendored copy of choregos pinned by commit and fingerprint " +
+    "(desktop/mods/choregos.lock.json, enforced by tests/desktop-mods.test.ts): never edited here, verified by " +
+    "`claude plugin validate` and `claude plugin test` in the choregos repo, so no desktop tsconfig includes it.",
+  nature: "deliberate",
+};
+
 const EXEMPT_SOURCES: Record<string, SourceExemption> = {
+  "desktop/mods/prosopon/hooks/layout.ts": CHOREGOS_COPY_EXEMPTION,
+  "desktop/mods/prosopon/hooks/register.tsx": CHOREGOS_COPY_EXEMPTION,
+  "desktop/mods/prosopon/hooks/versions.ts": CHOREGOS_COPY_EXEMPTION,
   "desktop/tests-support/hygiene-fixtures.ts": {
     reason:
       "Test-only support module, never shipped, covered by no desktop tsconfig today. Pre-existing gap " +

@@ -1,0 +1,8 @@
+{
+  "name": "prosopon",
+  "version": "0.1.0",
+  "description": "Readable transcript layouts with safe stock-renderer fallbacks.",
+  "author": {
+    "name": "VOCSAP"
+  }
+}
