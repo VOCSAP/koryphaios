@@ -28,6 +28,7 @@ export default defineConfig({
         input: {
           index: resolve(__dirname, 'src/preload/index.ts'),
           avatar: resolve(__dirname, 'src/preload/avatar.ts'),
+          approval: resolve(__dirname, 'src/preload/approval.ts'),
           // Guest preload injected into the embedded-browser <webview> (PLAN D1).
           'browser-inspect': resolve(__dirname, 'src/preload/browser-inspect.ts')
         }
