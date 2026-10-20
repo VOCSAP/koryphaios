@@ -62,8 +62,22 @@ class FakeWindow {
     return this.loadFailure ? Promise.reject(new Error('load failed')) : Promise.resolve()
   }
 
-  fire(event: string): void {
-    this.listeners.get(event)?.({ preventDefault: () => { this.prevented.push(event) } })
+  fire(event: string, ...args: unknown[]): void {
+    this.listeners.get(event)?.({ preventDefault: () => { this.prevented.push(event) } }, ...args)
+  }
+}
+
+class FakeSession {
+  requestHandler: ((webContents: unknown, permission: string, callback: (allowed: boolean) => void, details: unknown) => void) | null = null
+  constructor(readonly partition: string) {}
+  checkHandler: ((webContents: unknown, permission: string, requestingOrigin: string, details: unknown) => boolean) | null = null
+
+  setPermissionRequestHandler(handler: (webContents: unknown, permission: string, callback: (allowed: boolean) => void, details: unknown) => void): void {
+    this.requestHandler = handler
+  }
+
+  setPermissionCheckHandler(handler: (webContents: unknown, permission: string, requestingOrigin: string, details: unknown) => boolean): void {
+    this.checkHandler = handler
   }
 }
 
@@ -72,6 +86,7 @@ interface Limits { now(): number; rendererErrorBurst: number; rendererErrorRefil
 function harness(loadFailure = false, view: ApprovalPresentation = presentation, limits: Partial<Limits> = {}) {
   const handlers = new Map<string, ApprovalWindowIpcHandler>()
   const windows: FakeWindow[] = []
+  const sessions: FakeSession[] = []
   const constructed: ApprovalWindowNativeConstructionOptions[] = []
   const reports: string[] = []
   const verdicts: string[] = []
@@ -83,6 +98,11 @@ function harness(loadFailure = false, view: ApprovalPresentation = presentation,
       const window = new FakeWindow(loadFailure)
       windows.push(window)
       return window
+    },
+    sessionFromPartition: (partition) => {
+      const session = new FakeSession(partition)
+      sessions.push(session)
+      return session
     },
     reportError: (_scope, message) => { reports.push(message) }
   })
@@ -97,11 +117,11 @@ function harness(loadFailure = false, view: ApprovalPresentation = presentation,
     presentation: () => view,
     ...limits
   })
-  return { controller, constructed, handlers, reports, verdicts, windows }
+  return { controller, constructed, handlers, reports, sessions, verdicts, windows }
 }
 
-test('uses an ephemeral hardened partition and refuses foreign or subframe IPC', async () => {
-  const { controller, constructed, handlers, windows } = harness()
+test('uses an ephemeral hardened partition and traces foreign or subframe IPC before refusing it', async () => {
+  const { controller, constructed, handlers, reports, sessions, windows } = harness()
   expect(controller.open(document)).toEqual({ kind: 'opened', generation: 1 })
 
   const options = constructed[0]!
@@ -114,12 +134,29 @@ test('uses an ephemeral hardened partition and refuses foreign or subframe IPC',
   })
   expect(options.webPreferences.partition).toMatch(/^approval-window:/)
   expect(options.webPreferences.partition).not.toContain('persist:')
+  expect(sessions.map((session) => session.partition)).toEqual([options.webPreferences.partition])
 
   const current = windows[0]!.webContents
   const state = handlers.get(APPROVAL_WINDOW_CHANNELS.getState)!
   await expect(state({ sender: current, senderFrame: current.mainFrame })).resolves.toMatchObject({ generation: 1 })
   await expect(state({ sender: current, senderFrame: {} })).rejects.toThrow('Approval window sender is not current')
   await expect(state({ sender: new FakeWindow().webContents, senderFrame: {} })).rejects.toThrow('Approval window sender is not current')
+  expect(reports).toEqual([
+    'Approval window sender was rejected',
+    'Approval window sender was rejected'
+  ])
+})
+
+test('denies every permission through the ephemeral partition session', () => {
+  const { controller, sessions } = harness()
+  controller.open(document)
+
+  expect(sessions).toHaveLength(1)
+  const session = sessions[0]!
+  let allowed: boolean | null = null
+  session.requestHandler!({}, 'camera', (value) => { allowed = value }, {})
+  expect<boolean | null>(allowed).toBe(false)
+  expect(session.checkHandler!({}, 'notifications', 'https://hostile.example', {})).toBe(false)
 })
 
 test('settles Refuse exactly once on close before reading and renderer crash after reading', async () => {
@@ -229,6 +266,12 @@ test('refuses and reports navigation and load failures', async () => {
   await Promise.resolve()
   expect(loading.verdicts).toEqual(['refuse'])
   expect(loading.reports).toContain('Approval window failed to load')
+
+  const preload = harness()
+  expect(preload.controller.open(document)).toEqual({ kind: 'opened', generation: 1 })
+  preload.windows[0]!.fire('contents:preload-error', 'approval-preload.js', new Error('preload failed'))
+  expect(preload.verdicts).toEqual(['refuse'])
+  expect(preload.reports).toContain('Approval window preload failed')
 })
 
 test('serves the reader presentation outside the fingerprint of the approved document', async () => {

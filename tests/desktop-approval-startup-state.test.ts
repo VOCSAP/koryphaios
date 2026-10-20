@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { createStartupState } from "../desktop/src/main/approval-startup-state.ts";
+import { createStartupState, shouldQuitAfterAllWindowsClosed } from "../desktop/src/main/approval-startup-state.ts";
 
 test("a run starts in bootstrap and moves to running once launched", () => {
   const state = createStartupState();
@@ -23,4 +23,11 @@ test("a running app that starts quitting stays quitting", () => {
   state.markQuitting();
   state.markRunning();
   expect(state.isQuitting()).toBe(true);
+});
+
+test("window-all-closed quits only a running non-darwin app", () => {
+  expect(shouldQuitAfterAllWindowsClosed("win32", "bootstrap")).toBe(false);
+  expect(shouldQuitAfterAllWindowsClosed("win32", "quitting")).toBe(false);
+  expect(shouldQuitAfterAllWindowsClosed("win32", "running")).toBe(true);
+  expect(shouldQuitAfterAllWindowsClosed("darwin", "running")).toBe(false);
 });

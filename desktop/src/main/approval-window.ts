@@ -71,10 +71,16 @@ export interface ApprovalWindowNativeAdapter {
   endpoint(generation: number): ApprovalWindowWebContents | null
 }
 
+export interface ApprovalWindowSession {
+  setPermissionRequestHandler(handler: (webContents: unknown, permission: string, callback: (allowed: boolean) => void, details: unknown) => void): void
+  setPermissionCheckHandler(handler: (webContents: unknown, permission: string, requestingOrigin: string, details: unknown) => boolean): void
+}
+
 export interface ApprovalWindowNativeAdapterOptions {
   preload: string
   html: string
   createWindow(options: ApprovalWindowNativeConstructionOptions): ApprovalWindowBrowserWindow
+  sessionFromPartition(partition: string): ApprovalWindowSession
   reportError(scope: string, message: string, error?: unknown): void
 }
 
@@ -104,13 +110,17 @@ export function createApprovalNativeAdapter(options: ApprovalWindowNativeAdapter
     open(generation, lifecycle) {
       let window: ApprovalWindowBrowserWindow
       try {
+        const ephemeralPartition = partition()
+        const approvalSession = options.sessionFromPartition(ephemeralPartition)
+        approvalSession.setPermissionRequestHandler((_webContents, _permission, callback) => callback(false))
+        approvalSession.setPermissionCheckHandler(() => false)
         window = options.createWindow({
           width: 640,
           height: 700,
           show: false,
           webPreferences: {
             preload: options.preload,
-            partition: partition(),
+            partition: ephemeralPartition,
             sandbox: true,
             contextIsolation: true,
             nodeIntegration: false,
@@ -131,6 +141,10 @@ export function createApprovalNativeAdapter(options: ApprovalWindowNativeAdapter
         })
         window.webContents.on('render-process-gone', () => {
           options.reportError('approval-window', 'Approval window renderer crashed')
+          lifecycle.failed()
+        })
+        window.webContents.on('preload-error', (_event, _path, error) => {
+          options.reportError('approval-window', 'Approval window preload failed', error)
           lifecycle.failed()
         })
       } catch (error) {
@@ -157,10 +171,16 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null
 }
 
-function requireCurrentSender(event: ApprovalWindowIpcEvent, state: ApprovalWindowState, native: ApprovalWindowNativeAdapter): void {
+function requireCurrentSender(
+  event: ApprovalWindowIpcEvent,
+  state: ApprovalWindowState,
+  native: ApprovalWindowNativeAdapter,
+  reportError: (scope: string, message: string, error?: unknown) => void
+): void {
   const current = state.current
   const endpoint = current === null ? null : native.endpoint(current.generation)
   if (endpoint === null || event.sender !== endpoint || event.senderFrame !== endpoint.mainFrame) {
+    reportError('approval-window', 'Approval window sender was rejected')
     throw new Error('Approval window sender is not current')
   }
 }
@@ -253,7 +273,7 @@ export function createApprovalWindowController(options: ApprovalWindowController
   }
 
   const getState: ApprovalWindowIpcHandler = async (event, ...args): Promise<ApprovalWindowSnapshot> => {
-    requireCurrentSender(event, state, options.native)
+    requireCurrentSender(event, state, options.native, reportError)
     requireNoArguments(args)
     const current = state.current!
     let presentation: ApprovalPresentation
@@ -267,14 +287,14 @@ export function createApprovalWindowController(options: ApprovalWindowController
   }
 
   const read: ApprovalWindowIpcHandler = async (event, ...args): Promise<void> => {
-    requireCurrentSender(event, state, options.native)
+    requireCurrentSender(event, state, options.native, reportError)
     const transition = observeApprovalRead(state, readIntent(args))
     state = transition.state
     if (!transition.accepted) throw new Error('Approval window reading observation was rejected')
   }
 
   const verdict: ApprovalWindowIpcHandler = async (event, ...args): Promise<void> => {
-    requireCurrentSender(event, state, options.native)
+    requireCurrentSender(event, state, options.native, reportError)
     const result = settleApproval(state, verdictIntent(args))
     state = result.state
     if (!result.accepted || result.verdict === null) {
@@ -299,7 +319,7 @@ export function createApprovalWindowController(options: ApprovalWindowController
   let saturationReported = false
 
   const rendererError: ApprovalWindowIpcHandler = async (event, ...args): Promise<void> => {
-    requireCurrentSender(event, state, options.native)
+    requireCurrentSender(event, state, options.native, reportError)
     const message = readerErrorMessage(args)
     const generation = state.current!.generation
     const at = now()

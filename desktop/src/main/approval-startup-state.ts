@@ -14,6 +14,10 @@ export interface StartupState {
   markQuitting(): void
 }
 
+export function shouldQuitAfterAllWindowsClosed(platform: string, phase: StartupPhase): boolean {
+  return platform !== 'darwin' && phase === 'running'
+}
+
 export function createStartupState(): StartupState {
   let phase: StartupPhase = 'bootstrap'
   return {
