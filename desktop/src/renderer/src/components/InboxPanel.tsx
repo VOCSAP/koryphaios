@@ -229,6 +229,10 @@ export function InboxPanel(): React.JSX.Element {
    * message (ask_operator). See approval-verdict.ts for which one a given
    * chip must use.
    */
+  const closeInboxAfterFinalSuccessfulApproval = (ok: boolean): void => {
+    if (ok && useDeck.getState().pendingApprovals.length === 0) openInbox(false)
+  }
+
   const answerApproval = async (
     id: string,
     action:
@@ -256,6 +260,7 @@ export function InboxPanel(): React.JSX.Element {
       )
       setInboxReplyDraft(draftKey, '')
       clearPendingApproval(id)
+      closeInboxAfterFinalSuccessfulApproval(ok)
       setOpenKey(null)
     } catch (e) {
       // Defense in depth: the controls are already hidden on a remote client,
@@ -475,7 +480,10 @@ export function InboxPanel(): React.JSX.Element {
               <HookApprovalAnswer
                 approval={hookApproval}
                 actionsClassName="modal-actions inbox-modal-actions approval-actions"
-                onSettled={() => setOpenKey(null)}
+                onSettled={(ok) => {
+                  closeInboxAfterFinalSuccessfulApproval(ok)
+                  setOpenKey(null)
+                }}
               >
                 <button className="btn" onClick={() => setOpenKey(null)}>
                   {t('inbox.close')}

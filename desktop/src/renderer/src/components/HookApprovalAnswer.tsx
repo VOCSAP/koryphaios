@@ -13,8 +13,7 @@ interface Props {
   /** A row on reply_route 'hook': the module waits on it, nothing is typed into a terminal. */
   approval: InboxApproval
   actionsClassName: string
-  /** Called once the row is settled here or elsewhere; the host closes what it opened. */
-  onSettled?: () => void
+  onSettled?: (ok: boolean) => void
   /** Host buttons placed between the handback and the answering buttons. */
   children?: ReactNode
 }
@@ -54,7 +53,7 @@ export function HookApprovalAnswer(props: Props): React.JSX.Element {
       )
       setApprovalDraft(approval.id, null)
       clearPendingApproval(approval.id)
-      props.onSettled?.()
+      props.onSettled?.(ok)
     } catch (e) {
       const msg = errorText(e)
       if (msg.includes('remote-blocked')) showToast('inbox.verdictRemoteBlocked', 'error')

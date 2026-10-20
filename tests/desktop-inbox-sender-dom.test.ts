@@ -62,15 +62,17 @@ interface FakeDeckState {
   graphDrafts: unknown[];
   dict: Record<string, string>;
   remote: boolean;
-  openInbox: () => void;
+  openInbox: (open: boolean) => void;
   openGraphDraft: () => void;
   markInboxSeen: () => void;
   ackInboxEntry: () => void;
   setInboxReplyDraft: () => void;
   setApprovalDraft: () => void;
-  clearPendingApproval: () => void;
+  clearPendingApproval: (id: string) => void;
   showToast: () => void;
 }
+
+let inboxCalls: boolean[] = [];
 
 function initialFakeState(): FakeDeckState {
   return {
@@ -83,13 +85,16 @@ function initialFakeState(): FakeDeckState {
     graphDrafts: [],
     dict: {},
     remote: false,
-    openInbox: () => {},
+    openInbox: (open) => {
+      inboxCalls.push(open);
+    },
     openGraphDraft: () => {},
     markInboxSeen: () => {},
     ackInboxEntry: () => {},
     setInboxReplyDraft: () => {},
     setApprovalDraft: () => {},
-    clearPendingApproval: () => {},
+    clearPendingApproval: (id) =>
+      fakeUseDeck.setState((s) => ({ pendingApprovals: s.pendingApprovals.filter((approval) => approval.id !== id) })),
     showToast: () => {}
   };
 }
@@ -106,18 +111,11 @@ function resetFakeStore(): void {
 mockStore({ useDeck: fakeUseDeck, ...storeMockStubs });
 
 // mock.module freezes the exported-names list of a specifier for the whole
-// bun process on first materialization, not per importing file: a factory
-// exposing fewer names than the real module poisons every later file that
-// imports another value export of the same specifier. Re-export the real
-// module and only override the one symbol this fixture needs to control.
+// bun process on first materialization. Re-export the whole real surface so a
+// later import cannot require a name this fixture omitted.
 import * as realSharedTypes from "../desktop/src/shared/types.ts";
 
-mock.module("@shared/types", () => ({
-  ...realSharedTypes,
-  inboxEntryKey: () => {
-    throw new Error("inboxEntryKey stub called -- fixture must stay kind:'approval' only");
-  }
-}));
+mock.module("@shared/types", () => ({ ...realSharedTypes }));
 
 // Imported AFTER the mock.module calls above, so InboxPanel.tsx's own imports
 // (`../store`, `@shared/types`) bind to the mocks rather than attempting real
@@ -130,6 +128,7 @@ let root: Root;
 beforeEach(() => {
   jest.useFakeTimers();
   setSystemTime(new Date("2026-01-02T12:00:00.000Z"));
+  inboxCalls = [];
   resetFakeStore();
   container = document.createElement("div");
   document.body.appendChild(container);
@@ -164,6 +163,40 @@ function renderApprovals(approvals: FakeApproval[], sessions: FakeSession[]): vo
 
 function renderPanel(a: FakeApproval, sessions: FakeSession[]): void {
   renderApprovals([a], sessions);
+}
+
+function channelQuestion(id: string): FakeApproval {
+  return approval({ id, kind: "question", reply_route: "channel", mergeable: false, options: ["Yes"] });
+}
+
+function hookPermission(id: string): FakeApproval {
+  return approval({ id, kind: "permission", reply_route: "hook", mergeable: false, options: [] });
+}
+
+function setApprovalReply(reply: () => Promise<boolean>): void {
+  (globalThis as unknown as { window: { api: Record<string, unknown> } }).window.api = { approvalReply: reply };
+}
+
+function setApprovalAllow(allow: () => Promise<boolean>): void {
+  (globalThis as unknown as { window: { api: Record<string, unknown> } }).window.api = { approvalAllow: allow };
+}
+
+async function answerFirstChannelQuestion(): Promise<void> {
+  act(() => {
+    (container.querySelector(".inbox-entry-approval") as HTMLElement).click();
+  });
+  await act(async () => {
+    (container.querySelector(".inbox-option") as HTMLElement).click();
+  });
+}
+
+async function answerFirstHookPermission(): Promise<void> {
+  act(() => {
+    (container.querySelector(".inbox-entry-approval") as HTMLElement).click();
+  });
+  await act(async () => {
+    (container.querySelector(".approval-actions .primary") as HTMLElement).click();
+  });
 }
 
 function senderSpan(): HTMLElement | null {
@@ -274,6 +307,85 @@ test("a question keeps its producer options as chips and its free-text reply", (
   });
   expect([...container.querySelectorAll(".inbox-option")].map((b) => b.textContent)).toEqual(["A", "B", "C"]);
   expect(container.querySelector(".inbox-modal-reply")).not.toBeNull();
+});
+
+test("answering the last channel question closes the inbox", async () => {
+  setApprovalReply(async () => true);
+  renderApprovals([channelQuestion("only")], []);
+
+  await answerFirstChannelQuestion();
+
+  expect(inboxCalls).toEqual([false]);
+});
+
+test("answering a channel question leaves the inbox open when another question remains", async () => {
+  setApprovalReply(async () => true);
+  renderApprovals([channelQuestion("first"), channelQuestion("second")], []);
+
+  await answerFirstChannelQuestion();
+
+  expect(inboxCalls).toEqual([]);
+});
+
+test("a channel question arriving during a reply keeps the inbox open", async () => {
+  setApprovalReply(async () => {
+    fakeUseDeck.setState((s) => ({ pendingApprovals: [...s.pendingApprovals, channelQuestion("arrived")] }));
+    return true;
+  });
+  renderApprovals([channelQuestion("only")], []);
+
+  await answerFirstChannelQuestion();
+
+  expect(inboxCalls).toEqual([]);
+  expect(fakeUseDeck.getState().pendingApprovals.map((approval) => approval.id)).toEqual(["arrived"]);
+});
+
+test("notifications do not keep the inbox open after the last channel question is answered", async () => {
+  setApprovalReply(async () => true);
+  fakeUseDeck.setState({
+    inboxMessages: [{ id: 1, from: "peer", text: "notification", sentAt: "2026-01-02T12:00:00.000Z" }]
+  });
+  renderApprovals([channelQuestion("only")], []);
+
+  await answerFirstChannelQuestion();
+
+  expect(inboxCalls).toEqual([false]);
+});
+
+test("a channel answer settled elsewhere does not close the inbox", async () => {
+  setApprovalReply(async () => false);
+  renderApprovals([channelQuestion("only")], []);
+
+  await answerFirstChannelQuestion();
+
+  expect(inboxCalls).toEqual([]);
+});
+
+test("a rejected channel answer does not close the inbox", async () => {
+  setApprovalReply(async () => Promise.reject(new Error("broker unavailable")));
+  renderApprovals([channelQuestion("only")], []);
+
+  await answerFirstChannelQuestion();
+
+  expect(inboxCalls).toEqual([]);
+});
+
+test("answering the last hook permission closes the inbox", async () => {
+  setApprovalAllow(async () => true);
+  renderApprovals([hookPermission("only")], []);
+
+  await answerFirstHookPermission();
+
+  expect(inboxCalls).toEqual([false]);
+});
+
+test("a hook permission settled elsewhere does not close the inbox", async () => {
+  setApprovalAllow(async () => false);
+  renderApprovals([hookPermission("only")], []);
+
+  await answerFirstHookPermission();
+
+  expect(inboxCalls).toEqual([]);
 });
 
 test("the request text is shown once: hidden when the hook form renders the questions, kept otherwise", () => {
