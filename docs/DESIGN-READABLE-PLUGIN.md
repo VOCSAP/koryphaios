@@ -15,8 +15,9 @@ ci-dessous restent valables.
 ## 1. Cadrage
 
 Ratifie par l'operateur (carte f732182b, append du 2026-10-18, Kleos #29674) :
-cadres a coins DROITS, `ScreenGuard` INCHANGE, paquet autonome opt-in, table de
-versions certifiees, garantie bornee au corpus de captures. Le lot 1 livre le
+cadres a coins DROITS, `ScreenGuard` INCHANGE, paquet autonome opt-in, version
+minimale supportee (decision operateur du 2026-10-20, carte ab5ae18c, qui remplace
+la table de versions certifiees), garantie bornee au corpus de captures. Le lot 1 livre le
 CONTRAT et un PROTOTYPE chargeable seul, sans cablage Deck.
 
 ## 2. Precedents du depot (lus avant de dessiner)
@@ -64,7 +65,7 @@ desktop/readable-plugin/
   hooks/hooks.json               { "modules": ["./register.tsx"] }  (une seule cle)
   hooks/register.tsx             cablage seul : 3 hooks ui.render + session.start
   hooks/layout.ts                PUR : classification, constantes de cadre, regle de fin de tour
-  hooks/versions.ts              PUR : table des versions certifiees
+  hooks/versions.ts              PUR : version minimale supportee, par capacite
   tsconfig.json                  { "extends": "./.claude-plugin/types/tsconfig.json" } (comme deck-plugin)
   README.md                      installation hors Kory, quoi desactiver
 ```
@@ -92,8 +93,8 @@ toute garde ratee -> `return next(e)` (rendu stock).
 Gardes communes, dans cet ordre :
 1. `e.surface === 'terminal'`.
 2. `typeof` de chaque prop utilisee (`text` et `word` : string ; `durationMs` :
-   number fini). Echec -> stock (derive d'API a l'interieur d'une version certifiee).
-3. `await certified($)` (4.3) vrai pour la capacite `layout`.
+   number fini). Echec -> stock (derive d'API a l'interieur d'une version supportee).
+3. `isSupported(base, 'layout')` (4.3) vrai, `base` lu dans `await $.session.version()`.
 4. `(e.viewport?.columns ?? 80) >= MIN_FRAME_COLUMNS` (40). Sous 40 colonnes : stock.
    Valeur choisie parce que la mesure du lead couvre 40, 80 et 120 : en dessous,
    non mesure, donc stock (DEDUIT : echec ouvert vers le rendu natif).
@@ -107,42 +108,52 @@ Gardes communes, dans cet ordre :
 `isFirstOfReply` et `onScreen` ne servent pas au lot 1 (V1 : tout bloc non
 resume est encadre, ratifie).
 
-### 4.3 Table des versions et repli
+### 4.3 Version minimale et repli
 
-`versions.ts` (pur, ne depend pas du module `claude-code` a l'execution) :
+Decision operateur du 2026-10-20 (carte ab5ae18c) : la certification EXACTE est
+abandonnee. La CLI se met a jour presque chaque jour, et l'egalite exacte laissait
+le plugin inactif chez l'operateur (2.1.304 contre 2.1.303 certifiee). Une version
+egale ou superieure a un minimum valide active le plugin ; si une mise a jour
+casse le rendu, on fait une passe de reparation (le repli R7 limite l'impact).
+
+`versions.ts` (pur, ne depend pas du module `claude-code` a l'execution, livre
+dans choregos@67d3fe6) :
 
 ```ts
 export type Capability = 'layout'              // 574feb89 ajoutera 'finalTurn'
-export const CERTIFIED: Readonly<Record<string, readonly Capability[]>> = {
-  '2.1.303': ['layout']
+export const MIN_SUPPORTED: Readonly<Record<Capability, string>> = {
+  layout: '2.1.303',
 }
-export function isCertified(base: string | undefined, capability: Capability): boolean
+export function isSupported(base: string | undefined, capability: Capability): boolean
 ```
 
 - Cle = `SessionVersion.base` de `await $.session.version()` (type :
   `claude-code.d.ts:12252-12272`, `version: () => Promise<SessionVersion>` ligne
-  2919). Egalite EXACTE, jamais une plage : l'API « moves between releases »
-  (reference.md du skill) et la CLI se met a jour seule.
-- `base` absent, suffixe `-dev`, ou version hors table -> `false`.
-- Une capacite par version : certifier une version pour `layout` ne certifie pas
-  `finalTurn` (point d'extension de 574feb89).
-- `certified($)` memoise la PROMESSE dans une variable du module (constante pour
+  2919), lue comme une release `MAJOR.MINOR.PATCH` et comparee NUMERIQUEMENT,
+  composant par composant, au minimum de la capacite (2.1.40 est inferieur a
+  2.1.303). MESURE sur session reelle : 2.1.303 et 2.1.304 rendent `base` egal a
+  `version`.
+- `base` absent, illisible, suffixe `-dev` (`2.1.304-dev` n'est pas une release)
+  ou inferieur au minimum -> `false`.
+- Un minimum par capacite : le minimum de `layout` ne dit rien de `finalTurn`
+  (point d'extension de 574feb89).
+- `supported($)` memoise la PROMESSE dans une variable du module (constante pour
   un processus ; un rechargement la recree). Rejet de `$.session.version()` ->
   `false` ET `$.ui.log(msg, { to: 'debug' })` (pas de silence). Passer `$` a des
   `function` declarees, pas a des `const` fleches (regle de `claude plugin
   validate` rappelee par `tests/desktop-kory-module-plugin-validate.test.ts:27`).
-- Version non certifiee : un hook `session.start` appelle `certified($)` une fois
-  et leve UN toast (`$.ui.toast`) « version X non certifiee, rendu natif », une
-  seule fois par processus. Sans lui le plugin « ne fait rien » apres chaque mise
-  a jour de la CLI sans qu'aucune trace ne le dise.
+- Version non supportee : un hook `session.start` appelle `supported($)` une fois
+  et leve UN toast (`$.ui.toast`) « version X non supportee, rendu natif », une
+  seule fois par processus. Sans lui le plugin « ne fait rien » sur une CLI trop
+  ancienne ou de developpement sans qu'aucune trace ne le dise.
 - Un hook de module en echec ou au-dela de 10 s est SAUTE, un arbre invalide est
   remplace par le rendu du moteur avec une ligne de debug (reference.md,
   « Drawing: ui.render »). Le repli est donc natif ; le paquet n'ajoute aucun
   `try/catch` qui masquerait une erreur.
 
-Cout de maintenance a assumer (DEDUIT) : chaque mise a jour de la CLI sort de la
-table et rend le rendu stock jusqu'a une nouvelle certification (lot 2 : capture
-+ verdicts, puis une ligne dans `CERTIFIED`).
+Cout de maintenance a assumer (DEDUIT) : une mise a jour de la CLI reste active
+sans certification ; une casse constatee se repare dans le plugin, et le minimum
+n'est releve que si une version ancienne ne peut plus etre servie.
 
 ### 4.4 Rendu V1
 
@@ -184,7 +195,7 @@ Regle de fin de tour (`turnRule`) :
 
 | Cas | Pourquoi | Garde |
 |---|---|---|
-| Version non certifiee, surface non terminal, `< 40` colonnes | repli | gardes communes |
+| Version non supportee, surface non terminal, `< 40` colonnes | repli | gardes communes |
 | `UserMessage` dont `origin.kind !== 'composer'` | notifications et messages de pairs ont un habillage du moteur | garde propre |
 | `AssistantMessage` qui ressemble a un message de limite | la detection de `quota.ts` lit le flux PTY nettoye (`quota.ts:38-55`) : `hit\s+your\s+limit`, `resets?\s+...` utilisent `\s+` qui ne traverse pas `│`. Mesure du lead : coupe en deux lignes d'un cadre, le message n'est plus detecte. | `mustStayStock(text)` |
 
@@ -273,7 +284,7 @@ version dans le harnais. Piste (DEDUIT, `claude-code.d.ts:7082,7386`) : `$.sessi
 est un appel `$` dont l'evenement est `session.version` ; un `on('session.version', …)`
 pose par le test SOUS le plugin le simulerait. `mock` n'a que `clock`, `store`,
 `env`, `session` (`:16202`). Repli si la piste echoue : le test lit `claude
---version` et assertionne la branche qui correspond (cadre si certifiee, stock +
+--version` et assertionne la branche qui correspond (cadre si supportee, stock +
 toast sinon), avec un message d'assertion qui nomme la version. Ne jamais laisser
 une mise a jour de la CLI rendre le gate rouge sans que le message le dise.
 
@@ -307,7 +318,7 @@ une mise a jour de la CLI rendre le gate rouge sans que le message le dise.
 | ajouter `limit`-like au regex de `quota.ts` ET a l'echantillon sans toucher `mustStayStock` | invariant du quota |
 | `turnRule` a largeur `columns` | invariant de largeur |
 | ajouter `·` en tete d'une ligne attenuee | test d'invariant `hasSpinnerRowCue` sur la ligne attenuee |
-| table `CERTIFIED` vide | harnais (branche stock + toast) |
+| `MIN_SUPPORTED` au-dessus de la version courante, ou comparaison lexicale | harnais (branche stock + toast) |
 
 ### 6.5 Renvoye au lot 2
 
@@ -315,8 +326,9 @@ Captures reelles du CLI 2.1.303 dans une tuile PTY avec le paquet : tours simple
 plusieurs appels d'outil, reponse longue, liste numerotee, URL, 40/80/120
 colonnes, `/clear`, reprise, pause, injection d'une directive pendant un cadre
 visible. Verdicts ajoutes a `tests/_fixture-verdicts.ts` SANS toucher aux entrees
-existantes. Capture du message de limite (6.6). Regle de promotion : une entree de
-`CERTIFIED` exige au moins une capture du corpus pour cette version.
+existantes. Capture du message de limite (6.6). Plus de regle de promotion par
+version (decision operateur du 2026-10-20, 4.3) : le corpus sert de preuve sur la
+version minimale et de banc de reparation quand une mise a jour casse le rendu.
 
 ### 6.6 Mesures de la ratification
 
@@ -352,7 +364,7 @@ exclu. La conception ne depend pas du resultat (`mustStayStock`), l'ACTIVATION
 
 | Lot | Contenu | Depend de |
 |---|---|---|
-| 2 | Corpus de captures PTY reelles, verdicts dans `_fixture-verdicts.ts`, sonde du message de limite, regle de promotion de `CERTIFIED`, sonde « deux copies » | 1 |
+| 2 | Corpus de captures PTY reelles, verdicts dans `_fixture-verdicts.ts`, sonde du message de limite, sonde « deux copies » | 1 |
 | 3 | Distribution Deck, defaut DESACTIVE : 3e `--plugin-dir` (`pluginDirsForTile`, `session-command.ts:117-126`, nom dans une constante `DECK_*_DIRNAME`), entree `extraResources` + `tests/desktop-electron-builder-resources.test.ts`, `labels` pose depuis la locale, reglage operateur | 1 (peut chevaucher 2) |
 | 4 | Revue visuelle (`DESIGN.md`, marges), validation de l'operateur en tuile, activation par defaut | 2 et 3 |
 | 574feb89 | Distinction tour final / intermediaire | 4 (V1 observee) |
@@ -375,8 +387,8 @@ la reecriture multi-dossiers avec un test qui la mord.
    `claude-code.d.ts:4561-4582`, `:2393`) sans toucher au dessin ni aux versions.
 2. `BlockKind = 'frame' | 'dim' | 'stock'` ferme, `switch` exhaustif au dessin.
 3. `dim` accepte un corps `Markdown` (pas seulement le texte d'un resume).
-4. Table `CERTIFIED` a capacites : 574feb89 ajoute `finalTurn`, certifie par ses
-   propres captures de repeinture.
+4. `MIN_SUPPORTED` a capacites : 574feb89 ajoute `finalTurn`, avec un minimum
+   valide par ses propres captures de repeinture.
 5. Le harnais 6.2 est parametre par composant : il sert tel quel.
 6. Le rig de capture du lot 2 doit pouvoir enregistrer DANS LE TEMPS (repeintures
    d'une meme ligne), faute de quoi 574feb89 devra le reecrire.
@@ -402,7 +414,7 @@ lisible depuis un depot clone : le Deck le charge depuis ses ressources.
 
 1. Defaut de `labels` : `en` (portable) recommande ; `fr` si l'operateur veut
    « Vous » des le lot 1 sans reglage.
-2. Toast unique a version non certifiee : garde (recommande) ou ligne de debug
+2. Toast unique a version non supportee : garde (recommande) ou ligne de debug
    seule ?
 3. Licence : ecrire depuis ce contrat (recommande) ou reprendre du code du mod
    MIT et en porter la notice.

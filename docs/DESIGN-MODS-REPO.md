@@ -60,7 +60,7 @@ aujourd'hui casse dans le Deck pour des liens que Claude Code emet de lui-meme.
 
 | Repo des plugins | Kory |
 |---|---|
-| Le rendu (hooks `ui.render`), la table `CERTIFIED`, le repli `next(e)` | Preuve que la garde reste `clear` contre le VRAI `xterm-screen.ts` sur le snapshot epingle (grille synthetique, puis corpus reel, lots 1 et 2) |
+| Le rendu (hooks `ui.render`), la version minimale `MIN_SUPPORTED`, le repli `next(e)` | Preuve que la garde reste `clear` contre le VRAI `xterm-screen.ts` sur le snapshot epingle (grille synthetique, puis corpus reel, lots 1 et 2) |
 | `marketplace.json` a N entrees, un dossier par plugin, versions par plugin | Le cablage : `--plugin-dir` (troisieme et quatrieme dossier), `extraResources`, reecriture sandbox, defaut desactive, langue des etiquettes |
 | `claude plugin validate` et `claude plugin test` de chaque plugin, sa CI, ses tests de rendu | Clic OSC 8 : `linkHandler`, validation MAIN-side du href (entree hostile), apercu d'image, journal des refus |
 | Le CONTRAT ECRIT des exigences de Kory (section 5) : invariants testables par plugin, sans reproduire la garde | Link provider xterm pour les CLI SANS mod (chemins, `chemin:ligne`, URL) |
@@ -137,7 +137,7 @@ pas une entree hostile).
 ```
 
 Regles : (1) un plugin ne depend d'aucun autre et n'importe rien hors de son
-dossier (la table de versions `CERTIFIED` est DUPLIQUEE dans chaque plugin ;
+dossier (le fichier de versions, `MIN_SUPPORTED` par capacite, est DUPLIQUE dans chaque plugin ;
 un test de CI verifie que les copies sont identiques, pour que la derive soit
 rouge et non silencieuse) ; (2) nom de plugin distinct du mod tiers
 `readable-layout` et de tout nom de plugin Kory, pour eviter le cas "meme nom
@@ -153,8 +153,10 @@ et `claude plugin test` sur SON dossier ; (4) version par plugin, tag par plugin
   ou avec un libelle central (regle de fin de tour a `columns - 2`) ;
 - R4 aucun message de limite/quota n'est capture (reste en rendu natif) ;
 - R5 aucun glyphe de spinner en tete de ligne produite ;
-- R6 version : egalite exacte sur `SessionVersion.base`, absente/`-dev`/inconnue
-  = repli `next(e)` ;
+- R6 version : `SessionVersion.base` lue comme release `MAJOR.MINOR.PATCH` et
+  au moins egale au minimum supporte (2.1.303), comparee numeriquement ;
+  absente/`-dev`/illisible/inferieure = repli `next(e)`. Decision operateur du
+  2026-10-20 (carte ab5ae18c), qui remplace l'egalite exacte ;
 - R7 echec ouvert : toute erreur = `next(e)` ; aucun acces reseau ni
   processus ; lecture du systeme de fichiers limitee a `stat`/existence ;
 - R8 liens : seulement `http:`, `https:`, `file:`, 2048 car. max ; jamais de
@@ -190,7 +192,7 @@ qui retourne un arbre sans appeler `next` est terminal. Donc :
 ## 7. Le mod de liens : premiere forme (pas de conception detaillee)
 
 - Hook `ui.render` sur `AssistantMessage` (surface terminal, version
-  certifiee) : une fonction PURE `linkify(texte, contexte)` reperage de
+  supportee) : une fonction PURE `linkify(texte, contexte)` reperage de
   (1) URL `http(s)`, (2) chemins de fichiers absolus ou relatifs au `cwd` avec
   extension, avec `:ligne` optionnel ; (3) pas de balayage dans les blocs de
   code. Un chemin n'est lie que s'il EXISTE (`$.fs.stat`, une fois par chemin
@@ -216,7 +218,7 @@ qui retourne un arbre sans appeler `next` est terminal. Donc :
 |---|---|---|
 | M0 | Creer le repo (public, MIT), `marketplace.json`, CI (CLI epingle aligne), `CONTRACT.md`, squelette du plugin de rendu portant le contrat de `DESIGN-READABLE-PLUGIN.md` (tests `claude plugin test` du repo) | decision operateur sur le nom du repo et des plugins (hors mod tiers) |
 | L1 | Cote Kory : script de synchro + verrou + test d'empreinte ; preuve "garde inchangee, verdict clear" sur grille synthetique dans le vrai `createXtermScreen` avec importation du module pur du snapshot ; AUCUNE activation | M0 |
-| L2 | Corpus reel + oracle (`_fixture-verdicts.ts`) ; sonde quota ; sonde "deux copies" (`--plugin-dir` vs installe) ; sonde de chaine a deux plugins (section 6) ; regle de promotion ; alignement CLI CI 2.1.293 / certifie | L1 |
+| L2 | Corpus reel + oracle (`_fixture-verdicts.ts`) ; sonde quota ; sonde "deux copies" (`--plugin-dir` vs installe) ; sonde de chaine a deux plugins (section 6) ; alignement CLI CI 2.1.293 / version minimale | L1 |
 | L3 | Distribution Deck : dossiers `--plugin-dir` supplementaires, `extraResources`, defaut DESACTIVE, langue des etiquettes depuis la locale ; correctif de `rewritePluginDirForContainer` (non global) | L1 (L2 pour l'activation) |
 | L4 | Revue visuelle, validation de l'operateur, activation | L2, L3 |
 | L5a | Plugin de liens dans le repo (premiere forme section 7) | M0, independant de L1-L4 |
@@ -225,7 +227,7 @@ qui retourne un arbre sans appeler `next` est terminal. Donc :
 | L5d | Link provider xterm pour les CLI sans mod | L5b (partage la validation MAIN) |
 
 `574feb89` exige toujours du lot 1 : `classifyAssistant` asynchrone, `BlockKind`
-ferme, `CERTIFIED` a capacites, un rig de capture dans le temps ; en plus :
+ferme, `MIN_SUPPORTED` a capacites, un rig de capture dans le temps ; en plus :
 une capacite par plugin (`layout`, `links`), la meme table dupliquee et
 verifiee identique par la CI du repo.
 
@@ -244,7 +246,7 @@ verifiee identique par la CI du repo.
    `removeWorktree`, et la liste d1/d2/d3.
 2. Noms du repo et des plugins (hors `readable-layout`).
 3. Fermer ou requalifier 496ed818 (code supprime).
-4. Aligner le CLI de la CI (2.1.293) sur la version certifiee (2.1.303), ou
-   certifier 2.1.293 : impose avant que la CI du repo des plugins ne serve de
-   preuve.
+4. Aligner le CLI de la CI (2.1.293) sur la version minimale supportee (2.1.303) :
+   impose avant que la CI du repo des plugins ne serve de preuve, puisque 2.1.293
+   est sous le minimum.
 5. L5b en premier ? Il corrige un defaut visible aujourd'hui et ne depend de rien.

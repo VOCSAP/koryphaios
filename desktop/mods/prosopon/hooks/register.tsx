@@ -6,7 +6,7 @@ import {
   MIN_FRAME_COLUMNS,
   type BlockKind,
 } from './layout'
-import { isCertified } from './versions'
+import { isSupported } from './versions'
 
 export async function classifyAssistant(
   $: unknown,
@@ -60,7 +60,7 @@ export const register: Register = on => {
     let tree: ReturnType<typeof draw>
     try {
       const version = await $.session.version()
-      const kind = isCertified(version.base, 'layout') ? await classifyAssistant($, e) : 'stock'
+      const kind = isSupported(version.base, 'layout') ? await classifyAssistant($, e) : 'stock'
       tree = draw($, e, kind, text)
     } catch (error) {
       $.ui.log(`prosopon: stock render after ${String(error)}`, { to: 'debug' })
