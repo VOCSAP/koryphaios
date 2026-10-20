@@ -7,6 +7,7 @@
 //    cannot rewrite a delivered message.
 
 import { describe, expect, test } from "bun:test";
+import { REFUSAL_NOTICES } from "../notify/format.ts";
 import { NtfyChannel, type NtfyConfig } from "../notify/ntfy.ts";
 import { encodeAnswer, encodePair, parseClickUrl } from "../notify/ntfy-protocol.ts";
 import type { AnswerRefusal, ChannelBinding, ChannelHost, InboundAnswer } from "../notify/types.ts";
@@ -363,12 +364,14 @@ describe("subscription (the inbound leg)", () => {
     expect(String(rec.published.at(-1)!.message)).toContain("already handled");
   });
 
-  test("a refused answer is not taken for a settled one: it gets the closing message too", async () => {
+  test("a refused answer tells the phone why and never settles the still-pending request", async () => {
     const rec = await run([JSON.stringify({ id: "m1", message: encodeAnswer("appr-1", "text", "go") })], {
       refused: "verdict-only",
     });
     expect(rec.answers).toHaveLength(1);
     expect(rec.published, "a refusal object is truthy and must not pass for a settled approval").toHaveLength(1);
+    expect(String(rec.published[0]!.message)).toBe(REFUSAL_NOTICES["verdict-only"]);
+    expect(parseClickUrl(String(rec.published[0]!.click))).toEqual({ view: "notice", approvalId: "appr-1" });
   });
 
   test("a pairing message pairs the notification topic and confirms on it", async () => {

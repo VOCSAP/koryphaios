@@ -272,14 +272,22 @@ export function pairedClickUrl(ok: boolean): string {
   return `${NTFY_CLICK_SCHEME}://paired/${ok ? "1" : "0"}`;
 }
 
-export type ClickView = "approval" | "settled" | "paired";
+/**
+ * Link on a refused answer. It names the request without settling it: the request
+ * is still pending, so the app shows the reason and keeps the request.
+ */
+export function noticeClickUrl(approvalId: string): string {
+  return `${NTFY_CLICK_SCHEME}://notice/${encodeURIComponent(approvalId)}`;
+}
+
+export type ClickView = "approval" | "settled" | "paired" | "notice";
 
 /**
  * Uses the shared scheme constant rather than a literal, so encoding and
  * parsing cannot silently diverge if the scheme is ever renamed.
  */
 export function parseClickUrl(url: string): { view: ClickView; approvalId: string } | null {
-  const m = new RegExp(`^${NTFY_CLICK_SCHEME}://(approval|settled|paired)/([^/?#]+)$`).exec(
+  const m = new RegExp(`^${NTFY_CLICK_SCHEME}://(approval|settled|paired|notice)/([^/?#]+)$`).exec(
     String(url ?? "")
   );
   if (!m) return null;
@@ -414,5 +422,24 @@ export function buildSettledPublish(
     priority: 1,
     tags: ["white_check_mark"],
     click: settledClickUrl(approvalId),
+  };
+}
+
+/**
+ * Build the message telling the phone why its answer was refused. Never the
+ * settled link: the request is still pending and must stay on the phone.
+ */
+export function buildRefusalPublish(
+  approvalId: string,
+  text: string,
+  deps: Pick<BuildPublishDeps, "topicNotif">
+): NtfyPublish {
+  return {
+    topic: deps.topicNotif,
+    title: "Not sent",
+    message: truncate(stripControl(text), NTFY_MESSAGE_MAX),
+    priority: 2,
+    tags: ["warning"],
+    click: noticeClickUrl(approvalId),
   };
 }

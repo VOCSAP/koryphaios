@@ -23,6 +23,7 @@ import {
   generateCredential,
   type ApprovalCredential,
 } from "../shared/approval.ts";
+import { REFUSAL_NOTICES } from "../notify/format.ts";
 import { decodePairingPayload, encodeAnswer, encodePair, parseClickUrl } from "../notify/ntfy-protocol.ts";
 import { OPERATOR_TRUST_VERSION } from "../shared/operator-trust.ts";
 import type { Approval } from "../shared/types.ts";
@@ -712,6 +713,14 @@ describe("ntfy enrolment", () => {
 
     await ntfy.publishRaw(payload.topic_replies, encodeAnswer(approvalId, "text", "Green"));
     await ntfy.publishRaw(payload.topic_replies, encodeAnswer(approvalId, "allow"));
+    const aboutRequest = () => (ntfy.published.get(payload.topic_notif) ?? []).filter((m) => String(m.click).includes(approvalId));
+    const refusalNotices = () =>
+      aboutRequest().filter((m) => parseClickUrl(String(m.click))?.view === "notice" && m.message === REFUSAL_NOTICES["answers-only"]);
+    expect(await until(() => refusalNotices().length === 2), "the phone must be told why its text and its Allow were refused").toBe(true);
+    expect(
+      aboutRequest().map((m) => parseClickUrl(String(m.click))?.view),
+      "a refused answer must never retire the still-pending request from the phone"
+    ).toEqual(["approval", "notice", "notice"]);
     const typed = await signedPost<{ approval: Approval }>(
       b,
       "/approval/add",

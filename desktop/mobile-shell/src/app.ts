@@ -151,6 +151,10 @@ function onMessage(msg: Parameters<typeof classify>[0]): void {
     setNotice(effect.ok ? "" : effect.text);
     return;
   }
+  if (effect.kind === "notice") {
+    setNotice(effect.text);
+    return;
+  }
 
   // An approval arriving at all proves the pairing took, even if the ack was
   // lost — ntfy has no delivery guarantee, so this is the belt to that brace.

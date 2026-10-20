@@ -7,6 +7,7 @@ import { describe, expect, test } from "bun:test";
 import {
   approvalClickUrl,
   buildApprovalPublish,
+  buildRefusalPublish,
   buildSettledPublish,
   decodeInbound,
   decodePairingPayload,
@@ -16,6 +17,7 @@ import {
   isPrivateHost,
   isValidTopic,
   normalizeNtfyServer,
+  noticeClickUrl,
   NTFY_ANSWER_MAX,
   NTFY_CLICK_SCHEME,
   NTFY_MESSAGE_MAX,
@@ -225,6 +227,19 @@ describe("click deep links", () => {
     expect(parseClickUrl(approvalClickUrl("a/b c"))).toEqual({ view: "approval", approvalId: "a/b c" });
   });
 
+  test("round-trips the refusal notice view", () => {
+    expect(parseClickUrl(noticeClickUrl("a/b c"))).toEqual({ view: "notice", approvalId: "a/b c" });
+  });
+
+  test("an app that predates the notice view finds none of its own views in a notice link", () => {
+    // The Android service and the older app route on `parastates://<view>/` prefixes;
+    // a notice must match none of them, or an older phone retires or rewrites the request.
+    const link = noticeClickUrl("appr-1");
+    for (const older of ["approval", "settled", "paired"]) {
+      expect(link.startsWith(`${NTFY_CLICK_SCHEME}://${older}/`), `a notice link read as the ${older} view`).toBe(false);
+    }
+  });
+
   test("round-trips the pairing acknowledgement, both verdicts", () => {
     expect(parseClickUrl(pairedClickUrl(true))).toEqual({ view: "paired", approvalId: "1" });
     expect(parseClickUrl(pairedClickUrl(false))).toEqual({ view: "paired", approvalId: "0" });
@@ -342,5 +357,17 @@ describe("buildSettledPublish", () => {
     expect(p.click).toBe(settledClickUrl("appr-1"));
     expect(p.actions).toBeUndefined();
     expect(p.message).toContain("handled via deck");
+  });
+});
+
+describe("buildRefusalPublish", () => {
+  test("carries the reason on the notice view, never the settled link", () => {
+    const p = buildRefusalPublish("appr-1", `Not sent: try again${String.fromCharCode(27)}[31m`, { topicNotif: DEPS.topicNotif });
+    expect(p.click).toBe(noticeClickUrl("appr-1"));
+    expect(p.priority).toBe(2);
+    expect(p.tags).toEqual(["warning"]);
+    expect(p.actions).toBeUndefined();
+    expect(p.message).not.toContain(String.fromCharCode(27));
+    expect(p.message.startsWith("Not sent: try again")).toBe(true);
   });
 });

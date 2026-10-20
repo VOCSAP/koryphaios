@@ -3,12 +3,15 @@
 // Told apart by their click deep link: parastates://approval/<id> adds to the
 // list, parastates://settled/<id> drops it and cancels the Android
 // notification, parastates://paired/<0|1> is the broker's pairing-handshake
-// reply.
+// reply, parastates://notice/<id> says why an answer was refused and leaves the
+// still-pending request in the list.
 // ntfy cannot edit a delivered message (unlike Telegram/Discord), so a settled
 // message plus this reducer is what makes an already-answered question stop
 // looking actionable on the phone.
 
 import { parseClickUrl } from "../../../notify/ntfy-protocol.ts";
+import { HIDDEN_CONTROLS } from "../../../shared/log-redact.ts";
+import { stripControl } from "../../../shared/text.ts";
 import { readJson, writeJson, type KeyValueStore } from "./storage.ts";
 
 export const INBOX_KEY = "koryphaios.approvals.inbox";
@@ -43,6 +46,8 @@ export type InboxEffect =
   | { kind: "settle"; id: string; text: string }
   /** The broker acknowledged (or refused) this device's pairing. */
   | { kind: "paired"; ok: boolean; text: string }
+  /** The broker refused an answer; the request it names is still pending. */
+  | { kind: "notice"; id: string; text: string }
   | { kind: "ignore" };
 
 /**
@@ -61,6 +66,10 @@ export function classify(msg: NtfyMessage, now: number): InboxEffect {
   }
   if (click.view === "paired") {
     return { kind: "paired", ok: click.approvalId === "1", text: String(msg.message ?? "") };
+  }
+  if (click.view === "notice") {
+    const text = stripControl(String(msg.message ?? "")).replace(HIDDEN_CONTROLS, "").slice(0, 2000);
+    return { kind: "notice", id: click.approvalId, text };
   }
   return {
     kind: "add",
@@ -85,7 +94,7 @@ export function applyEffect(
   effect: InboxEffect,
   now: number
 ): PendingApproval[] {
-  if (effect.kind === "ignore" || effect.kind === "paired") return pending;
+  if (effect.kind === "ignore" || effect.kind === "paired" || effect.kind === "notice") return pending;
   if (effect.kind === "settle") return pending.filter((p) => p.id !== effect.id);
   const without = pending.filter((p) => p.id !== effect.approval.id);
   return prune([effect.approval, ...without], now);

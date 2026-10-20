@@ -11,9 +11,10 @@
 // address-binding check.
 
 import type { Approval } from "../shared/types.ts";
-import { ALREADY_HANDLED_NOTICE, originLabel, renderSettled } from "./format.ts";
+import { ALREADY_HANDLED_NOTICE, originLabel, REFUSAL_NOTICES, renderSettled } from "./format.ts";
 import {
   buildApprovalPublish,
+  buildRefusalPublish,
   buildSettledPublish,
   decodeInbound,
   pairedClickUrl,
@@ -300,7 +301,14 @@ export class NtfyChannel implements NotificationChannel {
       fromAddress: address,
     };
     const settled = await this.deps.host.onAnswer("ntfy", answer);
-    if (!settled || "refused" in settled) await this.rejectLate(binding, answer);
+    if (!settled) await this.rejectLate(binding, answer);
+    else if ("refused" in settled) {
+      await this.publish(
+        buildRefusalPublish(answer.approvalId, REFUSAL_NOTICES[settled.refused], {
+          topicNotif: this.deps.config.topic_notif,
+        })
+      );
+    }
   }
 
   /**

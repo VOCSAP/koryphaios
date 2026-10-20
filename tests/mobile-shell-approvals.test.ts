@@ -39,6 +39,7 @@ import {
   approvalClickUrl,
   decodeInbound,
   encodePairingPayload,
+  noticeClickUrl,
   pairedClickUrl,
   settledClickUrl,
 } from "../notify/ntfy-protocol.ts";
@@ -204,6 +205,22 @@ describe("the inbox", () => {
       T0
     );
     expect(pending).toHaveLength(0);
+  });
+
+  test("a refusal notice says why and keeps the still-pending request, buttons included", () => {
+    const pending = applyEffect([], classify(request("appr-1"), T0), T0);
+    const effect = classify({ click: noticeClickUrl("appr-1"), message: "Not sent: this request takes Approve or Reject." }, T0);
+    expect(effect).toEqual({ kind: "notice", id: "appr-1", text: "Not sent: this request takes Approve or Reject." });
+    expect(applyEffect(pending, effect, T0)).toEqual(pending);
+  });
+
+  test("a notice from anyone who can publish on the topic shows no control, line break or bidi character", () => {
+    const c = String.fromCharCode;
+    const p = String.fromCodePoint;
+    const hostile = `Not sent:${c(0x1b)}[31m this${c(0x0d)}${c(0x0a)}request${p(0x202e)} takes${c(0x9b)} Approve${p(0x2066)} or Reject.`;
+    const effect = classify({ click: noticeClickUrl("appr-1"), message: hostile }, T0);
+    expect(effect).toEqual({ kind: "notice", id: "appr-1", text: "Not sent: this request takes Approve or Reject." });
+    expect(effect.kind === "notice" && /[\p{Cc}\p{Cf}]/u.test(effect.text), "a control or format character reached the screen").toBe(false);
   });
 
   test("a closing message for something else leaves the list alone", () => {
