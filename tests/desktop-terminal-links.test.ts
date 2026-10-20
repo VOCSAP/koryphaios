@@ -98,6 +98,16 @@ describe('installTerminalLinks', () => {
     expect(linkRig(rows, 22).provide(1)[0]!.text, 'the width heuristic alone does not see this wrap').toBe('/work/very/long/p')
   })
 
+  test('a quoted path with spaces, Windows or Git Bash form, is one link to the whole path on a tile with file links', async () => {
+    const rig = linkRig(['open "D:\\a b\\c.md" or "/d/a b/c.md" now'], 80)
+    const links = rig.provide(1)
+    expect(links.map((l) => l.text)).toEqual(['D:\\a b\\c.md', '/d/a b/c.md'])
+    expect(links[0]!.range).toEqual({ start: { x: 7, y: 1 }, end: { x: 17, y: 1 } })
+    links[1]!.activate(click(false), links[1]!.text)
+    await tick()
+    expect(rig.opened).toEqual([{ target: '/d/a b/c.md', intent: 'reveal' }])
+  })
+
   test('click reveals, Ctrl+click opens, Cmd+click opens, and the target sent to main is the path without the :line suffix', async () => {
     const rig = linkRig(['edit /work/src/a.ts:42'], 80)
     const [link] = rig.provide(1)
@@ -142,7 +152,7 @@ describe('installTerminalLinks', () => {
   })
 
   test('on a sandbox tile only http(s) stays clickable: no file link is offered and an OSC 8 file: is refused locally, traced, as a sandbox refusal', async () => {
-    const rig = linkRig(['/a/b and https://example.com/x HTTP://EXAMPLE.com/y'], 80, { fileLinks: false })
+    const rig = linkRig(['/a/b and https://example.com/x HTTP://EXAMPLE.com/y "C:\\a b\\c.md"'], 80, { fileLinks: false })
     expect(rig.provide(1).map((l) => l.text), 'the scheme is matched without regard to case').toEqual(['https://example.com/x', 'HTTP://EXAMPLE.com/y'])
     rig.handler.activate(click(false), 'file:///a/b', {} as never)
     rig.handler.activate(click(false), 'https://example.com/x', {} as never)

@@ -108,6 +108,16 @@ describe("segmentLinkedText", () => {
   const linkTargets = (text: string): string[] =>
     segmentLinkedText(text).flatMap((s) => (s.kind === "link" ? [s.target] : []));
 
+  test("a quoted path with spaces, Windows or Git Bash form, is one link segment to the whole path", () => {
+    const text = 'open "D:\\a b\\c.md" or "/d/a b/c.md" now';
+    const segments = segmentLinkedText(text);
+    expect(segments.map((s) => s.text).join("")).toBe(text);
+    expect(segments.filter((s) => s.kind === "link")).toEqual([
+      { kind: "link", text: "D:\\a b\\c.md", target: "D:\\a b\\c.md" },
+      { kind: "link", text: "/d/a b/c.md", target: "/d/a b/c.md" }
+    ]);
+  });
+
   test.each([
     ["userinfo with a password", "https://user:pass@example.com/x"],
     ["a trusted-looking name before the @", "https://trusted.com@evil.example/x"],

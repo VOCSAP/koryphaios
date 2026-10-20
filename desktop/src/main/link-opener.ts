@@ -12,6 +12,7 @@ const MAX_TARGET_LENGTH = 8192
 const MAX_LINK_HOPS = 16
 const MAX_READLINKS = 64
 const SCHEME_RE = /^([A-Za-z][A-Za-z0-9+.-]*):/
+const MSYS_DRIVE_RE = /^\/([A-Za-z])\//
 
 export interface LinkOpenerDeps {
   shell: {
@@ -81,6 +82,9 @@ export function createLinkOpener(deps: LinkOpenerDeps): LinkOpener {
       if (decoded.includes('\0')) return { kind: 'refused', reason: 'invalid' }
       return finishPath(deps.platform === 'win32' ? decoded.replace(/^\/(?=[A-Za-z]:)/, '') : decoded)
     }
+    // Git Bash writes D:\x as /d/x. Rewritten before any check, it meets every guard of the drive form.
+    const msysDrive = deps.platform === 'win32' ? MSYS_DRIVE_RE.exec(target) : null
+    if (msysDrive) target = `${msysDrive[1]!.toUpperCase()}:\\${target.slice(3)}`
     if (target.includes('\0')) return { kind: 'refused', reason: 'invalid' }
     if (target === '~' || target.startsWith('~/') || target.startsWith('~\\')) {
       return finishPath(p.join(deps.home, target.slice(1)))

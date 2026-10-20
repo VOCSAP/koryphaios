@@ -36,6 +36,42 @@ describe('detectLinks', () => {
     expect(targets('https://x.com/?f=/usr/local/bin')).toEqual(['https://x.com/?f=/usr/local/bin'])
   })
 
+  test('a quoted path is one link across its spaces, the quotes left out of it', () => {
+    const exe = 'D:\\Jeux\\GOG Galaxy\\Games\\Cyberpunk 2077\\REDprelauncher.exe'
+    expect(targets('  - Git Bash : "/d/Jeux/GOG Galaxy/Games/Cyberpunk 2077/REDprelauncher.exe"')).toEqual([
+      '/d/Jeux/GOG Galaxy/Games/Cyberpunk 2077/REDprelauncher.exe'
+    ])
+    const powershell = `  - PowerShell : & "${exe}"`
+    const [link] = detectLinks(powershell)
+    expect(link?.target).toBe(exe)
+    expect(powershell.slice(link!.start, link!.end)).toBe(exe)
+    expect(targets('"C:\\a b\\c.md" and "D:\\x y\\z.txt"')).toEqual(['C:\\a b\\c.md', 'D:\\x y\\z.txt'])
+    expect(targets('run `D:\\a b\\c.md:12` then ~ "~/my notes/x.md"')).toEqual(['D:\\a b\\c.md', '~/my notes/x.md'])
+  })
+
+  test('an apostrophe in the prose before a single-quoted path does not take its opening quote', () => {
+    expect(targets("don't touch 'C:\\a b\\c.exe' ok")).toEqual(['C:\\a b\\c.exe'])
+    expect(targets("l'exe est 'D:\\Jeux\\GOG Galaxy\\x.exe'")).toEqual(['D:\\Jeux\\GOG Galaxy\\x.exe'])
+  })
+
+  test.each([
+    ['a no-break space', 0xa0],
+    ['a tab', 0x09],
+    ['an ideographic space', 0x3000],
+    ['a line separator', 0x2028]
+  ])('%s inside quotes is not read as a space of the path: no target holds it', (_label, code) => {
+    const blank = String.fromCharCode(code)
+    const found = targets(`see "C:\\Program${blank}Files\\x.md" now`)
+    expect(found.some((t) => t.includes(blank)), JSON.stringify(found)).toBe(false)
+  })
+
+  test('unquoted prose and quoted text that is not a whole path keep stopping at the first blank', () => {
+    expect(targets('see /work/a.md and then some words')).toEqual(['/work/a.md'])
+    expect(targets("it's /usr/bin/env and isn't quoted")).toEqual(['/usr/bin/env'])
+    expect(targets('"not a path" then /a/b c')).toEqual(['/a/b'])
+    expect(targets('"/help" and "" and "/a b/c " end')).toEqual([])
+  })
+
   test('a path directly after a word character is not a path start', () => {
     expect(targets('abc/def/ghi')).toEqual([])
     expect(targets('xC:\\a\\b')).toEqual([])

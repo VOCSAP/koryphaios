@@ -11,6 +11,9 @@ export interface DetectedLink {
 }
 
 const URL_RE = /https?:\/\/[^\s<>"'`]+/gi
+// A quoted path keeps its spaces, U+0020 only: a no-break or ideographic space would read as one and lead elsewhere.
+// The path start is anchored inside the regex so that an apostrophe of the prose cannot take the opening quote of a path.
+const QUOTED_PATH_RE = /(["'`])((?:[A-Za-z]:[\\/]|~[\\/]|\/[^\s/"'`<>|*?]+\/)(?:[^\s"'`<>|*?]| )*[^\s"'`<>|*?])\1/g
 const WINDOWS_PATH_RE = /(?<![A-Za-z0-9_])[A-Za-z]:[\\/][^\s<>"'`|*?]+/g
 const HOME_PATH_RE = /(?<![\w.~/\\-])~[\\/][^\s<>"'`|*?]+/g
 // Two segments at least, so a slash command such as `/help` is not a path.
@@ -37,6 +40,13 @@ export function detectLinks(text: string): DetectedLink[] {
     }
   }
   take(URL_RE, false)
+  for (const m of text.matchAll(QUOTED_PATH_RE)) {
+    const path = m[2]!
+    const start = m.index + 1
+    const end = start + path.length
+    if (found.some((l) => start < l.end && end > l.start)) continue
+    found.push({ start, end, target: path.replace(LINE_SUFFIX_RE, '') })
+  }
   take(WINDOWS_PATH_RE, true)
   take(HOME_PATH_RE, true)
   take(POSIX_PATH_RE, true)

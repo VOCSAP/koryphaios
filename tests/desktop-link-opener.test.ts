@@ -175,8 +175,9 @@ describe('link-opener: parsing', () => {
   })
 
   test('a drive-less absolute path is invalid on Windows even when the filesystem would resolve it', async () => {
-    const { opener, calls } = harness('win32', { existing: { '\\a\\b': 'C:\\a\\b' } })
-    expect(await opener.open('/a/b', 'reveal')).toEqual({ ok: false, reason: 'invalid' })
+    const { opener, calls } = harness('win32', { existing: { '\\ab\\c': 'C:\\ab\\c', '\\a\\b': 'C:\\a\\b' } })
+    expect(await opener.open('/ab/c', 'reveal')).toEqual({ ok: false, reason: 'invalid' })
+    expect(await opener.open('\\a\\b', 'reveal')).toEqual({ ok: false, reason: 'invalid' })
     expect(calls.shown).toEqual([])
   })
 
@@ -200,6 +201,57 @@ describe('link-opener: parsing', () => {
   test('a missing path is not-found', async () => {
     const { opener } = harness('linux')
     expect(await opener.open('/no/such/file.md', 'reveal')).toEqual({ ok: false, reason: 'not-found' })
+  })
+})
+
+describe('link-opener: a Git Bash /x/... path on Windows is its drive path', () => {
+  test('/d/x.md is revealed as D:\\x.md, spaces included', async () => {
+    const exe = 'D:\\Jeux\\GOG Galaxy\\REDprelauncher.exe'
+    const { opener, calls } = harness('win32', { existing: { 'D:\\x.md': 'D:\\x.md', [exe]: exe } })
+    expect(await opener.open('/d/x.md', 'reveal')).toEqual({ ok: true })
+    expect(await opener.open('/d/Jeux/GOG Galaxy/REDprelauncher.exe', 'reveal')).toEqual({ ok: true })
+    expect(calls.shown).toEqual(['D:\\x.md', exe])
+  })
+
+  test('the translated path meets the same guards as its drive form: a symlink component onto a share is refused before realpath', async () => {
+    const opts = { links: { 'C:\\work\\link': '\\\\127.0.0.1\\share\\x' }, existing: { 'C:\\work\\link\\a.png': 'C:\\work\\link\\a.png' } }
+    for (const target of ['/c/work/link/a.png', 'C:\\work\\link\\a.png']) {
+      const { opener, calls } = harness('win32', opts)
+      expect(await opener.open(target, 'reveal'), target).toEqual({ ok: false, reason: 'network-path' })
+      expect(calls.readlinks, target).toContain('C:\\work\\link')
+      expect(calls.realpaths, target).toEqual([])
+    }
+  })
+
+  test('a translated executable is only shown on Ctrl+click, even when the allow-list names its type', async () => {
+    const exe = 'D:\\x y\\z.exe'
+    const { opener, calls } = harness('win32', { existing: { [exe]: exe }, policy: { extensions: ['.exe'], exclusions: [] } })
+    expect(await opener.open('/d/x y/z.exe', 'open')).toEqual({ ok: true })
+    expect(calls.shown).toEqual([exe])
+    expect(calls.opened).toEqual([])
+  })
+
+  test('the translated path meets the alternate data stream guard of its drive form', async () => {
+    const { opener, calls } = harness('win32', { existing: { 'C:\\work\\a.png': 'C:\\work\\a.png' } })
+    expect(await opener.open('/c/work/a.png:stream', 'reveal')).toEqual({ ok: false, reason: 'invalid' })
+    expect(calls.realpaths).toEqual([])
+    expect(await opener.open('/c/work/a.png', 'reveal'), 'the same path without the stream is translated and revealed').toEqual({ ok: true })
+  })
+
+  test.each([
+    ['//host/share/a.png', 'network-path'],
+    ['/d', 'invalid'],
+    ['/dd/x.md', 'invalid']
+  ] as const)('%s is not translated: %s', async (target, reason) => {
+    const { opener, calls } = harness('win32', { existing: { 'D:\\': 'D:\\', 'D:\\x.md': 'D:\\x.md' } })
+    expect(await opener.open(target, 'reveal')).toEqual({ ok: false, reason })
+    expect(calls.realpaths).toEqual([])
+  })
+
+  test('outside Windows /d/x.md stays a POSIX path', async () => {
+    const { opener, calls } = harness('linux', { existing: { '/d/x.md': '/d/x.md' } })
+    expect(await opener.open('/d/x.md', 'reveal')).toEqual({ ok: true })
+    expect(calls.shown).toEqual(['/d/x.md'])
   })
 })
 
