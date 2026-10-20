@@ -161,6 +161,7 @@ test('offers no way to approve when the rendered detail does not fit', () => {
     expect(spec.approveIndex, 'no approve button').toBeNull()
     expect(spec.buttons.filter((label) => APPROVE_WORDS.test(label)), 'no button label approves').toEqual([])
     expect(spec.showFileIndex).toBe(0)
+    expect(spec.document.showFile).toBe(isFr ? 'Montrer serve.json' : 'Show serve.json')
     expect(spec.buttons[spec.cancelId]).toBe(isFr ? 'Fermer' : 'Close')
     expect(spec.detail).not.toContain('bun')
   }
@@ -177,6 +178,7 @@ test('defaults to Refuse and cancels to Refuse when the detail fits', () => {
     expect(spec.cancelId).toBe(spec.defaultId)
     expect(spec.defaultId).not.toBe(spec.approveIndex)
     expect(spec.detail).toBe(render.detail)
+    expect(spec.document.detail).toBe(spec.detail)
   }
 })
 
@@ -297,6 +299,7 @@ test('launch command door shows padding as dots and keeps the hidden tail readab
 
     expect(spec.approveIndex).toBe(0)
     expect(shownValue(spec.detail)).toBe(PADDED_COMMAND.replaceAll(' ', DOT))
+    expect(spec.document.detail).toBe(spec.detail)
     expect(spec.detail, 'no raw run of spaces reaches the box').not.toContain('  ')
     expect(spec.detail.startsWith(isFr ? 'Commande (config du projet) :' : 'Command (project config):')).toBe(true)
     expect(spec.buttons).toEqual(isFr ? ['Utiliser cette commande', 'Refuser'] : ['Use this command', 'Refuse'])
@@ -369,15 +372,44 @@ test('shell field door shows a hostile basename numbered and escaped, never as r
   expect(spec.detail).not.toContain(rlo)
 })
 
-test('every gate door offers no way to approve and never echoes the text when it does not fit', () => {
+test('every gate door keeps its full document but offers no way to approve when it does not fit', () => {
   const huge = 'x'.repeat(3000)
+  const workspaceItems = Array.from({ length: 12 }, (_, index) => `session-${String(index + 1).padStart(2, '0')}: ${'x'.repeat(100)}`)
   for (const isFr of [false, true]) {
     const specs = [
-      launchCommandDialog(huge, { isFr, maxLines: 40 }),
-      worktreeInitDialog(huge, { isFr, maxLines: 40 }),
-      shellFieldDialog({ isFr, maxLines: 40, message: 'm', label: 'l', basename: 'b', items: [huge], buttons: ['Apply', 'Refuse'] })
+      {
+        spec: launchCommandDialog(huge, { isFr, maxLines: 40 }),
+        detail: huge,
+        message: isFr ? 'Ce projet définit sa propre commande de lancement des sessions.' : 'This project defines its own session launch command.',
+        lead: isFr ? 'Commande (config du projet) :' : 'Command (project config):',
+        trail: isFr
+          ? "Elle sera exécutée dans chaque terminal de session de ce projet. N'accepte que si tu fais confiance à ce dépôt. Refuser garde la commande globale."
+          : 'It will run in every session terminal of this project. Accept only if you trust this repository. Refusing keeps the global command.',
+        approve: isFr ? 'Utiliser cette commande' : 'Use this command',
+        refuse: isFr ? 'Refuser' : 'Refuse'
+      },
+      {
+        spec: worktreeInitDialog(huge, { isFr, maxLines: 40 }),
+        detail: huge,
+        message: isFr ? 'Ce projet définit un hook exécuté à la création de worktree.' : 'This project defines a worktree-creation init hook.',
+        lead: isFr ? 'Hook (config du projet) :' : 'Hook (project config):',
+        trail: isFr
+          ? "Il sera exécuté dans un shell à chaque création de worktree de ce projet. N'accepte que si tu fais confiance à ce dépôt. Refuser désactive ce hook."
+          : 'It will run in a shell on every worktree creation for this project. Accept only if you trust this repository. Refusing disables the hook.',
+        approve: isFr ? 'Exécuter ce hook' : 'Run this hook',
+        refuse: isFr ? 'Refuser' : 'Refuse'
+      },
+      {
+        spec: shellFieldDialog({ isFr, maxLines: 40, message: 'm', label: 'Workspace', basename: 'workspace.json', items: workspaceItems, buttons: ['Restore', 'Refuse'] }),
+        detail: `workspace.json${workspaceItems.join('')}`,
+        message: 'm',
+        lead: isFr ? 'Workspace :\n01| workspace.json' : 'Workspace:\n01| workspace.json',
+        trail: isFr ? 'Accepte uniquement si tu fais confiance à ce dépôt.' : 'Accept only if you trust this repository.',
+        approve: 'Restore',
+        refuse: 'Refuse'
+      }
     ]
-    for (const spec of specs) {
+    for (const { spec, detail, message, lead, trail, approve, refuse } of specs) {
       expect(spec.approveIndex, 'no approve button').toBeNull()
       expect(spec.showFileIndex).toBeNull()
       expect(spec.buttons).toEqual([isFr ? 'Fermer' : 'Close'])
@@ -385,6 +417,14 @@ test('every gate door offers no way to approve and never echoes the text when it
       expect(spec.cancelId).toBe(0)
       expect(spec.detail).not.toContain('xxxx')
       expect(spec.detail).toMatch(/\d+ (lines|lignes)/)
+      expect(Object.isFrozen(spec.document)).toBe(true)
+      expect(spec.document.message).toBe(message)
+      expect(spec.document.detail.startsWith(lead)).toBe(true)
+      expect(spec.document.detail.endsWith(trail)).toBe(true)
+      expect(shownValue(spec.document.detail)).toBe(detail.replaceAll(' ', DOT))
+      expect(spec.document.approve).toBe(approve)
+      expect(spec.document.refuse).toBe(refuse)
+      expect(spec.document.close).toBe(isFr ? 'Fermer' : 'Close')
     }
   }
 })

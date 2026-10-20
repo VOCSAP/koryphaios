@@ -8,6 +8,7 @@
 
 import type { ServeApprovalPrompt } from './serve-config'
 import type { SpawnSummary } from './deck-control'
+import type { ApprovalDocument } from '../shared/approval-document'
 
 /**
  * Characters per value line; every line is one unbreakable word for the box.
@@ -139,6 +140,7 @@ export interface ApprovalDialogSpec {
   approveIndex: number | null
   /** Index of the button that shows the source file in the file manager, null when Approve is offered or there is no file. */
   showFileIndex: number | null
+  readonly document: ApprovalDocument
 }
 
 export interface ApprovalDialogText {
@@ -158,26 +160,36 @@ export interface ApprovalDialogText {
 
 /** Refuse is both the default and the cancel answer; a body that does not fit offers no way to approve. */
 export function approvalDialogSpec(render: ApprovalFieldsRender, text: ApprovalDialogText): ApprovalDialogSpec {
+  const document: ApprovalDocument = Object.freeze({
+    message: text.message,
+    detail: [text.lead, render.detail, text.trail].filter(Boolean).join('\n\n'),
+    approve: text.approve,
+    refuse: text.refuse,
+    close: text.close,
+    showFile: text.showFile
+  })
   if (!render.fits) {
-    const buttons = text.showFile === undefined ? [text.close] : [text.showFile, text.close]
+    const buttons = document.showFile === undefined ? [document.close] : [document.showFile, document.close]
     return {
-      message: text.message,
+      message: document.message,
       detail: text.tooLong,
       buttons,
       defaultId: buttons.length - 1,
       cancelId: buttons.length - 1,
       approveIndex: null,
-      showFileIndex: text.showFile === undefined ? null : 0
+      showFileIndex: document.showFile === undefined ? null : 0,
+      document
     }
   }
   return {
-    message: text.message,
-    detail: [text.lead, render.detail, text.trail].filter(Boolean).join('\n\n'),
-    buttons: [text.approve, text.refuse],
+    message: document.message,
+    detail: document.detail,
+    buttons: [document.approve, document.refuse],
     defaultId: 1,
     cancelId: 1,
     approveIndex: 0,
-    showFileIndex: null
+    showFileIndex: null,
+    document
   }
 }
 
