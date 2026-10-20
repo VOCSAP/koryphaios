@@ -55,23 +55,28 @@ export interface LaunchApprovalResult {
 
 /**
  * Gate a PROJECT-sourced launchCommand behind the per-project approval.
- * `confirm` is called only on first use / hash change; returning false keeps
+ * `confirm` is called only on first use / hash change; resolving false keeps
  * the fallback (global/default) command and persists nothing, so the operator
  * is asked again next launch.
+ * @returns null when `cancelled` holds once the operator has answered: the
+ * startup was abandoned meanwhile, so even an approval is not recorded.
  */
-export function resolveApprovedLaunchCommand(opts: {
+export async function resolveApprovedLaunchCommand(opts: {
   projectKey: string
   /** launchCommand found in the PROJECT config. */
   projectCommand: string
   /** Global/default command used when refused. */
   fallback: string
   approvalsFile: string
-  confirm: (command: string) => boolean
-}): LaunchApprovalResult {
+  confirm: (command: string) => Promise<boolean>
+  cancelled: () => boolean
+}): Promise<LaunchApprovalResult | null> {
   if (isApproved(opts.approvalsFile, opts.projectKey, opts.projectCommand)) {
     return { command: opts.projectCommand, source: 'project', prompted: false }
   }
-  if (opts.confirm(opts.projectCommand)) {
+  const approved = await opts.confirm(opts.projectCommand)
+  if (opts.cancelled()) return null
+  if (approved) {
     approve(opts.approvalsFile, opts.projectKey, opts.projectCommand)
     return { command: opts.projectCommand, source: 'project', prompted: true }
   }

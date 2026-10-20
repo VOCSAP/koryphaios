@@ -63,6 +63,7 @@ import {
 import { magicCompactPluginPresent } from './magic-compact'
 import { runMagicCompactInTurn } from './magic-compact-sequence'
 import { approve, commandHash, isApproved, resolveApprovedLaunchCommand } from './launch-approval'
+import { createStartupState } from './approval-startup-state'
 import { homedir, hostname } from 'node:os'
 import {
   WorkspaceService,
@@ -471,6 +472,8 @@ const approvalsFile = (): string => join(app.getPath('userData'), APP_STATE_SUBD
 // project config, so a repo-shipped worktreeInit cannot reach the shell ungated.
 let approvedWorktreeInit: string | undefined
 const getWorktreeInit = (): string | undefined => approvedWorktreeInit
+
+const startup = createStartupState()
 
 const isFrLocale = (): boolean => (config.locale || app.getLocale()).toLowerCase().startsWith('fr')
 
@@ -2538,21 +2541,6 @@ const approvalDialogMaxLines = (): number => {
 }
 
 /** True only when the operator pressed the Approve button; a spec that does not fit has none. */
-const showApprovalDialogSync = (spec: ApprovalDialogSpec): boolean => {
-  if (spec.approveIndex === null) journal.add('session', `approval dialog offers no Approve, its text does not fit: ${spec.message}`)
-  const win = mainWindow && !mainWindow.isDestroyed() ? mainWindow : null
-  const options: Electron.MessageBoxSyncOptions = {
-    type: 'warning',
-    title: 'Koryphaios',
-    message: spec.message,
-    detail: spec.detail,
-    buttons: spec.buttons,
-    defaultId: spec.defaultId,
-    cancelId: spec.cancelId
-  }
-  return isApprovalAnswer(spec, win ? dialog.showMessageBoxSync(win, options) : dialog.showMessageBoxSync(options))
-}
-
 const showApprovalDialog = async (spec: ApprovalDialogSpec): Promise<boolean> => {
   if (spec.approveIndex === null) journal.add('session', `approval dialog offers no Approve, its text does not fit: ${spec.message}`)
   const win = mainWindow && !mainWindow.isDestroyed() ? mainWindow : null
@@ -3409,14 +3397,16 @@ app.whenReady().then(async () => {
   const projCmd = projectLaunchCommand(cliContext.projectDir)
   if (projCmd && projCmd.trim() !== safeLaunchCommand.trim()) {
     const isFr = isFrLocale()
-    const decision = resolveApprovedLaunchCommand({
+    const decision = await resolveApprovedLaunchCommand({
       projectKey: computeDeckProjectKey(cliContext.projectDir),
       projectCommand: projCmd,
       fallback: safeLaunchCommand,
       approvalsFile: approvalsFile(),
       confirm: (command) =>
-        showApprovalDialogSync(launchCommandDialog(command, { isFr, maxLines: approvalDialogMaxLines() }))
+        showApprovalDialog(launchCommandDialog(command, { isFr, maxLines: approvalDialogMaxLines() })),
+      cancelled: startup.isQuitting
     })
+    if (!decision) return
     if (decision.source === 'project') {
       service.setLaunchCommand(decision.command)
       if (decision.prompted) journal.add('session', `project launchCommand approved: ${decision.command}`)
@@ -3433,14 +3423,16 @@ app.whenReady().then(async () => {
     const globalWti = globalWorktreeInit()
     if (projWti && projWti.trim() && projWti.trim() !== (globalWti ?? '').trim()) {
       const isFr = isFrLocale()
-      const decision = resolveApprovedLaunchCommand({
+      const decision = await resolveApprovedLaunchCommand({
         projectKey: `${computeDeckProjectKey(cliContext.projectDir)}::worktreeInit`,
         projectCommand: projWti,
         fallback: globalWti ?? '',
         approvalsFile: approvalsFile(),
         confirm: (command) =>
-          showApprovalDialogSync(worktreeInitDialog(command, { isFr, maxLines: approvalDialogMaxLines() }))
+          showApprovalDialog(worktreeInitDialog(command, { isFr, maxLines: approvalDialogMaxLines() })),
+        cancelled: startup.isQuitting
       })
+      if (!decision) return
       approvedWorktreeInit = decision.source === 'project' ? decision.command : globalWti || undefined
       journal.add(
         'session',
@@ -3686,6 +3678,7 @@ app.whenReady().then(async () => {
   await startLoopbackBroker('startup')
   const armed = await armApprovalsAtStartup(approvals)
   journal.add('session', armed ? 'remote approvals armed' : 'remote approvals unavailable')
+  if (startup.isQuitting()) return
   // Clodex proxy starts detached so neither the window nor restored tiles wait on a login-shell probe.
   void Promise.resolve()
     .then(() => ensureClodexController().start(getConfig().clodexAutoStart, getConfig().clodexProxyArgs))
@@ -3718,6 +3711,7 @@ app.whenReady().then(async () => {
   // Restart seed (card 5852c074): re-track already in-progress items BEFORE
   // the watcher's first tick, see seedDispatchedFromRoadmap's doc comment.
   await seedDispatchedFromRoadmap()
+  if (startup.isQuitting()) return
   // Auto-dispatch watcher (PLAN C15): no-op while nothing was dispatched.
   dispatchTimer = setInterval(() => void watchDispatched(), DISPATCH_WATCH_MS)
   // Idle-lock watcher (PLAN K2): releases locks held by silent local tiles.
@@ -3734,6 +3728,7 @@ app.whenReady().then(async () => {
   // Guard rules: repo/global rules files and the approvals store, polled.
   ttsr.start()
   createWindow()
+  startup.markRunning()
   avatarClient.start()
   void startAvatarProcess()
     .then(() => avatarClient.sessionsChanged())
@@ -3749,6 +3744,7 @@ app.on('window-all-closed', () => {
 })
 
 const runBeforeQuit = createBeforeQuitHandler({
+  onQuitIntent: startup.markQuitting,
   effects: [
     { label: 'log', run: () => logInfo('main', 'quitting') },
     {

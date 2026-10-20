@@ -13,6 +13,7 @@ export interface AvatarBeforeQuitEvent {
 
 export function createAvatarQuitHandler(plan: AvatarQuitHandlerPlan): (event: AvatarBeforeQuitEvent) => void {
   const handleQuit = createBeforeQuitHandler({
+    onQuitIntent: () => undefined,
     effects: [{ label: 'Avatar Tray', run: plan.disposeTray }],
     release: plan.release,
     quit: plan.quit,

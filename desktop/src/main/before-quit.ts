@@ -19,6 +19,8 @@ export interface QuitEffect {
 }
 
 export interface BeforeQuitPlan {
+  /** Called once, before any effect: from here on a pending startup must not resume. */
+  readonly onQuitIntent: () => void
   readonly effects: readonly QuitEffect[]
   /** Bounded release of whatever outlives the window; may reject. */
   readonly release: () => Promise<unknown>
@@ -52,6 +54,11 @@ export function createBeforeQuitHandler(
     started = true
     const pendingEffects: Promise<void>[] = []
     try {
+      try {
+        plan.onQuitIntent()
+      } catch (error) {
+        plan.onError('main', 'quit intent failed', error)
+      }
       for (const effect of plan.effects) {
         try {
           const run = effect.run()

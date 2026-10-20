@@ -7,6 +7,8 @@ import { SERVE_QUIT_DEADLINE_MS } from "../desktop/src/main/serve-lifecycle.ts";
 interface Harness {
   readonly handler: (preventDefault: () => void) => void;
   readonly ran: string[];
+  /** Effects already run at each quit-intent call. */
+  readonly intentsAfter: number[];
   readonly prevented: string[];
   readonly errors: { scope: string; message: string; error?: unknown }[];
   /** Both settle from their own sink, so no test counts microtask turns. */
@@ -22,6 +24,7 @@ function harness(opts: {
   /** Stands in for Electron serving the quit the handler just asked for. */
   reenterOnQuit?: boolean;
   throwOnQuit?: boolean;
+  throwOnIntent?: boolean;
   /** Reports awaited before `reported` settles, for the passes that fail twice. */
   expectReports?: number;
 }): Harness {
@@ -33,6 +36,7 @@ function harness(opts: {
   let resolveReported = (): void => {};
   const h: Harness = {
     ran,
+    intentsAfter: [],
     prevented,
     errors,
     quits: 0,
@@ -44,6 +48,10 @@ function harness(opts: {
     }),
     prevent: () => prevented.push(`pass ${prevented.length + 1}`),
     handler: createBeforeQuitHandler({
+      onQuitIntent: () => {
+        h.intentsAfter.push(ran.length);
+        if (opts.throwOnIntent) throw new Error("intent exploded");
+      },
       effects: ["alpha", "beta", "gamma"].map((label) => ({
         label,
         run: () => {
@@ -194,6 +202,36 @@ test("the first pass prevents the default quit, runs every effect once and quits
   expect(h.errors, "a clean pass reports nothing").toEqual([]);
 });
 
+test("the quit intent is signalled once, before any effect, whatever the number of passes", async () => {
+  const { release, settle } = pendingRelease();
+  const h = harness({ release });
+  h.handler(h.prevent);
+  h.handler(h.prevent);
+  settle();
+  await h.quitted;
+  h.handler(h.prevent);
+  expect(
+    h.intentsAfter,
+    "a startup answer arriving during the effects must already find the run quitting"
+  ).toEqual([0]);
+});
+
+test("an effect that throws neither delays nor repeats the quit intent", async () => {
+  const h = harness({ release: async () => "done", throwOn: "alpha" });
+  h.handler(h.prevent);
+  await Promise.all([h.quitted, h.reported]);
+  expect(h.intentsAfter).toEqual([0]);
+});
+
+test("a quit intent that throws is reported and the shutdown still runs", async () => {
+  const h = harness({ release: async () => "done", throwOnIntent: true });
+  h.handler(h.prevent);
+  await h.quitted;
+  expect(h.errors.map((e) => e.message)).toEqual(["quit intent failed"]);
+  expect(h.ran).toEqual(["alpha", "beta", "gamma"]);
+  expect(h.quits).toBe(1);
+});
+
 test("a re-entrant pass is cancelled while the release is pending and let through once quit has run", async () => {
   const { release, settle } = pendingRelease();
   const h = harness({ release });
@@ -302,6 +340,7 @@ test("quit waits for an approval revocation effect before exiting", async () => 
     resolveQuit = resolve;
   });
   const handler = createBeforeQuitHandler({
+    onQuitIntent: () => {},
     effects: [{ label: "approvals", run: () => revoked }],
     release: async () => undefined,
     quit: () => {
@@ -328,6 +367,7 @@ test("an approval revocation timeout is reported before quit", async () => {
     resolveQuit = resolve;
   });
   const handler = createBeforeQuitHandler({
+    onQuitIntent: () => {},
     effects: [{ label: "approvals", timeoutMs, run: () => new Promise<void>(() => {}) }],
     release: async () => undefined,
     quit: resolveQuit,

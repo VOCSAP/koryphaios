@@ -25,71 +25,114 @@ afterAll(() => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-test("first use prompts; approval persists the hash and skips the prompt next time", () => {
+const notCancelled = (): boolean => false;
+
+test("first use prompts; approval persists the hash and skips the prompt next time", async () => {
   const file = join(dir, "a.json");
   let prompts = 0;
-  const r1 = resolveApprovedLaunchCommand({
+  const r1 = await resolveApprovedLaunchCommand({
     projectKey: KEY,
     projectCommand: PROJ_CMD,
     fallback: FALLBACK,
     approvalsFile: file,
-    confirm: () => (prompts++, true)
+    confirm: async () => (prompts++, true),
+    cancelled: notCancelled
   });
   expect(r1).toEqual({ command: PROJ_CMD, source: "project", prompted: true });
   expect(prompts).toBe(1);
   expect(readApprovals(file)[KEY]).toBe(commandHash(PROJ_CMD));
 
-  const r2 = resolveApprovedLaunchCommand({
+  const r2 = await resolveApprovedLaunchCommand({
     projectKey: KEY,
     projectCommand: PROJ_CMD,
     fallback: FALLBACK,
     approvalsFile: file,
-    confirm: () => (prompts++, true)
+    confirm: async () => (prompts++, true),
+    cancelled: notCancelled
   });
-  expect(r2.prompted).toBe(false);
-  expect(r2.command).toBe(PROJ_CMD);
+  expect(r2?.prompted).toBe(false);
+  expect(r2?.command).toBe(PROJ_CMD);
   expect(prompts).toBe(1); // not asked again
 });
 
-test("refusal falls back to the global command and persists NOTHING", () => {
+test("refusal falls back to the global command and persists NOTHING", async () => {
   const file = join(dir, "b.json");
-  const r = resolveApprovedLaunchCommand({
+  const r = await resolveApprovedLaunchCommand({
     projectKey: KEY,
     projectCommand: PROJ_CMD,
     fallback: FALLBACK,
     approvalsFile: file,
-    confirm: () => false
+    confirm: async () => false,
+    cancelled: notCancelled
   });
   expect(r).toEqual({ command: FALLBACK, source: "fallback", prompted: true });
-  expect(readApprovals(file)).toEqual({});
+  expect(readApprovals(file), "a pending answer is not consent").toEqual({});
   // Asked again on the next launch (no sticky refusal).
   let asked = false;
-  resolveApprovedLaunchCommand({
+  await resolveApprovedLaunchCommand({
     projectKey: KEY,
     projectCommand: PROJ_CMD,
     fallback: FALLBACK,
     approvalsFile: file,
-    confirm: () => ((asked = true), false)
+    confirm: async () => ((asked = true), false),
+    cancelled: notCancelled
   });
   expect(asked).toBe(true);
 });
 
-test("a CHANGED project command (different hash) re-prompts", () => {
+test("nothing is recorded while the operator has not answered", async () => {
+  const file = join(dir, "pending.json");
+  let answer: (approved: boolean) => void = () => {};
+  const decision = resolveApprovedLaunchCommand({
+    projectKey: KEY,
+    projectCommand: PROJ_CMD,
+    fallback: FALLBACK,
+    approvalsFile: file,
+    confirm: () => new Promise<boolean>((resolve) => (answer = resolve)),
+    cancelled: notCancelled
+  });
+  await Promise.resolve();
+  expect(readApprovals(file)).toEqual({});
+  answer(true);
+  expect((await decision)?.source).toBe("project");
+  expect(readApprovals(file)[KEY]).toBe(commandHash(PROJ_CMD));
+});
+
+test("an approval answered after the startup was abandoned records nothing and resumes nothing", async () => {
+  const file = join(dir, "quit.json");
+  let quitting = false;
+  let answer: (approved: boolean) => void = () => {};
+  const decision = resolveApprovedLaunchCommand({
+    projectKey: KEY,
+    projectCommand: PROJ_CMD,
+    fallback: FALLBACK,
+    approvalsFile: file,
+    confirm: () => new Promise<boolean>((resolve) => (answer = resolve)),
+    cancelled: () => quitting
+  });
+  quitting = true;
+  answer(true);
+  expect(await decision, "the caller must stop, not launch the fallback").toBeNull();
+  expect(readApprovals(file)).toEqual({});
+});
+
+test("a CHANGED project command (different hash) re-prompts", async () => {
   const file = join(dir, "c.json");
   approve(file, KEY, PROJ_CMD);
   expect(isApproved(file, KEY, PROJ_CMD)).toBe(true);
   expect(isApproved(file, KEY, PROJ_CMD + " --extra")).toBe(false);
 
   let asked = false;
-  const r = resolveApprovedLaunchCommand({
+  const r = await resolveApprovedLaunchCommand({
     projectKey: KEY,
     projectCommand: PROJ_CMD + " --extra",
     fallback: FALLBACK,
     approvalsFile: file,
-    confirm: () => ((asked = true), false)
+    confirm: async () => ((asked = true), false),
+    cancelled: notCancelled
   });
   expect(asked).toBe(true);
-  expect(r.command).toBe(FALLBACK);
+  expect(r?.command).toBe(FALLBACK);
   // The old approval is untouched (refusing the new one persists nothing).
   expect(readApprovals(file)[KEY]).toBe(commandHash(PROJ_CMD));
 });
