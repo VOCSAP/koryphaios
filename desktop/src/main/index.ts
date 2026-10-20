@@ -2553,12 +2553,28 @@ const showApprovalDialogSync = (spec: ApprovalDialogSpec): boolean => {
   return isApprovalAnswer(spec, win ? dialog.showMessageBoxSync(win, options) : dialog.showMessageBoxSync(options))
 }
 
-const confirmShellFieldApproval = (opts: ShellFieldApprovalOpts): boolean => {
+const showApprovalDialog = async (spec: ApprovalDialogSpec): Promise<boolean> => {
+  if (spec.approveIndex === null) journal.add('session', `approval dialog offers no Approve, its text does not fit: ${spec.message}`)
+  const win = mainWindow && !mainWindow.isDestroyed() ? mainWindow : null
+  const options: Electron.MessageBoxOptions = {
+    type: 'warning',
+    title: 'Koryphaios',
+    message: spec.message,
+    detail: spec.detail,
+    buttons: spec.buttons,
+    defaultId: spec.defaultId,
+    cancelId: spec.cancelId
+  }
+  const answer = await (win ? dialog.showMessageBox(win, options) : dialog.showMessageBox(options))
+  return isApprovalAnswer(spec, answer.response)
+}
+
+const confirmShellFieldApproval = async (opts: ShellFieldApprovalOpts): Promise<boolean> => {
   const { key, value } = shellFieldApprovalCacheKey(opts)
   const file = approvalsFile()
   if (isApproved(file, key, value)) return true
   const isFr = isFrLocale()
-  const ok = showApprovalDialogSync(
+  const ok = await showApprovalDialog(
     shellFieldDialog({
       isFr,
       maxLines: approvalDialogMaxLines(),
@@ -2611,10 +2627,10 @@ function spawnShellFieldKey(entry: { command?: string; args?: string }): {
  * separates cooperating authorities by role and does not resist a hostile
  * agent pre-approving its own payload.
  */
-const confirmSpawnShellFields = (
+const confirmSpawnShellFields = async (
   entry: { command?: string; args?: string },
   attendance: CallerAttendance
-): boolean => {
+): Promise<boolean> => {
   if (!sessionsHaveShellFields([entry])) return true
   const { basename, hashPayload } = spawnShellFieldKey(entry)
   const approvalOpts: ShellFieldApprovalOpts = {
@@ -2637,7 +2653,7 @@ const confirmSpawnShellFields = (
     )
     return false
   }
-  return confirmShellFieldApproval(approvalOpts)
+  return await confirmShellFieldApproval(approvalOpts)
 }
 
 /**
@@ -2651,7 +2667,7 @@ const confirmSpawnShellFields = (
  * 'unattended' caller never opens the dialog for an unapproved payload --
  * see confirmShellFieldApproval's own doc for why.
  */
-const resolveTemplateInputs = (path: string, attendance: CallerAttendance): TemplateResolveResult => {
+const resolveTemplateInputs = async (path: string, attendance: CallerAttendance): Promise<TemplateResolveResult> => {
   const projectDir = getConfig().projectDir
   const source = templateSource(path, projectDir)
   if (!source) {
@@ -2688,31 +2704,20 @@ const resolveTemplateInputs = (path: string, attendance: CallerAttendance): Temp
       journal.add('session', `template refused (no attended operator, not pre-approved): ${approvalOpts.basename}`)
       return { ok: false, reason: 'unattended' }
     }
-    if (!confirmShellFieldApproval(approvalOpts)) {
+    if (!(await confirmShellFieldApproval(approvalOpts))) {
       return { ok: false, reason: 'refused' }
     }
   }
   return { ok: true, inputs: templateToInputs(tpl) }
 }
 
-/**
- * Operator approval gate for workspace restore, shell-bearing `args` (card
- * 09d54a29): a workspace is read from the same repo-cloned dir as a template
- * (<projectDir>/.claude/claude-peers/workspaces/*.json) and its `args` lands
- * in the exact same shell sink, so it is gated the exact same way. Called by
- * WorkspaceService.restore() ONLY when workspaceHasShellFields(ws) is true.
- */
-const confirmWorkspaceShellFields = (
+const confirmWorkspaceShellFields = async (
   ws: { id: string; name: string; sessions: WorkspaceSession[] },
   attendance: CallerAttendance
-): WorkspaceApprovalGateResult => {
+): Promise<WorkspaceApprovalGateResult> => {
   const approvalOpts: ShellFieldApprovalOpts = {
     keyPart: 'workspace',
     basename: ws.name && ws.name.trim() ? ws.name : ws.id,
-    // `bridge` is folded in only when a session carries one: it must land in a
-    // DIFFERENT cache slot than the same args without it (approving the args
-    // alone must never pre-approve a wrapper), while a workspace that has none
-    // keeps the slot the operator already approved.
     hashPayload: ws.sessions.map((s) => ({
       args: s.args.join(' '),
       ...(s.bridge ? { bridge: s.bridge } : {})
@@ -2733,22 +2738,13 @@ const confirmWorkspaceShellFields = (
     journal.add('session', `workspace shell fields refused (no attended operator, not pre-approved): ${approvalOpts.basename}`)
     return 'unattended'
   }
-  return confirmShellFieldApproval(approvalOpts) ? 'approved' : 'declined'
+  return await confirmShellFieldApproval(approvalOpts) ? 'approved' : 'declined'
 }
 
-/**
- * Operator approval gate for workspace restore, untrusted `cwd` (card
- * 09d54a29 follow-up, GX-SEC class): called by WorkspaceService.restore()
- * ONLY when workspaceHasUntrustedCwd(ws, projectDir) is true. A SEPARATE
- * vulnerability class from confirmWorkspaceShellFields above -- arbitrary
- * file read (the cwd becomes a readable root for the explorer/diff channels,
- * ipc.ts workDirRoots) rather than command execution -- kept as its own
- * keyPart/copy so the two are never silently conflated into one approval.
- */
-const confirmWorkspaceUntrustedCwd = (
+const confirmWorkspaceUntrustedCwd = async (
   ws: { id: string; name: string; sessions: WorkspaceSession[] },
   attendance: CallerAttendance
-): WorkspaceApprovalGateResult => {
+): Promise<WorkspaceApprovalGateResult> => {
   const approvalOpts: ShellFieldApprovalOpts = {
     keyPart: 'workspace-cwd',
     basename: ws.name && ws.name.trim() ? ws.name : ws.id,
@@ -2768,7 +2764,7 @@ const confirmWorkspaceUntrustedCwd = (
     journal.add('session', `workspace untrusted cwd refused (no attended operator, not pre-approved): ${approvalOpts.basename}`)
     return 'unattended'
   }
-  return confirmShellFieldApproval(approvalOpts) ? 'approved' : 'declined'
+  return await confirmShellFieldApproval(approvalOpts) ? 'approved' : 'declined'
 }
 
 // ----- Supervisor spawn approval (PLAN TS4 / card 02e1c07c) -----

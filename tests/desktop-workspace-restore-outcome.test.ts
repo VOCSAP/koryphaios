@@ -24,7 +24,9 @@ const quietReasons: WorkspaceRestoreQuietReason[] = [
   "empty",
   "locked",
   "shell-declined",
-  "cwd-declined"
+  "cwd-declined",
+  "busy",
+  "superseded"
 ];
 
 test("every quiet reason resolves to { applied: false, reason } -- never throws", () => {
@@ -58,13 +60,15 @@ test("unattended throws, with an actionable message distinct from lock-race's", 
 // lock-race or unattended silently resolving instead of throwing -- must go
 // RED. This pins the CURRENT, correct mapping: exactly two of seven reasons
 // throw.
-test("proof #1: exactly 'lock-race' and 'unattended' throw; the other five resolve", () => {
+test("proof #1: exactly 'lock-race' and 'unattended' throw; the other reasons resolve", () => {
   const reasons: WorkspaceRestoreResult[] = [
     { ok: false, reason: "missing" },
     { ok: false, reason: "empty" },
     { ok: false, reason: "locked" },
     { ok: false, reason: "shell-declined" },
     { ok: false, reason: "cwd-declined" },
+    { ok: false, reason: "busy" },
+    { ok: false, reason: "superseded" },
     { ok: false, reason: "lock-race" },
     { ok: false, reason: "unattended" }
   ];
@@ -76,7 +80,7 @@ test("proof #1: exactly 'lock-race' and 'unattended' throw; the other five resol
       return true;
     }
   });
-  expect(threw).toEqual([false, false, false, false, false, true, true]);
+  expect(threw).toEqual([false, false, false, false, false, false, false, true, true]);
 });
 
 // The switch's `default: { const _exhaustive: never = result.reason; ... }`
@@ -98,6 +102,11 @@ test("'empty' shows toast.nothingToRestore", () => {
 
 test("'locked' shows toast.alreadyOpen -- the existing wording fits it", () => {
   expect(workspaceRestoreToastKeyFor("locked")).toBe("toast.alreadyOpen");
+});
+
+test("'busy' and 'superseded' each show a distinct restore toast", () => {
+  expect(workspaceRestoreToastKeyFor("busy")).toBe("toast.workspaceRestoreBusy");
+  expect(workspaceRestoreToastKeyFor("superseded")).toBe("toast.workspaceRestoreSuperseded");
 });
 
 // 'missing' gets its own toast.workspaceMissing, distinct from 'locked's
@@ -127,7 +136,9 @@ test("proof #1 mirror for the renderer sink: exactly the two declined reasons ar
     "toast.nothingToRestore", // empty
     "toast.alreadyOpen", // locked
     null, // shell-declined
-    null // cwd-declined
+    null, // cwd-declined
+    "toast.workspaceRestoreBusy", // busy
+    "toast.workspaceRestoreSuperseded" // superseded
   ]);
 });
 

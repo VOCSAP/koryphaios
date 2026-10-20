@@ -30,10 +30,10 @@ function makeService(projectDir: string, capture: () => unknown[]): WorkspaceSer
     setConfig: () => {},
     getScope: () => ({ secret: 's', scopeKind: 'ephemeral', groupId: 'a'.repeat(32), name: 'test-scope', root: 'test' }),
     adoptScope: () => {},
-    confirmShellFields: () => {
+    confirmShellFields: async () => {
       throw new Error('confirmShellFields must not be called: no fixture carries args')
     },
-    confirmUntrustedCwd: () => {
+    confirmUntrustedCwd: async () => {
       throw new Error('confirmUntrustedCwd must not be called: every fixture cwd is in the project')
     }
   }
@@ -56,19 +56,19 @@ test('the Deck name follows the current workspace: none, auto name, Save As, the
   svc.releaseOnQuit()
 })
 
-test('a restored workspace gives its name even when the recapture persists nothing', () => {
+test('a restored workspace gives its name even when the recapture persists nothing', async () => {
   const project = freshProject()
   const first = makeService(project, () => [session('agent', project)])
   const saved = first.saveNamed('Alpha')
   first.releaseOnQuit()
 
   const second = makeService(project, () => [])
-  expect(second.restore(saved.id, 'attended')).toEqual({ ok: true })
+  expect(await second.restore(saved.id, 'attended')).toEqual({ ok: true })
   expect(second.currentWorkspaceName).toBe('Alpha')
   second.releaseOnQuit()
 })
 
-test('a restored workspace whose name is not a string yields no name, and the Deck falls back to its folder', () => {
+test('a restored workspace whose name is not a string yields no name, and the Deck falls back to its folder', async () => {
   for (const hostile of [123, {}, []]) {
     const project = freshProject()
     const first = makeService(project, () => [session('agent', project)])
@@ -78,7 +78,7 @@ test('a restored workspace whose name is not a string yields no name, and the De
     saveWorkspace(project, { ...stored, name: hostile as unknown as string })
 
     const second = makeService(project, () => [])
-    expect(second.restore(saved.id, 'attended')).toEqual({ ok: true })
+    expect(await second.restore(saved.id, 'attended')).toEqual({ ok: true })
     expect(second.currentWorkspaceName).toBeNull()
     const options = deckAvatarClientOptions({
       deckRunId: 'deck-run-1',

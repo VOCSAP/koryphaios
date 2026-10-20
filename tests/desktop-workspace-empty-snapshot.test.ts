@@ -10,7 +10,7 @@ import { join } from "node:path";
 // serialized ANOTHER (captureSessions(), excludes it) -- a supervisor-only
 // moment passed the old guard and persisted `sessions: []`, minting a phantom
 // workspace and clobbering a real snapshot the same way.
-import { WorkspaceService } from "../desktop/src/main/workspace-service.ts";
+import { WorkspaceService, type WorkspaceDeps } from "../desktop/src/main/workspace-service.ts";
 import { listWorkspaces, saveWorkspace, type Workspace } from "../desktop/src/main/workspace-store.ts";
 
 const tmpDirs: string[] = [];
@@ -59,7 +59,7 @@ function def(name: string, cwd: string): Def {
 }
 
 function makeService(projectDir: string, capture: () => Def[], restored: Def[][]) {
-  const deps = {
+  const deps: WorkspaceDeps = {
     projectDir,
     service: {
       captureSessions: capture,
@@ -68,7 +68,7 @@ function makeService(projectDir: string, capture: () => Def[], restored: Def[][]
         restored.push(defs);
         return [];
       },
-    },
+    } as unknown as WorkspaceDeps["service"],
     getConfig: () => ({ displayMode: "2x2", gridCols: 2, gridRows: 2 }),
     setConfig: () => {},
     getScope: () => ({
@@ -85,15 +85,14 @@ function makeService(projectDir: string, capture: () => Def[], restored: Def[][]
     // (rather than returning a fixed value) turns an unexpected call into a
     // visible test failure instead of silently rubber-stamping the gate --
     // the team-lead's explicit ask when this mock was found incomplete.
-    confirmShellFields: () => {
+    confirmShellFields: async () => {
       throw new Error("confirmShellFields must not be called: no fixture in this file carries args");
     },
-    confirmUntrustedCwd: () => {
+    confirmUntrustedCwd: async () => {
       throw new Error("confirmUntrustedCwd must not be called: no fixture in this file has an out-of-project cwd");
     },
   };
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  return new WorkspaceService(deps as any);
+  return new WorkspaceService(deps);
 }
 
 test("saveAuto on an empty captureSessions() mints nothing", () => {
@@ -111,7 +110,7 @@ test("saveAuto on an empty captureSessions() mints nothing", () => {
   svc.releaseOnQuit();
 });
 
-test("restoring a workspace is not a silent no-op success", () => {
+test("restoring a workspace is not a silent no-op success", async () => {
   const proj = freshProject();
   const restored: Def[][] = [];
   let live: Def[] = [def("team-lead", proj)];
@@ -124,7 +123,7 @@ test("restoring a workspace is not a silent no-op success", () => {
   svc.releaseOnQuit();
   live = [];
   const next = makeService(proj, () => live, restored);
-  const result = next.restore(saved.id, "attended");
+  const result = await next.restore(saved.id, "attended");
 
   expect(result).toEqual({ ok: true });
   // fromWorkspaceSessions mints a fresh local id/createdAt on restore, so
@@ -157,7 +156,7 @@ test("a real snapshot is NOT clobbered by a later supervisor-only saveAuto", () 
   svc.releaseOnQuit();
 });
 
-test("restoring the workspace this instance already owns succeeds (lock self-exemption)", () => {
+test("restoring the workspace this instance already owns succeeds (lock self-exemption)", async () => {
   const proj = freshProject();
   const restored: Def[][] = [];
   const live: Def[] = [def("team-lead", proj)];
@@ -167,14 +166,14 @@ test("restoring the workspace this instance already owns succeeds (lock self-exe
   const current = svc.listForCwd()[0]!;
   expect(current.current).toBe(true);
 
-  expect(svc.restore(current.id, "attended")).toEqual({ ok: true });
+  expect(await svc.restore(current.id, "attended")).toEqual({ ok: true });
   expect(restored.at(-1)).toHaveLength(1);
   expect(restored.at(-1)![0]).toMatchObject({ name: "team-lead", sessionId: "sid-team-lead" });
 
   svc.releaseOnQuit();
 });
 
-test("restore() refuses a workspace persisted with zero sessions, never touching restoreFrom", () => {
+test("restore() refuses a workspace persisted with zero sessions, never touching restoreFrom", async () => {
   const proj = freshProject();
   const restored: Def[][] = [];
   const live: Def[] = [def("team-lead", proj)];
@@ -197,7 +196,7 @@ test("restore() refuses a workspace persisted with zero sessions, never touching
   };
   saveWorkspace(proj, empty);
 
-  const result = svc.restore("legacy-empty", "attended");
+  const result = await svc.restore("legacy-empty", "attended");
 
   expect(result).toEqual({ ok: false, reason: "empty" });
   // restoreFrom starts with pty.killAll() in the real service -- proving it
@@ -208,7 +207,7 @@ test("restore() refuses a workspace persisted with zero sessions, never touching
   svc.releaseOnQuit();
 });
 
-test("empty deck + a non-empty current workspace is NOT caught by the zero-session refusal (b8d65b24 interaction)", () => {
+test("empty deck + a non-empty current workspace is NOT caught by the zero-session refusal (b8d65b24 interaction)", async () => {
   const proj = freshProject();
   const restored: Def[][] = [];
   const live: Def[] = [def("team-lead", proj)];
@@ -223,7 +222,7 @@ test("empty deck + a non-empty current workspace is NOT caught by the zero-sessi
   // agents, so it must not also swallow the case where the deck's live agent
   // count has dropped to 0 -- the two guards count different things and must
   // not collide.
-  expect(svc.restore(current.id, "attended")).toEqual({ ok: true });
+  expect(await svc.restore(current.id, "attended")).toEqual({ ok: true });
   expect(restored.at(-1)).toHaveLength(1);
 
   svc.releaseOnQuit();

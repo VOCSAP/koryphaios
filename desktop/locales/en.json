@@ -99,6 +99,8 @@
   "toast.nothingToRestore": "This workspace has no sessions to restore",
   "toast.alreadyOpen": "Session already open",
   "toast.workspaceMissing": "This workspace no longer exists",
+  "toast.workspaceRestoreBusy": "Another workspace restore is already in progress",
+  "toast.workspaceRestoreSuperseded": "This workspace restore was replaced by a newer action",
   "toast.peerIdCopied": "peer id copied",
   "toast.peerTableCopied": "peer table copied",
   "tile.expiredTitle": "Session expired",

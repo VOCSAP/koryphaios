@@ -104,16 +104,7 @@ export interface DeckControlDeps {
   removeWorktree(path: string): Promise<void>
   listTemplates(): TemplateSummary[]
   /** May prompt the operator and persist an approval, but never spawns, so the batch is approved before any tile exists. */
-  resolveTemplate(path: string): TemplateResolveResult
-  /**
-   * Card 89cb66f9: spawn exactly ONE template entry and return the created
-   * SessionRuntime -- the old dep returned only a count (inputs.length),
-   * which made ownedSessions.set structurally impossible to write per tile.
-   * Append-only from the supervisor ('replace' would kill its own tile).
-   * `checkpoint` covers the whole batch in one git checkpoint (pass true only
-   * for the first tile the caller actually spawns); `hasLead` is decided ONCE
-   * by the caller before the loop starts (PLAN C18 crown rule).
-   */
+  resolveTemplate(path: string): Promise<TemplateResolveResult>
   spawnTemplateEntry(
     input: TemplateInput,
     opts: { checkpoint: boolean; hasLead: boolean }
@@ -161,15 +152,7 @@ export interface DeckControlDeps {
    * file). Best-effort: a missing file is not an error.
    */
   revokeTeamLeadMcpConfig(callerId: string): void
-  /**
-   * Audit fix #1c (card 6c380073): gate a spawn entry carrying a shell-bearing
-   * field (`args` -- SpawnPlanEntry has no `command`) behind the same
-   * operator-approval mechanism templates/workspace-restore already use for
-   * the identical sink, but with the hands-free short-circuit that mechanism
-   * itself lacks (see the implementation's own doc, index.ts). Returns true
-   * when the spawn may proceed.
-   */
-  confirmSpawnShellFields(entry: { command?: string; args?: string }): boolean
+  confirmSpawnShellFields(entry: { command?: string; args?: string }): Promise<boolean>
   /**
    * Run a shell command INSIDE this project's sandbox container
    * (PLAN-SANDBOX M2): "add this dependency to the instance". Rejected when
@@ -557,9 +540,7 @@ export function startDeckControl(
         const entry = parseEntry(args)
         const embedded = validateEntry(entry)
         assertArgsAllowedForRestrictedCaller(entry, restricted)
-        // Audit fix #1c: shell-bearing `args` needs operator approval (same
-        // gate templates/workspace-restore use), unless already cached.
-        if (!deps.confirmSpawnShellFields({ args: entry.args })) {
+        if (!(await deps.confirmSpawnShellFields({ args: entry.args }))) {
           throw new Error('refused: this launch carries unapproved shell arguments')
         }
         const releaseCapacity = spawnCap.reserve(1)
@@ -614,7 +595,7 @@ export function startDeckControl(
         // poisons the whole plan, same convention as validateEntry above.
         for (const entry of entries) {
           assertArgsAllowedForRestrictedCaller(entry, restricted)
-          if (!deps.confirmSpawnShellFields({ args: entry.args })) {
+          if (!(await deps.confirmSpawnShellFields({ args: entry.args }))) {
             throw new Error('refused: this team plan carries unapproved shell arguments')
           }
         }
@@ -857,25 +838,9 @@ export function startDeckControl(
       case 'deck_apply_template': {
         const path = str(args, 'path')
         if (!path) throw new Error('path is required')
-        // This route never throws for a non-ok reason (containment,
-        // malformed, or the operator declining the approval dialog) -- every
-        // one maps to an empty batch, via templateInputsOrEmpty
-        // (shared/template-apply-outcome.ts, review correction C2: a
-        // dedicated, exhaustively-checked sink, not an inline ternary that
-        // would silently swallow a future fourth reason).
-        const resolved = deps.resolveTemplate(path)
+        const resolved = await deps.resolveTemplate(path)
         const inputs = templateInputsOrEmpty(resolved)
         if (inputs.length === 0) {
-          // Review correction C5, card 96c98453: `refused` below is a
-          // PER-TILE approval counter (see the loop's own comment) and must
-          // not be reused to describe a whole-batch outcome -- reusing it
-          // would conflate two distinct meanings. A total resolution
-          // failure (an operator refusal at the shell-field approval
-          // dialog, or a real containment/malformed anomaly) is instead
-          // named ADDITIVELY via `resolution`, so it stops reading the same
-          // as "there was nothing to spawn" -- the exact bug this card
-          // fixes on the other two surfaces (ipc.ts, store.ts), now closed
-          // here too.
           return resolved.ok
             ? { spawned: 0, refused: 0 }
             : { spawned: 0, refused: 0, resolution: resolved.reason }

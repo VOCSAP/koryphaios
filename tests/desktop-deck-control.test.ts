@@ -172,7 +172,7 @@ function makeDeps(state: { sessions: SessionRuntime[] }): DeckControlDeps & {
     // Default: two plain entries, mirroring the old fixed `applyTemplate: async () => 2` stub.
     // Card 96c98453: resolveTemplate now returns a discriminated result, not
     // TemplateInput[] | null directly.
-    resolveTemplate: () => ({ ok: true, inputs: [{ name: "tpl-a" }, { name: "tpl-b" }] }),
+    resolveTemplate: async () => ({ ok: true, inputs: [{ name: "tpl-a" }, { name: "tpl-b" }] }),
     spawnTemplateEntry: async (input, opts) => {
       spawnInputs.push(input);
       spawnOpts.push(opts);
@@ -202,7 +202,7 @@ function makeDeps(state: { sessions: SessionRuntime[] }): DeckControlDeps & {
     revokeTeamLeadMcpConfig: (callerId) => {
       revokedLeadCallerIds.push(callerId);
     },
-    confirmSpawnShellFields: () => true,
+    confirmSpawnShellFields: async () => true,
     runDirective: async (directive, peerIds, prompt, callerId, _excludeSupervisor, options) => {
       directiveRuns.push({
         directive,
@@ -1039,7 +1039,7 @@ test("audit fix #1a: a RESTRICTED caller's non-empty `args` is refused explicitl
 
 test("audit fix #1c: deps.confirmSpawnShellFields refusing stops a spawn BEFORE it ever reaches spawnSession/approval", async () => {
   const deps = makeDeps({ sessions: [] });
-  deps.confirmSpawnShellFields = () => false;
+  deps.confirmSpawnShellFields = async () => false;
   const srv = await startDeckControl(deps);
   servers.push(srv);
 
@@ -1061,7 +1061,7 @@ test("audit fix #1c: deps.confirmSpawnShellFields refusing stops a spawn BEFORE 
 test("audit fix #1c: a spawn with no shell-bearing args is never refused, and the gate is consulted (not skipped) -- proves it does not bite unconditionally", async () => {
   const deps = makeDeps({ sessions: [] });
   let calls = 0;
-  deps.confirmSpawnShellFields = (entry) => {
+  deps.confirmSpawnShellFields = async (entry) => {
     calls++;
     // Mirrors the real predicate's own outcome for THIS assertion's sanity:
     // an entry with no args/command must never be refused.
@@ -1476,7 +1476,7 @@ test("deck_apply_template: capCheck + ONE approveSpawn for the whole batch, owne
 test("deck_apply_template shows a clodex bridge in the agent approval recap", async () => {
   const state = { sessions: [] as SessionRuntime[] };
   const deps = makeDeps(state);
-  deps.resolveTemplate = () => ({ ok: true, inputs: [{ name: "bridge", bridge: "clodex" }] });
+  deps.resolveTemplate = async () => ({ ok: true, inputs: [{ name: "bridge", bridge: "clodex" }] });
   const srv = await startDeckControl(deps);
   servers.push(srv);
 
@@ -1487,7 +1487,7 @@ test("deck_apply_template shows a clodex bridge in the agent approval recap", as
 test("deck_apply_template: batch cap refuses the whole template before any tile spawns or approval is asked", async () => {
   const state = { sessions: Array.from({ length: SPAWN_CAP - 1 }, (_, i) => fakeSession(`live-${i}`)) };
   const deps = makeDeps(state);
-  deps.resolveTemplate = () => ({ ok: true, inputs: [{ name: "a" }, { name: "b" }] }); // 7 live + 2 > SPAWN_CAP(8)
+  deps.resolveTemplate = async () => ({ ok: true, inputs: [{ name: "a" }, { name: "b" }] }); // 7 live + 2 > SPAWN_CAP(8)
   const srv = await startDeckControl(deps);
   servers.push(srv);
 
@@ -1511,7 +1511,7 @@ for (const reason of ["containment", "malformed", "refused"] as const) {
   test(`deck_apply_template: resolveTemplate resolving to reason='${reason}' spawns nothing, skips approveSpawn, does not throw, and NAMES the reason via 'resolution'`, async () => {
     const state = { sessions: [] as SessionRuntime[] };
     const deps = makeDeps(state);
-    deps.resolveTemplate = () => ({ ok: false, reason });
+    deps.resolveTemplate = async () => ({ ok: false, reason });
     const srv = await startDeckControl(deps);
     servers.push(srv);
 
@@ -1532,7 +1532,7 @@ for (const reason of ["containment", "malformed", "refused"] as const) {
 test("deck_apply_template: an ok:true resolution with zero sessions has no `resolution` field -- distinct from a real refusal/anomaly", async () => {
   const state = { sessions: [] as SessionRuntime[] };
   const deps = makeDeps(state);
-  deps.resolveTemplate = () => ({ ok: true, inputs: [] });
+  deps.resolveTemplate = async () => ({ ok: true, inputs: [] });
   const srv = await startDeckControl(deps);
   servers.push(srv);
 
@@ -1547,7 +1547,7 @@ test("deck_apply_template: an ok:true resolution with zero sessions has no `reso
 test("deck_apply_template: an operator refusal on one entry skips that tile, its ownedSessions entry, and is counted in `refused`", async () => {
   const state = { sessions: [] as SessionRuntime[] };
   const deps = makeDeps(state);
-  deps.resolveTemplate = () => ({ ok: true, inputs: [{ name: "no" }, { name: "yes" }] });
+  deps.resolveTemplate = async () => ({ ok: true, inputs: [{ name: "no" }, { name: "yes" }] });
   deps.approveSpawn = async (entries) => ({ pending: false, decisions: entries.map((_, i) => i === 1) });
   const srv = await startDeckControl(deps);
   servers.push(srv);
@@ -1581,7 +1581,7 @@ test("deck_apply_template: hasLead decided ONCE before the batch -- true strips 
   // called with opts.hasLead=true for every entry, never recomputed mid-loop.
   const withLiveLead = { sessions: [fakeSession("existing-lead", { lead: true })] as SessionRuntime[] };
   const deps1 = makeDeps(withLiveLead);
-  deps1.resolveTemplate = () => ({ ok: true, inputs: [{ name: "a" }, { name: "b", lead: true }] });
+  deps1.resolveTemplate = async () => ({ ok: true, inputs: [{ name: "a" }, { name: "b", lead: true }] });
   const srv1 = await startDeckControl(deps1);
   servers.push(srv1);
   await call(srv1, "deck_apply_template", { path: "/t.json" });
@@ -1597,7 +1597,7 @@ test("deck_apply_template: hasLead decided ONCE before the batch -- true strips 
   // be allowed through (opts.hasLead=false for every entry of this batch).
   const withoutLead = { sessions: [] as SessionRuntime[] };
   const deps2 = makeDeps(withoutLead);
-  deps2.resolveTemplate = () => ({ ok: true, inputs: [{ name: "a", lead: true }, { name: "b" }] });
+  deps2.resolveTemplate = async () => ({ ok: true, inputs: [{ name: "a", lead: true }, { name: "b" }] });
   const srv2 = await startDeckControl(deps2);
   servers.push(srv2);
   await call(srv2, "deck_apply_template", { path: "/t.json" });
@@ -2224,10 +2224,114 @@ test("deck_list_sessions: sessionView's `thinking` field carries 'working'/'idle
 
 const INDEX_TS_PATH = join(import.meta.dir, "..", "desktop", "src", "main", "index.ts");
 
+const SHOW_APPROVAL_DIALOG_SIGNATURE =
+  /const showApprovalDialog = async \(spec: ApprovalDialogSpec\): Promise<boolean> => \{/g;
+
 const RESOLVE_TEMPLATE_INPUTS_SIGNATURE =
-  /const resolveTemplateInputs = \(path: string, attendance: CallerAttendance\): TemplateResolveResult => \{/g;
+  /const resolveTemplateInputs = async \(path: string, attendance: CallerAttendance\): Promise<TemplateResolveResult> => \{/g;
 
 type TemplateResolverProbeDeps = Record<string, unknown>;
+
+function extractShowApprovalDialogBody(src: string): string {
+  const matches = [...src.matchAll(SHOW_APPROVAL_DIALOG_SIGNATURE)];
+  if (matches.length !== 1) throw new Error(`showApprovalDialog signature matched ${matches.length} times`);
+  const match = matches[0]!;
+  return extractBracedBody(src, match.index + match[0].length - 1);
+}
+
+const CONFIRM_SHELL_FIELD_APPROVAL_SIGNATURE =
+  /const confirmShellFieldApproval = async \(opts: ShellFieldApprovalOpts\): Promise<boolean> => \{/g;
+
+function compileConfirmShellFieldApproval(
+  src: string,
+  deps: TemplateResolverProbeDeps
+): (opts: unknown) => Promise<boolean> {
+  const matches = [...src.matchAll(CONFIRM_SHELL_FIELD_APPROVAL_SIGNATURE)];
+  if (matches.length !== 1) {
+    throw new Error(
+      `confirmShellFieldApproval signature matched ${matches.length} times -- cannot execute an ambiguous source boundary`
+    );
+  }
+  const match = matches[0]!;
+  const body = extractBracedBody(src, match.index + match[0].length - 1);
+  return new Function(
+    ...Object.keys(deps),
+    `return async (opts) => {${body}}`
+  )(...Object.values(deps)) as (opts: unknown) => Promise<boolean>;
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
+function shellFieldApprovalProbe(showApprovalDialog: () => Promise<boolean>) {
+  let approvals = 0;
+  return {
+    deps: {
+      shellFieldApprovalCacheKey: () => ({ key: "key", value: "value" }),
+      approvalsFile: () => "/approvals.json",
+      isApproved: () => false,
+      isFrLocale: () => false,
+      showApprovalDialog,
+      shellFieldDialog: (spec: unknown) => spec,
+      approvalDialogMaxLines: () => 8,
+      approve: () => {
+        approvals++;
+      },
+      journal: { add: () => {} }
+    },
+    approvals: () => approvals
+  };
+}
+
+test("confirmShellFieldApproval waits for the dialog verdict before approving", async () => {
+  const source = readFileSync(INDEX_TS_PATH, "utf-8");
+  const opts = {
+    keyPart: "template",
+    basename: "template.json",
+    previewLines: [],
+    messageEn: "Approve?",
+    messageFr: "Approuver ?",
+    labelEn: "Template",
+    labelFr: "Modèle",
+    buttonsEn: ["Cancel", "Approve"],
+    buttonsFr: ["Annuler", "Approuver"]
+  };
+
+  const rejectedDialog = deferred<boolean>();
+  const rejectedProbe = shellFieldApprovalProbe(() => rejectedDialog.promise);
+  const reject = compileConfirmShellFieldApproval(source, rejectedProbe.deps);
+  let rejectedSettled = false;
+  const rejected = reject(opts).then((result) => {
+    rejectedSettled = true;
+    return result;
+  });
+  expect(rejectedProbe.approvals()).toBe(0);
+  await Promise.resolve();
+  expect(rejectedSettled).toBe(false);
+  rejectedDialog.resolve(false);
+  expect(await rejected).toBe(false);
+  expect(rejectedProbe.approvals()).toBe(0);
+
+  const approvedDialog = deferred<boolean>();
+  const approvedProbe = shellFieldApprovalProbe(() => approvedDialog.promise);
+  const approve = compileConfirmShellFieldApproval(source, approvedProbe.deps);
+  const approved = approve(opts);
+  expect(approvedProbe.approvals()).toBe(0);
+  approvedDialog.resolve(true);
+  expect(await approved).toBe(true);
+  expect(approvedProbe.approvals()).toBe(1);
+});
+
+test("showApprovalDialog awaits Electron's asynchronous message box API", () => {
+  const body = extractShowApprovalDialogBody(readFileSync(INDEX_TS_PATH, "utf-8"));
+  expect(body).toContain("await (win ? dialog.showMessageBox(win, options) : dialog.showMessageBox(options))");
+  expect(body).not.toContain("showMessageBoxSync");
+});
 
 function compileResolveTemplateInputs(
   src: string,
@@ -2250,11 +2354,11 @@ function compileResolveTemplateInputs(
   }
   return new Function(
     ...Object.keys(deps),
-    `return (path, attendance) => {${executableBody}}`
+    `return async (path, attendance) => {${executableBody}}`
   )(...Object.values(deps)) as (path: string, attendance: string) => unknown;
 }
 
-test("resolveTemplateInputs passes bridge-aware approval options to the approval cache", () => {
+test("resolveTemplateInputs passes bridge-aware approval options to the approval cache", async () => {
   const plain = {
     type: "claude-peers-template",
     version: 1,
@@ -2286,7 +2390,7 @@ test("resolveTemplateInputs passes bridge-aware approval options to the approval
     refusesUnattendedApproval: () => false,
     isShellFieldPreApproved: () => false,
     journal: { add: () => {} },
-    confirmShellFieldApproval: (opts: { hashPayload: unknown }) => {
+    confirmShellFieldApproval: async (opts: { hashPayload: unknown }) => {
       received.push(opts);
       return approvalVerdict;
     },
@@ -2296,20 +2400,106 @@ test("resolveTemplateInputs passes bridge-aware approval options to the approval
     }
   });
 
-  expect(resolve("/plain.json", "attended")).toEqual({ ok: false, reason: "refused" });
+  expect(await resolve("/plain.json", "attended")).toEqual({ ok: false, reason: "refused" });
   expect(templateToInputsCalls).toEqual([]);
 
   approvalVerdict = true;
-  expect(resolve("/plain.json", "attended")).toEqual({ ok: true, inputs: [] });
-  expect(resolve("/bridged.json", "attended")).toEqual({ ok: true, inputs: [] });
+  expect(await resolve("/plain.json", "attended")).toEqual({ ok: true, inputs: [] });
+  expect(await resolve("/bridged.json", "attended")).toEqual({ ok: true, inputs: [] });
   expect(received.slice(1).map((opts) => opts.hashPayload)).toEqual([
     [{ command: "", args: "--model clodex:openai-oauth:gpt-5.6-sol" }],
     [{ command: "", args: "--model clodex:openai-oauth:gpt-5.6-sol", bridge: "clodex" }]
   ]);
 });
 
+const CONFIRM_WORKSPACE_SHELL_FIELDS_SIGNATURE =
+  /const confirmWorkspaceShellFields = async \(\s*ws: \{ id: string; name: string; sessions: WorkspaceSession\[\] \},\s*attendance: CallerAttendance\s*\): Promise<WorkspaceApprovalGateResult> => \{/g;
+
+function compileConfirmWorkspaceShellFields(
+  src: string,
+  deps: TemplateResolverProbeDeps
+): (workspace: unknown, attendance: string) => unknown {
+  const matches = [...src.matchAll(CONFIRM_WORKSPACE_SHELL_FIELDS_SIGNATURE)];
+  if (matches.length !== 1) {
+    throw new Error(
+      `confirmWorkspaceShellFields signature matched ${matches.length} times -- cannot execute an ambiguous source boundary`
+    );
+  }
+  const match = matches[0]!;
+  const body = extractBracedBody(src, match.index + match[0].length - 1);
+  const executableBody = body.replace(
+    /const approvalOpts:\s*ShellFieldApprovalOpts\s*=/,
+    "const approvalOpts ="
+  );
+  if (executableBody === body) {
+    throw new Error("confirmWorkspaceShellFields approval options type annotation was not found");
+  }
+  return new Function(
+    ...Object.keys(deps),
+    `return async (ws, attendance) => {${executableBody}}`
+  )(...Object.values(deps)) as (workspace: unknown, attendance: string) => unknown;
+}
+
+function unattendedApprovalProbe(preApproved: () => boolean) {
+  let dialogOpens = 0;
+  const confirmShellFieldApproval = async () => {
+    if (!preApproved()) dialogOpens++;
+    return true;
+  };
+  return {
+    deps: {
+      refusesUnattendedApproval: (attendance: string, approved: boolean) => attendance === "unattended" && !approved,
+      isShellFieldPreApproved: () => preApproved(),
+      confirmShellFieldApproval,
+      journal: { add: () => {} }
+    },
+    dialogOpens: () => dialogOpens
+  };
+}
+
+test("unattended template spawns do not open a dialog whether shell fields are unapproved or pre-approved", async () => {
+  const source = readFileSync(INDEX_TS_PATH, "utf-8");
+  let approved = false;
+  const probe = unattendedApprovalProbe(() => approved);
+  const resolve = compileResolveTemplateInputs(source, {
+    getConfig: () => ({ projectDir: "/project" }),
+    templateSource: () => "local",
+    reportError: () => {},
+    readTemplate: () => ({ type: "claude-peers-template", version: 1, sessions: [{ name: "dev", args: "--danger" }] }),
+    templateHasShellFields: () => true,
+    templateApproval: () => ({ hashPayload: [], previewLines: [] }),
+    basename: (path: string) => path,
+    ...probe.deps,
+    templateToInputs: () => [{ name: "dev" }]
+  });
+
+  const unapproved = await resolve("/template.json", "unattended");
+  expect(probe.dialogOpens()).toBe(0);
+  expect(unapproved).toEqual({ ok: false, reason: "unattended" });
+
+  approved = true;
+  const preApproved = await resolve("/template.json", "unattended");
+  expect(probe.dialogOpens()).toBe(0);
+  expect(preApproved).toEqual({ ok: true, inputs: [{ name: "dev" }] });
+});
+
+test("unattended workspace restores do not open a dialog whether shell fields are unapproved or pre-approved", async () => {
+  const source = readFileSync(INDEX_TS_PATH, "utf-8");
+  let approved = false;
+  const probe = unattendedApprovalProbe(() => approved);
+  const confirm = compileConfirmWorkspaceShellFields(source, probe.deps);
+  const workspace = { id: "workspace-1", name: "workspace", sessions: [{ name: "dev", args: ["--danger"] }] };
+
+  expect(await confirm(workspace, "unattended")).toBe("unattended");
+  expect(probe.dialogOpens()).toBe(0);
+
+  approved = true;
+  expect(await confirm(workspace, "unattended")).toBe("approved");
+  expect(probe.dialogOpens()).toBe(0);
+});
+
 const CONFIRM_SPAWN_SHELL_FIELDS_SIGNATURE =
-  /const confirmSpawnShellFields = \(\s*entry: \{ command\?: string; args\?: string \},\s*attendance: CallerAttendance\s*\): boolean => \{/g;
+  /const confirmSpawnShellFields = async \(\s*entry: \{ command\?: string; args\?: string \},\s*attendance: CallerAttendance\s*\): Promise<boolean> => \{/g;
 
 function extractConfirmSpawnShellFieldsBody(src: string): string {
   const matches = [...src.matchAll(CONFIRM_SPAWN_SHELL_FIELDS_SIGNATURE)];
@@ -2366,10 +2556,10 @@ test("the extractor throws when the signature is absent", () => {
 });
 
 test("the extractor throws (never picks the first) when the signature matches more than once", () => {
-  const oneOccurrence = `const confirmSpawnShellFields = (
+  const oneOccurrence = `const confirmSpawnShellFields = async (
   entry: { command?: string; args?: string },
   attendance: CallerAttendance
-): boolean => {
+): Promise<boolean> => {
   return true
 }
 `;

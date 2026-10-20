@@ -107,8 +107,8 @@ function minimalDeps(proj: string): WorkspaceDeps {
     setConfig: () => {},
     getScope: () => ({}) as never,
     adoptScope: () => {},
-    confirmShellFields: () => "approved",
-    confirmUntrustedCwd: () => "approved"
+    confirmShellFields: async () => "approved",
+    confirmUntrustedCwd: async () => "approved"
   };
 }
 
@@ -298,8 +298,8 @@ function checkWorkspaceRestoreWiring(src: string): string | null {
     return "workspace:restore's hasTeamLeadAgentSession(id) guard does not call ensureControlServer()";
   }
 
-  const restoreCallIdx = body.indexOf("workspaces.restore(");
-  if (restoreCallIdx === -1) return "workspace:restore no longer calls workspaces.restore(...)";
+  const restoreCallIdx = body.indexOf("await workspaces.restore(");
+  if (restoreCallIdx === -1) return "workspace:restore no longer awaits workspaces.restore(...)";
   if (guardIdx > restoreCallIdx) {
     return "workspace:restore's hasTeamLeadAgentSession/ensureControlServer guard must run BEFORE workspaces.restore(...)";
   }
@@ -317,7 +317,7 @@ test("negative control: REJECTS a synthetic handler that never calls ensureContr
     "  if (workspaces.hasTeamLeadAgentSession(id)) {",
     "    // nothing",
     "  }",
-    "  const result = workspaces.restore(id, attendance)",
+    "  const result = await workspaces.restore(id, attendance)",
     "})"
   ].join("\n");
   const reason = checkWorkspaceRestoreWiring(mutated);
@@ -325,11 +325,24 @@ test("negative control: REJECTS a synthetic handler that never calls ensureContr
   expect(reason).toContain("ensureControlServer");
 });
 
+test("negative control: REJECTS a synthetic handler that does not await workspace restore", () => {
+  const mutated = [
+    "regHandle('workspace:restore', async (_e, id: string) => {",
+    "  if (workspaces.hasTeamLeadAgentSession(id)) {",
+    "    await ensureControlServer()",
+    "  }",
+    "  const result = workspaces.restore(id, attendance)",
+    "})"
+  ].join("\n");
+  const reason = checkWorkspaceRestoreWiring(mutated);
+  expect(reason).toContain("awaits workspaces.restore");
+});
+
 test("negative control: REJECTS a synthetic handler that starts the endpoint unconditionally", () => {
   const mutated = [
     "regHandle('workspace:restore', async (_e, id: string) => {",
     "  await ensureControlServer()",
-    "  const result = workspaces.restore(id, attendance)",
+    "  const result = await workspaces.restore(id, attendance)",
     "})"
   ].join("\n");
   const reason = checkWorkspaceRestoreWiring(mutated);
@@ -340,7 +353,7 @@ test("negative control: REJECTS a synthetic handler that starts the endpoint unc
 test("MUTATION PROOF: REJECTS a handler where the guard runs AFTER workspaces.restore(...)", () => {
   const mutated = [
     "regHandle('workspace:restore', async (_e, id: string) => {",
-    "  const result = workspaces.restore(id, attendance)",
+    "  const result = await workspaces.restore(id, attendance)",
     "  if (workspaces.hasTeamLeadAgentSession(id)) {",
     "    await ensureControlServer()",
     "  }",
@@ -360,7 +373,7 @@ test("MUTATION PROOF: REJECTS a handler with two guard occurrences instead of ta
     "  if (workspaces.hasTeamLeadAgentSession(id)) {",
     "    await ensureControlServer()",
     "  }",
-    "  const result = workspaces.restore(id, attendance)",
+    "  const result = await workspaces.restore(id, attendance)",
     "})"
   ].join("\n");
   const reason = checkWorkspaceRestoreWiring(mutated);

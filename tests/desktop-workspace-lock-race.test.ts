@@ -209,8 +209,8 @@ function service(projectDir: string, pid: number, openLock?: LockOpener): Worksp
     setConfig: () => {},
     getScope: () => ({ secret: 's', scopeKind: 'ephemeral', groupId: 'a'.repeat(64), name: 'n', root: 'n' }),
     adoptScope: () => {},
-    confirmShellFields: () => 'approved',
-    confirmUntrustedCwd: () => 'approved',
+    confirmShellFields: async () => 'approved',
+    confirmUntrustedCwd: async () => 'approved',
     pid,
     host: 'this-host',
     openLock
@@ -226,18 +226,18 @@ test('the workspace list shows as locked a workspace another Deck process owns, 
   const svc = service(projectDir, 5555)
   const holder = await holdInChild(projectDir)
   expect(svc.listForCwd().find((w) => w.id === 'ws1')?.locked).toBe(true)
-  expect(svc.restore('ws1', 'attended')).toEqual({ ok: false, reason: 'locked' })
+  expect(await svc.restore('ws1', 'attended')).toEqual({ ok: false, reason: 'locked' })
   holder.kill('SIGKILL')
   await holder.exited
   expect(svc.listForCwd().find((w) => w.id === 'ws1')?.locked).toBe(false)
-  expect(svc.restore('ws1', 'attended')).toEqual({ ok: true })
+  expect(await svc.restore('ws1', 'attended')).toEqual({ ok: true })
 })
 
-test('the OS lock of an owned workspace survives a garbage collection: the service keeps its connection', () => {
+test('the OS lock of an owned workspace survives a garbage collection: the service keeps its connection', async () => {
   const projectDir = freshProject()
   saveWorkspace(projectDir, sampleWorkspace('ws1'))
   const svc = service(projectDir, 5555)
-  expect(svc.restore('ws1', 'attended')).toEqual({ ok: true })
+  expect(await svc.restore('ws1', 'attended')).toEqual({ ok: true })
   Bun.gc(true)
   Bun.gc(true)
   expect(probeSameHostLock(projectDir, 'ws1'), 'a collected connection drops its lock').toBe('held')
@@ -268,12 +268,12 @@ function countingOpener(): { open: LockOpener; opened: () => number } {
   }
 }
 
-test("the owner of the current workspace rewrites its vanished JSON lock without ever letting go of the OS lock", () => {
+test("the owner of the current workspace rewrites its vanished JSON lock without ever letting go of the OS lock", async () => {
   const projectDir = freshProject()
   saveWorkspace(projectDir, sampleWorkspace('ws1'))
   const counter = countingOpener()
   const svc = service(projectDir, 5555, counter.open)
-  expect(svc.restore('ws1', 'attended')).toEqual({ ok: true })
+  expect(await svc.restore('ws1', 'attended')).toEqual({ ok: true })
   rmSync(lockPath(projectDir, 'ws1'))
   expect(takeLock(projectDir, 'ws1', 6666, () => false), 'no other Deck may win while the JSON is gone').toBeNull()
 
@@ -285,7 +285,7 @@ test("the owner of the current workspace rewrites its vanished JSON lock without
   expect(probeSameHostLock(projectDir, 'ws1')).toBe('held')
 })
 
-test('a lock database that cannot be probed keeps the workspace locked, traced once with its remedy', () => {
+test('a lock database that cannot be probed keeps the workspace locked, traced once with its remedy', async () => {
   const projectDir = freshProject()
   saveWorkspace(projectDir, sampleWorkspace('ws1'))
   const file = join(projectDir, '.claude', 'claude-peers', 'workspaces', 'ws1.json')
@@ -299,7 +299,7 @@ test('a lock database that cannot be probed keeps the workspace locked, traced o
     expect(probeSameHostLock(projectDir, 'ws1')).toBe('unprobeable')
     expect(svc.listForCwd().find((w) => w.id === 'ws1')?.locked).toBe(true)
     expect(svc.listForCwd().find((w) => w.id === 'ws1')?.locked).toBe(true)
-    expect(svc.restore('ws1', 'attended')).toEqual({ ok: false, reason: 'locked' })
+    expect(await svc.restore('ws1', 'attended')).toEqual({ ok: false, reason: 'locked' })
     expect(svc.pruneStale()).toEqual([])
   } finally {
     onDeckError(() => {})
@@ -309,11 +309,11 @@ test('a lock database that cannot be probed keeps the workspace locked, traced o
   expect(readFileSync(garbage, 'utf8')).toBe('not a lock database, '.repeat(40))
 })
 
-test('a heartbeat that finds a foreign JSON lock gives the OS lock back', () => {
+test('a heartbeat that finds a foreign JSON lock gives the OS lock back', async () => {
   const projectDir = freshProject()
   saveWorkspace(projectDir, sampleWorkspace('ws1'))
   const svc = service(projectDir, 5555)
-  expect(svc.restore('ws1', 'attended')).toEqual({ ok: true })
+  expect(await svc.restore('ws1', 'attended')).toEqual({ ok: true })
   const tick = () => (svc as unknown as { heartbeatTick(): void }).heartbeatTick()
   rmSync(lockPath(projectDir, 'ws1'))
   tick()
