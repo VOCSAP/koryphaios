@@ -1201,5 +1201,10 @@
   "rules.addDisabledPending": "Approuvez ce fichier avant d'ajouter une règle.",
   "rules.saveStale": "Le fichier a changé sur disque depuis son ouverture. Rechargé — votre modification n'a pas été enregistrée.",
   "rules.savePending": "Le statut d'approbation de ce fichier a changé depuis son ouverture. Rechargé — votre modification n'a pas été enregistrée.",
-  "rules.savedPendingApproval": "Enregistré. Ce fichier doit encore être approuvé pour que ses règles s'activent."
+  "rules.savedPendingApproval": "Enregistré. Ce fichier doit encore être approuvé pour que ses règles s'activent.",
+  "approvalReader.regionLabel": "Texte intégral de la demande",
+  "approvalReader.unreached": "Faites défiler jusqu'à la fin du texte pour pouvoir approuver.",
+  "approvalReader.reached": "Fin du texte atteinte : vous pouvez approuver.",
+  "approvalReader.readFailed": "Le Deck n'a pas enregistré votre lecture : l'approbation reste verrouillée. Refusez cette demande, puis relancez l'action.",
+  "approvalReader.verdictFailed": "Votre approbation n'a pas été acceptée. Refusez cette demande, puis relancez l'action."
 }

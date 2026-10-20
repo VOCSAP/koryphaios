@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 
 import type { ApprovalDocument } from '../shared/approval-document'
-import type { ApprovalReadMetrics, ApprovalVerdict } from '../shared/approval-window'
+import { reachedBottom, type ApprovalReadMetrics, type ApprovalVerdict } from '../shared/approval-window'
 
 export interface ApprovalWindowRequest {
   readonly generation: number
@@ -65,19 +65,6 @@ export function requestApproval(state: ApprovalWindowState, document: ApprovalDo
 
 function isCurrent(state: ApprovalWindowState, generation: number, fingerprint: string): state is ApprovalWindowState & { current: ApprovalWindowRequest } {
   return state.current !== null && state.current.generation === generation && state.current.fingerprint === fingerprint
-}
-
-function reachedBottom(metrics: ApprovalReadMetrics): boolean {
-  return (
-    Number.isFinite(metrics.viewportHeight) &&
-    Number.isFinite(metrics.scrollHeight) &&
-    Number.isFinite(metrics.scrollTop) &&
-    metrics.viewportHeight > 0 &&
-    metrics.scrollHeight > 0 &&
-    metrics.scrollTop >= 0 &&
-    metrics.scrollTop <= metrics.scrollHeight &&
-    metrics.scrollTop + metrics.viewportHeight >= metrics.scrollHeight
-  )
 }
 
 export function observeApprovalRead(state: ApprovalWindowState, intent: ApprovalReadIntent): ApprovalTransition {

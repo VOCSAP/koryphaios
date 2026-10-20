@@ -1,11 +1,19 @@
 import { expect, test } from 'bun:test'
+import { join } from 'node:path'
+import { loadDict } from '../desktop/src/main/i18n.ts'
 import {
+  approvalReaderPresentation,
   createApprovalNativeAdapter,
   createApprovalWindowController,
   type ApprovalWindowIpcHandler,
   type ApprovalWindowNativeConstructionOptions
 } from '../desktop/src/main/approval-window.ts'
-import { APPROVAL_WINDOW_CHANNELS, type ApprovalWindowSnapshot } from '../desktop/src/shared/approval-window.ts'
+import {
+  APPROVAL_READER_ERROR_MAX_BYTES,
+  APPROVAL_WINDOW_CHANNELS,
+  type ApprovalPresentation,
+  type ApprovalWindowSnapshot
+} from '../desktop/src/shared/approval-window.ts'
 import type { ApprovalDocument } from '../desktop/src/shared/approval-document.ts'
 
 const document: ApprovalDocument = Object.freeze({
@@ -15,6 +23,11 @@ const document: ApprovalDocument = Object.freeze({
   refuse: 'Refuse',
   close: 'Close'
 })
+
+const presentation: ApprovalPresentation = {
+  lang: 'en',
+  text: { regionLabel: 'Full text', unreached: 'Not reached', reached: 'Reached', readFailed: 'Read failed', verdictFailed: 'Verdict failed' }
+}
 
 type Listener = (...args: unknown[]) => void
 
@@ -54,7 +67,9 @@ class FakeWindow {
   }
 }
 
-function harness(loadFailure = false) {
+interface Limits { now(): number; rendererErrorBurst: number; rendererErrorRefillMs: number }
+
+function harness(loadFailure = false, view: ApprovalPresentation = presentation, limits: Partial<Limits> = {}) {
   const handlers = new Map<string, ApprovalWindowIpcHandler>()
   const windows: FakeWindow[] = []
   const constructed: ApprovalWindowNativeConstructionOptions[] = []
@@ -78,7 +93,9 @@ function harness(loadFailure = false) {
     },
     native,
     reportError: (_scope, message) => { reports.push(message) },
-    onVerdict: (verdict) => { verdicts.push(verdict) }
+    onVerdict: (verdict) => { verdicts.push(verdict) },
+    presentation: () => view,
+    ...limits
   })
   return { controller, constructed, handlers, reports, verdicts, windows }
 }
@@ -212,4 +229,107 @@ test('refuses and reports navigation and load failures', async () => {
   await Promise.resolve()
   expect(loading.verdicts).toEqual(['refuse'])
   expect(loading.reports).toContain('Approval window failed to load')
+})
+
+test('serves the reader presentation outside the fingerprint of the approved document', async () => {
+  const french: ApprovalPresentation = { lang: 'fr', text: { ...presentation.text, reached: 'Fin atteinte' } }
+  const snapshots: ApprovalWindowSnapshot[] = []
+  for (const view of [presentation, french]) {
+    const { controller, handlers, windows } = harness(false, view)
+    controller.open(document)
+    const current = windows[0]!.webContents
+    snapshots.push((await handlers.get(APPROVAL_WINDOW_CHANNELS.getState)!({ sender: current, senderFrame: current.mainFrame })) as ApprovalWindowSnapshot)
+  }
+
+  expect(snapshots.map((snapshot) => snapshot.presentation)).toEqual([presentation, french])
+  expect(snapshots[0]!.fingerprint, 'interface text must not change what the operator approves').toBe(snapshots[1]!.fingerprint)
+})
+
+test('logs a reader error report from the current window only, prefixed and cut to the byte cap', async () => {
+  const { controller, handlers, reports, windows } = harness()
+  controller.open(document)
+  const current = windows[0]!.webContents
+  const report = handlers.get(APPROVAL_WINDOW_CHANNELS.reportError)!
+
+  await expect(report({ sender: new FakeWindow().webContents, senderFrame: {} }, 'forged')).rejects.toThrow('Approval window sender is not current')
+  await expect(report({ sender: current, senderFrame: {} }, 'subframe')).rejects.toThrow('Approval window sender is not current')
+  expect(reports.some((message) => message.includes('forged') || message.includes('subframe')), 'a foreign report must not reach the log').toBe(false)
+
+  await expect(report({ sender: current, senderFrame: current.mainFrame }, `${'a'.repeat(APPROVAL_READER_ERROR_MAX_BYTES - 1)}éz`)).resolves.toBeUndefined()
+  const logged = reports.at(-1)!
+  expect(logged.startsWith('approval-reader: ')).toBe(true)
+  const body = logged.slice('approval-reader: '.length)
+  expect(Buffer.byteLength(body, 'utf8'), 'a multibyte char straddling the cap is dropped whole').toBe(APPROVAL_READER_ERROR_MAX_BYTES - 1)
+})
+
+test('keeps a reader error report on one line with its control characters made visible', async () => {
+  const { controller, handlers, reports, windows } = harness()
+  controller.open(document)
+  const current = windows[0]!.webContents
+  const event = { sender: current, senderFrame: current.mainFrame }
+  const report = handlers.get(APPROVAL_WINDOW_CHANNELS.reportError)!
+  const ESC = String.fromCharCode(0x1b)
+  const NEL = String.fromCharCode(0x85)
+
+  await report(event, `boom\r\napproval-reader: forged${ESC}[31m${NEL}end`)
+  const logged = reports.at(-1)!
+
+  expect(logged.split('\n'), 'a newline would let the reader forge a second log entry').toHaveLength(1)
+  expect([...logged].some((char) => { const code = char.codePointAt(0)!; return code <= 0x1f || (code >= 0x7f && code <= 0x9f) })).toBe(false)
+  expect(logged).toBe(`approval-reader: boom${'\\'}x0d${'\\'}x0aapproval-reader: forged${'\\'}x1b[31m${'\\'}x85end`)
+})
+
+test('refuses a reader error report that is not a single string', async () => {
+  const { controller, handlers, reports, windows } = harness()
+  controller.open(document)
+  const current = windows[0]!.webContents
+  const event = { sender: current, senderFrame: current.mainFrame }
+  const report = handlers.get(APPROVAL_WINDOW_CHANNELS.reportError)!
+
+  await expect(report(event, ['a', 'b'])).rejects.toThrow('Approval window error report is invalid')
+  await expect(report(event, 'a', 'b')).rejects.toThrow('Approval window error report is invalid')
+  expect(reports.filter((message) => message.startsWith('approval-reader: '))).toEqual([])
+})
+
+test('rate-limits reader error reports with a single saturation trace per window', async () => {
+  let clock = 0
+  const { controller, handlers, reports, windows } = harness(false, presentation, { now: () => clock, rendererErrorBurst: 2, rendererErrorRefillMs: 1_000 })
+  controller.open(document)
+  const current = windows[0]!.webContents
+  const event = { sender: current, senderFrame: current.mainFrame }
+  const report = handlers.get(APPROVAL_WINDOW_CHANNELS.reportError)!
+
+  for (const n of [1, 2, 3, 4, 5]) await report(event, `m${n}`)
+  const fromReader = (): string[] => reports.filter((message) => message.startsWith('approval-reader: '))
+  expect(fromReader(), 'a flooding reader must not fill the log').toEqual([
+    'approval-reader: m1',
+    'approval-reader: m2',
+    'approval-reader: error reports saturated, dropping until the rate limit refills'
+  ])
+
+  clock = 1_000
+  await report(event, 'm6')
+  expect(fromReader().at(-1)).toBe('approval-reader: 3 reports dropped; m6')
+  expect(fromReader().filter((message) => message.includes('saturated'))).toHaveLength(1)
+})
+
+test('reader presentation reads each text field from its own locale key, embedded English included', () => {
+  const fields = ['regionLabel', 'unreached', 'reached', 'readFailed', 'verdictFailed'] as const
+  const expected = (dict: Record<string, string>): Record<string, string | undefined> =>
+    Object.fromEntries(fields.map((field) => [field, dict[`approvalReader.${field}`]]))
+
+  const embedded = loadDict('en', [])
+  const english = approvalReaderPresentation(embedded, 'en')
+  expect(english.lang).toBe('en')
+  expect<Record<string, string | undefined>>({ ...english.text }, 'each field must come from its own key').toEqual(expected(embedded))
+  for (const field of fields) {
+    expect(english.text[field], `approvalReader.${field} must have an embedded English value, never the raw key`).not.toBe(`approvalReader.${field}`)
+  }
+  expect(new Set(Object.values(english.text)).size, 'two fields must not share one text').toBe(fields.length)
+
+  const shipped = loadDict('fr', [join(import.meta.dir, '..', 'desktop', 'locales')])
+  const french = approvalReaderPresentation(shipped, 'fr')
+  expect(french.lang).toBe('fr')
+  expect<Record<string, string | undefined>>({ ...french.text }).toEqual(expected(shipped))
+  for (const field of fields) expect(french.text[field], `approvalReader.${field} must be translated in fr.json`).not.toBe(english.text[field])
 })

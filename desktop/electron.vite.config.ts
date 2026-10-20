@@ -48,7 +48,8 @@ export default defineConfig({
       rollupOptions: {
         input: {
           index: resolve(__dirname, 'src/renderer/index.html'),
-          avatar: resolve(__dirname, 'src/renderer/avatar.html')
+          avatar: resolve(__dirname, 'src/renderer/avatar.html'),
+          approval: resolve(__dirname, 'src/renderer/approval.html')
         }
       }
     }

@@ -1413,6 +1413,11 @@ export const EN_DEFAULTS: Record<string, string> = {
   'rules.saveStale': 'The file changed on disk since you opened it. Reloaded — your edit was not saved.',
   'rules.savePending': "This file's approval status changed since you opened it. Reloaded — your edit was not saved.",
   'rules.savedPendingApproval': 'Saved. This file still needs approval before its rules become active.',
+  'approvalReader.regionLabel': 'Full text of the request',
+  'approvalReader.unreached': 'Scroll to the end of the text to be able to approve.',
+  'approvalReader.reached': 'End of the text reached: you can approve.',
+  'approvalReader.readFailed': 'The Deck did not record your reading, so approval stays locked. Refuse this request, then retry the action.',
+  'approvalReader.verdictFailed': 'Your approval was not accepted. Refuse this request, then retry the action.',
 }
 
 /**

@@ -9339,3 +9339,82 @@ html.avatar-document body {
   from { opacity: 0.35; }
   to { opacity: 1; }
 }
+
+/* ---------- Approval reader window (an approval too long for the native box) ---------- */
+html.approval-document,
+html.approval-document body,
+#approval {
+  height: 100%;
+}
+
+#approval {
+  display: block;
+}
+
+/* The modal surface and padding, stretched to the window. Only the text region
+   scrolls, so the footer and its two answers are always on screen. */
+.approval-root {
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  padding: 20px;
+  background: var(--bg-2);
+}
+
+.approval-root .modal-head {
+  flex: none;
+}
+
+.approval-root .modal-head h2 {
+  overflow-wrap: anywhere;
+}
+
+/* Inset on the modal surface, like an input: it receives the text under review. */
+.approval-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+/* Wraps instead of scrolling sideways: a horizontal bar would hide the end of a
+   line while the bottom of the region reads as "everything seen". */
+.approval-text {
+  margin: 0;
+  padding: 10px 12px;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--fg);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.approval-foot {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.approval-status {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  font-size: 12px;
+  color: var(--fg-dim);
+}
+
+.approval-status.is-error {
+  color: var(--danger);
+}
+
+.approval-foot .modal-actions {
+  flex: none;
+  margin-top: 0;
+}

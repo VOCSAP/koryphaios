@@ -120,6 +120,15 @@ test('rejects an infinite viewport height as completed reading', () => {
   expect(result.state.current?.read).toBe(false)
 })
 
+test('refuses a read one pixel short of the bottom and accepts it at the bottom', () => {
+  const first = opened()
+  const identity = { generation: first.current.generation, fingerprint: first.current.fingerprint }
+  const short = observeApprovalRead(first.state, { ...identity, metrics: { viewportHeight: 100, scrollHeight: 500, scrollTop: 399 } })
+
+  expect(short.accepted, 'one hidden pixel row is unread text').toBe(false)
+  expect(observeApprovalRead(first.state, { ...identity, metrics: readMetrics }).accepted).toBe(true)
+})
+
 test('rejects invalid verdict values and invalid reading metrics', () => {
   const first = opened()
   for (const metrics of [

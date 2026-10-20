@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 
 import { reportError as deckReportError } from './log'
+import { t, type SupportedLocale } from './i18n'
 import {
   createApprovalWindowState,
   observeApprovalRead,
@@ -10,7 +11,9 @@ import {
 } from './approval-window-state'
 import type { ApprovalDocument } from '../shared/approval-document'
 import {
+  APPROVAL_READER_ERROR_MAX_BYTES,
   APPROVAL_WINDOW_CHANNELS,
+  type ApprovalPresentation,
   type ApprovalReadMetrics,
   type ApprovalVerdict,
   type ApprovalWindowSnapshot
@@ -80,6 +83,11 @@ export interface ApprovalWindowControllerOptions {
   native: ApprovalWindowNativeAdapter
   reportError?(scope: string, message: string, error?: unknown): void
   onVerdict(verdict: ApprovalVerdict): void
+  /** Localised interface text of the reader, resolved when the reader asks for its state. */
+  presentation(document: ApprovalDocument): ApprovalPresentation
+  now?(): number
+  rendererErrorBurst?: number
+  rendererErrorRefillMs?: number
 }
 
 function preventDefault(event: unknown): void {
@@ -174,6 +182,47 @@ function readIntent(args: unknown[]): { generation: number; fingerprint: string;
   return { generation: value.generation, fingerprint: value.fingerprint, metrics: { viewportHeight, scrollHeight, scrollTop } }
 }
 
+/** Cuts at a code point boundary, so a truncated report never ends in half a UTF-8 sequence. */
+export function truncateUtf8(text: string, maxBytes: number): string {
+  let bytes = 0
+  let end = 0
+  for (const char of text) {
+    const size = Buffer.byteLength(char, 'utf8')
+    if (bytes + size > maxBytes) break
+    bytes += size
+    end += char.length
+  }
+  return text.slice(0, end)
+}
+
+/** C0, DEL and C1 become visible \xNN, so a report cannot break the log line or forge a prefix or an escape sequence. */
+export function neutralizeControls(text: string): string {
+  let out = ''
+  for (const char of text) {
+    const code = char.codePointAt(0)!
+    out += code <= 0x1f || (code >= 0x7f && code <= 0x9f) ? `\\x${code.toString(16).padStart(2, '0')}` : char
+  }
+  return out
+}
+
+export function approvalReaderPresentation(dict: Record<string, string>, lang: SupportedLocale): ApprovalPresentation {
+  return {
+    lang,
+    text: {
+      regionLabel: t(dict, 'approvalReader.regionLabel'),
+      unreached: t(dict, 'approvalReader.unreached'),
+      reached: t(dict, 'approvalReader.reached'),
+      readFailed: t(dict, 'approvalReader.readFailed'),
+      verdictFailed: t(dict, 'approvalReader.verdictFailed')
+    }
+  }
+}
+
+function readerErrorMessage(args: unknown[]): string {
+  if (args.length !== 1 || typeof args[0] !== 'string') throw new Error('Approval window error report is invalid')
+  return truncateUtf8(neutralizeControls(args[0]), APPROVAL_READER_ERROR_MAX_BYTES)
+}
+
 function verdictIntent(args: unknown[]): { generation: number; fingerprint: string; verdict: unknown } {
   const value = args[0]
   if (args.length !== 1 || !isRecord(value) || typeof value.generation !== 'number' || typeof value.fingerprint !== 'string') {
@@ -207,7 +256,14 @@ export function createApprovalWindowController(options: ApprovalWindowController
     requireCurrentSender(event, state, options.native)
     requireNoArguments(args)
     const current = state.current!
-    return { generation: current.generation, fingerprint: current.fingerprint, document: current.document }
+    let presentation: ApprovalPresentation
+    try {
+      presentation = options.presentation(current.document)
+    } catch (error) {
+      reportError('approval-window', 'Approval window presentation failed', error)
+      throw error
+    }
+    return { generation: current.generation, fingerprint: current.fingerprint, document: current.document, presentation }
   }
 
   const read: ApprovalWindowIpcHandler = async (event, ...args): Promise<void> => {
@@ -233,9 +289,51 @@ export function createApprovalWindowController(options: ApprovalWindowController
     }
   }
 
+  const now = options.now ?? Date.now
+  const burst = options.rendererErrorBurst ?? 5
+  const refillMs = options.rendererErrorRefillMs ?? 1_000
+  let bucketGeneration: number | null = null
+  let available = burst
+  let lastRefillAt = 0
+  let suppressed = 0
+  let saturationReported = false
+
+  const rendererError: ApprovalWindowIpcHandler = async (event, ...args): Promise<void> => {
+    requireCurrentSender(event, state, options.native)
+    const message = readerErrorMessage(args)
+    const generation = state.current!.generation
+    const at = now()
+    if (bucketGeneration !== generation) {
+      bucketGeneration = generation
+      available = burst
+      lastRefillAt = at
+      suppressed = 0
+      saturationReported = false
+    } else {
+      const replenished = Math.floor(Math.max(0, at - lastRefillAt) / refillMs)
+      if (replenished > 0) {
+        available = Math.min(burst, available + replenished)
+        lastRefillAt += replenished * refillMs
+      }
+    }
+    if (available < 1) {
+      suppressed += 1
+      if (!saturationReported) {
+        saturationReported = true
+        reportError('approval-window', 'approval-reader: error reports saturated, dropping until the rate limit refills')
+      }
+      return
+    }
+    available -= 1
+    const dropped = suppressed > 0 ? `${suppressed} reports dropped; ` : ''
+    suppressed = 0
+    reportError('approval-window', `approval-reader: ${dropped}${message}`)
+  }
+
   options.ipc.handle(APPROVAL_WINDOW_CHANNELS.getState, getState)
   options.ipc.handle(APPROVAL_WINDOW_CHANNELS.read, read)
   options.ipc.handle(APPROVAL_WINDOW_CHANNELS.verdict, verdict)
+  options.ipc.handle(APPROVAL_WINDOW_CHANNELS.reportError, rendererError)
 
   return {
     open(document) {
@@ -257,6 +355,7 @@ export function createApprovalWindowController(options: ApprovalWindowController
       options.ipc.removeHandler(APPROVAL_WINDOW_CHANNELS.getState)
       options.ipc.removeHandler(APPROVAL_WINDOW_CHANNELS.read)
       options.ipc.removeHandler(APPROVAL_WINDOW_CHANNELS.verdict)
+      options.ipc.removeHandler(APPROVAL_WINDOW_CHANNELS.reportError)
       const current = state.current
       if (current !== null) settle(current.generation, 'refuse', true)
     }
