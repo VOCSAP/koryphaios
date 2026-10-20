@@ -206,6 +206,7 @@ import { createBeforeQuitHandler } from './before-quit'
 import { ServeService } from './serve-service'
 import { SERVE_QUIT_DEADLINE_MS } from './serve-lifecycle'
 import {
+  buildSpawnApprovalPayload,
   isApprovalAnswer,
   launchCommandDialog,
   maxLinesFor,
@@ -2777,23 +2778,6 @@ const confirmWorkspaceUntrustedCwd = (
 // asynchronous broker approval (merge:'never') instead of a synchronous
 // dialog -- every caller of this gate is a deck-control (agent) caller, which
 // could never answer a local dialog anyway.
-const summaryLine = (s: SpawnSummary): string => {
-  const parts = [
-    `• ${s.name}`,
-    s.embedded ? `[embedded: ${s.embedded}]` : s.agent ? `[agent: ${s.agent}]` : '',
-    s.model ? `model ${s.model}` : '',
-    s.effort ? `effort ${s.effort}` : '',
-    s.worktree_branch ? `⎇ ${s.worktree_branch}` : ''
-  ].filter(Boolean)
-  const head = parts.join('  ')
-  // Shows args verbatim so the operator can see the free-form shell arguments
-  // before approving the spawn.
-  const lines = [head, s.args ? `   args: ${s.args}` : '', s.prompt_preview ? `   ${s.prompt_preview}` : ''].filter(
-    Boolean
-  )
-  return lines.join('\n')
-}
-
 /**
  * In-flight and settled grants for a supervisor spawn, keyed by
  * `${callerId}::${spawnPlanFootprint}` -- a cache of what has been asked or
@@ -2853,7 +2837,8 @@ function requestSpawnGrant(
       return Promise.resolve({ pending: false, granted: false })
     }
     const summaries = plan.map((p) => p.summary)
-    const label = summaries.length === 1 ? `"${summaries[0]!.name}"` : `${summaries.length} agent session(s)`
+    const label = `${summaries.length} agent session(s)`
+    const payload = buildSpawnApprovalPayload(summaries, callerId, isFrLocale())
     return arbitrateSpawnGrant(
       key,
       spawnGrants,
@@ -2861,10 +2846,8 @@ function requestSpawnGrant(
         raise: () =>
           addApproval(deps, {
             kind: 'permission',
-            // The author shown to the operator is the server-known callerId,
-            // never an agent-declared tile_ref (card 02e1c07c).
-            title: `Agent "${callerId}" wants to spawn ${label}`,
-            question: summaries.map(summaryLine).join('\n'),
+            title: payload.title,
+            question: payload.question,
             sessionRef: `deck-spawn-${callerId}`,
             tileRef: `deck-spawn-${callerId}`,
             projectKey: computeDeckProjectKey(cliContext.projectDir),

@@ -1,13 +1,18 @@
 import { expect, test } from 'bun:test'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { extractBracedBody } from './_braced-body'
 import {
   SERVE_DIALOG_COLUMNS,
   SERVE_DIALOG_MAX_LINES,
+  buildSpawnApprovalPayload,
   gateDialog,
   isApprovalAnswer,
   launchCommandDialog,
   maxLinesFor,
   renderApprovalFields,
   renderServeApproval,
+  renderSpawnApprovalQuestion,
   serveDialogSpec,
   shellFieldDialog,
   worktreeInitDialog,
@@ -182,6 +187,109 @@ const PADDED_COMMAND = `npm run dev${' '.repeat(400)}; ${PADDED_TAIL}`
 function shownValue(detail: string): string {
   return valueLines(detail.split('\n')).map(valueText).join('')
 }
+
+test('spawn approval renders every summary field as numbered visible units', () => {
+  const rlo = String.fromCharCode(0x202e)
+  const detail = renderSpawnApprovalQuestion(
+    [
+      {
+        name: 'worker',
+        agent: '',
+        embedded: '',
+        model: '',
+        effort: '',
+        cli: 'claude',
+        worktree_branch: 'feature/ready',
+        prompt_preview: 'Préparer la version 漢',
+        args: `--label  a${rlo}\n--run`
+      }
+    ],
+    false
+  )
+
+  expect(shownValue(detail)).toBe(
+    `{U+2022}${DOT}worker${DOT.repeat(2)}branch:${DOT}feature/ready{U+000A}${DOT.repeat(3)}args:${DOT}--label${DOT.repeat(2)}a{U+202E}{U+000A}--run{U+000A}${DOT.repeat(3)}Pr{U+00E9}parer${DOT}la${DOT}version${DOT}{U+6F22}`
+  )
+  expect(detail).not.toContain(rlo)
+  expect(detail).toContain('01| ')
+
+  const frenchDetail = renderSpawnApprovalQuestion(
+    [{
+      name: 'worker',
+      agent: '',
+      embedded: '',
+      model: '',
+      effort: '',
+      cli: 'claude',
+      worktree_branch: 'feature/ready',
+      prompt_preview: '',
+      args: ''
+    }],
+    true
+  )
+  expect(shownValue(frenchDetail)).toContain(`branche:${DOT}feature/ready`)
+  expect(frenchDetail).not.toContain('{U+2387}')
+})
+
+test('spawn payload identifies its caller and action with localized visible fields', () => {
+  const rlo = String.fromCharCode(0x202e)
+  const payload = buildSpawnApprovalPayload(
+    [
+      {
+        name: `worker\n${rlo}漢`,
+        agent: '',
+        embedded: '',
+        model: '',
+        effort: '',
+        cli: 'claude',
+        worktree_branch: '',
+        prompt_preview: '',
+        args: '--label   value'
+      }
+    ],
+    'team-lead-deadbeef',
+    true
+  )
+
+  expect(payload.title).toBe(`L'agent "team-lead-deadbeef" veut lancer 1 session d'agent`)
+  expect(payload.question).toContain('01| ')
+  expect(payload.question).not.toContain(rlo)
+  expect(payload.question).not.toContain('漢')
+  expect(payload.question).toContain(`Les espaces sont affichés ${DOT}.`)
+
+  expect(buildSpawnApprovalPayload([], 'team-lead-deadbeef', false).title).toBe(
+    'Agent "team-lead-deadbeef" wants to spawn 0 agent sessions'
+  )
+  expect(buildSpawnApprovalPayload([], 'team-lead-deadbeef', true).title).toBe(
+    `L'agent "team-lead-deadbeef" veut lancer 0 sessions d'agent`
+  )
+})
+
+test('requestSpawnGrant sends both approval fields from its one payload builder', () => {
+  const src = readFileSync(join(import.meta.dir, '..', 'desktop', 'src', 'main', 'index.ts'), 'utf8')
+  const anchor =
+    /function requestSpawnGrant\(\s*mode: 'team-review' \| 'full-control',\s*callerId: string,\s*deps: ApprovalDeps\s*\): \(plan: SpawnGrantPlanItem\[\]\) => Promise<\{ pending: true \} \| \{ pending: false; granted: boolean \}> \{/g
+  const matches = [...src.matchAll(anchor)]
+  expect(matches.length, 'requestSpawnGrant must retain its expected signature so its sole approval payload is scanned').toBe(1)
+  const match = matches[0]!
+  const body = extractBracedBody(src, match.index + match[0].length - 1)
+  expect(body, 'requestSpawnGrant must build one caller-aware localized payload').toContain(
+    'const payload = buildSpawnApprovalPayload(summaries, callerId, isFrLocale())'
+  )
+
+  expect(
+    [...body.matchAll(/\baddApproval\b/g)],
+    'requestSpawnGrant must reference addApproval exactly once: an alias or a second call with a named object would bypass the scanned object'
+  ).toHaveLength(1)
+
+  const calls = [...body.matchAll(/addApproval\(deps,\s*\{/g)]
+  expect(calls, 'requestSpawnGrant must pass exactly one direct approval object').toHaveLength(1)
+  const call = calls[0]!
+  const object = extractBracedBody(body, call.index + call[0].lastIndexOf('{'))
+  expect(object, 'the direct approval object must keep the payload title').toContain('title: payload.title')
+  expect(object, 'the direct approval object must keep the rendered payload question').toContain('question: payload.question')
+  expect(object, 'the direct approval object must not spread another object: a spread after title/question could overwrite them').not.toContain('...')
+})
 
 test('launch command door shows padding as dots and keeps the hidden tail readable, Refuse by default', () => {
   for (const isFr of [false, true]) {

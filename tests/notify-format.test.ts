@@ -20,6 +20,7 @@ import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Approval } from "../shared/types.ts";
+import { buildSpawnApprovalPayload } from "../desktop/src/main/serve-approval-dialog.ts";
 
 function approval(patch: Partial<Approval> = {}): Approval {
   return {
@@ -121,6 +122,22 @@ describe("rendering", () => {
   test("a permission carries a button hint, a question asks for a reply", () => {
     expect(renderTelegram(approval({ kind: "permission" }))).toContain("button");
     expect(renderTelegram(approval({ kind: "question" }))).toContain("Reply");
+  });
+
+  test("renders a real spawn payload without a hostile title or false block", () => {
+    const rlo = String.fromCharCode(0x202e);
+    const payload = buildSpawnApprovalPayload([{
+      name: `worker\n${rlo}漢`, agent: "", embedded: "", model: "", effort: "", cli: "claude", worktree_branch: "", prompt_preview: "", args: "--label   value"
+    }], "team-lead-deadbeef", false);
+    const rendered = renderTelegram(approval(payload));
+
+    expect(rendered).toStartWith('<b>Agent "team-lead-deadbeef" wants to spawn 1 agent session</b>');
+    expect(rendered).toContain("01| ");
+    expect(rendered).toContain("args:·--label");
+    expect(rendered).not.toContain("--label   ");
+    expect(rendered).not.toContain(`worker\n`);
+    expect(rendered).not.toContain(rlo);
+    expect(rendered).not.toContain("漢");
   });
 
   test("a settled message states who answered and what", () => {

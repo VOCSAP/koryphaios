@@ -7,6 +7,7 @@
 // Pure module, no electron: unit-tested under bun.
 
 import type { ServeApprovalPrompt } from './serve-config'
+import type { SpawnSummary } from './deck-control'
 
 /**
  * Characters per value line; every line is one unbreakable word for the box.
@@ -94,6 +95,38 @@ export function renderApprovalFields(
   }
   lines.push(opts.isFr ? `Les espaces sont affichés ${MIDDLE_DOT}.` : `Spaces are shown as ${MIDDLE_DOT}.`)
   return { lines, detail: lines.join('\n'), fits: lines.length <= opts.maxLines }
+}
+
+export function renderSpawnApprovalQuestion(summaries: readonly SpawnSummary[], isFr: boolean): string {
+  const items = summaries.map((summary) => {
+    const parts = [
+      `• ${summary.name}`,
+      summary.embedded ? `[embedded: ${summary.embedded}]` : summary.agent ? `[agent: ${summary.agent}]` : '',
+      summary.model ? `model ${summary.model}` : '',
+      summary.effort ? `effort ${summary.effort}` : '',
+      summary.worktree_branch ? `${isFr ? 'branche' : 'branch'}: ${summary.worktree_branch}` : ''
+    ].filter(Boolean)
+    const head = parts.join('  ')
+    return [head, summary.args ? `   args: ${summary.args}` : '', summary.prompt_preview ? `   ${summary.prompt_preview}` : '']
+      .filter(Boolean)
+      .join('\n')
+  })
+  return renderApprovalFields([{ label: '', items }], { isFr, maxLines: Number.POSITIVE_INFINITY }).detail
+}
+
+export function buildSpawnApprovalPayload(
+  summaries: readonly SpawnSummary[],
+  callerId: string,
+  isFr: boolean
+): { title: string; question: string } {
+  const count = summaries.length
+  const sessions = isFr
+    ? `${count} session${count === 1 ? '' : 's'} d'agent`
+    : `${count} agent session${count === 1 ? '' : 's'}`
+  return {
+    title: isFr ? `L'agent "${callerId}" veut lancer ${sessions}` : `Agent "${callerId}" wants to spawn ${sessions}`,
+    question: renderSpawnApprovalQuestion(summaries, isFr)
+  }
 }
 
 export interface ApprovalDialogSpec {

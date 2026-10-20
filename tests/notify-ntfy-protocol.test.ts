@@ -26,6 +26,7 @@ import {
   settledClickUrl,
 } from "../notify/ntfy-protocol.ts";
 import type { Approval } from "../shared/types.ts";
+import { buildSpawnApprovalPayload } from "../desktop/src/main/serve-approval-dialog.ts";
 
 function approval(patch: Partial<Approval> = {}): Approval {
   return {
@@ -248,6 +249,22 @@ describe("renderNtfy (hostile input #4: the agent writes these strings)", () => 
     const r = renderNtfy(approval({ question: "line one\nline two" }), "bureau · koryphaios");
     expect(r.title).toBe("bureau · koryphaios · Bash");
     expect(r.message).toBe("line one\nline two");
+  });
+
+  test("renders a real spawn payload without a hostile title or false block", () => {
+    const rlo = String.fromCharCode(0x202e);
+    const payload = buildSpawnApprovalPayload([{
+      name: `worker\n${rlo}漢`, agent: "", embedded: "", model: "", effort: "", cli: "claude", worktree_branch: "", prompt_preview: "", args: "--label   value"
+    }], "team-lead-deadbeef", false);
+    const rendered = renderNtfy(approval(payload), "bureau");
+
+    expect(rendered.title).toBe('bureau · Agent "team-lead-deadbeef" wants to spawn 1 agent session');
+    expect(rendered.message).toStartWith("01| ");
+    expect(rendered.message).toContain("args:·--label");
+    expect(rendered.message).not.toContain("--label   ");
+    expect(rendered.message).not.toContain(`worker\n`);
+    expect(rendered.message).not.toContain(rlo);
+    expect(rendered.message).not.toContain("漢");
   });
 
   test("strips ANSI and control characters from both fields", () => {

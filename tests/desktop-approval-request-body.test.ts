@@ -15,6 +15,7 @@ import { mockStore, storeMockStubs } from "./_store-mock";
 import { capVisibly } from "../shared/text.ts";
 import { APPROVAL_QUESTION_MAX } from "../shared/approval.ts";
 import * as realSharedTypes from "../desktop/src/shared/types.ts";
+import { buildSpawnApprovalPayload } from "../desktop/src/main/serve-approval-dialog.ts";
 
 const { act, React, createRoot, create } = await import("../desktop/tests-support/react-test-harness");
 
@@ -203,6 +204,25 @@ test("a question is plain text: no command block, no signal row", () => {
     className: "inbox-modal-text"
   }));
   expect(shape()).toEqual(["plain:inbox-modal-text=Which branch?\nmain or dev"]);
+});
+
+test("a spawn payload stays visible in the Courrier approval body", () => {
+  const rlo = String.fromCharCode(0x202e);
+  const payload = buildSpawnApprovalPayload([{
+    name: `worker\n${rlo}漢`, agent: "", embedded: "", model: "", effort: "", cli: "claude", worktree_branch: "", prompt_preview: "", args: "--label   value"
+  }], "team-lead-deadbeef", false);
+  render(React.createElement(ApprovalRequestBody, {
+    approval: { kind: "permission", question: payload.question },
+    className: "inbox-modal-text"
+  }));
+
+  expect(payload.title).toBe('Agent "team-lead-deadbeef" wants to spawn 1 agent session');
+  expect(container.querySelector(".approval-command-head")!.textContent).toStartWith("01| ");
+  expect(container.querySelector(".approval-command-rest")!.textContent).toContain("args:·--label");
+  expect(container.textContent).not.toContain("--label   ");
+  expect(container.textContent).not.toContain(`worker\n`);
+  expect(container.textContent).not.toContain(rlo);
+  expect(container.textContent).not.toContain("漢");
 });
 
 test("a question's URL is a link inside the host box", () => {
