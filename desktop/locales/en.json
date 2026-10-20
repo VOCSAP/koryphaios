@@ -1205,6 +1205,6 @@
   "approvalReader.regionLabel": "Full text of the request",
   "approvalReader.unreached": "Scroll to the end of the text to be able to approve.",
   "approvalReader.reached": "End of the text reached: you can approve.",
-  "approvalReader.readFailed": "The Deck did not record your reading, so approval stays locked. Refuse this request, then retry the action.",
+  "approvalReader.readFailed": "The Deck could not confirm that the end of the text was reached, so approval stays locked. Refuse this request, then retry the action.",
   "approvalReader.verdictFailed": "Your approval was not accepted. Refuse this request, then retry the action."
 }

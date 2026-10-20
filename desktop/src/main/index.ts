@@ -6,11 +6,13 @@ import {
   BrowserWindow,
   desktopCapturer,
   dialog,
+  ipcMain,
   Menu,
   nativeTheme,
   Notification,
   safeStorage,
   screen,
+  session,
   shell
 } from 'electron'
 import { publicKeyFingerprint } from '../../../shared/operator-trust'
@@ -63,7 +65,9 @@ import {
 import { magicCompactPluginPresent } from './magic-compact'
 import { runMagicCompactInTurn } from './magic-compact-sequence'
 import { approve, commandHash, isApproved, resolveApprovedLaunchCommand } from './launch-approval'
-import { createStartupState } from './approval-startup-state'
+import { createStartupState, onStartupFailure, shouldQuitAfterAllWindowsClosed } from './approval-startup-state'
+import { approvalReaderPresentation, approvalWindowAssets, createApprovalNativeAdapter, createApprovalWindowController, routeApproval } from './approval-window'
+import { loadDict, resolveLocale } from './i18n'
 import { homedir, hostname } from 'node:os'
 import {
   WorkspaceService,
@@ -476,6 +480,23 @@ const getWorktreeInit = (): string | undefined => approvedWorktreeInit
 const startup = createStartupState()
 
 const isFrLocale = (): boolean => (config.locale || app.getLocale()).toLowerCase().startsWith('fr')
+
+const approvalReader = createApprovalWindowController({
+  ipc: ipcMain,
+  native: createApprovalNativeAdapter({
+    ...approvalWindowAssets(__dirname),
+    createWindow: (options) => new BrowserWindow(options),
+    parent: () => (mainWindow && !mainWindow.isDestroyed() ? mainWindow : null),
+    sessionFromPartition: (partition) => session.fromPartition(partition),
+    reportError
+  }),
+  reportError,
+  presentation: () => {
+    const locale = resolveLocale(config.locale, app.getLocale())
+    const shippedDir = app.isPackaged ? join(process.resourcesPath, 'locales') : join(app.getAppPath(), 'locales')
+    return approvalReaderPresentation(loadDict(locale, [shippedDir, join(app.getPath('userData'), 'locales')]), locale)
+  }
+})
 
 const getConfig = (): AppConfig => config
 const setConfig = (patch: Partial<AppConfig>): AppConfig => {
@@ -2541,21 +2562,27 @@ const approvalDialogMaxLines = (): number => {
 }
 
 /** True only when the operator pressed the Approve button; a spec that does not fit has none. */
-const showApprovalDialog = async (spec: ApprovalDialogSpec): Promise<boolean> => {
-  if (spec.approveIndex === null) journal.add('session', `approval dialog offers no Approve, its text does not fit: ${spec.message}`)
-  const win = mainWindow && !mainWindow.isDestroyed() ? mainWindow : null
-  const options: Electron.MessageBoxOptions = {
-    type: 'warning',
-    title: 'Koryphaios',
-    message: spec.message,
-    detail: spec.detail,
-    buttons: spec.buttons,
-    defaultId: spec.defaultId,
-    cancelId: spec.cancelId
-  }
-  const answer = await (win ? dialog.showMessageBox(win, options) : dialog.showMessageBox(options))
-  return isApprovalAnswer(spec, answer.response)
-}
+const showApprovalDialog = async (spec: ApprovalDialogSpec): Promise<boolean> =>
+  await routeApproval(spec, {
+    native: async (nativeSpec) => {
+      const win = mainWindow && !mainWindow.isDestroyed() ? mainWindow : null
+      const options: Electron.MessageBoxOptions = {
+        type: 'warning',
+        title: 'Koryphaios',
+        message: nativeSpec.message,
+        detail: nativeSpec.detail,
+        buttons: nativeSpec.buttons,
+        defaultId: nativeSpec.defaultId,
+        cancelId: nativeSpec.cancelId
+      }
+      const answer = await (win ? dialog.showMessageBox(win, options) : dialog.showMessageBox(options))
+      return isApprovalAnswer(nativeSpec, answer.response)
+    },
+    reader: {
+      open: (document, onVerdict) => approvalReader.open(document, (verdict) => onVerdict(verdict === 'approve'))
+    },
+    report: (error) => reportError('main', 'approval reader failed to open', error)
+  })
 
 const confirmShellFieldApproval = async (opts: ShellFieldApprovalOpts): Promise<boolean> => {
   const { key, value } = shellFieldApprovalCacheKey(opts)
@@ -3737,10 +3764,15 @@ app.whenReady().then(async () => {
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
   })
+}).catch((error) => {
+  onStartupFailure(startup.phase(), error, {
+    report: (failure) => reportError('main', 'startup failed after ready', failure),
+    quit: () => app.quit()
+  })
 })
 
 app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') app.quit()
+  if (shouldQuitAfterAllWindowsClosed(process.platform, startup.phase())) app.quit()
 })
 
 const runBeforeQuit = createBeforeQuitHandler({

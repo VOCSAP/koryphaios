@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { join } from 'node:path'
 
 import { reportError as deckReportError } from './log'
 import { t, type SupportedLocale } from './i18n'
@@ -38,10 +39,12 @@ export interface ApprovalWindowIpcMain {
   removeHandler(channel: string): void
 }
 
-export interface ApprovalWindowNativeConstructionOptions {
+export interface ApprovalWindowNativeConstructionOptions<W = unknown> {
   width: number
   height: number
   show: false
+  parent?: W
+  modal?: true
   webPreferences: {
     preload: string
     partition: string
@@ -55,6 +58,7 @@ export interface ApprovalWindowNativeConstructionOptions {
 export interface ApprovalWindowBrowserWindow {
   webContents: ApprovalWindowWebContents
   on(event: string, listener: (...args: unknown[]) => void): void
+  show(): void
   destroy(): void
   isDestroyed(): boolean
   loadFile(file: string): Promise<unknown>
@@ -74,12 +78,17 @@ export interface ApprovalWindowNativeAdapter {
 export interface ApprovalWindowSession {
   setPermissionRequestHandler(handler: (webContents: unknown, permission: string, callback: (allowed: boolean) => void, details: unknown) => void): void
   setPermissionCheckHandler(handler: (webContents: unknown, permission: string, requestingOrigin: string, details: unknown) => boolean): void
+  on(event: 'will-download', listener: (event: unknown) => void): void
+  clearStorageData(): Promise<void>
+  clearCache(): Promise<void>
 }
 
-export interface ApprovalWindowNativeAdapterOptions {
+export interface ApprovalWindowNativeAdapterOptions<W extends ApprovalWindowBrowserWindow = ApprovalWindowBrowserWindow> {
   preload: string
   html: string
-  createWindow(options: ApprovalWindowNativeConstructionOptions): ApprovalWindowBrowserWindow
+  /** The live main window the reader is modal to, or null to open it standalone. */
+  parent(): W | null
+  createWindow(options: ApprovalWindowNativeConstructionOptions<W>): W
   sessionFromPartition(partition: string): ApprovalWindowSession
   reportError(scope: string, message: string, error?: unknown): void
 }
@@ -88,12 +97,43 @@ export interface ApprovalWindowControllerOptions {
   ipc: ApprovalWindowIpcMain
   native: ApprovalWindowNativeAdapter
   reportError?(scope: string, message: string, error?: unknown): void
-  onVerdict(verdict: ApprovalVerdict): void
+  onVerdict?(verdict: ApprovalVerdict): void
   /** Localised interface text of the reader, resolved when the reader asks for its state. */
   presentation(document: ApprovalDocument): ApprovalPresentation
   now?(): number
   rendererErrorBurst?: number
   rendererErrorRefillMs?: number
+}
+
+export interface ApprovalRouteSpec {
+  approveIndex: number | null
+  document: ApprovalDocument
+}
+
+export interface ApprovalRouteReader {
+  open(document: ApprovalDocument, onVerdict: (approved: boolean) => void): { kind: 'opened' | 'busy' }
+}
+
+export async function routeApproval<T extends ApprovalRouteSpec>(
+  spec: T,
+  deps: { native(spec: T): Promise<boolean>; reader: ApprovalRouteReader; report(error: unknown): void }
+): Promise<boolean> {
+  if (spec.approveIndex !== null) return await deps.native(spec)
+  return await new Promise<boolean>((resolve) => {
+    try {
+      if (deps.reader.open(spec.document, resolve).kind === 'busy') resolve(false)
+    } catch (error) {
+      deps.report(error)
+      resolve(false)
+    }
+  })
+}
+
+export function approvalWindowAssets(mainDir: string): { preload: string; html: string } {
+  return {
+    preload: join(mainDir, '../preload/approval.js'),
+    html: join(mainDir, '../renderer/approval.html')
+  }
 }
 
 function preventDefault(event: unknown): void {
@@ -102,7 +142,7 @@ function preventDefault(event: unknown): void {
   }
 }
 
-export function createApprovalNativeAdapter(options: ApprovalWindowNativeAdapterOptions): ApprovalWindowNativeAdapter {
+export function createApprovalNativeAdapter<W extends ApprovalWindowBrowserWindow>(options: ApprovalWindowNativeAdapterOptions<W>): ApprovalWindowNativeAdapter {
   const windows = new Map<number, ApprovalWindowBrowserWindow>()
   const partition = () => `approval-window:${randomUUID()}`
 
@@ -114,10 +154,13 @@ export function createApprovalNativeAdapter(options: ApprovalWindowNativeAdapter
         const approvalSession = options.sessionFromPartition(ephemeralPartition)
         approvalSession.setPermissionRequestHandler((_webContents, _permission, callback) => callback(false))
         approvalSession.setPermissionCheckHandler(() => false)
+        approvalSession.on('will-download', (event) => preventDefault(event))
+        const parent = options.parent()
         window = options.createWindow({
           width: 640,
           height: 700,
           show: false,
+          ...(parent === null ? {} : { parent, modal: true as const }),
           webPreferences: {
             preload: options.preload,
             partition: ephemeralPartition,
@@ -129,14 +172,30 @@ export function createApprovalNativeAdapter(options: ApprovalWindowNativeAdapter
         })
         windows.set(generation, window)
         window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+        window.on('ready-to-show', () => window.show())
         window.on('close', () => lifecycle.closed())
         window.on('closed', () => {
           windows.delete(generation)
+          void Promise.all([approvalSession.clearStorageData(), approvalSession.clearCache()]).catch((error) => {
+            options.reportError('approval-window', 'Approval window session cleanup failed', error)
+          })
           lifecycle.closed()
+        })
+        let loaded = false
+        window.webContents.on('did-finish-load', () => { loaded = true })
+        window.webContents.on('did-start-navigation', (details) => {
+          if (!loaded || !isRecord(details) || details.isMainFrame !== true) return
+          options.reportError('approval-window', 'Approval window reload was refused')
+          lifecycle.failed()
         })
         window.webContents.on('will-navigate', (event) => {
           preventDefault(event)
           options.reportError('approval-window', 'Approval window navigation was refused')
+          lifecycle.failed()
+        })
+        window.webContents.on('will-frame-navigate', (event) => {
+          preventDefault(event)
+          options.reportError('approval-window', 'Approval window frame navigation was refused')
           lifecycle.failed()
         })
         window.webContents.on('render-process-gone', () => {
@@ -175,12 +234,12 @@ function requireCurrentSender(
   event: ApprovalWindowIpcEvent,
   state: ApprovalWindowState,
   native: ApprovalWindowNativeAdapter,
-  reportError: (scope: string, message: string, error?: unknown) => void
+  reportRejected: (scope: string, message: string, error?: unknown) => void
 ): void {
   const current = state.current
   const endpoint = current === null ? null : native.endpoint(current.generation)
   if (endpoint === null || event.sender !== endpoint || event.senderFrame !== endpoint.mainFrame) {
-    reportError('approval-window', 'Approval window sender was rejected')
+    reportRejected('approval-window', 'Approval window sender was rejected')
     throw new Error('Approval window sender is not current')
   }
 }
@@ -252,11 +311,37 @@ function verdictIntent(args: unknown[]): { generation: number; fingerprint: stri
 }
 
 export function createApprovalWindowController(options: ApprovalWindowControllerOptions): {
-  open(document: ApprovalDocument): { kind: 'opened'; generation: number } | { kind: 'busy' }
+  open(document: ApprovalDocument, onVerdict?: (verdict: ApprovalVerdict) => void): { kind: 'opened'; generation: number } | { kind: 'busy' }
   dispose(): void
 } {
   const reportError = options.reportError ?? deckReportError
+  const verdictCallbacks = new Map<number, (verdict: ApprovalVerdict) => void>()
+  const now = options.now ?? Date.now
   let state = createApprovalWindowState()
+  let rejectedSeen = false
+  let rejectedGeneration: number | null = null
+  let rejectedAt = 0
+  let rejectedSuppressed = 0
+  const reportRejectedSender = (scope: string, message: string): void => {
+    const generation = state.current?.generation ?? null
+    const at = now()
+    if (!rejectedSeen || rejectedGeneration !== generation) {
+      rejectedSeen = true
+      rejectedGeneration = generation
+      rejectedAt = at
+      rejectedSuppressed = 0
+      reportError(scope, message)
+      return
+    }
+    if (at - rejectedAt >= 1_000) {
+      if (rejectedSuppressed > 0) reportError(scope, `${rejectedSuppressed} rejected senders suppressed`)
+      rejectedAt = at
+      rejectedSuppressed = 0
+      reportError(scope, message)
+      return
+    }
+    rejectedSuppressed += 1
+  }
 
   const settle = (generation: number, verdict: ApprovalVerdict, closeWindow: boolean): void => {
     const current = state.current
@@ -266,14 +351,16 @@ export function createApprovalWindowController(options: ApprovalWindowController
     if (!result.accepted || result.verdict === null) return
     if (closeWindow) options.native.close(generation)
     try {
-      options.onVerdict(result.verdict)
+      verdictCallbacks.get(generation)?.(result.verdict)
     } catch (error) {
       reportError('approval-window', 'Approval window verdict delivery failed', error)
+    } finally {
+      verdictCallbacks.delete(generation)
     }
   }
 
   const getState: ApprovalWindowIpcHandler = async (event, ...args): Promise<ApprovalWindowSnapshot> => {
-    requireCurrentSender(event, state, options.native, reportError)
+    requireCurrentSender(event, state, options.native, reportRejectedSender)
     requireNoArguments(args)
     const current = state.current!
     let presentation: ApprovalPresentation
@@ -287,14 +374,14 @@ export function createApprovalWindowController(options: ApprovalWindowController
   }
 
   const read: ApprovalWindowIpcHandler = async (event, ...args): Promise<void> => {
-    requireCurrentSender(event, state, options.native, reportError)
+    requireCurrentSender(event, state, options.native, reportRejectedSender)
     const transition = observeApprovalRead(state, readIntent(args))
     state = transition.state
     if (!transition.accepted) throw new Error('Approval window reading observation was rejected')
   }
 
   const verdict: ApprovalWindowIpcHandler = async (event, ...args): Promise<void> => {
-    requireCurrentSender(event, state, options.native, reportError)
+    requireCurrentSender(event, state, options.native, reportRejectedSender)
     const result = settleApproval(state, verdictIntent(args))
     state = result.state
     if (!result.accepted || result.verdict === null) {
@@ -303,13 +390,14 @@ export function createApprovalWindowController(options: ApprovalWindowController
     }
     options.native.close(result.state.generation)
     try {
-      options.onVerdict(result.verdict)
+      verdictCallbacks.get(result.state.generation)?.(result.verdict)
     } catch (error) {
       reportError('approval-window', 'Approval window verdict delivery failed', error)
+    } finally {
+      verdictCallbacks.delete(result.state.generation)
     }
   }
 
-  const now = options.now ?? Date.now
   const burst = options.rendererErrorBurst ?? 5
   const refillMs = options.rendererErrorRefillMs ?? 1_000
   let bucketGeneration: number | null = null
@@ -319,7 +407,7 @@ export function createApprovalWindowController(options: ApprovalWindowController
   let saturationReported = false
 
   const rendererError: ApprovalWindowIpcHandler = async (event, ...args): Promise<void> => {
-    requireCurrentSender(event, state, options.native, reportError)
+    requireCurrentSender(event, state, options.native, reportRejectedSender)
     const message = readerErrorMessage(args)
     const generation = state.current!.generation
     const at = now()
@@ -356,10 +444,11 @@ export function createApprovalWindowController(options: ApprovalWindowController
   options.ipc.handle(APPROVAL_WINDOW_CHANNELS.reportError, rendererError)
 
   return {
-    open(document) {
+    open(document, onVerdict = options.onVerdict ?? (() => {})) {
       const request = requestApproval(state, document)
       state = request.state
       if (request.kind === 'busy') return { kind: 'busy' }
+      verdictCallbacks.set(request.current.generation, onVerdict)
       try {
         options.native.open(request.current.generation, {
           closed: () => settle(request.current.generation, 'refuse', false),

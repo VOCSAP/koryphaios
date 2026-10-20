@@ -1205,6 +1205,6 @@
   "approvalReader.regionLabel": "Texte intégral de la demande",
   "approvalReader.unreached": "Faites défiler jusqu'à la fin du texte pour pouvoir approuver.",
   "approvalReader.reached": "Fin du texte atteinte : vous pouvez approuver.",
-  "approvalReader.readFailed": "Le Deck n'a pas enregistré votre lecture : l'approbation reste verrouillée. Refusez cette demande, puis relancez l'action.",
+  "approvalReader.readFailed": "Le Deck n'a pas pu confirmer que la fin du texte est atteinte : l'approbation reste verrouillée. Refusez cette demande, puis relancez l'action.",
   "approvalReader.verdictFailed": "Votre approbation n'a pas été acceptée. Refusez cette demande, puis relancez l'action."
 }

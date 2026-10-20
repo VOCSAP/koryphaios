@@ -1,5 +1,20 @@
 import { expect, test } from "bun:test";
-import { createStartupState, shouldQuitAfterAllWindowsClosed } from "../desktop/src/main/approval-startup-state.ts";
+import { createStartupState, onStartupFailure, shouldQuitAfterAllWindowsClosed, type StartupPhase } from "../desktop/src/main/approval-startup-state.ts";
+
+test("a startup failure is always traced, and quits only a run that has no window yet", () => {
+  const failure = new Error("boom");
+  const outcomes = (["bootstrap", "running", "quitting"] as StartupPhase[]).map((phase) => {
+    const reported: unknown[] = [];
+    let quits = 0;
+    onStartupFailure(phase, failure, { report: (error) => { reported.push(error); }, quit: () => { quits += 1; } });
+    return { phase, reported, quits };
+  });
+  expect(outcomes).toEqual([
+    { phase: "bootstrap", reported: [failure], quits: 1 },
+    { phase: "running", reported: [failure], quits: 0 },
+    { phase: "quitting", reported: [failure], quits: 0 },
+  ]);
+});
 
 test("a run starts in bootstrap and moves to running once launched", () => {
   const state = createStartupState();

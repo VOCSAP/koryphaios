@@ -3,9 +3,12 @@ import { join } from 'node:path'
 import { loadDict } from '../desktop/src/main/i18n.ts'
 import {
   approvalReaderPresentation,
+  approvalWindowAssets,
   createApprovalNativeAdapter,
+  routeApproval,
   createApprovalWindowController,
   type ApprovalWindowIpcHandler,
+  type ApprovalWindowNativeAdapter,
   type ApprovalWindowNativeConstructionOptions
 } from '../desktop/src/main/approval-window.ts'
 import {
@@ -43,10 +46,15 @@ class FakeWindow {
   }
   loaded: string | null = null
   destroyed = false
+  shown = false
   readonly prevented: string[] = []
 
   on(event: string, listener: Listener): void {
     this.listeners.set(event, listener)
+  }
+
+  show(): void {
+    this.shown = true
   }
 
   destroy(): void {
@@ -63,12 +71,19 @@ class FakeWindow {
   }
 
   fire(event: string, ...args: unknown[]): void {
-    this.listeners.get(event)?.({ preventDefault: () => { this.prevented.push(event) } }, ...args)
+    this.fireWithDetails(event, {}, ...args)
+  }
+
+  fireWithDetails(event: string, details: Record<string, unknown>, ...args: unknown[]): void {
+    this.listeners.get(event)?.({ ...details, preventDefault: () => { this.prevented.push(event) } }, ...args)
   }
 }
 
 class FakeSession {
   requestHandler: ((webContents: unknown, permission: string, callback: (allowed: boolean) => void, details: unknown) => void) | null = null
+  readonly listeners = new Map<string, Listener>()
+  storageCleared = false
+  cacheCleared = false
   constructor(readonly partition: string) {}
   checkHandler: ((webContents: unknown, permission: string, requestingOrigin: string, details: unknown) => boolean) | null = null
 
@@ -79,20 +94,33 @@ class FakeSession {
   setPermissionCheckHandler(handler: (webContents: unknown, permission: string, requestingOrigin: string, details: unknown) => boolean): void {
     this.checkHandler = handler
   }
+
+  on(event: string, listener: Listener): void {
+    this.listeners.set(event, listener)
+  }
+
+  async clearStorageData(): Promise<void> {
+    this.storageCleared = true
+  }
+
+  async clearCache(): Promise<void> {
+    this.cacheCleared = true
+  }
 }
 
 interface Limits { now(): number; rendererErrorBurst: number; rendererErrorRefillMs: number }
 
-function harness(loadFailure = false, view: ApprovalPresentation = presentation, limits: Partial<Limits> = {}) {
+function harness(loadFailure = false, view: ApprovalPresentation = presentation, limits: Partial<Limits> = {}, parent: () => FakeWindow | null = () => null) {
   const handlers = new Map<string, ApprovalWindowIpcHandler>()
   const windows: FakeWindow[] = []
   const sessions: FakeSession[] = []
-  const constructed: ApprovalWindowNativeConstructionOptions[] = []
+  const constructed: ApprovalWindowNativeConstructionOptions<FakeWindow>[] = []
   const reports: string[] = []
   const verdicts: string[] = []
   const native = createApprovalNativeAdapter({
     preload: 'approval-preload.js',
     html: 'approval.html',
+    parent,
     createWindow(options) {
       constructed.push(options)
       const window = new FakeWindow(loadFailure)
@@ -120,8 +148,59 @@ function harness(loadFailure = false, view: ApprovalPresentation = presentation,
   return { controller, constructed, handlers, reports, sessions, verdicts, windows }
 }
 
-test('uses an ephemeral hardened partition and traces foreign or subframe IPC before refusing it', async () => {
-  const { controller, constructed, handlers, reports, sessions, windows } = harness()
+test('resolves the built approval preload and page from the main output directory', () => {
+  expect(approvalWindowAssets('desktop/out/main')).toEqual({
+    preload: join('desktop/out/main', '../preload/approval.js'),
+    html: join('desktop/out/main', '../renderer/approval.html')
+  })
+})
+
+// bun's per-test timeout does not fail an await that never settles, so a promise a mutant leaves pending must read 'pending' instead of hanging the file.
+const settledWithin = (promise: Promise<unknown>): Promise<string> =>
+  Promise.race([promise.then(String), new Promise<string>((resolve) => setTimeout(() => resolve('pending'), 0))])
+
+test('routes short approval to native and long approval only to the reader', async () => {
+  let nativeCalls = 0
+  let readerCalls = 0
+  const reports: unknown[] = []
+  const report = (error: unknown): void => { reports.push(error) }
+  const reader = { open: (_document: ApprovalDocument, settle: (approved: boolean) => void) => { readerCalls++; settle(true); return { kind: 'opened' as const } } }
+  expect(await settledWithin(routeApproval({ approveIndex: 0, document }, { native: async () => { nativeCalls++; return true }, reader, report }))).toBe('true')
+  expect(await settledWithin(routeApproval({ approveIndex: null, document }, { native: async () => { nativeCalls++; return true }, reader, report }))).toBe('true')
+  expect(nativeCalls).toBe(1)
+  expect(readerCalls).toBe(1)
+  expect(reports).toEqual([])
+})
+
+test('refuses busy or synchronously failing approval readers, tracing the failure', async () => {
+  const native = async () => true
+  const reports: unknown[] = []
+  const report = (error: unknown): void => { reports.push(error) }
+  expect(await settledWithin(routeApproval({ approveIndex: null, document }, { native, reader: { open: () => ({ kind: 'busy' }) }, report }))).toBe('false')
+  expect(reports, 'a busy reader is a refusal, not a failure').toEqual([])
+  const failure = new Error('open failed')
+  expect(await settledWithin(routeApproval({ approveIndex: null, document }, { native, reader: { open: () => { throw failure } }, report }))).toBe('false')
+  expect(reports, 'a reader that fails to open must leave a trace').toEqual([failure])
+})
+
+test('settles the opened approval when a second reader request is busy', async () => {
+  const { controller, windows } = harness()
+  const reader = {
+    open: (approval: ApprovalDocument, settle: (approved: boolean) => void) =>
+      controller.open(approval, (verdict) => settle(verdict === 'approve'))
+  }
+  const reports: unknown[] = []
+  const report = (error: unknown): void => { reports.push(error) }
+  const first = routeApproval({ approveIndex: null, document }, { native: async () => true, reader, report })
+  expect(await settledWithin(routeApproval({ approveIndex: null, document }, { native: async () => true, reader, report })), 'the busy request is refused').toBe('false')
+  windows[0]!.fire('closed')
+  expect(await settledWithin(first), 'the open approval must receive its own refusal').toBe('false')
+  expect(reports).toEqual([])
+})
+
+test('uses an ephemeral hardened partition and bounds traces for foreign or subframe IPC', async () => {
+  let clock = 0
+  const { controller, constructed, handlers, reports, sessions, windows } = harness(false, presentation, { now: () => clock })
   expect(controller.open(document)).toEqual({ kind: 'opened', generation: 1 })
 
   const options = constructed[0]!
@@ -141,10 +220,65 @@ test('uses an ephemeral hardened partition and traces foreign or subframe IPC be
   await expect(state({ sender: current, senderFrame: current.mainFrame })).resolves.toMatchObject({ generation: 1 })
   await expect(state({ sender: current, senderFrame: {} })).rejects.toThrow('Approval window sender is not current')
   await expect(state({ sender: new FakeWindow().webContents, senderFrame: {} })).rejects.toThrow('Approval window sender is not current')
+  expect(reports).toEqual(['Approval window sender was rejected'])
+  clock = 1_000
+  await expect(state({ sender: current, senderFrame: {} })).rejects.toThrow('Approval window sender is not current')
   expect(reports).toEqual([
     'Approval window sender was rejected',
+    '1 rejected senders suppressed',
     'Approval window sender was rejected'
   ])
+})
+
+test('traces a foreign sender probing while no approval is open, and the sender that crosses the trace window', async () => {
+  let clock = 0
+  const { handlers, reports } = harness(false, presentation, { now: () => clock })
+  const state = handlers.get(APPROVAL_WINDOW_CHANNELS.getState)!
+  const probe = async (at: number): Promise<void> => {
+    clock = at
+    await expect(state({ sender: new FakeWindow().webContents, senderFrame: {} })).rejects.toThrow('Approval window sender is not current')
+  }
+
+  await probe(0)
+  expect(reports, 'the first foreign sender is traced even with no approval open').toEqual(['Approval window sender was rejected'])
+  await probe(100)
+  await probe(200)
+  await probe(1_500)
+  expect(reports).toEqual([
+    'Approval window sender was rejected',
+    '2 rejected senders suppressed',
+    'Approval window sender was rejected'
+  ])
+})
+
+test('delivers the refusal to the generation whose native window fails while opening', () => {
+  const failures: [string, ApprovalWindowNativeAdapter['open']][] = [
+    ['throws', () => { throw new Error('native open failed') }],
+    ['fails synchronously', (_generation, lifecycle) => lifecycle.failed()]
+  ]
+  for (const [name, open] of failures) {
+    const controller = createApprovalWindowController({
+      ipc: { handle: () => {}, removeHandler: () => {} },
+      native: { open, close: () => {}, endpoint: () => null },
+      reportError: () => {},
+      presentation: () => presentation
+    })
+    const verdicts: string[] = []
+    expect(controller.open(document, (verdict) => { verdicts.push(verdict) }), name).toEqual({ kind: 'opened', generation: 1 })
+    expect(verdicts, `a native window that ${name} must still refuse its own request`).toEqual(['refuse'])
+  }
+})
+
+test('opens the reader as a modal child of the main window when there is one, standalone otherwise', () => {
+  const standalone = harness()
+  standalone.controller.open(document)
+  expect(standalone.constructed[0]).not.toHaveProperty('parent')
+  expect(standalone.constructed[0]).not.toHaveProperty('modal')
+
+  const main = new FakeWindow()
+  const child = harness(false, presentation, {}, () => main)
+  child.controller.open(document)
+  expect(child.constructed[0]).toMatchObject({ parent: main, modal: true })
 })
 
 test('denies every permission through the ephemeral partition session', () => {
@@ -157,6 +291,19 @@ test('denies every permission through the ephemeral partition session', () => {
   session.requestHandler!({}, 'camera', (value) => { allowed = value }, {})
   expect<boolean | null>(allowed).toBe(false)
   expect(session.checkHandler!({}, 'notifications', 'https://hostile.example', {})).toBe(false)
+  let downloadPrevented = false
+  session.listeners.get('will-download')!({ preventDefault: () => { downloadPrevented = true } })
+  expect(downloadPrevented).toBe(true)
+})
+
+test('clears ephemeral session data and cache after the window closes', async () => {
+  const { controller, sessions, windows } = harness()
+  controller.open(document)
+  windows[0]!.fire('closed')
+  await Promise.resolve()
+
+  expect(sessions[0]!.storageCleared).toBe(true)
+  expect(sessions[0]!.cacheCleared).toBe(true)
 })
 
 test('settles Refuse exactly once on close before reading and renderer crash after reading', async () => {
@@ -256,10 +403,27 @@ test('rejects read and verdict from a foreign sender or a subframe without recor
 test('refuses and reports navigation and load failures', async () => {
   const navigation = harness()
   expect(navigation.controller.open(document)).toEqual({ kind: 'opened', generation: 1 })
+  navigation.windows[0]!.fire('ready-to-show')
+  expect(navigation.windows[0]!.shown).toBe(true)
   navigation.windows[0]!.fire('contents:will-navigate')
   expect(navigation.windows[0]!.prevented, 'the navigation itself must be cancelled, not only reported').toEqual(['contents:will-navigate'])
   expect(navigation.verdicts).toEqual(['refuse'])
   expect(navigation.reports).toContain('Approval window navigation was refused')
+
+  const frameNavigation = harness()
+  frameNavigation.controller.open(document)
+  frameNavigation.windows[0]!.fire('contents:will-frame-navigate')
+  expect(frameNavigation.windows[0]!.prevented).toEqual(['contents:will-frame-navigate'])
+  expect(frameNavigation.verdicts).toEqual(['refuse'])
+  expect(frameNavigation.reports).toContain('Approval window frame navigation was refused')
+
+  const reload = harness()
+  reload.controller.open(document)
+  reload.windows[0]!.fire('contents:did-finish-load')
+  // Electron 43 shape: the details event first, then the deprecated positional url, isInPlace, isMainFrame.
+  reload.windows[0]!.fireWithDetails('contents:did-start-navigation', { url: 'approval.html', isMainFrame: true, isSameDocument: false }, 'approval.html', false, true)
+  expect(reload.verdicts).toEqual(['refuse'])
+  expect(reload.reports).toContain('Approval window reload was refused')
 
   const loading = harness(true)
   expect(loading.controller.open(document)).toEqual({ kind: 'opened', generation: 1 })

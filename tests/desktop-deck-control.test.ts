@@ -2225,7 +2225,7 @@ test("deck_list_sessions: sessionView's `thinking` field carries 'working'/'idle
 const INDEX_TS_PATH = join(import.meta.dir, "..", "desktop", "src", "main", "index.ts");
 
 const SHOW_APPROVAL_DIALOG_SIGNATURE =
-  /const showApprovalDialog = async \(spec: ApprovalDialogSpec\): Promise<boolean> => \{/g;
+  /const showApprovalDialog = async \(spec: ApprovalDialogSpec\): Promise<boolean> =>\s+await routeApproval\(spec, \{\s+native: async \(nativeSpec\) => \{/g;
 
 const RESOLVE_TEMPLATE_INPUTS_SIGNATURE =
   /const resolveTemplateInputs = async \(path: string, attendance: CallerAttendance\): Promise<TemplateResolveResult> => \{/g;
@@ -2327,7 +2327,7 @@ test("confirmShellFieldApproval waits for the dialog verdict before approving", 
   expect(approvedProbe.approvals()).toBe(1);
 });
 
-test("showApprovalDialog awaits Electron's asynchronous message box API", () => {
+test("showApprovalDialog's native path awaits Electron's asynchronous message box API", () => {
   const body = extractShowApprovalDialogBody(readFileSync(INDEX_TS_PATH, "utf-8"));
   expect(body).toContain("await (win ? dialog.showMessageBox(win, options) : dialog.showMessageBox(options))");
   expect(body).not.toContain("showMessageBoxSync");

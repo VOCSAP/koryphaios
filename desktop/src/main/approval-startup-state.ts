@@ -18,6 +18,15 @@ export function shouldQuitAfterAllWindowsClosed(platform: string, phase: Startup
   return platform !== 'darwin' && phase === 'running'
 }
 
+/**
+ * A launch step that throws after ready: a run still in bootstrap has no window and window-all-closed will not
+ * quit it, so it quits; a running Deck stays up, and a quitting one is already shutting down once.
+ */
+export function onStartupFailure(phase: StartupPhase, error: unknown, deps: { report(error: unknown): void; quit(): void }): void {
+  deps.report(error)
+  if (phase === 'bootstrap') deps.quit()
+}
+
 export function createStartupState(): StartupState {
   let phase: StartupPhase = 'bootstrap'
   return {
