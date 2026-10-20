@@ -11,7 +11,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
-import { MAX_LOGGED_CHARS, redactSecrets } from "./log-redact.ts";
+import { logLine } from "./log-redact.ts";
 
 export type LogLevel = "info" | "warn" | "error";
 
@@ -115,11 +115,8 @@ export function createLogger(options: LoggerOptions): Logger {
   }
 
   function write(level: LogLevel, prefix: string, message: string, context?: unknown): void {
-    const line = redactSecrets(
-      (
-        `${now().toISOString()} ${level.toUpperCase().padEnd(5)} ` +
-        `${prefix}${message}${renderContext(context)}`
-      ).slice(0, MAX_LOGGED_CHARS)
+    const line = logLine(
+      `${now().toISOString()} ${level.toUpperCase().padEnd(5)} ` + `${prefix}${message}${renderContext(context)}`
     );
     if (mirror) {
       // console.error for warn/error keeps the current stderr behavior of the
@@ -157,7 +154,7 @@ export function stderrMirror(
   fileLog: Logger,
   tag: string
 ): { log(msg: string): void; logError(msg: string, e?: unknown): void } {
-  const stderrLine = (msg: string): string => redactSecrets(`[${tag}] ${msg}`.slice(0, MAX_LOGGED_CHARS));
+  const stderrLine = (msg: string): string => logLine(`[${tag}] ${msg}`);
   return {
     log: (msg) => {
       console.error(stderrLine(msg));

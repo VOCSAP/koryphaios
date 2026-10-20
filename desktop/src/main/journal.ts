@@ -1,4 +1,4 @@
-import { MAX_LOGGED_CHARS, redactSecrets } from '../../../shared/log-redact'
+import { HIDDEN_CONTROLS, LINE_BREAKS, MAX_LOGGED_CHARS, redactAcrossBreaks } from '../../../shared/log-redact'
 
 export type JournalKind =
   | 'session'
@@ -23,33 +23,10 @@ export type JournalEntrySink = (entry: JournalEntry) => void
 
 export const JOURNAL_CAP = 500
 
-const carriageReturn = String.fromCharCode(13)
-const lineFeed = String.fromCharCode(10)
-const journalLineBreaks = new RegExp(
-  `${carriageReturn}${lineFeed}|[${carriageReturn}${lineFeed}${String.fromCodePoint(0x2028)}${String.fromCodePoint(0x2029)}]`,
-  'g'
-)
-const journalControls = new RegExp(
-  `[${String.fromCharCode(0)}-${String.fromCharCode(0x1f)}${String.fromCharCode(0x7f)}-${String.fromCharCode(0x9f)}${String.fromCodePoint(0x061c)}${String.fromCodePoint(0x200b)}-${String.fromCodePoint(0x200f)}${String.fromCodePoint(0x202a)}-${String.fromCodePoint(0x202e)}${String.fromCodePoint(0x2060)}-${String.fromCodePoint(0x2069)}${String.fromCodePoint(0xfeff)}]`,
-  'g'
-)
 const replacement = String.fromCharCode(0xfffd)
 
 function journalSafe(text: string): string {
-  return text.replace(journalLineBreaks, ' / ').replace(journalControls, replacement)
-}
-
-function withoutSeparators(text: string): string {
-  return text.replace(journalLineBreaks, '').replace(journalControls, '')
-}
-
-// The joined form is never emitted: joining drops the boundary the patterns
-// anchor on, so it redacts less than the direct pass. It only shows a piece was missed.
-function redactAcrossBreaks(text: string): string {
-  const direct = redactSecrets(text)
-  const flat = withoutSeparators(direct)
-  if (redactSecrets(withoutSeparators(text)) === flat) return direct
-  return redactSecrets(flat).replace(/\[redacted\][A-Za-z0-9._~+/=-]+/g, '[redacted]')
+  return text.replace(LINE_BREAKS, ' / ').replace(HIDDEN_CONTROLS, replacement)
 }
 
 export class Journal {

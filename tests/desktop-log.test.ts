@@ -161,6 +161,54 @@ test("journal writer reports prune and write failures independently through main
   expect(warnings).toHaveLength(2);
 });
 
+test("a reported message starts a single main.log entry and carries no raw control character", () => {
+  const esc = String.fromCharCode(27);
+  const c1 = String.fromCharCode(0x9b);
+  const cr = String.fromCharCode(13);
+  const main = initDeckLog(dir);
+
+  reportError("renderer:x", `boom\n2026-10-20T00:00:00.000Z ERROR [x] forged${esc}[31m${c1}${cr}end`);
+
+  const text = readFileSync(main.file, "utf-8");
+  expect(text.match(/^\d{4}-\d\d-\d\dT/gm)).toHaveLength(1);
+  expect(text).toContain("[renderer:x] boom\n\t2026-10-20T00:00:00.000Z ERROR [x] forged\\x1b[31m\\x9b\n\tend\n");
+  for (const byte of [esc, c1, cr]) expect(text).not.toContain(byte);
+});
+
+test("a secret split by a line break or a control character is redacted in main.log", () => {
+  const esc = String.fromCharCode(27);
+  const soh = String.fromCharCode(1);
+  const cr = String.fromCharCode(13);
+  const passwordName = ["pass", "word"].join("");
+  const main = initDeckLog(dir);
+
+  reportError("renderer:x", `${passwordName}=hunter\n2secretTail`);
+  reportError("renderer:x", `Bearer abcdefgh${esc}ijklmnopqrstuvwx`);
+  reportError("renderer:x", `sk-abcdefghij${soh}klmnopqrstuvwx`);
+  reportError("renderer:x", `ghp_${"A".repeat(10)}${cr}${"B".repeat(20)}`);
+
+  const text = readFileSync(main.file, "utf-8");
+  for (const piece of ["hunter", "secretTail", "ijklmnop", "abcdefghij", "klmnop", "AAAAAAAAAA", "BBBBBBBBBB"]) {
+    expect(text, `piece ${piece} of a split secret left in clear in main.log`).not.toContain(piece);
+  }
+});
+
+test("a line cut at the logged cap never ends inside an escape", () => {
+  const esc = String.fromCharCode(27);
+  const log = createRollingLogger({ dir, name: "main", mirrorToConsole: false, now: fixedNow });
+  log.info(esc.repeat(9000));
+  const line = readFileSync(log.file, "utf-8").trimEnd();
+  expect(line.length).toBeLessThanOrEqual(8192);
+  expect(line).toEndWith("\\x1b");
+  expect(line).not.toContain(esc);
+});
+
+test("the rolling logger keeps a tab and turns a line break into an indented continuation", () => {
+  const log = createRollingLogger({ dir, name: "serve", mirrorToConsole: false, now: fixedNow });
+  log.info("a\nb\tc");
+  expect(readFileSync(log.file, "utf-8")).toBe("2026-07-19T10:00:00.000Z INFO  a\n\tb\tc\n");
+});
+
 test("main.log never carries a value from a reported error message, stack or context", () => {
   const tails = ["Q7vX2mR9kL4pW8nZ3cT6", "H5jN1bF8sD3gY6uE0aK9"];
   const anthropicKey = ["sk", "ant", "api03", tails[0]].join("-");

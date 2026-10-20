@@ -100,6 +100,52 @@ function isSecretAssignment(name: string, index: number, text: string): boolean 
   return name === 'key' && (text[index - 1] === '?' || text[index - 1] === '&')
 }
 
+const LF = String.fromCharCode(10)
+const TAB = String.fromCharCode(9)
+const CR = String.fromCharCode(13)
+export const LINE_BREAKS = new RegExp(`${CR}${LF}|[${CR}${LF}${String.fromCodePoint(0x2028)}${String.fromCodePoint(0x2029)}]`, 'g')
+export const HIDDEN_CONTROLS = new RegExp(
+  `[${String.fromCharCode(0)}-${String.fromCharCode(0x1f)}${String.fromCharCode(0x7f)}-${String.fromCharCode(0x9f)}${String.fromCodePoint(0x061c)}${String.fromCodePoint(0x200b)}-${String.fromCodePoint(0x200f)}${String.fromCodePoint(0x202a)}-${String.fromCodePoint(0x202e)}${String.fromCodePoint(0x2060)}-${String.fromCodePoint(0x2069)}${String.fromCodePoint(0xfeff)}]`,
+  'g'
+)
+
+function withoutSeparators(text: string): string {
+  return text.replace(LINE_BREAKS, '').replace(HIDDEN_CONTROLS, '')
+}
+
+// The joined form is never emitted: joining drops the boundary the patterns
+// anchor on, so it redacts less than the direct pass. It only shows a piece was missed.
+export function redactAcrossBreaks(text: string): string {
+  const direct = redactSecrets(text)
+  const flat = withoutSeparators(direct)
+  if (redactSecrets(withoutSeparators(text)) === flat) return direct
+  return redactSecrets(flat).replace(/\[redacted\][A-Za-z0-9._~+/=-]+/g, '[redacted]')
+}
+
+/**
+ * Every line break becomes a newline and a tab, so only an entry starts at column 0 (with its
+ * timestamp) and a stack stays readable; TAB stays; any other C0, DEL or C1 becomes a visible \xNN.
+ */
+export function logSafe(text: string): string {
+  let out = ''
+  for (const char of text.replace(LINE_BREAKS, LF + TAB)) {
+    const code = char.codePointAt(0)!
+    const control = code <= 0x1f || (code >= 0x7f && code <= 0x9f)
+    out += control && char !== LF && char !== TAB ? `\\x${code.toString(16).padStart(2, '0')}` : char
+  }
+  return out
+}
+
+/**
+ * A raw log line made safe to append: cut, redacted across line breaks and controls, neutralized,
+ * then cut again since escapes lengthen it, never in the middle of an escape or a continuation.
+ */
+export function logLine(raw: string): string {
+  const safe = logSafe(redactAcrossBreaks(raw.slice(0, MAX_LOGGED_CHARS)))
+  if (safe.length <= MAX_LOGGED_CHARS) return safe
+  return safe.slice(0, MAX_LOGGED_CHARS).replace(/\\(?:x[0-9a-f]?)?$|\n$/, '')
+}
+
 /** Replaces the value of every known secret shape with `[redacted]`, keeping the rest of the text. Idempotent. */
 export function redactSecrets(text: string): string {
   const shaped = text

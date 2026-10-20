@@ -82,6 +82,41 @@ test("the stderr mirror of a stdio process prints its tagged line masked, and lo
   expect(text).toContain("register with Bearer [redacted]");
 });
 
+const ESC = String.fromCharCode(27);
+const C1 = String.fromCharCode(0x9b);
+const CR = String.fromCharCode(13);
+const forged = `boom\n2026-07-19T10:00:00.000Z ERROR forged${ESC}[31m${C1}${CR}end\ttab`;
+
+test("a message carrying line breaks and control characters starts a single entry in the file", () => {
+  const log = createLogger({ dir, name: "t", mirrorToConsole: false, now: fixedNow });
+  log.info(forged);
+  const text = readFileSync(log.file, "utf-8");
+  expect(text.match(/^\d{4}-\d\d-\d\dT/gm)).toHaveLength(1);
+  expect(text).toBe(`2026-07-19T10:00:00.000Z INFO  boom\n\t2026-07-19T10:00:00.000Z ERROR forged\\x1b[31m\\x9b\n\tend\ttab\n`);
+});
+
+test("the stderr mirror prints control characters escaped and line breaks as continuations", () => {
+  const printed: string[] = [];
+  const originalError = console.error;
+  console.error = (...args: unknown[]) => { printed.push(args.join(" ")); };
+  const fileLog = createLogger({ dir, name: "t", mirrorToConsole: false, now: fixedNow });
+  try {
+    stderrMirror(fileLog, "claude-peers").log(forged);
+  } finally {
+    console.error = originalError;
+  }
+  expect(printed).toEqual([`[claude-peers] boom\n\t2026-07-19T10:00:00.000Z ERROR forged\\x1b[31m\\x9b\n\tend\ttab`]);
+});
+
+test("a line of control characters stays within the logged cap once escaped", () => {
+  const log = createLogger({ dir, name: "t", mirrorToConsole: false, now: fixedNow });
+  log.info(ESC.repeat(MAX_LOGGED_CHARS));
+  const line = readFileSync(log.file, "utf-8").trimEnd();
+  expect(line.length).toBeLessThanOrEqual(MAX_LOGGED_CHARS);
+  expect(line).toEndWith("\\x1b");
+  expect(line).not.toContain(ESC);
+});
+
 test("a line longer than the logged cap is truncated before it reaches the file", () => {
   const log = createLogger({ dir, name: "t", mirrorToConsole: false, now: fixedNow });
   log.info(`Bearer ${tails[1]} ${"x".repeat(MAX_LOGGED_CHARS * 4)}`);

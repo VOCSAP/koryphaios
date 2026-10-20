@@ -10,7 +10,7 @@ import {
 } from 'node:fs'
 import { join } from 'node:path'
 import { Journal, type JournalEntry } from './journal'
-import { MAX_LOGGED_CHARS, redactSecrets } from '../../../shared/log-redact'
+import { logLine } from '../../../shared/log-redact'
 
 export type LogLevel = 'info' | 'warn' | 'error'
 
@@ -110,12 +110,7 @@ export function createRollingLogger(options: RollingLoggerOptions): RollingLogge
   }
 
   function write(level: LogLevel, message: string, context?: unknown): void {
-    const line = redactSecrets(
-      (`${now().toISOString()} ${level.toUpperCase().padEnd(5)} ${message}` + renderContext(context)).slice(
-        0,
-        MAX_LOGGED_CHARS
-      )
-    )
+    const line = logLine(`${now().toISOString()} ${level.toUpperCase().padEnd(5)} ${message}` + renderContext(context))
     if (mirror) (level === 'info' ? console.log : console.error)(line)
     try {
       ensureDir()
@@ -222,13 +217,13 @@ export function logInfo(scope: string, message: string): void {
 
 export function logWarn(scope: string, message: string, context?: unknown): void {
   if (current) current.warn(`[${scope}] ${message}`, context)
-  else console.error(redactSecrets(`[${scope}] ${message}` + renderContext(context)))
+  else console.error(logLine(`[${scope}] ${message}` + renderContext(context)))
 }
 
 export function reportError(scope: string, message: string, error?: unknown): void {
   try {
     if (current) current.error(`[${scope}] ${message}`, error)
-    else console.error(redactSecrets(`[${scope}] ${message}` + renderContext(error)))
+    else console.error(logLine(`[${scope}] ${message}` + renderContext(error)))
     const detail =
       error === undefined
         ? ''
