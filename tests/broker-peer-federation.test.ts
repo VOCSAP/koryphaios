@@ -358,7 +358,7 @@ test("messaging: replica to replica, replica to upstream and back, delivered onc
     await receive("C drains A's message", U, C.instance_token, "hello carol from alice");
 
     const cToA = await send(U, C.instance_token, "alice", "hello alice from carol");
-    expect(cToA).toEqual({ ok: true });
+    expect(cToA).toEqual({ ok: true, message_id: expect.any(Number) });
     const fromC = await receive("A receives C's message", R1, A.instance_token, "hello alice from carol");
     expect(fromC.from_peer_id).toBe("carol");
   } finally {
@@ -369,7 +369,7 @@ test("messaging: replica to replica, replica to upstream and back, delivered onc
 
 test("the operator inbox and the Deck's announcements never leave their broker", async () => {
   const toOperator = await send(R1, A.instance_token, "operator", "a question for my operator");
-  expect(["operator is a local deposit", toOperator]).toEqual(["operator is a local deposit", { ok: true }]);
+  expect(["operator is a local deposit", toOperator]).toEqual(["operator is a local deposit", { ok: true, message_id: expect.any(Number) }]);
   await settleBothReplicas();
   const drain = (b: TestBroker) =>
     post<{ messages: { text: string }[] }>(`${b.url}/operator-inbox`, { group_id: G, group_secret_hash: H });
@@ -456,7 +456,7 @@ test("an outage shorter than the grace: mirrors stay listed as link-down, the qu
   ]);
   expect(["C -> A is accepted upstream and waits", await send(U, C.instance_token, "alice", "sent while R1 was away")]).toEqual([
     "C -> A is accepted upstream and waits",
-    { ok: true },
+    { ok: true, message_id: expect.any(Number) },
   ]);
   await goOnline(P1, R1);
   await receive("B receives the queued message", R2, B.instance_token, "sent during a short outage");
@@ -548,8 +548,8 @@ test("two replicas naming their agent alike: one is suffixed upstream, both stay
       ["same", "same-2"],
     ]);
 
-    expect(await send(U, C.instance_token, "same", "for the one called same")).toEqual({ ok: true });
-    expect(await send(U, C.instance_token, "same-2", "for the one called same-2")).toEqual({ ok: true });
+    expect(await send(U, C.instance_token, "same", "for the one called same")).toEqual({ ok: true, message_id: expect.any(Number) });
+    expect(await send(U, C.instance_token, "same-2", "for the one called same-2")).toEqual({ ok: true, message_id: expect.any(Number) });
     const suffixedIsA = (await aliasOf(R1, A.instance_token)) === "same-2";
     const [forA, forB] = suffixedIsA
       ? ["for the one called same-2", "for the one called same"]

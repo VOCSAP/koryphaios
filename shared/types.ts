@@ -268,9 +268,22 @@ export interface DelegationsCloseResponse {
   task: DelegatedTask;
 }
 
+export interface DelegationsAttachRequest {
+  from_token: InstanceToken;
+  message_id: number;
+  deadline_sec: number;
+}
+
+export interface DelegationsAttachResponse {
+  task: DelegatedTask;
+  already_tracked: boolean;
+}
+
 export interface SendMessageResponse {
   ok: boolean;
   error?: string;
+  /** Present when the broker stored the message itself (not relayed). */
+  message_id?: number;
   task?: DelegatedTask;
   /**
    * Set by a replica when the target is a remote peer and the upstream link is

@@ -142,6 +142,8 @@ import type {
   DelegationTaskRef,
   DelegationsCloseRequest,
   DelegationsCloseResponse,
+  DelegationsAttachRequest,
+  DelegationsAttachResponse,
   DelegationsListRequest,
   DelegationsListResponse,
   PollMessagesRequest,
@@ -732,9 +734,20 @@ db.run(`
     closed_at TEXT,
     closed_by_binding TEXT,
     terminal_reason TEXT,
-    escalation_result TEXT
+    escalation_result TEXT,
+    source_message_id INTEGER
   )
 `);
+try {
+  db.run("ALTER TABLE delegated_tasks ADD COLUMN source_message_id INTEGER");
+} catch (e) {
+  const msg = e instanceof Error ? e.message : String(e);
+  if (!msg.includes("duplicate column name")) log.error(`migration: ${msg}`);
+}
+db.run(
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_delegated_tasks_source_message
+   ON delegated_tasks(group_id, source_message_id) WHERE source_message_id IS NOT NULL`
+);
 db.run(`CREATE INDEX IF NOT EXISTS idx_delegated_tasks_due ON delegated_tasks(status, due_at_ms)`);
 db.run(`CREATE INDEX IF NOT EXISTS idx_delegated_tasks_decision ON delegated_tasks(status, decision_due_at_ms)`);
 db.run(`CREATE INDEX IF NOT EXISTS idx_delegated_tasks_delegator ON delegated_tasks(group_id, delegator_token, status)`);
@@ -3061,6 +3074,7 @@ type DelegatedTaskRow = {
   closed_by_binding: string | null;
   terminal_reason: string | null;
   escalation_result: string | null;
+  source_message_id: number | null;
 };
 
 type MessageSender = {
@@ -3253,7 +3267,7 @@ async function sendOrdinaryMessage(
   const sentAt = new Date().toISOString();
   const messageId = recordMessageTx(sender.instance_token, target.instance_token, sender.group_id, text, sentAt, taskId);
   pushPeerMessage(target.instance_token, messageId, sender, text, sentAt);
-  return { ok: true };
+  return taskId === null ? { ok: true, message_id: messageId } : { ok: true };
 }
 
 function messageForTask(
@@ -3480,6 +3494,151 @@ function handleDelegationsClose(body: DelegationsCloseRequest): TaskResult<Deleg
   const task = taskForParticipant(body.task_id, sender);
   if ("error" in task) return task;
   return { task: toDelegatedTask(closeDelegatedTaskTx(task, sender, null).row) };
+}
+
+type AttachedSourceRow = {
+  id: number;
+  from_token: InstanceToken;
+  to_token: InstanceToken;
+  group_id: GroupId;
+  text: string;
+  task_id: string | null;
+  federation_id: string | null;
+};
+
+type AttachedTaskResult = { row: DelegatedTaskRow; push: DeckPush | null; alreadyTracked: boolean } | null;
+
+const attachDelegatedTaskTx = db.transaction(
+  (source: AttachedSourceRow, sender: MessageSender, target: MessageTarget, deadlineSec: number, nowMs: number): AttachedTaskResult => {
+    const existing = db.query(
+      "SELECT * FROM delegated_tasks WHERE group_id = ? AND source_message_id = ?"
+    ).get(sender.group_id, source.id) as DelegatedTaskRow | null;
+    if (existing) return { row: existing, push: null, alreadyTracked: true };
+
+    const open = db.query(
+      "SELECT COUNT(*) AS n FROM delegated_tasks WHERE group_id = ? AND delegator_token = ? AND status <> 'closed'"
+    ).get(sender.group_id, sender.instance_token) as { n: number };
+    if (open.n >= MAX_OPEN_DELEGATED_TASKS) return null;
+
+    const taskId = randomUUID();
+    const now = new Date(nowMs).toISOString();
+    const dueAtMs = nowMs + deadlineSec * 1000;
+    const label = taskLabelFromText(source.text);
+    db.run(
+      `INSERT INTO delegated_tasks (
+        task_id, group_id, owner_broker_id, delegator_token, delegate_kind, delegate_binding,
+        delegator_peer_id_snapshot, delegate_peer_id_snapshot, label, status, due_at_ms,
+        decision_due_at_ms, rearm_count, generation, max_rearms, lead_silence_sec, max_deadline_sec,
+        created_at, updated_at, closed_at, closed_by_binding, terminal_reason, escalation_result, source_message_id
+      ) VALUES (?, ?, ?, ?, 'local', ?, ?, ?, ?, 'armed', ?, NULL, 0, 0, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, ?)`,
+      [
+        taskId,
+        sender.group_id,
+        BROKER_ID,
+        sender.instance_token,
+        target.instance_token,
+        sender.peer_id,
+        target.peer_id,
+        label,
+        dueAtMs,
+        DELEGATION_POLICY.values.max_rearms,
+        DELEGATION_POLICY.values.lead_silence_sec,
+        DELEGATION_POLICY.values.max_deadline_sec,
+        now,
+        now,
+        source.id,
+      ]
+    );
+    const linked = db.run(
+      "UPDATE messages SET task_id = ? WHERE id = ? AND group_id = ? AND from_token = ? AND to_token = ? AND task_id IS NULL",
+      [taskId, source.id, source.group_id, sender.instance_token, target.instance_token]
+    );
+    if (linked.changes !== 1) throw new Error("source message changed while attaching delegation");
+    const push = depositDeckMessage(
+      target.instance_token,
+      sender.group_id,
+      `Task ${taskId} is due at ${new Date(dueAtMs).toISOString()}. Close it explicitly when work is complete.`,
+      now
+    );
+    return { row: taskRow(taskId, sender.group_id)!, push, alreadyTracked: false };
+  }
+);
+
+function handleDelegationsAttach(body: unknown): TaskResult<DelegationsAttachResponse> {
+  if (body === null || typeof body !== "object" || Array.isArray(body)) {
+    return { error: "delegation attachment requires from_token, message_id and deadline_sec", status: 400 };
+  }
+  const input = body as DelegationsAttachRequest & Record<string, unknown>;
+  if (!Object.keys(input).every((key) => key === "from_token" || key === "message_id" || key === "deadline_sec")) {
+    return { error: "delegation attachment only accepts from_token, message_id and deadline_sec", status: 400 };
+  }
+  if (typeof input.from_token !== "string") return { error: "from_token is required", status: 400 };
+  if (isSentinelInstanceToken(input.from_token)) return { error: "from_token cannot be a reserved sentinel identity", status: 400 };
+  if (typeof input.message_id !== "number" || !Number.isSafeInteger(input.message_id) || input.message_id < 1) {
+    return { error: "message_id must be a positive safe integer", status: 400 };
+  }
+  const sender = senderForDelegation(input.from_token);
+  if (!sender) return { error: "Sender not registered", status: 404 };
+
+  const existing = db.query(
+    "SELECT * FROM delegated_tasks WHERE group_id = ? AND source_message_id = ?"
+  ).get(sender.group_id, input.message_id) as DelegatedTaskRow | null;
+  if (existing) {
+    if (existing.delegator_token !== sender.instance_token) {
+      return { error: "Only the source message sender can attach its task", status: 403 };
+    }
+    const frozen = validateDeadlineSec(input.deadline_sec, {
+      max_rearms: existing.max_rearms,
+      lead_silence_sec: existing.lead_silence_sec,
+      max_deadline_sec: existing.max_deadline_sec,
+    });
+    if (!frozen.ok) return { error: frozen.error, status: 400 };
+    return { task: toDelegatedTask(existing), already_tracked: true };
+  }
+  if (!DELEGATION_POLICY.available) {
+    return { error: `Delegation policy unavailable: ${DELEGATION_POLICY.diagnostics.join("; ")}`, status: 409 };
+  }
+  const deadline = validateDeadlineSec(input.deadline_sec, DELEGATION_POLICY.values);
+  if (!deadline.ok) return { error: deadline.error, status: 400 };
+  const source = db.query(
+    "SELECT id, from_token, to_token, group_id, text, task_id, federation_id FROM messages WHERE id = ? AND group_id = ?"
+  ).get(input.message_id, sender.group_id) as AttachedSourceRow | null;
+  if (!source) return { error: "Source message not found in your group", status: 404 };
+  if (source.from_token !== sender.instance_token) return { error: "Only the source message sender can attach its task", status: 403 };
+  if (source.task_id !== null) return { error: "Only an ordinary message can receive a delegation attachment", status: 400 };
+  if (source.federation_id !== null || sender.via !== null) return { error: "A remote message cannot receive a delegation attachment", status: 400 };
+  if (!groupMayCarryOperatorInbox(sender.group_id)) {
+    return { error: "Tracked tasks require a group with an operator inbox", status: 409 };
+  }
+  if (isSentinelInstanceToken(source.to_token)) return { error: "Tracked tasks cannot target a sentinel", status: 400 };
+  const target = db.query(
+    "SELECT instance_token, peer_id, via, upstream_peer_id FROM peers WHERE instance_token = ? AND group_id = ? AND status = 'active'"
+  ).get(source.to_token, sender.group_id) as MessageTarget | null;
+  if (!target) return { error: "The source message recipient is not active", status: 409 };
+  if (target.instance_token === sender.instance_token || target.via !== null) {
+    return { error: "Tracked tasks require two distinct local peers", status: 400 };
+  }
+  if (!taskLabelFromText(source.text)) return { error: "source message must contain visible text", status: 400 };
+
+  try {
+    const attached = attachDelegatedTaskTx(source, sender, target, deadline.value, Date.now());
+    if (!attached) {
+      return {
+        error: `You already have ${MAX_OPEN_DELEGATED_TASKS} open delegated tasks in this group; list them with check_messages(open_tasks_with="*") and close the finished ones`,
+        status: 409,
+      };
+    }
+    if (attached.push) pushDeckMessage(attached.push.token, attached.push.messageId, attached.push.text, attached.push.sentAt);
+    return { task: toDelegatedTask(attached.row), already_tracked: attached.alreadyTracked };
+  } catch (e) {
+    const raced = db.query(
+      "SELECT * FROM delegated_tasks WHERE group_id = ? AND source_message_id = ?"
+    ).get(sender.group_id, source.id) as DelegatedTaskRow | null;
+    if (raced && raced.delegator_token === sender.instance_token) {
+      return { task: toDelegatedTask(raced), already_tracked: true };
+    }
+    throw e;
+  }
 }
 
 const DELEGATION_SWEEP_BATCH = 100;
@@ -11948,6 +12107,11 @@ const server = Bun.serve<WsData>({
         }
         case "/delegations/close": {
           const result = handleDelegationsClose(body as DelegationsCloseRequest);
+          if ("error" in result) return Response.json({ error: result.error }, { status: result.status });
+          return Response.json(result);
+        }
+        case "/delegations/attach": {
+          const result = handleDelegationsAttach(body);
           if ("error" in result) return Response.json({ error: result.error }, { status: result.status });
           return Response.json(result);
         }

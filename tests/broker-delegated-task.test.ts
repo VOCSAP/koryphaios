@@ -81,6 +81,26 @@ function taskRow(taskId: string, target = broker): { status: string; rearm_count
   }
 }
 
+function seedOpenTasks(delegator: Peer, delegate: Peer, count: number, target = broker): void {
+  const db = openBrokerDb(target.dbPath);
+  try {
+    const now = new Date().toISOString();
+    for (let index = 0; index < count; index++) {
+      db.run(
+        `INSERT INTO delegated_tasks (
+          task_id, group_id, owner_broker_id, delegator_token, delegate_kind, delegate_binding,
+          delegator_peer_id_snapshot, delegate_peer_id_snapshot, label, status, due_at_ms,
+          decision_due_at_ms, rearm_count, generation, max_rearms, lead_silence_sec, max_deadline_sec,
+          created_at, updated_at
+        ) VALUES (?, ?, 'test', ?, 'local', ?, ?, ?, ?, 'armed', ?, NULL, 0, 0, 3, 300, 14400, ?, ?)`,
+        [randomUUID(), delegatedGroup, delegator.instance_token, delegate.instance_token, delegator.peer_id, delegate.peer_id, `Quota seed ${index}`, Date.now() + 60_000, now, now]
+      );
+    }
+  } finally {
+    db.close();
+  }
+}
+
 function countMessagesWithText(text: string): number {
   const db = openBrokerDb(broker.dbPath, { readonly: true });
   try {
@@ -158,6 +178,569 @@ describe("delegated tasks", () => {
       expect(tracked.body.error).toContain("Delegation policy unavailable");
     } finally {
       await stopBroker(restricted);
+    }
+  });
+
+  test("returns the persisted id for a local ordinary send", async () => {
+    const sender = await register("delegation-ordinary-id-bob", "/delegation-ordinary-id-bob");
+    const recipient = await register("delegation-ordinary-id-alice", "/delegation-ordinary-id-alice");
+    const sent = await post<{ ok: boolean; message_id?: number }>(`${broker.url}/send-message`, {
+      from_token: sender.instance_token,
+      to_peer_id: recipient.peer_id,
+      text: "message that will later gain an ETA",
+    });
+
+    expect(sent.status).toBe(200);
+    expect(sent.body.ok).toBeTrue();
+    const messageId = sent.body.message_id;
+    expect(typeof messageId).toBe("number");
+    if (typeof messageId !== "number") throw new Error("local send did not return its message id");
+    const db = openBrokerDb(broker.dbPath, { readonly: true });
+    try {
+      expect(db.query("SELECT id FROM messages WHERE id = ?").get(messageId)).toBeDefined();
+    } finally {
+      db.close();
+    }
+  });
+
+  test("attaches an ETA from the attachment time and deposits one fixed Deck notice", async () => {
+    const clockDir = mkdtempSync(join(tmpdir(), "cp-attach-clock-"));
+    const clockPath = join(clockDir, "fixed-clock.ts");
+    const nowMs = 1_762_586_400_000;
+    writeFileSync(clockPath, `Date.now = () => ${nowMs};\n`);
+    let fixedBroker: TestBroker | null = null;
+    try {
+      fixedBroker = await startBroker({}, { command: ["bun", "--preload", clockPath, "broker.ts"] });
+      const delegator = await register("delegation-attach-bob", "/delegation-attach-bob", fixedBroker);
+      const delegate = await register("delegation-attach-alice", "/delegation-attach-alice", fixedBroker);
+      const observer = await register("delegation-attach-observer", "/delegation-attach-observer", fixedBroker);
+      const sourceText = "Please complete the source migration before review";
+      const source = await post<{ ok: boolean; message_id?: number }>(`${fixedBroker.url}/send-message`, {
+        from_token: delegator.instance_token,
+        to_peer_id: delegate.peer_id,
+        text: sourceText,
+      });
+      expect(source.body).toEqual({ ok: true, message_id: expect.any(Number) });
+      const sourceMessageId = source.body.message_id;
+      if (typeof sourceMessageId !== "number") throw new Error("local source message id missing");
+
+      const incoming = await post<{ ok: boolean; message_id?: number }>(`${fixedBroker.url}/send-message`, {
+        from_token: observer.instance_token,
+        to_peer_id: delegator.peer_id,
+        text: "unread before attachment",
+      });
+      const incomingMessageId = incoming.body.message_id;
+      if (typeof incomingMessageId !== "number") throw new Error("incoming message id missing");
+      const sourceDb = openBrokerDb(fixedBroker.dbPath);
+      try {
+        sourceDb.run("UPDATE messages SET sent_at = ? WHERE id = ?", ["2000-01-01T00:00:00.000Z", sourceMessageId]);
+      } finally {
+        sourceDb.close();
+      }
+
+      const attachResponse = await fetch(`${fixedBroker.url}/delegations/attach`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ from_token: delegator.instance_token, message_id: sourceMessageId, deadline_sec: 60 }),
+      });
+      expect(attachResponse.headers.get("content-type")).toContain("application/json");
+      const attached = await attachResponse.json() as { task: Task; already_tracked: boolean };
+      expect(attachResponse.status).toBe(200);
+      expect(attached.already_tracked).toBeFalse();
+      expect(attached.task.due_at_ms).toBe(nowMs + 60_000);
+
+      const db = openBrokerDb(fixedBroker.dbPath, { readonly: true });
+      try {
+        expect(db.query("SELECT task_id FROM messages WHERE id = ?").get(sourceMessageId)).toEqual({ task_id: attached.task.task_id });
+        expect(
+          db.query("SELECT source_message_id FROM delegated_tasks WHERE task_id = ?").get(attached.task.task_id)
+        ).toEqual({ source_message_id: sourceMessageId });
+        const notices = db.query(
+          "SELECT text, delivered FROM messages WHERE from_token = '__deck__' AND to_token = ?"
+        ).all(delegate.instance_token) as { text: string; delivered: number }[];
+        expect(notices).toHaveLength(1);
+        const notice = notices[0]!;
+        expect(notice.delivered).toBe(0);
+        expect(notice.text).toContain(attached.task.task_id);
+        expect(notice.text).toContain(new Date(nowMs + 60_000).toISOString());
+        expect(notice.text).toContain("Close");
+        expect(notice.text).not.toContain(sourceText);
+        expect(notice.text).not.toContain(attached.task.label);
+        expect(db.query("SELECT delivered FROM messages WHERE id = ?").get(incomingMessageId)).toEqual({ delivered: 0 });
+      } finally {
+        db.close();
+      }
+    } finally {
+      if (fixedBroker) await stopBroker(fixedBroker);
+      rmSync(clockDir, { recursive: true, force: true });
+    }
+  });
+
+  test("keeps the first attachment immutable across retries and source expiry", async () => {
+    const delegator = await register("delegation-attach-retry-bob", "/delegation-attach-retry-bob");
+    const delegate = await register("delegation-attach-retry-alice", "/delegation-attach-retry-alice");
+    const source = await post<{ ok: boolean; message_id?: number }>(`${broker.url}/send-message`, {
+      from_token: delegator.instance_token,
+      to_peer_id: delegate.peer_id,
+      text: "Retry source message",
+    });
+    const sourceMessageId = source.body.message_id;
+    if (typeof sourceMessageId !== "number") throw new Error("local source message id missing");
+    const first = await post<{ task: Task; already_tracked: boolean }>(`${broker.url}/delegations/attach`, {
+      from_token: delegator.instance_token,
+      message_id: sourceMessageId,
+      deadline_sec: 60,
+    });
+    expect(first.body.already_tracked).toBeFalse();
+    const firstSnapshot = taskRow(first.body.task.task_id);
+    const db = openBrokerDb(broker.dbPath, { readonly: true });
+    let firstNoticeCount: number;
+    try {
+      firstNoticeCount = (
+        db.query("SELECT COUNT(*) AS count FROM messages WHERE from_token = '__deck__' AND to_token = ? AND text LIKE ?")
+          .get(delegate.instance_token, `%${first.body.task.task_id}%`) as { count: number }
+      ).count;
+    } finally {
+      db.close();
+    }
+    expect(firstNoticeCount).toBe(1);
+
+    const third = await register("delegation-attach-retry-third", "/delegation-attach-retry-third");
+    for (const caller of [delegate, third]) {
+      const intruder = await post<{ error?: string; task?: unknown }>(`${broker.url}/delegations/attach`, {
+        from_token: caller.instance_token,
+        message_id: sourceMessageId,
+        deadline_sec: 60,
+      });
+      expect(intruder.status).toBe(403);
+      expect(intruder.body.task).toBeUndefined();
+    }
+
+    const retried = await post<{ task: Task; already_tracked: boolean }>(`${broker.url}/delegations/attach`, {
+      from_token: delegator.instance_token,
+      message_id: sourceMessageId,
+      deadline_sec: 120,
+    });
+    expect(retried.body).toMatchObject({ already_tracked: true, task: { task_id: first.body.task.task_id } });
+    expect(taskRow(first.body.task.task_id)).toEqual(firstSnapshot);
+
+    const freeze = openBrokerDb(broker.dbPath);
+    try {
+      freeze.run("UPDATE delegated_tasks SET max_deadline_sec = 100 WHERE task_id = ?", [first.body.task.task_id]);
+    } finally {
+      freeze.close();
+    }
+    const beyondFrozen = await post<{ error?: string; task?: unknown }>(`${broker.url}/delegations/attach`, {
+      from_token: delegator.instance_token,
+      message_id: sourceMessageId,
+      deadline_sec: 101,
+    });
+    expect(beyondFrozen.status).toBe(400);
+    expect(beyondFrozen.body.task).toBeUndefined();
+    const withinFrozen = await post<{ task: Task; already_tracked: boolean }>(`${broker.url}/delegations/attach`, {
+      from_token: delegator.instance_token,
+      message_id: sourceMessageId,
+      deadline_sec: 100,
+    });
+    expect(withinFrozen.body).toMatchObject({ already_tracked: true, task: { task_id: first.body.task.task_id } });
+    expect(taskRow(first.body.task.task_id)).toEqual(firstSnapshot);
+    const afterRetry = openBrokerDb(broker.dbPath, { readonly: true });
+    try {
+      expect(
+        (afterRetry.query("SELECT COUNT(*) AS count FROM messages WHERE from_token = '__deck__' AND to_token = ? AND text LIKE ?")
+          .get(delegate.instance_token, `%${first.body.task.task_id}%`) as { count: number }).count
+      ).toBe(firstNoticeCount);
+    } finally {
+      afterRetry.close();
+    }
+
+    const closed = await post<{ task: Task }>(`${broker.url}/delegations/close`, {
+      from_token: delegate.instance_token,
+      task_id: first.body.task.task_id,
+    });
+    expect(closed.body.task.status).toBe("closed");
+    const expireSource = openBrokerDb(broker.dbPath);
+    try {
+      expireSource.run("DELETE FROM messages WHERE id = ?", [sourceMessageId]);
+    } finally {
+      expireSource.close();
+    }
+    const expiredRetry = await post<{ task: Task; already_tracked: boolean }>(`${broker.url}/delegations/attach`, {
+      from_token: delegator.instance_token,
+      message_id: sourceMessageId,
+      deadline_sec: 60,
+    });
+    expect(expiredRetry.body).toMatchObject({ already_tracked: true, task: { task_id: first.body.task.task_id, status: "closed" } });
+  });
+
+  test("refuses attachment by a recipient, a peer reusing the sender name, sentinels and invalid forms", async () => {
+    const delegator = await register("delegation-attach-authority-bob", "/delegation-attach-authority-bob");
+    const delegate = await register("delegation-attach-authority-alice", "/delegation-attach-authority-alice");
+    const impostor = await register("delegation-attach-authority-impostor", "/delegation-attach-authority-impostor");
+    const source = await post<{ ok: boolean; message_id?: number }>(`${broker.url}/send-message`, {
+      from_token: delegator.instance_token,
+      to_peer_id: delegate.peer_id,
+      text: "Source protected by its token",
+    });
+    const sourceMessageId = source.body.message_id;
+    if (typeof sourceMessageId !== "number") throw new Error("local source message id missing");
+
+    const recipientAttempt = await post<{ error?: string }>(`${broker.url}/delegations/attach`, {
+      from_token: delegate.instance_token,
+      message_id: sourceMessageId,
+      deadline_sec: 60,
+    });
+    expect(recipientAttempt.status).toBe(403);
+
+    const db = openBrokerDb(broker.dbPath);
+    try {
+      db.run("UPDATE peers SET peer_id = ? WHERE instance_token = ?", ["delegation-attach-authority-former", delegator.instance_token]);
+      db.run("UPDATE peers SET peer_id = ? WHERE instance_token = ?", [delegator.peer_id, impostor.instance_token]);
+    } finally {
+      db.close();
+    }
+    const homonymAttempt = await post<{ error?: string }>(`${broker.url}/delegations/attach`, {
+      from_token: impostor.instance_token,
+      message_id: sourceMessageId,
+      deadline_sec: 60,
+    });
+    expect(homonymAttempt.status).toBe(403);
+
+    const malformed = await post<{ error?: string }>(`${broker.url}/delegations/attach`, {
+      from_token: delegator.instance_token,
+      message_id: sourceMessageId,
+      deadline_sec: 60,
+      text: "must not become a new send",
+    });
+    expect(malformed.status).toBe(400);
+    const sentinel = await post<{ error?: string }>(`${broker.url}/delegations/attach`, {
+      from_token: "__deck__",
+      message_id: sourceMessageId,
+      deadline_sec: 60,
+    });
+    expect(sentinel.status).toBe(400);
+    const invalidDeadline = await post<{ error?: string }>(`${broker.url}/delegations/attach`, {
+      from_token: delegator.instance_token,
+      message_id: sourceMessageId,
+      deadline_sec: Number.MAX_SAFE_INTEGER + 1,
+    });
+    expect(invalidDeadline.status).toBe(400);
+    const absent = await post<{ error?: string }>(`${broker.url}/delegations/attach`, {
+      from_token: delegator.instance_token,
+      message_id: 999_999_999,
+      deadline_sec: 60,
+    });
+    expect(absent.status).toBe(404);
+    const check = openBrokerDb(broker.dbPath, { readonly: true });
+    try {
+      expect(
+        (check.query("SELECT COUNT(*) AS count FROM delegated_tasks WHERE source_message_id = ?").get(sourceMessageId) as { count: number }).count
+      ).toBe(0);
+    } finally {
+      check.close();
+    }
+  });
+
+  test("refuses remote, inactive, inbox-less and over-quota attachment without persistence", async () => {
+    const delegator = await register("delegation-attach-guards-bob", "/delegation-attach-guards-bob");
+    const delegate = await register("delegation-attach-guards-alice", "/delegation-attach-guards-alice");
+    const remoteSource = await post<{ ok: boolean; message_id?: number }>(`${broker.url}/send-message`, {
+      from_token: delegator.instance_token,
+      to_peer_id: delegate.peer_id,
+      text: "Remote source refusal",
+    });
+    const remoteMessageId = remoteSource.body.message_id;
+    if (typeof remoteMessageId !== "number") throw new Error("local source message id missing");
+    const remoteDb = openBrokerDb(broker.dbPath);
+    try {
+      remoteDb.run("UPDATE messages SET federation_id = ? WHERE id = ?", ["upstream:1", remoteMessageId]);
+    } finally {
+      remoteDb.close();
+    }
+    const remote = await post<{ error?: string }>(`${broker.url}/delegations/attach`, {
+      from_token: delegator.instance_token,
+      message_id: remoteMessageId,
+      deadline_sec: 60,
+    });
+    expect(remote.status).toBe(400);
+
+    const inactiveSource = await post<{ ok: boolean; message_id?: number }>(`${broker.url}/send-message`, {
+      from_token: delegator.instance_token,
+      to_peer_id: delegate.peer_id,
+      text: "Inactive recipient refusal",
+    });
+    const inactiveMessageId = inactiveSource.body.message_id;
+    if (typeof inactiveMessageId !== "number") throw new Error("local source message id missing");
+    const inactiveDb = openBrokerDb(broker.dbPath);
+    try {
+      inactiveDb.run("UPDATE peers SET status = 'dormant' WHERE instance_token = ?", [delegate.instance_token]);
+    } finally {
+      inactiveDb.close();
+    }
+    const inactive = await post<{ error?: string }>(`${broker.url}/delegations/attach`, {
+      from_token: delegator.instance_token,
+      message_id: inactiveMessageId,
+      deadline_sec: 60,
+    });
+    expect(inactive.status).toBe(409);
+
+    const viaDelegator = await register("delegation-attach-via-bob", "/delegation-attach-via-bob");
+    const viaDelegate = await register("delegation-attach-via-alice", "/delegation-attach-via-alice");
+    const viaSource = await post<{ ok: boolean; message_id?: number }>(`${broker.url}/send-message`, {
+      from_token: viaDelegator.instance_token,
+      to_peer_id: viaDelegate.peer_id,
+      text: "Relayed recipient refusal",
+    });
+    const viaMessageId = viaSource.body.message_id;
+    if (typeof viaMessageId !== "number") throw new Error("local source message id missing");
+    const viaDb = openBrokerDb(broker.dbPath);
+    try {
+      viaDb.run("UPDATE peers SET via = 'upstream' WHERE instance_token = ?", [viaDelegate.instance_token]);
+    } finally {
+      viaDb.close();
+    }
+    const viaAttempt = await post<{ error?: string }>(`${broker.url}/delegations/attach`, {
+      from_token: viaDelegator.instance_token,
+      message_id: viaMessageId,
+      deadline_sec: 60,
+    });
+    expect(viaAttempt.status).toBe(400);
+
+    const replacedDelegator = await register("delegation-attach-replaced-bob", "/delegation-attach-replaced-bob");
+    const replacedDelegate = await register("delegation-attach-replaced-alice", "/delegation-attach-replaced-alice");
+    const replacedSource = await post<{ ok: boolean; message_id?: number }>(`${broker.url}/send-message`, {
+      from_token: replacedDelegator.instance_token,
+      to_peer_id: replacedDelegate.peer_id,
+      text: "Replaced recipient refusal",
+    });
+    const replacedMessageId = replacedSource.body.message_id;
+    if (typeof replacedMessageId !== "number") throw new Error("local source message id missing");
+    const replacedDb = openBrokerDb(broker.dbPath);
+    try {
+      replacedDb.run("UPDATE peers SET instance_token = ? WHERE instance_token = ?", [randomUUID(), replacedDelegate.instance_token]);
+    } finally {
+      replacedDb.close();
+    }
+    const replacedAttempt = await post<{ error?: string }>(`${broker.url}/delegations/attach`, {
+      from_token: replacedDelegator.instance_token,
+      message_id: replacedMessageId,
+      deadline_sec: 60,
+    });
+    expect(replacedAttempt.status).toBe(409);
+
+    const noInboxA = await post<Peer>(`${broker.url}/register`, {
+      pid: livePid(), cwd: "/delegation-attach-no-inbox-a", git_root: null, tty: null, summary: "",
+      host: "delegation-attach-no-inbox-a", client_pid: 1, project_key: null, group_id: "default", group_secret_hash: null,
+    });
+    const noInboxB = await post<Peer>(`${broker.url}/register`, {
+      pid: livePid(), cwd: "/delegation-attach-no-inbox-b", git_root: null, tty: null, summary: "",
+      host: "delegation-attach-no-inbox-b", client_pid: 1, project_key: null, group_id: "default", group_secret_hash: null,
+    });
+    const noInboxSource = await post<{ ok: boolean; message_id?: number }>(`${broker.url}/send-message`, {
+      from_token: noInboxA.body.instance_token,
+      to_peer_id: noInboxB.body.peer_id,
+      text: "Inbox-less source",
+    });
+    const noInboxMessageId = noInboxSource.body.message_id;
+    if (typeof noInboxMessageId !== "number") throw new Error("local source message id missing");
+    const noInbox = await post<{ error?: string }>(`${broker.url}/delegations/attach`, {
+      from_token: noInboxA.body.instance_token,
+      message_id: noInboxMessageId,
+      deadline_sec: 60,
+    });
+    expect(noInbox.status).toBe(409);
+
+    const quotaDelegator = await register("delegation-attach-quota-bob", "/delegation-attach-quota-bob");
+    const quotaDelegate = await register("delegation-attach-quota-alice", "/delegation-attach-quota-alice");
+    const quotaSource = await post<{ ok: boolean; message_id?: number }>(`${broker.url}/send-message`, {
+      from_token: quotaDelegator.instance_token,
+      to_peer_id: quotaDelegate.peer_id,
+      text: "Quota attachment source",
+    });
+    const quotaMessageId = quotaSource.body.message_id;
+    if (typeof quotaMessageId !== "number") throw new Error("local source message id missing");
+    seedOpenTasks(quotaDelegator, quotaDelegate, 100);
+    const quota =await post<{ error?: string }>(`${broker.url}/delegations/attach`, {
+      from_token: quotaDelegator.instance_token,
+      message_id: quotaMessageId,
+      deadline_sec: 60,
+    });
+    expect(quota.status).toBe(409);
+    expect(quota.body.error).toContain('check_messages(open_tasks_with="*")');
+    const verify = openBrokerDb(broker.dbPath, { readonly: true });
+    try {
+      expect(verify.query("SELECT task_id FROM messages WHERE id = ?").get(quotaMessageId)).toEqual({ task_id: null });
+      expect(
+        (verify.query("SELECT COUNT(*) AS count FROM delegated_tasks WHERE source_message_id = ?").get(quotaMessageId) as { count: number }).count
+      ).toBe(0);
+    } finally {
+      verify.close();
+    }
+  });
+
+  test("rolls back an attachment when its Deck notice is rejected", async () => {
+    const delegator = await register("delegation-attach-rollback-bob", "/delegation-attach-rollback-bob");
+    const delegate = await register("delegation-attach-rollback-alice", "/delegation-attach-rollback-alice");
+    const source = await post<{ ok: boolean; message_id?: number }>(`${broker.url}/send-message`, {
+      from_token: delegator.instance_token,
+      to_peer_id: delegate.peer_id,
+      text: "Attachment rollback source",
+    });
+    const sourceMessageId = source.body.message_id;
+    if (typeof sourceMessageId !== "number") throw new Error("local source message id missing");
+    const db = openBrokerDb(broker.dbPath);
+    try {
+      db.run(
+        `CREATE TRIGGER reject_delegation_attach_notice BEFORE INSERT ON messages
+           WHEN NEW.from_token = '__deck__'
+           BEGIN SELECT RAISE(ABORT, 'Deck notice rejected'); END`
+      );
+      const rejected = await post<{ error?: string }>(`${broker.url}/delegations/attach`, {
+        from_token: delegator.instance_token,
+        message_id: sourceMessageId,
+        deadline_sec: 60,
+      });
+      expect(rejected.status).toBe(500);
+      expect(db.query("SELECT task_id FROM messages WHERE id = ?").get(sourceMessageId)).toEqual({ task_id: null });
+      expect(
+        (db.query("SELECT COUNT(*) AS count FROM delegated_tasks WHERE source_message_id = ?").get(sourceMessageId) as { count: number }).count
+      ).toBe(0);
+    } finally {
+      db.run("DROP TRIGGER IF EXISTS reject_delegation_attach_notice");
+      db.close();
+    }
+  });
+
+  test("serves a retry for an already attached source while the delegator quota is full", async () => {
+    const delegator = await register("delegation-attach-full-retry-bob", "/delegation-attach-full-retry-bob");
+    const delegate = await register("delegation-attach-full-retry-alice", "/delegation-attach-full-retry-alice");
+    const source = await post<{ ok: boolean; message_id?: number }>(`${broker.url}/send-message`, {
+      from_token: delegator.instance_token,
+      to_peer_id: delegate.peer_id,
+      text: "Attached before the quota filled",
+    });
+    const sourceMessageId = source.body.message_id;
+    if (typeof sourceMessageId !== "number") throw new Error("local source message id missing");
+    const first = await post<{ task: Task; already_tracked: boolean }>(`${broker.url}/delegations/attach`, {
+      from_token: delegator.instance_token,
+      message_id: sourceMessageId,
+      deadline_sec: 60,
+    });
+    expect(first.status).toBe(200);
+    seedOpenTasks(delegator, delegate, 99);
+
+    const retry = await post<{ task: Task; already_tracked: boolean }>(`${broker.url}/delegations/attach`, {
+      from_token: delegator.instance_token,
+      message_id: sourceMessageId,
+      deadline_sec: 60,
+    });
+    expect(retry.status).toBe(200);
+    expect(retry.body).toMatchObject({ already_tracked: true, task: { task_id: first.body.task.task_id } });
+  });
+
+  test("refuses a first attachment beyond the policy maximum and accepts the maximum itself", async () => {
+    const delegator = await register("delegation-attach-bound-bob", "/delegation-attach-bound-bob");
+    const delegate = await register("delegation-attach-bound-alice", "/delegation-attach-bound-alice");
+    const sendSource = async (text: string): Promise<number> => {
+      const sent = await post<{ ok: boolean; message_id?: number }>(`${broker.url}/send-message`, {
+        from_token: delegator.instance_token,
+        to_peer_id: delegate.peer_id,
+        text,
+      });
+      if (typeof sent.body.message_id !== "number") throw new Error("local source message id missing");
+      return sent.body.message_id;
+    };
+    const beyondId = await sendSource("Source beyond the maximum");
+    const beyond = await post<{ error?: string }>(`${broker.url}/delegations/attach`, {
+      from_token: delegator.instance_token,
+      message_id: beyondId,
+      deadline_sec: 14_401,
+    });
+    expect(beyond.status).toBe(400);
+    const check = openBrokerDb(broker.dbPath, { readonly: true });
+    try {
+      expect(check.query("SELECT task_id FROM messages WHERE id = ?").get(beyondId)).toEqual({ task_id: null });
+      expect(
+        (check.query("SELECT COUNT(*) AS count FROM delegated_tasks WHERE source_message_id = ?").get(beyondId) as { count: number }).count
+      ).toBe(0);
+    } finally {
+      check.close();
+    }
+
+    const atMaxId = await sendSource("Source at the maximum");
+    const atMax = await post<{ already_tracked: boolean }>(`${broker.url}/delegations/attach`, {
+      from_token: delegator.instance_token,
+      message_id: atMaxId,
+      deadline_sec: 14_400,
+    });
+    expect(atMax.status).toBe(200);
+    expect(atMax.body.already_tracked).toBeFalse();
+  });
+
+  test("leaves a task citation without a message id", async () => {
+    const delegator = await register("delegation-citation-bob", "/delegation-citation-bob");
+    const delegate = await register("delegation-citation-alice", "/delegation-citation-alice");
+    const task = await createTask(delegator, delegate, "Citation target");
+    const cited = await post<unknown>(`${broker.url}/send-message`, {
+      from_token: delegator.instance_token,
+      to_peer_id: delegate.peer_id,
+      text: "A follow-up that cites the task",
+      task_id: task.task_id,
+    });
+    expect(cited.status).toBe(200);
+    expect(cited.body).toEqual({ ok: true });
+  });
+
+  test("migrates a database created without the source column and attaches an old message", async () => {
+    const legacyDir = mkdtempSync(join(tmpdir(), "cp-attach-legacy-"));
+    const legacyDb = join(legacyDir, "legacy.db");
+    let first: TestBroker | null = null;
+    let second: TestBroker | null = null;
+    try {
+      first = await startBroker({ CLAUDE_PEERS_DB: legacyDb });
+      const delegator = await register("delegation-legacy-bob", "/delegation-legacy-bob", first);
+      const delegate = await register("delegation-legacy-alice", "/delegation-legacy-alice", first);
+      const kept = await createTask(delegator, delegate, "Task kept across the migration", first);
+      const source = await post<{ ok: boolean; message_id?: number }>(`${first.url}/send-message`, {
+        from_token: delegator.instance_token,
+        to_peer_id: delegate.peer_id,
+        text: "Message sent before the column existed",
+      });
+      const sourceMessageId = source.body.message_id;
+      if (typeof sourceMessageId !== "number") throw new Error("local source message id missing");
+      await stopBroker(first);
+      first = null;
+
+      const legacy = openBrokerDb(legacyDb);
+      try {
+        legacy.run("DROP INDEX idx_delegated_tasks_source_message");
+        legacy.run("ALTER TABLE delegated_tasks DROP COLUMN source_message_id");
+        const columns = legacy.query("PRAGMA table_info(delegated_tasks)").all() as { name: string }[];
+        expect(columns.map((column) => column.name)).not.toContain("source_message_id");
+      } finally {
+        legacy.close();
+      }
+
+      second = await startBroker({ CLAUDE_PEERS_DB: legacyDb });
+      const migrated = openBrokerDb(legacyDb, { readonly: true });
+      try {
+        const columns = migrated.query("PRAGMA table_info(delegated_tasks)").all() as { name: string }[];
+        expect(columns.map((column) => column.name)).toContain("source_message_id");
+        expect(migrated.query("SELECT status FROM delegated_tasks WHERE task_id = ?").get(kept.task_id)).toEqual({ status: "armed" });
+      } finally {
+        migrated.close();
+      }
+      const attached = await post<{ task: Task; already_tracked: boolean }>(`${second.url}/delegations/attach`, {
+        from_token: delegator.instance_token,
+        message_id: sourceMessageId,
+        deadline_sec: 60,
+      });
+      expect(attached.status).toBe(200);
+      expect(attached.body.already_tracked).toBeFalse();
+    } finally {
+      if (first) await stopBroker(first);
+      if (second) await stopBroker(second);
+      rmSync(legacyDir, { recursive: true, force: true });
     }
   });
 
