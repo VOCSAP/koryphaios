@@ -131,10 +131,9 @@ checkboxes, range sliders. The native Windows/Chromium defaults (grey button,
 square white dropdown, blue focus ring) ignore `data-theme` entirely, so one
 unstyled control makes a whole view read as unfinished. Two ways to satisfy it:
 give the element an archetype class, or rely on a rule that already targets it
-(the element-level `select`, `textarea` and `input[type='radio']` rules,
-`.modal-actions button:not(.primary)`, `.field input`). Still native and NOT
-covered by any element rule as of 2026-08-27: `input[type='checkbox']` (11
-sites, card `0d57a60c`). If you introduce a control type this guide does not cover yet, style
+(the element-level `select`, `textarea`, `input[type='radio']` and
+`input[type='checkbox']` rules, `.modal-actions button:not(.primary)`,
+`.field input`). If you introduce a control type this guide does not cover yet, style
 it at the ELEMENT level in `styles.css` and document it here — a per-instance
 class only fixes the instance you were looking at, and the next one ships bare.
 

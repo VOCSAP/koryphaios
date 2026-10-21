@@ -29,14 +29,17 @@ cp -r desktop/src /tmp/<lot>/desktop/
 cp -r shared /tmp/<lot>/
 cp package.json /tmp/<lot>/
 cp tests/<the 3-4 relevant>.test.ts /tmp/<lot>/tests/
-ln -s <repo>/node_modules /tmp/<lot>/node_modules
-cd /tmp/<lot> && bun test ./tests/<file>.test.ts
+cmd.exe //c "mklink /J $(cygpath -w /tmp/<lot>/node_modules) $(cygpath -w <repo>/node_modules)"
+bun test --cwd /tmp/<lot> ./tests/<file>.test.ts
 ```
 
-~2 MB, ~0.2 s per run. Measured 2026-08-18 on card 4df14b5b: baseline
-`53 pass`, and after deleting a wiring line from `approval-service.ts`
-(`grep -c` confirming 0 occurrences left) still `53 pass` -- the hole, proven
-without touching the repo.
+On Windows the `node_modules` entry is a junction, never `ln -s` (see the
+first trap below).
+
+The mirror holds only sources, so a run costs a fraction of a second. Measured
+on card 4df14b5b: after deleting a wiring line from `approval-service.ts`
+(`grep -c` confirming 0 occurrences left) the pass count was identical to the
+baseline -- the hole, proven without touching the repo.
 
 ## Recipe 2 -- a CORE lot (broker / server / E2E)
 
@@ -44,12 +47,12 @@ without touching the repo.
 cp -r shared tests notify /tmp/<lot>/
 cp server.ts broker.ts cli.ts index.ts package.json tsconfig.json /tmp/<lot>/
 cp -r desktop/src desktop/tests-support desktop/locales /tmp/<lot>/desktop/
-ln -s ... node_modules   # both of them
+mklink /J ... node_modules   # root AND desktop/, same form as Recipe 1
 ```
 
 **`notify/` is the one everyone forgets, and its absence does not look like an
 incomplete mirror.** The E2E reports `could not start broker on any port`
-(3 fail); only `bun broker.ts` by hand says
+and fails; only `bun broker.ts` by hand says
 `Cannot find module './notify/registry.ts'`. So ALWAYS run the untouched suites
 in the mirror first and match their counts against the author's, before
 crediting any red or green to a mutation. Measured 2026-08-19, card e3f8065d.
@@ -60,13 +63,13 @@ crediting any red or green to a mutation. Measured 2026-08-19, card e3f8065d.
 mkdir -p /tmp/<lot>/tests
 git archive HEAD desktop | tar -x -C /tmp/<lot>
 cd /tmp/<lot> && git init && git add desktop
-cp package.json tsconfig.json ... && ln -s node_modules && cp <testfile> tests/
+cp package.json tsconfig.json ... && mklink /J node_modules (Recipe 1 form) && cp <testfile> tests/
 ```
 
-Measured 2026-08-25: the mirror returned **259 tracked / 193 `.ts|.tsx`**,
-identical to the real repo, and reproduced the author's exact
-`19 pass 0 fail 47 expect()`. This is what lets you `git add` probe files to
-change the domain without touching the shared checkout.
+Check the mirror before mutating: `git ls-files` must return the same tracked
+and `.ts|.tsx` counts as the real repo, and the untouched test must reproduce
+the author's pass/fail/expect counts. This is what lets you `git add` probe
+files to change the domain without touching the shared checkout.
 
 ## Recipe 4 -- a gate that reads WORKFLOW TEXT
 
@@ -81,11 +84,24 @@ sed -n '1,<last-line-before-first-test>p' <testfile> \
   | sed -E 's/^(function |const NAME|interface )/export \1/' > tests/gate.ts
 ```
 
-then write probes importing `./gate.ts`. ~30 s, zero repo writes. Measured
-2026-08-26 on `tests/desktop-ci-typecheck-coverage.test.ts`.
+then write probes importing `./gate.ts`. Zero repo writes. Used on
+`tests/desktop-ci-typecheck-coverage.test.ts`.
 
 ## Traps that make a mirror lie
 
+- **`ln -s` under Git Bash makes a deep COPY, not a link.** With no
+  `MSYS=winsymlinks` set, `ln -s <dir> <mirror>/x` exits 0 and creates a real
+  directory; a file written through it never reaches `<dir>`. For a large
+  `node_modules` that is a slow copy that looks like a link. Use
+  `cmd.exe //c "mklink /J <win link in mirror> <win real dir>"` with `cygpath -w` on both
+  paths: the junction is a real link and needs no privilege. The opposite rule
+  heard elsewhere, "copy, never link", is the same trap seen from the other
+  side: it describes `ln -s`, not a junction. Keep the whole `mklink` command
+  inside the double quotes (without them MSYS mangles `/J` and cmd answers
+  "Option non valide"), and before ANY cleanup of the mirror remove each
+  junction with `cmd.exe //c "rmdir <win path>"`, then abort if it still
+  exists: `rm -rf` or `git worktree remove` through a junction deletes the
+  TARGET, the repo's own `node_modules`.
 - **The Write tool's `/tmp` is `C:\tmp`; Git Bash's `/tmp` is
   `%LOCALAPPDATA%\Temp`.** A `perl -0pi /tmp/x.pl` then dies with "Can't open
   perl script" while the pipeline around it keeps printing plausible output.
@@ -94,9 +110,10 @@ then write probes importing `./gate.ts`. ~30 s, zero repo writes. Measured
   it bun treats the argument as a name FILTER and matches nothing, which reads
   as a pass.
 - **`sed -i` / `perl -pi` rewrite a CRLF file to LF and `git diff` hides it.**
-  Measured 2026-08-19 on `server.ts`: one substitution plus its exact inverse
-  restored the TEXT but the file went 84237 -> 82227 bytes (2010 CRs dropped),
-  while `git diff --numstat` still read `19 2`. In a disposable mirror this is
+  Measured on `server.ts`: one substitution plus its exact inverse restored
+  the TEXT but the file lost every CR (its byte size shrank), while
+  `git diff --numstat` still showed only the substituted lines. In a
+  disposable mirror this is
   free (every restore is a `cp` from the original); in place it is not.
 - **MSYS mangles an inline perl expression** containing `/` plus `[...]`: a
   substitution that matched on a scratch file silently became a no-op through
@@ -124,8 +141,8 @@ now: a new file runs by default, and `scripts/pure-module-partition.ts`'s
 `EXEMPTIONS` table is what has to justify skipping one.
 
 Consequence: **the widely-cited "CI collects 78 of 116 files" trap describes
-the state BEFORE that card.** `ls tests/*.test.ts | wc -l` is 215 today, 132 of
-them `desktop-*`. Treat any memory, comment or doc repeating the 78/116 figure
+the state BEFORE that card.** Count the files with `ls tests/*.test.ts | wc -l`
+rather than trusting a figure. Treat any memory, comment or doc repeating the 78/116 figure
 as a claim to re-measure, and audit the new `EXEMPTIONS` deny-list instead --
 per the global `guard-coverage-audit` skill, a deny-list is the half that fails
 OPEN.

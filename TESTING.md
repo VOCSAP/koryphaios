@@ -53,7 +53,7 @@ test("hello world", () => {
 
 ## Checks before committing
 
-- `bun scripts/check-commit-closure.ts --staged` -- ~2 s. "If I commit right
+- `bun scripts/check-commit-closure.ts --staged`. "If I commit right
   now, does this commit stand on its own?" See "Commit closure check" below.
 - `bun test` -- the full suite (core broker/server + desktop pure modules).
   Broker suites spin up an ephemeral broker on a random port via
@@ -61,15 +61,17 @@ test("hello world", () => {
   not leak in) and tear it down in `afterAll`. Desktop suites test the pure
   modules (no electron import: dirs and ciphers are injected).
 - Smoke check: `bun build --target=bun broker.ts server.ts cli.ts
-  --outdir=/tmp/cp-check` bundles all entrypoints in ~20 ms and surfaces any
-  import or type-resolution error.
+  --outdir=/tmp/cp-check` bundles all entrypoints and fails on an unresolved
+  import (`Could not resolve`) or a missing named export (`No matching
+  export`). It does NOT type-check: a file with `const n: number = "a"`
+  bundles with exit 0. Types are the job of the two typecheck lines below.
 - `npm run typecheck` in `desktop/` (tsconfig.node + tsconfig.web).
 - `bun run typecheck` (root) -- `tsc --noEmit -p tsconfig.core.json`, scoped to
   `broker.ts`, `server.ts`, `cli.ts` and `shared/**/*.ts` (a glob, so it grows
   on its own when a file is added to `shared/`). The plain root
   `tsconfig.json` covers the same domain but pulls in every `tests/*.test.ts`
-  and, transitively, most of `desktop/src/**` (368 errors measured
-  2026-08-28 vs a dozen in the scoped domain) -- do not point the gate at it.
+  and, transitively, most of `desktop/src/**`, so it reports far more errors
+  than the scoped domain -- do not point the gate at it.
   Card 15fa65cd: this domain had no typecheck anywhere, local or CI, before
   this line existed. The scoped count moves as `broker.ts` changes hands
   between sessions -- do not treat any specific number here as current,
