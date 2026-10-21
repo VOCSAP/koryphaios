@@ -28,9 +28,11 @@ Electron + React 19 + zustand, xterm terminals over node-pty. Sources in
 - **Session status (model badge + context ring)**: each non-sandbox Claude
   Code tile launches with one `--settings` path pointing at a content-addressed
   `deck-tile-<sha12>.json` (`statusline-settings.ts`). The file always sets
-  `tui: "default"` and `env.CLAUDE_CODE_NO_FLICKER: "0"`, and adds a
+  `tui: "default"`, `env.CLAUDE_CODE_NO_FLICKER: "0"` and
+  `env.CLAUDE_CODE_NATIVE_CURSOR: "1"`, and adds a
   `statusLine` which runs `desk-statusline.mjs` every 5 s when live status is
-  enabled. The process environment also forces `CLAUDE_CODE_NO_FLICKER=0`.
+  enabled. The process environment of a host tile also forces both variables
+  (a sandbox tile carries them through its inline `--settings` only).
   The hook writes the statusLine stdin
   fields (model, `context_window.used_percentage`, window size) to
   `~/.claude/peers/desk-status-<token>.json`, then chains the operator's

@@ -82,7 +82,8 @@ export function buildSpawnPlan(
     CLAUDE_PEERS_STATUS_LINE_CACHE: '1',
     TERM: 'xterm-256color',
     ...extraEnv,
-    CLAUDE_CODE_NO_FLICKER: '0'
+    CLAUDE_CODE_NO_FLICKER: '0',
+    CLAUDE_CODE_NATIVE_CURSOR: '1'
   }
   if (plat === 'win32') env.KORY_JOB_PS = JOB_PREAMBLE_PS
   return { invocation, env }

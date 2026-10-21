@@ -716,6 +716,12 @@ test("spawn plan overrides inherited no-flicker", () => {
   expect(env.CLAUDE_CODE_NO_FLICKER).toBe("0");
 });
 
+test("spawn plan forces the native cursor over an inherited value, and sets it when none is given", () => {
+  const opts = { command: "claude x", shell: "/bin/bash", interactive: false };
+  expect(buildSpawnPlan(opts, { CLAUDE_CODE_NATIVE_CURSOR: "0" }, "linux").env.CLAUDE_CODE_NATIVE_CURSOR).toBe("1");
+  expect(buildSpawnPlan(opts, undefined, "linux").env.CLAUDE_CODE_NATIVE_CURSOR).toBe("1");
+});
+
 test("windows non-interactive Job Object command emits no startup sentinel", () => {
   const invocation = buildShellInvocation({ command: "claude x", shell: "", interactive: false, killTreeOnClose: true }, "win32");
   const command = invocation.args.at(-1)!;

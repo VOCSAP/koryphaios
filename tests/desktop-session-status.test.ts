@@ -534,14 +534,14 @@ test("buildStatusLineSettings refuses a path that would break the quoted command
   }
 });
 
-test("tile settings contain the required TUI and no-flicker values", () => {
+test("tile settings contain the required TUI, no-flicker and native-cursor values", () => {
   expect(JSON.parse(buildTileSettings())).toEqual({
     tui: "default",
-    env: { CLAUDE_CODE_NO_FLICKER: "0" },
+    env: { CLAUDE_CODE_NO_FLICKER: "0", CLAUDE_CODE_NATIVE_CURSOR: "1" },
   });
   expect(JSON.parse(buildTileSettings('{"statusLine":{"type":"command"}}'))).toEqual({
     tui: "default",
-    env: { CLAUDE_CODE_NO_FLICKER: "0" },
+    env: { CLAUDE_CODE_NO_FLICKER: "0", CLAUDE_CODE_NATIVE_CURSOR: "1" },
     statusLine: { type: "command" },
   });
 });
@@ -558,7 +558,7 @@ test("writeTileSettings writes a full content-keyed tile settings file", () => {
   expect(a.endsWith(tileSettingsFileName(content)), "file name derives from its content").toBe(true);
   expect(JSON.parse(content), "written content").toEqual({
     tui: "default",
-    env: { CLAUDE_CODE_NO_FLICKER: "0" },
+    env: { CLAUDE_CODE_NO_FLICKER: "0", CLAUDE_CODE_NATIVE_CURSOR: "1" },
     statusLine: { type: "command", command: 'bun "/one/desk-statusline.mjs"', refreshInterval: STATUSLINE_REFRESH_S }
   });
   const badDir = join(tmpDir(), "a$HOME");

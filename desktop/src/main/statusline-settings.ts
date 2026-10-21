@@ -38,7 +38,7 @@ export function buildStatusLineSettings(hookPath: string, plat: NodeJS.Platform 
 export function buildTileSettings(statusLineSettings?: string): string {
   return JSON.stringify({
     tui: 'default',
-    env: { CLAUDE_CODE_NO_FLICKER: '0' },
+    env: { CLAUDE_CODE_NO_FLICKER: '0', CLAUDE_CODE_NATIVE_CURSOR: '1' },
     ...(statusLineSettings ? JSON.parse(statusLineSettings) : {})
   })
 }

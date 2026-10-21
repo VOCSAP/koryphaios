@@ -72,8 +72,8 @@ const { STATUS_SILENCE_MS, STALE_STATUS_FILE_MS } = await import("../desktop/src
 const { onDeckError } = await import("../desktop/src/main/log.ts");
 
 const SETTINGS = '{"statusLine":{"type":"command","command":"bun statusline"}}';
-const TILE_SETTINGS = '{"tui":"default","env":{"CLAUDE_CODE_NO_FLICKER":"0"},"statusLine":{"type":"command","command":"bun statusline"}}';
-const BASE_SETTINGS = '{"tui":"default","env":{"CLAUDE_CODE_NO_FLICKER":"0"}}';
+const TILE_SETTINGS = '{"tui":"default","env":{"CLAUDE_CODE_NO_FLICKER":"0","CLAUDE_CODE_NATIVE_CURSOR":"1"},"statusLine":{"type":"command","command":"bun statusline"}}';
+const BASE_SETTINGS = '{"tui":"default","env":{"CLAUDE_CODE_NO_FLICKER":"0","CLAUDE_CODE_NATIVE_CURSOR":"1"}}';
 
 const tmpDirs: string[] = [];
 const services: InstanceType<typeof SessionService>[] = [];
