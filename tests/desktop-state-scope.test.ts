@@ -346,6 +346,10 @@ const NOT_APP_STATE: Record<string, NotAppStateRule> = {
   "server-runtime.json": { reason: "clodex's record of its live servers under the same home, written by `clodex server`; the Deck only reads it to adopt a proxy or to prove the identity of one it owns" },
   runtimePath: { reason: "builds the path of that clodex manifest under its home; the Deck writes nothing there, its own lifecycle records live in the SQLite store keyed by clodex-lifecycle.*" },
   readRuntime: { reason: "interpolates the manifest name into two error traces, which are messages and never paths; the read itself addresses the file through runtimePath" },
+  "choregos.lock.json": { reason: "the lock shipped with the distributed mods copy (desktop/mods or resources/mods), written only by scripts/sync-mods.ts; the Deck only reads it" },
+  "tsconfig.json": { reason: "a project or engine file name the mods working-copy check reads or refuses (the engine writes it into a plugin directory); the Deck writes none under userData" },
+  "jsconfig.json": { reason: "a project config name the mods working-copy check refuses above the working copies, because the engine's runtime would read it; never written by the Deck" },
+  "package.json": { reason: "a project file name the mods working-copy check refuses above the working copies, because the engine's runtime would read it; never written by the Deck" },
 };
 
 /** index.ts hands the per-group dir builder to ipc.ts through the deps object. */

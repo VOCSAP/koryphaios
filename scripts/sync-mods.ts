@@ -1,19 +1,14 @@
 // Blobs are read at the commit, never from the clone's worktree: a dirty clone must not leak into the copy.
 
 import { spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
+import { isDistributable, isEnginePath, modsFingerprint, PLUGIN_NAME_PATTERN, type ModFile } from "../shared/mods-fingerprint";
 
 export const PLUGINS = ["prosopon"] as const;
 export const CHOREGOS_REPO = "https://github.com/VOCSAP/choregos";
 export const MODS_DIR = join(import.meta.dir, "..", "desktop", "mods");
 export const LOCK_PATH = join(MODS_DIR, "choregos.lock.json");
-
-export interface ModFile {
-  path: string;
-  bytes: Uint8Array;
-}
 
 export interface ModsLock {
   repo: string;
@@ -28,29 +23,6 @@ export function isBunTestFile(path: string): boolean {
   return /[._](test|spec)[._]/i.test(name);
 }
 
-// CRLF is folded to LF: a Windows checkout with core.autocrlf=true rewrites the
-// copy's line endings, and the fingerprint must not depend on the host.
-function normalizeEol(bytes: Uint8Array): Uint8Array {
-  const out: number[] = [];
-  for (let i = 0; i < bytes.length; i++) {
-    const byte = bytes[i]!;
-    if (byte === 0x0d && bytes[i + 1] === 0x0a) continue;
-    out.push(byte);
-  }
-  return Uint8Array.from(out);
-}
-
-export function modsFingerprint(files: readonly ModFile[]): string {
-  const hash = createHash("sha256");
-  for (const file of [...files].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))) {
-    hash.update(file.path);
-    hash.update("\0");
-    hash.update(normalizeEol(file.bytes));
-    hash.update("\0");
-  }
-  return hash.digest("hex");
-}
-
 function git(repo: string, args: string[]): Buffer {
   const result = spawnSync("git", ["-C", repo, "-c", "core.quotePath=false", ...args], { maxBuffer: 64 * 1024 * 1024 });
   if (result.status !== 0) {
@@ -61,11 +33,8 @@ function git(repo: string, args: string[]): Buffer {
 
 const FORBIDDEN_SEGMENTS = new Set([".git", ".gitattributes", ".gitmodules", "..", "."]);
 
-function isDistributable(path: string): boolean {
-  return path === "README.md" || path.startsWith(".claude-plugin/") || path.startsWith("hooks/");
-}
-
 export function readPluginAtCommit(repo: string, commit: string, plugin: string): ModFile[] {
+  if (!PLUGIN_NAME_PATTERN.test(plugin)) throw new Error(`plugin name '${plugin}' does not match ${PLUGIN_NAME_PATTERN}`);
   const prefix = `plugins/${plugin}/`;
   const listing = git(repo, ["ls-tree", "-r", "-z", "--full-tree", commit, "--", prefix]).toString("utf-8");
   const selected: { path: string; oid: string }[] = [];
@@ -78,6 +47,7 @@ export function readPluginAtCommit(repo: string, commit: string, plugin: string)
     const forbidden = path.split("/").find((segment) => segment === "" || FORBIDDEN_SEGMENTS.has(segment));
     if (forbidden !== undefined) throw new Error(`${fullPath}: the path segment '${forbidden}' is refused`);
     if (path.startsWith("tests/")) continue;
+    if (isEnginePath(path)) throw new Error(`${fullPath}: a path the engine writes into a plugin directory is never distributed`);
     if (isBunTestFile(path)) throw new Error(`${fullPath}: a test file outside tests/ would be collected by a bare bun test`);
     if (!isDistributable(path)) throw new Error(`${fullPath}: only .claude-plugin/, hooks/ and README.md are distributable`);
     if (type !== "blob" || (mode !== "100644" && mode !== "100755")) {

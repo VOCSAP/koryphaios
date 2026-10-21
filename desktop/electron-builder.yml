@@ -24,6 +24,14 @@ extraResources:
     to: deck-plugin
   - from: deck-lead-plugin
     to: deck-lead-plugin
+  # Pinned third-party plugins; the files the engine writes into a plugin
+  # directory never ship (ENGINE_PATHS).
+  - from: mods
+    to: mods
+    filter:
+      - "**/*"
+      - "!*/tsconfig.json"
+      - "!*/.claude-plugin/types/**"
   # Sandbox image recipe the Docker view builds from.
   - from: resources/sandbox
     to: sandbox

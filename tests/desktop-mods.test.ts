@@ -6,16 +6,8 @@ import { basename, join, relative } from 'node:path'
 import { detectRateLimit } from '../desktop/src/main/quota'
 import { createXtermScreen, inspectInjectGuard } from '../desktop/src/main/xterm-screen'
 import { classifyAssistantBlock, GUARD_SAFE_BORDER } from '../desktop/mods/prosopon/hooks/layout'
-import {
-  isBunTestFile,
-  LOCK_PATH,
-  MODS_DIR,
-  modsFingerprint,
-  readPluginAtCommit,
-  writePlugins,
-  type ModFile,
-  type ModsLock
-} from '../scripts/sync-mods'
+import { modsFingerprint, type ModFile } from '../shared/mods-fingerprint'
+import { isBunTestFile, LOCK_PATH, MODS_DIR, readPluginAtCommit, writePlugins, type ModsLock } from '../scripts/sync-mods'
 
 const esc = String.fromCharCode(27)
 
@@ -136,10 +128,26 @@ describe('sync script against a choregos fixture repository', () => {
     ['plugins/p/hooks/.gitattributes', /segment '\.gitattributes'/],
     ['plugins/p/hooks\\evil.ts', /backslash/],
     ['plugins/p/package.json', /distributable/],
-    ['plugins/p/scripts/run.sh', /distributable/]
+    ['plugins/p/scripts/run.sh', /distributable/],
+    ['plugins/p/tsconfig.json', /engine writes/],
+    ['plugins/p/.claude-plugin/types/.gitignore', /engine writes/],
+    ['plugins/p/.claude-plugin/types/tsconfig.json', /engine writes/],
+    ['plugins/p/.claude-plugin/types/claude-code/index.d.ts', /engine writes/],
+    ['plugins/p/Tsconfig.json', /engine writes/],
+    ['plugins/p/.claude-plugin/Types/claude-code/index.d.ts', /engine writes/],
+    ['plugins/p/.CLAUDE-PLUGIN/types/.gitignore', /engine writes/]
   ])('refuses %s', (path, reason) => {
     const commit = commitOf({ ...BASE, [path]: 'x' })
     expect(() => readPluginAtCommit(repo, commit, 'p')).toThrow(reason)
+  })
+
+  test('keeps a file whose name merely starts like an engine path', () => {
+    const commit = commitOf({ ...BASE, 'plugins/p/.claude-plugin/types.md': 'x' })
+    expect(readPluginAtCommit(repo, commit, 'p').map((file) => file.path)).toContain('.claude-plugin/types.md')
+  })
+
+  test.each(['../x', 'Prosopon', 'a/b', '', '-x', 'x'.repeat(65)])('refuses the plugin name %j before reading the repository', (plugin) => {
+    expect(() => readPluginAtCommit(repo, 'HEAD', plugin)).toThrow(/does not match/)
   })
 })
 
@@ -242,6 +250,20 @@ describe('copy fingerprint', () => {
   test('changes when one byte changes', () => {
     const edited = [{ path: lf[0]!.path, bytes: encode('export const a = 2\nexport const b = 2\n') }, lf[1]!]
     expect(modsFingerprint(edited)).not.toBe(modsFingerprint(lf))
+  })
+
+  test('does not let a file name and content that imitate the separator collide with two files', () => {
+    const nul = String.fromCharCode(0)
+    const two = [
+      { path: 'a', bytes: encode('X') },
+      { path: 'b', bytes: encode('Y') }
+    ]
+    const one = [{ path: 'a', bytes: encode(`X${nul}b${nul}Y`) }]
+    expect(modsFingerprint(one)).not.toBe(modsFingerprint(two))
+  })
+
+  test('does not move a byte between a path and its content', () => {
+    expect(modsFingerprint([{ path: 'ab', bytes: encode('c') }])).not.toBe(modsFingerprint([{ path: 'a', bytes: encode('bc') }]))
   })
 
   test('changes when a file is renamed', () => {

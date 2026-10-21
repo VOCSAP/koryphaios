@@ -3,6 +3,8 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AVATAR_TRAY_ICON_DIRNAME, avatarTrayIconFiles } from "../desktop/src/main/avatar-tray-icon.ts";
+import { MODS_DIRNAME } from "../desktop/src/main/session-command.ts";
+import { ENGINE_PATHS } from "../shared/mods-fingerprint.ts";
 
 const DESKTOP_DIR = join(import.meta.dir, "..", "desktop");
 const YML_PATH = join(DESKTOP_DIR, "electron-builder.yml");
@@ -97,8 +99,75 @@ function checkSourceEntries(desktopDir: string, entries: ExtraResourceEntry[]): 
 test("electron-builder.yml declares at least the known extraResources entries", () => {
   const targets = parseExtraResourcesTargets(readFileSync(YML_PATH, "utf-8"));
   expect(targets).toEqual(
-    expect.arrayContaining(["locales", "docs", "deck-plugin", "deck-lead-plugin", "sandbox", AVATAR_TRAY_ICON_DIRNAME])
+    expect.arrayContaining([
+      "locales",
+      "docs",
+      "deck-plugin",
+      "deck-lead-plugin",
+      "sandbox",
+      AVATAR_TRAY_ICON_DIRNAME,
+      MODS_DIRNAME
+    ])
   );
+});
+
+// The yml cannot import ENGINE_PATHS, so its exclusion patterns are checked
+// against the constant here, in both directions.
+function parseExtraResourcesFilter(yamlText: string, to: string): string[] {
+  const lines = yamlText.split(/\r?\n/);
+  const startIdx = lines.findIndex((l) => /^extraResources:\s*$/.test(l));
+  if (startIdx === -1) return [];
+  const patterns: string[] = [];
+  let inEntry = false;
+  let inFilter = false;
+  for (let i = startIdx + 1; i < lines.length; i++) {
+    const line = lines[i];
+    if (/^\S/.test(line)) break;
+    const keyed = line.match(/^\s*-?\s*(from|to):\s*(.+?)\s*$/);
+    if (/^\s*-\s+(from|to):/.test(line)) {
+      inEntry = false;
+      inFilter = false;
+    }
+    if (keyed?.[1] === "to" && keyed[2].replace(/^["']|["']$/g, "") === to) inEntry = true;
+    if (/^\s*filter:\s*$/.test(line)) inFilter = true;
+    const item = line.match(/^\s*-\s+(?!from:|to:)(.+?)\s*$/);
+    if (inEntry && inFilter && item) patterns.push(item[1].replace(/^["']|["']$/g, ""));
+  }
+  return patterns;
+}
+
+function engineExclusionPatterns(): string[] {
+  return ENGINE_PATHS.map((path) => (path.endsWith("/") ? `!*/${path}**` : `!*/${path}`));
+}
+
+test("the mods extraResources filter excludes exactly the engine paths and nothing else", () => {
+  const yaml = readFileSync(YML_PATH, "utf-8");
+  const underMods = (path: string) => path === MODS_DIRNAME || path.startsWith(`${MODS_DIRNAME}/`);
+  const modsEntries = parseExtraResourcesEntries(yaml).filter((e) => underMods(e.from) || underMods(e.to));
+  expect(modsEntries).toEqual([{ from: MODS_DIRNAME, to: MODS_DIRNAME }]);
+  const patterns = parseExtraResourcesFilter(yaml, MODS_DIRNAME);
+  expect(patterns.filter((p) => !p.startsWith("!"))).toEqual(["**/*"]);
+  expect(patterns.filter((p) => p.startsWith("!")).sort()).toEqual(engineExclusionPatterns().sort());
+});
+
+test("parseExtraResourcesFilter reads only the filter of the entry it is asked for", () => {
+  const yaml = [
+    "extraResources:",
+    "  - from: a",
+    "    to: a",
+    "    filter:",
+    '      - "!*/a.txt"',
+    "  - from: b",
+    "    to: b",
+    "    filter:",
+    '      - "**/*"',
+    '      - "!*/b.txt"',
+    "files:",
+    "  - out/**/*"
+  ].join("\n");
+  expect(parseExtraResourcesFilter(yaml, "a")).toEqual(["!*/a.txt"]);
+  expect(parseExtraResourcesFilter(yaml, "b")).toEqual(["**/*", "!*/b.txt"]);
+  expect(parseExtraResourcesFilter(yaml, "c")).toEqual([]);
 });
 
 const PACKAGED_RESOURCES_DIR = join(DESKTOP_DIR, "dist", "win-unpacked", "resources");

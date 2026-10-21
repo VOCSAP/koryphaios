@@ -667,7 +667,7 @@ describe('xterm main-process screen adapter', () => {
     expect(turn, `${name} holds no turn checkpoint`).toBeDefined()
     expect(
       turn!.lines.some((line) => /^┌─ You /.test(line)),
-      `${name}: no user frame at ${turn!.label}; the capture loaded another copy of the plugin than the working copy at choregos 432ab5e`
+      `${name}: no user frame at ${turn!.label}; the capture loaded another copy of the plugin than the plugin copy at choregos 432ab5e these captures were taken with`
     ).toBe(true)
   })
 

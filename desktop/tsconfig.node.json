@@ -45,6 +45,7 @@
     "../shared/logger.ts",
     "../shared/log-redact.ts",
     "../shared/broker-stop-marker.ts",
+    "../shared/mods-fingerprint.ts",
     "hooks/**/*.ts",
     "mcp/**/*.ts",
     "scripts/win-verify/**/*.ts",

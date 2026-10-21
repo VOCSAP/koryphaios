@@ -35,6 +35,12 @@ export function deckLeadPluginDirFor(isPackaged: boolean, resourcesPath: string,
   return join(isPackaged ? resourcesPath : appPath, DECK_LEAD_PLUGIN_DIRNAME)
 }
 
+export const MODS_DIRNAME = 'mods'
+
+export function modsDirFor(isPackaged: boolean, resourcesPath: string, appPath: string): string {
+  return join(isPackaged ? resourcesPath : appPath, MODS_DIRNAME)
+}
+
 export type SpawnMode = 'fresh' | 'resume'
 
 export interface SessionCommandInput {

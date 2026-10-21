@@ -118,7 +118,7 @@ Prérequis de la resynchronisation de K3b. Supprimer `plugins/prosopon/.claude-p
 - Ternaire inversé dans `modsDirFor`.
 - Entrée `mods` retirée du YAML.
 - Un chemin ajouté à `ENGINE_PATHS` sans son motif dans le YAML : le test de parité passe au rouge.
-- Le filtre retiré n'est visible que par le test empaqueté (`skipIf` sans arbre) : le dire dans le corps du commit, ne pas le présenter comme gardé par la gate.
+- Retrait du filtre : gardé par le test de parité. L'effet sémantique du filtre (options minimatch d'electron-builder, `dot: true`) est mesuré une fois par un packaging jetable, et aucun test ne le garde. **MESURÉ par la revue** : le test empaqueté passe même sur un arbre qui livre les chemins du moteur, parce que `checkDir` ne lit que le premier niveau et que `EXACT_FILES` n'a pas d'entrée `mods`. Limite **DÉDUITE** : `!*/` ne couvre que la disposition `mods/<plugin>/`, pas un plugin rangé plus bas.
 
 ### K3b : copie de travail, Koryphaios, developer + test-engineer
 
@@ -192,6 +192,12 @@ Prérequis de la resynchronisation de K3b. Supprimer `plugins/prosopon/.claude-p
 - Réécriture conteneur qui accepte deux `--plugin-dir`.
 - Comptage limité à la forme entre guillemets doubles : `--plugin-dir=x` dans les `args` passe.
 
+**Point ouvert pour la prochaine session** (D1 = S2, 2026-10-22, non résolu ici) :
+- Sous S2, le refus multi `--plugin-dir` de R1 (`rewritePluginDirForContainer`) bloquerait les mods.
+- La réécriture devra traduire CHAQUE `--plugin-dir` par une table exacte de l'hôte vers le conteneur au lieu de refuser, en gardant le refus pour toute forme inconnue.
+- La copie de travail doit être vérifiée juste avant le `docker cp` (revue -2).
+- Note L4 : `PROJECTED_ENTRIES` contient `plugins` (`sandbox-projection.ts:20`).
+
 **Ordre** : C3 avant la resynchronisation de K3b ; K3a et K3b en parallèle, K3c ensuite. Seul K3c touche `index.ts`, et uniquement pour transmettre des valeurs. La décision vit dans `pluginDirsForTile`, une fonction pure, ce qui évite toute extraction de corps dans `index.ts`.
 
 ## Coût en tests
@@ -214,13 +220,13 @@ Prérequis de la resynchronisation de K3b. Supprimer `plugins/prosopon/.claude-p
 
 **Constat hors périmètre** : `deck-plugin` subit déjà l'écriture du moteur dans `resources/` en paquet. C'est un défaut préexistant, non traité par L3.
 
-**D1, sandbox** :
-- S1, recommandée : rendu stock en sandbox.
-- S2 : projection et table de réécriture, en lot séparé.
+**D1, sandbox**, DÉCIDÉE par l'opérateur le 2026-10-22 : **S2**. Les mods sont projetés dans la sandbox par `docker cp` (« les mods viennent de nous, donc fiables »). S1 n'est plus retenu ; ce choix remplace S1 dans la recommandation ci-dessus. Le point ouvert de K3c en découle.
+- S1 : rendu stock en sandbox.
+- S2, retenue : projection et table de réécriture.
 - Refus d'activer les mods sur un espace de travail sandboxé, affiché dans l'interface.
 
-**D2, forme de l'interrupteur** :
-- I1, recommandée : champ global sans interface jusqu'à L4.
+**D2, forme de l'interrupteur**, DÉCIDÉE par l'opérateur le 2026-10-22 : **I1**. Aucune interface ni aucun réglage visible avant L4.
+- I1, retenue : champ global sans interface jusqu'à L4.
 - I2 : réglage visible dès L3.
 - I3 : I2 plus une surcharge par session, sur le précédent de `autoResumeQuota`.
 

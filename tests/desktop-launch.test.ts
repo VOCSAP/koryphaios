@@ -22,6 +22,7 @@ import {
   deckLeadPluginDirFor,
   deckPluginDirFor,
   encodeInitialPromptKeystrokes,
+  modsDirFor,
   pluginDirsForTile,
   quotePromptArg,
   sanitizeFlagValue,
@@ -366,6 +367,11 @@ test("embedded plugin resolvers use their own directory names in packaged and de
     expect(packaged.startsWith("C:/res") || packaged.startsWith("C:\\res")).toBe(true);
     expect(dev.startsWith("C:/repo") || dev.startsWith("C:\\repo")).toBe(true);
   }
+});
+
+test("mods resolve under the resources path when packaged and under the app path in dev", () => {
+  expect(modsDirFor(true, "C:/res", "C:/repo")).toBe(join("C:/res", "mods"));
+  expect(modsDirFor(false, "C:/res", "C:/repo")).toBe(join("C:/repo", "mods"));
 });
 
 // ----- supervisor flags (PLAN C5/C8): re-passed on fresh AND resume -----
