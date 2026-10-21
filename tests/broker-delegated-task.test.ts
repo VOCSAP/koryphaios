@@ -21,6 +21,8 @@ interface Task {
   policy: { max_rearms: number; lead_silence_sec: number; max_deadline_sec: number };
 }
 
+const attachNoticeBody = (taskId: string): string => `A deadline was attached to the sender's earlier request: task ${taskId}.`;
+
 let broker: TestBroker;
 let delegatedGroup: string;
 let delegatedSecretHash: string;
@@ -261,9 +263,12 @@ describe("delegated tasks", () => {
         expect(notices).toHaveLength(1);
         const notice = notices[0]!;
         expect(notice.delivered).toBe(0);
-        expect(notice.text).toContain(attached.task.task_id);
-        expect(notice.text).toContain(new Date(nowMs + 60_000).toISOString());
-        expect(notice.text).toContain("Close");
+        expect(notice.text).toBe(attachNoticeBody(attached.task.task_id));
+        expect(notice.text).not.toContain(new Date(nowMs + 60_000).toISOString());
+        expect(notice.text).not.toContain("Close");
+        expect(db.query("SELECT task_id FROM messages WHERE from_token = '__deck__' AND to_token = ?").get(delegate.instance_token)).toEqual({
+          task_id: attached.task.task_id,
+        });
         expect(notice.text).not.toContain(sourceText);
         expect(notice.text).not.toContain(attached.task.label);
         expect(db.query("SELECT delivered FROM messages WHERE id = ?").get(incomingMessageId)).toEqual({ delivered: 0 });
@@ -297,8 +302,8 @@ describe("delegated tasks", () => {
     let firstNoticeCount: number;
     try {
       firstNoticeCount = (
-        db.query("SELECT COUNT(*) AS count FROM messages WHERE from_token = '__deck__' AND to_token = ? AND text LIKE ?")
-          .get(delegate.instance_token, `%${first.body.task.task_id}%`) as { count: number }
+        db.query("SELECT COUNT(*) AS count FROM messages WHERE from_token = '__deck__' AND to_token = ? AND task_id = ?")
+          .get(delegate.instance_token, first.body.task.task_id) as { count: number }
       ).count;
     } finally {
       db.close();
@@ -347,8 +352,8 @@ describe("delegated tasks", () => {
     const afterRetry = openBrokerDb(broker.dbPath, { readonly: true });
     try {
       expect(
-        (afterRetry.query("SELECT COUNT(*) AS count FROM messages WHERE from_token = '__deck__' AND to_token = ? AND text LIKE ?")
-          .get(delegate.instance_token, `%${first.body.task.task_id}%`) as { count: number }).count
+        (afterRetry.query("SELECT COUNT(*) AS count FROM messages WHERE from_token = '__deck__' AND to_token = ? AND task_id = ?")
+          .get(delegate.instance_token, first.body.task.task_id) as { count: number }).count
       ).toBe(firstNoticeCount);
     } finally {
       afterRetry.close();
@@ -1227,5 +1232,209 @@ describe("delegated tasks", () => {
     for (const internal of ["delegator_token", "delegate_binding", "owner_broker_id", "instance_token", "pid", "client_pid"]) {
       expect(publicJson).not.toContain(internal);
     }
+  });
+});
+
+const UNTRACKED_REFUSAL =
+  "Message not sent. Add deadline_sec, cite an existing task, or use expects_reply:false if no reply is expected.";
+
+type Sent = { ok: boolean; error?: string; message_id?: number; tracking_unavailable?: string; task?: Task };
+
+function sendAs(from: Peer, to: Peer | string, extra: Record<string, unknown> = {}, target = broker) {
+  return post<Sent>(`${target.url}/send-message`, {
+    from_token: from.instance_token,
+    to_peer_id: typeof to === "string" ? to : to.peer_id,
+    text: `message ${randomUUID()}`,
+    ...extra,
+  });
+}
+
+const lead = { untracked_reply_policy: "lead", expects_reply: true } as const;
+
+function messagesBetween(from: Peer, to: Peer, target = broker): number {
+  const db = openBrokerDb(target.dbPath, { readonly: true });
+  try {
+    return (
+      db.query("SELECT COUNT(*) AS n FROM messages WHERE from_token = ? AND to_token = ?").get(from.instance_token, to.instance_token) as {
+        n: number;
+      }
+    ).n;
+  } finally {
+    db.close();
+  }
+}
+
+describe("untracked reply policy", () => {
+  test("refuses a lead's new request to a peer that has sent nothing, without storing it", async () => {
+    const boss = await register("untracked-first-boss", "/untracked-first-boss");
+    const worker = await register("untracked-first-worker", "/untracked-first-worker");
+    const refused = await sendAs(boss, worker, lead);
+    expect(refused.body).toEqual({ ok: false, error: UNTRACKED_REFUSAL });
+    expect(messagesBetween(boss, worker)).toBe(0);
+  });
+
+  test("accepts a lead's send once the target has written, then refuses the next one until it writes again", async () => {
+    const boss = await register("untracked-reply-boss", "/untracked-reply-boss");
+    const worker = await register("untracked-reply-worker", "/untracked-reply-worker");
+    expect((await sendAs(worker, boss)).body.ok).toBeTrue();
+    const answered = await sendAs(boss, worker, lead);
+    expect(answered.body).toEqual({ ok: true, message_id: expect.any(Number) });
+    expect((await sendAs(boss, worker, lead)).body).toEqual({ ok: false, error: UNTRACKED_REFUSAL });
+    expect((await sendAs(worker, boss)).body.ok).toBeTrue();
+    expect((await sendAs(boss, worker, lead)).body.ok).toBeTrue();
+    expect(messagesBetween(boss, worker)).toBe(2);
+  });
+
+  test("never refuses a lead's message to itself", async () => {
+    const boss = await register("untracked-self-boss", "/untracked-self-boss");
+    expect((await sendAs(boss, boss, lead)).body).toEqual({ ok: true, message_id: expect.any(Number) });
+  });
+
+  test("never refuses a tracked send, a citation, an information send, a warn policy or an older client", async () => {
+    const boss = await register("untracked-exempt-boss", "/untracked-exempt-boss");
+    const worker = await register("untracked-exempt-worker", "/untracked-exempt-worker");
+    const tracked = await sendAs(boss, worker, { ...lead, deadline_sec: 60, task_label: "Exempt" });
+    expect(tracked.body.ok).toBeTrue();
+    const taskId = tracked.body.task!.task_id;
+    expect((await sendAs(boss, worker, { ...lead, task_id: taskId })).body.ok).toBeTrue();
+    expect((await sendAs(boss, worker, { untracked_reply_policy: "lead", expects_reply: false })).body.ok).toBeTrue();
+    expect((await sendAs(boss, worker, { untracked_reply_policy: "warn", expects_reply: true })).body.ok).toBeTrue();
+    expect((await sendAs(boss, worker)).body.ok).toBeTrue();
+  });
+
+  test("counts any message the tracked send left behind as the lead's last send", async () => {
+    const boss = await register("untracked-last-boss", "/untracked-last-boss");
+    const worker = await register("untracked-last-worker", "/untracked-last-worker");
+    expect((await sendAs(worker, boss)).body.ok).toBeTrue();
+    expect((await sendAs(boss, worker, { ...lead, deadline_sec: 60, task_label: "Last send" })).body.ok).toBeTrue();
+    expect((await sendAs(boss, worker, lead)).body).toEqual({ ok: false, error: UNTRACKED_REFUSAL });
+  });
+
+  test("refuses an unknown policy and a non boolean expects_reply before any effect", async () => {
+    const boss = await register("untracked-invalid-boss", "/untracked-invalid-boss");
+    const worker = await register("untracked-invalid-worker", "/untracked-invalid-worker");
+    for (const extra of [
+      { untracked_reply_policy: "boss" },
+      { untracked_reply_policy: 5 },
+      { untracked_reply_policy: null },
+      { untracked_reply_policy: "lead", expects_reply: "no" },
+      { untracked_reply_policy: "warn", expects_reply: 0 },
+      { expects_reply: "false" },
+    ]) {
+      const refused = await sendAs(boss, worker, extra);
+      expect(refused.body.ok, JSON.stringify(extra)).toBeFalse();
+      expect(refused.body.error, JSON.stringify(extra)).not.toBe(UNTRACKED_REFUSAL);
+    }
+    expect(messagesBetween(boss, worker)).toBe(0);
+  });
+
+  test("decides on message ids, tokens and the group, not on timestamps, delivery or names", async () => {
+    const boss = await register("untracked-ids-boss", "/untracked-ids-boss");
+    const worker = await register("untracked-ids-worker", "/untracked-ids-worker");
+    const other = await register("untracked-ids-other", "/untracked-ids-other");
+    expect((await sendAs(other, boss)).body.ok).toBeTrue();
+    expect((await sendAs(worker, other)).body.ok).toBeTrue();
+    expect((await sendAs(boss, worker, lead)).body).toEqual({ ok: false, error: UNTRACKED_REFUSAL });
+
+    expect((await sendAs(worker, boss)).body.ok).toBeTrue();
+    const firstSend = await sendAs(boss, worker, lead);
+    expect(firstSend.body.ok).toBeTrue();
+    const inbound = await sendAs(worker, boss);
+    const db = openBrokerDb(broker.dbPath);
+    try {
+      // The newer answer carries the older date: only the ids order the exchange.
+      db.run("UPDATE messages SET sent_at = '2100-01-01T00:00:00.000Z' WHERE id = ?", [firstSend.body.message_id!]);
+      db.run("UPDATE messages SET sent_at = '2000-01-01T00:00:00.000Z', delivered = 1 WHERE id = ?", [inbound.body.message_id!]);
+      db.run("UPDATE peers SET peer_id = 'untracked-ids-renamed' WHERE instance_token = ?", [worker.instance_token]);
+    } finally {
+      db.close();
+    }
+    const allowed = await sendAs(boss, "untracked-ids-renamed", lead);
+    expect(allowed.body).toEqual({ ok: true, message_id: expect.any(Number) });
+
+    const equal = openBrokerDb(broker.dbPath);
+    try {
+      equal.run("UPDATE messages SET sent_at = '2000-01-01T00:00:00.000Z' WHERE from_token = ? OR to_token = ?", [
+        boss.instance_token,
+        boss.instance_token,
+      ]);
+    } finally {
+      equal.close();
+    }
+    expect((await sendAs(boss, "untracked-ids-renamed", lead)).body).toEqual({ ok: false, error: UNTRACKED_REFUSAL });
+  });
+
+  test("lets exactly one of several concurrent sends through", async () => {
+    const boss = await register("untracked-race-boss", "/untracked-race-boss");
+    const worker = await register("untracked-race-worker", "/untracked-race-worker");
+    expect((await sendAs(worker, boss)).body.ok).toBeTrue();
+    const results = await Promise.all(Array.from({ length: 8 }, () => sendAs(boss, worker, lead)));
+    expect(results.filter((result) => result.body.ok)).toHaveLength(1);
+    expect(messagesBetween(boss, worker)).toBe(1);
+  });
+
+  test("never refuses the operator inbox, a remote peer or a group without an operator inbox, and says tracking is unavailable", async () => {
+    const boss = await register("untracked-scope-boss", "/untracked-scope-boss");
+    const operator = await sendAs(boss, "operator", lead);
+    expect(operator.body).toEqual({ ok: true, message_id: expect.any(Number) });
+
+    const remote = await register("untracked-scope-remote", "/untracked-scope-remote");
+    const db = openBrokerDb(broker.dbPath);
+    try {
+      db.run("UPDATE peers SET via = 'upstream' WHERE instance_token = ?", [remote.instance_token]);
+    } finally {
+      db.close();
+    }
+    const toRemote = await sendAs(boss, remote, lead);
+    expect(toRemote.body).toEqual({ ok: true, message_id: expect.any(Number), tracking_unavailable: "remote_peer" });
+
+    const bare = async (host: string) =>
+      (
+        await post<Peer>(`${broker.url}/register`, {
+          pid: livePid(), cwd: `/${host}`, git_root: null, tty: null, summary: "", host, client_pid: 1,
+          project_key: null, group_id: "default", group_secret_hash: null,
+        })
+      ).body;
+    const bareBoss = await bare("untracked-scope-bare-boss");
+    const bareWorker = await bare("untracked-scope-bare-worker");
+    const noInbox = await sendAs(bareBoss, bareWorker, lead);
+    expect(noInbox.body).toEqual({ ok: true, message_id: expect.any(Number), tracking_unavailable: "no_operator_inbox" });
+
+    const local = await register("untracked-scope-local", "/untracked-scope-local");
+    expect((await sendAs(local, boss)).body.tracking_unavailable).toBeUndefined();
+    expect((await sendAs(boss, local, { untracked_reply_policy: "warn", expects_reply: true })).body.tracking_unavailable).toBeUndefined();
+  });
+
+  test("keeps refusing a lead's new request when the delegator's quota is full", async () => {
+    const boss = await register("untracked-quota-boss", "/untracked-quota-boss");
+    const worker = await register("untracked-quota-worker", "/untracked-quota-worker");
+    seedOpenTasks(boss, worker, 100);
+    expect((await sendAs(boss, worker, lead)).body).toEqual({ ok: false, error: UNTRACKED_REFUSAL });
+  });
+
+  test("keeps refusing a lead's new request when the delegation policy is unavailable", async () => {
+    const restricted = await startBroker({ CLAUDE_PEERS_DELEGATION_MAX_REARMS: "11" });
+    try {
+      const secret = randomUUID();
+      const group = await groupId(secret);
+      const hash = await sha256Hex(secret);
+      const join = async (host: string): Promise<Peer> =>
+        (
+          await post<Peer>(`${restricted.url}/register`, {
+            pid: livePid(), cwd: `/${host}`, git_root: null, tty: null, summary: "", host, client_pid: 1,
+            project_key: null, group_id: group, group_secret_hash: hash,
+          })
+        ).body;
+      const boss = await join("untracked-policy-boss");
+      const worker = await join("untracked-policy-worker");
+      expect((await sendAs(boss, worker, lead, restricted)).body).toEqual({ ok: false, error: UNTRACKED_REFUSAL });
+    } finally {
+      await stopBroker(restricted);
+    }
+  });
+
+  test("announces the capability only a broker with the refusal and the attachment carries", async () => {
+    const health = await get<{ untracked_reply_version?: number }>(`${broker.url}/health`);
+    expect(health.body.untracked_reply_version).toBe(1);
   });
 });

@@ -144,6 +144,8 @@ import type {
   DelegationsCloseResponse,
   DelegationsAttachRequest,
   DelegationsAttachResponse,
+  TrackingUnavailableReason,
+  UntrackedReplyPolicy,
   DelegationsListRequest,
   DelegationsListResponse,
   PollMessagesRequest,
@@ -3176,6 +3178,13 @@ type DelegationContextSource = {
 };
 
 function computeDelegationContext(message: DelegationContextSource): DelegationContext | undefined {
+  if (message.from_token === DECK_INSTANCE_TOKEN) {
+    // Only an attachment notice stores a task id on a Deck message, and only the broker writes that sender.
+    const armed = message.task_id === null ? null : taskRow(message.task_id, message.group_id);
+    return armed?.delegate_binding === message.to_token
+      ? { task: { ...toDelegationTaskRef(armed), recipient_side: "delegate" } }
+      : undefined;
+  }
   if (message.task_id !== null) {
     const cited = taskRow(message.task_id, message.group_id);
     if (cited?.delegator_token === message.from_token && cited.delegate_binding === message.to_token) {
@@ -3224,11 +3233,41 @@ function messageDelegationContext(messageId: number): DelegationContext | undefi
   }
 }
 
+const UNTRACKED_REPLY_VERSION = 1;
+const UNTRACKED_REPLY_REFUSAL =
+  "Message not sent. Add deadline_sec, cite an existing task, or use expects_reply:false if no reply is expected.";
+
+type UntrackedSend = { policy: UntrackedReplyPolicy; expectsReply: boolean };
+
+// The decision and the insertion share one transaction: two concurrent sends cannot both see the
+// same history. Only ids, tokens and the group are compared.
+const recordUnlessUnanswered = db.transaction(
+  (sender: MessageSender, target: MessageTarget, text: string, sentAt: string): number | null => {
+    const answered = db.query(
+      `SELECT 1 FROM messages
+        WHERE group_id = ? AND from_token = ? AND to_token = ?
+          AND id > COALESCE(
+            (SELECT MAX(id) FROM messages WHERE group_id = ? AND from_token = ? AND to_token = ?), 0)
+        LIMIT 1`
+    ).get(
+      sender.group_id, target.instance_token, sender.instance_token,
+      sender.group_id, sender.instance_token, target.instance_token
+    );
+    return answered ? recordMessage(sender.instance_token, target.instance_token, sender.group_id, text, sentAt) : null;
+  }
+);
+
+function trackingUnavailable(sender: MessageSender, target: MessageTarget): TrackingUnavailableReason | undefined {
+  if (sender.via !== null || target.via !== null) return "remote_peer";
+  return groupMayCarryOperatorInbox(sender.group_id) ? undefined : "no_operator_inbox";
+}
+
 async function sendOrdinaryMessage(
   sender: MessageSender,
   targetId: string,
   text: string,
-  taskId: string | null = null
+  taskId: string | null = null,
+  untracked?: UntrackedSend
 ): Promise<SendMessageResponse> {
   if (text.length > MESSAGE_TEXT_MAX) {
     return { ok: false, error: `text must be a string of at most ${MESSAGE_TEXT_MAX} characters` };
@@ -3261,13 +3300,26 @@ async function sendOrdinaryMessage(
   if (taskId !== null && target.via !== null) {
     return { ok: false, error: "A task citation cannot be relayed to a remote peer" };
   }
+  const unavailable =
+    untracked !== undefined && target.instance_token !== OPERATOR_INSTANCE_TOKEN ? trackingUnavailable(sender, target) : undefined;
+  const withTracking = (response: SendMessageResponse): SendMessageResponse =>
+    response.ok && unavailable !== undefined ? { ...response, tracking_unavailable: unavailable } : response;
   if (BROKER_MODE === "replica" && target.via !== null) {
-    return relayOutboundMessage(sender, { ...target, upstream_peer_id: target.upstream_peer_id ?? target.peer_id }, text);
+    return withTracking(await relayOutboundMessage(sender, { ...target, upstream_peer_id: target.upstream_peer_id ?? target.peer_id }, text));
   }
   const sentAt = new Date().toISOString();
-  const messageId = recordMessageTx(sender.instance_token, target.instance_token, sender.group_id, text, sentAt, taskId);
+  const refusable =
+    untracked?.policy === "lead" &&
+    untracked.expectsReply &&
+    target.instance_token !== OPERATOR_INSTANCE_TOKEN &&
+    target.instance_token !== sender.instance_token &&
+    unavailable === undefined;
+  const messageId = refusable
+    ? recordUnlessUnanswered(sender, target, text, sentAt)
+    : recordMessageTx(sender.instance_token, target.instance_token, sender.group_id, text, sentAt, taskId);
+  if (messageId === null) return { ok: false, error: UNTRACKED_REPLY_REFUSAL };
   pushPeerMessage(target.instance_token, messageId, sender, text, sentAt);
-  return taskId === null ? { ok: true, message_id: messageId } : { ok: true };
+  return withTracking(taskId === null ? { ok: true, message_id: messageId } : { ok: true });
 }
 
 function messageForTask(
@@ -3376,6 +3428,12 @@ async function handleSendMessage(body: SendMessageRequest): Promise<SendMessageR
   }
   const sender = senderForDelegation(body.from_token);
   if (!sender) return { ok: false, error: "Sender not registered" };
+  if (body.untracked_reply_policy !== undefined && body.untracked_reply_policy !== "lead" && body.untracked_reply_policy !== "warn") {
+    return { ok: false, error: "untracked_reply_policy must be 'lead' or 'warn'" };
+  }
+  if (body.expects_reply !== undefined && typeof body.expects_reply !== "boolean") {
+    return { ok: false, error: "expects_reply must be a boolean" };
+  }
   const hasDeadline = body.deadline_sec !== undefined;
   const hasTaskId = body.task_id !== undefined;
   const hasTaskAction = body.task_action !== undefined;
@@ -3383,7 +3441,11 @@ async function handleSendMessage(body: SendMessageRequest): Promise<SendMessageR
     if (typeof body.to_peer_id !== "string" || typeof body.text !== "string") {
       return { ok: false, error: "to_peer_id and text are required" };
     }
-    return sendOrdinaryMessage(sender, body.to_peer_id, body.text);
+    const untracked =
+      body.untracked_reply_policy === undefined
+        ? undefined
+        : { policy: body.untracked_reply_policy, expectsReply: body.expects_reply !== false };
+    return sendOrdinaryMessage(sender, body.to_peer_id, body.text, null, untracked);
   }
   if (hasTaskAction && !isDelegationTaskAction(body.task_action)) {
     return { ok: false, error: "task_action must be 'close'" };
@@ -3506,6 +3568,10 @@ type AttachedSourceRow = {
   federation_id: string | null;
 };
 
+// The id never changes; the current deadline and the close instruction come from the projected task
+// note, so the body cannot disagree with them after a rearm or a close.
+const attachNoticeBody = (taskId: string): string => `A deadline was attached to the sender's earlier request: task ${taskId}.`;
+
 type AttachedTaskResult = { row: DelegatedTaskRow; push: DeckPush | null; alreadyTracked: boolean } | null;
 
 const attachDelegatedTaskTx = db.transaction(
@@ -3557,8 +3623,9 @@ const attachDelegatedTaskTx = db.transaction(
     const push = depositDeckMessage(
       target.instance_token,
       sender.group_id,
-      `Task ${taskId} is due at ${new Date(dueAtMs).toISOString()}. Close it explicitly when work is complete.`,
-      now
+      attachNoticeBody(taskId),
+      now,
+      taskId
     );
     return { row: taskRow(taskId, sender.group_id)!, push, alreadyTracked: false };
   }
@@ -3667,8 +3734,17 @@ function taskPeerExists(token: InstanceToken, groupId: GroupId): boolean {
 }
 
 /** Runs inside the caller's transaction; the caller pushes after commit. */
-function depositDeckMessage(token: InstanceToken, groupId: GroupId, text: string, sentAt: string): DeckPush {
-  const result = insertMessage.run(DECK_INSTANCE_TOKEN, token, groupId, text, sentAt);
+function depositDeckMessage(
+  token: InstanceToken,
+  groupId: GroupId,
+  text: string,
+  sentAt: string,
+  taskId: string | null = null
+): DeckPush {
+  const result =
+    taskId === null
+      ? insertMessage.run(DECK_INSTANCE_TOKEN, token, groupId, text, sentAt)
+      : insertTaskMessage.run(DECK_INSTANCE_TOKEN, token, groupId, text, sentAt, taskId);
   updateLastActivity.run(sentAt, token);
   return { token, messageId: Number(result.lastInsertRowid), text, sentAt };
 }
@@ -3917,6 +3993,7 @@ function pushDeckMessage(
 ): void {
   const ws = wsPool.get(token);
   if (!ws || ws.readyState !== 1) return;
+  const delegationContext = messageDelegationContext(messageId);
   try {
     ws.send(
       JSON.stringify({
@@ -3928,6 +4005,7 @@ function pushDeckMessage(
         from_cwd: "",
         text,
         sent_at: sentAt,
+        ...(delegationContext ? { delegation_context: delegationContext } : {}),
       })
     );
   } catch (e) {
@@ -11976,6 +12054,7 @@ const server = Bun.serve<WsData>({
           // replication routes at all, whatever shape it runs in.
           serve_replicas: SERVE_REPLICAS,
           delegation_policy: DELEGATION_POLICY,
+          untracked_reply_version: UNTRACKED_REPLY_VERSION,
           // Only a replica has an upstream to be online against; on the other
           // modes the field is absent rather than a misleading `true`.
           ...(BROKER_MODE === "replica"

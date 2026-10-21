@@ -1504,6 +1504,7 @@ export class SessionService extends EventEmitter {
       ...this.getScopeEnv(),
       CLAUDE_PEERS_DESK_SESSION: def.id,
       CLAUDE_PEERS_ROLE: def.role ?? '',
+      CLAUDE_PEERS_SUPERVISOR: def.supervisor === true ? '1' : '0',
       KORY_PERMISSION_LEASE: '',
       CLAUDE_PEERS_DEPOSIT_CAPABILITY: '',
       KORY_APPROVAL_MODULE: koryModuleServed ? '1' : '',

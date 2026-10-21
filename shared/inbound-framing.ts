@@ -98,7 +98,7 @@ export function renderInbound(
   recipientRole?: string | null,
   delegation?: DelegationContext
 ): string {
-  if (isDeckSender(fromPeerId)) return renderDeckAnnouncement(text);
+  if (isDeckSender(fromPeerId)) return `${renderDeckAnnouncement(text)}${renderDelegationNote(fromPeerId, delegation)}`;
   if (isOperatorSender(fromPeerId)) return renderOperatorAnswer(text);
   const base = renderPeerMessage(text);
   const framed = recipientRole === "team-lead" ? `${base}${ROUTING_REMINDER_NOTE}${LEAD_DIRECTIVE_NOTE}` : base;

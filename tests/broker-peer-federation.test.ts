@@ -699,3 +699,55 @@ test("an inbound message reusing an old upstream id after an upstream reset is d
     return { done: s.federation?.active === true, value: s.federation };
   });
 }, 30_000);
+
+test("the hub arms no task, and attaches none, toward a peer a replica hosts", async () => {
+  const created = await post<SendMessageResponse>(`${U.url}/send-message`, {
+    from_token: C.instance_token,
+    to_peer_id: "alice",
+    text: "track this remote request",
+    deadline_sec: 60,
+    task_label: "Remote request",
+  });
+  expect(["a tracked task toward a replica peer is refused", created.body.ok, created.body.error]).toEqual([
+    "a tracked task toward a replica peer is refused",
+    false,
+    "Tracked tasks require two distinct local peers",
+  ]);
+
+  const plain = await post<SendMessageResponse>(`${U.url}/send-message`, {
+    from_token: C.instance_token,
+    to_peer_id: "alice",
+    text: "plain request to a replica peer",
+    untracked_reply_policy: "warn",
+    expects_reply: true,
+  });
+  expect(["the send is accepted and says tracking is unavailable", plain.body.ok, plain.body.tracking_unavailable]).toEqual([
+    "the send is accepted and says tracking is unavailable",
+    true,
+    "remote_peer",
+  ]);
+  const attach = await post<{ error?: string }>(`${U.url}/delegations/attach`, {
+    from_token: C.instance_token,
+    message_id: plain.body.message_id,
+    deadline_sec: 60,
+  });
+  expect(["an attachment toward a replica peer is refused", attach.status]).toEqual([
+    "an attachment toward a replica peer is refused",
+    400,
+  ]);
+}, 30_000);
+
+test("a replica's relayed send says tracking is unavailable and offers no message id", async () => {
+  const relayed = await post<SendMessageResponse>(`${R1.url}/send-message`, {
+    from_token: A.instance_token,
+    to_peer_id: "bob",
+    text: "relayed request with a policy",
+    untracked_reply_policy: "warn",
+    expects_reply: true,
+  });
+  expect(["the relayed send carries the diagnostic and no local id", relayed.body]).toEqual([
+    "the relayed send carries the diagnostic and no local id",
+    { ok: true, tracking_unavailable: "remote_peer" },
+  ]);
+  await receive("B receives the relayed request", R2, B.instance_token, "relayed request with a policy");
+}, 30_000);

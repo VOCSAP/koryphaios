@@ -17,6 +17,7 @@ type SessionExitListener = (event: { exitCode: number }) => void;
 
 interface SessionFakePty {
   pid: number;
+  env: Record<string, string>;
   killCalls: number;
   output(data: string): void;
   exit(code?: number): void;
@@ -26,11 +27,12 @@ const sessionPtys: SessionFakePty[] = [];
 let nextSessionPid = 40_000;
 
 mock.module("node-pty", () => ({
-  spawn() {
+  spawn(_file?: string, _args?: unknown, options?: { env?: Record<string, string> }) {
     let onData: SessionDataListener | null = null;
     let onExit: SessionExitListener | null = null;
     const proc: SessionFakePty & Record<string, unknown> = {
       pid: nextSessionPid++,
+      env: { ...(options?.env ?? {}) },
       killCalls: 0,
       output: (data: string) => onData?.(data),
       exit: (exitCode = 0) => onExit?.({ exitCode }),
@@ -389,6 +391,29 @@ test("SessionService restart does not replace a live PTY", async () => {
     expect(restarted.pid).toBe(first.pid);
     expect(service.list().find((runtime) => runtime.id === initial.id)!.pid).toBe(first.pid);
   } finally {
+    service.closeAll();
+    for (const pty of sessionPtys.splice(0)) pty.exit();
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("a launched tile exports its supervisor bit as 1 or 0 whatever the Deck's own environment holds", async () => {
+  const home = mkdtempSync(join(tmpdir(), "kory-pty-supervisor-bit-"));
+  const cwd = join(home, "project");
+  const service = createSessionService(home, cwd);
+  const inherited = process.env.CLAUDE_PEERS_SUPERVISOR;
+  process.env.CLAUDE_PEERS_SUPERVISOR = "1";
+
+  try {
+    service.create({});
+    expect(sessionPtys.at(-1)!.env.CLAUDE_PEERS_SUPERVISOR).toBe("0");
+    service.create({ supervisor: true });
+    expect(sessionPtys.at(-1)!.env.CLAUDE_PEERS_SUPERVISOR).toBe("1");
+    service.create({ lead: true });
+    expect(sessionPtys.at(-1)!.env.CLAUDE_PEERS_SUPERVISOR).toBe("0");
+  } finally {
+    if (inherited === undefined) delete process.env.CLAUDE_PEERS_SUPERVISOR;
+    else process.env.CLAUDE_PEERS_SUPERVISOR = inherited;
     service.closeAll();
     for (const pty of sessionPtys.splice(0)) pty.exit();
     rmSync(home, { recursive: true, force: true });

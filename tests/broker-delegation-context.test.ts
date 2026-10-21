@@ -498,6 +498,127 @@ describe("a failed projection never costs the message", () => {
   }, 30_000);
 });
 
+describe("the attachment notice carries the task it arms", () => {
+  async function ordinary(from: Peer, to: Peer, text: string): Promise<number> {
+    const sent = await post<{ ok: boolean; message_id?: number }>(`${broker.url}/send-message`, {
+      from_token: from.instance_token,
+      to_peer_id: to.peer_id,
+      text,
+    });
+    expect(sent.body.ok).toBeTrue();
+    return sent.body.message_id!;
+  }
+
+  async function attach(from: Peer, messageId: number): Promise<string> {
+    const attached = await post<{ task: { task_id: string } }>(`${broker.url}/delegations/attach`, {
+      from_token: from.instance_token,
+      message_id: messageId,
+      deadline_sec: 600,
+    });
+    expect(attached.status).toBe(200);
+    return attached.body.task.task_id;
+  }
+
+  const notice = (taskId: string): string => `A deadline was attached to the sender's earlier request: task ${taskId}.`;
+
+  async function noticeFor(frames: Frame[], taskId: string): Promise<Frame> {
+    const deadline = Date.now() + 3000;
+    while (Date.now() < deadline) {
+      const found = frames.find((f) => f.type === "message" && f.text === notice(taskId) && f.delegation_context?.task?.task_id === taskId);
+      if (found) return found;
+      await Bun.sleep(25);
+    }
+    throw new Error(`no notice for ${taskId} within 3 s`);
+  }
+
+  const expected = (taskId: string, label: string, status = "armed"): DelegationContext => ({
+    task: { task_id: taskId, label, due_at: dueAtFromDb(taskId), status, recipient_side: "delegate" },
+  });
+
+  test("the immediate WS push carries the task, its label and the delegate side", async () => {
+    const bob = await register("notice-push-bob");
+    const alice = await register("notice-push-alice");
+    const aliceFrames = await openWs(alice);
+    const taskId = await attach(bob, await ordinary(bob, alice, "Please audit the notice flow"));
+    const frame = await noticeFor(aliceFrames, taskId);
+    expect(frame.delegation_context).toEqual(expected(taskId, "Please audit the notice flow"));
+    expect(frame.text).toBe(notice(taskId));
+    expect(frame.text).not.toContain("Please audit the notice flow");
+    expectNoInternals(frame);
+  });
+
+  test("a notice queued while the delegate was offline carries the task on WS replay", async () => {
+    const bob = await register("notice-replay-bob");
+    const alice = await register("notice-replay-alice");
+    const taskId = await attach(bob, await ordinary(bob, alice, "Replay the notice"));
+    const aliceFrames = await openWs(alice);
+    const frame = await noticeFor(aliceFrames, taskId);
+    expect(frame.delegation_context).toEqual(expected(taskId, "Replay the notice"));
+  });
+
+  test("peek then poll return the same context, and a free-text Deck message naming the task has none", async () => {
+    const bob = await register("notice-poll-bob");
+    const alice = await register("notice-poll-alice");
+    const taskId = await attach(bob, await ordinary(bob, alice, "Poll the notice"));
+    const announced = await post<{ sent: number }>(`${broker.url}/announce`, {
+      group_id: group,
+      group_secret_hash: secretHash,
+      to_peer_id: alice.peer_id,
+      text: `Operator note that mentions ${taskId} in free text`,
+    });
+    expect(announced.body.sent).toBe(1);
+    for (const route of ["/peek-messages", "/poll-messages"]) {
+      const result = await post<{ messages: Delivered[] }>(`${broker.url}${route}`, { instance_token: alice.instance_token });
+      const arrived = result.body.messages.find((m) => m.text === notice(taskId));
+      const free = result.body.messages.find((m) => m.text.startsWith("Operator note that mentions"));
+      expect(arrived?.delegation_context, route).toEqual(expected(taskId, "Poll the notice"));
+      expect(free, route).toBeDefined();
+      expect("delegation_context" in free!, route).toBeFalse();
+      expectNoInternals(result.body);
+    }
+  });
+
+  test("a closed task is projected as closed", async () => {
+    const bob = await register("notice-closed-bob");
+    const alice = await register("notice-closed-alice");
+    const taskId = await attach(bob, await ordinary(bob, alice, "Close the notice"));
+    const closed = await post(`${broker.url}/delegations/close`, { from_token: alice.instance_token, task_id: taskId });
+    expect(closed.status).toBe(200);
+    const result = await post<{ messages: Delivered[] }>(`${broker.url}/peek-messages`, { instance_token: alice.instance_token });
+    const arrived = result.body.messages.find((m) => m.text === notice(taskId));
+    expect(arrived?.delegation_context?.task).toMatchObject({ task_id: taskId, status: "closed" });
+  });
+
+  test("a Deck message that names a task for someone else than its delegate has no context", async () => {
+    const bob = await register("notice-forged-bob");
+    const alice = await register("notice-forged-alice");
+    const carol = await register("notice-forged-carol");
+    const taskId = await attach(bob, await ordinary(bob, alice, "Do not forge the notice"));
+    const db = openBrokerDb(broker.dbPath);
+    const forgeries: Array<[Peer, string, string]> = [
+      [carol, group, `forged for ${carol.peer_id}`],
+      [bob, group, `forged for ${bob.peer_id}`],
+      [alice, "another-group", `forged in another group for ${alice.peer_id}`],
+    ];
+    try {
+      for (const [target, inGroup, text] of forgeries) {
+        db.run(
+          "INSERT INTO messages (from_token, to_token, group_id, text, sent_at, delivered, task_id) VALUES ('__deck__', ?, ?, ?, ?, 0, ?)",
+          [target.instance_token, inGroup, text, new Date().toISOString(), taskId]
+        );
+      }
+    } finally {
+      db.close();
+    }
+    for (const [target, , text] of forgeries) {
+      const result = await post<{ messages: Delivered[] }>(`${broker.url}/peek-messages`, { instance_token: target.instance_token });
+      const forged = result.body.messages.find((m) => m.text === text);
+      expect(forged, text).toBeDefined();
+      expect("delegation_context" in forged!, text).toBeFalse();
+    }
+  });
+});
+
 describe("replay, poll and peek project the same context", () => {
   test("a message queued while the delegator was offline carries the reminder on WS replay", async () => {
     const bob = await register("replay-bob");

@@ -211,7 +211,19 @@ export interface SendMessageRequest {
   task_id?: string;
   task_action?: DelegationTaskAction;
   task_label?: string;
+  /**
+   * Set by the MCP from the session's registered role, never from an agent argument; the broker
+   * validates it. Absent on an older client, which keeps the contract it had.
+   */
+  untracked_reply_policy?: UntrackedReplyPolicy;
+  /** Set by the MCP alongside the policy; omitted by the tool means true. */
+  expects_reply?: boolean;
 }
+
+export type UntrackedReplyPolicy = "lead" | "warn";
+
+/** Why an accepted send cannot be given a deadline afterwards. */
+export type TrackingUnavailableReason = "remote_peer" | "no_operator_inbox";
 
 export interface DelegatedTask {
   task_id: string;
@@ -285,6 +297,8 @@ export interface SendMessageResponse {
   /** Present when the broker stored the message itself (not relayed). */
   message_id?: number;
   task?: DelegatedTask;
+  /** Only on an accepted send that carried an untracked_reply_policy. */
+  tracking_unavailable?: TrackingUnavailableReason;
   /**
    * Set by a replica when the target is a remote peer and the upstream link is
    * down within the federation grace: the message sits in the local queue and

@@ -34,8 +34,10 @@ import type {
   RoadmapUpsertAckField,
   SendMessageResponse,
   DelegationContext,
+  DelegationsAttachResponse,
   DelegationsCloseResponse,
   DelegationsListResponse,
+  UntrackedReplyPolicy,
   ContextResumeFrame,
 } from "./shared/types.ts";
 import { taskLabelFromText } from "./shared/delegated-task.ts";
@@ -79,6 +81,7 @@ import {
   DECK_PEER_ID,
   DECK_INSTANCE_TOKEN,
   OPERATOR_INSTANCE_TOKEN,
+  OPERATOR_PEER_ID,
   ROADMAP_UPSERT_ACK_FIELDS,
   ROADMAP_ADD_ACK_FIELDS,
   ROADMAP_UPDATE_ACK_FIELDS,
@@ -120,7 +123,15 @@ import {
   type WaitCandidateMessage,
 } from "./shared/wait-for-message.ts";
 import { composeOutboundMessage } from "./shared/message-framing.ts";
-import { formatPeer, renderOpenTasks, renderSendAck, renderTaskCloseAck } from "./shared/peer-render.ts";
+import {
+  formatPeer,
+  renderAttachAck,
+  renderOpenTasks,
+  renderSendAck,
+  renderTaskCloseAck,
+  renderTrackingUnavailable,
+  renderUntrackedReplyWarning,
+} from "./shared/peer-render.ts";
 import { resolveProjectKey } from "./shared/project-key.ts";
 import { askOperatorWaitReply } from "./shared/approval-outcome.ts";
 import { tmpdir } from "node:os";
@@ -174,13 +185,100 @@ async function brokerFetch<T>(path: string, body: unknown, signal?: AbortSignal)
   return res.json() as Promise<T>;
 }
 
-async function brokerGet<T>(path: string): Promise<T> {
-  const res = await fetch(`${BROKER_URL}${path}`, { headers: brokerHeaders() });
+async function brokerGet<T>(path: string, signal?: AbortSignal): Promise<T> {
+  const res = await fetch(`${BROKER_URL}${path}`, { headers: brokerHeaders(), signal });
   if (!res.ok) {
     const err = await res.text();
     throw new Error(`Broker error (${path}): ${res.status} ${err}`);
   }
   return res.json() as Promise<T>;
+}
+
+// --- Untracked replies and ETAs armed after the fact ---
+
+function toolFailure(text: string) {
+  return { content: [{ type: "text" as const, text }], isError: true };
+}
+
+// The registered role and the launch bit are declarations of the launcher, not an attestation:
+// they decide a convenience policy, never a right.
+function untrackedReplyPolicy(): UntrackedReplyPolicy {
+  return myRole === "team-lead" || (process.env.CLAUDE_PEERS_SUPERVISOR || "") === "1" ? "lead" : "warn";
+}
+
+const ATTACH_PROBE_TIMEOUT_MS = 3000;
+
+type AttachCapability =
+  | { ok: true }
+  | { ok: false; reason: "broker_outdated" | "delegation_policy_unavailable" | "capability_unverified" };
+
+async function attachCapability(): Promise<AttachCapability> {
+  try {
+    const health = await brokerGet<{ untracked_reply_version?: unknown; delegation_policy?: { available?: unknown } }>(
+      "/health",
+      AbortSignal.timeout(ATTACH_PROBE_TIMEOUT_MS)
+    );
+    if (typeof health.untracked_reply_version !== "number" || health.untracked_reply_version < 1) {
+      return { ok: false, reason: "broker_outdated" };
+    }
+    if (health.delegation_policy?.available !== true) return { ok: false, reason: "delegation_policy_unavailable" };
+    return { ok: true };
+  } catch (e) {
+    logError("attach capability probe failed", e);
+    return { ok: false, reason: "capability_unverified" };
+  }
+}
+
+const ATTACH_REFUSALS = {
+  broker_outdated:
+    "This broker predates deadlines armed after the fact (its /health carries no untracked_reply_version): update and restart it, then retry. Nothing was sent.",
+  delegation_policy_unavailable:
+    "The broker's delegation policy is unavailable (see delegation_policy.diagnostics in its /health): no deadline can be armed. Nothing was sent.",
+  capability_unverified: "The broker's /health could not be read, so its capabilities are unknown. Nothing was sent.",
+} as const;
+
+async function armEtaOnSentMessage(a: Record<string, unknown>) {
+  const extra = Object.keys(a).filter((key) => key !== "message_id" && key !== "deadline_sec");
+  if (extra.length > 0) {
+    return toolFailure(`send_message with message_id takes only message_id and deadline_sec; remove: ${extra.join(", ")}`);
+  }
+  const { message_id: messageId, deadline_sec: deadline } = a;
+  if (typeof messageId !== "number" || !Number.isSafeInteger(messageId) || messageId < 1) {
+    return toolFailure("message_id must be a positive safe integer");
+  }
+  if (typeof deadline !== "number" || !Number.isSafeInteger(deadline) || deadline < 1) {
+    return toolFailure("deadline_sec must be a positive safe integer number of seconds");
+  }
+  if (!myInstanceToken) return toolFailure("Not registered with broker yet");
+  const capability = await attachCapability();
+  if (!capability.ok) return toolFailure(ATTACH_REFUSALS[capability.reason]);
+  try {
+    const result = await brokerFetch<Partial<DelegationsAttachResponse>>("/delegations/attach", {
+      from_token: myInstanceToken,
+      message_id: messageId,
+      deadline_sec: deadline,
+    });
+    if (!result.task || typeof result.task.task_id !== "string" || typeof result.already_tracked !== "boolean") {
+      return toolFailure("The broker answered without a task: nothing was tracked.");
+    }
+    return { content: [{ type: "text" as const, text: renderAttachAck(result.task, result.already_tracked) }] };
+  } catch (e) {
+    return toolFailure(`Error arming the deadline: ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
+/** What follows an accepted send that armed nothing; the repair is offered only where it can work. */
+async function untrackedReplyNotice(result: SendMessageResponse): Promise<string> {
+  // The broker's reason reaches the model, so only the two codes it is known to send are rendered.
+  if (result.tracking_unavailable !== undefined) {
+    const known = result.tracking_unavailable === "remote_peer" || result.tracking_unavailable === "no_operator_inbox";
+    return renderTrackingUnavailable(known ? result.tracking_unavailable : "unknown");
+  }
+  if (typeof result.message_id !== "number" || !Number.isSafeInteger(result.message_id) || result.message_id < 1) {
+    return renderTrackingUnavailable("broker_outdated");
+  }
+  const capability = await attachCapability();
+  return capability.ok ? renderUntrackedReplyWarning(result.message_id) : renderTrackingUnavailable(capability.reason);
 }
 
 async function isBrokerAlive(): Promise<boolean> {
@@ -657,6 +755,10 @@ const TOOLS = [
         deadline_sec: {
           type: "number" as const,
           description: "Seconds until due; omitted = no task, or no rearm with task_id.",
+        },
+        message_id: {
+          type: "number" as const,
+          description: "A message you already sent: with deadline_sec alone, arms its deadline without resending.",
         },
         task_id: {
           type: "string" as const,
@@ -1805,7 +1907,9 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
         deadline_sec?: unknown;
         task_id?: unknown;
         task_action?: unknown;
+        message_id?: unknown;
       };
+      if (a.message_id !== undefined) return armEtaOnSentMessage(args as Record<string, unknown>);
       const target = a.to_peer_id ?? a.to_id;
       if (a.task_action !== undefined && a.message === undefined && target === undefined) {
         if (!myInstanceToken) {
@@ -1865,6 +1969,9 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
           task_id: a.task_id,
           task_action: a.task_action,
           task_label: creatingTask && typeof a.message === "string" ? taskLabelFromText(a.message) : undefined,
+          // Never read from the tool arguments: they come from the launcher's declarations.
+          untracked_reply_policy: untrackedReplyPolicy(),
+          expects_reply: a.expects_reply !== false,
         });
         if (!result.ok) {
           return {
@@ -1884,8 +1991,21 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
             isError: true,
           };
         }
+        const untracked =
+          a.deadline_sec === undefined &&
+          a.task_id === undefined &&
+          a.task_action === undefined &&
+          a.expects_reply !== false &&
+          target !== OPERATOR_PEER_ID &&
+          target !== DECK_PEER_ID;
+        const ack = renderSendAck(target, result);
         return {
-          content: [{ type: "text" as const, text: renderSendAck(target, result) }],
+          content: [
+            {
+              type: "text" as const,
+              text: untracked && config.warn_untracked_reply.enabled ? `${ack}\n${await untrackedReplyNotice(result)}` : ack,
+            },
+          ],
         };
       } catch (e) {
         return {
@@ -2679,6 +2799,7 @@ async function main() {
   // so the Deck maps tile -> session id deterministically (no-op outside the Deck).
   await writeDeskSessionId();
   log(`Registered as peer '${myPeerId}'`);
+  if (config.warn_untracked_reply.diagnostic) log(config.warn_untracked_reply.diagnostic);
 
   // Background summary upgrade.
   (async () => {

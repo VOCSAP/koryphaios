@@ -216,6 +216,21 @@ describe("send_message expects_reply, end to end", () => {
     expect(prop!.description ?? "").toContain("false");
   }, 90_000);
 
+  test("send_message ADVERTISES message_id with deadline_sec, so an agent can arm a deadline on a sent message", async () => {
+    const b = await startBroker();
+    brokers.push(b);
+    const peer = await spawnPeer(b);
+
+    const id = nextRpcId++;
+    peer.send({ jsonrpc: "2.0", id, method: "tools/list", params: {} });
+    const listed = await readUntil(peer.reader, id, peer.buffer);
+
+    const prop = listed.result?.tools?.find((t) => t.name === "send_message")?.inputSchema?.properties?.message_id;
+    expect(prop).toBeDefined();
+    expect(prop!.type).toBe("number");
+    expect(prop!.description ?? "").toContain("deadline_sec");
+  }, 90_000);
+
   test("a waived message aimed at the operator inbox is stored unframed", async () => {
     const b = await startBroker();
     brokers.push(b);

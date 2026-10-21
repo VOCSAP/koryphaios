@@ -90,6 +90,7 @@ const ENV_KEYS = [
   "CLAUDE_PEERS_DELEGATION_MAX_REARMS",
   "CLAUDE_PEERS_DELEGATION_LEAD_SILENCE_SEC",
   "CLAUDE_PEERS_DELEGATION_MAX_DEADLINE_SEC",
+  "CLAUDE_PEERS_WARN_UNTRACKED_REPLY",
 ] as const;
 
 let envSnapshot: Record<string, string | undefined> = {};
@@ -382,4 +383,49 @@ test("marks the delegation policy unavailable for every invalid file/environment
     expect(envCfg.delegation_policy.diagnostics.join(" ")).toContain("environment");
     delete process.env[entry.envKey];
   }
+});
+
+// --- warn_untracked_reply: environment 0/1, then the global file, then active ---
+
+test("loadConfig: the untracked-reply warning is active by default, with no diagnostic", async () => {
+  expect((await loadConfig()).warn_untracked_reply).toEqual({ enabled: true, diagnostic: null });
+});
+
+test("loadConfig: warn_untracked_reply false in the file switches the warning off", async () => {
+  writeConfigFile({ warn_untracked_reply: false });
+  expect((await loadConfig()).warn_untracked_reply).toEqual({ enabled: false, diagnostic: null });
+  writeConfigFile({ warn_untracked_reply: true });
+  expect((await loadConfig()).warn_untracked_reply).toEqual({ enabled: true, diagnostic: null });
+});
+
+test("loadConfig: CLAUDE_PEERS_WARN_UNTRACKED_REPLY 0 or 1 beats the file in both directions", async () => {
+  writeConfigFile({ warn_untracked_reply: true });
+  process.env.CLAUDE_PEERS_WARN_UNTRACKED_REPLY = "0";
+  expect((await loadConfig()).warn_untracked_reply).toEqual({ enabled: false, diagnostic: null });
+  writeConfigFile({ warn_untracked_reply: false });
+  process.env.CLAUDE_PEERS_WARN_UNTRACKED_REPLY = "1";
+  expect((await loadConfig()).warn_untracked_reply).toEqual({ enabled: true, diagnostic: null });
+});
+
+test("loadConfig: an invalid environment value or file value keeps the warning active and says so", async () => {
+  writeConfigFile({ warn_untracked_reply: false });
+  for (const value of ["banana", "true", "00", " 0"]) {
+    process.env.CLAUDE_PEERS_WARN_UNTRACKED_REPLY = value;
+    const cfg = await loadConfig();
+    expect(cfg.warn_untracked_reply.enabled, value).toBe(true);
+    expect(cfg.warn_untracked_reply.diagnostic, value).toContain("CLAUDE_PEERS_WARN_UNTRACKED_REPLY");
+  }
+  delete process.env.CLAUDE_PEERS_WARN_UNTRACKED_REPLY;
+  for (const value of ["false", 0, null, [false]]) {
+    writeConfigFile({ warn_untracked_reply: value });
+    const cfg = await loadConfig();
+    expect(cfg.warn_untracked_reply.enabled, JSON.stringify(value)).toBe(true);
+    expect(cfg.warn_untracked_reply.diagnostic, JSON.stringify(value)).toContain("warn_untracked_reply");
+  }
+});
+
+test("loadConfig: an empty environment value is an absent one", async () => {
+  writeConfigFile({ warn_untracked_reply: false });
+  process.env.CLAUDE_PEERS_WARN_UNTRACKED_REPLY = "";
+  expect((await loadConfig()).warn_untracked_reply).toEqual({ enabled: false, diagnostic: null });
 });

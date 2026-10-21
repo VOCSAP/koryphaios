@@ -70,6 +70,13 @@ export interface Config {
    */
   serve_replicas: boolean;
   delegation_policy: DelegationPolicyState;
+  warn_untracked_reply: WarnUntrackedReply;
+}
+
+/** `diagnostic` names an invalid value that was ignored; the warning then stays on. */
+export interface WarnUntrackedReply {
+  enabled: boolean;
+  diagnostic: string | null;
 }
 
 interface FileConfig {
@@ -91,6 +98,7 @@ interface FileConfig {
   delegation_max_rearms?: unknown;
   delegation_lead_silence_sec?: unknown;
   delegation_max_deadline_sec?: unknown;
+  warn_untracked_reply?: unknown;
 }
 
 interface FileConfigResult {
@@ -231,6 +239,17 @@ function resolveDelegationPolicy(fileCfg: FileConfig, fileResult: FileConfigResu
   };
 }
 
+// The switch only mutes the warning: an unreadable value must never mute it by accident.
+function resolveWarnUntrackedReply(environment: string | undefined, fileValue: unknown): WarnUntrackedReply {
+  if (environment !== undefined && environment !== "") {
+    if (environment === "0" || environment === "1") return { enabled: environment === "1", diagnostic: null };
+    return { enabled: true, diagnostic: "CLAUDE_PEERS_WARN_UNTRACKED_REPLY must be 0 or 1; the untracked-reply warning stays on" };
+  }
+  if (fileValue === undefined) return { enabled: true, diagnostic: null };
+  if (typeof fileValue === "boolean") return { enabled: fileValue, diagnostic: null };
+  return { enabled: true, diagnostic: "warn_untracked_reply in the global config must be a boolean; the untracked-reply warning stays on" };
+}
+
 /**
  * Load configuration. Tolerant of missing file. Always returns a complete Config.
  */
@@ -238,6 +257,10 @@ export async function loadConfig(): Promise<Config> {
   const fileResult = await readFileConfig();
   const fileCfg = fileResult.config;
   const delegation_policy = resolveDelegationPolicy(fileCfg, fileResult);
+  const warn_untracked_reply = resolveWarnUntrackedReply(
+    process.env.CLAUDE_PEERS_WARN_UNTRACKED_REPLY,
+    fileCfg.warn_untracked_reply
+  );
 
   const port = parseInt(
     process.env.CLAUDE_PEERS_PORT ?? String(fileCfg.port ?? 7899),
@@ -298,6 +321,7 @@ export async function loadConfig(): Promise<Config> {
     offline_replica,
     serve_replicas,
     delegation_policy,
+    warn_untracked_reply,
   };
 }
 

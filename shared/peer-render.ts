@@ -88,6 +88,26 @@ export function renderSendAck(
   return `Message to peer '${target}' queued: the central broker is unreachable, it will be delivered if the link returns ${window}, otherwise dropped and you will be told.`;
 }
 
+export const UNTRACKED_REPLY_MARKER = "[claude-peers:untracked-reply:v1]";
+
+/** Appended to the result of an accepted send that armed nothing; `messageId` is the broker's own id. */
+export function renderUntrackedReplyWarning(messageId: number): string {
+  return `${UNTRACKED_REPLY_MARKER} Message sent without tracking. To arm an ETA without resending the text: send_message(message_id=${messageId}, deadline_sec=<seconds>).`;
+}
+
+/** Same marker, with no call to offer: `reason` is one of a closed set of stable codes. */
+export function renderTrackingUnavailable(reason: string): string {
+  return `${UNTRACKED_REPLY_MARKER} Message sent without tracking; tracking unavailable: ${reason}.`;
+}
+
+/** The result of an ETA armed on a message already sent. Says nothing about the notice having been read. */
+export function renderAttachAck(task: DelegatedTask, alreadyTracked: boolean): string {
+  if (alreadyTracked) {
+    return `Already tracked; deadline unchanged. ${describeTask(task)}, ${describeDue(task.due_at_ms)}, status ${task.status}.`;
+  }
+  return `Tracking armed; request not resent; notification to the delegate recorded. ${describeTask(task)}, ${describeDue(task.due_at_ms)}.`;
+}
+
 /** The result of a close without a message: nothing was sent. */
 export function renderTaskCloseAck(task: DelegatedTask): string {
   return `No message sent; ${describeTask(task)} is closed.`;
