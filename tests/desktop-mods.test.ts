@@ -334,11 +334,11 @@ describe('prosopon frame against the real injection guard', () => {
   test('leaves every quota message the detector reads in stock rendering', () => {
     const now = Date.now()
     const messages = [
-      "You've hit your limit · resets 10:30pm (Europe/London)",
+      "⎿  You've hit your limit · resets 10:30pm (Europe/London)",
       '⎿  5-hour limit reached ∙ resets 2pm',
-      'weekly limit reached, resets in 2 hours',
-      "You've hit your limit — try later",
-      'Limit reached (resets 8m)'
+      '⎿  weekly limit reached, resets in 2 hours',
+      "⎿  You've hit your limit — try later",
+      '⎿  Limit reached (resets 8m)'
     ]
     for (const message of messages) {
       expect(detectRateLimit(message, now), message).not.toBeNull()

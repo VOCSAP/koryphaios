@@ -42,13 +42,25 @@ const OLD_FORMAT = `
 `;
 
 const NEW_FORMAT = `
-You've hit your limit · resets 10:30pm (Europe/London)
+⎿  You've hit your limit · resets 10:30pm (Europe/London)
 
   ❯ 1. Stop and wait for limit to reset
     2. Use extra usage to continue
 `;
 
-const MINUTES_FORMAT = `Limit reached (resets 8m)`;
+const MINUTES_FORMAT = `⎿  Limit reached (resets 8m)`;
+
+// Raw PTY bytes of Claude Code 2.1.304 (and 2.1.306 for the reference wording):
+// every space is written as ESC[1C, so stripping the CSI without a replacement
+// fuses the words.
+const CAPTURED_SESSION_LIMIT =
+  "\x1b[48;2;55;55;55m\x1b[13;1H❯ \x1b[38;2;255;255;255mC1 probe: continue\x1b[K\x1b[38;2;153;153;153m\x1b[49m\r\n" +
+  " \x1b[1C⎿\x1b[1C\u00a0\x1b[38;2;255;107;128mYou've\x1b[1Chit\x1b[1Cyour\x1b[1Csession\x1b[1Climit\x1b[1C·\x1b[1Cresets\x1b[1C7:10pm\x1b[1C(Europe/Paris)\x1b[1C·\x1b[1Cprogress\x1b[1Csaved\x1b[38;2;136;136;136m\x1b[16;1H";
+const CAPTURED_REFERENCE_LIMIT =
+  " \x1b[1C⎿\x1b[1C\u00a0\x1b[38;2;255;107;128mYou've\x1b[1Chit\x1b[1Cyour\x1b[1Climit\x1b[1C·\x1b[1Cresets\x1b[1C10pm\x1b[1C(Europe/London)\x1b[38;2;136;136;136m\x1b[16;1H";
+// Rows copied from raw-stock.bin and joined: an excerpt, not one contiguous capture.
+const EXCERPT_TRUST_DIALOG =
+  "\x1b[1m\x1b[3;2HAccessing\x1b[1Cworkspace:\x1b[m\x1b[7;2HQuick\x1b[1Csafety\x1b[1Ccheck:\x1b[1CIs\x1b[1Cthis\x1b[1Ca\x1b[1Cproject\x1b[1Cyou\x1b[1Ccreated?\x1b[38;2;153;153;153m\x1b[18;2HEnter\x1b[1Cto\x1b[1Cconfirm\x1b[1C·\x1b[1CEsc\x1b[1Cto\x1b[1Ccancel";
 
 // ----- parseResetClock -----
 
@@ -102,10 +114,20 @@ test("detects the minutes format as now+N", () => {
   expect(m!.resetAt).toBe(now + 8 * 60_000);
 });
 
+test("detects the session-limit wording with its reset time, or without one", () => {
+  const now = todayAt(9, 0);
+  expect(detectRateLimit("⎿  You've hit your session limit · resets 7:10pm (Europe/Paris) · progress saved", now)).toEqual({
+    resetAt: todayAt(19, 10)
+  });
+  expect(detectRateLimit("⎿  You've hit your session limit (resets 8m)", now)).toEqual({ resetAt: now + 8 * 60_000 });
+  expect(detectRateLimit("⎿  You've hit your session limit — try later", now)).toEqual({ resetAt: null });
+  expect(detectRateLimit("⎿  You have hit your session limit — progress saved", now)).toEqual({ resetAt: null });
+});
+
 test("fallback: limit text without a parseable time -> resetAt null", () => {
   const now = todayAt(9, 0);
-  expect(detectRateLimit("You've hit your limit — try later", now)).toEqual({ resetAt: null });
-  expect(detectRateLimit("weekly limit reached, resets in 2 hours", now)).toEqual({
+  expect(detectRateLimit("⎿  You've hit your limit — try later", now)).toEqual({ resetAt: null });
+  expect(detectRateLimit("⎿  weekly limit reached, resets in 2 hours", now)).toEqual({
     resetAt: null
   });
 });
@@ -115,6 +137,22 @@ test("prose near-misses do not match (word boundaries)", () => {
   expect(detectRateLimit("The limit of my patience has been tested", now)).toBeNull();
   expect(detectRateLimit("Please rate your experience with limits", now)).toBeNull();
   expect(detectRateLimit("unlimited reachedness", now)).toBeNull();
+});
+
+test("a CLI row that only mentions a limit is no quota limit: just the real labels match", () => {
+  const now = todayAt(9, 0);
+  for (const line of [
+    "⎿  Context limit reached · ",
+    "⎿  Fable limit reached · continuing on",
+    "⎿  Fast limit reached and temporarily disabled · resets in",
+    "⎿  Concurrent subagent limit reached",
+    "⎿  Usage limit reachedness",
+    "⎿  desktop/src/main/quota.ts:61: '5-hour limit reached'"
+  ]) {
+    expect(detectRateLimit(line, now), line).toBeNull();
+  }
+  expect(detectRateLimit("⎿  Usage limit reached · limit resets 7pm", now)).toEqual({ resetAt: todayAt(19, 0) });
+  expect(detectRateLimit("⎿  You've hit your session limit · resets 7:10pm", now)).toEqual({ resetAt: todayAt(19, 10) });
 });
 
 test("stripAnsi removes CSI sequences around a marker", () => {
@@ -152,12 +190,112 @@ test("emits limit once per episode, even when the screen redraws", () => {
 test("detects a message split across two PTY chunks (rolling buffer)", () => {
   const d = new QuotaDetector(() => todayAt(9, 0));
   const ev = collect(d);
-  d.feed("s1", "You've hit your li");
+  d.feed("s1", "⎿  You've hit your li");
   expect(ev.limits.length).toBe(0);
   d.feed("s1", "mit · resets 10pm (Europe/London)");
   expect(ev.limits.length).toBe(1);
   expect(ev.limits[0].resetAt).toBe(todayAt(22, 0));
   d.stop();
+});
+
+test("a captured limit screen whose spaces are cursor-forward moves raises a limit with its reset time", () => {
+  const session = new QuotaDetector(() => todayAt(9, 0));
+  const sessionEvents = collect(session);
+  session.feed("s1", CAPTURED_SESSION_LIMIT);
+  expect(sessionEvents.limits).toEqual([{ id: "s1", resetAt: todayAt(19, 10) }]);
+  session.stop();
+
+  const reference = new QuotaDetector(() => todayAt(9, 0));
+  const referenceEvents = collect(reference);
+  reference.feed("s1", CAPTURED_REFERENCE_LIMIT);
+  expect(referenceEvents.limits).toEqual([{ id: "s1", resetAt: todayAt(22, 0) }]);
+  reference.stop();
+});
+
+test("a cursor-forward move split across two PTY chunks still separates the words", () => {
+  const d = new QuotaDetector(() => todayAt(9, 0));
+  const ev = collect(d);
+  d.feed("s1", "⎿ You've\x1b[1Chit\x1b[1Cyour\x1b[1Csession\x1b[");
+  expect(ev.limits.length).toBe(0);
+  d.feed("s1", "1Climit\x1b[1C·\x1b[1Cresets\x1b[1C7:10pm");
+  expect(ev.limits).toEqual([{ id: "s1", resetAt: todayAt(19, 10) }]);
+  d.stop();
+});
+
+test("a cursor-forward move of any width, or without a count, separates the words", () => {
+  const d = new QuotaDetector(() => todayAt(9, 0));
+  const ev = collect(d);
+  d.feed("s1", "⎿ You've\x1b[3Chit\x1b[Cyour\x1b[12Climit\x1b[C·\x1b[Cresets\x1b[2C10pm");
+  expect(ev.limits).toEqual([{ id: "s1", resetAt: todayAt(22, 0) }]);
+  d.stop();
+});
+
+test("a captured screen without a quota message raises no limit", () => {
+  const d = new QuotaDetector(() => todayAt(9, 0));
+  const ev = collect(d);
+  d.feed("s1", EXCERPT_TRUST_DIALOG);
+  expect(ev.limits).toEqual([]);
+  d.stop();
+});
+
+// The CLI paints every space of the assistant's prose as ESC[1C too, so once those become spaces
+// only the row marker tells the CLI's own notice from text an agent wrote.
+const paintedProse = (text: string): string => `\r\n\x1b[1C●\x1b[1C${text.split(" ").join("\x1b[1C")}\r\n`;
+const PROSE_THAT_READS_LIKE_A_LIMIT = [
+  "The build was rate limited yesterday.",
+  "The API limit reached its ceiling, resets 1m later.",
+  "You have hit your session limit, resets 8m.",
+  "You've hit your limit · resets 2pm",
+];
+
+for (const sentence of PROSE_THAT_READS_LIKE_A_LIMIT) {
+  test(`an assistant row painted like the CLI paints it raises no limit: ${sentence}`, () => {
+    const d = new QuotaDetector(() => todayAt(9, 0));
+    const ev = collect(d);
+    d.feed("s1", paintedProse(sentence));
+    d.feed("s1", `\x1b[1C\x1b[1C${sentence.split(" ").join("\x1b[1C")}\r\n`);
+    expect(ev.limits).toEqual([]);
+    d.stop();
+  });
+}
+
+test("a row marker in the middle of a row does not open a limit notice", () => {
+  const d = new QuotaDetector(() => todayAt(9, 0));
+  const ev = collect(d);
+  d.feed("s1", paintedProse("It printed ⎿ You've hit your limit · resets 2pm"));
+  expect(ev.limits).toEqual([]);
+  d.stop();
+});
+
+test("a notice painted by cursor positioning alone, with no line feed before it, is still read", () => {
+  const d = new QuotaDetector(() => todayAt(9, 0));
+  const ev = collect(d);
+  d.feed("s1", "\x1b[14;1Hsome row\x1b[15;1H\x1b[1C⎿\x1b[1C You've\x1b[1Chit\x1b[1Cyour\x1b[1Climit\x1b[1C·\x1b[1Cresets\x1b[1C2pm");
+  expect(ev.limits).toEqual([{ id: "s1", resetAt: todayAt(14, 0) }]);
+  d.stop();
+});
+
+test("only a cursor-forward move stands for a space: a move back or to a column does not", () => {
+  const row = (gap: string): string =>
+    `\r\n⎿\x1b[1C${["You've", "hit", "your", "limit", "·", "resets", "2pm"].join(gap)}`;
+  const probe = (gap: string): QuotaLimitEvent[] => {
+    const d = new QuotaDetector(() => todayAt(9, 0));
+    const ev = collect(d);
+    d.feed("s1", row(gap));
+    d.stop();
+    return ev.limits;
+  };
+  expect(probe("\x1b[1C")).toHaveLength(1);
+  expect(probe("\x1b[5D")).toEqual([]);
+  expect(probe("\x1b[3G")).toEqual([]);
+});
+
+test("stripAnsi stays a bare strip: a cursor-forward move leaves no space", () => {
+  expect(stripAnsi("a\x1b[1Cb")).toBe("ab");
+});
+
+test("a rate-limited sentence in a CLI row is not a quota notice", () => {
+  expect(detectRateLimit("⎿  The request was rate limited", todayAt(9, 0))).toBeNull();
 });
 
 test("busy cues end the episode (manual or auto resume) and re-arm detection", () => {
@@ -179,7 +317,7 @@ test("resume-due fires once when the parsed reset is already past (<1h)", async 
   // Injected now = 15:00; "resets 2:55pm" is 5min past (<1h) -> kept -> ~0ms timer.
   const d = new QuotaDetector(() => todayAt(15, 0));
   const ev = collect(d);
-  d.feed("s1", "5-hour limit reached ∙ resets 2:55pm");
+  d.feed("s1", "⎿  5-hour limit reached ∙ resets 2:55pm");
   expect(ev.limits.length).toBe(1);
   expect(ev.limits[0].resetAt).toBe(todayAt(14, 55));
   await wait(30);
@@ -192,7 +330,7 @@ test("resume-due fires once when the parsed reset is already past (<1h)", async 
 test("unknown reset time -> periodic resume-due while the episode lasts", async () => {
   const d = new QuotaDetector(Date.now, 25, 0); // 25ms periodic, no busy grace
   const ev = collect(d);
-  d.feed("s1", "You've hit your limit");
+  d.feed("s1", "⎿  You've hit your limit");
   expect(ev.limits[0].resetAt).toBeNull();
   // This assertion is racy because armTimer re-arms from inside its own
   // callback (a chained setTimeout), so lateness accumulates per hop.
@@ -211,7 +349,7 @@ test("unknown reset time -> periodic resume-due while the episode lasts", async 
 test("clear() drops state and cancels pending timers", async () => {
   const d = new QuotaDetector(Date.now, 20);
   const ev = collect(d);
-  d.feed("s1", "You've hit your limit");
+  d.feed("s1", "⎿  You've hit your limit");
   d.clear("s1");
   await wait(60);
   expect(ev.dues).toEqual([]);
@@ -235,7 +373,7 @@ test("an OSC-carried 'limit reached' phrase does not spuriously trigger detectRa
 });
 
 test("a real limit screen (plain text, no OSC wrapper) still triggers detectRateLimit after the OSC fix", () => {
-  const chunk = "You've hit your limit · resets 8pm";
+  const chunk = "⎿  You've hit your limit · resets 8pm";
   expect(detectRateLimit(stripAnsi(chunk), Date.now())).not.toBeNull();
 });
 
@@ -248,7 +386,7 @@ test("busy text carried inside an OSC title FRAGMENTED across two chunks does no
   d.on("limit", (e: QuotaLimitEvent) => limitEv.push(e));
   d.on("clear", () => clearEv.push(true));
 
-  d.feed("s1", "5-hour limit reached · resets 2pm\n");
+  d.feed("s1", "⎿  5-hour limit reached · resets 2pm\n");
   expect(limitEv.length).toBe(1);
 
   // Idle title glyph, so only a leak of its payload as screen text could clear.
@@ -270,7 +408,7 @@ test("once resume-due fired, a busy frame inside the post-limit window ends the 
   const ev = collect(d);
   const clears: string[] = [];
   d.on("clear", (e: { id: string }) => clears.push(e.id));
-  d.feed("s1", "You've hit your limit · resets 9am (Europe/London)"); // reset already due
+  d.feed("s1", "⎿  You've hit your limit · resets 9am (Europe/London)"); // reset already due
   await waitUntil(() => ev.dues.length >= 1);
   now = t0 + 100;
   expect(ev.dues, "a reset time already past must fire resume-due at once").toEqual(["s1"]);
@@ -287,7 +425,7 @@ test("without resume-due, a busy frame inside the post-limit window does not end
   const ev = collect(d);
   const clears: string[] = [];
   d.on("clear", (e: { id: string }) => clears.push(e.id));
-  d.feed("s1", "You've hit your limit · resets 10pm (Europe/London)");
+  d.feed("s1", "⎿  You've hit your limit · resets 10pm (Europe/London)");
   now = t0 + 300;
   d.feed("s1", SPINNER_FRAME);
   expect(clears, "a trailing frame of the limited turn ended the episode").toEqual([]);
@@ -305,13 +443,13 @@ test("a new episode re-applies the post-limit window after a resumed one", async
   const ev = collect(d);
   const clears: string[] = [];
   d.on("clear", (e: { id: string }) => clears.push(e.id));
-  d.feed("s1", "You've hit your limit · resets 9am (Europe/London)");
+  d.feed("s1", "⎿  You've hit your limit · resets 9am (Europe/London)");
   await waitUntil(() => ev.dues.length >= 1);
   now = t0 + 300;
   d.feed("s1", SPINNER_FRAME);
   expect(clears).toEqual(["s1"]);
   now = t0 + 10_000;
-  d.feed("s1", "You've hit your limit · resets 10pm (Europe/London)");
+  d.feed("s1", "⎿  You've hit your limit · resets 10pm (Europe/London)");
   now = t0 + 10_200;
   d.feed("s1", SPINNER_FRAME);
   expect(clears, "the previous episode's resume leaked into the next one's window").toEqual(["s1"]);
@@ -325,7 +463,7 @@ test("a periodic resume-due also lifts the post-limit window", async () => {
   const ev = collect(d);
   const clears: string[] = [];
   d.on("clear", (e: { id: string }) => clears.push(e.id));
-  d.feed("s1", "You've hit your limit");
+  d.feed("s1", "⎿  You've hit your limit");
   await waitUntil(() => ev.dues.length >= 1);
   now = t0 + 300;
   d.feed("s1", SPINNER_FRAME);
@@ -340,7 +478,7 @@ test("an immediate resume-due does not let the limited turn's own trailing frame
   const ev = collect(d);
   const clears: string[] = [];
   d.on("clear", (e: { id: string }) => clears.push(e.id));
-  d.feed("s1", "You've hit your limit · resets 9am (Europe/London)"); // reset already due
+  d.feed("s1", "⎿  You've hit your limit · resets 9am (Europe/London)"); // reset already due
   await waitUntil(() => ev.dues.length >= 1);
   expect(ev.dues).toEqual(["s1"]);
   now = t0 + 70;
@@ -362,7 +500,7 @@ test("after a late resume-due, a busy frame before the injected keystrokes does 
   const ev = collect(d);
   const clears: string[] = [];
   d.on("clear", (e: { id: string }) => clears.push(e.id));
-  d.feed("s1", "You've hit your limit");
+  d.feed("s1", "⎿  You've hit your limit");
   now = t0 + 500; // the periodic resume-due fires at this clock
   await waitUntil(() => ev.dues.length >= 1);
   now = t0 + 550;

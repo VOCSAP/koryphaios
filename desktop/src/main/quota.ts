@@ -35,24 +35,40 @@ export function stripAnsi(s: string): string {
   return s.replace(ANSI_RE, '')
 }
 
+// Claude Code writes every space, the assistant's prose included, as ESC[1C: a
+// bare strip fuses the words, a space restores them. A cursor positioning ends a
+// row like a line feed does.
+// eslint-disable-next-line no-control-regex
+const CURSOR_FORWARD_RE = /\x1b\[\d{0,4}C/g
+// eslint-disable-next-line no-control-regex
+const CURSOR_POSITION_RE = /\x1b\[\d{0,4}(?:;\d{0,4})?[Hf]/g
+function stripForDetection(s: string): string {
+  return stripAnsi(s.replace(CURSOR_POSITION_RE, '\n').replace(CURSOR_FORWARD_RE, ' '))
+}
+
+// The CLI prints its own limit notice on a row that opens with the tree-corner marker (U+23BF). The
+// words alone are not enough: once spaces are restored, a sentence an agent wrote
+// reads the same, and a forged limit refuses the lead's directives.
+const CLI_ROW = '^[^\\S\\r\\n]{0,32}\\u23bf[^\\S\\r\\n]{1,16}'
+const HIT = "you(?:['’]ve|\\s+have)\\s+hit\\s+your\\s+(?:session\\s+)?limit"
+const REACHED = '(?:(?:usage|\\d{1,2}-hour|weekly|spend|opus|sonnet)\\s+)?limit\\s+reached\\b'
+const CLOCK = '(\\d{1,2}(?::\\d{2})?\\s*[ap]m)'
+const cliRow = (body: string): RegExp => new RegExp(CLI_ROW + body, 'im')
+
 // Time-capturing patterns, tried in order. Group 1 = clock ("2pm", "10:30am").
 const TIME_PATTERNS = [
   // "You've hit your limit · resets 10pm (Europe/London)"
-  /hit\s+your\s+limit.*?resets?\s+(\d{1,2}(?::\d{2})?\s*[ap]m)/i,
+  cliRow(`${HIT}.{0,200}?resets?\\s+${CLOCK}`),
   // "5-hour limit reached ∙ resets 2pm"
-  /limit\s+reached.*?resets?\s+(\d{1,2}(?::\d{2})?\s*[ap]m)/i
+  cliRow(`${REACHED}.{0,200}?resets?\\s+${CLOCK}`)
 ]
 
 // "Limit reached (resets 8m)" / "resets 45m" -> minutes from now.
-const MINUTES_PATTERN = /(?:hit\s+your\s+limit|limit\s+reached).*?resets?\s+(\d{1,3})m\b/i
+const MINUTES_PATTERN = cliRow(`(?:${HIT}|${REACHED}).{0,200}?resets?\\s+(\\d{1,3})m\\b`)
 
 // Limit detected but no parseable time -> periodic retry. Word boundaries keep
-// prose like "the limit of my patience" or "rate your experience" from matching.
-const FALLBACK_PATTERNS = [
-  /you['’]ve\s+hit\s+your\s+limit/i,
-  /\blimit\s+reached\b/i,
-  /\brate\s+limited\b/i
-]
+// prose like "the limit of my patience" from matching.
+const FALLBACK_PATTERNS = [cliRow(HIT), cliRow(REACHED)]
 
 /**
  * Parse a clock string captured by TIME_PATTERNS ("2pm", "10:30am", "3 pm")
@@ -160,7 +176,7 @@ export class QuotaDetector extends EventEmitter {
 
   feed(id: string, data: string): void {
     const st = this.state(id)
-    const stripped = stripAnsi(data)
+    const stripped = stripForDetection(data)
     // Fed on every chunk, not only while limited: its escape and OSC parsers
     // must see the whole byte stream to stay in sync with it.
     const busy = st.busy.feed(data)
@@ -175,7 +191,7 @@ export class QuotaDetector extends EventEmitter {
     // Re-strip the accumulated buffer (not just `stripped`, the per-chunk
     // delta): closes the cross-chunk OSC fragmentation gap, see the comment
     // on `stripAnsi` above.
-    st.buf = stripAnsi((st.buf + stripped).slice(-MAX_BUF))
+    st.buf = stripForDetection((st.buf + stripped).slice(-MAX_BUF))
     const match = detectRateLimit(st.buf, this.now())
     if (!match) return
 
