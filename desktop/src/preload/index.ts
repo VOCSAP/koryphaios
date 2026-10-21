@@ -129,6 +129,7 @@ const api: DeckApi = {
   sandboxImageRemove: () => ipcRenderer.invoke('sandbox:image-remove'),
   openExternal: (url: string) => ipcRenderer.invoke('shell:open-external', url),
   openLink: (target: string, intent: LinkIntent) => ipcRenderer.invoke('shell:open-link', target, intent),
+  previewImage: (target: string) => ipcRenderer.invoke('shell:preview-image', target),
   sandboxBuildStop: () => ipcRenderer.invoke('sandbox:build-stop'),
   sandboxAuthPurge: () => ipcRenderer.invoke('sandbox:auth-purge'),
   sandboxResetCopy: () => ipcRenderer.invoke('sandbox:reset-copy'),

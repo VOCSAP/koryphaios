@@ -20,6 +20,7 @@ const NOTICE_TOAST: Record<LinkNotice, string> = {
 export function sessionLinkDeps(): TerminalLinkDeps {
   return {
     open: (target, intent) => window.api.openLink(target, intent),
+    preview: (target) => window.api.previewImage(target),
     onRefused: (reason) => useDeck.getState().showToast(NOTICE_TOAST[reason], 'error'),
     report: (message) => window.api.reportError('terminal', message),
     fileLinks: () => useDeck.getState().sandboxStatus?.enabled === false,

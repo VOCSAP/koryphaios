@@ -16,7 +16,11 @@ mockStore({ useDeck: Object.assign(() => state, { getState: () => state }), ...s
 
 const { sessionLinkDeps } = await import('../desktop/src/renderer/src/terminal-link-deps')
 
-const apiCalls: { openLink: unknown[][]; reportError: unknown[][] } = { openLink: [], reportError: [] }
+const apiCalls: { openLink: unknown[][]; previewImage: unknown[][]; reportError: unknown[][] } = {
+  openLink: [],
+  previewImage: [],
+  reportError: []
+}
 const windowBefore = Object.getOwnPropertyDescriptor(globalThis, 'window')
 Object.defineProperty(globalThis, 'window', {
   configurable: true,
@@ -24,6 +28,7 @@ Object.defineProperty(globalThis, 'window', {
   value: {
     api: {
       openLink: async (...args: unknown[]) => (apiCalls.openLink.push(args), { ok: true }),
+      previewImage: async (...args: unknown[]) => (apiCalls.previewImage.push(args), { ok: false, reason: 'unavailable' }),
       reportError: (...args: unknown[]) => void apiCalls.reportError.push(args)
     }
   }
@@ -36,6 +41,7 @@ afterAll(() => {
 beforeEach(() => {
   toasts.length = 0
   apiCalls.openLink.length = 0
+  apiCalls.previewImage.length = 0
   apiCalls.reportError.length = 0
   state.sandboxStatus = null
 })
@@ -54,6 +60,13 @@ describe('sessionLinkDeps', () => {
   test('open hands the target then the intent to the preload API, in that order', async () => {
     await sessionLinkDeps().open('/work/a.md', 'open')
     expect(apiCalls.openLink).toEqual([['/work/a.md', 'open']])
+  })
+
+  test('preview hands the bare target to the preload API and returns what main answered, with no toast', async () => {
+    expect(await sessionLinkDeps().preview('/work/a.png')).toEqual({ ok: false, reason: 'unavailable' })
+    expect(apiCalls.previewImage).toEqual([['/work/a.png']])
+    expect(apiCalls.openLink, 'a hover never goes through the open channel').toEqual([])
+    expect(toasts).toEqual([])
   })
 
   test('report goes to the terminal scope of the error log', () => {

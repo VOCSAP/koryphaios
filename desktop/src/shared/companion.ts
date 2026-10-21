@@ -195,6 +195,7 @@ export const COMPANION_MANIFEST = {
   sandboxImageRemove: { kind: 'invoke', channel: 'sandbox:image-remove' },
   openExternal: { kind: 'invoke', channel: 'shell:open-external' },
   openLink: { kind: 'invoke', channel: 'shell:open-link' },
+  previewImage: { kind: 'invoke', channel: 'shell:preview-image' },
   sandboxBuildStop: { kind: 'invoke', channel: 'sandbox:build-stop' },
   sandboxAuthPurge: { kind: 'invoke', channel: 'sandbox:auth-purge' },
   sandboxResetCopy: { kind: 'invoke', channel: 'sandbox:reset-copy' },
@@ -316,6 +317,8 @@ const EXPLICIT_REMOTE_BLOCKED_CHANNELS: readonly string[] = [
   // open a link is a "make the operator's machine visit this" primitive.
   'shell:open-external',
   'shell:open-link',
+  // A read, but of a host file chosen by text an agent wrote: tier 0 would leave it reachable from a paired phone.
+  'shell:preview-image',
   // ask_operator lot: these three don't relay a message, they RENDER A HUMAN
   // VERDICT. An agent is stopped, doing nothing, specifically because its
   // safety model requires a human to decide -- what comes back is consumed
@@ -511,6 +514,7 @@ export const CHANNEL_TIERS: Readonly<Record<string, 0 | 1 | 2 | 3>> = {
   'sandbox:image-remove': 2,
   'shell:open-external': 2,
   'shell:open-link': 2,
+  'shell:preview-image': 0,
   'sandbox:build-stop': 2,
   'sandbox:reset-copy': 2,
 

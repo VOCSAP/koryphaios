@@ -204,6 +204,8 @@
   "tile.linkBrowser": "Clic pour ouvrir dans le navigateur",
   "tile.linkSandbox":"Non ouvert ici : les fichiers d'un projet sandbox sont dans le conteneur",
   "tile.linkShift":"Maj+clic : le clic n'est pas transmis à l'application",
+  "tile.linkPreviewLoading": "Chargement de l'aperçu…",
+  "tile.linkPreviewUnavailable": "Pas d'aperçu pour ce fichier",
   "area.emptyTitle": "Aucun terminal pair pour l'instant",
   "area.emptyBody": "Ajoute une session pair Claude Code pour l'ancrer ici. Chaque tuile tourne dans un vrai terminal, isolé dans le groupe de cette fenêtre, donc OAuth fonctionne normalement.",
   "area.addTerminal": "＋ Ajouter un terminal pair",

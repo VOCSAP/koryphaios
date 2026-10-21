@@ -12,25 +12,31 @@ import type { ILink, ILinkProvider } from '@xterm/xterm'
 import { logicalLine } from '../desktop/src/shared/link-detect'
 import { installTerminalLinks, type LinkNotice, type LinkTerminal } from '../desktop/src/renderer/src/terminal-links'
 import { createSessionTerminal } from '../desktop/src/renderer/src/terminal-focus-report'
-import type { LinkIntent, LinkOutcome } from '../desktop/src/shared/types'
+import type { ImagePreviewResult, LinkIntent, LinkOutcome } from '../desktop/src/shared/types'
 
 interface LinkRig {
   provide(bufferLine: number): ILink[]
   handler: NonNullable<LinkTerminal['options']['linkHandler']>
   opened: { target: string; intent: LinkIntent }[]
+  previews: string[]
   refused: LinkNotice[]
   reports: string[]
+  dispose(): void
 }
 
 interface RigOptions {
   fileLinks?: boolean
   outcome?: () => Promise<LinkOutcome>
+  preview?: (target: string) => Promise<ImagePreviewResult>
 }
+
+const NO_PREVIEW: ImagePreviewResult = { ok: false, reason: 'unavailable' }
 
 type TerminalView = Pick<LinkTerminal, 'cols' | 'buffer'>
 
 function rigOver(view: TerminalView, opts: RigOptions): LinkRig {
   const opened: LinkRig['opened'] = []
+  const previews: string[] = []
   const refused: LinkNotice[] = []
   const reports: string[] = []
   let provider: ILinkProvider | undefined
@@ -40,10 +46,14 @@ function rigOver(view: TerminalView, opts: RigOptions): LinkRig {
     buffer: view.buffer,
     registerLinkProvider: (p) => ((provider = p), { dispose() {} })
   }
-  installTerminalLinks(term, {
+  const gate = installTerminalLinks(term, {
     open: async (target, intent) => {
       opened.push({ target, intent })
       return opts.outcome ? opts.outcome() : { ok: true }
+    },
+    preview: async (target) => {
+      previews.push(target)
+      return opts.preview ? opts.preview(target) : NO_PREVIEW
     },
     onRefused: (reason) => refused.push(reason),
     report: (m) => reports.push(m),
@@ -58,8 +68,10 @@ function rigOver(view: TerminalView, opts: RigOptions): LinkRig {
     },
     handler: term.options.linkHandler!,
     opened,
+    previews,
     refused,
-    reports
+    reports,
+    dispose: gate.dispose
   }
 }
 
@@ -191,7 +203,7 @@ describe('installTerminalLinks', () => {
       buffer: { active: { getLine: () => undefined } },
       registerLinkProvider: (p) => ((provider = p), { dispose() {} })
     }
-    const gate = installTerminalLinks(term, { open: async () => ({ ok: true }), onRefused() {}, report() {}, fileLinks: () => true, label: (k) => k })
+    const gate = installTerminalLinks(term, { open: async () => ({ ok: true }), preview: async () => NO_PREVIEW, onRefused() {}, report() {}, fileLinks: () => true, label: (k) => k })
     expect(provider).toBeDefined()
     term.options.linkHandler!.hover?.(hover(40, 50), 'https://example.com/x', {} as never)
     expect(document.querySelector('.terminal-link-tooltip')).not.toBeNull()
@@ -253,6 +265,207 @@ describe('installTerminalLinks', () => {
   })
 })
 
+describe('image preview in the link tooltip', () => {
+  const DATA = 'data:image/png;base64,AAAA'
+  const shown = (width = 40, height = 30): ImagePreviewResult => ({ ok: true, dataUrl: DATA, width, height })
+  const tooltips = (): HTMLElement[] => [...document.querySelectorAll<HTMLElement>('.terminal-link-tooltip')]
+  const images = (): HTMLImageElement[] => [...document.querySelectorAll<HTMLImageElement>('.terminal-link-preview')]
+  const notes = (): (string | null)[] => [...document.querySelectorAll('.terminal-link-preview-note')].map((n) => n.textContent)
+
+  function deferred<T>(): { promise: Promise<T>; resolve(v: T): void; reject(e: unknown): void } {
+    let resolve!: (v: T) => void
+    let reject!: (e: unknown) => void
+    const promise = new Promise<T>((res, rej) => ((resolve = res), (reject = rej)))
+    return { promise, resolve, reject }
+  }
+
+  test('hovering an image path asks main once and puts the image in the one tooltip, after a loading note', async () => {
+    const answer = deferred<ImagePreviewResult>()
+    const rig = linkRig(['see /work/a.png'], 80, { preview: () => answer.promise })
+    const [link] = rig.provide(1)
+    link!.hover?.(hover(40, 50), link!.text)
+    expect(rig.previews).toEqual(['/work/a.png'])
+    expect(notes()).toEqual(['tile.linkPreviewLoading'])
+
+    answer.resolve(shown(40, 30))
+    await tick()
+
+    expect(tooltips()).toHaveLength(1)
+    expect(images().map((i) => i.getAttribute('src'))).toEqual([DATA])
+    expect([images()[0]!.getAttribute('width'), images()[0]!.getAttribute('height')]).toEqual(['40', '30'])
+    expect(notes()).toEqual([])
+    expect(tooltipLines()?.[0], 'the target stays the first line').toBe('/work/a.png')
+  })
+
+  test('an OSC 8 file: link to an image is previewed with the target it carries', async () => {
+    const rig = linkRig([], 80, { preview: async () => shown() })
+    rig.handler.hover?.(hover(40, 50), 'file:///C:/proj/shot.JPG', {} as never)
+    await tick()
+    expect(rig.previews).toEqual(['file:///C:/proj/shot.JPG'])
+    expect(images()).toHaveLength(1)
+  })
+
+  test.each([
+    ['a web URL ending in .png', 'https://example.com/a.png', true],
+    ['a file that is not a PNG or a JPEG', 'file:///work/a.gif', true],
+    ['a markdown file', 'file:///work/a.md', true],
+    ['an image on a sandbox tile', 'file:///work/a.png', false]
+  ])('%s is never sent to main for a preview', async (_name, target, fileLinks) => {
+    const rig = linkRig([], 80, { fileLinks, preview: async () => shown() })
+    rig.handler.hover?.(hover(40, 50), target, {} as never)
+    await tick()
+    expect(rig.previews).toEqual([])
+    expect(images()).toHaveLength(0)
+    expect(notes()).toEqual([])
+  })
+
+  test('leaving before the answer drops it: the tooltip that asked never receives the image', async () => {
+    const answer = deferred<ImagePreviewResult>()
+    const rig = linkRig([], 80, { preview: () => answer.promise })
+    rig.handler.hover?.(hover(40, 50), 'file:///work/a.png', {} as never)
+    const host = tooltips()[0]!
+    rig.handler.leave?.(hover(40, 50), 'file:///work/a.png', {} as never)
+
+    answer.resolve(shown())
+    await tick()
+
+    expect(host.querySelector('img'), 'the answer reached a tooltip the operator already left').toBeNull()
+    expect(tooltips()).toHaveLength(0)
+  })
+
+  test('disposing the gate before the answer drops it, and a rejection after the dispose is still traced', async () => {
+    const answer = deferred<ImagePreviewResult>()
+    const rig = linkRig([], 80, { preview: () => answer.promise })
+    rig.handler.hover?.(hover(40, 50), 'file:///work/a.png', {} as never)
+    const host = tooltips()[0]!
+    rig.dispose()
+
+    answer.reject(new Error('ipc down'))
+    await tick()
+
+    expect(host.querySelector('.terminal-link-preview-note')?.textContent, 'no state is painted on a disposed tooltip').toBe('tile.linkPreviewLoading')
+    expect(rig.reports).toEqual(['image preview failed: ipc down'])
+  })
+
+  test('a late answer never lands in the tooltip of a newer hover', async () => {
+    const first = deferred<ImagePreviewResult>()
+    const rig = linkRig([], 80, { preview: (t) => (t.endsWith('first.png') ? first.promise : Promise.resolve(shown(9, 9))) })
+    rig.handler.hover?.(hover(40, 50), 'file:///work/first.png', {} as never)
+    rig.handler.hover?.(hover(60, 50), 'https://example.com/page', {} as never)
+
+    first.resolve(shown())
+    await tick()
+
+    expect(tooltips()).toHaveLength(1)
+    expect(images(), 'the newer tooltip is a web link: it has no image').toHaveLength(0)
+  })
+
+  test('hovers that pile up behind a pending request are reduced to the last one, requested after the first answer', async () => {
+    const first = deferred<ImagePreviewResult>()
+    const rig = linkRig([], 80, { preview: (t) => (t.endsWith('a.png') ? first.promise : Promise.resolve(shown(7, 7))) })
+    for (const name of ['a', 'b', 'c']) rig.handler.hover?.(hover(40, 50), `file:///work/${name}.png`, {} as never)
+    expect(rig.previews, 'one request at a time').toEqual(['file:///work/a.png'])
+
+    first.resolve(shown())
+    await tick()
+
+    expect(rig.previews, 'b was replaced before it was ever asked').toEqual(['file:///work/a.png', 'file:///work/c.png'])
+    expect(images().map((i) => i.getAttribute('width'))).toEqual(['7'])
+  })
+
+  test('a waiting hover that was left is not requested', async () => {
+    const first = deferred<ImagePreviewResult>()
+    const rig = linkRig([], 80, { preview: () => first.promise })
+    rig.handler.hover?.(hover(40, 50), 'file:///work/a.png', {} as never)
+    rig.handler.hover?.(hover(40, 50), 'file:///work/b.png', {} as never)
+    rig.handler.leave?.(hover(40, 50), 'file:///work/b.png', {} as never)
+
+    first.resolve(shown())
+    await tick()
+
+    expect(rig.previews).toEqual(['file:///work/a.png'])
+  })
+
+  test('an unavailable answer says so in the tooltip, and a busy one says nothing', async () => {
+    const unavailable = linkRig([], 80, { preview: async () => ({ ok: false, reason: 'unavailable' }) })
+    unavailable.handler.hover?.(hover(40, 50), 'file:///work/a.png', {} as never)
+    await tick()
+    expect(notes()).toEqual(['tile.linkPreviewUnavailable'])
+    expect(images()).toHaveLength(0)
+    unavailable.handler.leave?.(hover(40, 50), 'file:///work/a.png', {} as never)
+
+    const busy = linkRig([], 80, { preview: async () => ({ ok: false, reason: 'busy' }) })
+    busy.handler.hover?.(hover(40, 50), 'file:///work/a.png', {} as never)
+    await tick()
+    expect(notes()).toEqual([])
+    expect(images()).toHaveLength(0)
+  })
+
+  test('a failed call is traced, shown as unavailable, and never raised as a toast', async () => {
+    const rig = linkRig([], 80, { preview: () => Promise.reject(new Error('ipc down')) })
+    rig.handler.hover?.(hover(40, 50), 'file:///work/a.png', {} as never)
+    await tick()
+    expect(rig.reports).toEqual(['image preview failed: ipc down'])
+    expect(notes()).toEqual(['tile.linkPreviewUnavailable'])
+    expect(rig.refused, 'a hover is not a user action: no toast').toEqual([])
+  })
+
+  test('an image the renderer cannot decode is traced and replaced by the unavailable note', async () => {
+    const rig = linkRig([], 80, { preview: async () => shown() })
+    rig.handler.hover?.(hover(40, 50), 'file:///work/a.png', {} as never)
+    await tick()
+    images()[0]!.dispatchEvent(new Event('error'))
+    expect(rig.reports).toHaveLength(1)
+    expect(rig.reports[0]).toContain('could not be decoded')
+    expect(images()).toHaveLength(0)
+    expect(notes()).toEqual(['tile.linkPreviewUnavailable'])
+  })
+
+  test('the tooltip is moved back inside the viewport once the image has made it larger', async () => {
+    const measure = HTMLElement.prototype.getBoundingClientRect
+    HTMLElement.prototype.getBoundingClientRect = () => ({ width: 300, height: 200 }) as DOMRect
+    try {
+      const rig = linkRig([], 80, { preview: async () => shown() })
+      rig.handler.hover?.(hover(window.innerWidth - 10, window.innerHeight - 10), 'file:///work/a.png', {} as never)
+      await tick()
+      const host = tooltips()[0]!
+      expect(host.style.getPropertyValue('--terminal-link-tooltip-x')).toBe(`${window.innerWidth - 300 - 8}px`)
+      expect(host.style.getPropertyValue('--terminal-link-tooltip-y')).toBe(`${window.innerHeight - 200 - 8}px`)
+    } finally {
+      HTMLElement.prototype.getBoundingClientRect = measure
+    }
+  })
+
+  test('the box is measured at left 0, because a fixed box narrows with its left edge, then clamped to the right edge', async () => {
+    const measure = HTMLElement.prototype.getBoundingClientRect
+    HTMLElement.prototype.getBoundingClientRect = function (this: HTMLElement) {
+      const left = Number.parseFloat(this.style.getPropertyValue('--terminal-link-tooltip-x'))
+      return { width: Math.min(480, window.innerWidth - left), height: 200 } as DOMRect
+    }
+    try {
+      for (const withImage of [true, false]) {
+        const rig = linkRig([], 80, { preview: async () => (withImage ? shown() : { ok: false, reason: 'unavailable' }) })
+        rig.handler.hover?.(hover(window.innerWidth - 10, 100), 'file:///work/a.png', {} as never)
+        await tick()
+        expect(tooltips()[0]!.style.getPropertyValue('--terminal-link-tooltip-x'), `image: ${withImage}`).toBe(
+          `${window.innerWidth - 480 - 8}px`
+        )
+        rig.handler.leave?.(hover(0, 0), 'file:///work/a.png', {} as never)
+      }
+    } finally {
+      HTMLElement.prototype.getBoundingClientRect = measure
+    }
+  })
+
+  test('a click on an image link is unchanged: it reveals and asks for no preview', async () => {
+    const rig = linkRig(['see /work/a.png'], 80)
+    rig.provide(1)[0]!.activate(click(false), '/work/a.png')
+    await tick()
+    expect(rig.opened).toEqual([{ target: '/work/a.png', intent: 'reveal' }])
+    expect(rig.previews).toEqual([])
+  })
+})
+
 describe('installTerminalLinks over a real xterm buffer', () => {
   const FIXTURE = join(import.meta.dir, 'pty-harness', 'fixtures', 'permission-bash-wrapped-2.1.291.json')
 
@@ -291,6 +504,7 @@ describe('installTerminalLinks over a real xterm buffer', () => {
   test('disposing a session terminal removes the link tooltip it is showing', () => {
     const term = createSessionTerminal({ allowProposedApi: true }, () => {}, {
       open: async () => ({ ok: true }),
+      preview: async () => NO_PREVIEW,
       onRefused() {},
       report() {},
       fileLinks: () => true,

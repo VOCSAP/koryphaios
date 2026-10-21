@@ -4087,6 +4087,23 @@ body:has(.rm-modal) .rm-conflict-modal {
   box-shadow: 0 4px 12px color-mix(in srgb, var(--bg) 45%, transparent);
 }
 
+.terminal-link-preview {
+  display: block;
+  max-width: 320px;
+  max-height: 240px;
+  width: auto;
+  height: auto;
+  margin-top: 6px;
+  border-radius: 4px;
+  background: var(--bg-3);
+  object-fit: contain;
+}
+
+.terminal-link-preview-note {
+  margin-top: 6px;
+  color: var(--fg-dim);
+}
+
 /* A URL or path an agent wrote, made clickable: a focusable span on the Deck (its text stays selectable), an anchor on the companion. */
 .text-link {
   color: var(--accent);

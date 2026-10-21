@@ -625,6 +625,234 @@ describe('link-opener on a real filesystem', () => {
   })
 })
 
+describe('link-opener: resolveLocal, the guards behind an image preview', () => {
+  const untouched = (calls: Calls): void => expect([calls.external, calls.shown, calls.opened]).toEqual([[], [], []])
+
+  test('a file inside a root resolves to its canonical path and nothing is opened, shown or launched', async () => {
+    const { opener, calls } = harness('linux', { existing: { '/work': '/work', '/work/a.png': '/work/a.png' } })
+    expect(await opener.resolveLocal('/work/a.png', ['/work'])).toEqual({ ok: true, real: '/work/a.png' })
+    untouched(calls)
+  })
+
+  test('a file outside every root is refused as not-allowed, whatever it is', async () => {
+    const { opener } = harness('linux', {
+      existing: { '/work': '/work', '/work/a.png': '/work/a.png', '/etc/a.png': '/etc/a.png', '/workshop/a.png': '/workshop/a.png' }
+    })
+    expect(await opener.resolveLocal('/etc/a.png', ['/work'])).toEqual({ ok: false, reason: 'not-allowed' })
+    expect(await opener.resolveLocal('/workshop/a.png', ['/work']), 'a sibling that shares the prefix is not inside').toEqual({
+      ok: false,
+      reason: 'not-allowed'
+    })
+    expect(await opener.resolveLocal('/work/a.png', []), 'no root, no read').toEqual({ ok: false, reason: 'not-allowed' })
+  })
+
+  test('the roots are canonicalised too: a root reached through an alias contains the real path of its files', async () => {
+    const { opener } = harness('linux', {
+      existing: { '/alias/proj': '/real/proj', '/alias/proj/a.png': '/real/proj/a.png' }
+    })
+    expect(await opener.resolveLocal('/alias/proj/a.png', ['/alias/proj'])).toEqual({ ok: true, real: '/real/proj/a.png' })
+  })
+
+  test('a link inside a root that points outside it is judged by where it lands', async () => {
+    const { opener } = harness('linux', {
+      links: { '/work/out': '/etc' },
+      existing: { '/work': '/work', '/work/out/a.png': '/etc/a.png' }
+    })
+    expect(await opener.resolveLocal('/work/out/a.png', ['/work'])).toEqual({ ok: false, reason: 'not-allowed' })
+  })
+
+  test('a ~/ path and a /mnt/c/ path are expanded before the containment check', async () => {
+    const posix = harness('linux', { existing: { '/home/op/proj': '/home/op/proj', '/home/op/proj/a.png': '/home/op/proj/a.png' } })
+    expect(await posix.opener.resolveLocal('~/proj/a.png', ['/home/op/proj'])).toEqual({ ok: true, real: '/home/op/proj/a.png' })
+    const win = harness('win32', { existing: { 'C:\\work': 'C:\\work', 'C:\\work\\a.png': 'C:\\work\\a.png' } })
+    expect(await win.opener.resolveLocal('/mnt/c/work/a.png', ['C:\\work'])).toEqual({ ok: true, real: 'C:\\work\\a.png' })
+  })
+
+  test('an excluded path inside a root is refused: a root that is a home folder does not expose its secrets', async () => {
+    const { opener } = harness('linux', {
+      existing: { '/home/op': '/home/op', '/home/op/.ssh/k.png': '/home/op/.ssh/k.png', '/home/op/own/a.png': '/home/op/own/a.png' },
+      policy: { extensions: [...DEFAULT_LINK_EXTENSIONS], exclusions: [...DEFAULT_LINK_EXCLUSIONS, '~/own'] }
+    })
+    expect(await opener.resolveLocal('/home/op/.ssh/k.png', ['/home/op'])).toEqual({ ok: false, reason: 'not-allowed' })
+    expect(await opener.resolveLocal('/home/op/own/a.png', ['/home/op']), 'an operator entry is read at every call').toEqual({
+      ok: false,
+      reason: 'not-allowed'
+    })
+  })
+
+  test.each([
+    ['win32', '\\\\attacker\\share\\a.png'],
+    ['win32', 'file://attacker/share/a.png'],
+    ['linux', '//attacker/share/a.png']
+  ] as const)('%s %s is refused as a network path before any filesystem call', async (platform, target) => {
+    const { opener, calls } = harness(platform)
+    expect(await opener.resolveLocal(target, ['/work'])).toEqual({ ok: false, reason: 'network-path' })
+    expect([calls.realpaths, calls.readlinks]).toEqual([[], []])
+  })
+
+  test('a link component whose target is a network path is refused by reading links first, realpath is never asked', async () => {
+    const { opener, calls } = harness('win32', {
+      links: { 'C:\\work\\link': '\\\\127.0.0.1\\share\\x' },
+      existing: { 'C:\\work\\link\\a.png': 'C:\\work\\link\\a.png', 'C:\\work': 'C:\\work' }
+    })
+    expect(await opener.resolveLocal('C:\\work\\link\\a.png', ['C:\\work'])).toEqual({ ok: false, reason: 'network-path' })
+    expect(calls.realpaths, 'realpath on a link to a UNC share opens the SMB session itself').toEqual([])
+  })
+
+  test('a root that is a network path is skipped without a filesystem call', async () => {
+    const { opener, calls } = harness('win32', { existing: { 'C:\\work': 'C:\\work', 'C:\\work\\a.png': 'C:\\work\\a.png' } })
+    expect(await opener.resolveLocal('C:\\work\\a.png', ['\\\\host\\share', 'C:\\work'])).toEqual({ ok: true, real: 'C:\\work\\a.png' })
+    expect(calls.realpaths.filter((p) => p.startsWith('\\\\'))).toEqual([])
+  })
+
+  test('a root whose links cannot be read is traced and skipped, one that is missing is skipped silently', async () => {
+    const { opener, calls } = harness('linux', {
+      existing: { '/work': '/work', '/work/a.png': '/work/a.png' },
+      readlinkErrors: { '/locked': 'EACCES' },
+      realpathErrors: { '/gone': 'ENOENT' }
+    })
+    expect(await opener.resolveLocal('/work/a.png', ['/locked', '/gone', '/work'])).toEqual({ ok: true, real: '/work/a.png' })
+    expect(calls.reports).toHaveLength(1)
+    expect(calls.reports[0]).toContain('/locked')
+  })
+
+  test('a root that is a link to a network path, or sits under one, is never resolved: no realpath on it, no preview', async () => {
+    const { opener, calls } = harness('win32', {
+      links: { 'C:\\proj': '\\\\evil\\share\\x', 'C:\\mnt': '\\\\evil\\share\\y' },
+      existing: { 'C:\\work': 'C:\\work', 'C:\\work\\a.png': 'C:\\work\\a.png' }
+    })
+    expect(await opener.resolveLocal('C:\\work\\a.png', ['C:\\proj', 'C:\\mnt\\proj']), 'neither root contains the file').toEqual({
+      ok: false,
+      reason: 'not-allowed'
+    })
+    expect(
+      calls.realpaths.filter((p) => p !== 'C:\\work\\a.png'),
+      'realpath on such a root opens the SMB session itself'
+    ).toEqual([])
+    expect(await opener.resolveLocal('C:\\work\\a.png', ['C:\\proj', 'C:\\mnt\\proj', 'C:\\work'])).toEqual({
+      ok: true,
+      real: 'C:\\work\\a.png'
+    })
+    expect(calls.realpaths.filter((p) => p === 'C:\\proj' || p.startsWith('C:\\mnt'))).toEqual([])
+  })
+
+  test.each([
+    ['an http URL', 'https://example.com/a.png'],
+    ['an alternate data stream', 'C:\\work\\a.png:stream'],
+    ['a relative path', 'a.png'],
+    ['an empty target', ''],
+    ['a target over 8192 characters', `/${'a'.repeat(8192)}`]
+  ])('%s is invalid and touches nothing', async (_name, target) => {
+    const { opener, calls } = harness('win32', { existing: { 'C:\\work': 'C:\\work' } })
+    expect(await opener.resolveLocal(target, ['C:\\work'])).toEqual({ ok: false, reason: 'invalid' })
+    untouched(calls)
+    expect(calls.realpaths).toEqual([])
+  })
+
+  test('a target that is not a string is invalid', async () => {
+    const { opener } = harness('linux')
+    expect(await opener.resolveLocal({ toString: () => '/work/a.png' }, ['/work'])).toEqual({ ok: false, reason: 'invalid' })
+  })
+
+  test('a missing file is not-found', async () => {
+    const { opener } = harness('linux', { existing: { '/work': '/work' } })
+    expect(await opener.resolveLocal('/work/gone.png', ['/work'])).toEqual({ ok: false, reason: 'not-found' })
+  })
+})
+
+describe('link-opener: exclusion entries and unreadable paths', () => {
+  const NETWORK_EXCLUSIONS = ['\\\\evil\\share\\z', 'C:\\mnt\\secrets']
+  const networkWorld = (): ReturnType<typeof harness> =>
+    harness('win32', {
+      links: { 'C:\\mnt': '\\\\evil\\share\\y' },
+      existing: { 'C:\\work': 'C:\\work', 'C:\\work\\a.png': 'C:\\work\\a.png' },
+      policy: { extensions: [...DEFAULT_LINK_EXTENSIONS], exclusions: NETWORK_EXCLUSIONS }
+    })
+  const touchedNetwork = (realpaths: string[]): string[] => realpaths.filter((p) => p.startsWith('\\\\') || p.startsWith('C:\\mnt'))
+
+  test('an exclusion that is a network path, or sits under a link to one, is never resolved: not on a hover, not on a click', async () => {
+    const hover = networkWorld()
+    expect(await hover.opener.resolveLocal('C:\\work\\a.png', ['C:\\work'])).toEqual({ ok: true, real: 'C:\\work\\a.png' })
+    expect(touchedNetwork(hover.calls.realpaths), 'realpath on such an entry opens the SMB session itself').toEqual([])
+
+    const click = networkWorld()
+    expect(await click.opener.open('C:\\work\\a.png', 'open')).toEqual({ ok: true })
+    expect(touchedNetwork(click.calls.realpaths)).toEqual([])
+  })
+
+  test('an exclusion that is a link to a local folder still excludes what lies behind it', async () => {
+    const { opener } = harness('win32', {
+      existing: { 'C:\\work': 'C:\\work', 'C:\\alias': 'C:\\secret', 'C:\\secret\\k.png': 'C:\\secret\\k.png' },
+      policy: { extensions: [...DEFAULT_LINK_EXTENSIONS], exclusions: ['C:\\alias'] }
+    })
+    expect(await opener.resolveLocal('C:\\secret\\k.png', ['C:\\secret'])).toEqual({ ok: false, reason: 'not-allowed' })
+    expect(await opener.open('C:\\secret\\k.png', 'open')).toEqual({ ok: false, reason: 'not-allowed' })
+  })
+
+  test('an exclusion that cannot be read refuses the file and is traced, one that is missing excludes nothing', async () => {
+    const world = (code: string): ReturnType<typeof harness> =>
+      harness('linux', {
+        existing: { '/work': '/work', '/work/a.png': '/work/a.png' },
+        realpathErrors: { '/priv/x': code },
+        policy: { extensions: [...DEFAULT_LINK_EXTENSIONS], exclusions: ['/priv/x'] }
+      })
+    const locked = world('EACCES')
+    expect(await locked.opener.resolveLocal('/work/a.png', ['/work'])).toEqual({ ok: false, reason: 'not-allowed' })
+    expect(locked.calls.reports.join('\n')).toContain('EACCES')
+    const missing = world('ENOENT')
+    expect(await missing.opener.resolveLocal('/work/a.png', ['/work'])).toEqual({ ok: true, real: '/work/a.png' })
+    expect(missing.calls.reports).toEqual([])
+  })
+
+  test('a root or a target that cannot be read is traced with its error code, once however often it is hovered', async () => {
+    const { opener, calls } = harness('linux', {
+      existing: { '/work': '/work', '/work/a.png': '/work/a.png' },
+      realpathErrors: { '/locked': 'EACCES', '/work/b.png': 'EPERM' }
+    })
+    for (let i = 0; i < 2; i++) {
+      expect(await opener.resolveLocal('/work/a.png', ['/locked', '/work'])).toEqual({ ok: true, real: '/work/a.png' })
+      expect(await opener.resolveLocal('/work/b.png', ['/work'])).toEqual({ ok: false, reason: 'not-found' })
+    }
+    expect(calls.reports).toHaveLength(2)
+    expect(calls.reports.find((r) => r.includes('/locked'))).toContain('EACCES')
+    expect(calls.reports.find((r) => r.includes('b.png'))).toContain('EPERM')
+  })
+
+  test('an exclusion whose own links cannot be read refuses the file, on a hover and on a click', async () => {
+    const world = (): ReturnType<typeof harness> =>
+      harness('linux', {
+        existing: { '/work': '/work', '/work/a.png': '/work/a.png' },
+        readlinkErrors: { '/priv/x': 'EACCES' },
+        policy: { extensions: [...DEFAULT_LINK_EXTENSIONS], exclusions: ['/priv/x'] }
+      })
+    expect(await world().opener.resolveLocal('/work/a.png', ['/work'])).toEqual({ ok: false, reason: 'not-allowed' })
+    const click = world()
+    expect(await click.opener.open('/work/a.png', 'open')).toEqual({ ok: false, reason: 'not-allowed' })
+    expect(click.calls.opened).toEqual([])
+  })
+
+  test('the memory of traced paths is bounded: a path hovered long ago is traced again', async () => {
+    const targets = Array.from({ length: 300 }, (_, i) => `/work/f${i}.png`)
+    const { opener, calls } = harness('linux', {
+      existing: { '/work': '/work' },
+      realpathErrors: Object.fromEntries(targets.map((t) => [t, 'EACCES']))
+    })
+    for (const target of targets) await opener.resolveLocal(target, ['/work'])
+    await opener.resolveLocal(targets[0]!, ['/work'])
+    expect(calls.reports).toHaveLength(301)
+  })
+
+  test('a root or a target that does not exist is not traced', async () => {
+    const { opener, calls } = harness('linux', {
+      existing: { '/work': '/work', '/work/a.png': '/work/a.png' },
+      realpathErrors: { '/gone': 'ENOENT', '/work/b.png': 'ENOTDIR' }
+    })
+    expect(await opener.resolveLocal('/work/a.png', ['/gone', '/work'])).toEqual({ ok: true, real: '/work/a.png' })
+    expect(await opener.resolveLocal('/work/b.png', ['/work'])).toEqual({ ok: false, reason: 'not-found' })
+    expect(calls.reports).toEqual([])
+  })
+})
+
 describe('nodeLinkFs', () => {
   const base = mkdtempSync(join(tmpdir(), 'kory-linkfs-'))
   writeFileSync(join(base, 'plain.txt'), 'x')

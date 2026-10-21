@@ -11,6 +11,7 @@ import { safeExternalUrl } from './external-url'
 const MAX_TARGET_LENGTH = 8192
 const MAX_LINK_HOPS = 16
 const MAX_READLINKS = 64
+const MAX_TRACED_PATHS = 256
 const SCHEME_RE = /^([A-Za-z][A-Za-z0-9+.-]*):/
 const MSYS_DRIVE_RE = /^\/([A-Za-z])\//
 const WSL_DRIVE_RE = /^\/mnt\/([A-Za-z])\/(.+)$/
@@ -35,8 +36,12 @@ export interface LinkOpenerDeps {
   reportError(scope: string, message: string, err?: unknown): void
 }
 
+export type LocalResolution = { ok: true; real: string } | { ok: false; reason: LinkRefusal }
+
 export interface LinkOpener {
   open(target: unknown, intent: unknown): Promise<LinkOutcome>
+  /** The canonical path of a local target lying inside one of `roots` and under no exclusion; opens nothing. */
+  resolveLocal(target: unknown, roots: readonly string[]): Promise<LocalResolution>
 }
 
 /** The production filesystem adapter: `realpath` is libuv's native one, which expands Windows 8.3 names. */
@@ -115,6 +120,19 @@ export function createLinkOpener(deps: LinkOpenerDeps): LinkOpener {
   const expandHome = (entry: string): string =>
     entry.startsWith('~/') || entry.startsWith('~\\') ? p.join(deps.home, entry.slice(1)) : entry
 
+  const isAbsent = (code: string): boolean => code === 'ENOENT' || code === 'ENOTDIR'
+
+  // A hover repeats on the same text: each unreadable path is traced once, and the memory of it is bounded.
+  const traced = new Set<string>()
+  function traceUnreadable(what: string, path: string, code: string | undefined): void {
+    if (code === undefined || isAbsent(code)) return
+    const key = `${what}|${path}`
+    if (traced.has(key)) return
+    if (traced.size >= MAX_TRACED_PATHS) traced.clear()
+    traced.add(key)
+    deps.reportError('links', `${what} unreadable (${code}): ${path.slice(0, 200)}`)
+  }
+
   // The entry itself may be a link (a dotfile directory symlinked elsewhere), so both the written and the resolved form are compared.
   async function isExcluded(real: string, exclusions: readonly string[]): Promise<boolean> {
     for (const entry of exclusions) {
@@ -124,12 +142,16 @@ export function createLinkOpener(deps: LinkOpenerDeps): LinkOpener {
       }
       const written = p.normalize(expandHome(entry))
       if (within(real, written)) return true
-      try {
-        if (within(real, await deps.fs.realpath(written))) return true
-      } catch (e) {
-        const code = (e as NodeJS.ErrnoException | undefined)?.code
-        if (code === 'ENOENT' || code === 'ENOTDIR') continue
-        deps.reportError('links', `exclusion entry unreadable: ${entry.slice(0, 200)}`, e)
+      // The operator writes these entries, and one may point at a share: it is never resolved.
+      if (isNetworkOrDevicePath(written)) continue
+      const resolved = await canonical(written)
+      if ('real' in resolved) {
+        if (within(real, resolved.real)) return true
+        continue
+      }
+      if (resolved.refusal === 'failed') return true
+      if (resolved.code !== undefined && !isAbsent(resolved.code)) {
+        deps.reportError('links', `exclusion entry unreadable (${resolved.code}): ${entry.slice(0, 200)}`)
         return true
       }
     }
@@ -208,19 +230,25 @@ export function createLinkOpener(deps: LinkOpenerDeps): LinkOpener {
     }
   }
 
-  async function openLocal(path: string, intent: LinkIntent): Promise<LinkOutcome> {
+  async function canonical(path: string): Promise<{ real: string } | { refusal: LinkRefusal; code?: string }> {
     const linkProblem = await linkRefusal(path)
-    if (linkProblem !== null) return refuse(linkProblem, path)
-
+    if (linkProblem !== null) return { refusal: linkProblem }
     let real: string
     try {
       real = await deps.fs.realpath(path)
-    } catch {
-      return refuse('not-found', path)
+    } catch (e) {
+      return { refusal: 'not-found', code: (e as NodeJS.ErrnoException | undefined)?.code ?? 'UNKNOWN' }
     }
     // A junction or a mapped drive can resolve onto a network path.
-    if (isNetworkOrDevicePath(real)) return refuse('network-path', path)
-    if (hasStreamSuffix(real)) return refuse('invalid', path)
+    if (isNetworkOrDevicePath(real)) return { refusal: 'network-path' }
+    if (hasStreamSuffix(real)) return { refusal: 'invalid' }
+    return { real }
+  }
+
+  async function openLocal(path: string, intent: LinkIntent): Promise<LinkOutcome> {
+    const resolved = await canonical(path)
+    if ('refusal' in resolved) return refuse(resolved.refusal, path)
+    const { real } = resolved
 
     // A directory is only ever shown: it can become a file named x.exe between this check and a launch, and a .app folder launches on macOS.
     if (await deps.fs.isDirectory(real)) {
@@ -250,5 +278,43 @@ export function createLinkOpener(deps: LinkOpenerDeps): LinkOpener {
     return { ok: true }
   }
 
-  return { open }
+  // The one place that decides which files a hover may read: only inside a work dir.
+  async function previewContained(real: string, roots: readonly string[]): Promise<boolean> {
+    for (const root of roots) {
+      if (isNetworkOrDevicePath(root)) continue
+      const resolved = await canonical(root)
+      if ('real' in resolved) {
+        if (within(real, resolved.real)) return true
+      } else {
+        traceUnreadable('preview root', root, resolved.code)
+      }
+    }
+    return false
+  }
+
+  async function resolveLocal(rawTarget: unknown, roots: readonly string[]): Promise<LocalResolution> {
+    if (typeof rawTarget !== 'string' || rawTarget.length === 0 || rawTarget.length > MAX_TARGET_LENGTH) {
+      return { ok: false, reason: 'invalid' }
+    }
+    const parsed = parse(rawTarget)
+    if (parsed.kind === 'refused') return { ok: false, reason: parsed.reason }
+    if (parsed.kind === 'url' || hasStreamSuffix(parsed.path)) return { ok: false, reason: 'invalid' }
+    try {
+      const resolved = await canonical(parsed.path)
+      if ('refusal' in resolved) {
+        traceUnreadable('preview target', parsed.path, resolved.code)
+        return { ok: false, reason: resolved.refusal }
+      }
+      const { real } = resolved
+      if (!(await previewContained(real, roots)) || (await isExcluded(real, deps.policy().exclusions))) {
+        return { ok: false, reason: 'not-allowed' }
+      }
+      return { ok: true, real }
+    } catch (e) {
+      deps.reportError('links', `link resolve failed: ${parsed.path.slice(0, 200)}`, e)
+      return { ok: false, reason: 'failed' }
+    }
+  }
+
+  return { open, resolveLocal }
 }

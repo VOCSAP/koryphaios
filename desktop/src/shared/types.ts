@@ -1334,6 +1334,10 @@ export type SandboxProtectionStatus =
 export type LinkIntent = 'reveal' | 'open'
 export type LinkRefusal = 'invalid' | 'network-path' | 'not-found' | 'not-allowed' | 'failed'
 export type LinkOutcome = { ok: true } | { ok: false; reason: LinkRefusal }
+/** `busy`: another preview of this window is still being read; `unavailable`: no image to show, whatever the cause. */
+export type ImagePreviewResult =
+  | { ok: true; dataUrl: string; width: number; height: number }
+  | { ok: false; reason: 'unavailable' | 'busy' }
 
 /** Full sandbox state of THIS window's project (Docker rail view + gates). */
 export interface SandboxStatus {
@@ -2591,6 +2595,12 @@ export interface DeckApi {
    * validates it on every call; a refusal is a value, never a throw.
    */
   openLink(target: string, intent: LinkIntent): Promise<LinkOutcome>
+  /**
+   * A PNG or JPEG a terminal printed, read by main and returned as a bounded
+   * data URL for a hover preview. Only a local file inside a work dir is read,
+   * and never on a sandbox project; the renderer decodes it, main never does.
+   */
+  previewImage(target: string): Promise<ImagePreviewResult>
   /** Kill the image-build terminal (dialog closed mid-build). */
   sandboxBuildStop(): Promise<void>
   /** Wipe the credentials in the shared auth volume ("disconnect"). */

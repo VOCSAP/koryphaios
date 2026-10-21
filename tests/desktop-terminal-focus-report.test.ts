@@ -8,6 +8,7 @@ const FOCUS_IN = '\x1b[I'
 
 const inertLinks: TerminalLinkDeps = {
   open: async () => ({ ok: true }),
+  preview: async () => ({ ok: false, reason: 'unavailable' }),
   onRefused: () => {},
   report: () => {},
   fileLinks: () => true,

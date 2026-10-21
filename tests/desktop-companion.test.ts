@@ -139,6 +139,15 @@ test('shell:open-link is remote-blocked: a paired device could make the PC open 
   ).toBe(true)
 })
 
+test('shell:preview-image stays remote-blocked by the EXPLICIT floor even though it is a tier-0 read', () => {
+  expect(COMPANION_MANIFEST.previewImage).toEqual({ kind: 'invoke', channel: 'shell:preview-image' })
+  expect(CHANNEL_TIERS['shell:preview-image']).toBe(0)
+  expect(
+    REMOTE_BLOCKED_CHANNELS.has('shell:preview-image'),
+    'a paired device could make the PC read a local file and receive its bytes'
+  ).toBe(true)
+})
+
 test('agents:stop (trust-changing) is remote-blocked; agents:stop-state (read) is not', () => {
   expect(CHANNEL_TIERS['agents:stop']).toBe(3)
   expect(REMOTE_BLOCKED_CHANNELS.has('agents:stop')).toBe(true)
