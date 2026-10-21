@@ -25,6 +25,18 @@ test('accepts the current protocol version and resolved Deck identity', () => {
   expect(parseAvatarAttachRequest(validAttach)).toEqual(validAttach)
 })
 
+const { deckPid: _omittedPid, ...attachWithoutPid } = validAttach
+
+test.each<[string, Record<string, unknown>]>([
+  ['an absent key', attachWithoutPid],
+  ['zero', { ...validAttach, deckPid: 0 }],
+  ['NaN, which JSON transport would normalize to null', { ...validAttach, deckPid: Number.NaN }],
+  ['a non-integer number', { ...validAttach, deckPid: 1.5 }],
+  ['a numeric string', { ...validAttach, deckPid: '4242' }]
+])('rejects an attach PID that is %s', (_label, request) => {
+  expect(() => parseAvatarAttachRequest(request)).toThrow(expect.objectContaining({ code: 'invalid_attach_request' }))
+})
+
 test('rejects malformed protocol versions as invalid attach requests', () => {
   for (const protocol_version of [undefined, null, '1', 1.5, 'abc', {}, Number.MAX_SAFE_INTEGER + 1]) {
     try {

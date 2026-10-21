@@ -34,8 +34,9 @@ interface AvatarResponse {
   body: Record<string, unknown>
 }
 
-async function openServer(): Promise<{ server: AvatarServer; state: AvatarState; reports: string[] }> {
-  const state = new AvatarState({ now: () => 0 })
+async function openServer(): Promise<{ server: AvatarServer; state: AvatarState; reports: string[]; setNow(now: number): void }> {
+  let now = 0
+  const state = new AvatarState({ now: () => now })
   const reports: string[] = []
   const server = await startAvatarServer({
     avatarRunId: 'avatar-run-1',
@@ -44,7 +45,7 @@ async function openServer(): Promise<{ server: AvatarServer; state: AvatarState;
     token,
     report: (_scope, message) => reports.push(message)
   })
-  return { server, state, reports }
+  return { server, state, reports, setNow: (next) => { now = next } }
 }
 
 test('reports a rejected Avatar request handler', async () => {
@@ -221,6 +222,63 @@ test('attaches one Deck per identity, receives state, and makes detach idempoten
       broker_url: attach.broker_url
     }))).toEqual({ status: 200, body: { ok: true, detached: false } })
     expect(state.summary().face).toBe('seul')
+  } finally {
+    await server.close()
+  }
+})
+
+test('rejects an attach PID that cannot prove Deck process ownership', async () => {
+  const { server } = await openServer()
+  try {
+    for (const deckPid of [undefined, '4242', 42.5, 0]) {
+      expect(await post(server, '/attach', JSON.stringify({ ...attach, deckPid }))).toEqual({
+        status: 400,
+        body: { error: 'invalid_request' }
+      })
+    }
+  } finally {
+    await server.close()
+  }
+})
+
+test('removes a suspect Deck only when its PID confirms it is dead', async () => {
+  const { server, state, setNow } = await openServer()
+  try {
+    expect(await post(server, '/attach', JSON.stringify(attach))).toMatchObject({ status: 200 })
+    setNow(15_000)
+
+    const probed: number[] = []
+    server.sweepDeadDecks((pid) => {
+      probed.push(pid)
+      return false
+    })
+
+    expect(probed).toEqual([attach.deckPid])
+    expect(server.attachedDecks()).toEqual([])
+    expect(state.summary()).toMatchObject({ face: 'seul', decks: [] })
+  } finally {
+    await server.close()
+  }
+})
+
+test('retains a live suspect Deck and does not probe a fresh Deck', async () => {
+  const { server, state, setNow } = await openServer()
+  const fresh = { ...attach, deckRunId: 'deck-run-fresh', deckPid: 5252 }
+  try {
+    expect(await post(server, '/attach', JSON.stringify(attach))).toMatchObject({ status: 200 })
+    setNow(14_999)
+    expect(await post(server, '/attach', JSON.stringify(fresh))).toMatchObject({ status: 200 })
+    setNow(15_000)
+
+    const probed: number[] = []
+    server.sweepDeadDecks((pid) => {
+      probed.push(pid)
+      return true
+    })
+
+    expect(probed).toEqual([attach.deckPid])
+    expect(server.attachedDecks()).toEqual([attach, fresh])
+    expect(state.summary().face).toBe('panne')
   } finally {
     await server.close()
   }

@@ -12,7 +12,7 @@ import type { SessionRuntime } from '../shared/types'
 import { isAvatarCounter, projectAvatarCounters } from './avatar-counters'
 import type { AvatarRendezvous } from './avatar-registry'
 import { avatarHttpsRequestOptions, connectAvatarWss } from './avatar-transport'
-import { logInfo, reportError } from './log'
+import { logInfo, logWarn, reportError } from './log'
 
 export const AVATAR_REQUEST_TIMEOUT_MS = 3_000
 export const AVATAR_COMMAND_TIMEOUT_MS = 2_000
@@ -46,6 +46,7 @@ export interface AvatarClientOptions {
   after?: (ms: number, fire: () => void) => () => void
   report?: typeof reportError
   info?: typeof logInfo
+  warn?: typeof logWarn
 }
 
 export interface AvatarClient {
@@ -116,6 +117,7 @@ export function createAvatarClient(options: AvatarClientOptions): AvatarClient {
   const every = options.every ?? everyInterval
   const after = options.after ?? afterTimeout
   const info = options.info ?? logInfo
+  const warn = options.warn ?? logWarn
   const link = failureEpisode(report, info, 'Avatar link restored')
   const webSocket = failureEpisode(report, info, 'Avatar WebSocket restored')
   const unreadInput = failureEpisode(report, info, 'Inbox unread count valid again')
@@ -275,10 +277,16 @@ export function createAvatarClient(options: AvatarClientOptions): AvatarClient {
         socket = null
         closing?.close(1000, 'Deck detaching')
         const rendezvous = options.rendezvous()
-        if (!rendezvous || attachedRunId !== rendezvous.avatarRunId) return
+        if (!rendezvous) return
+        if (attachedRunId === null) return
+        if (attachedRunId !== rendezvous.avatarRunId) {
+          warn('avatar-client', 'Avatar detach abandoned because its run changed')
+          return
+        }
         attachedRunId = null
         const status = await post(rendezvous, '/detach', identity)
         if (status !== 200) report('avatar-client', `Avatar refused the detach with status ${status}`)
+        else info('avatar-client', 'Avatar detached')
       })
     }
   }

@@ -119,6 +119,7 @@ async function setup(appearanceOverride: Partial<AvatarAppearance> = {}) {
   const windowErrors: string[] = []
   let heartbeat: (() => void) | null = null
   let doubleClick: (() => void) | null = null
+  let sweeps = 0
   const assembly = assembleAvatar({
     ipc: { handle: () => {}, removeHandler: () => {} },
     available: true,
@@ -169,6 +170,7 @@ async function setup(appearanceOverride: Partial<AvatarAppearance> = {}) {
   }
   const tray = createAvatarTray({
     summary: assembly.traySummary,
+    sweepDeadDecks: () => { sweeps += 1 },
     iconDir: 'icons',
     locale: 'en',
     attachedDecks: () => [DECK],
@@ -220,8 +222,16 @@ async function setup(appearanceOverride: Partial<AvatarAppearance> = {}) {
     doubleClick()
   }
   tick()
-  return { assembly, tray, windows, menus, windowErrors, appearance, locate, checkedIn, pureMenu, tick, doubleClickIcon }
+  return { assembly, tray, windows, menus, windowErrors, appearance, locate, checkedIn, pureMenu, tick, doubleClickIcon, sweepCount: () => sweeps }
 }
+
+test('sweeps dead Decks on the initial Tray refresh and every heartbeat', async () => {
+  const s = await setup()
+
+  expect(s.sweepCount()).toBe(2)
+  s.tick()
+  expect(s.sweepCount()).toBe(3)
+})
 
 test('a Tray double-click raises a visible avatar after showing it, without touching Always on top', async () => {
   const s = await setup({ alwaysOnTop: false })

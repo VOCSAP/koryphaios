@@ -185,6 +185,7 @@ test('translates every native label, drives actions, refreshes, reports errors a
 
   const tray = createAvatarTray({
     summary: () => summary,
+    sweepDeadDecks: () => {},
     iconDir: 'icons',
     locale: 'en',
     attachedDecks: () => attached,
@@ -247,6 +248,7 @@ test('reports a native refresh failure without preventing disposal', () => {
   const errors: unknown[] = []
   const tray = createAvatarTray({
     summary: () => summary,
+    sweepDeadDecks: () => {},
     iconDir: 'icons',
     locale: 'en',
     attachedDecks: () => attached,
@@ -315,6 +317,7 @@ test('clicking the broker entry hands its value to the Avatar', () => {
   let running = true
   createAvatarTray({
     summary: () => summary,
+    sweepDeadDecks: () => {},
     iconDir: 'icons',
     locale: 'en',
     attachedDecks: () => attached,

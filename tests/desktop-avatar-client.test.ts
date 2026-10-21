@@ -62,6 +62,7 @@ function harness(overrides: Partial<AvatarClientOptions> = {}) {
   const sockets: FakeClientSocket[] = []
   const reports: string[] = []
   const infos: string[] = []
+  const warnings: string[] = []
   const heartbeat: { ms?: number; tick?: () => void } = {}
   const deadlines: Array<{ ms: number; fire(): void; cancelled: boolean }> = []
   const live = {
@@ -108,9 +109,10 @@ function harness(overrides: Partial<AvatarClientOptions> = {}) {
     },
     report: (_scope, message) => reports.push(message),
     info: (_scope, message) => infos.push(message),
+    warn: (_scope, message) => warnings.push(message),
     ...overrides
   })
-  return { client, posts, sockets, reports, infos, heartbeat, deadlines, live }
+  return { client, posts, sockets, reports, infos, warnings, heartbeat, deadlines, live }
 }
 
 const flush = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0))
@@ -153,6 +155,21 @@ test('auto-attaches only when the global setting is on and the project has not o
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
+})
+
+test('logs successful and abandoned Avatar detach attempts', async () => {
+  const successful = harness()
+  successful.client.start()
+  await flush()
+  await successful.client.stop()
+  expect(successful.infos).toContain('Avatar detached')
+
+  const abandoned = harness()
+  abandoned.client.start()
+  await flush()
+  abandoned.live.rendezvous = rendezvous('avatar-run-2')
+  await abandoned.client.stop()
+  expect(abandoned.warnings).toContain('Avatar detach abandoned because its run changed')
 })
 
 test('attaches, binds, pushes state on change and repeats it every five seconds', async () => {

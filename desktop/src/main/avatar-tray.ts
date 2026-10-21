@@ -25,6 +25,7 @@ export interface AvatarTray {
 
 export interface AvatarTrayOptions {
   summary(): AvatarViewSummary
+  sweepDeadDecks(): void
   iconDir: string
   locale: SupportedLocale
   attachedDecks(): AvatarAttachRequest[]
@@ -158,6 +159,7 @@ export function createAvatarTray(options: AvatarTrayOptions, dependencies: Avata
   // not raise nativeTheme 'updated'.
   const refresh = (): void => {
     try {
+      options.sweepDeadDecks()
       const summary = options.summary()
       syncIcon(avatarTrayVariant(summary.face), currentTaskbar())
       const menu = buildAvatarTrayMenu(

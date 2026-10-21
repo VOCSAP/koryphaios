@@ -46,6 +46,7 @@ export interface AvatarServer {
   readonly host: string
   readonly port: number
   attachedDecks(): AvatarAttachedDeck[]
+  sweepDeadDecks(isAlive: (pid: number) => boolean): void
   focusDeck(identity: AvatarDeckIdentity, command: AvatarCommand): Promise<AvatarCommandResult>
   isDeckBound(identity: AvatarDeckIdentity): boolean
   /** The Deck-side port of the Deck's open bound WebSocket, or null. */
@@ -334,6 +335,16 @@ export async function startAvatarServer(options: AvatarServerOptions): Promise<A
         host: address.address,
         port: address.port,
         attachedDecks: () => [...attached.values()].map((deck) => ({ ...deck })),
+        sweepDeadDecks: (isAlive) => {
+          for (const deck of options.state.summary().decks) {
+            if (!deck.suspect) continue
+            const attachedDeck = attached.get(deckKey(deck.identity))
+            if (!attachedDeck) continue
+            if (!options.state.removeDeadDeck(deck.identity, !isAlive(attachedDeck.deckPid))) continue
+            attached.delete(deckKey(deck.identity))
+            hub.detach(deck.identity)
+          }
+        },
         focusDeck: hub.focusDeck,
         isDeckBound: hub.isDeckBound,
         boundRemotePort: hub.boundRemotePort,

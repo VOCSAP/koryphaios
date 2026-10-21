@@ -264,6 +264,7 @@ function startTray(
   let tick: (() => void) | null = null
   const tray = createAvatarTray({
     summary: () => summaryWithFace(face),
+    sweepDeadDecks: () => {},
     iconDir,
     locale: 'en',
     attachedDecks: () => [],

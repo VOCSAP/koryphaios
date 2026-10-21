@@ -211,6 +211,7 @@ async function startAvatar(): Promise<void> {
     createTray: () => {
       tray = createAvatarTray({
         summary: trayBrokerSummary(refreshManualStop, assembly.traySummary),
+        sweepDeadDecks: () => server?.sweepDeadDecks(deckProcessIsAlive),
         iconDir: avatarTrayIconDir(app.isPackaged, process.resourcesPath, app.getAppPath()),
         locale,
         attachedDecks: () => server?.attachedDecks() ?? [],
