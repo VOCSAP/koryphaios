@@ -797,7 +797,8 @@ describe('link-opener: exclusion entries and unreadable paths', () => {
         policy: { extensions: [...DEFAULT_LINK_EXTENSIONS], exclusions: ['/priv/x'] }
       })
     const locked = world('EACCES')
-    expect(await locked.opener.resolveLocal('/work/a.png', ['/work'])).toEqual({ ok: false, reason: 'not-allowed' })
+    for (let i = 0; i < 2; i++) expect(await locked.opener.resolveLocal('/work/a.png', ['/work'])).toEqual({ ok: false, reason: 'not-allowed' })
+    expect(locked.calls.reports, 'traced once however often it is hovered').toHaveLength(1)
     expect(locked.calls.reports.join('\n')).toContain('EACCES')
     const missing = world('ENOENT')
     expect(await missing.opener.resolveLocal('/work/a.png', ['/work'])).toEqual({ ok: true, real: '/work/a.png' })
@@ -831,6 +832,28 @@ describe('link-opener: exclusion entries and unreadable paths', () => {
     expect(click.calls.opened).toEqual([])
   })
 
+  test('an unreadable exclusion entry is traced at every click: only the hover deduplicates', async () => {
+    const { opener, calls } = harness('linux', {
+      existing: { '/work/a.png': '/work/a.png' },
+      realpathErrors: { '/priv/x': 'EACCES' },
+      policy: { extensions: [...DEFAULT_LINK_EXTENSIONS], exclusions: ['/priv/x'] }
+    })
+    for (let i = 0; i < 2; i++) expect(await opener.open('/work/a.png', 'open')).toEqual({ ok: false, reason: 'not-allowed' })
+    expect(calls.reports.filter((r) => r.includes('exclusion entry unreadable'))).toHaveLength(2)
+  })
+
+  test('the same path failing for another cause is traced again at a hover, the same cause is not', async () => {
+    const errors: Record<string, string> = { '/work/b.png': 'EACCES' }
+    const { opener, calls } = harness('linux', { existing: { '/work': '/work' }, realpathErrors: errors })
+    for (const code of ['EACCES', 'EACCES', 'EIO', 'EIO']) {
+      errors['/work/b.png'] = code
+      await opener.resolveLocal('/work/b.png', ['/work'])
+    }
+    expect(calls.reports).toHaveLength(2)
+    expect(calls.reports[0]).toContain('EACCES')
+    expect(calls.reports[1]).toContain('EIO')
+  })
+
   test('the memory of traced paths is bounded: a path hovered long ago is traced again', async () => {
     const targets = Array.from({ length: 300 }, (_, i) => `/work/f${i}.png`)
     const { opener, calls } = harness('linux', {
@@ -840,6 +863,38 @@ describe('link-opener: exclusion entries and unreadable paths', () => {
     for (const target of targets) await opener.resolveLocal(target, ['/work'])
     await opener.resolveLocal(targets[0]!, ['/work'])
     expect(calls.reports).toHaveLength(301)
+  })
+
+  test('a hovered target whose link cannot be read is traced once however often it is hovered, a click is traced every time', async () => {
+    const world = (): ReturnType<typeof harness> =>
+      harness('linux', {
+        existing: { '/w': '/w', '/w/a/x.png': '/w/a/x.png' },
+        readlinkErrors: { '/w/a': 'EACCES' }
+      })
+    const hover = world()
+    for (let i = 0; i < 3; i++) expect(await hover.opener.resolveLocal('/w/a/x.png', ['/w'])).toEqual({ ok: false, reason: 'failed' })
+    expect(hover.calls.reports, 'one trace carrying the code, not one per hover and not two for one event').toHaveLength(1)
+    expect(hover.calls.reports[0]).toContain('EACCES')
+
+    const click = world()
+    for (let i = 0; i < 2; i++) expect(await click.opener.open('/w/a/x.png', 'reveal')).toEqual({ ok: false, reason: 'failed' })
+    expect(click.calls.reports.filter((r) => r.includes('readlink failed'))).toHaveLength(2)
+  })
+
+  test('a hovered link loop or network target is traced once, and a hover refused as absent or outside is not traced at all', async () => {
+    const { opener, calls } = harness('linux', {
+      links: { '/w/l1': '/w/l2', '/w/l2': '/w/l1' },
+      existing: { '/w': '/w', '/etc/b.png': '/etc/b.png' }
+    })
+    for (let i = 0; i < 3; i++) {
+      expect(await opener.resolveLocal('/w/l1/x.png', ['/w'])).toEqual({ ok: false, reason: 'network-path' })
+      expect(await opener.resolveLocal('//attacker/share/a.png', ['/w'])).toEqual({ ok: false, reason: 'network-path' })
+      expect(await opener.resolveLocal('/etc/b.png', ['/w'])).toEqual({ ok: false, reason: 'not-allowed' })
+      expect(await opener.resolveLocal('/w/missing.png', ['/w'])).toEqual({ ok: false, reason: 'not-found' })
+    }
+    expect(calls.reports).toHaveLength(2)
+    expect(calls.reports.some((r) => r.includes('/w/l1/x.png'))).toBe(true)
+    expect(calls.reports.some((r) => r.includes('//attacker/share/a.png'))).toBe(true)
   })
 
   test('a root or a target that does not exist is not traced', async () => {

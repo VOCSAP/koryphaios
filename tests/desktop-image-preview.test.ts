@@ -1,5 +1,5 @@
-import { expect, test } from 'bun:test'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { describe, expect, test } from 'bun:test'
+import { constants, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { reachedWithin } from './_bounded-await'
@@ -7,8 +7,10 @@ import {
   createImagePreviewService,
   MAX_PREVIEW_BYTES,
   nodePreviewFs,
+  previewHandler,
   readImageHeader,
   type ImagePreviewDeps,
+  type ImagePreviewService,
   type PreviewHandle
 } from '../desktop/src/main/image-preview-service'
 
@@ -74,12 +76,13 @@ function harness(
     notFile?: boolean
     refusal?: string
     openFails?: boolean
+    /** Read at every open: the code of the error thrown, changed between two hovers. */
+    openError?: { code: string }
   } = {}
 ): { service: ReturnType<typeof createImagePreviewService>; calls: Calls; release: () => void } {
   const calls: Calls = { resolve: 0, opens: [], closes: 0, reads: 0, requested: 0, reports: [] }
   let release: () => void = () => {}
   const held = opts.hold ? new Promise<void>((resolve) => (release = resolve)) : undefined
-  const path = opts.path ?? '/work/picture.png'
   const handle: PreviewHandle = {
     stat: async () => ({ dev: 1n, ino: 2n, isFile: () => !opts.notFile }),
     read: async (buffer, offset, length, position) => {
@@ -93,15 +96,16 @@ function harness(
     close: async () => void calls.closes++
   }
   const deps: ImagePreviewDeps = {
-    resolveTarget: async () => {
+    resolveTarget: async (target) => {
       calls.resolve++
-      return opts.refusal ? { ok: false, reason: opts.refusal } : { ok: true, path }
+      return opts.refusal ? { ok: false, reason: opts.refusal } : { ok: true, path: opts.path ?? String(target) }
     },
     sandboxEnabled: () => opts.sandbox ?? false,
     fs: {
       open: async (entry) => {
         calls.opens.push(entry)
         if (opts.openFails) throw new Error('EACCES')
+        if (opts.openError) throw Object.assign(new Error(opts.openError.code), { code: opts.openError.code })
         return handle
       },
       stat: async () => ({ dev: opts.mismatch ? 3n : 1n, ino: 2n, isFile: () => true })
@@ -214,17 +218,111 @@ test('a sandbox project is unavailable before target resolution or any file acce
   expect(calls).toMatchObject({ resolve: 0, opens: [], reads: 0, reports: [] })
 })
 
-test('a refusal from the target guards opens nothing, and only an unexpected one is traced', async () => {
-  for (const [refusal, traced] of [
-    ['not-allowed', 0],
-    ['not-found', 0],
-    ['network-path', 1]
-  ] as const) {
+test('a refusal from the target guards opens nothing and adds no trace of its own: the resolver traces what it refuses', async () => {
+  for (const refusal of ['not-allowed', 'not-found', 'network-path', 'failed', 'invalid']) {
     const { service, calls } = harness(png(), { refusal })
     expect(await service.preview(1, '/outside/a.png')).toEqual({ ok: false, reason: 'unavailable' })
     expect(calls.opens, refusal).toEqual([])
-    expect(calls.reports, refusal).toHaveLength(traced)
+    expect(calls.reports, refusal).toEqual([])
   }
+})
+
+test.each([
+  ['an open that fails', { openFails: true }, png(), '/work/a.png'],
+  ['a descriptor that is not a regular file', { notFile: true }, png(), '/work/a.png'],
+  ['a path that names another file than the descriptor', { mismatch: true }, png(), '/work/a.png'],
+  ['a source over the limit', {}, Buffer.alloc(MAX_PREVIEW_BYTES + 1), '/work/a.png'],
+  ['a refused header', {}, png(1, 1, { apng: true }), '/work/a.png']
+] as const)('%s is traced once however often the file is hovered', async (_name, opts, bytes, path) => {
+  const { service, calls } = harness(bytes as Buffer, { ...opts, path })
+  for (let i = 0; i < 3; i++) expect(await service.preview(1, path)).toEqual({ ok: false, reason: 'unavailable' })
+  expect(calls.reports).toHaveLength(1)
+})
+
+test('each file is traced on its own: two files failing to open give two traces', async () => {
+  const { service, calls } = harness(png(), { openFails: true })
+  await service.preview(1, '/work/a.png')
+  await service.preview(1, '/work/b.png')
+  expect(calls.reports).toHaveLength(2)
+})
+
+test('a new cause on the same file is traced, the same cause again is not', async () => {
+  const openError = { code: 'EACCES' }
+  const { service, calls } = harness(png(), { openError })
+  for (const code of ['EACCES', 'EACCES', 'EMFILE', 'EIO', 'EIO']) {
+    openError.code = code
+    await service.preview(1, '/work/a.png')
+  }
+  expect(calls.reports).toHaveLength(3)
+  expect(calls.reports.map((m) => m.includes('/work/a.png'))).toEqual([true, true, true])
+})
+
+test('the memory of traced failures is bounded: a file hovered long ago is traced again', async () => {
+  const { service, calls } = harness(png(), { openFails: true })
+  for (let i = 0; i < 300; i++) await service.preview(1, `/work/f${i}.png`)
+  await service.preview(1, '/work/f0.png')
+  expect(calls.reports).toHaveLength(301)
+})
+
+async function flagsOf(platform: NodeJS.Platform): Promise<number> {
+  let flags = -1
+  const handle = { stat: async () => ({}), read: async () => ({ bytesRead: 0 }), close: async () => {} }
+  await nodePreviewFs(platform, async (_path, given) => ((flags = given), handle as never)).open('/a.png')
+  return flags
+}
+
+test('the production adapter opens read-only, and on Windows with no flag beyond that', async () => {
+  expect(await flagsOf('win32')).toBe(constants.O_RDONLY)
+  expect((await flagsOf('linux')) & (constants.O_WRONLY | constants.O_RDWR), 'never writable').toBe(0)
+})
+
+// O_NONBLOCK is undefined in Node's constants on Windows, so the flag itself can only be observed elsewhere.
+test.skipIf(process.platform === 'win32')('off Windows the adapter opens with O_NONBLOCK, which a FIFO would otherwise turn into a hang', async () => {
+  for (const platform of ['linux', 'darwin'] as const) {
+    expect((await flagsOf(platform)) & constants.O_NONBLOCK, platform).toBe(constants.O_NONBLOCK)
+  }
+})
+
+test.skipIf(process.platform === 'win32')('a FIFO named x.png is refused without blocking, and the window takes the next preview', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'kory-fifo-'))
+  try {
+    const fifo = join(dir, 'x.png')
+    expect(Bun.spawnSync(['mkfifo', fifo]).exitCode).toBe(0)
+    const real = join(dir, 'real.png')
+    writeFileSync(real, png(3, 3))
+    const reported: string[] = []
+    const service = createImagePreviewService({
+      resolveTarget: async (target) => ({ ok: true, path: String(target) }),
+      sandboxEnabled: () => false,
+      fs: nodePreviewFs(),
+      reportError: (_scope, message) => void reported.push(message)
+    })
+    expect(await reachedWithin(service.preview(1, fifo), 'the preview of a FIFO', 3000)).toEqual({ ok: false, reason: 'unavailable' })
+    expect(await reachedWithin(service.preview(1, real), 'the next preview of the window', 3000)).toMatchObject({ ok: true })
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+describe('previewHandler', () => {
+  const recorder = (): { service: ImagePreviewService; asked: [number, unknown][] } => {
+    const asked: [number, unknown][] = []
+    return { asked, service: { preview: async (id, target) => (asked.push([id, target]), { ok: true, dataUrl: 'd', width: 1, height: 1 }) } }
+  }
+
+  test('a local event reaches the service with the id of its sender', async () => {
+    const { service, asked } = recorder()
+    expect(await previewHandler(service, () => true)({ sender: { id: 7 } }, '/a.png')).toMatchObject({ ok: true })
+    expect(asked).toEqual([[7, '/a.png']])
+  })
+
+  test('an event the predicate does not call local, or one without a numeric sender id, is refused and never reaches the service', async () => {
+    const { service, asked } = recorder()
+    expect(await previewHandler(service, () => false)({ sender: { id: 7 } }, '/a.png')).toEqual({ ok: false, reason: 'unavailable' })
+    expect(await previewHandler(service, () => true)({ sender: {} }, '/a.png')).toEqual({ ok: false, reason: 'unavailable' })
+    expect(await previewHandler(service, () => true)({}, '/a.png')).toEqual({ ok: false, reason: 'unavailable' })
+    expect(asked).toEqual([])
+  })
 })
 
 test('a path that names another file than the descriptor is unavailable and traced', async () => {

@@ -1,4 +1,5 @@
-import { open, stat } from 'node:fs/promises'
+import { constants } from 'node:fs'
+import { open, stat, type FileHandle } from 'node:fs/promises'
 import { extname } from 'node:path'
 import type { ImagePreviewResult } from '../shared/types'
 
@@ -9,6 +10,7 @@ const MAX_AXIS = 4096
 const MAX_PIXELS = 8_000_000
 const JPEG_SCAN_BYTES = 64 * 1024
 const READ_CHUNK = 64 * 1024
+const MAX_TRACED_MESSAGES = 256
 const PNG_SIGNATURE = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])
 const JPEG_SOF = new Set([0xc0, 0xc1, 0xc2, 0xc3, 0xc5, 0xc6, 0xc7, 0xc9, 0xca, 0xcb, 0xcd, 0xce, 0xcf])
 
@@ -35,10 +37,15 @@ export interface ImagePreviewService {
   preview(senderId: number, target: unknown): Promise<ImagePreviewResult>
 }
 
-export function nodePreviewFs(): ImagePreviewDeps['fs'] {
+/** A FIFO named x.png would hold open() until a writer shows up: without O_NONBLOCK the window stays busy, and fstat then refuses what was opened. */
+export function nodePreviewFs(
+  platform: NodeJS.Platform = process.platform,
+  openFile: (path: string, flags: number) => Promise<FileHandle> = open
+): ImagePreviewDeps['fs'] {
+  const flags = platform === 'win32' ? constants.O_RDONLY : constants.O_RDONLY | constants.O_NONBLOCK
   return {
     open: async (path) => {
-      const handle = await open(path, 'r')
+      const handle = await openFile(path, flags)
       return {
         stat: () => handle.stat({ bigint: true }),
         read: (buffer, offset, length, position) => handle.read(buffer, offset, length, position),
@@ -101,9 +108,31 @@ export function readImageHeader(bytes: Buffer, path: string): Header {
   return header
 }
 
+const unavailable: ImagePreviewResult = { ok: false, reason: 'unavailable' }
+
+/** The handler of the preview channel: only a genuine local event reaches the service. */
+export function previewHandler(
+  service: ImagePreviewService,
+  isLocal: (event: unknown) => boolean
+): (event: { sender?: { id?: unknown } }, target: unknown) => Promise<ImagePreviewResult> | ImagePreviewResult {
+  return (event, target) => {
+    const id = event.sender?.id
+    return isLocal(event) && typeof id === 'number' ? service.preview(id, target) : unavailable
+  }
+}
+
 export function createImagePreviewService(deps: ImagePreviewDeps): ImagePreviewService {
   const active = new Set<number>()
-  const unavailable: ImagePreviewResult = { ok: false, reason: 'unavailable' }
+
+  // A hover repeats on the same file: each failure is traced once per cause, and the memory of it is bounded.
+  const traced = new Set<string>()
+  function trace(message: string, err?: unknown): void {
+    const key = `${message}|${(err as NodeJS.ErrnoException | undefined)?.code ?? ''}`
+    if (traced.has(key)) return
+    if (traced.size >= MAX_TRACED_MESSAGES) traced.clear()
+    traced.add(key)
+    deps.reportError('image-preview', message, err)
+  }
 
   async function readBounded(handle: PreviewHandle): Promise<Buffer | null> {
     const chunks: Buffer[] = []
@@ -121,36 +150,31 @@ export function createImagePreviewService(deps: ImagePreviewDeps): ImagePreviewS
 
   async function load(target: unknown): Promise<ImagePreviewResult> {
     const resolved = await deps.resolveTarget(target)
-    if (!resolved.ok) {
-      // A target outside the work dirs is a policy answer, not a fault: tracing every hover would flood the journal.
-      if (resolved.reason !== 'not-allowed' && resolved.reason !== 'not-found') {
-        deps.reportError('image-preview', `preview refused (${resolved.reason})`)
-      }
-      return unavailable
-    }
+    // The resolver traces what it refuses, once per path; a target outside the work dirs or absent is a policy answer, not a fault.
+    if (!resolved.ok) return unavailable
     const { path } = resolved
     let handle: PreviewHandle
     try {
       handle = await deps.fs.open(path)
     } catch (e) {
-      deps.reportError('image-preview', `preview open failed: ${path.slice(0, 200)}`, e)
+      trace(`preview open failed: ${path.slice(0, 200)}`, e)
       return unavailable
     }
     try {
       const opened = await handle.stat()
       const named = await deps.fs.stat(path)
       if (!opened.isFile() || opened.dev !== named.dev || opened.ino !== named.ino) {
-        deps.reportError('image-preview', `preview file changed after opening: ${path.slice(0, 200)}`)
+        trace(`preview file changed after opening: ${path.slice(0, 200)}`)
         return unavailable
       }
       const bytes = await readBounded(handle)
       if (bytes === null) {
-        deps.reportError('image-preview', `preview source over ${MAX_PREVIEW_BYTES} bytes: ${path.slice(0, 200)}`)
+        trace(`preview source over ${MAX_PREVIEW_BYTES} bytes: ${path.slice(0, 200)}`)
         return unavailable
       }
       const header = readImageHeader(bytes, path)
       if (!header.ok) {
-        deps.reportError('image-preview', `preview refused (${header.reason}): ${path.slice(0, 200)}`)
+        trace(`preview refused (${header.reason}): ${path.slice(0, 200)}`)
         return unavailable
       }
       return {
@@ -160,7 +184,7 @@ export function createImagePreviewService(deps: ImagePreviewDeps): ImagePreviewS
         height: header.height
       }
     } catch (e) {
-      deps.reportError('image-preview', `preview read failed: ${path.slice(0, 200)}`, e)
+      trace(`preview read failed: ${path.slice(0, 200)}`, e)
       return unavailable
     } finally {
       await handle.close().catch((e: unknown) => deps.reportError('image-preview', 'preview close failed', e))

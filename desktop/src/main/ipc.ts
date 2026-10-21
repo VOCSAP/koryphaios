@@ -2,7 +2,7 @@ import { join } from 'node:path'
 import { app, BrowserWindow, desktopCapturer, dialog, shell, webContents } from 'electron'
 import { broadcast, isLocalIpcEvent, regHandle, regOn } from './api-registry'
 import { safeExternalUrl } from './external-url'
-import { createImagePreviewService, nodePreviewFs } from './image-preview-service'
+import { createImagePreviewService, nodePreviewFs, previewHandler } from './image-preview-service'
 import { createLinkOpener, nodeLinkFs } from './link-opener'
 import { homedir } from 'node:os'
 import { handleAnswersIpc } from './approval-service'
@@ -1030,10 +1030,7 @@ export function registerIpc({
     fs: nodePreviewFs(),
     reportError
   })
-  // Reads a file for a hover: a remote caller is refused here as well as by the channel floor.
-  regHandle('shell:preview-image', (e, target: unknown) =>
-    isLocalIpcEvent(e) ? imagePreview.preview(e.sender.id, target) : { ok: false, reason: 'unavailable' }
-  )
+  regHandle('shell:preview-image', previewHandler(imagePreview, isLocalIpcEvent))
 
   // ----- dev server (serve.json) -----
   const serveIpc = createServeIpc({

@@ -122,19 +122,22 @@ export function createLinkOpener(deps: LinkOpenerDeps): LinkOpener {
 
   const isAbsent = (code: string): boolean => code === 'ENOENT' || code === 'ENOTDIR'
 
-  // A hover repeats on the same text: each unreadable path is traced once, and the memory of it is bounded.
+  // A hover repeats on the same text: each path is traced once per cause, and the memory of it is bounded.
   const traced = new Set<string>()
-  function traceUnreadable(what: string, path: string, code: string | undefined): void {
-    if (code === undefined || isAbsent(code)) return
-    const key = `${what}|${path}`
+  function traceOnce(what: string, path: string, detail: string): void {
+    const key = `${what}|${detail}|${path}`
     if (traced.has(key)) return
     if (traced.size >= MAX_TRACED_PATHS) traced.clear()
     traced.add(key)
-    deps.reportError('links', `${what} unreadable (${code}): ${path.slice(0, 200)}`)
+    deps.reportError('links', `${what} (${detail}): ${path.slice(0, 200)}`)
+  }
+  function traceUnreadable(what: string, path: string, code: string | undefined): void {
+    if (code === undefined || isAbsent(code)) return
+    traceOnce(`${what} unreadable`, path, code)
   }
 
   // The entry itself may be a link (a dotfile directory symlinked elsewhere), so both the written and the resolved form are compared.
-  async function isExcluded(real: string, exclusions: readonly string[]): Promise<boolean> {
+  async function isExcluded(real: string, exclusions: readonly string[], hover = false): Promise<boolean> {
     for (const entry of exclusions) {
       if (!/[\\/]/.test(entry)) {
         if (real.split(/[\\/]/).some((segment) => sameCase(segment) === sameCase(entry))) return true
@@ -144,14 +147,15 @@ export function createLinkOpener(deps: LinkOpenerDeps): LinkOpener {
       if (within(real, written)) return true
       // The operator writes these entries, and one may point at a share: it is never resolved.
       if (isNetworkOrDevicePath(written)) continue
-      const resolved = await canonical(written)
+      const resolved = await canonical(written, hover)
       if ('real' in resolved) {
         if (within(real, resolved.real)) return true
         continue
       }
       if (resolved.refusal === 'failed') return true
       if (resolved.code !== undefined && !isAbsent(resolved.code)) {
-        deps.reportError('links', `exclusion entry unreadable (${resolved.code}): ${entry.slice(0, 200)}`)
+        if (hover) traceOnce('exclusion entry unreadable', entry, resolved.code)
+        else deps.reportError('links', `exclusion entry unreadable (${resolved.code}): ${entry.slice(0, 200)}`)
         return true
       }
     }
@@ -161,7 +165,7 @@ export function createLinkOpener(deps: LinkOpenerDeps): LinkOpener {
   // `realpath` follows a symlink onto a UNC target by itself, so every component is read first.
   // A read that fails for a reason other than "not there" cannot prove the path is local.
   // A prefix is skipped once it and the link it holds are fully followed: targets sharing a long parent would otherwise exhaust the read budget.
-  async function linkRefusal(path: string): Promise<LinkRefusal | null> {
+  async function linkRefusal(path: string, hover: boolean): Promise<LinkRefusal | null> {
     const budget = { reads: 0 }
     const followed = new Set<string>()
     async function walk(current: string, hops: number): Promise<LinkRefusal | null> {
@@ -182,7 +186,8 @@ export function createLinkOpener(deps: LinkOpenerDeps): LinkOpener {
         } catch (e) {
           const code = (e as NodeJS.ErrnoException | undefined)?.code
           if (code === 'ENOENT' || code === 'ENOTDIR') return null
-          deps.reportError('links', `readlink failed: ${prefix.slice(0, 200)}`, e)
+          if (hover) traceUnreadable('readlink', prefix, code ?? 'UNKNOWN')
+          else deps.reportError('links', `readlink failed: ${prefix.slice(0, 200)}`, e)
           return 'failed'
         }
         if (target !== null) {
@@ -230,8 +235,8 @@ export function createLinkOpener(deps: LinkOpenerDeps): LinkOpener {
     }
   }
 
-  async function canonical(path: string): Promise<{ real: string } | { refusal: LinkRefusal; code?: string }> {
-    const linkProblem = await linkRefusal(path)
+  async function canonical(path: string, hover = false): Promise<{ real: string } | { refusal: LinkRefusal; code?: string }> {
+    const linkProblem = await linkRefusal(path, hover)
     if (linkProblem !== null) return { refusal: linkProblem }
     let real: string
     try {
@@ -282,7 +287,7 @@ export function createLinkOpener(deps: LinkOpenerDeps): LinkOpener {
   async function previewContained(real: string, roots: readonly string[]): Promise<boolean> {
     for (const root of roots) {
       if (isNetworkOrDevicePath(root)) continue
-      const resolved = await canonical(root)
+      const resolved = await canonical(root, true)
       if ('real' in resolved) {
         if (within(real, resolved.real)) return true
       } else {
@@ -292,22 +297,28 @@ export function createLinkOpener(deps: LinkOpenerDeps): LinkOpener {
     return false
   }
 
+  // A hover repeats on the same text: a refusal that is neither a policy answer nor already traced where it happened is traced once.
+  function deny(reason: LinkRefusal, path: string): LocalResolution {
+    if (reason !== 'not-found' && reason !== 'not-allowed' && reason !== 'failed') traceOnce('preview refused', path, reason)
+    return { ok: false, reason }
+  }
+
   async function resolveLocal(rawTarget: unknown, roots: readonly string[]): Promise<LocalResolution> {
     if (typeof rawTarget !== 'string' || rawTarget.length === 0 || rawTarget.length > MAX_TARGET_LENGTH) {
-      return { ok: false, reason: 'invalid' }
+      return deny('invalid', String(rawTarget))
     }
     const parsed = parse(rawTarget)
-    if (parsed.kind === 'refused') return { ok: false, reason: parsed.reason }
-    if (parsed.kind === 'url' || hasStreamSuffix(parsed.path)) return { ok: false, reason: 'invalid' }
+    if (parsed.kind === 'refused') return deny(parsed.reason, rawTarget)
+    if (parsed.kind === 'url' || hasStreamSuffix(parsed.path)) return deny('invalid', rawTarget)
     try {
-      const resolved = await canonical(parsed.path)
+      const resolved = await canonical(parsed.path, true)
       if ('refusal' in resolved) {
         traceUnreadable('preview target', parsed.path, resolved.code)
-        return { ok: false, reason: resolved.refusal }
+        return deny(resolved.refusal, parsed.path)
       }
       const { real } = resolved
-      if (!(await previewContained(real, roots)) || (await isExcluded(real, deps.policy().exclusions))) {
-        return { ok: false, reason: 'not-allowed' }
+      if (!(await previewContained(real, roots)) || (await isExcluded(real, deps.policy().exclusions, true))) {
+        return deny('not-allowed', parsed.path)
       }
       return { ok: true, real }
     } catch (e) {
