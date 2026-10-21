@@ -3334,13 +3334,21 @@ const closeDelegatedTaskTx = db.transaction(
 const rearmDelegatedTaskTx = db.transaction(
   (row: DelegatedTaskRow, sender: MessageSender, target: MessageTarget, text: string, deadlineSec: number, nowMs: number) => {
     const now = new Date(nowMs).toISOString();
-    const result = db.run(
-      `UPDATE delegated_tasks
-          SET status = 'armed', due_at_ms = ?, decision_due_at_ms = NULL, rearm_count = rearm_count + 1,
-              generation = generation + 1, updated_at = ?
-        WHERE task_id = ? AND group_id = ? AND status = 'overdue' AND decision_due_at_ms > ? AND rearm_count < max_rearms`,
-      [nowMs + deadlineSec * 1000, now, row.task_id, row.group_id, nowMs]
-    );
+    const result =
+      row.status === "armed"
+        ? db.run(
+            `UPDATE delegated_tasks
+                SET due_at_ms = ?, updated_at = ?
+              WHERE task_id = ? AND group_id = ? AND status = 'armed' AND due_at_ms = ? AND due_at_ms > ?`,
+            [nowMs + deadlineSec * 1000, now, row.task_id, row.group_id, row.due_at_ms, nowMs]
+          )
+        : db.run(
+            `UPDATE delegated_tasks
+                SET status = 'armed', due_at_ms = ?, decision_due_at_ms = NULL, rearm_count = rearm_count + 1,
+                    generation = generation + 1, updated_at = ?
+              WHERE task_id = ? AND group_id = ? AND status = 'overdue' AND decision_due_at_ms > ? AND rearm_count < max_rearms`,
+            [nowMs + deadlineSec * 1000, now, row.task_id, row.group_id, nowMs]
+          );
     if (result.changes !== 1) return null;
     const messageId = recordMessage(sender.instance_token, target.instance_token, sender.group_id, text, now, row.task_id);
     return { row: taskRow(row.task_id, row.group_id)!, messageId, sentAt: now };
@@ -3429,9 +3437,13 @@ async function handleSendMessage(body: SendMessageRequest): Promise<SendMessageR
       max_deadline_sec: task.max_deadline_sec,
     });
     if (!deadline.ok) return { ok: false, error: deadline.error };
+    const nowMs = Date.now();
+    if (task.status === "armed" && task.due_at_ms !== null && nowMs + deadline.value * 1000 <= task.due_at_ms) {
+      return { ok: false, error: "The new deadline must extend the task deadline" };
+    }
     const report = messageForTask(body, task, sender);
     if ("error" in report) return { ok: false, error: report.error };
-    const rearmed = rearmDelegatedTaskTx(task, sender, report.target, report.text, deadline.value, Date.now());
+    const rearmed = rearmDelegatedTaskTx(task, sender, report.target, report.text, deadline.value, nowMs);
     if (!rearmed) return { ok: false, error: "Task cannot be rearmed in its current state" };
     pushPeerMessage(report.target.instance_token, rearmed.messageId, sender, report.text, rearmed.sentAt);
     return { ok: true, task: toDelegatedTask(rearmed.row) };
@@ -3517,23 +3529,29 @@ function reserveDelegationEvent(
   );
 }
 
-const markTaskOverdueTx = db.transaction((row: DelegatedTaskRow, nowMs: number): DeckPush | null => {
-  const decisionDueMs = (row.due_at_ms ?? nowMs) + row.lead_silence_sec * 1000;
-  const at = new Date(nowMs).toISOString();
-  const result = db.run(
-    `UPDATE delegated_tasks SET status = 'overdue', decision_due_at_ms = ?, updated_at = ?
-      WHERE task_id = ? AND group_id = ? AND status = 'armed' AND generation = ? AND due_at_ms <= ?`,
-    [decisionDueMs, at, row.task_id, row.group_id, row.generation, nowMs]
-  );
-  if (result.changes !== 1) return null;
-  const delegate = publicTaskPeerName(row.delegate_binding, row.group_id, row.delegate_peer_id_snapshot);
-  const text =
-    `No explicit closure from '${delegate}' for task ${row.task_id} (${JSON.stringify(row.label)}); its deadline has passed. ` +
-    `Check the outcome, then close the task or rearm it with a new deadline (${row.max_rearms - row.rearm_count} rearm(s) left). ` +
-    `Escalation to the operator at ${new Date(decisionDueMs).toISOString()}, in ${describeDuration(decisionDueMs - nowMs)}, without a decision.`;
-  reserveDelegationEvent(row, "due", row.delegator_token, text, at);
-  return depositDeckMessage(row.delegator_token, row.group_id, text, at);
-});
+const markTaskOverdueTx = db.transaction(
+  (row: DelegatedTaskRow, nowMs: number): { pushes: DeckPush[]; delegateMissing: boolean } | null => {
+    const decisionDueMs = (row.due_at_ms ?? nowMs) + row.lead_silence_sec * 1000;
+    const at = new Date(nowMs).toISOString();
+    const result = db.run(
+      `UPDATE delegated_tasks SET status = 'overdue', decision_due_at_ms = ?, updated_at = ?
+        WHERE task_id = ? AND group_id = ? AND status = 'armed' AND generation = ? AND due_at_ms <= ?`,
+      [decisionDueMs, at, row.task_id, row.group_id, row.generation, nowMs]
+    );
+    if (result.changes !== 1) return null;
+    const delegate = publicTaskPeerName(row.delegate_binding, row.group_id, row.delegate_peer_id_snapshot);
+    const text =
+      `No explicit closure from '${delegate}' for task ${row.task_id} (${JSON.stringify(row.label)}); its deadline has passed. ` +
+      `Check the outcome, then close the task or rearm it with a new deadline (${row.max_rearms - row.rearm_count} rearm(s) left). ` +
+      `Escalation to the operator at ${new Date(decisionDueMs).toISOString()}, in ${describeDuration(decisionDueMs - nowMs)}, without a decision.`;
+    reserveDelegationEvent(row, "due", row.delegator_token, text, at);
+    const pushes = [depositDeckMessage(row.delegator_token, row.group_id, text, at)];
+    if (!taskPeerExists(row.delegate_binding, row.group_id)) return { pushes, delegateMissing: true };
+    const reminder = `Task ${row.task_id} deadline passed. Send your report or blocker while citing this task.`;
+    pushes.push(depositDeckMessage(row.delegate_binding, row.group_id, reminder, at));
+    return { pushes, delegateMissing: false };
+  }
+);
 
 const PARTICIPANT_GONE_SQL = `(
   NOT EXISTS (SELECT 1 FROM peers p WHERE p.instance_token = delegated_tasks.delegator_token AND p.group_id = delegated_tasks.group_id)
@@ -3615,7 +3633,10 @@ function sweepDelegatedTasks(nowMs: number = Date.now()): void {
   const orphans = db.query(
     `SELECT * FROM delegated_tasks WHERE status IN ('armed', 'overdue') AND ${PARTICIPANT_GONE_SQL} ORDER BY task_id LIMIT ?`
   ).all(DELEGATION_SWEEP_BATCH) as DelegatedTaskRow[];
-  for (const row of orphans) settle(row, "orphaned", "participant_gone");
+  for (const row of orphans) {
+    log.warn(`delegation sweep: task ${row.task_id} has a missing participant; no deadline reminder will be sent`);
+    settle(row, "orphaned", "participant_gone");
+  }
 
   const expired = db.query(
     "SELECT * FROM delegated_tasks WHERE status = 'armed' AND due_at_ms <= ? ORDER BY due_at_ms, task_id LIMIT ?"
@@ -3627,8 +3648,13 @@ function sweepDelegatedTasks(nowMs: number = Date.now()): void {
       settle(row, "escalated", "lead_silent");
     } else {
       try {
-        const push = markTaskOverdueTx(row, nowMs);
-        if (push) pushes.push(push);
+        const overdue = markTaskOverdueTx(row, nowMs);
+        if (overdue) {
+          pushes.push(...overdue.pushes);
+          if (overdue.delegateMissing) {
+            log.warn(`delegation sweep: task ${row.task_id} has a missing participant; no deadline reminder will be sent`);
+          }
+        }
       } catch (e) {
         log.error(`delegation sweep: alerting task ${row.task_id} failed`, e);
       }

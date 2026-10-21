@@ -1,5 +1,8 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { get, groupId, livePid, post, sha256Hex, startBroker, stopBroker, type TestBroker, openBrokerDb } from "./_helper.ts";
 
 interface Peer {
@@ -32,8 +35,8 @@ afterAll(async () => {
   await stopBroker(broker);
 });
 
-async function register(host: string, cwd: string): Promise<Peer> {
-  const result = await post<Peer>(`${broker.url}/register`, {
+async function register(host: string, cwd: string, target = broker): Promise<Peer> {
+  const result = await post<Peer>(`${target.url}/register`, {
     pid: livePid(),
     cwd,
     git_root: null,
@@ -49,8 +52,8 @@ async function register(host: string, cwd: string): Promise<Peer> {
   return result.body;
 }
 
-async function createTask(delegator: Peer, delegate: Peer, label: string): Promise<Task> {
-  const result = await post<{ ok: boolean; task?: Task; error?: string }>(`${broker.url}/send-message`, {
+async function createTask(delegator: Peer, delegate: Peer, label: string, target = broker): Promise<Task> {
+  const result = await post<{ ok: boolean; task?: Task; error?: string }>(`${target.url}/send-message`, {
     from_token: delegator.instance_token,
     to_peer_id: delegate.peer_id,
     text: `Initial request for ${label}`,
@@ -67,12 +70,12 @@ async function createTask(delegator: Peer, delegate: Peer, label: string): Promi
   return result.body.task!;
 }
 
-function taskRow(taskId: string): { status: string; rearm_count: number; generation: number; closed_at: string | null } {
-  const db = openBrokerDb(broker.dbPath, { readonly: true });
+function taskRow(taskId: string, target = broker): { status: string; rearm_count: number; generation: number; due_at_ms: number | null; closed_at: string | null } {
+  const db = openBrokerDb(target.dbPath, { readonly: true });
   try {
     return db.query(
-      "SELECT status, rearm_count, generation, closed_at FROM delegated_tasks WHERE task_id = ?"
-    ).get(taskId) as { status: string; rearm_count: number; generation: number; closed_at: string | null };
+      "SELECT status, rearm_count, generation, due_at_ms, closed_at FROM delegated_tasks WHERE task_id = ?"
+    ).get(taskId) as { status: string; rearm_count: number; generation: number; due_at_ms: number | null; closed_at: string | null };
   } finally {
     db.close();
   }
@@ -452,6 +455,72 @@ describe("delegated tasks", () => {
     const publicJson = JSON.stringify(closed.body);
     for (const internal of ["delegator_token", "delegate_binding", "owner_broker_id", "instance_token", "pid", "client_pid"]) {
       expect(publicJson).not.toContain(internal);
+    }
+  });
+
+  test("lets only the delegator extend an armed task without consuming a rearm", async () => {
+    const delegator = await register("delegation-extend-bob", "/delegation-extend-bob");
+    const delegate = await register("delegation-extend-alice", "/delegation-extend-alice");
+    const task = await createTask(delegator, delegate, "Extend armed task");
+    const extension = await post<{ ok: boolean; task?: Task; error?: string }>(`${broker.url}/send-message`, {
+      from_token: delegator.instance_token,
+      to_peer_id: delegate.peer_id,
+      text: "The deadline has been extended",
+      task_id: task.task_id,
+      deadline_sec: 120,
+    });
+
+    expect(extension.status).toBe(200);
+    expect(extension.body.ok).toBeTrue();
+    expect(extension.body.task).toMatchObject({ status: "armed", rearm_count: 0, generation: 0 });
+    expect(extension.body.task!.due_at_ms).toBeGreaterThan(task.due_at_ms!);
+    const extendedDueAt = extension.body.task!.due_at_ms!;
+
+    const shorter = await post<{ ok: boolean; error?: string }>(`${broker.url}/send-message`, {
+      from_token: delegator.instance_token,
+      to_peer_id: delegate.peer_id,
+      text: "The shorter deadline must be refused",
+      task_id: task.task_id,
+      deadline_sec: 1,
+    });
+    expect(shorter.body).toEqual({ ok: false, error: "The new deadline must extend the task deadline" });
+    expect(taskRow(task.task_id).due_at_ms).toBe(extendedDueAt);
+
+    const rejected = await post<{ ok: boolean; error?: string }>(`${broker.url}/send-message`, {
+      from_token: delegate.instance_token,
+      to_peer_id: delegator.peer_id,
+      text: "Unauthorized extension",
+      task_id: task.task_id,
+      deadline_sec: 120,
+    });
+    expect(rejected.status).toBe(200);
+    expect(rejected.body).toEqual({ ok: false, error: "Only the delegator can rearm this task" });
+    expect(taskRow(task.task_id)).toMatchObject({ status: "armed", rearm_count: 0, generation: 0 });
+  });
+
+  test("refuses an equal armed-task deadline without moving it", async () => {
+    const clockDir = mkdtempSync(join(tmpdir(), "cp-delegated-clock-"));
+    const clockPath = join(clockDir, "fixed-clock.ts");
+    const nowMs = 1_762_586_400_000;
+    writeFileSync(clockPath, `Date.now = () => ${nowMs};\n`);
+    let fixedBroker: TestBroker | null = null;
+    try {
+      fixedBroker = await startBroker({}, { command: ["bun", "--preload", clockPath, "broker.ts"] });
+      const delegator = await register("delegation-equal-bob", "/delegation-equal-bob", fixedBroker);
+      const delegate = await register("delegation-equal-alice", "/delegation-equal-alice", fixedBroker);
+      const task = await createTask(delegator, delegate, "Equal armed task", fixedBroker);
+      const equal = await post<{ ok: boolean; error?: string }>(`${fixedBroker.url}/send-message`, {
+        from_token: delegator.instance_token,
+        to_peer_id: delegate.peer_id,
+        text: "The equal deadline must be refused",
+        task_id: task.task_id,
+        deadline_sec: 60,
+      });
+      expect(equal.body).toEqual({ ok: false, error: "The new deadline must extend the task deadline" });
+      expect(taskRow(task.task_id, fixedBroker).due_at_ms).toBe(task.due_at_ms);
+    } finally {
+      if (fixedBroker) await stopBroker(fixedBroker);
+      rmSync(clockDir, { recursive: true, force: true });
     }
   });
 

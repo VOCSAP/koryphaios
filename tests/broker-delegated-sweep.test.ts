@@ -3,6 +3,7 @@ import { Database } from "bun:sqlite";
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { taskLabelFromText } from "../shared/delegated-task.ts";
 import { DECK_INSTANCE_TOKEN, OPERATOR_INSTANCE_TOKEN } from "../shared/types.ts";
 import { groupId, livePid, post, sha256Hex, startBroker, stopBroker, type TestBroker, openBrokerDb } from "./_helper.ts";
 
@@ -60,9 +61,9 @@ async function registerIn(b: TestBroker, group: Group, host: string): Promise<Pe
   return result.body;
 }
 
-async function createTask(b: TestBroker, bob: Peer, alice: Peer, label: string): Promise<Task> {
+async function createTask(b: TestBroker, bob: Peer, alice: Peer, label: string, text = `Work for ${label}`): Promise<Task> {
   const result = await post<{ ok: boolean; task?: Task; error?: string }>(`${b.url}/send-message`, {
-    from_token: bob.instance_token, to_peer_id: alice.peer_id, text: `Work for ${label}`, deadline_sec: 60, task_label: label,
+    from_token: bob.instance_token, to_peer_id: alice.peer_id, text, deadline_sec: 60, task_label: label,
   });
   expect(result.body.error).toBeUndefined();
   expect(result.body.ok).toBeTrue();
@@ -103,6 +104,14 @@ function deckMessagesTo(b: TestBroker, token: string, taskId: string, fragment: 
     (db.query(
       "SELECT COUNT(*) AS n FROM messages WHERE from_token = ? AND to_token = ? AND text LIKE ? AND text LIKE ?"
     ).get(DECK_INSTANCE_TOKEN, token, `%${taskId}%`, `%${fragment}%`) as { n: number }).n
+  );
+}
+
+function deckMessageTexts(b: TestBroker, token: string, taskId: string): string[] {
+  return withDb(b, (db) =>
+    (db.query(
+      "SELECT text FROM messages WHERE from_token = ? AND to_token = ? AND text LIKE ? ORDER BY id"
+    ).all(DECK_INSTANCE_TOKEN, token, `%${taskId}%`) as { text: string }[]).map((message) => message.text)
   );
 }
 
@@ -162,6 +171,7 @@ describe("delegated task sweep", () => {
     const overdue = await waitFor(() => state(main, task.task_id), (s) => s.status === "overdue", "first overdue");
     expect(overdue.decision_due_at_ms).toBe(dueAt + 300_000);
     expect(deckMessagesTo(main, bob.instance_token, task.task_id, ALERT)).toBe(1);
+    expect(deckMessageTexts(main, alice.instance_token, task.task_id)).toHaveLength(1);
 
     await barrier(main);
     expect(deckMessagesTo(main, bob.instance_token, task.task_id, ALERT)).toBe(1);
@@ -172,6 +182,7 @@ describe("delegated task sweep", () => {
     pastDue(main, task.task_id);
     await waitFor(() => state(main, task.task_id), (s) => s.status === "overdue" && s.generation === 1, "second overdue");
     expect(deckMessagesTo(main, bob.instance_token, task.task_id, ALERT)).toBe(2);
+    expect(deckMessageTexts(main, alice.instance_token, task.task_id)).toHaveLength(2);
     expect(eventGenerations(main, task.task_id, "due")).toEqual([0, 1]);
 
     edit(main, "UPDATE delegated_tasks SET decision_due_at_ms = ? WHERE task_id = ?", [Date.now() - 1, task.task_id]);
@@ -187,6 +198,27 @@ describe("delegated task sweep", () => {
     expect((await rearm(main, bob, alice, task.task_id)).ok).toBeFalse();
     expect(state(main, task.task_id).status).toBe("escalated");
   }, 40_000);
+
+  test("notifies the delegate once at expiry with a fixed reminder", async () => {
+    const group = await newGroup();
+    const bob = await registerIn(main, group, "sweep-reminder-bob");
+    const alice = await registerIn(main, group, "sweep-reminder-alice");
+    const agentText = "agent-generated status must not be repeated";
+    const label = taskLabelFromText(agentText);
+    const task = await createTask(main, bob, alice, label, agentText);
+
+    pastDue(main, task.task_id);
+    await waitFor(() => state(main, task.task_id), (s) => s.status === "overdue", "delegate reminder");
+    expect(deckMessagesTo(main, bob.instance_token, task.task_id, ALERT)).toBe(1);
+    const [reminder] = deckMessageTexts(main, alice.instance_token, task.task_id);
+    expect(reminder).toContain(`Task ${task.task_id}`);
+    expect(reminder).toContain("Send your report or blocker while citing this task.");
+    expect(reminder).not.toContain(agentText);
+    expect(reminder).not.toContain(label);
+
+    await barrier(main);
+    expect(deckMessageTexts(main, alice.instance_token, task.task_id)).toHaveLength(1);
+  }, 30_000);
 
   test("sends the initial request plus three rearms at the default profile, then one escalation", async () => {
     const group = await newGroup();
@@ -366,6 +398,9 @@ describe("delegated task sweep", () => {
     edit(main, "UPDATE peers SET last_seen = ? WHERE instance_token = ?", [new Date(Date.now() - 3 * 86_400_000).toISOString(), alice.instance_token]);
     const orphaned = await waitFor(() => state(main, task.task_id), (s) => s.status === "orphaned", "orphaned by purge");
     expect(orphaned).toMatchObject({ terminal_reason: "participant_gone", escalation_result: "no_consumer" });
+    expect(readFileSync(join(main.tmpDir, "logs", "broker.log"), "utf8")).toContain(
+      `delegation sweep: task ${task.task_id} has a missing participant; no deadline reminder will be sent`
+    );
     expect(operatorMessages(main, task.task_id)).toBe(1);
     expect(deckMessagesTo(main, bob.instance_token, task.task_id, SETTLED)).toBe(1);
 
