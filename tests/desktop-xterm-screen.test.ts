@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { classifyInjectGuard, createXtermScreen, inspectInjectGuard, ScreenGuard } from '../desktop/src/main/xterm-screen'
-import { EXPECTED_FIXTURE_VERDICTS, RESIZE_MARKER } from './_fixture-verdicts'
+import { EXPECTED_FIXTURE_VERDICTS, fixtureStartSize, GEOMETRY_MARKER, RESIZE_MARKER } from './_fixture-verdicts'
 
 const esc = String.fromCharCode(27)
 const createScreen = (
@@ -36,15 +36,21 @@ async function fixtureSnapshotAfter(fixture: string, data: string, cols = 120, r
   return snapshotFromChunks([...loadFixture(fixture), { t: 0, data }], cols, rows)
 }
 
-async function fixtureVerdicts(fixture: string): Promise<{ checkpoints: readonly ('clear' | 'modal')[]; final: 'clear' | 'modal' }> {
-  const screen = createScreen({ cols: 120, rows: 40 })
-  const checkpoints: Array<'clear' | 'modal'> = []
-  for (const chunk of loadFixture(fixture)) {
+type Verdict = 'clear' | 'modal'
+type CheckpointScreen = { label: string; verdict: Verdict; lines: readonly string[] }
+
+async function fixtureReplay(fixture: string): Promise<{ checkpoints: CheckpointScreen[]; final: Verdict }> {
+  const chunks = loadFixture(fixture)
+  const screen = createScreen(fixtureStartSize(chunks))
+  const checkpoints: CheckpointScreen[] = []
+  for (const chunk of chunks) {
     if (isMarker(chunk)) {
+      if (GEOMETRY_MARKER.test(chunk.data)) continue
       await screen.drain()
       const read = screen.read()
       if (read.status !== 'ready') throw new Error(`${fixture}: xterm screen unavailable: ${read.reason}`)
-      checkpoints.push(classifyInjectGuard(read.snapshot))
+      const label = chunk.data.trim().replace(/^#+\s*|\s*#+$/g, '')
+      checkpoints.push({ label, verdict: classifyInjectGuard(read.snapshot), lines: read.snapshot.lines })
       const resize = RESIZE_MARKER.exec(chunk.data)
       if (resize) screen.resize(Number(resize[1]), Number(resize[2]))
       continue
@@ -56,6 +62,11 @@ async function fixtureVerdicts(fixture: string): Promise<{ checkpoints: readonly
   screen.dispose()
   if (read.status !== 'ready') throw new Error(`${fixture}: xterm screen unavailable: ${read.reason}`)
   return { checkpoints, final: classifyInjectGuard(read.snapshot) }
+}
+
+async function fixtureVerdicts(fixture: string): Promise<{ checkpoints: readonly Verdict[]; final: Verdict }> {
+  const replay = await fixtureReplay(fixture)
+  return { checkpoints: replay.checkpoints.map((checkpoint) => checkpoint.verdict), final: replay.final }
 }
 
 async function feedAtEveryBoundary(sequence: string): Promise<void> {
@@ -576,6 +587,88 @@ describe('xterm main-process screen adapter', () => {
       if (!expected) throw new Error(`missing baseline verdict for ${fixture}`)
       expect(await fixtureVerdicts(fixture), fixture).toEqual(expected)
     }
+  })
+
+  const stateCapturedColumns = (name: string): number | null => {
+    const stated = /-(\d+)c-/.exec(name)
+    return stated ? Number(stated[1]) : null
+  }
+  const PROSOPON_CAPTURES = Object.keys(EXPECTED_FIXTURE_VERDICTS)
+    .filter((name) => name.startsWith('prosopon-'))
+    .sort()
+  const FRAME_TOP = /^┌─ (You|Claude) /
+
+  test('every capture whose name states a width declares that width as its start geometry', () => {
+    const named = Object.keys(EXPECTED_FIXTURE_VERDICTS).flatMap((name) => {
+      const stated = stateCapturedColumns(name)
+      return stated === null ? [] : [{ name, stated }]
+    })
+    expect(named.length, 'no fixture states its capture width: the geometry guard would check nothing').toBeGreaterThan(0)
+    for (const { name, stated } of named) {
+      expect(
+        fixtureStartSize(loadFixture(name)).cols,
+        `${name} must open with a GEOMETRY marker of the width its name states: replayed at the legacy 120 columns it reflows into a screen that never existed`
+      ).toBe(stated)
+    }
+  })
+
+  test.each(PROSOPON_CAPTURES.filter((name) => /-(flow|permission)-/.test(name)))(
+    'keeps every real dialog of %s modal with the working copy frames above it',
+    async (name) => {
+      const replay = await fixtureReplay(name)
+      const dialogs = replay.checkpoints.filter((checkpoint) => ['PERMISSION', 'ASK-QUESTION', 'MODEL-PICKER'].includes(checkpoint.label))
+      expect(dialogs.length, `${name} holds no dialog checkpoint`).toBeGreaterThan(0)
+      for (const dialog of dialogs) {
+        expect(dialog.verdict, `${name} ${dialog.label}: a real dialog is modal whatever is drawn above it`).toBe('modal')
+        if (dialog.label === 'MODEL-PICKER' && (stateCapturedColumns(name) ?? 0) < 80) continue
+        expect(
+          dialog.lines.some((line) => FRAME_TOP.test(line)),
+          `${name} ${dialog.label}: no frame is on screen, so this checkpoint does not prove the guard under frames`
+        ).toBe(true)
+      }
+    }
+  )
+
+  test.each(PROSOPON_CAPTURES.filter((name) => /-(flow|resume)-/.test(name)))(
+    'keeps an idle composer clear under the working copy frames in %s',
+    async (name) => {
+      const replay = await fixtureReplay(name)
+      const settled = replay.checkpoints.filter((checkpoint) => ['AFTER-TURN', 'AFTER-RESUMED-TURN', 'AFTER-PAUSE', 'AFTER-INTERRUPT', 'AFTER-ASK'].includes(checkpoint.label))
+      expect(settled.length, `${name} holds no settled-composer checkpoint`).toBeGreaterThan(0)
+      for (const checkpoint of settled) {
+        expect(checkpoint.verdict, `${name} ${checkpoint.label}: an idle composer under frames is clear`).toBe('clear')
+        expect(
+          checkpoint.lines.some((line) => FRAME_TOP.test(line)),
+          `${name} ${checkpoint.label}: no frame is on screen, so this checkpoint does not prove the guard under frames`
+        ).toBe(true)
+      }
+    }
+  )
+
+  test.each(['prosopon-432ab5e-quota-80c-2.1.306.json', 'stock-quota-80c-2.1.306.json'])(
+    'the settled screen of %s paints the session-limit line natively, outside any frame',
+    async (name) => {
+      const replay = await fixtureReplay(name)
+      const settled = replay.checkpoints.find((checkpoint) => checkpoint.label === 'QUOTA')
+      expect(settled, `${name} holds no QUOTA checkpoint`).toBeDefined()
+      const limit = settled!.lines.find((line) => line.includes('hit your session limit'))
+      expect(limit, `${name}: the session-limit line is not on the settled screen`).toBeDefined()
+      expect(limit!.trimStart().startsWith('⎿'), `${name}: the limit line is wrapped in a frame instead of starting with the CLI marker`).toBe(true)
+      expect(
+        settled!.lines.some((line) => /^┌─ Claude /.test(line)),
+        `${name}: the quota message sits in an assistant frame`
+      ).toBe(false)
+    }
+  )
+
+  test.each(PROSOPON_CAPTURES)('%s was captured with a plugin copy that draws the user frame', async (name) => {
+    const replay = await fixtureReplay(name)
+    const turn = replay.checkpoints.find((checkpoint) => ['AFTER-TURN', 'RESUMED', 'QUOTA'].includes(checkpoint.label))
+    expect(turn, `${name} holds no turn checkpoint`).toBeDefined()
+    expect(
+      turn!.lines.some((line) => /^┌─ You /.test(line)),
+      `${name}: no user frame at ${turn!.label}; the capture loaded another copy of the plugin than the working copy at choregos 432ab5e`
+    ).toBe(true)
   })
 
   // mutation: drop `!style.bgDefault` from isEchoRow; this capture's selector row is then skipped and the rule becomes composer-geometry

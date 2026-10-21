@@ -1,71 +1,137 @@
-import type { EngineInterface, Register, RenderInput } from 'claude-code'
+import type { EngineInterface, Register, RenderViewport } from 'claude-code'
 
 import {
+  ASSISTANT_COLOR,
   classifyAssistantBlock,
   GUARD_SAFE_BORDER,
   MIN_FRAME_COLUMNS,
-  type BlockKind,
+  resolveLabels,
+  turnRule,
+  USER_COLOR,
 } from './layout'
 import { isSupported } from './versions'
 
-export async function classifyAssistant(
-  $: unknown,
-  e: RenderInput<'AssistantMessage'>,
-): Promise<BlockKind> {
-  void $
-  return classifyAssistantBlock(e.props.text, e.props.isSummary === true)
+type Sized = { surface: string; viewport?: RenderViewport }
+
+function columnsOf(e: Sized): number {
+  return e.viewport?.columns ?? 80
 }
 
-function assertNever(kind: never): never {
-  throw new Error(`prosopon: unknown block kind ${String(kind)}`)
+function wideEnough(e: Sized): boolean {
+  const columns = columnsOf(e)
+  return Number.isFinite(columns) && columns >= MIN_FRAME_COLUMNS
 }
 
-function draw(
-  $: EngineInterface,
-  e: RenderInput<'AssistantMessage'>,
-  kind: BlockKind,
-  text: string,
-) {
-  switch (kind) {
-    case 'stock':
-    case 'dim':
-      return undefined
-    case 'frame': {
-      const { Box, Markdown } = $.ui.resolve(e)
-      return (
-        <Box borderStyle={GUARD_SAFE_BORDER} flexDirection="column">
-          <Markdown text={text} />
-        </Box>
-      )
-    }
-    default:
-      return assertNever(kind)
+function stockAfter($: EngineInterface, error: unknown): void {
+  $.ui.log(`prosopon: stock render after ${String(error)}`, { to: 'debug' })
+}
+
+async function layoutSupported($: EngineInterface): Promise<boolean> {
+  try {
+    const version = await $.session.version()
+    return isSupported(version.base, 'layout')
+  } catch (error) {
+    stockAfter($, error)
+    return false
   }
 }
 
-export const register: Register = on => {
+function frame(
+  $: EngineInterface,
+  e: Parameters<EngineInterface['ui']['resolve']>[0],
+  title: string,
+  color: string,
+  body: unknown,
+) {
+  const { Box, Text } = $.ui.resolve(e)
+  return (
+    <Box flexDirection="column" marginTop={1}>
+      <Box flexDirection="column" borderStyle={GUARD_SAFE_BORDER} borderColor={color} paddingX={1}>
+        {body as never}
+      </Box>
+      <Box position="absolute" top={0} left={2}>
+        <Text color={color} bold>
+          {` ${title} `}
+        </Text>
+      </Box>
+    </Box>
+  )
+}
+
+export const register: Register = (on, options) => {
+  const labels = resolveLabels(options.labels)
+
+  on('ui.render', { component: 'UserMessage' }, async ($, e, next) => {
+    const { text, origin } = e.props
+    if (
+      e.surface !== 'terminal' ||
+      typeof text !== 'string' ||
+      text.trim() === '' ||
+      (origin as { kind?: unknown } | null | undefined)?.kind !== 'composer' ||
+      !wideEnough(e)
+    ) {
+      return next(e)
+    }
+    if (!(await layoutSupported($))) return next(e)
+    try {
+      const { Text } = $.ui.resolve(e)
+      return frame($, e, labels.user, USER_COLOR, <Text>{text.trim()}</Text>)
+    } catch (error) {
+      stockAfter($, error)
+      return next(e)
+    }
+  })
+
   on('ui.render', { component: 'AssistantMessage' }, async ($, e, next) => {
     const { text, isSummary } = e.props
-    const columns = e.viewport?.columns ?? 80
     if (
       e.surface !== 'terminal' ||
       typeof text !== 'string' ||
       (isSummary !== undefined && typeof isSummary !== 'boolean') ||
-      !Number.isFinite(columns) ||
-      columns < MIN_FRAME_COLUMNS
+      !wideEnough(e)
     ) {
       return next(e)
     }
+    if (!(await layoutSupported($))) return next(e)
+    if (classifyAssistantBlock(text, isSummary === true) !== 'frame') return next(e)
 
-    let tree: ReturnType<typeof draw>
+    const drawn = await next(e)
     try {
-      const version = await $.session.version()
-      const kind = isSupported(version.base, 'layout') ? await classifyAssistant($, e) : 'stock'
-      tree = draw($, e, kind, text)
+      return frame($, e, labels.assistant, ASSISTANT_COLOR, drawn)
     } catch (error) {
-      $.ui.log(`prosopon: stock render after ${String(error)}`, { to: 'debug' })
+      stockAfter($, error)
+      return drawn
+    }
+  })
+
+  on('ui.render', { component: 'TurnDuration' }, async ($, e, next) => {
+    const { word, durationMs, waitingFor, isExpanded } = e.props
+    if (
+      e.surface !== 'terminal' ||
+      typeof word !== 'string' ||
+      word.trim() === '' ||
+      typeof durationMs !== 'number' ||
+      !Number.isFinite(durationMs) ||
+      durationMs < 0 ||
+      waitingFor !== undefined ||
+      isExpanded === true ||
+      !wideEnough(e)
+    ) {
       return next(e)
     }
-    return tree ?? next(e)
+    if (!(await layoutSupported($))) return next(e)
+    try {
+      const { Box, Text } = $.ui.resolve(e)
+      return (
+        <Box marginTop={1}>
+          <Text dimColor wrap="truncate-end">
+            {turnRule(word, durationMs, columnsOf(e))}
+          </Text>
+        </Box>
+      )
+    } catch (error) {
+      stockAfter($, error)
+      return next(e)
+    }
   })
 }

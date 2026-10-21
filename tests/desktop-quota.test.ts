@@ -3,6 +3,8 @@
 // session-service.ts, so it does not guard the gating behavior there.
 
 import { test, expect } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 
 import {
   detectRateLimit,
@@ -210,6 +212,26 @@ test("a captured limit screen whose spaces are cursor-forward moves raises a lim
   reference.feed("s1", CAPTURED_REFERENCE_LIMIT);
   expect(referenceEvents.limits).toEqual([{ id: "s1", resetAt: todayAt(22, 0) }]);
   reference.stop();
+});
+
+const PTY_FIXTURES = join(import.meta.dir, "pty-harness", "fixtures");
+const rawChunksOf = (name: string): string[] =>
+  (JSON.parse(readFileSync(join(PTY_FIXTURES, name), "utf-8")) as Array<{ data: string }>)
+    .filter((chunk) => !chunk.data.startsWith("\n########## "))
+    .map((chunk) => chunk.data);
+
+test.each([
+  ["with the plugin loaded", "prosopon-432ab5e-quota-80c-2.1.306.json"],
+  ["without any plugin", "stock-quota-80c-2.1.306.json"]
+])("the session-limit line the CLI paints %s raises a limit with its reset time", (_label, fixture) => {
+  const d = new QuotaDetector(() => todayAt(9, 0));
+  const ev = collect(d);
+  for (const chunk of rawChunksOf(fixture)) d.feed("s1", chunk);
+  expect(
+    ev.limits,
+    `${fixture}: the detector must raise on the limit line as the CLI paints it`
+  ).toEqual([{ id: "s1", resetAt: todayAt(19, 10) }]);
+  d.stop();
 });
 
 test("a cursor-forward move split across two PTY chunks still separates the words", () => {

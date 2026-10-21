@@ -1,7 +1,8 @@
-export type Capability = 'layout'
+export type Capability = 'layout' | 'links'
 
 export const MIN_SUPPORTED: Readonly<Record<Capability, string>> = {
   layout: '2.1.303',
+  links: '2.1.303',
 }
 
 const RELEASE = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/

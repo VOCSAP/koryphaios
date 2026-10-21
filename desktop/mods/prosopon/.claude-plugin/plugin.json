@@ -4,5 +4,13 @@
   "description": "Readable transcript layouts with safe stock-renderer fallbacks.",
   "author": {
     "name": "VOCSAP"
+  },
+  "userConfig": {
+    "labels": {
+      "type": "string",
+      "title": "Frame labels",
+      "description": "Language of the frame titles: en (You) or fr (Vous). Any other value uses en.",
+      "default": "en"
+    }
   }
 }

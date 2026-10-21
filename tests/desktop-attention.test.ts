@@ -14,7 +14,7 @@ import {
   type AttentionEvent
 } from "../desktop/src/main/attention.ts";
 import { createScreenWitness } from "../desktop/src/main/attention-screen-witness.ts";
-import { EXPECTED_FIXTURE_VERDICTS, RESIZE_MARKER } from "./_fixture-verdicts.ts";
+import { EXPECTED_FIXTURE_VERDICTS, fixtureStartSize, RESIZE_MARKER } from "./_fixture-verdicts.ts";
 import {
   createXtermScreen,
   inspectInjectGuard,
@@ -604,6 +604,7 @@ const NUMBERED_COMPOSER_CAPTURES: Record<string, string> = {
 };
 
 let REAL_CHOOSERS: string[] = [];
+const FINAL_STATES: Record<string, string> = {};
 
 beforeAll(async () => {
   const fixtures = readdirSync(join(import.meta.dir, "pty-harness", "fixtures"))
@@ -611,13 +612,21 @@ beforeAll(async () => {
 
   const pickers = await Promise.all(
     fixtures.map(async (name) => {
-      const screen = createXtermScreen({ cols: 120, rows: 40, reportError: () => undefined });
-      for (const chunk of loadFixture(name)) if (!isMarker(chunk)) screen.feed(chunk.data);
+      const chunks = loadFixture(name);
+      const screen = createXtermScreen({ ...fixtureStartSize(chunks), reportError: () => undefined });
+      for (const chunk of chunks) {
+        const resize = RESIZE_MARKER.exec(chunk.data);
+        if (resize) {
+          await screen.drain();
+          screen.resize(Number(resize[1]), Number(resize[2]));
+        } else if (!isMarker(chunk)) screen.feed(chunk.data);
+      }
       await screen.drain();
       const read = screen.read();
       screen.dispose();
       if (read.status !== "ready") throw new Error(`${name}: xterm screen unavailable: ${read.reason}`);
       const inspection = inspectInjectGuard(read.snapshot);
+      FINAL_STATES[name] = inspection.state;
       return inspection.state === "modal" && inspection.rule === "picker" ? name : null;
     })
   );
@@ -706,6 +715,19 @@ test("the first real paint of a 2.1.301 trust prompt, folder glued to Enter, rai
     clock.advanceBy(D);
     expect(events.map((event) => event.waiting), name).toEqual([true]);
     expect(events[0]!.at, name).toBeLessThanOrEqual(paintedAt + D);
+  }
+});
+
+test("the picker extraction reads the final screen of every capture as the verdict oracle records it", () => {
+  const compared = Object.entries(FINAL_STATES).filter(([name]) => name in EXPECTED_FIXTURE_VERDICTS);
+  expect(
+    compared.map(([name]) => name).sort(),
+    "the compared captures must be exactly the oracle's, numbered-composer captures aside"
+  ).toEqual(Object.keys(EXPECTED_FIXTURE_VERDICTS).filter((name) => !(name in NUMBERED_COMPOSER_CAPTURES)).sort());
+  for (const [name, state] of compared) {
+    expect(state, `${name}: replayed at another geometry than the one it was captured at, its final screen reads differently`).toBe(
+      EXPECTED_FIXTURE_VERDICTS[name]!.final
+    );
   }
 });
 
@@ -1066,7 +1088,7 @@ function screenStates(name: string): Promise<{ initial: XtermScreenRead; after: 
       screen.dispose();
       resolve({ initial, after });
     };
-    const screen = createXtermScreen({ cols: 120, rows: 40, reportError: () => undefined, releasePending: advance });
+    const screen = createXtermScreen({ ...fixtureStartSize(chunks), reportError: () => undefined, releasePending: advance });
     const initial = screen.read();
     advance();
   });

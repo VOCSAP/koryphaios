@@ -34,7 +34,27 @@ export const EXPECTED_FIXTURE_VERDICTS: Record<string, { checkpoints: readonly (
   'turn-no-statusline-hi.json': { checkpoints: [], final: 'clear' },
   'turn-with-statusline-count.json': { checkpoints: [], final: 'clear' },
   'turn-with-statusline-hi.json': { checkpoints: [], final: 'clear' },
-  'typing-numbered-2.1.301.json': { checkpoints: ['modal', 'clear', 'modal', 'modal'], final: 'modal' }
+  'typing-numbered-2.1.301.json': { checkpoints: ['modal', 'clear', 'modal', 'modal'], final: 'modal' },
+  'prosopon-432ab5e-flow-40c-2.1.306.json': { checkpoints: ['clear', 'clear', 'clear', 'clear', 'modal', 'clear', 'modal', 'clear', 'clear', 'modal', 'clear', 'clear'], final: 'clear' },
+  'prosopon-432ab5e-permission-40c-2.1.306.json': { checkpoints: ['clear', 'clear', 'modal'], final: 'modal' },
+  'prosopon-432ab5e-resume-40c-2.1.306.json': { checkpoints: ['clear', 'clear'], final: 'clear' },
+  'prosopon-432ab5e-flow-80c-2.1.306.json': { checkpoints: ['clear', 'clear', 'clear', 'clear', 'modal', 'clear', 'modal', 'clear', 'clear', 'modal', 'clear', 'clear'], final: 'clear' },
+  'prosopon-432ab5e-permission-80c-2.1.306.json': { checkpoints: ['clear', 'clear', 'modal'], final: 'modal' },
+  'prosopon-432ab5e-resume-80c-2.1.306.json': { checkpoints: ['clear', 'clear'], final: 'clear' },
+  'prosopon-432ab5e-flow-120c-2.1.306.json': { checkpoints: ['clear', 'clear', 'clear', 'clear', 'modal', 'clear', 'modal', 'clear', 'clear', 'modal', 'clear', 'clear'], final: 'clear' },
+  'prosopon-432ab5e-permission-120c-2.1.306.json': { checkpoints: ['clear', 'clear', 'modal'], final: 'modal' },
+  'prosopon-432ab5e-resume-120c-2.1.306.json': { checkpoints: ['clear', 'clear'], final: 'clear' },
+  'prosopon-432ab5e-quota-80c-2.1.306.json': { checkpoints: ['clear'], final: 'clear' },
+  'stock-quota-80c-2.1.306.json': { checkpoints: ['clear'], final: 'clear' }
 }
 
 export const RESIZE_MARKER = /^\n########## RESIZE \[(\d+),(\d+)\] ##########/
+
+export const GEOMETRY_MARKER = /^\n########## GEOMETRY \[(\d+),(\d+)\] ##########/
+
+export const LEGACY_START_SIZE = { cols: 120, rows: 40 } as const
+
+export function fixtureStartSize(chunks: ReadonlyArray<{ data: string }>): { cols: number; rows: number } {
+  const declared = chunks[0] === undefined ? null : GEOMETRY_MARKER.exec(chunks[0].data)
+  return declared ? { cols: Number(declared[1]), rows: Number(declared[2]) } : LEGACY_START_SIZE
+}
