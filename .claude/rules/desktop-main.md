@@ -17,7 +17,7 @@ Importing repo-root `shared/` from `desktop/src/main`: `add-broker-feature` skil
   Why: they are twin escape-sequence state machines over the same PTY stream; a divergent cap leaks fragments into one consumer only.
 - A `CLAUDE_PEERS_*` variable set per session is read by its consumer as `process.env.X || ''`, never `=== ''` or `'X' in process.env`.
   Why: on Windows an empty value reaches the child as an absent variable.
-- On win32, do not spawn a console program (`cmd.exe`, a `.cmd` shim) with `detached: true`; gate it on the platform as `serve-lifecycle.ts` does (`detached: isPosix(state)`).
-  Why: the detached child allocates a new, visible console window, and no test observes windows.
+- On win32, a process that must outlive the Deck (the `bun.exe` broker, the Electron Avatar) is spawned with `detached: true`; a console program (`cmd.exe`, `powershell.exe`, a `.cmd` shim) is not, so gate it on the platform as `serve-lifecycle.ts` does (`detached: isPosix(state)`).
+  Why: without `detached` the libuv job object kills the child with its parent, while a detached console program allocates a new, visible console window, and no test observes windows.
 - A startup migration writes its completion marker only after a copy that succeeded and copied something (`markMigrationDone` in `migrate-data-dir.ts`).
   Why: a marker written on a no-op freezes the migration, so data that appears later in the legacy location is never taken.

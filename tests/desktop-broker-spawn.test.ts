@@ -283,6 +283,25 @@ test("the detached spawn adds bun to PATH, unreferences its child, and reports c
   expect(reports).toEqual([["local broker process failed to start (bun /opt/koryphaios/broker.ts)", error]]);
 });
 
+test("on win32 the broker child is spawned detached so it outlives the Deck", () => {
+  const spawned: DetachedSpawnOptions[] = [];
+  spawnDetachedBroker("bun.exe", "C:\\repo\\broker.ts", {}, {
+    env: { Path: "C:\\Windows" },
+    homeDir: "C:\\Users\\op",
+    platform: "win32",
+    spawn: (_command: string, _args: string[], options: DetachedSpawnOptions) => {
+      spawned.push(options);
+      return { on: (_event: "error", _listener: (error: unknown) => void) => {}, unref: () => {} };
+    },
+    report: (_message: string, _error: unknown) => {},
+  });
+  expect(spawned).toHaveLength(1);
+  expect(
+    spawned[0]?.detached,
+    "on win32 the broker must be detached: without it libuv's job object kills bun.exe when the Deck exits, and a detached bun.exe opens no console"
+  ).toBe(true);
+});
+
 test("the detached spawn uses the Windows separator and preserves the Path key", () => {
   let environment: Record<string, string | undefined> | undefined;
   spawnDetachedBroker("bun.exe", "C:\\repo\\broker.ts", {}, {
