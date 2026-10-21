@@ -2,6 +2,10 @@
 // on the text each agent actually reads on every arrival path.
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { randomUUID } from "node:crypto";
 import { startBroker, stopBroker, scrubEnv, type TestBroker, openBrokerDb } from "./_helper.ts";
 import { DELEGATE_CLOSE_NOTE, DELEGATOR_CHECK_NOTE, PEER_INBOUND_NOTE } from "../shared/inbound-framing.ts";
 
@@ -10,8 +14,10 @@ const TASK_ID = /tracked task ([0-9a-f-]{36})/;
 
 const brokers: TestBroker[] = [];
 const procs: ReturnType<typeof Bun.spawn>[] = [];
+const configDirs: string[] = [];
 
 afterAll(async () => {
+  for (const dir of configDirs) rmSync(dir, { recursive: true, force: true });
   for (const p of procs) {
     try {
       p.kill();
@@ -535,7 +541,7 @@ async function sendSource(p: Pair, text: string): Promise<{ token: string; messa
   const db = openBrokerDb(p.broker.dbPath, { readonly: true });
   try {
     return {
-      token: (db.query("SELECT instance_token FROM peers WHERE peer_id = ?").get(p.bobId) as { instance_token: string }).instance_token,
+      token: (db.query("SELECT from_token FROM messages WHERE text = ?").get(text) as { from_token: string }).from_token,
       messageId: (db.query("SELECT id FROM messages WHERE text = ?").get(text) as { id: number }).id,
     };
   } finally {
@@ -580,6 +586,7 @@ function recordingFront(
     health?: (h: Record<string, unknown>) => Record<string, unknown>;
     attach?: (a: Record<string, unknown>) => Record<string, unknown>;
     send?: (s: Record<string, unknown>) => Record<string, unknown>;
+    register?: (r: Record<string, unknown>) => Record<string, unknown>;
   } = {}
 ) {
   const paths: string[] = [];
@@ -602,7 +609,9 @@ function recordingFront(
             ? rewrite.attach
             : url.pathname === "/send-message"
               ? rewrite.send
-              : undefined;
+              : url.pathname === "/register"
+                ? rewrite.register
+                : undefined;
       if (!rewriter) return new Response(text, { status: res.status, headers: { "Content-Type": "application/json" } });
       return Response.json(rewriter(JSON.parse(text) as Record<string, unknown>), { status: res.status });
     },
@@ -722,6 +731,52 @@ describe("the untracked reply warning", () => {
       noPolicy.stop();
     }
   }, 120_000);
+
+  test("a message to oneself says tracking is unavailable instead of offering an attach the broker refuses", async () => {
+    const p = await sharedPair();
+    const res = await plain(p.bob, p.bobId, "A note to myself.");
+    expect(res.result?.isError).toBeFalsy();
+    expect(toolText(res)).toBe(`Message sent to peer '${p.bobId}'\n${unavailableBecause("self_target")}`);
+  }, 90_000);
+});
+
+function configWithGroup(name: string, secret: string): Record<string, string> {
+  const dir = mkdtempSync(join(tmpdir(), "cp-untracked-switch-"));
+  configDirs.push(dir);
+  mkdirSync(join(dir, "claude-peers"), { recursive: true });
+  writeFileSync(join(dir, "claude-peers", "config.json"), JSON.stringify({ groups: { [name]: secret } }));
+  return { APPDATA: dir, XDG_CONFIG_HOME: dir };
+}
+
+describe("the untracked reply policy across switch_group", () => {
+  test("a lead stays a lead in the group it switches to: its new request there is refused", async () => {
+    const secret = randomUUID();
+    const bob = await spawnPeer(shared.broker, { CLAUDE_PEERS_ROLE: "team-lead", ...configWithGroup("other", secret) });
+    const dave = await spawnPeer(shared.broker, { CLAUDE_PEERS_FORCE_GROUP: secret });
+    const daveId = await peerIdOf(dave);
+    expect((await callTool(bob, "switch_group", { name: "other" })).result?.isError).toBeFalsy();
+    expect(toolText(await plain(bob, daveId, "A request after the switch."))).toBe(`Failed to send: ${REFUSAL}`);
+  }, 90_000);
+
+  test("the policy is recomputed from the role the broker reports after the switch, not kept from the first send", async () => {
+    const secret = randomUUID();
+    let switched = false;
+    const front = recordingFront(shared.broker, { register: (r) => (switched ? { ...r, role: "team-lead" } : r) });
+    try {
+      const bob = await spawnPeer(shared.broker, { ...front.env, ...configWithGroup("other", secret) });
+      const carol = await spawnPeer(shared.broker);
+      const dave = await spawnPeer(shared.broker, { CLAUDE_PEERS_FORCE_GROUP: secret });
+      const [carolId, daveId] = await Promise.all([peerIdOf(carol), peerIdOf(dave)]);
+      const before = await plain(bob, carolId, "A request before the switch.");
+      expect(before.result?.isError).toBeFalsy();
+      expect(toolText(before)).toContain(MARKER);
+      switched = true;
+      expect((await callTool(bob, "switch_group", { name: "other" })).result?.isError).toBeFalsy();
+      expect(toolText(await plain(bob, daveId, "A request after the switch."))).toBe(`Failed to send: ${REFUSAL}`);
+    } finally {
+      front.stop();
+    }
+  }, 90_000);
 });
 
 describe("send_message(message_id, deadline_sec) arms an ETA on a message already sent", () => {

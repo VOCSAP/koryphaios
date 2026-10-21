@@ -269,9 +269,12 @@ async function armEtaOnSentMessage(a: Record<string, unknown>) {
 
 /** What follows an accepted send that armed nothing; the repair is offered only where it can work. */
 async function untrackedReplyNotice(result: SendMessageResponse): Promise<string> {
-  // The broker's reason reaches the model, so only the two codes it is known to send are rendered.
+  // The broker's reason reaches the model, so only the codes it is known to send are rendered.
   if (result.tracking_unavailable !== undefined) {
-    const known = result.tracking_unavailable === "remote_peer" || result.tracking_unavailable === "no_operator_inbox";
+    const known =
+      result.tracking_unavailable === "remote_peer" ||
+      result.tracking_unavailable === "no_operator_inbox" ||
+      result.tracking_unavailable === "self_target";
     return renderTrackingUnavailable(known ? result.tracking_unavailable : "unknown");
   }
   if (typeof result.message_id !== "number" || !Number.isSafeInteger(result.message_id) || result.message_id < 1) {

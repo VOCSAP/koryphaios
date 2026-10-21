@@ -351,6 +351,8 @@ L'interrupteur est résolu au démarrage du MCP : `CLAUDE_PEERS_WARN_UNTRACKED_R
 
 **Amendement du 2026-10-21, lot 3 (décision de l'opérateur) :** les textes du refus B, de l'avertissement et de ses variantes « tracking unavailable », ainsi que les deux rendus de l'attache de H3 (« Tracking armed; request not resent; notification to the delegate recorded » et « Already tracked; deadline unchanged »), sont en anglais, comme les autres erreurs du broker : le lecteur est le modèle, le broker n'a pas d'i18n, et le coût de l'avertissement se mesure par recherche du texte dans les transcripts. Le sens des textes français ratifiés plus haut est conservé phrase pour phrase. Le marqueur `[claude-peers:untracked-reply:v1]` et les raisons stables (`remote_peer`, `no_operator_inbox`, `broker_outdated`, `delegation_policy_unavailable`, `capability_unverified`, `unknown`) ne changent pas. Les trois sorties du refus restent nommées : `deadline_sec`, un `task_id` existant, `expects_reply:false`. Les citations de ces textes dans H1, H3 et H4 portent désormais la version anglaise.
 
+**Précision du 2026-10-21 (carte `80462fdc`) :** un envoi à soi-même est accepté mais l'attache de H3 exige deux pairs distincts ; le broker répond donc `tracking_unavailable: "self_target"` et l'avertissement rend « Message sent without tracking; tracking unavailable: self_target. » au lieu de proposer une réparation que le broker refuserait. `self_target` s'ajoute aux raisons stables ci-dessus.
+
 #### H2. Provenance de la politique lead/warn
 
 **DÉDUIT :** `session-service.ts:783,792-794` distingue rôle, superviseur et drapeau de tuile lead ; ces trois données ne sont pas interchangeables.

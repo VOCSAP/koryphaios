@@ -223,7 +223,7 @@ export interface SendMessageRequest {
 export type UntrackedReplyPolicy = "lead" | "warn";
 
 /** Why an accepted send cannot be given a deadline afterwards. */
-export type TrackingUnavailableReason = "remote_peer" | "no_operator_inbox";
+export type TrackingUnavailableReason = "remote_peer" | "no_operator_inbox" | "self_target";
 
 export interface DelegatedTask {
   task_id: string;

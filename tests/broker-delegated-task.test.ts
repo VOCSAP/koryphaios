@@ -1285,9 +1285,10 @@ describe("untracked reply policy", () => {
     expect(messagesBetween(boss, worker)).toBe(2);
   });
 
-  test("never refuses a lead's message to itself", async () => {
+  test("never refuses a lead's message to itself, and says tracking is unavailable for it", async () => {
     const boss = await register("untracked-self-boss", "/untracked-self-boss");
-    expect((await sendAs(boss, boss, lead)).body).toEqual({ ok: true, message_id: expect.any(Number) });
+    expect((await sendAs(boss, boss, lead)).body).toEqual({ ok: true, message_id: expect.any(Number), tracking_unavailable: "self_target" });
+    expect((await sendAs(boss, boss, { untracked_reply_policy: "warn", expects_reply: true })).body.tracking_unavailable).toBe("self_target");
   });
 
   test("never refuses a tracked send, a citation, an information send, a warn policy or an older client", async () => {

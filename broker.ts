@@ -3258,6 +3258,7 @@ const recordUnlessUnanswered = db.transaction(
 );
 
 function trackingUnavailable(sender: MessageSender, target: MessageTarget): TrackingUnavailableReason | undefined {
+  if (target.instance_token === sender.instance_token) return "self_target";
   if (sender.via !== null || target.via !== null) return "remote_peer";
   return groupMayCarryOperatorInbox(sender.group_id) ? undefined : "no_operator_inbox";
 }
