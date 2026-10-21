@@ -42,17 +42,35 @@ function writeElectronProbe(dir: string): string {
 
 const LINUX_PROBE_FLAGS = process.platform === "linux" ? ["--no-sandbox", "--ozone-platform=headless"] : [];
 
-async function waitForResult(file: string, child: ChildProcess, stderr: { text: string }): Promise<{ acquired: boolean }> {
-  const deadline = Date.now() + 5_000;
-  while (!existsSync(file)) {
+interface WaitOptions {
+  timeoutMs?: number;
+  pause?: () => Promise<void>;
+}
+
+async function waitForResult(
+  file: string,
+  child: ChildProcess,
+  stderr: { text: string },
+  { timeoutMs = 5_000, pause = () => new Promise<void>((resolve) => setTimeout(resolve, 20)) }: WaitOptions = {}
+): Promise<{ acquired: boolean }> {
+  const deadline = Date.now() + timeoutMs;
+  let unreadable = "";
+  for (;;) {
+    if (existsSync(file)) {
+      try {
+        return JSON.parse(readFileSync(file, "utf-8")) as { acquired: boolean };
+      } catch (error) {
+        if (!(error instanceof SyntaxError)) throw error;
+        unreadable = `; the file existed but did not parse: ${error.message}`;
+      }
+    }
     if (Date.now() >= deadline) {
       throw new Error(
-        `Electron probe did not write ${file} (exitCode=${String(child.exitCode)}, signal=${String(child.signalCode)})\nprobe stderr:\n${stderr.text || "(empty)"}`
+        `Electron probe did not write ${file} (exitCode=${String(child.exitCode)}, signal=${String(child.signalCode)}${unreadable})\nprobe stderr:\n${stderr.text || "(empty)"}`
       );
     }
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await pause();
   }
-  return JSON.parse(readFileSync(file, "utf-8")) as { acquired: boolean };
 }
 
 async function startProbe(probe: string, root: string, profile: string): Promise<{ child: ChildProcess; result: { acquired: boolean } }> {
@@ -150,6 +168,42 @@ test("Avatar configures its profile before claiming its Electron lifetime throug
   expect(calls).toEqual([`setPath:userData:${join("C:", "Deck", "avatar")}`, "claim"]);
   lifetime?.release();
   expect(calls).toEqual([`setPath:userData:${join("C:", "Deck", "avatar")}`, "claim", "release"]);
+});
+
+const FAKE_CHILD = { exitCode: null, signalCode: null } as ChildProcess;
+
+test("the probe result is read once its write is complete, not when the file first appears", async () => {
+  const file = join(tempDir(), "result.json");
+  const stages = ["", '{"acquired":', '{"acquired":true}'];
+  let polls = 0;
+  const pause = async (): Promise<void> => {
+    writeFileSync(file, stages[polls] ?? "");
+    polls += 1;
+  };
+  writeFileSync(file, "");
+
+  const result = await waitForResult(file, FAKE_CHILD, { text: "" }, { pause });
+
+  expect(result, "an empty or truncated result file must be retried, not parsed").toEqual({ acquired: true });
+  expect(polls, "the reader must have polled past the empty and the truncated file").toBe(3);
+});
+
+test("a probe result that never becomes valid expires with the probe diagnostics", async () => {
+  const file = join(tempDir(), "result.json");
+  writeFileSync(file, '{"acquired":');
+
+  const expiry = waitForResult(file, FAKE_CHILD, { text: "probe said boom" }, { timeoutMs: 0, pause: async () => {} });
+
+  await expect(expiry).rejects.toThrow(`Electron probe did not write ${file} (exitCode=null, signal=null; the file existed but did not parse`);
+  await expect(expiry).rejects.toThrow("probe said boom");
+});
+
+test("a probe that wrote no result file expires with the probe diagnostics", async () => {
+  const file = join(tempDir(), "never-written.json");
+
+  await expect(waitForResult(file, FAKE_CHILD, { text: "" }, { timeoutMs: 0, pause: async () => {} })).rejects.toThrow(
+    `Electron probe did not write ${file} (exitCode=null, signal=null)`
+  );
 });
 
 test("a real Electron using the Avatar profile does not capture the Deck profile singleton", async () => {
