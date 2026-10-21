@@ -1,10 +1,17 @@
-import { describe, expect, test } from 'bun:test'
+import { GlobalRegistrator } from '@happy-dom/global-registrator'
+import { afterAll, afterEach, describe, expect, test } from 'bun:test'
+
+GlobalRegistrator.register()
+
+afterEach(() => document.querySelectorAll('.terminal-link-tooltip').forEach((tooltip) => tooltip.remove()))
+afterAll(async () => GlobalRegistrator.unregister())
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { Terminal } from '@xterm/xterm'
 import type { ILink, ILinkProvider } from '@xterm/xterm'
 import { logicalLine } from '../desktop/src/shared/link-detect'
 import { installTerminalLinks, type LinkNotice, type LinkTerminal } from '../desktop/src/renderer/src/terminal-links'
+import { createSessionTerminal } from '../desktop/src/renderer/src/terminal-focus-report'
 import type { LinkIntent, LinkOutcome } from '../desktop/src/shared/types'
 
 interface LinkRig {
@@ -40,7 +47,8 @@ function rigOver(view: TerminalView, opts: RigOptions): LinkRig {
     },
     onRefused: (reason) => refused.push(reason),
     report: (m) => reports.push(m),
-    fileLinks: () => opts.fileLinks ?? true
+    fileLinks: () => opts.fileLinks ?? true,
+    label: (key) => key
   })
   return {
     provide: (line) => {
@@ -79,6 +87,9 @@ function linkRig(rows: string[], cols: number, opts: RigOptions & { wrapped?: nu
 
 const tick = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0))
 const click = (ctrlKey: boolean, button = 0, metaKey = false): MouseEvent => ({ ctrlKey, metaKey, button }) as MouseEvent
+const hover = (clientX: number, clientY: number): MouseEvent => ({ clientX, clientY }) as MouseEvent
+const tooltipLines = (): string[] | undefined =>
+  document.querySelector<HTMLElement>('.terminal-link-tooltip')?.textContent?.split('\n')
 
 describe('installTerminalLinks', () => {
   test('a path hard-wrapped at the terminal width is one link spanning both rows, on either row', () => {
@@ -129,6 +140,68 @@ describe('installTerminalLinks', () => {
     await tick()
     expect(rig.opened).toEqual([])
     expect(rig.refused).toEqual([])
+  })
+
+  test('hovering an OSC 8 link shows its target and gestures, then leave removes the tooltip', () => {
+    const rig = linkRig([], 80)
+    const target = 'https://example.com/actual-target'
+    rig.handler.hover?.(hover(40, 50), target, {} as never)
+    expect(tooltipLines(), 'main opens a web target in the browser whatever the intent').toEqual([target, 'tile.linkBrowser'])
+    rig.handler.leave?.(hover(40, 50), target, {} as never)
+    expect(document.querySelector('.terminal-link-tooltip')).toBeNull()
+    rig.handler.hover?.(hover(40, 50), 'file:///C:/proj/a.md', {} as never)
+    expect(tooltipLines()).toEqual(['file:///C:/proj/a.md', 'tile.linkReveal', 'tile.linkOpen'])
+  })
+
+  test('hovering a detected path shows the target main receives, not the printed text, and leave removes the tooltip', () => {
+    const rig = linkRig(['edit /work/src/a.ts:12'], 80)
+    const [link] = rig.provide(1)
+    expect(link!.text, 'the premise: the printed text carries a line suffix the target drops').toBe('/work/src/a.ts:12')
+    link!.hover?.(hover(40, 50), link!.text)
+    expect(tooltipLines()?.[0]).toBe('/work/src/a.ts')
+    link!.leave?.(hover(40, 50), link!.text)
+    expect(document.querySelector('.terminal-link-tooltip')).toBeNull()
+  })
+
+  test('hovering a second link without a leave in between keeps a single tooltip, showing the second target', () => {
+    const rig = linkRig([], 80)
+    rig.handler.hover?.(hover(40, 50), 'https://example.com/first', {} as never)
+    rig.handler.hover?.(hover(60, 50), 'https://example.com/second', {} as never)
+    expect(document.querySelectorAll('.terminal-link-tooltip')).toHaveLength(1)
+    expect(tooltipLines()?.[0]).toBe('https://example.com/second')
+  })
+
+  test('disposing the link gate removes a visible tooltip', () => {
+    let provider: ILinkProvider | undefined
+    const term: LinkTerminal = {
+      cols: 80,
+      options: {},
+      buffer: { active: { getLine: () => undefined } },
+      registerLinkProvider: (p) => ((provider = p), { dispose() {} })
+    }
+    const gate = installTerminalLinks(term, { open: async () => ({ ok: true }), onRefused() {}, report() {}, fileLinks: () => true, label: (k) => k })
+    expect(provider).toBeDefined()
+    term.options.linkHandler!.hover?.(hover(40, 50), 'https://example.com/x', {} as never)
+    expect(document.querySelector('.terminal-link-tooltip')).not.toBeNull()
+    gate.dispose()
+    expect(document.querySelector('.terminal-link-tooltip')).toBeNull()
+  })
+
+  test('on a sandbox tile a file target names the refusal instead of the click gestures, a web target still opens in the browser', () => {
+    const rig = linkRig([], 80, { fileLinks: false })
+    rig.handler.hover?.(hover(40, 50), 'file:///a/b', {} as never)
+    expect(tooltipLines()).toEqual(['file:///a/b', 'tile.linkSandbox'])
+    rig.handler.hover?.(hover(40, 50), 'https://example.com/x', {} as never)
+    expect(tooltipLines()).toEqual(['https://example.com/x', 'tile.linkBrowser'])
+  })
+
+  test('the tooltip keeps a link target as text rather than markup', () => {
+    const rig = linkRig([], 80)
+    const target = '<img src=x onerror=alert(1)>'
+    rig.handler.hover?.(hover(40, 50), target, {} as never)
+    const tooltip = document.querySelector<HTMLElement>('.terminal-link-tooltip')
+    expect(tooltip!.textContent).toContain(target)
+    expect(tooltip!.querySelector('img')).toBeNull()
   })
 
   test('an OSC 8 file: link is forwarded to main as is', async () => {
@@ -201,6 +274,20 @@ describe('installTerminalLinks over a real xterm buffer', () => {
     for (const header of [rowOf('● Bash(mkdir'), rowOf(' │ mkdir')]) {
       expect(rowsOf(header, true), 'a hard wrap indented by Claude Code is not reconstructible').toEqual([header])
     }
+  })
+
+  test('disposing a session terminal removes the link tooltip it is showing', () => {
+    const term = createSessionTerminal({ allowProposedApi: true }, () => {}, {
+      open: async () => ({ ok: true }),
+      onRefused() {},
+      report() {},
+      fileLinks: () => true,
+      label: (k) => k
+    })
+    term.options.linkHandler!.hover?.(hover(40, 50), 'https://example.com/x', {} as never)
+    expect(document.querySelector('.terminal-link-tooltip')).not.toBeNull()
+    term.dispose()
+    expect(document.querySelector('.terminal-link-tooltip')).toBeNull()
   })
 
   test('a path longer than the width is one link across the soft-wrapped rows of a real buffer', async () => {

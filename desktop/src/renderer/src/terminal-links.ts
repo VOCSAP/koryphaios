@@ -11,6 +11,8 @@ export interface TerminalLinkDeps {
   report(message: string): void
   /** False on a sandbox tile: its paths are the container's, so only http(s) stays clickable. */
   fileLinks(): boolean
+  /** Translated text for an i18n key, read at hover time so a locale change applies to the next tooltip. */
+  label(key: string): string
 }
 
 export interface LinkTerminal {
@@ -57,13 +59,37 @@ export function activateLink(
  * One click path for every link of a session terminal: OSC 8 hyperlinks (via
  * xterm's linkHandler) and links found in the printed text.
  */
-export function installTerminalLinks(term: LinkTerminal, deps: TerminalLinkDeps): void {
+export function installTerminalLinks(term: LinkTerminal, deps: TerminalLinkDeps): { dispose(): void } {
   const activate = (target: string, event: Pick<MouseEvent, 'button' | 'ctrlKey' | 'metaKey'>): void =>
     activateLink(deps, target, event)
+  let tooltip: HTMLDivElement | undefined
+  const hideTooltip = (): void => {
+    tooltip?.remove()
+    tooltip = undefined
+  }
+  const showTooltip = (target: string, event: Pick<MouseEvent, 'clientX' | 'clientY'>): void => {
+    if (typeof document === 'undefined') return
+    hideTooltip()
+    tooltip = document.createElement('div')
+    tooltip.className = 'terminal-link-tooltip xterm-hover'
+    tooltip.setAttribute('role', 'tooltip')
+    // Main sends a web target to the browser whatever the intent, so a web link has one gesture.
+    const gestures = WEB_URL_RE.test(target)
+      ? [deps.label('tile.linkBrowser')]
+      : deps.fileLinks()
+        ? [deps.label('tile.linkReveal'), deps.label('tile.linkOpen')]
+        : [deps.label('tile.linkSandbox')]
+    tooltip.textContent = [target, ...gestures].join('\n')
+    tooltip.style.setProperty('--terminal-link-tooltip-x', `${event.clientX + 12}px`)
+    tooltip.style.setProperty('--terminal-link-tooltip-y', `${event.clientY + 12}px`)
+    document.body.append(tooltip)
+  }
 
   term.options.linkHandler = {
     allowNonHttpProtocols: true,
-    activate: (event, text) => activate(text, event)
+    activate: (event, text) => activate(text, event),
+    hover: (event, text) => showTooltip(text, event),
+    leave: hideTooltip
   }
 
   term.registerLinkProvider({
@@ -91,10 +117,13 @@ export function installTerminalLinks(term: LinkTerminal, deps: TerminalLinkDeps)
             end: { x: endCell.col + endCell.width, y: end.row + 1 }
           },
           text: line.text.slice(match.start, match.end),
-          activate: (event) => activate(match.target, event)
+          activate: (event) => activate(match.target, event),
+          hover: (event) => showTooltip(match.target, event),
+          leave: hideTooltip
         })
       }
       callback(links.length > 0 ? links : undefined)
     }
   })
+  return { dispose: hideTooltip }
 }

@@ -51,6 +51,8 @@ export function createSessionTerminal(
 ): Terminal {
   const term = new Terminal(options)
   suppressFocusReporting(term, report)
-  installTerminalLinks(term, links)
+  // An addon is disposed by term.dispose(), so callers need no second teardown to drop a visible link tooltip.
+  const linkGate = installTerminalLinks(term, links)
+  term.loadAddon({ activate: () => {}, dispose: () => linkGate.dispose() })
   return term
 }

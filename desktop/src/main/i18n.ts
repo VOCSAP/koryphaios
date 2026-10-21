@@ -303,6 +303,10 @@ export const EN_DEFAULTS: Record<string, string> = {
   'tile.fullscreenTitle': 'Double-click to toggle fullscreen',
   'tile.restartTitle': 'Restart peer',
   'tile.closeTitle': 'Close session',
+  'tile.linkReveal': 'Click to reveal',
+  'tile.linkOpen': 'Ctrl/Cmd-click to open',
+  'tile.linkBrowser': 'Click to open in the browser',
+  'tile.linkSandbox':"Not opened here: a sandboxed project's files live in the container",
 
   'area.emptyTitle': 'No peer terminals yet',
   'area.emptyBody':

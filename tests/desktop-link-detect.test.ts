@@ -24,6 +24,10 @@ describe('detectLinks', () => {
     expect(targets('see HTTPS://x.com/a now')).toEqual(['HTTPS://x.com/a'])
   })
 
+  test('detects an absolute WSL mount path as a text link', () => {
+    expect(targets('open /mnt/c/Users/op/a.md')).toEqual(['/mnt/c/Users/op/a.md'])
+  })
+
   test('a slash command, a fraction and a bare drive letter are not paths', () => {
     expect(targets('/help and and/or 1/2 C: done')).toEqual([])
   })

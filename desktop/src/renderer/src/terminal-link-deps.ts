@@ -1,3 +1,4 @@
+import { translate } from './i18n'
 import { useDeck } from './store'
 import type { LinkNotice, TerminalLinkDeps } from './terminal-links'
 
@@ -21,6 +22,7 @@ export function sessionLinkDeps(): TerminalLinkDeps {
     open: (target, intent) => window.api.openLink(target, intent),
     onRefused: (reason) => useDeck.getState().showToast(NOTICE_TOAST[reason], 'error'),
     report: (message) => window.api.reportError('terminal', message),
-    fileLinks: () => useDeck.getState().sandboxStatus?.enabled === false
+    fileLinks: () => useDeck.getState().sandboxStatus?.enabled === false,
+    label: (key) => translate(useDeck.getState().dict, key)
   }
 }

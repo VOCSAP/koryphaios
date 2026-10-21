@@ -10,7 +10,8 @@ const inertLinks: TerminalLinkDeps = {
   open: async () => ({ ok: true }),
   onRefused: () => {},
   report: () => {},
-  fileLinks: () => true
+  fileLinks: () => true,
+  label: (key) => key
 }
 
 function guardedTerminal(): { term: Terminal; sent: string[]; reports: string[] } {

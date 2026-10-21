@@ -4068,6 +4068,25 @@ body:has(.rm-modal) .rm-conflict-modal {
   cursor: help;
 }
 
+.terminal-link-tooltip {
+  --terminal-link-tooltip-x: auto;
+  --terminal-link-tooltip-y: auto;
+  position: fixed;
+  z-index: 20;
+  left: var(--terminal-link-tooltip-x);
+  top: var(--terminal-link-tooltip-y);
+  max-width: min(480px, calc(100vw - 24px));
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-2);
+  color: var(--fg);
+  font: 11px/1.45 var(--mono);
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+  box-shadow: 0 4px 12px color-mix(in srgb, var(--bg) 45%, transparent);
+}
+
 /* A URL or path an agent wrote, made clickable: a focusable span on the Deck (its text stays selectable), an anchor on the companion. */
 .text-link {
   color: var(--accent);

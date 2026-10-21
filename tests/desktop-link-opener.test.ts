@@ -255,6 +255,37 @@ describe('link-opener: a Git Bash /x/... path on Windows is its drive path', () 
   })
 })
 
+describe('link-opener: a WSL /mnt/<letter>/ path on Windows is its drive path', () => {
+  test('/mnt/c/Users/op/a.md is revealed as C:\\Users\\op\\a.md before the existing guards', async () => {
+    const target = 'C:\\Users\\op\\a.md'
+    const { opener, calls } = harness('win32', { existing: { [target]: target } })
+    expect(await opener.open('/mnt/c/Users/op/a.md', 'reveal')).toEqual({ ok: true })
+    expect(calls.shown).toEqual([target])
+  })
+
+  test('/mnt/c/Users/op/.ssh/x.json meets the default exclusion exactly as C:\\Users\\op\\.ssh\\x.json does', async () => {
+    const excluded = 'C:\\Users\\op\\.ssh\\x.json'
+    const open = 'C:\\Users\\op\\x.json'
+    const { opener, calls } = harness('win32', { existing: { [excluded]: excluded, [open]: open } })
+    expect(await opener.open(excluded, 'open')).toEqual({ ok: false, reason: 'not-allowed' })
+    expect(await opener.open('/mnt/c/Users/op/.ssh/x.json', 'open')).toEqual({ ok: false, reason: 'not-allowed' })
+    expect(await opener.open('/mnt/c/Users/op/x.json', 'open'), 'the same file outside .ssh opens').toEqual({ ok: true })
+    expect(calls.opened).toEqual([open])
+  })
+
+  test.each(['/mnt/cc/Users/op/a.md', '/mnt/1/Users/op/a.md', '/mnt/c'])('%s is not translated as a WSL drive path', async (target) => {
+    const { opener, calls } = harness('win32')
+    expect(await opener.open(target, 'reveal')).toEqual({ ok: false, reason: 'invalid' })
+    expect(calls.realpaths).toEqual([])
+  })
+
+  test.each(['linux', 'darwin'] as const)('outside Windows /mnt/c/a.md stays a POSIX path on %s', async (platform) => {
+    const { opener, calls } = harness(platform, { existing: { '/mnt/c/a.md': '/mnt/c/a.md' } })
+    expect(await opener.open('/mnt/c/a.md', 'reveal')).toEqual({ ok: true })
+    expect(calls.shown).toEqual(['/mnt/c/a.md'])
+  })
+})
+
 describe('link-opener: reveal', () => {
   test('any existing local path is revealed, even one an open would refuse', async () => {
     const { opener, calls } = harness('linux', {

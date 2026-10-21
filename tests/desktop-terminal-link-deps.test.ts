@@ -6,11 +6,12 @@ import type { LinkNotice } from '../desktop/src/renderer/src/terminal-links'
 
 interface FakeState {
   sandboxStatus: { enabled: boolean } | null
+  dict: Record<string, string>
   showToast(key: string, kind: string): void
 }
 
 const toasts: [string, string][] = []
-const state: FakeState = { sandboxStatus: null, showToast: (key, kind) => void toasts.push([key, kind]) }
+const state: FakeState = { sandboxStatus: null, dict: {}, showToast: (key, kind) => void toasts.push([key, kind]) }
 mockStore({ useDeck: Object.assign(() => state, { getState: () => state }), ...storeMockStubs } as never)
 
 const { sessionLinkDeps } = await import('../desktop/src/renderer/src/terminal-link-deps')
@@ -58,6 +59,14 @@ describe('sessionLinkDeps', () => {
   test('report goes to the terminal scope of the error log', () => {
     sessionLinkDeps().report('boom')
     expect(apiCalls.reportError).toEqual([['terminal', 'boom']])
+  })
+
+  test('label reads the dictionary of the moment, so a locale change reaches the next tooltip', () => {
+    const deps = sessionLinkDeps()
+    state.dict = { 'tile.linkReveal': 'Click to reveal' }
+    expect(deps.label('tile.linkReveal')).toBe('Click to reveal')
+    state.dict = { 'tile.linkReveal': 'Clic pour afficher dans le dossier' }
+    expect(deps.label('tile.linkReveal')).toBe('Clic pour afficher dans le dossier')
   })
 
   test('every refusal reason has its own toast key, defined in both locales', () => {
