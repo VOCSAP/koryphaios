@@ -11,6 +11,7 @@
 import { test, expect, describe, afterAll } from "bun:test";
 import { startBroker, stopBroker, scrubEnv, type TestBroker } from "./_helper.ts";
 import { TOOLS } from "../server.ts";
+import { reachedWithin } from "./_bounded-await.ts";
 
 const brokers: TestBroker[] = [];
 const procs: ReturnType<typeof Bun.spawn>[] = [];
@@ -29,8 +30,13 @@ afterAll(async () => {
 
 interface JsonRpcResponse {
   id?: number;
-  result?: { content?: Array<{ text?: string }>; isError?: boolean; tools?: Array<{ name: string }> };
-  error?: { message?: string };
+  result?: {
+    content?: Array<{ text?: string }>;
+    isError?: boolean;
+    tools?: Array<{ name: string }>;
+    capabilities?: { experimental?: Record<string, unknown> };
+  };
+  error?: { code?: number; message?: string };
 }
 
 /** Read stdout until a JSON-RPC message with the wanted id shows up. */
@@ -69,8 +75,8 @@ interface Harness {
   send: (msg: unknown) => void;
 }
 
-/** Boot `bun server.ts` with CLAUDE_PEERS_TOOLS set to `toolsEnv` (undefined = unset). */
-async function boot(toolsEnv: string | undefined): Promise<Harness> {
+/** Spawn `bun server.ts` with CLAUDE_PEERS_TOOLS set to `toolsEnv` (undefined = unset), before any handshake. */
+async function spawnServer(toolsEnv: string | undefined): Promise<Harness> {
   const b = await startBroker();
   brokers.push(b);
 
@@ -90,19 +96,26 @@ async function boot(toolsEnv: string | undefined): Promise<Harness> {
     proc.stdin.write(JSON.stringify(msg) + "\n");
   };
 
-  send({
-    jsonrpc: "2.0",
-    id: 0,
-    method: "initialize",
-    params: {
-      protocolVersion: "2025-11-25",
-      capabilities: { roots: {}, elicitation: {} },
-      clientInfo: { name: "test-harness", version: "0.0.1" },
-    },
-  });
-  await readUntil(reader, 0, buffer);
-
   return { b, proc, reader, buffer, send };
+}
+
+const INITIALIZE_REQUEST = (id: number) => ({
+  jsonrpc: "2.0",
+  id,
+  method: "initialize",
+  params: {
+    protocolVersion: "2025-11-25",
+    capabilities: { roots: {}, elicitation: {} },
+    clientInfo: { name: "test-harness", version: "0.0.1" },
+  },
+});
+
+/** Boot `bun server.ts` with CLAUDE_PEERS_TOOLS set to `toolsEnv` (undefined = unset), initialized. */
+async function boot(toolsEnv: string | undefined): Promise<Harness> {
+  const h = await spawnServer(toolsEnv);
+  h.send(INITIALIZE_REQUEST(0));
+  await readUntil(h.reader, 0, h.buffer);
+  return h;
 }
 
 describe("CLAUDE_PEERS_TOOLS: server.ts's tool allow-list", () => {
@@ -186,5 +199,27 @@ describe("CLAUDE_PEERS_TOOLS: server.ts's tool allow-list", () => {
     const res = await readUntil(h.reader, 1, h.buffer);
     expect(res.result).toBeUndefined();
     expect(res.error?.message ?? "").toContain("Unknown tool: not-a-real-tool");
+  }, 60_000);
+});
+
+// Claude Code sends server/discover before initialize. A success reply moves the
+// connection to the modern protocol era, where it drops channel notifications
+// without an error, so the push of every peer message silently stops.
+describe("MCP handshake: the channel stays on the legacy protocol era", () => {
+  test("server/discover before initialize is refused with -32601 and initialize still advertises claude/channel", async () => {
+    const h = await spawnServer(undefined);
+    h.send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "server/discover",
+      params: { _meta: { "io.modelcontextprotocol/protocolVersion": "2026-07-28" } },
+    });
+    const discover = await reachedWithin(readUntil(h.reader, 1, h.buffer), "server/discover reply", 10_000);
+    expect(discover.result).toBeUndefined();
+    expect(discover.error?.code).toBe(-32601);
+
+    h.send(INITIALIZE_REQUEST(2));
+    const init = await reachedWithin(readUntil(h.reader, 2, h.buffer), "initialize reply", 10_000);
+    expect(init.result?.capabilities?.experimental?.["claude/channel"]).toEqual({});
   }, 60_000);
 });
