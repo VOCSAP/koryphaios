@@ -133,6 +133,18 @@ describe('installTerminalLinks', () => {
     ])
   })
 
+  test('Shift+click reveals and Ctrl+Shift+click opens: xterm keeps a Shift click from the application, the link still acts', async () => {
+    const rig = linkRig(['edit /work/src/a.ts'], 80)
+    const [link] = rig.provide(1)
+    link!.activate({ button: 0, shiftKey: true, ctrlKey: false, metaKey: false } as MouseEvent, link!.text)
+    link!.activate({ button: 0, shiftKey: true, ctrlKey: true, metaKey: false } as MouseEvent, link!.text)
+    await tick()
+    expect(rig.opened).toEqual([
+      { target: '/work/src/a.ts', intent: 'reveal' },
+      { target: '/work/src/a.ts', intent: 'open' }
+    ])
+  })
+
   test.each([1, 2])('a click with button %i (middle, right) never activates a link: it belongs to copy and paste', async (button) => {
     const rig = linkRig(['edit /work/src/a.ts'], 80)
     rig.provide(1)[0]!.activate(click(false, button), '/work/src/a.ts')
@@ -146,11 +158,11 @@ describe('installTerminalLinks', () => {
     const rig = linkRig([], 80)
     const target = 'https://example.com/actual-target'
     rig.handler.hover?.(hover(40, 50), target, {} as never)
-    expect(tooltipLines(), 'main opens a web target in the browser whatever the intent').toEqual([target, 'tile.linkBrowser'])
+    expect(tooltipLines(), 'main opens a web target in the browser whatever the intent').toEqual([target, 'tile.linkBrowser', 'tile.linkShift'])
     rig.handler.leave?.(hover(40, 50), target, {} as never)
     expect(document.querySelector('.terminal-link-tooltip')).toBeNull()
     rig.handler.hover?.(hover(40, 50), 'file:///C:/proj/a.md', {} as never)
-    expect(tooltipLines()).toEqual(['file:///C:/proj/a.md', 'tile.linkReveal', 'tile.linkOpen'])
+    expect(tooltipLines()).toEqual(['file:///C:/proj/a.md', 'tile.linkReveal', 'tile.linkOpen', 'tile.linkShift'])
   })
 
   test('hovering a detected path shows the target main receives, not the printed text, and leave removes the tooltip', () => {
@@ -192,7 +204,7 @@ describe('installTerminalLinks', () => {
     rig.handler.hover?.(hover(40, 50), 'file:///a/b', {} as never)
     expect(tooltipLines()).toEqual(['file:///a/b', 'tile.linkSandbox'])
     rig.handler.hover?.(hover(40, 50), 'https://example.com/x', {} as never)
-    expect(tooltipLines()).toEqual(['https://example.com/x', 'tile.linkBrowser'])
+    expect(tooltipLines()).toEqual(['https://example.com/x', 'tile.linkBrowser', 'tile.linkShift'])
   })
 
   test('the tooltip keeps a link target as text rather than markup', () => {

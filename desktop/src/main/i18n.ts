@@ -307,6 +307,7 @@ export const EN_DEFAULTS: Record<string, string> = {
   'tile.linkOpen': 'Ctrl/Cmd-click to open',
   'tile.linkBrowser': 'Click to open in the browser',
   'tile.linkSandbox':"Not opened here: a sandboxed project's files live in the container",
+  'tile.linkShift':'Shift-click: the click is not passed to the application',
 
   'area.emptyTitle': 'No peer terminals yet',
   'area.emptyBody':

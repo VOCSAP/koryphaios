@@ -203,6 +203,7 @@
   "tile.linkOpen": "Ctrl/Cmd-click to open",
   "tile.linkBrowser": "Click to open in the browser",
   "tile.linkSandbox":"Not opened here: a sandboxed project's files live in the container",
+  "tile.linkShift":"Shift-click: the click is not passed to the application",
   "area.emptyTitle": "No peer terminals yet",
   "area.emptyBody": "Add a Claude Code peer session to dock it here. Each tile runs in a real terminal, scoped to this window's isolated group, so OAuth works normally.",
   "area.addTerminal": "＋ Add peer terminal",

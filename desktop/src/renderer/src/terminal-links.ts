@@ -75,9 +75,9 @@ export function installTerminalLinks(term: LinkTerminal, deps: TerminalLinkDeps)
     tooltip.setAttribute('role', 'tooltip')
     // Main sends a web target to the browser whatever the intent, so a web link has one gesture.
     const gestures = WEB_URL_RE.test(target)
-      ? [deps.label('tile.linkBrowser')]
+      ? [deps.label('tile.linkBrowser'), deps.label('tile.linkShift')]
       : deps.fileLinks()
-        ? [deps.label('tile.linkReveal'), deps.label('tile.linkOpen')]
+        ? [deps.label('tile.linkReveal'), deps.label('tile.linkOpen'), deps.label('tile.linkShift')]
         : [deps.label('tile.linkSandbox')]
     tooltip.textContent = [target, ...gestures].join('\n')
     tooltip.style.setProperty('--terminal-link-tooltip-x', `${event.clientX + 12}px`)
