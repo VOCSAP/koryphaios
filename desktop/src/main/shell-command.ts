@@ -81,7 +81,8 @@ export function buildSpawnPlan(
     // Populate the status-line peer_id cache so the Deck can show peer_id.
     CLAUDE_PEERS_STATUS_LINE_CACHE: '1',
     TERM: 'xterm-256color',
-    ...extraEnv
+    ...extraEnv,
+    CLAUDE_CODE_NO_FLICKER: '0'
   }
   if (plat === 'win32') env.KORY_JOB_PS = JOB_PREAMBLE_PS
   return { invocation, env }

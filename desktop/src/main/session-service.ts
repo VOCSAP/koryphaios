@@ -16,6 +16,7 @@ import { fetchTilePeers, type BrokerEndpoint } from './broker-client'
 import { PEER_POLL_MS, TilePeerPoller } from './peer-state'
 import {
   buildSessionCommandLine,
+  claudeSettingsIssue,
   encodeInitialPromptKeystrokes,
   sanitizeFlagValue,
   shouldInjectPrompt,
@@ -23,6 +24,7 @@ import {
 } from './session-command'
 import { ThinkingDetector } from './thinking'
 import { isClaudeLaunch, isClodexLaunch, withClodexWrapper } from './session-kind'
+import { buildTileSettings } from './statusline-settings'
 import {
   QuotaDetector,
   type QuotaClearEvent,
@@ -515,23 +517,23 @@ export class SessionService extends EventEmitter {
   /** Peers dir the sandbox containers write into, or null when sandbox is off. */
   private sandboxPeersDir: () => string | null = () => null
 
-  /**
-   * Returns the path of the statusLine settings file for `--settings`, or ''
-   * when unavailable (the provider reports why). Injected by index.ts, which
-   * owns the app-state dir and the plugin dir.
-   */
   private getStatusLineSettings: () => string = () => ''
+  private writeTileSettingsFile: (settings: string) => string = () => ''
   private hostSupportsKoryTelemetry: (shell: string) => boolean = () => false
 
   setStatusLineSettingsProvider(provider: () => string): void {
     this.getStatusLineSettings = provider
   }
 
+  setTileSettingsFileProvider(provider: (settings: string) => string): void {
+    this.writeTileSettingsFile = provider
+  }
+
   setHostTelemetryProvider(provider: (shell: string) => boolean): void {
     this.hostSupportsKoryTelemetry = provider
   }
 
-  /** A sandboxed tile writes its status inside the container, which the host path in the settings file does not reach. */
+  /** Sandboxed tiles use container telemetry and do not install the host hook. */
   private statusLineSettingsFor(
     def: SessionDef,
     base: string,
@@ -1428,26 +1430,28 @@ export class SessionService extends EventEmitter {
     this.revokePermissionLease(def.id)
     const cfg = this.getConfig()
     const base = this.resolveBaseCommand(def)
+    const argsIssue = isClaudeLaunch(base) ? claudeSettingsIssue(base, def.args) : undefined
+    if (argsIssue) {
+      reportError('session', `Claude launch ${argsIssue.replace(/^contain/, 'contains')}; tile not launched`)
+      return
+    }
 
     const effective: SpawnMode = mode === 'resume' && def.sessionId ? 'resume' : 'fresh'
 
-    // Drop any stale prompt-injection entry from a previous spawn of this id
-    // before (maybe) recording a fresh one below (150eb188) -- a resume must
-    // never inject one, matching "prompt lives in the transcript, never
-    // re-played".
     this.pendingPrompt.delete(def.id)
-
-    // startPty has one caller (spawnSession) and every call starts a
-    // genuinely new claude process, in either branch below (a resume with no
-    // transcript degrades to fresh and mints an id too) -- the dead
-    // process's history owes the new one nothing.
     def.sessionIdHistory = []
 
     const sandboxed = !def.supervisor && this.sandboxPeersDir() !== null
     const pluginDirs = this.getPluginDirs(this.deckLeadPluginTiles.has(def.id), sandboxed)
     const telemetryPluginLoaded = Boolean(pluginDirs[0])
-    const settingsFile = this.statusLineSettingsFor(def, base, telemetryPluginLoaded, cfg.shell)
-    const fallbackInjected = settingsFile !== undefined
+    const statusLineSettings = this.statusLineSettingsFor(def, base, telemetryPluginLoaded, cfg.shell)
+    const tileSettings = isClaudeLaunch(base) ? buildTileSettings(statusLineSettings) : undefined
+    const settings = tileSettings ? (sandboxed ? tileSettings : this.writeTileSettingsFile(tileSettings) || undefined) : undefined
+    if (isClaudeLaunch(base) && !settings) {
+      reportError('session', 'tile settings unavailable; tile not launched')
+      return
+    }
+    const fallbackInjected = statusLineSettings !== undefined
     const koryModuleServed =
       !sandboxed && isClaudeLaunch(base) && telemetryPluginLoaded && this.hostSupportsKoryTelemetry(cfg.shell)
     const statusSourceTrusted = fallbackInjected || koryModuleServed
@@ -1465,7 +1469,7 @@ export class SessionService extends EventEmitter {
         pluginDirs,
         mcpConfig: def.mcpConfig,
         appendSystemPromptFile: def.appendSystemPromptFile,
-        settingsFile,
+        settings,
         mode: 'resume'
       })
     } else {
@@ -1479,7 +1483,7 @@ export class SessionService extends EventEmitter {
         pluginDirs,
         mcpConfig: def.mcpConfig,
         appendSystemPromptFile: def.appendSystemPromptFile,
-        settingsFile,
+        settings,
         mode: 'fresh'
       })
       // The prompt is recorded here rather than passed via argv, since Windows'

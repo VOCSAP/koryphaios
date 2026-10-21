@@ -15,6 +15,7 @@ import {
 } from "../desktop/src/main/launch-config.ts";
 import {
   buildSessionCommandLine,
+  claudeSettingsIssue,
   createMissingDirTracker,
   DECK_LEAD_PLUGIN_DIRNAME,
   DECK_PLUGIN_DIRNAME,
@@ -146,6 +147,31 @@ test("fresh launch appends --session-id then args", () => {
 test("fresh launch without args", () => {
   const line = buildSessionCommandLine({ baseCommand: "claude run", sessionId: "id-1", mode: "fresh" });
   expect(line).toBe("claude run --session-id \"id-1\"");
+});
+
+test("fresh launch places Deck settings after free args and effort", () => {
+  const line = buildSessionCommandLine({
+    baseCommand: "claude run",
+    sessionId: "id-1",
+    args: "--settings attacker.json",
+    effort: "high",
+    settings: "deck.json",
+    mode: "fresh"
+  });
+  expect(line.lastIndexOf("--settings")).toBe(line.indexOf("--settings 'deck.json'"));
+  expect(line).toBe("claude run --session-id \"id-1\" --settings attacker.json --effort \"high\" --settings 'deck.json'");
+});
+
+test("Claude settings guard rejects shell option and expansion forms", () => {
+  for (const source of ["-- x", "${A:---set}${B:-tings}=x.json", "$S", "$env:X"]) {
+    expect(claudeSettingsIssue("claude", source), source).toBeDefined();
+  }
+});
+
+test("Claude settings guard accepts literal dollar amounts and percent", () => {
+  for (const source of ['--append-system-prompt "cout 50%"', '"prix $5"']) {
+    expect(claudeSettingsIssue("claude", source), source).toBeUndefined();
+  }
 });
 
 test("resume forks prev into new id and never re-passes args/agent/model", () => {
@@ -369,37 +395,18 @@ test("--mcp-config and --append-system-prompt-file are emitted on both modes", (
   expect(resume).toContain("--resume \"id-old\" --fork-session");
 });
 
-test("--settings is emitted on both modes when set, absent when unset", () => {
-  const fresh = buildSessionCommandLine({
-    baseCommand: "claude",
-    sessionId: "id-1",
-    settingsFile: "/state/deck-statusline-abc.json",
-    mode: "fresh"
-  });
-  expect(fresh, "fresh line carries the statusLine settings").toBe(
-    'claude --settings "/state/deck-statusline-abc.json" --session-id "id-1"'
-  );
-  const resume = buildSessionCommandLine({
-    baseCommand: "claude",
-    sessionId: "id-new",
-    prevSessionId: "id-old",
-    settingsFile: "/state/deck-statusline-abc.json",
-    mode: "resume"
-  });
-  expect(resume, "resume line re-passes the statusLine settings (not restored by --fork-session)").toContain(
-    '--settings "/state/deck-statusline-abc.json"'
-  );
-  for (const settingsFile of [undefined, "", "   "]) {
-    for (const mode of ["fresh", "resume"] as const) {
-      const line = buildSessionCommandLine({
-        baseCommand: "claude",
-        sessionId: "id-new",
-        prevSessionId: "id-old",
-        settingsFile,
-        mode
-      });
-      expect(line, `no --settings flag on ${mode} for ${JSON.stringify(settingsFile)}`).not.toContain("--settings");
-    }
+test("a Claude session command carries one provided settings path", () => {
+  const settings = "C:/deck-state/deck-tile-a1b2c3.json";
+  for (const mode of ["fresh", "resume"] as const) {
+    const line = buildSessionCommandLine({
+      baseCommand: "claude",
+      sessionId: "id-new",
+      prevSessionId: "id-old",
+      settings,
+      mode
+    });
+    expect((line.match(/--settings/g) ?? []).length, `${mode} has one settings flag`).toBe(1);
+    expect(line, `${mode} uses the supplied settings path`).toContain(`--settings '${settings}'`);
   }
 });
 
@@ -697,6 +704,16 @@ test("spawn plan off win32 neither sets KORY_JOB_PS nor changes the shell comman
 
   expect(env.KORY_JOB_PS, "KORY_JOB_PS is only ours on win32").toBe(process.env.KORY_JOB_PS);
   expect(invocation.args).toEqual(["-l", "-c", "claude x"]);
+});
+
+test("spawn plan overrides inherited no-flicker", () => {
+  const { env } = buildSpawnPlan(
+    { command: "claude x", shell: "/bin/bash", interactive: false },
+    { CLAUDE_CODE_NO_FLICKER: "1" },
+    "linux"
+  );
+
+  expect(env.CLAUDE_CODE_NO_FLICKER).toBe("0");
 });
 
 test("windows non-interactive Job Object command emits no startup sentinel", () => {

@@ -65,6 +65,7 @@ function setup(mint?: () => { mcpConfig: string; callerId: string } | null) {
   mkdirSync(cwd, { recursive: true });
   const config = { projectDir: cwd, shell: "/bin/sh", interactiveShell: false } as never;
   const svc = new SessionService(() => config, () => ({}), "claude", () => [], home, mint);
+  svc.setTileSettingsFileProvider(() => join(home, "tile-settings.json"));
   services.push(svc);
   const broadcasts: Array<Array<{ id: string; locked?: boolean }>> = [];
   svc.on("changed", (list) => broadcasts.push(list));

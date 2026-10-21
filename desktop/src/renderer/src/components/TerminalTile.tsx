@@ -6,7 +6,7 @@ import { GLYPHS, GLYPH_ACTIONS, GLYPH_BADGES } from './icons'
 import { useDeck } from '../store'
 import { formatClock, useT } from '../i18n'
 import { registerTerminal, unregisterTerminal } from '../terminal-registry'
-import { copySelection, pasteFromClipboard } from '../terminal-clipboard'
+import { copySelection, handleTerminalContextMenu } from '../terminal-clipboard'
 import { createSessionTerminal } from '../terminal-focus-report'
 import { sessionLinkDeps } from '../terminal-link-deps'
 import { ConfirmDialog } from './ConfirmDialog'
@@ -110,7 +110,10 @@ export function TerminalTile({
       // to xterm's native paste handler -- intercepting it here would fire on top
       // of the native textarea paste event and paste twice.
       if (e.ctrlKey && !e.altKey && !e.metaKey && e.key.toLowerCase() === 'c') {
-        if (copySelection(term)) return false
+        if (term.getSelection()) {
+          void copySelection(term)
+          return false
+        }
         return !e.shiftKey // plain Ctrl+C interrupts; Ctrl+Shift+C is swallowed
       }
 
@@ -346,11 +349,8 @@ export function TerminalTile({
         className="tile-body"
         ref={hostRef}
         onContextMenu={(e) => {
-          // Right-click: copy the selection if any, otherwise paste.
-          e.preventDefault()
           const term = termRef.current
-          if (!term) return
-          if (!copySelection(term)) void pasteFromClipboard(term)
+          if (term) void handleTerminalContextMenu(term, e)
         }}
       />
       <TileApprovalPanel tileId={id} />

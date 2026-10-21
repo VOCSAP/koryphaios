@@ -29,8 +29,9 @@ import {
 import {
   STATUSLINE_REFRESH_S,
   buildStatusLineSettings,
-  statusLineSettingsFileName,
-  writeStatusLineSettings,
+  buildTileSettings,
+  tileSettingsFileName,
+  writeTileSettings,
 } from "../desktop/src/main/statusline-settings.ts";
 import { sanitizeSessionId } from "../shared/peer-cache.ts";
 import { sanitizeToken } from "../desktop/src/main/desk-session.ts";
@@ -533,17 +534,34 @@ test("buildStatusLineSettings refuses a path that would break the quoted command
   }
 });
 
-test("writeStatusLineSettings writes a content-keyed file", () => {
+test("tile settings contain the required TUI and no-flicker values", () => {
+  expect(JSON.parse(buildTileSettings())).toEqual({
+    tui: "default",
+    env: { CLAUDE_CODE_NO_FLICKER: "0" },
+  });
+  expect(JSON.parse(buildTileSettings('{"statusLine":{"type":"command"}}'))).toEqual({
+    tui: "default",
+    env: { CLAUDE_CODE_NO_FLICKER: "0" },
+    statusLine: { type: "command" },
+  });
+});
+
+test("writeTileSettings writes a full content-keyed tile settings file", () => {
   const dir = join(tmpDir(), "state");
-  const a = writeStatusLineSettings(dir, "/one/desk-statusline.mjs", "linux")!;
-  const b = writeStatusLineSettings(dir, "/two/desk-statusline.mjs", "linux")!;
+  const one = buildTileSettings(buildStatusLineSettings("/one/desk-statusline.mjs", "linux")!);
+  const two = buildTileSettings(buildStatusLineSettings("/two/desk-statusline.mjs", "linux")!);
+  const a = writeTileSettings(dir, one)!;
+  const b = writeTileSettings(dir, two)!;
   expect(a === b, "two hook paths never share one settings file").toBe(false);
-  expect(writeStatusLineSettings(dir, "/one/desk-statusline.mjs", "linux"), "same content, same file").toBe(a);
+  expect(writeTileSettings(dir, one), "same content, same file").toBe(a);
   const content = readFileSync(a, "utf-8");
-  expect(a.endsWith(statusLineSettingsFileName(content)), "file name derives from its content").toBe(true);
-  expect(JSON.parse(content).statusLine.command, "written content").toBe('bun "/one/desk-statusline.mjs"');
-  expect(writeStatusLineSettings(dir, '/bad"/x.mjs', "linux"), "unsafe hook path writes nothing").toBeNull();
+  expect(a.endsWith(tileSettingsFileName(content)), "file name derives from its content").toBe(true);
+  expect(JSON.parse(content), "written content").toEqual({
+    tui: "default",
+    env: { CLAUDE_CODE_NO_FLICKER: "0" },
+    statusLine: { type: "command", command: 'bun "/one/desk-statusline.mjs"', refreshInterval: STATUSLINE_REFRESH_S }
+  });
   const badDir = join(tmpDir(), "a$HOME");
-  expect(writeStatusLineSettings(badDir, "/one/desk-statusline.mjs", "linux"), "unsafe --settings path refused").toBeNull();
+  expect(writeTileSettings(badDir, one), "unsafe --settings path refused").toBeNull();
   expect(existsSync(badDir), "nothing created for a refused settings path").toBe(false);
 });

@@ -30,7 +30,7 @@ import {
   deckPluginDirFor,
   pluginDirsForTile
 } from './session-command'
-import { statusLineHookPath, writeStatusLineSettings } from './statusline-settings'
+import { buildStatusLineSettings, statusLineHookPath, writeTileSettings } from './statusline-settings'
 import { hostSupportsKoryTelemetry, prewarmClaudeVersion } from './usage-service'
 import { registerIpc, resolveDocsDir } from './ipc'
 import { parseCliContext } from './cli-context'
@@ -735,35 +735,33 @@ const service = new SessionService(
   permissionLeases
 )
 
-// statusLine settings for `--settings`: resolved at every spawn, like
-// getDeckPluginDir, so a hook bundle built or deleted mid-run is picked up. A
-// missing plugin dir is already reported by getDeckPluginDir; any other
-// unavailability is reported once per episode.
 const statusLineUnavailableTracker = createMissingDirTracker()
-const getStatusLineSettingsFile = (): string => {
+const getStatusLineSettings = (): string => {
   const pluginDir = getDeckPluginDir()
   if (!pluginDir) return ''
   const hook = statusLineHookPath(pluginDir)
-  let file: string | null = null
-  let why = ''
-  let err: unknown
   if (!existsSync(hook)) {
-    why = `statusLine script missing (${hook}) -- run \`npm run build:hook\`; tiles show no model or context fill`
-  } else {
-    try {
-      file = writeStatusLineSettings(appStateDir(), hook)
-      if (!file) {
-        why = `statusLine script or settings path cannot be quoted into a command (${hook}, ${appStateDir()}); tiles show no model or context fill`
-      }
-    } catch (e) {
-      why = 'failed to write the statusLine settings file; tiles show no model or context fill'
-      err = e
-    }
+    const why = `statusLine script missing (${hook}) -- run \`npm run build:hook\`; tiles show no model or context fill`
+    if (statusLineUnavailableTracker.check(false)) reportError('session', why)
+    return ''
   }
-  if (statusLineUnavailableTracker.check(file !== null)) reportError('session', why, err)
-  return file ?? ''
+  const settings = buildStatusLineSettings(hook)
+  if (!settings && statusLineUnavailableTracker.check(false)) {
+    reportError('session', `statusLine script path cannot be quoted into a command (${hook}); tiles show no model or context fill`)
+  }
+  if (settings) statusLineUnavailableTracker.check(true)
+  return settings ?? ''
 }
-service.setStatusLineSettingsProvider(getStatusLineSettingsFile)
+const writeTileSettingsFile = (settings: string): string => {
+  try {
+    return writeTileSettings(appStateDir(), settings) ?? ''
+  } catch (e) {
+    reportError('session', 'failed to write the tile settings file', e)
+    return ''
+  }
+}
+service.setStatusLineSettingsProvider(getStatusLineSettings)
+service.setTileSettingsFileProvider(writeTileSettingsFile)
 service.setHostTelemetryProvider(hostSupportsKoryTelemetry)
 
 const journal = createPersistentJournal({

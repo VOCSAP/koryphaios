@@ -26,9 +26,12 @@ Electron + React 19 + zustand, xterm terminals over node-pty. Sources in
   `withClodexWrapper` in `session-kind.ts`), never at create time — so it
   still follows a launch-config change made after the tile was created.
 - **Session status (model badge + context ring)**: each non-sandbox Claude
-  Code tile launches with `--settings` pointing at a shared
-  `deck-statusline-<sha12>.json` (`statusline-settings.ts`) whose `statusLine`
-  runs `desk-statusline.mjs` every 5 s. The hook writes the statusLine stdin
+  Code tile launches with one `--settings` path pointing at a content-addressed
+  `deck-tile-<sha12>.json` (`statusline-settings.ts`). The file always sets
+  `tui: "default"` and `env.CLAUDE_CODE_NO_FLICKER: "0"`, and adds a
+  `statusLine` which runs `desk-statusline.mjs` every 5 s when live status is
+  enabled. The process environment also forces `CLAUDE_CODE_NO_FLICKER=0`.
+  The hook writes the statusLine stdin
   fields (model, `context_window.used_percentage`, window size) to
   `~/.claude/peers/desk-status-<token>.json`, then chains the operator's
   statusLine from the GLOBAL `~/.claude/settings.json` only (hostile input #1).
@@ -45,13 +48,15 @@ Electron + React 19 + zustand, xterm terminals over node-pty. Sources in
   that command re-runs on every 5 s tick. Status/cache
   leftovers of unknown tiles older than 24 h are swept at start/restore (the
   peers dir is shared with other live Decks). Settings > General
-  `liveStatusLine` (default on) drops `--settings` at the next spawn, giving
-  the tile back Claude Code's footer hints.
+  `liveStatusLine` (default on) controls only the `statusLine` member: turning
+  it off retains the tile settings file and omits that member.
 - **Sandbox mode (🏺 Docker rail view, SBX1–SBX5)**: per-project
   toggle that runs NEW sessions inside a persistent Docker/Podman container
   (`kory-sbx-<hash12>`, project bind-mounted at `/work`, `sleep infinity` +
   one `docker exec` per session via a launch script under `/kory-run` — no
-  PowerShell→bash double quoting). Deterministic per-project naming, shared
+  PowerShell→bash double quoting). Sandbox Claude launches receive their tile
+  settings as inline JSON quoted for that POSIX script, never as a host path or
+  mount. Deterministic per-project naming, shared
   `kory-claude-auth` volume on `~/.claude` (one CLI login for every project,
   done in a blocking first-run modal with an embedded auth terminal — agents
   cannot spawn until authenticated, `sandboxGate` in create-session.ts). That

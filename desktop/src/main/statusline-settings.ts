@@ -1,8 +1,3 @@
-// The settings file passed to Claude Code tiles as `--settings <file>`: it
-// installs the Deck's statusLine script (hooks/desk-statusline.ts), which
-// reports model + context fill and chains the operator's own status line.
-// Pure node builtins, no electron import, so it is bun-testable.
-
 import { createHash } from 'node:crypto'
 import { mkdirSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -40,29 +35,20 @@ export function buildStatusLineSettings(hookPath: string, plat: NodeJS.Platform 
   })
 }
 
-/**
- * File name keyed by the content itself: the directory is shared by every
- * Deck window, and two builds (dev checkout, packaged app) point at different
- * hook paths, so one window can never rewrite the file another one launches.
- */
-export function statusLineSettingsFileName(content: string): string {
-  return `deck-statusline-${createHash('sha256').update(content).digest('hex').slice(0, 12)}.json`
+export function buildTileSettings(statusLineSettings?: string): string {
+  return JSON.stringify({
+    tui: 'default',
+    env: { CLAUDE_CODE_NO_FLICKER: '0' },
+    ...(statusLineSettings ? JSON.parse(statusLineSettings) : {})
+  })
 }
 
-/**
- * Write (atomically, temp + rename) the settings file for `hookPath` into
- * `dir` and return its path, or null when the hook path or the settings file's
- * own path (quoted into `--settings "<path>"`) is unusable. Throws on I/O
- * failure for the caller's error sink.
- */
-export function writeStatusLineSettings(
-  dir: string,
-  hookPath: string,
-  plat: NodeJS.Platform = process.platform
-): string | null {
-  const content = buildStatusLineSettings(hookPath, plat)
-  if (!content) return null
-  const file = join(dir, statusLineSettingsFileName(content))
+export function tileSettingsFileName(content: string): string {
+  return `deck-tile-${createHash('sha256').update(content).digest('hex').slice(0, 12)}.json`
+}
+
+export function writeTileSettings(dir: string, content: string): string | null {
+  const file = join(dir, tileSettingsFileName(content))
   if (!isQuotableCommandPath(file)) return null
   mkdirSync(dir, { recursive: true })
   const tmp = `${file}.${process.pid}.tmp`

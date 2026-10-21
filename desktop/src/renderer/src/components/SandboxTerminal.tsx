@@ -3,7 +3,7 @@ import { Terminal, type ITheme } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { WebLinksAddon } from '@xterm/addon-web-links'
 import { errorText, useDeck } from '../store'
-import { copySelection, pasteFromClipboard } from '../terminal-clipboard'
+import { copySelection, handleTerminalContextMenu } from '../terminal-clipboard'
 
 // Dialog-hosted xterm bound to one of the sandbox UTILITY PTYs (the login
 // terminal and the image build, PLAN-SANDBOX SBX3/M2). Follows the
@@ -75,7 +75,10 @@ export function SandboxTerminal({
     term.attachCustomKeyEventHandler((e) => {
       if (e.type !== 'keydown') return true
       if (e.ctrlKey && !e.altKey && !e.metaKey && e.key.toLowerCase() === 'c') {
-        if (copySelection(term)) return false
+        if (term.getSelection()) {
+          void copySelection(term)
+          return false
+        }
         return !e.shiftKey // plain Ctrl+C interrupts; Ctrl+Shift+C is swallowed
       }
       return true
@@ -121,13 +124,9 @@ export function SandboxTerminal({
     <div
       ref={hostRef}
       className="sandbox-auth-term"
-      // Terminal convention (same as TerminalTile): right-click copies the
-      // selection, or pastes when there is none.
       onContextMenu={(e) => {
         const term = termRef.current
-        if (!term) return
-        e.preventDefault()
-        if (!copySelection(term)) void pasteFromClipboard(term)
+        if (term) void handleTerminalContextMenu(term, e)
       }}
     />
   )

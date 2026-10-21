@@ -62,6 +62,18 @@ mock.module(join(import.meta.dir, "..", "desktop", "src", "main", "store.ts"), (
 
 const { SessionService } = await import("../desktop/src/main/session-service.ts");
 
+function createSessionService(home: string, cwd: string): InstanceType<typeof SessionService> {
+  const service = new SessionService(
+    () => ({ projectDir: cwd, shell: "powershell.exe", interactiveShell: false }),
+    () => ({}),
+    "claude",
+    () => [],
+    home
+  );
+  service.setTileSettingsFileProvider(() => join(home, "tile-settings.json"));
+  return service;
+}
+
 function extractBody(source: string, signature: RegExp, label: string): string {
   const matches = source.match(new RegExp(signature.source, signature.flags.includes("g") ? signature.flags : signature.flags + "g")) ?? [];
   if (matches.length !== 1) throw new Error(`${label} extraction matched ${matches.length} declarations`);
@@ -366,13 +378,7 @@ test("startup acknowledgement deletes a pending prompt after its deferred write 
 test("SessionService restart does not replace a live PTY", async () => {
   const home = mkdtempSync(join(tmpdir(), "kory-pty-restart-"));
   const cwd = join(home, "project");
-  const service = new SessionService(
-    () => ({ projectDir: cwd, shell: "powershell.exe", interactiveShell: false }),
-    () => ({}),
-    "claude",
-    () => [],
-    home
-  );
+  const service = createSessionService(home, cwd);
 
   try {
     const initial = service.create({});
@@ -392,13 +398,7 @@ test("SessionService restart does not replace a live PTY", async () => {
 test("SessionService.closeAll retries a retired PTY after its final definition is removed", async () => {
   const home = mkdtempSync(join(tmpdir(), "kory-pty-close-all-"));
   const cwd = join(home, "project");
-  const service = new SessionService(
-    () => ({ projectDir: cwd, shell: "powershell.exe", interactiveShell: false }),
-    () => ({}),
-    "claude",
-    () => [],
-    home
-  );
+  const service = createSessionService(home, cwd);
 
   try {
     const initial = service.create({});

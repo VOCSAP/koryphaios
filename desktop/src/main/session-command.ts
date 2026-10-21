@@ -67,12 +67,8 @@ export interface SessionCommandInput {
    * supervisor's role at harness level (PLAN C8).
    */
   appendSystemPromptFile?: string
-  /**
-   * Path to a generated settings file (the Deck's statusLine), emitted as
-   * `--settings "<path>"` on BOTH fresh and resume: command-line settings are
-   * not restored by --fork-session and outrank user/project/local settings.
-   */
-  settingsFile?: string
+  /** Generated Claude settings value, emitted once on fresh and resume launches. */
+  settings?: string
   mode: SpawnMode
 }
 
@@ -99,10 +95,21 @@ function appendSystemPromptFlag(path?: string): string {
   return p ? ` --append-system-prompt-file "${p}"` : ''
 }
 
-/** ` --settings "<path>"` when set, otherwise empty. */
-function settingsFlag(path?: string): string {
-  const p = path?.trim()
-  return p ? ` --settings "${p}"` : ''
+export function claudeSettingsIssue(base: string, args: string | undefined): string | undefined {
+  const source = `${base} ${args ?? ''}`
+  if (source.includes('$(') || source.includes('`') || source.includes('${') || /\$[A-Za-z_]/.test(source)) {
+    return 'contain a shell substitution'
+  }
+  if (/(?:^|\s)--(?=\s|$)/.test(source)) return 'contain a bare option separator'
+  const normalized = source.replace(/["'\\^]/g, '')
+  return normalized.includes('--settings') || normalized.includes('-settings')
+    ? 'contain a settings flag that is managed by the Deck'
+    : undefined
+}
+
+function settingsFlag(settings?: string): string {
+  const value = settings?.trim()
+  return value ? ` --settings ${quotePromptArg(value)}` : ''
 }
 
 /** ` --plugin-dir "<dir>"` for every non-empty embedded plugin directory. */
@@ -195,13 +202,14 @@ export function buildSessionCommandLine(input: SessionCommandInput): string {
     // prevSessionId can originate from the desk-session back-channel, whose file
     // lives in a dir mounted into sandbox containers (validated in
     // desk-session.ts). Quoting is the second lock on that door.
-    return `${base}${pluginFlags(input.pluginDirs)}${mcpConfigFlag(input.mcpConfig)}${appendSystemPromptFlag(input.appendSystemPromptFile)}${settingsFlag(input.settingsFile)} --resume "${input.prevSessionId}" --fork-session --session-id "${input.sessionId}"${effortFlag(input.effort)}`
+    return `${base}${pluginFlags(input.pluginDirs)}${mcpConfigFlag(input.mcpConfig)}${appendSystemPromptFlag(input.appendSystemPromptFile)}${settingsFlag(input.settings)} --resume "${input.prevSessionId}" --fork-session --session-id "${input.sessionId}"${effortFlag(input.effort)}`
   }
 
-  let line = `${base}${pluginFlags(input.pluginDirs)}${mcpConfigFlag(input.mcpConfig)}${appendSystemPromptFlag(input.appendSystemPromptFile)}${settingsFlag(input.settingsFile)} --session-id "${input.sessionId}"`
+  let line = `${base}${pluginFlags(input.pluginDirs)}${mcpConfigFlag(input.mcpConfig)}${appendSystemPromptFlag(input.appendSystemPromptFile)} --session-id "${input.sessionId}"`
   const extra = input.args?.trim()
   if (extra) line += ` ${extra}`
   line += effortFlag(input.effort)
+  line += settingsFlag(input.settings)
   // No positional initial prompt here anymore (150eb188): session-service
   // injects it as post-spawn PTY keystrokes via encodeInitialPromptKeystrokes
   // below, once the tile is actually up, instead of composing it into argv

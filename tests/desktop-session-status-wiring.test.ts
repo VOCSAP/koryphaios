@@ -71,7 +71,9 @@ const { STATUS_FILE_VERSION } = await import("../desktop/src/shared/session-stat
 const { STATUS_SILENCE_MS, STALE_STATUS_FILE_MS } = await import("../desktop/src/main/session-status-file.ts");
 const { onDeckError } = await import("../desktop/src/main/log.ts");
 
-const SETTINGS = "/deck/state/deck-statusline-abc.json";
+const SETTINGS = '{"statusLine":{"type":"command","command":"bun statusline"}}';
+const TILE_SETTINGS = '{"tui":"default","env":{"CLAUDE_CODE_NO_FLICKER":"0"},"statusLine":{"type":"command","command":"bun statusline"}}';
+const BASE_SETTINGS = '{"tui":"default","env":{"CLAUDE_CODE_NO_FLICKER":"0"}}';
 
 const tmpDirs: string[] = [];
 const services: InstanceType<typeof SessionService>[] = [];
@@ -110,6 +112,11 @@ function setup(
   );
   services.push(svc);
   svc.setStatusLineSettingsProvider(() => SETTINGS);
+  svc.setTileSettingsFileProvider((settings) => {
+    const file = join(home, `tile-${Math.random().toString(36).slice(2)}.json`);
+    writeFileSync(file, settings, "utf-8");
+    return file;
+  });
   svc.setHostTelemetryProvider(() => opts.hostTelemetry === true);
   if (opts.sandboxPeersDir) svc.setSandboxProvider(() => null, undefined, () => opts.sandboxPeersDir!);
   const broadcasts: Array<Array<{ id: string; liveStatus: { model: string } | null }>> = [];
@@ -121,6 +128,12 @@ function lastLine(): string {
   const p = spawned.at(-1);
   if (!p) throw new Error("nothing spawned");
   return p.args.join(" ");
+}
+
+function hostSettings(line = lastLine()): string {
+  const match = /--settings '([^']+\.json)'/.exec(line);
+  if (!match) throw new Error(`host settings file not found in ${line}`);
+  return readFileSync(match[1]!, "utf-8");
 }
 
 function writeStatus(peersDir: string, id: string, model: string, at: number): void {
@@ -135,26 +148,96 @@ function poll(svc: unknown): void {
   (svc as { pollPeerIds(): void }).pollPeerIds();
 }
 
-test("a host Claude Code tile gets --settings and marks the fallback writer", () => {
+test("a host Claude Code tile gets one settings file and marks the fallback writer", () => {
   const { svc } = setup();
   svc.create({});
-  expect(lastLine(), "claude tile launched with the Deck statusLine").toContain(`--settings "${SETTINGS}"`);
+  expect(lastLine(), "host settings are never inline JSON").not.toContain(TILE_SETTINGS);
+  expect(lastLine(), "host tile receives a settings path").toMatch(/--settings '[^']+\.json'/);
   expect(spawned.at(-1)!.env.KORY_STATUS_FALLBACK).toBe("1");
+});
+
+test("a host tile without a settings file is not spawned", () => {
+  const errors: string[] = [];
+  onDeckError((_scope, text) => errors.push(text));
+  try {
+    const { svc } = setup();
+    svc.setTileSettingsFileProvider(() => "");
+    svc.create({});
+    expect(spawned).toHaveLength(0);
+    expect(errors).toEqual(["tile settings unavailable; tile not launched"]);
+  } finally {
+    onDeckError(() => {});
+  }
+});
+
+test.each([
+  ["quoted append-system-prompt", '--append-system-prompt "hello world"'],
+  ["multiple spaces", "--model   opus"],
+  ["quoted model value", '--model "x y"']
+])("a Claude tile accepts %s", (_name, args) => {
+  const { svc } = setup();
+  svc.create({ args });
+  expect(spawned).toHaveLength(1);
+});
+
+test("a non-Claude tile accepts quoted shell args", () => {
+  const { svc } = setup();
+  svc.create({ command: "bash", args: '-c "echo hello"' });
+  expect(spawned).toHaveLength(1);
+});
+
+test("a non-Claude tile accepts a settings-looking arg", () => {
+  const { svc } = setup();
+  svc.create({ command: "bash", args: "--settings ignored" });
+  expect(spawned).toHaveLength(1);
+});
+
+test.each([
+  ["settings flag", "--settings attacker.json"],
+  ["quotes inside settings flag", '--set""tings attacker.json'],
+  ["backslash inside settings flag", "--set\\tings attacker.json"],
+  ["settings assignment", "--settings=attacker.json"],
+  ["dollar substitution", "$(echo --settings) attacker.json"],
+  ["backtick substitution", "`echo --settings` attacker.json"]
+])("a Claude tile rejects %s in free args", (_name, args) => {
+  const errors: string[] = [];
+  onDeckError((_scope, text) => errors.push(text));
+  try {
+    const { svc } = setup();
+    svc.create({ args });
+    expect(spawned).toHaveLength(0);
+    expect(errors).toHaveLength(1);
+  } finally {
+    onDeckError(() => {});
+  }
+});
+
+test("a Claude tile rejects settings in its base command", () => {
+  const errors: string[] = [];
+  onDeckError((_scope, text) => errors.push(text));
+  try {
+    const { svc } = setup();
+    svc.create({ command: "claude --settings attacker.json" });
+    expect(spawned).toHaveLength(0);
+    expect(errors).toEqual(["Claude launch contains a settings flag that is managed by the Deck; tile not launched"]);
+  } finally {
+    onDeckError(() => {});
+  }
 });
 
 test("a compatible host keeps the fallback when no telemetry plugin is loaded", () => {
   const { svc } = setup({ hostTelemetry: true });
   svc.create({});
 
-  expect(lastLine()).toContain(`--settings "${SETTINGS}"`);
+  expect(hostSettings()).toBe(TILE_SETTINGS);
   expect(spawned.at(-1)!.env.KORY_STATUS_FALLBACK).toBe("1");
 });
 
-test("a compatible host Claude tile trusts the plugin without the fallback", () => {
+test("returning undefined for the served telemetry statusLine keeps the tile settings", () => {
   const { svc, peersDir } = setup({ hostTelemetry: true, pluginDirs: () => ["/plugins/general"] });
   const runtime = svc.create({});
 
-  expect(lastLine()).not.toContain("--settings");
+  expect(hostSettings()).toBe(BASE_SETTINGS);
   expect(spawned.at(-1)!.env.KORY_STATUS_FALLBACK).not.toBe("1");
   writeStatus(peersDir, runtime.id, "Opus", Date.now() + 1);
   poll(svc);
@@ -165,7 +248,7 @@ test("a compatible host with only the role plugin keeps the fallback", () => {
   const { svc } = setup({ hostTelemetry: true, pluginDirs: () => ["", "/plugins/role"] });
   svc.create({});
 
-  expect(lastLine()).toContain(`--settings "${SETTINGS}"`);
+  expect(hostSettings()).toBe(TILE_SETTINGS);
   expect(spawned.at(-1)!.env.KORY_STATUS_FALLBACK).toBe("1");
 });
 
@@ -176,7 +259,7 @@ test("a plugin-only launch clears an inherited fallback marker", () => {
     const { svc } = setup({ hostTelemetry: true, pluginDirs: () => ["/plugins/general"] });
     svc.create({});
 
-    expect(lastLine()).not.toContain("--settings");
+    expect(hostSettings()).toBe(BASE_SETTINGS);
     expect(spawned.at(-1)!.env.KORY_STATUS_FALLBACK).toBeUndefined();
   } finally {
     if (inherited === undefined) delete process.env.KORY_STATUS_FALLBACK;
@@ -184,14 +267,14 @@ test("a plugin-only launch clears an inherited fallback marker", () => {
   }
 });
 
-test("a sandboxed tile gets no --settings, the supervisor still does", () => {
+test("leaving the sandbox statusLine undefined still passes inline tile settings", () => {
   const sbx = mkdtempSync(join(tmpdir(), "kory-sbx-peers-"));
   tmpDirs.push(sbx);
   const { svc } = setup({ sandboxPeersDir: sbx });
   svc.create({});
-  expect(lastLine(), "sandboxed tile: host hook path unreachable, no flag").not.toContain("--settings");
+  expect(lastLine(), "sandboxed tile settings are inline").toContain(`--settings '${BASE_SETTINGS}'`);
   svc.create({ supervisor: true } as never);
-  expect(lastLine(), "supervisor is never sandboxed: flag kept").toContain(`--settings "${SETTINGS}"`);
+  expect(hostSettings(), "supervisor is never sandboxed: statusLine kept").toBe(TILE_SETTINGS);
 });
 
 test("a sandboxed tile never trusts the compatible host plugin", () => {
@@ -446,7 +529,7 @@ test("a resumed (forked) spawn gets --settings too", async () => {
   await svc.restart(rt.id);
   const line = lastLine();
   expect(line, "restart took the resume path").toContain("--fork-session");
-  expect(line, "resume spawn launched with the Deck statusLine").toContain(`--settings "${SETTINGS}"`);
+  expect(hostSettings(line), "resume spawn launched with the Deck statusLine").toBe(TILE_SETTINGS);
 });
 
 test("a sandbox restart cleans its prior tile process before replacement spawn", async () => {
@@ -824,23 +907,23 @@ test("silent statusLine: reported once per spawn after the grace period, never o
   expect(silent().filter((e) => e.includes('"shell"')), "a tile without --settings is never flagged").toEqual([]);
 });
 
-test("liveStatusLine off still trusts a compatible host telemetry plugin", () => {
+test("returning undefined for liveStatusLine off still passes tile settings", () => {
   const { svc, peersDir } = setup({ liveStatusLine: false, hostTelemetry: true, pluginDirs: () => ["/plugins/general"] });
   const runtime = svc.create({});
 
-  expect(lastLine()).not.toContain("--settings");
+  expect(hostSettings()).toBe(BASE_SETTINGS);
   expect(spawned.at(-1)!.env.KORY_STATUS_FALLBACK).not.toBe("1");
   writeStatus(peersDir, runtime.id, "Opus", Date.now() + 1);
   poll(svc);
   expect(svc.list().find((session) => session.id === runtime.id)!.liveStatus?.model).toBe("Opus");
 });
 
-test("liveStatusLine off: no --settings on any spawn, and a status file found is never shown", async () => {
+test("removing the liveStatusLine keeps tile settings on fresh, supervisor, and resume spawns", async () => {
   const { svc, peersDir, home, cwd } = setup({ liveStatusLine: false });
   const rt = svc.create({});
-  expect(lastLine(), "fresh spawn without the Deck statusLine").not.toContain("--settings");
+  expect(hostSettings(), "fresh spawn carries tile settings without the Deck statusLine").toBe(BASE_SETTINGS);
   svc.create({ supervisor: true } as never);
-  expect(lastLine(), "supervisor spawn without the Deck statusLine").not.toContain("--settings");
+  expect(hostSettings(), "supervisor spawn carries tile settings without the Deck statusLine").toBe(BASE_SETTINGS);
   writeStatus(peersDir, rt.id, "Opus", Date.now() + 1);
   poll(svc);
   expect(svc.list().find((s) => s.id === rt.id)!.liveStatus, "no statusLine installed: liveStatus stays null").toBeNull();
@@ -851,13 +934,13 @@ test("liveStatusLine off: no --settings on any spawn, and a status file found is
   spawned.find((p) => p.args.join(" ").includes(rt.sessionId))!.exit(1);
   await svc.restart(rt.id);
   expect(lastLine(), "resume path taken").toContain("--fork-session");
-  expect(lastLine(), "resume spawn without the Deck statusLine").not.toContain("--settings");
+  expect(hostSettings(), "resume spawn carries tile settings without the Deck statusLine").toBe(BASE_SETTINGS);
 });
 
 test("liveStatusLine explicitly on behaves as the default", () => {
   const { svc } = setup({ liveStatusLine: true });
   svc.create({});
-  expect(lastLine(), "flag passed when the setting is on").toContain(`--settings "${SETTINGS}"`);
+  expect(hostSettings(), "flag passed when the setting is on").toBe(TILE_SETTINGS);
 });
 
 test("silent statusLine: no warning while the tile waits on the operator; clock restarts when it stops", () => {

@@ -1,28 +1,49 @@
 import type { Terminal } from '@xterm/xterm'
+import { useDeck } from './store'
 
-// Clipboard bridge for every xterm the Deck hosts. Shared on purpose: this
-// logic lived only in TerminalTile, so the sandbox LOGIN terminal shipped with
-// no copy path at all -- and that is the one terminal where copying is the
-// whole point (the operator has to move an OAuth URL to the host browser).
-// Worse, the failure is silent AND misleading: the CLI running inside the
-// container prints "Copied!" after writing to the CONTAINER's clipboard, which
-// never reaches Windows. Any new terminal component must wire these two.
-
-/** Copy the current selection to the clipboard and clear it. No-op if empty. */
-export function copySelection(term: Terminal): boolean {
-  const sel = term.getSelection()
-  if (!sel) return false
-  void navigator.clipboard.writeText(sel)
-  term.clearSelection()
-  return true
+function reportClipboardFailure(action: 'copy' | 'paste'): void {
+  const message = `clipboard ${action} failed`
+  window.api.reportError('terminal', message)
+  useDeck.getState().showToast(message, 'error', { raw: true })
 }
 
-/** Paste clipboard text through xterm (bracketed-paste aware -> onData -> PTY). */
+type CopyResult = 'empty' | 'copied' | 'failed'
+
+export async function copySelection(term: Terminal): Promise<CopyResult> {
+  const selection = term.getSelection()
+  if (!selection) return 'empty'
+  if (typeof navigator === 'undefined' || !navigator.clipboard) {
+    reportClipboardFailure('copy')
+    return 'failed'
+  }
+  try {
+    await navigator.clipboard.writeText(selection)
+    term.clearSelection()
+    return 'copied'
+  } catch {
+    reportClipboardFailure('copy')
+    return 'failed'
+  }
+}
+
 export async function pasteFromClipboard(term: Terminal): Promise<void> {
+  if (typeof navigator === 'undefined' || !navigator.clipboard) {
+    reportClipboardFailure('paste')
+    return
+  }
   try {
     const text = await navigator.clipboard.readText()
     if (text) term.paste(text)
   } catch {
-    /* clipboard read denied / unavailable */
+    reportClipboardFailure('paste')
   }
+}
+
+export async function handleTerminalContextMenu(
+  term: Terminal,
+  event: Pick<MouseEvent, 'preventDefault' | 'shiftKey'>
+): Promise<void> {
+  event.preventDefault()
+  if (term.modes.mouseTrackingMode !== 'none' && !event.shiftKey) return
+  if ((await copySelection(term)) === 'empty') await pasteFromClipboard(term)
 }
