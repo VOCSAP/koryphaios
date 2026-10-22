@@ -2,7 +2,7 @@ import { afterAll, describe, expect, test } from 'bun:test'
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { ENGINE_JSX, enabledModsFromLock, ensureModWorkingCopy, loadModsLock, type WorkingCopyRequest } from '../desktop/src/main/mods-working-copy'
+import { ENGINE_JSX, enabledModsFromLock, ensureModWorkingCopy, listLockedMods, loadModsLock, type WorkingCopyRequest } from '../desktop/src/main/mods-working-copy'
 import * as modsWorkingCopy from '../desktop/src/main/mods-working-copy'
 import { modsFingerprint, type ModFile } from '../shared/mods-fingerprint'
 
@@ -602,6 +602,31 @@ describe('lock file', async () => {
     ['no plugins object', 'nope']
   ])('refuses a lock with %s', (_label, plugins) => {
     expect(() => loadModsLock(lockFile(plugins))).toThrow()
+  })
+
+  test('lists the plugin names of the lock in lock order and reports nothing', () => {
+    const reports: unknown[][] = []
+    const dir = lockFile({ p: { version: '1', fingerprint: good }, q: { version: '1', fingerprint: good } })
+    expect(listLockedMods(dir, loadModsLock, (...args) => reports.push(args))).toEqual(['p', 'q'])
+    expect(reports, 'a readable lock must not report an error').toEqual([])
+  })
+
+  test('lists exactly the plugins of the lock shipped under desktop/mods', () => {
+    const distDir = join(import.meta.dir, '..', 'desktop', 'mods')
+    const shipped = Object.keys(JSON.parse(readFileSync(join(distDir, 'choregos.lock.json'), 'utf-8')).plugins)
+    expect(listLockedMods(distDir)).toEqual(shipped)
+  })
+
+  test.each([
+    ['a lock without a plugins object', () => lockFile('nope'), /plugins object/],
+    ['a directory holding no lock file', () => scratch(), /ENOENT/]
+  ] as Array<[string, () => string, RegExp]>)('an unreadable lock (%s) lists nothing and reports the cause under the mods scope', (_label, makeDir, cause) => {
+    const reports: Array<[string, string, unknown]> = []
+    const listed = listLockedMods(makeDir(), loadModsLock, (scope, message, error) => reports.push([scope, message, error]))
+    expect(listed, 'a failing listing must degrade to no offered mod, never throw into the IPC handler').toEqual([])
+    expect(reports.length, 'the failure must leave exactly one trace').toBe(1)
+    expect(reports[0]![0]).toBe('mods')
+    expect(String(reports[0]![2]), 'the trace must carry the cause, not only a generic message').toMatch(cause)
   })
 
   test('loads the lock shipped under desktop/mods and materializes its plugins from the real distributed copy', async () => {

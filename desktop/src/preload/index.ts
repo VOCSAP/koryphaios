@@ -113,6 +113,7 @@ const api: DeckApi = {
 
   getConfig: () => ipcRenderer.invoke('config:get'),
   setConfig: (patch: Partial<AppConfig>) => ipcRenderer.invoke('config:set', patch),
+  listMods: () => ipcRenderer.invoke('mods:list'),
   getPeersConfig: () => ipcRenderer.invoke('peersConfig:get'),
   setOfflineReplica: (value: boolean) => ipcRenderer.invoke('peersConfig:setOfflineReplica', value),
   pickDirectory: () => ipcRenderer.invoke('dialog:pickDirectory'),

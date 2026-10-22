@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto'
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { FINGERPRINT_PATTERN, isEnginePath, modsFingerprint, PLUGIN_NAME_PATTERN, type ModFile } from '../../../shared/mods-fingerprint'
+import { reportError } from './log'
 
 export const MODS_LOCK_FILENAME = 'choregos.lock.json'
 
@@ -103,6 +104,19 @@ export function loadModsLock(distDir: string): Map<string, string> {
     lock.set(name, fingerprint)
   }
   return lock
+}
+
+export function listLockedMods(
+  distDir: string,
+  loadLock: (dir: string) => ReadonlyMap<string, string> = loadModsLock,
+  report: (scope: string, message: string, error?: unknown) => void = reportError
+): string[] {
+  try {
+    return Array.from(loadLock(distDir).keys())
+  } catch (error) {
+    report('mods', 'failed to list choregos mods', error)
+    return []
+  }
 }
 
 export function enabledModsFromLock(enabled: unknown, lock: ReadonlyMap<string, string>): string[] {

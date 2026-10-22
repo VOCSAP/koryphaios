@@ -503,6 +503,28 @@ test("SessionService rejects active mods without a launch plan (mutation: permit
   }
 });
 
+test.each([
+  ["null", null, 1],
+  ["an array holding true", [true], 1],
+  ["a number", 7, 1],
+  ["a string", "true", 1],
+  ["a record whose entries are not the boolean true", { prosopon: false, other: "true", third: 1 }, 1],
+  ["a record holding true", { prosopon: true }, 0]
+] as Array<[string, unknown, number]>)("a tile created with no launch plan while enabledMods holds %s", (_label, enabledMods, spawned) => {
+  const home = mkdtempSync(join(tmpdir(), "kory-pty-enabled-mods-domain-"));
+  const cwd = join(home, "project");
+  const service = createSessionService(home, cwd, { enabledMods });
+
+  try {
+    service.create({});
+    expect(sessionPtys, `enabledMods=${JSON.stringify(enabledMods)}: only a record holding the boolean true makes a launch plan mandatory`).toHaveLength(spawned);
+  } finally {
+    service.closeAll();
+    for (const pty of sessionPtys.splice(0)) pty.exit();
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
 test("SessionService rejects a sandbox plugin-dir before spawning a PTY (mutation: omit sandbox guard at consumption)", () => {
   const home = mkdtempSync(join(tmpdir(), "kory-pty-sandbox-plugin-dir-"));
   const cwd = join(home, "project");

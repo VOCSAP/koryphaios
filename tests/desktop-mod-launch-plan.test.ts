@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { LaunchAttemptRegistry, prepareLaunchModPlan, prepareRestorePlans } from '../desktop/src/main/mod-launch-plan'
+import { hasEnabledMods, LaunchAttemptRegistry, prepareLaunchModPlan, prepareRestorePlans } from '../desktop/src/main/mod-launch-plan'
 
 const signal = () => new AbortController().signal
 
@@ -36,6 +36,23 @@ test.each(NOT_AN_ENABLED_RECORD)('enabledMods %s enables nothing and never loads
   })
   expect(plan, `enabledMods=${JSON.stringify(value)} must yield the empty host plan`).toEqual({ attemptId: 'a', mode: 'host', modDirs: [], copies: [], diagnostics: [] })
   expect(loads, `enabledMods=${JSON.stringify(value)} must not read the lock`).toBe(0)
+})
+
+const NOTHING_ENABLED: ReadonlyArray<[string, unknown]> = [
+  ...NOT_AN_ENABLED_RECORD,
+  ['an empty record', {}],
+  ['a record whose entries are not the boolean true', { alpha: false, beta: 'true', gamma: 1, delta: {} }]
+]
+
+test.each(NOTHING_ENABLED)('hasEnabledMods reads enabledMods holding %s as nothing enabled', (_label, value) => {
+  expect(hasEnabledMods(value), `enabledMods=${JSON.stringify(value)} must not read as active`).toBe(false)
+})
+
+test.each([
+  ['a single true', { alpha: true }],
+  ['a true among false entries', { alpha: false, beta: true }]
+] as Array<[string, unknown]>)('hasEnabledMods reads %s as enabled', (_label, value) => {
+  expect(hasEnabledMods(value), `enabledMods=${JSON.stringify(value)} must read as active`).toBe(true)
 })
 
 test('sandbox refusal returns a structural refusal', async () => {

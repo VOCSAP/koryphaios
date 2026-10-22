@@ -1,0 +1,24 @@
+{
+  "name": "mitos",
+  "version": "0.1.0",
+  "description": "Turns existing file paths in assistant replies into clickable file links.",
+  "author": {
+    "name": "VOCSAP"
+  },
+  "userConfig": {
+    "allowed_extensions": {
+      "type": "string",
+      "multiple": true,
+      "title": "Allowed extensions",
+      "description": "Extensions, without the dot, whose files may become links. Replaces the default list; executable extensions are never linked.",
+      "default": [
+        "md", "markdown", "txt", "log", "csv", "tsv", "pdf",
+        "json", "jsonc", "yaml", "yml", "toml", "ini", "xml",
+        "ts", "tsx", "mts", "cts", "jsx", "mjs", "cjs",
+        "py", "rs", "go", "java", "kt", "c", "h", "cpp", "hpp", "cs", "rb", "php",
+        "lua", "swift", "dart", "sql", "vue", "svelte", "css", "scss",
+        "png", "jpg", "jpeg", "gif", "webp"
+      ]
+    }
+  }
+}

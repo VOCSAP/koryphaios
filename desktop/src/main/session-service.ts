@@ -11,7 +11,7 @@ import type {
   SessionStatus
 } from '@shared/types'
 import { PtyManager, validPtyDimensions } from './pty-manager'
-import type { LaunchAttemptRegistry, LaunchModCopy, LaunchModPlan } from './mod-launch-plan'
+import { hasEnabledMods, type LaunchAttemptRegistry, type LaunchModCopy, type LaunchModPlan } from './mod-launch-plan'
 import { saveSessions } from './store'
 import { fetchTilePeers, type BrokerEndpoint } from './broker-client'
 import { PEER_POLL_MS, TilePeerPoller } from './peer-state'
@@ -1462,7 +1462,7 @@ export class SessionService extends EventEmitter {
     const cfg = this.getConfig()
     const base = this.resolveBaseCommand(def)
     const sandboxed = !def.supervisor && this.sandboxPeersDir() !== null
-    const activeMods = Object.values(cfg.enabledMods ?? {}).some((enabled) => enabled === true)
+    const activeMods = hasEnabledMods(cfg.enabledMods)
     const refusal = modPlan && 'refused' in modPlan ? modPlan.refused : modPlan && modPlan.mode !== (sandboxed ? 'sandbox' : 'host') ? 'launch plan mode does not match tile' : activeMods && !modPlan ? 'active mods have no launch plan' : null
     if (refusal) {
       reportError('session', `launch mod plan refused: ${refusal}; tile not launched`)

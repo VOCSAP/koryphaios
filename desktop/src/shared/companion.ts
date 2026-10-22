@@ -44,6 +44,7 @@ export const COMPANION_MANIFEST = {
   // config / i18n
   getConfig: { kind: 'invoke', channel: 'config:get' },
   setConfig: { kind: 'invoke', channel: 'config:set' },
+  listMods: { kind: 'invoke', channel: 'mods:list' },
   getPeersConfig: { kind: 'invoke', channel: 'peersConfig:get' },
   setOfflineReplica: { kind: 'invoke', channel: 'peersConfig:setOfflineReplica' },
   pickDirectory: { kind: 'invoke', channel: 'dialog:pickDirectory' },
@@ -366,6 +367,7 @@ export const CHANNEL_TIERS: Readonly<Record<string, 0 | 1 | 2 | 3>> = {
   'sessions:list': 0,
   'sessions:peek-next-color': 0,
   'config:get': 0,
+  'mods:list': 0,
   // Read-only, and deliberately secret-free: the summary carries a yes/no
   // token marker, never the bearer token itself.
   'peersConfig:get': 0,

@@ -173,6 +173,7 @@ interface IpcDeps {
   workspaces: WorkspaceService
   getConfig: () => AppConfig
   setConfig: (patch: Partial<AppConfig>) => AppConfig
+  listMods: () => string[]
   /** safeStorage-backed cipher (index.ts): local-provider API keys (C29). */
   secretCipher: SecretCipher
   getWindow: () => BrowserWindow | null
@@ -285,6 +286,7 @@ export function registerIpc({
   workspaces,
   getConfig,
   setConfig,
+  listMods,
   secretCipher,
   getWindow,
   announce,
@@ -743,6 +745,7 @@ export function registerIpc({
     ...setConfig(patch ?? {}),
     localProviders: sanitizeProviders(getConfig().localProviders ?? [])
   }))
+  regHandle('mods:list', () => listMods())
   // ----- claude-peers core config (Settings > Broker) -----
   // The FILE PATH is resolved main-side and is never a renderer argument, so
   // the only untrusted value crossing this boundary is the boolean --

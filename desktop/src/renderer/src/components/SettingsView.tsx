@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { BrokerSettings } from './BrokerSettings'
 import { NotificationChannels } from './NotificationChannels'
 import { RulesSettings } from './RulesSettings'
@@ -52,6 +52,21 @@ export function SettingsView(): React.JSX.Element {
   const setPickContextPrompt = useDeck((s) => s.setPickContextPrompt)
 
   const [active, setActive] = useState<Category>('general')
+  const [mods, setMods] = useState<string[]>([])
+  const enabledMods =
+    typeof config.enabledMods === 'object' && config.enabledMods !== null && !Array.isArray(config.enabledMods)
+      ? config.enabledMods
+      : {}
+  const requestedEnabledMods = useRef<Record<string, boolean>>(enabledMods)
+  const pendingEnabledModsWrites = useRef(0)
+  useEffect(() => {
+    if (pendingEnabledModsWrites.current === 0) requestedEnabledMods.current = enabledMods
+  }, [config.enabledMods])
+  useEffect(() => {
+    void window.api.listMods().then(setMods).catch((error: unknown) => {
+      window.api.reportError('settings', `failed to list choregos mods: ${String(error)}`)
+    })
+  }, [])
 
   // Free-text fields are buffered locally and committed on blur (avoids a config
   // round-trip per keystroke). Seeded from config; resynced if it changes under us.
@@ -106,6 +121,20 @@ export function SettingsView(): React.JSX.Element {
 
   const set = <K extends keyof AppConfig>(key: K, value: AppConfig[K]): void => {
     void updateConfig({ [key]: value } as Partial<AppConfig>)
+  }
+
+  const setEnabledMod = (name: string, enabled: boolean): void => {
+    const next = { ...requestedEnabledMods.current, [name]: enabled }
+    requestedEnabledMods.current = next
+    pendingEnabledModsWrites.current += 1
+    void updateConfig({ enabledMods: next }).finally(() => {
+      pendingEnabledModsWrites.current -= 1
+      if (pendingEnabledModsWrites.current === 0) {
+        const current = useDeck.getState().config?.enabledMods
+        requestedEnabledMods.current =
+          typeof current === 'object' && current !== null && !Array.isArray(current) ? current : {}
+      }
+    })
   }
 
   const browse = async (): Promise<void> => {
@@ -229,6 +258,25 @@ export function SettingsView(): React.JSX.Element {
                 <span>{t('settings.liveStatusLine')}</span>
               </label>
               <small className="field-check-help">{t('settings.liveStatusLineHelp')}</small>
+
+              {mods.length > 0 && (
+                <>
+                  <div className="field">
+                    <span>{t('settings.enabledMods')}</span>
+                  </div>
+                  {mods.map((name) => (
+                    <label key={name} className="field field-check">
+                      <input
+                        type="checkbox"
+                        checked={enabledMods[name] === true}
+                        onChange={(e) => setEnabledMod(name, e.target.checked)}
+                      />
+                      <span>{name}</span>
+                    </label>
+                  ))}
+                  <small className="field-check-help">{t('settings.enabledModsHelp')}</small>
+                </>
+              )}
 
               <label className="field field-check">
                 <input

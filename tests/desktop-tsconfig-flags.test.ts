@@ -305,19 +305,32 @@ interface SourceExemption {
   nature: SourceExemptionNature;
 }
 
-const CHOREGOS_COPY_EXEMPTION: SourceExemption = {
-  reason:
-    "docs/DESIGN-READABLE-PLUGIN.md lays out this plugin file and types it against .claude-plugin/types, which only " +
-    "a live Claude Code session writes. Vendored copy of choregos pinned by commit and fingerprint " +
-    "(desktop/mods/choregos.lock.json, enforced by tests/desktop-mods.test.ts): never edited here, verified by " +
-    "`claude plugin validate` and `claude plugin test` in the choregos repo, so no desktop tsconfig includes it.",
-  nature: "deliberate",
-};
+const MODS_LOCK_PATH = join(REPO_ROOT, "desktop", "mods", "choregos.lock.json");
+const LOCKED_MOD_SOURCE = /^desktop\/mods\/([^/]+)\/.+\.tsx?$/;
+
+// A pinned choregos copy is typed against .claude-plugin/types, which only a live Claude Code session
+// writes, and is verified in the choregos repo. The lock that fingerprints it is the proof, not a document
+// that happens to name the file.
+function readLockedModPlugins(lockPath: string): Set<string> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(lockPath, "utf-8"));
+  } catch (error) {
+    throw new Error(`cannot read the choregos lock at ${lockPath}: ${String(error)}`);
+  }
+  const plugins = (parsed as { plugins?: unknown } | null)?.plugins;
+  if (typeof plugins !== "object" || plugins === null || Array.isArray(plugins)) {
+    throw new Error(`${lockPath} has no plugins object`);
+  }
+  return new Set(Object.keys(plugins));
+}
+
+function isLockedModSource(rel: string, lockedPlugins: ReadonlySet<string>): boolean {
+  const plugin = LOCKED_MOD_SOURCE.exec(rel)?.[1];
+  return plugin !== undefined && lockedPlugins.has(plugin);
+}
 
 const EXEMPT_SOURCES: Record<string, SourceExemption> = {
-  "desktop/mods/prosopon/hooks/layout.ts": CHOREGOS_COPY_EXEMPTION,
-  "desktop/mods/prosopon/hooks/register.tsx": CHOREGOS_COPY_EXEMPTION,
-  "desktop/mods/prosopon/hooks/versions.ts": CHOREGOS_COPY_EXEMPTION,
   "desktop/tests-support/hygiene-fixtures.ts": {
     reason:
       "Test-only support module, never shipped, covered by no desktop tsconfig today. Pre-existing gap " +
@@ -375,16 +388,19 @@ const DESKTOP_SOURCE_DISCOVERY_ARGS = ["ls-files", "--cached", "desktop"];
 // a fixture "proving" the coverage check works could drift from what the
 // real test actually runs). `files` are repo-root-relative (as returned by
 // `git ls-files`). A file matches if EITHER it is named in `exemptions`, OR
-// at least one config whose baseDir prefixes it has an include glob that
-// matches the remainder.
+// it is a source of a plugin pinned in the choregos lock, OR at least one
+// config whose baseDir prefixes it has an include glob that matches the
+// remainder.
 function findUncoveredDesktopSources(
   files: string[],
   configs: { baseDir: string; include: string[]; exclude?: string[] }[],
-  exemptions: Record<string, SourceExemption>
+  exemptions: Record<string, SourceExemption>,
+  lockedPlugins: ReadonlySet<string> = new Set()
 ): string[] {
   const unmatched: string[] = [];
   for (const f of files) {
     if (Object.hasOwn(exemptions, f)) continue;
+    if (isLockedModSource(f, lockedPlugins)) continue;
     let covered = false;
     for (const c of configs) {
       if (!f.startsWith(c.baseDir)) continue;
@@ -495,11 +511,64 @@ test("every .ts/.tsx/.mts/.cts file staged or committed under desktop/ is covere
 
   expect(files.length, "git ls-files --cached desktop returned no .ts/.tsx files").toBeGreaterThan(100);
 
-  const unmatched = findUncoveredDesktopSources(files, configs, EXEMPT_SOURCES);
+  const lockedPlugins = readLockedModPlugins(MODS_LOCK_PATH);
+  expect(lockedPlugins.size, "the choregos lock pins no plugin, so no mod source could be exempted").toBeGreaterThan(0);
+
+  const unmatched = findUncoveredDesktopSources(files, configs, EXEMPT_SOURCES, lockedPlugins);
   expect(
     unmatched,
-    `not covered by any desktop tsconfig and not in EXEMPT_SOURCES: ${unmatched.join(", ")}`
+    `not covered by any desktop tsconfig, not in EXEMPT_SOURCES and not a source of a plugin pinned in desktop/mods/choregos.lock.json: ${unmatched.join(", ")}`
   ).toEqual([]);
+
+  const lockedCopies = files.filter((f) => isLockedModSource(f, lockedPlugins));
+  expect(lockedCopies.length, "no tracked source is exempted by the lock: the rule would be dead").toBeGreaterThan(0);
+  expect(
+    findUncoveredDesktopSources(lockedCopies, configs, {}),
+    "a source of a locked plugin is already covered by a desktop tsconfig, so the lock exemption is unnecessary for it"
+  ).toEqual(lockedCopies);
+});
+
+test("findUncoveredDesktopSources: a source of a locked plugin is exempt at any depth, a source anywhere else is not", () => {
+  const locked = new Set(["prosopon", "mitos"]);
+  expect(
+    findUncoveredDesktopSources(
+      ["desktop/mods/prosopon/hooks/layout.ts", "desktop/mods/mitos/hooks/deep/guard.tsx"],
+      [],
+      {},
+      locked
+    )
+  ).toEqual([]);
+  const stays = [
+    "desktop/mods/zzz/a.ts",
+    "desktop/mods/prosoponx/a.ts",
+    "desktop/modsx/prosopon/a.ts",
+    "desktop/other/mods/prosopon/a.ts",
+    "desktop/mods/prosopon.ts",
+    "desktop/mods/prosopon/a.mts",
+  ];
+  expect(findUncoveredDesktopSources(stays, [], {}, locked), "only desktop/mods/<locked plugin>/**/*.ts|tsx is exempt").toEqual(stays);
+  expect(findUncoveredDesktopSources(["desktop/mods/prosopon/hooks/layout.ts"], [], {}, new Set())).toEqual([
+    "desktop/mods/prosopon/hooks/layout.ts",
+  ]);
+});
+
+test("readLockedModPlugins: the plugin names of a readable lock, an explicit failure for anything else", () => {
+  const dir = mkdtempSync(join(tmpdir(), "kory-mods-lock-"));
+  try {
+    const write = (name: string, text: string): string => {
+      const path = join(dir, name);
+      writeFileSync(path, text);
+      return path;
+    };
+    expect([...readLockedModPlugins(write("ok.json", JSON.stringify({ plugins: { a: {}, b: {} } })))]).toEqual(["a", "b"]);
+    expect(() => readLockedModPlugins(join(dir, "absent.json"))).toThrow(/cannot read the choregos lock/);
+    expect(() => readLockedModPlugins(write("broken.json", "{ not json"))).toThrow(/cannot read the choregos lock/);
+    expect(() => readLockedModPlugins(write("noplugins.json", JSON.stringify({ repo: "r" })))).toThrow(/no plugins object/);
+    expect(() => readLockedModPlugins(write("array.json", JSON.stringify({ plugins: ["a"] })))).toThrow(/no plugins object/);
+    expect(() => readLockedModPlugins(write("null.json", "null"))).toThrow(/no plugins object/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("findUncoveredDesktopSources: against the REAL desktop tsconfigs and REAL exemptions, a file under a brand-new uncovered directory is still reported", () => {

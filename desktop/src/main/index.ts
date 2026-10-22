@@ -173,7 +173,7 @@ import type { SessionRuntime } from '@shared/types'
 import { listAgents } from './agents'
 import { createSessionWithWorktree, restartSessionGated } from './create-session'
 import { hasEnabledMods, LaunchAttemptRegistry, prepareLaunchModPlan, prepareRestorePlans } from './mod-launch-plan'
-import { enabledModsFromLock, ensureModWorkingCopy, loadModsLock, verifyModWorkingCopy } from './mods-working-copy'
+import { enabledModsFromLock, ensureModWorkingCopy, listLockedMods, loadModsLock, verifyModWorkingCopy } from './mods-working-copy'
 import { SandboxService, type SandboxLaunch } from './sandbox-service'
 import {
   mapHostPathToContainer,
@@ -3635,6 +3635,7 @@ app.whenReady().then(async () => {
     workspaces,
     getConfig,
     setConfig,
+    listMods: () => listLockedMods(modDistDir),
     secretCipher,
     getWindow: () => mainWindow,
     announce: (text: string) => broadcastAnnounce(text),

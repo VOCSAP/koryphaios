@@ -1,13 +1,13 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, join, relative } from 'node:path'
 import { detectRateLimit } from '../desktop/src/main/quota'
 import { createXtermScreen, inspectInjectGuard } from '../desktop/src/main/xterm-screen'
 import { classifyAssistantBlock, GUARD_SAFE_BORDER } from '../desktop/mods/prosopon/hooks/layout'
 import { modsFingerprint, type ModFile } from '../shared/mods-fingerprint'
-import { isBunTestFile, LOCK_PATH, MODS_DIR, readPluginAtCommit, writePlugins, type ModsLock } from '../scripts/sync-mods'
+import { isBunTestFile, LOCK_PATH, MODS_DIR, PLUGINS, readPluginAtCommit, writePlugins, type ModsLock } from '../scripts/sync-mods'
 
 const esc = String.fromCharCode(27)
 
@@ -148,6 +148,62 @@ describe('sync script against a choregos fixture repository', () => {
 
   test.each(['../x', 'Prosopon', 'a/b', '', '-x', 'x'.repeat(65)])('refuses the plugin name %j before reading the repository', (plugin) => {
     expect(() => readPluginAtCommit(repo, 'HEAD', plugin)).toThrow(/does not match/)
+  })
+
+  test('the plugins the script syncs are exactly the plugins the lock pins', () => {
+    expect([...PLUGINS].sort(), 'PLUGINS in scripts/sync-mods.ts and the plugins of choregos.lock.json must name the same set: a plugin only in the lock is never refreshed, one only in PLUGINS is never pinned').toEqual(
+      Object.keys(lock.plugins).sort()
+    )
+  })
+
+  test('a run over a commit holding every locked plugin replaces each copy and rewrites each lock entry', () => {
+    const names = Object.keys(lock.plugins)
+    const upstream: Record<string, string> = { LICENSE: 'MIT' }
+    names.forEach((name, index) => {
+      upstream[`plugins/${name}/.claude-plugin/plugin.json`] = `{"version":"7.${index}.0"}`
+      upstream[`plugins/${name}/hooks/hooks.json`] = `{"plugin":"${name}"}`
+      upstream[`plugins/${name}/README.md`] = `# ${name}`
+    })
+    const commit = commitOf(upstream)
+
+    const layout = mkdtempSync(join(tmpdir(), 'kory-mods-sync-'))
+    try {
+      mkdirSync(join(layout, 'scripts'))
+      mkdirSync(join(layout, 'shared'))
+      copyFileSync(join(import.meta.dir, '..', 'scripts', 'sync-mods.ts'), join(layout, 'scripts', 'sync-mods.ts'))
+      copyFileSync(join(import.meta.dir, '..', 'shared', 'mods-fingerprint.ts'), join(layout, 'shared', 'mods-fingerprint.ts'))
+      const modsDir = join(layout, 'desktop', 'mods')
+      for (const name of names) {
+        mkdirSync(join(modsDir, name), { recursive: true })
+        writeFileSync(join(modsDir, name, 'stale.txt'), 'previous copy')
+      }
+
+      const result = spawnSync(process.execPath, [join(layout, 'scripts', 'sync-mods.ts'), '--repo', repo, '--commit', commit], { encoding: 'utf-8' })
+      expect(result.status, `sync-mods exited ${result.status}: ${result.stderr}`).toBe(0)
+
+      const written: ModsLock = JSON.parse(readFileSync(join(modsDir, 'choregos.lock.json'), 'utf-8'))
+      expect(written.commit).toBe(commit)
+      expect(Object.keys(written.plugins).sort(), 'every plugin present upstream and in the previous lock must get a lock entry').toEqual([...names].sort())
+      expect(
+        readdirSync(modsDir).filter((entry) => entry !== 'choregos.lock.json').sort(),
+        'the script must leave one directory per locked plugin and no staging leftover'
+      ).toEqual([...names].sort())
+      names.forEach((name, index) => {
+        const files = filesUnder(join(modsDir, name))
+        expect(files.map((file) => file.path).sort(), `${name}: the previous copy must be replaced, not merged into`).toEqual([
+          '.claude-plugin/plugin.json',
+          'LICENSE',
+          'README.md',
+          'hooks/hooks.json'
+        ])
+        expect(written.plugins[name], `${name}: its lock entry must carry the version and the fingerprint of the files written`).toEqual({
+          version: `7.${index}.0`,
+          fingerprint: modsFingerprint(files)
+        })
+      })
+    } finally {
+      rmSync(layout, { recursive: true, force: true })
+    }
   })
 })
 

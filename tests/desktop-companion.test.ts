@@ -104,7 +104,7 @@ function scanFile(path: string): { channels: string[]; unparsedCount: number } {
   return { channels, unparsedCount: rawCount - channels.length }
 }
 
-test('regHandle domain is discovered across main/ (not hardcoded), and unparseable call sites fail loudly instead of undercounting silently (review round, second pass)', () => {
+test('regHandle and invoke manifest domains are reciprocal, discovered from main/ and fully parseable', () => {
   const files = discoverHandlerFiles(MAIN_DIR)
   expect(files.length).toBeGreaterThan(0)
   const allChannels: string[] = []
@@ -121,6 +121,12 @@ test('regHandle domain is discovered across main/ (not hardcoded), and unparseab
   const unmanifested = allChannels.filter((ch) => !manifestChannels.has(ch))
   expect(untiered).toEqual([])
   expect(unmanifested).toEqual([])
+
+  const handled = new Set(allChannels)
+  const unhandled = Object.values(COMPANION_MANIFEST)
+    .filter((s) => s.kind === 'invoke' && !handled.has(s.channel))
+    .map((s) => s.channel)
+  expect(unhandled, 'an invoke channel declared in the manifest has no regHandle: the renderer call rejects with no handler').toEqual([])
 })
 
 test('broker:start (undoes an operator stop) is remote-blocked by its tier; broker:retry (a poll) is not', () => {

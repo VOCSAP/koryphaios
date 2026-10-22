@@ -385,6 +385,8 @@ export const EN_DEFAULTS: Record<string, string> = {
   'settings.liveStatusLine': 'Show model and context fill in the session list',
   'settings.liveStatusLineHelp':
     "Replaces Claude Code's footer hints (? for shortcuts, esc to interrupt) in each tile. Takes effect the next time a tile starts.",
+  'settings.enabledMods': 'Choregos mods',
+  'settings.enabledModsHelp': 'Enabled mods load in new sessions only.',
   'settings.spawnMode': 'Supervisor agent spawns',
   'settings.spawnModeHandsFree': 'Hands-free',
   'settings.spawnModeHandsFreeHelp':
