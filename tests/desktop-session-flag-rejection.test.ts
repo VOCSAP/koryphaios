@@ -149,7 +149,7 @@ test("every sanitizeFlagValue call in session-service goes through flagValue", (
 });
 
 test("each buildSessionCommandLine call of startPty routes its effort through flagValue", () => {
-  const head = "private startPty(def: SessionDef, mode: SpawnMode): void {";
+  const head = "private startPty(def: SessionDef, mode: SpawnMode, modPlan?: LaunchModPlan): void {";
   const body = extractBracedBody(SRC, sliceOnce(head) + head.length - 1);
   const callHead = "buildSessionCommandLine({";
   const literals: string[] = [];

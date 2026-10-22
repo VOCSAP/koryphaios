@@ -28,6 +28,7 @@ import {
   createMissingDirTracker,
   deckLeadPluginDirFor,
   deckPluginDirFor,
+  modsDirFor,
   pluginDirsForTile
 } from './session-command'
 import { buildStatusLineSettings, statusLineHookPath, writeTileSettings } from './statusline-settings'
@@ -171,11 +172,12 @@ import { APP_STATE_SUBDIR, runDataMigration } from './migrate-data-dir'
 import type { SessionRuntime } from '@shared/types'
 import { listAgents } from './agents'
 import { createSessionWithWorktree, restartSessionGated } from './create-session'
+import { hasEnabledMods, LaunchAttemptRegistry, prepareLaunchModPlan, prepareRestorePlans } from './mod-launch-plan'
+import { enabledModsFromLock, ensureModWorkingCopy, loadModsLock, verifyModWorkingCopy } from './mods-working-copy'
 import { SandboxService, type SandboxLaunch } from './sandbox-service'
 import {
   mapHostPathToContainer,
   rewriteLoopbackForContainer,
-  rewritePluginDirForContainer,
   sandboxifyEnv,
   SANDBOX_RUN_DIR
 } from './sandbox-command'
@@ -590,8 +592,8 @@ const getDeckLeadPluginDir = (): string => {
   return exists ? dir : ''
 }
 
-const getPluginDirs = (hasDeckLeadTools: boolean, sandboxed: boolean): readonly string[] => {
-  const selected = pluginDirsForTile(getDeckPluginDir(), getDeckLeadPluginDir, hasDeckLeadTools, sandboxed)
+const getPluginDirs = (hasDeckLeadTools: boolean, sandboxed: boolean, modDirs: readonly string[] = []): readonly string[] => {
+  const selected = pluginDirsForTile(getDeckPluginDir(), getDeckLeadPluginDir, hasDeckLeadTools, sandboxed, modDirs)
   if (selected.rolePluginOmitted) {
     reportError(
       'sandbox',
@@ -937,6 +939,8 @@ service.setSandboxProvider(
     const launch = sandbox.launchInfo()
     if (!launch) return null
     return {
+      engine: launch.engine,
+      containerId: launch.containerId,
       wrap: (tileId, sessionId, command, cwdHost, env) => {
         const cwd = mapHostPathToContainer(cwdHost, launch.workSource)
         if (cwd === null) {
@@ -950,10 +954,7 @@ service.setSandboxProvider(
           ? ttsr.projectIntoSandbox(env.CLAUDE_PEERS_DESK_SESSION ?? '', sessionId, launch.runDirHost)
           : { file: '', log: '' }
         sandbox.writeLaunchScript(tileId, {
-          // `command` carries --plugin-dir pointing at the HOST deck-plugin
-          // path; rewrite it onto the container path projectDeckPlugin()
-          // copied it to. No-op if the flag is absent.
-          command: composeSandboxAppendPrompt(sessionId, rewritePluginDirForContainer(command), launch),
+          command: composeSandboxAppendPrompt(sessionId, command, launch),
           cwd,
           env: {
             ...sandboxifyEnv(env, (path) => {
@@ -1003,6 +1004,44 @@ const sandboxGate = async (): Promise<string | null> => {
   }
   if (st.authed !== true) throw new Error('sandbox-auth-required')
   return sandbox.effectiveRoot()
+}
+
+const modWorkRoot = join(app.getPath('userData'), 'mods')
+const modDistDir = modsDirFor(app.isPackaged, process.resourcesPath, app.getAppPath())
+const launchAttempts = new LaunchAttemptRegistry()
+service.setLaunchAttemptRegistry(launchAttempts)
+const launchModDeps = {
+  hasEnabledMods: (config: AppConfig) => hasEnabledMods(config.enabledMods),
+  enabledModsFromLock: (config: AppConfig, lock: ReadonlyMap<string, string>) => enabledModsFromLock(config.enabledMods, lock),
+  ensureModWorkingCopy,
+  prepareMods: (input: Parameters<SandboxService['prepareMods']>[0]) => sandbox.prepareMods(input)
+}
+service.setModWorkingCopyVerifier((copy) => {
+  const verified = verifyModWorkingCopy({ ...copy, lock: loadModsLock(modDistDir), workRoot: modWorkRoot, distDir: modDistDir })
+  return verified.ok ? { ok: true } : { ok: false, reason: verified.reason }
+})
+const modLaunch = {
+  registry: launchAttempts,
+  prepare: (attempt: { attemptId: string; signal: AbortSignal }, input?: { supervisor: boolean }) => {
+    return prepareLaunchModPlan(
+      {
+        ...launchModDeps,
+        verifyHostCopy: (copy) => {
+          const verified = verifyModWorkingCopy({ ...copy, lock: loadModsLock(modDistDir), workRoot: modWorkRoot, distDir: modDistDir })
+          return verified.ok ? { ok: true } : { ok: false, reason: verified.reason }
+        }
+      },
+      {
+        sandboxed: input?.supervisor !== true && sandbox.isEnabled(),
+        config: getConfig(),
+        loadLock: () => loadModsLock(modDistDir),
+        workRoot: modWorkRoot,
+        distDir: modDistDir,
+        signal: attempt.signal,
+        attemptId: attempt.attemptId
+      }
+    )
+  }
 }
 
 service.on('removed', ({ name }: { name: string }) => {
@@ -2985,7 +3024,7 @@ const controlDeps: DeckControlDeps = {
       service,
       getConfig().projectDir,
       input,
-      { sandboxGate, warmSandboxTranscripts, beforeSpawn: checkpointBeforeSpawn, worktreeInit: getWorktreeInit() },
+      { sandboxGate, warmSandboxTranscripts, modLaunch, beforeSpawn: checkpointBeforeSpawn, worktreeInit: getWorktreeInit() },
       {
         teamLeadDeckBridge: isTeamLeadAgent(input.agent),
         hasDeckLeadTools: opts?.hasDeckLeadTools === true
@@ -2997,7 +3036,7 @@ const controlDeps: DeckControlDeps = {
   sandboxExec: (command) => sandbox.supervisorExec(command),
   runDirective: directiveBindings.runDirective,
   restartSession: async (id) => {
-    await restartSessionGated(service, id, { sandboxGate, warmSandboxTranscripts })
+    await restartSessionGated(service, id, { sandboxGate, warmSandboxTranscripts, modLaunch })
   },
   closeSession: (id) => service.remove(id),
   journal: (message) => journal.add('session', message),
@@ -3038,7 +3077,7 @@ const controlDeps: DeckControlDeps = {
       service,
       getConfig().projectDir,
       opts.hasLead ? { ...input, lead: undefined } : input,
-      { sandboxGate, warmSandboxTranscripts, worktreeInit: getWorktreeInit() },
+      { sandboxGate, warmSandboxTranscripts, modLaunch, worktreeInit: getWorktreeInit() },
       // Card 3c322f10 (piece 3, agent route): the deck-control server is
       // necessarily already up here -- this call only ever arrives through
       // it -- so unlike the operator route there is no ensureControlServer()
@@ -3158,7 +3197,7 @@ const ensureControlServer = async (): Promise<DeckControlServer> => {
 const ensureSupervisor = async (): Promise<SessionRuntime> => {
   const existing = service.list().find((s) => s.supervisor)
   if (existing && existing.status !== 'exited') return existing
-  if (existing) return service.restart(existing.id)
+  if (existing) return restartSessionGated(service, existing.id, { sandboxGate, warmSandboxTranscripts, modLaunch })
 
   const deckPluginDir = getDeckPluginDir()
   if (!deckPluginDir) throw new Error('deck-plugin dir missing (build skipped)')
@@ -3169,26 +3208,41 @@ const ensureSupervisor = async (): Promise<SessionRuntime> => {
   if (!existsSync(deckLeadScriptPath(mcpScript))) {
     throw new Error('deck-lead MCP script missing -- run `npm run build:mcp`')
   }
-  const server = await ensureControlServer()
-  const stateDir = appStateDir()
-  // The control URL and token are THIS window's: a per-group file, never the
-  // shared root where a second window would overwrite it.
-  const mcpConfig = writeSupervisorMcpConfig({
-    dir: sessionDir(),
-    mcpScriptPath: mcpScript,
-    execPath: process.execPath,
-    controlUrl: server.url,
-    controlToken: server.token
-  })
-  const appendSystemPromptFile = writeSupervisorSystemPrompt(stateDir, resolveDocsDir())
-  return service.create({
-    name: SUPERVISOR_NAME,
-    prompt: SUPERVISOR_BRIEFING,
-    supervisor: true,
-    mcpConfig,
-    appendSystemPromptFile,
-    announce: 'supervisor session joined this group'
-  })
+  const targetKey = `new:${randomUUID()}`
+  const attempt = launchAttempts.begin(targetKey)
+  const assertCurrent = (): void => {
+    if (!launchAttempts.isCurrent(attempt.attemptId)) throw new Error('mod launch superseded')
+  }
+  try {
+    const server = await ensureControlServer()
+    assertCurrent()
+    const stateDir = appStateDir()
+    // The control URL and token are THIS window's: a per-group file, never the
+    // shared root where a second window would overwrite it.
+    const mcpConfig = writeSupervisorMcpConfig({
+      dir: sessionDir(),
+      mcpScriptPath: mcpScript,
+      execPath: process.execPath,
+      controlUrl: server.url,
+      controlToken: server.token
+    })
+    const appendSystemPromptFile = writeSupervisorSystemPrompt(stateDir, resolveDocsDir())
+    const modPlan = await modLaunch.prepare(attempt, { supervisor: true })
+    assertCurrent()
+    return service.create(
+      {
+        name: SUPERVISOR_NAME,
+        prompt: SUPERVISOR_BRIEFING,
+        supervisor: true,
+        mcpConfig,
+        appendSystemPromptFile,
+        announce: 'supervisor session joined this group'
+      },
+      { modPlan }
+    )
+  } finally {
+    launchAttempts.complete(targetKey, attempt.attemptId)
+  }
 }
 
 /**
@@ -3228,7 +3282,8 @@ const workspaces = new WorkspaceService({
   getScope: () => activeScope,
   adoptScope,
   confirmShellFields: confirmWorkspaceShellFields,
-  confirmUntrustedCwd: confirmWorkspaceUntrustedCwd
+  confirmUntrustedCwd: confirmWorkspaceUntrustedCwd,
+  prepareModPlans: (defs, signal) => prepareRestorePlans(launchAttempts, modLaunch.prepare, (def) => def.supervisor !== true && sandbox.isEnabled(), defs, signal)
 })
 
 // Grey out File > Export template... when there is nothing to export. Must
@@ -3584,6 +3639,7 @@ app.whenReady().then(async () => {
     getWindow: () => mainWindow,
     announce: (text: string) => broadcastAnnounce(text),
     ensureSupervisor,
+    modLaunch,
     // Card 3c322f10 (piece 2): declared at line ~2582, well before this call
     // site (~2964) -- no TDZ concern here, unlike the SessionService
     // constructor much earlier in the file.

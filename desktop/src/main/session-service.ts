@@ -1,7 +1,7 @@
 import { EventEmitter } from 'node:events'
 import { randomUUID } from 'node:crypto'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import type {
   AppConfig,
   CreateSessionInput,
@@ -11,6 +11,7 @@ import type {
   SessionStatus
 } from '@shared/types'
 import { PtyManager, validPtyDimensions } from './pty-manager'
+import type { LaunchAttemptRegistry, LaunchModCopy, LaunchModPlan } from './mod-launch-plan'
 import { saveSessions } from './store'
 import { fetchTilePeers, type BrokerEndpoint } from './broker-client'
 import { PEER_POLL_MS, TilePeerPoller } from './peer-state'
@@ -20,6 +21,7 @@ import {
   encodeInitialPromptKeystrokes,
   sanitizeFlagValue,
   shouldInjectPrompt,
+  DECK_PLUGIN_DIRNAME,
   type SpawnMode
 } from './session-command'
 import { ThinkingDetector } from './thinking'
@@ -222,6 +224,8 @@ export type DirectiveOutcome = 'written' | 'no-terminal' | 'busy-timeout' | 'ref
  * this service never imports the engine service (and stays electron-lean).
  */
 export interface SandboxWrapper {
+  engine: 'docker' | 'podman'
+  containerId: string
   wrap(tileId: string, sessionId: string, command: string, cwdHost: string, env: Record<string, string>): string
   cleanup(tileId: string): Promise<void>
 }
@@ -324,6 +328,8 @@ export class SessionService extends EventEmitter {
   /** Live (post-fork) claude session ids open in this process; double-resume guard. */
   private registry = new OpenIdRegistry()
   private deckLeadPluginTiles = new Set<string>()
+  private launchAttempts: Pick<LaunchAttemptRegistry, 'cancel' | 'cancelAll' | 'cancelAllExcept' | 'complete' | 'isCurrent'> | null = null
+  private verifyModWorkingCopy: ((copy: LaunchModCopy) => { ok: true } | { ok: false; reason: string }) | null = null
 
   constructor(
     private getConfig: () => AppConfig,
@@ -336,7 +342,7 @@ export class SessionService extends EventEmitter {
     /** Resolved base command (launch-config) used when a session has no override. */
     private launchCommand = '',
     /** Resolves the embedded plugin directories fresh for every spawn. */
-    private getPluginDirs: (hasDeckLeadTools: boolean, sandboxed: boolean) => readonly string[] = () => [],
+    private getPluginDirs: (hasDeckLeadTools: boolean, sandboxed: boolean, modDirs?: readonly string[]) => readonly string[] = () => [],
     /** Home dir for transcript existence checks (injectable for tests). */
     private home: string = homedir(),
     /**
@@ -490,6 +496,14 @@ export class SessionService extends EventEmitter {
     this.launchCommand = command
   }
 
+  setLaunchAttemptRegistry(registry: Pick<LaunchAttemptRegistry, 'cancel' | 'cancelAll' | 'cancelAllExcept' | 'complete' | 'isCurrent'>): void {
+    this.launchAttempts = registry
+  }
+
+  setModWorkingCopyVerifier(verify: (copy: LaunchModCopy) => { ok: true } | { ok: false; reason: string }): void {
+    this.verifyModWorkingCopy = verify
+  }
+
   // ----- guard rules -----
 
   /**
@@ -638,6 +652,7 @@ export class SessionService extends EventEmitter {
   }
 
   stop(): void {
+    this.launchAttempts?.cancelAll()
     if (this.pollTimer) clearInterval(this.pollTimer)
     this.pollTimer = null
     this.thinkingDetector.stop()
@@ -724,7 +739,7 @@ export class SessionService extends EventEmitter {
    */
   create(
     input: CreateSessionInput,
-    opts?: { teamLeadDeckBridge?: boolean; hasDeckLeadTools?: boolean }
+    opts?: { teamLeadDeckBridge?: boolean; hasDeckLeadTools?: boolean; modPlan?: LaunchModPlan }
   ): SessionRuntime {
     const cfg = this.getConfig()
     // B6: agent/model are structured identifiers that get interpolated into the
@@ -840,7 +855,7 @@ export class SessionService extends EventEmitter {
       liveStatusSilenceWarned: false,
       liveStatusAttentionAt: 0
     })
-    this.spawnSession(def, 'fresh')
+    this.spawnSession(def, 'fresh', opts?.modPlan)
     this.broadcast()
     // Journal hook (PLAN C14): index.ts narrates spawns without diffing lists.
     this.emit('created', this.toRuntime(def))
@@ -856,6 +871,7 @@ export class SessionService extends EventEmitter {
    * legitimately run twice under that race.
    */
   async remove(id: string): Promise<void> {
+    this.launchAttempts?.cancel(id)
     this.revokePermissionLease(id)
     const forceCleanup = (): void => {
       const def = this.defs.find((d) => d.id === id)
@@ -942,6 +958,7 @@ export class SessionService extends EventEmitter {
    * auto-save guard ignores this empty broadcast.
    */
   closeAll(): void {
+    this.launchAttempts?.cancelAll()
     this.revokeAllPermissionLeases()
     for (const d of this.defs) {
       this.emit('removed', { id: d.id, name: d.name })
@@ -1026,7 +1043,10 @@ export class SessionService extends EventEmitter {
    * transcript is missing (expired -> flagged, not spawned) or its id is already
    * open in this process (double-resume guard).
    */
-  restoreFrom(defs: SessionDef[]): SessionRuntime[] {
+  restoreFrom(defs: SessionDef[], modPlans?: ReadonlyMap<string, LaunchModPlan>): SessionRuntime[] {
+    const preservedAttemptIds = new Set<string>()
+    for (const plan of modPlans?.values() ?? []) preservedAttemptIds.add(plan.attemptId)
+    this.launchAttempts?.cancelAllExcept(preservedAttemptIds)
     this.revokeAllPermissionLeases()
     for (const d of this.defs) this.emit('removed', { id: d.id, name: d.name })
     this.pty.killAll()
@@ -1104,7 +1124,15 @@ export class SessionService extends EventEmitter {
     }
     this.persist()
     this.sweepStatusFiles()
-    for (const d of this.defs) this.spawnSession(d, 'resume')
+    for (const d of this.defs) {
+      const modPlan = modPlans?.get(d.id)
+      if (modPlan && this.launchAttempts && !this.launchAttempts.isCurrent(modPlan.attemptId)) {
+        reportError('session', 'restored launch plan superseded; tile not launched')
+        continue
+      }
+      this.spawnSession(d, 'resume', modPlan)
+      if (modPlan) this.launchAttempts?.complete(d.id, modPlan.attemptId)
+    }
     this.broadcast()
     return this.list()
   }
@@ -1286,7 +1314,7 @@ export class SessionService extends EventEmitter {
    * (no transcript) starts fresh with the stored args (the "start new" action of
    * the expired overlay) by clearing its dead id first.
    */
-  restart(id: string): Promise<SessionRuntime> {
+  restart(id: string, modPlan?: LaunchModPlan): Promise<SessionRuntime> {
     const inFlight = this.restartInFlight.get(id)
     if (inFlight) return inFlight
 
@@ -1296,10 +1324,13 @@ export class SessionService extends EventEmitter {
     this.revokePermissionLease(id)
     const restart = (async (): Promise<SessionRuntime> => {
       await this.cleanupSandbox(def.id, def.name)
+      if (modPlan && this.launchAttempts && !this.launchAttempts.isCurrent(modPlan.attemptId)) {
+        throw new Error('mod launch superseded')
+      }
       if (!this.defs.includes(def)) throw new Error('session removed or replaced during restart')
       // spawnSession downgrades to a fresh launch automatically when there is no
       // transcript to resume, so a single 'resume' request covers both cases.
-      this.spawnSession(def, 'resume')
+      this.spawnSession(def, 'resume', modPlan)
       this.broadcast()
       return this.toRuntime(def)
     })()
@@ -1342,7 +1373,7 @@ export class SessionService extends EventEmitter {
    * restoring multiple sessions is instant and parallel. A resume whose stored
    * REAL id has no transcript is flagged expired and not spawned.
    */
-  private spawnSession(def: SessionDef, mode: SpawnMode): void {
+  private spawnSession(def: SessionDef, mode: SpawnMode, modPlan?: LaunchModPlan): void {
     const r = this.runtime.get(def.id)
     if (!r) return // removed before we got here
 
@@ -1361,7 +1392,7 @@ export class SessionService extends EventEmitter {
     r.expired = false
 
     const before = new Set(this.transcriptsOf(def.cwd).map((e) => e.id))
-    this.startPty(def, effectiveMode) // INSTANT
+    this.startPty(def, effectiveMode, modPlan) // INSTANT
     // Fire-and-forget: discovery must never block terminal visibility.
     void this.discoverRealId(def, before)
   }
@@ -1426,11 +1457,29 @@ export class SessionService extends EventEmitter {
     this.broadcast()
   }
 
-  private startPty(def: SessionDef, mode: SpawnMode): void {
+  private startPty(def: SessionDef, mode: SpawnMode, modPlan?: LaunchModPlan): void {
     this.revokePermissionLease(def.id)
     const cfg = this.getConfig()
     const base = this.resolveBaseCommand(def)
-    const argsIssue = isClaudeLaunch(base) ? claudeSettingsIssue(base, def.args) : undefined
+    const sandboxed = !def.supervisor && this.sandboxPeersDir() !== null
+    const activeMods = Object.values(cfg.enabledMods ?? {}).some((enabled) => enabled === true)
+    const refusal = modPlan && 'refused' in modPlan ? modPlan.refused : modPlan && modPlan.mode !== (sandboxed ? 'sandbox' : 'host') ? 'launch plan mode does not match tile' : activeMods && !modPlan ? 'active mods have no launch plan' : null
+    if (refusal) {
+      reportError('session', `launch mod plan refused: ${refusal}; tile not launched`)
+      const runtime = this.runtime.get(def.id)
+      if (runtime) {
+        runtime.status = 'exited'
+        runtime.exitCode = -1
+      }
+      this.persist()
+      return
+    }
+    if (modPlan && 'diagnostics' in modPlan) {
+      for (const diagnostic of modPlan.diagnostics) {
+        reportError('session', `mod "${diagnostic.plugin}" omitted: ${diagnostic.reason}`)
+      }
+    }
+    const argsIssue = isClaudeLaunch(base) ? claudeSettingsIssue(base, def.args, sandboxed) : undefined
     if (argsIssue) {
       reportError('session', `Claude launch ${argsIssue.replace(/^contain/, 'contains')}; tile not launched`)
       return
@@ -1441,9 +1490,21 @@ export class SessionService extends EventEmitter {
     this.pendingPrompt.delete(def.id)
     def.sessionIdHistory = []
 
-    const sandboxed = !def.supervisor && this.sandboxPeersDir() !== null
-    const pluginDirs = this.getPluginDirs(this.deckLeadPluginTiles.has(def.id), sandboxed)
-    const telemetryPluginLoaded = Boolean(pluginDirs[0])
+    const modDirs = modPlan && 'modDirs' in modPlan ? modPlan.mode === 'host' && this.verifyModWorkingCopy
+      ? modPlan.copies.flatMap((copy) => {
+          const verified = this.verifyModWorkingCopy!(copy)
+          if (verified.ok) return [copy.hostDir]
+          reportError('session', `mod "${copy.plugin}" omitted: ${verified.reason}`)
+          return []
+        })
+      : modPlan.modDirs
+      : []
+    const pluginDirs = this.getPluginDirs(
+      this.deckLeadPluginTiles.has(def.id),
+      sandboxed,
+      modDirs
+    )
+    const telemetryPluginLoaded = pluginDirs.some((pluginDir) => basename(pluginDir) === DECK_PLUGIN_DIRNAME)
     const statusLineSettings = this.statusLineSettingsFor(def, base, telemetryPluginLoaded, cfg.shell)
     const tileSettings = isClaudeLaunch(base) ? buildTileSettings(statusLineSettings) : undefined
     const settings = tileSettings ? (sandboxed ? tileSettings : this.writeTileSettingsFile(tileSettings) || undefined) : undefined
@@ -1517,17 +1578,28 @@ export class SessionService extends EventEmitter {
     const ttsr = this.ttsrFiles(def)
     Object.assign(sessionEnv, { CLAUDE_PEERS_TTSR_FILE: ttsr.file, CLAUDE_PEERS_TTSR_LOG: ttsr.log })
 
-    // Sandbox mode (SBX1): wrap the composed command in a `docker exec` into
-    // the project container. The supervisor is exempt — it pilots the Deck
-    // from the host and its MCP harness (Electron binary + loopback control
-    // url) does not exist container-side. Callers gate container + auth before
-    // spawning; a throw here (container lost since that gate) leaves a
-    // visibly-exited tile rather than a login prompt in it.
+    // The supervisor stays on the host because it pilots the Deck through its host-only MCP harness.
     this.sandboxCleanup.delete(def.id)
     if (!def.supervisor) {
       try {
         const wrapper = this.getSandboxWrapper()
         if (wrapper) {
+          const needsSandboxTarget = modPlan && 'mode' in modPlan && modPlan.mode === 'sandbox' && modPlan.modDirs.length > 0
+          const targetMatches = !needsSandboxTarget || (
+            'engine' in modPlan &&
+            'containerId' in modPlan &&
+            modPlan.engine === wrapper.engine &&
+            modPlan.containerId === wrapper.containerId
+          )
+          if (!targetMatches) {
+            reportError('session', 'launch mod plan container does not match tile; tile not launched')
+            if (r) {
+              r.status = 'exited'
+              r.exitCode = -1
+            }
+            this.persist()
+            return
+          }
           command = wrapper.wrap(def.id, def.sessionId, command, def.cwd, sessionEnv)
           this.sandboxCleanup.set(def.id, () => wrapper.cleanup(def.id))
         }

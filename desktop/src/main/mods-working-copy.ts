@@ -24,7 +24,8 @@ export interface WorkingCopyRequest {
   workRoot: string
   plugin: string
   lock: ReadonlyMap<string, string>
-  rename?: (from: string, to: string) => void
+  rename?: (from: string, to: string) => void | Promise<void>
+  wait?: (delay: number) => void | Promise<void>
   nonce?: () => string
 }
 
@@ -57,17 +58,24 @@ const RENAME_RETRY_DELAYS_MS = [10, 20, 40, 80, 160]
 
 // A directory rename right after its tree was written can fail with EPERM on Windows for a few milliseconds.
 // Onto an existing directory it fails for good, so the retry only applies while the target is absent.
-function renameWithRetry(rename: (from: string, to: string) => void, from: string, to: string): void {
+async function renameWithRetry(
+  rename: (from: string, to: string) => void | Promise<void>,
+  from: string,
+  to: string,
+  wait: (delay: number) => void | Promise<void>,
+  revalidate: () => void
+): Promise<void> {
   for (const delay of RENAME_RETRY_DELAYS_MS) {
     try {
-      rename(from, to)
+      await rename(from, to)
       return
     } catch (error) {
       if (!TRANSIENT_RENAME_CODES.has((error as NodeJS.ErrnoException).code ?? '') || existsSync(to)) throw error
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delay)
+      await wait(delay)
+      revalidate()
     }
   }
-  rename(from, to)
+  await rename(from, to)
 }
 
 class ModsRefusal extends Error {
@@ -97,11 +105,15 @@ export function loadModsLock(distDir: string): Map<string, string> {
   return lock
 }
 
-export function ensureModWorkingCopy(request: WorkingCopyRequest): WorkingCopyOutcome {
+export function enabledModsFromLock(enabled: unknown, lock: ReadonlyMap<string, string>): string[] {
+  if (!isRecord(enabled)) return []
+  return Object.entries(enabled)
+    .filter(([name, value]) => value === true && PLUGIN_NAME_PATTERN.test(name) && lock.has(name))
+    .map(([name]) => name)
+}
+
+export function verifyModWorkingCopy(request: WorkingCopyRequest): WorkingCopyOutcome {
   const { distDir, workRoot, plugin, lock } = request
-  const rename = (from: string, to: string): void => renameWithRetry(request.rename ?? renameSync, from, to)
-  const nonce = request.nonce ?? (() => randomBytes(6).toString('hex'))
-  let drifted: string | null = null
   try {
     if (!PLUGIN_NAME_PATTERN.test(plugin)) throw new ModsRefusal('plugin-name', `plugin name '${plugin}' does not match ${PLUGIN_NAME_PATTERN}`)
     const fingerprint = lock.get(plugin)
@@ -118,6 +130,46 @@ export function ensureModWorkingCopy(request: WorkingCopyRequest): WorkingCopyOu
     requireRealDirectoryIfPresent(parent)
     for (const holder of [parent, workRoot, dirname(workRoot)]) requireNoProjectConfig(holder)
     const dir = join(parent, fingerprint)
+    const inspection = inspectWorkingCopy(dir, fingerprint, distributed)
+    if (inspection.kind !== 'conforming') {
+      throw new ModsRefusal('materialize', `the working copy of '${plugin}' is not conforming: ${inspection.kind === 'drift' ? inspection.detail : 'absent'}`)
+    }
+    return { ok: true, dir, reused: true, drifted: null }
+  } catch (error) {
+    if (error instanceof ModsRefusal) return { ok: false, reason: error.reason, message: error.message, drifted: null }
+    return { ok: false, reason: 'io', message: errorText(error), drifted: null }
+  }
+}
+
+export async function ensureModWorkingCopy(request: WorkingCopyRequest): Promise<WorkingCopyOutcome> {
+  const { distDir, workRoot, plugin, lock } = request
+  const wait = request.wait ?? ((delay: number) => new Promise<void>((resolve) => setTimeout(resolve, delay)))
+  const nonce = request.nonce ?? (() => randomBytes(6).toString('hex'))
+  let drifted: string | null = null
+  try {
+    if (!PLUGIN_NAME_PATTERN.test(plugin)) throw new ModsRefusal('plugin-name', `plugin name '${plugin}' does not match ${PLUGIN_NAME_PATTERN}`)
+    const fingerprint = lock.get(plugin)
+    if (fingerprint === undefined) throw new ModsRefusal('not-locked', `plugin '${plugin}' is not in the lock`)
+    if (!FINGERPRINT_PATTERN.test(fingerprint)) {
+      throw new ModsRefusal('fingerprint', `the locked fingerprint of '${plugin}' does not match ${FINGERPRINT_PATTERN}`)
+    }
+    const distributed = readTree(join(distDir, plugin), 'distributed-drift', `distributed copy of '${plugin}'`)
+    if (modsFingerprint(distributed) !== fingerprint) {
+      throw new ModsRefusal('distributed-drift', `the distributed copy of '${plugin}' does not match its locked fingerprint`)
+    }
+    const parent = join(workRoot, plugin)
+    const dir = join(parent, fingerprint)
+    const validateParents = (): void => {
+      requireRealDirectoryIfPresent(workRoot)
+      requireRealDirectoryIfPresent(parent)
+      for (const holder of [parent, workRoot, dirname(workRoot)]) requireNoProjectConfig(holder)
+    }
+    const revalidate = (): void => {
+      validateParents()
+      requireRealDirectoryIfPresent(dir)
+    }
+    const rename = (from: string, to: string): Promise<void> => renameWithRetry(request.rename ?? renameSync, from, to, wait, revalidate)
+    validateParents()
     const inspect = (): Inspection => inspectWorkingCopy(dir, fingerprint, distributed)
 
     const first = inspect()
@@ -125,9 +177,11 @@ export function ensureModWorkingCopy(request: WorkingCopyRequest): WorkingCopyOu
     if (first.kind === 'drift') {
       const retired = `${dir}.drift-${nonce()}`
       try {
-        rename(dir, retired)
+        await rename(dir, retired)
+        revalidate()
         drifted = retired
       } catch (error) {
+        revalidate()
         const again = inspect()
         if (again.kind === 'conforming') return { ok: true, dir, reused: true, drifted }
         if (again.kind === 'drift') {
@@ -137,6 +191,7 @@ export function ensureModWorkingCopy(request: WorkingCopyRequest): WorkingCopyOu
     }
 
     const staging = `${dir}.staging-${nonce()}`
+    let stagingRenamed = false
     try {
       mkdirSync(parent, { recursive: true })
       for (const file of distributed) {
@@ -144,9 +199,18 @@ export function ensureModWorkingCopy(request: WorkingCopyRequest): WorkingCopyOu
         mkdirSync(dirname(target), { recursive: true })
         writeFileSync(target, file.bytes)
       }
-      rename(staging, dir)
+      await rename(staging, dir)
+      stagingRenamed = true
+      revalidate()
     } catch (error) {
-      // The staging name carries this call's nonce and the directory was never loaded: removing it touches no other copy.
+      try {
+        revalidate()
+      } catch (revalidationError) {
+        if (!stagingRenamed && revalidationError instanceof ModsRefusal) {
+          throw new ModsRefusal(revalidationError.reason, `${revalidationError.message}; staging directory '${staging}' was left in place`)
+        }
+        throw revalidationError
+      }
       rmSync(staging, { recursive: true, force: true })
       if (inspect().kind === 'conforming') return { ok: true, dir, reused: true, drifted }
       throw new ModsRefusal('materialize', `the working copy of '${plugin}' cannot be materialized: ${errorText(error)}`)
@@ -166,7 +230,7 @@ function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-// Bun walks up from a hook file to the nearest tsconfig, package.json, bunfig.toml and node_modules: none may sit above the copy.
+// Bun reads project config from each controlled ancestor of a working copy.
 function requireNoProjectConfig(dir: string): void {
   for (const name of PROJECT_CONFIG_NAMES) {
     if (existsSync(join(dir, name))) throw new ModsRefusal('unsafe-parent', `${join(dir, name)} sits above the working copies and would be read by the engine`)

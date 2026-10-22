@@ -337,6 +337,7 @@ export interface AppConfig {
   clodexAutoStart: boolean
   /** Extra arguments appended to a newly spawned clodex proxy. */
   clodexProxyArgs: string
+  enabledMods: Record<string, boolean>
   /** Number of columns in the tile grid (legacy; custom mode uses gridCols/gridRows). */
   columns: number
   /** Tile layout mode. */

@@ -288,8 +288,8 @@ export function checkSpawnBridgeWiring(src: string): string | null {
     return "resolveBaseCommand does not gate this.bridgedCommand() on the strict `def.bridge === 'clodex'` marker -- a persisted def is untrusted input";
   }
 
-  const startMatch = /private startPty\(def: SessionDef, mode: SpawnMode\): void \{/.exec(src);
-  if (!startMatch) return "private startPty(def: SessionDef, mode: SpawnMode): void not found -- has it been renamed?";
+  const startMatch = /private startPty\(def: SessionDef, mode: SpawnMode, modPlan\?: LaunchModPlan\): void \{/.exec(src);
+  if (!startMatch) return "private startPty(def: SessionDef, mode: SpawnMode, modPlan?: LaunchModPlan): void not found -- has it been renamed?";
   const startBody = codeOnly(extractBracedBody(src, startMatch.index + startMatch[0].length - 1));
   if (!/const\s+base\s*=\s*this\.resolveBaseCommand\(def\)/.test(startBody)) {
     return "startPty does not take its `base` from this.resolveBaseCommand(def) -- the PTY would be spawned on the unwrapped command";
@@ -331,7 +331,7 @@ test("negative control: the checker REJECTS an ungated wrap (every tile bridged)
     "    const base = def.command.trim() || this.launchCommand",
     "    return this.bridgedCommand(base)",
     "  }",
-    "  private startPty(def: SessionDef, mode: SpawnMode): void {",
+    "  private startPty(def: SessionDef, mode: SpawnMode, modPlan?: LaunchModPlan): void {",
     "    const base = this.resolveBaseCommand(def)",
     "    r.claudeLaunch = isClaudeLaunch(base)",
     "  }",
@@ -350,7 +350,7 @@ test("negative control: the checker REJECTS claudeLaunch answered from the pre-b
     "    const base = def.command.trim() || this.launchCommand",
     "    return def.bridge === 'clodex' ? this.bridgedCommand(base) : base",
     "  }",
-    "  private startPty(def: SessionDef, mode: SpawnMode): void {",
+    "  private startPty(def: SessionDef, mode: SpawnMode, modPlan?: LaunchModPlan): void {",
     "    const base = this.resolveBaseCommand(def)",
     "    r.claudeLaunch = isClaudeLaunch(base)",
     "  }",

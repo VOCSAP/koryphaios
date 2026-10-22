@@ -234,7 +234,7 @@ test("a compatible host keeps the fallback when no telemetry plugin is loaded", 
 });
 
 test("returning undefined for the served telemetry statusLine keeps the tile settings", () => {
-  const { svc, peersDir } = setup({ hostTelemetry: true, pluginDirs: () => ["/plugins/general"] });
+  const { svc, peersDir } = setup({ hostTelemetry: true, pluginDirs: () => ["/plugins/deck-plugin"] });
   const runtime = svc.create({});
 
   expect(hostSettings()).toBe(BASE_SETTINGS);
@@ -256,7 +256,7 @@ test("a plugin-only launch clears an inherited fallback marker", () => {
   const inherited = process.env.KORY_STATUS_FALLBACK;
   process.env.KORY_STATUS_FALLBACK = "1";
   try {
-    const { svc } = setup({ hostTelemetry: true, pluginDirs: () => ["/plugins/general"] });
+    const { svc } = setup({ hostTelemetry: true, pluginDirs: () => ["/plugins/deck-plugin"] });
     svc.create({});
 
     expect(hostSettings()).toBe(BASE_SETTINGS);
@@ -280,7 +280,7 @@ test("leaving the sandbox statusLine undefined still passes inline tile settings
 test("a sandboxed tile never trusts the compatible host plugin", () => {
   const sbx = mkdtempSync(join(tmpdir(), "kory-sbx-peers-"));
   tmpDirs.push(sbx);
-  const { svc } = setup({ sandboxPeersDir: sbx, hostTelemetry: true, pluginDirs: () => ["/plugins/general"] });
+  const { svc } = setup({ sandboxPeersDir: sbx, hostTelemetry: true, pluginDirs: () => ["/plugins/deck-plugin"] });
   const runtime = svc.create({});
 
   writeStatus(sbx, runtime.id, "Forged", Date.now() + 1);
@@ -289,7 +289,7 @@ test("a sandboxed tile never trusts the compatible host plugin", () => {
 });
 
 test("the approval module is armed only where the host serves the Kory module", () => {
-  const served = setup({ hostTelemetry: true, pluginDirs: () => ["/plugins/general"] });
+  const served = setup({ hostTelemetry: true, pluginDirs: () => ["/plugins/deck-plugin"] });
   served.svc.create({});
   expect(spawned.at(-1)!.env.KORY_APPROVAL_MODULE, "host claude tile with the plugin and a compatible CLI").toBe("1");
 
@@ -297,13 +297,13 @@ test("the approval module is armed only where the host serves the Kory module", 
   noPlugin.svc.create({});
   expect(spawned.at(-1)!.env.KORY_APPROVAL_MODULE, "no plugin loaded").toBe("");
 
-  const oldCli = setup({ pluginDirs: () => ["/plugins/general"] });
+  const oldCli = setup({ pluginDirs: () => ["/plugins/deck-plugin"] });
   oldCli.svc.create({});
   expect(spawned.at(-1)!.env.KORY_APPROVAL_MODULE, "CLI without the module host").toBe("");
 
   const sbx = mkdtempSync(join(tmpdir(), "kory-sbx-peers-"));
   tmpDirs.push(sbx);
-  const sandboxed = setup({ sandboxPeersDir: sbx, hostTelemetry: true, pluginDirs: () => ["/plugins/general"] });
+  const sandboxed = setup({ sandboxPeersDir: sbx, hostTelemetry: true, pluginDirs: () => ["/plugins/deck-plugin"] });
   sandboxed.svc.create({});
   expect(spawned.at(-1)!.env.KORY_APPROVAL_MODULE, "sandboxed tile").toBe("");
 });
@@ -431,11 +431,11 @@ test("a host team-lead tile keeps the ordered plugins on fresh and resumed launc
     mintTeamLeadBridge: () => ({ mcpConfig: "/state/team-lead.json", callerId: "team-lead-1" }),
     pluginDirs: (hasDeckLeadTools, sandboxed) => {
       reads.push([hasDeckLeadTools, sandboxed]);
-      return hasDeckLeadTools ? ["/plugins/general", "/plugins/role"] : ["/plugins/general"];
+      return hasDeckLeadTools ? ["/plugins/deck-plugin", "/plugins/role"] : ["/plugins/deck-plugin"];
     }
   });
   const runtime = svc.create({ agent: "team-lead" }, { teamLeadDeckBridge: true });
-  expect(lastLine()).toContain('--plugin-dir "/plugins/general" --plugin-dir "/plugins/role"');
+  expect(lastLine()).toContain('--plugin-dir "/plugins/deck-plugin" --plugin-dir "/plugins/role"');
 
   const transcriptDir = join(home, ".claude", "projects", encodeProjectDir(cwd));
   mkdirSync(transcriptDir, { recursive: true });
@@ -443,7 +443,7 @@ test("a host team-lead tile keeps the ordered plugins on fresh and resumed launc
   spawned.at(-1)!.exit(1);
   await svc.restart(runtime.id);
 
-  expect(lastLine()).toContain('--plugin-dir "/plugins/general" --plugin-dir "/plugins/role"');
+  expect(lastLine()).toContain('--plugin-dir "/plugins/deck-plugin" --plugin-dir "/plugins/role"');
   expect(reads).toEqual([
     [true, false],
     [true, false]
@@ -455,14 +455,14 @@ test("an embedded team-lead mint grants the role plugin through the trusted crea
   const { svc } = setup({
     pluginDirs: (hasDeckLeadTools, sandboxed) => {
       reads.push([hasDeckLeadTools, sandboxed]);
-      return hasDeckLeadTools ? ["/plugins/general", "/plugins/role"] : ["/plugins/general"];
+      return hasDeckLeadTools ? ["/plugins/deck-plugin", "/plugins/role"] : ["/plugins/deck-plugin"];
     }
   });
   svc.create(
     { agent: "team-lead", mcpConfig: "/state/embedded-team-lead.json" },
     { hasDeckLeadTools: true }
   );
-  expect(lastLine()).toContain('--plugin-dir "/plugins/general" --plugin-dir "/plugins/role"');
+  expect(lastLine()).toContain('--plugin-dir "/plugins/deck-plugin" --plugin-dir "/plugins/role"');
   expect(reads).toEqual([[true, false]]);
 });
 
@@ -472,7 +472,7 @@ test("a failed team-lead mint omits the role plugin", () => {
     mintTeamLeadBridge: () => null,
     pluginDirs: (hasDeckLeadTools, sandboxed) => {
       reads.push([hasDeckLeadTools, sandboxed]);
-      return ["/plugins/general"];
+      return ["/plugins/deck-plugin"];
     }
   });
   svc.create({ agent: "team-lead" }, { teamLeadDeckBridge: true });
@@ -485,11 +485,11 @@ test("an ordinary developer tile delegates general-plugin selection to the provi
   const { svc } = setup({
     pluginDirs: (hasDeckLeadTools, sandboxed) => {
       reads.push([hasDeckLeadTools, sandboxed]);
-      return ["/plugins/general"];
+      return ["/plugins/deck-plugin"];
     }
   });
   svc.create({ agent: "developer" });
-  expect(lastLine()).toContain('--plugin-dir "/plugins/general"');
+  expect(lastLine()).toContain('--plugin-dir "/plugins/deck-plugin"');
   expect(lastLine()).not.toContain("/plugins/role");
   expect(reads).toEqual([[false, false]]);
 });
@@ -503,11 +503,11 @@ test("a sandboxed role tile delegates role-plugin omission to the provider", () 
     mintTeamLeadBridge: () => ({ mcpConfig: "/state/team-lead.json", callerId: "team-lead-1" }),
     pluginDirs: (hasDeckLeadTools, sandboxed) => {
       reads.push([hasDeckLeadTools, sandboxed]);
-      return ["/plugins/general"];
+      return ["/plugins/deck-plugin"];
     }
   });
   svc.create({ agent: "team-lead" }, { teamLeadDeckBridge: true });
-  expect(lastLine()).toContain('--plugin-dir "/plugins/general"');
+  expect(lastLine()).toContain('--plugin-dir "/plugins/deck-plugin"');
   expect(lastLine()).not.toContain("/plugins/role");
   expect(reads).toEqual([[true, true]]);
 });
@@ -908,7 +908,7 @@ test("silent statusLine: reported once per spawn after the grace period, never o
 });
 
 test("returning undefined for liveStatusLine off still passes tile settings", () => {
-  const { svc, peersDir } = setup({ liveStatusLine: false, hostTelemetry: true, pluginDirs: () => ["/plugins/general"] });
+  const { svc, peersDir } = setup({ liveStatusLine: false, hostTelemetry: true, pluginDirs: () => ["/plugins/deck-plugin"] });
   const runtime = svc.create({});
 
   expect(hostSettings()).toBe(BASE_SETTINGS);

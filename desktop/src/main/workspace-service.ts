@@ -12,6 +12,7 @@ import type { AppConfig, DisplayMode, WorkspaceSummary } from '@shared/types'
 import type { WorkspaceRestoreResult } from '../shared/workspace-restore-outcome'
 import type { Scope } from './scope'
 import type { SessionService } from './session-service'
+import type { RestorePlansResult } from './mod-launch-plan'
 import {
   type Workspace,
   type WorkspaceDisplayMode,
@@ -147,6 +148,7 @@ export interface WorkspaceDeps {
   adoptScope: (ws: { groupId: string; scopeKind: 'ephemeral' | 'custom' }) => void
   confirmShellFields: (ws: Workspace, attendance: CallerAttendance) => Promise<WorkspaceApprovalGateResult>
   confirmUntrustedCwd: (ws: Workspace, attendance: CallerAttendance) => Promise<WorkspaceApprovalGateResult>
+  prepareModPlans?: (defs: ReadonlyArray<ReturnType<typeof fromWorkspaceSessions>[number]>, signal: AbortSignal) => Promise<RestorePlansResult>
   pid?: number
   host?: string
   /** THIS process's own actual start time (epoch ms). Test-injectable like
@@ -175,6 +177,14 @@ export class WorkspaceService {
   private restoreOperation = 0
   private activeRestoreOperation: number | null = null
   private pendingRestoreId: string | null = null
+  private restoreModPreparation: AbortController | null = null
+
+  private invalidateRestore(): void {
+    this.restoreModPreparation?.abort()
+    this.restoreModPreparation = null
+    this.activeRestoreOperation = null
+    this.pendingRestoreId = null
+  }
 
   constructor(private deps: WorkspaceDeps) {
     this.host = deps.host ?? hostname()
@@ -476,9 +486,19 @@ export class WorkspaceService {
         if (gate === 'declined') return { ok: false, reason: 'cwd-declined' }
         if (gate === 'unattended') return { ok: false, reason: 'unattended' }
       }
+      const defs = fromWorkspaceSessions(ws.sessions)
+      this.restoreModPreparation?.abort()
+      const controller = new AbortController()
+      this.restoreModPreparation = controller
+      const prepared = this.deps.prepareModPlans
+        ? await this.deps.prepareModPlans(defs, controller.signal)
+        : { ok: true as const, plans: new Map() }
+      if (!prepared.ok) return { ok: false, reason: 'superseded' }
+      if (this.activeRestoreOperation !== operation) return { ok: false, reason: 'superseded' }
+      if (this.lockedByOther(id, Date.now())) return { ok: false, reason: 'locked' }
       this.deps.adoptScope({ groupId: ws.groupId, scopeKind: ws.scopeKind })
       this.deps.setConfig(fromDisplayMode(ws.displayMode))
-      this.deps.service.restoreFrom(fromWorkspaceSessions(ws.sessions))
+      this.deps.service.restoreFrom(defs, prepared.plans)
       if (!this.own(id)) {
         reportError(
           'workspace',
@@ -515,6 +535,7 @@ export class WorkspaceService {
       return { ok: true }
     } finally {
       if (this.activeRestoreOperation === operation) {
+        this.restoreModPreparation = null
         this.activeRestoreOperation = null
         this.pendingRestoreId = null
       }
@@ -522,10 +543,7 @@ export class WorkspaceService {
   }
 
   deleteWs(id: string): void {
-    if (id === this.pendingRestoreId) {
-      this.activeRestoreOperation = null
-      this.pendingRestoreId = null
-    }
+    if (id === this.pendingRestoreId) this.invalidateRestore()
     if (id === this.currentId) {
       if (this.held) releaseHeldLock(this.held)
       this.held = null
@@ -541,8 +559,7 @@ export class WorkspaceService {
    * workspace is kept restorable, not deleted.
    */
   startNew(): void {
-    this.activeRestoreOperation = null
-    this.pendingRestoreId = null
+    this.invalidateRestore()
     if (!this.currentId) return
     this.saveAuto()
     if (!this.releaseCurrent()) {
@@ -574,8 +591,7 @@ export class WorkspaceService {
 
   /** Final auto-save + lock release on quit. */
   releaseOnQuit(): void {
-    this.activeRestoreOperation = null
-    this.pendingRestoreId = null
+    this.invalidateRestore()
     // A failed final save still propagates to the quit effect that traces it,
     // but must not leave the lock behind.
     let saveFailed = false

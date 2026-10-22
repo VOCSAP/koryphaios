@@ -6,7 +6,7 @@
 // into the spawned command line — argv on this interactive-PTY path can't be
 // redirected to stdin/file without breaking live keystrokes.
 
-import { join } from 'node:path'
+import { join, posix } from 'node:path'
 
 /**
  * Pulled out as a pure constant so index.ts's host resolution and
@@ -16,6 +16,8 @@ import { join } from 'node:path'
  */
 export const DECK_PLUGIN_DIRNAME = 'deck-plugin'
 export const DECK_LEAD_PLUGIN_DIRNAME = 'deck-lead-plugin'
+const SANDBOX_CLAUDE_DIR = '/home/kory/.claude'
+export const SANDBOX_DECK_PLUGIN_DIR = posix.join(SANDBOX_CLAUDE_DIR, DECK_PLUGIN_DIRNAME)
 
 /**
  * Pure decision behind index.ts's getDeckPluginDir: a packaged app reads the
@@ -101,13 +103,14 @@ function appendSystemPromptFlag(path?: string): string {
   return p ? ` --append-system-prompt-file "${p}"` : ''
 }
 
-export function claudeSettingsIssue(base: string, args: string | undefined): string | undefined {
+export function claudeSettingsIssue(base: string, args: string | undefined, sandboxed = false): string | undefined {
   const source = `${base} ${args ?? ''}`
   if (source.includes('$(') || source.includes('`') || source.includes('${') || /\$[A-Za-z_]/.test(source)) {
     return 'contain a shell substitution'
   }
   if (/(?:^|\s)--(?=\s|$)/.test(source)) return 'contain a bare option separator'
   const normalized = source.replace(/["'\\^]/g, '')
+  if (sandboxed && normalized.includes('--plugin-dir')) return 'contain a plugin-dir flag that is managed by the Deck'
   return normalized.includes('--settings') || normalized.includes('-settings')
     ? 'contain a settings flag that is managed by the Deck'
     : undefined
@@ -131,11 +134,17 @@ export function pluginDirsForTile(
   deckPluginDir: string,
   deckLeadPluginDir: () => string,
   hasDeckLeadTools: boolean,
-  sandboxed: boolean
+  sandboxed: boolean,
+  modDirs: readonly string[] = []
 ): { pluginDirs: readonly string[]; rolePluginOmitted: boolean } {
-  if (!hasDeckLeadTools) return { pluginDirs: [deckPluginDir], rolePluginOmitted: false }
-  if (sandboxed) return { pluginDirs: [deckPluginDir], rolePluginOmitted: true }
-  return { pluginDirs: [deckPluginDir, deckLeadPluginDir()], rolePluginOmitted: false }
+  if (sandboxed) {
+    return {
+      pluginDirs: deckPluginDir.trim() ? [SANDBOX_DECK_PLUGIN_DIR, ...modDirs] : [...modDirs],
+      rolePluginOmitted: hasDeckLeadTools
+    }
+  }
+  if (!hasDeckLeadTools) return { pluginDirs: [deckPluginDir, ...modDirs], rolePluginOmitted: false }
+  return { pluginDirs: [deckPluginDir, deckLeadPluginDir(), ...modDirs], rolePluginOmitted: false }
 }
 
 /**

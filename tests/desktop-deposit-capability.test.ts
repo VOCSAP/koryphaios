@@ -24,7 +24,7 @@ test("each mint is 64 lowercase hex and never repeats", () => {
 });
 
 function startPtyBody(source: string): string {
-  const match = /private startPty\(def: SessionDef, mode: SpawnMode\): void \{/.exec(source);
+  const match = /private startPty\(def: SessionDef, mode: SpawnMode, modPlan\?: LaunchModPlan\): void \{/.exec(source);
   if (!match) throw new Error("startPty not found");
   return extractBracedBody(source, match.index + match[0].length - 1);
 }

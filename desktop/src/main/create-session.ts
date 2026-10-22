@@ -2,16 +2,24 @@
 // C4/C5): resolves the optional worktree BEFORE the spawn so the session's cwd
 // is the fresh worktree, and fires the configured init hook in the background.
 
+import { randomUUID } from 'node:crypto'
 import { resolve, sep } from 'node:path'
 import type { CreateSessionInput, SessionRuntime } from '@shared/types'
 import type { SessionService } from './session-service'
 import { createWorktree, runWorktreeInit } from './worktree-service'
+import { type LaunchAttemptRegistry, type LaunchModPlan } from './mod-launch-plan'
 
 /** True when `target` is `root` or lives inside it (path-boundary aware). */
 function isInside(target: string, root: string): boolean {
   const t = resolve(target)
   const r = resolve(root)
   return t === r || t.startsWith(r + sep)
+}
+
+export interface ModLaunchDeps {
+  attemptKey?: string
+  registry: LaunchAttemptRegistry
+  prepare(attempt: { attemptId: string; signal: AbortSignal }, input?: { supervisor: boolean }): Promise<LaunchModPlan>
 }
 
 export interface CreateSessionDeps {
@@ -33,6 +41,7 @@ export interface CreateSessionDeps {
    * worktree resume fresh.
    */
   warmSandboxTranscripts: (cwd: string) => Promise<void>
+  modLaunch?: ModLaunchDeps
   /**
    * Called with the session's final cwd for sessions landing in an EXISTING
    * tree (a fresh worktree is clean by construction, so it is skipped).
@@ -53,12 +62,20 @@ export interface CreateSessionDeps {
   cwdOutsideRoot?: 'remap' | 'refuse'
 }
 
-type SandboxSpawnDeps = Pick<CreateSessionDeps, 'sandboxGate' | 'warmSandboxTranscripts'>
+type SandboxSpawnDeps = Pick<CreateSessionDeps, 'sandboxGate' | 'warmSandboxTranscripts' | 'modLaunch'>
 
 /** Gate, then warm each cwd, for spawn paths that respawn stored defs (restore, restart). */
-export async function gateSandboxForCwds(cwds: Iterable<string>, deps: SandboxSpawnDeps): Promise<void> {
+export async function gateSandboxForCwds(
+  cwds: Iterable<string>,
+  deps: SandboxSpawnDeps,
+  assertCurrent?: () => void
+): Promise<void> {
   await deps.sandboxGate()
-  for (const cwd of cwds) await deps.warmSandboxTranscripts(cwd)
+  assertCurrent?.()
+  for (const cwd of cwds) {
+    await deps.warmSandboxTranscripts(cwd)
+    assertCurrent?.()
+  }
 }
 
 /** service.restart behind the sandbox gate; the supervisor runs on the host and is exempt. */
@@ -68,8 +85,25 @@ export async function restartSessionGated(
   deps: SandboxSpawnDeps
 ): Promise<SessionRuntime> {
   const session = service.list().find((s) => s.id === id)
-  if (session && !session.supervisor) await gateSandboxForCwds([session.cwd], deps)
-  return service.restart(id)
+  const modLaunch = deps.modLaunch
+  if (!modLaunch) {
+    if (session && !session.supervisor) await gateSandboxForCwds([session.cwd], deps)
+    return service.restart(id)
+  }
+  return modLaunch.registry.join(id, async () => {
+    const attempt = modLaunch.registry.begin(id)
+    const assertCurrent = (): void => {
+      if (!modLaunch.registry.isCurrent(attempt.attemptId)) throw new Error('mod launch superseded')
+    }
+    try {
+      if (session && !session.supervisor) await gateSandboxForCwds([session.cwd], deps, assertCurrent)
+      const modPlan = await modLaunch.prepare(attempt, { supervisor: session?.supervisor === true })
+      assertCurrent()
+      return await service.restart(id, modPlan)
+    } finally {
+      modLaunch.registry.complete(id, attempt.attemptId)
+    }
+  })
 }
 
 export async function createSessionWithWorktree(
@@ -81,34 +115,55 @@ export async function createSessionWithWorktree(
   opts?: { teamLeadDeckBridge?: boolean; hasDeckLeadTools?: boolean }
 ): Promise<SessionRuntime> {
   const { sandboxGate, warmSandboxTranscripts, beforeSpawn, worktreeInit } = deps
-  let root = projectDir
-  if (!input.supervisor) {
-    root = (await sandboxGate()) || projectDir
+  const modLaunch = deps.modLaunch
+  const targetKey = modLaunch ? (modLaunch.attemptKey ?? `new:${randomUUID()}`) : ''
+  const attempt = modLaunch?.registry.begin(targetKey)
+  const assertCurrent = (): void => {
+    if (attempt && !modLaunch!.registry.isCurrent(attempt.attemptId)) throw new Error('mod launch superseded')
   }
-  const req = { ...input }
-  const branch = req.worktreeBranch?.trim()
-  if (branch) {
-    const wt = await createWorktree(root, branch)
-    if (worktreeInit) runWorktreeInit(wt.path, worktreeInit)
-    req.cwd = wt.path
-    req.worktree = { path: wt.path, branch: wt.branch ?? branch }
-  } else {
-    const requested = req.cwd?.trim()
-    // Copy mode ONLY (root !== projectDir): a cwd chosen against the REAL tree
-    // (e.g. "open a session here" on a worktree row) is outside the mounted
-    // clone, so the container could not see it — fall back to the effective
-    // root rather than spawning a session whose cwd is missing on the other
-    // side. In mount mode an out-of-tree cwd stays legitimate and untouched.
-    // An empty cwd would default to cfg.projectDir inside SessionService —
-    // the REAL tree — so copy mode must pin it explicitly here.
-    if (root !== projectDir && (!requested || !isInside(requested, root))) {
-      if (requested && deps.cwdOutsideRoot === 'refuse') {
-        throw new Error(`${requested} is outside the sandbox copy (${root}): refusing to relocate the session`)
-      }
-      req.cwd = root
+  try {
+    let root = projectDir
+    if (!input.supervisor) {
+      root = (await sandboxGate()) || projectDir
+      assertCurrent()
     }
-    if (beforeSpawn) await beforeSpawn(req.cwd?.trim() || root)
+    const req = { ...input }
+    const branch = req.worktreeBranch?.trim()
+    if (branch) {
+      const wt = await createWorktree(root, branch)
+      assertCurrent()
+      if (worktreeInit) runWorktreeInit(wt.path, worktreeInit)
+      req.cwd = wt.path
+      req.worktree = { path: wt.path, branch: wt.branch ?? branch }
+    } else {
+      const requested = req.cwd?.trim()
+      // Copy mode ONLY (root !== projectDir): a cwd chosen against the REAL tree
+      // (e.g. "open a session here" on a worktree row) is outside the mounted
+      // clone, so the container could not see it — fall back to the effective
+      // root rather than spawning a session whose cwd is missing on the other
+      // side. In mount mode an out-of-tree cwd stays legitimate and untouched.
+      // An empty cwd would default to cfg.projectDir inside SessionService —
+      // the REAL tree — so copy mode must pin it explicitly here.
+      if (root !== projectDir && (!requested || !isInside(requested, root))) {
+        if (requested && deps.cwdOutsideRoot === 'refuse') {
+          throw new Error(`${requested} is outside the sandbox copy (${root}): refusing to relocate the session`)
+        }
+        req.cwd = root
+      }
+      if (beforeSpawn) {
+        await beforeSpawn(req.cwd?.trim() || root)
+        assertCurrent()
+      }
+    }
+    if (!input.supervisor) {
+      await warmSandboxTranscripts(req.cwd?.trim() || root)
+      assertCurrent()
+    }
+    if (!modLaunch || !attempt) return service.create(req, opts)
+    const modPlan = await modLaunch.prepare(attempt, { supervisor: input.supervisor === true })
+    assertCurrent()
+    return service.create(req, { ...opts, modPlan })
+  } finally {
+    if (attempt) modLaunch!.registry.complete(targetKey, attempt.attemptId)
   }
-  if (!input.supervisor) await warmSandboxTranscripts(req.cwd?.trim() || root)
-  return service.create(req, opts)
 }

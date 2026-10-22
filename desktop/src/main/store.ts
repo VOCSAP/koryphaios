@@ -1,6 +1,5 @@
 import { app } from 'electron'
 import { existsSync, mkdirSync, readFileSync } from 'node:fs'
-import { homedir } from 'node:os'
 import { join } from 'node:path'
 import {
   JOIN_ANNOUNCE_LEVELS,
@@ -9,7 +8,7 @@ import {
   type SessionDef
 } from '@shared/types'
 import { writeFileAtomic } from './atomic-write'
-import { DEFAULT_PALETTE, sanitizeGlowColor } from '@shared/palette'
+import { sanitizeGlowColor } from '@shared/palette'
 import {
   DEFAULT_DEMO_TARGET,
   DEFAULT_HELP_TARGET,
@@ -24,79 +23,8 @@ import { reportError } from './log'
 import { WF_LANE_H_DEFAULT, WF_LANE_H_MIN } from '@shared/workflow'
 import { sanitizeTtsrDisabled } from './ttsr-toggles'
 import { SPAWN_CAP, sanitizeSpawnCap } from './spawn-cap'
-import { DEFAULT_LINK_EXCLUSIONS, DEFAULT_LINK_EXTENSIONS, linkListsFromStored } from '@shared/link-policy'
-
-const DEFAULT_CONFIG: AppConfig = {
-  projectDir: homedir(),
-  // The `claudepeers` alias on the user's machine. Wrapped in a login/interactive
-  // shell (see pty-manager) so the alias resolves.
-  peerCommand: 'claudepeers',
-  shell: '',
-  interactiveShell: false,
-  clodexAutoStart: true,
-  clodexProxyArgs: '',
-  columns: 2,
-  displayMode: '2x2',
-  gridCols: 2,
-  gridRows: 2,
-  sidebarWidth: 260,
-  // Agents sidebar starts unfolded; a config written before this field existed
-  // gets `false` from the DEFAULT_CONFIG spread below, never `undefined`.
-  sidebarCollapsed: false,
-  // Roadmap filter panel starts unfolded, same spread guarantee as above.
-  roadmapFiltersCollapsed: false,
-  // Graph chats panel starts unfolded, same spread guarantee as above.
-  graphListCollapsed: false,
-  // Pick-context dialog on by default; a config written before this field
-  // existed gets `true` from the DEFAULT_CONFIG spread, never `undefined`.
-  pickContextPrompt: true,
-  wfLaneHeight: 240,
-  theme: 'dark',
-  fontSize: 13,
-  // '' = auto: main/i18n.ts derives en/fr from the OS locale.
-  locale: '',
-  palette: DEFAULT_PALETTE,
-  // '' = theme default (gold): the renderer only overrides --glow when set.
-  glowColor: '',
-  rememberScopeSecrets: true,
-  // Quota auto-resume is opt-in (PLAN C1): off unless the operator enables it.
-  autoResumeQuota: false,
-  // Team-lead suggestion pattern (PLAN C10): substring matched on agent/name.
-  leadPattern: 'team-lead',
-  // System notification when a session waits for the operator (PLAN C11).
-  notifyAttention: true,
-  // Model badge + context ring in the session list: on by default; turning it
-  // off gives the tiles back Claude Code's footer hints at their next spawn.
-  liveStatusLine: true,
-  // Remote approvals (PLAN-notifications-mobiles): opt-in — it sends the
-  // question outside the machine, so it is never on by default.
-  mobileApprovals: false,
-  // Supervisor spawn trust mode (PLAN TS4): hands-free by default -- the
-  // consent rule lives in the supervisor's system prompt, the app confirms
-  // nothing. 'team-review' / 'full-control' add native approval dialogs.
-  supervisorSpawnMode: 'hands-free',
-  agentSpawnCap: SPAWN_CAP,
-  linkOpenExtensions: [...DEFAULT_LINK_EXTENSIONS],
-  linkOpenExclusions: [...DEFAULT_LINK_EXCLUSIONS],
-  // Join-announce gate (card 8cb54a0f): off by default -- the operator opts
-  // into either the lead-only note or the full historical broadcast.
-  joinAnnounceLevel: 'off',
-  // Floating "?" help assistant (PLAN C9): shown by default, Haiku for cost.
-  helpButton: true,
-  helpTarget: DEFAULT_HELP_TARGET,
-  wandTarget: DEFAULT_WAND_TARGET,
-  demoTarget: DEFAULT_DEMO_TARGET,
-  // Embedded browser view (PLAN D1): the usual local dev-server address.
-  browserUrl: 'http://localhost:3000',
-  // Unified model pickers (C29): operator-pinned favorites + local endpoints.
-  modelFavorites: [],
-  localProviders: [],
-  // Operator-added peer roles (card a2f61172): the built-in list lives in
-  // shared/role.ts, this only carries what the operator typed via "Other…".
-  roleChoices: [],
-  // Guard rules: every rule is active until the operator switches it off.
-  ttsrDisabled: []
-}
+import { linkListsFromStored } from '@shared/link-policy'
+import { DEFAULT_CONFIG } from './store-defaults'
 
 function dataDir(): string {
   // App state lives under a `config/` subfolder of userData so it never

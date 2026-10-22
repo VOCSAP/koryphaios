@@ -82,6 +82,132 @@ export const SANDBOX_DECK_PLUGIN_NAME = DECK_PLUGIN_DIRNAME
  * projectDeckPlugin() in sandbox-service.ts enforces.
  */
 export const SANDBOX_DECK_PLUGIN_DIR = `${SANDBOX_CONFIG_DIR}/${SANDBOX_DECK_PLUGIN_NAME}`
+export const SANDBOX_MODS_DIR = '/opt/kory-mods'
+
+export interface SandboxModProjectionSpec {
+  containerId: string
+  plugin: string
+  fingerprint: string
+  hostDir: string
+  stagingNonce: string
+}
+
+const MOD_PLUGIN_RE = /^[a-z0-9][a-z0-9-]{0,63}$/
+const MOD_FINGERPRINT_RE = /^[0-9a-f]{64}$/
+const MOD_STAGING_NONCE_RE = /^[a-z0-9][a-z0-9-]{0,63}$/
+const CONTAINER_ID_RE = /^[0-9a-f]{64}$/
+
+export function isSandboxContainerId(value: unknown): value is string {
+  return typeof value === 'string' && CONTAINER_ID_RE.test(value)
+}
+
+function modProjectionPaths(spec: SandboxModProjectionSpec): { staging: string; published: string } {
+  if (!isSandboxContainerId(spec.containerId)) throw new Error('sandbox-container-id-invalid')
+  if (!MOD_PLUGIN_RE.test(spec.plugin)) throw new Error('sandbox-mod-plugin-invalid')
+  if (!MOD_FINGERPRINT_RE.test(spec.fingerprint)) throw new Error('sandbox-mod-fingerprint-invalid')
+  if (!MOD_STAGING_NONCE_RE.test(spec.stagingNonce)) throw new Error('sandbox-mod-staging-nonce-invalid')
+  const pluginDir = `${SANDBOX_MODS_DIR}/${spec.plugin}`
+  return {
+    staging: `${pluginDir}/.stage-${spec.stagingNonce}`,
+    published: `${pluginDir}/${spec.fingerprint}`
+  }
+}
+
+export interface SandboxNamespaceInspection {
+  mounts: readonly { destination: string }[]
+  user: string
+}
+
+export function parseModNamespaceInspection(stdout: string): SandboxNamespaceInspection | null {
+  const [rawMounts, rawUser, ...rest] = stdout.trim().split('\t')
+  if (rest.length > 0 || rawMounts === undefined || rawUser === undefined) return null
+  try {
+    const mounts: unknown = JSON.parse(rawMounts)
+    const user: unknown = JSON.parse(rawUser)
+    if (!Array.isArray(mounts) || typeof user !== 'string') return null
+    const normalized = mounts.map((mount) => {
+      if (typeof mount !== 'object' || mount === null || typeof (mount as { Destination?: unknown }).Destination !== 'string') return null
+      return { destination: (mount as { Destination: string }).Destination.replace(/\/+$/, '') || '/' }
+    })
+    return normalized.every((mount): mount is { destination: string } => mount !== null) ? { mounts: normalized, user } : null
+  } catch {
+    return null
+  }
+}
+
+export function buildModNamespaceInspectArgs(containerId: string): string[] {
+  if (!CONTAINER_ID_RE.test(containerId)) throw new Error('sandbox-container-id-invalid')
+  return ['inspect', '--format', '{{json .Mounts}}\t{{json .Config.User}}', containerId]
+}
+
+export function buildModNamespaceUserArgs(containerId: string): string[] {
+  if (!CONTAINER_ID_RE.test(containerId)) throw new Error('sandbox-container-id-invalid')
+  return ['exec', containerId, 'id', '-u']
+}
+
+export function buildModNamespaceStatArgs(containerId: string): string[] {
+  if (!CONTAINER_ID_RE.test(containerId)) throw new Error('sandbox-container-id-invalid')
+  return ['exec', '--user', 'root', containerId, 'stat', '-c', '%u %g %a %F', '/opt', SANDBOX_MODS_DIR]
+}
+
+export function buildModNamespaceCreateArgs(containerId: string): string[] {
+  if (!CONTAINER_ID_RE.test(containerId)) throw new Error('sandbox-container-id-invalid')
+  return ['exec', '--user', 'root', containerId, 'mkdir', '-m', '755', SANDBOX_MODS_DIR]
+}
+
+export function buildModParentArgs(spec: SandboxModProjectionSpec): string[] {
+  modProjectionPaths(spec)
+  return ['exec', '--user', 'root', spec.containerId, 'mkdir', `${SANDBOX_MODS_DIR}/${spec.plugin}`]
+}
+
+export function buildModParentStatArgs(spec: SandboxModProjectionSpec): string[] {
+  modProjectionPaths(spec)
+  return ['exec', '--user', 'root', spec.containerId, 'stat', '-c', '%u %g %a %F', `${SANDBOX_MODS_DIR}/${spec.plugin}`]
+}
+
+export function buildModMkdirArgs(spec: SandboxModProjectionSpec): string[] {
+  const { staging } = modProjectionPaths(spec)
+  return ['exec', '--user', 'root', spec.containerId, 'mkdir', staging]
+}
+
+export function buildModPublishedStatArgs(spec: SandboxModProjectionSpec): string[] {
+  const { published } = modProjectionPaths(spec)
+  return ['exec', '--user', 'root', spec.containerId, 'stat', '-c', '%u %g %a %F', published]
+}
+
+export function buildModPublishedTreeStatArgs(spec: SandboxModProjectionSpec): string[] {
+  const { published } = modProjectionPaths(spec)
+  return ['exec', '--user', 'root', spec.containerId, 'find', published, '-xdev', '-printf', '%U %G %m %y\\n']
+}
+
+export function buildModCopyArgs(spec: SandboxModProjectionSpec): string[] {
+  const { staging } = modProjectionPaths(spec)
+  return ['cp', `${spec.hostDir}/.`, `${spec.containerId}:${staging}`]
+}
+
+export function buildModPublishArgs(spec: SandboxModProjectionSpec): string[] {
+  const { staging, published } = modProjectionPaths(spec)
+  return ['exec', '--user', 'root', spec.containerId, 'mv', '-T', staging, published]
+}
+
+export function buildModStagingCleanArgs(spec: SandboxModProjectionSpec): string[] {
+  const { staging } = modProjectionPaths(spec)
+  return ['exec', '--user', 'root', spec.containerId, 'rm', '-rf', staging]
+}
+
+export function buildModStagingListArgs(spec: SandboxModProjectionSpec): string[] {
+  modProjectionPaths(spec)
+  return [
+    'exec', '--user', 'root', spec.containerId, 'find', `${SANDBOX_MODS_DIR}/${spec.plugin}`,
+    '-maxdepth', '1', '-mindepth', '1', '-type', 'd', '-name', '.stage-*', '-printf', '%f\\n'
+  ]
+}
+
+export function parseModStagingNames(stdout: string): string[] | null {
+  const names = stdout.trim() === '' ? [] : stdout.trim().split('\n')
+  return names.every((name) => /^\.stage-[a-z0-9][a-z0-9-]{0,63}$/.test(name)) ? names : null
+}
+
 // Re-exported so main-side consumers keep one import; the renderer reads it
 // from @shared/types (this module is main-only). Relative import: this file
 // must stay loadable by bun tests, which do not resolve the @shared alias.
@@ -154,18 +280,6 @@ export function mapHostPathToContainer(
 /** POSIX single-quote escaping for values embedded in the launch script. */
 export function shQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`
-}
-
-/**
- * Rewrites the --plugin-dir flag in an already-composed command line to the
- * container path, since the host path it was built with is invisible inside the
- * sandbox and the plugin would fail to load silently.
- * A single fixed replacement is correct: there is exactly one deck-plugin per
- * app, always projected to the same container path. No-op when the flag is
- * absent.
- */
-export function rewritePluginDirForContainer(command: string): string {
-  return command.replace(/--plugin-dir "[^"]*"/, `--plugin-dir "${SANDBOX_DECK_PLUGIN_DIR}"`)
 }
 
 /** Rewrite a host-loopback URL so the container reaches the HOST's loopback. */
@@ -345,10 +459,12 @@ export function parseSandboxPid(stdout: string): string | null {
 }
 
 export function buildReadPidArgs(name: string, tileId: string): string[] {
+  if (!isSandboxContainerId(name)) throw new Error('sandbox-container-id-invalid')
   return ['exec', name, 'cat', pidFileContainerPath(tileId)]
 }
 
 export function buildKillPidGroupArgs(name: string, pid: string, tileId: string): string[] {
+  if (!isSandboxContainerId(name)) throw new Error('sandbox-container-id-invalid')
   if (!isSandboxPid(pid)) throw new Error('sandbox-pid-invalid')
   return [
     'exec',
@@ -362,8 +478,8 @@ export function buildKillPidGroupArgs(name: string, pid: string, tileId: string)
   ]
 }
 
-/** The PTY command that runs a sandboxed session: exec into the idling container. */
 export function buildExecCommand(engine: SandboxEngine, name: string, tileId: string): string {
+  if (!isSandboxContainerId(name)) throw new Error('sandbox-container-id-invalid')
   return `${engine} exec -it ${name} bash ${scriptContainerPath(tileId)}`
 }
 

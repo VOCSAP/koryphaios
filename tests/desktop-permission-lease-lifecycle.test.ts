@@ -88,10 +88,10 @@ test("all destructive SessionService lifecycle paths revoke a lease before repla
 
   expect(revokesBefore(methodBody(source, /stop\(\): void \{/), "this.revokeAllPermissionLeases()", "this.pty.killAll()")).toBe(true);
   expect(revokesBefore(methodBody(source, /closeAll\(\): void \{/), "this.revokeAllPermissionLeases()", "this.pty.killAll()")).toBe(true);
-  expect(revokesBefore(methodBody(source, /restoreFrom\(defs: SessionDef\[\]\): SessionRuntime\[\] \{/), "this.revokeAllPermissionLeases()", "this.pty.killAll()")).toBe(true);
-  expect(revokesBefore(methodBody(source, /restart\(id: string\): Promise<SessionRuntime> \{/), "this.revokePermissionLease(id)", "await this.cleanupSandbox")).toBe(true);
+  expect(revokesBefore(methodBody(source, /restoreFrom\(defs: SessionDef\[\], modPlans\?: ReadonlyMap<string, LaunchModPlan>\): SessionRuntime\[\] \{/), "this.revokeAllPermissionLeases()", "this.pty.killAll()")).toBe(true);
+  expect(revokesBefore(methodBody(source, /restart\(id: string, modPlan\?: LaunchModPlan\): Promise<SessionRuntime> \{/), "this.revokePermissionLease(id)", "await this.cleanupSandbox")).toBe(true);
   expect(revokesBefore(methodBody(source, /async remove\(id: string\): Promise<void> \{/), "this.revokePermissionLease(id)", "await gracefulClose")).toBe(true);
-  const startPty = methodBody(source, /private startPty\(def: SessionDef, mode: SpawnMode\): void \{/);
+  const startPty = methodBody(source, /private startPty\(def: SessionDef, mode: SpawnMode, modPlan\?: LaunchModPlan\): void \{/);
   expect(revokesBefore(startPty, "this.revokePermissionLease(def.id)", "this.pty.spawn(")).toBe(true);
   const spawnCatch = startPty.indexOf("} catch (e) {", startPty.indexOf("this.pty.spawn("));
   if (spawnCatch < 0) throw new Error("spawn failure handler not found");
@@ -166,7 +166,7 @@ function executeLeaseSetup(source: string, sandboxed: boolean, base: string) {
 }
 
 function executeLeaseCreationFailure(source: string) {
-  const body = methodBody(source, /private startPty\(def: SessionDef, mode: SpawnMode\): void \{/);
+  const body = methodBody(source, /private startPty\(def: SessionDef, mode: SpawnMode, modPlan\?: LaunchModPlan\): void \{/);
   const start = body.indexOf("let permissionLease: PermissionLeaseHandle | null = null");
   if (start < 0) throw new Error("permission lease spawn setup not found");
   const run = new Function(

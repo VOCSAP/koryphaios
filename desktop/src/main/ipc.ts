@@ -72,7 +72,7 @@ import {
   upsertRoadmap
 } from './roadmap-service'
 import { validateReorderWaves } from './roadmap-reorder-validate'
-import { createSessionWithWorktree, gateSandboxForCwds, restartSessionGated } from './create-session'
+import { createSessionWithWorktree, gateSandboxForCwds, restartSessionGated, type ModLaunchDeps } from './create-session'
 import { effectiveAgent, isTeamLeadAgent } from './team-lead-bridge'
 import { composePlanImportPrompt } from './import-plan'
 import { collectDiff, collectFileDiff, composeDiffReviewPrompt } from './diff-service'
@@ -219,6 +219,7 @@ interface IpcDeps {
   sandboxGate: () => Promise<string | null>
   /** Warm the container-side transcript cache for a session's real cwd (M2). */
   sandboxWarmTranscripts: (cwd: string) => Promise<void>
+  modLaunch: ModLaunchDeps
   /**
    * Answer a pending/expired_notif blocking question as the operator
    * (Courrier family 3): claims it broker-side and delivers to the waiting
@@ -304,6 +305,7 @@ export function registerIpc({
   sandbox,
   sandboxGate,
   sandboxWarmTranscripts,
+  modLaunch,
   approvalReply,
   approvalDecline,
   approvalAck,
@@ -356,6 +358,7 @@ export function registerIpc({
       {
         sandboxGate,
         warmSandboxTranscripts: sandboxWarmTranscripts,
+        modLaunch,
         beforeSpawn: checkpoint,
         worktreeInit: getWorktreeInit()
       },
@@ -368,7 +371,7 @@ export function registerIpc({
     service.setColor(id, color)
   )
   regHandle('sessions:restart', (_e, id: string) =>
-    restartSessionGated(service, id, { sandboxGate, warmSandboxTranscripts: sandboxWarmTranscripts })
+    restartSessionGated(service, id, { sandboxGate, warmSandboxTranscripts: sandboxWarmTranscripts, modLaunch })
   )
   regHandle('sessions:set-auto-resume', (_e, id: string, enabled: boolean) =>
     service.setAutoResume(id, !!enabled)
@@ -1096,6 +1099,7 @@ export function registerIpc({
       {
         sandboxGate,
         warmSandboxTranscripts: sandboxWarmTranscripts,
+        modLaunch,
         beforeSpawn: checkpoint,
         cwdOutsideRoot: 'refuse'
       }
@@ -1236,7 +1240,7 @@ export function registerIpc({
         prompt: composePlanImportPrompt(file),
         announce: `one-shot agent: imports plan "${file}" into the shared roadmap`
       },
-      { sandboxGate, warmSandboxTranscripts: sandboxWarmTranscripts, beforeSpawn: checkpoint }
+      { sandboxGate, warmSandboxTranscripts: sandboxWarmTranscripts, modLaunch, beforeSpawn: checkpoint }
     )
     return true
   })
@@ -1483,6 +1487,7 @@ export function registerIpc({
         {
           sandboxGate: async () => sandboxRoot,
           warmSandboxTranscripts: sandboxWarmTranscripts,
+          modLaunch,
           worktreeInit: getWorktreeInit()
         },
         { teamLeadDeckBridge: isTeamLeadAgent(effectiveAgent(input.agent, input.args).agent) }

@@ -45,6 +45,7 @@ import { onDeckError } from "../desktop/src/main/log.ts";
 import { SPAWN_CAP } from "../desktop/src/main/spawn-cap.ts";
 import type { AppConfig, SessionDef } from "../desktop/src/shared/types.ts";
 import type { Scope } from "../desktop/src/main/scope.ts";
+import { reachedWithin } from "./_bounded-await.ts";
 
 // A non-secret sentinel value used to prove the store strips a stray
 // scopeSecret-like field; deliberately not credential-shaped.
@@ -1573,4 +1574,307 @@ test("gracefulClose returns 'exit' immediately when already dead", async () => {
   });
   expect(outcome).toBe("exit");
   expect(wrote).toBe(false); // no /exit written to a dead session
+});
+
+const settled = <T>(promise: Promise<T>): Promise<T> => reachedWithin(promise, "the restore settles", 1500);
+
+async function flushMicrotasks(): Promise<void> {
+  for (let i = 0; i < 20; i++) await Promise.resolve();
+}
+
+function projectSessionsWorkspace(proj: string, id: string): Workspace {
+  const base = sampleWorkspace().sessions[0]!;
+  return sampleWorkspace({
+    id,
+    sessions: [
+      { ...base, name: "first", claudeSessionId: "sid-first", cwd: proj, args: [], position: 0 },
+      { ...base, name: "second", claudeSessionId: "sid-second", cwd: proj, args: [], position: 1 },
+    ],
+  });
+}
+
+interface PendingPreparation {
+  defs: SessionDef[];
+  signal: AbortSignal;
+  release(): void;
+  fail(error: Error): void;
+}
+
+function modRestoreRig(proj: string, overrides: Partial<WorkspaceDeps> = {}, events: string[] = []) {
+  const pending: PendingPreparation[] = [];
+  const restored: Array<{ defs: SessionDef[]; plans: unknown }> = [];
+  const deps = fakeDeps(proj, {
+    adoptScope: () => { events.push("adopt"); },
+    setConfig: () => { events.push("config"); },
+    prepareModPlans: (defs, signal) => {
+      events.push("prepare");
+      return new Promise((resolve, reject) => {
+        pending.push({
+          defs: [...defs],
+          signal,
+          release: () => resolve({ ok: true, plans: new Map(defs.map((d) => [d.id, { attemptId: d.id, mode: "host" as const, modDirs: [`/mods/${d.name}`], diagnostics: [] }])) }),
+          fail: (error) => reject(error),
+        });
+      });
+    },
+    ...overrides,
+  });
+  const applySessions = deps.service.restoreFrom.bind(deps.service);
+  deps.service.restoreFrom = ((defs: SessionDef[], plans?: unknown) => {
+    events.push("restore");
+    restored.push({ defs, plans });
+    return applySessions(defs);
+  }) as WorkspaceDeps["service"]["restoreFrom"];
+  return { deps, events, pending, restored, svc: workspaceService(deps) };
+}
+
+test("WorkspaceService.restore(): mod plans are prepared only after the approval, in that order", async () => {
+  const proj = freshProject();
+  ensureWorkspacesDir(proj);
+  const ws = shellOnlyWorkspace(proj, "wsp-prep-order");
+  saveWorkspace(proj, ws);
+  const gate = deferredGate();
+  const events: string[] = [];
+  const rig = modRestoreRig(proj, { confirmShellFields: async () => { events.push("gate"); return gate.promise; } }, events);
+
+  const restoring = rig.svc.restore(ws.id, "attended");
+  await flushMicrotasks();
+  expect(rig.events, "no preparation while the operator has not approved").toEqual(["gate"]);
+
+  gate.resolve("approved");
+  await flushMicrotasks();
+  expect(rig.events).toEqual(["gate", "prepare"]);
+  rig.pending[0]!.release();
+  await expect(settled(restoring)).resolves.toEqual({ ok: true });
+  expect(rig.events).toEqual(["gate", "prepare", "adopt", "config", "restore"]);
+});
+
+test.each([
+  ["shell", "confirmShellFields"],
+  ["cwd", "confirmUntrustedCwd"],
+] as const)("WorkspaceService.restore(): a restore declined at the %s approval prepares nothing", async (_name, gateKey) => {
+  const proj = freshProject();
+  ensureWorkspacesDir(proj);
+  const ws = gateKey === "confirmShellFields" ? shellOnlyWorkspace(proj, "wsp-prep-declined-shell") : cwdOnlyWorkspace("wsp-prep-declined-cwd");
+  saveWorkspace(proj, ws);
+  const rig = modRestoreRig(proj, { [gateKey]: async () => "declined" });
+
+  const result = await settled(rig.svc.restore(ws.id, "attended"));
+
+  expect(result.ok).toBe(false);
+  expect(rig.events, "a declined restore must not build or copy anything").toEqual([]);
+});
+
+test("WorkspaceService.restore(): restoreFrom receives the very defs that were prepared, with their plans keyed by def id", async () => {
+  const proj = freshProject();
+  ensureWorkspacesDir(proj);
+  const ws = projectSessionsWorkspace(proj, "wsp-prep-plans");
+  saveWorkspace(proj, ws);
+  const rig = modRestoreRig(proj);
+
+  const restoring = rig.svc.restore(ws.id, "attended");
+  await flushMicrotasks();
+  saveWorkspace(proj, { ...ws, sessions: ws.sessions.map((s) => ({ ...s, name: "rewritten" })) });
+  rig.pending[0]!.release();
+  await expect(settled(restoring)).resolves.toEqual({ ok: true });
+
+  const ids = rig.pending[0]!.defs.map((d) => d.id);
+  expect(rig.restored).toHaveLength(1);
+  expect(rig.restored[0]!.defs.map((d) => d.id), "ids are minted per call: a recomputation orphans every plan").toEqual(ids);
+  expect(rig.restored[0]!.defs.map((d) => d.name)).toEqual(["first", "second"]);
+  const plans = rig.restored[0]!.plans as Map<string, { attemptId: string; modDirs: string[] }>;
+  expect(plans, "the plans must reach restoreFrom").toBeInstanceOf(Map);
+  expect([...plans.keys()]).toEqual(ids);
+  expect(ids).toHaveLength(2);
+  expect(ids[0]).not.toBe(ids[1]);
+  expect(plans.get(ids[0]!)!.modDirs).toEqual(["/mods/first"]);
+  expect(plans.get(ids[1]!)!.modDirs).toEqual(["/mods/second"]);
+});
+
+test("WorkspaceService.restore(): the live tiles, scope and config stay untouched while the mods are being prepared", async () => {
+  const proj = freshProject();
+  ensureWorkspacesDir(proj);
+  const ws = projectSessionsWorkspace(proj, "wsp-prep-wait");
+  saveWorkspace(proj, ws);
+  const rig = modRestoreRig(proj);
+  const liveBefore = rig.deps.sessions.map((s) => s.id);
+
+  const restoring = rig.svc.restore(ws.id, "attended");
+  await flushMicrotasks();
+
+  expect(rig.events, "nothing may be swapped before the preparation settles").toEqual(["prepare"]);
+  expect(rig.deps.sessions.map((s) => s.id)).toEqual(liveBefore);
+
+  rig.pending[0]!.release();
+  await settled(restoring);
+  expect(rig.deps.sessions.map((s) => s.name)).toEqual(["first", "second"]);
+});
+
+test("WorkspaceService.restore(): a restore superseded while mods prepare applies nothing", async () => {
+  const proj = freshProject();
+  ensureWorkspacesDir(proj);
+  const ws = projectSessionsWorkspace(proj, "wsp-prep-superseded");
+  saveWorkspace(proj, ws);
+  const rig = modRestoreRig(proj);
+
+  const restoring = rig.svc.restore(ws.id, "attended");
+  await flushMicrotasks();
+  rig.svc.startNew();
+  rig.pending[0]!.release();
+
+  await expect(settled(restoring)).resolves.toEqual({ ok: false, reason: "superseded" });
+  expect(rig.events.filter((e) => e !== "prepare"), "no scope, config or tile effect after a superseded preparation").toEqual([]);
+});
+
+test("WorkspaceService.restore(): a lock taken by another instance while mods prepare refuses the restore", async () => {
+  const proj = freshProject();
+  ensureWorkspacesDir(proj);
+  const ws = projectSessionsWorkspace(proj, "wsp-prep-locked");
+  saveWorkspace(proj, ws);
+  const rig = modRestoreRig(proj);
+
+  const restoring = rig.svc.restore(ws.id, "attended");
+  await flushMicrotasks();
+  takeLock(proj, ws.id, { ...baseLiveness, pid: 9999, isPidAlive: () => true });
+  rig.pending[0]!.release();
+
+  await expect(settled(restoring)).resolves.toEqual({ ok: false, reason: "locked" });
+  expect(rig.events.filter((e) => e !== "prepare")).toEqual([]);
+});
+
+test("WorkspaceService.restore(): a second restore aborts the previous preparation and only it is applied", async () => {
+  const proj = freshProject();
+  ensureWorkspacesDir(proj);
+  const first = projectSessionsWorkspace(proj, "wsp-prep-first");
+  const second = projectSessionsWorkspace(proj, "wsp-prep-second");
+  saveWorkspace(proj, first);
+  saveWorkspace(proj, second);
+  const rig = modRestoreRig(proj);
+
+  const restoringFirst = rig.svc.restore(first.id, "attended");
+  await flushMicrotasks();
+  rig.svc.deleteWs(first.id);
+  const restoringSecond = rig.svc.restore(second.id, "attended");
+  await flushMicrotasks();
+
+  expect(rig.pending).toHaveLength(2);
+  expect(rig.pending[0]!.signal.aborted, "the replaced restore must stop preparing").toBe(true);
+  expect(rig.pending[1]!.signal.aborted, "the new restore must keep its own preparation alive").toBe(false);
+
+  rig.pending[0]!.release();
+  await expect(settled(restoringFirst)).resolves.toEqual({ ok: false, reason: "superseded" });
+  rig.pending[1]!.release();
+  await expect(settled(restoringSecond)).resolves.toEqual({ ok: true });
+
+  expect(rig.restored, "exactly one restore reaches the tiles").toHaveLength(1);
+  expect(rig.restored[0]!.defs.map((d) => d.id)).toEqual(rig.pending[1]!.defs.map((d) => d.id));
+  expect(rig.svc.currentWorkspaceId).toBe(second.id);
+});
+
+test("WorkspaceService.restore(): a failing preparation swaps nothing and leaves the service ready for the next restore", async () => {
+  const proj = freshProject();
+  ensureWorkspacesDir(proj);
+  const ws = projectSessionsWorkspace(proj, "wsp-prep-failing");
+  saveWorkspace(proj, ws);
+  const rig = modRestoreRig(proj);
+
+  const failing = rig.svc.restore(ws.id, "attended").then(() => "resolved", () => "rejected");
+  await flushMicrotasks();
+  rig.pending[0]!.fail(new Error("copy failed"));
+  await settled(failing);
+
+  expect(rig.events.filter((e) => e !== "prepare"), "a failed preparation must not replace the tiles").toEqual([]);
+  const again = rig.svc.restore(ws.id, "attended");
+  await flushMicrotasks();
+  expect(rig.pending, "the service is not stuck busy").toHaveLength(2);
+  rig.pending[1]!.release();
+  await expect(settled(again)).resolves.toEqual({ ok: true });
+});
+
+test.each([
+  ["deleting the workspace being restored", "delete", (svc: ReturnType<typeof workspaceService>, id: string) => svc.deleteWs(id)],
+  ["starting a new workspace", "new", (svc: ReturnType<typeof workspaceService>) => svc.startNew()],
+  ["quitting", "quit", (svc: ReturnType<typeof workspaceService>) => svc.releaseOnQuit()],
+] as const)("WorkspaceService: %s aborts the mod preparation of a pending restore and no tile is swapped", async (_name, slug, act) => {
+  const proj = freshProject();
+  ensureWorkspacesDir(proj);
+  const ws = projectSessionsWorkspace(proj, `wsp-abort-${slug}`);
+  saveWorkspace(proj, ws);
+  const rig = modRestoreRig(proj);
+
+  const restoring = rig.svc.restore(ws.id, "attended");
+  await flushMicrotasks();
+  expect(rig.pending, "the restore must be waiting on its mod preparation").toHaveLength(1);
+  act(rig.svc, ws.id);
+
+  expect(rig.pending[0]!.signal.aborted, "the preparation keeps copying into a container nobody will use").toBe(true);
+  rig.pending[0]!.release();
+  await expect(settled(restoring)).resolves.toEqual({ ok: false, reason: "superseded" });
+  expect(rig.restored, "an invalidated restore must never reach the tiles").toHaveLength(0);
+  expect(rig.events.filter((e) => e !== "prepare")).toEqual([]);
+});
+
+test("WorkspaceService.deleteWs: deleting another workspace leaves the pending restore preparation running", async () => {
+  const proj = freshProject();
+  ensureWorkspacesDir(proj);
+  const restored = projectSessionsWorkspace(proj, "wsp-abort-bystander-restored");
+  const other = projectSessionsWorkspace(proj, "wsp-abort-bystander-other");
+  saveWorkspace(proj, restored);
+  saveWorkspace(proj, other);
+  const rig = modRestoreRig(proj);
+
+  const restoring = rig.svc.restore(restored.id, "attended");
+  await flushMicrotasks();
+  rig.svc.deleteWs(other.id);
+
+  expect(rig.pending[0]!.signal.aborted, "an unrelated deletion must not cancel the restore").toBe(false);
+  rig.pending[0]!.release();
+  await expect(settled(restoring)).resolves.toEqual({ ok: true });
+  expect(rig.restored).toHaveLength(1);
+});
+
+test("WorkspaceService.restore(): a superseded mod preparation swaps nothing and releases the operation", async () => {
+  const proj = freshProject();
+  ensureWorkspacesDir(proj);
+  const ws = projectSessionsWorkspace(proj, "wsp-prep-batch-superseded");
+  saveWorkspace(proj, ws);
+  let preparations = 0;
+  const events: string[] = [];
+  const rig = modRestoreRig(proj, {
+    prepareModPlans: async (defs) => {
+      preparations++;
+      if (preparations === 1) return { ok: false as const, reason: "superseded" as const };
+      return { ok: true as const, plans: new Map(defs.map((def) => [def.id, { attemptId: def.id, mode: "host" as const, modDirs: [], copies: [], diagnostics: [] }])) };
+    },
+  }, events);
+
+  await expect(settled(rig.svc.restore(ws.id, "attended"))).resolves.toEqual({ ok: false, reason: "superseded" });
+  expect(events).toEqual([]);
+  expect(rig.restored).toHaveLength(0);
+
+  await expect(settled(rig.svc.restore(ws.id, "attended"))).resolves.toEqual({ ok: true });
+  expect(rig.restored).toHaveLength(1);
+});
+
+test("WorkspaceService.restore(): a restore started after an invalidation prepares on a fresh signal", async () => {
+  const proj = freshProject();
+  ensureWorkspacesDir(proj);
+  const ws = projectSessionsWorkspace(proj, "wsp-abort-fresh-signal");
+  saveWorkspace(proj, ws);
+  const rig = modRestoreRig(proj);
+
+  const first = rig.svc.restore(ws.id, "attended");
+  await flushMicrotasks();
+  rig.svc.startNew();
+  const second = rig.svc.restore(ws.id, "attended");
+  await flushMicrotasks();
+
+  expect(rig.pending).toHaveLength(2);
+  expect(rig.pending[0]!.signal.aborted).toBe(true);
+  expect(rig.pending[1]!.signal.aborted, "the replacement restore must not inherit the aborted signal").toBe(false);
+  rig.pending[0]!.release();
+  rig.pending[1]!.release();
+  await expect(settled(first)).resolves.toEqual({ ok: false, reason: "superseded" });
+  await expect(settled(second)).resolves.toEqual({ ok: true });
+  expect(rig.restored).toHaveLength(1);
 });

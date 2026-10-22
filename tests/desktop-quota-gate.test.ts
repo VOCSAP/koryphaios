@@ -218,7 +218,7 @@ test("MAJOR (mutation review): the pty data handler DOES feed quotaDetector when
 });
 
 function extractStartPtyBody(src: string): string {
-  const pattern = /private startPty\(def: SessionDef, mode: SpawnMode\): void \{/;
+  const pattern = /private startPty\(def: SessionDef, mode: SpawnMode, modPlan\?: LaunchModPlan\): void \{/;
   assertSingleDeclaration(src, pattern, "startPty()");
   const fnMatch = pattern.exec(src);
   if (!fnMatch) {

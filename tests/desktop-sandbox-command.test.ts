@@ -1,6 +1,6 @@
 // PLAN-SANDBOX SBX1: pure sandbox builders (naming, path/env mapping, engine
 // arg vectors, launch script) — desktop/src/main/sandbox-command.
-import { test, expect } from "bun:test";
+import { test, expect, describe } from "bun:test";
 import {
   DEFAULT_SANDBOX_PORTS,
   SANDBOX_AUTH_VOLUME,
@@ -16,6 +16,15 @@ import {
   buildReadPidArgs,
   buildImageRemoveArgs,
   buildCopyIntoArgs,
+  buildModCopyArgs,
+  buildModMkdirArgs,
+  buildModPublishArgs,
+  buildModNamespaceCreateArgs,
+  buildModNamespaceInspectArgs,
+  buildModNamespaceStatArgs,
+  buildModStagingCleanArgs,
+  parseModNamespaceInspection,
+  SANDBOX_MODS_DIR,
   buildProjectionChownArgs,
   buildProjectionCleanArgs,
   composeCustomDockerfile,
@@ -35,7 +44,6 @@ import {
   parseSandboxPid,
   parseTranscriptList,
   rewriteLoopbackForContainer,
-  rewritePluginDirForContainer,
   SANDBOX_DECK_PLUGIN_DIR,
   SANDBOX_DECK_PLUGIN_NAME,
   sandboxifyEnv,
@@ -99,26 +107,6 @@ test("mapHostPathToContainer returns NULL outside the mount, never a /work fallb
 test("shQuote survives embedded single quotes", () => {
   expect(shQuote("it's")).toBe(`'it'\\''s'`);
   expect(shQuote("plain")).toBe("'plain'");
-});
-
-// Card a79c7696 volet 1: wrap() left --plugin-dir pointing at a HOST path
-// inside the container. The coverage trap the card calls out: a test that
-// only checks the flag CHANGED would still pass if it pointed at an empty
-// dir. So this pins the rewritten value against SANDBOX_HOME composed
-// independently, not just against SANDBOX_DECK_PLUGIN_DIR re-imported --
-// proving the flag lands exactly where projectDeckPlugin() (sandbox-service)
-// copies deck-plugin to.
-test("rewritePluginDirForContainer redirects --plugin-dir onto the projected container path", () => {
-  const hostCmd = `claude --plugin-dir "C:\\Users\\op\\AppData\\Local\\Programs\\koryphaios\\resources\\deck-plugin" --session-id "abc"`;
-  expect(rewritePluginDirForContainer(hostCmd)).toBe(
-    `claude --plugin-dir "${SANDBOX_HOME}/.claude/deck-plugin" --session-id "abc"`
-  );
-  expect(SANDBOX_DECK_PLUGIN_DIR).toBe(`${SANDBOX_HOME}/.claude/deck-plugin`);
-});
-
-test("rewritePluginDirForContainer is a no-op when --plugin-dir is absent", () => {
-  const hostCmd = `claude --session-id "abc"`;
-  expect(rewritePluginDirForContainer(hostCmd)).toBe(hostCmd);
 });
 
 // Reviewer (card a79c7696 volet 1 review, correction 2): the invariant has a
@@ -272,15 +260,15 @@ test("sandbox cleanup accepts one numeric pid and uses fixed argv", () => {
   for (const invalid of ["", "0\n", "1\n", "2147483648\n", " 517\n", "517 9\n", "517\n9\n", "-517\n"]) {
     expect(parseSandboxPid(invalid)).toBeNull();
   }
-  expect(buildReadPidArgs("kory-sbx-0123456789ab", "tile-1")).toEqual([
+  expect(buildReadPidArgs("a".repeat(64), "tile-1")).toEqual([
     "exec",
-    "kory-sbx-0123456789ab",
+    "a".repeat(64),
     "cat",
     "/kory-run/pid-tile-1"
   ]);
-  expect(buildKillPidGroupArgs("kory-sbx-0123456789ab", "517", "tile-1")).toEqual([
+  expect(buildKillPidGroupArgs("a".repeat(64), "517", "tile-1")).toEqual([
     "exec",
-    "kory-sbx-0123456789ab",
+    "a".repeat(64),
     "bash",
     "-c",
     "kill -- -\"$1\" 2>/dev/null || true; rm -f \"$2\"",
@@ -288,11 +276,18 @@ test("sandbox cleanup accepts one numeric pid and uses fixed argv", () => {
     "517",
     "/kory-run/pid-tile-1"
   ]);
-  expect(() => buildKillPidGroupArgs("kory-sbx-0123456789ab", "1", "tile-1")).toThrow("sandbox-pid-invalid");
-  expect(() => buildKillPidGroupArgs("kory-sbx-0123456789ab", "2147483648", "tile-1")).toThrow("sandbox-pid-invalid");
-  expect(() => buildKillPidGroupArgs("kory-sbx-0123456789ab", "517; touch /tmp/pwned", "tile-1")).toThrow(
+  expect(() => buildKillPidGroupArgs("a".repeat(64), "1", "tile-1")).toThrow("sandbox-pid-invalid");
+  expect(() => buildKillPidGroupArgs("a".repeat(64), "2147483648", "tile-1")).toThrow("sandbox-pid-invalid");
+  expect(() => buildKillPidGroupArgs("a".repeat(64), "517; touch /tmp/pwned", "tile-1")).toThrow(
     "sandbox-pid-invalid"
   );
+});
+
+test("sandbox exec builders reject an invalid pinned container id", () => {
+  const invalid = "kory-sbx-0123456789ab";
+  expect(() => buildReadPidArgs(invalid, "tile-1")).toThrow("sandbox-container-id-invalid");
+  expect(() => buildKillPidGroupArgs(invalid, "517", "tile-1")).toThrow("sandbox-container-id-invalid");
+  expect(() => buildExecCommand("docker", invalid, "tile-1")).toThrow("sandbox-container-id-invalid");
 });
 
 test("sandboxifyEnv translates the FORCE_GROUP file transport inline", () => {
@@ -512,8 +507,8 @@ test("buildCreateArgs mounts the CLONE in copy mode, labels the real project", (
 });
 
 test("exec command shape", () => {
-  expect(buildExecCommand("docker", "kory-sbx-0123456789ab", "sid")).toBe(
-    `docker exec -it kory-sbx-0123456789ab bash ${SANDBOX_RUN_DIR}/cmd-sid.sh`
+  expect(buildExecCommand("docker", "a".repeat(64), "sid")).toBe(
+    `docker exec -it ${"a".repeat(64)} bash ${SANDBOX_RUN_DIR}/cmd-sid.sh`
   );
 });
 
@@ -572,4 +567,181 @@ test("image removal is never forced", () => {
     "koryphaios-sandbox",
   ]);
   expect(buildImageRemoveArgs("koryphaios-sandbox")).not.toContain("-f");
+});
+
+test("mod projection builders stage without following links then publish atomically", () => {
+  const spec = {
+    containerId: "a".repeat(64),
+    plugin: "readable-layout",
+    fingerprint: "b".repeat(64),
+    hostDir: "/host/mods/readable-layout",
+    stagingNonce: "stage-abc123",
+  };
+  const staging = "/opt/kory-mods/readable-layout/.stage-stage-abc123";
+  const published = "/opt/kory-mods/readable-layout/" + "b".repeat(64);
+
+  expect(buildModMkdirArgs(spec)).toEqual([
+    "exec", "--user", "root", "a".repeat(64), "mkdir", staging,
+  ]);
+  expect(buildModCopyArgs(spec)).toEqual([
+    "cp", "/host/mods/readable-layout/.", "a".repeat(64) + ":" + staging,
+  ]);
+  expect(buildModCopyArgs(spec)).not.toContain("-L");
+  expect(buildModPublishArgs(spec)).toEqual([
+    "exec", "--user", "root", "a".repeat(64), "mv", "-T", staging, published,
+  ]);
+});
+
+const MOD_CID = "a".repeat(64);
+const MOD_FP = "b".repeat(64);
+const MOD_SPEC = {
+  containerId: MOD_CID,
+  plugin: "readable-layout",
+  fingerprint: MOD_FP,
+  hostDir: "/host/mods/readable-layout",
+  stagingNonce: "stage-abc123",
+};
+
+test("parseModNamespaceInspection reads the mounts and user of a real inspect line", () => {
+  const mounts = JSON.stringify([
+    { Type: "volume", Name: "kory-claude-auth", Source: "/var/lib/docker/volumes/kory-claude-auth/_data", Destination: "/home/kory/.claude", Driver: "local", Mode: "z", RW: true, Propagation: "" },
+    { Type: "bind", Source: "/c/project", Destination: "/work", Mode: "", RW: true, Propagation: "rprivate" },
+  ]);
+  expect(parseModNamespaceInspection(`${mounts}\t"kory"\n`)).toEqual({
+    mounts: [{ destination: "/home/kory/.claude" }, { destination: "/work" }],
+    user: "kory",
+  });
+  expect(parseModNamespaceInspection(`[]\t""`)).toEqual({ mounts: [], user: "" });
+});
+
+test("parseModNamespaceInspection strips trailing slashes so a /opt/ mount cannot dodge the comparison", () => {
+  const out = parseModNamespaceInspection(`[{"Destination":"/opt/kory-mods/"},{"Destination":"//"},{"Destination":"/opt//"}]\t"kory"`);
+  expect(out?.mounts.map((m) => m.destination)).toEqual(["/opt/kory-mods", "/", "/opt"]);
+});
+
+test.each([
+  ["empty output", ""],
+  ["no separator between mounts and user", `[]"kory"`],
+  ["three fields", `[]\t"kory"\textra`],
+  ["mounts is an object, not an array", `{}\t"kory"`],
+  ["mounts is null", `null\t"kory"`],
+  ["user is not a string", `[]\tnull`],
+  ["user is a number", `[]\t0`],
+  ["mounts is not JSON", `[{\t"kory"`],
+  ["user is not JSON", `[]\tkory`],
+  ["a mount without Destination among valid ones", `[{"Destination":"/work"},{"Source":"/x"}]\t"kory"`],
+  ["a mount whose Destination is not a string", `[{"Destination":5}]\t"kory"`],
+  ["a mount that is not an object", `["/opt"]\t"kory"`],
+])("parseModNamespaceInspection returns null on %s instead of a partial reading", (_name, stdout) => {
+  expect(parseModNamespaceInspection(stdout), `unrecognised inspect output must be refused whole: ${JSON.stringify(stdout)}`).toBeNull();
+});
+
+test("namespace stat inspects /opt then /opt/kory-mods as root without dereferencing links", () => {
+  const args = buildModNamespaceStatArgs(MOD_CID);
+  expect(args).toEqual(["exec", "--user", "root", MOD_CID, "stat", "-c", "%u %g %a %F", "/opt", SANDBOX_MODS_DIR]);
+  expect(args, "a followed link would report the target's type and owner").not.toContain("-L");
+  expect(args).not.toContain("--dereference");
+  expect(SANDBOX_MODS_DIR).toBe("/opt/kory-mods");
+});
+
+test("namespace creation is an exclusive mkdir in mode 755 without -p or chown", () => {
+  const args = buildModNamespaceCreateArgs(MOD_CID);
+  expect(args).toEqual(["exec", "--user", "root", MOD_CID, "mkdir", "-m", "755", SANDBOX_MODS_DIR]);
+  expect(args, "-p would create /opt itself and accept an existing hostile directory").not.toContain("-p");
+  expect(args.join(" ")).not.toMatch(/chown|chmod/);
+});
+
+test("namespace inspect asks for mounts and the configured user of the pinned id", () => {
+  expect(buildModNamespaceInspectArgs(MOD_CID)).toEqual([
+    "inspect", "--format", "{{json .Mounts}}\t{{json .Config.User}}", MOD_CID,
+  ]);
+});
+
+test.each([
+  ["namespace inspect", buildModNamespaceInspectArgs],
+  ["namespace stat", buildModNamespaceStatArgs],
+  ["namespace create", buildModNamespaceCreateArgs],
+])("%s refuses a container name where an id is required", (_name, build) => {
+  expect(() => build("kory-sbx-0123456789ab")).toThrow("sandbox-container-id-invalid");
+  expect(() => build(MOD_CID.toUpperCase())).toThrow("sandbox-container-id-invalid");
+  expect(() => build(MOD_CID.slice(1))).toThrow("sandbox-container-id-invalid");
+});
+
+const MOD_BUILDERS = [
+  ["mkdir", buildModMkdirArgs],
+  ["copy", buildModCopyArgs],
+  ["publish", buildModPublishArgs],
+  ["staging clean", buildModStagingCleanArgs],
+] as const;
+
+describe.each(MOD_BUILDERS)("mod %s builder", (_name, build) => {
+  test.each([
+    ["a path separator", "a/b"],
+    ["a parent segment", ".."],
+    ["a dot segment", "."],
+    ["an uppercase letter", "Layout"],
+    ["a leading dash", "-layout"],
+    ["an empty name", ""],
+    ["65 characters", "a".repeat(65)],
+    ["a space", "read able"],
+  ])("rejects a plugin with %s rather than filtering it", (_why, plugin) => {
+    expect(() => build({ ...MOD_SPEC, plugin })).toThrow("sandbox-mod-plugin-invalid");
+  });
+
+  test("accepts a plugin of exactly 64 characters", () => {
+    expect(() => build({ ...MOD_SPEC, plugin: "a".repeat(64) })).not.toThrow();
+  });
+
+  test.each([
+    ["63 hex digits", "b".repeat(63)],
+    ["65 hex digits", "b".repeat(65)],
+    ["uppercase hex", "B".repeat(64)],
+    ["non hex letters", "g".repeat(64)],
+    ["a path", "../".repeat(21) + "b"],
+  ])("rejects a fingerprint of %s", (_why, fingerprint) => {
+    expect(() => build({ ...MOD_SPEC, fingerprint })).toThrow("sandbox-mod-fingerprint-invalid");
+  });
+
+  test.each([
+    ["a path separator", "a/b"],
+    ["a parent segment", ".."],
+    ["an empty nonce", ""],
+    ["an uppercase letter", "Abc"],
+  ])("rejects a staging nonce with %s", (_why, stagingNonce) => {
+    expect(() => build({ ...MOD_SPEC, stagingNonce })).toThrow("sandbox-mod-staging-nonce-invalid");
+  });
+
+  test("rejects a container name where the pinned id is required", () => {
+    expect(() => build({ ...MOD_SPEC, containerId: "kory-sbx-0123456789ab" })).toThrow("sandbox-container-id-invalid");
+  });
+});
+
+test("mod projection argv stays under /opt/kory-mods/<plugin>, with no mount, chown, link following or auth volume", () => {
+  const all = MOD_BUILDERS.map(([, build]) => build(MOD_SPEC));
+  const staging = `${SANDBOX_MODS_DIR}/readable-layout/.stage-stage-abc123`;
+  const published = `${SANDBOX_MODS_DIR}/readable-layout/${MOD_FP}`;
+  for (const args of all) {
+    const flat = args.join(" ");
+    expect(flat, "no new mount, no ownership change, no dereference").not.toMatch(/(^| )(-v|--mount|-L|--dereference|-p|-R)( |$)|chown/);
+    expect(flat).not.toContain(SANDBOX_HOME);
+    expect(flat).not.toContain(SANDBOX_RUN_DIR);
+    expect(flat).not.toContain(SANDBOX_WORK_DIR);
+    expect(flat).not.toContain(SANDBOX_AUTH_VOLUME);
+    expect(flat.includes(staging) || flat.includes(published), "every mod argv targets a controlled path").toBe(true);
+  }
+  expect(staging.slice(0, staging.lastIndexOf("/"))).toBe(published.slice(0, published.lastIndexOf("/")));
+});
+
+test("buildCreateArgs mounts nothing at /opt, so the namespace stays inside the image layer", () => {
+  const args = buildCreateArgs({
+    name: containerNameFor("/project/p"),
+    image: SANDBOX_IMAGE_DEFAULT,
+    projectDir: "/project/p",
+    workSource: "/project/p",
+    runDirHost: "/state/run",
+    peersDirHost: "/state/peers",
+    ports: DEFAULT_SANDBOX_PORTS,
+    protection: { status: "not-applicable", reason: "copy-mode", applied: [], skipped: [] },
+  });
+  expect(args.filter((a) => /(^|:)\/opt(\/|$|:)/.test(a))).toEqual([]);
 });

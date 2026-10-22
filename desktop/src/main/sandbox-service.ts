@@ -11,6 +11,7 @@
 // generated shape (hostile input #3): this service only ever passes
 // `kory-sbx-<hash12>` names it re-checked, whatever the renderer sent.
 
+import { randomBytes } from 'node:crypto'
 import { EventEmitter } from 'node:events'
 import { execFile, spawn } from 'node:child_process'
 import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
@@ -27,6 +28,7 @@ import {
   SANDBOX_AUTH_VOLUME,
   SANDBOX_HOME,
   SANDBOX_IMAGE_CUSTOM,
+  SANDBOX_MODS_DIR,
   SANDBOX_RUN_DIR,
   SANDBOX_WORK_DIR,
   buildAuthProbeArgs,
@@ -36,6 +38,21 @@ import {
   buildCopyIntoArgs,
   buildCreateArgs,
   buildExecCommand,
+  buildModCopyArgs,
+  buildModMkdirArgs,
+  buildModParentArgs,
+  buildModParentStatArgs,
+  buildModPublishedStatArgs,
+  buildModPublishedTreeStatArgs,
+  buildModNamespaceCreateArgs,
+  buildModNamespaceInspectArgs,
+  buildModNamespaceUserArgs,
+  buildModNamespaceStatArgs,
+  buildModPublishArgs,
+  buildModStagingCleanArgs,
+  buildModStagingListArgs,
+  parseModNamespaceInspection,
+  parseModStagingNames,
   buildImageBuildCommand,
   buildImageProbeArgs,
   buildImageRemoveArgs,
@@ -48,6 +65,7 @@ import {
   buildTranscriptListArgs,
   containerNameFor,
   containerTranscriptDir,
+  isSandboxContainerId,
   isSandboxContainerName,
   parseSandboxPid,
   parseTranscriptList,
@@ -229,6 +247,38 @@ const SUPERVISOR_EXEC_TIMEOUT_MS = 5 * 60_000
 
 export type SandboxEngineState = 'ok' | 'daemon-down' | 'missing'
 
+function namespaceStatIsSafe(stdout: string, expectedLines = 2): boolean {
+  const lines = stdout.trim().split('\n')
+  if (lines.length !== expectedLines) return false
+  return lines.every((line) => {
+    const [uid, gid, mode, type, ...rest] = line.trim().split(/\s+/)
+    if (rest.length > 0 || uid !== '0' || gid !== '0' || type !== 'directory' || mode === undefined) return false
+    const parsed = Number.parseInt(mode, 8)
+    return Number.isInteger(parsed) && (parsed & 0o022) === 0
+  })
+}
+
+function publishedTreeIsSafe(stdout: string): boolean {
+  const lines = stdout.trim().split('\n')
+  return lines.length > 0 && lines.every((line) => {
+    const [uid, gid, mode, type, ...rest] = line.trim().split(/\s+/)
+    if (rest.length > 0 || uid !== '0' || gid !== '0' || mode === undefined || (type !== 'd' && type !== 'f')) return false
+    const parsed = Number.parseInt(mode, 8)
+    return Number.isInteger(parsed) && (parsed & 0o6022) === 0
+  })
+}
+
+function namespaceInspectionIsSafe(stdout: string): boolean {
+  const inspection = parseModNamespaceInspection(stdout)
+  if (!inspection || inspection.user === '' || inspection.user === 'root' || inspection.user === '0' || inspection.user.startsWith('0:')) return false
+  return !inspection.mounts.some((mount) =>
+    mount.destination === '/' ||
+    mount.destination === '/opt' ||
+    mount.destination === '/opt/kory-mods' ||
+    mount.destination.startsWith('/opt/kory-mods/')
+  )
+}
+
 interface EngineProbe {
   engine: SandboxEngine | null
   state: SandboxEngineState
@@ -237,9 +287,50 @@ interface EngineProbe {
 }
 
 /** What startPty needs to wrap a session command (cached, synchronous). */
+export interface SandboxModHostCopy {
+  plugin: string
+  fingerprint: string
+  hostDir: string
+}
+
+export interface SandboxModReference {
+  plugin: string
+  fingerprint: string
+  containerDir: string
+}
+
+export interface SandboxModPreparationDiagnostics {
+  omitted: readonly { plugin: string; reason: string }[]
+}
+
+export interface SandboxModPreparationInput {
+  attemptId: string
+  copies: readonly SandboxModHostCopy[]
+  signal: AbortSignal
+  verifyHostCopy: (copy: SandboxModHostCopy) => { ok: true } | { ok: false; reason: string }
+}
+
+interface SandboxModPreparationFlight {
+  controller: AbortController
+  waiters: number
+  settled: boolean
+  promise: Promise<SandboxModPreparation>
+}
+
+export type SandboxModPreparation =
+  | {
+      ok: true
+      engine: SandboxEngine
+      containerId: string
+      references: readonly SandboxModReference[]
+      diagnostics: SandboxModPreparationDiagnostics
+    }
+  | { ok: false; reason: string }
+
 export interface SandboxLaunch {
   engine: SandboxEngine
   container: string
+  containerId: string
   runDirHost: string
   /** Host dir mounted at /work — the project, or the clone in copy mode. */
   workSource: string
@@ -309,6 +400,7 @@ export class SandboxService extends EventEmitter {
   private lastError: string | null = null
   /** Last observed readiness, consumed synchronously by launchInfo(). */
   private lastReady = false
+  private readyContainerId: string | null = null
   /** Last broker-bridge verdict (null = not probed yet). */
   private bridgeOk: boolean | null = null
   /** Container-side transcripts, keyed by HOST cwd (M2 resume). */
@@ -322,6 +414,11 @@ export class SandboxService extends EventEmitter {
   private authedCache: boolean | null = null
   /** In-flight background auth probe (status() must never stack a second one). */
   private authProbeInFlight: Promise<void> | null = null
+  private readonly modNamespaceSafe = new Set<string>()
+  private readonly modPreparations = new Map<string, SandboxModPreparationFlight>()
+  private readonly modStagings = new Set<string>()
+  private readonly orphanStagingReports = new Set<string>()
+  private readonly sessionTargets = new Map<string, { engine: SandboxEngine; containerId: string }>()
   /**
    * Keyed by container id, not name: a recreate mints a new id so a fresh
    * container always gets a fresh copy with no manual invalidation.
@@ -638,18 +735,7 @@ export class SandboxService extends EventEmitter {
     return res.code === 0 ? res.stdout.trim() : null
   }
 
-  /**
-   * Identity + state in ONE engine call (ensure() runs on every agent spawn).
-   * The ID is what keys the projection marker — see projectedMarkerFile.
-   *
-   * Card 9e529177 point 3: `{{json .Mounts}}` added as a third tabbed field
-   * so the SAME call also answers "does this already-created container carry
-   * the protection binds the CURRENT plan expects" (a container created
-   * before this feature shipped has none, silently, until rebuilt). Measured
-   * cost: nil — `docker inspect` already deserializes the whole object
-   * (0.114s vs 0.132s for the old two-field format, in the noise), so this is
-   * zero extra engine calls, not one more.
-   */
+  // Identity, state, and mounts must come from one inspection of the same container.
   private async inspectIdState(
     name: string
   ): Promise<{ id: string; state: string; mounts: SandboxMountInfo[] } | null> {
@@ -662,6 +748,13 @@ export class SandboxService extends EventEmitter {
     if (res.code !== 0) return null
     const [id, state, mountsJson] = res.stdout.trim().split('\t')
     if (!id || !state) return null
+    if (!isSandboxContainerId(id)) {
+      if (name === this.containerName) {
+        this.lastReady = false
+        this.readyContainerId = null
+      }
+      throw new Error('sandbox-container-id-invalid')
+    }
     return { id, state, mounts: parseMounts(mountsJson) }
   }
 
@@ -730,6 +823,7 @@ export class SandboxService extends EventEmitter {
     }
     const authed = probe.state === 'ok' ? this.authedCache : null
     this.lastReady = containerState === 'running'
+    if (!this.lastReady) this.readyContainerId = null
     const plan = this.protectionPlan()
     const rebuildReasons = computeRebuildReasons(plan, mounts, this.containerName, containerState)
     return {
@@ -848,6 +942,7 @@ export class SandboxService extends EventEmitter {
       // keyed by the container ID, and a recreate mints a new one.
       await this.run(['rm', '-f', this.containerName], 30_000)
       this.lastReady = false
+      this.readyContainerId = null
     }
     rmSync(this.copyDirHost, { recursive: true, force: true })
     this.deps.journal('sandbox: ephemeral clone reset')
@@ -954,6 +1049,7 @@ export class SandboxService extends EventEmitter {
           )
           await this.run(['rm', '-f', this.containerName], 30_000)
           this.lastReady = false
+      this.readyContainerId = null
           info = null
         }
       }
@@ -987,6 +1083,7 @@ export class SandboxService extends EventEmitter {
         // covers an engine that ever stops doing so.
         const createdId =
           created.stdout.trim() || ((await this.inspectIdState(this.containerName))?.id ?? '')
+        if (!isSandboxContainerId(createdId)) throw new Error('sandbox-container-id-invalid')
         info = { id: createdId, state: 'created', mounts: [] }
         this.deps.journal(`sandbox: container ${this.containerName} created (${this.image()})`)
         mark('create')
@@ -1006,6 +1103,7 @@ export class SandboxService extends EventEmitter {
         this.deps.journal(`sandbox: container ${this.containerName} started`)
         mark('start')
       }
+      this.readyContainerId = info.id
       this.lastReady = true
       // Projection runs only when the container id or the config fingerprint
       // changed (the marker is persisted); the bridge probe is a diagnostic
@@ -1417,6 +1515,7 @@ export class SandboxService extends EventEmitter {
         const r = await this.run(['stop', '-t', '5', name], 30_000)
         if (r.code !== 0) fail(r, 'stop')
         if (name === this.containerName) this.lastReady = false
+      this.readyContainerId = null
         break
       }
       case 'remove': {
@@ -1436,6 +1535,7 @@ export class SandboxService extends EventEmitter {
         const r = await this.run(['rm', '-f', name], 30_000)
         if (r.code !== 0) fail(r, 'remove')
         if (name === this.containerName) this.lastReady = false
+      this.readyContainerId = null
         if (!wasRunning) this.purgeRunDirsFor(name)
         break
       }
@@ -1451,6 +1551,7 @@ export class SandboxService extends EventEmitter {
         const rm = await this.run(['rm', '-f', name], 30_000)
         if (rm.code !== 0 && !rm.stderr.includes('No such container')) fail(rm, 'remove')
         this.lastReady = false
+      this.readyContainerId = null
         if (!wasRunning) this.purgeRunDirsFor(name)
         await this.ensure()
         break
@@ -1492,6 +1593,206 @@ export class SandboxService extends EventEmitter {
 
   // ----- spawn integration -----
 
+  async prepareMods(input: SandboxModPreparationInput): Promise<SandboxModPreparation> {
+    if (input.signal.aborted) return { ok: false, reason: 'sandbox-mod-preparation-aborted' }
+    await this.ensure()
+    if (input.signal.aborted) return { ok: false, reason: 'sandbox-mod-preparation-aborted' }
+    const engine = this.probe?.engine
+    const containerId = this.readyContainerId
+    if (!engine || this.probe?.state !== 'ok' || !this.lastReady || !containerId) return { ok: false, reason: 'sandbox-container-unavailable' }
+    if (input.copies.length === 0) return { ok: true, engine, containerId, references: [], diagnostics: { omitted: [] } }
+    const results: SandboxModPreparation[] = []
+    const orphanCollector = { names: [] as string[], invalid: false }
+    for (const copy of input.copies) {
+      const key = `${engine}:${containerId}:${copy.plugin}:${copy.fingerprint}`
+      let flight = this.modPreparations.get(key)
+      if (!flight) {
+        const controller = new AbortController()
+        flight = { controller, waiters: 0, settled: false, promise: Promise.resolve({ ok: false, reason: 'sandbox-mod-preparation-aborted' }) }
+        flight.promise = this.prepareModsRun({ ...input, copies: [copy], signal: controller.signal }, { engine, containerId }, orphanCollector)
+          .finally(() => {
+            flight!.settled = true
+            this.modPreparations.delete(key)
+          })
+        this.modPreparations.set(key, flight)
+      }
+      results.push(await this.awaitModPreparation(flight, input.signal))
+      if (!results[results.length - 1]!.ok) return results[results.length - 1]!
+    }
+    const first = results[0]
+    if (!first || !first.ok) return { ok: false, reason: 'sandbox-container-unavailable' }
+    const namespaceKey = `${engine}:${containerId}`
+    if (!this.orphanStagingReports.has(namespaceKey) && (orphanCollector.invalid || orphanCollector.names.length > 0)) {
+      this.orphanStagingReports.add(namespaceKey)
+      const detail = orphanCollector.invalid ? 'unrecognised staging listing output' : `${orphanCollector.names.length} (${orphanCollector.names.join(', ')})`
+      reportError('sandbox', `orphaned mod stagings in ${containerId}: ${detail}`)
+    }
+    return { ok: true, engine: first.engine, containerId: first.containerId, references: results.flatMap((result) => (result as Extract<SandboxModPreparation, { ok: true }>).references), diagnostics: { omitted: results.flatMap((result) => (result as Extract<SandboxModPreparation, { ok: true }>).diagnostics.omitted) } }
+  }
+
+  private awaitModPreparation(flight: SandboxModPreparationFlight, signal: AbortSignal): Promise<SandboxModPreparation> {
+    flight.waiters += 1
+    return new Promise((resolve) => {
+      let released = false
+      const release = () => {
+        if (released) return
+        released = true
+        flight.waiters -= 1
+        if (flight.waiters === 0 && !flight.settled) flight.controller.abort()
+      }
+      const onAbort = () => {
+        release()
+        resolve({ ok: false, reason: 'sandbox-mod-preparation-aborted' })
+      }
+      signal.addEventListener('abort', onAbort, { once: true })
+      void flight.promise.then((result) => {
+        signal.removeEventListener('abort', onAbort)
+        release()
+        resolve(result)
+      })
+    })
+  }
+
+  private async prepareModsRun(
+    input: SandboxModPreparationInput,
+    pinned?: { engine: SandboxEngine; containerId: string },
+    orphanCollector?: { names: string[]; invalid: boolean }
+  ): Promise<SandboxModPreparation> {
+    const aborted = (): SandboxModPreparation | null =>
+      input.signal.aborted ? { ok: false, reason: 'sandbox-mod-preparation-aborted' } : null
+    if (aborted()) return aborted()!
+    await Promise.resolve()
+    if (aborted()) return aborted()!
+    if (!pinned) await this.ensure()
+    if (aborted()) return aborted()!
+    const engine = pinned?.engine ?? this.probe?.engine
+    const containerId = pinned?.containerId ?? this.readyContainerId
+    if (!engine || (!pinned && (this.probe?.state !== 'ok' || !this.lastReady)) || !containerId) return { ok: false, reason: 'sandbox-container-unavailable' }
+    const namespaceKey = `${engine}:${containerId}`
+    if (!this.modNamespaceSafe.has(namespaceKey)) {
+      const inspected = await this.run(buildModNamespaceInspectArgs(containerId))
+      if (aborted()) return aborted()!
+      if (inspected.code !== 0 || !namespaceInspectionIsSafe(inspected.stdout)) return { ok: false, reason: 'sandbox-mod-namespace-invalid' }
+      let stat = await this.run(buildModNamespaceStatArgs(containerId))
+      if (aborted()) return aborted()!
+      if (stat.code !== 0) {
+        const created = await this.run(buildModNamespaceCreateArgs(containerId))
+        if (aborted()) return aborted()!
+        if (created.code !== 0 && !/File exists/i.test(created.stderr)) return { ok: false, reason: 'sandbox-mod-namespace-invalid' }
+        stat = await this.run(buildModNamespaceStatArgs(containerId))
+        if (aborted()) return aborted()!
+      }
+      if (stat.code !== 0 || !namespaceStatIsSafe(stat.stdout)) return { ok: false, reason: 'sandbox-mod-namespace-invalid' }
+      this.modNamespaceSafe.add(namespaceKey)
+    }
+    const uid = await this.run(buildModNamespaceUserArgs(containerId))
+    if (aborted()) return aborted()!
+    if (uid.code !== 0 || uid.stdout.trim() === '0') return { ok: false, reason: 'sandbox-mod-root-user' }
+    const references: SandboxModReference[] = []
+    const omitted: { plugin: string; reason: string }[] = []
+    const orphanStagings = orphanCollector?.names ?? []
+    for (const copy of input.copies) {
+      const spec = { ...copy, containerId, stagingNonce: randomBytes(12).toString('hex') }
+      const pluginDir = `${SANDBOX_MODS_DIR}/${copy.plugin}`
+      const parent = await this.run(buildModParentArgs(spec))
+      if (aborted()) return aborted()!
+      if (parent.code !== 0 && !/File exists/i.test(parent.stderr)) {
+        omitted.push({ plugin: copy.plugin, reason: 'sandbox-mod-parent-create-failed' })
+        continue
+      }
+      const parentStat = await this.run(buildModParentStatArgs(spec))
+      if (aborted()) return aborted()!
+      if (parentStat.code !== 0 || !namespaceStatIsSafe(parentStat.stdout, 1)) {
+        omitted.push({ plugin: copy.plugin, reason: 'sandbox-mod-parent-invalid' })
+        continue
+      }
+      const stagingList = await this.run(buildModStagingListArgs(spec))
+      if (aborted()) return aborted()!
+      const stagingNames = stagingList.code === 0 ? parseModStagingNames(stagingList.stdout) : null
+      if (!stagingNames) {
+        if (orphanCollector) orphanCollector.invalid = true
+      } else {
+        orphanStagings.push(...stagingNames
+          .map((name) => `${copy.plugin}/${name}`)
+          .filter((name) => !this.modStagings.has(`${containerId}:${name}`)))
+      }
+      const existing = await this.run(buildModPublishedStatArgs(spec))
+      if (aborted()) return aborted()!
+      if (existing.code === 0) {
+        const tree = await this.run(buildModPublishedTreeStatArgs(spec))
+        if (aborted()) return aborted()!
+        if (namespaceStatIsSafe(existing.stdout, 1) && tree.code === 0 && publishedTreeIsSafe(tree.stdout)) {
+          references.push({ plugin: copy.plugin, fingerprint: copy.fingerprint, containerDir: `${pluginDir}/${copy.fingerprint}` })
+        } else {
+          omitted.push({ plugin: copy.plugin, reason: 'sandbox-mod-published-invalid' })
+        }
+        continue
+      }
+      if (!/no such file|cannot stat/i.test(existing.stderr)) {
+        omitted.push({ plugin: copy.plugin, reason: 'sandbox-mod-published-state-unknown' })
+        continue
+      }
+      const mkdir = await this.run(buildModMkdirArgs(spec))
+      if (mkdir.code !== 0) {
+        omitted.push({ plugin: copy.plugin, reason: 'sandbox-mod-staging-create-failed' })
+        continue
+      }
+      const stagingKey = `${containerId}:${copy.plugin}/.stage-${spec.stagingNonce}`
+      this.modStagings.add(stagingKey)
+      let published = false
+      try {
+        if (aborted()) return aborted()!
+        let verified: { ok: true } | { ok: false; reason: string }
+        try {
+          verified = input.verifyHostCopy(copy)
+        } catch (error) {
+          reportError('sandbox', `mod verification failed for ${copy.plugin}`, error)
+          omitted.push({ plugin: copy.plugin, reason: 'host-copy-verification-error' })
+          continue
+        }
+        if (!verified.ok) {
+          omitted.push({ plugin: copy.plugin, reason: verified.reason })
+          continue
+        }
+        const copied = await this.run(buildModCopyArgs(spec))
+        if (aborted()) return aborted()!
+        if (copied.code !== 0) {
+          omitted.push({ plugin: copy.plugin, reason: 'sandbox-mod-copy-failed' })
+          continue
+        }
+        const permissions = await this.run(['exec', '--user', 'root', containerId, 'chmod', '-R', 'u-s,g-s,go-w', `${pluginDir}/.stage-${spec.stagingNonce}`])
+        if (aborted()) return aborted()!
+        if (permissions.code !== 0) {
+          omitted.push({ plugin: copy.plugin, reason: 'sandbox-mod-permissions-failed' })
+          continue
+        }
+        const renamed = await this.run(buildModPublishArgs(spec))
+        if (aborted()) return aborted()!
+        if (renamed.code !== 0) {
+          const winner = await this.run(buildModPublishedStatArgs(spec))
+          if (aborted()) return aborted()!
+          const winnerTree = winner.code === 0 ? await this.run(buildModPublishedTreeStatArgs(spec)) : null
+          if (winnerTree && aborted()) return aborted()!
+          if (winner.code === 0 && namespaceStatIsSafe(winner.stdout, 1) && winnerTree?.code === 0 && publishedTreeIsSafe(winnerTree.stdout)) {
+            references.push({ plugin: copy.plugin, fingerprint: copy.fingerprint, containerDir: `${pluginDir}/${copy.fingerprint}` })
+          } else {
+            omitted.push({ plugin: copy.plugin, reason: 'sandbox-mod-publish-collision-invalid' })
+          }
+          continue
+        }
+        published = true
+        references.push({ plugin: copy.plugin, fingerprint: copy.fingerprint, containerDir: `${pluginDir}/${copy.fingerprint}` })
+      } finally {
+        this.modStagings.delete(stagingKey)
+        if (!published) {
+          const cleaned = await this.run(buildModStagingCleanArgs(spec))
+          if (cleaned.code !== 0) reportError('sandbox', `failed to clean mod staging for ${copy.plugin}`, cleaned.stderr)
+        }
+      }
+    }
+    return { ok: true, engine, containerId, references, diagnostics: { omitted } }
+  }
+
   /**
    * Synchronous launch info for SessionService.startPty. null = sandbox off.
    * Throws when enabled but the container is not known-running. Spawn paths
@@ -1501,12 +1802,13 @@ export class SandboxService extends EventEmitter {
   launchInfo(): SandboxLaunch | null {
     if (!this.isEnabled()) return null
     const engine = this.probe?.engine
-    if (!engine || this.probe?.state !== 'ok' || !this.lastReady) {
+    if (!engine || this.probe?.state !== 'ok' || !this.lastReady || !this.readyContainerId) {
       throw new Error('sandbox enabled but container not ready — open the Docker view')
     }
     return {
       engine,
       container: this.containerName,
+      containerId: this.readyContainerId,
       runDirHost: this.runDirHost,
       workSource: this.workSource(),
       protection: this.protectionPlan()
@@ -1522,12 +1824,12 @@ export class SandboxService extends EventEmitter {
   }
 
   async cleanupSession(tileId: string): Promise<void> {
-    const launch = this.launchInfo()
-    if (!launch) {
+    const target = this.sessionTargets.get(tileId)
+    if (!target) {
       reportError('sandbox', `sandbox cleanup skipped for tile ${tileId}: no active launch`)
       return
     }
-    const pidResult = await this.run(buildReadPidArgs(launch.container, tileId))
+    const pidResult = await this.run(buildReadPidArgs(target.containerId, tileId))
     if (pidResult.code !== 0) {
       reportError('sandbox', `failed to read sandbox pid for tile ${tileId}`, pidResult.stderr || `exit code ${pidResult.code}`)
       return
@@ -1537,13 +1839,15 @@ export class SandboxService extends EventEmitter {
       reportError('sandbox', `refusing invalid sandbox pid for tile ${tileId}`)
       return
     }
-    const cleanup = await this.run(buildKillPidGroupArgs(launch.container, pid, tileId))
+    const cleanup = await this.run(buildKillPidGroupArgs(target.containerId, pid, tileId))
+    this.sessionTargets.delete(tileId)
     if (cleanup.code !== 0) reportError('sandbox', `failed to clean sandbox process group for tile ${tileId}`, cleanup.stderr)
   }
 
-  /** The `docker exec` command line the PTY runs for a sandboxed session. */
   execCommand(launch: SandboxLaunch, tileId: string): string {
-    return buildExecCommand(launch.engine, launch.container, tileId)
+    const command = buildExecCommand(launch.engine, launch.containerId, tileId)
+    this.sessionTargets.set(tileId, { engine: launch.engine, containerId: launch.containerId })
+    return command
   }
 
   /** True when any kory-sbx container is running (auth-purge guard, SBX3). */

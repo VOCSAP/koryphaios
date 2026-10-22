@@ -28,6 +28,7 @@ import {
   sanitizeFlagValue,
   shouldInjectPrompt
 } from "../desktop/src/main/session-command.ts";
+import { SANDBOX_DECK_PLUGIN_DIR } from "../desktop/src/main/sandbox-command.ts";
 import * as shellCommand from "../desktop/src/main/shell-command.ts";
 import {
   JOB_STARTUP_SCAN_WINDOW_MS,
@@ -173,6 +174,45 @@ test("Claude settings guard accepts literal dollar amounts and percent", () => {
   for (const source of ['--append-system-prompt "cout 50%"', '"prix $5"']) {
     expect(claudeSettingsIssue("claude", source), source).toBeUndefined();
   }
+});
+
+test("sandbox settings guard rejects plugin-dir in base and args (mutation: omit sandbox plugin-dir check)", () => {
+  for (const [base, args] of [
+    ['claude --plugin-dir /user-plugin', undefined],
+    ['claude', '--plugin-dir=/user-plugin'],
+    ['claude', '--plugin-"dir" /user-plugin']
+  ]) {
+    expect(claudeSettingsIssue(base, args, true), `${base} ${args ?? ''}`).toBeDefined();
+  }
+  expect(claudeSettingsIssue('claude --plugin-dir /user-plugin', undefined)).toBeUndefined();
+});
+
+const PLUGIN_DIR_SPELLINGS: Array<[string, string]> = [
+  ["bare flag", "--plugin-dir"],
+  ["single-quoted flag", "'--plugin-dir' /user-plugin"],
+  ["single quotes inside the flag", "--plugin-'dir' /user-plugin"],
+  ["backslash inside the flag", String.raw`--plugin\-dir /user-plugin`],
+  ["double quotes splitting the flag", '--plug"in-dir" /user-plugin'],
+  ["caret inside the flag", "--plugin^-dir /user-plugin"],
+  ["equals with a quoted value", '--plugin-dir="/user-plugin"']
+];
+
+test.each(PLUGIN_DIR_SPELLINGS)("a sandboxed launch refuses the plugin-dir flag spelled as: %s, in the base and in the args", (_name, spelling) => {
+  expect(claudeSettingsIssue(`claude ${spelling}`, undefined, true), `base "claude ${spelling}"`).toBe("contain a plugin-dir flag that is managed by the Deck");
+  expect(claudeSettingsIssue("claude", spelling, true), `args "${spelling}"`).toBe("contain a plugin-dir flag that is managed by the Deck");
+  expect(claudeSettingsIssue(`claude ${spelling}`, undefined), "a host tile keeps its own plugin-dir in the base").toBeUndefined();
+  expect(claudeSettingsIssue("claude", spelling), "a host tile keeps its own plugin-dir in the args").toBeUndefined();
+});
+
+test("plugin composition appends host mods after embedded plugins and uses sandbox container paths (mutation: prepend mods or use host deck path)", () => {
+  expect(pluginDirsForTile('/host/deck-plugin', () => '/host/deck-lead-plugin', true, false, ['/host/mod-a'])).toEqual({
+    pluginDirs: ['/host/deck-plugin', '/host/deck-lead-plugin', '/host/mod-a'],
+    rolePluginOmitted: false
+  });
+  expect(pluginDirsForTile('/host/deck-plugin', () => '/host/deck-lead-plugin', true, true, ['/opt/kory-mods/a/fingerprint'])).toEqual({
+    pluginDirs: ['/home/kory/.claude/deck-plugin', '/opt/kory-mods/a/fingerprint'],
+    rolePluginOmitted: true
+  });
 });
 
 test("resume forks prev into new id and never re-passes args/agent/model", () => {
@@ -331,7 +371,7 @@ test("a sandboxed deck-lead tile omits the unprojected role plugin", () => {
     true,
     true
   );
-  expect(selected).toEqual({ pluginDirs: ["C:/res/deck-plugin"], rolePluginOmitted: true });
+  expect(selected).toEqual({ pluginDirs: ["/home/kory/.claude/deck-plugin"], rolePluginOmitted: true });
   expect(rolePluginDirRead).toBe(0);
 });
 
@@ -758,4 +798,132 @@ test("createMissingDirTracker re-arms: a return to present clears the report, a 
   expect(tracker.check(true)).toBe(false);
   expect(tracker.check(true)).toBe(false);
   expect(tracker.check(false)).toBe(true);
+});
+
+const LAUNCH_DECK = "/host/res/deck-plugin";
+const LAUNCH_LEAD = "/host/res/deck-lead-plugin";
+const LAUNCH_HOST_MODS = ["/host/user/mods/mod-a/fp-a", "/host/user/mods/mod-b/fp-b"];
+const LAUNCH_CONTAINER_MODS = ["/opt/kory-mods/mod-a/fp-a", "/opt/kory-mods/mod-b/fp-b"];
+
+test.each([
+  ["a host tile without role tools", false, false, LAUNCH_HOST_MODS, [LAUNCH_DECK, ...LAUNCH_HOST_MODS], false],
+  ["a sandboxed tile without role tools", false, true, LAUNCH_CONTAINER_MODS, [SANDBOX_DECK_PLUGIN_DIR, ...LAUNCH_CONTAINER_MODS], false],
+  ["a host deck-lead tile", true, false, LAUNCH_HOST_MODS, [LAUNCH_DECK, LAUNCH_LEAD, ...LAUNCH_HOST_MODS], false],
+  ["a sandboxed deck-lead tile", true, true, LAUNCH_CONTAINER_MODS, [SANDBOX_DECK_PLUGIN_DIR, ...LAUNCH_CONTAINER_MODS], true],
+] as const)("%s lists the embedded plugins first and the mods after them in their given order", (_name, hasLead, sandboxed, mods, expected, omitted) => {
+  const selected = pluginDirsForTile(LAUNCH_DECK, () => LAUNCH_LEAD, hasLead, sandboxed, mods);
+
+  expect(selected.pluginDirs, "a mod must never load before the embedded plugins, nor out of order").toEqual([...expected]);
+  expect(selected.rolePluginOmitted).toBe(omitted);
+  if (sandboxed) {
+    expect(selected.pluginDirs, "a sandboxed tile carries container paths only").not.toContain(LAUNCH_DECK);
+    expect(selected.pluginDirs).not.toContain(LAUNCH_LEAD);
+  }
+});
+
+test("a sandboxed tile omits the container deck plugin when the host plugin is absent", () => {
+  const selected = pluginDirsForTile("", () => LAUNCH_LEAD, false, true, LAUNCH_CONTAINER_MODS);
+
+  expect(selected.pluginDirs).toEqual(LAUNCH_CONTAINER_MODS);
+  expect(selected.rolePluginOmitted).toBe(false);
+});
+
+test.each([
+  ["a host tile without role tools", false, false, [LAUNCH_DECK]],
+  ["a sandboxed tile without role tools", false, true, [SANDBOX_DECK_PLUGIN_DIR]],
+  ["a host deck-lead tile", true, false, [LAUNCH_DECK, LAUNCH_LEAD]],
+  ["a sandboxed deck-lead tile", true, true, [SANDBOX_DECK_PLUGIN_DIR]],
+] as const)("%s keeps exactly its embedded plugins when no mod is passed", (_name, hasLead, sandboxed, expected) => {
+  const withoutArgument = pluginDirsForTile(LAUNCH_DECK, () => LAUNCH_LEAD, hasLead, sandboxed);
+  const withEmptyList = pluginDirsForTile(LAUNCH_DECK, () => LAUNCH_LEAD, hasLead, sandboxed, []);
+
+  expect(withoutArgument.pluginDirs).toEqual([...expected]);
+  expect(withEmptyList, "an empty mod list is the same selection as no argument").toEqual(withoutArgument);
+});
+
+test("a fresh launch emits every embedded plugin then every mod, host and sandbox", () => {
+  const host = pluginDirsForTile(LAUNCH_DECK, () => LAUNCH_LEAD, true, false, LAUNCH_HOST_MODS).pluginDirs;
+  const sandbox = pluginDirsForTile(LAUNCH_DECK, () => LAUNCH_LEAD, true, true, LAUNCH_CONTAINER_MODS).pluginDirs;
+
+  expect(buildSessionCommandLine({ baseCommand: "claude run", sessionId: "id-1", pluginDirs: host, mode: "fresh" })).toBe(
+    `claude run --plugin-dir "${LAUNCH_DECK}" --plugin-dir "${LAUNCH_LEAD}" --plugin-dir "${LAUNCH_HOST_MODS[0]}" --plugin-dir "${LAUNCH_HOST_MODS[1]}" --session-id "id-1"`
+  );
+  expect(buildSessionCommandLine({ baseCommand: "claude run", sessionId: "id-1", pluginDirs: sandbox, mode: "fresh" })).toBe(
+    `claude run --plugin-dir "${SANDBOX_DECK_PLUGIN_DIR}" --plugin-dir "${LAUNCH_CONTAINER_MODS[0]}" --plugin-dir "${LAUNCH_CONTAINER_MODS[1]}" --session-id "id-1"`
+  );
+});
+
+test("a resumed launch keeps every mod, in order, before --resume", () => {
+  const host = pluginDirsForTile(LAUNCH_DECK, () => LAUNCH_LEAD, true, false, LAUNCH_HOST_MODS).pluginDirs;
+  const sandbox = pluginDirsForTile(LAUNCH_DECK, () => LAUNCH_LEAD, false, true, LAUNCH_CONTAINER_MODS).pluginDirs;
+
+  const hostLine = buildSessionCommandLine({ baseCommand: "claude run", sessionId: "id-new", prevSessionId: "id-old", pluginDirs: host, mode: "resume" });
+  const sandboxLine = buildSessionCommandLine({ baseCommand: "claude run", sessionId: "id-new", prevSessionId: "id-old", pluginDirs: sandbox, mode: "resume" });
+
+  expect(hostLine).toBe(
+    `claude run --plugin-dir "${LAUNCH_DECK}" --plugin-dir "${LAUNCH_LEAD}" --plugin-dir "${LAUNCH_HOST_MODS[0]}" --plugin-dir "${LAUNCH_HOST_MODS[1]}" --resume "id-old" --fork-session --session-id "id-new"`
+  );
+  expect(sandboxLine, "a mod lost on resume would silently vanish from a restored tile").toBe(
+    `claude run --plugin-dir "${SANDBOX_DECK_PLUGIN_DIR}" --plugin-dir "${LAUNCH_CONTAINER_MODS[0]}" --plugin-dir "${LAUNCH_CONTAINER_MODS[1]}" --resume "id-old" --fork-session --session-id "id-new"`
+  );
+});
+
+test("with the mods off, the fresh command is byte for byte the embedded-plugin command", () => {
+  const options = {
+    baseCommand: "claude run",
+    sessionId: "id-1",
+    args: "--agent reviewer",
+    effort: "high",
+    mcpConfig: "/m.json",
+    appendSystemPromptFile: "/p.md",
+    settings: "deck.json",
+    mode: "fresh" as const
+  };
+  const host = pluginDirsForTile(LAUNCH_DECK, () => LAUNCH_LEAD, true, false).pluginDirs;
+  const sandbox = pluginDirsForTile(LAUNCH_DECK, () => LAUNCH_LEAD, false, true).pluginDirs;
+
+  expect(buildSessionCommandLine({ ...options, pluginDirs: host })).toBe(
+    `claude run --plugin-dir "${LAUNCH_DECK}" --plugin-dir "${LAUNCH_LEAD}" --mcp-config "/m.json" --append-system-prompt-file "/p.md" --session-id "id-1" --agent reviewer --effort "high" --settings 'deck.json'`
+  );
+  expect(buildSessionCommandLine({ ...options, pluginDirs: sandbox })).toBe(
+    `claude run --plugin-dir "${SANDBOX_DECK_PLUGIN_DIR}" --mcp-config "/m.json" --append-system-prompt-file "/p.md" --session-id "id-1" --agent reviewer --effort "high" --settings 'deck.json'`
+  );
+  expect(buildSessionCommandLine({ ...options, pluginDirs: [] })).toBe(
+    `claude run --mcp-config "/m.json" --append-system-prompt-file "/p.md" --session-id "id-1" --agent reviewer --effort "high" --settings 'deck.json'`
+  );
+});
+
+test("with the mods off, the resumed command is byte for byte the embedded-plugin command", () => {
+  const options = {
+    baseCommand: "claude run",
+    sessionId: "id-new",
+    prevSessionId: "id-old",
+    args: "--agent reviewer",
+    effort: "high",
+    mcpConfig: "/m.json",
+    appendSystemPromptFile: "/p.md",
+    settings: "deck.json",
+    mode: "resume" as const
+  };
+  const host = pluginDirsForTile(LAUNCH_DECK, () => LAUNCH_LEAD, true, false).pluginDirs;
+  const sandbox = pluginDirsForTile(LAUNCH_DECK, () => LAUNCH_LEAD, false, true).pluginDirs;
+
+  expect(buildSessionCommandLine({ ...options, pluginDirs: host })).toBe(
+    `claude run --plugin-dir "${LAUNCH_DECK}" --plugin-dir "${LAUNCH_LEAD}" --mcp-config "/m.json" --append-system-prompt-file "/p.md" --settings 'deck.json' --resume "id-old" --fork-session --session-id "id-new" --effort "high"`
+  );
+  expect(buildSessionCommandLine({ ...options, pluginDirs: sandbox })).toBe(
+    `claude run --plugin-dir "${SANDBOX_DECK_PLUGIN_DIR}" --mcp-config "/m.json" --append-system-prompt-file "/p.md" --settings 'deck.json' --resume "id-old" --fork-session --session-id "id-new" --effort "high"`
+  );
+  expect(buildSessionCommandLine({ ...options, pluginDirs: undefined })).toBe(
+    `claude run --mcp-config "/m.json" --append-system-prompt-file "/p.md" --settings 'deck.json' --resume "id-old" --fork-session --session-id "id-new" --effort "high"`
+  );
+});
+
+test("a command with no plugin directory at all has no stray space or empty flag", () => {
+  for (const pluginDirs of [undefined, [], [""], ["  "]]) {
+    expect(buildSessionCommandLine({ baseCommand: "claude run", sessionId: "id-1", pluginDirs, mode: "fresh" })).toBe('claude run --session-id "id-1"');
+    expect(buildSessionCommandLine({ baseCommand: "claude run", sessionId: "id-new", prevSessionId: "id-old", pluginDirs, mode: "resume" })).toBe(
+      'claude run --resume "id-old" --fork-session --session-id "id-new"'
+    );
+  }
 });

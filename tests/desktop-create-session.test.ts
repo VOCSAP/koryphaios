@@ -10,6 +10,8 @@ import {
   type CreateSessionDeps
 } from "../desktop/src/main/create-session";
 import type { SessionService } from "../desktop/src/main/session-service";
+import { LaunchAttemptRegistry, prepareLaunchModPlan, type LaunchModPlan } from "../desktop/src/main/mod-launch-plan";
+import { reachedWithin } from "./_bounded-await";
 
 const NO_SANDBOX: CreateSessionDeps = {
   sandboxGate: async () => null,
@@ -55,6 +57,10 @@ function copyModeDeps(log: string[]): CreateSessionDeps {
       log.push(`warm:${cwd}`);
     }
   };
+}
+
+function plan(attemptId: string): LaunchModPlan {
+  return { attemptId, mode: "host", modDirs: ["/mods/readable"], diagnostics: [] };
 }
 
 test("createSessionWithWorktree forwards the trusted embedded role option", async () => {
@@ -131,6 +137,198 @@ test("cwdOutsideRoot 'refuse' still accepts a cwd inside the copy and leaves mou
     cwdOutsideRoot: "refuse"
   });
   expect(created.map((c) => c.cwd)).toEqual([inside, outside]);
+});
+
+test("createSessionWithWorktree prepares its mod plan before calling service.create", async () => {
+  const log: string[] = [];
+  let receivedPlan: LaunchModPlan | undefined;
+  const service = {
+    create(_input: CreateSessionInput, opts?: { modPlan?: LaunchModPlan }) {
+      log.push("create");
+      receivedPlan = opts?.modPlan;
+      return {} as SessionRuntime;
+    }
+  } as unknown as SessionService;
+  const registry = new LaunchAttemptRegistry();
+
+  await createSessionWithWorktree(service, PROJECT, {}, {
+    ...NO_SANDBOX,
+    modLaunch: {
+      attemptKey: "new:tile",
+      registry,
+      prepare: async (attempt) => {
+        log.push(`prepare:${attempt.attemptId}`);
+        return plan(attempt.attemptId);
+      }
+    }
+  });
+
+  expect(log).toEqual(["prepare:1", "create"]);
+  expect(receivedPlan).toEqual(plan("1"));
+});
+
+test("a mod switch flipped while a launch prepares leaves that launch its selection, and the next launch reads the new one", async () => {
+  const config = { enabledMods: { alpha: true, beta: true } as Record<string, boolean> };
+  const lock = new Map([["alpha", "a".repeat(64)], ["beta", "b".repeat(64)]]);
+  let releaseCopies: () => void = () => {};
+  const copiesMayFinish = new Promise<void>((resolve) => { releaseCopies = resolve; });
+  let markBuilding: () => void = () => {};
+  const building = new Promise<void>((resolve) => { markBuilding = resolve; });
+  const deps = {
+    enabledModsFromLock: (current: typeof config) => Object.entries(current.enabledMods).filter(([, on]) => on === true).map(([name]) => name),
+    ensureModWorkingCopy: async ({ plugin }: { plugin: string }) => {
+      markBuilding();
+      await copiesMayFinish;
+      return { ok: true as const, dir: `/host/${plugin}` };
+    },
+    verifyHostCopy: () => ({ ok: true as const })
+  };
+  const received: Array<LaunchModPlan | undefined> = [];
+  const service = {
+    create(_input: CreateSessionInput, opts?: { modPlan?: LaunchModPlan }) {
+      received.push(opts?.modPlan);
+      return {} as SessionRuntime;
+    }
+  } as unknown as SessionService;
+  const registry = new LaunchAttemptRegistry();
+  const launchDeps = (attemptKey: string): CreateSessionDeps => ({
+    ...NO_SANDBOX,
+    modLaunch: {
+      attemptKey,
+      registry,
+      prepare: (attempt) =>
+        prepareLaunchModPlan(deps, { sandboxed: false, config, lock, workRoot: "/work", distDir: "/dist", signal: attempt.signal, attemptId: attempt.attemptId })
+    }
+  });
+  const modDirsOf = (plan: LaunchModPlan | undefined): readonly string[] | undefined => (plan && "modDirs" in plan ? plan.modDirs : undefined);
+
+  const inFlight = createSessionWithWorktree(service, PROJECT, {}, launchDeps("new:first"));
+  await reachedWithin(building, "the first launch reaching its first working copy");
+  config.enabledMods = { alpha: true, beta: false };
+  releaseCopies();
+  await inFlight;
+  await createSessionWithWorktree(service, PROJECT, {}, launchDeps("new:second"));
+
+  expect(modDirsOf(received[0]), "the launch already preparing keeps the selection it started with").toEqual(["/host/alpha", "/host/beta"]);
+  expect(modDirsOf(received[1]), "the next launch reads the switched selection").toEqual(["/host/alpha"]);
+});
+
+test("createSessionWithWorktree rejects a plan cancelled while the sandbox gate awaits", async () => {
+  const { service, created } = recordingService();
+  const registry = new LaunchAttemptRegistry();
+  let releaseGate: (value: string | null) => void = () => {};
+  const gate = new Promise<string | null>((resolve) => { releaseGate = resolve; });
+
+  const run = createSessionWithWorktree(service, PROJECT, {}, {
+    sandboxGate: async () => gate,
+    warmSandboxTranscripts: async () => {},
+    modLaunch: { registry, prepare: async (attempt) => plan(attempt.attemptId) }
+  });
+  registry.cancelAll();
+  releaseGate(null);
+
+  expect(await rejection(run)).toBe("mod launch superseded");
+  expect(created).toEqual([]);
+});
+
+test("createSessionWithWorktree rejects a plan cancelled while beforeSpawn awaits", async () => {
+  const { service, created } = recordingService();
+  const registry = new LaunchAttemptRegistry();
+  let releaseBeforeSpawn: () => void = () => {};
+  const beforeSpawn = new Promise<void>((resolve) => { releaseBeforeSpawn = resolve; });
+  let markBeforeSpawn: () => void = () => {};
+  const reachedBeforeSpawn = new Promise<void>((resolve) => { markBeforeSpawn = resolve; });
+
+  const run = createSessionWithWorktree(service, PROJECT, {}, {
+    sandboxGate: async () => null,
+    warmSandboxTranscripts: async () => {},
+    beforeSpawn: async () => {
+      markBeforeSpawn();
+      await beforeSpawn;
+    },
+    modLaunch: { registry, prepare: async (attempt) => plan(attempt.attemptId) }
+  });
+  await reachedBeforeSpawn;
+  registry.cancelAll();
+  releaseBeforeSpawn();
+
+  expect(await rejection(run)).toBe("mod launch superseded");
+  expect(created).toEqual([]);
+});
+
+test("createSessionWithWorktree rejects a plan superseded while preparation awaited", async () => {
+  const { service, created } = recordingService();
+  const registry = {
+    begin: () => ({ attemptId: "1", signal: new AbortController().signal }),
+    isCurrent: () => false,
+    complete: () => {}
+  } as unknown as LaunchAttemptRegistry;
+  const run = createSessionWithWorktree(service, PROJECT, {}, {
+    ...NO_SANDBOX,
+    modLaunch: {
+      attemptKey: "new:tile",
+      registry,
+      prepare: async () => plan("1")
+    }
+  });
+
+  expect(await rejection(run)).toBe("mod launch superseded");
+  expect(created).toEqual([]);
+});
+
+test("restartSessionGated joins concurrent mod plan preparation for one tile", async () => {
+  const log: string[] = [];
+  const { service } = recordingService([{ id: "t1", cwd: "/wt/t1" }], log);
+  const registry = new LaunchAttemptRegistry();
+  let prepares = 0;
+  const deps = {
+    ...copyModeDeps(log),
+    modLaunch: {
+      registry,
+      prepare: async (attempt: { attemptId: string }) => {
+        prepares += 1;
+        await Promise.resolve();
+        return plan(attempt.attemptId);
+      }
+    }
+  };
+
+  await Promise.all([restartSessionGated(service, "t1", deps), restartSessionGated(service, "t1", deps)]);
+
+  expect(prepares).toBe(1);
+});
+
+test("restartSessionGated keeps concurrent restarts joined through restart cleanup", async () => {
+  let prepares = 0;
+  let releaseRestart: (value: SessionRuntime) => void = () => {};
+  const restarted = new Promise<SessionRuntime>((resolve) => { releaseRestart = resolve; });
+  let markRestart: () => void = () => {};
+  const restartStarted = new Promise<void>((resolve) => { markRestart = resolve; });
+  const service = {
+    list: () => [{ id: "t1", cwd: "/wt/t1", supervisor: true }] as SessionRuntime[],
+    restart: async () => {
+      markRestart();
+      return restarted;
+    }
+  } as unknown as SessionService;
+  const registry = new LaunchAttemptRegistry();
+  const deps = {
+    ...NO_SANDBOX,
+    modLaunch: {
+      registry,
+      prepare: async (attempt: { attemptId: string }) => {
+        prepares += 1;
+        return plan(attempt.attemptId);
+      }
+    }
+  };
+
+  const first = restartSessionGated(service, "t1", deps);
+  await restartStarted;
+  const second = restartSessionGated(service, "t1", deps);
+  expect(prepares).toBe(1);
+  releaseRestart({} as SessionRuntime);
+  await Promise.all([first, second]);
 });
 
 test("gateSandboxForCwds fails before warming anything when the sandbox is not authenticated", async () => {

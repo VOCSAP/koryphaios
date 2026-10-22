@@ -219,7 +219,7 @@ qui retourne un arbre sans appeler `next` est terminal. Donc :
 | M0 | Creer le repo (public, MIT), `marketplace.json`, CI (CLI epingle aligne), `CONTRACT.md`, squelette du plugin de rendu portant le contrat de `DESIGN-READABLE-PLUGIN.md` (tests `claude plugin test` du repo) | decision operateur sur le nom du repo et des plugins (hors mod tiers) |
 | L1 | Cote Kory : script de synchro + verrou + test d'empreinte ; preuve "garde inchangee, verdict clear" sur grille synthetique dans le vrai `createXtermScreen` avec importation du module pur du snapshot ; AUCUNE activation | M0 |
 | L2 | Corpus reel + oracle (`_fixture-verdicts.ts`) ; sonde quota ; sonde "deux copies" (`--plugin-dir` vs installe) ; sonde de chaine a deux plugins (section 6) ; alignement CLI CI sur la version minimale (pin 2.1.293 devenu 2.1.303, lot K1) | L1 |
-| L3 | Distribution Deck : dossiers `--plugin-dir` supplementaires, `extraResources`, defaut DESACTIVE, langue des etiquettes depuis la locale ; correctif de `rewritePluginDirForContainer` (non global) | L1 (L2 pour l'activation) |
+| L3 | Distribution Deck : dossiers `--plugin-dir` supplementaires, `extraResources`, defaut DESACTIVE, langue des etiquettes depuis la locale ; les chemins `--plugin-dir` sandbox sont composés avant `buildSessionCommandLine`, sans réécriture de la commande. | L1 (L2 pour l'activation) |
 | L4 | Revue visuelle, validation de l'operateur, activation | L2, L3 |
 | L5a | Plugin de liens dans le repo (premiere forme section 7) | M0, independant de L1-L4 |
 | L5b | Deck : `linkHandler` + validation MAIN + journal ; corrige les OSC 8 natifs (b2) | LIVRE en `2ed6b80` (`terminal-links.ts`, `link-opener.ts`) |
