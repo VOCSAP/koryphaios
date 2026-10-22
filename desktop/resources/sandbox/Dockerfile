@@ -12,7 +12,7 @@
 #   - bun for the claude-peers MCP server (server.ts), git for worktrees,
 #     claude CLI via the native installer (lands in ~/.local/bin)
 
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
@@ -35,9 +35,14 @@ ENV HOME=/home/kory
 ENV CLAUDE_CONFIG_DIR=/home/kory/.claude
 ENV PATH="/home/kory/.local/bin:/home/kory/.bun/bin:${PATH}"
 
-# Bun (runs server.ts / project tooling) + Claude Code (native installer).
-RUN curl -fsSL https://bun.sh/install | bash \
-  && curl -fsSL https://claude.ai/install.sh | bash
+ARG BUN_VERSION=1.4.2
+ARG CLAUDE_VERSION=2.1.308
+# Without this the native CLI replaces the pinned version at runtime.
+ENV DISABLE_AUTOUPDATER=1
+RUN curl -fsSL https://bun.sh/install | bash -s -- "bun-v${BUN_VERSION}" \
+  && curl -fsSL https://claude.ai/install.sh | bash -s -- "${CLAUDE_VERSION}" \
+  && test "$(bun --version)" = "${BUN_VERSION}" \
+  && test "$(claude --version | cut -d' ' -f1)" = "${CLAUDE_VERSION}"
 
 # The Deck overrides the command with `sleep infinity` at create; this default
 # keeps a hand-run `docker run` usable for debugging.

@@ -1429,6 +1429,43 @@ test(".bun-version exists and is non-empty (a bun-version-file pointing at a mis
   expect(readFileSync(BUN_VERSION_FILE_PATH, "utf-8").trim().length).toBeGreaterThan(0);
 });
 
+const SANDBOX_DOCKERFILE_PATH = join(REPO_ROOT, "desktop", "resources", "sandbox", "Dockerfile");
+
+function dockerfileBunVersionArgs(dockerfileText: string): string[] {
+  return [...dockerfileText.matchAll(/^ARG[ \t]+BUN_VERSION=(\S+)[ \t]*$/gm)].map((m) => m[1] ?? "");
+}
+
+const EXPLICIT_BUN_VERSION = /^\d+\.\d+\.\d+$/;
+
+test("sandbox Dockerfile pins the same explicit bun as .bun-version (ARG BUN_VERSION duplicates the CI source of truth)", () => {
+  const args = dockerfileBunVersionArgs(readFileSync(SANDBOX_DOCKERFILE_PATH, "utf-8"));
+  const pinned = readFileSync(BUN_VERSION_FILE_PATH, "utf-8").trim();
+  expect(
+    args.length,
+    "desktop/resources/sandbox/Dockerfile must carry exactly one `ARG BUN_VERSION=<version>` line: with none the parity check below would pass vacuously",
+  ).toBe(1);
+  expect(pinned, ".bun-version must be an explicit X.Y.Z: `latest` or a range makes the parity below prove nothing").toMatch(EXPLICIT_BUN_VERSION);
+  expect(args[0], "ARG BUN_VERSION must be an explicit X.Y.Z: `latest` or a range installs an unpinned bun").toMatch(EXPLICIT_BUN_VERSION);
+  expect(
+    args[0],
+    "ARG BUN_VERSION in desktop/resources/sandbox/Dockerfile drifted from the repo-root .bun-version that the CI workflows install",
+  ).toBe(pinned);
+});
+
+test("mutation proof: an explicit bun version is X.Y.Z only, never latest, a range, a prefix or a prerelease", () => {
+  expect(EXPLICIT_BUN_VERSION.test("1.4.2")).toBe(true);
+  for (const unpinned of ["latest", "1.4", "1.x", "v1.4.2", "bun-v1.4.2", "1.4.2-canary", "^1.4.2", "1.4.2 "]) {
+    expect(EXPLICIT_BUN_VERSION.test(unpinned), `${JSON.stringify(unpinned)} is not an explicit pin`).toBe(false);
+  }
+});
+
+test("mutation proof: dockerfileBunVersionArgs reads the default from CRLF and LF text and ignores commented, defaultless and look-alike ARG lines", () => {
+  expect(dockerfileBunVersionArgs("FROM x\r\nARG BUN_VERSION=1.4.2\r\nARG CLAUDE_VERSION=2.1\r\n")).toEqual(["1.4.2"]);
+  expect(dockerfileBunVersionArgs("FROM x\nARG BUN_VERSION=1.4.2\n")).toEqual(["1.4.2"]);
+  expect(dockerfileBunVersionArgs("# ARG BUN_VERSION=1.4.2\nARG BUN_VERSION\nARG NOT_BUN_VERSION=1.4.2\n")).toEqual([]);
+  expect(dockerfileBunVersionArgs("ARG BUN_VERSION=1.4.2\nARG BUN_VERSION=1.4.3\n")).toEqual(["1.4.2", "1.4.3"]);
+});
+
 test("mutation proof: a workflow snippet with a literal bun-version: is detected by both primitives (usesSetupBun and hasLiteralBunVersion)", () => {
   const text = "uses: oven-sh/setup-bun@v2\nwith:\n  bun-version: latest\n";
   expect(usesSetupBun(text)).toBe(true);
