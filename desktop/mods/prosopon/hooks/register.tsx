@@ -1,14 +1,12 @@
 import type { EngineInterface, Register, RenderViewport } from 'claude-code'
 
 import {
-  ASSISTANT_COLOR,
   classifyAssistantBlock,
   GUARD_SAFE_BORDER,
   MIN_FRAME_COLUMNS,
-  resolveLabels,
+  resolveFrameConfiguration,
   SHORT_NOTE_BULLET,
   turnRule,
-  USER_COLOR,
 } from './layout'
 import { isSupported } from './versions'
 
@@ -50,8 +48,8 @@ function frame(
       <Box flexDirection="column" borderStyle={GUARD_SAFE_BORDER} borderColor={color} paddingX={1}>
         {body as never}
       </Box>
-      <Box position="absolute" top={0} left={2}>
-        <Text color={color} bold>
+      <Box position="absolute" top={0} left={2} right={2}>
+        <Text color={color} bold wrap="truncate-end">
           {` ${title} `}
         </Text>
       </Box>
@@ -60,7 +58,7 @@ function frame(
 }
 
 export const register: Register = (on, options) => {
-  const labels = resolveLabels(options.labels)
+  const configuration = resolveFrameConfiguration(options)
 
   on('ui.render', { component: 'UserMessage' }, async ($, e, next) => {
     const { text, origin } = e.props
@@ -76,7 +74,7 @@ export const register: Register = (on, options) => {
     if (!(await layoutSupported($))) return next(e)
     try {
       const { Text } = $.ui.resolve(e)
-      return frame($, e, labels.user, USER_COLOR, <Text>{text.trim()}</Text>)
+      return frame($, e, configuration.userLabel, configuration.userColor, <Text>{text.trim()}</Text>)
     } catch (error) {
       stockAfter($, error)
       return next(e)
@@ -114,7 +112,7 @@ export const register: Register = (on, options) => {
 
     const drawn = await next(e)
     try {
-      return frame($, e, labels.assistant, ASSISTANT_COLOR, drawn)
+      return frame($, e, configuration.assistantLabel, configuration.assistantColor, drawn)
     } catch (error) {
       stockAfter($, error)
       return drawn

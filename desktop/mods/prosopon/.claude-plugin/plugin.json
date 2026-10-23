@@ -11,6 +11,21 @@
       "title": "Frame labels",
       "description": "Language of the frame titles: en (You) or fr (Vous). Any other value uses en.",
       "default": "en"
+    },
+    "user_label": {
+      "type": "string",
+      "title": "Your frame label",
+      "description": "Optional title for your prompt frame. Up to 20 code points with no control characters; invalid values use the language label."
+    },
+    "user_color": {
+      "type": "string",
+      "title": "Your frame color",
+      "description": "A Claude Code theme color or #rrggbb. Invalid values use suggestion."
+    },
+    "assistant_color": {
+      "type": "string",
+      "title": "Assistant frame color",
+      "description": "A Claude Code theme color or #rrggbb. Invalid values use claude."
     }
   }
 }
