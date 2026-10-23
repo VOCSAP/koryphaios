@@ -169,6 +169,24 @@ for (const [label, method] of [
   });
 }
 
+test("two gestures in one tick while a verdict is in flight send it once", async () => {
+  let release: (ok: boolean) => void = () => {};
+  (globalThis as unknown as { window: { api: Record<string, unknown> } }).window.api.approvalDecline = (id: string) => {
+    calls.push(["approvalDecline", id]);
+    return new Promise<boolean>((resolve) => {
+      release = resolve;
+    });
+  };
+  mount([row({})]);
+  const deny = button("inbox.permissionDeny");
+  await act(async () => {
+    deny.click();
+    deny.click();
+  });
+  expect(calls, "the second gesture lands while the first verdict is unsettled").toEqual([["approvalDecline", "r1"]]);
+  await act(async () => release(true));
+});
+
 test("form B/C: a hook question renders the question form and sends structured answers", async () => {
   const questions: Q[] = [
     { question: "Channel?", header: "", multi_select: false, options: [{ label: "Stable", description: "" }, { label: "Beta", description: "" }] },

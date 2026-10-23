@@ -1,7 +1,3 @@
-// Mounts the real InboxPanel component and reads the rendered DOM for the three
-// shapes senderOf() can produce on an approval entry: resolved (name only),
-// unresolved with a tile_ref (text + <code>), unresolved with an empty tile_ref
-// (text only).
 // '@shared/*' imports are intercepted with mock.module, keyed by the bare
 // specifier exactly as written in the importing file -- bun matches on that
 // literal string, not on a resolved filesystem path.
@@ -174,7 +170,10 @@ function hookPermission(id: string): FakeApproval {
 }
 
 function setApprovalReply(reply: () => Promise<boolean>): void {
-  (globalThis as unknown as { window: { api: Record<string, unknown> } }).window.api = { approvalReply: reply };
+  (globalThis as unknown as { window: { api: Record<string, unknown> } }).window.api = {
+    approvalReply: reply,
+    reportError: () => {}
+  };
 }
 
 function setApprovalAllow(allow: () => Promise<boolean>): void {

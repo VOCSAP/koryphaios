@@ -5,6 +5,7 @@ import { useT } from '../i18n'
 import { GLYPH_ACTIONS, GLYPH_BADGES } from './icons'
 import { HookApprovalAnswer } from './HookApprovalAnswer'
 import { ApprovalRequestBody } from './ApprovalRequestBody'
+import { linkedText } from './LinkedText'
 import { formQuestions } from './approval-answers'
 import { canAnswerVerdict } from './verdict-remote'
 
@@ -51,7 +52,9 @@ export function TileApprovalPanel({ tileId }: { tileId: string }): React.JSX.Ele
       </div>
       {!folded && (
         <div className="tile-approval-body">
-          {!formQuestions(row) && <ApprovalRequestBody approval={row} className="tile-approval-text" />}
+          {!formQuestions(row) && (
+            <ApprovalRequestBody t={t} approval={row} className="tile-approval-text" renderText={linkedText} />
+          )}
           <HookApprovalAnswer key={row.id} approval={row} actionsClassName="tile-approval-actions approval-actions" />
         </div>
       )}

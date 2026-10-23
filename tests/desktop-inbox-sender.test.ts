@@ -113,7 +113,7 @@ describe("InboxPanel.tsx actually routes through resolveApprovalSender() -- proo
     const tileRefHits = PANEL.match(/tile_ref/g) ?? [];
     // grep -c equivalent, scalar count over the WHOLE file, not a skim.
     expect(tileRefHits.length).toBe(1);
-    expect(PANEL).toMatch(/resolveApprovalSender\(e\.approval\.origin\.tile_ref,\s*sessions\)/);
+    expect(PANEL).toMatch(/resolveApprovalSender\(approval\.origin\.tile_ref,\s*sessions\)/);
   });
 
   test("never reads origin.from_peer directly (the field the old '?' fallback used)", () => {

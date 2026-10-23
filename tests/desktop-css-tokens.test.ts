@@ -177,9 +177,9 @@ test("the inbox panel stacks under the modal veil, never over an open modal", ()
   expect(z("inbox-panel"), "the inbox paints unveiled over an open modal and hides its left edge").toBeLessThan(
     z("modal-backdrop")
   );
-  const panel = readFileSync(join(SRC, "renderer", "src", "components", "InboxPanel.tsx"), "utf8");
-  expect(panel.includes('"inbox-panel'), "InboxPanel.tsx no longer renders .inbox-panel: the scan below reads nothing").toBe(true);
-  expect(panel.match(/zIndex|z-index/g) ?? [], "an inline z-index in InboxPanel.tsx outranks the stylesheet ladder").toEqual([]);
+  const panel = readFileSync(join(SRC, "renderer", "src", "components", "InboxCore.tsx"), "utf8");
+  expect(panel.includes('"inbox-panel'), "InboxCore.tsx no longer renders .inbox-panel: the scan below reads nothing").toBe(true);
+  expect(panel.match(/zIndex|z-index/g) ?? [], "an inline z-index in InboxCore.tsx outranks the stylesheet ladder").toEqual([]);
 });
 
 /**

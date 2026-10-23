@@ -28,6 +28,9 @@ const fakeUseDeck = create(() => ({
 mockStore({ useDeck: fakeUseDeck, ...storeMockStubs });
 
 const { ApprovalAnswerForm } = await import("../desktop/src/renderer/src/components/ApprovalAnswerForm.tsx");
+const { translate } = await import("../desktop/src/renderer/src/i18n.ts");
+const t = (key: string, params?: Record<string, string | number>): string =>
+  translate(fakeUseDeck.getState().dict, key, params);
 const { formQuestions, keepDrafts } = await import("../desktop/src/renderer/src/components/approval-answers.ts");
 
 interface Q {
@@ -74,6 +77,7 @@ afterEach(() => {
 function Host(props: { approval: FormApproval }): React.JSX.Element {
   const [draft, setDraft] = React.useState<QuestionDraft[] | undefined>(undefined);
   return React.createElement(ApprovalAnswerForm, {
+    t,
     approval: props.approval as never,
     disabled: false,
     draft,

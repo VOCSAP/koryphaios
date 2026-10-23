@@ -1,7 +1,7 @@
 import type { ReactNode } from 'react'
 import type { Approval } from '@shared/types'
 import { GLYPH_ACTIONS } from './icons'
-import { useT } from '../i18n'
+import type { TFn } from '../i18n'
 import {
   OTHER_MAX,
   buildAnswers,
@@ -19,6 +19,8 @@ import {
 } from './approval-answers'
 
 interface Props {
+  /** Supplied by the host so the form never reads the Deck store: the avatar renders it too. */
+  t: TFn
   /** A request on reply_route 'hook': the module waits on it, nothing is typed into a terminal. */
   approval: Pick<Approval, 'id' | 'kind' | 'questions'>
   disabled: boolean
@@ -42,8 +44,7 @@ interface Props {
  * verdicts, because it decides nothing.
  */
 export function ApprovalAnswerForm(props: Props): React.JSX.Element {
-  const t = useT()
-  const { approval, disabled } = props
+  const { t, approval, disabled } = props
   const questions = formQuestions(approval)
   const drafts = props.draft ?? (questions ? emptyDrafts(questions) : [])
   const oneClick = questions !== null && isOneClick(questions)

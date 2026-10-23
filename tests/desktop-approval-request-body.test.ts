@@ -90,9 +90,16 @@ const fakeUseDeck = create<FakeDeckState>(() => initialFakeState());
 mockStore({ useDeck: fakeUseDeck, ...storeMockStubs });
 mock.module("@shared/types", () => ({ ...realSharedTypes }));
 
-const { ApprovalRequestBody, ApprovalNavigate } = await import(
-  "../desktop/src/renderer/src/components/ApprovalRequestBody.tsx"
-);
+const { ApprovalRequestBody } = await import("../desktop/src/renderer/src/components/ApprovalRequestBody.tsx");
+const { ApprovalNavigate } = await import("../desktop/src/renderer/src/components/ApprovalNavigate.tsx");
+const { linkedText } = await import("../desktop/src/renderer/src/components/LinkedText.tsx");
+const { translate } = await import("../desktop/src/renderer/src/i18n.ts");
+
+const keyT = (key: string, params?: Record<string, string | number>): string => translate({}, key, params);
+
+function body(props: { approval: { kind: string; question: string }; danger?: string | null; className: string }): unknown {
+  return React.createElement(ApprovalRequestBody, { t: keyT, renderText: linkedText, ...props } as never);
+}
 const { InboxPanel } = await import("../desktop/src/renderer/src/components/InboxPanel.tsx");
 const { TileApprovalPanel } = await import("../desktop/src/renderer/src/components/TileApprovalPanel.tsx");
 
@@ -154,7 +161,7 @@ function approval(over: Partial<FakeApproval> = {}): FakeApproval {
 }
 
 test("a permission leads with its first line, then the rest, then the legend alone when nothing is flagged", () => {
-  render(React.createElement(ApprovalRequestBody, {
+  render(body({
     approval: { kind: "permission", question: PERMISSION },
     className: "inbox-modal-text"
   }));
@@ -166,7 +173,7 @@ test("a permission leads with its first line, then the rest, then the legend alo
 });
 
 test("a single-line permission renders no rest block, and the legend is still there", () => {
-  render(React.createElement(ApprovalRequestBody, {
+  render(body({
     approval: { kind: "permission", question: "rm -rf build" },
     className: "tile-approval-text"
   }));
@@ -177,7 +184,7 @@ test("a single-line permission renders no rest block, and the legend is still th
 });
 
 test("the danger badge appears only with a danger prop, before the legend, naming the matched pattern", () => {
-  render(React.createElement(ApprovalRequestBody, {
+  render(body({
     approval: { kind: "permission", question: "rm -rf /" },
     danger: "rm -rf",
     className: "inbox-modal-text"
@@ -189,7 +196,7 @@ test("the danger badge appears only with a danger prop, before the legend, namin
 });
 
 test("a null danger renders no badge", () => {
-  render(React.createElement(ApprovalRequestBody, {
+  render(body({
     approval: { kind: "permission", question: "ls" },
     danger: null,
     className: "inbox-modal-text"
@@ -199,7 +206,7 @@ test("a null danger renders no badge", () => {
 });
 
 test("a question is plain text: no command block, no signal row", () => {
-  render(React.createElement(ApprovalRequestBody, {
+  render(body({
     approval: { kind: "question", question: "Which branch?\nmain or dev" },
     className: "inbox-modal-text"
   }));
@@ -211,7 +218,7 @@ test("a spawn payload stays visible in the Courrier approval body", () => {
   const payload = buildSpawnApprovalPayload([{
     name: `worker\n${rlo}漢`, agent: "", embedded: "", model: "", effort: "", cli: "claude", worktree_branch: "", prompt_preview: "", args: "--label   value"
   }], "team-lead-deadbeef", false);
-  render(React.createElement(ApprovalRequestBody, {
+  render(body({
     approval: { kind: "permission", question: payload.question },
     className: "inbox-modal-text"
   }));
@@ -226,7 +233,7 @@ test("a spawn payload stays visible in the Courrier approval body", () => {
 });
 
 test("a question's URL is a link inside the host box", () => {
-  render(React.createElement(ApprovalRequestBody, {
+  render(body({
     approval: { kind: "question", question: "Is https://example.com/x right?" },
     className: "inbox-modal-text"
   }));
@@ -236,8 +243,24 @@ test("a question's URL is a link inside the host box", () => {
   ]);
 });
 
-test("a permission command stays plain text on every line: the operator judges it as written", () => {
+test("a question is shown through the host's renderText: a host without links gets plain text", () => {
+  const seen: string[] = [];
   render(React.createElement(ApprovalRequestBody, {
+    t: keyT,
+    approval: { kind: "question", question: "Is https://example.com/x right?" },
+    className: "inbox-modal-text",
+    renderText: (text: string) => {
+      seen.push(text);
+      return text;
+    }
+  } as never));
+  expect(seen).toEqual(["Is https://example.com/x right?"]);
+  expect(container.querySelectorAll(".text-link").length, "no Deck link wired behind the host's back").toBe(0);
+  expect(shape()).toEqual(["plain:inbox-modal-text=Is https://example.com/x right?"]);
+});
+
+test("a permission command stays plain text on every line: the operator judges it as written", () => {
+  render(body({
     approval: { kind: "permission", question: "Run curl https://example.com/a\nthen https://example.com/b" },
     className: "inbox-modal-text"
   }));
@@ -266,7 +289,7 @@ test("markup in the agent's text renders as literal text: no element injected, n
   const head = `<img src=x onerror="globalThis.__approvalPwned=1">`;
   const rest = `<b onmouseover="globalThis.__approvalPwned=2">bold</b>`;
   const danger = `<svg onload="globalThis.__approvalPwned=3"></svg>`;
-  render(React.createElement(ApprovalRequestBody, {
+  render(body({
     approval: { kind: "permission", question: `${head}\n${rest}` },
     danger,
     className: "inbox-modal-text"
@@ -284,7 +307,7 @@ const MARKER = /… \[truncated from \d+ characters\]$/;
 
 test("a producer-cut question keeps its visible truncation marker", () => {
   expect(LONG, "fixture is really cut by the producer's cutter").toMatch(MARKER);
-  render(React.createElement(ApprovalRequestBody, {
+  render(body({
     approval: { kind: "permission", question: LONG },
     className: "inbox-modal-text"
   }));
@@ -366,6 +389,64 @@ test("the Courrier modal disables Navigate when the requesting tile is not open"
   });
   expect((container.querySelector(".inbox-modal .inbox-goto-btn") as HTMLButtonElement).disabled).toBe(true);
   expect(container.querySelector(".inbox-modal .inbox-goto-reason")).not.toBeNull();
+});
+
+test("every rejected Courrier or Reclame call is traced to the journal right before its toast", async () => {
+  const log: string[] = [];
+  const g = globalThis as unknown as { window: { api?: unknown } };
+  g.window.api = {
+    inboxDelete: () => Promise.reject(new Error("delete-boom")),
+    inboxReply: () => Promise.reject(new Error("reply-boom")),
+    approvalDecline: () => Promise.reject(new Error("decline-boom")),
+    approvalHandback: () => Promise.reject(new Error("handback-boom")),
+    reportError: (scope: string, message: string) => log.push(`report:${scope}:${message}`)
+  };
+  const message = { id: 3, from: "peer-x", text: "hi", sentAt: "2026-10-09T12:00:00.000Z" };
+  const press = async (el: Element | undefined | null): Promise<void> => {
+    await act(async () => {
+      (el as HTMLElement).click();
+    });
+  };
+  const entry = (excerpt: string): Element | undefined =>
+    [...container.querySelectorAll(".inbox-entry")].find((e) => e.querySelector(".inbox-entry-excerpt")?.textContent === excerpt);
+  const labelled = (label: string): Element | undefined =>
+    [...container.querySelectorAll("button")].find((b) => b.textContent === label);
+  const closeModal = async (): Promise<void> => press(container.querySelector(".modal-backdrop"));
+  try {
+    fakeUseDeck.setState({
+      inboxMessages: [message],
+      inboxReplyDrafts: { [realSharedTypes.inboxEntryKey({ kind: "message", message })]: "on it" },
+      pendingApprovals: [
+        approval({ id: "apr-d", kind: "question", reply_route: "channel", options: [], question: "decline me" }),
+        approval({ id: "apr-h", kind: "permission", reply_route: "hook", question: "hand me back" })
+      ],
+      showToast: ((key: string) => log.push(`toast:${key.split(":")[0]}`)) as never
+    });
+    await act(async () => {
+      root.render(React.createElement(InboxPanel) as Parameters<Root["render"]>[0]);
+    });
+    await press(container.querySelector(".inbox-delete-btn"));
+    await press(entry("hi"));
+    await press(labelled("inbox.reply"));
+    await closeModal();
+    await press(entry("decline me"));
+    await press(labelled("inbox.decline"));
+    await closeModal();
+    await press(entry("hand me back"));
+    await press(labelled("inbox.handback"));
+    expect(log.map((line) => line.replace("Error: ", ""))).toEqual([
+      "report:inbox:delete of message 3 failed: delete-boom",
+      "toast:inbox.delete",
+      "report:inbox:reply to peer-x failed: reply-boom",
+      "toast:inbox.reply",
+      "report:inbox:answer 'deny' on apr-d failed: decline-boom",
+      "toast:inbox.reply",
+      "report:inbox:hook answer 'handback' on apr-h failed: handback-boom",
+      "toast:inbox.reply"
+    ]);
+  } finally {
+    delete g.window.api;
+  }
 });
 
 test("the tile panel renders its hook permission through the shared body", () => {

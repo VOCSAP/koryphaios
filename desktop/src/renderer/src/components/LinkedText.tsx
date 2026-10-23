@@ -108,3 +108,7 @@ export function LinkedText({ text }: { text: string }): React.JSX.Element {
     </>
   )
 }
+
+export function linkedText(text: string): React.JSX.Element {
+  return <LinkedText text={text} />
+}

@@ -1,26 +1,22 @@
+import type { ReactNode } from 'react'
 import type { Approval } from '@shared/types'
-import { useDeck } from '../store'
-import { useT } from '../i18n'
-import { resolveApprovalSender } from '../inbox-sender'
-import { GLYPH_ACTIONS, GLYPH_BADGES } from './icons'
+import type { TFn } from '../i18n'
+import { GLYPH_BADGES } from './icons'
 import { displayApprovalText, splitCommandLine } from './approval-display'
-import { LinkedText } from './LinkedText'
 
 interface Props {
+  t: TFn
   approval: Pick<Approval, 'kind' | 'question'>
   danger?: string | null
   className: string
+  /** How a question's agent-written text is shown: the Deck makes its links clickable, another host may not. */
+  renderText: (text: string) => ReactNode
 }
 
-export function ApprovalRequestBody({ approval, danger, className }: Props): React.JSX.Element {
-  const t = useT()
+export function ApprovalRequestBody({ t, approval, danger, className, renderText }: Props): React.JSX.Element {
   const text = displayApprovalText(approval.question)
   if (approval.kind !== 'permission') {
-    return (
-      <div className={className}>
-        <LinkedText text={text} />
-      </div>
-    )
+    return <div className={className}>{renderText(text)}</div>
   }
 
   const { head, rest } = splitCommandLine(text)
@@ -42,39 +38,5 @@ export function ApprovalRequestBody({ approval, danger, className }: Props): Rea
         <span className="approval-signal-legend">{t('inbox.signalLegend')}</span>
       </div>
     </>
-  )
-}
-
-export function ApprovalNavigate({
-  approval,
-  onNavigated
-}: {
-  approval: Pick<Approval, 'origin'>
-  onNavigated: () => void
-}): React.JSX.Element {
-  const t = useT()
-  const sessions = useDeck((s) => s.sessions)
-  const focusTile = useDeck((s) => s.focusTile)
-  const ref = approval.origin.tile_ref
-  // tile_ref is agent supplied: only an exact live tile is followed, never a guess.
-  const target = resolveApprovalSender(ref, sessions).resolved ? ref : null
-
-  return (
-    <div className="inbox-modal-goto">
-      <button
-        type="button"
-        className="btn btn-sm inbox-goto-btn"
-        disabled={!target}
-        onClick={() => {
-          if (!target) return
-          onNavigated()
-          focusTile(target)
-        }}
-      >
-        {GLYPH_ACTIONS.forward}
-        {t('inbox.navigate')}
-      </button>
-      {!target && <span className="inbox-goto-reason">{t('inbox.navigateUnavailable')}</span>}
-    </div>
   )
 }

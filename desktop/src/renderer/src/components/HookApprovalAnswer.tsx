@@ -1,9 +1,9 @@
-import { useState, type ReactNode } from 'react'
+import { useRef, useState, type ReactNode } from 'react'
 import { errorText, useDeck, type InboxApproval } from '../store'
 import { useT } from '../i18n'
 import { ApprovalAnswerForm } from './ApprovalAnswerForm'
 
-type HookAction =
+export type HookAnswerAction =
   | { kind: 'allow' }
   | { kind: 'deny' }
   | { kind: 'handback' }
@@ -19,55 +19,77 @@ interface Props {
 }
 
 /**
- * The one place a module-served request is claimed, whichever host shows it
- * (the Courrier modal, the tile panel): same IPC primitives, same toasts, same
- * draft, so the two can never answer differently. The host decides whether
- * verdicts may be offered at all (canAnswerVerdict).
+ * The one place a module-served request is claimed, whichever Deck host shows
+ * it (the Courrier modal, the tile panel): same IPC primitives, same toasts,
+ * same draft, so the two can never answer differently. Resolves to the
+ * broker's `ok` once settled (false: another channel won the race), or null
+ * when the call failed, already reported to the operator.
  */
-export function HookApprovalAnswer(props: Props): React.JSX.Element {
+export function useHookApprovalSettle(): (approvalId: string, action: HookAnswerAction) => Promise<boolean | null> {
   const t = useT()
-  const { approval } = props
-  const draft = useDeck((s) => s.approvalDrafts[approval.id])
   const setApprovalDraft = useDeck((s) => s.setApprovalDraft)
   const clearPendingApproval = useDeck((s) => s.clearPendingApproval)
   const showToast = useDeck((s) => s.showToast)
-  const [sending, setSending] = useState(false)
 
-  const answer = async (action: HookAction): Promise<void> => {
-    if (sending) return
-    setSending(true)
+  return async (approvalId, action) => {
     try {
       const ok =
         action.kind === 'deny'
-          ? await window.api.approvalDecline(approval.id)
+          ? await window.api.approvalDecline(approvalId)
           : action.kind === 'allow'
-            ? await window.api.approvalAllow(approval.id)
+            ? await window.api.approvalAllow(approvalId)
             : action.kind === 'handback'
-              ? await window.api.approvalHandback(approval.id)
-              : await window.api.approvalAnswers(approval.id, action.answers)
+              ? await window.api.approvalHandback(approvalId)
+              : await window.api.approvalAnswers(approvalId, action.answers)
       // `false` is not a failure: another channel (phone, Telegram…) won the
       // race and the agent is already released.
       showToast(
         ok ? (action.kind === 'handback' ? 'toast.inboxHandedBack' : 'toast.inboxAnswerSent') : 'toast.inboxAnsweredElsewhere',
         ok ? 'success' : 'info'
       )
-      setApprovalDraft(approval.id, null)
-      clearPendingApproval(approval.id)
-      props.onSettled?.(ok)
+      setApprovalDraft(approvalId, null)
+      clearPendingApproval(approvalId)
+      return ok
     } catch (e) {
       const msg = errorText(e)
+      window.api.reportError('inbox', `hook answer '${action.kind}' on ${approvalId} failed: ${msg}`)
       if (msg.includes('remote-blocked')) showToast('inbox.verdictRemoteBlocked', 'error')
       else
         showToast(`${t(action.kind === 'answers' ? 'inbox.answersFailed' : 'inbox.reply')}: ${msg}`, 'error', {
           raw: true
         })
+      return null
+    }
+  }
+}
+
+/** The host decides whether verdicts may be offered at all (canAnswerVerdict). */
+export function HookApprovalAnswer(props: Props): React.JSX.Element {
+  const t = useT()
+  const { approval } = props
+  const draft = useDeck((s) => s.approvalDrafts[approval.id])
+  const setApprovalDraft = useDeck((s) => s.setApprovalDraft)
+  const settle = useHookApprovalSettle()
+  const [sending, setSending] = useState(false)
+  const inFlight = useRef(false)
+
+  const answer = async (action: HookAnswerAction): Promise<void> => {
+    // A ref, not `sending`: two gestures in one tick both read the stale state.
+    if (inFlight.current) return
+    inFlight.current = true
+    setSending(true)
+    try {
+      const ok = await settle(approval.id, action)
+      if (ok !== null) props.onSettled?.(ok)
     } finally {
+      inFlight.current = false
       setSending(false)
     }
   }
 
   return (
     <ApprovalAnswerForm
+      t={t}
       approval={approval}
       disabled={sending}
       draft={draft}
