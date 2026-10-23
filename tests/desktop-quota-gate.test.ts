@@ -6,7 +6,7 @@ import { test, expect } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { isClaudeLaunch } from "../desktop/src/main/session-kind.ts";
+import { isClaudeLaunch, isClodexLaunch, withoutClodexWrapper } from "../desktop/src/main/session-kind.ts";
 import { extractBracedBody } from "./_braced-body";
 
 const SESSION_SERVICE_PATH = join(
@@ -289,8 +289,14 @@ function extractResolveClaudeLaunchBody(src: string): string {
   return extractBracedBody(src, fnMatch.index + fnMatch[0].length - 1);
 }
 
+type ResolvedCommand = {
+  command: string;
+  wrapperRemoved: string | null;
+  bridgeIssue: string | null;
+};
+
 function extractResolveBaseCommandBody(src: string): string {
-  const pattern = /private resolveBaseCommand\(def: SessionDef\): string \{/;
+  const pattern = /private resolveBaseCommand\(def: SessionDef\): (?:string|ResolvedCommand) \{/;
   assertSingleDeclaration(src, pattern, "resolveBaseCommand()");
   const fnMatch = pattern.exec(src);
   if (!fnMatch) {
@@ -306,26 +312,41 @@ test("MINOR (mutation review): resolveClaudeLaunch falls back to this.launchComm
   // extracted body too, not a stub: the `|| this.launchCommand` fallback this
   // test names now lives there, and a mutant dropping it must still fail here.
   // eslint-disable-next-line no-new-func -- extracted from the real source text, not user input
-  const resolveBaseCommand = new Function("def", extractResolveBaseCommandBody(src)) as (
+  const resolveBaseCommand = new Function(
+    "def",
+    "isClodexLaunch",
+    "withoutClodexWrapper",
+    extractResolveBaseCommandBody(src)
+  ) as (
     this: unknown,
-    def: { command: string; bridge?: string }
-  ) => string;
+    def: { command: string; bridge?: string; supervisor?: boolean },
+    isClodexLaunchArg: (command: string) => boolean,
+    withoutClodexWrapperArg: (command: string) => string
+  ) => ResolvedCommand;
   // eslint-disable-next-line no-new-func -- extracted from the real source text, not user input
   const fn = new Function("def", "isClaudeLaunch", body) as (
     this: unknown,
-    def: { command: string },
+    def: { command: string; supervisor?: boolean },
     isClaudeLaunchArg: (command: string) => boolean
   ) => boolean;
   const self = {
     launchCommand: "codex --flag",
-    resolveBaseCommand(def: { command: string; bridge?: string }): string {
-      return resolveBaseCommand.call(self, def);
+    sandboxPeersDir: () => null,
+    runsInSandbox(def: { supervisor?: boolean }): boolean {
+      return !def.supervisor && this.sandboxPeersDir() !== null;
+    },
+    resolveBaseCommand(def: { command: string; bridge?: string; supervisor?: boolean }): ResolvedCommand {
+      return resolveBaseCommand.call(self, def, isClodexLaunch, withoutClodexWrapper);
+    },
+    bridgedCommand(base: string): ResolvedCommand {
+      return { command: base, wrapperRemoved: null, bridgeIssue: null };
     }
   };
   // The named mutant (isClaudeLaunch(def.command), dropping the `||`
   // fallback) would call isClaudeLaunch('') -> true (empty-string default);
   // asserting `false` here is exactly what that mutant fails.
   expect(fn.call(self, { command: "" }, isClaudeLaunch)).toBe(false);
+  expect(fn.call(self, { command: "", supervisor: true }, isClaudeLaunch)).toBe(false);
 });
 
 function extractToRuntimeBody(src: string): string {

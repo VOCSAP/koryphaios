@@ -6,7 +6,8 @@ import { test, expect } from "bun:test";
 import {
   isClaudeLaunch,
   isClodexLaunch,
-  withClodexWrapper
+  withClodexWrapper,
+  withoutClodexWrapper
 } from "../desktop/src/main/session-kind.ts";
 
 test("empty command => true (resolves to the CONFIGURED launch command, which starts with claude absent an override)", () => {
@@ -160,6 +161,19 @@ test("withClodexWrapper is idempotent: an already-wrapped command is returned un
   expect(withClodexWrapper("/opt/bin/clodex-claude --model opus")).toBe(
     "/opt/bin/clodex-claude --model opus"
   );
+});
+
+test("withoutClodexWrapper replaces the wrapper token and preserves remaining arguments", () => {
+  expect(
+    withoutClodexWrapper("clodex-claude --dangerously-load-development-channels server:claude-peers")
+  ).toBe("claude --dangerously-load-development-channels server:claude-peers");
+  expect(withoutClodexWrapper('"C:\\Program Files\\clodex-claude.cmd" --model opus')).toBe(
+    "claude --model opus"
+  );
+});
+
+test("withoutClodexWrapper replaces a clodex-claude token that is not the executable", () => {
+  expect(withoutClodexWrapper("echo clodex-claude")).toBe("echo claude");
 });
 
 test("withClodexWrapper THROWS on an empty command: empty means the CONFIGURED launch command, which only the caller can resolve", () => {

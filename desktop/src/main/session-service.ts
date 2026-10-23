@@ -25,7 +25,7 @@ import {
   type SpawnMode
 } from './session-command'
 import { ThinkingDetector } from './thinking'
-import { isClaudeLaunch, isClodexLaunch, withClodexWrapper } from './session-kind'
+import { isClaudeLaunch, isClodexLaunch, withClodexWrapper, withoutClodexWrapper } from './session-kind'
 import { buildTileSettings } from './statusline-settings'
 import {
   QuotaDetector,
@@ -81,6 +81,14 @@ import type { JoinAnnounceIntent } from '@shared/announce'
 import { peerToolsEnvValue } from './session-env'
 import { PermissionLeaseRuntime, type PermissionLeaseHandle } from './permission-lease-runtime'
 import { mintDepositCapability } from './deposit-capability'
+
+type WrapperRemovalSource = 'configured launch command' | 'tile command override' | 'bridged tile'
+
+interface ResolvedCommand {
+  command: string
+  wrapperRemoved: WrapperRemovalSource | null
+  bridgeIssue: string | null
+}
 
 interface RuntimeState {
   status: SessionStatus
@@ -678,25 +686,39 @@ export class SessionService extends EventEmitter {
    * Launch command for a tile the operator asked to route through the clodex
    * wrapper. The wrapper is a HOST binary and the proxy it discovers listens on
    * the host loopback, so a sandboxed tile -- which runs the command inside the
-   * container -- keeps its unwrapped command; sandboxPeersDir() is the
-   * service's own "sandbox mode is on" signal (null = off) and never throws.
-   * Every drop leaves a trace: the operator picked a bridged model and must see
-   * why the tile did not get one.
+   * container -- keeps its unwrapped command. Every drop leaves a trace: the
+   * operator picked a bridged model and must see why the tile did not get one.
    */
-  private bridgedCommand(base: string): string {
-    if (this.sandboxPeersDir() !== null) {
-      reportError('session', `clodex bridge ignored, sandbox mode owns the launch command: "${base}"`)
-      return base
+  private bridgedCommand(base: string, sandboxed: boolean): ResolvedCommand {
+    if (sandboxed) {
+      if (isClodexLaunch(base)) {
+        return { command: withoutClodexWrapper(base), wrapperRemoved: 'bridged tile', bridgeIssue: null }
+      }
+      return {
+        command: base,
+        wrapperRemoved: null,
+        bridgeIssue: 'clodex bridge ignored, sandbox mode owns the launch command'
+      }
     }
     if (!base.trim()) {
-      reportError('session', 'clodex bridge ignored, no launch command resolved to wrap')
-      return base
+      return {
+        command: base,
+        wrapperRemoved: null,
+        bridgeIssue: 'clodex bridge ignored, no launch command resolved to wrap'
+      }
     }
     const wrapped = withClodexWrapper(base)
-    if (wrapped === base && !isClodexLaunch(base)) {
-      reportError('session', `clodex bridge ignored, no claude binary in the launch command: "${base}"`)
+    return {
+      command: wrapped,
+      wrapperRemoved: null,
+      bridgeIssue: wrapped === base && !isClodexLaunch(base)
+        ? 'clodex bridge ignored, no claude binary in the launch command'
+        : null
     }
-    return wrapped
+  }
+
+  private runsInSandbox(def: SessionDef): boolean {
+    return !def.supervisor && this.sandboxPeersDir() !== null
   }
 
   /**
@@ -707,9 +729,20 @@ export class SessionService extends EventEmitter {
    * `def.bridge` comes back from persisted session/workspace files, so it is
    * re-validated here as the exact string rather than tested for truthiness.
    */
-  private resolveBaseCommand(def: SessionDef): string {
-    const base = def.command.trim() || this.launchCommand
-    return def.bridge === 'clodex' ? this.bridgedCommand(base) : base
+  private resolveBaseCommand(def: SessionDef): ResolvedCommand {
+    const override = def.command.trim()
+    const hasOverride = Boolean(override)
+    const base = override || this.launchCommand
+    const sandboxed = this.runsInSandbox(def)
+    if (def.bridge === 'clodex') return this.bridgedCommand(base, sandboxed)
+    if (sandboxed && isClodexLaunch(base)) {
+      return {
+        command: withoutClodexWrapper(base),
+        wrapperRemoved: hasOverride ? 'tile command override' : 'configured launch command',
+        bridgeIssue: null
+      }
+    }
+    return { command: base, wrapperRemoved: null, bridgeIssue: null }
   }
 
   private flagValue(field: string, raw: string | undefined): string {
@@ -1460,8 +1493,14 @@ export class SessionService extends EventEmitter {
   private startPty(def: SessionDef, mode: SpawnMode, modPlan?: LaunchModPlan): void {
     this.revokePermissionLease(def.id)
     const cfg = this.getConfig()
-    const base = this.resolveBaseCommand(def)
-    const sandboxed = !def.supervisor && this.sandboxPeersDir() !== null
+    const resolved = this.resolveBaseCommand(def)
+    const base = resolved.command
+    if (resolved.wrapperRemoved) {
+      reportError('session', `clodex bridge removed from ${resolved.wrapperRemoved} for sandbox launch`)
+    } else if (resolved.bridgeIssue) {
+      reportError('session', resolved.bridgeIssue)
+    }
+    const sandboxed = this.runsInSandbox(def)
     const activeMods = hasEnabledMods(cfg.enabledMods)
     const refusal = modPlan && 'refused' in modPlan ? modPlan.refused : modPlan && modPlan.mode !== (sandboxed ? 'sandbox' : 'host') ? 'launch plan mode does not match tile' : activeMods && !modPlan ? 'active mods have no launch plan' : null
     if (refusal) {
@@ -1725,7 +1764,7 @@ export class SessionService extends EventEmitter {
    * session's answer (see RuntimeState.claudeLaunch).
    */
   private resolveClaudeLaunch(def: SessionDef): boolean {
-    return isClaudeLaunch(this.resolveBaseCommand(def))
+    return isClaudeLaunch(this.resolveBaseCommand(def).command)
   }
 
   /**

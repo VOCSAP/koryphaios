@@ -100,3 +100,9 @@ export function withClodexWrapper(command: string): string {
   if (!target) return command
   return command.slice(0, target.start) + CLODEX_WRAPPER_BIN + command.slice(target.end)
 }
+
+export function withoutClodexWrapper(command: string): string {
+  const target = tokenize(command).find((token) => normalizeToken(token.value) === CLODEX_WRAPPER_BIN)
+  if (!target) return command
+  return command.slice(0, target.start) + 'claude' + command.slice(target.end)
+}

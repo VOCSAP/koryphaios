@@ -10,7 +10,11 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { extractBracedBody, extractParenBody } from "./_braced-body";
-import { isClodexLaunch, withClodexWrapper } from "../desktop/src/main/session-kind.ts";
+import {
+  isClodexLaunch,
+  withClodexWrapper,
+  withoutClodexWrapper
+} from "../desktop/src/main/session-kind.ts";
 
 const SESSION_SERVICE_PATH = join(
   import.meta.dir,
@@ -54,68 +58,96 @@ function extractPrivateBody(pattern: RegExp, label: string): string {
 
 // ----- the real bridgedCommand() body, run against stubs -----
 
-type Trace = { scope: string; message: string };
+type ResolvedCommand = {
+  command: string;
+  wrapperRemoved: string | null;
+  bridgeIssue: string | null;
+};
 
 function makeBridgedCommand(sandboxPeersDir: string | null): {
-  bridgedCommand: (base: string) => string;
-  traces: Trace[];
+  bridgedCommand: (base: string, sandboxed: boolean) => ResolvedCommand;
 } {
   const body = extractPrivateBody(
-    /private bridgedCommand\(base: string\): string \{/,
+    /private bridgedCommand\(base: string(?:, sandboxed: boolean)?\): (?:string|ResolvedCommand) \{/,
     "bridgedCommand()"
   );
-  const traces: Trace[] = [];
   // eslint-disable-next-line no-new-func -- extracted from the real source text, not user input
-  const fn = new Function("base", "withClodexWrapper", "isClodexLaunch", "reportError", body) as (
+  const fn = new Function("base", "sandboxed", "withClodexWrapper", "isClodexLaunch", "withoutClodexWrapper", body) as (
     this: unknown,
     base: string,
+    sandboxed: boolean,
     withClodexWrapperArg: (command: string) => string,
     isClodexLaunchArg: (command: string) => boolean,
-    reportErrorArg: (scope: string, message: string) => void
-  ) => string;
+    withoutClodexWrapperArg: (command: string) => string
+  ) => ResolvedCommand;
   const self = { sandboxPeersDir: () => sandboxPeersDir };
   return {
-    traces,
-    bridgedCommand: (base: string): string =>
-      fn.call(self, base, withClodexWrapper, isClodexLaunch, (scope, message) =>
-        traces.push({ scope, message })
-      )
+    bridgedCommand: (base: string, sandboxed: boolean): ResolvedCommand =>
+      fn.call(self, base, sandboxed, withClodexWrapper, isClodexLaunch, withoutClodexWrapper)
   };
 }
 
-test("sandbox OFF: the claude token of the resolved launch command is rewritten to the wrapper, silently (no anomaly)", () => {
-  const { bridgedCommand, traces } = makeBridgedCommand(null);
-  expect(bridgedCommand("claude --dangerously-load-development-channels server:claude-peers")).toBe(
-    "clodex-claude --dangerously-load-development-channels server:claude-peers"
-  );
-  expect(traces).toEqual([]);
+test("sandbox OFF: the claude token of the resolved launch command is rewritten to the wrapper without a trace outcome", () => {
+  const { bridgedCommand } = makeBridgedCommand(null);
+  expect(bridgedCommand("claude --dangerously-load-development-channels server:claude-peers", false)).toEqual({
+    command: "clodex-claude --dangerously-load-development-channels server:claude-peers",
+    wrapperRemoved: null,
+    bridgeIssue: null
+  });
 });
 
-test("sandbox ON: the bridge is dropped, the command is untouched, and the drop is traced (the wrapper and its proxy are HOST-side only)", () => {
-  const { bridgedCommand, traces } = makeBridgedCommand("/state/sandbox-peers/kory-sbx-abc");
-  expect(bridgedCommand("claude --model opus")).toBe("claude --model opus");
-  expect(traces.length).toBe(1);
-  expect(traces[0]!.scope).toBe("session");
-  expect(traces[0]!.message).toMatch(/sandbox/i);
+test("sandbox ON: a plain bridged tile keeps its command and records one issue outcome", () => {
+  const { bridgedCommand } = makeBridgedCommand("/state/sandbox-peers/kory-sbx-abc");
+  expect(bridgedCommand("claude --model opus", true)).toEqual({
+    command: "claude --model opus",
+    wrapperRemoved: null,
+    bridgeIssue: "clodex bridge ignored, sandbox mode owns the launch command"
+  });
 });
 
-test("no claude binary in the launch command: untouched AND traced -- the operator picked a bridged model and gets a tile that is not bridged", () => {
-  const { bridgedCommand, traces } = makeBridgedCommand(null);
-  expect(bridgedCommand("./run-agent.sh --whatever")).toBe("./run-agent.sh --whatever");
-  expect(traces.length).toBe(1);
-  expect(traces[0]!.scope).toBe("session");
+test("a bridged command without claude is returned with an issue outcome", () => {
+  const { bridgedCommand } = makeBridgedCommand(null);
+  expect(bridgedCommand("./run-agent.sh --whatever", false)).toEqual({
+    command: "./run-agent.sh --whatever",
+    wrapperRemoved: null,
+    bridgeIssue: "clodex bridge ignored, no claude binary in the launch command"
+  });
 });
 
-test("an already-wrapped launch command is a no-op, NOT an anomaly: no trace", () => {
-  const { bridgedCommand, traces } = makeBridgedCommand(null);
-  expect(bridgedCommand("clodex-claude --model opus")).toBe("clodex-claude --model opus");
-  expect(traces).toEqual([]);
+test("an already-wrapped host launch command has no bridge outcome", () => {
+  const { bridgedCommand } = makeBridgedCommand(null);
+  expect(bridgedCommand("clodex-claude --model opus", false)).toEqual({
+    command: "clodex-claude --model opus",
+    wrapperRemoved: null,
+    bridgeIssue: null
+  });
 });
 
-test("an empty base is traced and returned, never thrown: withClodexWrapper's own empty guard must not escape the spawn path", () => {
-  const { bridgedCommand, traces } = makeBridgedCommand(null);
-  expect(bridgedCommand("")).toBe("");
-  expect(traces.length).toBe(1);
+test("an empty bridged command returns an issue outcome without throwing", () => {
+  const { bridgedCommand } = makeBridgedCommand(null);
+  expect(bridgedCommand("", false)).toEqual({
+    command: "",
+    wrapperRemoved: null,
+    bridgeIssue: "clodex bridge ignored, no launch command resolved to wrap"
+  });
+});
+
+test("sandbox ON: a bridged tile already using clodex-claude launches claude and records removal once", () => {
+  const { bridgedCommand } = makeBridgedCommand("/state/sandbox-peers/kory-sbx-abc");
+  expect(bridgedCommand("clodex-claude --model opus", true)).toEqual({
+    command: "claude --model opus",
+    wrapperRemoved: "bridged tile",
+    bridgeIssue: null
+  });
+});
+
+test("sandbox ON: a bridged supervisor keeps its clodex-claude command without a removal outcome", () => {
+  const { bridgedCommand } = makeBridgedCommand("/state/sandbox-peers/kory-sbx-abc");
+  expect(bridgedCommand("clodex-claude --model opus", false)).toEqual({
+    command: "clodex-claude --model opus",
+    wrapperRemoved: null,
+    bridgeIssue: null
+  });
 });
 
 // ----- the real resolveBaseCommand() body, run against stubs -----
@@ -124,49 +156,119 @@ test("an empty base is traced and returned, never thrown: withClodexWrapper's ow
 // on. Its stub bridgedCommand tags what it receives, so each assertion below
 // proves both the decision and the exact string handed to the wrapper.
 
-function makeResolveBaseCommand(launchCommand: string): {
-  resolveBaseCommand: (def: { command: string; bridge?: string }) => string;
+function makeResolveBaseCommand(launchCommand: string, sandboxPeersDir: string | null = null): {
+  resolveBaseCommand: (def: { command: string; bridge?: string; supervisor?: boolean }) => ResolvedCommand;
   wrapped: string[];
 } {
   const body = extractPrivateBody(
-    /private resolveBaseCommand\(def: SessionDef\): string \{/,
+    /private resolveBaseCommand\(def: SessionDef\): (?:string|ResolvedCommand) \{/,
     "resolveBaseCommand()"
   );
   const wrapped: string[] = [];
   // eslint-disable-next-line no-new-func -- extracted from the real source text, not user input
-  const fn = new Function("def", body) as (
+  const fn = new Function("def", "isClodexLaunch", "withoutClodexWrapper", "reportError", body) as (
     this: unknown,
-    def: { command: string; bridge?: string }
-  ) => string;
+    def: { command: string; bridge?: string; supervisor?: boolean },
+    isClodexLaunchArg: (command: string) => boolean,
+    withoutClodexWrapperArg: (command: string) => string,
+    reportErrorArg: () => void
+  ) => ResolvedCommand;
   const self = {
     launchCommand,
-    bridgedCommand: (base: string): string => {
+    sandboxPeersDir: () => sandboxPeersDir,
+    runsInSandbox: (def: { supervisor?: boolean }) => !def.supervisor && sandboxPeersDir !== null,
+    bridgedCommand: (base: string, _sandboxed?: boolean): ResolvedCommand => {
       wrapped.push(base);
-      return `WRAPPED(${base})`;
+      return { command: `WRAPPED(${base})`, wrapperRemoved: null, bridgeIssue: null };
     }
   };
-  return { wrapped, resolveBaseCommand: (def) => fn.call(self, def) };
+  return {
+    wrapped,
+    resolveBaseCommand: (def) => fn.call(self, def, isClodexLaunch, withoutClodexWrapper, () => {})
+  };
 }
 
 test("no bridge marker: the base is the def's own command, else the CONFIGURED launch command -- and the wrapper is never consulted", () => {
   const { resolveBaseCommand, wrapped } = makeResolveBaseCommand("claude --resume-me");
-  expect(resolveBaseCommand({ command: "" })).toBe("claude --resume-me");
-  expect(resolveBaseCommand({ command: "   " })).toBe("claude --resume-me");
-  expect(resolveBaseCommand({ command: "codex --flag" })).toBe("codex --flag");
+  expect(resolveBaseCommand({ command: "" }).command).toBe("claude --resume-me");
+  expect(resolveBaseCommand({ command: "   " }).command).toBe("claude --resume-me");
+  expect(resolveBaseCommand({ command: "codex --flag" }).command).toBe("codex --flag");
   expect(wrapped).toEqual([]);
 });
 
 test("bridge marker with an empty command: the CONFIGURED launch command is what gets wrapped, resolved fresh at this spawn", () => {
   const { resolveBaseCommand, wrapped } = makeResolveBaseCommand("claude --resume-me");
-  expect(resolveBaseCommand({ command: "", bridge: "clodex" })).toBe(
+  expect(resolveBaseCommand({ command: "", bridge: "clodex" }).command).toBe(
     "WRAPPED(claude --resume-me)"
   );
   expect(wrapped).toEqual(["claude --resume-me"]);
 });
 
+test("sandbox ON: a configured clodex-claude launch command is replaced with claude and records its source", () => {
+  const { resolveBaseCommand, wrapped } = makeResolveBaseCommand(
+    "clodex-claude --dangerously-load-development-channels server:claude-peers",
+    "/state/sandbox-peers/kory-sbx-abc"
+  );
+  expect(resolveBaseCommand({ command: "" })).toEqual({
+    command: "claude --dangerously-load-development-channels server:claude-peers",
+    wrapperRemoved: "configured launch command",
+    bridgeIssue: null
+  });
+  expect(wrapped).toEqual([]);
+});
+
+test("sandbox ON: a tile command override through clodex-claude is replaced with claude and records its source", () => {
+  const { resolveBaseCommand, wrapped } = makeResolveBaseCommand(
+    "claude --global",
+    "/state/sandbox-peers/kory-sbx-abc"
+  );
+  expect(resolveBaseCommand({ command: "clodex-claude --model opus" })).toEqual({
+    command: "claude --model opus",
+    wrapperRemoved: "tile command override",
+    bridgeIssue: null
+  });
+  expect(wrapped).toEqual([]);
+});
+
+test("sandbox ON: a supervisor keeps its configured clodex-claude command without a removal outcome", () => {
+  const { resolveBaseCommand } = makeResolveBaseCommand(
+    "clodex-claude --dangerously-load-development-channels server:claude-peers",
+    "/state/sandbox-peers/kory-sbx-abc"
+  );
+  expect(resolveBaseCommand({ command: "", supervisor: true })).toEqual({
+    command: "clodex-claude --dangerously-load-development-channels server:claude-peers",
+    wrapperRemoved: null,
+    bridgeIssue: null
+  });
+});
+
+test("sandbox ON: plain claude and codex commands remain unchanged without a bridge outcome", () => {
+  const { resolveBaseCommand } = makeResolveBaseCommand("claude --global", "/state/sandbox-peers/kory-sbx-abc");
+  expect(resolveBaseCommand({ command: "claude --model opus" })).toEqual({
+    command: "claude --model opus",
+    wrapperRemoved: null,
+    bridgeIssue: null
+  });
+  expect(resolveBaseCommand({ command: "codex --model gpt" })).toEqual({
+    command: "codex --model gpt",
+    wrapperRemoved: null,
+    bridgeIssue: null
+  });
+});
+
+test("sandbox OFF: a configured clodex-claude launch command remains unchanged", () => {
+  const { resolveBaseCommand, wrapped } = makeResolveBaseCommand("clodex-claude --model opus");
+  expect(resolveBaseCommand({ command: "" })).toEqual({
+    command: "clodex-claude --model opus",
+    wrapperRemoved: null,
+    bridgeIssue: null
+  });
+  expect(wrapped).toEqual([]);
+});
+
 test("bridge marker with an explicit command: that command is what gets wrapped", () => {
   const { resolveBaseCommand, wrapped } = makeResolveBaseCommand("claude --resume-me");
-  expect(resolveBaseCommand({ command: "claude --mine", bridge: "clodex" })).toBe(
+  expect(resolveBaseCommand({ command: "claude --mine", bridge: "clodex" }).command).toBe(
     "WRAPPED(claude --mine)"
   );
   expect(wrapped).toEqual(["claude --mine"]);
@@ -177,7 +279,7 @@ test("bridge marker with an explicit command: that command is what gets wrapped"
 test("a bridge marker that is not the exact string is ignored, never wrapped: a persisted def is untrusted input", () => {
   const { resolveBaseCommand, wrapped } = makeResolveBaseCommand("claude --resume-me");
   for (const hostile of ["clodex ", "Clodex", "clodex-evil", "1", ""]) {
-    expect(resolveBaseCommand({ command: "claude --mine", bridge: hostile })).toBe("claude --mine");
+    expect(resolveBaseCommand({ command: "claude --mine", bridge: hostile }).command).toBe("claude --mine");
   }
   expect(wrapped).toEqual([]);
 });
@@ -276,26 +378,51 @@ export function checkSpawnBridgeWiring(src: string): string | null {
     return `expected exactly one raw \`def.command.trim()\` resolution in session-service.ts, found ${raw} -- every spawn path must resolve through resolveBaseCommand, or a bridged tile silently starts on the unwrapped binary at that one path`;
   }
 
-  const resolverMatch = /private resolveBaseCommand\(def: SessionDef\): string \{/.exec(src);
-  if (!resolverMatch) return "private resolveBaseCommand(def: SessionDef): string not found -- has it been renamed?";
+  const resolverMatch = /private resolveBaseCommand\(def: SessionDef\): (?:string|ResolvedCommand) \{/.exec(src);
+  if (!resolverMatch) return "private resolveBaseCommand(def: SessionDef) not found -- has it been renamed?";
   const resolverBody = codeOnly(
     extractBracedBody(src, resolverMatch.index + resolverMatch[0].length - 1)
   );
   if (!resolverBody.includes("def.command.trim()")) {
     return "the file's single raw `def.command.trim()` is NOT the one inside resolveBaseCommand -- some other method owns the resolution";
   }
-  if (!/def\.bridge\s*===\s*'clodex'\s*\?\s*this\.bridgedCommand\(/.test(resolverBody)) {
+  if (!/if\s*\(def\.bridge\s*===\s*'clodex'\)\s*return\s*this\.bridgedCommand\(base, sandboxed\)/.test(resolverBody)) {
     return "resolveBaseCommand does not gate this.bridgedCommand() on the strict `def.bridge === 'clodex'` marker -- a persisted def is untrusted input";
+  }
+  if (!/const\s+sandboxed\s*=\s*this\.runsInSandbox\(def\)/.test(resolverBody)) {
+    return "resolveBaseCommand does not derive sandboxed from the shared tile predicate";
   }
 
   const startMatch = /private startPty\(def: SessionDef, mode: SpawnMode, modPlan\?: LaunchModPlan\): void \{/.exec(src);
   if (!startMatch) return "private startPty(def: SessionDef, mode: SpawnMode, modPlan?: LaunchModPlan): void not found -- has it been renamed?";
   const startBody = codeOnly(extractBracedBody(src, startMatch.index + startMatch[0].length - 1));
-  if (!/const\s+base\s*=\s*this\.resolveBaseCommand\(def\)/.test(startBody)) {
-    return "startPty does not take its `base` from this.resolveBaseCommand(def) -- the PTY would be spawned on the unwrapped command";
+  if (!/const\s+resolved\s*=\s*this\.resolveBaseCommand\(def\)/.test(startBody)) {
+    return "startPty does not resolve its command through this.resolveBaseCommand(def) -- the PTY would be spawned on the unwrapped command";
+  }
+  if (!/const\s+base\s*=\s*resolved\.command/.test(startBody)) {
+    return "startPty does not take its base command from the pure resolver result -- the PTY would not run the resolved command";
+  }
+  if (!/const\s+sandboxed\s*=\s*this\.runsInSandbox\(def\)/.test(startBody)) {
+    return "startPty does not reuse the shared tile sandbox predicate";
   }
   if (!/r\.claudeLaunch = isClaudeLaunch\(base\)/.test(startBody)) {
     return "startPty does not freeze r.claudeLaunch from the resolved `base` -- it would answer for a command this tile never ran";
+  }
+  if (!/if\s*\(resolved\.wrapperRemoved\)\s*\{\s*reportError\('session', `clodex bridge removed from \$\{resolved\.wrapperRemoved\} for sandbox launch`\)\s*\}/.test(startBody)) {
+    return "startPty does not trace the wrapper removal from its source only -- the trace may leak a launch command or happen before the spawn";
+  }
+  if (!/else if\s*\(resolved\.bridgeIssue\)\s*\{\s*reportError\('session', resolved\.bridgeIssue\)\s*\}/.test(startBody)) {
+    return "startPty does not emit at most one bridge outcome per spawn";
+  }
+  if (/reportError\(/.test(resolverBody)) {
+    return "resolveBaseCommand reports directly -- repeated pre-spawn reads would duplicate a trace";
+  }
+
+  const bridgedMatch = /private bridgedCommand\(base: string, sandboxed: boolean\): ResolvedCommand \{/.exec(src);
+  if (!bridgedMatch) return "private bridgedCommand(base: string, sandboxed: boolean) not found -- has it been renamed?";
+  const bridgedBody = codeOnly(extractBracedBody(src, bridgedMatch.index + bridgedMatch[0].length - 1));
+  if (/reportError\(/.test(bridgedBody)) {
+    return "bridgedCommand reports directly -- resolveBaseCommand must stay pure";
   }
 
   const claudeMatch = /private resolveClaudeLaunch\(def: SessionDef\): boolean \{/.exec(src);
@@ -303,7 +430,7 @@ export function checkSpawnBridgeWiring(src: string): string | null {
   const claudeBody = codeOnly(
     extractBracedBody(src, claudeMatch.index + claudeMatch[0].length - 1)
   );
-  if (!/isClaudeLaunch\(this\.resolveBaseCommand\(def\)\)/.test(claudeBody)) {
+  if (!/isClaudeLaunch\(this\.resolveBaseCommand\(def\)\.command\)/.test(claudeBody)) {
     return "resolveClaudeLaunch answers from something other than the fully-resolved command -- the seeded claudeLaunch would describe a command no tile runs";
   }
 
@@ -317,7 +444,7 @@ test("session-service.ts: resolveBaseCommand is the ONLY place a def's command i
 test("negative control: the checker REJECTS a second raw resolution outside resolveBaseCommand", () => {
   const src = readFileSync(SESSION_SERVICE_PATH, "utf-8");
   const mutated = src.replace(
-    "const base = this.resolveBaseCommand(def)",
+    "const base = resolved.command",
     "const base = def.command.trim() || this.launchCommand"
   );
   expect(mutated).not.toBe(src);
@@ -346,12 +473,21 @@ test("negative control: the checker REJECTS an ungated wrap (every tile bridged)
 test("negative control: the checker REJECTS claudeLaunch answered from the pre-bridge command", () => {
   const mutated = [
     "class X {",
-    "  private resolveBaseCommand(def: SessionDef): string {",
+    "  private resolveBaseCommand(def: SessionDef): ResolvedCommand {",
     "    const base = def.command.trim() || this.launchCommand",
-    "    return def.bridge === 'clodex' ? this.bridgedCommand(base) : base",
+    "    const sandboxed = this.runsInSandbox(def)",
+    "    if (def.bridge === 'clodex') return this.bridgedCommand(base, sandboxed)",
+    "    return { command: base, wrapperRemoved: null, bridgeIssue: null }",
+    "  }",
+    "  private bridgedCommand(base: string, sandboxed: boolean): ResolvedCommand {",
+    "    return { command: base, wrapperRemoved: null, bridgeIssue: null }",
     "  }",
     "  private startPty(def: SessionDef, mode: SpawnMode, modPlan?: LaunchModPlan): void {",
-    "    const base = this.resolveBaseCommand(def)",
+    "    const resolved = this.resolveBaseCommand(def)",
+    "    const base = resolved.command",
+    "    const sandboxed = this.runsInSandbox(def)",
+    "    if (resolved.wrapperRemoved) { reportError('session', `clodex bridge removed from ${resolved.wrapperRemoved} for sandbox launch`) }",
+    "    else if (resolved.bridgeIssue) { reportError('session', resolved.bridgeIssue) }",
     "    r.claudeLaunch = isClaudeLaunch(base)",
     "  }",
     "  private resolveClaudeLaunch(def: SessionDef): boolean {",
