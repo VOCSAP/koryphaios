@@ -24,6 +24,10 @@
 
 const MINIMUM_PLAUSIBLE_WIDTH = 40
 const AGENT_INDENT = 2
+const BOX_VERTICAL = String.fromCodePoint(0x2502)
+const BOX_LEFT = `${BOX_VERTICAL} `
+const BOX_RIGHT = ` ${BOX_VERTICAL}`
+const BOX_FRAME_WIDTH = 4
 
 type StringWidth = (text: string) => number
 
@@ -103,7 +107,50 @@ function joinKind(previous: string, next: string, shownLength: number, width: nu
   return shownLength + 1 + firstWord > width ? 'word-wrap' : 'newline'
 }
 
+function hasAgentIndent(text: string): boolean {
+  let lines = text.split('\n').map((line) => line.trimEnd())
+  while (lines[0] === '') lines = lines.slice(1)
+  while (lines.at(-1) === '') lines = lines.slice(0, -1)
+  if (lines.length === 0) return false
+
+  const continuationIndents = lines.slice(1).filter((line) => line !== '').map(leadingSpaces)
+  const continuationIndent = Math.min(...continuationIndents)
+  const partialFirstLine = Number.isFinite(continuationIndent) && leadingSpaces(lines[0]!) < continuationIndent
+  const indent = partialFirstLine
+    ? continuationIndent
+    : Math.min(...lines.filter((line) => line !== '').map(leadingSpaces))
+  return indent >= AGENT_INDENT
+}
+
+export function stripBoxFrame(text: string, width: number, stringWidth: StringWidth = fallbackStringWidth): { text: string; frameWidth: number } {
+  if (!Number.isFinite(width) || !Number.isInteger(width) || width <= 0) return { text, frameWidth: 0 }
+
+  const rows = text.split('\n')
+  const hasFrame = rows.every((row, index) => (
+    (index === 0 || row.startsWith(BOX_LEFT)) &&
+    (index === rows.length - 1 || row.endsWith(BOX_RIGHT))
+  ))
+  if (!hasFrame) return { text, frameWidth: 0 }
+
+  const completeRows = rows.filter((row) => row.startsWith(BOX_LEFT) && row.endsWith(BOX_RIGHT))
+  if (completeRows.length === 0) return { text, frameWidth: 0 }
+
+  const rightColumns = completeRows.map((row) => stringWidth(row) - stringWidth(BOX_VERTICAL))
+  const expectedRightColumn = width - 1
+  if (!rightColumns.every((column) => column === expectedRightColumn)) return { text, frameWidth: 0 }
+
+  const stripped = rows.map((row) => {
+    const withoutLeft = row.startsWith(BOX_LEFT) ? row.slice(BOX_LEFT.length) : row
+    const withoutFrame = withoutLeft.endsWith(BOX_RIGHT) ? withoutLeft.slice(0, -BOX_RIGHT.length) : withoutLeft
+    return withoutFrame.trimEnd()
+  }).join('\n')
+  return hasAgentIndent(stripped) ? { text: stripped, frameWidth: BOX_FRAME_WIDTH } : { text, frameWidth: 0 }
+}
+
 export function normalizeTerminalSelection(text: string, width: number, options: NormalizeOptions = {}): string {
+  const frame = stripBoxFrame(text, width, options.stringWidth ?? fallbackStringWidth)
+  text = frame.text
+  width -= frame.frameWidth
   let lines = text.split('\n').map((line) => line.trimEnd())
   while (lines[0] === '') lines = lines.slice(1)
   while (lines.at(-1) === '') lines = lines.slice(0, -1)
