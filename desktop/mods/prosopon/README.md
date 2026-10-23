@@ -1,6 +1,6 @@
 # Prosopon
 
-Prosopon frames the transcript with a readable, guarded layout: your prompts typed at the composer, the assistant's blocks, and a rule closing each turn.
+Prosopon gives the transcript a readable, guarded layout: framed prompts and assistant blocks, dimmed short assistant notes, and a rule closing each turn.
 
 ## Install
 
@@ -12,12 +12,10 @@ The layout runs on Claude Code `2.1.303` or any later release, in a terminal of 
 
 ## What it draws
 
-- An assistant block is framed around what the rest of the render chain returns. A hook that rewrites the text, such as Mitos adding file links, keeps its rewrite inside the frame whichever of the two plugins loads first.
-- A prompt typed at the composer is framed under `You`. Task notifications, messages from peers or channels and bridge or SDK turns keep the stock rendering.
+- A one-line, non-summary assistant note of at most 160 characters draws with Claude Code's dimmed native assistant marker (U+25CF) followed by its own Markdown. It does not call render hooks placed beneath Prosopon; a rewrite already present in its input text is drawn.
+- Other assistant blocks are framed around what the rest of the render chain returns. A prompt typed at the composer is framed under `You`; task notifications, messages from peers or channels, and bridge or SDK turns keep the stock rendering.
 - A turn ends with a dimmed rule such as `── Baked for 3s ───…`, two columns shorter than the terminal.
 
 Set the `labels` option to `fr` for `Vous`; any other value gives `You`.
 
-The layout has not been proven against a corpus of real captures before L2. Keep it opt-in until that corpus is available.
-
-Summary blocks keep Claude Code's stock rendering for now. Their dimmed, indented line waits for L2's differential capture of the stock and plugin renders, because the indentation changes where lines wrap.
+Summary blocks keep Claude Code's stock rendering.

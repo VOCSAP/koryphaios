@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:f
 import { dirname, join, resolve, sep } from "node:path";
 import { isDistributable, isEnginePath, modsFingerprint, PLUGIN_NAME_PATTERN, type ModFile } from "../shared/mods-fingerprint";
 
-export const PLUGINS = ["prosopon", "mitos"] as const;
+export const PLUGINS = ["mitos", "prosopon"] as const;
 export const CHOREGOS_REPO = "https://github.com/VOCSAP/choregos";
 export const MODS_DIR = join(import.meta.dir, "..", "desktop", "mods");
 export const LOCK_PATH = join(MODS_DIR, "choregos.lock.json");

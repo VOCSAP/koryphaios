@@ -574,6 +574,15 @@ describe('enabled mods', async () => {
 
     expect(enabledModsFromLock(enabled, lock)).toEqual(['prosopon'])
   })
+
+  test('uses lock order instead of enabledMods insertion order (mutation: return configuration order)', () => {
+    const lock = new Map([
+      ['mitos', 'a'.repeat(64)],
+      ['prosopon', 'b'.repeat(64)]
+    ])
+
+    expect(enabledModsFromLock({ prosopon: true, mitos: true }, lock)).toEqual(['mitos', 'prosopon'])
+  })
 })
 
 test('uses UTF-8 bytes for an accented path length (mutation: use path code-unit length)', async () => {

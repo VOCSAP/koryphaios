@@ -21,6 +21,8 @@ export function resolveLabels(value: unknown): Labels {
 const STOCK_VOCABULARY = /limit|reset|quota|overloaded|usage/i
 const STOCK_MAX_CHARS = 400
 const STOCK_MAX_LINES = 3
+const SHORT_NOTE_MAX_CHARS = 160
+export const SHORT_NOTE_BULLET = `${String.fromCodePoint(0x25cf)} `
 
 function mustStayStock(text: string): boolean {
   return (
@@ -31,8 +33,8 @@ function mustStayStock(text: string): boolean {
 }
 
 export function classifyAssistantBlock(text: string, isSummary: boolean): BlockKind {
-  if (text.trim() === '' || mustStayStock(text)) return 'stock'
-  return isSummary ? 'dim' : 'frame'
+  if (text === '' || isSummary || mustStayStock(text)) return 'stock'
+  return !text.includes('\n') && text.length <= SHORT_NOTE_MAX_CHARS ? 'dim' : 'frame'
 }
 
 const TURN_WORD_MAX = 24

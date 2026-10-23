@@ -156,6 +156,14 @@ describe('sync script against a choregos fixture repository', () => {
     )
   })
 
+  test('the committed lock preserves the plugin load order', () => {
+    expect(Object.keys(lock.plugins)).toEqual([...PLUGINS])
+  })
+
+  test('the sync order makes Mitos the outer render hook before Prosopon', () => {
+    expect(PLUGINS).toEqual(['mitos', 'prosopon'])
+  })
+
   test('a run over a commit holding every locked plugin replaces each copy and rewrites each lock entry', () => {
     const names = Object.keys(lock.plugins)
     const upstream: Record<string, string> = { LICENSE: 'MIT' }
@@ -339,7 +347,7 @@ describe('prosopon frame against the real injection guard', () => {
   }
 
   const BODIES = [
-    'A plain answer.',
+    'A plain answer. '.repeat(11),
     '1. a\n2. b',
     'Choose:\n❯ 1. oui',
     '╭──╮\n╰──╯',

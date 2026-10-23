@@ -1,5 +1,6 @@
 import { expect, test } from 'bun:test'
 import { hasEnabledMods, LaunchAttemptRegistry, prepareLaunchModPlan, prepareRestorePlans } from '../desktop/src/main/mod-launch-plan'
+import { enabledModsFromLock } from '../desktop/src/main/mods-working-copy'
 
 const signal = () => new AbortController().signal
 
@@ -230,6 +231,27 @@ test('a host plan lists the working copies in lock order and never calls the san
   )
   expect(plan).toEqual({ attemptId: 'a', mode: 'host', modDirs: ['/host/alpha', '/host/beta'], copies: [{ plugin: 'alpha', fingerprint: 'a'.repeat(64), hostDir: '/host/alpha' }, { plugin: 'beta', fingerprint: 'b'.repeat(64), hostDir: '/host/beta' }], diagnostics: [] })
   expect(sandboxCalls).toBe(0)
+})
+
+test.each([false, true])('a Prosopon-then-Mitos configuration keeps Mitos first in the %s plan', async (sandboxed) => {
+  const lock = new Map([
+    ['mitos', 'a'.repeat(64)],
+    ['prosopon', 'b'.repeat(64)]
+  ])
+  const plan = await prepareLaunchModPlan(
+    deps({
+      enabledModsFromLock: (config, locked) => enabledModsFromLock(config.enabledMods, locked),
+      ensureModWorkingCopy: async ({ plugin }: { plugin: string }) => ({ ok: true as const, dir: `/host/${plugin}` }),
+      prepareMods: async ({ copies }) => ({
+        ok: true as const,
+        references: copies.map((copy) => ({ plugin: copy.plugin, containerDir: `/sandbox/${copy.plugin}` })),
+        diagnostics: { omitted: [] }
+      })
+    }),
+    planInput({ sandboxed, config: { enabledMods: { prosopon: true, mitos: true } }, lock })
+  )
+
+  expect(plan).toMatchObject({ mode: sandboxed ? 'sandbox' : 'host', modDirs: sandboxed ? ['/sandbox/mitos', '/sandbox/prosopon'] : ['/host/mitos', '/host/prosopon'] })
 })
 
 test('a working copy that fails is omitted with its reason while the other mods are kept', async () => {

@@ -6,6 +6,7 @@ import {
   GUARD_SAFE_BORDER,
   MIN_FRAME_COLUMNS,
   resolveLabels,
+  SHORT_NOTE_BULLET,
   turnRule,
   USER_COLOR,
 } from './layout'
@@ -93,7 +94,23 @@ export const register: Register = (on, options) => {
       return next(e)
     }
     if (!(await layoutSupported($))) return next(e)
-    if (classifyAssistantBlock(text, isSummary === true) !== 'frame') return next(e)
+    const normalized = text.trim()
+    const block = classifyAssistantBlock(normalized, isSummary === true)
+    if (block === 'stock') return next(e)
+    if (block === 'dim') {
+      try {
+        const { Box, Markdown, Text } = $.ui.resolve(e)
+        return (
+          <Box flexDirection="row" marginTop={1}>
+            <Text dimColor>{SHORT_NOTE_BULLET}</Text>
+            <Markdown text={normalized} dimColor />
+          </Box>
+        )
+      } catch (error) {
+        stockAfter($, error)
+        return next(e)
+      }
+    }
 
     const drawn = await next(e)
     try {

@@ -121,9 +121,7 @@ export function listLockedMods(
 
 export function enabledModsFromLock(enabled: unknown, lock: ReadonlyMap<string, string>): string[] {
   if (!isRecord(enabled)) return []
-  return Object.entries(enabled)
-    .filter(([name, value]) => value === true && PLUGIN_NAME_PATTERN.test(name) && lock.has(name))
-    .map(([name]) => name)
+  return Array.from(lock.keys()).filter((name) => PLUGIN_NAME_PATTERN.test(name) && enabled[name] === true)
 }
 
 export function verifyModWorkingCopy(request: WorkingCopyRequest): WorkingCopyOutcome {
