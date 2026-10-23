@@ -44,6 +44,7 @@ export const DEFAULT_CONFIG: AppConfig = {
   linkOpenExclusions: [...DEFAULT_LINK_EXCLUSIONS],
   joinAnnounceLevel: 'off',
   helpButton: true,
+  normalizeTerminalCopy: true,
   helpTarget: DEFAULT_HELP_TARGET,
   wandTarget: DEFAULT_WAND_TARGET,
   demoTarget: DEFAULT_DEMO_TARGET,

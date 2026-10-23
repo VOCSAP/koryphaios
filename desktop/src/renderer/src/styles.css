@@ -1539,9 +1539,18 @@ textarea:disabled {
   text-align: center;
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
   z-index: 50;
-  /* A click dismisses it (Toast.tsx). */
   cursor: pointer;
 }
+.toast-action {
+  margin-left: 12px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font-weight: 600;
+  text-decoration: underline;
+}
+.toast-action:not(:disabled):hover { filter: brightness(1.08); }
+.toast-action:disabled { opacity: 0.4; cursor: default; }
 /* Green success (save). */
 .toast-success {
   background: #2f7d4f;

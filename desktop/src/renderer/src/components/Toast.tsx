@@ -1,25 +1,20 @@
 import { useDeck } from '../store'
 import { useT } from '../i18n'
 
-/**
- * Bottom-of-window transient status message. `toast` holds an i18n key, or raw
- * text (an error message) when `toastRaw` is set. Policy (PLAN O5): toasts are
- * for the outcome of a direct user action only -- background failures go to
- * the log/journal/banner, never here.
- */
+/** Background failures use the log, journal or banner so their visibility is not time-limited. */
 export function Toast(): React.JSX.Element | null {
   const t = useT()
   const toast = useDeck((s) => s.toast)
   const variant = useDeck((s) => s.toastVariant)
   const raw = useDeck((s) => s.toastRaw)
+  const action = useDeck((s) => s.toastAction)
   const params = useDeck((s) => s.toastParams)
   const dismiss = useDeck((s) => s.dismissToast)
   if (!toast) return null
-  // A click dismisses: the toast covers a tall modal's footer (Save/Cancel)
-  // for its whole lifetime. Keyboard focus is never blocked by it.
   return (
     <div className={`toast toast-${variant}`} role={variant === 'error' ? 'alert' : 'status'} onClick={dismiss}>
-      {raw ? toast : t(toast, params ?? undefined)}
+      <span>{raw ? toast : t(toast, params ?? undefined)}</span>
+      {action && <button className="toast-action" onClick={action.onClick}>{t(action.label)}</button>}
     </div>
   )
 }

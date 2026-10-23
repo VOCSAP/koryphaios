@@ -78,6 +78,7 @@ export const EN_DEFAULTS: Record<string, string> = {
   "notifications.pairDone": "Done",
   "notifications.disabledHint": "Enable remote approvals above to connect a channel.",
   'common.cancel': 'Cancel',
+  'common.undo': 'Undo',
   'common.save': 'Save',
   'common.create': 'Create',
   'common.delete': 'Delete',
@@ -367,6 +368,10 @@ export const EN_DEFAULTS: Record<string, string> = {
   'help.model': 'Model: {model}',
   'help.hide': 'Hide the help button (re-enable in Settings)',
   'settings.helpButton': 'Show the floating "?" help button',
+  'settings.normalizeTerminalCopy': 'Repair wrapped Claude Code terminal copies',
+  'settings.normalizeTerminalCopyHelp':
+    'Join Claude Code hard wraps before copying terminal selections. Turn this off to copy the original text unchanged.',
+  'toast.terminalCopyRepaired': 'Terminal copy repaired',
   'settings.helpModel': 'Help assistant & resume digest model',
   'settings.helpModelHelp':
     "Each question is a one-shot read-only inference with the active view's context — any catalog model (frontier CLI or local endpoint). Haiku is cheap and usually enough; note local endpoints cannot read the project files.",

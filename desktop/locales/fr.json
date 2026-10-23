@@ -1,5 +1,6 @@
 {
   "common.cancel": "Annuler",
+  "common.undo": "Annuler",
   "common.save": "Enregistrer",
   "common.create": "Créer",
   "common.delete": "Supprimer",
@@ -254,6 +255,9 @@
   "help.model": "Modèle : {model}",
   "help.hide": "Masquer le bouton d'aide (réactivable dans Réglages)",
   "settings.helpButton": "Afficher le bouton d'aide flottant « ? »",
+  "settings.normalizeTerminalCopy": "Réparer les copies Claude Code coupées",
+  "settings.normalizeTerminalCopyHelp": "Réunit les coupures Claude Code avant de copier une sélection du terminal. Désactivez cette option pour copier le texte d’origine sans modification.",
+  "toast.terminalCopyRepaired": "Copie du terminal réparée",
   "settings.helpModel": "Modèle de l'aide et du digest de reprise",
   "settings.helpModelHelp": "Chaque question est une inférence one-shot en lecture seule avec le contexte de la vue active — n'importe quel modèle du catalogue (CLI frontier ou endpoint local). Haiku est économique et suffit en général ; note : les endpoints locaux ne peuvent pas lire les fichiers du projet.",
   "settings.helpModelHint": "Le modèle de l'assistant se choisit dans la catégorie Modèles.",

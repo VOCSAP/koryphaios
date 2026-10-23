@@ -305,6 +305,16 @@ export function SettingsView(): React.JSX.Element {
               <label className="field field-check">
                 <input
                   type="checkbox"
+                  checked={config.normalizeTerminalCopy}
+                  onChange={(e) => set('normalizeTerminalCopy', e.target.checked)}
+                />
+                <span>{t('settings.normalizeTerminalCopy')}</span>
+              </label>
+              <small className="field-check-help">{t('settings.normalizeTerminalCopyHelp')}</small>
+
+              <label className="field field-check">
+                <input
+                  type="checkbox"
                   checked={pickContextPrompt}
                   onChange={(e) => setPickContextPrompt(e.target.checked)}
                 />

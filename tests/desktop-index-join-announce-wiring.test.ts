@@ -82,6 +82,20 @@ const PEER_RESOLVED_HANDLER = slice(
   ["\n)\n", "\n})\n"],
   "peer-resolved handler"
 );
+const SET_CONFIG_ANCHOR = "const setConfig = (patch: Partial<AppConfig>): AppConfig =>";
+
+function extractSetConfig(source: string): string {
+  const setConfigStart = source.indexOf(SET_CONFIG_ANCHOR);
+  if (setConfigStart < 0) throw new Error("setConfig: anchor not found -- index.ts changed shape");
+  if (source.indexOf(SET_CONFIG_ANCHOR, setConfigStart + SET_CONFIG_ANCHOR.length) >= 0) {
+    throw new Error("setConfig: anchor is ambiguous -- index.ts changed shape");
+  }
+  const setConfigOpen = source.indexOf("{", setConfigStart + SET_CONFIG_ANCHOR.length);
+  if (setConfigOpen < 0) throw new Error("setConfig: opening brace not found -- index.ts changed shape");
+  return `${source.slice(setConfigStart, setConfigOpen + 1)}${extractBracedBody(source, setConfigOpen, true)}}`;
+}
+
+const SET_CONFIG = extractSetConfig(SRC);
 
 // Anti-vacuity floor: no slice should ever come back suspiciously short (an
 // anchor matching a decoy earlier in the file, or a terminator picked too
@@ -95,6 +109,10 @@ for (const [label, body] of [
     expect(body.length).toBeGreaterThan(100);
   });
 }
+
+test("setConfig extraction rejects an ambiguous anchor", () => {
+  expect(() => extractSetConfig(`${SRC}\n${SET_CONFIG_ANCHOR} {}`)).toThrow("setConfig: anchor is ambiguous");
+});
 
 interface Emitter {
   name: string;
@@ -133,6 +151,20 @@ async function evaluate<T>(wrapper: string, name: string): Promise<(env: Record<
   const mod = (await import(pathToFileURL(file).href)) as { register: (env: Record<string, unknown>) => T };
   return mod.register;
 }
+
+const registerSetConfig = await evaluate<{
+  setConfig: (patch: Record<string, unknown>) => Record<string, unknown>;
+}>(
+  `export function register(env) {
+  let config = env.config
+  const { reportError, sanitizeGlowColor, sanitizeSpawnCap, sanitizeLinkPatch,
+    applyProviderKeyPatch, secretCipher, sanitizeTtsrDisabled, prewarmClaudeVersion,
+    saveConfig, nativeTheme, applyClodexAutoStart, ttsr, broadcast, sanitizeConfigForRenderer } = env
+${SET_CONFIG}
+  return { setConfig }
+}`,
+  "set-config"
+);
 
 const registerSendPeerAnnounce = await evaluate<{
   sendPeerAnnounce: (peerId: string, text: string, subject: string) => Promise<void>;
@@ -562,6 +594,31 @@ const x = async () => { await sendPeerAnnounce(1, 2, 3) }
 const y = async () => { await sendPeerAnnounceOther(1) }
 `;
   expect(countCalls(synthetic, "sendPeerAnnounce")).toBe(1);
+});
+
+test("config:set removes a non-boolean normalizeTerminalCopy patch", () => {
+  const reports: Array<[string, string]> = [];
+  const config = { theme: "dark", agentSpawnCap: 4, clodexAutoStart: false, ttsrDisabled: [], normalizeTerminalCopy: true };
+  const { setConfig } = registerSetConfig({
+    config,
+    reportError: (scope: string, message: string) => reports.push([scope, message]),
+    sanitizeGlowColor: (value: string) => value,
+    sanitizeSpawnCap: () => 4,
+    sanitizeLinkPatch: (patch: Record<string, unknown>) => patch,
+    applyProviderKeyPatch: () => [],
+    secretCipher: {},
+    sanitizeTtsrDisabled: (value: unknown) => value,
+    prewarmClaudeVersion: () => undefined,
+    saveConfig: () => undefined,
+    nativeTheme: { themeSource: "" },
+    applyClodexAutoStart: () => undefined,
+    ttsr: { recompileAll: () => undefined },
+    broadcast: () => undefined,
+    sanitizeConfigForRenderer: (value: Record<string, unknown>) => value
+  });
+
+  expect(setConfig({ normalizeTerminalCopy: "false" })).toEqual(config);
+  expect(reports).toEqual([["config", "rejected config:set normalizeTerminalCopy (false)"]]);
 });
 
 // Three degradation routes are each closed by a separate test: the domain

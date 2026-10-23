@@ -522,6 +522,11 @@ const setConfig = (patch: Partial<AppConfig>): AppConfig => {
     const { agentSpawnCap: _ignored, ...rest } = patch
     patch = rest
   }
+  if (patch.normalizeTerminalCopy !== undefined && typeof patch.normalizeTerminalCopy !== 'boolean') {
+    reportError('config', `rejected config:set normalizeTerminalCopy (${String(patch.normalizeTerminalCopy).slice(0, 40)})`)
+    const { normalizeTerminalCopy: _ignored, ...rest } = patch
+    patch = rest
+  }
   patch = sanitizeLinkPatch(patch, (message) => reportError('config', message))
   // Local-provider API keys never persist in clear (C29): a renderer patch
   // carries transient `apiKey` fields that are encrypted (safeStorage) into

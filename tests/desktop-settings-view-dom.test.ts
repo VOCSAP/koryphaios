@@ -104,6 +104,16 @@ async function click(box: HTMLInputElement): Promise<void> {
   });
 }
 
+test("terminal copy normalization is enabled by default and can be disabled", async () => {
+  await mount(DEFAULT_CONFIG.enabledMods, []);
+  const checkbox = modCheckbox("settings.normalizeTerminalCopy");
+
+  expect(checkbox, "the copy normalization switch must be visible").not.toBeUndefined();
+  expect(checkbox!.checked).toBe(true);
+  await click(checkbox!);
+  expect(updateConfigCalls).toEqual([{ normalizeTerminalCopy: false }]);
+});
+
 test("with the default configuration every offered mod is shown unchecked", async () => {
   await mount(DEFAULT_CONFIG.enabledMods, ["alpha", "beta"]);
   expect(modCheckbox("alpha"), "alpha must be offered as a switch").not.toBeUndefined();

@@ -414,6 +414,8 @@ export interface AppConfig {
   joinAnnounceLevel: JoinAnnounceLevel
   /** Show the floating "?" help-assistant button (PLAN C9). */
   helpButton: boolean
+  /** Normalize Claude Code hard-wrapped terminal selections before copying. */
+  normalizeTerminalCopy: boolean
   /**
    * Inference target of the help assistant AND the resume digest (lot A):
    * any provider of the unified catalog (frontier CLI or local endpoint).

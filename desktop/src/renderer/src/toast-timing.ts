@@ -1,7 +1,6 @@
-// How long each toast variant stays on screen. No React/DOM import, so bun test
-// loads it from the repo root; store.ts itself cannot be imported there.
-
 export type ToastVariant = 'success' | 'info' | 'error'
+
+export const TOAST_ACTION_MS = 10_000
 
 /**
  * An error toast reports a direct action that did NOT happen (a blocked Save

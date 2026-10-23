@@ -5,6 +5,8 @@
 // store's dismiss action and that the toast leaves the DOM.
 
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 
 GlobalRegistrator.register();
 
@@ -17,6 +19,7 @@ afterAll(async () => {
 });
 
 const { act, React, createRoot, create } = await import("../desktop/tests-support/react-test-harness");
+const EN_DICT = JSON.parse(readFileSync(join(import.meta.dir, "..", "desktop", "locales", "en.json"), "utf8")) as Record<string, string>;
 
 interface FakeDeckState {
   dict: Record<string, string>;
@@ -24,6 +27,7 @@ interface FakeDeckState {
   toastVariant: "success" | "info" | "error";
   toastRaw: boolean;
   toastParams: Record<string, string | number> | null;
+  toastAction: { label: string; onClick: () => void } | null;
   dismissToast(): void;
 }
 
@@ -33,6 +37,7 @@ const fakeUseDeck = create<FakeDeckState>((set) => ({
   toastVariant: "error",
   toastRaw: false,
   toastParams: null,
+  toastAction: null,
   dismissToast: () => set({ toast: null }),
 }));
 
@@ -68,6 +73,30 @@ test("a click on an error toast removes it before its timer runs out", () => {
   });
   expect(container.querySelector(".toast"), "the toast stays over the modal footer after a click").toBeNull();
   expect(fakeUseDeck.getState().toast).toBeNull();
+});
+
+test("a toast action runs before the toast is dismissed", () => {
+  let calls = 0;
+  act(() => {
+    fakeUseDeck.setState({ toastAction: { label: "common.undo", onClick: () => { calls++; } } });
+  });
+
+  const action = container.querySelector(".toast button");
+  expect(action, "the toast action never rendered").not.toBeNull();
+  act(() => {
+    (action as HTMLButtonElement).click();
+  });
+
+  expect(calls).toBe(1);
+  expect(fakeUseDeck.getState().toast).toBeNull();
+});
+
+test("a toast action renders its translated label instead of its key (mutation: common.undo absent)", () => {
+  act(() => {
+    fakeUseDeck.setState({ dict: EN_DICT, toastAction: { label: "common.undo", onClick: () => undefined } });
+  });
+
+  expect(container.querySelector(".toast button")?.textContent).not.toBe("common.undo");
 });
 
 test("a dismissable toast keeps its alert role", () => {

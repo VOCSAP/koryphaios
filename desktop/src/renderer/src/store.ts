@@ -34,7 +34,7 @@ import { countPendingInboxMessages } from '@shared/inbox-pending'
 import { shouldShowTemplateAppliedToast } from '@shared/template-apply-outcome'
 import { workspaceRestoreToastKeyFor } from '@shared/workspace-restore-outcome'
 import { keepDrafts, type QuestionDraft } from './components/approval-answers'
-import { TOAST_MS } from './toast-timing'
+import { TOAST_ACTION_MS, TOAST_MS } from './toast-timing'
 
 /**
  * The blocking-question payload, DERIVED from the Courrier union instead of
@@ -93,6 +93,7 @@ interface DeckState {
   toastVariant: 'success' | 'info' | 'error'
   /** True when `toast` is raw text (an error message), not an i18n key. */
   toastRaw: boolean
+  toastAction: { label: string; onClick: () => void } | null
   /**
    * Interpolation params for `toast` when it is a key. Carried here rather
    * than pre-rendered into raw text, so a toast raised from the store (which
@@ -366,7 +367,7 @@ interface DeckState {
   showToast(
     key: string,
     variant?: 'success' | 'info' | 'error',
-    opts?: { raw?: boolean; params?: Record<string, string | number> }
+    opts?: { raw?: boolean; params?: Record<string, string | number>; action?: { label: string; onClick: () => void } }
   ): boolean
   /** The toast sits over a tall modal's footer; a click hands it back. */
   dismissToast(): void
@@ -557,6 +558,7 @@ export const useDeck = create<DeckState>((set, get) => ({
   toast: null,
   toastVariant: 'success',
   toastRaw: false,
+  toastAction: null,
   toastParams: null,
   currentWorkspaceName: null,
   workspaces: [],
@@ -1035,26 +1037,29 @@ export const useDeck = create<DeckState>((set, get) => ({
   },
 
   showToast: (key, variant = 'success', opts) => {
-    // Throttle repeats (PLAN O5): a failing action retried in a loop must not
-    // strobe the UI -- one toast per key per 5 s.
+    // A visible duplicate would strobe the UI; an expired toast must be recreated.
     const now = Date.now()
     const last = lastToastAt.get(key) ?? 0
-    if (now - last < 5000) return false
+    if (now - last < 5000 && get().toast === key) {
+      if (opts?.action) set({ toastAction: opts.action })
+      return false
+    }
     lastToastAt.set(key, now)
     set({
       toast: key,
       toastVariant: variant,
       toastRaw: opts?.raw ?? false,
+      toastAction: opts?.action ?? null,
       toastParams: opts?.params ?? null
     })
     const token = ++toastToken
     setTimeout(() => {
-      if (toastToken === token) set({ toast: null })
-    }, TOAST_MS[variant])
+      if (toastToken === token) set({ toast: null, toastAction: null })
+    }, opts?.action ? TOAST_ACTION_MS : TOAST_MS[variant])
     return true
   },
 
-  dismissToast: () => set({ toast: null }),
+  dismissToast: () => set({ toast: null, toastAction: null }),
 
   async saveCurrent() {
     await guarded('save workspace', async () => {

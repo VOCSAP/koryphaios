@@ -107,6 +107,7 @@ export function loadConfig(): AppConfig {
   }
   // Whether a spawn carries --settings is not decided by a stray string in the file.
   if (typeof cfg.liveStatusLine !== 'boolean') cfg.liveStatusLine = DEFAULT_CONFIG.liveStatusLine
+  if (typeof cfg.normalizeTerminalCopy !== 'boolean') cfg.normalizeTerminalCopy = DEFAULT_CONFIG.normalizeTerminalCopy
   // Hand-edited file: only well-formed toggle keys survive.
   cfg.ttsrDisabled = sanitizeTtsrDisabled(raw.ttsrDisabled)
   delete (cfg as { helpModel?: string }).helpModel
