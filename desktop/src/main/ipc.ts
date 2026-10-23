@@ -11,6 +11,7 @@ import type {
   AppConfig,
   AssignResult,
   CreateSessionInput,
+  ChoregosMod,
   DispatchResult,
   HelpExchange,
   I18nPayload,
@@ -173,7 +174,7 @@ interface IpcDeps {
   workspaces: WorkspaceService
   getConfig: () => AppConfig
   setConfig: (patch: Partial<AppConfig>) => AppConfig
-  listMods: () => string[]
+  listMods: () => ChoregosMod[]
   /** safeStorage-backed cipher (index.ts): local-provider API keys (C29). */
   secretCipher: SecretCipher
   getWindow: () => BrowserWindow | null

@@ -2,7 +2,7 @@ import { afterAll, describe, expect, test } from 'bun:test'
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { ENGINE_JSX, enabledModsFromLock, ensureModWorkingCopy, listLockedMods, loadModsLock, type WorkingCopyRequest } from '../desktop/src/main/mods-working-copy'
+import { activeClaudePlugins, claudePluginOmissions, ENGINE_JSX, enabledModsFromLock, ensureModWorkingCopy, listLockedMods, loadModsLock, type WorkingCopyRequest } from '../desktop/src/main/mods-working-copy'
 import * as modsWorkingCopy from '../desktop/src/main/mods-working-copy'
 import { modsFingerprint, type ModFile } from '../shared/mods-fingerprint'
 
@@ -547,6 +547,83 @@ describe('segment validation before any join', async () => {
 })
 
 describe('enabled mods', async () => {
+  test('follows the global settings symlink when finding active Claude Code plugins (mutation: read the link itself)', () => {
+    const dir = scratch()
+    const target = join(dir, 'claude-config', 'settings.json')
+    const link = join(dir, '.claude', 'settings.json')
+    mkdirSync(dirname(target), { recursive: true })
+    mkdirSync(dirname(link), { recursive: true })
+    writeFileSync(target, JSON.stringify({ enabledPlugins: { 'prosopon@choregos': true, 'mitos@other': false } }))
+    symlinkSync(target, link, 'file')
+
+    expect(activeClaudePlugins([link])).toEqual(new Set(['prosopon']))
+  })
+
+  test.each([
+    ['prosopon@choregos', 'prosopon'],
+    ['prosopon-x@market', 'prosopon-x'],
+    ['@market', undefined],
+    ['prosopon@', undefined],
+    ['Prosopon@market', undefined]
+  ])('accepts only valid lower-case plugin marketplace keys: %s', (key, plugin) => {
+    const file = join(scratch(), '.claude', 'settings.json')
+    mkdirSync(dirname(file), { recursive: true })
+    writeFileSync(file, JSON.stringify({ enabledPlugins: { [key]: true } }))
+
+    expect(activeClaudePlugins([file]), 'mutation: allow an empty marketplace').toEqual(plugin === undefined ? new Set() : new Set([plugin]))
+  })
+
+  test('finds active plugins in a tile project settings file', () => {
+    const file = join(scratch(), '.claude', 'settings.local.json')
+    mkdirSync(dirname(file), { recursive: true })
+    writeFileSync(file, JSON.stringify({ enabledPlugins: { 'mitos@choregos': true } }))
+
+    expect(activeClaudePlugins([file])).toEqual(new Set(['mitos']))
+  })
+
+  test('reports a broken settings symlink and treats it as inactive (mutation: keep existsSync before the try)', () => {
+    const link = join(scratch(), '.claude', 'settings.json')
+    mkdirSync(dirname(link), { recursive: true })
+    symlinkSync(join(dirname(link), 'missing.json'), link, 'file')
+    const reports: Array<[string, string, unknown]> = []
+
+    expect(activeClaudePlugins([link], (scope, message, error) => reports.push([scope, message, error]))).toEqual(new Set())
+    expect(reports).toHaveLength(1)
+    expect(reports[0]![0]).toBe('mods')
+  })
+
+  test('maps global and both project settings files to their matching host directories (mutation: omit settings.local.json)', () => {
+    const dir = scratch()
+    const globalSettings = join(dir, 'global', 'settings.json')
+    const cwd = join(dir, 'project')
+    mkdirSync(dirname(globalSettings), { recursive: true })
+    mkdirSync(join(cwd, '.claude'), { recursive: true })
+    writeFileSync(globalSettings, JSON.stringify({ enabledPlugins: { 'prosopon@choregos': true } }))
+    writeFileSync(join(cwd, '.claude', 'settings.json'), JSON.stringify({ enabledPlugins: { 'mitos@choregos': true } }))
+    writeFileSync(join(cwd, '.claude', 'settings.local.json'), JSON.stringify({ enabledPlugins: { 'ergon@choregos': true } }))
+
+    expect(claudePluginOmissions(globalSettings, cwd, [
+      { plugin: 'prosopon', hostDir: '/mods/prosopon' },
+      { plugin: 'mitos', hostDir: '/mods/mitos' },
+      { plugin: 'ergon', hostDir: '/mods/ergon' },
+      { plugin: 'other', hostDir: '/mods/other' }
+    ])).toEqual([
+      { plugin: 'prosopon', hostDir: '/mods/prosopon', source: 'global Claude Code settings' },
+      { plugin: 'mitos', hostDir: '/mods/mitos', source: 'project Claude Code settings' },
+      { plugin: 'ergon', hostDir: '/mods/ergon', source: 'project Claude Code settings' }
+    ])
+  })
+
+  test('reports unreadable Claude Code settings and treats them as inactive', () => {
+    const file = join(scratch(), 'settings.json')
+    writeFileSync(file, '{not-json')
+    const reports: Array<[string, string, unknown]> = []
+
+    expect(activeClaudePlugins([file], (scope, message, error) => reports.push([scope, message, error]))).toEqual(new Set())
+    expect(reports).toHaveLength(1)
+    expect(reports[0]![0]).toBe('mods')
+  })
+
   test('ignores a non-object activation map (mutation: omit the record check)', async () => {
     expect(enabledModsFromLock(null, new Map([['prosopon', 'a'.repeat(64)]]))).toEqual([])
   })

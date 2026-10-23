@@ -324,6 +324,11 @@ export interface ApprovalEnrolmentPayload {
   userSalt: string
 }
 
+export interface ChoregosMod {
+  name: string
+  globallyActive: boolean
+}
+
 export interface AppConfig {
   /** Default working directory used as the base for new sessions. */
   projectDir: string
@@ -2145,7 +2150,7 @@ export interface DeckApi {
   // config
   getConfig(): Promise<AppConfig>
   setConfig(patch: Partial<AppConfig>): Promise<AppConfig>
-  listMods(): Promise<string[]>
+  listMods(): Promise<ChoregosMod[]>
   pickDirectory(): Promise<string | null>
   /** Read-only summary of the claude-peers core config (never the token value). */
   getPeersConfig(): Promise<PeersConfigSummary>

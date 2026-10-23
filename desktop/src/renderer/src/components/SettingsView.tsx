@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { BrokerSettings } from './BrokerSettings'
 import { NotificationChannels } from './NotificationChannels'
 import { RulesSettings } from './RulesSettings'
-import type { AppConfig, DisplayMode, LaunchPreset, ModelOption } from '@shared/types'
+import type { AppConfig, ChoregosMod, DisplayMode, LaunchPreset, ModelOption } from '@shared/types'
 import {
   clodexSettingUnavailable,
   targetKey,
@@ -52,7 +52,7 @@ export function SettingsView(): React.JSX.Element {
   const setPickContextPrompt = useDeck((s) => s.setPickContextPrompt)
 
   const [active, setActive] = useState<Category>('general')
-  const [mods, setMods] = useState<string[]>([])
+  const [mods, setMods] = useState<ChoregosMod[]>([])
   const enabledMods =
     typeof config.enabledMods === 'object' && config.enabledMods !== null && !Array.isArray(config.enabledMods)
       ? config.enabledMods
@@ -264,14 +264,16 @@ export function SettingsView(): React.JSX.Element {
                   <div className="field">
                     <span>{t('settings.enabledMods')}</span>
                   </div>
-                  {mods.map((name) => (
-                    <label key={name} className="field field-check">
+                  {mods.map((mod) => (
+                    <label key={mod.name} className="field field-check">
                       <input
                         type="checkbox"
-                        checked={enabledMods[name] === true}
-                        onChange={(e) => setEnabledMod(name, e.target.checked)}
+                        checked={enabledMods[mod.name] === true}
+                        disabled={mod.globallyActive}
+                        title={mod.globallyActive ? t('settings.enabledModGlobalHelp') : undefined}
+                        onChange={(e) => setEnabledMod(mod.name, e.target.checked)}
                       />
-                      <span>{name}</span>
+                      <span>{mod.name}</span>
                     </label>
                   ))}
                   <small className="field-check-help">{t('settings.enabledModsHelp')}</small>

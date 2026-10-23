@@ -28,8 +28,8 @@ import {
   createMissingDirTracker,
   deckLeadPluginDirFor,
   deckPluginDirFor,
-  modsDirFor,
-  pluginDirsForTile
+  makePluginDirsResolver,
+  modsDirFor
 } from './session-command'
 import { buildStatusLineSettings, statusLineHookPath, writeTileSettings } from './statusline-settings'
 import { hostSupportsKoryTelemetry, prewarmClaudeVersion } from './usage-service'
@@ -173,7 +173,7 @@ import type { SessionRuntime } from '@shared/types'
 import { listAgents } from './agents'
 import { createSessionWithWorktree, restartSessionGated } from './create-session'
 import { hasEnabledMods, LaunchAttemptRegistry, prepareLaunchModPlan, prepareRestorePlans } from './mod-launch-plan'
-import { enabledModsFromLock, ensureModWorkingCopy, listLockedMods, loadModsLock, verifyModWorkingCopy } from './mods-working-copy'
+import { activeClaudePlugins, enabledModsFromLock, ensureModWorkingCopy, listLockedMods, loadModsLock, verifyModWorkingCopy } from './mods-working-copy'
 import { SandboxService, type SandboxLaunch } from './sandbox-service'
 import {
   mapHostPathToContainer,
@@ -597,16 +597,7 @@ const getDeckLeadPluginDir = (): string => {
   return exists ? dir : ''
 }
 
-const getPluginDirs = (hasDeckLeadTools: boolean, sandboxed: boolean, modDirs: readonly string[] = []): readonly string[] => {
-  const selected = pluginDirsForTile(getDeckPluginDir(), getDeckLeadPluginDir, hasDeckLeadTools, sandboxed, modDirs)
-  if (selected.rolePluginOmitted) {
-    reportError(
-      'sandbox',
-      'deck-lead-plugin omitted from a sandboxed tile because its container projection is not available'
-    )
-  }
-  return selected.pluginDirs
-}
+const getPluginDirs = makePluginDirsResolver({ deckPluginDir: getDeckPluginDir, deckLeadPluginDir: getDeckLeadPluginDir, globalSettings: join(homedir(), '.claude', 'settings.json'), trace: (message) => journal.add('session', message), reportRolePluginOmitted: () => reportError('sandbox', 'deck-lead-plugin omitted from a sandboxed tile because its container projection is not available') })
 
 // Design endpoint (PLAN D2b): loopback receiver for element picks coming from
 // EXTERNAL apps in design mode (Tauri/Electron dev builds running the
@@ -3640,7 +3631,10 @@ app.whenReady().then(async () => {
     workspaces,
     getConfig,
     setConfig,
-    listMods: () => listLockedMods(modDistDir),
+    listMods: () => {
+      const globalActive = activeClaudePlugins([join(homedir(), '.claude', 'settings.json')])
+      return listLockedMods(modDistDir).map((name) => ({ name, globallyActive: globalActive.has(name) }))
+    },
     secretCipher,
     getWindow: () => mainWindow,
     announce: (text: string) => broadcastAnnounce(text),

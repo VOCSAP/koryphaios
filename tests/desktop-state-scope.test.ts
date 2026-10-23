@@ -327,6 +327,7 @@ const NOT_APP_STATE: Record<string, NotAppStateRule> = {
   ".credentials.json": { reason: "Claude Code's OAuth credential file under ~/.claude, read for the usage gauge; never written" },
   "auth.json": { reason: "Codex CLI's credential file under its home, read for the usage gauge; never written" },
   "settings.json": { reason: "Claude Code settings (host ~/.claude or the sandbox copy), a projection SOURCE, never Deck state" },
+  "settings.local.json": { reason: "Claude Code project settings read to determine active plugins; never written under the Deck state directory" },
   "CLAUDE.md": { reason: "repo instructions listed as a sandbox projection source; never written by the Deck" },
   "deck-journal.txt": { reason: "default file name of the journal EXPORT save dialog, written where the operator chooses" },
   containerPath: { reason: "container-side path of the sandbox prompt file (/kory-run), a mount target, not userData" },

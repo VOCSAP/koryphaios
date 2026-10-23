@@ -274,6 +274,7 @@
   "settings.liveStatusLineHelp": "Remplace les indications en pied de Claude Code (? for shortcuts, esc to interrupt) dans chaque tuile. Prend effet au prochain démarrage d'une tuile.",
   "settings.enabledMods": "Mods choregos",
   "settings.enabledModsHelp": "Les mods activés se chargent dans les nouvelles sessions uniquement.",
+  "settings.enabledModGlobalHelp": "Ce plugin est actif dans vos réglages Claude Code globaux.",
   "settings.spawnMode": "Spawns d'agents du superviseur",
   "settings.spawnModeHandsFree": "Mains libres",
   "settings.spawnModeHandsFreeHelp": "Le superviseur lance les agents que tu lui demandes, sans confirmation de l'app. Chaque lancement reste visible (tuile + journal).",

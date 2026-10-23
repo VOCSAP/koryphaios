@@ -1,7 +1,7 @@
 import { test, expect, afterEach } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 
 // All three modules are pure (no node-pty / electron), so they import under bun.
 import {
@@ -22,8 +22,10 @@ import {
   deckLeadPluginDirFor,
   deckPluginDirFor,
   encodeInitialPromptKeystrokes,
+  makePluginDirsResolver,
   modsDirFor,
   pluginDirsForTile,
+  pluginDirsWithClaudePluginOmissions,
   quotePromptArg,
   sanitizeFlagValue,
   shouldInjectPrompt
@@ -826,6 +828,153 @@ test("a sandboxed tile omits the container deck plugin when the host plugin is a
 
   expect(selected.pluginDirs).toEqual(LAUNCH_CONTAINER_MODS);
   expect(selected.rolePluginOmitted).toBe(false);
+});
+
+test("removing the active-mod omission makes the host launch include a duplicate plugin directory", () => {
+  const selected = pluginDirsForTile(
+    LAUNCH_DECK,
+    () => LAUNCH_LEAD,
+    false,
+    false,
+    LAUNCH_HOST_MODS,
+    [LAUNCH_HOST_MODS[0]]
+  );
+
+  expect(selected.pluginDirs, "a mod active in Claude Code must not also be passed by the Deck").toEqual([
+    LAUNCH_DECK,
+    LAUNCH_HOST_MODS[1]
+  ]);
+});
+
+test("Claude Code settings omit matching host directories and leave their activation sources in the trace", () => {
+  const dir = tmpProject();
+  const globalSettings = join(dir, "global", "settings.json");
+  const cwd = join(dir, "project");
+  mkdirSync(dirname(globalSettings), { recursive: true });
+  mkdirSync(join(cwd, ".claude"), { recursive: true });
+  writeFileSync(globalSettings, JSON.stringify({ enabledPlugins: { "mod-a@choregos": true } }));
+  writeFileSync(join(cwd, ".claude", "settings.local.json"), JSON.stringify({ enabledPlugins: { "mod-b@choregos": true } }));
+  const traces: string[] = [];
+
+  const dirs = pluginDirsWithClaudePluginOmissions({
+    deckPluginDir: LAUNCH_DECK,
+    deckLeadPluginDir: () => LAUNCH_LEAD,
+    hasDeckLeadTools: false,
+    sandboxed: false,
+    modDirs: LAUNCH_HOST_MODS,
+    modCopies: [
+      { plugin: "mod-a", hostDir: LAUNCH_HOST_MODS[0]! },
+      { plugin: "mod-b", hostDir: LAUNCH_HOST_MODS[1]! }
+    ],
+    globalSettings,
+    cwd,
+    trace: (message) => traces.push(message),
+    reportRolePluginOmitted: () => {}
+  });
+
+  expect(dirs, "mutation: replace omissions with []").toEqual([LAUNCH_DECK]);
+  expect(traces, "mutation: remove the omission trace").toEqual([
+    "mod \"mod-a\" omitted because it is active in global Claude Code settings",
+    "mod \"mod-b\" omitted because it is active in project Claude Code settings"
+  ]);
+});
+
+test("a sandboxed tile keeps its mod directories and emits no Claude Code omission trace", () => {
+  const dir = tmpProject();
+  const globalSettings = join(dir, "global", "settings.json");
+  mkdirSync(dirname(globalSettings), { recursive: true });
+  writeFileSync(globalSettings, JSON.stringify({ enabledPlugins: { "mod-a@choregos": true } }));
+  const traces: string[] = [];
+
+  const dirs = pluginDirsWithClaudePluginOmissions({
+    deckPluginDir: LAUNCH_DECK,
+    deckLeadPluginDir: () => LAUNCH_LEAD,
+    hasDeckLeadTools: false,
+    sandboxed: true,
+    modDirs: LAUNCH_CONTAINER_MODS,
+    modCopies: [{ plugin: "mod-a", hostDir: LAUNCH_CONTAINER_MODS[0]! }],
+    globalSettings,
+    cwd: join(dir, "project"),
+    trace: (message) => traces.push(message),
+    reportRolePluginOmitted: () => {}
+  });
+
+  expect(dirs, "mutation: invert the sandbox branch").toEqual([SANDBOX_DECK_PLUGIN_DIR, ...LAUNCH_CONTAINER_MODS]);
+  expect(traces).toEqual([]);
+});
+
+test("the plugin resolver factory keeps cwd, copies and sandbox state in its callback", () => {
+  const dir = tmpProject();
+  const globalSettings = join(dir, "global", "settings.json");
+  const cwd = join(dir, "project");
+  mkdirSync(dirname(globalSettings), { recursive: true });
+  mkdirSync(join(cwd, ".claude"), { recursive: true });
+  writeFileSync(globalSettings, JSON.stringify({ enabledPlugins: { "mod-a@choregos": true } }));
+  writeFileSync(join(cwd, ".claude", "settings.local.json"), JSON.stringify({ enabledPlugins: { "mod-b@choregos": true } }));
+  const traces: string[] = [];
+  const resolvePluginDirs = makePluginDirsResolver({
+    deckPluginDir: () => LAUNCH_DECK,
+    deckLeadPluginDir: () => LAUNCH_LEAD,
+    globalSettings,
+    trace: (message) => traces.push(message),
+    reportRolePluginOmitted: () => {}
+  });
+  const copies = [
+    { plugin: "mod-a", hostDir: LAUNCH_HOST_MODS[0]! },
+    { plugin: "mod-b", hostDir: LAUNCH_HOST_MODS[1]! }
+  ];
+
+  expect(
+    resolvePluginDirs(false, false, LAUNCH_HOST_MODS, copies, cwd),
+    "mutation: ignore callback cwd or copies"
+  ).toEqual([LAUNCH_DECK]);
+  expect(traces).toEqual([
+    "mod \"mod-a\" omitted because it is active in global Claude Code settings",
+    "mod \"mod-b\" omitted because it is active in project Claude Code settings"
+  ]);
+
+  traces.length = 0;
+  expect(
+    resolvePluginDirs(false, true, LAUNCH_CONTAINER_MODS, [{ plugin: "mod-a", hostDir: LAUNCH_CONTAINER_MODS[0]! }], cwd),
+    "mutation: force callback sandboxed to false"
+  ).toEqual([SANDBOX_DECK_PLUGIN_DIR, ...LAUNCH_CONTAINER_MODS]);
+  expect(traces).toEqual([]);
+});
+
+test("the plugin resolver factory relays the deck-lead tools flag to the lead plugin and the omission report", () => {
+  const dir = tmpProject();
+  const globalSettings = join(dir, "global", "settings.json");
+  const cwd = join(dir, "project");
+  mkdirSync(dirname(globalSettings), { recursive: true });
+  writeFileSync(globalSettings, JSON.stringify({ enabledPlugins: { "mod-a@choregos": true } }));
+  let omissionReports = 0;
+  const resolvePluginDirs = makePluginDirsResolver({
+    deckPluginDir: () => LAUNCH_DECK,
+    deckLeadPluginDir: () => LAUNCH_LEAD,
+    globalSettings,
+    trace: () => {},
+    reportRolePluginOmitted: () => { omissionReports++; }
+  });
+  const hostCopies = [{ plugin: "mod-a", hostDir: LAUNCH_HOST_MODS[0]! }];
+  const containerCopies = [{ plugin: "mod-a", hostDir: LAUNCH_CONTAINER_MODS[0]! }];
+
+  expect(
+    resolvePluginDirs(true, false, LAUNCH_HOST_MODS, hostCopies, cwd),
+    "mutation: force callback hasDeckLeadTools to false"
+  ).toEqual([LAUNCH_DECK, LAUNCH_LEAD, LAUNCH_HOST_MODS[1]!]);
+  expect(omissionReports, "a host lead tile loses nothing, so it reports nothing").toBe(0);
+
+  expect(
+    resolvePluginDirs(false, true, LAUNCH_CONTAINER_MODS, containerCopies, cwd),
+    "a sandboxed tile without role tools keeps every mod"
+  ).toEqual([SANDBOX_DECK_PLUGIN_DIR, ...LAUNCH_CONTAINER_MODS]);
+  expect(omissionReports, "a sandboxed tile without role tools omits no role plugin").toBe(0);
+
+  expect(
+    resolvePluginDirs(true, true, LAUNCH_CONTAINER_MODS, containerCopies, cwd),
+    "a sandboxed lead tile never receives the lead plugin"
+  ).toEqual([SANDBOX_DECK_PLUGIN_DIR, ...LAUNCH_CONTAINER_MODS]);
+  expect(omissionReports, "mutation: force callback hasDeckLeadTools to false, or drop reportRolePluginOmitted").toBe(1);
 });
 
 test.each([

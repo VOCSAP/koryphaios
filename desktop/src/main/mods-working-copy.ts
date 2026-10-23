@@ -124,6 +124,51 @@ export function enabledModsFromLock(enabled: unknown, lock: ReadonlyMap<string, 
   return Array.from(lock.keys()).filter((name) => PLUGIN_NAME_PATTERN.test(name) && enabled[name] === true)
 }
 
+export function activeClaudePlugins(
+  files: readonly string[],
+  report: (scope: string, message: string, error?: unknown) => void = reportError
+): ReadonlySet<string> {
+  const active = new Set<string>()
+  for (const file of files) {
+    try {
+      if (lstatSync(file, { throwIfNoEntry: false }) === undefined) continue
+      const parsed: unknown = JSON.parse(readFileSync(file, 'utf-8'))
+      const enabledPlugins = isRecord(parsed) ? parsed.enabledPlugins : undefined
+      if (!isRecord(enabledPlugins)) continue
+      for (const [key, enabled] of Object.entries(enabledPlugins)) {
+        const separator = key.indexOf('@')
+        const plugin = key.slice(0, separator)
+        if (separator > 0 && separator < key.length - 1 && PLUGIN_NAME_PATTERN.test(plugin) && enabled === true) active.add(plugin)
+      }
+    } catch (error) {
+      report('mods', `failed to read Claude Code settings at ${file}`, error)
+    }
+  }
+  return active
+}
+
+export interface ClaudePluginOmission {
+  plugin: string
+  hostDir: string
+  source: 'global Claude Code settings' | 'project Claude Code settings'
+}
+
+export function claudePluginOmissions(
+  globalSettings: string,
+  cwd: string,
+  copies: readonly { plugin: string; hostDir: string }[],
+  report: (scope: string, message: string, error?: unknown) => void = reportError
+): readonly ClaudePluginOmission[] {
+  const globalActive = activeClaudePlugins([globalSettings], report)
+  const projectActive = activeClaudePlugins([join(cwd, '.claude', 'settings.json'), join(cwd, '.claude', 'settings.local.json')], report)
+  const omissions: ClaudePluginOmission[] = []
+  for (const copy of copies) {
+    if (globalActive.has(copy.plugin)) omissions.push({ ...copy, source: 'global Claude Code settings' })
+    else if (projectActive.has(copy.plugin)) omissions.push({ ...copy, source: 'project Claude Code settings' })
+  }
+  return omissions
+}
+
 export function verifyModWorkingCopy(request: WorkingCopyRequest): WorkingCopyOutcome {
   const { distDir, workRoot, plugin, lock } = request
   try {

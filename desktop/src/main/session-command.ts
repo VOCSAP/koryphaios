@@ -7,6 +7,7 @@
 // redirected to stdin/file without breaking live keystrokes.
 
 import { join, posix } from 'node:path'
+import { claudePluginOmissions } from './mods-working-copy'
 
 /**
  * Pulled out as a pure constant so index.ts's host resolution and
@@ -135,16 +136,75 @@ export function pluginDirsForTile(
   deckLeadPluginDir: () => string,
   hasDeckLeadTools: boolean,
   sandboxed: boolean,
-  modDirs: readonly string[] = []
+  modDirs: readonly string[] = [],
+  omittedModDirs: readonly string[] = []
 ): { pluginDirs: readonly string[]; rolePluginOmitted: boolean } {
+  const activeModDirs = sandboxed ? modDirs : modDirs.filter((dir) => !omittedModDirs.includes(dir))
   if (sandboxed) {
     return {
-      pluginDirs: deckPluginDir.trim() ? [SANDBOX_DECK_PLUGIN_DIR, ...modDirs] : [...modDirs],
+      pluginDirs: deckPluginDir.trim() ? [SANDBOX_DECK_PLUGIN_DIR, ...activeModDirs] : [...activeModDirs],
       rolePluginOmitted: hasDeckLeadTools
     }
   }
-  if (!hasDeckLeadTools) return { pluginDirs: [deckPluginDir, ...modDirs], rolePluginOmitted: false }
-  return { pluginDirs: [deckPluginDir, deckLeadPluginDir(), ...modDirs], rolePluginOmitted: false }
+  if (!hasDeckLeadTools) return { pluginDirs: [deckPluginDir, ...activeModDirs], rolePluginOmitted: false }
+  return { pluginDirs: [deckPluginDir, deckLeadPluginDir(), ...activeModDirs], rolePluginOmitted: false }
+}
+
+export interface PluginDirsWithClaudePluginOmissionsInput {
+  deckPluginDir: string
+  deckLeadPluginDir: () => string
+  hasDeckLeadTools: boolean
+  sandboxed: boolean
+  modDirs: readonly string[]
+  modCopies: readonly { plugin: string; hostDir: string }[]
+  globalSettings: string
+  cwd: string
+  trace: (message: string) => void
+  reportRolePluginOmitted: () => void
+}
+
+export function pluginDirsWithClaudePluginOmissions(input: PluginDirsWithClaudePluginOmissionsInput): readonly string[] {
+  const omissions = input.sandboxed ? [] : claudePluginOmissions(input.globalSettings, input.cwd, input.modCopies)
+  for (const omission of omissions) input.trace(`mod "${omission.plugin}" omitted because it is active in ${omission.source}`)
+  const selected = pluginDirsForTile(
+    input.deckPluginDir,
+    input.deckLeadPluginDir,
+    input.hasDeckLeadTools,
+    input.sandboxed,
+    input.modDirs,
+    omissions.map((omission) => omission.hostDir)
+  )
+  if (selected.rolePluginOmitted) input.reportRolePluginOmitted()
+  return selected.pluginDirs
+}
+
+export interface PluginDirsResolverDeps {
+  deckPluginDir: () => string
+  deckLeadPluginDir: () => string
+  globalSettings: string
+  trace: (message: string) => void
+  reportRolePluginOmitted: () => void
+}
+
+export function makePluginDirsResolver(deps: PluginDirsResolverDeps): (
+  hasDeckLeadTools: boolean,
+  sandboxed: boolean,
+  modDirs?: readonly string[],
+  modCopies?: readonly { plugin: string; hostDir: string }[],
+  cwd?: string
+) => readonly string[] {
+  return (hasDeckLeadTools, sandboxed, modDirs = [], modCopies = [], cwd = '') => pluginDirsWithClaudePluginOmissions({
+    deckPluginDir: deps.deckPluginDir(),
+    deckLeadPluginDir: deps.deckLeadPluginDir,
+    hasDeckLeadTools,
+    sandboxed,
+    modDirs,
+    modCopies,
+    globalSettings: deps.globalSettings,
+    cwd,
+    trace: deps.trace,
+    reportRolePluginOmitted: deps.reportRolePluginOmitted
+  })
 }
 
 /**

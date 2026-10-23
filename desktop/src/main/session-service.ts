@@ -350,7 +350,13 @@ export class SessionService extends EventEmitter {
     /** Resolved base command (launch-config) used when a session has no override. */
     private launchCommand = '',
     /** Resolves the embedded plugin directories fresh for every spawn. */
-    private getPluginDirs: (hasDeckLeadTools: boolean, sandboxed: boolean, modDirs?: readonly string[]) => readonly string[] = () => [],
+    private getPluginDirs: (
+      hasDeckLeadTools: boolean,
+      sandboxed: boolean,
+      modDirs?: readonly string[],
+      modCopies?: readonly LaunchModCopy[],
+      cwd?: string
+    ) => readonly string[] = () => [],
     /** Home dir for transcript existence checks (injectable for tests). */
     private home: string = homedir(),
     /**
@@ -1541,7 +1547,9 @@ export class SessionService extends EventEmitter {
     const pluginDirs = this.getPluginDirs(
       this.deckLeadPluginTiles.has(def.id),
       sandboxed,
-      modDirs
+      modDirs,
+      modPlan && 'copies' in modPlan ? modPlan.copies : [],
+      def.cwd
     )
     const telemetryPluginLoaded = pluginDirs.some((pluginDir) => basename(pluginDir) === DECK_PLUGIN_DIRNAME)
     const statusLineSettings = this.statusLineSettingsFor(def, base, telemetryPluginLoaded, cfg.shell)

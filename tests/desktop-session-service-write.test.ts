@@ -77,7 +77,13 @@ function createSessionService(
   home: string,
   cwd: string,
   config: Record<string, unknown> = {},
-  getPluginDirs: (_lead: boolean, _sandboxed: boolean, modDirs?: readonly string[]) => readonly string[] = (_lead, _sandboxed, modDirs = []) => modDirs
+  getPluginDirs: (
+    _lead: boolean,
+    _sandboxed: boolean,
+    modDirs?: readonly string[],
+    modCopies?: readonly { plugin: string; hostDir: string }[],
+    cwd?: string
+  ) => readonly string[] = (_lead, _sandboxed, modDirs = []) => modDirs
 ): InstanceType<typeof SessionService> {
   const service = new SessionService(
     () => ({ projectDir: cwd, shell: "powershell.exe", interactiveShell: false, ...config }),
@@ -736,6 +742,25 @@ test.each([
     expect(service.list()[0]?.status).toBe("running");
     expect(seen).toEqual([[]]);
   });
+});
+
+test("a host mod plan passes its copies and tile cwd to the plugin directory resolver", async () => {
+  const calls: Array<{ copies: readonly { plugin: string; hostDir: string }[]; cwd: string | undefined }> = [];
+  const copies = [{ plugin: "prosopon", fingerprint: "a".repeat(64), hostDir: "/mods/prosopon" }];
+  await withModService(
+    { enabledMods: { prosopon: true } },
+    (_lead, _sandboxed, modDirs = [], seenCopies = [], cwd) => {
+      calls.push({ copies: seenCopies, cwd });
+      return modDirs;
+    },
+    (service) => {
+      service.create(
+        { cwd: "/tile/project" },
+        { modPlan: { attemptId: "a", mode: "host", modDirs: ["/mods/prosopon"], copies, diagnostics: [] } } as never
+      );
+      expect(calls).toEqual([{ copies, cwd: "/tile/project" }]);
+    }
+  );
 });
 
 test("a restored workspace gives each tile its own mod plan", async () => {

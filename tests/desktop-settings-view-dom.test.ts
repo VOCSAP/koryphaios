@@ -31,7 +31,9 @@ interface FakeDeckState {
 
 let updateConfigCalls: Array<Partial<AppConfig>> = [];
 let reportedErrors: Array<[string, string]> = [];
-let listModsImpl: () => Promise<string[]> = () => Promise.resolve([]);
+type ModOffer = string | { name: string; globallyActive: boolean };
+
+let listModsImpl: () => Promise<ModOffer[]> = () => Promise.resolve([]);
 
 function deckState(enabledMods: unknown): FakeDeckState {
   return {
@@ -82,9 +84,9 @@ afterEach(() => {
   container.remove();
 });
 
-async function mount(enabledMods: unknown, offered: string[]): Promise<void> {
+async function mount(enabledMods: unknown, offered: ModOffer[]): Promise<void> {
   fakeUseDeck.setState(deckState(enabledMods), true);
-  listModsImpl = () => Promise.resolve(offered);
+  listModsImpl = () => Promise.resolve(offered.map((mod) => typeof mod === "string" ? { name: mod, globallyActive: false } : mod));
   await act(async () => {
     root.render(React.createElement(SettingsView));
     await Promise.resolve();
@@ -119,6 +121,20 @@ test("with the default configuration every offered mod is shown unchecked", asyn
   expect(modCheckbox("alpha"), "alpha must be offered as a switch").not.toBeUndefined();
   expect(modCheckbox("alpha")!.checked, "no mod may read as enabled without an operator gesture").toBe(false);
   expect(modCheckbox("beta")!.checked, "no mod may read as enabled without an operator gesture").toBe(false);
+});
+
+test("a globally active mod disables only its activation switch", async () => {
+  await mount({}, [
+    { name: "prosopon", globallyActive: true },
+    { name: "mitos", globallyActive: false }
+  ]);
+
+  const globallyActive = modCheckbox("prosopon");
+  const deckManaged = modCheckbox("mitos");
+  expect(globallyActive, "the globally active mod must remain identifiable in settings").not.toBeUndefined();
+  expect(globallyActive!.disabled, "a global plugin must own its activation state").toBe(true);
+  expect(globallyActive!.title).toBe("settings.enabledModGlobalHelp");
+  expect(deckManaged!.disabled, "an inactive global plugin remains controlled by the Deck").toBe(false);
 });
 
 test("a mod stored as true reads as checked and its neighbour stays unchecked", async () => {
