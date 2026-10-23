@@ -25,6 +25,16 @@ import {
 import { commandHash } from './launch-approval'
 import { reportError } from './log'
 
+export class BrokerHttpError extends Error {
+  constructor(
+    readonly path: string,
+    readonly status: number,
+    readonly detail: string
+  ) {
+    super(detail ? `${path} failed: ${detail.slice(0, 300)}: ${status}` : `${path} failed: ${status}`)
+  }
+}
+
 export interface ApprovalDeps {
   endpoint: BrokerEndpoint
   identity: OperatorIdentity
@@ -70,7 +80,6 @@ async function signedPost<T>(
 ): Promise<T> {
   const res = await signedRequest(deps, path, payload, signal)
   if (!res.ok) {
-    // The status stays last: callers match a lost race with /: 409$/.
     const raw = (await res.text()).trim()
     let detail = raw
     try {
@@ -79,7 +88,7 @@ async function signedPost<T>(
     } catch {
       // Not JSON: the raw body is the operator's only clue, kept as is.
     }
-    throw new Error(detail ? `${path} failed: ${detail.slice(0, 300)}: ${res.status}` : `${path} failed: ${res.status}`)
+    throw new BrokerHttpError(path, res.status, detail)
   }
   return (await res.json()) as T
 }
@@ -240,7 +249,7 @@ export async function claimApproval(
     })
     return res.approval
   } catch (e) {
-    if (e instanceof Error && /: 409$/.test(e.message)) return null
+    if (e instanceof BrokerHttpError && e.status === 409) return null
     throw e
   }
 }
@@ -303,7 +312,7 @@ export async function settleAnsweredInTerminal(deps: ApprovalDeps, id: string): 
     })
     return res.approval
   } catch (e) {
-    if (e instanceof Error && /: 409$/.test(e.message)) return null
+    if (e instanceof BrokerHttpError && e.status === 409) return null
     throw e
   }
 }
@@ -342,7 +351,7 @@ export async function ackApproval(deps: ApprovalDeps, id: string): Promise<Appro
     })
     return res.approval
   } catch (e) {
-    if (e instanceof Error && /: 409$/.test(e.message)) return null
+    if (e instanceof BrokerHttpError && e.status === 409) return null
     throw e
   }
 }

@@ -2,7 +2,10 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import * as approvalService from "../desktop/src/main/approval-service.ts";
 import {
   addApproval,
+  BrokerHttpError,
   claimApproval,
+  settleAnsweredInTerminal,
+  ackApproval,
   fetchPendingApprovals,
   fetchUndeliveredVerdicts,
   markVerdictsDelivered,
@@ -187,7 +190,15 @@ test("a refused claim surfaces the broker's reason to the operator, status last"
     { ...deps, fetchImpl: answering(410, JSON.stringify({ error: reason })) },
     { id: "a", answerKind: "allow" }
   );
-  await expect(gone).rejects.toThrow(`/approval/claim failed: ${reason}: 410`);
+  const goneError = await gone.catch((error: unknown) => error);
+  expect(goneError, "a status other than 409 must remain an error").toBeInstanceOf(BrokerHttpError);
+  expect(goneError).toMatchObject({
+    path: "/approval/claim",
+    status: 410,
+    detail: reason
+  });
+  expect(goneError).toMatchObject({ message: `/approval/claim failed: ${reason}: 410` });
+  expect(String(goneError)).toBe(`Error: /approval/claim failed: ${reason}: 410`);
 
   const raw = claimApproval({ ...deps, fetchImpl: answering(502, "Bad Gateway") }, { id: "a", answerKind: "allow" });
   await expect(raw).rejects.toThrow("/approval/claim failed: Bad Gateway: 502");
@@ -200,4 +211,22 @@ test("a refused claim surfaces the broker's reason to the operator, status last"
     { id: "a", answerKind: "allow" }
   );
   expect(lost, "a lost race still reads as null once the reason is in the message").toBeNull();
+});
+
+test("settleAnsweredInTerminal treats only HTTP 409 as already settled", async () => {
+  const answering = (status: number): typeof fetch =>
+    (async () => new Response(JSON.stringify({ error: "already-settled" }), { status })) as unknown as typeof fetch;
+  const deps = makeDeps("proj-terminal-answer");
+
+  await expect(settleAnsweredInTerminal({ ...deps, fetchImpl: answering(409) }, "a")).resolves.toBeNull();
+  await expect(settleAnsweredInTerminal({ ...deps, fetchImpl: answering(410) }, "a")).rejects.toBeInstanceOf(BrokerHttpError);
+});
+
+test("ackApproval treats only HTTP 409 as already settled", async () => {
+  const answering = (status: number): typeof fetch =>
+    (async () => new Response(JSON.stringify({ error: "already-settled" }), { status })) as unknown as typeof fetch;
+  const deps = makeDeps("proj-ack");
+
+  await expect(ackApproval({ ...deps, fetchImpl: answering(409) }, "a")).resolves.toBeNull();
+  await expect(ackApproval({ ...deps, fetchImpl: answering(410) }, "a")).rejects.toBeInstanceOf(BrokerHttpError);
 });
