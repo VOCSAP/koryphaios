@@ -303,6 +303,8 @@ export interface Approval {
   notif_expires_at: string
   answered_at: string | null
   delivered_at: string | null
+  /** Display only, never a key or a proof: the last 12 characters of the digest of the author instance of an attested question. */
+  author_instance_hint?: string
 }
 
 /** One notification channel as the Settings screen sees it. */

@@ -96,6 +96,8 @@ interface ScopeFields {
   project_key: string;
   /** Non-null only for a session credential, which may act on its own tile. */
   session_ref: string | null;
+  /** Set only on the stamp of an attested question: the run and the author instance the broker proved. */
+  inbox?: { run_ref: string; group_id: string; author_instance_ref: string };
 }
 
 // Module-private, and THIS is the enforcement -- not the brand on the type.
@@ -173,13 +175,16 @@ export function approvalTileWhere(scope: ApprovalScope): { sql: string; params: 
  * The credential-derived columns of an INSERT, as columns and values the caller
  * splices into its own statement without ever seeing them.
  */
-export function stampInsert(stamp: OriginStamp): { columns: string[]; values: string[] } {
+export function stampInsert(stamp: OriginStamp): { columns: string[]; values: Array<string | number> } {
   const f = stampFields.get(stamp);
   if (!f) throw new Error("stampInsert: not a stamp minted by this module");
-  return {
-    columns: ["operator_id", "project_key", "session_ref"],
-    values: [f.operator_id, f.project_key, f.session_ref ?? ""],
-  };
+  const columns = ["operator_id", "project_key", "session_ref"];
+  const values: Array<string | number> = [f.operator_id, f.project_key, f.session_ref ?? ""];
+  if (f.inbox) {
+    columns.push("inbox_run_ref", "inbox_group_id", "author_instance_ref", "provenance_version", "source_kind");
+    values.push(f.inbox.run_ref, f.inbox.group_id, f.inbox.author_instance_ref, 1, "agent");
+  }
+  return { columns, values };
 }
 
 /** Everything this module needs from the broker, so it imports no database. */
@@ -233,9 +238,15 @@ const GATE_OPERATIONS = {
   [INBOX_GATES.authorClose]: ["inbox-author-proof"],
   [INBOX_GATES.mandateList]: ["inbox-list"],
   [INBOX_GATES.mandateClose]: ["inbox-close"],
+  [INBOX_GATES.drain]: ["inbox-drain"],
+  [INBOX_GATES.purge]: ["inbox-purge"],
 } as const satisfies Record<InboxGate, readonly ApprovalOperation[]>;
 
-const INBOX_OPERATION_SET: ReadonlySet<ApprovalOperation> = new Set<ApprovalOperation>(INBOX_OPERATIONS);
+const V1_ONLY_OPERATIONS: ReadonlySet<ApprovalOperation> = new Set<ApprovalOperation>([
+  ...INBOX_OPERATIONS,
+  "inbox-drain",
+  "inbox-purge",
+]);
 
 declare const ACTOR_BRAND: unique symbol;
 
@@ -316,7 +327,12 @@ export interface ApprovalAuth {
     ids: string[]
   ): AuthResult<{ scope: ApprovalScope; rows: R[] }>;
   authorizeQuery(body: Body, op: ApprovalOperation): AuthResult<{ scope: ApprovalScope }>;
-  authorizeCreate(body: Body): AuthResult<{ scope: ApprovalScope; stamp: OriginStamp }>;
+  /**
+   * With `inbox`, the question is attested: a v1 proof of a run credential for
+   * that gate, naming (in the signed body) the asking instance, which must be
+   * bound to that very run. The stamp then carries the run and the instance.
+   */
+  authorizeCreate(body: Body, inbox?: { gate: InboxGate }): AuthResult<{ scope: ApprovalScope; stamp: OriginStamp }>;
   scopeForAnsweredRow<R extends { operator_id: string; project_key: string }>(
     approvalId: string
   ): { scope: ApprovalScope; row: R } | null;
@@ -367,7 +383,7 @@ export function createApprovalAuth(deps: ApprovalAuthDeps): ApprovalAuth {
     // happened to pass a gate: an Inbox operation has no legacy form, so a
     // legacy proof can never carry one, and a gate carries only its own
     // operations.
-    if (gate === undefined && INBOX_OPERATION_SET.has(op)) {
+    if (gate === undefined && V1_ONLY_OPERATIONS.has(op)) {
       return { error: `${op} requires a v1 proof`, status: 403 };
     }
     if (
@@ -628,12 +644,40 @@ export function createApprovalAuth(deps: ApprovalAuthDeps): ApprovalAuth {
       return { scope: got.scope };
     },
 
-    authorizeCreate(body: Body): AuthResult<{ scope: ApprovalScope; stamp: OriginStamp }> {
-      const got = scopeFor(body, "add");
-      if (isAuthError(got)) return got;
-      const f = scopeFields.get(got.scope);
-      if (!f) throw new Error("authorizeCreate: scope lost its fields");
-      return { scope: got.scope, stamp: mintStamp({ ...f }) };
+    authorizeCreate(body: Body, inbox?: { gate: InboxGate }): AuthResult<{ scope: ApprovalScope; stamp: OriginStamp }> {
+      if (inbox === undefined) {
+        const got = scopeFor(body, "add");
+        if (isAuthError(got)) return got;
+        const f = scopeFields.get(got.scope);
+        if (!f) throw new Error("authorizeCreate: scope lost its fields");
+        return { scope: got.scope, stamp: mintStamp({ ...f }) };
+      }
+      const id = authenticate(body, "inbox-deposit", inbox.gate);
+      if (isAuthError(id)) return id;
+      if (id.purpose !== "run" || !id.inbox) return { error: "a run credential is required to ask", status: 403 };
+      const projectKey = resolveProjectKey(id, body);
+      if (typeof projectKey !== "string") return projectKey;
+      const token = typeof body.instance_token === "string" ? body.instance_token : "";
+      if (!token) return { error: "instance_token is required for an attested question", status: 400 };
+      const ref = deriveInstanceRef(token);
+      const binding = deps.resolveInstanceBinding?.(ref) ?? null;
+      if (
+        !binding ||
+        binding.operator_id !== id.operator_id ||
+        binding.run_ref !== id.inbox.run_ref ||
+        binding.group_id !== id.inbox.group_id ||
+        binding.project_key !== projectKey
+      ) {
+        return { error: "the asking instance is not bound to this run", status: 403 };
+      }
+      const fields: ScopeFields = { operator_id: id.operator_id, project_key: projectKey, session_ref: id.session_ref };
+      return {
+        scope: mintScope({ ...fields }),
+        stamp: mintStamp({
+          ...fields,
+          inbox: { run_ref: id.inbox.run_ref, group_id: id.inbox.group_id, author_instance_ref: ref },
+        }),
+      };
     },
 
     /**

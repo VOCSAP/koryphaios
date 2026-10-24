@@ -2,11 +2,29 @@ import { test, expect, beforeAll, afterAll } from "bun:test";
 import { hostname } from "node:os";
 import { createHash } from "node:crypto";
 import { startBroker, stopBroker, post, livePid, type TestBroker, openBrokerDb } from "./_helper.ts";
+import {
+  buildAuthProof,
+  buildInboxProof,
+  deriveInstanceRef,
+  deriveOperatorId,
+  generateCredential,
+  INBOX_GATES,
+  type ApprovalCredential,
+  type InboxGate,
+} from "../shared/approval.ts";
 
 let broker: TestBroker;
 const brokers: TestBroker[] = [];
 
-beforeAll(async () => { broker = await startBroker(); });
+// One operator trusted at boot mints every run credential of this file.
+const INBOX_OPERATOR = (() => {
+  const cred = generateCredential();
+  return { cred, id: deriveOperatorId(cred.publicKey) };
+})();
+
+beforeAll(async () => {
+  broker = await startBroker({}, { trustedOperators: [INBOX_OPERATOR.cred.publicKey] });
+});
 afterAll(async () => {
   await stopBroker(broker);
   for (const b of brokers) { await stopBroker(b); }
@@ -262,4 +280,292 @@ test("two rows sharing one cc_session_id FAIL CLOSED: a third tile gets a fresh 
   const third = await register(host, cwd, livePid(), { desk_session: "tile-C", cc_session_id: "cc-dup" });
   expect(third.body.instance_token).not.toBe(one.body.instance_token);
   expect(third.body.instance_token).not.toBe(restored.body.instance_token);
+});
+
+const INBOX_PROJECT = "github.com/vocsap/koryphaios";
+const INBOX_SECRET = "a".repeat(64);
+
+interface RunCredential {
+  cred: ApprovalCredential;
+  tokenId: string;
+  run: string;
+  group: string;
+}
+
+async function mintRunCredential(group: string): Promise<RunCredential> {
+  const cred = generateCredential();
+  const run = crypto.randomUUID();
+  const body = {
+    session_public_key: cred.publicKey,
+    session_ref: `window-${run}`,
+    project_key: INBOX_PROJECT,
+    inbox: { version: 1, kind: "run", run_ref: run, group_id: group },
+    public_key: INBOX_OPERATOR.cred.publicKey,
+  };
+  const auth = buildInboxProof(INBOX_OPERATOR.cred.privateKey, body, INBOX_GATES.mint, {
+    kind: "operator",
+    operator_id: INBOX_OPERATOR.id,
+  });
+  const res = await post<{ token_id: string }>(`${broker.url}/approval/token-mint`, { ...body, auth });
+  expect(res.status).toBe(200);
+  return { cred, tokenId: res.body.token_id, run, group };
+}
+
+interface RegisterReply {
+  peer_id: string;
+  instance_token: string;
+  error?: string;
+}
+
+function registerBody(group: string, host: string, cwd: string, extras: RegisterExtras): Record<string, unknown> {
+  return {
+    pid: livePid(), cwd, git_root: null, tty: null, summary: "", host, client_pid: 1,
+    project_key: null, group_id: group, group_secret_hash: INBOX_SECRET,
+    ...extras,
+  };
+}
+
+function registerBare(group: string, host: string, cwd: string, extras: RegisterExtras = {}) {
+  return post<RegisterReply>(`${broker.url}/register`, registerBody(group, host, cwd, extras));
+}
+
+function registerAttested(
+  run: RunCredential,
+  host: string,
+  cwd: string,
+  options: RegisterExtras & { resume?: string; gate?: InboxGate; credential?: ApprovalCredential; group?: string } = {}
+) {
+  const { resume, gate, credential, group, ...extras } = options;
+  const body = {
+    ...registerBody(group ?? run.group, host, cwd, extras),
+    inbox_operation: "register",
+    ...(resume ? { resume_instance_token: resume } : {}),
+  };
+  const auth = buildInboxProof((credential ?? run.cred).privateKey, body, gate ?? INBOX_GATES.register, {
+    kind: "session",
+    operator_id: INBOX_OPERATOR.id,
+    token_id: run.tokenId,
+  });
+  return post<RegisterReply>(`${broker.url}/register`, { ...body, auth });
+}
+
+function bindingOf(instanceToken: string): Record<string, unknown> | null {
+  const db = openBrokerDb(broker.dbPath, { readonly: true });
+  try {
+    return db
+      .query("SELECT operator_id, run_ref, group_id, project_key FROM inbox_instance_bindings WHERE author_instance_ref = ?")
+      .get(deriveInstanceRef(instanceToken)) as Record<string, unknown> | null;
+  } finally {
+    db.close();
+  }
+}
+
+function peerCount(host: string, cwd: string): number {
+  const db = openBrokerDb(broker.dbPath, { readonly: true });
+  try {
+    return (db.query("SELECT COUNT(*) AS n FROM peers WHERE host = ? AND cwd = ?").get(host, cwd) as { n: number }).n;
+  } finally {
+    db.close();
+  }
+}
+
+function dropRows(sql: string, ...params: string[]): void {
+  const db = openBrokerDb(broker.dbPath);
+  try {
+    db.run(sql, params);
+  } finally {
+    db.close();
+  }
+}
+
+const canonicalOf = (host: string, cwd: string): string[] => sessionRows(host, cwd).map((r) => r.instance_token);
+
+test("an attested register binds the instance to the credential's scope, and the binding outlives its peer row and association", async () => {
+  const run = await mintRunCredential("g-inbox-bind");
+  const a = await registerAttested(run, "hostBind", "/bind");
+
+  expect(a.status).toBe(200);
+  expect(bindingOf(a.body.instance_token)).toEqual({
+    operator_id: INBOX_OPERATOR.id,
+    run_ref: run.run,
+    group_id: run.group,
+    project_key: INBOX_PROJECT,
+  });
+  dropRows("DELETE FROM peers WHERE instance_token = ?", a.body.instance_token);
+  dropRows("DELETE FROM peer_sessions WHERE instance_token = ?", a.body.instance_token);
+  expect(bindingOf(a.body.instance_token), "the marker must outlive both rows").not.toBeNull();
+});
+
+test("a bare client never takes over a bound dormant candidate, and its owner gets the identity back only with its own proof", async () => {
+  const run = await mintRunCredential("g-inbox-dormant");
+  const opts = { desk_session: "tile-1" };
+  const b = await registerAttested(run, "hostDorm", "/dorm", opts);
+  await disconnect(b.body.instance_token);
+
+  const bare = await registerBare(run.group, "hostDorm", "/dorm", opts);
+  expect(bare.body.instance_token).not.toBe(b.body.instance_token);
+  expect(bare.body.peer_id).not.toBe(b.body.peer_id);
+  expect(canonicalOf("hostDorm", "/dorm"), "the canonical association is not rewritten").toEqual([b.body.instance_token]);
+
+  const signedWithoutProof = await registerAttested(run, "hostDorm", "/dorm", opts);
+  expect(signedWithoutProof.body.instance_token).not.toBe(b.body.instance_token);
+  expect(canonicalOf("hostDorm", "/dorm")).toEqual([b.body.instance_token]);
+
+  const back = await registerAttested(run, "hostDorm", "/dorm", { ...opts, resume: b.body.instance_token });
+  expect(back.body.instance_token).toBe(b.body.instance_token);
+  expect(back.body.peer_id).toBe(b.body.peer_id);
+});
+
+test("a bound candidate whose peer row was purged is not reinserted for a bare client, but is for its owner", async () => {
+  const run = await mintRunCredential("g-inbox-purged");
+  const opts = { desk_session: "tile-1" };
+  const b = await registerAttested(run, "hostPurged", "/purged", opts);
+  dropRows("DELETE FROM peers WHERE instance_token = ?", b.body.instance_token);
+
+  const bare = await registerBare(run.group, "hostPurged", "/purged", opts);
+  expect(bare.body.instance_token).not.toBe(b.body.instance_token);
+  expect(canonicalOf("hostPurged", "/purged"), "the association stays on the purged bound token").toEqual([b.body.instance_token]);
+  expect(bindingOf(b.body.instance_token), "the marker is still there after the purge").not.toBeNull();
+
+  const back = await registerAttested(run, "hostPurged", "/purged", { ...opts, resume: b.body.instance_token });
+  expect(back.body.instance_token).toBe(b.body.instance_token);
+  expect(peerCount("hostPurged", "/purged")).toBe(2);
+});
+
+test("a bound candidate reached through cc_session_id is not resumed either, and its owner's key is not touched", async () => {
+  const run = await mintRunCredential("g-inbox-cc");
+  const b = await registerAttested(run, "hostCc", "/cc", { desk_session: "tile-B", cc_session_id: "cc-bound" });
+  await disconnect(b.body.instance_token);
+
+  const other = await registerBare(run.group, "hostCc", "/cc", { desk_session: "tile-A", cc_session_id: "cc-bound" });
+  expect(other.body.instance_token).not.toBe(b.body.instance_token);
+  const rows = sessionRows("hostCc", "/cc");
+  expect(rows.map((r) => r.instance_token).sort()).toEqual([b.body.instance_token, other.body.instance_token].sort());
+});
+
+test("the proof of an instance does not replace a canonical association held by another bound instance", async () => {
+  const run = await mintRunCredential("g-inbox-cost");
+  const opts = { desk_session: "tile-1" };
+  const b = await registerAttested(run, "hostCost", "/cost", opts);
+  await disconnect(b.body.instance_token);
+  const a = await registerAttested(run, "hostCost", "/cost", opts);
+  expect(a.body.instance_token).not.toBe(b.body.instance_token);
+
+  const aAgain = await registerAttested(run, "hostCost", "/cost", { ...opts, resume: a.body.instance_token });
+  expect(aAgain.body.instance_token, "a proof of A does not match the candidate B: continuity is the accepted cost").not.toBe(
+    a.body.instance_token
+  );
+  expect(aAgain.body.instance_token, "and a proof of A never hands out B's identity").not.toBe(b.body.instance_token);
+  expect(canonicalOf("hostCost", "/cost")).toEqual([b.body.instance_token]);
+});
+
+test("a proven bound candidate that is still running is not taken over: the newcomer is a new bound instance", async () => {
+  const run = await mintRunCredential("g-inbox-collision");
+  const opts = { desk_session: "tile-1" };
+  const b = await registerAttested(run, "hostCol", "/col", opts);
+
+  const second = await registerAttested(run, "hostCol", "/col", { ...opts, resume: b.body.instance_token });
+
+  expect(second.status).toBe(200);
+  expect(second.body.instance_token).not.toBe(b.body.instance_token);
+  expect(bindingOf(second.body.instance_token), "the newcomer is bound to the run like any attested instance").toMatchObject({
+    run_ref: run.run,
+  });
+  expect(canonicalOf("hostCol", "/col")).toEqual([b.body.instance_token]);
+});
+
+test("a proof from another run does not resume a bound candidate", async () => {
+  const run1 = await mintRunCredential("g-inbox-two-runs");
+  const run2 = await mintRunCredential("g-inbox-two-runs");
+  const opts = { desk_session: "tile-1" };
+  const first = await registerAttested(run1, "hostTwo", "/two", opts);
+  await disconnect(first.body.instance_token);
+
+  const stolen = await registerAttested(run2, "hostTwo", "/two", { ...opts, resume: first.body.instance_token });
+  expect(stolen.body.instance_token).not.toBe(first.body.instance_token);
+  expect(bindingOf(stolen.body.instance_token)).toMatchObject({ run_ref: run2.run });
+  expect(canonicalOf("hostTwo", "/two")).toEqual([first.body.instance_token]);
+  const rightful = await registerAttested(run1, "hostTwo", "/two", { ...opts, resume: first.body.instance_token });
+  expect(rightful.body.instance_token).toBe(first.body.instance_token);
+});
+
+test("an attested instance never converts a legacy row: a new bound identity, and it takes the key only when no live legacy process holds it", async () => {
+  const run = await mintRunCredential("g-inbox-legacy");
+  const dormantLegacy = await registerBare(run.group, "hostLeg", "/leg-dormant");
+  await disconnect(dormantLegacy.body.instance_token);
+  const attested = await registerAttested(run, "hostLeg", "/leg-dormant");
+  expect(attested.body.instance_token).not.toBe(dormantLegacy.body.instance_token);
+  expect(bindingOf(dormantLegacy.body.instance_token), "the legacy token is never promoted").toBeNull();
+  expect(canonicalOf("hostLeg", "/leg-dormant")).toEqual([attested.body.instance_token]);
+
+  const liveLegacy = await registerBare(run.group, "hostLeg", "/leg-live");
+  const alongside = await registerAttested(run, "hostLeg", "/leg-live");
+  expect(alongside.body.instance_token).not.toBe(liveLegacy.body.instance_token);
+  expect(bindingOf(alongside.body.instance_token)).not.toBeNull();
+  expect(canonicalOf("hostLeg", "/leg-live")).toEqual([liveLegacy.body.instance_token]);
+});
+
+test("a proof that is present but invalid is a refusal, never a bare registration", async () => {
+  const run = await mintRunCredential("g-inbox-refuse");
+  const expectRefused = async (reply: Promise<{ status: number; body: RegisterReply }>, status: number, host: string, cwd: string) => {
+    const res = await reply;
+    expect({ status: res.status, peers: peerCount(host, cwd) }).toEqual({ status, peers: 0 });
+  };
+
+  await expectRefused(registerAttested(run, "hostRef1", "/r1", { gate: INBOX_GATES.deposit }), 401, "hostRef1", "/r1");
+  await expectRefused(registerAttested(run, "hostRef2", "/r2", { credential: generateCredential() }), 401, "hostRef2", "/r2");
+
+  const legacyProof = await (async () => {
+    const body = { ...registerBody(run.group, "hostRef3", "/r3", {}), inbox_operation: "register" };
+    const auth = buildAuthProof(run.cred.privateKey, body, { kind: "session", operator_id: INBOX_OPERATOR.id, token_id: run.tokenId });
+    return post<RegisterReply>(`${broker.url}/register`, { ...body, auth });
+  })();
+  expect({ status: legacyProof.status, error: legacyProof.body.error, peers: peerCount("hostRef3", "/r3") }).toEqual({
+    status: 401,
+    error: "not-v1",
+    peers: 0,
+  });
+
+  await expectRefused(registerAttested(run, "hostRef4", "/r4", { group: "g-inbox-elsewhere" }), 403, "hostRef4", "/r4");
+  const db = openBrokerDb(broker.dbPath, { readonly: true });
+  const pinned = db.query("SELECT 1 FROM groups WHERE group_id = 'g-inbox-elsewhere'").get();
+  db.close();
+  expect(pinned, "a refused attested register must not pin a group").toBeNull();
+});
+
+test("an inbox field without its proof is a 400, and a revoked run credential is a 401", async () => {
+  const run = await mintRunCredential("g-inbox-fields");
+  const withResume = await registerBare(run.group, "hostFld", "/fld", {
+    resume_instance_token: "x",
+  } as RegisterExtras);
+  const withOperation = await registerBare(run.group, "hostFld", "/fld2", {
+    inbox_operation: "register",
+  } as RegisterExtras);
+  expect([withResume.status, withOperation.status]).toEqual([400, 400]);
+
+  const revoke = {
+    session_ref: `window-${run.run}`,
+    public_key: INBOX_OPERATOR.cred.publicKey,
+  };
+  const revokeAuth = buildAuthProof(INBOX_OPERATOR.cred.privateKey, revoke, { kind: "operator", operator_id: INBOX_OPERATOR.id });
+  expect((await post(`${broker.url}/approval/token-revoke`, { ...revoke, auth: revokeAuth })).status).toBe(200);
+  const afterRevoke = await registerAttested(run, "hostFld", "/fld3");
+  expect({ status: afterRevoke.status, peers: peerCount("hostFld", "/fld3") }).toEqual({ status: 401, peers: 0 });
+});
+
+test("the binding is written with the peer in one transaction: a failing binding publishes neither the peer nor the association", async () => {
+  const run = await mintRunCredential("g-inbox-atomic");
+  const db = openBrokerDb(broker.dbPath);
+  db.run("CREATE TRIGGER zz_binding_abort BEFORE INSERT ON inbox_instance_bindings BEGIN SELECT RAISE(ABORT, 'forced'); END");
+  try {
+    const res = await registerAttested(run, "hostAtomic", "/atomic");
+    expect(res.status).toBeGreaterThanOrEqual(500);
+    expect(peerCount("hostAtomic", "/atomic")).toBe(0);
+    expect(sessionRows("hostAtomic", "/atomic")).toEqual([]);
+  } finally {
+    db.run("DROP TRIGGER zz_binding_abort");
+    db.close();
+  }
+  const after = await registerAttested(run, "hostAtomic", "/atomic");
+  expect(after.status).toBe(200);
 });

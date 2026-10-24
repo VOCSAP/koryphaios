@@ -155,6 +155,16 @@ export interface RegisterRequest {
    * context reserve is refused while the owner has not announced it.
    */
   context_resume_version?: number;
+  /**
+   * Inbox attestation. `auth` is a v1 proof of the Deck's
+   * run credential over this whole body: it makes the new instance a member of
+   * that run. `resume_instance_token` is the previous private token of this
+   * same instance and is only honoured inside the signed payload; it lets a
+   * bound instance get its own identity back, and nothing else does.
+   */
+  inbox_operation?: "register";
+  resume_instance_token?: string;
+  auth?: ApprovalAuthProof;
 }
 
 export interface RegisterResponse {
@@ -218,6 +228,12 @@ export interface SendMessageRequest {
   untracked_reply_policy?: UntrackedReplyPolicy;
   /** Set by the MCP alongside the policy; omitted by the tool means true. */
   expects_reply?: boolean;
+  /**
+   * Inbox attestation. A v1 proof of the Deck's run
+   * credential over this whole body. Required for an operator deposit from an
+   * instance that was bound to a run; ignored for peer-to-peer messages.
+   */
+  auth?: ApprovalAuthProof;
 }
 
 export type UntrackedReplyPolicy = "lead" | "warn";
@@ -1508,6 +1524,14 @@ export interface OperatorInboxRequest {
    * each see everything and neither one consumes for the other.
    */
   session_id?: string;
+  /**
+   * Run-scoped read: the Deck run whose entries this read
+   * addresses, with `auth` an operator-signed v1 proof over the whole body. The
+   * run must have a live credential. Without them the read is the legacy one,
+   * which never sees an entry stamped with a run.
+   */
+  run_ref?: string;
+  auth?: ApprovalAuthProof;
 }
 
 export interface OperatorInboxMessage {
@@ -1515,6 +1539,12 @@ export interface OperatorInboxMessage {
   from_peer_id: PeerId;
   text: string;
   sent_at: string;
+  /**
+   * Display only, never a key or a proof: the last 12 characters of the digest
+   * of the author instance, so two instances sharing a peer_id snapshot can be
+   * told apart. Absent on a legacy entry and on a broker notification.
+   */
+  author_instance_hint?: string;
 }
 
 export interface OperatorInboxResponse {
@@ -1536,6 +1566,9 @@ export interface OperatorInboxPurgeRequest {
    */
   scope: "session" | "ids";
   ids?: number[];
+  /** Run-scoped purge: same contract as OperatorInboxRequest.run_ref and auth. */
+  run_ref?: string;
+  auth?: ApprovalAuthProof;
 }
 
 export interface OperatorInboxPurgeResponse {
@@ -1913,10 +1946,20 @@ export interface Approval {
   notif_expires_at: string; // ISO timestamp
   answered_at: string | null;
   delivered_at: string | null;
+  /**
+   * Display only, never a key or a proof: the last 12 characters of the digest
+   * of the author instance of an attested question. Absent on any other row.
+   */
+  author_instance_hint?: string;
 }
 
 export interface ApprovalAddRequest {
   auth?: ApprovalAuthProof;
+  /**
+   * Required with a v1 proof: the private token of the asking instance, inside
+   * the signed body. The answer is routed to that instance and to no other.
+   */
+  instance_token?: string;
   origin?: Partial<ApprovalOrigin>;
   kind?: ApprovalKind;
   title?: string;
@@ -2028,6 +2071,11 @@ export interface ApprovalListRequest {
   status?: ApprovalStatus;
   /** Only approvals answered but not yet applied by the producer. */
   undelivered_only?: boolean;
+  /**
+   * The Deck run asking. An attested channel question belongs to the run that
+   * raised it and is returned to that run only; without it none is returned.
+   */
+  run_ref?: string;
 }
 
 export interface ApprovalListResponse {
@@ -2037,6 +2085,7 @@ export interface ApprovalListResponse {
 export interface ApprovalDeliveredRequest {
   auth?: ApprovalAuthProof;
   ids?: string[];
+  run_ref?: string;
 }
 
 export interface ApprovalDeliveredResponse {

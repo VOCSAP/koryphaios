@@ -107,6 +107,7 @@ import {
   APPROVAL_ANSWER_KINDS,
   APPROVAL_VIAS,
   approvalWaitTimeoutSec,
+  deriveInstanceRef,
   deriveTokenId,
   INBOX_GATES,
   sanitizeAnswerForPty,
@@ -124,6 +125,7 @@ import {
   isAuthError,
   type ApprovalScope,
   type AuthResult,
+  type InboxInstanceBinding,
 } from "./shared/approval-scope.ts";
 // Card bf76d37f: the dispatch outcome is written by the Deck and READ BACK by
 // an agent, so it crosses the same boundary as an approval answer and gets the
@@ -1729,6 +1731,90 @@ db.run(
   `CREATE INDEX IF NOT EXISTS idx_approvals_operator ON pending_approvals(operator_id, status)`
 );
 
+function migrateAddColumns(table: string, columns: string[]): void {
+  for (const column of columns) {
+    try {
+      db.run(`ALTER TABLE ${table} ADD COLUMN ${column}`);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (!msg.includes("duplicate column name")) log.error(`migration: ${msg}`);
+    }
+  }
+}
+
+migrateAddColumns("messages", [
+  "inbox_operator_id TEXT",
+  "inbox_run_ref TEXT",
+  "inbox_group_id TEXT",
+  "inbox_project_key TEXT",
+  "author_instance_ref TEXT",
+  "author_peer_id_snapshot TEXT",
+  "source_kind TEXT",
+  "provenance_version INTEGER",
+]);
+for (const column of [
+  "inbox_run_ref TEXT",
+  "inbox_group_id TEXT",
+  "author_instance_ref TEXT",
+  "author_peer_id_snapshot TEXT",
+  "source_kind TEXT",
+  "provenance_version INTEGER",
+]) {
+  try {
+    db.run(`ALTER TABLE pending_approvals ADD COLUMN ${column}`);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (!msg.includes("duplicate column name")) log.error(`migration: ${msg}`);
+  }
+}
+db.run(`CREATE INDEX IF NOT EXISTS idx_messages_inbox_run ON messages(to_token, inbox_run_ref)`);
+
+// No foreign key or cascade: losing a peers or peer_sessions row must never turn a bound token back into a legacy one.
+db.run(`
+  CREATE TABLE IF NOT EXISTS inbox_instance_bindings (
+    author_instance_ref TEXT PRIMARY KEY,
+    operator_id TEXT NOT NULL,
+    run_ref TEXT NOT NULL,
+    group_id TEXT NOT NULL,
+    project_key TEXT NOT NULL,
+    bound_at TEXT NOT NULL
+  )
+`);
+
+// Read cursors of a Deck RUN. A separate table from operator_inbox_sessions so a
+// legacy session_id and a run-scoped one can never address the same cursor, and
+// a cursor row names the run it belongs to.
+db.run(`
+  CREATE TABLE IF NOT EXISTS operator_inbox_run_sessions (
+    session_id TEXT NOT NULL,
+    operator_id TEXT NOT NULL,
+    run_ref TEXT NOT NULL,
+    group_id TEXT NOT NULL,
+    last_id INTEGER NOT NULL DEFAULT 0,
+    started_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL,
+    PRIMARY KEY (session_id, operator_id, run_ref, group_id)
+  )
+`);
+
+const selectInstanceBinding = db.prepare(
+  `SELECT operator_id, run_ref, group_id, project_key FROM inbox_instance_bindings WHERE author_instance_ref = ?`
+);
+
+/** Resolves a binding by the DIGEST of an instance token; a database error propagates and is never read as "unbound". */
+function bindingByRef(instanceRef: string): InboxInstanceBinding | null {
+  return (selectInstanceBinding.get(instanceRef) as InboxInstanceBinding | null) ?? null;
+}
+
+function bindingOfToken(instanceToken: string): InboxInstanceBinding | null {
+  return bindingByRef(deriveInstanceRef(instanceToken));
+}
+
+/** The only part of an instance digest that leaves the broker: 12 characters, for display. */
+function instanceHint(instanceRef: string): string {
+  return instanceRef.slice(-12);
+}
+
 // Card 1def56da: rows written before project scoping carry project_key = '',
 // which compares as an ordinary value here, not a wildcard -- nothing can claim
 // them once every handler requires a scope.
@@ -1997,19 +2083,11 @@ function emitLockAbandonedEvent(row: {
     return;
   }
   const minutes = Math.max(0, row.held_minutes ?? 0);
-  // Card 4441e883, team-lead correctif: this function serves BOTH clause 1/2
-  // (owner-gone/TTL, a real abandonment) and clause 3 (a deliberate park that
-  // expired) -- `lock_parked_at !== null` is what distinguishes them, since
-  // clause 3 is the only one that ever releases a parked row (see the doc
-  // comment on `release` above). And the UPDATE below only ever flips status
-  // to 'planned' when it WAS 'in_progress' -- a locked row with any other
-  // status (reachable via /roadmap/import writing locked=1 outside
-  // resolveRoadmapLock) never gets that flip, so the "back to 'planned'"
-  // fragment must not be asserted for it.
+  // An expired park was a deliberate release, an abandonment was not, and only an in_progress row goes back to 'planned'.
   const eventFragment = row.lock_parked_at !== null ? "its park expired" : "abandoned";
   const statusFragment = row.status === "in_progress" ? " -- it is back to 'planned'" : "";
-  const text = `Card '${row.title}' (${row.id}) was held by '${row.locked_by ?? "unknown"}' for ${minutes} minute${minutes === 1 ? "" : "s"}, then ${eventFragment}${statusFragment}.`;
-  insertMessage.run(DECK_INSTANCE_TOKEN, OPERATOR_INSTANCE_TOKEN, row.locked_group, text, new Date().toISOString());
+  const text = `Card ${JSON.stringify(row.title)} (${row.id}) was held by '${row.locked_by ?? "unknown"}' for ${minutes} minute${minutes === 1 ? "" : "s"}, then ${eventFragment}${statusFragment}.`;
+  insertSystemMessage.run(DECK_INSTANCE_TOKEN, OPERATOR_INSTANCE_TOKEN, row.locked_group, text, new Date().toISOString());
 }
 
 /**
@@ -2196,6 +2274,25 @@ const insertTaskMessage = db.prepare(`
   VALUES (?, ?, ?, ?, ?, 0, ?)
 `);
 
+// Stamped by the broker's own producers and by nothing else: no request field
+// reaches this statement, and a legacy NULL row is not a system row.
+const insertSystemMessage = db.prepare(`
+  INSERT INTO messages (from_token, to_token, group_id, text, sent_at, delivered, source_kind, provenance_version)
+  VALUES (?, ?, ?, ?, ?, 0, 'system', 1)
+`);
+
+interface MessageProvenance extends InboxInstanceBinding {
+  author_instance_ref: string;
+  author_peer_id_snapshot: string;
+}
+
+const insertAgentMessage = db.prepare(`
+  INSERT INTO messages (from_token, to_token, group_id, text, sent_at, delivered,
+    inbox_operator_id, inbox_run_ref, inbox_group_id, inbox_project_key,
+    author_instance_ref, author_peer_id_snapshot, source_kind, provenance_version)
+  VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, 'agent', 1)
+`);
+
 // Ordered by sent_at then id, not id alone: sent_at stays the primary sort key
 // so intended chronological order is preserved, while id only breaks a genuine
 // sent_at tie -- two sends can land in the same millisecond.
@@ -2236,7 +2333,7 @@ const upsertOperatorInboxSession = db.prepare(`
   INSERT INTO operator_inbox_sessions (session_id, group_id, last_id, started_at, last_seen_at)
   VALUES (
     ?, ?,
-    COALESCE((SELECT MAX(id) FROM messages WHERE to_token = ? AND group_id = ?), 0),
+    COALESCE((SELECT MAX(id) FROM messages WHERE to_token = ? AND group_id = ? AND source_kind IS NOT 'agent'), 0),
     ?, ?
   )
   ON CONFLICT (session_id, group_id) DO UPDATE SET last_seen_at = excluded.last_seen_at
@@ -2249,7 +2346,7 @@ const selectOperatorInboxSession = db.prepare(
 const selectOperatorInboxByCursor = db.prepare(
   `SELECT m.id, m.text, m.sent_at, COALESCE(p.peer_id, '<gone>') AS from_peer_id
    FROM messages m LEFT JOIN peers p ON p.instance_token = m.from_token
-   WHERE m.to_token = ? AND m.group_id = ? AND m.id > ?
+   WHERE m.to_token = ? AND m.group_id = ? AND m.id > ? AND m.source_kind IS NOT 'agent'
    ORDER BY m.id`
 );
 
@@ -2284,17 +2381,85 @@ const minLiveOperatorInboxCursor = db.prepare(
 // reachable from.
 const bumpOperatorInboxCursorToMax = db.prepare(
   `UPDATE operator_inbox_sessions
-     SET last_id = COALESCE((SELECT MAX(id) FROM messages WHERE to_token = ? AND group_id = ?), last_id)
+     SET last_id = COALESCE((SELECT MAX(id) FROM messages WHERE to_token = ? AND group_id = ? AND source_kind IS NOT 'agent'), last_id)
    WHERE session_id = ? AND group_id = ?`
 );
 
+// The legacy purge never reaches an entry stamped by an agent of a run:
+// 'IS NOT' keeps NULL (legacy) and 'system' rows in its reach, nothing else.
 const purgeOperatorInboxUpToId = db.prepare(
-  `DELETE FROM messages WHERE to_token = ? AND group_id = ? AND id <= ?`
+  `DELETE FROM messages WHERE to_token = ? AND group_id = ? AND id <= ? AND source_kind IS NOT 'agent'`
 );
 
 const purgeOperatorInboxByIds = (ids: number[]) =>
   db.prepare(
-    `DELETE FROM messages WHERE to_token = ? AND group_id = ? AND id IN (${ids.map(() => "?").join(",")})`
+    `DELETE FROM messages WHERE to_token = ? AND group_id = ? AND source_kind IS NOT 'agent' AND id IN (${ids.map(() => "?").join(",")})`
+  );
+
+// --- Run-scoped cursors and reads: the domain of ONE run, plus the group's
+// broker notifications. A run's cursor starts at zero because its domain is new
+// and isolated: seeding it at the box's current MAX(id) would lose an entry
+// deposited before the Deck's first poll.
+
+const upsertRunInboxSession = db.prepare(`
+  INSERT INTO operator_inbox_run_sessions (session_id, operator_id, run_ref, group_id, last_id, started_at, last_seen_at)
+  VALUES (?, ?, ?, ?, 0, ?, ?)
+  ON CONFLICT (session_id, operator_id, run_ref, group_id) DO UPDATE SET last_seen_at = excluded.last_seen_at
+`);
+
+const selectRunInboxSession = db.prepare(
+  `SELECT last_id FROM operator_inbox_run_sessions
+    WHERE session_id = ? AND operator_id = ? AND run_ref = ? AND group_id = ?`
+);
+
+const selectRunInboxByCursor = db.prepare(
+  `SELECT m.id, m.text, m.sent_at, m.source_kind, m.author_instance_ref,
+          COALESCE(m.author_peer_id_snapshot, p.peer_id, '<gone>') AS from_peer_id
+   FROM messages m LEFT JOIN peers p ON p.instance_token = m.from_token
+   WHERE m.to_token = ? AND m.group_id = ? AND m.id > ?
+     AND ((m.inbox_operator_id = ? AND m.inbox_run_ref = ?) OR m.source_kind = 'system')
+   ORDER BY m.id`
+);
+
+const advanceRunInboxCursor = db.prepare(
+  `UPDATE operator_inbox_run_sessions SET last_id = ?
+    WHERE session_id = ? AND operator_id = ? AND run_ref = ? AND group_id = ?`
+);
+
+const gcDeadRunInboxSessions = db.prepare(
+  `DELETE FROM operator_inbox_run_sessions
+    WHERE operator_id = ? AND run_ref = ? AND group_id = ? AND julianday(last_seen_at) < julianday('now', ?)`
+);
+
+const minLiveRunInboxCursor = db.prepare(
+  `SELECT MIN(last_id) AS floor FROM operator_inbox_run_sessions
+    WHERE operator_id = ? AND run_ref = ? AND group_id = ?`
+);
+
+const bumpRunInboxCursorToMax = db.prepare(
+  `UPDATE operator_inbox_run_sessions
+      SET last_id = COALESCE((
+        SELECT MAX(id) FROM messages
+         WHERE to_token = ? AND group_id = ?
+           AND ((inbox_operator_id = ? AND inbox_run_ref = ?) OR source_kind = 'system')
+      ), last_id)
+    WHERE session_id = ? AND operator_id = ? AND run_ref = ? AND group_id = ?`
+);
+
+// The floor deletes the run's OWN agent entries only: a broker notification is
+// shared by every Deck of the group and is removed by an explicit id.
+const purgeRunInboxUpToId = db.prepare(
+  `DELETE FROM messages
+    WHERE to_token = ? AND group_id = ? AND id <= ?
+      AND inbox_operator_id = ? AND inbox_run_ref = ? AND source_kind = 'agent'`
+);
+
+const purgeRunInboxByIds = (ids: number[]) =>
+  db.prepare(
+    `DELETE FROM messages
+      WHERE to_token = ? AND group_id = ?
+        AND ((inbox_operator_id = ? AND inbox_run_ref = ?) OR source_kind = 'system')
+        AND id IN (${ids.map(() => "?").join(",")})`
   );
 
 // Heuristic ack: a peer sending a message in a group has necessarily processed
@@ -2330,12 +2495,27 @@ function recordMessage(
   groupId: string,
   text: string,
   sentAt: string,
-  taskId: string | null = null
+  taskId: string | null = null,
+  provenance: MessageProvenance | null = null
 ): number {
   const result =
-    taskId === null
-      ? insertMessage.run(fromToken, toToken, groupId, text, sentAt)
-      : insertTaskMessage.run(fromToken, toToken, groupId, text, sentAt, taskId);
+    provenance !== null
+      ? insertAgentMessage.run(
+          fromToken,
+          toToken,
+          groupId,
+          text,
+          sentAt,
+          provenance.operator_id,
+          provenance.run_ref,
+          provenance.group_id,
+          provenance.project_key,
+          provenance.author_instance_ref,
+          provenance.author_peer_id_snapshot
+        )
+      : taskId === null
+        ? insertMessage.run(fromToken, toToken, groupId, text, sentAt)
+        : insertTaskMessage.run(fromToken, toToken, groupId, text, sentAt, taskId);
   const messageId = Number(result.lastInsertRowid);
   updateLastActivity.run(sentAt, fromToken);
   updateLastActivity.run(sentAt, toToken);
@@ -2460,6 +2640,82 @@ function normalizeIncomingProjectKey(
   return raw;
 }
 
+const insertInstanceBinding = db.prepare(
+  `INSERT INTO inbox_instance_bindings (author_instance_ref, operator_id, run_ref, group_id, project_key, bound_at)
+   VALUES (?, ?, ?, ?, ?, ?)`
+);
+
+function sameRunScope(a: InboxInstanceBinding, b: InboxInstanceBinding): boolean {
+  return (
+    a.operator_id === b.operator_id &&
+    a.run_ref === b.run_ref &&
+    a.group_id === b.group_id &&
+    a.project_key === b.project_key
+  );
+}
+
+/** A peer that is registered and genuinely running: same pid probe as the resume path, without mutating the row. */
+function peerIsLive(instanceToken: string): boolean {
+  const row = db
+    .query("SELECT status, pid, host FROM peers WHERE instance_token = ?")
+    .get(instanceToken) as { status: string; pid: number; host: string } | null;
+  if (!row || row.status !== "active") return false;
+  if (row.host !== BROKER_HOST) return true;
+  try {
+    process.kill(row.pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Judges the optional Inbox attestation of a /register body. No proof means a
+ * bare client and no scope. A proof means the whole body was signed by the run
+ * credential: any failure is a refusal, and the run must cover the group being
+ * joined. The project the instance is bound to is the credential's, not the
+ * peer's declared project_key, which a tile in another repository may differ on.
+ */
+function admitRegisterAttestation(
+  body: RegisterRequest
+): { scope: InboxInstanceBinding | null } | { error: string; status: number } {
+  if (body.auth === undefined) {
+    if (body.inbox_operation !== undefined || body.resume_instance_token !== undefined) {
+      return { error: "an inbox attestation needs an auth proof", status: 400 };
+    }
+    return { scope: null };
+  }
+  if (body.inbox_operation !== "register") return { error: "inbox_operation must be 'register'", status: 400 };
+  if (
+    body.resume_instance_token !== undefined &&
+    (typeof body.resume_instance_token !== "string" ||
+      body.resume_instance_token.length === 0 ||
+      body.resume_instance_token.length > 256)
+  ) {
+    return { error: "resume_instance_token must be a non-empty string", status: 400 };
+  }
+  const identity = approvalAuth.authenticateInbox(
+    body as unknown as { auth?: ApprovalAuthProof } & Record<string, unknown>,
+    "inbox-register",
+    INBOX_GATES.register
+  );
+  if (isAuthError(identity)) return identity;
+  if (identity.purpose !== "run" || !identity.inbox) {
+    return { error: "a run credential is required to register", status: 403 };
+  }
+  if (identity.inbox.group_id !== body.group_id) {
+    return { error: "run credential does not cover this group", status: 403 };
+  }
+  return {
+    scope: {
+      operator_id: identity.operator_id,
+      run_ref: identity.inbox.run_ref,
+      group_id: identity.inbox.group_id,
+      project_key: identity.project_key ?? "",
+    },
+  };
+}
+
 function handleRegister(body: RegisterRequest): RegisterResponse | { error: string; status: number } {
   const groupId = body.group_id;
   const secretHash = body.group_secret_hash;
@@ -2469,6 +2725,13 @@ function handleRegister(body: RegisterRequest): RegisterResponse | { error: stri
     host: body.host,
     client_pid: body.client_pid,
   });
+
+  // 0) Inbox attestation, judged BEFORE the group is pinned: a refused attested
+  // register must not leave a group behind. An auth that is present and invalid
+  // is a refusal, never a fallback to the bare behaviour.
+  const attested = admitRegisterAttestation(body);
+  if ("error" in attested) return attested;
+  const runScope = attested.scope;
 
   // 1) Group authentication / TOFU. /register is the one caller that also
   // PINS the secret on first sight, so it keeps its own existing/insert
@@ -2500,6 +2763,9 @@ function handleRegister(body: RegisterRequest): RegisterResponse | { error: stri
   let session = db.query(
     "SELECT instance_token FROM peer_sessions WHERE session_key = ?"
   ).get(sk) as { instance_token: string } | null;
+  // True when the candidate holds THIS session key. A candidate found through
+  // cc_session_id sits under another key, so this key is free to associate.
+  const keyIsOccupied = session !== null;
 
   if (!session && ccSessionId) {
     // Secondary lookup only on a key miss, for the Restore gesture (a new tile
@@ -2520,6 +2786,76 @@ function handleRegister(body: RegisterRequest): RegisterResponse | { error: stri
       log.warn(
         `cc_session_id ${ccSessionId.slice(0, 16)} matches ${candidates.length} session rows; refusing to pick one, minting a fresh peer`
       );
+    }
+  }
+
+  // A new instance: one transaction for the peer, its binding to the run and,
+  // when it takes over the session key, the association. Nothing is visible
+  // unless every part landed, so a token never exists without its marker.
+  const registerNewInstance = (opts: { associate: boolean }): RegisterResponse => {
+    const token = randomUUID();
+    const peerId = deriveDefaultId(body.host, body.cwd, groupId);
+    db.transaction(() => {
+      insertPeer.run(
+        token,
+        peerId,
+        groupId,
+        body.pid,
+        body.cwd,
+        body.git_root,
+        body.tty,
+        body.summary,
+        now,
+        now,
+        now,
+        body.host,
+        body.client_pid,
+        projectKey,
+        body.claude_cli_pid ?? null,
+        normalizedRole
+      );
+      if (runScope) {
+        insertInstanceBinding.run(
+          deriveInstanceRef(token),
+          runScope.operator_id,
+          runScope.run_ref,
+          runScope.group_id,
+          runScope.project_key,
+          now
+        );
+      }
+      if (opts.associate) {
+        upsertPeerSession.run(sk, token, groupId, body.host, body.cwd, now, ccSessionId, deskSessionHash(body.desk_session));
+      }
+    })();
+    return { peer_id: peerId, instance_token: token, role: normalizedRole };
+  };
+
+  // A candidate that was ever bound to a run is a security identity, not an
+  // index entry. Without the proof of its own token (signed, same run) it is not
+  // resumed, not resurrected and its association is not rewritten: the caller
+  // gets a new instance and nothing else moves. Judged before every branch
+  // below, so no branch can forget it.
+  if (session) {
+    const candidateBinding = bindingOfToken(session.instance_token);
+    if (candidateBinding !== null) {
+      const proven =
+        runScope !== null &&
+        typeof body.resume_instance_token === "string" &&
+        safeEqual(body.resume_instance_token, session.instance_token) &&
+        sameRunScope(candidateBinding, runScope);
+      if (!proven) {
+        log.warn(`register: a bound session candidate was not proven, minting a new instance`, {
+          group_id: groupId,
+          attested: runScope !== null,
+        });
+        return registerNewInstance({ associate: !keyIsOccupied });
+      }
+    } else if (runScope !== null) {
+      // An attested instance never converts an unattested row in place. It gets
+      // a new bound identity, and takes the association only when no live legacy
+      // process holds the key.
+      return registerNewInstance({ associate: !keyIsOccupied || !peerIsLive(session.instance_token) });
     }
   }
 
@@ -2583,6 +2919,7 @@ function handleRegister(body: RegisterRequest): RegisterResponse | { error: stri
       log.warn(
         `session_key collision: existing active peer ${existingPeer.peer_id} keeps the session, minting new peer`
       );
+      if (runScope !== null) return registerNewInstance({ associate: false });
       const freshToken = randomUUID();
       const freshId = deriveDefaultId(body.host, body.cwd, groupId);
       // Card a2f61172: same rule as every other branch -- the transport's
@@ -2635,6 +2972,7 @@ function handleRegister(body: RegisterRequest): RegisterResponse | { error: stri
   }
 
   // 3) Fresh registration.
+  if (runScope !== null) return registerNewInstance({ associate: true });
   const newToken = randomUUID();
   const newPeerId = deriveDefaultId(body.host, body.cwd, groupId);
   insertPeer.run(
@@ -3284,12 +3622,58 @@ function trackingUnavailable(sender: MessageSender, target: MessageTarget): Trac
   return groupMayCarryOperatorInbox(sender.group_id) ? undefined : "no_operator_inbox";
 }
 
+/**
+ * Admission of a deposit addressed to the operator, judged before anything is
+ * written. A sender that was ever bound to a run must sign: removing the proof
+ * is not a way back to the unattested behaviour. A proof is a v1 proof of a run
+ * credential over the final body, and the sender must be bound to exactly that
+ * run, so a credential of one run never speaks for an instance of another.
+ * The provenance returned is built here from the credential and the binding;
+ * nothing in the body names an author.
+ */
+function admitOperatorDeposit(
+  body: SendMessageRequest,
+  sender: MessageSender
+): { provenance: MessageProvenance | null } | { error: string; status: number } {
+  const binding = bindingOfToken(sender.instance_token);
+  if (body.auth === undefined) {
+    if (binding !== null) return { error: "an attested instance must sign its operator deposits", status: 401 };
+    return { provenance: null };
+  }
+  const identity = approvalAuth.authenticateInbox(
+    body as unknown as { auth?: ApprovalAuthProof } & Record<string, unknown>,
+    "inbox-deposit",
+    INBOX_GATES.deposit
+  );
+  if (isAuthError(identity)) return identity;
+  if (identity.purpose !== "run" || !identity.inbox) {
+    return { error: "a run credential is required to deposit", status: 403 };
+  }
+  const credentialScope: InboxInstanceBinding = {
+    operator_id: identity.operator_id,
+    run_ref: identity.inbox.run_ref,
+    group_id: identity.inbox.group_id,
+    project_key: identity.project_key ?? "",
+  };
+  if (binding === null || !sameRunScope(binding, credentialScope) || sender.group_id !== credentialScope.group_id) {
+    return { error: "the sender instance is not bound to this run", status: 403 };
+  }
+  return {
+    provenance: {
+      ...credentialScope,
+      author_instance_ref: deriveInstanceRef(sender.instance_token),
+      author_peer_id_snapshot: sender.peer_id,
+    },
+  };
+}
+
 async function sendOrdinaryMessage(
   sender: MessageSender,
   targetId: string,
   text: string,
   taskId: string | null = null,
-  untracked?: UntrackedSend
+  untracked?: UntrackedSend,
+  provenance: MessageProvenance | null = null
 ): Promise<SendMessageResponse> {
   if (text.length > MESSAGE_TEXT_MAX) {
     return { ok: false, error: `text must be a string of at most ${MESSAGE_TEXT_MAX} characters` };
@@ -3338,7 +3722,7 @@ async function sendOrdinaryMessage(
     unavailable === undefined;
   const messageId = refusable
     ? recordUnlessUnanswered(sender, target, text, sentAt)
-    : recordMessageTx(sender.instance_token, target.instance_token, sender.group_id, text, sentAt, taskId);
+    : recordMessageTx(sender.instance_token, target.instance_token, sender.group_id, text, sentAt, taskId, provenance);
   if (messageId === null) return { ok: false, error: UNTRACKED_REPLY_REFUSAL };
   pushPeerMessage(target.instance_token, messageId, sender, text, sentAt);
   return withTracking(taskId === null ? { ok: true, message_id: messageId } : { ok: true });
@@ -3467,6 +3851,11 @@ async function handleSendMessage(body: SendMessageRequest): Promise<SendMessageR
       body.untracked_reply_policy === undefined
         ? undefined
         : { policy: body.untracked_reply_policy, expectsReply: body.expects_reply !== false };
+    if (body.to_peer_id === OPERATOR_PEER_ID) {
+      const admitted = admitOperatorDeposit(body, sender);
+      if ("error" in admitted) return { ok: false, error: admitted.error, status: admitted.status };
+      return sendOrdinaryMessage(sender, body.to_peer_id, body.text, null, untracked, admitted.provenance);
+    }
     return sendOrdinaryMessage(sender, body.to_peer_id, body.text, null, untracked);
   }
   if (hasTaskAction && !isDelegationTaskAction(body.task_action)) {
@@ -3855,7 +4244,7 @@ const settleTaskTx = db.transaction(
       `${SETTLE_REASON_TEXT[reason]} (${row.rearm_count}/${row.max_rearms} rearms used). ` +
       `The broker will not follow this task up again; close it explicitly once it is settled.`;
     const pushes: DeckPush[] = [];
-    insertMessage.run(DECK_INSTANCE_TOKEN, OPERATOR_INSTANCE_TOKEN, row.group_id, text, at);
+    insertSystemMessage.run(DECK_INSTANCE_TOKEN, OPERATOR_INSTANCE_TOKEN, row.group_id, text, at);
     reserveDelegationEvent(row, "escalate", OPERATOR_INSTANCE_TOKEN, text, at);
     if (taskPeerExists(row.delegator_token, row.group_id)) {
       pushes.push(depositDeckMessage(row.delegator_token, row.group_id, text, at));
@@ -9552,6 +9941,125 @@ if (BROKER_MODE === "replica") {
 }
 
 /**
+ * A run-scoped read or purge is the Deck main's gesture: an operator-signed v1
+ * proof over the whole body, naming the run, and the run must still hold a live
+ * credential. The scope returned is built here from the proof and the stored
+ * credential, never from a field of the body.
+ */
+function admitRunRead(
+  body: OperatorInboxRequest | OperatorInboxPurgeRequest,
+  op: "inbox-drain" | "inbox-purge"
+): { scope: { operator_id: string; run_ref: string } } | { error: string; status: number } {
+  if (typeof body.run_ref !== "string" || body.run_ref === "" || body.auth === undefined) {
+    return { error: "run_ref and auth are required together", status: 400 };
+  }
+  if (typeof body.session_id !== "string" || body.session_id.length === 0) {
+    return { error: "session_id is required for a run-scoped read", status: 400 };
+  }
+  const identity = approvalAuth.authenticateInbox(
+    body as unknown as { auth?: ApprovalAuthProof } & Record<string, unknown>,
+    op,
+    op === "inbox-drain" ? INBOX_GATES.drain : INBOX_GATES.purge
+  );
+  if (isAuthError(identity)) return identity;
+  if (identity.kind !== "operator") return { error: "the operator key is required", status: 403 };
+  const runRef = body.run_ref.toLowerCase();
+  const live = db
+    .query(
+      `SELECT 1 FROM approval_session_tokens
+        WHERE operator_id = ? AND inbox_purpose = 'run' AND run_ref = ? AND group_id = ?
+          AND revoked_at IS NULL AND expires_at > ?
+        LIMIT 1`
+    )
+    .get(identity.operator_id, runRef, body.group_id, new Date().toISOString());
+  if (!live) return { error: "no live credential for this run", status: 403 };
+  if (!groupExists(body.group_id)) {
+    return { error: `The '${body.group_id}' group has never registered a session`, status: 403 };
+  }
+  return { scope: { operator_id: identity.operator_id, run_ref: runRef } };
+}
+
+type RunInboxRow = {
+  id: number;
+  text: string;
+  sent_at: string;
+  source_kind: string | null;
+  from_peer_id: string;
+  author_instance_ref: string | null;
+};
+
+// IMMEDIATE takes the write lock at the first statement, so a second broker on
+// the same database cannot read the same cursor and deliver the batch twice.
+const drainRunInboxTx = db.transaction(
+  (sessionId: string, operatorId: string, runRef: string, groupId: string, now: string): RunInboxRow[] => {
+    upsertRunInboxSession.run(sessionId, operatorId, runRef, groupId, now, now);
+    const lastId =
+      (selectRunInboxSession.get(sessionId, operatorId, runRef, groupId) as { last_id: number } | null)?.last_id ?? 0;
+    const rows = selectRunInboxByCursor.all(OPERATOR_INSTANCE_TOKEN, groupId, lastId, operatorId, runRef) as RunInboxRow[];
+    // A broker notification is shared with the group's legacy reader, which
+    // still selects on delivered = 0: only the run's own entries are marked.
+    for (const row of rows) if (row.source_kind === "agent") markDelivered.run(row.id);
+    if (rows.length > 0) {
+      advanceRunInboxCursor.run(rows[rows.length - 1]!.id, sessionId, operatorId, runRef, groupId);
+    }
+    return rows;
+  }
+);
+
+const purgeRunInboxSessionTx = db.transaction(
+  (sessionId: string, operatorId: string, runRef: string, groupId: string, now: string): number => {
+    gcDeadRunInboxSessions.run(operatorId, runRef, groupId, `-${OPERATOR_INBOX_SESSION_TTL_MIN} minutes`);
+    // A session that never drained is created here, under the same lock, so the
+    // floor below always includes the caller's own cursor.
+    upsertRunInboxSession.run(sessionId, operatorId, runRef, groupId, now, now);
+    bumpRunInboxCursorToMax.run(OPERATOR_INSTANCE_TOKEN, groupId, operatorId, runRef, sessionId, operatorId, runRef, groupId);
+    const floor = (minLiveRunInboxCursor.get(operatorId, runRef, groupId) as { floor: number | null } | null)?.floor;
+    if (floor === null || floor === undefined) return 0;
+    return purgeRunInboxUpToId.run(OPERATOR_INSTANCE_TOKEN, groupId, floor, operatorId, runRef).changes;
+  }
+);
+
+function handleRunInboxDrain(
+  body: OperatorInboxRequest
+): OperatorInboxResponse | { error: string; status: number } {
+  const admitted = admitRunRead(body, "inbox-drain");
+  if ("error" in admitted) return admitted;
+  const { operator_id: operatorId, run_ref: runRef } = admitted.scope;
+  const rows = drainRunInboxTx.immediate(body.session_id as string, operatorId, runRef, body.group_id, new Date().toISOString());
+  return {
+    messages: rows.map((r) => ({
+      id: r.id,
+      from_peer_id: r.from_peer_id,
+      text: r.text,
+      sent_at: r.sent_at,
+      ...(r.author_instance_ref ? { author_instance_hint: instanceHint(r.author_instance_ref) } : {}),
+    })),
+  };
+}
+
+function handleRunInboxPurge(
+  body: OperatorInboxPurgeRequest
+): OperatorInboxPurgeResponse | { error: string; status: number } {
+  const admitted = admitRunRead(body, "inbox-purge");
+  if ("error" in admitted) return admitted;
+  const { operator_id: operatorId, run_ref: runRef } = admitted.scope;
+  const groupId = body.group_id;
+
+  if (body.scope === "ids") {
+    const rawIds = body.ids ?? [];
+    const ids = rawIds.filter((id) => Number.isInteger(id));
+    if (rawIds.length > 0 && ids.length === 0) {
+      return { error: "ids must contain at least one integer", status: 400 };
+    }
+    if (ids.length === 0) return { deleted: 0 };
+    return { deleted: purgeRunInboxByIds(ids).run(OPERATOR_INSTANCE_TOKEN, groupId, operatorId, runRef, ...ids).changes };
+  }
+  if (body.scope !== "session") return { error: `unknown scope '${body.scope}'`, status: 400 };
+
+  return { deleted: purgeRunInboxSessionTx.immediate(body.session_id, operatorId, runRef, groupId, new Date().toISOString()) };
+}
+
+/**
  * session_id branches the read: absent, or empty/non-string and treated as
  * absent rather than a 400 or used as-is, takes the legacy byte-identical path;
  * a real value takes a non-destructive cursor path scoped to that session.
@@ -9585,6 +10093,7 @@ function handleOperatorInbox(
   // TOFU check.
   const inboxSecretError = checkGroupSecret(groupId, body.group_secret_hash ?? null);
   if (inboxSecretError) return inboxSecretError;
+  if (body.run_ref !== undefined || body.auth !== undefined) return handleRunInboxDrain(body);
 
   // Card 1e81ee7b MAJOR 4: absent/'' stays the legacy drain (assumed,
   // documented retro-compat for an old Deck or a bare send_message caller);
@@ -9607,7 +10116,7 @@ function handleOperatorInbox(
     const rows = db.query(
       `SELECT m.id, m.text, m.sent_at, COALESCE(p.peer_id, '<gone>') AS from_peer_id
        FROM messages m LEFT JOIN peers p ON p.instance_token = m.from_token
-       WHERE m.to_token = ? AND m.group_id = ? AND m.delivered = 0
+       WHERE m.to_token = ? AND m.group_id = ? AND m.delivered = 0 AND m.source_kind IS NOT 'agent'
        ORDER BY m.id`
     ).all(OPERATOR_INSTANCE_TOKEN, groupId) as OperatorInboxMessage[];
     for (const row of rows) markDelivered.run(row.id);
@@ -9677,6 +10186,7 @@ function handleOperatorInboxPurge(
   }
   const secretError = checkGroupSecret(groupId, body.group_secret_hash ?? null);
   if (secretError) return secretError;
+  if (body.run_ref !== undefined || body.auth !== undefined) return handleRunInboxPurge(body);
 
   // Card 1e81ee7b BLOCKER 2 / MAJOR 5 part 4: checkGroupSecret above does not
   // attest this group has ever registered (see groupExists doc comment).
@@ -9923,6 +10433,7 @@ type ApprovalRow = {
   producer_secret_hash: string;
   questions_json: string | null;
   answers_json: string | null;
+  author_instance_ref?: string | null;
 };
 
 /** A stored JSON column that fails to parse reads as null, with a trace. */
@@ -9992,6 +10503,7 @@ function rowToApproval(row: ApprovalRow): Approval {
     notif_expires_at: row.notif_expires_at,
     answered_at: row.answered_at,
     delivered_at: row.delivered_at,
+    ...(row.author_instance_ref ? { author_instance_hint: instanceHint(row.author_instance_ref) } : {}),
   };
 }
 
@@ -10041,6 +10553,7 @@ const approvalAuth = createApprovalAuth({
     });
   },
   rememberNonce,
+  resolveInstanceBinding: bindingByRef,
 });
 
 // Long-poll registry: /approval/wait parks here until a claim resolves it.
@@ -10216,6 +10729,37 @@ function deliverApprovalAnswer(row: ApprovalRow): void {
   }
 }
 
+function resolveAttestedAsker(
+  body: ApprovalAddRequest & Record<string, unknown>
+): { token: string; peer_id: string; group_id: string } | { error: string; status: number } {
+  const token = typeof body.instance_token === "string" ? body.instance_token : "";
+  const binding = bindingOfToken(token);
+  const peer = db
+    .query("SELECT peer_id, group_id FROM peers WHERE instance_token = ? AND status = 'active'")
+    .get(token) as { peer_id: string; group_id: string } | null;
+  if (!binding || !peer || peer.group_id !== binding.group_id) {
+    return { error: "the asking instance is not registered in this run's group", status: 409 };
+  }
+  if (body.reply_peer_id !== undefined && body.reply_peer_id !== peer.peer_id) {
+    return { error: "reply_peer_id contradicts the asking instance", status: 403 };
+  }
+  const declaredGroup = (body.origin as { group_id?: unknown } | undefined)?.group_id;
+  if (typeof declaredGroup === "string" && declaredGroup !== "" && declaredGroup !== peer.group_id) {
+    return { error: "origin.group_id contradicts the credential", status: 403 };
+  }
+  return { token, peer_id: peer.peer_id, group_id: peer.group_id };
+}
+
+/** The instance token an UNSIGNED channel question would reach, resolved like the answer route does. */
+function unsignedChannelPeer(body: ApprovalAddRequest & Record<string, unknown>): string | null {
+  const group = (body.origin as { group_id?: unknown } | undefined)?.group_id;
+  if (typeof body.reply_peer_id !== "string" || typeof group !== "string" || !body.reply_peer_id || !group) return null;
+  const peer = db
+    .query("SELECT instance_token FROM peers WHERE peer_id = ? AND group_id = ? AND status = 'active'")
+    .get(body.reply_peer_id, group) as { instance_token: string } | null;
+  return peer?.instance_token ?? null;
+}
+
 function handleApprovalAdd(
   body: ApprovalAddRequest & Record<string, unknown>
 ): ApprovalAddResponse | { error: string; status: number } {
@@ -10224,12 +10768,33 @@ function handleApprovalAdd(
   // the new row carries.
   // That closes the path where a sandboxed agent reads project_key from the
   // request body to file under another project.
-  const authorized = approvalAuth.authorizeCreate(body);
+  // A v1 proof makes the question attested: only a channel question can carry
+  // one, because the attested route is the instance named in the signed body.
+  const attestedAsk = body.auth?.v !== undefined;
+  if (attestedAsk && body.reply_route !== "channel") {
+    return { error: "a v1 proof is only valid on a channel question", status: 400 };
+  }
+  const authorized = approvalAuth.authorizeCreate(body, attestedAsk ? { gate: INBOX_GATES.channel } : undefined);
   if (isAuthError(authorized)) return authorized;
   const { scope, stamp } = authorized;
 
   const draft = validateApprovalDraft(body);
   if (!draft.ok) return { error: draft.error, status: 400 };
+
+  // The asking instance of an attested question, proven by the signed body. An
+  // instance that was ever bound to a run cannot ask unsigned: dropping the
+  // proof is not a way back to the unattested route.
+  let asker: { token: string; peer_id: string; group_id: string } | null = null;
+  if (attestedAsk) {
+    const resolved = resolveAttestedAsker(body);
+    if ("error" in resolved) return resolved;
+    asker = resolved;
+  } else if (body.reply_route === "channel") {
+    const named = unsignedChannelPeer(body);
+    if (named !== null && bindingOfToken(named) !== null) {
+      return { error: "an attested instance must sign its channel questions", status: 401 };
+    }
+  }
   // A mergeable row is shared with any later raise on the same tile, so the
   // verdict the module returns to the engine could answer a dialog it did not
   // raise.
@@ -10306,11 +10871,13 @@ function handleApprovalAdd(
 
   const origin = (body.origin ?? {}) as Record<string, unknown>;
   const pick = (k: string): string => (typeof origin[k] === "string" ? (origin[k] as string) : "");
-  const reply = resolveReplyRoute(
-    typeof body.reply_route === "string" ? body.reply_route : undefined,
-    typeof body.reply_peer_id === "string" ? body.reply_peer_id : undefined,
-    pick("group_id")
-  );
+  const reply: { route: ApprovalReplyRoute; token: string; group: string } = asker
+    ? { route: "channel", token: asker.token, group: asker.group_id }
+    : resolveReplyRoute(
+        typeof body.reply_route === "string" ? body.reply_route : undefined,
+        typeof body.reply_peer_id === "string" ? body.reply_peer_id : undefined,
+        pick("group_id")
+      );
   // Checked on the RESOLVED route: a channel whose peer is gone falls back to
   // pty, and nothing can type structured answers into a terminal.
   if (draft.value.questions && reply.route === "pty") {
@@ -10337,15 +10904,15 @@ function handleApprovalAdd(
       `INSERT INTO pending_approvals
          (id, ${stamped.columns.join(", ")}, origin_host, origin_user, group_id, from_peer,
           tile_ref, mergeable, absorbed_permission, reply_route, reply_token, reply_group, producer_secret_hash,
-          kind, title, question, options_json, questions_json, status, created_at, notif_expires_at)
-       VALUES (?, ${stamped.columns.map(() => "?").join(", ")}, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
+          kind, title, question, options_json, questions_json, status, created_at, notif_expires_at${asker ? ", author_peer_id_snapshot" : ""})
+       VALUES (?, ${stamped.columns.map(() => "?").join(", ")}, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?${asker ? ", ?" : ""})`,
       [
         id,
         ...stamped.values,
         pick("host").slice(0, 128),
         pick("os_user_hash").slice(0, 64),
-        pick("group_id").slice(0, 64),
-        pick("from_peer").slice(0, 128),
+        asker ? asker.group_id : pick("group_id").slice(0, 64),
+        asker ? asker.peer_id : pick("from_peer").slice(0, 128),
         draft.value.tile_ref,
         draft.value.merge === "tile" ? 1 : 0,
         draft.value.tile_only ? 1 : 0,
@@ -10360,6 +10927,7 @@ function handleApprovalAdd(
         draft.value.questions ? JSON.stringify(draft.value.questions) : null,
         createdAt,
         notifExpiresAt,
+        ...(asker ? [asker.peer_id] : []),
       ]
     );
     if (!replacesTilePermission) return [];
@@ -10798,6 +11366,10 @@ function handleApprovalWithdraw(
   return { approval };
 }
 
+function requestedRunRef(body: { run_ref?: unknown }): string {
+  return typeof body.run_ref === "string" ? body.run_ref.toLowerCase() : "";
+}
+
 function handleApprovalList(
   body: ApprovalListRequest & Record<string, unknown>
 ): ApprovalListResponse | { error: string; status: number } {
@@ -10828,6 +11400,10 @@ function handleApprovalList(
   // later populated the array still includes it.
   const filters: string[] = [];
   const params: unknown[] = [...where.params];
+  // An attested channel question belongs to the run that raised it. No run_ref
+  // matches no run, so an attested row is never shown to a caller that names none.
+  filters.push("(inbox_run_ref IS NULL OR inbox_run_ref = ?)");
+  params.push(requestedRunRef(body));
   if (typeof body.status === "string" && body.status) {
     filters.push("status = ?");
     params.push(body.status);
@@ -10860,12 +11436,14 @@ function handleApprovalDelivered(
   const where = approvalWhere(authorized.scope);
   const now = new Date().toISOString();
   let marked = 0;
+  const runRef = requestedRunRef(body);
   const tx = db.transaction(() => {
     for (const id of ids.slice(0, 200)) {
       marked += db.run(
         `UPDATE pending_approvals SET delivered_at = ?
-          WHERE id = ? AND ${where.sql} AND delivered_at IS NULL`,
-        [now, id, ...(where.params as never[])]
+          WHERE id = ? AND ${where.sql} AND delivered_at IS NULL
+            AND (inbox_run_ref IS NULL OR inbox_run_ref = ?)`,
+        [now, id, ...(where.params as never[]), runRef]
       ).changes;
     }
   });

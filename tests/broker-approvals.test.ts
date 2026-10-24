@@ -4,12 +4,13 @@ import { mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { startBroker, stopBroker, post, approvalListBody, type TestBroker, openBrokerDb } from "./_helper.ts";
+import { startBroker, stopBroker, post, approvalListBody, livePid, type TestBroker, openBrokerDb } from "./_helper.ts";
 import {
   approvalWaitTimeoutSec,
   buildAuthProof,
   buildInboxProof,
   capVisibly,
+  deriveInstanceRef,
   deriveOperatorId,
   deriveTokenId,
   generateCredential,
@@ -17,7 +18,7 @@ import {
   type ApprovalCredential,
   type InboxGate,
 } from "../shared/approval.ts";
-import type { Approval } from "../shared/types.ts";
+import { OPERATOR_INSTANCE_TOKEN, type Approval } from "../shared/types.ts";
 import { buildApprovalRequest } from "../desktop/hooks/approval-hook.ts";
 
 const brokers: TestBroker[] = [];
@@ -2803,5 +2804,244 @@ describe("Inbox run roots and mandates (token routes)", () => {
     const row = res.body.approvals.find((a) => a.id === approval.id);
     expect(row?.id, "the row must be in the response for the check to mean anything").toBe(approval.id);
     expect(JSON.stringify(res.body)).not.toContain("CANARY-");
+  });
+});
+
+describe("Attested channel questions", () => {
+  type Run = { cred: ApprovalCredential; tokenId: string; run: string; group: string };
+  type Bound = { peer_id: string; instance_token: string };
+  const SECRET = "c".repeat(64);
+
+  async function v1Post<T>(
+    b: TestBroker,
+    path: string,
+    payload: Record<string, unknown>,
+    signer: { cred: ApprovalCredential; operator_id: string; kind: "operator" | "session"; token_id?: string },
+    gate: InboxGate
+  ): Promise<{ status: number; body: T }> {
+    const body = { project_key: DEFAULT_PROJECT_KEY, ...payload, public_key: signer.cred.publicKey } as Record<string, unknown>;
+    const auth = buildInboxProof(signer.cred.privateKey, body, gate, {
+      kind: signer.kind,
+      operator_id: signer.operator_id,
+      token_id: signer.token_id,
+    });
+    return post<T>(`${b.url}${path}`, { ...body, auth });
+  }
+
+  async function mintRun(b: TestBroker, op: Operator, group: string): Promise<Run> {
+    const cred = generateCredential();
+    const run = crypto.randomUUID();
+    const res = await v1Post<{ token_id: string }>(
+      b,
+      "/approval/token-mint",
+      { session_public_key: cred.publicKey, session_ref: `window-${run}`, inbox: { version: 1, kind: "run", run_ref: run, group_id: group } },
+      { cred: op.cred, operator_id: op.id, kind: "operator" },
+      INBOX_GATES.mint
+    );
+    expect(res.status).toBe(200);
+    return { cred, tokenId: res.body.token_id, run, group };
+  }
+
+  async function bindInstance(b: TestBroker, op: Operator, run: Run, host: string, cwd: string): Promise<Bound> {
+    const body = {
+      pid: livePid(), cwd, git_root: null, tty: null, summary: "", host, client_pid: 1,
+      project_key: null, group_id: run.group, group_secret_hash: SECRET, inbox_operation: "register",
+    };
+    const auth = buildInboxProof(run.cred.privateKey, body, INBOX_GATES.register, {
+      kind: "session",
+      operator_id: op.id,
+      token_id: run.tokenId,
+    });
+    const res = await post<Bound>(`${b.url}/register`, { ...body, auth });
+    expect(res.status).toBe(200);
+    return res.body;
+  }
+
+  const asking = (token: string | undefined, over: Record<string, unknown> = {}): Record<string, unknown> => ({
+    kind: "permission",
+    title: "Bash",
+    question: "Allow rm?",
+    reply_route: "channel",
+    origin: { host: "bureau" },
+    ...(token === undefined ? {} : { instance_token: token }),
+    ...over,
+  });
+
+  const ask = (b: TestBroker, op: Operator, run: Run, payload: Record<string, unknown>, gate: InboxGate = INBOX_GATES.channel) =>
+    v1Post<{ approval: Approval; error?: string }>(
+      b,
+      "/approval/add",
+      payload,
+      { cred: run.cred, operator_id: op.id, kind: "session", token_id: run.tokenId },
+      gate
+    );
+
+  function storedRow(b: TestBroker, id: string): Record<string, unknown> {
+    const db = openBrokerDb(b.dbPath, { readonly: true });
+    try {
+      return db.query("SELECT * FROM pending_approvals WHERE id = ?").get(id) as Record<string, unknown>;
+    } finally {
+      db.close();
+    }
+  }
+
+  const rowCount = (b: TestBroker, op: Operator): number => {
+    const db = openBrokerDb(b.dbPath, { readonly: true });
+    try {
+      return (db.query("SELECT COUNT(*) AS n FROM pending_approvals WHERE operator_id = ?").get(op.id) as { n: number }).n;
+    } finally {
+      db.close();
+    }
+  };
+
+  test("an attested question is stamped with the run, the group and the instance digest, and its answer goes to that instance", async () => {
+    const b = await boot();
+    const op = newOperator();
+    const run = await mintRun(b, op, "g-chan-stamp");
+    const bound = await bindInstance(b, op, run, "hChanStamp", "/chan-stamp");
+
+    const res = await ask(b, op, run, asking(bound.instance_token));
+
+    expect(res.status).toBe(200);
+    const row = storedRow(b, res.body.approval.id);
+    expect(row).toMatchObject({
+      operator_id: op.id,
+      project_key: DEFAULT_PROJECT_KEY,
+      inbox_run_ref: run.run,
+      inbox_group_id: run.group,
+      author_instance_ref: deriveInstanceRef(bound.instance_token),
+      author_peer_id_snapshot: bound.peer_id,
+      source_kind: "agent",
+      provenance_version: 1,
+      reply_route: "channel",
+      reply_token: bound.instance_token,
+      reply_group: run.group,
+      from_peer: bound.peer_id,
+      group_id: run.group,
+    });
+    expect(res.body.approval.author_instance_hint).toBe(deriveInstanceRef(bound.instance_token).slice(-12));
+    expect(JSON.stringify(res.body)).not.toContain(deriveInstanceRef(bound.instance_token));
+
+    const claim = await signedPost(b, "/approval/claim", { id: res.body.approval.id, via: "deck", answer_kind: "allow" }, { cred: op.cred, operator_id: op.id });
+    expect(claim.status).toBe(200);
+    const db = openBrokerDb(b.dbPath, { readonly: true });
+    const answers = db
+      .query("SELECT COUNT(*) AS n FROM messages WHERE from_token = ? AND to_token = ?")
+      .get(OPERATOR_INSTANCE_TOKEN, bound.instance_token) as { n: number };
+    db.close();
+    expect(answers.n).toBe(1);
+  });
+
+  test("a bound instance cannot ask on a channel without its proof: refused before any insertion", async () => {
+    const b = await boot();
+    const op = newOperator();
+    const run = await mintRun(b, op, "g-chan-m4");
+    const bound = await bindInstance(b, op, run, "hChanM4", "/chan-m4");
+    const unsigned = {
+      kind: "permission", title: "Bash", question: "Allow rm?", reply_route: "channel",
+      reply_peer_id: bound.peer_id, origin: { host: "bureau", group_id: run.group },
+    };
+
+    const refused = await signedPost<{ error: string }>(b, "/approval/add", unsigned, {
+      cred: run.cred, operator_id: op.id, kind: "session", token_id: run.tokenId,
+    });
+
+    expect({ status: refused.status, rows: rowCount(b, op) }).toEqual({ status: 401, rows: 0 });
+    expect((await ask(b, op, run, asking(bound.instance_token))).status).toBe(200);
+    expect(rowCount(b, op)).toBe(1);
+  });
+
+  test("a channel question signed with a legacy proof is never attested, whatever its body claims", async () => {
+    const b = await boot();
+    const op = newOperator();
+    const run = await mintRun(b, op, "g-chan-legacy");
+    const legacyPeer = (
+      await post<Bound>(`${b.url}/register`, {
+        pid: livePid(), cwd: "/chan-legacy", git_root: null, tty: null, summary: "", host: "hChanLeg", client_pid: 1,
+        project_key: null, group_id: run.group, group_secret_hash: SECRET,
+      })
+    ).body;
+
+    const res = await signedPost<{ approval: Approval }>(
+      b,
+      "/approval/add",
+      {
+        kind: "permission", title: "legacy channel", question: "Allow rm?", reply_route: "channel",
+        reply_peer_id: legacyPeer.peer_id, origin: { host: "bureau", group_id: run.group },
+        instance_token: legacyPeer.instance_token, source_kind: "agent", inbox_run_ref: run.run,
+      },
+      { cred: run.cred, operator_id: op.id, kind: "session", token_id: run.tokenId }
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.body.approval.author_instance_hint).toBeUndefined();
+    expect(storedRow(b, res.body.approval.id)).toMatchObject({
+      reply_route: "channel",
+      reply_token: legacyPeer.instance_token,
+      inbox_run_ref: null,
+      inbox_group_id: null,
+      author_instance_ref: null,
+      author_peer_id_snapshot: null,
+      source_kind: null,
+      provenance_version: null,
+    });
+  });
+
+  test("an attested question refuses a contradicting reply peer or group, an unbound or foreign instance, and a missing instance", async () => {
+    const b = await boot();
+    const op = newOperator();
+    const run = await mintRun(b, op, "g-chan-refuse");
+    const otherRun = await mintRun(b, op, "g-chan-refuse");
+    const mine = await bindInstance(b, op, run, "hChanR1", "/chan-r1");
+    const other = await bindInstance(b, op, run, "hChanR2", "/chan-r2");
+    const foreign = await bindInstance(b, op, otherRun, "hChanR3", "/chan-r3");
+
+    const statuses = [
+      (await ask(b, op, run, asking(mine.instance_token, { reply_peer_id: other.peer_id }))).status,
+      (await ask(b, op, run, asking(mine.instance_token, { origin: { host: "bureau", group_id: "g-elsewhere" } }))).status,
+      (await ask(b, op, run, asking(foreign.instance_token))).status,
+      (await ask(b, op, run, asking("a-token-nobody-registered"))).status,
+      (await ask(b, op, run, asking(undefined))).status,
+      (await ask(b, op, run, asking(mine.instance_token, { reply_route: "pty" }))).status,
+      (await ask(b, op, run, asking(mine.instance_token), INBOX_GATES.deposit)).status,
+    ];
+
+    expect(statuses).toEqual([403, 403, 403, 403, 400, 400, 401]);
+    expect(rowCount(b, op)).toBe(0);
+    await post(`${b.url}/disconnect`, { instance_token: mine.instance_token });
+    expect((await ask(b, op, run, asking(mine.instance_token))).status, "an instance that is not active cannot receive an answer").toBe(409);
+  });
+
+  test("an unattested channel question keeps its legacy route, and an attested row is shown to its own run only", async () => {
+    const b = await boot();
+    const op = newOperator();
+    const runA = await mintRun(b, op, "g-chan-iso");
+    const runB = await mintRun(b, op, "g-chan-iso");
+    const a = await bindInstance(b, op, runA, "hChanI1", "/chan-i1");
+    const bb = await bindInstance(b, op, runB, "hChanI2", "/chan-i2");
+    const askA = await ask(b, op, runA, asking(a.instance_token, { title: "from A" }));
+    const askB = await ask(b, op, runB, asking(bb.instance_token, { title: "from B" }));
+    await addApproval(b, op, { title: "legacy row" });
+    const listFor = async (runRef?: string): Promise<string[]> => {
+      const res = await signedPost<{ approvals: Approval[] }>(
+        b,
+        "/approval/list",
+        approvalListBody(DEFAULT_PROJECT_KEY, runRef === undefined ? {} : { run_ref: runRef }),
+        { cred: op.cred, operator_id: op.id }
+      );
+      return res.body.approvals.map((x) => x.title).sort();
+    };
+
+    expect(await listFor(runA.run)).toEqual(["from A", "legacy row"]);
+    expect(await listFor(runB.run)).toEqual(["from B", "legacy row"]);
+    expect(await listFor(), "a caller that names no run sees no attested row").toEqual(["legacy row"]);
+    expect(await listFor(crypto.randomUUID())).toEqual(["legacy row"]);
+
+    const mark = async (ids: string[], runRef?: string): Promise<number> =>
+      (await signedPost<{ marked: number }>(b, "/approval/delivered", { ids, ...(runRef ? { run_ref: runRef } : {}) }, { cred: op.cred, operator_id: op.id })).body.marked;
+    await signedPost(b, "/approval/claim", { id: askA.body.approval.id, via: "deck", answer_kind: "allow" }, { cred: op.cred, operator_id: op.id });
+    await signedPost(b, "/approval/claim", { id: askB.body.approval.id, via: "deck", answer_kind: "allow" }, { cred: op.cred, operator_id: op.id });
+    expect(await mark([askA.body.approval.id], runB.run), "another run cannot mark it").toBe(0);
+    expect(await mark([askA.body.approval.id], runA.run)).toBe(1);
   });
 });

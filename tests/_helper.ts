@@ -2,7 +2,16 @@ import { Database } from "bun:sqlite";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { buildAuthProof, deriveOperatorId, generateCredential } from "../shared/approval.ts";
+import {
+  buildAuthProof,
+  buildInboxProof,
+  deriveOperatorId,
+  generateCredential,
+  INBOX_GATES,
+  type ApprovalCredential,
+  type ApprovalAuthProof,
+  type InboxGate,
+} from "../shared/approval.ts";
 import { operatorTrustFilePath } from "../shared/config.ts";
 import { OPERATOR_TRUST_VERSION } from "../shared/operator-trust.ts";
 export { scrubEnv } from "./_scrub-env.ts";
@@ -280,4 +289,110 @@ export function deckAuthored(payload: Record<string, unknown>): Record<string, u
       operator_id: deriveOperatorId(FIXTURE_OPERATOR.publicKey),
     }),
   };
+}
+
+export const INBOX_TEST_PROJECT = "github.com/vocsap/koryphaios";
+
+export interface RunCredential {
+  cred: ApprovalCredential;
+  tokenId: string;
+  run: string;
+  group: string;
+  secretHash: string;
+}
+
+export function operatorInboxProof(body: Record<string, unknown>, gate: InboxGate): ApprovalAuthProof {
+  return buildInboxProof(FIXTURE_OPERATOR.privateKey, body, gate, { kind: "operator", operator_id: FIXTURE_OPERATOR_ID });
+}
+
+export function runInboxProof(run: RunCredential, body: Record<string, unknown>, gate: InboxGate): ApprovalAuthProof {
+  return buildInboxProof(run.cred.privateKey, body, gate, {
+    kind: "session",
+    operator_id: FIXTURE_OPERATOR_ID,
+    token_id: run.tokenId,
+  });
+}
+
+export type PostFn = <T = unknown>(url: string, body: unknown) => Promise<{ status: number; body: T }>;
+
+export async function mintRunCredential(
+  b: TestBroker,
+  group: { id: string; hash: string },
+  project: string = INBOX_TEST_PROJECT,
+  send: PostFn = post
+): Promise<RunCredential> {
+  const cred = generateCredential();
+  const run = crypto.randomUUID();
+  const body = {
+    session_public_key: cred.publicKey,
+    session_ref: `window-${run}`,
+    project_key: project,
+    inbox: { version: 1, kind: "run", run_ref: run, group_id: group.id },
+    public_key: FIXTURE_OPERATOR.publicKey,
+  };
+  const res = await send<{ token_id: string }>(`${b.url}/approval/token-mint`, {
+    ...body,
+    auth: operatorInboxProof(body, INBOX_GATES.mint),
+  });
+  if (res.status !== 200) throw new Error(`run credential mint refused: ${res.status} ${JSON.stringify(res.body)}`);
+  return { cred, tokenId: res.body.token_id, run, group: group.id, secretHash: group.hash };
+}
+
+export function registerAttestedInstance(
+  b: TestBroker,
+  run: RunCredential,
+  host: string,
+  cwd: string,
+  extras: Record<string, unknown> = {},
+  send: PostFn = post
+) {
+  const body = {
+    pid: livePid(),
+    cwd,
+    git_root: null,
+    tty: null,
+    summary: "",
+    host,
+    client_pid: 1,
+    project_key: null,
+    group_id: run.group,
+    group_secret_hash: run.secretHash,
+    inbox_operation: "register",
+    ...extras,
+  };
+  return send<{ peer_id: string; instance_token: string }>(`${b.url}/register`, {
+    ...body,
+    auth: runInboxProof(run, body, INBOX_GATES.register),
+  });
+}
+
+export function depositToOperator(
+  b: TestBroker,
+  fromToken: string,
+  text: string,
+  signedBy?: RunCredential,
+  extras: Record<string, unknown> = {}
+) {
+  const body = { from_token: fromToken, to_peer_id: "operator", text, ...extras };
+  return post<{ ok: boolean; error?: string }>(`${b.url}/send-message`, {
+    ...body,
+    ...(signedBy ? { auth: runInboxProof(signedBy, body, INBOX_GATES.deposit) } : {}),
+  });
+}
+
+export function runInboxCall<T>(
+  b: TestBroker,
+  path: "/operator-inbox" | "/operator-inbox/purge",
+  run: RunCredential,
+  fields: Record<string, unknown>,
+  options: { gate?: InboxGate; runRef?: string } = {}
+) {
+  const body = {
+    group_id: run.group,
+    group_secret_hash: run.secretHash,
+    run_ref: options.runRef ?? run.run,
+    ...fields,
+  };
+  const gate = options.gate ?? (path === "/operator-inbox" ? INBOX_GATES.drain : INBOX_GATES.purge);
+  return post<T>(`${b.url}${path}`, { ...body, auth: operatorInboxProof(body, gate) });
 }

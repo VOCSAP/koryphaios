@@ -194,6 +194,8 @@ export const INBOX_GATES = {
   authorClose: "inbox-author:close",
   mandateList: "inbox-mandate:list",
   mandateClose: "inbox-mandate:close",
+  drain: "POST /operator-inbox",
+  purge: "POST /operator-inbox/purge",
 } as const;
 
 export type InboxGate = (typeof INBOX_GATES)[keyof typeof INBOX_GATES];
@@ -355,6 +357,10 @@ export const APPROVAL_OPERATIONS = [
   "roadmap-write",
   "context-transaction",
   "operator-check",
+  // Reading and purging the operator inbox of ONE run is the Deck main's gesture,
+  // signed with the operator key: no token purpose opens either.
+  "inbox-drain",
+  "inbox-purge",
   ...INBOX_OPERATIONS,
 ] as const;
 

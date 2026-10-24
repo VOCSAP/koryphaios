@@ -99,6 +99,7 @@ const EXPECTED_PROJECT_KEY_TABLES = [
   "approval_session_tokens",
   "dispatch_requests",
   "graph_drafts",
+  "inbox_instance_bindings",
   "peers",
   "pending_approvals",
   "roadmap_context_documents",
@@ -149,6 +150,22 @@ function insertDispatchRequest(db: Database, id: string, projectKey: string): vo
     [id, projectKey]
   );
 }
+
+test("an instance binding is lowered together with the run credential it is compared to", () => {
+  const db = seededDb();
+  insertApprovalSessionToken(db, "run-token", "github.com/VOCSAP/koryphaios");
+  db.run(
+    `INSERT INTO inbox_instance_bindings (author_instance_ref, operator_id, run_ref, group_id, project_key, bound_at)
+     VALUES ('ref-1', 'op1', 'run-1', 'g1', 'github.com/VOCSAP/koryphaios', ${NOW})`
+  );
+
+  expect(migrateAll(db, true).status).toBe("written");
+
+  const binding = db.query<{ project_key: string }, []>("SELECT project_key FROM inbox_instance_bindings WHERE author_instance_ref = 'ref-1'").get();
+  const token = db.query<{ project_key: string }, []>("SELECT project_key FROM approval_session_tokens WHERE token_id = 'run-token'").get();
+  expect(binding?.project_key).toBe("github.com/vocsap/koryphaios");
+  expect(binding?.project_key, "the binding and its credential still compare equal").toBe(token?.project_key);
+});
 
 test("discovery finds every real project_key-bearing table in broker.ts's schema, none else", () => {
   const db = seededDb();

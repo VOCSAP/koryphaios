@@ -16,6 +16,7 @@ export interface UpstreamProxy {
   intercept: ((path: string, req: Request) => Response | null) | null;
   /** Requests seen by path, forwarded or not. */
   seen: string[];
+  exchanges: Array<{ path: string; request: string; response: string }>;
   stop(): void;
 }
 
@@ -26,6 +27,7 @@ export function startUpstreamProxy(upstreamUrl: string): UpstreamProxy {
     blocked: false,
     intercept: null,
     seen: [],
+    exchanges: [],
     stop() {
       server.stop(true);
     },
@@ -41,10 +43,17 @@ export function startUpstreamProxy(upstreamUrl: string): UpstreamProxy {
       const headers: Record<string, string> = { "content-type": "application/json" };
       const auth = req.headers.get("authorization");
       if (auth) headers.authorization = auth;
-      return fetch(`${upstreamUrl}${url.pathname}${url.search}`, {
+      const requestText = req.method === "POST" ? await req.text() : "";
+      const upstream = await fetch(`${upstreamUrl}${url.pathname}${url.search}`, {
         method: req.method,
         headers,
-        body: req.method === "POST" ? await req.text() : undefined,
+        body: req.method === "POST" ? requestText : undefined,
+      });
+      const responseText = await upstream.text();
+      proxy.exchanges.push({ path: url.pathname, request: requestText, response: responseText });
+      return new Response(responseText, {
+        status: upstream.status,
+        headers: { "content-type": upstream.headers.get("content-type") ?? "application/json" },
       });
     },
   });

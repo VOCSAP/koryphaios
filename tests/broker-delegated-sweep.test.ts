@@ -242,6 +242,16 @@ describe("delegated task sweep", () => {
     expect(escalated).toMatchObject({ terminal_reason: "rearms_exhausted", escalation_result: "emitted" });
     expect(deckMessagesTo(main, bob.instance_token, task.task_id, ALERT)).toBe(3);
     expect(operatorMessages(main, task.task_id)).toBe(1);
+    expect(
+      withDb(main, (db) =>
+        db
+          .query(
+            "SELECT source_kind, provenance_version, inbox_run_ref, author_instance_ref FROM messages WHERE from_token = ? AND to_token = ? AND text LIKE ?"
+          )
+          .all(DECK_INSTANCE_TOKEN, OPERATOR_INSTANCE_TOKEN, `%${task.task_id}%`)
+      ),
+      "the escalation is stamped by the broker's own producer"
+    ).toEqual([{ source_kind: "system", provenance_version: 1, inbox_run_ref: null, author_instance_ref: null }]);
     expect((await rearm(main, bob, alice, task.task_id)).ok).toBeFalse();
   }, 40_000);
 

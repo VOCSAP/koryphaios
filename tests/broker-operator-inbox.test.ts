@@ -17,10 +17,20 @@ import {
   type TestBroker,
   openBrokerDb,
 } from "./_helper.ts";
-import { buildAuthProof, type ApprovalCredential } from "../shared/approval.ts";
+import { buildAuthProof, deriveInstanceRef, INBOX_GATES, type ApprovalCredential } from "../shared/approval.ts";
+import {
+  depositToOperator,
+  mintRunCredential,
+  operatorInboxProof,
+  registerAttestedInstance,
+  runInboxCall,
+  runInboxProof,
+  INBOX_TEST_PROJECT,
+  type RunCredential,
+} from "./_helper.ts";
 // The sentinel token is imported rather than re-typed, so seed and assertion
 // cannot silently agree with each other while testing an unrelated row.
-import { OPERATOR_INSTANCE_TOKEN, SENTINEL_DEFINITIONS, type Approval } from "../shared/types.ts";
+import { DECK_INSTANCE_TOKEN, OPERATOR_INSTANCE_TOKEN, SENTINEL_DEFINITIONS, type Approval } from "../shared/types.ts";
 
 let broker: TestBroker;
 
@@ -1005,5 +1015,371 @@ test("cursor session_id is scoped per group (MAJOR 1, composite PK): the same se
     expect(rowCount).toBe(2);
   } finally {
     db.close();
+  }
+});
+
+type RunDrain = { messages: { id: number; from_peer_id: string; text: string; author_instance_hint?: string }[] } | { error: string };
+
+async function newRuns(label: string, count = 1): Promise<{ g: { id: string; hash: string }; runs: RunCredential[] }> {
+  const g = { id: await groupId(label), hash: await sha256Hex(label) };
+  const runs: RunCredential[] = [];
+  for (let i = 0; i < count; i++) runs.push(await mintRunCredential(broker, g));
+  return { g, runs };
+}
+
+function operatorRows<T>(sql: string, ...params: (string | number)[]): T[] {
+  const db = openBrokerDb(broker.dbPath, { readonly: true });
+  try {
+    return db.query(sql).all(...params) as T[];
+  } finally {
+    db.close();
+  }
+}
+
+const rowsFor = (group: string): number =>
+  operatorRows<{ n: number }>("SELECT COUNT(*) AS n FROM messages WHERE to_token = ? AND group_id = ?", OPERATOR_INSTANCE_TOKEN, group)[0]!.n;
+
+const drainRun = (run: RunCredential, session: string, over: Record<string, unknown> = {}) =>
+  runInboxCall<RunDrain>(broker, "/operator-inbox", run, { session_id: session, ...over });
+
+const purgeRun = (run: RunCredential, session: string, scope: "session" | "ids", ids?: number[]) =>
+  runInboxCall<{ deleted: number } | { error: string }>(broker, "/operator-inbox/purge", run, { session_id: session, scope, ids });
+
+const runTexts = (r: { body: unknown }): string[] => (r.body as { messages: { text: string }[] }).messages.map((m) => m.text);
+
+function insertSystemNote(group: string, text: string): number {
+  const db = openBrokerDb(broker.dbPath);
+  try {
+    return Number(
+      db
+        .run(
+          `INSERT INTO messages (from_token, to_token, group_id, text, sent_at, delivered, source_kind, provenance_version)
+           VALUES (?, ?, ?, ?, ?, 0, 'system', 1)`,
+          [DECK_INSTANCE_TOKEN, OPERATOR_INSTANCE_TOKEN, group, text, new Date().toISOString()]
+        )
+        .lastInsertRowid
+    );
+  } finally {
+    db.close();
+  }
+}
+
+test("an attested deposit is stamped with the run scope, the instance digest and the peer snapshot", async () => {
+  const { runs } = await newRuns("inb-stamp");
+  const run = runs[0]!;
+  const a = await registerAttestedInstance(broker, run, "hStamp", "/stamp");
+
+  const sent = await depositToOperator(broker, a.body.instance_token, "signed note", run);
+
+  expect(sent.body.ok).toBe(true);
+  expect(
+    operatorRows(
+      `SELECT inbox_operator_id, inbox_run_ref, inbox_group_id, inbox_project_key, author_instance_ref,
+              author_peer_id_snapshot, source_kind, provenance_version
+         FROM messages WHERE to_token = ? AND group_id = ?`,
+      OPERATOR_INSTANCE_TOKEN,
+      run.group
+    )
+  ).toEqual([
+    {
+      inbox_operator_id: FIXTURE_OPERATOR_ID,
+      inbox_run_ref: run.run,
+      inbox_group_id: run.group,
+      inbox_project_key: INBOX_TEST_PROJECT,
+      author_instance_ref: deriveInstanceRef(a.body.instance_token),
+      author_peer_id_snapshot: a.body.peer_id,
+      source_kind: "agent",
+      provenance_version: 1,
+    },
+  ]);
+});
+
+test("a bound instance cannot deposit without its proof: refused before any insertion, with the proof it lands", async () => {
+  const { runs } = await newRuns("inb-m4");
+  const run = runs[0]!;
+  const a = await registerAttestedInstance(broker, run, "hM4", "/m4");
+
+  const unsigned = await depositToOperator(broker, a.body.instance_token, "no proof");
+  expect({ status: unsigned.status, ok: unsigned.body.ok, rows: rowsFor(run.group) }).toEqual({ status: 401, ok: false, rows: 0 });
+
+  const signed = await depositToOperator(broker, a.body.instance_token, "with proof", run);
+  expect({ ok: signed.body.ok, rows: rowsFor(run.group) }).toEqual({ ok: true, rows: 1 });
+});
+
+test("a run credential does not speak for an instance of another run, an unbound instance or another group", async () => {
+  const { g, runs } = await newRuns("inb-cross", 2);
+  const [runA, runB] = runs as [RunCredential, RunCredential];
+  const a = await registerAttestedInstance(broker, runA, "hCrossA", "/crossA");
+  const b = await registerAttestedInstance(broker, runB, "hCrossB", "/crossB");
+  const legacy = await register("hCrossL", "/crossL", g);
+  const other = await newRuns("inb-cross-other");
+
+  const refusals = [
+    await depositToOperator(broker, b.body.instance_token, "B speaks with A's credential", runA),
+    await depositToOperator(broker, legacy.body.instance_token, "unbound with a run credential", runA),
+    await depositToOperator(broker, a.body.instance_token, "A with a credential of another group", other.runs[0]!),
+  ];
+
+  expect(refusals.map((r) => [r.status, r.body.ok])).toEqual([[403, false], [403, false], [403, false]]);
+  expect(rowsFor(g.id)).toBe(0);
+  expect((await depositToOperator(broker, a.body.instance_token, "A with A", runA)).body.ok).toBe(true);
+});
+
+test("an unattested deposit keeps working, carries no provenance, and no body field makes it a system notification", async () => {
+  const { g, runs } = await newRuns("inb-legacy-deposit");
+  const run = runs[0]!;
+  const legacy = await register("hLegDep", "/legdep", g);
+
+  const sent = await depositToOperator(broker, legacy.body.instance_token, "plain legacy note", undefined, {
+    source_kind: "system",
+    inbox_run_ref: run.run,
+    author_instance_ref: "forged",
+  });
+
+  expect(sent.body.ok).toBe(true);
+  expect(
+    operatorRows("SELECT source_kind, inbox_run_ref, author_instance_ref FROM messages WHERE to_token = ? AND group_id = ?", OPERATOR_INSTANCE_TOKEN, g.id)
+  ).toEqual([{ source_kind: null, inbox_run_ref: null, author_instance_ref: null }]);
+  expect(runTexts(await drainRun(run, "legacy-note")), "a run never reads an unattested entry").toEqual([]);
+  expect(runTexts(await drain(g))).toEqual(["plain legacy note"]);
+});
+
+test("a run reads its own entries and the group's broker notifications, never another run's nor an unattested one", async () => {
+  const { g, runs } = await newRuns("inb-isolation", 2);
+  const [runA, runB] = runs as [RunCredential, RunCredential];
+  const a = await registerAttestedInstance(broker, runA, "hIsoA", "/isoA");
+  const b = await registerAttestedInstance(broker, runB, "hIsoB", "/isoB");
+  const legacy = await register("hIsoL", "/isoL", g);
+  await depositToOperator(broker, a.body.instance_token, "from A", runA);
+  await depositToOperator(broker, b.body.instance_token, "from B", runB);
+  await depositToOperator(broker, legacy.body.instance_token, "legacy note");
+  insertSystemNote(g.id, "system note");
+
+  await drainAs(g, "legacy-cursor");
+  await depositToOperator(broker, a.body.instance_token, "late from A", runA);
+  expect(runTexts(await drainAs(g, "legacy-cursor")), "a legacy cursor never reads an attested entry").toEqual([]);
+  expect(runTexts(await drain(g))).toEqual(["legacy note", "system note"]);
+
+  expect(runTexts(await drainRun(runA, "shared-session"))).toEqual(["from A", "system note", "late from A"]);
+  expect(runTexts(await drainRun(runB, "shared-session"))).toEqual(["from B", "system note"]);
+  expect(runTexts(await drainRun(runA, "shared-session"))).toEqual([]);
+});
+
+test("a run cursor starts at zero: an entry deposited before the first read is not lost, and each session reads it once", async () => {
+  const { runs } = await newRuns("inb-cursor");
+  const run = runs[0]!;
+  const a = await registerAttestedInstance(broker, run, "hCur", "/cur");
+  await depositToOperator(broker, a.body.instance_token, "early", run);
+
+  expect(runTexts(await drainRun(run, "first"))).toEqual(["early"]);
+  expect(runTexts(await drainRun(run, "first"))).toEqual([]);
+  expect(runTexts(await drainRun(run, "second"))).toEqual(["early"]);
+  await depositToOperator(broker, a.body.instance_token, "later", run);
+  expect(runTexts(await drainRun(run, "first"))).toEqual(["later"]);
+});
+
+test("a legacy purge, by id or by session floor, never deletes an entry of a run but still deletes a notification", async () => {
+  const { g, runs } = await newRuns("inb-purge-legacy");
+  const run = runs[0]!;
+  const a = await registerAttestedInstance(broker, run, "hPurL", "/purL");
+  await depositToOperator(broker, a.body.instance_token, "agent entry", run);
+  const agentId = operatorRows<{ id: number }>("SELECT id FROM messages WHERE to_token = ? AND group_id = ?", OPERATOR_INSTANCE_TOKEN, g.id)[0]!.id;
+  insertSystemNote(g.id, "notification above the agent entry");
+  const texts = (): string[] =>
+    operatorRows<{ text: string }>("SELECT text FROM messages WHERE to_token = ? AND group_id = ? ORDER BY id", OPERATOR_INSTANCE_TOKEN, g.id).map((r) => r.text);
+
+  expect((await purge(g, "legacy-s", "ids", [agentId])).body).toEqual({ deleted: 0 });
+  await drainAs(g, "legacy-s");
+  expect((await purge(g, "legacy-s", "session")).body, "the floor sits above the agent entry and still must not take it").toEqual({ deleted: 1 });
+  expect(texts()).toEqual(["agent entry"]);
+});
+
+test("a run purge deletes only its own entries, by id and by session, and a notification only when named", async () => {
+  const { g, runs } = await newRuns("inb-purge", 2);
+  const [runA, runB] = runs as [RunCredential, RunCredential];
+  const a = await registerAttestedInstance(broker, runA, "hPurA", "/purA");
+  const b = await registerAttestedInstance(broker, runB, "hPurB", "/purB");
+  await depositToOperator(broker, a.body.instance_token, "a1", runA);
+  await depositToOperator(broker, a.body.instance_token, "a2", runA);
+  await depositToOperator(broker, b.body.instance_token, "b1", runB);
+  const systemId = insertSystemNote(g.id, "system note");
+  const idOf = (text: string): number =>
+    operatorRows<{ id: number }>("SELECT id FROM messages WHERE to_token = ? AND text = ?", OPERATOR_INSTANCE_TOKEN, text)[0]!.id;
+  const texts = (): string[] =>
+    operatorRows<{ text: string }>("SELECT text FROM messages WHERE to_token = ? AND group_id = ? ORDER BY id", OPERATOR_INSTANCE_TOKEN, g.id).map((r) => r.text);
+  await drainRun(runA, "pA");
+  await drainRun(runB, "pB");
+
+  expect((await purgeRun(runA, "pA", "ids", [idOf("a1"), idOf("b1")])).body).toEqual({ deleted: 1 });
+  expect(texts()).toEqual(["a2", "b1", "system note"]);
+
+  expect((await purgeRun(runA, "pA", "session")).body).toEqual({ deleted: 1 });
+  expect(texts()).toEqual(["b1", "system note"]);
+
+  expect((await purgeRun(runB, "pB", "ids", [systemId])).body).toEqual({ deleted: 1 });
+  expect(texts()).toEqual(["b1"]);
+});
+
+test("a run that reads first leaves the group's notification to the legacy reader", async () => {
+  const { g, runs } = await newRuns("inb-run-first");
+  const run = runs[0]!;
+  const a = await registerAttestedInstance(broker, run, "hRunFirst", "/runfirst");
+  await depositToOperator(broker, a.body.instance_token, "agent entry", run);
+  insertSystemNote(g.id, "group notification");
+
+  expect(runTexts(await drainRun(run, "first-reader"))).toEqual(["agent entry", "group notification"]);
+  expect(runTexts(await drain(g)), "the notification is still undelivered for the legacy reader").toEqual(["group notification"]);
+});
+
+test("a run drain is one write: a failure after the read delivers nothing and leaves no cursor", async () => {
+  const { runs } = await newRuns("inb-drain-atomic");
+  const run = runs[0]!;
+  const a = await registerAttestedInstance(broker, run, "hDrainTx", "/draintx");
+  await depositToOperator(broker, a.body.instance_token, "kept for the next read", run);
+  const db = openBrokerDb(broker.dbPath);
+  db.run("CREATE TRIGGER zz_run_cursor_abort BEFORE UPDATE OF last_id ON operator_inbox_run_sessions BEGIN SELECT RAISE(ABORT, 'forced'); END");
+  try {
+    expect((await drainRun(run, "atomic-session")).status).toBe(500);
+  } finally {
+    db.run("DROP TRIGGER zz_run_cursor_abort");
+    db.close();
+  }
+  expect(
+    operatorRows<{ delivered: number }>("SELECT delivered FROM messages WHERE to_token = ? AND group_id = ?", OPERATOR_INSTANCE_TOKEN, run.group)
+  ).toEqual([{ delivered: 0 }]);
+  expect(operatorRows("SELECT 1 FROM operator_inbox_run_sessions WHERE run_ref = ?", run.run)).toEqual([]);
+  expect(runTexts(await drainRun(run, "atomic-session"))).toEqual(["kept for the next read"]);
+});
+
+test("a run session purge is one write, and a session that never drained gets its cursor in it", async () => {
+  const { runs } = await newRuns("inb-purge-atomic");
+  const run = runs[0]!;
+  const a = await registerAttestedInstance(broker, run, "hPurgeTx", "/purgetx");
+  await depositToOperator(broker, a.body.instance_token, "survives the failed purge", run);
+  const db = openBrokerDb(broker.dbPath);
+  db.run(
+    `CREATE TRIGGER zz_run_purge_abort BEFORE DELETE ON messages WHEN OLD.to_token = '${OPERATOR_INSTANCE_TOKEN}'
+     BEGIN SELECT RAISE(ABORT, 'forced'); END`
+  );
+  try {
+    expect((await purgeRun(run, "never-drained", "session")).status).toBe(500);
+  } finally {
+    db.run("DROP TRIGGER zz_run_purge_abort");
+    db.close();
+  }
+  expect(operatorRows("SELECT 1 FROM operator_inbox_run_sessions WHERE run_ref = ?", run.run), "the failed purge left no cursor").toEqual([]);
+  expect(rowsFor(run.group)).toBe(1);
+
+  expect((await purgeRun(run, "never-drained", "session")).body).toEqual({ deleted: 1 });
+  expect(
+    operatorRows<{ session_id: string }>("SELECT session_id FROM operator_inbox_run_sessions WHERE run_ref = ?", run.run),
+    "a session that never drained is created by the purge, not ignored"
+  ).toEqual([{ session_id: "never-drained" }]);
+});
+
+test("a run cursor older than its TTL, stored as an ISO timestamp, is collected and no longer holds the purge floor", async () => {
+  const { runs } = await newRuns("inb-cursor-gc");
+  const run = runs[0]!;
+  const a = await registerAttestedInstance(broker, run, "hCursorGc", "/cursorgc");
+  await depositToOperator(broker, a.body.instance_token, "behind a dead cursor", run);
+  const staleSeen = new Date(Date.now() - 25 * 3_600_000).toISOString();
+  const db = openBrokerDb(broker.dbPath);
+  db.run(
+    `INSERT INTO operator_inbox_run_sessions (session_id, operator_id, run_ref, group_id, last_id, started_at, last_seen_at)
+     VALUES ('dead-cursor', ?, ?, ?, 0, ?, ?)`,
+    [FIXTURE_OPERATOR_ID, run.run, run.group, staleSeen, staleSeen]
+  );
+  db.close();
+
+  expect((await purgeRun(run, "live-cursor", "session")).body, "the dead cursor at 0 no longer pins the floor").toEqual({ deleted: 1 });
+  expect(
+    operatorRows<{ session_id: string }>("SELECT session_id FROM operator_inbox_run_sessions WHERE run_ref = ? ORDER BY session_id", run.run)
+  ).toEqual([{ session_id: "live-cursor" }]);
+});
+
+test("an expired run credential can neither drain nor purge", async () => {
+  const { runs } = await newRuns("inb-expired");
+  const run = runs[0]!;
+  await registerAttestedInstance(broker, run, "hExpired", "/expired");
+  expect((await drainRun(run, "exp-session")).status, "live credential: allowed").toBe(200);
+  const db = openBrokerDb(broker.dbPath);
+  db.run("UPDATE approval_session_tokens SET expires_at = ? WHERE token_id = ?", [new Date(Date.now() - 60_000).toISOString(), run.tokenId]);
+  db.close();
+
+  const drained = await drainRun(run, "exp-session");
+  const purged = await purgeRun(run, "exp-session", "session");
+  expect([drained.status, drained.body, purged.status, purged.body]).toEqual([
+    403,
+    { error: "no live credential for this run" },
+    403,
+    { error: "no live credential for this run" },
+  ]);
+});
+
+test("a run-scoped read needs the operator key, a v1 proof for its own door and a live credential", async () => {
+  const { runs } = await newRuns("inb-auth");
+  const run = runs[0]!;
+  // A registered instance makes the group exist, so only the credential check can refuse below.
+  await registerAttestedInstance(broker, run, "hAuth", "/auth");
+  const base = { group_id: run.group, group_secret_hash: run.secretHash, run_ref: run.run, session_id: "auth-session" };
+  const noLiveCredential = { error: "no live credential for this run" };
+  const cursorRows = (): number =>
+    operatorRows<{ n: number }>("SELECT COUNT(*) AS n FROM operator_inbox_run_sessions WHERE run_ref = ?", run.run)[0]!.n;
+  const call = (body: Record<string, unknown>, auth?: unknown) =>
+    post<{ error?: string }>(`${broker.url}/operator-inbox`, auth === undefined ? body : { ...body, auth });
+
+  const legacyProof = buildAuthProof(FIXTURE_OPERATOR.privateKey, base, { kind: "operator", operator_id: FIXTURE_OPERATOR_ID });
+  expect((await call(base, legacyProof)).status).toBe(401);
+  expect((await call(base, operatorInboxProof(base, INBOX_GATES.purge))).status).toBe(401);
+  expect((await call(base, runInboxProof(run, base, INBOX_GATES.drain))).status, "a run credential is not the operator").toBe(403);
+  const stranger = { ...base, run_ref: crypto.randomUUID() };
+  const strangerRead = await call(stranger, operatorInboxProof(stranger, INBOX_GATES.drain));
+  expect({ status: strangerRead.status, body: strangerRead.body }, "a run that never held a credential").toEqual({
+    status: 403,
+    body: noLiveCredential,
+  });
+  const { run_ref: _r, ...withoutRun } = base;
+  expect((await call(withoutRun, operatorInboxProof(withoutRun, INBOX_GATES.drain))).status, "a proof without run_ref").toBe(400);
+  expect((await call(base)).status, "run_ref without a proof").toBe(400);
+  const { session_id: _s, ...withoutSession } = base;
+  expect((await call(withoutSession, operatorInboxProof(withoutSession, INBOX_GATES.drain))).status).toBe(400);
+  expect(cursorRows(), "a refused read never creates a cursor").toBe(0);
+  expect((await call(base, operatorInboxProof(base, INBOX_GATES.drain))).status, "the same read with a live credential").toBe(200);
+
+  const revoke = { session_ref: `window-${run.run}`, public_key: FIXTURE_OPERATOR.publicKey };
+  await post(`${broker.url}/approval/token-revoke`, {
+    ...revoke,
+    auth: buildAuthProof(FIXTURE_OPERATOR.privateKey, revoke, { kind: "operator", operator_id: FIXTURE_OPERATOR_ID }),
+  });
+  const afterRevoke = await call(base, operatorInboxProof(base, INBOX_GATES.drain));
+  expect({ status: afterRevoke.status, body: afterRevoke.body }, "a run without a live credential").toEqual({
+    status: 403,
+    body: noLiveCredential,
+  });
+});
+
+test("the display hint tells two instances with the same snapshot apart and never exposes a digest or a token", async () => {
+  const { runs } = await newRuns("inb-hint");
+  const run = runs[0]!;
+  const a = await registerAttestedInstance(broker, run, "hHintA", "/hintA");
+  const b = await registerAttestedInstance(broker, run, "hHintB", "/hintB");
+  const rename = (token: string, name: string) => post(`${broker.url}/set-id`, { instance_token: token, new_peer_id: name });
+  await rename(a.body.instance_token, "alpha");
+  await depositToOperator(broker, a.body.instance_token, "first alpha", run);
+  await rename(a.body.instance_token, "beta");
+  await rename(b.body.instance_token, "alpha");
+  await depositToOperator(broker, b.body.instance_token, "second alpha", run);
+
+  const read = await drainRun(run, "hint-session");
+  const messages = (read.body as { messages: { from_peer_id: string; author_instance_hint?: string }[] }).messages;
+
+  expect(messages.map((m) => m.from_peer_id), "the snapshot survives the rename").toEqual(["alpha", "alpha"]);
+  expect(messages.map((m) => m.author_instance_hint)).toEqual([
+    deriveInstanceRef(a.body.instance_token).slice(-12),
+    deriveInstanceRef(b.body.instance_token).slice(-12),
+  ]);
+  const wire = JSON.stringify(read.body);
+  for (const secret of [a, b].flatMap((p) => [p.body.instance_token, deriveInstanceRef(p.body.instance_token)])) {
+    expect(wire).not.toContain(secret);
   }
 });

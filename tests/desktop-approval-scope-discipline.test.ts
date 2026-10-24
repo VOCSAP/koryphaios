@@ -47,6 +47,9 @@ const ALLOWED_FILES = new Set([
   // broker's own database file, as a fixture standing for a dead CLI session:
   // a fixture, not a caller.
   join("tests", "broker-ntfy-channel.test.ts"),
+  // Seeds a database in the schema that predates the Inbox provenance columns,
+  // then reads it back after the broker migrated it: DDL and a fixture row, no caller.
+  join("tests", "broker-migration.test.ts"),
 ]);
 
 /**

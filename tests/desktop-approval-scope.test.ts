@@ -546,6 +546,7 @@ const INBOX_GROUP = "group-a";
 const INBOX_PROJECT = "github.com/vocsap/koryphaios";
 const INSTANCE_A = "instance-token-A";
 const INSTANCE_B = "instance-token-B";
+const UNREGISTERED_INSTANCE = "instance-nobody-registered";
 
 /**
  * One operator, one live run root, three mandates hanging from it and two bound
@@ -745,6 +746,17 @@ describe("an Inbox operation has no legacy form, and a door carries only its own
     });
   });
 
+  test("the operator key cannot read or purge a run's inbox with a legacy proof", () => {
+    const w = inboxWorld();
+    const legacy = signed({ x: 1 }, { cred: w.op.cred, id: w.op.id });
+    for (const op of ["inbox-drain", "inbox-purge"] as const) {
+      expect({ op, got: w.auth.authenticateOperator(legacy as never, op) }).toEqual({
+        op,
+        got: { error: `${op} requires a v1 proof`, status: 403 },
+      });
+    }
+  });
+
   test("a valid v1 proof is refused under a door that does not carry the operation", () => {
     const w = inboxWorld();
     const refused = { error: expect.stringContaining("is not carried by this gate"), status: 403 };
@@ -801,6 +813,63 @@ describe("an Inbox operation has no legacy form, and a door carries only its own
     }
     const list = w.auth.authenticateInbox(w.sign({ x: 1 }, w.creds.lead, "m-lead", INBOX_GATES.mandateList) as never, "inbox-list", INBOX_GATES.mandateList);
     expect(isAuthError(list)).toBe(false);
+  });
+});
+
+describe("an attested question is authorized from the instance named in the signed body", () => {
+  const ask = (w: ReturnType<typeof inboxWorld>, over: Record<string, unknown> = {}, cred = w.rootCred, tokenId = "root") =>
+    w.auth.authorizeCreate(
+      w.sign({ kind: "permission", title: "t", question: "q", instance_token: INSTANCE_A, ...over }, cred, tokenId, INBOX_GATES.channel) as never,
+      { gate: INBOX_GATES.channel }
+    );
+
+  test("it stamps the run, the group and the digest of the instance, and nothing the body claims", () => {
+    const w = inboxWorld();
+    const got = ask(w, { inbox_run_ref: "claimed", source_kind: "system" });
+
+    expect(isAuthError(got)).toBe(false);
+    if (isAuthError(got)) return;
+    expect(stampInsert(got.stamp)).toEqual({
+      columns: ["operator_id", "project_key", "session_ref", "inbox_run_ref", "inbox_group_id", "author_instance_ref", "provenance_version", "source_kind"],
+      values: [w.op.id, INBOX_PROJECT, "window-run", INBOX_RUN, INBOX_GROUP, deriveInstanceRef(INSTANCE_A), 1, "agent"],
+    });
+  });
+
+  test("an unattested question keeps its three credential columns", () => {
+    const w = inboxWorld();
+    const body = signed({ kind: "permission", title: "t", question: "q" }, { cred: w.rootCred, id: w.op.id, token_id: "root", kind: "session" });
+    const got = w.auth.authorizeCreate(body as never);
+    expect(isAuthError(got)).toBe(false);
+    if (isAuthError(got)) return;
+    expect(stampInsert(got.stamp).columns).toEqual(["operator_id", "project_key", "session_ref"]);
+  });
+
+  test("a missing, unbound or foreign instance is refused, along every binding dimension", () => {
+    const w = inboxWorld();
+    expect(ask(w, { instance_token: undefined })).toEqual({ error: "instance_token is required for an attested question", status: 400 });
+    const notBound = { error: "the asking instance is not bound to this run", status: 403 };
+    expect(ask(w, { instance_token: UNREGISTERED_INSTANCE })).toEqual(notBound);
+    for (const [field, value] of [
+      ["operator_id", "someone-else"],
+      ["run_ref", "22222222-2222-4222-8222-222222222222"],
+      ["group_id", "group-b"],
+      ["project_key", "github.com/other/repo"],
+    ] as const) {
+      const other = inboxWorld();
+      other.bindings[deriveInstanceRef(INSTANCE_A)]![field] = value;
+      expect({ field, got: ask(other) }).toEqual({ field, got: notBound });
+    }
+  });
+
+  test("only a run credential asks, and only with a v1 proof for the channel door", () => {
+    const w = inboxWorld();
+    expect(ask(w, {}, w.creds.lead, "m-lead")).toEqual({ error: "credential may not inbox-deposit", status: 403 });
+    const legacy = signed({ kind: "permission", title: "t", question: "q", instance_token: INSTANCE_A }, {
+      cred: w.rootCred, id: w.op.id, token_id: "root", kind: "session",
+    });
+    expect(w.auth.authorizeCreate(legacy as never, { gate: INBOX_GATES.channel })).toEqual({ error: "not-v1", status: 401 });
+    const wrongDoor = w.sign({ kind: "permission", instance_token: INSTANCE_A }, w.rootCred, "root", INBOX_GATES.deposit);
+    expect(w.auth.authorizeCreate(wrongDoor as never, { gate: INBOX_GATES.channel })).toEqual({ error: "bad-signature", status: 401 });
   });
 });
 

@@ -14,9 +14,12 @@ import {
   livePid,
   sha256Hex,
   groupId,
+  mintRunCredential,
+  registerAttestedInstance,
   type TestBroker,
   openBrokerDb,
 } from "./_helper.ts";
+import { deriveInstanceRef } from "../shared/approval.ts";
 import { startUpstreamProxy, type UpstreamProxy } from "./_upstream-proxy.ts";
 import type {
   DeliveredMessage,
@@ -751,3 +754,36 @@ test("a replica's relayed send says tracking is unavailable and offers no messag
   ]);
   await receive("B receives the relayed request", R2, B.instance_token, "relayed request with a policy");
 }, 30_000);
+
+test("the run scope, digest and token of a bound instance never travel in a federation exchange", async () => {
+  const group = { id: G, hash: H };
+  const onUpstream = await mintRunCredential(U, group, undefined, post);
+  const onReplica = await mintRunCredential(R1, group, undefined, post);
+  const from = [P1.exchanges.length, P2.exchanges.length] as const;
+  const boundOnUpstream = await registerAttestedInstance(U, onUpstream, "host-bound-u", "/work/bound-u", {}, post);
+  const boundOnReplica = await registerAttestedInstance(R1, onReplica, "host-bound-r", "/work/bound-r", {}, post);
+  try {
+    await settleBothReplicas();
+    await settleBothReplicas();
+
+    const wire = [...P1.exchanges.slice(from[0]), ...P2.exchanges.slice(from[1])]
+      .map((e) => `${e.request}\n${e.response}`)
+      .join("\n");
+    for (const peer of [boundOnUpstream, boundOnReplica]) {
+      expect(wire, "the exchange is not empty: the bound peer travels by name").toContain(peer.body.peer_id);
+    }
+    const secrets = [
+      ...[boundOnUpstream, boundOnReplica].flatMap((p) => {
+        const ref = deriveInstanceRef(p.body.instance_token);
+        return [p.body.instance_token, ref, ref.slice(-12)];
+      }),
+      ...[onUpstream, onReplica].flatMap((r) => [r.run, r.tokenId, r.cred.publicKey]),
+    ];
+    for (const secret of secrets) {
+      expect(wire.includes(secret), `a private Inbox value travelled: ${secret.slice(0, 12)}`).toBe(false);
+    }
+  } finally {
+    await post(`${U.url}/unregister`, { instance_token: boundOnUpstream.body.instance_token });
+    await post(`${R1.url}/unregister`, { instance_token: boundOnReplica.body.instance_token });
+  }
+}, 40_000);

@@ -433,6 +433,18 @@ describe("token purpose x operation (stored purpose decides, refusal by default)
   });
 });
 
+describe("run-scoped inbox reads belong to the operator key alone", () => {
+  test("no token purpose opens inbox-drain or inbox-purge, a session cannot attempt them, the operator can", () => {
+    for (const op of ["inbox-drain", "inbox-purge"] as const) {
+      for (const purpose of ["legacy", "run", "mandate"] as const) {
+        expect({ op, purpose, ok: isPurposeOperationAllowed(purpose, op) }).toEqual({ op, purpose, ok: false });
+      }
+      expect({ op, session: isOperationAllowed("session", op) }).toEqual({ op, session: false });
+      expect({ op, operator: isOperationAllowed("operator", op) }).toEqual({ op, operator: true });
+    }
+  });
+});
+
 describe("author instance digest", () => {
   test("is a full, deterministic, domain-separated SHA-256", () => {
     const ref = deriveInstanceRef("instance-token-a");
