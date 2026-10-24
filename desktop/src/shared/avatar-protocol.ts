@@ -4,8 +4,17 @@ import type { AvatarDeckCounters, AvatarDeckIdentity, AvatarDeckSnapshot } from 
 export const AVATAR_PROTOCOL_VERSION = 1
 export const MAX_AVATAR_COUNTER = 1_000_000
 export const MAX_AVATAR_ATTACHMENTS = 64
+export const MAX_AVATAR_REQUEST_BYTES = 64 * 1024
 export const AVATAR_COMMANDS = ['focus', 'open_question'] as const
+export const AVATAR_CAPABILITIES = ['a3_context'] as const
 export type AvatarCommand = (typeof AVATAR_COMMANDS)[number]
+export type AvatarCapability = (typeof AVATAR_CAPABILITIES)[number]
+
+export interface AvatarDeckContext {
+  group_id: string
+  project_key: string
+  scope_generation: number
+}
 
 const MAX_DECK_RUN_ID_LENGTH = 64
 const MAX_AVATAR_REQUEST_ID_LENGTH = 64
@@ -21,6 +30,8 @@ export interface AvatarAttachRequest {
   broker_url: string
   projectDir: string
   deckName: string
+  capabilities?: AvatarCapability[]
+  context?: AvatarDeckContext
 }
 
 export interface AvatarBindFrame extends AvatarDeckIdentity {
@@ -127,6 +138,31 @@ function requiredDeckName(value: unknown): string {
   return deckName
 }
 
+function optionalAvatarCapabilities(value: unknown): AvatarCapability[] | undefined {
+  if (value === undefined) return undefined
+  if (!Array.isArray(value)) invalidAttachRequest()
+  return [...new Set(value.filter((capability): capability is AvatarCapability => (AVATAR_CAPABILITIES as readonly unknown[]).includes(capability)))]
+}
+
+function optionalAvatarContext(value: unknown, capabilities: readonly AvatarCapability[] | undefined): AvatarDeckContext | undefined {
+  if (value === undefined) return undefined
+  if (!capabilities?.includes('a3_context')) invalidAttachRequest()
+  const input = record(value)
+  const groupId = requiredString(input.group_id)
+  const projectKey = requiredString(input.project_key)
+  const scopeGeneration = input.scope_generation
+  if (
+    groupId.length > MAX_DECK_RUN_ID_LENGTH ||
+    projectKey.length > MAX_PROJECT_DIR_LENGTH ||
+    typeof scopeGeneration !== 'number' ||
+    !Number.isSafeInteger(scopeGeneration) ||
+    scopeGeneration < 0
+  ) {
+    invalidAttachRequest()
+  }
+  return { group_id: groupId, project_key: projectKey, scope_generation: scopeGeneration }
+}
+
 export function escapeAvatarTrayLabel(deckName: string): string {
   return deckName.replaceAll('&', '&&')
 }
@@ -141,13 +177,17 @@ function requiredProtocolVersion(value: unknown): number {
 
 export function parseAvatarAttachRequest(value: unknown): AvatarAttachRequest {
   const input = record(value)
+  const capabilities = optionalAvatarCapabilities(input.capabilities)
+  const context = optionalAvatarContext(input.context, capabilities)
   return {
     protocol_version: requiredProtocolVersion(input.protocol_version),
     deckRunId: requiredDeckRunId(input.deckRunId),
     deckPid: requiredPid(input.deckPid),
     broker_url: requiredBrokerUrl(input.broker_url),
     projectDir: requiredProjectDir(input.projectDir),
-    deckName: requiredDeckName(input.deckName)
+    deckName: requiredDeckName(input.deckName),
+    ...(capabilities === undefined ? {} : { capabilities }),
+    ...(context === undefined ? {} : { context })
   }
 }
 

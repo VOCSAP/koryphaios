@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { brokerStopDialogOptions, confirmedStop } from "../desktop/src/main/avatar-broker-wiring.ts";
 import { AVATAR_TRAY_COPY } from "../desktop/src/main/avatar-tray-copy.ts";
+import { extractParenBody } from "./_braced-body.ts";
 
 const ENTRY = resolve(import.meta.dir, "../desktop/src/main/avatar-entry.ts");
 const source = (): string => readFileSync(ENTRY, "utf8").replace(/\r\n/g, "\n");
@@ -46,4 +47,12 @@ test("the Avatar re-reads the manual stop from both the broker probe and the Tra
   expect(js).toMatch(/brokerUrls:\s*probeBrokerUrls\(refreshManualStop,/);
   expect(js).toMatch(/summary:\s*trayBrokerSummary\(refreshManualStop,/);
   expect(js).toMatch(/brokerHealth:\s*\(port\)\s*=>\s*fetchBrokerHealth\(port,/);
+});
+
+test("the Avatar server resolves its broker allow-list through the link policy", () => {
+  const entry = code();
+  const start = entry.indexOf("server = await startAvatarServer(");
+  expect(start, "avatar-entry.ts: server startup anchor is unavailable").toBeGreaterThanOrEqual(0);
+  const body = extractParenBody(entry, entry.indexOf("(", start));
+  expect(body).toContain("allowedBrokerUrls: () => avatarAllowedBrokerUrls(resolveBrokerEndpoint().url)");
 });

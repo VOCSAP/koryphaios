@@ -34,7 +34,7 @@ interface AvatarResponse {
   body: Record<string, unknown>
 }
 
-async function openServer(): Promise<{ server: AvatarServer; state: AvatarState; reports: string[]; setNow(now: number): void }> {
+async function openServer(options: { allowedBrokerUrls?: readonly string[] } = {}): Promise<{ server: AvatarServer; state: AvatarState; reports: string[]; setNow(now: number): void }> {
   let now = 0
   const state = new AvatarState({ now: () => now })
   const reports: string[] = []
@@ -43,7 +43,8 @@ async function openServer(): Promise<{ server: AvatarServer; state: AvatarState;
     certificate: await certificate,
     state,
     token,
-    report: (_scope, message) => reports.push(message)
+    report: (_scope, message) => reports.push(message),
+    allowedBrokerUrls: () => options.allowedBrokerUrls ?? [attach.broker_url]
   })
   return { server, state, reports, setNow: (next) => { now = next } }
 }
@@ -227,6 +228,25 @@ test('attaches one Deck per identity, receives state, and makes detach idempoten
   }
 })
 
+test('negotiates A3 context only with a capable Deck while preserving A1 attachments', async () => {
+  const { server } = await openServer()
+  const context = { group_id: 'group-1', project_key: 'project-1', scope_generation: 1 }
+  try {
+    expect(await post(server, '/attach', JSON.stringify({ ...attach, capabilities: ['a3_context'], context }))).toEqual({
+      status: 200,
+      body: { ok: true, protocol_version: 1, avatarRunId: 'avatar-run-1', capabilities: ['a3_context'] }
+    })
+    expect(server.attachedDecks()).toEqual([{ ...attach, capabilities: ['a3_context'], context }])
+    expect(await post(server, '/attach', JSON.stringify({ ...attach, capabilities: ['future_avatar_capability'] }))).toEqual({
+      status: 200,
+      body: { ok: true, protocol_version: 1, avatarRunId: 'avatar-run-1' }
+    })
+    expect(server.attachedDecks()).toEqual([{ ...attach, capabilities: [] }])
+  } finally {
+    await server.close()
+  }
+})
+
 test('rejects an attach PID that cannot prove Deck process ownership', async () => {
   const { server } = await openServer()
   try {
@@ -285,8 +305,8 @@ test('retains a live suspect Deck and does not probe a fresh Deck', async () => 
 })
 
 test('keeps distinct broker identities with the same Deck run id attached', async () => {
-  const { server, state } = await openServer()
   const otherBroker = 'https://127.0.0.1:7900'
+  const { server, state } = await openServer({ allowedBrokerUrls: [attach.broker_url, otherBroker] })
   try {
     expect(await post(server, '/attach', JSON.stringify(attach))).toMatchObject({ status: 200 })
     expect(await post(server, '/attach', JSON.stringify({ ...attach, broker_url: otherBroker }))).toMatchObject({
@@ -317,6 +337,26 @@ test('keeps distinct broker identities with the same Deck run id attached', asyn
       attach.broker_url,
       otherBroker
     ])
+  } finally {
+    await server.close()
+  }
+})
+
+test('keeps an unlisted broker attached in A1 while refusing its A3 context', async () => {
+  const { server, reports } = await openServer()
+  const broker_url = 'https://untrusted.example.test'
+  const context = { group_id: 'group-1', project_key: 'project-1', scope_generation: 1 }
+  try {
+    expect(await post(server, '/attach', JSON.stringify({ ...attach, broker_url, capabilities: ['a3_context'] }))).toEqual({
+      status: 200,
+      body: { ok: true, protocol_version: 1, avatarRunId: 'avatar-run-1' }
+    })
+    expect(await post(server, '/attach', JSON.stringify({ ...attach, broker_url, capabilities: ['a3_context'], context }))).toEqual({
+      status: 403,
+      body: { error: 'broker_not_allowed' }
+    })
+    expect(server.attachedDecks()).toEqual([{ ...attach, broker_url, capabilities: [] }])
+    expect(reports).toEqual(['rejected Avatar context for a broker not authorized by Avatar main'])
   } finally {
     await server.close()
   }
@@ -713,4 +753,40 @@ test('the Deck side of a bound socket is the local end netstat must read, the Av
     remote: { address: '127.0.0.1', port: 50_100 }
   })
   expect(deckSocketEndpoints(server, otherDeck)).toBeNull()
+})
+
+test.each([
+  ['an empty allow-list', { allowedBrokerUrls: [] as string[] }, attach.broker_url],
+  ['a broker URL that an allowed one is only a prefix of', { allowedBrokerUrls: ['http://127.0.0.1:78'] }, attach.broker_url],
+  ['a broker URL extending an allowed one with a path', {}, `${attach.broker_url}/evil`]
+])('refuses the A3 context of a broker outside the allow-list: %s', async (_what, options, broker_url) => {
+  const { server } = await openServer(options)
+  const context = { group_id: 'group-1', project_key: 'project-1', scope_generation: 1 }
+  try {
+    expect(await post(server, '/attach', JSON.stringify({ ...attach, broker_url, capabilities: ['a3_context'], context }))).toEqual({
+      status: 403,
+      body: { error: 'broker_not_allowed' }
+    })
+  } finally {
+    await server.close()
+  }
+})
+
+test('refuses the A3 context when the server was given no broker allow-list', async () => {
+  const server = await startAvatarServer({
+    avatarRunId: 'avatar-run-1',
+    certificate: await certificate,
+    state: new AvatarState({ now: () => 0 }),
+    token,
+    report: () => undefined
+  })
+  const context = { group_id: 'group-1', project_key: 'project-1', scope_generation: 1 }
+  try {
+    expect(await post(server, '/attach', JSON.stringify({ ...attach, capabilities: ['a3_context'], context }))).toEqual({
+      status: 403,
+      body: { error: 'broker_not_allowed' }
+    })
+  } finally {
+    await server.close()
+  }
 })

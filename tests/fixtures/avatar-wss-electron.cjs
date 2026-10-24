@@ -62,7 +62,7 @@ function oversizedFrameCloseCode(rendezvous) {
 async function detachedCloseCode(rendezvous, postAvatarJson) {
   const other = { ...deck, deckRunId: 'deck-run-detached' }
   const identity = { deckRunId: other.deckRunId, broker_url: other.broker_url }
-  if ((await postAvatarJson(rendezvous, '/attach', { protocol_version: 1, ...other })) !== 200) throw new Error('attach refused')
+  if ((await postAvatarJson(rendezvous, '/attach', { protocol_version: 1, ...other })).status !== 200) throw new Error('attach refused')
   const socket = connectAvatarWss(rendezvous, '/ws')
   const closed = new Promise((resolve) => socket.once('close', (code) => resolve(code)))
   await new Promise((resolve, reject) => {
@@ -70,7 +70,7 @@ async function detachedCloseCode(rendezvous, postAvatarJson) {
     socket.once('message', resolve)
     socket.once('error', reject)
   })
-  if ((await postAvatarJson(rendezvous, '/detach', identity)) !== 200) throw new Error('detach refused')
+  if ((await postAvatarJson(rendezvous, '/detach', identity)).status !== 200) throw new Error('detach refused')
   return closed
 }
 
@@ -78,7 +78,7 @@ async function detachedCloseCode(rendezvous, postAvatarJson) {
 async function boundSocketEnds(rendezvous, server, postAvatarJson) {
   const other = { ...deck, deckRunId: 'deck-run-port' }
   const identity = { deckRunId: other.deckRunId, broker_url: other.broker_url }
-  if ((await postAvatarJson(rendezvous, '/attach', { protocol_version: 1, ...other })) !== 200) throw new Error('attach refused')
+  if ((await postAvatarJson(rendezvous, '/attach', { protocol_version: 1, ...other })).status !== 200) throw new Error('attach refused')
   const socket = connectAvatarWss(rendezvous, '/ws')
   const closed = new Promise((resolve) => socket.once('close', resolve))
   await new Promise((resolve, reject) => {
@@ -98,7 +98,7 @@ async function boundSocketEnds(rendezvous, server, postAvatarJson) {
     remoteEndIsServer: ends.remote.port === server.port,
     ownerIsThisProcess: owner
   }
-  if ((await postAvatarJson(rendezvous, '/detach', identity)) !== 200) throw new Error('detach refused')
+  if ((await postAvatarJson(rendezvous, '/detach', identity)).status !== 200) throw new Error('detach refused')
   await closed
   return result
 }
@@ -128,6 +128,7 @@ async function run() {
     certificate,
     state: new AvatarState({ now: () => Date.now() }),
     token: 'avatar-e2e-token',
+    allowedBrokerUrls: () => [deck.broker_url],
     report
   })
   const rendezvous = {

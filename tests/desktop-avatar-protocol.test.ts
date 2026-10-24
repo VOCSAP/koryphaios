@@ -25,6 +25,30 @@ test('accepts the current protocol version and resolved Deck identity', () => {
   expect(parseAvatarAttachRequest(validAttach)).toEqual(validAttach)
 })
 
+test('accepts A3 context only when its capability is negotiated', () => {
+  const context = { group_id: 'group-1', project_key: 'project-1', scope_generation: 1 }
+  expect(parseAvatarAttachRequest({ ...validAttach, capabilities: ['a3_context'], context })).toEqual({
+    ...validAttach,
+    capabilities: ['a3_context'],
+    context
+  })
+  expect(() => parseAvatarAttachRequest({ ...validAttach, context })).toThrow(/invalid Avatar attach request/)
+})
+
+test('ignores an unknown capability while preserving the A1 attach request', () => {
+  expect(parseAvatarAttachRequest({ ...validAttach, capabilities: ['future_avatar_capability'] })).toEqual({
+    ...validAttach,
+    capabilities: []
+  })
+})
+
+test('deduplicates negotiated Avatar capabilities', () => {
+  expect(parseAvatarAttachRequest({ ...validAttach, capabilities: ['a3_context', 'a3_context'] })).toEqual({
+    ...validAttach,
+    capabilities: ['a3_context']
+  })
+})
+
 const { deckPid: _omittedPid, ...attachWithoutPid } = validAttach
 
 test.each<[string, Record<string, unknown>]>([
@@ -188,4 +212,19 @@ test('reads the requestId of a command refused only for being outside AVATAR_COM
   expect(unsupportedAvatarCommandRequestId({ type: 'command', requestId: 'request-9', command: 'restart', deckRunId: 'bad id' })).toBeNull()
   expect(unsupportedAvatarCommandRequestId({ type: 'bound', requestId: 'request-9', command: 'restart' })).toBeNull()
   expect(unsupportedAvatarCommandRequestId(null)).toBeNull()
+})
+
+const a3Context = { group_id: 'group-1', project_key: 'project-1', scope_generation: 1 }
+
+test.each([
+  ['a negative scope generation', { ...a3Context, scope_generation: -1 }],
+  ['a fractional scope generation', { ...a3Context, scope_generation: 1.5 }],
+  ['a scope generation beyond the safe integers', { ...a3Context, scope_generation: 2 ** 53 }],
+  ['a scope generation that is not a number', { ...a3Context, scope_generation: '1' }],
+  ['a missing scope generation', { group_id: 'group-1', project_key: 'project-1' }],
+  ['an empty group', { ...a3Context, group_id: '' }],
+  ['an absurdly long group', { ...a3Context, group_id: 'g'.repeat(10_000) }],
+  ['an absurdly long project key', { ...a3Context, project_key: 'p'.repeat(100_000) }]
+])('refuses an A3 context carrying %s', (_what, context) => {
+  expect(() => parseAvatarAttachRequest({ ...validAttach, capabilities: ['a3_context'], context })).toThrow(/invalid Avatar attach request/)
 })

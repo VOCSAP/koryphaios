@@ -85,7 +85,8 @@ test('a restored workspace whose name is not a string yields no name, and the De
       projectDir: project,
       projectKey: 'project-a',
       stateDir: project,
-      brokerUrl: 'http://127.0.0.1:7899',
+      brokerUrl: () => 'http://127.0.0.1:7899',
+      scope: () => ({ group_id: 'group-1', project_key: 'project-a', scope_generation: 0 }),
       sessions: () => [],
       window: () => null,
       workspaceName: () => second.currentWorkspaceName

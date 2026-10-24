@@ -223,8 +223,8 @@ import {
   worktreeInitDialog,
   type ApprovalDialogSpec
 } from './serve-approval-dialog'
-import { createAvatarClient } from './avatar-client'
-import { boundedAvatarDetach, deckAvatarClientOptions, focusDeckWindow } from './avatar-deck-link'
+import { createAvatarClient, type AvatarClient } from './avatar-client'
+import { boundedAvatarDetach, createAvatarScopeTracker, deckAvatarClientOptions, focusDeckWindow } from './avatar-deck-link'
 import { avatarLaunchCommand, ensureAvatar, spawnDetachedAvatar } from './avatar-ensure'
 import {
   createClodexControllerDeps,
@@ -367,6 +367,8 @@ let config: AppConfig = { ...loadConfig(), projectDir: cliContext.projectDir }
 // relaunching (DESIGN 6.6).
 let activeScope: Scope = computeScope(cliContext.projectDir, cliContext.scopeId)
 let activeScopeEnv: ScopeEnv = buildScopeEnv(activeScope)
+const avatarScope = createAvatarScopeTracker()
+let avatarClient: AvatarClient | null = null
 
 const appStateDir = (): string => join(app.getPath('userData'), APP_STATE_SUBDIR)
 // SESSION-scoped state of THIS window (session-state.ts): sessions/<groupId>/
@@ -1962,7 +1964,7 @@ const pollPendingApprovals = createPendingApprovalsTick({
   broadcastPending: (list) => {
     lastPendingApprovals = list
     broadcast('approvals:pending', list)
-    avatarClient.sessionsChanged()
+    avatarClient?.sessionsChanged()
   },
   pendingUnavailable: () => {
     lastPendingApprovals = []
@@ -3263,6 +3265,7 @@ const adoptScope = (ws: { groupId: string; scopeKind: 'ephemeral' | 'custom' }):
   removeSessionStateDir(appStateDir(), activeScope.groupId, reportSessionState)
   activeScope = next
   activeScopeEnv = buildScopeEnv(activeScope)
+  avatarScope.scopeChanged(() => avatarClient?.scopeChanged())
   try {
     touchSessionStateDir(sessionDir(), Date.now())
   } catch (e) {
@@ -3294,12 +3297,14 @@ const syncExportTemplateEnabled = (): void => {
 }
 service.on('changed', syncExportTemplateEnabled)
 
+const avatarProjectKey = computeDeckProjectKey(cliContext.projectDir)
 const avatarOptions = deckAvatarClientOptions({
   deckRunId: randomUUID(),
   projectDir: cliContext.projectDir,
-  projectKey: computeDeckProjectKey(cliContext.projectDir),
+  projectKey: avatarProjectKey,
   stateDir: appStateDir(),
-  brokerUrl: resolveBrokerEndpoint().url,
+  brokerUrl: () => resolveBrokerEndpoint().url,
+  scope: () => avatarScope.context(activeScope.groupId, avatarProjectKey),
   sessions: () => service.list(),
   window: () => mainWindow,
   workspaceName: () => workspaces.currentWorkspaceName
@@ -3320,14 +3325,14 @@ async function openOldestPendingQuestion(): Promise<void> {
   }
 }
 
-const avatarClient = createAvatarClient({
+avatarClient = createAvatarClient({
   ...avatarOptions,
   pendingApprovals: () => lastPendingApprovals,
   inboxUnread: pendingInboxCounter(sessionDir, () => pendingInboxWrites),
   openQuestion: () => openOldestPendingQuestion()
 })
 let avatarDetach: Promise<void> = Promise.resolve()
-service.on('changed', () => avatarClient.sessionsChanged())
+service.on('changed', () => avatarClient?.sessionsChanged())
 
 async function startAvatarProcess(): Promise<void> {
   const outcome = await ensureAvatar({
@@ -3810,9 +3815,9 @@ app.whenReady().then(async () => {
   ttsr.start()
   createWindow()
   startup.markRunning()
-  avatarClient.start()
+  avatarClient?.start()
   void startAvatarProcess()
-    .then(() => avatarClient.sessionsChanged())
+    .then(() => avatarClient?.sessionsChanged())
     .catch((e) => reportError('avatar', 'Avatar startup check failed', e))
 
   app.on('activate', () => {
@@ -3849,7 +3854,7 @@ const runBeforeQuit = createBeforeQuitHandler({
     {
       label: 'avatar',
       run: () => {
-        avatarDetach = avatarClient.stop()
+        avatarDetach = avatarClient?.stop() ?? Promise.resolve()
       }
     },
     { label: 'service', run: () => service.stop() },

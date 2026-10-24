@@ -1,10 +1,14 @@
 import { request } from 'node:https'
 import type { RawData } from 'ws'
 import {
+  AVATAR_CAPABILITIES,
   AVATAR_PROTOCOL_VERSION,
+  MAX_AVATAR_REQUEST_BYTES,
   parseAvatarServerFrame,
   unsupportedAvatarCommandRequestId,
-  type AvatarAttachRequest
+  type AvatarAttachRequest,
+  type AvatarCapability,
+  type AvatarDeckContext
 } from '../shared/avatar-protocol'
 import { AVATAR_HEARTBEAT_MS, type AvatarDeckIdentity } from '../shared/avatar-state'
 import type { HookAwaitRow } from '../shared/hook-await'
@@ -26,10 +30,16 @@ export interface AvatarClientSocket {
   on(event: 'error', listener: (error: Error) => void): unknown
 }
 
-export type AvatarPost = (rendezvous: AvatarRendezvous, path: string, body: unknown) => Promise<number>
+export interface AvatarPostResponse {
+  status: number
+  body: Record<string, unknown> | null
+}
+
+export type AvatarPostResult = number | AvatarPostResponse
+export type AvatarPost = (rendezvous: AvatarRendezvous, path: string, body: unknown) => Promise<AvatarPostResult>
 
 export interface AvatarClientOptions {
-  /** Re-read at every sync for its name; deckRunId and broker_url are taken once, at creation. */
+  /** Re-read at every sync so the attachment follows the current Deck scope. */
   deck(): Omit<AvatarAttachRequest, 'protocol_version'>
   autoAttachEnabled(): boolean
   rendezvous(): AvatarRendezvous | null
@@ -52,14 +62,33 @@ export interface AvatarClientOptions {
 export interface AvatarClient {
   start(): boolean
   sessionsChanged(): void
+  scopeChanged(): void
   stop(): Promise<void>
 }
 
-export function postAvatarJson(rendezvous: AvatarRendezvous, path: string, body: unknown): Promise<number> {
+export function postAvatarJson(rendezvous: AvatarRendezvous, path: string, body: unknown): Promise<AvatarPostResponse> {
   return new Promise((resolve, reject) => {
     const outgoing = request({ ...avatarHttpsRequestOptions(rendezvous, path), method: 'POST' }, (response) => {
-      response.resume()
-      response.once('end', () => resolve(response.statusCode ?? 0))
+      const chunks: Buffer[] = []
+      let size = 0
+      response.on('data', (chunk: Buffer) => {
+        size += chunk.length
+        if (size > MAX_AVATAR_REQUEST_BYTES) {
+          response.destroy(new Error(`Avatar ${path} response payload_too_large`))
+          return
+        }
+        chunks.push(chunk)
+      })
+      response.once('end', () => {
+        const text = Buffer.concat(chunks).toString('utf8')
+        try {
+          const value = JSON.parse(text) as unknown
+          const parsed = value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : null
+          resolve({ status: response.statusCode ?? 0, body: parsed })
+        } catch {
+          resolve({ status: response.statusCode ?? 0, body: null })
+        }
+      })
       response.once('error', reject)
     })
     outgoing.once('error', reject)
@@ -110,6 +139,21 @@ function rawText(data: RawData): string {
   return data.toString('utf8')
 }
 
+function postStatus(result: AvatarPostResult): number {
+  return typeof result === 'number' ? result : result.status
+}
+
+function negotiatedCapabilities(result: AvatarPostResult): readonly AvatarCapability[] {
+  if (typeof result === 'number') return []
+  const capabilities = result.body?.capabilities
+  if (!Array.isArray(capabilities)) return []
+  return capabilities.filter((capability): capability is AvatarCapability => (AVATAR_CAPABILITIES as readonly unknown[]).includes(capability))
+}
+
+function attachmentKey(identity: AvatarDeckIdentity, context: AvatarDeckContext | undefined): string {
+  return JSON.stringify([identity.deckRunId, identity.broker_url, context?.group_id, context?.project_key, context?.scope_generation])
+}
+
 export function createAvatarClient(options: AvatarClientOptions): AvatarClient {
   const report = options.report ?? reportError
   const post = options.post ?? postAvatarJson
@@ -121,13 +165,11 @@ export function createAvatarClient(options: AvatarClientOptions): AvatarClient {
   const link = failureEpisode(report, info, 'Avatar link restored')
   const webSocket = failureEpisode(report, info, 'Avatar WebSocket restored')
   const unreadInput = failureEpisode(report, info, 'Inbox unread count valid again')
-  const initialDeck = options.deck()
-  const identity: AvatarDeckIdentity = { deckRunId: initialDeck.deckRunId, broker_url: initialDeck.broker_url }
-  let attachedRunId: string | null = null
-  let attachedName: string | null = null
+  let attached: { avatarRunId: string; identity: AvatarDeckIdentity; key: string; name: string } | null = null
   let socket: AvatarClientSocket | null = null
   let lastPushed: string | null = null
   let stopHeartbeat: (() => void) | null = null
+  let scopeEpoch = 0
   let chain = Promise.resolve()
 
   const enqueue = (work: () => Promise<void>): Promise<void> => {
@@ -142,7 +184,7 @@ export function createAvatarClient(options: AvatarClientOptions): AvatarClient {
     current.send(JSON.stringify({ type: 'command_result', requestId, ok, ...(error === undefined ? {} : { error }) }))
   }
 
-  const openSocket = (rendezvous: AvatarRendezvous): void => {
+  const openSocket = (rendezvous: AvatarRendezvous, identity: AvatarDeckIdentity): void => {
     const current = connect(rendezvous)
     let bound = false
     socket = current
@@ -214,29 +256,72 @@ export function createAvatarClient(options: AvatarClientOptions): AvatarClient {
 
   const sync = async (force: boolean): Promise<void> => {
     if (!stopHeartbeat) return
+    const epoch = scopeEpoch
     const rendezvous = options.rendezvous()
     if (!rendezvous) {
-      attachedRunId = null
+      attached = null
       return
     }
-    const deck = { ...options.deck(), ...identity }
-    const avatarChanged = attachedRunId !== rendezvous.avatarRunId
-    if (avatarChanged || deck.deckName !== attachedName) {
-      const status = await post(rendezvous, '/attach', { protocol_version: AVATAR_PROTOCOL_VERSION, ...deck })
-      if (status !== 200) {
-        link.fail(`Avatar refused the attach with status ${status}`)
+    const deck = options.deck()
+    const identity: AvatarDeckIdentity = { deckRunId: deck.deckRunId, broker_url: deck.broker_url }
+    const key = attachmentKey(identity, deck.context)
+    const contextFreeKey = attachmentKey(identity, undefined)
+    const needsAttach =
+      attached === null ||
+      attached.avatarRunId !== rendezvous.avatarRunId ||
+      attached.key !== key ||
+      attached.name !== deck.deckName
+    if (needsAttach) {
+      const previousAttachment = attached
+      if (
+        previousAttachment &&
+        previousAttachment.avatarRunId === rendezvous.avatarRunId &&
+        previousAttachment.identity.broker_url !== identity.broker_url
+      ) {
+        const detachResult = await post(rendezvous, '/detach', previousAttachment.identity)
+        if (epoch !== scopeEpoch) return
+        const detachStatus = postStatus(detachResult)
+        if (detachStatus !== 200) report('avatar-client', `Avatar refused the detach with status ${detachStatus}`)
+      }
+      const { context, ...attachDeck } = deck
+      const capabilities = context === undefined ? [] : AVATAR_CAPABILITIES
+      const attachResult = await post(rendezvous, '/attach', {
+        protocol_version: AVATAR_PROTOCOL_VERSION,
+        ...attachDeck,
+        ...(capabilities.length === 0 ? {} : { capabilities })
+      })
+      const attachStatus = postStatus(attachResult)
+      if (attachStatus !== 200) {
+        link.fail(`Avatar refused the attach with status ${attachStatus}`)
         return
       }
-      attachedName = deck.deckName
-      if (avatarChanged) {
-        attachedRunId = rendezvous.avatarRunId
-        lastPushed = null
-        const previous = socket
+      attached = { avatarRunId: rendezvous.avatarRunId, identity, key: context === undefined ? key : contextFreeKey, name: deck.deckName }
+      if (epoch !== scopeEpoch) return
+      if (context && negotiatedCapabilities(attachResult).includes('a3_context')) {
+        const contextResult = await post(rendezvous, '/attach', {
+          protocol_version: AVATAR_PROTOCOL_VERSION,
+          ...attachDeck,
+          capabilities,
+          context
+        })
+        if (epoch !== scopeEpoch) return
+        const contextStatus = postStatus(contextResult)
+        if (contextStatus !== 200) {
+          link.fail(`Avatar refused the attach with status ${contextStatus}`)
+          return
+        }
+      }
+      const avatarChanged = previousAttachment?.avatarRunId !== rendezvous.avatarRunId
+      const identityChanged = previousAttachment !== null && previousAttachment.identity.broker_url !== identity.broker_url
+      attached = { avatarRunId: rendezvous.avatarRunId, identity, key, name: deck.deckName }
+      lastPushed = null
+      if (avatarChanged || identityChanged) {
+        const previousSocket = socket
         socket = null
-        previous?.close(1000, 'Avatar restarted')
+        previousSocket?.close(1000, avatarChanged ? 'Avatar restarted' : 'Deck scope changed')
       }
     }
-    if (!socket) openSocket(rendezvous)
+    if (!socket) openSocket(rendezvous, identity)
 
     const unread = options.inboxUnread?.() ?? 0
     if (isAvatarCounter(unread)) unreadInput.ok()
@@ -248,10 +333,12 @@ export function createAvatarClient(options: AvatarClientOptions): AvatarClient {
     }
     const serialized = JSON.stringify(snapshot)
     if (!force && serialized === lastPushed) return
-    const status = await post(rendezvous, '/state', snapshot)
-    if (status !== 200) {
-      if (status === 409) attachedRunId = null
-      link.fail(`Avatar refused the state with status ${status}`)
+    const stateResult = await post(rendezvous, '/state', snapshot)
+    if (epoch !== scopeEpoch) return
+    const stateStatus = postStatus(stateResult)
+    if (stateStatus !== 200) {
+      if (stateStatus === 409) attached = null
+      link.fail(`Avatar refused the state with status ${stateStatus}`)
       return
     }
     lastPushed = serialized
@@ -269,6 +356,14 @@ export function createAvatarClient(options: AvatarClientOptions): AvatarClient {
     sessionsChanged() {
       if (stopHeartbeat) void enqueue(() => sync(false))
     },
+    scopeChanged() {
+      scopeEpoch += 1
+      lastPushed = null
+      const previousSocket = socket
+      socket = null
+      previousSocket?.close(1000, 'Deck scope changed')
+      if (stopHeartbeat) void enqueue(() => sync(true))
+    },
     stop() {
       stopHeartbeat?.()
       stopHeartbeat = null
@@ -277,14 +372,15 @@ export function createAvatarClient(options: AvatarClientOptions): AvatarClient {
         socket = null
         closing?.close(1000, 'Deck detaching')
         const rendezvous = options.rendezvous()
-        if (!rendezvous) return
-        if (attachedRunId === null) return
-        if (attachedRunId !== rendezvous.avatarRunId) {
+        if (!rendezvous || !attached) return
+        if (attached.avatarRunId !== rendezvous.avatarRunId) {
           warn('avatar-client', 'Avatar detach abandoned because its run changed')
           return
         }
-        attachedRunId = null
-        const status = await post(rendezvous, '/detach', identity)
+        const identity = attached.identity
+        attached = null
+        const result = await post(rendezvous, '/detach', identity)
+        const status = postStatus(result)
         if (status !== 200) report('avatar-client', `Avatar refused the detach with status ${status}`)
         else info('avatar-client', 'Avatar detached')
       })

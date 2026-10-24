@@ -7,6 +7,7 @@ import {
   AVATAR_PROTOCOL_VERSION,
   AvatarProtocolError,
   MAX_AVATAR_ATTACHMENTS,
+  MAX_AVATAR_REQUEST_BYTES,
   parseAvatarAttachRequest,
   parseAvatarDeckFrame,
   parseAvatarDetachRequest,
@@ -19,7 +20,7 @@ import type { TcpEndpoint } from './avatar-socket-owner'
 import { AvatarState, type AvatarDeckIdentity } from '../shared/avatar-state'
 import { reportError } from './log'
 
-export const MAX_AVATAR_REQUEST_BYTES = 64 * 1024
+export { MAX_AVATAR_REQUEST_BYTES }
 export const AVATAR_BIND_TIMEOUT_MS = 5_000
 export const AVATAR_COMMAND_RESULT_TIMEOUT_MS = 3_000
 
@@ -28,6 +29,7 @@ export interface AvatarServerOptions {
   certificate: AvatarRunCertificate
   state: AvatarState
   token: string
+  allowedBrokerUrls?(): readonly string[]
   port?: number
   bindTimeoutMs?: number
   commandResultTimeoutMs?: number
@@ -131,6 +133,10 @@ function deckKey(identity: AvatarDeckIdentity): string {
   return JSON.stringify([identity.deckRunId, identity.broker_url])
 }
 
+function brokerAllowed(allowedBrokerUrls: readonly string[], brokerUrl: string): boolean {
+  return allowedBrokerUrls.includes(brokerUrl)
+}
+
 function sameBearerToken(authorization: string | undefined, token: string): boolean {
   if (!authorization?.startsWith('Bearer ')) return false
   const provided = Buffer.from(authorization.slice('Bearer '.length))
@@ -220,6 +226,17 @@ export async function startAvatarServer(options: AvatarServerOptions): Promise<A
       const body = await readJson(request)
       if (request.url === '/attach') {
         const attach = parseAvatarAttachRequest(body)
+        const allowedBroker = brokerAllowed(options.allowedBrokerUrls?.() ?? [], attach.broker_url)
+        if (attach.context && !allowedBroker) {
+          reject(
+            response,
+            403,
+            { error: 'broker_not_allowed' },
+            'rejected Avatar context for a broker not authorized by Avatar main'
+          )
+          return
+        }
+        const capabilities = allowedBroker ? (attach.capabilities ?? []) : []
         const key = deckKey(attach)
         if (!attached.has(key) && attached.size >= MAX_AVATAR_ATTACHMENTS) {
           reject(response, 409, { error: 'too_many_attached_decks' }, 'rejected Avatar attachment limit')
@@ -232,11 +249,12 @@ export async function startAvatarServer(options: AvatarServerOptions): Promise<A
             unread: 0
           })
         }
-        attached.set(key, { ...attach })
+        attached.set(key, { ...attach, ...(attach.capabilities === undefined ? {} : { capabilities }) })
         sendJson(response, 200, {
           ok: true,
           protocol_version: AVATAR_PROTOCOL_VERSION,
-          avatarRunId: options.avatarRunId
+          avatarRunId: options.avatarRunId,
+          ...(capabilities.length === 0 ? {} : { capabilities })
         })
         return
       }

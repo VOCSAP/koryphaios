@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { createPendingApprovalsTick, hookAwaitedTiles, type PendingApprovalsIo } from "../desktop/src/main/hook-attention.ts";
+import { extractParenBody } from "./_braced-body.ts";
 import type { Approval } from "../shared/types.ts";
 
 function approval(overrides: { status: Approval["status"]; reply_route: Approval["reply_route"]; tile_ref: string }): Approval {
@@ -151,8 +152,9 @@ test("the Avatar client reads the poll's last list and the Courrier's pending me
   const tickBody = tick.slice(0, tick.indexOf("\n})"));
   expect(tickBody, "the list kept for the Avatar is the one broadcast").toMatch(/broadcastPending: \(list\) => \{\s*lastPendingApprovals = list/);
   expect(tickBody, "an unreadable poll empties the list kept for the Avatar").toMatch(/pendingUnavailable: \(\) => \{\s*lastPendingApprovals = \[\]/);
-  const client = index.slice(index.indexOf("const avatarClient = createAvatarClient("));
-  const clientBody = client.slice(0, client.indexOf("\n})"));
+  const avatarClientAssignment = index.indexOf("avatarClient = createAvatarClient(");
+  expect(avatarClientAssignment, "the Avatar client is assigned after scope lifecycle setup").toBeGreaterThanOrEqual(0);
+  const clientBody = extractParenBody(index, index.indexOf("(", avatarClientAssignment));
   expect(clientBody).toMatch(/pendingApprovals: \(\) => lastPendingApprovals/);
   expect(clientBody).toMatch(/inboxUnread: pendingInboxCounter\(sessionDir, \(\) => pendingInboxWrites\)/);
 });

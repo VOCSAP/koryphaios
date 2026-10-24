@@ -1,4 +1,5 @@
 import { basename, join, resolve } from 'node:path'
+import type { AvatarDeckContext } from '../shared/avatar-protocol'
 import type { SessionRuntime } from '../shared/types'
 import type { AvatarClientOptions } from './avatar-client'
 import { readAvatarRegistry } from './avatar-registry'
@@ -20,10 +21,31 @@ export interface DeckAvatarLinkDeps {
   projectDir: string
   projectKey: string
   stateDir: string
-  brokerUrl: string
+  brokerUrl(): string
+  scope(): AvatarDeckContext
   sessions(): SessionRuntime[]
   window(): DeckAvatarWindow | null
   workspaceName(): string | null
+}
+
+export interface AvatarScopeTracker {
+  context(groupId: string, projectKey: string): AvatarDeckContext
+  scopeChanged(notify: () => void): void
+}
+
+export function avatarAllowedBrokerUrls(brokerUrl: string): string[] {
+  return [brokerUrl]
+}
+
+export function createAvatarScopeTracker(): AvatarScopeTracker {
+  let generation = 0
+  return {
+    context: (groupId, projectKey) => ({ group_id: groupId, project_key: projectKey, scope_generation: generation }),
+    scopeChanged: (notify) => {
+      generation += 1
+      notify()
+    }
+  }
 }
 
 // C0 and C1 controls, bidi embeddings/overrides and bidi isolates: invisible, and able to disguise a Tray label.
@@ -89,9 +111,10 @@ export function deckAvatarClientOptions(
     deck: () => ({
       deckRunId: deps.deckRunId,
       deckPid: process.pid,
-      broker_url: deps.brokerUrl,
+      broker_url: deps.brokerUrl(),
       projectDir,
-      deckName: deckNameFrom([deps.workspaceName(), basename(projectDir), projectDir])
+      deckName: deckNameFrom([deps.workspaceName(), basename(projectDir), projectDir]),
+      context: deps.scope()
     }),
     autoAttachEnabled: () => avatarAutoAttachEnabled(settingsFile, deps.projectKey),
     rendezvous: () => readAvatarRegistry(deps.stateDir),

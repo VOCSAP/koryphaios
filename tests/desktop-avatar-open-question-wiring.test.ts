@@ -6,6 +6,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pendingQuestionTarget } from "../desktop/src/main/pending-question-target.ts";
+import { extractParenBody } from "./_braced-body.ts";
 
 const INDEX = resolve(import.meta.dir, "../desktop/src/main/index.ts");
 
@@ -22,6 +23,10 @@ function indexSource(): string {
   return readFileSync(INDEX, "utf8").replace(/\r\n/g, "\n");
 }
 
+function indexCode(): string {
+  return new Bun.Transpiler({ loader: "ts" }).transformSync(indexSource());
+}
+
 function openOldest(deps: Record<string, unknown>): () => Promise<void> {
   const source = indexSource();
   const start = source.indexOf("async function openOldestPendingQuestion(");
@@ -34,7 +39,7 @@ function openOldest(deps: Record<string, unknown>): () => Promise<void> {
 
 function avatarOpenQuestion(openOldestPendingQuestion: () => Promise<void>): () => Promise<void> {
   const source = indexSource();
-  const anchor = source.indexOf("const avatarClient = createAvatarClient({");
+  const anchor = source.indexOf("avatarClient = createAvatarClient({");
   const marker = "  openQuestion: ";
   const start = anchor < 0 ? -1 : source.indexOf(marker, anchor);
   if (start < 0) throw new Error("index.ts: the avatar client openQuestion option is unavailable");
@@ -49,6 +54,22 @@ test("the avatar client's openQuestion option runs openOldestPendingQuestion", a
   let calls = 0;
   await avatarOpenQuestion(async () => { calls += 1; })();
   expect(calls).toBe(1);
+});
+
+test("adoptScope advances the Avatar scope tracker", () => {
+  const index = indexCode();
+  const start = index.indexOf("const adoptScope =");
+  expect(start, "index.ts: adoptScope anchor is unavailable").toBeGreaterThanOrEqual(0);
+  const body = braced(index, index.indexOf("{", index.indexOf("=>", start)));
+  expect(body).toContain("avatarScope.scopeChanged(() => avatarClient?.scopeChanged())");
+});
+
+test("the Avatar scope uses the project key calculated for its options", () => {
+  const index = indexCode();
+  const start = index.indexOf("const avatarOptions = deckAvatarClientOptions(");
+  expect(start, "index.ts: Avatar options anchor is unavailable").toBeGreaterThanOrEqual(0);
+  const body = extractParenBody(index, index.indexOf("(", start));
+  expect(body).toContain("scope: () => avatarScope.context(activeScope.groupId, avatarProjectKey)");
 });
 
 test("openOldestPendingQuestion focuses the window, then opens the oldest pending row in the Courrier", async () => {
