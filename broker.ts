@@ -2368,7 +2368,7 @@ const advanceOperatorInboxCursor = db.prepare(
 // unknown group by construction, TOFU) -- see groupExists() and its two
 // call sites, which are the actual gate against that.
 const gcDeadOperatorInboxSessions = db.prepare(
-  `DELETE FROM operator_inbox_sessions WHERE group_id = ? AND last_seen_at < datetime('now', ?)`
+  `DELETE FROM operator_inbox_sessions WHERE group_id = ? AND julianday(last_seen_at) < julianday('now', ?)`
 );
 
 const minLiveOperatorInboxCursor = db.prepare(

@@ -585,6 +585,42 @@ test("lot 1A: session_id absent is byte-identical to legacy -- no operator_inbox
   }
 });
 
+test("a legacy cursor older than its TTL, stored as an ISO timestamp, is collected and no longer holds the purge floor", async () => {
+  const cellBroker = await startBroker({ CLAUDE_PEERS_OPERATOR_INBOX_SESSION_TTL_MIN: "2" });
+  try {
+    const g = { id: await groupId("op-legacy-cursor-gc"), hash: await sha256Hex("op-legacy-cursor-gc") };
+    const a = await register("hLegacyCursorGc", "/legacycursorgc", g, cellBroker);
+    await drainAs(g, "dead-cursor", cellBroker);
+    await sendToOperator(a.body.instance_token, "behind a dead cursor", cellBroker);
+
+    const staleSeen = new Date(Date.now() - 5 * 60_000).toISOString();
+    const db = openBrokerDb(cellBroker.dbPath);
+    db.run(
+      "UPDATE operator_inbox_sessions SET last_seen_at = ? WHERE session_id = ? AND group_id = ?",
+      [staleSeen, "dead-cursor", g.id]
+    );
+    db.close();
+
+    await drainAs(g, "live-cursor", cellBroker);
+    expect(
+      (await purge(g, "live-cursor", "session", undefined, cellBroker)).body,
+      "the dead cursor at 0 no longer pins the floor"
+    ).toEqual({ deleted: 1 });
+    const check = openBrokerDb(cellBroker.dbPath, { readonly: true });
+    try {
+      expect(
+        check
+          .query("SELECT session_id FROM operator_inbox_sessions WHERE group_id = ? ORDER BY session_id")
+          .all(g.id)
+      ).toEqual([{ session_id: "live-cursor" }]);
+    } finally {
+      check.close();
+    }
+  } finally {
+    await stopBroker(cellBroker);
+  }
+}, 30_000);
+
 test("lot 1A: a session_id reaped by the purge GC re-seeds as brand-new (no replay, no error)", async () => {
   const g = { id: await groupId("op-lot1a-reap"), hash: await sha256Hex("op-lot1a-reap") };
   const a = await register("hLot1aR", "/lot1aR", g);
