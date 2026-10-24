@@ -106,6 +106,7 @@ export function GraphView(): React.JSX.Element {
   // + relaunch via desktop/src/shared/types.ts + main/store.ts).
   const listCollapsed = useDeck((s) => s.graphListCollapsed)
   const setListCollapsed = useDeck((s) => s.setGraphListCollapsed)
+  const showToast = useDeck((s) => s.showToast)
 
   const canvasRef = useRef<HTMLDivElement>(null)
   // Single state machine for every canvas drag: panning the camera, moving a
@@ -352,7 +353,10 @@ export function GraphView(): React.JSX.Element {
       })
       setGraphs((gs) => gs.map((g) => (g.id === updated.id ? updated : g)))
     } catch (err) {
-      setNotice(String(err instanceof Error ? err.message : err).slice(0, 200))
+      const detail = String(err instanceof Error ? err.message : err).slice(0, 200)
+      window.api.reportError('graph', `inference failed: ${detail}`)
+      showToast(detail, 'error', { raw: true })
+      setNotice(detail)
     } finally {
       setRunning(null)
     }

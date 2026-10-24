@@ -123,6 +123,8 @@ export function runHelp(opts: {
   cwd: string
   /** Override for slower callers (graph inference, C24). Default: 120 s. */
   timeoutMs?: number
+  /** Restricts a headless CLI to the caller's allowlisted environment. */
+  env?: NodeJS.ProcessEnv
 }): Promise<string> {
   const marker = `__CP_HELP_START_${randomBytes(6).toString('hex')}__`
   const inv = buildShellInvocation({
@@ -138,7 +140,8 @@ export function runHelp(opts: {
         cwd: opts.cwd,
         timeout: opts.timeoutMs ?? HELP_TIMEOUT_MS,
         maxBuffer: 8 * 1024 * 1024,
-        encoding: 'utf-8'
+        encoding: 'utf-8',
+        env: opts.env
       },
       (err, stdout, stderr) => {
         if (err) {

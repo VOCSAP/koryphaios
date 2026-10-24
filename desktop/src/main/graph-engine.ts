@@ -26,6 +26,8 @@ import {
 } from '../shared/graph'
 import {
   buildAdapterCommand,
+  buildClaudeAuthStatusCommand,
+  buildClaudeHeadlessEnv,
   GRAPH_INFER_TIMEOUT_MS,
   runHttpInference,
   writeContextFile,
@@ -171,7 +173,7 @@ export interface InferDeps {
   shell: string
   cwd: string
   /** Injectable for tests; defaults to runHelp with the graph timeout. */
-  run?: (command: string) => Promise<string>
+  run?: (command: string, env?: NodeJS.ProcessEnv) => Promise<string>
   /**
    * PTY-backed runner for CLIs that misbehave without a TTY (antigravity —
    * agy#318/#76). Optional: absent (tests), those targets use `run`.
@@ -217,11 +219,29 @@ export async function runInference(
 
   const run =
     deps.run ??
-    ((command: string) =>
-      runHelp({ command, shell: deps.shell, cwd: deps.cwd, timeoutMs: GRAPH_INFER_TIMEOUT_MS }))
+    ((command: string, env?: NodeJS.ProcessEnv) =>
+      runHelp({
+        command,
+        shell: deps.shell,
+        cwd: deps.cwd,
+        timeoutMs: GRAPH_INFER_TIMEOUT_MS,
+        env
+      }))
   const http = deps.http ?? runHttpInference
   const filesDir = join(deps.stateDir, 'graphs')
   const compiled = compileContext(doc, req.nodeId)
+  const judgeTarget = req.judge ?? DEFAULT_JUDGE
+  const needsClaude =
+    targets.some((target) => target.cli === 'claude') || (req.battle && judgeTarget.cli === 'claude')
+  const claudeEnv = needsClaude ? buildClaudeHeadlessEnv() : undefined
+  if (claudeEnv) {
+    try {
+      await run(buildClaudeAuthStatusCommand(), claudeEnv)
+    } catch (err) {
+      const detail = err instanceof Error && err.message ? `: ${err.message}` : ''
+      throw new Error(`Claude authentication check failed. Run \`claude auth login\` and try again${detail}`)
+    }
+  }
 
   /** One target inference: shell command for the CLIs, HTTP for 'local'. */
   const runTarget = (target: ModelTarget): Promise<string> => {
@@ -240,15 +260,15 @@ export async function runInference(
     }
     const content = target.cli === 'claude' ? compiled.system : composeSinglePrompt(compiled)
     const contextFile = writeContextFile(filesDir, { nodeId: node.id, cli: target.cli }, content)
-    // D5 extended to the prompt (07dc42c0): the operator's question rides a
-    // second file, fed via stdin — never the command line (win32 argv
-    // mangling, see model-adapters.ts header comment).
+    // The operator question is fed via stdin, never argv, to preserve it through win32 PowerShell.
     const promptFile =
       target.cli === 'claude'
         ? writeContextFile(filesDir, { nodeId: `${node.id}-prompt`, cli: target.cli }, compiled.prompt)
         : undefined
+    const command = buildAdapterCommand({ contextFile, promptFile, target })
+    if (target.cli === 'claude') return run(command, claudeEnv)
     const exec = target.cli === 'antigravity' && deps.runTty ? deps.runTty : run
-    return exec(buildAdapterCommand({ contextFile, promptFile, target }))
+    return exec(command)
   }
 
   const settled = await Promise.allSettled(
@@ -299,7 +319,6 @@ export async function runInference(
 
   const ok = answers.filter((a) => a.status === 'ok')
   if (req.battle && ok.length >= 2) {
-    const judgeTarget = req.judge ?? DEFAULT_JUDGE
     const labeled = ok.map((a, i) => ({
       label: String.fromCharCode(65 + i),
       text: a.text,
@@ -340,8 +359,10 @@ export async function runInference(
               GRAPH_JUDGE_PROMPT
             )
           : undefined
+      const command = buildAdapterCommand({ contextFile, promptFile, target: judgeTarget })
+      if (judgeTarget.cli === 'claude') return run(command, claudeEnv)
       const exec = judgeTarget.cli === 'antigravity' && deps.runTty ? deps.runTty : run
-      return exec(buildAdapterCommand({ contextFile, promptFile, target: judgeTarget }))
+      return exec(command)
     }
     const started = Date.now()
     const judgeSpot = findFreeSpot(out.nodes, node.x, node.y + 2 * FAN_Y)

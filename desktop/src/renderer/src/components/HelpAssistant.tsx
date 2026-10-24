@@ -27,6 +27,7 @@ export function HelpAssistant(): React.JSX.Element | null {
   const config = useDeck((s) => s.config!)
   const view = useDeck((s) => s.view)
   const updateConfig = useDeck((s) => s.updateConfig)
+  const showToast = useDeck((s) => s.showToast)
   const helpSeed = useDeck((s) => s.helpSeed)
   const clearHelpSeed = useDeck((s) => s.clearHelpSeed)
 
@@ -71,6 +72,8 @@ export function HelpAssistant(): React.JSX.Element | null {
       (e) => {
         setBusy(false)
         const detail = e instanceof Error ? e.message : String(e)
+        window.api.reportError('help', `digest failed: ${detail}`)
+        showToast(t('help.failed', { error: detail }), 'error', { raw: true })
         setMessages((m) =>
           m.map((msg) =>
             msg.pending
@@ -103,6 +106,8 @@ export function HelpAssistant(): React.JSX.Element | null {
       (e) => {
         setBusy(false)
         const detail = e instanceof Error ? e.message : String(e)
+        window.api.reportError('help', `ask failed: ${detail}`)
+        showToast(t('help.failed', { error: detail }), 'error', { raw: true })
         setMessages((m) =>
           m.map((msg) =>
             msg.pending

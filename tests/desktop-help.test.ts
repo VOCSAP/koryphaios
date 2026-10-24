@@ -1,10 +1,10 @@
-// PLAN-v0.4 C9: the floating help assistant (desktop/src/main/help-assistant).
-// Pure builders + a real runHelp round-trip against a fake `claude` binary.
-// Since lot A the command side lives in model-adapters (buildAdapterCommand);
-// this suite keeps the prompts, the transcript replay and the executor.
-
-import { test, expect, afterAll } from "bun:test";
+import { GlobalRegistrator } from "@happy-dom/global-registrator";
+import { test, expect, afterAll, mock } from "bun:test";
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import type { Root } from "../desktop/tests-support/react-test-harness";
+import { mockStore, storeMockStubs } from "./_store-mock";
+
+GlobalRegistrator.register();
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -19,7 +19,7 @@ import {
 import { buildAdapterCommand } from "../desktop/src/main/model-adapters.ts";
 
 const tmpDirs: string[] = [];
-afterAll(() => {
+afterAll(async () => {
   for (const d of tmpDirs.splice(0)) {
     try {
       rmSync(d, { recursive: true, force: true });
@@ -27,12 +27,75 @@ afterAll(() => {
       /* */
     }
   }
+  await GlobalRegistrator.unregister();
 });
 
 function tmp(): string {
   const d = mkdtempSync(join(tmpdir(), "cp-help-"));
   tmpDirs.push(d);
   return d;
+}
+
+const { act, React, createRoot, create } = await import("../desktop/tests-support/react-test-harness");
+const fakeUseDeck = create<any>(() => ({
+  dict: {},
+  config: { helpButton: true, helpTarget: { cli: "claude", model: "" } },
+  view: "home",
+  updateConfig: () => undefined,
+  showToast: () => undefined,
+  helpSeed: null,
+  clearHelpSeed: () => undefined
+}));
+mockStore({ useDeck: fakeUseDeck, ...storeMockStubs });
+const realModels = await import("../desktop/src/shared/models.ts");
+mock.module("@shared/models", () => ({ ...realModels, targetLabel: () => "Claude" }));
+const { HelpAssistant } = await import("../desktop/src/renderer/src/components/HelpAssistant");
+
+// The default runners of the utility and graph inferences reach execFile only through runHelp, with no
+// injectable runner: this spy observes their spawn options and delegates to the real execFile when unarmed.
+type SpawnRecord = { file: string; args: readonly string[]; options: { env?: NodeJS.ProcessEnv } };
+const realChildProcess = await import("node:child_process");
+const realExecFile = realChildProcess.execFile;
+let recordedSpawns: SpawnRecord[] | null = null;
+mock.module("node:child_process", () => ({
+  ...realChildProcess,
+  execFile: (...args: unknown[]) => {
+    if (recordedSpawns === null) return (realExecFile as (...a: unknown[]) => unknown)(...args);
+    const [file, fileArgs, options, callback] = args as [
+      string,
+      readonly string[],
+      SpawnRecord["options"],
+      (err: Error | null, stdout: string, stderr: string) => void
+    ];
+    recordedSpawns.push({ file, args: fileArgs, options });
+    queueMicrotask(() => callback(null, "", ""));
+    return undefined;
+  }
+}));
+const { runUtilityInference } = await import("../desktop/src/main/utility-inference.ts");
+const { runInference } = await import("../desktop/src/main/graph-engine.ts");
+
+async function spawnsWithWitness(run: () => Promise<unknown>): Promise<SpawnRecord[]> {
+  const previous = process.env.KORY_DEFAULT_RUNNER_WITNESS;
+  process.env.KORY_DEFAULT_RUNNER_WITNESS = "inherited-secret";
+  const spawns: SpawnRecord[] = [];
+  recordedSpawns = spawns;
+  try {
+    await run();
+    return spawns;
+  } finally {
+    recordedSpawns = null;
+    if (previous === undefined) delete process.env.KORY_DEFAULT_RUNNER_WITNESS;
+    else process.env.KORY_DEFAULT_RUNNER_WITNESS = previous;
+  }
+}
+
+function expectAllowlistedSpawns(spawns: SpawnRecord[]): void {
+  expect(spawns.map(({ args }) => args.some((arg) => arg.includes("auth status")))).toEqual([true, false]);
+  for (const { options } of spawns) {
+    expect(options.env, "an undefined env makes execFile inherit the whole process.env").toBeDefined();
+    expect(options.env?.KORY_DEFAULT_RUNNER_WITNESS).toBeUndefined();
+  }
 }
 
 // ----- code selection (PLAN GX7) -----
@@ -160,6 +223,55 @@ posixOnly("runHelp resolves the binary through the login shell and returns stdou
   expect(out).toBe("fake answer: which item next?");
 });
 
+test("runHelp passes only its explicit environment to the headless command", async () => {
+  const previous = process.env.KORY_TEST_FORBIDDEN;
+  process.env.KORY_TEST_FORBIDDEN = "inherited-secret";
+  try {
+    const win = process.platform === "win32";
+    const out = await runHelp({
+      command: win
+        ? 'if ($env:KORY_TEST_FORBIDDEN) { Write-Output "$env:USERPROFILE/$env:KORY_TEST_FORBIDDEN" } else { Write-Output "$env:USERPROFILE/missing" }'
+        : 'printf "%s/%s" "$HOME" "${KORY_TEST_FORBIDDEN:-missing}"',
+      shell: win ? "powershell.exe" : "/bin/sh",
+      cwd: tmp(),
+      env: win
+        ? { PATH: process.env.PATH, USERPROFILE: "C:\\isolated-home" }
+        : { PATH: process.env.PATH, HOME: "/isolated-home" }
+    });
+    expect(out).toBe(win ? "C:\\isolated-home/missing" : "/isolated-home/missing");
+  } finally {
+    if (previous === undefined) delete process.env.KORY_TEST_FORBIDDEN;
+    else process.env.KORY_TEST_FORBIDDEN = previous;
+  }
+}, 30_000);
+
+test("the default utility runner spawns Claude with the allowlisted environment only", async () => {
+  const spawns = await spawnsWithWitness(() =>
+    runUtilityInference(
+      { stateDir: tmp(), shell: "", cwd: tmp() },
+      { target: { cli: "claude", model: "" }, system: "system", prompt: "question", kind: "digest" }
+    )
+  );
+  expectAllowlistedSpawns(spawns);
+});
+
+test("the default graph runner spawns Claude with the allowlisted environment only", async () => {
+  const spawns = await spawnsWithWitness(() =>
+    runInference(
+      { stateDir: tmp(), shell: "", cwd: tmp() },
+      {
+        id: "g1",
+        name: "g",
+        nodes: [{ id: "q", type: "user", parents: [], text: "hello", x: 0, y: 0, createdAt: 1 }],
+        createdAt: 1,
+        updatedAt: 1
+      },
+      { nodeId: "q", targets: [{ cli: "claude", model: "" }], battle: false }
+    )
+  );
+  expectAllowlistedSpawns(spawns);
+});
+
 posixOnly("runHelp surfaces a failing invocation as a rejected promise", async () => {
   const dir = tmp();
   const fake = join(dir, "claude");
@@ -175,6 +287,42 @@ posixOnly("runHelp surfaces a failing invocation as a rejected promise", async (
     platform: "linux"
   });
   await expect(runHelp({ command: cmd, shell: "/bin/sh", cwd: dir })).rejects.toThrow(/boom/);
+});
+
+test("Help digest failure reports and toasts the direct action", async () => {
+  const reports: string[][] = [];
+  const toasts: unknown[][] = [];
+  const hadApi = "api" in window;
+  const previousApi = (window as any).api;
+  const previousShowToast = fakeUseDeck.getState().showToast;
+  (window as any).api = {
+    askDigest: () => Promise.reject(new Error("offline")),
+    reportError: (...args: string[]) => reports.push(args)
+  };
+  fakeUseDeck.setState({ showToast: (...args: unknown[]) => toasts.push(args) });
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root: Root = createRoot(container);
+  try {
+    await act(async () => {
+      root.render(React.createElement(HelpAssistant));
+    });
+    await act(async () => {
+      (container.querySelector(".help-fab") as HTMLButtonElement).click();
+    });
+    await act(async () => {
+      (container.querySelector(".help-head .icon-btn") as HTMLButtonElement).click();
+      await Promise.resolve();
+    });
+    expect(reports).toEqual([["help", "digest failed: offline"]]);
+    expect(toasts[0]?.[1]).toBe("error");
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+    if (hadApi) (window as any).api = previousApi;
+    else delete (window as any).api;
+    fakeUseDeck.setState({ showToast: previousShowToast });
+  }
 });
 
 // 30_000 because both spawn a process, and a spawn on the windows-latest runner

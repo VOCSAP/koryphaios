@@ -1,7 +1,3 @@
-// EXPLORATION-graph-chat C24: headless CLI adapters
-// (desktop/src/main/model-adapters). Context by FILE (D5), read-only
-// harness per CLI (D6), command-line model sanitized.
-
 import { test, expect, afterAll } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -9,11 +5,13 @@ import { join } from "node:path";
 
 import {
   buildAdapterCommand,
+  buildClaudeAuthStatusCommand,
+  buildClaudeHeadlessEnv,
   sanitizeModel,
   stdinFromFile,
   writeContextFile
 } from "../desktop/src/main/model-adapters.ts";
-import { HELP_DISALLOWED_TOOLS } from "../desktop/src/main/help-assistant.ts";
+import { runHelp } from "../desktop/src/main/help-assistant.ts";
 
 const tmpDirs: string[] = [];
 afterAll(() => {
@@ -40,6 +38,45 @@ test("sanitizeModel allows identifiers, rejects shell metacharacters", () => {
   expect(sanitizeModel("a".repeat(200))).toBe("");
 });
 
+test("Claude headless environment retains only startup, network and subscription variables", () => {
+  expect(
+    buildClaudeHeadlessEnv({
+      PATH: "/bin",
+      HOME: "/home/operator",
+      CLAUDE_CODE_OAUTH_TOKEN: "subscription-token",
+      HTTP_PROXY: "http://proxy",
+      ALL_PROXY: "socks5://proxy",
+      ANTHROPIC_API_KEY: "api-key",
+      ANTHROPIC_AUTH_TOKEN: "auth-token",
+      ANTHROPIC_BASE_URL: "https://provider.example",
+      CLAUDE_CODE_USE_BEDROCK: "1",
+      CLAUDE_CODE_USE_VERTEX: "1",
+      AWS_REGION: "eu-west-3",
+      GOOGLE_CLOUD_PROJECT: "project",
+      CLOUD_API_KEY: "cloud-key",
+      NODE_OPTIONS: "--require hostile",
+      CLAUDE_CODE_SHELL_PREFIX: "hostile",
+      CLAUDE_PEERS_FORCE_GROUP: "hostile-provider-switch",
+      KORY_HEADLESS_TEST_SENTINEL: "must-not-reach-claude"
+    })
+  ).toEqual({
+    PATH: "/bin",
+    HOME: "/home/operator",
+    CLAUDE_CODE_OAUTH_TOKEN: "subscription-token",
+    HTTP_PROXY: "http://proxy",
+    ALL_PROXY: "socks5://proxy",
+    ANTHROPIC_API_KEY: "api-key",
+    ANTHROPIC_AUTH_TOKEN: "auth-token",
+    ANTHROPIC_BASE_URL: "https://provider.example",
+    CLAUDE_CODE_USE_BEDROCK: "1",
+    CLAUDE_CODE_USE_VERTEX: "1",
+    AWS_REGION: "eu-west-3",
+    GOOGLE_CLOUD_PROJECT: "project",
+    CLOUD_API_KEY: "cloud-key",
+    NoDefaultCurrentDirectoryInExePath: "1"
+  });
+});
+
 test("stdinFromFile: POSIX redirection vs PowerShell pipe, UTF-8 forced on both win32 stages", () => {
   expect(stdinFromFile("codex exec -", "/tmp/f.md", "linux")).toBe('codex exec - < "/tmp/f.md"');
   // win32: WinPS 5.1's Get-Content defaults to the ANSI codepage on a BOM-less
@@ -51,7 +88,7 @@ test("stdinFromFile: POSIX redirection vs PowerShell pipe, UTF-8 forced on both 
   );
 });
 
-test("claude adapter: C9 read-only harness, context via --append-system-prompt-file, question via stdinFromFile", () => {
+test("claude adapter: no-tools headless harness carries the isolation flags, context via file and question via stdin", () => {
   const cmd = buildAdapterCommand({
     promptFile: "/state/q.md",
     contextFile: "/state/ctx.md",
@@ -60,10 +97,46 @@ test("claude adapter: C9 read-only harness, context via --append-system-prompt-f
   });
   expect(cmd).toBe(
     `claude -p --append-system-prompt-file "/state/ctx.md" --model opus` +
-      ` --strict-mcp-config --disallowedTools "${HELP_DISALLOWED_TOOLS}"` +
+      ` --tools= --strict-mcp-config --safe-mode --setting-sources=` +
       ` < "/state/q.md"`
   );
 });
+
+test.skipIf(process.platform !== "win32")("Claude PowerShell round-trip preserves empty headless options in the allowlisted environment", async () => {
+  const previous = process.env.KORY_HEADLESS_TEST_SENTINEL;
+  process.env.KORY_HEADLESS_TEST_SENTINEL = "must-not-reach-claude";
+  try {
+    const env = buildClaudeHeadlessEnv();
+    expect(env.KORY_HEADLESS_TEST_SENTINEL).toBeUndefined();
+    const auth = await runHelp({
+      command: buildClaudeAuthStatusCommand(),
+      shell: "powershell.exe",
+      cwd: process.cwd(),
+      env,
+      timeoutMs: 30_000
+    });
+    expect(auth).toContain("loggedIn");
+    const dir = tmp();
+    const contextFile = writeContextFile(dir, { nodeId: "powershell", cli: "claude" }, "Reply exactly POWERSHELL_HEADLESS_OK.");
+    const promptFile = writeContextFile(dir, { nodeId: "powershell-prompt", cli: "claude" }, "Reply exactly POWERSHELL_HEADLESS_OK.");
+    const answer = await runHelp({
+      command: buildAdapterCommand({
+        contextFile,
+        promptFile,
+        target: { cli: "claude", model: "" },
+        platform: "win32"
+      }),
+      shell: "powershell.exe",
+      cwd: process.cwd(),
+      env,
+      timeoutMs: 60_000
+    });
+    expect(answer.trim()).toBe("POWERSHELL_HEADLESS_OK");
+  } finally {
+    if (previous === undefined) delete process.env.KORY_HEADLESS_TEST_SENTINEL;
+    else process.env.KORY_HEADLESS_TEST_SENTINEL = previous;
+  }
+}, 90_000);
 
 test("claude adapter never puts operator text on argv (07dc42c0): embedded quotes, newlines and non-ASCII stay in the piped file", () => {
   // The exact reported field failure: an unbalanced double quote before a
@@ -86,7 +159,7 @@ test("claude adapter never puts operator text on argv (07dc42c0): embedded quote
   expect(linux).not.toContain("--model"); // '' = CLI default
   expect(linux).toBe(
     `claude -p --append-system-prompt-file "/state/graphs/graph-context-n1-claude.md"` +
-      ` --strict-mcp-config --disallowedTools "${HELP_DISALLOWED_TOOLS}"` +
+      ` --tools= --strict-mcp-config --safe-mode --setting-sources=` +
       ` < "/state/graphs/graph-context-n1-prompt-claude.md"`
   );
   const win = buildAdapterCommand({

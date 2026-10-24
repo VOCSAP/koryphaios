@@ -1,14 +1,3 @@
-// The compiled context always travels by file, never the command line, since a
-// large context would blow Windows' ~32k command-line limit.
-// claude: constant system prompt + context via --append-system-prompt-file,
-// question fed via stdin — a quoted positional argument gets mis-escaped when
-// the PowerShell wrap re-invokes claude.exe in legacy argument mode.
-// codex/gemini: the full composed prompt (system + context + question) is
-// written to a file and fed through stdin.
-// Read-only harness per CLI: claude uses --strict-mcp-config +
-// --disallowedTools, codex uses --sandbox read-only, gemini uses
-// --approval-mode plan.
-
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { HELP_DISALLOWED_TOOLS } from './help-assistant'
@@ -17,6 +6,84 @@ import type { GraphCli, ModelTarget } from '../shared/graph'
 
 /** Per-inference timeout: long contexts + reasoning models outlive C9's 120 s. */
 export const GRAPH_INFER_TIMEOUT_MS = 300_000
+
+const CLAUDE_HEADLESS_ENV_ALLOW = new Set([
+  'SYSTEMROOT',
+  'SYSTEMDRIVE',
+  'WINDIR',
+  'COMSPEC',
+  'PATHEXT',
+  'TEMP',
+  'TMP',
+  'APPDATA',
+  'LOCALAPPDATA',
+  'USERPROFILE',
+  'HOMEDRIVE',
+  'HOMEPATH',
+  'USERNAME',
+  'USERDOMAIN',
+  'COMPUTERNAME',
+  'PROGRAMDATA',
+  'PROGRAMFILES',
+  'PROGRAMFILES(X86)',
+  'PROGRAMW6432',
+  'COMMONPROGRAMFILES',
+  'COMMONPROGRAMFILES(X86)',
+  'COMMONPROGRAMW6432',
+  'PROCESSOR_ARCHITECTURE',
+  'NUMBER_OF_PROCESSORS',
+  'OS',
+  'HOME',
+  'USER',
+  'LOGNAME',
+  'SHELL',
+  'TMPDIR',
+  'XDG_CONFIG_HOME',
+  'XDG_DATA_HOME',
+  'XDG_CACHE_HOME',
+  'XDG_RUNTIME_DIR',
+  'PATH',
+  'LANG',
+  'LC_ALL',
+  'LC_CTYPE',
+  'TERM',
+  'HTTP_PROXY',
+  'HTTPS_PROXY',
+  'ALL_PROXY',
+  'NO_PROXY',
+  'NODE_EXTRA_CA_CERTS',
+  'SSL_CERT_FILE',
+  'CLAUDE_CODE_OAUTH_TOKEN',
+  'ANTHROPIC_API_KEY',
+  'ANTHROPIC_AUTH_TOKEN',
+  'ANTHROPIC_BASE_URL',
+  'CLAUDE_CODE_USE_BEDROCK',
+  'CLAUDE_CODE_USE_VERTEX',
+  'CLAUDE_CONFIG_DIR',
+  'CLAUDE_CODE_GIT_BASH_PATH'
+])
+
+const CLAUDE_HEADLESS_ENV_PREFIX_ALLOW = ['AWS_', 'GOOGLE_', 'CLOUD_']
+
+/** Preserve only approved runtime, authentication, network and cloud-provider settings. */
+export function buildClaudeHeadlessEnv(base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {}
+  for (const [key, value] of Object.entries(base)) {
+    const upperKey = key.toUpperCase()
+    if (
+      value !== undefined &&
+      (CLAUDE_HEADLESS_ENV_ALLOW.has(upperKey) || CLAUDE_HEADLESS_ENV_PREFIX_ALLOW.some((prefix) => upperKey.startsWith(prefix)))
+    ) {
+      env[key] = value
+    }
+  }
+  env.NoDefaultCurrentDirectoryInExePath = '1'
+  return env
+}
+
+export function buildClaudeAuthStatusCommand(bin = 'claude'): string {
+  return `${bin.trim() || 'claude'} --safe-mode --setting-sources= auth status`
+}
 
 /**
  * `model` also rides the command line: allow only benign identifier chars
@@ -41,18 +108,7 @@ function quotedPath(p: string): string {
   return `"${p.replace(/"/g, '')}"`
 }
 
-/**
- * Cross-shell "feed this file to stdin" wrapper. POSIX shells support
- * redirection; PowerShell (the win32 shell wrap, shell-command.ts spawns the
- * legacy `powershell.exe`, not `pwsh`) needs a Get-Content pipe — with the
- * encoding forced at BOTH stages, or non-ASCII operator text (accents,
- * non-Latin-1) survives the truncation fix only to get mangled a different
- * way (reviewer catch, 07dc42c0): (a) `writeContextFile` writes UTF-8
- * without a BOM, and WinPS 5.1's `Get-Content` without `-Encoding` reads a
- * BOM-less file as the system ANSI codepage ("é" -> "Ã©"); (b) WinPS 5.1
- * pipes to a native child through `$OutputEncoding`, which defaults to
- * ASCII, replacing every non-ASCII byte with a literal `?`.
- */
+// PowerShell must force UTF-8 for both file decoding and native-child stdin.
 export function stdinFromFile(command: string, file: string, plat: NodeJS.Platform): string {
   if (plat === 'win32') {
     return (
@@ -65,8 +121,7 @@ export function stdinFromFile(command: string, file: string, plat: NodeJS.Platfo
 
 export interface AdapterInput {
   /**
-   * File carrying the operator's question / instruction, fed to the claude
-   * adapter via stdin (D5 extended to the prompt — see the header comment).
+   * File carrying the operator's question, fed to Claude via stdin instead of argv.
    * Required when `target.cli === 'claude'`; unused by the other adapters
    * (codex/gemini already read the fully composed prompt from contextFile via
    * stdin, antigravity's positional instruction is a fixed non-operator
@@ -87,6 +142,8 @@ export interface AdapterInput {
    * equivalent flag.
    */
   addDir?: string
+  /** Read-only tools permit project inspection without mutation. */
+  tools?: 'none' | 'read-only'
 }
 
 /** Full command line for one target; parsed by the login shell like C9. */
@@ -99,13 +156,14 @@ export function buildAdapterCommand(input: AdapterInput): string {
         throw new Error('claude adapter requires promptFile (D5: operator text never rides argv)')
       }
       const bin = input.bin?.trim() || 'claude'
+      const tools = input.tools ?? 'none'
       const cmd =
         `${bin} -p` +
         ` --append-system-prompt-file ${quotedPath(input.contextFile)}` +
         (model ? ` --model ${model}` : '') +
         (input.addDir ? ` --add-dir ${quotedPath(input.addDir)}` : '') +
-        ` --strict-mcp-config` +
-        ` --disallowedTools "${HELP_DISALLOWED_TOOLS}"`
+        (tools === 'read-only' ? ` --disallowedTools "${HELP_DISALLOWED_TOOLS}"` : ` --tools=`) +
+        ` --strict-mcp-config --safe-mode --setting-sources=`
       return stdinFromFile(cmd, input.promptFile, plat)
     }
     case 'codex': {
@@ -210,13 +268,6 @@ export async function runHttpInference(
   return content.trim()
 }
 
-/**
- * Write the context file for one target under the app-state dir. claude gets
- * the system+context side only (the question is the positional prompt);
- * codex/gemini get the fully composed prompt (they read stdin, no system
- * flag). The nodeId+cli suffix keeps parallel fan-out targets from clobbering
- * each other.
- */
 export function writeContextFile(
   dir: string,
   key: { nodeId: string; cli: GraphCli },

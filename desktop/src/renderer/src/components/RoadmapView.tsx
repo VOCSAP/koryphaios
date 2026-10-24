@@ -664,7 +664,10 @@ export function RoadmapView(): React.JSX.Element {
       } : d))
       setMutationError(null)
     } catch (e) {
-      setMutationError(e instanceof Error ? e.message : String(e))
+      const detail = e instanceof Error ? e.message : String(e)
+      window.api.reportError('roadmap', `wand failed: ${detail}`)
+      showToast(detail, 'error', { raw: true })
+      setMutationError(detail)
     } finally {
       setWandBusy(false)
     }

@@ -1,15 +1,7 @@
-// One-shot utility inferences (lot A, EXPLORATION-multi-llm): the help
-// assistant, the resume digest and the roadmap context wand generalized from
-// `claude -p` to any ModelTarget of the unified catalog — frontier CLIs
-// through the C24 adapters (read-only harness per CLI, context by FILE),
-// local OpenAI-compatible endpoints over HTTP (C29).
-//
-// The system prompts stay CODE CONSTANTS composed by the callers (C8 rule);
-// this module only routes { target, system, prompt } to the right executor.
-// Node builtins only; both executors are injectable for tests.
-
 import {
   buildAdapterCommand,
+  buildClaudeAuthStatusCommand,
+  buildClaudeHeadlessEnv,
   GRAPH_INFER_TIMEOUT_MS,
   runHttpInference,
   writeContextFile,
@@ -27,7 +19,7 @@ export interface UtilityInferenceRequest {
   target: ModelTarget
   /** System side: code-constant prompt + app-generated context. */
   system: string
-  /** Question side (short; rides the command line on the claude adapter). */
+  /** Question side. */
   prompt: string
   kind: UtilityKind
   /** Extra readable directory (claude --add-dir): the shipped reference docs. */
@@ -42,7 +34,7 @@ export interface UtilityDeps {
   /** Configured local endpoints, keys DECRYPTED (ipc passes decryptProviders). */
   localProviders?: LocalProviderConfig[]
   /** Injectable for tests; defaults to runHelp with the graph timeout. */
-  run?: (command: string) => Promise<string>
+  run?: (command: string, env?: NodeJS.ProcessEnv) => Promise<string>
   /**
    * PTY-backed runner for CLIs that misbehave without a TTY (antigravity —
    * agy#318/#76). Optional: absent (tests), those targets use `run`.
@@ -80,9 +72,7 @@ export async function runUtilityInference(
       prompt: req.prompt
     })
   }
-  // claude keeps system and question separated (--append-system-prompt-file +
-  // stdin-fed question, D5 extended — see model-adapters.ts header comment);
-  // codex/gemini read one composed document from stdin instead.
+  // Claude receives the question on stdin rather than argv; codex and Gemini receive one stdin document.
   const content =
     target.cli === 'claude' ? req.system : composeStdinPrompt(req.system, req.prompt)
   const contextFile = writeContextFile(deps.stateDir, { nodeId: req.kind, cli: target.cli }, content)
@@ -94,12 +84,23 @@ export async function runUtilityInference(
     contextFile,
     promptFile,
     target,
-    addDir: req.addDir
+    addDir: req.addDir,
+    tools: req.kind === 'digest' ? 'none' : 'read-only'
   })
   const run =
     deps.run ??
-    ((cmd: string) =>
-      runHelp({ command: cmd, shell: deps.shell, cwd: deps.cwd, timeoutMs: GRAPH_INFER_TIMEOUT_MS }))
+    ((cmd: string, env?: NodeJS.ProcessEnv) =>
+      runHelp({ command: cmd, shell: deps.shell, cwd: deps.cwd, timeoutMs: GRAPH_INFER_TIMEOUT_MS, env }))
+  if (target.cli === 'claude') {
+    const env = buildClaudeHeadlessEnv()
+    try {
+      await run(buildClaudeAuthStatusCommand(), env)
+    } catch (err) {
+      const detail = err instanceof Error && err.message ? `: ${err.message}` : ''
+      throw new Error(`Claude authentication check failed. Run \`claude auth login\` and try again${detail}`)
+    }
+    return run(command, env)
+  }
   const exec = target.cli === 'antigravity' && deps.runTty ? deps.runTty : run
   return exec(command)
 }

@@ -57,6 +57,7 @@ test("the wand's claude target composes into the C9 read-only harness", () => {
     promptFile: "/state/wand-prompt.md",
     contextFile: "/state/ctx.md",
     target: { cli: "claude", model: "haiku" },
+    tools: "read-only",
     platform: "linux",
   });
   expect(cmd).toContain("--model haiku");

@@ -1,7 +1,3 @@
-// EXPLORATION-graph-chat C25: context compilation + inference orchestration
-// (desktop/src/main/graph-engine). Linear vs merge rendering (D3), budget
-// elision (D8), anonymized judge, fan-out with an injected runner.
-
 import { test, expect, afterAll } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -158,11 +154,11 @@ test("buildJudgeSystem embeds context, prompt and anonymized answers", () => {
 
 // ----- runInference (injected runner) -----
 
-function deps(run: (cmd: string) => Promise<string>): {
+function deps(run: (cmd: string, env?: NodeJS.ProcessEnv) => Promise<string>): {
   stateDir: string;
   shell: string;
   cwd: string;
-  run: (cmd: string) => Promise<string>;
+  run: (cmd: string, env?: NodeJS.ProcessEnv) => Promise<string>;
 } {
   return { stateDir: tmp(), shell: "", cwd: "/", run };
 }
@@ -196,6 +192,77 @@ test("fan-out: one assistant node per target, errors isolated per target", async
   expect(ko.error).toContain("codex not installed");
   // The input doc is not mutated.
   expect(doc.nodes).toHaveLength(1);
+});
+
+test("graph inference uses one filtered Claude environment for preflight, candidate and battle judge", async () => {
+  const calls: { cmd: string; env?: NodeJS.ProcessEnv }[] = [];
+  const previous = process.env.KORY_HEADLESS_TEST_SENTINEL;
+  process.env.KORY_HEADLESS_TEST_SENTINEL = "must-not-reach-claude";
+  const doc = docOf([n("q", [], "user", "hello")]);
+  try {
+    await runInference(
+      deps(async (cmd, env) => {
+        calls.push({ cmd, env });
+        return cmd.includes("-judge") ? "merged verdict" : "candidate";
+      }),
+      doc,
+      {
+        nodeId: "q",
+        targets: [
+          { cli: "claude", model: "opus" },
+          { cli: "gemini", model: "" }
+        ],
+        battle: true
+      }
+    );
+    expect(calls[0]?.cmd).toBe('claude --safe-mode --setting-sources= auth status');
+    expect(calls.filter(({ cmd }) => cmd.includes("auth status"))).toHaveLength(1);
+    expect(calls[1]?.cmd).toContain("--tools=");
+    expect(calls.at(-1)?.cmd).toContain("-judge");
+    expect(calls[0]?.env).toBeDefined();
+    expect(calls[1]?.env).toBe(calls[0]?.env);
+    expect(calls.at(-1)?.env).toBe(calls[0]?.env);
+    expect(calls[0]?.env?.KORY_HEADLESS_TEST_SENTINEL).toBeUndefined();
+  } finally {
+    if (previous === undefined) delete process.env.KORY_HEADLESS_TEST_SENTINEL;
+    else process.env.KORY_HEADLESS_TEST_SENTINEL = previous;
+  }
+});
+
+test("graph inference preflights and filters the environment when only the battle judge is Claude", async () => {
+  const calls: { cmd: string; env?: NodeJS.ProcessEnv }[] = [];
+  await runInference(
+    deps(async (cmd, env) => {
+      calls.push({ cmd, env });
+      return cmd.includes("-judge") ? "verdict" : "candidate";
+    }),
+    docOf([n("q", [], "user", "hello")]),
+    {
+      nodeId: "q",
+      targets: [{ cli: "gemini", model: "" }, { cli: "codex", model: "" }],
+      battle: true,
+      judge: { cli: "claude", model: "sonnet" }
+    }
+  );
+  expect(calls[0]?.cmd).toBe('claude --safe-mode --setting-sources= auth status');
+  expect(calls[0]?.env).toBeDefined();
+  expect(calls.at(-1)?.cmd).toContain("-judge");
+  expect(calls.at(-1)?.env).toBe(calls[0]?.env);
+});
+
+test("graph inference rejects a failed Claude preflight before any target", async () => {
+  const calls: string[] = [];
+  await expect(
+    runInference(
+      deps(async (cmd) => {
+        calls.push(cmd);
+        throw new Error("not logged in");
+      }),
+      docOf([n("q", [], "user", "hello")]),
+      { nodeId: "q", targets: [{ cli: "claude", model: "opus" }], battle: false }
+    )
+  ).rejects.toThrow("Claude authentication check failed. Run `claude auth login` and try again: not logged in");
+  expect(calls).toEqual(['claude --safe-mode --setting-sources= auth status']);
 });
 
 test("battle: judge node arbitrates the ok answers, legend reveals the mapping", async () => {

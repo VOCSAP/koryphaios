@@ -1,8 +1,3 @@
-// Lot A (EXPLORATION-multi-llm): utility-inference routing — help assistant,
-// resume digest and context wand generalized to any ModelTarget. Frontier
-// CLIs get the C24 adapter commands (context by FILE), 'local' goes over
-// HTTP; system prompts stay separated on claude, composed on stdin CLIs.
-
 import { test, expect, afterAll } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -41,20 +36,35 @@ function tmp(): string {
 
 // ----- routing -----
 
-test("claude target: system-only context file, C9 read-only command", async () => {
+test("claude utility: verifies authentication before the isolated read-only command", async () => {
   const stateDir = tmp();
   const commands: string[] = [];
+  const environments: (NodeJS.ProcessEnv | undefined)[] = [];
+  const previous = process.env.KORY_HEADLESS_TEST_SENTINEL;
+  process.env.KORY_HEADLESS_TEST_SENTINEL = "must-not-reach-claude";
+  try {
   const out = await runUtilityInference(
-    { stateDir, shell: "", cwd: "/", run: async (cmd) => (commands.push(cmd), "an answer") },
+    {
+      stateDir,
+      shell: "",
+      cwd: "/",
+      run: async (cmd, env) => (commands.push(cmd), environments.push(env), "an answer")
+    },
     { target: { cli: "claude", model: "haiku" }, system: "SYS", prompt: "QUESTION", kind: "help" }
   );
   expect(out).toBe("an answer");
-  expect(commands).toHaveLength(1);
-  const cmd = commands[0]!;
+  expect(commands).toHaveLength(2);
+  expect(commands[0]).toBe('claude --safe-mode --setting-sources= auth status');
+  const cmd = commands[1]!;
   expect(cmd).toContain("claude -p");
   expect(cmd).toContain("--model haiku");
   expect(cmd).toContain("--strict-mcp-config");
+  expect(cmd).toContain("--safe-mode");
+  expect(cmd).toContain('--setting-sources=');
   expect(cmd).toContain(`--disallowedTools "${HELP_DISALLOWED_TOOLS}"`);
+  expect(environments[0]).toBeDefined();
+  expect(environments[1]).toBe(environments[0]);
+  expect(environments[0]?.KORY_HEADLESS_TEST_SENTINEL).toBeUndefined();
   // The system side rides --append-system-prompt-file; the question rides a
   // second file, fed via stdin (D5 extended — 07dc42c0), never the command.
   const file = /--append-system-prompt-file "([^"]+)"/.exec(cmd)![1]!;
@@ -63,6 +73,51 @@ test("claude target: system-only context file, C9 read-only command", async () =
   const m = /(?:< "([^"]+)"$|Get-Content -Raw -Encoding UTF8 "([^"]+)" \|)/.exec(cmd)!;
   const promptFile = (m[1] ?? m[2])!;
   expect(readFileSync(promptFile, "utf-8")).toBe("QUESTION");
+  } finally {
+    if (previous === undefined) delete process.env.KORY_HEADLESS_TEST_SENTINEL;
+    else process.env.KORY_HEADLESS_TEST_SENTINEL = previous;
+  }
+});
+
+test("Claude utility assigns read-only tools to Help and Wand, none to Digest", async () => {
+  const commands: Record<"help" | "wand" | "digest", string> = { help: "", wand: "", digest: "" };
+  for (const kind of ["help", "wand", "digest"] as const) {
+    await runUtilityInference(
+      {
+        stateDir: tmp(),
+        shell: "",
+        cwd: "/",
+        run: async (cmd) => {
+          if (cmd.includes("auth status")) return "authenticated";
+          commands[kind] = cmd;
+          return "answer";
+        }
+      },
+      { target: { cli: "claude", model: "" }, system: "SYS", prompt: "QUESTION", kind }
+    );
+  }
+  expect(commands.help).toContain(`--disallowedTools "${HELP_DISALLOWED_TOOLS}"`);
+  expect(commands.wand).toContain(`--disallowedTools "${HELP_DISALLOWED_TOOLS}"`);
+  expect(commands.digest).toContain("--tools=");
+});
+
+test("Claude utility reports a failed authentication check before invoking the prompt", async () => {
+  const commands: string[] = [];
+  await expect(
+    runUtilityInference(
+      {
+        stateDir: tmp(),
+        shell: "",
+        cwd: "/",
+        run: async (cmd) => {
+          commands.push(cmd);
+          throw new Error("not logged in");
+        }
+      },
+      { target: { cli: "claude", model: "" }, system: "SYS", prompt: "QUESTION", kind: "digest" }
+    )
+  ).rejects.toThrow("Claude authentication check failed. Run `claude auth login` and try again: not logged in");
+  expect(commands).toEqual(['claude --safe-mode --setting-sources= auth status']);
 });
 
 test("codex/gemini targets: composed system+question document fed via stdin", async () => {
@@ -92,7 +147,11 @@ test("distinct kinds write distinct context files (no clobbering)", async () => 
         stateDir,
         shell: "",
         cwd: "/",
-        run: async (cmd) => (files.push(/--append-system-prompt-file "([^"]+)"/.exec(cmd)![1]!), "x")
+        run: async (cmd) => {
+          if (cmd.includes("auth status")) return "authenticated";
+          files.push(/--append-system-prompt-file "([^"]+)"/.exec(cmd)![1]!);
+          return "x";
+        }
       },
       { target: { cli: "claude", model: "" }, system: kind, prompt: "q", kind }
     );
