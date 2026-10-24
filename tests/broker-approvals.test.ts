@@ -668,6 +668,8 @@ describe("session token renewal", () => {
   test("renew_only fixes every renewed lease at 24 hours", async () => {
     const b = await boot();
     const op = newOperator();
+    // The broker and this test read the clock in two separate processes.
+    const SKEW_MS = 5;
     for (const requestedTtlHours of [1, 720]) {
       const cred = generateCredential();
       await mintSessionToken(b, op, cred, `renew-ttl-${requestedTtlHours}`);
@@ -686,8 +688,8 @@ describe("session token renewal", () => {
       const afterRenewal = Date.now();
       expect(renew.status).toBe(200);
       const expiresAt = Date.parse(renew.body.expires_at);
-      expect(expiresAt).toBeGreaterThanOrEqual(beforeRenewal + 24 * 3600_000);
-      expect(expiresAt).toBeLessThanOrEqual(afterRenewal + 24 * 3600_000 + 1);
+      expect(expiresAt).toBeGreaterThanOrEqual(beforeRenewal + 24 * 3600_000 - SKEW_MS);
+      expect(expiresAt).toBeLessThanOrEqual(afterRenewal + 24 * 3600_000 + SKEW_MS);
     }
   });
 
