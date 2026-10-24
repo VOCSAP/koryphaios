@@ -1,6 +1,6 @@
 {
   "repo": "https://github.com/VOCSAP/choregos",
-  "commit": "1ed6278aeb65e42e5a5c40ca2290833cfb669db3",
+  "commit": "134410c0bd6d407ddad3e564cffefb461fd740fc",
   "plugins": {
     "mitos": {
       "version": "0.1.0",
@@ -8,7 +8,7 @@
     },
     "prosopon": {
       "version": "0.1.0",
-      "fingerprint": "b7feb0804182fd7ccf992c90829171f79ca6f68f4392e5953f8a957b6338556f"
+      "fingerprint": "e1d0a15423b9bc5e0ca8140419b2fed2c2890891fed4d56c03664d819139abbd"
     }
   }
 }

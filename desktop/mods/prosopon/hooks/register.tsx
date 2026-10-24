@@ -3,6 +3,7 @@ import type { EngineInterface, Register, RenderViewport } from 'claude-code'
 import {
   classifyAssistantBlock,
   GUARD_SAFE_BORDER,
+  isRenderableText,
   MIN_FRAME_COLUMNS,
   resolveFrameConfiguration,
   SHORT_NOTE_BULLET,
@@ -84,6 +85,52 @@ function toolHeader(tool: string, input: unknown): string | undefined {
   return `Bash(${toolInput.command})`
 }
 
+const MAX_FILE_TOOL_PATH_LENGTH = 40
+const FILE_TOOL_TITLES = new Map([
+  ['Edit', 'Update'],
+  ['Write', 'Write'],
+])
+
+// The native header shows a file under the session directory relative to it, normalized and with
+// the platform separator, and any other file as given. Only a path that needs no normalization is
+// rebuilt here; every other one, and a drive letter cased differently, is left to next(e).
+function relativeToolPath(filePath: string, cwd: string): string | undefined {
+  const windows = /^[A-Za-z]:[\\/]/.test(cwd)
+  if (!windows && !cwd.startsWith('/')) return undefined
+  if (filePath.length > cwd.length + 1 + MAX_FILE_TOOL_PATH_LENGTH) return undefined
+  const separators = windows ? /[\\/]/ : /\//
+  const base = cwd.split(separators)
+  if (base.at(-1) === '') base.pop()
+  const parts = filePath.split(separators)
+  if (parts.length <= base.length || base.some((segment, index) => parts[index] !== segment)) return undefined
+  const rest = parts.slice(base.length)
+  if (rest.some(segment => segment === '' || segment === '.' || segment === '..')) return undefined
+  const relative = rest.join(windows ? '\\' : '/')
+  return relative.length <= MAX_FILE_TOOL_PATH_LENGTH && hasSafeToolHeaderArgument(relative) ? relative : undefined
+}
+
+async function fileToolHeader(
+  $: EngineInterface,
+  title: string,
+  input: unknown,
+  columns: number,
+): Promise<string | undefined> {
+  if (typeof input !== 'object' || input === null) return undefined
+  const filePath = (input as { file_path?: unknown }).file_path
+  if (typeof filePath !== 'string') return undefined
+  let cwd: string
+  try {
+    cwd = await $.session.cwd()
+  } catch (error) {
+    stockAfter($, error)
+    return undefined
+  }
+  const relative = relativeToolPath(filePath, cwd)
+  if (relative === undefined) return undefined
+  const header = `${title}(${relative})`
+  return header.length <= columns - SHORT_NOTE_BULLET.length ? header : undefined
+}
+
 // The fixed bullet is two cells, and printable ASCII aligns string indexes with terminal cells.
 function wrapToolHeader(header: string, columns: number): [string, string] {
   const firstWidth = columns - SHORT_NOTE_BULLET.length
@@ -153,6 +200,7 @@ export const register: Register = (on, options) => {
       e.surface !== 'terminal' ||
       typeof text !== 'string' ||
       text.trim() === '' ||
+      !isRenderableText(text) ||
       (origin as { kind?: unknown } | null | undefined)?.kind !== 'composer' ||
       !wideEnough(e)
     ) {
@@ -180,8 +228,18 @@ export const register: Register = (on, options) => {
     ) {
       return next(e)
     }
-    const header = toolHeader(tool, input)
-    if (header === undefined || (tool === 'Bash' && (needsMidWordWrap(header, columnsOf(e)) || !fitsNativeBashHeader(header, columnsOf(e)))) || !(await layoutSupported($))) return next(e)
+    const columns = columnsOf(e)
+    const fileTitle = FILE_TOOL_TITLES.get(tool)
+    let header: string | undefined
+    if (fileTitle !== undefined) {
+      header = (await layoutSupported($)) ? await fileToolHeader($, fileTitle, input, columns) : undefined
+    } else {
+      header = toolHeader(tool, input)
+      if (header !== undefined && (needsMidWordWrap(header, columns) || !fitsNativeBashHeader(header, columns) || !(await layoutSupported($)))) {
+        header = undefined
+      }
+    }
+    if (header === undefined) return next(e)
     try {
       return dimToolHeader($, e, header)
     } catch (error) {
@@ -203,7 +261,7 @@ export const register: Register = (on, options) => {
     if (!(await layoutSupported($))) return next(e)
     const normalized = text.trim()
     const block = classifyAssistantBlock(normalized, isSummary === true)
-    if (block === 'stock') return next(e)
+    if (block === 'stock' || (block === 'dim' && !isRenderableText(text))) return next(e)
     if (block === 'dim') {
       try {
         const { Box, Markdown, Text } = $.ui.resolve(e)

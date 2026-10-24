@@ -20,12 +20,12 @@
     "user_color": {
       "type": "string",
       "title": "Your frame color",
-      "description": "A Claude Code theme color or #rrggbb. Invalid values use suggestion."
+      "description": "A color name (red, orange, yellow, green, cyan, blue, purple, magenta, pink, gray, grey, white, black), a Claude Code theme color, or #rrggbb. Invalid values use suggestion."
     },
     "assistant_color": {
       "type": "string",
       "title": "Assistant frame color",
-      "description": "A Claude Code theme color or #rrggbb. Invalid values use claude."
+      "description": "A color name (red, orange, yellow, green, cyan, blue, purple, magenta, pink, gray, grey, white, black), a Claude Code theme color, or #rrggbb. Invalid values use claude."
     }
   }
 }

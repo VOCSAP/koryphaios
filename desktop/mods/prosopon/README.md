@@ -20,6 +20,6 @@ The layout runs on Claude Code `2.1.303` or any later release, in a terminal of 
 
 - Set `labels` to `fr` for `Vous`; any other value gives `You`.
 - Set `user_label` to a label of at most 20 code points without control characters; invalid and empty values use the language label.
-- Set `user_color` and `assistant_color` to a Claude Code theme color or `#rrggbb`; invalid values use `suggestion` and `claude` respectively.
+- Set `user_color` and `assistant_color` to a color name (`red`, `orange`, `yellow`, `green`, `cyan`, `blue`, `purple`, `magenta`, `pink`, `gray`, `grey`, `white`, `black`, case ignored), a Claude Code theme color or `#rrggbb`; invalid values use `suggestion` and `claude` respectively.
 
 Summary blocks keep Claude Code's stock rendering.
