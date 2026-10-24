@@ -1861,6 +1861,8 @@ export interface ApprovalAuthProof {
   ts: number;
   /** base64 Ed25519 signature over canonicalize(payload)\n nonce \n ts. */
   sig: string;
+  /** Inbox proof version. Absent on a legacy proof, which is never accepted as v1. */
+  v?: number;
 }
 
 /** Origin metadata: display + audit only, NEVER an authorisation input. */
@@ -2041,6 +2043,21 @@ export interface ApprovalDeliveredResponse {
   marked: number;
 }
 
+/**
+ * Inbox block of a token mint. A run root binds a token to one Deck run and
+ * group; a mandate is a distinct token whose scope the broker copies from its
+ * run parent, so the caller never chooses a scope.
+ */
+export type ApprovalTokenInbox =
+  | { version: 1; kind: "run"; run_ref: string; group_id: string }
+  | {
+      version: 1;
+      kind: "mandate";
+      parent_token_id: string;
+      caller_ref: string;
+      authority: "author" | "lead" | "supervisor";
+    };
+
 /** Deck mints a restricted per-session token (never the operator key). */
 export interface ApprovalTokenMintRequest {
   auth?: ApprovalAuthProof;
@@ -2050,12 +2067,13 @@ export interface ApprovalTokenMintRequest {
   project_key?: string;
   token?: string;
   ttl_hours?: number;
+  inbox?: ApprovalTokenInbox;
 }
 
 export interface ApprovalTokenMintResponse {
   token_id: string;
   expires_at: string;
-  capabilities?: { renew_only?: boolean };
+  capabilities?: { renew_only?: boolean; inbox_provenance?: 1 };
 }
 
 export interface ApprovalTokenRevokeRequest {

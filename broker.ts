@@ -108,6 +108,7 @@ import {
   APPROVAL_VIAS,
   approvalWaitTimeoutSec,
   deriveTokenId,
+  INBOX_GATES,
   sanitizeAnswerForPty,
   validateApprovalAnswers,
   validateApprovalDraft,
@@ -1599,6 +1600,26 @@ try {
   const msg = e instanceof Error ? e.message : String(e);
   if (!msg.includes("duplicate column name")) log.error(`migration: ${msg}`);
 }
+
+// Nullable by design: a NULL purpose is a legacy token and is never promoted to
+// a run or a mandate.
+for (const column of [
+  "inbox_purpose TEXT",
+  "inbox_version INTEGER",
+  "run_ref TEXT",
+  "group_id TEXT",
+  "parent_token_id TEXT",
+  "caller_ref TEXT",
+  "authority TEXT",
+]) {
+  try {
+    db.run(`ALTER TABLE approval_session_tokens ADD COLUMN ${column}`);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (!msg.includes("duplicate column name")) log.error(`migration: ${msg}`);
+  }
+}
+db.run(`CREATE INDEX IF NOT EXISTS idx_approval_tokens_parent ON approval_session_tokens(parent_token_id)`);
 
 let revokedTokenCount = 0;
 for (const token of db.query("SELECT token_id, operator_id FROM approval_session_tokens WHERE revoked_at IS NULL").all() as Array<{ token_id: string; operator_id: string }>) {
@@ -11045,9 +11066,202 @@ function handleChannelList(
   };
 }
 
+const INBOX_TTL_MAX_HOURS = 24;
+const INBOX_GROUP_ID_MAX = 128;
+const INBOX_CALLER_REF_MAX = 128;
+const INBOX_RUN_REF_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const INBOX_AUTHORITIES: ReadonlySet<string> = new Set(["author", "lead", "supervisor"]);
+
+interface InboxTokenRow {
+  operator_id: string;
+  public_key: string;
+  session_ref: string;
+  project_key: string;
+  revoked_at: string | null;
+  expires_at: string;
+  inbox_purpose: string | null;
+  run_ref: string | null;
+  group_id: string | null;
+  parent_token_id: string | null;
+  caller_ref: string | null;
+  authority: string | null;
+}
+
+const INBOX_TOKEN_COLUMNS =
+  "operator_id, public_key, session_ref, project_key, revoked_at, expires_at, inbox_purpose, run_ref, group_id, parent_token_id, caller_ref, authority";
+
+/**
+ * Inbox run roots and mandates. The scope of a token is fixed at mint: a
+ * second mint or a renewal that differs on ANY dimension is a conflict, never
+ * an update, because a scope that could move would let a credential change run.
+ */
+function handleInboxTokenMint(
+  body: ApprovalTokenMintRequest & Record<string, unknown>
+): ApprovalTokenMintResponse | { error: string; status: number } {
+  // Authenticated with a v1 proof for this exact gate: a legacy proof signed
+  // for a plain mint can never open an Inbox credential.
+  const auth = approvalAuth.authenticateInbox(body, "mint-token", INBOX_GATES.mint);
+  if (isAuthError(auth)) return auth;
+
+  const inbox = body.inbox as unknown;
+  if (typeof inbox !== "object" || inbox === null || (inbox as { version?: unknown }).version !== 1) {
+    return { error: "inbox.version must be 1", status: 400 };
+  }
+  const block = inbox as Record<string, unknown>;
+
+  const sessionPublicKey = typeof body.session_public_key === "string" ? body.session_public_key : "";
+  const sessionRef = typeof body.session_ref === "string" ? body.session_ref.trim().slice(0, 128) : "";
+  if (!sessionPublicKey) return { error: "session_public_key is required", status: 400 };
+  if (!sessionRef) return { error: "session_ref is required", status: 400 };
+
+  // typeof + isFinite, never a coercion: Number(null) is 0 and Number("5") is 5.
+  const rawTtl = body.ttl_hours === undefined ? INBOX_TTL_MAX_HOURS : body.ttl_hours;
+  if (typeof rawTtl !== "number" || !Number.isFinite(rawTtl) || rawTtl <= 0 || rawTtl > INBOX_TTL_MAX_HOURS) {
+    return { error: `ttl_hours must be a number in (0, ${INBOX_TTL_MAX_HOURS}]`, status: 400 };
+  }
+  const ttlHours = rawTtl;
+
+  const rawProjectKey = typeof body.project_key === "string" ? body.project_key : "";
+  if (!rawProjectKey) return { error: "project_key is required", status: 400 };
+  const projectKeyCheck = validateProjectKey(rawProjectKey);
+  if (!projectKeyCheck.ok) {
+    return { error: `project_key is invalid (${projectKeyCheck.reason})`, status: 400 };
+  }
+  const mintCaseRefusal = projectKeyCaseRefusal(rawProjectKey);
+  if (mintCaseRefusal) return { error: mintCaseRefusal, status: 400 };
+
+  const now = new Date();
+  const nowIso = now.toISOString();
+  let expiresMs = now.getTime() + ttlHours * 3600_000;
+
+  let purpose: "run" | "mandate";
+  let projectKey = rawProjectKey;
+  let runRef: string;
+  let groupId: string;
+  let parentTokenId: string | null = null;
+  let callerRef: string | null = null;
+  let authority: string | null = null;
+
+  if (block.kind === "run") {
+    const rawRun = typeof block.run_ref === "string" ? block.run_ref.toLowerCase() : "";
+    if (!INBOX_RUN_REF_RE.test(rawRun)) return { error: "inbox.run_ref must be a UUID", status: 400 };
+    const rawGroup = typeof block.group_id === "string" ? block.group_id : "";
+    if (rawGroup.length === 0 || rawGroup.length > INBOX_GROUP_ID_MAX) {
+      return { error: "inbox.group_id is required", status: 400 };
+    }
+    purpose = "run";
+    runRef = rawRun;
+    groupId = rawGroup;
+  } else if (block.kind === "mandate") {
+    const parentId = typeof block.parent_token_id === "string" ? block.parent_token_id : "";
+    const caller = typeof block.caller_ref === "string" ? block.caller_ref : "";
+    if (!parentId) return { error: "inbox.parent_token_id is required", status: 400 };
+    if (caller.length === 0 || caller.length > INBOX_CALLER_REF_MAX) {
+      return { error: "inbox.caller_ref is required", status: 400 };
+    }
+    if (typeof block.authority !== "string" || !INBOX_AUTHORITIES.has(block.authority)) {
+      return { error: "inbox.authority must be author, lead or supervisor", status: 400 };
+    }
+    // Only a LIVE run root of the same operator can parent a mandate: no
+    // mandate-to-mandate chain, and the scope is copied, never chosen.
+    const parent = db
+      .query(`SELECT ${INBOX_TOKEN_COLUMNS} FROM approval_session_tokens WHERE token_id = ? AND operator_id = ?`)
+      .get(parentId, auth.operator_id) as InboxTokenRow | null;
+    if (
+      !parent ||
+      parent.inbox_purpose !== "run" ||
+      parent.revoked_at !== null ||
+      parent.expires_at <= nowIso ||
+      !parent.run_ref ||
+      !parent.group_id
+    ) {
+      return { error: "mandate parent is not a live run token", status: 409 };
+    }
+    if (parent.project_key !== rawProjectKey) {
+      return { error: "mandate project_key must match its parent", status: 409 };
+    }
+    // A mandate never outlives the run credential it hangs from.
+    expiresMs = Math.min(expiresMs, Date.parse(parent.expires_at));
+    purpose = "mandate";
+    projectKey = parent.project_key;
+    runRef = parent.run_ref;
+    groupId = parent.group_id;
+    parentTokenId = parentId;
+    callerRef = caller;
+    authority = block.authority;
+  } else {
+    return { error: "inbox.kind must be run or mandate", status: 400 };
+  }
+
+  const tokenId = deriveTokenId(sessionPublicKey);
+  const existing = db
+    .query(`SELECT ${INBOX_TOKEN_COLUMNS} FROM approval_session_tokens WHERE token_id = ?`)
+    .get(tokenId) as InboxTokenRow | null;
+  if (existing?.revoked_at) return { error: "session-token-revoked", status: 409 };
+
+  const expiresAt = new Date(expiresMs).toISOString();
+  const capabilities = { renew_only: true, inbox_provenance: 1 } as const;
+  const sameScope = (row: InboxTokenRow): boolean =>
+    row.operator_id === auth.operator_id &&
+    row.public_key === sessionPublicKey &&
+    row.session_ref === sessionRef &&
+    row.project_key === projectKey &&
+    row.inbox_purpose === purpose &&
+    row.run_ref === runRef &&
+    row.group_id === groupId &&
+    row.parent_token_id === parentTokenId &&
+    row.caller_ref === callerRef &&
+    row.authority === authority;
+
+  if (body.renew_only === true) {
+    if (!existing || !sameScope(existing) || existing.expires_at <= nowIso) {
+      return { error: "session token is not renewable", status: 409 };
+    }
+    const renewal = db.run(
+      `UPDATE approval_session_tokens
+          SET expires_at = ?
+        WHERE token_id = ? AND operator_id = ? AND public_key = ?
+          AND session_ref = ? AND project_key = ? AND inbox_purpose = ?
+          AND run_ref = ? AND group_id = ?
+          AND parent_token_id IS ? AND caller_ref IS ? AND authority IS ?
+          AND revoked_at IS NULL AND expires_at > ?`,
+      [
+        expiresAt, tokenId, auth.operator_id, sessionPublicKey,
+        sessionRef, projectKey, purpose, runRef, groupId,
+        parentTokenId, callerRef, authority, nowIso,
+      ]
+    );
+    if (renewal.changes !== 1) return { error: "session token is not renewable", status: 409 };
+    return { token_id: tokenId, expires_at: expiresAt, capabilities };
+  }
+
+  if (existing) {
+    if (!sameScope(existing)) return { error: "inbox token scope is immutable", status: 409 };
+    // Expiration is terminal, even when the immutable scope still matches.
+    const reissue = db.run(
+      "UPDATE approval_session_tokens SET expires_at = ? WHERE token_id = ? AND revoked_at IS NULL AND expires_at > ?",
+      [expiresAt, tokenId, nowIso]
+    );
+    if (reissue.changes !== 1) return { error: "session token is expired", status: 409 };
+    return { token_id: tokenId, expires_at: expiresAt, capabilities };
+  }
+  db.run(
+    `INSERT INTO approval_session_tokens
+       (token_id, operator_id, public_key, session_ref, project_key, created_at, expires_at, revoked_at,
+        inbox_purpose, inbox_version, run_ref, group_id, parent_token_id, caller_ref, authority)
+     VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, 1, ?, ?, ?, ?, ?)`,
+    [
+      tokenId, auth.operator_id, sessionPublicKey, sessionRef, projectKey, nowIso, expiresAt,
+      purpose, runRef, groupId, parentTokenId, callerRef, authority,
+    ]
+  );
+  return { token_id: tokenId, expires_at: expiresAt, capabilities };
+}
+
 function handleApprovalTokenMint(
   body: ApprovalTokenMintRequest & Record<string, unknown>
 ): ApprovalTokenMintResponse | { error: string; status: number } {
+  if (body.inbox !== undefined) return handleInboxTokenMint(body);
   const auth = approvalAuth.authenticateOperator(body, "mint-token");
   if (isAuthError(auth)) return auth;
 
@@ -11072,8 +11286,11 @@ function handleApprovalTokenMint(
   if (mintCaseRefusal) return { error: mintCaseRefusal, status: 400 };
   const projectKey = rawProjectKey;
   const tokenId = deriveTokenId(sessionPublicKey);
-  const existing = db.query("SELECT revoked_at FROM approval_session_tokens WHERE token_id = ?").get(tokenId) as { revoked_at: string | null } | null;
+  const existing = db.query("SELECT revoked_at, inbox_purpose FROM approval_session_tokens WHERE token_id = ?").get(tokenId) as { revoked_at: string | null; inbox_purpose: string | null } | null;
   if (existing?.revoked_at) return { error: "session-token-revoked", status: 409 };
+  // A legacy mint or renewal never touches an Inbox credential: its scope is
+  // immutable and only an Inbox mint (v1 proof) may re-issue it.
+  if (existing && existing.inbox_purpose !== null) return { error: "token is an inbox credential", status: 409 };
   const now = new Date();
   const nowIso = now.toISOString();
   const expiresAt = new Date(now.getTime() + ttlHours * 3600_000).toISOString();
@@ -11083,7 +11300,7 @@ function handleApprovalTokenMint(
       `UPDATE approval_session_tokens
          SET expires_at = ?
        WHERE token_id = ? AND operator_id = ? AND public_key = ?
-         AND session_ref = ? AND project_key = ?
+         AND session_ref = ? AND project_key = ? AND inbox_purpose IS NULL
          AND revoked_at IS NULL AND expires_at > ?`,
       [expiresAt, tokenId, auth.operator_id, sessionPublicKey, sessionRef, projectKey, nowIso]
     );
@@ -11096,10 +11313,30 @@ function handleApprovalTokenMint(
      VALUES (?, ?, ?, ?, ?, ?, ?, NULL)
      ON CONFLICT(token_id) DO UPDATE SET
        expires_at = excluded.expires_at, revoked_at = NULL,
-       project_key = excluded.project_key`,
+       project_key = excluded.project_key
+       WHERE approval_session_tokens.inbox_purpose IS NULL`,
     [tokenId, auth.operator_id, sessionPublicKey, sessionRef, projectKey, nowIso, expiresAt]
   );
   return { token_id: tokenId, expires_at: expiresAt, capabilities };
+}
+
+/**
+ * A mandate hangs from a run root, so it ends with it. Run after every revoke:
+ * a mandate whose parent is revoked is revoked in the same call, whichever
+ * filter (token_id or session_ref) revoked the parent and whatever session_ref
+ * the mandate itself carries.
+ */
+function revokeMandatesOfRevokedParents(operatorId: string, nowIso: string): number {
+  return db.run(
+    `UPDATE approval_session_tokens
+        SET revoked_at = ?
+      WHERE inbox_purpose = 'mandate' AND revoked_at IS NULL AND operator_id = ?
+        AND parent_token_id IN (
+          SELECT token_id FROM approval_session_tokens
+           WHERE operator_id = ? AND revoked_at IS NOT NULL
+        )`,
+    [nowIso, operatorId, operatorId]
+  ).changes;
 }
 
 function handleApprovalTokenRevoke(
@@ -11109,18 +11346,26 @@ function handleApprovalTokenRevoke(
   if (isAuthError(auth)) return auth;
   const now = new Date().toISOString();
   if (typeof body.token_id === "string" && body.token_id) {
-    const r = db.run(
-      "UPDATE approval_session_tokens SET revoked_at = ? WHERE token_id = ? AND operator_id = ? AND revoked_at IS NULL",
-      [now, body.token_id, auth.operator_id]
-    );
-    return { revoked: r.changes };
+    const tokenId = body.token_id;
+    const revokeRootAndMandates = db.transaction(() => {
+      const r = db.run(
+        "UPDATE approval_session_tokens SET revoked_at = ? WHERE token_id = ? AND operator_id = ? AND revoked_at IS NULL",
+        [now, tokenId, auth.operator_id]
+      );
+      return r.changes + revokeMandatesOfRevokedParents(auth.operator_id, now);
+    });
+    return { revoked: revokeRootAndMandates() };
   }
   if (typeof body.session_ref === "string" && body.session_ref) {
-    const r = db.run(
-      "UPDATE approval_session_tokens SET revoked_at = ? WHERE session_ref = ? AND operator_id = ? AND revoked_at IS NULL",
-      [now, body.session_ref, auth.operator_id]
-    );
-    return { revoked: r.changes };
+    const sessionRef = body.session_ref;
+    const revokeSessionAndMandates = db.transaction(() => {
+      const r = db.run(
+        "UPDATE approval_session_tokens SET revoked_at = ? WHERE session_ref = ? AND operator_id = ? AND revoked_at IS NULL",
+        [now, sessionRef, auth.operator_id]
+      );
+      return r.changes + revokeMandatesOfRevokedParents(auth.operator_id, now);
+    });
+    return { revoked: revokeSessionAndMandates() };
   }
   return { error: "token_id or session_ref is required", status: 400 };
 }

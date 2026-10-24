@@ -8,9 +8,17 @@
 // module, or any future neighbouring table such as approval notes or history.
 
 import {
+  deriveInstanceRef,
+  INBOX_GATES,
+  INBOX_OPERATIONS,
   isOperationAllowed,
+  isPurposeOperationAllowed,
+  parseTokenPurpose,
   verifyAuthProof,
+  verifyInboxProof,
   type ApprovalOperation,
+  type ApprovalTokenPurpose,
+  type InboxGate,
 } from "./approval.ts";
 import type { ApprovalAuthProof } from "./types.ts";
 
@@ -41,6 +49,18 @@ export interface ApprovalIdentity {
   readonly session_ref: string | null;
   /** Set for a session credential: the project its Deck window minted it for. */
   readonly project_key: string | null;
+  readonly token_id: string | null;
+  /** Set for a session credential: read from the stored row, never from the body. */
+  readonly purpose: ApprovalTokenPurpose | null;
+  readonly inbox: InboxTokenScope | null;
+}
+
+export interface InboxTokenScope {
+  readonly run_ref: string;
+  readonly group_id: string;
+  readonly parent_token_id: string | null;
+  readonly authority: string | null;
+  readonly caller_ref: string | null;
 }
 
 declare const SCOPE_BRAND: unique symbol;
@@ -171,6 +191,19 @@ export interface ApprovalAuthDeps {
   onTrustRefused?: (refusal: AuthError) => void;
   /** The broker owns the bounded replay cache; skew alone would not stop one. */
   rememberNonce(nonce: string, nowSec: number): boolean;
+  /**
+   * Resolves an author instance by the DIGEST of its token (never the token
+   * itself) to the run it was bound to. Absent = no binding is knowable, so an
+   * author proof is refused.
+   */
+  resolveInstanceBinding?(instanceRef: string): InboxInstanceBinding | null;
+}
+
+export interface InboxInstanceBinding {
+  operator_id: string;
+  run_ref: string;
+  group_id: string;
+  project_key: string;
 }
 
 type Body = { auth?: ApprovalAuthProof } & Record<string, unknown>;
@@ -182,10 +215,101 @@ interface TokenRow {
   project_key: string;
   revoked_at: string | null;
   expires_at: string;
+  inbox_purpose?: string | null;
+  run_ref?: string | null;
+  group_id?: string | null;
+  parent_token_id?: string | null;
+  authority?: string | null;
+  caller_ref?: string | null;
 }
+
+// A total mapping prevents a new proof gate from accepting an operation by omission.
+const GATE_OPERATIONS = {
+  [INBOX_GATES.register]: ["inbox-register"],
+  [INBOX_GATES.deposit]: ["inbox-deposit"],
+  [INBOX_GATES.channel]: ["inbox-deposit"],
+  [INBOX_GATES.mint]: ["mint-token"],
+  [INBOX_GATES.authorList]: ["inbox-author-proof"],
+  [INBOX_GATES.authorClose]: ["inbox-author-proof"],
+  [INBOX_GATES.mandateList]: ["inbox-list"],
+  [INBOX_GATES.mandateClose]: ["inbox-close"],
+} as const satisfies Record<InboxGate, readonly ApprovalOperation[]>;
+
+const INBOX_OPERATION_SET: ReadonlySet<ApprovalOperation> = new Set<ApprovalOperation>(INBOX_OPERATIONS);
+
+declare const ACTOR_BRAND: unique symbol;
+
+/**
+ * A verified Inbox actor, opaque for the same reason as ApprovalScope: only
+ * verifyInboxAction can mint one, so a copied or hand-built object has no
+ * entry in the module-private store and is refused by authorizeInboxEntry.
+ */
+export interface InboxActor {
+  readonly [ACTOR_BRAND]: "inbox";
+}
+
+interface ActorFields {
+  operator_id: string;
+  run_ref: string;
+  group_id: string;
+  project_key: string;
+  authority: "author" | "lead" | "supervisor";
+  authorInstanceRef: string | null;
+}
+
+const actorFields = new WeakMap<object, ActorFields>();
+
+function mintActor(f: ActorFields): InboxActor {
+  const a = Object.freeze({}) as InboxActor;
+  actorFields.set(a, f);
+  return a;
+}
+
+/** The provenance stamped on an entry at deposit; a NULL member never matches. */
+export interface InboxEntryProvenance {
+  operator_id: string | null;
+  run_ref: string | null;
+  group_id: string | null;
+  project_key: string | null;
+  author_instance_ref: string | null;
+}
+
+/**
+ * Object first, then actor: the entry's own scope must equal the actor's
+ * verified scope, and only then does the actor's authority count. An elevated
+ * mandate acts inside its run; an author acts only on entries stamped with the
+ * digest of the instance it proved. An entry without an author digest can
+ * never satisfy the author branch.
+ */
+export function authorizeInboxEntry(actor: InboxActor, entry: InboxEntryProvenance): boolean {
+  const a = actorFields.get(actor);
+  if (!a) return false;
+  const sameScope =
+    entry.operator_id === a.operator_id &&
+    entry.run_ref === a.run_ref &&
+    entry.group_id === a.group_id &&
+    entry.project_key === a.project_key;
+  if (!sameScope) return false;
+  if (a.authority === "lead" || a.authority === "supervisor") return true;
+  return (
+    a.authorInstanceRef !== null &&
+    entry.author_instance_ref !== null &&
+    a.authorInstanceRef === entry.author_instance_ref
+  );
+}
+
+export type InboxActionOperation = "inbox-list" | "inbox-close";
 
 export interface ApprovalAuth {
   authenticateOperator(body: Body, op: ApprovalOperation): AuthResult<ApprovalIdentity>;
+  /** Same checks as authenticateOperator, but the proof must be a v1 proof for exactly `gate`. */
+  authenticateInbox(body: Body, op: ApprovalOperation, gate: InboxGate): AuthResult<ApprovalIdentity>;
+  /**
+   * Verifies a mandate envelope and, when present, the author's own proof
+   * carried inside it. Returns an actor for authorizeInboxEntry; it exposes no
+   * route and mutates nothing.
+   */
+  verifyInboxAction(body: Body, op: InboxActionOperation): AuthResult<InboxActor>;
   authorizeTarget<R>(
     body: Body,
     op: ApprovalOperation,
@@ -205,6 +329,53 @@ export function createApprovalAuth(deps: ApprovalAuthDeps): ApprovalAuth {
    * operation table by construction rather than by re-typing a rule.
    */
   function authenticateOperator(body: Body, op: ApprovalOperation): AuthResult<ApprovalIdentity> {
+    return authenticate(body, op, undefined);
+  }
+
+  function authenticateInbox(body: Body, op: ApprovalOperation, gate: InboxGate): AuthResult<ApprovalIdentity> {
+    return authenticate(body, op, gate);
+  }
+
+  const TOKEN_COLUMNS = `public_key, operator_id, session_ref, project_key, revoked_at, expires_at,
+           inbox_purpose, run_ref, group_id, parent_token_id, authority, caller_ref`;
+
+  /** A mandate is only as live as its run parent: revoked, expired or foreign parent = unusable. */
+  function mandateParentRefusal(row: TokenRow): AuthError | null {
+    const parent = row.parent_token_id
+      ? deps.queryOne<TokenRow>(
+          `SELECT ${TOKEN_COLUMNS} FROM approval_session_tokens WHERE token_id = ?`,
+          [row.parent_token_id]
+        )
+      : null;
+    if (!parent) return { error: "mandate parent not found", status: 401 };
+    if (parent.revoked_at) return { error: "mandate parent revoked", status: 401 };
+    if (new Date(parent.expires_at).getTime() < Date.now()) return { error: "mandate parent expired", status: 401 };
+    if (
+      parseTokenPurpose(parent.inbox_purpose) !== "run" ||
+      parent.operator_id !== row.operator_id ||
+      parent.run_ref !== row.run_ref ||
+      parent.group_id !== row.group_id ||
+      parent.project_key !== row.project_key
+    ) {
+      return { error: "mandate parent mismatch", status: 401 };
+    }
+    return null;
+  }
+
+  function authenticate(body: Body, op: ApprovalOperation, gate: InboxGate | undefined): AuthResult<ApprovalIdentity> {
+    // The proof format is decided by the OPERATION, not by whether a caller
+    // happened to pass a gate: an Inbox operation has no legacy form, so a
+    // legacy proof can never carry one, and a gate carries only its own
+    // operations.
+    if (gate === undefined && INBOX_OPERATION_SET.has(op)) {
+      return { error: `${op} requires a v1 proof`, status: 403 };
+    }
+    if (
+      gate !== undefined &&
+      (!Object.hasOwn(GATE_OPERATIONS, gate) || !(GATE_OPERATIONS[gate] as readonly ApprovalOperation[]).includes(op))
+    ) {
+      return { error: `${op} is not carried by this gate`, status: 403 };
+    }
     const proof = body.auth;
     if (!proof || typeof proof !== "object") return { error: "auth proof required", status: 401 };
     if (proof.kind !== "operator" && proof.kind !== "session") {
@@ -222,6 +393,7 @@ export function createApprovalAuth(deps: ApprovalAuthDeps): ApprovalAuth {
     let knownKey: string | null = null;
     let sessionRef: string | null = null;
     let tokenProjectKey: string | null = null;
+    let tokenRow: TokenRow | null = null;
 
     if (proof.kind === "operator") {
       const trusted = deps.resolveTrustedOperator(proof.operator_id);
@@ -231,7 +403,7 @@ export function createApprovalAuth(deps: ApprovalAuthDeps): ApprovalAuth {
     } else {
       if (!proof.token_id) return { error: "token_id required", status: 401 };
       const row = deps.queryOne<TokenRow>(
-        `SELECT public_key, operator_id, session_ref, project_key, revoked_at, expires_at
+        `SELECT ${TOKEN_COLUMNS}
            FROM approval_session_tokens WHERE token_id = ?`,
         [proof.token_id]
       );
@@ -243,8 +415,13 @@ export function createApprovalAuth(deps: ApprovalAuthDeps): ApprovalAuth {
       if (row.operator_id !== proof.operator_id) return { error: "token/operator mismatch", status: 401 };
       const trusted = deps.resolveTrustedOperator(row.operator_id);
       if (isAuthError(trusted)) return trusted;
+      if (parseTokenPurpose(row.inbox_purpose) === "mandate") {
+        const refusal = mandateParentRefusal(row);
+        if (refusal) return refusal;
+      }
       knownKey = row.public_key;
       sessionRef = row.session_ref;
+      tokenRow = row;
       // Kept as '' rather than normalized to null: a token minted without
       // project scoping carries '' here, and the refusal that names the cause
       // lives at the point of use, not here.
@@ -252,9 +429,32 @@ export function createApprovalAuth(deps: ApprovalAuthDeps): ApprovalAuth {
       tokenProjectKey = typeof row.project_key === "string" ? row.project_key : "";
     }
 
-    const verdict = verifyAuthProof(knownKey, payload, proof);
+    const verdict = gate === undefined
+      ? verifyAuthProof(knownKey, payload, proof)
+      : verifyInboxProof(knownKey, payload, proof, gate);
     if (!verdict.ok) return { error: verdict.reason, status: 401 };
     if (!deps.rememberNonce(proof.nonce, nowSec)) return { error: "replayed-proof", status: 401 };
+
+    // Second authority, behind the kind check above and after the signature so
+    // an unauthenticated caller learns nothing about a token's purpose. It is
+    // the purpose STORED for this token_id that decides, never one the body claims.
+    let purpose: ApprovalTokenPurpose | null = null;
+    let inbox: InboxTokenScope | null = null;
+    if (tokenRow) {
+      purpose = parseTokenPurpose(tokenRow.inbox_purpose);
+      if (purpose === null) return { error: "unknown token purpose", status: 403 };
+      if (!isPurposeOperationAllowed(purpose, op)) return { error: `credential may not ${op}`, status: 403 };
+      if (purpose !== "legacy") {
+        if (!tokenRow.run_ref || !tokenRow.group_id) return { error: "inbox token scope is incomplete", status: 401 };
+        inbox = {
+          run_ref: tokenRow.run_ref,
+          group_id: tokenRow.group_id,
+          parent_token_id: tokenRow.parent_token_id ?? null,
+          authority: tokenRow.authority ?? null,
+          caller_ref: tokenRow.caller_ref ?? null,
+        };
+      }
+    }
 
     if (proof.kind === "operator") {
       const at = new Date().toISOString();
@@ -270,7 +470,96 @@ export function createApprovalAuth(deps: ApprovalAuthDeps): ApprovalAuth {
       kind: proof.kind,
       session_ref: sessionRef,
       project_key: tokenProjectKey,
+      token_id: tokenRow ? (proof.token_id ?? null) : null,
+      purpose,
+      inbox,
     };
+  }
+
+  /**
+   * The envelope is signed by a mandate under its own gate; the optional
+   * `author` member is a SECOND proof, signed by the run root under the
+   * author gate. Nothing in the body is an authority: the scope and the
+   * authority come from the stored mandate, the author digest from a proof
+   * whose root must be that mandate's parent and whose payload must repeat
+   * the envelope's operation, entry and reason.
+   */
+  function verifyInboxAction(body: Body, op: InboxActionOperation): AuthResult<InboxActor> {
+    const isList = op === "inbox-list";
+    const id = authenticate(body, op, isList ? INBOX_GATES.mandateList : INBOX_GATES.mandateClose);
+    if (isAuthError(id)) return id;
+    if (id.kind !== "session" || id.purpose !== "mandate" || !id.inbox || !id.token_id) {
+      return { error: "a mandate is required", status: 403 };
+    }
+    const authority = id.inbox.authority;
+    if (authority !== "author" && authority !== "lead" && authority !== "supervisor") {
+      return { error: "mandate authority is unknown", status: 403 };
+    }
+    if (body.inbox_operation !== (isList ? "list" : "close")) {
+      return { error: "inbox_operation does not match the route", status: 400 };
+    }
+    const projectKey = id.project_key ?? "";
+
+    let authorInstanceRef: string | null = null;
+    if (body.author !== undefined) {
+      const author = body.author;
+      if (
+        typeof author !== "object" || author === null ||
+        typeof (author as { payload?: unknown }).payload !== "object" ||
+        (author as { payload?: unknown }).payload === null ||
+        typeof (author as { auth?: unknown }).auth !== "object" ||
+        (author as { auth?: unknown }).auth === null
+      ) {
+        return { error: "author proof is malformed", status: 400 };
+      }
+      const payload = (author as { payload: Record<string, unknown> }).payload;
+      const authorBody: Body = { ...payload, auth: (author as { auth: ApprovalAuthProof }).auth };
+      const authorId = authenticate(
+        authorBody,
+        "inbox-author-proof",
+        isList ? INBOX_GATES.authorList : INBOX_GATES.authorClose
+      );
+      if (isAuthError(authorId)) return authorId;
+      if (
+        authorId.kind !== "session" ||
+        authorId.token_id !== id.inbox.parent_token_id ||
+        authorId.operator_id !== id.operator_id
+      ) {
+        return { error: "author proof root is not the mandate's parent", status: 403 };
+      }
+      if (
+        payload.inbox_operation !== body.inbox_operation ||
+        (payload.entry_id ?? null) !== (body.entry_id ?? null) ||
+        (payload.reason ?? null) !== (body.reason ?? null)
+      ) {
+        return { error: "author proof does not match the envelope", status: 403 };
+      }
+      const token = payload.instance_token;
+      if (typeof token !== "string" || token.length === 0) {
+        return { error: "author proof carries no instance", status: 400 };
+      }
+      const ref = deriveInstanceRef(token);
+      const binding = deps.resolveInstanceBinding?.(ref) ?? null;
+      if (
+        !binding ||
+        binding.operator_id !== id.operator_id ||
+        binding.run_ref !== id.inbox.run_ref ||
+        binding.group_id !== id.inbox.group_id ||
+        binding.project_key !== projectKey
+      ) {
+        return { error: "author instance is not bound to this run", status: 403 };
+      }
+      authorInstanceRef = ref;
+    }
+
+    return mintActor({
+      operator_id: id.operator_id,
+      run_ref: id.inbox.run_ref,
+      group_id: id.inbox.group_id,
+      project_key: projectKey,
+      authority,
+      authorInstanceRef,
+    });
   }
 
   /**
@@ -310,6 +599,8 @@ export function createApprovalAuth(deps: ApprovalAuthDeps): ApprovalAuth {
 
   return {
     authenticateOperator,
+    authenticateInbox,
+    verifyInboxAction,
 
     /**
      * Returns the already-scoped rows directly so callers never have to

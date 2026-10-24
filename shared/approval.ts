@@ -178,7 +178,112 @@ export function buildAuthProof(
   return proof;
 }
 
+export const INBOX_PROOF_VERSION = 1;
+
+/**
+ * One constant per door that accepts an Inbox proof. The verifier owns the
+ * gate: a proof never declares which door it was meant for, so a proof signed
+ * for one door cannot be replayed at another.
+ */
+export const INBOX_GATES = {
+  register: "POST /register",
+  deposit: "POST /send-message:operator",
+  channel: "POST /approval/add:channel",
+  mint: "POST /approval/token-mint:inbox",
+  authorList: "inbox-author:list",
+  authorClose: "inbox-author:close",
+  mandateList: "inbox-mandate:list",
+  mandateClose: "inbox-mandate:close",
+} as const;
+
+export type InboxGate = (typeof INBOX_GATES)[keyof typeof INBOX_GATES];
+
+const INBOX_MESSAGE_PREFIX = "koryphaios-inbox";
+
+/**
+ * A JSON array keeps the fields unambiguous (no separator can be forged from
+ * inside the payload) and cannot be mistaken for a legacy message, which is a
+ * canonical object followed by newline-separated nonce and timestamp.
+ */
+export function inboxSignedMessage(
+  payload: unknown,
+  nonce: string,
+  ts: number,
+  gate: InboxGate,
+  version: number = INBOX_PROOF_VERSION
+): Buffer {
+  return Buffer.from(JSON.stringify([INBOX_MESSAGE_PREFIX, version, gate, canonicalize(payload), nonce, ts]), "utf-8");
+}
+
+export function buildInboxProof(
+  privateKey: string,
+  payload: unknown,
+  gate: InboxGate,
+  opts: { kind: ApprovalAuthKind; operator_id: string; token_id?: string; now?: number }
+): ApprovalAuthProof {
+  const ts = opts.now ?? Math.floor(Date.now() / 1000);
+  const nonce = randomBytes(12).toString("base64url");
+  const key = createPrivateKey({
+    key: Buffer.from(privateKey, "base64"),
+    format: "der",
+    type: "pkcs8",
+  });
+  const sig = sign(null, inboxSignedMessage(payload, nonce, ts, gate), key).toString("base64");
+  const proof: ApprovalAuthProof = { kind: opts.kind, operator_id: opts.operator_id, nonce, ts, sig, v: INBOX_PROOF_VERSION };
+  if (opts.token_id) proof.token_id = opts.token_id;
+  return proof;
+}
+
 export type AuthVerdict = { ok: true } | { ok: false; reason: string };
+
+/**
+ * Verifies a v1 Inbox proof for ONE gate. A proof that is not v1 is refused
+ * here and never retried as a legacy proof: falling back after a failure is
+ * how a downgrade would be built.
+ */
+export function verifyInboxProof(
+  publicKey: string,
+  payload: unknown,
+  proof: ApprovalAuthProof | undefined,
+  gate: InboxGate,
+  opts: { now?: number } = {}
+): AuthVerdict {
+  if (!proof || typeof proof !== "object") return { ok: false, reason: "missing-proof" };
+  if (proof.v !== INBOX_PROOF_VERSION) return { ok: false, reason: "not-v1" };
+  if (typeof proof.sig !== "string" || typeof proof.nonce !== "string") {
+    return { ok: false, reason: "malformed-proof" };
+  }
+  if (!Number.isFinite(proof.ts)) return { ok: false, reason: "malformed-proof" };
+  const now = opts.now ?? Math.floor(Date.now() / 1000);
+  if (Math.abs(now - proof.ts) > APPROVAL_AUTH_SKEW_SEC) return { ok: false, reason: "stale-proof" };
+  try {
+    const key = createPublicKey({
+      key: Buffer.from(publicKey, "base64"),
+      format: "der",
+      type: "spki",
+    });
+    const ok = verify(
+      null,
+      inboxSignedMessage(payload, proof.nonce, proof.ts, gate),
+      key,
+      Buffer.from(proof.sig, "base64")
+    );
+    return ok ? { ok: true } : { ok: false, reason: "bad-signature" };
+  } catch {
+    return { ok: false, reason: "malformed-proof" };
+  }
+}
+
+const DOMAIN_INBOX_AUTHOR = "koryphaios/inbox/inbox-author-v1\0";
+
+/**
+ * Identity of an author INSTANCE, derived from its private token. The full
+ * digest is an internal comparison key and never a public field: a truncated
+ * form would let two instances collide.
+ */
+export function deriveInstanceRef(instanceToken: string): string {
+  return digest(DOMAIN_INBOX_AUTHOR, instanceToken);
+}
 
 /**
  * Verify a proof against the credential's PUBLIC half. Rejects outside
@@ -219,42 +324,95 @@ export function verifyAuthProof(
   }
 }
 
-// --- Scope: what each credential class may do ---
+export const INBOX_OPERATIONS = [
+  "inbox-register",
+  "inbox-deposit",
+  "inbox-author-proof",
+  "inbox-list",
+  "inbox-close",
+] as const;
 
 /**
  * Operations an approval credential can attempt. `claim` is deliberately
  * OPERATOR-ONLY: it is the operation that authorises a tool call, so a
- * sandboxed agent must never reach it (PLAN §6.8).
+ * sandboxed agent must never reach it.
  */
-export type ApprovalOperation =
-  | "add"
-  | "wait"
+export const APPROVAL_OPERATIONS = [
+  "add",
+  "wait",
   // A session closing its own guarded row without a verdict: it settles
   // nothing and authorises nothing, so it stays on the session side.
-  | "withdraw"
-  | "claim"
-  | "list"
-  | "channels"
-  | "mint-token"
-  // Card 39c40571 layer 2: a roadmap write claiming the reserved 'deck' author
-  // is an OPERATOR gesture. It is listed here (rather than getting its own
-  // verifier beside this one) so it inherits the signature check, the nonce
-  // replay guard and this very table, and so that leaving it out of
-  // SESSION_ALLOWED below is what refuses a sandboxed agent's session token.
-  | "roadmap-write"
-  | "context-transaction"
-  | "operator-check";
+  "withdraw",
+  "claim",
+  "list",
+  "channels",
+  "mint-token",
+  // A roadmap write claiming the reserved 'deck' author is an OPERATOR gesture.
+  // It is listed here (rather than getting its own verifier beside this one) so
+  // it inherits the signature check, the nonce replay guard and this very table,
+  // and so that leaving it out of SESSION_ALLOWED below is what refuses a
+  // sandboxed agent's session token.
+  "roadmap-write",
+  "context-transaction",
+  "operator-check",
+  ...INBOX_OPERATIONS,
+] as const;
+
+export type ApprovalOperation = (typeof APPROVAL_OPERATIONS)[number];
+
+const INBOX_OPERATION_SET: ReadonlySet<ApprovalOperation> = new Set<ApprovalOperation>(INBOX_OPERATIONS);
 
 /**
  * A session credential may only ASK. Every operation absent from this set is
  * operator-only, which is the point: `claim` authorises a tool call and
  * `roadmap-write` speaks as the operator on a shared backlog, so a sandboxed
- * agent holding a session token must reach neither (PLAN §6.8).
+ * agent holding a session token must reach neither.
+ * The Inbox operations are a session-class gesture that the stored purpose
+ * (below) narrows further: this set only says a session MAY attempt them.
  */
-const SESSION_ALLOWED: ReadonlySet<ApprovalOperation> = new Set<ApprovalOperation>(["add", "wait", "withdraw"]);
+const SESSION_ALLOWED: ReadonlySet<ApprovalOperation> = new Set<ApprovalOperation>([
+  "add",
+  "wait",
+  "withdraw",
+  ...INBOX_OPERATIONS,
+]);
 
 export function isOperationAllowed(kind: ApprovalAuthKind, op: ApprovalOperation): boolean {
-  return kind === "operator" ? true : SESSION_ALLOWED.has(op);
+  // The operator key carries no instance, so it can never stand in for a run
+  // or a mandate on an Inbox operation.
+  if (kind === "operator") return !INBOX_OPERATION_SET.has(op);
+  return SESSION_ALLOWED.has(op);
+}
+
+export type ApprovalTokenPurpose = "legacy" | "run" | "mandate";
+
+/**
+ * The purpose is read from the token row, never from the request body. NULL is
+ * the migration value and means legacy; any other unknown value is refused
+ * (null), never mapped to a permissive class.
+ */
+export function parseTokenPurpose(raw: unknown): ApprovalTokenPurpose | null {
+  if (raw === null || raw === undefined) return "legacy";
+  if (raw === "run" || raw === "mandate") return raw;
+  return null;
+}
+
+const PURPOSE_ALLOWED: Readonly<Record<ApprovalTokenPurpose, ReadonlySet<ApprovalOperation>>> = {
+  legacy: new Set<ApprovalOperation>(["add", "wait", "withdraw"]),
+  run: new Set<ApprovalOperation>([
+    "add",
+    "wait",
+    "withdraw",
+    "inbox-register",
+    "inbox-deposit",
+    "inbox-author-proof",
+  ]),
+  mandate: new Set<ApprovalOperation>(["inbox-list", "inbox-close"]),
+};
+
+/** Second guard behind isOperationAllowed, evaluated on the stored purpose. Refuses by default. */
+export function isPurposeOperationAllowed(purpose: ApprovalTokenPurpose, op: ApprovalOperation): boolean {
+  return PURPOSE_ALLOWED[purpose]?.has(op) ?? false;
 }
 
 // --- Validation ---

@@ -5,13 +5,25 @@ import {
   APPROVAL_OPTIONS_MAX,
   APPROVAL_TITLE_MAX,
   buildAuthProof,
+  buildInboxProof,
   canonicalize,
+  deriveInstanceRef,
   deriveOperatorId,
   deriveTokenId,
   formatOrigin,
   generateCredential,
   generateSecret,
+  APPROVAL_OPERATIONS,
+  INBOX_GATES,
+  INBOX_OPERATIONS,
+  inboxSignedMessage,
   isOperationAllowed,
+  isPurposeOperationAllowed,
+  parseTokenPurpose,
+  verifyInboxProof,
+  type ApprovalOperation,
+  type ApprovalTokenPurpose,
+  type InboxGate,
   sanitizeAnswerForPty,
   stripControl,
   validateApprovalDraft,
@@ -311,5 +323,122 @@ describe("formatOrigin", () => {
 
   test("degrades gracefully without a project key", () => {
     expect(formatOrigin({ host: "portable", project_key: "" })).toBe("portable");
+  });
+});
+
+const ALL_GATES = Object.values(INBOX_GATES) as InboxGate[];
+
+describe("Inbox proof v1 (one gate per proof)", () => {
+  const cred = generateCredential();
+  const operatorId = deriveOperatorId(cred.publicKey);
+  const payload = { inbox_operation: "close", entry_id: "e-1" };
+  const build = (gate: InboxGate, now?: number) =>
+    buildInboxProof(cred.privateKey, payload, gate, { kind: "operator", operator_id: operatorId, now });
+
+  test("a proof verifies at the gate it was signed for", () => {
+    for (const gate of ALL_GATES) {
+      expect({ gate, ...verifyInboxProof(cred.publicKey, payload, build(gate), gate) }).toEqual({ gate, ok: true });
+    }
+  });
+
+  test("a proof is refused at every other gate", () => {
+    for (const signedFor of ALL_GATES) {
+      const proof = build(signedFor);
+      for (const checkedAt of ALL_GATES.filter((g) => g !== signedFor)) {
+        const verdict = verifyInboxProof(cred.publicKey, payload, proof, checkedAt);
+        expect({ signedFor, checkedAt, ok: verdict.ok }).toEqual({ signedFor, checkedAt, ok: false });
+      }
+    }
+  });
+
+  test("the signed bytes change with the gate and with the version", () => {
+    const base = inboxSignedMessage(payload, "n", 1, INBOX_GATES.register);
+    expect(inboxSignedMessage(payload, "n", 1, INBOX_GATES.deposit).equals(base), "gate is part of the bytes").toBe(false);
+    expect(inboxSignedMessage(payload, "n", 1, INBOX_GATES.register, 2).equals(base), "version is part of the bytes").toBe(false);
+  });
+
+  test("a proof that is not v1 is refused and never retried as a legacy proof", () => {
+    const legacy = buildAuthProof(cred.privateKey, payload, { kind: "operator", operator_id: operatorId });
+    expect(verifyInboxProof(cred.publicKey, payload, legacy, INBOX_GATES.mint)).toEqual({ ok: false, reason: "not-v1" });
+    expect(verifyInboxProof(cred.publicKey, payload, { ...build(INBOX_GATES.mint), v: 2 }, INBOX_GATES.mint)).toEqual({
+      ok: false,
+      reason: "not-v1",
+    });
+    const { v: _v, ...withoutVersion } = build(INBOX_GATES.mint);
+    expect(verifyInboxProof(cred.publicKey, payload, withoutVersion, INBOX_GATES.mint).ok).toBe(false);
+  });
+
+  test("a v1 proof is not a legacy proof either", () => {
+    expect(verifyAuthProof(cred.publicKey, payload, build(INBOX_GATES.mint)).ok).toBe(false);
+  });
+
+  test("the payload and the clock are still covered", () => {
+    const proof = build(INBOX_GATES.mint);
+    expect(verifyInboxProof(cred.publicKey, { ...payload, entry_id: "e-2" }, proof, INBOX_GATES.mint).ok).toBe(false);
+    const stale = build(INBOX_GATES.mint, Math.floor(Date.now() / 1000) - APPROVAL_AUTH_SKEW_SEC - 5);
+    expect(verifyInboxProof(cred.publicKey, payload, stale, INBOX_GATES.mint)).toEqual({ ok: false, reason: "stale-proof" });
+  });
+
+  test("garbage is a verdict, never an exception", () => {
+    for (const bad of [undefined, null, "x", { v: 1 }, { v: 1, sig: 1, nonce: "n", ts: 1 }] as never[]) {
+      expect(verifyInboxProof(cred.publicKey, payload, bad, INBOX_GATES.mint).ok).toBe(false);
+    }
+  });
+});
+
+describe("token purpose x operation (stored purpose decides, refusal by default)", () => {
+  // Written out in full on purpose: the table under test is not re-derived here.
+  const EXPECTED: Record<ApprovalTokenPurpose, ApprovalOperation[]> = {
+    legacy: ["add", "wait", "withdraw"],
+    run: ["add", "wait", "withdraw", "inbox-register", "inbox-deposit", "inbox-author-proof"],
+    mandate: ["inbox-list", "inbox-close"],
+  };
+
+  test("every purpose allows exactly its operations, over the whole union", () => {
+    for (const purpose of Object.keys(EXPECTED) as ApprovalTokenPurpose[]) {
+      const allowed = APPROVAL_OPERATIONS.filter((op) => isPurposeOperationAllowed(purpose, op));
+      expect({ purpose, allowed }).toEqual({ purpose, allowed: EXPECTED[purpose] });
+    }
+  });
+
+  test("a mandate can neither ask, wait, withdraw, claim, mint, register nor deposit", () => {
+    for (const op of ["add", "wait", "withdraw", "claim", "mint-token", "inbox-register", "inbox-deposit"] as const) {
+      expect({ op, ok: isPurposeOperationAllowed("mandate", op) }).toEqual({ op, ok: false });
+    }
+  });
+
+  test("a run root cannot list or close and holds no operator-class operation", () => {
+    for (const op of ["inbox-list", "inbox-close", "claim", "mint-token", "list", "channels", "roadmap-write"] as const) {
+      expect({ op, ok: isPurposeOperationAllowed("run", op) }).toEqual({ op, ok: false });
+    }
+  });
+
+  test("a legacy token holds no Inbox operation", () => {
+    for (const op of INBOX_OPERATIONS) expect({ op, ok: isPurposeOperationAllowed("legacy", op) }).toEqual({ op, ok: false });
+  });
+
+  test("purpose parsing: NULL is legacy, run and mandate are themselves, anything else is refused", () => {
+    expect(parseTokenPurpose(null)).toBe("legacy");
+    expect(parseTokenPurpose(undefined)).toBe("legacy");
+    expect(parseTokenPurpose("run")).toBe("run");
+    expect(parseTokenPurpose("mandate")).toBe("mandate");
+    for (const bad of ["", "legacy", "RUN", "bogus", 1, {}]) expect(parseTokenPurpose(bad)).toBeNull();
+  });
+
+  test("the operator key can attempt no Inbox operation, a session can attempt each of them", () => {
+    for (const op of INBOX_OPERATIONS) {
+      expect({ op, operator: isOperationAllowed("operator", op) }).toEqual({ op, operator: false });
+      expect({ op, session: isOperationAllowed("session", op) }).toEqual({ op, session: true });
+    }
+  });
+});
+
+describe("author instance digest", () => {
+  test("is a full, deterministic, domain-separated SHA-256", () => {
+    const ref = deriveInstanceRef("instance-token-a");
+    expect(ref).toMatch(/^[0-9a-f]{64}$/);
+    expect(deriveInstanceRef("instance-token-a")).toBe(ref);
+    expect(deriveInstanceRef("instance-token-b")).not.toBe(ref);
+    expect(new Bun.CryptoHasher("sha256").update("instance-token-a").digest("hex")).not.toBe(ref);
   });
 });

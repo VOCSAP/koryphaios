@@ -8,11 +8,14 @@ import { startBroker, stopBroker, post, approvalListBody, type TestBroker, openB
 import {
   approvalWaitTimeoutSec,
   buildAuthProof,
+  buildInboxProof,
   capVisibly,
   deriveOperatorId,
   deriveTokenId,
   generateCredential,
+  INBOX_GATES,
   type ApprovalCredential,
+  type InboxGate,
 } from "../shared/approval.ts";
 import type { Approval } from "../shared/types.ts";
 import { buildApprovalRequest } from "../desktop/hooks/approval-hook.ts";
@@ -2314,5 +2317,491 @@ describe("over-long title and question are cut visibly", () => {
     expect(row.title.endsWith("[truncated from 301 characters]"), row.title).toBe(true);
     expect(codePoints(row.title)).toBeLessThanOrEqual(200);
     expect(row.title.startsWith(EMOJI)).toBe(true);
+  });
+});
+
+describe("Inbox run roots and mandates (token routes)", () => {
+  type Mint = { token_id: string; expires_at: string; capabilities?: { renew_only?: boolean; inbox_provenance?: number } };
+  type Signer = { cred: ApprovalCredential; operator_id: string; kind?: "operator" | "session"; token_id?: string };
+  const RUN_A = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const RUN_B = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+
+  /** Signs a v1 proof for ONE gate over the final body, the way the Deck main will. */
+  async function inboxPost<T>(
+    b: TestBroker,
+    path: string,
+    payload: Record<string, unknown>,
+    signer: Signer,
+    gate: InboxGate
+  ): Promise<{ status: number; body: T }> {
+    const body = { project_key: DEFAULT_PROJECT_KEY, ...payload, public_key: signer.cred.publicKey } as Record<string, unknown>;
+    const auth = buildInboxProof(signer.cred.privateKey, body, gate, {
+      kind: signer.kind ?? "operator",
+      operator_id: signer.operator_id,
+      token_id: signer.token_id,
+    });
+    return post<T>(`${b.url}${path}`, { ...body, auth });
+  }
+
+  const runBlock = (run = RUN_A, group = "group-a") => ({ version: 1, kind: "run", run_ref: run, group_id: group });
+  const mandateBlock = (parent: string, authority = "lead", caller = "caller-1") => ({
+    version: 1,
+    kind: "mandate",
+    parent_token_id: parent,
+    caller_ref: caller,
+    authority,
+  });
+
+  const mint = (
+    b: TestBroker,
+    op: Operator,
+    cred: ApprovalCredential,
+    inbox: Record<string, unknown>,
+    over: Record<string, unknown> = {}
+  ) =>
+    inboxPost<Mint & { error?: string }>(
+      b,
+      "/approval/token-mint",
+      { session_public_key: cred.publicKey, session_ref: "window-a", inbox, ...over },
+      { cred: op.cred, operator_id: op.id },
+      INBOX_GATES.mint
+    );
+
+  function rowOf(b: TestBroker, tokenId: string): Record<string, unknown> | null {
+    const db = openBrokerDb(b.dbPath, { readonly: true });
+    try {
+      return db.query("SELECT * FROM approval_session_tokens WHERE token_id = ?").get(tokenId) as Record<string, unknown> | null;
+    } finally {
+      db.close();
+    }
+  }
+
+  async function runWithMandates(b: TestBroker, op: Operator, run: string, ref: string, authorities: string[]) {
+    const root = generateCredential();
+    const rootMint = await mint(b, op, root, runBlock(run), { session_ref: ref });
+    expect(rootMint.status).toBe(200);
+    const mandates: Array<{ cred: ApprovalCredential; token_id: string }> = [];
+    for (const [i, authority] of authorities.entries()) {
+      const cred = generateCredential();
+      const m = await mint(b, op, cred, mandateBlock(rootMint.body.token_id, authority, `${ref}-caller-${i}`), {
+        session_ref: `${ref}-caller-${i}`,
+      });
+      expect(m.status).toBe(200);
+      mandates.push({ cred, token_id: m.body.token_id });
+    }
+    return { root, rootId: rootMint.body.token_id, mandates };
+  }
+
+  test("a run root is stored with an immutable scope and advertises the capability", async () => {
+    const b = await boot();
+    const op = newOperator();
+    const cred = generateCredential();
+    const res = await mint(b, op, cred, runBlock());
+
+    expect(res.status).toBe(200);
+    expect(res.body.capabilities).toEqual({ renew_only: true, inbox_provenance: 1 });
+    expect(res.body.token_id).toBe(deriveTokenId(cred.publicKey));
+    const row = rowOf(b, res.body.token_id);
+    expect(row).toMatchObject({
+      operator_id: op.id,
+      inbox_purpose: "run",
+      inbox_version: 1,
+      run_ref: RUN_A,
+      group_id: "group-a",
+      parent_token_id: null,
+      authority: null,
+      project_key: DEFAULT_PROJECT_KEY,
+    });
+  });
+
+  test("a legacy proof cannot open an Inbox credential", async () => {
+    const b = await boot();
+    const op = newOperator();
+    const cred = generateCredential();
+    const res = await signedPost<{ error: string }>(
+      b,
+      "/approval/token-mint",
+      { session_public_key: cred.publicKey, session_ref: "window-a", inbox: runBlock() },
+      { cred: op.cred, operator_id: op.id }
+    );
+    expect(res.status).toBe(401);
+    expect(res.body.error).toBe("not-v1");
+    expect(rowOf(b, deriveTokenId(cred.publicKey))).toBeNull();
+  });
+
+  test("a v1 proof signed for another gate cannot mint", async () => {
+    const b = await boot();
+    const op = newOperator();
+    const cred = generateCredential();
+    const res = await inboxPost<{ error: string }>(
+      b,
+      "/approval/token-mint",
+      { session_public_key: cred.publicKey, session_ref: "window-a", inbox: runBlock() },
+      { cred: op.cred, operator_id: op.id },
+      INBOX_GATES.deposit
+    );
+    expect(res.status).toBe(401);
+    expect(rowOf(b, deriveTokenId(cred.publicKey))).toBeNull();
+  });
+
+  test("a malformed run block is a 400, never a partial row", async () => {
+    const b = await boot();
+    const op = newOperator();
+    for (const inbox of [
+      { ...runBlock(), version: 2 },
+      { ...runBlock(), run_ref: "not-a-uuid" },
+      { ...runBlock(), group_id: "" },
+      { ...runBlock(), kind: "root" },
+      { version: 1, kind: "mandate", parent_token_id: "x", caller_ref: "", authority: "lead" },
+      { version: 1, kind: "mandate", parent_token_id: "x", caller_ref: "c", authority: "owner" },
+    ]) {
+      const cred = generateCredential();
+      const res = await mint(b, op, cred, inbox);
+      expect({ inbox, status: res.status }).toEqual({ inbox, status: 400 });
+      expect(rowOf(b, deriveTokenId(cred.publicKey))).toBeNull();
+    }
+  });
+
+  test("ttl_hours: absent means 24, only a finite number in (0, 24] is accepted, at mint AND at renew", async () => {
+    const b = await boot();
+    const op = newOperator();
+    const cred = generateCredential();
+    const HOUR = 3_600_000;
+    // The broker and this process read the clock separately: a 1 ms disagreement was measured.
+    const SKEW_MS = 5;
+    const before = Date.now();
+    const first = await mint(b, op, cred, runBlock());
+    const after = Date.now();
+    expect(Date.parse(first.body.expires_at)).toBeGreaterThanOrEqual(before + 24 * HOUR - SKEW_MS);
+    expect(Date.parse(first.body.expires_at)).toBeLessThanOrEqual(after + 24 * HOUR + SKEW_MS);
+
+    const half = generateCredential();
+    const beforeShort = Date.now();
+    const short = await mint(b, op, half, runBlock(), { ttl_hours: 0.5 });
+    const afterShort = Date.now();
+    expect(short.status).toBe(200);
+    expect(Date.parse(short.body.expires_at)).toBeGreaterThanOrEqual(beforeShort + 0.5 * HOUR - SKEW_MS);
+    expect(Date.parse(short.body.expires_at)).toBeLessThanOrEqual(afterShort + 0.5 * HOUR + SKEW_MS);
+    expect((await mint(b, op, generateCredential(), runBlock(), { ttl_hours: 24 })).status).toBe(200);
+
+    for (const ttl of [24.0001, 24.5, 25, 0, -1, null, "5", [24], {}]) {
+      const fresh = generateCredential();
+      const minted = await mint(b, op, fresh, runBlock(), { ttl_hours: ttl });
+      expect({ ttl, at: "mint", status: minted.status }).toEqual({ ttl, at: "mint", status: 400 });
+      expect(rowOf(b, deriveTokenId(fresh.publicKey))).toBeNull();
+      const renewed = await mint(b, op, cred, runBlock(), { ttl_hours: ttl, renew_only: true });
+      expect({ ttl, at: "renew", status: renewed.status }).toEqual({ ttl, at: "renew", status: 400 });
+    }
+    const renewOk = await mint(b, op, cred, runBlock(), { ttl_hours: 24, renew_only: true });
+    expect(renewOk.status).toBe(200);
+  });
+
+  test("a renewal that differs on any scope dimension is a conflict and changes nothing", async () => {
+    const b = await boot();
+    const op = newOperator();
+    const cred = generateCredential();
+    const first = await mint(b, op, cred, runBlock());
+    const before = rowOf(b, first.body.token_id);
+
+    for (const [name, inbox, over] of [
+      ["run_ref", runBlock(RUN_B), {}],
+      ["group_id", runBlock(RUN_A, "group-b"), {}],
+      ["project_key", runBlock(), { project_key: "github.com/other/repo" }],
+      ["session_ref", runBlock(), { session_ref: "window-other" }],
+    ] as const) {
+      const res = await mint(b, op, cred, inbox, { ...over, renew_only: true });
+      expect({ name, status: res.status }).toEqual({ name, status: 409 });
+    }
+    expect(rowOf(b, first.body.token_id)).toEqual(before);
+
+    const same = await mint(b, op, cred, runBlock(), { renew_only: true });
+    expect(same.status).toBe(200);
+    expect(same.body.token_id).toBe(first.body.token_id);
+  });
+
+  test("a second mint over a live Inbox token cannot move its scope either", async () => {
+    const b = await boot();
+    const op = newOperator();
+    const cred = generateCredential();
+    const first = await mint(b, op, cred, runBlock());
+    const moved = await mint(b, op, cred, runBlock(RUN_B));
+    expect(moved.status).toBe(409);
+    expect(rowOf(b, first.body.token_id)).toMatchObject({ run_ref: RUN_A });
+    expect((await mint(b, op, cred, runBlock())).status).toBe(200);
+  });
+
+  test("a legacy mint or renewal never touches an Inbox row, and an Inbox mint never takes a legacy row", async () => {
+    const b = await boot();
+    const op = newOperator();
+    const cred = generateCredential();
+    const first = await mint(b, op, cred, runBlock());
+    const before = rowOf(b, first.body.token_id);
+
+    const legacyBody = { session_public_key: cred.publicKey, session_ref: "window-a" };
+    const reMint = await signedPost<{ error: string }>(b, "/approval/token-mint", legacyBody, { cred: op.cred, operator_id: op.id });
+    const reNew = await signedPost<{ error: string }>(
+      b,
+      "/approval/token-mint",
+      { ...legacyBody, renew_only: true },
+      { cred: op.cred, operator_id: op.id }
+    );
+    expect([reMint.status, reNew.status]).toEqual([409, 409]);
+    expect(reMint.body.error).toBe("token is an inbox credential");
+    expect(rowOf(b, first.body.token_id)).toEqual(before);
+
+    const legacyCred = generateCredential();
+    const legacy = await signedPost<Mint>(
+      b,
+      "/approval/token-mint",
+      { session_public_key: legacyCred.publicKey, session_ref: "window-a" },
+      { cred: op.cred, operator_id: op.id }
+    );
+    expect(legacy.status).toBe(200);
+    expect(legacy.body.capabilities).toEqual({ renew_only: true });
+    expect(rowOf(b, legacy.body.token_id)?.inbox_purpose).toBeNull();
+    expect((await mint(b, op, legacyCred, runBlock())).status).toBe(409);
+    expect(rowOf(b, legacy.body.token_id)?.inbox_purpose).toBeNull();
+  });
+
+  test("a mandate copies its scope from a live run parent and never outlives it", async () => {
+    const b = await boot();
+    const op = newOperator();
+    const { rootId, mandates } = await runWithMandates(b, op, RUN_A, "window-a", ["lead"]);
+
+    expect(rowOf(b, mandates[0]!.token_id)).toMatchObject({
+      operator_id: op.id,
+      inbox_purpose: "mandate",
+      run_ref: RUN_A,
+      group_id: "group-a",
+      project_key: DEFAULT_PROJECT_KEY,
+      parent_token_id: rootId,
+      authority: "lead",
+    });
+
+    const short = new Date(Date.now() + 3_600_000).toISOString();
+    const db = openBrokerDb(b.dbPath);
+    db.run("UPDATE approval_session_tokens SET expires_at = ? WHERE token_id = ?", [short, rootId]);
+    db.close();
+    const bounded = await mint(b, op, generateCredential(), mandateBlock(rootId, "supervisor", "caller-2"), {
+      session_ref: "caller-2",
+      ttl_hours: 24,
+    });
+    expect(bounded.status).toBe(200);
+    expect(bounded.body.expires_at).toBe(short);
+  });
+
+  test("an expired Inbox token is never re-issued by a second mint, for a root or for a mandate", async () => {
+    const b = await boot();
+    const op = newOperator();
+    const run = await runWithMandates(b, op, RUN_A, "window-exp", ["lead"]);
+    const mandate = run.mandates[0]!;
+    const expire = (tokenId: string): string => {
+      const past = new Date(Date.now() - 60_000).toISOString();
+      const db = openBrokerDb(b.dbPath);
+      db.run("UPDATE approval_session_tokens SET expires_at = ? WHERE token_id = ?", [past, tokenId]);
+      db.close();
+      return past;
+    };
+
+    const mandatePast = expire(mandate.token_id);
+    const reMandate = await mint(b, op, mandate.cred, mandateBlock(run.rootId, "lead", "window-exp-caller-0"), {
+      session_ref: "window-exp-caller-0",
+    });
+    expect(reMandate.status).toBe(409);
+    expect(rowOf(b, mandate.token_id)?.expires_at, "the expired mandate row did not move").toBe(mandatePast);
+
+    const rootPast = expire(run.rootId);
+    const reRoot = await mint(b, op, run.root, runBlock(RUN_A), { session_ref: "window-exp" });
+    expect(reRoot.status).toBe(409);
+    expect(rowOf(b, run.rootId)?.expires_at, "the expired root row did not move").toBe(rootPast);
+  });
+
+  test("revoking a root and cascading to its mandates is one atomic write, by token_id and by session_ref", async () => {
+    const b = await boot();
+    const op = newOperator();
+    const db = openBrokerDb(b.dbPath);
+    db.run(
+      `CREATE TRIGGER zz_cascade_abort BEFORE UPDATE OF revoked_at ON approval_session_tokens
+       WHEN NEW.inbox_purpose = 'mandate' BEGIN SELECT RAISE(ABORT, 'forced'); END`
+    );
+    try {
+      for (const [ref, run] of [["window-atomic-id", RUN_A], ["window-atomic-ref", RUN_B]] as const) {
+        const built = await runWithMandates(b, op, run, ref, ["lead"]);
+        const filter = ref.endsWith("-id") ? { token_id: built.rootId } : { session_ref: ref };
+        const res = await signedPost(b, "/approval/token-revoke", filter, { cred: op.cred, operator_id: op.id });
+        expect({ ref, status: res.status }).toEqual({ ref, status: 500 });
+        expect({ ref, rootRevoked: rowOf(b, built.rootId)?.revoked_at }).toEqual({ ref, rootRevoked: null });
+        expect({ ref, mandateRevoked: rowOf(b, built.mandates[0]!.token_id)?.revoked_at }).toEqual({ ref, mandateRevoked: null });
+      }
+    } finally {
+      db.run("DROP TRIGGER zz_cascade_abort");
+      db.close();
+    }
+  });
+
+  test("a mandate mint cannot name its own run or group: the stored row carries the parent's", async () => {
+    const b = await boot();
+    const op = newOperator();
+    const { rootId } = await runWithMandates(b, op, RUN_A, "window-forge", []);
+    const cred = generateCredential();
+    const forged = await mint(
+      b,
+      op,
+      cred,
+      { ...mandateBlock(rootId, "lead", "caller-forge"), run_ref: RUN_B, group_id: "group-forged" },
+      { session_ref: "caller-forge" }
+    );
+
+    expect(forged.status).toBe(200);
+    expect(rowOf(b, forged.body.token_id)).toMatchObject({ run_ref: RUN_A, group_id: "group-a" });
+  });
+
+  test("a mandate renewal keeps its scope, stays bounded by its parent, and dies with it", async () => {
+    const b = await boot();
+    const op = newOperator();
+    const { rootId, mandates } = await runWithMandates(b, op, RUN_A, "window-r", ["lead"]);
+    const mandate = mandates[0]!;
+    const short = new Date(Date.now() + 3_600_000).toISOString();
+    const db = openBrokerDb(b.dbPath);
+    db.run("UPDATE approval_session_tokens SET expires_at = ? WHERE token_id = ?", [short, rootId]);
+    db.close();
+    const renew = (authority: string, caller = "window-r-caller-0") =>
+      mint(b, op, mandate.cred, mandateBlock(rootId, authority, caller), {
+        session_ref: "window-r-caller-0",
+        renew_only: true,
+        ttl_hours: 24,
+      });
+
+    const same = await renew("lead");
+    expect(same.status).toBe(200);
+    expect(same.body.expires_at, "a renewed mandate never outlives its parent").toBe(short);
+
+    expect((await renew("supervisor")).status, "authority is part of the scope").toBe(409);
+    expect((await renew("lead", "another-caller")).status, "caller_ref is part of the scope").toBe(409);
+
+    await signedPost(b, "/approval/token-revoke", { token_id: rootId }, { cred: op.cred, operator_id: op.id });
+    expect((await renew("lead")).status, "revoked with its parent").toBe(409);
+  });
+
+  test("a mandate refuses a parent that is a mandate, revoked, expired, foreign or in another project", async () => {
+    const b = await boot();
+    const op = newOperator();
+    const other = newOperator();
+    const { rootId, mandates } = await runWithMandates(b, op, RUN_A, "window-a", ["lead"]);
+    const attempt = (parent: string, over: Record<string, unknown> = {}, as: Operator = op) =>
+      mint(b, as, generateCredential(), mandateBlock(parent, "author", `c-${Math.random()}`), { session_ref: "caller-x", ...over });
+
+    expect((await attempt(mandates[0]!.token_id)).status, "no mandate chain").toBe(409);
+    expect((await attempt("no-such-token")).status, "unknown parent").toBe(409);
+    expect((await attempt(rootId, {}, other)).status, "another operator's parent").toBe(409);
+    expect((await attempt(rootId, { project_key: "github.com/other/repo" })).status, "another project").toBe(409);
+
+    const expired = await runWithMandates(b, op, RUN_B, "window-b", []);
+    const db = openBrokerDb(b.dbPath);
+    db.run("UPDATE approval_session_tokens SET expires_at = ? WHERE token_id = ?", [new Date(Date.now() - 1000).toISOString(), expired.rootId]);
+    db.close();
+    expect((await attempt(expired.rootId)).status, "expired parent").toBe(409);
+
+    const revoked = await runWithMandates(b, op, RUN_B, "window-c", []);
+    await signedPost(b, "/approval/token-revoke", { token_id: revoked.rootId }, { cred: op.cred, operator_id: op.id });
+    expect((await attempt(revoked.rootId)).status, "revoked parent").toBe(409);
+  });
+
+  test("a mandate token cannot ask for anything: no add, and no row is created", async () => {
+    const b = await boot();
+    const op = newOperator();
+    const { root, rootId, mandates } = await runWithMandates(b, op, RUN_A, "window-a", ["lead"]);
+    const count = (): number => {
+      const db = openBrokerDb(b.dbPath, { readonly: true });
+      try {
+        return (db.query("SELECT count(*) AS n FROM pending_approvals WHERE operator_id = ?").get(op.id) as { n: number }).n;
+      } finally {
+        db.close();
+      }
+    };
+    const asking = { kind: "permission", title: "Bash", question: "Allow rm?" };
+
+    const asMandate = await signedPost<{ error: string }>(b, "/approval/add", asking, {
+      cred: mandates[0]!.cred,
+      operator_id: op.id,
+      kind: "session",
+      token_id: mandates[0]!.token_id,
+    });
+    expect(asMandate.status).toBe(403);
+    expect(asMandate.body.error).toBe("credential may not add");
+    expect(count()).toBe(0);
+
+    const asRoot = await signedPost<{ approval: Approval }>(b, "/approval/add", asking, {
+      cred: root,
+      operator_id: op.id,
+      kind: "session",
+      token_id: rootId,
+    });
+    expect(asRoot.status).toBe(200);
+    expect(count()).toBe(1);
+  });
+
+  test("revoking by session_ref or token_id also revokes the mandates, whatever their own session_ref", async () => {
+    const b = await boot();
+    const op = newOperator();
+    const a = await runWithMandates(b, op, RUN_A, "window-a", ["lead", "author"]);
+    const other = await runWithMandates(b, op, RUN_B, "window-b", ["supervisor"]);
+
+    const bySession = await signedPost<{ revoked: number }>(b, "/approval/token-revoke", { session_ref: "window-a" }, { cred: op.cred, operator_id: op.id });
+    expect(bySession.body.revoked).toBe(3);
+    for (const id of [a.rootId, ...a.mandates.map((m) => m.token_id)]) {
+      expect({ id, revoked: rowOf(b, id)?.revoked_at !== null }).toEqual({ id, revoked: true });
+    }
+    for (const id of [other.rootId, other.mandates[0]!.token_id]) {
+      expect({ id, revoked: rowOf(b, id)?.revoked_at !== null }).toEqual({ id, revoked: false });
+    }
+    const stillUsable = await signedPost(b, "/approval/add", { kind: "permission", title: "t", question: "q" }, {
+      cred: other.root,
+      operator_id: op.id,
+      kind: "session",
+      token_id: other.rootId,
+    });
+    expect(stillUsable.status).toBe(200);
+
+    const byId = await signedPost<{ revoked: number }>(b, "/approval/token-revoke", { token_id: other.rootId }, { cred: op.cred, operator_id: op.id });
+    expect(byId.body.revoked).toBe(2);
+    expect(rowOf(b, other.mandates[0]!.token_id)?.revoked_at).not.toBeNull();
+  });
+
+  test("a revoked mandate stays revoked: a re-mint cannot resurrect it", async () => {
+    const b = await boot();
+    const op = newOperator();
+    const run = await runWithMandates(b, op, RUN_A, "window-a", ["lead"]);
+    await signedPost(b, "/approval/token-revoke", { token_id: run.rootId }, { cred: op.cred, operator_id: op.id });
+    const again = await mint(b, op, run.mandates[0]!.cred, mandateBlock(run.rootId, "lead", "window-a-caller-0"), { session_ref: "window-a-caller-0" });
+    expect(again.status).toBe(409);
+  });
+
+  test("the public approval projection exposes no private column, known or unknown", async () => {
+    const b = await boot();
+    const op = newOperator();
+    const approval = await addApproval(b, op);
+    const db = openBrokerDb(b.dbPath);
+    const columns = db.query("PRAGMA table_info(pending_approvals)").all() as Array<{ name: string }>;
+    if (!columns.some((c) => c.name === "zz_private_canary")) {
+      db.run("ALTER TABLE pending_approvals ADD COLUMN zz_private_canary TEXT");
+    }
+    db.run(
+      `UPDATE pending_approvals
+          SET reply_token = 'CANARY-reply-token', reply_group = 'CANARY-reply-group',
+              producer_secret_hash = 'CANARY-producer-hash', zz_private_canary = 'CANARY-unknown-column'
+        WHERE id = ?`,
+      [approval.id]
+    );
+    db.close();
+
+    const res = await signedPost<{ approvals: Approval[] }>(b, "/approval/list", approvalListBody(DEFAULT_PROJECT_KEY), {
+      cred: op.cred,
+      operator_id: op.id,
+    });
+    expect(res.status).toBe(200);
+    const row = res.body.approvals.find((a) => a.id === approval.id);
+    expect(row?.id, "the row must be in the response for the check to mean anything").toBe(approval.id);
+    expect(JSON.stringify(res.body)).not.toContain("CANARY-");
   });
 });
