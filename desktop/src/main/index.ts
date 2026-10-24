@@ -269,6 +269,8 @@ import {
   SUPERVISOR_BRIEFING,
   SUPERVISOR_NAME,
   deckLeadScriptPath,
+  shouldAutoSpawnSupervisor,
+  type SupervisorTrigger,
   writeSupervisorMcpConfig,
   writeSupervisorSystemPrompt,
   writeTeamLeadMcpConfig
@@ -527,6 +529,11 @@ const setConfig = (patch: Partial<AppConfig>): AppConfig => {
   if (patch.normalizeTerminalCopy !== undefined && typeof patch.normalizeTerminalCopy !== 'boolean') {
     reportError('config', `rejected config:set normalizeTerminalCopy (${String(patch.normalizeTerminalCopy).slice(0, 40)})`)
     const { normalizeTerminalCopy: _ignored, ...rest } = patch
+    patch = rest
+  }
+  if (patch.startSupervisorOnLaunch !== undefined && typeof patch.startSupervisorOnLaunch !== 'boolean') {
+    reportError('config', `rejected config:set startSupervisorOnLaunch (${String(patch.startSupervisorOnLaunch).slice(0, 40)})`)
+    const { startSupervisorOnLaunch: _ignored, ...rest } = patch
     patch = rest
   }
   patch = sanitizeLinkPatch(patch, (message) => reportError('config', message))
@@ -3191,10 +3198,16 @@ const ensureControlServer = async (): Promise<DeckControlServer> => {
  * CONSTANT (never operator/repo-configurable -- PLAN C8 security decision:
  * a customizable harness could silently repurpose a session that pilots the
  * app; no --agent profile for the supervisor for the same reason).
+ * Resolves null, spawning nothing, for an 'auto' trigger while no supervisor
+ * is live and startSupervisorOnLaunch is off.
  */
-const ensureSupervisor = async (): Promise<SessionRuntime> => {
+const ensureSupervisor = async (trigger: SupervisorTrigger = 'manual'): Promise<SessionRuntime | null> => {
   const existing = service.list().find((s) => s.supervisor)
   if (existing && existing.status !== 'exited') return existing
+  if (!shouldAutoSpawnSupervisor(trigger, getConfig())) {
+    journal.add('session', 'supervisor auto-start skipped: "Start the supervisor at launch" is off in Settings')
+    return null
+  }
   if (existing) return restartSessionGated(service, existing.id, { sandboxGate, warmSandboxTranscripts, modLaunch })
 
   const deckPluginDir = getDeckPluginDir()

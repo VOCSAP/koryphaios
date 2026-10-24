@@ -15,6 +15,29 @@ import { dirname, join } from 'node:path'
 /** Default tile name of the supervisor session. */
 export const SUPERVISOR_NAME = 'supervisor'
 
+/** Why the supervisor is being started: the Home view's first visit, or an explicit operator gesture. */
+export type SupervisorTrigger = 'auto' | 'manual'
+
+/**
+ * The trigger crosses IPC from the renderer and from a paired companion, so
+ * anything but the exact string 'auto' is a manual start: an unknown value
+ * must never be the one that gets suppressed by the setting.
+ */
+export function parseSupervisorTrigger(raw: unknown): SupervisorTrigger {
+  return raw === 'auto' ? 'auto' : 'manual'
+}
+
+/**
+ * A manual start always proceeds; only the automatic one obeys the setting,
+ * and only an explicit `false` suppresses it (the default is to spawn).
+ */
+export function shouldAutoSpawnSupervisor(
+  trigger: SupervisorTrigger,
+  config: { startSupervisorOnLaunch?: unknown }
+): boolean {
+  return trigger === 'manual' || config.startSupervisorOnLaunch !== false
+}
+
 // SECURITY: the supervisor's role definition is NOT operator- or
 // repo-configurable, by design. It pilots the app (deck_* tools), so a
 // customizable harness (a supervisor.md picked up from the repo, or an agent

@@ -23,7 +23,9 @@ import {
   buildSupervisorSystemPrompt,
   writeSupervisorSystemPrompt,
   SUPERVISOR_BRIEFING,
-  SUPERVISOR_SYSTEM_PROMPT
+  SUPERVISOR_SYSTEM_PROMPT,
+  parseSupervisorTrigger,
+  shouldAutoSpawnSupervisor
 } from "../desktop/src/main/supervisor.ts";
 import type { CreateSessionInput } from "../desktop/src/shared/types.ts";
 import type { DeckControlSession as SessionRuntime } from "../desktop/src/main/deck-control.ts";
@@ -1604,6 +1606,28 @@ test("deck_apply_template: hasLead decided ONCE before the batch -- true strips 
   expect(deps2.spawnOpts.map((o) => o.hasLead)).toEqual([false, false]);
   expect(withoutLead.sessions.find((s) => s.name === "a")!.lead).toBe(true);
   expect(withoutLead.sessions.find((s) => s.name === "b")!.lead).toBeFalsy();
+});
+
+// ----- supervisor start trigger -----
+
+test("an automatic supervisor start is skipped only when startSupervisorOnLaunch is false", () => {
+  expect(shouldAutoSpawnSupervisor("auto", { startSupervisorOnLaunch: false })).toBe(false);
+  expect(shouldAutoSpawnSupervisor("auto", { startSupervisorOnLaunch: true })).toBe(true);
+  expect(shouldAutoSpawnSupervisor("auto", {}), "a config without the field still spawns the supervisor").toBe(true);
+});
+
+test("a manual supervisor start proceeds whatever startSupervisorOnLaunch says", () => {
+  expect(shouldAutoSpawnSupervisor("manual", { startSupervisorOnLaunch: false })).toBe(true);
+  expect(shouldAutoSpawnSupervisor("manual", { startSupervisorOnLaunch: true })).toBe(true);
+});
+
+test("only the exact string 'auto' from IPC is an automatic start; anything else is manual", () => {
+  expect(parseSupervisorTrigger("auto")).toBe("auto");
+  for (const raw of [undefined, null, "manual", "AUTO", " auto", "auto ", 1, true, {}, ["auto"], new String("auto")]) {
+    expect(parseSupervisorTrigger(raw)).toBe("manual");
+  }
+  // End to end: a garbage trigger cannot be the one the setting suppresses.
+  expect(shouldAutoSpawnSupervisor(parseSupervisorTrigger("bogus"), { startSupervisorOnLaunch: false })).toBe(true);
 });
 
 // ----- supervisor mcp-config file -----

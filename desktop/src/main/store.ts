@@ -78,6 +78,9 @@ export function loadConfig(): AppConfig {
   if (!SUPERVISOR_SPAWN_MODES.includes(cfg.supervisorSpawnMode)) {
     cfg.supervisorSpawnMode = 'hands-free'
   }
+  if (typeof cfg.startSupervisorOnLaunch !== 'boolean') {
+    cfg.startSupervisorOnLaunch = DEFAULT_CONFIG.startSupervisorOnLaunch
+  }
   const agentSpawnCap = sanitizeSpawnCap(raw.agentSpawnCap)
   if (agentSpawnCap === null && raw.agentSpawnCap !== undefined) {
     reportError('store', `invalid agentSpawnCap (${String(raw.agentSpawnCap).slice(0, 40)}) in config.json, using ${SPAWN_CAP}`)

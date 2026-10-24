@@ -39,6 +39,7 @@ export const DEFAULT_CONFIG: AppConfig = {
   liveStatusLine: true,
   mobileApprovals: false,
   supervisorSpawnMode: 'hands-free',
+  startSupervisorOnLaunch: true,
   agentSpawnCap: SPAWN_CAP,
   linkOpenExtensions: [...DEFAULT_LINK_EXTENSIONS],
   linkOpenExclusions: [...DEFAULT_LINK_EXCLUSIONS],

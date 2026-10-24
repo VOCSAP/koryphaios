@@ -409,6 +409,8 @@ export interface AppConfig {
   mobileApprovals: boolean
   /** Confirmation level for supervisor-initiated spawns (PLAN TS4). */
   supervisorSpawnMode: SupervisorSpawnMode
+  /** Spawn the Home supervisor on the first visit of a run; off leaves only the manual start button. */
+  startSupervisorOnLaunch: boolean
   /** Live-session ceiling for agent-initiated spawns (deck-control); operator gestures are not capped. */
   agentSpawnCap: number
   /** File types Ctrl/Cmd+click on a terminal link may launch (dot-prefixed, lower case). */
@@ -2344,7 +2346,9 @@ export interface DeckApi {
   clearReview(): Promise<void>
 
   // supervisor (PLAN C5): spawn (or return) the Home supervisor session.
-  ensureSupervisor(): Promise<SessionRuntime>
+  // 'auto' is the Home view's first visit and resolves null when the operator
+  // turned startSupervisorOnLaunch off; an absent trigger is a manual start.
+  ensureSupervisor(trigger?: 'auto' | 'manual'): Promise<SessionRuntime | null>
 
   // help assistant (PLAN C9): one throwaway `claude -p` question, view-aware.
   // `selection` (PLAN GX7): optional Files-view snippet, injected into the

@@ -3,10 +3,11 @@ import { useDeck } from '../store'
 import { useT } from '../i18n'
 import { TerminalTile } from './TerminalTile'
 
-// Home view (PLAN C5): the SUPERVISOR session, full width. Spawned lazily on
-// the first visit (never at app start); if the operator closes it, a manual
-// start button is shown instead of auto-respawning in a loop. The view stays
-// mounted in App (display:none) so the xterm scrollback survives view switches.
+// Home view: the SUPERVISOR session, full width. The first visit asks main for
+// an 'auto' start, which main skips when startSupervisorOnLaunch is off; if the
+// operator closes it, a manual start button is shown instead of auto-respawning
+// in a loop. The view stays mounted in App (display:none) so the xterm
+// scrollback survives view switches.
 
 export function HomeView({ active }: { active: boolean }): React.JSX.Element {
   const t = useT()
@@ -19,10 +20,10 @@ export function HomeView({ active }: { active: boolean }): React.JSX.Element {
   // it on purpose -> show the start button instead.
   const autoSpawned = useRef(false)
 
-  const start = (): void => {
+  const start = (trigger: 'auto' | 'manual'): void => {
     setPending(true)
     setError(null)
-    window.api.ensureSupervisor().then(
+    window.api.ensureSupervisor(trigger).then(
       () => setPending(false),
       (e) => {
         setPending(false)
@@ -34,7 +35,7 @@ export function HomeView({ active }: { active: boolean }): React.JSX.Element {
   useEffect(() => {
     if (!active || supervisor || pending || autoSpawned.current) return
     autoSpawned.current = true
-    start()
+    start('auto')
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active, supervisor, pending])
 
@@ -50,7 +51,7 @@ export function HomeView({ active }: { active: boolean }): React.JSX.Element {
             <>
               {error && <p className="home-error">{t('home.error', { error })}</p>}
               <p>{t('home.body')}</p>
-              <button className="primary" onClick={start}>
+              <button className="primary" onClick={() => start('manual')}>
                 {t('home.start')}
               </button>
             </>

@@ -275,6 +275,8 @@
   "settings.enabledMods": "Mods choregos",
   "settings.enabledModsHelp": "Les mods activés se chargent dans les nouvelles sessions uniquement.",
   "settings.enabledModGlobalHelp": "Ce plugin est actif dans vos réglages Claude Code globaux.",
+  "settings.startSupervisorOnLaunch": "Lancer le superviseur au démarrage",
+  "settings.startSupervisorOnLaunchHelp": "Désactivé : la vue Home affiche le bouton « Démarrer le superviseur » à la place. Prend effet au prochain démarrage.",
   "settings.spawnMode": "Spawns d'agents du superviseur",
   "settings.spawnModeHandsFree": "Mains libres",
   "settings.spawnModeHandsFreeHelp": "Le superviseur lance les agents que tu lui demandes, sans confirmation de l'app. Chaque lancement reste visible (tuile + journal).",

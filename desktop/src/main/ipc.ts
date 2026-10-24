@@ -41,6 +41,7 @@ import { buildAuthCommand, SANDBOX_AUTH_PTY_ID, SANDBOX_BUILD_PTY_ID } from './s
 import { APP_STATE_SUBDIR } from './migrate-data-dir'
 import { buildHelpPrompt, buildHelpSystemPrompt, sanitizeHelpSelection } from './help-assistant'
 import { buildWandPrompt, WAND_SYSTEM_PROMPT, type WandDraft } from './context-wand'
+import { parseSupervisorTrigger, type SupervisorTrigger } from './supervisor'
 import { runUtilityInference, type UtilityDeps } from './utility-inference'
 import { markGraphDraftOpened, peersConfigPath, resolveBrokerEndpoint } from './broker-client'
 import { readPeersConfigSummary, writeOfflineReplica } from './peers-config-store'
@@ -181,7 +182,7 @@ interface IpcDeps {
   /** Broadcast a free-text operator message to the active group; returns peer count. */
   announce: (text: string) => Promise<number>
   /** Spawn (or return) the Home supervisor session (PLAN C5). */
-  ensureSupervisor: () => Promise<SessionRuntime>
+  ensureSupervisor: (trigger: SupervisorTrigger) => Promise<SessionRuntime | null>
   /** Activity journal (PLAN C14), owned by index.ts. */
   journal: Journal
   /** Dispatch the first queued roadmap item to the team-lead (PLAN C15). */
@@ -1219,7 +1220,7 @@ export function registerIpc({
   })
 
   // ----- supervisor (PLAN C5) -----
-  regHandle('supervisor:ensure', () => ensureSupervisor())
+  regHandle('supervisor:ensure', (_e, trigger: unknown) => ensureSupervisor(parseSupervisorTrigger(trigger)))
 
   // ----- plan import (PLAN C7) -----
   // File picker + one-shot import agent (code-constant prompt). Returns true

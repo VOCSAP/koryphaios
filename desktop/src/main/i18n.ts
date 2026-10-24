@@ -393,6 +393,9 @@ export const EN_DEFAULTS: Record<string, string> = {
   'settings.enabledMods': 'Choregos mods',
   'settings.enabledModsHelp': 'Enabled mods load in new sessions only.',
   'settings.enabledModGlobalHelp': 'This plugin is active in your global Claude Code settings.',
+  'settings.startSupervisorOnLaunch': 'Start the supervisor at launch',
+  'settings.startSupervisorOnLaunchHelp':
+    'Off: the Home view shows the "Start the supervisor" button instead. Takes effect at the next launch.',
   'settings.spawnMode': 'Supervisor agent spawns',
   'settings.spawnModeHandsFree': 'Hands-free',
   'settings.spawnModeHandsFreeHelp':

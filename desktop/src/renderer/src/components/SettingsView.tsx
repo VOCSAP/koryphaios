@@ -324,6 +324,16 @@ export function SettingsView(): React.JSX.Element {
               </label>
               <small className="field-check-help">{t('settings.pickContextPromptHint')}</small>
 
+              <label className="field field-check">
+                <input
+                  type="checkbox"
+                  checked={config.startSupervisorOnLaunch !== false}
+                  onChange={(e) => set('startSupervisorOnLaunch', e.target.checked)}
+                />
+                <span>{t('settings.startSupervisorOnLaunch')}</span>
+              </label>
+              <small className="field-check-help">{t('settings.startSupervisorOnLaunchHelp')}</small>
+
               <div className="field">
                 <span>{t('settings.spawnMode')}</span>
               </div>

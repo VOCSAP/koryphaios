@@ -420,7 +420,7 @@ test("deck-control's restartSession respawns through restartSessionGated", () =>
 
 test("no spawn path calls service.restart( outside ensureSupervisor (the one sandbox-exempt tile)", () => {
   const supervisorBody = indexBracedBody(
-    /const ensureSupervisor = async \(\): Promise<SessionRuntime> => \{/,
+    /const ensureSupervisor = async \([^)]*\): Promise<SessionRuntime \| null> => \{/,
     "ensureSupervisor"
   );
   expect(count(IPC_SRC, "service.restart("), "ipc.ts restarts a tile without the sandbox gate").toBe(0);

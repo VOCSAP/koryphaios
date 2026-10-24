@@ -218,7 +218,7 @@ const api: DeckApi = {
   loadReview: () => ipcRenderer.invoke('browser:review-load'),
   saveReview: (state) => ipcRenderer.invoke('browser:review-save', state),
   clearReview: () => ipcRenderer.invoke('browser:review-clear'),
-  ensureSupervisor: () => ipcRenderer.invoke('supervisor:ensure'),
+  ensureSupervisor: (trigger) => ipcRenderer.invoke('supervisor:ensure', trigger),
   askHelp: (question: string, view: DeckView, transcript: HelpExchange[], selection?: HelpSelection) =>
     ipcRenderer.invoke('help:ask', question, view, transcript, selection),
   askDigest: () => ipcRenderer.invoke('help:digest'),
