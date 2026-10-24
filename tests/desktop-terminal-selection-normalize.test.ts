@@ -235,6 +235,32 @@ test('laisse intactes deux rangées partielles si la rangée complète ne se ter
   expect(stripBoxFrame(captureSelection, captureCols, undefined, unframedFull)).toEqual({ text: captureSelection, frameWidth: 0 })
 })
 
+test('retire le cadre quand xterm joint deux rangées encadrées consécutives', () => {
+  const cols = 60
+  const first = framedRow(`  echo '${'a'.repeat(45)}`, cols - 4)
+  const middle = framedRow(`  ${'b'.repeat(51)}`, cols - 4)
+  const last = framedRow(`  ${'c'.repeat(51)}'`, cols - 4)
+  const selection = `${first.slice(first.indexOf('echo'))}${middle}\n${last.slice(0, last.lastIndexOf("'") + 1)}`
+
+  expect(normalizeTerminalSelection(selection, cols, { requireAgentIndent: true })).toBe(`echo '${'a'.repeat(45)} ${'b'.repeat(51)} ${'c'.repeat(51)}'`)
+})
+
+test('laisse intact un texte non encadré dont deux fragments sont joints', () => {
+  const text = `echo '${'a'.repeat(45)} ${boxVertical}${boxVertical} ${'b'.repeat(51)}\n${boxVertical}   ${'c'.repeat(51)}'`
+
+  expect(stripBoxFrame(text, 60)).toEqual({ text, frameWidth: 0 })
+})
+
+test('retire le cadre quand xterm joint trois rangées encadrées consécutives', () => {
+  const cols = 60
+  const first = framedRow(`  echo '${'a'.repeat(45)}`, cols - 4)
+  const middle = framedRow(`  ${'b'.repeat(51)}`, cols - 4)
+  const last = framedRow(`  ${'c'.repeat(51)}'`, cols - 4)
+  const selection = `${first.slice(first.indexOf('echo'))}${middle}${last.slice(0, last.lastIndexOf("'") + 1)}`
+
+  expect(normalizeTerminalSelection(selection, cols, { requireAgentIndent: true })).toBe(`echo '${'a'.repeat(45)} ${'b'.repeat(51)} ${'c'.repeat(51)}'`)
+})
+
 test('compare la bordure droite CJK en cellules terminal (mutation: row.length)', () => {
   const ascii = `${boxVertical} ${'  aa'.padEnd(10)} ${boxVertical}`
   const cjk = `${boxVertical}   界${' '.repeat(6)} ${boxVertical}`

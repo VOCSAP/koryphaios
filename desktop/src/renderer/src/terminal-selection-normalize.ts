@@ -140,7 +140,7 @@ export function stripBoxFrame(
 ): { text: string; frameWidth: number } {
   if (!Number.isFinite(width) || !Number.isInteger(width) || width <= 0) return { text, frameWidth: 0 }
 
-  const rows = text.split('\n')
+  const rows = text.replaceAll(`${BOX_RIGHT}${BOX_LEFT}`, `${BOX_RIGHT}\n${BOX_LEFT}`).split('\n')
   const hasFrame = rows.every((row, index) => (
     (index === 0 || row.startsWith(BOX_LEFT)) &&
     (index === rows.length - 1 || row.endsWith(BOX_RIGHT))
