@@ -208,6 +208,33 @@ test('refuse les largeurs hostiles', () => {
   }
 })
 
+const captureCols = 120
+const captureCommand = `echo "prosopon copy test: ${'x'.repeat(79)} oscar`
+const captureContinuation = 'papa quebec zulu end"'
+const captureFirstRowFull = framedRow(`  ${captureCommand}`, captureCols - 4)
+const captureSelection = `${captureFirstRowFull.slice(captureFirstRowFull.indexOf('echo'))}\n${boxVertical}   ${captureContinuation}`
+
+test('retire le cadre de deux rangées partielles quand la rangée d’écran complète prouve la bordure', () => {
+  expect(stripBoxFrame(captureSelection, captureCols), 'sans la rangée complète, rien ne prouve la colonne de la bordure').toEqual({ text: captureSelection, frameWidth: 0 })
+  expect(normalizeTerminalSelection(captureSelection, captureCols, { requireAgentIndent: true, firstRowFull: captureFirstRowFull }))
+    .toBe(`${captureCommand} ${captureContinuation}`)
+})
+
+test('laisse intactes deux rangées partielles si la bordure de la rangée complète n’est pas à width - 1', () => {
+  const misplacedFull = framedRow(`  ${captureCommand}`, captureCols - 6)
+  const selection = `${misplacedFull.slice(misplacedFull.indexOf('echo'))}\n${boxVertical}   ${captureContinuation}`
+
+  expect(stripBoxFrame(selection, captureCols, undefined, misplacedFull)).toEqual({ text: selection, frameWidth: 0 })
+})
+
+test('laisse intactes deux rangées partielles si la rangée complète ne se termine pas par la première rangée sélectionnée ou n’est pas encadrée', () => {
+  const otherFull = framedRow('  ls -la', captureCols - 4)
+  const unframedFull = `  ${captureFirstRowFull.slice(2)}`
+
+  expect(stripBoxFrame(captureSelection, captureCols, undefined, otherFull)).toEqual({ text: captureSelection, frameWidth: 0 })
+  expect(stripBoxFrame(captureSelection, captureCols, undefined, unframedFull)).toEqual({ text: captureSelection, frameWidth: 0 })
+})
+
 test('compare la bordure droite CJK en cellules terminal (mutation: row.length)', () => {
   const ascii = `${boxVertical} ${'  aa'.padEnd(10)} ${boxVertical}`
   const cjk = `${boxVertical}   界${' '.repeat(6)} ${boxVertical}`

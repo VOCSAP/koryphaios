@@ -34,6 +34,7 @@ type StringWidth = (text: string) => number
 interface NormalizeOptions {
   requireAgentIndent?: boolean
   stringWidth?: StringWidth
+  firstRowFull?: string
 }
 
 function leadingSpaces(text: string): number {
@@ -122,7 +123,21 @@ function hasAgentIndent(text: string): boolean {
   return indent >= AGENT_INDENT
 }
 
-export function stripBoxFrame(text: string, width: number, stringWidth: StringWidth = fallbackStringWidth): { text: string; frameWidth: number } {
+function isCompleteFrameRow(row: string): boolean {
+  return row.startsWith(BOX_LEFT) && row.endsWith(BOX_RIGHT)
+}
+
+/**
+ * `firstRowFull` is the whole screen row holding the selection's first line:
+ * a partial first row does not say at which column it starts, so only that
+ * row can prove its right border when the selection has no complete row.
+ */
+export function stripBoxFrame(
+  text: string,
+  width: number,
+  stringWidth: StringWidth = fallbackStringWidth,
+  firstRowFull?: string
+): { text: string; frameWidth: number } {
   if (!Number.isFinite(width) || !Number.isInteger(width) || width <= 0) return { text, frameWidth: 0 }
 
   const rows = text.split('\n')
@@ -132,10 +147,15 @@ export function stripBoxFrame(text: string, width: number, stringWidth: StringWi
   ))
   if (!hasFrame) return { text, frameWidth: 0 }
 
-  const completeRows = rows.filter((row) => row.startsWith(BOX_LEFT) && row.endsWith(BOX_RIGHT))
-  if (completeRows.length === 0) return { text, frameWidth: 0 }
+  const completeRows = rows.filter(isCompleteFrameRow)
+  const verifiedRows = completeRows.length > 0
+    ? completeRows
+    : firstRowFull !== undefined && isCompleteFrameRow(firstRowFull) && firstRowFull.endsWith(rows[0]!)
+      ? [firstRowFull]
+      : []
+  if (verifiedRows.length === 0) return { text, frameWidth: 0 }
 
-  const rightColumns = completeRows.map((row) => stringWidth(row) - stringWidth(BOX_VERTICAL))
+  const rightColumns = verifiedRows.map((row) => stringWidth(row) - stringWidth(BOX_VERTICAL))
   const expectedRightColumn = width - 1
   if (!rightColumns.every((column) => column === expectedRightColumn)) return { text, frameWidth: 0 }
 
@@ -148,7 +168,7 @@ export function stripBoxFrame(text: string, width: number, stringWidth: StringWi
 }
 
 export function normalizeTerminalSelection(text: string, width: number, options: NormalizeOptions = {}): string {
-  const frame = stripBoxFrame(text, width, options.stringWidth ?? fallbackStringWidth)
+  const frame = stripBoxFrame(text, width, options.stringWidth ?? fallbackStringWidth, options.firstRowFull)
   text = frame.text
   width -= frame.frameWidth
   let lines = text.split('\n').map((line) => line.trimEnd())

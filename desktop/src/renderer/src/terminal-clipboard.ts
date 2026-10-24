@@ -15,6 +15,12 @@ function terminalStringWidth(term: Terminal): StringWidth | undefined {
     : undefined
 }
 
+function selectionFirstRow(term: Terminal): string | undefined {
+  const start = term.getSelectionPosition?.()?.start
+  if (!start) return undefined
+  return term.buffer?.active.getLine(start.y)?.translateToString(true)
+}
+
 function reportClipboardFailure(action: 'copy' | 'paste'): void {
   const message = `clipboard ${action} failed`
   window.api.reportError('terminal', message)
@@ -43,7 +49,8 @@ export async function copySelection(term: Terminal): Promise<CopyResult> {
       ? selection
       : normalizeTerminalSelection(selection, term.cols, {
           requireAgentIndent: true,
-          stringWidth: terminalStringWidth(term)
+          stringWidth: terminalStringWidth(term),
+          firstRowFull: selectionFirstRow(term)
         })
     await navigator.clipboard.writeText(text)
     if (text !== selection) {

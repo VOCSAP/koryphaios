@@ -41,7 +41,11 @@ function terminal(
   mouseTrackingMode: string,
   selection = "",
   clipboard: { writeText?: (text: string) => Promise<void>; readText?: () => Promise<string> } = {},
-  options: { cols?: number; unicodeService?: { getStringCellWidth(text: string): number } } = {}
+  options: {
+    cols?: number;
+    unicodeService?: { getStringCellWidth(text: string): number };
+    screenRow?: { y: number; text: string };
+  } = {}
 ): {
   term: Terminal;
   cleared: string[];
@@ -71,6 +75,16 @@ function terminal(
       _core: options.unicodeService ? { unicodeService: options.unicodeService } : undefined,
       modes: { mouseTrackingMode },
       getSelection: () => selection,
+      ...(options.screenRow ? {
+        getSelectionPosition: () => ({ start: { x: 4, y: options.screenRow!.y }, end: { x: 25, y: options.screenRow!.y + 1 } }),
+        buffer: {
+          active: {
+            getLine: (y: number) => y === options.screenRow!.y
+              ? { translateToString: (trimRight?: boolean) => (trimRight ? options.screenRow!.text : `${options.screenRow!.text}   `) }
+              : undefined
+          }
+        }
+      } : {}),
       clearSelection: () => cleared.push(selection),
       paste: (text: string) => pasted.push(text)
     } as unknown as Terminal,
@@ -188,6 +202,18 @@ test("copySelection falls back to grapheme width when xterm has no Unicode servi
   await copySelection(term);
 
   expect(written).toEqual([`echo 👩‍💻${"z".repeat(31)}\ny`]);
+});
+
+test("copySelection unframes two partial Prosopon rows from the full first screen row", async () => {
+  const border = String.fromCodePoint(0x2502);
+  const command = `echo "prosopon copy test: ${"x".repeat(79)} oscar`;
+  const fullRow = `${border} ${`  ${command}`.padEnd(116)} ${border}`;
+  const selection = `${fullRow.slice(fullRow.indexOf("echo"))}\n${border}   papa zulu end"`;
+  const { term, written } = terminal("none", selection, {}, { cols: 120, screenRow: { y: 37, text: fullRow } });
+
+  await copySelection(term);
+
+  expect(written).toEqual([`${command} papa zulu end"`]);
 });
 
 test("copySelection undo rewrites the raw selection", async () => {
