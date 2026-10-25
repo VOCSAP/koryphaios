@@ -1236,6 +1236,19 @@ configs MCP par lancement (`supervisor-mcp.json`, `demo-mcp.json`,
 - [ ] **Cloisonner la base du broker par groupe** : refusé (§12) ; ne pas y
       revenir sans en parler à l'opérateur.
 
+### 3.11 Effort des peers piloté par le team-lead (plan, non commencé)
+
+Plan et décisions opérateur : `docs/DESIGN-PEER-EFFORT.md`. Carte roadmap à
+créer avant le lot 1.
+
+- [ ] **Vérifications V1 à V4 sur la machine de l'opérateur** (cache conservé
+      sur abonnement, module chargé dans une tuile avec `turn.step`, rôle du
+      superviseur, effort sur Haiku 5.5) : bloquantes pour les lots 1 à 6.
+- [ ] **Lots 1 à 6** (vocabulaire partagé, broker, `server.ts`, module Kory,
+      options du Deck, consignes du lead), tests d'abord.
+- [ ] **Lot 7** : exposition de l'effort et du modèle effectifs dans
+      `list_peers` ; différé jusqu'à livraison des lots 1 à 6.
+
 ---
 
 ## 4. Maintenance / dette technique
