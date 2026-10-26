@@ -32,13 +32,17 @@ type FrameOptions = {
   user_label?: unknown
   user_color?: unknown
   assistant_color?: unknown
+  tool_results?: unknown
 }
+
+export type ToolResultsMode = 'summary' | 'header' | 'full'
 
 export type FrameConfiguration = {
   userLabel: string
   assistantLabel: string
   userColor: string
   assistantColor: string
+  toolResults: ToolResultsMode
 }
 
 const USER_LABEL_BIDI_CONTROLS = new Set([
@@ -72,6 +76,10 @@ function resolveColor(value: unknown, fallback: string): string {
   return NAMED_COLOR_VALUES.get(value.toLowerCase()) ?? fallback
 }
 
+function resolveToolResultsMode(value: unknown): ToolResultsMode {
+  return value === 'header' || value === 'full' ? value : 'summary'
+}
+
 export function resolveFrameConfiguration(options: FrameOptions): FrameConfiguration {
   const labels = resolveLabels(options.labels)
   return {
@@ -79,6 +87,7 @@ export function resolveFrameConfiguration(options: FrameOptions): FrameConfigura
     assistantLabel: labels.assistant,
     userColor: resolveColor(options.user_color, USER_COLOR),
     assistantColor: resolveColor(options.assistant_color, ASSISTANT_COLOR),
+    toolResults: resolveToolResultsMode(options.tool_results),
   }
 }
 

@@ -191,6 +191,80 @@ function dimToolHeader(
   )
 }
 
+const TOOL_RESULT_PREFIX = `${String.fromCodePoint(0x23bf)} `
+const MAX_TOOL_RESULT_SUMMARY_LENGTH = 64
+const MAX_EDIT_PATCH_LINES = 10_000
+
+type ToolResultOutput = Record<string, unknown>
+
+function stringOutputField(output: unknown, field: string): string | undefined {
+  if (typeof output !== 'object' || output === null) return undefined
+  const value = (output as ToolResultOutput)[field]
+  return typeof value === 'string' ? value : undefined
+}
+
+function lineCount(value: string): number {
+  return value === '' ? 0 : value.split('\n').length
+}
+
+function lastPrintableLine(value: string): string {
+  const tail = value.slice(-MAX_TOOL_RESULT_SUMMARY_LENGTH)
+  const line = tail.slice(tail.lastIndexOf('\n') + 1)
+  let printable = ''
+  for (let index = 0; index < line.length && printable.length < MAX_TOOL_RESULT_SUMMARY_LENGTH; index += 1) {
+    const code = line.charCodeAt(index)
+    if (code >= 0x20 && code <= 0x7e) printable += line[index]
+  }
+  return printable
+}
+
+function editPatchSummary(output: unknown): string | undefined {
+  if (typeof output !== 'object' || output === null) return undefined
+  const structuredPatch = (output as ToolResultOutput).structuredPatch
+  if (!Array.isArray(structuredPatch)) return undefined
+  let added = 0
+  let removed = 0
+  let total = 0
+  for (const hunk of structuredPatch) {
+    if (typeof hunk !== 'object' || hunk === null) return undefined
+    const lines = (hunk as ToolResultOutput).lines
+    if (!Array.isArray(lines)) return undefined
+    for (const line of lines) {
+      if (typeof line !== 'string' || ++total > MAX_EDIT_PATCH_LINES) return undefined
+      if (line.startsWith('+')) added += 1
+      if (line.startsWith('-')) removed += 1
+    }
+  }
+  return `+${added} -${removed}`
+}
+
+function toolResultSummary(tool: string, output: unknown): string | undefined {
+  if (tool === 'Bash') {
+    const interpretation = stringOutputField(output, 'returnCodeInterpretation')
+    const summary = interpretation === '' || interpretation === undefined
+      ? stringOutputField(output, 'stdout')
+      : interpretation
+    if (summary === undefined) return undefined
+    const detail = lastPrintableLine(summary)
+    return detail === '' ? undefined : detail
+  }
+  if (tool === 'Write') {
+    const content = stringOutputField(output, 'content')
+    return content === undefined ? undefined : `Wrote ${lineCount(content)} lines`
+  }
+  if (tool === 'Edit' || tool === 'Update') return editPatchSummary(output)
+  return undefined
+}
+
+function dimToolResult(
+  $: EngineInterface,
+  e: Parameters<EngineInterface['ui']['resolve']>[0],
+  summary: string,
+) {
+  const { Box, Text } = $.ui.resolve(e)
+  return <Box><Text dimColor wrap="truncate-end">{`${TOOL_RESULT_PREFIX}${summary}`}</Text></Box>
+}
+
 export const register: Register = (on, options) => {
   const configuration = resolveFrameConfiguration(options)
 
@@ -242,6 +316,37 @@ export const register: Register = (on, options) => {
     if (header === undefined) return next(e)
     try {
       return dimToolHeader($, e, header)
+    } catch (error) {
+      stockAfter($, error)
+      return next(e)
+    }
+  })
+
+  on('ui.render', { component: 'ToolResult' }, async ($, e, next) => {
+    const { tool, output, isErrored, isExpanded } = e.props
+    if (
+      e.surface !== 'terminal' ||
+      configuration.toolResults === 'full' ||
+      isErrored ||
+      isExpanded !== false ||
+      !wideEnough(e) ||
+      (tool !== 'Bash' && tool !== 'Write' && tool !== 'Edit' && tool !== 'Update')
+    ) {
+      return next(e)
+    }
+    if (configuration.toolResults === 'header') {
+      try {
+        const { Box } = $.ui.resolve(e)
+        return <Box />
+      } catch (error) {
+        stockAfter($, error)
+        return next(e)
+      }
+    }
+    try {
+      const summary = toolResultSummary(tool, output)
+      if (summary === undefined) return next(e)
+      return dimToolResult($, e, summary)
     } catch (error) {
       stockAfter($, error)
       return next(e)

@@ -26,6 +26,12 @@
       "type": "string",
       "title": "Assistant frame color",
       "description": "A color name (red, orange, yellow, green, cyan, blue, purple, magenta, pink, gray, grey, white, black), a Claude Code theme color, or #rrggbb. Invalid values use claude."
+    },
+    "tool_results": {
+      "type": "string",
+      "title": "Tool result detail",
+      "description": "summary shows a compact result line, header hides it, and full keeps the native result. Any other value uses summary.",
+      "default": "summary"
     }
   }
 }

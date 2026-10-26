@@ -1,6 +1,6 @@
 # Mitos
 
-Mitos turns the bare file paths of an assistant reply into clickable `file:///` links. A path is linked only when it names an existing file, reached through no symbolic link or junction, with an allowed extension. Claude Code then draws the link as a terminal hyperlink (OSC 8), which a terminal that supports them opens on click.
+Mitos turns the file and folder paths of an assistant reply into clickable `file:///` links. A path is linked only when it names an existing file with an allowed extension, or an existing folder without an extension, reached through no symbolic link or junction. Claude Code then draws the link as a terminal hyperlink (OSC 8), which a terminal that supports them opens on click; a folder opens in the file manager.
 
 ## Install
 
@@ -12,9 +12,11 @@ Mitos runs on Claude Code `2.1.303` or any later release, in a terminal. A devel
 
 ## What becomes a link
 
-- Absolute paths (`C:\proj\a.ts`, `/home/me/a.ts`) and paths relative to the session's folder (`src/a.ts`), with an extension and no spaces.
+- Absolute file paths (`C:\proj\a.ts`, `/home/me/a.ts`) and file paths relative to the session's folder (`src/a.ts`), with an extension and no spaces. An extension follows a dot that does not open the name: a file named `md` or `.md` has none and stays as written.
+- Folders without an extension, written absolute (`C:\proj\src`, `/home/me/src`) or ending with a separator (`src/`). A relative name without a final separator (`src`) stays as written. A folder whose name has an extension (`lib.d/`, `Evil.app/`, `Setup.pkg\`) is never linked, since opening a bundle runs it; a leading dot is not an extension, so `.claude/` is linked.
 - A `:line` suffix (`src/a.ts:42`) stays in the label; the link opens the file, not the line.
-- Code blocks, inline code, existing links and URLs are never rewritten.
+- Inline code whose whole content is one such path (`` `src/a.ts` ``) becomes a link as a whole, backticks kept. Inline code holding anything else, such as a command or a path with other words, stays as written.
+- Code blocks, existing links and URLs are never rewritten.
 - At most 32 distinct paths per reply are checked; a reply over 64 KiB is left as written.
 
 ## Allowed extensions
