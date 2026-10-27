@@ -502,7 +502,7 @@ describe('installTerminalLinks over a real xterm buffer', () => {
   })
 
   test('disposing a session terminal removes the link tooltip it is showing', () => {
-    const term = createSessionTerminal({ allowProposedApi: true }, () => {}, {
+    const term = createSessionTerminal({ allowProposedApi: true, windowsPty: undefined }, () => {}, {
       open: async () => ({ ok: true }),
       preview: async () => NO_PREVIEW,
       onRefused() {},

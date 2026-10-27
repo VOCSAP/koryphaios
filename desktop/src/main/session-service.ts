@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events'
 import { randomUUID } from 'node:crypto'
-import { homedir } from 'node:os'
+import { homedir, release } from 'node:os'
 import { existsSync } from 'node:fs'
 import { basename, join } from 'node:path'
 import type {
@@ -84,6 +84,7 @@ import type { JoinAnnounceIntent } from '@shared/announce'
 import { peerToolsEnvValue } from './session-env'
 import { PermissionLeaseRuntime, type PermissionLeaseHandle } from './permission-lease-runtime'
 import { mintDepositCapability } from './deposit-capability'
+import { windowsPtyFor } from '../shared/windows-pty'
 
 type WrapperRemovalSource = 'configured launch command' | 'tile command override' | 'bridged tile'
 
@@ -265,6 +266,7 @@ export class SessionService extends EventEmitter {
   private runtime = new Map<string, RuntimeState>()
   private permissionLeaseHandles = new Map<string, PermissionLeaseHandle>()
   private pty = new PtyManager()
+  private readonly windowsPty = windowsPtyFor(process.platform, release())
   private thinkingDetector = new ThinkingDetector()
   private quotaDetector = new QuotaDetector()
   private attentionDetector = new AttentionDetector({
@@ -1805,7 +1807,8 @@ export class SessionService extends EventEmitter {
       // correction) -- single source of truth, frozen at spawn by startPty.
       // No runtime yet: leans "it's claude" (see isClaudeSession's doc).
       claudeLaunch: r?.claudeLaunch ?? true,
-      liveStatus: r?.liveStatus ?? null
+      liveStatus: r?.liveStatus ?? null,
+      windowsPty: this.windowsPty
     }
   }
 

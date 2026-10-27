@@ -1,4 +1,4 @@
-import { Terminal, type ITerminalInitOnlyOptions, type ITerminalOptions } from '@xterm/xterm'
+import { Terminal, type ITerminalInitOnlyOptions, type ITerminalOptions, type IWindowsPty } from '@xterm/xterm'
 import { installTerminalLinks, type TerminalLinkDeps } from './terminal-links'
 
 export const FOCUS_REPORTING_MODE = 1004
@@ -45,10 +45,11 @@ export function suppressFocusReporting(
 
 /** The only way a session terminal is built, so neither the focus guard nor the link gate can be forgotten at a call site. */
 export function createSessionTerminal(
-  options: ITerminalOptions & ITerminalInitOnlyOptions,
+  options: ITerminalOptions & ITerminalInitOnlyOptions & { windowsPty: IWindowsPty | undefined },
   report: (message: string) => void,
   links: TerminalLinkDeps
 ): Terminal {
+  // ConPTY repaints its own view of the screen, so xterm must not pull scrollback lines into the viewport when rows grow.
   const term = new Terminal(options)
   suppressFocusReporting(term, report)
   // An addon is disposed by term.dispose(), so callers need no second teardown to drop a visible link tooltip.

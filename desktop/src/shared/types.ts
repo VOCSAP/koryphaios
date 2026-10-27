@@ -1,5 +1,7 @@
 // Types shared across the main, preload and renderer processes.
 
+import type { WindowsPtyInfo } from './windows-pty'
+
 export type SessionStatus = 'starting' | 'running' | 'exited'
 
 /** Tile layout mode. '1x1' is a horizontal carousel; the rest are cols x rows grids. */
@@ -157,6 +159,8 @@ export interface SessionRuntime extends SessionDef {
    * Deck statusLine (sandbox, non-claude command). Never persisted.
    */
   liveStatus: SessionLiveStatus | null
+  /** Host PTY backend the terminal must emulate; null off Windows. */
+  windowsPty: WindowsPtyInfo | null
 }
 
 /** One statusLine report, validated main-side before it reaches the renderer. */

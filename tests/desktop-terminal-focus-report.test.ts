@@ -17,7 +17,7 @@ const inertLinks: TerminalLinkDeps = {
 
 function guardedTerminal(): { term: Terminal; sent: string[]; reports: string[] } {
   const reports: string[] = []
-  const term = createSessionTerminal({ allowProposedApi: true }, (message) => reports.push(message), inertLinks)
+  const term = createSessionTerminal({ allowProposedApi: true, windowsPty: undefined }, (message) => reports.push(message), inertLinks)
   const sent: string[] = []
   term.onData((data) => sent.push(data))
   return { term, sent, reports }
@@ -69,6 +69,29 @@ describe('createSessionTerminal suppresses standalone focus reporting on a real 
     await write(term, '\x1b[?1004h\x1b[?1004l')
     expect(term.modes.sendFocusMode).toBe(false)
     expect(sent).toEqual([])
+  })
+})
+
+describe('createSessionTerminal forwards windowsPty to xterm', () => {
+  async function growRows(windowsPty: { backend: 'conpty'; buildNumber: number } | undefined) {
+    const term = createSessionTerminal({ allowProposedApi: true, rows: 10, cols: 40, windowsPty }, () => {}, inertLinks)
+    let lines = ''
+    for (let i = 0; i < 50; i++) lines += `line ${i}\r\n`
+    await write(term, lines)
+    const before = { baseY: term.buffer.active.baseY, cursorY: term.buffer.active.cursorY }
+    term.resize(40, 20)
+    return { before, after: { baseY: term.buffer.active.baseY, cursorY: term.buffer.active.cursorY } }
+  }
+
+  test('a ConPTY terminal keeps its scrollback out of the viewport when rows grow', async () => {
+    const { before, after } = await growRows({ backend: 'conpty', buildNumber: 26300 })
+    expect(before.baseY).toBeGreaterThan(0)
+    expect(after).toEqual(before)
+  })
+
+  test('without windowsPty xterm pulls scrollback down on growth, so the option is what makes the difference', async () => {
+    const { before, after } = await growRows(undefined)
+    expect(after.baseY).toBeLessThan(before.baseY)
   })
 })
 

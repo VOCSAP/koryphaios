@@ -75,7 +75,8 @@ export function TerminalTile({
         fontFamily: FONT_STACK,
         cursorBlink: true,
         scrollback: 8000,
-        theme: THEMES[config.theme]
+        theme: THEMES[config.theme],
+        windowsPty: session.windowsPty ?? undefined
       },
       (message) => window.api.reportError('terminal', message),
       sessionLinkDeps()
