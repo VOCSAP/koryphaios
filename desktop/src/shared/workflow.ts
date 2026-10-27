@@ -214,25 +214,52 @@ export function laneEdges(ordered: RoadmapItem[]): LaneEdge[] {
   return edges
 }
 
+const DEPENDENCY_PREFIX = /^[0-9a-f]{8}[0-9a-f-]*$/
+
+/**
+ * The item a depends_on entry names: the item with that exact id, else the
+ * only one equal to it ignoring case, else the only item whose id it prefixes
+ * (8+ hex characters, the id8 agents copy from roadmap_list), the entry
+ * case-folded. Null when nothing or several items match. Same rule as the
+ * broker's matchDependency.
+ */
+export function resolveDependency(items: RoadmapItem[], dep: string): RoadmapItem | null {
+  const exact = items.find((i) => i.id === dep)
+  if (exact) return exact
+  const prefix = dep.toLowerCase()
+  const folded = items.filter((i) => i.id.toLowerCase() === prefix)
+  if (folded.length === 1) return folded[0]!
+  if (!DEPENDENCY_PREFIX.test(prefix)) return null
+  const matches = items.filter((i) => i.id.startsWith(prefix))
+  return matches.length === 1 ? matches[0]! : null
+}
+
+export interface UnmetDeps {
+  /** Resolved dependencies the lane does not show and that are not done. */
+  unmet: RoadmapItem[]
+  /** depends_on entries that match no item, or several (the dispatcher holds the card). */
+  unknown: string[]
+}
+
 /**
  * Dependencies of a displayed item that the lane does NOT show and that are
  * not done: the item is scheduled while its prerequisite is neither finished
  * nor planned before it (an archived dependency is flagged too -- it will
- * never complete). Dangling ids (dependency deleted broker-side) are skipped.
+ * never complete). An entry resolving to no single item is reported apart.
  */
 export function unmetDeps(
   item: RoadmapItem,
   all: RoadmapItem[],
   shownIds: Set<string>
-): RoadmapItem[] {
-  const byId = new Map(all.map((i) => [i.id, i]))
-  const out: RoadmapItem[] = []
+): UnmetDeps {
+  const unmet: RoadmapItem[] = []
+  const unknown: string[] = []
   for (const dep of item.depends_on) {
-    if (shownIds.has(dep)) continue
-    const d = byId.get(dep)
-    if (d && d.status !== 'done') out.push(d)
+    const d = resolveDependency(all, dep)
+    if (!d) unknown.push(dep)
+    else if (!shownIds.has(d.id) && d.status !== 'done') unmet.push(d)
   }
-  return out
+  return { unmet, unknown }
 }
 
 /** Does `fromId` transitively depend on `toId` (walking depends_on)? */

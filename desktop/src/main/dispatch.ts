@@ -13,16 +13,13 @@ import type { DirectiveDispatch, DispatchResult, RoadmapItem } from '../shared/t
 // desktop/tsconfig.node.json already carries the root file in its program.
 // Type-only, so the repo-root bun harness never resolves it at runtime.
 import type { DispatchedCard, DispatchRequest, DispatchRequestOutcome } from '../../../shared/types'
-import { queuedItems } from '../shared/workflow'
+import { queuedItems, resolveDependency } from '../shared/workflow'
 import { dispatchedTargetsTail } from './directive-journal'
 import { directiveKeys, isDirectiveCommand } from './directive'
 
-// queuedItems used to own its own filter+sort here (localeCompare tiebreak,
-// diverging from the broker's BINARY-collation `ORDER BY queue, id` the
-// moment an id left lowercase hex). Re-exported from shared/workflow so this
-// module and desktop/src/main/index.ts keep importing it from './dispatch'
-// unchanged, but the queue's actual order is derived in exactly one place
-// (roadmap card 42edc88b phase 0).
+// Re-exported so callers keep importing from './dispatch' while the queue
+// order and the dependency rule are each derived in one place, the one the
+// lane renders from.
 export { queuedItems }
 
 /** The next item to dispatch (lowest queue position), or null. */
@@ -35,25 +32,7 @@ export function nextQueuePosition(items: RoadmapItem[]): number {
   return items.reduce((max, i) => (i.queue !== null && i.queue > max ? i.queue : max), 0) + 1
 }
 
-const DEPENDENCY_PREFIX = /^[0-9a-f]{8}[0-9a-f-]*$/
-
-/**
- * The item a depends_on entry names: the item with that exact id, else the
- * only one equal to it ignoring case, else the only item whose id it prefixes
- * (8+ hex characters, the id8 agents copy from roadmap_list), the entry
- * case-folded. Null when nothing or several items match. Same rule as the
- * broker's matchDependency.
- */
-export function resolveDependency(items: RoadmapItem[], dep: string): RoadmapItem | null {
-  const exact = items.find((i) => i.id === dep)
-  if (exact) return exact
-  const prefix = dep.toLowerCase()
-  const folded = items.filter((i) => i.id.toLowerCase() === prefix)
-  if (folded.length === 1) return folded[0]!
-  if (!DEPENDENCY_PREFIX.test(prefix)) return null
-  const matches = items.filter((i) => i.id.startsWith(prefix))
-  return matches.length === 1 ? matches[0]! : null
-}
+export { resolveDependency }
 
 /** Why the automatic dispatch must not advance the queue this tick. */
 export type AutoDispatchHold =

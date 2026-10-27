@@ -827,6 +827,7 @@
   "roadmap.wf.violationOrder": "« {item} » est planifié avant sa dépendance « {dep} » : réordonnez la file ou supprimez la dépendance.",
   "roadmap.wf.violationMissing": "Dépendances ni planifiées avant cet item ni terminées : {list}",
   "roadmap.wf.depLabel": "« {item} » dépend de « {dep} ».",
+  "roadmap.wf.unknownDep": "dépendance inconnue {id}",
   "roadmap.wf.removeDep": "Supprimer la dépendance",
   "roadmap.wf.createHere": "Créer un item de roadmap ici",
   "roadmap.wf.fullscreen": "Ouvrir le workflow en plein écran",

@@ -6205,6 +6205,15 @@ body:has(.rm-modal) .rm-conflict-modal {
   color: var(--danger);
 }
 
+.wf-badge-unknown {
+  border-style: dashed;
+  color: var(--fg-dim);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* Dependency port: grab it to pull a link toward another card / the void. */
 .wf-port {
   position: absolute;

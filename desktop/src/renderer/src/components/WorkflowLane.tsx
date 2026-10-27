@@ -791,7 +791,7 @@ export function WorkflowLane({
               const x = dragged ? ghost.x : p.x
               const y = dragged ? ghost.y : p.y
               const locked = isRoadmapLocked(item)
-              const unmet = unmetDeps(item, items, shownIds)
+              const { unmet, unknown } = unmetDeps(item, items, shownIds)
               const directive = item.kind === 'directive'
               return (
                 <div
@@ -854,6 +854,15 @@ export function WorkflowLane({
                         {GLYPH_BADGES.warning}
                       </span>
                     )}
+                    {unknown.map((id) => (
+                      <span
+                        key={id}
+                        className="rm-badge wf-badge-unknown"
+                        title={t('roadmap.wf.unknownDep', { id: id.slice(0, 8) })}
+                      >
+                        {t('roadmap.wf.unknownDep', { id: id.slice(0, 8) })}
+                      </span>
+                    ))}
                   </div>
                   {!locked && (
                     <span

@@ -202,7 +202,7 @@ test('laneEdges: flags a dependency queued after its dependent', () => {
   expect(edges).toContainEqual({ from: 'late', to: 'after', violated: false })
 })
 
-test('unmetDeps: reports off-lane unfinished dependencies, skips done and dangling', () => {
+test('unmetDeps: reports off-lane unfinished dependencies, skips done, separates unknown ids', () => {
   const all = [
     item('shown', { queue: 1, depends_on: ['off', 'finished', 'ghost', 'gone'] }),
     item('off'),
@@ -210,8 +210,49 @@ test('unmetDeps: reports off-lane unfinished dependencies, skips done and dangli
     item('gone', { status: 'archived' })
   ]
   const shown = new Set(['shown'])
-  const unmet = unmetDeps(all[0]!, all, shown)
-  expect(unmet.map((i) => i.id).sort()).toEqual(['gone', 'off'])
+  const r = unmetDeps(all[0]!, all, shown)
+  expect(r.unmet.map((i) => i.id).sort()).toEqual(['gone', 'off'])
+  expect(r.unknown).toEqual(['ghost'])
+})
+
+const A = 'aaaaaaaa-1111-4000-8000-000000000001'
+const B = 'aaaaaaab-2222-4000-8000-000000000002'
+const C1 = 'cccccccc-1111-4000-8000-000000000003'
+const C2 = 'cccccccc-2222-4000-8000-000000000004'
+
+test('unmetDeps: an 8+ hex prefix resolves to the unique item, like the dispatcher', () => {
+  const dep = item(A)
+  const head = item('h', { queue: 1, depends_on: [A.slice(0, 8)] })
+  const r = unmetDeps(head, [head, dep], new Set(['h']))
+  expect(r.unknown).toEqual([])
+  expect(r.unmet.map((i) => i.id)).toEqual([A])
+})
+
+test('unmetDeps: a prefix shorter than 8 chars or non-hex is unknown', () => {
+  const dep = item(A)
+  const head = item('h', { queue: 1, depends_on: [A.slice(0, 7), 'zzzzzzzz'] })
+  const r = unmetDeps(head, [head, dep], new Set(['h']))
+  expect(r.unmet).toEqual([])
+  expect(r.unknown).toEqual([A.slice(0, 7), 'zzzzzzzz'])
+})
+
+test('unmetDeps: an ambiguous prefix is unknown, a longer one disambiguates', () => {
+  const all = [item(C1), item(C2)]
+  const head = item('h', { queue: 1, depends_on: ['cccccccc', C2.slice(0, 13)] })
+  const r = unmetDeps(head, [head, ...all], new Set(['h']))
+  expect(r.unknown).toEqual(['cccccccc'])
+  expect(r.unmet.map((i) => i.id)).toEqual([C2])
+})
+
+test('unmetDeps: a done dependency named by prefix is neither unmet nor unknown', () => {
+  const head = item('h', { queue: 1, depends_on: [A.slice(0, 8)] })
+  const r = unmetDeps(head, [head, item(A, { status: 'done' })], new Set(['h']))
+  expect(r).toEqual({ unmet: [], unknown: [] })
+})
+
+test('unmetDeps: a self-dependency resolves to the shown item, so it is neither unmet nor unknown', () => {
+  const head = item('h', { queue: 1, depends_on: ['h'] })
+  expect(unmetDeps(head, [head], new Set(['h']))).toEqual({ unmet: [], unknown: [] })
 })
 
 test('dependsWouldCycle walks depends_on transitively', () => {

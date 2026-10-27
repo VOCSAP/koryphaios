@@ -827,6 +827,7 @@
   "roadmap.wf.violationOrder": "\"{item}\" is scheduled before its dependency \"{dep}\": reorder the queue or remove the dependency.",
   "roadmap.wf.violationMissing": "Dependencies neither scheduled before this item nor done: {list}",
   "roadmap.wf.depLabel": "\"{item}\" depends on \"{dep}\".",
+  "roadmap.wf.unknownDep": "unknown dependency {id}",
   "roadmap.wf.removeDep": "Remove dependency",
   "roadmap.wf.createHere": "Create a roadmap item here",
   "roadmap.wf.fullscreen": "Open the workflow full screen",
