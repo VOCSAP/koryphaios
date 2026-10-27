@@ -85,6 +85,11 @@ Colour is meaning. Do not repurpose these:
   configurable (AppConfig.glowColor); never reuse it for anything but
   attention effects.
 
+**Review marks.** The zones of an annotate review wear categorical identity
+colours, the first 8 entries of the session palette (`REVIEW_MARK_COLORS`),
+shared by the mark over the page and the panel card. They carry no meaning and
+are never reused as a semantic colour.
+
 **Tile-head action tones.** The four actions that repeat in every terminal head
 (agent AND supervisor) are colour-coded at rest, because four identical grey
 glyphs in a row are unreadable at a glance: yellow `var(--action-prompt)`

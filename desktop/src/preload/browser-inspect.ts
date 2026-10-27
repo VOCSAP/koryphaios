@@ -58,6 +58,23 @@ createDrawModifierWatcher(
   (held) => ipcRenderer.sendToHost('deck:draw-modifier', held)
 )
 
+// Window scroll only: the host shifts the review marks by it. A scrolling inner
+// container is not reported.
+let scrollFrame = 0
+const reportScroll = (): void => {
+  scrollFrame = 0
+  ipcRenderer.sendToHost('deck:guest-scroll', { x: window.scrollX, y: window.scrollY })
+}
+window.addEventListener(
+  'scroll',
+  () => {
+    if (!scrollFrame) scrollFrame = requestAnimationFrame(reportScroll)
+  },
+  { passive: true }
+)
+window.addEventListener('DOMContentLoaded', reportScroll)
+window.addEventListener('load', reportScroll)
+
 // A navigation (or the guest tearing down) mid-hold must not leave the host
 // stuck believing the modifier is still held: neither a `blur` nor a keyup
 // is guaranteed to fire on the way out (the page can navigate, or be torn

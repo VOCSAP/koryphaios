@@ -1550,6 +1550,9 @@ export interface PickRegion {
   tool: 'freehand' | 'circle'
   /** Sanitized page URL at draw time (sanitizePickUrl). */
   pageUrl: string
+  /** Guest window scroll at pin time (web mode); absent on older regions and in window mode. */
+  scrollX?: number
+  scrollY?: number
 }
 
 /**

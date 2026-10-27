@@ -210,6 +210,44 @@ test('region with invalid tool rejects the whole file', async () => {
   expect(await validatePersistedReview(review, { annotationsDir: ANNOTATIONS_DIR })).toBeNull()
 })
 
+function regionReview(extra: Record<string, unknown>) {
+  return validReview({
+    annotations: [
+      validAnnotation({
+        pick: undefined,
+        region: { x: 1, y: 1, width: 10, height: 10, tool: 'circle', pageUrl: 'https://example.com', ...extra }
+      })
+    ]
+  })
+}
+
+test('region scrollX/scrollY round-trip through validation', async () => {
+  const out = await validatePersistedReview(regionReview({ scrollX: 12, scrollY: 340 }), {
+    annotationsDir: ANNOTATIONS_DIR
+  })
+  expect(out!.annotations[0]!.region!.scrollX).toBe(12)
+  expect(out!.annotations[0]!.region!.scrollY).toBe(340)
+})
+
+test('region written without scroll fields still loads and stays without them', async () => {
+  const out = await validatePersistedReview(regionReview({}), { annotationsDir: ANNOTATIONS_DIR })
+  expect(out).not.toBeNull()
+  expect('scrollX' in out!.annotations[0]!.region!).toBe(false)
+  expect('scrollY' in out!.annotations[0]!.region!).toBe(false)
+})
+
+for (const [label, bad] of [
+  ['NaN', NaN],
+  ['negative', -1],
+  ['string', '5']
+] as const) {
+  test(`region with ${label} scrollX rejects the whole file`, async () => {
+    expect(
+      await validatePersistedReview(regionReview({ scrollX: bad }), { annotationsDir: ANNOTATIONS_DIR })
+    ).toBeNull()
+  })
+}
+
 test('annotation count over the PICK_BUDGET cap rejects the whole file', async () => {
   const annotations = Array.from({ length: PICK_BUDGET.annotationsMaxPerPage + 1 }, (_, i) =>
     validAnnotation({ id: `a${i}` })

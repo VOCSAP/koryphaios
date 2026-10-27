@@ -39,7 +39,7 @@ function validateRegion(raw: unknown): PickRegion | null {
   if (!(height > 0 && height <= 20000)) return null
   if (typeof r.tool !== 'string' || !REGION_TOOLS.includes(r.tool as PickRegion['tool'])) return null
   if (typeof r.pageUrl !== 'string') return null
-  return {
+  const region: PickRegion = {
     x,
     y,
     width,
@@ -47,6 +47,13 @@ function validateRegion(raw: unknown): PickRegion | null {
     tool: r.tool as PickRegion['tool'],
     pageUrl: sanitizePickUrl(r.pageUrl)
   }
+  for (const key of ['scrollX', 'scrollY'] as const) {
+    const v = r[key]
+    if (v === undefined) continue
+    if (typeof v !== 'number' || !Number.isFinite(v) || v < 0) return null
+    region[key] = v
+  }
+  return region
 }
 
 /**

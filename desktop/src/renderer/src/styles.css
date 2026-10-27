@@ -6704,6 +6704,25 @@ body:has(.rm-modal) .rm-conflict-modal {
   touch-action: none;
 }
 
+/* Pinned review regions kept drawn over the page: under the draw canvas so a
+   new stroke is never blocked, and click-through. */
+.review-marks {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 3;
+  pointer-events: none;
+}
+
+.review-mark-n {
+  fill: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  text-anchor: middle;
+  dominant-baseline: central;
+}
+
 /* Transparent overlay so divider drags keep receiving mouse events (webviews
    are out-of-process and swallow them otherwise). */
 .browser-drag-shield {
@@ -6793,7 +6812,23 @@ body:has(.rm-modal) .rm-conflict-modal {
   background: var(--bg-3);
   border: 1px solid var(--border);
   border-radius: 6px;
+  border-left: 3px solid var(--mark-color, var(--border));
   padding: 8px;
+}
+
+.annotate-row-mark {
+  flex: none;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 4px;
+  box-sizing: border-box;
+  border-radius: 9px;
+  background: var(--mark-color, var(--bg-3));
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 18px;
+  text-align: center;
 }
 
 .annotate-row + .annotate-row {

@@ -30,6 +30,7 @@ import { PICK_BUDGET, sanitizePickUrl } from '@shared/pick-security'
 import { computeBoxCropRect, computeElementCropRect, PICK_SHOT_MAX_BYTES } from '@shared/pick-shot'
 import { annotationToCardFields, pickNoteToCardSeed } from '@shared/pick-card'
 import { paintStroke, strokeBounds, type DrawStroke, type DrawTool, clampBoundsToBox } from '@shared/draw-strokes'
+import { reviewMarkColor, visibleRegionMarks } from '@shared/review-marks'
 import { createDrawModifierWatcher, type DrawModifierPlatform } from '@shared/draw-modifier'
 import {
   computeCropRect,
@@ -278,6 +279,11 @@ export function BrowserView({ active }: { active: boolean }): React.JSX.Element 
   // never through the src attribute (resetting src reloads the page).
   const initialUrl = useRef(normalizeUrl(config.browserUrl) || 'http://localhost:3000')
   const [urlText, setUrlText] = useState(initialUrl.current)
+  // The page the guest actually shows (urlText also holds what the operator is typing).
+  const [guestUrl, setGuestUrl] = useState(initialUrl.current)
+  const guestScrollRef = useRef({ x: 0, y: 0 })
+  // Re-render trigger only: the marks read guestScrollRef.
+  const [, setGuestScroll] = useState(guestScrollRef.current)
   const [canBack, setCanBack] = useState(false)
   const [canFwd, setCanFwd] = useState(false)
   const [loading, setLoading] = useState(false)
@@ -537,6 +543,7 @@ export function BrowserView({ active }: { active: boolean }): React.JSX.Element 
       const ev = e as WebviewNavigateEvent
       if (ev.isMainFrame === false) return
       setUrlText(ev.url)
+      setGuestUrl(ev.url)
       syncNav()
       // Remember the last URL (debounced: HMR-heavy pages navigate often).
       if (persistTimer.current) clearTimeout(persistTimer.current)
@@ -559,6 +566,19 @@ export function BrowserView({ active }: { active: boolean }): React.JSX.Element 
         // Escape (or the host itself) disarmed the multi-pick guest listener.
         // The pending batch is untouched -- only Send/Discard clear it.
         setReviewArmed(false)
+        return
+      }
+      if (ev.channel === 'deck:guest-scroll') {
+        const p = ev.args[0] as { x?: unknown; y?: unknown } | null
+        if (!p || typeof p.x !== 'number' || typeof p.y !== 'number') return
+        if (!Number.isFinite(p.x) || !Number.isFinite(p.y)) return
+        const cur = guestScrollRef.current
+        if (cur.x === p.x && cur.y === p.y) return
+        const next = { x: p.x, y: p.y }
+        guestScrollRef.current = next
+        // A re-render per scroll frame only pays off when a mark can move;
+        // the render reads the ref, so a later pin still starts from here.
+        if (pendingAnnotationsRef.current.some((a) => a.region)) setGuestScroll(next)
         return
       }
       if (ev.channel === 'deck:draw-modifier') {
@@ -1175,6 +1195,10 @@ export function BrowserView({ active }: { active: boolean }): React.JSX.Element 
     const pageUrl =
       mode === 'web' ? sanitizePickUrl(webviewRef.current?.getURL() || urlText) : ''
     const region: PickRegion = { ...visible, tool: stroke.tool, pageUrl }
+    if (mode === 'web') {
+      region.scrollX = Math.max(0, guestScrollRef.current.x)
+      region.scrollY = Math.max(0, guestScrollRef.current.y)
+    }
     const id = crypto.randomUUID()
     const annotation: PickAnnotation = {
       id,
@@ -1485,6 +1509,38 @@ export function BrowserView({ active }: { active: boolean }): React.JSX.Element 
     window.addEventListener('mouseup', onUp)
   }
 
+  const reviewMarks =
+    mode === 'web'
+      ? visibleRegionMarks(pendingAnnotations, sanitizePickUrl(guestUrl), guestScrollRef.current)
+      : visibleRegionMarks(pendingAnnotations, '', { x: 0, y: 0 })
+  const reviewMarksOverlay =
+    reviewMarks.length > 0 ? (
+      <svg className="review-marks" aria-hidden="true">
+        {reviewMarks.map((m) => {
+          const common = { fill: m.color, fillOpacity: 0.1, stroke: m.color, strokeWidth: 2 }
+          return (
+            <g key={m.id}>
+              {m.tool === 'circle' ? (
+                <ellipse
+                  cx={m.box.x + m.box.width / 2}
+                  cy={m.box.y + m.box.height / 2}
+                  rx={m.box.width / 2}
+                  ry={m.box.height / 2}
+                  {...common}
+                />
+              ) : (
+                <rect x={m.box.x} y={m.box.y} width={m.box.width} height={m.box.height} rx={6} {...common} />
+              )}
+              <circle cx={m.box.x + 9} cy={m.box.y + 9} r={9} fill={m.color} />
+              <text className="review-mark-n" x={m.box.x + 9} y={m.box.y + 9}>
+                {m.n}
+              </text>
+            </g>
+          )
+        })}
+      </svg>
+    ) : null
+
   return (
     <div className="browser-view">
       {paired && (
@@ -1762,6 +1818,7 @@ export function BrowserView({ active }: { active: boolean }): React.JSX.Element 
                 webpreferences="sandbox=no,backgroundThrottling=no"
               />
             )}
+            {mode === 'web' && reviewMarksOverlay}
             {(drawing || holdHeld) && mode === 'web' && (
               <canvas
                 ref={canvasRef}
@@ -1794,6 +1851,7 @@ export function BrowserView({ active }: { active: boolean }): React.JSX.Element 
             (shot ? (
               <div className="browser-shot-wrap">
                 <img className="browser-shot" src={shot.dataUrl} alt={shot.title} />
+                {reviewMarksOverlay}
                 {drawing && (
                   <canvas
                     ref={canvasRef}
@@ -1821,9 +1879,14 @@ export function BrowserView({ active }: { active: boolean }): React.JSX.Element 
                 {pendingAnnotations.length === 0 ? (
                   <p className="annotate-panel-empty">{t('browser.annotateEmpty')}</p>
                 ) : (
-                  pendingAnnotations.map((a) => (
-                    <div key={a.id} className="annotate-row">
+                  pendingAnnotations.map((a, i) => (
+                    <div
+                      key={a.id}
+                      className="annotate-row"
+                      style={{ '--mark-color': reviewMarkColor(i) } as React.CSSProperties}
+                    >
                       <div className="annotate-row-head">
+                        <span className="annotate-row-mark">{i + 1}</span>
                         <span className="annotate-row-label">
                           {a.pick ? a.pick.tagName : t('browser.annotateRegionLabel')}
                           {a.comment.trim() ? ` — ${firstWords(a.comment, 6)}` : ''}

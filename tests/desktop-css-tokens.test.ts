@@ -23,6 +23,7 @@ const RUNTIME_TOKENS: Record<string, string[]> = {
     "desktop/src/renderer/src/components/TerminalTile.tsx",
     "desktop/src/renderer/src/components/BrowserView.tsx"
   ],
+  "--mark-color": ["desktop/src/renderer/src/components/BrowserView.tsx"],
   "--chip-color": ["desktop/src/renderer/src/components/MobileAgents.tsx"]
 };
 
