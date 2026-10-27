@@ -136,6 +136,7 @@ function makeDeps(state: { sessions: SessionRuntime[] }): DeckControlDeps & {
     revokedLeadCallerIds,
     spawnOpts,
     sessionSpawnOpts,
+    inboxMandates: { request: () => {}, release: () => {} },
     listAgents: () => ["team-lead", "dev", "reviewer"],
     listModels: () => [{ id: "opus", label: "Opus" }],
     listPresets: () => [],
@@ -529,6 +530,34 @@ test("deck_close_session: a peer_id resolving to a tile this caller owns closes 
   expect(ok.body.ok).toBe(true);
   // The RESOLVED tile id reaches closeSession, never the peer_id.
   expect(deps.closed).toEqual([session.id]);
+});
+
+test("a caller's mandate authority comes from the provisioning path, never from its label", async () => {
+  const state = { sessions: [] as SessionRuntime[] };
+  const requested: Array<[string, string]> = [];
+  const released: string[] = [];
+  const deps = {
+    ...makeDeps(state),
+    inboxMandates: {
+      request: (callerRef: string, authority: string) => requested.push([callerRef, authority]),
+      release: (callerRef: string) => released.push(callerRef)
+    }
+  };
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+  expect(requested, "the historical supervisor token").toEqual([["supervisor", "supervisor"]]);
+
+  const labelOnly = srv.mintCaller("team-lead", TEAM_LEAD_DECK_TOOLS);
+  expect(requested[1], "a 'team-lead' label alone elevates nothing").toEqual([labelOnly.callerId, "author"]);
+
+  const created = await call(srv, "deck_spawn_session", { name: "lead", embedded_agent: "team-lead" });
+  expect(created.status).toBe(200);
+  const tile = (created.body.result as { session: { id: string } }).session;
+  const leadCaller = deps.leadMcpCalls[0]!.callerId;
+  expect(requested[2], "the team-lead spawn path provisions a lead").toEqual([leadCaller, "lead"]);
+
+  expect(srv.revokeCallerForSession(tile.id)).toBe(leadCaller);
+  expect(released, "a revoked caller releases its mandate").toEqual([leadCaller]);
 });
 
 test("deck_close_session: a team-lead closes another unlocked peer by peer_id", async () => {
@@ -1939,6 +1968,7 @@ const REVIEWED_DECK_CONTROL_DEPS = [
   "confirmSpawnShellFields",
   "createWorktree",
   "getSpawnCap",
+  "inboxMandates",
   "journal",
   "listAgents",
   "listModels",

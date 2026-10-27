@@ -53,7 +53,6 @@ async function launchServer(
     cwd: settingsDir,
     env: scrubEnv(settingsDir, {
       CLAUDE_PEERS_BROKER_URL: brokerUrl,
-      CLAUDE_PEERS_DESK_SESSION: randomUUID(),
       CLAUDE_PEERS_LOG_DIR: logDir,
       CLAUDE_PEERS_DEPOSIT_CAPABILITY: capability,
       ...extraEnv,

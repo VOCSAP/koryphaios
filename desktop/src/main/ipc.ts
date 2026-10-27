@@ -140,6 +140,7 @@ import { graphId as graphDocId, parseGraphDoc, type GraphDoc } from '../shared/g
 import { parseTemplate, toTemplate, type TemplateResolveResult } from '@shared/template'
 import { templateInputsOrThrow } from '@shared/template-apply-outcome'
 import { workspaceRestoreOrThrow } from '@shared/workspace-restore-outcome'
+import { registerWorkspaceRestoreHandler } from './workspace-restore-effects'
 import { availableLocales, loadDict, resolveLocale } from './i18n'
 import { reportError } from './log'
 
@@ -783,51 +784,17 @@ export function registerIpc({
   regHandle('workspace:save', (_e, name?: string) =>
     name && name.trim() ? workspaces.saveNamed(name) : workspaces.saveAuto()
   )
-  regHandle('workspace:restore', async (_e, id: string) => {
-    // Restore respawns straight through SessionService, so it gates here and
-    // warms EVERY cwd it will respawn into, not just the root: otherwise
-    // worktree tiles would look "expired" and start fresh.
-    await gateSandboxForCwds(workspaces.sessionCwds(id), {
-      sandboxGate,
-      warmSandboxTranscripts: sandboxWarmTranscripts
-    })
-    // Best-effort, once for the batch before restoreFrom(): a failure must not
-    // block the restore, only mean the team-lead tile(s) reopen without the bridge.
-    if (workspaces.hasTeamLeadAgentSession(id)) {
-      try {
-        await ensureControlServer()
-      } catch (e) {
-        reportError('session', 'failed to start the deck-control endpoint for a workspace-restored team-lead tile', e)
-      }
-    }
-    const attendance: CallerAttendance = isLocalIpcEvent(_e) ? 'attended' : 'unattended'
-    const result = await workspaces.restore(id, attendance)
-    const announceCurrent = (): void => {
-      const current = workspaces.listForCwd().find((w) => w.current) ?? null
-      broadcast('workspace:current', current)
-    }
-    // Card 07134c6a, review correction C2: 'lock-race' is the ONE non-ok
-    // reason where sessions were ALREADY swapped (restoreFrom() already ran)
-    // before the failure -- unlike every other reason (nothing moved), the
-    // window's current-workspace state and the inbox must still reflect
-    // that change even though workspaceRestoreOrThrow below is about to
-    // throw an error to the caller. Checked on the RAW result (not by
-    // catching the throw) so this only fires for the one reason actually
-    // known to have changed state, never for a future unrecognised reason.
-    if (!result.ok && result.reason === 'lock-race') {
-      announceCurrent()
-      void purgeInboxSession()
-    }
-    const outcome = workspaceRestoreOrThrow(result)
-    if (outcome.applied) {
-      announceCurrent()
-      // Courrier lot 1D: only a SUCCESSFUL restore counts as "this session
-      // starts over" -- a failed restore (applied===false) changed nothing
-      // for every OTHER reason, so it must not purge either (see the
-      // 'lock-race' exception handled above, before this point).
-      void purgeInboxSession()
-    }
-    return outcome
+  registerWorkspaceRestoreHandler(regHandle, {
+    workspaces,
+    isLocalIpcEvent,
+    gateSandboxForCwds,
+    sandboxGate,
+    warmSandboxTranscripts: sandboxWarmTranscripts,
+    ensureControlServer,
+    reportError,
+    resolveOutcome: workspaceRestoreOrThrow,
+    broadcastCurrent: (current) => broadcast('workspace:current', current),
+    purgeInboxSession: () => void purgeInboxSession()
   })
   regHandle('workspace:delete', (_e, id: string) => workspaces.deleteWs(id))
   regHandle('workspace:current', () => workspaces.currentWorkspaceId)

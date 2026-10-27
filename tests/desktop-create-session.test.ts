@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { extractBracedBody, extractParenBody } from "./_braced-body";
+import { extractBracedBody, extractParenBody, findMatchingClose } from "./_braced-body";
 import type { CreateSessionInput, SessionRuntime } from "../desktop/src/shared/types";
 import {
   createSessionWithWorktree,
@@ -383,9 +383,6 @@ test("gateSandboxForCwds warms every cwd it is given, in order", async () => {
   expect(warmed).toEqual(["/a", "/b"]);
 });
 
-// ----- call-site wiring: the type makes the deps required, these scans pin
-// WHICH deps each spawn site hands over.
-
 const MAIN_DIR = join(import.meta.dir, "..", "desktop", "src", "main");
 const IPC_SRC = readFileSync(join(MAIN_DIR, "ipc.ts"), "utf-8");
 const INDEX_SRC = readFileSync(join(MAIN_DIR, "index.ts"), "utf-8");
@@ -395,6 +392,42 @@ function ipcHandler(channel: string): string {
   const at = IPC_SRC.indexOf(anchor);
   if (at < 0) throw new Error(`ipc.ts: ${anchor} not found -- renamed or reshaped?`);
   return extractParenBody(IPC_SRC, at + "regHandle".length, true);
+}
+
+function ipcCode(source: string): string {
+  return new Bun.Transpiler({ loader: "ts" }).transformSync(source);
+}
+
+function workspaceRestoreDeps(source: string): string {
+  const code = ipcCode(source);
+  const anchor = "registerWorkspaceRestoreHandler(regHandle,";
+  const at = code.indexOf(anchor);
+  if (at < 0) throw new Error("ipc.ts: workspace restore registration is unavailable");
+  const open = code.indexOf("{", at + anchor.length);
+  if (open < 0) throw new Error("ipc.ts: workspace restore dependencies are unavailable");
+  return extractBracedBody(code, open, true);
+}
+
+function registerIpcParts(source: string): { params: string; body: string } {
+  const code = ipcCode(source);
+  const at = code.indexOf("function registerIpc(");
+  if (at < 0) throw new Error("ipc.ts: registerIpc is unavailable");
+  const openParams = code.indexOf("(", at);
+  const closeParams = findMatchingClose(code, openParams, "(", ")", true);
+  const openBody = code.indexOf("{", closeParams);
+  if (openBody < 0) throw new Error("ipc.ts: registerIpc body is unavailable");
+  return { params: extractParenBody(code, openParams, true), body: extractBracedBody(code, openBody, true) };
+}
+
+function importsProductionGate(source: string): boolean {
+  return /import\s*\{[^}]*\bgateSandboxForCwds\b(?!\s+as\s+\w+)[^}]*\}\s*from\s*['"]\.\/create-session['"]/.test(source);
+}
+
+function hasGateShadow(source: string): boolean {
+  const { params, body } = registerIpcParts(source);
+  return /\bgateSandboxForCwds\b/.test(params) ||
+    /\b(?:const|let|var|function)\s+gateSandboxForCwds\b/.test(body) ||
+    /\bfunction(?:\s+\w+)?\s*\([^()\n]*\bgateSandboxForCwds\b[^()\n]*\)|\([^()\n]*\bgateSandboxForCwds\b[^()\n]*\)\s*=>|\bgateSandboxForCwds\s*=>/.test(body);
 }
 
 function indexBracedBody(anchor: RegExp, label: string): string {
@@ -431,12 +464,16 @@ test("no spawn path calls service.restart( outside ensureSupervisor (the one san
 });
 
 test("workspace:restore gates the sandbox before restoring any session", () => {
-  const body = ipcHandler("workspace:restore");
-  const gate = body.indexOf("gateSandboxForCwds(");
-  const restore = body.indexOf("workspaces.restore(");
-  expect(gate, "workspace:restore no longer calls gateSandboxForCwds").toBeGreaterThanOrEqual(0);
-  expect(restore, "workspace:restore no longer calls workspaces.restore").toBeGreaterThanOrEqual(0);
-  expect(gate < restore, "workspace:restore respawns sessions before the sandbox gate").toBe(true);
+  const productionGate = (deps: string) => /^\s*gateSandboxForCwds\s*,?$/m.test(deps);
+  const registerIpc = (params = "", body = "") => `function registerIpc(${params}) { ${body} }`;
+  expect(importsProductionGate(IPC_SRC)).toBe(true);
+  expect(hasGateShadow(IPC_SRC)).toBe(false);
+  expect(productionGate(workspaceRestoreDeps(IPC_SRC))).toBe(true);
+  expect(productionGate(workspaceRestoreDeps("registerWorkspaceRestoreHandler(regHandle, { gateSandboxForCwds })"))).toBe(true);
+  expect(productionGate(workspaceRestoreDeps("registerWorkspaceRestoreHandler(regHandle, { /* gateSandboxForCwds */ })"))).toBe(false);
+  expect(productionGate(workspaceRestoreDeps("registerWorkspaceRestoreHandler(regHandle, { gateSandboxForCwds: async () => {} })"))).toBe(false);
+  expect(hasGateShadow(registerIpc("", "const gateSandboxForCwds = async () => {}"))).toBe(true);
+  expect(hasGateShadow(registerIpc("gateSandboxForCwds", ""))).toBe(true);
 });
 
 test("diff:review refuses a cwd outside the sandbox copy instead of relocating the reviewer", () => {

@@ -1,11 +1,4 @@
-// Card 6363bd69: a workspace-restored team-lead AGENT tile (agent==='team-lead',
-// never the separate `lead` window-routing flag) must get the same
-// deck-control bridge a fresh spawn or a template entry already gets. Restore
-// bypasses SessionService.create()/resolveMcpConfig entirely -- args is the
-// only surviving signal, so this file proves both the extraction bound and
-// that the real restoreFrom()/ipc.ts wiring actually delegates to it.
-
-import { test, expect } from "bun:test";
+import { afterAll, test, expect } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -24,7 +17,6 @@ import { newWorkspaceId, saveWorkspace, type Workspace } from "../desktop/src/ma
 import { extractBracedBody } from "./_braced-body";
 
 const SESSION_SERVICE_PATH = join(import.meta.dir, "..", "desktop", "src", "main", "session-service.ts");
-const IPC_PATH = join(import.meta.dir, "..", "desktop", "src", "main", "ipc.ts");
 
 // ----- effectiveAgent on a restored SessionDef.args: bounded extraction -----
 
@@ -60,14 +52,11 @@ test("is ambiguous on an empty value or a shell separator", () => {
   }
 });
 
-test("card 6363bd69: the recovered value round-trips through the SAME isTeamLeadAgent predicate every other route uses", () => {
+test("the recovered value round-trips through the SAME isTeamLeadAgent predicate every other route uses", () => {
   expect(isTeamLeadAgent(effectiveAgent(undefined, '--agent "team-lead"').agent)).toBe(true);
   expect(isTeamLeadAgent(effectiveAgent(undefined, '--agent "reviewer"').agent)).toBe(false);
   expect(isTeamLeadAgent(effectiveAgent(undefined, "").agent)).toBe(false);
 });
-
-// ----- WorkspaceService.hasTeamLeadAgentSession: real class, real fs -----
-// (workspace-service.ts's own header: no electron/node-pty import, bun-testable directly.)
 
 const tmpDirs: string[] = [];
 function freshProject(): string {
@@ -106,7 +95,10 @@ function minimalDeps(proj: string): WorkspaceDeps {
     getConfig: () => ({}) as never,
     setConfig: () => {},
     getScope: () => ({}) as never,
-    adoptScope: () => {},
+    adoptScope: async () => ({ state: "busy" }),
+    cancelScopeAdoption: () => {},
+    closeScopeAdoption: () => {},
+    onCredentialFailure: () => {},
     confirmShellFields: async () => "approved",
     confirmUntrustedCwd: async () => "approved"
   };
@@ -224,7 +216,7 @@ function runRestoreMintLoop(defs: RestoredDefStub[]): {
   return { mintCalls, reports, mintedCallerIds };
 }
 
-test("card 6363bd69 wiring: restoreFrom()'s real mint loop grants mcpConfig only to the team-lead-agent def, using the injected real predicates", () => {
+test("restoreFrom()'s real mint loop grants mcpConfig only to the team-lead-agent def, using the injected real predicates", () => {
   const leadDef = { id: "lead", name: "lead", args: '--agent "team-lead"', mcpConfig: undefined as string | undefined };
   const otherDef = { id: "reviewer", name: "rev", args: '--agent "reviewer"', mcpConfig: undefined as string | undefined };
 
@@ -266,128 +258,6 @@ test("restoreFrom stores each restored mint in runtime state", () => {
   expect(body).toMatch(/mintedCallerId:\s*mintedCallerIds\.get\(d\.id\)\s*\?\?\s*null/);
 });
 
-// ----- ipc.ts's workspace:restore: ensureControlServer() gated on
-// hasTeamLeadAgentSession(id), running BEFORE workspaces.restore(...) -----
-
-function checkWorkspaceRestoreWiring(src: string): string | null {
-  const handlerAnchor = /regHandle\(\s*'workspace:restore'[\s\S]*?=>\s*\{/;
-  const m = handlerAnchor.exec(src);
-  if (!m) return "workspace:restore handler not found in ipc.ts -- has it been renamed?";
-  const openIdx = m.index + m[0].length - 1;
-  let body: string;
-  try {
-    body = extractBracedBody(src, openIdx);
-  } catch (e) {
-    return `could not extract the workspace:restore handler body: ${(e as Error).message}`;
-  }
-
-  const guardAnchor = "if (workspaces.hasTeamLeadAgentSession(id)) {";
-  const guardCount = body.split(guardAnchor).length - 1;
-  if (guardCount !== 1) {
-    return `workspace:restore: expected exactly 1 occurrence of the hasTeamLeadAgentSession guard, found ${guardCount}`;
-  }
-  const guardIdx = body.indexOf(guardAnchor);
-  const guardOpenIdx = guardIdx + guardAnchor.length - 1;
-  let guardBody: string;
-  try {
-    guardBody = extractBracedBody(body, guardOpenIdx);
-  } catch (e) {
-    return `could not extract the hasTeamLeadAgentSession guard body: ${(e as Error).message}`;
-  }
-  if (!/ensureControlServer\(\)/.test(guardBody)) {
-    return "workspace:restore's hasTeamLeadAgentSession(id) guard does not call ensureControlServer()";
-  }
-
-  const restoreCallIdx = body.indexOf("await workspaces.restore(");
-  if (restoreCallIdx === -1) return "workspace:restore no longer awaits workspaces.restore(...)";
-  if (guardIdx > restoreCallIdx) {
-    return "workspace:restore's hasTeamLeadAgentSession/ensureControlServer guard must run BEFORE workspaces.restore(...)";
-  }
-  return null;
-}
-
-test("ipc.ts's workspace:restore starts the deck-control endpoint (gated on hasTeamLeadAgentSession) before workspaces.restore(...)", () => {
-  const src = readFileSync(IPC_PATH, "utf-8");
-  expect(checkWorkspaceRestoreWiring(src)).toBeNull();
-});
-
-test("negative control: REJECTS a synthetic handler that never calls ensureControlServer()", () => {
-  const mutated = [
-    "regHandle('workspace:restore', async (_e, id: string) => {",
-    "  if (workspaces.hasTeamLeadAgentSession(id)) {",
-    "    // nothing",
-    "  }",
-    "  const result = await workspaces.restore(id, attendance)",
-    "})"
-  ].join("\n");
-  const reason = checkWorkspaceRestoreWiring(mutated);
-  expect(reason).not.toBeNull();
-  expect(reason).toContain("ensureControlServer");
-});
-
-test("negative control: REJECTS a synthetic handler that does not await workspace restore", () => {
-  const mutated = [
-    "regHandle('workspace:restore', async (_e, id: string) => {",
-    "  if (workspaces.hasTeamLeadAgentSession(id)) {",
-    "    await ensureControlServer()",
-    "  }",
-    "  const result = workspaces.restore(id, attendance)",
-    "})"
-  ].join("\n");
-  const reason = checkWorkspaceRestoreWiring(mutated);
-  expect(reason).toContain("awaits workspaces.restore");
-});
-
-test("negative control: REJECTS a synthetic handler that starts the endpoint unconditionally", () => {
-  const mutated = [
-    "regHandle('workspace:restore', async (_e, id: string) => {",
-    "  await ensureControlServer()",
-    "  const result = await workspaces.restore(id, attendance)",
-    "})"
-  ].join("\n");
-  const reason = checkWorkspaceRestoreWiring(mutated);
-  expect(reason).not.toBeNull();
-  expect(reason).toContain("hasTeamLeadAgentSession");
-});
-
-test("MUTATION PROOF: REJECTS a handler where the guard runs AFTER workspaces.restore(...)", () => {
-  const mutated = [
-    "regHandle('workspace:restore', async (_e, id: string) => {",
-    "  const result = await workspaces.restore(id, attendance)",
-    "  if (workspaces.hasTeamLeadAgentSession(id)) {",
-    "    await ensureControlServer()",
-    "  }",
-    "})"
-  ].join("\n");
-  const reason = checkWorkspaceRestoreWiring(mutated);
-  expect(reason).not.toBeNull();
-  expect(reason).toContain("BEFORE");
-});
-
-test("MUTATION PROOF: REJECTS a handler with two guard occurrences instead of taking the first", () => {
-  const mutated = [
-    "regHandle('workspace:restore', async (_e, id: string) => {",
-    "  if (workspaces.hasTeamLeadAgentSession(id)) {",
-    "    await ensureControlServer()",
-    "  }",
-    "  if (workspaces.hasTeamLeadAgentSession(id)) {",
-    "    await ensureControlServer()",
-    "  }",
-    "  const result = await workspaces.restore(id, attendance)",
-    "})"
-  ].join("\n");
-  const reason = checkWorkspaceRestoreWiring(mutated);
-  expect(reason).not.toBeNull();
-  expect(reason).toContain("expected exactly 1");
-});
-
-test("cleanup: temp workspace dirs", () => {
-  for (const d of tmpDirs) {
-    try {
-      rmSync(d, { recursive: true, force: true });
-    } catch {
-      // best-effort
-    }
-  }
-  expect(true).toBe(true);
+afterAll(() => {
+  for (const d of tmpDirs.splice(0)) rmSync(d, { recursive: true, force: true });
 });

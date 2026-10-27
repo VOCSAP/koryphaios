@@ -12,9 +12,12 @@ import {
   APPROVAL_QUESTION_MAX,
   APPROVAL_QUESTIONS_MAX,
   buildAuthProof,
+  buildInboxProof,
+  INBOX_GATES,
   sanitizeAnswerForPty,
   type Approval,
-  type ApprovalAddResponse
+  type ApprovalAddResponse,
+  type InboxGate
 } from './approval-auth'
 import type { OperatorIdentity } from './operator-identity'
 import {
@@ -47,21 +50,51 @@ export interface ApprovalDeps {
    * 400 discovered by an operator instead of a typecheck.
    */
   projectKey: string
+  /**
+   * This window's run. Sent on the approval list and delivered calls so the
+   * broker shows attested channel questions of THIS run only; absent, an
+   * attested row is never listed.
+   */
+  runRef?: string
   fetchImpl?: typeof fetch
+}
+
+export type InboxAuthority = 'author' | 'lead' | 'supervisor'
+
+export type ApprovalTokenInboxBlock =
+  | { version: 1; kind: 'run'; run_ref: string; group_id: string }
+  | { version: 1; kind: 'mandate'; parent_token_id: string; caller_ref: string; authority: InboxAuthority }
+
+export interface MintedToken {
+  token_id: string
+  expires_at: string
+  capabilities?: { renew_only?: boolean; inbox_provenance?: number }
+}
+
+/**
+ * Operator-signed proof over a whole body. With a gate it is a v1 proof bound
+ * to that door, which an Inbox operation requires: the broker never accepts a
+ * legacy proof there, and never retries one after a v1 failure.
+ */
+export function signOperatorBody(
+  identity: OperatorIdentity,
+  body: Record<string, unknown>,
+  gate?: InboxGate
+): ReturnType<typeof buildAuthProof> {
+  const opts = { kind: 'operator' as const, operator_id: identity.operatorId }
+  return gate ? buildInboxProof(identity.privateKey, body, gate, opts) : buildAuthProof(identity.privateKey, body, opts)
 }
 
 async function signedRequest(
   deps: ApprovalDeps,
   path: string,
   payload: Record<string, unknown>,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  gate?: InboxGate
 ): Promise<Response> {
   const f = deps.fetchImpl ?? fetch
   const body = { ...payload, public_key: deps.identity.publicKey }
-  const auth = buildAuthProof(deps.identity.privateKey, body, {
-    kind: 'operator',
-    operator_id: deps.identity.operatorId
-  })
+  const auth = signOperatorBody(deps.identity, body, gate)
   const headers: Record<string, string> = { 'content-type': 'application/json' }
   if (deps.endpoint.token) headers.authorization = `Bearer ${deps.endpoint.token}`
   return f(`${deps.endpoint.url}${path}`, {
@@ -76,9 +109,10 @@ async function signedPost<T>(
   deps: ApprovalDeps,
   path: string,
   payload: Record<string, unknown>,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  gate?: InboxGate
 ): Promise<T> {
-  const res = await signedRequest(deps, path, payload, signal)
+  const res = await signedRequest(deps, path, payload, signal, gate)
   if (!res.ok) {
     const raw = (await res.text()).trim()
     let detail = raw
@@ -131,27 +165,42 @@ export async function checkOperatorTrust(deps: ApprovalDeps): Promise<OperatorTr
 /** Register a session's public key so its agent may raise approvals. */
 export async function mintSessionToken(
   deps: ApprovalDeps,
-  args: { sessionPublicKey: string; sessionRef: string; ttlHours?: number }
-): Promise<{ token_id: string; expires_at: string; capabilities?: { renew_only?: boolean } }> {
-  return signedPost(deps, '/approval/token-mint', {
-    session_public_key: args.sessionPublicKey,
-    session_ref: args.sessionRef,
-    project_key: deps.projectKey,
-    ttl_hours: args.ttlHours ?? 24
-  })
+  args: { sessionPublicKey: string; sessionRef: string; ttlHours?: number; inbox?: ApprovalTokenInboxBlock }
+): Promise<MintedToken> {
+  return signedPost(
+    deps,
+    '/approval/token-mint',
+    {
+      session_public_key: args.sessionPublicKey,
+      session_ref: args.sessionRef,
+      project_key: deps.projectKey,
+      ttl_hours: args.ttlHours ?? 24,
+      ...(args.inbox ? { inbox: args.inbox } : {})
+    },
+    undefined,
+    args.inbox ? INBOX_GATES.mint : undefined
+  )
 }
 
+/** The scope travels unchanged: the broker refuses a renewal that differs on any dimension. */
 export async function renewSessionToken(
   deps: ApprovalDeps,
-  args: { sessionPublicKey: string; sessionRef: string; signal?: AbortSignal }
-): Promise<{ token_id: string; expires_at: string; capabilities?: { renew_only?: boolean } }> {
-  return signedPost(deps, '/approval/token-mint', {
-    session_public_key: args.sessionPublicKey,
-    session_ref: args.sessionRef,
-    project_key: deps.projectKey,
-    ttl_hours: 24,
-    renew_only: true
-  }, args.signal)
+  args: { sessionPublicKey: string; sessionRef: string; signal?: AbortSignal; inbox?: ApprovalTokenInboxBlock }
+): Promise<MintedToken> {
+  return signedPost(
+    deps,
+    '/approval/token-mint',
+    {
+      session_public_key: args.sessionPublicKey,
+      session_ref: args.sessionRef,
+      project_key: deps.projectKey,
+      ttl_hours: 24,
+      renew_only: true,
+      ...(args.inbox ? { inbox: args.inbox } : {})
+    },
+    args.signal,
+    args.inbox ? INBOX_GATES.mint : undefined
+  )
 }
 
 export async function revokeSessionToken(
@@ -432,9 +481,14 @@ export async function disconnectChannel(
 export async function fetchUndeliveredVerdicts(deps: ApprovalDeps): Promise<Approval[]> {
   const res = await signedPost<{ approvals: Approval[] }>(deps, '/approval/list', {
     project_key: deps.projectKey,
-    undelivered_only: true
+    undelivered_only: true,
+    ...runRefField(deps)
   })
   return res.approvals ?? []
+}
+
+function runRefField(deps: ApprovalDeps): { run_ref?: string } {
+  return deps.runRef ? { run_ref: deps.runRef } : {}
 }
 
 /**
@@ -453,11 +507,13 @@ export async function fetchPendingApprovals(deps: ApprovalDeps): Promise<Approva
   const [pending, expired] = await Promise.all([
     signedPost<{ approvals: Approval[] }>(deps, '/approval/list', {
       project_key: deps.projectKey,
-      status: 'pending'
+      status: 'pending',
+      ...runRefField(deps)
     }),
     signedPost<{ approvals: Approval[] }>(deps, '/approval/list', {
       project_key: deps.projectKey,
-      status: 'expired_notif'
+      status: 'expired_notif',
+      ...runRefField(deps)
     })
   ])
   return [...(pending.approvals ?? []), ...(expired.approvals ?? [])].sort((a, b) =>
@@ -472,7 +528,8 @@ export async function markVerdictsDelivered(deps: ApprovalDeps, ids: string[]): 
   // re-offers answers it has already applied.
   const res = await signedPost<{ marked: number }>(deps, '/approval/delivered', {
     project_key: deps.projectKey,
-    ids
+    ids,
+    ...runRefField(deps)
   })
   return res.marked
 }

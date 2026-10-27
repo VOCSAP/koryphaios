@@ -1,15 +1,10 @@
-// Card c7185135 (vector half): scrubEnv now redirects HOME/USERPROFILE, not
-// just APPDATA/XDG_CONFIG_HOME. A test that only asserts on the returned env
-// OBJECT would pass even if server.ts ignored the redirected vars -- this
-// spawns a real server.ts and checks the FILESYSTEM SIDE EFFECT it produces
-// (shared/peer-cache.ts's session-identity file), the actual property being
-// protected.
+// Exercise the filesystem side effect: inspecting the env object would not prove the spawned server consumes it.
 
 import { test, expect, afterAll } from "bun:test";
-import { mkdtempSync, rmSync, existsSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, existsSync, writeFileSync } from "node:fs";
 import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
-import { startBroker, stopBroker, scrubEnv, type TestBroker } from "./_helper.ts";
+import { FIXTURE_OPERATOR_ID, groupId, mintRunCredential, sha256Hex, startBroker, stopBroker, scrubEnv, type TestBroker } from "./_helper.ts";
 import { sessionIdentityFileName } from "../shared/peer-cache.ts";
 
 const brokers: TestBroker[] = [];
@@ -34,6 +29,25 @@ test("a server.ts spawned through scrubEnv writes its session-identity file unde
   brokers.push(b);
   const scratch = mkdtempSync(join(tmpdir(), "cp-scrubenv-home-"));
   dirs.push(scratch);
+  const secret = crypto.randomUUID();
+  mkdirSync(join(scratch, "claude-peers"), { recursive: true });
+  writeFileSync(join(scratch, "claude-peers", "config.json"), JSON.stringify({ groups: { alpha: secret }, default_group: "alpha" }));
+  const run = await mintRunCredential(b, { id: await groupId(secret), hash: await sha256Hex(secret) });
+  const credFile = join(scratch, "run-credential.json");
+  writeFileSync(
+    credFile,
+    JSON.stringify({
+      brokerUrl: b.url,
+      operatorId: FIXTURE_OPERATOR_ID,
+      tokenId: run.tokenId,
+      sessionRef: `window-${run.run}`,
+      privateKey: run.cred.privateKey,
+      publicKey: run.cred.publicKey,
+      osUserHash: "hash",
+      inbox: { version: 1, run_ref: run.run, group_id: run.group },
+    }),
+    { mode: 0o600 }
+  );
 
   // Unique per run so this assertion can never collide with a real tile's
   // own token (CLAUDE_PEERS_DESK_SESSION is stable per tile, never this
@@ -46,11 +60,13 @@ test("a server.ts spawned through scrubEnv writes its session-identity file unde
   // stdin stays open ("pipe", never .end()'d): "ignore" reads as immediate
   // EOF, which server.ts treats as "Claude Code closed" and races its own
   // cleanup()/delete against the register write this test is trying to catch.
-  const proc = Bun.spawn(["bun", "server.ts"], {
+  const proc = Bun.spawn(["bun", join(import.meta.dir, "..", "server.ts")], {
+    cwd: scratch,
     env: scrubEnv(scratch, {
       CLAUDE_PEERS_BROKER_URL: b.url,
       CLAUDE_PEERS_PORT: String(b.port),
       CLAUDE_PEERS_DESK_SESSION: token,
+      CLAUDE_PEERS_APPROVAL_FILE: credFile,
     }),
     stdio: ["pipe", "ignore", "ignore"],
   });

@@ -419,6 +419,25 @@ export function buildAnnouncePayload(params: SendAnnounceParams): {
   }
 }
 
+/**
+ * A run-scoped read or purge of the operator inbox: the broker answers only the
+ * entries of `runRef`, and only for a proof of the operator key over the whole
+ * body, so `sign` must be the operator's v1 signer for that door.
+ */
+export interface RunInboxSigner {
+  runRef: string
+  sign(body: Record<string, unknown>, door: 'drain' | 'purge'): unknown
+}
+
+function signRunInboxBody(
+  base: Record<string, unknown>,
+  run: RunInboxSigner,
+  door: 'drain' | 'purge'
+): Record<string, unknown> {
+  const body = { ...base, run_ref: run.runRef }
+  return { ...body, auth: run.sign(body, door) }
+}
+
 /** One drained operator-inbox message (PLAN C12). */
 export interface OperatorInboxMessage {
   id: number
@@ -440,20 +459,21 @@ export interface OperatorInboxMessage {
  * broker's legacy delivered=0 drain.
  */
 export async function fetchOperatorInbox(
-  params: { groupId: string; secret: string; sessionId?: string },
+  params: { groupId: string; secret: string; sessionId?: string; run?: RunInboxSigner },
   deps: AnnounceDeps
 ): Promise<OperatorInboxMessage[]> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
   if (deps.endpoint.token) headers['Authorization'] = `Bearer ${deps.endpoint.token}`
   const f = deps.fetchFn ?? fetch
+  const base = {
+    group_id: params.groupId,
+    group_secret_hash: computeGroupSecretHash(params.secret),
+    ...(params.sessionId ? { session_id: params.sessionId } : {})
+  }
   const res = await f(`${deps.endpoint.url}/operator-inbox`, {
     method: 'POST',
     headers,
-    body: JSON.stringify({
-      group_id: params.groupId,
-      group_secret_hash: computeGroupSecretHash(params.secret),
-      ...(params.sessionId ? { session_id: params.sessionId } : {})
-    })
+    body: JSON.stringify(params.run ? signRunInboxBody(base, params.run, 'drain') : base)
   })
   if (!res.ok) throw new Error(`operator-inbox failed: ${res.status}`)
   return ((await res.json()) as { messages: OperatorInboxMessage[] }).messages
@@ -466,7 +486,7 @@ export async function fetchOperatorInbox(
  * best-effort policy (index.ts wraps both call sites with reportError).
  */
 export async function purgeOperatorInbox(
-  params: { groupId: string; secret: string; sessionId: string } & (
+  params: { groupId: string; secret: string; sessionId: string; run?: RunInboxSigner } & (
     | { scope: 'session' }
     | { scope: 'ids'; ids: number[] }
   ),
@@ -475,16 +495,17 @@ export async function purgeOperatorInbox(
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
   if (deps.endpoint.token) headers['Authorization'] = `Bearer ${deps.endpoint.token}`
   const f = deps.fetchFn ?? fetch
+  const base = {
+    group_id: params.groupId,
+    group_secret_hash: computeGroupSecretHash(params.secret),
+    session_id: params.sessionId,
+    scope: params.scope,
+    ...(params.scope === 'ids' ? { ids: params.ids } : {})
+  }
   const res = await f(`${deps.endpoint.url}/operator-inbox/purge`, {
     method: 'POST',
     headers,
-    body: JSON.stringify({
-      group_id: params.groupId,
-      group_secret_hash: computeGroupSecretHash(params.secret),
-      session_id: params.sessionId,
-      scope: params.scope,
-      ...(params.scope === 'ids' ? { ids: params.ids } : {})
-    })
+    body: JSON.stringify(params.run ? signRunInboxBody(base, params.run, 'purge') : base)
   })
   if (!res.ok) throw new Error(`operator-inbox/purge failed: ${res.status}`)
   return ((await res.json()) as { deleted: number }).deleted

@@ -63,7 +63,21 @@ async function register(
   });
 }
 
-async function sendToOperator(fromToken: string, text: string, b: TestBroker = broker) {
+async function insertLegacyOperatorMessage(fromToken: string, text: string, b: TestBroker = broker): Promise<void> {
+  const db = openBrokerDb(b.dbPath);
+  try {
+    const peer = db.query("SELECT group_id FROM peers WHERE instance_token = ?").get(fromToken) as { group_id: string } | null;
+    if (!peer) throw new Error("insertLegacyOperatorMessage: unknown sender");
+    db.run(
+      "INSERT INTO messages (from_token, to_token, group_id, text, sent_at, delivered) VALUES (?, ?, ?, ?, ?, 0)",
+      [fromToken, OPERATOR_INSTANCE_TOKEN, peer.group_id, text, new Date().toISOString()]
+    );
+  } finally {
+    db.close();
+  }
+}
+
+async function postToOperator(fromToken: string, text: string, b: TestBroker = broker) {
   return post<{ ok: boolean; error?: string }>(`${b.url}/send-message`, {
     from_token: fromToken,
     to_peer_id: "operator",
@@ -104,13 +118,11 @@ async function purge(
   });
 }
 
-test("send_message to 'operator' lands in the group inbox; drain marks delivered", async () => {
+test("a legacy operator message lands in the group inbox; the legacy drain marks it delivered", async () => {
   const g = { id: await groupId("op-A"), hash: await sha256Hex("op-A") };
   const a = await register("hOp1", "/opA1", g);
 
-  const sent = await sendToOperator(a.body.instance_token, "review is done, merge?");
-  expect(sent.status).toBe(200);
-  expect((sent.body as { ok: boolean }).ok).toBe(true);
+  await insertLegacyOperatorMessage(a.body.instance_token, "review is done, merge?");
 
   const first = await drain(g);
   expect(first.status).toBe(200);
@@ -141,7 +153,7 @@ test("the inbox is group-isolated and rejects a wrong secret with 401", async ()
   const a = await register("hOpI1", "/opI1", gA);
   await register("hOpI2", "/opI2", gB);
 
-  await sendToOperator(a.body.instance_token, "only group A sees this");
+  await insertLegacyOperatorMessage(a.body.instance_token, "only group A sees this");
 
   const drainB = await drain(gB);
   expect((drainB.body as { messages: unknown[] }).messages.length).toBe(0);
@@ -187,7 +199,7 @@ test("the reserved operator row never surfaces in list_peers or group-stats", as
 test("volet 1 deposit: send_message to 'operator' is refused from the 'default' group", async () => {
   const a = await register("hOpD1", "/opD1"); // no group -> 'default'
 
-  const sent = await sendToOperator(a.body.instance_token, "nobody will ever drain this");
+  const sent = await postToOperator(a.body.instance_token, "nobody will ever drain this");
   expect(sent.status).toBe(200);
   const body = sent.body as { ok: boolean; error?: string };
   expect(body.ok).toBe(false);
@@ -204,13 +216,13 @@ test("volet 1 deposit: send_message to 'operator' is refused from the 'default' 
     db.close();
   }
 
-  // Negative control on the probe itself: the same call in a secret-pinned
+  // Negative control on the probe itself: an attested send in a secret-pinned
   // group still succeeds, so `ok:false` above comes from the group, not from a
   // send path broken for everyone.
-  const g = { id: await groupId("op-dep-ok"), hash: await sha256Hex("op-dep-ok") };
-  const b = await register("hOpD2", "/opD2", g);
-  const okSend = await sendToOperator(b.body.instance_token, "this one is drainable");
-  expect((okSend.body as { ok: boolean }).ok).toBe(true);
+  const { runs } = await newRuns("op-dep-ok");
+  const b = await registerAttestedInstance(broker, runs[0]!, "hOpD2", "/opD2");
+  const okSend = await depositToOperator(broker, b.body.instance_token, "this one is drainable", runs[0]!);
+  expect(okSend.body.ok).toBe(true);
 });
 
 test("volet 1 drain: /operator-inbox on 'default' is refused with 403 and consumes nothing", async () => {
@@ -544,8 +556,8 @@ test("lot 1A: two sessions on the same group each see everything; neither consum
   const firstB = await drainAs(g, "sess-B");
   expect((firstB.body as { messages: unknown[] }).messages.length).toBe(0);
 
-  await sendToOperator(a.body.instance_token, "msg 1");
-  await sendToOperator(a.body.instance_token, "msg 2");
+  await insertLegacyOperatorMessage(a.body.instance_token, "msg 1");
+  await insertLegacyOperatorMessage(a.body.instance_token, "msg 2");
 
   const readA = await drainAs(g, "sess-A");
   const messagesA = (readA.body as { messages: { text: string }[] }).messages;
@@ -567,7 +579,7 @@ test("lot 1A: two sessions on the same group each see everything; neither consum
 test("lot 1A: session_id absent is byte-identical to legacy -- no operator_inbox_sessions row is written", async () => {
   const g = { id: await groupId("op-lot1a-legacy"), hash: await sha256Hex("op-lot1a-legacy") };
   const a = await register("hLot1aL", "/lot1aL", g);
-  await sendToOperator(a.body.instance_token, "legacy path");
+  await insertLegacyOperatorMessage(a.body.instance_token, "legacy path");
 
   const legacy = await drain(g); // no session_id in the body
   expect((legacy.body as { messages: { text: string }[] }).messages.map((m) => m.text)).toEqual([
@@ -591,7 +603,7 @@ test("a legacy cursor older than its TTL, stored as an ISO timestamp, is collect
     const g = { id: await groupId("op-legacy-cursor-gc"), hash: await sha256Hex("op-legacy-cursor-gc") };
     const a = await register("hLegacyCursorGc", "/legacycursorgc", g, cellBroker);
     await drainAs(g, "dead-cursor", cellBroker);
-    await sendToOperator(a.body.instance_token, "behind a dead cursor", cellBroker);
+    await insertLegacyOperatorMessage(a.body.instance_token, "behind a dead cursor", cellBroker);
 
     const staleSeen = new Date(Date.now() - 5 * 60_000).toISOString();
     const db = openBrokerDb(cellBroker.dbPath);
@@ -626,7 +638,7 @@ test("lot 1A: a session_id reaped by the purge GC re-seeds as brand-new (no repl
   const a = await register("hLot1aR", "/lot1aR", g);
 
   await drainAs(g, "sess-stale"); // registers, cursor = 0
-  await sendToOperator(a.body.instance_token, "sent before the reap");
+  await insertLegacyOperatorMessage(a.body.instance_token, "sent before the reap");
   const beforeReap = await drainAs(g, "sess-stale");
   expect((beforeReap.body as { messages: { text: string }[] }).messages.map((m) => m.text)).toEqual([
     "sent before the reap",
@@ -673,7 +685,7 @@ test("lot 1A: a session_id reaped by the purge GC re-seeds as brand-new (no repl
 
   // A message sent AFTER the re-registration is, however, seen normally --
   // the reap did not leave the session permanently blind.
-  await sendToOperator(a.body.instance_token, "sent after the reap");
+  await insertLegacyOperatorMessage(a.body.instance_token, "sent after the reap");
   const followUp = await drainAs(g, "sess-stale");
   expect((followUp.body as { messages: { text: string }[] }).messages.map((m) => m.text)).toEqual([
     "sent after the reap",
@@ -690,9 +702,9 @@ test("lot 1C purge scope=session: bounded by the slowest LIVE session, even when
   await drainAs(g, "sess-fast");
   await drainAs(g, "sess-slow");
 
-  await sendToOperator(a.body.instance_token, "m1");
-  await sendToOperator(a.body.instance_token, "m2");
-  await sendToOperator(a.body.instance_token, "m3");
+  await insertLegacyOperatorMessage(a.body.instance_token, "m1");
+  await insertLegacyOperatorMessage(a.body.instance_token, "m2");
+  await insertLegacyOperatorMessage(a.body.instance_token, "m3");
 
   // sess-fast reads everything (cursor -> id of m3). sess-slow never drains
   // again, so it stays live (last_seen_at from its registration) but its
@@ -737,8 +749,8 @@ test("lot 1C purge scope=ids: deletes only the named ids, and only within the ca
   const a = await register("hLot1cIA", "/lot1cIA", gA);
   const b = await register("hLot1cIB", "/lot1cIB", gB);
 
-  await sendToOperator(a.body.instance_token, "group A message");
-  await sendToOperator(b.body.instance_token, "group B message");
+  await insertLegacyOperatorMessage(a.body.instance_token, "group A message");
+  await insertLegacyOperatorMessage(b.body.instance_token, "group B message");
 
   const db = openBrokerDb(broker.dbPath, { readonly: true });
   let idA: number, idB: number;
@@ -832,9 +844,9 @@ test("purge BLOCKER 1: a group-A caller cannot hijack group-B's cursor by naming
   // messages.id is a GLOBAL autoincrement, so bumping "victim-sess" to
   // group A's MAX(id) jumps past B's pending id too, even though the
   // attacker only ever proved knowledge of group A's own secret.
-  await sendToOperator(b.body.instance_token, "B's actual unread mail");
-  await sendToOperator(a.body.instance_token, "A message 1");
-  await sendToOperator(a.body.instance_token, "A message 2");
+  await insertLegacyOperatorMessage(b.body.instance_token, "B's actual unread mail");
+  await insertLegacyOperatorMessage(a.body.instance_token, "A message 1");
+  await insertLegacyOperatorMessage(a.body.instance_token, "A message 2");
 
   // Authenticated as group A throughout; "victim-sess" belongs to group B.
   await purge(gA, "victim-sess", "session");
@@ -905,7 +917,7 @@ test("cursor drain marks delivered too (MAJOR 2): the TTL sweep must not treat c
   const a = await register("hMajor2", "/major2", g);
 
   await drainAs(g, "sess-m2");
-  await sendToOperator(a.body.instance_token, "cursor-read message");
+  await insertLegacyOperatorMessage(a.body.instance_token, "cursor-read message");
   const drained = await drainAs(g, "sess-m2");
   expect((drained.body as { messages: { text: string }[] }).messages.map((m) => m.text)).toEqual([
     "cursor-read message",
@@ -933,7 +945,7 @@ test("purge scope=session (MAJOR 3): the GC reap raises the floor within the SAM
 
   // Live session: drains everything, so its last_id tracks MAX(id).
   await drainAs(g, "sess-live");
-  await sendToOperator(a.body.instance_token, "m1");
+  await insertLegacyOperatorMessage(a.body.instance_token, "m1");
   await drainAs(g, "sess-live");
 
   // Age sess-dead past the GC TTL.
@@ -1018,8 +1030,8 @@ test("cursor session_id is scoped per group (MAJOR 1, composite PK): the same se
   // "lot 1A" tests above): a message sent BEFORE a group's first drain is
   // invisible to it -- by design, a fresh session only watches forward.
   const premierA = await drainAs(gA, SESSION);
-  await sendToOperator(a.body.instance_token, "A msg");
-  await sendToOperator(b.body.instance_token, "B msg");
+  await insertLegacyOperatorMessage(a.body.instance_token, "A msg");
+  await insertLegacyOperatorMessage(b.body.instance_token, "B msg");
   // "B msg" already exists when B registers here, so B's cursor seeds past
   // it -- under the CORRECT composite-PK code this is a clean, unrelated
   // row; under a session_id-only PK, B's registration instead CONFLICTS
@@ -1161,7 +1173,7 @@ test("a run credential does not speak for an instance of another run, an unbound
   expect((await depositToOperator(broker, a.body.instance_token, "A with A", runA)).body.ok).toBe(true);
 });
 
-test("an unattested deposit keeps working, carries no provenance, and no body field makes it a system notification", async () => {
+test("an unattested deposit is refused with the remedy and stores nothing, whatever its body claims", async () => {
   const { g, runs } = await newRuns("inb-legacy-deposit");
   const run = runs[0]!;
   const legacy = await register("hLegDep", "/legdep", g);
@@ -1172,12 +1184,20 @@ test("an unattested deposit keeps working, carries no provenance, and no body fi
     author_instance_ref: "forged",
   });
 
-  expect(sent.body.ok).toBe(true);
-  expect(
-    operatorRows("SELECT source_kind, inbox_run_ref, author_instance_ref FROM messages WHERE to_token = ? AND group_id = ?", OPERATOR_INSTANCE_TOKEN, g.id)
-  ).toEqual([{ source_kind: null, inbox_run_ref: null, author_instance_ref: null }]);
+  expect({ status: sent.status, ok: sent.body.ok }).toEqual({ status: 403, ok: false });
+  expect(sent.body.error, "the agent is told how to reach the operator").toContain("restart this session from the Deck");
+  expect(rowsFor(g.id), "a refused deposit leaves no row, system or legacy").toBe(0);
+  expect(runTexts(await drain(g))).toEqual([]);
+});
+
+test("a historical unattested entry stays readable by the legacy reader only, never by a run", async () => {
+  const { g, runs } = await newRuns("inb-legacy-history");
+  const run = runs[0]!;
+  const legacy = await register("hLegHist", "/leghist", g);
+  await insertLegacyOperatorMessage(legacy.body.instance_token, "note from before the upgrade");
+
   expect(runTexts(await drainRun(run, "legacy-note")), "a run never reads an unattested entry").toEqual([]);
-  expect(runTexts(await drain(g))).toEqual(["plain legacy note"]);
+  expect(runTexts(await drain(g))).toEqual(["note from before the upgrade"]);
 });
 
 test("a run reads its own entries and the group's broker notifications, never another run's nor an unattested one", async () => {
@@ -1188,7 +1208,7 @@ test("a run reads its own entries and the group's broker notifications, never an
   const legacy = await register("hIsoL", "/isoL", g);
   await depositToOperator(broker, a.body.instance_token, "from A", runA);
   await depositToOperator(broker, b.body.instance_token, "from B", runB);
-  await depositToOperator(broker, legacy.body.instance_token, "legacy note");
+  await insertLegacyOperatorMessage(legacy.body.instance_token, "legacy note");
   insertSystemNote(g.id, "system note");
 
   await drainAs(g, "legacy-cursor");

@@ -181,8 +181,8 @@ test("Serve shutdown removes the session state even when the Serve quit rejects"
 test("exactly one quit effect removes the session state dir", () => {
   expect(
     referenceSites(readIndex(), 'removeSessionStateDir'),
-    'removeSessionStateDir must appear exactly at: its import, the group switch in adoptScope, and the serve quit effect in runBeforeQuit'
-  ).toEqual(['import', 'const adoptScope', 'const runBeforeQuit'])
+    'removeSessionStateDir must appear exactly at: its import, the group switch cleanup in scopeWiring, and the serve quit effect in runBeforeQuit'
+  ).toEqual(['import', 'const scopeWiring', 'const runBeforeQuit'])
 });
 
 test("the Serve quit deadline expires before the quit effect bound", () => {

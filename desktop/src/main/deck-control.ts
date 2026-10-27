@@ -84,7 +84,17 @@ const SPAWN_APPROVAL_PENDING_NOTE = 'awaiting operator approval -- retry this ex
 /** A session as deck-control sees it: the renderer-visible runtime plus the caller id minted for a team-lead tile. */
 export type DeckControlSession = SessionRuntime & { mintedCallerId?: string | null }
 
+export type CallerAuthority = 'author' | 'lead' | 'supervisor'
+
 export interface DeckControlDeps {
+  /**
+   * Run mandates, one per caller, minted asynchronously by the main. A request
+   * is never a grant: the mandate is usable only once the main has it ready.
+   */
+  inboxMandates: {
+    request(callerRef: string, authority: CallerAuthority): void
+    release(callerRef: string): void
+  }
   listAgents(): string[]
   listModels(): ModelOption[]
   listPresets(): LaunchPreset[]
@@ -182,7 +192,8 @@ export interface DeckControlServer {
    */
   mintCaller(
     label: string,
-    allowedTools?: readonly string[] | null
+    allowedTools?: readonly string[] | null,
+    authority?: CallerAuthority
   ): { token: string; callerId: string }
   /**
    * Revoke the caller minted for a team-lead SESSION on its final removal, keyed by the session id (the object index
@@ -350,6 +361,8 @@ interface CallerEntry {
   callerId: string
   /** null = every tool, array = only those, empty array = none (Card 6c380073). */
   allowedTools: string[] | null
+  /** Set by the provisioning path that minted the caller, never read from its label. */
+  authority: CallerAuthority
 }
 
 export function startDeckControl(
@@ -361,24 +374,30 @@ export function startDeckControl(
   // BEFORE dispatch ever runs. The historical token is registered here as
   // callerId 'supervisor' with an unrestricted (null) allow-list.
   const callerTable = new Map<string, CallerEntry>()
-  callerTable.set(token, { callerId: 'supervisor', allowedTools: null })
+  callerTable.set(token, { callerId: 'supervisor', allowedTools: null, authority: 'supervisor' })
+  deps.inboxMandates.request('supervisor', 'supervisor')
 
   /**
    * Mint a fresh token/callerId pair (Card 6c380073). callerId includes a
    * random suffix so two mints of the same label (e.g. two team-lead spawns)
    * never collide -- each gets its own ownedSessions entries and its own
    * --mcp-config filename downstream.
+   * The authority defaults to author: a 'team-lead' label alone elevates
+   * nothing, only a lead provisioning path passing 'lead' does.
    */
   function mintCaller(
     label: string,
-    allowedTools?: readonly string[] | null
+    allowedTools?: readonly string[] | null,
+    authority: CallerAuthority = 'author'
   ): { token: string; callerId: string } {
     const mintedToken = randomBytes(24).toString('hex')
     const callerId = `${label}-${randomBytes(4).toString('hex')}`
     callerTable.set(mintedToken, {
       callerId,
-      allowedTools: allowedTools ? [...allowedTools] : null
+      allowedTools: allowedTools ? [...allowedTools] : null,
+      authority
     })
+    deps.inboxMandates.request(callerId, authority)
     return { token: mintedToken, callerId }
   }
 
@@ -388,9 +407,14 @@ export function startDeckControl(
    * by scanning. No-op if callerId is not registered.
    */
   function revokeCaller(callerId: string): void {
+    let revoked = false
     for (const [tok, entry] of callerTable) {
-      if (entry.callerId === callerId) callerTable.delete(tok)
+      if (entry.callerId === callerId) {
+        callerTable.delete(tok)
+        revoked = true
+      }
     }
+    if (revoked) deps.inboxMandates.release(callerId)
   }
 
   /** The caller id minted for this tile's own calls: runtime state first, then the spawn-time map. */
@@ -455,7 +479,7 @@ export function startDeckControl(
     // BOTH mintCaller (server-side scope) and writeTeamLeadMcpConfig
     // (client-side DECK_CONTROL_TOOLS) below -- never imported a second time
     // at either consumer, so the two can never independently drift apart.
-    const leadMint = embedded?.id === 'team-lead' ? mintCaller('team-lead', TEAM_LEAD_DECK_TOOLS) : null
+    const leadMint = embedded?.id === 'team-lead' ? mintCaller('team-lead', TEAM_LEAD_DECK_TOOLS, 'lead') : null
     const input: CreateSessionInput = {
       name: entry.name ?? embedded?.id,
       agent: entry.agent,

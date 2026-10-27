@@ -354,7 +354,10 @@ const NOT_APP_STATE: Record<string, NotAppStateRule> = {
 };
 
 /** index.ts hands the per-group dir builder to ipc.ts through the deps object. */
-const ACCESSOR_BINDINGS: readonly AccessorBinding[] = [{ file: "index.ts", callee: "registerIpc", prop: SESSION_DIR_BUILDER }];
+const ACCESSOR_BINDINGS: readonly AccessorBinding[] = [
+  { file: "index.ts", callee: "registerIpc", prop: SESSION_DIR_BUILDER },
+  { file: "index.ts", callee: "createInboxEffects", prop: "sessionDir", singleCall: true, bindingFactory: "createSessionDirAccessor" },
+];
 
 // ----- sources -----
 
@@ -379,6 +382,7 @@ const REAL_INPUT = {
   notAppState: NOT_APP_STATE,
   sessionDirBuilders: SESSION_DIR_BUILDERS,
   accessorBindings: ACCESSOR_BINDINGS,
+  capturedDirectoryFiles: ["inbox-session.ts"],
 };
 
 // ----- the guard on the real tree -----
@@ -537,11 +541,95 @@ test("mutation: a classified session file with its callers correctly wired is cl
   expect(findings).toEqual([]);
 });
 
+const INBOX_EFFECTS_BINDING = ACCESSOR_BINDINGS.filter((b) => b.callee === "createInboxEffects");
+
+const SESSION_DIR_DECL = "const sessionDir = createSessionDirAccessor({ stateDir: appStateDir, groupId: () => activeScope.groupId })";
+const INBOX_EFFECTS_CALL = "const inboxEffects = createInboxEffects({ sessionDir, epoch: () => 0 })";
+
+function bindingFindings(sources: Record<string, string>) {
+  return auditStateScopes({
+    ...MUTATION_BASE,
+    sources,
+    accessorBindings: INBOX_EFFECTS_BINDING,
+    capturedDirectoryFiles: REAL_INPUT.capturedDirectoryFiles,
+  }).filter((f) => f.kind !== "stale-rule");
+}
+
+test("mutation: the inbox effects factory called once with the session accessor is clean", () => {
+  expect(bindingFindings({ "index.ts": [SESSION_DIR_DECL, INBOX_EFFECTS_CALL].join("\n") })).toEqual([]);
+});
+
+test("mutation: a conforming decoy call next to a real call fed the state root turns the binding red", () => {
+  const findings = bindingFindings({
+    "index.ts": [SESSION_DIR_DECL, INBOX_EFFECTS_CALL, "const real = createInboxEffects({ sessionDir: appStateDir })"].join("\n"),
+  });
+  expect(findings.map((f) => [f.kind, f.detail])).toEqual([["unbound-accessor", "createInboxEffects is called 2 times in the scan (expected exactly 1)"]]);
+});
+
+test("mutation: a second call in another module turns the binding red", () => {
+  const findings = bindingFindings({
+    "index.ts": [SESSION_DIR_DECL, INBOX_EFFECTS_CALL].join("\n"),
+    "other.ts": "const x = createInboxEffects({ sessionDir: root })",
+  });
+  expect(findings.map((f) => f.kind)).toEqual(["unbound-accessor"]);
+});
+
+test("mutation: no call at all turns the binding red", () => {
+  const findings = bindingFindings({ "index.ts": SESSION_DIR_DECL });
+  expect(findings.map((f) => f.detail)).toEqual(["createInboxEffects is called 0 times in the scan (expected exactly 1)"]);
+});
+
+test("mutation: a duplicated accessor key turns the binding red, whichever of the two is the root", () => {
+  for (const object of ["{ sessionDir, sessionDir: appStateDir }", "{ sessionDir: appStateDir, sessionDir }"]) {
+    const findings = bindingFindings({ "index.ts": [SESSION_DIR_DECL, `createInboxEffects(${object})`].join("\n") });
+    expect(findings.map((f) => f.detail), object).toEqual(["sessionDir: sessionDir is written 2 times in the object"]);
+  }
+});
+
+test("mutation: a spread in the object, which can override the accessor, turns the binding red", () => {
+  const findings = bindingFindings({ "index.ts": [SESSION_DIR_DECL, "createInboxEffects({ sessionDir, ...extra })"].join("\n") });
+  expect(findings[0]!.detail).toContain("a spread");
+});
+
+test("mutation: an accessor that is the state root turns the binding red", () => {
+  const byRoot = bindingFindings({ "index.ts": [SESSION_DIR_DECL, "createInboxEffects({ sessionDir: appStateDir })"].join("\n") });
+  expect(byRoot.map((f) => f.kind)).toEqual(["unbound-accessor"]);
+  const byBinding = bindingFindings({ "index.ts": ["const sessionDir = appStateDir", INBOX_EFFECTS_CALL].join("\n") });
+  expect(byBinding.map((f) => f.kind)).toEqual(["unbound-accessor"]);
+});
+
+test("mutation: a second accessor built inline in the factory call, or a sessionDir bound twice, turns the binding red", () => {
+  const inline = bindingFindings({
+    "index.ts": [SESSION_DIR_DECL, "createInboxEffects({ sessionDir: createSessionDirAccessor({ stateDir: appStateDir, groupId: () => g }), epoch: () => 0 })"].join("\n"),
+  });
+  expect(inline.map((f) => f.detail)).toEqual([expect.stringContaining("is not the bare identifier sessionDir")]);
+  const reassigned = bindingFindings({
+    "index.ts": [
+      "let sessionDir = createSessionDirAccessor({ stateDir: appStateDir, groupId: () => activeScope.groupId })",
+      "sessionDir = createSessionDirAccessor({ stateDir: appStateDir, groupId: () => 'cccccccccccccccc' })",
+      INBOX_EFFECTS_CALL,
+    ].join("\n"),
+  });
+  expect(reassigned.map((f) => [f.kind, f.detail])).toEqual([["unbound-accessor", "sessionDir must have exactly one binding, declared const and calling createSessionDirAccessor (found 1)"]]);
+  const twice = bindingFindings({ "index.ts": [SESSION_DIR_DECL, "let sessionDir = createSessionDirAccessor({})", INBOX_EFFECTS_CALL].join("\n") });
+  expect(twice.map((f) => f.detail)).toEqual([expect.stringContaining("exactly one binding")]);
+  const viaBuilder = bindingFindings({ "index.ts": ["const sessionDir = sessionStateDir(appStateDir(), g)", INBOX_EFFECTS_CALL].join("\n") });
+  expect(viaBuilder.map((f) => f.detail)).toEqual([expect.stringContaining("exactly one binding")]);
+});
+
+test("mutation: captured.directory handed to a store call is a finding in index.ts, clean in the factory module only", () => {
+  const call = "appendInboxHistory(captured.directory, toPersist)";
+  expect(bindingFindings({ "index.ts": [SESSION_DIR_DECL, INBOX_EFFECTS_CALL, call].join("\n") }).map((f) => f.kind)).toEqual(["unwired-session-call"]);
+  expect(bindingFindings({ "index.ts": [SESSION_DIR_DECL, INBOX_EFFECTS_CALL].join("\n"), "inbox-session.ts": call })).toEqual([]);
+  const root = "appendInboxHistory(appStateDir(), toPersist)";
+  expect(bindingFindings({ "index.ts": [SESSION_DIR_DECL, INBOX_EFFECTS_CALL].join("\n"), "inbox-session.ts": root }).map((f) => f.kind)).toEqual(["unwired-session-call"]);
+});
+
 test("mutation: the deps object handing the builder to ipc.ts is checked too (a root binding there turns the guard red)", () => {
   const findings = auditStateScopes({
     ...MUTATION_BASE,
     sources: { "index.ts": "registerIpc({ service, sessionStateDir: () => join(app.getPath('userData'), APP_STATE_SUBDIR) })\n" },
-    accessorBindings: ACCESSOR_BINDINGS,
+    accessorBindings: ACCESSOR_BINDINGS.filter((b) => b.callee === "registerIpc"),
   }).filter((f) => f.kind !== "stale-rule");
   expect(findings.map((f) => f.kind)).toEqual(["unbound-accessor"]);
 });

@@ -29,7 +29,11 @@ function makeService(projectDir: string, capture: () => unknown[]): WorkspaceSer
     getConfig: () => ({ displayMode: '2x2', gridCols: 2, gridRows: 2 }),
     setConfig: () => {},
     getScope: () => ({ secret: 's', scopeKind: 'ephemeral', groupId: 'a'.repeat(32), name: 'test-scope', root: 'test' }),
-    adoptScope: () => {},
+    adoptScope: async (_ws: unknown, own: () => boolean) =>
+      own() ? { state: 'published', scope: { projectKey: 'project', groupId: 'a'.repeat(32) } } : { state: 'lock-race' },
+    cancelScopeAdoption: () => {},
+    closeScopeAdoption: () => {},
+    onCredentialFailure: () => {},
     confirmShellFields: async () => {
       throw new Error('confirmShellFields must not be called: no fixture carries args')
     },

@@ -3,6 +3,7 @@ import { test, expect, describe, afterAll, beforeEach, afterEach } from "bun:tes
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { getEventListeners } from "node:events";
 import { ApprovalRuntime, armApprovalsAtStartup, retryOperatorTrust } from "../desktop/src/main/approval-runtime.ts";
 import { onDeckError } from "../desktop/src/main/log.ts";
 import {
@@ -14,6 +15,7 @@ import {
 import { deriveOperatorId, generateCredential } from "../shared/approval.ts";
 import { publicKeyFingerprint } from "../shared/operator-trust.ts";
 import type { SecretCipher } from "../desktop/src/main/scope-secrets.ts";
+import { reachedWithin } from "./_bounded-await.ts";
 
 const dirs: string[] = [];
 afterAll(() => {
@@ -185,12 +187,240 @@ function stubMintSuccess(): void {
         headers: { "content-type": "application/json" },
       });
     }
-    return new Response(JSON.stringify({ token_id: "tok_test", expires_at: new Date(Date.now() + 3600_000).toISOString() }), {
+    return new Response(JSON.stringify({ token_id: "tok_test", capabilities: { inbox_provenance: 1 }, expires_at: new Date(Date.now() + 3600_000).toISOString() }), {
       status: 200,
       headers: { "content-type": "application/json" },
     });
   }) as unknown as typeof fetch;
 }
+
+describe("ApprovalRuntime.whenPreparationSettled()", () => {
+  test("waits until a ready preparation is abandoned", async () => {
+    stubMintSuccess();
+    const runtime = new ApprovalRuntime({
+      stateDir: tmp(),
+      cipher: fakeCipher,
+      endpoint: () => ({ url: "http://broker.local", token: "" }),
+      runId: "run-test",
+      host: "test-host",
+      groupId: () => "g-runtime",
+    });
+
+    const preparation = await runtime.prepareScope({ projectKey: "project", groupId: "g-target" });
+    expect(preparation.state).toBe("ready");
+    const settled = runtime.whenPreparationSettled();
+    let waiting = true;
+    void settled.then(() => { waiting = false; });
+    await Promise.resolve();
+    expect(waiting).toBe(true);
+    if (preparation.state === "ready") await preparation.abandon();
+
+    await expect(reachedWithin(settled, "the abandoned preparation settles its waiters")).resolves.toBeUndefined();
+  });
+
+  test("settles after an in-flight preparation refuses", async () => {
+    let releaseMint!: (response: Response) => void;
+    let mintStarted!: () => void;
+    const started = new Promise<void>((resolve) => { mintStarted = resolve; });
+    const response = new Promise<Response>((resolve) => { releaseMint = resolve; });
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/health")) return new Response(JSON.stringify({ operator_trust_version: 1, operator_trust_state: "ready" }), { status: 200 });
+      if (url.endsWith("/operator/check")) {
+        const body = JSON.parse(String(init?.body)) as { public_key: string };
+        return new Response(JSON.stringify({ operator_id: deriveOperatorId(body.public_key), protocol_version: 1 }), { status: 200 });
+      }
+      if (url.endsWith("/approval/token-mint")) {
+        mintStarted();
+        return response;
+      }
+      return new Response(JSON.stringify({ revoked: 1 }), { status: 200 });
+    }) as unknown as typeof fetch;
+    const runtime = new ApprovalRuntime({
+      stateDir: tmp(),
+      cipher: fakeCipher,
+      endpoint: () => ({ url: "http://broker.local", token: "" }),
+      runId: "run-test",
+      host: "test-host",
+      groupId: () => "g-runtime",
+    });
+
+    const preparing = runtime.prepareScope({ projectKey: "project", groupId: "g-target" });
+    await reachedWithin(started, "the preparation reaches mint");
+    const settled = runtime.whenPreparationSettled();
+    releaseMint(new Response(JSON.stringify({ token_id: "tok_test", capabilities: {}, expires_at: new Date(Date.now() + 3600_000).toISOString() }), { status: 200 }));
+
+    await expect(preparing).resolves.toMatchObject({ state: "refused", cause: "capability" });
+    await expect(reachedWithin(settled, "the refused preparation settles its waiters")).resolves.toBeUndefined();
+  });
+
+  test("aborting an observer does not abandon its preparation", async () => {
+    stubMintSuccess();
+    const runtime = new ApprovalRuntime({
+      stateDir: tmp(),
+      cipher: fakeCipher,
+      endpoint: () => ({ url: "http://broker.local", token: "" }),
+      runId: "run-test",
+      host: "test-host",
+      groupId: () => "g-runtime",
+    });
+    const preparation = await runtime.prepareScope({ projectKey: "project", groupId: "g-target" });
+    const controller = new AbortController();
+    const settled = runtime.whenPreparationSettled(controller.signal);
+    controller.abort();
+
+    await expect(reachedWithin(settled, "the aborted observer resolves")).resolves.toBeUndefined();
+    expect(runtime.publishedRootStatus({ projectKey: "project", groupId: "g-target" })).toBe("pending");
+    if (preparation.state === "ready") await preparation.abandon();
+  });
+
+  test("disarming settles an observer while mint remains in flight", async () => {
+    let releaseMint!: (response: Response) => void;
+    let mintStarted!: () => void;
+    const started = new Promise<void>((resolve) => { mintStarted = resolve; });
+    const response = new Promise<Response>((resolve) => { releaseMint = resolve; });
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/health")) return new Response(JSON.stringify({ operator_trust_version: 1, operator_trust_state: "ready" }), { status: 200 });
+      if (url.endsWith("/operator/check")) {
+        const body = JSON.parse(String(init?.body)) as { public_key: string };
+        return new Response(JSON.stringify({ operator_id: deriveOperatorId(body.public_key), protocol_version: 1 }), { status: 200 });
+      }
+      if (url.endsWith("/approval/token-mint")) {
+        mintStarted();
+        return response;
+      }
+      return new Response(JSON.stringify({ revoked: 1 }), { status: 200 });
+    }) as unknown as typeof fetch;
+    const runtime = new ApprovalRuntime({
+      stateDir: tmp(),
+      cipher: fakeCipher,
+      endpoint: () => ({ url: "http://broker.local", token: "" }),
+      runId: "run-test",
+      host: "test-host",
+      groupId: () => "g-runtime",
+    });
+
+    const preparing = runtime.prepareScope({ projectKey: "project", groupId: "g-target" });
+    await reachedWithin(started, "the preparation reaches mint before disarm");
+    const settled = runtime.whenPreparationSettled();
+    const disarming = runtime.disarm();
+
+    await expect(reachedWithin(settled, "disarm settles the observer before mint returns")).resolves.toBeUndefined();
+    releaseMint(new Response(JSON.stringify({ token_id: "tok_test", capabilities: { inbox_provenance: 1 }, expires_at: new Date(Date.now() + 3600_000).toISOString() }), { status: 200 }));
+    await preparing;
+    await disarming;
+  });
+
+  function newRuntime(): ApprovalRuntime {
+    return new ApprovalRuntime({
+      stateDir: tmp(),
+      cipher: fakeCipher,
+      endpoint: () => ({ url: "http://broker.local", token: "" }),
+      runId: "run-test",
+      host: "test-host",
+      groupId: () => "g-runtime",
+    });
+  }
+
+  function holdMint(): { started: Promise<void>; release(): void } {
+    let respond!: (response: Response) => void;
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    const response = new Promise<Response>((resolve) => { respond = resolve; });
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/health")) return new Response(JSON.stringify({ operator_trust_version: 1, operator_trust_state: "ready" }), { status: 200 });
+      if (url.endsWith("/operator/check")) {
+        const body = JSON.parse(String(init?.body)) as { public_key: string };
+        return new Response(JSON.stringify({ operator_id: deriveOperatorId(body.public_key), protocol_version: 1 }), { status: 200 });
+      }
+      if (url.endsWith("/approval/token-mint")) {
+        markStarted();
+        return response;
+      }
+      return new Response(JSON.stringify({ revoked: 1 }), { status: 200 });
+    }) as unknown as typeof fetch;
+    return {
+      started,
+      release: () => respond(new Response(JSON.stringify({ token_id: "tok_test", capabilities: { inbox_provenance: 1 }, expires_at: new Date(Date.now() + 3600_000).toISOString() }), { status: 200 })),
+    };
+  }
+
+  test("an already aborted signal settles at once while a preparation is held", async () => {
+    stubMintSuccess();
+    const runtime = newRuntime();
+    const preparation = await runtime.prepareScope({ projectKey: "project", groupId: "g-target" });
+    expect(preparation.state).toBe("ready");
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(reachedWithin(runtime.whenPreparationSettled(controller.signal), "an aborted signal settles its observer")).resolves.toBeUndefined();
+    if (preparation.state === "ready") await preparation.abandon();
+  });
+
+  test("an observer registered after disarm began settles before the in-flight mint returns", async () => {
+    const mint = holdMint();
+    const runtime = newRuntime();
+    const preparing = runtime.prepareScope({ projectKey: "project", groupId: "g-target" });
+    await reachedWithin(mint.started, "the preparation reaches mint before disarm");
+    const disarming = runtime.disarm();
+
+    await expect(reachedWithin(runtime.whenPreparationSettled(), "a disarming runtime settles a late observer")).resolves.toBeUndefined();
+    mint.release();
+    await preparing;
+    await disarming;
+  });
+
+  test("an observer registered during mint stays pending while the ready preparation is held", async () => {
+    const mint = holdMint();
+    const runtime = newRuntime();
+    const preparing = runtime.prepareScope({ projectKey: "project", groupId: "g-target" });
+    await reachedWithin(mint.started, "the preparation reaches mint");
+    const settled = runtime.whenPreparationSettled();
+    let waiting = true;
+    void settled.then(() => { waiting = false; });
+    mint.release();
+    const preparation = await reachedWithin(preparing, "the preparation becomes ready");
+    expect(preparation.state).toBe("ready");
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(waiting).toBe(true);
+    if (preparation.state === "ready") await preparation.abandon();
+
+    await expect(reachedWithin(settled, "abandoning the held preparation settles the observer")).resolves.toBeUndefined();
+  });
+
+  test("settles when the held preparation is published", async () => {
+    stubMintSuccess();
+    const runtime = newRuntime();
+    const preparation = await runtime.prepareScope({ projectKey: "project", groupId: "g-target" });
+    if (preparation.state !== "ready") throw new Error(`preparation refused: ${preparation.cause}`);
+    const settled = runtime.whenPreparationSettled();
+    let waiting = true;
+    void settled.then(() => { waiting = false; });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(waiting).toBe(true);
+    const installed = preparation.install();
+    if (installed.state !== "ready") throw new Error(`install refused: ${installed.cause}`);
+    installed.publish();
+
+    await expect(reachedWithin(settled, "publishing settles the observer")).resolves.toBeUndefined();
+    await runtime.disarm();
+  });
+
+  test("an observer detaches its abort listener once settled", async () => {
+    stubMintSuccess();
+    const runtime = newRuntime();
+    const preparation = await runtime.prepareScope({ projectKey: "project", groupId: "g-target" });
+    const controller = new AbortController();
+    const settled = runtime.whenPreparationSettled(controller.signal);
+    expect(getEventListeners(controller.signal, "abort")).toHaveLength(1);
+    if (preparation.state === "ready") await preparation.abandon();
+    await reachedWithin(settled, "abandoning settles the observer");
+
+    expect(getEventListeners(controller.signal, "abort")).toHaveLength(0);
+  });
+});
 
 describe("armApprovalsAtStartup()", () => {
   beforeEach(() => stubMintSuccess());
@@ -202,7 +432,7 @@ describe("armApprovalsAtStartup()", () => {
       cipher: fakeCipher,
       endpoint: () => ({ url: "http://broker.local", token: "" }),
       runId: "run-test",
-      host: "test-host",
+      host: "test-host", groupId: () => "g-runtime",
     });
 
     const armed = await armApprovalsAtStartup(runtime);
@@ -225,7 +455,7 @@ describe("retryOperatorTrust()", () => {
       cipher: fakeCipher,
       endpoint: () => ({ url: "http://broker.local", token: "" }),
       runId: "run-test",
-      host: "test-host",
+      host: "test-host", groupId: () => "g-runtime",
       onTrustStatus: (state) => {
         current.state = state;
         statuses.push({ state });
@@ -271,7 +501,7 @@ describe("retryOperatorTrust()", () => {
       cipher: fakeCipher,
       endpoint: () => ({ url: "http://broker.local", token: "" }),
       runId: "run-test",
-      host: "test-host",
+      host: "test-host", groupId: () => "g-runtime",
       onTrustStatus: (state) => {
         current.state = state;
         statuses.push(state);
@@ -294,7 +524,7 @@ describe("retryOperatorTrust()", () => {
       cipher: fakeCipher,
       endpoint: () => ({ url: "http://broker.local", token: "" }),
       runId: "run-test",
-      host: "test-host",
+      host: "test-host", groupId: () => "g-runtime",
       onTrustStatus: (state) => { current.state = state; },
     });
     const retry = retryOperatorTrustHandler(runtime, current);
@@ -342,7 +572,7 @@ describe("retryOperatorTrust()", () => {
       cipher: fakeCipher,
       endpoint: () => ({ url: "http://broker.local", token: "" }),
       runId: "run-test",
-      host: "test-host",
+      host: "test-host", groupId: () => "g-runtime",
       onTrustStatus: (state) => statuses.push(state),
     });
     const prior = { state: "not-trusted" };
@@ -362,7 +592,7 @@ describe("retryOperatorTrust()", () => {
       cipher: fakeCipher,
       endpoint: () => ({ url: "http://broker.local", token: "" }),
       runId: "run-test",
-      host: "test-host",
+      host: "test-host", groupId: () => "g-runtime",
       onTrustStatus: (state) => {
         current.state = state;
         statuses.push(state);
@@ -403,7 +633,7 @@ describe("retryOperatorTrust()", () => {
       cipher: fakeCipher,
       endpoint: () => ({ url: "http://broker.local", token: "" }),
       runId: "run-test",
-      host: "test-host",
+      host: "test-host", groupId: () => "g-runtime",
       onTrustStatus: (state) => {
         current.state = state;
         statuses.push(state);
@@ -476,7 +706,7 @@ function trustBroker(outcome: () => TrustOutcome): typeof fetch {
       const body = JSON.parse(String(init?.body)) as { public_key: string };
       return json({ operator_id: deriveOperatorId(body.public_key), protocol_version: 1 });
     }
-    return json({ token_id: "tok_test", expires_at: new Date(Date.now() + 3600_000).toISOString() });
+    return json({ token_id: "tok_test", capabilities: { inbox_provenance: 1 }, expires_at: new Date(Date.now() + 3600_000).toISOString() });
   }) as unknown as typeof fetch;
 }
 
@@ -494,7 +724,7 @@ describe("operator trust refusals reach the Deck error channel", () => {
         cipher: fakeCipher,
         endpoint: () => ({ url: "http://broker.local", token: "" }),
         runId: "run-test",
-        host: "test-host",
+        host: "test-host", groupId: () => "g-runtime",
         onTrustStatus: (_state, key) => { publicKey = key; },
       });
 
@@ -522,7 +752,7 @@ describe("operator trust refusals reach the Deck error channel", () => {
       cipher: fakeCipher,
       endpoint: () => ({ url: "http://broker.local", token: "" }),
       runId: "run-test",
-      host: "test-host",
+      host: "test-host", groupId: () => "g-runtime",
     });
     expect(await runtime.arm()).toBe(true);
     expect(errors).toEqual([]);
@@ -556,7 +786,7 @@ describe("operator trust refusals reach the Deck error channel", () => {
       cipher: fakeCipher,
       endpoint: () => ({ url: "http://broker.local", token: "" }),
       runId: "run-test",
-      host: "test-host",
+      host: "test-host", groupId: () => "g-runtime",
     });
 
     expect(await runtime.arm()).toBe(false);
@@ -577,7 +807,7 @@ describe("operator trust refusals reach the Deck error channel", () => {
       cipher: fakeCipher,
       endpoint: () => ({ url: "http://broker.local", token: "" }),
       runId: "run-test",
-      host: "test-host",
+      host: "test-host", groupId: () => "g-runtime",
     });
     expect(await runtime.arm()).toBe(true);
 
@@ -601,7 +831,7 @@ describe("ApprovalRuntime.arm() without any mobile transport configured", () => 
       cipher: fakeCipher,
       endpoint: () => ({ url: "http://broker.local", token: "" }),
       runId: "run-test",
-      host: "test-host",
+      host: "test-host", groupId: () => "g-runtime",
     });
     const armed = await runtime.arm();
     expect(armed).toBe(true);
@@ -635,7 +865,7 @@ describe("ApprovalRuntime.arm() without any mobile transport configured", () => 
       cipher: fakeCipher,
       endpoint: () => ({ url: "http://broker.local", token: "" }),
       runId: "run-test",
-      host: "test-host",
+      host: "test-host", groupId: () => "g-runtime",
     });
 
     expect(await runtime.arm()).toBe(false);
@@ -656,7 +886,7 @@ describe("ApprovalRuntime.arm() without any mobile transport configured", () => 
       cipher: fakeCipher,
       endpoint: () => ({ url: "http://broker.local", token: "" }),
       runId: "run-test",
-      host: "test-host",
+      host: "test-host", groupId: () => "g-runtime",
       onTrustStatus: (state: string) => states.push(state),
     });
 
@@ -681,7 +911,7 @@ describe("ApprovalRuntime.arm() without any mobile transport configured", () => 
       cipher: fakeCipher,
       endpoint: () => ({ url: "http://broker.local", token: "" }),
       runId: "run-test",
-      host: "test-host",
+      host: "test-host", groupId: () => "g-runtime",
       onTrustStatus: (state: string, publicKey?: string) => {
         states.push(state);
         reportedPublicKey = publicKey;
@@ -719,7 +949,7 @@ describe("ApprovalRuntime.arm() without any mobile transport configured", () => 
       cipher: fakeCipher,
       endpoint: () => ({ url: "http://broker.local", token: "" }),
       runId: "run-test",
-      host: "test-host",
+      host: "test-host", groupId: () => "g-runtime",
       onTrustStatus: (state: string, publicKey?: string) => {
         states.push(state);
         reportedPublicKey = publicKey;
@@ -747,7 +977,7 @@ describe("ApprovalRuntime.arm() without any mobile transport configured", () => 
       cipher: fakeCipher,
       endpoint: () => ({ url: "http://broker.local", token: "" }),
       runId: "run-test",
-      host: "test-host",
+      host: "test-host", groupId: () => "g-runtime",
       onTrustStatus: (state: string) => states.push(state),
     });
 
@@ -775,7 +1005,7 @@ describe("ApprovalRuntime.arm() without any mobile transport configured", () => 
       cipher: fakeCipher,
       endpoint: () => ({ url: "http://broker.local", token: "" }),
       runId: "run-test",
-      host: "test-host",
+      host: "test-host", groupId: () => "g-runtime",
       onTrustStatus: (state: string) => states.push(state),
     });
 
@@ -807,7 +1037,7 @@ describe("ApprovalRuntime.arm() without any mobile transport configured", () => 
       cipher: fakeCipher,
       endpoint: () => ({ url: "http://broker.local", token: "" }),
       runId: "run-test",
-      host: "test-host",
+      host: "test-host", groupId: () => "g-runtime",
       onTrustStatus: (state: string) => states.push(state),
     });
 
@@ -835,7 +1065,7 @@ describe("ApprovalRuntime.arm() without any mobile transport configured", () => 
       cipher: fakeCipher,
       endpoint: () => ({ url: "http://broker.local", token: "" }),
       runId: "run-test",
-      host: "test-host",
+      host: "test-host", groupId: () => "g-runtime",
       onTrustStatus: (state: string) => states.push(state),
     });
 
@@ -852,7 +1082,7 @@ describe("ApprovalRuntime.arm() without any mobile transport configured", () => 
       cipher: fakeCipher,
       endpoint: () => ({ url: "http://broker.local", token: "" }),
       runId: "run-test",
-      host: "test-host",
+      host: "test-host", groupId: () => "g-runtime",
       onTrustStatus: (state: string) => states.push(state),
     });
 
@@ -886,12 +1116,28 @@ describe("ApprovalRuntime.arm() without any mobile transport configured", () => 
       cipher: fakeCipher,
       endpoint: () => ({ url: "http://broker.local", token: "" }),
       runId: "run-test",
-      host: "test-host",
+      host: "test-host", groupId: () => "g-runtime",
     });
 
     expect(await runtime.arm()).toBe(true);
     await runtime.disarm();
     expect(runtime.deps()).toBeNull();
+  });
+
+  test("does not expose a credential path after disarm begins", async () => {
+    const runtime = new ApprovalRuntime({
+      stateDir: tmp(),
+      cipher: fakeCipher,
+      endpoint: () => ({ url: "http://broker.local", token: "" }),
+      runId: "run-test",
+      host: "test-host", groupId: () => "g-runtime",
+    });
+
+    expect(await runtime.arm()).toBe(true);
+    const disarming = runtime.disarm();
+
+    expect(runtime.env().CLAUDE_PEERS_APPROVAL_FILE).toBe("");
+    await disarming;
   });
 
   test("rearms after a failed revoke with the retained token dependencies", async () => {
@@ -920,7 +1166,7 @@ describe("ApprovalRuntime.arm() without any mobile transport configured", () => 
           headers: { "content-type": "application/json" },
         });
       }
-      return new Response(JSON.stringify({ token_id: "tok_test", expires_at: new Date(Date.now() + 3600_000).toISOString() }), {
+      return new Response(JSON.stringify({ token_id: "tok_test", capabilities: { inbox_provenance: 1 }, expires_at: new Date(Date.now() + 3600_000).toISOString() }), {
         status: 200,
         headers: { "content-type": "application/json" },
       });
@@ -930,7 +1176,7 @@ describe("ApprovalRuntime.arm() without any mobile transport configured", () => 
       cipher: fakeCipher,
       endpoint: () => ({ url: "http://broker.local", token: "" }),
       runId: "run-test",
-      host: "test-host",
+      host: "test-host", groupId: () => "g-runtime",
     });
 
     expect(await runtime.arm()).toBe(true);
@@ -943,6 +1189,36 @@ describe("ApprovalRuntime.arm() without any mobile transport configured", () => 
     expect(requests[0]).toBe("http://broker.local/approval/token-revoke");
   });
 
+  test("does not recover a published scope while a failed mint leaves revocation debt", async () => {
+    let mints = 0;
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/health")) {
+        return new Response(JSON.stringify({ operator_trust_version: 1, operator_trust_state: "ready" }), { status: 200 });
+      }
+      if (url.endsWith("/operator/check")) {
+        const body = JSON.parse(String(init?.body)) as { public_key: string };
+        return new Response(JSON.stringify({ operator_id: deriveOperatorId(body.public_key), protocol_version: 1 }), { status: 200 });
+      }
+      if (url.endsWith("/approval/token-revoke")) return new Response(JSON.stringify({ revoked: 1 }), { status: 200 });
+      mints += 1;
+      if (mints === 2) throw new TypeError("network failure");
+      return new Response(JSON.stringify({ token_id: "tok_test", capabilities: { inbox_provenance: 1 }, expires_at: new Date(Date.now() + 3600_000).toISOString() }), { status: 200 });
+    }) as unknown as typeof fetch;
+    const runtime = new ApprovalRuntime({
+      stateDir: tmp(),
+      cipher: fakeCipher,
+      endpoint: () => ({ url: "http://broker.local", token: "" }),
+      runId: "run-test",
+      host: "test-host", groupId: () => "g-runtime",
+    });
+
+    expect(await runtime.arm()).toBe(true);
+    await expect(runtime.prepareScope({ projectKey: "project", groupId: "g-candidate" })).resolves.toMatchObject({ state: "refused", cause: "mint-refused" });
+    expect(await runtime.recoverPublishedScope({ projectKey: "project", groupId: "g-runtime" })).toBe(false);
+    expect(mints).toBe(2);
+  });
+
   test("reports an unreachable broker with its local public key without claiming incompatibility", async () => {
     const stateDir = tmp();
     const states: { state: string; publicKey?: string }[] = [];
@@ -951,7 +1227,7 @@ describe("ApprovalRuntime.arm() without any mobile transport configured", () => 
       cipher: fakeCipher,
       endpoint: () => ({ url: "http://broker.local", token: "" }),
       runId: "run-test",
-      host: "test-host",
+      host: "test-host", groupId: () => "g-runtime",
       onTrustStatus: (state: string, publicKey?: string) => states.push({ state, publicKey }),
     });
 
@@ -980,7 +1256,7 @@ describe("ApprovalRuntime.arm() without any mobile transport configured", () => 
       cipher: hostileCipher,
       endpoint: () => ({ url: "http://broker.local", token: "" }),
       runId: "run-test",
-      host: "test-host",
+      host: "test-host", groupId: () => "g-runtime",
     });
 
     expect(await runtime.arm()).toBe(false);
@@ -999,7 +1275,7 @@ describe("ApprovalRuntime.arm() without any mobile transport configured", () => 
       cipher: fakeCipher,
       endpoint: () => ({ url: "http://broker.local", token: "" }),
       runId: "run-test",
-      host: "test-host",
+      host: "test-host", groupId: () => "g-runtime",
     });
 
     expect(await runtime.arm()).toBe(false);
@@ -1018,7 +1294,7 @@ describe("ApprovalRuntime.checkTrustNow()", () => {
       cipher: fakeCipher,
       endpoint: () => ({ url: "http://broker.local", token: "" }),
       runId: "run-test",
-      host: "test-host",
+      host: "test-host", groupId: () => "g-runtime",
       onTrustStatus: (state: string, publicKey?: string) => states.push({ state, publicKey }),
     });
   }
@@ -1103,7 +1379,7 @@ describe("ApprovalRuntime.arm() when the keychain is merely unavailable (not cor
       cipher: unavailableCipher,
       endpoint: () => ({ url: "http://broker.local", token: "" }),
       runId: "run-test",
-      host: "test-host",
+      host: "test-host", groupId: () => "g-runtime",
     });
     const armed = await runtime.arm();
 

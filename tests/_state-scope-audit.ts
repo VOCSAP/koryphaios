@@ -1,39 +1,12 @@
-// Pure audit behind tests/desktop-state-scope.test.ts: every file name the
-// Deck's main process can write under its state dir must be classified with
-// a scope and a reason, and every SESSION-scoped file must be reached through
-// the per-group directory. Sources are injected as {path: text}, so the same
-// audit runs on the real tree AND on synthetic mutations that prove it bites.
-// Not named *.test.ts on purpose: reachable only by relative import.
-//
-// Coverage gaps, by design (each is a fail-closed direction or a documented
-// blind spot, not a silent allowance):
-// - Only literals carrying a data extension (DATA_EXT) are candidates: a
-//   file written with a code extension (.ts, .js, .html) or with no extension
-//   is not app state and not scanned. A NEW data extension is a blind spot
-//   until added to DATA_EXT.
-// - A computed name is caught only when its template literal ends with a data
-//   extension or interpolates an identifier ending in FILE; a name assembled
-//   by string concatenation ('a' + ext) is not seen.
-// - Attribution of a template literal to its enclosing declaration is
-//   textual (nearest preceding function / arrow-const / IPC handler). A
-//   template that cannot be attributed is a finding, never dropped.
-// - Wiring resolution accepts a session-dir builder call itself, or an
-//   identifier whose EVERY binding in the file contains such a call. A binding
-//   the scan cannot find is a finding. The builder is matched by NAME, not
-//   by resolving its import: a local declaration shadowing `sessionStateDir`
-//   with a root path passes, and so does a builder called with a constant
-//   group id instead of the live window's -- the scan proves the builder is
-//   called, not which group it is called with (that is desktop-session-state's
-//   behavioural domain and index.ts's wiring).
-// - A session-scoped literal may appear ONLY in its declaring module: a
-//   second writer of the same name elsewhere is a finding even when the
-//   name is classified.
-// - The scan covers desktop/src/main only. A state file name declared in
-//   desktop/src/shared and imported is not seen (none exists today);
-//   preload and renderer import no node:fs.
-// - The inbox-store export check (in the test) matches `export function
-//   name(param: string`: an arrow-const export or an options-object first
-//   parameter escapes it.
+// Pure audit of the Deck's state files, run on injected {path: text} sources.
+// Coverage gaps, by design:
+// - Only DATA_EXT literals are candidates.
+// - Constructors match names rather than imports, so local homonyms and constant groups pass.
+// - capturedDirectoryFiles exempts every captured.directory call in inbox-session.ts, including calls outside the factory; behavior tests prove provenance.
+// - Factory aliases (`const f = createInboxEffects`) evade the single-call check.
+// - registerIpc lacks bindingFactory, so inline accessors are accepted.
+// - Comment removal misses a decoy in a string.
+// - The scan covers only desktop/src/main.
 
 import { findMatchingClose } from "./_braced-body";
 
@@ -66,6 +39,10 @@ export interface AccessorBinding {
   file: string;
   callee: string;
   prop: string;
+  /** `callee` is called exactly once in the whole scan, in `file`, with `prop` written once and no spread in the object. */
+  singleCall?: boolean;
+  /** `prop` is the bare identifier of that name, and its sole const binding in `file` calls this factory. */
+  bindingFactory?: string;
 }
 
 export interface AuditInput {
@@ -75,6 +52,8 @@ export interface AuditInput {
   /** Names of the per-group directory builders (session-state.ts's sessionStateDir and its closable accessor factory). */
   sessionDirBuilders: readonly string[];
   accessorBindings?: readonly AccessorBinding[];
+  /** Files whose store calls take `captured.directory`, derived from an injected accessor by the factory itself. */
+  capturedDirectoryFiles?: readonly string[];
 }
 
 export type FindingKind =
@@ -210,6 +189,33 @@ function objectProp(objText: string, prop: string): string | null {
   return null;
 }
 
+/** Every `callee(` call in the scan, declarations and import specifiers excluded. */
+function findCalls(callee: string, sources: Record<string, string>): Array<{ file: string; src: string; open: number }> {
+  const callRe = new RegExp(`(?<![.\\w$])${callee}\\s*\\(`, "g");
+  const calls: Array<{ file: string; src: string; open: number }> = [];
+  for (const [file, src] of Object.entries(sources)) {
+    let m: RegExpExecArray | null;
+    callRe.lastIndex = 0;
+    while ((m = callRe.exec(src)) !== null) {
+      const before = src.slice(Math.max(0, m.index - 40), m.index);
+      if (/function\s+$/.test(before) || /import\s*\{[^}]*$/.test(before)) continue;
+      calls.push({ file, src, open: m.index + m[0].length - 1 });
+    }
+  }
+  return calls;
+}
+
+/** Problem with the object literal text for a single-call binding, or null. */
+function objectKeyProblem(objText: string, prop: string): string | null {
+  const trimmed = objText.trim();
+  if (!trimmed.startsWith("{")) return `the argument ${JSON.stringify(trimmed.slice(0, 60))} is not an object literal`;
+  const body = trimmed.slice(1, findMatchingClose(trimmed, 0, "{", "}", true) - 1);
+  const entries = splitArgs(body);
+  if (entries.some((entry) => entry.startsWith("..."))) return `a spread in the object could override ${prop}`;
+  const written = entries.filter((entry) => entry === prop || new RegExp(`^${prop}\\s*:`).test(entry));
+  return written.length > 1 ? `${prop} is written ${written.length} times in the object` : null;
+}
+
 /**
  * Does `expr` (the dir argument text) reach the per-group directory? Either
  * the builder is called in the expression itself, or the expression is a bare
@@ -329,6 +335,7 @@ export function auditStateScopes(input: AuditInput): Finding[] {
           findings.push({ kind: "unparsed-call", file, line, detail: `${callee}(${argText.trim()}): dir argument not found` });
           continue;
         }
+        if (dirExpr === "captured.directory" && input.capturedDirectoryFiles?.includes(file)) continue;
         const r = resolvesToSessionDir(dirExpr, src, input.sessionDirBuilders);
         if (!r.ok) {
           findings.push({ kind: "unwired-session-call", file, line, detail: `${callee} (${acc.guards.join(", ")}): ${r.why}` });
@@ -344,21 +351,53 @@ export function auditStateScopes(input: AuditInput): Finding[] {
       findings.push({ kind: "unbound-accessor", file: b.file, line: 0, detail: `file not in scan` });
       continue;
     }
-    const callRe = new RegExp(`(?<![.\\w$])${b.callee}\\s*\\(`);
-    const m = callRe.exec(src);
-    if (!m) {
-      findings.push({ kind: "unbound-accessor", file: b.file, line: 0, detail: `${b.callee}( not found` });
-      continue;
+    let open: number;
+    if (b.singleCall) {
+      const calls = findCalls(b.callee, stripped);
+      if (calls.length !== 1) {
+        findings.push({ kind: "unbound-accessor", file: b.file, line: 0, detail: `${b.callee} is called ${calls.length} times in the scan (expected exactly 1)` });
+        continue;
+      }
+      if (calls[0]!.file !== b.file) {
+        findings.push({ kind: "unbound-accessor", file: calls[0]!.file, line: 0, detail: `${b.callee} is called outside ${b.file}` });
+        continue;
+      }
+      open = calls[0]!.open;
+    } else {
+      const m = new RegExp(`(?<![.\\w$])${b.callee}\\s*\\(`).exec(src);
+      if (!m) {
+        findings.push({ kind: "unbound-accessor", file: b.file, line: 0, detail: `${b.callee}( not found` });
+        continue;
+      }
+      open = m.index + m[0].length - 1;
     }
-    const open = m.index + m[0].length - 1;
+    const line = lineAt(src, open);
     const argText = src.slice(open + 1, findMatchingClose(src, open, "(", ")", true) - 1);
+    if (b.singleCall) {
+      const problem = objectKeyProblem(argText, b.prop);
+      if (problem !== null) {
+        findings.push({ kind: "unbound-accessor", file: b.file, line, detail: `${b.prop}: ${problem}` });
+        continue;
+      }
+    }
     const value = objectProp(argText, b.prop);
     if (value === null) {
-      findings.push({ kind: "unbound-accessor", file: b.file, line: lineAt(src, m.index), detail: `${b.callee}({ ${b.prop}: ... }) missing` });
+      findings.push({ kind: "unbound-accessor", file: b.file, line, detail: `${b.callee}({ ${b.prop}: ... }) missing` });
+      continue;
+    }
+    if (b.bindingFactory) {
+      if (value !== b.prop) {
+        findings.push({ kind: "unbound-accessor", file: b.file, line, detail: `${b.prop}: ${JSON.stringify(value)} is not the bare identifier ${b.prop}` });
+        continue;
+      }
+      const bindings = [...src.matchAll(new RegExp(`\\b(const|let|var)\\s+${b.prop}\\b[^=\\n]*=\\s*([^\\n]+)`, "g"))];
+      if (bindings.length !== 1 || bindings[0]![1] !== "const" || !new RegExp(`\\b${b.bindingFactory}\\(`).test(bindings[0]![2]!)) {
+        findings.push({ kind: "unbound-accessor", file: b.file, line, detail: `${b.prop} must have exactly one binding, declared const and calling ${b.bindingFactory} (found ${bindings.length})` });
+      }
       continue;
     }
     const r = resolvesToSessionDir(value, src, input.sessionDirBuilders);
-    if (!r.ok) findings.push({ kind: "unbound-accessor", file: b.file, line: lineAt(src, m.index), detail: `${b.prop}: ${r.why}` });
+    if (!r.ok) findings.push({ kind: "unbound-accessor", file: b.file, line, detail: `${b.prop}: ${r.why}` });
   }
 
   // 5. Stale rules: a classification nothing in the tree uses is a decision about a file that no longer exists.

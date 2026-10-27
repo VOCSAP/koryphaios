@@ -6,7 +6,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pendingQuestionTarget } from "../desktop/src/main/pending-question-target.ts";
-import { extractParenBody } from "./_braced-body.ts";
+import { extractBracedBody, extractParenBody } from "./_braced-body.ts";
 
 const INDEX = resolve(import.meta.dir, "../desktop/src/main/index.ts");
 
@@ -23,8 +23,21 @@ function indexSource(): string {
   return readFileSync(INDEX, "utf8").replace(/\r\n/g, "\n");
 }
 
+function compiledCode(source: string): string {
+  return new Bun.Transpiler({ loader: "ts" }).transformSync(source);
+}
+
 function indexCode(): string {
-  return new Bun.Transpiler({ loader: "ts" }).transformSync(indexSource());
+  return compiledCode(indexSource());
+}
+
+function afterScopePublishedBody(source: string): string {
+  const marker = "afterScopePublished:";
+  const start = source.indexOf(marker);
+  if (start < 0) throw new Error("index.ts: afterScopePublished callback is unavailable");
+  const open = source.indexOf("{", source.indexOf("=>", start));
+  if (open < 0) throw new Error("index.ts: afterScopePublished callback body is unavailable");
+  return extractBracedBody(source, open, true);
 }
 
 function openOldest(deps: Record<string, unknown>): () => Promise<void> {
@@ -57,11 +70,10 @@ test("the avatar client's openQuestion option runs openOldestPendingQuestion", a
 });
 
 test("adoptScope advances the Avatar scope tracker", () => {
-  const index = indexCode();
-  const start = index.indexOf("const adoptScope =");
-  expect(start, "index.ts: adoptScope anchor is unavailable").toBeGreaterThanOrEqual(0);
-  const body = braced(index, index.indexOf("{", index.indexOf("=>", start)));
-  expect(body).toContain("avatarScope.scopeChanged(() => avatarClient?.scopeChanged())");
+  const call = "avatarScope.scopeChanged(() => avatarClient?.scopeChanged())";
+  expect(afterScopePublishedBody(indexCode())).toContain(call);
+  expect(afterScopePublishedBody(compiledCode(`const wiring = { afterScopePublished: () => { ${call} } };`))).toContain(call);
+  expect(afterScopePublishedBody(compiledCode(`const wiring = { afterScopePublished: () => { /* ${call} */ } };`))).not.toContain(call);
 });
 
 test("the Avatar scope uses the project key calculated for its options", () => {

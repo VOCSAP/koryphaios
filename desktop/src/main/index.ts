@@ -77,6 +77,8 @@ import {
   type WorkspaceApprovalGateResult
 } from './workspace-service'
 import type { WorkspaceSession } from './workspace-store'
+import { credentialFailureReporter } from '../shared/workspace-restore-outcome'
+import { RESCOPE_WAIT_MS } from './scope-adoption'
 import {
   BrokerHealthTracker,
   fetchDispatchRequests,
@@ -91,15 +93,10 @@ import {
   sendAnnounce,
   type BrokerEndpoint,
   type ContextTransactionRequest,
-  type ContextTransactionResponse
+  type ContextTransactionResponse,
+  type RunInboxSigner
 } from './broker-client'
-import {
-  appendInboxHistory,
-  clearInboxHistory,
-  deleteInboxHistoryEntries,
-  discardUnscopedInboxFiles,
-  pendingInboxCounter
-} from './inbox-store'
+import { discardUnscopedInboxFiles, pendingInboxCounter } from './inbox-store'
 import { spawn as spawnProcess } from 'node:child_process'
 import {
   adoptedBrokerNotice,
@@ -121,7 +118,14 @@ import {
   clearBrokerStopMarker,
   readBrokerStopMarker
 } from '../../../shared/broker-stop-marker'
-import { createInboxSessionTracker, purgeInboxSessionCore } from './inbox-session'
+import {
+  createInboxEffects,
+  createInboxSessionTracker,
+  createRunInboxSigner,
+  createRunReadErrorSink,
+  purgeInboxDomains,
+  readOperatorInboxBoth
+} from './inbox-session'
 import {
   appendRoadmapContext,
   computeDeckProjectKey,
@@ -231,7 +235,13 @@ import {
   releaseBeforeQuit,
   RELEASE_DEADLINE_MS
 } from './clodex-lifecycle-deps'
-import { ApprovalRuntime, armApprovalsAtStartup, retryOperatorTrust } from './approval-runtime'
+import {
+  ApprovalRuntime,
+  armApprovalsAtStartup,
+  mandateBridge,
+  retryOperatorTrust
+} from './approval-runtime'
+import { createScopeWiring } from './scope-orchestration'
 import { remoteApprovalsEnabled } from './approval-store'
 import {
   ackApproval,
@@ -251,12 +261,14 @@ import {
   markVerdictsDelivered,
   notTypedQuestion,
   settleTileAnsweredInTerminal,
+  signOperatorBody,
   spawnPlanFootprint,
   waitApproval,
   withinDeferWindow,
   type ApprovalDeps,
   type SpawnGrantStore
 } from './approval-service'
+import { INBOX_GATES } from './approval-auth'
 import { createPendingApprovalsTick } from './hook-attention'
 import { pendingQuestionTarget } from './pending-question-target'
 import { matchPermissionDialog, permissionDialogShown } from './permission-dialog'
@@ -674,7 +686,52 @@ const approvals = new ApprovalRuntime({
   runId: approvalRunId,
   host: hostname(),
   projectKey: () => computeDeckProjectKey(cliContext.projectDir),
+  groupId: () => activeScope.groupId,
   onTrustStatus: setOperatorTrustStatus
+})
+
+const scopeWiring = createScopeWiring<Scope, { scope: Scope; environment: ScopeEnv }>({
+  approvals,
+  currentScope: () => activeScope,
+  hasLiveSessions: () => service.hasLiveSessions(),
+  resolveScope: (ws) => {
+    let next = resolveAdoptedScope(ws, activeScope, cliContext.projectDir)
+    if (next.groupId !== ws.groupId && ws.scopeKind === 'custom' && config.rememberScopeSecrets) {
+      const remembered = recallScopeSecret(secretsDir(), secretCipher, ws.groupId)
+      if (remembered) next = computeScope(cliContext.projectDir, remembered)
+    }
+    return next
+  },
+  toScopeTarget: (scope) => ({ projectKey: computeDeckProjectKey(cliContext.projectDir), groupId: scope.groupId }),
+  publishScope: (adopted, previous) => {
+    const previousScopeEnv = activeScopeEnv
+    activeScope = adopted
+    activeScopeEnv = buildScopeEnv(adopted)
+    return { scope: previous, environment: previousScopeEnv }
+  },
+  afterScopePublished: ({ scope, environment }) => {
+    environment.cleanup()
+    removeSessionStateDir(appStateDir(), scope.groupId, reportSessionState)
+    avatarScope.scopeChanged(() => avatarClient?.scopeChanged())
+    try {
+      touchSessionStateDir(sessionDir(), Date.now())
+    } catch (error) {
+      reportSessionState('could not create the adopted scope session state dir', error)
+    }
+  },
+  scopeEnvironment: () => activeScopeEnv.env,
+  approvalEnvironment: () => approvals.env(),
+  designEnvironment: (): Record<string, string> => designServer
+    ? { CLAUDE_DECK_DESIGN_URL: designServer.url, CLAUDE_DECK_DESIGN_TOKEN: designServer.token }
+    : {},
+  onCleanupError: (error) => reportError('workspace-restore', 'could not clean up a rejected scope credential', error)
+})
+
+const runInboxSigner: () => RunInboxSigner | undefined = createRunInboxSigner({
+  inboxRun: () => approvals.inboxRun(),
+  operator: () => approvals.operator,
+  activeGroupId: () => activeScope.groupId,
+  sign: (identity, body, door) => signOperatorBody(identity, body, door === 'drain' ? INBOX_GATES.drain : INBOX_GATES.purge)
 })
 const permissionLeases = new PermissionLeaseRuntime({
   stateDir: join(app.getPath('userData'), APP_STATE_SUBDIR),
@@ -710,16 +767,7 @@ function approvalsEnabled(): boolean {
 
 const service = new SessionService(
   getConfig,
-  () => ({
-    ...activeScopeEnv.env,
-    ...approvals.env(),
-    ...(designServer
-      ? {
-          CLAUDE_DECK_DESIGN_URL: designServer.url,
-          CLAUDE_DECK_DESIGN_TOKEN: designServer.token
-        }
-      : null)
-  }),
+  scopeWiring.spawnEnvironment,
   safeLaunchCommand,
   getPluginDirs,
   undefined,
@@ -1546,10 +1594,6 @@ service.on('needs-you', ({ id }: { id: string }) => notifyWaitingSession(id))
 // spawns). Drained batches go to the renderer inbox + a system notification.
 const INBOX_POLL_MS = 10_000
 let inboxTimer: NodeJS.Timeout | null = null
-// Drained batches whose disk write failed, retried on the next poll (O6): the
-// broker already forgot them, this queue is their only copy.
-const pendingInboxWrites: { id: number; from: string; text: string; sentAt: string }[] = []
-
 const currentInboxSessionId = createInboxSessionTracker(() => activeScope.groupId)
 
 // Broker reachability (PLAN O5): fed by the inbox poll below (one signal per
@@ -1704,39 +1748,70 @@ const notifyInbox = (batch: { from: string; text: string }[]): void => {
   n.show()
 }
 
+const runReadErrors = createRunReadErrorSink((message, e) => reportError('inbox', message, e))
+
+const inboxEffects = createInboxEffects({
+  sessionDir,
+  epoch: () => scopeWiring.scopeEpoch(),
+  groupId: () => activeScope.groupId,
+  sessionId: currentInboxSessionId,
+  purgeBroker: async () => {
+    const endpoint = resolveBrokerEndpoint()
+    const params = {
+      groupId: activeScope.groupId,
+      secret: activeScope.secret,
+      sessionId: currentInboxSessionId(),
+      scope: 'session' as const
+    }
+    await purgeInboxDomains({
+      purge: (run) => purgeOperatorInbox({ ...params, ...(run ? { run } : {}) }, { endpoint }),
+      run: runInboxSigner(),
+      onRejection: (domain, e) =>
+        reportError('inbox', `session purge of the ${domain} Courrier failed (broker-side rows may stay)`, e)
+    })
+  },
+  deleteBroker: async (ids) => {
+    const endpoint = resolveBrokerEndpoint()
+    const params = {
+      groupId: activeScope.groupId,
+      secret: activeScope.secret,
+      sessionId: currentInboxSessionId(),
+      scope: 'ids' as const,
+      ids
+    }
+    return purgeInboxDomains({
+      purge: (run) => purgeOperatorInbox({ ...params, ...(run ? { run } : {}) }, { endpoint }),
+      run: runInboxSigner(),
+      onRejection: (domain, e) => reportError('inbox', `manual delete in the ${domain} Courrier failed for ${ids.length} id(s)`, e)
+    })
+  },
+  broadcast,
+  notify: notifyInbox,
+  info: (message) => logInfo('inbox', message),
+  error: (message, e) => reportError('inbox', message, e)
+})
+
 const pollOperatorInbox = async (): Promise<void> => {
   brokerHealth.setManualStop(readManualStop())
   try {
-    const messages = await fetchOperatorInbox(
-      {
-        groupId: activeScope.groupId,
-        secret: activeScope.secret,
-        sessionId: currentInboxSessionId()
-      },
-      { endpoint: resolveBrokerEndpoint() }
-    )
-    brokerHealth.recordSuccess()
-    if (messages.length === 0 && pendingInboxWrites.length === 0) return
-    const batch = messages.map((m) => ({
-      id: m.id,
-      from: m.from_peer_id,
-      text: m.text,
-      sentAt: m.sent_at
-    }))
-    // Courrier lot 1B: the broker read is now non-destructive (cursor by
-    // session_id, broker.ts), but this journal stays load-bearing for a
-    // DIFFERENT reason -- see inbox-store.ts's header comment. Journal to
-    // disk BEFORE showing it; a failed write re-queues the batch for the next
-    // tick (O6) -- these messages exist nowhere else on this Deck once read.
-    const toPersist = [...pendingInboxWrites.splice(0), ...batch]
-    let failed = false
-    appendInboxHistory(sessionDir(), toPersist, undefined, (e) => {
-      failed = true
-      reportError('inbox', `history write failed (${toPersist.length} message(s) queued for retry)`, e)
+    await inboxEffects.poll(async (captured) => {
+      const endpoint = resolveBrokerEndpoint()
+      const read = { groupId: activeScope.groupId, secret: activeScope.secret, sessionId: captured.sessionId }
+      const run = runInboxSigner()
+      const messages = await readOperatorInboxBoth({
+        readLegacy: () => fetchOperatorInbox(read, { endpoint }),
+        readRun: run
+          ? async () => {
+              const rows = await fetchOperatorInbox({ ...read, run }, { endpoint })
+              runReadErrors.onRunSuccess()
+              return rows
+            }
+          : undefined,
+        onRunError: runReadErrors.onRunError
+      })
+      brokerHealth.recordSuccess()
+      return messages
     })
-    if (failed) pendingInboxWrites.push(...toPersist)
-    broadcast('inbox:new', batch)
-    notifyInbox(batch)
   } catch (e) {
     // Broker down / unreachable: the next tick retries; the health tracker
     // owns the (deduplicated) reporting so this stays quiet per-tick.
@@ -1752,57 +1827,13 @@ const pollOperatorInbox = async (): Promise<void> => {
  * Best-effort by design: a purge failure must never block the gesture it rides
  * on.
  */
-async function purgeInboxSession(): Promise<void> {
-  await purgeInboxSessionCore({
-    purgeBroker: async () => {
-      await purgeOperatorInbox(
-        {
-          groupId: activeScope.groupId,
-          secret: activeScope.secret,
-          sessionId: currentInboxSessionId(),
-          scope: 'session'
-        },
-        { endpoint: resolveBrokerEndpoint() }
-      )
-    },
-    clearLocal: () =>
-      clearInboxHistory(sessionDir(), (e) =>
-        reportError('inbox', 'local history truncate failed after session purge', e)
-      ),
-    onPurgeError: (e) =>
-      reportError('inbox', 'session purge failed (broker-side Courrier may keep stale rows)', e)
-  })
-  broadcast('inbox:cleared')
+function purgeInboxSession(): Promise<void> {
+  return inboxEffects.purge()
 }
 
-/**
- * Courrier lot 1E (card 1e81ee7b): manual "delete this one" gesture, a third
- * state distinct from Close and Ack -- never a reinterpretation of either.
- * Global broker-side delete (any session, any group member sees it gone) +
- * local journal removal. Empty/unknown ids are a 0-effect no-op, matching the
- * broker's own scope='ids' semantics -- never an error.
- */
-async function inboxDelete(ids: number[]): Promise<number> {
-  let deleted = 0
-  try {
-    deleted = await purgeOperatorInbox(
-      {
-        groupId: activeScope.groupId,
-        secret: activeScope.secret,
-        sessionId: currentInboxSessionId(),
-        scope: 'ids',
-        ids
-      },
-      { endpoint: resolveBrokerEndpoint() }
-    )
-  } catch (e) {
-    reportError('inbox', `manual delete failed for ${ids.length} id(s)`, e)
-  }
-  deleteInboxHistoryEntries(sessionDir(), ids, (e) =>
-    reportError('inbox', 'local history entry removal failed after manual delete', e)
-  )
-  broadcast('inbox:cleared')
-  return deleted
+/** Empty or unknown ids are a 0-effect no-op, matching the broker's scope='ids' semantics. */
+function inboxDelete(ids: number[]): Promise<number> {
+  return inboxEffects.delete(ids)
 }
 
 // ----- Graph drafts poll -----
@@ -3016,6 +3047,7 @@ const cleanupTeamLeadMcpFile = (callerId: string): void => {
 }
 
 const controlDeps: DeckControlDeps = {
+  inboxMandates: mandateBridge(approvals),
   listAgents: () => listAgents(getConfig().projectDir),
   listModels: () => resolveLaunchConfig(getConfig().projectDir).models,
   listPresets: () => resolveLaunchConfig(getConfig().projectDir).presets,
@@ -3256,43 +3288,16 @@ const ensureSupervisor = async (trigger: SupervisorTrigger = 'manual'): Promise<
   }
 }
 
-/**
- * Adopt a restored workspace's scope. No-op once a session is running (the scope
- * is fixed at first spawn). Ephemeral workspaces mint a fresh secret; a custom
- * one is only reused if its groupId matches the launched scope (DESIGN 6.8).
- */
-const adoptScope = (ws: { groupId: string; scopeKind: 'ephemeral' | 'custom' }): void => {
-  if (service.hasLiveSessions()) return
-  let next = resolveAdoptedScope(ws, activeScope, cliContext.projectDir)
-  // D8: resolveAdoptedScope falls back to a fresh ephemeral when the launched
-  // scope does not match the workspace's custom group. If we remembered that
-  // group's secret, rebuild the scope from it to rejoin the same group.
-  if (next.groupId !== ws.groupId && ws.scopeKind === 'custom' && config.rememberScopeSecrets) {
-    const remembered = recallScopeSecret(secretsDir(), secretCipher, ws.groupId)
-    if (remembered) next = computeScope(cliContext.projectDir, remembered)
-  }
-  if (next === activeScope) return
-  activeScopeEnv.cleanup()
-  // The session-scoped state belongs to the group being left: an inbox kept
-  // across the switch would show the old group's messages under the new one.
-  removeSessionStateDir(appStateDir(), activeScope.groupId, reportSessionState)
-  activeScope = next
-  activeScopeEnv = buildScopeEnv(activeScope)
-  avatarScope.scopeChanged(() => avatarClient?.scopeChanged())
-  try {
-    touchSessionStateDir(sessionDir(), Date.now())
-  } catch (e) {
-    reportSessionState('could not create the adopted scope session state dir', e)
-  }
-}
-
 const workspaces = new WorkspaceService({
   projectDir: cliContext.projectDir,
   service,
   getConfig,
   setConfig: (patch) => void setConfig(patch),
   getScope: () => activeScope,
-  adoptScope,
+  adoptScope: scopeWiring.adoptScope,
+  cancelScopeAdoption: scopeWiring.cancelScopeAdoption,
+  closeScopeAdoption: scopeWiring.closeScopeAdoption,
+  onCredentialFailure: credentialFailureReporter(reportError, RESCOPE_WAIT_MS),
   confirmShellFields: confirmWorkspaceShellFields,
   confirmUntrustedCwd: confirmWorkspaceUntrustedCwd,
   prepareModPlans: (defs, signal) => prepareRestorePlans(launchAttempts, modLaunch.prepare, (def) => def.supervisor !== true && sandbox.isEnabled(), defs, signal)
@@ -3341,7 +3346,7 @@ async function openOldestPendingQuestion(): Promise<void> {
 avatarClient = createAvatarClient({
   ...avatarOptions,
   pendingApprovals: () => lastPendingApprovals,
-  inboxUnread: pendingInboxCounter(sessionDir, () => pendingInboxWrites),
+  inboxUnread: pendingInboxCounter(sessionDir, inboxEffects.pendingMessages),
   openQuestion: () => openOldestPendingQuestion()
 })
 let avatarDetach: Promise<void> = Promise.resolve()

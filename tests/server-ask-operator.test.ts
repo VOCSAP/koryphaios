@@ -2,14 +2,23 @@ import { test, expect, describe, afterAll } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { startBroker, stopBroker, post, approvalListBody, scrubEnv, type TestBroker } from "./_helper.ts";
 import {
-  APPROVAL_OPTIONS_MAX,
-  buildAuthProof,
-  deriveOperatorId,
-  deriveTokenId,
-  generateCredential,
-} from "../shared/approval.ts";
+  FIXTURE_OPERATOR,
+  FIXTURE_OPERATOR_ID,
+  groupId,
+  mintRunCredential,
+  registerAttestedInstance,
+  sha256Hex,
+  startBroker,
+  stopBroker,
+  post,
+  approvalListBody,
+  scrubEnv,
+  type RunCredential,
+  type TestBroker,
+} from "./_helper.ts";
+import { APPROVAL_OPTIONS_MAX, buildAuthProof } from "../shared/approval.ts";
+import { writeSessionIdentityFile } from "../shared/peer-cache.ts";
 import type { Approval } from "../shared/types.ts";
 import { resolveProjectKey } from "../shared/project-key.ts";
 import { computeProjectKey } from "../shared/summarize.ts";
@@ -97,57 +106,53 @@ interface Harness {
   reader: ReadableStreamDefaultReader<Uint8Array>;
   buffer: { text: string };
   op: { privateKey: string; publicKey: string; id: string };
+  run: RunCredential | null;
   send: (msg: unknown) => void;
 }
 
+const DESK_SESSION = "ask-operator-test";
+
 async function boot(withCredential: boolean): Promise<Harness> {
-  const opCred = generateCredential();
-  const operatorId = deriveOperatorId(opCred.publicKey);
-  const b = await startBroker({}, { trustedOperators: [opCred.publicKey] });
+  const b = await startBroker();
   brokers.push(b);
   const dir = mkdtempSync(join(tmpdir(), "cp-ask-"));
   dirs.push(dir);
 
-  const sessionCred = generateCredential();
-
-  const mintBody = {
-    session_public_key: sessionCred.publicKey,
-    session_ref: "tile-1",
-    // project_key must be set before buildAuthProof is called: the proof covers
-    // the body minus its own auth field, so appending it afterward yields 401
-    // instead of the expected 200.
-    // Must match the literal firstApproval lists by, since minting under one
-    // value and listing under another returns an empty list with no error.
-    project_key: SPAWNED_SERVER_PROJECT_KEY,
-    public_key: opCred.publicKey,
-  };
-  const auth = buildAuthProof(opCred.privateKey, mintBody, {
-    kind: "operator",
-    operator_id: operatorId,
-  });
-  expect((await post(`${b.url}/approval/token-mint`, { ...mintBody, auth })).status).toBe(200);
-
   const extra: Record<string, string> = {
     CLAUDE_PEERS_BROKER_URL: b.url,
     CLAUDE_PEERS_PORT: String(b.port),
-    // No session-identity file is written: ask_operator/ask_operator_wait
-    // sign with the session's own credential and need no proven peer, so
-    // resolveCompanionIdentity()'s unproven fallback is exactly what these
-    // tests want.
-    CLAUDE_PEERS_DESK_SESSION: "ask-operator-test",
+    CLAUDE_PEERS_DESK_SESSION: DESK_SESSION,
   };
+  let run: RunCredential | null = null;
   if (withCredential) {
+    // A new question is deposited only by a run credential carrying an Inbox
+    // block, from a tile whose registration the broker attested for that same
+    // run and group; project_key must be the one firstApproval lists by.
+    const label = `ask-operator-${crypto.randomUUID()}`;
+    run = await mintRunCredential(b, { id: await groupId(label), hash: await sha256Hex(label) }, SPAWNED_SERVER_PROJECT_KEY);
+    const reg = await registerAttestedInstance(b, run, "test-host", `/tmp/${label}`);
+    expect(reg.status).toBe(200);
+    await writeSessionIdentityFile(
+      DESK_SESSION,
+      reg.body.peer_id,
+      run.group,
+      reg.body.instance_token,
+      dir,
+      { version: 1, runRef: run.run, groupId: run.group },
+      FIXTURE_OPERATOR_ID,
+    );
     const credFile = join(dir, "approval.json");
     writeFileSync(
       credFile,
       JSON.stringify({
         brokerUrl: b.url,
-        operatorId,
-        tokenId: deriveTokenId(sessionCred.publicKey),
-        sessionRef: "tile-1",
-        privateKey: sessionCred.privateKey,
-        publicKey: sessionCred.publicKey,
+        operatorId: FIXTURE_OPERATOR_ID,
+        tokenId: run.tokenId,
+        sessionRef: `window-${run.run}`,
+        privateKey: run.cred.privateKey,
+        publicKey: run.cred.publicKey,
         osUserHash: "hash-of-olivier",
+        inbox: { version: 1, run_ref: run.run, group_id: run.group },
       }),
       { mode: 0o600 }
     );
@@ -176,12 +181,12 @@ async function boot(withCredential: boolean): Promise<Harness> {
   });
   await readUntil(reader, 0, buffer);
 
-  return { b, proc, reader, buffer, op: { ...opCred, id: operatorId }, send };
+  return { b, proc, reader, buffer, op: { ...FIXTURE_OPERATOR, id: FIXTURE_OPERATOR_ID }, run, send };
 }
 
 async function firstApproval(h: Harness): Promise<Approval | null> {
   for (let i = 0; i < 80; i++) {
-    const body = approvalListBody(SPAWNED_SERVER_PROJECT_KEY, { public_key: h.op.publicKey });
+    const body = approvalListBody(SPAWNED_SERVER_PROJECT_KEY, { public_key: h.op.publicKey, run_ref: h.run!.run });
     const auth = buildAuthProof(h.op.privateKey, body, {
       kind: "operator",
       operator_id: h.op.id,
@@ -257,7 +262,7 @@ describe("ask_operator over MCP stdio", () => {
     expect(approval?.title).toBe("Migration");
     expect(approval?.options).toEqual(["A", "B"]);
     // The MCP tool signs with the RESTRICTED session credential.
-    expect(approval?.origin.session_ref).toBe("tile-1");
+    expect(approval?.origin.session_ref).toBe(`window-${h.run!.run}`);
 
     expect(await claim(h, approval!.id, "text", "go with B, but keep a backup")).toBe(200);
 

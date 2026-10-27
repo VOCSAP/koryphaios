@@ -1,9 +1,19 @@
 import { test, expect, afterAll } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { access, readFile, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { startBroker, stopBroker, scrubEnv, type TestBroker } from "./_helper.ts";
+import {
+  FIXTURE_OPERATOR_ID,
+  groupId,
+  mintRunCredential,
+  scrubEnv,
+  sha256Hex,
+  startBroker,
+  stopBroker,
+  type TestBroker,
+} from "./_helper.ts";
 import { readSessionIdentityFile, sessionIdentityFileName } from "../shared/peer-cache.ts";
 
 /** Scans EVERY file left in `dir`, not just the expected path: a deletion
@@ -72,12 +82,28 @@ test("cleanup() (triggered by stdin close, the same path Claude Code exiting tak
   const homeDir = mkdtempSync(join(tmpdir(), "cp-cleanup-home-"));
   dirs.push(homeDir);
   const deskSession = "probe-cleanup";
+  const groupSecret = randomUUID();
+  mkdirSync(join(homeDir, "claude-peers"), { recursive: true });
+  writeFileSync(join(homeDir, "claude-peers", "config.json"), JSON.stringify({ groups: { alpha: groupSecret }, default_group: "alpha" }));
+  const run = await mintRunCredential(b, { id: await groupId(groupSecret), hash: await sha256Hex(groupSecret) });
+  const credential = join(homeDir, "run-credential.json");
+  writeFileSync(credential, JSON.stringify({
+    brokerUrl: b.url,
+    operatorId: FIXTURE_OPERATOR_ID,
+    tokenId: run.tokenId,
+    sessionRef: `window-${run.run}`,
+    privateKey: run.cred.privateKey,
+    publicKey: run.cred.publicKey,
+    osUserHash: "hash",
+    inbox: { version: 1, run_ref: run.run, group_id: run.group },
+  }));
 
   const proc = Bun.spawn(["bun", "server.ts"], {
     env: scrubEnv(homeDir, {
       CLAUDE_PEERS_BROKER_URL: b.url,
       CLAUDE_PEERS_PORT: String(b.port),
       CLAUDE_PEERS_DESK_SESSION: deskSession,
+      CLAUDE_PEERS_APPROVAL_FILE: credential,
     }),
     stdio: ["pipe", "pipe", "pipe"],
   });

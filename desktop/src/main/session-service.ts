@@ -341,12 +341,7 @@ export class SessionService extends EventEmitter {
 
   constructor(
     private getConfig: () => AppConfig,
-    /**
-     * Forced-group scope env merged into every spawned PTY (see scope.ts).
-     * A getter (not a snapshot) so the app can ADOPT a different scope at restore
-     * before any session has spawned (DESIGN 6.6).
-     */
-    private getScopeEnv: () => Record<string, string> = () => ({}),
+    private getScopeEnv: () => Record<string, string>,
     /** Resolved base command (launch-config) used when a session has no override. */
     private launchCommand = '',
     /** Resolves the embedded plugin directories fresh for every spawn. */

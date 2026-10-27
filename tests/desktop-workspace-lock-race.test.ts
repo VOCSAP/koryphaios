@@ -208,7 +208,11 @@ function service(projectDir: string, pid: number, openLock?: LockOpener): Worksp
     getConfig: () => ({ displayMode: '2x2', gridCols: 2, gridRows: 2 }) as AppConfig,
     setConfig: () => {},
     getScope: () => ({ secret: 's', scopeKind: 'ephemeral', groupId: 'a'.repeat(64), name: 'n', root: 'n' }),
-    adoptScope: () => {},
+    adoptScope: async (_ws, own) =>
+      own() ? { state: 'published', scope: { projectKey: 'project', groupId: 'a'.repeat(64) } } : { state: 'lock-race' },
+    cancelScopeAdoption: () => {},
+    closeScopeAdoption: () => {},
+    onCredentialFailure: () => {},
     confirmShellFields: async () => 'approved',
     confirmUntrustedCwd: async () => 'approved',
     pid,

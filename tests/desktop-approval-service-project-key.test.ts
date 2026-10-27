@@ -12,7 +12,7 @@ import {
   mintSessionToken,
   type ApprovalDeps
 } from "../desktop/src/main/approval-service.ts";
-import { generateCredential, deriveOperatorId } from "../shared/approval.ts";
+import { generateCredential, deriveOperatorId, INBOX_GATES, verifyInboxProof } from "../shared/approval.ts";
 
 interface CapturedCall {
   url: string;
@@ -178,6 +178,41 @@ test("markVerdictsDelivered sends project_key on its /approval/delivered request
   expect(calls.length).toBe(1);
   expect(calls[0]!.url.endsWith("/approval/delivered")).toBe(true);
   expect(calls[0]!.body.project_key).toBe("proj-deliver");
+});
+
+test("the list and delivered calls name this window's run, on every request", async () => {
+  const deps = { ...makeDeps("proj-run"), runRef: "3f1c2a4e-9b7d-4c1e-8a2b-5d6e7f809a1b" };
+  await fetchUndeliveredVerdicts(deps);
+  await fetchPendingApprovals(deps);
+  await markVerdictsDelivered(deps, ["id-1"]);
+  expect(calls.map((c) => [new URL(c.url).pathname, c.body.run_ref])).toEqual([
+    ["/approval/list", deps.runRef],
+    ["/approval/list", deps.runRef],
+    ["/approval/list", deps.runRef],
+    ["/approval/delivered", deps.runRef]
+  ]);
+});
+
+test("an Inbox mint and its renewal carry the inbox block under a v1 proof for the mint door", async () => {
+  const deps = makeDeps("proj-inbox");
+  const inbox = { version: 1, kind: "run", run_ref: "3f1c2a4e-9b7d-4c1e-8a2b-5d6e7f809a1b", group_id: "g" } as const;
+  await mintSessionToken(deps, { sessionPublicKey: "pub", sessionRef: "window-x", inbox });
+  await renewSessionToken!(deps, { sessionPublicKey: "pub", sessionRef: "window-x", inbox } as never);
+  for (const call of calls) {
+    expect(call.body.inbox).toEqual(inbox);
+    const { auth, ...payload } = call.body;
+    expect(verifyInboxProof(deps.identity.publicKey, payload, auth as never, INBOX_GATES.mint).ok, "v1 proof for the mint door").toBe(true);
+  }
+  expect(calls[1]!.body.renew_only).toBe(true);
+});
+
+test("signOperatorBody binds a v1 proof to the door it is given, never to another", () => {
+  const deps = makeDeps("proj-door");
+  const body = { group_id: "g", run_ref: "r", session_id: "s" };
+  const proof = approvalService.signOperatorBody(deps.identity, body, INBOX_GATES.drain);
+  expect(proof.kind).toBe("operator");
+  expect(verifyInboxProof(deps.identity.publicKey, body, proof, INBOX_GATES.drain).ok).toBe(true);
+  expect(verifyInboxProof(deps.identity.publicKey, body, proof, INBOX_GATES.purge).ok).toBe(false);
 });
 
 test("a refused claim surfaces the broker's reason to the operator, status last", async () => {

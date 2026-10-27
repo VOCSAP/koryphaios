@@ -15,11 +15,14 @@ import {
   sha256Hex,
   groupId,
   mintRunCredential,
+  operatorInboxProof,
   registerAttestedInstance,
+  runInboxProof,
+  type RunCredential,
   type TestBroker,
   openBrokerDb,
 } from "./_helper.ts";
-import { deriveInstanceRef } from "../shared/approval.ts";
+import { deriveInstanceRef, INBOX_GATES } from "../shared/approval.ts";
 import { startUpstreamProxy, type UpstreamProxy } from "./_upstream-proxy.ts";
 import type {
   DeliveredMessage,
@@ -371,17 +374,32 @@ test("messaging: replica to replica, replica to upstream and back, delivered onc
 }, 30_000);
 
 test("the operator inbox and the Deck's announcements never leave their broker", async () => {
-  const toOperator = await send(R1, A.instance_token, "operator", "a question for my operator");
-  expect(["operator is a local deposit", toOperator]).toEqual(["operator is a local deposit", { ok: true, message_id: expect.any(Number) }]);
-  await settleBothReplicas();
-  const drain = (b: TestBroker) =>
-    post<{ messages: { text: string }[] }>(`${b.url}/operator-inbox`, { group_id: G, group_secret_hash: H });
-  expect([
-    "the deposit is in R1's inbox and in no other",
-    (await drain(R1)).body.messages.map((m) => m.text),
-    (await drain(U)).body.messages.map((m) => m.text),
-    (await drain(R2)).body.messages.map((m) => m.text),
-  ]).toEqual(["the deposit is in R1's inbox and in no other", ["a question for my operator"], [], []]);
+  const run = await mintRunCredential(R1, { id: G, hash: H }, undefined, post);
+  const depositor = await registerAttestedInstance(R1, run, "host-depositor", "/work/depositor", {}, post);
+  try {
+    const question = "a question for my operator";
+    const deposit = { from_token: depositor.body.instance_token, to_peer_id: "operator", text: question };
+    const toOperator = await post<SendMessageResponse>(`${R1.url}/send-message`, {
+      ...deposit,
+      auth: runInboxProof(run, deposit, INBOX_GATES.deposit),
+    });
+    await settleBothReplicas();
+    const stored = [R1, U, R2].map((b) => countMessages(b, "text = ?", question));
+    const drainBody = { group_id: G, group_secret_hash: H, run_ref: run.run, session_id: "federation-drain" };
+    const drained = await post<{ messages?: { text: string }[] }>(`${R1.url}/operator-inbox`, {
+      ...drainBody,
+      auth: operatorInboxProof(drainBody, INBOX_GATES.drain),
+    });
+    expect(["operator is a local deposit", toOperator.body]).toEqual(["operator is a local deposit", { ok: true, message_id: expect.any(Number) }]);
+    expect([
+      "the deposit is in R1's inbox and in no other",
+      drained.status,
+      drained.body.messages?.map((m) => m.text),
+      stored,
+    ]).toEqual(["the deposit is in R1's inbox and in no other", 200, [question], [1, 0, 0]]);
+  } finally {
+    await post(`${R1.url}/unregister`, { instance_token: depositor.body.instance_token });
+  }
 
   const broadcast = await post<{ sent: number }>(`${R1.url}/announce`, {
     group_id: G,

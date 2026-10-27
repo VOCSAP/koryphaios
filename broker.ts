@@ -1810,6 +1810,16 @@ function bindingOfToken(instanceToken: string): InboxInstanceBinding | null {
   return bindingByRef(deriveInstanceRef(instanceToken));
 }
 
+function registerResponse(peerId: string, instanceToken: string, role: string | null): RegisterResponse {
+  const binding = bindingOfToken(instanceToken);
+  return {
+    peer_id: peerId,
+    instance_token: instanceToken,
+    inbox_binding: binding ? { version: 1, run_ref: binding.run_ref, group_id: binding.group_id } : null,
+    role,
+  };
+}
+
 /** The only part of an instance digest that leaves the broker: 12 characters, for display. */
 function instanceHint(instanceRef: string): string {
   return instanceRef.slice(-12);
@@ -2828,7 +2838,7 @@ function handleRegister(body: RegisterRequest): RegisterResponse | { error: stri
         upsertPeerSession.run(sk, token, groupId, body.host, body.cwd, now, ccSessionId, deskSessionHash(body.desk_session));
       }
     })();
-    return { peer_id: peerId, instance_token: token, role: normalizedRole };
+    return registerResponse(peerId, token, normalizedRole);
   };
 
   // A candidate that was ever bound to a run is a security identity, not an
@@ -2905,11 +2915,7 @@ function handleRegister(body: RegisterRequest): RegisterResponse | { error: stri
         existingPeer.instance_token
       );
       upsertPeerSession.run(sk, existingPeer.instance_token, groupId, body.host, body.cwd, now, ccSessionId, deskSessionHash(body.desk_session));
-      return {
-        peer_id: existingPeer.peer_id,
-        instance_token: existingPeer.instance_token,
-        role: normalizedRole,
-      };
+      return registerResponse(existingPeer.peer_id, existingPeer.instance_token, normalizedRole);
     }
 
     if (existingPeer && existingPeer.status === "active") {
@@ -2942,7 +2948,7 @@ function handleRegister(body: RegisterRequest): RegisterResponse | { error: stri
         body.claude_cli_pid ?? null,
         normalizedRole
       );
-      return { peer_id: freshId, instance_token: freshToken, role: normalizedRole };
+      return registerResponse(freshId, freshToken, normalizedRole);
     }
 
     // peer row purged but the session_key remembered the token: reinsert reusing it.
@@ -2968,7 +2974,7 @@ function handleRegister(body: RegisterRequest): RegisterResponse | { error: stri
       normalizedRole
     );
     upsertPeerSession.run(sk, session.instance_token, groupId, body.host, body.cwd, now, ccSessionId, deskSessionHash(body.desk_session));
-    return { peer_id: reusedId, instance_token: session.instance_token, role: normalizedRole };
+    return registerResponse(reusedId, session.instance_token, normalizedRole);
   }
 
   // 3) Fresh registration.
@@ -2994,7 +3000,7 @@ function handleRegister(body: RegisterRequest): RegisterResponse | { error: stri
     normalizedRole
   );
   upsertPeerSession.run(sk, newToken, groupId, body.host, body.cwd, now, ccSessionId, deskSessionHash(body.desk_session));
-  return { peer_id: newPeerId, instance_token: newToken, role: normalizedRole };
+  return registerResponse(newPeerId, newToken, normalizedRole);
 }
 
 // Card 37a2b8c7 review follow-up (MAJOR-2): the client-declared instance_token
@@ -3638,7 +3644,14 @@ function admitOperatorDeposit(
   const binding = bindingOfToken(sender.instance_token);
   if (body.auth === undefined) {
     if (binding !== null) return { error: "an attested instance must sign its operator deposits", status: 401 };
-    return { provenance: null };
+    // A group without a secret has no operator inbox at all: the send path
+    // refuses it next with that more precise reason, and stores nothing.
+    if (!groupMayCarryOperatorInbox(sender.group_id)) return { provenance: null };
+    return {
+      error:
+        "the operator inbox only accepts messages from a session launched by a Koryphaios Deck and registered with its run credential; restart this session from the Deck, or ask the operator on screen",
+      status: 403,
+    };
   }
   const identity = approvalAuth.authenticateInbox(
     body as unknown as { auth?: ApprovalAuthProof } & Record<string, unknown>,
@@ -10793,6 +10806,13 @@ function handleApprovalAdd(
     const named = unsignedChannelPeer(body);
     if (named !== null && bindingOfToken(named) !== null) {
       return { error: "an attested instance must sign its channel questions", status: 401 };
+    }
+    if (body.auth?.kind === "session") {
+      return {
+        error:
+          "a channel question from an agent must be attested by its Koryphaios Deck run; restart this session from the Deck, or ask the operator on screen",
+        status: 403,
+      };
     }
   }
   // A mergeable row is shared with any later raise on the same tile, so the

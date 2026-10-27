@@ -201,7 +201,11 @@ export function wireTileDisappearance(
 /** Minimal shape `buildMintTeamLeadBridge` needs from the real DeckControlServer (deck-control.ts) -- a structural subset, not an import of that type, so this module never pulls in deck-control.ts's own dependency graph. */
 export interface DeckControlServerLike {
   url: string
-  mintCaller(label: string, allowedTools?: readonly string[] | null): { token: string; callerId: string }
+  mintCaller(
+    label: string,
+    allowedTools?: readonly string[] | null,
+    authority?: 'author' | 'lead' | 'supervisor'
+  ): { token: string; callerId: string }
 }
 
 /**
@@ -229,7 +233,7 @@ export function buildMintTeamLeadBridge(deps: {
     // producing a token and URL that fail to match.
     const server = deps.getControlServer()
     if (!server) return null
-    const { token, callerId } = server.mintCaller('team-lead', TEAM_LEAD_DECK_TOOLS)
+    const { token, callerId } = server.mintCaller('team-lead', TEAM_LEAD_DECK_TOOLS, 'lead')
     const mcpConfig = deps.write(token, callerId, TEAM_LEAD_DECK_TOOLS)
     return { mcpConfig, callerId }
   }

@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { createPendingApprovalsTick, hookAwaitedTiles, type PendingApprovalsIo } from "../desktop/src/main/hook-attention.ts";
 import { extractParenBody } from "./_braced-body.ts";
+import { stripComments } from "./_state-scope-audit.ts";
 import type { Approval } from "../shared/types.ts";
 
 function approval(overrides: { status: Approval["status"]; reply_route: Approval["reply_route"]; tile_ref: string }): Approval {
@@ -147,7 +148,7 @@ test("the Deck's poll timer runs the tested tick and notifies on the service's n
 });
 
 test("the Avatar client reads the poll's last list and the Courrier's pending messages", () => {
-  const index = readFileSync(join(import.meta.dir, "..", "desktop", "src", "main", "index.ts"), "utf8");
+  const index = stripComments(readFileSync(join(import.meta.dir, "..", "desktop", "src", "main", "index.ts"), "utf8"));
   const tick = index.slice(index.indexOf("const pollPendingApprovals = createPendingApprovalsTick("));
   const tickBody = tick.slice(0, tick.indexOf("\n})"));
   expect(tickBody, "the list kept for the Avatar is the one broadcast").toMatch(/broadcastPending: \(list\) => \{\s*lastPendingApprovals = list/);
@@ -156,5 +157,8 @@ test("the Avatar client reads the poll's last list and the Courrier's pending me
   expect(avatarClientAssignment, "the Avatar client is assigned after scope lifecycle setup").toBeGreaterThanOrEqual(0);
   const clientBody = extractParenBody(index, index.indexOf("(", avatarClientAssignment));
   expect(clientBody).toMatch(/pendingApprovals: \(\) => lastPendingApprovals/);
-  expect(clientBody).toMatch(/inboxUnread: pendingInboxCounter\(sessionDir, \(\) => pendingInboxWrites\)/);
+  expect(
+    clientBody.match(/inboxUnread: pendingInboxCounter\(sessionDir, inboxEffects\.pendingMessages\)/g) ?? [],
+    "the Avatar's unread count is fed by the factory's epoch-filtered pending list, in code and exactly once"
+  ).toHaveLength(1);
 });

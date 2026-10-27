@@ -51,7 +51,11 @@ function makeService(projectDir: string): { svc: WorkspaceService; failSave: (e:
       name: "quit-scope",
       root: "test",
     }),
-    adoptScope: () => {},
+    adoptScope: async (_ws: unknown, own: () => boolean) =>
+      own() ? { state: "published", scope: { projectKey: "project", groupId: "b".repeat(32) } } : { state: "lock-race" },
+    cancelScopeAdoption: () => {},
+    closeScopeAdoption: () => {},
+    onCredentialFailure: () => {},
   };
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const svc = new WorkspaceService(deps as any);

@@ -16,6 +16,7 @@ import { hostname } from "node:os";
 import type {
   PublicPeer,
   RegisterResponse,
+  InboxBindingAck,
   PollMessagesResponse,
   GroupId,
   GroupStatsResponse,
@@ -74,8 +75,11 @@ import {
   writePeerIdCache,
   writeDeskSessionId,
   writeSessionIdentityFile,
+  readSessionIdentityFile,
   deleteSessionIdentityFile,
+  type InboxBindingConfirmation,
 } from "./shared/peer-cache.ts";
+import { inboxDepositReadiness } from "./shared/inbox-readiness.ts";
 import { createLogger, coreLogDir, stderrMirror } from "./shared/logger.ts";
 import {
   DECK_PEER_ID,
@@ -96,7 +100,11 @@ import { CONTEXT_RESUME_ACK_TTL_MS, CONTEXT_RESUME_VERSION, depositCapabilityHas
 import { APPROVAL_OPTIONS_MAX } from "./shared/approval.ts";
 import {
   buildAuthProof,
+  INBOX_GATES,
   loadSessionApprovalCredential,
+  runCredentialCovers,
+  signInboxBody,
+  type SessionApprovalCredential,
 } from "./shared/approval-client.ts";
 import {
   buildDraftPrepareArgs,
@@ -393,6 +401,85 @@ let myRegisteredAt: string = "";
 // transport wins on every register call, dormant resume included. Only
 // whoami reads this -- it is not otherwise consumed by this process.
 let myRole: string | null = null;
+let myInboxAttested = false;
+let myInboxBinding: InboxBindingConfirmation | null = null;
+let myInboxOperatorId: string | null = null;
+
+interface RegisterAttempt {
+  path: string;
+  bare: Record<string, unknown>;
+  signed: Record<string, unknown> | null;
+  credential: SessionApprovalCredential | null;
+  requiresInboxBinding: boolean;
+}
+
+interface RegisterResult {
+  reg: RegisterResponse;
+  attested: boolean;
+  inboxBinding: InboxBindingConfirmation | null;
+  operatorId: string | null;
+}
+
+function confirmedInboxBinding(
+  binding: InboxBindingAck | null,
+  credential: SessionApprovalCredential | null,
+  groupId: string,
+): InboxBindingConfirmation | null {
+  if (!binding || binding.version !== 1 || !credential?.inbox) return null;
+  if (binding.run_ref !== credential.inbox.runRef || binding.group_id !== credential.inbox.groupId || binding.group_id !== groupId) {
+    return null;
+  }
+  return { version: 1, runRef: binding.run_ref, groupId: binding.group_id };
+}
+
+// resume_instance_token is signed with the body so the instance it names is resumed only for this run.
+function attestRegister(
+  path: string,
+  bare: Record<string, unknown>,
+  groupId: string,
+  resumeToken: string | null,
+  validated?: SessionApprovalCredential | null
+): RegisterAttempt {
+  const cred = validated === undefined ? loadSessionApprovalCredential() : validated;
+  const requiresInboxBinding = Boolean(process.env.CLAUDE_PEERS_DESK_SESSION?.trim());
+  if (!cred?.inbox || !runCredentialCovers(cred, groupId)) {
+    if (requiresInboxBinding) {
+      throw new Error("Kory Inbox registration requires a readable run credential for this group; verify the Deck launch and reconnect this session");
+    }
+    return { path, bare, signed: null, credential: null, requiresInboxBinding: false };
+  }
+  const attested = { ...bare, inbox_operation: "register", ...(resumeToken ? { resume_instance_token: resumeToken } : {}) };
+  return {
+    path,
+    bare,
+    signed: signInboxBody(cred, attested, INBOX_GATES.register),
+    credential: cred,
+    requiresInboxBinding,
+  };
+}
+
+/**
+ * Once a proof was sent, a failure is never followed by the bare body: the
+ * broker may have accepted the signed one (a lost answer), and a bare retry
+ * would then mint a second, unbound identity.
+ */
+async function registerFetch(attempt: RegisterAttempt): Promise<RegisterResult> {
+  if (attempt.signed) {
+    try {
+      const reg = await brokerFetch<RegisterResponse>(attempt.path, attempt.signed);
+      const inboxBinding = confirmedInboxBinding(reg.inbox_binding, attempt.credential, String(attempt.signed.group_id));
+      if (attempt.requiresInboxBinding && !inboxBinding) {
+        throw new Error("Kory Inbox registration was not confirmed by this claude-peers broker; update the broker and reconnect this session");
+      }
+      return { reg, attested: true, inboxBinding, operatorId: inboxBinding ? attempt.credential?.operatorId ?? null : null };
+    } catch (e) {
+      logError("The attested /register failed", e);
+      throw e;
+    }
+  }
+  return { reg: await brokerFetch<RegisterResponse>(attempt.path, attempt.bare), attested: false, inboxBinding: null, operatorId: null };
+}
+
 let wsConnected: boolean = false;
 let wsSocket: WebSocket | null = null;
 let wsReconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1648,11 +1735,13 @@ interface CompanionIdentity {
   peerId: string | null;
   groupId: string;
   instanceToken: string | null;
+  inboxBinding: InboxBindingConfirmation | null;
+  operatorId: string | null;
   projectKey: string;
   fromPeer: string;
 }
 
-/** ask_operator / ask_operator_wait: signs with the session's restricted credential, no peer identity required. */
+/** ask_operator creates a channel deposit only after the session's Inbox registration is confirmed. */
 async function handleAskOperator(name: string, args: unknown, identity: CompanionIdentity) {
   const cred = loadSessionApprovalCredential();
   if (!cred) {
@@ -1680,6 +1769,14 @@ async function handleAskOperator(name: string, args: unknown, identity: Companio
   try {
     let approvalId: string;
     if (name === "ask_operator") {
+      const readiness = inboxDepositReadiness(identity, cred);
+      if (readiness) {
+        logError(`${name}: ${readiness}`);
+        return {
+          content: [{ type: "text" as const, text: `ask_operator refused: ${readiness}. Verify the Koryphaios launch and the claude-peers broker version, then reconnect this session from Koryphaios.` }],
+          isError: true,
+        };
+      }
       const title = String((args as { title?: unknown }).title ?? "").trim();
       const question = String((args as { question?: unknown }).question ?? "").trim();
       if (!title || !question) {
@@ -1689,39 +1786,38 @@ async function handleAskOperator(name: string, args: unknown, identity: Companio
         };
       }
       const rawOptions = (args as { options?: unknown }).options;
-      const created = await signedPost<ApprovalAddResponse>("/approval/add", {
-        kind: "question",
-        title,
-        question,
-        options: Array.isArray(rawOptions) ? rawOptions.map(String) : [],
-        session_ref: cred.sessionRef,
-        // The caller may only wait on its own new approval.
-        merge: "never",
-        // Belt and braces: the tool returns the answer directly, but if the
-        // agent stops polling its ticket the broker still hands it over as
-        // a peer message rather than stranding it.
-        // Never "channel" with a null peer: a missing identity is decided
-        // HERE, explicitly, rather than leaving the broker's own (silent,
-        // untraced) fallback branch be the only place that downgrades it.
-        reply_route: identity.peerId ? "channel" : "pty",
-        reply_peer_id: identity.peerId ?? undefined,
-        origin: {
-          host: identity.host,
-          os_user_hash: cred.osUserHash,
-          project_key: identity.projectKey,
-          from_peer: identity.fromPeer,
-          group_id: identity.groupId,
-        },
-      });
+      const created = await brokerFetch<ApprovalAddResponse>(
+        "/approval/add",
+        signInboxBody(cred, {
+          kind: "question",
+          title,
+          question,
+          options: Array.isArray(rawOptions) ? rawOptions.map(String) : [],
+          session_ref: cred.sessionRef,
+          merge: "never",
+          reply_route: "channel",
+          reply_peer_id: identity.peerId ?? undefined,
+          origin: {
+            host: identity.host,
+            os_user_hash: cred.osUserHash,
+            project_key: identity.projectKey,
+            from_peer: identity.fromPeer,
+            group_id: identity.groupId,
+          },
+          instance_token: identity.instanceToken,
+        }, INBOX_GATES.channel)
+      );
       approvalId = created.approval.id;
-      if (identity.peerId && "reply_route" in created.approval && created.approval.reply_route === "pty") {
+      if (identity.peerId && "reply_route" in created.approval && created.approval.reply_route !== "channel") {
+        logError(`${name}: the broker stored a channel question on the '${String(created.approval.reply_route)}' route`);
         return {
           content: [
             {
               type: "text" as const,
-              text: `The operator was notified, but the channel reply route fell back to PTY, so their answer will not be pushed to this session. Call ask_operator_wait with ticket "${approvalId}" to keep waiting.`,
+              text: `${name} failed: protocol error, the broker stored this channel question on the '${String(created.approval.reply_route)}' route, so the answer could not reach this session. Ticket "${approvalId}".`,
             },
           ],
+          isError: true,
         };
       }
     } else {
@@ -1754,6 +1850,7 @@ async function handleAskOperator(name: string, args: unknown, identity: Companio
       ],
     };
   } catch (e) {
+    logError(`${name} failed`, e);
     const msg = e instanceof Error ? e.message : String(e);
     return { content: [{ type: "text" as const, text: `${name} failed: ${msg}` }], isError: true };
   }
@@ -1958,9 +2055,36 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
           isError: true,
         };
       }
+      const runCred = target === OPERATOR_PEER_ID ? loadSessionApprovalCredential() : null;
+      if (target === OPERATOR_PEER_ID) {
+        const readiness = runCred
+          ? inboxDepositReadiness(
+              {
+                peerId: myPeerId,
+                groupId: myGroupId,
+                instanceToken: myInstanceToken,
+                inboxBinding: myInboxBinding,
+                operatorId: myInboxOperatorId,
+              },
+              runCred,
+            )
+          : "the run credential is unavailable";
+        if (readiness) {
+          logError(`send_message operator deposit refused: ${readiness}`);
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: `Message to the operator refused: ${readiness}. Verify the Koryphaios launch and the claude-peers broker version, then reconnect this session from Koryphaios.`,
+              },
+            ],
+            isError: true,
+          };
+        }
+      }
       try {
         const creatingTask = a.deadline_sec !== undefined && a.task_id === undefined;
-        const result = await brokerFetch<SendMessageResponse>("/send-message", {
+        const sendBody = {
           from_token: myInstanceToken,
           to_peer_id: target,
           // `target` is passed so the operator inbox is never framed: this tool
@@ -1975,7 +2099,11 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
           // Never read from the tool arguments: they come from the launcher's declarations.
           untracked_reply_policy: untrackedReplyPolicy(),
           expects_reply: a.expects_reply !== false,
-        });
+        };
+        const result = await brokerFetch<SendMessageResponse>(
+          "/send-message",
+          runCred ? signInboxBody(runCred, sendBody, INBOX_GATES.deposit) : sendBody
+        );
         if (!result.ok) {
           return {
             content: [{ type: "text" as const, text: `Failed to send: ${result.error}` }],
@@ -2011,6 +2139,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
           ],
         };
       } catch (e) {
+        logError("send_message failed", e);
         return {
           content: [{ type: "text" as const, text: `Error sending message: ${e instanceof Error ? e.message : String(e)}` }],
           isError: true,
@@ -2274,43 +2403,66 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
       }
       const newGroupId = computeGroupId(secret);
       const newSecretHash = computeGroupSecretHash(secret);
+      // Judged before /disconnect, the same group included: an attested session
+      // re-registers attested or not at all, so the credential must be readable
+      // and cover the target, or the session would come back unbound.
+      const switchCred = myInboxAttested ? loadSessionApprovalCredential() : undefined;
+      if (myInboxAttested && !runCredentialCovers(switchCred ?? null, newGroupId)) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `switch_group to '${targetName}' refused: this session was launched by a Koryphaios Deck and its run credential covers only the Deck's group, or cannot be read right now. Leaving would cut this session off the operator; ask the operator to change the Deck's group instead.`,
+            },
+          ],
+          isError: true,
+        };
+      }
+      // Signed before /disconnect with the credential just validated: the file
+      // is not read again on this path, so a Deck rewriting it in between cannot
+      // turn the re-register into a bare one. The token being left is the
+      // resume proof: within the same group the instance keeps its identity.
+      const attempt = attestRegister("/register", {
+        pid: process.pid,
+        cwd: myCwd,
+        git_root: myGitRoot,
+        tty: null,
+        summary: "",
+        host: myHost,
+        client_pid: myClientPid,
+        project_key: roadmapProjectKey(),
+        group_id: newGroupId,
+        group_secret_hash: newSecretHash,
+        role: process.env.CLAUDE_PEERS_ROLE,
+        desk_session: process.env.CLAUDE_PEERS_DESK_SESSION,
+        cc_session_id: process.env.CLAUDE_CODE_SESSION_ID,
+        deposit_capability_hash: depositCapabilityHashFromEnv(process.env),
+        context_resume_version: CONTEXT_RESUME_VERSION,
+      }, newGroupId, myInstanceToken, switchCred);
+      const previousInboxBinding = myInboxBinding;
+      const previousInboxOperatorId = myInboxOperatorId;
+      let disconnected = false;
       try {
+        myInboxBinding = null;
+        myInboxOperatorId = null;
+        await deleteSessionIdentityFile(process.env.CLAUDE_PEERS_DESK_SESSION ?? "");
         await brokerFetch("/disconnect", { instance_token: myInstanceToken });
+        disconnected = true;
         // Cancel any pending WS reconnect before switching identity.
         clearWsReconnect();
         if (wsSocket && wsSocket.readyState !== WebSocket.CLOSED) {
-          try { wsSocket.close(); } catch { /* ignore */ }
+          try {
+            wsSocket.close();
+          } catch (e) {
+            logError("Could not close the WebSocket before switching group", e);
+          }
         }
-        const reg = await brokerFetch<RegisterResponse>("/register", {
-          pid: process.pid,
-          cwd: myCwd,
-          git_root: myGitRoot,
-          tty: null,
-          summary: "",
-          host: myHost,
-          client_pid: myClientPid,
-          // Card 6aa32af4: same resolved value as the initial /register --
-          // see resolveProjectKey in shared/project-key.ts.
-          project_key: roadmapProjectKey(),
-          group_id: newGroupId,
-          group_secret_hash: newSecretHash,
-          // Card a2f61172: same source as the boot /register below -- both
-          // sites must carry this or the role silently disappears on
-          // switch_group (their bodies already diverge on claude_cli_pid).
-          role: process.env.CLAUDE_PEERS_ROLE,
-          // Card 3d121a74 lot L3-a: same two sources as the boot /register
-          // below, and the same "both sites or nothing" rule as `role` -- a
-          // switch_group that omitted desk_session would silently fall back to
-          // the legacy directory-wide key and re-open the shared-row defect
-          // for exactly the peers that just changed group. Pinned by a test
-          // comparing the two bodies' identity keys as SETS.
-          desk_session: process.env.CLAUDE_PEERS_DESK_SESSION,
-          cc_session_id: process.env.CLAUDE_CODE_SESSION_ID,
-          deposit_capability_hash: depositCapabilityHashFromEnv(process.env),
-          context_resume_version: CONTEXT_RESUME_VERSION,
-        });
+        const { reg, attested, inboxBinding, operatorId } = await registerFetch(attempt);
         myInstanceToken = reg.instance_token;
         myPeerId = reg.peer_id;
+        myInboxAttested = attested;
+        myInboxBinding = inboxBinding;
+        myInboxOperatorId = operatorId;
         myGroupId = newGroupId;
         myRegisteredAt = new Date().toISOString();
         // reg.role can be undefined at runtime -- an older broker omits it from
@@ -2319,7 +2471,15 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
         // which would make whoami's role field vanish instead of showing null.
         myRole = reg.role ?? null;
         await writePeerIdCache(myCwd, myPeerId);
-        await writeSessionIdentityFile(process.env.CLAUDE_PEERS_DESK_SESSION ?? "", myPeerId, myGroupId, myInstanceToken ?? "");
+        await writeSessionIdentityFile(
+          process.env.CLAUDE_PEERS_DESK_SESSION ?? "",
+          myPeerId,
+          myGroupId,
+          myInstanceToken ?? "",
+          undefined,
+          myInboxBinding,
+          myInboxOperatorId,
+        );
         await writeDeskSessionId();
         connectWs();
         return {
@@ -2331,6 +2491,24 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
           ],
         };
       } catch (e) {
+        if (!disconnected) {
+          myInboxBinding = previousInboxBinding;
+          myInboxOperatorId = previousInboxOperatorId;
+          try {
+            await writeSessionIdentityFile(
+              process.env.CLAUDE_PEERS_DESK_SESSION ?? "",
+              myPeerId!,
+              myGroupId,
+              myInstanceToken!,
+              undefined,
+              myInboxBinding,
+              myInboxOperatorId,
+            );
+          } catch (restoreError) {
+            logError("Could not restore the identity after disconnect failure", restoreError);
+          }
+        }
+        logError("switch_group failed", e);
         return {
           content: [{ type: "text" as const, text: `Error switching group: ${e instanceof Error ? e.message : String(e)}` }],
           isError: true,
@@ -2357,27 +2535,63 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
           isError: true,
         };
       }
+      let brokerRenameSucceeded = false;
       try {
+        await deleteSessionIdentityFile(process.env.CLAUDE_PEERS_DESK_SESSION ?? "");
         const result = await brokerFetch<SetIdResponse | { error: string }>("/set-id", {
           instance_token: myInstanceToken,
           new_peer_id: new_id,
         });
         if ("error" in result) {
+          await writeSessionIdentityFile(
+            process.env.CLAUDE_PEERS_DESK_SESSION ?? "",
+            myPeerId!,
+            myGroupId,
+            myInstanceToken,
+            undefined,
+            myInboxBinding,
+            myInboxOperatorId,
+          );
           return {
             content: [{ type: "text" as const, text: result.error }],
             isError: true,
           };
         }
+        brokerRenameSucceeded = true;
         myPeerId = result.peer_id;
         // set-id renames the peer IN PLACE broker-side, so this name becomes
         // free for a future registration to claim: third mutator of myPeerId
         // alongside boot and switch_group, same "both or neither" rule.
         await writePeerIdCache(myCwd, myPeerId);
-        await writeSessionIdentityFile(process.env.CLAUDE_PEERS_DESK_SESSION ?? "", myPeerId, myGroupId, myInstanceToken ?? "");
+        await writeSessionIdentityFile(
+          process.env.CLAUDE_PEERS_DESK_SESSION ?? "",
+          myPeerId,
+          myGroupId,
+          myInstanceToken ?? "",
+          undefined,
+          myInboxBinding,
+          myInboxOperatorId,
+        );
         return {
           content: [{ type: "text" as const, text: JSON.stringify(result) }],
         };
       } catch (e) {
+        if (!brokerRenameSucceeded) {
+          try {
+            await writeSessionIdentityFile(
+              process.env.CLAUDE_PEERS_DESK_SESSION ?? "",
+              myPeerId!,
+              myGroupId,
+              myInstanceToken,
+              undefined,
+              myInboxBinding,
+              myInboxOperatorId,
+            );
+          } catch (restoreError) {
+            logError("Could not restore the identity after set_id refusal", restoreError);
+          }
+        }
+        logError("set_id failed", e);
         return {
           content: [{ type: "text" as const, text: `Error setting id: ${e instanceof Error ? e.message : String(e)}` }],
           isError: true,
@@ -2725,10 +2939,13 @@ async function main() {
   // status filter downstream (findPeerByInstanceToken): deleting it before
   // this process /register's closes that window instead of relying on every
   // exit path to have run cleanup().
+  // The prior token stays in memory only because an attested resume must prove the instance being resumed.
+  const previousIdentity = await readSessionIdentityFile(process.env.CLAUDE_PEERS_DESK_SESSION ?? "");
   try {
     await deleteSessionIdentityFile(process.env.CLAUDE_PEERS_DESK_SESSION ?? "");
   } catch (e) {
     logError("Failed to delete a stale session-identity file at boot", e);
+    if (process.env.CLAUDE_PEERS_DESK_SESSION?.trim()) throw e;
   }
 
   log("Local context detection...");
@@ -2764,7 +2981,7 @@ async function main() {
   });
   log(`Heuristic summary: ${initialSummary}`);
 
-  const reg = await brokerFetch<RegisterResponse>("/register", {
+  const { reg, attested, inboxBinding, operatorId } = await registerFetch(attestRegister("/register", {
     pid: process.pid,
     cwd: myCwd,
     git_root: myGitRoot,
@@ -2787,9 +3004,12 @@ async function main() {
     cc_session_id: process.env.CLAUDE_CODE_SESSION_ID,
     deposit_capability_hash: depositCapabilityHashFromEnv(process.env),
     context_resume_version: CONTEXT_RESUME_VERSION,
-  });
+  }, groupId, previousIdentity?.instanceToken ?? null));
   myInstanceToken = reg.instance_token;
   myPeerId = reg.peer_id;
+  myInboxAttested = attested;
+  myInboxBinding = inboxBinding;
+  myInboxOperatorId = operatorId;
   myRegisteredAt = new Date().toISOString();
   // reg.role can be undefined at runtime -- an older broker omits it from
   // /register entirely, despite the string|null type.
@@ -2797,11 +3017,19 @@ async function main() {
   // would make whoami's role field vanish instead of showing null.
   myRole = reg.role ?? null;
   await writePeerIdCache(myCwd, myPeerId);
-  await writeSessionIdentityFile(process.env.CLAUDE_PEERS_DESK_SESSION ?? "", myPeerId, myGroupId, myInstanceToken ?? "");
+  await writeSessionIdentityFile(
+    process.env.CLAUDE_PEERS_DESK_SESSION ?? "",
+    myPeerId,
+    myGroupId,
+    myInstanceToken ?? "",
+    undefined,
+    myInboxBinding,
+    myInboxOperatorId,
+  );
   // Deck back-channel: hand the real minted session id to the per-tile token file
   // so the Deck maps tile -> session id deterministically (no-op outside the Deck).
   await writeDeskSessionId();
-  log(`Registered as peer '${myPeerId}'`);
+  log(`Registered as peer '${myPeerId}'${attested ? ", attested by the run credential" : ""}`);
   if (config.warn_untracked_reply.diagnostic) log(config.warn_untracked_reply.diagnostic);
 
   // Background summary upgrade.

@@ -11,6 +11,7 @@ import { hostname, uptime as osUptime } from 'node:os'
 import type { AppConfig, DisplayMode, WorkspaceSummary } from '@shared/types'
 import type { WorkspaceRestoreResult } from '../shared/workspace-restore-outcome'
 import type { Scope } from './scope'
+import type { ScopeAdoptionResult } from './scope-adoption'
 import type { SessionService } from './session-service'
 import type { RestorePlansResult } from './mod-launch-plan'
 import {
@@ -145,7 +146,13 @@ export interface WorkspaceDeps {
   getConfig: () => AppConfig
   setConfig: (patch: Partial<AppConfig>) => void
   getScope: () => Scope
-  adoptScope: (ws: { groupId: string; scopeKind: 'ephemeral' | 'custom' }) => void
+  adoptScope: (
+    ws: { groupId: string; scopeKind: 'ephemeral' | 'custom' },
+    own: () => boolean
+  ) => Promise<ScopeAdoptionResult>
+  cancelScopeAdoption: () => void
+  closeScopeAdoption: () => void
+  onCredentialFailure: (result: Extract<ScopeAdoptionResult, { state: 'credential-timed-out' | 'credential-unavailable' }>) => void
   confirmShellFields: (ws: Workspace, attendance: CallerAttendance) => Promise<WorkspaceApprovalGateResult>
   confirmUntrustedCwd: (ws: Workspace, attendance: CallerAttendance) => Promise<WorkspaceApprovalGateResult>
   prepareModPlans?: (defs: ReadonlyArray<ReturnType<typeof fromWorkspaceSessions>[number]>, signal: AbortSignal) => Promise<RestorePlansResult>
@@ -180,6 +187,7 @@ export class WorkspaceService {
   private restoreModPreparation: AbortController | null = null
 
   private invalidateRestore(): void {
+    this.deps.cancelScopeAdoption()
     this.restoreModPreparation?.abort()
     this.restoreModPreparation = null
     this.activeRestoreOperation = null
@@ -432,12 +440,6 @@ export class WorkspaceService {
     return result
   }
 
-  /**
-   * Distinct cwds the sessions of a saved workspace will respawn into. Used by
-   * the sandbox to warm its container-side transcript cache BEFORE `restore`
-   * spawns them (PLAN-SANDBOX M2): the spawn path is synchronous, so anything
-   * it needs to know must already be cached. Empty when the workspace is gone.
-   */
   sessionCwds(id: string): string[] {
     const ws = loadWorkspace(this.deps.projectDir, id)
     if (!ws) return []
@@ -447,12 +449,6 @@ export class WorkspaceService {
     return [...new Set(cwds)]
   }
 
-  /**
-   * Card 6363bd69: peeks at a not-yet-restored workspace's own sessions with
-   * the SAME signal `restoreFrom()` itself recovers post-restore, so a caller
-   * can start the deck-control endpoint proactively -- mirrors
-   * template:apply's own `inputs.some(isTeamLeadAgent)` pre-check.
-   */
   hasTeamLeadAgentSession(id: string): boolean {
     const ws = loadWorkspace(this.deps.projectDir, id)
     if (!ws) return false
@@ -496,36 +492,51 @@ export class WorkspaceService {
       if (!prepared.ok) return { ok: false, reason: 'superseded' }
       if (this.activeRestoreOperation !== operation) return { ok: false, reason: 'superseded' }
       if (this.lockedByOther(id, Date.now())) return { ok: false, reason: 'locked' }
-      this.deps.adoptScope({ groupId: ws.groupId, scopeKind: ws.scopeKind })
-      this.deps.setConfig(fromDisplayMode(ws.displayMode))
-      this.deps.service.restoreFrom(defs, prepared.plans)
-      if (!this.own(id)) {
-        reportError(
-          'workspace',
-          `restore(${id}) lost the lock race after swapping sessions -- ownership unresolved`
+      let acquired = false
+      let lockedAfterReadiness = false
+      let adoption: ScopeAdoptionResult
+      try {
+        adoption = await this.deps.adoptScope(
+          { groupId: ws.groupId, scopeKind: ws.scopeKind },
+          () => {
+            if (this.lockedByOther(id, Date.now())) {
+              lockedAfterReadiness = true
+              return false
+            }
+            acquired = this.own(id)
+            return acquired
+          }
         )
-        // When own() fails here after restoreFrom() already swapped sessions,
-        // this.currentId would otherwise still point at the OLD workspace while
-        // the live sessions belong to the NEW one, letting a debounced auto-save
-        // silently overwrite the OLD workspace's file with the NEW workspace's
-        // sessions.
-        // The currentId reset below closes that path; releaseLock's result is
-        // still checked and traced rather than ignored.
-        if (this.currentId && !this.releaseCurrent()) {
-          reportError(
-            'workspace',
-            `restore(${id}) skipped releaseLock for ${this.currentId}: on-disk lock owned by another identity`
-          )
+      } catch (error) {
+        if (acquired) {
+          this.releaseCurrent()
+          this.currentId = null
+        }
+        throw error
+      }
+      if (lockedAfterReadiness) return { ok: false, reason: 'locked' }
+      if (adoption.state !== 'published') {
+        if (adoption.state === 'credential-unavailable') {
+          const refusal = adoption.cause
+          if (refusal === 'busy') return { ok: false, reason: 'busy' }
+          if (refusal === 'closed') return { ok: false, reason: 'superseded' }
+          this.deps.onCredentialFailure(adoption)
+          return { ok: false, reason: 'credential-unavailable', cause: refusal }
+        }
+        if (adoption.state === 'credential-timed-out') this.deps.onCredentialFailure(adoption)
+        return { ok: false, reason: adoption.state === 'closed' ? 'superseded' : adoption.state }
+      }
+      try {
+        this.deps.setConfig(fromDisplayMode(ws.displayMode))
+        this.deps.service.restoreFrom(defs, prepared.plans)
+      } catch (error) {
+        if (!this.releaseCurrent()) {
+          reportError('workspace', `restore(${id}) could not release the workspace after application failure`)
         }
         this.currentId = null
-        return { ok: false, reason: 'lock-race' }
+        throw error
       }
       this.persistedName = { id, name: ws.name }
-      // Recapture right after restoring a non-empty workspace (ws.sessions.length
-      // > 0, guarded above) must not itself come back empty -- that would mean
-      // restoreFrom silently produced nothing, exactly the defect this card
-      // fixes elsewhere. saveAuto()'s own empty-guard would otherwise swallow it
-      // without a trace.
       if (this.saveAuto() === null) {
         logWarn(
           'workspace',
@@ -591,7 +602,11 @@ export class WorkspaceService {
 
   /** Final auto-save + lock release on quit. */
   releaseOnQuit(): void {
-    this.invalidateRestore()
+    this.deps.closeScopeAdoption()
+    this.restoreModPreparation?.abort()
+    this.restoreModPreparation = null
+    this.activeRestoreOperation = null
+    this.pendingRestoreId = null
     // A failed final save still propagates to the quit effect that traces it,
     // but must not leave the lock behind.
     let saveFailed = false

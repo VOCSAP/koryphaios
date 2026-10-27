@@ -1,9 +1,19 @@
 import { test, expect, afterAll } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { startBroker, stopBroker, scrubEnv, type TestBroker } from "./_helper.ts";
-import { readSessionIdentityFile } from "../shared/peer-cache.ts";
+import {
+  FIXTURE_OPERATOR_ID,
+  groupId,
+  mintRunCredential,
+  scrubEnv,
+  sha256Hex,
+  startBroker,
+  stopBroker,
+  type TestBroker,
+} from "./_helper.ts";
+import { readSessionIdentityFile, sessionIdentityFileName, type SessionIdentity } from "../shared/peer-cache.ts";
 
 const brokers: TestBroker[] = [];
 const procs: ReturnType<typeof Bun.spawn>[] = [];
@@ -60,18 +70,44 @@ test("set_id updates the per-tile identity file to the renamed peer_id", async (
   const homeDir = mkdtempSync(join(tmpdir(), "cp-setid-home-"));
   dirs.push(homeDir);
   const deskSession = "probe-set-id";
+  const groupSecret = randomUUID();
+  mkdirSync(join(homeDir, "claude-peers"), { recursive: true });
+  writeFileSync(join(homeDir, "claude-peers", "config.json"), JSON.stringify({ groups: { alpha: groupSecret }, default_group: "alpha" }));
+  const run = await mintRunCredential(b, { id: await groupId(groupSecret), hash: await sha256Hex(groupSecret) });
+  const credential = join(homeDir, "run-credential.json");
+  writeFileSync(credential, JSON.stringify({
+    brokerUrl: b.url,
+    operatorId: FIXTURE_OPERATOR_ID,
+    tokenId: run.tokenId,
+    sessionRef: `window-${run.run}`,
+    privateKey: run.cred.privateKey,
+    publicKey: run.cred.publicKey,
+    osUserHash: "hash",
+    inbox: { version: 1, run_ref: run.run, group_id: run.group },
+  }));
 
   const proc = Bun.spawn(["bun", "server.ts"], {
     env: scrubEnv(homeDir, {
       CLAUDE_PEERS_BROKER_URL: b.url,
       CLAUDE_PEERS_PORT: String(b.port),
       CLAUDE_PEERS_DESK_SESSION: deskSession,
+      CLAUDE_PEERS_APPROVAL_FILE: credential,
     }),
     stdio: ["pipe", "pipe", "pipe"],
   });
   procs.push(proc);
   const reader = proc.stdout.getReader();
   const buffer = { text: "" };
+  const stderr = { text: "" };
+  void (async () => {
+    const decoder = new TextDecoder();
+    const stderrReader = proc.stderr.getReader();
+    while (true) {
+      const { value, done } = await stderrReader.read();
+      if (done) break;
+      stderr.text += decoder.decode(value, { stream: true });
+    }
+  })();
   const send = (msg: unknown): void => {
     proc.stdin.write(JSON.stringify(msg) + "\n");
   };
@@ -89,7 +125,7 @@ test("set_id updates the per-tile identity file to the renamed peer_id", async (
   await readUntil(reader, 0, buffer);
 
   // Wait for boot /register to have written the identity file at least once.
-  let initial: { peerId: string; groupId: string } | null = null;
+  let initial: SessionIdentity | null = null;
   for (let i = 0; i < 80 && !initial; i++) {
     initial = await readSessionIdentityFile(deskSession, homeDir);
     if (!initial) await Bun.sleep(100);
@@ -106,11 +142,44 @@ test("set_id updates the per-tile identity file to the renamed peer_id", async (
   const res = await readUntil(reader, 1, buffer);
   expect(res.result?.isError).toBeFalsy();
 
-  let after: { peerId: string; groupId: string } | null = null;
+  let after: SessionIdentity | null = null;
   for (let i = 0; i < 80; i++) {
     after = await readSessionIdentityFile(deskSession, homeDir);
     if (after?.peerId === newId) break;
     await Bun.sleep(100);
   }
   expect(after?.peerId).toBe(newId);
+  expect(after?.inboxBinding).toEqual({ version: 1, runRef: run.run, groupId: run.group });
+  expect(after?.operatorId).toBe(FIXTURE_OPERATOR_ID);
+
+  send({
+    jsonrpc: "2.0",
+    id: 2,
+    method: "tools/call",
+    params: { name: "set_id", arguments: { new_id: "operator" } },
+  });
+  const reserved = await readUntil(reader, 2, buffer);
+  expect(reserved.result?.isError).toBe(true);
+  expect((await readSessionIdentityFile(deskSession, homeDir))?.inboxBinding, "a broker refusal restores the readiness snapshot").toEqual({
+    version: 1,
+    runRef: run.run,
+    groupId: run.group,
+  });
+
+  const nextId = "renamed-peer-write-failure";
+  const writeBlocker = join(homeDir, ".claude", "peers", `${sessionIdentityFileName(deskSession)}.${proc.pid}.tmp`);
+  mkdirSync(writeBlocker);
+  send({
+    jsonrpc: "2.0",
+    id: 3,
+    method: "tools/call",
+    params: { name: "set_id", arguments: { new_id: nextId } },
+  });
+  const failed = await readUntil(reader, 3, buffer);
+  expect(failed.result?.isError).toBe(true);
+  rmSync(writeBlocker, { recursive: true });
+  expect(await readSessionIdentityFile(deskSession, homeDir), "a failed snapshot write leaves no ready identity").toBeNull();
+  for (let i = 0; i < 20 && !stderr.text.includes("set_id failed"); i++) await Bun.sleep(50);
+  expect(stderr.text).toContain("set_id failed");
+  expect(stderr.text).not.toContain("Could not restore the identity after set_id refusal");
 }, 30_000);

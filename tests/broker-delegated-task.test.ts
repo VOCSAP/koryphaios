@@ -3,7 +3,8 @@ import { randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { get, groupId, livePid, post, sha256Hex, startBroker, stopBroker, type TestBroker, openBrokerDb } from "./_helper.ts";
+import { get, groupId, livePid, mintRunCredential, post, registerAttestedInstance, runInboxProof, sha256Hex, startBroker, stopBroker, type TestBroker, openBrokerDb } from "./_helper.ts";
+import { INBOX_GATES } from "../shared/approval.ts";
 
 interface Peer {
   peer_id: string;
@@ -1376,7 +1377,10 @@ describe("untracked reply policy", () => {
 
   test("never refuses the operator inbox, a remote peer or a group without an operator inbox, and says tracking is unavailable", async () => {
     const boss = await register("untracked-scope-boss", "/untracked-scope-boss");
-    const operator = await sendAs(boss, "operator", lead);
+    const run = await mintRunCredential(broker, { id: delegatedGroup, hash: delegatedSecretHash });
+    const deckSession = await registerAttestedInstance(broker, run, "untracked-scope-deck", "/untracked-scope-deck");
+    const deposit = { from_token: deckSession.body.instance_token, to_peer_id: "operator", text: `message ${randomUUID()}`, ...lead };
+    const operator = await post<Sent>(`${broker.url}/send-message`, { ...deposit, auth: runInboxProof(run, deposit, INBOX_GATES.deposit) });
     expect(operator.body).toEqual({ ok: true, message_id: expect.any(Number) });
 
     const remote = await register("untracked-scope-remote", "/untracked-scope-remote");

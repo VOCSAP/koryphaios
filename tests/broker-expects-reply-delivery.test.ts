@@ -1,5 +1,17 @@
 import { test, expect, describe, afterAll } from "bun:test";
-import { startBroker, stopBroker, scrubEnv, type TestBroker, openBrokerDb } from "./_helper.ts";
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
+import {
+  FIXTURE_OPERATOR_ID,
+  groupId,
+  mintRunCredential,
+  openBrokerDb,
+  scrubEnv,
+  sha256Hex,
+  startBroker,
+  stopBroker,
+  type TestBroker,
+} from "./_helper.ts";
 import { OPERATOR_INSTANCE_TOKEN, OPERATOR_PEER_ID } from "../shared/types.ts";
 import { PEER_NO_REPLY_NOTE } from "../shared/message-framing.ts";
 
@@ -68,13 +80,35 @@ async function readUntil(
   throw new Error(`no JSON-RPC response with id ${wantedId}`);
 }
 
+// The operator inbox only accepts a session registered with a run credential.
+async function runCredentialFile(b: TestBroker): Promise<string> {
+  const run = await mintRunCredential(b, { id: await groupId(FORCED_GROUP), hash: await sha256Hex(FORCED_GROUP) });
+  const path = join(b.tmpDir, `run-credential-${run.run}.json`);
+  writeFileSync(
+    path,
+    JSON.stringify({
+      brokerUrl: b.url,
+      operatorId: FIXTURE_OPERATOR_ID,
+      tokenId: run.tokenId,
+      sessionRef: `window-${run.run}`,
+      privateKey: run.cred.privateKey,
+      publicKey: run.cred.publicKey,
+      osUserHash: "hash",
+      inbox: { version: 1, run_ref: run.run, group_id: run.group },
+    }),
+    { mode: 0o600 }
+  );
+  return path;
+}
+
 /** Spawn one `bun server.ts` MCP peer against an already-running broker. */
-async function spawnPeer(b: TestBroker): Promise<Peer> {
+async function spawnPeer(b: TestBroker, extraEnv: Record<string, string> = {}): Promise<Peer> {
   const proc = Bun.spawn(["bun", "server.ts"], {
     env: scrubEnv(b.tmpDir, {
       CLAUDE_PEERS_BROKER_URL: b.url,
       CLAUDE_PEERS_PORT: String(b.port),
       CLAUDE_PEERS_FORCE_GROUP: FORCED_GROUP,
+      ...extraEnv,
     }),
     stdio: ["pipe", "pipe", "pipe"],
   });
@@ -234,7 +268,7 @@ describe("send_message expects_reply, end to end", () => {
   test("a waived message aimed at the operator inbox is stored unframed", async () => {
     const b = await startBroker();
     brokers.push(b);
-    const sender = await spawnPeer(b);
+    const sender = await spawnPeer(b, { CLAUDE_PEERS_APPROVAL_FILE: await runCredentialFile(b) });
 
     const forHuman = "Blocked on a credential, can you confirm which vault entry?";
     const sent = await callTool(sender, "send_message", {

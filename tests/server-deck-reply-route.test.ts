@@ -5,15 +5,21 @@ import { join } from "node:path";
 import {
   FIXTURE_OPERATOR,
   FIXTURE_OPERATOR_ID,
+  groupId,
+  mintRunCredential,
+  registerAttestedInstance,
+  sha256Hex,
   startBroker,
   stopBroker,
   post,
   livePid,
   scrubEnv,
+  type RunCredential,
   type TestBroker,
 } from "./_helper.ts";
 import {
   buildAuthProof,
+  deriveInstanceRef,
   deriveTokenId,
   generateCredential,
 } from "../shared/approval.ts";
@@ -146,9 +152,21 @@ function pumpStderr(proc: ReturnType<typeof Bun.spawn>): { text: string } {
   return buffer;
 }
 
+async function attestedTile(b: TestBroker, label: string): Promise<{ run: RunCredential; peerId: string; groupId: string; instanceToken: string }> {
+  const run = await mintRunCredential(b, { id: await groupId(label), hash: await sha256Hex(label) }, SPAWNED_SERVER_PROJECT_KEY);
+  const reg = await registerAttestedInstance(b, run, "test-host", `/tmp/${label}`);
+  expect(reg.status).toBe(200);
+  return { run, peerId: reg.body.peer_id, groupId: run.group, instanceToken: reg.body.instance_token };
+}
+
 async function bootDeck(
   b: TestBroker,
-  opts: { deskSession: string; identity: { peerId: string; groupId: string; instanceToken: string } | null }
+  opts: {
+    deskSession: string;
+    identity: { peerId: string; groupId: string; instanceToken: string } | null;
+    run?: RunCredential;
+    confirmation?: { runRef: string; groupId: string; operatorId: string } | null;
+  }
 ): Promise<{
   proc: ReturnType<typeof Bun.spawn>;
   reader: ReadableStreamDefaultReader<Uint8Array>;
@@ -168,35 +186,58 @@ async function bootDeck(
       opts.identity.peerId,
       opts.identity.groupId,
       opts.identity.instanceToken,
-      homeDir
+      homeDir,
+      opts.confirmation === null
+        ? null
+        : opts.confirmation
+          ? { version: 1, runRef: opts.confirmation.runRef, groupId: opts.confirmation.groupId }
+          : opts.run
+            ? { version: 1, runRef: opts.run.run, groupId: opts.run.group }
+            : null,
+      opts.confirmation === null ? null : opts.confirmation?.operatorId ?? (opts.run ? FIXTURE_OPERATOR_ID : null),
     );
   }
 
   const opCred = FIXTURE_OPERATOR;
   const operatorId = FIXTURE_OPERATOR_ID;
-  const sessionCred = generateCredential();
-  const mintBody = {
-    session_public_key: sessionCred.publicKey,
-    session_ref: "deck-tile-1",
-    project_key: SPAWNED_SERVER_PROJECT_KEY,
-    public_key: opCred.publicKey,
-  };
-  const auth = buildAuthProof(opCred.privateKey, mintBody, { kind: "operator", operator_id: operatorId });
-  expect((await post(`${b.url}/approval/token-mint`, { ...mintBody, auth })).status).toBe(200);
-
   const credFile = join(credDir, "approval.json");
-  await Bun.write(
-    credFile,
-    JSON.stringify({
-      brokerUrl: b.url,
-      operatorId,
-      tokenId: deriveTokenId(sessionCred.publicKey),
-      sessionRef: "deck-tile-1",
-      privateKey: sessionCred.privateKey,
-      publicKey: sessionCred.publicKey,
-      osUserHash: "hash-of-olivier",
-    })
-  );
+  if (opts.run) {
+    await Bun.write(
+      credFile,
+      JSON.stringify({
+        brokerUrl: b.url,
+        operatorId,
+        tokenId: opts.run.tokenId,
+        sessionRef: `window-${opts.run.run}`,
+        privateKey: opts.run.cred.privateKey,
+        publicKey: opts.run.cred.publicKey,
+        osUserHash: "hash-of-olivier",
+        inbox: { version: 1, run_ref: opts.run.run, group_id: opts.run.group },
+      })
+    );
+  } else {
+    const sessionCred = generateCredential();
+    const mintBody = {
+      session_public_key: sessionCred.publicKey,
+      session_ref: "deck-tile-1",
+      project_key: SPAWNED_SERVER_PROJECT_KEY,
+      public_key: opCred.publicKey,
+    };
+    const auth = buildAuthProof(opCred.privateKey, mintBody, { kind: "operator", operator_id: operatorId });
+    expect((await post(`${b.url}/approval/token-mint`, { ...mintBody, auth })).status).toBe(200);
+    await Bun.write(
+      credFile,
+      JSON.stringify({
+        brokerUrl: b.url,
+        operatorId,
+        tokenId: deriveTokenId(sessionCred.publicKey),
+        sessionRef: "deck-tile-1",
+        privateKey: sessionCred.privateKey,
+        publicKey: sessionCred.publicKey,
+        osUserHash: "hash-of-olivier",
+      })
+    );
+  }
 
   const proc = Bun.spawn(["bun", "server-deck.ts"], {
     env: scrubEnv(homeDir, {
@@ -232,12 +273,13 @@ async function bootDeck(
 
 async function firstApproval(
   b: TestBroker,
-  opCred: { privateKey: string; publicKey: string; id: string }
-): Promise<{ id: string; reply_route: string } | null> {
+  opCred: { privateKey: string; publicKey: string; id: string },
+  runRef?: string
+): Promise<{ id: string; reply_route: string; author_instance_hint?: string } | null> {
   for (let i = 0; i < 80; i++) {
-    const body = { project_key: SPAWNED_SERVER_PROJECT_KEY, public_key: opCred.publicKey };
+    const body = { project_key: SPAWNED_SERVER_PROJECT_KEY, public_key: opCred.publicKey, ...(runRef ? { run_ref: runRef } : {}) };
     const auth = buildAuthProof(opCred.privateKey, body, { kind: "operator", operator_id: opCred.id });
-    const res = await post<{ approvals: Array<{ id: string; reply_route: string }> }>(
+    const res = await post<{ approvals: Array<{ id: string; reply_route: string; author_instance_hint?: string }> }>(
       `${b.url}/approval/list`,
       { ...body, auth }
     );
@@ -249,13 +291,12 @@ async function firstApproval(
 }
 
 describe("server-deck.ts ask_operator reply routing", () => {
-  test("PREDICTION: a matching identity file resolves to reply_route channel", async () => {
+  test("a matching identity file resolves to an attested channel question for that instance", async () => {
     const b = await startBroker();
     brokers.push(b);
-    const groupId = "deck-reply-route-group-positive";
-    const { peerId, instanceToken } = await registerTestPeer(b, groupId);
+    const tile = await attestedTile(b, "deck-reply-route-group-positive");
 
-    const h = await bootDeck(b, { deskSession: "probe-positive", identity: { peerId, groupId, instanceToken } });
+    const h = await bootDeck(b, { deskSession: "probe-positive", identity: tile, run: tile.run });
     h.send({
       jsonrpc: "2.0",
       id: 1,
@@ -263,16 +304,81 @@ describe("server-deck.ts ask_operator reply routing", () => {
       params: { name: "ask_operator", arguments: { title: "t", question: "q" } },
     });
 
-    const approval = await firstApproval(b, h.opCred);
+    const approval = await firstApproval(b, h.opCred, tile.run.run);
     expect(approval).not.toBeNull();
+    expect(approval?.reply_route).toBe("channel");
+    expect(approval?.author_instance_hint).toBe(deriveInstanceRef(tile.instanceToken).slice(-12));
+  }, 30_000);
+
+  test("only the confirmed operator, run and group can create a channel question", async () => {
+    const b = await startBroker();
+    brokers.push(b);
+    const tile = await attestedTile(b, "deck-reply-route-readiness");
+    const cases = [
+      ["operator", { runRef: tile.run.run, groupId: tile.run.group, operatorId: "other-operator" }],
+      ["run", { runRef: "other-run", groupId: tile.run.group, operatorId: FIXTURE_OPERATOR_ID }],
+      ["group", { runRef: tile.run.run, groupId: "other-group", operatorId: FIXTURE_OPERATOR_ID }],
+    ] as const;
+
+    for (const [label, confirmation] of cases) {
+      const h = await bootDeck(b, {
+        deskSession: `probe-readiness-${label}`,
+        identity: tile,
+        run: tile.run,
+        confirmation,
+      });
+      h.send({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: { name: "ask_operator", arguments: { title: "t", question: "q" } },
+      });
+      const res = await readUntil(h.reader, 1, h.buffer);
+      expect(res.result?.isError, label).toBe(true);
+      expect(await approvalListedOnce(b, h.opCred, tile.run.run), label).toBeNull();
+    }
+  }, 30_000);
+
+  test("a project CWD distinct from the run project still creates a channel question", async () => {
+    const b = await startBroker();
+    brokers.push(b);
+    const tile = await attestedTile(b, "deck-reply-route-project-cwd");
+    const h = await bootDeck(b, { deskSession: "probe-project-cwd", identity: tile, run: tile.run });
+    h.send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/call",
+      params: { name: "ask_operator", arguments: { title: "t", question: "q" } },
+    });
+
+    const approval = await firstApproval(b, h.opCred, tile.run.run);
     expect(approval?.reply_route).toBe("channel");
   }, 30_000);
 
-  test("NEGATIVE CONTROL: an absent identity file resolves to reply_route pty, explicitly", async () => {
+  test("without a run credential a channel question is refused, never silently turned into a pty one", async () => {
     const b = await startBroker();
     brokers.push(b);
+    const groupId = "deck-reply-route-group-legacy";
+    const { peerId, instanceToken } = await registerTestPeer(b, groupId);
 
-    const h = await bootDeck(b, { deskSession: "probe-negative", identity: null });
+    const h = await bootDeck(b, { deskSession: "probe-legacy", identity: { peerId, groupId, instanceToken } });
+    h.send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/call",
+      params: { name: "ask_operator", arguments: { title: "t", question: "q" } },
+    });
+    const res = await readUntil(h.reader, 1, h.buffer);
+    expect(res.result?.isError).toBe(true);
+    expect(res.result?.content?.[0]?.text ?? "").toContain("run credential has no Inbox scope");
+  }, 30_000);
+
+  test("an absent identity file refuses a new question without creating a deposit", async () => {
+    const b = await startBroker();
+    brokers.push(b);
+    const run = await mintRunCredential(b, { id: await groupId("deck-reply-route-missing"), hash: await sha256Hex("deck-reply-route-missing") }, SPAWNED_SERVER_PROJECT_KEY);
+
+    const h = await bootDeck(b, { deskSession: "probe-negative", identity: null, run });
     h.send({
       jsonrpc: "2.0",
       id: 1,
@@ -280,9 +386,10 @@ describe("server-deck.ts ask_operator reply routing", () => {
       params: { name: "ask_operator", arguments: { title: "t", question: "q" } },
     });
 
-    const approval = await firstApproval(b, h.opCred);
-    expect(approval).not.toBeNull();
-    expect(approval?.reply_route).toBe("pty");
+    const res = await readUntil(h.reader, 1, h.buffer);
+    expect(res.result?.isError).toBe(true);
+    expect(res.result?.content?.[0]?.text ?? "").toContain("Inbox registration is not yet confirmed");
+    expect(await firstApproval(b, h.opCred, run.run)).toBeNull();
   }, 30_000);
 
   test("MAJOR 3: a desk_session token with no usable identity file is traced, not silent", async () => {
@@ -324,36 +431,13 @@ describe("server-deck.ts ask_operator reply routing", () => {
     expect(h.stderr.text).not.toContain("instanceToken");
   }, 30_000);
 
-  test("a channel request that falls back to PTY warns the agent before waiting", async () => {
+  test("a stale identity is refused before waiting, never routed to a peer that left", async () => {
     const b = await startBroker();
     brokers.push(b);
-    const groupId = "deck-reply-route-group-warning";
-    const { peerId, instanceToken } = await registerTestPeer(b, groupId);
-    expect((await post(`${b.url}/disconnect`, { instance_token: instanceToken })).status).toBe(200);
+    const tile = await attestedTile(b, "deck-reply-route-group-stale");
+    expect((await post(`${b.url}/disconnect`, { instance_token: tile.instanceToken })).status).toBe(200);
 
-    const h = await bootDeck(b, { deskSession: "probe-warning", identity: { peerId, groupId, instanceToken } });
-    h.send({
-      jsonrpc: "2.0",
-      id: 1,
-      method: "tools/call",
-      params: { name: "ask_operator", arguments: { title: "Fallback", question: "Can you see this?" } },
-    });
-
-    const res = await readBeforeWait(h.reader, 1, h.buffer);
-    const text = res.result?.content?.[0]?.text ?? "";
-    expect(res.result?.isError).toBeFalsy();
-    expect(text).toContain("not be pushed");
-    expect(text).toContain("ask_operator_wait");
-  }, 30_000);
-
-  test("a stale identity routes the reply to PTY", async () => {
-    const b = await startBroker();
-    brokers.push(b);
-    const groupId = "deck-reply-route-group-stale";
-    const { peerId, instanceToken } = await registerTestPeer(b, groupId);
-    expect((await post(`${b.url}/disconnect`, { instance_token: instanceToken })).status).toBe(200);
-
-    const h = await bootDeck(b, { deskSession: "probe-stale", identity: { peerId, groupId, instanceToken } });
+    const h = await bootDeck(b, { deskSession: "probe-stale", identity: tile, run: tile.run });
     h.send({
       jsonrpc: "2.0",
       id: 1,
@@ -361,8 +445,22 @@ describe("server-deck.ts ask_operator reply routing", () => {
       params: { name: "ask_operator", arguments: { title: "t", question: "q" } },
     });
 
-    const approval = await firstApproval(b, h.opCred);
-    expect(approval).not.toBeNull();
-    expect(approval?.reply_route).toBe("pty");
+    const res = await readBeforeWait(h.reader, 1, h.buffer);
+    expect(res.result?.isError).toBe(true);
+    expect(res.result?.content?.[0]?.text ?? "").toContain("not registered in this run's group");
+    expect(await approvalListedOnce(b, h.opCred, tile.run.run), "nothing was raised").toBeNull();
+    for (let i = 0; i < 50 && !h.stderr.text.includes("ask_operator failed"); i++) await Bun.sleep(20);
+    expect(h.stderr.text, "the failed signed question is logged").toContain("ask_operator failed");
   }, 30_000);
 });
+
+async function approvalListedOnce(
+  b: TestBroker,
+  opCred: { privateKey: string; publicKey: string; id: string },
+  runRef: string
+): Promise<{ id: string } | null> {
+  const body = { project_key: SPAWNED_SERVER_PROJECT_KEY, public_key: opCred.publicKey, run_ref: runRef };
+  const auth = buildAuthProof(opCred.privateKey, body, { kind: "operator", operator_id: opCred.id });
+  const res = await post<{ approvals: Array<{ id: string }> }>(`${b.url}/approval/list`, { ...body, auth });
+  return res.body.approvals?.[0] ?? null;
+}

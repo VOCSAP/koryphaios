@@ -39,7 +39,92 @@ describe("session-identity file", () => {
   test("round-trips a written (peerId, groupId, instanceToken) triple", async () => {
     await writeSessionIdentityFile("tile-token-1", "peer-a", "group-a", "token-a", tmpHome);
     const read = await readSessionIdentityFile("tile-token-1", tmpHome);
-    expect(read).toEqual({ peerId: "peer-a", groupId: "group-a", instanceToken: "token-a" });
+    expect(read).toEqual({
+      peerId: "peer-a",
+      groupId: "group-a",
+      instanceToken: "token-a",
+      inboxBinding: null,
+      operatorId: null,
+    });
+  });
+
+  test("round-trips an Inbox binding confirmation with its operator", async () => {
+    await writeSessionIdentityFile(
+      "tile-token-confirmed",
+      "peer-confirmed",
+      "group-confirmed",
+      "instance-confirmed",
+      tmpHome,
+      { version: 1, runRef: "run-confirmed", groupId: "group-confirmed" },
+      "operator-confirmed",
+    );
+
+    expect(await readSessionIdentityFile("tile-token-confirmed", tmpHome)).toEqual({
+      peerId: "peer-confirmed",
+      groupId: "group-confirmed",
+      instanceToken: "instance-confirmed",
+      inboxBinding: { version: 1, runRef: "run-confirmed", groupId: "group-confirmed" },
+      operatorId: "operator-confirmed",
+    });
+  });
+
+  test("a confirmation cannot be persisted without its operator", async () => {
+    await expect(
+      writeSessionIdentityFile(
+        "tile-token-partial",
+        "peer-partial",
+        "group-partial",
+        "instance-partial",
+        tmpHome,
+        { version: 1, runRef: "run-partial", groupId: "group-partial" },
+      ),
+    ).rejects.toThrow("Inbox binding confirmation and operator must be written together");
+  });
+
+  test("a malformed Inbox confirmation stays non-ready while preserving resume identity", async () => {
+    await writeFile(
+      join(peersDir, sessionIdentityFileName("v2")),
+      JSON.stringify({
+        peer_id: "peer-v2",
+        group_id: "group-v2",
+        instance_token: "instance-v2",
+        inbox_binding: { version: 2, run_ref: "run-v2", group_id: "group-v2" },
+        operator_id: "operator-v2",
+      }),
+      "utf-8",
+    );
+    await writeFile(
+      join(peersDir, sessionIdentityFileName("partial")),
+      JSON.stringify({
+        peer_id: "peer-partial",
+        group_id: "group-partial",
+        instance_token: "instance-partial",
+        inbox_binding: { version: 1, run_ref: "run-partial", group_id: "group-partial" },
+      }),
+      "utf-8",
+    );
+
+    for (const sessionId of ["v2", "partial"]) {
+      const identity = await readSessionIdentityFile(sessionId, tmpHome);
+      expect(identity?.inboxBinding).toBeNull();
+      expect(identity?.operatorId).toBeNull();
+      expect(identity?.instanceToken).toContain("instance");
+    }
+  });
+
+  test("writer surfaces an atomic write failure", async () => {
+    const sessionId = "write-failure";
+    await mkdir(join(peersDir, `${sessionIdentityFileName(sessionId)}.${process.pid}.tmp`));
+    await expect(writeSessionIdentityFile(sessionId, "peer", "group", "instance", tmpHome)).rejects.toThrow();
+  });
+
+  test("a failed atomic rename removes the temporary identity snapshot", async () => {
+    const sessionId = "rename-failure";
+    const filename = sessionIdentityFileName(sessionId);
+    await mkdir(join(peersDir, filename));
+
+    await expect(writeSessionIdentityFile(sessionId, "peer", "group", "instance", tmpHome)).rejects.toThrow();
+    expect(await readdir(peersDir)).not.toContain(`${filename}.${process.pid}.tmp`);
   });
 
   test("no file at all resolves to null", async () => {

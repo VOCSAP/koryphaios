@@ -220,6 +220,36 @@ test("fetchOperatorInbox omits session_id from the body when absent -- legacy sh
   expect("session_id" in body).toBe(false);
 });
 
+test("a run-scoped read and purge sign the whole body, run_ref included, for their own door; without a run the body carries neither", async () => {
+  const bodies: Record<string, unknown>[] = [];
+  const fetchFn = (async (_url: string | URL | Request, init?: RequestInit) => {
+    bodies.push(JSON.parse(init!.body as string));
+    return new Response(JSON.stringify({ messages: [], deleted: 0 }), { status: 200 });
+  }) as unknown as typeof fetch;
+  const signed: Array<{ body: Record<string, unknown>; door: string }> = [];
+  const run = {
+    runRef: "3f1c2a4e-9b7d-4c1e-8a2b-5d6e7f809a1b",
+    sign: (body: Record<string, unknown>, door: "drain" | "purge") => {
+      signed.push({ body: { ...body }, door });
+      return { kind: "operator", door };
+    }
+  };
+  const deps = { endpoint: { url: "http://x", token: null }, fetchFn };
+  await fetchOperatorInbox({ groupId: "g1", secret: "s1", sessionId: "sess", run }, deps);
+  await purgeOperatorInbox({ groupId: "g1", secret: "s1", sessionId: "sess", scope: "ids", ids: [4], run }, deps);
+  await fetchOperatorInbox({ groupId: "g1", secret: "s1", sessionId: "sess" }, deps);
+
+  expect(signed.map((s) => s.door)).toEqual(["drain", "purge"]);
+  for (const [i, s] of signed.entries()) {
+    const { auth, ...sent } = bodies[i]!;
+    expect(s.body, "the signer saw exactly what was sent").toEqual(sent);
+    expect(sent.run_ref).toBe(run.runRef);
+    expect(auth).toEqual({ kind: "operator", door: s.door });
+  }
+  expect(bodies[1]!.ids).toEqual([4]);
+  expect("run_ref" in bodies[2]! || "auth" in bodies[2]!).toBe(false);
+});
+
 test("fetchOperatorInbox throws on a non-2xx response", async () => {
   const fetchFn = (async () => new Response("nope", { status: 403 })) as unknown as typeof fetch;
   await expect(

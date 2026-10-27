@@ -589,7 +589,12 @@ function fakeDeps(
     getConfig: () => ({ displayMode: "2x2", gridCols: 2, gridRows: 2 }) as AppConfig,
     setConfig: () => {},
     getScope: () => fakeScope(),
-    adoptScope: () => {},
+    adoptScope: async (_ws, own) => own()
+      ? { state: "published", scope: { projectKey: "project", groupId: fakeScope().groupId } }
+      : { state: "lock-race" },
+    cancelScopeAdoption: () => {},
+    closeScopeAdoption: () => {},
+    onCredentialFailure: () => {},
     // Card 09d54a29: benign default so the ~10 pre-existing restore() tests
     // above (whose sampleWorkspace() sessions carry non-empty `args` by
     // default) keep exercising what they actually test, not this gate --
@@ -650,7 +655,6 @@ test("WorkspaceService.restore(): each approval gate rejects an invalidated requ
     let effects = 0;
     const deps = fakeDeps(proj, {
       [gateKey]: async () => gate.promise,
-      adoptScope: () => { effects++; },
       setConfig: () => { effects++; },
     });
     deps.service.restoreFrom = () => { effects++; return []; };
@@ -678,7 +682,6 @@ test("WorkspaceService.restore(): each approval gate rechecks a lock acquired wh
     let effects = 0;
     const deps = fakeDeps(proj, {
       [gateKey]: async () => gate.promise,
-      adoptScope: () => { effects++; },
       setConfig: () => { effects++; },
     });
     deps.service.restoreFrom = () => { effects++; return []; };
@@ -737,13 +740,12 @@ test("WorkspaceService.restore(): concurrent approval returns busy without inval
   expect(svc.currentWorkspaceId).toBe(first.id);
 });
 
-test("WorkspaceService.restore(): TOCTOU race lost between the top guard and own() still returns false, not silently true, and does NOT corrupt the OLD workspace's file (review correction D1, card 07134c6a)", async () => {
-  const proj = freshProject();
+function seedRaceWorkspaces(proj: string): { oldWs: Workspace } {
   ensureWorkspacesDir(proj);
   const oldWs = sampleWorkspace({ id: "wsp_old" });
   saveWorkspace(proj, oldWs);
-  // A session shape distinguishable from oldWs's default ("reviewer") so the
-  // anti-corruption assertion below cannot pass by content coincidence.
+  // Sessions distinguishable from oldWs's default ("reviewer") so the
+  // anti-corruption assertion cannot pass by content coincidence.
   const targetWs = sampleWorkspace({
     id: "wsp_target",
     sessions: [
@@ -758,66 +760,242 @@ test("WorkspaceService.restore(): TOCTOU race lost between the top guard and own
     ],
   });
   saveWorkspace(proj, targetWs);
+  return { oldWs };
+}
 
+function takeForeignTargetLock(proj: string): void {
+  takeLock(proj, "wsp_target", {
+    host: "other-host",
+    now: Date.now(),
+    bootInstant: 0,
+    startedAt: 1_000,
+    staleMs: 5_000,
+    isPidAlive: () => true,
+    pid: 1,
+  });
+}
+
+test("WorkspaceService.restore(): a foreign lock taken while the scope is adopted refuses as 'locked' before any session is swapped", async () => {
+  const proj = freshProject();
+  seedRaceWorkspaces(proj);
   const deps = fakeDeps(proj);
   const svc = workspaceService(deps);
-
-  // Needs a real prior restore so currentId is non-null and its lock is
-  // genuinely on disk: a freshly constructed service with currentId already
-  // null made the fix's two lines unreachable no-ops.
   expect(await svc.restore("wsp_old", "attended")).toEqual({ ok: true });
-  expect(svc.currentWorkspaceId).toBe("wsp_old");
-  expect(readLock(proj, "wsp_old")).not.toBeNull();
+  const oldLiveSessions = deps.sessions;
 
-  // Step 2: race-lose the restore of wsp_target -- restore()'s own
-  // top-of-function guard (readLock + isLockLive + ownsLock) passes here
-  // (wsp_target has no lock yet), so pre-seeding a foreign live lock before
-  // calling restore() would only exercise THAT pre-existing guard
-  // (b8d65b24), not the deeper own()-return-value fix this card adds. To
-  // reach own()'s OWN refusal, a foreign instance must grab wsp_target's
-  // lock in the window between the guard and own(id) -- simulated
-  // deterministically via adoptScope(), the first deps call restore() makes
-  // after its guard and before own(). Overridden on the SAME deps object
-  // restore() already holds, so only THIS call races.
-  deps.adoptScope = () => {
-    takeLock(proj, "wsp_target", {
-      host: "other-host",
-      now: Date.now(),
-      bootInstant: 0,
-      startedAt: 1_000,
-      staleMs: 5_000,
-      isPidAlive: () => true,
-      pid: 1,
-    });
+  deps.adoptScope = async (_ws, own) => {
+    takeForeignTargetLock(proj);
+    return own()
+      ? { state: "published", scope: { projectKey: "project", groupId: fakeScope().groupId } }
+      : { state: "lock-race" };
   };
   const result = await svc.restore("wsp_target", "attended");
-  // Card 07134c6a: this is the ONE reason where the operator's sessions
-  // were ALREADY swapped by restoreFrom() before the lock reclaim failed --
-  // 'lock-race', never lumped with the top-guard 'locked' case (a DIFFERENT
-  // test), and never silently resolved.
-  expect(result).toEqual({ ok: false, reason: "lock-race" });
-
-  // Card 07134c6a C2: currentId must be null (not "wsp_old", the id it
-  // still pointed at when own() failed), and wsp_old's OWN lock must have
-  // been released -- both PRECONDITIONS of the anti-corruption fix, not the
-  // fix itself.
-  expect(svc.currentWorkspaceId).toBeNull();
-  expect(readLock(proj, "wsp_old")).toBeNull();
-
-  // THE assertion that actually pins the anti-corruption fix, not just its
-  // preconditions: without releaseLock+currentId=null above, the debounced
-  // auto-save the 'changed' event (restoreFrom already emitted it) arms
-  // would call saveAuto() -> ensureCurrent() -> own(currentId) -> succeed
-  // against the STILL-"wsp_old" id, silently overwriting wsp_old's FILE
-  // with wsp_target's already-swapped sessions. Simulated directly here (no
-  // timer needed): call saveAuto() -- with currentId now null, it mints a
-  // FRESH id instead -- then read wsp_old's file back from disk.
-  svc.saveAuto();
-  const oldFileAfter = loadWorkspace(proj, "wsp_old");
-  expect(oldFileAfter).not.toBeNull();
-  expect(oldFileAfter!.sessions).toEqual(oldWs.sessions);
+  expect(result).toEqual({ ok: false, reason: "locked" });
+  expect(svc.currentWorkspaceId).toBe("wsp_old");
+  expect(deps.sessions).toBe(oldLiveSessions);
 
   svc.releaseOnQuit();
+});
+
+test("WorkspaceService.restore(): the sessions spawn only once the adopted scope's transition has settled", async () => {
+  const proj = freshProject();
+  ensureWorkspacesDir(proj);
+  saveWorkspace(proj, sampleWorkspace({ id: "wsp_scope" }));
+  let settle = (): void => {};
+  const transition = new Promise<void>((resolve) => {
+    settle = resolve;
+  });
+  let adopted = false;
+  const deps = fakeDeps(proj, {
+    adoptScope: async (_ws, own) => {
+      adopted = true;
+      await transition;
+      return own()
+        ? { state: "published", scope: { projectKey: "project", groupId: fakeScope().groupId } }
+        : { state: "lock-race" };
+    },
+  });
+  const before = deps.sessions;
+  const svc = workspaceService(deps);
+
+  const restoring = svc.restore("wsp_scope", "attended");
+  for (let i = 0; i < 20 && !adopted; i++) await Promise.resolve();
+  expect(adopted).toBe(true);
+  for (let i = 0; i < 20; i++) await Promise.resolve();
+  expect(deps.sessions, "no session is spawned while the run credential is being re-minted").toBe(before);
+
+  settle();
+  await expect(restoring).resolves.toEqual({ ok: true });
+  expect(deps.sessions).not.toBe(before);
+  svc.releaseOnQuit();
+});
+
+test("WorkspaceService.restore(): a credential timeout does not acquire or replace sessions", async () => {
+  const proj = freshProject();
+  ensureWorkspacesDir(proj);
+  saveWorkspace(proj, sampleWorkspace({ id: "wsp_credential_timeout" }));
+  const deps = fakeDeps(proj, {
+    adoptScope: async () => ({ state: "credential-timed-out" }),
+  });
+  const before = deps.sessions;
+  const svc = workspaceService(deps);
+
+  await expect(svc.restore("wsp_credential_timeout", "attended")).resolves.toEqual({ ok: false, reason: "credential-timed-out" });
+  expect(svc.currentWorkspaceId).toBeNull();
+  expect(deps.sessions).toBe(before);
+  svc.releaseOnQuit();
+});
+
+function adoptionHarness(proj: string) {
+  ensureWorkspacesDir(proj);
+  saveWorkspace(proj, sampleWorkspace({ id: "wsp_a", groupId: "g-a" }));
+  saveWorkspace(proj, sampleWorkspace({ id: "wsp_b", groupId: "g-b" }));
+  const initial: Scope = { ...fakeScope(), groupId: "g-initial" };
+  const state = { active: initial, restored: 0 };
+  const settles: Array<() => void> = [];
+  const cancelled = new Set<number>();
+  let ticket = 0;
+  const deps = fakeDeps(proj, {
+    getScope: () => state.active,
+    adoptScope: (ws, own) => {
+      const current = ticket++;
+      return new Promise((resolve) => settles.push(() => {
+        if (cancelled.has(current)) return resolve({ state: "superseded" });
+        if (!own()) return resolve({ state: "lock-race" });
+        state.active = { ...fakeScope(), groupId: ws.groupId, scopeKind: ws.scopeKind };
+        resolve({ state: "published", scope: { projectKey: "project", groupId: ws.groupId } });
+      }));
+    },
+    cancelScopeAdoption: () => cancelled.add(ticket - 1),
+    closeScopeAdoption: () => cancelled.add(ticket - 1),
+  });
+  const restoreFrom = deps.service.restoreFrom.bind(deps.service);
+  deps.service.restoreFrom = ((...args: Parameters<typeof restoreFrom>) => {
+    state.restored += 1;
+    return restoreFrom(...args);
+  }) as typeof restoreFrom;
+  const adopting = async (count: number): Promise<void> => {
+    for (let i = 0; i < 50 && settles.length < count; i++) await Promise.resolve();
+    expect(settles.length, "the restore reached adoptScope").toBe(count);
+  };
+  return { deps, state, settles, reverted: [], initial, adopting, svc: workspaceService(deps) };
+}
+
+test("WorkspaceService.restore(): startNew during the scope adoption cancels the restore and returns to the previous scope", async () => {
+  const h = adoptionHarness(freshProject());
+  const restoring = h.svc.restore("wsp_a", "attended");
+  await h.adopting(1);
+  expect(h.state.active.groupId).toBe("g-initial");
+
+  h.svc.startNew();
+  expect(h.state.active.groupId, "the next session must not start in the cancelled workspace's group").toBe("g-initial");
+  h.settles[0]!();
+  await expect(reachedWithin(restoring, "the cancelled restore settles")).resolves.toEqual({ ok: false, reason: "superseded" });
+  expect(h.state.restored).toBe(0);
+  expect(h.reverted).toEqual([]);
+  expect(h.state.active).toBe(h.initial);
+  h.svc.releaseOnQuit();
+});
+
+test("WorkspaceService.restore(): deleting the workspace being restored during the scope adoption returns to the previous scope", async () => {
+  const h = adoptionHarness(freshProject());
+  const restoring = h.svc.restore("wsp_a", "attended");
+  await h.adopting(1);
+
+  h.svc.deleteWs("wsp_a");
+  expect(h.state.active.groupId).toBe("g-initial");
+  h.settles[0]!();
+  await expect(reachedWithin(restoring, "the cancelled restore settles")).resolves.toEqual({ ok: false, reason: "superseded" });
+  expect(h.state.restored).toBe(0);
+  expect(h.reverted).toEqual([]);
+  h.svc.releaseOnQuit();
+});
+
+test("WorkspaceService.restore(): a restore started after a cancelled one keeps its own scope when the cancelled one wakes", async () => {
+  const h = adoptionHarness(freshProject());
+  const first = h.svc.restore("wsp_a", "attended");
+  await h.adopting(1);
+  await expect(h.svc.restore("wsp_b", "attended")).resolves.toEqual({ ok: false, reason: "busy" });
+
+  h.svc.startNew();
+  const second = h.svc.restore("wsp_b", "attended");
+  await h.adopting(2);
+  expect(h.state.active.groupId).toBe("g-initial");
+
+  h.settles[0]!();
+  await expect(reachedWithin(first, "the cancelled restore settles")).resolves.toEqual({ ok: false, reason: "superseded" });
+  expect(h.state.active.groupId, "the cancelled restore must not publish its scope").toBe("g-initial");
+  h.settles[1]!();
+  await expect(reachedWithin(second, "the newer restore settles")).resolves.toEqual({ ok: true });
+  expect(h.state.active.groupId).toBe("g-b");
+  expect(h.svc.currentWorkspaceId).toBe("wsp_b");
+  expect(h.reverted).toEqual([]);
+  h.svc.releaseOnQuit();
+});
+
+test("WorkspaceService.restore(): cancelling the newer restore after the older cancelled one woke still returns to the previous scope", async () => {
+  const h = adoptionHarness(freshProject());
+  const first = h.svc.restore("wsp_a", "attended");
+  await h.adopting(1);
+  h.svc.startNew();
+  const second = h.svc.restore("wsp_b", "attended");
+  await h.adopting(2);
+  h.settles[0]!();
+  await expect(reachedWithin(first, "the older restore settles")).resolves.toEqual({ ok: false, reason: "superseded" });
+
+  h.svc.deleteWs("wsp_b");
+  expect(h.state.active.groupId).toBe("g-initial");
+  h.settles[1]!();
+  await expect(reachedWithin(second, "the newer restore settles")).resolves.toEqual({ ok: false, reason: "superseded" });
+  expect(h.reverted).toEqual([]);
+  expect(h.state.restored).toBe(0);
+  h.svc.releaseOnQuit();
+});
+
+test("WorkspaceService.restore(): a restore whose adoption changed nothing reverts nothing when cancelled", async () => {
+  const h = adoptionHarness(freshProject());
+  let settle = (): void => {};
+  let cancelled = false;
+  h.deps.cancelScopeAdoption = () => { cancelled = true; };
+  h.deps.adoptScope = async (_ws, own) => {
+    await new Promise<void>((resolve) => { settle = resolve; h.settles.push(resolve); });
+    if (cancelled) return { state: "superseded" };
+    return own()
+      ? { state: "published", scope: { projectKey: "project", groupId: fakeScope().groupId } }
+      : { state: "lock-race" };
+  };
+  const restoring = h.svc.restore("wsp_a", "attended");
+  await h.adopting(1);
+
+  h.svc.startNew();
+  settle();
+  await expect(reachedWithin(restoring, "the cancelled restore settles")).resolves.toEqual({ ok: false, reason: "superseded" });
+  expect(h.reverted).toEqual([]);
+  expect(h.state.active).toBe(h.initial);
+});
+
+test("WorkspaceService.startNew(): after a completed restore keeps the restored scope", async () => {
+  const h = adoptionHarness(freshProject());
+  const restoring = h.svc.restore("wsp_a", "attended");
+  await h.adopting(1);
+  h.settles[0]!();
+  await expect(reachedWithin(restoring, "the restore settles")).resolves.toEqual({ ok: true });
+
+  h.svc.startNew();
+  expect(h.reverted).toEqual([]);
+  expect(h.state.active.groupId).toBe("g-a");
+  h.svc.releaseOnQuit();
+});
+
+test("WorkspaceService.restore(): quitting during the scope adoption does not re-mint a credential for the previous scope", async () => {
+  const h = adoptionHarness(freshProject());
+  const restoring = h.svc.restore("wsp_a", "attended");
+  await h.adopting(1);
+
+  h.svc.releaseOnQuit();
+  h.settles[0]!();
+  await expect(reachedWithin(restoring, "the cancelled restore settles")).resolves.toEqual({ ok: false, reason: "superseded" });
+  expect(h.reverted).toEqual([]);
 });
 
 test("WorkspaceService.restore(): succeeds and owns the lock when nothing contends", async () => {
@@ -1604,7 +1782,12 @@ function modRestoreRig(proj: string, overrides: Partial<WorkspaceDeps> = {}, eve
   const pending: PendingPreparation[] = [];
   const restored: Array<{ defs: SessionDef[]; plans: unknown }> = [];
   const deps = fakeDeps(proj, {
-    adoptScope: () => { events.push("adopt"); },
+    adoptScope: async (_ws, own) => {
+      events.push("adopt");
+      return own()
+        ? { state: "published", scope: { projectKey: "project", groupId: fakeScope().groupId } }
+        : { state: "lock-race" };
+    },
     setConfig: () => { events.push("config"); },
     prepareModPlans: (defs, signal) => {
       events.push("prepare");
@@ -1877,4 +2060,281 @@ test("WorkspaceService.restore(): a restore started after an invalidation prepar
   await expect(settled(first)).resolves.toEqual({ ok: false, reason: "superseded" });
   await expect(settled(second)).resolves.toEqual({ ok: true });
   expect(rig.restored).toHaveLength(1);
+});
+
+function credentialRig(proj: string, adopt: WorkspaceDeps["adoptScope"], overrides: Partial<WorkspaceDeps> = {}) {
+  const failures: unknown[] = [];
+  const events: string[] = [];
+  const counts = { cancel: 0, close: 0, restoreFrom: 0 };
+  const deps = fakeDeps(proj, {
+    adoptScope: adopt,
+    onCredentialFailure: (result) => { failures.push(result); },
+    setConfig: () => { events.push("config"); },
+    cancelScopeAdoption: () => { counts.cancel++; },
+    closeScopeAdoption: () => { counts.close++; },
+    ...overrides,
+  });
+  const applySessions = deps.service.restoreFrom.bind(deps.service);
+  deps.service.restoreFrom = ((defs: SessionDef[], plans?: unknown) => {
+    counts.restoreFrom++;
+    events.push("restore");
+    return applySessions(defs, plans as never);
+  }) as WorkspaceDeps["service"]["restoreFrom"];
+  return { deps, failures, events, counts, svc: workspaceService(deps) };
+}
+
+test("WorkspaceService.restore(): each refused adoption state maps to its own reason and opens nothing", async () => {
+  const table: Array<[Awaited<ReturnType<WorkspaceDeps["adoptScope"]>>, { ok: false; reason: string }, boolean]> = [
+    [{ state: "credential-timed-out" }, { ok: false, reason: "credential-timed-out" }, true],
+    [{ state: "lock-race" }, { ok: false, reason: "lock-race" }, false],
+    [{ state: "superseded" }, { ok: false, reason: "superseded" }, false],
+    [{ state: "closed" }, { ok: false, reason: "superseded" }, false],
+    [{ state: "busy" }, { ok: false, reason: "busy" }, false],
+  ];
+  for (const [adoption, expected, reported] of table) {
+    const proj = freshProject();
+    ensureWorkspacesDir(proj);
+    saveWorkspace(proj, sampleWorkspace({ id: "wsp_refused" }));
+    const rig = credentialRig(proj, async () => adoption);
+    await expect(rig.svc.restore("wsp_refused", "attended"), adoption.state).resolves.toEqual(expected);
+    expect(rig.events, `${adoption.state}: no config and no session may follow a refused adoption`).toEqual([]);
+    expect(rig.svc.currentWorkspaceId, `${adoption.state}: the workspace must not become current`).toBeNull();
+    expect(readLock(proj, "wsp_refused"), `${adoption.state}: no lock may be left behind`).toBeNull();
+    expect(rig.failures.length, `${adoption.state}: failure sink calls`).toBe(reported ? 1 : 0);
+  }
+});
+
+test("WorkspaceService.restore(): a credential refusal reaches the failure sink with its typed cause and keeps that cause", async () => {
+  for (const cause of ["trust", "identity", "capability", "local-file", "mint-refused"] as const) {
+    const proj = freshProject();
+    ensureWorkspacesDir(proj);
+    saveWorkspace(proj, sampleWorkspace({ id: "wsp_cause" }));
+    const rig = credentialRig(proj, async () => ({ state: "credential-unavailable", cause }));
+    await expect(rig.svc.restore("wsp_cause", "attended"), cause).resolves.toEqual({ ok: false, reason: "credential-unavailable", cause });
+    expect(rig.failures, `${cause}: the sink receives the adoption result`).toEqual([{ state: "credential-unavailable", cause }]);
+    expect(rig.events, `${cause}: nothing is applied`).toEqual([]);
+    expect(rig.svc.currentWorkspaceId).toBeNull();
+  }
+});
+
+test("WorkspaceService.restore(): a preparation refused as busy or closed is a quiet result, not a credential failure", async () => {
+  const table: Array<["busy" | "closed", string]> = [
+    ["busy", "busy"],
+    ["closed", "superseded"],
+  ];
+  for (const [cause, reason] of table) {
+    const proj = freshProject();
+    ensureWorkspacesDir(proj);
+    saveWorkspace(proj, sampleWorkspace({ id: "wsp_quiet_refusal" }));
+    const rig = credentialRig(proj, async () => ({ state: "credential-unavailable", cause }));
+    await expect(rig.svc.restore("wsp_quiet_refusal", "attended"), cause).resolves.toEqual({ ok: false, reason });
+    expect(rig.failures, `${cause}: a quiet refusal must not reach the credential failure sink`).toEqual([]);
+    expect(rig.events, `${cause}: nothing is applied`).toEqual([]);
+    expect(rig.svc.currentWorkspaceId).toBeNull();
+  }
+});
+
+test("WorkspaceService.restore(): a preparation refused as invalid-target keeps its own cause and reaches the failure sink", async () => {
+  const proj = freshProject();
+  ensureWorkspacesDir(proj);
+  saveWorkspace(proj, sampleWorkspace({ id: "wsp_invalid_target" }));
+  const rig = credentialRig(proj, async () => ({ state: "credential-unavailable", cause: "invalid-target" }));
+  await expect(rig.svc.restore("wsp_invalid_target", "attended")).resolves.toEqual({ ok: false, reason: "credential-unavailable", cause: "invalid-target" });
+  expect(rig.failures).toEqual([{ state: "credential-unavailable", cause: "invalid-target" }]);
+  expect(rig.events).toEqual([]);
+});
+
+test("WorkspaceService.restore(): an adoption target carries the saved workspace's own group and scope kind", async () => {
+  const proj = freshProject();
+  ensureWorkspacesDir(proj);
+  saveWorkspace(proj, sampleWorkspace({ id: "wsp_target_scope", groupId: "g-custom-saved", scopeKind: "custom" }));
+  const targets: unknown[] = [];
+  const rig = credentialRig(proj, async (ws, own) => {
+    targets.push(ws);
+    return own() ? { state: "published", scope: { projectKey: "project", groupId: ws.groupId } } : { state: "lock-race" };
+  }, { getScope: () => ({ ...fakeScope(), groupId: "g-live-other", scopeKind: "ephemeral" }) });
+  await expect(rig.svc.restore("wsp_target_scope", "attended")).resolves.toEqual({ ok: true });
+  expect(targets).toEqual([{ groupId: "g-custom-saved", scopeKind: "custom" }]);
+});
+
+test("WorkspaceService.restore(): a workspace locked by another instance is refused before any approval is asked", async () => {
+  const proj = freshProject();
+  seedRaceWorkspaces(proj);
+  takeForeignTargetLock(proj);
+  const asked: string[] = [];
+  let adopted = 0;
+  const rig = credentialRig(proj, async () => { adopted++; return { state: "lock-race" }; }, {
+    confirmShellFields: async () => { asked.push("shell"); return "approved"; },
+    confirmUntrustedCwd: async () => { asked.push("cwd"); return "approved"; },
+  });
+  await expect(rig.svc.restore("wsp_target", "attended")).resolves.toEqual({ ok: false, reason: "locked" });
+  expect(asked, "no approval dialog for a workspace another instance holds").toEqual([]);
+  expect(adopted).toBe(0);
+});
+
+test("WorkspaceService.restore(): an adoption error after acquisition releases the target workspace", async () => {
+  const proj = freshProject();
+  ensureWorkspacesDir(proj);
+  saveWorkspace(proj, sampleWorkspace({ id: "wsp_adoption_error" }));
+  const boom = new Error("scope publication failed");
+  const rig = credentialRig(proj, async (_ws, own) => {
+    own();
+    throw boom;
+  });
+
+  await expect(rig.svc.restore("wsp_adoption_error", "attended")).rejects.toBe(boom);
+  expect(rig.svc.currentWorkspaceId).toBeNull();
+  expect(readLock(proj, "wsp_adoption_error")).toBeNull();
+});
+
+test("WorkspaceService.restore(): a setConfig error after acquisition releases the target workspace", async () => {
+  const proj = freshProject();
+  ensureWorkspacesDir(proj);
+  saveWorkspace(proj, sampleWorkspace({ id: "wsp_config_error" }));
+  const boom = new Error("configuration failed");
+  const rig = credentialRig(proj, async (_ws, own) => own()
+    ? { state: "published", scope: { projectKey: "project", groupId: "scope" } }
+    : { state: "lock-race" }, {
+      setConfig: () => { throw boom; }
+    });
+
+  await expect(rig.svc.restore("wsp_config_error", "attended")).rejects.toBe(boom);
+  expect(rig.svc.currentWorkspaceId).toBeNull();
+  expect(readLock(proj, "wsp_config_error")).toBeNull();
+  expect(rig.counts.restoreFrom).toBe(0);
+});
+
+test("WorkspaceService.restore(): an error while applying the sessions keeps the new tiles and scope, releases the workspace and writes no snapshot", async () => {
+  const proj = freshProject();
+  seedRaceWorkspaces(proj);
+  const rig = credentialRig(proj, async (ws, own) => own()
+    ? { state: "published", scope: { projectKey: "project", groupId: ws.groupId } }
+    : { state: "lock-race" });
+  await expect(rig.svc.restore("wsp_old", "attended")).resolves.toEqual({ ok: true });
+  const oldBefore = loadWorkspace(proj, "wsp_old");
+  const targetBefore = loadWorkspace(proj, "wsp_target");
+  const applied = rig.counts.restoreFrom;
+  const cancelled = rig.counts.cancel;
+
+  const boom = new Error("tile spawn failed");
+  const realRestoreFrom = rig.deps.service.restoreFrom;
+  let closeAllCalls = 0;
+  (rig.deps.service as unknown as { closeAll: () => void }).closeAll = () => { closeAllCalls++; };
+  rig.deps.service.restoreFrom = ((...args: Parameters<typeof realRestoreFrom>) => {
+    realRestoreFrom(...args);
+    throw boom;
+  }) as typeof realRestoreFrom;
+
+  await expect(rig.svc.restore("wsp_target", "attended")).rejects.toBe(boom);
+  expect(rig.counts.restoreFrom - applied, "no compensating restoreFrom after the failure").toBe(1);
+  expect(closeAllCalls, "the tiles opened before the failure are not closed").toBe(0);
+  expect(rig.deps.sessions.map((s) => s.name), "the partial application stays in place").toEqual(["target-peer"]);
+  expect(rig.counts.cancel - cancelled, "the scope adoption is not cancelled or rolled back").toBe(0);
+  expect(rig.svc.currentWorkspaceId, "the failed workspace must not stay current").toBeNull();
+  expect(readLock(proj, "wsp_target"), "the target workspace lock is released").toBeNull();
+  expect(loadWorkspace(proj, "wsp_target"), "no partial snapshot is written into the target").toEqual(targetBefore);
+  expect(loadWorkspace(proj, "wsp_old"), "no partial snapshot is written into the previous workspace").toEqual(oldBefore);
+});
+
+test("WorkspaceService.restore(): a release refused after an application failure is traced and the original error still propagates", async () => {
+  const proj = freshProject();
+  seedRaceWorkspaces(proj);
+  const rig = credentialRig(proj, async (ws, own) => own()
+    ? { state: "published", scope: { projectKey: "project", groupId: ws.groupId } }
+    : { state: "lock-race" });
+  const boom = new Error("tile spawn failed");
+  rig.deps.service.restoreFrom = (() => {
+    const foreign: Lock = { pid: 99_999, host: "other-host", startedAt: 0, heartbeat: Date.now() };
+    writeFileSync(join(workspacesDir(proj), "wsp_target.lock"), JSON.stringify(foreign));
+    throw boom;
+  }) as WorkspaceDeps["service"]["restoreFrom"];
+
+  const reported: Array<{ scope: string; text: string }> = [];
+  onDeckError((scope, text) => reported.push({ scope, text }));
+  try {
+    await expect(rig.svc.restore("wsp_target", "attended")).rejects.toBe(boom);
+  } finally {
+    onDeckError(() => {});
+  }
+  expect(reported.filter((r) => r.text.includes("wsp_target") && r.text.includes("release")), "the refused release is traced with the workspace id").toHaveLength(1);
+});
+
+test("WorkspaceService.restore(): re-saves the restored workspace under the live scope right after applying it", async () => {
+  const proj = freshProject();
+  ensureWorkspacesDir(proj);
+  saveWorkspace(proj, sampleWorkspace({ id: "wsp_recapture", scopeName: "scope-label-saved-earlier" }));
+  const rig = credentialRig(proj, async (ws, own) => own()
+    ? { state: "published", scope: { projectKey: "project", groupId: ws.groupId } }
+    : { state: "lock-race" });
+  await expect(rig.svc.restore("wsp_recapture", "attended")).resolves.toEqual({ ok: true });
+  expect(loadWorkspace(proj, "wsp_recapture")!.scopeName, "the file records the scope the restored tiles now run under").toBe(fakeScope().name);
+});
+
+test("WorkspaceService.restore(): the restored workspace's name stays current even when no tile could be re-captured", async () => {
+  const proj = freshProject();
+  ensureWorkspacesDir(proj);
+  saveWorkspace(proj, sampleWorkspace({ id: "wsp_nameless", name: "Named before restore" }));
+  const rig = credentialRig(proj, async (ws, own) => own()
+    ? { state: "published", scope: { projectKey: "project", groupId: ws.groupId } }
+    : { state: "lock-race" });
+  rig.deps.service.restoreFrom = (() => {}) as WorkspaceDeps["service"]["restoreFrom"];
+  (rig.deps.service as unknown as { captureSessions: () => SessionDef[] }).captureSessions = () => [];
+  await expect(rig.svc.restore("wsp_nameless", "attended")).resolves.toEqual({ ok: true });
+  expect(rig.svc.currentWorkspaceId).toBe("wsp_nameless");
+  expect(rig.svc.currentWorkspaceName).toBe("Named before restore");
+});
+
+test("WorkspaceService.restore(): without a mod preparer, restoreFrom still receives a plans map", async () => {
+  const proj = freshProject();
+  ensureWorkspacesDir(proj);
+  saveWorkspace(proj, sampleWorkspace({ id: "wsp_noplans" }));
+  const rig = credentialRig(proj, async (ws, own) => own()
+    ? { state: "published", scope: { projectKey: "project", groupId: ws.groupId } }
+    : { state: "lock-race" });
+  const received: unknown[] = [];
+  const realRestoreFrom = rig.deps.service.restoreFrom;
+  rig.deps.service.restoreFrom = ((defs: SessionDef[], plans?: unknown) => {
+    received.push(plans);
+    return realRestoreFrom(defs, plans as never);
+  }) as typeof realRestoreFrom;
+  await expect(rig.svc.restore("wsp_noplans", "attended")).resolves.toEqual({ ok: true });
+  expect(received).toHaveLength(1);
+  expect(received[0]).toBeInstanceOf(Map);
+  expect((received[0] as Map<unknown, unknown>).size).toBe(0);
+});
+
+test("WorkspaceService.deleteWs: deleting a workspace whose restore already finished does not cancel the scope adoption", async () => {
+  const proj = freshProject();
+  ensureWorkspacesDir(proj);
+  saveWorkspace(proj, sampleWorkspace({ id: "wsp_finished" }));
+  const rig = credentialRig(proj, async (ws, own) => own()
+    ? { state: "published", scope: { projectKey: "project", groupId: ws.groupId } }
+    : { state: "lock-race" });
+  await expect(rig.svc.restore("wsp_finished", "attended")).resolves.toEqual({ ok: true });
+  expect(rig.counts.cancel).toBe(0);
+  rig.svc.deleteWs("wsp_finished");
+  expect(rig.counts.cancel, "no restore is pending for that id any more").toBe(0);
+});
+
+test("WorkspaceService.startNew(): a finished restore's mod preparation signal is not aborted afterwards", async () => {
+  const proj = freshProject();
+  ensureWorkspacesDir(proj);
+  const ws = projectSessionsWorkspace(proj, "wsp-finished-signal");
+  saveWorkspace(proj, ws);
+  const rig = modRestoreRig(proj);
+  const restoring = rig.svc.restore(ws.id, "attended");
+  await flushMicrotasks();
+  rig.pending[0]!.release();
+  await expect(settled(restoring)).resolves.toEqual({ ok: true });
+  rig.svc.startNew();
+  expect(rig.pending[0]!.signal.aborted, "a completed preparation has nothing left to cancel").toBe(false);
+});
+
+test("WorkspaceService.releaseOnQuit(): closes the scope adoption for good rather than only cancelling it", async () => {
+  const proj = freshProject();
+  ensureWorkspacesDir(proj);
+  const rig = credentialRig(proj, async () => ({ state: "closed" }));
+  rig.svc.releaseOnQuit();
+  expect(rig.counts.close, "quit closes admission").toBe(1);
+  expect(rig.counts.cancel, "quit is not a re-armable cancel").toBe(0);
 });

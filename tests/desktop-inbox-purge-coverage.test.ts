@@ -1,11 +1,3 @@
-// Scans desktop/src/main/ipc.ts for handlers invoking any of three reset verbs
-// (workspaces.startNew, service.closeAll, workspaces.restore) and requires each
-// to also call purgeInboxSession in the same body.
-// Does not follow a reset verb reached through an intermediate helper function,
-// and treats a verb reachable only through dead code as present.
-// A regHandle/regOn channel name that isn't a string literal fails the guard
-// loudly rather than being silently skipped.
-
 import { test, expect } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -14,10 +6,7 @@ import { findMatchingClose } from "./_braced-body";
 const REPO_ROOT = join(import.meta.dir, "..");
 const IPC_TS = join(REPO_ROOT, "desktop", "src", "main", "ipc.ts");
 
-// The three known reset-verb calls this scan recognizes today (see the
-// MEASURED CORRECTION note above for why `workspaces.restore(` had to be
-// added to the brief's original 2-verb signature).
-const RESET_VERB_RE = /\bworkspaces\.startNew\(|\bservice\.closeAll\(|\bworkspaces\.restore\(/;
+const RESET_VERB_RE = /\bworkspaces\.startNew\(|\bservice\.closeAll\(/;
 const PURGE_CALL_RE = /\bpurgeInboxSession\(/;
 
 function stripComments(src: string): string {
@@ -59,30 +48,17 @@ function stripComments(src: string): string {
   return out;
 }
 
-/**
- * From `src[openParenIdx] === '('`, returns the text strictly between that
- * paren and its balanced match, quote-aware. Depth is a single counter
- * across `(`, `{`, `[` (mirrors desktop-deckapi-producer-coverage.test.ts's
- * splitTopLevelProps depth tracking) -- safe because well-formed TS code
- * always nests these three bracket kinds in matching pairs.
- */
 function extractBalancedParen(src: string, openParenIdx: number): { body: string; endIdx: number } {
   const endIdx = findMatchingClose(src, openParenIdx, ["(", "{", "["], [")", "}", "]"], true);
   return { body: src.slice(openParenIdx + 1, endIdx - 1), endIdx };
 }
 
 interface ScannedHandler {
-  /** The channel string, or null if the first argument was not a literal (UNPARSED). */
   channel: string | null;
   inDomain: boolean;
   hasPurge: boolean;
 }
 
-/**
- * Every `regHandle('chan', ...)` / `regOn('chan', ...)` call site in the
- * given ipc.ts source, classified by whether its body invokes a
- * reset verb and whether it also calls purgeInboxSession(.
- */
 function scanIpcHandlers(rawSrc: string): { handlers: ScannedHandler[]; unparsedCount: number } {
   const src = stripComments(rawSrc);
   const callHeadRe = /\b(?:regHandle|regOn)\(/g;
@@ -122,16 +98,16 @@ test("every workspace-reset handler in ipc.ts also purges the operator inbox", (
   const domain = handlers.filter((h) => h.inDomain);
   // Fail closed: zero discovered reset handlers means the scan itself is
   // broken (regex stopped matching after a refactor), not that the domain
-  // is empty -- this repo has at least 3 today.
+  // is empty.
   expect(domain.length).toBeGreaterThan(0);
 
   expect(missingPurge(handlers)).toEqual([]);
 });
 
-test("sanity floor: the scan discovers at least the 3 known reset handlers (catches the domain collapsing)", () => {
+test("sanity floor: the scan discovers the known reset handlers", () => {
   const { handlers } = scanIpcHandlers(readFileSync(IPC_TS, "utf-8"));
   const domainChannels = handlers.filter((h) => h.inDomain).map((h) => h.channel);
-  for (const known of ["app:new-clear", "workspace:restore", "template:apply"]) {
+  for (const known of ["app:new-clear", "template:apply"]) {
     expect(domainChannels).toContain(known);
   }
 });
@@ -156,24 +132,6 @@ test("fixture: a reset handler with NO purge call is caught", () => {
   const { handlers } = scanIpcHandlers(src);
   expect(missingPurge(handlers)).toEqual([
     'handler "app:new-clear" resets the workspace but never calls purgeInboxSession()'
-  ]);
-});
-
-test("fixture: the workspaces.restore() verb alone (the third path) is recognized as in-domain and caught missing purge", () => {
-  // This is the exact shape of the real workspace:restore handler minus its
-  // purge call -- the case the brief's original 2-verb signature would have
-  // missed entirely (see the MEASURED CORRECTION note at the top of file).
-  const src = `regHandle('workspace:restore', async (_e, id) => {
-    const ok = workspaces.restore(id)
-    if (ok) {
-      broadcast('workspace:current', current)
-    }
-    return ok
-  })`;
-  const { handlers } = scanIpcHandlers(src);
-  expect(handlers[0]!.inDomain).toBe(true);
-  expect(missingPurge(handlers)).toEqual([
-    'handler "workspace:restore" resets the workspace but never calls purgeInboxSession()'
   ]);
 });
 
@@ -257,3 +215,4 @@ regHandle('template:apply', async (_e, path, mode) => {
     'handler "template:apply" resets the workspace but never calls purgeInboxSession()'
   ]);
 });
+

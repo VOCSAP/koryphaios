@@ -80,20 +80,16 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
  * Read the sibling server.ts process's identity for THIS tile, at call time
  * rather than at boot: the two MCP processes start concurrently, so a
  * boot-time read would race server.ts's own /register. A missing or
- * unreadable file resolves to a null identity, which every companion-eligible
- * handler turns into an explicit refusal (reply_route "pty", or a broker-side
- * "instance_token is required") rather than a silent success or a fallback
- * self-registration. instanceToken is a credential -- never logged, here or
- * anywhere downstream.
+ * unreadable file resolves to a null identity, so a new operator question is
+ * refused before its deposit. instanceToken is a credential -- never logged,
+ * here or anywhere downstream.
  */
 async function resolveCompanionIdentity(): Promise<CompanionIdentity> {
   const host = hostname();
   const token = process.env.CLAUDE_PEERS_DESK_SESSION ?? "";
   if (!token) {
     log(
-      "CLAUDE_PEERS_DESK_SESSION is unset -- falling back to an unproven identity; " +
-      "graph_draft_send and roadmap_dispatch will be refused by the broker, " +
-      "ask_operator[_wait] will fall back to a pty reply"
+      "CLAUDE_PEERS_DESK_SESSION is unset -- graph_draft_send, roadmap_dispatch and new ask_operator deposits cannot use a confirmed identity"
     );
   }
   const identity = token ? await readSessionIdentityFile(token) : null;
@@ -105,6 +101,8 @@ async function resolveCompanionIdentity(): Promise<CompanionIdentity> {
     peerId: identity?.peerId ?? null,
     groupId: identity?.groupId ?? "",
     instanceToken: identity?.instanceToken ?? null,
+    inboxBinding: identity?.inboxBinding ?? null,
+    operatorId: identity?.operatorId ?? null,
     projectKey: "",
     // Same fallback shape as server.ts's own roadmapAuthor(), so the
     // operator inbox never shows an empty sender when identity is unknown.

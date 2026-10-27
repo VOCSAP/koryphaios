@@ -61,7 +61,11 @@ function makeService(projectDir: string): WorkspaceService {
       name: "test-scope",
       root: "test",
     }),
-    adoptScope: () => {},
+    adoptScope: async (_ws: unknown, own: () => boolean) =>
+      own() ? { state: "published", scope: { projectKey: "project", groupId: "a".repeat(32) } } : { state: "lock-race" },
+    cancelScopeAdoption: () => {},
+    closeScopeAdoption: () => {},
+    onCredentialFailure: () => {},
   };
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   return new WorkspaceService(deps as any);

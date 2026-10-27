@@ -314,6 +314,7 @@ async function mintRunCredential(group: string): Promise<RunCredential> {
 interface RegisterReply {
   peer_id: string;
   instance_token: string;
+  inbox_binding?: { version: number; run_ref: string; group_id: string } | null;
   error?: string;
 }
 
@@ -396,6 +397,17 @@ test("an attested register binds the instance to the credential's scope, and the
   expect(bindingOf(a.body.instance_token), "the marker must outlive both rows").not.toBeNull();
 });
 
+test("a register response acknowledges the returned instance's Inbox binding", async () => {
+  const run = await mintRunCredential("g-inbox-register-ack");
+  const attested = await registerAttested(run, "hostAck", "/ack");
+  const bare = await registerBare(run.group, "hostBareAck", "/bare-ack");
+
+  expect(attested.status).toBe(200);
+  expect(attested.body.inbox_binding).toEqual({ version: 1, run_ref: run.run, group_id: run.group });
+  expect(bare.status).toBe(200);
+  expect(bare.body.inbox_binding).toBeNull();
+});
+
 test("a bare client never takes over a bound dormant candidate, and its owner gets the identity back only with its own proof", async () => {
   const run = await mintRunCredential("g-inbox-dormant");
   const opts = { desk_session: "tile-1" };
@@ -414,6 +426,7 @@ test("a bare client never takes over a bound dormant candidate, and its owner ge
   const back = await registerAttested(run, "hostDorm", "/dorm", { ...opts, resume: b.body.instance_token });
   expect(back.body.instance_token).toBe(b.body.instance_token);
   expect(back.body.peer_id).toBe(b.body.peer_id);
+  expect(back.body.inbox_binding).toEqual({ version: 1, run_ref: run.run, group_id: run.group });
 });
 
 test("a bound candidate whose peer row was purged is not reinserted for a bare client, but is for its owner", async () => {
@@ -429,6 +442,7 @@ test("a bound candidate whose peer row was purged is not reinserted for a bare c
 
   const back = await registerAttested(run, "hostPurged", "/purged", { ...opts, resume: b.body.instance_token });
   expect(back.body.instance_token).toBe(b.body.instance_token);
+  expect(back.body.inbox_binding).toEqual({ version: 1, run_ref: run.run, group_id: run.group });
   expect(peerCount("hostPurged", "/purged")).toBe(2);
 });
 
@@ -471,6 +485,7 @@ test("a proven bound candidate that is still running is not taken over: the newc
   expect(bindingOf(second.body.instance_token), "the newcomer is bound to the run like any attested instance").toMatchObject({
     run_ref: run.run,
   });
+  expect(second.body.inbox_binding).toEqual({ version: 1, run_ref: run.run, group_id: run.group });
   expect(canonicalOf("hostCol", "/col")).toEqual([b.body.instance_token]);
 });
 

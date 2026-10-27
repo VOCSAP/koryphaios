@@ -15,7 +15,16 @@ async function writeCacheAtomic(target: string, data: string): Promise<void> {
   // this mode is a no-op and the file's real protection is the user profile's
   // own ACLs (measured -- st.mode reads 0o666 regardless of what is asked for).
   await writeFile(tmp, data, { encoding: "utf-8", mode: 0o600 });
-  await rename(tmp, target);
+  try {
+    await rename(tmp, target);
+  } catch (e) {
+    try {
+      await unlink(tmp);
+    } catch (cleanupError) {
+      throw new AggregateError([e, cleanupError], "Could not replace the identity cache or remove its temporary file");
+    }
+    throw e;
+  }
 }
 
 /**
@@ -139,14 +148,25 @@ export function sessionIdentityFileName(token: string): string {
   return `session-identity-${sanitizeSessionId(token)}.json`;
 }
 
+export interface InboxBindingConfirmation {
+  version: 1;
+  runRef: string;
+  groupId: string;
+}
+
+export interface SessionIdentity {
+  peerId: string;
+  groupId: string;
+  instanceToken: string;
+  inboxBinding: InboxBindingConfirmation | null;
+  operatorId: string | null;
+}
+
 /**
  * Write the per-tile identity file for an already-resolved (peerId, groupId,
  * instanceToken) triple. No-op when the token or any of the three is empty
  * -- the reader rejects a partial identity too, so the writer must not
- * produce one. Best-effort: failures are silent so callers never break their
- * own /register flow. Called from EVERY site that can change myPeerId or
- * myInstanceToken (boot, switch_group, set_id) alongside writePeerIdCache,
- * so the two never drift apart -- both or neither.
+ * produce one. The identity snapshot is written atomically.
  */
 export async function writeSessionIdentityFile(
   token: string,
@@ -154,41 +174,86 @@ export async function writeSessionIdentityFile(
   groupId: string,
   instanceToken: string,
   home: string = homedir(),
+  inboxBinding: InboxBindingConfirmation | null = null,
+  operatorId: string | null = null,
 ): Promise<void> {
   const safeToken = sanitizeSessionId(token);
   if (!safeToken || !peerId || !groupId || !instanceToken) return;
-  try {
-    const cacheDir = join(home, ".claude", "peers");
-    await mkdir(cacheDir, { recursive: true });
-    await writeCacheAtomic(
-      join(cacheDir, sessionIdentityFileName(safeToken)),
-      JSON.stringify({ peer_id: peerId, group_id: groupId, instance_token: instanceToken })
-    );
-  } catch {
-    // best-effort: a companion MCP process falls back to an unproven identity
+  if ((inboxBinding === null) !== (operatorId === null)) {
+    throw new Error("Inbox binding confirmation and operator must be written together");
   }
+  const cacheDir = join(home, ".claude", "peers");
+  await mkdir(cacheDir, { recursive: true });
+  await writeCacheAtomic(
+    join(cacheDir, sessionIdentityFileName(safeToken)),
+    JSON.stringify({
+      peer_id: peerId,
+      group_id: groupId,
+      instance_token: instanceToken,
+      ...(inboxBinding && operatorId
+        ? {
+            inbox_binding: {
+              version: inboxBinding.version,
+              run_ref: inboxBinding.runRef,
+              group_id: inboxBinding.groupId,
+            },
+            operator_id: operatorId,
+          }
+        : {}),
+    })
+  );
 }
 
 /**
  * Read the per-tile identity file written by writeSessionIdentityFile.
  * Returns null on any absence, parse failure or malformed shape -- the
- * caller's job is to fail closed (reply_route "pty", a refused dispatch...)
- * on null, never to guess a partial identity. Never log the return value:
+ * caller's job is to fail closed on null, never to guess a partial identity.
+ * Never log the return value:
  * instanceToken is a credential.
  */
 export async function readSessionIdentityFile(
   token: string,
   home: string = homedir(),
-): Promise<{ peerId: string; groupId: string; instanceToken: string } | null> {
+): Promise<SessionIdentity | null> {
   const safeToken = sanitizeSessionId(token);
   if (!safeToken) return null;
   try {
     const raw = await readFile(join(home, ".claude", "peers", sessionIdentityFileName(safeToken)), "utf-8");
-    const parsed = JSON.parse(raw) as { peer_id?: unknown; group_id?: unknown; instance_token?: unknown };
+    const parsed = JSON.parse(raw) as {
+      peer_id?: unknown;
+      group_id?: unknown;
+      instance_token?: unknown;
+      inbox_binding?: { version?: unknown; run_ref?: unknown; group_id?: unknown };
+      operator_id?: unknown;
+    };
     if (typeof parsed.peer_id !== "string" || !parsed.peer_id) return null;
     if (typeof parsed.group_id !== "string" || !parsed.group_id) return null;
     if (typeof parsed.instance_token !== "string" || !parsed.instance_token) return null;
-    return { peerId: parsed.peer_id, groupId: parsed.group_id, instanceToken: parsed.instance_token };
+    const inbox = parsed.inbox_binding;
+    if (
+      inbox?.version === 1 &&
+      typeof inbox.run_ref === "string" &&
+      inbox.run_ref.length > 0 &&
+      typeof inbox.group_id === "string" &&
+      inbox.group_id.length > 0 &&
+      typeof parsed.operator_id === "string" &&
+      parsed.operator_id.length > 0
+    ) {
+      return {
+        peerId: parsed.peer_id,
+        groupId: parsed.group_id,
+        instanceToken: parsed.instance_token,
+        inboxBinding: { version: 1, runRef: inbox.run_ref, groupId: inbox.group_id },
+        operatorId: parsed.operator_id,
+      };
+    }
+    return {
+      peerId: parsed.peer_id,
+      groupId: parsed.group_id,
+      instanceToken: parsed.instance_token,
+      inboxBinding: null,
+      operatorId: null,
+    };
   } catch {
     return null;
   }

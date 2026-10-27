@@ -13,11 +13,13 @@ export {
   APPROVAL_TITLE_MAX,
   APPROVAL_WAIT_MAX_SEC,
   buildAuthProof,
+  buildInboxProof,
   canonicalize,
   deriveOperatorId,
   deriveTokenId,
   generateCredential,
   generateSecret,
+  INBOX_GATES,
   isOperationAllowed,
   sanitizeAnswerForPty,
   stripControl,
@@ -32,5 +34,6 @@ export {
   type ApprovalKind,
   type ApprovalOrigin,
   type ApprovalStatus,
-  type ApprovalVia
+  type ApprovalVia,
+  type InboxGate
 } from '../../../shared/approval'

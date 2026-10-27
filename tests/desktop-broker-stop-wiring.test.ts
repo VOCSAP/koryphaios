@@ -3,6 +3,7 @@
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { pollInboxForCapturedScope, readOperatorInboxBoth } from "../desktop/src/main/inbox-session.ts";
 
 const INDEX = resolve(import.meta.dir, "../desktop/src/main/index.ts");
 
@@ -162,6 +163,8 @@ function pollOperatorInboxWith(order: string[], fetch: () => Promise<unknown[]>)
   return new Function(
     "order",
     "fetch",
+    "readOperatorInboxBoth",
+    "pollInboxForCapturedScope",
     `const brokerHealth = {
        setManualStop: () => order.push("setManualStop"),
        recordSuccess: () => order.push("recordSuccess"),
@@ -172,9 +175,18 @@ function pollOperatorInboxWith(order: string[], fetch: () => Promise<unknown[]>)
      const activeScope = { groupId: "g", secret: "s" };
      const currentInboxSessionId = () => "session";
      const resolveBrokerEndpoint = () => ({ url: "http://127.0.0.1:7899" });
-     const pendingInboxWrites = [];
+     const runInboxSigner = () => undefined;
+     const runReadErrors = { onRunError: () => {}, onRunSuccess: () => {} };
+     const inboxEffects = {
+       poll: (read) => pollInboxForCapturedScope({
+         context: () => ({ epoch: 0, groupId: "g", sessionId: "session", directory: "dir" }),
+         read,
+         apply: () => {},
+         onDiscard: () => {},
+       }),
+     };
      ${js(`export const f = async () => ${body}`).replace("export const f = ", "return ")}`
-  )(order, fetch) as () => Promise<void>;
+  )(order, fetch, readOperatorInboxBoth, pollInboxForCapturedScope) as () => Promise<void>;
 }
 
 test("every health tick reads the marker before the poll that feeds the tracker", async () => {

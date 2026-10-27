@@ -223,11 +223,10 @@ test('9.3 clean exit: once the accessor is closed, no writer resuming late can r
   const accessor = createSessionDirAccessor({ stateDir: () => root, groupId: () => GROUP_A })
   appendInboxHistory(accessor(), [msg(1)])
   appendAckedKey(accessor(), 'message:1:x')
-  // The quit path: close the gate, then remove the directory.
+  expect(accessor.isClosed()).toBe(false)
   accessor.close()
+  expect(accessor.isClosed()).toBe(true)
   expect(removeSessionStateDir(root, GROUP_A, noReport)).toBe(true)
-  // Every writer index.ts and ipc.ts route through the accessor resumes
-  // after a broker await and asks for the directory again.
   const lateWriters: Array<[string, () => void]> = [
     ['appendInboxHistory', () => appendInboxHistory(accessor(), [msg(2)])],
     ['appendAckedKey', () => appendAckedKey(accessor(), 'message:2:x')],

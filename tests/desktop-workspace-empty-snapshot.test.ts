@@ -41,10 +41,6 @@ interface Def {
   createdAt: number;
 }
 
-// `cwd` is the real project dir (threaded in by each caller, all of which
-// have it in scope as `proj`) rather than a placeholder: this file's fixtures
-// must be genuinely IN-TREE so confirmUntrustedCwd (card 09d54a29 follow-up)
-// has no legitimate reason to fire here -- see makeService below.
 function def(name: string, cwd: string): Def {
   return {
     id: `local-${name}`,
@@ -78,13 +74,11 @@ function makeService(projectDir: string, capture: () => Def[], restored: Def[][]
       name: "test-scope",
       root: "test",
     }),
-    adoptScope: () => {},
-    // Card 09d54a29 (+ follow-up): NONE of this file's fixtures carry
-    // shell-bearing args or an out-of-project cwd (def() above always uses
-    // the real `proj`), so restore() must never even ask. Throwing here
-    // (rather than returning a fixed value) turns an unexpected call into a
-    // visible test failure instead of silently rubber-stamping the gate --
-    // the team-lead's explicit ask when this mock was found incomplete.
+    adoptScope: async (_ws, own) =>
+      own() ? { state: "published", scope: { projectKey: "project", groupId: "a".repeat(32) } } : { state: "lock-race" },
+    cancelScopeAdoption: () => {},
+    closeScopeAdoption: () => {},
+    onCredentialFailure: () => {},
     confirmShellFields: async () => {
       throw new Error("confirmShellFields must not be called: no fixture in this file carries args");
     },

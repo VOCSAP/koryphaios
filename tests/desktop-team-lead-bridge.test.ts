@@ -477,6 +477,7 @@ test("buildMintTeamLeadBridge mints with mintCaller('team-lead', TEAM_LEAD_DECK_
     expect(mintCaller).toHaveBeenCalledTimes(1);
     expect(mintCaller.mock.calls[0]?.[0]).toBe("team-lead");
     expect(mintCaller.mock.calls[0]?.[1]).toEqual(TEAM_LEAD_DECK_TOOLS);
+    expect((mintCaller.mock.calls[0] as unknown[])[2], "the bridge is a lead provisioning path, the label alone is not").toBe("lead");
 
     const written = JSON.parse(readFileSync(result!.mcpConfig, "utf-8"));
     const toolsEnv: string = written.mcpServers["deck-control"].env.DECK_CONTROL_TOOLS;

@@ -26,14 +26,14 @@ const fakeCipher: SecretCipher = {
 const originalFetch = globalThis.fetch;
 function stubMintSuccess(): void {
   globalThis.fetch = withOperatorTrustBroker((async () =>
-    new Response(JSON.stringify({ token_id: "tok_test", expires_at: new Date(Date.now() + 3600_000).toISOString() }), {
+    new Response(JSON.stringify({ token_id: "tok_test", capabilities: { inbox_provenance: 1 }, expires_at: new Date(Date.now() + 3600_000).toISOString() }), {
       status: 200,
       headers: { "content-type": "application/json" },
     })) as typeof fetch);
 }
 
 function readCredentialOrigin(stateDir: string, projectKey: string): Record<string, unknown> {
-  const raw = readFileSync(join(stateDir, approvalCredFileName(projectKey, "run-test")), "utf8");
+  const raw = readFileSync(join(stateDir, approvalCredFileName(projectKey, "run-test", "g-runtime")), "utf8");
   return (JSON.parse(raw) as { origin: Record<string, unknown> }).origin;
 }
 
@@ -47,7 +47,7 @@ describe("ApprovalRuntime.arm() writes origin.project_key", () => {
         cipher: fakeCipher,
         endpoint: () => ({ url: "http://broker.local", token: "" }),
         runId: "run-test",
-        host: "test-host",
+        host: "test-host", groupId: () => "g-runtime",
         projectKey: () => "local:deadbeefcafebabe",
       });
       const armed = await runtime.arm();
@@ -71,7 +71,7 @@ describe("ApprovalRuntime.arm() writes origin.project_key", () => {
         cipher: fakeCipher,
         endpoint: () => ({ url: "http://broker.local", token: "" }),
         runId: "run-test",
-        host: "test-host",
+        host: "test-host", groupId: () => "g-runtime",
         // projectKey intentionally omitted.
       });
       const armed = await runtime.arm();
@@ -92,7 +92,7 @@ describe("ApprovalRuntime.arm() writes origin.project_key", () => {
         cipher: fakeCipher,
         endpoint: () => ({ url: "http://broker.local", token: "" }),
         runId: "run-test",
-        host: "test-host",
+        host: "test-host", groupId: () => "g-runtime",
         projectKey: () => {
           throw new Error("git shelled out and failed");
         },

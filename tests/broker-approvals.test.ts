@@ -2953,7 +2953,7 @@ describe("Attested channel questions", () => {
     expect(rowCount(b, op)).toBe(1);
   });
 
-  test("a channel question signed with a legacy proof is never attested, whatever its body claims", async () => {
+  test("a channel question signed with a legacy proof is refused, whatever its body claims, and an operator-signed one stays accepted", async () => {
     const b = await boot();
     const op = newOperator();
     const run = await mintRun(b, op, "g-chan-legacy");
@@ -2975,18 +2975,21 @@ describe("Attested channel questions", () => {
       { cred: run.cred, operator_id: op.id, kind: "session", token_id: run.tokenId }
     );
 
-    expect(res.status).toBe(200);
-    expect(res.body.approval.author_instance_hint).toBeUndefined();
-    expect(storedRow(b, res.body.approval.id)).toMatchObject({
-      reply_route: "channel",
-      reply_token: legacyPeer.instance_token,
-      inbox_run_ref: null,
-      inbox_group_id: null,
-      author_instance_ref: null,
-      author_peer_id_snapshot: null,
-      source_kind: null,
-      provenance_version: null,
-    });
+    expect({ status: res.status, rows: rowCount(b, op) }).toEqual({ status: 403, rows: 0 });
+    expect((res.body as unknown as { error: string }).error).toContain("restart this session from the Deck");
+
+    const deck = await signedPost<{ approval: Approval }>(
+      b,
+      "/approval/add",
+      {
+        kind: "question", title: "deck tile", question: "Still there?", reply_route: "channel",
+        reply_peer_id: legacyPeer.peer_id, origin: { host: "bureau", group_id: run.group },
+        session_ref: "tile-deck", project_key: DEFAULT_PROJECT_KEY,
+      },
+      { cred: op.cred, operator_id: op.id }
+    );
+    expect(deck.status).toBe(200);
+    expect(storedRow(b, deck.body.approval.id)).toMatchObject({ reply_route: "channel", inbox_run_ref: null, source_kind: null });
   });
 
   test("an attested question refuses a contradicting reply peer or group, an unbound or foreign instance, and a missing instance", async () => {

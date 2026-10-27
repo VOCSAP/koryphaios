@@ -38,6 +38,7 @@ export function sessionStateDir(stateDir: string, groupId: string): string {
 export type SessionDirAccessor = (() => string) & {
   /** After close() every call throws: no writer can recreate the removed directory. */
   close(): void
+  isClosed(): boolean
 }
 
 /**
@@ -56,6 +57,7 @@ export function createSessionDirAccessor(deps: { stateDir: () => string; groupId
   accessor.close = () => {
     closed = true
   }
+  accessor.isClosed = () => closed
   return accessor
 }
 

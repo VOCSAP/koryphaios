@@ -167,9 +167,16 @@ export interface RegisterRequest {
   auth?: ApprovalAuthProof;
 }
 
+export interface InboxBindingAck {
+  version: 1;
+  run_ref: string;
+  group_id: GroupId;
+}
+
 export interface RegisterResponse {
   peer_id: PeerId;
   instance_token: InstanceToken;
+  inbox_binding: InboxBindingAck | null;
   // Always normalizeRole(body.role) -- the transport wins unconditionally,
   // so this only ever differs from the request body by NORMALIZATION (trim/
   // lowercase/ROLE_REGEX validation), never by a stored value winning over
