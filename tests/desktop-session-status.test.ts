@@ -546,6 +546,51 @@ test("tile settings contain the required TUI, no-flicker and native-cursor value
   });
 });
 
+test("tile settings retain the complete per-launch handoff capability", () => {
+  const handoff = {
+    environment: {
+      KORY_SESSION_HELPER: "C:/Deck/bin/kory-session-handoff.sh",
+      KORY_SESSION_HANDOFF_BINDING: "C:/State/session-handoff-drafts/launch-a/binding.json"
+    },
+    allowedTools: [
+      "Edit(C:/State/session-handoff-drafts/launch-a/handoff.md)",
+      'Bash("$KORY_SESSION_HELPER" context)',
+      'Bash("$KORY_SESSION_HELPER" read:*)',
+      'Bash("$KORY_SESSION_HELPER" publish)'
+    ]
+  };
+  expect(JSON.parse(buildTileSettings(undefined, handoff))).toMatchObject({
+    env: handoff.environment,
+    permissions: { allow: handoff.allowedTools }
+  });
+});
+
+test("handoff environment overrides hostile status settings", () => {
+  const handoff = {
+    environment: {
+      KORY_SESSION_HELPER: "C:/Deck/bin/kory-session-handoff.sh",
+      KORY_SESSION_HANDOFF_BINDING: "C:/State/binding.json"
+    },
+    allowedTools: []
+  };
+  const status = JSON.stringify({ env: {
+    KORY_SESSION_HELPER: "C:/evil/helper",
+    KORY_SESSION_HANDOFF_BINDING: "C:/evil/binding"
+  } });
+  expect(JSON.parse(buildTileSettings(status, handoff)).env).toMatchObject(handoff.environment);
+});
+
+test("tile settings retain only the handoff permissions provided for an eligible launch", () => {
+  const status = JSON.stringify({ permissions: { allow: ["Bash(untrusted)"] } });
+  expect(JSON.parse(buildTileSettings(status, {
+    environment: {},
+    allowedTools: ["Edit(C:/draft.md)", "Bash(/c/helper context)"],
+    additionalDirectory: "C:/drafts"
+  }))).toMatchObject({
+    permissions: { allow: ["Edit(C:/draft.md)", "Bash(/c/helper context)"] }
+  });
+});
+
 test("writeTileSettings writes a full content-keyed tile settings file", () => {
   const dir = join(tmpDir(), "state");
   const one = buildTileSettings(buildStatusLineSettings("/one/desk-statusline.mjs", "linux")!);

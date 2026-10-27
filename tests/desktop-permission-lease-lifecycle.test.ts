@@ -178,7 +178,7 @@ function executeLeaseCreationFailure(source: string) {
     "sessionEnv",
     "isClaudeLaunch",
     "reportError",
-    `let r = null;\n${body
+    `let r = null;\nlet handoffLaunch = null;\n${body
       .slice(start)
       .replace("let permissionLease: PermissionLeaseHandle | null = null", "let permissionLease = null")}\nreturn sessionEnv;`
   ) as (
@@ -216,6 +216,8 @@ function executeLeaseCreationFailure(source: string) {
       },
     },
     revokePermissionLeaseHandle: () => {},
+    clearSessionHandoff: () => {},
+    sessionHandoffLaunches: new Map(),
     cleanupSandbox: () => Promise.resolve(),
     deadWriteReported: { delete: () => {} },
     screenGuard: {

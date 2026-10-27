@@ -10,7 +10,9 @@ import { extractBracedBody } from "./_braced-body";
 import { buildSessionCommandLine, sanitizeFlagValue } from "../desktop/src/main/session-command";
 
 const SESSION_SERVICE_PATH = join(import.meta.dir, "..", "desktop", "src", "main", "session-service.ts");
+const INDEX_PATH = join(import.meta.dir, "..", "desktop", "src", "main", "index.ts");
 const SRC = readFileSync(SESSION_SERVICE_PATH, "utf-8");
+const INDEX_SRC = readFileSync(INDEX_PATH, "utf-8");
 
 type Trace = { scope: string; message: string };
 
@@ -136,6 +138,7 @@ test("a rejected effort is traced, and buildSessionCommandLine omits --effort fo
 
 function codeOnly(src: string): string {
   return src
+    .replace(/\r/g, "")
     .replace(/\/\*[\s\S]*?\*\//g, "")
     .split("\n")
     .map((line) => line.replace(/\/\/.*/, ""))
@@ -161,4 +164,52 @@ test("each buildSessionCommandLine call of startPty routes its effort through fl
     const efforts = literal.split("\n").filter((line) => /^\s*effort:/.test(line));
     expect(efforts.map((line) => line.trim())).toEqual(["effort: this.flagValue('effort', def.effort),"]);
   }
+});
+
+test("session handoff capability reaches both launch modes and the child environment", () => {
+  const head = "private startPty(def: SessionDef, mode: SpawnMode, modPlan?: LaunchModPlan): void {";
+  const body = extractBracedBody(SRC, sliceOnce(head) + head.length - 1);
+  const callHead = "buildSessionCommandLine({";
+  const literals: string[] = [];
+  for (let i = body.indexOf(callHead); i !== -1; i = body.indexOf(callHead, i + 1)) {
+    literals.push(codeOnly(extractBracedBody(body, i + callHead.length - 1)));
+  }
+  expect(literals).toHaveLength(2);
+  for (const literal of literals) {
+    expect(literal).toContain("additionalDirectories: handoffLaunch ? [handoffLaunch.additionalDirectory] : undefined,");
+  }
+  expect(codeOnly(body)).toContain("if (handoffLaunch) Object.assign(sessionEnv, handoffLaunch.environment)");
+  expect(codeOnly(body)).toContain("if (!sandboxed && isClaudeLaunch(base) && this.deckLeadPluginTiles.has(def.id) && deckLeadPluginDir && this.sessionHandoffLaunchProvider && sessionHandoffSupported(this.platform)) {");
+});
+
+test("session handoff drafts end with their PTY generation", () => {
+  const exitHead = "this.pty.on('exit', ({ id, exitCode }: { id: string; exitCode: number }) => {";
+  const exitBody = extractBracedBody(SRC, sliceOnce(exitHead) + exitHead.length - 1);
+  expect(codeOnly(exitBody)).toContain("this.clearSessionHandoff(id)");
+
+  const startHead = "private startPty(def: SessionDef, mode: SpawnMode, modPlan?: LaunchModPlan): void {";
+  const startBody = extractBracedBody(SRC, sliceOnce(startHead) + startHead.length - 1);
+  expect(codeOnly(startBody)).toContain("this.clearSessionHandoff(def.id)\n    try {\n      this.pty.spawn(");
+
+  const removeHead = "async remove(id: string): Promise<void> {";
+  const removeBody = extractBracedBody(SRC, sliceOnce(removeHead) + removeHead.length - 1);
+  expect(codeOnly(removeBody)).toContain("this.clearSessionHandoff(id)");
+
+  const closeAllHead = "closeAll(): void {";
+  const closeAllBody = extractBracedBody(SRC, sliceOnce(closeAllHead) + closeAllHead.length - 1);
+  expect(codeOnly(closeAllBody)).toContain("this.clearSessionHandoff(d.id)");
+  expect(codeOnly(startBody)).toContain("if (handoffLaunch) this.discardSessionHandoff(handoffLaunch)\n            reportError('session', 'launch mod plan container does not match tile; tile not launched')");
+  expect(codeOnly(startBody)).toContain("if (handoffLaunch) this.discardSessionHandoff(handoffLaunch)\n        reportError('sandbox', `sandboxed spawn refused for \"${def.name}\"`, e)");
+  expect(codeOnly(startBody)).toContain("this.pty.spawn(\n        def.id,");
+  expect(codeOnly(startBody)).toContain("if (handoffLaunch) this.sessionHandoffLaunches.set(def.id, handoffLaunch)");
+});
+
+test("Deck gives each handoff a run-owned namespace before it can purge orphan drafts", () => {
+  const head = "function initSessionState(): void {";
+  const start = INDEX_SRC.indexOf(head);
+  if (start === -1) throw new Error(`index.ts: missing ${head}`);
+  const body = extractBracedBody(INDEX_SRC, start + head.length - 1);
+  expect(codeOnly(body)).toContain("purgeSessionHandoffDrafts(appStateDir(), approvalRunId, (message, error) => reportError('session', message, error))");
+  expect(codeOnly(INDEX_SRC)).toContain("createSessionHandoffLaunch(\n  appStateDir(),");
+  expect(codeOnly(INDEX_SRC)).toContain("  tileId,\n  approvalRunId,\n  app.getPath('logs')\n)");
 });

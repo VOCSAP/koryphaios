@@ -63,6 +63,8 @@ export interface SessionCommandInput {
   effort?: string
   /** Absolute paths to embedded plugins, passed on both fresh and resumed sessions. */
   pluginDirs?: readonly string[]
+  /** Extra directories Claude Code may access during this launch. */
+  additionalDirectories?: readonly string[]
   /**
    * Path to a generated .mcp config, emitted as `--mcp-config "<path>"` on
    * BOTH fresh and resume (not restored by --fork-session, like --effort).
@@ -128,6 +130,14 @@ function pluginFlags(pluginDirs?: readonly string[]): string {
     .map((pluginDir) => pluginDir.trim())
     .filter(Boolean)
     .map((pluginDir) => ` --plugin-dir "${pluginDir}"`)
+    .join('')
+}
+
+function additionalDirectoryFlags(directories?: readonly string[]): string {
+  return (directories ?? [])
+    .map((directory) => directory.trim())
+    .filter(Boolean)
+    .map((directory) => ` --add-dir "${directory}"`)
     .join('')
 }
 
@@ -277,10 +287,10 @@ export function buildSessionCommandLine(input: SessionCommandInput): string {
     // prevSessionId can originate from the desk-session back-channel, whose file
     // lives in a dir mounted into sandbox containers (validated in
     // desk-session.ts). Quoting is the second lock on that door.
-    return `${base}${pluginFlags(input.pluginDirs)}${mcpConfigFlag(input.mcpConfig)}${appendSystemPromptFlag(input.appendSystemPromptFile)}${settingsFlag(input.settings)} --resume "${input.prevSessionId}" --fork-session --session-id "${input.sessionId}"${effortFlag(input.effort)}`
+    return `${base}${pluginFlags(input.pluginDirs)}${additionalDirectoryFlags(input.additionalDirectories)}${mcpConfigFlag(input.mcpConfig)}${appendSystemPromptFlag(input.appendSystemPromptFile)}${settingsFlag(input.settings)} --resume "${input.prevSessionId}" --fork-session --session-id "${input.sessionId}"${effortFlag(input.effort)}`
   }
 
-  let line = `${base}${pluginFlags(input.pluginDirs)}${mcpConfigFlag(input.mcpConfig)}${appendSystemPromptFlag(input.appendSystemPromptFile)} --session-id "${input.sessionId}"`
+  let line = `${base}${pluginFlags(input.pluginDirs)}${additionalDirectoryFlags(input.additionalDirectories)}${mcpConfigFlag(input.mcpConfig)}${appendSystemPromptFlag(input.appendSystemPromptFile)} --session-id "${input.sessionId}"`
   const extra = input.args?.trim()
   if (extra) line += ` ${extra}`
   line += effortFlag(input.effort)

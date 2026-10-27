@@ -119,6 +119,36 @@ const STATE_SCOPES: Record<string, StateFileRule> = {
     wiring: [{ callee: "ServeService", dirArg: { prop: "sessionDir" } }],
     reason: "child stdout and stderr of this window's served project; a shared root would mix output from a different Deck run",
   },
+  "handoff.md": {
+    kind: "literal",
+    scope: "run",
+    reason: "unpublished lead handoff draft belongs to one run UUID, so a sibling Deck cannot read or remove it",
+  },
+  "binding.json": {
+    kind: "literal",
+    scope: "run",
+    reason: "capability binding belongs to one run UUID and must remain isolated from sibling Deck windows",
+  },
+  reserveNumber: {
+    kind: "constructor",
+    scope: "run",
+    reason: "numbered handoff archive entry belongs to the run-owned namespace that contains its active binding",
+  },
+  temporary: {
+    kind: "constructor",
+    scope: "run",
+    reason: "atomic binding temporary is confined to the run-owned namespace and cannot cross into a sibling Deck",
+  },
+  publishSessionHandoff: {
+    kind: "constructor",
+    scope: "run",
+    reason: "draft handoffs live beneath the run UUID that owns this Deck window; published handoffs are indexed by project",
+  },
+  "owner.json": {
+    kind: "literal",
+    scope: "run",
+    reason: "run owner PID records the only liveness evidence that permits orphan cleanup after a crashed Deck",
+  },
 
   // ----- PROJECT: belongs to the repository, whatever the window -----
   "review-pending.json": {

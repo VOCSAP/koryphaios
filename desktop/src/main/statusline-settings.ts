@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import type { SessionHandoffLaunch } from './session-handoff'
 import { mkdirSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
@@ -35,11 +36,17 @@ export function buildStatusLineSettings(hookPath: string, plat: NodeJS.Platform 
   })
 }
 
-export function buildTileSettings(statusLineSettings?: string): string {
+export function buildTileSettings(statusLineSettings?: string, handoffLaunch?: SessionHandoffLaunch): string {
+  const status = statusLineSettings ? JSON.parse(statusLineSettings) : {}
+  const environment = { CLAUDE_CODE_NO_FLICKER: '0', CLAUDE_CODE_NATIVE_CURSOR: '1' }
   return JSON.stringify({
     tui: 'default',
-    env: { CLAUDE_CODE_NO_FLICKER: '0', CLAUDE_CODE_NATIVE_CURSOR: '1' },
-    ...(statusLineSettings ? JSON.parse(statusLineSettings) : {})
+    env: environment,
+    ...status,
+    ...(handoffLaunch ? {
+      env: { ...environment, ...status.env, ...handoffLaunch.environment },
+      permissions: { allow: handoffLaunch.allowedTools }
+    } : {})
   })
 }
 

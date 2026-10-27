@@ -1,6 +1,7 @@
 import { EventEmitter } from 'node:events'
 import { randomUUID } from 'node:crypto'
 import { homedir } from 'node:os'
+import { existsSync } from 'node:fs'
 import { basename, join } from 'node:path'
 import type {
   AppConfig,
@@ -21,12 +22,14 @@ import {
   encodeInitialPromptKeystrokes,
   sanitizeFlagValue,
   shouldInjectPrompt,
+  DECK_LEAD_PLUGIN_DIRNAME,
   DECK_PLUGIN_DIRNAME,
   type SpawnMode
 } from './session-command'
 import { ThinkingDetector } from './thinking'
 import { isClaudeLaunch, isClodexLaunch, withClodexWrapper, withoutClodexWrapper } from './session-kind'
 import { buildTileSettings } from './statusline-settings'
+import { removeSessionHandoffLaunch, sessionHandoffSupported, type SessionHandoffLaunch } from './session-handoff'
 import {
   QuotaDetector,
   type QuotaClearEvent,
@@ -250,6 +253,8 @@ export type SandboxProvider = () => SandboxWrapper | null
  */
 export type SandboxTranscriptLookup = (cwdHost: string) => TranscriptEntry[] | null
 
+export type SessionHandoffLaunchProvider = (tileId: string, helperPath: string) => SessionHandoffLaunch
+
 /**
  * Coordinates the persisted session list, the live PTYs and the resolved
  * peer_id. Emits `data` / `exit` (forwarded to the renderer verbatim) and
@@ -338,6 +343,8 @@ export class SessionService extends EventEmitter {
   private deckLeadPluginTiles = new Set<string>()
   private launchAttempts: Pick<LaunchAttemptRegistry, 'cancel' | 'cancelAll' | 'cancelAllExcept' | 'complete' | 'isCurrent'> | null = null
   private verifyModWorkingCopy: ((copy: LaunchModCopy) => { ok: true } | { ok: false; reason: string }) | null = null
+  private sessionHandoffLaunchProvider: SessionHandoffLaunchProvider | null = null
+  private sessionHandoffLaunches = new Map<string, SessionHandoffLaunch>()
 
   constructor(
     private getConfig: () => AppConfig,
@@ -365,7 +372,8 @@ export class SessionService extends EventEmitter {
     private mintTeamLeadBridge: MintTeamLeadBridge = () => null,
     /** Null leaves every tile without a peer_id. */
     private getTilePeerScope: (() => TilePeerScope) | null = null,
-    private permissionLeases: PermissionLeaseRuntime | null = null
+    private permissionLeases: PermissionLeaseRuntime | null = null,
+    private platform: NodeJS.Platform = process.platform
   ) {
     super()
     // Starts empty: the previous run is recovered explicitly through a
@@ -385,6 +393,7 @@ export class SessionService extends EventEmitter {
     })
     this.pty.on('exit', ({ id, exitCode }: { id: string; exitCode: number }) => {
       this.revokePermissionLease(id)
+      this.clearSessionHandoff(id)
       // This listener receives spontaneous exits only.
       const def = this.defs.find((d) => d.id === id)
       void this.cleanupSandbox(id, def?.name ?? id)
@@ -550,6 +559,25 @@ export class SessionService extends EventEmitter {
 
   setTileSettingsFileProvider(provider: (settings: string) => string): void {
     this.writeTileSettingsFile = provider
+  }
+
+  setSessionHandoffLaunchProvider(provider: SessionHandoffLaunchProvider): void {
+    this.sessionHandoffLaunchProvider = provider
+  }
+
+  private discardSessionHandoff(launch: SessionHandoffLaunch): void {
+    try {
+      removeSessionHandoffLaunch(launch)
+    } catch (error) {
+      reportError('session', `failed to remove session handoff draft ${launch.additionalDirectory}`, error)
+    }
+  }
+
+  private clearSessionHandoff(id: string): void {
+    const launch = this.sessionHandoffLaunches.get(id)
+    if (!launch) return
+    this.sessionHandoffLaunches.delete(id)
+    this.discardSessionHandoff(launch)
   }
 
   setHostTelemetryProvider(provider: (shell: string) => boolean): void {
@@ -911,6 +939,7 @@ export class SessionService extends EventEmitter {
       const def = this.defs.find((d) => d.id === id)
       if (!def) return
       this.revokePermissionLease(id)
+      this.clearSessionHandoff(id)
       this.emit('removed', { id: def.id, name: def.name })
       if (def.sessionId) this.registry.release(def.sessionId)
       this.killWithTrace(id, 'force cleanup')
@@ -995,6 +1024,7 @@ export class SessionService extends EventEmitter {
     this.launchAttempts?.cancelAll()
     this.revokeAllPermissionLeases()
     for (const d of this.defs) {
+      this.clearSessionHandoff(d.id)
       this.emit('removed', { id: d.id, name: d.name })
       if (d.sessionId) this.registry.release(d.sessionId)
     }
@@ -1547,10 +1577,25 @@ export class SessionService extends EventEmitter {
       def.cwd
     )
     const telemetryPluginLoaded = pluginDirs.some((pluginDir) => basename(pluginDir) === DECK_PLUGIN_DIRNAME)
+    const deckLeadPluginDir = pluginDirs.find((pluginDir) => basename(pluginDir) === DECK_LEAD_PLUGIN_DIRNAME)
+    let handoffLaunch: SessionHandoffLaunch | null = null
+    if (!sandboxed && isClaudeLaunch(base) && this.deckLeadPluginTiles.has(def.id) && deckLeadPluginDir && this.sessionHandoffLaunchProvider && sessionHandoffSupported(this.platform)) {
+      const helperPath = join(deckLeadPluginDir, 'bin', 'kory-session-handoff.sh')
+      if (!existsSync(helperPath)) {
+        reportError('session', `session handoff helper missing (${helperPath})`)
+      } else {
+        try {
+          handoffLaunch = this.sessionHandoffLaunchProvider(def.id, helperPath)
+        } catch (error) {
+          reportError('session', `session handoff setup failed for "${def.name}"`, error)
+        }
+      }
+    }
     const statusLineSettings = this.statusLineSettingsFor(def, base, telemetryPluginLoaded, cfg.shell)
-    const tileSettings = isClaudeLaunch(base) ? buildTileSettings(statusLineSettings) : undefined
+    const tileSettings = isClaudeLaunch(base) ? buildTileSettings(statusLineSettings, handoffLaunch ?? undefined) : undefined
     const settings = tileSettings ? (sandboxed ? tileSettings : this.writeTileSettingsFile(tileSettings) || undefined) : undefined
     if (isClaudeLaunch(base) && !settings) {
+      if (handoffLaunch) this.discardSessionHandoff(handoffLaunch)
       reportError('session', 'tile settings unavailable; tile not launched')
       return
     }
@@ -1570,6 +1615,7 @@ export class SessionService extends EventEmitter {
         prevSessionId: prev,
         effort: this.flagValue('effort', def.effort),
         pluginDirs,
+        additionalDirectories: handoffLaunch ? [handoffLaunch.additionalDirectory] : undefined,
         mcpConfig: def.mcpConfig,
         appendSystemPromptFile: def.appendSystemPromptFile,
         settings,
@@ -1584,6 +1630,7 @@ export class SessionService extends EventEmitter {
         args: def.args,
         effort: this.flagValue('effort', def.effort),
         pluginDirs,
+        additionalDirectories: handoffLaunch ? [handoffLaunch.additionalDirectory] : undefined,
         mcpConfig: def.mcpConfig,
         appendSystemPromptFile: def.appendSystemPromptFile,
         settings,
@@ -1619,6 +1666,7 @@ export class SessionService extends EventEmitter {
     // launched the Deck must never point a tile at another tile's rules or log.
     const ttsr = this.ttsrFiles(def)
     Object.assign(sessionEnv, { CLAUDE_PEERS_TTSR_FILE: ttsr.file, CLAUDE_PEERS_TTSR_LOG: ttsr.log })
+    if (handoffLaunch) Object.assign(sessionEnv, handoffLaunch.environment)
 
     // The supervisor stays on the host because it pilots the Deck through its host-only MCP harness.
     this.sandboxCleanup.delete(def.id)
@@ -1634,6 +1682,7 @@ export class SessionService extends EventEmitter {
             modPlan.containerId === wrapper.containerId
           )
           if (!targetMatches) {
+            if (handoffLaunch) this.discardSessionHandoff(handoffLaunch)
             reportError('session', 'launch mod plan container does not match tile; tile not launched')
             if (r) {
               r.status = 'exited'
@@ -1646,6 +1695,7 @@ export class SessionService extends EventEmitter {
           this.sandboxCleanup.set(def.id, () => wrapper.cleanup(def.id))
         }
       } catch (e) {
+        if (handoffLaunch) this.discardSessionHandoff(handoffLaunch)
         reportError('sandbox', `sandboxed spawn refused for "${def.name}"`, e)
         if (r) {
           r.status = 'exited'
@@ -1710,6 +1760,7 @@ export class SessionService extends EventEmitter {
         reportError('session', `permission lease setup failed for "${def.name}"`, e)
       }
     }
+    this.clearSessionHandoff(def.id)
     try {
       this.pty.spawn(
         def.id,
@@ -1718,9 +1769,11 @@ export class SessionService extends EventEmitter {
         sessionEnv,
         ({ id, cols, rows }) => this.screenGuard.start(id, cols, rows)
       )
+      if (handoffLaunch) this.sessionHandoffLaunches.set(def.id, handoffLaunch)
       this.deadWriteReported.delete(def.id)
     } catch (e) {
       this.screenGuard.clear(def.id)
+      if (handoffLaunch) this.discardSessionHandoff(handoffLaunch)
       // Keep a synchronous spawn failure visible as an exited tile.
       reportError('session', `spawn failed for "${def.name}" (cwd: ${def.cwd})`, e)
       this.revokePermissionLeaseHandle(permissionLease)

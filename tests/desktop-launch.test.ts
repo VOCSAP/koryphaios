@@ -350,6 +350,20 @@ test("resume inserts every --plugin-dir before --resume", () => {
   );
 });
 
+test("session handoff adds its fixed draft directory on fresh and resumed launches", () => {
+  const input = {
+    baseCommand: "claude run",
+    sessionId: "id-new",
+    additionalDirectories: ["C:/Users/test/AppData/session-handoffs/launch-a"]
+  };
+  expect(buildSessionCommandLine({ ...input, mode: "fresh" })).toBe(
+    'claude run --add-dir "C:/Users/test/AppData/session-handoffs/launch-a" --session-id "id-new"'
+  );
+  expect(buildSessionCommandLine({ ...input, prevSessionId: "id-old", mode: "resume" })).toBe(
+    'claude run --add-dir "C:/Users/test/AppData/session-handoffs/launch-a" --resume "id-old" --fork-session --session-id "id-new"'
+  );
+});
+
 test("empty plugin directories never emit a flag", () => {
   const fresh = buildSessionCommandLine({
     baseCommand: "claude run",

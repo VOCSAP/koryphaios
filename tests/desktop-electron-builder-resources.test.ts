@@ -8,6 +8,9 @@ import { ENGINE_PATHS } from "../shared/mods-fingerprint.ts";
 
 const DESKTOP_DIR = join(import.meta.dir, "..", "desktop");
 const YML_PATH = join(DESKTOP_DIR, "electron-builder.yml");
+const PACKAGE_PATH = join(DESKTOP_DIR, "package.json");
+const DESK_BACKCHANNEL_HOOK_BUILD = "bun build hooks/desk-backchannel-hook.ts --target=node --outfile=deck-plugin/hooks/desk-backchannel-hook.mjs";
+const PACKAGED_DESK_BACKCHANNEL_HOOK = "deck-plugin/hooks/desk-backchannel-hook.mjs";
 
 // Targets whose content is a closed set the app loads by name: a partial copy
 // is as broken as an empty one, so presence of "some file" is not enough.
@@ -58,6 +61,9 @@ function checkDir(dir: string, label: string, target: string, result: ResourceCh
 function checkPackagedResources(resourcesDir: string, targets: string[]): ResourceCheck {
   const result: ResourceCheck = { missing: [], empty: [], absent: [], unexpected: [] };
   for (const target of targets) checkDir(join(resourcesDir, target), target, target, result);
+  if (targets.includes("deck-plugin") && !existsSync(join(resourcesDir, PACKAGED_DESK_BACKCHANNEL_HOOK))) {
+    result.absent.push(PACKAGED_DESK_BACKCHANNEL_HOOK);
+  }
   return result;
 }
 
@@ -95,6 +101,33 @@ function checkSourceEntries(desktopDir: string, entries: ExtraResourceEntry[]): 
   for (const entry of entries) checkDir(join(desktopDir, entry.from), entry.from, entry.to, result);
   return result;
 }
+
+test("the lead handoff helper is built before the packaged plugin resource is copied", () => {
+  const pkg = JSON.parse(readFileSync(PACKAGE_PATH, "utf-8")) as { scripts?: Record<string, string> };
+  expect(pkg.scripts?.["build:cli"]).toContain("deck-lead-plugin/bin/kory-session-handoff.mjs");
+  expect(pkg.scripts?.build).toContain("npm run build:cli");
+  expect(pkg.scripts?.dev).toContain("npm run build:cli");
+  expect(parseExtraResourcesEntries(readFileSync(YML_PATH, "utf-8"))).toContainEqual({
+    from: "deck-lead-plugin",
+    to: "deck-lead-plugin"
+  });
+  expect(readFileSync(join(DESKTOP_DIR, "deck-lead-plugin", "bin", "kory-session-handoff.sh"), "utf-8")).toContain("kory-session-handoff.mjs");
+});
+
+test("the desk backchannel hook is built before deck-plugin is packaged", () => {
+  const pkg = JSON.parse(readFileSync(PACKAGE_PATH, "utf-8")) as { scripts?: Record<string, string> };
+  expect(pkg.scripts?.["build:hook"]).toContain(DESK_BACKCHANNEL_HOOK_BUILD);
+  expect(pkg.scripts?.build).toContain("npm run build:hook");
+  for (const packageScript of ["package", "package:win", "package:mac", "package:linux"] as const) {
+    const script = pkg.scripts?.[packageScript];
+    expect(typeof script).toBe("string");
+    const steps = script!.split("&&").map((step) => step.trim());
+    const buildIndex = steps.indexOf("npm run build");
+    const builderIndex = steps.findIndex((step) => step.startsWith("electron-builder"));
+    expect(buildIndex).toBeGreaterThanOrEqual(0);
+    expect(builderIndex).toBeGreaterThan(buildIndex);
+  }
+});
 
 test("electron-builder.yml declares at least the known extraResources entries", () => {
   const targets = parseExtraResourcesTargets(readFileSync(YML_PATH, "utf-8"));
@@ -219,6 +252,17 @@ test("a packaged target dir that exists but is empty is reported empty", () => {
   const result = checkPackagedResources(resourcesDir, ["locales", "docs"]);
   expect(result.missing).toEqual([]);
   expect(result.empty).toEqual(["locales"]);
+});
+
+test("a packaged deck-plugin without the desk backchannel hook is reported absent", () => {
+  const resourcesDir = join(scratch("kory-eb-resources-"), "resources");
+  mkdirSync(join(resourcesDir, "deck-plugin", "hooks"), { recursive: true });
+  writeFileSync(join(resourcesDir, "deck-plugin", "hooks", "approval-hook.mjs"), "stub");
+
+  const result = checkPackagedResources(resourcesDir, ["deck-plugin"]);
+  expect(result.missing).toEqual([]);
+  expect(result.empty).toEqual([]);
+  expect(result.absent).toEqual([PACKAGED_DESK_BACKCHANNEL_HOOK]);
 });
 
 test("a source entry whose from: points nowhere is reported missing", () => {

@@ -32,6 +32,7 @@ import {
   modsDirFor
 } from './session-command'
 import { buildStatusLineSettings, statusLineHookPath, writeTileSettings } from './statusline-settings'
+import { createSessionHandoffLaunch, purgeSessionHandoffDrafts } from './session-handoff'
 import { hostSupportsKoryTelemetry, prewarmClaudeVersion } from './usage-service'
 import { registerIpc, resolveDocsDir } from './ipc'
 import { parseCliContext } from './cli-context'
@@ -420,6 +421,7 @@ const reportSessionState = (message: string, error: unknown): void => reportErro
  * window's sweep never takes it for an orphan.
  */
 function initSessionState(): void {
+  purgeSessionHandoffDrafts(appStateDir(), approvalRunId, (message, error) => reportError('session', message, error))
   try {
     const discarded = discardUnscopedInboxFiles(appStateDir())
     if (discarded) {
@@ -817,6 +819,14 @@ const writeTileSettingsFile = (settings: string): string => {
 }
 service.setStatusLineSettingsProvider(getStatusLineSettings)
 service.setTileSettingsFileProvider(writeTileSettingsFile)
+service.setSessionHandoffLaunchProvider((tileId, helperPath) => createSessionHandoffLaunch(
+  appStateDir(),
+  computeDeckProjectKey(cliContext.projectDir),
+  helperPath,
+  tileId,
+  approvalRunId,
+  app.getPath('logs')
+))
 service.setHostTelemetryProvider(hostSupportsKoryTelemetry)
 
 const journal = createPersistentJournal({
