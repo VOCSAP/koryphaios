@@ -1,15 +1,6 @@
-// Keeps the Deck's back-channel session id in sync across in-process id
-// rotations (/clear, compaction) that server.ts cannot observe, since its
-// CLAUDE_CODE_SESSION_ID env is frozen for the process lifetime.
-// Gated on CLAUDE_PEERS_DESK_SESSION so any non-Deck session runs it as a
-// silent no-op.
-// Reads the real resumable id from the SessionStart payload's transcript_path
-// (its .jsonl basename) and overwrites
-// ~/.claude/peers/desk-session-<token>.txt.
-// Must run under bun; imports resolve relative to this file regardless of the
-// session's cwd.
-
-import { sanitizeSessionId, writeDeskSessionFile, type DeskSessionSource } from "../../shared/peer-cache.ts";
+import { resolveBrokerEndpoint } from "../src/main/broker-client.ts";
+import { readSessionIdentityFile, sanitizeSessionId, writeDeskSessionFile, type DeskSessionSource } from "../../shared/peer-cache.ts";
+import { buildCompactReanchorContext, fetchCompactGroupPeers, reanchorAfterCompaction } from "./compact-reanchor.ts";
 
 /** SessionStart payload fields this hook consumes (others ignored). */
 export interface SessionStartPayload {
@@ -46,7 +37,25 @@ export function deriveSessionSource(payload: SessionStartPayload): DeskSessionSo
   return source !== undefined && SESSION_START_SOURCES.has(source) ? (source as DeskSessionSource) : "startup";
 }
 
-/** Read all of stdin as a UTF-8 string (the hook payload). */
+function traceCompactReanchor(message: string): void {
+  process.stderr.write(`${message}\n`);
+}
+
+async function compactReanchorContext(token: string): Promise<string> {
+  const role = process.env.CLAUDE_PEERS_ROLE || "";
+  const identity = await readSessionIdentityFile(token);
+  if (!identity) {
+    traceCompactReanchor("Kory compact reanchor: tile identity unavailable");
+    return buildCompactReanchorContext({ peerId: "", groupId: "", role }, null);
+  }
+
+  return reanchorAfterCompaction(
+    { peerId: identity.peerId, groupId: identity.groupId, role },
+    async () => fetchCompactGroupPeers(resolveBrokerEndpoint(), identity.instanceToken),
+    traceCompactReanchor,
+  );
+}
+
 async function readStdin(): Promise<string> {
   let raw = "";
   for await (const chunk of process.stdin) raw += chunk;
@@ -65,9 +74,25 @@ async function main(): Promise<void> {
     return; // malformed payload -> best-effort no-op
   }
 
+  const source = deriveSessionSource(payload);
   const id = deriveSessionId(payload);
-  if (!id) return;
-  await writeDeskSessionFile(token, { sid: id, source: deriveSessionSource(payload) });
+  if (id) {
+    try {
+      await writeDeskSessionFile(token, { sid: id, source });
+    } catch (error) {
+      traceCompactReanchor(`Kory desk backchannel: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  if (source !== "compact") return;
+
+  process.stdout.write(
+    JSON.stringify({
+      hookSpecificOutput: {
+        hookEventName: "SessionStart",
+        additionalContext: await compactReanchorContext(token),
+      },
+    }),
+  );
 }
 
 // Only run when executed directly (so tests can import deriveSessionId cleanly).
