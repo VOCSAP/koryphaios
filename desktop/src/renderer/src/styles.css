@@ -631,6 +631,19 @@ body {
   color: var(--fg-dim);
 }
 
+/* --fg-dim: a lost registration is a state to notice, not an alarm
+   (--danger) nor a call for the operator (--glow). */
+.row-peer-off {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  color: var(--fg-dim);
+}
+
+.sidebar-collapsed .row-peer-off {
+  display: none;
+}
+
 .row-lock {
   display: inline-flex;
   align-items: center;

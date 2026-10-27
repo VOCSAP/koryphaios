@@ -299,6 +299,7 @@ describe("the Deck client trusts only a well-formed binding", () => {
 interface FakeDeck {
   poller: TilePeerPoller;
   peers: Map<string, string | null>;
+  statuses: Map<string, "active" | "dormant" | null>;
   alive: Set<string>;
   fetches: string[][];
   reports: unknown[];
@@ -308,6 +309,7 @@ interface FakeDeck {
 function fakeDeck(fetchImpl: (deskSessions: string[]) => Promise<(TilePeerBinding | null)[]>): FakeDeck {
   const deck: Omit<FakeDeck, "poller"> = {
     peers: new Map(),
+    statuses: new Map(),
     alive: new Set(),
     fetches: [],
     reports: [],
@@ -324,6 +326,10 @@ function fakeDeck(fetchImpl: (deskSessions: string[]) => Promise<(TilePeerBindin
     setPeer: (id, next, previous) => {
       deck.changes.push({ id, next, previous });
       deck.peers.set(id, next);
+    },
+    currentStatus: (id) => deck.statuses.get(id) ?? null,
+    setStatus: (id, next) => {
+      deck.statuses.set(id, next);
     },
     report: (e) => deck.reports.push(e),
   });
@@ -409,6 +415,51 @@ describe("the peer poll tick", () => {
   });
 });
 
+describe("the peer poll tick carries the broker status", () => {
+  test("a dormant binding reaches the tile and an active one clears it, each reported as a change", async () => {
+    let status: "active" | "dormant" = "dormant";
+    const deck = fakeDeck(async () => [{ peer_id: "p-1", status }]);
+    deck.peers.set("t1", "p-1");
+    deck.alive.add("t1");
+
+    expect(await deck.poller.tick(), "the status alone changed").toBe(true);
+    expect(deck.statuses.get("t1")).toBe("dormant");
+    expect(deck.changes, "the peer id did not move").toEqual([]);
+
+    status = "active";
+    expect(await deck.poller.tick()).toBe(true);
+    expect(deck.statuses.get("t1")).toBe("active");
+  });
+
+  test("an unchanged status and peer id report no change", async () => {
+    const deck = fakeDeck(async () => [{ peer_id: "p-1", status: "dormant" }]);
+    deck.peers.set("t1", "p-1");
+    deck.alive.add("t1");
+
+    expect(await deck.poller.tick()).toBe(true);
+    expect(await deck.poller.tick(), "a second identical answer is not a change").toBe(false);
+  });
+
+  test("a failed round keeps the last status, and a null binding or a dead pty clears it", async () => {
+    let mode: "fail" | "unbound" = "fail";
+    const deck = fakeDeck(async (deskSessions) => {
+      if (mode === "fail") throw new Error("broker down");
+      return deskSessions.map(() => null);
+    });
+    deck.peers.set("t1", "p-1").set("t2", "p-2");
+    deck.statuses.set("t1", "dormant").set("t2", "dormant");
+    deck.alive.add("t1");
+
+    await deck.poller.tick();
+    expect(deck.statuses.get("t1"), "a failed round blanks nothing").toBe("dormant");
+
+    mode = "unbound";
+    await deck.poller.tick();
+    expect(deck.statuses.get("t1"), "no binding means no status").toBeNull();
+    expect(deck.statuses.get("t2"), "a dead pty has no status").toBeNull();
+  });
+});
+
 describe("source scan, not execution: the Deck's peer poll is wired to the broker, not to the cache files", () => {
   const main = join(import.meta.dir, "..", "desktop", "src", "main");
   const service = readFileSync(join(main, "session-service.ts"), "utf-8").replace(/\r\n/g, "\n");
@@ -429,6 +480,8 @@ describe("source scan, not execution: the Deck's peer poll is wired to the broke
       "new TilePeerPoller(",
       "fetchTilePeers({ groupId, secret, deskSessions }, { endpoint })",
       "setPeer: (id, next) => this.applyPeerId(id, next)",
+      "setStatus: (id, next) => {",
+      "currentStatus: (id) => this.runtime.get(id)?.peerStatus ?? null",
       "reportError(",
       "await this.peerPoller.tick()",
     ]) {

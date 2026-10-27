@@ -421,6 +421,7 @@ export const EN_DEFAULTS: Record<string, string> = {
   'sidebar.lock': 'Lock',
   'sidebar.unlock': 'Unlock',
   'sidebar.lockedTitle': 'Locked: no agent, team-lead or supervisor, may close this session',
+  'sidebar.peerDormant': 'Disconnected: this session lost its claude-peers server',
   'sidebar.leadTitle':
     'Team-lead: targeted app notices (dispatch, integrations) go to this session',
   'sidebar.roleTitle': 'Role: {role}',

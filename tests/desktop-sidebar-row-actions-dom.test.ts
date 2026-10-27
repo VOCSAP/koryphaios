@@ -252,6 +252,22 @@ test("a locked row wears the frame and the padlock, AHEAD of the role glyph", ()
   expect(row().querySelector(".row-lock")?.getAttribute("title")).toBe("sidebar.lockedTitle");
 });
 
+test("a dormant peer wears the disconnected mark with its label, and the peer id stays visible", () => {
+  renderRow(session({ peerStatus: "dormant" }));
+  const mark = row().querySelector(".row-peer-off");
+  expect(mark, "a dormant tile must show it lost its claude-peers server").not.toBeNull();
+  expect(mark!.getAttribute("role")).toBe("img");
+  expect(mark!.getAttribute("aria-label")).toBe("sidebar.peerDormant");
+  expect(row().querySelector(".row-sub")?.textContent).toContain("peer-a");
+});
+
+test("an active or unreported peer wears no disconnected mark", () => {
+  for (const peerStatus of ["active", null]) {
+    renderRow(session({ peerStatus }));
+    expect(row().querySelector(".row-peer-off"), `peerStatus ${String(peerStatus)}`).toBeNull();
+  }
+});
+
 test("folded, a locked row keeps its frame class, so the rail still shows the lock", () => {
   renderRow(session({ locked: true }), true);
   expect(row().classList.contains("row-locked")).toBe(true);

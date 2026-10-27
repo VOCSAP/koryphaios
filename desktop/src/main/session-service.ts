@@ -6,6 +6,7 @@ import { basename, join } from 'node:path'
 import type {
   AppConfig,
   CreateSessionInput,
+  PeerStatus,
   SessionDef,
   SessionLiveStatus,
   SessionRuntime,
@@ -98,6 +99,7 @@ interface RuntimeState {
   status: SessionStatus
   exitCode: number | null
   peerId: string | null
+  peerStatus: PeerStatus | null
   /**
    * Frequency-based ternary ('working' | 'idle' | 'unknown') driven by the
    * activity tracker.
@@ -888,6 +890,7 @@ export class SessionService extends EventEmitter {
       status: 'starting',
       exitCode: null,
       peerId: null,
+      peerStatus: null,
       activity: 'unknown',
       expired: false,
       rateLimited: false,
@@ -1163,6 +1166,7 @@ export class SessionService extends EventEmitter {
         status: 'exited',
         exitCode: null,
         peerId: null,
+        peerStatus: null,
         activity: 'unknown',
         expired: false,
         rateLimited: false,
@@ -1796,6 +1800,7 @@ export class SessionService extends EventEmitter {
       exitCode: r?.exitCode ?? null,
       pid: this.pty.pid(def.id),
       peerId: r?.peerId ?? null,
+      peerStatus: r?.peerStatus ?? null,
       activity: r?.activity ?? 'unknown',
       expired: r?.expired ?? false,
       rateLimited: r?.rateLimited ?? false,
@@ -2001,7 +2006,12 @@ export class SessionService extends EventEmitter {
         const { endpoint, groupId, secret } = getScope()
         return fetchTilePeers({ groupId, secret, deskSessions }, { endpoint })
       },
+      currentStatus: (id) => this.runtime.get(id)?.peerStatus ?? null,
       setPeer: (id, next) => this.applyPeerId(id, next),
+      setStatus: (id, next) => {
+        const r = this.runtime.get(id)
+        if (r) r.peerStatus = next
+      },
       report: (e) =>
         reportError('session', 'could not resolve tile peer ids from the broker, keeping the last known ones', e)
     })

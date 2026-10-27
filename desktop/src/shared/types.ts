@@ -114,6 +114,9 @@ export interface SessionDef {
   createdAt: number
 }
 
+/** The broker's view of a tile's claude-peers registration. */
+export type PeerStatus = 'active' | 'dormant'
+
 /** Live runtime view of a session, sent to the renderer. */
 export interface SessionRuntime extends SessionDef {
   status: SessionStatus
@@ -121,6 +124,8 @@ export interface SessionRuntime extends SessionDef {
   pid: number | null
   /** Display peer_id resolved from the claude-peers status-line cache, if any. */
   peerId: string | null
+  /** Broker status of that peer_id; null when the broker has not reported one. */
+  peerStatus: PeerStatus | null
   /**
    * FREQUENCY-based activity predicate (card f8082208 / docs/
    * DESIGN-ACTIVITY-PREDICATE.md), ternary and never a boolean: 'unknown'

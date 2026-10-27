@@ -14,6 +14,8 @@ export interface TilePeerPollDeps {
   /** Index-aligned with `deskSessions`; rejects on any broker failure. */
   fetch(deskSessions: string[]): Promise<(TilePeerBinding | null)[]>
   setPeer(id: string, next: string | null, previous: string | null): void
+  currentStatus(id: string): TilePeerBinding['status'] | null
+  setStatus(id: string, next: TilePeerBinding['status'] | null): void
   report(error: unknown): void
 }
 
@@ -39,21 +41,31 @@ export class TilePeerPoller {
     } finally {
       this.inFlight = false
     }
-    const answered = new Map<string, string | null>()
+    const answered = new Map<string, TilePeerBinding | null>()
     resolved?.forEach((binding, i) => {
       const id = live[i]
-      if (id !== undefined) answered.set(id, binding?.peer_id ?? null)
+      if (id !== undefined) answered.set(id, binding)
     })
     let changed = false
     for (const id of this.deps.tileIds()) {
       const previous = this.deps.currentPeer(id)
       if (previous === undefined) continue
       let next: string | null
-      if (!this.deps.isAlive(id)) next = null
-      else if (answered.has(id)) next = answered.get(id) ?? null
-      else continue
+      let nextStatus: TilePeerBinding['status'] | null
+      if (!this.deps.isAlive(id)) {
+        next = null
+        nextStatus = null
+      } else if (answered.has(id)) {
+        const binding = answered.get(id) ?? null
+        next = binding?.peer_id ?? null
+        nextStatus = binding?.status ?? null
+      } else continue
       if (next !== previous) {
         this.deps.setPeer(id, next, previous)
+        changed = true
+      }
+      if (nextStatus !== this.deps.currentStatus(id)) {
+        this.deps.setStatus(id, nextStatus)
         changed = true
       }
     }

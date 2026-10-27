@@ -270,6 +270,16 @@ export function SessionRow({
           {GLYPH_BADGES.laurel}
         </span>
       )}
+      {session.peerStatus === 'dormant' && (
+        <span
+          className="row-peer-off"
+          role="img"
+          title={t('sidebar.peerDormant')}
+          aria-label={t('sidebar.peerDormant')}
+        >
+          {GLYPH_BADGES.torchOut}
+        </span>
+      )}
       {/* Model + context fill: the tile's own statusLine
           report, null until the first one arrives or when the tile carries
           no Deck statusLine (sandbox, non-claude command) -- both badges

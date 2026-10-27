@@ -297,6 +297,7 @@
   "sidebar.lock": "Verrouiller",
   "sidebar.unlock": "Déverrouiller",
   "sidebar.lockedTitle": "Verrouillée : aucun agent, team-lead ni superviseur, ne peut fermer cette session",
+  "sidebar.peerDormant": "Déconnectée : cette session a perdu son serveur claude-peers",
   "sidebar.leadTitle": "Team-lead : les notifications ciblées de l'app (dispatch, intégrations) vont à cette session",
   "sidebar.roleTitle": "Rôle : {role}",
   "create.lead": "Team-lead de cette fenêtre",
