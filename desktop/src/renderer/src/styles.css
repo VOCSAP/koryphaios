@@ -1904,6 +1904,22 @@ textarea:disabled {
   flex: 1;
 }
 
+.field-kind-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.field-kind-row select {
+  flex: 1;
+  min-width: 0;
+}
+
+.field-kind-glyph {
+  display: inline-flex;
+  flex: none;
+}
+
 .field-grid {
   display: grid;
   grid-template-columns: repeat(3, 1fr);

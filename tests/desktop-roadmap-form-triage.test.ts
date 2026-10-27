@@ -227,3 +227,51 @@ test("a triaged card opens on its own role and can be cleared back to untriaged"
     "clearing must travel as an explicit null; an omitted key would leave the old role standing"
   ).toBeNull();
 });
+
+function kindField(): Element {
+  const field = [...container.querySelectorAll(".rm-modal-form .field")].find(
+    (el) => (el.querySelector("span")?.textContent ?? "").trim() === "roadmap.fieldKind"
+  );
+  if (!field) throw new Error("the edit form rendered no Kind field");
+  return field;
+}
+
+test("opening the edit form raises no <span> inside <option> warning", async () => {
+  const seen: string[] = [];
+  const original = console.error;
+  console.error = (...args: unknown[]) => {
+    seen.push(args.map(String).join(" "));
+  };
+  try {
+    await mountWith(item({ kind: "bug" }));
+    await openEditForm();
+  } finally {
+    console.error = original;
+  }
+  expect(
+    seen.filter((m) => m.includes("cannot be a child of <option>")),
+    "an option holds text only; the glyph belongs beside the select"
+  ).toEqual([]);
+  expect(
+    kindField().querySelector("option .kind-glyph"),
+    "a native option never renders element children"
+  ).toBeNull();
+});
+
+test("the kind glyph beside the select follows the selected kind", async () => {
+  await mountWith(item({ kind: "bug" }));
+  await openEditForm();
+  const field = kindField();
+  const glyph = (): Element | null => field.querySelector(".field-kind-glyph .kind-glyph");
+  expect(glyph()?.className, "the form must open on the glyph of the card's own kind").toContain(
+    "kind-glyph-bug"
+  );
+  const select = field.querySelector("select") as HTMLSelectElement;
+  await act(async () => {
+    select.value = "idea";
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  expect(glyph()?.className, "changing the select must change the glyph").toContain(
+    "kind-glyph-idea"
+  );
+});

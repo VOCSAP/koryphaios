@@ -1055,25 +1055,30 @@ export function RoadmapView(): React.JSX.Element {
             <div className="field-grid">
               <label className="field">
                 <span>{t('roadmap.fieldKind')}</span>
-                <select
-                  value={draft.kind}
-                  onChange={(e) => {
-                    const kind = e.target.value as RoadmapKind
-                    // Switching to a directive seeds a default command so the
-                    // card is always coherent (broker requires one).
-                    setDraft({
-                      ...draft,
-                      kind,
-                      directive: kind === 'directive' ? (draft.directive ?? 'clear') : draft.directive
-                    })
-                  }}
-                >
-                  {KINDS.map((k) => (
-                    <option key={k} value={k}>
-                      {KIND_ICONS[k]} {t(`roadmap.kind.${k}`)}
-                    </option>
-                  ))}
-                </select>
+                <div className="field-kind-row">
+                  <span className="field-kind-glyph" aria-hidden="true">
+                    {KIND_ICONS[draft.kind]}
+                  </span>
+                  <select
+                    value={draft.kind}
+                    onChange={(e) => {
+                      const kind = e.target.value as RoadmapKind
+                      // Switching to a directive seeds a default command so the
+                      // card is always coherent (broker requires one).
+                      setDraft({
+                        ...draft,
+                        kind,
+                        directive: kind === 'directive' ? (draft.directive ?? 'clear') : draft.directive
+                      })
+                    }}
+                  >
+                    {KINDS.map((k) => (
+                      <option key={k} value={k}>
+                        {t(`roadmap.kind.${k}`)}
+                      </option>
+                    ))}
+                  </select>
+                </div>
               </label>
               {draftIsDirective ? (
                 <label className="field">
