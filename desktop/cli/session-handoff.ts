@@ -44,7 +44,8 @@ function main(): void {
       project: activeBinding.projectKey,
       draft: activeBinding.draftPath,
       helper: '"$KORY_SESSION_HELPER"',
-      addendum: skills.addendum
+      addendum: skills.addendum,
+      storage: skills.storage
     })}\n`)
     return
   }

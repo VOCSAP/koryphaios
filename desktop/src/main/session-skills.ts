@@ -1,10 +1,10 @@
 import { randomUUID } from 'node:crypto'
 import { lstatSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import type { SessionSkillSettings } from '../shared/types'
+import type { SessionSkillAddendum, SessionSkillSettings } from '../shared/types'
+import { SESSION_SKILL_TEXT_MAX_BYTES as MAX_ADDENDUM_BYTES } from '../shared/session-skill-limits'
 
 const SESSION_SKILLS_FILE = 'session-skills.json'
-const MAX_ADDENDUM_BYTES = 16 * 1024
 const MAX_DOCUMENT_BYTES = 64 * 1024
 
 export function sessionSkillsPath(stateDir: string): string {
@@ -12,7 +12,7 @@ export function sessionSkillsPath(stateDir: string): string {
 }
 
 function emptySessionSkills(): SessionSkillSettings {
-  return { version: 1, addendum: { start: '', end: '', stop: '' } }
+  return { version: 2, addendum: { start: '', end: '', stop: '' }, storage: { mode: 'kory', instructions: '' } }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -24,15 +24,29 @@ function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): 
   return actual.length === keys.length && keys.every((key) => Object.hasOwn(value, key))
 }
 
-function validateSessionSkills(value: unknown): asserts value is SessionSkillSettings {
-  if (!isRecord(value) || !hasExactKeys(value, ['version', 'addendum']) || value.version !== 1 || !isRecord(value.addendum) || !hasExactKeys(value.addendum, ['start', 'end', 'stop'])) {
-    throw new Error('Invalid session skills settings')
-  }
+function validateAddendum(value: unknown): asserts value is SessionSkillAddendum {
+  if (!isRecord(value) || !hasExactKeys(value, ['start', 'end', 'stop'])) throw new Error('Invalid session skills settings')
   for (const moment of ['start', 'end', 'stop'] as const) {
-    const addendum = value.addendum[moment]
+    const addendum = value[moment]
     if (typeof addendum !== 'string') throw new Error('Invalid session skills settings')
     if (Buffer.byteLength(addendum, 'utf8') > MAX_ADDENDUM_BYTES) throw new Error(`Session skill addendum "${moment}" is too large`)
   }
+}
+
+function legacySessionSkills(value: unknown): SessionSkillSettings | null {
+  if (!isRecord(value) || !hasExactKeys(value, ['version', 'addendum']) || value.version !== 1) return null
+  validateAddendum(value.addendum)
+  return { version: 2, addendum: value.addendum, storage: { mode: 'kory', instructions: '' } }
+}
+
+function validateSessionSkills(value: unknown): asserts value is SessionSkillSettings {
+  if (!isRecord(value) || !hasExactKeys(value, ['version', 'addendum', 'storage']) || value.version !== 2) throw new Error('Invalid session skills settings')
+  validateAddendum(value.addendum)
+  if (!isRecord(value.storage) || !hasExactKeys(value.storage, ['mode', 'instructions']) || (value.storage.mode !== 'kory' && value.storage.mode !== 'custom') || typeof value.storage.instructions !== 'string') {
+    throw new Error('Invalid session skills settings')
+  }
+  if (Buffer.byteLength(value.storage.instructions, 'utf8') > MAX_ADDENDUM_BYTES) throw new Error('Session skill storage instructions is too large')
+  if (value.storage.mode === 'custom' && value.storage.instructions.trim() === '') throw new Error('Invalid session skills settings')
 }
 
 function serializeSessionSkills(value: SessionSkillSettings): string {
@@ -63,6 +77,8 @@ export function readSessionSkills(stateDir: string): SessionSkillSettings {
   } catch {
     throw new Error('Invalid session skills settings')
   }
+  const legacy = legacySessionSkills(parsed)
+  if (legacy) return legacy
   validateSessionSkills(parsed)
   return parsed
 }

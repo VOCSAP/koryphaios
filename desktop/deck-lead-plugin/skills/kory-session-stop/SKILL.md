@@ -31,7 +31,7 @@ Run this exact command, alone in its own Bash call:
 "$KORY_SESSION_HELPER" context
 ```
 
-It prints JSON: `helper` (the pre-approved `"$KORY_SESSION_HELPER"` command), `draft` (absolute path of the handoff draft file), `project`, `addendum`. For every later helper call, use only `"$KORY_SESSION_HELPER" <op>`.
+It prints JSON: `helper` (the pre-approved `"$KORY_SESSION_HELPER"` command), `draft` (absolute path of the handoff draft file), `project`, `addendum`, `storage`. For every later helper call, use only `"$KORY_SESSION_HELPER" <op>`.
 
 | Result | Action |
 |---|---|
@@ -39,7 +39,7 @@ It prints JSON: `helper` (the pre-approved `"$KORY_SESSION_HELPER"` command), `d
 | exit 77, `command not found`, or an empty program name | Reply in one line: `No Kory session binding on this tile (exit <code>): no handoff can be published; dispatch is stopped, nothing else was changed.` Stop. |
 | any other exit code | Reply in one line with the exit code and the first line of stderr. Stop. |
 
-Do not write the handoff anywhere else and do not use any other notes or memory system instead: the next session only ever reads what the helper serves.
+After a valid context, `storage.mode` decides where the handoff is stored. Without a valid context, the protocol has already stopped and no other storage source is used.
 
 **Operator addendum.** Use only the `stop` addendum. If the JSON carries addenda for several moments, ignore the `end` one even though this protocol ends like a session end: the operator wrote it for `/kory-session-end`, not for a stop. Carry the `stop` addendum out after section 4, unless it says when. When it names a slash command or a skill (`/something`), do not invoke it: operator-only commands run only when the operator or the Deck types them as a separate turn. Say in one line that you left it for them. For the same reason, never invoke `/kory-session-end` yourself: section 4 is its protocol.
 
@@ -62,8 +62,8 @@ Do not write the handoff anywhere else and do not use any other notes or memory 
 
 1. Cards: after a soft stop, each card you hold is `done` when delivered and verified, otherwise back to `planned` with a note on where it stopped; a card a worker still holds after its report is released the same way (`release: true`, `status: "planned"`). Open tasks: closed with a reason, or handed over and listed in the handoff with the role that holds it.
 2. Worktrees and scratch mirrors created for this session's work: remove the ones whose work is merged or abandoned, after `git status` in each shows nothing left to keep; leave anything you cannot prove belongs to this session. On the shared checkout, no `git stash`, `checkout`, `restore` or `reset`.
-3. Write the handoff with the Write tool to the `draft` path, replacing its content. If the Write tool is not available, reply `Stop needs the Write tool to fill the handoff draft.` and stop; do not pipe or echo the text into the helper instead, because those commands are not pre-approved. Sections, in order: **Objective** (the next session's, or `resume after <soft|hard> stop`); **State** (done and verified with the command and its decisive output line, in flight, abandoned); **Next action**; **Decisions** (with reasons, and what was rejected); **Cards** (id8, title, status, one line); **Open tasks** (role holding each); **Open questions**; **Roster** (ROLES only, never a peer_id: peer_ids are minted per session). No token, password or key in the text.
-4. Run this exact command alone in its own Bash call, with nothing before or after it (no `&&`, `;`, `|`, `cd`, `echo`: any addition makes it ask the operator for permission):
+3. Build one handoff with these sections, in order: **Objective** (the next session's, or `resume after <soft|hard> stop`); **State** (done and verified with the command and its decisive output line, in flight, abandoned); **Next action**; **Decisions** (with reasons, and what was rejected); **Cards** (id8, title, status, one line); **Open tasks** (role holding each); **Open questions**; **Roster** (ROLES only, never a peer_id: peer_ids are minted per session). No token, password or key in the text. When `storage.mode` is `custom`, follow `storage.instructions` to write it, then read it back and compare. The text describes commands to run, never a slash command to invoke. Record any custom command failure and continue with Kory storage below.
+4. A successful custom round trip is already published. Otherwise write the handoff with the Write tool to `draft`, replacing its content. If the Write tool is unavailable, reply `Stop needs the Write tool to fill the handoff draft.` and stop; do not pipe or echo the text into the helper instead, because those commands are not pre-approved. Then run this exact command alone in its own Bash call. Nothing before or after it: no `&&`, `;`, `|`, `cd` or `echo`. Any addition turns the pre-approved command into one that asks the operator for permission:
 
 ```
 "$KORY_SESSION_HELPER" publish
@@ -76,4 +76,4 @@ Do not write the handoff anywhere else and do not use any other notes or memory 
 | exit 74 (I/O) | Publish once more. |
 | a second failure, or exit 77 | Reply in one line with the exit code and the draft path. Stop. |
 
-5. One line: `Session stopped (<soft|hard>): handoff #<number> published for <project>.` Then the `stop` addendum, if any.
+5. For successful custom storage, say: `Session stopped (<soft|hard>): handoff stored with custom storage for <project>.` For Kory storage, say: `Session stopped (<soft|hard>): handoff #<number> published for <project>.` If custom storage failed, append: `Custom handoff storage failed: <cause>. Fell back to Kory storage.` When `storage.mode` is `kory` and `storage.instructions` is empty, add: `Default Kory storage is active; customize it with /kory-setup-handoff.` Then carry out the `stop` addendum, if any.

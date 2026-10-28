@@ -479,9 +479,15 @@ export interface SessionSkillAddendum {
   stop: string
 }
 
+export interface SessionSkillStorage {
+  mode: 'kory' | 'custom'
+  instructions: string
+}
+
 export interface SessionSkillSettings {
-  version: 1
+  version: 2
   addendum: SessionSkillAddendum
+  storage: SessionSkillStorage
 }
 
 /** A selectable language for the settings picker: stable code + native label. */

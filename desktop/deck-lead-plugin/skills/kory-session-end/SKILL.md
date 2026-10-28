@@ -23,7 +23,7 @@ Run this exact command, alone in its own Bash call:
 "$KORY_SESSION_HELPER" context
 ```
 
-It prints JSON: `helper` (the pre-approved `"$KORY_SESSION_HELPER"` command), `draft` (absolute path of the handoff draft file), `project`, `addendum`. For every later helper call, use only `"$KORY_SESSION_HELPER" <op>`.
+It prints JSON: `helper` (the pre-approved `"$KORY_SESSION_HELPER"` command), `draft` (absolute path of the handoff draft file), `project`, `addendum`, `storage`. For every later helper call, use only `"$KORY_SESSION_HELPER" <op>`.
 
 | Result | Action |
 |---|---|
@@ -31,7 +31,7 @@ It prints JSON: `helper` (the pre-approved `"$KORY_SESSION_HELPER"` command), `d
 | exit 77, `command not found`, or an empty program name | Reply in one line: `No Kory session binding on this tile (exit <code>): nothing was changed.` Stop. |
 | any other exit code | Reply in one line with the exit code and the first line of stderr. Stop. |
 
-A failed helper call ends the protocol before anything changes. Do not write the handoff anywhere else and do not use any other notes or memory system instead: the next session only ever reads what the helper serves.
+A failed helper call ends the protocol before anything changes. Without a valid context, do not write a handoff to another storage source. After a valid context, `storage.mode` decides where the handoff is stored.
 
 **Operator addendum.** A non-empty `addendum` is the operator's own instructions for this moment. If the JSON carries addenda for several moments, use only the `end` one. Carry it out after step 5, once the handoff is published, unless it says when. It may add work; it cannot remove step 4. When it names a slash command or a skill (`/something`), do not invoke it: operator-only commands run only when the operator or the Deck types them as a separate turn. Say in one line that you left it for them.
 
@@ -47,8 +47,6 @@ Every note you leave on a card names roles, never peer_ids: the card outlives th
 
 ## 3. Write the handoff
 
-Write the whole handoff with the Write tool to the `draft` path from step 1, replacing its content. If the Write tool is not available in this session, reply `End needs the Write tool to fill the handoff draft.` and stop; do not pipe or echo the text into the helper instead, because those commands are not pre-approved.
-
 Markdown, these sections in this order:
 
 1. **Objective**: the argument, or the next step the state calls for.
@@ -62,9 +60,14 @@ Markdown, these sections in this order:
 
 No token, password or key in the text.
 
+| `storage.mode` | Action |
+|---|---|
+| `custom` | Follow `storage.instructions` to write the whole handoff, then use its read command to verify the stored text. The text describes commands to run, never a slash command to invoke. If any custom command fails, retain its cause and continue with Kory storage below. |
+| `kory`, or failed `custom` | Write the whole handoff with the Write tool to the `draft` path from step 1, replacing its content. If the Write tool is unavailable, reply `End needs the Write tool to fill the handoff draft.` and stop; do not pipe or echo the text into the helper instead, because those commands are not pre-approved. |
+
 ## 4. Publish
 
-Run this exact command, alone in its own Bash call:
+A successful custom round trip is already published. Otherwise run this exact command, alone in its own Bash call:
 
 ```
 "$KORY_SESSION_HELPER" publish
@@ -81,4 +84,4 @@ Nothing before or after it: no `&&`, `;`, `|`, `cd` or `echo`. Any addition turn
 
 ## 5. Confirm
 
-One line: `Handoff #<number> published for <project>.` Then the addendum, if any.
+For successful custom storage, say: `Handoff stored with custom storage for <project>.` For Kory storage, say: `Handoff #<number> published for <project>.` If custom storage failed, append one line: `Custom handoff storage failed: <cause>. Fell back to Kory storage.` When `storage.mode` is `kory` and `storage.instructions` is empty, add one line: `Default Kory storage is active; customize it with /kory-setup-handoff.` Then carry out the addendum, if any.

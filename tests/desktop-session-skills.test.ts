@@ -20,16 +20,47 @@ test('returns empty addenda only when the global file is absent', () => {
   const state = stateDir()
 
   expect(readSessionSkills(state)).toEqual({
-    version: 1,
-    addendum: { start: '', end: '', stop: '' }
+    version: 2,
+    addendum: { start: '', end: '', stop: '' },
+    storage: { mode: 'kory', instructions: '' }
   })
+})
+
+test('normalizes an absent or v1 settings document to Kory storage', () => {
+  const state = stateDir()
+  const expected = {
+    version: 2,
+    addendum: { start: '', end: '', stop: '' },
+    storage: { mode: 'kory', instructions: '' }
+  }
+
+  expect(readSessionSkills(state)).toEqual(expected)
+  writeFileSync(sessionSkillsPath(state), JSON.stringify({ version: 1, addendum: { start: 'resume', end: '', stop: '' } }))
+  expect(readSessionSkills(state)).toEqual({
+    ...expected,
+    addendum: { start: 'resume', end: '', stop: '' }
+  })
+})
+
+test('accepts bounded custom storage instructions', () => {
+  const state = stateDir()
+  const settings = {
+    version: 2 as const,
+    addendum: { start: '', end: '', stop: '' },
+    storage: { mode: 'custom' as const, instructions: 'é'.repeat(8 * 1024) }
+  }
+
+  expect(writeSessionSkills(state, settings)).toEqual(settings)
+  expect(() => writeSessionSkills(state, { ...settings, storage: { mode: 'custom', instructions: 'é'.repeat(8 * 1024 + 1) } })).toThrow('storage')
+  expect(() => writeSessionSkills(state, { ...settings, storage: { mode: 'custom', instructions: '   ' } })).toThrow('Invalid session skills settings')
 })
 
 test('persists each addendum in the global state directory', () => {
   const state = stateDir()
   const settings = {
-    version: 1 as const,
-    addendum: { start: 'Prepare context.', end: 'Publish the handoff.', stop: 'Explain the stop.' }
+    version: 2 as const,
+    addendum: { start: 'Prepare context.', end: 'Publish the handoff.', stop: 'Explain the stop.' },
+    storage: { mode: 'kory' as const, instructions: '' }
   }
 
   expect(writeSessionSkills(state, settings)).toEqual(settings)
@@ -46,7 +77,7 @@ test('rejects a linked, malformed, or non-strict settings file instead of treati
   expect(() => readSessionSkills(state)).toThrow('symbolic link')
   rmSync(file)
   symlinkSync(join(state, 'missing.json'), file, process.platform === 'win32' ? 'file' : undefined)
-  expect(() => writeSessionSkills(state, { version: 1, addendum: { start: '', end: '', stop: '' } })).toThrow('symbolic link')
+  expect(() => writeSessionSkills(state, addenda())).toThrow('symbolic link')
   rmSync(file)
 
   for (const content of [
@@ -71,8 +102,9 @@ test('distinguishes a non-regular file from a symbolic link', () => {
 test('names the oversized addendum that is rejected before persistence', () => {
   const state = stateDir()
   const settings = {
-    version: 1 as const,
-    addendum: { start: 'x'.repeat(16 * 1024 + 1), end: '', stop: '' }
+    version: 2 as const,
+    addendum: { start: 'x'.repeat(16 * 1024 + 1), end: '', stop: '' },
+    storage: { mode: 'kory' as const, instructions: '' }
   }
 
   expect(() => writeSessionSkills(state, settings)).toThrow('start')
@@ -88,23 +120,23 @@ test('rejects an oversized persisted document before JSON parsing', () => {
 
 test('writes no temporary file after a completed save', () => {
   const state = stateDir()
-  writeSessionSkills(state, { version: 1, addendum: { start: 'A', end: 'B', stop: 'C' } })
+  writeSessionSkills(state, addenda('A', 'B', 'C'))
 
   expect(readdirSync(state).filter((name) => name.endsWith('.tmp'))).toEqual([])
 })
 
 test('reads a later persisted value without retaining a prior snapshot', () => {
   const state = stateDir()
-  writeSessionSkills(state, { version: 1, addendum: { start: 'first', end: '', stop: '' } })
+  writeSessionSkills(state, addenda('first'))
   expect(readSessionSkills(state).addendum.start).toBe('first')
 
-  writeSessionSkills(state, { version: 1, addendum: { start: 'second', end: '', stop: '' } })
+  writeSessionSkills(state, addenda('second'))
   expect(readSessionSkills(state).addendum.start).toBe('second')
 })
 
 test('reads an externally replaced settings document on the next access', () => {
   const state = stateDir()
-  writeSessionSkills(state, { version: 1, addendum: { start: 'first', end: '', stop: '' } })
+  writeSessionSkills(state, addenda('first'))
   writeFileSync(sessionSkillsPath(state), JSON.stringify({ version: 1, addendum: { start: 'second', end: '', stop: '' } }))
 
   expect(readSessionSkills(state).addendum.start).toBe('second')
@@ -118,7 +150,11 @@ test('does not derive the settings file from the working directory', () => {
   expect(sessionSkillsPath(state)).not.toBe(join(cwd, 'session-skills.json'))
 })
 
-const addenda = (start = '', end = '', stop = '') => ({ version: 1 as const, addendum: { start, end, stop } })
+const addenda = (start = '', end = '', stop = '') => ({
+  version: 2 as const,
+  addendum: { start, end, stop },
+  storage: { mode: 'kory' as const, instructions: '' }
+})
 
 test('handlers set and get use their shared state directory', () => {
   const state = stateDir()
@@ -225,7 +261,16 @@ test('rejects unknown addendum keys on read and write', () => {
   expect(() => readSessionSkills(state)).toThrow('Invalid session skills settings')
 })
 
-test('rejects a version other than number 1', () => {
+test('rejects unknown storage keys on read and write', () => {
+  const state = stateDir()
+  const extra = { version: 2, addendum: { start: '', end: '', stop: '' }, storage: { mode: 'kory', instructions: '', extra: '' } }
+
+  expect(() => writeSessionSkills(state, extra)).toThrow('Invalid session skills settings')
+  writeFileSync(sessionSkillsPath(state), JSON.stringify(extra))
+  expect(() => readSessionSkills(state)).toThrow('Invalid session skills settings')
+})
+
+test('rejects a non-numeric version', () => {
   const state = stateDir()
   writeFileSync(sessionSkillsPath(state), JSON.stringify({ version: '1', addendum: { start: '', end: '', stop: '' } }))
 

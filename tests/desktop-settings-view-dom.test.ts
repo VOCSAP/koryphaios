@@ -34,7 +34,8 @@ let reportedErrors: Array<[string, string]> = [];
 type ModOffer = string | { name: string; globallyActive: boolean };
 
 let listModsImpl: () => Promise<ModOffer[]> = () => Promise.resolve([]);
-const NO_SKILLS: SessionSkillSettings = { version: 1, addendum: { start: "", end: "", stop: "" } };
+const KORY_STORAGE = { mode: "kory", instructions: "" } as const;
+const NO_SKILLS: SessionSkillSettings = { version: 2, addendum: { start: "", end: "", stop: "" }, storage: KORY_STORAGE };
 let getSkillsImpl: () => Promise<SessionSkillSettings> = () => Promise.resolve(NO_SKILLS);
 let setSkillsImpl: (value: SessionSkillSettings) => Promise<SessionSkillSettings> = (value) => Promise.resolve(value);
 let setSkillsCalls: SessionSkillSettings[] = [];
@@ -401,7 +402,7 @@ test("a skills file that cannot be read stays an invalid state with no field to 
     "the failed read must be traced with its cause"
   ).toHaveLength(1);
 
-  getSkillsImpl = () => Promise.resolve({ version: 1, addendum: { start: "S", end: "", stop: "" } });
+  getSkillsImpl = () => Promise.resolve({ version: 2, addendum: { start: "S", end: "", stop: "" }, storage: KORY_STORAGE });
   const retry = panel.querySelector(".skills-invalid button") as HTMLButtonElement;
   await act(async () => {
     retry.click();
@@ -437,7 +438,7 @@ test("a refused save keeps the typed text and shows the refusal as an error stat
 });
 
 test("each moment shows its own stored text and saves into its own field", async () => {
-  getSkillsImpl = () => Promise.resolve({ version: 1, addendum: { start: "S0", end: "E0", stop: "P0" } });
+  getSkillsImpl = () => Promise.resolve({ version: 2, addendum: { start: "S0", end: "E0", stop: "P0" }, storage: KORY_STORAGE });
   const panel = await openSkills();
 
   expect(MOMENT_COMMANDS.map((c) => momentArea(panel, c)?.value), "each field must be seeded from its own moment").toEqual([
@@ -446,7 +447,10 @@ test("each moment shows its own stored text and saves into its own field", async
     "P0",
   ]);
   expect(panel.querySelectorAll("textarea"), "one text area per moment, no command editor").toHaveLength(3);
-  expect(panel.querySelectorAll("input"), "no command input, hidden or disabled, may be offered while no command is ever typed").toHaveLength(0);
+  expect(
+    panel.querySelectorAll("input:not([type=radio])"),
+    "no command input, hidden or disabled, may be offered while no command is ever typed"
+  ).toHaveLength(0);
 
   await typeInto(momentArea(panel, "/kory-session-start")!, "S1");
   await typeInto(momentArea(panel, "/kory-session-end")!, "E1");
@@ -455,7 +459,7 @@ test("each moment shows its own stored text and saves into its own field", async
   await clickSave(panel);
 
   expect(setSkillsCalls, "each moment's text must land in its own field of the one document").toEqual([
-    { version: 1, addendum: { start: "S1", end: "E1", stop: "P1" } },
+    { version: 2, addendum: { start: "S1", end: "E1", stop: "P1" }, storage: KORY_STORAGE },
   ]);
   expect(skillsRoot(panel).dataset.state, "an accepted write must show the saved state").toBe("saved");
   expect(panel.querySelector("[role=status]")?.textContent).toContain("skills.saved");
@@ -471,4 +475,121 @@ test("the Skills page states its global scope, warns against secrets and marks a
     (panel.querySelector(".skills-actions button") as HTMLButtonElement).disabled,
     "nothing to save until the operator types"
   ).toBe(true);
+  expect(storageRadio(panel, "kory").checked, "a document with Kory storage must show Kory chosen").toBe(true);
+  expect(storageArea(panel), "Kory storage offers no instructions to type").toBeUndefined();
+});
+
+function storageRadio(panel: HTMLElement, mode: "kory" | "custom"): HTMLInputElement {
+  const radio = panel.querySelector(`[role=radiogroup] input[type=radio][value=${mode}]`) as HTMLInputElement | null;
+  expect(radio, `the handoff storage choice must offer ${mode}`).not.toBeNull();
+  return radio!;
+}
+
+function storageArea(panel: HTMLElement): HTMLTextAreaElement | undefined {
+  return panel.querySelector("[role=radiogroup]")?.closest("section")?.querySelector("textarea") ?? undefined;
+}
+
+async function choose(radio: HTMLInputElement): Promise<void> {
+  await act(async () => {
+    radio.click();
+  });
+}
+
+test("custom handoff storage with blank instructions cannot be saved and says why", async () => {
+  const panel = await openSkills();
+  await choose(storageRadio(panel, "custom"));
+  const save = panel.querySelector(".skills-actions button") as HTMLButtonElement;
+
+  expect(storageArea(panel), "choosing custom storage must offer the instructions field").not.toBeUndefined();
+  expect(save.disabled, "custom storage with no instructions must not be savable").toBe(true);
+  expect(panel.querySelector(".skills-actions")?.textContent, "the refusal must say why").toContain("skills.storageEmpty");
+
+  await typeInto(storageArea(panel)!, "   \n ");
+  expect(save.disabled, "whitespace is not instructions").toBe(true);
+  await clickSave(panel);
+  expect(setSkillsCalls, "no write may leave for a custom storage nobody described").toHaveLength(0);
+
+  await typeInto(storageArea(panel)!, "kleos-cli handoff dump --content <handoff>");
+  expect(save.disabled, "described custom storage must become savable").toBe(false);
+  await clickSave(panel);
+  expect(setSkillsCalls.map((v) => v.storage)).toEqual([
+    { mode: "custom", instructions: "kleos-cli handoff dump --content <handoff>" },
+  ]);
+});
+
+// 5461 three-byte characters plus one ASCII byte: exactly 16384 UTF-8 bytes for 5462 characters.
+const AT_LIMIT = "€".repeat(5461) + "a";
+const OVER_LIMIT = AT_LIMIT + "é";
+
+test("every skills text is accepted at exactly 16 KiB of UTF-8 and refused two bytes over, naming the field", async () => {
+  expect(new TextEncoder().encode(AT_LIMIT).length).toBe(16384);
+  expect(new TextEncoder().encode(OVER_LIMIT).length).toBe(16386);
+  const panel = await openSkills();
+  await act(async () => {
+    fakeUseDeck.setState({ dict: { "skills.tooLarge": "TOO:{limit}:{fields}" } });
+  });
+  await choose(storageRadio(panel, "custom"));
+  await typeInto(storageArea(panel)!, "kleos-cli handoff dump");
+  const save = panel.querySelector(".skills-actions button") as HTMLButtonElement;
+  const status = (): string => panel.querySelector(".skills-actions .skills-status")?.textContent ?? "";
+  const fields: Array<[string, () => HTMLTextAreaElement, string]> = [
+    ["skills.storageTitle", () => storageArea(panel)!, "kleos-cli handoff dump"],
+    ...MOMENT_COMMANDS.map((c, i): [string, () => HTMLTextAreaElement, string] => [
+      ["skills.startTitle", "skills.endTitle", "skills.stopTitle"][i]!,
+      () => momentArea(panel, c)!,
+      "",
+    ]),
+  ];
+
+  for (const [title, area, rest] of fields) {
+    await typeInto(area(), AT_LIMIT);
+    expect(save.disabled, `${title}: exactly 16 KiB is within the limit main accepts`).toBe(false);
+    expect(status(), `${title}: no size refusal at the limit`).not.toContain("TOO:");
+
+    await typeInto(area(), OVER_LIMIT);
+    expect(save.disabled, `${title}: two bytes over the limit main refuses must not be savable`).toBe(true);
+    expect(status(), `${title}: the refusal must name the field and the limit`).toBe(`TOO:16:${title}`);
+    expect(area().getAttribute("aria-invalid"), `${title}: the oversized field must be marked invalid`).toBe("true");
+    await clickSave(panel);
+    expect(setSkillsCalls, `${title}: no write may leave over the limit`).toHaveLength(0);
+    await typeInto(area(), rest);
+  }
+
+  await typeInto(storageArea(panel)!, OVER_LIMIT);
+  await typeInto(momentArea(panel, "/kory-session-end")!, OVER_LIMIT);
+  expect(status(), "every oversized field must be named").toBe("TOO:16:skills.storageTitle, skills.endTitle");
+
+  await typeInto(storageArea(panel)!, AT_LIMIT);
+  await typeInto(momentArea(panel, "/kory-session-end")!, "");
+  await clickSave(panel);
+  expect(setSkillsCalls.map((v) => v.storage.instructions), "a text at the limit must leave as typed").toEqual([AT_LIMIT]);
+});
+
+test("switching the handoff storage back to Kory is a change the save keeps, with the typed text", async () => {
+  const custom = { mode: "custom", instructions: "kleos-cli handoff latest" } as const;
+  getSkillsImpl = () => Promise.resolve({ version: 2, addendum: { start: "S0", end: "", stop: "" }, storage: custom });
+  const panel = await openSkills();
+
+  expect(storageRadio(panel, "custom").checked, "the stored custom mode must be shown chosen").toBe(true);
+  expect(storageArea(panel)?.value).toBe("kleos-cli handoff latest");
+
+  await choose(storageRadio(panel, "kory"));
+  expect(skillsRoot(panel).dataset.state, "a mode switch alone must count as a change").toBe("dirty");
+  expect(storageArea(panel), "Kory storage hides the instructions field").toBeUndefined();
+  await clickSave(panel);
+
+  expect(setSkillsCalls, "the switch must reach the one document, the addendum untouched").toEqual([
+    {
+      version: 2,
+      addendum: { start: "S0", end: "", stop: "" },
+      storage: { mode: "kory", instructions: "kleos-cli handoff latest" },
+    },
+  ]);
+  expect(skillsRoot(panel).dataset.state).toBe("saved");
+  expect(storageRadio(panel, "kory").checked, "the saved mode must stay chosen after the write").toBe(true);
+
+  await choose(storageRadio(panel, "custom"));
+  expect(storageArea(panel)?.value, "the text typed for custom storage must survive a round trip through Kory").toBe(
+    "kleos-cli handoff latest"
+  );
 });
