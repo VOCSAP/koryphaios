@@ -40,10 +40,17 @@ export interface InjectorTiming {
   turnCeilingMs: number
 }
 
+export interface InjectorClock {
+  now(): number
+  setTimeout(callback: () => void, delay: number): NodeJS.Timeout
+  clearTimeout(timer: NodeJS.Timeout): void
+}
+
 export type InTurnInject = (command: string, idleWaitMs?: number) => Promise<DirectiveOutcome>
 
 export class TileInjector {
   private readonly turns = new Map<string, Promise<void>>()
+  private readonly turnGenerations = new Map<string, object>()
   private readonly timing: InjectorTiming
 
   constructor(
@@ -53,7 +60,8 @@ export class TileInjector {
     private readonly lastOutputAt: (id: string) => number | null,
     timing: Partial<InjectorTiming> & { activityIdleMs: number },
     private readonly report: (message: string) => void = (message) => reportError('session', message),
-    private readonly info: (scope: string, message: string) => void = logInfo
+    private readonly info: (scope: string, message: string) => void = logInfo,
+    private readonly clock: InjectorClock = { now: () => Date.now(), setTimeout, clearTimeout }
   ) {
     this.timing = {
       settleMs: timing.settleMs ?? DIRECTIVE_SETTLE_MS,
@@ -67,23 +75,26 @@ export class TileInjector {
    * Runs `fn` after every earlier turn of tile `id` has settled, whatever its
    * outcome, or has held the tile past the turn ceiling.
    */
-  inTurn<T>(id: string, fn: () => Promise<T>): Promise<T> {
+  inTurn<T>(id: string, fn: (isCurrent: () => boolean) => Promise<T>): Promise<T> {
     const previous = this.turns.get(id) ?? Promise.resolve()
     let release!: () => void
     const settled = new Promise<void>((resolve) => {
       release = resolve
     })
     const run = previous.then(() => {
-      const ceiling = setTimeout(() => {
+      const generation = {}
+      this.turnGenerations.set(id, generation)
+      const ceiling = this.clock.setTimeout(() => {
         this.report(`injection turn of tile ${id} still running after ${this.timing.turnCeilingMs} ms; its queue is released`)
-        release()
+        done()
       }, this.timing.turnCeilingMs)
       if (typeof ceiling.unref === 'function') ceiling.unref()
       const done = () => {
-        clearTimeout(ceiling)
+        this.clock.clearTimeout(ceiling)
+        if (this.turnGenerations.get(id) === generation) this.turnGenerations.delete(id)
         release()
       }
-      const turn = Promise.resolve().then(fn)
+      const turn = Promise.resolve().then(() => fn(() => this.turnGenerations.get(id) === generation))
       turn.then(done, done)
       return turn
     })
@@ -100,9 +111,9 @@ export class TileInjector {
    * what TURN_CEILING_MS is sized on.
    */
   serializeTile<T>(id: string, fn: (inject: InTurnInject) => Promise<T>): Promise<T> {
-    return this.inTurn(id, () =>
+    return this.inTurn(id, (isCurrent) =>
       fn((command, idleWaitMs = DIRECTIVE_IDLE_WAIT_MS) =>
-        this.injectCommand(id, command, Math.min(idleWaitMs, DIRECTIVE_IDLE_WAIT_MS))
+        this.injectCommand(id, command, Math.min(idleWaitMs, DIRECTIVE_IDLE_WAIT_MS), isCurrent)
       )
     )
   }
@@ -116,23 +127,35 @@ export class TileInjector {
   async injectCommand(
     id: string,
     command: string,
-    idleWaitMs: number = DIRECTIVE_IDLE_WAIT_MS
+    idleWaitMs: number = DIRECTIVE_IDLE_WAIT_MS,
+    isCurrent?: () => boolean
   ): Promise<DirectiveOutcome> {
+    if (isCurrent && !isCurrent()) throw this.staleTurn(id)
     if (!this.pty.isAlive(id)) return 'no-terminal'
     const life = this.pty.life(id)
     if (!life) return 'no-terminal'
     const idle = await this.waitIdle(id, idleWaitMs)
+    if (isCurrent && !isCurrent()) throw this.staleTurn(id)
     if (!this.pty.isAlive(id) || this.pty.life(id) !== life) return 'no-terminal'
     if (!idle) return 'busy-timeout'
     const firstRefusal = this.refusal(id)
     if (firstRefusal) return firstRefusal
+    if (isCurrent && !isCurrent()) throw this.staleTurn(id)
     if (!this.pty.write(id, '\x1b')) return 'no-terminal'
-    await new Promise((res) => setTimeout(res, this.timing.settleMs))
+    await new Promise<void>((res) => this.clock.setTimeout(res, this.timing.settleMs))
+    if (isCurrent && !isCurrent()) throw this.staleTurn(id)
     if (!this.pty.isAlive(id) || this.pty.life(id) !== life) return 'no-terminal'
     const secondRefusal = this.refusal(id)
     if (secondRefusal) return secondRefusal
+    if (isCurrent && !isCurrent()) throw this.staleTurn(id)
     if (!this.pty.write(id, encodeSubmittedKeystrokes(command))) return 'no-terminal'
     return 'written'
+  }
+
+  private staleTurn(id: string): Error {
+    const error = new Error(`injection callback refused for ${id}: its turn is no longer current`)
+    this.report(error.message)
+    return error
   }
 
   private refusal(id: string): DirectiveOutcome | null {
@@ -164,14 +187,14 @@ export class TileInjector {
    * the operator types. A session with no output yet counts as idle.
    */
   private async waitIdle(id: string, deadlineMs: number): Promise<boolean> {
-    const deadline = Date.now() + deadlineMs
+    const deadline = this.clock.now() + deadlineMs
     for (;;) {
       const r = this.runtime.get(id)
       if (!r) return false
       const last = this.lastOutputAt(id)
-      if (last === null || Date.now() - last >= this.timing.activityIdleMs) return true
-      if (Date.now() >= deadline) return false
-      await new Promise((res) => setTimeout(res, this.timing.idlePollMs))
+      if (last === null || this.clock.now() - last >= this.timing.activityIdleMs) return true
+      if (this.clock.now() >= deadline) return false
+      await new Promise<void>((res) => this.clock.setTimeout(res, this.timing.idlePollMs))
     }
   }
 }

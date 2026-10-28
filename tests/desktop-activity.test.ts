@@ -391,11 +391,12 @@ test("B1: a session already 'idle' at exit stays 'idle'", () => {
 // ----- 6. waitIdle proof (B2): byte-recency, NOT RuntimeState.activity ----
 
 const WAIT_IDLE_ANCHOR = "private async waitIdle(id: string, deadlineMs: number): Promise<boolean> {";
+const waitIdleClock = { now: () => Date.now(), setTimeout, clearTimeout };
 
 function makeWaitIdle() {
   const src = readFileSync(TILE_INJECTOR_PATH, "utf-8");
   const body = extractByAnchor(src, WAIT_IDLE_ANCHOR, "waitIdle()");
-  const fnSrc = `async function(id, deadlineMs) ${body}`;
+  const fnSrc = `async function(id, deadlineMs) ${body.replace("new Promise<void>", "new Promise")}`;
   // eslint-disable-next-line no-new-func -- extracted from the real source text, not user input
   const factory = new Function("return " + fnSrc)() as (
     this: unknown,
@@ -411,6 +412,7 @@ test("B2: waitIdle resolves true from BYTE RECENCY even when activity is 'workin
   const self = {
     runtime: new Map([["a", { activity: "working" as Activity }]]),
     timing: { activityIdleMs: ACTIVITY_IDLE_MS, idlePollMs: 10 },
+    clock: waitIdleClock,
     // 5s of silence -- past the 3s ACTIVITY_IDLE_MS threshold.
     lastOutputAt: (_id: string) => Date.now() - 5000
   };
@@ -428,6 +430,7 @@ test("B2: waitIdle resolves false at the deadline when bytes are still fresh, ev
   const self = {
     runtime: new Map([["a", { activity: "idle" as Activity }]]),
     timing: { activityIdleMs: ACTIVITY_IDLE_MS, idlePollMs: 10 },
+    clock: waitIdleClock,
     lastOutputAt: (_id: string) => Date.now() // just wrote -- not quiet yet
   };
   const result = await waitIdle(self, "a", 150);
@@ -436,7 +439,7 @@ test("B2: waitIdle resolves false at the deadline when bytes are still fresh, ev
 
 test("B2: an unknown session id resolves false immediately (no runtime entry)", async () => {
   const waitIdle = makeWaitIdle();
-  const self = { runtime: new Map(), lastOutputAt: () => null };
+  const self = { runtime: new Map(), lastOutputAt: () => null, clock: waitIdleClock };
   expect(await waitIdle(self, "missing", 100)).toBe(false);
 });
 
@@ -445,6 +448,7 @@ test("B2: a session with a PRESENT runtime entry that has never produced a byte 
   const self = {
     runtime: new Map([["a", { activity: "unknown" as Activity }]]),
     timing: { activityIdleMs: ACTIVITY_IDLE_MS, idlePollMs: 10 },
+    clock: waitIdleClock,
     lastOutputAt: (_id: string) => null
   };
   const start = Date.now();
@@ -465,7 +469,8 @@ test("B2: a byte through the pty data handler is what closes the waitIdle gate -
     ...ptyDataSelf(outputAt),
     lastOutputAt,
     runtime: new Map([["a", { activity: "unknown" as Activity }]]),
-    timing: { activityIdleMs: ACTIVITY_IDLE_MS, idlePollMs: 10 }
+    timing: { activityIdleMs: ACTIVITY_IDLE_MS, idlePollMs: 10 },
+    clock: waitIdleClock
   };
   const arrivedAt = 1_000_000;
   const clock = spyOn(Date, "now");

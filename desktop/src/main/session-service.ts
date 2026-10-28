@@ -1892,7 +1892,7 @@ export class SessionService extends EventEmitter {
 
   /** Types a command into tile `id` once its earlier injections are done. */
   injectCommand(id: string, command: string, idleWaitMs: number = DIRECTIVE_IDLE_WAIT_MS): Promise<DirectiveOutcome> {
-    return this.injector.inTurn(id, () => this.injector.injectCommand(id, command, idleWaitMs))
+    return this.injector.inTurn(id, (isCurrent) => this.injector.injectCommand(id, command, idleWaitMs, isCurrent))
   }
 
   /** Holds tile `id` for a whole injection sequence; injections inside it take no further turn. */

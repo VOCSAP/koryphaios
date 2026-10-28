@@ -43,6 +43,12 @@ test("'refused-modal' is a member of DirectiveOutcome and its agent-stop mirror"
   expect(/export type InjectOutcome = ([^\n]+)/.exec(agentStop)?.[1]).toContain("'refused-modal'")
 })
 
+test('SessionService passes its turn generation to command injection', () => {
+  const src = readFileSync(SESSION_SERVICE_PATH, 'utf-8')
+  const body = extractBody(src, /injectCommand\(id: string, command: string, idleWaitMs: number = DIRECTIVE_IDLE_WAIT_MS\): Promise<DirectiveOutcome> \{/, 'SessionService.injectCommand()')
+  expect(body.trim()).toBe('return this.injector.inTurn(id, (isCurrent) => this.injector.injectCommand(id, command, idleWaitMs, isCurrent))')
+})
+
 test('SessionService feeds xterm before publishing data and invalidates it when PTY resize fails', () => {
   const src = readFileSync(SESSION_SERVICE_PATH, 'utf-8')
   expect(src.indexOf('this.screenGuard.feed(e.id, e.data)')).toBeLessThan(src.indexOf("this.emit('data', e)"))

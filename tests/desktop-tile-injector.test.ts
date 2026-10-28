@@ -1,9 +1,44 @@
 import { expect, test } from 'bun:test'
-import { TileInjector, type InjectorScreen } from '../desktop/src/main/tile-injector.ts'
+import { TileInjector, type InjectorClock, type InjectorScreen } from '../desktop/src/main/tile-injector.ts'
 import { DIRECTIVE_IDLE_WAIT_MS, runClearReloadInTurn } from '../desktop/src/main/directive-run.ts'
 import type { XtermScreenRead } from '../desktop/src/main/xterm-screen.ts'
+import { reachedWithin } from './_bounded-await'
 
 const ESC = '\x1b'
+
+class FakeClock implements InjectorClock {
+  private current = 0
+
+  now(): number {
+    return this.current
+  }
+  private nextId = 1
+  private readonly timers = new Map<number, { due: number; callback: () => void }>()
+
+  setTimeout(callback: () => void, delay: number): NodeJS.Timeout {
+    const id = this.nextId++
+    this.timers.set(id, { due: this.current + delay, callback })
+    return id as unknown as NodeJS.Timeout
+  }
+
+  clearTimeout(timer: NodeJS.Timeout): void {
+    this.timers.delete(timer as unknown as number)
+  }
+
+  advance(delay: number): void {
+    const target = this.current + delay
+    for (;;) {
+      const due = [...this.timers.entries()]
+        .filter(([, timer]) => timer.due <= target)
+        .sort(([a, x], [b, y]) => x.due - y.due || a - b)[0]
+      if (!due) break
+      this.timers.delete(due[0])
+      this.current = due[1].due
+      due[1].callback()
+    }
+    this.current = target
+  }
+}
 
 const clearScreen = (): XtermScreenRead => {
   const lines = Array<string>(40).fill('')
@@ -18,10 +53,11 @@ function fixture(
     reads?: readonly XtermScreenRead[]
     screen?: InjectorScreen
     runtime?: { needsAttention?: boolean; rateLimited?: boolean }
-    lastOutputAt?: number | null
+    lastOutputAt?: number | null | (() => number | null)
     replaceLifeAfterEscape?: boolean
     replaceLifeDuringIdleWait?: boolean
     turnCeilingMs?: number
+    clock?: InjectorClock
   } = {}
 ) {
   const writes: string[] = []
@@ -47,11 +83,12 @@ function fixture(
     { get: (id) => (alive.has(id) ? options.runtime ?? {} : undefined) },
     () => {
       if (options.replaceLifeDuringIdleWait) life = {}
-      return options.lastOutputAt ?? null
+      return typeof options.lastOutputAt === 'function' ? options.lastOutputAt() : options.lastOutputAt ?? null
     },
     { activityIdleMs: 500, settleMs: 5, idlePollMs: 5, ...(options.turnCeilingMs ? { turnCeilingMs: options.turnCeilingMs } : {}) },
     (message) => reports.push(message),
-    (_scope, message) => logs.push(message)
+    (_scope, message) => logs.push(message),
+    options.clock
   )
   return { injector, writes, reports, logs, alive }
 }
@@ -199,6 +236,122 @@ test('a turn that never settles releases its tile at the ceiling, traced with th
   expect(await withinMs(next, 1_000, 'the turn queued behind a stuck one')).toBe('written')
   expect(commands(writes)).toEqual(['ESC', '/clear'])
   expect(reports).toEqual(['injection turn of tile t1 still running after 50 ms; its queue is released'])
+})
+
+test('a callback resumed after its ceiling release cannot type into an active newer turn', async () => {
+  const clock = new FakeClock()
+  const { injector, writes, reports } = fixture({ turnCeilingMs: 50, clock })
+  let injectStale!: (command: string) => Promise<string>
+  let staleStarted!: () => void
+  const staleReady = new Promise<void>((resolve) => {
+    staleStarted = resolve
+  })
+  let releaseStale!: () => void
+  const staleReleased = new Promise<void>((resolve) => {
+    releaseStale = resolve
+  })
+  const stale = injector.serializeTile('t1', async (inject) => {
+    injectStale = inject
+    staleStarted()
+    await staleReleased
+    return 'stale-finished'
+  })
+  await reachedWithin(staleReady, 'the stale callback capture')
+  let injectCurrent!: (command: string) => Promise<string>
+  let currentStarted!: () => void
+  const currentReady = new Promise<void>((resolve) => {
+    currentStarted = resolve
+  })
+  let releaseCurrent!: () => void
+  const currentReleased = new Promise<void>((resolve) => {
+    releaseCurrent = resolve
+  })
+  const current = injector.serializeTile('t1', async (inject) => {
+    injectCurrent = inject
+    currentStarted()
+    await currentReleased
+    return 'current-finished'
+  })
+
+  clock.advance(50)
+  await reachedWithin(currentReady, 'the newer callback after stale ceiling')
+  const staleError = await injectStale('/compact').then(
+    () => '',
+    (error) => error instanceof Error ? error.message : String(error)
+  )
+  releaseStale()
+  expect(await stale).toBe('stale-finished')
+
+  const currentAttempt = injectCurrent('/clear')
+  for (let i = 0; i < 2; i++) await Promise.resolve()
+  clock.advance(5)
+  expect(await currentAttempt).toBe('written')
+  releaseCurrent()
+  expect(await current).toBe('current-finished')
+
+  expect(staleError).toContain('injection callback refused for t1')
+  expect(commands(writes)).toEqual(['ESC', '/clear'])
+  expect(reports).toEqual([
+    'injection turn of tile t1 still running after 50 ms; its queue is released',
+    'injection callback refused for t1: its turn is no longer current'
+  ])
+})
+
+test('an injection that waits past its ceiling writes nothing after a newer turn starts', async () => {
+  const clock = new FakeClock()
+  let lastOutputAt: number | null = 0
+  const { injector, writes, reports } = fixture({
+    turnCeilingMs: 50,
+    lastOutputAt: () => lastOutputAt,
+    clock
+  })
+  let started!: () => void
+  const injectionStarted = new Promise<void>((resolve) => {
+    started = resolve
+  })
+  const stale = injector.serializeTile('t1', async (inject) => {
+    const attempt = inject('/compact', 1_000)
+    started()
+    return attempt
+  })
+  await reachedWithin(injectionStarted, 'the stale injection idle wait')
+  let currentStarted!: () => void
+  const currentReady = new Promise<void>((resolve) => {
+    currentStarted = resolve
+  })
+  let releaseCurrent!: () => void
+  const currentReleased = new Promise<void>((resolve) => {
+    releaseCurrent = resolve
+  })
+  const current = injector.serializeTile('t1', async () => {
+    currentStarted()
+    await currentReleased
+    return 'current-finished'
+  })
+
+  for (let i = 0; i < 9; i++) {
+    clock.advance(5)
+    await Promise.resolve()
+  }
+  clock.advance(5)
+  await reachedWithin(currentReady, 'the newer turn after stale idle wait')
+  lastOutputAt = null
+  clock.advance(5)
+  for (let i = 0; i < 2; i++) await Promise.resolve()
+  clock.advance(5)
+  const staleError = await stale.then(
+    () => '',
+    (error) => error instanceof Error ? error.message : String(error)
+  )
+  releaseCurrent()
+  expect(await current).toBe('current-finished')
+
+  expect(staleError).toContain('injection callback refused for t1')
+  expect(writes).toEqual([])
+  expect(reports).toEqual([
+    'injection turn of tile t1 still running after 50 ms; its queue is released',
+    'injection callback refused for t1: its turn is no longer current'
+  ])
 })
 
 test('a turn that ends before the ceiling leaves no trace', async () => {
