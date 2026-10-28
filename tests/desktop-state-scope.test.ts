@@ -293,6 +293,11 @@ const STATE_SCOPES: Record<string, StateFileRule> = {
     scope: "machine",
     reason: "the operator's own guard rules under the global config dir, applied in every project; one operator, one file, polled by every window",
   },
+  "session-skills.json": {
+    kind: "literal",
+    scope: "machine",
+    reason: "operator-authored session instructions under userData/config; every local Deck uses the same private prompts by design",
+  },
   "operator.json": {
     kind: "literal",
     scope: "machine",

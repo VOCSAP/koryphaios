@@ -9,7 +9,7 @@ afterAll(async () => {
 import { afterAll, afterEach, beforeEach, expect, mock, test } from "bun:test";
 import type { Root } from "../desktop/tests-support/react-test-harness";
 import { mockStore, storeMockStubs } from "./_store-mock";
-import type { AppConfig } from "../desktop/src/shared/types.ts";
+import type { AppConfig, SessionSkillSettings } from "../desktop/src/shared/types.ts";
 import { DEFAULT_CONFIG } from "../desktop/src/main/store-defaults.ts";
 
 const { act, React, createRoot, create } = await import("../desktop/tests-support/react-test-harness");
@@ -34,6 +34,10 @@ let reportedErrors: Array<[string, string]> = [];
 type ModOffer = string | { name: string; globallyActive: boolean };
 
 let listModsImpl: () => Promise<ModOffer[]> = () => Promise.resolve([]);
+const NO_SKILLS: SessionSkillSettings = { version: 1, addendum: { start: "", end: "", stop: "" } };
+let getSkillsImpl: () => Promise<SessionSkillSettings> = () => Promise.resolve(NO_SKILLS);
+let setSkillsImpl: (value: SessionSkillSettings) => Promise<SessionSkillSettings> = (value) => Promise.resolve(value);
+let setSkillsCalls: SessionSkillSettings[] = [];
 
 function deckState(enabledMods: unknown): FakeDeckState {
   return {
@@ -62,8 +66,16 @@ beforeEach(() => {
   updateConfigCalls = [];
   reportedErrors = [];
   listModsImpl = () => Promise.resolve([]);
+  getSkillsImpl = () => Promise.resolve(NO_SKILLS);
+  setSkillsImpl = (value) => Promise.resolve(value);
+  setSkillsCalls = [];
   (globalThis as unknown as { window: { api: Record<string, unknown> } }).window.api = {
     listMods: () => listModsImpl(),
+    getSessionSkills: () => getSkillsImpl(),
+    setSessionSkills: (value: SessionSkillSettings) => {
+      setSkillsCalls.push(value);
+      return setSkillsImpl(value);
+    },
     getLaunchConfig: () => Promise.resolve({ launchCommand: "", presets: [], models: [], worktreeInit: undefined }),
     modelCatalogs: () => Promise.resolve([]),
     onModelsChanged: () => () => {},
@@ -324,4 +336,139 @@ test("a failing mods:list leaves the page rendered with no mod switch and traces
     "a rejected mods:list is a failure shown to nobody unless it is traced with its cause in the settings scope"
   ).toHaveLength(1);
   expect(reportedErrors, "no other call of the page may report an error on this mount").toHaveLength(1);
+});
+
+async function flush(): Promise<void> {
+  await act(async () => {
+    for (let i = 0; i < 4; i++) await Promise.resolve();
+  });
+}
+
+async function openSkills(): Promise<HTMLElement> {
+  await mount({}, []);
+  const item = [...container.querySelectorAll(".settings-tree-item")].find((b) => b.textContent === "settings.catSkills");
+  expect(item, "Settings must offer a Skills category").not.toBeUndefined();
+  await act(async () => {
+    (item as HTMLButtonElement).click();
+  });
+  await flush();
+  return container.querySelector(".settings-panel") as HTMLElement;
+}
+
+function skillsRoot(panel: HTMLElement): HTMLElement {
+  return panel.querySelector(".skills-settings") as HTMLElement;
+}
+
+function momentArea(panel: HTMLElement, command: string): HTMLTextAreaElement | undefined {
+  const section = [...panel.querySelectorAll("section")].find(
+    (s) => s.querySelector("code")?.textContent === command
+  );
+  return section?.querySelector("textarea") ?? undefined;
+}
+
+async function typeInto(area: HTMLTextAreaElement, text: string): Promise<void> {
+  const nativeSetter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set;
+  if (!nativeSetter) throw new Error("textarea has no native value setter");
+  await act(async () => {
+    nativeSetter.call(area, text);
+    area.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+}
+
+async function clickSave(panel: HTMLElement): Promise<void> {
+  const save = panel.querySelector(".skills-actions button") as HTMLButtonElement | null;
+  expect(save, "the Skills page must offer a save button").not.toBeNull();
+  await act(async () => {
+    save!.click();
+  });
+  await flush();
+}
+
+const MOMENT_COMMANDS = ["/kory-session-start", "/kory-session-end", "/kory-session-stop"] as const;
+
+test("a skills file that cannot be read stays an invalid state with no field to type into", async () => {
+  getSkillsImpl = () => Promise.reject(new Error("session-skills.json: unexpected token at line 3"));
+  const panel = await openSkills();
+
+  expect(skillsRoot(panel).dataset.state, "an unreadable file must be shown as invalid, not as loading or empty").toBe("invalid");
+  expect(panel.querySelectorAll("textarea"), "an unreadable file must not fall back to empty, editable fields").toHaveLength(0);
+  expect(panel.querySelector(".skills-actions"), "no save may be offered over a file nobody could read").toBeNull();
+  expect(panel.querySelector("[role=alert]")?.textContent, "the cause must be visible to the operator").toContain(
+    "unexpected token at line 3"
+  );
+  expect(
+    reportedErrors.filter(([scope, message]) => scope === "settings" && message.includes("unexpected token at line 3")),
+    "the failed read must be traced with its cause"
+  ).toHaveLength(1);
+
+  getSkillsImpl = () => Promise.resolve({ version: 1, addendum: { start: "S", end: "", stop: "" } });
+  const retry = panel.querySelector(".skills-invalid button") as HTMLButtonElement;
+  await act(async () => {
+    retry.click();
+  });
+  await flush();
+  expect(skillsRoot(panel).dataset.state, "a retry that reads the file must leave the invalid state").not.toBe("invalid");
+  expect(momentArea(panel, "/kory-session-start")?.value).toBe("S");
+});
+
+test("a refused save keeps the typed text and shows the refusal as an error state", async () => {
+  setSkillsImpl = () => Promise.reject(new Error("addendum.stop exceeds 16 KiB"));
+  const panel = await openSkills();
+  await typeInto(momentArea(panel, "/kory-session-stop")!, "hand the roster over");
+  await clickSave(panel);
+
+  expect(setSkillsCalls, "one click is one write").toHaveLength(1);
+  expect(skillsRoot(panel).dataset.state, "a refused write must leave the page in its error state").toBe("error");
+  expect(momentArea(panel, "/kory-session-stop")!.value, "the refused text must stay where the operator typed it").toBe(
+    "hand the roster over"
+  );
+  expect(panel.querySelector("[role=alert]")?.textContent, "the refusal reason must be visible").toContain(
+    "addendum.stop exceeds 16 KiB"
+  );
+  expect(panel.textContent, "a refused write must never read as saved").not.toContain("skills.saved");
+  expect(
+    (panel.querySelector(".skills-actions button") as HTMLButtonElement).disabled,
+    "the operator must be able to retry the save"
+  ).toBe(false);
+  expect(
+    reportedErrors.filter(([scope, message]) => scope === "settings" && message.includes("exceeds 16 KiB")),
+    "the refused write must be traced with its cause"
+  ).toHaveLength(1);
+});
+
+test("each moment shows its own stored text and saves into its own field", async () => {
+  getSkillsImpl = () => Promise.resolve({ version: 1, addendum: { start: "S0", end: "E0", stop: "P0" } });
+  const panel = await openSkills();
+
+  expect(MOMENT_COMMANDS.map((c) => momentArea(panel, c)?.value), "each field must be seeded from its own moment").toEqual([
+    "S0",
+    "E0",
+    "P0",
+  ]);
+  expect(panel.querySelectorAll("textarea"), "one text area per moment, no command editor").toHaveLength(3);
+  expect(panel.querySelectorAll("input"), "no command input, hidden or disabled, may be offered while no command is ever typed").toHaveLength(0);
+
+  await typeInto(momentArea(panel, "/kory-session-start")!, "S1");
+  await typeInto(momentArea(panel, "/kory-session-end")!, "E1");
+  await typeInto(momentArea(panel, "/kory-session-stop")!, "P1");
+  expect(skillsRoot(panel).dataset.state).toBe("dirty");
+  await clickSave(panel);
+
+  expect(setSkillsCalls, "each moment's text must land in its own field of the one document").toEqual([
+    { version: 1, addendum: { start: "S1", end: "E1", stop: "P1" } },
+  ]);
+  expect(skillsRoot(panel).dataset.state, "an accepted write must show the saved state").toBe("saved");
+  expect(panel.querySelector("[role=status]")?.textContent).toContain("skills.saved");
+});
+
+test("the Skills page states its global scope, warns against secrets and marks an empty document", async () => {
+  const panel = await openSkills();
+  const text = panel.textContent ?? "";
+  expect(text, "the scope must be stated as global to the Deck").toContain("skills.scope");
+  expect(text, "the operator must be told the text enters the conversation").toContain("skills.secretTitle");
+  expect(text, "an empty document must say the skills run their native protocol alone").toContain("skills.empty");
+  expect(
+    (panel.querySelector(".skills-actions button") as HTMLButtonElement).disabled,
+    "nothing to save until the operator types"
+  ).toBe(true);
 });

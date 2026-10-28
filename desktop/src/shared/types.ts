@@ -473,6 +473,17 @@ export interface AppConfig {
   ttsrDisabled: string[]
 }
 
+export interface SessionSkillAddendum {
+  start: string
+  end: string
+  stop: string
+}
+
+export interface SessionSkillSettings {
+  version: 1
+  addendum: SessionSkillAddendum
+}
+
 /** A selectable language for the settings picker: stable code + native label. */
 export interface LocaleOption {
   /** Locale tag ('en', 'fr', …). */
@@ -2166,6 +2177,8 @@ export interface DeckApi {
   // config
   getConfig(): Promise<AppConfig>
   setConfig(patch: Partial<AppConfig>): Promise<AppConfig>
+  getSessionSkills(): Promise<SessionSkillSettings>
+  setSessionSkills(value: SessionSkillSettings): Promise<SessionSkillSettings>
   listMods(): Promise<ChoregosMod[]>
   pickDirectory(): Promise<string | null>
   /** Read-only summary of the claude-peers core config (never the token value). */

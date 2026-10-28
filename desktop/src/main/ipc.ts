@@ -143,6 +143,7 @@ import { workspaceRestoreOrThrow } from '@shared/workspace-restore-outcome'
 import { registerWorkspaceRestoreHandler } from './workspace-restore-effects'
 import { availableLocales, loadDict, resolveLocale } from './i18n'
 import { reportError } from './log'
+import { sessionSkillsHandlers } from './session-skills'
 
 /**
  * Build the renderer i18n payload from the current config. Reads shipped locale
@@ -176,6 +177,7 @@ interface IpcDeps {
   workspaces: WorkspaceService
   getConfig: () => AppConfig
   setConfig: (patch: Partial<AppConfig>) => AppConfig
+  sessionSkillsDir: string
   listMods: () => ChoregosMod[]
   /** safeStorage-backed cipher (index.ts): local-provider API keys (C29). */
   secretCipher: SecretCipher
@@ -289,6 +291,7 @@ export function registerIpc({
   workspaces,
   getConfig,
   setConfig,
+  sessionSkillsDir,
   listMods,
   secretCipher,
   getWindow,
@@ -748,6 +751,9 @@ export function registerIpc({
     ...setConfig(patch ?? {}),
     localProviders: sanitizeProviders(getConfig().localProviders ?? [])
   }))
+  const sessionSkills = sessionSkillsHandlers(sessionSkillsDir)
+  regHandle('skills:get', (_e, ...args: unknown[]) => sessionSkills.get(...args))
+  regHandle('skills:set', (_e, value: unknown, ...args: unknown[]) => sessionSkills.set(value, ...args))
   regHandle('mods:list', () => listMods())
   // ----- claude-peers core config (Settings > Broker) -----
   // The FILE PATH is resolved main-side and is never a renderer argument, so

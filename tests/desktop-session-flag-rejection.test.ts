@@ -210,6 +210,8 @@ test("Deck gives each handoff a run-owned namespace before it can purge orphan d
   if (start === -1) throw new Error(`index.ts: missing ${head}`);
   const body = extractBracedBody(INDEX_SRC, start + head.length - 1);
   expect(codeOnly(body)).toContain("purgeSessionHandoffDrafts(appStateDir(), approvalRunId, (message, error) => reportError('session', message, error))");
-  expect(codeOnly(INDEX_SRC)).toContain("createSessionHandoffLaunch(\n  appStateDir(),");
+  const sharedStateRootGuarantee = "handoff and skills share the Deck state root";
+  expect(codeOnly(INDEX_SRC), sharedStateRootGuarantee).toContain("const sessionSkillsStateDir = appStateDir()");
+  expect(codeOnly(INDEX_SRC), sharedStateRootGuarantee).toContain("createSessionHandoffLaunch(\n  sessionSkillsStateDir,");
   expect(codeOnly(INDEX_SRC)).toContain("  tileId,\n  approvalRunId,\n  app.getPath('logs')\n)");
 });

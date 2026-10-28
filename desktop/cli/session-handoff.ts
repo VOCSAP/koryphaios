@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs'
+import { dirname } from 'node:path'
 import { createRollingLogger } from '../src/main/log'
 import {
   publishSessionHandoff,
@@ -6,6 +7,7 @@ import {
   readSessionHandoffBinding,
   sessionHandoffSupported
 } from '../src/main/session-handoff'
+import { readSessionSkills } from '../src/main/session-skills'
 
 class HandoffCommandError extends Error {
   constructor(message: string, readonly exitCode: 64 | 65 | 66 | 74 | 77) {
@@ -37,11 +39,12 @@ function main(): void {
   const activeBinding = binding()
   const store = { archiveDir: activeBinding.archiveDir, projectKey: activeBinding.projectKey }
   if (command === 'context') {
+    const skills = readSessionSkills(dirname(dirname(activeBinding.archiveDir)))
     process.stdout.write(`${JSON.stringify({
       project: activeBinding.projectKey,
       draft: activeBinding.draftPath,
       helper: '"$KORY_SESSION_HELPER"',
-      addendum: { start: '', end: '', stop: '' }
+      addendum: skills.addendum
     })}\n`)
     return
   }

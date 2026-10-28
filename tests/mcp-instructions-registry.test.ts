@@ -76,6 +76,7 @@ const TRIAGED_DOMAIN_FILES: ReadonlyArray<{ file: string; verdict: Verdict }> = 
   { file: "desktop/mcp/demo-browser-mcp.ts", verdict: { carries: true, name: "demo-browser" } },
   { file: "desktop/src/main/demo-driver.ts", verdict: { carries: false } },
   { file: "desktop/src/main/graph-engine.ts", verdict: { carries: false } },
+  { file: "desktop/src/main/i18n.ts", verdict: { carries: false } },
   { file: "desktop/src/main/model-adapters.ts", verdict: { carries: false } },
   { file: "desktop/src/main/peer-rotation.ts", verdict: { carries: false } },
   { file: "desktop/src/main/supervisor.ts", verdict: { carries: false } },

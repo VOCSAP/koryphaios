@@ -819,8 +819,9 @@ const writeTileSettingsFile = (settings: string): string => {
 }
 service.setStatusLineSettingsProvider(getStatusLineSettings)
 service.setTileSettingsFileProvider(writeTileSettingsFile)
+const sessionSkillsStateDir = appStateDir()
 service.setSessionHandoffLaunchProvider((tileId, helperPath) => createSessionHandoffLaunch(
-  appStateDir(),
+  sessionSkillsStateDir,
   computeDeckProjectKey(cliContext.projectDir),
   helperPath,
   tileId,
@@ -3664,6 +3665,7 @@ app.whenReady().then(async () => {
     workspaces,
     getConfig,
     setConfig,
+    sessionSkillsDir: sessionSkillsStateDir,
     listMods: () => {
       const globalActive = activeClaudePlugins([join(homedir(), '.claude', 'settings.json')])
       return listLockedMods(modDistDir).map((name) => ({ name, globallyActive: globalActive.has(name) }))

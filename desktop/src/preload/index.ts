@@ -29,6 +29,7 @@ import type {
   ServeChannelState,
   SessionAttentionEvent,
   SessionQuotaEvent,
+  SessionSkillSettings,
   ApprovalNotAppliedEvent,
   SessionRuntime,
   SessionThinkingEvent,
@@ -113,6 +114,8 @@ const api: DeckApi = {
 
   getConfig: () => ipcRenderer.invoke('config:get'),
   setConfig: (patch: Partial<AppConfig>) => ipcRenderer.invoke('config:set', patch),
+  getSessionSkills: () => ipcRenderer.invoke('skills:get'),
+  setSessionSkills: (value: SessionSkillSettings) => ipcRenderer.invoke('skills:set', value),
   listMods: () => ipcRenderer.invoke('mods:list'),
   getPeersConfig: () => ipcRenderer.invoke('peersConfig:get'),
   setOfflineReplica: (value: boolean) => ipcRenderer.invoke('peersConfig:setOfflineReplica', value),

@@ -191,6 +191,15 @@ test('peersConfig:get stays remote-blocked by the EXPLICIT floor even though it 
   expect(REMOTE_BLOCKED_CHANNELS.has('peersConfig:setOfflineReplica')).toBe(true)
 })
 
+test('Skills prompts stay local: get is explicit-blocked and set is blocked by tier', () => {
+  expect(COMPANION_MANIFEST.getSessionSkills).toEqual({ kind: 'invoke', channel: 'skills:get' })
+  expect(CHANNEL_TIERS['skills:get']).toBe(0)
+  expect(REMOTE_BLOCKED_CHANNELS.has('skills:get')).toBe(true)
+  expect(COMPANION_MANIFEST.setSessionSkills).toEqual({ kind: 'invoke', channel: 'skills:set' })
+  expect(CHANNEL_TIERS['skills:set']).toBe(3)
+  expect(REMOTE_BLOCKED_CHANNELS.has('skills:set')).toBe(true)
+})
+
 test('peersConfig:summary is never PUSHED either: blocking the read alone would leak the same payload', () => {
   // The invoke floor only refuses what the phone ASKS for. peersConfig:summary
   // is broadcast by the host after a successful write, unasked -- so blocking

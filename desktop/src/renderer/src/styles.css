@@ -9070,6 +9070,161 @@ body:has(.rm-modal) .rm-conflict-modal {
   font-size: 12px;
 }
 
+/* ---------- Settings > Skills -------------------------------------------- */
+/* Each moment is a bordered block headed by the native command it extends,
+   so the text reads as an addition to that skill, not a substitute for it. */
+.skills-settings {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+/* The scope in force, marked like the active broker mode: an accent rule at
+   the start of the row, not a filled box that would read as a control. */
+.skills-scope {
+  border-left: 2px solid var(--accent);
+  padding: 2px 0 2px 10px;
+}
+
+.skills-scope p {
+  margin: 0;
+  line-height: 1.45;
+}
+
+.skills-scope .skills-scope-dim {
+  margin-top: 4px;
+  color: var(--fg-dim);
+  font-size: 12px;
+}
+
+/* A standing instruction, not a state: neutral surface, the emphasis carried
+   by the bold lead rather than by the amber reserved for real blockages. */
+.skills-secret {
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-2);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.skills-secret strong {
+  font-weight: 600;
+}
+
+.skills-hint {
+  margin: 0;
+  color: var(--fg-dim);
+  font-size: 12px;
+}
+
+.skills-moment {
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-2);
+}
+
+.skills-moment-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.skills-moment-head h3 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.skills-moment-command {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--fg-dim);
+  background: var(--bg-3);
+  border-radius: 4px;
+  padding: 1px 6px;
+}
+
+.skills-moment-help {
+  margin: 4px 0 10px;
+  color: var(--fg-dim);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.skills-field {
+  margin-bottom: 0;
+}
+
+.skills-field textarea {
+  min-height: 96px;
+  line-height: 1.45;
+}
+
+.skills-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+/* Block text, not a flex row: a flex row turns each text run into its own
+   item, so a long refusal squeezes the "Not saved:" label onto two lines. */
+.skills-status {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  color: var(--fg-dim);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.skills-status-error {
+  color: var(--danger);
+}
+
+.skills-status-message {
+  font-family: var(--mono);
+  overflow-wrap: anywhere;
+}
+
+.skills-invalid {
+  padding: 12px 14px;
+  border: 1px solid color-mix(in srgb, var(--danger) 50%, transparent);
+  border-radius: 8px;
+}
+
+.skills-invalid-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 4px;
+  color: var(--danger);
+  font-weight: 600;
+}
+
+.skills-invalid-body {
+  margin: 0;
+  color: var(--fg-dim);
+  font-size: 12px;
+}
+
+.skills-invalid-message {
+  margin: 8px 0 10px;
+  max-height: 160px;
+  overflow: auto;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  font-family: var(--mono);
+  font-size: 12px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
 /* Modal: Voir/Éditer/Ajouter a rule ------------------------------------- */
 .rules-modal {
   width: min(560px, 92vw);

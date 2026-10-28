@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { BrokerSettings } from './BrokerSettings'
 import { NotificationChannels } from './NotificationChannels'
 import { RulesSettings } from './RulesSettings'
+import { SkillsSettings } from './SkillsSettings'
 import type { AppConfig, ChoregosMod, DisplayMode, LaunchPreset, ModelOption } from '@shared/types'
 import {
   clodexSettingUnavailable,
@@ -18,13 +19,7 @@ import { graphId } from '@shared/graph'
 import { useDeck } from '../store'
 import { useT } from '../i18n'
 
-// VS Code-style settings page: a category tree on the left, the active
-// category's fields on the right. Replaces the former SettingsDialog modal and
-// is the single configuration surface (also reached via the sidebar gear and
-// Edit > Settings…). Changes apply live -- discrete inputs on change, free-text
-// inputs on blur -- so switching the language is instant (no Save button).
-
-type Category = 'general' | 'appearance' | 'terminal' | 'models' | 'broker' | 'rules'
+type Category = 'general' | 'appearance' | 'terminal' | 'models' | 'broker' | 'rules' | 'skills'
 
 const CATEGORIES: { id: Category; key: string }[] = [
   { id: 'general', key: 'settings.catGeneral' },
@@ -32,7 +27,8 @@ const CATEGORIES: { id: Category; key: string }[] = [
   { id: 'terminal', key: 'settings.catTerminal' },
   { id: 'models', key: 'settings.catModels' },
   { id: 'broker', key: 'settings.catBroker' },
-  { id: 'rules', key: 'settings.catRules' }
+  { id: 'rules', key: 'settings.catRules' },
+  { id: 'skills', key: 'settings.catSkills' }
 ]
 
 const DISPLAY_MODE_KEYS: { value: DisplayMode; key: string }[] = [
@@ -761,14 +757,11 @@ export function SettingsView(): React.JSX.Element {
             </>
           )}
 
-          {/* Mounted only while the category is open: the panel re-reads the
-              claude-peers file on every visit, and on a companion client it
-              must not read it at all. */}
           {active === 'broker' && <BrokerSettings />}
 
-          {/* Mounted only while open, like Broker: rulesList() re-reads the
-              three sources on every visit. */}
           {active === 'rules' && <RulesSettings />}
+
+          {active === 'skills' && <SkillsSettings />}
         </div>
       </div>
     </div>

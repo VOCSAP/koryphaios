@@ -44,6 +44,8 @@ export const COMPANION_MANIFEST = {
   // config / i18n
   getConfig: { kind: 'invoke', channel: 'config:get' },
   setConfig: { kind: 'invoke', channel: 'config:set' },
+  getSessionSkills: { kind: 'invoke', channel: 'skills:get' },
+  setSessionSkills: { kind: 'invoke', channel: 'skills:set' },
   listMods: { kind: 'invoke', channel: 'mods:list' },
   getPeersConfig: { kind: 'invoke', channel: 'peersConfig:get' },
   setOfflineReplica: { kind: 'invoke', channel: 'peersConfig:setOfflineReplica' },
@@ -353,7 +355,8 @@ const EXPLICIT_REMOTE_BLOCKED_CHANNELS: readonly string[] = [
   // and the event floor below -- because a forwarded event like 'roadmap:sync'
   // is refused nowhere; the third third is that RoadmapSyncStatus declares no
   // upstream address for it to carry.
-  'peersConfig:get'
+  'peersConfig:get',
+  'skills:get'
 ]
 
 /**
@@ -367,6 +370,7 @@ export const CHANNEL_TIERS: Readonly<Record<string, 0 | 1 | 2 | 3>> = {
   'sessions:list': 0,
   'sessions:peek-next-color': 0,
   'config:get': 0,
+  'skills:get': 0,
   'mods:list': 0,
   // Read-only, and deliberately secret-free: the summary carries a yes/no
   // token marker, never the bearer token itself.
@@ -521,6 +525,7 @@ export const CHANNEL_TIERS: Readonly<Record<string, 0 | 1 | 2 | 3>> = {
   'sandbox:reset-copy': 2,
 
   'config:set': 3,
+  'skills:set': 3,
   // Trust-changing, one notch beyond config:set: this writes the claude-peers
   // CORE config, which decides which broker every agent on this machine talks
   // to -- not just this Deck window. Tier 3 puts it on the remote-blocked

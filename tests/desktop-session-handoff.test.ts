@@ -14,6 +14,7 @@ import {
   sessionHandoffSupported,
   writeSessionHandoffBinding
 } from "../desktop/src/main/session-handoff";
+import { readSessionSkills, writeSessionSkills } from "../desktop/src/main/session-skills";
 
 const dirs: string[] = [];
 const HELPER_WRAPPER = join(import.meta.dir, "..", "desktop", "deck-lead-plugin", "bin", "kory-session-handoff.sh");
@@ -23,6 +24,19 @@ function stateDir(): string {
   const dir = mkdtempSync(join(tmpdir(), "kory-session-handoff-"));
   dirs.push(dir);
   return dir;
+}
+
+function boundHelper(root: string, tileId = "tile-a", generation = "generation-a") {
+  const store = createSessionHandoffStore(root, "project-key");
+  const launchDir = join(root, "session-handoff-drafts", RUN_ID, generation);
+  mkdirSync(launchDir, { recursive: true });
+  const draftPath = join(launchDir, "handoff.md");
+  const bindingPath = join(launchDir, "binding.json");
+  writeSessionHandoffBinding(bindingPath, {
+    version: 1, projectKey: store.projectKey, archiveDir: store.archiveDir, draftPath, helperPath: HELPER_WRAPPER,
+    logDir: join(root, "logs"), launchId: `launch-${tileId}`, tileId, generation, runId: RUN_ID
+  });
+  return { draftPath, env: { ...process.env, KORY_SESSION_HANDOFF_BINDING: bindingPath } };
 }
 
 afterEach(() => {
@@ -221,6 +235,10 @@ test("helper reports the launch context and publishes its bound draft without st
     runId: RUN_ID
   });
   const env = { ...process.env, KORY_SESSION_HANDOFF_BINDING: bindingPath };
+  writeSessionSkills(root, {
+    version: 1,
+    addendum: { start: "Prepare context.", end: "Publish the handoff.", stop: "Explain the stop." }
+  });
 
   const context = Bun.spawnSync({ cmd: ["bash", HELPER_WRAPPER, "context"], env });
   expect(context.exitCode).toBe(0);
@@ -228,7 +246,16 @@ test("helper reports the launch context and publishes its bound draft without st
     project: "project-key",
     draft: draftPath,
     helper: '"$KORY_SESSION_HELPER"',
-    addendum: { start: "", end: "", stop: "" }
+    addendum: { start: "Prepare context.", end: "Publish the handoff.", stop: "Explain the stop." }
+  });
+  writeSessionSkills(root, {
+    version: 1,
+    addendum: { start: "New context.", end: "New handoff.", stop: "New stop." }
+  });
+  const refreshed = Bun.spawnSync({ cmd: ["bash", HELPER_WRAPPER, "context"], env });
+  expect(refreshed.exitCode).toBe(0);
+  expect(JSON.parse(refreshed.stdout.toString()).addendum).toEqual({
+    start: "New context.", end: "New handoff.", stop: "New stop."
   });
   writeFileSync(draftPath, "# End\n");
   const publish = Bun.spawnSync({ cmd: ["bash", HELPER_WRAPPER, "publish"], env });
@@ -266,6 +293,11 @@ test("helper assigns distinct exit codes to missing bindings, handoffs, invalid 
   delete withoutBinding.KORY_SESSION_HANDOFF_BINDING;
 
   expect(Bun.spawnSync({ cmd: ["bash", HELPER_WRAPPER, "context"], env: withoutBinding }).exitCode).toBe(77);
+  writeFileSync(join(root, "session-skills.json"), "{");
+  const invalidSkills = Bun.spawnSync({ cmd: ["bash", HELPER_WRAPPER, "context"], env });
+  expect(invalidSkills.exitCode).toBe(74);
+  expect(invalidSkills.stdout.toString()).toBe("");
+  rmSync(join(root, "session-skills.json"));
   expect(Bun.spawnSync({ cmd: ["bash", HELPER_WRAPPER, "read", "latest"], env }).exitCode).toBe(66);
   const missingDraft = Bun.spawnSync({ cmd: ["bash", HELPER_WRAPPER, "publish"], env });
   expect(missingDraft.exitCode).toBe(65);
@@ -336,6 +368,74 @@ test("helper rejects hostile read selectors with exit code 64", () => {
     expect(result.exitCode).toBe(64);
     expect(result.stdout.toString()).toBe("");
   }
+});
+
+test("a corrupt skills document does not block handoff publish or read", () => {
+  const root = stateDir();
+  const { draftPath, env } = boundHelper(root);
+  writeFileSync(join(root, "session-skills.json"), "{");
+  writeFileSync(draftPath, "# End\n");
+
+  const publish = Bun.spawnSync({ cmd: ["bash", HELPER_WRAPPER, "publish"], env });
+  expect(publish.exitCode, `publish stderr: ${publish.stderr.toString()}`).toBe(0);
+  expect(Bun.spawnSync({ cmd: ["bash", HELPER_WRAPPER, "read", "latest"], env }).exitCode).toBe(0);
+});
+
+test("context returns all empty addenda when no skills document exists", () => {
+  const root = stateDir();
+  const { env } = boundHelper(root);
+  const context = Bun.spawnSync({ cmd: ["bash", HELPER_WRAPPER, "context"], env });
+
+  expect(context.exitCode).toBe(0);
+  expect(JSON.parse(context.stdout.toString()).addendum).toEqual({ start: "", end: "", stop: "" });
+});
+
+test("context retains empty addenda next to a filled addendum", () => {
+  const root = stateDir();
+  const { env } = boundHelper(root);
+  writeSessionSkills(root, { version: 1, addendum: { start: "only start", end: "", stop: "" } });
+
+  const addendum = JSON.parse(Bun.spawnSync({ cmd: ["bash", HELPER_WRAPPER, "context"], env }).stdout.toString()).addendum;
+  expect(addendum).toEqual({ start: "only start", end: "", stop: "" });
+});
+
+test("context ignores hostile skills documents in its working directory", () => {
+  const root = stateDir();
+  const hostileCwd = stateDir();
+  const { env } = boundHelper(root);
+  const global = { version: 1 as const, addendum: { start: "global", end: "", stop: "" } };
+  writeSessionSkills(root, global);
+  writeFileSync(join(hostileCwd, "session-skills.json"), JSON.stringify({ version: 1, addendum: { start: "cwd", end: "", stop: "" } }));
+  mkdirSync(join(hostileCwd, ".claude", "claude-peers"), { recursive: true });
+  writeFileSync(join(hostileCwd, ".claude", "claude-peers", "session-skills.json"), JSON.stringify({ version: 1, addendum: { start: "repo", end: "", stop: "" } }));
+
+  expect(readSessionSkills(root)).toEqual(global);
+  const context = Bun.spawnSync({ cmd: ["bash", HELPER_WRAPPER, "context"], env, cwd: hostileCwd });
+  expect(context.exitCode).toBe(0);
+  expect(JSON.parse(context.stdout.toString()).addendum).toEqual(global.addendum);
+});
+
+test("two bound tiles read one shared skills document", () => {
+  const root = stateDir();
+  const first = boundHelper(root, "tile-a", "generation-a");
+  const second = boundHelper(root, "tile-b", "generation-b");
+  const value = { version: 1 as const, addendum: { start: "shared", end: "", stop: "" } };
+  writeSessionSkills(root, value);
+
+  for (const env of [first.env, second.env]) {
+    const context = Bun.spawnSync({ cmd: ["bash", HELPER_WRAPPER, "context"], env });
+    expect(context.exitCode).toBe(0);
+    expect(JSON.parse(context.stdout.toString()).addendum).toEqual(value.addendum);
+  }
+});
+
+test("context rejects trailing arguments with no stdout", () => {
+  const root = stateDir();
+  const { env } = boundHelper(root);
+  const result = Bun.spawnSync({ cmd: ["bash", HELPER_WRAPPER, "context", "hostile"], env });
+
+  expect(result.exitCode).toBe(64);
+  expect(result.stdout.toString()).toBe("");
 });
 
 test("parallel helper publications retain every numbered handoff", async () => {
