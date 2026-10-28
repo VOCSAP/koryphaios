@@ -683,6 +683,9 @@ export function startDeckControl(
           )
         }
         const targetSession = deps.listSessions().find((session) => session.id === id)
+        if (restricted && (targetSession?.lead || targetSession?.supervisor)) {
+          throw new Error('refused: a team-lead cannot restart a lead or supervisor tile')
+        }
         const releaseCapacity = targetSession?.status === 'exited' ? spawnCap.reserve(1) : null
         try {
           await deps.restartSession(id)
@@ -735,7 +738,6 @@ export function startDeckControl(
       }
 
       case 'deck_close_all': {
-        if (restricted) throw new Error('refused: deck_close_all is reserved to the supervisor')
         if (closeAllInFlight) throw new Error('refused: deck_close_all already running')
         closeAllInFlight = true
         try {
@@ -754,7 +756,7 @@ export function startDeckControl(
           for (const leadWave of [false, true]) {
             const wave: DeckControlSession[] = []
             for (const session of deps.listSessions()) {
-              if (session.supervisor || handled.has(session.id) || isLeadTile(session) !== leadWave) continue
+              if (session.supervisor || (restricted && isLeadTile(session)) || handled.has(session.id) || isLeadTile(session) !== leadWave) continue
               handled.add(session.id)
               if (session.locked) {
                 skipLocked(session)
@@ -778,7 +780,7 @@ export function startDeckControl(
           // Tiles spawned during the call (a lead may spawn while the first wave closes).
           const remaining: string[] = []
           for (const session of deps.listSessions()) {
-            if (session.supervisor || handled.has(session.id)) continue
+            if (session.supervisor || (restricted && isLeadTile(session)) || handled.has(session.id)) continue
             if (session.locked) skipLocked(session)
             else remaining.push(session.name)
           }

@@ -9,32 +9,19 @@ import { startBroker, stopBroker, scrubEnv, type TestBroker } from "./_helper.ts
 import { DECK_TOOL_NAMES } from "../server-deck.ts";
 import { DECK_ONLY_TOOLS } from "../server.ts";
 
-const FIVE_DECK_ONLY_NAMES = [
+const DECK_ONLY_NAMES = [
   "roadmap_dispatch",
   "graph_draft_prepare",
   "graph_draft_send",
   "ask_operator",
   "ask_operator_wait",
+  "notify_operator",
 ] as const;
+const LEGACY_DECK_NAMES = DECK_ONLY_NAMES.filter((name) => name !== "notify_operator");
 
-test("DECK_TOOL_NAMES and DECK_ONLY_TOOLS name the exact same five tools, in both directions", () => {
-  // Duplicated in both tests on purpose: a `-t` filter, a file split or a
-  // skip on either one must not carry away the check that the hand-typed
-  // literal below still matches the production array it stands for.
-  expect(new Set<string>(FIVE_DECK_ONLY_NAMES)).toEqual(new Set(DECK_ONLY_TOOLS.map((t) => t.name)));
-  const fromServerDeck = new Set<string>(DECK_TOOL_NAMES);
-  const fromServer = new Set(DECK_ONLY_TOOLS.map((t) => t.name));
-  for (const name of FIVE_DECK_ONLY_NAMES) {
-    expect(fromServerDeck.has(name)).toBe(true);
-    expect(fromServer.has(name)).toBe(true);
-  }
-  for (const name of fromServerDeck) {
-    expect(fromServer.has(name)).toBe(true);
-  }
-  for (const name of fromServer) {
-    expect(fromServerDeck.has(name)).toBe(true);
-  }
-  expect(fromServerDeck.size).toBe(fromServer.size);
+test("the legacy server serves the legacy five tools while server.ts defines the six family tools", () => {
+  expect(new Set<string>(DECK_ONLY_NAMES)).toEqual(new Set(DECK_ONLY_TOOLS.map((t) => t.name)));
+  expect(new Set<string>(LEGACY_DECK_NAMES)).toEqual(new Set(DECK_TOOL_NAMES));
 });
 
 const brokers: TestBroker[] = [];
@@ -84,8 +71,8 @@ async function readUntil(
   throw new Error(`no JSON-RPC response with id ${wantedId}`);
 }
 
-test("the core server's tools/list names none of the five Kory-only tools", async () => {
-  expect(new Set<string>(FIVE_DECK_ONLY_NAMES)).toEqual(new Set(DECK_ONLY_TOOLS.map((t) => t.name)));
+test("the core server's tools/list names none of the family-only tools", async () => {
+  expect(new Set<string>(DECK_ONLY_NAMES)).toEqual(new Set(DECK_ONLY_TOOLS.map((t) => t.name)));
   const b = await startBroker();
   brokers.push(b);
   const proc = Bun.spawn(["bun", "server.ts"], {
@@ -118,7 +105,7 @@ test("the core server's tools/list names none of the five Kory-only tools", asyn
   const res = await readUntil(reader, 1, buffer);
   const names = (res.result?.tools ?? []).map((t) => t.name);
   expect(names.length).toBeGreaterThan(0);
-  for (const name of FIVE_DECK_ONLY_NAMES) {
+  for (const name of DECK_ONLY_NAMES) {
     expect(names).not.toContain(name);
   }
 
@@ -129,7 +116,7 @@ test("the core server's tools/list names none of the five Kory-only tools", asyn
   // the initialize response, not from the source.
   const instructions = init.result?.instructions ?? "";
   expect(instructions.length).toBeGreaterThan(0);
-  for (const name of FIVE_DECK_ONLY_NAMES) {
+  for (const name of DECK_ONLY_NAMES) {
     expect(instructions).not.toContain(name);
   }
 
@@ -138,7 +125,7 @@ test("the core server's tools/list names none of the five Kory-only tools", asyn
   // one call per name so a single surviving `case` cannot hide behind an
   // earlier failure.
   let id = 2;
-  for (const name of FIVE_DECK_ONLY_NAMES) {
+  for (const name of DECK_ONLY_NAMES) {
     send({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: {} } });
     const callRes = await readUntil(reader, id, buffer);
     expect(callRes.result).toBeUndefined();

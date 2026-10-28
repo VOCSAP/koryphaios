@@ -480,8 +480,8 @@ test("buildMintTeamLeadBridge mints with mintCaller('team-lead', TEAM_LEAD_DECK_
     expect((mintCaller.mock.calls[0] as unknown[])[2], "the bridge is a lead provisioning path, the label alone is not").toBe("lead");
 
     const written = JSON.parse(readFileSync(result!.mcpConfig, "utf-8"));
-    const toolsEnv: string = written.mcpServers["deck-control"].env.DECK_CONTROL_TOOLS;
-    expect(toolsEnv.split(",")).toEqual([...TEAM_LEAD_DECK_TOOLS]);
+    const toolsEnv: string = written.mcpServers["kory-deck"].env.DECK_CONTROL_TOOLS;
+    expect(toolsEnv.split(",")).toEqual([...TEAM_LEAD_DECK_TOOLS, "roadmap_dispatch"]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -497,61 +497,16 @@ test("PROOF: buildMintTeamLeadBridge returns null (not an error) when getControl
   expect(mint()).toBeNull();
 });
 
-test("MUTATION PROOF (Q4): widening or emptying the allow-list passed to mintCaller/write changes the assertion above -- pinned against the LIVE TEAM_LEAD_DECK_TOOLS export, not a copy", () => {
-  const dir = mkdtempSync(join(tmpdir(), "kory-team-lead-bridge-mutant-"));
-  try {
-    const mintCaller = mock((label: string, allowedTools?: readonly string[] | null) => ({
-      token: "tok-456",
-      callerId: `${label}-def`
-    }));
-    // Simulates a MUTANT buildMintTeamLeadBridge that widens the allow-list
-    // (a 4th tool slipped in) instead of reusing TEAM_LEAD_DECK_TOOLS as-is.
-    const widenedMutant = [...TEAM_LEAD_DECK_TOOLS, "deck_apply_template"];
-    mintCaller("team-lead", widenedMutant);
-    const emptiedMutant: string[] = [];
-    mintCaller("team-lead", emptiedMutant);
-
-    expect(mintCaller.mock.calls[0]?.[1]).not.toEqual(TEAM_LEAD_DECK_TOOLS);
-    expect(mintCaller.mock.calls[1]?.[1]).not.toEqual(TEAM_LEAD_DECK_TOOLS);
-    // The REAL function, unmutated, must still match -- proving the test
-    // discriminates the guarded (real) behaviour from the two unguarded
-    // (mutant) ones above, rather than passing on all three.
-    const mint = buildMintTeamLeadBridge({
-      getControlServer: () => fakeControlServer(mintCaller),
-      write: (token, callerId, allowedTools) =>
-        writeTeamLeadMcpConfig(
-          { dir, mcpScriptPath: "C:/fake/deck-control-mcp.mjs", execPath: "C:/fake/node.exe", controlUrl: "http://127.0.0.1:9999", controlToken: token },
-          `${callerId}.json`,
-          allowedTools
-        )
-    });
-    mint();
-    expect(mintCaller.mock.calls[2]?.[1]).toEqual(TEAM_LEAD_DECK_TOOLS);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test("TEAM_LEAD_DECK_TOOLS exposes spawn, close and run-directive but not restart", () => {
+test("TEAM_LEAD_DECK_TOOLS exposes the complete deck surface", () => {
   expect([...TEAM_LEAD_DECK_TOOLS]).toEqual([
-    "deck_spawn_session",
-    "deck_spawn_team",
-    "deck_close_session",
-    "deck_run_directive"
+    "deck_team_playbook", "deck_team_agents", "deck_spawn_team", "deck_list_agents", "deck_list_models",
+    "deck_list_presets", "deck_spawn_session", "deck_list_sessions", "deck_sandbox_exec", "deck_restart_session",
+    "deck_close_session", "deck_close_all", "deck_run_directive", "deck_create_worktree", "deck_list_worktrees",
+    "deck_remove_worktree", "deck_list_templates", "deck_apply_template", "deck_save_template", "deck_announce"
   ]);
 });
 
-// Weakest guard in this repo's own hierarchy (source scan only), used because
-// session-service.ts can't be exercised behaviorally.
-// Proves the call exists and its result reaches the SessionDef literal, but
-// cannot prove it's called with the correct arguments -- a mutation
-// substituting a wrong argument passes unchanged.
-
 export function checkMcpConfigWiring(src: string): string | null {
-  // Non-greedy up to the return-type arrow, not `[^{]*` -- the signature's
-  // own `opts?: { teamLeadDeckBridge?: boolean }` parameter type contains a
-  // `{` BEFORE the function body's own opening brace, which a naive
-  // "anything but a brace" class would stop at, matching the WRONG brace.
   const fnMatch = /create\(\s*input: CreateSessionInput[\s\S]*?\): SessionRuntime \{/.exec(src);
   if (!fnMatch) {
     return "create(input: CreateSessionInput, ...): SessionRuntime not found in session-service.ts -- has its signature changed?";

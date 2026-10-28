@@ -1,8 +1,3 @@
-// Card c9269fef lot L2-bis, MAJOR 2: server-deck.ts must apply
-// CLAUDE_PEERS_TOOLS the same way server.ts does, at BOTH ends (tools/list
-// AND tools/call) -- hiding a tool from the list alone still leaves it
-// callable by name, which would make the allow-list decorative here too.
-
 import { test, expect, describe, afterAll } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -56,13 +51,17 @@ async function readUntil(
   throw new Error(`no JSON-RPC response with id ${wantedId}`);
 }
 
-/** Boot server-deck.ts with CLAUDE_PEERS_TOOLS restricting the surface to
- * graph_draft_prepare only, excluding both ask_operator tools. */
-async function bootRestricted() {
+async function bootRestricted(
+  family: "legacy" | "operator",
+  tools: string | undefined
+) {
   const dir = mkdtempSync(join(tmpdir(), "cp-deck-tools-allowlist-"));
   dirs.push(dir);
   const proc = Bun.spawn(["bun", "server-deck.ts"], {
-    env: scrubEnv(dir, { CLAUDE_PEERS_TOOLS: "graph_draft_prepare" }),
+    env: scrubEnv(dir, {
+      ...(tools !== undefined ? { CLAUDE_PEERS_TOOLS: tools } : {}),
+      ...(family === "operator" ? { KORY_MCP_FAMILY: "operator" } : {})
+    }),
     stdio: ["pipe", "pipe", "pipe"],
   });
   procs.push(proc);
@@ -87,7 +86,7 @@ async function bootRestricted() {
 
 describe("server-deck.ts honors CLAUDE_PEERS_TOOLS", () => {
   test("tools/list omits a tool the allow-list excludes", async () => {
-    const { reader, buffer, send } = await bootRestricted();
+    const { reader, buffer, send } = await bootRestricted("legacy", "graph_draft_prepare");
     send({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} });
     const res = await readUntil(reader, 1, buffer);
     const names = (res.result?.tools ?? []).map((t) => t.name);
@@ -95,7 +94,7 @@ describe("server-deck.ts honors CLAUDE_PEERS_TOOLS", () => {
   }, 30_000);
 
   test("tools/call refuses a hidden tool by name, not just hides it from the list", async () => {
-    const { reader, buffer, send } = await bootRestricted();
+    const { reader, buffer, send } = await bootRestricted("legacy", "graph_draft_prepare");
     send({
       jsonrpc: "2.0",
       id: 1,
@@ -105,5 +104,57 @@ describe("server-deck.ts honors CLAUDE_PEERS_TOOLS", () => {
     const res = await readUntil(reader, 1, buffer);
     expect(res.result?.isError).toBe(true);
     expect(res.result?.content?.[0]?.text).toContain("tool not available");
+  }, 30_000);
+
+  test("an empty allow-list grants the operator family zero tools", async () => {
+    const { reader, buffer, send } = await bootRestricted("operator", "");
+    send({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} });
+    const listed = await readUntil(reader, 1, buffer);
+    expect(listed.result?.tools).toEqual([]);
+  }, 30_000);
+
+  test("an absent allow-list grants the operator family its complete surface", async () => {
+    const { reader, buffer, send } = await bootRestricted("operator", undefined);
+    send({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} });
+    const listed = await readUntil(reader, 1, buffer);
+    expect((listed.result?.tools ?? []).map((tool) => tool.name).sort()).toEqual([
+      "ask_operator",
+      "ask_operator_wait",
+      "graph_draft_prepare",
+      "graph_draft_send",
+      "notify_operator"
+    ]);
+  }, 30_000);
+
+  test("send_message grants the notify_operator contract alias", async () => {
+    const { reader, buffer, send } = await bootRestricted("operator", "send_message");
+    send({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} });
+    const listed = await readUntil(reader, 1, buffer);
+    expect((listed.result?.tools ?? []).map((tool) => tool.name)).toEqual(["notify_operator"]);
+
+    send({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "notify_operator", arguments: {} } });
+    const called = await readUntil(reader, 2, buffer);
+    expect(called.result?.isError).toBe(true);
+    expect(called.result?.content?.[0]?.text).toBe("message is required");
+  }, 30_000);
+
+  test("an allow-list without send_message refuses notify_operator before dispatch", async () => {
+    const { reader, buffer, send } = await bootRestricted("operator", "ask_operator");
+    send({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "notify_operator", arguments: {} } });
+    const called = await readUntil(reader, 1, buffer);
+    expect(called.result?.isError).toBe(true);
+    expect(called.result?.content?.[0]?.text).toBe("Error: tool not available: notify_operator");
+  }, 30_000);
+
+  test("the operator family keeps roadmap_dispatch unavailable in both discovery and calls", async () => {
+    const { reader, buffer, send } = await bootRestricted("operator", "graph_draft_prepare");
+    send({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} });
+    const listed = await readUntil(reader, 1, buffer);
+    expect((listed.result?.tools ?? []).map((tool) => tool.name)).toEqual(["graph_draft_prepare"]);
+
+    send({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "roadmap_dispatch", arguments: {} } });
+    const called = await readUntil(reader, 2, buffer);
+    expect(called.result?.isError).toBe(true);
+    expect(called.result?.content?.[0]?.text).toBe("Error: tool not available: roadmap_dispatch");
   }, 30_000);
 });
