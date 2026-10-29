@@ -15,7 +15,7 @@ l'accès à l'Inbox ou ne démarrent plus.
 |---|---|---|
 | Broker | Répond `inbox_binding` à `/register`, refuse un dépôt non attesté | `broker.ts` (`registerResponse`, `admitOperatorDeposit`) |
 | Serveur MCP `claude-peers` d'une tuile | Exige l'accusé en contexte Kory, s'arrête sinon | `server.ts` (`attestRegister`, `registerFetch`, `confirmedInboxBinding`) |
-| Serveur MCP `deck-lead` (tuiles lead et superviseur) | Embarque la même porte de readiness via l'import de `server.ts` | `server-deck.ts`, bundle `server-deck.mjs` |
+| Serveurs MCP `kory-operator` / `kory-deck` (tuiles lead et superviseur) | Embarquent la même porte de readiness via l'import de `server.ts` | `server-deck.ts`, bundle `server-deck.mjs` |
 
 ## Ce que fait le code
 
@@ -64,7 +64,7 @@ l'accès à l'Inbox ou ne démarrent plus.
   est absente ou ne désigne pas de `server.ts`. S'il répond déjà sur
   `/health`, il est réutilisé tel quel : **il ne prend pas le nouveau code
   tant qu'il n'est pas arrêté et relancé**.
-- **`deck-lead`** : lancé par le Deck depuis son bundle
+- **`kory-operator` / `kory-deck`** : lancés par le Deck depuis leur bundle
   `deck-plugin/mcp/server-deck.mjs` (`deckLeadScriptPath` dans
   `desktop/src/main/supervisor.ts`), produit par `npm run build:mcp` dans
   `desktop/` et recopié dans le paquet par `extraResources`
@@ -133,10 +133,11 @@ puis la chaîne de build habituelle du Deck (`npm run build` dans `desktop/`,
 qui enchaîne `build:mcp`) et relancer le Deck.
 
 Raison : le bundle embarque la porte de readiness de `server.ts` au moment du
-build. Un Deck non reconstruit continue de lancer l'ancien `deck-lead`.
+build. Un Deck non reconstruit continue de lancer l'ancien `kory-operator` ou
+`kory-deck`.
 
-Symptôme si on l'oublie : les tuiles lead et superviseur, dont `deck-lead`
-est ancien, gardent l'ancien comportement de dépôt pour `ask_operator`
+Symptôme si on l'oublie : les tuiles lead et superviseur, dont l'un des serveurs
+`kory-operator` ou `kory-deck` est ancien, gardent l'ancien comportement de dépôt pour `ask_operator`
 (même 403 que ci-dessus face à un broker qui attend l'attestation).
 
 ### Étape 4 : reconnecter ou relancer les tuiles

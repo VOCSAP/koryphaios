@@ -1,13 +1,8 @@
-// Supervisor session's bridge to the Deck: a dependency-free MCP stdio server
-// (newline-delimited JSON-RPC 2.0) forwarding every tool call to the Deck's
-// loopback control endpoint.
-// Runs under plain Node (ELECTRON_RUN_AS_NODE=1) with no
-// @modelcontextprotocol/sdk — node builtins and global fetch only.
-// DECK_CONTROL_TOOLS is an allow-list, never a deny-list, so a forgotten entry
-// fails closed instead of exposing a new tool by default; unset exposes every
-// tool, and a set-but-empty value is distinct from unset and exposes zero.
-
 import { createInterface } from 'node:readline'
+import { hostname } from 'node:os'
+import { readSessionIdentityFile } from '../../shared/peer-cache.ts'
+import { handleRoadmapDispatch, TOOLS_ALLOWLIST as PEERS_ALLOWLIST, type CompanionIdentity } from '../../shared/roadmap-dispatch.ts'
+import { brokerHeaders, brokerUrl, loadBrokerConfig } from '../../shared/broker-config.ts'
 import { DIRECTIVE_ACCEPTS_PROMPT, directiveCommands } from '../src/main/directive'
 import {
   CLEAR_RELOAD_WORKSTREAM_MAX,
@@ -19,6 +14,11 @@ import {
 const CONTROL_URL = process.env.DECK_CONTROL_URL ?? ''
 const CONTROL_TOKEN = process.env.DECK_CONTROL_TOKEN ?? ''
 const TOOLS_ENV_VAR = 'DECK_CONTROL_TOOLS'
+const brokerConfig = loadBrokerConfig((message) => process.stderr.write(`[claude-peers] ${message}\n`)).config
+const ROADMAP_DISPATCH_ENDPOINT = {
+  url: brokerUrl(brokerConfig),
+  headers: brokerHeaders(brokerConfig, { 'Content-Type': 'application/json' })
+}
 
 interface JsonRpcRequest {
   jsonrpc: '2.0'
@@ -172,7 +172,7 @@ const TOOLS = [
   {
     name: 'deck_close_all',
     description:
-      'Close every session tile except supervisor tiles and locked tiles (everything except me), team-lead tiles last. Returns {closed, locked, failed, remaining}: names of the tiles closed, of the locked tiles left open (the operator closes those by hand), {name, error} for each closure that failed, and the names of tiles spawned during the call, left open. It does not land the peers first: send them their landing instruction before calling it.',
+      'Close eligible session tiles while preserving locked and supervisor tiles; a team-lead also preserves lead tiles. Returns {closed, locked, failed, remaining}: names of the tiles closed, of the locked tiles left open (the operator closes those by hand), {name, error} for each closure that failed, and the names of tiles spawned during the call, left open. It does not land the peers first: send them their landing instruction before calling it.',
     inputSchema: { type: 'object', properties: {} }
   },
   {
@@ -274,6 +274,11 @@ const TOOLS = [
       properties: { text: { type: 'string' } },
       required: ['text']
     }
+  },
+  {
+    name: 'roadmap_dispatch',
+    description: "Run the roadmap queue's head wave in this Deck. It has no arguments.",
+    inputSchema: { type: 'object', properties: {} }
   }
 ]
 
@@ -302,7 +307,9 @@ function filterTools(tools: typeof TOOLS, allowlist: string[] | null): typeof TO
 
 const TOOLS_ALLOWLIST_RAW = process.env[TOOLS_ENV_VAR]
 const TOOLS_ALLOWLIST = resolveToolAllowlist(TOOLS_ALLOWLIST_RAW)
-const FILTERED_TOOLS = filterTools(TOOLS, TOOLS_ALLOWLIST)
+const FILTERED_TOOLS = filterTools(TOOLS, TOOLS_ALLOWLIST).filter(
+  (t) => t.name !== 'roadmap_dispatch' || PEERS_ALLOWLIST === null || PEERS_ALLOWLIST.includes(t.name)
+)
 
 const SUPERVISOR_INSTRUCTIONS =
   'You are the Deck SUPERVISOR. You pilot the desktop app that hosts this session: spawn visible agent sessions (deck_spawn_session for one, deck_spawn_team for a whole plan, with agent profiles from deck_list_agents or embedded fallbacks from deck_team_agents, initial prompts, optional worktrees), inspect them (deck_list_sessions), manage worktrees and templates, and broadcast announcements. You do NOT write code yourself: read the project, consult the shared roadmap (roadmap_* tools), pick the right agent profiles, brief them via the initial prompt, then coordinate through send_message / list_peers. CONSENT: never spawn without an explicit operator instruction in the conversation — a question calls for a proposal plus confirmation; read deck_team_playbook before composing a team. You may close any non-locked tile except supervisor tiles (deck_close_session, deck_close_all); other destructive actions only work on what you created, ask the operator otherwise.'
@@ -318,13 +325,7 @@ function subsetInstructions(toolNames: string[]): string {
 const INSTRUCTIONS =
   TOOLS_ALLOWLIST === null ? SUPERVISOR_INSTRUCTIONS : subsetInstructions(FILTERED_TOOLS.map((t) => t.name))
 
-// Resolution trace at startup (Card ff091064): when a tool is missing from a
-// caller's surface, this is what says whether DECK_CONTROL_TOOLS ate it and
-// what the requested vs retained lists were -- without it, diagnosing a
-// missing tool costs an hour of guessing between this filter and the
-// definition's own `tools:` frontmatter (a second, independent filter).
-// stdout is the JSON-RPC channel here (never console.log); stderr is the
-// only sink this dependency-free script has.
+// stdout is reserved for JSON-RPC frames, so diagnostics use stderr.
 process.stderr.write(
   JSON.stringify({
     ev: 'deck-control-mcp: tool allowlist resolved',
@@ -333,6 +334,22 @@ process.stderr.write(
     retained: FILTERED_TOOLS.map((t) => t.name)
   }) + '\n'
 )
+
+async function resolveCompanionIdentity(): Promise<CompanionIdentity> {
+  const host = hostname()
+  const deskSession = process.env.CLAUDE_PEERS_DESK_SESSION ?? ''
+  const identity = deskSession ? await readSessionIdentityFile(deskSession) : null
+  return {
+    host,
+    peerId: identity?.peerId ?? null,
+    groupId: identity?.groupId ?? '',
+    instanceToken: identity?.instanceToken ?? null,
+    inboxBinding: identity?.inboxBinding ?? null,
+    operatorId: identity?.operatorId ?? null,
+    projectKey: '',
+    fromPeer: identity?.peerId ?? `${host || 'unknown'}-unregistered`
+  }
+}
 
 async function callControl(tool: string, args: Record<string, unknown>): Promise<unknown> {
   const res = await fetch(`${CONTROL_URL}/call`, {
@@ -377,11 +394,6 @@ async function handle(req: JsonRpcRequest): Promise<void> {
     case 'tools/call': {
       const name = req.params?.name as string
       const args = (req.params?.arguments ?? {}) as Record<string, unknown>
-      // Coverage, not just sensitivity (CLAUDE.md guard-coverage rule): hiding
-      // a tool from tools/list alone still leaves it CALLABLE by name, which
-      // would make the allow-list decorative. Refuse here too, so the deny
-      // is enforced at the boundary that actually reaches deck-control.ts,
-      // not only at discovery time.
       if (!FILTERED_TOOLS.some((t) => t.name === name)) {
         return reply(req.id, {
           content: [{ type: 'text', text: `Error: tool not available: ${name}` }],
@@ -389,6 +401,9 @@ async function handle(req: JsonRpcRequest): Promise<void> {
         })
       }
       try {
+        if (name === 'roadmap_dispatch') {
+          return reply(req.id, await handleRoadmapDispatch(await resolveCompanionIdentity(), ROADMAP_DISPATCH_ENDPOINT))
+        }
         const result = await callControl(name, args)
         return reply(req.id, {
           content: [{ type: 'text', text: JSON.stringify(result, null, 2) }]

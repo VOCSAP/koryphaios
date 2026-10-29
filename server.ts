@@ -35,7 +35,7 @@ import type {
 } from "./shared/types.ts";
 import { taskLabelFromText } from "./shared/delegated-task.ts";
 import { ROADMAP_TOOLS } from "./shared/roadmap-tools.ts";
-import { filterTools, resolveToolAllowlist, TOOLS_ENV_VAR } from "./shared/tool-allowlist.ts";
+import { filterTools, TOOLS_ENV_VAR } from "./shared/tool-allowlist.ts";
 import { callRoadmapTool } from "./shared/roadmap-mcp.ts";
 export {
   formatLockContestedBy,
@@ -51,11 +51,11 @@ import {
 } from "./shared/summarize.ts";
 import {
   loadConfig,
+  brokerHeaders,
   brokerUrl,
   isLoopbackBrokerUrl,
   buildSummaryProviderConfig,
   canonicalBrokerUrl,
-  brokerHeaders,
   resolveGroup,
   computeGroupId,
   computeGroupSecretHash,
@@ -87,7 +87,12 @@ import {
   OPERATOR_PEER_ID,
 } from "./shared/types.ts";
 import type { GraphDraftAddResponse } from "./shared/types.ts";
-import type { DispatchRequest, DispatchRequestAddResponse } from "./shared/types.ts";
+import {
+  handleRoadmapDispatch as dispatchRoadmap,
+  renderDispatchOutcome,
+  TOOLS_ALLOWLIST,
+  type CompanionIdentity,
+} from "./shared/roadmap-dispatch.ts";
 import type {
   ApprovalAddResponse,
   ApprovalWaitResponse,
@@ -150,12 +155,20 @@ const PEER_ID_REGEX = /^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$/;
 const config = await loadConfig();
 const BROKER_URL = brokerUrl(config);
 const BROKER_TOKEN = config.broker_token ?? null;
+const ROADMAP_DISPATCH_ENDPOINT = {
+  url: BROKER_URL,
+  headers: brokerHeaders(config, { "Content-Type": "application/json" }),
+};
 const HEARTBEAT_INTERVAL_MS = 15_000;
 const WS_RECONNECT_INITIAL_MS = 1000;
 const WS_RECONNECT_MAX_MS = 30_000;
 const BROKER_SCRIPT = join(dirname(fileURLToPath(import.meta.url)), "broker.ts");
 
 // --- Broker HTTP communication ---
+
+async function handleRoadmapDispatch(identity: CompanionIdentity) {
+  return dispatchRoadmap(identity, ROADMAP_DISPATCH_ENDPOINT);
+}
 
 // signal is optional and defaults to undefined so every existing brokerFetch
 // caller is unaffected; only wait_for_message's own opportunistic peek supplies
@@ -986,6 +999,15 @@ const DECK_ONLY_TOOLS = [
     },
   },
   {
+    name: "notify_operator",
+    description: "Send a signed one-way notification to the HUMAN operator's Deck or phone. Do not use it for a blocking question: use ask_operator instead.",
+    inputSchema: {
+      type: "object" as const,
+      properties: { message: { type: "string" as const, description: "Self-contained notification text." } },
+      required: ["message"],
+    },
+  },
+  {
     name: "ask_operator",
     description:
       "Ask the HUMAN operator a blocking question and WAIT for the answer (it reaches them on their phone or the Deck, so use it instead of an on-screen question when they may be away). Returns the answer as free text, or a ticket: then call ask_operator_wait rather than assuming an answer. Available only when remote approvals are enabled for this project.",
@@ -1028,7 +1050,6 @@ const DECK_ONLY_TOOLS = [
 // --- Tool handlers ---
 
 const TOOLS_ALLOWLIST_RAW = process.env[TOOLS_ENV_VAR];
-const TOOLS_ALLOWLIST = resolveToolAllowlist(TOOLS_ALLOWLIST_RAW);
 const FILTERED_TOOLS = filterTools(TOOLS, TOOLS_ALLOWLIST);
 
 log(
@@ -1083,33 +1104,6 @@ async function writeGlobalCompanionIdentity(): Promise<void> {
   }
 }
 
-/** A completed roadmap card may still have no execution outcome. */
-export function renderDispatchOutcome(request: DispatchRequest): string {
-  if (request.status !== "done" || !request.outcome) {
-    return `Dispatch requested (id ${request.id}) — the Deck had not answered within the wait. The request is PARKED broker-side, not lost: the Deck runs it and announces the outcome on this channel. Do not assume it ran.`;
-  }
-  const { cards, note } = request.outcome;
-  if (cards.length === 0) {
-    return `Dispatch ran, and dispatched NOTHING${note ? `: ${note}` : "."} Nothing in the queue was eligible, so no tile was touched.`;
-  }
-  const lines = cards.map((c) => {
-    const parts = [`  - [${c.id.slice(0, 8)}] ${c.kind}: ${c.title}`];
-    parts.push(`    hit: ${c.matched.length > 0 ? c.matched.join(", ") : "(none)"}`);
-    if (c.missing.length > 0) parts.push(`    NOT hit: ${c.missing.join(", ")}`);
-    if (c.ambiguous.length > 0) {
-      parts.push(`    refused as ambiguous (several live tiles share the id): ${c.ambiguous.join(", ")}`);
-    }
-    const refused = c.refused ?? [];
-    if (refused.length > 0) {
-      parts.push(`    refused: ${refused.map(({ peerId, reason }) => `${peerId} (${reason})`).join(", ")}`);
-    }
-    const pending = c.pending ?? [];
-    if (pending.length > 0) parts.push(`    pending: ${pending.join(", ")}`);
-    return parts.join("\n");
-  });
-  return `Dispatch ran. ${cards.length} card(s) dispatched:\n${lines.join("\n")}${note ? `\n${note}` : ""}`;
-}
-
 /** graph_draft_prepare: pure local inference, no peer identity, no broker call. */
 async function handleGraphDraftPrepare(args: unknown) {
   const a = args as { question?: string; hints?: string };
@@ -1142,20 +1136,34 @@ async function handleGraphDraftPrepare(args: unknown) {
   }
 }
 
-/** Caller-resolved identity: none of the three companion-eligible handlers
- * read a module variable, so server-deck.ts can supply its own, sourced from
- * the per-tile identity file instead of server.ts's own (unset in that
- * process) registration state. instanceToken is a credential -- never log
- * it, truncated or not. */
-interface CompanionIdentity {
-  host: string;
-  peerId: string | null;
-  groupId: string;
-  instanceToken: string | null;
-  inboxBinding: InboxBindingConfirmation | null;
-  operatorId: string | null;
-  projectKey: string;
-  fromPeer: string;
+async function handleNotifyOperator(args: unknown, identity: CompanionIdentity) {
+  const message = (args as { message?: unknown }).message;
+  if (typeof message !== "string" || !message.trim()) {
+    return { content: [{ type: "text" as const, text: "message is required" }], isError: true };
+  }
+  const cred = loadSessionApprovalCredential();
+  const readiness = cred ? inboxDepositReadiness(identity, cred) : "the run credential is unavailable";
+  if (readiness) {
+    logError(`notify_operator refused: ${readiness}`);
+    return { content: [{ type: "text" as const, text: `Notification to the operator refused: ${readiness}.` }], isError: true };
+  }
+  try {
+    const result = await brokerFetch<SendMessageResponse>(
+      "/send-message",
+      signInboxBody(cred!, {
+        from_token: identity.instanceToken,
+        to_peer_id: OPERATOR_PEER_ID,
+        text: composeOutboundMessage(message, false, OPERATOR_PEER_ID),
+        untracked_reply_policy: untrackedReplyPolicy(),
+        expects_reply: false,
+      }, INBOX_GATES.deposit)
+    );
+    if (!result.ok) return { content: [{ type: "text" as const, text: `Failed to notify: ${result.error}` }], isError: true };
+    return { content: [{ type: "text" as const, text: renderSendAck(OPERATOR_PEER_ID, result) }] };
+  } catch (e) {
+    logError("notify_operator failed", e);
+    return { content: [{ type: "text" as const, text: `notify_operator failed: ${e instanceof Error ? e.message : String(e)}` }], isError: true };
+  }
 }
 
 /** ask_operator creates a channel deposit only after the session's Inbox registration is confirmed. */
@@ -1273,41 +1281,8 @@ async function handleAskOperator(name: string, args: unknown, identity: Companio
   }
 }
 
-/** Proof body for a proven-identity route: present only when a token is available. */
 function proofFrom(instanceToken: string | null): Record<string, string> {
   return instanceToken ? { instance_token: instanceToken } : {};
-}
-
-/** roadmap_dispatch: broker-side resolveProvenGraphDraftPeer's sibling route
- * derives from/project from the proven instance_token, so `by`/`project_key`
- * here are declarative only -- the token is what actually authorizes this. */
-async function handleRoadmapDispatch(identity: CompanionIdentity) {
-  try {
-    // One HTTP call: the broker parks the request and holds the response
-    // open until the Deck resolves it (wait_sec) -- imitating
-    // deck_spawn_session's "wait for the real result, else tell the caller
-    // the Deck will announce it". 25 s is two cycles of the Deck's 10 s
-    // poller, so a healthy Deck answers inside the wait and a slow one
-    // still gets its outcome parked on the row.
-    const { request } = await brokerFetch<DispatchRequestAddResponse>(
-      "/dispatch-request/add",
-      {
-        project_key: identity.projectKey,
-        by: identity.fromPeer,
-        wait_sec: 25,
-        ...proofFrom(identity.instanceToken),
-      }
-    );
-    return {
-      content: [{ type: "text" as const, text: renderDispatchOutcome(request) }],
-    };
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    return {
-      content: [{ type: "text" as const, text: `roadmap_dispatch failed: ${msg}` }],
-      isError: true,
-    };
-  }
 }
 
 /** graph_draft_send: same proven-identity shape as handleRoadmapDispatch. */
@@ -2281,7 +2256,9 @@ export {
   filterTools,
   handleGraphDraftPrepare,
   handleAskOperator,
+  handleNotifyOperator,
   handleRoadmapDispatch,
+  renderDispatchOutcome,
   handleGraphDraftSend,
 };
 export type { CompanionIdentity };

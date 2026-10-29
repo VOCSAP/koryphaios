@@ -1,7 +1,14 @@
 import { test, expect, describe } from "bun:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { DECK_TOOL_NAMES, mcp } from "../server-deck.ts";
+
+// The query makes a separate module instance: the family is read at load, and other test files import the default one.
+const ambientFamily = process.env.KORY_MCP_FAMILY;
+process.env.KORY_MCP_FAMILY = "operator";
+const { DECK_TOOL_NAMES, mcp } = await import("../server-deck.ts?family=operator").finally(() => {
+  if (ambientFamily === undefined) delete process.env.KORY_MCP_FAMILY;
+  else process.env.KORY_MCP_FAMILY = ambientFamily;
+});
 
 type DeckTool = { name: string; description?: string; inputSchema: unknown };
 
@@ -55,6 +62,11 @@ function withInflatedDescription(tools: readonly DeckTool[], name: string, extra
 }
 
 describe("the per-turn Deck-only MCP surface stays under its cap", () => {
+  test("the measured family is the one the Deck mounts as kory-operator", () => {
+    expect(DECK_TOOL_NAMES, "the operator family must carry notify_operator").toContain("notify_operator");
+    expect(DECK_TOOL_NAMES, "the operator family must not carry roadmap_dispatch").not.toContain("roadmap_dispatch");
+  });
+
   test("the served tools/list plus the served instructions fit between the floor and DECK_CEILING_CHARS", () => {
     const total = measureDeckSurface(SERVED.tools, SERVED.instructions);
     expect(total, `Deck-only surface fell to ${total} chars: the server served a truncated surface`).toBeGreaterThan(
