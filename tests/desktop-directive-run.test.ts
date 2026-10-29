@@ -22,7 +22,7 @@ import {
   requireContextResumeSupport
 } from "../desktop/src/main/broker-client";
 import { DIRECTIVE_ACCEPTS_PROMPT, directiveCommands, isDirectiveCommand } from "../desktop/src/main/directive";
-import { TOOLS } from "../server.ts";
+import { ROADMAP_TOOLS } from "../shared/roadmap-tools.ts";
 import { extractBracedBody } from "./_braced-body";
 import type { RoadmapDirective, SessionRuntime } from "../desktop/src/shared/types";
 
@@ -1603,7 +1603,7 @@ test("clear_reload journals its workstream rather than a prompt", async () => {
 
 test("clear_reload is accepted only by deck_run_directive, not roadmap cards", () => {
   const schemaEnum = (name: string): string[] => {
-    const tool = TOOLS.find((t) => t.name === name) as
+    const tool = ROADMAP_TOOLS.find((t) => t.name === name) as
       | { inputSchema: { properties: { directive?: { enum?: string[] } } } }
       | undefined;
     const e = tool?.inputSchema.properties.directive?.enum;

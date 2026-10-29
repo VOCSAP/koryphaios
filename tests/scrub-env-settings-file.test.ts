@@ -85,8 +85,21 @@ test("a legitimate override -- a DIFFERENT directory the caller owns -- still wi
   }
 });
 
-test("an ambient Deck control URL, token or tool list never reaches a child, unless the caller sets it", () => {
-  const keys = ["DECK_CONTROL_URL", "DECK_CONTROL_TOKEN", "DECK_CONTROL_TOOLS"] as const;
+test("an ambient Claude messaging socket never reaches a child unless the caller sets it", () => {
+  const key = "CLAUDE_CODE_MESSAGING_SOCKET";
+  const saved = process.env[key];
+  try {
+    process.env[key] = "ambient-messaging-socket";
+    expect(scrubEnv(scratchDir)[key]).toBeUndefined();
+    expect(scrubEnv(scratchDir, { [key]: "set-by-caller" })[key]).toBe("set-by-caller");
+  } finally {
+    if (saved === undefined) delete process.env[key];
+    else process.env[key] = saved;
+  }
+});
+
+test("an ambient Deck control URL, token, tool list, role or operator ceiling never reaches a child, unless the caller sets it", () => {
+  const keys = ["DECK_CONTROL_URL", "DECK_CONTROL_TOKEN", "DECK_CONTROL_TOOLS", "DECK_CONTROL_ROLE", "KORY_OPERATOR_TOOLS"] as const;
   const saved = Object.fromEntries(keys.map((k) => [k, process.env[k]]));
   try {
     for (const k of keys) process.env[k] = `ambient-${k}`;

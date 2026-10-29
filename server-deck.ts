@@ -1,24 +1,4 @@
-/**
- * Second MCP entrypoint (Card c9269fef), loaded only by supervisor/team-lead
- * tiles. Exposes the five Kory-only tools and imports their
- * definitions/handlers from server.ts rather than redefining them.
- * No shebang: unlike server.ts/broker.ts/cli.ts, the
- * shipped artifact is desktop/deck-plugin/mcp/server-deck.mjs run explicitly
- * via `node <path>` (supervisor.ts), never executed as `./server-deck.ts` --
- * a `#!/usr/bin/env bun` surviving into that bundle would misdirect a direct
- * `chmod +x` invocation to bun instead of the node runtime it was built for.
- * Deliberately not a peer (no /register, no heartbeat, no WebSocket): a
- * second registration for the same tile would collide on the same
- * sessionKey(host, cwd, group_id, desk_session) as server.ts and mint a
- * fantom duplicate peer sharing its role -- no fallback self-registration
- * exists anywhere in this file, by construction, not by discipline.
- * Its `instructions` block carries ONLY what neither the core server's own
- * block nor the five tool descriptions already state, and stays under 400
- * characters: Claude Code concatenates every connected server's
- * instructions into one shared budget and silently truncates whichever
- * connects last, so a sentence written on both sides is paid twice and can
- * cost the core block its tail.
- */
+// This companion reuses the sibling tile identity and never registers a second peer.
 
 import { hostname } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -28,13 +8,13 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { ListToolsRequestSchema, CallToolRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { createLogger, coreLogDir } from "./shared/logger.ts";
 import { readSessionIdentityFile } from "./shared/peer-cache.ts";
+import { OPERATOR_CEILING_ENV, OPERATOR_TOOLS, resolveMountCeiling } from "./shared/mount-ceiling.ts";
 import {
   DECK_ONLY_TOOLS,
   TOOLS_ALLOWLIST,
-  filterTools,
   handleGraphDraftPrepare,
   handleAskOperator,
-  handleRoadmapDispatch,
+  handleNotifyOperator,
   handleGraphDraftSend,
   type CompanionIdentity,
 } from "./server.ts";
@@ -42,33 +22,28 @@ import {
 const fileLog = createLogger({ dir: coreLogDir(), name: "server-deck", mirrorToConsole: false });
 
 function log(msg: string) {
-  console.error(`[claude-peers-deck] ${msg}`);
+  console.error(`[kory-operator] ${msg}`);
   fileLog.info(msg);
 }
 
-const DECK_TOOL_NAMES = [
-  "ask_operator",
-  "ask_operator_wait",
-  "graph_draft_prepare",
-  "graph_draft_send",
-  "roadmap_dispatch",
-] as const;
-
-// Applies CLAUDE_PEERS_TOOLS the same way server.ts's own FILTERED_TOOLS
-// does (filterTools(TOOLS, TOOLS_ALLOWLIST)), so a tile configured OUT of a
-// tool via SessionDef.peerTools cannot regain it through this second server.
-// DECK_ONLY_TOOLS (server.ts) is already exactly the five names below; the
-// extra name filter is belt-and-suspenders against the two lists drifting.
-const DECK_TOOLS = filterTools(DECK_ONLY_TOOLS, TOOLS_ALLOWLIST).filter((t) =>
-  (DECK_TOOL_NAMES as readonly string[]).includes(t.name)
-);
+const DECK_TOOL_NAMES = OPERATOR_TOOLS;
+const CEILING = resolveMountCeiling(OPERATOR_CEILING_ENV, process.env[OPERATOR_CEILING_ENV], DECK_TOOL_NAMES);
+if (!CEILING.ok) log(`mount refused, no tool served: ${CEILING.reason}`);
+const DECK_TOOLS = DECK_ONLY_TOOLS.filter((tool) => {
+  if (!CEILING.ok || !CEILING.value.includes(tool.name)) return false;
+  if (tool.name === "notify_operator") {
+    return TOOLS_ALLOWLIST === null || TOOLS_ALLOWLIST.includes("send_message");
+  }
+  return TOOLS_ALLOWLIST === null || TOOLS_ALLOWLIST.includes(tool.name);
+});
 
 const mcp = new Server(
-  { name: "claude-peers-deck", version: "0.9.0" },
+  { name: "kory-operator", version: "0.9.0" },
   {
     capabilities: { tools: {} },
-    instructions:
-      "Kory-only tools, provided only to a Koryphaios lead or supervisor tile. A kind='directive' card filed and queued with the core server's roadmap tools is executed here, by roadmap_dispatch.",
+    instructions: CEILING.ok
+      ? "Kory operator tools for a lead or supervisor tile. Use ask_operator for blocking questions and notify_operator for one-way signed notices."
+      : "No operator tool is served: the mount ceiling is missing or invalid.",
   }
 );
 
@@ -89,7 +64,7 @@ async function resolveCompanionIdentity(): Promise<CompanionIdentity> {
   const token = process.env.CLAUDE_PEERS_DESK_SESSION ?? "";
   if (!token) {
     log(
-      "CLAUDE_PEERS_DESK_SESSION is unset -- graph_draft_send, roadmap_dispatch and new ask_operator deposits cannot use a confirmed identity"
+      "CLAUDE_PEERS_DESK_SESSION is unset -- graph_draft_send and new ask_operator deposits cannot use a confirmed identity"
     );
   }
   const identity = token ? await readSessionIdentityFile(token) : null;
@@ -112,13 +87,7 @@ async function resolveCompanionIdentity(): Promise<CompanionIdentity> {
 
 mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
   const { name, arguments: args } = req.params;
-  // Same coverage rule as server.ts's own tools/call guard: hiding a tool
-  // from tools/list alone still leaves it callable by name, which would make
-  // CLAUDE_PEERS_TOOLS decorative on this second server.
-  if (
-    (DECK_TOOL_NAMES as readonly string[]).includes(name) &&
-    !DECK_TOOLS.some((t) => t.name === name)
-  ) {
+  if (!DECK_TOOLS.some((t) => t.name === name)) {
     return {
       content: [{ type: "text" as const, text: `Error: tool not available: ${name}` }],
       isError: true,
@@ -130,8 +99,8 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
     case "ask_operator":
     case "ask_operator_wait":
       return handleAskOperator(name, args, await resolveCompanionIdentity());
-    case "roadmap_dispatch":
-      return handleRoadmapDispatch(await resolveCompanionIdentity());
+    case "notify_operator":
+      return handleNotifyOperator(args, await resolveCompanionIdentity());
     case "graph_draft_send":
       return handleGraphDraftSend(args, await resolveCompanionIdentity());
     default:

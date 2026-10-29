@@ -35,6 +35,8 @@ import {
   composeCustomDockerfile,
   buildAuthPurgeArgs,
   buildBrokerProbeArgs,
+  buildRoadmapMcpProbeArgs,
+  isRoadmapMcpRegistered,
   buildCopyIntoArgs,
   buildCreateArgs,
   buildExecCommand,
@@ -403,6 +405,8 @@ export class SandboxService extends EventEmitter {
   private readyContainerId: string | null = null
   /** Last broker-bridge verdict (null = not probed yet). */
   private bridgeOk: boolean | null = null
+  /** Last verdict on the kory-roadmap registration (null = not probed yet). */
+  private roadmapMcpOk: boolean | null = null
   /** Container-side transcripts, keyed by HOST cwd (M2 resume). */
   private transcripts = new Map<string, { id: string; mtimeMs: number }[]>()
   private imagePresent: boolean | null = null
@@ -852,6 +856,7 @@ export class SandboxService extends EventEmitter {
         .map((e) => e.name),
       hookWarnings: this.hookWarnings,
       brokerBridge: this.bridgeOk,
+      roadmapMcp: this.roadmapMcpOk,
       driftDays: drift,
       busy: this.busy,
       protection: toProtectionStatus(plan),
@@ -1103,6 +1108,7 @@ export class SandboxService extends EventEmitter {
         this.deps.journal(`sandbox: container ${this.containerName} started`)
         mark('start')
       }
+      if (this.readyContainerId !== info.id) this.roadmapMcpOk = null
       this.readyContainerId = info.id
       this.lastReady = true
       // Projection runs only when the container id or the config fingerprint
@@ -1403,12 +1409,20 @@ export class SandboxService extends EventEmitter {
    */
   async probeBrokerBridge(): Promise<boolean | null> {
     if (!this.lastReady) return null
-    const res = await this.run(
-      buildBrokerProbeArgs(this.containerName, this.deps.containerBrokerUrl()),
-      8000
-    )
+    const [res] = await Promise.all([
+      this.run(buildBrokerProbeArgs(this.containerName, this.deps.containerBrokerUrl()), 8000),
+      this.probeRoadmapMcp()
+    ])
     this.bridgeOk = res.code === 0
     return this.bridgeOk
+  }
+
+  /** Whether kory-roadmap is registered on the auth volume, asked of the container's own CLI. */
+  async probeRoadmapMcp(): Promise<boolean | null> {
+    if (!this.lastReady) return null
+    const res = await this.run(buildRoadmapMcpProbeArgs(this.containerName), 15_000)
+    this.roadmapMcpOk = isRoadmapMcpRegistered(res.code, res.stdout)
+    return this.roadmapMcpOk
   }
 
   // ----- transcripts (resume inside the sandbox, M2) -----

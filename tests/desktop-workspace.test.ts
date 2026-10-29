@@ -42,6 +42,7 @@ import {
   type WorkspaceDeps,
 } from "../desktop/src/main/workspace-service.ts";
 import { onDeckError } from "../desktop/src/main/log.ts";
+import { fromWorkspaceSessions, toWorkspaceSessions } from "../desktop/src/main/workspace-session-map.ts";
 import { SPAWN_CAP } from "../desktop/src/main/spawn-cap.ts";
 import type { AppConfig, SessionDef } from "../desktop/src/shared/types.ts";
 import type { Scope } from "../desktop/src/main/scope.ts";
@@ -167,6 +168,48 @@ test("loadWorkspace rejects a file whose session names a bridge this build does 
     "utf8",
   );
   expect(loadWorkspace(proj, "wsp_good_bridge")?.sessions[0]!.bridge).toBe("clodex");
+});
+
+test("a saved session keeps its tool denial through capture, file and restore, and a file with a hostile name is rejected whole", () => {
+  const defs = [
+    { id: "a", name: "reviewer", cwd: "/p", command: "", args: "", sessionId: "sid-r", color: "#111", createdAt: 1, disallowedTools: ["Write", "Edit"] },
+    { id: "b", name: "dev", cwd: "/p", command: "", args: "", sessionId: "sid-d", color: "#222", createdAt: 2 }
+  ];
+  const captured = toWorkspaceSessions(defs as never);
+  expect(captured[0]!.disallowedTools).toEqual(["Write", "Edit"]);
+  expect(captured[1]).not.toHaveProperty("disallowedTools");
+
+  const proj = freshProject();
+  ensureWorkspacesDir(proj);
+  const ws = sampleWorkspace({ id: "wsp_denial", sessions: captured });
+  saveWorkspace(proj, ws);
+  const restored = fromWorkspaceSessions(loadWorkspace(proj, "wsp_denial")!.sessions);
+  expect(restored[0]!.disallowedTools).toEqual(["Write", "Edit"]);
+  expect(restored[1]!.disallowedTools).toBeUndefined();
+
+  writeFileSync(
+    join(workspacesDir(proj), "wsp_hostile_denial.json"),
+    JSON.stringify({ ...ws, id: "wsp_hostile_denial", sessions: [{ ...captured[0]!, disallowedTools: ["Write", "$(id)"] }] }),
+    "utf8"
+  );
+  expect(loadWorkspace(proj, "wsp_hostile_denial")).toBeNull();
+});
+
+test("a workspace saved with the denial inside args gets it lifted into the field at restore, and a hostile pair stays in args", () => {
+  const base = sampleWorkspace().sessions[0]!;
+  const restored = fromWorkspaceSessions([
+    { ...base, position: 0, args: ["--agent", "reviewer", "--disallowedTools", '"Write,Edit,NotebookEdit"'] },
+    { ...base, position: 1, args: ["--disallowedTools", '"Write,$(id)"'] },
+    { ...base, position: 2, args: ["--disallowedTools", '"Bash"'], disallowedTools: ["Write"] }
+  ]);
+  expect(restored[0]!.args).toBe("--agent reviewer");
+  expect(restored[0]!.disallowedTools).toEqual(["Write", "Edit", "NotebookEdit"]);
+  expect(restored[1]!.args, "an invalid list is not lifted: the fresh launch keeps its current behaviour").toBe(
+    '--disallowedTools "Write,$(id)"'
+  );
+  expect(restored[1]!.disallowedTools).toBeUndefined();
+  expect(restored[2]!.args, "a session that already has the field is left as saved").toBe('--disallowedTools "Bash"');
+  expect(restored[2]!.disallowedTools).toEqual(["Write"]);
 });
 
 test("listWorkspaces sorts by updatedAt desc and skips malformed files", () => {

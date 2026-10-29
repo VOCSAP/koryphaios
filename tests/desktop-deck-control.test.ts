@@ -4,7 +4,7 @@
 // electron/node-pty; the MCP server is spawned for real (bun runs the TS) and
 // spoken to over newline-delimited JSON-RPC.
 
-import { test, expect, afterAll } from "bun:test";
+import { test, expect, afterAll, afterEach } from "bun:test";
 import type { Subprocess } from "bun";
 import {
   startDeckControl,
@@ -14,6 +14,10 @@ import {
   type SpawnSummary
 } from "../desktop/src/main/deck-control.ts";
 import { EMBEDDED_AGENTS, getEmbeddedAgent } from "../desktop/src/main/team-embedded.ts";
+import { mintDemoTile, writeDemoMcpConfig } from "../desktop/src/main/demo-driver.ts";
+import type { WebContents } from "electron";
+import { onDeckError } from "../desktop/src/main/log.ts";
+import { reachedWithin } from "./_bounded-await.ts";
 import { directiveCommands } from "../desktop/src/main/directive.ts";
 import { sanitizeRole } from "../desktop/src/shared/role.ts";
 import {
@@ -29,11 +33,12 @@ import {
 } from "../desktop/src/main/supervisor.ts";
 import type { CreateSessionInput } from "../desktop/src/shared/types.ts";
 import type { DeckControlSession as SessionRuntime } from "../desktop/src/main/deck-control.ts";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { extractBracedBody } from "./_braced-body";
 import { scrubEnv } from "./_scrub-env.ts";
+import { OPERATOR_CEILING_ENV, OPERATOR_TOOLS, encodeMountCeiling } from "../shared/mount-ceiling.ts";
 import {
   arbitrateSpawnApproval,
   arbitrateSpawnGrant,
@@ -44,13 +49,16 @@ import {
   type SpawnGrantStore
 } from "../desktop/src/main/approval-service.ts";
 import type { Approval } from "../desktop/src/main/approval-auth.ts";
+import { writeSessionIdentityFile } from "../shared/peer-cache.ts";
 
 const servers: DeckControlServer[] = [];
 const procs: Subprocess[] = [];
 const tmpDirs: string[] = [];
+const stoppers: Array<() => void> = [];
 
 afterAll(() => {
   for (const s of servers) s.close();
+  for (const stop of stoppers.splice(0)) stop();
   for (const p of procs) {
     try {
       p.kill();
@@ -99,6 +107,7 @@ function makeDeps(state: { sessions: SessionRuntime[] }): DeckControlDeps & {
   restarted: string[];
   leadMcpCalls: { token: string; callerId: string; allowedTools: readonly string[] }[];
   revokedLeadCallerIds: string[];
+  demoMints: Array<{ mcpConfig: string; released: number; release(): void }>;
   spawnOpts: { checkpoint: boolean; hasLead: boolean }[];
   sessionSpawnOpts: Array<{ hasDeckLeadTools?: boolean } | undefined>;
   directiveRuns: {
@@ -121,10 +130,12 @@ function makeDeps(state: { sessions: SessionRuntime[] }): DeckControlDeps & {
   const sessionSpawnOpts: Array<{ hasDeckLeadTools?: boolean } | undefined> = [];
   const leadMcpCalls: { token: string; callerId: string; allowedTools: readonly string[] }[] = [];
   const revokedLeadCallerIds: string[] = [];
+  const demoMints: Array<{ mcpConfig: string; released: number; release(): void }> = [];
   const directiveRuns: { directive: string; peerIds: string[]; prompt: string | undefined; callerId: string }[] = [];
   let n = 0;
   return {
     directiveRuns,
+    demoMints,
     closed,
     journalEntries,
     removedWt,
@@ -204,6 +215,18 @@ function makeDeps(state: { sessions: SessionRuntime[] }): DeckControlDeps & {
     },
     revokeTeamLeadMcpConfig: (callerId) => {
       revokedLeadCallerIds.push(callerId);
+    },
+    sandboxEnabled: () => false,
+    mintDemoTile: async () => {
+      const mint = {
+        mcpConfig: `/state/demo-mcp-${demoMints.length + 1}.json`,
+        released: 0,
+        release() {
+          this.released++;
+        }
+      };
+      demoMints.push(mint);
+      return mint;
     },
     confirmSpawnShellFields: async () => true,
     runDirective: async (directive, peerIds, prompt, callerId, _excludeSupervisor, options) => {
@@ -437,6 +460,23 @@ test("deck_restart_session refuses an exited tile when the live cap is full", as
 
   expect(restarted.status).toBe(400);
   expect(restarted.body.error).toContain("spawn cap");
+  expect(deps.restarted).toEqual([]);
+});
+
+test("deck_restart_session refuses a lead tile even when the team-lead owns it", async () => {
+  const state = { sessions: [] as SessionRuntime[] };
+  const deps = makeDeps(state);
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+  const teamLead = srv.mintCaller("team-lead", TEAM_LEAD_DECK_TOOLS);
+  const spawned = await call(srv, "deck_spawn_session", { name: "lead-owned" }, teamLead.token);
+  const id = (spawned.body.result as { session: { id: string } }).session.id;
+  state.sessions.find((session) => session.id === id)!.lead = true;
+
+  const result = await call(srv, "deck_restart_session", { id }, teamLead.token);
+
+  expect(result.status).toBe(400);
+  expect(result.body.error).toContain("lead or supervisor");
   expect(deps.restarted).toEqual([]);
 });
 
@@ -905,42 +945,46 @@ test("deck_close_all: the in-flight guard is released when a closure throws thro
   expect(retried.status, "a throw must not leave the guard held").toBe(200);
 });
 
-test("deck_close_all is supervisor-only: absent from TEAM_LEAD_DECK_TOOLS, refused to a team-lead and to any restricted list", async () => {
-  expect(TEAM_LEAD_DECK_TOOLS as readonly string[]).not.toContain("deck_close_all");
-  const { deps } = closeAllRig([fakeSession("dev-1", { name: "Dev 1" })]);
+test("deck_close_all is available to a team-lead but skips lead and supervisor tiles", async () => {
+  expect(TEAM_LEAD_DECK_TOOLS as readonly string[]).toContain("deck_close_all");
+  const { deps } = closeAllRig([
+    fakeSession("dev-1", { name: "Dev 1" }),
+    fakeSession("lead-1", { name: "Lead 1", lead: true }),
+    fakeSession("sup-1", { name: "Supervisor", supervisor: true })
+  ]);
   const srv = await startDeckControl(deps);
   servers.push(srv);
   const teamLead = srv.mintCaller("team-lead", TEAM_LEAD_DECK_TOOLS);
-  const narrowed = srv.mintCaller("narrowed", ["deck_close_all"]);
 
-  const notListed = await call(srv, "deck_close_all", {}, teamLead.token);
-  const listedButRestricted = await call(srv, "deck_close_all", {}, narrowed.token);
+  const result = await call(srv, "deck_close_all", {}, teamLead.token);
 
-  expect(notListed.status).toBe(403);
-  expect(listedButRestricted.status).toBe(400);
-  expect(listedButRestricted.body.error).toContain("supervisor");
-  expect(deps.closed).toEqual([]);
+  expect(result.status).toBe(200);
+  expect(deps.closed).toEqual(["dev-1"]);
+  expect(
+    (result.body.result as CloseAllResult).remaining,
+    "a preserved lead tile is not a tile spawned during the call and must not be reported as remaining"
+  ).toEqual([]);
 });
 
-test("deck_close_all: the MCP description says close everything except the supervisor, and the supervisor prompt says to land peers first", () => {
+test("deck_close_all describes each caller's protected tiles", () => {
   const mcpSource = readFileSync(join(import.meta.dir, "..", "desktop", "mcp", "deck-control-mcp.ts"), "utf-8");
   expect(mcpSource).toContain("name: 'deck_close_all'");
-  expect(mcpSource).toContain("Close every session tile except supervisor tiles and locked tiles");
+  expect(mcpSource).toContain("a team-lead also preserves lead tiles");
   expect(mcpSource).toContain("Returns {closed, locked, failed, remaining}");
   expect(SUPERVISOR_SYSTEM_PROMPT).toContain("remaining");
   expect(SUPERVISOR_SYSTEM_PROMPT).toContain("deck_close_all");
   expect(SUPERVISOR_SYSTEM_PROMPT).toContain("before calling deck_close_all");
 });
 
-test("deck_close_session descriptions state the four gestures and close authorization rule", () => {
+test("team-lead prompt and close-all description state the served surface and protected tiles", () => {
   const mcpSource = readFileSync(join(import.meta.dir, "..", "desktop", "mcp", "deck-control-mcp.ts"), "utf-8");
   const embeddedSource = readFileSync(join(import.meta.dir, "..", "desktop", "src", "main", "team-embedded.ts"), "utf-8");
 
-  expect(mcpSource).toContain("A team-lead may close any non-locked peer except its own tile or a lead/supervisor tile.");
-  expect(mcpSource).toContain("The supervisor may close any non-locked peer except supervisor tiles.");
-  expect(embeddedSource).toContain("Close any non-locked session tile except a supervisor tile.");
-  expect(embeddedSource).toContain("You have exactly four gestures:");
-  expect(embeddedSource).toContain("deck_close_session (a non-locked peer other than your own tile or a lead/supervisor tile)");
+  expect(mcpSource).toContain("a team-lead also preserves lead tiles");
+  expect(embeddedSource).toContain("complete Deck surface plus roadmap_dispatch");
+  expect(embeddedSource).toContain("cannot pass free-form args");
+  expect(embeddedSource).toContain("approval dialog");
+  expect(embeddedSource).toContain("cannot close, restart, or clear_reload a lead or supervisor tile");
 });
 
 test("deck_close_session: id and peer_id together are refused; neither is still refused", async () => {
@@ -1147,12 +1191,13 @@ test("embedded spawn: prompt file, harness disallowedTools, team-lead crown rule
   const srv = await startDeckControl(deps);
   servers.push(srv);
 
-  // reviewer: read-only role -> --disallowedTools riding the args + prompt file.
+  // reviewer: read-only role -> structured tool denial + prompt file.
   const reviewer = await call(srv, "deck_spawn_session", { embedded_agent: "reviewer" });
   expect(reviewer.body.ok).toBe(true);
   const reviewerInput = deps.spawnInputs[0]!;
   expect(reviewerInput.appendSystemPromptFile).toBe("/state/embedded-agent-reviewer.md");
-  expect(reviewerInput.args).toContain('--disallowedTools "Write,Edit');
+  expect(reviewerInput.disallowedTools).toEqual(["Write", "Edit", "NotebookEdit"]);
+  expect(reviewerInput.args, "the denial travels as a field, not as a launch argument").toBeUndefined();
   expect(reviewerInput.lead).toBeUndefined();
   // Card ff091064 (piece 2): the deck-control bridge is team-lead-only --
   // no other embedded profile spawned through this same path gets it.
@@ -1275,8 +1320,8 @@ test("a team-lead spawn mints its OWN token/callerId (never the supervisor's), s
   expect(allowed.status).toBe(200);
   expect(allowed.body.ok).toBe(true);
 
-  const refused = await call(srv, "deck_announce", { text: "hi" }, first.token);
-  expect(refused.status).toBe(403);
+  const announced = await call(srv, "deck_announce", { text: "hi" }, first.token);
+  expect(announced.status).toBe(200);
 });
 
 // End to end: the lead's token works, then it does not.
@@ -1344,6 +1389,332 @@ test("a spawn that fails AFTER the mint revokes the token and deletes its config
   const orphanedToken = deps.leadMcpCalls[0]!.token;
   const afterRollback = await call(srv, "deck_list_agents", {}, orphanedToken);
   expect(afterRollback.status).toBe(401);
+});
+
+test("a team-lead config write that throws revokes the minted caller, asks for the file to go and spawns nothing", async () => {
+  const deps = makeDeps({ sessions: [] });
+  deps.writeTeamLeadMcpConfig = (token, callerId, allowedTools) => {
+    deps.leadMcpCalls.push({ token, callerId, allowedTools });
+    throw new Error("MCP mount not written: DECK_CONTROL_TOOLS names unknown tool 'deck_bogus'");
+  };
+  let spawned = 0;
+  deps.spawnSession = async () => {
+    spawned++;
+    throw new Error("must not be reached");
+  };
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+
+  const failed = await call(srv, "deck_spawn_session", { embedded_agent: "team-lead" });
+  expect(failed.status).toBe(400);
+  expect(failed.body.error).toContain("MCP mount not written");
+  expect(spawned, "a refused config still reached the spawn").toBe(0);
+
+  const { callerId, token } = deps.leadMcpCalls[0]!;
+  expect(deps.revokedLeadCallerIds, "the config file of the refused mount was not asked to go").toEqual([callerId]);
+  expect((await call(srv, "deck_list_agents", {}, token)).status, "the minted caller is still live").toBe(401);
+});
+
+test("an embedded prompt write that throws after the mint revokes the minted caller before any config is written", async () => {
+  const deps = makeDeps({ sessions: [] });
+  deps.writeEmbeddedPrompt = () => {
+    throw new Error("prompt file not writable");
+  };
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+
+  const failed = await call(srv, "deck_spawn_session", { embedded_agent: "team-lead" });
+  expect(failed.status).toBe(400);
+  expect(failed.body.error).toContain("prompt file not writable");
+  expect(deps.leadMcpCalls, "a config was written after the prompt failed").toEqual([]);
+  expect(deps.revokedLeadCallerIds, "the caller minted before the prompt write was left alive").toHaveLength(1);
+});
+
+function captureDeckErrors(): string[] {
+  const seen: string[] = [];
+  onDeckError((scope, text) => {
+    seen.push(`${scope} ${text}`);
+  });
+  return seen;
+}
+
+// The demo slot belongs to the process, so a tile a test leaves live would refuse the next test's demo.
+const liveDemoTiles: Array<{ srv: DeckControlServer; id: string }> = [];
+afterEach(() => {
+  for (const { srv, id } of liveDemoTiles.splice(0)) srv.revokeCallerForSession(id);
+});
+
+async function spawnDemo(srv: DeckControlServer, extra: Record<string, unknown> = {}) {
+  const res = await call(srv, "deck_spawn_session", { name: "demo", embedded_agent: "demo", ...extra });
+  const id = (res.body.result as { session?: { id?: string } } | undefined)?.session?.id;
+  if (res.status === 200 && id) liveDemoTiles.push({ srv, id });
+  return res;
+}
+
+test("a demo spawn mounts its per-tile config and the profile's own lists, and mints no lead caller", async () => {
+  const deps = makeDeps({ sessions: [] });
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+
+  const created = await spawnDemo(srv);
+  expect(created.status).toBe(200);
+
+  const profile = getEmbeddedAgent("demo")!;
+  const input = deps.spawnInputs[0]!;
+  expect(input.mcpConfig, "the tile mounts the config its own mint produced").toBe(deps.demoMints[0]!.mcpConfig);
+  expect(input.peerTools).toEqual(profile.peerTools);
+  expect(input.disallowedTools).toEqual(profile.disallowedTools);
+  expect(input.args ?? "", "the denial travels as a field, not as a launch argument").not.toContain("--disallowedTools");
+  expect(input.strictMcpConfig, "the input handed to spawnSession closes the MCP surface").toBe(true);
+  expect(input.args ?? "", "the flag travels as a field, not as a launch argument").not.toContain("--strict-mcp-config");
+  expect(input.role).toBe("demo");
+  expect(deps.leadMcpCalls, "a demo tile gets no deck-control caller").toEqual([]);
+  expect(deps.sessionSpawnOpts[0], "a demo tile is not offered the deck-lead plugin").toBeUndefined();
+});
+
+test("a second demo is refused with a trace while the first tile lives, and accepted once that tile is gone", async () => {
+  const seen = captureDeckErrors();
+  const deps = makeDeps({ sessions: [] });
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+
+  const first = await spawnDemo(srv);
+  const tileId = (first.body.result as { session: { id: string } }).session.id;
+
+  const second = await spawnDemo(srv, { name: "demo-2" });
+  expect(second.status).toBe(400);
+  expect(second.body.error).toContain("already live");
+  expect(deps.demoMints.length, "the refused demo mints nothing").toBe(1);
+  expect(deps.approvals.length, "the refusal precedes any approval").toBe(1);
+  expect(seen.some((line) => line.includes("deck-control") && line.includes("already live"))).toBe(true);
+
+  srv.revokeCallerForSession(tileId);
+  const third = await spawnDemo(srv, { name: "demo-3" });
+  expect(third.status).toBe(200);
+  expect(deps.demoMints.length).toBe(2);
+});
+
+test("the demo token is released once, by the disappearance of its tile", async () => {
+  const deps = makeDeps({ sessions: [] });
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+  const created = await spawnDemo(srv);
+  const tileId = (created.body.result as { session: { id: string } }).session.id;
+
+  expect(srv.revokeCallerForSession("another-tile")).toBe(null);
+  expect(deps.demoMints[0]!.released, "another tile's disappearance does not touch it").toBe(0);
+
+  expect(srv.revokeCallerForSession(tileId)).toBe(null);
+  expect(srv.revokeCallerForSession(tileId)).toBe(null);
+  expect(deps.demoMints[0]!.released).toBe(1);
+});
+
+test("a demo spawn under sandbox is refused with a trace, before any approval or mint", async () => {
+  const seen = captureDeckErrors();
+  const deps = makeDeps({ sessions: [] });
+  deps.sandboxEnabled = () => true;
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+
+  const single = await spawnDemo(srv);
+  expect(single.status).toBe(400);
+  expect(single.body.error).toContain("sandbox");
+  const team = await call(srv, "deck_spawn_team", { team: [{ embedded_agent: "demo", name: "d" }] });
+  expect(team.status).toBe(400);
+  expect(team.body.error).toContain("sandbox");
+
+  expect(deps.approvals).toEqual([]);
+  expect(deps.demoMints).toEqual([]);
+  expect(deps.spawnInputs).toEqual([]);
+  expect(seen.filter((line) => line.includes("deck-control") && line.includes("sandbox")).length).toBe(2);
+});
+
+test("a demo spawn that fails after the mint releases it and frees the slot for a retry", async () => {
+  const deps = makeDeps({ sessions: [] });
+  const realSpawn = deps.spawnSession;
+  let failing = true;
+  deps.spawnSession = async (input, opts) => {
+    if (failing) throw new Error("worktree creation blew up");
+    return realSpawn(input, opts);
+  };
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+
+  const failed = await spawnDemo(srv);
+  expect(failed.status).toBe(400);
+  expect(deps.demoMints[0]!.released).toBe(1);
+
+  failing = false;
+  expect((await spawnDemo(srv)).status).toBe(200);
+});
+
+test("a demo whose browser cannot be driven is traced, spawns no tile and leaves the slot free", async () => {
+  const seen = captureDeckErrors();
+  const deps = makeDeps({ sessions: [] });
+  const realMint = deps.mintDemoTile;
+  let open = false;
+  deps.mintDemoTile = async () => {
+    if (!open) throw new Error("the embedded browser is not open: open the Browser view in the Deck first");
+    return realMint();
+  };
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+
+  const refused = await spawnDemo(srv);
+  expect(refused.status).toBe(400);
+  expect(refused.body.error).toContain("embedded browser is not open");
+  expect(deps.spawnInputs).toEqual([]);
+  expect(seen.some((line) => line.includes("demo tile could not be minted"))).toBe(true);
+
+  open = true;
+  expect((await spawnDemo(srv)).status).toBe(200);
+});
+
+test("two racing demo spawns: the slot is taken before the mint's first await, so exactly one mints", async () => {
+  const deps = makeDeps({ sessions: [] });
+  const realMint = deps.mintDemoTile;
+  let gate!: () => void;
+  const gateOpen = new Promise<void>((resolve) => {
+    gate = resolve;
+  });
+  let mintStarted!: () => void;
+  const started = new Promise<void>((resolve) => {
+    mintStarted = resolve;
+  });
+  deps.mintDemoTile = async () => {
+    mintStarted();
+    await gateOpen;
+    return realMint();
+  };
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+
+  const a = spawnDemo(srv, { name: "a" });
+  const b = spawnDemo(srv, { name: "b" });
+  await reachedWithin(started, "the first demo reaches its mint");
+  const refused = await reachedWithin(Promise.race([a, b]), "the second demo is refused while the first mint is pending");
+  expect(refused.status).toBe(400);
+  expect(refused.body.error).toContain("already live");
+  gate();
+  const settled = await Promise.all([a, b]);
+  expect(settled.map((r) => r.status).sort()).toEqual([200, 400]);
+  expect(deps.demoMints.length).toBe(1);
+});
+
+test("a demo mint refused for a missing global entry is traced, spawns no tile and frees the slot", async () => {
+  const seen = captureDeckErrors();
+  const dir = mkdtempSync(join(tmpdir(), "cp-demo-mint-"));
+  tmpDirs.push(dir);
+  const host = { id: 1, isDestroyed: () => false, getType: () => "window" } as unknown as WebContents;
+  const guest = { id: 2, isDestroyed: () => false, getType: () => "webview", hostWebContents: { id: 1 } } as unknown as WebContents;
+  let userServers: unknown = { "kory-roadmap": { command: "bun", args: ["r.ts"] } };
+  const deps = makeDeps({ sessions: [] });
+  deps.mintDemoTile = () =>
+    mintDemoTile({
+      guests: [host, guest],
+      host,
+      readUserMcpServers: () => userServers,
+      report: () => {},
+      writeConfig: (control, fileName, globals) =>
+        writeDemoMcpConfig({
+          dir,
+          mcpScriptPath: "/s.mjs",
+          execPath: "/e",
+          controlUrl: control.url,
+          controlToken: control.token,
+          fileName,
+          extraServers: globals
+        })
+    });
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+
+  const refused = await spawnDemo(srv);
+  expect(refused.status).toBe(400);
+  expect(refused.body.error).toContain('"claude-peers"');
+  expect(deps.spawnInputs).toEqual([]);
+  expect(seen.some((line) => line.includes("demo tile could not be minted") && line.includes('"claude-peers"'))).toBe(true);
+
+  userServers = {
+    "claude-peers": { command: "bun", args: ["s.ts"] },
+    "kory-roadmap": { command: "bun", args: ["r.ts"] }
+  };
+  const retried = await spawnDemo(srv);
+  expect(retried.status, "the refused attempt left the slot free").toBe(200);
+  const tileId = (retried.body.result as { session: { id: string } }).session.id;
+  srv.revokeCallerForSession(tileId);
+});
+
+test("a team whose demo entry loses the slot during the approval spawns nothing else", async () => {
+  const deps = makeDeps({ sessions: [] });
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+  const realApprove = deps.approveSpawn;
+  deps.approveSpawn = async (entries, plan, callerId) => {
+    const verdict = await realApprove(entries, plan, callerId);
+    if (entries.length === 2) expect((await spawnDemo(srv, { name: "intruder" })).status).toBe(200);
+    return verdict;
+  };
+
+  const res = await call(srv, "deck_spawn_team", {
+    team: [
+      { name: "dev", embedded_agent: "developer" },
+      { name: "demo-in-team", embedded_agent: "demo" }
+    ]
+  });
+  expect(res.status).toBe(400);
+  expect(res.body.error).toContain("already live");
+  expect(deps.spawnInputs.map((input) => input.name), "only the intruder exists: the developer was not spawned before the refusal").toEqual(["intruder"]);
+});
+
+test("an embedded team-lead spawned under sandbox mints no lead caller and writes no bridge file, and the result says so", async () => {
+  const seen = captureDeckErrors();
+  const deps = makeDeps({ sessions: [] });
+  deps.sandboxEnabled = () => true;
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+
+  const single = await call(srv, "deck_spawn_session", { name: "lead", embedded_agent: "team-lead" });
+  expect(single.status).toBe(200);
+  const singleBody = single.body.result as { session: { id: string; bridge_note?: string } };
+  expect(singleBody.session.bridge_note).toContain("bridge refused: sandbox");
+  expect(deps.leadMcpCalls, "no lead credit is minted on the host").toEqual([]);
+  expect(deps.spawnInputs[0]!.mcpConfig).toBeUndefined();
+  expect(deps.sessionSpawnOpts[0]).toBeUndefined();
+
+  const team = await call(srv, "deck_spawn_team", {
+    team: [
+      { name: "lead-2", embedded_agent: "team-lead" },
+      { name: "dev", embedded_agent: "developer" }
+    ]
+  });
+  const spawned = (team.body.result as { spawned: Array<{ name: string; bridge_note?: string }> }).spawned;
+  expect(spawned.find((s) => s.name === "lead-2")!.bridge_note).toContain("bridge refused: sandbox");
+  expect(spawned.find((s) => s.name === "dev")!.bridge_note).toBeUndefined();
+  expect(deps.leadMcpCalls).toEqual([]);
+  expect(seen.filter((line) => line.includes("team-lead bridge refused")).length).toBe(2);
+
+  deps.sandboxEnabled = () => false;
+  const open = await call(srv, "deck_spawn_session", { name: "lead-3", embedded_agent: "team-lead" });
+  expect((open.body.result as { session: { bridge_note?: string } }).session.bridge_note).toBeUndefined();
+  expect(deps.leadMcpCalls.length, "off sandbox the lead still gets its bridge").toBe(1);
+});
+
+test("a team with two demo entries is refused before any approval", async () => {
+  const deps = makeDeps({ sessions: [] });
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+
+  const res = await call(srv, "deck_spawn_team", {
+    team: [
+      { embedded_agent: "demo", name: "a" },
+      { embedded_agent: "demo", name: "b" }
+    ]
+  });
+  expect(res.status).toBe(400);
+  expect(res.body.error).toContain("only one demo");
+  expect(deps.approvals).toEqual([]);
+  expect(deps.demoMints).toEqual([]);
 });
 
 // Card 6c380073, second audit round: `effort` reached the login-shell command
@@ -1661,29 +2032,38 @@ test("only the exact string 'auto' from IPC is an automatic start; anything else
 
 // ----- supervisor mcp-config file -----
 
-test("writeSupervisorMcpConfig writes a valid --mcp-config with env bridge", () => {
+test("writeSupervisorMcpConfig mounts the separated kory operator and deck servers", () => {
   const dir = mkdtempSync(join(tmpdir(), "cp-sup-"));
   tmpDirs.push(dir);
+  const mcpScriptPath = "/res/deck-plugin/mcp/deck-control-mcp.mjs";
   const file = writeSupervisorMcpConfig({
     dir,
-    mcpScriptPath: "/res/deck-plugin/mcp/deck-control-mcp.mjs",
+    mcpScriptPath,
     execPath: "/usr/bin/electron",
     controlUrl: "http://127.0.0.1:1234",
     controlToken: "tok"
   });
   const parsed = JSON.parse(readFileSync(file, "utf-8")) as {
-    mcpServers: Record<
-      string,
-      { command: string; args: string[]; env: Record<string, string> }
-    >;
+    mcpServers: Record<string, { command: string; args: string[]; env: Record<string, string> }>;
   };
-  const server = parsed.mcpServers["deck-control"]!;
-  expect(server.command).toBe("/usr/bin/electron");
-  expect(server.args).toEqual(["/res/deck-plugin/mcp/deck-control-mcp.mjs"]);
-  expect(server.env.ELECTRON_RUN_AS_NODE).toBe("1");
-  expect(server.env.DECK_CONTROL_URL).toBe("http://127.0.0.1:1234");
-  expect(server.env.DECK_CONTROL_TOKEN).toBe("tok");
-  expect(server.env.DECK_CONTROL_TOOLS).toBeUndefined();
+  expect(Object.keys(parsed.mcpServers).sort()).toEqual(["kory-deck", "kory-operator"]);
+  const deck = parsed.mcpServers["kory-deck"]!;
+  expect(deck.command).toBe("/usr/bin/electron");
+  expect(deck.args).toEqual([mcpScriptPath]);
+  expect(deck.env).toMatchObject({
+    ELECTRON_RUN_AS_NODE: "1",
+    DECK_CONTROL_URL: "http://127.0.0.1:1234",
+    DECK_CONTROL_TOKEN: "tok"
+  });
+  expect(deck.env.DECK_CONTROL_TOOLS, "the supervisor perimeter is posted explicitly, never deduced from an absent variable").toBe(
+    [...TEAM_LEAD_DECK_TOOLS, "roadmap_dispatch"].join(",")
+  );
+  expect(deck.env.DECK_CONTROL_ROLE).toBe("supervisor");
+  expect(parsed.mcpServers["kory-operator"]!.args).toEqual([join(dirname(mcpScriptPath), "server-deck.mjs")]);
+  expect(parsed.mcpServers["kory-operator"]!.env).toEqual({
+    ELECTRON_RUN_AS_NODE: "1",
+    [OPERATOR_CEILING_ENV]: encodeMountCeiling(OPERATOR_TOOLS)
+  });
   expect(SUPERVISOR_BRIEFING).toContain("deck_list_agents");
 });
 
@@ -1714,15 +2094,19 @@ test("writeTeamLeadMcpConfig writes its OWN file, scoped to TEAM_LEAD_DECK_TOOLS
   const parsed = JSON.parse(readFileSync(leadFile, "utf-8")) as {
     mcpServers: Record<string, { env: Record<string, string> }>;
   };
-  expect(parsed.mcpServers["deck-control"]!.env.DECK_CONTROL_TOOLS).toBe(
-    TEAM_LEAD_DECK_TOOLS.join(",")
+  expect(parsed.mcpServers["kory-deck"]!.env.DECK_CONTROL_TOOLS).toBe(
+    [...TEAM_LEAD_DECK_TOOLS, "roadmap_dispatch"].join(",")
   );
-  // The supervisor's own file stays unrestricted even after the team-lead's
-  // is written -- the two writers must not share mutable state.
+  expect(parsed.mcpServers["kory-deck"]!.env.DECK_CONTROL_ROLE).toBe("lead");
+  // The supervisor's own file keeps its explicit ceiling and role even after the
+  // team-lead's is written -- the two writers must not share mutable state.
   const supParsed = JSON.parse(readFileSync(supFile, "utf-8")) as {
     mcpServers: Record<string, { env: Record<string, string> }>;
   };
-  expect(supParsed.mcpServers["deck-control"]!.env.DECK_CONTROL_TOOLS).toBeUndefined();
+  expect(supParsed.mcpServers["kory-deck"]!.env.DECK_CONTROL_TOOLS).toBe(
+    [...TEAM_LEAD_DECK_TOOLS, "roadmap_dispatch"].join(",")
+  );
+  expect(supParsed.mcpServers["kory-deck"]!.env.DECK_CONTROL_ROLE).toBe("supervisor");
 });
 
 test("writeSupervisorMcpConfig also writes the deck-lead key, deck-control untouched", () => {
@@ -1739,15 +2123,17 @@ test("writeSupervisorMcpConfig also writes the deck-lead key, deck-control untou
   const parsed = JSON.parse(readFileSync(file, "utf-8")) as {
     mcpServers: Record<string, { command: string; args: string[]; env: Record<string, string> }>;
   };
-  // Exact key set: adding deck-lead must not silently drop or rename deck-control.
-  expect(Object.keys(parsed.mcpServers).sort()).toEqual(["deck-control", "deck-lead"]);
-  const deckControl = parsed.mcpServers["deck-control"]!;
-  expect(deckControl.command).toBe("/usr/bin/electron");
-  expect(deckControl.args).toEqual([mcpScriptPath]);
-  const deckLead = parsed.mcpServers["deck-lead"]!;
-  expect(deckLead.command).toBe("/usr/bin/electron");
-  expect(deckLead.args).toEqual([join(dirname(mcpScriptPath), "server-deck.mjs")]);
-  expect(deckLead.env).toEqual({ ELECTRON_RUN_AS_NODE: "1" });
+  expect(Object.keys(parsed.mcpServers).sort()).toEqual(["kory-deck", "kory-operator"]);
+  const deck = parsed.mcpServers["kory-deck"]!;
+  expect(deck.command).toBe("/usr/bin/electron");
+  expect(deck.args).toEqual([mcpScriptPath]);
+  const operator = parsed.mcpServers["kory-operator"]!;
+  expect(operator.command).toBe("/usr/bin/electron");
+  expect(operator.args).toEqual([join(dirname(mcpScriptPath), "server-deck.mjs")]);
+  expect(operator.env).toEqual({
+    ELECTRON_RUN_AS_NODE: "1",
+    [OPERATOR_CEILING_ENV]: encodeMountCeiling(OPERATOR_TOOLS)
+  });
 });
 
 test("writeTeamLeadMcpConfig also writes the deck-lead key, same shape as the supervisor's", () => {
@@ -1768,13 +2154,39 @@ test("writeTeamLeadMcpConfig also writes the deck-lead key, same shape as the su
   const parsed = JSON.parse(readFileSync(file, "utf-8")) as {
     mcpServers: Record<string, { command: string; args: string[]; env: Record<string, string> }>;
   };
-  expect(Object.keys(parsed.mcpServers).sort()).toEqual(["deck-control", "deck-lead"]);
-  const deckLead = parsed.mcpServers["deck-lead"]!;
-  expect(deckLead.command).toBe("/usr/bin/electron");
-  expect(deckLead.args).toEqual([join(dirname(mcpScriptPath), "server-deck.mjs")]);
-  expect(deckLead.env).toEqual({ ELECTRON_RUN_AS_NODE: "1" });
-  // deck-control keeps its own scoped tool allowlist, unaffected by deck-lead's presence.
-  expect(parsed.mcpServers["deck-control"]!.env.DECK_CONTROL_TOOLS).toBe(TEAM_LEAD_DECK_TOOLS.join(","));
+  expect(Object.keys(parsed.mcpServers).sort()).toEqual(["kory-deck", "kory-operator"]);
+  const operator = parsed.mcpServers["kory-operator"]!;
+  expect(operator.command).toBe("/usr/bin/electron");
+  expect(operator.args).toEqual([join(dirname(mcpScriptPath), "server-deck.mjs")]);
+  expect(operator.env).toEqual({
+    ELECTRON_RUN_AS_NODE: "1",
+    [OPERATOR_CEILING_ENV]: encodeMountCeiling(OPERATOR_TOOLS)
+  });
+  expect(parsed.mcpServers["kory-deck"]!.env.DECK_CONTROL_TOOLS).toBe([...TEAM_LEAD_DECK_TOOLS, "roadmap_dispatch"].join(","));
+  expect(parsed.mcpServers["kory-deck"]!.env.DECK_CONTROL_ROLE).toBe("lead");
+});
+
+test("a writer refuses to write a ceiling the MCP process would refuse, and leaves no config file", () => {
+  const dir = mkdtempSync(join(tmpdir(), "cp-lead-invalid-"));
+  tmpDirs.push(dir);
+  const input = {
+    dir,
+    mcpScriptPath: "/res/deck-plugin/mcp/deck-control-mcp.mjs",
+    execPath: "/usr/bin/electron",
+    controlUrl: "http://127.0.0.1:1234",
+    controlToken: "tok"
+  };
+  expect(
+    () => writeTeamLeadMcpConfig(input, "dispatch-twice.json", [...TEAM_LEAD_DECK_TOOLS, "roadmap_dispatch"]),
+    "a registry that grows roadmap_dispatch would double it and cost every lead its tools"
+  ).toThrow("DECK_CONTROL_TOOLS lists 'roadmap_dispatch' twice");
+  expect(() => writeTeamLeadMcpConfig(input, "unknown-tool.json", ["deck_announce", "deck_bogus"])).toThrow(
+    "DECK_CONTROL_TOOLS names unknown tool 'deck_bogus'"
+  );
+  expect(
+    existsSync(join(dir, "dispatch-twice.json")) || existsSync(join(dir, "unknown-tool.json")),
+    "a refused mount left a config file behind"
+  ).toBe(false);
 });
 
 test("writeSupervisorSystemPrompt regenerates the role anchor from the code constant", () => {
@@ -1813,6 +2225,8 @@ test("deck-control-mcp speaks MCP over stdio and forwards tools/call", async () 
     env: scrubEnv(tmpdir(), {
       DECK_CONTROL_URL: srv.url,
       DECK_CONTROL_TOKEN: srv.token,
+      DECK_CONTROL_TOOLS: SUPERVISOR_MOUNT,
+      DECK_CONTROL_ROLE: "supervisor",
     }),
     stdin: "pipe",
     stdout: "pipe",
@@ -1883,12 +2297,7 @@ test("deck-control-mcp speaks MCP over stdio and forwards tools/call", async () 
   expect(refused.result.isError).toBe(true);
 });
 
-// ----- DECK_CONTROL_TOOLS allow-list (Card ff091064, piece 1) -----
-// Coverage, not just sensitivity: each test below also stands in for "a 19th
-// tool ships tomorrow" -- the mechanism is a NAME filter over the live TOOLS
-// array (deck-control-mcp.ts), never an enumerated allow snapshot, so a new
-// tool automatically inherits whichever branch (unset/listed/empty) applies
-// without this suite needing an update.
+const SUPERVISOR_MOUNT = [...TEAM_LEAD_DECK_TOOLS, "roadmap_dispatch"].join(",");
 
 async function speakMcp(
   env: Record<string, string | undefined>,
@@ -1896,6 +2305,7 @@ async function speakMcp(
 ): Promise<{
   send: (msg: unknown) => void;
   recv: () => Promise<Record<string, unknown>>;
+  stderr: () => Promise<string>;
 }> {
   const extra: Record<string, string> = {};
   for (const [key, value] of Object.entries(env)) {
@@ -1905,13 +2315,27 @@ async function speakMcp(
     env: scrubEnv(tmpdir(), extra),
     stdin: "pipe",
     stdout: "pipe",
-    stderr: "ignore"
+    stderr: "pipe"
   });
   procs.push(proc);
   const reader = proc.stdout.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
+  let stderrText = "";
+  void (async () => {
+    const errReader = proc.stderr.getReader();
+    const errDecoder = new TextDecoder();
+    for (;;) {
+      const { value, done } = await errReader.read();
+      if (done) return;
+      stderrText += errDecoder.decode(value, { stream: true });
+    }
+  })();
   return {
+    stderr: async () => {
+      for (let i = 0; i < 150 && !stderrText.includes('"ev":"deck-control-mcp:'); i++) await Bun.sleep(20);
+      return stderrText;
+    },
     send: (msg: unknown) => {
       proc.stdin.write(JSON.stringify(msg) + "\n");
       void proc.stdin.flush();
@@ -1976,11 +2400,13 @@ const REVIEWED_DECK_CONTROL_DEPS = [
   "listSessions",
   "listTemplates",
   "listWorktrees",
+  "mintDemoTile",
   "removeWorktree",
   "resolveTemplate",
   "restartSession",
   "revokeTeamLeadMcpConfig",
   "runDirective",
+  "sandboxEnabled",
   "sandboxExec",
   "saveTemplate",
   "spawnSession",
@@ -2028,9 +2454,8 @@ test("DeckControlDeps holds exactly the reviewed dependencies, none able to muta
   const { send, recv } = await speakMcp({
     DECK_CONTROL_URL: srv.url,
     DECK_CONTROL_TOKEN: srv.token,
-    // Explicit undefined: force-absent even if the test runner's own
-    // environment happened to carry this var (see speakMcp above).
-    DECK_CONTROL_TOOLS: undefined
+    DECK_CONTROL_TOOLS: SUPERVISOR_MOUNT,
+    DECK_CONTROL_ROLE: "supervisor"
   });
   send({ jsonrpc: "2.0", id: 1, method: "tools/list" });
   const tools = (await recv()) as { result: { tools: { name: string }[] } };
@@ -2061,7 +2486,8 @@ test("initialize serves an instructions block that keeps its supervisor clauses,
   const { send, recv } = await speakMcp({
     DECK_CONTROL_URL: srv.url,
     DECK_CONTROL_TOKEN: srv.token,
-    DECK_CONTROL_TOOLS: undefined
+    DECK_CONTROL_TOOLS: SUPERVISOR_MOUNT,
+    DECK_CONTROL_ROLE: "supervisor"
   });
 
   send({
@@ -2119,7 +2545,8 @@ test("initialize in subset mode (team-lead) speaks as a team-lead, names only th
   const { send, recv } = await speakMcp({
     DECK_CONTROL_URL: srv.url,
     DECK_CONTROL_TOKEN: srv.token,
-    DECK_CONTROL_TOOLS: TEAM_LEAD_DECK_TOOLS.join(",")
+    DECK_CONTROL_TOOLS: TEAM_LEAD_DECK_TOOLS.join(","),
+    DECK_CONTROL_ROLE: "lead"
   });
 
   send({
@@ -2137,7 +2564,7 @@ test("initialize in subset mode (team-lead) speaks as a team-lead, names only th
   expect(block).toContain("You are a team-lead of this Deck, not its supervisor");
   expect(block).toContain("closes any non-locked tile except your own and lead or supervisor tiles");
   expect(block, "a team-lead is never told it is the supervisor").not.toContain("You are the Deck SUPERVISOR");
-  expect(block, "deck_close_all is not served to a team-lead").not.toContain("deck_close_all");
+  expect(block, "deck_close_all is served to a team-lead").toContain("deck_close_all");
   expectNamedToolsServed(block, served);
 });
 
@@ -2147,7 +2574,8 @@ test("DECK_CONTROL_TOOLS set: tools/list returns exactly the named subset, and t
   const { send, recv } = await speakMcp({
     DECK_CONTROL_URL: srv.url,
     DECK_CONTROL_TOKEN: srv.token,
-    DECK_CONTROL_TOOLS: "deck_spawn_session, deck_close_session"
+    DECK_CONTROL_TOOLS: "deck_spawn_session,deck_close_session",
+    DECK_CONTROL_ROLE: "lead"
   });
   send({ jsonrpc: "2.0", id: 1, method: "tools/list" });
   const tools = (await recv()) as { result: { tools: { name: string }[] } };
@@ -2180,23 +2608,21 @@ test("DECK_CONTROL_TOOLS set: tools/list returns exactly the named subset, and t
   expect(refused.result.content[0]!.text).toContain("deck_announce");
 });
 
-test("DECK_CONTROL_TOOLS=TEAM_LEAD_DECK_TOOLS: deck_restart_session is refused AT THE CALL for the team-lead's real scope, not just absent from the listing", async () => {
-  // Uses the real exported TEAM_LEAD_DECK_TOOLS constant rather than a
-  // hand-copied string, so this cannot silently pass once the underlying list
-  // changes without the coverage being re-checked.
+test("DECK_CONTROL_TOOLS=TEAM_LEAD_DECK_TOOLS: deck_restart_session is listed and reaches the Deck boundary", async () => {
   const srv = await startDeckControl(makeDeps({ sessions: [] }));
   servers.push(srv);
   const { send, recv } = await speakMcp({
     DECK_CONTROL_URL: srv.url,
     DECK_CONTROL_TOKEN: srv.token,
-    DECK_CONTROL_TOOLS: TEAM_LEAD_DECK_TOOLS.join(",")
+    DECK_CONTROL_TOOLS: TEAM_LEAD_DECK_TOOLS.join(","),
+    DECK_CONTROL_ROLE: "lead"
   });
   send({ jsonrpc: "2.0", id: 1, method: "tools/list" });
   const tools = (await recv()) as { result: { tools: { name: string }[] } };
   expect(tools.result.tools.map((t) => t.name).sort()).toEqual(
     [...TEAM_LEAD_DECK_TOOLS].sort()
   );
-  expect(tools.result.tools.map((t) => t.name)).not.toContain("deck_restart_session");
+  expect(tools.result.tools.map((t) => t.name)).toContain("deck_restart_session");
 
   send({
     jsonrpc: "2.0",
@@ -2205,11 +2631,8 @@ test("DECK_CONTROL_TOOLS=TEAM_LEAD_DECK_TOOLS: deck_restart_session is refused A
     params: { name: "deck_restart_session", arguments: { id: "whatever" } }
   });
   const refused = (await recv()) as { result: { isError?: boolean; content: { text: string }[] } };
-  // Text pins that this is the MCP-boundary refusal ("tool not available"),
-  // never reaching deck-control.ts's own dispatch/guard at all -- a
-  // business-logic refusal from THAT layer would read differently.
   expect(refused.result.isError).toBe(true);
-  expect(refused.result.content[0]!.text).toBe("Error: tool not available: deck_restart_session");
+  expect(refused.result.content[0]!.text).not.toBe("Error: tool not available: deck_restart_session");
 
   // A listed tool still works normally through the same boundary.
   send({
@@ -2222,13 +2645,14 @@ test("DECK_CONTROL_TOOLS=TEAM_LEAD_DECK_TOOLS: deck_restart_session is refused A
   expect(allowed.result.isError).toBeUndefined();
 });
 
-test("DECK_CONTROL_TOOLS set and EMPTY: zero tools listed, every tools/call refused -- distinct from unset", async () => {
+test("DECK_CONTROL_TOOLS=none is the explicit empty set: zero tools listed, every tools/call refused, no refusal trace", async () => {
   const srv = await startDeckControl(makeDeps({ sessions: [] }));
   servers.push(srv);
-  const { send, recv } = await speakMcp({
+  const { send, recv, stderr } = await speakMcp({
     DECK_CONTROL_URL: srv.url,
     DECK_CONTROL_TOKEN: srv.token,
-    DECK_CONTROL_TOOLS: ""
+    DECK_CONTROL_TOOLS: "none",
+    DECK_CONTROL_ROLE: "lead"
   });
   send({ jsonrpc: "2.0", id: 1, method: "tools/list" });
   const tools = (await recv()) as { result: { tools: unknown[] } };
@@ -2242,7 +2666,290 @@ test("DECK_CONTROL_TOOLS set and EMPTY: zero tools listed, every tools/call refu
   });
   const refused = (await recv()) as { result: { isError?: boolean } };
   expect(refused.result.isError).toBe(true);
+  expect(await stderr()).not.toContain("mount refused");
 });
+
+function mountTrace(text: string): Record<string, unknown> {
+  const line = text.split("\n").find((candidate) => candidate.startsWith('{"ev":"deck-control-mcp:'));
+  if (!line) throw new Error(`no mount trace in stderr: ${text.slice(0, 300)}`);
+  return JSON.parse(line) as Record<string, unknown>;
+}
+
+const BAD_DECK_MOUNTS: Array<[label: string, env: Record<string, string | undefined>, variable: string]> = [
+  ["an absent ceiling", { DECK_CONTROL_TOOLS: undefined, DECK_CONTROL_ROLE: "lead" }, "DECK_CONTROL_TOOLS"],
+  ["an empty ceiling", { DECK_CONTROL_TOOLS: "", DECK_CONTROL_ROLE: "lead" }, "DECK_CONTROL_TOOLS"],
+  ["an unknown tool name", { DECK_CONTROL_TOOLS: "deck_announce,deck_bogus", DECK_CONTROL_ROLE: "lead" }, "DECK_CONTROL_TOOLS"],
+  ["a duplicated name", { DECK_CONTROL_TOOLS: "deck_announce,deck_announce", DECK_CONTROL_ROLE: "lead" }, "DECK_CONTROL_TOOLS"],
+  ["an empty entry", { DECK_CONTROL_TOOLS: "deck_announce,", DECK_CONTROL_ROLE: "lead" }, "DECK_CONTROL_TOOLS"],
+  ["a space after the comma", { DECK_CONTROL_TOOLS: "deck_announce, deck_list_agents", DECK_CONTROL_ROLE: "lead" }, "DECK_CONTROL_TOOLS"],
+  ["an absent role", { DECK_CONTROL_TOOLS: SUPERVISOR_MOUNT, DECK_CONTROL_ROLE: undefined }, "DECK_CONTROL_ROLE"],
+  ["an unknown role", { DECK_CONTROL_TOOLS: SUPERVISOR_MOUNT, DECK_CONTROL_ROLE: "worker" }, "DECK_CONTROL_ROLE"]
+];
+
+for (const [label, mountEnv, variable] of BAD_DECK_MOUNTS) {
+  test(`kory-deck with ${label} serves no tool, answers neutral instructions and traces ${variable}`, async () => {
+    const srv = await startDeckControl(makeDeps({ sessions: [] }));
+    servers.push(srv);
+    const { send, recv, stderr } = await speakMcp({ DECK_CONTROL_URL: srv.url, DECK_CONTROL_TOKEN: srv.token, ...mountEnv });
+    send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "t", version: "0" } }
+    });
+    const init = (await recv()) as { result: { instructions: string } };
+    expect(init.result.instructions).toContain("mount ceiling is missing or invalid");
+    send({ jsonrpc: "2.0", id: 2, method: "tools/list" });
+    const tools = (await recv()) as { result: { tools: unknown[] } };
+    expect(tools.result.tools).toEqual([]);
+    const trace = mountTrace(await stderr()) as { ev: string; variable: string };
+    expect(trace.ev).toContain("mount refused");
+    expect(trace.variable).toBe(variable);
+  });
+}
+
+test("the supervisor ceiling is exactly the registry the bridge declares, so it loses no capability", async () => {
+  const srv = await startDeckControl(makeDeps({ sessions: [] }));
+  servers.push(srv);
+  const { send, recv, stderr } = await speakMcp({
+    DECK_CONTROL_URL: srv.url,
+    DECK_CONTROL_TOKEN: srv.token,
+    DECK_CONTROL_TOOLS: SUPERVISOR_MOUNT,
+    DECK_CONTROL_ROLE: "supervisor"
+  });
+  send({ jsonrpc: "2.0", id: 1, method: "tools/list" });
+  const tools = (await recv()) as { result: { tools: { name: string }[] } };
+  const trace = mountTrace(await stderr()) as { registry: string[]; retained: string[] };
+  expect([...trace.registry].sort(), "the bridge declares a tool the supervisor ceiling does not post, or the reverse").toEqual(
+    SUPERVISOR_MOUNT.split(",").sort()
+  );
+  expect(tools.result.tools.map((t) => t.name).sort()).toEqual(SUPERVISOR_MOUNT.split(",").sort());
+});
+
+interface DispatchProbe {
+  url: string;
+  paths: string[];
+  adds: Array<{ authorization: string | null; body: Record<string, unknown> }>;
+}
+
+const SIBLING_TOKEN = `sibling-${crypto.randomUUID()}`;
+const CONTROL_TOKEN_FOR_DISPATCH = `control-${crypto.randomUUID()}`;
+
+function startDispatchBroker(): DispatchProbe {
+  const probe: DispatchProbe = { url: "", adds: [], paths: [] };
+  const srv = Bun.serve({
+    port: 0,
+    hostname: "127.0.0.1",
+    async fetch(req) {
+      const path = new URL(req.url).pathname;
+      probe.paths.push(path);
+      const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
+      if (path !== "/dispatch-request/add") return new Response(`unexpected route ${path}`, { status: 404 });
+      probe.adds.push({ authorization: req.headers.get("authorization"), body });
+      if (body.instance_token !== SIBLING_TOKEN) return new Response("unknown instance_token", { status: 401 });
+      return Response.json({
+        request: {
+          id: "req-1",
+          project_key: "p",
+          from_peer: "lead-peer",
+          status: "done",
+          created_at: "2026-01-01T00:00:00.000Z",
+          resolved_at: "2026-01-01T00:00:01.000Z",
+          outcome: { cards: [], note: "probe wave" }
+        }
+      });
+    }
+  });
+  stoppers.push(() => srv.stop(true));
+  probe.url = `http://127.0.0.1:${srv.port}`;
+  return probe;
+}
+
+async function speakKoryDeckWithSibling(opts: {
+  probe: DispatchProbe;
+  deckControlTools: string | undefined;
+  role?: "lead" | "supervisor";
+  peersTools?: string;
+  siblingToken?: string | null;
+  controlUrl?: string;
+}): Promise<Awaited<ReturnType<typeof speakMcp>>> {
+  const home = mkdtempSync(join(tmpdir(), "cp-dispatch-home-"));
+  tmpDirs.push(home);
+  const siblingToken = opts.siblingToken === undefined ? SIBLING_TOKEN : opts.siblingToken;
+  if (siblingToken) await writeSessionIdentityFile("dispatch-witness", "lead-peer", "kory-run-group", siblingToken, home);
+  const port = new URL(opts.probe.url).port;
+  return speakMcp({
+    HOME: home,
+    USERPROFILE: home,
+    APPDATA: home,
+    XDG_CONFIG_HOME: home,
+    DECK_CONTROL_URL: opts.controlUrl ?? "http://127.0.0.1:9",
+    DECK_CONTROL_TOKEN: CONTROL_TOKEN_FOR_DISPATCH,
+    DECK_CONTROL_TOOLS: opts.deckControlTools,
+    DECK_CONTROL_ROLE: opts.role ?? "lead",
+    CLAUDE_PEERS_TOOLS: opts.peersTools,
+    CLAUDE_PEERS_BROKER_URL: opts.probe.url,
+    CLAUDE_PEERS_PORT: port,
+    CLAUDE_PEERS_DESK_SESSION: "dispatch-witness"
+  });
+}
+
+async function callTool(
+  mcp: Awaited<ReturnType<typeof speakMcp>>,
+  id: number,
+  name: string
+): Promise<{ isError?: boolean; text: string }> {
+  mcp.send({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: {} } });
+  const res = (await mcp.recv()) as { result: { isError?: boolean; content: { text: string }[] } };
+  return { isError: res.result.isError, text: res.result.content[0]!.text };
+}
+
+async function listedToolNames(mcp: Awaited<ReturnType<typeof speakMcp>>, id: number): Promise<string[]> {
+  mcp.send({ jsonrpc: "2.0", id, method: "tools/list" });
+  const res = (await mcp.recv()) as { result: { tools: { name: string }[] } };
+  return res.result.tools.map((t) => t.name);
+}
+
+async function servedInstructionsMatchTools(
+  mcp: Awaited<ReturnType<typeof speakMcp>>,
+  id: number,
+  label: string,
+  expectEveryServedToolNamed: boolean
+): Promise<string[]> {
+  mcp.send({
+    jsonrpc: "2.0",
+    id,
+    method: "initialize",
+    params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "t", version: "0" } }
+  });
+  const init = (await mcp.recv()) as { result: { instructions: string } };
+  const served = await listedToolNames(mcp, id + 1);
+  const cited = [...new Set(init.result.instructions.match(/\b(?:deck_[a-z_]+|roadmap_dispatch)\b/g) ?? [])];
+  expect(
+    cited.filter((name) => !served.includes(name)),
+    `${label}: the instructions name tools that tools/list does not serve`
+  ).toEqual([]);
+  if (expectEveryServedToolNamed) {
+    expect(
+      served.filter((name) => !cited.includes(name)),
+      `${label}: a served tool is missing from the instructions`
+    ).toEqual([]);
+    expect(served.length, `${label}: tools/list served nothing, the comparison above proves nothing`).toBeGreaterThan(0);
+  }
+  return served;
+}
+
+test("kory-deck roadmap_dispatch proves itself with the sibling instance token and never with the control token", async () => {
+  const probe = startDispatchBroker();
+  const mcp = await speakKoryDeckWithSibling({ probe, deckControlTools: "roadmap_dispatch" });
+
+  const ran = await callTool(mcp, 1, "roadmap_dispatch");
+  expect(ran.isError, `an authorized dispatch was refused: ${ran.text}`).toBeUndefined();
+  expect(ran.text).toContain("Dispatch ran");
+  expect(probe.adds, "exactly one /dispatch-request/add for one call").toHaveLength(1);
+  expect(probe.adds[0]!.body.instance_token, "dispatch must carry the sibling tile's instance_token").toBe(SIBLING_TOKEN);
+  const wire = JSON.stringify(probe.adds);
+  expect(wire, "the Deck control credential reached the broker").not.toContain(CONTROL_TOKEN_FOR_DISPATCH);
+});
+
+test("kory-deck roadmap_dispatch is refused by the broker when the sibling token is wrong, and a missing sibling identity sends no proof", async () => {
+  const probe = startDispatchBroker();
+  const wrong = await speakKoryDeckWithSibling({ probe, deckControlTools: "roadmap_dispatch", siblingToken: "not-the-sibling" });
+  const refused = await callTool(wrong, 1, "roadmap_dispatch");
+  expect(refused.isError, "a wrong sibling token must surface as an error").toBe(true);
+  expect(probe.adds[0]!.body.instance_token).toBe("not-the-sibling");
+  expect(JSON.stringify(probe.adds)).not.toContain(CONTROL_TOKEN_FOR_DISPATCH);
+
+  const noIdentity = await speakKoryDeckWithSibling({ probe, deckControlTools: "roadmap_dispatch", siblingToken: null });
+  const before = probe.adds.length;
+  const absent = await callTool(noIdentity, 1, "roadmap_dispatch");
+  expect(absent.isError, "an absent sibling identity must surface as an error").toBe(true);
+  expect(
+    probe.adds.slice(before).map((add) => add.body.instance_token),
+    "with no sibling identity the call must not fall back to the control credential"
+  ).not.toContain(CONTROL_TOKEN_FOR_DISPATCH);
+});
+
+test("kory-deck refuses a direct roadmap_dispatch call that DECK_CONTROL_TOOLS hides, with zero broker traffic", async () => {
+  const probe = startDispatchBroker();
+  for (const hidden of ["deck_announce", "none"]) {
+    const mcp = await speakKoryDeckWithSibling({ probe, deckControlTools: hidden });
+    expect(await listedToolNames(mcp, 1), `roadmap_dispatch is listed under DECK_CONTROL_TOOLS='${hidden}'`).not.toContain(
+      "roadmap_dispatch"
+    );
+    const refused = await callTool(mcp, 2, "roadmap_dispatch");
+    expect(refused.isError).toBe(true);
+    expect(refused.text).toBe("Error: tool not available: roadmap_dispatch");
+  }
+  expect(probe.adds, "a hidden roadmap_dispatch reached the broker").toEqual([]);
+});
+
+test("kory-deck keeps roadmap_dispatch private when CLAUDE_PEERS_TOOLS excludes it, even under a permissive DECK_CONTROL_TOOLS", async () => {
+  const probe = startDispatchBroker();
+  for (const [deckControlTools, role] of [
+    ["roadmap_dispatch,deck_announce", "lead"],
+    [SUPERVISOR_MOUNT, "supervisor"]
+  ] as const) {
+    const mcp = await speakKoryDeckWithSibling({ probe, deckControlTools, role, peersTools: "list_peers" });
+    const label = `DECK_CONTROL_TOOLS=${deckControlTools === SUPERVISOR_MOUNT ? "the supervisor ceiling" : deckControlTools}`;
+    expect(await listedToolNames(mcp, 1), `${label}: P excludes dispatch yet it is listed`).not.toContain("roadmap_dispatch");
+    const served = await servedInstructionsMatchTools(mcp, 3, label, role === "lead");
+    expect(served, `${label}: P excludes dispatch yet it is served after initialize`).not.toContain("roadmap_dispatch");
+    const refused = await callTool(mcp, 2, "roadmap_dispatch");
+    expect(refused.isError, `${label}: a P-private dispatch was executed: ${refused.text}`).toBe(true);
+    expect(refused.text).toBe("Error: tool not available: roadmap_dispatch");
+  }
+  expect(probe.adds, "a P-private dispatch reached /dispatch-request/add").toEqual([]);
+
+  const granted = await speakKoryDeckWithSibling({
+    probe,
+    deckControlTools: "roadmap_dispatch",
+    peersTools: "list_peers,roadmap_dispatch"
+  });
+  expect(await listedToolNames(granted, 1)).toContain("roadmap_dispatch");
+  expect(await servedInstructionsMatchTools(granted, 3, "P grants dispatch", true)).toContain("roadmap_dispatch");
+  const ran = await callTool(granted, 2, "roadmap_dispatch");
+  expect(ran.isError, `P grants dispatch but the call failed: ${ran.text}`).toBeUndefined();
+  expect(probe.adds).toHaveLength(1);
+});
+
+test("kory-deck keeps roadmap_dispatch private when DECK_CONTROL_TOOLS omits it, even if CLAUDE_PEERS_TOOLS grants it", async () => {
+  const probe = startDispatchBroker();
+  const mcp = await speakKoryDeckWithSibling({
+    probe,
+    deckControlTools: "deck_announce",
+    peersTools: "roadmap_dispatch"
+  });
+  expect(await listedToolNames(mcp, 1)).not.toContain("roadmap_dispatch");
+  const refused = await callTool(mcp, 2, "roadmap_dispatch");
+  expect(refused.isError).toBe(true);
+  expect(probe.adds, "the union of P and DECK_CONTROL_TOOLS opened dispatch").toEqual([]);
+});
+
+test("every tool the bridge serves to the supervisor is refused to a caller granted none or granted no valid ceiling, with no traffic to the Deck or the broker", async () => {
+  const probe = startDispatchBroker();
+  const supervisor = await speakKoryDeckWithSibling({
+    probe,
+    deckControlTools: SUPERVISOR_MOUNT,
+    role: "supervisor",
+    controlUrl: probe.url
+  });
+  const registry = await listedToolNames(supervisor, 1);
+  expect(registry, "the supervisor bridge does not serve the Deck tools").toContain("deck_spawn_session");
+  expect(registry, "roadmap_dispatch is not in the registry this walk derives").toContain("roadmap_dispatch");
+
+  for (const ceiling of ["none", undefined, "", "deck_bogus"]) {
+    const ungranted = await speakKoryDeckWithSibling({ probe, deckControlTools: ceiling, controlUrl: probe.url });
+    expect(await listedToolNames(ungranted, 1), `ceiling ${ceiling ?? "absent"} lists a tool`).toEqual([]);
+    for (const [index, name] of registry.entries()) {
+      expect(await callTool(ungranted, index + 2, name), `${name} is callable under ceiling ${ceiling ?? "absent"}`).toEqual({
+        isError: true,
+        text: `Error: tool not available: ${name}`
+      });
+    }
+  }
+  expect(probe.paths, "a refused call still reached the Deck or the broker").toEqual([]);
+}, 60_000);
 
 // Card f8082208, correction 1: pins that sessionView's `thinking` field
 // carries the REAL ternary activity value over the wire -- 'unknown' must
@@ -3579,7 +4286,8 @@ test("the MCP bridge serves deck_run_directive with the card directive enum and 
   const { send, recv } = await speakMcp({
     DECK_CONTROL_URL: srv.url,
     DECK_CONTROL_TOKEN: srv.token,
-    DECK_CONTROL_TOOLS: undefined
+    DECK_CONTROL_TOOLS: SUPERVISOR_MOUNT,
+    DECK_CONTROL_ROLE: "supervisor"
   });
   send({ jsonrpc: "2.0", id: 1, method: "tools/list" });
   const listed = (await recv()) as {
@@ -3609,20 +4317,37 @@ test("the MCP bridge serves deck_run_directive with the card directive enum and 
   expect(tool!.inputSchema.required).toEqual(["directive", "peer_ids"]);
 });
 
-// ----- per-turn surface budget -----
-// What the model reads on every turn, measured on the wire: the initialize
-// instructions plus the JSON of tools/list, in characters (no tokenizer here).
-// Each mode has its own ceiling, about 10% over what it serves today. When a
-// ceiling breaks, shorten the text; never raise the ceiling.
+// Measure wire characters because initialize instructions and tools/list are resent each turn.
 const SUPERVISOR_CEILING_CHARS = 11_000;
 const SUPERVISOR_FLOOR_CHARS = 6_000;
-const TEAM_LEAD_CEILING_CHARS = 5_600;
+const TEAM_LEAD_CEILING_CHARS = 11_000;
 const TEAM_LEAD_FLOOR_CHARS = 3_000;
-const TEAM_LEAD_TOOLS_ENV = TEAM_LEAD_DECK_TOOLS.join(",");
 
-async function servedSurface(tools: string | undefined, script?: string): Promise<number> {
+function writtenLeadToolsEnv(): string {
+  const dir = mkdtempSync(join(tmpdir(), "cp-lead-budget-"));
+  tmpDirs.push(dir);
+  const file = writeTeamLeadMcpConfig(
+    {
+      dir,
+      mcpScriptPath: "/res/deck-plugin/mcp/deck-control-mcp.mjs",
+      execPath: "/usr/bin/electron",
+      controlUrl: "http://127.0.0.1:1",
+      controlToken: "unused"
+    },
+    "lead-budget.json",
+    TEAM_LEAD_DECK_TOOLS
+  );
+  const parsed = JSON.parse(readFileSync(file, "utf-8")) as {
+    mcpServers: Record<string, { env: Record<string, string> }>;
+  };
+  return parsed.mcpServers["kory-deck"]!.env.DECK_CONTROL_TOOLS!;
+}
+
+const TEAM_LEAD_TOOLS_ENV = writtenLeadToolsEnv();
+
+async function servedSurface(tools: string, role: "lead" | "supervisor", script?: string): Promise<number> {
   const { send, recv } = await speakMcp(
-    { DECK_CONTROL_URL: "http://127.0.0.1:1", DECK_CONTROL_TOKEN: "unused", DECK_CONTROL_TOOLS: tools },
+    { DECK_CONTROL_URL: "http://127.0.0.1:1", DECK_CONTROL_TOKEN: "unused", DECK_CONTROL_TOOLS: tools, DECK_CONTROL_ROLE: role },
     script
   );
   send({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} });
@@ -3637,7 +4362,7 @@ test("the supervisor surface stays between its floor and its ceiling, even run f
   process.env.DECK_CONTROL_TOOLS = TEAM_LEAD_TOOLS_ENV;
   let total: number;
   try {
-    total = await servedSurface(undefined);
+    total = await servedSurface(SUPERVISOR_MOUNT, "supervisor");
   } finally {
     if (ambient === undefined) delete process.env.DECK_CONTROL_TOOLS;
     else process.env.DECK_CONTROL_TOOLS = ambient;
@@ -3647,20 +4372,25 @@ test("the supervisor surface stays between its floor and its ceiling, even run f
 });
 
 test("the team-lead surface stays between its floor and its ceiling", async () => {
-  const total = await servedSurface(TEAM_LEAD_TOOLS_ENV);
+  expect(
+    TEAM_LEAD_TOOLS_ENV.split(","),
+    "the lead profile measured here is not the one supervisor.ts writes: it must serve roadmap_dispatch"
+  ).toContain("roadmap_dispatch");
+  const total = await servedSurface(TEAM_LEAD_TOOLS_ENV, "lead");
   expect(total, "below the floor, the bridge served a truncated surface").toBeGreaterThan(TEAM_LEAD_FLOOR_CHARS);
   expect(total, "shorten the instructions or tool descriptions; never raise the ceiling").toBeLessThanOrEqual(TEAM_LEAD_CEILING_CHARS);
 });
 
-test("the surface measure follows each mode's own tools: a subset tool counts twice, another tool only for the supervisor", async () => {
+test("the surface measure counts dispatch and the lead/supervisor-only tools", async () => {
   const dir = mkdtempSync(join(tmpdir(), "deck-surface-"));
   try {
     const mainDir = join(import.meta.dir, "..", "desktop", "src", "main").replaceAll("\\", "/");
     // The copy lives outside the repo, so its relative imports are pinned to the real modules.
-    const source = readFileSync(join(import.meta.dir, "..", "desktop", "mcp", "deck-control-mcp.ts"), "utf-8").replaceAll(
-      "'../src/main/",
-      `'${mainDir}/`
-    );
+    const rootDir = join(import.meta.dir, "..").replaceAll("\\", "/");
+    const source = readFileSync(join(import.meta.dir, "..", "desktop", "mcp", "deck-control-mcp.ts"), "utf-8")
+      .replaceAll("'../src/main/", `'${mainDir}/`)
+      .replaceAll("'../../shared/", `'${rootDir}/shared/`)
+      .replaceAll("'../../server.ts'", `'${rootDir}/server.ts'`);
     const filler = "x".repeat(2_000);
     const inflate = (tool: string) => {
       const marker = `name: '${tool}',`;
@@ -3669,14 +4399,20 @@ test("the surface measure follows each mode's own tools: a subset tool counts tw
       writeFileSync(script, source.replace(marker, `${marker} description_padding: '${filler}',`), "utf-8");
       return script;
     };
-    const [supervisor, teamLead] = [await servedSurface(undefined), await servedSurface(TEAM_LEAD_TOOLS_ENV)];
+    const [supervisor, teamLead] = [
+      await servedSurface(SUPERVISOR_MOUNT, "supervisor"),
+      await servedSurface(TEAM_LEAD_TOOLS_ENV, "lead")
+    ];
     const inSubset = inflate("deck_close_session");
-    const outside = inflate("deck_list_sessions");
+    const supervisorOnly = inflate("deck_list_sessions");
+    const dispatch = inflate("roadmap_dispatch");
     const padding = `"description_padding":"${filler}",`.length;
-    expect(await servedSurface(undefined, inSubset)).toBe(supervisor + padding);
-    expect(await servedSurface(TEAM_LEAD_TOOLS_ENV, inSubset)).toBe(teamLead + padding);
-    expect(await servedSurface(undefined, outside)).toBe(supervisor + padding);
-    expect(await servedSurface(TEAM_LEAD_TOOLS_ENV, outside)).toBe(teamLead);
+    expect(await servedSurface(SUPERVISOR_MOUNT, "supervisor", dispatch)).toBe(supervisor + padding);
+    expect(await servedSurface(TEAM_LEAD_TOOLS_ENV, "lead", dispatch), "roadmap_dispatch is served to the lead but not counted").toBe(teamLead + padding);
+    expect(await servedSurface(SUPERVISOR_MOUNT, "supervisor", inSubset)).toBe(supervisor + padding);
+    expect(await servedSurface(TEAM_LEAD_TOOLS_ENV, "lead", inSubset)).toBe(teamLead + padding);
+    expect(await servedSurface(SUPERVISOR_MOUNT, "supervisor", supervisorOnly)).toBe(supervisor + padding);
+    expect(await servedSurface(TEAM_LEAD_TOOLS_ENV, "lead", supervisorOnly)).toBe(teamLead + padding);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

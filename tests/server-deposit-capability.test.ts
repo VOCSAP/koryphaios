@@ -14,7 +14,6 @@ import {
   stopBroker,
   type TestBroker,
 } from "./_helper.ts";
-import { deriveInstanceRef } from "../shared/approval.ts";
 import { readSessionIdentityFile, sessionIdentityFileName } from "../shared/peer-cache.ts";
 import { OPERATOR_INSTANCE_TOKEN } from "../shared/types.ts";
 import { reachedWithin } from "./_bounded-await.ts";
@@ -287,7 +286,7 @@ test(
 );
 
 test(
-  "a Deck session registers and deposits with its run credential, resumes its own instance by proof, and cannot leave the run's group",
+  "a Deck session registers with its run credential, cannot write to the operator through send_message, resumes its own instance by proof, and cannot leave the run's group",
   async () => {
     const b = await startBroker();
     brokers.push(b);
@@ -389,16 +388,47 @@ test(
     }
     const firstToken = firstIdentity!.instanceToken;
 
+    const operatorSendsBefore = requests.filter((r) => r.path === "/send-message").length;
     first.send({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "send_message", arguments: { to_peer_id: "operator", message: "attested note" } } });
-    expect((await first.read(1)).result?.isError ?? false).toBe(false);
-    const deposit = requests.find((r) => r.path === "/send-message")!;
-    expect((deposit.body.auth as { v?: number }).v, "the operator deposit is signed").toBe(1);
-    const db = openBrokerDb(b.dbPath, { readonly: true });
-    const stored = db
-      .query("SELECT author_instance_ref, inbox_run_ref FROM messages WHERE to_token = ? AND text = ?")
-      .get(OPERATOR_INSTANCE_TOKEN, "attested note") as { author_instance_ref: string; inbox_run_ref: string } | null;
-    db.close();
-    expect(stored).toEqual({ author_instance_ref: deriveInstanceRef(firstToken), inbox_run_ref: run.run });
+    const operatorRefused = await first.read(1);
+    expect(operatorRefused.result?.isError, "send_message to the operator is refused even for an attested Deck session").toBe(true);
+    expect(operatorRefused.result?.content?.[0]?.text ?? "", "the refusal names where to go").toContain("kory-operator");
+    expect(requests.filter((r) => r.path === "/send-message").length, "the refusal is judged before transport").toBe(operatorSendsBefore);
+
+    for (const [rpcId, args] of [
+      [7, { to_peer_id: OPERATOR_INSTANCE_TOKEN, message: "raw sentinel token" }],
+      [8, { to_id: "operator", message: "to_id spelling" }],
+    ] as const) {
+      first.send({ jsonrpc: "2.0", id: rpcId, method: "tools/call", params: { name: "send_message", arguments: args } });
+      const refusedSpelling = await first.read(rpcId);
+      const spelled = JSON.stringify(Object.keys(args));
+      expect(refusedSpelling.result?.isError, `${spelled} is refused`).toBe(true);
+      expect(refusedSpelling.result?.content?.[0]?.text ?? "", `${spelled} gets the refusal that names kory-operator`).toContain("kory-operator");
+    }
+    expect(requests.filter((r) => r.path === "/send-message").length, "no spelling of the operator reaches the broker").toBe(operatorSendsBefore);
+
+    const peerReg = await fetch(`${b.url}/register`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        pid: process.pid,
+        cwd: settingsDir,
+        git_root: null,
+        tty: null,
+        summary: "",
+        host: "test-host",
+        client_pid: 1,
+        project_key: "deposit-capability-peer",
+        group_id: run.group,
+        group_secret_hash: await sha256Hex(alpha),
+      }),
+    });
+    expect(peerReg.status).toBe(200);
+    const ordinaryPeer = (await peerReg.json()) as { peer_id: string };
+    first.send({ jsonrpc: "2.0", id: 6, method: "tools/call", params: { name: "send_message", arguments: { to_peer_id: ordinaryPeer.peer_id, message: "ordinary note" } } });
+    const peerSent = await first.read(6);
+    expect(peerSent.result?.isError ?? false, peerSent.result?.content?.[0]?.text).toBe(false);
+    expect(requests.filter((r) => r.path === "/send-message").length, "an ordinary peer send reaches the broker").toBe(operatorSendsBefore + 1);
 
     const disconnectsBefore = requests.filter((r) => r.path === "/disconnect").length;
     first.send({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "switch_group", arguments: { name: "beta" } } });
@@ -412,10 +442,6 @@ test(
     first.send({ jsonrpc: "2.0", id: 30, method: "tools/call", params: { name: "switch_group", arguments: { name: "alpha" } } });
     expect((await first.read(30)).result?.isError).toBe(true);
     expect((await identity())?.inboxBinding, "a failed disconnect restores the readiness snapshot").not.toBeNull();
-    const depositsBeforeDisconnectFailure = requests.filter((r) => r.path === "/send-message").length;
-    first.send({ jsonrpc: "2.0", id: 31, method: "tools/call", params: { name: "send_message", arguments: { to_peer_id: "operator", message: "after disconnect failure" } } });
-    expect((await first.read(31)).result?.isError ?? false).toBe(false);
-    expect(requests.filter((r) => r.path === "/send-message").length).toBe(depositsBeforeDisconnectFailure + 1);
 
     const vanished = `${credFile}.vanished`;
     let snapshotPresentAfterDisconnect: boolean | null = null;
@@ -446,11 +472,6 @@ test(
       expect((await switching.read(1)).result?.isError, `${fault}: re-register fails after /disconnect`).toBe(true);
       expect(await readSessionIdentityFile(switchDesk, settingsDir), `${fault}: no ready snapshot remains between disconnect and a new acknowledgement`).toBeNull();
 
-      const depositsBeforeFailedSwitch = requests.filter((r) => r.path === "/send-message").length;
-      switching.send({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "send_message", arguments: { to_peer_id: "operator", message: `after-${fault}` } } });
-      const refusedAfterSwitch = await switching.read(2);
-      expect(refusedAfterSwitch.result?.isError, `${fault}: the stale tuple is refused locally`).toBe(true);
-      expect(requests.filter((r) => r.path === "/send-message").length, `${fault}: no deposit follows a failed switch`).toBe(depositsBeforeFailedSwitch);
       faults.delete("/register");
       switching.proc.kill();
       await switching.proc.exited;
@@ -465,13 +486,6 @@ test(
     expect(requests.filter((r) => r.path === "/disconnect").length).toBe(disconnectsBeforeSameGroup);
     expect(peerStatus(liveToken)).toBe("active");
     renameSync(parked, credFile);
-
-    faults.set("/send-message", "refuse");
-    first.send({ jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: "send_message", arguments: { to_peer_id: "operator", message: "refused note" } } });
-    expect((await first.read(5)).result?.isError).toBe(true);
-    await until(() => first.stderr.text.includes("send_message failed"), "the failed signed deposit is logged");
-    const refusedDeposit = requests.filter((r) => r.path === "/send-message").at(-1)!;
-    expect(first.stderr.text.includes((refusedDeposit.body.auth as { sig: string }).sig), "no signed body in the log").toBe(false);
 
     first.proc.kill("SIGKILL");
     await first.proc.exited;
@@ -516,7 +530,7 @@ test(
     bare.send({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "send_message", arguments: { to_peer_id: "operator", message: "bare note" } } });
     const bareRefused = await bare.read(1);
     expect(bareRefused.result?.isError).toBe(true);
-    expect(bareRefused.result?.content?.[0]?.text ?? "").toContain("run credential is unavailable");
+    expect(bareRefused.result?.content?.[0]?.text ?? "").toContain("kory-operator");
     expect(requests.filter((r) => r.path === "/send-message").length, "nothing reaches the broker").toBe(sendsBefore);
 
     const peerRows = (): number => {

@@ -391,6 +391,33 @@ test("audit fix 1 sexies: writeEmbeddedAgentPrompt's real output (team-role anch
   rmSync(userDataDir, { recursive: true, force: true });
 });
 
+test("probeRoadmapMcp answers null before the container is ready, then the registration verdict of the container's own claude", async () => {
+  const stateDir = mkdtempSync(join(tmpdir(), "cp-sandbox-svc-roadmap-probe-"));
+  const calls: string[][] = [];
+  let reply: SandboxExecResult = { code: 0, stdout: "kory-roadmap:\n  Scope: User config (available in all your projects)\n", stderr: "" };
+  const svc = new SandboxService(
+    makeDeps("/project/roadmap-probe", stateDir, async (_file, args) => {
+      calls.push(args);
+      if (args[0] === "version") return { code: 0, stdout: "1.2.3", stderr: "" };
+      return reply;
+    })
+  );
+  writeSandboxSettings(join(stateDir, "sandbox.json"), "k", { enabled: true });
+  await svc.detectEngine();
+
+  expect(await svc.probeRoadmapMcp(), "an unready container is unknown, not unregistered").toBeNull();
+  expect(calls.filter((args) => args[0] === "exec")).toEqual([]);
+
+  (svc as unknown as { lastReady: boolean }).lastReady = true;
+  expect(await svc.probeRoadmapMcp()).toBe(true);
+  expect(calls.at(-1)).toEqual(["exec", containerNameFor("/project/roadmap-probe"), "claude", "mcp", "get", "kory-roadmap"]);
+
+  reply = { code: 1, stdout: 'No MCP server named "kory-roadmap".', stderr: "" };
+  expect(await svc.probeRoadmapMcp()).toBe(false);
+  expect(((await svc.status()) as { roadmapMcp: boolean | null }).roadmapMcp, "the verdict reaches the status the Docker view renders").toBe(false);
+  rmSync(stateDir, { recursive: true, force: true });
+});
+
 test("cleanupSession reports an unavailable launch with its tile id", async () => {
   const reports: Array<[string, string]> = [];
   onDeckError((scope, text) => reports.push([scope, text]));

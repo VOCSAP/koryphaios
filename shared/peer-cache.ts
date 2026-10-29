@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -136,16 +137,13 @@ export async function writeDeskSessionId(
   );
 }
 
-/**
- * Filename of the per-tile identity file (Card c9269fef, lots L2-bis/L3):
- * carries peer_id, group_id and instance_token, the last a SECRET, which is
- * why the file is written 0600 (writeCacheAtomic). Keyed by the same
- * desk-session token as deskSessionFileName, since that is the only value
- * both the main server.ts process and a companion MCP process for the same
- * tile already share.
- */
 export function sessionIdentityFileName(token: string): string {
   return `session-identity-${sanitizeSessionId(token)}.json`;
+}
+
+export function globalSessionIdentityFileName(messagingSocket: string): string {
+  const hash = createHash("sha256").update(messagingSocket).digest("hex");
+  return `global-session-identity-${hash}.json`;
 }
 
 export interface InboxBindingConfirmation {
@@ -154,12 +152,77 @@ export interface InboxBindingConfirmation {
   groupId: string;
 }
 
+export interface WindowsWriterGeneration {
+  platform: "win32";
+  pid: number;
+  creationUtc: string;
+}
+
+export interface LinuxWriterGeneration {
+  platform: "linux";
+  pid: number;
+  startToken: string;
+  bootId: string;
+}
+
+export type WriterGeneration = WindowsWriterGeneration | LinuxWriterGeneration;
+
 export interface SessionIdentity {
   peerId: string;
   groupId: string;
   instanceToken: string;
   inboxBinding: InboxBindingConfirmation | null;
   operatorId: string | null;
+  writerGeneration?: WriterGeneration;
+  projectKey?: string;
+  brokerUrl?: string;
+}
+
+export interface SessionIdentityReadOptions {
+  measureWriterGeneration?: (pid: number) => Promise<WriterGeneration | null>;
+  verifyWriterGeneration?: boolean;
+  requireProjectKey?: boolean;
+}
+
+function sameWriterGeneration(expected: WriterGeneration, measured: WriterGeneration): boolean {
+  if (expected.platform !== measured.platform || expected.pid !== measured.pid) return false;
+  if (expected.platform === "win32" || measured.platform === "win32") {
+    return expected.platform === "win32" && measured.platform === "win32" && expected.creationUtc === measured.creationUtc;
+  }
+  return expected.startToken === measured.startToken && expected.bootId === measured.bootId;
+}
+
+function parseWriterGeneration(value: unknown): WriterGeneration | null {
+  if (!value || typeof value !== "object") return null;
+  const generation = value as Record<string, unknown>;
+  if (generation.platform === "win32") {
+    if (
+      typeof generation.pid !== "number" ||
+      !Number.isSafeInteger(generation.pid) ||
+      generation.pid <= 0 ||
+      typeof generation.creation_utc !== "string" ||
+      !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{1,9}Z$/.test(generation.creation_utc)
+    ) return null;
+    return { platform: "win32", pid: generation.pid, creationUtc: generation.creation_utc };
+  }
+  if (generation.platform === "linux") {
+    if (
+      typeof generation.pid !== "number" ||
+      !Number.isSafeInteger(generation.pid) ||
+      generation.pid <= 0 ||
+      typeof generation.start_token !== "string" ||
+      !/^\d+$/.test(generation.start_token) ||
+      typeof generation.boot_id !== "string" ||
+      generation.boot_id.length === 0
+    ) return null;
+    return {
+      platform: "linux",
+      pid: generation.pid,
+      startToken: generation.start_token,
+      bootId: generation.boot_id,
+    };
+  }
+  return null;
 }
 
 /**
@@ -168,28 +231,32 @@ export interface SessionIdentity {
  * -- the reader rejects a partial identity too, so the writer must not
  * produce one. The identity snapshot is written atomically.
  */
-export async function writeSessionIdentityFile(
-  token: string,
+async function writeIdentityFile(
+  fileName: string,
   peerId: string,
   groupId: string,
   instanceToken: string,
-  home: string = homedir(),
-  inboxBinding: InboxBindingConfirmation | null = null,
-  operatorId: string | null = null,
+  home: string,
+  projectKey: string | null,
+  inboxBinding: InboxBindingConfirmation | null,
+  operatorId: string | null,
+  writerGeneration: WriterGeneration | null,
+  brokerUrl: string | null,
 ): Promise<void> {
-  const safeToken = sanitizeSessionId(token);
-  if (!safeToken || !peerId || !groupId || !instanceToken) return;
+  if (!peerId || !groupId || !instanceToken) return;
   if ((inboxBinding === null) !== (operatorId === null)) {
     throw new Error("Inbox binding confirmation and operator must be written together");
   }
   const cacheDir = join(home, ".claude", "peers");
   await mkdir(cacheDir, { recursive: true });
   await writeCacheAtomic(
-    join(cacheDir, sessionIdentityFileName(safeToken)),
+    join(cacheDir, fileName),
     JSON.stringify({
       peer_id: peerId,
       group_id: groupId,
       instance_token: instanceToken,
+      ...(projectKey ? { project_key: projectKey } : {}),
+      ...(brokerUrl ? { broker_url: brokerUrl } : {}),
       ...(inboxBinding && operatorId
         ? {
             inbox_binding: {
@@ -200,7 +267,73 @@ export async function writeSessionIdentityFile(
             operator_id: operatorId,
           }
         : {}),
-    })
+      ...(writerGeneration
+        ? {
+            writer_generation: writerGeneration.platform === "win32"
+              ? {
+                  platform: "win32",
+                  pid: writerGeneration.pid,
+                  creation_utc: writerGeneration.creationUtc,
+                }
+              : {
+                  platform: "linux",
+                  pid: writerGeneration.pid,
+                  start_token: writerGeneration.startToken,
+                  boot_id: writerGeneration.bootId,
+                },
+          }
+        : {}),
+    }),
+  );
+}
+
+export async function writeSessionIdentityFile(
+  token: string,
+  peerId: string,
+  groupId: string,
+  instanceToken: string,
+  home: string = homedir(),
+  inboxBinding: InboxBindingConfirmation | null = null,
+  operatorId: string | null = null,
+): Promise<void> {
+  const safeToken = sanitizeSessionId(token);
+  if (!safeToken) return;
+  await writeIdentityFile(
+    sessionIdentityFileName(safeToken),
+    peerId,
+    groupId,
+    instanceToken,
+    home,
+    null,
+    inboxBinding,
+    operatorId,
+    null,
+    null,
+  );
+}
+
+export async function writeGlobalSessionIdentityFile(
+  messagingSocket: string,
+  peerId: string,
+  groupId: string,
+  instanceToken: string,
+  projectKey: string,
+  home: string = homedir(),
+  writerGeneration: WriterGeneration | null = null,
+  brokerUrl: string = "",
+): Promise<void> {
+  if (!messagingSocket || !projectKey || !brokerUrl) return;
+  await writeIdentityFile(
+    globalSessionIdentityFileName(messagingSocket),
+    peerId,
+    groupId,
+    instanceToken,
+    home,
+    projectKey,
+    null,
+    null,
+    writerGeneration,
+    brokerUrl,
   );
 }
 
@@ -211,24 +344,36 @@ export async function writeSessionIdentityFile(
  * Never log the return value:
  * instanceToken is a credential.
  */
-export async function readSessionIdentityFile(
-  token: string,
-  home: string = homedir(),
+async function readIdentityFile(
+  fileName: string,
+  home: string,
+  options: SessionIdentityReadOptions,
 ): Promise<SessionIdentity | null> {
-  const safeToken = sanitizeSessionId(token);
-  if (!safeToken) return null;
   try {
-    const raw = await readFile(join(home, ".claude", "peers", sessionIdentityFileName(safeToken)), "utf-8");
+    const raw = await readFile(join(home, ".claude", "peers", fileName), "utf-8");
     const parsed = JSON.parse(raw) as {
       peer_id?: unknown;
       group_id?: unknown;
       instance_token?: unknown;
+      project_key?: unknown;
+      broker_url?: unknown;
       inbox_binding?: { version?: unknown; run_ref?: unknown; group_id?: unknown };
       operator_id?: unknown;
+      writer_generation?: unknown;
     };
     if (typeof parsed.peer_id !== "string" || !parsed.peer_id) return null;
     if (typeof parsed.group_id !== "string" || !parsed.group_id) return null;
     if (typeof parsed.instance_token !== "string" || !parsed.instance_token) return null;
+    const projectKey = typeof parsed.project_key === "string" && parsed.project_key ? parsed.project_key : undefined;
+    const brokerUrl = typeof parsed.broker_url === "string" && parsed.broker_url ? parsed.broker_url : undefined;
+    if (options.requireProjectKey && !projectKey) return null;
+    const writerGeneration = parseWriterGeneration(parsed.writer_generation);
+    if (parsed.writer_generation !== undefined && writerGeneration === null) return null;
+    if (options.measureWriterGeneration || options.verifyWriterGeneration) {
+      if (!writerGeneration || !options.measureWriterGeneration) return null;
+      const measured = await options.measureWriterGeneration(writerGeneration.pid);
+      if (!measured || !sameWriterGeneration(writerGeneration, measured)) return null;
+    }
     const inbox = parsed.inbox_binding;
     if (
       inbox?.version === 1 &&
@@ -245,6 +390,9 @@ export async function readSessionIdentityFile(
         instanceToken: parsed.instance_token,
         inboxBinding: { version: 1, runRef: inbox.run_ref, groupId: inbox.group_id },
         operatorId: parsed.operator_id,
+        ...(projectKey ? { projectKey } : {}),
+        ...(brokerUrl ? { brokerUrl } : {}),
+        ...(writerGeneration ? { writerGeneration } : {}),
       };
     }
     return {
@@ -253,9 +401,44 @@ export async function readSessionIdentityFile(
       instanceToken: parsed.instance_token,
       inboxBinding: null,
       operatorId: null,
+      ...(projectKey ? { projectKey } : {}),
+      ...(brokerUrl ? { brokerUrl } : {}),
+      ...(writerGeneration ? { writerGeneration } : {}),
     };
   } catch {
     return null;
+  }
+}
+
+export async function readSessionIdentityFile(
+  token: string,
+  home: string = homedir(),
+  options: SessionIdentityReadOptions = {},
+): Promise<SessionIdentity | null> {
+  const safeToken = sanitizeSessionId(token);
+  if (!safeToken) return null;
+  return readIdentityFile(sessionIdentityFileName(safeToken), home, options);
+}
+
+export async function readGlobalSessionIdentityFile(
+  messagingSocket: string,
+  home: string = homedir(),
+  options: SessionIdentityReadOptions = {},
+): Promise<SessionIdentity | null> {
+  if (!messagingSocket) return null;
+  return readIdentityFile(globalSessionIdentityFileName(messagingSocket), home, options);
+}
+
+export async function deleteGlobalSessionIdentityFile(
+  messagingSocket: string,
+  home: string = homedir(),
+): Promise<void> {
+  if (!messagingSocket) return;
+  try {
+    await unlink(join(home, ".claude", "peers", globalSessionIdentityFileName(messagingSocket)));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return;
+    throw error;
   }
 }
 

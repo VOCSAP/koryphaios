@@ -106,6 +106,55 @@ export async function restartSessionGated(
   })
 }
 
+/**
+ * Who decides each field of a new session. sessions:create is an operator
+ * channel (the paired companion is the operator on the move), so dropping the
+ * main-side fields keeps a request from naming state only the main process
+ * sets. That is hygiene, not a security boundary: free-form `args` still
+ * reaches the claude command line. A field added to CreateSessionInput does
+ * not compile until it is classified here.
+ */
+const SESSION_FIELD_ORIGIN = {
+  name: 'request',
+  cwd: 'request',
+  command: 'request',
+  bridge: 'request',
+  agent: 'request',
+  model: 'request',
+  effort: 'request',
+  role: 'request',
+  args: 'request',
+  prompt: 'request',
+  worktreeBranch: 'request',
+  // WorktreesView adopts an existing worktree by sending it.
+  worktree: 'request',
+  lead: 'request',
+  color: 'request',
+  announce: 'request',
+  peerTools: 'main',
+  supervisor: 'main',
+  mcpConfig: 'main',
+  strictMcpConfig: 'main',
+  disallowedTools: 'main',
+  appendSystemPromptFile: 'main'
+} as const satisfies Record<keyof CreateSessionInput, 'request' | 'main'>
+
+export type MainOnlySessionField = {
+  [K in keyof typeof SESSION_FIELD_ORIGIN]: (typeof SESSION_FIELD_ORIGIN)[K] extends 'main' ? K : never
+}[keyof typeof SESSION_FIELD_ORIGIN]
+
+export const SESSION_FIELDS = Object.keys(SESSION_FIELD_ORIGIN) as Array<keyof CreateSessionInput>
+
+const MAIN_ONLY_FIELDS = SESSION_FIELDS.filter((field) => SESSION_FIELD_ORIGIN[field] === 'main')
+
+export function stripMainOnlySessionFields(
+  input: CreateSessionInput | undefined
+): Omit<CreateSessionInput, MainOnlySessionField> {
+  const requested: CreateSessionInput = { ...input }
+  for (const field of MAIN_ONLY_FIELDS) delete requested[field]
+  return requested
+}
+
 export async function createSessionWithWorktree(
   service: SessionService,
   projectDir: string,

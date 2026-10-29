@@ -1,16 +1,16 @@
-// Supervisor session support (PLAN C5): the generated --mcp-config file that
-// bridges the Home supervisor tile to the deck-control endpoint, plus its
-// built-in briefing prompt (submitted via the C2 initial-prompt mechanism).
-// Card ff091064 (piece 2) adds writeTeamLeadMcpConfig: the same bridge for
-// the window's team-lead tile, scoped by DECK_CONTROL_TOOLS to a narrower
-// tool subset (deck-control-mcp.ts, piece 1) -- a distinct file from the
-// supervisor's own, since both tiles can be live at once and must not race
-// to overwrite each other's --mcp-config.
-//
-// Node builtins only, unit-testable under `bun test`.
+// Each tile receives its own generated MCP config so live sessions never share credentials.
 
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
+import {
+  DECK_CEILING_ENV,
+  DECK_ROLE_ENV,
+  OPERATOR_CEILING_ENV,
+  OPERATOR_TOOLS,
+  encodeMountCeiling,
+  resolveMountCeiling,
+  type DeckRole
+} from '../../../shared/mount-ceiling'
 
 /** Default tile name of the supervisor session. */
 export const SUPERVISOR_NAME = 'supervisor'
@@ -104,96 +104,89 @@ export interface SupervisorMcpConfigInput {
   controlToken: string
 }
 
-/** deck_restart_session stays excluded because a team-lead cannot restart tiles it did not spawn. */
 export const TEAM_LEAD_DECK_TOOLS = [
-  'deck_spawn_session',
+  'deck_team_playbook',
+  'deck_team_agents',
   'deck_spawn_team',
+  'deck_list_agents',
+  'deck_list_models',
+  'deck_list_presets',
+  'deck_spawn_session',
+  'deck_list_sessions',
+  'deck_sandbox_exec',
+  'deck_restart_session',
   'deck_close_session',
-  'deck_run_directive'
+  'deck_close_all',
+  'deck_run_directive',
+  'deck_create_worktree',
+  'deck_list_worktrees',
+  'deck_remove_worktree',
+  'deck_list_templates',
+  'deck_apply_template',
+  'deck_save_template',
+  'deck_announce'
 ] as const
 
-/**
- * Bundled sibling of mcpScriptPath in the same deck-plugin/mcp dir (build:mcp
- * writes both there) -- derived rather than a new SupervisorMcpConfigInput
- * field, so both callers (ensureSupervisor, the team-lead spawn path) need no
- * change to gain the second server.
- * Exported so both writer call sites in index.ts can existsSync this exact
- * path before writing the config -- a single source of truth for the
- * derivation, instead of two independent copies that could drift apart.
- */
 export function deckLeadScriptPath(mcpScriptPath: string): string {
   return join(dirname(mcpScriptPath), 'server-deck.mjs')
 }
 
-/** Shared env/args shape for both writers below. */
+const DECK_MOUNT_REGISTRY = [...TEAM_LEAD_DECK_TOOLS, 'roadmap_dispatch']
+
+/**
+ * The writers are the only author of a ceiling, so an invalid one is raised
+ * here, where the caller can report it, rather than left to cost the tile its
+ * tools silently when the MCP process refuses it.
+ */
+function checkedCeiling(variable: string, tools: readonly string[], registry: readonly string[]): string {
+  const value = encodeMountCeiling(tools)
+  const resolved = resolveMountCeiling(variable, value, registry)
+  if (!resolved.ok) throw new Error(`MCP mount not written: ${resolved.reason}`)
+  return value
+}
+
+/** Shared env/args shape for both writers below: every mount carries its ceilings and role explicitly. */
 function buildDeckControlMcpConfig(
   input: SupervisorMcpConfigInput,
-  toolsAllowlist?: readonly string[]
+  role: DeckRole,
+  toolsAllowlist: readonly string[]
 ): { mcpServers: Record<string, { command: string; args: string[]; env: Record<string, string> }> } {
   const env: Record<string, string> = {
     ELECTRON_RUN_AS_NODE: '1',
     DECK_CONTROL_URL: input.controlUrl,
-    DECK_CONTROL_TOKEN: input.controlToken
+    DECK_CONTROL_TOKEN: input.controlToken,
+    [DECK_CEILING_ENV]: checkedCeiling(DECK_CEILING_ENV, [...toolsAllowlist, 'roadmap_dispatch'], DECK_MOUNT_REGISTRY),
+    [DECK_ROLE_ENV]: role
   }
-  // Unset (undefined) on purpose when no allowlist is passed: DECK_CONTROL_TOOLS
-  // absent means "every tool" to the server (deck-control-mcp.ts), matching
-  // the supervisor's unrestricted surface -- never set it to an empty string
-  // here, that would mean "zero tools" instead.
-  if (toolsAllowlist) env.DECK_CONTROL_TOOLS = toolsAllowlist.join(',')
   return {
     mcpServers: {
-      'deck-control': { command: input.execPath, args: [input.mcpScriptPath], env },
-      // Reserved for the supervisor and team-lead tiles only:
-      // the 5 Kory-only claude-peers tools (ask_operator[_wait],
-      // graph_draft_prepare/send, roadmap_dispatch). No DECK_CONTROL_* here --
-      // server-deck.ts talks to the core broker the same way server.ts does
-      // (loadConfig() off disk), not through the deck-control HTTP endpoint.
-      // CLAUDE_PEERS_DESK_SESSION is deliberately absent from this env block:
-      // it reaches the child by inheritance from the tile's own process env
-      // (confirmed on disk via session-identity-*.json), the same route
-      // server.ts itself relies on -- posing it here explicitly would be a
-      // second, divergent mechanism for the same value.
-      'deck-lead': {
+      'kory-deck': { command: input.execPath, args: [input.mcpScriptPath], env },
+      'kory-operator': {
         command: input.execPath,
         args: [deckLeadScriptPath(input.mcpScriptPath)],
-        env: { ELECTRON_RUN_AS_NODE: '1' }
+        env: {
+          ELECTRON_RUN_AS_NODE: '1',
+          [OPERATOR_CEILING_ENV]: checkedCeiling(OPERATOR_CEILING_ENV, OPERATOR_TOOLS, OPERATOR_TOOLS)
+        }
       }
     }
   }
 }
 
-/**
- * Write the supervisor's .mcp config file and return its path. Rewritten on
- * every supervisor spawn so the per-launch control URL/token stay current.
- * ELECTRON_RUN_AS_NODE makes the Electron binary behave as plain node, so the
- * MCP server runs without any bundled runtime, packaged or dev. Unrestricted
- * tool surface (no DECK_CONTROL_TOOLS): the supervisor keeps every tool.
- */
 export function writeSupervisorMcpConfig(input: SupervisorMcpConfigInput): string {
-  const config = buildDeckControlMcpConfig(input)
+  const config = buildDeckControlMcpConfig(input, 'supervisor', TEAM_LEAD_DECK_TOOLS)
   mkdirSync(input.dir, { recursive: true })
   const file = join(input.dir, 'supervisor-mcp.json')
   writeFileSync(file, JSON.stringify(config, null, 2), 'utf-8')
   return file
 }
 
-/**
- * fileName is required, never defaulted: a lingering default would let a future
- * caller silently overwrite a shared file name, letting two live team-leads
- * trade tokens.
- * allowedTools is likewise required: the caller threads through the same array
- * reference already passed to mintCaller, so the server-side scope and this
- * file's tool list can never independently drift.
- * Uses its own token and its own file, distinct from the supervisor's, so a
- * live supervisor tile and a live team-lead tile never race-overwrite each
- * other's --mcp-config.
- */
 export function writeTeamLeadMcpConfig(
   input: SupervisorMcpConfigInput,
   fileName: string,
   allowedTools: readonly string[]
 ): string {
-  const config = buildDeckControlMcpConfig(input, allowedTools)
+  const config = buildDeckControlMcpConfig(input, 'lead', allowedTools)
   mkdirSync(input.dir, { recursive: true })
   const file = join(input.dir, fileName)
   writeFileSync(file, JSON.stringify(config, null, 2), 'utf-8')

@@ -13,6 +13,8 @@ import {
   stopBroker,
   post,
   approvalListBody,
+  openBrokerDb,
+  runInboxCall,
   scrubEnv,
   type RunCredential,
   type TestBroker,
@@ -22,6 +24,7 @@ import { writeSessionIdentityFile } from "../shared/peer-cache.ts";
 import type { Approval } from "../shared/types.ts";
 import { resolveProjectKey } from "../shared/project-key.ts";
 import { computeProjectKey } from "../shared/summarize.ts";
+import { OPERATOR_CEILING_ENV, OPERATOR_TOOLS, encodeMountCeiling } from "../shared/mount-ceiling.ts";
 
 async function getGitRoot(cwd: string): Promise<string | null> {
   try {
@@ -49,8 +52,10 @@ const SPAWNED_SERVER_PROJECT_KEY = await (async () => {
 const brokers: TestBroker[] = [];
 const procs: ReturnType<typeof Bun.spawn>[] = [];
 const dirs: string[] = [];
+const stoppers: Array<() => void> = [];
 
 afterAll(async () => {
+  for (const stop of stoppers.splice(0)) stop();
   for (const p of procs) {
     try {
       p.kill();
@@ -68,7 +73,7 @@ interface JsonRpcResponse {
   result?: {
     content?: Array<{ text?: string }>;
     isError?: boolean;
-    tools?: Array<{ name: string; inputSchema?: { properties?: Record<string, { maxItems?: number }> } }>;
+    tools?: Array<{ name: string; inputSchema?: { properties?: Record<string, { maxItems?: number }>; required?: string[] } }>;
   };
 }
 
@@ -107,23 +112,55 @@ interface Harness {
   buffer: { text: string };
   op: { privateKey: string; publicKey: string; id: string };
   run: RunCredential | null;
+  peerId: string | null;
+  sends: Array<Record<string, unknown>>;
+  /** Every request path that reached the broker through the tap; empty when the tap is off. */
+  paths: string[];
   send: (msg: unknown) => void;
 }
 
 const DESK_SESSION = "ask-operator-test";
 
-async function boot(withCredential: boolean): Promise<Harness> {
+/** Forwards every request to the real broker and keeps the JSON body of each /send-message: the broker
+ * ignores `expects_reply` for the operator destination, so only the wire shows what the tool sent. */
+function tapSendMessage(target: string): { url: string; port: number; sends: Array<Record<string, unknown>>; paths: string[] } {
+  const sends: Array<Record<string, unknown>> = [];
+  const paths: string[] = [];
+  const srv = Bun.serve({
+    port: 0,
+    hostname: "127.0.0.1",
+    async fetch(req) {
+      const url = new URL(req.url);
+      const raw = req.method === "GET" ? undefined : await req.text();
+      paths.push(url.pathname);
+      if (url.pathname === "/send-message" && raw) sends.push(JSON.parse(raw) as Record<string, unknown>);
+      return fetch(`${target}${url.pathname}${url.search}`, { method: req.method, headers: req.headers, body: raw });
+    },
+  });
+  stoppers.push(() => srv.stop(true));
+  return { url: `http://127.0.0.1:${srv.port}`, port: srv.port as number, sends, paths };
+}
+
+/** `ceiling` null leaves KORY_OPERATOR_TOOLS absent. */
+async function boot(
+  withCredential: boolean,
+  tapWire = false,
+  ceiling: string | null = encodeMountCeiling(OPERATOR_TOOLS)
+): Promise<Harness> {
   const b = await startBroker();
   brokers.push(b);
   const dir = mkdtempSync(join(tmpdir(), "cp-ask-"));
   dirs.push(dir);
 
+  const tap = tapWire ? tapSendMessage(b.url) : null;
   const extra: Record<string, string> = {
-    CLAUDE_PEERS_BROKER_URL: b.url,
-    CLAUDE_PEERS_PORT: String(b.port),
+    CLAUDE_PEERS_BROKER_URL: tap?.url ?? b.url,
+    CLAUDE_PEERS_PORT: String(tap?.port ?? b.port),
     CLAUDE_PEERS_DESK_SESSION: DESK_SESSION,
   };
+  if (ceiling !== null) extra[OPERATOR_CEILING_ENV] = ceiling;
   let run: RunCredential | null = null;
+  let peerId: string | null = null;
   if (withCredential) {
     // A new question is deposited only by a run credential carrying an Inbox
     // block, from a tile whose registration the broker attested for that same
@@ -132,6 +169,7 @@ async function boot(withCredential: boolean): Promise<Harness> {
     run = await mintRunCredential(b, { id: await groupId(label), hash: await sha256Hex(label) }, SPAWNED_SERVER_PROJECT_KEY);
     const reg = await registerAttestedInstance(b, run, "test-host", `/tmp/${label}`);
     expect(reg.status).toBe(200);
+    peerId = reg.body.peer_id;
     await writeSessionIdentityFile(
       DESK_SESSION,
       reg.body.peer_id,
@@ -145,7 +183,7 @@ async function boot(withCredential: boolean): Promise<Harness> {
     writeFileSync(
       credFile,
       JSON.stringify({
-        brokerUrl: b.url,
+        brokerUrl: tap?.url ?? b.url,
         operatorId: FIXTURE_OPERATOR_ID,
         tokenId: run.tokenId,
         sessionRef: `window-${run.run}`,
@@ -181,7 +219,7 @@ async function boot(withCredential: boolean): Promise<Harness> {
   });
   await readUntil(reader, 0, buffer);
 
-  return { b, proc, reader, buffer, op: { ...FIXTURE_OPERATOR, id: FIXTURE_OPERATOR_ID }, run, send };
+  return { b, proc, reader, buffer, op: { ...FIXTURE_OPERATOR, id: FIXTURE_OPERATOR_ID }, run, peerId, sends: tap?.sends ?? [], paths: tap?.paths ?? [], send };
 }
 
 async function firstApproval(h: Harness): Promise<Approval | null> {
@@ -227,6 +265,87 @@ describe("ask_operator over MCP stdio", () => {
     expect(names).toContain("ask_operator_wait");
     const ask = res.result?.tools?.find((t) => t.name === "ask_operator");
     expect(ask?.inputSchema?.properties?.options?.maxItems).toBe(APPROVAL_OPTIONS_MAX);
+  }, 60_000);
+
+  test("the operator family advertises notify_operator and not roadmap_dispatch", async () => {
+    const h = await boot(true);
+    h.send({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} });
+    const res = await readUntil(h.reader, 1, h.buffer);
+    const names = (res.result?.tools ?? []).map((tool) => tool.name);
+    expect(names).toContain("notify_operator");
+    expect(names).not.toContain("roadmap_dispatch");
+    expect(res.result?.tools?.find((tool) => tool.name === "notify_operator")?.inputSchema?.required).toEqual(["message"]);
+  }, 60_000);
+
+  test("notify_operator deposits a signed one-way message", async () => {
+    const h = await boot(true, true);
+    h.send({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "notify_operator", arguments: { message: "review complete" } } });
+    const res = await readUntil(h.reader, 1, h.buffer);
+    expect(res.result?.isError).toBeFalsy();
+    expect(res.result?.content?.[0]?.text).toContain("operator");
+
+    expect(h.sends, "one notification is exactly one /send-message").toHaveLength(1);
+    const wire = h.sends[0]!;
+    expect(wire.to_peer_id).toBe("operator");
+    expect(wire.expects_reply, "a notification asks for no reply").toBe(false);
+    for (const taskField of ["deadline_sec", "task_id", "task_action", "task_label"]) {
+      expect(wire, `a notification must not carry the task field ${taskField}`).not.toHaveProperty(taskField);
+    }
+
+    const drained = await runInboxCall<{ messages: Array<{ from_peer_id: string; text: string }> }>(
+      h.b,
+      "/operator-inbox",
+      h.run!,
+      { session_id: "notify-reread" }
+    );
+    expect(drained.status).toBe(200);
+    expect(
+      drained.body.messages.map((m) => ({ from: m.from_peer_id, text: m.text })),
+      "the operator inbox holds the sender's text verbatim, once"
+    ).toEqual([{ from: h.peerId!, text: "review complete" }]);
+
+    const db = openBrokerDb(h.b.dbPath, { readonly: true });
+    try {
+      const tasks = db.query("SELECT COUNT(*) AS n FROM delegated_tasks").get() as { n: number };
+      expect(tasks.n, "a notification must not open a delegated task").toBe(0);
+    } finally {
+      db.close();
+    }
+  }, 60_000);
+
+  test("a refused surface stops every operator tool before transport, with a live credential and valid arguments", async () => {
+    const VALID: Record<(typeof OPERATOR_TOOLS)[number], Record<string, unknown>> = {
+      ask_operator: { title: "t", question: "q" },
+      ask_operator_wait: { ticket: "x" },
+      notify_operator: { message: "m" },
+      graph_draft_prepare: { question: "q" },
+      graph_draft_send: { title: "t", prompt: "p" },
+    };
+    const refused = await boot(true, true, null);
+    let id = 1;
+    for (const name of OPERATOR_TOOLS) {
+      refused.send({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: VALID[name] } });
+      const res = await readUntil(refused.reader, id, refused.buffer);
+      expect(res.result?.isError, `${name} was served`).toBe(true);
+      expect(res.result?.content?.[0]?.text).toBe(`Error: tool not available: ${name}`);
+      id++;
+    }
+    expect(refused.paths, "a refused tool reached the broker").toEqual([]);
+
+    const live = await boot(true, true);
+    live.send({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "notify_operator", arguments: VALID.notify_operator } });
+    expect((await readUntil(live.reader, 1, live.buffer)).result?.isError).toBeFalsy();
+    expect(live.paths, "the same call under the full ceiling must reach the broker, or the zero above proves nothing").toContain(
+      "/send-message"
+    );
+  }, 60_000);
+
+  test("notify_operator rejects a non-string message before consulting credentials", async () => {
+    const h = await boot(false);
+    h.send({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "notify_operator", arguments: { message: 1 } } });
+    const res = await readUntil(h.reader, 1, h.buffer);
+    expect(res.result?.isError).toBe(true);
+    expect(res.result?.content?.[0]?.text).toBe("message is required");
   }, 60_000);
 
   test("without a credential the tool refuses instead of hanging, naming the real cause", async () => {

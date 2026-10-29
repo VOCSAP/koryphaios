@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { startBroker, stopBroker, post, livePid, scrubEnv, type TestBroker } from "./_helper.ts";
 import { writeSessionIdentityFile } from "../shared/peer-cache.ts";
+import { OPERATOR_CEILING_ENV, OPERATOR_TOOLS, encodeMountCeiling } from "../shared/mount-ceiling.ts";
 
 const brokers: TestBroker[] = [];
 const procs: ReturnType<typeof Bun.spawn>[] = [];
@@ -105,6 +106,7 @@ async function bootDeck(
       CLAUDE_PEERS_BROKER_URL: b.url,
       CLAUDE_PEERS_PORT: String(b.port),
       CLAUDE_PEERS_DESK_SESSION: opts.deskSession,
+      [OPERATOR_CEILING_ENV]: encodeMountCeiling(OPERATOR_TOOLS),
     }),
     stdio: ["pipe", "pipe", "pipe"],
   });
@@ -174,25 +176,8 @@ describe("server-deck.ts token authz", () => {
     expect(res.result?.content?.[0]?.text).toContain("sent to the operator's Deck");
   }, 30_000);
 
-  test("PREDICTION (roadmap_dispatch): a matching identity file is ACCEPTED broker-side (not an auth refusal)", async () => {
-    const res = await callDeckTool(live.deck, "roadmap_dispatch", {});
-    // No peer/tile to actually dispatch to -- the outcome text is whatever
-    // renderDispatchOutcome says for an empty wave, but it must NOT be the
-    // auth-refusal shape ("instance_token is required" / "unknown instance_token").
-    // Checked against the raw TOKEN VALUE, not the field name: a message
-    // that leaked the credential itself would still pass a name-only check.
-    expect(res.result?.isError).toBeFalsy();
-    expect(res.result?.content?.[0]?.text ?? "").not.toContain(live.instanceToken);
-  }, 30_000);
-
   test("NEGATIVE CONTROL (graph_draft_send): an absent identity file is refused explicitly, never a silent success", async () => {
     const res = await callDeckTool(absent, "graph_draft_send", { title: "t", prompt: "p" });
-    expect(res.result?.isError).toBe(true);
-    expect(res.result?.content?.[0]?.text).toContain("instance_token is required");
-  }, 30_000);
-
-  test("NEGATIVE CONTROL (roadmap_dispatch): an absent identity file is refused explicitly, never a silent success", async () => {
-    const res = await callDeckTool(absent, "roadmap_dispatch", {});
     expect(res.result?.isError).toBe(true);
     expect(res.result?.content?.[0]?.text).toContain("instance_token is required");
   }, 30_000);

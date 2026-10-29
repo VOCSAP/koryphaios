@@ -12,13 +12,15 @@
 // blocks a legitimate roadmap write.
 
 /** Free-text fields this hook inspects, per MCP tool. Extending coverage to
- * a future roadmap tool that writes long free text means adding BOTH an
- * entry here AND a matching PreToolUse entry in hooks.json naming that
- * tool -- this list alone does not make the hook fire on it. */
+ * a future roadmap tool that writes long free text, or to another server
+ * prefix, means adding BOTH an entry here AND a matching PreToolUse entry in
+ * hooks.json naming that exact tool -- this list alone does not make the hook
+ * fire on it. Names are closed: a roadmap_* tool under any other prefix is not
+ * guarded. */
 const TOOL_TEXT_FIELDS: Record<string, readonly string[]> = {
-  "mcp__claude-peers__roadmap_add": ["title", "description", "rationale", "context"],
-  "mcp__claude-peers__roadmap_update": ["title", "description", "rationale", "context"],
-  "mcp__claude-peers__roadmap_append_context": ["text"],
+  "mcp__kory-roadmap__roadmap_add": ["title", "description", "rationale", "context"],
+  "mcp__kory-roadmap__roadmap_update": ["title", "description", "rationale", "context"],
+  "mcp__kory-roadmap__roadmap_append_context": ["text"],
 };
 
 export interface HookPayload {
@@ -57,7 +59,7 @@ export function detectSerializationAccident(
   toolName: string,
   toolInput: Record<string, unknown> | undefined
 ): AccidentMatch | null {
-  const fields = TOOL_TEXT_FIELDS[toolName];
+  const fields = Object.hasOwn(TOOL_TEXT_FIELDS, toolName) ? TOOL_TEXT_FIELDS[toolName] : undefined;
   if (!fields || !toolInput) return null;
 
   for (const field of fields) {

@@ -1,11 +1,7 @@
 import { homedir } from 'node:os'
 import type { AppConfig } from '../shared/types'
 import { DEFAULT_PALETTE } from '../shared/palette'
-import {
-  DEFAULT_DEMO_TARGET,
-  DEFAULT_HELP_TARGET,
-  DEFAULT_WAND_TARGET
-} from '../shared/models'
+import { DEFAULT_HELP_TARGET, DEFAULT_WAND_TARGET } from '../shared/models'
 import { SPAWN_CAP } from './spawn-cap'
 import { DEFAULT_LINK_EXCLUSIONS, DEFAULT_LINK_EXTENSIONS } from '../shared/link-policy'
 
@@ -48,7 +44,6 @@ export const DEFAULT_CONFIG: AppConfig = {
   normalizeTerminalCopy: true,
   helpTarget: DEFAULT_HELP_TARGET,
   wandTarget: DEFAULT_WAND_TARGET,
-  demoTarget: DEFAULT_DEMO_TARGET,
   browserUrl: 'http://localhost:3000',
   modelFavorites: [],
   localProviders: [],

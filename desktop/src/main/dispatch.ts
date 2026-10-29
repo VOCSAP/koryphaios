@@ -478,7 +478,7 @@ export function composeStopText(item: RoadmapItem, viaSupervisor: boolean): stri
   ]
   if (viaSupervisor) {
     head.push(
-      'As supervisor: relay the stop to the peers working on this item (send_message), verify they acknowledged, then report the outcome to the operator (send_message to "operator").'
+      'As supervisor: relay the stop to the peers working on this item (send_message), verify they acknowledged, then report the outcome to the operator (notify_operator).'
     )
   } else {
     head.push(

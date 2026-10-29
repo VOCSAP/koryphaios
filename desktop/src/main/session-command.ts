@@ -7,6 +7,7 @@
 // redirected to stdin/file without breaking live keystrokes.
 
 import { join, posix } from 'node:path'
+import { isToolNameList } from '../shared/tool-names'
 import { claudePluginOmissions } from './mods-working-copy'
 
 /**
@@ -72,6 +73,19 @@ export interface SessionCommandInput {
    */
   mcpConfig?: string
   /**
+   * Emitted as `--strict-mcp-config` on BOTH fresh and resume, next to
+   * --mcp-config: --fork-session restores neither, so a resumed tile would
+   * otherwise reload every user MCP server.
+   */
+  strictMcpConfig?: boolean
+  /**
+   * Emitted as `--disallowedTools "<a,b>"` on BOTH fresh and resume:
+   * --fork-session does not restore it, so a resumed read-only or demo tile
+   * would get Bash and Write back. Every name is checked against the tool-name
+   * allow-list and the line is refused, never trimmed, on a bad one.
+   */
+  disallowedTools?: readonly string[]
+  /**
    * Path to a generated system-prompt extension, emitted as
    * `--append-system-prompt-file "<path>"` on BOTH fresh and resume (the
    * system prompt is rebuilt at every launch). Used to anchor the
@@ -98,6 +112,18 @@ function effortFlag(effort?: string): string {
 function mcpConfigFlag(mcpConfig?: string): string {
   const p = mcpConfig?.trim()
   return p ? ` --mcp-config "${p}"` : ''
+}
+
+/** ` --strict-mcp-config` only for the exact boolean `true`, otherwise empty. */
+function strictMcpConfigFlag(strict?: boolean): string {
+  return strict === true ? ' --strict-mcp-config' : ''
+}
+
+/** ` --disallowedTools "<a,b>"` for a non-empty list; throws on a name outside the allow-list. */
+function disallowedToolsFlag(tools?: readonly string[]): string {
+  if (tools === undefined || tools.length === 0) return ''
+  if (!isToolNameList(tools)) throw new Error('disallowedTools holds a name outside the tool-name allow-list')
+  return ` --disallowedTools "${tools.join(',')}"`
 }
 
 /** ` --append-system-prompt-file "<path>"` when set, otherwise empty. */
@@ -281,16 +307,17 @@ export function buildSessionCommandLine(input: SessionCommandInput): string {
 
   if (input.mode === 'resume' && input.prevSessionId) {
     // No args / --agent / --model: Claude auto-restores them on --fork-session.
-    // --effort, --mcp-config, --append-system-prompt-file and --settings are
-    // the exceptions (not auto-restored).
+    // --effort, --mcp-config, --strict-mcp-config, --disallowedTools and
+    // --settings are the exceptions (not auto-restored). --append-system-prompt-file
+    // is restored from the transcript's prompt snapshot; re-passing it does not duplicate it.
     // Ids are double-quoted even though they are UUID-shaped by construction:
     // prevSessionId can originate from the desk-session back-channel, whose file
     // lives in a dir mounted into sandbox containers (validated in
     // desk-session.ts). Quoting is the second lock on that door.
-    return `${base}${pluginFlags(input.pluginDirs)}${additionalDirectoryFlags(input.additionalDirectories)}${mcpConfigFlag(input.mcpConfig)}${appendSystemPromptFlag(input.appendSystemPromptFile)}${settingsFlag(input.settings)} --resume "${input.prevSessionId}" --fork-session --session-id "${input.sessionId}"${effortFlag(input.effort)}`
+    return `${base}${pluginFlags(input.pluginDirs)}${additionalDirectoryFlags(input.additionalDirectories)}${mcpConfigFlag(input.mcpConfig)}${strictMcpConfigFlag(input.strictMcpConfig)}${disallowedToolsFlag(input.disallowedTools)}${appendSystemPromptFlag(input.appendSystemPromptFile)}${settingsFlag(input.settings)} --resume "${input.prevSessionId}" --fork-session --session-id "${input.sessionId}"${effortFlag(input.effort)}`
   }
 
-  let line = `${base}${pluginFlags(input.pluginDirs)}${additionalDirectoryFlags(input.additionalDirectories)}${mcpConfigFlag(input.mcpConfig)}${appendSystemPromptFlag(input.appendSystemPromptFile)} --session-id "${input.sessionId}"`
+  let line = `${base}${pluginFlags(input.pluginDirs)}${additionalDirectoryFlags(input.additionalDirectories)}${mcpConfigFlag(input.mcpConfig)}${strictMcpConfigFlag(input.strictMcpConfig)}${disallowedToolsFlag(input.disallowedTools)}${appendSystemPromptFlag(input.appendSystemPromptFile)} --session-id "${input.sessionId}"`
   const extra = input.args?.trim()
   if (extra) line += ` ${extra}`
   line += effortFlag(input.effort)

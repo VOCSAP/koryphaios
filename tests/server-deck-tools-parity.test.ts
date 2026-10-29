@@ -1,40 +1,20 @@
-// Card 9f75e69f LOT 2: the five Kory-only tools live only in server-deck.ts's
-// DECK_TOOL_NAMES and server.ts's DECK_ONLY_TOOLS. A test that only counts
-// tools would stay green if the wrong five moved; naming each one closes
-// that gap for both the parity between the two lists and the core server's
-// tools/list.
-
 import { test, expect, afterAll } from "bun:test";
 import { startBroker, stopBroker, scrubEnv, type TestBroker } from "./_helper.ts";
 import { DECK_TOOL_NAMES } from "../server-deck.ts";
 import { DECK_ONLY_TOOLS } from "../server.ts";
 
-const FIVE_DECK_ONLY_NAMES = [
-  "roadmap_dispatch",
+const DECK_ONLY_NAMES = [
   "graph_draft_prepare",
   "graph_draft_send",
   "ask_operator",
   "ask_operator_wait",
+  "notify_operator",
 ] as const;
+const NOT_IN_CORE = [...DECK_ONLY_NAMES, "roadmap_dispatch"] as const;
 
-test("DECK_TOOL_NAMES and DECK_ONLY_TOOLS name the exact same five tools, in both directions", () => {
-  // Duplicated in both tests on purpose: a `-t` filter, a file split or a
-  // skip on either one must not carry away the check that the hand-typed
-  // literal below still matches the production array it stands for.
-  expect(new Set<string>(FIVE_DECK_ONLY_NAMES)).toEqual(new Set(DECK_ONLY_TOOLS.map((t) => t.name)));
-  const fromServerDeck = new Set<string>(DECK_TOOL_NAMES);
-  const fromServer = new Set(DECK_ONLY_TOOLS.map((t) => t.name));
-  for (const name of FIVE_DECK_ONLY_NAMES) {
-    expect(fromServerDeck.has(name)).toBe(true);
-    expect(fromServer.has(name)).toBe(true);
-  }
-  for (const name of fromServerDeck) {
-    expect(fromServer.has(name)).toBe(true);
-  }
-  for (const name of fromServer) {
-    expect(fromServerDeck.has(name)).toBe(true);
-  }
-  expect(fromServerDeck.size).toBe(fromServer.size);
+test("server-deck.ts serves exactly the five operator-family tools that server.ts declares", () => {
+  expect(new Set<string>(DECK_ONLY_NAMES)).toEqual(new Set(DECK_ONLY_TOOLS.map((t) => t.name)));
+  expect(new Set<string>(DECK_ONLY_NAMES)).toEqual(new Set(DECK_TOOL_NAMES));
 });
 
 const brokers: TestBroker[] = [];
@@ -84,8 +64,7 @@ async function readUntil(
   throw new Error(`no JSON-RPC response with id ${wantedId}`);
 }
 
-test("the core server's tools/list names none of the five Kory-only tools", async () => {
-  expect(new Set<string>(FIVE_DECK_ONLY_NAMES)).toEqual(new Set(DECK_ONLY_TOOLS.map((t) => t.name)));
+test("the core server's tools/list names none of the family-only tools", async () => {
   const b = await startBroker();
   brokers.push(b);
   const proc = Bun.spawn(["bun", "server.ts"], {
@@ -118,7 +97,7 @@ test("the core server's tools/list names none of the five Kory-only tools", asyn
   const res = await readUntil(reader, 1, buffer);
   const names = (res.result?.tools ?? []).map((t) => t.name);
   expect(names.length).toBeGreaterThan(0);
-  for (const name of FIVE_DECK_ONLY_NAMES) {
+  for (const name of NOT_IN_CORE) {
     expect(names).not.toContain(name);
   }
 
@@ -129,7 +108,7 @@ test("the core server's tools/list names none of the five Kory-only tools", asyn
   // the initialize response, not from the source.
   const instructions = init.result?.instructions ?? "";
   expect(instructions.length).toBeGreaterThan(0);
-  for (const name of FIVE_DECK_ONLY_NAMES) {
+  for (const name of NOT_IN_CORE) {
     expect(instructions).not.toContain(name);
   }
 
@@ -138,7 +117,7 @@ test("the core server's tools/list names none of the five Kory-only tools", asyn
   // one call per name so a single surviving `case` cannot hide behind an
   // earlier failure.
   let id = 2;
-  for (const name of FIVE_DECK_ONLY_NAMES) {
+  for (const name of NOT_IN_CORE) {
     send({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: {} } });
     const callRes = await readUntil(reader, id, buffer);
     expect(callRes.result).toBeUndefined();

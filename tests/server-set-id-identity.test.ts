@@ -1,6 +1,6 @@
 import { test, expect, afterAll } from "bun:test";
 import { randomUUID } from "node:crypto";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -13,13 +13,51 @@ import {
   stopBroker,
   type TestBroker,
 } from "./_helper.ts";
-import { readSessionIdentityFile, sessionIdentityFileName, type SessionIdentity } from "../shared/peer-cache.ts";
+import {
+  globalSessionIdentityFileName,
+  readGlobalSessionIdentityFile,
+  readSessionIdentityFile,
+  sessionIdentityFileName,
+  type SessionIdentity,
+} from "../shared/peer-cache.ts";
 
 const brokers: TestBroker[] = [];
 const procs: ReturnType<typeof Bun.spawn>[] = [];
 const dirs: string[] = [];
+const stoppers: Array<() => void> = [];
+
+const GLOBAL_SOCKET = "set-id-global-socket";
+
+interface SetIdProxy {
+  url: string;
+  port: number;
+  refuseSetId: boolean;
+  snapshotPresentAtSetId: boolean[];
+}
+
+function startSetIdProxy(target: string, snapshotOnDisk: () => boolean): SetIdProxy {
+  const proxy: SetIdProxy = { url: "", port: 0, refuseSetId: false, snapshotPresentAtSetId: [] };
+  const srv = Bun.serve({
+    port: 0,
+    hostname: "127.0.0.1",
+    async fetch(req) {
+      const url = new URL(req.url);
+      if (url.pathname === "/set-id") {
+        proxy.snapshotPresentAtSetId.push(snapshotOnDisk());
+        if (proxy.refuseSetId) return Response.json({ error: "refused by the test" }, { status: 503 });
+      }
+      const raw = req.method === "GET" ? undefined : await req.text();
+      return fetch(`${target}${url.pathname}${url.search}`, { method: req.method, headers: req.headers, body: raw });
+    },
+  });
+  stoppers.push(() => srv.stop(true));
+  proxy.url = `http://127.0.0.1:${srv.port}`;
+  proxy.port = srv.port as number;
+  return proxy;
+}
 
 afterAll(async () => {
+  for (const stop of stoppers.splice(0)) stop();
   for (const p of procs) {
     try {
       p.kill();
@@ -64,7 +102,7 @@ async function readUntil(
   throw new Error(`no JSON-RPC response with id ${wantedId}`);
 }
 
-test("set_id updates the per-tile identity file to the renamed peer_id", async () => {
+test.skipIf(process.platform === "darwin")("set_id updates the per-tile identity file to the renamed peer_id (publishes a global snapshot, needs a measurable process generation, refused on darwin)", async () => {
   const b = await startBroker();
   brokers.push(b);
   const homeDir = mkdtempSync(join(tmpdir(), "cp-setid-home-"));
@@ -86,10 +124,13 @@ test("set_id updates the per-tile identity file to the renamed peer_id", async (
     inbox: { version: 1, run_ref: run.run, group_id: run.group },
   }));
 
+  const globalSnapshotPath = join(homeDir, ".claude", "peers", globalSessionIdentityFileName(GLOBAL_SOCKET));
+  const proxy = startSetIdProxy(b.url, () => existsSync(globalSnapshotPath));
   const proc = Bun.spawn(["bun", "server.ts"], {
     env: scrubEnv(homeDir, {
-      CLAUDE_PEERS_BROKER_URL: b.url,
-      CLAUDE_PEERS_PORT: String(b.port),
+      CLAUDE_PEERS_BROKER_URL: proxy.url,
+      CLAUDE_PEERS_PORT: String(proxy.port),
+      CLAUDE_CODE_MESSAGING_SOCKET: GLOBAL_SOCKET,
       CLAUDE_PEERS_DESK_SESSION: deskSession,
       CLAUDE_PEERS_APPROVAL_FILE: credential,
     }),
@@ -124,13 +165,20 @@ test("set_id updates the per-tile identity file to the renamed peer_id", async (
   });
   await readUntil(reader, 0, buffer);
 
-  // Wait for boot /register to have written the identity file at least once.
   let initial: SessionIdentity | null = null;
   for (let i = 0; i < 80 && !initial; i++) {
     initial = await readSessionIdentityFile(deskSession, homeDir);
     if (!initial) await Bun.sleep(100);
   }
   expect(initial).not.toBeNull();
+
+  const globalSnapshot = () => readGlobalSessionIdentityFile(GLOBAL_SOCKET, homeDir);
+  let publishedGlobal: SessionIdentity | null = null;
+  for (let i = 0; i < 80 && !publishedGlobal; i++) {
+    publishedGlobal = await globalSnapshot();
+    if (!publishedGlobal) await Bun.sleep(100);
+  }
+  expect(publishedGlobal?.peerId, "the boot snapshot of the global companion identity").toBe(initial!.peerId);
 
   const newId = "renamed-peer-c9269fef";
   send({
@@ -151,6 +199,8 @@ test("set_id updates the per-tile identity file to the renamed peer_id", async (
   expect(after?.peerId).toBe(newId);
   expect(after?.inboxBinding).toEqual({ version: 1, runRef: run.run, groupId: run.group });
   expect(after?.operatorId).toBe(FIXTURE_OPERATOR_ID);
+  expect(proxy.snapshotPresentAtSetId, "the global snapshot was still on disk when /set-id reached the broker").toEqual([false]);
+  expect((await globalSnapshot())?.peerId, "the global snapshot names the renamed peer").toBe(newId);
 
   send({
     jsonrpc: "2.0",
@@ -164,6 +214,10 @@ test("set_id updates the per-tile identity file to the renamed peer_id", async (
     version: 1,
     runRef: run.run,
     groupId: run.group,
+  });
+  expect(await globalSnapshot(), "a broker refusal restores the global snapshot, same peer and same instance").toMatchObject({
+    peerId: newId,
+    instanceToken: after!.instanceToken,
   });
 
   const nextId = "renamed-peer-write-failure";
@@ -179,7 +233,23 @@ test("set_id updates the per-tile identity file to the renamed peer_id", async (
   expect(failed.result?.isError).toBe(true);
   rmSync(writeBlocker, { recursive: true });
   expect(await readSessionIdentityFile(deskSession, homeDir), "a failed snapshot write leaves no ready identity").toBeNull();
+  expect(await globalSnapshot(), "a failed snapshot write after the broker renamed the peer must not leave the old global identity").toBeNull();
   for (let i = 0; i < 20 && !stderr.text.includes("set_id failed"); i++) await Bun.sleep(50);
   expect(stderr.text).toContain("set_id failed");
   expect(stderr.text).not.toContain("Could not restore the identity after set_id refusal");
+
+  proxy.refuseSetId = true;
+  send({
+    jsonrpc: "2.0",
+    id: 4,
+    method: "tools/call",
+    params: { name: "set_id", arguments: { new_id: "renamed-peer-refused-503" } },
+  });
+  const unavailable = await readUntil(reader, 4, buffer);
+  expect(unavailable.result?.isError).toBe(true);
+  expect(unavailable.result?.content?.[0]?.text).toContain("Broker error (/set-id)");
+  expect(await globalSnapshot(), "a thrown broker error restores the global snapshot of the current peer").toMatchObject({
+    peerId: nextId,
+    instanceToken: after!.instanceToken,
+  });
 }, 30_000);

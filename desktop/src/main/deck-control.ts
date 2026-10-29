@@ -23,6 +23,7 @@ import type { TemplateInput, TemplateResolveResult } from '../shared/template'
 import { templateInputsOrEmpty } from '../shared/template-apply-outcome'
 import { resolveDirectiveTargets, type DeckDirective } from './directive'
 import { parseRunDirectiveArgs, type DeckDirectiveRunResult } from './directive-run'
+import type { DemoTileMint } from './demo-driver'
 import { EMBEDDED_AGENTS, getEmbeddedAgent, type EmbeddedAgent } from './team-embedded'
 import { TEAM_PLAYBOOK } from './team-embedded'
 import { TEAM_LEAD_DECK_TOOLS } from './supervisor'
@@ -162,6 +163,10 @@ export interface DeckControlDeps {
    * file). Best-effort: a missing file is not an error.
    */
   revokeTeamLeadMcpConfig(callerId: string): void
+  /** True while sandbox mode is on: the demo bridge is a host loopback endpoint a container cannot reach. */
+  sandboxEnabled(): boolean
+  /** One demo-control server and --mcp-config for a demo tile; throws a readable reason when the embedded browser cannot be driven. */
+  mintDemoTile(): Promise<DemoTileMint>
   confirmSpawnShellFields(entry: { command?: string; args?: string }): Promise<boolean>
   /**
    * Run a shell command INSIDE this project's sandbox container
@@ -186,15 +191,17 @@ export interface DeckControlServer {
   token: string
   /**
    * Mint a new caller: a fresh Bearer token, registered server-side with its
-   * own callerId and tool allow-list (Card 6c380073). `allowedTools`
-   * mirrors the three-state semantics of DECK_CONTROL_TOOLS (deck-control-mcp.ts):
-   * omitted/null = every tool, an array = only those, an empty array = none.
+   * own callerId and tool allow-list. `allowedTools`: omitted/null = every
+   * tool, an array = only those, an empty array = none. This server-side scope
+   * is separate from the DECK_CONTROL_TOOLS mount ceiling of the MCP bridge.
    */
   mintCaller(
     label: string,
     allowedTools?: readonly string[] | null,
     authority?: CallerAuthority
   ): { token: string; callerId: string }
+  /** Revoke every token registered under callerId; a no-op for an unknown callerId. */
+  revokeCaller(callerId: string): void
   /**
    * Revoke the caller minted for a team-lead SESSION on its final removal, keyed by the session id (the object index
    * caller ipc already has) rather than by callerId (which the caller would
@@ -202,9 +209,30 @@ export interface DeckControlServer {
    * that was never minted its own caller -- the supervisor tile, any
    * non-lead profile. Returns the revoked callerId on a real revocation, so
    * the caller can also delete the matching --mcp-config file.
+   * A demo tile has no caller: the same call closes its demo-control server
+   * and deletes its own config file, and returns null.
    */
   revokeCallerForSession(sessionId: string): string | null
   close(): void
+}
+
+/**
+ * The Deck has one embedded <webview>, so one demo tile drives it at a time,
+ * whatever the number of endpoints: the slot belongs to the process. It is
+ * taken synchronously, before the first await, so two racing starts cannot
+ * both pass the check.
+ */
+interface DemoSlot {
+  sessionId: string | null
+  mint: DemoTileMint | null
+}
+let demoSlot: DemoSlot | null = null
+const sessionDemoSlot = new Map<string, DemoSlot>()
+
+function releaseDemoSlot(slot: DemoSlot): void {
+  slot.mint?.release()
+  if (slot.sessionId) sessionDemoSlot.delete(slot.sessionId)
+  if (demoSlot === slot) demoSlot = null
 }
 
 type ToolArgs = Record<string, unknown>
@@ -426,8 +454,37 @@ export function startDeckControl(
     )
   }
 
+  /** Embedded team-lead tiles spawned under sandbox: born without the deck-control bridge. */
+  const bridgeRefusedSessions = new Set<string>()
+
+  function spawnedView(session: SessionRuntime): Record<string, unknown> {
+    return bridgeRefusedSessions.has(session.id)
+      ? { ...sessionView(session), bridge_note: 'bridge refused: sandbox -- this lead tile has no deck-control' }
+      : sessionView(session)
+  }
+
+  function refuseDemoSpawn(reason: string): never {
+    const message = `refused: ${reason}`
+    reportError('deck-control', `demo spawn ${message}`)
+    throw new Error(message)
+  }
+
+  function assertDemoSpawnAvailable(): void {
+    if (deps.sandboxEnabled()) {
+      refuseDemoSpawn(
+        'a demo tile cannot start while sandbox mode is on (its browser bridge is a host loopback endpoint a container cannot reach)'
+      )
+    }
+    if (demoSlot) {
+      refuseDemoSpawn('a demo tile is already live: the Deck has a single embedded browser -- close that tile first')
+    }
+  }
+
   /** See DeckControlServer.revokeCallerForSession's own doc. */
   function revokeCallerForSession(sessionId: string): string | null {
+    const demo = sessionDemoSlot.get(sessionId)
+    if (demo) releaseDemoSlot(demo)
+    bridgeRefusedSessions.delete(sessionId)
     const callerId = callerForSession(sessionId)
     if (!callerId) return null
     revokeCaller(callerId)
@@ -462,60 +519,70 @@ export function startDeckControl(
     embedded: EmbeddedAgent | null,
     callerId: string
   ): Promise<SessionRuntime> {
-    // Embedded read-only roles get their tool denial at harness level.
-    const args = [
-      entry.args ?? '',
-      embedded?.disallowedTools ? `--disallowedTools "${embedded.disallowedTools}"` : ''
-    ]
-      .filter(Boolean)
-      .join(' ')
     // Embedded team-lead lands as the window lead only when none is live
     // (same rule as templates, PLAN C18 -- never demote an operator's lead).
     const hasLiveLead = deps.listSessions().some((s) => s.lead && s.status !== 'exited')
-    // Card 6c380073: a spawned team-lead tile gets its OWN minted token/callerId
-    // (never the spawning caller's), so its future deck-control calls are
-    // authorized under its own ownedSessions entries, not the supervisor's.
-    // Audit fix #6: TEAM_LEAD_DECK_TOOLS is named ONCE here and threaded to
-    // BOTH mintCaller (server-side scope) and writeTeamLeadMcpConfig
-    // (client-side DECK_CONTROL_TOOLS) below -- never imported a second time
-    // at either consumer, so the two can never independently drift apart.
-    const leadMint = embedded?.id === 'team-lead' ? mintCaller('team-lead', TEAM_LEAD_DECK_TOOLS, 'lead') : null
+    // A team-lead tile gets its OWN minted caller (never the spawning caller's), and
+    // TEAM_LEAD_DECK_TOOLS is named once for both the server-side scope and the config's tool list.
+    // Under sandbox the tile is born without the bridge, so a live lead credit would sit unused on the host.
+    const bridgeRefused = embedded?.id === 'team-lead' && deps.sandboxEnabled()
+    if (bridgeRefused) reportError('deck-control', 'team-lead bridge refused: sandbox mode is on')
+    const leadMint =
+      embedded?.id === 'team-lead' && !bridgeRefused ? mintCaller('team-lead', TEAM_LEAD_DECK_TOOLS, 'lead') : null
+    // A write that throws after the mint must not leave the minted caller alive for a tile that never opens.
+    let appendSystemPromptFile: string | undefined
+    let mcpConfig: string | undefined
+    try {
+      appendSystemPromptFile = embedded ? deps.writeEmbeddedPrompt(embedded.id) : undefined
+      mcpConfig = leadMint
+        ? deps.writeTeamLeadMcpConfig(leadMint.token, leadMint.callerId, TEAM_LEAD_DECK_TOOLS)
+        : undefined
+    } catch (e) {
+      if (leadMint) {
+        revokeCaller(leadMint.callerId)
+        deps.revokeTeamLeadMcpConfig(leadMint.callerId)
+      }
+      throw e
+    }
     const input: CreateSessionInput = {
       name: entry.name ?? embedded?.id,
       agent: entry.agent,
       model: entry.model,
       effort: entry.effort,
-      args: args || undefined,
+      args: entry.args,
       prompt: entry.prompt,
       worktreeBranch: entry.worktreeBranch,
       announce: entry.announce,
-      appendSystemPromptFile: embedded ? deps.writeEmbeddedPrompt(embedded.id) : undefined,
+      appendSystemPromptFile,
       lead: embedded?.id === 'team-lead' && !hasLiveLead ? true : undefined,
-      // Card 3c085f1a: threaded straight through -- undefined on every
-      // profile in the catalog today (no list to recycle), same "absent
-      // means unrestricted" contract as SessionDef.peerTools's own doc.
       peerTools: embedded?.peerTools,
-      // Uses `embedded.id` (team-lead, developer, reviewer, explorer, debugger,
-      // test-engineer), not `embedded.role`: EmbeddedAgent has two unrelated
-      // fields with that same name, the latter a prose summary.
-      // A spawn with no embedded profile poses no role; never invented for an
-      // operator-profile spawn.
+      strictMcpConfig: embedded?.strictMcpConfig,
+      // Embedded read-only roles get their tool denial at harness level, on every launch.
+      disallowedTools: embedded?.disallowedTools.length ? [...embedded.disallowedTools] : undefined,
+      // The profile id, not `embedded.role` (a prose summary); an operator-profile spawn poses no role.
       role: embedded?.id,
-      // Card ff091064 (piece 2): only the embedded team-lead gets the
-      // deck-control bridge -- every other embedded/operator profile spawned
-      // through this same path (dev, reviewer, ...) stays without it.
-      mcpConfig: leadMint
-        ? deps.writeTeamLeadMcpConfig(leadMint.token, leadMint.callerId, TEAM_LEAD_DECK_TOOLS)
-        : undefined
+      // Only the embedded team-lead gets the deck-control bridge.
+      mcpConfig
+    }
+    let demoSlotTaken: DemoSlot | null = null
+    if (embedded?.id === 'demo') {
+      assertDemoSpawnAvailable()
+      demoSlotTaken = { sessionId: null, mint: null }
+      demoSlot = demoSlotTaken
+      try {
+        demoSlotTaken.mint = await deps.mintDemoTile()
+      } catch (e) {
+        releaseDemoSlot(demoSlotTaken)
+        reportError('deck-control', 'demo tile could not be minted', e)
+        throw e
+      }
+      input.mcpConfig = demoSlotTaken.mint.mcpConfig
     }
     let created: SessionRuntime
     try {
       created = await deps.spawnSession(input, leadMint ? { hasDeckLeadTools: true } : undefined)
     } catch (e) {
-      // Audit fix #2 (card 6c380073): the mint AND the --mcp-config file
-      // write both happen ABOVE, before the spawn -- if spawnSession then
-      // fails, undo both rather than leaving an orphaned token/file that
-      // authorizes a tile that was never created.
+      if (demoSlotTaken) releaseDemoSlot(demoSlotTaken)
       if (leadMint) {
         revokeCaller(leadMint.callerId)
         deps.revokeTeamLeadMcpConfig(leadMint.callerId)
@@ -523,9 +590,13 @@ export function startDeckControl(
       throw e
     }
     ownedSessions.set(created.id, callerId)
+    if (bridgeRefused) bridgeRefusedSessions.add(created.id)
     if (leadMint) sessionMintedCallerId.set(created.id, leadMint.callerId)
-    // Audit fix #4: first-writer-wins -- a path collision must never let a
-    // second caller silently steal ownership of an existing worktree entry.
+    if (demoSlotTaken) {
+      demoSlotTaken.sessionId = created.id
+      sessionDemoSlot.set(created.id, demoSlotTaken)
+    }
+    // First writer wins: a path collision must not let a second caller steal an existing worktree entry.
     if (created.worktree && !ownedWorktrees.has(created.worktree.path)) {
       ownedWorktrees.set(created.worktree.path, callerId)
     }
@@ -551,7 +622,7 @@ export function startDeckControl(
             id: a.id,
             role: a.role,
             recommended_tier: a.recommendedTier,
-            disallowed_tools: a.disallowedTools || null
+            disallowed_tools: a.disallowedTools.join(',') || null
           })),
           note: 'Embedded fallback profiles (fixed by the app). Prefer the operator profiles from deck_list_agents; spawn these via deck_spawn_session/deck_spawn_team embedded_agent.'
         }
@@ -563,6 +634,7 @@ export function startDeckControl(
       case 'deck_spawn_session': {
         const entry = parseEntry(args)
         const embedded = validateEntry(entry)
+        if (embedded?.id === 'demo') assertDemoSpawnAvailable()
         assertArgsAllowedForRestrictedCaller(entry, restricted)
         if (!(await deps.confirmSpawnShellFields({ args: entry.args }))) {
           throw new Error('refused: this launch carries unapproved shell arguments')
@@ -584,7 +656,7 @@ export function startDeckControl(
         if (args['wait_for_peer'] === false) {
           deps.armSpawnAck(created.id, created.name)
           return {
-            session: sessionView(created),
+            session: spawnedView(created),
             note: 'async ack armed: the Deck will notify you when this session connects'
           }
         }
@@ -594,12 +666,12 @@ export function startDeckControl(
           // still hears about it (connected or failed) without polling.
           deps.armSpawnAck(created.id, created.name)
           return {
-            session: sessionView(created),
+            session: spawnedView(created),
             peer_id: null,
             note: 'peer_id not resolved yet -- the Deck will notify you when this session connects (or fails to)'
           }
         }
-        return { session: sessionView(created), peer_id: peerId }
+        return { session: spawnedView(created), peer_id: peerId }
       }
 
       case 'deck_spawn_team': {
@@ -614,9 +686,9 @@ export function startDeckControl(
           return parseEntry(e as ToolArgs)
         })
         const embeddeds = entries.map((entry) => validateEntry(entry))
-        // Audit fix #1a/#1c: same two gates as deck_spawn_session, applied to
-        // EVERY entry before the approval dialog / any spawn -- one bad entry
-        // poisons the whole plan, same convention as validateEntry above.
+        const demoEntries = embeddeds.filter((embedded) => embedded?.id === 'demo').length
+        if (demoEntries > 1) refuseDemoSpawn('a team can hold only one demo entry: the Deck has a single embedded browser')
+        if (demoEntries === 1) assertDemoSpawnAvailable()
         for (const entry of entries) {
           assertArgsAllowedForRestrictedCaller(entry, restricted)
           if (!(await deps.confirmSpawnShellFields({ args: entry.args }))) {
@@ -636,14 +708,19 @@ export function startDeckControl(
           const decisions = approval.decisions
           const spawned: Record<string, unknown>[] = []
           let refused = 0
-          for (let i = 0; i < entries.length; i++) {
+          // The demo entry goes first: if another demo took the slot during the approval, it
+          // throws before any other member of the team has been spawned.
+          const order = entries
+            .map((_, i) => i)
+            .sort((a, b) => Number(embeddeds[b]?.id === 'demo') - Number(embeddeds[a]?.id === 'demo'))
+          for (const i of order) {
             if (!decisions[i]) {
               refused++
               continue
             }
             const created = await spawnEntry(entries[i]!, embeddeds[i] ?? null, callerId)
             deps.armSpawnAck(created.id, created.name)
-            spawned.push(sessionView(created))
+            spawned.push(spawnedView(created))
           }
           return {
             spawned,
@@ -683,6 +760,9 @@ export function startDeckControl(
           )
         }
         const targetSession = deps.listSessions().find((session) => session.id === id)
+        if (restricted && (targetSession?.lead || targetSession?.supervisor)) {
+          throw new Error('refused: a team-lead cannot restart a lead or supervisor tile')
+        }
         const releaseCapacity = targetSession?.status === 'exited' ? spawnCap.reserve(1) : null
         try {
           await deps.restartSession(id)
@@ -735,7 +815,6 @@ export function startDeckControl(
       }
 
       case 'deck_close_all': {
-        if (restricted) throw new Error('refused: deck_close_all is reserved to the supervisor')
         if (closeAllInFlight) throw new Error('refused: deck_close_all already running')
         closeAllInFlight = true
         try {
@@ -754,7 +833,7 @@ export function startDeckControl(
           for (const leadWave of [false, true]) {
             const wave: DeckControlSession[] = []
             for (const session of deps.listSessions()) {
-              if (session.supervisor || handled.has(session.id) || isLeadTile(session) !== leadWave) continue
+              if (session.supervisor || (restricted && isLeadTile(session)) || handled.has(session.id) || isLeadTile(session) !== leadWave) continue
               handled.add(session.id)
               if (session.locked) {
                 skipLocked(session)
@@ -778,7 +857,7 @@ export function startDeckControl(
           // Tiles spawned during the call (a lead may spawn while the first wave closes).
           const remaining: string[] = []
           for (const session of deps.listSessions()) {
-            if (session.supervisor || handled.has(session.id)) continue
+            if (session.supervisor || (restricted && isLeadTile(session)) || handled.has(session.id)) continue
             if (session.locked) skipLocked(session)
             else remaining.push(session.name)
           }
@@ -978,6 +1057,7 @@ export function startDeckControl(
         url: `http://127.0.0.1:${addr.port}`,
         token,
         mintCaller,
+        revokeCaller,
         revokeCallerForSession,
         close: () => server.close()
       })

@@ -11,10 +11,10 @@
  * Settings file is JSON, all keys optional. See README for full schema.
  */
 
-import { join, dirname, sep } from "node:path";
+import { join, dirname } from "node:path";
 import { homedir } from "node:os";
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 
 import type { GroupId } from "./types.ts";
 import type { SummaryProviderConfig } from "./summarize.ts";
@@ -29,6 +29,14 @@ import {
   type DelegationPolicyState,
 } from "./delegated-task.ts";
 import { createLogger, coreLogDir } from "./logger.ts";
+import {
+  brokerMode,
+  brokerUrl,
+  parseBooleanFlag,
+  loadBrokerConfig,
+  settingsFilePath,
+  type BrokerConfigFile,
+} from "./broker-config.ts";
 
 export type SummaryProvider = "auto" | "anthropic" | "openai-compat" | "none";
 
@@ -79,8 +87,7 @@ export interface WarnUntrackedReply {
   diagnostic: string | null;
 }
 
-interface FileConfig {
-  port?: number;
+interface FileConfig extends BrokerConfigFile {
   db?: string;
   summary_provider?: SummaryProvider;
   summary_base_url?: string;
@@ -90,10 +97,7 @@ interface FileConfig {
   anthropic_model?: string;
   groups?: Record<string, string>;
   default_group?: string;
-  broker_url?: string;
-  broker_token?: string;
   bind_host?: string;
-  offline_replica?: boolean;
   serve_replicas?: boolean;
   delegation_max_rearms?: unknown;
   delegation_lead_silence_sec?: unknown;
@@ -101,69 +105,10 @@ interface FileConfig {
   warn_untracked_reply?: unknown;
 }
 
-interface FileConfigResult {
-  config: FileConfig;
-  path: string;
-  error: string | null;
-}
-
 const DEFAULT_ANTHROPIC_MODEL = "claude-haiku-4-5-20251001";
-
-export function settingsFilePath(): string {
-  if (process.platform === "win32") {
-    const appdata = process.env.APPDATA;
-    if (appdata) {
-      return join(appdata, "claude-peers", "config.json");
-    }
-    return join(homedir(), "AppData", "Roaming", "claude-peers", "config.json");
-  }
-  const xdg = process.env.XDG_CONFIG_HOME;
-  if (xdg) {
-    return join(xdg, "claude-peers", "config.json");
-  }
-  return join(homedir(), ".config", "claude-peers", "config.json");
-}
 
 export function operatorTrustFilePath(configPath = settingsFilePath()): string {
   return join(dirname(configPath), "operator-trust.json");
-}
-
-// node:fs, not Bun.file: this module is bundled for node, where Bun is
-// undefined. Only the FF FE (UTF-16LE) BOM is sniffed, matching the one
-// non-UTF-8 encoding Bun.file().json() itself decodes.
-function decodeConfigBuffer(buf: Buffer): string {
-  if (buf.length >= 2 && buf[0] === 0xff && buf[1] === 0xfe) {
-    return buf.subarray(2).toString("utf16le");
-  }
-  return buf.toString("utf-8");
-}
-
-async function readFileConfig(): Promise<FileConfigResult> {
-  const path = settingsFilePath();
-  try {
-    if (!existsSync(path)) {
-      return { config: {}, path, error: null };
-    }
-    const raw = decodeConfigBuffer(readFileSync(path)).replace(/^\uFEFF/, "");
-    const data = JSON.parse(raw) as unknown;
-    if (!data || typeof data !== "object" || Array.isArray(data)) {
-      throw new Error("config root must be an object");
-    }
-    return { config: data as FileConfig, path, error: null };
-  } catch (e) {
-    let isDir = false;
-    try {
-      isDir = statSync(path).isDirectory();
-    } catch {
-      // path vanished between existsSync and here, or is unreadable -- not
-      // a directory, fall through to the generic message.
-    }
-    const reason = isDir ? `${path} is a directory, not a file` : e instanceof Error ? e.message : String(e);
-    const msg = `ignoring malformed config ${path}: ${reason} (using defaults)`;
-    console.error(`[claude-peers] ${msg}`);
-    createLogger({ dir: coreLogDir(), name: "config", mirrorToConsole: false }).child("config").error(msg);
-    return { config: {}, path, error: reason };
-  }
 }
 
 function defaultDbPath(): string {
@@ -182,7 +127,7 @@ function parseProvider(value: string | undefined): SummaryProvider | null {
   return null;
 }
 
-function resolveDelegationPolicy(fileCfg: FileConfig, fileResult: FileConfigResult): DelegationPolicyState {
+function resolveDelegationPolicy(fileCfg: FileConfig, fileResult: { path: string; error: string | null }): DelegationPolicyState {
   const values: DelegationPolicy = { ...DELEGATION_POLICY_DEFAULTS };
   const sources: Record<DelegationPolicyKey, "env" | "file" | "default"> = {
     max_rearms: "default",
@@ -254,7 +199,10 @@ function resolveWarnUntrackedReply(environment: string | undefined, fileValue: u
  * Load configuration. Tolerant of missing file. Always returns a complete Config.
  */
 export async function loadConfig(): Promise<Config> {
-  const fileResult = await readFileConfig();
+  const fileResult = loadBrokerConfig<FileConfig>((message) => {
+    console.error(`[claude-peers] ${message}`);
+    createLogger({ dir: coreLogDir(), name: "config", mirrorToConsole: false }).child("config").error(message);
+  });
   const fileCfg = fileResult.config;
   const delegation_policy = resolveDelegationPolicy(fileCfg, fileResult);
   const warn_untracked_reply = resolveWarnUntrackedReply(
@@ -326,19 +274,6 @@ export async function loadConfig(): Promise<Config> {
 }
 
 /**
- * Env flag parser for the booleans this loader owns: "1"/"true"/"yes"/"on" set,
- * "0"/"false"/"no"/"off" clear, anything else (unset, empty, typo) falls back
- * to the file value so a mistyped env var cannot silently flip a mode.
- */
-export function parseBooleanFlag(raw: string | undefined, fallback: boolean): boolean {
-  if (raw === undefined) return fallback;
-  const v = raw.trim().toLowerCase();
-  if (v === "1" || v === "true" || v === "yes" || v === "on") return true;
-  if (v === "0" || v === "false" || v === "no" || v === "off") return false;
-  return fallback;
-}
-
-/**
  * Resolve the effective provider, taking "auto" into account.
  *
  * Auto-detection priority:
@@ -391,30 +326,17 @@ export function buildSummaryProviderConfig(config: Config): SummaryProviderConfi
   };
 }
 
-export type BrokerMode = "local" | "remote" | "replica";
+export {
+  brokerHeaders,
+  brokerMode,
+  brokerUrl,
+  parseBooleanFlag,
+  settingsFilePath,
+  type BrokerMode,
+} from "./broker-config.ts";
 
-/**
- * The ONE decision of which deployment shape this config describes. Every
- * client (server.ts, cli.ts, the Deck's resolveBrokerEndpoint mirror) and the
- * broker itself derive their endpoint from it, so the three can never
- * disagree on where the broker is.
- *  - local:   no broker_url -> loopback broker, auto-spawned.
- *  - remote:  broker_url, no opt-in -> clients talk to broker_url directly.
- *  - replica: broker_url + offline_replica -> clients talk to loopback; the
- *             loopback broker replicates against broker_url (its upstream).
- */
-export function brokerMode(config: Pick<Config, "broker_url" | "offline_replica">): BrokerMode {
-  if (!config.broker_url) return "local";
-  return config.offline_replica ? "replica" : "remote";
-}
-
-/**
- * Build the broker URL the CLIENTS of this config talk to. Only the remote
- * mode points away from loopback; a replica keeps its clients local by design.
- */
-export function brokerUrl(config: Pick<Config, "broker_url" | "offline_replica" | "port">): string {
-  if (brokerMode(config) === "remote") return config.broker_url as string;
-  return `http://127.0.0.1:${config.port}`;
+export function canonicalBrokerUrl(config: Pick<Config, "broker_url" | "offline_replica" | "port">): string {
+  return new URL(brokerUrl(config)).toString();
 }
 
 /**

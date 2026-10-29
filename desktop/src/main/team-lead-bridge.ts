@@ -206,6 +206,7 @@ export interface DeckControlServerLike {
     allowedTools?: readonly string[] | null,
     authority?: 'author' | 'lead' | 'supervisor'
   ): { token: string; callerId: string }
+  revokeCaller(callerId: string): void
 }
 
 /**
@@ -234,7 +235,11 @@ export function buildMintTeamLeadBridge(deps: {
     const server = deps.getControlServer()
     if (!server) return null
     const { token, callerId } = server.mintCaller('team-lead', TEAM_LEAD_DECK_TOOLS, 'lead')
-    const mcpConfig = deps.write(token, callerId, TEAM_LEAD_DECK_TOOLS)
-    return { mcpConfig, callerId }
+    try {
+      return { mcpConfig: deps.write(token, callerId, TEAM_LEAD_DECK_TOOLS), callerId }
+    } catch (e) {
+      server.revokeCaller(callerId)
+      throw e
+    }
   }
 }

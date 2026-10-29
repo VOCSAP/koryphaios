@@ -74,27 +74,19 @@ import {
   upsertRoadmap
 } from './roadmap-service'
 import { validateReorderWaves } from './roadmap-reorder-validate'
-import { createSessionWithWorktree, gateSandboxForCwds, restartSessionGated, type ModLaunchDeps } from './create-session'
+import {
+  createSessionWithWorktree,
+  gateSandboxForCwds,
+  restartSessionGated,
+  stripMainOnlySessionFields,
+  type ModLaunchDeps
+} from './create-session'
 import { effectiveAgent, isTeamLeadAgent } from './team-lead-bridge'
 import { composePlanImportPrompt } from './import-plan'
 import { collectDiff, collectFileDiff, composeDiffReviewPrompt } from './diff-service'
 import { clearReviewState, readReviewState, validatePersistedReview, writeReviewState } from './review-state-service'
 import { recordingFileName } from '@shared/recording'
-import { DEFAULT_DEMO_TARGET, sanitizeTarget } from '@shared/models'
 import { linkPolicyOf } from '@shared/link-policy'
-import { startDemoControl } from './demo-control'
-import { createBrowserDriver } from './browser-drive'
-import {
-  buildDemoCommand,
-  cancelDemoRun,
-  demoRunning,
-  MAX_SCENARIO_CHARS,
-  runDemoCommand,
-  writeDemoMcpConfig,
-  writeDemoScenarioFile,
-  writeDemoSystemPrompt
-} from './demo-driver'
-import { markProviderUsed } from './usage-service'
 import { listExplorerDir, readExplorerFile } from './explorer-service'
 import type { TtsrProjectRef, TtsrService } from './ttsr-service'
 import { isTtsrToggleKey } from './ttsr-toggles'
@@ -207,14 +199,6 @@ interface IpcDeps {
   brokerStart: () => Promise<BrokerStartResult>
   operatorTrustStatus: () => OperatorTrustStatusEvent
   retryOperatorTrust: () => Promise<OperatorTrustStatusEvent>
-  /**
-   * deck-plugin dir (built hook/mcp/design assets), '' when the build was
-   * skipped or has since gone missing. A GETTER (card d02c8e96 fix c), not a
-   * cached string: index.ts's getDeckPluginDir re-checks existsSync live on
-   * every call, so a dir deleted mid-run (aborted repackage) is caught at the
-   * next demo-browser launch instead of silently reusing a stale path.
-   */
-  deckPluginDir: () => string
   /** Sandbox container lifecycle for this project (PLAN-SANDBOX). */
   sandbox: SandboxService
   /**
@@ -309,7 +293,6 @@ export function registerIpc({
   brokerStart,
   operatorTrustStatus,
   retryOperatorTrust,
-  deckPluginDir,
   sandbox,
   sandboxGate,
   sandboxWarmTranscripts,
@@ -358,7 +341,7 @@ export function registerIpc({
         reportError('session', 'failed to start the deck-control endpoint for an operator-opened team-lead tile', e)
       }
     }
-    const { supervisor: _supervisor, ...requested } = input ?? {}
+    const requested = stripMainOnlySessionFields(input)
     return createSessionWithWorktree(
       service,
       getConfig().projectDir,
@@ -552,72 +535,6 @@ export function registerIpc({
       return null
     }
   })
-
-  // ----- REC scripted scenario (demo driver) -----
-  // One throwaway demo agent drives the embedded webview through a PER-RUN
-  // loopback endpoint + token (demo-control.ts, least privilege: never the
-  // supervisor's deck-control token) while the renderer records the pane.
-  regHandle(
-    'browser:demo-run',
-    async (_e, webviewId: number, scenario: string, rawTarget: unknown) => {
-      if (typeof webviewId !== 'number') throw new Error('webviewId is required')
-      const wc = webContents.fromId(webviewId)
-      // The id comes from the renderer: accept only a live <webview> guest —
-      // handing the driver any other surface (the Deck window itself) would
-      // let input events land on the app chrome.
-      if (!wc || wc.isDestroyed() || wc.getType() !== 'webview') {
-        throw new Error('embedded browser webview not found')
-      }
-      if (typeof scenario !== 'string' || !scenario.trim()) throw new Error('scenario is required')
-      if (scenario.length > MAX_SCENARIO_CHARS) {
-        throw new Error(`scenario too long (max ${MAX_SCENARIO_CHARS} chars)`)
-      }
-      const target = sanitizeTarget(rawTarget, DEFAULT_DEMO_TARGET)
-      if (target.cli !== 'claude') {
-        throw new Error('only claude targets can run demo scenarios (the browser bridge rides --mcp-config)')
-      }
-      if (demoRunning()) throw new Error('a demo scenario is already running')
-      const pluginDir = deckPluginDir()
-      const mcpScript = join(pluginDir, 'mcp', 'demo-browser-mcp.mjs')
-      if (!pluginDir || !existsSync(mcpScript)) {
-        throw new Error('demo-browser MCP script missing -- run `npm run build:mcp`')
-      }
-      const stateDir = join(app.getPath('userData'), APP_STATE_SUBDIR)
-      const control = await startDemoControl(createBrowserDriver(wc))
-      // Per-run control token and the operator's scenario are this window's:
-      // written under its session dir, never the shared root. Resolved AFTER
-      // the await, so a quit during it refuses the write instead of
-      // recreating the removed directory.
-      const demoDir = sessionStateDir()
-      try {
-        const mcpConfigPath = writeDemoMcpConfig({
-          dir: demoDir,
-          mcpScriptPath: mcpScript,
-          execPath: process.execPath,
-          controlUrl: control.url,
-          controlToken: control.token
-        })
-        const systemPromptFile = writeDemoSystemPrompt(stateDir)
-        const scenarioFile = writeDemoScenarioFile(demoDir, scenario.trim())
-        const command = buildDemoCommand({
-          scenarioFile,
-          systemPromptFile,
-          mcpConfigPath,
-          model: target.model
-        })
-        markProviderUsed(target.cli) // feed the amphora gauge
-        return await runDemoCommand({
-          command,
-          shell: getConfig().shell,
-          cwd: getConfig().projectDir
-        })
-      } finally {
-        control.close()
-      }
-    }
-  )
-
-  regHandle('browser:demo-cancel', () => cancelDemoRun())
 
   // ----- sandbox mode (PLAN-SANDBOX SBX2–SBX5, M2/M3) -----
   regHandle('sandbox:status', (_e, force?: boolean) => sandbox.status(!!force))

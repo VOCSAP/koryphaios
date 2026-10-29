@@ -20,13 +20,11 @@ import {
   getLivingRoadmapContextUnits,
   getRoadmapContextLiveLength,
 } from "../shared/roadmap-append.ts";
-import { DECK_ONLY_TOOLS } from "../server.ts";
 
 /**
  * Maps every roadmap_ tool to its ack field domain, or null when the ack is not
  * RoadmapItem-field-pick-list shaped at all (roadmap_get/list/archive have no
- * per-field ack, roadmap_append_context reports a byte count, roadmap_dispatch
- * reports cards/tiles dispatched).
+ * per-field ack, roadmap_append_context reports a byte count).
  * null is an exemption that must be justified by the ack's shape, never used
  * just because no domain was defined.
  */
@@ -37,16 +35,6 @@ const ROADMAP_TOOL_ACK_DOMAINS: Record<string, readonly string[] | null> = {
   roadmap_update: ROADMAP_UPDATE_ACK_FIELDS,
   roadmap_archive: null,
   roadmap_append_context: null,
-  // Card bf76d37f. Mutates NO card: it runs the head wave of the queue, so it
-  // acknowledges an EXECUTION, not a set of written fields. Two reasons a
-  // field domain would be wrong rather than merely unnecessary here. Its
-  // inputSchema has zero properties (the no-argument ruling), so any non-null
-  // domain would make findUncoveredAckFields compare an empty list and pass
-  // VACUOUSLY -- green while asserting nothing. And its ack deliberately
-  // cannot be a card-field echo: runDirectiveWave marks a card done BEFORE
-  // executing it, which is why this tool reports tiles hit / missed /
-  // ambiguous instead of anything read back off the RoadmapItem.
-  roadmap_dispatch: null,
 };
 
 const brokers: TestBroker[] = [];
@@ -110,13 +98,26 @@ interface Harness {
 
 let nextRpcId = 1;
 
-// Factors out the process-spawn half of boot() so a second server.ts instance
-// can attach to an existing broker: the broker's session_key collision branch
-// mints a fresh peer_id/instance_token for a second process sharing
-// host+cwd+tty, so two harnesses booted this way are genuinely distinct,
-// independently proven identities.
+const NO_MEASURABLE_GENERATION = process.platform === "darwin";
+const NEEDS_GENERATION = "needs a measurable process generation, refused on darwin";
+
+let nextSocket = 1;
+
+// The roadmap tools are served by kory-roadmap, which authors through the
+// identity server.ts publishes under CLAUDE_CODE_MESSAGING_SOCKET, so a
+// harness is a server.ts / server-roadmap.ts pair sharing one socket and the
+// returned handle talks to the roadmap half. A second pair on an existing
+// broker is a genuinely distinct, independently proven identity: the broker's
+// session_key collision branch mints a fresh peer_id/instance_token for a
+// second process sharing host+cwd+tty.
 async function bootOnBroker(b: TestBroker, extraEnv: Record<string, string> = {}): Promise<Harness> {
-  const proc = Bun.spawn(["bun", "server.ts"], {
+  const env = { CLAUDE_CODE_MESSAGING_SOCKET: `roadmap-ack-${process.pid}-${nextSocket++}`, ...extraEnv };
+  await spawnMcp("server.ts", b, env);
+  return spawnMcp("server-roadmap.ts", b, env);
+}
+
+async function spawnMcp(entrypoint: string, b: TestBroker, extraEnv: Record<string, string>): Promise<Harness> {
+  const proc = Bun.spawn(["bun", entrypoint], {
     env: scrubEnv(b.tmpDir, {
       CLAUDE_PEERS_BROKER_URL: b.url,
       CLAUDE_PEERS_PORT: String(b.port),
@@ -189,7 +190,7 @@ async function seedCards(h: Harness, count: number): Promise<string[]> {
   return ids;
 }
 
-describe("roadmap_add/roadmap_update MCP ack", () => {
+describe.skipIf(NO_MEASURABLE_GENERATION)(`roadmap_add/roadmap_update MCP ack (${NEEDS_GENERATION})`, () => {
   test("roadmap_update on a >1000 char context reports landed size, never the content", async () => {
     const h = await boot();
     const bigContext = "x".repeat(3512);
@@ -426,21 +427,13 @@ describe("roadmap_add/roadmap_update MCP ack", () => {
     // entry left for a removed tool fails it too.
     // Two hand-written checks alone can silently miss a tool shipping with zero
     // coverage, since nothing unions or asks about the full set.
-    // The domain is BOTH servers: a roadmap_ tool absent from the core is
-    // still served to lead and supervisor tiles out of DECK_ONLY_TOOLS, so
-    // dropping its entry here would shrink the coverage instead of following
-    // the tool.
     const h = await boot();
     h.send({ jsonrpc: "2.0", id: nextRpcId, method: "tools/list", params: {} });
     const res = await readUntil(h.reader, nextRpcId, h.buffer);
     nextRpcId++;
     const tools = res.result?.tools ?? [];
-    const coreRoadmapTools = tools.filter((t) => t.name.startsWith("roadmap_"));
-    const deckOnlyRoadmapTools = DECK_ONLY_TOOLS.filter((t) => t.name.startsWith("roadmap_"));
-    // Each side must be SEEN before its silence means anything.
-    expect(coreRoadmapTools.length).toBeGreaterThan(0);
-    expect(deckOnlyRoadmapTools.length).toBeGreaterThan(0);
-    const roadmapTools = [...coreRoadmapTools, ...deckOnlyRoadmapTools];
+    const roadmapTools = tools.filter((t) => t.name.startsWith("roadmap_"));
+    expect(roadmapTools.length).toBeGreaterThan(0);
 
     const roadmapToolNames = roadmapTools.map((t) => t.name);
     for (const name of roadmapToolNames) {
@@ -451,7 +444,7 @@ describe("roadmap_add/roadmap_update MCP ack", () => {
     }
 
     for (const [name, domain] of Object.entries(ROADMAP_TOOL_ACK_DOMAINS)) {
-      if (domain === null) continue; // not a field-pick-list-shaped ack (roadmap_append_context reports a byte count, not RoadmapItem fields; roadmap_dispatch reports dispatched cards and the tiles they hit; roadmap_get/list/archive have no per-field ack at all)
+      if (domain === null) continue; // not a field-pick-list-shaped ack (roadmap_append_context reports a byte count, not RoadmapItem fields; roadmap_get/list/archive have no per-field ack at all)
       const tool = roadmapTools.find((t) => t.name === name)!;
       const schemaFields = Object.keys(tool.inputSchema?.properties ?? {}).filter((f) => f !== "id");
       const diff = findUncoveredAckFields(schemaFields, domain);

@@ -6,6 +6,7 @@
 // SessionService.create().
 
 import { test, expect, mock } from "bun:test";
+import { EventEmitter } from "node:events";
 import { readFileSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -17,13 +18,16 @@ import {
   wantsTeamLeadBridge,
   resolveMcpConfig,
   buildMintTeamLeadBridge,
+  wireTileDisappearance,
   type TeamLeadBridgeInput,
   type MintTeamLeadBridge,
   type ResolvedMcpConfig,
   type DeckControlServerLike
 } from "../desktop/src/main/team-lead-bridge";
+import { startDeckControl, type DeckControlDeps } from "../desktop/src/main/deck-control";
 import { TEAM_LEAD_DECK_TOOLS, writeTeamLeadMcpConfig } from "../desktop/src/main/supervisor";
 import { sanitizeFlagValue } from "../desktop/src/main/session-command";
+import { OPERATOR_TOOLS } from "../shared/mount-ceiling";
 
 const SESSION_SERVICE_PATH = join(import.meta.dir, "..", "desktop", "src", "main", "session-service.ts");
 const INDEX_PATH = join(import.meta.dir, "..", "desktop", "src", "main", "index.ts");
@@ -168,6 +172,69 @@ test("MUTATION PROOF: treating any mcpConfig as a granted bridge would enable th
   expect(mutant(explicitWithoutCaller, false, false)).toBe(true);
 });
 
+test("a demo tile mounts its explicit config as is: no bridge minted, no caller, no deck-lead plugin", () => {
+  const mint = mock(fakeMint({ mcpConfig: "/state/from-mint.json", callerId: "x" }));
+  const resolved = resolveMcpConfig({ mcpConfig: "/state/demo-mcp-ab12.json" }, "demo", false, mint, () => {});
+  expect(resolved).toEqual({ mcpConfig: "/state/demo-mcp-ab12.json" });
+  expect(mint).not.toHaveBeenCalled();
+  expect(wantsTeamLeadBridge({}, "demo", true)).toBe(false);
+  expect(wantsDeckLeadPlugin(resolved, false, false)).toBe(false);
+});
+
+test("a demo tile's token is released by the tile's final removal or clean exit, not by a crash", async () => {
+  let released = 0;
+  let n = 0;
+  const srv = await startDeckControl({
+    inboxMandates: { request: () => {}, release: () => {} },
+    listSessions: () => [],
+    getSpawnCap: () => 8,
+    approveSpawn: async (entries: unknown[]) => ({ pending: false, decisions: entries.map(() => true) }),
+    confirmSpawnShellFields: async () => true,
+    waitForPeer: async (id: string) => `peer-${id}`,
+    armSpawnAck: () => {},
+    writeEmbeddedPrompt: (id: string) => `/state/embedded-agent-${id}.md`,
+    sandboxEnabled: () => false,
+    mintDemoTile: async () => ({
+      mcpConfig: "/state/demo-mcp.json",
+      release: () => {
+        released++;
+      }
+    }),
+    spawnSession: async (input: { name?: string }) => ({ id: `tile-${++n}`, name: input.name ?? "demo", peerId: "p" })
+  } as unknown as DeckControlDeps);
+  try {
+    const events = new EventEmitter();
+    wireTileDisappearance(events, {
+      forgetTile: () => {},
+      report: () => {},
+      revokeCallerForSession: (id) => srv.revokeCallerForSession(id),
+      cleanupMcpFile: () => {}
+    });
+    const spawn = async (): Promise<string> => {
+      const res = await fetch(`${srv.url}/call`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${srv.token}` },
+        body: JSON.stringify({ tool: "deck_spawn_session", args: { name: "demo", embedded_agent: "demo" } })
+      });
+      const body = (await res.json()) as { ok: boolean; error?: string; result?: { session: { id: string } } };
+      expect(body.error).toBeUndefined();
+      return body.result!.session.id;
+    };
+
+    const first = await spawn();
+    events.emit("exit", { id: first, exitCode: 1 });
+    expect(released, "a crashed tile stays restartable and keeps its token").toBe(0);
+    events.emit("exit", { id: first, exitCode: 0 });
+    expect(released).toBe(1);
+
+    const second = await spawn();
+    events.emit("removed", { id: second });
+    expect(released).toBe(2);
+  } finally {
+    srv.close();
+  }
+});
+
 // ----- isTeamLeadAgent: the single predicate all three marker call sites share -----
 
 test("isTeamLeadAgent: exact match only, not a prefix/substring, and false on empty/undefined", () => {
@@ -295,6 +362,7 @@ function runCreateBridgeDecision(agent: string, input: { args?: string; name?: s
   );
   const result = run.call(
     {
+      sandboxBridgeRefusal: () => undefined,
       mintTeamLeadBridge: () => {
         mintCalls.push("called");
         return { mcpConfig: "/state/team-lead-mcp-create.json", callerId: "team-lead-create" };
@@ -358,6 +426,7 @@ function runRestoreDeckLeadPluginDecision(args: string | undefined, supervisor: 
   return run.call(
     {
       deckLeadPluginTiles: new Set<string>(),
+      sandboxBridgeRefusal: () => undefined,
       mintTeamLeadBridge: fakeMint({ mcpConfig: "/state/team-lead-mcp-restore.json", callerId: "team-lead-restore" })
     },
     effectiveAgent,
@@ -450,11 +519,14 @@ test("create() mints no bridge and reports nothing for a non-team-lead tile with
 // mintCaller scope and the client-side write, the latter via the real
 // writeTeamLeadMcpConfig against a throwaway temp dir.
 
-function fakeControlServer(mintCaller: DeckControlServerLike["mintCaller"]): DeckControlServerLike {
-  return { url: "http://127.0.0.1:9999", mintCaller };
+function fakeControlServer(
+  mintCaller: DeckControlServerLike["mintCaller"],
+  revokeCaller: DeckControlServerLike["revokeCaller"] = () => undefined
+): DeckControlServerLike {
+  return { url: "http://127.0.0.1:9999", mintCaller, revokeCaller };
 }
 
-test("buildMintTeamLeadBridge mints with mintCaller('team-lead', TEAM_LEAD_DECK_TOOLS) and writes exactly that allow-list to DECK_CONTROL_TOOLS", () => {
+test("buildMintTeamLeadBridge mints with mintCaller('team-lead', TEAM_LEAD_DECK_TOOLS) and posts exactly that allow-list, the lead role and the operator ceiling", () => {
   const dir = mkdtempSync(join(tmpdir(), "kory-team-lead-bridge-"));
   try {
     const mintCaller = mock((label: string, allowedTools?: readonly string[] | null) => ({
@@ -480,11 +552,33 @@ test("buildMintTeamLeadBridge mints with mintCaller('team-lead', TEAM_LEAD_DECK_
     expect((mintCaller.mock.calls[0] as unknown[])[2], "the bridge is a lead provisioning path, the label alone is not").toBe("lead");
 
     const written = JSON.parse(readFileSync(result!.mcpConfig, "utf-8"));
-    const toolsEnv: string = written.mcpServers["deck-control"].env.DECK_CONTROL_TOOLS;
-    expect(toolsEnv.split(",")).toEqual([...TEAM_LEAD_DECK_TOOLS]);
+    const toolsEnv: string = written.mcpServers["kory-deck"].env.DECK_CONTROL_TOOLS;
+    expect(toolsEnv.split(",")).toEqual([...TEAM_LEAD_DECK_TOOLS, "roadmap_dispatch"]);
+    expect(written.mcpServers["kory-deck"].env.DECK_CONTROL_ROLE).toBe("lead");
+    expect(written.mcpServers["kory-operator"].env.KORY_OPERATOR_TOOLS.split(",")).toEqual([...OPERATOR_TOOLS]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("buildMintTeamLeadBridge revokes the minted caller and rethrows when the config write throws, and revokes nothing when it succeeds", () => {
+  const minted = () => ({ token: "tok-1", callerId: "team-lead-xyz" });
+  const revoked: string[] = [];
+  const failing = buildMintTeamLeadBridge({
+    getControlServer: () => fakeControlServer(minted, (callerId) => void revoked.push(callerId)),
+    write: () => {
+      throw new Error("MCP mount not written: boom");
+    }
+  });
+  expect(() => failing()).toThrow("MCP mount not written: boom");
+  expect(revoked, "the caller minted for a tile that never opens was left alive").toEqual(["team-lead-xyz"]);
+
+  const working = buildMintTeamLeadBridge({
+    getControlServer: () => fakeControlServer(minted, (callerId) => void revoked.push(callerId)),
+    write: () => "/state/team-lead-mcp.json"
+  });
+  expect(working()).toEqual({ mcpConfig: "/state/team-lead-mcp.json", callerId: "team-lead-xyz" });
+  expect(revoked, "a successful write revoked the caller it just minted").toEqual(["team-lead-xyz"]);
 });
 
 test("PROOF: buildMintTeamLeadBridge returns null (not an error) when getControlServer says the server isn't up", () => {
@@ -497,61 +591,16 @@ test("PROOF: buildMintTeamLeadBridge returns null (not an error) when getControl
   expect(mint()).toBeNull();
 });
 
-test("MUTATION PROOF (Q4): widening or emptying the allow-list passed to mintCaller/write changes the assertion above -- pinned against the LIVE TEAM_LEAD_DECK_TOOLS export, not a copy", () => {
-  const dir = mkdtempSync(join(tmpdir(), "kory-team-lead-bridge-mutant-"));
-  try {
-    const mintCaller = mock((label: string, allowedTools?: readonly string[] | null) => ({
-      token: "tok-456",
-      callerId: `${label}-def`
-    }));
-    // Simulates a MUTANT buildMintTeamLeadBridge that widens the allow-list
-    // (a 4th tool slipped in) instead of reusing TEAM_LEAD_DECK_TOOLS as-is.
-    const widenedMutant = [...TEAM_LEAD_DECK_TOOLS, "deck_apply_template"];
-    mintCaller("team-lead", widenedMutant);
-    const emptiedMutant: string[] = [];
-    mintCaller("team-lead", emptiedMutant);
-
-    expect(mintCaller.mock.calls[0]?.[1]).not.toEqual(TEAM_LEAD_DECK_TOOLS);
-    expect(mintCaller.mock.calls[1]?.[1]).not.toEqual(TEAM_LEAD_DECK_TOOLS);
-    // The REAL function, unmutated, must still match -- proving the test
-    // discriminates the guarded (real) behaviour from the two unguarded
-    // (mutant) ones above, rather than passing on all three.
-    const mint = buildMintTeamLeadBridge({
-      getControlServer: () => fakeControlServer(mintCaller),
-      write: (token, callerId, allowedTools) =>
-        writeTeamLeadMcpConfig(
-          { dir, mcpScriptPath: "C:/fake/deck-control-mcp.mjs", execPath: "C:/fake/node.exe", controlUrl: "http://127.0.0.1:9999", controlToken: token },
-          `${callerId}.json`,
-          allowedTools
-        )
-    });
-    mint();
-    expect(mintCaller.mock.calls[2]?.[1]).toEqual(TEAM_LEAD_DECK_TOOLS);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test("TEAM_LEAD_DECK_TOOLS exposes spawn, close and run-directive but not restart", () => {
+test("TEAM_LEAD_DECK_TOOLS exposes the complete deck surface", () => {
   expect([...TEAM_LEAD_DECK_TOOLS]).toEqual([
-    "deck_spawn_session",
-    "deck_spawn_team",
-    "deck_close_session",
-    "deck_run_directive"
+    "deck_team_playbook", "deck_team_agents", "deck_spawn_team", "deck_list_agents", "deck_list_models",
+    "deck_list_presets", "deck_spawn_session", "deck_list_sessions", "deck_sandbox_exec", "deck_restart_session",
+    "deck_close_session", "deck_close_all", "deck_run_directive", "deck_create_worktree", "deck_list_worktrees",
+    "deck_remove_worktree", "deck_list_templates", "deck_apply_template", "deck_save_template", "deck_announce"
   ]);
 });
 
-// Weakest guard in this repo's own hierarchy (source scan only), used because
-// session-service.ts can't be exercised behaviorally.
-// Proves the call exists and its result reaches the SessionDef literal, but
-// cannot prove it's called with the correct arguments -- a mutation
-// substituting a wrong argument passes unchanged.
-
 export function checkMcpConfigWiring(src: string): string | null {
-  // Non-greedy up to the return-type arrow, not `[^{]*` -- the signature's
-  // own `opts?: { teamLeadDeckBridge?: boolean }` parameter type contains a
-  // `{` BEFORE the function body's own opening brace, which a naive
-  // "anything but a brace" class would stop at, matching the WRONG brace.
   const fnMatch = /create\(\s*input: CreateSessionInput[\s\S]*?\): SessionRuntime \{/.exec(src);
   if (!fnMatch) {
     return "create(input: CreateSessionInput, ...): SessionRuntime not found in session-service.ts -- has its signature changed?";

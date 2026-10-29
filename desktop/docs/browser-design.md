@@ -213,18 +213,16 @@ saved path is shown in a toast. Capture is served by the main process with
 the Deck's own window only (no OS picker, no arbitrary-source access from the
 renderer); the pane crop is computed renderer-side (`shared/recording.ts`).
 
-### Scripted scenario (demo driver)
+### Scripted scenario (demo tile)
 
-The dialog's optional **scenario** field turns the recording into an
-agent-driven demo: describe what to show ("open the dashboard, create a
-project named Demo…"), pick the model (Claude CLI targets only, Sonnet
-default — remembered in `config.demoTarget`), and the Deck launches ONE
-throwaway `claude -p` whose only capabilities are five `demo_*` MCP tools on
-the embedded page: `demo_read` (structured snapshot: text excerpt +
-interactive elements with stable selectors), `demo_navigate`, `demo_click`
-and `demo_type` (real input events with human pacing, visible on the video),
-`demo_wait` (viewer-pacing pauses). The recording auto-stops when the agent
-reports the scenario done; stopping the recording cancels the agent.
+A scripted demo is performed by the embedded `demo` agent tile, spawned by a
+lead (`deck_spawn_session` / `deck_spawn_team` with `embedded_agent: 'demo'`).
+Its only browser capabilities are five `demo_*` MCP tools on the embedded
+page: `demo_read` (structured snapshot: text excerpt + interactive elements
+with stable selectors), `demo_navigate`, `demo_click` and `demo_type` (real
+input events with human pacing, visible on the video), `demo_wait`
+(viewer-pacing pauses). The operator starts and stops the recording with REC;
+the Deck has one embedded browser, so one demo tile lives at a time.
 `demo_navigate`/`demo_click`/`demo_type` results carry a self-review
 `reminder` field once the agent has gone too long without a `demo_read`
 (always after a navigation, or after 3 actions since the last read) — a
@@ -232,8 +230,8 @@ result-level nudge re-asserting the system prompt's contract at the moment
 the agent actually drifts from it.
 
 Security shape: the agent's bridge (`demo-browser-mcp.mjs`) talks to a
-loopback endpoint + Bearer token minted PER RUN (`demo-control.ts`) — never
-the supervisor's deck-control token; the harness is a code constant (C8), the
+loopback endpoint + Bearer token minted PER TILE (`demo-control.ts`) -- never
+the supervisor's deck-control token; the profile is a code constant (C8), the
 scenario text is framed as data; all file/shell/web tools are disallowed; a
 120-step cap bounds runaway loops; selectors and texts coming back from the
 agent enter page scripts JSON-encoded only, and navigation is restricted to

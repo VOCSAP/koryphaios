@@ -549,6 +549,11 @@ export const EN_DEFAULTS: Record<string, string> = {
   'sandbox.bridgeRetest': 'Re-test',
   'sandbox.bridgeHint':
     'Sessions in the container cannot reach the broker: peer messaging and the roadmap will be offline. On a native Linux engine, bind the broker beyond loopback (CLAUDE_PEERS_BIND_HOST=0.0.0.0 with a broker_token).',
+  'sandbox.roadmap': 'Roadmap server:',
+  'sandbox.roadmapOk': 'registered',
+  'sandbox.roadmapKo': 'not registered',
+  'sandbox.roadmapHint':
+    'kory-roadmap is not registered on the container sign-in volume: sandboxed sessions have no roadmap tools. Register it from the container with claude mcp add --scope user (procedure in the sandbox documentation).',
   'sandbox.drift': 'image is {n} day(s) newer',
   'sandbox.driftHint':
     'The image was rebuilt after this container was created — Rebuild to pick it up (everything installed by hand inside is lost).',
@@ -744,19 +749,9 @@ export const EN_DEFAULTS: Record<string, string> = {
   'browser.recordScopeBrowser': 'Browser pane only (the embedded page)',
   'browser.recordScopeWindow': 'Whole Koryphaios window',
   'browser.recordStart': 'Start recording',
-  'browser.recordScenario':
-    'Scripted scenario (optional) — an agent drives the browser while it records',
-  'browser.recordScenarioPlaceholder':
-    'Describe what to show, e.g.: open the dashboard, create a project named Demo, show the settings page…',
-  'browser.recordModel': 'Scenario model (Claude CLI)',
-  'browser.recordStartScenario': 'Record the scenario',
-  'browser.recordDemoRunning':
-    'A demo agent is driving the browser — stopping the recording also stops it',
   'toast.recordSaved': 'Recording saved: {path}',
   'toast.recordFailed': 'Recording failed',
   'toast.recordFallbackWindow': 'Browser pane not capturable — recording the whole window',
-  'toast.demoDone': 'Scenario finished — saving the recording',
-  'toast.demoFailed': 'Demo scenario failed (see the log); the recording is saved anyway',
   'design.sourcePrefix': '[app: {source}] ',
   'nav.roadmap': 'Roadmap',
   'roadmap.title': 'Roadmap',
@@ -907,7 +902,7 @@ export const EN_DEFAULTS: Record<string, string> = {
   'inbox.title': 'Operator inbox',
   'inbox.close': 'Close',
   'inbox.empty':
-    "No messages yet. Agents can write to you with send_message to 'operator' — questions, results, blockers.",
+    "No messages yet. Leads and the supervisor write to you with notify_operator or ask_operator; workers go through their lead.",
   'inbox.drafts': 'Questions to open in the graph',
   'inbox.openGraph': 'Open in graph',
   'inbox.hint': 'Closing a message never acknowledges it — it stays here until you do.',

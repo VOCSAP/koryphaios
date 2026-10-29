@@ -26,6 +26,7 @@ import {
 import { writeSessionIdentityFile } from "../shared/peer-cache.ts";
 import { resolveProjectKey } from "../shared/project-key.ts";
 import { computeProjectKey } from "../shared/summarize.ts";
+import { OPERATOR_CEILING_ENV, OPERATOR_TOOLS, encodeMountCeiling } from "../shared/mount-ceiling.ts";
 
 async function getGitRoot(cwd: string): Promise<string | null> {
   try {
@@ -245,6 +246,7 @@ async function bootDeck(
       CLAUDE_PEERS_PORT: String(b.port),
       CLAUDE_PEERS_APPROVAL_FILE: credFile,
       CLAUDE_PEERS_DESK_SESSION: opts.deskSession,
+      [OPERATOR_CEILING_ENV]: encodeMountCeiling(OPERATOR_TOOLS),
     }),
     stdio: ["pipe", "pipe", "pipe"],
   });
@@ -423,7 +425,7 @@ describe("server-deck.ts ask_operator reply routing", () => {
 
     expect(h.stderr.text).toContain("CLAUDE_PEERS_DESK_SESSION is unset");
     expect(h.stderr.text).toContain("graph_draft_send");
-    expect(h.stderr.text).toContain("roadmap_dispatch");
+    expect(h.stderr.text).toContain("ask_operator");
     // Distinct trace from the "token present but file missing" case above --
     // an empty token must never fire that other branch's message.
     expect(h.stderr.text).not.toContain("No usable session-identity file");

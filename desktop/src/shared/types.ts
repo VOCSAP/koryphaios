@@ -105,6 +105,21 @@ export interface SessionDef {
    */
   mcpConfig?: string
   /**
+   * `--strict-mcp-config` on BOTH fresh and resume (--fork-session does not
+   * restore it): the tile loads only the servers of its own mcpConfig. Set
+   * only from an embedded profile. Such a tile is never captured into a
+   * workspace or template, because its mcpConfig is a runtime-only mint.
+   */
+  strictMcpConfig?: boolean
+  /**
+   * Tool names for `--disallowedTools` on BOTH fresh and resume (--fork-session
+   * does not restore it). Set from an embedded profile, and carried by a saved
+   * workspace or template so a restored read-only tile keeps its denial. Every
+   * name passes isToolNameList before it reaches a command line.
+   * undefined or empty = no denial.
+   */
+  disallowedTools?: string[]
+  /**
    * Path of a generated system-prompt extension passed as
    * `--append-system-prompt-file` on BOTH fresh and resume. Set only for the
    * supervisor: its role anchor, regenerated from a CODE CONSTANT at every
@@ -442,12 +457,6 @@ export interface AppConfig {
   helpTarget: import('./graph').ModelTarget
   /** Inference target of the roadmap context wand (was pinned haiku, C21). */
   wandTarget: import('./graph').ModelTarget
-  /**
-   * Inference target of the REC scripted-scenario driver (claude CLI only —
-   * the demo browser bridge is injected via --mcp-config). Remembered from
-   * the REC modal's picker; default claude/sonnet.
-   */
-  demoTarget: import('./graph').ModelTarget
   /** Last URL loaded in the embedded browser view (PLAN D1); restored on open. */
   browserUrl: string
   /**
@@ -575,7 +584,7 @@ export interface CreateSessionInput {
    * layer creates the worktree and fills `worktree` before the service spawns.
    */
   worktreeBranch?: string
-  /** Filled by the MAIN process after worktree creation; not a renderer input. */
+  /** Filled by the MAIN process after worktree creation, or sent by the renderer to adopt an existing worktree. */
   worktree?: { path: string; branch: string }
   /** MAIN-only (PLAN C5): mark the created session as the supervisor. */
   supervisor?: boolean
@@ -590,8 +599,22 @@ export interface CreateSessionInput {
    * here that grants a capability is one a remote caller can set on itself.
    * The operator-route bridge decision travels as a separate function parameter
    * instead.
+   * sessions:create strips it from the renderer's request: a launch config is
+   * written main-side only, since it names the MCP servers the tile loads.
    */
   mcpConfig?: string
+  /**
+   * MAIN-only: SessionDef.strictMcpConfig. Set only from an embedded profile;
+   * it only narrows what the tile loads. sessions:create strips it from the
+   * renderer's request, so a client cannot opt a tile out of saved workspaces.
+   */
+  strictMcpConfig?: boolean
+  /**
+   * SessionDef.disallowedTools. Posed by the profile or a validated saved
+   * recipe; sessions:create strips it from the renderer's request. create()
+   * refuses a list holding a name outside isToolNameList.
+   */
+  disallowedTools?: string[]
   /** MAIN-only (PLAN C8): --append-system-prompt-file path (supervisor anchor). */
   appendSystemPromptFile?: string
   /** Optional explicit colour (hex); falls back to the rotating palette. */
@@ -1432,6 +1455,8 @@ export interface SandboxStatus {
   hookWarnings: string[]
   /** Broker reachable FROM the container (real curl probe); null = unknown. */
   brokerBridge: boolean | null
+  /** kory-roadmap registered in the user scope of the container's CLI; null = unknown. */
+  roadmapMcp: boolean | null
   /** Days between this container's creation and a NEWER image, else null. */
   driftDays: number | null
   busy: boolean
@@ -2351,18 +2376,6 @@ export interface DeckApi {
   saveAnnotation(dataUrl: string): Promise<string | null>
   /** Persist a finished REC screen recording; returns the absolute file path. */
   saveRecording(data: Uint8Array, ext: 'mp4' | 'webm'): Promise<string | null>
-  /**
-   * Run a REC scripted scenario: a one-shot demo-driver agent (target.cli
-   * 'claude' only) drives the embedded webview while the renderer records.
-   * Resolves with the agent's closing summary when the scenario ends.
-   */
-  runDemoScenario(
-    webviewId: number,
-    scenario: string,
-    target: import('./graph').ModelTarget
-  ): Promise<string>
-  /** Cancel the running demo scenario (REC stop while a scenario runs). */
-  cancelDemoScenario(): Promise<boolean>
   /** Capturable OS windows/screens for the Window mirror mode (D2a). */
   listCaptureWindows(): Promise<WindowSource[]>
   /** Full-size still of one window/screen; null when gone. */

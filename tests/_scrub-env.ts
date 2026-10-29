@@ -1,18 +1,4 @@
-// CLAUDE_PEERS_* is purged so a token or URL left in the developer's shell
-// can never leak in -- otherwise a stray token turns every unauthenticated
-// test POST into a 401. But loadConfig() resolves env THEN a settings file,
-// so that purge owns only half: offline_replica (file only) demotes an
-// injected broker_url to a replication upstream, since brokerUrl() returns
-// broker_url only in "remote" mode. HOME/USERPROFILE are redirected too
-// (USERPROFILE wins over HOME on win32; both are set so the guard is blind
-// to neither) -- they control os.homedir(), which shared/peer-cache.ts joins
-// with ".claude/peers" to read, write and delete the per-tile
-// session-identity file: a spawned child that inherits the real home can
-// otherwise overwrite or delete the identity file of the tile that spawned
-// it. settingsDir must be a directory that never holds a
-// claude-peers/config.json (an already-owned scratch dir, e.g. a
-// TestBroker's tmpDir, needs no new directory). extra is spread last so a
-// caller-owned override (its own config.json elsewhere) keeps winning.
+// settingsDir must never hold a claude-peers/config.json: loadConfig() reads that file after env.
 export function scrubEnv(
   settingsDir: string,
   extra: Record<string, string> = {}
@@ -33,7 +19,11 @@ export function scrubEnv(
   // a live Deck control URL and token that no child may inherit.
   const scrubbed = Object.fromEntries(
     Object.entries(process.env).filter(
-      ([k]) => !k.startsWith("CLAUDE_PEERS_") && !k.toUpperCase().startsWith("DECK_CONTROL_")
+      ([k]) =>
+        !k.startsWith("CLAUDE_PEERS_") &&
+        !k.toUpperCase().startsWith("DECK_CONTROL_") &&
+        k !== "CLAUDE_CODE_MESSAGING_SOCKET" &&
+        k !== "KORY_OPERATOR_TOOLS"
     )
   ) as Record<string, string>;
   return {

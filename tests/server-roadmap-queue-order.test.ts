@@ -63,14 +63,27 @@ interface Harness {
 
 let nextRpcId = 1;
 
+const NO_MEASURABLE_GENERATION = process.platform === "darwin";
+
+let nextSocket = 1;
+
+// The roadmap tools are served by kory-roadmap, which authors through the
+// identity server.ts publishes under CLAUDE_CODE_MESSAGING_SOCKET, so the
+// returned handle talks to the roadmap half of a server.ts / server-roadmap.ts pair.
 async function boot(): Promise<Harness> {
   const b = await startBroker();
   brokers.push(b);
+  const env = { CLAUDE_CODE_MESSAGING_SOCKET: `roadmap-boot-${process.pid}-${nextSocket++}` };
+  await spawnMcp("server.ts", b, env);
+  return spawnMcp("server-roadmap.ts", b, env);
+}
 
-  const proc = Bun.spawn(["bun", "server.ts"], {
+async function spawnMcp(entrypoint: string, b: TestBroker, extraEnv: Record<string, string>): Promise<Harness> {
+  const proc = Bun.spawn(["bun", entrypoint], {
     env: scrubEnv(b.tmpDir, {
       CLAUDE_PEERS_BROKER_URL: b.url,
       CLAUDE_PEERS_PORT: String(b.port),
+      ...extraEnv,
     }),
     stdio: ["pipe", "pipe", "pipe"],
   });
@@ -112,7 +125,7 @@ function toolText(res: JsonRpcResponse): string {
 
 type ItemRes = { item: RoadmapItem };
 
-test("roadmap_list order:queue renders real dispatch order with waves, queue marker shown in both modes", async () => {
+test.skipIf(NO_MEASURABLE_GENERATION)("roadmap_list order:queue renders real dispatch order with waves, queue marker shown in both modes (needs a measurable process generation, refused on darwin)", async () => {
   const h = await boot();
 
   // Creation order deliberately does NOT match intended queue order, so a

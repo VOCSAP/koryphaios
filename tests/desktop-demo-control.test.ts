@@ -127,6 +127,7 @@ test("step cap: beyond DEMO_STEP_CAP every call errors", async () => {
   const over = await call(srv, "demo_read");
   expect(over.body.ok).toBe(false);
   expect(over.body.error).toContain("step cap");
+  expect(over.body.error, "the refusal says how to run another scenario on a tile-long server").toContain("fresh demo session");
   expect(log.reads).toBe(DEMO_STEP_CAP);
 });
 

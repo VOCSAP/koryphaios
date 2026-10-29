@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { extractBracedBody } from "./_braced-body";
 import { validPtyDimensions } from "../desktop/src/main/pty-manager.ts";
 import { onDeckError } from "../desktop/src/main/log.ts";
+import { fromWorkspaceSessions, toWorkspaceSessions } from "../desktop/src/main/workspace-session-map.ts";
 import { LaunchAttemptRegistry } from "../desktop/src/main/mod-launch-plan.ts";
 
 const SESSION_SERVICE_PATH = join(import.meta.dir, "..", "desktop", "src", "main", "session-service.ts");
@@ -956,5 +957,244 @@ test("a restart revalidates host copies against their state at that spawn", asyn
 
     expect(sessionPtys).toHaveLength(1);
     expect(sessionPtys[0]!.args.join(" ")).not.toContain("/mods/alpha");
+  });
+});
+
+const BRIDGE_FILE = "/state/team-lead-mcp-aaaaaaaaaaaa-caller-1.json";
+
+async function withBridgeService(
+  sandboxed: boolean,
+  body: (service: ModPlanService, probe: { mints: number; commands: string[]; home: string }) => void | Promise<void>
+): Promise<void> {
+  const home = mkdtempSync(join(tmpdir(), "kory-pty-sandbox-bridge-"));
+  const probe = { mints: 0, commands: [] as string[], home };
+  const service = new SessionService(
+    () => ({ projectDir: join(home, "project"), shell: "powershell.exe", interactiveShell: false }),
+    () => ({}),
+    "claude",
+    withDeckPlugin,
+    home,
+    () => {
+      probe.mints++;
+      return { mcpConfig: BRIDGE_FILE, callerId: "caller-1" };
+    }
+  );
+  service.setTileSettingsFileProvider(() => join(home, "tile-settings.json"));
+  if (sandboxed) {
+    service.setSandboxProvider(
+      () => ({ wrap: (_tile: string, _session: string, command: string) => { probe.commands.push(command); return "wrapped"; }, cleanup: async () => {} }) as never,
+      undefined,
+      () => "/sandbox/peers"
+    );
+  }
+  const reports: Array<[string, string]> = [];
+  onDeckError((scope, text) => reports.push([scope, text]));
+  (service as unknown as { reports: typeof reports }).reports = reports;
+  try {
+    await body(service, probe);
+  } finally {
+    onDeckError(() => {});
+    service.closeAll();
+    for (const pty of sessionPtys.splice(0)) pty.exit();
+    rmSync(home, { recursive: true, force: true });
+  }
+}
+
+const bridgeRefusals = (service: ModPlanService): string[] =>
+  reportsOf(service).filter(([scope, text]) => scope === "session" && text.includes("deck-control bridge refused")).map(([, text]) => text);
+const mcpConfigOf = (service: ModPlanService): string | undefined => service.captureSessions()[0]?.mcpConfig;
+
+test.each([
+  ["a lead opened by the operator or deck_spawn_session or a template (agent field plus trusted marker)", { agent: "team-lead" }, { teamLeadDeckBridge: true }],
+  ["an embedded lead of deck_spawn_team (explicit config plus deck lead tools)", { mcpConfig: BRIDGE_FILE }, { hasDeckLeadTools: true }]
+] as const)("a sandboxed tile never receives the lead bridge: %s", async (_route, input, opts) => {
+  await withBridgeService(true, (service, probe) => {
+    service.create({ name: "lead", ...input }, opts as never);
+
+    expect(probe.mints, "the bridge must not even be minted for a container that cannot reach it").toBe(0);
+    expect(mcpConfigOf(service), "no mcpConfig may be stored for a sandboxed lead").toBeUndefined();
+    expect(probe.commands.join(" "), "the container command carries no --mcp-config").not.toContain("--mcp-config");
+    expect(bridgeRefusals(service).some((text) => text.includes("sandbox"))).toBe(true);
+  });
+});
+
+test.each([
+  ["a lead opened by the operator", { agent: "team-lead" }, { teamLeadDeckBridge: true }, 1],
+  ["an embedded lead of deck_spawn_team", { mcpConfig: BRIDGE_FILE }, { hasDeckLeadTools: true }, 0]
+] as const)("a host tile keeps the lead bridge: %s", async (_route, input, opts, mints) => {
+  await withBridgeService(false, (service, probe) => {
+    service.create({ name: "lead", ...input }, opts as never);
+
+    expect(probe.mints).toBe(mints);
+    expect(mcpConfigOf(service)).toBe(BRIDGE_FILE);
+    expect(bridgeRefusals(service)).toEqual([]);
+  });
+});
+
+test("a sandboxed tile that is not a lead leaves no bridge trace, and an operator mcpConfig without the lead marker is untouched", async () => {
+  await withBridgeService(true, (service, probe) => {
+    service.create({ name: "worker" });
+    service.create({ name: "operator-config", mcpConfig: "/ops/own.json" });
+
+    expect(probe.mints).toBe(0);
+    expect(bridgeRefusals(service)).toEqual([]);
+    expect(service.captureSessions().map((d) => d.mcpConfig)).toEqual([undefined, "/ops/own.json"]);
+  });
+});
+
+test("the supervisor is never sandboxed, so it keeps its bridge when the sandbox is on", async () => {
+  await withBridgeService(true, (service, probe) => {
+    service.create({ name: "supervisor", agent: "team-lead", supervisor: true }, { teamLeadDeckBridge: true } as never);
+
+    expect(probe.mints).toBe(1);
+    expect(bridgeRefusals(service)).toEqual([]);
+  });
+});
+
+test.each([
+  [true, 0, undefined],
+  [false, 1, BRIDGE_FILE]
+] as const)("a restored lead tile under sandbox=%s mints %i bridge(s)", async (sandboxed, mints, mcpConfig) => {
+  await withBridgeService(sandboxed, (service, probe) => {
+    service.restoreFrom([{ ...restoredDef("restored-lead", "lead"), args: "--agent team-lead" }]);
+
+    expect(probe.mints).toBe(mints);
+    expect(mcpConfigOf(service)).toBe(mcpConfig);
+    expect(bridgeRefusals(service).length > 0).toBe(sandboxed);
+  });
+});
+
+test.each([
+  ["fresh", false],
+  ["resumed", true]
+] as const)("a lead tile created on the host and %s after the sandbox was enabled launches without the bridge", async (_mode, withTranscript) => {
+  await withBridgeService(false, async (service, probe) => {
+    const tile = service.create({ name: "lead", agent: "team-lead" }, { teamLeadDeckBridge: true } as never);
+    const [def] = service.captureSessions();
+    expect(def?.mcpConfig, "control: created on the host, the tile holds the bridge").toBe(BRIDGE_FILE);
+    if (withTranscript) {
+      const projects = join(probe.home, ".claude", "projects", encodeProjectDir(def!.cwd));
+      mkdirSync(projects, { recursive: true });
+      writeFileSync(join(projects, `${def!.sessionId}.jsonl`), "{}\n", "utf-8");
+    }
+    sessionPtys.at(-1)!.exit(1);
+    service.setSandboxProvider(
+      () => ({ wrap: (_tile: string, _session: string, command: string) => { probe.commands.push(command); return "wrapped"; }, cleanup: async () => {} }) as never,
+      undefined,
+      () => "/sandbox/peers"
+    );
+
+    await service.restart(tile.id);
+
+    expect(probe.commands, "the restart reached the sandbox wrapper").toHaveLength(1);
+    expect(probe.commands[0]!.includes("--resume"), "the path under test is the one named by the case").toBe(withTranscript);
+    expect(probe.commands[0], "the container command carries no --mcp-config").not.toContain("--mcp-config");
+    expect(probe.mints, "a restart never mints").toBe(1);
+    expect(bridgeRefusals(service).some((text) => text.includes("sandbox"))).toBe(true);
+  });
+});
+
+test.each([
+  ["fresh", false],
+  ["resumed", true]
+] as const)("a strict-MCP tile reaches its terminal with --strict-mcp-config when %s", async (_mode, resumed) => {
+  await withBridgeService(false, async (service, probe) => {
+    const tile = service.create({ name: "demo", strictMcpConfig: true, mcpConfig: "/state/demo-mcp-ab12.json" });
+    expect(sessionPtys.at(-1)!.args.join(" "), "control: the first launch is fresh").not.toContain("--resume");
+    if (resumed) {
+      const [runtime] = service.list();
+      const projects = join(probe.home, ".claude", "projects", encodeProjectDir(runtime!.cwd));
+      mkdirSync(projects, { recursive: true });
+      writeFileSync(join(projects, `${runtime!.sessionId}.jsonl`), "{}\n", "utf-8");
+      sessionPtys.at(-1)!.exit(1);
+      await service.restart(tile.id);
+      expect(sessionPtys.at(-1)!.args.join(" "), "the path under test is the resume").toContain("--resume");
+    }
+    const command = sessionPtys.at(-1)!.args.join(" ");
+    expect(command).toContain('--mcp-config "/state/demo-mcp-ab12.json" --strict-mcp-config');
+  });
+});
+
+test("a strict-MCP tile is left out of a workspace or template capture, a plain tile is kept", async () => {
+  await withBridgeService(false, (service) => {
+    service.create({ name: "demo", strictMcpConfig: true, mcpConfig: "/state/demo-mcp-ab12.json" });
+    service.create({ name: "plain" });
+
+    expect(service.captureSessions().map((d) => d.name)).toEqual(["plain"]);
+  });
+});
+
+test("create refuses a tool denial holding a name outside the allow-list and spawns nothing", async () => {
+  await withBridgeService(false, (service) => {
+    expect(() => service.create({ name: "bad", disallowedTools: ["Write", "$(id)"] })).toThrow("allow-list");
+    expect(sessionPtys).toHaveLength(0);
+    expect(service.list()).toHaveLength(0);
+  });
+});
+
+test.each([
+  ["fresh", false],
+  ["resumed", true]
+] as const)("a tile with a tool denial launches with --disallowedTools exactly once when %s", async (_mode, resumed) => {
+  await withBridgeService(false, async (service, probe) => {
+    const tile = service.create({ name: "reviewer", args: "--agent reviewer", disallowedTools: ["Write", "Edit"] });
+    if (resumed) {
+      const [runtime] = service.list();
+      const projects = join(probe.home, ".claude", "projects", encodeProjectDir(runtime!.cwd));
+      mkdirSync(projects, { recursive: true });
+      writeFileSync(join(projects, `${runtime!.sessionId}.jsonl`), "{}\n", "utf-8");
+      sessionPtys.at(-1)!.exit(1);
+      await service.restart(tile.id);
+      expect(sessionPtys.at(-1)!.args.join(" "), "the path under test is the resume").toContain("--resume");
+    }
+    const command = sessionPtys.at(-1)!.args.join(" ");
+    expect(command.split('--disallowedTools "Write,Edit"').length - 1).toBe(1);
+  });
+});
+
+test("a read-only tile saved into a workspace comes back resumed with its denial", async () => {
+  await withBridgeService(false, (service, probe) => {
+    service.create({ name: "reviewer", disallowedTools: ["Write", "Edit", "NotebookEdit"] });
+    const [captured] = service.captureSessions();
+    expect(captured!.disallowedTools, "control: the live tile holds the denial").toEqual(["Write", "Edit", "NotebookEdit"]);
+    const projects = join(probe.home, ".claude", "projects", encodeProjectDir(captured!.cwd));
+    mkdirSync(projects, { recursive: true });
+    writeFileSync(join(projects, `${captured!.sessionId}.jsonl`), "{}\n", "utf-8");
+
+    service.restoreFrom(fromWorkspaceSessions(toWorkspaceSessions(service.captureSessions())));
+
+    const command = sessionPtys.at(-1)!.args.join(" ");
+    expect(command, "the path under test is the resume").toContain("--resume");
+    expect(command).toContain('--disallowedTools "Write,Edit,NotebookEdit"');
+  });
+});
+
+test("a workspace saved before the structured denial restores resumed with the denial re-passed", async () => {
+  await withBridgeService(false, (service, probe) => {
+    const cwd = join(probe.home, "project");
+    const projects = join(probe.home, ".claude", "projects", encodeProjectDir(cwd));
+    mkdirSync(projects, { recursive: true });
+    writeFileSync(join(projects, "sid-legacy.jsonl"), "{}\n", "utf-8");
+
+    service.restoreFrom(
+      fromWorkspaceSessions([
+        { claudeSessionId: "sid-legacy", name: "reviewer", cwd, args: ["--disallowedTools", '"Write,Edit,NotebookEdit"'], color: "#111", position: 0 }
+      ])
+    );
+
+    const command = sessionPtys.at(-1)!.args.join(" ");
+    expect(command, "the path under test is the resume").toContain("--resume");
+    expect(command.split("--disallowedTools").length - 1, "re-passed once, from the field").toBe(1);
+    expect(command).toContain('--disallowedTools "Write,Edit,NotebookEdit"');
+    expect(service.captureSessions()[0]!.args, "the saved args stop carrying the pair").toBe("");
+  });
+});
+
+test("only the exact boolean closes a tile: a truthy string in a create request does nothing", async () => {
+  await withBridgeService(false, (service) => {
+    service.create({ name: "claimed", strictMcpConfig: "true" as never });
+
+    expect(sessionPtys.at(-1)!.args.join(" ")).not.toContain("--strict-mcp-config");
+    expect(service.captureSessions().map((d) => d.name)).toEqual(["claimed"]);
   });
 });

@@ -246,7 +246,7 @@ l'opérateur sur une machine avec affichage.
     PTY via bracketed-paste) : le texte arrive complet ET la saisie reste
     utilisable ensuite dans la tuile ;
   - vérifier `utility-inference.ts` (question du help « ? » et du wand
-    roadmap) et `demo-driver.ts` (scénario REC) avec un texte contenant `"`.
+    roadmap) avec un texte contenant `"`.
 - [ ] **Auto-ack de l'avertissement dev-channels (session 2026-07-24, issue
       anthropics/claude-code#42486)** — logique testée
       (`desktop-startup-ack.test.ts` : détection deux-cues, frontières de chunk,
@@ -274,11 +274,12 @@ l'opérateur sur une machine avec affichage.
     (barre de titre Windows/Linux, notch macOS) ; MP4 réellement muxé par
     l'Electron embarqué (sinon repli WebM attendu) ; qualité/taille à 6 Mbps ;
     arrêt via fermeture de fenêtre en cours d'enregistrement.
-  - **Scénario démo** : run réel `claude -p --mcp-config` (bridge
-    `demo-browser-mcp.mjs` sous `ELECTRON_RUN_AS_NODE`) sur un vrai site ;
-    `sendInputEvent` frappe/clic sur des inputs React contrôlés ; annulation
-    par REC stop pendant le run (kill + sauvegarde du partiel) ; timeout 5 min
-    et cap 120 étapes en conditions réelles ; pacing du DEMO_SYSTEM_PROMPT à
+  - **Scénario démo (tuile démo)** : preuve sur un vrai webview MESURÉE (carte
+    9423f41b) : sur une instance Electron privée, `deck_spawn_session
+    {embedded_agent:'demo'}` monte la tuile sur le vrai `<webview>`, et le
+    serveur demo-control de la tuile pilote la page (`demo_navigate` lit le
+    titre, `demo_click` modifie le texte, `demo_read` le relit). Reste : cap
+    de 120 étapes en conditions réelles ; rythme du prompt du profil `demo` à
     ajuster à l'usage (beats trop rapides/lents).
   - **Démo README Kory** : produire le clip final (scope fenêtre entière +
     superviseur orchestrant une équipe) sur un poste avec sessions Claude

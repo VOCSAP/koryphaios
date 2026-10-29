@@ -26,8 +26,10 @@ export function HomeView({ active }: { active: boolean }): React.JSX.Element {
     window.api.ensureSupervisor(trigger).then(
       () => setPending(false),
       (e) => {
+        const message = e instanceof Error ? e.message : String(e)
         setPending(false)
-        setError(e instanceof Error ? e.message : String(e))
+        setError(message)
+        window.api.reportError('supervisor:ensure', message)
       }
     )
   }

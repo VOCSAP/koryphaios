@@ -1,6 +1,6 @@
 {
   "hook_event_name": "PreToolUse",
-  "tool_name": "mcp__claude-peers__roadmap_update",
+  "tool_name": "mcp__kory-roadmap__roadmap_update",
   "tool_input": {
     "id": "b313f0c3-4a6a-4eeb-895c-57ecb980e948",
     "title": "Une restauration de workspace efface le role des sessions cote broker",

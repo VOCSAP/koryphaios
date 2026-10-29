@@ -242,8 +242,8 @@ function objectLiteral(source: string, name: string): string {
 /** Calls into the registered IPC handlers, and so to serve:start, without naming it. */
 const IPC_TRANSIT = /\b(?:invokeRemote|regHandle|ipcMain)\b/
 
-/** The composition roots hold the service by design; their deck-control wiring is checked through controlDeps. */
-const COMPOSITION_ROOTS = ['desktop/src/main/index.ts', 'desktop/src/main/ipc.ts']
+/** The composition root holds the service by design; its deck-control wiring is checked through controlDeps. */
+const COMPOSITION_ROOTS = ['desktop/src/main/index.ts']
 /** Its invokeRemote is the companion path, closed for serve:* by the remote-block floor asserted above. */
 const TRANSIT_EXEMPT = ['desktop/src/main/companion-server.ts']
 

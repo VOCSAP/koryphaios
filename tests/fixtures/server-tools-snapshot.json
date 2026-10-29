@@ -7,11 +7,5 @@
   "whoami",
   "list_groups",
   "switch_group",
-  "set_id",
-  "roadmap_list",
-  "roadmap_get",
-  "roadmap_add",
-  "roadmap_update",
-  "roadmap_archive",
-  "roadmap_append_context"
+  "set_id"
 ]

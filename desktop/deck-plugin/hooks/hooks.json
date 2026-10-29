@@ -49,7 +49,7 @@
     ],
     "PreToolUse": [
       {
-        "matcher": "mcp__claude-peers__roadmap_add",
+        "matcher": "mcp__kory-roadmap__roadmap_add",
         "hooks": [
           {
             "type": "command",
@@ -59,7 +59,7 @@
         ]
       },
       {
-        "matcher": "mcp__claude-peers__roadmap_update",
+        "matcher": "mcp__kory-roadmap__roadmap_update",
         "hooks": [
           {
             "type": "command",
@@ -69,7 +69,7 @@
         ]
       },
       {
-        "matcher": "mcp__claude-peers__roadmap_append_context",
+        "matcher": "mcp__kory-roadmap__roadmap_append_context",
         "hooks": [
           {
             "type": "command",

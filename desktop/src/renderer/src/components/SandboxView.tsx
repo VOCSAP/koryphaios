@@ -535,6 +535,19 @@ export function SandboxView(): React.JSX.Element {
         {status?.brokerBridge === false && (
           <div className="sandbox-line sandbox-warn">{t('sandbox.bridgeHint')}</div>
         )}
+        {status && status.containerState === 'running' && (
+          <div className="sandbox-line">
+            <span className="sandbox-label">{t('sandbox.roadmap')}</span>
+            {status.roadmapMcp === true && (
+              <span className="rm-badge rm-badge-value-high">{t('sandbox.roadmapOk')}</span>
+            )}
+            {status.roadmapMcp === false && <span className="rm-badge">{t('sandbox.roadmapKo')}</span>}
+            {status.roadmapMcp === null && <span className="rm-badge">{t('sandbox.bridgeUnknown')}</span>}
+          </div>
+        )}
+        {status?.containerState === 'running' && status.roadmapMcp === false && (
+          <div className="sandbox-line sandbox-dim">{t('sandbox.roadmapHint')}</div>
+        )}
         {hasLive && (
           <div className="sandbox-line">
             <span className="sandbox-warn">{t('sandbox.blockedLive')}</span>

@@ -83,6 +83,8 @@ export const SANDBOX_DECK_PLUGIN_NAME = DECK_PLUGIN_DIRNAME
  */
 export const SANDBOX_DECK_PLUGIN_DIR = `${SANDBOX_CONFIG_DIR}/${SANDBOX_DECK_PLUGIN_NAME}`
 export const SANDBOX_MODS_DIR = '/opt/kory-mods'
+/** Key under which the global roadmap server is registered with `claude mcp add`. */
+export const ROADMAP_MCP_SERVER = 'kory-roadmap'
 
 export interface SandboxModProjectionSpec {
   containerId: string
@@ -667,6 +669,25 @@ export function buildImageRemoveArgs(image: string): string[] {
  */
 export function buildBrokerProbeArgs(name: string, brokerUrl: string): string[] {
   return ['exec', name, 'curl', '-sf', '-m', '4', '-o', '/dev/null', `${brokerUrl}/health`]
+}
+
+/**
+ * Arg vector asking the container's own `claude` whether the global roadmap
+ * server is registered. Nothing projects `.claude.json` into the container, so
+ * the registration is an operator step on the auth volume and this is the
+ * only way to learn whether it was done. `mcp get` also starts the server for
+ * its health check; only its exit code and `Scope:` line are read.
+ */
+export function buildRoadmapMcpProbeArgs(name: string): string[] {
+  return ['exec', name, 'claude', 'mcp', 'get', ROADMAP_MCP_SERVER]
+}
+
+/**
+ * Registered for every tile only when the entry sits in the user scope, which
+ * lives on the auth volume; a local or project entry belongs to one cwd.
+ */
+export function isRoadmapMcpRegistered(code: number, stdout: string): boolean {
+  return code === 0 && /^\s*Scope:\s*User config/m.test(stdout)
 }
 
 /**

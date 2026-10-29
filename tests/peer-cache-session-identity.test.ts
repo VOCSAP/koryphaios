@@ -5,10 +5,15 @@ import { join } from "node:path";
 
 import {
   deleteSessionIdentityFile,
+  globalSessionIdentityFileName,
+  readGlobalSessionIdentityFile,
   readSessionIdentityFile,
   sessionIdentityFileName,
+  writeGlobalSessionIdentityFile,
   writeSessionIdentityFile,
+  type WriterGeneration,
 } from "../shared/peer-cache";
+import { measureWriterGeneration } from "../shared/process-generation.ts";
 
 /** Scans EVERY file left in `dir`, not just the expected path: a deletion
  * mutated into a `rename` to a neighboring name would still pass a
@@ -34,6 +39,38 @@ describe("session-identity file", () => {
 
   afterEach(async () => {
     await rm(tmpHome, { recursive: true, force: true });
+  });
+
+  test("derives a global identity filename from the messaging socket without exposing it", () => {
+    const socket = "socket://private-rendezvous";
+    const fileName = globalSessionIdentityFileName(socket);
+    expect(fileName).toMatch(/^global-session-identity-[a-f0-9]{64}\.json$/);
+    expect(fileName).not.toContain(socket);
+  });
+
+  test("round-trips a global identity keyed by the messaging socket", async () => {
+    await writeGlobalSessionIdentityFile(
+      "socket://private-rendezvous",
+      "peer-global",
+      "group-global",
+      "instance-global",
+      "project-global",
+      tmpHome,
+      null,
+      "http://127.0.0.1:7899/",
+    );
+    expect(await readGlobalSessionIdentityFile("socket://private-rendezvous", tmpHome)).toMatchObject({
+      peerId: "peer-global",
+      groupId: "group-global",
+      instanceToken: "instance-global",
+      projectKey: "project-global",
+      brokerUrl: "http://127.0.0.1:7899/",
+    });
+  });
+
+  test("a global identity without a broker url is not published", async () => {
+    await writeGlobalSessionIdentityFile("socket://private-rendezvous", "peer-global", "group-global", "instance-global", "project-global", tmpHome);
+    expect(await readGlobalSessionIdentityFile("socket://private-rendezvous", tmpHome)).toBeNull();
   });
 
   test("round-trips a written (peerId, groupId, instanceToken) triple", async () => {
@@ -66,6 +103,115 @@ describe("session-identity file", () => {
       inboxBinding: { version: 1, runRef: "run-confirmed", groupId: "group-confirmed" },
       operatorId: "operator-confirmed",
     });
+  });
+
+  test("round-trips a valid writer generation", async () => {
+    const token = "writer-generation";
+    await writeFile(
+      join(peersDir, sessionIdentityFileName(token)),
+      JSON.stringify({
+        peer_id: "peer-generation",
+        group_id: "group-generation",
+        instance_token: "instance-generation",
+        writer_generation: { platform: "win32", pid: 123, creation_utc: "2026-10-28T12:00:00.000Z" },
+      }),
+      "utf-8",
+    );
+
+    expect(await readSessionIdentityFile(token, tmpHome)).toEqual({
+      peerId: "peer-generation",
+      groupId: "group-generation",
+      instanceToken: "instance-generation",
+      inboxBinding: null,
+      operatorId: null,
+      writerGeneration: { platform: "win32", pid: 123, creationUtc: "2026-10-28T12:00:00.000Z" },
+    });
+  });
+
+  const GEN_SOCKET = "socket://writer-generation";
+  const GEN_BROKER = "http://127.0.0.1:7899/";
+
+  async function writeGlobalWithGeneration(generation: WriterGeneration): Promise<void> {
+    await writeGlobalSessionIdentityFile(
+      GEN_SOCKET, "peer-gen", "group-gen", "instance-gen", "project-gen", tmpHome, generation, GEN_BROKER,
+    );
+  }
+
+  test("writer persists the supplied writer generation", async () => {
+    const generation: WriterGeneration = { platform: "win32", pid: 123, creationUtc: "2026-10-28T12:00:00.000Z" };
+    await writeGlobalWithGeneration(generation);
+
+    expect(await readGlobalSessionIdentityFile(GEN_SOCKET, tmpHome)).toMatchObject({ writerGeneration: generation });
+  });
+
+  test("reader refuses a snapshot when the writer process generation changed", async () => {
+    await writeGlobalWithGeneration({ platform: "win32", pid: 123, creationUtc: "2026-10-28T12:00:00.000Z" });
+
+    const identity = await readGlobalSessionIdentityFile(GEN_SOCKET, tmpHome, {
+      measureWriterGeneration: async () => ({
+        platform: "win32" as const,
+        pid: 123,
+        creationUtc: "2026-10-28T12:01:00.000Z",
+      }),
+    });
+    expect(identity).toBeNull();
+  });
+
+  test("reader hands the pid recorded in the file to the injected measure function", async () => {
+    const generation: WriterGeneration = { platform: "win32", pid: 4321, creationUtc: "2026-10-28T12:00:00.000Z" };
+    await writeGlobalWithGeneration(generation);
+
+    const seen: number[] = [];
+    const identity = await readGlobalSessionIdentityFile(GEN_SOCKET, tmpHome, {
+      verifyWriterGeneration: true,
+      measureWriterGeneration: async (pid) => {
+        seen.push(pid);
+        return generation;
+      },
+    });
+    expect(seen).toEqual([4321]);
+    expect(identity).toMatchObject({ writerGeneration: generation });
+  });
+
+  test("reader refuses when verification is requested but no measure function is supplied", async () => {
+    await writeGlobalWithGeneration({ platform: "win32", pid: 4321, creationUtc: "2026-10-28T12:00:00.000Z" });
+
+    expect(await readGlobalSessionIdentityFile(GEN_SOCKET, tmpHome, { verifyWriterGeneration: true })).toBeNull();
+    expect(await readGlobalSessionIdentityFile(GEN_SOCKET, tmpHome)).not.toBeNull();
+  });
+
+  test("reader verification rejects a live process whose recorded generation is stale", async () => {
+    await writeGlobalWithGeneration({ platform: "win32", pid: process.pid, creationUtc: "2000-01-01T00:00:00.000Z" });
+
+    expect(
+      await readGlobalSessionIdentityFile(GEN_SOCKET, tmpHome, { verifyWriterGeneration: true, measureWriterGeneration }),
+    ).toBeNull();
+  });
+
+  test("a platform without a process generation measurement yields none", async () => {
+    const original = Object.getOwnPropertyDescriptor(process, "platform")!;
+    const measuredHere = await measureWriterGeneration(process.pid);
+    try {
+      Object.defineProperty(process, "platform", { ...original, value: "darwin" });
+      expect(await measureWriterGeneration(process.pid), "darwin must measure no generation, so no snapshot is ever published").toBeNull();
+    } finally {
+      Object.defineProperty(process, "platform", original);
+    }
+    if (process.platform !== "darwin") {
+      expect(measuredHere, "control: the real platform measures the current process").not.toBeNull();
+    }
+  });
+
+  test.skipIf(process.platform === "darwin")("reader verification accepts the live writer process generation (needs a measurable process generation, refused on darwin)", async () => {
+    const writerGeneration = await measureWriterGeneration(process.pid);
+    expect(writerGeneration).not.toBeNull();
+    if (!writerGeneration) throw new Error("current process generation was not measurable");
+
+    await writeGlobalWithGeneration(writerGeneration);
+
+    expect(
+      await readGlobalSessionIdentityFile(GEN_SOCKET, tmpHome, { verifyWriterGeneration: true, measureWriterGeneration }),
+    ).toMatchObject({ writerGeneration });
   });
 
   test("a confirmation cannot be persisted without its operator", async () => {
@@ -138,6 +284,8 @@ describe("session-identity file", () => {
     ["instance_token missing entirely", { peer_id: "p", group_id: "g" }],
     ["peer_id an array", { peer_id: ["p"], group_id: "g", instance_token: "t" }],
     ["peer_id a number", { peer_id: 123, group_id: "g", instance_token: "t" }],
+    ["writer generation has an unknown platform", { peer_id: "p", group_id: "g", instance_token: "t", writer_generation: { platform: "other", pid: 1 } }],
+    ["writer generation has no process id", { peer_id: "p", group_id: "g", instance_token: "t", writer_generation: { platform: "win32", creation_utc: "2026-10-28T12:00:00.000Z" } }],
     ["file content a bare JSON string", "just-a-string"],
     ["file content a JSON null", null],
   ];

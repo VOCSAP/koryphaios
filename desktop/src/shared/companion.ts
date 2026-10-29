@@ -126,8 +126,6 @@ export const COMPANION_MANIFEST = {
   captureBrowser: { kind: 'invoke', channel: 'browser:capture' },
   saveAnnotation: { kind: 'invoke', channel: 'browser:save-annotation' },
   saveRecording: { kind: 'invoke', channel: 'browser:save-recording' },
-  runDemoScenario: { kind: 'invoke', channel: 'browser:demo-run' },
-  cancelDemoScenario: { kind: 'invoke', channel: 'browser:demo-cancel' },
   listCaptureWindows: { kind: 'invoke', channel: 'design:list-windows' },
   captureWindow: { kind: 'invoke', channel: 'design:capture-window' },
   loadReview: { kind: 'invoke', channel: 'browser:review-load' },
@@ -275,8 +273,6 @@ const EXPLICIT_REMOTE_BLOCKED_CHANNELS: readonly string[] = [
   'browser:capture',
   'browser:save-annotation',
   'browser:save-recording',
-  'browser:demo-run',
-  'browser:demo-cancel',
   'design:list-windows',
   'design:capture-window',
   // Remote approvals: enrolling a channel means pasting a BOT TOKEN, and
@@ -491,8 +487,6 @@ export const CHANNEL_TIERS: Readonly<Record<string, 0 | 1 | 2 | 3>> = {
   'browser:capture': 2,
   'browser:save-annotation': 2,
   'browser:save-recording': 2,
-  'browser:demo-run': 2,
-  'browser:demo-cancel': 2,
   'design:list-windows': 2,
   'design:capture-window': 2,
   // Reading the pending review is a read (tier 0, like diff:collect); saving

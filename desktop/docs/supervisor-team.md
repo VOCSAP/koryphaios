@@ -10,7 +10,7 @@ worktree each) and coordinates them via peer messages.
 - It is the **only** session bridged to the app, through private `deck_*`
   MCP tools served over a loopback endpoint with a per-launch Bearer token.
 - It never writes code itself; it delegates to the agents it spawns.
-- It also has the shared `roadmap_*` tools and claude-peers messaging
+- It also has the shared `roadmap_*` tools (from `kory-roadmap`, registered next to `claude-peers`) and claude-peers messaging
   (`list_peers` / `send_message`).
 
 ## Security model (fixed by the application)

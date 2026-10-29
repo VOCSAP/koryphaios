@@ -36,7 +36,6 @@ import type {
   StopMode,
   WorkspaceSummary
 } from '@shared/types'
-import type { ModelTarget } from '@shared/graph'
 
 function subscribe<T>(channel: string, cb: (payload: T) => void): () => void {
   const listener = (_e: Electron.IpcRendererEvent, payload: T): void => {
@@ -213,9 +212,6 @@ const api: DeckApi = {
   saveAnnotation: (dataUrl: string) => ipcRenderer.invoke('browser:save-annotation', dataUrl),
   saveRecording: (data: Uint8Array, ext: 'mp4' | 'webm') =>
     ipcRenderer.invoke('browser:save-recording', data, ext),
-  runDemoScenario: (webviewId: number, scenario: string, target: ModelTarget) =>
-    ipcRenderer.invoke('browser:demo-run', webviewId, scenario, target),
-  cancelDemoScenario: () => ipcRenderer.invoke('browser:demo-cancel'),
   listCaptureWindows: () => ipcRenderer.invoke('design:list-windows'),
   captureWindow: (id: string) => ipcRenderer.invoke('design:capture-window', id),
   loadReview: () => ipcRenderer.invoke('browser:review-load'),
