@@ -49,6 +49,16 @@
     ],
     "PreToolUse": [
       {
+        "matcher": "mcp__kory-roadmap__roadmap_add",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bun \"${CLAUDE_PLUGIN_ROOT}/hooks/roadmap-guard-hook.mjs\"",
+            "timeout": 10
+          }
+        ]
+      },
+      {
         "matcher": "mcp__claude-peers__roadmap_add",
         "hooks": [
           {
@@ -59,7 +69,27 @@
         ]
       },
       {
+        "matcher": "mcp__kory-roadmap__roadmap_update",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bun \"${CLAUDE_PLUGIN_ROOT}/hooks/roadmap-guard-hook.mjs\"",
+            "timeout": 10
+          }
+        ]
+      },
+      {
         "matcher": "mcp__claude-peers__roadmap_update",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bun \"${CLAUDE_PLUGIN_ROOT}/hooks/roadmap-guard-hook.mjs\"",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "mcp__kory-roadmap__roadmap_append_context",
         "hooks": [
           {
             "type": "command",

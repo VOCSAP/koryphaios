@@ -4,15 +4,18 @@
 // implausibly small, fails this test rather than passing quietly.
 
 import { test, expect, describe } from "bun:test";
+import { callRoadmapTool, ROADMAP_INSTRUCTIONS } from "../shared/roadmap-mcp.ts";
+import { ROADMAP_TOOLS } from "../shared/roadmap-tools.ts";
 
 const SRC = await Bun.file(new URL("../server.ts", import.meta.url)).text();
+const ROADMAP_CEILING_CHARS = 8_400;
 
 // Use characters because the test runner has no tokenizer; keep the ceiling
 // tight enough that one verbose description fails before small additions
 // accumulate.
 const CEILING_CHARS = 19_000;
 // Below this, the extractor lost a block: a full TOOLS array cannot fit in so little.
-const FLOOR_CHARS = 8_000;
+const FLOOR_CHARS = 6_000;
 
 function stripCommentLines(block: string): string {
   return block
@@ -47,6 +50,15 @@ function toolBlock(src: string, name: string): string {
 }
 
 describe("the per-turn MCP surface stays under its cap", () => {
+  test("kory-roadmap's schemas + instructions fit in ROADMAP_CEILING_CHARS", () => {
+    const schemas = JSON.stringify(ROADMAP_TOOLS).length;
+    const total = schemas + ROADMAP_INSTRUCTIONS.length;
+    expect(
+      total,
+      `kory-roadmap per-turn surface (schemas ${schemas} + instructions ${ROADMAP_INSTRUCTIONS.length}) exceeds ${ROADMAP_CEILING_CHARS} chars: move text out of the tool descriptions or the instructions, do not raise the ceiling`
+    ).toBeLessThanOrEqual(ROADMAP_CEILING_CHARS);
+  });
+
   test("instructions + TOOLS (comment lines excluded) fit in CEILING_CHARS", () => {
     const total = measureInstructions(SRC) + measureTools(SRC);
     expect(total).toBeGreaterThan(FLOOR_CHARS);
@@ -64,45 +76,84 @@ describe("the per-turn MCP surface stays under its cap", () => {
     // descriptions, not a second time here.
     expect(block).not.toContain("409");
     expect(block).not.toContain("magic_compact");
-    // Pins the status transition order and which peer_id locks the item
-    // in_progress, since this block is now the only place those facts are
-    // stated for the model.
-    expect(block).toContain("planned -> in_progress -> done");
-    expect(block).toContain("LOCKS the item under your peer_id");
   });
 });
 
-describe("roadmap_list: the singular filters left the schema, not the handler", () => {
-  test("the schema exposes only the plural filters", () => {
-    const schema = toolBlock(SRC, "roadmap_list");
+describe("kory-roadmap serves the SHARED ROADMAP instructions", () => {
+  test("the instructions state the status order and who holds the in_progress lock", () => {
+    expect(ROADMAP_INSTRUCTIONS, "status transition order missing from the served instructions").toContain(
+      "planned -> in_progress -> done"
+    );
+    expect(ROADMAP_INSTRUCTIONS, "in_progress lock owner missing from the served instructions").toContain(
+      "LOCKS the item under your peer_id"
+    );
+  });
+
+  test("the instructions tell an agent that stops to put the item back to planned", () => {
+    expect(ROADMAP_INSTRUCTIONS, "release rule missing: a stopped agent would keep the lock").toContain(
+      "set it back to planned if you stop before finishing"
+    );
+  });
+
+  test("the instructions explain triage and how to find executable work", () => {
+    expect(ROADMAP_INSTRUCTIONS, "ready-for-agent is no longer defined").toContain(
+      "ready-for-agent means it is specified enough to take without a human question"
+    );
+    expect(ROADMAP_INSTRUCTIONS, "needs-info is no longer defined").toContain("needs-info awaits one");
+    expect(ROADMAP_INSTRUCTIONS, "no pointer to the triage filter").toContain('triages:["ready-for-agent"]');
+  });
+
+  test("the instructions explain the directive card", () => {
+    expect(ROADMAP_INSTRUCTIONS, "directive card guidance missing").toContain("kind='directive'");
+  });
+
+  test("the instructions stay out of the lock mechanics the tool descriptions own", () => {
+    expect(ROADMAP_INSTRUCTIONS).not.toContain("409");
+    expect(ROADMAP_INSTRUCTIONS).not.toContain("magic_compact");
+  });
+});
+
+describe("kory-roadmap registry and handler", () => {
+  test("roadmap_list exposes plural filters and still forwards legacy singular filters", async () => {
+    const schema = ROADMAP_TOOLS.find((tool) => tool.name === "roadmap_list");
+    expect(schema).toBeDefined();
+    const properties = schema!.inputSchema.properties;
     for (const singular of ["kind", "status", "priority", "tag"]) {
-      expect(schema).not.toMatch(new RegExp(`^\\s{8}${singular}:`, "m"));
+      expect(properties).not.toHaveProperty(singular);
     }
     for (const plural of ["kinds", "statuses", "priorities", "tags", "efforts", "values", "q", "include_archived"]) {
-      expect(schema).toMatch(new RegExp(`^\\s{8}${plural}:`, "m"));
+      expect(properties).toHaveProperty(plural);
     }
-    expect(schema).toContain("Always pass a filter");
+
+    const sent: Array<{ path: string; body: Record<string, unknown> }> = [];
+    const result = await callRoadmapTool(
+      "roadmap_list",
+      { kind: "bug", status: "planned", priority: "must", tag: "mcp" },
+      {
+        identity: { peerId: "probe-peer", projectKey: "github.com/example/probe" },
+        brokerFetch: async <T>(path: string, body: Record<string, unknown>) => {
+          sent.push({ path, body });
+          return { items: [] } as T;
+        },
+      },
+    );
+    expect(result.isError, result.content[0]?.text).toBeUndefined();
+    expect(sent.map((request) => request.path)).toEqual(["/roadmap/list"]);
+    expect(sent[0]!.body, "a legacy singular filter was dropped before reaching the broker").toMatchObject({
+      project_key: "github.com/example/probe",
+      kind: "bug",
+      status: "planned",
+      priority: "must",
+      tag: "mcp",
+    });
   });
 
-  test("the handler still forwards a singular an older agent may send", () => {
-    // The broker takes the UNION of both forms (mergeEnumFilter, broker.ts);
-    // this pins the hop between the MCP argument and that request.
-    const start = SRC.indexOf('case "roadmap_list":');
-    expect(start).toBeGreaterThan(0);
-    const handler = SRC.slice(start, SRC.indexOf("case ", start + 10));
-    for (const singular of ["kind", "status", "priority", "tag"]) {
-      expect(handler).toContain(`${singular}: a.${singular},`);
-    }
-  });
-});
-
-describe("roadmap_append_context: compact guidance stays actionable", () => {
-  test("the description keeps overwrite and durable-fact guidance without the stale per-call cap", () => {
-    const schema = toolBlock(SRC, "roadmap_append_context");
-    expect(schema).toContain("roadmap_update replaces");
-    expect(schema).toContain("operator's next Save may overwrite appended text");
-    expect(schema).toContain("durable facts go in description/rationale");
-    expect(schema).not.toContain("Capped per call");
+  test("roadmap_append_context keeps overwrite guidance", () => {
+    const schema = ROADMAP_TOOLS.find((tool) => tool.name === "roadmap_append_context");
+    expect(schema?.description).toContain("roadmap_update replaces");
+    expect(schema?.description).toContain("operator's next Save may overwrite appended text");
+    expect(schema?.description).toContain("durable facts go in description/rationale");
+    expect(schema?.description).not.toContain("Capped per call");
   });
 });
 

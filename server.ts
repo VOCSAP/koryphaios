@@ -25,14 +25,6 @@ import type {
   WhoamiResponse,
   ListGroupsResponse,
   SetIdResponse,
-  RoadmapItem,
-  RoadmapListResponse,
-  RoadmapUpsertResponse,
-  RoadmapArchiveResponse,
-  RoadmapContextAppendResponse,
-  RoadmapContextDocument,
-  RoadmapContextDocumentListResponse,
-  RoadmapUpsertAckField,
   SendMessageResponse,
   DelegationContext,
   DelegationsAttachResponse,
@@ -42,12 +34,14 @@ import type {
   ContextResumeFrame,
 } from "./shared/types.ts";
 import { taskLabelFromText } from "./shared/delegated-task.ts";
-import {
-  formatRoadmapContextDocumentHeader,
-  formatRoadmapContextDocumentOmission,
-  ROADMAP_CONTEXT_DOCUMENT_OUTPUT_MAX_CHARS,
-  type RoadmapContextDocumentOmissions,
-} from "./shared/types.ts";
+import { ROADMAP_TOOLS } from "./shared/roadmap-tools.ts";
+import { filterTools, resolveToolAllowlist, TOOLS_ENV_VAR } from "./shared/tool-allowlist.ts";
+import { callRoadmapTool } from "./shared/roadmap-mcp.ts";
+export {
+  formatLockContestedBy,
+  formatRoadmapItemLine,
+  formatRoadmapUpsertAck,
+} from "./shared/roadmap-mcp.ts";
 import {
   generateSummary,
   heuristicSummary,
@@ -60,6 +54,8 @@ import {
   brokerUrl,
   isLoopbackBrokerUrl,
   buildSummaryProviderConfig,
+  canonicalBrokerUrl,
+  brokerHeaders,
   resolveGroup,
   computeGroupId,
   computeGroupSecretHash,
@@ -75,20 +71,20 @@ import {
   writePeerIdCache,
   writeDeskSessionId,
   writeSessionIdentityFile,
+  writeGlobalSessionIdentityFile,
   readSessionIdentityFile,
+  deleteGlobalSessionIdentityFile,
   deleteSessionIdentityFile,
   type InboxBindingConfirmation,
 } from "./shared/peer-cache.ts";
 import { inboxDepositReadiness } from "./shared/inbox-readiness.ts";
+import { measureWriterGeneration } from "./shared/process-generation.ts";
 import { createLogger, coreLogDir, stderrMirror } from "./shared/logger.ts";
 import {
   DECK_PEER_ID,
   DECK_INSTANCE_TOKEN,
   OPERATOR_INSTANCE_TOKEN,
   OPERATOR_PEER_ID,
-  ROADMAP_UPSERT_ACK_FIELDS,
-  ROADMAP_ADD_ACK_FIELDS,
-  ROADMAP_UPDATE_ACK_FIELDS,
 } from "./shared/types.ts";
 import type { GraphDraftAddResponse } from "./shared/types.ts";
 import type { DispatchRequest, DispatchRequestAddResponse } from "./shared/types.ts";
@@ -114,12 +110,6 @@ import {
   GRAPH_DRAFT_SYSTEM_PROMPT,
   GRAPH_DRAFT_TIMEOUT_MS,
 } from "./shared/graph-draft.ts";
-import {
-  buildRoadmapAppendHeader,
-  getLivingRoadmapContextUnits,
-  getRoadmapContextLiveLength,
-  parseRoadmapContext,
-} from "./shared/roadmap-append.ts";
 import {
   runWaitForMessage,
   buildWaiter,
@@ -152,7 +142,6 @@ import { spawn as spawnChildProcess } from "node:child_process";
 // drops desktop from the default glob, not from files reached by an explicit
 // import (see the comment on that exclude). Single source of truth for
 // "dispatch queue order" per CLAUDE.md: do not re-derive this sort locally.
-import { queuedItems, wavesOf } from "./desktop/src/shared/workflow.ts";
 
 const PEER_ID_REGEX = /^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$/;
 
@@ -168,12 +157,6 @@ const BROKER_SCRIPT = join(dirname(fileURLToPath(import.meta.url)), "broker.ts")
 
 // --- Broker HTTP communication ---
 
-function brokerHeaders(extra?: Record<string, string>): Record<string, string> {
-  const h: Record<string, string> = { ...extra };
-  if (BROKER_TOKEN) h["Authorization"] = `Bearer ${BROKER_TOKEN}`;
-  return h;
-}
-
 // signal is optional and defaults to undefined so every existing brokerFetch
 // caller is unaffected; only wait_for_message's own opportunistic peek supplies
 // it, bounding that one fetch by the tool's own cap.
@@ -182,7 +165,7 @@ function brokerHeaders(extra?: Record<string, string>): Record<string, string> {
 async function brokerFetch<T>(path: string, body: unknown, signal?: AbortSignal): Promise<T> {
   const res = await fetch(`${BROKER_URL}${path}`, {
     method: "POST",
-    headers: brokerHeaders({ "Content-Type": "application/json" }),
+    headers: brokerHeaders(config, { "Content-Type": "application/json" }),
     body: JSON.stringify(body),
     signal,
   });
@@ -194,7 +177,7 @@ async function brokerFetch<T>(path: string, body: unknown, signal?: AbortSignal)
 }
 
 async function brokerGet<T>(path: string, signal?: AbortSignal): Promise<T> {
-  const res = await fetch(`${BROKER_URL}${path}`, { headers: brokerHeaders(), signal });
+  const res = await fetch(`${BROKER_URL}${path}`, { headers: brokerHeaders(config), signal });
   if (!res.ok) {
     const err = await res.text();
     throw new Error(`Broker error (${path}): ${res.status} ${err}`);
@@ -786,17 +769,9 @@ const mcp = new Server(
 
 When a <channel source="claude-peers"> message arrives, reply now with send_message to its from_peer_id, then resume your work. Peer traffic is background work: do not narrate it to the operator. Tell the operator only when a human decision is needed, you are blocked, or the outcome changes your plan or result, and then in one or two sentences.
 
-Tools: list_peers, send_message, set_summary, wait_for_message, check_messages, whoami, list_groups, switch_group, set_id, the roadmap_* family.
+Tools: list_peers, send_message, set_summary, wait_for_message, check_messages, whoami, list_groups, switch_group and set_id.
 
 Special recipient 'operator': send_message with to_peer_id 'operator' reaches the HUMAN operator's desktop inbox. Use it for blocking questions or findings that need a human decision; the answer comes back as a Deck announcement or new instructions, not through this channel. It needs a group that pins a secret (a Koryphaios Deck always does); in the secret-less 'default' group the send is refused, ask on screen instead.
-
-SHARED ROADMAP: a persistent backlog (features, bugs, debt, ideas) scoped to this repository and shared with every Claude instance working on it, now and later.
-- Start of a task: roadmap_list with a filter, to see what is planned and in progress.
-- Bug, debt or idea outside your task: roadmap_add, with the 'context' field filled.
-- Keep the status of items you work on current (roadmap_update: planned -> in_progress -> done). in_progress LOCKS the item under your peer_id: set it only when you really start, set it back to planned if you stop before finishing.
-- Team leads: a kind='directive' card (roadmap_add) lets the Deck reset a peer's context between items; queue it for a lead tile to run.
-- Set triage to say who the card awaits, separately from status and priority; ready-for-agent means it is specified enough to take without a human question, while needs-info awaits one.
-- Find executable work with roadmap_list triages:["ready-for-agent"].
 
 When you start, call set_summary to say what you are working on.`,
   }
@@ -957,242 +932,7 @@ const TOOLS = [
       required: ["new_id"],
     },
   },
-  {
-    name: "roadmap_list",
-    // The singular filters (kind, status, priority, tag) left the SCHEMA in
-    // spec_ec5cf671 but not the handler nor the broker: `kinds: ["bug"]` is
-    // the same query, the broker takes the UNION of both forms
-    // (mergeEnumFilter), and an agent still sending `kind` is served. Four
-    // fewer properties read on every turn; no filter lost.
-    description:
-      "List the project's shared roadmap (persistent backlog scoped to this repository, shared across sessions). Always pass a filter (statuses, kinds, q ...) so you do not load the whole board. Within a filter: OR; between filters: AND. Archived items hidden unless include_archived.",
-    inputSchema: {
-      type: "object" as const,
-      properties: {
-        kinds: {
-          type: "array" as const,
-          items: { type: "string" as const, enum: ["feature", "bug", "debt", "idea", "chore", "directive"] },
-        },
-        statuses: {
-          type: "array" as const,
-          items: { type: "string" as const, enum: ["idea", "planned", "in_progress", "done", "archived"] },
-        },
-        priorities: {
-          type: "array" as const,
-          items: { type: "string" as const, enum: ["must", "should", "could", "wont"] },
-        },
-        efforts: {
-          type: "array" as const,
-          items: { type: "string" as const, enum: ["low", "medium", "high"] },
-        },
-        values: {
-          type: "array" as const,
-          items: { type: "string" as const, enum: ["low", "medium", "high"] },
-        },
-        triages: {
-          type: "array" as const,
-          items: {
-            type: "string" as const,
-            enum: ["needs-triage", "needs-info", "ready-for-agent", "ready-for-human", "wontfix"],
-          },
-        },
-        tags: {
-          type: "array" as const,
-          items: { type: "string" as const },
-          description: "Items carrying at least one of these tags.",
-        },
-        q: {
-          type: "string" as const,
-          description: "Free-text search over title, description and tags (order, case and accents ignored).",
-        },
-        q_deep: {
-          type: "boolean" as const,
-          description: "Widen `q` to rationale and context.",
-        },
-        include_archived: { type: "boolean" as const, description: "Default false." },
-        order: {
-          type: "string" as const,
-          enum: ["queue"],
-          description: "queue: real dispatch order (queue ascending, waves grouped) instead of MoSCoW groups.",
-        },
-      },
-    },
-  },
-  {
-    name: "roadmap_get",
-    description:
-      "Show the full detail of one roadmap item (description, rationale, tags, dependencies, authorship). Accepts a full id or a unique prefix (e.g. the 8-char id shown by roadmap_list).",
-    inputSchema: {
-      type: "object" as const,
-      properties: {
-        id: { type: "string" as const, description: "Item id, or a unique id prefix." },
-        raw_context: { type: "boolean" as const, description: "Return the raw context without folding superseded units." },
-        with_documents: {
-          type: "boolean" as const,
-          description: "Include immutable context documents when this card has them. Default false.",
-        },
-      },
-      required: ["id"],
-    },
-  },
-  // Directive cards run when reached at the head of the dispatch queue: the
-  // Deck types the command into target_peer_ids' terminals, agents never invoke
-  // it themselves.
-  // 'clear' resets a peer's context for free and keeps system prompt, CLAUDE.md
-  // and MCP; 'compact' costs one inference; 'magic_compact' is the
-  // deterministic plugin, falling back to compact.
-  {
-    name: "roadmap_add",
-    description:
-      "Add an item to the project's shared roadmap: a feature, bug, tech debt or idea you want to survive this session. Only title is required (defaults: kind=feature, priority=could, value/effort=medium, status=idea). Always fill `context`. kind='directive' is a control card the Deck executes on target_peer_ids (team leads only).",
-    inputSchema: {
-      type: "object" as const,
-      properties: {
-        title: { type: "string" as const, description: "Short imperative title." },
-        kind: {
-          type: "string" as const,
-          enum: ["feature", "bug", "debt", "idea", "chore", "directive"],
-          description: "Default feature.",
-        },
-        directive: {
-          type: "string" as const,
-          enum: ["clear", "compact", "magic_compact"],
-          description:
-            "REQUIRED when kind='directive': clear (free context reset), compact (one inference), magic_compact (plugin, falls back to compact).",
-        },
-        target_peer_ids: {
-          type: "array" as const,
-          items: { type: "string" as const },
-          description: "kind='directive' only: peer_ids (from list_peers) that receive the command. Max 16 per card.",
-        },
-        description: { type: "string" as const, description: "Free markdown details." },
-        rationale: { type: "string" as const, description: "Why it matters." },
-        context: {
-          type: "string" as const,
-          description:
-            "Briefing for a future session with none of this one's context: objective, scope boundaries, relevant files/tests, acceptance criteria, decisions made -- what the repo alone won't reveal.",
-        },
-        priority: {
-          type: "string" as const,
-          enum: ["must", "should", "could", "wont"],
-          description: "MoSCoW, default could.",
-        },
-        value: { type: "string" as const, enum: ["low", "medium", "high"], description: "Default medium." },
-        effort: { type: "string" as const, enum: ["low", "medium", "high"], description: "Default medium." },
-        status: {
-          type: "string" as const,
-          enum: ["idea", "planned", "in_progress", "done"],
-          description: "Default idea.",
-        },
-        triage: {
-          type: "string" as const,
-          enum: ["needs-triage", "needs-info", "ready-for-agent", "ready-for-human", "wontfix"],
-          description:
-            "Who the card waits on. ready-for-agent = specified enough to take as written. wontfix requires priority=wont.",
-        },
-        tags: { type: "array" as const, items: { type: "string" as const } },
-        depends_on: {
-          type: "array" as const,
-          items: { type: "string" as const },
-          description: "Ids of items this one depends on.",
-        },
-      },
-      required: ["title"],
-    },
-  },
-  // [INACTIVE] has no agent-side field: only the operator can lift it, and
-  // claiming (in_progress or locked=true) 403s regardless of what else the
-  // write changes -- a retry with extra fields does not help.
-  // status:in_progress locks the item under the caller's own peer_id so two
-  // peers cannot claim the same card.
-  // The broker's force:true override exists but is not exposed by this tool.
-  {
-    name: "roadmap_update",
-    description:
-      "Partially update a roadmap item (only fields you pass change): reprioritize, retag, rewrite, or move status. status=archived archives, any other status restores. status:in_progress locks it; a status write on an item locked by another peer is refused (409). Claiming an [INACTIVE] card is refused (403).",
-    inputSchema: {
-      type: "object" as const,
-      properties: {
-        id: { type: "string" as const, description: "Item id, or a unique id prefix." },
-        title: { type: "string" as const },
-        kind: { type: "string" as const, enum: ["feature", "bug", "debt", "idea", "chore", "directive"] },
-        directive: {
-          type: "string" as const,
-          enum: ["clear", "compact", "magic_compact"],
-          description: "kind='directive' only.",
-        },
-        target_peer_ids: {
-          type: "array" as const,
-          items: { type: "string" as const },
-          description: "kind='directive' only.",
-        },
-        description: { type: "string" as const },
-        rationale: { type: "string" as const },
-        context: {
-          type: "string" as const,
-          description: "Briefing for a future agent (see roadmap_add). Replaces the whole field.",
-        },
-        priority: { type: "string" as const, enum: ["must", "should", "could", "wont"] },
-        value: { type: "string" as const, enum: ["low", "medium", "high"] },
-        effort: { type: "string" as const, enum: ["low", "medium", "high"] },
-        status: {
-          type: "string" as const,
-          enum: ["idea", "planned", "in_progress", "done", "archived"],
-        },
-        triage: {
-          type: "string" as const,
-          enum: ["needs-triage", "needs-info", "ready-for-agent", "ready-for-human", "wontfix"],
-          description: "Triage role. wontfix requires priority=wont.",
-        },
-        tags: { type: "array" as const, items: { type: "string" as const } },
-        depends_on: { type: "array" as const, items: { type: "string" as const } },
-        locked: {
-          type: "boolean" as const,
-          description: "Usually implicit. false releases your lock while staying in_progress, true re-claims.",
-        },
-        release: {
-          type: "boolean" as const,
-          description:
-            "Release or reclaim a card locked by another peer in your OWN group (refused across groups). Distinct from force, which overrides the true owner.",
-        },
-        // queue sets only this card's own rank; it never reorders or renumbers
-        // the rest of the queue. Global reorder is /roadmap/reorder,
-        // deliberately not exposed here.
-        queue: { type: "number" as const, description: "Rank; null dequeues; ties share a wave." },
-      },
-      required: ["id"],
-    },
-  },
-  {
-    name: "roadmap_archive",
-    description:
-      "Archive a roadmap item (reversible soft delete: it disappears from default lists but can be restored with roadmap_update status).",
-    inputSchema: {
-      type: "object" as const,
-      properties: {
-        id: { type: "string" as const, description: "Item id, or a unique id prefix." },
-      },
-      required: ["id"],
-    },
-  },
-  {
-    name: "roadmap_append_context",
-    description:
-      "Append a note to a roadmap item's context without replacing it (roadmap_update replaces). Use it to leave a note on another agent's card: the work-lock does not block it. Not idempotent; a retry may land twice. The operator's next Save may overwrite appended text: durable facts go in description/rationale. Does not refresh updated_at.",
-    inputSchema: {
-      type: "object" as const,
-      properties: {
-        id: { type: "string" as const, description: "Item id, or a unique id prefix." },
-        text: { type: "string" as const, description: "The note." },
-        supersedes: {
-          type: "array" as const,
-          items: { type: "string" as const },
-          description: "Existing context targets this append replaces.",
-        },
-      },
-      required: ["id", "text"],
-    },
-  },
+  ...ROADMAP_TOOLS,
 ];
 
 // Kory-only surface: dispatched from the queue, moving a question into the
@@ -1287,49 +1027,10 @@ const DECK_ONLY_TOOLS = [
 
 // --- Tool handlers ---
 
-// CLAUDE_PEERS_TOOLS: unset exposes every tool; set to a comma-separated list
-// exposes exactly those names; set to the empty string exposes none. The three
-// states are distinguished deliberately.
-// Applies to the process Kory spawns per session tile; a sub-agent inherits the
-// already-connected parent server, so this has no effect on sub-agents.
-const TOOLS_ENV_VAR = "CLAUDE_PEERS_TOOLS";
-
-/**
- * Pure allow-list resolver. `undefined` (env var absent) means "no
- * restriction" -- distinct from `[]` (env var present and empty, meaning
- * zero tools). Kept pure so a test can drive it without spawning a process
- * or touching env.
- */
-function resolveToolAllowlist(envValue: string | undefined): string[] | null {
-  if (envValue === undefined) return null;
-  if (envValue === "") return [];
-  return envValue
-    .split(",")
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0);
-}
-
-/**
- * Pure filter: `null` allowlist (var absent) passes every tool through
- * unchanged. The Set intersection means the allow-list can only SHRINK the
- * surface below TOOLS, never grow it -- a stale or misspelled name in the
- * env var is silently dropped, never surfaced as a phantom tool.
- */
-function filterTools<T extends { name: string }>(tools: readonly T[], allowlist: string[] | null): T[] {
-  if (allowlist === null) return tools.slice();
-  const allowed = new Set(allowlist);
-  return tools.filter((t) => allowed.has(t.name));
-}
-
 const TOOLS_ALLOWLIST_RAW = process.env[TOOLS_ENV_VAR];
 const TOOLS_ALLOWLIST = resolveToolAllowlist(TOOLS_ALLOWLIST_RAW);
 const FILTERED_TOOLS = filterTools(TOOLS, TOOLS_ALLOWLIST);
 
-// Resolution trace at startup: when a tool is missing from a caller's
-// surface, this is what says whether CLAUDE_PEERS_TOOLS ate it and what the
-// requested vs retained lists were -- without it, diagnosing a missing tool
-// costs an hour of guessing (same rationale as deck-control-mcp.ts's own
-// startup trace, Card ff091064).
 log(
   `Tool allowlist resolved (source: ${
     TOOLS_ALLOWLIST_RAW === undefined ? "unset (no restriction)" : TOOLS_ENV_VAR
@@ -1351,20 +1052,35 @@ function roadmapProjectKey(): string {
   return resolveProjectKey(myProjectKey, myGitRoot, myCwd);
 }
 
-/** Author stamp for roadmap writes: the resolved peer_id, else a host fallback. */
-function roadmapAuthor(): string {
-  return myPeerId ?? `${myHost || "unknown"}-unregistered`;
+async function invalidateGlobalCompanionIdentity(): Promise<void> {
+  const messagingSocket = process.env.CLAUDE_CODE_MESSAGING_SOCKET;
+  if (!messagingSocket) return;
+  await deleteGlobalSessionIdentityFile(messagingSocket);
 }
 
-/**
- * Proof that accompanies `by` (roadmap card 39c40571, layer 1). The broker
- * REQUIRES it as soon as `by` names a registered peer, which is exactly the
- * case here once registration succeeded -- without it our own writes would be
- * refused as impersonation of ourselves. Omitted before registration, when the
- * author is the host fallback and belongs to no peer row.
- */
-function roadmapProof(): Record<string, string> {
-  return myInstanceToken ? { instance_token: myInstanceToken } : {};
+async function writeGlobalCompanionIdentity(): Promise<void> {
+  await invalidateGlobalCompanionIdentity();
+  const messagingSocket = process.env.CLAUDE_CODE_MESSAGING_SOCKET;
+  if (!messagingSocket || !myPeerId || !myInstanceToken) return;
+  const writerGeneration = await measureWriterGeneration(process.pid);
+  if (!writerGeneration) {
+    logError("Could not measure the process generation for the global roadmap companion");
+    return;
+  }
+  try {
+    await writeGlobalSessionIdentityFile(
+      messagingSocket,
+      myPeerId,
+      myGroupId,
+      myInstanceToken,
+      roadmapProjectKey(),
+      undefined,
+      writerGeneration,
+      canonicalBrokerUrl(config),
+    );
+  } catch (error) {
+    logError("Could not write the global roadmap companion identity", error);
+  }
 }
 
 /** A completed roadmap card may still have no execution outcome. */
@@ -1393,305 +1109,6 @@ export function renderDispatchOutcome(request: DispatchRequest): string {
   });
   return `Dispatch ran. ${cards.length} card(s) dispatched:\n${lines.join("\n")}${note ? `\n${note}` : ""}`;
 }
-
-/**
- * Resolve a full id or a UNIQUE id prefix (roadmap_list shows 8-char prefixes)
- * against the project's items, archived included. Throws a descriptive error
- * on no match / ambiguous prefix.
- */
-async function resolveRoadmapId(idOrPrefix: string): Promise<string> {
-  const needle = idOrPrefix.trim();
-  if (!needle) throw new Error("empty id");
-  const { items } = await brokerFetch<RoadmapListResponse>("/roadmap/list", {
-    project_key: roadmapProjectKey(),
-    include_archived: true,
-  });
-  const exact = items.find((i) => i.id === needle);
-  if (exact) return exact.id;
-  const matches = items.filter((i) => i.id.startsWith(needle));
-  if (matches.length === 1) return matches[0]!.id;
-  if (matches.length === 0) throw new Error(`no roadmap item matches '${needle}'`);
-  throw new Error(
-    `ambiguous id prefix '${needle}' (${matches.length} matches) -- use more characters`
-  );
-}
-
-/**
- * How many contesting holders a rendered line names before it stops counting
- * them. `lock_contested_by` is written by whichever OTHER brokers relay a claim
- * on the same card, so its length is not this process's to bound, and one
- * runaway card must not be able to inflate every line of a roadmap_list.
- */
-const LOCK_CONTESTED_SHOWN = 3;
-
-/**
- * The peers holding this card's work-lock on ANOTHER broker at the same time as
- * its local holder. Empty string when nothing contests it, so an uncontested
- * card -- almost every card -- costs zero characters per turn; a tolerated
- * absent field (an older broker answers without it) reads the same way.
- */
-export function formatLockContestedBy(contested: readonly string[] | undefined): string {
-  if (!Array.isArray(contested) || contested.length === 0) return "";
-  const shown = contested.slice(0, LOCK_CONTESTED_SHOWN);
-  const hidden = contested.length - shown.length;
-  return `${shown.join(", ")}${hidden > 0 ? `, +${hidden} more` : ""}`;
-}
-
-export function formatRoadmapItemLine(i: RoadmapItem): string {
-  const tags = i.tags.length ? `  #${i.tags.join(" #")}` : "";
-  const lock = i.locked ? ` 🔒${i.locked_by ?? ""}` : "";
-  // Next to the lock marker, where an agent already looks to decide whether the
-  // card is free: a claim relayed to a shared upstream can be held by an agent
-  // on another machine, which no local field would ever show.
-  const contested = formatLockContestedBy(i.lock_contested_by);
-  const alsoHeld = contested ? ` [also held elsewhere: ${contested}]` : "";
-  // Shown in list output so an agent evaluating a card sees it is blocked
-  // before attempting the claim that would 403.
-  const inactive = i.inactive ? " [INACTIVE -- do not claim]" : "";
-  // Card 7defe381 LOT 1: a marker present ONLY when the card is enqueued, so
-  // the vast majority of unenqueued cards pay zero extra chars per turn.
-  const queueRank = i.queue !== null ? ` queue:${i.queue}` : "";
-  // Same shape as queueRank: an untriaged card pays nothing. Worth its chars on
-  // the others because the role is what tells an agent whether the card is
-  // takeable AS WRITTEN, which no other field on this line answers.
-  const triage = i.triage !== null ? ` triage:${i.triage}` : "";
-  return `[${i.id.slice(0, 8)}] ${i.kind} · ${i.priority} · value:${i.value} effort:${i.effort} · ${i.status}${triage}${queueRank}${lock}${alsoHeld}${inactive} — ${i.title}${tags}`;
-}
-
-/**
- * Card 7defe381 LOT 1: the roadmap in its REAL dispatch order, for
- * `roadmap_list({ order: "queue" })`. Delegates the ordering/grouping to
- * `queuedItems`/`wavesOf` (desktop/src/shared/workflow.ts) rather than
- * re-deriving a sort here -- that module is already the single source of
- * truth the Deck's own workflow lane draws from (see the import comment
- * above), so this view can never silently diverge from what the Deck shows.
- * `queuedItems` excludes done/archived rows even when they still carry a
- * stale `queue` value, so a finished card never resurfaces as pending.
- */
-function formatRoadmapQueueOrder(items: RoadmapItem[]): string {
-  const byId = new Map(items.map((i) => [i.id, i] as const));
-  const ordered = queuedItems(items);
-  const waves = wavesOf(ordered);
-  const waveBlocks = waves.map((waveIds, idx) => {
-    const rows = waveIds.map((id) => formatRoadmapItemLine(byId.get(id)!));
-    return `WAVE ${idx + 1} (${rows.length} card${rows.length > 1 ? "s" : ""}, dispatched together):\n${rows.join("\n")}`;
-  });
-  const queuedIds = new Set(ordered.map((i) => i.id));
-  const rest = items.filter((i) => !queuedIds.has(i.id));
-
-  const parts: string[] = [];
-  parts.push(
-    waveBlocks.length
-      ? `DISPATCH QUEUE (${ordered.length} card(s) in ${waves.length} wave(s)):\n\n${waveBlocks.join("\n\n")}`
-      : "DISPATCH QUEUE: empty."
-  );
-  if (rest.length) {
-    parts.push(`NOT QUEUED (${rest.length}):\n${rest.map(formatRoadmapItemLine).join("\n")}`);
-  }
-  return parts.join("\n\n");
-}
-
-function formatRoadmapContext(context: string, rawContext: boolean): string {
-  if (rawContext) return `context (raw agent briefing): ${context}`;
-
-  const livingUnits = getLivingRoadmapContextUnits(context);
-  const livingTargets = new Set(livingUnits.map((unit) => unit.target));
-  const supersededUnits = parseRoadmapContext(context).filter((unit) => !livingTargets.has(unit.target));
-  const lines = [
-    `context (living, ${getRoadmapContextLiveLength(context)} chars): ${livingUnits.map((unit) => unit.raw).join("")}`,
-  ];
-  if (supersededUnits.length > 0) {
-    lines.push(
-      `context superseded: ${supersededUnits.length} unit(s): ${supersededUnits
-        .map((unit) => unit.timestamp ?? "body")
-        .join(", ")}`
-    );
-  }
-  return lines.join("\n");
-}
-
-function formatRoadmapContextDocuments(
-  documents: readonly RoadmapContextDocument[],
-  omitted?: RoadmapContextDocumentOmissions,
-): string {
-  const rendered = documents.map(
-    (document) => `${formatRoadmapContextDocumentHeader(document)}\n${document.units.map((unit) => unit.raw).join("")}`,
-  );
-  if (omitted && omitted.document_count > 0) {
-    rendered.push(formatRoadmapContextDocumentOmission(omitted));
-  }
-  const section = rendered.join("\n\n");
-  if (section.length > ROADMAP_CONTEXT_DOCUMENT_OUTPUT_MAX_CHARS) {
-    throw new Error("context document section exceeds its output budget");
-  }
-  return section;
-}
-
-function formatRoadmapItemDetail(
-  i: RoadmapItem,
-  rawContext = false,
-  documentCount = 0,
-  documents?: readonly RoadmapContextDocument[],
-  omittedDocuments?: RoadmapContextDocumentOmissions,
-): string {
-  const lines = [
-    `${formatRoadmapItemLine(i)}`,
-    `id: ${i.id}`,
-    i.description ? `description: ${i.description}` : "",
-    i.rationale ? `rationale: ${i.rationale}` : "",
-    i.context ? formatRoadmapContext(i.context, rawContext) : "",
-    documents
-      ? formatRoadmapContextDocuments(documents, omittedDocuments)
-      : documentCount > 0
-        ? `context documents available: ${documentCount}; call roadmap_get with with_documents: true to read them.`
-        : "",
-    i.kind === "directive"
-      ? `directive: /${i.directive} -> ${i.target_peer_ids.length ? i.target_peer_ids.join(", ") : "(no targets yet)"} (executed by the Deck when dispatched)`
-      : "",
-    i.depends_on.length ? `depends_on: ${i.depends_on.map((d) => d.slice(0, 8)).join(", ")}` : "",
-    // Spelled out here rather than left to the summary line above: 'ready-for-agent'
-    // is a claim about THIS card being specified enough to execute without asking,
-    // and an agent reading the detail is exactly the caller deciding that.
-    i.triage !== null ? `triage: ${i.triage} (who the card waits on)` : "triage: not triaged yet",
-    i.locked ? `locked: by ${i.locked_by} since ${i.locked_at} (actively being worked on)` : "",
-    i.inactive ? `inactive: this card is inactive -- do not claim it or move it to in_progress; only an operator-signed write can clear this` : "",
-    `created: ${i.created_at} by ${i.created_by}`,
-    `updated: ${i.updated_at} by ${i.updated_by}`,
-    i.deleted_at ? `archived: ${i.deleted_at}` : "",
-  ].filter(Boolean);
-  return lines.join("\n  ");
-}
-
-/**
- * Reports what the caller requested crossed against what the broker actually
- * landed (via ROADMAP_UPSERT_ACK_FIELDS); args are never trusted directly since
- * the broker silently normalizes or drops fields.
- * domain is per-tool, never a union: roadmap_add never forwards locked, so it
- * must never appear in that path's ack even if passed.
- * Two conditional trailers, each read off the written item: one when the
- * caller's own instance token matches item.locked_by_token, reminding it how to
- * release its own claim, and one when another broker holds the same work-lock
- * (lock_contested_by). Neither costs a lookup nor a character otherwise.
- */
-export function formatRoadmapUpsertAck(opts: {
-  label: "created" | "updated";
-  item: RoadmapItem;
-  args: Record<string, unknown>;
-  domain: readonly RoadmapUpsertAckField[];
-  holderInstanceToken?: string;
-}): string {
-  const { label, item, args, domain, holderInstanceToken } = opts;
-  const passed: string[] = [];
-  const untouched: string[] = [];
-  for (const field of domain) {
-    if (args[field] === undefined) {
-      untouched.push(field);
-      continue;
-    }
-    const spec = ROADMAP_UPSERT_ACK_FIELDS[field];
-    if (spec.category === "intent") {
-      // No landed/requested comparison: this field has no stored column of
-      // its own, and `locked`/`status`/the holder fields already carry the
-      // real outcome. Only the caller's own request is worth echoing, and
-      // only when it was actually asserted.
-      if (args[field] === true) {
-        passed.push(`${field} requested`);
-      } else {
-        untouched.push(field);
-      }
-      continue;
-    }
-    const landed = spec.landed(item);
-    if (spec.category === "long") {
-      const requestedArg = args[field];
-      const requestedLen = typeof requestedArg === "string" ? requestedArg.length : String(requestedArg).length;
-      const landedLen = typeof landed === "string" ? landed.length : String(landed).length;
-      passed.push(`${field}: requested ${requestedLen} chars, landed ${landedLen} chars`);
-    } else if (spec.category === "list") {
-      const landedCount = Array.isArray(landed) ? landed.length : 0;
-      const requestedArg = args[field];
-      const requestedCount = Array.isArray(requestedArg) ? requestedArg.length : 0;
-      const suffix = requestedCount !== landedCount ? ` (requested ${requestedCount})` : "";
-      passed.push(`${field} -> ${landedCount} item(s)${suffix}`);
-    } else {
-      const landedStr = String(landed);
-      const requestedStr = String(args[field]);
-      const suffix = requestedStr !== landedStr ? ` (requested ${requestedStr})` : "";
-      passed.push(`${field} -> ${landedStr}${suffix}`);
-    }
-  }
-  const passedLabel = label === "created" ? "set" : "changed";
-  const untouchedLabel = label === "created" ? "defaults" : "unchanged";
-  const lines = [`Roadmap item ${label}: ${item.id.slice(0, 8)}`];
-  if (passed.length) lines.push(`  ${passedLabel}: ${passed.join(", ")}`);
-  if (untouched.length) lines.push(`  ${untouchedLabel}: ${untouched.join(", ")}`);
-  // Card 4441e883: `item.locked_by_token` is null on any unproven/unclaimed
-  // lock (see RoadmapItem.locked_by_token's doc comment) -- the `!== null`
-  // guard is what keeps two undefined/absent tokens from reading as a match.
-  if (
-    holderInstanceToken !== undefined &&
-    item.locked_by_token !== null &&
-    item.locked_by_token === holderInstanceToken
-  ) {
-    const since = item.locked_at !== null ? formatLockedAtHHMM(item.locked_at) : "an unknown time";
-    lines.push(
-      `  you hold this card's work-lock (since ${since}) -- if only your own part is done, pass locked:false while leaving status:in_progress so the card stays claimed for the rest`
-    );
-  }
-  // Read off the WRITTEN card, like every other line here: an agent that just
-  // claimed a card relayed to a shared upstream learns from the ack itself that
-  // somebody else holds it too, instead of from a silent divergence later.
-  const contested = formatLockContestedBy(item.lock_contested_by);
-  if (contested) {
-    lines.push(`  work-lock also held elsewhere: ${contested}`);
-  }
-  return lines.join("\n");
-}
-
-/**
- * Never echoes the appended content itself.
- * Reports how much was added (header included) and the field's new total size,
- * rather than upsert's requested-vs-landed wording: an append's total is not
- * comparable to the incoming fragment the way an upsert's before/after is.
- * The appended length is computed via buildRoadmapAppendHeader with the same
- * `by` author, since an ISO-8601 timestamp is always 24 chars regardless of
- * instant.
- */
-function formatRoadmapAppendAck(requestedText: string, author: string, item: RoadmapItem): string {
-  const landed = ROADMAP_UPSERT_ACK_FIELDS.context.landed(item);
-  const landedLen = typeof landed === "string" ? landed.length : String(landed).length;
-  const headerLen = buildRoadmapAppendHeader(new Date().toISOString(), author).length;
-  const appendedLen = headerLen + requestedText.length;
-  return [
-    `Roadmap item context appended: ${item.id.slice(0, 8)}`,
-    `  appended ${appendedLen} chars (header included), context now ${landedLen} chars`,
-  ].join("\n");
-}
-
-// Card 4441e883, team-lead correctif (L3): `locked_at` is either SQLite's
-// `datetime('now')` form ("YYYY-MM-DD HH:MM:SS", UTC, no timezone marker) or
-// an ISO string ("YYYY-MM-DDTHH:MM:SS.sssZ") -- broker.ts's UPDATE stamps it
-// via `COALESCE(?, datetime('now'))`, so an import-path caller can supply
-// either shape (same ambiguity `shared/roadmap-lock.ts`'s `parseAsUtcMs`
-// normalizes for TTL math). Both forms put HH:MM at the same offset right
-// after the date separator, so a plain match extracts it without going
-// through `Date` -- parsing a marker-less string with `Date` reads it as
-// LOCAL time (V8 behaviour) and would silently shift the displayed hour on
-// a non-UTC host, while this string carries no timezone of its own to lose.
-function formatLockedAtHHMM(lockedAt: string): string {
-  const m = lockedAt.match(/[ T](\d{2}):(\d{2})/);
-  return m ? `${m[1]}:${m[2]}` : lockedAt;
-}
-
-const roadmapToolError = (e: unknown): { content: { type: "text"; text: string }[]; isError: true } => ({
-  content: [
-    {
-      type: "text" as const,
-      text: `Roadmap error: ${e instanceof Error ? e.message : String(e)}`,
-    },
-  ],
-  isError: true,
-});
 
 /** graph_draft_prepare: pure local inference, no peer identity, no broker call. */
 async function handleGraphDraftPrepare(args: unknown) {
@@ -1927,17 +1344,6 @@ async function handleGraphDraftSend(args: unknown, identity: CompanionIdentity) 
 mcp.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
   const { name, arguments: args } = req.params;
 
-  // Coverage, not just sensitivity (CLAUDE.md guard-coverage rule): hiding a
-  // tool from tools/list alone still leaves it CALLABLE by name, which would
-  // make CLAUDE_PEERS_TOOLS decorative. Refuse here too, at the boundary
-  // that actually dispatches -- same shape as deck-control-mcp.ts's own
-  // tools/call refusal (Card ff091064). Guarded on "known to TOOLS but
-  // filtered out", not merely "absent from FILTERED_TOOLS": a name that is
-  // not in TOOLS at all (typo, stale client) is a DIFFERENT, pre-existing
-  // failure mode and must keep hitting the switch's own `default: throw`
-  // below unchanged -- collapsing the two would silently swap that
-  // protocol-level error for this tool-result shape for every caller,
-  // allow-list or not.
   if (TOOLS.some((t) => t.name === name) && !FILTERED_TOOLS.some((t) => t.name === name)) {
     return {
       content: [{ type: "text" as const, text: `Error: tool not available: ${name}` }],
@@ -2445,6 +1851,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
       try {
         myInboxBinding = null;
         myInboxOperatorId = null;
+        await invalidateGlobalCompanionIdentity();
         await deleteSessionIdentityFile(process.env.CLAUDE_PEERS_DESK_SESSION ?? "");
         await brokerFetch("/disconnect", { instance_token: myInstanceToken });
         disconnected = true;
@@ -2480,6 +1887,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
           myInboxBinding,
           myInboxOperatorId,
         );
+        await writeGlobalCompanionIdentity();
         await writeDeskSessionId();
         connectWs();
         return {
@@ -2504,6 +1912,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
               myInboxBinding,
               myInboxOperatorId,
             );
+            await writeGlobalCompanionIdentity();
           } catch (restoreError) {
             logError("Could not restore the identity after disconnect failure", restoreError);
           }
@@ -2535,33 +1944,14 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
           isError: true,
         };
       }
-      let brokerRenameSucceeded = false;
       try {
+        await invalidateGlobalCompanionIdentity();
         await deleteSessionIdentityFile(process.env.CLAUDE_PEERS_DESK_SESSION ?? "");
-        const result = await brokerFetch<SetIdResponse | { error: string }>("/set-id", {
+        const result = await brokerFetch<SetIdResponse>("/set-id", {
           instance_token: myInstanceToken,
           new_peer_id: new_id,
         });
-        if ("error" in result) {
-          await writeSessionIdentityFile(
-            process.env.CLAUDE_PEERS_DESK_SESSION ?? "",
-            myPeerId!,
-            myGroupId,
-            myInstanceToken,
-            undefined,
-            myInboxBinding,
-            myInboxOperatorId,
-          );
-          return {
-            content: [{ type: "text" as const, text: result.error }],
-            isError: true,
-          };
-        }
-        brokerRenameSucceeded = true;
         myPeerId = result.peer_id;
-        // set-id renames the peer IN PLACE broker-side, so this name becomes
-        // free for a future registration to claim: third mutator of myPeerId
-        // alongside boot and switch_group, same "both or neither" rule.
         await writePeerIdCache(myCwd, myPeerId);
         await writeSessionIdentityFile(
           process.env.CLAUDE_PEERS_DESK_SESSION ?? "",
@@ -2572,11 +1962,12 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
           myInboxBinding,
           myInboxOperatorId,
         );
+        await writeGlobalCompanionIdentity();
         return {
           content: [{ type: "text" as const, text: JSON.stringify(result) }],
         };
       } catch (e) {
-        if (!brokerRenameSucceeded) {
+        if (e instanceof Error && e.message.startsWith("Broker error (/set-id):")) {
           try {
             await writeSessionIdentityFile(
               process.env.CLAUDE_PEERS_DESK_SESSION ?? "",
@@ -2587,6 +1978,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
               myInboxBinding,
               myInboxOperatorId,
             );
+            await writeGlobalCompanionIdentity();
           } catch (restoreError) {
             logError("Could not restore the identity after set_id refusal", restoreError);
           }
@@ -2599,258 +1991,20 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
       }
     }
 
-    case "roadmap_list": {
-      const a = args as {
-        kind?: string;
-        status?: string;
-        priority?: string;
-        tag?: string;
-        include_archived?: boolean;
-        kinds?: string[];
-        statuses?: string[];
-        priorities?: string[];
-        efforts?: string[];
-        values?: string[];
-        triages?: string[];
-        tags?: string[];
-        q?: string;
-        q_deep?: boolean;
-        order?: string;
-      };
-      try {
-        const { items } = await brokerFetch<RoadmapListResponse>("/roadmap/list", {
-          project_key: roadmapProjectKey(),
-          kind: a.kind,
-          status: a.status,
-          priority: a.priority,
-          tag: a.tag,
-          include_archived: a.include_archived ?? false,
-          kinds: a.kinds,
-          statuses: a.statuses,
-          priorities: a.priorities,
-          efforts: a.efforts,
-          values: a.values,
-          triages: a.triages,
-          tags: a.tags,
-          q: a.q,
-          q_deep: a.q_deep,
-        });
-        if (items.length === 0) {
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: "The roadmap is empty (for these filters). Use roadmap_add to record features, bugs, debt or ideas.",
-              },
-            ],
-          };
-        }
-        // Card 7defe381 LOT 1: `order: "queue"` renders the real dispatch
-        // order instead of the MoSCoW grouping below -- the default view is
-        // untouched so every other agent's habitual reading of this tool
-        // does not change shape.
-        const body =
-          a.order === "queue"
-            ? formatRoadmapQueueOrder(items)
-            : (() => {
-                // Group by MoSCoW priority for a scannable overview.
-                const moscow = ["must", "should", "could", "wont"] as const;
-                return moscow
-                  .map((p) => {
-                    const rows = items.filter((i) => i.priority === p);
-                    if (rows.length === 0) return "";
-                    return `${p.toUpperCase()} (${rows.length}):\n${rows.map(formatRoadmapItemLine).join("\n")}`;
-                  })
-                  .filter(Boolean)
-                  .join("\n\n");
-              })();
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: `${items.length} roadmap item(s):\n\n${body}\n\nUse roadmap_get <id> for details, roadmap_update to change status.`,
-            },
-          ],
-        };
-      } catch (e) {
-        return roadmapToolError(e);
-      }
-    }
-
-    case "roadmap_get": {
-      const a = args as { id: string; raw_context?: boolean; with_documents?: boolean };
-      try {
-        const id = await resolveRoadmapId(a.id);
-        const { items } = await brokerFetch<RoadmapListResponse>("/roadmap/list", {
-          project_key: roadmapProjectKey(),
-          include_archived: true,
-        });
-        const item = items.find((i) => i.id === id);
-        if (!item) throw new Error(`item ${id} vanished`);
-        const documentList = await brokerFetch<RoadmapContextDocumentListResponse>("/roadmap/context-document/list", {
-          id,
-          project_key: roadmapProjectKey(),
-          include_documents: a.with_documents === true,
-        });
-        if (a.with_documents === true && !documentList.documents) {
-          throw new Error("context document read returned no documents");
-        }
-        const omittedDocuments =
-          documentList.omitted_document_count === undefined
-            ? undefined
-            : {
-                document_count: documentList.omitted_document_count,
-                document_ids: documentList.omitted_document_ids ?? [],
-              };
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: formatRoadmapItemDetail(
-                item,
-                a.raw_context === true,
-                documentList.document_count,
-                documentList.documents,
-                omittedDocuments,
-              ),
-            },
-          ],
-        };
-      } catch (e) {
-        return roadmapToolError(e);
-      }
-    }
-
-    case "roadmap_add": {
-      const a = args as Record<string, unknown> & { title: string };
-      try {
-        const { item } = await brokerFetch<RoadmapUpsertResponse>("/roadmap/upsert", {
-          project_key: roadmapProjectKey(),
-          by: roadmapAuthor(),
-          ...roadmapProof(),
-          title: a.title,
-          kind: a.kind,
-          description: a.description,
-          rationale: a.rationale,
-          context: a.context,
-          priority: a.priority,
-          value: a.value,
-          effort: a.effort,
-          status: a.status,
-          triage: a.triage,
-          tags: a.tags,
-          depends_on: a.depends_on,
-          directive: a.directive,
-          target_peer_ids: a.target_peer_ids,
-        });
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: formatRoadmapUpsertAck({
-                label: "created",
-                item,
-                args: a,
-                domain: ROADMAP_ADD_ACK_FIELDS,
-                holderInstanceToken: myInstanceToken ?? undefined,
-              }),
-            },
-          ],
-        };
-      } catch (e) {
-        return roadmapToolError(e);
-      }
-    }
-
-    case "roadmap_update": {
-      const a = args as Record<string, unknown> & { id: string };
-      try {
-        const id = await resolveRoadmapId(a.id);
-        const { item } = await brokerFetch<RoadmapUpsertResponse>("/roadmap/upsert", {
-          id,
-          by: roadmapAuthor(),
-          ...roadmapProof(),
-          title: a.title,
-          kind: a.kind,
-          description: a.description,
-          rationale: a.rationale,
-          context: a.context,
-          priority: a.priority,
-          value: a.value,
-          effort: a.effort,
-          status: a.status,
-          triage: a.triage,
-          tags: a.tags,
-          depends_on: a.depends_on,
-          directive: a.directive,
-          target_peer_ids: a.target_peer_ids,
-          locked: typeof a.locked === "boolean" ? a.locked : undefined,
-          // Passed through raw, unlike locked above: the broker validates its
-          // type itself (400 on a non-boolean) and must actually see a bad
-          // value to refuse it, rather than have it silently dropped here.
-          release: a.release,
-          queue: a.queue,
-        });
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: formatRoadmapUpsertAck({
-                label: "updated",
-                item,
-                args: a,
-                domain: ROADMAP_UPDATE_ACK_FIELDS,
-                holderInstanceToken: myInstanceToken ?? undefined,
-              }),
-            },
-          ],
-        };
-      } catch (e) {
-        return roadmapToolError(e);
-      }
-    }
-
-    case "roadmap_archive": {
-      const a = args as { id: string };
-      try {
-        const id = await resolveRoadmapId(a.id);
-        const { item } = await brokerFetch<RoadmapArchiveResponse>("/roadmap/archive", {
-          id,
-          by: roadmapAuthor(),
-          ...roadmapProof(),
-        });
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: `Roadmap item archived (restorable via roadmap_update status):\n${formatRoadmapItemLine(item)}`,
-            },
-          ],
-        };
-      } catch (e) {
-        return roadmapToolError(e);
-      }
-    }
-
-    case "roadmap_append_context": {
-      const a = args as { id: string; text: string; supersedes?: string[] };
-      try {
-        const id = await resolveRoadmapId(a.id);
-        const by = roadmapAuthor();
-        const { item } = await brokerFetch<RoadmapContextAppendResponse>("/roadmap/append-context", {
-          id,
-          by,
-          ...roadmapProof(),
-          text: a.text,
-          supersedes: a.supersedes,
-        });
-        return {
-          content: [{ type: "text" as const, text: formatRoadmapAppendAck(a.text, by, item) }],
-        };
-      } catch (e) {
-        return roadmapToolError(e);
-      }
-    }
+    case "roadmap_list":
+    case "roadmap_get":
+    case "roadmap_add":
+    case "roadmap_update":
+    case "roadmap_archive":
+    case "roadmap_append_context":
+      return callRoadmapTool(name, args as Record<string, unknown>, {
+        identity: {
+          peerId: myPeerId ?? `${myHost || "unknown"}-unregistered`,
+          instanceToken: myInstanceToken ?? undefined,
+          projectKey: roadmapProjectKey(),
+        },
+        brokerFetch,
+      });
 
     default:
       throw new Error(`Unknown tool: ${name}`);
@@ -3026,6 +2180,7 @@ async function main() {
     myInboxBinding,
     myInboxOperatorId,
   );
+  await writeGlobalCompanionIdentity();
   // Deck back-channel: hand the real minted session id to the per-tile token file
   // so the Deck maps tile -> session id deterministically (no-op outside the Deck).
   await writeDeskSessionId();

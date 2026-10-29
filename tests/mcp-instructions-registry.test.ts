@@ -72,6 +72,7 @@ type Verdict = { carries: true; name: string } | { carries: false };
 const TRIAGED_DOMAIN_FILES: ReadonlyArray<{ file: string; verdict: Verdict }> = [
   { file: "server.ts", verdict: { carries: true, name: "claude-peers" } },
   { file: "server-deck.ts", verdict: { carries: true, name: "claude-peers-deck" } },
+  { file: "server-roadmap.ts", verdict: { carries: true, name: "kory-roadmap" } },
   { file: "desktop/mcp/deck-control-mcp.ts", verdict: { carries: true, name: "deck-control" } },
   { file: "desktop/mcp/demo-browser-mcp.ts", verdict: { carries: true, name: "demo-browser" } },
   { file: "desktop/src/main/demo-driver.ts", verdict: { carries: false } },
@@ -169,7 +170,7 @@ describe("every file mentioning an MCP-instructions token is triaged, not silent
     // Duplicated on purpose: a silent edit of a `carries` flag above must
     // still be caught by a hand-typed list that does not read from the same
     // table it is meant to check.
-    const KNOWN_CARRIER_NAMES = ["claude-peers", "claude-peers-deck", "deck-control", "demo-browser"];
+    const KNOWN_CARRIER_NAMES = ["claude-peers", "claude-peers-deck", "deck-control", "demo-browser", "kory-roadmap"];
     const namesFromTriage = TRIAGED_DOMAIN_FILES.filter(
       (e): e is { file: string; verdict: { carries: true; name: string } } => e.verdict.carries
     )

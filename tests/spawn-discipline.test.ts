@@ -135,12 +135,20 @@ describe("launch forms", () => {
 
 describe("domain", () => {
   test("a server entry is named at a path boundary, never inside another name", () => {
-    for (const named of ["server.ts", "../server.ts", "C:\\repo\\server-deck.mjs", "--outfile=server-deck.js", "bun server.ts"]) {
+    for (const named of ["server.ts", "../server.ts", "C:\\repo\\server-deck.mjs", "--outfile=server-deck.js", "bun server.ts", "bun server-roadmap.ts"]) {
       expect(SERVER_ARTIFACT.test(named), named).toBeTrue();
     }
-    for (const other of ["avatar-server.ts", "myserver.ts", "server.tsx"]) {
+    for (const other of ["avatar-server.ts", "myserver.ts", "server.tsx", "avatar-server-roadmap.ts"]) {
       expect(SERVER_ARTIFACT.test(other), other).toBeFalse();
     }
+  });
+
+  test("a file that launches only server-roadmap.ts unscrubbed is caught", () => {
+    const source = `${HELPER_IMPORT}Bun.spawn(["bun", "server-roadmap.ts"], { env: process.env });`;
+    expect(auditDomain([{ file: "roadmap-only.test.ts", source }]).filter((f) => f.file === "roadmap-only.test.ts").map((f) => f.problem)).toEqual([
+      expect.stringContaining("without a top-level env: scrubEnv(...)"),
+      "1 launches, the table expects 0"
+    ]);
   });
 
   test("a file naming only avatar-server.ts is outside the domain", () => {

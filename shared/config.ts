@@ -417,6 +417,19 @@ export function brokerUrl(config: Pick<Config, "broker_url" | "offline_replica" 
   return `http://127.0.0.1:${config.port}`;
 }
 
+export function canonicalBrokerUrl(config: Pick<Config, "broker_url" | "offline_replica" | "port">): string {
+  return new URL(brokerUrl(config)).toString();
+}
+
+export function brokerHeaders(
+  config: Pick<Config, "broker_token">,
+  extra?: Record<string, string>,
+): Record<string, string> {
+  const headers: Record<string, string> = { ...extra };
+  if (config.broker_token) headers.Authorization = `Bearer ${config.broker_token}`;
+  return headers;
+}
+
 /**
  * The broker this config's LOCAL broker replicates against; null unless the
  * mode is replica. The broker refuses to start on a loopback upstream (a

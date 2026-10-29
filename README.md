@@ -93,9 +93,10 @@ Scope of this mode:
 
 ### Sessions outside Kory (global claude.json MCP entry)
 
-Nothing changes in a standalone MCP entry for a session outside Kory --
-still `bun ~/koryphaios/server.ts` and, if you use one, the `CLAUDE_PEERS_GROUP`
-env var. The mode (`local`/`remote`/`replica`) is resolved from the *same*
+A standalone session registers two global MCP entries from the same revision:
+`claude-peers` serves the peer tools only and `kory-roadmap` serves the shared roadmap.
+The pilot configuration filters the `roadmap_*` family out of `claude-peers`, so no session receives duplicate roadmap aliases.
+If you use one, both entries receive the same `CLAUDE_PEERS_GROUP` env var. The mode (`local`/`remote`/`replica`) is resolved from the *same*
 claude-peers settings file every consumer reads (`%APPDATA%\claude-peers\config.json`
 on Windows, `$XDG_CONFIG_HOME/claude-peers/config.json` when `XDG_CONFIG_HOME`
 is set, otherwise `~/.config/claude-peers/config.json` on Linux/macOS) plus the
@@ -134,11 +135,23 @@ cd ~/koryphaios
 bun install
 ```
 
-### 2. Register the MCP server
+### 2. Register the MCP servers
 
 ```bash
-claude mcp add --scope user --transport stdio claude-peers -- bun ~/koryphaios/server.ts
+claude mcp add --scope user --transport stdio claude-peers -e CLAUDE_PEERS_TOOLS=list_peers,send_message,set_summary,check_messages,wait_for_message,whoami,list_groups,switch_group,set_id -- bun ~/koryphaios/server.ts
+claude mcp add --scope user --transport stdio kory-roadmap -- bun ~/koryphaios/server-roadmap.ts
 ```
+
+`claude mcp add` never replaces an existing key: on a key already present it prints `already exists`, exits 1 and leaves the stored entry untouched. A machine that already has a `claude-peers` entry (the previous single-server form, which also served the roadmap tools) therefore has to be migrated by hand.
+
+`claude mcp add` without `--scope` writes to the **local** scope (this project, private to you), and `claude mcp get <key>` prints one entry only, the one that wins, on a `Scope:` line: `Local config`, `Project config` or `User config`. Measured with the same key in two scopes: a local entry hides a user entry and a project entry, and a user entry was shown over a project entry. An old entry left in another scope therefore hides or is hidden by the new one, and `claude mcp remove <key> --scope <scope>` only touches the scope it names (`No MCP server named "<key>" in user scope`, exit 1, on any other). Migration order:
+
+1. Read the existing entry: `claude mcp get claude-peers` and note its `Scope:` line (local, project or user). Run `claude mcp get kory-roadmap`: if it finds an entry, stop, that is a collision and its owner decides whether to keep or remove it.
+2. Back up the `claude-peers` entry: save the `get` output (command, args, `Environment:`) outside the repository.
+3. Add `kory-roadmap` with the second command above. It does not conflict with `claude-peers`, so a failure here leaves the old entry in place.
+4. Remove the old entry from the scope read in step 1: `claude mcp remove claude-peers --scope local`, `--scope project` or `--scope user`.
+5. Add `claude-peers` with the first command above, and carry over from the step 2 backup every `-e` variable and argument that the standard command does not already set (a custom `CLAUDE_PEERS_TOOLS`, another server path, and so on).
+6. Check: `claude mcp get claude-peers` must print `Scope: User config` and an `Environment:` that contains `CLAUDE_PEERS_TOOLS` and every variable carried over from the backup, and `claude mcp get kory-roadmap` must find its entry. Another scope on the first line means an old entry is still hiding the new one: repeat step 4 for that scope.
 
 ### 3. Run Claude Code with the channel
 
@@ -369,9 +382,9 @@ The current peer is parked as `dormant` (resume-able), and a fresh registration 
 | `list_groups`    | Show available groups (from your user config) and how many active peers each has                              |
 | `switch_group`   | Move this session to another group by name. Disconnects the current peer (kept dormant) and re-registers      |
 | `set_id`         | Rename your `peer_id` within the current group. Refused with 409 on collision (active or dormant)             |
-| `roadmap_list` / `roadmap_get` | Browse the project's shared backlog (filters: kind/status/priority/tag; unique id prefixes accepted) |
-| `roadmap_add`    | Record a feature/bug/debt/idea/chore with MoSCoW priority, value/effort, tags, dependencies                   |
-| `roadmap_update` / `roadmap_archive` | Keep item statuses current (`planned` → `in_progress` → `done`); archive is a reversible soft delete |
+| `roadmap_list` / `roadmap_get` (`kory-roadmap`) | Browse the project's shared backlog (filters: kind/status/priority/tag; unique id prefixes accepted) |
+| `roadmap_add` (`kory-roadmap`) | Record a feature/bug/debt/idea/chore with MoSCoW priority, value/effort, tags, dependencies |
+| `roadmap_update` / `roadmap_archive` / `roadmap_append_context` (`kory-roadmap`) | Keep item statuses current (`planned` → `in_progress` → `done`); archive is a reversible soft delete |
 
 The `repo` scope matches across PCs by normalizing `git remote get-url origin`.
 

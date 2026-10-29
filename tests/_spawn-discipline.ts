@@ -12,7 +12,7 @@ import { join } from "node:path";
 import ts from "typescript6";
 
 /** A server entry named at a path boundary: avatar-server.ts is another program. */
-export const SERVER_ARTIFACT = /(?:^|[\\/"'`\s=])server(?:-deck)?\.(?:ts|[cm]?js)\b/;
+export const SERVER_ARTIFACT = /(?:^|[\\/"'`\s=])server(?:-deck|-roadmap)?\.(?:ts|[cm]?js)\b/;
 
 const CHILD_PROCESS_MODULES = new Set(["node:child_process", "child_process"]);
 const CHILD_PROCESS_LAUNCHES = new Set(["spawn", "spawnSync", "exec", "execSync", "execFile", "execFileSync", "fork"]);
