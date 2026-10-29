@@ -15,13 +15,14 @@ import {
   writeSessionHandoffBinding
 } from "../desktop/src/main/session-handoff";
 import { readSessionSkills, writeSessionSkills } from "../desktop/src/main/session-skills";
+import { canonicalPath } from "../desktop/src/main/worktree-service";
 
 const dirs: string[] = [];
 const HELPER_WRAPPER = join(import.meta.dir, "..", "desktop", "deck-lead-plugin", "bin", "kory-session-handoff.sh");
 const RUN_ID = "00000000-0000-4000-8000-000000000001";
 
 function stateDir(): string {
-  const dir = mkdtempSync(join(tmpdir(), "kory-session-handoff-"));
+  const dir = canonicalPath(mkdtempSync(join(tmpdir(), "kory-session-handoff-")));
   dirs.push(dir);
   return dir;
 }
@@ -99,7 +100,8 @@ test("rejects invalid handoff selectors and content before reading or publishing
 
 test("launch binding confines a tile to one external draft and the helper operations", () => {
   const root = stateDir();
-  const launch = createSessionHandoffLaunch(root, "project-key", "C:\\Kory\\deck-lead-plugin\\bin\\kory-session-handoff.sh", "tile-a", RUN_ID, join(root, "logs"));
+  const windowsHelper = "C:\\Kory\\deck-lead-plugin\\bin\\kory-session-handoff.sh";
+  const launch = createSessionHandoffLaunch(root, "project-key", windowsHelper, "tile-a", RUN_ID, join(root, "logs"));
 
   expect(launch.additionalDirectory.startsWith(root)).toBe(true);
   expect(launch.allowedTools).toEqual([
@@ -108,7 +110,11 @@ test("launch binding confines a tile to one external draft and the helper operat
     'Bash("$KORY_SESSION_HELPER" read:*)',
     'Bash("$KORY_SESSION_HELPER" publish)'
   ]);
-  expect(launch.environment.KORY_SESSION_HELPER).toBe('/c/Kory/deck-lead-plugin/bin/kory-session-handoff.sh');
+  expect(launch.environment.KORY_SESSION_HELPER).toBe(
+    process.platform === "win32" ? "/c/Kory/deck-lead-plugin/bin/kory-session-handoff.sh" : windowsHelper
+  );
+  const msysLaunch = createSessionHandoffLaunch(root, "project-key", "C:/Kory/deck-lead-plugin/bin/kory-session-handoff.sh", "tile-b", RUN_ID, join(root, "logs"));
+  expect(msysLaunch.environment.KORY_SESSION_HELPER).toBe("/c/Kory/deck-lead-plugin/bin/kory-session-handoff.sh");
   const binding = readSessionHandoffBinding(launch.environment.KORY_SESSION_HANDOFF_BINDING!);
   expect(binding.helperPath).toBe(launch.environment.KORY_SESSION_HELPER);
   expect(binding.logDir).toBe(join(root, "logs"));

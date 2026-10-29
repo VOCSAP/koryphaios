@@ -102,7 +102,23 @@ test("claude adapter: no-tools headless harness carries the isolation flags, con
   );
 });
 
-test.skipIf(process.platform !== "win32")("Claude PowerShell round-trip preserves empty headless options in the allowlisted environment", async () => {
+function claudeIsLoggedIn(): boolean {
+  const env = buildClaudeHeadlessEnv();
+  const [first, ...args] = buildClaudeAuthStatusCommand().split(" ");
+  const bin = Bun.which(first, { PATH: env.PATH });
+  if (!bin) return false;
+  const probe = Bun.spawnSync([bin, ...args], {
+    env,
+    stdout: "ignore",
+    stderr: "ignore",
+    timeout: 15_000
+  });
+  return probe.exitCode === 0;
+}
+
+const needsLoggedInClaude = process.platform !== "win32" || !claudeIsLoggedIn();
+
+test.skipIf(needsLoggedInClaude)("Claude PowerShell round-trip preserves empty headless options in the allowlisted environment (needs win32 and a logged-in claude CLI)", async () => {
   const previous = process.env.KORY_HEADLESS_TEST_SENTINEL;
   process.env.KORY_HEADLESS_TEST_SENTINEL = "must-not-reach-claude";
   try {

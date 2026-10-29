@@ -128,23 +128,22 @@ jobs:
           echo "$version"
           test "$version" = "2.1.303 (Claude Code)"
 
+      # The next step runs a test that executes this gitignored bundle through
+      # its shell wrapper. It needs no desktop dependency, so it builds here,
+      # before the desktop install.
+      - name: Build session-handoff helper bundle
+        shell: bash
+        working-directory: desktop
+        run: bun build cli/session-handoff.ts --target=node --outfile=deck-lead-plugin/bin/kory-session-handoff.mjs
+
       # Pure modules (desktop main-process helpers, the notify channels and
       # their wire format, the mobile shell's decision logic, and a
       # happy-dom/React renderer harness) import under bun -- no node-pty /
       # electron among the root deps, so no native toolchain is needed here.
       #
-      # Card 0bbac537: this used to be an explicit `bun test <globs...>` line,
-      # an allow-list that silently drops any new file matching none of its
-      # patterns. scripts/partition-pure-tests.ts replaces it with a deny-list
-      # (a new file runs by default; scripts/pure-module-partition.ts's
-      # EXEMPTIONS table is what has to justify skipping one -- daemon-
-      # spawning integration suites, same broker-/server- families as before)
-      # AND fixes the process-global test pollution that made the previous
-      # bare `bun test` unsafe here in the first place (GlobalRegistrator.
-      # register() / bun's mock.module() both leak across files in a shared
-      # process -- see that script's header for the measured chain). Single
-      # call, single step, tests/desktop-ci-glob-coverage.test.ts's coverage
-      # audit is anchored on this step keeping this exact name.
+      # A deny-list, not a glob allow-list: a new test file runs by default and
+      # an exemption has to justify skipping it. Files that leak process-global
+      # state (happy-dom registration, mock.module) run in their own process.
       - name: Bun tests (pure modules)
         shell: bash
         run: bun scripts/partition-pure-tests.ts

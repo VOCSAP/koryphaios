@@ -97,17 +97,15 @@ test('opens one approval dialog at a time and refuses a repeated start while it 
     await Bun.sleep(1)
   }
   const second = h.ipc.start(dir)
-  await Bun.sleep(10)
+  // Settling while the dialog is still open is only possible through the busy refusal.
+  expect(await within(second, 'second start while the dialog is open')).toMatchObject({ ok: false, reason: 'busy' })
   for (const answer of open.splice(0)) answer(true)
 
-  expect(await within(second, 'second start')).toMatchObject({ ok: false, reason: 'busy' })
   expect(await within(first, 'first start')).toMatchObject({ ok: true })
   expect(h.prompts).toHaveLength(1)
   expect(h.servePaths, 'the dialog is pointed at the contained path readServeConfig resolved').toEqual(['/contained/serve.json'])
   const third = h.ipc.start(dir)
-  await Bun.sleep(10)
-  for (const answer of open.splice(0)) answer(true)
-  expect(await within(third, 'third start'), 'the guard is released once the dialog closes').toMatchObject({ ok: true })
+  expect(await within(third, 'third start'),'the guard is released once the dialog closes').toMatchObject({ ok: true })
 })
 
 test('starts the approved serve.json action of an allowed directory', async () => {

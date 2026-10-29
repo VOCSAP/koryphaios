@@ -7,6 +7,8 @@ afterAll(async () => {
 });
 
 import { afterAll, afterEach, beforeEach, expect, mock, test } from "bun:test";
+import { existsSync } from "node:fs";
+import { join, resolve } from "node:path";
 import type { Root } from "../desktop/tests-support/react-test-harness";
 import { mockStore, storeMockStubs } from "./_store-mock";
 import type { AppConfig, SessionSkillSettings } from "../desktop/src/shared/types.ts";
@@ -57,6 +59,9 @@ function deckState(enabledMods: unknown): FakeDeckState {
 
 const fakeUseDeck = create<FakeDeckState>(() => deckState(DEFAULT_CONFIG.enabledMods));
 mockStore({ useDeck: fakeUseDeck, ...storeMockStubs });
+
+const rendererDep = join(resolve(import.meta.dir, ".."), "desktop", "node_modules", "qrcode-generator");
+if (!existsSync(rendererDep)) throw new Error(`SettingsView imports NotificationChannels, which needs ${rendererDep}: run npm install in desktop/ first`);
 
 const { SettingsView } = await import("../desktop/src/renderer/src/components/SettingsView.tsx");
 
