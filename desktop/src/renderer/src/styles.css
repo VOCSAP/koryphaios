@@ -1431,6 +1431,19 @@ textarea:disabled {
   opacity: 0.4;
 }
 
+/* Themed rather than removed: several textareas opt into resize: vertical on
+   purpose. Same diagonal notch as .graph-node-resize-handle. */
+textarea::-webkit-resizer {
+  background: linear-gradient(
+    135deg,
+    transparent 0 45%,
+    var(--border) 45% 55%,
+    transparent 55% 70%,
+    var(--border) 70% 80%,
+    transparent 80%
+  );
+}
+
 .primary {
   background: var(--accent);
   color: var(--accent-fg);

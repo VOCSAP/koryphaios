@@ -142,6 +142,11 @@ give the element an archetype class, or rely on a rule that already targets it
 it at the ELEMENT level in `styles.css` and document it here — a per-instance
 class only fixes the instance you were looking at, and the next one ships bare.
 
+The textarea resize grip is part of the control: the element-level
+`textarea::-webkit-resizer` rule repaints it as the `--border` diagonal notch of
+`.graph-node-resize-handle`. A textarea that must not be resized sets
+`resize: none`; never hide or recolour the grip per instance.
+
 ### Keyboard focus
 
 The "blue focus ring" half of rule zero is answered ONCE, at element level:
