@@ -15,6 +15,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { scrubEnv } from "./_scrub-env.ts";
+import { OPERATOR_CEILING_ENV, OPERATOR_TOOLS, encodeMountCeiling } from "../shared/mount-ceiling.ts";
 
 const dirs: string[] = [];
 const procs: ReturnType<typeof Bun.spawn>[] = [];
@@ -75,7 +76,10 @@ test("the node-bundled server-deck.mjs starts under node, answers initialize, an
   const buildExit = await build.exited;
   expect(buildExit).toBe(0);
 
-  const proc = Bun.spawn(["node", outfile], { env: scrubEnv(outDir), stdio: ["pipe", "pipe", "pipe"] });
+  const proc = Bun.spawn(["node", outfile], {
+    env: scrubEnv(outDir, { [OPERATOR_CEILING_ENV]: encodeMountCeiling(OPERATOR_TOOLS), }),
+    stdio: ["pipe", "pipe", "pipe"],
+  });
   procs.push(proc);
 
   const stderrChunks: string[] = [];

@@ -24,6 +24,7 @@ import { writeSessionIdentityFile } from "../shared/peer-cache.ts";
 import type { Approval } from "../shared/types.ts";
 import { resolveProjectKey } from "../shared/project-key.ts";
 import { computeProjectKey } from "../shared/summarize.ts";
+import { OPERATOR_CEILING_ENV, OPERATOR_TOOLS, encodeMountCeiling } from "../shared/mount-ceiling.ts";
 
 async function getGitRoot(cwd: string): Promise<string | null> {
   try {
@@ -113,6 +114,8 @@ interface Harness {
   run: RunCredential | null;
   peerId: string | null;
   sends: Array<Record<string, unknown>>;
+  /** Every request path that reached the broker through the tap; empty when the tap is off. */
+  paths: string[];
   send: (msg: unknown) => void;
 }
 
@@ -120,23 +123,30 @@ const DESK_SESSION = "ask-operator-test";
 
 /** Forwards every request to the real broker and keeps the JSON body of each /send-message: the broker
  * ignores `expects_reply` for the operator destination, so only the wire shows what the tool sent. */
-function tapSendMessage(target: string): { url: string; port: number; sends: Array<Record<string, unknown>> } {
+function tapSendMessage(target: string): { url: string; port: number; sends: Array<Record<string, unknown>>; paths: string[] } {
   const sends: Array<Record<string, unknown>> = [];
+  const paths: string[] = [];
   const srv = Bun.serve({
     port: 0,
     hostname: "127.0.0.1",
     async fetch(req) {
       const url = new URL(req.url);
       const raw = req.method === "GET" ? undefined : await req.text();
+      paths.push(url.pathname);
       if (url.pathname === "/send-message" && raw) sends.push(JSON.parse(raw) as Record<string, unknown>);
       return fetch(`${target}${url.pathname}${url.search}`, { method: req.method, headers: req.headers, body: raw });
     },
   });
   stoppers.push(() => srv.stop(true));
-  return { url: `http://127.0.0.1:${srv.port}`, port: srv.port as number, sends };
+  return { url: `http://127.0.0.1:${srv.port}`, port: srv.port as number, sends, paths };
 }
 
-async function boot(withCredential: boolean, tapWire = false): Promise<Harness> {
+/** `ceiling` null leaves KORY_OPERATOR_TOOLS absent. */
+async function boot(
+  withCredential: boolean,
+  tapWire = false,
+  ceiling: string | null = encodeMountCeiling(OPERATOR_TOOLS)
+): Promise<Harness> {
   const b = await startBroker();
   brokers.push(b);
   const dir = mkdtempSync(join(tmpdir(), "cp-ask-"));
@@ -148,6 +158,7 @@ async function boot(withCredential: boolean, tapWire = false): Promise<Harness> 
     CLAUDE_PEERS_PORT: String(tap?.port ?? b.port),
     CLAUDE_PEERS_DESK_SESSION: DESK_SESSION,
   };
+  if (ceiling !== null) extra[OPERATOR_CEILING_ENV] = ceiling;
   let run: RunCredential | null = null;
   let peerId: string | null = null;
   if (withCredential) {
@@ -172,7 +183,7 @@ async function boot(withCredential: boolean, tapWire = false): Promise<Harness> 
     writeFileSync(
       credFile,
       JSON.stringify({
-        brokerUrl: b.url,
+        brokerUrl: tap?.url ?? b.url,
         operatorId: FIXTURE_OPERATOR_ID,
         tokenId: run.tokenId,
         sessionRef: `window-${run.run}`,
@@ -208,7 +219,7 @@ async function boot(withCredential: boolean, tapWire = false): Promise<Harness> 
   });
   await readUntil(reader, 0, buffer);
 
-  return { b, proc, reader, buffer, op: { ...FIXTURE_OPERATOR, id: FIXTURE_OPERATOR_ID }, run, peerId, sends: tap?.sends ?? [], send };
+  return { b, proc, reader, buffer, op: { ...FIXTURE_OPERATOR, id: FIXTURE_OPERATOR_ID }, run, peerId, sends: tap?.sends ?? [], paths: tap?.paths ?? [], send };
 }
 
 async function firstApproval(h: Harness): Promise<Approval | null> {
@@ -300,6 +311,33 @@ describe("ask_operator over MCP stdio", () => {
     } finally {
       db.close();
     }
+  }, 60_000);
+
+  test("a refused surface stops every operator tool before transport, with a live credential and valid arguments", async () => {
+    const VALID: Record<(typeof OPERATOR_TOOLS)[number], Record<string, unknown>> = {
+      ask_operator: { title: "t", question: "q" },
+      ask_operator_wait: { ticket: "x" },
+      notify_operator: { message: "m" },
+      graph_draft_prepare: { question: "q" },
+      graph_draft_send: { title: "t", prompt: "p" },
+    };
+    const refused = await boot(true, true, null);
+    let id = 1;
+    for (const name of OPERATOR_TOOLS) {
+      refused.send({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: VALID[name] } });
+      const res = await readUntil(refused.reader, id, refused.buffer);
+      expect(res.result?.isError, `${name} was served`).toBe(true);
+      expect(res.result?.content?.[0]?.text).toBe(`Error: tool not available: ${name}`);
+      id++;
+    }
+    expect(refused.paths, "a refused tool reached the broker").toEqual([]);
+
+    const live = await boot(true, true);
+    live.send({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "notify_operator", arguments: VALID.notify_operator } });
+    expect((await readUntil(live.reader, 1, live.buffer)).result?.isError).toBeFalsy();
+    expect(live.paths, "the same call under the full ceiling must reach the broker, or the zero above proves nothing").toContain(
+      "/send-message"
+    );
   }, 60_000);
 
   test("notify_operator rejects a non-string message before consulting credentials", async () => {

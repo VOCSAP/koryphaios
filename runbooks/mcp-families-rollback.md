@@ -258,6 +258,15 @@ Relancer le Deck SANS restaurer de workspace : une tuile restaurée démarre ses
 sur le broker encore en place, avant sa relance à l'étape 5. Si un workspace s'est
 restauré, fermer ses tuiles avant l'étape 5.
 
+Les plafonds de montage (`DECK_CONTROL_TOOLS`, `DECK_CONTROL_ROLE` et `KORY_OPERATOR_TOOLS`) vivent
+dans les fichiers MCP que le Deck génère au lancement du superviseur et de chaque lead
+(`supervisor-mcp.json` et les `team-lead-*.json` de son dossier d'état). Le Deck d'avant
+écrit ces fichiers sans `DECK_CONTROL_ROLE` ni `KORY_OPERATOR_TOOLS`, et ses bundles
+`deck-control-mcp.mjs` et `server-deck.mjs` ne lisent pas ces deux variables : reconstruire
+le Deck à l'étape 4 restaure donc aussi les plafonds, sans autre action (déduit du code,
+non rejoué). Un fichier généré par le Deck du lot et rejoué par un Deck d'avant reste
+inoffensif, les variables en trop étant ignorées.
+
 Contrôles, sur le `deck-plugin` réellement chargé par le Deck relancé :
 
 1. `hooks.json` : `grep -c 'mcp__claude-peers__roadmap_add' <deck-plugin>/hooks/hooks.json`

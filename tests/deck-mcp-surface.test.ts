@@ -9,6 +9,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { scrubEnv } from "./_scrub-env.ts";
+import { OPERATOR_CEILING_ENV, OPERATOR_TOOLS, encodeMountCeiling } from "../shared/mount-ceiling.ts";
 
 interface JsonRpcResponse {
   id?: number;
@@ -64,7 +65,7 @@ async function readUntil(
 }
 
 async function boot() {
-  const proc = Bun.spawn(["bun", "server-deck.ts"], { env: scrubEnv(settingsDir), stdio: ["pipe", "pipe", "pipe"] });
+  const proc = Bun.spawn(["bun", "server-deck.ts"], { env: scrubEnv(settingsDir, { [OPERATOR_CEILING_ENV]: encodeMountCeiling(OPERATOR_TOOLS), }), stdio: ["pipe", "pipe", "pipe"] });
   procs.push(proc);
   const reader = proc.stdout.getReader();
   const buffer = { text: "" };

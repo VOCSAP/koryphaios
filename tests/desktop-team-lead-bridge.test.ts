@@ -27,6 +27,7 @@ import {
 import { startDeckControl, type DeckControlDeps } from "../desktop/src/main/deck-control";
 import { TEAM_LEAD_DECK_TOOLS, writeTeamLeadMcpConfig } from "../desktop/src/main/supervisor";
 import { sanitizeFlagValue } from "../desktop/src/main/session-command";
+import { OPERATOR_TOOLS } from "../shared/mount-ceiling";
 
 const SESSION_SERVICE_PATH = join(import.meta.dir, "..", "desktop", "src", "main", "session-service.ts");
 const INDEX_PATH = join(import.meta.dir, "..", "desktop", "src", "main", "index.ts");
@@ -518,11 +519,14 @@ test("create() mints no bridge and reports nothing for a non-team-lead tile with
 // mintCaller scope and the client-side write, the latter via the real
 // writeTeamLeadMcpConfig against a throwaway temp dir.
 
-function fakeControlServer(mintCaller: DeckControlServerLike["mintCaller"]): DeckControlServerLike {
-  return { url: "http://127.0.0.1:9999", mintCaller };
+function fakeControlServer(
+  mintCaller: DeckControlServerLike["mintCaller"],
+  revokeCaller: DeckControlServerLike["revokeCaller"] = () => undefined
+): DeckControlServerLike {
+  return { url: "http://127.0.0.1:9999", mintCaller, revokeCaller };
 }
 
-test("buildMintTeamLeadBridge mints with mintCaller('team-lead', TEAM_LEAD_DECK_TOOLS) and writes exactly that allow-list to DECK_CONTROL_TOOLS", () => {
+test("buildMintTeamLeadBridge mints with mintCaller('team-lead', TEAM_LEAD_DECK_TOOLS) and posts exactly that allow-list, the lead role and the operator ceiling", () => {
   const dir = mkdtempSync(join(tmpdir(), "kory-team-lead-bridge-"));
   try {
     const mintCaller = mock((label: string, allowedTools?: readonly string[] | null) => ({
@@ -550,9 +554,31 @@ test("buildMintTeamLeadBridge mints with mintCaller('team-lead', TEAM_LEAD_DECK_
     const written = JSON.parse(readFileSync(result!.mcpConfig, "utf-8"));
     const toolsEnv: string = written.mcpServers["kory-deck"].env.DECK_CONTROL_TOOLS;
     expect(toolsEnv.split(",")).toEqual([...TEAM_LEAD_DECK_TOOLS, "roadmap_dispatch"]);
+    expect(written.mcpServers["kory-deck"].env.DECK_CONTROL_ROLE).toBe("lead");
+    expect(written.mcpServers["kory-operator"].env.KORY_OPERATOR_TOOLS.split(",")).toEqual([...OPERATOR_TOOLS]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("buildMintTeamLeadBridge revokes the minted caller and rethrows when the config write throws, and revokes nothing when it succeeds", () => {
+  const minted = () => ({ token: "tok-1", callerId: "team-lead-xyz" });
+  const revoked: string[] = [];
+  const failing = buildMintTeamLeadBridge({
+    getControlServer: () => fakeControlServer(minted, (callerId) => void revoked.push(callerId)),
+    write: () => {
+      throw new Error("MCP mount not written: boom");
+    }
+  });
+  expect(() => failing()).toThrow("MCP mount not written: boom");
+  expect(revoked, "the caller minted for a tile that never opens was left alive").toEqual(["team-lead-xyz"]);
+
+  const working = buildMintTeamLeadBridge({
+    getControlServer: () => fakeControlServer(minted, (callerId) => void revoked.push(callerId)),
+    write: () => "/state/team-lead-mcp.json"
+  });
+  expect(working()).toEqual({ mcpConfig: "/state/team-lead-mcp.json", callerId: "team-lead-xyz" });
+  expect(revoked, "a successful write revoked the caller it just minted").toEqual(["team-lead-xyz"]);
 });
 
 test("PROOF: buildMintTeamLeadBridge returns null (not an error) when getControlServer says the server isn't up", () => {

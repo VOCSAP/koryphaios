@@ -191,15 +191,17 @@ export interface DeckControlServer {
   token: string
   /**
    * Mint a new caller: a fresh Bearer token, registered server-side with its
-   * own callerId and tool allow-list (Card 6c380073). `allowedTools`
-   * mirrors the three-state semantics of DECK_CONTROL_TOOLS (deck-control-mcp.ts):
-   * omitted/null = every tool, an array = only those, an empty array = none.
+   * own callerId and tool allow-list. `allowedTools`: omitted/null = every
+   * tool, an array = only those, an empty array = none. This server-side scope
+   * is separate from the DECK_CONTROL_TOOLS mount ceiling of the MCP bridge.
    */
   mintCaller(
     label: string,
     allowedTools?: readonly string[] | null,
     authority?: CallerAuthority
   ): { token: string; callerId: string }
+  /** Revoke every token registered under callerId; a no-op for an unknown callerId. */
+  revokeCaller(callerId: string): void
   /**
    * Revoke the caller minted for a team-lead SESSION on its final removal, keyed by the session id (the object index
    * caller ipc already has) rather than by callerId (which the caller would
@@ -527,6 +529,21 @@ export function startDeckControl(
     if (bridgeRefused) reportError('deck-control', 'team-lead bridge refused: sandbox mode is on')
     const leadMint =
       embedded?.id === 'team-lead' && !bridgeRefused ? mintCaller('team-lead', TEAM_LEAD_DECK_TOOLS, 'lead') : null
+    // A write that throws after the mint must not leave the minted caller alive for a tile that never opens.
+    let appendSystemPromptFile: string | undefined
+    let mcpConfig: string | undefined
+    try {
+      appendSystemPromptFile = embedded ? deps.writeEmbeddedPrompt(embedded.id) : undefined
+      mcpConfig = leadMint
+        ? deps.writeTeamLeadMcpConfig(leadMint.token, leadMint.callerId, TEAM_LEAD_DECK_TOOLS)
+        : undefined
+    } catch (e) {
+      if (leadMint) {
+        revokeCaller(leadMint.callerId)
+        deps.revokeTeamLeadMcpConfig(leadMint.callerId)
+      }
+      throw e
+    }
     const input: CreateSessionInput = {
       name: entry.name ?? embedded?.id,
       agent: entry.agent,
@@ -536,7 +553,7 @@ export function startDeckControl(
       prompt: entry.prompt,
       worktreeBranch: entry.worktreeBranch,
       announce: entry.announce,
-      appendSystemPromptFile: embedded ? deps.writeEmbeddedPrompt(embedded.id) : undefined,
+      appendSystemPromptFile,
       lead: embedded?.id === 'team-lead' && !hasLiveLead ? true : undefined,
       peerTools: embedded?.peerTools,
       strictMcpConfig: embedded?.strictMcpConfig,
@@ -545,9 +562,7 @@ export function startDeckControl(
       // The profile id, not `embedded.role` (a prose summary); an operator-profile spawn poses no role.
       role: embedded?.id,
       // Only the embedded team-lead gets the deck-control bridge.
-      mcpConfig: leadMint
-        ? deps.writeTeamLeadMcpConfig(leadMint.token, leadMint.callerId, TEAM_LEAD_DECK_TOOLS)
-        : undefined
+      mcpConfig
     }
     let demoSlotTaken: DemoSlot | null = null
     if (embedded?.id === 'demo') {
@@ -1042,6 +1057,7 @@ export function startDeckControl(
         url: `http://127.0.0.1:${addr.port}`,
         token,
         mintCaller,
+        revokeCaller,
         revokeCallerForSession,
         close: () => server.close()
       })

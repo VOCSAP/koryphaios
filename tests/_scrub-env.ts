@@ -22,7 +22,8 @@ export function scrubEnv(
       ([k]) =>
         !k.startsWith("CLAUDE_PEERS_") &&
         !k.toUpperCase().startsWith("DECK_CONTROL_") &&
-        k !== "CLAUDE_CODE_MESSAGING_SOCKET"
+        k !== "CLAUDE_CODE_MESSAGING_SOCKET" &&
+        k !== "KORY_OPERATOR_TOOLS"
     )
   ) as Record<string, string>;
   return {

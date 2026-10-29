@@ -98,8 +98,8 @@ test("an ambient Claude messaging socket never reaches a child unless the caller
   }
 });
 
-test("an ambient Deck control URL, token or tool list never reaches a child, unless the caller sets it", () => {
-  const keys = ["DECK_CONTROL_URL", "DECK_CONTROL_TOKEN", "DECK_CONTROL_TOOLS"] as const;
+test("an ambient Deck control URL, token, tool list, role or operator ceiling never reaches a child, unless the caller sets it", () => {
+  const keys = ["DECK_CONTROL_URL", "DECK_CONTROL_TOKEN", "DECK_CONTROL_TOOLS", "DECK_CONTROL_ROLE", "KORY_OPERATOR_TOOLS"] as const;
   const saved = Object.fromEntries(keys.map((k) => [k, process.env[k]]));
   try {
     for (const k of keys) process.env[k] = `ambient-${k}`;

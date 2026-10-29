@@ -15,6 +15,7 @@ import {
 import { readSessionIdentityFile } from "../shared/peer-cache.ts";
 import { OPERATOR_INSTANCE_TOKEN } from "../shared/types.ts";
 import { PEER_NO_REPLY_NOTE } from "../shared/message-framing.ts";
+import { OPERATOR_CEILING_ENV, OPERATOR_TOOLS, encodeMountCeiling } from "../shared/mount-ceiling.ts";
 
 const FORCED_GROUP = "expects-reply-delivery-e2e-spec-258af6eb";
 
@@ -274,7 +275,11 @@ describe("send_message expects_reply, end to end", () => {
     const b = await startBroker();
     brokers.push(b);
     const deskSession = `expects-reply-operator-${crypto.randomUUID()}`;
-    const env = { CLAUDE_PEERS_APPROVAL_FILE: await runCredentialFile(b), CLAUDE_PEERS_DESK_SESSION: deskSession };
+    const env = {
+      CLAUDE_PEERS_APPROVAL_FILE: await runCredentialFile(b),
+      CLAUDE_PEERS_DESK_SESSION: deskSession,
+      [OPERATOR_CEILING_ENV]: encodeMountCeiling(OPERATOR_TOOLS),
+    };
     // A tile is a server.ts sibling that registers attested and publishes its identity, plus the
     // server-deck.ts process that reads it: notify_operator is the one-way deposit that remains.
     await spawnPeer(b, env);

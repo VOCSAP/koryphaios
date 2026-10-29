@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { startBroker, stopBroker, post, livePid, scrubEnv, type TestBroker } from "./_helper.ts";
 import { writeSessionIdentityFile } from "../shared/peer-cache.ts";
+import { OPERATOR_CEILING_ENV, OPERATOR_TOOLS, encodeMountCeiling } from "../shared/mount-ceiling.ts";
 
 const brokers: TestBroker[] = [];
 const procs: ReturnType<typeof Bun.spawn>[] = [];
@@ -105,6 +106,7 @@ async function bootDeck(
       CLAUDE_PEERS_BROKER_URL: b.url,
       CLAUDE_PEERS_PORT: String(b.port),
       CLAUDE_PEERS_DESK_SESSION: opts.deskSession,
+      [OPERATOR_CEILING_ENV]: encodeMountCeiling(OPERATOR_TOOLS),
     }),
     stdio: ["pipe", "pipe", "pipe"],
   });

@@ -26,6 +26,7 @@ import {
 import { writeSessionIdentityFile } from "../shared/peer-cache.ts";
 import { resolveProjectKey } from "../shared/project-key.ts";
 import { computeProjectKey } from "../shared/summarize.ts";
+import { OPERATOR_CEILING_ENV, OPERATOR_TOOLS, encodeMountCeiling } from "../shared/mount-ceiling.ts";
 
 async function getGitRoot(cwd: string): Promise<string | null> {
   try {
@@ -245,6 +246,7 @@ async function bootDeck(
       CLAUDE_PEERS_PORT: String(b.port),
       CLAUDE_PEERS_APPROVAL_FILE: credFile,
       CLAUDE_PEERS_DESK_SESSION: opts.deskSession,
+      [OPERATOR_CEILING_ENV]: encodeMountCeiling(OPERATOR_TOOLS),
     }),
     stdio: ["pipe", "pipe", "pipe"],
   });

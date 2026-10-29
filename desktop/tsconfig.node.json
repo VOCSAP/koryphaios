@@ -45,6 +45,7 @@
     "../shared/broker-config.ts",
     "../shared/roadmap-dispatch.ts",
     "../shared/tool-allowlist.ts",
+    "../shared/mount-ceiling.ts",
     "../shared/logger.ts",
     "../shared/log-redact.ts",
     "../shared/broker-stop-marker.ts",

@@ -584,7 +584,7 @@ export interface CreateSessionInput {
    * layer creates the worktree and fills `worktree` before the service spawns.
    */
   worktreeBranch?: string
-  /** Filled by the MAIN process after worktree creation; not a renderer input. */
+  /** Filled by the MAIN process after worktree creation, or sent by the renderer to adopt an existing worktree. */
   worktree?: { path: string; branch: string }
   /** MAIN-only (PLAN C5): mark the created session as the supervisor. */
   supervisor?: boolean
@@ -599,6 +599,8 @@ export interface CreateSessionInput {
    * here that grants a capability is one a remote caller can set on itself.
    * The operator-route bridge decision travels as a separate function parameter
    * instead.
+   * sessions:create strips it from the renderer's request: a launch config is
+   * written main-side only, since it names the MCP servers the tile loads.
    */
   mcpConfig?: string
   /**

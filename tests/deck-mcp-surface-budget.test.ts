@@ -2,7 +2,15 @@ import { test, expect, describe } from "bun:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 
-import { DECK_TOOL_NAMES, mcp } from "../server-deck.ts";
+import { OPERATOR_CEILING_ENV, OPERATOR_TOOLS, encodeMountCeiling } from "../shared/mount-ceiling.ts";
+
+// The ceiling is read when the module loads; the query makes a separate instance so other files importing the default one are unaffected.
+const ambientCeiling = process.env[OPERATOR_CEILING_ENV];
+process.env[OPERATOR_CEILING_ENV] = encodeMountCeiling(OPERATOR_TOOLS);
+const { DECK_TOOL_NAMES, mcp } = await import("../server-deck.ts?ceiling=full").finally(() => {
+  if (ambientCeiling === undefined) delete process.env[OPERATOR_CEILING_ENV];
+  else process.env[OPERATOR_CEILING_ENV] = ambientCeiling;
+});
 
 type DeckTool = { name: string; description?: string; inputSchema: unknown };
 

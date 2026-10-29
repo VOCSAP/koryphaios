@@ -3,6 +3,7 @@ import { hostname } from 'node:os'
 import { readSessionIdentityFile } from '../../shared/peer-cache.ts'
 import { handleRoadmapDispatch, TOOLS_ALLOWLIST as PEERS_ALLOWLIST, type CompanionIdentity } from '../../shared/roadmap-dispatch.ts'
 import { brokerHeaders, brokerUrl, loadBrokerConfig } from '../../shared/broker-config.ts'
+import { DECK_CEILING_ENV, DECK_ROLE_ENV, resolveMountCeiling, resolveMountRole } from '../../shared/mount-ceiling.ts'
 import { DIRECTIVE_ACCEPTS_PROMPT, directiveCommands } from '../src/main/directive'
 import {
   CLEAR_RELOAD_WORKSTREAM_MAX,
@@ -13,7 +14,6 @@ import {
 
 const CONTROL_URL = process.env.DECK_CONTROL_URL ?? ''
 const CONTROL_TOKEN = process.env.DECK_CONTROL_TOKEN ?? ''
-const TOOLS_ENV_VAR = 'DECK_CONTROL_TOOLS'
 const brokerConfig = loadBrokerConfig((message) => process.stderr.write(`[claude-peers] ${message}\n`)).config
 const ROADMAP_DISPATCH_ENDPOINT = {
   url: brokerUrl(brokerConfig),
@@ -282,39 +282,23 @@ const TOOLS = [
   }
 ]
 
-/**
- * Pure allow-list resolver for DECK_CONTROL_TOOLS. `undefined` (env var
- * absent) means "no restriction" -- distinct from `[]` (env var present and
- * empty, meaning zero tools). See the env-contract comment above for the
- * full semantics; kept pure so a test can drive it without spawning a
- * process or touching env.
- */
-function resolveToolAllowlist(envValue: string | undefined): string[] | null {
-  if (envValue === undefined) return null
-  if (envValue === '') return []
-  return envValue
-    .split(',')
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0)
-}
-
-/** Pure filter: `null` allowlist (var absent) passes every tool through unchanged. */
-function filterTools(tools: typeof TOOLS, allowlist: string[] | null): typeof TOOLS {
-  if (allowlist === null) return tools
-  const allowed = new Set(allowlist)
-  return tools.filter((t) => allowed.has(t.name))
-}
-
-const TOOLS_ALLOWLIST_RAW = process.env[TOOLS_ENV_VAR]
-const TOOLS_ALLOWLIST = resolveToolAllowlist(TOOLS_ALLOWLIST_RAW)
-const FILTERED_TOOLS = filterTools(TOOLS, TOOLS_ALLOWLIST).filter(
-  (t) => t.name !== 'roadmap_dispatch' || PEERS_ALLOWLIST === null || PEERS_ALLOWLIST.includes(t.name)
-)
+// The Deck writes the ceiling and the role into this entry's env; a missing or
+// malformed one serves nothing. CLAUDE_PEERS_TOOLS only narrows roadmap_dispatch further.
+const REGISTRY = TOOLS.map((t) => t.name)
+const CEILING = resolveMountCeiling(DECK_CEILING_ENV, process.env[DECK_CEILING_ENV], REGISTRY)
+const ROLE = resolveMountRole(process.env[DECK_ROLE_ENV])
+const GRANTED = CEILING.ok && ROLE.ok ? CEILING.value : null
+const FILTERED_TOOLS: typeof TOOLS =
+  GRANTED === null
+    ? []
+    : TOOLS.filter((t) => GRANTED.includes(t.name)).filter(
+        (t) => t.name !== 'roadmap_dispatch' || PEERS_ALLOWLIST === null || PEERS_ALLOWLIST.includes(t.name)
+      )
 
 const SUPERVISOR_INSTRUCTIONS =
   'You are the Deck SUPERVISOR. You pilot the desktop app that hosts this session: spawn visible agent sessions (deck_spawn_session for one, deck_spawn_team for a whole plan, with agent profiles from deck_list_agents or embedded fallbacks from deck_team_agents, initial prompts, optional worktrees), inspect them (deck_list_sessions), manage worktrees and templates, and broadcast announcements. You do NOT write code yourself: read the project, consult the shared roadmap (roadmap_* tools), pick the right agent profiles, brief them via the initial prompt, then coordinate through send_message / list_peers. CONSENT: never spawn without an explicit operator instruction in the conversation — a question calls for a proposal plus confirmation; read deck_team_playbook before composing a team. You may close any non-locked tile except supervisor tiles (deck_close_session, deck_close_all); other destructive actions only work on what you created, ask the operator otherwise.'
 
-/** A restricted caller (DECK_CONTROL_TOOLS set) is a team-lead: its text names only the tools it is served. */
+/** A lead's text names only the tools it is served. */
 function subsetInstructions(toolNames: string[]): string {
   const closeRule = toolNames.includes('deck_close_session')
     ? ' deck_close_session closes any non-locked tile except your own and lead or supervisor tiles.'
@@ -323,16 +307,28 @@ function subsetInstructions(toolNames: string[]): string {
 }
 
 const INSTRUCTIONS =
-  TOOLS_ALLOWLIST === null ? SUPERVISOR_INSTRUCTIONS : subsetInstructions(FILTERED_TOOLS.map((t) => t.name))
+  GRANTED === null
+    ? 'No Deck tool is served: the mount ceiling is missing or invalid.'
+    : ROLE.ok && ROLE.value === 'supervisor'
+      ? SUPERVISOR_INSTRUCTIONS
+      : subsetInstructions(FILTERED_TOOLS.map((t) => t.name))
 
 // stdout is reserved for JSON-RPC frames, so diagnostics use stderr.
 process.stderr.write(
-  JSON.stringify({
-    ev: 'deck-control-mcp: tool allowlist resolved',
-    source: TOOLS_ALLOWLIST_RAW === undefined ? 'unset (no restriction)' : TOOLS_ENV_VAR,
-    requested: TOOLS_ALLOWLIST,
-    retained: FILTERED_TOOLS.map((t) => t.name)
-  }) + '\n'
+  JSON.stringify(
+    GRANTED === null
+      ? {
+          ev: 'deck-control-mcp: mount refused, no tool served',
+          variable: !CEILING.ok ? DECK_CEILING_ENV : DECK_ROLE_ENV,
+          reason: !CEILING.ok ? CEILING.reason : !ROLE.ok ? ROLE.reason : ''
+        }
+      : {
+          ev: 'deck-control-mcp: mount ceiling resolved',
+          role: ROLE.ok ? ROLE.value : null,
+          registry: REGISTRY,
+          retained: FILTERED_TOOLS.map((t) => t.name)
+        }
+  ) + '\n'
 )
 
 async function resolveCompanionIdentity(): Promise<CompanionIdentity> {

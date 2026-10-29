@@ -74,7 +74,13 @@ import {
   upsertRoadmap
 } from './roadmap-service'
 import { validateReorderWaves } from './roadmap-reorder-validate'
-import { createSessionWithWorktree, gateSandboxForCwds, restartSessionGated, type ModLaunchDeps } from './create-session'
+import {
+  createSessionWithWorktree,
+  gateSandboxForCwds,
+  restartSessionGated,
+  stripMainOnlySessionFields,
+  type ModLaunchDeps
+} from './create-session'
 import { effectiveAgent, isTeamLeadAgent } from './team-lead-bridge'
 import { composePlanImportPrompt } from './import-plan'
 import { collectDiff, collectFileDiff, composeDiffReviewPrompt } from './diff-service'
@@ -335,12 +341,7 @@ export function registerIpc({
         reportError('session', 'failed to start the deck-control endpoint for an operator-opened team-lead tile', e)
       }
     }
-    const {
-      supervisor: _supervisor,
-      strictMcpConfig: _strictMcpConfig,
-      disallowedTools: _disallowedTools,
-      ...requested
-    } = input ?? {}
+    const requested = stripMainOnlySessionFields(input)
     return createSessionWithWorktree(
       service,
       getConfig().projectDir,

@@ -8,6 +8,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { ListToolsRequestSchema, CallToolRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { createLogger, coreLogDir } from "./shared/logger.ts";
 import { readSessionIdentityFile } from "./shared/peer-cache.ts";
+import { OPERATOR_CEILING_ENV, OPERATOR_TOOLS, resolveMountCeiling } from "./shared/mount-ceiling.ts";
 import {
   DECK_ONLY_TOOLS,
   TOOLS_ALLOWLIST,
@@ -25,15 +26,11 @@ function log(msg: string) {
   fileLog.info(msg);
 }
 
-const DECK_TOOL_NAMES = [
-  "ask_operator",
-  "ask_operator_wait",
-  "notify_operator",
-  "graph_draft_prepare",
-  "graph_draft_send",
-] as const;
+const DECK_TOOL_NAMES = OPERATOR_TOOLS;
+const CEILING = resolveMountCeiling(OPERATOR_CEILING_ENV, process.env[OPERATOR_CEILING_ENV], DECK_TOOL_NAMES);
+if (!CEILING.ok) log(`mount refused, no tool served: ${CEILING.reason}`);
 const DECK_TOOLS = DECK_ONLY_TOOLS.filter((tool) => {
-  if (!(DECK_TOOL_NAMES as readonly string[]).includes(tool.name)) return false;
+  if (!CEILING.ok || !CEILING.value.includes(tool.name)) return false;
   if (tool.name === "notify_operator") {
     return TOOLS_ALLOWLIST === null || TOOLS_ALLOWLIST.includes("send_message");
   }
@@ -44,8 +41,9 @@ const mcp = new Server(
   { name: "kory-operator", version: "0.9.0" },
   {
     capabilities: { tools: {} },
-    instructions:
-      "Kory operator tools for a lead or supervisor tile. Use ask_operator for blocking questions and notify_operator for one-way signed notices.",
+    instructions: CEILING.ok
+      ? "Kory operator tools for a lead or supervisor tile. Use ask_operator for blocking questions and notify_operator for one-way signed notices."
+      : "No operator tool is served: the mount ceiling is missing or invalid.",
   }
 );
 

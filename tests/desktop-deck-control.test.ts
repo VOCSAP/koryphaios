@@ -33,11 +33,12 @@ import {
 } from "../desktop/src/main/supervisor.ts";
 import type { CreateSessionInput } from "../desktop/src/shared/types.ts";
 import type { DeckControlSession as SessionRuntime } from "../desktop/src/main/deck-control.ts";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { extractBracedBody } from "./_braced-body";
 import { scrubEnv } from "./_scrub-env.ts";
+import { OPERATOR_CEILING_ENV, OPERATOR_TOOLS, encodeMountCeiling } from "../shared/mount-ceiling.ts";
 import {
   arbitrateSpawnApproval,
   arbitrateSpawnGrant,
@@ -1390,6 +1391,45 @@ test("a spawn that fails AFTER the mint revokes the token and deletes its config
   expect(afterRollback.status).toBe(401);
 });
 
+test("a team-lead config write that throws revokes the minted caller, asks for the file to go and spawns nothing", async () => {
+  const deps = makeDeps({ sessions: [] });
+  deps.writeTeamLeadMcpConfig = (token, callerId, allowedTools) => {
+    deps.leadMcpCalls.push({ token, callerId, allowedTools });
+    throw new Error("MCP mount not written: DECK_CONTROL_TOOLS names unknown tool 'deck_bogus'");
+  };
+  let spawned = 0;
+  deps.spawnSession = async () => {
+    spawned++;
+    throw new Error("must not be reached");
+  };
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+
+  const failed = await call(srv, "deck_spawn_session", { embedded_agent: "team-lead" });
+  expect(failed.status).toBe(400);
+  expect(failed.body.error).toContain("MCP mount not written");
+  expect(spawned, "a refused config still reached the spawn").toBe(0);
+
+  const { callerId, token } = deps.leadMcpCalls[0]!;
+  expect(deps.revokedLeadCallerIds, "the config file of the refused mount was not asked to go").toEqual([callerId]);
+  expect((await call(srv, "deck_list_agents", {}, token)).status, "the minted caller is still live").toBe(401);
+});
+
+test("an embedded prompt write that throws after the mint revokes the minted caller before any config is written", async () => {
+  const deps = makeDeps({ sessions: [] });
+  deps.writeEmbeddedPrompt = () => {
+    throw new Error("prompt file not writable");
+  };
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+
+  const failed = await call(srv, "deck_spawn_session", { embedded_agent: "team-lead" });
+  expect(failed.status).toBe(400);
+  expect(failed.body.error).toContain("prompt file not writable");
+  expect(deps.leadMcpCalls, "a config was written after the prompt failed").toEqual([]);
+  expect(deps.revokedLeadCallerIds, "the caller minted before the prompt write was left alive").toHaveLength(1);
+});
+
 function captureDeckErrors(): string[] {
   const seen: string[] = [];
   onDeckError((scope, text) => {
@@ -2015,9 +2055,15 @@ test("writeSupervisorMcpConfig mounts the separated kory operator and deck serve
     DECK_CONTROL_URL: "http://127.0.0.1:1234",
     DECK_CONTROL_TOKEN: "tok"
   });
-  expect(deck.env.DECK_CONTROL_TOOLS).toBeUndefined();
+  expect(deck.env.DECK_CONTROL_TOOLS, "the supervisor perimeter is posted explicitly, never deduced from an absent variable").toBe(
+    [...TEAM_LEAD_DECK_TOOLS, "roadmap_dispatch"].join(",")
+  );
+  expect(deck.env.DECK_CONTROL_ROLE).toBe("supervisor");
   expect(parsed.mcpServers["kory-operator"]!.args).toEqual([join(dirname(mcpScriptPath), "server-deck.mjs")]);
-  expect(parsed.mcpServers["kory-operator"]!.env).toEqual({ ELECTRON_RUN_AS_NODE: "1" });
+  expect(parsed.mcpServers["kory-operator"]!.env).toEqual({
+    ELECTRON_RUN_AS_NODE: "1",
+    [OPERATOR_CEILING_ENV]: encodeMountCeiling(OPERATOR_TOOLS)
+  });
   expect(SUPERVISOR_BRIEFING).toContain("deck_list_agents");
 });
 
@@ -2051,12 +2097,16 @@ test("writeTeamLeadMcpConfig writes its OWN file, scoped to TEAM_LEAD_DECK_TOOLS
   expect(parsed.mcpServers["kory-deck"]!.env.DECK_CONTROL_TOOLS).toBe(
     [...TEAM_LEAD_DECK_TOOLS, "roadmap_dispatch"].join(",")
   );
-  // The supervisor's own file stays unrestricted even after the team-lead's
-  // is written -- the two writers must not share mutable state.
+  expect(parsed.mcpServers["kory-deck"]!.env.DECK_CONTROL_ROLE).toBe("lead");
+  // The supervisor's own file keeps its explicit ceiling and role even after the
+  // team-lead's is written -- the two writers must not share mutable state.
   const supParsed = JSON.parse(readFileSync(supFile, "utf-8")) as {
     mcpServers: Record<string, { env: Record<string, string> }>;
   };
-  expect(supParsed.mcpServers["kory-deck"]!.env.DECK_CONTROL_TOOLS).toBeUndefined();
+  expect(supParsed.mcpServers["kory-deck"]!.env.DECK_CONTROL_TOOLS).toBe(
+    [...TEAM_LEAD_DECK_TOOLS, "roadmap_dispatch"].join(",")
+  );
+  expect(supParsed.mcpServers["kory-deck"]!.env.DECK_CONTROL_ROLE).toBe("supervisor");
 });
 
 test("writeSupervisorMcpConfig also writes the deck-lead key, deck-control untouched", () => {
@@ -2080,7 +2130,10 @@ test("writeSupervisorMcpConfig also writes the deck-lead key, deck-control untou
   const operator = parsed.mcpServers["kory-operator"]!;
   expect(operator.command).toBe("/usr/bin/electron");
   expect(operator.args).toEqual([join(dirname(mcpScriptPath), "server-deck.mjs")]);
-  expect(operator.env).toEqual({ ELECTRON_RUN_AS_NODE: "1" });
+  expect(operator.env).toEqual({
+    ELECTRON_RUN_AS_NODE: "1",
+    [OPERATOR_CEILING_ENV]: encodeMountCeiling(OPERATOR_TOOLS)
+  });
 });
 
 test("writeTeamLeadMcpConfig also writes the deck-lead key, same shape as the supervisor's", () => {
@@ -2105,8 +2158,35 @@ test("writeTeamLeadMcpConfig also writes the deck-lead key, same shape as the su
   const operator = parsed.mcpServers["kory-operator"]!;
   expect(operator.command).toBe("/usr/bin/electron");
   expect(operator.args).toEqual([join(dirname(mcpScriptPath), "server-deck.mjs")]);
-  expect(operator.env).toEqual({ ELECTRON_RUN_AS_NODE: "1" });
+  expect(operator.env).toEqual({
+    ELECTRON_RUN_AS_NODE: "1",
+    [OPERATOR_CEILING_ENV]: encodeMountCeiling(OPERATOR_TOOLS)
+  });
   expect(parsed.mcpServers["kory-deck"]!.env.DECK_CONTROL_TOOLS).toBe([...TEAM_LEAD_DECK_TOOLS, "roadmap_dispatch"].join(","));
+  expect(parsed.mcpServers["kory-deck"]!.env.DECK_CONTROL_ROLE).toBe("lead");
+});
+
+test("a writer refuses to write a ceiling the MCP process would refuse, and leaves no config file", () => {
+  const dir = mkdtempSync(join(tmpdir(), "cp-lead-invalid-"));
+  tmpDirs.push(dir);
+  const input = {
+    dir,
+    mcpScriptPath: "/res/deck-plugin/mcp/deck-control-mcp.mjs",
+    execPath: "/usr/bin/electron",
+    controlUrl: "http://127.0.0.1:1234",
+    controlToken: "tok"
+  };
+  expect(
+    () => writeTeamLeadMcpConfig(input, "dispatch-twice.json", [...TEAM_LEAD_DECK_TOOLS, "roadmap_dispatch"]),
+    "a registry that grows roadmap_dispatch would double it and cost every lead its tools"
+  ).toThrow("DECK_CONTROL_TOOLS lists 'roadmap_dispatch' twice");
+  expect(() => writeTeamLeadMcpConfig(input, "unknown-tool.json", ["deck_announce", "deck_bogus"])).toThrow(
+    "DECK_CONTROL_TOOLS names unknown tool 'deck_bogus'"
+  );
+  expect(
+    existsSync(join(dir, "dispatch-twice.json")) || existsSync(join(dir, "unknown-tool.json")),
+    "a refused mount left a config file behind"
+  ).toBe(false);
 });
 
 test("writeSupervisorSystemPrompt regenerates the role anchor from the code constant", () => {
@@ -2145,6 +2225,8 @@ test("deck-control-mcp speaks MCP over stdio and forwards tools/call", async () 
     env: scrubEnv(tmpdir(), {
       DECK_CONTROL_URL: srv.url,
       DECK_CONTROL_TOKEN: srv.token,
+      DECK_CONTROL_TOOLS: SUPERVISOR_MOUNT,
+      DECK_CONTROL_ROLE: "supervisor",
     }),
     stdin: "pipe",
     stdout: "pipe",
@@ -2215,12 +2297,15 @@ test("deck-control-mcp speaks MCP over stdio and forwards tools/call", async () 
   expect(refused.result.isError).toBe(true);
 });
 
+const SUPERVISOR_MOUNT = [...TEAM_LEAD_DECK_TOOLS, "roadmap_dispatch"].join(",");
+
 async function speakMcp(
   env: Record<string, string | undefined>,
   script = "desktop/mcp/deck-control-mcp.ts"
 ): Promise<{
   send: (msg: unknown) => void;
   recv: () => Promise<Record<string, unknown>>;
+  stderr: () => Promise<string>;
 }> {
   const extra: Record<string, string> = {};
   for (const [key, value] of Object.entries(env)) {
@@ -2230,13 +2315,27 @@ async function speakMcp(
     env: scrubEnv(tmpdir(), extra),
     stdin: "pipe",
     stdout: "pipe",
-    stderr: "ignore"
+    stderr: "pipe"
   });
   procs.push(proc);
   const reader = proc.stdout.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
+  let stderrText = "";
+  void (async () => {
+    const errReader = proc.stderr.getReader();
+    const errDecoder = new TextDecoder();
+    for (;;) {
+      const { value, done } = await errReader.read();
+      if (done) return;
+      stderrText += errDecoder.decode(value, { stream: true });
+    }
+  })();
   return {
+    stderr: async () => {
+      for (let i = 0; i < 150 && !stderrText.includes('"ev":"deck-control-mcp:'); i++) await Bun.sleep(20);
+      return stderrText;
+    },
     send: (msg: unknown) => {
       proc.stdin.write(JSON.stringify(msg) + "\n");
       void proc.stdin.flush();
@@ -2355,9 +2454,8 @@ test("DeckControlDeps holds exactly the reviewed dependencies, none able to muta
   const { send, recv } = await speakMcp({
     DECK_CONTROL_URL: srv.url,
     DECK_CONTROL_TOKEN: srv.token,
-    // Explicit undefined: force-absent even if the test runner's own
-    // environment happened to carry this var (see speakMcp above).
-    DECK_CONTROL_TOOLS: undefined
+    DECK_CONTROL_TOOLS: SUPERVISOR_MOUNT,
+    DECK_CONTROL_ROLE: "supervisor"
   });
   send({ jsonrpc: "2.0", id: 1, method: "tools/list" });
   const tools = (await recv()) as { result: { tools: { name: string }[] } };
@@ -2388,7 +2486,8 @@ test("initialize serves an instructions block that keeps its supervisor clauses,
   const { send, recv } = await speakMcp({
     DECK_CONTROL_URL: srv.url,
     DECK_CONTROL_TOKEN: srv.token,
-    DECK_CONTROL_TOOLS: undefined
+    DECK_CONTROL_TOOLS: SUPERVISOR_MOUNT,
+    DECK_CONTROL_ROLE: "supervisor"
   });
 
   send({
@@ -2446,7 +2545,8 @@ test("initialize in subset mode (team-lead) speaks as a team-lead, names only th
   const { send, recv } = await speakMcp({
     DECK_CONTROL_URL: srv.url,
     DECK_CONTROL_TOKEN: srv.token,
-    DECK_CONTROL_TOOLS: TEAM_LEAD_DECK_TOOLS.join(",")
+    DECK_CONTROL_TOOLS: TEAM_LEAD_DECK_TOOLS.join(","),
+    DECK_CONTROL_ROLE: "lead"
   });
 
   send({
@@ -2474,7 +2574,8 @@ test("DECK_CONTROL_TOOLS set: tools/list returns exactly the named subset, and t
   const { send, recv } = await speakMcp({
     DECK_CONTROL_URL: srv.url,
     DECK_CONTROL_TOKEN: srv.token,
-    DECK_CONTROL_TOOLS: "deck_spawn_session, deck_close_session"
+    DECK_CONTROL_TOOLS: "deck_spawn_session,deck_close_session",
+    DECK_CONTROL_ROLE: "lead"
   });
   send({ jsonrpc: "2.0", id: 1, method: "tools/list" });
   const tools = (await recv()) as { result: { tools: { name: string }[] } };
@@ -2513,7 +2614,8 @@ test("DECK_CONTROL_TOOLS=TEAM_LEAD_DECK_TOOLS: deck_restart_session is listed an
   const { send, recv } = await speakMcp({
     DECK_CONTROL_URL: srv.url,
     DECK_CONTROL_TOKEN: srv.token,
-    DECK_CONTROL_TOOLS: TEAM_LEAD_DECK_TOOLS.join(",")
+    DECK_CONTROL_TOOLS: TEAM_LEAD_DECK_TOOLS.join(","),
+    DECK_CONTROL_ROLE: "lead"
   });
   send({ jsonrpc: "2.0", id: 1, method: "tools/list" });
   const tools = (await recv()) as { result: { tools: { name: string }[] } };
@@ -2543,13 +2645,14 @@ test("DECK_CONTROL_TOOLS=TEAM_LEAD_DECK_TOOLS: deck_restart_session is listed an
   expect(allowed.result.isError).toBeUndefined();
 });
 
-test("DECK_CONTROL_TOOLS set and EMPTY: zero tools listed, every tools/call refused -- distinct from unset", async () => {
+test("DECK_CONTROL_TOOLS=none is the explicit empty set: zero tools listed, every tools/call refused, no refusal trace", async () => {
   const srv = await startDeckControl(makeDeps({ sessions: [] }));
   servers.push(srv);
-  const { send, recv } = await speakMcp({
+  const { send, recv, stderr } = await speakMcp({
     DECK_CONTROL_URL: srv.url,
     DECK_CONTROL_TOKEN: srv.token,
-    DECK_CONTROL_TOOLS: ""
+    DECK_CONTROL_TOOLS: "none",
+    DECK_CONTROL_ROLE: "lead"
   });
   send({ jsonrpc: "2.0", id: 1, method: "tools/list" });
   const tools = (await recv()) as { result: { tools: unknown[] } };
@@ -2563,6 +2666,64 @@ test("DECK_CONTROL_TOOLS set and EMPTY: zero tools listed, every tools/call refu
   });
   const refused = (await recv()) as { result: { isError?: boolean } };
   expect(refused.result.isError).toBe(true);
+  expect(await stderr()).not.toContain("mount refused");
+});
+
+function mountTrace(text: string): Record<string, unknown> {
+  const line = text.split("\n").find((candidate) => candidate.startsWith('{"ev":"deck-control-mcp:'));
+  if (!line) throw new Error(`no mount trace in stderr: ${text.slice(0, 300)}`);
+  return JSON.parse(line) as Record<string, unknown>;
+}
+
+const BAD_DECK_MOUNTS: Array<[label: string, env: Record<string, string | undefined>, variable: string]> = [
+  ["an absent ceiling", { DECK_CONTROL_TOOLS: undefined, DECK_CONTROL_ROLE: "lead" }, "DECK_CONTROL_TOOLS"],
+  ["an empty ceiling", { DECK_CONTROL_TOOLS: "", DECK_CONTROL_ROLE: "lead" }, "DECK_CONTROL_TOOLS"],
+  ["an unknown tool name", { DECK_CONTROL_TOOLS: "deck_announce,deck_bogus", DECK_CONTROL_ROLE: "lead" }, "DECK_CONTROL_TOOLS"],
+  ["a duplicated name", { DECK_CONTROL_TOOLS: "deck_announce,deck_announce", DECK_CONTROL_ROLE: "lead" }, "DECK_CONTROL_TOOLS"],
+  ["an empty entry", { DECK_CONTROL_TOOLS: "deck_announce,", DECK_CONTROL_ROLE: "lead" }, "DECK_CONTROL_TOOLS"],
+  ["a space after the comma", { DECK_CONTROL_TOOLS: "deck_announce, deck_list_agents", DECK_CONTROL_ROLE: "lead" }, "DECK_CONTROL_TOOLS"],
+  ["an absent role", { DECK_CONTROL_TOOLS: SUPERVISOR_MOUNT, DECK_CONTROL_ROLE: undefined }, "DECK_CONTROL_ROLE"],
+  ["an unknown role", { DECK_CONTROL_TOOLS: SUPERVISOR_MOUNT, DECK_CONTROL_ROLE: "worker" }, "DECK_CONTROL_ROLE"]
+];
+
+for (const [label, mountEnv, variable] of BAD_DECK_MOUNTS) {
+  test(`kory-deck with ${label} serves no tool, answers neutral instructions and traces ${variable}`, async () => {
+    const srv = await startDeckControl(makeDeps({ sessions: [] }));
+    servers.push(srv);
+    const { send, recv, stderr } = await speakMcp({ DECK_CONTROL_URL: srv.url, DECK_CONTROL_TOKEN: srv.token, ...mountEnv });
+    send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "t", version: "0" } }
+    });
+    const init = (await recv()) as { result: { instructions: string } };
+    expect(init.result.instructions).toContain("mount ceiling is missing or invalid");
+    send({ jsonrpc: "2.0", id: 2, method: "tools/list" });
+    const tools = (await recv()) as { result: { tools: unknown[] } };
+    expect(tools.result.tools).toEqual([]);
+    const trace = mountTrace(await stderr()) as { ev: string; variable: string };
+    expect(trace.ev).toContain("mount refused");
+    expect(trace.variable).toBe(variable);
+  });
+}
+
+test("the supervisor ceiling is exactly the registry the bridge declares, so it loses no capability", async () => {
+  const srv = await startDeckControl(makeDeps({ sessions: [] }));
+  servers.push(srv);
+  const { send, recv, stderr } = await speakMcp({
+    DECK_CONTROL_URL: srv.url,
+    DECK_CONTROL_TOKEN: srv.token,
+    DECK_CONTROL_TOOLS: SUPERVISOR_MOUNT,
+    DECK_CONTROL_ROLE: "supervisor"
+  });
+  send({ jsonrpc: "2.0", id: 1, method: "tools/list" });
+  const tools = (await recv()) as { result: { tools: { name: string }[] } };
+  const trace = mountTrace(await stderr()) as { registry: string[]; retained: string[] };
+  expect([...trace.registry].sort(), "the bridge declares a tool the supervisor ceiling does not post, or the reverse").toEqual(
+    SUPERVISOR_MOUNT.split(",").sort()
+  );
+  expect(tools.result.tools.map((t) => t.name).sort()).toEqual(SUPERVISOR_MOUNT.split(",").sort());
 });
 
 interface DispatchProbe {
@@ -2607,6 +2768,7 @@ function startDispatchBroker(): DispatchProbe {
 async function speakKoryDeckWithSibling(opts: {
   probe: DispatchProbe;
   deckControlTools: string | undefined;
+  role?: "lead" | "supervisor";
   peersTools?: string;
   siblingToken?: string | null;
   controlUrl?: string;
@@ -2624,6 +2786,7 @@ async function speakKoryDeckWithSibling(opts: {
     DECK_CONTROL_URL: opts.controlUrl ?? "http://127.0.0.1:9",
     DECK_CONTROL_TOKEN: CONTROL_TOKEN_FOR_DISPATCH,
     DECK_CONTROL_TOOLS: opts.deckControlTools,
+    DECK_CONTROL_ROLE: opts.role ?? "lead",
     CLAUDE_PEERS_TOOLS: opts.peersTools,
     CLAUDE_PEERS_BROKER_URL: opts.probe.url,
     CLAUDE_PEERS_PORT: port,
@@ -2709,7 +2872,7 @@ test("kory-deck roadmap_dispatch is refused by the broker when the sibling token
 
 test("kory-deck refuses a direct roadmap_dispatch call that DECK_CONTROL_TOOLS hides, with zero broker traffic", async () => {
   const probe = startDispatchBroker();
-  for (const hidden of ["deck_announce", ""]) {
+  for (const hidden of ["deck_announce", "none"]) {
     const mcp = await speakKoryDeckWithSibling({ probe, deckControlTools: hidden });
     expect(await listedToolNames(mcp, 1), `roadmap_dispatch is listed under DECK_CONTROL_TOOLS='${hidden}'`).not.toContain(
       "roadmap_dispatch"
@@ -2723,11 +2886,14 @@ test("kory-deck refuses a direct roadmap_dispatch call that DECK_CONTROL_TOOLS h
 
 test("kory-deck keeps roadmap_dispatch private when CLAUDE_PEERS_TOOLS excludes it, even under a permissive DECK_CONTROL_TOOLS", async () => {
   const probe = startDispatchBroker();
-  for (const deckControlTools of ["roadmap_dispatch,deck_announce", undefined]) {
-    const mcp = await speakKoryDeckWithSibling({ probe, deckControlTools, peersTools: "list_peers" });
-    const label = `DECK_CONTROL_TOOLS=${deckControlTools ?? "unset"}`;
+  for (const [deckControlTools, role] of [
+    ["roadmap_dispatch,deck_announce", "lead"],
+    [SUPERVISOR_MOUNT, "supervisor"]
+  ] as const) {
+    const mcp = await speakKoryDeckWithSibling({ probe, deckControlTools, role, peersTools: "list_peers" });
+    const label = `DECK_CONTROL_TOOLS=${deckControlTools === SUPERVISOR_MOUNT ? "the supervisor ceiling" : deckControlTools}`;
     expect(await listedToolNames(mcp, 1), `${label}: P excludes dispatch yet it is listed`).not.toContain("roadmap_dispatch");
-    const served = await servedInstructionsMatchTools(mcp, 3, label, deckControlTools !== undefined);
+    const served = await servedInstructionsMatchTools(mcp, 3, label, role === "lead");
     expect(served, `${label}: P excludes dispatch yet it is served after initialize`).not.toContain("roadmap_dispatch");
     const refused = await callTool(mcp, 2, "roadmap_dispatch");
     expect(refused.isError, `${label}: a P-private dispatch was executed: ${refused.text}`).toBe(true);
@@ -2760,20 +2926,27 @@ test("kory-deck keeps roadmap_dispatch private when DECK_CONTROL_TOOLS omits it,
   expect(probe.adds, "the union of P and DECK_CONTROL_TOOLS opened dispatch").toEqual([]);
 });
 
-test("every tool the bridge serves to an unrestricted caller is refused to a caller granted none, with no traffic to the Deck or the broker", async () => {
+test("every tool the bridge serves to the supervisor is refused to a caller granted none or granted no valid ceiling, with no traffic to the Deck or the broker", async () => {
   const probe = startDispatchBroker();
-  const unrestricted = await speakKoryDeckWithSibling({ probe, deckControlTools: undefined, controlUrl: probe.url });
-  const registry = await listedToolNames(unrestricted, 1);
-  expect(registry, "the unrestricted bridge no longer serves the Deck tools").toContain("deck_spawn_session");
+  const supervisor = await speakKoryDeckWithSibling({
+    probe,
+    deckControlTools: SUPERVISOR_MOUNT,
+    role: "supervisor",
+    controlUrl: probe.url
+  });
+  const registry = await listedToolNames(supervisor, 1);
+  expect(registry, "the supervisor bridge does not serve the Deck tools").toContain("deck_spawn_session");
   expect(registry, "roadmap_dispatch is not in the registry this walk derives").toContain("roadmap_dispatch");
 
-  const ungranted = await speakKoryDeckWithSibling({ probe, deckControlTools: "", controlUrl: probe.url });
-  expect(await listedToolNames(ungranted, 1)).toEqual([]);
-  for (const [index, name] of registry.entries()) {
-    expect(await callTool(ungranted, index + 2, name), `${name} is callable by a caller granted nothing`).toEqual({
-      isError: true,
-      text: `Error: tool not available: ${name}`
-    });
+  for (const ceiling of ["none", undefined, "", "deck_bogus"]) {
+    const ungranted = await speakKoryDeckWithSibling({ probe, deckControlTools: ceiling, controlUrl: probe.url });
+    expect(await listedToolNames(ungranted, 1), `ceiling ${ceiling ?? "absent"} lists a tool`).toEqual([]);
+    for (const [index, name] of registry.entries()) {
+      expect(await callTool(ungranted, index + 2, name), `${name} is callable under ceiling ${ceiling ?? "absent"}`).toEqual({
+        isError: true,
+        text: `Error: tool not available: ${name}`
+      });
+    }
   }
   expect(probe.paths, "a refused call still reached the Deck or the broker").toEqual([]);
 }, 60_000);
@@ -4113,7 +4286,8 @@ test("the MCP bridge serves deck_run_directive with the card directive enum and 
   const { send, recv } = await speakMcp({
     DECK_CONTROL_URL: srv.url,
     DECK_CONTROL_TOKEN: srv.token,
-    DECK_CONTROL_TOOLS: undefined
+    DECK_CONTROL_TOOLS: SUPERVISOR_MOUNT,
+    DECK_CONTROL_ROLE: "supervisor"
   });
   send({ jsonrpc: "2.0", id: 1, method: "tools/list" });
   const listed = (await recv()) as {
@@ -4171,9 +4345,9 @@ function writtenLeadToolsEnv(): string {
 
 const TEAM_LEAD_TOOLS_ENV = writtenLeadToolsEnv();
 
-async function servedSurface(tools: string | undefined, script?: string): Promise<number> {
+async function servedSurface(tools: string, role: "lead" | "supervisor", script?: string): Promise<number> {
   const { send, recv } = await speakMcp(
-    { DECK_CONTROL_URL: "http://127.0.0.1:1", DECK_CONTROL_TOKEN: "unused", DECK_CONTROL_TOOLS: tools },
+    { DECK_CONTROL_URL: "http://127.0.0.1:1", DECK_CONTROL_TOKEN: "unused", DECK_CONTROL_TOOLS: tools, DECK_CONTROL_ROLE: role },
     script
   );
   send({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} });
@@ -4188,7 +4362,7 @@ test("the supervisor surface stays between its floor and its ceiling, even run f
   process.env.DECK_CONTROL_TOOLS = TEAM_LEAD_TOOLS_ENV;
   let total: number;
   try {
-    total = await servedSurface(undefined);
+    total = await servedSurface(SUPERVISOR_MOUNT, "supervisor");
   } finally {
     if (ambient === undefined) delete process.env.DECK_CONTROL_TOOLS;
     else process.env.DECK_CONTROL_TOOLS = ambient;
@@ -4202,7 +4376,7 @@ test("the team-lead surface stays between its floor and its ceiling", async () =
     TEAM_LEAD_TOOLS_ENV.split(","),
     "the lead profile measured here is not the one supervisor.ts writes: it must serve roadmap_dispatch"
   ).toContain("roadmap_dispatch");
-  const total = await servedSurface(TEAM_LEAD_TOOLS_ENV);
+  const total = await servedSurface(TEAM_LEAD_TOOLS_ENV, "lead");
   expect(total, "below the floor, the bridge served a truncated surface").toBeGreaterThan(TEAM_LEAD_FLOOR_CHARS);
   expect(total, "shorten the instructions or tool descriptions; never raise the ceiling").toBeLessThanOrEqual(TEAM_LEAD_CEILING_CHARS);
 });
@@ -4225,17 +4399,20 @@ test("the surface measure counts dispatch and the lead/supervisor-only tools", a
       writeFileSync(script, source.replace(marker, `${marker} description_padding: '${filler}',`), "utf-8");
       return script;
     };
-    const [supervisor, teamLead] = [await servedSurface(undefined), await servedSurface(TEAM_LEAD_TOOLS_ENV)];
+    const [supervisor, teamLead] = [
+      await servedSurface(SUPERVISOR_MOUNT, "supervisor"),
+      await servedSurface(TEAM_LEAD_TOOLS_ENV, "lead")
+    ];
     const inSubset = inflate("deck_close_session");
     const supervisorOnly = inflate("deck_list_sessions");
     const dispatch = inflate("roadmap_dispatch");
     const padding = `"description_padding":"${filler}",`.length;
-    expect(await servedSurface(undefined, dispatch)).toBe(supervisor + padding);
-    expect(await servedSurface(TEAM_LEAD_TOOLS_ENV, dispatch), "roadmap_dispatch is served to the lead but not counted").toBe(teamLead + padding);
-    expect(await servedSurface(undefined, inSubset)).toBe(supervisor + padding);
-    expect(await servedSurface(TEAM_LEAD_TOOLS_ENV, inSubset)).toBe(teamLead + padding);
-    expect(await servedSurface(undefined, supervisorOnly)).toBe(supervisor + padding);
-    expect(await servedSurface(TEAM_LEAD_TOOLS_ENV, supervisorOnly)).toBe(teamLead + padding);
+    expect(await servedSurface(SUPERVISOR_MOUNT, "supervisor", dispatch)).toBe(supervisor + padding);
+    expect(await servedSurface(TEAM_LEAD_TOOLS_ENV, "lead", dispatch), "roadmap_dispatch is served to the lead but not counted").toBe(teamLead + padding);
+    expect(await servedSurface(SUPERVISOR_MOUNT, "supervisor", inSubset)).toBe(supervisor + padding);
+    expect(await servedSurface(TEAM_LEAD_TOOLS_ENV, "lead", inSubset)).toBe(teamLead + padding);
+    expect(await servedSurface(SUPERVISOR_MOUNT, "supervisor", supervisorOnly)).toBe(supervisor + padding);
+    expect(await servedSurface(TEAM_LEAD_TOOLS_ENV, "lead", supervisorOnly)).toBe(teamLead + padding);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

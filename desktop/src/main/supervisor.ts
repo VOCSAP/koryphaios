@@ -2,6 +2,15 @@
 
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
+import {
+  DECK_CEILING_ENV,
+  DECK_ROLE_ENV,
+  OPERATOR_CEILING_ENV,
+  OPERATOR_TOOLS,
+  encodeMountCeiling,
+  resolveMountCeiling,
+  type DeckRole
+} from '../../../shared/mount-ceiling'
 
 /** Default tile name of the supervisor session. */
 export const SUPERVISOR_NAME = 'supervisor'
@@ -122,32 +131,50 @@ export function deckLeadScriptPath(mcpScriptPath: string): string {
   return join(dirname(mcpScriptPath), 'server-deck.mjs')
 }
 
-/** Shared env/args shape for both writers below. */
+const DECK_MOUNT_REGISTRY = [...TEAM_LEAD_DECK_TOOLS, 'roadmap_dispatch']
+
+/**
+ * The writers are the only author of a ceiling, so an invalid one is raised
+ * here, where the caller can report it, rather than left to cost the tile its
+ * tools silently when the MCP process refuses it.
+ */
+function checkedCeiling(variable: string, tools: readonly string[], registry: readonly string[]): string {
+  const value = encodeMountCeiling(tools)
+  const resolved = resolveMountCeiling(variable, value, registry)
+  if (!resolved.ok) throw new Error(`MCP mount not written: ${resolved.reason}`)
+  return value
+}
+
+/** Shared env/args shape for both writers below: every mount carries its ceilings and role explicitly. */
 function buildDeckControlMcpConfig(
   input: SupervisorMcpConfigInput,
-  toolsAllowlist?: readonly string[]
+  role: DeckRole,
+  toolsAllowlist: readonly string[]
 ): { mcpServers: Record<string, { command: string; args: string[]; env: Record<string, string> }> } {
   const env: Record<string, string> = {
     ELECTRON_RUN_AS_NODE: '1',
     DECK_CONTROL_URL: input.controlUrl,
-    DECK_CONTROL_TOKEN: input.controlToken
+    DECK_CONTROL_TOKEN: input.controlToken,
+    [DECK_CEILING_ENV]: checkedCeiling(DECK_CEILING_ENV, [...toolsAllowlist, 'roadmap_dispatch'], DECK_MOUNT_REGISTRY),
+    [DECK_ROLE_ENV]: role
   }
-  // Leave the variable absent for unrestricted supervisors; an empty value intentionally grants zero tools.
-  if (toolsAllowlist) env.DECK_CONTROL_TOOLS = [...toolsAllowlist, 'roadmap_dispatch'].join(',')
   return {
     mcpServers: {
       'kory-deck': { command: input.execPath, args: [input.mcpScriptPath], env },
       'kory-operator': {
         command: input.execPath,
         args: [deckLeadScriptPath(input.mcpScriptPath)],
-        env: { ELECTRON_RUN_AS_NODE: '1' }
+        env: {
+          ELECTRON_RUN_AS_NODE: '1',
+          [OPERATOR_CEILING_ENV]: checkedCeiling(OPERATOR_CEILING_ENV, OPERATOR_TOOLS, OPERATOR_TOOLS)
+        }
       }
     }
   }
 }
 
 export function writeSupervisorMcpConfig(input: SupervisorMcpConfigInput): string {
-  const config = buildDeckControlMcpConfig(input)
+  const config = buildDeckControlMcpConfig(input, 'supervisor', TEAM_LEAD_DECK_TOOLS)
   mkdirSync(input.dir, { recursive: true })
   const file = join(input.dir, 'supervisor-mcp.json')
   writeFileSync(file, JSON.stringify(config, null, 2), 'utf-8')
@@ -159,7 +186,7 @@ export function writeTeamLeadMcpConfig(
   fileName: string,
   allowedTools: readonly string[]
 ): string {
-  const config = buildDeckControlMcpConfig(input, allowedTools)
+  const config = buildDeckControlMcpConfig(input, 'lead', allowedTools)
   mkdirSync(input.dir, { recursive: true })
   const file = join(input.dir, fileName)
   writeFileSync(file, JSON.stringify(config, null, 2), 'utf-8')

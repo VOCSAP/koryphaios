@@ -7,6 +7,8 @@ import {
   createSessionWithWorktree,
   gateSandboxForCwds,
   restartSessionGated,
+  SESSION_FIELDS,
+  stripMainOnlySessionFields,
   type CreateSessionDeps
 } from "../desktop/src/main/create-session";
 import type { SessionService } from "../desktop/src/main/session-service";
@@ -497,19 +499,75 @@ test("template:apply gates once with the real sandboxGate, before 'replace' clea
   ).toBe(true);
 });
 
-test("sessions:create strips the caller-supplied supervisor, strictMcpConfig and disallowedTools before spawning", () => {
-  const body = ipcHandler("sessions:create");
-  const strip = /const \{([^}]*?)\.\.\.(\w+)\s*\}\s*=\s*input/.exec(body);
-  expect(strip, "sessions:create forwards the whole input").not.toBeNull();
-  expect(strip![1], "input.supervisor exempts a tile from the sandbox").toMatch(/\bsupervisor:\s*\w+,/);
-  expect(strip![1], "input.strictMcpConfig would exclude an ordinary tile from saved workspaces").toMatch(
-    /\bstrictMcpConfig:\s*\w+,/
-  );
-  expect(strip![1], "input.disallowedTools is the profile's denial, not the renderer's to set").toMatch(
-    /\bdisallowedTools:\s*\w+,/
-  );
+test("stripMainOnlySessionFields removes the six main-only fields, keeps the rest and keeps an adopted worktree", () => {
+  const hostile: CreateSessionInput = {
+    name: "tile",
+    agent: "team-lead",
+    prompt: "p",
+    args: "--x",
+    worktree: { path: "C:/repo/.worktrees/feature", branch: "feature" },
+    supervisor: true,
+    strictMcpConfig: true,
+    disallowedTools: ["Bash"],
+    mcpConfig: "C:/elsewhere/mcp.json",
+    appendSystemPromptFile: "C:/elsewhere/prompt.md",
+    peerTools: ["list_peers"]
+  };
+  const stripped = stripMainOnlySessionFields(hostile);
+  for (const field of ["supervisor", "strictMcpConfig", "disallowedTools", "mcpConfig", "appendSystemPromptFile", "peerTools"]) {
+    expect(stripped, `${field} survived the strip`).not.toHaveProperty(field);
+  }
+  expect(stripped, "WorktreesView adopts an existing worktree by sending it").toEqual({
+    name: "tile",
+    agent: "team-lead",
+    prompt: "p",
+    args: "--x",
+    worktree: { path: "C:/repo/.worktrees/feature", branch: "feature" }
+  });
+  expect(hostile.mcpConfig, "the caller's own object was mutated").toBe("C:/elsewhere/mcp.json");
+  expect(stripMainOnlySessionFields(undefined)).toEqual({});
+});
+
+test("the fields stripped from a session request are exactly the CreateSessionInput fields the shared types annotate as main-only", () => {
+  const source = readFileSync(join(import.meta.dir, "..", "desktop", "src", "shared", "types.ts"), "utf-8");
+  const head = source.indexOf("export interface CreateSessionInput");
+  expect(head, "CreateSessionInput is no longer declared in the shared types").toBeGreaterThanOrEqual(0);
+  const body = extractBracedBody(source, source.indexOf("{", head));
+  const documented = new Map<string, string>();
+  let comment: string[] = [];
+  for (const line of body.split(/\r?\n/)) {
+    const field = /^ {2}(\w+)\??:/.exec(line);
+    if (field) {
+      documented.set(field[1]!, comment.join(" "));
+      comment = [];
+    } else if (/^\s*(\/\*\*|\*)/.test(line)) {
+      comment.push(line.trim());
+    }
+  }
   expect(
-    new RegExp(`createSessionWithWorktree\\(\\s*service,\\s*getConfig\\(\\)\\.projectDir,\\s*${strip![2]}\\s*,`).test(body),
+    [...documented.keys()].sort(),
+    "the scan of CreateSessionInput in types.ts missed a field (declared as readonly or at another indentation) or SESSION_FIELD_ORIGIN lists one the interface lacks"
+  ).toEqual([...SESSION_FIELDS].sort());
+  const annotated = [...documented]
+    .filter(([, text]) => /MAIN-only|strips it from the renderer's request/.test(text))
+    .map(([name]) => name)
+    .sort();
+  expect(annotated.length, "no field is annotated main-only: the scan matches nothing").toBeGreaterThan(0);
+  const everyField = Object.fromEntries([...documented.keys()].map((name) => [name, "x"]));
+  const kept = Object.keys(stripMainOnlySessionFields(everyField as unknown as CreateSessionInput));
+  const stripped = [...documented.keys()].filter((name) => !kept.includes(name)).sort();
+  expect(
+    stripped,
+    "a field is stripped but not annotated main-only in types.ts, or annotated main-only but still passes the strip"
+  ).toEqual(annotated);
+});
+
+test("sessions:create spawns from the stripped input", () => {
+  const body = ipcHandler("sessions:create");
+  const strip = /const (\w+) = stripMainOnlySessionFields\(input\)/.exec(body);
+  expect(strip, "sessions:create forwards the whole input").not.toBeNull();
+  expect(
+    new RegExp(`createSessionWithWorktree\\(\\s*service,\\s*getConfig\\(\\)\\.projectDir,\\s*${strip![1]}\\s*,`).test(body),
     "sessions:create spawns from the unstripped input"
   ).toBe(true);
 });
