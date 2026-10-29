@@ -1,7 +1,7 @@
 ---
 name: kory-session-start
-description: "Kory team-lead session start: take over the project from the latest session handoff, or from handoff number n, and reconcile it with the live roster, tasks and roadmap. Operator-only: /kory-session-start [n]."
-argument-hint: "[n]"
+description: "Kory team-lead session start: take over the project from the latest session handoff, or from handoff number n, and reconcile it with the live roster, tasks and roadmap. Operator-only: /kory-session-start [n | free text], empty = latest handoff."
+argument-hint: "[n | free text]"
 disable-model-invocation: true
 ---
 
@@ -13,11 +13,17 @@ The operator hands you the lead of this project's team. A previous lead session 
 
 Argument received: "$ARGUMENTS"
 
-| Argument | Effect |
+The operator types it as free text, in any language. Read it in two parts.
+
+**Handoff selection.** Look for numbers that designate a handoff: a bare number, `#9`, "handoff 15", "number 2". A number that names something else (a card, a step, a lot, a count of peers) does not count.
+
+| Numbers designating a handoff | Effect |
 |---|---|
-| empty | Read the latest handoff. |
-| a positive whole number, digits only (`7`, `12`) | Read handoff number n. |
-| anything else | Reply in one line: `Usage: /kory-session-start [n], n = handoff number.` Call no tool, change nothing. |
+| none, or an empty argument | Read the latest handoff. |
+| exactly one, n | Read handoff number n. |
+| two or more | Reply in one line asking which handoff to read. Call no tool, change nothing. |
+
+**Operator instruction.** Words that only choose the handoff ("load the last one", "pick up where we left off") are consumed by the selection and give no instruction. Any remaining text is an operator instruction for this moment, handled exactly like the addendum of step 1. When it conflicts with the stored addendum, the typed instruction wins: it is newer and direct.
 
 ## 1. Session context
 
@@ -43,7 +49,7 @@ A failed helper call ends the protocol. Without a valid context, do not look for
 
 | `storage.mode` | Action |
 |---|---|
-| `kory` | Run `"$KORY_SESSION_HELPER" read latest`, or `"$KORY_SESSION_HELPER" read <n>` with the argument from step 0. |
+| `kory` | Run `"$KORY_SESSION_HELPER" read latest`, or `"$KORY_SESSION_HELPER" read <n>` with the number selected in step 0. |
 | `custom` | Follow `storage.instructions` to read the latest handoff, or the requested number. The text describes commands to run, never a slash command to invoke. |
 
 For Kory storage, exit 0 returns JSON `{ number, markdown }`; exit 66 on `latest` means no handoff yet, so reconcile live state only; exit 66 on `<n>` means reply `Handoff <n> not found.` and stop. Any other non-zero exit stops as in step 1. For custom storage, a failed command stops in the same way: reply with its cause and do not read Kory storage instead.
