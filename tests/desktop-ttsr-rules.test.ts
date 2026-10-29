@@ -950,6 +950,9 @@ describe("timing probe seeds", () => {
   const REAL_SIZE_DEADLINE_MS = 1000;
   // The control asserts that no single input is slow, so the whole-rule deadline stays out of its way.
   const CONTROL_DEADLINE_MS = 10_000;
+  // Nor does it depend on the default per-input budget: a shared runner can spend several times the local cost
+  // of one 4 Ki input, and only a cubic pattern takes seconds there.
+  const CONTROL_SLOW_MS = 2_000;
 
   test("a Unicode property yields characters it accepts; defaults include an uppercase letter and a digit", async () => {
     const { probeSeeds } = await import("../desktop/src/shared/ttsr-probe");
@@ -995,11 +998,21 @@ describe("timing probe seeds", () => {
 
   test("a quadratic pattern fast on 4 Ki passes the old V8 probe but not the real-size bun stage", async () => {
     const { probeRulesSpeed } = await import("../desktop/src/shared/ttsr-probe");
-    expect(await probeRulesSpeed([quadratic], { realSize: false, deadlineMs: CONTROL_DEADLINE_MS }), "control: the 4 Ki V8 stage alone lets it through").toEqual([]);
+    expect(
+      await probeRulesSpeed([quadratic], { realSize: false, deadlineMs: CONTROL_DEADLINE_MS, slowMs: CONTROL_SLOW_MS }),
+      "control: the 4 Ki V8 stage alone lets it through",
+    ).toEqual([]);
     const errors = await probeRulesSpeed([quadratic], { ...SMALL_STAGE, deadlineMs: REAL_SIZE_DEADLINE_MS });
     expect(errors, "the real-size stage under the hook's runtime must refuse it").toHaveLength(1);
     expect(errors[0]).toContain("too slow under bun (the hook's runtime)");
     expect(errors[0]).toContain("262144 chars");
+  }, 30000);
+
+  test("the 4 Ki stage honours an injected per-input budget: the control relies on it", async () => {
+    const { probeRulesSpeed } = await import("../desktop/src/shared/ttsr-probe");
+    const errors = await probeRulesSpeed([quadratic], { realSize: false, deadlineMs: CONTROL_DEADLINE_MS, slowMs: 0 });
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain("(budget 0 ms)");
   }, 30000);
 
   test("on a 16 Ki command the bun stage measures the overrun against the hook budget", async () => {

@@ -16,7 +16,7 @@ import {
   HELP_SELECTION_TEXT_MAX,
   HELP_SYSTEM_PROMPT
 } from "../desktop/src/main/help-assistant.ts";
-import { buildAdapterCommand } from "../desktop/src/main/model-adapters.ts";
+import { buildAdapterCommand, buildClaudeHeadlessEnv } from "../desktop/src/main/model-adapters.ts";
 
 const tmpDirs: string[] = [];
 afterAll(async () => {
@@ -228,6 +228,8 @@ test("runHelp passes only its explicit environment to the headless command", asy
   process.env.KORY_TEST_FORBIDDEN = "inherited-secret";
   try {
     const win = process.platform === "win32";
+    // PowerShell stalls up to the test timeout on windows-latest under a two-variable env; the production allowlist is the env it really gets.
+    const isolatedHome = win ? tmp() : "/isolated-home";
     const out = await runHelp({
       command: win
         ? 'if ($env:KORY_TEST_FORBIDDEN) { Write-Output "$env:USERPROFILE/$env:KORY_TEST_FORBIDDEN" } else { Write-Output "$env:USERPROFILE/missing" }'
@@ -235,10 +237,10 @@ test("runHelp passes only its explicit environment to the headless command", asy
       shell: win ? "powershell.exe" : "/bin/sh",
       cwd: tmp(),
       env: win
-        ? { PATH: process.env.PATH, USERPROFILE: "C:\\isolated-home" }
-        : { PATH: process.env.PATH, HOME: "/isolated-home" }
+        ? { ...buildClaudeHeadlessEnv(), USERPROFILE: isolatedHome }
+        : { PATH: process.env.PATH, HOME: isolatedHome }
     });
-    expect(out).toBe(win ? "C:\\isolated-home/missing" : "/isolated-home/missing");
+    expect(out).toBe(`${isolatedHome}/missing`);
   } finally {
     if (previous === undefined) delete process.env.KORY_TEST_FORBIDDEN;
     else process.env.KORY_TEST_FORBIDDEN = previous;
