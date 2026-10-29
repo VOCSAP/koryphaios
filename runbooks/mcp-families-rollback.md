@@ -234,6 +234,21 @@ Contrôles :
    ne rend rien. Un fichier qui apparaît ici est un profil créé ou édité après le
    déploiement : il a été converti par la substitution, le relire.
 
+Le profil `team-lead.md` porte aussi les outils des serveurs du Deck, renommés par
+le même lot (`deck-control` devenu `kory-deck`, `deck-lead` devenu `kory-operator`,
+`roadmap_dispatch` passé de `deck-lead` à `kory-deck`). Le patch ne les couvre pas :
+le déploiement les a renommés à la main et a ajouté `notify_operator`. Le champ
+`tools:` filtre outil par outil, donc un nom qui ne correspond à aucun serveur monté
+retire l'outil sans erreur. Les remettre :
+
+```bash
+T=/c/Users/Olivier/.claude/claude-config/agents/team-lead.md
+sed -b -i -e 's/mcp__kory-operator__notify_operator, //' -e 's/mcp__kory-deck__roadmap_dispatch/mcp__deck-lead__roadmap_dispatch/g' -e 's/mcp__kory-deck__/mcp__deck-control__/g' -e 's/mcp__kory-operator__/mcp__deck-lead__/g' $T
+```
+
+Contrôle : `grep -c 'mcp__kory-deck__\|mcp__kory-operator__' $T` rend 0, et une
+tuile lead relancée liste de nouveau ses `deck_*` et `ask_operator`.
+
 ### Étape 4 : le Deck packagé et le deck-plugin installé
 
 Reconstruire depuis `REV_AVANT`, dans un checkout dédié et jamais dans le
