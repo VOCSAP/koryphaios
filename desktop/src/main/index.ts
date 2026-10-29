@@ -3775,7 +3775,6 @@ app.whenReady().then(async () => {
         return 0
       }
     },
-    deckPluginDir: getDeckPluginDir,
     sandbox,
     sandboxGate,
     sandboxWarmTranscripts: warmSandboxTranscripts,

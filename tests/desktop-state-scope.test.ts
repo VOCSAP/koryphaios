@@ -82,20 +82,13 @@ const STATE_SCOPES: Record<string, StateFileRule> = {
     reason:
       "carries THIS window's deck-control URL and token; at the root two windows overwrite each other and a supervisor could pilot the wrong Deck",
   },
-  "demo-mcp.json": {
-    kind: "literal",
-    scope: "session",
-    module: "demo-driver.ts",
-    wiring: [{ callee: "writeDemoMcpConfig", dirArg: { prop: "dir" } }],
-    reason: "per-run demo-control URL and token of this window's embedded browser; same swap hazard as supervisor-mcp.json",
-  },
   mintDemoTile: {
     kind: "constructor",
     scope: "session",
     module: "demo-driver.ts",
     wiring: [{ callee: "writeDemoMcpConfig", dirArg: { prop: "dir" } }],
     reason:
-      "demo-mcp-<id>.json of one demo tile: that tile's control URL and token, under a random id per mint; same swap hazard as demo-mcp.json",
+      "demo-mcp-<id>.json of one demo tile: that tile's control URL and token, under a random id per mint; same swap hazard as supervisor-mcp.json",
   },
   ttsrEffectiveFileName: {
     kind: "constructor",
@@ -112,13 +105,6 @@ const STATE_SCOPES: Record<string, StateFileRule> = {
     wiring: [{ callee: "TtsrService", dirArg: { prop: "sessionDir" } }],
     reason:
       "guard-rule hook trace log of one tile (<desk id>.log next to its rules), tailed into this window's error log; same desk-id reuse hazard",
-  },
-  "demo-scenario.md": {
-    kind: "literal",
-    scope: "session",
-    module: "demo-driver.ts",
-    wiring: [{ callee: "writeDemoScenarioFile", dirArg: 0 }],
-    reason: "the operator's scenario text for this window's demo run; two concurrent demos at the root would swap scenarios",
   },
   "serve.log": {
     kind: "literal",
@@ -325,11 +311,6 @@ const STATE_SCOPES: Record<string, StateFileRule> = {
     kind: "literal",
     scope: "machine",
     reason: "rendered from a code constant plus the docs dir, identical for every window; last-writer-wins on identical content is harmless",
-  },
-  "demo-system-prompt.md": {
-    kind: "literal",
-    scope: "machine",
-    reason: "rendered from a code constant, identical for every window; last-writer-wins on identical content is harmless",
   },
   "browser:save-annotation": {
     kind: "constructor",

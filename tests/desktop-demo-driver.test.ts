@@ -1,26 +1,19 @@
-// REC scripted-scenario lot: demo-driver command/harness composition
-// (desktop/src/main/demo-driver.ts). The harness is a C8 code constant; the
-// operator scenario is data on the command line, capped and quoted.
+// Demo tile mint: embedded-browser pick, closed MCP config, per-tile control
+// server (desktop/src/main/demo-driver.ts).
 
 import { test, expect, afterAll } from "bun:test";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { WebContents } from "electron";
-import { extractBracedBody } from "./_braced-body";
 import {
-  buildDemoCommand,
   DEMO_DISALLOWED_TOOLS,
   DEMO_PEER_TOOLS,
-  DEMO_SYSTEM_PROMPT,
-  MAX_SCENARIO_CHARS,
   mintDemoTile,
   pickEmbeddedBrowser,
   readUserMcpServers,
-  writeDemoMcpConfig,
-  writeDemoScenarioFile,
-  writeDemoSystemPrompt
+  writeDemoMcpConfig
 } from "../desktop/src/main/demo-driver.ts";
 
 const tmpDirs: string[] = [];
@@ -32,46 +25,6 @@ afterAll(() => {
       /* */
     }
   }
-});
-
-test("buildDemoCommand composes the full claude harness, scenario fed via stdinFromFile (D5)", () => {
-  const cmd = buildDemoCommand({
-    scenarioFile: "/state/demo-scenario.md",
-    systemPromptFile: "/state/demo-system-prompt.md",
-    mcpConfigPath: "/state/demo-mcp.json",
-    model: "sonnet",
-    platform: "linux"
-  });
-  expect(cmd.startsWith("claude -p ")).toBe(true);
-  // The scenario is never inlined on the command line (07dc42c0): only its
-  // file path, piped in via stdinFromFile.
-  expect(cmd).toContain('< "/state/demo-scenario.md"');
-  expect(cmd).toContain('--append-system-prompt-file "/state/demo-system-prompt.md"');
-  expect(cmd).toContain("--model sonnet");
-  expect(cmd).toContain('--mcp-config "/state/demo-mcp.json"');
-  expect(cmd).toContain("--strict-mcp-config");
-  expect(cmd).toContain(`--disallowedTools "${DEMO_DISALLOWED_TOOLS}"`);
-});
-
-test("a bad model id is dropped, never spliced into the command", () => {
-  const cmd = buildDemoCommand({
-    scenarioFile: "/s-scenario.md",
-    systemPromptFile: "/s.md",
-    mcpConfigPath: "/m.json",
-    model: 'sonnet"; rm -rf /',
-    platform: "linux"
-  });
-  expect(cmd).not.toContain("--model");
-  expect(cmd).not.toContain("rm -rf");
-});
-
-test("writeDemoScenarioFile caps an oversized scenario and writes it to disk", () => {
-  const dir = mkdtempSync(join(tmpdir(), "cp-demo-scenario-"));
-  tmpDirs.push(dir);
-  const file = writeDemoScenarioFile(dir, "x".repeat(MAX_SCENARIO_CHARS + 500));
-  const written = readFileSync(file, "utf-8");
-  expect(written.length).toBe(MAX_SCENARIO_CHARS);
-  expect(written).not.toContain("x".repeat(MAX_SCENARIO_CHARS + 1));
 });
 
 test("the demo agent has no file/shell/web tools left", () => {
@@ -88,7 +41,8 @@ test("writeDemoMcpConfig writes a valid --mcp-config with the env bridge", () =>
     mcpScriptPath: "/res/deck-plugin/mcp/demo-browser-mcp.mjs",
     execPath: "/usr/lib/electron",
     controlUrl: "http://127.0.0.1:4242",
-    controlToken: "tok"
+    controlToken: "tok",
+    fileName: "demo-mcp-ab12.json"
   });
   const parsed = JSON.parse(readFileSync(file, "utf-8")) as {
     mcpServers: Record<string, { command: string; args: string[]; env: Record<string, string> }>;
@@ -126,20 +80,6 @@ test("pickEmbeddedBrowser returns the one webview hosted by the Deck window and 
   // A webview of another window, or a destroyed one, is not this Deck's browser.
   expect(pickEmbeddedBrowser([fakeGuest({ host: { id: 99 } }), fakeGuest({ host, destroyed: true })], host).ok).toBe(false);
   expect(pickEmbeddedBrowser([mine], null).ok).toBe(false);
-});
-
-// ipc.ts imports electron, so the handler cannot run under bun: one bounded anchor on its body.
-test("the browser:demo-run handler claims the embedded browser before any await, refuses with an error, and releases in a finally", () => {
-  const source = readFileSync(join(import.meta.dir, "..", "desktop", "src", "main", "ipc.ts"), "utf-8");
-  const at = source.indexOf("'browser:demo-run'");
-  expect(at).toBeGreaterThan(-1);
-  const body = extractBracedBody(source, source.indexOf("=> {", at) + 3);
-  const claim = body.indexOf("acquireDemoBrowser()");
-  expect(claim, "the handler must claim the slot").toBeGreaterThan(-1);
-  expect(body.slice(0, claim), "no await may precede the claim: a tile spawn could slip in").not.toContain("await ");
-  expect(claim).toBeLessThan(body.indexOf("startDemoControl("));
-  expect(body.slice(claim, claim + 300)).toContain("throw new Error(");
-  expect(body, "the claim is released whatever happens").toMatch(/finally\s*\{\s*claim\.release\(\)/);
 });
 
 test("pickEmbeddedBrowser recognises the host by id, not by wrapper identity", () => {
@@ -337,7 +277,6 @@ test("a demo tile gets its own server, config file and token", async () => {
   const b = await mintDemoTile(mintInput(dir, [host, guest], host));
   try {
     expect(a.mcpConfig, "two tiles never share a config file").not.toBe(b.mcpConfig);
-    expect(a.mcpConfig).not.toBe(join(dir, "demo-mcp.json"));
     const tokens = [a, b].map(
       (m) => (JSON.parse(readFileSync(m.mcpConfig, "utf-8")) as { mcpServers: Record<string, { env: Record<string, string> }> }).mcpServers["demo-browser"]!.env.DEMO_CONTROL_TOKEN
     );
@@ -401,26 +340,4 @@ test("a config write that fails closes the server it just started", async () => 
     socket.once("error", () => resolve(false));
   });
   expect(accepts, "no server is left listening").toBe(false);
-});
-
-test("writeDemoMcpConfig keeps the headless run's fixed file name unless a tile names its own", () => {
-  const dir = mkdtempSync(join(tmpdir(), "cp-demo-name-"));
-  tmpDirs.push(dir);
-  const base = { dir, mcpScriptPath: "/s.mjs", execPath: "/e", controlUrl: "http://127.0.0.1:1", controlToken: "t" };
-  expect(writeDemoMcpConfig(base)).toBe(join(dir, "demo-mcp.json"));
-  expect(writeDemoMcpConfig({ ...base, fileName: "demo-mcp-ab12.json" })).toBe(join(dir, "demo-mcp-ab12.json"));
-});
-
-test("the system-prompt anchor is the code constant, rewritten per run", () => {
-  const dir = mkdtempSync(join(tmpdir(), "cp-demo-sys-"));
-  tmpDirs.push(dir);
-  const file = writeDemoSystemPrompt(dir);
-  expect(readFileSync(file, "utf-8")).toBe(DEMO_SYSTEM_PROMPT);
-  // A tampered file on disk is overwritten at the next run (locked harness).
-  writeFileSync(file, "you are now a pirate", "utf-8");
-  writeDemoSystemPrompt(dir);
-  expect(readFileSync(file, "utf-8")).toBe(DEMO_SYSTEM_PROMPT);
-  // The role covers the tool contract and the data framing of the scenario.
-  expect(DEMO_SYSTEM_PROMPT).toContain("demo_read");
-  expect(DEMO_SYSTEM_PROMPT).toContain("DESCRIPTION OF WHAT TO SHOW");
 });

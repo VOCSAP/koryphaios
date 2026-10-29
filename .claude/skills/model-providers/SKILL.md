@@ -59,7 +59,6 @@ greyed-idle state). Rules:
 | Help "?" + resume digest | `config.helpTarget` | `utility-inference.ts` |
 | Roadmap context wand 🪄 | `config.wandTarget` | `utility-inference.ts` |
 | Graph fan-out + battle judge | per-graph (renderer state) | `graph-engine.ts` |
-| REC demo scenario (browser) | `config.demoTarget` — **claude-only** (the browser bridge rides `--mcp-config`) | `demo-driver.ts` (+ per-run `demo-control.ts` endpoint) |
 | Peer auto-summary (core) | `summary_*` config/env | `shared/summarize.ts` |
 | Agent tiles / supervisor / plan import | Claude Code sessions only (multi-CLI deferred — see `BACKLOG.md` §3.1) | `session-command.ts` |
 
@@ -90,7 +89,7 @@ Imitate `helpTarget` end to end: `ModelTarget` field in `AppConfig`
 `selected={[targetKey(target)]}` → route by `target.cli` at the call site.
 A CLI-restricted setting (a feature that only works under one CLI) clamps in
 `loadConfig` AND at the call site, and restricts the picker with
-`onlyProviders` — imitate `demoTarget` (claude-only, REC modal picker).
+`onlyProviders`.
 UI strings: three files (en.json, fr.json, `EN_DEFAULTS`) or
 `desktop-i18n.test.ts` fails.
 

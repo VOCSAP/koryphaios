@@ -1,13 +1,13 @@
-// A separate server from deck-control, with a token minted per demo run and a
+// A separate server from deck-control, with a token minted per demo tile and a
 // toolset limited to the embedded browser pane: a runaway demo agent can at
 // worst click around one webview.
-// 127.0.0.1 only; the token pair travels only in the generated --mcp-config
-// file of that single invocation.
+// 127.0.0.1 only; the token pair travels only in that tile's generated
+// --mcp-config file.
 
 import { createServer, type Server } from 'node:http'
 import { randomBytes } from 'node:crypto'
 
-/** Tool calls allowed in one demo run — beyond this the agent must wrap up. */
+/** Tool calls allowed per demo tile -- beyond this the agent must wrap up. */
 export const DEMO_STEP_CAP = 120
 
 export interface DemoControlDeps {
@@ -63,13 +63,7 @@ export function startDemoControl(
 ): Promise<DemoControlServer> {
   const token = randomBytes(24).toString('hex')
   let steps = 0
-  // doop §4.1's "result nudge" layer: DEMO_SYSTEM_PROMPT already tells the
-  // agent to read the page after every navigation, but nothing re-asserted
-  // that contract at the moment the agent actually deviates from it. Track
-  // how many navigate/click/type calls have happened since the last
-  // demo_read and fold a short reminder into the tool RESULT itself (surfaced
-  // verbatim to the agent via demo-browser-mcp.ts's JSON.stringify) so the
-  // nudge lands exactly when it is needed instead of only once at the start.
+  // Fold a demo_read reminder into the tool result: the profile prompt alone is read once, at the start.
   let actionsSinceRead = 0
 
   async function dispatch(tool: string, args: ToolArgs): Promise<unknown> {

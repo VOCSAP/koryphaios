@@ -75,7 +75,6 @@ const TRIAGED_DOMAIN_FILES: ReadonlyArray<{ file: string; verdict: Verdict }> = 
   { file: "server-roadmap.ts", verdict: { carries: true, name: "kory-roadmap" } },
   { file: "desktop/mcp/deck-control-mcp.ts", verdict: { carries: true, name: "deck-control" } },
   { file: "desktop/mcp/demo-browser-mcp.ts", verdict: { carries: true, name: "demo-browser" } },
-  { file: "desktop/src/main/demo-driver.ts", verdict: { carries: false } },
   { file: "desktop/src/main/graph-engine.ts", verdict: { carries: false } },
   { file: "desktop/src/main/i18n.ts", verdict: { carries: false } },
   { file: "desktop/src/main/model-adapters.ts", verdict: { carries: false } },

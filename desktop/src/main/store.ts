@@ -10,7 +10,6 @@ import {
 import { writeFileAtomic } from './atomic-write'
 import { sanitizeGlowColor } from '@shared/palette'
 import {
-  DEFAULT_DEMO_TARGET,
   DEFAULT_HELP_TARGET,
   DEFAULT_WAND_TARGET,
   legacyHelpTarget,
@@ -70,10 +69,6 @@ export function loadConfig(): AppConfig {
     DEFAULT_HELP_TARGET
   )
   cfg.wandTarget = sanitizeUtilityTarget(raw.wandTarget, DEFAULT_WAND_TARGET)
-  // The demo bridge is claude-only (--mcp-config): a hand-edited non-claude
-  // target would silently run without browser tools — clamp it back.
-  cfg.demoTarget = sanitizeUtilityTarget(raw.demoTarget, DEFAULT_DEMO_TARGET)
-  if (cfg.demoTarget.cli !== 'claude') cfg.demoTarget = { ...DEFAULT_DEMO_TARGET }
   // Unknown/absent trust mode (older config, hand-edited file) -> default.
   if (!SUPERVISOR_SPAWN_MODES.includes(cfg.supervisorSpawnMode)) {
     cfg.supervisorSpawnMode = 'hands-free'
@@ -114,6 +109,7 @@ export function loadConfig(): AppConfig {
   // Hand-edited file: only well-formed toggle keys survive.
   cfg.ttsrDisabled = sanitizeTtsrDisabled(raw.ttsrDisabled)
   delete (cfg as { helpModel?: string }).helpModel
+  delete (cfg as Record<string, unknown>).demoTarget
   return cfg
 }
 

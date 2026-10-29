@@ -215,13 +215,12 @@ export interface DeckControlServer {
 }
 
 /**
- * The Deck has one embedded <webview>, so one demo drives it at a time, tile or
- * headless run, whatever the number of endpoints: the slot belongs to the
- * process and has one holder. It is taken synchronously, before the first
- * await of either path, so two racing starts cannot both pass the check.
+ * The Deck has one embedded <webview>, so one demo tile drives it at a time,
+ * whatever the number of endpoints: the slot belongs to the process. It is
+ * taken synchronously, before the first await, so two racing starts cannot
+ * both pass the check.
  */
 interface DemoSlot {
-  owner: 'tile' | 'headless'
   sessionId: string | null
   mint: DemoTileMint | null
 }
@@ -232,19 +231,6 @@ function releaseDemoSlot(slot: DemoSlot): void {
   slot.mint?.release()
   if (slot.sessionId) sessionDemoSlot.delete(slot.sessionId)
   if (demoSlot === slot) demoSlot = null
-}
-
-/** The headless launcher's claim on the embedded browser; the holder must call `release` in a finally. */
-export function acquireDemoBrowser(): { ok: true; release(): void } | { ok: false; reason: string } {
-  if (demoSlot) {
-    return {
-      ok: false,
-      reason: demoSlot.owner === 'tile' ? 'a demo tile is live on the embedded browser' : 'a demo scenario is already running'
-    }
-  }
-  const slot: DemoSlot = { owner: 'headless', sessionId: null, mint: null }
-  demoSlot = slot
-  return { ok: true, release: () => releaseDemoSlot(slot) }
 }
 
 type ToolArgs = Record<string, unknown>
@@ -487,9 +473,6 @@ export function startDeckControl(
         'a demo tile cannot start while sandbox mode is on (its browser bridge is a host loopback endpoint a container cannot reach)'
       )
     }
-    if (demoSlot?.owner === 'headless') {
-      refuseDemoSpawn('a headless demo scenario is running on the embedded browser -- wait for it or cancel it first')
-    }
     if (demoSlot) {
       refuseDemoSpawn('a demo tile is already live: the Deck has a single embedded browser -- close that tile first')
     }
@@ -569,7 +552,7 @@ export function startDeckControl(
     let demoSlotTaken: DemoSlot | null = null
     if (embedded?.id === 'demo') {
       assertDemoSpawnAvailable()
-      demoSlotTaken = { owner: 'tile', sessionId: null, mint: null }
+      demoSlotTaken = { sessionId: null, mint: null }
       demoSlot = demoSlotTaken
       try {
         demoSlotTaken.mint = await deps.mintDemoTile()

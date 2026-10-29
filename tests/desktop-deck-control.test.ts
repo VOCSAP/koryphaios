@@ -7,7 +7,6 @@
 import { test, expect, afterAll, afterEach } from "bun:test";
 import type { Subprocess } from "bun";
 import {
-  acquireDemoBrowser,
   startDeckControl,
   SPAWN_CAP,
   type DeckControlDeps,
@@ -1411,84 +1410,6 @@ async function spawnDemo(srv: DeckControlServer, extra: Record<string, unknown> 
   if (res.status === 200 && id) liveDemoTiles.push({ srv, id });
   return res;
 }
-
-function claimDemoBrowser() {
-  const claim = acquireDemoBrowser();
-  if (!claim.ok) throw new Error(`the headless claim was refused: ${claim.reason}`);
-  return claim;
-}
-
-test("a demo spawn is refused with a trace while the headless launcher holds the slot, even before its first await ends", async () => {
-  const seen = captureDeckErrors();
-  const deps = makeDeps({ sessions: [] });
-  const srv = await startDeckControl(deps);
-  servers.push(srv);
-  const claim = claimDemoBrowser();
-  try {
-    const refused = await spawnDemo(srv);
-    expect(refused.status).toBe(400);
-    expect(refused.body.error).toContain("headless demo scenario");
-    expect(deps.approvals, "the refusal precedes any approval").toEqual([]);
-    expect(deps.demoMints).toEqual([]);
-    expect(seen.some((line) => line.includes("deck-control") && line.includes("headless demo scenario"))).toBe(true);
-  } finally {
-    claim.release();
-  }
-  expect((await spawnDemo(srv)).status, "the released claim frees the slot").toBe(200);
-});
-
-test("a headless claim taken during the spawn's approval refuses the spawn at the mint, not after it", async () => {
-  const deps = makeDeps({ sessions: [] });
-  const realApprove = deps.approveSpawn;
-  let claim: ReturnType<typeof claimDemoBrowser> | null = null;
-  deps.approveSpawn = async (entries, plan, callerId) => {
-    const verdict = await realApprove(entries, plan, callerId);
-    claim = claimDemoBrowser();
-    return verdict;
-  };
-  const srv = await startDeckControl(deps);
-  servers.push(srv);
-  try {
-    const refused = await spawnDemo(srv);
-    expect(refused.status).toBe(400);
-    expect(refused.body.error).toContain("headless demo scenario");
-    expect(deps.demoMints, "no tile server was minted for the refused spawn").toEqual([]);
-    expect(deps.spawnInputs).toEqual([]);
-  } finally {
-    (claim as ReturnType<typeof claimDemoBrowser> | null)?.release();
-  }
-});
-
-test("a second headless claim is refused while the first holds the slot, and granted after its release", () => {
-  const first = claimDemoBrowser();
-  try {
-    const second = acquireDemoBrowser();
-    expect(second.ok, "two headless runs would drive the same webview").toBe(false);
-    expect(second.ok ? "" : second.reason).toContain("already running");
-  } finally {
-    first.release();
-  }
-  const again = acquireDemoBrowser();
-  expect(again.ok).toBe(true);
-  if (again.ok) again.release();
-});
-
-test("the headless claim sees a live demo tile and is released with its disappearance", async () => {
-  const deps = makeDeps({ sessions: [] });
-  const srv = await startDeckControl(deps);
-  servers.push(srv);
-  const created = await spawnDemo(srv);
-  const tileId = (created.body.result as { session: { id: string } }).session.id;
-
-  const during = acquireDemoBrowser();
-  expect(during.ok, "the headless launcher must see the tile").toBe(false);
-  expect(during.ok ? "" : during.reason).toContain("demo tile");
-
-  srv.revokeCallerForSession(tileId);
-  const after = acquireDemoBrowser();
-  expect(after.ok).toBe(true);
-  if (after.ok) after.release();
-});
 
 test("a demo spawn mounts its per-tile config and the profile's own lists, and mints no lead caller", async () => {
   const deps = makeDeps({ sessions: [] });
