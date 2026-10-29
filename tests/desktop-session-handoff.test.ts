@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, openSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -91,6 +91,49 @@ test("publishes once and warns when reservation cleanup fails after the final re
   )).toBe(1);
   expect(readdirSync(store.archiveDir).filter((name) => name.endsWith(".md"))).toEqual(["000001.md"]);
   expect(warnings).toEqual([["session handoff: could not remove archive reservation", cleanupError]]);
+});
+
+const epermError = () => Object.assign(new Error("EPERM: operation not permitted, open"), { code: "EPERM" });
+
+test("a reservation still being deleted by a publisher that finished takes the next number", () => {
+  const store = createSessionHandoffStore(stateDir(), "project-key");
+  let opens = 0;
+
+  const number = publishSessionHandoff(
+    store,
+    "# Mine",
+    { author: "launch-a", now: new Date("2026-10-27T10:00:00.000Z") },
+    undefined,
+    undefined,
+    (file) => {
+      opens++;
+      if (opens > 1) return openSync(file, "wx");
+      publishSessionHandoff(store, "# Theirs", { author: "launch-b", now: new Date("2026-10-27T10:00:00.000Z") });
+      throw epermError();
+    }
+  );
+
+  expect(number).toBe(2);
+  expect(opens).toBe(2);
+  expect(readSessionHandoff(store, 1)).toMatchObject({ number: 1, markdown: "# Theirs" });
+  expect(readSessionHandoff(store, 2)).toMatchObject({ number: 2, markdown: "# Mine" });
+});
+
+test("an EPERM on a number nobody published is a permission error and surfaces", () => {
+  const store = createSessionHandoffStore(stateDir(), "project-key");
+  const denied = epermError();
+  let opens = 0;
+
+  expect(() => publishSessionHandoff(
+    store,
+    "# Mine",
+    { author: "launch-a", now: new Date("2026-10-27T10:00:00.000Z") },
+    undefined,
+    undefined,
+    () => { opens++; throw denied; }
+  )).toThrow(denied);
+  expect(opens).toBe(1);
+  expect(readdirSync(store.archiveDir).filter((name) => name.endsWith(".md"))).toEqual([]);
 });
 
 test("rejects invalid handoff selectors and content before reading or publishing", () => {
@@ -477,7 +520,12 @@ helperTest("parallel helper publications retain every numbered handoff", async (
     stderr: "pipe"
   }));
 
-  expect(await Promise.all(processes.map((process) => process.exited))).toEqual(Array(64).fill(0));
+  const results = await Promise.all(processes.map(async (process) => ({
+    exitCode: await process.exited,
+    stderr: (await new Response(process.stderr).text()).trim()
+  })));
+  const failures = results.filter((result) => result.exitCode !== 0).map((result) => `${result.exitCode}: ${result.stderr}`);
+  expect(results.map((result) => result.exitCode), `non-zero helpers:\n${failures.join("\n")}`).toEqual(Array(64).fill(0));
   expect(readdirSync(store.archiveDir).filter((name) => name.endsWith(".md"))).toHaveLength(64);
 });
 

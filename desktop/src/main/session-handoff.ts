@@ -141,19 +141,25 @@ function nextNumber(archiveDir: string): number {
   return (occupied.length === 0 ? 0 : Math.max(...occupied)) + 1
 }
 
-function reserveNumber(archiveDir: string): { number: number; reservation: string } {
+function reserveNumber(archiveDir: string, openReservation: (file: string) => number): { number: number; reservation: string } {
   for (let number = nextNumber(archiveDir); number <= 999999; number++) {
     const reservation = join(archiveDir, `${formatNumber(number)}.reserve`)
+    const published = join(archiveDir, `${formatNumber(number)}.md`)
     try {
-      const fd = openSync(reservation, 'wx')
+      const fd = openReservation(reservation)
       closeSync(fd)
-      if (existsSync(join(archiveDir, `${formatNumber(number)}.md`))) {
+      if (existsSync(published)) {
         rmSync(reservation, { force: true })
         continue
       }
       return { number, reservation }
     } catch (error) {
-      if (error instanceof Error && 'code' in error && error.code === 'EEXIST') continue
+      const code = error instanceof Error && 'code' in error ? error.code : undefined
+      if (code === 'EEXIST') continue
+      // Windows answers EPERM, not EEXIST, for a reservation another publisher is still deleting;
+      // that publisher already renamed its .md into place, so the number is taken. Without the .md
+      // the EPERM is a real permission error and must surface.
+      if (code === 'EPERM' && existsSync(published)) continue
       throw error
     }
   }
@@ -421,11 +427,12 @@ export function publishSessionHandoff(
   markdown: string,
   provenance: HandoffProvenance,
   onWarning: (message: string, error: unknown) => void = () => {},
-  removeReservation: (file: string) => void = (file) => rmSync(file, { force: true })
+  removeReservation: (file: string) => void = (file) => rmSync(file, { force: true }),
+  openReservation: (file: string) => number = (file) => openSync(file, 'wx')
 ): number {
   validateMarkdown(markdown)
   assertArchiveDir(store)
-  const { number, reservation } = reserveNumber(store.archiveDir)
+  const { number, reservation } = reserveNumber(store.archiveDir, openReservation)
   const target = join(store.archiveDir, `${formatNumber(number)}.md`)
   const temporary = join(store.archiveDir, `.${formatNumber(number)}.${randomUUID()}.tmp`)
   try {
