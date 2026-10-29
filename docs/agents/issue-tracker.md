@@ -7,7 +7,7 @@ Work for this repo is tracked in two places:
 
 - **The shared roadmap** -- the persistent backlog scoped to this repository,
   reachable from any Claude session through the `roadmap_*` tools of the
-  `claude-peers` MCP server. One card is one issue. This is the tracker every
+  `kory-roadmap` MCP server. One card is one issue. This is the tracker every
   skill writes to.
 - **`BACKLOG.md`** -- the human-readable register of open work (to-do,
   to-verify, deferred, security backlog). A card that covers something already
