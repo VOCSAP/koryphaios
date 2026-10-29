@@ -1347,10 +1347,10 @@ const waitingTiles = new Set<string>()
 // operator's channel and applied through the poller.
 const openApprovals = new Map<string, string>()
 
-// Verdicts already announced as held (card 9c6de1e1), so the journal carries
-// ONE line per held answer instead of one per poll tick. Pruned below against
-// what the broker still returns, so it cannot outgrow the undelivered list.
+// One journal line per held answer instead of one per poll tick. Both sets are
+// pruned against what the broker still returns, so they cannot outgrow it.
 const heldVerdicts = new Set<string>()
+const unroutableTraced = new Set<string>()
 
 /**
  * Raises the Deck's question for a tile. `tileOnly` makes the broker refuse
@@ -1409,6 +1409,7 @@ const pollApprovalVerdicts = async (): Promise<void> => {
     const settled = await fetchUndeliveredVerdicts(deps)
     if (settled.length === 0) {
       heldVerdicts.clear()
+      unroutableTraced.clear()
       return
     }
     const applied: string[] = []
@@ -1426,6 +1427,19 @@ const pollApprovalVerdicts = async (): Promise<void> => {
         // Nothing to type, and nothing ever will: mark it so it stops coming back.
         applied.push(approval.id)
         heldVerdicts.delete(approval.id)
+        continue
+      }
+      if (disposition === 'unroutable') {
+        // Left UNDELIVERED: delivered_at is terminal broker-side and nothing
+        // reached an agent. A set of its own: an id held by a defer or a blank
+        // screen is already in heldVerdicts and still needs this trace.
+        if (!unroutableTraced.has(approval.id)) {
+          unroutableTraced.add(approval.id)
+          reportError(
+            'approvals',
+            `the answer to "${approval.title}" (from ${approval.answered_via}) reached no open tile "${tile || 'none'}". It is kept undelivered and typed in only if that tile comes back asking; otherwise answer it in the terminal.`
+          )
+        }
         continue
       }
       if (disposition === 'defer') {
@@ -1518,6 +1532,7 @@ const pollApprovalVerdicts = async (): Promise<void> => {
     // Anything absent from the broker's list is gone (answered elsewhere, expired,
     // purged): drop our bookkeeping with it.
     for (const id of heldVerdicts) if (!seen.has(id)) heldVerdicts.delete(id)
+    for (const id of unroutableTraced) if (!seen.has(id)) unroutableTraced.delete(id)
     await markVerdictsDelivered(deps, applied)
   } catch (e) {
     reportError('approvals', 'verdict poll failed', e)

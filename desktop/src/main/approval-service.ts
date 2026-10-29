@@ -591,13 +591,16 @@ export const VERDICT_DEFER_MS = 90_000
  * What the poller must do with one settled verdict.
  *
  *  - `apply`   type it into the tile;
- *  - `settle`  nothing to type and nothing ever will: mark it delivered;
+ *  - `settle`  already delivered by another route: mark it delivered;
  *  - `defer`   the tile is alive but not asking right now: leave the verdict
  *              UNDELIVERED so it comes back at the next poll;
+ *  - `unroutable` no tile to type into: leave it UNDELIVERED, since the
+ *              broker treats delivery as terminal and nothing was delivered;
+ *              the caller must trace it once;
  *  - `abandon` deferred long enough: mark it delivered, but the caller must
  *              leave a trace -- the operator answered and nothing was typed.
  */
-export type VerdictDisposition = 'apply' | 'settle' | 'defer' | 'abandon'
+export type VerdictDisposition = 'apply' | 'settle' | 'defer' | 'unroutable' | 'abandon'
 
 /**
  * The `waiting` guard is load-bearing: an answer that arrives after the
@@ -616,13 +619,7 @@ export function classifyVerdict(
   // a 'hook' answer is returned to Claude Code by the module waiting on it;
   // typing either in as well would deliver it twice.
   if (approval.reply_route === 'channel' || approval.reply_route === 'hook') return 'settle'
-  // No tile to type into, and none will appear: this one is genuinely over.
-  // Checked before the 'answered' check below on purpose: an unanswered
-  // approval whose tile has vanished would otherwise fall through to
-  // 'settle' too, but that path is unreachable in practice -- the broker
-  // only lists an approval as undelivered once status='answered' and
-  // answered_at is set (broker.ts undelivered_only filter, ~line 2697).
-  if (!session?.exists) return 'settle'
+  if (!session?.exists) return 'unroutable'
   // Not settled at all (the undelivered list should never carry these). Hold
   // it: marking an unanswered approval delivered would destroy the operator's
   // only chance to answer it.

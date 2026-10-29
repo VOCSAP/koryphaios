@@ -60,7 +60,7 @@ const RAISE = slice("function raiseTileQuestion(", ["\n}\n"], "raiseTileQuestion
 const registerPoller = await evaluate<{ poll: () => Promise<void> }>(
   `export function register(env) {
   const { approvals, approvalsEnabled, fetchUndeliveredVerdicts, service, waitingTiles,
-          openApprovals, heldVerdicts, canApplyVerdict, classifyVerdict, buildKeystrokes,
+          openApprovals, heldVerdicts, unroutableTraced, canApplyVerdict, classifyVerdict, buildKeystrokes,
           journal, markVerdictsDelivered, reportError, matchPermissionDialog, permissionDialogShown,
           trustPromptShown, withinDeferWindow, canonicalPath, broadcast, raiseTileQuestion,
           notTypedQuestion } = env
@@ -145,6 +145,7 @@ function pollerEnv(opts: {
     waitingTiles,
     openApprovals,
     heldVerdicts: new Set<string>(),
+    unroutableTraced: new Set<string>(),
     canApplyVerdict,
     classifyVerdict,
     buildKeystrokes,
@@ -224,13 +225,15 @@ describe("classifyVerdict (pure)", () => {
     expect(classifyVerdict(verdict({ answered_at: null }), { exists: true, waiting: false })).toBe("abandon");
   });
 
-  test("a closed or unknown session settles silently -- nothing will ever type it", () => {
-    expect(classifyVerdict(verdict(), { exists: false, waiting: true })).toBe("settle");
-    expect(classifyVerdict(verdict(), null)).toBe("settle");
+  test("a pty verdict with a closed or unknown session is unroutable, never settled: nothing was delivered", () => {
+    expect(classifyVerdict(verdict(), { exists: false, waiting: true })).toBe("unroutable");
+    expect(classifyVerdict(verdict(), null)).toBe("unroutable");
+    expect(classifyVerdict(verdict({ status: "pending", answer_kind: null }), null)).toBe("unroutable");
   });
 
   test("a channel-route answer settles: the broker already delivered it as a message", () => {
     expect(classifyVerdict(verdict({ reply_route: "channel" }), { exists: true, waiting: true })).toBe("settle");
+    expect(classifyVerdict(verdict({ reply_route: "channel" }), null)).toBe("settle");
   });
 
   test("a hook-route answer settles on every session state: the Claude Code module returns it itself", () => {
@@ -388,11 +391,90 @@ describe("pollApprovalVerdicts delivery rules", () => {
     expect(calls.filter((c) => c.fn === "reportError")).toEqual([]);
   });
 
-  test("a verdict for a tile that no longer exists is still settled in one poll", async () => {
-    const { poll, written, marked } = pollerEnv({ settled: [verdict({ tile: "gone" })], tiles: ["s1"] });
+  test.each([
+    ["names a window instead of a tile", { tile_ref: "", session_ref: "window-g1" }, "window-g1"],
+    ["names a tile that no longer exists", { tile_ref: "gone", session_ref: "gone" }, "gone"],
+  ])("a pty verdict that %s is traced once, never marked delivered", async (_what, origin, named) => {
+    const unroutable = verdict({ origin: origin as unknown as Approval["origin"] });
+    const { poll, written, marked, calls } = pollerEnv({ settled: [unroutable], tiles: ["s1"] });
+    await poll();
+    await poll();
     await poll();
     expect(written).toEqual([]);
-    expect(flat(marked)).toEqual(["appr-42"]);
+    expect(flat(marked), "mutation: classifyVerdict settles a verdict with no tile again").toEqual([]);
+    const traces = calls.filter((c) => c.fn === "reportError" && c.args[0] === "approvals");
+    expect(traces, "mutation: drop the unroutable trace, or its once-per-id guard").toHaveLength(1);
+    expect(String(traces[0]!.args[1])).toContain('"Finding"');
+    expect(String(traces[0]!.args[1])).toContain(named);
+  });
+
+  test("an unroutable verdict names no tile when the approval carries neither reference", async () => {
+    const bare = verdict({ origin: { tile_ref: "", session_ref: "" } as unknown as Approval["origin"] });
+    const { poll, calls } = pollerEnv({ settled: [bare] });
+    await poll();
+    const traces = calls.filter((c) => c.fn === "reportError" && c.args[0] === "approvals");
+    expect(traces).toHaveLength(1);
+    expect(String(traces[0]!.args[1])).toContain('"none"');
+  });
+
+  test("an unroutable id is forgotten once the broker stops listing it, so bookkeeping stays bounded", async () => {
+    const unroutable = verdict({ origin: { tile_ref: "", session_ref: "window-g1" } as unknown as Approval["origin"] });
+    const elsewhere = verdict({ id: "appr-43", reply_route: "hook" });
+    const settled = [unroutable];
+    const { poll, calls } = pollerEnv({ settled });
+    const traceCount = () => calls.filter((c) => c.fn === "reportError" && c.args[0] === "approvals").length;
+    await poll();
+    expect(traceCount()).toBe(1);
+    settled.splice(0, 1, elsewhere);
+    await poll();
+    settled.splice(0, 1, unroutable);
+    await poll();
+    expect(traceCount(), "mutation: drop the prune of unroutableTraced against the ids the broker still lists").toBe(2);
+  });
+
+  test("an unroutable id is also forgotten when the broker lists nothing, then traced again if it returns", async () => {
+    const unroutable = verdict({ origin: { tile_ref: "", session_ref: "window-g1" } as unknown as Approval["origin"] });
+    const settled = [unroutable];
+    const { poll, calls } = pollerEnv({ settled });
+    const traceCount = () => calls.filter((c) => c.fn === "reportError" && c.args[0] === "approvals").length;
+    await poll();
+    settled.splice(0);
+    await poll();
+    settled.push(unroutable);
+    await poll();
+    expect(traceCount(), "mutation: drop the unroutableTraced clear on an empty broker list").toBe(2);
+  });
+
+  test("a deferred answer whose tile then closes is traced once as unroutable", async () => {
+    const tiles = ["s1"];
+    const { poll, marked, calls } = pollerEnv({ settled: [verdict()], tiles, waiting: [] });
+    await poll();
+    expect(calls.filter((c) => c.fn === "reportError")).toEqual([]);
+    tiles.splice(0);
+    await poll();
+    await poll();
+    const traces = calls.filter((c) => c.fn === "reportError" && c.args[0] === "approvals");
+    expect(traces, "mutation: unroutable shares the heldVerdicts announce-once set with defer").toHaveLength(1);
+    expect(flat(marked)).toEqual([]);
+  });
+
+  test("an answer held for a blank screen whose tile then closes is traced once as unroutable", async () => {
+    const tiles = ["s1"];
+    const { poll, marked, calls } = pollerEnv({
+      settled: [verdict()],
+      tiles,
+      waiting: ["s1"],
+      screens: { s1: linesScreen() },
+    });
+    await poll();
+    expect(calls.filter((c) => c.fn === "journal.add" && /holding/.test(String(c.args[1])))).toHaveLength(1);
+    expect(calls.filter((c) => c.fn === "reportError")).toEqual([]);
+    tiles.splice(0);
+    await poll();
+    await poll();
+    const traces = calls.filter((c) => c.fn === "reportError" && c.args[0] === "approvals");
+    expect(traces, "mutation: unroutable shares the heldVerdicts announce-once set with the blank-screen hold").toHaveLength(1);
+    expect(flat(marked)).toEqual([]);
   });
 
   test("nothing settled means no call to the broker at all", async () => {
