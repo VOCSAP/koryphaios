@@ -84,10 +84,10 @@ import { DEFAULT_DEMO_TARGET, sanitizeTarget } from '@shared/models'
 import { linkPolicyOf } from '@shared/link-policy'
 import { startDemoControl } from './demo-control'
 import { createBrowserDriver } from './browser-drive'
+import { acquireDemoBrowser } from './deck-control'
 import {
   buildDemoCommand,
   cancelDemoRun,
-  demoRunning,
   MAX_SCENARIO_CHARS,
   runDemoCommand,
   writeDemoMcpConfig,
@@ -358,7 +358,12 @@ export function registerIpc({
         reportError('session', 'failed to start the deck-control endpoint for an operator-opened team-lead tile', e)
       }
     }
-    const { supervisor: _supervisor, ...requested } = input ?? {}
+    const {
+      supervisor: _supervisor,
+      strictMcpConfig: _strictMcpConfig,
+      disallowedTools: _disallowedTools,
+      ...requested
+    } = input ?? {}
     return createSessionWithWorktree(
       service,
       getConfig().projectDir,
@@ -576,43 +581,53 @@ export function registerIpc({
       if (target.cli !== 'claude') {
         throw new Error('only claude targets can run demo scenarios (the browser bridge rides --mcp-config)')
       }
-      if (demoRunning()) throw new Error('a demo scenario is already running')
-      const pluginDir = deckPluginDir()
-      const mcpScript = join(pluginDir, 'mcp', 'demo-browser-mcp.mjs')
-      if (!pluginDir || !existsSync(mcpScript)) {
-        throw new Error('demo-browser MCP script missing -- run `npm run build:mcp`')
+      // Taken synchronously: the headless run is otherwise invisible to a tile
+      // spawn until runDemoCommand sets its child.
+      const claim = acquireDemoBrowser()
+      if (!claim.ok) {
+        reportError('browser', `demo-run refused: ${claim.reason}`)
+        throw new Error(claim.reason)
       }
-      const stateDir = join(app.getPath('userData'), APP_STATE_SUBDIR)
-      const control = await startDemoControl(createBrowserDriver(wc))
-      // Per-run control token and the operator's scenario are this window's:
-      // written under its session dir, never the shared root. Resolved AFTER
-      // the await, so a quit during it refuses the write instead of
-      // recreating the removed directory.
-      const demoDir = sessionStateDir()
       try {
-        const mcpConfigPath = writeDemoMcpConfig({
-          dir: demoDir,
-          mcpScriptPath: mcpScript,
-          execPath: process.execPath,
-          controlUrl: control.url,
-          controlToken: control.token
-        })
-        const systemPromptFile = writeDemoSystemPrompt(stateDir)
-        const scenarioFile = writeDemoScenarioFile(demoDir, scenario.trim())
-        const command = buildDemoCommand({
-          scenarioFile,
-          systemPromptFile,
-          mcpConfigPath,
-          model: target.model
-        })
-        markProviderUsed(target.cli) // feed the amphora gauge
-        return await runDemoCommand({
-          command,
-          shell: getConfig().shell,
-          cwd: getConfig().projectDir
-        })
+        const pluginDir = deckPluginDir()
+        const mcpScript = join(pluginDir, 'mcp', 'demo-browser-mcp.mjs')
+        if (!pluginDir || !existsSync(mcpScript)) {
+          throw new Error('demo-browser MCP script missing -- run `npm run build:mcp`')
+        }
+        const stateDir = join(app.getPath('userData'), APP_STATE_SUBDIR)
+        const control = await startDemoControl(createBrowserDriver(wc))
+        // Per-run control token and the operator's scenario are this window's:
+        // written under its session dir, never the shared root. Resolved AFTER
+        // the await, so a quit during it refuses the write instead of
+        // recreating the removed directory.
+        const demoDir = sessionStateDir()
+        try {
+          const mcpConfigPath = writeDemoMcpConfig({
+            dir: demoDir,
+            mcpScriptPath: mcpScript,
+            execPath: process.execPath,
+            controlUrl: control.url,
+            controlToken: control.token
+          })
+          const systemPromptFile = writeDemoSystemPrompt(stateDir)
+          const scenarioFile = writeDemoScenarioFile(demoDir, scenario.trim())
+          const command = buildDemoCommand({
+            scenarioFile,
+            systemPromptFile,
+            mcpConfigPath,
+            model: target.model
+          })
+          markProviderUsed(target.cli) // feed the amphora gauge
+          return await runDemoCommand({
+            command,
+            shell: getConfig().shell,
+            cwd: getConfig().projectDir
+          })
+        } finally {
+          control.close()
+        }
       } finally {
-        control.close()
+        claim.release()
       }
     }
   )

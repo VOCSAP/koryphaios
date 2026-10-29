@@ -89,6 +89,14 @@ const STATE_SCOPES: Record<string, StateFileRule> = {
     wiring: [{ callee: "writeDemoMcpConfig", dirArg: { prop: "dir" } }],
     reason: "per-run demo-control URL and token of this window's embedded browser; same swap hazard as supervisor-mcp.json",
   },
+  mintDemoTile: {
+    kind: "constructor",
+    scope: "session",
+    module: "demo-driver.ts",
+    wiring: [{ callee: "writeDemoMcpConfig", dirArg: { prop: "dir" } }],
+    reason:
+      "demo-mcp-<id>.json of one demo tile: that tile's control URL and token, under a random id per mint; same swap hazard as demo-mcp.json",
+  },
   ttsrEffectiveFileName: {
     kind: "constructor",
     scope: "session",

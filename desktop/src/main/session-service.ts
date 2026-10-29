@@ -88,6 +88,7 @@ import { peerToolsEnvValue } from './session-env'
 import { PermissionLeaseRuntime, type PermissionLeaseHandle } from './permission-lease-runtime'
 import { mintDepositCapability } from './deposit-capability'
 import { windowsPtyFor } from '../shared/windows-pty'
+import { isToolNameList } from '../shared/tool-names'
 
 type WrapperRemovalSource = 'configured launch command' | 'tile command override' | 'bridged tile'
 
@@ -853,6 +854,9 @@ export class SessionService extends EventEmitter {
     input: CreateSessionInput,
     opts?: { teamLeadDeckBridge?: boolean; hasDeckLeadTools?: boolean; modPlan?: LaunchModPlan }
   ): SessionRuntime {
+    if (input.disallowedTools !== undefined && !isToolNameList(input.disallowedTools)) {
+      throw new Error('disallowedTools holds a name outside the tool-name allow-list')
+    }
     const cfg = this.getConfig()
     // B6: agent/model are structured identifiers that get interpolated into the
     // login-shell command line, so they are allow-listed (sanitizeFlagValue) and
@@ -922,6 +926,8 @@ export class SessionService extends EventEmitter {
       // Team-lead (PLAN C10): explicit flag; uniqueness enforced below.
       lead: input.lead && !input.supervisor ? true : undefined,
       mcpConfig,
+      strictMcpConfig: input.strictMcpConfig === true ? true : undefined,
+      disallowedTools: input.disallowedTools?.length ? [...input.disallowedTools] : undefined,
       appendSystemPromptFile: input.appendSystemPromptFile?.trim() || undefined,
       createdAt: Date.now()
     }
@@ -1144,13 +1150,15 @@ export class SessionService extends EventEmitter {
 
   /**
    * Supervisor is excluded: its token only lives for this app launch, and Home
-   * re-spawns it on demand.
+   * re-spawns it on demand. A strict-MCP tile (a demo tile) is excluded too:
+   * its mcpConfig points at a control server that dies with the Deck, and a
+   * restored copy would reopen to every user MCP server.
    * The spread here does include mcpConfig; both consumers project through
    * explicit pick-lists rather than a spread, so a live team-lead identity is
    * never captured onto a second tile. Keep those pick-lists explicit.
    */
   captureSessions(): SessionDef[] {
-    return this.defs.filter((d) => !d.supervisor).map((d) => ({ ...d }))
+    return this.defs.filter((d) => !d.supervisor && d.strictMcpConfig !== true).map((d) => ({ ...d }))
   }
 
   /**
@@ -1670,6 +1678,8 @@ export class SessionService extends EventEmitter {
         pluginDirs,
         additionalDirectories: handoffLaunch ? [handoffLaunch.additionalDirectory] : undefined,
         mcpConfig: this.mcpConfigForLaunch(def),
+        strictMcpConfig: def.strictMcpConfig,
+        disallowedTools: def.disallowedTools,
         appendSystemPromptFile: def.appendSystemPromptFile,
         settings,
         mode: 'resume'
@@ -1685,6 +1695,8 @@ export class SessionService extends EventEmitter {
         pluginDirs,
         additionalDirectories: handoffLaunch ? [handoffLaunch.additionalDirectory] : undefined,
         mcpConfig: this.mcpConfigForLaunch(def),
+        strictMcpConfig: def.strictMcpConfig,
+        disallowedTools: def.disallowedTools,
         appendSystemPromptFile: def.appendSystemPromptFile,
         settings,
         mode: 'fresh'

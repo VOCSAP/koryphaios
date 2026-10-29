@@ -75,7 +75,7 @@ export function startDemoControl(
   async function dispatch(tool: string, args: ToolArgs): Promise<unknown> {
     if (++steps > DEMO_STEP_CAP) {
       throw new Error(
-        `step cap: this demo run already made ${DEMO_STEP_CAP} tool calls — end the scenario now`
+        `step cap: this demo session already made ${DEMO_STEP_CAP} tool calls -- end the scenario now; a further scenario needs a fresh demo session (tell your lead, if you have one, to close this tile and spawn another)`
       )
     }
     switch (tool) {
@@ -160,7 +160,10 @@ export function startDemoControl(
       resolvePromise({
         url: `http://127.0.0.1:${addr.port}`,
         token,
-        close: () => server.close()
+        close: () => {
+          server.close()
+          server.closeAllConnections()
+        }
       })
     })
   })

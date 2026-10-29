@@ -105,6 +105,21 @@ export interface SessionDef {
    */
   mcpConfig?: string
   /**
+   * `--strict-mcp-config` on BOTH fresh and resume (--fork-session does not
+   * restore it): the tile loads only the servers of its own mcpConfig. Set
+   * only from an embedded profile. Such a tile is never captured into a
+   * workspace or template, because its mcpConfig is a runtime-only mint.
+   */
+  strictMcpConfig?: boolean
+  /**
+   * Tool names for `--disallowedTools` on BOTH fresh and resume (--fork-session
+   * does not restore it). Set from an embedded profile, and carried by a saved
+   * workspace or template so a restored read-only tile keeps its denial. Every
+   * name passes isToolNameList before it reaches a command line.
+   * undefined or empty = no denial.
+   */
+  disallowedTools?: string[]
+  /**
    * Path of a generated system-prompt extension passed as
    * `--append-system-prompt-file` on BOTH fresh and resume. Set only for the
    * supervisor: its role anchor, regenerated from a CODE CONSTANT at every
@@ -592,6 +607,18 @@ export interface CreateSessionInput {
    * instead.
    */
   mcpConfig?: string
+  /**
+   * MAIN-only: SessionDef.strictMcpConfig. Set only from an embedded profile;
+   * it only narrows what the tile loads. sessions:create strips it from the
+   * renderer's request, so a client cannot opt a tile out of saved workspaces.
+   */
+  strictMcpConfig?: boolean
+  /**
+   * SessionDef.disallowedTools. Posed by the profile or a validated saved
+   * recipe; sessions:create strips it from the renderer's request. create()
+   * refuses a list holding a name outside isToolNameList.
+   */
+  disallowedTools?: string[]
   /** MAIN-only (PLAN C8): --append-system-prompt-file path (supervisor anchor). */
   appendSystemPromptFile?: string
   /** Optional explicit colour (hex); falls back to the rotating palette. */

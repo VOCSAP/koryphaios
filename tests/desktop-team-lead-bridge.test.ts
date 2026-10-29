@@ -6,6 +6,7 @@
 // SessionService.create().
 
 import { test, expect, mock } from "bun:test";
+import { EventEmitter } from "node:events";
 import { readFileSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -17,11 +18,13 @@ import {
   wantsTeamLeadBridge,
   resolveMcpConfig,
   buildMintTeamLeadBridge,
+  wireTileDisappearance,
   type TeamLeadBridgeInput,
   type MintTeamLeadBridge,
   type ResolvedMcpConfig,
   type DeckControlServerLike
 } from "../desktop/src/main/team-lead-bridge";
+import { startDeckControl, type DeckControlDeps } from "../desktop/src/main/deck-control";
 import { TEAM_LEAD_DECK_TOOLS, writeTeamLeadMcpConfig } from "../desktop/src/main/supervisor";
 import { sanitizeFlagValue } from "../desktop/src/main/session-command";
 
@@ -166,6 +169,69 @@ test("MUTATION PROOF: treating any mcpConfig as a granted bridge would enable th
   const mutant = (resolved: ResolvedMcpConfig | undefined, supervisor: boolean, embeddedMint: boolean): boolean =>
     supervisor || resolved?.mcpConfig !== undefined || embeddedMint;
   expect(mutant(explicitWithoutCaller, false, false)).toBe(true);
+});
+
+test("a demo tile mounts its explicit config as is: no bridge minted, no caller, no deck-lead plugin", () => {
+  const mint = mock(fakeMint({ mcpConfig: "/state/from-mint.json", callerId: "x" }));
+  const resolved = resolveMcpConfig({ mcpConfig: "/state/demo-mcp-ab12.json" }, "demo", false, mint, () => {});
+  expect(resolved).toEqual({ mcpConfig: "/state/demo-mcp-ab12.json" });
+  expect(mint).not.toHaveBeenCalled();
+  expect(wantsTeamLeadBridge({}, "demo", true)).toBe(false);
+  expect(wantsDeckLeadPlugin(resolved, false, false)).toBe(false);
+});
+
+test("a demo tile's token is released by the tile's final removal or clean exit, not by a crash", async () => {
+  let released = 0;
+  let n = 0;
+  const srv = await startDeckControl({
+    inboxMandates: { request: () => {}, release: () => {} },
+    listSessions: () => [],
+    getSpawnCap: () => 8,
+    approveSpawn: async (entries: unknown[]) => ({ pending: false, decisions: entries.map(() => true) }),
+    confirmSpawnShellFields: async () => true,
+    waitForPeer: async (id: string) => `peer-${id}`,
+    armSpawnAck: () => {},
+    writeEmbeddedPrompt: (id: string) => `/state/embedded-agent-${id}.md`,
+    sandboxEnabled: () => false,
+    mintDemoTile: async () => ({
+      mcpConfig: "/state/demo-mcp.json",
+      release: () => {
+        released++;
+      }
+    }),
+    spawnSession: async (input: { name?: string }) => ({ id: `tile-${++n}`, name: input.name ?? "demo", peerId: "p" })
+  } as unknown as DeckControlDeps);
+  try {
+    const events = new EventEmitter();
+    wireTileDisappearance(events, {
+      forgetTile: () => {},
+      report: () => {},
+      revokeCallerForSession: (id) => srv.revokeCallerForSession(id),
+      cleanupMcpFile: () => {}
+    });
+    const spawn = async (): Promise<string> => {
+      const res = await fetch(`${srv.url}/call`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${srv.token}` },
+        body: JSON.stringify({ tool: "deck_spawn_session", args: { name: "demo", embedded_agent: "demo" } })
+      });
+      const body = (await res.json()) as { ok: boolean; error?: string; result?: { session: { id: string } } };
+      expect(body.error).toBeUndefined();
+      return body.result!.session.id;
+    };
+
+    const first = await spawn();
+    events.emit("exit", { id: first, exitCode: 1 });
+    expect(released, "a crashed tile stays restartable and keeps its token").toBe(0);
+    events.emit("exit", { id: first, exitCode: 0 });
+    expect(released).toBe(1);
+
+    const second = await spawn();
+    events.emit("removed", { id: second });
+    expect(released).toBe(2);
+  } finally {
+    srv.close();
+  }
 });
 
 // ----- isTeamLeadAgent: the single predicate all three marker call sites share -----

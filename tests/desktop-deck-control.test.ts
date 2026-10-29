@@ -4,9 +4,10 @@
 // electron/node-pty; the MCP server is spawned for real (bun runs the TS) and
 // spoken to over newline-delimited JSON-RPC.
 
-import { test, expect, afterAll } from "bun:test";
+import { test, expect, afterAll, afterEach } from "bun:test";
 import type { Subprocess } from "bun";
 import {
+  acquireDemoBrowser,
   startDeckControl,
   SPAWN_CAP,
   type DeckControlDeps,
@@ -14,6 +15,10 @@ import {
   type SpawnSummary
 } from "../desktop/src/main/deck-control.ts";
 import { EMBEDDED_AGENTS, getEmbeddedAgent } from "../desktop/src/main/team-embedded.ts";
+import { mintDemoTile, writeDemoMcpConfig } from "../desktop/src/main/demo-driver.ts";
+import type { WebContents } from "electron";
+import { onDeckError } from "../desktop/src/main/log.ts";
+import { reachedWithin } from "./_bounded-await.ts";
 import { directiveCommands } from "../desktop/src/main/directive.ts";
 import { sanitizeRole } from "../desktop/src/shared/role.ts";
 import {
@@ -102,6 +107,7 @@ function makeDeps(state: { sessions: SessionRuntime[] }): DeckControlDeps & {
   restarted: string[];
   leadMcpCalls: { token: string; callerId: string; allowedTools: readonly string[] }[];
   revokedLeadCallerIds: string[];
+  demoMints: Array<{ mcpConfig: string; released: number; release(): void }>;
   spawnOpts: { checkpoint: boolean; hasLead: boolean }[];
   sessionSpawnOpts: Array<{ hasDeckLeadTools?: boolean } | undefined>;
   directiveRuns: {
@@ -124,10 +130,12 @@ function makeDeps(state: { sessions: SessionRuntime[] }): DeckControlDeps & {
   const sessionSpawnOpts: Array<{ hasDeckLeadTools?: boolean } | undefined> = [];
   const leadMcpCalls: { token: string; callerId: string; allowedTools: readonly string[] }[] = [];
   const revokedLeadCallerIds: string[] = [];
+  const demoMints: Array<{ mcpConfig: string; released: number; release(): void }> = [];
   const directiveRuns: { directive: string; peerIds: string[]; prompt: string | undefined; callerId: string }[] = [];
   let n = 0;
   return {
     directiveRuns,
+    demoMints,
     closed,
     journalEntries,
     removedWt,
@@ -207,6 +215,18 @@ function makeDeps(state: { sessions: SessionRuntime[] }): DeckControlDeps & {
     },
     revokeTeamLeadMcpConfig: (callerId) => {
       revokedLeadCallerIds.push(callerId);
+    },
+    sandboxEnabled: () => false,
+    mintDemoTile: async () => {
+      const mint = {
+        mcpConfig: `/state/demo-mcp-${demoMints.length + 1}.json`,
+        released: 0,
+        release() {
+          this.released++;
+        }
+      };
+      demoMints.push(mint);
+      return mint;
     },
     confirmSpawnShellFields: async () => true,
     runDirective: async (directive, peerIds, prompt, callerId, _excludeSupervisor, options) => {
@@ -1171,12 +1191,13 @@ test("embedded spawn: prompt file, harness disallowedTools, team-lead crown rule
   const srv = await startDeckControl(deps);
   servers.push(srv);
 
-  // reviewer: read-only role -> --disallowedTools riding the args + prompt file.
+  // reviewer: read-only role -> structured tool denial + prompt file.
   const reviewer = await call(srv, "deck_spawn_session", { embedded_agent: "reviewer" });
   expect(reviewer.body.ok).toBe(true);
   const reviewerInput = deps.spawnInputs[0]!;
   expect(reviewerInput.appendSystemPromptFile).toBe("/state/embedded-agent-reviewer.md");
-  expect(reviewerInput.args).toContain('--disallowedTools "Write,Edit');
+  expect(reviewerInput.disallowedTools).toEqual(["Write", "Edit", "NotebookEdit"]);
+  expect(reviewerInput.args, "the denial travels as a field, not as a launch argument").toBeUndefined();
   expect(reviewerInput.lead).toBeUndefined();
   // Card ff091064 (piece 2): the deck-control bridge is team-lead-only --
   // no other embedded profile spawned through this same path gets it.
@@ -1368,6 +1389,371 @@ test("a spawn that fails AFTER the mint revokes the token and deletes its config
   const orphanedToken = deps.leadMcpCalls[0]!.token;
   const afterRollback = await call(srv, "deck_list_agents", {}, orphanedToken);
   expect(afterRollback.status).toBe(401);
+});
+
+function captureDeckErrors(): string[] {
+  const seen: string[] = [];
+  onDeckError((scope, text) => {
+    seen.push(`${scope} ${text}`);
+  });
+  return seen;
+}
+
+// The demo slot belongs to the process, so a tile a test leaves live would refuse the next test's demo.
+const liveDemoTiles: Array<{ srv: DeckControlServer; id: string }> = [];
+afterEach(() => {
+  for (const { srv, id } of liveDemoTiles.splice(0)) srv.revokeCallerForSession(id);
+});
+
+async function spawnDemo(srv: DeckControlServer, extra: Record<string, unknown> = {}) {
+  const res = await call(srv, "deck_spawn_session", { name: "demo", embedded_agent: "demo", ...extra });
+  const id = (res.body.result as { session?: { id?: string } } | undefined)?.session?.id;
+  if (res.status === 200 && id) liveDemoTiles.push({ srv, id });
+  return res;
+}
+
+function claimDemoBrowser() {
+  const claim = acquireDemoBrowser();
+  if (!claim.ok) throw new Error(`the headless claim was refused: ${claim.reason}`);
+  return claim;
+}
+
+test("a demo spawn is refused with a trace while the headless launcher holds the slot, even before its first await ends", async () => {
+  const seen = captureDeckErrors();
+  const deps = makeDeps({ sessions: [] });
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+  const claim = claimDemoBrowser();
+  try {
+    const refused = await spawnDemo(srv);
+    expect(refused.status).toBe(400);
+    expect(refused.body.error).toContain("headless demo scenario");
+    expect(deps.approvals, "the refusal precedes any approval").toEqual([]);
+    expect(deps.demoMints).toEqual([]);
+    expect(seen.some((line) => line.includes("deck-control") && line.includes("headless demo scenario"))).toBe(true);
+  } finally {
+    claim.release();
+  }
+  expect((await spawnDemo(srv)).status, "the released claim frees the slot").toBe(200);
+});
+
+test("a headless claim taken during the spawn's approval refuses the spawn at the mint, not after it", async () => {
+  const deps = makeDeps({ sessions: [] });
+  const realApprove = deps.approveSpawn;
+  let claim: ReturnType<typeof claimDemoBrowser> | null = null;
+  deps.approveSpawn = async (entries, plan, callerId) => {
+    const verdict = await realApprove(entries, plan, callerId);
+    claim = claimDemoBrowser();
+    return verdict;
+  };
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+  try {
+    const refused = await spawnDemo(srv);
+    expect(refused.status).toBe(400);
+    expect(refused.body.error).toContain("headless demo scenario");
+    expect(deps.demoMints, "no tile server was minted for the refused spawn").toEqual([]);
+    expect(deps.spawnInputs).toEqual([]);
+  } finally {
+    (claim as ReturnType<typeof claimDemoBrowser> | null)?.release();
+  }
+});
+
+test("a second headless claim is refused while the first holds the slot, and granted after its release", () => {
+  const first = claimDemoBrowser();
+  try {
+    const second = acquireDemoBrowser();
+    expect(second.ok, "two headless runs would drive the same webview").toBe(false);
+    expect(second.ok ? "" : second.reason).toContain("already running");
+  } finally {
+    first.release();
+  }
+  const again = acquireDemoBrowser();
+  expect(again.ok).toBe(true);
+  if (again.ok) again.release();
+});
+
+test("the headless claim sees a live demo tile and is released with its disappearance", async () => {
+  const deps = makeDeps({ sessions: [] });
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+  const created = await spawnDemo(srv);
+  const tileId = (created.body.result as { session: { id: string } }).session.id;
+
+  const during = acquireDemoBrowser();
+  expect(during.ok, "the headless launcher must see the tile").toBe(false);
+  expect(during.ok ? "" : during.reason).toContain("demo tile");
+
+  srv.revokeCallerForSession(tileId);
+  const after = acquireDemoBrowser();
+  expect(after.ok).toBe(true);
+  if (after.ok) after.release();
+});
+
+test("a demo spawn mounts its per-tile config and the profile's own lists, and mints no lead caller", async () => {
+  const deps = makeDeps({ sessions: [] });
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+
+  const created = await spawnDemo(srv);
+  expect(created.status).toBe(200);
+
+  const profile = getEmbeddedAgent("demo")!;
+  const input = deps.spawnInputs[0]!;
+  expect(input.mcpConfig, "the tile mounts the config its own mint produced").toBe(deps.demoMints[0]!.mcpConfig);
+  expect(input.peerTools).toEqual(profile.peerTools);
+  expect(input.disallowedTools).toEqual(profile.disallowedTools);
+  expect(input.args ?? "", "the denial travels as a field, not as a launch argument").not.toContain("--disallowedTools");
+  expect(input.strictMcpConfig, "the input handed to spawnSession closes the MCP surface").toBe(true);
+  expect(input.args ?? "", "the flag travels as a field, not as a launch argument").not.toContain("--strict-mcp-config");
+  expect(input.role).toBe("demo");
+  expect(deps.leadMcpCalls, "a demo tile gets no deck-control caller").toEqual([]);
+  expect(deps.sessionSpawnOpts[0], "a demo tile is not offered the deck-lead plugin").toBeUndefined();
+});
+
+test("a second demo is refused with a trace while the first tile lives, and accepted once that tile is gone", async () => {
+  const seen = captureDeckErrors();
+  const deps = makeDeps({ sessions: [] });
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+
+  const first = await spawnDemo(srv);
+  const tileId = (first.body.result as { session: { id: string } }).session.id;
+
+  const second = await spawnDemo(srv, { name: "demo-2" });
+  expect(second.status).toBe(400);
+  expect(second.body.error).toContain("already live");
+  expect(deps.demoMints.length, "the refused demo mints nothing").toBe(1);
+  expect(deps.approvals.length, "the refusal precedes any approval").toBe(1);
+  expect(seen.some((line) => line.includes("deck-control") && line.includes("already live"))).toBe(true);
+
+  srv.revokeCallerForSession(tileId);
+  const third = await spawnDemo(srv, { name: "demo-3" });
+  expect(third.status).toBe(200);
+  expect(deps.demoMints.length).toBe(2);
+});
+
+test("the demo token is released once, by the disappearance of its tile", async () => {
+  const deps = makeDeps({ sessions: [] });
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+  const created = await spawnDemo(srv);
+  const tileId = (created.body.result as { session: { id: string } }).session.id;
+
+  expect(srv.revokeCallerForSession("another-tile")).toBe(null);
+  expect(deps.demoMints[0]!.released, "another tile's disappearance does not touch it").toBe(0);
+
+  expect(srv.revokeCallerForSession(tileId)).toBe(null);
+  expect(srv.revokeCallerForSession(tileId)).toBe(null);
+  expect(deps.demoMints[0]!.released).toBe(1);
+});
+
+test("a demo spawn under sandbox is refused with a trace, before any approval or mint", async () => {
+  const seen = captureDeckErrors();
+  const deps = makeDeps({ sessions: [] });
+  deps.sandboxEnabled = () => true;
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+
+  const single = await spawnDemo(srv);
+  expect(single.status).toBe(400);
+  expect(single.body.error).toContain("sandbox");
+  const team = await call(srv, "deck_spawn_team", { team: [{ embedded_agent: "demo", name: "d" }] });
+  expect(team.status).toBe(400);
+  expect(team.body.error).toContain("sandbox");
+
+  expect(deps.approvals).toEqual([]);
+  expect(deps.demoMints).toEqual([]);
+  expect(deps.spawnInputs).toEqual([]);
+  expect(seen.filter((line) => line.includes("deck-control") && line.includes("sandbox")).length).toBe(2);
+});
+
+test("a demo spawn that fails after the mint releases it and frees the slot for a retry", async () => {
+  const deps = makeDeps({ sessions: [] });
+  const realSpawn = deps.spawnSession;
+  let failing = true;
+  deps.spawnSession = async (input, opts) => {
+    if (failing) throw new Error("worktree creation blew up");
+    return realSpawn(input, opts);
+  };
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+
+  const failed = await spawnDemo(srv);
+  expect(failed.status).toBe(400);
+  expect(deps.demoMints[0]!.released).toBe(1);
+
+  failing = false;
+  expect((await spawnDemo(srv)).status).toBe(200);
+});
+
+test("a demo whose browser cannot be driven is traced, spawns no tile and leaves the slot free", async () => {
+  const seen = captureDeckErrors();
+  const deps = makeDeps({ sessions: [] });
+  const realMint = deps.mintDemoTile;
+  let open = false;
+  deps.mintDemoTile = async () => {
+    if (!open) throw new Error("the embedded browser is not open: open the Browser view in the Deck first");
+    return realMint();
+  };
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+
+  const refused = await spawnDemo(srv);
+  expect(refused.status).toBe(400);
+  expect(refused.body.error).toContain("embedded browser is not open");
+  expect(deps.spawnInputs).toEqual([]);
+  expect(seen.some((line) => line.includes("demo tile could not be minted"))).toBe(true);
+
+  open = true;
+  expect((await spawnDemo(srv)).status).toBe(200);
+});
+
+test("two racing demo spawns: the slot is taken before the mint's first await, so exactly one mints", async () => {
+  const deps = makeDeps({ sessions: [] });
+  const realMint = deps.mintDemoTile;
+  let gate!: () => void;
+  const gateOpen = new Promise<void>((resolve) => {
+    gate = resolve;
+  });
+  let mintStarted!: () => void;
+  const started = new Promise<void>((resolve) => {
+    mintStarted = resolve;
+  });
+  deps.mintDemoTile = async () => {
+    mintStarted();
+    await gateOpen;
+    return realMint();
+  };
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+
+  const a = spawnDemo(srv, { name: "a" });
+  const b = spawnDemo(srv, { name: "b" });
+  await reachedWithin(started, "the first demo reaches its mint");
+  const refused = await reachedWithin(Promise.race([a, b]), "the second demo is refused while the first mint is pending");
+  expect(refused.status).toBe(400);
+  expect(refused.body.error).toContain("already live");
+  gate();
+  const settled = await Promise.all([a, b]);
+  expect(settled.map((r) => r.status).sort()).toEqual([200, 400]);
+  expect(deps.demoMints.length).toBe(1);
+});
+
+test("a demo mint refused for a missing global entry is traced, spawns no tile and frees the slot", async () => {
+  const seen = captureDeckErrors();
+  const dir = mkdtempSync(join(tmpdir(), "cp-demo-mint-"));
+  tmpDirs.push(dir);
+  const host = { id: 1, isDestroyed: () => false, getType: () => "window" } as unknown as WebContents;
+  const guest = { id: 2, isDestroyed: () => false, getType: () => "webview", hostWebContents: { id: 1 } } as unknown as WebContents;
+  let userServers: unknown = { "kory-roadmap": { command: "bun", args: ["r.ts"] } };
+  const deps = makeDeps({ sessions: [] });
+  deps.mintDemoTile = () =>
+    mintDemoTile({
+      guests: [host, guest],
+      host,
+      readUserMcpServers: () => userServers,
+      report: () => {},
+      writeConfig: (control, fileName, globals) =>
+        writeDemoMcpConfig({
+          dir,
+          mcpScriptPath: "/s.mjs",
+          execPath: "/e",
+          controlUrl: control.url,
+          controlToken: control.token,
+          fileName,
+          extraServers: globals
+        })
+    });
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+
+  const refused = await spawnDemo(srv);
+  expect(refused.status).toBe(400);
+  expect(refused.body.error).toContain('"claude-peers"');
+  expect(deps.spawnInputs).toEqual([]);
+  expect(seen.some((line) => line.includes("demo tile could not be minted") && line.includes('"claude-peers"'))).toBe(true);
+
+  userServers = {
+    "claude-peers": { command: "bun", args: ["s.ts"] },
+    "kory-roadmap": { command: "bun", args: ["r.ts"] }
+  };
+  const retried = await spawnDemo(srv);
+  expect(retried.status, "the refused attempt left the slot free").toBe(200);
+  const tileId = (retried.body.result as { session: { id: string } }).session.id;
+  srv.revokeCallerForSession(tileId);
+});
+
+test("a team whose demo entry loses the slot during the approval spawns nothing else", async () => {
+  const deps = makeDeps({ sessions: [] });
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+  const realApprove = deps.approveSpawn;
+  deps.approveSpawn = async (entries, plan, callerId) => {
+    const verdict = await realApprove(entries, plan, callerId);
+    if (entries.length === 2) expect((await spawnDemo(srv, { name: "intruder" })).status).toBe(200);
+    return verdict;
+  };
+
+  const res = await call(srv, "deck_spawn_team", {
+    team: [
+      { name: "dev", embedded_agent: "developer" },
+      { name: "demo-in-team", embedded_agent: "demo" }
+    ]
+  });
+  expect(res.status).toBe(400);
+  expect(res.body.error).toContain("already live");
+  expect(deps.spawnInputs.map((input) => input.name), "only the intruder exists: the developer was not spawned before the refusal").toEqual(["intruder"]);
+});
+
+test("an embedded team-lead spawned under sandbox mints no lead caller and writes no bridge file, and the result says so", async () => {
+  const seen = captureDeckErrors();
+  const deps = makeDeps({ sessions: [] });
+  deps.sandboxEnabled = () => true;
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+
+  const single = await call(srv, "deck_spawn_session", { name: "lead", embedded_agent: "team-lead" });
+  expect(single.status).toBe(200);
+  const singleBody = single.body.result as { session: { id: string; bridge_note?: string } };
+  expect(singleBody.session.bridge_note).toContain("bridge refused: sandbox");
+  expect(deps.leadMcpCalls, "no lead credit is minted on the host").toEqual([]);
+  expect(deps.spawnInputs[0]!.mcpConfig).toBeUndefined();
+  expect(deps.sessionSpawnOpts[0]).toBeUndefined();
+
+  const team = await call(srv, "deck_spawn_team", {
+    team: [
+      { name: "lead-2", embedded_agent: "team-lead" },
+      { name: "dev", embedded_agent: "developer" }
+    ]
+  });
+  const spawned = (team.body.result as { spawned: Array<{ name: string; bridge_note?: string }> }).spawned;
+  expect(spawned.find((s) => s.name === "lead-2")!.bridge_note).toContain("bridge refused: sandbox");
+  expect(spawned.find((s) => s.name === "dev")!.bridge_note).toBeUndefined();
+  expect(deps.leadMcpCalls).toEqual([]);
+  expect(seen.filter((line) => line.includes("team-lead bridge refused")).length).toBe(2);
+
+  deps.sandboxEnabled = () => false;
+  const open = await call(srv, "deck_spawn_session", { name: "lead-3", embedded_agent: "team-lead" });
+  expect((open.body.result as { session: { bridge_note?: string } }).session.bridge_note).toBeUndefined();
+  expect(deps.leadMcpCalls.length, "off sandbox the lead still gets its bridge").toBe(1);
+});
+
+test("a team with two demo entries is refused before any approval", async () => {
+  const deps = makeDeps({ sessions: [] });
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+
+  const res = await call(srv, "deck_spawn_team", {
+    team: [
+      { embedded_agent: "demo", name: "a" },
+      { embedded_agent: "demo", name: "b" }
+    ]
+  });
+  expect(res.status).toBe(400);
+  expect(res.body.error).toContain("only one demo");
+  expect(deps.approvals).toEqual([]);
+  expect(deps.demoMints).toEqual([]);
 });
 
 // Card 6c380073, second audit round: `effort` reached the login-shell command
@@ -1994,11 +2380,13 @@ const REVIEWED_DECK_CONTROL_DEPS = [
   "listSessions",
   "listTemplates",
   "listWorktrees",
+  "mintDemoTile",
   "removeWorktree",
   "resolveTemplate",
   "restartSession",
   "revokeTeamLeadMcpConfig",
   "runDirective",
+  "sandboxEnabled",
   "sandboxExec",
   "saveTemplate",
   "spawnSession",

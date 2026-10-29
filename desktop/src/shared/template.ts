@@ -10,6 +10,8 @@
 // it consumes/produces are declared structurally here and stay compatible with
 // SessionDef / CreateSessionInput in shared/types.ts.
 
+import { isToolNameList, liftDisallowedTools } from './tool-names'
+
 export const TEMPLATE_TYPE = 'claude-peers-template'
 export const TEMPLATE_VERSION = 1
 
@@ -45,6 +47,8 @@ export interface TemplateSession {
    * ?? '') || ''`), never here.
    */
   role?: string
+  /** Tool denial of the captured tile (SessionDef.disallowedTools), validated at parse and at spawn. */
+  disallowedTools?: string[]
 }
 
 export interface SessionTemplate {
@@ -66,6 +70,7 @@ interface DefLike {
   prompt?: string
   lead?: boolean
   role?: string
+  disallowedTools?: string[]
 }
 
 /** Structural subset of CreateSessionInput a template produces (no cwd). */
@@ -83,6 +88,7 @@ export interface TemplateInput {
   worktreeBranch?: string
   announce?: string
   role?: string
+  disallowedTools?: string[]
 }
 
 /**
@@ -119,6 +125,7 @@ export function toTemplate(defs: readonly DefLike[], name?: string): SessionTemp
       if (d.prompt && d.prompt.trim()) s.prompt = d.prompt.trim()
       if (d.lead) s.lead = true
       if (d.role && d.role.trim()) s.role = d.role.trim()
+      if (d.disallowedTools?.length) s.disallowedTools = [...d.disallowedTools]
       return s
     })
   }
@@ -137,7 +144,8 @@ export function templateToInputs(tpl: SessionTemplate): TemplateInput[] {
     if (s.name && s.name.trim()) input.name = s.name.trim()
     if (s.command && s.command.trim()) input.command = s.command.trim()
     if (s.bridge === 'clodex') input.bridge = 'clodex'
-    if (s.args && s.args.trim()) input.args = s.args.trim()
+    const lifted = liftDisallowedTools(s.args?.trim() ?? '', s.disallowedTools)
+    if (lifted.args) input.args = lifted.args
     if (s.effort && s.effort.trim()) input.effort = s.effort.trim()
     if (s.color && s.color.trim()) input.color = s.color.trim()
     if (s.prompt && s.prompt.trim()) input.prompt = s.prompt.trim()
@@ -147,6 +155,7 @@ export function templateToInputs(tpl: SessionTemplate): TemplateInput[] {
     if (s.worktreeBranch && s.worktreeBranch.trim()) input.worktreeBranch = s.worktreeBranch.trim()
     if (s.announce && s.announce.trim()) input.announce = s.announce.trim()
     if (s.role && s.role.trim()) input.role = s.role.trim()
+    if (lifted.disallowedTools) input.disallowedTools = lifted.disallowedTools
     return input
   })
 }
@@ -237,6 +246,9 @@ function isTemplateSession(v: unknown): v is TemplateSession {
   }
   if (s.lead !== undefined && typeof s.lead !== 'boolean') return false
   if (s.bridge !== undefined && s.bridge !== 'clodex') return false
+  // A list holding a name outside the allow-list rejects the template whole: dropping the
+  // offender would silently allow that tool.
+  if (s.disallowedTools !== undefined && !isToolNameList(s.disallowedTools)) return false
   return true
 }
 

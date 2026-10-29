@@ -5,6 +5,8 @@ import { test, expect, afterEach } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { ROADMAP_TOOLS } from "../shared/roadmap-tools.ts";
+import { DEMO_DISALLOWED_TOOLS, DEMO_PEER_TOOLS } from "../desktop/src/main/demo-driver.ts";
 import {
   EMBEDDED_AGENTS,
   TEAM_PLAYBOOK,
@@ -45,7 +47,7 @@ test("the supervisor system prompt itself anchors the consent rule", () => {
   expect(SUPERVISOR_SYSTEM_PROMPT).toContain("deck_team_playbook");
 });
 
-test("embedded catalog: the 6 core roles, unique ids, Deck-wired prompts", () => {
+test("embedded catalog: the core roles and the demo profile, unique ids, Deck-wired prompts", () => {
   const ids = EMBEDDED_AGENTS.map((a) => a.id);
   expect(ids).toEqual([
     "team-lead",
@@ -53,7 +55,8 @@ test("embedded catalog: the 6 core roles, unique ids, Deck-wired prompts", () =>
     "reviewer",
     "explorer",
     "debugger",
-    "test-engineer"
+    "test-engineer",
+    "demo"
   ]);
   expect(new Set(ids).size).toBe(ids.length);
   for (const agent of EMBEDDED_AGENTS) {
@@ -68,14 +71,35 @@ test("embedded catalog: the 6 core roles, unique ids, Deck-wired prompts", () =>
   expect(getEmbeddedAgent("reviewer")!.disallowedTools).toContain("Write");
   expect(getEmbeddedAgent("explorer")!.disallowedTools).toContain("Edit");
   // Executors keep their hands.
-  expect(getEmbeddedAgent("developer")!.disallowedTools).toBe("");
+  expect(getEmbeddedAgent("developer")!.disallowedTools).toEqual([]);
   expect(getEmbeddedAgent("nope")).toBeNull();
-  // Card 3c085f1a: `peerTools` is plumbing only in this lot -- no profile
-  // carries a list yet. undefined must NOT collapse to `[]` here: an empty
-  // array means "zero tools" server-side (server.ts's three-state contract),
-  // the opposite of what an unset field must mean (unrestricted).
-  for (const agent of EMBEDDED_AGENTS) {
+  // Only the demo profile carries a list. undefined must NOT collapse to `[]`
+  // for the others: an empty array means "zero tools" server-side
+  // (server.ts's three-state contract), the opposite of what an unset field
+  // must mean (unrestricted).
+  for (const agent of EMBEDDED_AGENTS.filter((a) => a.id !== "demo")) {
     expect(agent.peerTools).toBeUndefined();
+  }
+});
+
+test("the demo profile keeps only demo-safe peer tools, each served by claude-peers or kory-roadmap, and denies every built-in tool", () => {
+  const demo = getEmbeddedAgent("demo")!;
+  expect(demo.peerTools).toEqual(DEMO_PEER_TOOLS);
+  expect(demo.disallowedTools).toEqual(DEMO_DISALLOWED_TOOLS.split(","));
+  const roadmapNames = new Set(ROADMAP_TOOLS.map((tool) => tool.name));
+  for (const name of DEMO_PEER_TOOLS.filter((n) => n.startsWith("roadmap_"))) {
+    expect(roadmapNames.has(name), `${name} is not a kory-roadmap tool: CLAUDE_PEERS_TOOLS would drop it silently`).toBe(true);
+  }
+  // No lead capability rides this list.
+  for (const forbidden of ["roadmap_add", "roadmap_archive", "switch_group", "set_id", "wait_for_message"]) {
+    expect(DEMO_PEER_TOOLS).not.toContain(forbidden);
+  }
+  for (const tool of ["Bash", "Read", "Edit", "Write", "WebFetch", "Agent", "Skill"]) {
+    expect(demo.disallowedTools).toContain(tool);
+  }
+  expect(demo.strictMcpConfig, "the tile loads only the servers of its own --mcp-config").toBe(true);
+  for (const other of EMBEDDED_AGENTS.filter((agent) => agent.id !== "demo")) {
+    expect(other.strictMcpConfig, `${other.id} keeps the merged MCP surface`).toBeUndefined();
   }
 });
 

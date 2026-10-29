@@ -13,7 +13,8 @@ import {
   safeStorage,
   screen,
   session,
-  shell
+  shell,
+  webContents
 } from 'electron'
 import { publicKeyFingerprint } from '../../../shared/operator-trust'
 import type { AppConfig, InboxOpenTarget, OperatorTrustStatusEvent } from '@shared/types'
@@ -211,6 +212,7 @@ import {
   composeSpawnFailText,
   writeEmbeddedAgentPrompt
 } from './team-embedded'
+import { mintDemoTile, readUserMcpServers, writeDemoMcpConfig } from './demo-driver'
 import { startDesignEndpoint, type DesignEndpoint } from './design-endpoint'
 import { createClodexController, type ClodexController } from './clodex-lifecycle-controller'
 import { announceModelsChanged } from './model-registry'
@@ -3188,9 +3190,34 @@ const controlDeps: DeckControlDeps = {
   revokeTeamLeadMcpConfig: (callerId: string): void => {
     cleanupTeamLeadMcpFile(callerId)
   },
-  // Audit fix #1c (card 6c380073): see confirmSpawnShellFields's own doc.
-  // Card ffafeea6: 'unattended' unconditionally, same reasoning as
-  // resolveTemplate/approveSpawn above.
+  sandboxEnabled: () => sandbox.isEnabled(),
+  mintDemoTile: async () => {
+    const deckPluginDir = getDeckPluginDir()
+    const mcpScript = join(deckPluginDir, 'mcp', 'demo-browser-mcp.mjs')
+    if (!deckPluginDir || !existsSync(mcpScript)) {
+      throw new Error('demo-browser MCP script missing -- run `npm run build:mcp`')
+    }
+    return mintDemoTile({
+      guests: webContents.getAllWebContents(),
+      host: mainWindow?.webContents ?? null,
+      readUserMcpServers: () =>
+        readUserMcpServers(join(process.env.CLAUDE_CONFIG_DIR || homedir(), '.claude.json'), (path) =>
+          readFileSync(path, 'utf-8')
+        ),
+      writeConfig: (control, fileName, globals) =>
+        writeDemoMcpConfig({
+          dir: sessionDir(),
+          mcpScriptPath: mcpScript,
+          execPath: process.execPath,
+          controlUrl: control.url,
+          controlToken: control.token,
+          fileName,
+          extraServers: globals
+        }),
+      report: reportError
+    })
+  },
+  // 'unattended' unconditionally: the caller is an agent, so an unapproved shell field refuses instead of opening a dialog.
   confirmSpawnShellFields: (entry) => confirmSpawnShellFields(entry, 'unattended')
 }
 
@@ -3314,15 +3341,11 @@ const workspaces = new WorkspaceService({
   prepareModPlans: (defs, signal) => prepareRestorePlans(launchAttempts, modLaunch.prepare, (def) => def.supervisor !== true && sandbox.isEnabled(), defs, signal)
 })
 
-// Grey out File > Export template... when there is nothing to export. Must
-// count the same population saveTemplate() itself serializes
-// (service.captureSessions(), which excludes the supervisor): service.list()
-// alone (includes it) left the item enabled on a supervisor-only moment for
-// an export that would come back empty -- same root cause as the auto-save
-// guard below, in this same file (b8d65b24, mutation-tested review).
+// Grey out File > Export template... when there is nothing to export: the count
+// must follow the population saveTemplate() serializes (captureSessions()).
 const syncExportTemplateEnabled = (): void => {
   const item = Menu.getApplicationMenu()?.getMenuItemById('export-template')
-  if (item) item.enabled = service.list().some((s) => !s.supervisor)
+  if (item) item.enabled = service.captureSessions().length > 0
 }
 service.on('changed', syncExportTemplateEnabled)
 

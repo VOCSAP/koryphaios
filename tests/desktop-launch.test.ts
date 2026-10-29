@@ -457,6 +457,114 @@ test("--mcp-config and --append-system-prompt-file are emitted on both modes", (
   expect(resume).toContain("--resume \"id-old\" --fork-session");
 });
 
+test("a strict-MCP tile resumes with --strict-mcp-config right after its --mcp-config, before --resume", () => {
+  const resume = buildSessionCommandLine({
+    baseCommand: "claude run",
+    sessionId: "id-new",
+    prevSessionId: "id-old",
+    mcpConfig: "/state/demo-mcp-ab12.json",
+    strictMcpConfig: true,
+    mode: "resume"
+  });
+  expect(resume).toBe(
+    'claude run --mcp-config "/state/demo-mcp-ab12.json" --strict-mcp-config --resume "id-old" --fork-session --session-id "id-new"'
+  );
+});
+
+test("a strict-MCP tile launches fresh with --strict-mcp-config right after its --mcp-config", () => {
+  const fresh = buildSessionCommandLine({
+    baseCommand: "claude run",
+    sessionId: "id-1",
+    mcpConfig: "/state/demo-mcp-ab12.json",
+    strictMcpConfig: true,
+    mode: "fresh"
+  });
+  expect(fresh).toBe('claude run --mcp-config "/state/demo-mcp-ab12.json" --strict-mcp-config --session-id "id-1"');
+});
+
+test("a tile without the structured field never emits --strict-mcp-config, whatever its args or other value say", () => {
+  const options = { baseCommand: "claude run", sessionId: "id-1", mcpConfig: "/state/supervisor-mcp.json" } as const;
+  expect(buildSessionCommandLine({ ...options, mode: "fresh" })).not.toContain("--strict-mcp-config");
+  expect(buildSessionCommandLine({ ...options, strictMcpConfig: false, mode: "fresh" })).not.toContain("--strict-mcp-config");
+  expect(
+    buildSessionCommandLine({ ...options, strictMcpConfig: "true" as never, prevSessionId: "id-old", mode: "resume" })
+  ).not.toContain("--strict-mcp-config");
+});
+
+test("a resumed tile re-passes its tool denial: --disallowedTools sits before --resume", () => {
+  const resume = buildSessionCommandLine({
+    baseCommand: "claude run",
+    sessionId: "id-new",
+    prevSessionId: "id-old",
+    disallowedTools: ["Write", "Edit", "NotebookEdit"],
+    mode: "resume"
+  });
+  expect(resume).toBe(
+    'claude run --disallowedTools "Write,Edit,NotebookEdit" --resume "id-old" --fork-session --session-id "id-new"'
+  );
+});
+
+test("a fresh tile emits --disallowedTools exactly once, ahead of the free args", () => {
+  const fresh = buildSessionCommandLine({
+    baseCommand: "claude run",
+    sessionId: "id-1",
+    args: '--agent "reviewer"',
+    disallowedTools: ["Write", "Edit"],
+    mode: "fresh"
+  });
+  expect(fresh).toBe('claude run --disallowedTools "Write,Edit" --session-id "id-1" --agent "reviewer"');
+  expect(fresh.split("--disallowedTools").length - 1).toBe(1);
+});
+
+// --disallowedTools is variadic: a free argument right after the list is swallowed as one more tool name.
+test("the token after the tool-denial list is always a flag, fresh and resume, whatever else the tile carries", () => {
+  const everything = {
+    baseCommand: "claude run",
+    sessionId: "id-1",
+    pluginDirs: ["/p/deck-plugin"],
+    additionalDirectories: ["/p/extra"],
+    mcpConfig: "/state/demo-mcp.json",
+    strictMcpConfig: true,
+    disallowedTools: ["Write", "Edit"],
+    appendSystemPromptFile: "/state/prompt.md",
+    settings: "/state/settings.json",
+    effort: "high",
+    args: "freeform words"
+  } as const;
+  const lines = [
+    buildSessionCommandLine({ ...everything, mode: "fresh" }),
+    buildSessionCommandLine({ ...everything, prevSessionId: "id-old", mode: "resume" }),
+    buildSessionCommandLine({ baseCommand: "claude run", sessionId: "id-1", disallowedTools: ["Write"], mode: "fresh" }),
+    buildSessionCommandLine({ baseCommand: "claude run", sessionId: "id-1", prevSessionId: "id-old", disallowedTools: ["Write"], mode: "resume" })
+  ];
+  for (const line of lines) {
+    const next = /--disallowedTools "[^"]*" (\S+)/.exec(line)?.[1];
+    expect(next, line).toBeDefined();
+    expect(next!.startsWith("--"), `the token after the list is "${next}" in: ${line}`).toBe(true);
+  }
+});
+
+test("an empty or absent tool denial emits no flag", () => {
+  const options = { baseCommand: "claude run", sessionId: "id-1" } as const;
+  expect(buildSessionCommandLine({ ...options, mode: "fresh" })).not.toContain("--disallowedTools");
+  expect(buildSessionCommandLine({ ...options, disallowedTools: [], mode: "fresh" })).not.toContain("--disallowedTools");
+});
+
+test("a tool name outside the allow-list refuses the whole command line, fresh and resume, instead of being trimmed", () => {
+  const hostile = ["Bash; rm -rf /", "$(id)", "`id`", 'a"b', "a b", "", "Read\nBash", "a|b", "x".repeat(200)];
+  for (const name of hostile) {
+    const input = { baseCommand: "claude run", sessionId: "id-1", disallowedTools: ["Write", name] };
+    expect(() => buildSessionCommandLine({ ...input, mode: "fresh" }), JSON.stringify(name)).toThrow("allow-list");
+    expect(() => buildSessionCommandLine({ ...input, prevSessionId: "id-old", mode: "resume" }), JSON.stringify(name)).toThrow(
+      "allow-list"
+    );
+  }
+  // Control: permission-rule shapes still pass.
+  expect(
+    buildSessionCommandLine({ baseCommand: "claude run", sessionId: "id-1", disallowedTools: ["Bash(git:*)", "mcp__x__y"], mode: "fresh" })
+  ).toContain('--disallowedTools "Bash(git:*),mcp__x__y"');
+});
+
 test("a Claude session command carries one provided settings path", () => {
   const settings = "C:/deck-state/deck-tile-a1b2c3.json";
   for (const mode of ["fresh", "resume"] as const) {

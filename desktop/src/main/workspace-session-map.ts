@@ -7,6 +7,7 @@ import { randomUUID } from 'node:crypto'
 // Relative import (not the @shared alias) so this module resolves cleanly when
 // the bun test imports it directly, per the pure-module testing convention.
 import type { SessionDef } from '../shared/types'
+import { isToolNameList, liftDisallowedTools } from '../shared/tool-names'
 import type { WorkspaceSession } from './workspace-store'
 
 /** Split a free-form args string into tokens on whitespace. */
@@ -37,6 +38,7 @@ export function toWorkspaceSessions(defs: SessionDef[]): WorkspaceSession[] {
     cwd: d.cwd,
     args: splitArgs(d.args),
     bridge: bridgeOf(d),
+    ...(d.disallowedTools?.length ? { disallowedTools: [...d.disallowedTools] } : {}),
     color: d.color,
     position: i
   }))
@@ -52,15 +54,22 @@ export function toWorkspaceSessions(defs: SessionDef[]): WorkspaceSession[] {
 export function fromWorkspaceSessions(sessions: WorkspaceSession[]): SessionDef[] {
   return [...sessions]
     .sort((a, b) => a.position - b.position)
-    .map((s) => ({
-      id: randomUUID(),
-      name: s.name,
-      cwd: s.cwd,
-      command: '',
-      bridge: bridgeOf(s),
-      args: joinArgs(s.args),
-      sessionId: s.claudeSessionId,
-      color: s.color,
-      createdAt: Date.now()
-    }))
+    .map((s) => {
+      const { args, disallowedTools } = liftDisallowedTools(
+        joinArgs(s.args),
+        isToolNameList(s.disallowedTools) ? s.disallowedTools : undefined
+      )
+      return {
+        id: randomUUID(),
+        name: s.name,
+        cwd: s.cwd,
+        command: '',
+        bridge: bridgeOf(s),
+        ...(disallowedTools ? { disallowedTools } : {}),
+        args,
+        sessionId: s.claudeSessionId,
+        color: s.color,
+        createdAt: Date.now()
+      }
+    })
 }

@@ -497,12 +497,19 @@ test("template:apply gates once with the real sandboxGate, before 'replace' clea
   ).toBe(true);
 });
 
-test("sessions:create strips a caller-supplied supervisor flag before spawning", () => {
+test("sessions:create strips the caller-supplied supervisor, strictMcpConfig and disallowedTools before spawning", () => {
   const body = ipcHandler("sessions:create");
-  const strip = /const \{\s*supervisor:\s*\w+,\s*\.\.\.(\w+)\s*\}\s*=\s*input/.exec(body);
-  expect(strip, "sessions:create forwards input.supervisor, which exempts a tile from the sandbox").not.toBeNull();
+  const strip = /const \{([^}]*?)\.\.\.(\w+)\s*\}\s*=\s*input/.exec(body);
+  expect(strip, "sessions:create forwards the whole input").not.toBeNull();
+  expect(strip![1], "input.supervisor exempts a tile from the sandbox").toMatch(/\bsupervisor:\s*\w+,/);
+  expect(strip![1], "input.strictMcpConfig would exclude an ordinary tile from saved workspaces").toMatch(
+    /\bstrictMcpConfig:\s*\w+,/
+  );
+  expect(strip![1], "input.disallowedTools is the profile's denial, not the renderer's to set").toMatch(
+    /\bdisallowedTools:\s*\w+,/
+  );
   expect(
-    new RegExp(`createSessionWithWorktree\\(\\s*service,\\s*getConfig\\(\\)\\.projectDir,\\s*${strip![1]}\\s*,`).test(body),
+    new RegExp(`createSessionWithWorktree\\(\\s*service,\\s*getConfig\\(\\)\\.projectDir,\\s*${strip![2]}\\s*,`).test(body),
     "sessions:create spawns from the unstripped input"
   ).toBe(true);
 });

@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { extractBracedBody } from "./_braced-body";
 import { validPtyDimensions } from "../desktop/src/main/pty-manager.ts";
 import { onDeckError } from "../desktop/src/main/log.ts";
+import { fromWorkspaceSessions, toWorkspaceSessions } from "../desktop/src/main/workspace-session-map.ts";
 import { LaunchAttemptRegistry } from "../desktop/src/main/mod-launch-plan.ts";
 
 const SESSION_SERVICE_PATH = join(import.meta.dir, "..", "desktop", "src", "main", "session-service.ts");
@@ -1090,5 +1091,110 @@ test.each([
     expect(probe.commands[0], "the container command carries no --mcp-config").not.toContain("--mcp-config");
     expect(probe.mints, "a restart never mints").toBe(1);
     expect(bridgeRefusals(service).some((text) => text.includes("sandbox"))).toBe(true);
+  });
+});
+
+test.each([
+  ["fresh", false],
+  ["resumed", true]
+] as const)("a strict-MCP tile reaches its terminal with --strict-mcp-config when %s", async (_mode, resumed) => {
+  await withBridgeService(false, async (service, probe) => {
+    const tile = service.create({ name: "demo", strictMcpConfig: true, mcpConfig: "/state/demo-mcp-ab12.json" });
+    expect(sessionPtys.at(-1)!.args.join(" "), "control: the first launch is fresh").not.toContain("--resume");
+    if (resumed) {
+      const [runtime] = service.list();
+      const projects = join(probe.home, ".claude", "projects", encodeProjectDir(runtime!.cwd));
+      mkdirSync(projects, { recursive: true });
+      writeFileSync(join(projects, `${runtime!.sessionId}.jsonl`), "{}\n", "utf-8");
+      sessionPtys.at(-1)!.exit(1);
+      await service.restart(tile.id);
+      expect(sessionPtys.at(-1)!.args.join(" "), "the path under test is the resume").toContain("--resume");
+    }
+    const command = sessionPtys.at(-1)!.args.join(" ");
+    expect(command).toContain('--mcp-config "/state/demo-mcp-ab12.json" --strict-mcp-config');
+  });
+});
+
+test("a strict-MCP tile is left out of a workspace or template capture, a plain tile is kept", async () => {
+  await withBridgeService(false, (service) => {
+    service.create({ name: "demo", strictMcpConfig: true, mcpConfig: "/state/demo-mcp-ab12.json" });
+    service.create({ name: "plain" });
+
+    expect(service.captureSessions().map((d) => d.name)).toEqual(["plain"]);
+  });
+});
+
+test("create refuses a tool denial holding a name outside the allow-list and spawns nothing", async () => {
+  await withBridgeService(false, (service) => {
+    expect(() => service.create({ name: "bad", disallowedTools: ["Write", "$(id)"] })).toThrow("allow-list");
+    expect(sessionPtys).toHaveLength(0);
+    expect(service.list()).toHaveLength(0);
+  });
+});
+
+test.each([
+  ["fresh", false],
+  ["resumed", true]
+] as const)("a tile with a tool denial launches with --disallowedTools exactly once when %s", async (_mode, resumed) => {
+  await withBridgeService(false, async (service, probe) => {
+    const tile = service.create({ name: "reviewer", args: "--agent reviewer", disallowedTools: ["Write", "Edit"] });
+    if (resumed) {
+      const [runtime] = service.list();
+      const projects = join(probe.home, ".claude", "projects", encodeProjectDir(runtime!.cwd));
+      mkdirSync(projects, { recursive: true });
+      writeFileSync(join(projects, `${runtime!.sessionId}.jsonl`), "{}\n", "utf-8");
+      sessionPtys.at(-1)!.exit(1);
+      await service.restart(tile.id);
+      expect(sessionPtys.at(-1)!.args.join(" "), "the path under test is the resume").toContain("--resume");
+    }
+    const command = sessionPtys.at(-1)!.args.join(" ");
+    expect(command.split('--disallowedTools "Write,Edit"').length - 1).toBe(1);
+  });
+});
+
+test("a read-only tile saved into a workspace comes back resumed with its denial", async () => {
+  await withBridgeService(false, (service, probe) => {
+    service.create({ name: "reviewer", disallowedTools: ["Write", "Edit", "NotebookEdit"] });
+    const [captured] = service.captureSessions();
+    expect(captured!.disallowedTools, "control: the live tile holds the denial").toEqual(["Write", "Edit", "NotebookEdit"]);
+    const projects = join(probe.home, ".claude", "projects", encodeProjectDir(captured!.cwd));
+    mkdirSync(projects, { recursive: true });
+    writeFileSync(join(projects, `${captured!.sessionId}.jsonl`), "{}\n", "utf-8");
+
+    service.restoreFrom(fromWorkspaceSessions(toWorkspaceSessions(service.captureSessions())));
+
+    const command = sessionPtys.at(-1)!.args.join(" ");
+    expect(command, "the path under test is the resume").toContain("--resume");
+    expect(command).toContain('--disallowedTools "Write,Edit,NotebookEdit"');
+  });
+});
+
+test("a workspace saved before the structured denial restores resumed with the denial re-passed", async () => {
+  await withBridgeService(false, (service, probe) => {
+    const cwd = join(probe.home, "project");
+    const projects = join(probe.home, ".claude", "projects", encodeProjectDir(cwd));
+    mkdirSync(projects, { recursive: true });
+    writeFileSync(join(projects, "sid-legacy.jsonl"), "{}\n", "utf-8");
+
+    service.restoreFrom(
+      fromWorkspaceSessions([
+        { claudeSessionId: "sid-legacy", name: "reviewer", cwd, args: ["--disallowedTools", '"Write,Edit,NotebookEdit"'], color: "#111", position: 0 }
+      ])
+    );
+
+    const command = sessionPtys.at(-1)!.args.join(" ");
+    expect(command, "the path under test is the resume").toContain("--resume");
+    expect(command.split("--disallowedTools").length - 1, "re-passed once, from the field").toBe(1);
+    expect(command).toContain('--disallowedTools "Write,Edit,NotebookEdit"');
+    expect(service.captureSessions()[0]!.args, "the saved args stop carrying the pair").toBe("");
+  });
+});
+
+test("only the exact boolean closes a tile: a truthy string in a create request does nothing", async () => {
+  await withBridgeService(false, (service) => {
+    service.create({ name: "claimed", strictMcpConfig: "true" as never });
+
+    expect(sessionPtys.at(-1)!.args.join(" ")).not.toContain("--strict-mcp-config");
+    expect(service.captureSessions().map((d) => d.name)).toEqual(["claimed"]);
   });
 });

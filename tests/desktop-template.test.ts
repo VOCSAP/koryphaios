@@ -176,6 +176,54 @@ test("isTemplateSession rejects a non-string role (fail-closed tightening)", () 
   ).toBeNull();
 });
 
+test("a tile's tool denial survives template -> JSON -> parseTemplate -> templateToInputs, and a tile without one stays clean", () => {
+  const defs = [
+    { name: "reviewer", args: "--agent reviewer", disallowedTools: ["Write", "Edit", "NotebookEdit"] },
+    { name: "dev", args: "--agent dev", disallowedTools: [] as string[] },
+    { name: "plain" }
+  ];
+  const back = parseTemplate(JSON.parse(JSON.stringify(toTemplate(defs, "rt"))));
+  expect(back).not.toBeNull();
+  const inputs = templateToInputs(back!.template);
+  expect(inputs[0]!.disallowedTools).toEqual(["Write", "Edit", "NotebookEdit"]);
+  expect(inputs[1]).not.toHaveProperty("disallowedTools");
+  expect(inputs[2]).not.toHaveProperty("disallowedTools");
+});
+
+test("a template saved with the denial inside args gets it lifted into the input field, and a hostile pair stays in args", () => {
+  const tpl = {
+    type: TEMPLATE_TYPE,
+    version: 1,
+    sessions: [
+      { name: "old", args: '--agent reviewer --disallowedTools "Write,Edit,NotebookEdit"' },
+      { name: "hostile", args: '--disallowedTools "Write,$(id)"' },
+      { name: "both", args: '--disallowedTools "Bash"', disallowedTools: ["Write"] }
+    ]
+  };
+  const parsed = parseTemplate(tpl);
+  expect(parsed).not.toBeNull();
+  const inputs = templateToInputs(parsed!.template);
+  expect(inputs[0]).toEqual({
+    name: "old",
+    args: "--agent reviewer",
+    disallowedTools: ["Write", "Edit", "NotebookEdit"]
+  });
+  expect(inputs[1]).toEqual({ name: "hostile", args: '--disallowedTools "Write,$(id)"' });
+  expect(inputs[2]).toEqual({ name: "both", args: '--disallowedTools "Bash"', disallowedTools: ["Write"] });
+});
+
+test("parseTemplate rejects a template whose tool denial holds a name outside the allow-list, whole", () => {
+  const withDenial = (disallowedTools: unknown) => ({
+    type: TEMPLATE_TYPE,
+    version: 1,
+    sessions: [{ name: "a", disallowedTools }]
+  });
+  expect(parseTemplate(withDenial(["Write", "Edit"]))).not.toBeNull();
+  for (const hostile of [["Bash; rm -rf /"], ["$(id)"], ["a b"], ["`x`"], [""], "Write", [42]]) {
+    expect(parseTemplate(withDenial(hostile)), JSON.stringify(hostile)).toBeNull();
+  }
+});
+
 test("a template written before role existed still parses and applies identically (no migration, TEMPLATE_VERSION unchanged)", () => {
   expect(TEMPLATE_VERSION).toBe(1);
   const oldStyleTpl = { type: TEMPLATE_TYPE, version: 1, sessions: [{ name: "dev", agent: "developer" }] };
