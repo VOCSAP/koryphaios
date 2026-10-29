@@ -70,7 +70,7 @@ export interface EmbeddedAgent {
 /** Shared closing contract appended to every embedded profile. */
 const DECK_CONTRACT = [
   'Deck contract: you run as a Koryphaios session tile among peer sessions.',
-  'Coordinate through claude-peers: list_peers to see the team, send_message to report to your team-lead or the supervisor, and send_message to "operator" only for questions a human must answer.',
+  'Coordinate through claude-peers: list_peers to see the team, send_message to report to your team-lead or the supervisor. send_message cannot reach the human operator: when a human must answer, send the question to your team-lead or the supervisor, who relay it.',
   'Keep the shared roadmap honest: roadmap_get for full context, roadmap_update to set an item in_progress when you REALLY start (this locks it under your peer_id), done when complete, back to planned if you abandon it.',
   'End every completed task with a short structured report to whoever briefed you: what changed, how it was validated, what remains open.'
 ].join(' ')

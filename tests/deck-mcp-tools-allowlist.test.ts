@@ -51,17 +51,11 @@ async function readUntil(
   throw new Error(`no JSON-RPC response with id ${wantedId}`);
 }
 
-async function bootRestricted(
-  family: "legacy" | "operator",
-  tools: string | undefined
-) {
+async function bootRestricted(tools: string | undefined) {
   const dir = mkdtempSync(join(tmpdir(), "cp-deck-tools-allowlist-"));
   dirs.push(dir);
   const proc = Bun.spawn(["bun", "server-deck.ts"], {
-    env: scrubEnv(dir, {
-      ...(tools !== undefined ? { CLAUDE_PEERS_TOOLS: tools } : {}),
-      ...(family === "operator" ? { KORY_MCP_FAMILY: "operator" } : {})
-    }),
+    env: scrubEnv(dir, tools !== undefined ? { CLAUDE_PEERS_TOOLS: tools } : {}),
     stdio: ["pipe", "pipe", "pipe"],
   });
   procs.push(proc);
@@ -86,7 +80,7 @@ async function bootRestricted(
 
 describe("server-deck.ts honors CLAUDE_PEERS_TOOLS", () => {
   test("tools/list omits a tool the allow-list excludes", async () => {
-    const { reader, buffer, send } = await bootRestricted("legacy", "graph_draft_prepare");
+    const { reader, buffer, send } = await bootRestricted("graph_draft_prepare");
     send({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} });
     const res = await readUntil(reader, 1, buffer);
     const names = (res.result?.tools ?? []).map((t) => t.name);
@@ -94,7 +88,7 @@ describe("server-deck.ts honors CLAUDE_PEERS_TOOLS", () => {
   }, 30_000);
 
   test("tools/call refuses a hidden tool by name, not just hides it from the list", async () => {
-    const { reader, buffer, send } = await bootRestricted("legacy", "graph_draft_prepare");
+    const { reader, buffer, send } = await bootRestricted("graph_draft_prepare");
     send({
       jsonrpc: "2.0",
       id: 1,
@@ -107,14 +101,14 @@ describe("server-deck.ts honors CLAUDE_PEERS_TOOLS", () => {
   }, 30_000);
 
   test("an empty allow-list grants the operator family zero tools", async () => {
-    const { reader, buffer, send } = await bootRestricted("operator", "");
+    const { reader, buffer, send } = await bootRestricted("");
     send({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} });
     const listed = await readUntil(reader, 1, buffer);
     expect(listed.result?.tools).toEqual([]);
   }, 30_000);
 
   test("an absent allow-list grants the operator family its complete surface", async () => {
-    const { reader, buffer, send } = await bootRestricted("operator", undefined);
+    const { reader, buffer, send } = await bootRestricted(undefined);
     send({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} });
     const listed = await readUntil(reader, 1, buffer);
     expect((listed.result?.tools ?? []).map((tool) => tool.name).sort()).toEqual([
@@ -127,7 +121,7 @@ describe("server-deck.ts honors CLAUDE_PEERS_TOOLS", () => {
   }, 30_000);
 
   test("send_message grants the notify_operator contract alias", async () => {
-    const { reader, buffer, send } = await bootRestricted("operator", "send_message");
+    const { reader, buffer, send } = await bootRestricted("send_message");
     send({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} });
     const listed = await readUntil(reader, 1, buffer);
     expect((listed.result?.tools ?? []).map((tool) => tool.name)).toEqual(["notify_operator"]);
@@ -139,7 +133,7 @@ describe("server-deck.ts honors CLAUDE_PEERS_TOOLS", () => {
   }, 30_000);
 
   test("an allow-list without send_message refuses notify_operator before dispatch", async () => {
-    const { reader, buffer, send } = await bootRestricted("operator", "ask_operator");
+    const { reader, buffer, send } = await bootRestricted("ask_operator");
     send({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "notify_operator", arguments: {} } });
     const called = await readUntil(reader, 1, buffer);
     expect(called.result?.isError).toBe(true);
@@ -147,7 +141,7 @@ describe("server-deck.ts honors CLAUDE_PEERS_TOOLS", () => {
   }, 30_000);
 
   test("the operator family keeps roadmap_dispatch unavailable in both discovery and calls", async () => {
-    const { reader, buffer, send } = await bootRestricted("operator", "graph_draft_prepare");
+    const { reader, buffer, send } = await bootRestricted("graph_draft_prepare");
     send({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} });
     const listed = await readUntil(reader, 1, buffer);
     expect((listed.result?.tools ?? []).map((tool) => tool.name)).toEqual(["graph_draft_prepare"]);

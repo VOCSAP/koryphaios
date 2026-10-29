@@ -1,27 +1,20 @@
-// Card 9f75e69f LOT 2: the five Kory-only tools live only in server-deck.ts's
-// DECK_TOOL_NAMES and server.ts's DECK_ONLY_TOOLS. A test that only counts
-// tools would stay green if the wrong five moved; naming each one closes
-// that gap for both the parity between the two lists and the core server's
-// tools/list.
-
 import { test, expect, afterAll } from "bun:test";
 import { startBroker, stopBroker, scrubEnv, type TestBroker } from "./_helper.ts";
 import { DECK_TOOL_NAMES } from "../server-deck.ts";
 import { DECK_ONLY_TOOLS } from "../server.ts";
 
 const DECK_ONLY_NAMES = [
-  "roadmap_dispatch",
   "graph_draft_prepare",
   "graph_draft_send",
   "ask_operator",
   "ask_operator_wait",
   "notify_operator",
 ] as const;
-const LEGACY_DECK_NAMES = DECK_ONLY_NAMES.filter((name) => name !== "notify_operator");
+const NOT_IN_CORE = [...DECK_ONLY_NAMES, "roadmap_dispatch"] as const;
 
-test("the legacy server serves the legacy five tools while server.ts defines the six family tools", () => {
+test("server-deck.ts serves exactly the five operator-family tools that server.ts declares", () => {
   expect(new Set<string>(DECK_ONLY_NAMES)).toEqual(new Set(DECK_ONLY_TOOLS.map((t) => t.name)));
-  expect(new Set<string>(LEGACY_DECK_NAMES)).toEqual(new Set(DECK_TOOL_NAMES));
+  expect(new Set<string>(DECK_ONLY_NAMES)).toEqual(new Set(DECK_TOOL_NAMES));
 });
 
 const brokers: TestBroker[] = [];
@@ -72,7 +65,6 @@ async function readUntil(
 }
 
 test("the core server's tools/list names none of the family-only tools", async () => {
-  expect(new Set<string>(DECK_ONLY_NAMES)).toEqual(new Set(DECK_ONLY_TOOLS.map((t) => t.name)));
   const b = await startBroker();
   brokers.push(b);
   const proc = Bun.spawn(["bun", "server.ts"], {
@@ -105,7 +97,7 @@ test("the core server's tools/list names none of the family-only tools", async (
   const res = await readUntil(reader, 1, buffer);
   const names = (res.result?.tools ?? []).map((t) => t.name);
   expect(names.length).toBeGreaterThan(0);
-  for (const name of DECK_ONLY_NAMES) {
+  for (const name of NOT_IN_CORE) {
     expect(names).not.toContain(name);
   }
 
@@ -116,7 +108,7 @@ test("the core server's tools/list names none of the family-only tools", async (
   // the initialize response, not from the source.
   const instructions = init.result?.instructions ?? "";
   expect(instructions.length).toBeGreaterThan(0);
-  for (const name of DECK_ONLY_NAMES) {
+  for (const name of NOT_IN_CORE) {
     expect(instructions).not.toContain(name);
   }
 
@@ -125,7 +117,7 @@ test("the core server's tools/list names none of the family-only tools", async (
   // one call per name so a single surviving `case` cannot hide behind an
   // earlier failure.
   let id = 2;
-  for (const name of DECK_ONLY_NAMES) {
+  for (const name of NOT_IN_CORE) {
     send({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: {} } });
     const callRes = await readUntil(reader, id, buffer);
     expect(callRes.result).toBeUndefined();

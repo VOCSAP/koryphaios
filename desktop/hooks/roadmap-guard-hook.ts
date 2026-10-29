@@ -18,9 +18,6 @@
  * fire on it. Names are closed: a roadmap_* tool under any other prefix is not
  * guarded. */
 const TOOL_TEXT_FIELDS: Record<string, readonly string[]> = {
-  "mcp__claude-peers__roadmap_add": ["title", "description", "rationale", "context"],
-  "mcp__claude-peers__roadmap_update": ["title", "description", "rationale", "context"],
-  "mcp__claude-peers__roadmap_append_context": ["text"],
   "mcp__kory-roadmap__roadmap_add": ["title", "description", "rationale", "context"],
   "mcp__kory-roadmap__roadmap_update": ["title", "description", "rationale", "context"],
   "mcp__kory-roadmap__roadmap_append_context": ["text"],

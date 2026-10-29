@@ -423,7 +423,7 @@ describe("server-deck.ts ask_operator reply routing", () => {
 
     expect(h.stderr.text).toContain("CLAUDE_PEERS_DESK_SESSION is unset");
     expect(h.stderr.text).toContain("graph_draft_send");
-    expect(h.stderr.text).toContain("roadmap_dispatch");
+    expect(h.stderr.text).toContain("ask_operator");
     // Distinct trace from the "token present but file missing" case above --
     // an empty token must never fire that other branch's message.
     expect(h.stderr.text).not.toContain("No usable session-identity file");

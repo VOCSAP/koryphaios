@@ -108,25 +108,15 @@ test("the node-bundled server-deck.mjs starts under node, answers initialize, an
   const initResponse = (await readUntil(reader, 0, buffer)) as {
     result?: { serverInfo?: { name?: string }; capabilities?: unknown; instructions?: string };
   };
-  expect(initResponse.result?.serverInfo?.name).toBe("claude-peers-deck");
+  expect(initResponse.result?.serverInfo?.name).toBe("kory-operator");
   expect(initResponse.result?.capabilities).toEqual({ tools: {} });
 
-  // The instructions block escapes every guard that looks at tools/list, so
-  // it gets its own. The whole clause is pinned, not the words it is made
-  // of: a text reusing "directive" and "roadmap_dispatch" to say the
-  // OPPOSITE ("roadmap_dispatch is disabled here") satisfies both tokens
-  // separately. Pinning a literal is right here because that sentence IS
-  // the deliverable, nothing downstream reads it, and a future rewording
-  // must go through this test on purpose. The cap bounds THIS block only:
-  // the client charges every connected server's instructions to a single
-  // budget and truncates silently, and that SUM is guarded nowhere today
-  // (card d77f6e4a).
+  // The instructions block escapes every guard that looks at tools/list; the
+  // whole clause is pinned, not the words it is made of.
   const instructions = initResponse.result?.instructions ?? "";
   expect(instructions.length).toBeGreaterThan(0);
   expect(instructions.length).toBeLessThan(400);
-  expect(instructions).toContain(
-    "kind='directive' card filed and queued with the core server's roadmap tools is executed here, by roadmap_dispatch"
-  );
+  expect(instructions).toContain("Use ask_operator for blocking questions and notify_operator for one-way signed notices");
 
   // This diagnostic is emitted only when Node evaluates a Bun-only config path.
   expect(stderrChunks.join("")).not.toContain("Bun is not defined");
@@ -137,6 +127,6 @@ test("the node-bundled server-deck.mjs starts under node, answers initialize, an
   };
   const names = (listResponse.result?.tools ?? []).map((t) => t.name).sort();
   expect(names).toEqual(
-    ["ask_operator", "ask_operator_wait", "graph_draft_prepare", "graph_draft_send", "roadmap_dispatch"].sort()
+    ["ask_operator", "ask_operator_wait", "notify_operator", "graph_draft_prepare", "graph_draft_send"].sort()
   );
 }, 30_000);

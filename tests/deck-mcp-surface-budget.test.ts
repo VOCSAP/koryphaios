@@ -2,13 +2,7 @@ import { test, expect, describe } from "bun:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 
-// The query makes a separate module instance: the family is read at load, and other test files import the default one.
-const ambientFamily = process.env.KORY_MCP_FAMILY;
-process.env.KORY_MCP_FAMILY = "operator";
-const { DECK_TOOL_NAMES, mcp } = await import("../server-deck.ts?family=operator").finally(() => {
-  if (ambientFamily === undefined) delete process.env.KORY_MCP_FAMILY;
-  else process.env.KORY_MCP_FAMILY = ambientFamily;
-});
+import { DECK_TOOL_NAMES, mcp } from "../server-deck.ts";
 
 type DeckTool = { name: string; description?: string; inputSchema: unknown };
 

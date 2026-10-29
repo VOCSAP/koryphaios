@@ -42,8 +42,8 @@ broker is back (it usually auto-spawns with the first session in local mode).
 
 **Do peers reply to megaphone messages?**
 No — megaphone broadcasts and other Deck announcements are one-way,
-framed "informational only, do not reply". Agents answer the operator via
-`send_message` to `operator` (the Inbox).
+framed "informational only, do not reply". The lead and the supervisor answer the operator with
+`notify_operator` or `ask_operator` (the Inbox); a worker goes through its lead.
 
 ## Roadmap
 

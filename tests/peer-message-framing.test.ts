@@ -123,12 +123,11 @@ test("a message that already quotes the note is not treated specially", () => {
 // --- The operator inbox is a PERSON, never framed ---
 
 test("a message to the operator is never framed, whatever expects_reply says", () => {
-  // send_message accepts to_peer_id 'operator', and server.ts does not special-
-  // case it, so the waiver used to apply there too: an agent passing
-  // expects_reply:false would drop ~250 characters of AGENT-directed
+  // Every outbound text passes through composeOutboundMessage, including
+  // notify_operator's: a waiver would drop ~250 characters of AGENT-directed
   // instructions ("continue your current task") into a HUMAN's desktop inbox.
-  // Worse than noise: for that destination the recipient's answer IS the point
-  // of the channel, so a waiver is meaningless there by construction.
+  // For that destination the recipient's answer IS the point of the channel, so
+  // a waiver is meaningless there by construction.
   expect(composeOutboundMessage(SAMPLE, false, OPERATOR_PEER_ID)).toBe(SAMPLE);
   // The raw sentinel token too. It cannot actually deliver anything (the broker
   // resolves to_peer_id as a peer_id and 404s on it), but the refusal to FRAME

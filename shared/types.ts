@@ -399,8 +399,8 @@ function sentinelToken(peerId: PeerId): InstanceToken {
 export const DECK_INSTANCE_TOKEN: InstanceToken = sentinelToken("deck");
 export const DECK_PEER_ID: PeerId = "deck";
 /**
- * Reserved operator inbox sentinel: agents send_message to 'operator', the Deck
- * polls /operator-inbox. Permanently dormant like the deck row -- never listed,
+ * Reserved operator inbox sentinel: notify_operator and ask_operator deposit to
+ * it, the Deck polls /operator-inbox. Permanently dormant like the deck row -- never listed,
  * never purged.
  */
 export const OPERATOR_INSTANCE_TOKEN: InstanceToken = sentinelToken("operator");

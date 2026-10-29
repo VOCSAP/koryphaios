@@ -136,7 +136,7 @@ function tapSendMessage(target: string): { url: string; port: number; sends: Arr
   return { url: `http://127.0.0.1:${srv.port}`, port: srv.port as number, sends };
 }
 
-async function boot(withCredential: boolean, operatorFamily = false, tapWire = false): Promise<Harness> {
+async function boot(withCredential: boolean, tapWire = false): Promise<Harness> {
   const b = await startBroker();
   brokers.push(b);
   const dir = mkdtempSync(join(tmpdir(), "cp-ask-"));
@@ -186,7 +186,7 @@ async function boot(withCredential: boolean, operatorFamily = false, tapWire = f
     extra.CLAUDE_PEERS_APPROVAL_FILE = credFile;
   }
   const proc = Bun.spawn(["bun", "server-deck.ts"], {
-    env: scrubEnv(dir, operatorFamily ? { ...extra, KORY_MCP_FAMILY: "operator" } : extra),
+    env: scrubEnv(dir, extra),
     stdio: ["pipe", "pipe", "pipe"],
   });
   procs.push(proc);
@@ -257,7 +257,7 @@ describe("ask_operator over MCP stdio", () => {
   }, 60_000);
 
   test("the operator family advertises notify_operator and not roadmap_dispatch", async () => {
-    const h = await boot(true, true);
+    const h = await boot(true);
     h.send({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} });
     const res = await readUntil(h.reader, 1, h.buffer);
     const names = (res.result?.tools ?? []).map((tool) => tool.name);
@@ -267,7 +267,7 @@ describe("ask_operator over MCP stdio", () => {
   }, 60_000);
 
   test("notify_operator deposits a signed one-way message", async () => {
-    const h = await boot(true, true, true);
+    const h = await boot(true, true);
     h.send({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "notify_operator", arguments: { message: "review complete" } } });
     const res = await readUntil(h.reader, 1, h.buffer);
     expect(res.result?.isError).toBeFalsy();
@@ -303,7 +303,7 @@ describe("ask_operator over MCP stdio", () => {
   }, 60_000);
 
   test("notify_operator rejects a non-string message before consulting credentials", async () => {
-    const h = await boot(false, true);
+    const h = await boot(false);
     h.send({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "notify_operator", arguments: { message: 1 } } });
     const res = await readUntil(h.reader, 1, h.buffer);
     expect(res.result?.isError).toBe(true);

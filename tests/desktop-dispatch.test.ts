@@ -165,7 +165,8 @@ test("composeStopText names the item and carries the unlock statement", () => {
 test("composeStopText targets the supervisor or the whole group", () => {
   const it = item({ title: "t" });
   expect(composeStopText(it, true)).toContain("As supervisor:");
-  expect(composeStopText(it, true)).toContain('send_message to "operator"');
+  expect(composeStopText(it, true)).toContain("(notify_operator)");
+  expect(composeStopText(it, true)).not.toContain('send_message to "operator"');
   expect(composeStopText(it, false)).toContain("If you are working on this item: stop now");
   expect(composeStopText(it, false)).not.toContain("As supervisor:");
 });

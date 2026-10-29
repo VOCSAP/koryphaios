@@ -1601,8 +1601,8 @@ function notifyWaitingSession(id: string): void {
 service.on('needs-you', ({ id }: { id: string }) => notifyWaitingSession(id))
 
 // ----- Operator inbox (PLAN C12) -----
-// Agents `send_message` to the reserved 'operator' peer; the broker parks those
-// messages on the sentinel row and the Deck drains them here every 10 s
+// A lead or supervisor's notify_operator / ask_operator deposit is parked by the
+// broker on the sentinel row and the Deck drains it here every 10 s
 // (best-effort: the broker may not even be running before the first session
 // spawns). Drained batches go to the renderer inbox + a system notification.
 const INBOX_POLL_MS = 10_000

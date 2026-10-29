@@ -469,7 +469,7 @@ The Deck writes no MCP configuration for a sandboxed tile and does not project
 session sees are the ones registered with the container's own `claude`, in the
 user scope, on the auth volume that every container shares. Two are expected:
 
-- `claude-peers` (messaging and identity), restricted to its non-roadmap tools;
+- `claude-peers` (messaging and identity, peer tools only);
 - `kory-roadmap` (the six roadmap tools).
 
 Registering them is an operator step; the Docker view only reports it (the
@@ -495,9 +495,7 @@ checkout and register one of the safe forms above instead of `/work`.
 `docker exec -it <kory-sbx-...> bash`):
 
 ```bash
-claude mcp add --scope user --transport stdio claude-peers \
-  -e CLAUDE_PEERS_TOOLS=list_peers,send_message,set_summary,check_messages,wait_for_message,whoami,list_groups,switch_group,set_id \
-  -- bun CORE/server.ts
+claude mcp add --scope user --transport stdio claude-peers -- bun CORE/server.ts
 claude mcp add --scope user --transport stdio kory-roadmap -- bun CORE/server-roadmap.ts
 ```
 

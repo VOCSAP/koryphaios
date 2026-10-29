@@ -140,7 +140,7 @@ function buildDeckControlMcpConfig(
       'kory-operator': {
         command: input.execPath,
         args: [deckLeadScriptPath(input.mcpScriptPath)],
-        env: { ELECTRON_RUN_AS_NODE: '1', KORY_MCP_FAMILY: 'operator' }
+        env: { ELECTRON_RUN_AS_NODE: '1' }
       }
     }
   }

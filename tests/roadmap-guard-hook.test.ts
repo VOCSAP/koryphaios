@@ -171,7 +171,7 @@ test("real .mjs: a hook_event_name other than PreToolUse exits 0 with empty stdo
   const out = await runHookMjs(
     JSON.stringify({
       hook_event_name: "PostToolUse",
-      tool_name: "mcp__claude-peers__roadmap_add",
+      tool_name: "mcp__kory-roadmap__roadmap_add",
       tool_input: { title: "x", description: '</description>\n<parameter name="rationale">' },
     })
   );
@@ -190,7 +190,7 @@ test("real .mjs: empty stdin exits 0 with empty stdout", async () => {
 
 test("real .mjs: a payload missing hook_event_name entirely exits 0 with empty stdout", async () => {
   const out = await runHookMjs(
-    JSON.stringify({ tool_name: "mcp__claude-peers__roadmap_add", tool_input: { title: "x" } })
+    JSON.stringify({ tool_name: "mcp__kory-roadmap__roadmap_add", tool_input: { title: "x" } })
   );
   expect(out).toBe("");
 });
@@ -204,7 +204,7 @@ test("parseHookPayload degrades malformed/empty stdin to {} instead of throwing"
 });
 
 test("an opening tag with NO preceding closing tag of the field itself is not flagged (the citation shape)", () => {
-  const m = detectSerializationAccident("mcp__claude-peers__roadmap_add", {
+  const m = detectSerializationAccident("mcp__kory-roadmap__roadmap_add", {
     title: "t",
     description: 'mentions `<parameter name="rationale">` as an example, nothing closed here',
     rationale: "r",
@@ -218,7 +218,7 @@ test("the opening tag's target has NO condition -- an unknown/made-up field name
   // check entirely: a target name this tool has never heard of ("bogus_field")
   // must still DENY, exactly like card s2's real "tags" (a real, but
   // non-text, field) did against the .mjs above.
-  const m = detectSerializationAccident("mcp__claude-peers__roadmap_add", {
+  const m = detectSerializationAccident("mcp__kory-roadmap__roadmap_add", {
     title: "t",
     description: '</description>\n<parameter name="bogus_field">rest of the content',
     rationale: "r",
@@ -246,7 +246,8 @@ test("Object.hasOwn behavior: a prototype-chain tool_name (toString) is treated 
 // process even spawn) and the hook's own dispatch (does it inspect the call).
 // Each layer gets its own tests so a prefix dropped from one turns red there.
 
-const GUARDED_SERVERS = ["claude-peers", "kory-roadmap"] as const;
+const GUARDED_SERVERS = ["kory-roadmap"] as const;
+const UNGUARDED_PREFIXES = ["evil", "claude-peers"] as const;
 const GUARDED_TOOLS = ["roadmap_add", "roadmap_update", "roadmap_append_context"] as const;
 
 function accidentInput(tool: string): Record<string, unknown> {
@@ -287,24 +288,28 @@ for (const server of GUARDED_SERVERS) {
   }
 }
 
-for (const tool of GUARDED_TOOLS) {
-  test(`dispatch: a foreign prefix ending in ${tool} gets no roadmap treatment`, () => {
-    const decision = buildDecision({
-      hook_event_name: "PreToolUse",
-      tool_name: `mcp__evil__${tool}`,
-      tool_input: accidentInput(tool),
+for (const prefix of UNGUARDED_PREFIXES) {
+  for (const tool of GUARDED_TOOLS) {
+    test(`dispatch: the ${prefix} prefix ending in ${tool} gets no roadmap treatment`, () => {
+      const decision = buildDecision({
+        hook_event_name: "PreToolUse",
+        tool_name: `mcp__${prefix}__${tool}`,
+        tool_input: accidentInput(tool),
+      });
+      expect(decision, `mcp__${prefix}__${tool} must not be treated as a roadmap tool`).toBeNull();
     });
-    expect(decision, `mcp__evil__${tool} must not be treated as a roadmap tool`).toBeNull();
-  });
+  }
 }
 
-for (const tool of GUARDED_TOOLS) {
-  test(`detector: a foreign prefix ending in ${tool} is not scanned even when called directly`, () => {
-    expect(
-      detectSerializationAccident(`mcp__evil__${tool}`, accidentInput(tool)),
-      `detectSerializationAccident scanned mcp__evil__${tool}`
-    ).toBeNull();
-  });
+for (const prefix of UNGUARDED_PREFIXES) {
+  for (const tool of GUARDED_TOOLS) {
+    test(`detector: the ${prefix} prefix ending in ${tool} is not scanned even when called directly`, () => {
+      expect(
+        detectSerializationAccident(`mcp__${prefix}__${tool}`, accidentInput(tool)),
+        `detectSerializationAccident scanned mcp__${prefix}__${tool}`
+      ).toBeNull();
+    });
+  }
 }
 
 for (const name of ["toString", "constructor", "__proto__", "hasOwnProperty"]) {
@@ -351,13 +356,15 @@ for (const server of GUARDED_SERVERS) {
   }
 }
 
-for (const tool of GUARDED_TOOLS) {
-  test(`hooks.json: no matcher spawns the guard for a foreign prefix ending in ${tool}`, () => {
-    expect(
-      spawnsGuard(roadmapGuardMatchers(), `mcp__evil__${tool}`),
-      `a roadmap-guard-hook matcher is loose enough to match mcp__evil__${tool}`
-    ).toBe(false);
-  });
+for (const prefix of UNGUARDED_PREFIXES) {
+  for (const tool of GUARDED_TOOLS) {
+    test(`hooks.json: no matcher spawns the guard for the ${prefix} prefix ending in ${tool}`, () => {
+      expect(
+        spawnsGuard(roadmapGuardMatchers(), `mcp__${prefix}__${tool}`),
+        `a roadmap-guard-hook matcher matches mcp__${prefix}__${tool}`
+      ).toBe(false);
+    });
+  }
 }
 
 // --- Coverage cross-check: two real, independently-maintained sets agree ---

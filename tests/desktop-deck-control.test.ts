@@ -2017,7 +2017,7 @@ test("writeSupervisorMcpConfig mounts the separated kory operator and deck serve
   });
   expect(deck.env.DECK_CONTROL_TOOLS).toBeUndefined();
   expect(parsed.mcpServers["kory-operator"]!.args).toEqual([join(dirname(mcpScriptPath), "server-deck.mjs")]);
-  expect(parsed.mcpServers["kory-operator"]!.env).toEqual({ ELECTRON_RUN_AS_NODE: "1", KORY_MCP_FAMILY: "operator" });
+  expect(parsed.mcpServers["kory-operator"]!.env).toEqual({ ELECTRON_RUN_AS_NODE: "1" });
   expect(SUPERVISOR_BRIEFING).toContain("deck_list_agents");
 });
 
@@ -2080,7 +2080,7 @@ test("writeSupervisorMcpConfig also writes the deck-lead key, deck-control untou
   const operator = parsed.mcpServers["kory-operator"]!;
   expect(operator.command).toBe("/usr/bin/electron");
   expect(operator.args).toEqual([join(dirname(mcpScriptPath), "server-deck.mjs")]);
-  expect(operator.env).toEqual({ ELECTRON_RUN_AS_NODE: "1", KORY_MCP_FAMILY: "operator" });
+  expect(operator.env).toEqual({ ELECTRON_RUN_AS_NODE: "1" });
 });
 
 test("writeTeamLeadMcpConfig also writes the deck-lead key, same shape as the supervisor's", () => {
@@ -2105,7 +2105,7 @@ test("writeTeamLeadMcpConfig also writes the deck-lead key, same shape as the su
   const operator = parsed.mcpServers["kory-operator"]!;
   expect(operator.command).toBe("/usr/bin/electron");
   expect(operator.args).toEqual([join(dirname(mcpScriptPath), "server-deck.mjs")]);
-  expect(operator.env).toEqual({ ELECTRON_RUN_AS_NODE: "1", KORY_MCP_FAMILY: "operator" });
+  expect(operator.env).toEqual({ ELECTRON_RUN_AS_NODE: "1" });
   expect(parsed.mcpServers["kory-deck"]!.env.DECK_CONTROL_TOOLS).toBe([...TEAM_LEAD_DECK_TOOLS, "roadmap_dispatch"].join(","));
 });
 

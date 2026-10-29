@@ -141,9 +141,30 @@ async function boot(toolsEnv: string | undefined): Promise<Harness> {
 }
 
 describe("CLAUDE_PEERS_TOOLS: server.ts's tool allow-list", () => {
-  test("legacy roadmap registry has the exact shared schemas", () => {
-    expect(TOOLS.filter((tool) => tool.name.startsWith("roadmap_"))).toEqual(ROADMAP_TOOLS);
+  test("the core registry carries no roadmap tool", () => {
+    expect(TOOLS.filter((tool) => tool.name.startsWith("roadmap_")).map((tool) => tool.name)).toEqual([]);
   });
+
+  test("the core neither lists, announces nor serves a roadmap tool, and does not announce the operator recipient", async () => {
+    const h = await spawnServer(undefined);
+    h.send(INITIALIZE_REQUEST(0));
+    const init = await readUntil(h.reader, 0, h.buffer);
+    const instructions = init.result?.instructions ?? "";
+    expect(instructions.length, "server.ts serves no instructions").toBeGreaterThan(0);
+    expect(instructions).not.toContain("to_peer_id 'operator'");
+    h.send({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} });
+    const names = ((await readUntil(h.reader, 1, h.buffer)).result?.tools ?? []).map((t) => t.name);
+    let id = 2;
+    for (const { name } of ROADMAP_TOOLS) {
+      expect(names, `tools/list names ${name}`).not.toContain(name);
+      expect(instructions, `instructions name ${name}`).not.toContain(name);
+      h.send({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: {} } });
+      const called = await readUntil(h.reader, id, h.buffer);
+      expect(called.result, `tools/call ${name} was served`).toBeUndefined();
+      expect(called.error?.message ?? "").toContain(`Unknown tool: ${name}`);
+      id++;
+    }
+  }, 60_000);
 
   test("unset: every tool listed, unrestricted (zero regression for a session launched outside Kory)", async () => {
     const h = await boot(undefined);
@@ -154,7 +175,7 @@ describe("CLAUDE_PEERS_TOOLS: server.ts's tool allow-list", () => {
     // full array passed through, not a coincidental single survivor.
     expect(names).toContain("list_peers");
     expect(names).toContain("send_message");
-    expect(names.filter((name) => name.startsWith("roadmap_")).sort()).toEqual(ROADMAP_TOOLS.map((tool) => tool.name).sort());
+    expect(names.filter((name) => name.startsWith("roadmap_")), "server.ts lists a roadmap tool").toEqual([]);
     // Set equality against the source of truth, not a count: a count stays
     // green when the filter drops the WRONG tools, as long as the total
     // lands right.
@@ -540,68 +561,6 @@ describe.skipIf(NO_MEASURABLE_GENERATION)(`kory-roadmap authenticates to a broke
 
     expect(broker.requests.map((r) => r.authorization)).toEqual([null]);
   }, 60_000);
-});
-
-describe.skipIf(NO_MEASURABLE_GENERATION)(`the legacy server.ts and kory-roadmap render the same roadmap text (${NEEDS_GENERATION})`, () => {
-  let legacy: Harness;
-  let companion: Harness;
-  let nextId = 1;
-
-  beforeAll(async () => {
-    const b = await startBroker();
-    brokers.push(b);
-    const env = { CLAUDE_CODE_MESSAGING_SOCKET: "roadmap-parity-socket" };
-    legacy = await spawnServer(undefined, "server.ts", { broker: b, env });
-    legacy.send(INITIALIZE_REQUEST(0));
-    await readUntil(legacy.reader, 0, legacy.buffer);
-    companion = await spawnServer(undefined, "server-roadmap.ts", { broker: b, env });
-    companion.send(INITIALIZE_REQUEST(0));
-    await readUntil(companion.reader, 0, companion.buffer);
-  }, 120_000);
-
-  const call = async (h: Harness, name: string, args: Record<string, unknown>) => {
-    const id = nextId++;
-    h.send({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } });
-    const res = await readUntil(h.reader, id, h.buffer);
-    return { isError: res.result?.isError === true, text: res.result?.content?.[0]?.text ?? "" };
-  };
-  const bothServers = async (name: string, args: Record<string, unknown>) => {
-    const viaLegacy = await call(legacy, name, args);
-    expect(viaLegacy.text, `${name} is not served by server.ts`).not.toContain("tool not available");
-    const viaCompanion = await call(companion, name, args);
-    expect(viaCompanion, `${name}: kory-roadmap renders differently from server.ts`).toEqual(viaLegacy);
-    return viaLegacy;
-  };
-
-  test("a request the broker refuses is rendered the same way", async () => {
-    const refused = await bothServers("roadmap_add", {});
-    expect(refused.isError).toBe(true);
-    expect(refused.text).toContain("title is required");
-  }, 60_000);
-
-  test("each of the six roadmap tools gives the same result through either server", async () => {
-    expect((await bothServers("roadmap_list", {})).text).toContain("The roadmap is empty");
-
-    const added = await call(legacy, "roadmap_add", { title: "Parity probe", kind: "bug" });
-    expect(added.isError, added.text).toBe(false);
-    const listed = await bothServers("roadmap_list", {});
-    expect(listed.text, "the card added through server.ts is invisible to the list").toContain("Parity probe");
-    const cardId = /\[([0-9a-f]{8})\]/.exec(listed.text)?.[1];
-    expect(cardId, "the list shows no card id").toBeDefined();
-    expect((await bothServers("roadmap_get", { id: cardId! })).text).toContain("Parity probe");
-
-    const unknown = "ffffffff";
-    const refusals: Array<[string, Record<string, unknown>]> = [
-      ["roadmap_get", { id: unknown }],
-      ["roadmap_update", { id: unknown, status: "done" }],
-      ["roadmap_archive", { id: unknown }],
-      ["roadmap_append_context", { id: unknown, text: "note" }],
-    ];
-    for (const [name, args] of refusals) {
-      const refused = await bothServers(name, args);
-      expect(refused.isError, `${name} on a bad argument must be an error: ${refused.text}`).toBe(true);
-    }
-  }, 120_000);
 });
 
 interface FaultProxy extends BrokerEndpoint {

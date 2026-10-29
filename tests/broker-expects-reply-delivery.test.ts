@@ -12,7 +12,8 @@ import {
   stopBroker,
   type TestBroker,
 } from "./_helper.ts";
-import { OPERATOR_INSTANCE_TOKEN, OPERATOR_PEER_ID } from "../shared/types.ts";
+import { readSessionIdentityFile } from "../shared/peer-cache.ts";
+import { OPERATOR_INSTANCE_TOKEN } from "../shared/types.ts";
 import { PEER_NO_REPLY_NOTE } from "../shared/message-framing.ts";
 
 const FORCED_GROUP = "expects-reply-delivery-e2e-spec-258af6eb";
@@ -101,9 +102,13 @@ async function runCredentialFile(b: TestBroker): Promise<string> {
   return path;
 }
 
-/** Spawn one `bun server.ts` MCP peer against an already-running broker. */
-async function spawnPeer(b: TestBroker, extraEnv: Record<string, string> = {}): Promise<Peer> {
-  const proc = Bun.spawn(["bun", "server.ts"], {
+/** Spawn one `bun <entrypoint>` MCP peer (server.ts by default) against an already-running broker. */
+async function spawnPeer(
+  b: TestBroker,
+  extraEnv: Record<string, string> = {},
+  entrypoint = "server.ts"
+): Promise<Peer> {
+  const proc = Bun.spawn(["bun", entrypoint], {
     env: scrubEnv(b.tmpDir, {
       CLAUDE_PEERS_BROKER_URL: b.url,
       CLAUDE_PEERS_PORT: String(b.port),
@@ -268,14 +273,21 @@ describe("send_message expects_reply, end to end", () => {
   test("a waived message aimed at the operator inbox is stored unframed", async () => {
     const b = await startBroker();
     brokers.push(b);
-    const sender = await spawnPeer(b, { CLAUDE_PEERS_APPROVAL_FILE: await runCredentialFile(b) });
+    const deskSession = `expects-reply-operator-${crypto.randomUUID()}`;
+    const env = { CLAUDE_PEERS_APPROVAL_FILE: await runCredentialFile(b), CLAUDE_PEERS_DESK_SESSION: deskSession };
+    // A tile is a server.ts sibling that registers attested and publishes its identity, plus the
+    // server-deck.ts process that reads it: notify_operator is the one-way deposit that remains.
+    await spawnPeer(b, env);
+    let identity = await readSessionIdentityFile(deskSession, b.tmpDir);
+    for (let i = 0; i < 100 && !identity; i++) {
+      await Bun.sleep(100);
+      identity = await readSessionIdentityFile(deskSession, b.tmpDir);
+    }
+    expect(identity, "the server.ts sibling never published its identity").not.toBeNull();
+    const sender = await spawnPeer(b, env, "server-deck.ts");
 
     const forHuman = "Blocked on a credential, can you confirm which vault entry?";
-    const sent = await callTool(sender, "send_message", {
-      to_peer_id: OPERATOR_PEER_ID,
-      message: forHuman,
-      expects_reply: false,
-    });
+    const sent = await callTool(sender, "notify_operator", { message: forHuman });
 
     // The operator inbox is read from the broker DB directly rather than over
     // POST /poll-messages: that endpoint now refuses sentinel-shaped
@@ -287,13 +299,6 @@ describe("send_message expects_reply, end to end", () => {
       const rows = db
         .query("SELECT text FROM messages WHERE to_token = ? ORDER BY id DESC")
         .all(OPERATOR_INSTANCE_TOKEN) as { text: string }[];
-      // Asserted, not tolerated. The first cut of this test carried an
-      // "if (rows.length === 0) return" escape for the case where the broker
-      // refuses the operator inbox on a secretless group -- measured with a
-      // temporary probe (`expect(rows.length).toBe(-999)` -> `Received: 1`),
-      // that branch never runs, so it was pure fail-open: a future regression
-      // that stopped the message reaching the inbox at all would have left this
-      // test green.
       expect(sent.result?.isError).toBeFalsy();
       expect(rows.length).toBe(1);
       expect(rows[0]!.text).toBe(forHuman);

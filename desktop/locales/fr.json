@@ -704,7 +704,7 @@
   "nav.inbox": "Courrier",
   "inbox.title": "Courrier de l'opérateur",
   "inbox.close": "Fermer",
-  "inbox.empty": "Aucun message pour l'instant. Les agents peuvent t'écrire via send_message vers 'operator' — questions, résultats, blocages.",
+  "inbox.empty": "Aucun message pour l'instant. Les leads et le superviseur t'écrivent via notify_operator ou ask_operator ; les workers passent par leur lead.",
   "inbox.drafts": "Questions à ouvrir en graphe",
   "inbox.openGraph": "Ouvrir en graphe",
   "inbox.hint": "Fermer un message ne l'acquitte jamais — il reste ici tant que tu ne l'as pas fait.",

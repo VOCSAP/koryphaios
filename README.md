@@ -32,7 +32,7 @@ This project started as a fork of [louislva/claude-peers-mcp](https://github.com
 - **delivery hardening**: heuristic ack via `send_message` (replying acknowledges prior messages from the same group), capped WS flush at reconnect (no more backlog avalanche), TTL purge of stale undelivered messages.
 - **Deck announcements (`POST /announce`)**: the desktop Deck broadcasts one-way, no-reply system messages to a group -- an automatic join announcement when a session's `peer_id` resolves, plus free-text operator messages from the sidebar. Sent from a reserved non-routable `deck` sender; peers receive them framed as "informational only, do not reply" and cannot reply back.
 - **Shared roadmap**: a persistent per-project backlog in the broker (`roadmap_items`, scoped by normalized git remote, zero FK to peers/groups so items outlive sessions), driven by 5 new MCP tools (`roadmap_list/get/add/update/archive`) and the Deck's Roadmap view; JSON export/import (`bun cli.ts roadmap-export/import`). Items also carry an optional `directive` command + `target_peer_ids` for the Deck's **directive cards** (see the desktop section).
-- **Orchestrator batch (broker side)**: targeted announces (`POST /announce` with `to_peer_id`, the team-lead notification path), an **operator inbox** (agents `send_message` to the reserved `operator` peer -- the human in front of the Deck -- drained via `POST /operator-inbox`; requires a group with a secret, since the secret-less `default` group could be drained by anyone), and a `queue` position on roadmap items (the Deck's dispatch queue).
+- **Orchestrator batch (broker side)**: targeted announces (`POST /announce` with `to_peer_id`, the team-lead notification path), an **operator inbox** (the `ask_operator` and `notify_operator` tools of a lead or supervisor reach the human in front of the Deck -- drained via `POST /operator-inbox`; requires a group with a secret, since the secret-less `default` group could be drained by anyone), and a `queue` position on roadmap items (the Deck's dispatch queue).
 - **Remote approvals**: when a session blocks on a question, the broker parks it as an approval and rings the operator's phone over **Telegram** or **Discord** (bot tokens enrolled from the app, sealed at rest broker-side; both transports are OUTGOING, so nothing on the PC is ever exposed). Exactly one answer wins — a conditional `UPDATE` makes "answered in the Deck" and "answered on the phone" mutually exclusive, and every other copy is rewritten to "already handled". Identity is a NEW axis, `operator_id`: an Ed25519 keypair whose PUBLIC half alone is stored, so two OS accounts on one machine are compartmentalised and two PCs can share one identity. Agents reach it through `ask_operator` / `ask_operator_wait`.
 - **Desktop app (Koryphaios)**: dock several Claude Code peer sessions in one window and orchestrate them as a small agent team (see below).
 
@@ -52,7 +52,7 @@ workspaces (each tile resumes its Claude conversation). English / French UI.
 - **Team-lead 👑**: one designated session per window, target of dispatches and integration notices.
 - **Git worktrees**: spawn each agent in its own worktree/branch; a Worktrees view shows dirty state, attached sessions and orphans (resume or clean up).
 - **Diff / review**: per-session or per-worktree diff panel plus a one-shot reviewer agent that reports to the team-lead.
-- **Operator inbox ✉**: agents reach the human with `send_message` to `operator`; messages land in a Deck panel with system notifications.
+- **Operator inbox ✉**: leads and the supervisor reach the human with `ask_operator` and `notify_operator`; messages land in a Deck panel with system notifications.
 - **Awareness**: quota auto-resume (opt-in), "needs you" detection with clickable notifications, per-window activity journal 📜 with text export.
 - **Help assistant "?" and resume digest 📋**: throwaway read-only `claude -p` invocations grounded in the live app state (digest sources are configured in the GLOBAL config only -- never per repo).
 - **Templates**: hierarchical composer (lead top-center) to create/edit team recipes without spawning; applying never steals an existing crown.
@@ -86,7 +86,7 @@ Scope of this mode:
 
 - `roadmap_items` is replicated, and while the link is up `peers` and `messages` are federated: the replica relays its agents to the upstream on every sync pass (`POST /federation/sync`, a heartbeat for all of them at once) and relays each message to a remote peer synchronously (`POST /federation/send`), so agents on this machine see the upstream's peers and the other replicas' peers in `list_peers` (`Via: upstream broker`) and message them as in Mode 2, without any client leaving loopback. During an outage the remote peers stay visible for `CLAUDE_PEERS_FEDERATION_GRACE_SEC` (default 600 s) with a `link down for Ns` mention and a message sent to one of them is queued (`queued: true` in the ack) and delivered at reconnection. Past the grace, remote peers disappear from `list_peers`, the queue is dropped and each sender is told so by a local message from `deck`; messaging between local agents is never affected. Inbound messages sent to this machine's agents during the cut wait upstream and arrive at the first pass after reconnection.
 - The upstream must run a version serving `/federation/sync|send` for cross-machine messaging: an older upstream (404 on those routes) gives roadmap replication only -- `list_peers` stays local and `/health` reports `federation: 'unsupported'`.
-- Approvals, dispatch, graph drafts and the operator inbox stay local to each broker. The operator inbox and Deck announcements never leave the machine, online or offline: `send_message('operator')` is always a local deposit.
+- Approvals, dispatch, graph drafts and the operator inbox stay local to each broker. The operator inbox and Deck announcements never leave the machine, online or offline: an `ask_operator` or `notify_operator` deposit is always local.
 - `offline_replica` requires a remote `broker_url` to have any effect -- setting it without `broker_url` is equivalent to Mode 1 (nothing to replicate against).
 - The replica broker authenticates to its upstream with the same `broker_token` both read from this same config; there is no separate replica credential. Serving the replication routes at all is now an explicit, opt-in upstream ROLE: the upstream needs `serve_replicas: true` **and** a `broker_token` configured, or it refuses (403) with a message naming which of the two is missing. A broker that is itself in `replica` mode never serves these routes, even if `serve_replicas: true` is also set on it (that combination is a config mistake, not a chained topology) -- it logs a startup warning instead. The replica treats any of these refusals exactly as an unreachable upstream (same online/offline hysteresis as a network outage), logging an explicit startup error the first time this happens rather than leaving the operator to guess why it never comes online.
 - A push onto a card locked upstream by a peer this replica does not relay comes back as a conflict in the Deck (`reason: 'locked_upstream'`): the operator can only take the upstream version while that lock holds.
@@ -95,7 +95,6 @@ Scope of this mode:
 
 A standalone session registers two global MCP entries from the same revision:
 `claude-peers` serves the peer tools only and `kory-roadmap` serves the shared roadmap.
-The pilot configuration filters the `roadmap_*` family out of `claude-peers`, so no session receives duplicate roadmap aliases.
 If you use one, both entries receive the same `CLAUDE_PEERS_GROUP` env var. The mode (`local`/`remote`/`replica`) is resolved from the *same*
 claude-peers settings file every consumer reads (`%APPDATA%\claude-peers\config.json`
 on Windows, `$XDG_CONFIG_HOME/claude-peers/config.json` when `XDG_CONFIG_HOME`
@@ -138,7 +137,7 @@ bun install
 ### 2. Register the MCP servers
 
 ```bash
-claude mcp add --scope user --transport stdio claude-peers -e CLAUDE_PEERS_TOOLS=list_peers,send_message,set_summary,check_messages,wait_for_message,whoami,list_groups,switch_group,set_id -- bun ~/koryphaios/server.ts
+claude mcp add --scope user --transport stdio claude-peers -- bun ~/koryphaios/server.ts
 claude mcp add --scope user --transport stdio kory-roadmap -- bun ~/koryphaios/server-roadmap.ts
 ```
 
@@ -151,7 +150,7 @@ claude mcp add --scope user --transport stdio kory-roadmap -- bun ~/koryphaios/s
 3. Add `kory-roadmap` with the second command above. It does not conflict with `claude-peers`, so a failure here leaves the old entry in place.
 4. Remove the old entry from the scope read in step 1: `claude mcp remove claude-peers --scope local`, `--scope project` or `--scope user`.
 5. Add `claude-peers` with the first command above, and carry over from the step 2 backup every `-e` variable and argument that the standard command does not already set (a custom `CLAUDE_PEERS_TOOLS`, another server path, and so on).
-6. Check: `claude mcp get claude-peers` must print `Scope: User config` and an `Environment:` that contains `CLAUDE_PEERS_TOOLS` and every variable carried over from the backup, and `claude mcp get kory-roadmap` must find its entry. Another scope on the first line means an old entry is still hiding the new one: repeat step 4 for that scope.
+6. Check: `claude mcp get claude-peers` must print `Scope: User config` and an `Environment:` that contains every variable carried over from the backup, and `claude mcp get kory-roadmap` must find its entry. Another scope on the first line means an old entry is still hiding the new one: repeat step 4 for that scope.
 
 ### 3. Run Claude Code with the channel
 
@@ -214,10 +213,11 @@ Set `broker_url` and `broker_token` in your settings file (`%APPDATA%\claude-pee
 }
 ```
 
-Register the MCP server:
+Register the MCP servers:
 
 ```bash
 claude mcp add --scope user --transport stdio claude-peers -- bun ~/koryphaios/server.ts
+claude mcp add --scope user --transport stdio kory-roadmap -- bun ~/koryphaios/server-roadmap.ts
 ```
 
 Then launch Claude Code:
@@ -388,19 +388,17 @@ The current peer is parked as `dormant` (resume-able), and a fresh registration 
 
 The `repo` scope matches across PCs by normalizing `git remote get-url origin`.
 
-Two **reserved recipients** exist for `send_message`: `operator` reaches the
-HUMAN in front of the desktop Deck (questions, results, blockers -- drained
-into the Deck's inbox panel, no reply comes back through this channel), and
 `deck` is the non-routable sender of Deck announcements (never a valid
-target). `set_id` refuses the reserved names `deck`, `system` and `operator`.
+target), and `send_message` to `operator` is refused before any transport:
+the human in front of the desktop Deck is reached by the `ask_operator` and
+`notify_operator` tools of a lead or supervisor. `set_id` refuses the
+reserved names `deck`, `system` and `operator`.
 
 `send_message` also takes an optional `expects_reply: false`. Use it when the
 message INFORMS rather than asks -- a result, a status update, a hand-off --
 so the recipient is told not to acknowledge it and skips a whole inference
 turn; omit it (or pass `true`) for anything that genuinely needs an answer.
-Omitting the field is byte-for-byte identical to today's behaviour. The
-waiver is never applied when the target is `operator`, since a reply is the
-whole point of that channel.
+Omitting the field is byte-for-byte identical to today's behaviour.
 
 **Delegated tasks.** `send_message` with `deadline_sec` makes the broker
 follow the request up: it returns a task id, and if the recipient has not

@@ -104,7 +104,7 @@ describe("server-deck.ts surface", () => {
       "ask_operator_wait",
       "graph_draft_prepare",
       "graph_draft_send",
-      "roadmap_dispatch",
+      "notify_operator",
     ]);
   }, 30_000);
 });

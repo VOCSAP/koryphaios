@@ -80,7 +80,7 @@ running.
 ### Supervisor vs agents
 
 - **Agents** (Agents view) do the work: they code, review, explore. They have
-  the claude-peers MCP tools (`list_peers`, `send_message`, `roadmap_*`…).
+  the claude-peers MCP tools (`list_peers`, `send_message`…) and the roadmap tools (`roadmap_*`, served by `kory-roadmap`, registered next to `claude-peers`).
 - The **supervisor** (Home view) pilots the app: it is the only session
   bridged to the window through private `deck_*` tools (spawn/close tiles,
   worktrees, templates, announcements). It never codes itself. See

@@ -902,7 +902,7 @@ export const EN_DEFAULTS: Record<string, string> = {
   'inbox.title': 'Operator inbox',
   'inbox.close': 'Close',
   'inbox.empty':
-    "No messages yet. Agents can write to you with send_message to 'operator' — questions, results, blockers.",
+    "No messages yet. Leads and the supervisor write to you with notify_operator or ask_operator; workers go through their lead.",
   'inbox.drafts': 'Questions to open in the graph',
   'inbox.openGraph': 'Open in graph',
   'inbox.hint': 'Closing a message never acknowledges it — it stays here until you do.',

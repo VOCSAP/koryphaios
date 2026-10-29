@@ -1,6 +1,6 @@
 {
   "hook_event_name": "PreToolUse",
-  "tool_name": "mcp__claude-peers__roadmap_update",
+  "tool_name": "mcp__kory-roadmap__roadmap_update",
   "tool_input": {
     "id": "800b0fe3-2a7c-4e3d-997f-1c8089e5d3de",
     "title": "Hook PreToolUse dans le plugin: refuser un appel roadmap malforme avant qu'il coute un tour d'inference",

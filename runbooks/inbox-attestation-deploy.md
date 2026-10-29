@@ -6,7 +6,7 @@ broker distant.
 ## Objet
 
 Le dépôt de messages vers l'Inbox de l'opérateur (`ask_operator`,
-`send_message` vers `operator`) repose sur un accusé que le broker renvoie à
+`notify_operator`) repose sur un accusé que le broker renvoie à
 l'enregistrement d'une tuile. Les trois composants parlent ce protocole et
 doivent être mis à jour **dans un ordre précis**, sinon les tuiles perdent
 l'accès à l'Inbox ou ne démarrent plus.
@@ -37,14 +37,15 @@ l'accès à l'Inbox ou ne démarrent plus.
    Après un envoi signé en échec, il n'y a jamais de retry nu (il frapperait
    une seconde identité non liée).
 3. **La porte de readiness côté client.** `ask_operator` et
-   `send_message` vers `operator` sont refusés localement tant que
+   `notify_operator` sont refusés localement tant que
    `inboxDepositReadiness` (`shared/inbox-readiness.ts`) rend une raison :
    pas de scope Inbox dans le credential, identité non encore confirmée, ou
    accusé qui ne correspond pas au run. Cette porte vit dans `server.ts`
-   (`handleAskOperator` et le chemin `send_message`) ; `server-deck.ts`
-   l'importe, donc `server-deck.mjs` en embarque une copie figée au build.
+   (`handleAskOperator` et `handleNotifyOperator`) ; `server-deck.ts`
+   les importe, donc `server-deck.mjs` en embarque une copie figée au build.
    L'identité publiée entre les deux processus MCP d'une tuile passe par le
    fichier `session-identity-*.json` (`shared/peer-cache.ts`).
+   `send_message` vers `operator` est refusé par `server.ts` avant tout transport.
 4. **Le broker refuse un dépôt non attesté** (`admitOperatorDeposit`) : 401
    si une instance liée envoie sans preuve, 403 si l'instance n'est pas liée
    au run du credential, 403 si le groupe n'a pas de secret.

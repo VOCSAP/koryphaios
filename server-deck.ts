@@ -14,7 +14,6 @@ import {
   handleGraphDraftPrepare,
   handleAskOperator,
   handleNotifyOperator,
-  handleRoadmapDispatch,
   handleGraphDraftSend,
   type CompanionIdentity,
 } from "./server.ts";
@@ -22,26 +21,17 @@ import {
 const fileLog = createLogger({ dir: coreLogDir(), name: "server-deck", mirrorToConsole: false });
 
 function log(msg: string) {
-  console.error(`[claude-peers-deck] ${msg}`);
+  console.error(`[kory-operator] ${msg}`);
   fileLog.info(msg);
 }
 
-const LEGACY_TOOL_NAMES = [
-  "ask_operator",
-  "ask_operator_wait",
-  "graph_draft_prepare",
-  "graph_draft_send",
-  "roadmap_dispatch",
-] as const;
-const OPERATOR_TOOL_NAMES = [
+const DECK_TOOL_NAMES = [
   "ask_operator",
   "ask_operator_wait",
   "notify_operator",
   "graph_draft_prepare",
   "graph_draft_send",
 ] as const;
-const FAMILY = process.env.KORY_MCP_FAMILY === "operator" ? "operator" : "legacy";
-const DECK_TOOL_NAMES = FAMILY === "operator" ? OPERATOR_TOOL_NAMES : LEGACY_TOOL_NAMES;
 const DECK_TOOLS = DECK_ONLY_TOOLS.filter((tool) => {
   if (!(DECK_TOOL_NAMES as readonly string[]).includes(tool.name)) return false;
   if (tool.name === "notify_operator") {
@@ -51,13 +41,11 @@ const DECK_TOOLS = DECK_ONLY_TOOLS.filter((tool) => {
 });
 
 const mcp = new Server(
-  { name: FAMILY === "operator" ? "kory-operator" : "claude-peers-deck", version: "0.9.0" },
+  { name: "kory-operator", version: "0.9.0" },
   {
     capabilities: { tools: {} },
     instructions:
-      FAMILY === "operator"
-        ? "Kory operator tools for a lead or supervisor tile. Use ask_operator for blocking questions and notify_operator for one-way signed notices."
-        : "Kory-only tools, provided only to a Koryphaios lead or supervisor tile. A kind='directive' card filed and queued with the core server's roadmap tools is executed here, by roadmap_dispatch.",
+      "Kory operator tools for a lead or supervisor tile. Use ask_operator for blocking questions and notify_operator for one-way signed notices.",
   }
 );
 
@@ -78,7 +66,7 @@ async function resolveCompanionIdentity(): Promise<CompanionIdentity> {
   const token = process.env.CLAUDE_PEERS_DESK_SESSION ?? "";
   if (!token) {
     log(
-      "CLAUDE_PEERS_DESK_SESSION is unset -- graph_draft_send, roadmap_dispatch and new ask_operator deposits cannot use a confirmed identity"
+      "CLAUDE_PEERS_DESK_SESSION is unset -- graph_draft_send and new ask_operator deposits cannot use a confirmed identity"
     );
   }
   const identity = token ? await readSessionIdentityFile(token) : null;
@@ -115,8 +103,6 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
       return handleAskOperator(name, args, await resolveCompanionIdentity());
     case "notify_operator":
       return handleNotifyOperator(args, await resolveCompanionIdentity());
-    case "roadmap_dispatch":
-      return handleRoadmapDispatch(await resolveCompanionIdentity());
     case "graph_draft_send":
       return handleGraphDraftSend(args, await resolveCompanionIdentity());
     default:

@@ -34,9 +34,7 @@ import type {
   ContextResumeFrame,
 } from "./shared/types.ts";
 import { taskLabelFromText } from "./shared/delegated-task.ts";
-import { ROADMAP_TOOLS } from "./shared/roadmap-tools.ts";
 import { filterTools, TOOLS_ENV_VAR } from "./shared/tool-allowlist.ts";
-import { callRoadmapTool } from "./shared/roadmap-mcp.ts";
 export {
   formatLockContestedBy,
   formatRoadmapItemLine,
@@ -88,7 +86,6 @@ import {
 } from "./shared/types.ts";
 import type { GraphDraftAddResponse } from "./shared/types.ts";
 import {
-  handleRoadmapDispatch as dispatchRoadmap,
   renderDispatchOutcome,
   TOOLS_ALLOWLIST,
   type CompanionIdentity,
@@ -155,20 +152,12 @@ const PEER_ID_REGEX = /^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$/;
 const config = await loadConfig();
 const BROKER_URL = brokerUrl(config);
 const BROKER_TOKEN = config.broker_token ?? null;
-const ROADMAP_DISPATCH_ENDPOINT = {
-  url: BROKER_URL,
-  headers: brokerHeaders(config, { "Content-Type": "application/json" }),
-};
 const HEARTBEAT_INTERVAL_MS = 15_000;
 const WS_RECONNECT_INITIAL_MS = 1000;
 const WS_RECONNECT_MAX_MS = 30_000;
 const BROKER_SCRIPT = join(dirname(fileURLToPath(import.meta.url)), "broker.ts");
 
 // --- Broker HTTP communication ---
-
-async function handleRoadmapDispatch(identity: CompanionIdentity) {
-  return dispatchRoadmap(identity, ROADMAP_DISPATCH_ENDPOINT);
-}
 
 // signal is optional and defaults to undefined so every existing brokerFetch
 // caller is unaffected; only wait_for_message's own opportunistic peek supplies
@@ -784,11 +773,12 @@ When a <channel source="claude-peers"> message arrives, reply now with send_mess
 
 Tools: list_peers, send_message, set_summary, wait_for_message, check_messages, whoami, list_groups, switch_group and set_id.
 
-Special recipient 'operator': send_message with to_peer_id 'operator' reaches the HUMAN operator's desktop inbox. Use it for blocking questions or findings that need a human decision; the answer comes back as a Deck announcement or new instructions, not through this channel. It needs a group that pins a secret (a Koryphaios Deck always does); in the secret-less 'default' group the send is refused, ask on screen instead.
-
 When you start, call set_summary to say what you are working on.`,
   }
 );
+
+const OPERATOR_SEND_REFUSAL =
+  "send_message does not reach the operator. A Koryphaios lead or supervisor uses the kory-operator tools (ask_operator for a blocking question, notify_operator for a one-way notice); any other session reports to its team lead with send_message.";
 
 // --- Tool definitions ---
 
@@ -945,24 +935,10 @@ const TOOLS = [
       required: ["new_id"],
     },
   },
-  ...ROADMAP_TOOLS,
 ];
 
-// Kory-only surface: dispatched from the queue, moving a question into the
-// graph view, or reaching the human operator directly. Declared and handled
-// only by server-deck.ts's second entrypoint (Card 9f75e69f); the core
-// server neither advertises nor executes these five for every other tile.
+// The kory-operator tools: declared here, listed and served only by server-deck.ts.
 const DECK_ONLY_TOOLS = [
-  // No arguments: the head wave is already selected by the queue, so a caller
-  // cannot aim at a different card.
-  // runDirectiveWave marks a card done before it executes, so status alone
-  // proves nothing about execution -- the reply is the actual result.
-  {
-    name: "roadmap_dispatch",
-    description:
-      "Run the head wave of the roadmap queue in the operator's Deck, like its Dispatch button; no argument. Waits ~25 s and returns which cards were dispatched and which tiles were hit, refused or missed.",
-    inputSchema: { type: "object" as const, properties: {} },
-  },
   {
     name: "graph_draft_prepare",
     description:
@@ -1285,7 +1261,7 @@ function proofFrom(instanceToken: string | null): Record<string, string> {
   return instanceToken ? { instance_token: instanceToken } : {};
 }
 
-/** graph_draft_send: same proven-identity shape as handleRoadmapDispatch. */
+/** graph_draft_send: needs a proven identity, like ask_operator. */
 async function handleGraphDraftSend(args: unknown, identity: CompanionIdentity) {
   const payload = validateDraftPayload(args as { title?: unknown; prompt?: unknown });
   if ("error" in payload) {
@@ -1430,48 +1406,23 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
           isError: true,
         };
       }
+      if (target === OPERATOR_PEER_ID || target === OPERATOR_INSTANCE_TOKEN) {
+        return {
+          content: [{ type: "text" as const, text: OPERATOR_SEND_REFUSAL }],
+          isError: true,
+        };
+      }
       if (!myInstanceToken) {
         return {
           content: [{ type: "text" as const, text: "Not registered with broker yet" }],
           isError: true,
         };
       }
-      const runCred = target === OPERATOR_PEER_ID ? loadSessionApprovalCredential() : null;
-      if (target === OPERATOR_PEER_ID) {
-        const readiness = runCred
-          ? inboxDepositReadiness(
-              {
-                peerId: myPeerId,
-                groupId: myGroupId,
-                instanceToken: myInstanceToken,
-                inboxBinding: myInboxBinding,
-                operatorId: myInboxOperatorId,
-              },
-              runCred,
-            )
-          : "the run credential is unavailable";
-        if (readiness) {
-          logError(`send_message operator deposit refused: ${readiness}`);
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: `Message to the operator refused: ${readiness}. Verify the Koryphaios launch and the claude-peers broker version, then reconnect this session from Koryphaios.`,
-              },
-            ],
-            isError: true,
-          };
-        }
-      }
       try {
         const creatingTask = a.deadline_sec !== undefined && a.task_id === undefined;
         const sendBody = {
           from_token: myInstanceToken,
           to_peer_id: target,
-          // `target` is passed so the operator inbox is never framed: this tool
-          // accepts to_peer_id 'operator', which reaches a PERSON. See
-          // composeOutboundMessage's own doc; the exclusion lives there, not
-          // here, so a test can pin it.
           text: composeOutboundMessage(a.message as string, a.expects_reply, target),
           deadline_sec: a.deadline_sec,
           task_id: a.task_id,
@@ -1481,10 +1432,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
           untracked_reply_policy: untrackedReplyPolicy(),
           expects_reply: a.expects_reply !== false,
         };
-        const result = await brokerFetch<SendMessageResponse>(
-          "/send-message",
-          runCred ? signInboxBody(runCred, sendBody, INBOX_GATES.deposit) : sendBody
-        );
+        const result = await brokerFetch<SendMessageResponse>("/send-message", sendBody);
         if (!result.ok) {
           return {
             content: [{ type: "text" as const, text: `Failed to send: ${result.error}` }],
@@ -1508,7 +1456,6 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
           a.task_id === undefined &&
           a.task_action === undefined &&
           a.expects_reply !== false &&
-          target !== OPERATOR_PEER_ID &&
           target !== DECK_PEER_ID;
         const ack = renderSendAck(target, result);
         return {
@@ -1966,21 +1913,6 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
       }
     }
 
-    case "roadmap_list":
-    case "roadmap_get":
-    case "roadmap_add":
-    case "roadmap_update":
-    case "roadmap_archive":
-    case "roadmap_append_context":
-      return callRoadmapTool(name, args as Record<string, unknown>, {
-        identity: {
-          peerId: myPeerId ?? `${myHost || "unknown"}-unregistered`,
-          instanceToken: myInstanceToken ?? undefined,
-          projectKey: roadmapProjectKey(),
-        },
-        brokerFetch,
-      });
-
     default:
       throw new Error(`Unknown tool: ${name}`);
   }
@@ -2257,7 +2189,6 @@ export {
   handleGraphDraftPrepare,
   handleAskOperator,
   handleNotifyOperator,
-  handleRoadmapDispatch,
   renderDispatchOutcome,
   handleGraphDraftSend,
 };
