@@ -76,7 +76,9 @@ import {
   isTeamLeadAgent,
   resolveMcpConfig,
   wantsDeckLeadPlugin,
-  type MintTeamLeadBridge
+  wantsTeamLeadBridge,
+  type MintTeamLeadBridge,
+  type TeamLeadBridgeInput
 } from './team-lead-bridge'
 import { DEFAULT_PALETTE, paletteColor } from '@shared/palette'
 import { sanitizeRole } from '@shared/role'
@@ -229,6 +231,9 @@ const OUTPUT_SCAN_CAP = 65536
  * update both together.
  */
 export type DirectiveOutcome = 'written' | 'no-terminal' | 'busy-timeout' | 'refused-modal'
+
+const SANDBOX_BRIDGE_REFUSAL =
+  "the tile runs in the sandbox, and the bridge config names the host Electron binary and 127.0.0.1, which inside the container is the container's own loopback"
 
 /**
  * Sandbox wrapper (PLAN-SANDBOX SBX1), injected by index.ts. `wrap` receives
@@ -750,8 +755,49 @@ export class SessionService extends EventEmitter {
     }
   }
 
-  private runsInSandbox(def: SessionDef): boolean {
+  private runsInSandbox(def: Pick<SessionDef, 'supervisor'>): boolean {
     return !def.supervisor && this.sandboxPeersDir() !== null
+  }
+
+  /**
+   * Returned as the `ambiguity` of resolveMcpConfig, which turns it into a
+   * reportError trace.
+   */
+  private sandboxBridgeRefusal(
+    input: TeamLeadBridgeInput,
+    sanitizedAgent: string,
+    marker: boolean,
+    supervisor: boolean | undefined
+  ): string | undefined {
+    if (!this.runsInSandbox({ supervisor }) || !wantsTeamLeadBridge(input, sanitizedAgent, marker)) {
+      return undefined
+    }
+    return SANDBOX_BRIDGE_REFUSAL
+  }
+
+  /**
+   * A restart or resume replays the stored `mcpConfig`, so a lead tile created
+   * on the host and relaunched after the sandbox was enabled would otherwise
+   * carry the bridge into the container. A non-supervisor tile in
+   * `deckLeadPluginTiles` holds the bridge as its only `mcpConfig`.
+   */
+  private mcpConfigForLaunch(def: SessionDef): string | undefined {
+    if (!def.mcpConfig || !this.deckLeadPluginTiles.has(def.id) || !this.runsInSandbox(def)) return def.mcpConfig
+    reportError('session', `team-lead deck-control bridge refused for ${def.name}: ${SANDBOX_BRIDGE_REFUSAL}`)
+    return undefined
+  }
+
+  /**
+   * deck-control hands `hasDeckLeadTools` over only together with the lead
+   * bridge it wrote into `mcpConfig`; that pair is the one explicit config
+   * resolveMcpConfig cannot refuse, so it is dropped here.
+   */
+  private withoutSandboxedLeadBridge(input: CreateSessionInput, hasDeckLeadTools: boolean): CreateSessionInput {
+    if (!hasDeckLeadTools || !input.mcpConfig?.trim() || !this.runsInSandbox(input)) {
+      return input
+    }
+    reportError('session', `team-lead deck-control bridge refused for ${input.name?.trim() || 'unnamed session'}: ${SANDBOX_BRIDGE_REFUSAL}`)
+    return { ...input, mcpConfig: undefined }
   }
 
   /**
@@ -825,6 +871,7 @@ export class SessionService extends EventEmitter {
     ]
       .filter(Boolean)
       .join(' ')
+    input = this.withoutSandboxedLeadBridge(input, opts?.hasDeckLeadTools === true)
     // Mirrors the mcpConfig the agent-spawned route already carries, but only
     // when the caller posed opts.teamLeadDeckBridge itself; other callers
     // (template, workspace-restore, one-shot-agent) never pass opts and fall
@@ -840,7 +887,7 @@ export class SessionService extends EventEmitter {
       teamLeadMarker,
       this.mintTeamLeadBridge,
       reportError,
-      launched.ambiguity
+      launched.ambiguity ?? this.sandboxBridgeRefusal(input, launchedAgent, teamLeadMarker, input.supervisor)
     )
     const mcpConfig = resolvedMcpConfig?.mcpConfig
     // Strict enum, like every other agent-/companion-reachable field that
@@ -1153,7 +1200,7 @@ export class SessionService extends EventEmitter {
         teamLeadMarker,
         this.mintTeamLeadBridge,
         reportError,
-        ambiguity
+        ambiguity ?? this.sandboxBridgeRefusal(bridgeInput, agent ?? '', teamLeadMarker, d.supervisor)
       )
       if (wantsDeckLeadPlugin(resolvedMcpConfig, d.supervisor, false)) {
         this.deckLeadPluginTiles.add(d.id)
@@ -1622,7 +1669,7 @@ export class SessionService extends EventEmitter {
         effort: this.flagValue('effort', def.effort),
         pluginDirs,
         additionalDirectories: handoffLaunch ? [handoffLaunch.additionalDirectory] : undefined,
-        mcpConfig: def.mcpConfig,
+        mcpConfig: this.mcpConfigForLaunch(def),
         appendSystemPromptFile: def.appendSystemPromptFile,
         settings,
         mode: 'resume'
@@ -1637,7 +1684,7 @@ export class SessionService extends EventEmitter {
         effort: this.flagValue('effort', def.effort),
         pluginDirs,
         additionalDirectories: handoffLaunch ? [handoffLaunch.additionalDirectory] : undefined,
-        mcpConfig: def.mcpConfig,
+        mcpConfig: this.mcpConfigForLaunch(def),
         appendSystemPromptFile: def.appendSystemPromptFile,
         settings,
         mode: 'fresh'

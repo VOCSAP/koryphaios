@@ -12,6 +12,8 @@ import {
   buildAuthProbeArgs,
   buildAuthPurgeArgs,
   buildBrokerProbeArgs,
+  buildRoadmapMcpProbeArgs,
+  isRoadmapMcpRegistered,
   buildKillPidGroupArgs,
   buildReadPidArgs,
   buildImageRemoveArgs,
@@ -489,6 +491,28 @@ test("broker probe curls /health from inside the container", () => {
     "/dev/null",
     "http://host.docker.internal:7899/health"
   ]);
+});
+
+test("the roadmap probe asks the container's own claude for the kory-roadmap key", () => {
+  expect(buildRoadmapMcpProbeArgs("kory-sbx-0123456789ab")).toEqual([
+    "exec",
+    "kory-sbx-0123456789ab",
+    "claude",
+    "mcp",
+    "get",
+    "kory-roadmap"
+  ]);
+});
+
+test.each([
+  ["a user-scope entry", 0, "kory-roadmap:\n  Scope: User config (available in all your projects)\n  Status: ✔ Connected\n", true],
+  ["a local-scope entry, which belongs to one cwd", 0, "kory-roadmap:\n  Scope: Local config (private to you in this project)\n", false],
+  ["a project-scope entry", 0, "kory-roadmap:\n  Scope: Project config (shared via .mcp.json)\n", false],
+  ["an absent key", 1, 'No MCP server named "kory-roadmap". Configured servers: claude-peers\n', false],
+  ["a failed exec that printed a user-scope line", 1, "  Scope: User config\n", false],
+  ["no output at all", 0, "", false]
+] as const)("the roadmap probe verdict for %s", (_name, code, stdout, registered) => {
+  expect(isRoadmapMcpRegistered(code, stdout), `exit ${code} with ${JSON.stringify(stdout)}`).toBe(registered);
 });
 
 test("buildCreateArgs mounts the CLONE in copy mode, labels the real project", () => {

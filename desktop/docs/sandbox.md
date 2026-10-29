@@ -462,6 +462,82 @@ The supervisor is **exempt** from sandboxing: it pilots the app itself, and
 its MCP bridge points at the host Electron binary and a loopback control port
 that do not exist inside a container.
 
+## MCP servers inside the sandbox
+
+The Deck writes no MCP configuration for a sandboxed tile and does not project
+`.claude.json` (it is not in the projected set). The servers a sandboxed
+session sees are the ones registered with the container's own `claude`, in the
+user scope, on the auth volume that every container shares. Two are expected:
+
+- `claude-peers` (messaging and identity), restricted to its non-roadmap tools;
+- `kory-roadmap` (the six roadmap tools).
+
+Registering them is an operator step; the Docker view only reports it (the
+**Roadmap server** badge runs `claude mcp get kory-roadmap` in the container
+and is green only for a user-scope entry; **Re-test** refreshes it).
+
+**What the container must contain.** Both servers run from a copy of the Kory
+repository tree with `bun install` done, and `shared/` imports
+`desktop/src/shared`, so the server files alone fail with a missing-module
+error. That copy must never be the tree the host executes: the README registers
+`bun ~/koryphaios/server.ts` in the host's user scope, a sandboxed agent is
+assumed compromised, and a tree it can write that the host later runs is the
+`settings.json` escape again. Two forms are safe: a custom image that bakes the
+repository in, or a `:ro` mount of a separate copy of the installation, never
+the host's own checkout. Replace `CORE` below with that path.
+
+When the project IS the Kory repository, mounted at `/work`, the tree is
+already there and the sandboxed agent edits the code the host executes. That is
+inherent to working on Kory inside the sandbox, so run the host from another
+checkout and register one of the safe forms above instead of `/work`.
+
+**Registering** (inside the container, as the container user, for example
+`docker exec -it <kory-sbx-...> bash`):
+
+```bash
+claude mcp add --scope user --transport stdio claude-peers \
+  -e CLAUDE_PEERS_TOOLS=list_peers,send_message,set_summary,check_messages,wait_for_message,whoami,list_groups,switch_group,set_id \
+  -- bun CORE/server.ts
+claude mcp add --scope user --transport stdio kory-roadmap -- bun CORE/server-roadmap.ts
+```
+
+No broker URL goes in the entries: every sandboxed session already exports
+`CLAUDE_PEERS_BROKER_URL` pointing at the host broker, and the servers inherit
+it. `claude mcp add` refuses a key that already exists; migrating an older
+`claude-peers` entry follows the order given in the README (read its scope,
+back it up, add `kory-roadmap`, remove the old entry from its scope, add the
+new one, check with `claude mcp get`), run inside the container.
+
+**Identity of `kory-roadmap`.** It has no credential of its own. `claude-peers`
+writes a snapshot named after the session's `CLAUDE_CODE_MESSAGING_SOCKET`
+(`/tmp/cc-socks/<pid>.sock`) into `~/.claude/peers`, which is the Deck-owned
+peers directory, and `kory-roadmap` reads it. Until `claude-peers` has
+registered, `kory-roadmap` answers `Roadmap companion identity is unavailable`
+and acts as nobody. The snapshot also records the writer's process generation
+(pid, start token, boot id), and `kory-roadmap` re-measures it on every call.
+That is what rejects a snapshot left by the previous incarnation of the
+container: the peers directory outlives `docker restart`, the pid namespace
+restarts low, and the same socket name can come back; the start token differs,
+so the stale identity is refused instead of being adopted.
+
+**What a sandboxed tile never gets.** `kory-operator` and `kory-deck` (the lead
+bridge) name the host Electron binary and `127.0.0.1`, which inside the
+container is the container's own loopback, not the Deck's control port.
+`SessionService` therefore refuses the bridge for any non-supervisor tile while
+the sandbox is on, whichever route opened the tile (operator,
+`deck_spawn_session`, `deck_spawn_team`, templates, workspace restore), and
+drops the stored config again at every restart or resume, so a lead created
+before the sandbox was enabled does not carry it in. Each refusal is traced in
+the log as `team-lead deck-control bridge refused ... sandbox`. A sandboxed
+lead keeps `claude-peers` and `kory-roadmap` and has
+no deck tools. The supervisor is never sandboxed and keeps its bridge.
+
+**Approvals.** A sandboxed worker's permission prompts go through the
+`PermissionRequest` hook of the projected deck plugin, which runs under the
+image's `bun` and talks to the broker over the same bridge as messaging. It
+does not use `kory-operator`. The credential it needs can only add and wait
+for its own approvals, never settle one.
+
 ## Asking the supervisor to manage the environment
 
 With sandbox mode on, the supervisor gains `deck_sandbox_exec`: ask it

@@ -958,3 +958,137 @@ test("a restart revalidates host copies against their state at that spawn", asyn
     expect(sessionPtys[0]!.args.join(" ")).not.toContain("/mods/alpha");
   });
 });
+
+const BRIDGE_FILE = "/state/team-lead-mcp-aaaaaaaaaaaa-caller-1.json";
+
+async function withBridgeService(
+  sandboxed: boolean,
+  body: (service: ModPlanService, probe: { mints: number; commands: string[]; home: string }) => void | Promise<void>
+): Promise<void> {
+  const home = mkdtempSync(join(tmpdir(), "kory-pty-sandbox-bridge-"));
+  const probe = { mints: 0, commands: [] as string[], home };
+  const service = new SessionService(
+    () => ({ projectDir: join(home, "project"), shell: "powershell.exe", interactiveShell: false }),
+    () => ({}),
+    "claude",
+    withDeckPlugin,
+    home,
+    () => {
+      probe.mints++;
+      return { mcpConfig: BRIDGE_FILE, callerId: "caller-1" };
+    }
+  );
+  service.setTileSettingsFileProvider(() => join(home, "tile-settings.json"));
+  if (sandboxed) {
+    service.setSandboxProvider(
+      () => ({ wrap: (_tile: string, _session: string, command: string) => { probe.commands.push(command); return "wrapped"; }, cleanup: async () => {} }) as never,
+      undefined,
+      () => "/sandbox/peers"
+    );
+  }
+  const reports: Array<[string, string]> = [];
+  onDeckError((scope, text) => reports.push([scope, text]));
+  (service as unknown as { reports: typeof reports }).reports = reports;
+  try {
+    await body(service, probe);
+  } finally {
+    onDeckError(() => {});
+    service.closeAll();
+    for (const pty of sessionPtys.splice(0)) pty.exit();
+    rmSync(home, { recursive: true, force: true });
+  }
+}
+
+const bridgeRefusals = (service: ModPlanService): string[] =>
+  reportsOf(service).filter(([scope, text]) => scope === "session" && text.includes("deck-control bridge refused")).map(([, text]) => text);
+const mcpConfigOf = (service: ModPlanService): string | undefined => service.captureSessions()[0]?.mcpConfig;
+
+test.each([
+  ["a lead opened by the operator or deck_spawn_session or a template (agent field plus trusted marker)", { agent: "team-lead" }, { teamLeadDeckBridge: true }],
+  ["an embedded lead of deck_spawn_team (explicit config plus deck lead tools)", { mcpConfig: BRIDGE_FILE }, { hasDeckLeadTools: true }]
+] as const)("a sandboxed tile never receives the lead bridge: %s", async (_route, input, opts) => {
+  await withBridgeService(true, (service, probe) => {
+    service.create({ name: "lead", ...input }, opts as never);
+
+    expect(probe.mints, "the bridge must not even be minted for a container that cannot reach it").toBe(0);
+    expect(mcpConfigOf(service), "no mcpConfig may be stored for a sandboxed lead").toBeUndefined();
+    expect(probe.commands.join(" "), "the container command carries no --mcp-config").not.toContain("--mcp-config");
+    expect(bridgeRefusals(service).some((text) => text.includes("sandbox"))).toBe(true);
+  });
+});
+
+test.each([
+  ["a lead opened by the operator", { agent: "team-lead" }, { teamLeadDeckBridge: true }, 1],
+  ["an embedded lead of deck_spawn_team", { mcpConfig: BRIDGE_FILE }, { hasDeckLeadTools: true }, 0]
+] as const)("a host tile keeps the lead bridge: %s", async (_route, input, opts, mints) => {
+  await withBridgeService(false, (service, probe) => {
+    service.create({ name: "lead", ...input }, opts as never);
+
+    expect(probe.mints).toBe(mints);
+    expect(mcpConfigOf(service)).toBe(BRIDGE_FILE);
+    expect(bridgeRefusals(service)).toEqual([]);
+  });
+});
+
+test("a sandboxed tile that is not a lead leaves no bridge trace, and an operator mcpConfig without the lead marker is untouched", async () => {
+  await withBridgeService(true, (service, probe) => {
+    service.create({ name: "worker" });
+    service.create({ name: "operator-config", mcpConfig: "/ops/own.json" });
+
+    expect(probe.mints).toBe(0);
+    expect(bridgeRefusals(service)).toEqual([]);
+    expect(service.captureSessions().map((d) => d.mcpConfig)).toEqual([undefined, "/ops/own.json"]);
+  });
+});
+
+test("the supervisor is never sandboxed, so it keeps its bridge when the sandbox is on", async () => {
+  await withBridgeService(true, (service, probe) => {
+    service.create({ name: "supervisor", agent: "team-lead", supervisor: true }, { teamLeadDeckBridge: true } as never);
+
+    expect(probe.mints).toBe(1);
+    expect(bridgeRefusals(service)).toEqual([]);
+  });
+});
+
+test.each([
+  [true, 0, undefined],
+  [false, 1, BRIDGE_FILE]
+] as const)("a restored lead tile under sandbox=%s mints %i bridge(s)", async (sandboxed, mints, mcpConfig) => {
+  await withBridgeService(sandboxed, (service, probe) => {
+    service.restoreFrom([{ ...restoredDef("restored-lead", "lead"), args: "--agent team-lead" }]);
+
+    expect(probe.mints).toBe(mints);
+    expect(mcpConfigOf(service)).toBe(mcpConfig);
+    expect(bridgeRefusals(service).length > 0).toBe(sandboxed);
+  });
+});
+
+test.each([
+  ["fresh", false],
+  ["resumed", true]
+] as const)("a lead tile created on the host and %s after the sandbox was enabled launches without the bridge", async (_mode, withTranscript) => {
+  await withBridgeService(false, async (service, probe) => {
+    const tile = service.create({ name: "lead", agent: "team-lead" }, { teamLeadDeckBridge: true } as never);
+    const [def] = service.captureSessions();
+    expect(def?.mcpConfig, "control: created on the host, the tile holds the bridge").toBe(BRIDGE_FILE);
+    if (withTranscript) {
+      const projects = join(probe.home, ".claude", "projects", encodeProjectDir(def!.cwd));
+      mkdirSync(projects, { recursive: true });
+      writeFileSync(join(projects, `${def!.sessionId}.jsonl`), "{}\n", "utf-8");
+    }
+    sessionPtys.at(-1)!.exit(1);
+    service.setSandboxProvider(
+      () => ({ wrap: (_tile: string, _session: string, command: string) => { probe.commands.push(command); return "wrapped"; }, cleanup: async () => {} }) as never,
+      undefined,
+      () => "/sandbox/peers"
+    );
+
+    await service.restart(tile.id);
+
+    expect(probe.commands, "the restart reached the sandbox wrapper").toHaveLength(1);
+    expect(probe.commands[0]!.includes("--resume"), "the path under test is the one named by the case").toBe(withTranscript);
+    expect(probe.commands[0], "the container command carries no --mcp-config").not.toContain("--mcp-config");
+    expect(probe.mints, "a restart never mints").toBe(1);
+    expect(bridgeRefusals(service).some((text) => text.includes("sandbox"))).toBe(true);
+  });
+});

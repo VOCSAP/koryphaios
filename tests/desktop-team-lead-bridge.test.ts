@@ -295,6 +295,7 @@ function runCreateBridgeDecision(agent: string, input: { args?: string; name?: s
   );
   const result = run.call(
     {
+      sandboxBridgeRefusal: () => undefined,
       mintTeamLeadBridge: () => {
         mintCalls.push("called");
         return { mcpConfig: "/state/team-lead-mcp-create.json", callerId: "team-lead-create" };
@@ -358,6 +359,7 @@ function runRestoreDeckLeadPluginDecision(args: string | undefined, supervisor: 
   return run.call(
     {
       deckLeadPluginTiles: new Set<string>(),
+      sandboxBridgeRefusal: () => undefined,
       mintTeamLeadBridge: fakeMint({ mcpConfig: "/state/team-lead-mcp-restore.json", callerId: "team-lead-restore" })
     },
     effectiveAgent,

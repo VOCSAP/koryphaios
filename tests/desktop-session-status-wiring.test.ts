@@ -506,7 +506,7 @@ test("a sandboxed role tile delegates role-plugin omission to the provider", () 
       return ["/plugins/deck-plugin"];
     }
   });
-  svc.create({ agent: "team-lead" }, { teamLeadDeckBridge: true });
+  svc.create({ name: "lead", mcpConfig: "/state/team-lead.json" }, { hasDeckLeadTools: true });
   expect(lastLine()).toContain('--plugin-dir "/plugins/deck-plugin"');
   expect(lastLine()).not.toContain("/plugins/role");
   expect(reads).toEqual([[true, true]]);

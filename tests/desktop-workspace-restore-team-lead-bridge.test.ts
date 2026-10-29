@@ -206,7 +206,7 @@ function runRestoreMintLoop(defs: RestoredDefStub[]): {
     reportErrorFn: typeof report
   ) => Map<string, string>;
   const mintedCallerIds = run.call(
-    { defs, mintTeamLeadBridge: mint, deckLeadPluginTiles: new Set<string>() },
+    { defs, mintTeamLeadBridge: mint, deckLeadPluginTiles: new Set<string>(), sandboxBridgeRefusal: () => undefined },
     resolveMcpConfig,
     isTeamLeadAgent,
     effectiveAgent,

@@ -1432,6 +1432,8 @@ export interface SandboxStatus {
   hookWarnings: string[]
   /** Broker reachable FROM the container (real curl probe); null = unknown. */
   brokerBridge: boolean | null
+  /** kory-roadmap registered in the user scope of the container's CLI; null = unknown. */
+  roadmapMcp: boolean | null
   /** Days between this container's creation and a NEWER image, else null. */
   driftDays: number | null
   busy: boolean

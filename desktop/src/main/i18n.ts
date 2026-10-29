@@ -549,6 +549,11 @@ export const EN_DEFAULTS: Record<string, string> = {
   'sandbox.bridgeRetest': 'Re-test',
   'sandbox.bridgeHint':
     'Sessions in the container cannot reach the broker: peer messaging and the roadmap will be offline. On a native Linux engine, bind the broker beyond loopback (CLAUDE_PEERS_BIND_HOST=0.0.0.0 with a broker_token).',
+  'sandbox.roadmap': 'Roadmap server:',
+  'sandbox.roadmapOk': 'registered',
+  'sandbox.roadmapKo': 'not registered',
+  'sandbox.roadmapHint':
+    'kory-roadmap is not registered on the container sign-in volume: sandboxed sessions have no roadmap tools. Register it from the container with claude mcp add --scope user (procedure in the sandbox documentation).',
   'sandbox.drift': 'image is {n} day(s) newer',
   'sandbox.driftHint':
     'The image was rebuilt after this container was created — Rebuild to pick it up (everything installed by hand inside is lost).',
