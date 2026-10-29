@@ -1718,6 +1718,7 @@ export class SessionService extends EventEmitter {
     const sessionEnv = {
       ...this.getScopeEnv(),
       CLAUDE_PEERS_DESK_SESSION: def.id,
+      CLAUDE_PEERS_DESK_TILE_CWD: def.cwd,
       CLAUDE_PEERS_ROLE: def.role ?? '',
       CLAUDE_PEERS_SUPERVISOR: def.supervisor === true ? '1' : '0',
       KORY_PERMISSION_LEASE: '',

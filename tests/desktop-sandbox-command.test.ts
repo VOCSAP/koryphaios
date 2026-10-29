@@ -240,6 +240,7 @@ test("buildLaunchScript writes the tile pidfile before exec and drops hostile en
       cwd: "/work/.worktrees/fix",
       env: {
         CLAUDE_PEERS_DESK_SESSION: "tile-1",
+        CLAUDE_PEERS_DESK_TILE_CWD: "C:\\host\\project",
         "BAD KEY; rm": "x",
         QUOTED: "it's",
       },
@@ -252,6 +253,9 @@ test("buildLaunchScript writes the tile pidfile before exec and drops hostile en
   expect(script).toContain(`export QUOTED='it'\\''s'`);
   expect(script).not.toContain("BAD KEY");
   expect(script).toContain(`cd '/work/.worktrees/fix' || exit 1`);
+  expect(lines.at(-4), "the identity cwd is the container cwd, exported after the host env it overrides").toBe(
+    `export CLAUDE_PEERS_DESK_TILE_CWD='/work/.worktrees/fix'`
+  );
   expect(lines.at(-2)).toBe(`printf '%s\\n' "$$" > '/kory-run/pid-tile-1'`);
   expect(lines.at(-1)).toBe(`exec claude --session-id "abc"`);
 });

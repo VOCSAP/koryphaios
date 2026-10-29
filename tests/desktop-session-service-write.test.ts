@@ -635,6 +635,28 @@ test("a launched tile exports its supervisor bit as 1 or 0 whatever the Deck's o
   }
 });
 
+test("a launched tile exports its own cwd as its identity cwd whatever the Deck's own environment holds", async () => {
+  const home = mkdtempSync(join(tmpdir(), "kory-pty-tile-cwd-"));
+  const cwd = join(home, "project");
+  const worktree = join(home, "project", ".worktrees", "fix");
+  const service = createSessionService(home, cwd);
+  const inherited = process.env.CLAUDE_PEERS_DESK_TILE_CWD;
+  process.env.CLAUDE_PEERS_DESK_TILE_CWD = join(home, "another-tile");
+
+  try {
+    service.create({});
+    expect(sessionPtys.at(-1)!.env.CLAUDE_PEERS_DESK_TILE_CWD).toBe(cwd);
+    service.create({ cwd: worktree });
+    expect(sessionPtys.at(-1)!.env.CLAUDE_PEERS_DESK_TILE_CWD).toBe(worktree);
+  } finally {
+    if (inherited === undefined) delete process.env.CLAUDE_PEERS_DESK_TILE_CWD;
+    else process.env.CLAUDE_PEERS_DESK_TILE_CWD = inherited;
+    service.closeAll();
+    for (const pty of sessionPtys.splice(0)) pty.exit();
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
 test("SessionService.closeAll retries a retired PTY after its final definition is removed", async () => {
   const home = mkdtempSync(join(tmpdir(), "kory-pty-close-all-"));
   const cwd = join(home, "project");

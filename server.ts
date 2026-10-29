@@ -68,11 +68,12 @@ import {
 import {
   writePeerIdCache,
   writeDeskSessionId,
-  writeSessionIdentityFile,
+  writeSessionIdentityFile as writeSessionIdentityFileUnguarded,
   writeGlobalSessionIdentityFile,
   readSessionIdentityFile,
   deleteGlobalSessionIdentityFile,
-  deleteSessionIdentityFile,
+  deleteSessionIdentityFile as deleteSessionIdentityFileUnguarded,
+  tileIdentityGuard,
   type InboxBindingConfirmation,
 } from "./shared/peer-cache.ts";
 import { inboxDepositReadiness } from "./shared/inbox-readiness.ts";
@@ -342,6 +343,21 @@ function log(msg: string) {
 
 function logError(msg: string, e?: unknown) {
   serverLog.logError(msg, e);
+}
+
+function mayTouchTileIdentity(action: string): boolean {
+  const verdict = tileIdentityGuard();
+  if (verdict.allowed) return true;
+  logError(`Refused to ${action} the session-identity file: ${verdict.reason}`);
+  return false;
+}
+
+async function writeSessionIdentityFile(...args: Parameters<typeof writeSessionIdentityFileUnguarded>): Promise<void> {
+  if (mayTouchTileIdentity("write")) await writeSessionIdentityFileUnguarded(...args);
+}
+
+async function deleteSessionIdentityFile(...args: Parameters<typeof deleteSessionIdentityFileUnguarded>): Promise<void> {
+  if (mayTouchTileIdentity("delete")) await deleteSessionIdentityFileUnguarded(...args);
 }
 
 // Last-resort safety nets: Bun exits on unhandled rejections; leave a trace

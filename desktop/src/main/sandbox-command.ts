@@ -389,6 +389,7 @@ export function buildLaunchScript(spec: SandboxLaunchScriptSpec, pidFile: string
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) continue // never script-inject via a key
     lines.push(`export ${key}=${shQuote(value)}`)
   }
+  lines.push(`export CLAUDE_PEERS_DESK_TILE_CWD=${shQuote(spec.cwd)}`)
   lines.push(`cd ${shQuote(spec.cwd)} || exit 1`)
   lines.push(`printf '%s\\n' "$$" > ${shQuote(pidFile)}`)
   lines.push(`exec ${spec.command}`)

@@ -14,7 +14,7 @@ import {
   stopBroker,
   type TestBroker,
 } from "./_helper.ts";
-import { readSessionIdentityFile, sessionIdentityFileName } from "../shared/peer-cache.ts";
+import { readSessionIdentityFile, sessionIdentityFileName, writeSessionIdentityFile } from "../shared/peer-cache.ts";
 
 /** Scans EVERY file left in `dir`, not just the expected path: a deletion
  * mutated into a `rename` to a neighboring name would still pass a
@@ -76,12 +76,23 @@ async function readUntil(
   throw new Error(`no JSON-RPC response with id ${wantedId}`);
 }
 
-test("cleanup() (triggered by stdin close, the same path Claude Code exiting takes) deletes the identity file", async () => {
-  const b = await startBroker();
-  brokers.push(b);
+interface LaunchedServer {
+  proc: ReturnType<typeof Bun.spawn>;
+  homeDir: string;
+  reader: ReadableStreamDefaultReader<Uint8Array>;
+  buffer: { text: string };
+  stderr: { text: string };
+}
+
+async function launchServer(
+  b: TestBroker,
+  deskSession: string,
+  env: Record<string, string>,
+  opts: { cwd?: string; seed?: (homeDir: string) => Promise<void> } = {}
+): Promise<LaunchedServer> {
   const homeDir = mkdtempSync(join(tmpdir(), "cp-cleanup-home-"));
   dirs.push(homeDir);
-  const deskSession = "probe-cleanup";
+  await opts.seed?.(homeDir);
   const groupSecret = randomUUID();
   mkdirSync(join(homeDir, "claude-peers"), { recursive: true });
   writeFileSync(join(homeDir, "claude-peers", "config.json"), JSON.stringify({ groups: { alpha: groupSecret }, default_group: "alpha" }));
@@ -98,18 +109,30 @@ test("cleanup() (triggered by stdin close, the same path Claude Code exiting tak
     inbox: { version: 1, run_ref: run.run, group_id: run.group },
   }));
 
-  const proc = Bun.spawn(["bun", "server.ts"], {
+  const proc = Bun.spawn(["bun", join(import.meta.dir, "..", "server.ts")], {
     env: scrubEnv(homeDir, {
       CLAUDE_PEERS_BROKER_URL: b.url,
       CLAUDE_PEERS_PORT: String(b.port),
       CLAUDE_PEERS_DESK_SESSION: deskSession,
       CLAUDE_PEERS_APPROVAL_FILE: credential,
+      ...env,
     }),
+    cwd: opts.cwd,
     stdio: ["pipe", "pipe", "pipe"],
   });
   procs.push(proc);
   const reader = proc.stdout.getReader();
   const buffer = { text: "" };
+  const stderr = { text: "" };
+  const errReader = proc.stderr.getReader();
+  void (async () => {
+    const decoder = new TextDecoder();
+    for (;;) {
+      const { value, done } = await errReader.read();
+      if (done) return;
+      stderr.text += decoder.decode(value, { stream: true });
+    }
+  })();
   proc.stdin.write(
     JSON.stringify({
       jsonrpc: "2.0",
@@ -123,6 +146,15 @@ test("cleanup() (triggered by stdin close, the same path Claude Code exiting tak
     }) + "\n"
   );
   await readUntil(reader, 0, buffer);
+  return { proc, homeDir, reader, buffer, stderr };
+}
+
+test("cleanup() (triggered by stdin close, the same path Claude Code exiting takes) deletes the identity file", async () => {
+  const b = await startBroker();
+  brokers.push(b);
+  const deskSession = "probe-cleanup";
+  // The tile cwd equals the server's cwd: the guard must let a legitimate tile through.
+  const { proc, homeDir } = await launchServer(b, deskSession, { CLAUDE_PEERS_DESK_TILE_CWD: process.cwd() });
 
   let before: { peerId: string; groupId: string; instanceToken: string } | null = null;
   for (let i = 0; i < 80 && !before; i++) {
@@ -140,3 +172,42 @@ test("cleanup() (triggered by stdin close, the same path Claude Code exiting tak
   await expect(access(join(peersDir, sessionIdentityFileName(deskSession)))).rejects.toThrow();
   await assertSecretNotOnDisk(peersDir, before!.instanceToken);
 }, 30_000);
+
+test("a server started in another cwd with the tile's token neither overwrites nor deletes the tile's identity file", async () => {
+  const b = await startBroker();
+  brokers.push(b);
+  const deskSession = "probe-foreign-cwd";
+  const tileCwd = mkdtempSync(join(tmpdir(), "cp-tile-cwd-"));
+  const foreignCwd = mkdtempSync(join(tmpdir(), "cp-foreign-cwd-"));
+  dirs.push(tileCwd, foreignCwd);
+  const peersDirOf = (home: string): string => join(home, ".claude", "peers");
+  const tileFile = (home: string): string => join(peersDirOf(home), sessionIdentityFileName(deskSession));
+
+  const { proc, homeDir, stderr } = await launchServer(
+    b,
+    deskSession,
+    { CLAUDE_PEERS_DESK_TILE_CWD: tileCwd },
+    {
+      cwd: foreignCwd,
+      seed: async (home) => {
+        await writeSessionIdentityFile(deskSession, "tile-peer", "tile-group", "tile-secret", home);
+      },
+    }
+  );
+  const sealed = await readFile(tileFile(homeDir), "utf-8");
+
+  const deadline = Date.now() + 20_000;
+  while (!stderr.text.includes("Refused to write the session-identity file")) {
+    if (Date.now() > deadline) throw new Error(`the foreign-cwd server never refused its write; stderr: ${stderr.text.slice(-500)}`);
+    await Bun.sleep(50);
+  }
+  await proc.stdin.end();
+  await proc.exited;
+
+  const deleteRefusals = (): number => stderr.text.match(/Refused to delete the session-identity file/g)?.length ?? 0;
+  const drained = Date.now() + 5_000;
+  while (deleteRefusals() < 2 && Date.now() < drained) await Bun.sleep(20);
+
+  expect(await readFile(tileFile(homeDir), "utf-8"), "the tile's file survives boot, register and exit byte for byte").toBe(sealed);
+  expect(deleteRefusals(), "boot delete and cleanup delete are both refused").toBe(2);
+}, 40_000);

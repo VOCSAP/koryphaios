@@ -42,6 +42,7 @@
     "../shared/approval-client.ts",
     "shared/permission-lease.ts",
     "../shared/peer-cache.ts",
+    "../shared/canonical-config-path.ts",
     "../shared/broker-config.ts",
     "../shared/roadmap-dispatch.ts",
     "../shared/tool-allowlist.ts",

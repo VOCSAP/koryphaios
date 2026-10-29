@@ -1,4 +1,5 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
+import { symlinkSync } from "node:fs";
 import { access, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -9,6 +10,7 @@ import {
   readGlobalSessionIdentityFile,
   readSessionIdentityFile,
   sessionIdentityFileName,
+  tileIdentityGuard,
   writeGlobalSessionIdentityFile,
   writeSessionIdentityFile,
   type WriterGeneration,
@@ -362,5 +364,67 @@ describe("session-identity file", () => {
     const raw = await readFile(join(peersDir, sessionIdentityFileName("tile-token-7")), "utf-8");
     const parsed = JSON.parse(raw) as Record<string, unknown>;
     expect(Object.keys(parsed).sort()).toEqual(["group_id", "instance_token", "peer_id"]);
+  });
+});
+
+describe("tileIdentityGuard", () => {
+  let root: string;
+
+  beforeEach(async () => {
+    root = await mkdtemp(join(tmpdir(), "cp-tile-guard-"));
+  });
+
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const tileEnv = (tileCwd?: string): Record<string, string | undefined> => ({
+    CLAUDE_PEERS_DESK_SESSION: "tile-guard-token",
+    CLAUDE_PEERS_DESK_TILE_CWD: tileCwd,
+  });
+
+  test("a process whose cwd is not the tile cwd is refused, naming both directories", async () => {
+    const tile = join(root, "tile");
+    const child = join(root, "cp-register-test");
+    await mkdir(tile);
+    await mkdir(child);
+    const verdict = tileIdentityGuard(tileEnv(tile), child);
+    expect(verdict.allowed).toBe(false);
+    if (!verdict.allowed) {
+      expect(verdict.reason).toContain(child);
+      expect(verdict.reason).toContain(tile);
+    }
+  });
+
+  test("a process at the tile cwd is allowed", async () => {
+    const tile = join(root, "tile");
+    await mkdir(tile);
+    expect(tileIdentityGuard(tileEnv(tile), tile)).toEqual({ allowed: true });
+  });
+
+  test("a worktree tile is allowed at its worktree and refused at the main checkout", async () => {
+    const main = join(root, "repo");
+    const worktree = join(main, ".worktrees", "fix");
+    await mkdir(worktree, { recursive: true });
+    expect(tileIdentityGuard(tileEnv(worktree), worktree)).toEqual({ allowed: true });
+    expect(tileIdentityGuard(tileEnv(worktree), main).allowed).toBe(false);
+  });
+
+  test("a tile cwd reached through a symlinked or junctioned prefix equals the real cwd", async () => {
+    const real = join(root, "real");
+    await mkdir(join(real, "project"), { recursive: true });
+    const link = join(root, "link");
+    symlinkSync(real, link, "junction");
+    expect(tileIdentityGuard(tileEnv(join(link, "project")), join(real, "project"))).toEqual({ allowed: true });
+    expect(tileIdentityGuard(tileEnv(join(real, "project")), join(link, "project"))).toEqual({ allowed: true });
+  });
+
+  test("without a desk session the guard has nothing to protect and allows", async () => {
+    expect(tileIdentityGuard({ CLAUDE_PEERS_DESK_TILE_CWD: join(root, "elsewhere") }, root)).toEqual({ allowed: true });
+  });
+
+  test("a Deck that exports no tile cwd keeps the pre-guard behaviour", async () => {
+    expect(tileIdentityGuard(tileEnv(undefined), root)).toEqual({ allowed: true });
+    expect(tileIdentityGuard(tileEnv("   "), root)).toEqual({ allowed: true });
   });
 });

@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { canonicalConfigPath } from "./canonical-config-path.ts";
 
 // Atomic cache write (M-LOG-1 / N-MNT-5): write to a per-process temp file then
 // rename, so a torn write or two sessions racing on the shared per-cwd legacy
@@ -461,6 +462,28 @@ export async function deleteSessionIdentityFile(token: string, home: string = ho
     if ((e as NodeJS.ErrnoException)?.code === "ENOENT") return;
     throw e;
   }
+}
+
+export type TileIdentityVerdict = { allowed: true } | { allowed: false; reason: string };
+
+/**
+ * May this process write or delete its tile's session-identity file? A child
+ * that inherited the tile's env (token included) from a different cwd must
+ * not: its peer_id and instance_token would replace the tile's proven ones.
+ * CLAUDE_PEERS_DESK_TILE_CWD is the tile's own cwd (the container cwd in a
+ * sandbox), exported by the Deck. Absent means the Deck did not export it;
+ * refusing there would leave every such tile with an unproven identity, so
+ * the guard lets it through.
+ */
+export function tileIdentityGuard(
+  env: Record<string, string | undefined> = process.env,
+  cwd: string = process.cwd(),
+): TileIdentityVerdict {
+  if (!sanitizeSessionId(env.CLAUDE_PEERS_DESK_SESSION)) return { allowed: true };
+  const tileCwd = env.CLAUDE_PEERS_DESK_TILE_CWD?.trim();
+  if (!tileCwd) return { allowed: true };
+  if (canonicalConfigPath(cwd) === canonicalConfigPath(tileCwd)) return { allowed: true };
+  return { allowed: false, reason: `process cwd ${cwd} is not the tile cwd ${tileCwd}` };
 }
 
 /**
