@@ -21,6 +21,9 @@ const dirs: string[] = [];
 const HELPER_WRAPPER = join(import.meta.dir, "..", "desktop", "deck-lead-plugin", "bin", "kory-session-handoff.sh");
 const RUN_ID = "00000000-0000-4000-8000-000000000001";
 
+const helperTest = (name: string, body: () => void | Promise<void>) =>
+  test.skipIf(!sessionHandoffSupported())(`${name} (needs a platform session-handoff supports)`, body);
+
 function stateDir(): string {
   const dir = canonicalPath(mkdtempSync(join(tmpdir(), "kory-session-handoff-")));
   dirs.push(dir);
@@ -221,7 +224,7 @@ test("handoff launch, publication, and purge refuse linked filesystem parents", 
   expect(() => publishSessionHandoff(store, "# End", { author: "launch-a", now: new Date("2026-10-27T10:00:00.000Z") })).toThrow("symbolic link");
 });
 
-test("helper reports the launch context and publishes its bound draft without stdin", () => {
+helperTest("helper reports the launch context and publishes its bound draft without stdin", () => {
   const root = stateDir();
   const store = createSessionHandoffStore(root, "project-key");
   const launchDir = join(root, "session-handoff-drafts", RUN_ID, "generation-a");
@@ -278,7 +281,7 @@ test("helper reports the launch context and publishes its bound draft without st
   expect(JSON.parse(numbered.stdout.toString())).toEqual({ number: 1, markdown: "# End\n" });
 });
 
-test("helper assigns distinct exit codes to missing bindings, handoffs, invalid content, and I/O", () => {
+helperTest("helper assigns distinct exit codes to missing bindings, handoffs, invalid content, and I/O", () => {
   const root = stateDir();
   const store = createSessionHandoffStore(root, "project-key");
   const launchDir = join(root, "session-handoff-drafts", RUN_ID, "generation-a");
@@ -349,7 +352,7 @@ test("helper assigns distinct exit codes to missing bindings, handoffs, invalid 
   }).exitCode).toBe(77);
 });
 
-test("helper rejects hostile read selectors with exit code 64", () => {
+helperTest("helper rejects hostile read selectors with exit code 64", () => {
   const root = stateDir();
   const store = createSessionHandoffStore(root, "project-key");
   const launchDir = join(root, "session-handoff-drafts", RUN_ID, "generation-a");
@@ -379,7 +382,7 @@ test("helper rejects hostile read selectors with exit code 64", () => {
   }
 });
 
-test("a corrupt skills document does not block handoff publish or read", () => {
+helperTest("a corrupt skills document does not block handoff publish or read", () => {
   const root = stateDir();
   const { draftPath, env } = boundHelper(root);
   writeFileSync(join(root, "session-skills.json"), "{");
@@ -390,7 +393,7 @@ test("a corrupt skills document does not block handoff publish or read", () => {
   expect(Bun.spawnSync({ cmd: ["bash", HELPER_WRAPPER, "read", "latest"], env }).exitCode).toBe(0);
 });
 
-test("context returns all empty addenda when no skills document exists", () => {
+helperTest("context returns all empty addenda when no skills document exists", () => {
   const root = stateDir();
   const { env } = boundHelper(root);
   const context = Bun.spawnSync({ cmd: ["bash", HELPER_WRAPPER, "context"], env });
@@ -399,7 +402,7 @@ test("context returns all empty addenda when no skills document exists", () => {
   expect(JSON.parse(context.stdout.toString()).addendum).toEqual({ start: "", end: "", stop: "" });
 });
 
-test("context retains empty addenda next to a filled addendum", () => {
+helperTest("context retains empty addenda next to a filled addendum", () => {
   const root = stateDir();
   const { env } = boundHelper(root);
   writeSessionSkills(root, { version: 2, addendum: { start: "only start", end: "", stop: "" }, storage: { mode: "kory", instructions: "" } });
@@ -408,7 +411,7 @@ test("context retains empty addenda next to a filled addendum", () => {
   expect(addendum).toEqual({ start: "only start", end: "", stop: "" });
 });
 
-test("context ignores hostile skills documents in its working directory", () => {
+helperTest("context ignores hostile skills documents in its working directory", () => {
   const root = stateDir();
   const hostileCwd = stateDir();
   const { env } = boundHelper(root);
@@ -424,7 +427,7 @@ test("context ignores hostile skills documents in its working directory", () => 
   expect(JSON.parse(context.stdout.toString()).addendum).toEqual(global.addendum);
 });
 
-test("two bound tiles read one shared skills document", () => {
+helperTest("two bound tiles read one shared skills document", () => {
   const root = stateDir();
   const first = boundHelper(root, "tile-a", "generation-a");
   const second = boundHelper(root, "tile-b", "generation-b");
@@ -438,7 +441,7 @@ test("two bound tiles read one shared skills document", () => {
   }
 });
 
-test("context rejects trailing arguments with no stdout", () => {
+helperTest("context rejects trailing arguments with no stdout", () => {
   const root = stateDir();
   const { env } = boundHelper(root);
   const result = Bun.spawnSync({ cmd: ["bash", HELPER_WRAPPER, "context", "hostile"], env });
@@ -447,7 +450,7 @@ test("context rejects trailing arguments with no stdout", () => {
   expect(result.stdout.toString()).toBe("");
 });
 
-test("parallel helper publications retain every numbered handoff", async () => {
+helperTest("parallel helper publications retain every numbered handoff", async () => {
   const root = stateDir();
   const store = createSessionHandoffStore(root, "project-key");
   const launchDir = join(root, "session-handoff-drafts", RUN_ID, "generation-a");
@@ -476,4 +479,15 @@ test("parallel helper publications retain every numbered handoff", async () => {
 
   expect(await Promise.all(processes.map((process) => process.exited))).toEqual(Array(64).fill(0));
   expect(readdirSync(store.archiveDir).filter((name) => name.endsWith(".md"))).toHaveLength(64);
+});
+
+test.skipIf(sessionHandoffSupported())("an unsupported platform refuses with 77 and no stdout before any argument is parsed", () => {
+  const { env } = boundHelper(stateDir());
+
+  for (const args of [["context"], ["context", "hostile"], ["bogus"], []]) {
+    const result = Bun.spawnSync({ cmd: ["bash", HELPER_WRAPPER, ...args], env });
+    expect(result.exitCode, `exit code for [${args.join(" ")}]`).toBe(77);
+    expect(result.stdout.toString()).toBe("");
+    expect(result.stderr.toString()).toBe("Invalid session-handoff binding\n");
+  }
 });
