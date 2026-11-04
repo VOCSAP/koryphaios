@@ -9,10 +9,10 @@ import { TemplateComposer } from './TemplateComposer'
 /**
  * Template picker. Lists global + local templates; the selected one can be
  * Used (append to the current sessions) or Applied (replace, confirmed first
- * when sessions are open). Opened from File > Import template, File > New
- * template… (card 290a14e2, straight to a blank composer), the home
- * "Use template" button, and (once already open) its own "Manage templates"
- * button.
+ * when sessions are open). Opened from File > Template > Use Template…, the
+ * home "Use template" button, and (once already open) its own "Manage
+ * templates" button, which adds New / Edit / Duplicate / Delete. Edit
+ * Template… opens it in edit intent.
  */
 export function TemplatesDialog(): React.JSX.Element {
   const t = useT()
@@ -29,6 +29,7 @@ export function TemplatesDialog(): React.JSX.Element {
   const allSessions = useDeck((s) => s.sessions)
   const sessions = allSessions.filter((s) => !s.supervisor)
   const manage = useDeck((s) => s.templatesManage)
+  const edit = useDeck((s) => s.templatesEdit)
   const composerSeed = useDeck((s) => s.templatesComposerSeed)
   const applyTemplate = useDeck((s) => s.applyTemplate)
   const removeTemplate = useDeck((s) => s.removeTemplate)
@@ -82,6 +83,15 @@ export function TemplatesDialog(): React.JSX.Element {
     await refreshTemplates()
   }
 
+  // In edit intent a row opens its composer instead of being selected.
+  const choose = (tpl: TemplateSummary): void => {
+    if (edit) {
+      setComposer({ path: tpl.path })
+      return
+    }
+    setSelected(tpl.path)
+  }
+
   const use = (): void => {
     if (selected) void applyTemplate(selected, 'append')
   }
@@ -95,17 +105,26 @@ export function TemplatesDialog(): React.JSX.Element {
   return (
     <div className="modal-backdrop" onMouseDown={() => openTemplates(false)}>
       <div className="modal" onMouseDown={(e) => e.stopPropagation()}>
-        <h2>{t('template.pickTitle')}</h2>
+        <h2>{edit ? t('template.editPickTitle') : t('template.pickTitle')}</h2>
+        {edit && templates.length > 0 && <p className="confirm-msg">{t('template.editHint')}</p>}
 
         {templates.length === 0 ? (
-          <p className="confirm-msg">{t('template.empty')}</p>
+          <p className="confirm-msg">{edit ? t('template.editEmpty') : t('template.empty')}</p>
         ) : (
           <ul className="template-list">
             {templates.map((tpl) => (
               <li
                 key={tpl.path}
                 className={`template-row ${selected === tpl.path ? 'template-row-selected' : ''}`}
-                onClick={() => setSelected(tpl.path)}
+                tabIndex={0}
+                onClick={() => choose(tpl)}
+                onKeyDown={(e) => {
+                  if (e.target !== e.currentTarget) return
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault()
+                    choose(tpl)
+                  }
+                }}
                 title={tpl.path}
               >
                 <span className="template-name">{tpl.name}</span>
@@ -113,8 +132,8 @@ export function TemplatesDialog(): React.JSX.Element {
                   {t(`template.source.${tpl.source}`)}
                 </span>
                 <span className="template-count">{t('template.sessions', { n: tpl.sessionCount })}</span>
-                {/* Delete only in manage mode (File > Import template), never from
-                    the home "Use template" path. */}
+                {/* Row actions only in manage mode, never from the plain "Use
+                    template" path. */}
                 {manage && (
                   <>
                     <button
@@ -156,32 +175,35 @@ export function TemplatesDialog(): React.JSX.Element {
         )}
 
         <div className="modal-actions template-actions">
-          {manage ? (
-            <button
-              onClick={() => {
-                composerNonce.current++
-                setComposer({ path: null })
-              }}
-            >
-              {t('composer.new')}
-            </button>
-          ) : (
-            <button onClick={() => openTemplates(true, { manage: true })}>{t('template.manage')}</button>
-          )}
+          {(!edit || templates.length === 0) &&
+            (manage || edit ? (
+              <button
+                onClick={() => {
+                  composerNonce.current++
+                  setComposer({ path: null })
+                }}
+              >
+                {t('composer.new')}
+              </button>
+            ) : (
+              <button onClick={() => openTemplates(true, { manage: true })}>{t('template.manage')}</button>
+            ))}
           <button className="btn-cancel" onClick={() => openTemplates(false)}>
             {t('common.cancel')}
           </button>
           {/* Replace only makes sense when there are sessions to replace; with an
               empty window (e.g. opened from the home "Use template" button) Apply
               would equal Use, so it is hidden. */}
-          {sessions.length > 0 && (
+          {!edit && sessions.length > 0 && (
             <button className="btn-apply" onClick={apply} disabled={!selected}>
               {t('template.apply')}
             </button>
           )}
-          <button className="btn-use" onClick={use} disabled={!selected}>
-            {t('template.use')}
-          </button>
+          {!edit && (
+            <button className="btn-use" onClick={use} disabled={!selected}>
+              {t('template.use')}
+            </button>
+          )}
         </div>
       </div>
 
@@ -203,7 +225,10 @@ export function TemplatesDialog(): React.JSX.Element {
           key={composer.path ?? 'new-' + composerNonce.current}
           path={composer.path}
           onClose={() => setComposer(null)}
-          onSaved={() => void refreshTemplates()}
+          onSaved={() => {
+            void refreshTemplates()
+            if (edit) openTemplates(false)
+          }}
         />
       )}
 

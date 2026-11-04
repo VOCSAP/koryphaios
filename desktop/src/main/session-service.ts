@@ -89,6 +89,7 @@ import { PermissionLeaseRuntime, type PermissionLeaseHandle } from './permission
 import { mintDepositCapability } from './deposit-capability'
 import { windowsPtyFor } from '../shared/windows-pty'
 import { isToolNameList } from '../shared/tool-names'
+import { assertClodexContextInput, clodexContextEnv, isClodexContextTokens } from '../shared/clodex-context'
 
 type WrapperRemovalSource = 'configured launch command' | 'tile command override' | 'bridged tile'
 
@@ -857,6 +858,7 @@ export class SessionService extends EventEmitter {
     if (input.disallowedTools !== undefined && !isToolNameList(input.disallowedTools)) {
       throw new Error('disallowedTools holds a name outside the tool-name allow-list')
     }
+    assertClodexContextInput(input.clodexContextTokens)
     const cfg = this.getConfig()
     // B6: agent/model are structured identifiers that get interpolated into the
     // login-shell command line, so they are allow-listed (sanitizeFlagValue) and
@@ -906,6 +908,7 @@ export class SessionService extends EventEmitter {
       // Empty => the resolved launchCommand; a non-empty value overrides it.
       command: input.command?.trim() || '',
       bridge,
+      clodexContextTokens: bridge && isClodexContextTokens(input.clodexContextTokens) ? input.clodexContextTokens : undefined,
       args,
       sessionId: '',
       color: input.color?.trim() || paletteColor(cfg.palette ?? DEFAULT_PALETTE, this.defs.length),
@@ -1726,6 +1729,7 @@ export class SessionService extends EventEmitter {
       KORY_APPROVAL_MODULE: koryModuleServed ? '1' : '',
       ...(fallbackInjected ? { KORY_STATUS_FALLBACK: '1' } : null)
     }
+    Object.assign(sessionEnv, clodexContextEnv(def, !sandboxed && isClodexLaunch(base)))
     const peerToolsValue = peerToolsEnvValue(def.peerTools)
     if (peerToolsValue !== undefined) Object.assign(sessionEnv, { CLAUDE_PEERS_TOOLS: peerToolsValue })
     // Always exported, '' included: a value inherited from the process that

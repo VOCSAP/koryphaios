@@ -6438,9 +6438,7 @@ body:has(.rm-modal) .rm-conflict-modal {
   padding: 4px 7px;
 }
 
-/* 6px and not 3px: the radio used to add Chromium's own margin-right on top of
-   this gap, and the element-level input[type='radio'] rule zeroes that UA
-   margin. 6px keeps the disc-to-laurel distance the operator already had. */
+/* 6px, the box-to-laurel distance of the lead toggle. */
 .tc-lead-toggle {
   display: flex;
   align-items: center;
@@ -6452,6 +6450,72 @@ body:has(.rm-modal) .rm-conflict-modal {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 6px 10px;
+}
+
+/* The card's own gap spaces its rows; the create form's margin would double it. */
+.tc-card .field {
+  margin-bottom: 0;
+}
+
+/* Same box as .colour-btn. */
+.mp-current {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 8px;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.mp-current:hover:not(:disabled) {
+  border-color: var(--fg-dim);
+}
+
+.mp-current:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.mp-panel {
+  max-height: 240px;
+  overflow-y: auto;
+  margin-top: 4px;
+}
+
+.field .ctx-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.field .ctx-row input[type='range'] {
+  flex: 1;
+  width: auto;
+  min-width: 0;
+}
+
+.field .ctx-number {
+  flex: none;
+  width: 76px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.field .ctx-number[aria-invalid='true'] {
+  border-color: var(--danger);
+}
+
+.ctx-unit {
+  flex: none;
+  color: var(--fg-dim);
+  font-size: 12px;
+  white-space: nowrap;
 }
 
 /* ---------- Embedded browser view (PLAN D1) ---------- */

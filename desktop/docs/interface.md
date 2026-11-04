@@ -98,7 +98,11 @@ result.
 ## Menus
 
 - **File** — New (clear: close all sessions, empty window), Save workspace,
-  Save As…, Restore, Workspaces list, Export template, Import template.
+  Save As…, Restore, Workspaces list, and a **Template** submenu: Use
+  Template… (apply), Edit Template… (open a chosen template's composer,
+  spawning nothing), Save Template… (capture the current sessions). New,
+  Duplicate and Delete live in the picker's "Manage templates" mode. Labels
+  follow the active language and the menu is rebuilt when it changes.
 - **Edit** — Settings… (`Ctrl/Cmd+,`).
 
 ## Keyboard shortcuts

@@ -1,69 +1,33 @@
 import { useEffect, useState } from 'react'
-import type { LaunchPreset, ModelOption } from '@shared/types'
-import type { ProviderCatalog } from '@shared/models'
-import { CLODEX_PROVIDER_ID, favKey } from '@shared/models'
+import type { LaunchPreset } from '@shared/types'
 import { defaultAnnounceDraft } from '@shared/announce'
-import { mergeRoleChoices, sanitizeRole, TEAM_LEAD_ROLE } from '@shared/role'
+import { CLODEX_PROVIDER_ID } from '@shared/models'
+import { TEAM_LEAD_ROLE } from '@shared/role'
 import { useDeck } from '../store'
 import { useT } from '../i18n'
+import {
+  CONTEXT_DEFAULT_TOKENS,
+  isBridgePick,
+  isContextInvalid,
+  modelFieldsOf,
+  type ModelPick
+} from '../peer-options'
+import { useModelChoices } from '../use-model-choices'
 import { GLYPH_ACTIONS, GLYPH_BADGES } from './icons'
-import { ModelPicker } from './ModelPicker'
+import {
+  AgentField,
+  ClodexContextField,
+  EffortField,
+  ExtendedContextField,
+  ModelField,
+  RoleField
+} from './PeerOptionFields'
 
 /**
  * Advanced create popover: pick a subagent, a custom name + colour, a model, a
  * reasoning-effort level, free args, a preset, and (advanced) a different working
  * folder. Builds a single CreateSessionInput and spawns the session.
  */
-
-/** Effort slider stops. Index 0 = Auto (omit --effort), then the CLI levels. */
-const EFFORT_LEVELS = ['', 'low', 'medium', 'high', 'xhigh', 'max'] as const
-
-/**
- * Sentinel <option> value opening the free-text role entry. Not a role itself:
- * it can never collide with one, since sanitizeRole() strips the dots.
- */
-const ROLE_OTHER = '...other'
-
-/**
- * A model id can take the `[1m]` (1M context window) suffix when it is a
- * concrete, non-Haiku model. Opus and Sonnet aliases and their full ids
- * qualify; Haiku does not support 1M, and the empty "default" choice has no id
- * to append to. Mirrors Claude Code: "Only append [1m] when the underlying
- * model supports 1M context."
- */
-function supports1mContext(id: string): boolean {
-  const m = id.trim().toLowerCase()
-  return m !== '' && !m.includes('haiku')
-}
-
-/**
- * Sections of the create-menu picker (C29): the launch-config models
- * (operator-curated, first) merged with the Anthropic frontier catalog, deduped
- * by id, then the bridge providers as probed. Anthropic is forced available
- * (agent sessions run the claude CLI by construction); a bridge keeps its own
- * availability, since its wrapper may be missing or its proxy idle.
- */
-function mergeCreateCatalogs(
-  models: ModelOption[],
-  catalogs: ProviderCatalog[]
-): ProviderCatalog[] {
-  const frontier = catalogs.find((c) => c.id === 'anthropic')
-  const merged = [
-    ...models.map((m) => ({ id: m.id, label: m.label })),
-    ...(frontier?.models ?? []).filter((fm) => !models.some((m) => m.id === fm.id))
-  ]
-  return [
-    {
-      id: 'anthropic',
-      name: frontier?.name ?? 'Anthropic',
-      kind: 'frontier',
-      cli: 'claude',
-      available: true,
-      models: merged
-    },
-    ...catalogs.filter((c) => c.kind === 'bridge')
-  ]
-}
 
 export interface CreateMenuInitial {
   /** Pre-filled session name. */
@@ -96,37 +60,22 @@ export function CreateMenu({
   const [leadTouched, setLeadTouched] = useState(false)
 
   // Peer role (card a2f61172): what this agent DOES. Independent of the laurel
-  // above.
-  // Card 015c9c97: team-lead is REMOVED from this list -- the laurel checkbox
-  // above is the SOLE way to name a team-lead in this panel. It is projected
-  // onto `role` only at submit time (see `effectiveRole` below), never by
-  // mutating this dropdown's state. mergeRoleChoices/BUILTIN_ROLES stay
-  // untouched (TemplateComposer.tsx still lists team-lead there, out of
-  // scope for this card).
-  const updateConfig = useDeck((s) => s.updateConfig)
-  const roleChoices = mergeRoleChoices(config.roleChoices ?? []).filter((r) => r !== TEAM_LEAD_ROLE)
+  // above. The laurel is the SOLE way to name a team-lead in this panel (card
+  // 015c9c97): it is projected onto `role` only at submit time (`effectiveRole`).
   const [role, setRole] = useState('')
-  const [roleOther, setRoleOther] = useState(false)
-  const [roleDraft, setRoleDraft] = useState('')
 
+  const { presets, catalogs, sandboxOn } = useModelChoices()
   const [agents, setAgents] = useState<string[]>([])
-  const [presets, setPresets] = useState<LaunchPreset[]>([])
-  const [models, setModels] = useState<ModelOption[]>([])
-  // Unified picker catalogs (C29): the Anthropic section + favorites, plus the
-  // bridge sections, since agent sessions always run the claude CLI (a bridged
-  // one through its wrapper).
-  const [catalogs, setCatalogs] = useState<ProviderCatalog[]>([])
   const [agent, setAgent] = useState('')
   const [name, setName] = useState(initial?.name ?? '')
-  // Model choice: the id alone would collide between the Anthropic section and
-  // a bridge offering the same id, so the picked provider travels with it.
-  // An empty model with no provider is the CLI default.
-  const [pick, setPick] = useState<{ model: string; providerId?: string }>({ model: '' })
+  const [pick, setPick] = useState<ModelPick>({ model: '' })
   // Extended 1M context: appends the `[1m]` suffix to the model id (Claude Code
   // strips it before calling the provider). Only meaningful on a 1M-capable
   // model (Opus / Sonnet, not Haiku) and only when a concrete model is picked.
   const [extended, setExtended] = useState(false)
-  const [effortIdx, setEffortIdx] = useState(0)
+  const [effort, setEffort] = useState('')
+  // Tokens; undefined = default, NaN = an invalid typed value (see parseContextK).
+  const [contextTokens, setContextTokens] = useState<number | undefined>(undefined)
   const [extraArgs, setExtraArgs] = useState('')
   // Initial prompt, submitted as Claude's positional argument on the fresh
   // launch (PLAN C2). Presets with a `prompt` pre-fill it (last preset wins).
@@ -143,17 +92,9 @@ export function CreateMenu({
   // initial.announce counts as authored from the start.
   const [announce, setAnnounce] = useState(initial?.announce ?? '')
   const [announceTouched, setAnnounceTouched] = useState(!!initial?.announce)
-  // The bridge wrapper is a host binary: it cannot reach into a container, so
-  // sandbox mode hides those sections entirely.
-  const sandboxOn = useDeck((s) => s.sandboxStatus)?.enabled === true
 
   useEffect(() => {
     void window.api.listAgents().then(setAgents)
-    void window.api.getLaunchConfig().then((c) => {
-      setPresets(c.presets)
-      setModels(c.models)
-    })
-    void window.api.modelCatalogs().then(setCatalogs)
     // Seed the colour swatch with the real colour the session would receive, so
     // the preview is honest even when the user does not pick a custom colour.
     void window.api.peekNextColor().then(setColor)
@@ -167,14 +108,11 @@ export function CreateMenu({
     return () => window.removeEventListener('keydown', onKey)
   }, [onClose])
 
-  const model = pick.model
-  const isBridge = pick.providerId === CLODEX_PROVIDER_ID
-  // Whether the 1M toggle applies to the current pick, and the model id actually
-  // submitted (base id, or `<id>[1m]` when extended context is requested). A
-  // bridged model is served by another provider: the suffix means nothing there.
-  const canExtend = !isBridge && supports1mContext(model)
-  const use1m = extended && canExtend
-  const effectiveModel = use1m ? `${model}[1m]` : model
+  const isBridge = isBridgePick(pick)
+  // The model id actually submitted: base id, or `<id>[1m]` when extended
+  // context is requested and the pick supports it.
+  const { model: effectiveModel } = modelFieldsOf(pick, extended)
+  const contextInvalid = isBridge && isContextInvalid(contextTokens)
 
   // Keep the announce draft synced to the agent/model/effort choices until the
   // operator edits it (then it stays as authored). Uses the effective model so
@@ -184,12 +122,12 @@ export function CreateMenu({
     setAnnounce(
       defaultAnnounceDraft({
         agent,
-        model: effectiveModel,
-        effort: EFFORT_LEVELS[effortIdx] ?? '',
+        model: effectiveModel ?? '',
+        effort,
         via: isBridge ? CLODEX_PROVIDER_ID : undefined
       })
     )
-  }, [agent, effectiveModel, effortIdx, isBridge, announceTouched])
+  }, [agent, effectiveModel, effort, isBridge, announceTouched])
 
   // Sandbox mode cannot honour a bridged model, so a pick made before the
   // toggle flipped is dropped rather than silently launched unbridged.
@@ -210,7 +148,6 @@ export function CreateMenu({
   // Auto-name preview: the agent name, else "peer". The main process appends the
   // smallest free numeric suffix when this collides with a live session.
   const namePreview = agent.trim() || 'peer'
-  const effortLevel = EFFORT_LEVELS[effortIdx]
 
   // Suggest team-lead while untouched: pattern matches AND the seat is free.
   useEffect(() => {
@@ -220,35 +157,15 @@ export function CreateMenu({
     setLead(!hasLead && pattern !== '' && candidate.includes(pattern))
   }, [agent, name, hasLead, leadTouched, config.leadPattern])
 
-  /** Commit the free-text role: normalise, remember it for next time, select it. */
-  const addRole = (): void => {
-    const value = sanitizeRole(roleDraft)
-    setRoleOther(false)
-    setRoleDraft('')
-    if (!value) return
-    // Card 015c9c97: team-lead can only be named via the laurel checkbox, not
-    // through this free-text escape hatch.
-    if (value === TEAM_LEAD_ROLE) return
-    setRole(value)
-    // Persisted in the operator-GLOBAL config, like modelFavorites. Built-ins
-    // and already-known roles are filtered by mergeRoleChoices on read, but
-    // guard here too so the stored list does not grow duplicates.
-    if (!roleChoices.includes(value)) {
-      void updateConfig({ roleChoices: [...(config.roleChoices ?? []), value] })
-    }
-  }
-
-  // Card 015c9c97: the laurel checkbox is the sole way to name a team-lead --
-  // the submitted role is derived from it here, never from the dropdown
-  // (which never offers TEAM_LEAD_ROLE as a choice, see roleChoices above).
   const effectiveRole = lead ? TEAM_LEAD_ROLE : role
 
   const submit = (): void => {
+    if (contextInvalid) return
     void createSession({
       name: name.trim() || undefined,
       agent: agent || undefined,
-      model: effectiveModel || undefined,
-      effort: effortLevel || undefined,
+      model: effectiveModel,
+      effort: effort || undefined,
       role: effectiveRole || undefined,
       args: extraArgs.trim() || undefined,
       prompt: prompt.trim() || undefined,
@@ -260,7 +177,8 @@ export function CreateMenu({
       color: customColor ? color : undefined,
       announce: announce.trim() || undefined,
       lead: lead || undefined,
-      bridge: isBridge ? 'clodex' : undefined
+      bridge: isBridge ? 'clodex' : undefined,
+      clodexContextTokens: isBridge ? (contextTokens ?? CONTEXT_DEFAULT_TOKENS) : undefined
     })
     onCreate?.()
     onClose()
@@ -271,17 +189,7 @@ export function CreateMenu({
       <div className="popover" onMouseDown={(e) => e.stopPropagation()}>
         <h3>{t('create.title')}</h3>
 
-        <label className="field">
-          <span>{t('create.agent')}</span>
-          <select value={agent} onChange={(e) => setAgent(e.target.value)}>
-            <option value="">{t('create.agentDefault')}</option>
-            {agents.map((a) => (
-              <option key={a} value={a}>
-                {a}
-              </option>
-            ))}
-          </select>
-        </label>
+        <AgentField agents={agents} value={agent} onChange={setAgent} />
 
         <div className="field create-name-row">
           <label className="field create-name-field">
@@ -303,87 +211,28 @@ export function CreateMenu({
               }}
             />
           </label>
-        </div>
-
-        {/* Peer role (card a2f61172): what this agent DOES, exported to the
-            session as CLAUDE_PEERS_ROLE. An OPERATOR gesture only -- no agent
-            path sets it. Optional: "no role" is the default and leaves the
-            launch strictly as it was before this control existed.
-            Card 015c9c97: greyed out whenever the laurel checkbox is checked,
-            regardless of its own value -- the checkbox is the only source of
-            'team-lead' in this panel (see `effectiveRole` in submit). */}
-        <div className="field" title={t('create.roleHelp')} aria-disabled={lead}>
-          <span>{t('create.role')}</span>
-          <select
-            disabled={lead}
-            value={roleOther ? ROLE_OTHER : role}
-            onChange={(e) => {
-              const picked = e.target.value
-              if (picked === ROLE_OTHER) {
-                setRoleOther(true)
-                setRole('')
-                return
-              }
-              setRoleOther(false)
-              setRole(picked)
-            }}
-          >
-            <option value="">{t('create.roleNone')}</option>
-            {roleChoices.map((r) => (
-              <option key={r} value={r}>
-                {r}
-              </option>
-            ))}
-            <option value={ROLE_OTHER}>{t('create.roleOther')}</option>
-          </select>
-          {roleOther && (
-            <div className="field-row">
-              <input
-                autoFocus
-                disabled={lead}
-                value={roleDraft}
-                placeholder={t('create.rolePlaceholder')}
-                onChange={(e) => setRoleDraft(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') addRole()
-                }}
-              />
-              <button className="icon-btn" disabled={lead} onClick={addRole} title={t('create.roleAdd')}>
-                {GLYPH_ACTIONS.plus}
-              </button>
-            </div>
-          )}
-          {/* One line only: this field sits high in the form, and a 3-line
-              note here pushed the whole model block down. The full nuance
-              (independence from the laurel) lives in the field's title. */}
-          <small>{t('create.roleShort')}</small>
-        </div>
-
-        <div className="field">
-          <span>{t('create.model')}</span>
-          {/* Unified picker (C29): launch-config models first (operator-curated),
-              then the frontier Anthropic catalog, then the bridged providers;
-              favorites pinned below the separator. Always shown even if CLI
-              detection failed — without claude there would be no sessions at all. */}
-          <div className="create-model-picker">
-            <div
-              className={`mp-model${model === '' ? ' is-selected' : ''}`}
-              onClick={() => setPick({ model: '' })}
+          {customColor && (
+            <button
+              type="button"
+              className="chip"
+              title={t('create.colourAutoTitle')}
+              onClick={() => {
+                setCustomColor(false)
+                void window.api.peekNextColor().then(setColor)
+              }}
             >
-              <span className="mp-model-name">{t('create.modelDefault')}</span>
-            </div>
-            <ModelPicker
-              catalogs={mergeCreateCatalogs(models, catalogs)}
-              selected={[favKey(pick.providerId ?? 'anthropic', model)]}
-              multi={false}
-              onlyProviders={['anthropic', CLODEX_PROVIDER_ID]}
-              excludeKinds={sandboxOn ? ['bridge'] : undefined}
-              onPick={(_key, target) =>
-                setPick({ model: target.model, providerId: target.providerId })
-              }
-            />
-          </div>
+              {t('create.colourAuto')}
+            </button>
+          )}
         </div>
+
+        {/* Peer role (card a2f61172): exported to the session as
+            CLAUDE_PEERS_ROLE. An OPERATOR gesture only -- no agent path sets it.
+            Optional: "no role" leaves the launch strictly as it was before this
+            control existed. Greyed out while the laurel checkbox is checked. */}
+        <RoleField value={role} disabled={lead} onChange={setRole} />
+
+        <ModelField catalogs={catalogs} pick={pick} sandboxOn={sandboxOn} onPick={setPick} />
 
         <label className="field field-check" title={t('create.leadHelp')}>
           <input
@@ -400,37 +249,11 @@ export function CreateMenu({
           </span>
         </label>
 
-        <label
-          className="field field-check"
-          title={t('create.extendedContextHelp')}
-          aria-disabled={!canExtend}
-        >
-          <input
-            type="checkbox"
-            checked={use1m}
-            disabled={!canExtend}
-            onChange={(e) => setExtended(e.target.checked)}
-          />
-          <span>{t('create.extendedContext')}</span>
-        </label>
+        <ExtendedContextField pick={pick} extended={extended} onChange={setExtended} />
 
-        <div className="field">
-          <span>
-            {t('create.effort')}: <strong>{effortLevel || t('create.effortAuto')}</strong>
-          </span>
-          <input
-            type="range"
-            min={0}
-            max={EFFORT_LEVELS.length - 1}
-            step={1}
-            value={effortIdx}
-            onChange={(e) => setEffortIdx(Number(e.target.value))}
-          />
-          <div className="effort-ends">
-            <span>{t('create.effortFaster')}</span>
-            <span>{t('create.effortSmarter')}</span>
-          </div>
-        </div>
+        {isBridge && <ClodexContextField value={contextTokens} onChange={setContextTokens} />}
+
+        <EffortField value={effort} onChange={setEffort} />
 
         {presets.length > 0 && (
           <div className="field">
@@ -510,7 +333,7 @@ export function CreateMenu({
 
         <div className="modal-actions">
           <button onClick={onClose}>{t('common.cancel')}</button>
-          <button className="primary" onClick={submit}>
+          <button className="primary" onClick={submit} disabled={contextInvalid}>
             {t('common.create')}
           </button>
         </div>

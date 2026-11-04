@@ -101,6 +101,17 @@ test("the supervisor spawns without the sandbox gate or the transcript warm", as
   expect(log).toEqual(["create:"]);
 });
 
+test("an invalid clodexContextTokens is refused before the gate, the warm-up or the create", async () => {
+  const log: string[] = [];
+  const { service, created } = recordingService([], log);
+  const message = await rejection(
+    createSessionWithWorktree(service, PROJECT, { bridge: "clodex", clodexContextTokens: 872_001 }, copyModeDeps(log))
+  );
+  expect(message).toContain("between 200000 and 872000");
+  expect(log).toEqual([]);
+  expect(created).toEqual([]);
+});
+
 test("a failing sandbox gate stops the spawn before anything is created", async () => {
   const { service, created } = recordingService();
   const deps: CreateSessionDeps = {

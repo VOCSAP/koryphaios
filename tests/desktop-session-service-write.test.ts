@@ -1,4 +1,4 @@
-import { expect, mock, test } from "bun:test";
+import { describe, expect, mock, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -7,6 +7,8 @@ import { validPtyDimensions } from "../desktop/src/main/pty-manager.ts";
 import { onDeckError } from "../desktop/src/main/log.ts";
 import { fromWorkspaceSessions, toWorkspaceSessions } from "../desktop/src/main/workspace-session-map.ts";
 import { LaunchAttemptRegistry } from "../desktop/src/main/mod-launch-plan.ts";
+import { parseTemplate, toTemplate, templateToInputs } from "../desktop/src/shared/template.ts";
+import { effectiveAgent, isTeamLeadAgent } from "../desktop/src/main/team-lead-bridge.ts";
 
 const SESSION_SERVICE_PATH = join(import.meta.dir, "..", "desktop", "src", "main", "session-service.ts");
 const SHARED = join(import.meta.dir, "..", "desktop", "src", "shared");
@@ -1218,5 +1220,161 @@ test("only the exact boolean closes a tile: a truthy string in a create request 
 
     expect(sessionPtys.at(-1)!.args.join(" ")).not.toContain("--strict-mcp-config");
     expect(service.captureSessions().map((d) => d.name)).toEqual(["claimed"]);
+  });
+});
+
+describe("a captured session re-exported through a template relaunches with the same effective args", () => {
+  const cases: Array<[string, { agent?: string; model?: string }]> = [
+    ["agent only", { agent: "developer" }],
+    ["model only", { model: "opus" }],
+    ["agent and model", { agent: "developer", model: "sonnet" }],
+    ["1M-context model", { model: "claude-opus-4-8[1m]" }],
+    ["clodex model", { model: "clodex:gpt-5.1" }],
+    ["team-lead", { agent: "team-lead", model: "opus" }]
+  ];
+
+  test.each(cases)("%s", async (_label, fields) => {
+    await withBridgeService(false, (service, probe) => {
+      const lead = fields.agent === "team-lead";
+      const opts = { teamLeadDeckBridge: lead };
+      service.create({ name: "orig", ...fields }, opts as never);
+      const original = service.captureSessions()[0]!;
+      const input = templateToInputs(toTemplate([original]))[0]!;
+      expect(input.agent).toBe(fields.agent);
+      expect(input.model).toBe(fields.model);
+      const reopened = isTeamLeadAgent(effectiveAgent(input.agent, input.args).agent);
+      service.create({ name: "again", ...input }, { teamLeadDeckBridge: reopened } as never);
+      const again = service.captureSessions()[1]!;
+      expect(again.args).toBe(original.args);
+      expect(Boolean(again.mcpConfig)).toBe(Boolean(original.mcpConfig));
+      expect(probe.mints).toBe(lead ? 2 : 0);
+    });
+  });
+
+  test.each([
+    ["duplicate model", `--model "a" --model "b"`],
+    ["duplicate agent", `--agent "a" --agent "b"`],
+    ["single quotes", `--model 'x'`],
+    ["equals form", `--model=x`],
+    ["short flag", `-m x`],
+    ["invalid value", `--model "a;b"`],
+    ["flag after other args", `--verbose --model "x"`]
+  ])("%s stays byte for byte in args", async (_label, args) => {
+    await withBridgeService(false, (service) => {
+      service.create({ name: "orig", args });
+      const original = service.captureSessions()[0]!;
+      const tpl = toTemplate([original]);
+      expect(tpl.sessions[0]!.args).toBe(original.args);
+      expect(tpl.sessions[0]!.model).toBeUndefined();
+      const input = templateToInputs(tpl)[0]!;
+      service.create({ name: "again", ...input });
+      expect(service.captureSessions()[1]!.args).toBe(original.args);
+    });
+  });
+
+  test("a leading model lifted ahead of a later agent relaunches with the same args", async () => {
+    await withBridgeService(false, (service) => {
+      service.create({ name: "orig", args: `--model "x" --agent "y"` });
+      const original = service.captureSessions()[0]!;
+      const input = templateToInputs(toTemplate([original]))[0]!;
+      expect(input.model).toBe("x");
+      service.create({ name: "again", ...input });
+      expect(service.captureSessions()[1]!.args).toBe(original.args);
+    });
+  });
+
+  test("an edited template replaces the old model, and returning to default leaves no residual flag", async () => {
+    await withBridgeService(false, (service) => {
+      service.create({ name: "orig", agent: "developer", model: "opus", args: "--verbose" });
+      const session = toTemplate([service.captureSessions()[0]!]).sessions[0]!;
+      expect(session).toMatchObject({ agent: "developer", model: "opus", args: "--verbose" });
+
+      const replaced = templateToInputs({ type: "claude-peers-template", version: 1, sessions: [{ ...session, model: "sonnet" }] })[0]!;
+      service.create({ name: "replaced", ...replaced });
+      const replacedArgs = service.captureSessions()[1]!.args;
+      expect(replacedArgs).toBe(`--agent "developer" --model "sonnet" --verbose`);
+
+      const cleared = templateToInputs({ type: "claude-peers-template", version: 1, sessions: [{ ...session, model: undefined }] })[0]!;
+      service.create({ name: "cleared", ...cleared });
+      const clearedArgs = service.captureSessions()[2]!.args;
+      expect(clearedArgs).toBe(`--agent "developer" --verbose`);
+      expect(clearedArgs).not.toContain("--model");
+    });
+  });
+});
+
+describe("clodexContextTokens reaches the spawned child env", () => {
+  const VAR = "CLAUDE_CODE_MAX_CONTEXT_TOKENS";
+
+  test("two clodex tiles get their own values, an explicit one beats an inherited one, absent means 200000, the Deck env is untouched", async () => {
+    const before = process.env[VAR];
+    process.env[VAR] = "872000";
+    try {
+      await withBridgeService(false, (service) => {
+        service.create({ name: "a", bridge: "clodex", clodexContextTokens: 300_000 });
+        service.create({ name: "b", bridge: "clodex", clodexContextTokens: 531_000 });
+        service.create({ name: "c", bridge: "clodex" });
+        const [a, b, c] = sessionPtys.slice(-3);
+        expect(a!.env[VAR]).toBe("300000");
+        expect(b!.env[VAR]).toBe("531000");
+        expect(c!.env[VAR]).toBe("200000");
+        expect(process.env[VAR]).toBe("872000");
+      });
+    } finally {
+      if (before === undefined) delete process.env[VAR];
+      else process.env[VAR] = before;
+    }
+  });
+
+  test("the value survives capture, template, JSON, parse and a second create down to the PTY env", async () => {
+    await withBridgeService(false, (service) => {
+      service.create({ name: "orig", bridge: "clodex", clodexContextTokens: 531_000 });
+      const json = JSON.stringify(toTemplate(service.captureSessions(), "t"));
+      const input = templateToInputs(parseTemplate(JSON.parse(json))!.template)[0]!;
+      service.create({ name: "again", ...input });
+      expect(sessionPtys.at(-1)!.env[VAR]).toBe("531000");
+    });
+  });
+
+  test("a restart relaunches with the stored value", async () => {
+    await withBridgeService(false, async (service) => {
+      const tile = service.create({ name: "r", bridge: "clodex", clodexContextTokens: 410_000 });
+      await service.restart(tile.id);
+      expect(sessionPtys.at(-1)!.env[VAR]).toBe("410000");
+    });
+  });
+
+  test("a tile without the bridge gets nothing from the field", async () => {
+    const before = process.env[VAR];
+    delete process.env[VAR];
+    try {
+      await withBridgeService(false, (service) => {
+        service.create({ name: "plain", clodexContextTokens: 300_000 });
+        expect(sessionPtys.at(-1)!.env[VAR]).toBeUndefined();
+        expect(service.captureSessions()[0]!.clodexContextTokens).toBeUndefined();
+      });
+    } finally {
+      if (before !== undefined) process.env[VAR] = before;
+    }
+  });
+
+  test("a sandboxed bridged tile loses the wrapper and gets no injection", async () => {
+    const before = process.env[VAR];
+    delete process.env[VAR];
+    try {
+      await withBridgeService(true, (service) => {
+        service.create({ name: "box", bridge: "clodex", clodexContextTokens: 300_000 });
+        expect(sessionPtys.at(-1)!.env[VAR]).toBeUndefined();
+      });
+    } finally {
+      if (before !== undefined) process.env[VAR] = before;
+    }
+  });
+
+  test.each([199_999, 872_001, 1.5, NaN, Infinity, "300000", null])("create refuses %p before storing a tile", async (bad) => {
+    await withBridgeService(false, (service) => {
+      expect(() => service.create({ name: "x", bridge: "clodex", clodexContextTokens: bad as never })).toThrow(/between 200000 and 872000/);
+      expect(service.captureSessions()).toEqual([]);
+    });
   });
 });

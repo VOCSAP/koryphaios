@@ -304,9 +304,9 @@ const api: DeckApi = {
   onMenuSaveAs: (cb: () => void) => subscribe('menu:save-as', () => cb()),
   onMenuRestore: (cb: () => void) => subscribe('menu:restore', () => cb()),
   onMenuListWorkspaces: (cb: () => void) => subscribe('menu:list', () => cb()),
-  onMenuExportTemplate: (cb: () => void) => subscribe('menu:export-template', () => cb()),
-  onMenuNewTemplate: (cb: () => void) => subscribe('menu:new-template', () => cb()),
-  onMenuImportTemplate: (cb: () => void) => subscribe('menu:import-template', () => cb()),
+  onMenuUseTemplate: (cb: () => void) => subscribe('menu:use-template', () => cb()),
+  onMenuEditTemplate: (cb: () => void) => subscribe('menu:edit-template', () => cb()),
+  onMenuSaveTemplate: (cb: () => void) => subscribe('menu:save-template', () => cb()),
   onWorkspaceCurrent: (cb: (ws: WorkspaceSummary | null) => void) =>
     subscribe('workspace:current', cb),
   onBrokerStatus: (cb: (status: BrokerStatusEvent) => void) => subscribe('broker:status', cb),

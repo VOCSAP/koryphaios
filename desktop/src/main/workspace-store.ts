@@ -17,6 +17,7 @@ import { join, sep } from 'node:path'
 // `bun test` without an alias tsconfig.
 import { sessionsHaveShellFields } from '../shared/template'
 import { isToolNameList } from '../shared/tool-names'
+import { isValidClodexContextInput } from '../shared/clodex-context'
 // worktree-service.ts is itself node-builtins-only (no electron/@shared), so
 // this stays a pure-module import: canonicalPath is the project's own answer
 // to "comparing two paths? canonicalize both" (CLAUDE.md) -- a bare
@@ -49,6 +50,7 @@ export interface WorkspaceSession {
    * still sitting in `args`.
    */
   bridge?: 'clodex'
+  clodexContextTokens?: number
   /** SessionDef.disallowedTools: the only place a restored read-only tile finds its denial, `args` does not hold it. */
   disallowedTools?: string[]
   color: string
@@ -133,6 +135,7 @@ function isWorkspaceSession(value: unknown): value is WorkspaceSession {
     // honest for every reader downstream; a file naming any other bridge is
     // rejected whole rather than silently restored without it.
     (s.bridge === undefined || s.bridge === 'clodex') &&
+    isValidClodexContextInput(s.clodexContextTokens) &&
     // A list holding a name outside the allow-list rejects the file whole: dropping
     // the offender would silently allow that tool.
     (s.disallowedTools === undefined || isToolNameList(s.disallowedTools))

@@ -1,15 +1,14 @@
 import { useEffect, useState } from 'react'
 import type { SessionTemplate, TemplateSession } from '@shared/template'
 import { TEMPLATE_TYPE, TEMPLATE_VERSION } from '@shared/template'
-import type { ModelOption } from '@shared/types'
-import { mergeRoleChoices } from '@shared/role'
-import { useDeck } from '../store'
+import { errorText, useDeck } from '../store'
 import { useT } from '../i18n'
+import { entryHasInvalidContext, liftEntryLaunchOptions } from '../peer-options'
+import { useModelChoices } from '../use-model-choices'
 import { EntryCard } from './TemplateEntryCard'
 
 // Template composer (PLAN C18): create/edit a team template WITHOUT spawning
-// anything. One card per entry with the advanced-create fields; at most one
-// lead (radio semantics), rendered hierarchically: lead top-center, team below.
+// anything; at most one lead, rendered top-center with the team below.
 
 interface Props {
   /** Template file to edit, or null to compose a fresh one. */
@@ -26,39 +25,42 @@ function emptySession(n: number): TemplateSession {
 export function TemplateComposer({ path, onClose, onSaved }: Props): React.JSX.Element {
   const t = useT()
   const showToast = useDeck((s) => s.showToast)
-  // Peer role (card 0b9e0b07 lot B): the same operator-global list CreateMenu
-  // reads (config.roleChoices), merged with the built-ins the same way.
-  const config = useDeck((s) => s.config!)
-  const roleChoices = mergeRoleChoices(config.roleChoices ?? [])
+  const { catalogs, sandboxOn } = useModelChoices()
   const [name, setName] = useState('')
   const [local, setLocal] = useState(false)
   const [sessions, setSessions] = useState<TemplateSession[]>([emptySession(1)])
   const [agents, setAgents] = useState<string[]>([])
-  const [models, setModels] = useState<ModelOption[]>([])
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
-    void window.api.listAgents().then(setAgents, () => undefined)
-    void window.api.getLaunchConfig().then((cfg) => setModels(cfg.models), () => undefined)
+    void window.api.listAgents().then(setAgents, (e: unknown) => {
+      window.api.reportError('templates', `list agents failed: ${errorText(e)}`)
+    })
     if (!path) return
     void window.api.readTemplateFile(path).then((tpl) => {
       if (!tpl) return
       setName(tpl.name ?? '')
       setLocal(path.includes('.claude'))
-      if (tpl.sessions.length > 0) setSessions(tpl.sessions.map((s) => ({ ...s })))
+      if (tpl.sessions.length > 0) setSessions(tpl.sessions.map((s) => liftEntryLaunchOptions({ ...s })))
     })
   }, [path])
 
   const update = (idx: number, next: TemplateSession): void =>
     setSessions((all) => all.map((s, i) => (i === idx ? next : s)))
   const remove = (idx: number): void => setSessions((all) => all.filter((_, i) => i !== idx))
-  // Radio semantics: crowning one entry demotes every other (single lead).
+  // Crowning one entry demotes every other; crowning the lead again clears it.
   const setLead = (idx: number): void =>
-    setSessions((all) => all.map((s, i) => ({ ...s, lead: i === idx ? true : undefined })))
+    setSessions((all) =>
+      all.map((s, i) => ({ ...s, lead: i === idx && !s.lead ? true : undefined }))
+    )
+
+  // A blank-named entry is dropped at save, so only kept entries can block it.
+  const kept = sessions.filter((s) => s.name.trim() !== '')
+  const contextInvalid = kept.some(entryHasInvalidContext)
 
   const save = async (): Promise<void> => {
-    const clean = sessions.filter((s) => s.name.trim() !== '')
-    if (!name.trim() || clean.length === 0) return
+    const clean = kept
+    if (!name.trim() || clean.length === 0 || contextInvalid) return
     const tpl: SessionTemplate = {
       type: TEMPLATE_TYPE,
       version: TEMPLATE_VERSION,
@@ -101,8 +103,8 @@ export function TemplateComposer({ path, onClose, onSaved }: Props): React.JSX.E
               <EntryCard
                 session={sessions[leadIdx]!}
                 agents={agents}
-                models={models}
-                roleChoices={roleChoices}
+                catalogs={catalogs}
+                sandboxOn={sandboxOn}
                 onChange={(next) => update(leadIdx, next)}
                 onRemove={() => remove(leadIdx)}
                 onLead={() => setLead(leadIdx)}
@@ -117,8 +119,8 @@ export function TemplateComposer({ path, onClose, onSaved }: Props): React.JSX.E
                   key={i}
                   session={s}
                   agents={agents}
-                  models={models}
-                  roleChoices={roleChoices}
+                  catalogs={catalogs}
+                  sandboxOn={sandboxOn}
                   onChange={(next) => update(i, next)}
                   onRemove={() => remove(i)}
                   onLead={() => setLead(i)}
@@ -139,7 +141,7 @@ export function TemplateComposer({ path, onClose, onSaved }: Props): React.JSX.E
           <button onClick={onClose}>{t('common.cancel')}</button>
           <button
             className="primary"
-            disabled={!name.trim() || sessions.every((s) => !s.name.trim())}
+            disabled={!name.trim() || kept.length === 0 || contextInvalid}
             onClick={() => void save()}
           >
             {t('composer.save')}

@@ -5,6 +5,7 @@
 import { randomUUID } from 'node:crypto'
 import { resolve, sep } from 'node:path'
 import type { CreateSessionInput, SessionRuntime } from '@shared/types'
+import { assertClodexContextInput } from '../shared/clodex-context'
 import type { SessionService } from './session-service'
 import { createWorktree, runWorktreeInit } from './worktree-service'
 import { type LaunchAttemptRegistry, type LaunchModPlan } from './mod-launch-plan'
@@ -119,6 +120,7 @@ const SESSION_FIELD_ORIGIN = {
   cwd: 'request',
   command: 'request',
   bridge: 'request',
+  clodexContextTokens: 'request',
   agent: 'request',
   model: 'request',
   effort: 'request',
@@ -171,6 +173,8 @@ export async function createSessionWithWorktree(
     if (attempt && !modLaunch!.registry.isCurrent(attempt.attemptId)) throw new Error('mod launch superseded')
   }
   try {
+    // Checked before the worktree and the sandbox warm-up so a refusal leaves neither behind.
+    assertClodexContextInput(input.clodexContextTokens)
     let root = projectDir
     if (!input.supervisor) {
       root = (await sandboxGate()) || projectDir

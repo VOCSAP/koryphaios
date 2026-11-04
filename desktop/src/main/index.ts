@@ -22,6 +22,7 @@ import { sanitizeGlowColor } from '@shared/palette'
 import { sanitizeLinkPatch } from '@shared/link-policy'
 import { loadConfig, saveConfig } from './store'
 import { buildAppMenu } from './menu'
+import { rendererMenuActions, SAVE_TEMPLATE_ITEM_ID } from './menu-template'
 import { safeExternalUrl } from './external-url'
 import { SessionService, type DirectiveOutcome } from './session-service'
 import { PermissionLeaseRuntime } from './permission-lease-runtime'
@@ -521,6 +522,8 @@ const approvalReader = createApprovalWindowController({
 })
 
 const getConfig = (): AppConfig => config
+/** Rebuilds the native menu from the active locale; assigned once the menu exists. */
+let rebuildAppMenu: (() => void) | null = null
 const setConfig = (patch: Partial<AppConfig>): AppConfig => {
   // B9: projectDir is a launch-time, in-memory context (from cliContext), never
   // a runtime setting — the renderer only ever patches display/settings fields.
@@ -573,7 +576,9 @@ const setConfig = (patch: Partial<AppConfig>): AppConfig => {
   const autoStartWas = config.clodexAutoStart
   const ttsrDisabledWas = (config.ttsrDisabled ?? []).join('\n')
   const shellWas = config.shell
+  const localeWas = config.locale
   config = { ...config, ...patch }
+  if (config.locale !== localeWas) rebuildAppMenu?.()
   if (config.shell !== shellWas) void prewarmClaudeVersion(config.shell)
   saveConfig(config)
   nativeTheme.themeSource = config.theme
@@ -3356,13 +3361,13 @@ const workspaces = new WorkspaceService({
   prepareModPlans: (defs, signal) => prepareRestorePlans(launchAttempts, modLaunch.prepare, (def) => def.supervisor !== true && sandbox.isEnabled(), defs, signal)
 })
 
-// Grey out File > Export template... when there is nothing to export: the count
-// must follow the population saveTemplate() serializes (captureSessions()).
-const syncExportTemplateEnabled = (): void => {
-  const item = Menu.getApplicationMenu()?.getMenuItemById('export-template')
+// Grey out File > Template > Save Template… when there is nothing to save: the
+// count must follow the population saveTemplate() serializes (captureSessions()).
+const syncSaveTemplateEnabled = (): void => {
+  const item = Menu.getApplicationMenu()?.getMenuItemById(SAVE_TEMPLATE_ITEM_ID)
   if (item) item.enabled = service.captureSessions().length > 0
 }
-service.on('changed', syncExportTemplateEnabled)
+service.on('changed', syncSaveTemplateEnabled)
 
 const avatarProjectKey = computeDeckProjectKey(cliContext.projectDir)
 const avatarOptions = deckAvatarClientOptions({
@@ -3598,22 +3603,16 @@ app.whenReady().then(async () => {
   // "New (clear)" routes through the renderer so it can confirm before clearing.
   const toRenderer = (channel: string, payload?: unknown): void =>
     mainWindow?.webContents.send(channel, payload)
-  Menu.setApplicationMenu(
-    buildAppMenu({
-      onOpenSettings: () => toRenderer('menu:settings'),
-      onNewClear: () => toRenderer('menu:new-clear'),
-      onSave: () => toRenderer('menu:save'),
-      onSaveAs: () => toRenderer('menu:save-as'),
-      onRestore: () => toRenderer('menu:restore'),
-      onListWorkspaces: () => toRenderer('menu:list'),
-      onExportTemplate: () => toRenderer('menu:export-template'),
-      onNewTemplate: () => toRenderer('menu:new-template'),
-      onImportTemplate: () => toRenderer('menu:import-template')
-    })
-  )
-  // Reflect the initial session count on the Export-template menu item (the app
-  // starts empty, so it begins disabled).
-  syncExportTemplateEnabled()
+  // Rebuilt by setConfig on a locale change; Save Template restarts from the live session count.
+  rebuildAppMenu = (): void => {
+    const locale = resolveLocale(config.locale, app.getLocale())
+    const shippedDir = app.isPackaged ? join(process.resourcesPath, 'locales') : join(app.getAppPath(), 'locales')
+    const dict = loadDict(locale, [shippedDir, join(app.getPath('userData'), 'locales')])
+    Menu.setApplicationMenu(
+      buildAppMenu(rendererMenuActions(toRenderer), (key) => dict[key] ?? key, service.captureSessions().length > 0)
+    )
+  }
+  rebuildAppMenu()
   // Design endpoint (PLAN D2b): up before service.start() so even restored
   // sessions get the env pair. Picks are forwarded to the renderer, which
   // composes the prompt and routes it to the docked/selected agent.

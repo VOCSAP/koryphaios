@@ -33,7 +33,7 @@ A **template** is a portable session recipe (no ids, no cwd): per-entry
 agent, model, effort, args, initial prompt, worktree branch, announcement,
 colour, and a single team-lead crown.
 
-- **Export**: `File > Export template` captures the current session set.
+- **Save**: `File > Template > Save Template…` captures the current session set.
   *Local* templates are saved in `<project>/.claude/claude-peers/templates/`;
   *global* ones are available to every project.
 - **Apply**: from the empty-state `Use template` button or the templates
@@ -50,7 +50,35 @@ colour, and a single team-lead crown.
 ## Template composer
 
 Create, edit and duplicate templates **without spawning anything**: the
-composer renders the team hierarchically (lead top-center) and edits every
-per-entry field (agent/model/effort/args/prompt/worktree/announce/colour) and
-the single-lead crown. The supervisor can also save the current team as a
-template via its `deck_save_template` tool.
+composer renders the team hierarchically (lead top-center), one card per
+entry. Reached from `File > Template > Edit Template…` (choose a template, its
+composer opens) or the picker's "Manage templates" mode (New, Edit, Duplicate,
+Delete). The supervisor can also save the current team as a template via its
+`deck_save_template` tool.
+
+### Parity with the create popover
+
+Every option of the create popover (`CreateMenu.tsx`) is on the template card
+(`TemplateEntryCard.tsx`) through the same component and rules
+(`PeerOptionFields.tsx`, `peer-options.ts`), except the three below.
+
+| Option | Create popover | Template card | Difference |
+| --- | --- | --- | --- |
+| Agent | select | same select | none |
+| Name | input, placeholder previews the auto name | input in the card head | none |
+| Colour | swatch; "Auto colour" returns to the palette | same swatch and "Auto colour" | unset = auto, assigned at launch |
+| Role | select + "Other…" remembered in `roleChoices`; team-lead excluded; disabled while lead | same `RoleField` | a stored role missing from the list stays listed |
+| Provider + model | default row + `ModelPicker` (catalog, providers, favorites, clodex state, refreshed on `models:changed`); bridge hidden in sandbox mode | same picker, folded behind a button naming the current choice | stored as `model` + `bridge: 'clodex'` |
+| Team-lead | checkbox | checkbox in the card head | the composer keeps at most one |
+| Extended context (1M) | checkbox appending `[1m]`; off for Haiku and clodex | same | the `[1m]` suffix is read back from `model` |
+| Effort | slider, Auto + 5 levels | same slider | none |
+| Context Size (clodex only) | slider + number, 200k to 872k, default 200k | same | absent value = 200000; an invalid value blocks Save |
+| Extra args | input | same | read back verbatim, historical `--model` text included |
+| Initial prompt | textarea | same | none |
+| Join announcement | textarea, draft follows agent/model/effort | input, empty until authored | no auto draft |
+| Worktree branch | in "Advanced" | in the card | none |
+| Presets | chips filling args and prompt | absent | authoring aid: it only pre-fills args and prompt, both on the card |
+| Working folder | in "Advanced" | absent | a template carries no cwd, by design |
+
+Template-only: template name, the local checkbox (project vs global scope),
+adding and removing entries.

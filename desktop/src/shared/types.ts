@@ -25,6 +25,8 @@ export interface SessionDef {
    * the way back in: every reader re-validates it as the exact string.
    */
   bridge?: 'clodex'
+  /** Tokens, integer 200000..872000; absent means 200000. Applies to a bridged tile only; persisted, so re-validated on read. */
+  clodexContextTokens?: number
   /** Extra launch args appended after --session-id on a fresh launch. */
   args: string
   /** Current claude --session-id. Changes on every fork-resume. Empty until first spawn. */
@@ -559,6 +561,8 @@ export interface CreateSessionInput {
    * is a tile launched through a pass-through wrapper.
    */
   bridge?: 'clodex'
+  /** SessionDef.clodexContextTokens; refused main-side outside 200000..872000. */
+  clodexContextTokens?: number
   /** Chosen subagent (becomes `--agent <name>` and seeds the default name). */
   agent?: string
   /** Chosen model (becomes `--model <id>`). */
@@ -2751,10 +2755,12 @@ export interface DeckApi {
   onMenuSaveAs(cb: () => void): () => void
   onMenuRestore(cb: () => void): () => void
   onMenuListWorkspaces(cb: () => void): () => void
-  onMenuExportTemplate(cb: () => void): () => void
-  /** File > New template… (card 290a14e2): opens the composer on a blank template. */
-  onMenuNewTemplate(cb: () => void): () => void
-  onMenuImportTemplate(cb: () => void): () => void
+  /** File > Template > Use Template…: the picker, to apply a saved team. */
+  onMenuUseTemplate(cb: () => void): () => void
+  /** File > Template > Edit Template…: the picker in edit intent, a chosen template opens its composer. */
+  onMenuEditTemplate(cb: () => void): () => void
+  /** File > Template > Save Template…: the dialog that writes the current sessions out as a template. */
+  onMenuSaveTemplate(cb: () => void): () => void
   /** Current workspace summary (or null after New clear) for the window title. */
   onWorkspaceCurrent(cb: (ws: WorkspaceSummary | null) => void): () => void
 }

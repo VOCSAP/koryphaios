@@ -10,6 +10,8 @@
 // it consumes/produces are declared structurally here and stay compatible with
 // SessionDef / CreateSessionInput in shared/types.ts.
 
+import { isClodexContextTokens, isValidClodexContextInput } from './clodex-context'
+import { liftTemplateLaunchOptions } from './template-launch-options'
 import { isToolNameList, liftDisallowedTools } from './tool-names'
 
 export const TEMPLATE_TYPE = 'claude-peers-template'
@@ -20,6 +22,7 @@ export interface TemplateSession {
   name: string
   command?: string
   bridge?: 'clodex'
+  clodexContextTokens?: number
   args?: string
   effort?: string
   color?: string
@@ -64,6 +67,7 @@ interface DefLike {
   name: string
   command?: string
   bridge?: 'clodex'
+  clodexContextTokens?: number
   args?: string
   effort?: string
   color?: string
@@ -78,6 +82,7 @@ export interface TemplateInput {
   name?: string
   command?: string
   bridge?: 'clodex'
+  clodexContextTokens?: number
   args?: string
   effort?: string
   color?: string
@@ -118,8 +123,14 @@ export function toTemplate(defs: readonly DefLike[], name?: string): SessionTemp
     sessions: defs.map((d) => {
       const s: TemplateSession = { name: d.name }
       if (d.command && d.command.trim()) s.command = d.command.trim()
-      if (d.bridge === 'clodex') s.bridge = 'clodex'
-      if (d.args && d.args.trim()) s.args = d.args.trim()
+      if (d.bridge === 'clodex') {
+        s.bridge = 'clodex'
+        if (isClodexContextTokens(d.clodexContextTokens)) s.clodexContextTokens = d.clodexContextTokens
+      }
+      const lifted = liftTemplateLaunchOptions({ args: d.args })
+      if (lifted.args.trim()) s.args = lifted.args.trim()
+      if (lifted.agent) s.agent = lifted.agent
+      if (lifted.model) s.model = lifted.model
       if (d.effort && d.effort.trim()) s.effort = d.effort.trim()
       if (d.color && d.color.trim()) s.color = d.color.trim()
       if (d.prompt && d.prompt.trim()) s.prompt = d.prompt.trim()
@@ -143,7 +154,10 @@ export function templateToInputs(tpl: SessionTemplate): TemplateInput[] {
     const input: TemplateInput = {}
     if (s.name && s.name.trim()) input.name = s.name.trim()
     if (s.command && s.command.trim()) input.command = s.command.trim()
-    if (s.bridge === 'clodex') input.bridge = 'clodex'
+    if (s.bridge === 'clodex') {
+      input.bridge = 'clodex'
+      if (isClodexContextTokens(s.clodexContextTokens)) input.clodexContextTokens = s.clodexContextTokens
+    }
     const lifted = liftDisallowedTools(s.args?.trim() ?? '', s.disallowedTools)
     if (lifted.args) input.args = lifted.args
     if (s.effort && s.effort.trim()) input.effort = s.effort.trim()
@@ -246,6 +260,7 @@ function isTemplateSession(v: unknown): v is TemplateSession {
   }
   if (s.lead !== undefined && typeof s.lead !== 'boolean') return false
   if (s.bridge !== undefined && s.bridge !== 'clodex') return false
+  if (!isValidClodexContextInput(s.clodexContextTokens)) return false
   // A list holding a name outside the allow-list rejects the template whole: dropping the
   // offender would silently allow that tool.
   if (s.disallowedTools !== undefined && !isToolNameList(s.disallowedTools)) return false

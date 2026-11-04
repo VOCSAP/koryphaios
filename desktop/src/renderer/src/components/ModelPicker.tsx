@@ -94,7 +94,16 @@ export function ModelPicker({
       <div
         key={key}
         className={`mp-model${isSelected ? ' is-selected' : ''}`}
+        role="button"
+        tabIndex={0}
         onClick={() => onPick(key, toTarget(catalog, modelId))}
+        onKeyDown={(e) => {
+          if (e.target !== e.currentTarget) return
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault()
+            onPick(key, toTarget(catalog, modelId))
+          }
+        }}
       >
         {multi && (
           <span className="mp-check">
@@ -128,7 +137,17 @@ export function ModelPicker({
             <div
               className={`mp-provider-head${idle ? ' is-disabled' : ''}`}
               aria-disabled={idle || undefined}
+              role="button"
+              tabIndex={idle ? -1 : 0}
+              aria-expanded={idle ? undefined : !!open[c.id]}
               onClick={idle ? undefined : () => setOpen((o) => ({ ...o, [c.id]: !o[c.id] }))}
+              onKeyDown={(e) => {
+                if (idle || e.target !== e.currentTarget) return
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault()
+                  setOpen((o) => ({ ...o, [c.id]: !o[c.id] }))
+                }
+              }}
             >
               <span className="mp-provider-icon">{providerIcon(c)}</span>
               <span className="mp-provider-name">{c.name}</span>

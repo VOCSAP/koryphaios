@@ -16,6 +16,7 @@ import { afterAll, afterEach, beforeEach, expect, mock, test } from "bun:test";
 import type { Root } from "../desktop/tests-support/react-test-harness"; // type-only: erased, no runtime resolution
 import { mockStore, storeMockStubs } from "./_store-mock";
 import * as realSharedTemplate from "../desktop/src/shared/template.ts";
+import * as realSharedModels from "../desktop/src/shared/models.ts";
 
 const { act, React, createRoot, create } = await import("../desktop/tests-support/react-test-harness");
 
@@ -74,6 +75,7 @@ mockStore({ useDeck: fakeUseDeck, ...storeMockStubs });
 // @shared/template is aliased only in desktop's own tsconfig, unresolved when
 // bun test runs from the repo root; the real module is re-exported whole.
 mock.module("@shared/template", () => realSharedTemplate);
+mock.module("@shared/models", () => realSharedModels);
 
 // Card 0b9e0b07 lot B: TemplateComposer now also imports mergeRoleChoices
 // from '@shared/role' (same alias-resolution gap as above). Full, faithful
@@ -122,7 +124,10 @@ mock.module("@shared/role", () => {
 // never opens on an existing path, so only the first two need to resolve.
 (window as unknown as { api: unknown }).api = {
   listAgents: () => Promise.resolve([]),
-  getLaunchConfig: () => Promise.resolve({ models: [] }),
+  getLaunchConfig: () => Promise.resolve({ models: [], presets: [] }),
+  modelCatalogs: () => Promise.resolve([]),
+  onModelsChanged: () => () => {},
+  reportError: () => {},
   readTemplateFile: () => Promise.resolve(null)
 };
 

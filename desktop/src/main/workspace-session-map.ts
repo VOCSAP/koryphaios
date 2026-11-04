@@ -7,6 +7,7 @@ import { randomUUID } from 'node:crypto'
 // Relative import (not the @shared alias) so this module resolves cleanly when
 // the bun test imports it directly, per the pure-module testing convention.
 import type { SessionDef } from '../shared/types'
+import { isClodexContextTokens } from '../shared/clodex-context'
 import { isToolNameList, liftDisallowedTools } from '../shared/tool-names'
 import type { WorkspaceSession } from './workspace-store'
 
@@ -30,6 +31,12 @@ function bridgeOf(source: { bridge?: unknown }): 'clodex' | undefined {
   return source.bridge === 'clodex' ? 'clodex' : undefined
 }
 
+function contextOf(source: { bridge?: unknown; clodexContextTokens?: unknown }): { clodexContextTokens?: number } {
+  return source.bridge === 'clodex' && isClodexContextTokens(source.clodexContextTokens)
+    ? { clodexContextTokens: source.clodexContextTokens }
+    : {}
+}
+
 /** Snapshot live session defs as persisted workspace sessions (order preserved). */
 export function toWorkspaceSessions(defs: SessionDef[]): WorkspaceSession[] {
   return defs.map((d, i) => ({
@@ -38,6 +45,7 @@ export function toWorkspaceSessions(defs: SessionDef[]): WorkspaceSession[] {
     cwd: d.cwd,
     args: splitArgs(d.args),
     bridge: bridgeOf(d),
+    ...contextOf(d),
     ...(d.disallowedTools?.length ? { disallowedTools: [...d.disallowedTools] } : {}),
     color: d.color,
     position: i
@@ -65,6 +73,7 @@ export function fromWorkspaceSessions(sessions: WorkspaceSession[]): SessionDef[
         cwd: s.cwd,
         command: '',
         bridge: bridgeOf(s),
+        ...contextOf(s),
         ...(disallowedTools ? { disallowedTools } : {}),
         args,
         sessionId: s.claudeSessionId,

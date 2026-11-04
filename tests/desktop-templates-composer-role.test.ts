@@ -1,12 +1,9 @@
-// EntryCard is mounted directly from its own module rather than through the
-// full TemplateComposer, since it calls no store hook and is otherwise immune,
-// by construction, to a real cross-file contamination: a test-mocking utility
-// used elsewhere in this family freezes a specifier's export surface to
-// whatever the first-registered factory returns, for the rest of the process.
-// Re-exporting EntryCard alongside TemplateComposer from the same module never
-// actually protects it from that; only living in its own file does.
-// The remaining save()-to-disk round trip still needs the full component and
-// stays order-dependent on that file loading first.
+// EntryCard is mounted directly from its own module as well as through the
+// full TemplateComposer: re-exporting it alongside TemplateComposer from the
+// same module would not protect it from a test-mocking utility freezing a
+// specifier's export surface to the first-registered factory for the rest of
+// the process; only living in its own file does.
+// The save()-to-disk round trip needs the full component.
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 
 GlobalRegistrator.register();
@@ -19,6 +16,7 @@ import { afterAll, afterEach, beforeEach, expect, mock, test } from "bun:test";
 import type { Root } from "../desktop/tests-support/react-test-harness"; // type-only: erased, no runtime resolution
 import { mockStore, storeMockStubs } from "./_store-mock";
 import * as realSharedTemplate from "../desktop/src/shared/template.ts";
+import * as realSharedModels from "../desktop/src/shared/models.ts";
 
 const { act, React, createRoot, create } = await import("../desktop/tests-support/react-test-harness");
 
@@ -30,7 +28,7 @@ interface FakeDeckState {
 
 function initialFakeState(): FakeDeckState {
   return {
-    config: { roleChoices: [] },
+    config: { roleChoices: ["ops-lead"] },
     dict: {},
     showToast: () => {}
   };
@@ -42,16 +40,13 @@ function resetFakeStore(): void {
   fakeUseDeck.setState(initialFakeState(), true);
 }
 
-// TemplateComposer.tsx's top-level import of useDeck must resolve to something
-// syntactically valid for the module to load, but EntryCard never calls
-// useDeck, so which mock instance wins the module-cache race described above is
-// provably inert.
 mockStore({ useDeck: fakeUseDeck, ...storeMockStubs });
 
-// @shared/template and @shared/role are tsconfig-only aliases bun test does not
-// resolve. The role module is faithfully reimplemented here (not stubbed) so
-// mergeRoleChoices' real behavior populates the select.
+// @shared/template, @shared/models and @shared/role are tsconfig-only aliases
+// bun test does not resolve. The role module is faithfully reimplemented here
+// (not stubbed) so mergeRoleChoices' real behavior populates the select.
 mock.module("@shared/template", () => realSharedTemplate);
+mock.module("@shared/models", () => realSharedModels);
 mock.module("@shared/role", () => {
   const TEAM_LEAD_ROLE = "team-lead";
   const BUILTIN_ROLES = [
@@ -92,7 +87,10 @@ let writeCalls: Array<{ name: string; local: boolean; tpl: unknown }> = [];
 
 (window as unknown as { api: unknown }).api = {
   listAgents: () => Promise.resolve([]),
-  getLaunchConfig: () => Promise.resolve({ models: [] }),
+  getLaunchConfig: () => Promise.resolve({ models: [], presets: [] }),
+  modelCatalogs: () => Promise.resolve([]),
+  onModelsChanged: () => () => {},
+  reportError: () => {},
   readTemplateFile: () => Promise.resolve(null),
   writeTemplateFile: (name: string, local: boolean, tpl: unknown) => {
     writeCalls.push({ name, local, tpl });
@@ -148,14 +146,14 @@ function findRoleSelect(): HTMLSelectElement {
 
 const noop = (): void => {};
 
-function mountEntryCard(roleChoices: string[], onChange: (next: { role?: string }) => void): void {
+function mountEntryCard(onChange: (next: { role?: string }) => void): void {
   act(() => {
     root.render(
       React.createElement(EntryCard, {
         session: { name: "dev" },
         agents: [],
-        models: [],
-        roleChoices,
+        catalogs: [],
+        sandboxOn: false,
         onChange,
         onRemove: noop,
         onLead: noop,
@@ -167,15 +165,36 @@ function mountEntryCard(roleChoices: string[], onChange: (next: { role?: string 
 
 // ----- EntryCard direct (no store, immune to the race documented above) -----
 
-test("EntryCard's role select is populated from its roleChoices prop, empty option first", () => {
-  mountEntryCard(["team-lead", "developer", "ops-lead"], noop);
-  const select = findRoleSelect();
-  expect(Array.from(select.options).map((o) => o.value)).toEqual(["", "team-lead", "developer", "ops-lead"]);
+test("EntryCard's role select lists the operator's roles like the create popover, team-lead excluded, empty option first", () => {
+  mountEntryCard(noop);
+  const values = Array.from(findRoleSelect().options).map((o) => o.value);
+  expect(values[0]).toBe("");
+  expect(values).toContain("developer");
+  expect(values).toContain("ops-lead");
+  expect(values).not.toContain("team-lead");
+});
+
+test("EntryCard keeps a stored role that the list no longer offers, so opening it never blanks it", () => {
+  act(() => {
+    root.render(
+      React.createElement(EntryCard, {
+        session: { name: "dev", role: "team-lead" },
+        agents: [],
+        catalogs: [],
+        sandboxOn: false,
+        onChange: noop,
+        onRemove: noop,
+        onLead: noop,
+        t: (key: string) => key
+      })
+    );
+  });
+  expect(findRoleSelect().value).toBe("team-lead");
 });
 
 test("EntryCard emits onChange with the picked role when the operator selects one", () => {
   let last: { role?: string } | null = null;
-  mountEntryCard(["developer"], (next) => {
+  mountEntryCard((next) => {
     last = next;
   });
   act(() => setValue(findRoleSelect(), "developer", "change"));
@@ -185,7 +204,7 @@ test("EntryCard emits onChange with the picked role when the operator selects on
 
 test("EntryCard emits onChange with role undefined (never '') when reverted to the empty option", () => {
   let last: { role?: string } | null = null;
-  mountEntryCard(["developer"], (next) => {
+  mountEntryCard((next) => {
     last = next;
   });
   act(() => setValue(findRoleSelect(), "developer", "change"));

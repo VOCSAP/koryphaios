@@ -30,6 +30,7 @@ import {
   type Lock,
 } from "../desktop/src/main/workspace-lock.ts";
 import type { LockConnection } from "../desktop/src/main/file-lock.ts";
+import { fromWorkspaceSessions, toWorkspaceSessions } from "../desktop/src/main/workspace-session-map.ts";
 import { gracefulClose } from "../desktop/src/main/session-close.ts";
 // WorkspaceService's own runtime imports (node:os + the pure modules above)
 // carry no electron/node-pty, so importing it directly under bun test proves
@@ -168,6 +169,33 @@ test("loadWorkspace rejects a file whose session names a bridge this build does 
     "utf8",
   );
   expect(loadWorkspace(proj, "wsp_good_bridge")?.sessions[0]!.bridge).toBe("clodex");
+});
+
+test("clodexContextTokens round-trips def -> workspace file -> def, and a hostile value rejects the file whole", () => {
+  const proj = freshProject();
+  ensureWorkspacesDir(proj);
+  const ws = sampleWorkspace({ id: "wsp_ctx" });
+  const captured = toWorkspaceSessions([
+    { id: "d", name: "n", cwd: proj, command: "", args: "", sessionId: "s", color: "#fff", createdAt: 1, bridge: "clodex", clodexContextTokens: 531_000 },
+  ]);
+  expect(captured[0]!.clodexContextTokens).toBe(531_000);
+  saveWorkspace(proj, { ...ws, sessions: captured });
+  const loaded = loadWorkspace(proj, "wsp_ctx")!;
+  expect(fromWorkspaceSessions(loaded.sessions)[0]!.clodexContextTokens).toBe(531_000);
+
+  for (const bad of [199_999, 872_001, 1.5, "300000", null, Number.NaN]) {
+    writeFileSync(
+      join(workspacesDir(proj), "wsp_ctx_bad.json"),
+      JSON.stringify({ ...loaded, id: "wsp_ctx_bad", sessions: [{ ...captured[0]!, clodexContextTokens: bad }] }),
+      "utf8",
+    );
+    expect(loadWorkspace(proj, "wsp_ctx_bad"), `value ${String(bad)}`).toBeNull();
+  }
+
+  const unbridged = toWorkspaceSessions([
+    { id: "d", name: "n", cwd: proj, command: "", args: "", sessionId: "s", color: "#fff", createdAt: 1, clodexContextTokens: 531_000 },
+  ]);
+  expect(unbridged[0]).not.toHaveProperty("clodexContextTokens");
 });
 
 test("a saved session keeps its tool denial through capture, file and restore, and a file with a hostile name is rejected whole", () => {

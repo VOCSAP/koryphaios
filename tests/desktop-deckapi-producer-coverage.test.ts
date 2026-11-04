@@ -179,11 +179,43 @@ function extractConsumerChannels(preloadSrc: string): { channels: string[]; unpa
 const ADD_EVENT_SINK_RE =
   /addEventSink\(\s*\(\s*channel\s*,\s*payload\s*\)\s*=>\s*mainWindow\?\.webContents\.send\(\s*channel\s*,\s*payload\s*\)\s*\)/;
 
+const SENDER_DEF_RE =
+  /function\s+(\w+)\s*\(\s*(\w+)\s*:\s*\(\s*\w+\s*:\s*string\s*(?:,[^)]*)?\)\s*=>\s*void\s*\)[^{]*\{/g;
+
+/** Unsupported calls count as unparsed, so a syntax change cannot silently shrink the checked domain. */
+function extractTableSenders(src: string): { senders: Map<string, Set<string>>; unparsed: number } {
+  const senders = new Map<string, Set<string>>();
+  let unparsed = 0;
+  for (const def of src.matchAll(SENDER_DEF_RE)) {
+    const [header, fname, param] = [def[0], def[1]!, def[2]!];
+    const body = extractBracedBody(src, def.index! + header.length - 1, true);
+    const found = new Set<string>();
+    const callCount = [...body.matchAll(new RegExp(`\\b${param}\\(`, "g"))].length;
+    let resolved = 0;
+    for (const m of body.matchAll(new RegExp(`\\b${param}\\(\\s*(\\w+)\\.(\\w+)\\s*\\)`, "g"))) {
+      const tableHeader = src.match(new RegExp(`const\\s+${m[1]}\\s*=\\s*\\{`));
+      if (!tableHeader) continue;
+      const tableBody = extractBracedBody(src, tableHeader.index! + tableHeader[0].length - 1, true);
+      const prop = splitTopLevelProps(tableBody).find((p) => p.key === m[2]);
+      const lit = prop?.value.match(/^'([^']+)'$/);
+      if (!lit) continue;
+      found.add(lit[1]!);
+      resolved++;
+    }
+    unparsed += callCount - resolved;
+    if (senders.has(fname)) throw new Error(`Ambiguous table emitter "${fname}": resolve its identity before counting producers`);
+    senders.set(fname, found);
+  }
+  return { senders, unparsed };
+}
+
 /**
  * Every `broadcast('chan', ...)` / `mainWindow?.webContents.send('chan', ...)`
  * literal call site across the given files, plus calls to any named
  * single-line wrapper function that structurally forwards its own string
- * parameter to either verb (resolves index.ts's `toRenderer`).
+ * parameter to either verb (resolves index.ts's `toRenderer`), plus the
+ * channels of a table-driven emitter (extractTableSenders) called with such a
+ * wrapper or with `broadcast`.
  */
 function extractProducerChannels(filesByName: Record<string, string>): {
   channels: Set<string>;
@@ -192,9 +224,19 @@ function extractProducerChannels(filesByName: Record<string, string>): {
   const channels = new Set<string>();
   const unparsedByFile: Record<string, number> = {};
 
+  const stripped: Record<string, string> = {};
+  const tableSenders = new Map<string, Set<string>>();
   for (const [name, rawSrc] of Object.entries(filesByName)) {
-    let src = stripComments(rawSrc);
-    src = src.replace(ADD_EVENT_SINK_RE, "");
+    stripped[name] = stripComments(rawSrc).replace(ADD_EVENT_SINK_RE, "");
+    const { senders, unparsed } = extractTableSenders(stripped[name]!);
+    for (const [fname, chans] of senders) {
+      if (tableSenders.has(fname)) throw new Error(`Ambiguous table emitter "${fname}" in ${name}: resolve module identity before counting producers`);
+      tableSenders.set(fname, chans);
+    }
+    if (unparsed > 0) unparsedByFile[name] = unparsed;
+  }
+
+  for (const [name, src] of Object.entries(stripped)) {
 
     const wrapperDefRe =
       /const\s+(\w+)\s*=\s*\(\s*(\w+)\s*:\s*string[^)]*\)[^=]*=>[\s\S]*?(?:\.webContents\.send|broadcast)\(\s*\2\b/g;
@@ -224,8 +266,14 @@ function extractProducerChannels(filesByName: Record<string, string>): {
       for (const m of src.matchAll(callRe)) channels.add(m[1]!);
     }
 
+    for (const [sname, chans] of tableSenders) {
+      for (const m of src.matchAll(new RegExp(`\\b${sname}\\(\\s*(\\w+)\\s*\\)`, "g"))) {
+        if (m[1] === "broadcast" || wrapperNames.has(m[1]!)) for (const ch of chans) channels.add(ch);
+      }
+    }
+
     const unparsed = rawMatches.length - parsedCount - wrapperDefCount;
-    if (unparsed > 0) unparsedByFile[name] = unparsed;
+    if (unparsed > 0) unparsedByFile[name] = (unparsedByFile[name] ?? 0) + unparsed;
   }
 
   return { channels, unparsedByFile };
@@ -383,4 +431,101 @@ test("Garde B: the multiplex indirection (literal lives in a separate const bind
   const consumer = extractConsumerChannels(preload);
   expect(consumer.channels).toEqual(["pty:data"]);
   expect(consumer.unparsedCount).toBe(0);
+});
+
+// ----- table-driven emitters (menu-template.ts's rendererMenuActions) -------
+
+const MENU_TEMPLATE_FIXTURE =
+  `export const CHANNELS = {\n  save: 'menu:save',\n  list: 'menu:list',\n  unused: 'menu:unused'\n} as const\n` +
+  `export function menuActions(send: (channel: string) => void): Actions {\n` +
+  `  return {\n    onSave: () => send(CHANNELS.save),\n    onList: () => send(CHANNELS.list)\n  }\n}\n`;
+const WIRING_FIXTURE =
+  `const toRenderer = (channel: string, payload?: unknown): void =>\n  mainWindow?.webContents.send(channel, payload)\n` +
+  `Menu.set(build(menuActions(toRenderer)))`;
+const MENU_PRELOAD = wrapApi(
+  `onMenuSave: (cb) => subscribe('menu:save', cb),\n  onMenuList: (cb) => subscribe('menu:list', cb)`
+);
+
+function missingFor(main: Record<string, string>): string[] {
+  const consumer = extractConsumerChannels(MENU_PRELOAD);
+  return diffMissingProducers(consumer.channels, extractProducerChannels(main).channels);
+}
+
+test("table emitter: duplicate names across modules cannot silently replace a producer", () => {
+  expect(() => extractProducerChannels({
+    "first.ts": MENU_TEMPLATE_FIXTURE,
+    "second.ts": MENU_TEMPLATE_FIXTURE,
+    "index.ts": WIRING_FIXTURE,
+  })).toThrow(/ambiguous table emitter/i);
+});
+
+test("table emitter: duplicate definitions in one module are refused", () => {
+  expect(() => extractTableSenders(MENU_TEMPLATE_FIXTURE + MENU_TEMPLATE_FIXTURE)).toThrow(/ambiguous table emitter/i);
+});
+
+test("table emitter: channels sent through a table key count as produced once the emitter is called with a forwarding wrapper", () => {
+  const main = { "menu-template.ts": MENU_TEMPLATE_FIXTURE, "index.ts": WIRING_FIXTURE };
+  expect(missingFor(main)).toEqual([]);
+  expect(extractProducerChannels(main).unparsedByFile).toEqual({});
+});
+
+test("table emitter: a table entry that no send() call uses is not a producer", () => {
+  const main = { "menu-template.ts": MENU_TEMPLATE_FIXTURE, "index.ts": WIRING_FIXTURE };
+  expect(extractProducerChannels(main).channels.has("menu:unused")).toBe(false);
+});
+
+test("table emitter: dropping one send(TABLE.key) line leaves exactly that channel without a producer", () => {
+  const src = MENU_TEMPLATE_FIXTURE.replace("onSave: () => send(CHANNELS.save),\n    ", "");
+  expect(src).not.toBe(MENU_TEMPLATE_FIXTURE);
+  expect(missingFor({ "menu-template.ts": src, "index.ts": WIRING_FIXTURE })).toEqual([
+    'no producer found for channel "menu:save"',
+  ]);
+});
+
+test("table emitter: changing a table value leaves the consumed channel without a producer", () => {
+  const src = MENU_TEMPLATE_FIXTURE.replace("'menu:list'", "'menu:listing'");
+  expect(src).not.toBe(MENU_TEMPLATE_FIXTURE);
+  expect(missingFor({ "menu-template.ts": src, "index.ts": WIRING_FIXTURE })).toEqual([
+    'no producer found for channel "menu:list"',
+  ]);
+});
+
+test("table emitter: an emitter never called with a forwarding wrapper produces nothing", () => {
+  const unwired = WIRING_FIXTURE.replace("menuActions(toRenderer)", "menuActions(() => {})");
+  expect(unwired).not.toBe(WIRING_FIXTURE);
+  expect(missingFor({ "menu-template.ts": MENU_TEMPLATE_FIXTURE, "index.ts": unwired })).toEqual([
+    'no producer found for channel "menu:save"',
+    'no producer found for channel "menu:list"',
+  ]);
+});
+
+test("table emitter: an emitter called with a non-forwarding named function produces nothing", () => {
+  const unwired = WIRING_FIXTURE.replace("menuActions(toRenderer)", "menuActions(log)");
+  expect(unwired).not.toBe(WIRING_FIXTURE);
+  expect(missingFor({ "menu-template.ts": MENU_TEMPLATE_FIXTURE, "index.ts": unwired }).length).toBe(2);
+});
+
+test("table emitter: a send() call whose channel is not a table key is UNPARSED, not silently dropped", () => {
+  const src = MENU_TEMPLATE_FIXTURE.replace("send(CHANNELS.list)", "send(dynamicChannel)");
+  expect(src).not.toBe(MENU_TEMPLATE_FIXTURE);
+  expect(extractProducerChannels({ "menu-template.ts": src, "index.ts": WIRING_FIXTURE }).unparsedByFile).toEqual({
+    "menu-template.ts": 1,
+  });
+});
+
+test("table emitter: a table key whose value is not a quoted literal is UNPARSED", () => {
+  const src = MENU_TEMPLATE_FIXTURE.replace("'menu:save'", "prefix + 'save'");
+  expect(src).not.toBe(MENU_TEMPLATE_FIXTURE);
+  expect(extractProducerChannels({ "menu-template.ts": src, "index.ts": WIRING_FIXTURE }).unparsedByFile).toEqual({
+    "menu-template.ts": 1,
+  });
+});
+
+test("table emitter: a consumed channel with no producer anywhere is still caught when a table emitter exists", () => {
+  const preload = wrapApi(`onGhost: (cb) => subscribe('ghost:channel', cb)`);
+  const main = { "menu-template.ts": MENU_TEMPLATE_FIXTURE, "index.ts": WIRING_FIXTURE };
+  const consumer = extractConsumerChannels(preload);
+  expect(diffMissingProducers(consumer.channels, extractProducerChannels(main).channels)).toEqual([
+    'no producer found for channel "ghost:channel"',
+  ]);
 });

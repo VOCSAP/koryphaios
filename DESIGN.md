@@ -229,6 +229,16 @@ failure shape as a className matching no selector at all, different cause.
   "outside the total", so "counted and clean" and "not counted" can never
   render alike. A list mixing counted and uncounted lines therefore needs its
   groups TITLED, not merely separated.
+- **Peer option fields** (`PeerOptionFields.tsx`): the agent, role, model,
+  extended-context, effort and Context Size controls of a peer, one
+  implementation for the create popover and the template card; a card never
+  re-draws them. `ModelField compact` folds the picker behind `.mp-current`
+  (the `.colour-btn` box naming the current choice, `›` rotating open) and
+  unfolds it in `.mp-panel`. Context Size (clodex only) is `.ctx-row`: the
+  shared range input, a right-aligned `.ctx-number` text input in k tokens
+  (`aria-invalid` turns its border `--danger`, the range goes in
+  `.field-error`) and a `.ctx-unit` suffix; the field never claims to widen
+  the model's real window, its help line says so.
 - **Toasts** (`.toast`): fixed bottom-center, white text, filled green
   (success), amber (info) or red (error). Transient EVENTS only. Lifetime per
   variant in `toast-timing.ts`: 3 s for success and info, 8 s for error,

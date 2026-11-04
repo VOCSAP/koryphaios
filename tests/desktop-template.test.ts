@@ -312,3 +312,38 @@ test("template approval payload preserves legacy shape and records a clodex brid
   });
   expect(JSON.stringify(templateApproval(bridged).hashPayload)).toBe('[{"command":"","args":"","bridge":"clodex"}]');
 });
+
+// ----- clodexContextTokens -----
+
+test("clodexContextTokens survives def -> template -> JSON -> parse -> inputs exactly", () => {
+  for (const tokens of [200_000, 531_000, 872_000]) {
+    const json = JSON.stringify(toTemplate([{ name: "c", bridge: "clodex", clodexContextTokens: tokens }], "t"));
+    const parsed = parseTemplate(JSON.parse(json))!;
+    expect(parsed.template.sessions[0]!.clodexContextTokens).toBe(tokens);
+    expect(templateToInputs(parsed.template)[0]).toEqual({ name: "c", bridge: "clodex", clodexContextTokens: tokens });
+  }
+});
+
+test("a template session without the field stays valid and yields no explicit value (default 200000 applies at spawn)", () => {
+  const parsed = parseTemplate({ type: TEMPLATE_TYPE, version: 1, sessions: [{ name: "old", bridge: "clodex" }] })!;
+  expect(templateToInputs(parsed.template)[0]).toEqual({ name: "old", bridge: "clodex" });
+});
+
+test("a field without the clodex bridge is not carried into inputs or templates", () => {
+  expect(toTemplate([{ name: "a", clodexContextTokens: 300_000 }]).sessions[0]).toEqual({ name: "a" });
+  const parsed = parseTemplate({ type: TEMPLATE_TYPE, version: 1, sessions: [{ name: "a", clodexContextTokens: 300_000 }] })!;
+  expect(templateToInputs(parsed.template)[0]).toEqual({ name: "a" });
+});
+
+test("parseTemplate rejects the whole file for every invalid clodexContextTokens", () => {
+  const invalid: unknown[] = [199_999, 872_001, 0, -1, 300_000.5, NaN, Infinity, -Infinity, "300000", null, true, {}, []];
+  for (const bad of invalid) {
+    const parsed = parseTemplate({ type: TEMPLATE_TYPE, version: 1, sessions: [{ name: "a", bridge: "clodex", clodexContextTokens: bad }] });
+    expect(parsed, `value ${String(typeof bad === "number" ? bad : JSON.stringify(bad))}`).toBeNull();
+  }
+});
+
+test("the context size is not a shell-bearing field", () => {
+  const tpl = parseTemplate({ type: TEMPLATE_TYPE, version: 1, sessions: [{ name: "a", clodexContextTokens: 300_000 }] })!.template;
+  expect(templateHasShellFields(tpl)).toBe(false);
+});

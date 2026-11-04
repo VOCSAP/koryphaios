@@ -68,8 +68,13 @@ interface DeckState {
   saveAsOpen: boolean
   /** Template picker (import) visibility. */
   templatesOpen: boolean
-  /** Picker opened in manage mode (File > Import template): shows per-row Delete. */
+  /** Picker opened in manage mode (its "Manage templates" button): per-row Edit, Duplicate, Delete and New. */
   templatesManage: boolean
+  /**
+   * Picker opened to EDIT (File > Template > Edit Template…): choosing a
+   * template opens its composer directly, with no Use / Apply on offer.
+   */
+  templatesEdit: boolean
   /**
    * Bumped by openTemplates(open, { composer: true }), consumed and cleared by
    * TemplatesDialog once it opens, and forced back to 0 unconditionally on
@@ -336,7 +341,7 @@ interface DeckState {
   openWorkspaces(open: boolean, opts?: { loadOnly?: boolean }): void
   openNewClearConfirm(open: boolean): void
   openSaveAs(open: boolean): void
-  openTemplates(open: boolean, opts?: { manage?: boolean; composer?: boolean }): void
+  openTemplates(open: boolean, opts?: { manage?: boolean; edit?: boolean; composer?: boolean }): void
   /** TemplatesDialog consumed the composer seed (card 290a14e2, same one-shot
    *  pattern as clearHelpSeed/clearRoadmapSeed below). */
   clearTemplatesComposerSeed(): void
@@ -551,6 +556,7 @@ export const useDeck = create<DeckState>((set, get) => ({
   saveAsOpen: false,
   templatesOpen: false,
   templatesManage: false,
+  templatesEdit: false,
   templatesComposerSeed: 0,
   exportTemplateOpen: false,
   templates: [],
@@ -686,9 +692,9 @@ export const useDeck = create<DeckState>((set, get) => ({
     })
     window.api.onMenuRestore(() => get().openWorkspaces(true))
     window.api.onMenuListWorkspaces(() => get().openWorkspaces(true))
-    window.api.onMenuExportTemplate(() => get().openExportTemplate(true))
-    window.api.onMenuNewTemplate(() => get().openTemplates(true, { manage: true, composer: true }))
-    window.api.onMenuImportTemplate(() => get().openTemplates(true, { manage: true }))
+    window.api.onMenuSaveTemplate(() => get().openExportTemplate(true))
+    window.api.onMenuEditTemplate(() => get().openTemplates(true, { edit: true }))
+    window.api.onMenuUseTemplate(() => get().openTemplates(true))
     window.api.onWorkspaceCurrent((ws) => {
       set({ currentWorkspaceName: ws?.name ?? null })
       // `workspaces` is a bootstrap snapshot never repushed after mount --
@@ -940,6 +946,7 @@ export const useDeck = create<DeckState>((set, get) => ({
     set((s) => ({
       templatesOpen: open,
       templatesManage: open ? !!opts?.manage : false,
+      templatesEdit: open ? !!opts?.edit : false,
       // Only bumped when a blank composer is actually requested, so a plain
       // "Use template" / "Manage templates" open never re-triggers it. On
       // CLOSE, forced back to 0 unconditionally (card 290a14e2 review round
