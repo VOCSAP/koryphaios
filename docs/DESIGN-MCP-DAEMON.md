@@ -1,0 +1,507 @@
+# Daemon MCP partagé : conception (lot L0)
+
+Contrat : carte `7bd455f6` (daemon unique et relais Rust), carte `1dc74e6c` (reprise d'un pair par token au broker). Repli : carte `f4080f27`. Plan des lots et décisions de l'opérateur : `docs/DESIGN-MCP-DAEMON-LOTS.md`. Décision d'architecture : `docs/adr/008-shared-mcp-daemon.md`.
+
+Ce document prescrit la cible. Il ne décrit pas l'existant, sauf dans les constats étiquetés. Les chemins dits nouveaux sont des cibles. Étiquettes : **MESURÉ** (commande exécutée, ligne décisive citée), **DÉDUIT** (lecture de code, `fichier:ligne`), **SUPPOSÉ** (non vérifié). Les paragraphes **DÉCISION** prescrivent ; chacun nomme l'alternative écartée en une ligne.
+
+## 1. Problème et périmètre
+
+Chaque session Claude Code lance deux processus bun, `server.ts` (claude-peers) et `server-roadmap.ts` (kory-roadmap). Cible : un daemon bun par utilisateur OS, par machine et par racine de code (§6.2), et par session deux relais Rust (`--family peers`, `--family roadmap`) qui copient le JSON-RPC MCP entre Claude Code et le daemon.
+
+Décisions déjà tranchées par l'opérateur, non rouvertes ici : daemon local dédié, un seul daemon pour les deux familles, les deux familles par le même relais stdio, relais en Rust, repli vers les serveurs bun si le binaire manque, scénario obligatoire de sessions Kory et hors Kory ensemble. Elles sont consignées dans l'ADR 008 avec les options écartées.
+
+**Non-objectifs de ce chantier.** Les tuiles sandbox restent sur `server.ts` dans le conteneur. `kory-deck` et `kory-operator` (servis par `server-deck.ts` et les scripts de `desktop/mcp/`) restent des processus Kory distincts. Aucun changement du protocole WebSocket du broker : une WebSocket par session.
+
+**Ce qui ne doit pas casser.** Une tuile Kory n'entre jamais dans le groupe par défaut de l'utilisateur. Deux tuiles dans le même dossier gardent chacune leur identité. Le broker voit mourir une session quand elle meurt. La roadmap refuse fermé sans identité prouvée. Les approbations restent locales au run Kory.
+
+## 2. Structure actuelle : ce qu'un daemon casse
+
+`server.ts` est écrit pour un processus par session. Son état vit dans des variables de module, et ses modules partagés lisent `process.env`, `process.cwd()` et `process.pid` par défaut. Un daemon qui importerait ce code tel quel mélangerait les sessions sans erreur.
+
+| Constat | Source |
+|---|---|
+| **DÉDUIT** 15 variables de module portent l'identité et la connexion de LA session (`myInstanceToken`, `myPeerId`, `myGroupId`, `myCwd`, `myRole`, `wsSocket`, `pendingWaiters`...). | `server.ts:391-407,484-487,492-544` |
+| **DÉDUIT** Le corps de `/register` lit `process.pid`, `process.ppid` et cinq variables d'environnement ; le `/register` de `switch_group` omet `claude_cli_pid`. | `server.ts:2061-2084`, `server.ts:1769-1785` |
+| **DÉDUIT** `resolveGroup` et `loadSessionApprovalCredential` lisent `process.env` en interne : l'isolation de groupe de Kory (`CLAUDE_PEERS_FORCE_GROUP*`) passerait par l'environnement du daemon. | `shared/config.ts:395-434,537`, `shared/approval-client.ts:118-124` |
+| **DÉDUIT** `tileIdentityGuard` compare `process.cwd()` au cwd de la tuile : dans un daemon, toute écriture du fichier d'identité de tuile serait refusée, avec une simple ligne de log. | `shared/peer-cache.ts:478-487` |
+| **DÉDUIT** Le snapshot lu par la roadmap porte la génération de `process.pid` ; un daemon survit aux sessions, la vérification de vivacité ne tomberait jamais. | `server.ts:1074-1097`, `server-roadmap.ts:42-56` |
+| **DÉDUIT** Importer `server.ts` installe `process.on("unhandledRejection")` suivi de `process.exit(1)` et un `Server` MCP, même sans `main()`. `server-deck.ts` le fait déjà. | `server.ts:366-373,779`, `server-deck.ts:12-19` |
+| **DÉDUIT** Le Deck retrouve `broker.ts` en remplaçant le suffixe `server.ts` d'un argument de l'entrée MCP `claude-peers`, et lance le broker avec la `command` de cette entrée. Une entrée dont la commande est le relais lancerait le relais sur `broker.ts`. | `desktop/src/main/broker-spawn.ts:57-70` |
+| **DÉDUIT** Le broker remplace la socket de `wsPool` à chaque authentification WS d'un token et ne la retire à la fermeture que si c'est la même. Une WS refuse un token inconnu ou inactif. | `broker.ts:12853-12863` |
+| **DÉDUIT** Une ligne de session active dont le PID enregistré est vivant provoque une collision et un nouveau pair suffixé ; seul un candidat lié à un run accepte `resume_instance_token`, et seulement signé. | `broker.ts:2849-2870,2884-2894,2921-2929`, `broker.ts:2692-2696` |
+
+L'inventaire complet compte 99 lignes d'état et 17 couplages cachés. Son traitement est au §7.
+
+## 3. Cible
+
+```text
+claude.exe (session)                      daemon kory-mcp-daemon (un par utilisateur OS et racine de code)
+  stdin/stdout NDJSON                        écoute 127.0.0.1:<premier candidat libre parmi 10>
+  relay --family peers   ===trames===>       Session peers (createPeersSession)
+  relay --family roadmap ===trames===>       Session roadmap (createRoadmapSession)
+                                              |-- registre des sessions (clé : session_id)
+                                              |-- index de liaison peers/roadmap
+                                              |-- ensureBroker en vol unique par URL
+                                              +-- broker de chaque session (HTTP + 1 WS)
+```
+
+**DÉCISION, fichiers cibles.** Crate Rust `relay/` à la racine du dépôt, binaire `claude-peers-relay`. Point d'entrée du daemon `mcp-daemon.ts` à la racine, frère de `server.ts`. Logique de session dans des modules sans effet de bord à l'import : `shared/peers-session.ts` (fabrique de la famille peers, handlers et gestionnaires d'outils exportés vers `server-deck.ts`) et `shared/roadmap-session.ts` (autour de `shared/roadmap-mcp.ts`). Protocole commun : `shared/mcp-daemon-protocol.ts` (trames, validation du hello, MAC) et fixtures partagées `relay/protocol-fixtures/`. Écarté : mettre le crate sous `desktop/`, car le relais sert aussi les sessions hors Kory du produit cœur.
+
+**DÉCISION, un seul chemin de code.** `server.ts` et `server-roadmap.ts` deviennent des entrées stdio minces : elles construisent un hello depuis `process.env`, `process.cwd()`, `process.pid` et `process.ppid`, puis appellent la même fabrique que le daemon. Le repli bun et le daemon exécutent donc le même code de session. Écarté : garder `server.ts` intact à côté d'un nouveau code multi-session, ce qui créerait deux implémentations qui divergent dès le premier correctif.
+
+## 4. Protocole entre relais et daemon
+
+### 4.1 Transport
+
+**DÉCISION : TCP sur `127.0.0.1` sur les trois plateformes, avec authentification mutuelle applicative (§5).** Écarté : pipe nommé sous Windows et socket unix ailleurs. Raisons : deux codes de transport à tester ; sous Windows, la sécurité d'un pipe tient à son descripteur de sécurité, que libuv ne permet pas de fixer.
+
+**MESURÉ documentaire**, `mcp__crawl4ai-rag__searxng_search("node net.createServer named pipe security descriptor DACL windows not supported")`, issue nodejs/node#47086 : « Node (well, libuv) calls CreateNamedPipe () with the WRITE_DAC (but not WRITE_OWNER) flag and default security attributes ». **SUPPOSÉ** : le serveur de pipe de Bun sous Windows a la même limite ; non vérifié. Un socket unix dans un dossier `0700` serait sûr sous Linux et macOS, mais l'authentification applicative reste nécessaire pour Windows : un seul mécanisme partout coûte moins qu'un mécanisme par OS.
+
+**Ports candidats (Q1, DÉCIDÉ).** Port de base `p0 = 47000 + (fnv1a32(nom d'utilisateur en minuscules) mod 1000)`, puis les 9 suivants : 10 candidats, même règle sur les trois OS. `CLAUDE_PEERS_MCP_DAEMON_PORT`, s'il est défini dans l'environnement du relais, remplace la liste par ce seul port. Le port reste le verrou : un daemon par port, et le plus bas gagne (§6.2). Un candidat tenu par un autre programme, par le daemon d'un autre compte ou par le daemon d'une autre racine de code est sauté : l'authentification ou le hello échoue, jamais avec une fuite. Tous les candidats occupés sans daemon valide : repli (§10), journalisé. Écarté : port fixe unique, qui bloque le second compte d'une machine partagée ; port unique dérivé sans candidats, qui force le repli à la première collision ; port choisi par l'OS et publié dans un fichier, qui obligerait à un verrou de fichier propre à chaque OS.
+
+### 4.2 Trames
+
+**DÉCISION.** Chaque trame : longueur `u32` little-endian (octets qui suivent), un octet de type, puis une charge UTF-8. Charge maximale 16 Mio ; une trame plus grande est une violation de protocole et ferme la connexion. Écarté : NDJSON avec un préfixe de méthode réservé, qui mélange le contrôle et le MCP dans le même espace de noms.
+
+| Type | Sens | Charge |
+|---|---|---|
+| `0x01 CHALLENGE` | daemon vers relais | JSON `{proto_min, proto_max, daemon_nonce, daemon_instance, daemon_version}` |
+| `0x02 AUTH` | relais vers daemon | JSON `{proto_min, proto_max, relay_nonce, mac}` |
+| `0x03 AUTH_OK` | daemon vers relais | JSON `{proto, mac}` |
+| `0x04 HELLO` | relais vers daemon | JSON, §4.4 |
+| `0x05 WELCOME` | daemon vers relais | JSON `{session_id, family, tools_hash, resumed}` |
+| `0x10 MCP` | les deux sens | exactement un message JSON-RPC, sans saut de ligne final |
+| `0x11 TICKET` | daemon vers relais | JSON `{ticket}` |
+| `0x12 BYE` | relais vers daemon | JSON `{reason: "stdin_eof" \| "signal"}` |
+| `0x13 PING` / `0x14 PONG` | relais vers daemon / retour | vide |
+| `0x15 ERROR` | daemon vers relais, avant fermeture | JSON `{code, message}` |
+| `0x20 CONTROL` | client CLI ou daemon vers daemon, à la place de HELLO | JSON `{op: "status" \| "stop"}` ; `status` répond `{pid, pid_start, port, code_root, code_fingerprint, version, sessions}` |
+
+Codes d'`ERROR` : `proto_mismatch`, `hello_invalid`, `root_mismatch` (le relais essaie le candidat suivant, §6.2), `family_unavailable`, `session_limit`, `ticket_refused` (non fatal, voir §4.6), `shutting_down`.
+
+### 4.3 Poignée de main
+
+1. Le daemon envoie `CHALLENGE` avec un `daemon_nonce` de 32 octets aléatoires (base64url).
+2. Le relais répond `AUTH` : `relay_nonce` de 32 octets et `mac = HMAC-SHA256(clé, "kory-mcp-v1|relay|" + daemon_nonce + "|" + relay_nonce)`.
+3. Le daemon vérifie en temps constant, puis répond `AUTH_OK` avec `mac = HMAC-SHA256(clé, "kory-mcp-v1|daemon|" + relay_nonce + "|" + daemon_nonce)`, ou `ERROR` et ferme.
+4. Le relais vérifie ce MAC en temps constant. **Il n'envoie rien d'autre avant cette vérification** : ni environnement, ni ticket.
+5. Le relais envoie `HELLO` ; le daemon répond `WELCOME` ou `ERROR`.
+
+Chaque étape a un délai de 3 s. Un échec ferme la connexion sans verrouillage : la clé fait 256 bits.
+
+### 4.4 Message d'identité HELLO
+
+**DÉCISION, liste exacte des champs.**
+
+| Champ | Type | Origine | Usage dans le daemon |
+|---|---|---|---|
+| `proto` | entier | négocié | rejeté s'il diffère de `AUTH_OK.proto` |
+| `family` | `"peers"` \| `"roadmap"` | argument `--family` | choix de la fabrique |
+| `relay_version` | chaîne | binaire | logs et `status` |
+| `code_root` | chaîne hexadécimale | sha256 du chemin canonique du dossier de `--fallback` | refus `root_mismatch` s'il diffère de la racine du daemon |
+| `pid` | entier | PID du relais | `pid` et `client_pid` de `/register` ; génération d'auteur du snapshot |
+| `ppid` | entier | PID parent, `claude.exe` | `claude_cli_pid` des deux `/register` ; clé de liaison (§9) |
+| `pid_start` | chaîne opaque | heure de création du relais, mesurée par le relais | logs ; ticket lié au processus |
+| `ppid_start` | chaîne opaque | heure de création du parent | clé de liaison (§9) |
+| `cwd` | chaîne absolue | `current_dir()` du relais | `myCwd`, git, project key, garde de tuile |
+| `stdin_is_tty` | booléen | relais | champ `tty` de `/register` |
+| `env` | objet chaîne vers chaîne | filtre ci-dessous | toute lecture d'environnement de session |
+| `resume_ticket` | chaîne, 4096 octets au plus, optionnelle | mémoire du relais | reprise (§8.3) |
+| `replay` | booléen | relais | vrai quand le relais va rejouer `initialize` |
+
+**Filtre d'environnement**, appliqué par le relais : toute variable `CLAUDE_PEERS_*`, plus `CLAUDE_CODE_SESSION_ID`, `CLAUDE_CODE_MESSAGING_SOCKET`, `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL`, `PATH`, `HOME`, `USERPROFILE`, `APPDATA`, `LOCALAPPDATA`, `XDG_CONFIG_HOME`, `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY` et leurs formes minuscules. Une valeur vide n'est pas transmise : sous Windows une variable vide arrive absente à l'enfant, et le daemon doit lire la même chose qu'un `server.ts` lancé directement. Le préfixe entier `CLAUDE_PEERS_*` est transmis parce que Kory ajoute des variables au fil des cartes ; le daemon ignore celles qu'il ne lit pas. Écarté : une liste fermée de noms `CLAUDE_PEERS_*`, qui ferait perdre en silence la prochaine variable de Kory.
+
+Le daemon valide le hello avant toute action : types, `cwd` absolu, PID entiers positifs, 256 variables au plus, 64 Kio au total. Un hello invalide reçoit `ERROR hello_invalid`. **DÉDUIT** le `host` n'est pas un champ : les sessions servies par le daemon sont toutes sur la machine du daemon (les tuiles sandbox restent sur bun, `peer-cache.ts:473-475` mentionne le cwd conteneur), donc `hostname()` reste global au daemon.
+
+**DÉCISION, racine de code (revue critique, point 5).** Le premier relais qui lance le daemon choisit le code exécuté. **MESURÉ par la revue** (`~/.claude.json`) : la config globale pointe vers le clone `koryphaios-mcp` ; un relais d'un autre clone serait servi par l'autre code sans le savoir. Le hello porte donc `code_root`, et le daemon refuse un relais d'une autre racine par `ERROR root_mismatch`. Le relais passe alors au candidat suivant et, s'il ne trouve aucun daemon de sa racine, en lance un sur le premier port libre (§6.2) : un daemon par utilisateur et par racine, 10 au plus. Écarté : servir toute racine, ce qui exécute en silence un autre code ; refuser et passer en repli bun, ce qui laisserait mortes, après un crash, les sessions dont le daemon a été relancé par un relais de l'autre racine (pas de repli au milieu d'une session, §10). Question de confirmation Q11.
+
+### 4.5 Négociation de version
+
+`CHALLENGE` et `AUTH` portent chacun `[proto_min, proto_max]`. Version retenue : le plus grand entier commun. Sans entier commun, le daemon répond `ERROR proto_mismatch` et le relais passe en repli bun pour cette session (§10). **DÉCISION** : un relais ne demande jamais l'arrêt d'un daemon incompatible. Écarté : laisser un relais récent redémarrer le daemon, ce qui couperait N sessions pour en servir une. La version 1 est la seule au départ. `daemon_version` et `relay_version` servent au diagnostic, pas à la compatibilité.
+
+### 4.6 Ticket de reprise
+
+**DÉCISION, format.** Le ticket est minté par le daemon et opaque pour le relais : `base64url(json) + "." + base64url(HMAC-SHA256(clé, json))`. Contenu v1 : `{v: 1, family: "peers", relay_pid, relay_pid_start, writer_generation, instance_token, peer_id, group_id, notified_hwm, issued_at}`. `notified_hwm` est le plus grand id de message déjà poussé en channel. `writer_generation` est la génération du relais mesurée par le daemon précédent (§8.2) : le daemon suivant ne la remesure pas. La famille roadmap n'a pas de ticket.
+
+**Durée de vie.** Le ticket vit dans la mémoire du relais, jamais sur disque, et meurt avec lui. Le daemon en envoie un nouveau après chaque `/register` réussi (démarrage, `switch_group`, reprise), après `set_id`, et après une poussée de channel qui fait monter `notified_hwm`, regroupé à une trame par seconde au plus. Pas d'expiration propre : l'autorité est le broker, qui accepte ou refuse le token (§8.4). `issued_at` sert aux logs.
+
+**Vérification par le daemon suivant.** MAC valide, `relay_pid` et `relay_pid_start` égaux à ceux du hello, `family` égale. Un ticket refusé n'empêche pas la session : elle s'enregistre par le chemin ordinaire et le daemon envoie la notice d'identité changée (§8.3). Écarté : un ticket qui ne serait qu'un identifiant de session gardé par le daemon, car il disparaît avec le daemon dont on veut survivre au crash.
+
+### 4.7 Copie MCP, coupure, rejeu d'`initialize`
+
+Le relais lit des lignes NDJSON sur stdin et en fait des trames `MCP`, et l'inverse sur stdout. Il analyse chaque message juste assez pour lire `id` et `method`.
+
+- **Garde d'`initialize`.** Le relais garde en mémoire la première requête `initialize` et la notification `notifications/initialized`, octet pour octet.
+- **Requêtes en vol.** Il tient l'ensemble des `id` de requêtes envoyées sans réponse, borné à 256.
+- **Coupure.** À la fermeture de la socket, chaque requête en vol reçoit une erreur JSON-RPC `-32000` : « claude-peers daemon connection lost; this call may or may not have been executed ». Le texte dit « may have been executed » parce que `send_message` n'est pas idempotent. Toute nouvelle requête reçoit, tant que le daemon est absent : « claude-peers daemon unreachable, reconnecting ». Les notifications de Claude vers le serveur sont jetées.
+- **Reconnexion.** Délai de 100 ms doublé jusqu'à 5 s, avec gigue, sans limite de tentatives tant que stdin est ouvert. Chaque tentative parcourt les candidats ; l'absence de daemon de sa racine déclenche la course de démarrage (§6.2).
+- **Rejeu.** Après `WELCOME`, le relais envoie la requête `initialize` gardée avec un `id` réécrit en `"kory-relay-replay-<n>"`, attend la réponse portant cet `id` et l'avale, puis envoie la `notifications/initialized` gardée. Les requêtes de Claude arrivées pendant le rejeu attendent en file, 64 au plus et 5 s au plus ; au-delà elles reçoivent l'erreur de coupure. Écarté : rejouer avec l'`id` d'origine, qui pourrait croiser un `id` que Claude réutilise.
+- **Liste d'outils.** `WELCOME.tools_hash` est un condensat de la liste servie. Si elle diffère de celle de la connexion précédente, le relais émet `notifications/tools/list_changed`. **SUPPOSÉ** : Claude Code relit la liste à cette notification pour un serveur stdio ; à mesurer en L1, sans bloquer le lot car la liste ne change qu'avec le code du daemon.
+- **PING.** Le relais envoie `PING` toutes les 15 s ; sans `PONG` en 10 s, il ferme la connexion et suit le chemin de coupure.
+- **Daemon bloqué (revue critique, point 1).** Un daemon dont la boucle d'événements est bloquée accepte encore les connexions au niveau du noyau, ne répond plus, et garde le port : sans action, aucune relance n'est possible et les sessions restent en erreur, car il n'y a pas de repli en cours de session. **DÉCISION** : après 30 s pendant lesquelles chaque tentative a obtenu une connexion sans `CHALLENGE` dans les 3 s, le relais lit `mcp-daemon-<port>.json` (§6.2), vérifie que le PID est vivant, que son heure de création égale `pid_start` et que son image est `kory-mcp-daemon` (ou `bun` en repli de nom, §6.1), puis l'arrête et relance la course de démarrage. Plusieurs relais qui arrêtent le même PID sont sans effet de bord. Le PID n'est jamais pris dans un fichier dont `pid_start` ne correspond pas : un PID réutilisé n'est pas tué. Écarté : ne jamais tuer le daemon, ce qui laisse N sessions mortes jusqu'à une action de l'opérateur.
+- **Fin.** EOF de stdin : `BYE {reason: "stdin_eof"}`, fermeture, sortie 0. Signal : `BYE {reason: "signal"}` si possible.
+
+La notice de reconnexion est émise par le daemon, pas par le relais : c'est le daemon qui sait si la reprise a gardé l'identité (§8.3).
+
+## 5. Authentification du canal et modèle de menace
+
+**Modèle de menace, énoncé explicite.**
+
+- **Protégé** : un autre compte OS de la même machine. Il ne peut ni se connecter au daemon, ni se faire passer pour lui auprès d'un relais, ni lire ce qui traverse le canal.
+- **Non protégé, par construction** : tout processus du même utilisateur. Il lit déjà les fichiers d'identité de `~/.claude/peers` (tokens d'instance), le fichier de réglages (`broker_token`), les fichiers `.claude-peers.json` (secrets de groupe) et l'environnement des processus `claude.exe`. Il peut lancer `bun server.ts` avec n'importe quel environnement. Le daemon ne lui donne aucune capacité nouvelle. Il garde en mémoire les tokens de toutes les sessions, mais aucune trame ne permet à une connexion de lire l'état d'une autre.
+- **Hors périmètre** : l'administrateur de la machine.
+
+**DÉCISION, clé partagée.** 32 octets aléatoires, en hexadécimal, dans `<home>/.claude/peers/mcp-daemon.key`, le dossier qui porte déjà les fichiers d'identité. Le premier relais ou daemon qui ne la trouve pas la crée : écriture d'un fichier temporaire au nom aléatoire, puis lien dur (POSIX) ou `MoveFileEx` sans remplacement (Windows), pour qu'un lecteur ne voie jamais un fichier partiel ; le perdant relit le fichier du gagnant. Sous Linux et macOS, le relais et le daemon refusent une clé qui n'appartient pas à l'uid courant, ou dont le mode ou celui du dossier donne un droit au groupe ou aux autres. Ils passent alors en repli. Sous Windows, la protection repose sur l'ACL du profil (**SUPPOSÉ**, condition d'exploitation : profil non partagé). Pas de rotation automatique ; supprimer le fichier puis redémarrer le daemon fait tourner la clé.
+
+**Pourquoi mutuelle.** Sans la preuve du daemon, un autre compte qui écoute le premier sur le port reçoit les hellos, donc les secrets de groupe forcés par Kory. C'est le risque principal du TCP local. Le loopback n'est pas une identité.
+
+**Conteneurs sandbox (revue critique, point 6).** **DÉDUIT par la revue, non relu ici** : un conteneur joint le loopback de l'hôte (`desktop/src/main/sandbox-command.ts:289`) et peut ouvrir des connexions au daemon ; la clé n'est pas montée dans le conteneur (`sandbox-command.ts:305-357`), donc l'authentification tient. **DÉCISION** : le daemon borne les connexions non authentifiées à 32 en même temps et à 9 s de vie (trois étapes de 3 s) ; au-delà, une nouvelle connexion est fermée tout de suite et comptée dans `status`. Une connexion authentifiée compte dans la borne de sessions (§7.5). Écarté : filtrer par adresse source, qui ne distingue pas un conteneur passé par le pont de Docker Desktop d'un processus hôte (**SUPPOSÉ**).
+
+## 6. Cycle de vie du daemon
+
+### 6.1 Démarrage par le relais
+
+**DÉCISION.** Le relais qui gagne le verrou de lancement (§6.2) exécute `<dossier du fallback>/mcp-daemon.ts` avec l'image `kory-mcp-daemon` (ci-dessous), lancé :
+
+- détaché, sans fenêtre : `CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB` sous Windows, `setsid` sous POSIX ;
+- avec cwd = `<home>/.claude/peers`, jamais le cwd de la session : sous Windows, un cwd ouvert empêche de supprimer le dossier, et Kory retire des worktrees ;
+- avec stdout et stderr ouverts en ajout sur `<coreLogDir>/mcp-daemon.out.log`, pour capter une panique au chargement ;
+- avec un **environnement filtré** : bases OS (`SystemRoot`, `windir`, `ComSpec`, `PATH`, `PATHEXT`, `TEMP`, `TMP`, `HOME`, `USERPROFILE`, `APPDATA`, `LOCALAPPDATA`, `XDG_*`, `LANG`, `TZ`), proxys, et seulement ces réglages globaux au daemon : `CLAUDE_PEERS_LOG_DIR`, `CLAUDE_PEERS_POLL_FALLBACK_SEC`, `CLAUDE_PEERS_CONTEXT_RESUME_KEY_TTL_MS`, `CLAUDE_PEERS_MCP_DAEMON_*`. Aucune variable de session.
+
+Écarté : hériter l'environnement du premier relais, qui donnerait au daemon le groupe forcé de la première tuile Kory venue.
+
+**Ceinture et bretelles.** Au démarrage, le daemon retire de son propre `process.env`, et le journalise, toute variable de session (`CLAUDE_PEERS_FORCE_GROUP*`, `CLAUDE_PEERS_GROUP`, `CLAUDE_PEERS_DESK_*`, `CLAUDE_PEERS_ROLE`, `CLAUDE_PEERS_SUPERVISOR`, `CLAUDE_PEERS_TOOLS`, `CLAUDE_PEERS_APPROVAL_FILE`, `CLAUDE_PEERS_DEPOSIT_CAPABILITY`, `CLAUDE_PEERS_BROKER_*`, `CLAUDE_CODE_*`). Un daemon lancé à la main depuis le shell d'une tuile ne peut donc pas prêter son groupe. La garantie principale reste le §7.3 : les helpers n'ont plus de valeur par défaut.
+
+**MESURÉ (Claude Code 2.1.318, Windows 11, 2026-11-06)** : un enfant lancé par un serveur MCP stdio survit à la fin de la session, que ce soit un `claude -p` qui se termine ou une session interactive dont l'opérateur ferme la fenêtre de terminal. Les trois variantes survivent : sans option, avec `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP`, et avec `CREATE_BREAKAWAY_FROM_JOB` en plus, qui n'échoue pas. Claude Code ne tue donc pas les enfants de ses serveurs MCP à la fermeture. Le relais garde les options détachées ci-dessus, pour ne dépendre ni de la console ni d'un futur job. Le repli WMI n'est pas nécessaire hors Kory.
+
+**MESURÉ, cas d'une tuile Kory (2026-11-06)** : sous Windows, chaque tuile entre dans un job Windows (`JOB_PREAMBLE_PS`, `desktop/src/main/shell-command.ts`) avec `KILL_ON_JOB_CLOSE` (0x2000) et sans `BREAKAWAY_OK` (0x800). Avec le préambule réel, un enfant sans option ou détaché MEURT quand le PowerShell de la tuile se termine, et `CREATE_BREAKAWAY_FROM_JOB` échoue avec « Accès refusé ». Un daemon lancé depuis une tuile mourrait donc avec elle et couperait toutes les sessions, Kory ou non. Avec les limites `0x2800`, l'enfant `CREATE_BREAKAWAY_FROM_JOB` survit, et les enfants ordinaires meurent toujours : l'arrêt de l'arbre de la tuile reste intact. Décision : L2 ajoute `BREAKAWAY_OK` au job des tuiles, et le relais lance le daemon avec `CREATE_BREAKAWAY_FROM_JOB`. Si cette option échoue (Kory d'une version antérieure), le relais la retire, lance le daemon quand même, et le journalise : ce daemon mourra avec la tuile, et un autre relais le relancera. Contrepartie de sécurité à accepter : tout processus d'une tuile peut désormais sortir du job en le demandant, donc échapper à l'arrêt de l'arbre. C'est du code du même utilisateur, qui pouvait déjà lancer un processus hors de Kory. À remesurer si une version de Claude Code change ce comportement : le test de L6 ferme la session qui a lancé le daemon et vérifie qu'il sert encore la seconde.
+
+**Nom de processus distinct (DÉCIDÉ par l'opérateur le 2026-11-06).** Le daemon apparaît sous le nom `kory-mcp-daemon` dans le gestionnaire des tâches, `ps` et `top`, pour que l'utilisateur le distingue des autres processus bun. Le relais ne lance donc pas `bun` directement, mais une image nommée `kory-mcp-daemon` :
+
+- **Windows** : une copie de `bun.exe` sous `<home>/.claude/peers/bin/kory-mcp-daemon.exe`. MESURÉ (bun 1.3.13) : une copie renommée de `bun.exe` exécute un script `.ts` normalement et apparaît sous son nouveau nom dans `tasklist` ; `process.execPath` vaut le chemin de la copie. Le relais refait la copie quand elle manque ou quand sa taille ou sa date diffère du `bun.exe` résolu, pour suivre une mise à jour de bun. Écarté : un lien dur, qui garde l'ancien binaire quand `bun upgrade` remplace le fichier.
+- **Linux et macOS** : un lien symbolique `kory-mcp-daemon` vers `bun` dans le même dossier. SUPPOSÉ, à mesurer en L5 : le nom du processus (`comm`) est celui du chemin exécuté, donc celui du lien.
+- **Repli** : si la copie ou le lien échoue (disque plein, droits), le relais lance `bun` sous son nom, et le journalise.
+- **Effet de bord voulu** : un `taskkill /IM bun.exe` (règle « Shared checkout » du dépôt) n'arrête plus le daemon.
+
+### 6.2 Instance unique et course au démarrage
+
+**Recherche par le relais.** Il essaie les 10 candidats dans l'ordre. Connexion refusée : il note le port comme libre et continue. Connexion acceptée : poignée de main ; un échec d'authentification ou `root_mismatch` fait passer au suivant. Le premier `WELCOME` termine la recherche. Le relais ne parle donc qu'au daemon de sa racine au port le plus bas.
+
+**Verrou de lancement (revue critique, point 2).** Après un crash, N relais trouvent les candidats vides en même temps. Lancer N fois bun coûte N démarrages et, au pire, N mesures PowerShell de génération limitées à 5 s chacune (`shared/process-generation.ts:26-32`). **DÉCISION** : seul le relais qui crée en exclusif `<home>/.claude/peers/mcp-daemon-<code_root 8>.launch` (son PID et l'heure) lance le daemon. Les autres reprennent la recherche avec un délai aléatoire de 200 à 800 ms. Le fichier est supprimé par le daemon après `listen`, et considéré périmé après 15 s ou si son PID est mort ; un relais le remplace alors. Écarté : laisser chaque relais lancer et le port départager, ce qui produit exactement la tempête décrite.
+
+**Le plus bas gagne, côté daemon.** Au démarrage, le daemon parcourt les candidats. Pour chaque port occupé plus bas que celui qu'il vise, il se connecte comme client, s'authentifie et demande `CONTROL status`. Si ce daemon a la même racine, le nouveau sort avec le code 0 : il est en double. Sinon il prend le premier port libre. Un `EADDRINUSE` au `listen` relance le parcours. Après un `listen` réussi sur un port qui n'est pas le premier, il refait une fois le parcours des ports plus bas et sort s'il y trouve un daemon de sa racine, pour couvrir la course entre son parcours et son `listen`. Écarté : port unique sans parcours, incompatible avec la décision des 10 candidats.
+
+**Fichier d'état.** Après `listen`, le daemon écrit `<home>/.claude/peers/mcp-daemon-<port>.json` (`pid`, `pid_start`, `port`, `code_root`, `code_fingerprint`, `version`, `instance`, `started_at`) par écriture atomique, et le supprime à l'arrêt. Il sert au diagnostic et à l'arrêt d'un daemon bloqué (§4.7) ; aucun relais ne s'y fie pour trouver le daemon.
+
+**SUPPOSÉ, à mesurer en L2** : sous Windows, Bun n'ouvre pas son socket d'écoute avec `SO_REUSEADDR`, donc un second `listen` du même utilisateur sur le même port échoue bien. Sinon, deux daemons serviraient chacun une partie des sessions. Le test le vérifie (§12, L2).
+
+### 6.3 Arrêt
+
+- **Inactivité (Q2, DÉCIDÉ).** Sortie après `CLAUDE_PEERS_MCP_DAEMON_IDLE_SEC` secondes sans aucune connexion de session (600 par défaut, 0 pour jamais). Le gain mémoire vise les heures sans session, et la sortie fait prendre le nouveau code au prochain démarrage. Écarté : ne jamais s'arrêter, ce qui garderait environ 200 Mo et l'ancien code indéfiniment.
+- **Ordre de l'arrêt sur inactivité (revue critique, point 7).** **DÉCISION** : fermer d'abord l'écoute, attendre la fin des poignées de main en cours (9 s au plus), puis vérifier une dernière fois le nombre de sessions. Zéro : sortie. Sinon le daemon rouvre l'écoute sur le même port ; si un autre daemon l'a pris entre-temps, il continue de servir ses sessions sans écouter et sort quand la dernière se ferme. Écarté : vérifier puis fermer, ce qui laisse entrer un relais entre les deux et le coupe aussitôt.
+- **Arrêt demandé** (`CONTROL stop`, SIGTERM, SIGINT) : le daemon ferme les sockets des relais **sans** `/disconnect`. Les sessions sont vivantes, leurs relais se reconnectent et reprennent. Un `/disconnect` libérerait en RAM les dépôts de contexte de chaque session (`ARCHITECTURE.md`, « Context deposits »).
+- **Fin d'une session** (`BYE`, ou socket fermée par le relais) : `closeSession`, avec `/disconnect` borné à 3 s (§7.1).
+
+### 6.4 Mise à jour du code avec des sessions ouvertes
+
+**DÉCISION : une mise à jour est un crash contrôlé.** Le daemon calcule au démarrage l'empreinte de son code (sha256 du point d'entrée et de ses modules, ou d'un bundle en L5) et la publie dans `status`. `bun cli.ts mcp-daemon status` compare cette empreinte au code sur disque et affiche « daemon code is stale » le cas échéant. `bun cli.ts mcp-daemon restart` envoie `CONTROL stop` au daemon de la racine du clone qui l'exécute : les relais se reconnectent, relancent le nouveau daemon et reprennent par ticket. C'est le chemin que le crash doit déjà suivre, donc le seul à tester. Sans réponse à `CONTROL stop` en 5 s (daemon bloqué, revue critique, point 1), la commande arrête le PID du fichier d'état avec les mêmes vérifications que le relais (§4.7). Procédure dans `README.md` (Q7, DÉCIDÉ : CLI seule). Un relais plus récent que le daemon et sans version commune passe en repli pour sa session (§4.5). Écarté : un daemon qui surveille ses fichiers et redémarre seul pendant une écriture de l'opérateur.
+
+### 6.5 Logs et visibilité
+
+- Daemon : le puits existant `<coreLogDir>/server.log`, avec un logger enfant par session dont chaque ligne porte `s=<session_id 8>` et, une fois enregistré, `peer=<peer_id>`. Les lignes de cycle de vie portent `daemon`. Les serveurs bun de repli continuent d'écrire le même fichier, comme aujourd'hui N processus. stdout et stderr : `mcp-daemon.out.log`.
+- Relais : stderr seulement, lignes courtes, capté par Claude Code dans ses logs MCP.
+- Opérateur : un outil appelé pendant une coupure répond par l'erreur explicite du §4.7. `bun cli.ts mcp-daemon status` parcourt les 10 candidats et dit, pour chaque daemon : vivant, sans réponse ou périmé, avec sa racine ; il liste aussi les sessions en repli bun (Q5, §10). La notice de reconnexion arrive en channel dans les sessions peers.
+
+### 6.6 Kory ne possède pas le daemon
+
+Kory ne le lance pas, ne l'arrête pas et ne l'attend pas. Quitter Kory n'arrête pas le daemon. Une tuile Kory est une session comme une autre ; ce qui la distingue (groupe forcé, jeton de tuile, credential de run, capability de dépôt) arrive dans son hello. Le Deck peut afficher l'état du daemon par `CONTROL status`. C'est facultatif et hors de ce chantier.
+
+## 7. Modèle d'état par session
+
+### 7.1 Fabriques
+
+```ts
+type Hello = { family; pid; ppid; pidStart; ppidStart; cwd; stdinIsTty; env: Readonly<Record<string, string>>; resumeTicket?: string };
+type SessionDeps = { log: Logger; brokers: BrokerEnsurer; settings: SettingsCache; links: LinkIndex; mintTicket(t: TicketBody): string; sendTicket(t: string): void; now(): number; daemonGlobals: DaemonGlobals };
+
+createPeersSession(hello: Hello, transport: Transport, deps: SessionDeps): PeersSession
+createRoadmapSession(hello: Hello, transport: Transport, deps: SessionDeps): RoadmapSession
+interface Session { readonly id: string; ready: Promise<void>; close(reason: "bye" | "socket" | "daemon_stop"): Promise<void> }
+```
+
+`transport` est une implémentation du `Transport` du SDK MCP : sur des trames `MCP` dans le daemon, sur `process.stdin` et `process.stdout` dans les entrées bun. Chaque session construit son propre `Server` MCP et ses handlers en fermeture sur son contexte. Aucune fabrique n'appelle `process.*`.
+
+**Ouverture d'une session peers.** Validation du hello, `WELCOME`, service MCP immédiat (`initialize` et `tools/list` ne dépendent que du hello), puis enregistrement en tâche de fond. Un `tools/call` attend `ready`, 30 s au plus. Un broker absent n'est plus un échec du serveur MCP : la session réessaie l'enregistrement avec un délai croissant, et chaque appel d'outil répond l'erreur d'enregistrement en attendant. Écarté : refuser le hello si le broker ne répond pas, ce qui transformerait un broker lent à démarrer en serveur MCP en échec.
+
+**Fermeture.** Annule toutes les minuteries de la session, le résumé en cours, les attentes `wait_for_message` (signal de session composé avec `extra.signal`), ferme la WS, supprime le fichier d'identité de tuile (gardé, §7.3) et le snapshot global de la session, puis `/disconnect` borné à 3 s, sauf pour `daemon_stop`.
+
+**Sérialisation.** Les opérations qui changent l'identité (`register`, `switch_group`, `set_id`) passent par une chaîne de promesses propre à la session. Les minuteries lisent le contexte au moment de l'appel, comme aujourd'hui.
+
+### 7.2 Traitement de l'inventaire
+
+Chaque ligne de l'inventaire d'état de `server.ts`, `server-roadmap.ts` et de leurs imports transitifs (30 fichiers `shared/`, 12 fichiers `desktop/src/shared/`) relève d'un des groupes ci-dessous. La colonne « Preuve » nomme le test qui tombe si le traitement est oublié, ou la raison écrite qui en dispense.
+
+| Groupe | Lignes d'origine | Traitement | Preuve |
+|---|---|---|---|
+| A. Identité de la session | `server.ts:391-407` (`myInstanceToken`, `myPeerId`, `myGroupId`, `myGroupsMap`, `myCwd`, `myGitRoot`, `myProjectKey`, `myClientPid`, `myRegisteredAt`, `myRole`, `myInboxAttested`, `myInboxBinding`, `myInboxOperatorId`), `546-551`, `1064-1066`, `1655-1702` | Champs de `PeersSession` ; `roadmapProjectKey` et `groupNameForId` prennent le contexte | L4 : deux sessions de groupes et projets différents, `whoami` de chacune |
+| B. Connexion au broker | `484-487`, `555-571`, `618-714`, `722-775`, `2143-2151` | Une WS, un heartbeat, un poll et un backoff par session, enregistrés dans `session.timers` | L4 : fermer A n'arrête ni la WS ni le heartbeat de B |
+| C. Dédoublonnage et attentes | `492`, `493`, `532-534`, `538`, `544` | Par session et bornés (§7.5) ; ensembles vides à l'ouverture, `notified_hwm` du ticket en plus | L4 : un message pour A ne résout jamais l'attente de B ; pur : bornes |
+| D. Objets MCP | `779-794`, `1055`, `1311-1935`, `server-roadmap.ts:28-35` | Un `Server` par session ; `instructions` statiques | L4 : push vers la bonne connexion |
+| E. Tables statiques | `801`, `957`, `156-158`, `496`, `514`, `shared/approval.ts`, `shared/types.ts`, `delegated-task.ts`, `graph-draft.ts:21`, `roadmap-tools.ts`, les 12 fichiers `desktop/src/shared/` | Globales au daemon | Raison : jamais mutées (lecture de l'inventaire) |
+| F. Filtre d'outils | `1044-1053`, `shared/roadmap-dispatch.ts:5`, `server-roadmap.ts:14-15` | Calculé une fois par session depuis `hello.env.CLAUDE_PEERS_TOOLS` ; la constante de module de `roadmap-dispatch.ts` disparaît ; la ligne de log affiche la valeur effective | L2/L4 : deux sessions aux filtres différents |
+| G. Configuration | `153-155`, `shared/config.ts:201-282,115-118`, `shared/broker-config.ts:20-28,41,81-84`, `server-roadmap.ts:42,51` | `loadConfig(env)` par session ; chemin du fichier de réglages depuis l'env du hello ; cache global par chemin, mtime et taille | Pur : `loadConfig` avec deux env |
+| H. Environnement de session lu à l'appel | `200`, `444-445`, `1068-1097`, `1131-1274`, `1769-1785`, `1793-1911`, `2020-2026`, `2037`, `2061-2084`, `config.ts:287,304,395-434,537` | Tout passe par `ctx.env` ; `process.env` interdit dans les fabriques | L4 : `process.env` du daemon empoisonné, la session suit son hello |
+| I. PID, cwd, tty, hôte | `395`, `398-399`, `2029-2034`, `2062`, `2069`, `1770` | PID et ppid du relais, cwd et tty du hello ; `hostname()` global au daemon | L3/L4 : le broker reçoit le PID du relais |
+| J. Fichiers nommés | `peer-cache.ts:12,141-148,235-339,414-465,478-487`, `server.ts:1945` | Clés par session (jeton de tuile, socket de messagerie) ; noms temporaires aléatoires | Pur : deux écritures concurrentes de la même cible |
+| K. Cycle de vie du processus | `366-373`, `2136`, `2153-2198`, `server-roadmap.ts:69` | Retirés des fabriques ; chaque entrée (stdio ou daemon) a sa politique (§7.4) | L4 : un rejet non géré dans A laisse B servie |
+| L. Logs | `335-346`, `process-generation.ts:12`, `roadmap-mcp.ts:27`, `logger.ts:59-183`, `config.ts:204,400` | Puits global ; logger enfant par session ; `callRoadmapTool` accepte un logger en dépendance ; l'avertissement de plateforme reste une fois par daemon | Raison : un log mal étiqueté ne mélange aucun état |
+| M. Lancement du broker | `159`, `290-328` | Vol unique global, clé : URL canonique du broker | L4 : deux hellos simultanés, un seul spawn |
+| N. Fonctions sans état | `375-389`, `summarize.ts`, `roadmap-mcp.ts`, `wait-for-message.ts`, `project-key.ts`, `process-generation.ts:20-52`, `findUpwards`, `canonical-config-path.ts` et les modules purs listés | Globales au daemon | Raison : pures sur leurs arguments |
+| O. Minuteries par requête | `1587-1631`, `1970` | Par requête, annulées par le signal de session | L4 : fermer une session pendant un `wait_for_message` |
+| P. Résumé en tâche de fond | `2114-2134` | Par session, `AbortController` ; clé API depuis l'env du hello | Raison : best effort, aucun état partagé |
+| Q. Réglages de cadence | `503-507`, `523-527` | Globaux au daemon, lus de son env filtré ou des options de `startDaemon` | Raison : réglage d'exploitation |
+| R. Exports vers `server-deck.ts` | `1131-1159`, `1162-1274`, `1281-1309`, `2200-2211` | Déplacés dans `shared/peers-session.ts` ; rôle et superviseur en paramètres explicites | Les tests existants de `server-deck` ; L4 : import sans effet de bord |
+| S. Binaire de graph draft | `graph-draft.ts:30-36`, `server.ts:1954-1963` | `spawn` avec `env` = env du daemon recouvert par l'env du hello (`PATH` compris) | Raison : outil rangé dans `kory-operator` |
+| T. RegExp `/g` de module | `log-redact.ts:6-31`, `text.ts:11,13`, `approval.ts:466` | Globales ; usage synchrone qui remet `lastIndex` | Raison, **DÉDUIT** `log-redact.ts:65,79,93` ; `text.ts` **SUPPOSÉ** sûr (`.replace`) |
+
+### 7.3 Helpers de `shared/` à changer
+
+**DÉCISION : les paramètres d'environnement, de cwd et de PID deviennent obligatoires.** Une valeur par défaut `process.env` dans un helper de session est la panne silencieuse à empêcher ; la supprimer la transforme en erreur de compilation à chaque appel oublié. Écarté : garder les défauts et compter sur un test de discipline, garde de la famille qui échoue ouverte.
+
+| Helper | Changement |
+|---|---|
+| `tileIdentityGuard(env, cwd)` | sans défaut ; reçoit `hello.env` et `hello.cwd` |
+| `writePeerIdCache(cwd, peerId, home, env)`, `isPeerIdCacheEnabled(env)` | `env` obligatoire |
+| `writeDeskSessionId(home, env)` | `env` obligatoire |
+| `writeCacheAtomic` | suffixe temporaire aléatoire au lieu de `process.pid` |
+| `loadSessionApprovalCredential(env)` | `env` obligatoire, jamais mis en cache entre sessions |
+| `loadConfig(env)`, `loadBrokerConfig(env)`, `settingsFilePath(env)` | `env` obligatoire |
+| `resolveGroup(cwd, gitRoot, config, env)`, `resolveGroupName(env)`, `resolveForcedGroupSecret(env)`, `forcedGroupName(env)` | `env` obligatoire |
+| `buildSummaryProviderConfig(config, env)`, `resolveProvider`, `resolveSummaryApiKey` | `env` obligatoire |
+| `TOOLS_ALLOWLIST` de `roadmap-dispatch.ts` | supprimé ; `resolveToolAllowlist(env.CLAUDE_PEERS_TOOLS)` par session |
+| `depositCapabilityHashFromEnv(env)` | inchangé ; reçoit `hello.env` |
+| `coreLogDir(env)`, `defaultDbPath` | défaut conservé : globaux au daemon |
+
+Les autres appelants de ces helpers (`desktop/src/main`, `cli.ts`, hooks, tests) passent `process.env` explicitement dans le même commit. Le commit qui retire un défaut balaie les appelants par le nom de la fonction dans tout l'arbre.
+
+### 7.4 `process.exit`, signaux, rejets
+
+- **Fabriques** : aucun `process.exit`, `process.on` ou accès à `process.stdin` ou `process.stdout`.
+- **Entrées stdio** (`server.ts`, `server-roadmap.ts`) : gardent la politique actuelle, une session par processus. `uncaughtException` et `unhandledRejection` journalisent puis `exit(1)` ; SIGINT, SIGTERM et EOF de stdin ferment la session puis `exit(0)`.
+- **Daemon** : `unhandledRejection` journalise et continue. `uncaughtException` journalise ; plus de 5 en 60 s provoque un arrêt contrôlé (§6.3), suivi de reconnexion et de reprise. SIGINT et SIGTERM : arrêt contrôlé. Le point d'entrée du daemon n'importe aucun module qui installe un gestionnaire de processus. Chaque handler MCP et chaque minuterie de session s'exécute dans un `try/catch` qui journalise avec l'étiquette de la session. Écarté : un `exit(1)` du daemon à chaque rejet, qui transformerait le bug d'une session en coupure de N.
+
+### 7.5 Bornes
+
+| Collection | Borne | Au-delà |
+|---|---|---|
+| connexions de session par daemon | 512 | `ERROR session_limit`, le relais passe en repli |
+| connexions non authentifiées | 32 en même temps, 9 s de vie (§5) | fermeture immédiate, comptée dans `status` |
+| `notifiedMessageIds` | 4096 ids ; les ids du broker croissent, on retire les plus petits | rien de perdu : une poussée en trop est un doublon de notification |
+| `notifyFailedIds` | 1024, premier entré premier sorti | log possiblement répété |
+| `pendingWaiters` | 8 par session | erreur d'outil explicite |
+| `contextResumeNotifications` | TTL existant et 256 clés | refus journalisé |
+| tampon de sortie d'une connexion | 8 Mio | les notifications de channel sont jetées et journalisées (une poussée ne marque jamais `delivered`, `ARCHITECTURE.md`, « Delivery hardening ») ; une réponse ne l'est jamais : la connexion est fermée |
+| hello | 64 Kio, 256 variables | `hello_invalid` |
+| trame | 16 Mio | fermeture |
+
+### 7.6 Les 17 couplages cachés
+
+| # | Couplage | Traitement |
+|---|---|---|
+| 1 | Importer `server.ts` démarre un serveur | Modules de session sans effet de bord ; `server-deck.ts` importe `shared/peers-session.ts` |
+| 2 | `handleNotifyOperator` lit `myRole` de module | Rôle et superviseur en paramètres |
+| 3 | Génération d'auteur sur `process.pid` ; snapshot global jamais supprimé | Génération du PID du relais (§8.2) ; `close` supprime le snapshot |
+| 4 | `tileIdentityGuard` sur `process.cwd()` | Paramètres obligatoires (§7.3) |
+| 5 | Caches de `peer-cache` sur `process.env` | Paramètres obligatoires |
+| 6 | Groupe et credential d'approbation sur `process.env` | Paramètres obligatoires ; groupe vérifié par test L4 |
+| 7 | Filtre d'outils lu deux fois au chargement | Un seul calcul par session |
+| 8 | Aucune exclusion mutuelle autour de `switch_group` et `set_id` | Chaîne de promesses par session |
+| 9 | Ensembles jamais purgés | Bornes (§7.5) ; vides à l'ouverture |
+| 10 | Fichier temporaire de graph draft nommé par PID et milliseconde ; env du daemon | Nom `session_id` et aléa ; env de la session |
+| 11 | Un PowerShell par appel roadmap | Chemin lié en mémoire (§9) ; le chemin snapshot le garde |
+| 12 | stdout est le canal MCP | Inchangé pour les entrées stdio ; le stdout du daemon est un fichier |
+| 13 | Logs sans session | Logger enfant étiqueté |
+| 14 | `ensureBroker` sans verrou | Vol unique par URL |
+| 15 | Tuiles sandbox | Restent sur bun |
+| 16 | `claude_cli_pid` absent du `/register` de `switch_group` | Un seul constructeur de corps `/register` pour les deux sites, avec `claude_cli_pid = hello.ppid` |
+| 17 | Reprise après crash du daemon | Ticket (§4.6) et contrat broker (§8.4) |
+
+## 8. Vivacité et identité
+
+### 8.1 PID enregistrés
+
+**DÉCISION.** `pid` et `client_pid` de `/register` = PID du relais ; `pid_generation` = génération du relais (§8.2). Le PID du daemon n'est jamais envoyé au broker. Sinon `cleanStalePeers` verrait toutes les sessions vivantes tant que le daemon tourne. Le relais vit exactement aussi longtemps que la session MCP : il sort sur EOF de stdin.
+
+**`claude_cli_pid` (revue critique, point 8).** **MESURÉ**, `git grep -n "claude_cli_pid" -- ':!tests' ':!docs' ':!*.md'` : seulement la migration, des listes de colonnes d'écriture et des commentaires (`broker.ts:651,2238,2272,2824,...`, `server.ts:2069`). Aucun lecteur. Le commentaire `broker.ts:648` qui parle du hook SessionEnd est périmé. **DÉCISION** : le daemon envoie `claude_cli_pid = hello.ppid` dans les deux sites d'enregistrement, par parité de corps, mais aucune règle ne s'appuie dessus : ni la reprise (§8.4), ni la vivacité. Écarté : en faire une preuve de reprise, alors qu'aucun code ne le lit ni ne le vérifie.
+
+**Vivacité pendant une coupure (Q9, DÉCIDÉ).** En modes `local` et `replica`, le broker garde un pair actif tant que le PID de relais enregistré est vivant sur son hôte, même sans heartbeat. Une coupure du daemon de plus de 120 s ne rend donc plus le pair dormant, et ses dépôts de contexte survivent (le propriétaire d'un dépôt doit être actif, `ARCHITECTURE.md`, « Context deposits »). En mode `remote`, le broker ne sonde pas un PID étranger : la limite de 120 s du balayage demeure, et c'est documenté. Contrat broker : §8.4, règle V.
+
+### 8.2 Génération d'auteur du snapshot
+
+Le daemon écrit le snapshot global (`global-session-identity-<sha256(socket)>.json`) au nom de la session. **DÉCISION** : la génération enregistrée est celle du relais peers, mesurée par le daemon avec `measureWriterGeneration(hello.pid)`, la fonction qu'utilise le vérificateur. Le daemon mesure lui-même au lieu de croire `hello.pid_start`, pour que l'auteur et le lecteur comparent des valeurs de même source. L'écrivain est le daemon, la vie prouvée est celle du relais. `close` supprime le snapshot ; un crash du daemon le laisse, valide puisque le relais vit et que le token est repris (§8.3). Écarté : faire écrire le snapshot par le relais, qui devrait alors connaître le token et le format du fichier.
+
+**Reprise sans suppression (revue critique, point 2).** **DÉDUIT** `server.ts:1075-1081` : `writeGlobalCompanionIdentity` supprime le snapshot avant de mesurer la génération ; une mesure qui dépasse son délai laisse la roadmap en refus fermé avec une simple ligne de log. **DÉCISION** : sur une reprise par token acceptée avec le même PID de relais, le daemon ne supprime pas le snapshot. Il reprend `writer_generation` du ticket, sans mesure, et ne réécrit le fichier que si un champ d'identité a changé. Une première écriture mesure d'abord, et n'écrit qu'après une mesure réussie. Écarté : réécrire le snapshot à chaque reprise, ce qui rouvre la fenêtre de refus pendant la tempête de reconnexion.
+
+### 8.3 Reprise après crash du daemon
+
+1. Les relais voient la socket fermée, répondent l'erreur de coupure (§4.7) et se reconnectent ; le gagnant du verrou de lancement relance le daemon (§6.2).
+2. Chaque relais peers présente son ticket dans le hello, avec `replay: true`.
+3. Le daemon vérifie le ticket (§4.6). Ticket valide : `/register` avec `resume_instance_token`, signé par le credential de run s'il existe (tuile Kory), nu sinon (contrat §8.4). Avec ticket, le daemon ne supprime pas d'abord le fichier d'identité de tuile : les lecteurs (`server-deck.ts:70`, `desktop/mcp/deck-control-mcp.ts:337`, `desktop/hooks/desk-backchannel-hook.ts:46`) gardent un token valide pendant la coupure. Il le réécrit après l'enregistrement. Il garde aussi le snapshot global (§8.2). Sans ticket, le comportement de démarrage actuel s'applique (`server.ts:2020-2026`).
+4. WS ouverte après l'enregistrement : le broker refuse une WS pour un token inactif (`broker.ts:12853`), puis rejoue au plus 20 messages non livrés et les reprises de contexte. Les ids inférieurs ou égaux à `notified_hwm` ne sont pas repoussés en channel : ils restent lisibles par `check_messages`, car une poussée ne marque jamais `delivered`.
+5. Notice en channel, un seul message : identité gardée (« claude-peers reconnected after a daemon restart; calls made during the outage failed; run check_messages ») ou identité changée (« ... you are now peer `<id>` »). Le même texte va dans les logs.
+6. Le relais roadmap se reconnecte sans ticket ; son prochain appel résout la session (§9).
+
+Si Claude Code relance seulement le serveur MCP (`/mcp`), le nouveau relais n'a pas de ticket : chemin ordinaire, l'ancien PID de relais est mort, donc le broker ressuscite la ligne par `session_key` (`ARCHITECTURE.md`, « Resume flow »). Une tuile Kory garde en plus la reprise signée par le fichier d'identité. Si l'ancien relais vit encore, la règle S du §8.4 refuse la résurrection : la nouvelle session prend une identité neuve au lieu de voler celle d'un relais vivant.
+
+### 8.4 Contrat d'interface pour la carte `1dc74e6c` (broker)
+
+**Version annoncée.** `/health` expose `register_resume_version: 1`. Le daemon n'envoie une reprise nue que si cette version est présente ; sinon il enregistre par le chemin ordinaire et annonce l'identité changée. Un broker ancien ne voit donc jamais un champ qu'il refuserait (`broker.ts:2693-2696` rend 400).
+
+**Requête.** `/register` accepte `resume_instance_token` sans `auth` pour une instance qui n'est **pas** liée à un run. Pour une instance liée, la preuve signée actuelle reste exigée (`broker.ts:2849-2863`), puis les règles R2 à R4 s'ajoutent.
+
+**Règles d'acceptation, toutes nécessaires :**
+
+- **R1.** Le token désigne une ligne `peers` locale (`relay_id IS NULL`, `via IS NULL`), active ou dormante, du même `group_id` après la vérification TOFU, et du même `host`.
+- **R2.** `body.pid` égale le `pid` enregistré, c'est-à-dire le PID du relais du dernier enregistrement. Si la ligne porte une génération (`pid_generation`, nouvelle colonne optionnelle remplie à chaque `/register`) et le corps aussi, elles sont égales : un PID réutilisé ne passe pas. `claude_cli_pid` n'entre pas dans la règle (§8.1).
+- **R3.** Si `host` est l'hôte du broker, `body.pid` est vivant (`process.kill(pid, 0)`). Pour un broker distant, R1 et R2 suffisent : le token est le secret, et le broker ne sonde pas un PID étranger.
+- **R4.** La clé `session_key` du corps n'est pas associée à un **autre** token dont le PID est vivant ; sinon l'association reste à ce token.
+
+Aucune autre preuve n'est demandée, y compris hors Kory (Q4, DÉCIDÉ).
+
+**Effet si accepté.** Mise à jour en place de la ligne, même si elle est active : pas de collision, pas de suffixe, `peer_id` et token conservés. Les champs de lancement (`cwd`, `role`, `desk_session`, `cc_session_id`, résumé) sont réécrits comme dans la branche de résurrection. `peer_sessions` est mis à jour sous R4. Réponse `resumed: "token"`.
+
+**Deux règles hors de la reprise par token, exigées par la même carte :**
+
+- **V, vivacité (Q9, DÉCIDÉ).** En `local` et `replica`, `sweepInactivePeers` ne rend pas dormant un pair local dont le PID enregistré est vivant sur l'hôte du broker, même sans heartbeat. `cleanStalePeers` reste inchangé (PID mort : dormant). En `remote`, rien ne change : 120 s sans heartbeat rendent le pair dormant.
+- **S, résurrection par `session_key` (revue critique, DÉDUIT `broker.ts:2772,2884-2918`).** Aujourd'hui, une ligne **dormante** trouvée par `session_key` est ressuscitée sans regarder son PID. Pendant une coupure longue, une nouvelle session du même dossier (par exemple en repli bun) prendrait le `peer_id` et le token du pair dormant, et le ticket du relais d'origine échouerait ensuite. **DÉCISION** : la résurrection par `session_key` refuse une ligne, même dormante, dont le PID enregistré est vivant sur l'hôte du broker ; elle suit alors la branche de collision (identité neuve suffixée, association inchangée). Écarté : compter sur V seule, car une ligne peut aussi devenir dormante par `/disconnect` ou en mode `remote`.
+
+**Effet si refusé**, ou token inconnu parce que la ligne a été purgée : le champ est ignoré, le chemin ordinaire s'applique, la réponse porte `resumed: false` et le broker journalise le code de la règle en échec, jamais le token. Écarté : un 409 qui bloquerait l'enregistrement d'une session vivante pour un ticket périmé.
+
+**Interactions :**
+
+- **Époque de la capability de dépôt (Q3, DÉCIDÉ).** Conservée si la reprise par token est acceptée, avec le même PID de relais, et que `deposit_capability_hash` égale le condensat de la liaison en RAM. Sinon une nouvelle époque est mintée, comportement actuel. Raison : même relais et même capability veulent dire même lancement ; un crash d'infrastructure ne doit pas perdre le contexte que l'utilisateur a déposé avant `/clear`. Avec V, le propriétaire reste actif pendant la coupure en `local` et `replica`.
+- **Snapshot de session.** Non invalidé par la même reprise (§8.2).
+- **Tâches déléguées.** Liées au token (`ARCHITECTURE.md`, « Delegated tasks ») : token inchangé, rien à migrer, aucune tâche `orphaned`. Sans reprise, l'ancien token devient dormant puis supprimé, et ses tâches deviennent `orphaned` par la règle existante.
+- **Fédération.** `relay_ref = sha256(token)` est inchangé : la réplique présente la même ligne au prochain passage. Avec V, une coupure du daemon ne rend plus la ligne dormante sur la réplique tant que le relais vit, donc le miroir amont reste actif. Aucune nouvelle règle de fédération.
+- **Fichier d'identité de tuile.** Le token ne change pas : le fichier reste juste pendant la coupure et il est réécrit après la reprise (§8.3).
+- **WebSocket.** La nouvelle authentification remplace l'entrée de `wsPool` (`broker.ts:12857`) ; l'ancienne socket est déjà fermée avec le daemon mort.
+
+**Deux candidats.** Deux relais ne peuvent pas présenter le même PID. Un processus du même utilisateur qui forgerait `pid` et token est hors du modèle de menace (§5) : il possède déjà ce token par le fichier d'identité.
+
+## 9. Famille roadmap dans le daemon
+
+**DÉCISION, clé de liaison des deux relais d'une session :** `(sha256(CLAUDE_CODE_MESSAGING_SOCKET), ppid, ppid_start)`. Le socket de messagerie est la clé du snapshot actuel (`server-roadmap.ts:43`). Le PID et l'heure de création de `claude.exe` empêchent qu'une valeur de socket héritée par un autre processus relie deux sessions différentes. Écarté : le socket seul, qu'un `claude` imbriqué héritant de l'environnement d'une tuile pourrait présenter ; aussi `CLAUDE_CODE_SESSION_ID` seul, qui change à `/clear`.
+
+**Résolution, à chaque appel d'outil** (la session peers peut changer de groupe, de nom ou d'enregistrement entre deux appels) :
+
+1. L'index de liaison donne les sessions peers **ouvertes et enregistrées** ayant la même clé. Les sessions en fermeture sont exclues.
+2. **Exactement une** : son identité en mémoire (peer, token, `projectKey`, URL canonique du broker). L'URL du broker résolue depuis le hello roadmap doit égaler celle de la session peers, sinon refus, comme le contrôle actuel (`server-roadmap.ts:51`). Aucun PowerShell.
+3. **Aucune** : lecture du snapshot avec vérification de la génération d'auteur, comme aujourd'hui. Ce chemin couvre une session dont la famille peers tourne sur `server.ts` en repli, et tout le lot L2.
+4. **Deux ou plus** : refus « Roadmap companion identity is ambiguous », journalisé avec les deux `session_id`. Jamais la première ou la plus récente.
+5. Sans socket de messagerie : refus, comme aujourd'hui.
+
+Les refus gardent le texte actuel « Roadmap companion identity is unavailable » pour 2 et 3, avant tout trafic vers le broker.
+
+## 10. Repli et configuration
+
+**Configuration globale de Claude Code**, deux formes par famille :
+
+```json
+"claude-peers":  { "command": "<root>/bin/<plateforme>/claude-peers-relay[.exe]", "args": ["--family", "peers",   "--fallback", "<root>/server.ts"] },
+"kory-roadmap":  { "command": "<root>/bin/<plateforme>/claude-peers-relay[.exe]", "args": ["--family", "roadmap", "--fallback", "<root>/server-roadmap.ts"] }
+```
+
+Forme bun, inchangée : `"command": "bun", "args": ["<root>/server.ts"]`. Option `--bun <chemin>` du relais : interpréteur pour le daemon et le repli, `bun` du `PATH` par défaut. Le daemon est cherché à côté du fallback : `<dossier du fallback>/mcp-daemon.ts`.
+
+**Choix du repli, en deux temps :**
+
+- **À l'installation.** Binaire présent pour la plateforme : forme relais ; sinon forme bun. Commandes `claude mcp add` documentées dans `README.md`. Pas d'installateur dans `cli.ts`, conformément à `docs/DESIGN-MCP-FAMILIES.md` §4. Un binaire supprimé après l'installation fait échouer le serveur MCP de façon visible ; ce cas n'est pas rattrapé.
+- **Au démarrage d'une session, dans le relais.** Si aucune session ne s'ouvre auprès du daemon dans les 10 s (aucun candidat ne porte un daemon de sa racine après le lancement, tous les candidats occupés sans daemon valide, `proto_mismatch`, `family_unavailable`, `session_limit`, clé illisible ou aux droits trop larges), le relais lance `bun <fallback>` avec son propre environnement et son cwd, puis copie stdio dans les deux sens jusqu'à la fin de la session. Sous POSIX il remplace son image par `exec`. Sous Windows il reste parent ; `claude_cli_pid` vaut alors le PID du relais, sans conséquence puisque rien ne le lit (§8.1). Écarté : une variable dédiée pour corriger un champ sans lecteur. Le relais en repli écrit sa cause dans `<home>/.claude/peers/mcp-fallback-<pid>.json`, supprimé à sa sortie et ignoré si le PID est mort : `bun cli.ts mcp-daemon status` liste ainsi les sessions en repli (Q5, DÉCIDÉ). Sans cela, un repli permanent reste invisible. **Pas de repli au milieu d'une session** : après une première ouverture réussie, le relais se reconnecte seulement au daemon. Un serveur bun lancé en cours de session s'enregistrerait avec un autre PID et prendrait une identité suffixée. Écarté : relais sans repli, où un daemon défaillant rend toutes les sessions muettes.
+
+**Effet sur L2.** `family_unavailable` permet d'installer les deux relais dès L2 : tant que le daemon ne sert que la roadmap, le relais peers passe en repli sur `server.ts`, qui écrit le snapshot que lit la roadmap du daemon.
+
+**Tuiles Kory hôte.** Elles utilisent la configuration globale de l'utilisateur ; Kory n'écrit pas de configuration MCP pour elles. `demo-driver.ts` copie les entrées globales telles quelles : chemins absolus requis.
+
+**Lancement du broker par le Deck (revue critique, point 4).** **DÉDUIT** `desktop/src/main/broker-spawn.ts:57-70` : le Deck lance le broker avec la `command` de l'entrée MCP `claude-peers`. Avec le relais configuré, il lancerait le relais sur `broker.ts`. **DÉCISION, en L2** : `locateBrokerScript` trouve toujours l'argument qui finit par `server.ts` (la valeur de `--fallback`) ; quand la commande est le relais, il lance le broker avec la valeur de `--bun`, sinon `bun`. Un test du module existant le couvre. Écarté : une entrée de configuration dédiée au broker, qui ajoute une source de vérité de plus.
+
+**Job des tuiles Kory (Q10, DÉCIDÉ, §6.1).** En L2, `JOB_PREAMBLE_PS` (`desktop/src/main/shell-command.ts`) passe aux limites `0x2800` (`KILL_ON_JOB_CLOSE | BREAKAWAY_OK`).
+
+**Tuiles sandbox.** Inchangées : enregistrement `claude mcp add` dans le volume du conteneur, sur `bun server.ts` et `bun server-roadmap.ts`. Le cwd, les PID et l'hôte d'un conteneur n'ont pas de sens pour un daemon hôte (couplage 15).
+
+## 11. Modes du broker
+
+| Mode | Ce qui change pour le daemon |
+|---|---|
+| `local` | Le daemon peut lancer le broker pour une URL de loopback, en vol unique par URL. Le processus broker est lancé avec l'env du daemon recouvert par les variables de broker du hello de la session déclenchante (`CLAUDE_PEERS_PORT`, `CLAUDE_PEERS_DB`, `CLAUDE_PEERS_BIND_HOST`, `CLAUDE_PEERS_BROKER_TOKEN`, `CLAUDE_PEERS_OFFLINE_REPLICA`, `CLAUDE_PEERS_SERVE_REPLICAS`, `CLAUDE_PEERS_DELEGATION_*`), comme aujourd'hui `server.ts` donne le sien. Le marqueur d'arrêt du broker est respecté. Le broker sonde le PID du relais ; un relais vivant garde le pair actif (règle V). |
+| `replica` | Comme `local` pour le daemon : les clients parlent au broker de loopback, règle V comprise. `relay_ref` est stable par la reprise. Les approbations et la boîte opérateur restent sur le broker local. |
+| `remote` | Jamais de lancement de broker (refus actuel d'une URL qui n'est pas de loopback). Le broker ne sonde pas les PID : vivacité par heartbeat, limite de 120 s maintenue, reprise par R1 et R2 sans R3, règles V et S sans effet. Le Bearer vient de la session. Clé du daemon, snapshots et fichiers d'identité restent locaux, ce qui justifie le daemon local plutôt qu'une route du broker. |
+
+**Broker lancé détaché (revue critique, point 3).** **DÉDUIT** `server.ts:315-318` : le lancement actuel n'est pas détaché. **SUPPOSÉ** : comme libuv sous Node, bun place peut-être ses enfants dans un job Windows qui les arrête avec lui ; un arrêt du daemon arrêterait alors le broker, ses dépôts en RAM et ses WebSocket. **DÉCISION** : le daemon lance le broker détaché (`node:child_process.spawn` avec `detached: true`, `windowsHide: true`, stdio ignoré, `unref()`). Mesure en L2 : un parent bun lance un enfant sans `detached`, se termine, puis on vérifie l'enfant ; et aucune fenêtre de console ne s'ouvre avec `detached`. Écarté : garder le lancement attaché, qui lie la vie du broker partagé à celle du daemon.
+
+**Clés.** L'endpoint d'une session est résolu depuis son hello et le fichier de réglages : deux sessions peuvent viser deux brokers. Aucune table du daemon n'est indexée par groupe ou par broker seul. Le registre est indexé par `session_id`, minté par connexion.
+
+## 12. Stratégie de test par lot
+
+Règles : `CLAUDE.md`, « Rules for tests ». Chaque test nomme la mutation de la source qui le fait tomber. Le daemon se démarre **en processus** par `startDaemon({ port: 0, keyPath, logDir, idleSec, pollFallbackMs })`, une fois par fichier dans `beforeAll`, avec un faux relais TypeScript qui parle les trames. Un « crash » est `stop()` puis un nouveau `startDaemon` sur le même port. Aucune attente sur le temps réel : horloge injectée, ou intervalle au plancher et attente de la **condition**, bornée.
+
+| Lot | Fichier | Forme | Cas et mutation qui le fait tomber |
+|---|---|---|---|
+| L1 | `relay/tests/*.rs`, faux daemon TCP dans le test | cargo, hors gate bun | Rejeu : retirer le rejeu d'`initialize`, l'appel après coupure échoue. Doublon : ne pas avaler la réponse du rejeu, Claude voit deux réponses. Authentification : sauter la vérification du MAC du daemon, un faux écouteur reçoit un hello. Erreur en vol : retirer le suivi des `id`, une requête reste sans réponse. Course : N relais et un compteur de lancements, un seul lancement (mutation : retirer le verrou de lancement). Daemon absent : lancement puis service. Candidats : un écouteur étranger sur le premier port, puis un daemon `root_mismatch` sur le second, le relais s'ouvre sur le troisième (mutation : s'arrêter au premier port accepté). Daemon bloqué : faux daemon qui accepte sans `CHALLENGE`, son PID est arrêté après le délai (mutation : retirer l'arrêt) ; un fichier d'état dont `pid_start` ne correspond pas n'est jamais suivi (mutation : retirer la comparaison). Filtre d'env : retirer le préfixe `CLAUDE_PEERS_*`, l'instantané de hello change. |
+| L1 et L2 | `relay/protocol-fixtures/*.json`, lues par cargo et par `tests/mcp-daemon-protocol.test.ts` | pur, millisecondes | Changer un numéro de type ou le message signé par le MAC d'un seul côté fait tomber l'autre côté. |
+| L2 | `tests/mcp-daemon-protocol.test.ts` | pur | Validation du hello (PID `NaN`, cwd relatif, env trop grand), ticket (MAC, PID différent), bornes du §7.5 : supprimer une borne, le test de croissance tombe. |
+| L2 | `tests/mcp-daemon-roadmap.test.ts` | un broker et un daemon en `beforeAll` | Deux sessions de projets différents (mutation : identité mise en cache globale). Kory et hors Kory ensemble. Session sans snapshot refusée avant tout trafic broker (mutation : retirer le refus). Second `listen` sur le même port en échec (§6.2). Second daemon de même racine sur un port plus haut : il sort (mutation : retirer le parcours des ports plus bas). `root_mismatch` pour une autre racine. `family_unavailable` pour `peers`. 33e connexion non authentifiée fermée (mutation : retirer la borne). Arrêt sur inactivité avec un relais qui arrive pendant la fermeture : il est servi (mutation : vérifier avant de fermer l'écoute). |
+| L2 | `tests/desktop-broker-spawn.test.ts` existant | pur | Entrée MCP en forme relais : le broker est lancé avec `bun` (mutation : garder `entry.command`). |
+| L2 | `tests/desktop-launch.test.ts` existant | pur | Le préambule du job porte `0x2800` (mutation : revenir à `0x2000`). La survie réelle d'un enfant hors du job reste une mesure du corps du commit, pas un test : aucun test n'observe un job Windows. |
+| L3 | `tests/broker-resume.test.ts` existant | un broker en `beforeAll` | Deux pairs même hôte, même cwd, même groupe, lignes actives, PID vivants : reprise par token, aucun suffixe. PID différent : refus et chemin ordinaire (mutation : retirer R2). Génération différente sous le même PID : refus. Token inconnu : chemin ordinaire. Instance liée sans signature : refus. Époque gardée si même PID et même condensat, nouvelle sinon. Tâche déléguée non orpheline après reprise. Ligne dormante dont le PID est vivant : pas de résurrection par `session_key` (mutation : retirer S). Chemin `session_key` inchangé pour un PID mort. |
+| L3 | `tests/broker-sweep-inactive.test.ts` existant | un broker, intervalles au plancher | Pair sans heartbeat dont le PID est vivant : reste actif (mutation : retirer V) ; PID mort : dormant comme avant. |
+| L4 | `tests/mcp-daemon-peers.test.ts` | un broker et un daemon en `beforeAll` | Messages entre deux sessions et push vers la bonne connexion (mutation : router vers la dernière session). Deux tuiles dans le même dossier gardent leur identité après `stop()`/`startDaemon` (mutation : ne pas lire le ticket). `process.env` du test empoisonné (`CLAUDE_PEERS_FORCE_GROUP` d'un autre groupe) : la tuile suit son hello et n'entre jamais dans le groupe par défaut (mutation : rétablir un défaut `process.env`). Fermer A pendant un `wait_for_message` de B ne touche pas B. Le snapshot porte la génération du PID du faux relais. Liaison roadmap : deux candidats donnent un refus (mutation : prendre le premier). |
+| L4 | un test en processus enfant | enfant `bun` | Un rejet non géré dans une session ne fait pas sortir le daemon. Seule forme qui le prouve : un rejet non géré dans le processus de `bun test` fait échouer le runner. Le corps du commit le dit. |
+| L4 | fichiers `tests/server-*.test.ts` existants | inchangés | Ils lancent `server.ts` en enfant : ils gardent la parité de l'entrée stdio et du repli. |
+| L6 | matrice manuelle du plan | interactif | Push de channel visible ; fermer la tuile Kory qui a lancé le daemon, qui sert encore les autres sessions ; coupure de plus de 120 s sans perte de dépôt en `local` ; crash du daemon pendant un échange ; Kory et hors Kory ; trois modes ; sandbox sur bun ; mémoire avant et après dans le corps du commit. |
+
+Les fichiers L2 et L4 lancent un broker : le corps du commit dit ce que chaque fichier de plus de 5 s achète. La suite complète reste au séquenceur des commits.
+
+## 13. Questions pour l'opérateur
+
+| # | Question | Recommandation |
+|---|---|---|
+| Q1 | Port dérivé par utilisateur OS plutôt qu'un port fixe ? | **DÉCIDÉ par l'opérateur le 2026-11-06 : oui, avec 10 ports candidats.** Le port dérivé (§4.1) puis les 9 suivants. Le daemon écoute sur le premier libre ; le relais les essaie dans l'ordre et s'arrête au premier qui passe l'authentification mutuelle (§5). Un port occupé par un autre programme ou par le daemon d'un autre compte est sauté au lieu de forcer le repli. Le port reste le verrou : un daemon par port. Même règle sur Windows, Linux et macOS. Surcharge `CLAUDE_PEERS_MCP_DAEMON_PORT` : un seul candidat, celui-là. Tous les candidats occupés sans daemon valide : repli (§10), journalisé. Précision de conception : un daemon d'une autre racine de code est sauté comme un daemon étranger (§4.4, Q11). |
+| Q2 | Arrêt sur inactivité, et délai ? | **DÉCIDÉ par l'opérateur le 2026-11-06 : oui, 600 s.** La première session suivante relance le daemon par son relais. |
+| Q3 | Garder l'époque de dépôt de contexte à une reprise par token ? | **DÉCIDÉ par l'opérateur le 2026-11-06 : oui, si même PID de relais et même condensat de capability.** Un crash d'infrastructure n'est pas un nouveau lancement. |
+| Q4 | Accepter une reprise nue par token et PID pour les sessions hors Kory ? | **DÉCIDÉ par l'opérateur le 2026-11-06 : oui.** Le token est déjà un secret porteur écrit dans le fichier d'identité ; R2 ajoute la preuve du processus. Sans cela, chaque crash du daemon suffixe les sessions hors Kory. |
+| Q5 | Repli bun au démarrage quand le daemon ne s'ouvre pas ? | **DÉCIDÉ par l'opérateur le 2026-11-06 : oui, au démarrage seulement**, plus une visibilité : `bun cli.ts mcp-daemon status` liste les sessions en repli (chaque relais en repli l'inscrit, avec sa cause, dans un fichier d'état par PID sous `<home>/.claude/peers/`, retiré à sa sortie et ignoré si le PID est mort). Sans cela, un repli permanent reste invisible. |
+| Q6 | Lancement par WMI si le job object de Claude Code tue le daemon ? | **Sans objet** depuis les mesures du 2026-11-06 (§6.1) : hors Kory, l'enfant d'un serveur MCP survit à la session ; dans une tuile Kory, `BREAKAWAY_OK` (Q10) suffit. |
+| Q7 | Redémarrage pour mise à jour : CLI seule, ou aussi un bouton du Deck ? | **DÉCIDÉ par l'opérateur le 2026-11-06 : CLI seule**, et la procédure de mise à jour documentée dans `README.md` (`bun cli.ts mcp-daemon restart` après le déploiement). Ne pas confondre avec un crash, relancé automatiquement par les relais (§4.7, §6.2). Idée hors chantier : une entrée « arrêter le daemon » dans le menu de l'avatar Kory, à côté de « arrêter le broker local ». |
+| Q8 | La notice de reconnexion en channel à chaque reprise : acceptable comme bruit ? | **DÉCIDÉ par l'opérateur le 2026-11-06 : oui, sans jamais répéter.** Une seule notice par reprise, poussée une fois par le relais peers à la reconnexion ; jamais jointe aux réponses d'outils ni répétée à chaque appel. Plusieurs reprises proches (daemon qui redémarre en boucle) sont regroupées : au plus une notice par session toutes les 10 minutes, qui donne le nombre de coupures depuis la précédente. Le relais roadmap n'en envoie pas : il n'est pas un channel. |
+| Q9 | Un dépôt de contexte est perdu quand le pair passe dormant, après 120 s de coupure du daemon sans heartbeat. Que faire ? | **DÉCIDÉ par l'opérateur le 2026-11-06 : un relais vivant compte comme actif.** Le broker garde le pair actif tant que le PID du relais enregistré est vivant, même sans heartbeat ; les dépôts survivent à une coupure longue. Exigence ajoutée à la carte `1dc74e6c`. Vaut pour les modes `local` et `replica` (même hôte) ; en `remote`, le broker ne peut pas sonder le PID et la limite de 120 s demeure. Règle V du §8.4. |
+| Q10 | Autoriser la sortie du job Windows des tuiles Kory (`BREAKAWAY_OK`) ? | **DÉCIDÉ par l'opérateur le 2026-11-06 : oui** (§6.1). Seuls les processus lancés avec `CREATE_BREAKAWAY_FROM_JOB` sortent du job ; les autres sont toujours arrêtés avec la tuile. |
+| Q11 | Deux clones du dépôt utilisés en même temps : un daemon par racine de code (sur deux des 10 candidats), ou un seul daemon et le repli bun pour l'autre clone ? | **DÉCIDÉ par l'opérateur le 2026-11-06 : un daemon par racine** (§4.4). Contexte de l'opérateur : le clone `koryphaios-mcp` sert les sessions pendant le développement de Kory ; ce n'est pas la cible d'un utilisateur. Pendant le développement du daemon, les sessions de travail restent sur les serveurs bun ; seules des sessions de test pointent vers le relais par `--mcp-config`. La configuration globale et `koryphaios-mcp` passent au daemon une fois la version stable (L6). Avec un seul daemon, une session dont le daemon a été relancé par un relais de l'autre clone ne peut plus se reconnecter, faute de repli en cours de session. Coût : un daemon de plus, seulement quand deux clones servent des sessions en même temps. |
+
+## 14. Écarts et précisions par rapport au plan par lots
+
+Le plan `docs/DESIGN-MCP-DAEMON-LOTS.md` a été aligné sur ce document le 2026-11-06. Restent ces précisions de fond :
+
+- « Son port d'écoute sert de verrou d'instance unique » : conservé, sur 10 candidats par utilisateur OS, un daemon par port, le plus bas gagne par racine de code (§4.1, §6.2). Un port unique bloque le second compte d'une machine et, sans authentification mutuelle, livre les secrets de groupe à quiconque l'occupe en premier.
+- « Le relais devient aussi l'auteur du snapshot » : précisé. Le daemon écrit ; la génération prouvée est celle du relais (§8.2).
+- « Le broker reçoit le PID du relais (et de son parent `claude.exe`) » : le PID de `claude.exe` est envoyé mais n'est une preuve de rien, faute de lecteur (§8.1).
+- « Répond aux appels par une erreur explicite » : précisé pour les requêtes en vol, dont l'exécution est inconnue (§4.7).
+- « Démarre le daemon s'il est absent » : confirmé hors Kory ; dans une tuile Kory, exige `BREAKAWAY_OK` dans le job de la tuile (§6.1, Q10), livré en L2 avec la correction de `broker-spawn.ts`.
+- Estimation de L4 : l'inventaire confirme 3 à 4 jours **si** L4 comprend la conversion des helpers du §7.3 et de leurs appelants hors cœur. Ajouter 0,5 jour pour le passage de `server.ts` en entrée mince et le déplacement des exports de `server-deck.ts` (groupe R). L1 et L2 gagnent chacun environ 0,5 jour (candidats, verrou de lancement, daemon bloqué, nom de processus ; job des tuiles, `broker-spawn.ts`, broker détaché), L3 jusqu'à 0,5 jour pour les règles V et S. Total du plan : 10,5 à 13,5 jours. **SUPPOSÉ**, estimation.
+
+## 15. Traçabilité de la revue critique du 2026-11-06
+
+Verdict de la revue : « à corriger avant L1 et L3 ». Chaque point vit désormais dans la section indiquée, comme décision avec son alternative écartée.
+
+| Point | Sujet | Section |
+|---|---|---|
+| 0 | Job des tuiles Kory (bloquant) | §6.1, Q10, §10 |
+| 1 | Daemon bloqué | §4.7, §6.4 |
+| 2 | Tempête de reconnexion, snapshot supprimé avant mesure | §6.2 (verrou de lancement), §8.2, §4.6 (`writer_generation`) |
+| 3 | Broker lancé par le daemon, non détaché | §11 |
+| 4 | Lancement du broker par le Deck | §10 |
+| 5 | Version du code servi | §4.4 (`code_root`), §6.2, Q11 |
+| 6 | Conteneurs sandbox | §5 |
+| 7 | Ordre de l'arrêt sur inactivité | §6.3 |
+| 8 | `claude_cli_pid` sans lecteur | §8.1, §8.4 (R2), §10 |
+| S | Vol d'une identité dormante par `session_key` | §8.4 (règle S), §8.3 |
+| E | Option écartée rappelée : bundle seul (`f4080f27`) | ADR 008, §3 |
