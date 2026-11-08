@@ -15,7 +15,7 @@ export type DeckBrokerModeLike = 'local' | 'remote' | 'replica'
 
 export interface BrokerScriptLocation {
   script: string
-  /** The executable the MCP entry names for server.ts, reused for broker.ts. */
+  /** The executable that runs broker.ts: the entry's own command, or the relay's --bun value (bun when absent). */
   command: string
   /**
    * The CLAUDE_PEERS_* variables the MCP entry sets. A session-spawned broker
@@ -39,6 +39,7 @@ export interface LocateDeps {
  * The claude-peers entry of the user-scope ~/.claude.json, when it names a
  * server.ts: broker.ts is its sibling. Only `command` and `args` are read, only
  * a string arg ending in server.ts qualifies, and the sibling must exist.
+ * A relay entry names it through `--fallback` and never runs the broker itself.
  */
 export function locateBrokerScript(
   claudeJsonPath: string,
@@ -56,8 +57,9 @@ export function locateBrokerScript(
     }
     const entry = mcpEntry(parsed, 'claude-peers')
     if (entry) {
-      const serverArg = entry.args.find((a) => /(^|[\\/])server\.ts$/.test(a))
-      if (serverArg) {
+      const launch = brokerLaunch(entry)
+      if (launch) {
+        const { serverArg, command } = launch
         // `claude mcp add ... -- bun ~/koryphaios/server.ts` stores whatever the
         // shell handed it, normally already absolute; a file edited by hand can
         // still carry the tilde, which no filesystem call expands.
@@ -67,7 +69,7 @@ export function locateBrokerScript(
         // path module of a Linux CI run would not recognise.
         const script = expanded.slice(0, -'server.ts'.length) + 'broker.ts'
         if (deps.exists(script)) {
-          return { script, command: entry.command, env: entry.env, source: 'claude-json' }
+          return { script, command, env: entry.env, source: 'claude-json' }
         }
       }
     }
@@ -75,6 +77,30 @@ export function locateBrokerScript(
   const sibling = resolve(appRoot, '..', 'broker.ts')
   if (deps.exists(sibling)) return { script: sibling, command: 'bun', env: {}, source: 'app-root' }
   return null
+}
+
+const RELAY_COMMAND = /(^|[\\/])claude-peers-relay(\.exe)?$/i
+const SERVER_TS = /(^|[\\/])server\.ts$/
+
+/** `undefined`: flag absent. `null`: flag repeated, or present without a usable value. */
+function flagValue(args: string[], flag: string): string | null | undefined {
+  const i = args.indexOf(flag)
+  if (i < 0) return undefined
+  if (i !== args.lastIndexOf(flag)) return null
+  const value = args[i + 1]
+  return value && !value.startsWith('--') ? value : null
+}
+
+function brokerLaunch(entry: { command: string; args: string[] }): { serverArg: string; command: string } | null {
+  if (!RELAY_COMMAND.test(entry.command)) {
+    const serverArg = entry.args.find((a) => SERVER_TS.test(a))
+    return serverArg ? { serverArg, command: entry.command } : null
+  }
+  const fallback = flagValue(entry.args, '--fallback')
+  if (!fallback || !SERVER_TS.test(fallback)) return null
+  const bun = flagValue(entry.args, '--bun')
+  if (bun === null) return null
+  return { serverArg: fallback, command: bun ?? 'bun' }
 }
 
 export function locateUserBrokerScript(appRoot: string, deps: LocateDeps): BrokerScriptLocation | null {

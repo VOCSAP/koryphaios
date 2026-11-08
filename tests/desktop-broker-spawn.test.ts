@@ -100,6 +100,56 @@ test("an entry whose server.ts sibling does not exist is not trusted, and invali
   expect(invalid.warnings.length, "the unreadable claude.json is traced, never swallowed").toBe(1);
 });
 
+const RELAY_ROOT = "/home/op/koryphaios";
+const RELAY_BIN = "/home/op/koryphaios/bin/linux-x64/claude-peers-relay";
+
+function relayLocation(command: string, args: string[], existing = [`${RELAY_ROOT}/broker.ts`]) {
+  const { deps } = locateDeps(
+    { [CLAUDE_JSON]: JSON.stringify({ mcpServers: { "claude-peers": { command, args } } }) },
+    existing
+  );
+  return locateBrokerScript(CLAUDE_JSON, APP_ROOT, deps);
+}
+
+test("a relay entry launches the broker with bun, and with the --bun executable when one is given", () => {
+  const plain = relayLocation(RELAY_BIN, ["--family", "peers", "--fallback", `${RELAY_ROOT}/server.ts`]);
+  expect(plain, "the relay binary must never run broker.ts: the --fallback value locates the script, bun runs it").toEqual({
+    script: `${RELAY_ROOT}/broker.ts`,
+    command: "bun",
+    env: {},
+    source: "claude-json",
+  });
+  const pinned = relayLocation(RELAY_BIN, ["--family", "peers", "--fallback", `${RELAY_ROOT}/server.ts`, "--bun", "/opt/bun/bin/bun"]);
+  expect(pinned?.command, "an explicit --bun executable is the one that runs the broker").toBe("/opt/bun/bin/bun");
+  const windows = relayLocation("C:\\Users\\op\\koryphaios\\bin\\win32-x64\\Claude-Peers-Relay.exe", ["--fallback", "C:\\Users\\op\\koryphaios\\server.ts"], [
+    "C:\\Users\\op\\koryphaios\\broker.ts",
+  ]);
+  expect(windows?.command, "a backslash path with the .exe suffix is still recognised as the relay").toBe("bun");
+});
+
+test("a relay entry without a usable --fallback or --bun is not trusted", () => {
+  const sibling = resolve(APP_ROOT, "..", "broker.ts");
+  for (const args of [
+    ["--family", "peers"],
+    ["--fallback"],
+    ["--fallback", "--bun", "bun"],
+    ["--fallback", `${RELAY_ROOT}/other.ts`],
+    ["--fallback", `${RELAY_ROOT}/myserver.ts`],
+    ["--fallback", `${RELAY_ROOT}/server.ts`, "--bun"],
+    ["--fallback", `${RELAY_ROOT}/server.ts`, "--bun", "--family"],
+    ["--fallback", `${RELAY_ROOT}/server.ts`, "--fallback", `${RELAY_ROOT}/other.ts`],
+    ["--fallback", `${RELAY_ROOT}/server.ts`, "--bun", "bun", "--bun", "/opt/bun/bin/bun"],
+  ]) {
+    const located = relayLocation(RELAY_BIN, args, [`${RELAY_ROOT}/broker.ts`, `${RELAY_ROOT}/mybroker.ts`, sibling]);
+    expect(located?.source, `relay args ${JSON.stringify(args)} must fall through to the repository, never run the relay as the broker`).toBe("app-root");
+  }
+});
+
+test("a command whose file name only ends with the relay name keeps the bun form", () => {
+  const located = relayLocation("/opt/not-claude-peers-relay", [`${RELAY_ROOT}/server.ts`]);
+  expect(located?.command, "the whole file name decides the relay form").toBe("/opt/not-claude-peers-relay");
+});
+
 function ensureDeps(overrides: Partial<EnsureDeps> & { aliveAfterPolls?: number }) {
   const spawned: string[] = [];
   let polls = 0;

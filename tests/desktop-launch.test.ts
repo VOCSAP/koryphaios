@@ -727,6 +727,11 @@ test("windows killTreeOnClose evaluates the Job Object preamble from the environ
   expect(command).not.toContain(shellCommand.JOB_PREAMBLE_PS);
 });
 
+test("the tile job limits kill the tree on close and let a child ask to break away", () => {
+  expect(shellCommand.JOB_PREAMBLE_PS, "KILL_ON_JOB_CLOSE | BREAKAWAY_OK; without 0x800 a CREATE_BREAKAWAY_FROM_JOB child is refused").toContain("(uint)0x2800");
+  expect(shellCommand.JOB_PREAMBLE_PS, "the kill-only limit leaves the shared MCP daemon to die with its tile").not.toContain("(uint)0x2000");
+});
+
 test("windows interactive killTreeOnClose keeps the output marker before the preamble", () => {
   const invocation = buildShellInvocation({ command: "claude x", shell: "", interactive: true, killTreeOnClose: true }, "win32");
   const command = invocation.args.at(-1)!;
