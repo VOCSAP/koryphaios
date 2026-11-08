@@ -90,9 +90,17 @@ export function harness(): Harness {
       const tools = [{ name: "whoami", description: "d", inputSchema: { type: "object" as const } }];
       if (extraTool) tools.push({ name: extraTool, description: "d", inputSchema: { type: "object" as const } });
       server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools }));
-      server.setRequestHandler(CallToolRequestSchema, async () => ({
-        content: [{ type: "text", text: JSON.stringify({ cwd: hello.cwd, calls: ++calls, env: hello.env["MARK"] }) }],
-      }));
+      server.setRequestHandler(CallToolRequestSchema, async (request) => {
+        const pad = Number(request.params.arguments?.["reply_pad"] ?? 0);
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({ cwd: hello.cwd, calls: ++calls, env: hello.env["MARK"], ...(pad > 0 ? { pad: "p".repeat(pad) } : {}) }),
+            },
+          ],
+        };
+      });
       server.onclose = () => h.closed.push({ cwd: hello.cwd });
       return server;
     },
@@ -123,28 +131,42 @@ export class FakeRelay {
   private waiting?: (value: Frame | "closed") => void;
   private decoder: PlainFrameDecoder | SealedFrameDecoder = new PlainFrameDecoder();
   private sealer?: Sealer;
-  private socket!: Socket<undefined>;
+  private socket!: { write(data: Buffer): number; end(): void };
+  private pending: Buffer[] = [];
+  private ending = false;
   private challenge!: Challenge;
   private authPayload!: Buffer;
   private relayNonce = "";
   closed = false;
 
-  static async connect(port: number): Promise<FakeRelay> {
+  /** `writeCap` makes every socket write offer at most that many bytes, as a full send buffer would accept. */
+  static async connect(port: number, opts: { writeCap?: number } = {}): Promise<FakeRelay> {
     const relay = new FakeRelay();
-    relay.socket = await Bun.connect({
+    const real: Socket<undefined> = await Bun.connect({
       hostname: "127.0.0.1",
       port,
       socket: {
         data: (_socket, chunk) => relay.onData(chunk),
+        drain: () => relay.flush(),
         close: () => relay.onClose(),
         error: () => relay.onClose(),
       },
     });
+    const cap = opts.writeCap;
+    relay.socket = {
+      write(data) {
+        const offered = cap === undefined ? data : data.subarray(0, cap);
+        const accepted = real.write(offered);
+        if (accepted >= offered.length && offered.length < data.length) setTimeout(() => relay.flush(), 0);
+        return accepted;
+      },
+      end: () => void real.end(),
+    };
     return relay;
   }
 
-  static async open(port: number): Promise<FakeRelay> {
-    const relay = await FakeRelay.connect(port);
+  static async open(port: number, opts: { writeCap?: number } = {}): Promise<FakeRelay> {
+    const relay = await FakeRelay.connect(port, opts);
     await relay.sendAuth();
     await relay.finishHandshake();
     return relay;
@@ -213,7 +235,22 @@ export class FakeRelay {
   }
 
   writeRaw(buf: Buffer): void {
-    this.socket.write(buf);
+    this.pending.push(buf);
+    this.flush();
+  }
+
+  // Bun buffers nothing: write() returns the bytes it took and the rest is offered again on drain.
+  private flush(): void {
+    while (this.pending.length > 0) {
+      const head = this.pending[0] as Buffer;
+      const written = this.socket.write(head);
+      if (written < head.length) {
+        this.pending[0] = head.subarray(Math.max(written, 0));
+        return;
+      }
+      this.pending.shift();
+    }
+    if (this.ending) this.socket.end();
   }
 
   seal(type: number, payload: string | Buffer): Buffer {
@@ -255,7 +292,8 @@ export class FakeRelay {
   }
 
   close(): void {
-    this.socket.end();
+    this.ending = true;
+    this.flush();
   }
 }
 

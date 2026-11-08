@@ -25,13 +25,15 @@ export type ControlOutcome =
   | { kind: "reply"; body: Record<string, unknown> };
 
 export interface ControlSocket {
-  write(data: Uint8Array): unknown;
+  /** Returns how many bytes were accepted; the rest must be offered again after `drain`. */
+  write(data: Uint8Array): number;
   terminate(): void;
 }
 
 export interface ControlHandlers {
   open(socket: ControlSocket): void;
   data(socket: ControlSocket, chunk: Uint8Array): void;
+  drain(socket: ControlSocket): void;
   close(): void;
   error(socket: ControlSocket, error: Error): void;
 }
@@ -85,6 +87,23 @@ export function controlRequest(opts: ControlRequestOptions): Promise<ControlOutc
     let sealer: Sealer | undefined;
     let challenge: Challenge | undefined;
     let auth: { payload: Buffer; relayNonce: string } | undefined;
+    const pending: Uint8Array[] = [];
+
+    const flush = (): void => {
+      while (pending.length > 0 && socket !== undefined && !settled) {
+        const head = pending[0] as Uint8Array;
+        const written = socket.write(head);
+        if (written < head.length) {
+          pending[0] = head.subarray(Math.max(written, 0));
+          return;
+        }
+        pending.shift();
+      }
+    };
+    const send = (data: Uint8Array): void => {
+      pending.push(data);
+      flush();
+    };
 
     const finish = (outcome: ControlOutcome): void => {
       if (settled) return;
@@ -108,7 +127,7 @@ export function controlRequest(opts: ControlRequestOptions): Promise<ControlOutc
         auth = buildAuth(opts.key, parsed, { role: "control" });
         stage = "auth_ok";
         arm();
-        socket?.write(encodeFrame(FRAME_TYPE.AUTH, auth.payload));
+        send(encodeFrame(FRAME_TYPE.AUTH, auth.payload));
         return;
       }
       if (stage === "auth_ok") {
@@ -125,7 +144,7 @@ export function controlRequest(opts: ControlRequestOptions): Promise<ControlOutc
         decoder = new SealedFrameDecoder(new Opener(keys.d2r), PRE_AUTH_MAX_PAYLOAD);
         stage = "reply";
         arm();
-        socket?.write(sealer.seal(FRAME_TYPE.CONTROL, Buffer.from(JSON.stringify({ op: opts.op }))));
+        send(sealer.seal(FRAME_TYPE.CONTROL, Buffer.from(JSON.stringify({ op: opts.op }))));
         return;
       }
       if (frame.type !== FRAME_TYPE.CONTROL) return foreign(`daemon answered frame type ${frame.type}, not CONTROL`);
@@ -155,6 +174,9 @@ export function controlRequest(opts: ControlRequestOptions): Promise<ControlOutc
           onFrame(frame);
           if (settled || decoder !== before) break;
         }
+      },
+      drain() {
+        flush();
       },
       close() {
         foreign("the connection closed before a reply");

@@ -119,11 +119,26 @@ describe("sessions on a shared daemon", () => {
     expect(theirs.tools_hash).not.toBe(mine.tools_hash);
   });
 
-  test("once WELCOME is sent, MCP frames may exceed the HELLO bound", async () => {
-    const relay = await FakeRelay.open(daemon.port);
-    await relay.welcome({ cwd: "/work/big" });
-    const reply = await relay.rpc(1, "tools/call", { name: "whoami", arguments: { pad: "x".repeat(700_000) } });
-    expect(JSON.parse(reply.result.content[0].text)).toMatchObject({ cwd: "/work/big" });
+  test.each([[undefined], [65_536]])(
+    "once WELCOME is sent, MCP frames may exceed the HELLO bound (relay write cap %p)",
+    async (writeCap) => {
+      const relay = await FakeRelay.open(daemon.port, { writeCap });
+      await relay.welcome({ cwd: "/work/big" });
+      const reply = await relay.rpc(1, "tools/call", { name: "whoami", arguments: { pad: "x".repeat(700_000) } });
+      expect(JSON.parse(reply.result.content[0].text)).toMatchObject({ cwd: "/work/big" });
+      relay.close();
+    },
+  );
+
+  test("a reply larger than the socket accepts at once reaches the relay in full", async () => {
+    const { daemon: capped } = launch(harness(), { writeCap: 65_536 });
+    const relay = await FakeRelay.open(capped.port);
+    await relay.welcome({ cwd: "/work/big-reply" });
+    const reply = await relay.rpc(1, "tools/call", { name: "whoami", arguments: { reply_pad: 700_000 } });
+    const body = JSON.parse(reply.result.content[0].text) as { cwd: string; pad: string };
+    expect(body.cwd).toBe("/work/big-reply");
+    expect(body.pad).toHaveLength(700_000);
+    expect(await relay.whoami(2)).toMatchObject({ cwd: "/work/big-reply", calls: 2 });
     relay.close();
   });
 
@@ -517,6 +532,39 @@ describe("control role and lifecycle hooks", () => {
     expect(writes).toHaveLength(1);
     expect(writes[0]?.readUInt8(4)).toBe(FRAME_TYPE.AUTH);
     expect(terminated).toBeGreaterThan(0);
+  });
+
+  test("the control client sends its frames in full through a socket that takes 7 bytes per write", async () => {
+    const { daemon, control } = withControl(harness());
+    const accepted: number[] = [];
+    const connect: ControlConnect = (port, handlers) =>
+      Bun.connect({
+        hostname: "127.0.0.1",
+        port,
+        socket: {
+          open(socket) {
+            const capped = {
+              write(data: Uint8Array) {
+                const offered = data.subarray(0, 7);
+                const taken = socket.write(offered);
+                accepted.push(taken);
+                if (taken >= offered.length && offered.length < data.length) setTimeout(() => handlers.drain(capped), 0);
+                return taken;
+              },
+              terminate: () => socket.terminate(),
+            };
+            handlers.open(capped);
+          },
+          data: (socket, chunk) => handlers.data(socket, chunk),
+          drain: (socket) => handlers.drain(socket),
+          close: () => handlers.close(),
+          error: (socket, error) => handlers.error(socket, error),
+        },
+      });
+    const outcome = await controlRequest({ port: daemon.port, key, op: "stop", connect });
+    expect(outcome).toEqual({ kind: "reply", body: { ok: true } });
+    expect(accepted.length).toBeGreaterThan(10);
+    await until(() => control.stops === 1, "the stop handler to run");
   });
 
   test("a refused connection means the port is free", async () => {

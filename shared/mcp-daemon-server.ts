@@ -64,6 +64,8 @@ export interface DaemonOptions {
   key?: Buffer;
   control?: ControlHandler;
   onSessions?: (sessions: number) => void;
+  /** Test seam: each socket write accepts at most this many bytes, as a full send buffer would. */
+  writeCap?: number;
 }
 
 export interface ControlHandler {
@@ -413,6 +415,26 @@ interface DaemonContext {
 
 type Stage = "auth" | "hello" | "building" | "live";
 
+interface ConnectionSocket {
+  write(data: Buffer): number;
+  end(): void;
+  terminate(): void;
+}
+
+/** A socket that accepts `cap` bytes at most per write and reports the drain itself when it held bytes back. */
+function cappedSocket(socket: Socket<Connection>, cap: number, drained: () => void): ConnectionSocket {
+  return {
+    write(data) {
+      const offered = data.subarray(0, cap);
+      const accepted = socket.write(offered);
+      if (accepted >= offered.length && offered.length < data.length) setTimeout(drained, 0);
+      return accepted;
+    },
+    end: () => void socket.end(),
+    terminate: () => socket.terminate(),
+  };
+}
+
 class Connection {
   private stage: Stage = "auth";
   private decoder: PlainFrameDecoder | SealedFrameDecoder = new PlainFrameDecoder();
@@ -433,7 +455,7 @@ class Connection {
 
   constructor(
     private readonly ctx: DaemonContext,
-    private readonly socket: Socket<Connection>,
+    private readonly socket: ConnectionSocket,
     readonly id: number,
   ) {
     this.log = ctx.log.child(`c=${id}`);
@@ -819,7 +841,12 @@ export function startDaemon(opts: DaemonOptions): DaemonHandle {
       port,
       socket: {
         open(socket) {
-          const conn = new Connection(ctx, socket, ++ctx.nextConnection);
+          const limit = opts.writeCap;
+          const conn = new Connection(
+            ctx,
+            limit === undefined ? socket : cappedSocket(socket, limit, () => socket.data?.onDrain()),
+            ++ctx.nextConnection,
+          );
           socket.data = conn;
           conn.start();
         },
