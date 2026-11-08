@@ -26,6 +26,7 @@ import { roadmapTitleRefusal } from "./shared/roadmap-title.ts";
 import {
   CONTEXT_DEPOSIT_MAX_BODY_BYTES,
   CONTEXT_RESUME_VERSION,
+  REGISTER_RESUME_VERSION,
   isAttemptIdShape,
   isCapabilityHashShape,
   isCapabilityShape,
@@ -36,6 +37,16 @@ import {
   type ContextDepositResponse,
 } from "./shared/context-buffer.ts";
 import { ContextRegistry } from "./shared/context-registry.ts";
+import { guardedInterval as guardInterval } from "./shared/guarded-interval.ts";
+import { measureWriterGeneration } from "./shared/process-generation.ts";
+import {
+  keepsActiveWithoutHeartbeat,
+  mayStayActiveWithoutHeartbeat,
+  pidExists,
+  relayPidAlive,
+  resumeRefusal,
+  type ResumeCandidate,
+} from "./shared/relay-liveness.ts";
 import {
   formatRoadmapContextDocumentHeader,
   formatRoadmapContextDocumentOmission,
@@ -578,13 +589,7 @@ function groupExists(groupId: string): boolean {
 }
 
 function guardedInterval(name: string, fn: () => unknown, ms: number): ReturnType<typeof setInterval> {
-  return setInterval(() => {
-    try {
-      fn();
-    } catch (e) {
-      log.error(`timer ${name}: iteration failed (skipped)`, e);
-    }
-  }, ms);
+  return guardInterval(name, fn, ms, log);
 }
 
 try {
@@ -659,6 +664,15 @@ try {
 // in handleRegister. Existing rows are NULL.
 try {
   db.run("ALTER TABLE peers ADD COLUMN role TEXT");
+} catch (e) {
+  const msg = e instanceof Error ? e.message : String(e);
+  if (!msg.includes("duplicate column name")) log.error(`migration: ${msg}`);
+}
+
+// Migration (idempotent): identity of the process behind `pid`, rewritten at
+// every /register. NULL for a client that does not send one.
+try {
+  db.run("ALTER TABLE peers ADD COLUMN pid_generation TEXT");
 } catch (e) {
   const msg = e instanceof Error ? e.message : String(e);
   if (!msg.includes("duplicate column name")) log.error(`migration: ${msg}`);
@@ -1991,9 +2005,7 @@ function cleanStalePeers(): void {
      WHERE status = 'active' AND host = ? AND relay_id IS NULL AND via IS NULL`
   ).all(BROKER_HOST) as { instance_token: string; pid: number }[];
   for (const peer of actives) {
-    try {
-      process.kill(peer.pid, 0);
-    } catch {
+    if (!pidExists(peer.pid)) {
       db.run(
         "UPDATE peers SET status = 'dormant' WHERE instance_token = ?",
         [peer.instance_token]
@@ -2031,18 +2043,49 @@ guardedInterval("cleanStalePeers", cleanStalePeers, CLEAN_INTERVAL_MS);
 
 // --- Heartbeat-staleness sweep (active_stale_sec) ---
 
-function sweepInactivePeers(): void {
+const processGenerationLog = log.child("process-generation");
+const measureGeneration = (pid: number) => measureWriterGeneration(pid, processGenerationLog);
+
+async function sweepInactivePeers(): Promise<void> {
   // Two cutoffs: a mirror has no heartbeat of its own and gets the longer,
   // pass-interval-derived cutoff; every other row (local peers, and rows an
   // upstream relays for a replica) gets the operator's ACTIVE_STALE_SEC.
   const cutoff = new Date(Date.now() - ACTIVE_STALE_SEC * 1000).toISOString();
   const mirrorCutoff = new Date(Date.now() - MIRROR_ACTIVE_STALE_SEC * 1000).toISOString();
-  db.run(`UPDATE peers SET status = 'dormant' WHERE status = 'active' AND last_seen < ? AND NOT ${MIRROR_ROW_SQL}`, [
-    cutoff,
-  ]);
+  const silent = db
+    .query(
+      `SELECT instance_token, host, pid, pid_generation, relay_id, via FROM peers
+        WHERE status = 'active' AND last_seen < ? AND NOT ${MIRROR_ROW_SQL}`
+    )
+    .all(cutoff) as {
+    instance_token: string;
+    host: string;
+    pid: number;
+    pid_generation: string | null;
+    relay_id: string | null;
+    via: string | null;
+  }[];
+  const dormantUnlessHeartbeat = (token: string): void => {
+    db.run(`UPDATE peers SET status = 'dormant' WHERE instance_token = ? AND status = 'active' AND last_seen < ?`, [
+      token,
+      cutoff,
+    ]);
+  };
+  // Everything that needs no measure is judged in one synchronous block, so a
+  // pass stays atomic for all rows but the few whose process must be measured.
+  const toMeasure = silent.filter((row) => {
+    if (mayStayActiveWithoutHeartbeat(BROKER_MODE, row, BROKER_HOST)) return true;
+    dormantUnlessHeartbeat(row.instance_token);
+    return false;
+  });
   db.run(`UPDATE peers SET status = 'dormant' WHERE status = 'active' AND last_seen < ? AND ${MIRROR_ROW_SQL}`, [
     mirrorCutoff,
   ]);
+  for (const row of toMeasure) {
+    if (!(await keepsActiveWithoutHeartbeat(BROKER_MODE, row, BROKER_HOST, measureGeneration))) {
+      dormantUnlessHeartbeat(row.instance_token);
+    }
+  }
 }
 guardedInterval("sweepInactivePeers", sweepInactivePeers, SWEEP_INTERVAL_SEC * 1000);
 
@@ -2251,6 +2294,8 @@ const updateLastActivity = db.prepare(
   `UPDATE peers SET last_activity_at = ? WHERE instance_token = ?`
 );
 
+const recordPidGeneration = db.prepare(`UPDATE peers SET pid_generation = ? WHERE instance_token = ?`);
+
 // role is included in this SET list deliberately: it is a property of the
 // launch, not persisted state, so the transport value overwrites on every
 // register.
@@ -2259,6 +2304,7 @@ const updateLastActivity = db.prepare(
 const updateActiveOnRegister = db.prepare(`
   UPDATE peers
   SET status = 'active',
+      pid_generation = CASE WHEN pid = ? THEN pid_generation ELSE NULL END,
       pid = ?,
       cwd = ?,
       git_root = ?,
@@ -2671,12 +2717,7 @@ function peerIsLive(instanceToken: string): boolean {
     .get(instanceToken) as { status: string; pid: number; host: string } | null;
   if (!row || row.status !== "active") return false;
   if (row.host !== BROKER_HOST) return true;
-  try {
-    process.kill(row.pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
+  return pidExists(row.pid);
 }
 
 /**
@@ -2690,20 +2731,12 @@ function admitRegisterAttestation(
   body: RegisterRequest
 ): { scope: InboxInstanceBinding | null } | { error: string; status: number } {
   if (body.auth === undefined) {
-    if (body.inbox_operation !== undefined || body.resume_instance_token !== undefined) {
+    if (body.inbox_operation !== undefined) {
       return { error: "an inbox attestation needs an auth proof", status: 400 };
     }
     return { scope: null };
   }
   if (body.inbox_operation !== "register") return { error: "inbox_operation must be 'register'", status: 400 };
-  if (
-    body.resume_instance_token !== undefined &&
-    (typeof body.resume_instance_token !== "string" ||
-      body.resume_instance_token.length === 0 ||
-      body.resume_instance_token.length > 256)
-  ) {
-    return { error: "resume_instance_token must be a non-empty string", status: 400 };
-  }
   const identity = approvalAuth.authenticateInbox(
     body as unknown as { auth?: ApprovalAuthProof } & Record<string, unknown>,
     "inbox-register",
@@ -2726,7 +2759,32 @@ function admitRegisterAttestation(
   };
 }
 
+const RESUME_FIELD_MAX_CHARS = 256;
+
+/** A resume field of the wrong type is a refusal, never ignored: an ignored one would register a fresh identity. */
+function resumeFieldRefusal(body: RegisterRequest): { error: string; status: number } | null {
+  for (const field of ["resume_instance_token", "pid_generation"] as const) {
+    const value: unknown = body[field];
+    if (value === undefined) continue;
+    if (typeof value !== "string" || value.length === 0 || value.length > RESUME_FIELD_MAX_CHARS) {
+      return { error: `${field} must be a non-empty string of at most ${RESUME_FIELD_MAX_CHARS} characters`, status: 400 };
+    }
+  }
+  return null;
+}
+
+/** Whether the row still holds its session key against another registrant: pid-based on this host, status-based elsewhere. */
+function rowHoldsSessionKey(instanceToken: string): boolean {
+  const row = db.query("SELECT status, pid, host FROM peers WHERE instance_token = ?").get(instanceToken) as
+    | { status: string; pid: number; host: string }
+    | null;
+  if (!row) return false;
+  return row.host === BROKER_HOST ? pidExists(row.pid) : row.status === "active";
+}
+
 function handleRegister(body: RegisterRequest): RegisterResponse | { error: string; status: number } {
+  const fieldRefusal = resumeFieldRefusal(body);
+  if (fieldRefusal) return fieldRefusal;
   const groupId = body.group_id;
   const secretHash = body.group_secret_hash;
   const now = new Date().toISOString();
@@ -2776,6 +2834,64 @@ function handleRegister(body: RegisterRequest): RegisterResponse | { error: stri
   // True when the candidate holds THIS session key. A candidate found through
   // cc_session_id sits under another key, so this key is free to associate.
   const keyIsOccupied = session !== null;
+
+  // Resume by the presented token. The row is found by the token, never by the
+  // session key, so two peers sharing host, cwd and group each get their own
+  // back. A refused resume falls through to the ordinary path below.
+  const refuseResume = (reason: string): null => {
+    // A relaunched Deck tile presents the pid of its dead predecessor: the ordinary flow.
+    const line = `register: resume by token refused (${reason})`;
+    if (reason === "pid") log.info(line, { group_id: groupId });
+    else log.warn(line, { group_id: groupId });
+    return null;
+  };
+  const resumeByToken = (token: string): RegisterResponse | null => {
+    if (isSentinelInstanceToken(token)) return refuseResume("sentinel");
+    const row = db
+      .query("SELECT peer_id, group_id, host, pid, pid_generation, relay_id, via FROM peers WHERE instance_token = ?")
+      .get(token) as (ResumeCandidate & { peer_id: string }) | null;
+    if (!row) return refuseResume("unknown_token");
+    const refusal = resumeRefusal(
+      row,
+      { host: body.host, group_id: groupId, pid: body.pid, pid_generation: body.pid_generation ?? null },
+      BROKER_HOST
+    );
+    if (refusal) return refuseResume(refusal);
+    const binding = bindingOfToken(token);
+    if (binding !== null) {
+      if (runScope === null || !sameRunScope(binding, runScope)) return refuseResume("bound_unproven");
+    } else if (runScope !== null) {
+      return refuseResume("attested_over_unbound");
+    }
+    const keyHeldByOther =
+      session !== null && session.instance_token !== token && rowHoldsSessionKey(session.instance_token);
+    db.transaction(() => {
+      updateActiveOnRegister.run(
+        body.pid,
+        body.pid,
+        body.cwd,
+        body.git_root,
+        body.tty,
+        body.summary,
+        now,
+        now,
+        body.host,
+        body.client_pid,
+        projectKey,
+        body.claude_cli_pid ?? null,
+        normalizedRole,
+        token
+      );
+      if (!keyHeldByOther) {
+        upsertPeerSession.run(sk, token, groupId, body.host, body.cwd, now, ccSessionId, deskSessionHash(body.desk_session));
+      }
+    })();
+    return { ...registerResponse(row.peer_id, token, normalizedRole), resumed: "token" };
+  };
+  if (typeof body.resume_instance_token === "string") {
+    const resumed = resumeByToken(body.resume_instance_token);
+    if (resumed) return resumed;
+  }
 
   if (!session && ccSessionId) {
     // Secondary lookup only on a key miss, for the Restore gesture (a new tile
@@ -2882,9 +2998,7 @@ function handleRegister(body: RegisterRequest): RegisterResponse | { error: stri
     // throws, and treating that as dead would let the resurrect path silently
     // steal the active peer's identity.
     if (existingPeer && existingPeer.status === "active" && existingPeer.host === BROKER_HOST) {
-      try {
-        process.kill(existingPeer.pid, 0);
-      } catch {
+      if (!pidExists(existingPeer.pid)) {
         db.run(
           "UPDATE peers SET status = 'dormant' WHERE instance_token = ?",
           [existingPeer.instance_token]
@@ -2893,13 +3007,22 @@ function handleRegister(body: RegisterRequest): RegisterResponse | { error: stri
       }
     }
 
-    if (existingPeer && existingPeer.status === "dormant") {
+    // A dormant row whose relay is still alive belongs to that relay: another
+    // process of the same folder takes a new identity instead of its own.
+    const heldByLiveRelay =
+      existingPeer !== null &&
+      existingPeer.status === "dormant" &&
+      existingPeer.pid !== body.pid &&
+      relayPidAlive(existingPeer, BROKER_HOST);
+
+    if (existingPeer && existingPeer.status === "dormant" && !heldByLiveRelay) {
       // Resurrect dormant.
       // Card a2f61172 (operator-arbitrated design reversal): role is a
       // property of the LAUNCH, not persistent identity like peer_id/
       // instance_token -- the transport's normalizedRole wins unconditionally
       // here too, overwriting whatever was stored. No comparison, no refusal.
       updateActiveOnRegister.run(
+        body.pid,
         body.pid,
         body.cwd,
         body.git_root,
@@ -2918,12 +3041,12 @@ function handleRegister(body: RegisterRequest): RegisterResponse | { error: stri
       return registerResponse(existingPeer.peer_id, existingPeer.instance_token, normalizedRole);
     }
 
-    if (existingPeer && existingPeer.status === "active") {
+    if (existingPeer && (existingPeer.status === "active" || heldByLiveRelay)) {
       // Active collision: another process is already holding this session_key.
       // Mint a fresh peer with a derived id; do NOT touch peer_sessions
       // (the existing active row keeps the canonical session).
       log.warn(
-        `session_key collision: existing active peer ${existingPeer.peer_id} keeps the session, minting new peer`
+        `session_key collision: existing ${existingPeer.status} peer ${existingPeer.peer_id} keeps the session, minting new peer`
       );
       if (runScope !== null) return registerNewInstance({ associate: false });
       const freshToken = randomUUID();
@@ -3102,14 +3225,16 @@ function handleSetId(body: SetIdRequest): SetIdResponse | { error: string; statu
  * return branches of handleRegister are covered by one call site. A
  * TOFU-exempt group pins no secret and never binds.
  */
-function bindDepositCapability(body: RegisterRequest, instanceToken: string): void {
+function bindDepositCapability(body: RegisterRequest, instanceToken: string, resumedByToken: boolean): void {
   const declared: unknown = body.deposit_capability_hash;
   if (declared !== undefined && declared !== null && !isCapabilityHashShape(declared)) {
     log.warn("register: malformed deposit_capability_hash, launch left without a deposit capability");
   }
   const hash = !isTofuExemptGroup(body.group_id) && isCapabilityHashShape(declared) ? declared : null;
   const resume: unknown = body.context_resume_version;
-  contextRegistry.onRegister(instanceToken, hash, typeof resume === "number" ? resume : null);
+  const resumeVersion = typeof resume === "number" ? resume : null;
+  if (resumedByToken) contextRegistry.onResume(instanceToken, hash, resumeVersion);
+  else contextRegistry.onRegister(instanceToken, hash, resumeVersion);
 }
 
 const DEPOSIT_REFUSAL_TEXT: Record<ContextDepositRefusal["reason"], string> = {
@@ -12888,6 +13013,7 @@ const server = Bun.serve<WsData>({
         return Response.json({
           status: "ok",
           context_resume_version: CONTEXT_RESUME_VERSION,
+          register_resume_version: REGISTER_RESUME_VERSION,
           operator_trust_version: OPERATOR_TRUST_VERSION,
           operator_trust_state: operatorTrustSnapshot.state,
           peers: total,
@@ -12985,7 +13111,10 @@ const server = Bun.serve<WsData>({
           if ("error" in result) {
             return Response.json({ error: result.error }, { status: result.status });
           }
-          bindDepositCapability(body as RegisterRequest, result.instance_token);
+          const registered = body as RegisterRequest;
+          if (registered.resume_instance_token !== undefined && result.resumed === undefined) result.resumed = false;
+          if (registered.pid_generation !== undefined) recordPidGeneration.run(registered.pid_generation, result.instance_token);
+          bindDepositCapability(registered, result.instance_token, result.resumed === "token");
           return Response.json(result);
         }
         case "/heartbeat": {

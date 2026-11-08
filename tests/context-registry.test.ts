@@ -209,6 +209,37 @@ describe("ContextRegistry", () => {
     expect(deposit(h.registry, HASH_A)).toEqual({ ok: false, status: 401, reason: "capability" });
   });
 
+  test("onResume with the bound hash keeps the deposits and the epoch; another hash or none re-binds like onRegister", () => {
+    const h = harness();
+    liveOwner(h, "tok-a", HASH_A);
+    const kept = depositId(deposit(h.registry, HASH_A, "before"));
+
+    h.registry.onResume("tok-a", HASH_A, CONTEXT_RESUME_VERSION);
+    const afterSame = probeHeld(h.registry, HASH_A);
+    expect(afterSame.held, "same hash: the earlier deposit is still held").toEqual([kept, afterSame.probe].sort());
+
+    h.registry.onResume("tok-a", HASH_B);
+    expect(deposit(h.registry, HASH_A), "another hash: the old capability is unbound").toEqual({
+      ok: false,
+      status: 401,
+      reason: "capability",
+    });
+    expect(probeHeld(h.registry, HASH_B).held, "another hash: the earlier deposits are gone").toHaveLength(1);
+
+    h.registry.onResume("tok-a", null);
+    expect(deposit(h.registry, HASH_B)).toEqual({ ok: false, status: 401, reason: "capability" });
+  });
+
+  test("onResume announces the resume version on a kept binding", () => {
+    const h = harness();
+    liveOwner(h, "tok-a", HASH_A, "tok-a", "g1", null);
+    const id = depositId(deposit(h.registry, HASH_A));
+    expect(h.registry.reserve(id, { peer_id: "tok-a", group_id: "g1" })).toEqual({ ok: false, reason: "owner_lacks_context_resume" });
+
+    h.registry.onResume("tok-a", HASH_A, CONTEXT_RESUME_VERSION);
+    expect(h.registry.reserve(id, { peer_id: "tok-a", group_id: "g1" }).ok).toBe(true);
+  });
+
   test("each quota refuses with its own reason and leaves the registry unchanged", () => {
     const owner = harness({ perOwner: 2, perGroup: 100, total: 100 });
     liveOwner(owner, "tok-a", HASH_A);
@@ -345,6 +376,10 @@ describe("ContextRegistry", () => {
     const probes: Record<string, (h: Harness, depositId: string) => void> = {
       onRegister: (h, id) => {
         h.registry.onRegister("tok-other", HASH_B);
+        expect(h.registry.describe(id)).toBeNull();
+      },
+      onResume: (h, id) => {
+        h.registry.onResume("tok-other", HASH_B);
         expect(h.registry.describe(id)).toBeNull();
       },
       forgetOwner: (h, id) => {

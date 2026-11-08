@@ -53,6 +53,10 @@ export class LaunchBindings {
     return this.#byToken.get(instanceToken)?.epoch;
   }
 
+  hashOf(instanceToken: string): string | undefined {
+    return this.#byToken.get(instanceToken)?.capability_hash;
+  }
+
   tokensFor(capabilityHash: string): string[] {
     return [...(this.#byHash.get(capabilityHash) ?? [])];
   }
@@ -191,6 +195,20 @@ export class ContextRegistry {
       this.#bindings.setResumeVersion(instanceToken, resumeVersion);
     }
     this.#sweepDead();
+  }
+
+  /**
+   * A resume of the same relay: presenting the capability already bound keeps
+   * the epoch and the deposits. Any other hash is a new launch.
+   */
+  onResume(instanceToken: string, capabilityHash: string | null, resumeVersion: number | null = null): void {
+    if (capabilityHash === null || this.#bindings.hashOf(instanceToken) !== capabilityHash) {
+      this.onRegister(instanceToken, capabilityHash, resumeVersion);
+      return;
+    }
+    if (resumeVersion !== null && Number.isSafeInteger(resumeVersion) && resumeVersion >= 1) {
+      this.#bindings.setResumeVersion(instanceToken, resumeVersion);
+    }
   }
 
   /** Disconnect or unregister: the RAM is freed now rather than at the next sweep. */

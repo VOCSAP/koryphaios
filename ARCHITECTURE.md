@@ -300,7 +300,8 @@ no read route exist: the buffer is meant to be pushed back to its author only.
   `_SECRET`, ...).
 - **Owner = (`instance_token`, epoch).** Every `/register` mints a new epoch
   for its token, so a relaunch, a reconnection or a resurrection drops the
-  earlier deposits. Liveness is derived on every call (owner row active and
+  earlier deposits. An accepted resume by token (see "Resume flow") that
+  presents the capability hash already bound keeps the epoch. Liveness is derived on every call (owner row active and
   local, epoch unchanged); nothing revokes it, so the sites that turn a peer
   dormant need no hook. `/disconnect` and `/unregister` free the RAM at once, a
   sweep on the `cleanStalePeers` cadence frees the rest. `peer_id` is never
@@ -321,8 +322,11 @@ no read route exist: the buffer is meant to be pushed back to its author only.
 ## Resume flow
 
 `session_key = sha256(host || \0 || cwd || \0 || group_id)`. On `/register`:
-- session_key exists, peer is dormant -> flips to active, returns the same `(peer_id, instance_token)`.
+- body carries `resume_instance_token` -> looked up by the token, never by the session_key. Accepted when the row is local (neither relayed nor mirrored), in the same group and on the same host, `body.pid` equals the recorded pid, `pid_generation` matches (a row that stores one refuses a body without it), the pid is alive when the host is the broker's, and a bound row is proven by a signed body of its own run. The row is updated in place, `(peer_id, instance_token)` kept even when it is active, and the response carries `resumed: "token"`; the deposit epoch is kept when the bound capability hash is presented again. The session_key association moves to this token unless another token that holds the key has a live pid (or, on a host the broker cannot probe, an active row). Any refusal is logged with its reason, never the token, and the request goes on as below with `resumed: false`. `/health` announces `register_resume_version`.
+- session_key exists, peer is dormant -> flips to active, returns the same `(peer_id, instance_token)`, unless the recorded pid is alive on the broker host and differs from `body.pid`: that row belongs to its live relay, so the newcomer takes the collision branch below. The same pid returning (a `switch_group` back to a group it left) resurrects its own row.
 - session_key exists, peer is active but recorded `pid` is dead -> treat as dormant -> resurrect.
 - session_key exists, peer is genuinely active (live pid) -> session_key collision: mint a fresh `(peer_id, instance_token)` with derived suffix; the original keeps the canonical session.
 - session_key exists but the row was purged -> reuse the remembered `instance_token`, mint a fresh display id.
 - Else -> fresh registration.
+
+The heartbeat sweep (`sweepInactivePeers`) does not turn a local row dormant without heartbeat when it stores a `pid_generation`, its pid is alive on the broker host and the measured generation of that pid equals the stored one (so a reused pid keeps nothing), in `local` and `replica` modes. A row without generation, as `server.ts` registers, and `remote` mode keep the stale-heartbeat limit. One probe, `pidExists` in `shared/relay-liveness.ts`, serves every pid check of the broker: a pid that is not a positive integer is never alive, and `EPERM` counts as alive. A `/register` without `pid_generation` keeps the stored one for the same pid and clears it when the pid changes. The broker's timers (`guardedInterval`, `shared/guarded-interval.ts`) never overlap: a tick that finds the previous pass of the same timer still running is skipped with a log line.

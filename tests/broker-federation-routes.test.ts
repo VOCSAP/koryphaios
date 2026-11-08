@@ -266,7 +266,7 @@ test("toPublicPeer is a pick-list: every live column of peers is either publishe
   // The projection is read off the wire, the schema off the file: a column
   // added to peers that is in neither list below fails here, and a retained
   // column that shows up on the wire fails here too.
-  const RETAINED = ["instance_token", "pid", "client_pid", "claude_cli_pid", "relay_id", "relay_ref", "relay_base"];
+  const RETAINED = ["instance_token", "pid", "pid_generation", "client_pid", "claude_cli_pid", "relay_id", "relay_ref", "relay_base"];
   const COMPUTED = ["activity_status", "link_down_since"];
   const rows = await adminPeers(upstream);
   expect(["the admin dump has at least one row to read the projection from", rows.length > 0]).toEqual([

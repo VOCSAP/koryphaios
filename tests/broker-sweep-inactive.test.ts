@@ -2,6 +2,9 @@ import { test, expect, beforeAll, afterAll } from "bun:test";
 import { startBroker, stopBroker, post, livePid, type TestBroker, openBrokerDb } from "./_helper.ts";
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { hostname } from "node:os";
+import { measureWriterGeneration } from "../shared/process-generation.ts";
+import { canonicalWriterGeneration } from "../shared/relay-liveness.ts";
 import { join } from "node:path";
 
 // Every row of a test is distinct (own host/cwd/token), so the sweep tests
@@ -12,12 +15,14 @@ const ACTIVE_STALE_SEC = 3;
 const BROKER_TOKEN = "t".repeat(40);
 let shared: TestBroker;
 let replica: TestBroker;
+let remote: TestBroker;
 
 beforeAll(async () => {
-  [shared, replica] = await Promise.all([
+  [shared, replica, remote] = await Promise.all([
     startBroker({
       CLAUDE_PEERS_ACTIVE_STALE_SEC: String(ACTIVE_STALE_SEC),
       CLAUDE_PEERS_DORMANT_SWEEP_SEC: "1",
+      CLAUDE_PEERS_CLEAN_INTERVAL_SEC: "1",
     }),
     startBroker({
       CLAUDE_PEERS_OFFLINE_REPLICA: "1",
@@ -25,10 +30,15 @@ beforeAll(async () => {
       CLAUDE_PEERS_BROKER_TOKEN: BROKER_TOKEN,
       CLAUDE_PEERS_ACTIVE_STALE_SEC: "10",
     }),
+    startBroker({
+      CLAUDE_PEERS_BROKER_URL: "http://127.0.0.1:9",
+      CLAUDE_PEERS_ACTIVE_STALE_SEC: String(ACTIVE_STALE_SEC),
+      CLAUDE_PEERS_DORMANT_SWEEP_SEC: "1",
+    }),
   ]);
 });
 afterAll(async () => {
-  await Promise.all([shared, replica].filter(Boolean).map((b) => stopBroker(b)));
+  await Promise.all([shared, replica, remote].filter(Boolean).map((b) => stopBroker(b)));
 });
 
 async function waitFor<T>(read: () => T | Promise<T>, done: (value: T) => boolean, what: string, timeoutMs = 10_000): Promise<T> {
@@ -102,6 +112,78 @@ test("active peer with recent heartbeat stays active", async () => {
     "a sweep to dormant the silent control peer"
   );
   expect(statusOf(shared, kept.body.instance_token), "the heartbeating peer survives the sweep that took the silent one").toBe("active");
+}, 30_000);
+
+const ownGeneration = await measureWriterGeneration(process.pid);
+const ownGenerationText = ownGeneration ? canonicalWriterGeneration(ownGeneration) : "";
+const generationUnavailable = ownGeneration === null;
+
+/** Registers a silent peer (last_seen an hour old) and returns its token. */
+async function registerSilent(b: TestBroker, host: string, cwd: string, pidGeneration?: string): Promise<string> {
+  const r = await post<{ instance_token: string }>(`${b.url}/register`, {
+    pid: livePid(), cwd, git_root: null, tty: null,
+    summary: "", host, client_pid: livePid(),
+    project_key: null, group_id: "default", group_secret_hash: null,
+    ...(pidGeneration === undefined ? {} : { pid_generation: pidGeneration }),
+  });
+  expect(r.status).toBe(200);
+  const db = openBrokerDb(b.dbPath);
+  try {
+    db.run("UPDATE peers SET last_seen = ? WHERE instance_token = ?", [new Date(Date.now() - 3600_000).toISOString(), r.body.instance_token]);
+  } finally {
+    db.close();
+  }
+  return r.body.instance_token;
+}
+
+test.skipIf(generationUnavailable)(
+  "a peer whose relay is alive on the broker host as the registered process stays active without heartbeat, a silent peer of another host does not (needs a measurable process generation)",
+  async () => {
+    const live = await registerSilent(shared, hostname(), "/tmp/sweep-live-relay", ownGenerationText);
+    const foreign = await registerSilent(shared, "h-sweep-foreign", "/tmp/sweep-foreign-relay", ownGenerationText);
+
+    await waitFor(() => statusOf(shared, foreign), (s) => s === "dormant", "a sweep to dormant the silent peer of another host");
+    expect(statusOf(shared, live), "the sweep that took the foreign peer spared the one whose relay pid is alive").toBe("active");
+  },
+  30_000
+);
+
+test.skipIf(generationUnavailable)("a live pid that is no longer the registered process (reused pid) falls dormant (needs a measurable process generation)", async () => {
+  const reused = await registerSilent(shared, hostname(), "/tmp/sweep-reused-pid", `${ownGenerationText} (another process)`);
+  await waitFor(() => statusOf(shared, reused), (s) => s === "dormant", "a sweep to dormant the peer whose pid was reused");
+}, 30_000);
+
+test("a silent peer that registered no generation keeps the heartbeat rule even when its pid is alive", async () => {
+  const bare = await registerSilent(shared, hostname(), "/tmp/sweep-no-generation");
+  await waitFor(() => statusOf(shared, bare), (s) => s === "dormant", "a sweep to dormant the peer without generation");
+}, 30_000);
+
+test.skipIf(generationUnavailable)("a remote-mode broker cannot see a pid: the same silent peer falls dormant (needs a measurable process generation)", async () => {
+  const live = await registerSilent(remote, hostname(), "/tmp/sweep-remote-relay", ownGenerationText);
+  await waitFor(() => statusOf(remote, live), (s) => s === "dormant", "a remote-mode sweep to dormant the silent peer");
+});
+
+test("cleanStalePeers treats pid 0 as dead: a heartbeating same-host peer registered with pid 0 falls dormant", async () => {
+  const r = await post<{ instance_token: string }>(`${shared.url}/register`, {
+    pid: 0, cwd: "/tmp/sweep-pid-zero", git_root: null, tty: null,
+    summary: "", host: hostname(), client_pid: livePid(),
+    project_key: null, group_id: "default", group_secret_hash: null,
+  });
+  expect(r.status).toBe(200);
+  // Heartbeating keeps last_seen fresh, so only the pid probe can take it dormant.
+  const status = await waitFor(
+    async () => {
+      const s = statusOf(shared, r.body.instance_token);
+      if (s !== "dormant") {
+        await post(`${shared.url}/heartbeat`, { instance_token: r.body.instance_token });
+        await Bun.sleep(150);
+      }
+      return s;
+    },
+    (s) => s === "dormant",
+    "the pid probe of cleanStalePeers to dormant the pid 0 peer"
+  );
+  expect(status).toBe("dormant");
 }, 30_000);
 
 test("mirror rows get a longer, backoff-derived floor than local/relayed rows", async () => {

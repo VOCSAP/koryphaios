@@ -159,11 +159,14 @@ export interface RegisterRequest {
    * Inbox attestation. `auth` is a v1 proof of the Deck's
    * run credential over this whole body: it makes the new instance a member of
    * that run. `resume_instance_token` is the previous private token of this
-   * same instance and is only honoured inside the signed payload; it lets a
-   * bound instance get its own identity back, and nothing else does.
+   * same instance. For an instance bound to a run it is only honoured inside
+   * the signed payload; for any other it resumes the row without a proof when
+   * the relay pid, its generation, the host and the group all match.
    */
   inbox_operation?: "register";
   resume_instance_token?: string;
+  /** Opaque identity of the process behind `pid` (its start time), compared for equality on a resume. */
+  pid_generation?: string;
   auth?: ApprovalAuthProof;
 }
 
@@ -182,6 +185,8 @@ export interface RegisterResponse {
   // lowercase/ROLE_REGEX validation), never by a stored value winning over
   // it. This is what whoami surfaces as "my own role".
   role: string | null;
+  /** Present only when the request carried `resume_instance_token`: "token" when the row was resumed, false otherwise. */
+  resumed?: "token" | false;
 }
 
 export interface HeartbeatRequest {

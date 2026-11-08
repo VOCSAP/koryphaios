@@ -1,5 +1,7 @@
 import { test, expect, beforeAll, afterAll } from "bun:test";
 import { hostname } from "node:os";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { startBroker, stopBroker, post, livePid, type TestBroker, openBrokerDb } from "./_helper.ts";
 import {
@@ -34,6 +36,8 @@ afterAll(async () => {
 interface RegisterExtras {
   desk_session?: string;
   cc_session_id?: string;
+  pid?: number;
+  pid_generation?: string;
 }
 
 async function register(
@@ -315,6 +319,7 @@ interface RegisterReply {
   peer_id: string;
   instance_token: string;
   inbox_binding?: { version: number; run_ref: string; group_id: string } | null;
+  resumed?: "token" | false;
   error?: string;
 }
 
@@ -457,7 +462,7 @@ test("a bound candidate reached through cc_session_id is not resumed either, and
   expect(rows.map((r) => r.instance_token).sort()).toEqual([b.body.instance_token, other.body.instance_token].sort());
 });
 
-test("the proof of an instance does not replace a canonical association held by another bound instance", async () => {
+test("the proof of an instance resumed by token takes the session key from a dormant holder and never hands out its identity", async () => {
   const run = await mintRunCredential("g-inbox-cost");
   const opts = { desk_session: "tile-1" };
   const b = await registerAttested(run, "hostCost", "/cost", opts);
@@ -466,27 +471,63 @@ test("the proof of an instance does not replace a canonical association held by 
   expect(a.body.instance_token).not.toBe(b.body.instance_token);
 
   const aAgain = await registerAttested(run, "hostCost", "/cost", { ...opts, resume: a.body.instance_token });
-  expect(aAgain.body.instance_token, "a proof of A does not match the candidate B: continuity is the accepted cost").not.toBe(
-    a.body.instance_token
-  );
+  expect([aAgain.body.resumed, aAgain.body.instance_token], "A is found by its own token, not through the key B holds").toEqual([
+    "token",
+    a.body.instance_token,
+  ]);
   expect(aAgain.body.instance_token, "and a proof of A never hands out B's identity").not.toBe(b.body.instance_token);
-  expect(canonicalOf("hostCost", "/cost")).toEqual([b.body.instance_token]);
+  expect(canonicalOf("hostCost", "/cost"), "B is dormant on a host the broker cannot probe: it no longer holds the key").toEqual([
+    a.body.instance_token,
+  ]);
+
+  const activeRun = await mintRunCredential("g-inbox-cost-active");
+  const activeB = await registerAttested(activeRun, "hostCostActive", "/cost-active", opts);
+  const activeA = await registerAttested(activeRun, "hostCostActive", "/cost-active", opts);
+  expect(activeA.body.instance_token, "precondition: the second instance is a newcomer beside the active B").not.toBe(
+    activeB.body.instance_token
+  );
+  const activeAAgain = await registerAttested(activeRun, "hostCostActive", "/cost-active", { ...opts, resume: activeA.body.instance_token });
+  expect(activeAAgain.body.resumed).toBe("token");
+  expect(canonicalOf("hostCostActive", "/cost-active"), "B is ACTIVE on a host the broker cannot probe: it keeps the key").toEqual([
+    activeB.body.instance_token,
+  ]);
 });
 
-test("a proven bound candidate that is still running is not taken over: the newcomer is a new bound instance", async () => {
+test("a proven bound candidate that is still running under another pid is not taken over: the newcomer is a new bound instance", async () => {
   const run = await mintRunCredential("g-inbox-collision");
   const opts = { desk_session: "tile-1" };
   const b = await registerAttested(run, "hostCol", "/col", opts);
 
-  const second = await registerAttested(run, "hostCol", "/col", { ...opts, resume: b.body.instance_token });
+  const second = await registerAttested(run, "hostCol", "/col", { ...opts, pid: broker.proc.pid, resume: b.body.instance_token });
 
   expect(second.status).toBe(200);
   expect(second.body.instance_token).not.toBe(b.body.instance_token);
+  expect(second.body.resumed).toBe(false);
   expect(bindingOf(second.body.instance_token), "the newcomer is bound to the run like any attested instance").toMatchObject({
     run_ref: run.run,
   });
   expect(second.body.inbox_binding).toEqual({ version: 1, run_ref: run.run, group_id: run.group });
   expect(canonicalOf("hostCol", "/col")).toEqual([b.body.instance_token]);
+});
+
+test("a proven bound candidate presented again by the same relay pid is resumed in place, and a bare presenter never resumes it", async () => {
+  const run = await mintRunCredential("g-inbox-same-pid");
+  const opts = { desk_session: "tile-1" };
+  const b = await registerAttested(run, "hostSame", "/same", opts);
+
+  const bare = await registerBare(run.group, "hostSame", "/same", { ...opts, resume_instance_token: b.body.instance_token } as RegisterExtras);
+  expect(bare.status).toBe(200);
+  expect({ resumed: bare.body.resumed, token: bare.body.instance_token === b.body.instance_token }).toEqual({ resumed: false, token: false });
+  expect(bindingOf(bare.body.instance_token), "a bare presenter gets no binding").toBeNull();
+  expect(brokerLogs()).toContain("resume by token refused (bound_unproven)");
+
+  const again = await registerAttested(run, "hostSame", "/same", { ...opts, resume: b.body.instance_token });
+  expect(again.status).toBe(200);
+  expect(again.body.resumed).toBe("token");
+  expect(again.body.instance_token).toBe(b.body.instance_token);
+  expect(again.body.peer_id).toBe(b.body.peer_id);
+  expect(again.body.inbox_binding).toEqual({ version: 1, run_ref: run.run, group_id: run.group });
+  expect(canonicalOf("hostSame", "/same")).toEqual([b.body.instance_token]);
 });
 
 test("a proof from another run does not resume a bound candidate", async () => {
@@ -548,7 +589,7 @@ test("a proof that is present but invalid is a refusal, never a bare registratio
   expect(pinned, "a refused attested register must not pin a group").toBeNull();
 });
 
-test("an inbox field without its proof is a 400, and a revoked run credential is a 401", async () => {
+test("an inbox operation without its proof is a 400, a bare resume token is ignored, and a revoked run credential is a 401", async () => {
   const run = await mintRunCredential("g-inbox-fields");
   const withResume = await registerBare(run.group, "hostFld", "/fld", {
     resume_instance_token: "x",
@@ -556,7 +597,8 @@ test("an inbox field without its proof is a 400, and a revoked run credential is
   const withOperation = await registerBare(run.group, "hostFld", "/fld2", {
     inbox_operation: "register",
   } as RegisterExtras);
-  expect([withResume.status, withOperation.status]).toEqual([400, 400]);
+  expect([withResume.status, withOperation.status]).toEqual([200, 400]);
+  expect(withResume.body.resumed).toBe(false);
 
   const revoke = {
     session_ref: `window-${run.run}`,
@@ -583,4 +625,253 @@ test("the binding is written with the peer in one transaction: a failing binding
   }
   const after = await registerAttested(run, "hostAtomic", "/atomic");
   expect(after.status).toBe(200);
+});
+
+// Resume by presented token, and the liveness of a relay pid. The rows live on
+// the broker's own host so that its pid probe applies; a second live pid is
+// the broker's own.
+const HERE = hostname();
+const relayA = (): number => livePid();
+const relayB = (): number => broker.proc.pid;
+
+function registerRelay(group: string, host: string, cwd: string, pid: number, extras: Record<string, unknown> = {}) {
+  return post<RegisterReply>(`${broker.url}/register`, { ...registerBody(group, host, cwd, {}), pid, ...extras });
+}
+
+/** Every line the broker has logged so far. */
+function brokerLogs(): string {
+  return [join(broker.tmpDir, "logs"), broker.tmpDir]
+    .filter((d) => existsSync(d))
+    .flatMap((d) => readdirSync(d).filter((f) => f.endsWith(".log")).map((f) => readFileSync(join(d, f), "utf8")))
+    .join("\n");
+}
+
+function rowOf(token: string): { status: string; pid_generation: string | null; group_id: string; cwd: string } | null {
+  const db = openBrokerDb(broker.dbPath, { readonly: true });
+  try {
+    return db.query("SELECT status, pid_generation, group_id, cwd FROM peers WHERE instance_token = ?").get(token) as {
+      status: string;
+      pid_generation: string | null;
+      group_id: string;
+      cwd: string;
+    } | null;
+  } finally {
+    db.close();
+  }
+}
+
+test("two peers sharing host, cwd and group each get their own identity back by token, whatever the order", async () => {
+  const a = await registerRelay("default", HERE, "/rt-two", relayA());
+  const b = await registerRelay("default", HERE, "/rt-two", relayB());
+  expect(b.body.peer_id, "precondition: the second relay got a suffixed identity").not.toBe(a.body.peer_id);
+
+  const bAgain = await registerRelay("default", HERE, "/rt-two", relayB(), { resume_instance_token: b.body.instance_token });
+  expect(canonicalOf(HERE, "/rt-two"), "the resume of B leaves the session key with A, whose pid is alive").toEqual([a.body.instance_token]);
+  const aAgain = await registerRelay("default", HERE, "/rt-two", relayA(), { resume_instance_token: a.body.instance_token });
+
+  expect({
+    a: [aAgain.status, aAgain.body.resumed, aAgain.body.instance_token, aAgain.body.peer_id],
+    b: [bAgain.status, bAgain.body.resumed, bAgain.body.instance_token, bAgain.body.peer_id],
+    rows: peerCount(HERE, "/rt-two"),
+  }).toEqual({
+    a: [200, "token", a.body.instance_token, a.body.peer_id],
+    b: [200, "token", b.body.instance_token, b.body.peer_id],
+    rows: 2,
+  });
+});
+
+test("a resume that breaks a rule is ignored: ordinary registration, resumed false, nothing taken from the row", async () => {
+  interface Attempt {
+    name: string;
+    token?: string;
+    host?: string;
+    group?: string;
+    rowPid?: number;
+    pid?: number;
+    rowGeneration?: string;
+    generation?: string;
+    relayed?: boolean;
+  }
+  const attempts: Attempt[] = [
+    { name: "unknown token", token: crypto.randomUUID() },
+    { name: "another relay pid", pid: relayB() },
+    { name: "another group", group: "g-resume-other" },
+    { name: "another host", host: "hostResumeOther" },
+    { name: "dead pid", rowPid: 999_999_999, pid: 999_999_999 },
+    { name: "generation differs", rowGeneration: "gen-1", generation: "gen-2" },
+    { name: "generation omitted", rowGeneration: "gen-1" },
+    { name: "relayed row", relayed: true },
+    // The seeded sentinel rows are local, in group default, with host "" and pid 0: only the shape guard refuses them.
+    { name: "operator sentinel row", token: "__operator__", host: "", pid: 0 },
+    { name: "deck sentinel row", token: "__deck__", host: "", pid: 0 },
+    { name: "sentinel-shaped", token: "__anything__" },
+  ];
+  const outcomes: unknown[] = [];
+  const presented: string[] = [];
+  for (const [i, attempt] of attempts.entries()) {
+    const cwd = `/rt-refused-${i}`;
+    const rowPid = attempt.rowPid ?? relayA();
+    const row = await registerRelay("default", HERE, cwd, rowPid, attempt.rowGeneration ? { pid_generation: attempt.rowGeneration } : {});
+    if (attempt.relayed) dropRows("UPDATE peers SET relay_id = 'relay-test' WHERE instance_token = ?", row.body.instance_token);
+    const token = attempt.token ?? row.body.instance_token;
+    presented.push(token);
+    const res = await registerRelay(attempt.group ?? "default", attempt.host ?? HERE, cwd, attempt.pid ?? rowPid, {
+      resume_instance_token: token,
+      ...(attempt.generation ? { pid_generation: attempt.generation } : {}),
+    });
+    outcomes.push({
+      name: attempt.name,
+      status: res.status,
+      resumed: res.body.resumed,
+      reused: res.body.instance_token === row.body.instance_token,
+      group: rowOf(row.body.instance_token)?.group_id,
+    });
+  }
+  expect(outcomes).toEqual(
+    attempts.map((a) => ({ name: a.name, status: 200, resumed: false, reused: a.name === "dead pid", group: "default" }))
+  );
+
+  const logs = brokerLogs();
+  const refusalCodes = ["unknown_token", "pid", "group", "host", "pid_dead", "generation", "not_local", "sentinel"];
+  expect(
+    refusalCodes.filter((code) => !logs.includes(`resume by token refused (${code})`)),
+    "every refusal code of this table is traced"
+  ).toEqual([]);
+  const levelOf = (code: string): string[] =>
+    logs.split("\n").filter((line) => line.includes(`refused (${code})`)).map((line) => line.trim().split(/\s+/)[1] ?? "");
+  expect(
+    { pid: new Set(levelOf("pid")), group: new Set(levelOf("group")) },
+    "the pid code is the ordinary flow of a relaunched tile (info), the other codes warn"
+  ).toEqual({ pid: new Set(["INFO"]), group: new Set(["WARN"]) });
+  expect(
+    presented
+      .filter((token) => /^[0-9a-f-]{36}$/.test(token))
+      .filter((token) => logs.includes(token) || logs.includes(token.slice(0, 8))),
+    "no presented token, nor its prefix, reaches the log"
+  ).toEqual([]);
+});
+
+test("a resume field of the wrong type is a 400 that registers nothing", async () => {
+  const bad: Array<[string, unknown]> = [
+    ["resume_instance_token", 5],
+    ["resume_instance_token", ""],
+    ["resume_instance_token", "x".repeat(257)],
+    ["pid_generation", 5],
+    ["pid_generation", null],
+    ["pid_generation", ""],
+    ["pid_generation", "x".repeat(257)],
+  ];
+  const statuses: number[] = [];
+  for (const [field, value] of bad) {
+    statuses.push((await registerRelay("default", HERE, "/rt-bad", relayA(), { [field]: value })).status);
+  }
+  expect({ statuses, rows: peerCount(HERE, "/rt-bad") }).toEqual({ statuses: bad.map(() => 400), rows: 0 });
+});
+
+test("a token whose row was purged is ignored with a 200, never a conflict", async () => {
+  const a = await registerRelay("default", HERE, "/rt-purged", relayA());
+  await post(`${broker.url}/unregister`, { instance_token: a.body.instance_token });
+  expect(rowOf(a.body.instance_token)).toBeNull();
+
+  const res = await registerRelay("default", HERE, "/rt-purged", relayA(), { resume_instance_token: a.body.instance_token });
+  expect(res.status).toBe(200);
+  expect(res.body.resumed).toBe(false);
+  expect(res.body.instance_token).not.toBe(a.body.instance_token);
+});
+
+test("a dormant row is resumed in place, and a row that carries a generation refuses a resume without it", async () => {
+  const a = await registerRelay("default", HERE, "/rt-gen", relayA());
+  expect(rowOf(a.body.instance_token)?.pid_generation, "a client without a generation stores none").toBeNull();
+  await disconnect(a.body.instance_token);
+
+  const first = await registerRelay("default", HERE, "/rt-gen", relayA(), {
+    resume_instance_token: a.body.instance_token,
+    pid_generation: "gen-1",
+  });
+  expect(first.body.resumed).toBe("token");
+  expect(first.body.peer_id).toBe(a.body.peer_id);
+  expect(rowOf(a.body.instance_token)).toMatchObject({ status: "active", pid_generation: "gen-1" });
+
+  const omitted = await registerRelay("default", HERE, "/rt-gen", relayA(), { resume_instance_token: a.body.instance_token });
+  expect(omitted.body.resumed, "the row holds gen-1, a claim without a generation cannot skip the comparison").toBe(false);
+  const same = await registerRelay("default", HERE, "/rt-gen", relayA(), {
+    resume_instance_token: a.body.instance_token,
+    pid_generation: "gen-1",
+  });
+  expect(same.body.resumed).toBe("token");
+});
+
+test("a dormant row whose relay pid is alive is not resurrected by another process of the same folder", async () => {
+  const a = await registerRelay("default", HERE, "/rs-live", relayA());
+  await disconnect(a.body.instance_token);
+
+  const other = await registerRelay("default", HERE, "/rs-live", relayB());
+  expect({
+    token: other.body.instance_token === a.body.instance_token,
+    id: other.body.peer_id === a.body.peer_id,
+    key: canonicalOf(HERE, "/rs-live"),
+  }).toEqual({ token: false, id: false, key: [a.body.instance_token] });
+
+  const otherAgain = await registerRelay("default", HERE, "/rs-live", relayB(), { resume_instance_token: other.body.instance_token });
+  expect(otherAgain.body.resumed).toBe("token");
+  expect(canonicalOf(HERE, "/rs-live"), "a dormant holder whose pid is alive keeps the session key").toEqual([a.body.instance_token]);
+
+  const back = await registerRelay("default", HERE, "/rs-live", relayA());
+  expect(back.body.instance_token, "the relay that owns the row gets it back").toBe(a.body.instance_token);
+});
+
+test("an attested register never resumes an unbound row in place: it gets a new bound identity", async () => {
+  const run = await mintRunCredential("g-inbox-unbound-resume");
+  const legacy = await registerBare(run.group, "hostUnb", "/unb", { desk_session: "tile-1" });
+  const attested = await registerAttested(run, "hostUnb", "/unb", { desk_session: "tile-2", resume: legacy.body.instance_token });
+
+  expect(attested.status).toBe(200);
+  expect(attested.body.resumed).toBe(false);
+  expect(attested.body.instance_token).not.toBe(legacy.body.instance_token);
+  expect(bindingOf(legacy.body.instance_token), "the legacy token is never promoted").toBeNull();
+  expect(bindingOf(attested.body.instance_token)).not.toBeNull();
+  expect(brokerLogs()).toContain("resume by token refused (attested_over_unbound)");
+});
+
+test("pid 0 is not alive at the two register-time probes: a legacy row of pid 0 holds no key and is resurrected", async () => {
+  const run = await mintRunCredential("g-inbox-pid-zero");
+  const legacy = await registerRelay(run.group, HERE, "/pz-key", 0, { desk_session: "tile-1" });
+  const attested = await registerAttested(run, HERE, "/pz-key", { desk_session: "tile-1" });
+  expect(attested.body.instance_token).not.toBe(legacy.body.instance_token);
+  expect(canonicalOf(HERE, "/pz-key"), "an attested instance takes the key from a pid 0 legacy row").toEqual([attested.body.instance_token]);
+
+  const first = await registerRelay("default", HERE, "/pz-active", 0);
+  const second = await registerRelay("default", HERE, "/pz-active", relayA());
+  expect(second.body.instance_token, "an active row of pid 0 is read as dormant and resurrected, not as a collision").toBe(first.body.instance_token);
+});
+
+test("a register without pid_generation keeps the stored one for the same pid and clears it when the pid changes", async () => {
+  const first = await registerRelay("default", "hostGenKeep", "/gen-keep", relayA(), { pid_generation: "gen-1" });
+  await disconnect(first.body.instance_token);
+  const same = await registerRelay("default", "hostGenKeep", "/gen-keep", relayA());
+  expect(same.body.instance_token).toBe(first.body.instance_token);
+  expect(rowOf(first.body.instance_token)?.pid_generation, "same pid: the stored generation still describes it").toBe("gen-1");
+
+  await disconnect(first.body.instance_token);
+  const moved = await registerRelay("default", "hostGenKeep", "/gen-keep", relayB());
+  expect(moved.body.instance_token).toBe(first.body.instance_token);
+  expect(rowOf(first.body.instance_token)?.pid_generation, "another pid: the old generation describes a process that is gone").toBeNull();
+});
+
+test("a dormant row whose relay pid is dead is still resurrected by session key", async () => {
+  const dead = 999_999_999;
+  const a = await registerRelay("default", HERE, "/rs-dead", dead);
+  await disconnect(a.body.instance_token);
+  const next = await registerRelay("default", HERE, "/rs-dead", relayB());
+  expect(next.body.instance_token).toBe(a.body.instance_token);
+});
+
+test("a process that leaves a group and comes back to it gets its own identity back", async () => {
+  const first = await registerRelay("default", HERE, "/rs-switch", relayA());
+  await disconnect(first.body.instance_token);
+  const away = await registerRelay("g-resume-switch", HERE, "/rs-switch", relayA());
+  await disconnect(away.body.instance_token);
+
+  const back = await registerRelay("default", HERE, "/rs-switch", relayA());
+  expect([back.body.instance_token, back.body.peer_id]).toEqual([first.body.instance_token, first.body.peer_id]);
 });

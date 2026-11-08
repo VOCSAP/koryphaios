@@ -35,6 +35,9 @@ export const CONTEXT_RESUME_ACK_TTL_MS = 300_000;
 /** Advertised by the broker on /health and announced by the server at /register: both must support context resume. */
 export const CONTEXT_RESUME_VERSION = 1;
 
+/** Advertised by the broker on /health: a client sends a bare `resume_instance_token` only to a broker that announces it. */
+export const REGISTER_RESUME_VERSION = 1;
+
 const HEX64 = /^[0-9a-f]{64}$/;
 const SHA = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 const ATTEMPT_ID = /^[0-9a-f]{32}$/;

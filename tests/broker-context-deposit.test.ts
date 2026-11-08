@@ -6,11 +6,14 @@ import { join } from "node:path";
 import { Database } from "bun:sqlite";
 import { deckAuthored, groupId, livePid, sha256Hex, startBroker, stopBroker, type TestBroker, openBrokerDb } from "./_helper.ts";
 import { buildAuthProof, deriveOperatorId, generateCredential } from "../shared/approval.ts";
+import { measureWriterGeneration } from "../shared/process-generation.ts";
+import { canonicalWriterGeneration } from "../shared/relay-liveness.ts";
 import {
   CONTEXT_DEPOSIT_MAX_BODY_BYTES,
   CONTEXT_DEPOSIT_MAX_CHARS,
   CONTEXT_DEPOSITS_PER_OWNER,
   CONTEXT_RESUME_VERSION,
+  REGISTER_RESUME_VERSION,
   hashCapability,
 } from "../shared/context-buffer.ts";
 
@@ -21,6 +24,8 @@ process.env.NO_PROXY = "127.0.0.1,localhost";
 
 const HOST = hostname();
 const CWD = "C:/work/shared-cwd";
+const ownGeneration = await measureWriterGeneration(process.pid);
+const ownGenerationText = ownGeneration ? canonicalWriterGeneration(ownGeneration) : "";
 
 interface Group {
   id: string;
@@ -30,6 +35,7 @@ interface Group {
 interface Peer {
   peer_id: string;
   instance_token: string;
+  resumed?: "token" | false;
 }
 
 interface Reply {
@@ -76,6 +82,9 @@ async function register(
     pid?: number;
     bearer?: string;
     resume?: unknown;
+    resumeToken?: string;
+    host?: string;
+    pidGeneration?: string;
   } = {}
 ): Promise<Peer> {
   const hash =
@@ -90,7 +99,7 @@ async function register(
       git_root: null,
       tty: null,
       summary: "",
-      host: HOST,
+      host: opts.host ?? HOST,
       client_pid: 1,
       project_key: null,
       group_id: group === "default" ? "default" : group.id,
@@ -98,6 +107,8 @@ async function register(
       desk_session: opts.deskSession ?? randomUUID(),
       ...(hash === undefined ? {} : { deposit_capability_hash: hash }),
       ...(resume === undefined ? {} : { context_resume_version: resume }),
+      ...(opts.resumeToken === undefined ? {} : { resume_instance_token: opts.resumeToken }),
+      ...(opts.pidGeneration === undefined ? {} : { pid_generation: opts.pidGeneration }),
     },
     opts.bearer
   );
@@ -434,6 +445,33 @@ describe("POST /context/deposit on a real broker", () => {
     expect((await deposit(broker, nextCap, "t", { replace: second.body.deposit_id })).status).toBe(404);
   });
 
+  test("a resume by token that presents the bound capability keeps the earlier deposits", async () => {
+    const cap = newCapability();
+    const peer = await register(broker, G, { capability: cap });
+    const first = await deposit(broker, cap, "before the daemon restart");
+
+    const resumed = await register(broker, G, { capability: cap, resumeToken: peer.instance_token });
+    expect([resumed.resumed, resumed.instance_token]).toEqual(["token", peer.instance_token]);
+    const replaced = await deposit(broker, cap, "after the daemon restart", { replace: first.body.deposit_id });
+    expect(replaced.status, "the deposit made before the resume is still the owner's to replace").toBe(200);
+  });
+
+  test("a resume by token that presents another capability, or none, drops the earlier deposits", async () => {
+    const cap = newCapability();
+    const peer = await register(broker, G, { capability: cap });
+    const first = await deposit(broker, cap, "first launch");
+
+    const nextCap = newCapability();
+    const rebound = await register(broker, G, { capability: nextCap, resumeToken: peer.instance_token });
+    expect(rebound.resumed).toBe("token");
+    expect((await deposit(broker, cap)).status, "the old capability is no longer bound").toBe(401);
+    expect((await deposit(broker, nextCap, "t", { replace: first.body.deposit_id })).status, "the earlier deposit is gone").toBe(404);
+
+    const unbound = await register(broker, G, { capability: null, resumeToken: peer.instance_token });
+    expect(unbound.resumed).toBe("token");
+    expect((await deposit(broker, nextCap)).status, "a resume without a capability leaves the token unbound").toBe(401);
+  });
+
   test("/disconnect and /unregister refuse the capability at once", async () => {
     const capD = newCapability();
     const d = await register(broker, G, { capability: capD });
@@ -658,6 +696,13 @@ describe("context resume compatibility", () => {
 
   test("GET /health advertises the resume version as a number", async () => {
     expect(await resumeAdvertisement(broker)).toEqual({ mode: "local", version: CONTEXT_RESUME_VERSION, type: "number" });
+  });
+
+  test("GET /health advertises the register resume version in both modes", async () => {
+    const versions = await Promise.all(
+      [broker, remote].map(async (b) => ((await (await fetch(`${b.url}/health`)).json()) as Record<string, unknown>).register_resume_version)
+    );
+    expect(versions).toEqual([REGISTER_RESUME_VERSION, REGISTER_RESUME_VERSION]);
   });
 
   test("GET /health of a remote-mode broker advertises the resume version as a number", async () => {
@@ -984,12 +1029,12 @@ describe("liveness sweeps", () => {
     await stopBroker(timed);
   });
 
-  test("a dead PID and a stale heartbeat both turn the capability into a 401", async () => {
+  test("a dead PID and a stale heartbeat on a host the broker cannot probe turn the capability into a 401", async () => {
     const child = Bun.spawn(["bun", "-e", "setTimeout(() => {}, 60000)"], { stdio: ["ignore", "ignore", "ignore"] });
     const capPid = newCapability();
     await register(timed, TG, { capability: capPid, pid: child.pid });
     const capBeat = newCapability();
-    const beating = await register(timed, TG, { capability: capBeat });
+    const beating = await register(timed, TG, { capability: capBeat, host: "host-the-broker-cannot-probe" });
     expect((await deposit(timed, capPid)).status).toBe(200);
     expect((await deposit(timed, capBeat)).status).toBe(200);
 
@@ -999,6 +1044,24 @@ describe("liveness sweeps", () => {
     await call(timed, "/heartbeat", { instance_token: beating.instance_token });
     await waitFor("stale heartbeat swept", 10_000, async () => (await deposit(timed, capBeat)).status === 401);
   }, 30_000);
+
+  test.skipIf(ownGeneration === null)(
+    "a relay still running as the registered process keeps its capability without heartbeat, a reused pid does not (needs a measurable process generation)",
+    async () => {
+      // Registered before the reused pid: any sweep that dormants that one
+      // would dormant this one in the same pass, were it not for its generation.
+      const capLive = newCapability();
+      await register(timed, TG, { capability: capLive, pidGeneration: ownGenerationText });
+      const capReused = newCapability();
+      await register(timed, TG, { capability: capReused, pidGeneration: `${ownGenerationText} (another process)` });
+      expect((await deposit(timed, capLive)).status).toBe(200);
+      expect((await deposit(timed, capReused)).status).toBe(200);
+
+      await waitFor("reused pid swept", 20_000, async () => (await deposit(timed, capReused)).status === 401);
+      expect((await deposit(timed, capLive)).status, "the relay is the process that registered").toBe(200);
+    },
+    30_000
+  );
 });
 
 describe("restart and logs", () => {

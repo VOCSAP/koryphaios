@@ -15,6 +15,7 @@ import {
   writeSessionIdentityFile,
   type WriterGeneration,
 } from "../shared/peer-cache";
+import type { Logger } from "../shared/logger.ts";
 import { measureWriterGeneration } from "../shared/process-generation.ts";
 
 /** Scans EVERY file left in `dir`, not just the expected path: a deletion
@@ -202,6 +203,49 @@ describe("session-identity file", () => {
     if (process.platform !== "darwin") {
       expect(measuredHere, "control: the real platform measures the current process").not.toBeNull();
     }
+  });
+
+  /** A logger that records instead of writing; `lines` holds "<level> <message>". */
+  function recordingLogger(): Logger & { lines: string[] } {
+    const lines: string[] = [];
+    const logger: Logger & { lines: string[] } = {
+      lines,
+      file: "",
+      info: (message) => void lines.push(`info ${message}`),
+      warn: (message) => void lines.push(`warn ${message}`),
+      error: (message) => void lines.push(`error ${message}`),
+      child: () => logger,
+    };
+    return logger;
+  }
+
+  async function withPlatform<T>(platform: string, run: () => Promise<T>): Promise<T> {
+    const original = Object.getOwnPropertyDescriptor(process, "platform")!;
+    try {
+      Object.defineProperty(process, "platform", { ...original, value: platform });
+      return await run();
+    } finally {
+      Object.defineProperty(process, "platform", original);
+    }
+  }
+
+  test("a /proc read that fails (a pid that died, or no /proc) yields none and is traced on the logger it was given", async () => {
+    const log = recordingLogger();
+    const measured = await withPlatform("linux", () => measureWriterGeneration(999_999_999, log));
+    expect(measured).toBeNull();
+    expect(log.lines).toEqual(["warn Linux process generation measurement failed for pid 999999999"]);
+  });
+
+  test("the Windows measurement reports to the logger it was given", async () => {
+    const log = recordingLogger();
+    const saved = process.env.SystemRoot;
+    delete process.env.SystemRoot;
+    try {
+      expect(await withPlatform("win32", () => measureWriterGeneration(process.pid, log))).toBeNull();
+    } finally {
+      if (saved !== undefined) process.env.SystemRoot = saved;
+    }
+    expect(log.lines).toEqual(["error Cannot resolve an absolute System32 PowerShell path for process generation"]);
   });
 
   test.skipIf(process.platform === "darwin")("reader verification accepts the live writer process generation (needs a measurable process generation, refused on darwin)", async () => {
