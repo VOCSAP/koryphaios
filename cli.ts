@@ -657,6 +657,12 @@ switch (cmd) {
     operatorTrust(flags);
     break;
 
+  case "mcp-daemon": {
+    const { runMcpDaemonCommand } = await import("./shared/mcp-daemon-status.ts");
+    process.exitCode = await runMcpDaemonCommand(flags);
+    break;
+  }
+
   default:
     console.log(`claude-peers CLI v0.4
 
@@ -678,6 +684,8 @@ Usage:
                                           in the broker's memory (Kory launches)
   bun cli.ts operator-trust <export|init|validate|fingerprints>
                                           Administer the local static operator trust policy
+  bun cli.ts mcp-daemon <status|restart>  Show the shared MCP daemons and the sessions in bun
+                                          fallback; restart the daemon of this clone
 
 Note: 'send' is no longer available -- use the MCP send_message tool from
 within Claude Code (the broker requires a valid instance_token).

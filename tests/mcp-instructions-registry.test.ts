@@ -72,7 +72,9 @@ type Verdict = { carries: true; name: string } | { carries: false };
 const TRIAGED_DOMAIN_FILES: ReadonlyArray<{ file: string; verdict: Verdict }> = [
   { file: "server.ts", verdict: { carries: true, name: "claude-peers" } },
   { file: "server-deck.ts", verdict: { carries: true, name: "kory-operator" } },
-  { file: "server-roadmap.ts", verdict: { carries: true, name: "kory-roadmap" } },
+  { file: "server-roadmap.ts", verdict: { carries: false } },
+  { file: "shared/roadmap-server.ts", verdict: { carries: true, name: "kory-roadmap" } },
+  { file: "shared/mcp-daemon-server.ts", verdict: { carries: false } },
   { file: "desktop/mcp/deck-control-mcp.ts", verdict: { carries: true, name: "deck-control" } },
   { file: "desktop/mcp/demo-browser-mcp.ts", verdict: { carries: true, name: "demo-browser" } },
   { file: "desktop/src/main/graph-engine.ts", verdict: { carries: false } },

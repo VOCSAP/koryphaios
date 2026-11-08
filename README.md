@@ -425,6 +425,39 @@ bun cli.ts status                         # broker status, ws clients, all activ
 bun cli.ts peers [--include-dormant]      # list peers across all groups
 bun cli.ts groups                         # active peer counts per group_id
 bun cli.ts kill-broker                    # stop the broker (Linux/macOS only)
+bun cli.ts mcp-daemon status              # shared MCP daemons, stale code, sessions in bun fallback
+bun cli.ts mcp-daemon restart             # stop the daemon of this clone so the next session starts a new one
+```
+
+### Updating the shared MCP daemon
+
+The shared MCP daemon keeps the code it started with. After a `git pull` or any edit of `mcp-daemon.ts` or `shared/`, run these two commands from the clone the sessions use:
+
+```bash
+bun cli.ts mcp-daemon status     # a daemon of this clone that prints "daemon code is stale" runs the old code
+bun cli.ts mcp-daemon restart    # asks it to stop; the relays reconnect, start a daemon on the new code and resume their sessions
+```
+
+`status` scans the ten candidate ports and prints one line per port: free, a live daemon (pid, version, sessions, code root), a daemon of another clone, or no answer. It also lists the sessions that fell back to bun, from the `mcp-fallback-<pid>.json` files the relays write, and ignores those whose process is gone. `restart` stops only the daemon whose code root is this clone's. If it has not stopped 5 seconds after the request, `restart` stops the pid named in its state file, but only when that pid is alive, was created at the time the state file records, runs `kory-mcp-daemon` or `bun`, and is not 0 or above 2147483647; each refusal prints its reason. Neither command creates `~/.claude/peers/mcp-daemon.key`: without it they say so and do nothing.
+
+#### Relay form of the MCP configuration
+
+The relay (`claude-peers-relay`, built by `cargo build --release` in `relay/`, output `relay/target/release/claude-peers-relay[.exe]`) replaces `bun` as the `command` of each entry and copies the MCP traffic to the shared daemon. `--family` picks the served family, `--fallback` names the `server.ts` or `server-roadmap.ts` of the clone and also locates `mcp-daemon.ts`, and `--bun <path>` sets the interpreter for the daemon and the fallback (`bun` from the `PATH` when absent). The install location of the binary is not fixed yet: replace `<relay-binary>` with the path of your build.
+
+```bash
+claude mcp add --scope user --transport stdio claude-peers -- <relay-binary> --family peers --fallback ~/koryphaios/server.ts
+claude mcp add --scope user --transport stdio kory-roadmap -- <relay-binary> --family roadmap --fallback ~/koryphaios/server-roadmap.ts
+```
+
+Until the peers family is served by the daemon, the `claude-peers` relay falls back to `bun server.ts` and `bun cli.ts mcp-daemon status` lists that session as a fallback. Working sessions stay on the `bun` form above until the manual validation of the daemon is done. Use the relay form for test sessions only, through a separate configuration file passed with `--mcp-config <file> --strict-mcp-config`, so that no other MCP entry applies:
+
+```json
+{
+  "mcpServers": {
+    "claude-peers": { "command": "<relay-binary>", "args": ["--family", "peers", "--fallback", "<clone>/server.ts"] },
+    "kory-roadmap": { "command": "<relay-binary>", "args": ["--family", "roadmap", "--fallback", "<clone>/server-roadmap.ts"] }
+  }
+}
 ```
 
 `bun cli.ts send` was removed in v0.3: the broker requires a valid `instance_token` for routing, which only registered Claude Code peers hold. Use the MCP `send_message` tool from a Claude session.

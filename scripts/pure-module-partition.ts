@@ -34,6 +34,8 @@ export const EXEMPTIONS: Exemptions = {
       `${DAEMON_REASON_MARKER} (imports startBroker from tests/_helper.ts); run by the '${INTEGRATION_STEP_NAME}' step in desktop-build.yml, not the pure-module matrix`,
     "mcp-roadmap-ack.test.ts":
       `${DAEMON_REASON_MARKER} (imports startBroker from tests/_helper.ts, and Bun.spawn's \`bun server.ts\` directly); run by the '${INTEGRATION_STEP_NAME}' step in desktop-build.yml, not the pure-module matrix`,
+    "mcp-daemon-roadmap.test.ts":
+      `${DAEMON_REASON_MARKER} (imports startBroker from tests/_helper.ts, and binds the in-process MCP daemon on a loopback port); run by the '${INTEGRATION_STEP_NAME}' step in desktop-build.yml, not the pure-module matrix`,
     "desktop-clodex-lifecycle-io.test.ts":
       `${NATIVE_DEPS_REASON_MARKER} (spawns desktop/node_modules/electron and type-checks against desktop/node_modules/typescript); run by the '${INTEGRATION_STEP_NAME}' step in desktop-build.yml, not the pure-module matrix`,
     "desktop-file-lock-electron.test.ts":
