@@ -132,8 +132,15 @@ function parseDacl(sddl: string): { flags: string; aces: ParsedAce[] } | null {
   return { flags: firstAce < 0 ? dacl : dacl.slice(0, firstAce), aces };
 }
 
+const BUILT_IN_ADMINISTRATOR_SID = /^S-1-5-21-\d+-\d+-\d+-500$/i;
+
+// icacls writes the built-in Administrator account as the alias LA, not as its SID.
+function isCurrentUser(trustee: string, userSid: string): boolean {
+  return trustee === userSid || (trustee === "LA" && BUILT_IN_ADMINISTRATOR_SID.test(userSid));
+}
+
 function isOffending(ace: ParsedAce, userSid: string): boolean {
-  return ace.type !== "A" || (ace.trustee !== userSid && !WINDOWS_SYSTEM_TRUSTEES.includes(ace.trustee));
+  return ace.type !== "A" || (!isCurrentUser(ace.trustee, userSid) && !WINDOWS_SYSTEM_TRUSTEES.includes(ace.trustee));
 }
 
 // A file is acceptable when it does not inherit and every ACE is an allow for
@@ -147,7 +154,7 @@ export function windowsAclVerdict(sddl: string, userSid: string): string | null 
   for (const ace of dacl.aces) {
     if (isOffending(ace, userSid)) problems.push(`ACE ${ace.raw} is not an allow for the user, SYSTEM or Administrators`);
   }
-  if (!dacl.aces.some((ace) => ace.trustee === userSid && ace.type === "A")) problems.push("the current user has no ACE");
+  if (!dacl.aces.some((ace) => isCurrentUser(ace.trustee, userSid) && ace.type === "A")) problems.push("the current user has no ACE");
   return problems.length > 0 ? problems.join("; ") : null;
 }
 

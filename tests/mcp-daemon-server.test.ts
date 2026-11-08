@@ -748,6 +748,29 @@ describe("shared key file", () => {
     else expect(verdict).toContain(problem);
   });
 
+  describe("the SDDL alias LA", () => {
+    const ADMIN_SID = "S-1-5-21-1-2-3-500";
+    const SDDL = "D:PAI(A;;FA;;;LA)(A;;FA;;;SY)(A;;FA;;;BA)";
+
+    test("is the current user when the user is the built-in Administrator", () => {
+      expect(windowsAclVerdict(SDDL, ADMIN_SID)).toBeNull();
+      expect(windowsAclVerdict(`D:P(A;;FA;;;${ADMIN_SID})(A;;FA;;;SY)`, ADMIN_SID)).toBeNull();
+    });
+
+    test.each(["S-1-5-21-1-2-3-1001", "S-1-5-21-1-2-3-5000", "S-1-5-21-1-2-3-500-1", "S-1-5-32-500"])(
+      "is another account when the user is %s",
+      (userSid) => {
+        const verdict = windowsAclVerdict(SDDL, userSid);
+        expect(verdict).toContain("ACE A;;FA;;;LA is not an allow");
+        expect(verdict).toContain("the current user has no ACE");
+      },
+    );
+
+    test("never turns a deny ACE into an allow", () => {
+      expect(windowsAclVerdict("D:P(D;;FA;;;LA)(A;;FA;;;SY)", ADMIN_SID)).toContain("D;;FA;;;LA");
+    });
+  });
+
   test("a protected key is accepted, and the tools are only asked to read", () => {
     expect(loadKey(protectedKey(), silent, readOnlyAcl(GOOD)).equals(key)).toBe(true);
   });
