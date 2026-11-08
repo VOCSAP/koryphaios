@@ -1,7 +1,7 @@
 import { realpathSync } from "node:fs";
-import { homedir, userInfo } from "node:os";
+import { homedir } from "node:os";
 import { coreLogDir, createLogger } from "./shared/logger.ts";
-import { daemonCodeRoot, installProcessHandlers, runDaemon, scrubSessionEnv } from "./shared/mcp-daemon-lifecycle.ts";
+import { daemonCodeRoot, installProcessHandlers, osUsername, runDaemon, scrubSessionEnv } from "./shared/mcp-daemon-lifecycle.ts";
 
 const logDir = coreLogDir();
 const log = createLogger({ dir: logDir, name: "server", mirrorToConsole: false }).child("daemon");
@@ -14,7 +14,7 @@ const { createRoadmapServer } = await import("./shared/roadmap-server.ts");
 const codeDir = realpathSync.native(import.meta.dir);
 const run = runDaemon({
   home: homedir(),
-  username: userInfo().username,
+  username: osUsername,
   env: process.env,
   codeRoot: daemonCodeRoot(codeDir),
   codeDir,

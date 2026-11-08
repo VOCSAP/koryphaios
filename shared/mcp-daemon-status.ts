@@ -1,9 +1,17 @@
 import { readFileSync, readdirSync, realpathSync, statSync } from "node:fs";
-import { homedir, userInfo } from "node:os";
+import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import { coreLogDir, createLogger, type Logger } from "./logger.ts";
 import { controlRequest, type ControlOutcome, type ControlRequestOptions } from "./mcp-daemon-control.ts";
-import { candidatePorts, codeFingerprint, daemonCodeRoot, filetimeFromCreationUtc, stateFilePath } from "./mcp-daemon-lifecycle.ts";
+import {
+  UsernameError,
+  candidatePorts,
+  codeFingerprint,
+  daemonCodeRoot,
+  filetimeFromCreationUtc,
+  osUsername,
+  stateFilePath,
+} from "./mcp-daemon-lifecycle.ts";
 import { permissionVerdict } from "./mcp-daemon-server.ts";
 import { measureWriterGeneration } from "./process-generation.ts";
 
@@ -27,7 +35,8 @@ function parseObject(text: string): Record<string, unknown> {
 
 export interface McpDaemonDeps {
   peersDir: string;
-  username: string;
+  /** The account name, or a function reading it when the ports are derived from it. */
+  username: string | (() => string);
   env: Env;
   /** The clone whose daemon is meant: the directory that holds mcp-daemon.ts. */
   codeDir: string;
@@ -272,6 +281,12 @@ async function restartCommand(deps: McpDaemonDeps): Promise<number> {
   return failed ? 1 : 0;
 }
 
+function refuseUnusableUsername(e: unknown): number {
+  if (!(e instanceof UsernameError)) throw e;
+  console.error(`cannot tell which ports the daemon uses: ${e.message}`);
+  return 1;
+}
+
 export async function runMcpDaemonCommand(args: string[], base: McpDaemonDeps = realDeps()): Promise<number> {
   // Files and replies of other processes reach the output: a control character could rewrite the terminal or fake a line.
   const deps: McpDaemonDeps = { ...base, print: (line) => base.print(line.replace(CONTROL_CHARS, "?")) };
@@ -280,7 +295,11 @@ export async function runMcpDaemonCommand(args: string[], base: McpDaemonDeps = 
     deps.print(USAGE);
     return 2;
   }
-  return action === "status" ? statusCommand(deps) : restartCommand(deps);
+  try {
+    return await (action === "status" ? statusCommand(deps) : restartCommand(deps));
+  } catch (e) {
+    return refuseUnusableUsername(e);
+  }
 }
 
 async function measuredPidStart(pid: number, log: Logger): Promise<string | null> {
@@ -315,11 +334,11 @@ async function imageOfPid(pid: number, log: Logger): Promise<string | null> {
   return out.exitCode === 0 && text !== "" ? text : null;
 }
 
-function realDeps(): McpDaemonDeps {
+export function realDeps(): McpDaemonDeps {
   const log = createLogger({ dir: coreLogDir(), name: "server", mirrorToConsole: false }).child("daemon-cli");
   return {
     peersDir: join(homedir(), ".claude", "peers"),
-    username: userInfo().username,
+    username: osUsername,
     env: process.env,
     codeDir: realpathSync.native(join(import.meta.dir, "..")),
     log,

@@ -1,5 +1,6 @@
+import { dlopen, FFIType, ptr } from "bun:ffi";
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, extname, join, posix } from "node:path";
 import { createLogger, type Logger } from "./logger.ts";
 import { controlRequest, type ControlOutcome } from "./mcp-daemon-control.ts";
@@ -42,14 +43,88 @@ export function fnv1a32(text: string): number {
   return hash;
 }
 
-export function candidatePorts(username: string, env: Env, log: Logger): number[] {
+export class UsernameError extends Error {}
+
+export function checkedUsername(name: string, origin: string): string {
+  if (name.trim() === "") throw new UsernameError(`the user name from ${origin} is ${name === "" ? "empty" : JSON.stringify(name)}`);
+  return name;
+}
+
+export interface UsernameProbes {
+  platform: NodeJS.Platform;
+  /** GetUserNameW; null when the call fails. */
+  windowsUserName(): string | null;
+  posixUserName(): string;
+}
+
+/** `capacity` is the buffer size in UTF-16 units; 257 holds any account name. */
+export function getUserNameW(capacity = 257): string | null {
+  const lib = dlopen("advapi32.dll", { GetUserNameW: { args: [FFIType.ptr, FFIType.ptr], returns: FFIType.i32 } });
+  try {
+    const buf = new Uint16Array(capacity);
+    const len = new Uint32Array([buf.length]);
+    const ok = lib.symbols.GetUserNameW(ptr(buf), ptr(len));
+    const written = len[0] as number;
+    if (ok === 0 || written === 0) return null;
+    return new TextDecoder("utf-16le").decode(buf.subarray(0, written - 1));
+  } finally {
+    lib.close();
+  }
+}
+
+export interface IdRun {
+  exitCode: number | null;
+  stdout: string;
+  stderr: string;
+}
+
+function runId(command: string, args: string[]): IdRun {
+  const out = Bun.spawnSync([command, ...args], { stdout: "pipe", stderr: "pipe" });
+  return { exitCode: out.exitCode, stdout: out.stdout.toString(), stderr: out.stderr.toString() };
+}
+
+/** Name of the real uid, as getpwuid_r(getuid()) gives the relay; os.userInfo reads $USER, which the relay does not pass. */
+export function idRealUserName(run: (command: string, args: string[]) => IdRun = runId): string {
+  const command = existsSync("/usr/bin/id") ? "/usr/bin/id" : "id";
+  const out = run(command, ["-run"]);
+  if (out.exitCode !== 0) throw new Error(`${command} -run exited ${out.exitCode}: ${out.stderr.trim()}`);
+  return out.stdout.trim();
+}
+
+export function systemUsernameProbes(
+  platform: NodeJS.Platform = process.platform,
+  run: (command: string, args: string[]) => IdRun = runId,
+): UsernameProbes {
+  return { platform, windowsUserName: () => getUserNameW(), posixUserName: () => idRealUserName(run) };
+}
+
+/**
+ * The account name the relay computes its ports from, read the way the relay
+ * reads it and never from USERNAME or USER, which the relay does not pass to the daemon.
+ */
+export function osUsername(probes: UsernameProbes = systemUsernameProbes()): string {
+  const windows = probes.platform === "win32";
+  const origin = windows ? "GetUserNameW" : "id -run";
+  let name: string | null;
+  try {
+    name = windows ? probes.windowsUserName() : probes.posixUserName();
+  } catch (e) {
+    throw new UsernameError(`${origin} failed: ${e instanceof Error ? e.message : String(e)}`);
+  }
+  if (name === null) throw new UsernameError(`${origin} failed`);
+  return checkedUsername(name, origin);
+}
+
+/** `username` is read only when the ports are derived from it. */
+export function candidatePorts(username: string | (() => string), env: Env, log: Logger): number[] {
   const override = env[PORT_ENV];
   if (override !== undefined && override !== "") {
     const port = Number(override);
     if (Number.isInteger(port) && port >= 1 && port <= 65535) return [port];
     log.warn(`ignoring ${PORT_ENV}=${override}: not a port number`);
   }
-  const base = PORT_BASE + (fnv1a32(username.toLowerCase()) % PORT_SPAN);
+  const name = checkedUsername(typeof username === "function" ? username() : username, "the caller");
+  const base = PORT_BASE + (fnv1a32(name.toLowerCase()) % PORT_SPAN);
   return Array.from({ length: CANDIDATE_COUNT }, (_, i) => base + i);
 }
 
@@ -229,7 +304,8 @@ const realClock: DaemonClock = {
 
 export interface RunDaemonOptions {
   home: string;
-  username: string;
+  /** The account name, or a function reading it; read only when the ports are derived from it, and a failure stops the daemon with the cause logged. */
+  username: string | (() => string);
   env: Env;
   codeRoot: string;
   codeDir: string;

@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
@@ -11,18 +11,25 @@ import {
   filetimeFromCreationUtc,
   fingerprintFiles,
   fnv1a32,
+  getUserNameW,
+  idRealUserName,
   idleSeconds,
   installProcessHandlers,
   launchLockPath,
+  osUsername,
   ownPidStart,
   runDaemon,
   scrubSessionEnv,
   stateFilePath,
+  systemUsernameProbes,
+  UsernameError,
   type DaemonRun,
   type RunDaemonOptions,
+  type UsernameProbes,
 } from "../shared/mcp-daemon-lifecycle.ts";
 import { FRAME_TYPE } from "../shared/mcp-daemon-protocol.ts";
 import { startDaemon, type DaemonHandle } from "../shared/mcp-daemon-server.ts";
+import { runMcpDaemonCommand, type McpDaemonDeps } from "../shared/mcp-daemon-status.ts";
 import { reachedWithin } from "./_bounded-await.ts";
 import { CODE_ROOT, FakeClock, FakeRelay, harness, key, linkTestKey, settle, until, within } from "./_mcp-daemon-fake-relay.ts";
 
@@ -94,7 +101,7 @@ interface Started {
   statePath: (port: number) => string;
 }
 
-function begin(over: Partial<RunDaemonOptions> & { ports: number[]; home?: string }): Started {
+function begin(over: Partial<RunDaemonOptions> & { home?: string }): Started {
   const home = over.home ?? newHome();
   const logDir = join(root, `logs${++counter}`);
   const run = runDaemon({
@@ -134,6 +141,210 @@ describe("code root", () => {
 
   test.each(cases)("hashes the path $path to the fixture digest", ({ path, sha256 }) => {
     expect(daemonCodeRoot(path)).toBe(sha256);
+  });
+});
+
+function accountNameFromTheSystem(): string {
+  const command =
+    process.platform === "win32" ? [join(process.env["SystemRoot"] ?? "C:\\Windows", "System32", "whoami.exe")] : ["id", "-un"];
+  const out = Bun.spawnSync(command, { stdout: "pipe", stderr: "pipe" });
+  expect(out.exitCode).toBe(0);
+  return out.stdout.toString().trim().split("\\").pop() as string;
+}
+
+describe("account name", () => {
+  const windows = (name: string | null, over: Partial<UsernameProbes> = {}): UsernameProbes => ({
+    platform: "win32",
+    windowsUserName: () => name,
+    posixUserName: () => {
+      throw new Error("the POSIX probe must not run on Windows");
+    },
+    ...over,
+  });
+
+  test("reads GetUserNameW on Windows and the POSIX probe elsewhere", () => {
+    expect(osUsername(windows("Olivier"))).toBe("Olivier");
+    expect(
+      osUsername({ platform: "linux", posixUserName: () => "olivier", windowsUserName: () => null }),
+    ).toBe("olivier");
+  });
+
+  test.each([[""], ["  "]])("refuses the name %j", (name) => {
+    expect(() => osUsername(windows(name))).toThrow(UsernameError);
+    expect(() => osUsername(windows(name))).toThrow("GetUserNameW");
+  });
+
+  test("accepts an account that is really named unknown", () => {
+    expect(osUsername(windows("unknown"))).toBe("unknown");
+    expect(osUsername({ platform: "darwin", posixUserName: () => "unknown", windowsUserName: () => null })).toBe("unknown");
+  });
+
+  test("names the failing call when GetUserNameW returns nothing or throws", () => {
+    expect(() => osUsername(windows(null))).toThrow("GetUserNameW failed");
+    expect(() =>
+      osUsername(
+        windows(null, {
+          windowsUserName: () => {
+            throw new Error("advapi32 is missing");
+          },
+        }),
+      ),
+    ).toThrow("advapi32 is missing");
+    expect(() =>
+      osUsername({
+        platform: "linux",
+        windowsUserName: () => null,
+        posixUserName: () => {
+          throw new Error("no passwd entry");
+        },
+      }),
+    ).toThrow("id -run failed: no passwd entry");
+  });
+
+  test("id -run is asked for the real user name and a failure or an empty answer is refused", () => {
+    const seen: Array<[string, string[]]> = [];
+    const answer = (exitCode: number | null, stdout: string, stderr = "") => (command: string, args: string[]) => {
+      seen.push([command, args]);
+      return { exitCode, stdout, stderr };
+    };
+    expect(idRealUserName(answer(0, "olivier\n"))).toBe("olivier");
+    expect(seen[0]?.[0]).toMatch(/(^|\/)id$/);
+    expect(seen[0]?.[1]).toEqual(["-run"]);
+    expect(() => idRealUserName(answer(1, "", "id: cannot find name for user ID 4242\n"))).toThrow(
+      "id -run exited 1: id: cannot find name for user ID 4242",
+    );
+    expect(() => osUsername(systemUsernameProbes("linux", answer(0, "\n")))).toThrow("the user name from id -run is empty");
+    expect(() => osUsername(systemUsernameProbes("darwin", answer(127, "", "not found")))).toThrow("id -run exited 127: not found");
+    seen.length = 0;
+    expect(osUsername(systemUsernameProbes("darwin", answer(0, "olivier\n")))).toBe("olivier");
+    expect(seen.map(([, args]) => args)).toEqual([["-run"]]);
+  });
+
+  test("candidatePorts reads the name only when it derives the ports", () => {
+    const { log } = recordingLog();
+    const unreadable = () => {
+      throw new UsernameError("id -run failed");
+    };
+    expect(() => candidatePorts("", {}, log)).toThrow(UsernameError);
+    expect(() => candidatePorts(unreadable, {}, log)).toThrow("id -run failed");
+    expect(candidatePorts(unreadable, { CLAUDE_PEERS_MCP_DAEMON_PORT: "47001" }, log)).toEqual([47001]);
+    expect(candidatePorts("", { CLAUDE_PEERS_MCP_DAEMON_PORT: "47001" }, log)).toEqual([47001]);
+  });
+
+  test("the real call returns the account name whether or not USERNAME and USER are set", () => {
+    const saved = { USERNAME: process.env["USERNAME"], USER: process.env["USER"] };
+    try {
+      delete process.env["USERNAME"];
+      delete process.env["USER"];
+      expect(osUsername().toLowerCase()).toBe(accountNameFromTheSystem().toLowerCase());
+      process.env["USERNAME"] = "someone-else";
+      process.env["USER"] = "someone-else";
+      expect(osUsername().toLowerCase()).toBe(accountNameFromTheSystem().toLowerCase());
+    } finally {
+      for (const [name, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+    }
+  });
+
+  // A child process: changing USERNAME in this process does not change what os.userInfo reads here.
+  test("the status command reads the account name the way the daemon does, whatever USERNAME and USER say", () => {
+    const statusModule = join(import.meta.dir, "..", "shared", "mcp-daemon-status.ts").replaceAll("\\", "/");
+    const script = `import { realDeps } from ${JSON.stringify(statusModule)};
+const { username } = realDeps();
+console.log(typeof username === "function" ? username() : username);`;
+    const out = Bun.spawnSync([process.execPath, "-e", script], {
+      env: {
+        PATH: process.env["PATH"] ?? "",
+        SystemRoot: process.env["SystemRoot"] ?? "",
+        TEMP: process.env["TEMP"] ?? tmpdir(),
+        TMP: process.env["TMP"] ?? tmpdir(),
+        HOME: root,
+        USERPROFILE: root,
+        CLAUDE_PEERS_LOG_DIR: join(root, "status-logs"),
+        USERNAME: "someone-else",
+        USER: "someone-else",
+      },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    expect(out.stderr.toString()).toBe("");
+    expect(out.stdout.toString().trim().toLowerCase()).toBe(accountNameFromTheSystem().toLowerCase());
+  });
+
+  test.skipIf(process.platform !== "win32")("GetUserNameW with a buffer that is too small reports a failure instead of a name", () => {
+    expect(getUserNameW(1)).toBeNull();
+    expect((getUserNameW() as string).toLowerCase()).toBe(accountNameFromTheSystem().toLowerCase());
+  });
+
+  const statusDeps = (username: McpDaemonDeps["username"], env: Record<string, string> = {}): McpDaemonDeps => ({
+    peersDir: peersOf(newHome()),
+    username,
+    env,
+    codeDir,
+    log: recordingLog().log,
+    control: async () => ({ kind: "free" }),
+    pidStartOf: async () => null,
+    imageOf: async () => null,
+    isAlive: () => false,
+    kill() {},
+    sleep: async () => {},
+    now: () => 0,
+    print() {},
+  });
+
+  const unreadable = () => {
+    throw new UsernameError("id -run failed");
+  };
+
+  test.each([
+    ["status", "", "the user name from the caller is empty"],
+    ["restart", "", "the user name from the caller is empty"],
+    ["status", unreadable, "id -run failed"],
+    ["restart", unreadable, "id -run failed"],
+  ] as const)("the %s command prints the cause and exits 1 when the name is unusable (%#)", async (action, username, cause) => {
+    const errors: string[] = [];
+    const spy = spyOn(console, "error").mockImplementation((message: unknown) => void errors.push(String(message)));
+    try {
+      expect(await runMcpDaemonCommand([action], statusDeps(username))).toBe(1);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(errors.join("\n")).toContain(cause);
+  });
+
+  test("an invalid argument exits 2 before the account name is read", async () => {
+    let read = 0;
+    const deps = statusDeps(() => {
+      read++;
+      throw new UsernameError("id -run failed");
+    });
+    expect(await runMcpDaemonCommand(["bogus"], deps)).toBe(2);
+    expect(await runMcpDaemonCommand(["status", "extra"], deps)).toBe(2);
+    expect(read).toBe(0);
+  });
+
+  test("the status command does not read the name when the port is set", async () => {
+    const deps = statusDeps(unreadable, { CLAUDE_PEERS_MCP_DAEMON_PORT: "47001" });
+    expect(await runMcpDaemonCommand(["status"], deps)).toBe(0);
+  });
+
+  test.each([
+    ["an empty name", () => ""],
+    ["a function that throws", unreadable],
+  ])("the daemon does not start with %s", async (_what, username) => {
+    const started = begin({ username });
+    expect(await within(started.run.done, "the daemon to refuse")).toBe(1);
+    expect(started.run.port()).toBeUndefined();
+    expect(logOf(started.logDir)).toMatch(/the daemon cannot run[\s\S]*(is empty|id -run failed)/);
+  });
+
+  test("the daemon does not read the name when the port is set", async () => {
+    const [p0] = await freePorts(1);
+    const started = begin({ username: unreadable, env: { CLAUDE_PEERS_MCP_DAEMON_PORT: String(p0) } });
+    await serving(started, p0 as number);
+    expect(started.run.port()).toBe(p0);
   });
 });
 
@@ -888,6 +1099,61 @@ describe("the entry point", () => {
       expect(await reachedWithin(child.exited, "the daemon process to exit", 10_000)).toBe(0);
       expect(existsSync(statePath)).toBe(false);
     } finally {
+      if (child.exitCode === null) child.kill();
+    }
+  });
+
+  test("a real process started without USERNAME, as the relay starts it, listens on a port derived from the account name", async () => {
+    const home = join(root, `entry${++counter}`);
+    const peers = join(home, ".claude", "peers");
+    linkTestKey(root, join(peers, "mcp-daemon.key"));
+    const env: Record<string, string> = {
+      PATH: process.env["PATH"] ?? "",
+      SystemRoot: process.env["SystemRoot"] ?? "",
+      TEMP: process.env["TEMP"] ?? tmpdir(),
+      TMP: process.env["TMP"] ?? tmpdir(),
+      HOME: home,
+      USERPROFILE: home,
+      APPDATA: join(home, "AppData"),
+      CLAUDE_PEERS_LOG_DIR: join(home, "logs"),
+      CLAUDE_PEERS_MCP_DAEMON_IDLE_SEC: "0",
+    };
+    const oracle = accountNameFromTheSystem();
+    // The child gets back the USERNAME of this process whatever env it is given, so this process drops it while the child starts.
+    const savedUsername = process.env["USERNAME"];
+    delete process.env["USERNAME"];
+    let child: ReturnType<typeof Bun.spawn>;
+    try {
+      child = Bun.spawn([process.execPath, join(import.meta.dir, "..", "mcp-daemon.ts")], {
+        cwd: home,
+        env,
+        stdin: "ignore",
+        stdout: "ignore",
+        stderr: "pipe",
+      });
+    } finally {
+      if (savedUsername !== undefined) process.env["USERNAME"] = savedUsername;
+    }
+    const stateFile = () => readdirSync(peers).find((f) => /^mcp-daemon-\d+\.json$/.test(f));
+    let port = 0;
+    try {
+      await reachedWithin(
+        (async () => {
+          while (stateFile() === undefined) {
+            if (child.exitCode !== null) {
+              throw new Error(`the daemon exited with ${child.exitCode}: ${await new Response(child.stderr as ReadableStream).text()}`);
+            }
+            await new Promise((resolve) => setTimeout(resolve, 20));
+          }
+        })(),
+        "the daemon process to serve",
+        20_000,
+      );
+      port = Number((stateFile() as string).replace(/\D/g, ""));
+      expect(candidatePorts(oracle, {}, recordingLog().log)).toContain(port);
+    } finally {
+      if (port !== 0) await controlRequest({ port, key, op: "stop" });
+      if (child.exitCode === null) await reachedWithin(child.exited, "the daemon process to exit", 10_000);
       if (child.exitCode === null) child.kill();
     }
   });
