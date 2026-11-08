@@ -17,13 +17,13 @@ export interface BrokerConfigResult<T extends BrokerConfigFile = BrokerConfigFil
 
 export type BrokerMode = "local" | "remote" | "replica";
 
-export function settingsFilePath(): string {
+export function settingsFilePath(env: NodeJS.ProcessEnv = process.env): string {
   if (process.platform === "win32") {
-    const appdata = process.env.APPDATA;
+    const appdata = env.APPDATA;
     if (appdata) return join(appdata, "claude-peers", "config.json");
     return join(homedir(), "AppData", "Roaming", "claude-peers", "config.json");
   }
-  const xdg = process.env.XDG_CONFIG_HOME;
+  const xdg = env.XDG_CONFIG_HOME;
   if (xdg) return join(xdg, "claude-peers", "config.json");
   return join(homedir(), ".config", "claude-peers", "config.json");
 }
@@ -37,8 +37,9 @@ function decodeConfigBuffer(buffer: Buffer): string {
 
 export function readBrokerConfig<T extends BrokerConfigFile = BrokerConfigFile>(
   onWarn?: (message: string) => void,
+  env: NodeJS.ProcessEnv = process.env,
 ): BrokerConfigResult<T> {
-  const path = settingsFilePath();
+  const path = settingsFilePath(env);
   try {
     if (!existsSync(path)) return { config: {} as T, path, error: null };
     const raw = decodeConfigBuffer(readFileSync(path)).replace(/^﻿/, "");
@@ -71,17 +72,18 @@ export function parseBooleanFlag(raw: string | undefined, fallback: boolean): bo
 
 export function loadBrokerConfig<T extends BrokerConfigFile = BrokerConfigFile>(
   onWarn?: (message: string) => void,
+  env: NodeJS.ProcessEnv = process.env,
 ): BrokerConfigResult<T> {
-  const result = readBrokerConfig<T>(onWarn);
+  const result = readBrokerConfig<T>(onWarn, env);
   const fileConfig = result.config;
   return {
     ...result,
     config: {
       ...fileConfig,
-      port: Number.parseInt(process.env.CLAUDE_PEERS_PORT ?? String(fileConfig.port ?? 7899), 10),
-      broker_url: process.env.CLAUDE_PEERS_BROKER_URL ?? fileConfig.broker_url ?? null,
-      broker_token: process.env.CLAUDE_PEERS_BROKER_TOKEN ?? fileConfig.broker_token ?? null,
-      offline_replica: parseBooleanFlag(process.env.CLAUDE_PEERS_OFFLINE_REPLICA, fileConfig.offline_replica === true),
+      port: Number.parseInt(env.CLAUDE_PEERS_PORT ?? String(fileConfig.port ?? 7899), 10),
+      broker_url: env.CLAUDE_PEERS_BROKER_URL ?? fileConfig.broker_url ?? null,
+      broker_token: env.CLAUDE_PEERS_BROKER_TOKEN ?? fileConfig.broker_token ?? null,
+      offline_replica: parseBooleanFlag(env.CLAUDE_PEERS_OFFLINE_REPLICA, fileConfig.offline_replica === true),
     } as T,
   };
 }

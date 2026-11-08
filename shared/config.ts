@@ -111,9 +111,9 @@ export function operatorTrustFilePath(configPath = settingsFilePath()): string {
   return join(dirname(configPath), "operator-trust.json");
 }
 
-function defaultDbPath(): string {
+function defaultDbPath(env: NodeJS.ProcessEnv): string {
   if (process.platform === "linux" || process.platform === "darwin") {
-    return process.env.CLAUDE_PEERS_DB ?? "/var/lib/claude-peers/peers.db";
+    return env.CLAUDE_PEERS_DB ?? "/var/lib/claude-peers/peers.db";
   }
   return join(homedir(), ".claude-peers.db");
 }
@@ -127,7 +127,11 @@ function parseProvider(value: string | undefined): SummaryProvider | null {
   return null;
 }
 
-function resolveDelegationPolicy(fileCfg: FileConfig, fileResult: { path: string; error: string | null }): DelegationPolicyState {
+function resolveDelegationPolicy(
+  fileCfg: FileConfig,
+  fileResult: { path: string; error: string | null },
+  env: NodeJS.ProcessEnv
+): DelegationPolicyState {
   const values: DelegationPolicy = { ...DELEGATION_POLICY_DEFAULTS };
   const sources: Record<DelegationPolicyKey, "env" | "file" | "default"> = {
     max_rearms: "default",
@@ -154,7 +158,7 @@ function resolveDelegationPolicy(fileCfg: FileConfig, fileResult: { path: string
   ];
 
   for (const field of fields) {
-    const environment = process.env[field.environment];
+    const environment = env[field.environment];
     const result =
       environment !== undefined
         ? parseDelegationPolicyEnvironment(field.key, environment)
@@ -197,60 +201,63 @@ function resolveWarnUntrackedReply(environment: string | undefined, fileValue: u
 
 /**
  * Load configuration. Tolerant of missing file. Always returns a complete Config.
+ * `env` is the only source of CLAUDE_PEERS_* and settings-file locations: a
+ * caller serving another process passes that process's environment, except
+ * the home-directory fallback, which is this process's.
  */
-export async function loadConfig(): Promise<Config> {
+export async function loadConfig(env: NodeJS.ProcessEnv = process.env): Promise<Config> {
   const fileResult = loadBrokerConfig<FileConfig>((message) => {
     console.error(`[claude-peers] ${message}`);
-    createLogger({ dir: coreLogDir(), name: "config", mirrorToConsole: false }).child("config").error(message);
-  });
+    createLogger({ dir: coreLogDir(env), name: "config", mirrorToConsole: false }).child("config").error(message);
+  }, env);
   const fileCfg = fileResult.config;
-  const delegation_policy = resolveDelegationPolicy(fileCfg, fileResult);
+  const delegation_policy = resolveDelegationPolicy(fileCfg, fileResult, env);
   const warn_untracked_reply = resolveWarnUntrackedReply(
-    process.env.CLAUDE_PEERS_WARN_UNTRACKED_REPLY,
+    env.CLAUDE_PEERS_WARN_UNTRACKED_REPLY,
     fileCfg.warn_untracked_reply
   );
 
   const port = parseInt(
-    process.env.CLAUDE_PEERS_PORT ?? String(fileCfg.port ?? 7899),
+    env.CLAUDE_PEERS_PORT ?? String(fileCfg.port ?? 7899),
     10
   );
 
-  const db = process.env.CLAUDE_PEERS_DB ?? fileCfg.db ?? defaultDbPath();
+  const db = env.CLAUDE_PEERS_DB ?? fileCfg.db ?? defaultDbPath(env);
 
   const summary_provider: SummaryProvider =
-    parseProvider(process.env.CLAUDE_PEERS_SUMMARY_PROVIDER) ??
+    parseProvider(env.CLAUDE_PEERS_SUMMARY_PROVIDER) ??
     fileCfg.summary_provider ??
     "auto";
 
   const summary_base_url =
-    process.env.CLAUDE_PEERS_SUMMARY_BASE_URL ??
+    env.CLAUDE_PEERS_SUMMARY_BASE_URL ??
     fileCfg.summary_base_url ??
     null;
 
   const summary_api_key =
-    process.env.CLAUDE_PEERS_SUMMARY_API_KEY ??
+    env.CLAUDE_PEERS_SUMMARY_API_KEY ??
     fileCfg.summary_api_key ??
     null;
 
   // Backward-compat: CLAUDE_PEERS_ANTHROPIC_MODEL and `anthropic_model` key.
   const summary_model =
-    process.env.CLAUDE_PEERS_SUMMARY_MODEL ??
-    process.env.CLAUDE_PEERS_ANTHROPIC_MODEL ??
+    env.CLAUDE_PEERS_SUMMARY_MODEL ??
+    env.CLAUDE_PEERS_ANTHROPIC_MODEL ??
     fileCfg.summary_model ??
     fileCfg.anthropic_model ??
     DEFAULT_ANTHROPIC_MODEL;
 
   const groups: Record<string, string> = fileCfg.groups ?? {};
   const default_group = fileCfg.default_group ?? null;
-  const broker_url = process.env.CLAUDE_PEERS_BROKER_URL ?? fileCfg.broker_url ?? null;
-  const broker_token = process.env.CLAUDE_PEERS_BROKER_TOKEN ?? fileCfg.broker_token ?? null;
-  const bind_host = process.env.CLAUDE_PEERS_BIND_HOST ?? fileCfg.bind_host ?? null;
+  const broker_url = env.CLAUDE_PEERS_BROKER_URL ?? fileCfg.broker_url ?? null;
+  const broker_token = env.CLAUDE_PEERS_BROKER_TOKEN ?? fileCfg.broker_token ?? null;
+  const bind_host = env.CLAUDE_PEERS_BIND_HOST ?? fileCfg.bind_host ?? null;
   const offline_replica = parseBooleanFlag(
-    process.env.CLAUDE_PEERS_OFFLINE_REPLICA,
+    env.CLAUDE_PEERS_OFFLINE_REPLICA,
     fileCfg.offline_replica === true
   );
   const serve_replicas = parseBooleanFlag(
-    process.env.CLAUDE_PEERS_SERVE_REPLICAS,
+    env.CLAUDE_PEERS_SERVE_REPLICAS,
     fileCfg.serve_replicas === true
   );
 
