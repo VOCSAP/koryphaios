@@ -12,6 +12,8 @@ pub mod paths;
 pub mod seal;
 pub mod spawn;
 pub mod sys;
+#[cfg(windows)]
+pub mod winacl;
 
 use std::io::{BufRead, Write};
 use std::path::PathBuf;

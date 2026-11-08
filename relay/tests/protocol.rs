@@ -689,3 +689,391 @@ fn a_launch_that_fails_both_ways_is_an_error() {
     });
     assert!(out.is_err());
 }
+
+#[cfg(windows)]
+mod key_access_list {
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+
+    use claude_peers_relay::winacl;
+
+    use super::{auth, Logger, TempDir};
+
+    const USERS_INHERITABLE: &str = "*S-1-5-32-545:(OI)(CI)(RX)";
+
+    fn system32(program: &str) -> PathBuf {
+        PathBuf::from(std::env::var_os("SystemRoot").expect("SystemRoot"))
+            .join("System32")
+            .join(program)
+    }
+
+    fn icacls(path: &Path, args: &[&str]) {
+        let out = Command::new(system32("icacls.exe"))
+            .arg(path)
+            .args(args)
+            .output()
+            .expect("run icacls");
+        assert!(
+            out.status.success(),
+            "icacls {args:?} on {} failed: {}{}",
+            path.display(),
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    fn user_sid() -> String {
+        let out = Command::new(system32("whoami.exe"))
+            .args(["/user", "/fo", "csv", "/nh"])
+            .output()
+            .expect("run whoami");
+        String::from_utf8_lossy(&out.stdout)
+            .trim()
+            .rsplit(',')
+            .next()
+            .expect("whoami output")
+            .trim_matches('"')
+            .to_string()
+    }
+
+    /// Writes `sddl` as the access list of `path` without the inheritance
+    /// processing of `icacls` and `Set-Acl`, which rewrite the entry flags.
+    fn set_raw_dacl(path: &Path, sddl: &str) {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Foundation::LocalFree;
+        use windows_sys::Win32::Security::Authorization::{
+            ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+        };
+        use windows_sys::Win32::Security::{
+            SetFileSecurityW, DACL_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
+        };
+        let wide_sddl: Vec<u16> = sddl.encode_utf16().chain(Some(0)).collect();
+        let wide_path: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+        let mut descriptor = std::ptr::null_mut();
+        let converted = unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                wide_sddl.as_ptr(),
+                SDDL_REVISION_1,
+                &mut descriptor,
+                std::ptr::null_mut(),
+            )
+        };
+        assert!(converted != 0, "cannot parse {sddl}");
+        let set = unsafe {
+            SetFileSecurityW(
+                wide_path.as_ptr(),
+                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                descriptor,
+            )
+        };
+        let failure = std::io::Error::last_os_error();
+        unsafe { LocalFree(descriptor) };
+        assert!(
+            set != 0,
+            "cannot set {sddl} on {}: {failure}",
+            path.display()
+        );
+    }
+
+    /// SYSTEM's own entry satisfies the list however it is edited, so the
+    /// tests that remove the user's entry cannot run under it.
+    fn running_as_system(test: &str) -> bool {
+        let system = user_sid() == "S-1-5-18";
+        if system {
+            eprintln!("{test}: skipped, the token is SYSTEM (S-1-5-18)");
+        }
+        system
+    }
+
+    struct Dacl {
+        protected: bool,
+        /// `(flags, account)` of each entry, as `icacls /save` writes them.
+        aces: Vec<(String, String)>,
+    }
+
+    impl Dacl {
+        fn accounts(&self) -> Vec<&str> {
+            self.aces.iter().map(|(_, sid)| sid.as_str()).collect()
+        }
+    }
+
+    /// The access list of `path` as the OS reports it through `icacls /save`,
+    /// which shares no code with the relay.
+    fn dacl_of(path: &Path, scratch: &TempDir) -> Dacl {
+        let saved = scratch.path().join("dacl.txt");
+        icacls(path, &["/save", saved.to_str().expect("utf-8 path")]);
+        let units: Vec<u16> = std::fs::read(&saved)
+            .expect("saved access list")
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        let text = String::from_utf16(&units).expect("utf-16 access list");
+        let sddl = text
+            .lines()
+            .find(|l| l.starts_with("D:"))
+            .expect("a DACL line")
+            .to_string();
+        let header_end = sddl.find('(').unwrap_or(sddl.len());
+        let aces = sddl[header_end..]
+            .trim_matches(|c| c == '(' || c == ')')
+            .split(")(")
+            .filter(|ace| !ace.is_empty())
+            .map(|ace| {
+                let fields: Vec<&str> = ace.split(';').collect();
+                assert_eq!(fields[0], "A", "only allow entries are expected: {ace}");
+                (fields[1].to_string(), fields[5].to_string())
+            })
+            .collect();
+        Dacl {
+            protected: sddl[2..header_end].contains('P'),
+            aces,
+        }
+    }
+
+    fn assert_closed(dacl: &Dacl, what: &str) {
+        let accounts = dacl.accounts();
+        assert!(dacl.protected, "{what}: inheritance must be cut");
+        assert_eq!(accounts.len(), 3, "{what}: {accounts:?}");
+        assert!(
+            accounts.contains(&"SY") && accounts.contains(&"BA"),
+            "{what}: {accounts:?}"
+        );
+        assert!(
+            !accounts.iter().any(|a| ["BU", "WD", "AU"].contains(a)),
+            "{what}: {accounts:?}"
+        );
+        assert!(
+            dacl.aces.iter().all(|(flags, _)| !flags.contains("ID")),
+            "{what}: an entry is inherited"
+        );
+    }
+
+    #[test]
+    fn a_new_key_does_not_inherit_the_rights_its_directory_hands_out() {
+        let dir = TempDir::new();
+        let scratch = TempDir::new();
+        icacls(dir.path(), &["/grant", USERS_INHERITABLE]);
+        let control = dir.path().join("control.txt");
+        std::fs::write(&control, "x").expect("control file");
+        assert!(
+            dacl_of(&control, &scratch).accounts().contains(&"BU"),
+            "the directory must hand Users a right to a plain file, or this test proves nothing"
+        );
+
+        let (log, lines) = Logger::capturing("t");
+        auth::load_or_create_key(dir.path(), &log).expect("create");
+
+        assert_closed(
+            &dacl_of(&dir.path().join("mcp-daemon.key"), &scratch),
+            "the published key",
+        );
+        assert!(
+            lines.lock().expect("log").is_empty(),
+            "the key must be closed from its creation, not repaired afterwards"
+        );
+    }
+
+    #[test]
+    fn a_key_with_an_extra_access_entry_is_repaired_at_load_and_logged() {
+        let dir = TempDir::new();
+        let scratch = TempDir::new();
+        let (log, lines) = Logger::capturing("t");
+        let created = auth::load_or_create_key(dir.path(), &log).expect("create");
+        let key = dir.path().join("mcp-daemon.key");
+        icacls(&key, &["/grant", "*S-1-5-32-545:R"]);
+        assert!(
+            dacl_of(&key, &scratch).accounts().contains(&"BU"),
+            "the extra entry must be there before the load"
+        );
+
+        assert_eq!(
+            auth::load_or_create_key(dir.path(), &log).expect("repair"),
+            created
+        );
+
+        assert_closed(&dacl_of(&key, &scratch), "the repaired key");
+        let logged = lines.lock().expect("log").clone();
+        assert_eq!(logged.len(), 1, "one line per repair: {logged:?}");
+        assert!(
+            logged[0].contains("repaired the access list") && logged[0].contains("S-1-5-32-545"),
+            "{logged:?}"
+        );
+    }
+
+    #[test]
+    fn a_key_that_inherits_its_rights_is_repaired_at_load_and_logged() {
+        let dir = TempDir::new();
+        let scratch = TempDir::new();
+        icacls(dir.path(), &["/grant", USERS_INHERITABLE]);
+        let key = dir.path().join("mcp-daemon.key");
+        std::fs::write(&key, "00".repeat(32)).expect("key written by another tool");
+        assert!(
+            dacl_of(&key, &scratch).accounts().contains(&"BU"),
+            "the key must inherit the Users entry before the load"
+        );
+
+        let (log, lines) = Logger::capturing("t");
+        auth::load_or_create_key(dir.path(), &log).expect("repair");
+
+        assert_closed(&dacl_of(&key, &scratch), "the repaired key");
+        let logged = lines.lock().expect("log").clone();
+        assert_eq!(logged.len(), 1, "one line per repair: {logged:?}");
+        assert!(
+            logged[0].contains("repaired the access list")
+                && logged[0].contains("inherits access rights from its directory"),
+            "{logged:?}"
+        );
+    }
+
+    #[test]
+    fn a_key_with_a_deny_entry_is_repaired_at_load_and_logged() {
+        let dir = TempDir::new();
+        let scratch = TempDir::new();
+        let (log, lines) = Logger::capturing("t");
+        auth::load_or_create_key(dir.path(), &log).expect("create");
+        let key = dir.path().join("mcp-daemon.key");
+        icacls(&key, &["/deny", "*S-1-5-32-545:(WA)"]);
+
+        auth::load_or_create_key(dir.path(), &log).expect("repair");
+
+        assert_closed(&dacl_of(&key, &scratch), "the repaired key");
+        let logged = lines.lock().expect("log").clone();
+        assert_eq!(logged.len(), 1, "one line per repair: {logged:?}");
+        assert!(logged[0].contains("access entry of type"), "{logged:?}");
+    }
+
+    #[test]
+    fn a_key_whose_access_list_cannot_be_repaired_is_refused() {
+        let dir = TempDir::new();
+        if running_as_system("a_key_whose_access_list_cannot_be_repaired_is_refused") {
+            return;
+        }
+        let (log, lines) = Logger::capturing("t");
+        auth::load_or_create_key(dir.path(), &log).expect("create");
+        let key = dir.path().join("mcp-daemon.key");
+        let user_sid = user_sid();
+        // OWNER RIGHTS (S-1-3-4) replaces the implicit rights of the owner, so
+        // with its read-only entry as the only one that reaches this account
+        // the key stays readable and nobody here may write its access list.
+        icacls(&key, &["/remove:g", "*S-1-5-32-544"]);
+        icacls(&key, &["/grant:r", "*S-1-3-4:R"]);
+        icacls(&key, &["/remove:g", &format!("*{user_sid}")]);
+
+        let err = auth::load_or_create_key(dir.path(), &log).expect_err("an open key is refused");
+
+        assert!(err.contains("cannot be repaired"), "got {err}");
+        assert!(
+            lines.lock().expect("log").is_empty(),
+            "a repair that did not happen is not logged"
+        );
+    }
+
+    #[test]
+    fn the_key_file_is_closed_when_it_is_created_before_any_byte_is_written() {
+        let dir = TempDir::new();
+        let scratch = TempDir::new();
+        icacls(dir.path(), &["/grant", USERS_INHERITABLE]);
+        let control = dir.path().join("control.txt");
+        std::fs::write(&control, "x").expect("control file");
+        assert!(
+            dacl_of(&control, &scratch).accounts().contains(&"BU"),
+            "the directory must hand Users a right to a plain file, or this test proves nothing"
+        );
+
+        let created = dir.path().join("mcp-daemon.key.tmp");
+        let mut seen = None;
+        auth::write_private_with(&created, b"secret", &mut |p| {
+            assert_eq!(
+                std::fs::metadata(p).expect("the file exists").len(),
+                0,
+                "the hook must run before the secret is written"
+            );
+            seen = Some(dacl_of(p, &scratch));
+        })
+        .expect("write");
+
+        assert_closed(
+            &seen.expect("the hook ran"),
+            "the file at its creation, before the secret",
+        );
+        assert_eq!(std::fs::read(&created).expect("read back"), b"secret");
+    }
+
+    #[test]
+    fn an_access_list_without_an_entry_for_the_current_user_is_refused_by_the_audit() {
+        if running_as_system(
+            "an_access_list_without_an_entry_for_the_current_user_is_refused_by_the_audit",
+        ) {
+            return;
+        }
+        let dir = TempDir::new();
+        let file = dir.path().join("list.txt");
+        std::fs::write(&file, "x").expect("file");
+        icacls(&file, &["/inheritance:r"]);
+        icacls(&file, &["/grant:r", "*S-1-5-18:F"]);
+        icacls(&file, &["/grant:r", "*S-1-5-32-544:F"]);
+
+        let verdict = winacl::audit(&file).expect("read the access list");
+        assert!(
+            verdict
+                .as_ref()
+                .is_err_and(|why| why.contains("current user")),
+            "a protected list holding only SYSTEM and Administrators must be refused: {verdict:?}"
+        );
+
+        winacl::protect(&file).expect("repair");
+        assert_eq!(winacl::audit(&file).expect("read again"), Ok(()));
+    }
+
+    #[test]
+    fn a_protected_list_that_holds_an_inherited_entry_is_refused_by_the_audit() {
+        let dir = TempDir::new();
+        let scratch = TempDir::new();
+        let file = dir.path().join("list.txt");
+        std::fs::write(&file, "x").expect("file");
+        let user = user_sid();
+        let entries =
+            |flag: &str| format!("D:P(A;{flag};FA;;;SY)(A;{flag};FA;;;BA)(A;{flag};FA;;;{user})");
+
+        set_raw_dacl(&file, &entries("ID"));
+        assert!(
+            dacl_of(&file, &scratch)
+                .aces
+                .iter()
+                .all(|(flags, _)| flags.contains("ID")),
+            "the OS must keep the inherited flag on a protected list, or this test proves nothing"
+        );
+        let verdict = winacl::audit(&file).expect("read the access list");
+        assert!(
+            verdict
+                .as_ref()
+                .is_err_and(|why| why.contains("inherited access entry")),
+            "got {verdict:?}"
+        );
+
+        set_raw_dacl(&file, &entries(""));
+        assert_eq!(
+            winacl::audit(&file).expect("read again"),
+            Ok(()),
+            "the same entries without the flag are accepted"
+        );
+    }
+
+    #[test]
+    fn a_repair_that_leaves_the_list_open_is_refused_and_not_logged() {
+        let dir = TempDir::new();
+        let (log, lines) = Logger::capturing("t");
+        auth::load_or_create_key(dir.path(), &log).expect("create");
+        let key = dir.path().join("mcp-daemon.key");
+        icacls(&key, &["/grant", "*S-1-5-32-545:R"]);
+
+        let err = auth::check_permissions_with(&key, &log, &|_| Ok(()))
+            .expect_err("a list that is still open after the repair");
+
+        assert!(err.contains("after the repair"), "got {err}");
+        assert!(
+            lines.lock().expect("log").is_empty(),
+            "a repair that did not close the list is not logged"
+        );
+    }
+}

@@ -212,7 +212,7 @@ fn create_private_dir(path: &Path) -> io::Result<()> {
 pub fn load_or_create_key(peers_dir: &Path, log: &Logger) -> Result<Vec<u8>, String> {
     let path = peers_dir.join(KEY_FILE);
     match std::fs::read_to_string(&path) {
-        Ok(text) => return parse_key(&path, &text),
+        Ok(text) => return parse_key(&path, &text, log),
         Err(e) if e.kind() == ErrorKind::NotFound => {}
         Err(e) => return Err(format!("cannot read {}: {e}", path.display())),
     }
@@ -224,8 +224,10 @@ pub fn load_or_create_key(peers_dir: &Path, log: &Logger) -> Result<Vec<u8>, Str
         "{KEY_FILE}.{}.tmp",
         random_b64(8).map_err(|e| e.to_string())?
     ));
-    write_private(&tmp, hex_encode(&raw).as_bytes())
-        .map_err(|e| format!("cannot write {}: {e}", tmp.display()))?;
+    if let Err(e) = write_private(&tmp, hex_encode(&raw).as_bytes()) {
+        remove_file_logged(&tmp, log);
+        return Err(format!("cannot write {}: {e}", tmp.display()));
+    }
     let linked = std::fs::hard_link(&tmp, &path);
     remove_file_logged(&tmp, log);
     match linked {
@@ -235,11 +237,11 @@ pub fn load_or_create_key(peers_dir: &Path, log: &Logger) -> Result<Vec<u8>, Str
     }
     let text = std::fs::read_to_string(&path)
         .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-    parse_key(&path, &text)
+    parse_key(&path, &text, log)
 }
 
-fn parse_key(path: &Path, text: &str) -> Result<Vec<u8>, String> {
-    check_permissions(path)?;
+fn parse_key(path: &Path, text: &str, log: &Logger) -> Result<Vec<u8>, String> {
+    check_permissions(path, log)?;
     match hex_decode(text.trim()) {
         Some(k) if k.len() == 32 => Ok(k),
         _ => Err(format!(
@@ -261,13 +263,22 @@ fn write_private(path: &Path, data: &[u8]) -> io::Result<()> {
     f.write_all(data)
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
 fn write_private(path: &Path, data: &[u8]) -> io::Result<()> {
+    write_private_with(path, data, &mut |_| {})
+}
+
+/// Creates `path` closed to every other account, runs `before_write` on the
+/// empty file, then writes `data`.
+#[cfg(windows)]
+pub fn write_private_with(
+    path: &Path,
+    data: &[u8],
+    before_write: &mut dyn FnMut(&Path),
+) -> io::Result<()> {
     use std::io::Write;
-    let mut f = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)?;
+    let mut f = crate::winacl::create_private(path)?;
+    before_write(path);
     f.write_all(data)
 }
 
@@ -288,7 +299,7 @@ pub fn permission_verdict(mode: u32, is_dir: bool) -> Result<(), String> {
 }
 
 #[cfg(unix)]
-fn check_permissions(path: &Path) -> Result<(), String> {
+fn check_permissions(path: &Path, _log: &Logger) -> Result<(), String> {
     use std::os::unix::fs::MetadataExt;
     let uid = unsafe { libc::getuid() };
     let dir = path.parent().unwrap_or(Path::new("."));
@@ -302,8 +313,40 @@ fn check_permissions(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(not(unix))]
-fn check_permissions(_path: &Path) -> Result<(), String> {
+/// A key whose access list is open is repaired once and logged; one that stays
+/// open is refused, so the session falls back to bun.
+#[cfg(windows)]
+fn check_permissions(path: &Path, log: &Logger) -> Result<(), String> {
+    check_permissions_with(path, log, &crate::winacl::protect)
+}
+
+/// `check_permissions` with the repair injected.
+#[cfg(windows)]
+pub fn check_permissions_with(
+    path: &Path,
+    log: &Logger,
+    repair: &dyn Fn(&Path) -> io::Result<()>,
+) -> Result<(), String> {
+    use crate::winacl::audit;
+    let read = |p: &Path| {
+        audit(p).map_err(|e| format!("cannot read the access list of {}: {e}", p.display()))
+    };
+    let Err(why) = read(path)? else {
+        return Ok(());
+    };
+    repair(path).map_err(|e| {
+        format!(
+            "{} {why} and its access list cannot be repaired: {e}",
+            path.display()
+        )
+    })?;
+    if let Err(still) = read(path)? {
+        return Err(format!("{} {still} after the repair", path.display()));
+    }
+    log.line(&format!(
+        "repaired the access list of {}: it {why}",
+        path.display()
+    ));
     Ok(())
 }
 
