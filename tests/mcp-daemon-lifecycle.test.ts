@@ -18,6 +18,7 @@ import {
   launchLockPath,
   osUsername,
   ownPidStart,
+  processStartFiletime,
   runDaemon,
   scrubSessionEnv,
   stateFilePath,
@@ -29,6 +30,7 @@ import {
 } from "../shared/mcp-daemon-lifecycle.ts";
 import { FRAME_TYPE } from "../shared/mcp-daemon-protocol.ts";
 import { startDaemon, type DaemonHandle } from "../shared/mcp-daemon-server.ts";
+import { measureWriterGeneration } from "../shared/process-generation.ts";
 import { runMcpDaemonCommand, type McpDaemonDeps } from "../shared/mcp-daemon-status.ts";
 import { reachedWithin } from "./_bounded-await.ts";
 import { CODE_ROOT, FakeClock, FakeRelay, harness, key, linkTestKey, settle, until, within } from "./_mcp-daemon-fake-relay.ts";
@@ -549,6 +551,65 @@ describe("code fingerprint and start time", () => {
     expect(Number(value)).toBeLessThan(fixture.pid_start.windows.max);
   });
 
+  test.skipIf(process.platform !== "win32")("Windows only: GetProcessTimes gives the PowerShell value, without PowerShell", async () => {
+    const generation = await measureWriterGeneration(process.pid);
+    expect(generation?.platform).toBe("win32");
+    const viaPowerShell = filetimeFromCreationUtc((generation as { creationUtc: string }).creationUtc);
+    const systemRoot = process.env["SystemRoot"];
+    process.env["SystemRoot"] = "relative-and-wrong";
+    try {
+      expect(await ownPidStart(recordingLog().log)).toBe(viaPowerShell as string);
+    } finally {
+      if (systemRoot === undefined) delete process.env["SystemRoot"];
+      else process.env["SystemRoot"] = systemRoot;
+    }
+  });
+
+  test.skipIf(process.platform !== "win32")("Windows only: GetProcessTimes on a handle that is not a process reports a failure", () => {
+    expect(processStartFiletime(0n)).toBeNull();
+    expect(processStartFiletime()).toMatch(/^\d{18}$/);
+  });
+
+  test("a start time that cannot be measured is empty and logged, never a thrown error", async () => {
+    const failed = recordingLog();
+    expect(await ownPidStart(failed.log, { platform: "win32", windowsStart: () => null })).toBe("");
+    expect(failed.lines.join("\n")).toContain("GetProcessTimes failed");
+    const thrown = recordingLog();
+    const broken = () => {
+      throw new Error("kernel32.dll is missing");
+    };
+    expect(await ownPidStart(thrown.log, { platform: "win32", windowsStart: broken })).toBe("");
+    expect(thrown.lines.join("\n")).toContain("kernel32.dll is missing");
+    const noPs = recordingLog();
+    const missing = () => {
+      throw new Error("Executable not found in $PATH: ps");
+    };
+    expect(await ownPidStart(noPs.log, { platform: "darwin", run: missing })).toBe("");
+    expect(noPs.lines.join("\n")).toContain("Executable not found in $PATH: ps");
+    const badExit = recordingLog();
+    expect(await ownPidStart(badExit.log, { platform: "darwin", run: () => ({ exitCode: 1, stdout: "", stderr: "" }) })).toBe("");
+    expect(badExit.lines.join("\n")).toContain("ps exited 1");
+  });
+
+  test("outside Windows and Linux the start time is the lstart that ps prints", async () => {
+    const seen: string[][] = [];
+    const run = (command: string, args: string[]) => {
+      seen.push([command, ...args]);
+      return { exitCode: 0, stdout: "Sun Nov  8 18:22:36 2026\n", stderr: "" };
+    };
+    expect(await ownPidStart(recordingLog().log, { platform: "darwin", run })).toBe("Sun Nov  8 18:22:36 2026");
+    expect(seen).toEqual([["ps", "-o", "lstart=", "-p", String(process.pid)]]);
+  });
+
+  test("a daemon whose start time cannot be measured still serves, with an empty pid_start", async () => {
+    const [p0] = await freePorts(1);
+    const started = begin({ ports: [p0 as number], pidStart: "" });
+    await serving(started, p0 as number);
+    const state = JSON.parse(readFileSync(started.statePath(p0 as number), "utf8")) as { pid_start: string };
+    expect(state.pid_start).toBe("");
+    expect(started.run.port()).toBe(p0);
+  });
+
   test.skipIf(process.platform !== "linux")("Linux only: the own start time is field 22 of /proc/self/stat", async () => {
     const stat = readFileSync("/proc/self/stat", "utf8");
     const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
@@ -1040,121 +1101,156 @@ describe("idle shutdown", () => {
   });
 });
 
-describe("the entry point", () => {
-  test("a real process serves, drops the session variables of its shell, answers a status and stops on request", async () => {
-    const [port] = await freePorts(1);
-    const home = join(root, `entry${++counter}`);
-    const logDir = join(home, "logs");
-    linkTestKey(root, join(home, ".claude", "peers", "mcp-daemon.key"));
-    const repo = join(import.meta.dir, "..");
-    const env: Record<string, string> = {
-      PATH: process.env["PATH"] ?? "",
-      SystemRoot: process.env["SystemRoot"] ?? "",
-      TEMP: process.env["TEMP"] ?? tmpdir(),
-      TMP: process.env["TMP"] ?? tmpdir(),
-      HOME: home,
-      USERPROFILE: home,
-      APPDATA: join(home, "AppData"),
-      CLAUDE_PEERS_LOG_DIR: logDir,
-      CLAUDE_PEERS_MCP_DAEMON_PORT: String(port),
-      CLAUDE_PEERS_MCP_DAEMON_IDLE_SEC: "0",
-      CLAUDE_PEERS_FORCE_GROUP: "marker-of-the-group",
-      CLAUDE_CODE_SESSION_ID: "marker-of-the-session",
-    };
-    const child = Bun.spawn([process.execPath, join(repo, "mcp-daemon.ts")], {
-      cwd: home,
-      env,
-      stdin: "ignore",
-      stdout: "ignore",
-      stderr: "pipe",
-    });
-    const statePath = stateFilePath(join(home, ".claude", "peers"), port as number);
-    try {
-      await reachedWithin(
-        (async () => {
-          while (!existsSync(statePath)) {
-            if (child.exitCode !== null) {
-              throw new Error(`the daemon exited with ${child.exitCode}: ${await new Response(child.stderr).text()}`);
-            }
-            await new Promise((resolve) => setTimeout(resolve, 20));
-          }
-        })(),
-        "the daemon process to serve",
-        20_000,
-      );
-      const status = await controlRequest({ port: port as number, key, op: "status" });
-      expect(status.kind).toBe("reply");
-      const body = (status as { body: Record<string, unknown> }).body;
-      expect(body["pid"]).toBe(child.pid);
-      expect(body["code_root"]).toBe(daemonCodeRoot(realpathSync.native(repo)));
-      const log = logOf(logDir);
-      expect(log).toContain("removed 2 session variable(s)");
-      expect(log).toContain("CLAUDE_PEERS_FORCE_GROUP");
-      expect(log).not.toContain("marker-of-the-group");
-      expect(log).not.toContain("marker-of-the-session");
-      expect(await controlRequest({ port: port as number, key, op: "stop" })).toEqual({
-        kind: "reply",
-        body: { ok: true },
-      });
-      expect(await reachedWithin(child.exited, "the daemon process to exit", 10_000)).toBe(0);
-      expect(existsSync(statePath)).toBe(false);
-    } finally {
-      if (child.exitCode === null) child.kill();
-    }
-  });
+const ENTRY_TEST_MS = 30_000;
+const SERVE_WAIT_MS = 15_000;
+const EXIT_WAIT_MS = 5_000;
 
-  test("a real process started without USERNAME, as the relay starts it, listens on a port derived from the account name", async () => {
-    const home = join(root, `entry${++counter}`);
-    const peers = join(home, ".claude", "peers");
-    linkTestKey(root, join(peers, "mcp-daemon.key"));
-    const env: Record<string, string> = {
-      PATH: process.env["PATH"] ?? "",
-      SystemRoot: process.env["SystemRoot"] ?? "",
-      TEMP: process.env["TEMP"] ?? tmpdir(),
-      TMP: process.env["TMP"] ?? tmpdir(),
-      HOME: home,
-      USERPROFILE: home,
-      APPDATA: join(home, "AppData"),
-      CLAUDE_PEERS_LOG_DIR: join(home, "logs"),
-      CLAUDE_PEERS_MCP_DAEMON_IDLE_SEC: "0",
-    };
-    const oracle = accountNameFromTheSystem();
-    // The child gets back the USERNAME of this process whatever env it is given, so this process drops it while the child starts.
-    const savedUsername = process.env["USERNAME"];
-    delete process.env["USERNAME"];
-    let child: ReturnType<typeof Bun.spawn>;
-    try {
-      child = Bun.spawn([process.execPath, join(import.meta.dir, "..", "mcp-daemon.ts")], {
+/** Reads a child's stderr as it arrives: reading it only after the exit would hang while the child lives. */
+function collectText(stream: ReadableStream<Uint8Array> | undefined): () => string {
+  let text = "";
+  if (stream !== undefined) {
+    const decoder = new TextDecoder();
+    void (async () => {
+      for await (const chunk of stream) text += decoder.decode(chunk, { stream: true });
+    })().catch((e: unknown) => void (text += `\n[stderr reader failed: ${String(e)}]`));
+  }
+  return () => text;
+}
+
+/** Runs `body`; a failure carries the exit state, the stderr and the end of server.log of the child, so a CI log says where it stopped. */
+async function withChildReport<T>(
+  child: { exitCode: number | null },
+  logDir: string,
+  stderr: () => string,
+  body: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await body();
+  } catch (e) {
+    const logFile = join(logDir, "server.log");
+    const tail = existsSync(logFile) ? readFileSync(logFile, "utf8").trimEnd().split("\n").slice(-40).join("\n") : "(no server.log was written)";
+    const message = e instanceof Error ? e.message : String(e);
+    throw new Error(
+      `${message}\n--- child exit code: ${child.exitCode} ---\n--- child stderr ---\n${stderr()}\n--- server.log, last lines ---\n${tail}`,
+      { cause: e },
+    );
+  }
+}
+
+function entryEnv(home: string, extra: Record<string, string>): Record<string, string> {
+  return {
+    PATH: process.env["PATH"] ?? "",
+    SystemRoot: process.env["SystemRoot"] ?? "",
+    TEMP: process.env["TEMP"] ?? tmpdir(),
+    TMP: process.env["TMP"] ?? tmpdir(),
+    HOME: home,
+    USERPROFILE: home,
+    APPDATA: join(home, "AppData"),
+    CLAUDE_PEERS_LOG_DIR: join(home, "logs"),
+    CLAUDE_PEERS_MCP_DAEMON_IDLE_SEC: "0",
+    ...extra,
+  };
+}
+
+function waitForState(child: { exitCode: number | null }, found: () => boolean): Promise<void> {
+  return reachedWithin(
+    (async () => {
+      while (!found()) {
+        if (child.exitCode !== null) throw new Error(`the daemon exited with ${child.exitCode} before it served`);
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+    })(),
+    "the daemon process to serve",
+    SERVE_WAIT_MS,
+  );
+}
+
+describe("the entry point", () => {
+  test(
+    "a real process serves, drops the session variables of its shell, answers a status and stops on request",
+    async () => {
+      const [port] = await freePorts(1);
+      const home = join(root, `entry${++counter}`);
+      const logDir = join(home, "logs");
+      linkTestKey(root, join(home, ".claude", "peers", "mcp-daemon.key"));
+      const repo = join(import.meta.dir, "..");
+      const child = Bun.spawn([process.execPath, join(repo, "mcp-daemon.ts")], {
         cwd: home,
-        env,
+        env: entryEnv(home, {
+          CLAUDE_PEERS_MCP_DAEMON_PORT: String(port),
+          CLAUDE_PEERS_FORCE_GROUP: "marker-of-the-group",
+          CLAUDE_CODE_SESSION_ID: "marker-of-the-session",
+        }),
         stdin: "ignore",
         stdout: "ignore",
         stderr: "pipe",
       });
-    } finally {
-      if (savedUsername !== undefined) process.env["USERNAME"] = savedUsername;
-    }
-    const stateFile = () => readdirSync(peers).find((f) => /^mcp-daemon-\d+\.json$/.test(f));
-    let port = 0;
-    try {
-      await reachedWithin(
-        (async () => {
-          while (stateFile() === undefined) {
-            if (child.exitCode !== null) {
-              throw new Error(`the daemon exited with ${child.exitCode}: ${await new Response(child.stderr as ReadableStream).text()}`);
-            }
-            await new Promise((resolve) => setTimeout(resolve, 20));
-          }
-        })(),
-        "the daemon process to serve",
-        20_000,
-      );
-      port = Number((stateFile() as string).replace(/\D/g, ""));
-      expect(candidatePorts(oracle, {}, recordingLog().log)).toContain(port);
-    } finally {
-      if (port !== 0) await controlRequest({ port, key, op: "stop" });
-      if (child.exitCode === null) await reachedWithin(child.exited, "the daemon process to exit", 10_000);
-      if (child.exitCode === null) child.kill();
-    }
-  });
+      const stderr = collectText(child.stderr as ReadableStream<Uint8Array>);
+      const statePath = stateFilePath(join(home, ".claude", "peers"), port as number);
+      try {
+        await withChildReport(child, logDir, stderr, async () => {
+          await waitForState(child, () => existsSync(statePath));
+          const status = await controlRequest({ port: port as number, key, op: "status" });
+          expect(status.kind).toBe("reply");
+          const body = (status as { body: Record<string, unknown> }).body;
+          expect(body["pid"]).toBe(child.pid);
+          expect(body["code_root"]).toBe(daemonCodeRoot(realpathSync.native(repo)));
+          const log = logOf(logDir);
+          expect(log).toContain("removed 2 session variable(s)");
+          expect(log).toContain("CLAUDE_PEERS_FORCE_GROUP");
+          expect(log).not.toContain("marker-of-the-group");
+          expect(log).not.toContain("marker-of-the-session");
+          expect(await controlRequest({ port: port as number, key, op: "stop" })).toEqual({
+            kind: "reply",
+            body: { ok: true },
+          });
+          expect(await reachedWithin(child.exited, "the daemon process to exit", EXIT_WAIT_MS)).toBe(0);
+          expect(existsSync(statePath)).toBe(false);
+        });
+      } finally {
+        if (child.exitCode === null) child.kill();
+      }
+    },
+    ENTRY_TEST_MS,
+  );
+
+  test(
+    "a real process started without USERNAME, as the relay starts it, listens on a port derived from the account name",
+    async () => {
+      const home = join(root, `entry${++counter}`);
+      const peers = join(home, ".claude", "peers");
+      const logDir = join(home, "logs");
+      linkTestKey(root, join(peers, "mcp-daemon.key"));
+      const oracle = accountNameFromTheSystem();
+      // The child gets back the USERNAME of this process whatever env it is given, so this process drops it while the child starts.
+      const savedUsername = process.env["USERNAME"];
+      delete process.env["USERNAME"];
+      let child: ReturnType<typeof Bun.spawn>;
+      try {
+        child = Bun.spawn([process.execPath, join(import.meta.dir, "..", "mcp-daemon.ts")], {
+          cwd: home,
+          env: entryEnv(home, {}),
+          stdin: "ignore",
+          stdout: "ignore",
+          stderr: "pipe",
+        });
+      } finally {
+        if (savedUsername !== undefined) process.env["USERNAME"] = savedUsername;
+      }
+      const stderr = collectText(child.stderr as ReadableStream<Uint8Array>);
+      const stateFile = () => readdirSync(peers).find((f) => /^mcp-daemon-\d+\.json$/.test(f));
+      let port = 0;
+      try {
+        await withChildReport(child, logDir, stderr, async () => {
+          await waitForState(child, () => stateFile() !== undefined);
+          port = Number((stateFile() as string).replace(/\D/g, ""));
+          expect(candidatePorts(oracle, {}, recordingLog().log)).toContain(port);
+        });
+      } finally {
+        if (port !== 0) await controlRequest({ port, key, op: "stop" });
+        if (child.exitCode === null) await reachedWithin(child.exited, "the daemon process to exit", EXIT_WAIT_MS).catch(() => child.kill());
+      }
+    },
+    ENTRY_TEST_MS,
+  );
 });

@@ -225,15 +225,54 @@ export function filetimeFromCreationUtc(iso: string): string | null {
   return (BigInt(seconds) * 10_000_000n + BigInt(fraction) + FILETIME_UNIX_EPOCH).toString();
 }
 
-/** The `pid_start` string of this process, in the format of relay/src/sys.rs; empty when it cannot be measured. */
-export async function ownPidStart(log: Logger): Promise<string> {
-  const generation = await measureWriterGeneration(process.pid, log);
-  if (generation?.platform === "win32") return filetimeFromCreationUtc(generation.creationUtc) ?? "";
-  if (generation?.platform === "linux") return generation.startToken;
-  const ps = Bun.spawnSync(["ps", "-o", "lstart=", "-p", String(process.pid)], { stdout: "pipe", stderr: "pipe" });
-  const text = ps.stdout.toString().trim();
-  if (ps.exitCode !== 0 || text === "") log.warn(`cannot measure the start time of pid ${process.pid}: ps exited ${ps.exitCode}`);
-  return text;
+/**
+ * Creation time of a process as a decimal FILETIME, read with GetProcessTimes as the relay reads it; null when the call fails.
+ * The default handle is the pseudo handle of the current process.
+ */
+export function processStartFiletime(handle = -1n): string | null {
+  const lib = dlopen("kernel32.dll", {
+    GetProcessTimes: { args: [FFIType.i64, FFIType.ptr, FFIType.ptr, FFIType.ptr, FFIType.ptr], returns: FFIType.i32 },
+  });
+  try {
+    // creation, exit, kernel and user times: each FILETIME is a little-endian u64.
+    const times = new BigUint64Array(4);
+    const ok = lib.symbols.GetProcessTimes(handle, ptr(times, 0), ptr(times, 8), ptr(times, 16), ptr(times, 24));
+    return ok === 0 ? null : (times[0] as bigint).toString();
+  } finally {
+    lib.close();
+  }
+}
+
+export interface PidStartProbes {
+  platform?: NodeJS.Platform;
+  windowsStart?: () => string | null;
+  run?: (command: string, args: string[]) => IdRun;
+}
+
+/**
+ * The `pid_start` string of this process, in the format of relay/src/sys.rs;
+ * empty, with a log line, when it cannot be measured: a daemon without it still serves.
+ */
+export async function ownPidStart(log: Logger, probes: PidStartProbes = {}): Promise<string> {
+  const { platform = process.platform, windowsStart = processStartFiletime, run = runId } = probes;
+  try {
+    if (platform === "win32") {
+      const filetime = windowsStart();
+      if (filetime === null) log.warn("cannot measure the start time of this process: GetProcessTimes failed");
+      return filetime ?? "";
+    }
+    if (platform === "linux") {
+      const generation = await measureWriterGeneration(process.pid, log);
+      if (generation?.platform === "linux") return generation.startToken;
+    }
+    const ps = run("ps", ["-o", "lstart=", "-p", String(process.pid)]);
+    const text = ps.stdout.trim();
+    if (ps.exitCode !== 0 || text === "") log.warn(`cannot measure the start time of pid ${process.pid}: ps exited ${ps.exitCode}`);
+    return text;
+  } catch (e) {
+    log.warn(`cannot measure the start time of pid ${process.pid}: ${e instanceof Error ? e.message : String(e)}`);
+    return "";
+  }
 }
 
 export interface DaemonState {
