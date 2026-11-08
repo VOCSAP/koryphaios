@@ -1,0 +1,689 @@
+mod common;
+
+use std::io::Write;
+use std::net::TcpListener;
+use std::process::{Child, Command, Stdio};
+
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::Duration;
+
+use claude_peers_relay::auth;
+use claude_peers_relay::config::Config;
+use claude_peers_relay::discovery::{
+    acquire_launch_lock, candidate_ports, clear_stale_marker, find_session, fnv1a32,
+    launch_lock_file, release_launch_lock, stop_stuck, sweep, take_over_stale, Control, Found,
+};
+use claude_peers_relay::fake::{FakeDaemon, FakeOptions};
+use claude_peers_relay::frame;
+use claude_peers_relay::hello::{build_hello, Facts};
+use claude_peers_relay::paths::code_root_of;
+use claude_peers_relay::spawn::Spawner;
+use claude_peers_relay::sys;
+use common::*;
+use serde_json::{json, Value};
+
+fn fixtures() -> Value {
+    serde_json::from_str(include_str!("../protocol-fixtures/frames.json")).expect("fixtures parse")
+}
+
+fn hello_for(r: &Rig) -> Vec<u8> {
+    build_hello(&r.cfg, &Facts::collect(&r.cfg.logger), None, false)
+}
+
+#[test]
+fn port_derivation_matches_the_values_bun_computed() {
+    for case in fixtures()["port"]["cases"].as_array().expect("cases") {
+        let name = case["username"].as_str().expect("username");
+        assert_eq!(
+            fnv1a32(&name.to_lowercase()) as u64,
+            case["fnv1a32"].as_u64().expect("fnv"),
+            "fnv1a32 of {name}"
+        );
+        let ports = candidate_ports(name, None);
+        let base = case["base_port"].as_u64().expect("base") as u16;
+        assert_eq!(
+            ports,
+            (base..base + 10).collect::<Vec<_>>(),
+            "candidates of {name}"
+        );
+    }
+    assert_eq!(
+        candidate_ports("anyone", Some(5555)),
+        vec![5555],
+        "the override replaces the whole list"
+    );
+}
+
+#[test]
+fn username_case_does_not_change_the_candidates() {
+    assert_eq!(
+        candidate_ports("Olivier", None),
+        candidate_ports("olivier", None)
+    );
+}
+
+fn foreign_listener() -> (u16, thread::JoinHandle<()>) {
+    let l = TcpListener::bind(("127.0.0.1", 0)).expect("bind");
+    let port = l.local_addr().expect("addr").port();
+    let h = thread::spawn(move || {
+        for mut s in l.incoming().take(4).flatten() {
+            let _ = s.write_all(b"HTTP/1.1 400 Bad Request\r\n\r\n");
+        }
+    });
+    (port, h)
+}
+
+#[test]
+fn foreign_listener_and_other_root_daemon_are_skipped_for_the_third_candidate() {
+    let (foreign_port, _h) = foreign_listener();
+    let r = rig(
+        vec![foreign_port, free_port(), free_port()],
+        &root_hash("mine"),
+    );
+    let other_root = fake_on(&r, 1, &root_hash("someone-else"));
+    let mine = fake_on(&r, 2, &root_hash("mine"));
+    let found = sweep(&r.cfg, &r.key, &hello_for(&r), None);
+    assert!(
+        found.session.is_some(),
+        "the relay must reach the third candidate"
+    );
+    assert_eq!(
+        other_root.hellos().len(),
+        1,
+        "the other-root daemon must have been tried"
+    );
+    assert_eq!(mine.hellos().len(), 1);
+    assert_eq!(found.free_ports, 0);
+}
+
+fn fake_on(r: &Rig, index: usize, root: &str) -> FakeDaemon {
+    let listener = TcpListener::bind(("127.0.0.1", r.cfg.candidates[index])).expect("bind");
+    FakeDaemon::start(
+        listener,
+        FakeOptions {
+            key: r.key.clone(),
+            code_root: root.to_string(),
+            verify_relay: true,
+            tools_hash: "h".into(),
+            send_ticket: false,
+            hang: false,
+        },
+    )
+}
+
+#[test]
+fn a_free_port_is_counted_and_a_silent_listener_is_reported() {
+    let r = rig(vec![free_port(), free_port()], &root_hash("mine"));
+    let listener = TcpListener::bind(("127.0.0.1", r.cfg.candidates[1])).expect("bind");
+    let hang = FakeDaemon::start(
+        listener,
+        FakeOptions {
+            key: r.key.clone(),
+            code_root: root_hash("mine"),
+            verify_relay: true,
+            tools_hash: "h".into(),
+            send_ticket: false,
+            hang: true,
+        },
+    );
+    let found = sweep(&r.cfg, &r.key, &hello_for(&r), None);
+    assert!(found.session.is_none());
+    assert_eq!(found.free_ports, 1);
+    assert_eq!(found.silent_ports, vec![hang.port]);
+}
+
+#[test]
+fn a_listener_that_does_not_know_the_key_never_receives_the_hello() {
+    let r = rig(vec![free_port()], &root_hash("mine"));
+    let listener = TcpListener::bind(("127.0.0.1", r.cfg.candidates[0])).expect("bind");
+    let impostor = FakeDaemon::start(
+        listener,
+        FakeOptions {
+            key: vec![9u8; 32],
+            code_root: root_hash("mine"),
+            verify_relay: false,
+            tools_hash: "h".into(),
+            send_ticket: false,
+            hang: false,
+        },
+    );
+    let found = sweep(&r.cfg, &r.key, &hello_for(&r), None);
+    assert!(
+        found.session.is_none(),
+        "the relay must reject a daemon whose MAC does not verify"
+    );
+    assert!(
+        impostor.hellos().is_empty(),
+        "the HELLO, which carries session secrets, reached an unauthenticated listener"
+    );
+    assert!(r.logged("did not prove it knows the shared key"));
+}
+
+struct StartsDaemon {
+    launches: AtomicUsize,
+    port: u16,
+    daemon: Mutex<Option<FakeDaemon>>,
+    key: Vec<u8>,
+    root: String,
+}
+
+impl Spawner for StartsDaemon {
+    fn spawn(&self, cfg: &Config) -> std::io::Result<()> {
+        self.launches.fetch_add(1, Ordering::SeqCst);
+        let listener = TcpListener::bind(("127.0.0.1", self.port))?;
+        let opts = FakeOptions {
+            key: self.key.clone(),
+            code_root: self.root.clone(),
+            verify_relay: true,
+            tools_hash: "h".into(),
+            send_ticket: false,
+            hang: false,
+        };
+        *self.daemon.lock().unwrap_or_else(|e| e.into_inner()) =
+            Some(FakeDaemon::start(listener, opts));
+        release_launch_lock(cfg);
+        Ok(())
+    }
+}
+
+#[test]
+fn many_relays_starting_together_launch_the_daemon_once() {
+    let r = rig(vec![free_port()], &root_hash("mine"));
+    let spawner = Arc::new(StartsDaemon {
+        launches: AtomicUsize::new(0),
+        port: r.cfg.candidates[0],
+        daemon: Mutex::new(None),
+        key: r.key.clone(),
+        root: root_hash("mine"),
+    });
+    let hello = hello_for(&r);
+    let handles: Vec<_> = (0..8)
+        .map(|_| {
+            let (cfg, key, hello, spawner) =
+                (r.cfg.clone(), r.key.clone(), hello.clone(), spawner.clone());
+            thread::spawn(move || {
+                matches!(
+                    find_session(
+                        &cfg,
+                        &key,
+                        &hello,
+                        true,
+                        spawner.as_ref(),
+                        &Control::default()
+                    ),
+                    Found::Session(_)
+                )
+            })
+        })
+        .collect();
+    for h in handles {
+        assert!(
+            h.join().expect("relay thread"),
+            "every relay must end with a session"
+        );
+    }
+    assert_eq!(
+        spawner.launches.load(Ordering::SeqCst),
+        1,
+        "only the holder of the launch lock may start the daemon"
+    );
+}
+
+#[test]
+fn a_stale_launch_lock_is_replaced_and_a_live_fresh_one_is_respected() {
+    let r = rig(vec![free_port()], &root_hash("mine"));
+    let lock = launch_lock_file(&r.cfg.peers_dir, &r.cfg.code_root);
+
+    std::fs::write(&lock, format!("{} 0", std::process::id())).expect("write lock");
+    assert!(
+        !acquire_launch_lock(&r.cfg).expect("acquire"),
+        "a fresh lock held by a live process must be respected"
+    );
+
+    std::fs::write(&lock, "4000000000 0").expect("write lock");
+    assert!(
+        acquire_launch_lock(&r.cfg).expect("acquire"),
+        "a lock whose owner is dead must be replaced"
+    );
+    assert!(r.logged("stale launch lock"));
+
+    let mut aged = r.cfg.clone();
+    aged.launch_lock_stale = Duration::from_millis(0);
+    std::fs::write(&lock, format!("{} 0", std::process::id())).expect("write lock");
+    assert!(
+        acquire_launch_lock(&aged).expect("acquire"),
+        "a lock older than the limit must be replaced"
+    );
+}
+
+fn hang_daemon(r: &Rig, port: u16) -> Child {
+    let code = r.dir.path().join("code");
+    std::fs::create_dir_all(&code).expect("code dir");
+    let mut cmd = Command::new(FAKE_DAEMON_EXE);
+    cmd.arg(code.join("mcp-daemon.ts"))
+        .env_clear()
+        .env("HOME", r.dir.path())
+        .env("USERPROFILE", r.dir.path())
+        .env(
+            "SystemRoot",
+            std::env::var("SystemRoot").unwrap_or_default(),
+        )
+        .env("CLAUDE_PEERS_MCP_DAEMON_PORT", port.to_string())
+        .env("CLAUDE_PEERS_MCP_DAEMON_FAKE_MODE", "hang")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    cmd.spawn().expect("start the hanging fake daemon")
+}
+
+fn stuck_rig() -> (Rig, ChildGuard, u16) {
+    let port = free_port();
+    let mut r = rig(vec![port], "placeholder");
+    let code = r.dir.path().join("code");
+    std::fs::create_dir_all(&code).expect("code dir");
+    r.cfg.code_root = code_root_of(&code).expect("code root");
+    r.cfg.accepted_images = vec!["fake-daemon".into()];
+    // The fake daemon locates the peers dir from HOME/USERPROFILE = dir, so state files land in dir/.claude/peers.
+    r.cfg.peers_dir = r.dir.path().join(".claude").join("peers");
+    std::fs::create_dir_all(&r.cfg.peers_dir).expect("peers dir");
+    let child = hang_daemon(&r, port);
+    let state = r.cfg.peers_dir.join(format!("mcp-daemon-{port}.json"));
+    wait_until("the hanging daemon to publish its state file", || {
+        state.exists()
+            && std::fs::read_to_string(&state)
+                .map(|t| t.contains("env_keys"))
+                .unwrap_or(false)
+    });
+    (r, ChildGuard(child), port)
+}
+
+fn exited(child: &mut Child) -> bool {
+    child.try_wait().expect("try_wait").is_some()
+}
+
+#[test]
+fn a_silent_daemon_is_stopped_after_the_delay_and_the_relay_goes_on() {
+    let (r, mut child, port) = stuck_rig();
+    let spawner = NoSpawn(AtomicUsize::new(0));
+    let mut cfg = r.cfg.clone();
+    cfg.opening_deadline = Duration::from_secs(2);
+    let hello = hello_for(&r);
+    let found = find_session(&cfg, &r.key, &hello, true, &spawner, &Control::default());
+    assert!(
+        matches!(found, Found::Fallback(_)),
+        "no daemon exists, the opening ends in fallback"
+    );
+    wait_until("the silent daemon to be stopped", || exited(&mut child.0));
+    assert!(r.logged(&format!("stopped the silent daemon on port {port}")));
+    assert!(
+        spawner.0.load(Ordering::SeqCst) >= 1,
+        "once the port is free the relay must start a daemon"
+    );
+}
+
+#[test]
+fn a_reused_pid_is_never_stopped() {
+    let (r, mut child, port) = stuck_rig();
+    let state_path = r.cfg.peers_dir.join(format!("mcp-daemon-{port}.json"));
+    let mut state: Value =
+        serde_json::from_str(&std::fs::read_to_string(&state_path).expect("read state"))
+            .expect("parse state");
+    state["pid_start"] = json!("1");
+    std::fs::write(&state_path, state.to_string()).expect("write state");
+    stop_stuck(&r.cfg, &[port]);
+    thread::sleep(Duration::from_millis(150));
+    assert!(
+        !exited(&mut child.0),
+        "a process whose start time differs from the state file must survive"
+    );
+    assert!(r.logged("was reused"));
+}
+
+#[test]
+fn a_process_with_a_foreign_image_name_is_never_stopped() {
+    let (mut r, mut child, port) = stuck_rig();
+    r.cfg.accepted_images = vec!["bun".into(), "kory-mcp-daemon".into()];
+    stop_stuck(&r.cfg, &[port]);
+    thread::sleep(Duration::from_millis(150));
+    assert!(
+        !exited(&mut child.0),
+        "an image outside the accepted names must survive"
+    );
+    assert!(r.logged("not a daemon image"));
+}
+
+#[test]
+fn a_daemon_of_another_code_root_is_never_stopped() {
+    let (mut r, mut child, port) = stuck_rig();
+    r.cfg.code_root = root_hash("another-root");
+    stop_stuck(&r.cfg, &[port]);
+    thread::sleep(Duration::from_millis(150));
+    assert!(!exited(&mut child.0));
+    assert!(r.logged("another code root"));
+}
+
+#[test]
+fn a_takeover_never_removes_a_lock_that_is_fresh_once_the_marker_is_held() {
+    let r = rig(vec![free_port()], &root_hash("mine"));
+    let lock = launch_lock_file(&r.cfg.peers_dir, &r.cfg.code_root);
+    std::fs::write(&lock, format!("{} 0", std::process::id())).expect("write a live lock");
+    assert!(
+        !take_over_stale(&r.cfg, &lock).expect("take over"),
+        "a relay that judged the lock stale earlier must not delete one made since"
+    );
+    assert!(lock.exists(), "the live lock must still be there");
+    assert!(
+        !lock.with_extension("takeover").exists(),
+        "the marker must be released"
+    );
+}
+
+#[test]
+fn a_lock_path_the_system_refuses_to_create_is_busy_not_an_error() {
+    let r = rig(vec![free_port()], &root_hash("mine"));
+    let lock = launch_lock_file(&r.cfg.peers_dir, &r.cfg.code_root);
+    std::fs::create_dir(&lock).expect("a directory where the lock goes");
+    assert!(
+        !acquire_launch_lock(&r.cfg).expect("busy is not an error"),
+        "contention on the lock must read as 'not acquired'"
+    );
+    if cfg!(windows) {
+        assert!(
+            r.logged("is busy"),
+            "Windows answers access denied, and the refusal is logged"
+        );
+    }
+}
+
+#[test]
+fn a_takeover_marker_that_is_fresh_when_it_is_moved_is_put_back() {
+    let r = rig(vec![free_port()], &root_hash("mine"));
+    let marker = launch_lock_file(&r.cfg.peers_dir, &r.cfg.code_root).with_extension("takeover");
+    std::fs::write(&marker, format!("{} 0", std::process::id())).expect("write a live marker");
+    assert!(
+        !clear_stale_marker(&r.cfg, &marker),
+        "a relay that judged the marker stale earlier must not delete one made since"
+    );
+    assert!(marker.exists(), "the live marker must be back in place");
+    let leftovers = std::fs::read_dir(&r.cfg.peers_dir)
+        .expect("list")
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().contains(".stale-"))
+        .count();
+    assert_eq!(leftovers, 0, "the moved copy must be removed");
+}
+
+#[test]
+fn a_takeover_marker_left_by_a_dead_relay_does_not_block_the_launch_lock_forever() {
+    let r = rig(vec![free_port()], &root_hash("mine"));
+    let lock = launch_lock_file(&r.cfg.peers_dir, &r.cfg.code_root);
+    std::fs::write(&lock, "4000000000 0").expect("write a stale lock");
+    std::fs::write(lock.with_extension("takeover"), "4000000000 0").expect("write a stale marker");
+    assert!(
+        !acquire_launch_lock(&r.cfg).expect("acquire"),
+        "the first attempt only clears the dead relay's marker"
+    );
+    assert!(
+        acquire_launch_lock(&r.cfg).expect("acquire"),
+        "the next attempt takes over the stale lock"
+    );
+    assert!(r.logged("stale takeover marker"));
+}
+
+fn raw_login(r: &Rig, port: u16) -> (std::net::TcpStream, auth::Channel) {
+    let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).expect("connect");
+    let channel = auth::authenticate(
+        &mut s,
+        &r.key,
+        Duration::from_secs(1),
+        std::time::Instant::now() + Duration::from_secs(3),
+    )
+    .expect("authenticate");
+    s.set_read_timeout(Some(Duration::from_secs(3)))
+        .expect("read timeout");
+    (s, channel)
+}
+
+#[test]
+fn a_bit_flipped_in_the_first_sealed_frame_ends_the_connection_without_a_session() {
+    let mut r = rig(vec![free_port()], &root_hash("mine"));
+    let daemon = fake(&r, &root_hash("mine"));
+    let proxy = proxy(daemon.port, Some(1));
+    r.cfg.candidates = vec![proxy.port];
+    let found = sweep(&r.cfg, &r.key, &hello_for(&r), None);
+    assert!(
+        found.session.is_none(),
+        "a HELLO altered on the wire must not open a session"
+    );
+    wait_until("the daemon to refuse the altered frame", || {
+        daemon.rejected() == 1
+    });
+    assert!(
+        daemon.hellos().is_empty(),
+        "the daemon must not have acted on the altered HELLO"
+    );
+}
+
+#[test]
+fn a_frame_the_daemon_sent_cannot_be_reflected_back_at_it() {
+    let r = rig(vec![free_port()], &root_hash("mine"));
+    let daemon = fake(&r, &root_hash("mine"));
+    let (mut s, mut channel) = raw_login(&r, daemon.port);
+    channel
+        .sealer
+        .write(&mut s, frame::HELLO, &hello_for(&r))
+        .expect("send HELLO");
+    let welcome = read_raw_frame(&mut s);
+    let ticket = read_raw_frame(&mut s);
+    assert_eq!(
+        channel
+            .opener
+            .read(&mut std::io::Cursor::new(welcome))
+            .expect("genuine WELCOME")
+            .0,
+        frame::WELCOME
+    );
+    assert_eq!(
+        channel
+            .opener
+            .read(&mut std::io::Cursor::new(ticket.clone()))
+            .expect("genuine TICKET")
+            .0,
+        frame::TICKET
+    );
+    s.write_all(&ticket).expect("reflect");
+    wait_until("the daemon to refuse its own frame", || {
+        daemon.rejected() == 1
+    });
+}
+
+#[test]
+fn a_frame_the_relay_sent_cannot_be_replayed() {
+    let r = rig(vec![free_port()], &root_hash("mine"));
+    let daemon = fake(&r, &root_hash("mine"));
+    let (mut s, mut channel) = raw_login(&r, daemon.port);
+    let hello = channel
+        .sealer
+        .seal(frame::HELLO, &hello_for(&r))
+        .expect("seal HELLO");
+    s.write_all(&hello).expect("send HELLO");
+    read_raw_frame(&mut s);
+    read_raw_frame(&mut s);
+    s.write_all(&hello).expect("replay HELLO");
+    wait_until("the daemon to refuse the replay", || daemon.rejected() == 1);
+    assert_eq!(
+        daemon.hellos().len(),
+        1,
+        "the replayed HELLO must not be acted on twice"
+    );
+}
+
+#[test]
+fn an_unauthenticated_error_on_the_lowest_port_makes_the_relay_try_the_next_candidate() {
+    let r = rig(vec![free_port(), free_port()], &root_hash("mine"));
+    let impostor = fake_on(&r, 0, &root_hash("mine"));
+    impostor.set_refuse_auth(Some("proto_mismatch"));
+    let spawner = StartsDaemon {
+        launches: AtomicUsize::new(0),
+        port: r.cfg.candidates[1],
+        daemon: Mutex::new(None),
+        key: r.key.clone(),
+        root: root_hash("mine"),
+    };
+    let found = find_session(
+        &r.cfg,
+        &r.key,
+        &hello_for(&r),
+        true,
+        &spawner,
+        &Control::default(),
+    );
+    assert!(
+        matches!(found, Found::Session(_)),
+        "an ERROR nobody authenticated must not push the relay to the bun fallback"
+    );
+    assert_eq!(spawner.launches.load(Ordering::SeqCst), 1);
+}
+
+/// Accepts connections and writes `first` at once, then `drip` one byte at a time.
+fn hostile_listener(first: Vec<u8>, drip: Vec<u8>, gap: Duration) -> u16 {
+    let l = TcpListener::bind(("127.0.0.1", 0)).expect("bind");
+    let port = l.local_addr().expect("addr").port();
+    thread::spawn(move || {
+        for mut s in l.incoming().flatten() {
+            let (first, drip) = (first.clone(), drip.clone());
+            thread::spawn(move || {
+                if s.write_all(&first).is_err() {
+                    return;
+                }
+                for b in drip {
+                    thread::sleep(gap);
+                    if s.write_all(&[b]).is_err() {
+                        return;
+                    }
+                }
+                thread::sleep(Duration::from_secs(30));
+            });
+        }
+    });
+    port
+}
+
+#[test]
+fn a_listener_that_drips_one_byte_at_a_time_cannot_hold_the_opening_open() {
+    let port = hostile_listener(
+        1000u32.to_le_bytes().to_vec(),
+        vec![1u8; 500],
+        Duration::from_millis(40),
+    );
+    let mut r = rig(vec![port], &root_hash("mine"));
+    r.cfg.step_timeout = Duration::from_millis(300);
+    r.cfg.opening_deadline = Duration::from_millis(1500);
+    let (cfg, key, hello) = (r.cfg.clone(), r.key.clone(), hello_for(&r));
+    let (tx, rx) = std::sync::mpsc::channel();
+    thread::spawn(move || {
+        let found = find_session(
+            &cfg,
+            &key,
+            &hello,
+            true,
+            &NoSpawn(AtomicUsize::new(0)),
+            &Control::default(),
+        );
+        let _ = tx.send(matches!(found, Found::Fallback(_)));
+    });
+    let fell_back = rx
+        .recv_timeout(Duration::from_secs(6))
+        .expect("the opening must end near its deadline, not follow the dripping listener");
+    assert!(
+        fell_back,
+        "a candidate that never completes its handshake leaves no session: fallback"
+    );
+}
+
+#[test]
+fn a_declared_frame_over_64_kib_before_authentication_is_refused_without_reading_it() {
+    let port = hostile_listener(
+        1_048_577u32.to_le_bytes().to_vec(),
+        Vec::new(),
+        Duration::from_millis(1),
+    );
+    let mut r = rig(vec![port], &root_hash("mine"));
+    r.cfg.step_timeout = Duration::from_secs(1);
+    let started = std::time::Instant::now();
+    let found = sweep(&r.cfg, &r.key, &hello_for(&r), None);
+    assert!(found.session.is_none());
+    assert!(
+        started.elapsed() < Duration::from_millis(800),
+        "the oversize header must be refused at once, took {:?}",
+        started.elapsed()
+    );
+    assert!(r.logged("protocol violation"), "the refusal must be logged");
+}
+
+#[test]
+fn a_reconnect_loop_ends_when_the_session_stops() {
+    let r = rig(vec![free_port()], &root_hash("mine"));
+    let spawner = Arc::new(NoSpawn(AtomicUsize::new(0)));
+    let ctl = Arc::new(Control::default());
+    let (cfg, key, hello, s, c) = (
+        r.cfg.clone(),
+        r.key.clone(),
+        hello_for(&r),
+        spawner.clone(),
+        ctl.clone(),
+    );
+    let (tx, rx) = std::sync::mpsc::channel();
+    thread::spawn(move || {
+        let found = find_session(&cfg, &key, &hello, false, s.as_ref(), &c);
+        let _ = tx.send(matches!(found, Found::Stopped));
+    });
+    wait_until("the loop to try launching a daemon", || {
+        spawner.0.load(Ordering::SeqCst) >= 1
+    });
+    ctl.stop.store(true, Ordering::SeqCst);
+    assert!(
+        rx.recv_timeout(Duration::from_secs(3))
+            .expect("the loop must end after the stop flag"),
+        "it must report Stopped"
+    );
+}
+
+#[test]
+fn only_one_of_many_relays_takes_over_a_stale_launch_lock() {
+    let r = rig(vec![free_port()], &root_hash("mine"));
+    let lock = launch_lock_file(&r.cfg.peers_dir, &r.cfg.code_root);
+    for round in 0..40 {
+        std::fs::write(&lock, "4000000000 0").expect("write a stale lock");
+        let barrier = Arc::new(std::sync::Barrier::new(8));
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let (cfg, barrier) = (r.cfg.clone(), barrier.clone());
+                thread::spawn(move || {
+                    barrier.wait();
+                    acquire_launch_lock(&cfg).expect("acquire")
+                })
+            })
+            .collect();
+        let winners = handles
+            .into_iter()
+            .map(|h| h.join().expect("thread"))
+            .filter(|won| *won)
+            .count();
+        assert_eq!(
+            winners, 1,
+            "round {round}: exactly one relay may take over a stale lock"
+        );
+    }
+}
+
+#[test]
+fn start_time_and_image_are_measured_for_a_live_process() {
+    let pid = std::process::id();
+    assert!(sys::is_alive(pid));
+    assert!(sys::start_time(pid).is_some_and(|s| !s.is_empty()));
+    assert!(sys::image_stem(pid).is_some_and(|s| !s.is_empty()));
+    assert!(!sys::is_alive(4_000_000_000));
+    assert!(sys::username().is_some_and(|u| !u.is_empty()));
+}

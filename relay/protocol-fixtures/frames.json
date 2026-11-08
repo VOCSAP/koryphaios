@@ -1,0 +1,146 @@
+{
+  "pid_start": {
+    "contract": "HELLO pid_start and ppid_start are opaque strings compared for equality only; each OS has one fixed format, and an empty string means the start time could not be measured.",
+    "windows": {
+      "format": "decimal u64 FILETIME of the process creation time (100 ns ticks since 1601-01-01 UTC), from GetProcessTimes",
+      "example": "133750000000000000",
+      "min": 120000000000000000,
+      "max": 200000000000000000
+    },
+    "linux": {
+      "format": "field 22 of /proc/<pid>/stat (start time in clock ticks since boot), decimal, counted after the last ')' because the command name may contain spaces and parentheses",
+      "stat_line": "4242 (kory (mcp) daemon) S 1 4242 4242 0 -1 4194560 100 0 0 0 1 2 0 0 20 0 3 0 987654 12345678 1234 18446744073709551615 0 0 0 0 0 0 0 0 0",
+      "expected": "987654"
+    },
+    "other_unix": {
+      "format": "trimmed output of `ps -o lstart= -p <pid>`",
+      "example": "Sat Nov  8 14:46:14 2026"
+    }
+  },
+  "frame": {
+    "length_prefix": "u32 little-endian, counts the type byte plus the payload",
+    "max_payload_bytes": 16777216,
+    "types": {
+      "CHALLENGE": 1,
+      "AUTH": 2,
+      "AUTH_OK": 3,
+      "HELLO": 4,
+      "WELCOME": 5,
+      "MCP": 16,
+      "TICKET": 17,
+      "BYE": 18,
+      "PING": 19,
+      "PONG": 20,
+      "ERROR": 21,
+      "CONTROL": 32
+    },
+    "example": {
+      "type": 16,
+      "payload": "{\"jsonrpc\":\"2.0\"}",
+      "bytes_hex": "12000000107b226a736f6e727063223a22322e30227d"
+    }
+  },
+  "port": {
+    "rule": "47000 + (fnv1a32(lowercase username utf8) mod 1000), then the 9 following ports",
+    "cases": [
+      {
+        "username": "olivier",
+        "fnv1a32": 4130280175,
+        "base_port": 47175
+      },
+      {
+        "username": "alice",
+        "fnv1a32": 2267157479,
+        "base_port": 47479
+      },
+      {
+        "username": "a",
+        "fnv1a32": 3826002220,
+        "base_port": 47220
+      },
+      {
+        "username": "bob smith",
+        "fnv1a32": 3895611279,
+        "base_port": 47279
+      },
+      {
+        "username": "administrator",
+        "fnv1a32": 3468633482,
+        "base_port": 47482
+      },
+      {
+        "username": "élodie",
+        "fnv1a32": 2301005718,
+        "base_port": 47718
+      }
+    ]
+  },
+  "code_root": {
+    "rule": "lowercase hex sha256 of the UTF-8 canonical directory path string",
+    "cases": [
+      {
+        "path": "C:\\Users\\Olivier\\workspace\\koryphaios",
+        "sha256": "965b2c85a41f9703acf9776d8b80a598c88879cd932dcb6bd1b76a2dc6393dcd"
+      },
+      {
+        "path": "/home/olivier/koryphaios-mcp",
+        "sha256": "1354df2945c820cd92cb5086e64512d0c071cbf0d5e5ae8c9eb9131a4ccc2230"
+      },
+      {
+        "path": "/tmp/x",
+        "sha256": "2e56aa36f538b33b48f37ef51e54ddb5cb9c7935e65c296b7494a17e8dff2a12"
+      }
+    ]
+  },
+  "handshake": {
+    "construction": "relay mac = HMAC(key, 'kory-mcp-v1|relay|' + daemon_nonce + '|' + relay_nonce + '|' + hC + '|' + proto_min + '|' + proto_max); daemon mac = HMAC(key, 'kory-mcp-v1|daemon|' + relay_nonce + '|' + daemon_nonce + '|' + hC + '|' + hA + '|' + proto); hC and hA are base64url(SHA-256) of the exact CHALLENGE and AUTH payload bytes; key = the 32 decoded bytes of mcp-daemon.key; nonces and MACs are base64url without padding.",
+    "key_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    "daemon_nonce": "oKGio6SlpqeoqaqrrK2ur7CxsrO0tba3uLm6u7y9vr8",
+    "relay_nonce": "QEFCQ0RFRkdISUpLTE1OT1BRUlNUVVZXWFlaW1xdXl8",
+    "challenge_payload": "{\"daemon_instance\":\"fake\",\"daemon_nonce\":\"oKGio6SlpqeoqaqrrK2ur7CxsrO0tba3uLm6u7y9vr8\",\"daemon_version\":\"0\",\"proto_max\":1,\"proto_min\":1}",
+    "auth_payload": "{\"mac\":\"D61gt4vP8AnNISGYnq_4wminBgzph_fj9NiC2brNhao\",\"proto_max\":1,\"proto_min\":1,\"relay_nonce\":\"QEFCQ0RFRkdISUpLTE1OT1BRUlNUVVZXWFlaW1xdXl8\"}",
+    "auth_ok_payload": "{\"mac\":\"zuAUgYOwMP61NWUViOyAWusAaBk639k2OItEHN4JUhU\",\"proto\":1}",
+    "hC": "HO70zaVSkBXFvlPtdCeYKvz68roPVGy0_EiwUYwUsx0",
+    "hA": "0d98ijCabF97mrLlGYnuqriT7zMkNBQwWWB1EsZzVss",
+    "relay_mac": "D61gt4vP8AnNISGYnq_4wminBgzph_fj9NiC2brNhao",
+    "daemon_mac": "zuAUgYOwMP61NWUViOyAWusAaBk639k2OItEHN4JUhU",
+    "control_role_note": "the role 'control' is reserved for the daemon's control client; a MAC signed with it must not verify as 'relay'",
+    "control_mac_of_relay_message": "FD3x45lkraRHIfOGI8BM-LbYhrgUmhXCuEY2dm_EIas"
+  },
+  "sealed": {
+    "construction": "k = HKDF-SHA256(ikm = key, salt = daemon_nonce_raw || relay_nonce_raw, info = label || SHA-256(CHALLENGE || AUTH || AUTH_OK), 32 bytes); labels 'kory-mcp-v1 r2d' and 'kory-mcp-v1 d2r'. Wire = u32le L || AES-256-GCM(type || payload) || tag(16), L = 1 + len(payload) + 16, AAD = the 4 bytes of L, nonce = 4 zero bytes || u64 big-endian counter of that direction starting at 0.",
+    "transcript_hash_hex": "679968e1066bd727caaed5d5b24bfacdefc87dc59128226c8caa4270afaa289e",
+    "k_r2d_hex": "81348f15519aceaa17ad3f363b0fe4ec62fc578ada5659918d4434b28140a887",
+    "k_d2r_hex": "d9c3dd52ee8e6b62fdb3b31f934d8977ab1c9c39ffc37140f85e003398edb104",
+    "frames": [
+      {
+        "direction": "r2d",
+        "counter": 0,
+        "type": 4,
+        "payload": "{\"family\":\"peers\",\"proto\":1}",
+        "wire_hex": "2d000000e93d4aecd96b3042ce0507c1ef9db786f7e4e4552ce7d9dddd8136e6aab50869deadefff73922f19b5b3538178"
+      },
+      {
+        "direction": "r2d",
+        "counter": 1,
+        "type": 16,
+        "payload": "{\"id\":1,\"jsonrpc\":\"2.0\",\"method\":\"ping\"}",
+        "wire_hex": "39000000bf7091d9e0ffcf8c634e820d1a0994f367f354dc55970515f967b0252bfc59b5265950d3c0c2166b48670cf9e16de4667b8814545561c84ee3"
+      },
+      {
+        "direction": "d2r",
+        "counter": 0,
+        "type": 5,
+        "payload": "{\"family\":\"peers\",\"resumed\":false,\"session_id\":\"s1\",\"tools_hash\":\"h\"}",
+        "wire_hex": "56000000a6fe657ad0f8f4f206b05851f8cc32559e7fe9d21056f7e678683e97c57025a824b84dc5a9623de4b717435c3b749eae9d2a006b65f31b1a8cc20a24e9dbd8d0c77b0beb9ea939746f39dd4030f8ad9febf383281e4b"
+      },
+      {
+        "direction": "d2r",
+        "counter": 1,
+        "type": 17,
+        "payload": "{\"ticket\":\"t1\"}",
+        "wire_hex": "20000000a792a98c71522a68592d9630c763af1591f8d9a774ba6fa4711c9a6b4ab2a26f"
+      }
+    ]
+  }
+}

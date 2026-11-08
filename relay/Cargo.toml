@@ -1,0 +1,47 @@
+[package]
+name = "claude-peers-relay"
+version = "0.1.0"
+edition = "2021"
+description = "stdio relay between a Claude Code session and the shared MCP daemon"
+publish = false
+
+[lib]
+name = "claude_peers_relay"
+path = "src/lib.rs"
+
+[[bin]]
+name = "claude-peers-relay"
+path = "src/main.rs"
+
+# Test double of the daemon, launched by the integration tests. Not shipped:
+# only claude-peers-relay is distributed.
+[[bin]]
+name = "fake-daemon"
+path = "src/bin/fake_daemon.rs"
+
+[dependencies]
+aes-gcm = "0.11.1"
+base64 = "0.22"
+getrandom = "0.4"
+hkdf = "0.13.0"
+hmac = "0.13"
+serde_json = "1"
+sha2 = "0.11"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_System_Diagnostics_ToolHelp",
+  "Win32_System_Threading",
+  "Win32_System_WindowsProgramming",
+] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
