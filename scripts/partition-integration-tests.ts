@@ -10,7 +10,7 @@
 // ephemeral port, so running them serially in one process is expected to be
 // safe.
 import { readdirSync } from "node:fs";
-import { EXEMPTIONS, exemptedFiles, isExempt, listTestFiles, REPO_ROOT, TESTS_DIR } from "./pure-module-partition.ts";
+import { EXEMPTIONS, exemptedFiles, integrationArgv, isExempt, listTestFiles, REPO_ROOT, TESTS_DIR } from "./pure-module-partition.ts";
 
 interface InvocationResult {
   exitCode: number;
@@ -27,17 +27,9 @@ interface InvocationResult {
 // An unparseable recap fails, never a default pass.
 const RECAP_RE = /Ran (\d+) tests? across (\d+) files?/;
 
-// Sets the bun test timeout floor globally rather than per test: a per-test
-// timeout has no effect on a beforeAll/beforeEach hook, and many of these
-// suites spawn a broker inside one.
-// An explicit per-test timeout still wins over this flag.
-// Paired with a timeout-minutes ceiling on the CI step, since raising this
-// removes the only bound on a runaway run.
-const DEFAULT_TEST_TIMEOUT_MS = 30_000;
-
 function runBunTest(files: string[]): InvocationResult {
   const start = Date.now();
-  const proc = Bun.spawnSync(["bun", "test", "--timeout", String(DEFAULT_TEST_TIMEOUT_MS), ...files.map((f) => `tests/${f}`)], {
+  const proc = Bun.spawnSync(integrationArgv(files), {
     cwd: REPO_ROOT,
     stdout: "pipe",
     stderr: "pipe",

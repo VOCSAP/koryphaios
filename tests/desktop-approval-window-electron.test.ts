@@ -101,7 +101,7 @@ async function until(label, read, done, ms = 8000) {
   }
 }
 const js = (target, code) => target.executeJavaScript(code)
-const verdictAfter = (count) => until('verdict', () => verdicts.length, (n) => n > count, 2000).then(() => verdicts[count], (error) => 'none: ' + error.message)
+const verdictAfter = (count, ms = 2000) => until('verdict', () => verdicts.length, (n) => n > count, ms).then(() => verdicts[count], (error) => 'none: ' + error.message)
 
 function workspace(index) {
   const lines = []
@@ -219,7 +219,8 @@ async function scenario() {
   await rendered(crash.win)
   mark = reports.length
   crash.win.webContents.forcefullyCrashRenderer()
-  result.crash = { verdict: await verdictAfter(crash.count), traces: reports.slice(mark) }
+  // A forced crash can take several seconds to reach render-process-gone in a Linux container.
+  result.crash = { verdict: await verdictAfter(crash.count, 20000), traces: reports.slice(mark) }
 
   const resized = openReader({ message: 'Resize', detail: Array.from({ length: 36 }, (_, i) => 'line ' + i).join('\\n'), approve: 'Approve', refuse: 'Refuse', close: 'Close' })
   await rendered(resized.win)

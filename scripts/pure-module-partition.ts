@@ -150,6 +150,19 @@ export const PARTITION_SCRIPT_COMMAND = "bun scripts/partition-pure-tests.ts";
 // not verification, see that function's header.
 export const INTEGRATION_PARTITION_SCRIPT_COMMAND = "bun scripts/partition-integration-tests.ts";
 
+// Sets the bun test timeout floor globally rather than per test: a per-test
+// timeout has no effect on a beforeAll/beforeEach hook, and many integration
+// suites spawn a broker inside one.
+// An explicit per-test timeout still wins over this flag.
+// Paired with a timeout-minutes ceiling on the CI step, since raising this
+// removes the only bound on a runaway run.
+export const DEFAULT_TEST_TIMEOUT_MS = 30_000;
+
+// Single builder of the integration bun test argv: CI and the local replay must not diverge.
+export function integrationArgv(files: readonly string[]): string[] {
+  return ["bun", "test", "--timeout", String(DEFAULT_TEST_TIMEOUT_MS), ...files.map((f) => `tests/${f}`)];
+}
+
 function escapeRegExp(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }

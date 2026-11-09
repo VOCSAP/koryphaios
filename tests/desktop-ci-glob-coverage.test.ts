@@ -27,6 +27,8 @@ import {
   auditExemptionLocations,
   DAEMON_REASON_MARKER,
   NATIVE_DEPS_REASON_MARKER,
+  DEFAULT_TEST_TIMEOUT_MS,
+  integrationArgv,
 } from "../scripts/pure-module-partition.ts";
 
 const REPO_ROOT = join(import.meta.dir, "..");
@@ -208,6 +210,11 @@ test("scripts/partition-integration-tests.ts actually exists on disk (the workfl
 
 test("the integration step's run: line invokes exactly the integration partition script (bounded parse, same discipline as the pure-module step)", () => {
   expect(parseIntegrationStepRun(REAL_WORKFLOW_TEXT)).toBe(INTEGRATION_PARTITION_SCRIPT_COMMAND);
+});
+
+test("the integration command line is bun test with the 30 s per-test floor, then each file under tests/", () => {
+  expect(DEFAULT_TEST_TIMEOUT_MS).toBe(30_000);
+  expect(integrationArgv(["a.test.ts", "b.test.ts"])).toEqual(["bun", "test", "--timeout", String(DEFAULT_TEST_TIMEOUT_MS), "tests/a.test.ts", "tests/b.test.ts"]);
 });
 
 test("the integration step carries no continue-on-error / if: neutralization (present, not decorative)", () => {

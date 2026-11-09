@@ -83,6 +83,51 @@ test("hello world", () => {
 The `desktop-precommit` skill (`.claude/skills/`) walks this checklist with
 the workarounds for the known environment quirks below.
 
+### Replaying the CI test steps locally
+
+`bun scripts/ci-replay.ts [--docker] [--no-native] [--split N] [--all-steps] [--keep]`
+replays, on the CURRENT working tree, the test steps of
+`.github/workflows/desktop-build.yml`: the steps are parsed from the workflow
+(a step added there runs here by default; the typechecks and the node-pty ABI
+gate run only with `--all-steps`). A workflow key the replay does not model
+(`if:`, `env:`, `continue-on-error:`, a job `env:` or `defaults:`) stops it with
+an error instead of replaying something else. Natively the pure partition runs
+at the same time as the integration partition, which is shared between `N`
+(default 6) `bun test` processes balanced by file size, CI order kept inside each
+process (the weights become measured durations once a run has covered every
+file; they are cached under the git dir). `--split 1` reproduces the CI
+arrangement: one process for the integration partition.
+
+`--docker` also replays the job in a Linux container (`scripts/ci-replay/Dockerfile`,
+bun from `.bun-version`) at the same time as the native run, with half the
+processes. The container gets a tar of the working tree (tracked and
+untracked-not-ignored files, so uncommitted work is replayed and an ignored file
+such as `.claude/settings.local.json` stays out) and nothing else from the host.
+The tar is the first `tar` on the PATH of the host: the GNU tar of Git for Windows
+under Git Bash, the System32 bsdtar otherwise; the file list is NUL-separated,
+which both read alike. A Windows checkout under `core.autocrlf=true` is CRLF while
+a runner extracts LF, so the container strips the CRLF after extracting, from every
+file, including the three the repo stores with CRLF or mixed endings (`.gitignore`,
+`LICENSE`, `tsconfig.json`) that a runner keeps as is; the native run sees the checkout as it
+is. The container runs the steps in the workflow order (`--ci-order`): the pure
+partition at its place, before `Install desktop deps`, as on a runner.
+
+Two differences from a runner remain. The native run shares the checkout, which
+already holds `desktop/node_modules`, so a pure test that imports a desktop
+dependency is green natively and red on a runner: only the container can show
+it. And `shell:` is ignored: every step runs under Git Bash, while on a Windows
+runner a step without `shell: bash` (the desktop install, typecheck and build)
+runs under pwsh.
+
+The output is one PASS/FAIL line per step, with the log folder, then the failing
+tests; exit code 1 when anything is red. It runs with `CI=true`, the Deck env
+purged (`DECK_CONTROL_*` included), a temp folder of its own (`CI_REPLAY_TMP=<dir>`
+to name one), and a neutral `core.hooksPath`. A step that changes a tracked file
+turns the run red (hash of `git diff HEAD --binary` before and after), and so does
+an edit made by another session while the replay runs: re-run when the shared tree
+moved. It installs dependencies, so it is not a read-only probe of `node_modules`.
+Not covered: macOS, and anything a GitHub runner has that the image lacks.
+
 ## Cost budget (measured 2026-10-18)
 
 Every file of `tests/` run in its own `bun test` process on a Linux
