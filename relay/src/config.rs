@@ -27,12 +27,15 @@ impl Family {
     }
 }
 
+type LogObserver = Arc<dyn Fn(&str) + Send + Sync>;
+
 /// The relay's only log sink is stderr, which Claude Code captures in its MCP
 /// logs. `capture` lets a test read the same lines.
 #[derive(Clone)]
 pub struct Logger {
     tag: String,
     capture: Option<Arc<Mutex<Vec<String>>>>,
+    observer: Option<LogObserver>,
 }
 
 impl Logger {
@@ -40,6 +43,7 @@ impl Logger {
         Logger {
             tag: tag.to_string(),
             capture: None,
+            observer: None,
         }
     }
 
@@ -49,9 +53,17 @@ impl Logger {
             Logger {
                 tag: tag.to_string(),
                 capture: Some(lines.clone()),
+                observer: None,
             },
             lines,
         )
+    }
+
+    /// `observer` runs on the logging thread for every line, so a test can act
+    /// at an exact point of the code that logs.
+    pub fn observed_by(mut self, observer: impl Fn(&str) + Send + Sync + 'static) -> Logger {
+        self.observer = Some(Arc::new(observer));
+        self
     }
 
     pub fn line(&self, msg: &str) {
@@ -61,6 +73,9 @@ impl Logger {
             c.lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .push(msg.to_string());
+        }
+        if let Some(o) = &self.observer {
+            o(msg);
         }
     }
 }

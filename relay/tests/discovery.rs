@@ -233,6 +233,136 @@ fn many_relays_starting_together_launch_the_daemon_once() {
 }
 
 #[test]
+fn no_daemon_is_started_when_the_resweep_under_the_launch_lock_finds_no_free_port() {
+    let mut r = rig(vec![free_port()], &root_hash("mine"));
+    let port = r.cfg.candidates[0];
+    let lock = launch_lock_file(&r.cfg.peers_dir, &r.cfg.code_root);
+    std::fs::write(&lock, "4000000000 0").expect("write a lock whose owner is dead");
+
+    // The stale-lock takeover logs after the first sweep and before the re-sweep.
+    let silent: Arc<Mutex<Option<FakeDaemon>>> = Arc::new(Mutex::new(None));
+    let (slot, key, root) = (silent.clone(), r.key.clone(), root_hash("mine"));
+    r.cfg.logger = r.cfg.logger.clone().observed_by(move |line| {
+        if !line.contains("removed a stale launch lock") {
+            return;
+        }
+        let listener = TcpListener::bind(("127.0.0.1", port)).expect("bind the late daemon port");
+        *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(FakeDaemon::start(
+            listener,
+            FakeOptions {
+                key: key.clone(),
+                code_root: root.clone(),
+                verify_relay: true,
+                tools_hash: "h".into(),
+                send_ticket: false,
+                hang: true,
+            },
+        ));
+    });
+    r.cfg.step_timeout = Duration::from_millis(100);
+    r.cfg.opening_deadline = Duration::from_millis(900);
+
+    let spawner = NoSpawn(AtomicUsize::new(0));
+    let found = find_session(
+        &r.cfg,
+        &r.key,
+        &hello_for(&r),
+        true,
+        &spawner,
+        &Control::default(),
+    );
+
+    assert!(
+        silent.lock().unwrap_or_else(|e| e.into_inner()).is_some(),
+        "the late daemon must have appeared between the two sweeps"
+    );
+    assert_eq!(
+        spawner.0.load(Ordering::SeqCst),
+        0,
+        "a re-sweep that finds every candidate occupied must not start another daemon"
+    );
+    assert!(r.logged("every candidate port became occupied since the first sweep"));
+    assert!(matches!(found, Found::Fallback(_)));
+    assert!(
+        !lock.exists(),
+        "the launch lock must be released when no daemon is started"
+    );
+}
+
+#[test]
+fn no_daemon_is_started_when_the_resweep_finds_a_daemon_that_refuses_the_session() {
+    let mut r = rig(vec![free_port(), free_port()], &root_hash("mine"));
+    let port = r.cfg.candidates[0];
+    let lock = launch_lock_file(&r.cfg.peers_dir, &r.cfg.code_root);
+    std::fs::write(&lock, "4000000000 0").expect("write a lock whose owner is dead");
+
+    // The stale-lock takeover logs after the first sweep and before the re-sweep.
+    let refuser: Arc<Mutex<Option<FakeDaemon>>> = Arc::new(Mutex::new(None));
+    let (slot, key, root) = (refuser.clone(), r.key.clone(), root_hash("mine"));
+    r.cfg.logger = r.cfg.logger.clone().observed_by(move |line| {
+        if !line.contains("removed a stale launch lock") {
+            return;
+        }
+        let listener = TcpListener::bind(("127.0.0.1", port)).expect("bind the late daemon port");
+        let daemon = FakeDaemon::start(
+            listener,
+            FakeOptions {
+                key: key.clone(),
+                code_root: root.clone(),
+                verify_relay: true,
+                tools_hash: "h".into(),
+                send_ticket: false,
+                hang: false,
+            },
+        );
+        daemon.set_refuse_hello(Some("proto_mismatch"));
+        *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(daemon);
+    });
+
+    let spawner = NoSpawn(AtomicUsize::new(0));
+    let control = Control::default();
+    let found = find_session(&r.cfg, &r.key, &hello_for(&r), true, &spawner, &control);
+
+    assert!(
+        refuser.lock().unwrap_or_else(|e| e.into_inner()).is_some(),
+        "the refusing daemon must have appeared between the two sweeps"
+    );
+    assert_eq!(
+        spawner.0.load(Ordering::SeqCst),
+        0,
+        "a daemon that refuses the session exists: no other daemon may be started"
+    );
+    match found {
+        Found::Fallback(cause) => assert!(
+            cause.contains("proto_mismatch"),
+            "the fallback must carry the refusal, got {cause:?}"
+        ),
+        _ => panic!("the opening must end in fallback"),
+    }
+    assert!(
+        control
+            .refusal()
+            .is_some_and(|c| c.contains("proto_mismatch")),
+        "the refusal must be recorded for the caller"
+    );
+    let sweeps_that_met_the_refusal = r
+        .log
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .filter(|l| l.starts_with(&format!("port {port}: daemon answered")))
+        .count();
+    assert_eq!(
+        sweeps_that_met_the_refusal, 1,
+        "the opening must end on the re-sweep that met the refusal, not sweep again"
+    );
+    assert!(
+        !lock.exists(),
+        "the launch lock must be released when no daemon is started"
+    );
+}
+
+#[test]
 fn a_stale_launch_lock_is_replaced_and_a_live_fresh_one_is_respected() {
     let r = rig(vec![free_port()], &root_hash("mine"));
     let lock = launch_lock_file(&r.cfg.peers_dir, &r.cfg.code_root);

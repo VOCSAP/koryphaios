@@ -653,12 +653,30 @@ pub fn find_session(
                             cfg.opening_deadline.as_millis()
                         ));
                     }
-                    cfg.logger.line("starting the shared MCP daemon");
-                    if let Err(e) = spawner.spawn(cfg) {
-                        cfg.logger.line(&format!("cannot start the daemon: {e}"));
+                    if recheck.free_ports == 0 || recheck.fatal.is_some() {
                         release_launch_lock(cfg);
-                        if opening {
-                            return Found::Fallback(format!("cannot start the daemon: {e}"));
+                        match recheck.fatal {
+                            Some(cause) => {
+                                cfg.logger.line(&format!(
+                                    "a daemon refused the session under the launch lock ({cause}); not starting another"
+                                ));
+                                ctl.set_refusal(Some(cause.clone()));
+                                if opening {
+                                    return Found::Fallback(cause);
+                                }
+                            }
+                            None => cfg.logger.line(
+                                "every candidate port became occupied since the first sweep; not starting a daemon",
+                            ),
+                        }
+                    } else {
+                        cfg.logger.line("starting the shared MCP daemon");
+                        if let Err(e) = spawner.spawn(cfg) {
+                            cfg.logger.line(&format!("cannot start the daemon: {e}"));
+                            release_launch_lock(cfg);
+                            if opening {
+                                return Found::Fallback(format!("cannot start the daemon: {e}"));
+                            }
                         }
                     }
                 }
