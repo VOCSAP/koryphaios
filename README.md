@@ -442,7 +442,9 @@ bun cli.ts mcp-daemon restart    # asks it to stop; the relays reconnect, start 
 
 #### Relay form of the MCP configuration
 
-The relay (`claude-peers-relay`, built by `cargo build --release` in `relay/`, output `relay/target/release/claude-peers-relay[.exe]`) replaces `bun` as the `command` of each entry and copies the MCP traffic to the shared daemon. `--family` picks the served family, `--fallback` names the `server.ts` or `server-roadmap.ts` of the clone and also locates `mcp-daemon.ts`, and `--bun <path>` sets the interpreter for the daemon and the fallback (`bun` from the `PATH` when absent). The install location of the binary is not fixed yet: replace `<relay-binary>` with the path of your build.
+The relay (`claude-peers-relay`) replaces `bun` as the `command` of each entry and copies the MCP traffic to the shared daemon. `--family` picks the served family, `--fallback` names the `server.ts` or `server-roadmap.ts` of the clone and also locates `mcp-daemon.ts`, and `--bun <path>` sets the interpreter for the daemon and the fallback (`bun` from the `PATH` when absent).
+
+`bun scripts/relay-setup.ts` builds the relay for the machine it runs on (`cargo build --release --locked` in `relay/`, with the static `musl` target on Linux, so the Rust target must be installed: `rustup target add x86_64-unknown-linux-musl`), installs it at `bin/<platform>-<arch>/claude-peers-relay[.exe]` (`win32-x64`, `linux-x64`, `darwin-arm64`...; never committed) and prints the two `claude mcp add` commands below with absolute paths. Without cargo, or when the build fails, it prints the `bun` form and says why. `bun scripts/relay-setup.ts --print-only` builds nothing and prints the relay form when the binary is already installed, the `bun` form otherwise. The script never writes the Claude Code configuration: run the printed commands yourself.
 
 ```bash
 claude mcp add --scope user --transport stdio claude-peers -- <relay-binary> --family peers --fallback ~/koryphaios/server.ts

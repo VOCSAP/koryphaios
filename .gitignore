@@ -75,3 +75,6 @@ desktop/docs/reference/
 
 # Rust relay build output (relay/Cargo.lock is tracked).
 relay/target/
+
+# Relay binaries built for this machine, never committed.
+bin/*/

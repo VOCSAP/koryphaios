@@ -441,6 +441,8 @@ Les refus gardent le texte actuel « Roadmap companion identity is unavailable �
 "kory-roadmap":  { "command": "<root>/bin/<plateforme>/claude-peers-relay[.exe]", "args": ["--family", "roadmap", "--fallback", "<root>/server-roadmap.ts"] }
 ```
 
+`<plateforme>` vaut `${process.platform}-${process.arch}` (par exemple `win32-x64`, `linux-x64`, `darwin-arm64`). Avant la v1.0, aucune CI ne produit le binaire et il n'est jamais commité : `bun scripts/relay-setup.ts` le construit pour l'hôte (cible `x86_64-unknown-linux-musl` sous Linux), l'installe à cet emplacement et affiche les deux commandes `claude mcp add` ; sans cargo ou en cas d'échec de la construction, il affiche la forme bun, sauf si un binaire est déjà installé (forme relais avec ce binaire). Le script n'écrit jamais la configuration de Claude Code (pas d'installateur dans `cli.ts`, `docs/DESIGN-MCP-FAMILIES.md` §4).
+
 Forme bun, inchangée : `"command": "bun", "args": ["<root>/server.ts"]`. Option `--bun <chemin>` du relais : interpréteur pour le daemon et le repli, `bun` du `PATH` par défaut. Le daemon est cherché à côté du fallback : `<dossier du fallback>/mcp-daemon.ts`.
 
 **Choix du repli, en deux temps :**
