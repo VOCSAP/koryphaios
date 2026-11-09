@@ -245,7 +245,8 @@ test("runHelp passes only its explicit environment to the headless command", asy
     if (previous === undefined) delete process.env.KORY_TEST_FORBIDDEN;
     else process.env.KORY_TEST_FORBIDDEN = previous;
   }
-}, 30_000);
+  // PowerShell with the reduced headless env takes ~26 s on windows-latest, card e506994f.
+}, 90_000);
 
 test("the default utility runner spawns Claude with the allowlisted environment only", async () => {
   const spawns = await spawnsWithWitness(() =>
