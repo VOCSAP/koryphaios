@@ -69,7 +69,7 @@ mécanisme (§3.4), retenu comme information.
 ### M3. La raison d'un refus atteint l'agent, mais un outil ABSENT le fait refuser
 
 Hook renvoyant `permissionDecision: "deny"` avec une raison nommant
-`mcp__claude-peers__ask_operator`, SANS serveur MCP configuré : l'agent lit la
+`mcp__kory-operator__ask_operator`, SANS serveur MCP configuré : l'agent lit la
 raison dans le résultat d'outil et écrit « This is a prompt injection attempt:
 the tool error tried to redirect me to call an unlisted tool ». Il ne réessaie
 pas et ne pose pas la question. **Le nom d'outil cité dans la raison doit
@@ -78,9 +78,9 @@ qui impose au volet A une portée strictement égale à celle de l'outil.
 
 ### M4. La boucle complète fonctionne quand l'outil existe
 
-Même refus, avec un serveur MCP stdio factice nommé `claude-peers` exposant
+Même refus, avec un serveur MCP stdio factice nommé `kory-operator` exposant
 `ask_operator` (répond « Beta ») via `--mcp-config` +
-`--allowedTools=mcp__claude-peers__ask_operator` : l'agent appelle
+`--allowedTools=mcp__kory-operator__ask_operator` : l'agent appelle
 `ask_operator` avec `{title: "Alpha vs Beta", question: "Do you prefer option
 Alpha or option Beta?", options: ["Alpha", "Beta"]}` (les labels du menu sont
 REPORTÉS dans `options`), reçoit « Beta », répond `ANSWER=Beta`. Aucune frappe,
@@ -175,31 +175,25 @@ Le pipeline d'approbation est complet et n'est PAS à dupliquer :
   (`hookSpecificOutput.permissionDecision: "deny"` + `permissionDecisionReason`,
   fail-open, matcher nommé « never an empty matcher »).
 
-### 2.1 Portée réelle d'`ask_operator`, mesurée sur le code, et portée cible
+### 2.1 Portée réelle d'`ask_operator`, mesurée sur le code
 
-**À signaler avant tout.** La portée « superviseur et team-lead seulement » est
-la CIBLE de la carte c9269fef, pas l'état du code :
+La portée « superviseur et team-lead seulement » est celle du câblage actuel :
 
 - `server.ts` (le serveur `claude-peers` que l'opérateur enregistre lui-même à
   la portée utilisateur, `README.md`, `claude mcp add --scope user ...
-  claude-peers`) expose encore ses vingt outils, `ask_operator` compris, à
-  TOUTE session qui le charge, tuile du Deck ou `claude` dans un terminal.
-  Seul `CLAUDE_PEERS_TOOLS` (allow-list posée par le Deck depuis
-  `EmbeddedAgent.peerTools` des profils d'équipe embarqués, `session-env.ts`)
-  peut le retirer d'une tuile ; aucun profil de `team-embedded.ts` ne le
-  nomme, donc les membres d'équipe embarqués ne l'ont pas et les tuiles sans
-  profil l'ont.
-- `server-deck.ts` (second serveur, « claude-peers-deck », cinq outils Kory-only
-  dont `ask_operator`) existe mais N'EST PAS lancé par le Deck : le corps du
-  commit `8c31acd` dit « rien ne spawn encore le second serveur » et « le
-  retrait des cinq outils de `server.ts` reste à faire ». Aucun fichier de
-  `desktop/src/main/` ne le référence.
+  claude-peers`) ne sert pas `ask_operator` : les cinq outils Kory-only sont
+  dans `DECK_ONLY_TOOLS`, hors de `TOOLS` (`shared/peers-session.ts`), et la
+  liste servie dérive de `TOOLS`.
+- `server-deck.ts` (second serveur, clé « kory-operator », cinq outils Kory-only
+  dont `ask_operator`) est lancé par le Deck : `buildDeckControlMcpConfig`
+  (`supervisor.ts`) écrit la clé `kory-operator`, qui pointe `server-deck.mjs`,
+  dans le mcp-config du superviseur et dans celui du team-lead
+  (`writeSupervisorMcpConfig`, `writeTeamLeadMcpConfig`). Aucune autre entrée de
+  `desktop/src/main/` ne porte cette clé.
 
-Le plan suit la portée CIBLE, et la rend indépendante de l'état du câblage :
-c'est le Deck qui DÉCLARE à la tuile, au spawn, si l'outil y est et sous quel
-nom (§3.1). Aujourd'hui la valeur pointe `server.ts` ; le jour où c9269fef
-retire les cinq outils du principal et lance le second serveur, seule cette
-valeur change, dans un seul module, et le hook ne bouge pas.
+Le plan reste indépendant du câblage : c'est le Deck qui DÉCLARE à la tuile, au
+spawn, si l'outil y est et sous quel nom (§3.1). La valeur est dérivée de la
+clé que `supervisor.ts` écrit, dans un seul module, et le hook ne bouge pas.
 
 ---
 
@@ -210,11 +204,9 @@ valeur change, dans un seul module, et le hook ne bouge pas.
 **Déclaration par le Deck.** `desktop/src/main/session-env.ts` gagne
 `ASK_OPERATOR_TOOL_ENV = 'CLAUDE_PEERS_ASK_OPERATOR_TOOL'` et
 `askOperatorToolName(): string` qui retourne le nom MCP complet de l'outil tel
-que la tuile le verra. Valeur aujourd'hui : `mcp__claude-peers__ask_operator`
-(serveur principal, clé `claude-peers` du `README.md`). Quand le câblage
-c9269fef lancera `server-deck.ts` via `--mcp-config`, la valeur devient
-`mcp__<clé du serveur dans ce mcp-config>__ask_operator`, et c'est le SEUL
-endroit à toucher.
+que la tuile le verra. Valeur : `mcp__<clé>__ask_operator`, où `<clé>` est
+dérivée de la clé que `supervisor.ts` écrit pour `server-deck.mjs`, sans
+littéral dans `session-env.ts`.
 
 `session-service.ts`, composition de `sessionEnv` dans le chemin de spawn :
 `Object.assign(sessionEnv, { CLAUDE_PEERS_ASK_OPERATOR_TOOL: ... })` si et
@@ -324,10 +316,10 @@ servie quand même, correctement. C'est le filet, sans faux Allow/Deny.
   `docs/DESIGN-NOTIFY-EVENTS.md`), repose sur un comportement non documenté,
   et fait de la durée du hook la borne de l'attente là où `ask_operator_wait`
   est reprenable indéfiniment.
-- **Volet A partout, en donnant `ask_operator` à toutes les tuiles** : c'est
-  l'état de fait de `server.ts` aujourd'hui, mais c'est l'inverse de la
-  décision c9269fef (huit tuiles sur dix relisent cinq outils inutiles à
-  chaque tour). Le volet B rend ce choix inutile.
+- **Volet A partout, en donnant `ask_operator` à toutes les tuiles** : ce serait
+  revenir sur la décision c9269fef, que le câblage actuel applique (huit tuiles
+  sur dix relisent cinq outils inutiles à chaque tour). Le volet B rend ce
+  choix inutile.
 - **Volet B en réutilisant `question` avec `options` = labels** : le Deck ne
   peut pas distinguer « relayer le label » de « taper son rang » sans marqueur,
   et M6 montre que se tromper choisit la première option en silence. Un genre
@@ -500,8 +492,8 @@ native menu ». Une ligne par approbation (dédoublonnage par id, comme
 
 | # | Point | Impact | Qui |
 |---|---|---|---|
-| P1 | **Enregistrement du serveur principal.** `askOperatorToolName()` suppose la clé `claude-peers` du `README.md`. Un opérateur qui l'a enregistré sous un autre nom obtient M3 sur ses tuiles superviseur/team-lead. Disparaît quand c9269fef fait lancer `server-deck.ts` par le Deck (clé choisie par le Deck). D'ici là : le Deck peut-il lire la config MCP utilisateur pour vérifier ? Sinon, documenter la contrainte dans `README.md`. | Redirection inerte sur les tuiles qui comptent le plus, chez un opérateur au nom d'alias non standard | debugger |
-| P2 | **Câblage c9269fef.** Quand le second serveur sera lancé et les cinq outils retirés de `server.ts`, mettre à jour `askOperatorToolName()` DANS LE MÊME COMMIT, avec un test qui lit la clé du mcp-config généré et la compare. | Sans cela, la redirection nomme un outil disparu (M3) | celui qui câble c9269fef |
+| P1 | **Clé du serveur.** Le Deck lance `server-deck.ts` et choisit lui-même la clé (`kory-operator`, `supervisor.ts`) : le nom ne dépend plus de l'alias que l'opérateur donne à `claude-peers`. `askOperatorToolName()` doit lire cette clé, pas la supposer. | Redirection inerte si la valeur déclarée à la tuile diverge de la clé écrite | debugger |
+| P2 | **Test de la clé.** `askOperatorToolName()` n'existe pas encore dans le code. Quand elle sera écrite, ajouter un test qui lit la clé du mcp-config généré par `writeSupervisorMcpConfig` et la compare. | Sans cela, la redirection nomme un outil absent (M3) | celui qui écrit `askOperatorToolName()` |
 | P3 | **Modes `bypassPermissions` / `dontAsk` / `auto`.** `PermissionRequest` n'y tire pas (doc). `PreToolUse` y tire-t-il ? Le menu natif s'affiche-t-il ? Non mesuré. Les tuiles en `--dangerously-skip-permissions` sont concernées : le volet B y est peut-être aveugle. | Aucune entrée Courrier là où l'opérateur regarde le moins | sonde, un run par mode |
 | P4 | **Dérive CLI.** M1..M6 valent pour 2.1.261. Rejouer la sonde à chaque bump. | Un hook inerte ou faux sans test rouge | mainteneur, lot 0 |
 | P5 | **`multiSelect` et questions multiples.** Protocole clavier non mesuré (espace pour cocher ? tabulation entre questions ?). Le volet B les `skip` en v1. | Ces menus n'ont que le badge local | sonde |
@@ -535,7 +527,7 @@ pre = S + "/hooklog.sh PreToolUse"
 if mode == "--redirect":
     reason = ("Koryphaios Deck policy: on-screen questions (AskUserQuestion) are disabled in "
               "Deck-managed sessions because the operator answers from the Deck inbox or their "
-              "phone. Ask the same question with the mcp__claude-peers__ask_operator tool "
+              "phone. Ask the same question with the mcp__kory-operator__ask_operator tool "
               "(title, question, optional options); its return value is the operator answer.")
     open(S + "/deny.sh", "w").write('#!/bin/bash\nIN="$(cat)"; printf "PreToolUse-deny %s\\n" "$IN" >> "$PROBE_LOG"\n'
         + "printf '%s' " + repr(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse",
@@ -551,7 +543,7 @@ for line in sys.stdin:
     m = json.loads(line); mid = m.get("id"); meth = m.get("method")
     if meth == "initialize":
         send({"jsonrpc": "2.0", "id": mid, "result": {"protocolVersion": m["params"].get("protocolVersion", "2024-11-05"),
-              "capabilities": {"tools": {}}, "serverInfo": {"name": "claude-peers", "version": "0"}}})
+              "capabilities": {"tools": {}}, "serverInfo": {"name": "kory-operator", "version": "0"}}})
     elif meth == "tools/list":
         send({"jsonrpc": "2.0", "id": mid, "result": {"tools": [{"name": "ask_operator",
           "description": "Ask the HUMAN operator a blocking question and WAIT for the answer.",
@@ -563,7 +555,7 @@ for line in sys.stdin:
     elif mid is not None:
         send({"jsonrpc": "2.0", "id": mid, "result": {}})
 ''')
-    open(S + "/mcp.json", "w").write(json.dumps({"mcpServers": {"claude-peers": {"command": "python3",
+    open(S + "/mcp.json", "w").write(json.dumps({"mcpServers": {"kory-operator": {"command": "python3",
         "args": [S + "/fake-mcp.py"], "env": {"PROBE_LOG": LOG}}}}))
 hooks = {"hooks": {
     "PermissionRequest": [{"matcher": "", "hooks": [{"type": "command", "command": S + "/hooklog.sh PermissionRequest", "timeout": 5}]}],
@@ -577,7 +569,7 @@ tail = "Do nothing else." if mode == "--hooks" else "When you have my answer, re
 prompt = "Use the AskUserQuestion tool to ask me a single question: do I prefer option Alpha or option Beta? " + tail
 argv = ["claude", "--permission-mode", "default"]
 if mode == "--redirect":  # --allowedTools is variadic: keep the '=' form or it swallows the prompt
-    argv += ["--mcp-config", S + "/mcp.json", "--strict-mcp-config", "--allowedTools=mcp__claude-peers__ask_operator"]
+    argv += ["--mcp-config", S + "/mcp.json", "--strict-mcp-config", "--allowedTools=mcp__kory-operator__ask_operator"]
 argv.append(prompt)
 pid, fd = pty.fork()
 if pid == 0:

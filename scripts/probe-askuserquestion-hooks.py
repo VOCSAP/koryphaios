@@ -24,7 +24,7 @@ import tempfile
 import time
 
 SECRET_ENV = ("CLAUDE_CODE_OAUTH_TOKEN",)
-MCP_SERVER = "claude-peers"
+MCP_SERVER = "kory-operator"
 MCP_TOOL = "ask_operator"
 TOOL_NAME = "mcp__%s__%s" % (MCP_SERVER, MCP_TOOL)
 HOOK_EVENTS = ("PreToolUse", "PermissionRequest", "Notification", "PostToolUse")

@@ -2,9 +2,9 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, expect, test } from "bun:test";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { createPeersSession, DECK_ONLY_TOOLS } from "../shared/peers-session.ts";
+import { DECK_ONLY_TOOLS } from "../shared/peers-session.ts";
+import { OPERATOR_CEILING_ENV, OPERATOR_TOOLS, resolveMountCeiling } from "../shared/mount-ceiling.ts";
+import { deckLeadScriptPath, writeSupervisorMcpConfig } from "../desktop/src/main/supervisor.ts";
 import { scrubEnv } from "./_scrub-env.ts";
 
 const REPO_ROOT = join(import.meta.dir, "..");
@@ -58,75 +58,31 @@ test("probe --selftest passes on every check and covers the secret-leak and verd
   }
 });
 
-async function peersSessionServerName(): Promise<string> {
-  const home = mkdtempSync(join(SCRATCH, "session-"));
-  const brokerFetch = async (input: unknown, init?: { body?: unknown }): Promise<Response> => {
-    const path = new URL(String(input)).pathname;
-    if (path === "/register") {
-      const body = JSON.parse(String(init?.body)) as { role?: string };
-      return Response.json({ peer_id: "peer-1", instance_token: "token-1", inbox_binding: null, role: body.role ?? null });
-    }
-    if (path === "/peek-messages" || path === "/poll-messages") return Response.json({ messages: [] });
-    return Response.json({ ok: true });
-  };
-  class IdleSocket {
-    static CLOSED = 3;
-    readyState = 0;
-    addEventListener(): void {}
-    send(): void {}
-    close(): void {
-      this.readyState = IdleSocket.CLOSED;
-    }
-  }
-  const session = createPeersSession(
-    {
-      env: { XDG_CONFIG_HOME: home, APPDATA: home, CLAUDE_PEERS_PORT: "17999", CLAUDE_PEERS_LOG_DIR: join(home, "logs") },
-      cwd: home,
-      pid: 777,
-      ppid: 4242,
-      stdinIsTty: false,
-    },
-    {
-      log: { log: () => {}, logError: () => {} },
-      home,
-      hostname: () => "test-host",
-      ensureBroker: async () => {},
-      measureWriterGeneration: async () => null,
-      settings: {
-        contextResumeKeyTtlMs: 300_000,
-        pollFallbackIntervalMs: 3_600_000,
-        heartbeatIntervalMs: 3_600_000,
-        disconnectBoundMs: 3_000,
-        wsReconnectInitialMs: 60_000,
-      },
-      fetch: brokerFetch as unknown as typeof fetch,
-      WebSocket: IdleSocket as unknown as typeof WebSocket,
-    },
-  );
-  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  await session.server.connect(serverTransport);
-  const client = new Client({ name: "probe-test", version: "1.0.0" });
-  await client.connect(clientTransport);
-  try {
-    await session.ready;
-    return client.getServerVersion()?.name ?? "";
-  } finally {
-    await client.close();
-    await session.close("bye");
-  }
-}
-
-test("the MCP server the probe names is the peers session's own server", async () => {
-  const serverName = await peersSessionServerName();
-  expect(serverName, `the probe addresses server "${constant("MCP_SERVER")}", the peers session serves as "${serverName}"`).toBe(
-    constant("MCP_SERVER"),
-  );
+test("the MCP server the probe names is mounted by the Deck with a ceiling that grants the tool the probe tells the agent to call", () => {
+  const server = constant("MCP_SERVER");
+  const tool = constant("MCP_TOOL");
+  const mcpScriptPath = join(SCRATCH, "deck-plugin", "mcp", "deck-control-mcp.mjs");
+  const file = writeSupervisorMcpConfig({
+    dir: SCRATCH,
+    mcpScriptPath,
+    execPath: process.execPath,
+    controlUrl: "http://127.0.0.1:1",
+    controlToken: "unused",
+  });
+  const mcpServers = (JSON.parse(readFileSync(file, "utf-8")) as {
+    mcpServers: Record<string, { args: string[]; env: Record<string, string> }>;
+  }).mcpServers;
+  const mounted = mcpServers[server];
+  expect(
+    mounted,
+    `the Deck mounts no MCP server "${server}" (mounted: ${Object.keys(mcpServers).join(", ")}): mcp__${server}__${tool} does not exist`,
+  ).toBeDefined();
+  expect(mounted!.args, `"${server}" does not launch the operator-family script`).toEqual([deckLeadScriptPath(mcpScriptPath)]);
+  const ceiling = resolveMountCeiling(OPERATOR_CEILING_ENV, mounted!.env[OPERATOR_CEILING_ENV], OPERATOR_TOOLS);
+  expect(ceiling.ok, `the "${server}" mount ceiling is refused by the server's own resolver`).toBe(true);
+  expect(ceiling.ok ? ceiling.value : [], `"${server}" is mounted without "${tool}" in its ceiling`).toContain(tool);
+  expect(
+    DECK_ONLY_TOOLS.map((declared) => declared.name),
+    `the operator family declares no "${tool}": the "${server}" process has nothing to serve under it`,
+  ).toContain(tool);
 });
-
-test("the tool the probe tells the agent to call is declared by the operator tool family", () => {
-  const declared = DECK_ONLY_TOOLS.map((tool) => tool.name);
-  expect(declared, `no operator-family tool "${constant("MCP_TOOL")}": the probe's deny reason points at nothing`).toContain(
-    constant("MCP_TOOL"),
-  );
-});
-
