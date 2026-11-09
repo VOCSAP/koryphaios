@@ -6,6 +6,8 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
 
+import type { Logger } from "../shared/logger.ts";
+import type { LinkedIdentity, LinkLookup } from "../shared/mcp-daemon-links.ts";
 import { writeGlobalSessionIdentityFile, type WriterGeneration } from "../shared/peer-cache.ts";
 import { measureWriterGeneration } from "../shared/process-generation.ts";
 import { createRoadmapServer } from "../shared/roadmap-server.ts";
@@ -232,6 +234,68 @@ test.skipIf(GENERATION_MEASURABLE)(
 
     expect(await callTool(client, "roadmap_list")).toEqual({ isError: true, text: IDENTITY_REFUSAL });
     expect(s.broker.requests, "a snapshot whose writer cannot be checked must not reach the broker").toEqual([]);
+  },
+  60_000
+);
+
+function linkedTo(lookup: LinkLookup): { lookup(): LinkLookup; log: Logger; errors: string[] } {
+  const errors: string[] = [];
+  const log: Logger = { info: () => {}, warn: () => {}, error: (m) => void errors.push(m), child: () => log, file: "" };
+  return { lookup: () => lookup, log, errors };
+}
+
+function identityOf(session: Session, brokerUrl = new URL(session.broker.url).toString()): LinkedIdentity {
+  return { peerId: `linked-${session.label}`, instanceToken: `tok-${session.label}`, projectKey: session.projectKey, brokerUrl };
+}
+
+test("a single linked peers session serves the call from memory, with no snapshot on disk", async () => {
+  const s = newSession("linked");
+  const links = linkedTo({ kind: "one", sessionId: "s1", identity: identityOf(s) });
+  const client = await connect(createRoadmapServer({ env: s.env, home: s.home, links }));
+
+  expect(await callTool(client, "roadmap_list")).toEqual({ isError: false, text: EMPTY_ROADMAP });
+  expect(s.broker.requests.map((r) => [r.path, r.body.project_key])).toEqual([["/roadmap/list", s.projectKey]]);
+});
+
+test("a linked identity naming another broker than the env's is refused before any broker traffic", async () => {
+  const s = newSession("linkedforeign");
+  const links = linkedTo({ kind: "one", sessionId: "s1", identity: identityOf(s, "http://127.0.0.1:2/") });
+  const client = await connect(createRoadmapServer({ env: s.env, home: s.home, links }));
+
+  expect(await callTool(client, "roadmap_list")).toEqual({ isError: true, text: IDENTITY_REFUSAL });
+  expect(s.broker.requests, "the broker of the env must not receive a call made as a peer of another broker").toEqual([]);
+});
+
+test("two linked peers sessions are refused as ambiguous and both session ids are logged", async () => {
+  const s = newSession("ambiguous");
+  const links = linkedTo({ kind: "many", sessionIds: ["s-first", "s-second"] });
+  const client = await connect(createRoadmapServer({ env: s.env, home: s.home, links }));
+
+  expect(await callTool(client, "roadmap_list")).toEqual({ isError: true, text: "Roadmap companion identity is ambiguous" });
+  expect(s.broker.requests, "an ambiguous identity must not reach the broker").toEqual([]);
+  expect(links.errors).toHaveLength(1);
+  expect(links.errors[0]).toContain("s-first");
+  expect(links.errors[0]).toContain("s-second");
+});
+
+test("no linked peers session and no snapshot: the call is refused as unavailable", async () => {
+  const s = newSession("unlinked");
+  const links = linkedTo({ kind: "none" });
+  const client = await connect(createRoadmapServer({ env: s.env, home: s.home, links }));
+
+  expect(await callTool(client, "roadmap_list")).toEqual({ isError: true, text: IDENTITY_REFUSAL });
+  expect(s.broker.requests).toEqual([]);
+});
+
+test.skipIf(!GENERATION_MEASURABLE)(
+  `no linked peers session falls back to the snapshot on disk (${NEEDS_GENERATION})`,
+  async () => {
+    const s = newSession("unlinkedsnap");
+    await writeSnapshot(s);
+    const client = await connect(createRoadmapServer({ env: s.env, home: s.home, links: linkedTo({ kind: "none" }) }));
+
+    expect(await callTool(client, "roadmap_list")).toEqual({ isError: false, text: EMPTY_ROADMAP });
+    expect(s.broker.requests.map((r) => r.body.project_key)).toEqual([s.projectKey]);
   },
   60_000
 );

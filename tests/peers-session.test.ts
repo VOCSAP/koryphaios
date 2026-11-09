@@ -644,6 +644,105 @@ describe("close", () => {
   });
 });
 
+describe("identity", () => {
+  test("is null while the registration has not answered", async () => {
+    // Mutation: answering the tokens held before the registration completes.
+    const h = await openSession({ hang: ["/register"], skipReady: true });
+    await until(() => callsTo(h, "/register").length === 1, "the boot /register");
+    expect(h.session.identity()).toBeNull();
+
+    await reachedWithin(h.session.close("bye"), "close while /register hangs");
+  });
+
+  test("is the registered peer with the project key and the broker URL the snapshot carries", async () => {
+    // Mutation: a project key or a broker URL that differs from the snapshot read by the stdio roadmap companion.
+    const h = await openSession({ env: { CLAUDE_CODE_MESSAGING_SOCKET: SOCKET } });
+    const snapshot = await readGlobalSessionIdentityFile(SOCKET, h.home);
+
+    expect(h.session.identity()).toEqual({
+      peerId: "peer-1",
+      instanceToken: "token-1",
+      projectKey: snapshot?.projectKey as string,
+      brokerUrl: "http://127.0.0.1:17999/",
+    });
+    expect(snapshot?.brokerUrl).toBe("http://127.0.0.1:17999/");
+  });
+
+  describe("while the identity is being replaced", () => {
+    const openSwitchable = () =>
+      openSession({
+        groups: { alpha: "alpha-secret", beta: "beta-secret" },
+        env: { CLAUDE_CODE_MESSAGING_SOCKET: SOCKET, CLAUDE_PEERS_GROUP: "alpha" },
+      });
+
+    test("is null from the switch_group /disconnect until the new identity is published", async () => {
+      // Mutation: answering the old token while the broker has already disconnected it.
+      const h = await openSwitchable();
+      expect(h.session.identity()?.instanceToken, "control: published at boot").toBe("token-1");
+      let release!: () => void;
+      h.broker.gates.set("/register", new Promise<void>((resolve) => (release = resolve)));
+
+      const switching = call(h, "switch_group", { name: "beta" });
+      try {
+        await until(() => callsTo(h, "/register").length === 2, "the switch's /register");
+        expect(callsTo(h, "/disconnect")).toHaveLength(1);
+        expect(h.session.identity()).toBeNull();
+      } finally {
+        release();
+      }
+      expect(isError(await switching)).toBe(false);
+      expect(h.session.identity()).toMatchObject({ peerId: "peer-2", instanceToken: "token-2" });
+    });
+
+    test("stays null after a switch_group whose /register fails", async () => {
+      // Mutation: restoring the flag when the switch fails after the /disconnect.
+      const h = await openSwitchable();
+      h.broker.failures.set("/register", { times: 10, kind: "http" });
+
+      expect(isError(await call(h, "switch_group", { name: "beta" }))).toBe(true);
+      expect(callsTo(h, "/disconnect")).toHaveLength(1);
+      expect(h.session.identity()).toBeNull();
+    });
+
+    test("is null while set_id waits for the broker and follows the rename once published", async () => {
+      // Mutation: a snapshot withdrawn for set_id that identity() does not see.
+      const h = await openSwitchable();
+      let release!: () => void;
+      h.broker.gates.set("/set-id", new Promise<void>((resolve) => (release = resolve)));
+
+      const renaming = call(h, "set_id", { new_id: "renamed-peer" });
+      try {
+        await until(() => callsTo(h, "/set-id").length === 1, "the /set-id request");
+        expect(h.session.identity()).toBeNull();
+      } finally {
+        release();
+      }
+      expect(isError(await renaming)).toBe(false);
+      expect(h.session.identity()).toMatchObject({ peerId: "renamed-peer", instanceToken: "token-1" });
+    });
+
+    test("is the old identity again after a set_id the broker refuses", async () => {
+      // Mutation: the restore after a refusal not republishing, leaving the session unlinked for good.
+      const h = await openSwitchable();
+      h.broker.failures.set("/set-id", { times: 1, kind: "http" });
+
+      expect(isError(await call(h, "set_id", { new_id: "renamed-peer" }))).toBe(true);
+      expect(h.session.identity()).toMatchObject({ peerId: "peer-1", instanceToken: "token-1" });
+    });
+  });
+
+  test("follows a rename of the peer", async () => {
+    // Mutation: an identity captured once at registration.
+    const h = await openSession({ env: { CLAUDE_CODE_MESSAGING_SOCKET: SOCKET } });
+    expect(h.session.identity()?.peerId, "control: the registered peer").toBe("peer-1");
+    expect(isError(await call(h, "set_id", { new_id: "renamed-peer" }))).toBe(false);
+
+    const snapshot = await readGlobalSessionIdentityFile(SOCKET, h.home);
+    expect(h.session.identity()?.peerId).toBe(snapshot?.peerId as string);
+    expect(h.session.identity()?.peerId).not.toBe("peer-1");
+  });
+});
+
 describe("bounds and ordering", () => {
   test("at most 8 wait_for_message calls wait at once", async () => {
     // Mutation: removing the bound.
@@ -994,6 +1093,19 @@ describe("resuming after a daemon restart", () => {
     });
     await until(() => channelTexts(h).length === 1, "the reconnection notice");
     expect(channelTexts(h)).toEqual([KEPT_NOTICE]);
+  });
+
+  test("a resumed identity whose snapshot was kept in place is published to the roadmap family", async () => {
+    // Mutation: the kept-snapshot shortcut not marking the identity as published.
+    const h = await openSession({
+      env: { CLAUDE_CODE_MESSAGING_SOCKET: SOCKET },
+      input: { resume: ticket() },
+      prepare: resumableBroker,
+      seed: keptSnapshot,
+    });
+
+    expect(h.writes.snapshot, "control: the snapshot was kept, not rewritten").toBe(0);
+    expect(h.session.identity()).toMatchObject({ peerId: "peer-old", instanceToken: "token-old" });
   });
 
   test("a snapshot that differs from the resumed identity is rewritten", async () => {

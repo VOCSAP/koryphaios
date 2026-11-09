@@ -70,6 +70,7 @@ interface Closed {
 }
 
 export interface Harness {
+  entered: string[];
   created: string[];
   closed: Closed[];
   gates: Map<string, Promise<void>>;
@@ -78,10 +79,12 @@ export interface Harness {
 
 export function harness(): Harness {
   const h: Harness = {
+    entered: [],
     created: [],
     closed: [],
     gates: new Map(),
     factory: (extraTool) => async (hello) => {
+      h.entered.push(hello.cwd);
       if (hello.cwd === "/work/boom") throw new Error("factory exploded");
       await h.gates.get(hello.cwd);
       h.created.push(hello.cwd);

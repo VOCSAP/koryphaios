@@ -4,6 +4,7 @@ import { createBrokerEnsurer, type BrokerEnsureRequest, type BrokerEnsurer, type
 import { brokerStopMarkerPath } from "../shared/broker-stop-marker.ts";
 import { settingsFilePath } from "../shared/config.ts";
 import type { Logger } from "../shared/logger.ts";
+import { createLinkIndex, linkKeyOf, type LinkedIdentity, type LinkIndex } from "../shared/mcp-daemon-links.ts";
 import type { Hello } from "../shared/mcp-daemon-protocol.ts";
 import type { FamilyContext, FamilyHandle, FamilyTicketClaims } from "../shared/mcp-daemon-server.ts";
 import { createPeersFamily, ensureBrokerFor } from "../shared/peers-family.ts";
@@ -77,6 +78,7 @@ interface SessionSeam {
   deps: PeersSessionDeps[];
   closes: string[];
   server: object;
+  current: LinkedIdentity | null;
   createSession: (input: PeersSessionInput, deps: PeersSessionDeps) => PeersSession;
 }
 
@@ -86,6 +88,7 @@ function sessionSeam(ready: Promise<void> = Promise.resolve()): SessionSeam {
     deps: [],
     closes: [],
     server: { name: "the server of the session" },
+    current: null,
     createSession: (input, deps) => {
       seam.inputs.push(input);
       seam.deps.push(deps);
@@ -94,6 +97,7 @@ function sessionSeam(ready: Promise<void> = Promise.resolve()): SessionSeam {
         ready,
         close: async (reason: string) => void seam.closes.push(reason),
         openChannel: () => {},
+        identity: () => seam.current,
       } as unknown as PeersSession;
     },
   };
@@ -185,6 +189,78 @@ describe("the peers family factory", () => {
     build(createPeersFamily({ createSession: seam.createSession }), r.ctx);
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(r.lines.error).toEqual(["peers session failed to register"]);
+  });
+});
+
+describe("the publication of a session in the link index", () => {
+  const linked: Hello = { ...hello, ppid_start: "gen-1", env: { ...hello.env, CLAUDE_CODE_MESSAGING_SOCKET: "sock-a" } };
+  const key = linkKeyOf(linked) as NonNullable<ReturnType<typeof linkKeyOf>>;
+  const mine: LinkedIdentity = { peerId: "p1", instanceToken: "t1", projectKey: "github.com/example/a", brokerUrl: "http://127.0.0.1:7899/" };
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+  function open(links: LinkIndex, ready: Promise<void>, helloOver: Hello = linked) {
+    const seam = sessionSeam(ready);
+    seam.current = mine;
+    const handle = createPeersFamily({ createSession: seam.createSession, links })(helloOver, rig().ctx) as FamilyHandle;
+    return { seam, handle };
+  }
+
+  test("a session enters the index once it is registered, under the hello's key and the session id", async () => {
+    const links = createLinkIndex();
+    let registered!: () => void;
+    open(links, new Promise<void>((resolve) => (registered = resolve)));
+    await settle();
+    expect(links.find(key), "a session still registering is not linked").toEqual({ kind: "none" });
+    registered();
+    await settle();
+    expect(links.find(key)).toEqual({ kind: "one", sessionId: "s1", identity: mine });
+  });
+
+  test("the entry reads the identity of the session at each lookup", async () => {
+    const links = createLinkIndex();
+    const { seam } = open(links, Promise.resolve());
+    await settle();
+    seam.current = { ...mine, peerId: "renamed" };
+    expect(links.find(key)).toMatchObject({ kind: "one", identity: { peerId: "renamed" } });
+  });
+
+  test("a closed session is out of the index", async () => {
+    const links = createLinkIndex();
+    const { handle } = open(links, Promise.resolve());
+    await settle();
+    await handle.close("bye");
+    expect(links.find(key)).toEqual({ kind: "none" });
+  });
+
+  test("a session closed before it registered never enters the index", async () => {
+    const links = createLinkIndex();
+    let registered!: () => void;
+    const { handle } = open(links, new Promise<void>((resolve) => (registered = resolve)));
+    await handle.close("socket");
+    registered();
+    await settle();
+    expect(links.find(key)).toEqual({ kind: "none" });
+  });
+
+  test("a session that fails to register never enters the index", async () => {
+    const links = createLinkIndex();
+    open(links, Promise.reject(new Error("register refused")));
+    await settle();
+    expect(links.find(key)).toEqual({ kind: "none" });
+  });
+
+  test("a session of another parent start time is not found under this key", async () => {
+    const links = createLinkIndex();
+    open(links, Promise.resolve(), { ...linked, ppid_start: "gen-2" });
+    await settle();
+    expect(links.find(key)).toEqual({ kind: "none" });
+  });
+
+  test("a hello without a messaging socket publishes nothing", async () => {
+    const links = createLinkIndex();
+    open(links, Promise.resolve(), { ...linked, env: { CLAUDE_PEERS_PORT: "7899" } });
+    await settle();
+    expect(links.find(key)).toEqual({ kind: "none" });
   });
 });
 

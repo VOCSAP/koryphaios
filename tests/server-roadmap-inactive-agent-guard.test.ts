@@ -4,7 +4,7 @@
 // schema declares.
 
 import { test, expect, afterAll } from "bun:test";
-import { startBroker, stopBroker, post, deckAuthored, scrubEnv, type TestBroker } from "./_helper.ts";
+import { startBroker, stopBroker, post, deckAuthored, scrubEnv, awaitCoreRegistered, type TestBroker } from "./_helper.ts";
 import type { RoadmapItem } from "../shared/types.ts";
 
 const brokers: TestBroker[] = [];
@@ -74,7 +74,8 @@ async function boot(): Promise<Harness> {
   const b = await startBroker();
   brokers.push(b);
   const env = { CLAUDE_CODE_MESSAGING_SOCKET: `roadmap-boot-${process.pid}-${nextSocket++}` };
-  await spawnMcp("server.ts", b, env);
+  const core = await spawnMcp("server.ts", b, env);
+  await awaitCoreRegistered(core.send, (id) => readUntil(core.reader, id, core.buffer));
   return spawnMcp("server-roadmap.ts", b, env);
 }
 

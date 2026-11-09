@@ -3,6 +3,7 @@ import { brokerAnswers, type BrokerEnsurer } from "./broker-ensure.ts";
 import { brokerStopMarkerPath } from "./broker-stop-marker.ts";
 import { settingsFilePath } from "./config.ts";
 import type { Logger } from "./logger.ts";
+import { linkKeyOf, type LinkIndex } from "./mcp-daemon-links.ts";
 import type { FamilyContext, FamilyFactory } from "./mcp-daemon-server.ts";
 import { createPeersSession, readPeersSessionSettings, type EnsureBrokerRequest } from "./peers-session.ts";
 import { measureWriterGeneration } from "./process-generation.ts";
@@ -13,6 +14,8 @@ export interface PeersFamilyDeps {
   hostname?: () => string;
   /** GET <url>/health: true when the broker answers 2xx. */
   isAlive?: (url: string, log: Logger) => Promise<boolean>;
+  /** Where an open registered session is published for the roadmap family of the same Claude Code session. */
+  links?: LinkIndex;
 }
 
 function remoteBrokerUnreachable(url: string): Error {
@@ -79,7 +82,21 @@ export function createPeersFamily(deps: PeersFamilyDeps = {}): FamilyFactory {
         sendPidGeneration: true,
       },
     );
-    session.ready.catch((error) => ctx.log.error("peers session failed to register", error));
-    return { server: session.server, close: (reason) => session.close(reason) };
+    const key = deps.links ? linkKeyOf(hello) : null;
+    let open = true;
+    let leave: (() => void) | null = null;
+    session.ready
+      .then(() => {
+        if (open && deps.links && key) leave = deps.links.register(ctx.sessionId, key, () => session.identity());
+      })
+      .catch((error) => ctx.log.error("peers session failed to register", error));
+    return {
+      server: session.server,
+      close: (reason) => {
+        open = false;
+        leave?.();
+        return session.close(reason);
+      },
+    };
   };
 }

@@ -24,10 +24,13 @@ export interface RelayHello {
   env: Record<string, string>;
   pid: number;
   ppid: number;
+  pid_start: string;
+  replay: boolean;
+  resume_ticket: string;
 }
 
 export type HelloReply =
-  | { kind: "welcome"; sessionId: string; family: string; toolsHash: string }
+  | { kind: "welcome"; sessionId: string; family: string; toolsHash: string; resumed: boolean }
   | { kind: "refused"; code: string; message: string }
   | { kind: "closed" };
 
@@ -63,8 +66,24 @@ export class DaemonRelay {
     return relay;
   }
 
+  /** Every resume ticket the daemon sent on this connection, oldest first. */
+  readonly tickets: string[] = [];
+  /** Every JSON-RPC message the daemon sent without an `id`: the channel pushes. */
+  readonly notifications: Array<{ method: string; params?: any }> = [];
+
+  private record(frame: Frame): void {
+    if (frame.type === FRAME_TYPE.TICKET) {
+      this.tickets.push(JSON.parse(frame.payload.toString()).ticket as string);
+    } else if (frame.type === FRAME_TYPE.MCP) {
+      const message = JSON.parse(frame.payload.toString());
+      if (message.id === undefined && typeof message.method === "string") this.notifications.push(message);
+    }
+  }
+
   private onData(chunk: Uint8Array): void {
-    this.queue.push(...this.decoder.push(chunk));
+    const frames = this.decoder.push(chunk);
+    for (const frame of frames) this.record(frame);
+    this.queue.push(...frames);
     const next = this.waiting ? this.queue.shift() : undefined;
     if (this.waiting && next) {
       const waiter = this.waiting;
@@ -80,11 +99,11 @@ export class DaemonRelay {
     waiter?.("closed");
   }
 
-  private async nextFrame(what: string): Promise<Frame | "closed"> {
+  private async nextFrame(what: string, waitMs = WAIT_MS): Promise<Frame | "closed"> {
     const queued = this.queue.shift();
     if (queued) return queued;
     if (this.closed) return "closed";
-    return reachedWithin(new Promise<Frame | "closed">((resolve) => (this.waiting = resolve)), what, WAIT_MS);
+    return reachedWithin(new Promise<Frame | "closed">((resolve) => (this.waiting = resolve)), what, waitMs);
   }
 
   private async authenticate(key: Buffer): Promise<void> {
@@ -143,7 +162,13 @@ export class DaemonRelay {
       if (frame === "closed") return { kind: "closed" };
       if (frame.type === FRAME_TYPE.WELCOME) {
         const welcome = JSON.parse(frame.payload.toString());
-        return { kind: "welcome", sessionId: welcome.session_id, family: welcome.family, toolsHash: welcome.tools_hash };
+        return {
+          kind: "welcome",
+          sessionId: welcome.session_id,
+          family: welcome.family,
+          toolsHash: welcome.tools_hash,
+          resumed: welcome.resumed === true,
+        };
       }
       if (frame.type === FRAME_TYPE.ERROR) {
         const refusal = JSON.parse(frame.payload.toString());
@@ -152,11 +177,12 @@ export class DaemonRelay {
     }
   }
 
-  async rpc(method: string, params?: unknown): Promise<{ result?: any; error?: any }> {
+  /** `waitMs` bounds the wait for each frame of the reply; a tool that blocks on purpose raises it. */
+  async rpc(method: string, params?: unknown, waitMs = WAIT_MS): Promise<{ result?: any; error?: any }> {
     const id = ++this.nextId;
     this.send(FRAME_TYPE.MCP, JSON.stringify({ jsonrpc: "2.0", id, method, params }));
     for (;;) {
-      const frame = await this.nextFrame(`reply to ${method}`);
+      const frame = await this.nextFrame(`reply to ${method}`, waitMs);
       if (frame === "closed") throw new Error(`connection closed while waiting for ${method}`);
       if (frame.type !== FRAME_TYPE.MCP) continue;
       const message = JSON.parse(frame.payload.toString());
@@ -169,8 +195,8 @@ export class DaemonRelay {
     return (reply.result.tools as Array<{ name: string }>).map((tool) => tool.name);
   }
 
-  async callTool(name: string, args: Record<string, unknown> = {}): Promise<ToolReply> {
-    const reply = await this.rpc("tools/call", { name, arguments: args });
+  async callTool(name: string, args: Record<string, unknown> = {}, waitMs = WAIT_MS): Promise<ToolReply> {
+    const reply = await this.rpc("tools/call", { name, arguments: args }, waitMs);
     if (reply.error) throw new Error(`${name} failed at the protocol level: ${JSON.stringify(reply.error)}`);
     return { isError: reply.result.isError === true, text: reply.result.content[0]?.text ?? "" };
   }

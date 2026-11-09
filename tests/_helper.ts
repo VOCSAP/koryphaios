@@ -14,6 +14,7 @@ import {
 } from "../shared/approval.ts";
 import { operatorTrustFilePath } from "../shared/config.ts";
 import { OPERATOR_TRUST_VERSION } from "../shared/operator-trust.ts";
+import { reachedWithin } from "./_bounded-await.ts";
 export { scrubEnv } from "./_scrub-env.ts";
 import { scrubEnv } from "./_scrub-env.ts";
 
@@ -395,4 +396,25 @@ export function runInboxCall<T>(
   };
   const gate = options.gate ?? (path === "/operator-inbox" ? INBOX_GATES.drain : INBOX_GATES.purge);
   return post<T>(`${b.url}${path}`, { ...body, auth: operatorInboxProof(body, gate) });
+}
+
+interface CoreRegistrationReply {
+  result?: { isError?: boolean; content?: Array<{ text?: string }> };
+  error?: { message?: string };
+}
+
+/**
+ * server.ts answers initialize before /register ends, and the identity snapshot
+ * a companion reads is written at the end of it; a tools/call is the only reply
+ * that waits for the registration.
+ */
+export async function awaitCoreRegistered(
+  send: (msg: unknown) => void,
+  read: (id: number) => Promise<CoreRegistrationReply>,
+  id = 1_000_000
+): Promise<void> {
+  send({ jsonrpc: "2.0", id, method: "tools/call", params: { name: "whoami", arguments: {} } });
+  const reply = await reachedWithin(read(id), "whoami reply of the core peers session, so the end of its registration", 30_000);
+  const refusal = reply.error?.message ?? (reply.result?.isError ? reply.result.content?.[0]?.text : undefined);
+  if (refusal !== undefined) throw new Error(`the core peers session did not register before the companion started: ${refusal}`);
 }

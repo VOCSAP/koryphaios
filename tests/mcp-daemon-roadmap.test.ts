@@ -2,15 +2,16 @@ import { afterAll, afterEach, beforeAll, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createLinkIndex, linkKeyOf } from "../shared/mcp-daemon-links.ts";
 import { startDaemon, type DaemonHandle } from "../shared/mcp-daemon-server.ts";
 import { writeGlobalSessionIdentityFile, type WriterGeneration } from "../shared/peer-cache.ts";
 import { measureWriterGeneration } from "../shared/process-generation.ts";
-import { createRoadmapServer } from "../shared/roadmap-server.ts";
+import { createRoadmapFamily } from "../shared/roadmap-server.ts";
 import { ROADMAP_TOOLS } from "../shared/roadmap-tools.ts";
 import type { RegisterResponse, RoadmapItem } from "../shared/types.ts";
 import { livePid, post, startBroker, stopBroker, type TestBroker } from "./_helper.ts";
 import { linkTestKey } from "./_mcp-daemon-fake-relay.ts";
-import { DaemonRelay, RELAY_CODE_ROOT } from "./_mcp-daemon-relay.ts";
+import { DaemonRelay, RELAY_CODE_ROOT, type RelayHello } from "./_mcp-daemon-relay.ts";
 
 const IDENTITY_REFUSAL = "Roadmap companion identity is unavailable";
 const GENERATION_MEASURABLE = process.platform === "win32" || process.platform === "linux";
@@ -21,6 +22,7 @@ const PROJECT_BETA = "github.com/example/mcp-daemon-roadmap-beta";
 const PROJECT_SHARED = "github.com/example/mcp-daemon-roadmap-shared";
 const TITLE_ALPHA = "alpha-only card";
 const TITLE_BETA = "beta-only card";
+const PARENT_GENERATION = "claude-process-generation-1";
 
 interface FrontRequest {
   path: string;
@@ -62,6 +64,8 @@ let home: string;
 let ownGeneration: WriterGeneration;
 const fronts: Front[] = [];
 const relays: DaemonRelay[] = [];
+const links = createLinkIndex();
+const leaves: Array<() => void> = [];
 
 function startFront(target: string): Front {
   const front: Front = { url: "", requests: [], stop: () => server.stop(true) };
@@ -157,7 +161,7 @@ async function openSession(label: string, options: SessionOptions): Promise<Open
     opened.peer = await registerPeer(options.projectKey, cwd);
     await publishSnapshot(opened, snapshot === "own" ? front : snapshot.brokerFront);
   }
-  const reply = await opened.relay.hello({ cwd, env });
+  const reply = await opened.relay.hello({ cwd, env, ppid_start: PARENT_GENERATION } as Partial<RelayHello> & { env: typeof env });
   expect(reply.kind, `the daemon must serve the roadmap family for ${label}`).toBe("welcome");
   return opened;
 }
@@ -177,7 +181,7 @@ beforeAll(async () => {
     keyPath,
     logDir: join(home, "logs"),
     codeRoot: RELAY_CODE_ROOT,
-    families: { roadmap: (hello) => createRoadmapServer({ env: hello.env, home }) },
+    families: { roadmap: createRoadmapFamily(links, home) },
   });
   await seedCard(PROJECT_ALPHA, TITLE_ALPHA);
   await seedCard(PROJECT_BETA, TITLE_BETA);
@@ -185,6 +189,7 @@ beforeAll(async () => {
 
 afterEach(() => {
   for (const relay of relays.splice(0)) relay.close();
+  for (const leave of leaves.splice(0)) leave();
 });
 
 afterAll(async () => {
@@ -309,6 +314,55 @@ test.skipIf(!GENERATION_MEASURABLE)(
   },
   30_000,
 );
+
+function publishLink(opened: Opened, sessionId: string, peer: Peer, ppidStart = PARENT_GENERATION): void {
+  const key = linkKeyOf({ env: { CLAUDE_CODE_MESSAGING_SOCKET: opened.socket }, ppid: 100, ppid_start: ppidStart });
+  if (!key) throw new Error("the fixture socket must give a link key");
+  leaves.push(
+    links.register(sessionId, key, () => ({
+      peerId: peer.peerId,
+      instanceToken: peer.token,
+      projectKey: opened.projectKey,
+      brokerUrl: new URL(opened.front.url).toString(),
+    })),
+  );
+}
+
+test("a session linked to a registered peers session is served as that peer with no snapshot on disk", async () => {
+  const session = await openSession("linked", { projectKey: PROJECT_ALPHA, snapshot: "none" });
+  const peer = await registerPeer(PROJECT_ALPHA, "/work/linked");
+  publishLink(session, "peers-linked", peer);
+
+  const listed = await session.relay.callTool("roadmap_list");
+  const added = await session.relay.callTool("roadmap_add", { title: "added through the link" });
+
+  expect(listed.isError, listed.text).toBe(false);
+  expect(listed.text).toContain(TITLE_ALPHA);
+  expect(added.isError, added.text).toBe(false);
+  expect(session.front.requests.map((r) => [r.path, r.project_key])).toEqual([
+    ["/roadmap/list", PROJECT_ALPHA],
+    ["/roadmap/upsert", PROJECT_ALPHA],
+  ]);
+  const authors = new Map((await cardsOf(PROJECT_ALPHA)).map((card) => [card.title, card.created_by]));
+  expect(authors.get("added through the link"), "the card must be authored by the linked peer").toBe(peer.peerId.toLowerCase());
+}, 30_000);
+
+test("two peers sessions linked to one Claude Code session refuse the call as ambiguous, before any broker traffic", async () => {
+  const session = await openSession("twolinks", { projectKey: PROJECT_ALPHA, snapshot: "none" });
+  publishLink(session, "peers-one", await registerPeer(PROJECT_ALPHA, "/work/twolinks"));
+  publishLink(session, "peers-two", await registerPeer(PROJECT_ALPHA, "/work/twolinks"));
+
+  expect(await session.relay.callTool("roadmap_list")).toEqual({ isError: true, text: "Roadmap companion identity is ambiguous" });
+  expect(session.front.requests).toEqual([]);
+}, 30_000);
+
+test("a peers session of another parent generation is not linked: the call is refused as unavailable", async () => {
+  const session = await openSession("othergen", { projectKey: PROJECT_ALPHA, snapshot: "none" });
+  publishLink(session, "peers-stale", await registerPeer(PROJECT_ALPHA, "/work/othergen"), "an-older-claude-process");
+
+  expect(await session.relay.callTool("roadmap_list")).toEqual({ isError: true, text: IDENTITY_REFUSAL });
+  expect(session.front.requests).toEqual([]);
+}, 30_000);
 
 test("a hello for the peers family is refused with family_unavailable", async () => {
   const relay = await DaemonRelay.open(daemon.port, keyPath);

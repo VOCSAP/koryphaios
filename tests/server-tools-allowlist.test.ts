@@ -2,7 +2,7 @@ import { test, expect, describe, beforeAll, afterAll } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, relative, resolve } from "node:path";
-import { startBroker, stopBroker, scrubEnv, type TestBroker } from "./_helper.ts";
+import { startBroker, stopBroker, scrubEnv, awaitCoreRegistered, type TestBroker } from "./_helper.ts";
 import { TOOLS } from "../shared/peers-session.ts";
 import { ROADMAP_INSTRUCTIONS } from "../shared/roadmap-mcp.ts";
 import { ROADMAP_TOOLS } from "../shared/roadmap-tools.ts";
@@ -225,9 +225,9 @@ describe("CLAUDE_PEERS_TOOLS: server.ts's tool allow-list", () => {
       params: { name: "whoami", arguments: {} },
     });
     const res = await readUntil(h.reader, 1, h.buffer);
-    // Registration completes before mcp.connect in main(), so by the time
-    // this responds the guard has let it through to whoami's own logic --
-    // proven by NOT getting the allow-list's refusal text.
+    // initialize is answered before the registration ends and a tools/call
+    // waits for it, so this reply comes from whoami's own logic -- proven by
+    // NOT getting the allow-list's refusal text.
     expect(res.result?.content?.[0]?.text).not.toBe("Error: tool not available: whoami");
   }, 60_000);
 
@@ -284,6 +284,7 @@ describe("kory-roadmap", () => {
     const core = await spawnServer(undefined, "server.ts", { broker: b, env: { CLAUDE_CODE_MESSAGING_SOCKET: socket } });
     core.send(INITIALIZE_REQUEST(0));
     await readUntil(core.reader, 0, core.buffer);
+    await awaitCoreRegistered(core.send, (id) => readUntil(core.reader, id, core.buffer));
 
     const companion = await spawnServer(undefined, "server-roadmap.ts", {
       broker: b,

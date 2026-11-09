@@ -727,6 +727,49 @@ describe("process error policy", () => {
     proc.emit(signal);
     expect(stops).toEqual([`signal ${signal}`]);
   });
+
+  test("an unhandled rejection raised inside a session is logged by a real process that keeps serving", async () => {
+    const home = newHome();
+    const logDir = join(root, `logs${++counter}`);
+    const stderrPath = join(root, `rejection-child-${++counter}.err`);
+    const child = Bun.spawn(
+      [process.execPath, join(import.meta.dir, "_mcp-daemon-rejection-child.ts"), join(peersOf(home), "mcp-daemon.key"), logDir, ROOT_A],
+      { stdout: "pipe", stderr: Bun.file(stderrPath) },
+    );
+    let out = "";
+    void (async () => {
+      for await (const chunk of child.stdout) out += new TextDecoder().decode(chunk);
+    })();
+    const outcome = (what: string, seen: () => boolean) =>
+      reachedWithin(
+        Promise.race([
+          (async () => {
+            while (!seen()) await new Promise((resolve) => setTimeout(resolve, 5));
+          })(),
+          child.exited.then((code) => {
+            throw new Error(`the daemon process exited with ${code} before ${what}; stderr: ${readFileSync(stderrPath, "utf8")}`);
+          }),
+        ]),
+        what,
+        10_000,
+      );
+    try {
+      await outcome("it listened", () => /LISTENING \d+/.test(out));
+      const port = Number(/LISTENING (\d+)/.exec(out)?.[1]);
+      const relay = await FakeRelay.open(port);
+      await relay.welcome();
+      expect((await relay.rpc(1, "tools/call", { name: "ping", arguments: {} })).result.content[0].text).toBe("ping");
+      await relay.rpc(2, "tools/call", { name: "reject", arguments: {} });
+      await outcome("the rejection was logged", () => out.includes("LOGGED unhandled rejection"));
+      expect(child.exitCode, "the process that logged the rejection is still running").toBeNull();
+      const after = await relay.rpc(3, "tools/call", { name: "ping", arguments: {} });
+      expect(after.result.content[0].text, "the daemon still answers a session after the rejection").toBe("ping");
+      relay.close();
+    } finally {
+      child.kill();
+      await child.exited;
+    }
+  }, 30_000);
 });
 
 describe("one daemon per code root, lowest port first", () => {

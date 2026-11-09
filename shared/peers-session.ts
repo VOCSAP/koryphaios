@@ -131,6 +131,7 @@ import type {
   FamilyTicketClaims,
   ResumeOutcome,
 } from "./mcp-daemon-server.ts";
+import type { LinkedIdentity } from "./mcp-daemon-links.ts";
 
 export type { CloseReason };
 
@@ -218,6 +219,12 @@ export interface PeersSession extends FamilyHandle {
    * itself when the server is already connected at `ready`. Idempotent.
    */
   openChannel(): void;
+  /**
+   * The current identity while the global companion identity is published: null before the registration,
+   * and from the start of a switch_group or set_id until its new identity is published.
+   * It does not look at a close in progress.
+   */
+  identity(): LinkedIdentity | null;
 }
 
 /** The broker did not answer: the request never got an HTTP response. */
@@ -1552,7 +1559,12 @@ export function createPeersSession(input: PeersSessionInput, deps: PeersSessionD
     return resolveProjectKey(myProjectKey, myGitRoot, myCwd);
   }
 
+  // False from the moment the snapshot is withdrawn until it is written again: a linked roadmap session
+  // must never act as a token the broker is disconnecting.
+  let companionPublished = false;
+
   async function invalidateGlobalCompanionIdentity(): Promise<void> {
+    companionPublished = false;
     const messagingSocket = input.env.CLAUDE_CODE_MESSAGING_SOCKET;
     if (!messagingSocket) return;
     await deleteGlobalSessionIdentityFile(messagingSocket, deps.home);
@@ -1594,6 +1606,7 @@ export function createPeersSession(input: PeersSessionInput, deps: PeersSessionD
           current.writerGeneration &&
           canonicalWriterGeneration(current.writerGeneration) === canonicalWriterGeneration(generation)
         ) {
+          companionPublished = true;
           return;
         }
       }
@@ -1607,9 +1620,15 @@ export function createPeersSession(input: PeersSessionInput, deps: PeersSessionD
         generation,
         brokerUrlText,
       );
+      companionPublished = true;
     } catch (error) {
       logError("Could not write the global roadmap companion identity", error);
     }
+  }
+
+  function identity(): LinkedIdentity | null {
+    if (!companionPublished || !myPeerId || !myInstanceToken) return null;
+    return { peerId: myPeerId, instanceToken: myInstanceToken, projectKey: roadmapProjectKey(), brokerUrl: canonicalBrokerUrl(config) };
   }
 
   function issueTicket(): void {
@@ -2607,5 +2626,5 @@ export function createPeersSession(input: PeersSessionInput, deps: PeersSessionD
     if (!closed && !(typeof e === "object" && e !== null && ensureFailures.has(e))) logError("Registration failed", e);
   });
 
-  return { server: mcp, ready, close, openChannel };
+  return { server: mcp, ready, close, openChannel, identity };
 }

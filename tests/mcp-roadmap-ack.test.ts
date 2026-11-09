@@ -8,7 +8,7 @@
 
 import { test, expect, describe, afterAll } from "bun:test";
 import { join } from "node:path";
-import { startBroker, stopBroker, scrubEnv, type TestBroker, openBrokerDb } from "./_helper.ts";
+import { startBroker, stopBroker, scrubEnv, awaitCoreRegistered, type TestBroker, openBrokerDb } from "./_helper.ts";
 import {
   ROADMAP_ADD_ACK_FIELDS,
   ROADMAP_CONTEXT_DOCUMENT_OUTPUT_MAX_CHARS,
@@ -112,7 +112,8 @@ let nextSocket = 1;
 // second process sharing host+cwd+tty.
 async function bootOnBroker(b: TestBroker, extraEnv: Record<string, string> = {}): Promise<Harness> {
   const env = { CLAUDE_CODE_MESSAGING_SOCKET: `roadmap-ack-${process.pid}-${nextSocket++}`, ...extraEnv };
-  await spawnMcp("server.ts", b, env);
+  const core = await spawnMcp("server.ts", b, env);
+  await awaitCoreRegistered(core.send, (id) => readUntil(core.reader, id, core.buffer));
   return spawnMcp("server-roadmap.ts", b, env);
 }
 

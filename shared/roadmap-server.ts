@@ -2,6 +2,9 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 
 import { brokerHeaders, brokerUrl, canonicalBrokerUrl, loadConfig, type Config } from "./config.ts";
+import type { Logger } from "./logger.ts";
+import { linkKeyOf, type LinkIndex, type LinkLookup } from "./mcp-daemon-links.ts";
+import type { FamilyFactory } from "./mcp-daemon-server.ts";
 import { readGlobalSessionIdentityFile } from "./peer-cache.ts";
 import { measureWriterGeneration } from "./process-generation.ts";
 import { callRoadmapTool, ROADMAP_INSTRUCTIONS } from "./roadmap-mcp.ts";
@@ -12,6 +15,8 @@ export interface RoadmapServerOptions {
   /** The session's environment: the only source of the allowlist, the messaging socket and the broker config. */
   env: NodeJS.ProcessEnv;
   home?: string;
+  /** The daemon's view of the peers session of the same Claude Code session; absent for a stdio server. */
+  links?: { lookup(): LinkLookup; log: Logger };
 }
 
 async function brokerFetch<T>(config: Config, path: string, body: Record<string, unknown>): Promise<T> {
@@ -25,8 +30,20 @@ async function brokerFetch<T>(config: Config, path: string, body: Record<string,
   return JSON.parse(payload) as T;
 }
 
+/** The roadmap family of the daemon: each session resolves its identity from the peers session of its Claude Code session. */
+export function createRoadmapFamily(index: LinkIndex, home?: string): FamilyFactory {
+  return (hello, ctx) => {
+    const key = linkKeyOf(hello);
+    return createRoadmapServer({
+      env: hello.env,
+      home,
+      links: { lookup: () => (key ? index.find(key) : { kind: "none" }), log: ctx.log },
+    });
+  };
+}
+
 /** The kory-roadmap MCP server of one session, not yet connected to a transport. */
-export function createRoadmapServer({ env, home }: RoadmapServerOptions): Server {
+export function createRoadmapServer({ env, home, links }: RoadmapServerOptions): Server {
   const filteredTools = filterTools(ROADMAP_TOOLS, resolveToolAllowlist(env[TOOLS_ENV_VAR]));
 
   const mcp = new Server(
@@ -45,13 +62,21 @@ export function createRoadmapServer({ env, home }: RoadmapServerOptions): Server
     }
     const config = await loadConfig(env);
     const messagingSocket = env.CLAUDE_CODE_MESSAGING_SOCKET;
-    const identity = messagingSocket
-      ? await readGlobalSessionIdentityFile(messagingSocket, home, {
-          verifyWriterGeneration: true,
-          measureWriterGeneration,
-          requireProjectKey: true,
-        })
-      : null;
+    const linked = links?.lookup() ?? { kind: "none" as const };
+    if (linked.kind === "many") {
+      links?.log.error(`Roadmap companion identity is ambiguous: sessions ${linked.sessionIds.join(", ")} share this Claude Code session`);
+      return { content: [{ type: "text" as const, text: "Roadmap companion identity is ambiguous" }], isError: true };
+    }
+    const identity =
+      linked.kind === "one"
+        ? linked.identity
+        : messagingSocket
+          ? await readGlobalSessionIdentityFile(messagingSocket, home, {
+              verifyWriterGeneration: true,
+              measureWriterGeneration,
+              requireProjectKey: true,
+            })
+          : null;
     if (!identity?.projectKey || identity.brokerUrl !== canonicalBrokerUrl(config)) {
       return {
         content: [{ type: "text" as const, text: "Roadmap companion identity is unavailable" }],

@@ -209,7 +209,7 @@ describe("sessions on a shared daemon", () => {
     const relay = await FakeRelay.open(daemon.port);
     relay.sendHello({ cwd: "/work/slow" });
     relay.send(FRAME_TYPE.MCP, JSON.stringify({ jsonrpc: "2.0", id: 9, method: "tools/list" }));
-    await settle();
+    await until(() => h.entered.includes("/work/slow"), "the family factory to be entered for /work/slow");
     release();
     await relay.expectFrame(FRAME_TYPE.WELCOME, "WELCOME");
     const reply = await relay.expectFrame(FRAME_TYPE.MCP, "reply to the early tools/list");
@@ -441,7 +441,7 @@ describe("unauthenticated connections", () => {
     const { daemon, logDir } = launch(h, { clock });
     const relay = await FakeRelay.open(daemon.port);
     relay.sendHello({ cwd: "/work/hang" });
-    await settle();
+    await until(() => h.entered.includes("/work/hang"), "the family factory to be entered for /work/hang");
     clock.advance(3000);
     await relay.expectClosed("close at the WELCOME deadline");
     expect(logOf(logDir)).toContain('handshake stage "building" exceeded 3000 ms');
