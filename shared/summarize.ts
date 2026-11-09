@@ -35,6 +35,11 @@ const SYSTEM_PROMPT =
 
 const HTTP_TIMEOUT_MS = 5000;
 
+function requestSignal(abort?: AbortSignal): AbortSignal {
+  const timeout = AbortSignal.timeout(HTTP_TIMEOUT_MS);
+  return abort ? AbortSignal.any([abort, timeout]) : timeout;
+}
+
 export function heuristicSummary(context: SummaryContext): string {
   const projectName = context.git_root
     ? basename(context.git_root)
@@ -63,7 +68,8 @@ function buildUserMessage(context: SummaryContext): string {
 
 async function callAnthropic(
   ctx: SummaryContext,
-  cfg: SummaryProviderConfig
+  cfg: SummaryProviderConfig,
+  abort?: AbortSignal
 ): Promise<string | null> {
   // Card 630e3d16 audit round 2: no process.env.ANTHROPIC_API_KEY fallback
   // here. cfg.api_key is fully resolved upstream by
@@ -88,7 +94,7 @@ async function callAnthropic(
         messages: [{ role: "user", content: buildUserMessage(ctx) }],
         max_tokens: 100,
       }),
-      signal: AbortSignal.timeout(HTTP_TIMEOUT_MS),
+      signal: requestSignal(abort),
     });
     if (!res.ok) return null;
     const data = (await res.json()) as { content?: Array<{ text?: string }> };
@@ -100,7 +106,8 @@ async function callAnthropic(
 
 async function callOpenAICompat(
   ctx: SummaryContext,
-  cfg: SummaryProviderConfig
+  cfg: SummaryProviderConfig,
+  abort?: AbortSignal
 ): Promise<string | null> {
   if (!cfg.base_url) return null;
 
@@ -122,7 +129,7 @@ async function callOpenAICompat(
         temperature: 0.3,
         stream: false,
       }),
-      signal: AbortSignal.timeout(HTTP_TIMEOUT_MS),
+      signal: requestSignal(abort),
     });
     if (!res.ok) return null;
     const data = (await res.json()) as {
@@ -140,14 +147,15 @@ async function callOpenAICompat(
  */
 export async function generateSummary(
   ctx: SummaryContext,
-  providerCfg: SummaryProviderConfig
+  providerCfg: SummaryProviderConfig,
+  abort?: AbortSignal
 ): Promise<string> {
   let llm: string | null = null;
 
   if (providerCfg.provider === "anthropic") {
-    llm = await callAnthropic(ctx, providerCfg);
+    llm = await callAnthropic(ctx, providerCfg, abort);
   } else if (providerCfg.provider === "openai-compat") {
-    llm = await callOpenAICompat(ctx, providerCfg);
+    llm = await callOpenAICompat(ctx, providerCfg, abort);
   }
 
   return llm ?? heuristicSummary(ctx);

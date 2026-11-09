@@ -372,4 +372,21 @@ describe("writeCacheAtomic", () => {
 
     await expect(writeCacheAtomic(target, "peer-a", fake)).rejects.toMatchObject({ code: "EACCES" });
   });
+
+  test("several writers racing on one target in one process all resolve and leave one whole payload and no temp file", async () => {
+    const ROUNDS = 30;
+    const WRITERS = 4;
+    for (let round = 0; round < ROUNDS; round++) {
+      const payloads = Array.from({ length: WRITERS }, (_, i) => `${i}:${round}:`.padEnd(32_768, String.fromCharCode(97 + i)));
+
+      const outcomes = await Promise.allSettled(payloads.map((data) => writeCacheAtomic(target, data)));
+
+      expect(
+        outcomes.flatMap((o) => (o.status === "rejected" ? [String(o.reason)] : [])),
+        `round ${round}: a concurrent writer of the same target was refused`
+      ).toEqual([]);
+      expect(payloads, `round ${round}: the target holds a torn or foreign payload`).toContain(await readFile(target, "utf-8"));
+      expect(await readdir(dir), `round ${round}: a temp file survived the race`).toEqual(["identity.json"]);
+    }
+  });
 });

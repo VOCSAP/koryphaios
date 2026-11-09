@@ -2553,7 +2553,8 @@ export function createPeersSession(input: PeersSessionInput, deps: PeersSessionD
         }
         const summary = await generateSummary(
           { cwd: myCwd, git_root: myGitRoot, git_branch: gitBranch, recent_files: recentFiles },
-          summaryConfig
+          summaryConfig,
+          sessionAbort.signal
         );
         log(`Summary provider: ${summaryConfig.provider} (model: ${config.summary_model})`);
         if (summary && summary !== initialSummary && myInstanceToken && !closed) {
@@ -2596,6 +2597,10 @@ export function createPeersSession(input: PeersSessionInput, deps: PeersSessionD
     ]);
     clearTimeout(waitTimer);
     if (!settled) logError("An identity operation did not settle before the close bound; closing without it");
+    // A daemon stop is a controlled crash: the peer stays registered and its token
+    // does not change, so the identity files stay valid for their readers until
+    // the resumed session rewrites them.
+    if (reason === "daemon_stop") return;
     // Local work that cannot fail to complete goes BEFORE the network call below,
     // so a silent broker cannot keep the deletions from running.
     try {
@@ -2608,7 +2613,7 @@ export function createPeersSession(input: PeersSessionInput, deps: PeersSessionD
     } catch (e) {
       logError("Failed to delete the global session snapshot on cleanup", e);
     }
-    if (reason !== "daemon_stop" && myInstanceToken) {
+    if (myInstanceToken) {
       const remaining = deadline - now();
       if (remaining > 0) await disconnectBounded(myInstanceToken, remaining);
       else logError("No time left to disconnect the peer; the broker's stale sweep will mark it dormant");

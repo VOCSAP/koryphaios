@@ -601,32 +601,38 @@ describe("the global snapshot the roadmap companion reads", () => {
   });
 });
 
-// The per-tile identity file needs a signed run credential and a real broker to
-// be written at all; its removal on close is proved by server-cleanup-identity.
 describe("close", () => {
+  const CLOSE_TILE = "close-tile";
+
   async function openPublished(): Promise<Harness> {
     const h = await openSession({ env: { CLAUDE_CODE_MESSAGING_SOCKET: SOCKET } });
+    // Set after the registration: a tile token at boot demands a run credential.
+    h.env.CLAUDE_PEERS_DESK_SESSION = CLOSE_TILE;
+    await writeSessionIdentityFile(CLOSE_TILE, "peer-1", "default", "token-1", h.home);
     expect((await readGlobalSessionIdentityFile(SOCKET, h.home))?.peerId, "control: the snapshot is written").toBe("peer-1");
+    expect((await readSessionIdentityFile(CLOSE_TILE, h.home))?.peerId, "control: the tile file is written").toBe("peer-1");
     return h;
   }
 
-  test("bye disconnects the peer once and removes the snapshot", async () => {
-    // Mutation: dropping the /disconnect, calling it twice, or leaving the snapshot behind.
+  test("bye disconnects the peer once and removes the snapshot and the tile file", async () => {
+    // Mutation: dropping the /disconnect, calling it twice, or leaving either file behind.
     const h = await openPublished();
     await h.session.close("bye");
     await h.session.close("bye");
 
     expect(callsTo(h, "/disconnect")).toEqual([{ path: "/disconnect", body: { instance_token: "token-1" } }]);
     expect(await readGlobalSessionIdentityFile(SOCKET, h.home)).toBeNull();
+    expect(await readSessionIdentityFile(CLOSE_TILE, h.home)).toBeNull();
   });
 
-  test("daemon_stop removes the snapshot but never disconnects the peer", async () => {
-    // Mutation: ignoring the reason.
+  test("daemon_stop keeps the snapshot and the tile file and never disconnects the peer", async () => {
+    // Mutation: deleting either file, or disconnecting, whatever the reason.
     const h = await openPublished();
     await h.session.close("daemon_stop");
 
     expect(callsTo(h, "/disconnect")).toEqual([]);
-    expect(await readGlobalSessionIdentityFile(SOCKET, h.home)).toBeNull();
+    expect((await readGlobalSessionIdentityFile(SOCKET, h.home))?.peerId).toBe("peer-1");
+    expect((await readSessionIdentityFile(CLOSE_TILE, h.home))?.peerId).toBe("peer-1");
   });
 
   test("a wait_for_message in flight ends as cancelled instead of outliving the session", async () => {
@@ -992,6 +998,26 @@ describe("closing a session that still has work in flight", () => {
       answer();
       await until(() => callsTo(h, "/set-summary").length === 1, "the summary upgrade");
       expect(callsTo(h, "/set-summary")[0]?.body.summary).toBe("an upgraded summary");
+    });
+
+    test("is abandoned at the provider when the session closes while it is answering", async () => {
+      // Mutation: the session abort signal not reaching the provider request.
+      const realFetch = globalThis.fetch;
+      let providerSignal: AbortSignal | undefined;
+      globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+        if (String(input).endsWith("/chat/completions")) providerSignal = init?.signal ?? undefined;
+        return realFetch(input, init);
+      }) as typeof fetch;
+      try {
+        const { h } = await openWithSummaryProvider();
+        expect(providerSignal?.aborted, "control: the provider request carries a live signal").toBe(false);
+
+        await h.session.close("bye");
+
+        expect(providerSignal?.aborted).toBe(true);
+      } finally {
+        globalThis.fetch = realFetch;
+      }
     });
 
     test("is dropped when the session closed before the provider answered", async () => {
