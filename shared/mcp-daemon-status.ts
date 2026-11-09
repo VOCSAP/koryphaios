@@ -8,12 +8,11 @@ import {
   candidatePorts,
   codeFingerprint,
   daemonCodeRoot,
-  filetimeFromCreationUtc,
   osUsername,
   stateFilePath,
 } from "./mcp-daemon-lifecycle.ts";
 import { permissionVerdict } from "./mcp-daemon-server.ts";
-import { measureWriterGeneration } from "./process-generation.ts";
+import { measureWriterGeneration, processImagePath, processStartFiletime } from "./process-generation.ts";
 
 type Env = Record<string, string | undefined>;
 
@@ -88,13 +87,15 @@ interface DaemonFacts {
   fingerprint: string;
   version: string;
   sessions: number;
+  /** Absent from the reply of a daemon older than the counter. */
+  dropped: number | undefined;
 }
 
 function factsOf(body: Record<string, unknown>): DaemonFacts | null {
-  const { pid, code_root: codeRoot, code_fingerprint: fingerprint, version, sessions } = body;
+  const { pid, code_root: codeRoot, code_fingerprint: fingerprint, version, sessions, dropped_notifications: dropped } = body;
   if (typeof pid !== "number" || typeof codeRoot !== "string" || typeof fingerprint !== "string") return null;
   if (typeof version !== "string" || typeof sessions !== "number") return null;
-  return { pid, codeRoot, fingerprint, version, sessions };
+  return { pid, codeRoot, fingerprint, version, sessions, dropped: typeof dropped === "number" ? dropped : undefined };
 }
 
 function scan(deps: McpDaemonDeps, key: Buffer, ports: number[]): Promise<PortReport[]> {
@@ -109,7 +110,8 @@ function describePort(report: PortReport, ourRoot: string, disk: string | undefi
   }
   const facts = factsOf(outcome.body);
   if (facts === null) return `port ${port}: answers status with an unexpected body`;
-  const what = `daemon pid ${facts.pid}, version ${facts.version}, ${facts.sessions} session(s), code root ${facts.codeRoot.slice(0, 8)}`;
+  const dropped = facts.dropped !== undefined && facts.dropped > 0 ? `, ${facts.dropped} notification(s) dropped` : "";
+  const what = `daemon pid ${facts.pid}, version ${facts.version}, ${facts.sessions} session(s)${dropped}, code root ${facts.codeRoot.slice(0, 8)}`;
   if (facts.codeRoot !== ourRoot) return `port ${port}: ${what}, another code root`;
   if (disk !== undefined && facts.fingerprint !== disk) {
     return `port ${port}: ${what}, this clone: daemon code is stale (running ${facts.fingerprint.slice(0, 12)}, disk ${disk.slice(0, 12)}); run bun cli.ts mcp-daemon restart`;
@@ -303,10 +305,14 @@ export async function runMcpDaemonCommand(args: string[], base: McpDaemonDeps = 
 }
 
 async function measuredPidStart(pid: number, log: Logger): Promise<string | null> {
+  if (process.platform === "win32") {
+    const filetime = processStartFiletime(pid);
+    if (filetime === null) log.warn(`cannot measure the start time of pid ${pid}`);
+    return filetime;
+  }
   const generation = await measureWriterGeneration(pid, log);
-  if (generation?.platform === "win32") return filetimeFromCreationUtc(generation.creationUtc);
   if (generation?.platform === "linux") return generation.startToken;
-  if (process.platform === "win32" || process.platform === "linux") return null;
+  if (process.platform === "linux") return null;
   const ps = Bun.spawnSync(["ps", "-o", "lstart=", "-p", String(pid)], { stdout: "pipe", stderr: "pipe" });
   const text = ps.stdout.toString().trim();
   return ps.exitCode === 0 && text !== "" ? text : null;
@@ -321,14 +327,12 @@ async function imageOfPid(pid: number, log: Logger): Promise<string | null> {
       return null;
     }
   }
-  const [command, args] =
-    process.platform === "win32"
-      ? [
-          join(process.env["SystemRoot"] ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
-          ["-NoLogo", "-NoProfile", "-Command", `(Get-Process -Id ${pid}).ProcessName`],
-        ]
-      : ["ps", ["-o", "comm=", "-p", String(pid)]];
-  const out = Bun.spawnSync([command as string, ...(args as string[])], { stdout: "pipe", stderr: "pipe" });
+  if (process.platform === "win32") {
+    const path = processImagePath(pid);
+    if (path === null) log.warn(`cannot read the image of pid ${pid}`);
+    return path;
+  }
+  const out = Bun.spawnSync(["ps", "-o", "comm=", "-p", String(pid)], { stdout: "pipe", stderr: "pipe" });
   const text = out.stdout.toString().trim();
   if (out.exitCode !== 0 || text === "") log.warn(`cannot read the image of pid ${pid}: exit ${out.exitCode}`);
   return out.exitCode === 0 && text !== "" ? text : null;

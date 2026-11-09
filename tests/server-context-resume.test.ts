@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpath
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { CONTEXT_RESUME_ACK_TTL_MS, hashCapability } from "../shared/context-buffer.ts";
-import { contextResumeKeyTtlMs, pollFallbackIntervalMs } from "../server.ts";
+import { contextResumeKeyTtlMs, pollFallbackIntervalMs } from "../shared/peers-session.ts";
 import { deckAuthored, groupId, post, scrubEnv, sha256Hex, startBroker, stopBroker, type TestBroker, openBrokerDb } from "./_helper.ts";
 
 const SERVER_PATH = resolve(import.meta.dir, "..", "server.ts");

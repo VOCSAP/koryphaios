@@ -7,7 +7,7 @@
  * for routing, which only a registered MCP peer holds.
  */
 
-import { loadConfig, brokerUrl, operatorTrustFilePath } from "./shared/config.ts";
+import { loadConfig, brokerUrl, operatorTrustFilePath, settingsFilePath } from "./shared/config.ts";
 import type { Peer, GroupStatsResponse, RoadmapUpsertResponse } from "./shared/types.ts";
 import { computeProjectKey } from "./shared/summarize.ts";
 import { resolveProjectKey } from "./shared/project-key.ts";
@@ -30,7 +30,7 @@ import {
 } from "./shared/operator-trust.ts";
 import { deriveOperatorId } from "./shared/approval.ts";
 
-const config = await loadConfig();
+const config = await loadConfig(process.env);
 const BROKER_URL = brokerUrl(config);
 
 function authHeaders(extra: Record<string, string> = {}): Record<string, string> {
@@ -318,7 +318,7 @@ function readDeckPublicKey(path: string): string {
   }
 }
 
-function readOperatorTrust(path = operatorTrustFilePath()) {
+function readOperatorTrust(path = operatorTrustFilePath(settingsFilePath(process.env))) {
   try {
     return parseOperatorTrust(readFileSync(path, "utf-8"));
   } catch (error) {
@@ -335,7 +335,7 @@ function initializeOperatorTrust(publicKey: string, label: string | undefined): 
     operatorTrustExit(2, error instanceof Error ? error.message : String(error));
   }
 
-  const path = operatorTrustFilePath();
+  const path = operatorTrustFilePath(settingsFilePath(process.env));
   mkdirSync(dirname(path), { recursive: true });
   let fd: number;
   try {

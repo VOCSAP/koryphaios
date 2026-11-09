@@ -8,18 +8,26 @@ const log = createLogger({ dir: logDir, name: "server", mirrorToConsole: false }
 
 scrubSessionEnv(process.env, log);
 
-// Imported after the scrub: the roadmap server must never read a session variable of the shell that started the daemon.
+// Imported after the scrub: these modules must never read a session variable of the shell that started the daemon.
 const { createRoadmapServer } = await import("./shared/roadmap-server.ts");
+const { createBrokerEnsurer, daemonBrokerDeps } = await import("./shared/broker-ensure.ts");
+const { readPeersSessionSettings } = await import("./shared/peers-session.ts");
 
+const home = homedir();
 const codeDir = realpathSync.native(import.meta.dir);
+const brokers = createBrokerEnsurer(
+  daemonBrokerDeps({ env: process.env, home, codeDir, log, which: (PATH) => Bun.which("bun", { PATH }) }),
+);
 const run = runDaemon({
-  home: homedir(),
+  home,
   username: osUsername,
   env: process.env,
   codeRoot: daemonCodeRoot(codeDir),
   codeDir,
   logDir,
   families: { roadmap: (hello) => createRoadmapServer({ env: hello.env }) },
+  brokers,
+  settings: readPeersSessionSettings(process.env, (message) => log.error(message)),
 });
 
 installProcessHandlers(process, { stop: (reason) => void run.stop(reason), log, now: Date.now });

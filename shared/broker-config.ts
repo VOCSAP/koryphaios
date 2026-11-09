@@ -17,7 +17,7 @@ export interface BrokerConfigResult<T extends BrokerConfigFile = BrokerConfigFil
 
 export type BrokerMode = "local" | "remote" | "replica";
 
-export function settingsFilePath(env: NodeJS.ProcessEnv = process.env): string {
+export function settingsFilePath(env: NodeJS.ProcessEnv): string {
   if (process.platform === "win32") {
     const appdata = env.APPDATA;
     if (appdata) return join(appdata, "claude-peers", "config.json");
@@ -36,8 +36,8 @@ function decodeConfigBuffer(buffer: Buffer): string {
 }
 
 export function readBrokerConfig<T extends BrokerConfigFile = BrokerConfigFile>(
-  onWarn?: (message: string) => void,
-  env: NodeJS.ProcessEnv = process.env,
+  onWarn: ((message: string) => void) | undefined,
+  env: NodeJS.ProcessEnv,
 ): BrokerConfigResult<T> {
   const path = settingsFilePath(env);
   try {
@@ -71,8 +71,8 @@ export function parseBooleanFlag(raw: string | undefined, fallback: boolean): bo
 }
 
 export function loadBrokerConfig<T extends BrokerConfigFile = BrokerConfigFile>(
-  onWarn?: (message: string) => void,
-  env: NodeJS.ProcessEnv = process.env,
+  onWarn: ((message: string) => void) | undefined,
+  env: NodeJS.ProcessEnv,
 ): BrokerConfigResult<T> {
   const result = readBrokerConfig<T>(onWarn, env);
   const fileConfig = result.config;

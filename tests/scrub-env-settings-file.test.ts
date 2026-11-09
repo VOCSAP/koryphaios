@@ -41,7 +41,7 @@ test("a CLAUDE_PEERS_*-only filter leaks the ambient settings file's offline_rep
   process.env.XDG_CONFIG_HOME = ambientDir;
   // Simulates the naive filter's own env record: it never touches these two
   // vars, so this IS what a spawned child would see under it.
-  const cfg = await loadConfig();
+  const cfg = await loadConfig(process.env);
   expect(cfg.offline_replica).toBe(true);
 });
 
@@ -51,7 +51,7 @@ test("scrubEnv owns the settings-file half: the same ambient value never reaches
   const protectedEnv = scrubEnv(scratchDir);
   process.env.APPDATA = protectedEnv.APPDATA;
   process.env.XDG_CONFIG_HOME = protectedEnv.XDG_CONFIG_HOME;
-  const cfg = await loadConfig();
+  const cfg = await loadConfig(process.env);
   expect(cfg.offline_replica).toBe(false);
 });
 

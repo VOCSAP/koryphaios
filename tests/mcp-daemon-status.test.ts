@@ -1,12 +1,13 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { createLogger } from "../shared/logger.ts";
 import { controlRequest, type ControlOutcome, type ControlRequestOptions } from "../shared/mcp-daemon-control.ts";
 import { candidatePorts, codeFingerprint, daemonCodeRoot, stateFilePath } from "../shared/mcp-daemon-lifecycle.ts";
 import { startDaemon } from "../shared/mcp-daemon-server.ts";
-import { runMcpDaemonCommand, type McpDaemonDeps } from "../shared/mcp-daemon-status.ts";
+import { realDeps, runMcpDaemonCommand, type McpDaemonDeps } from "../shared/mcp-daemon-status.ts";
+import { processStartFiletime } from "../shared/process-generation.ts";
 
 const KEY_HEX = "ab".repeat(32);
 const bases: string[] = [];
@@ -167,6 +168,26 @@ describe("status", () => {
     expect(lines.get(f.ports[3] as number)).toContain("another code root");
     expect(lines.get(f.ports[4] as number)).toContain("no answer");
     expect(lines.get(f.ports[5] as number)).toContain("unexpected body");
+  });
+
+  test("a daemon that dropped notifications says how many; zero, absent or not a number says nothing", async () => {
+    const bodies = new Map<number, Record<string, unknown>>();
+    const f = fixture({ control: async (opts) => (bodies.has(opts.port) ? reply(bodies.get(opts.port) as Record<string, unknown>) : { kind: "free" }) });
+    f.writeKey();
+    const [dropped, zero, older, garbage] = f.ports as [number, number, number, number];
+    bodies.set(dropped, daemonBody(f.ourRoot, { dropped_notifications: 3, code_fingerprint: f.disk }));
+    bodies.set(zero, daemonBody(f.ourRoot, { dropped_notifications: 0, code_fingerprint: f.disk }));
+    bodies.set(older, daemonBody(f.ourRoot, { code_fingerprint: f.disk }));
+    bodies.set(garbage, daemonBody(f.ourRoot, { dropped_notifications: "5", code_fingerprint: f.disk }));
+
+    await runMcpDaemonCommand(["status"], f.deps);
+
+    const line = (port: number) => f.printed.find((l) => l.startsWith(`port ${port}: `)) as string;
+    expect(line(dropped)).toContain("3 notification(s) dropped");
+    for (const port of [zero, older, garbage]) {
+      expect(line(port), `port ${port}`).not.toContain("dropped");
+      expect(line(port), `port ${port}`).toContain("1 session(s), code root");
+    }
   });
 });
 
@@ -507,5 +528,14 @@ describe("against a real daemon on a loopback port", () => {
     } finally {
       await daemon.stop();
     }
+  });
+
+  test.skipIf(process.platform !== "win32")("Windows only: the real pid probes read the creation time and the image through FFI", async () => {
+    const deps = realDeps();
+    expect(await deps.pidStartOf(process.pid)).toBe(processStartFiletime(process.pid) as string);
+    expect(basename((await deps.imageOf(process.pid)) as string).toLowerCase()).toBe(basename(process.execPath).toLowerCase());
+    const unusable = 0xffff_fffe;
+    expect(await deps.pidStartOf(unusable)).toBeNull();
+    expect(await deps.imageOf(unusable)).toBeNull();
   });
 });

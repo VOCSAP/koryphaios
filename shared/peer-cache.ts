@@ -1,29 +1,64 @@
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { canonicalConfigPath } from "./canonical-config-path.ts";
 
-// Atomic cache write (M-LOG-1 / N-MNT-5): write to a per-process temp file then
-// rename, so a torn write or two sessions racing on the shared per-cwd legacy
-// file can never leave a partial id for a reader to pick up. The temp name is
-// pid-scoped so concurrent writers do not clobber each other's temp.
-async function writeCacheAtomic(target: string, data: string): Promise<void> {
-  const tmp = `${target}.${process.pid}.tmp`;
-  // 0o600: computeGroupId (shared/config.ts) is sha256(secret).slice(0,32),
-  // the first half of group_secret_hash -- a world-readable identity file
-  // would hand any other local user an offline verification oracle on the
-  // group secret. POSIX-only: NTFS has no permission bits, so on Windows
-  // this mode is a no-op and the file's real protection is the user profile's
-  // own ACLs (measured -- st.mode reads 0o666 regardless of what is asked for).
-  await writeFile(tmp, data, { encoding: "utf-8", mode: 0o600 });
+export interface CacheIo {
+  writeFile(path: string, data: string, options: { encoding: "utf-8"; mode: number }): Promise<void>;
+  rename(from: string, to: string): Promise<void>;
+  unlink(path: string): Promise<void>;
+  sleep(ms: number): Promise<void>;
+}
+
+const defaultCacheIo: CacheIo = {
+  writeFile,
+  rename,
+  unlink,
+  sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+};
+
+// Windows refuses a rename while another handle on the target is open, which
+// concurrent writers of one target hit: the loser retries instead of failing.
+const RENAME_RETRY_CODES = new Set(["EPERM", "EACCES", "EBUSY"]);
+const RENAME_ATTEMPTS = 6;
+const RENAME_RETRY_DELAY_MS = 10;
+
+async function renameWithRetry(io: CacheIo, from: string, to: string): Promise<void> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      await io.rename(from, to);
+      return;
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException)?.code;
+      if (attempt >= RENAME_ATTEMPTS || !code || !RENAME_RETRY_CODES.has(code)) throw e;
+      await io.sleep(RENAME_RETRY_DELAY_MS * attempt);
+    }
+  }
+}
+
+// Write to a temp file then rename, so a torn write or two sessions racing on
+// the shared per-cwd legacy file can never leave a partial id for a reader to
+// pick up. The temp name carries a random suffix so concurrent writers,
+// including sessions of one process, do not clobber each other's temp.
+export async function writeCacheAtomic(target: string, data: string, io: CacheIo = defaultCacheIo): Promise<void> {
+  const tmp = `${target}.${randomBytes(6).toString("hex")}.tmp`;
   try {
-    await rename(tmp, target);
+    // 0o600: computeGroupId (shared/config.ts) is sha256(secret).slice(0,32),
+    // the first half of group_secret_hash -- a world-readable identity file
+    // would hand any other local user an offline verification oracle on the
+    // group secret. POSIX-only: NTFS has no permission bits, so on Windows
+    // this mode is a no-op and the file's real protection is the user profile's
+    // own ACLs (measured -- st.mode reads 0o666 regardless of what is asked for).
+    await io.writeFile(tmp, data, { encoding: "utf-8", mode: 0o600 });
+    await renameWithRetry(io, tmp, target);
   } catch (e) {
     try {
-      await unlink(tmp);
+      await io.unlink(tmp);
     } catch (cleanupError) {
-      throw new AggregateError([e, cleanupError], "Could not replace the identity cache or remove its temporary file");
+      if ((cleanupError as NodeJS.ErrnoException)?.code !== "ENOENT") {
+        throw new AggregateError([e, cleanupError], "Could not replace the identity cache or remove its temporary file");
+      }
     }
     throw e;
   }
@@ -48,7 +83,7 @@ export function computeCwdKey(cwd: string): string {
  * (e.g. vocsap/claude-config status-line.sh) and most users will not want
  * server.ts to litter $HOME.
  */
-export function isPeerIdCacheEnabled(env: Record<string, string | undefined> = process.env): boolean {
+export function isPeerIdCacheEnabled(env: Record<string, string | undefined>): boolean {
   const raw = env.CLAUDE_PEERS_STATUS_LINE_CACHE;
   if (!raw) return false;
   return ["1", "true", "yes", "on"].includes(raw.toLowerCase());
@@ -128,8 +163,8 @@ export async function writeDeskSessionFile(
  * hook covers those rotations instead.
  */
 export async function writeDeskSessionId(
-  home: string = homedir(),
-  env: Record<string, string | undefined> = process.env,
+  home: string,
+  env: Record<string, string | undefined>,
 ): Promise<void> {
   await writeDeskSessionFile(
     env.CLAUDE_PEERS_DESK_SESSION ?? "",
@@ -476,8 +511,8 @@ export type TileIdentityVerdict = { allowed: true } | { allowed: false; reason: 
  * the guard lets it through.
  */
 export function tileIdentityGuard(
-  env: Record<string, string | undefined> = process.env,
-  cwd: string = process.cwd(),
+  env: Record<string, string | undefined>,
+  cwd: string,
 ): TileIdentityVerdict {
   if (!sanitizeSessionId(env.CLAUDE_PEERS_DESK_SESSION)) return { allowed: true };
   const tileCwd = env.CLAUDE_PEERS_DESK_TILE_CWD?.trim();
@@ -498,8 +533,8 @@ export function tileIdentityGuard(
 export async function writePeerIdCache(
   cwd: string,
   peerId: string,
-  home: string = homedir(),
-  env: Record<string, string | undefined> = process.env,
+  home: string,
+  env: Record<string, string | undefined>,
 ): Promise<void> {
   if (!isPeerIdCacheEnabled(env)) return;
   try {

@@ -31,6 +31,8 @@ export const COUNTER_LIMIT = 1n << 48n;
 
 const TAG_BYTES = 16;
 const MIN_SEALED_LEN = 1 + TAG_BYTES;
+/** Bytes a sealed frame adds to its payload: length header, type byte, authentication tag. */
+export const SEALED_FRAME_OVERHEAD = 4 + MIN_SEALED_LEN;
 const NONCE_BYTES = 32;
 const MAC_BYTES = 32;
 const HELLO_MAX_ENV_VARS = 256;
@@ -528,6 +530,8 @@ export interface TicketClaims {
   group_id: string;
   notified_hwm: number;
   issued_at: number | string;
+  notice_at?: number;
+  outages?: number;
 }
 
 const TICKET_MAC_DOMAIN = "kory-mcp-v1|ticket|";

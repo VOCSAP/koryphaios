@@ -10,7 +10,7 @@
 import { test, expect, describe } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { TOOLS } from "../server.ts";
+import { TOOLS } from "../shared/peers-session.ts";
 
 const snapshotNames: string[] = JSON.parse(
   readFileSync(join(import.meta.dir, "fixtures", "server-tools-snapshot.json"), "utf-8")

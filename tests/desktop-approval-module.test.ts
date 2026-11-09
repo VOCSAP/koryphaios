@@ -3,7 +3,11 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { generateCredential, verifyAuthProof } from "../shared/approval.ts";
-import type { SessionApprovalCredential } from "../shared/approval-client.ts";
+import {
+  APPROVAL_FILE_ENV,
+  loadSessionApprovalCredential,
+  type SessionApprovalCredential,
+} from "../shared/approval-client.ts";
 import {
   APPROVAL_MODULE_ENV,
   register,
@@ -290,4 +294,41 @@ test("withdraw posts a session-signed request carrying the producer secret", asy
   });
   expect(auth).toMatchObject({ kind: "session", operator_id: "op-1", token_id: "tok-1" });
   expect(verifyAuthProof(cred.publicKey, payload, auth)).toEqual({ ok: true });
+});
+
+test("loadSessionApprovalCredential follows the env it is given, never the process env", () => {
+  const dir = mkdtempSync(join(tmpdir(), "kory-approval-cred-"));
+  const previous = process.env[APPROVAL_FILE_ENV];
+  try {
+    const credential = (operatorId: string): SessionApprovalCredential => ({
+      brokerUrl: "http://broker.test",
+      brokerToken: null,
+      operatorId,
+      tokenId: "tok",
+      sessionRef: "tile-1",
+      privateKey: "priv",
+      publicKey: "pub",
+      osUserHash: "",
+      blockSec: 900,
+      origin: {},
+    });
+    const ownFile = join(dir, "own.json");
+    const daemonFile = join(dir, "daemon.json");
+    writeFileSync(ownFile, JSON.stringify(credential("op-session")));
+    writeFileSync(daemonFile, JSON.stringify(credential("op-daemon")));
+    process.env[APPROVAL_FILE_ENV] = daemonFile;
+
+    expect(
+      loadSessionApprovalCredential({ [APPROVAL_FILE_ENV]: ownFile })?.operatorId,
+      "the credential of the file named by the passed env, not the one the process env names",
+    ).toBe("op-session");
+    expect(
+      loadSessionApprovalCredential({}),
+      "a session env without the variable is off, even when the process env names a valid file",
+    ).toBeNull();
+  } finally {
+    if (previous === undefined) delete process.env[APPROVAL_FILE_ENV];
+    else process.env[APPROVAL_FILE_ENV] = previous;
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

@@ -265,10 +265,24 @@ export class FakeRelay {
     this.send(FRAME_TYPE.HELLO, JSON.stringify(helloFor(over)));
   }
 
-  async welcome(over: Record<string, unknown> = {}): Promise<{ session_id: string; family: string; tools_hash: string; resumed: boolean }> {
+  /** `errors` holds the ERROR frames that came before WELCOME; any of them fails the call unless `allowErrors`, as a refused resume ticket does. */
+  async welcome(
+    over: Record<string, unknown> = {},
+    opts: { allowErrors?: boolean } = {},
+  ): Promise<{ session_id: string; family: string; tools_hash: string; resumed: boolean; errors: Array<{ code: string; message: string }> }> {
     this.sendHello(over);
-    const frame = await this.expectFrame(FRAME_TYPE.WELCOME, "WELCOME");
-    return JSON.parse(frame.payload.toString());
+    const errors: Array<{ code: string; message: string }> = [];
+    for (;;) {
+      const frame = await this.nextFrame("WELCOME");
+      if (frame === "closed") throw new Error(`WELCOME: connection closed after ${JSON.stringify(errors)}`);
+      if (frame.type === FRAME_TYPE.ERROR) {
+        errors.push(JSON.parse(frame.payload.toString()));
+        continue;
+      }
+      expect(frame.type).toBe(FRAME_TYPE.WELCOME);
+      if (!opts.allowErrors && errors.length > 0) throw new Error(`ERROR frames before WELCOME: ${JSON.stringify(errors)}`);
+      return { ...JSON.parse(frame.payload.toString()), errors };
+    }
   }
 
   async rpc(id: number, method: string, params?: unknown): Promise<{ result?: any; error?: any }> {

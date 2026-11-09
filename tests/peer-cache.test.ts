@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtemp, rm, readFile, stat } from "node:fs/promises";
+import { mkdtemp, readdir, rename, rm, readFile, stat, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -8,8 +8,10 @@ import {
   deskSessionFileName,
   isPeerIdCacheEnabled,
   sanitizeSessionId,
+  writeCacheAtomic,
   writeDeskSessionId,
   writePeerIdCache,
+  type CacheIo,
 } from "../shared/peer-cache";
 
 const ENABLED_ENV = { CLAUDE_PEERS_STATUS_LINE_CACHE: "1" };
@@ -265,4 +267,109 @@ describe("isPeerIdCacheEnabled", () => {
       expect(isPeerIdCacheEnabled({ CLAUDE_PEERS_STATUS_LINE_CACHE: value })).toBe(false);
     },
   );
+});
+
+describe("writeCacheAtomic", () => {
+  let dir: string;
+  let target: string;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), "cp-atomic-"));
+    target = join(dir, "identity.json");
+  });
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  function errno(code: string): NodeJS.ErrnoException {
+    return Object.assign(new Error(code), { code });
+  }
+
+  function io(overrides: Partial<CacheIo> = {}): CacheIo & { sleeps: number[] } {
+    const sleeps: number[] = [];
+    return {
+      writeFile: (path, data, options) => writeFile(path, data, options),
+      rename,
+      unlink,
+      sleep: async (ms) => {
+        sleeps.push(ms);
+      },
+      ...overrides,
+      sleeps,
+    };
+  }
+
+  test("a rename refused twice with a retryable code succeeds on the third attempt", async () => {
+    let refusals = 2;
+    const fake = io({
+      rename: async (from, to) => {
+        if (refusals-- > 0) throw errno("EPERM");
+        await rename(from, to);
+      },
+    });
+
+    await writeCacheAtomic(target, "peer-a", fake);
+
+    expect(await readFile(target, "utf-8")).toBe("peer-a");
+    expect(fake.sleeps.length, "the writer must wait between attempts").toBe(2);
+    expect(await readdir(dir)).toEqual(["identity.json"]);
+  });
+
+  test("a rename refused for good surfaces the error after a bounded number of attempts and leaves no temp file", async () => {
+    let attempts = 0;
+    let sleeps = 0;
+    const fake = io({
+      rename: async () => {
+        attempts++;
+        throw errno("EBUSY");
+      },
+      sleep: async () => {
+        if (++sleeps > 20) throw new Error("rename retried without bound: more than 20 waits");
+      },
+    });
+
+    await expect(writeCacheAtomic(target, "peer-a", fake)).rejects.toMatchObject({ code: "EBUSY" });
+
+    expect(attempts, "retries must stop").toBeGreaterThan(1);
+    expect(attempts).toBeLessThan(20);
+    expect(await readdir(dir)).toEqual([]);
+  });
+
+  test("a rename refused with another code is not retried", async () => {
+    let attempts = 0;
+    const fake = io({
+      rename: async () => {
+        attempts++;
+        throw errno("ENOSPC");
+      },
+    });
+
+    await expect(writeCacheAtomic(target, "peer-a", fake)).rejects.toMatchObject({ code: "ENOSPC" });
+
+    expect(attempts).toBe(1);
+  });
+
+  test("a temp file write that fails after creating the file surfaces the error and removes the temp file", async () => {
+    const fake = io({
+      writeFile: async (path, data, options) => {
+        await writeFile(path, data.slice(0, 2), options);
+        throw errno("ENOSPC");
+      },
+    });
+
+    await expect(writeCacheAtomic(target, "peer-a", fake)).rejects.toMatchObject({ code: "ENOSPC" });
+
+    expect(await readdir(dir)).toEqual([]);
+  });
+
+  test("a temp file write that fails before creating anything surfaces the original error", async () => {
+    const fake = io({
+      writeFile: async () => {
+        throw errno("EACCES");
+      },
+    });
+
+    await expect(writeCacheAtomic(target, "peer-a", fake)).rejects.toMatchObject({ code: "EACCES" });
+  });
 });

@@ -1,14 +1,13 @@
 import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { Logger } from "../shared/logger.ts";
 import { controlRequest } from "../shared/mcp-daemon-control.ts";
 import {
   candidatePorts,
   codeFingerprint,
   daemonCodeRoot,
-  filetimeFromCreationUtc,
   fingerprintFiles,
   fnv1a32,
   getUserNameW,
@@ -18,7 +17,6 @@ import {
   launchLockPath,
   osUsername,
   ownPidStart,
-  processStartFiletime,
   runDaemon,
   scrubSessionEnv,
   stateFilePath,
@@ -28,9 +26,14 @@ import {
   type RunDaemonOptions,
   type UsernameProbes,
 } from "../shared/mcp-daemon-lifecycle.ts";
-import { FRAME_TYPE } from "../shared/mcp-daemon-protocol.ts";
-import { startDaemon, type DaemonHandle } from "../shared/mcp-daemon-server.ts";
-import { measureWriterGeneration } from "../shared/process-generation.ts";
+import { FRAME_TYPE, type Hello } from "../shared/mcp-daemon-protocol.ts";
+import { startDaemon, type DaemonHandle, type FamilyContext } from "../shared/mcp-daemon-server.ts";
+import {
+  filetimeToCreationUtc,
+  measureWriterGeneration,
+  processImagePath,
+  processStartFiletime,
+} from "../shared/process-generation.ts";
 import { runMcpDaemonCommand, type McpDaemonDeps } from "../shared/mcp-daemon-status.ts";
 import { reachedWithin } from "./_bounded-await.ts";
 import { CODE_ROOT, FakeClock, FakeRelay, harness, key, linkTestKey, settle, until, within } from "./_mcp-daemon-fake-relay.ts";
@@ -538,10 +541,32 @@ describe("code fingerprint and start time", () => {
     expect(hashed.has("desktop/src/shared/workflow.ts")).toBe(true);
   });
 
-  test("converts a PowerShell creation time to the FILETIME measured on this machine", () => {
-    expect(filetimeFromCreationUtc("2026-11-08T17:22:36.7733341Z")).toBe("134386321567733341");
-    expect(filetimeFromCreationUtc("2026-11-08T17:22:36.5Z")).toBe("134386321565000000");
-    expect(filetimeFromCreationUtc("not a date")).toBeNull();
+  // Pairs produced by PowerShell ([DateTime].ToFileTimeUtc() and .ToString('o')); the 00:30Z and 01:30Z
+  // pair is one local hour that Europe/Paris lives twice.
+  test.each([
+    ["134386321567733341", "2026-11-08T17:22:36.7733341Z"],
+    ["134386321560000123", "2026-11-08T17:22:36.0000123Z"],
+    ["134386321560000000", "2026-11-08T17:22:36.0000000Z"],
+    ["134373618000000000", "2026-10-25T00:30:00.0000000Z"],
+    ["134373654000000000", "2026-10-25T01:30:00.0000000Z"],
+    ["116444736000000000", "1970-01-01T00:00:00.0000000Z"],
+    ["157469183999999999", "2099-12-31T23:59:59.9999999Z"],
+  ])("FILETIME %s is the PowerShell creation time %s", (filetime, iso) => {
+    expect(filetimeToCreationUtc(filetime)).toBe(iso);
+    expect(filetimeToCreationUtc(BigInt(filetime))).toBe(iso);
+  });
+
+  test("a FILETIME before the Unix epoch or not a number is refused, never converted to a wrong date", () => {
+    expect(() => filetimeToCreationUtc("116444735999999999")).toThrow(RangeError);
+    expect(() => filetimeToCreationUtc(0n)).toThrow(RangeError);
+    expect(() => filetimeToCreationUtc("not a date")).toThrow();
+  });
+
+  test("a pid that no Windows process can have gives null", () => {
+    for (const pid of [0, -1, 1.5, Number.NaN, 0x1_0000_0000]) {
+      expect(processStartFiletime(pid), `pid ${pid}`).toBeNull();
+      expect(processImagePath(pid), `pid ${pid}`).toBeNull();
+    }
   });
 
   test.skipIf(process.platform !== "win32")("Windows only: the own start time is a FILETIME in the fixture's range", async () => {
@@ -551,23 +576,52 @@ describe("code fingerprint and start time", () => {
     expect(Number(value)).toBeLessThan(fixture.pid_start.windows.max);
   });
 
-  test.skipIf(process.platform !== "win32")("Windows only: GetProcessTimes gives the PowerShell value, without PowerShell", async () => {
-    const generation = await measureWriterGeneration(process.pid);
-    expect(generation?.platform).toBe("win32");
-    const viaPowerShell = filetimeFromCreationUtc((generation as { creationUtc: string }).creationUtc);
-    const systemRoot = process.env["SystemRoot"];
-    process.env["SystemRoot"] = "relative-and-wrong";
+  test.skipIf(process.platform !== "win32")("Windows only: the FFI creation time of this process and of a child equals PowerShell's", async () => {
+    const child = Bun.spawn([process.execPath, "-e", "await new Promise(() => {})"], { stdio: ["ignore", "ignore", "ignore"] });
     try {
-      expect(await ownPidStart(recordingLog().log)).toBe(viaPowerShell as string);
+      const pids = [process.pid, child.pid];
+      const powershell = join(process.env["SystemRoot"] ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+      const reference = Bun.spawnSync(
+        [powershell, "-NoLogo", "-NoProfile", "-Command", `foreach ($id in ${pids.join(",")}) { (Get-Process -Id $id).StartTime.ToUniversalTime().ToString('o') }`],
+        { stdout: "pipe", stderr: "pipe" },
+      );
+      expect(reference.exitCode, reference.stderr.toString()).toBe(0);
+      const expected = reference.stdout.toString().trim().split(/\r?\n/);
+      expect(expected).toHaveLength(2);
+      for (const [index, pid] of pids.entries()) {
+        const filetime = processStartFiletime(pid);
+        expect(filetime, `pid ${pid}`).toMatch(/^\d{18}$/);
+        expect(filetimeToCreationUtc(filetime as string), `pid ${pid}`).toBe(expected[index] as string);
+        const generation = await measureWriterGeneration(pid);
+        expect(generation, `pid ${pid}`).toEqual({ platform: "win32", pid, creationUtc: expected[index] as string });
+      }
+      expect(await ownPidStart(recordingLog().log)).toBe(processStartFiletime(process.pid) as string);
     } finally {
-      if (systemRoot === undefined) delete process.env["SystemRoot"];
-      else process.env["SystemRoot"] = systemRoot;
+      child.kill();
+      await child.exited;
     }
   });
 
-  test.skipIf(process.platform !== "win32")("Windows only: GetProcessTimes on a handle that is not a process reports a failure", () => {
-    expect(processStartFiletime(0n)).toBeNull();
-    expect(processStartFiletime()).toMatch(/^\d{18}$/);
+  test.skipIf(process.platform !== "win32")("Windows only: a pid that has exited has no creation time and no image", async () => {
+    // A process object lives while any handle to it is open, so the pid of a child this test spawned is still
+    // readable after it exits; the grandchild's handle closes with its parent.
+    const parent = Bun.spawn(
+      [process.execPath, "-e", "const p = Bun.spawn([process.execPath, '-e', '0']); await p.exited; console.log(p.pid)"],
+      { stdout: "pipe", stderr: "ignore" },
+    );
+    const gone = Number((await new Response(parent.stdout).text()).trim());
+    await parent.exited;
+    expect(Number.isInteger(gone) && gone > 0).toBe(true);
+    await until(() => processStartFiletime(gone) === null, "the exited parent to release the handle it held on its child");
+    const log = recordingLog();
+    expect(processStartFiletime(gone)).toBeNull();
+    expect(processImagePath(gone)).toBeNull();
+    expect(await measureWriterGeneration(gone, log.log)).toBeNull();
+    expect(log.lines).toEqual(["Windows process generation measurement failed"]);
+  });
+
+  test.skipIf(process.platform !== "win32")("Windows only: the image of this process is the file that runs it", () => {
+    expect(basename(processImagePath(process.pid) as string).toLowerCase()).toBe(basename(process.execPath).toLowerCase());
   });
 
   test("a start time that cannot be measured is empty and logged, never a thrown error", async () => {
@@ -956,6 +1010,7 @@ describe("control requests to a running daemon", () => {
         code_fingerprint: codeFingerprint(codeDir),
         version: "1",
         sessions: 0,
+        dropped_notifications: 0,
       },
     });
     const relay = await FakeRelay.open(p0 as number);
@@ -963,6 +1018,49 @@ describe("control requests to a running daemon", () => {
     const after = await controlRequest({ port: p0 as number, key, op: "status" });
     expect(after.kind === "reply" && after.body["sessions"]).toBe(1);
     relay.close();
+  });
+
+  test("the status reply carries the dropped notification count of the daemon", async () => {
+    const [p0] = await freePorts(1);
+    const started = begin({
+      ports: [p0 as number],
+      start: (opts) => {
+        const handle = startDaemon(opts);
+        handles.push(handle);
+        return { ...handle, stats: () => ({ ...handle.stats(), droppedNotifications: 7 }) };
+      },
+    });
+    await serving(started, p0 as number);
+    const reply = await controlRequest({ port: p0 as number, key, op: "status" });
+    expect(reply.kind === "reply" && reply.body["dropped_notifications"]).toBe(7);
+  });
+
+  test("the home, the broker ensurer and the settings of the run reach the family; without an ensurer the daemon keeps its own", async () => {
+    const seen: FamilyContext[] = [];
+    const families = {
+      roadmap: (hello: Hello, ctx: FamilyContext) => {
+        seen.push(ctx);
+        return harness().factory()(hello, ctx);
+      },
+    };
+    const brokers = { ensure: async () => ({ action: "already-running" as const }) };
+    const settings = { contextResumeKeyTtlMs: 2000, pollFallbackIntervalMs: 3000, heartbeatIntervalMs: 4000 };
+    const [p0, p1] = await freePorts(2);
+    const home = newHome();
+    const wired = begin({ ports: [p0 as number], home, families, brokers, settings });
+    await serving(wired, p0 as number);
+    await (await FakeRelay.open(p0 as number)).welcome({ cwd: "/work/wired" });
+    const ctx = seen[0] as FamilyContext;
+    expect(ctx.brokers).toBe(brokers);
+    expect(ctx.settings).toEqual(settings);
+    expect(ctx.home).toBe(home);
+
+    const bare = begin({ ports: [p1 as number], families });
+    await serving(bare, p1 as number);
+    await (await FakeRelay.open(p1 as number)).welcome({ cwd: "/work/bare" });
+    await expect(
+      (seen[1] as FamilyContext).brokers.ensure({ url: "http://127.0.0.1:1", settingsPath: "s", env: {} }),
+    ).rejects.toThrow("without a broker launcher");
   });
 
   test("stop closes the sessions, removes the state file and ends the run with exit 0", async () => {
@@ -1195,6 +1293,7 @@ describe("the entry point", () => {
           const body = (status as { body: Record<string, unknown> }).body;
           expect(body["pid"]).toBe(child.pid);
           expect(body["code_root"]).toBe(daemonCodeRoot(realpathSync.native(repo)));
+          expect(body["dropped_notifications"]).toBe(0);
           const log = logOf(logDir);
           expect(log).toContain("removed 2 session variable(s)");
           expect(log).toContain("CLAUDE_PEERS_FORCE_GROUP");

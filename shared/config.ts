@@ -107,7 +107,7 @@ interface FileConfig extends BrokerConfigFile {
 
 const DEFAULT_ANTHROPIC_MODEL = "claude-haiku-4-5-20251001";
 
-export function operatorTrustFilePath(configPath = settingsFilePath()): string {
+export function operatorTrustFilePath(configPath: string): string {
   return join(dirname(configPath), "operator-trust.json");
 }
 
@@ -205,7 +205,7 @@ function resolveWarnUntrackedReply(environment: string | undefined, fileValue: u
  * caller serving another process passes that process's environment, except
  * the home-directory fallback, which is this process's.
  */
-export async function loadConfig(env: NodeJS.ProcessEnv = process.env): Promise<Config> {
+export async function loadConfig(env: NodeJS.ProcessEnv): Promise<Config> {
   const fileResult = loadBrokerConfig<FileConfig>((message) => {
     console.error(`[claude-peers] ${message}`);
     createLogger({ dir: coreLogDir(env), name: "config", mirrorToConsole: false }).child("config").error(message);
@@ -288,46 +288,36 @@ export async function loadConfig(env: NodeJS.ProcessEnv = process.env): Promise<
  *   2. summary_api_key OR ANTHROPIC_API_KEY defined -> anthropic
  *   3. otherwise -> none (heuristic only)
  */
-export function resolveProvider(config: Config): Exclude<SummaryProvider, "auto"> {
+export function resolveProvider(
+  config: Config,
+  env: NodeJS.ProcessEnv
+): Exclude<SummaryProvider, "auto"> {
   if (config.summary_provider !== "auto") return config.summary_provider;
   if (config.summary_base_url) return "openai-compat";
-  if (config.summary_api_key || process.env.ANTHROPIC_API_KEY) return "anthropic";
+  if (config.summary_api_key || env.ANTHROPIC_API_KEY) return "anthropic";
   return "none";
 }
 
-/**
- * Card 630e3d16 (M-SEC-3): resolve the API key to use for the ALREADY-RESOLVED
- * summary provider. process.env.ANTHROPIC_API_KEY is only ever a safe
- * fallback when the resolved provider is "anthropic" (its only sink is
- * callAnthropic, which hardcodes https://api.anthropic.com). Naming that one
- * allowed value keeps this closed by construction: a future provider value
- * added later still gets no env fallback unless explicitly added here.
- */
+/** env.ANTHROPIC_API_KEY is a fallback only for anthropic, whose sink hardcodes api.anthropic.com. */
 export function resolveSummaryApiKey(
   provider: Exclude<SummaryProvider, "auto">,
-  config: Config
+  config: Config,
+  env: NodeJS.ProcessEnv
 ): string | null {
   if (provider === "anthropic") {
-    return config.summary_api_key ?? process.env.ANTHROPIC_API_KEY ?? null;
+    return config.summary_api_key ?? env.ANTHROPIC_API_KEY ?? null;
   }
   return config.summary_api_key ?? null;
 }
 
-/**
- * Card 630e3d16 audit round 2: the previous fix wired resolveProvider +
- * resolveSummaryApiKey inline at the server.ts call site, which left that
- * call site itself unexercised by any test (a mutation reverting the
- * unconditional env fallback there would pass every test). This function
- * makes the call site trivial: server.ts calls it once and passes the
- * result verbatim to generateSummary, so the only thing left to review at
- * the call site is "was this function called and its result used" -- the
- * security-relevant decision itself lives here, where the tests reach it.
- */
-export function buildSummaryProviderConfig(config: Config): SummaryProviderConfig {
-  const provider = resolveProvider(config);
+export function buildSummaryProviderConfig(
+  config: Config,
+  env: NodeJS.ProcessEnv
+): SummaryProviderConfig {
+  const provider = resolveProvider(config, env);
   return {
     provider,
-    api_key: resolveSummaryApiKey(provider, config),
+    api_key: resolveSummaryApiKey(provider, config, env),
     model: config.summary_model,
     base_url: config.summary_base_url,
   };
@@ -398,11 +388,11 @@ const FORCE_GROUP_NAME_ENV = "CLAUDE_PEERS_FORCE_GROUP_NAME";
  * CLAUDE_PEERS_FORCE_GROUP_FILE itself being unset falls through to null with
  * no trace: there is no path to read.
  */
-function resolveForcedGroupSecret(): string | null {
-  const envSecret = process.env[FORCE_GROUP_ENV];
+function resolveForcedGroupSecret(env: NodeJS.ProcessEnv): string | null {
+  const envSecret = env[FORCE_GROUP_ENV];
   if (envSecret && envSecret.length > 0) return envSecret;
 
-  const filePath = process.env[FORCE_GROUP_FILE_ENV];
+  const filePath = env[FORCE_GROUP_FILE_ENV];
   if (filePath && filePath.length > 0) {
     const log = createLogger({ dir: coreLogDir(), name: "config", mirrorToConsole: false }).child(
       "config"
@@ -437,8 +427,8 @@ function resolveForcedGroupSecret(): string | null {
  * Derive the display name for a forced group. Uses CLAUDE_PEERS_FORCE_GROUP_NAME
  * when provided, otherwise a deterministic `forced-<group_id slice 0,8>`.
  */
-function forcedGroupName(secret: string): string {
-  const envName = process.env[FORCE_GROUP_NAME_ENV];
+function forcedGroupName(secret: string, env: NodeJS.ProcessEnv): string {
+  const envName = env[FORCE_GROUP_NAME_ENV];
   if (envName && envName.length > 0) return envName;
   return `forced-${computeGroupId(secret).slice(0, 8)}`;
 }
@@ -525,10 +515,11 @@ function findUpwards(start: string, filename: string, gitRoot: string | null): s
 export function resolveGroupName(
   cwd: string,
   gitRoot: string | null,
-  userConfig: Pick<Config, "default_group">
+  userConfig: Pick<Config, "default_group">,
+  env: NodeJS.ProcessEnv
 ): string {
-  const forced = resolveForcedGroupSecret();
-  if (forced !== null) return forcedGroupName(forced);
+  const forced = resolveForcedGroupSecret(env);
+  if (forced !== null) return forcedGroupName(forced, env);
 
   const localFile = findUpwards(cwd, PROJECT_LOCAL_FILE, gitRoot);
   if (localFile) {
@@ -541,7 +532,7 @@ export function resolveGroupName(
     if (name) return name;
   }
   if (userConfig.default_group) return userConfig.default_group;
-  const envGroup = process.env.CLAUDE_PEERS_GROUP;
+  const envGroup = env.CLAUDE_PEERS_GROUP;
   if (envGroup && envGroup.length > 0) return envGroup;
   return "default";
 }
@@ -589,23 +580,24 @@ export function computeGroupSecretHash(secret: string | null): string | null {
 export function resolveGroup(
   cwd: string,
   gitRoot: string | null,
-  userConfig: Pick<Config, "groups" | "default_group">
+  userConfig: Pick<Config, "groups" | "default_group">,
+  env: NodeJS.ProcessEnv
 ): { name: string; group_id: GroupId; group_secret_hash: string | null; groups_map: Record<string, GroupId> } {
   // Top precedence: the desktop app forces an isolated group via env/file. This
   // bypasses project files, default_group and CLAUDE_PEERS_GROUP entirely.
-  const forced = resolveForcedGroupSecret();
+  const forced = resolveForcedGroupSecret(env);
   if (forced !== null) {
     const group_id = computeGroupId(forced);
     const group_secret_hash = computeGroupSecretHash(forced);
-    const name = forcedGroupName(forced);
+    const name = forcedGroupName(forced, env);
     const groups_map = buildGroupsMap(userConfig.groups);
-    // Inject the forced name so server.ts groupNameForId reverse-lookup resolves
-    // it instead of falling back to '<unknown>'. Forced wins on name collision.
+    // Inject the forced name so a group_id reverse lookup resolves it instead
+    // of '<unknown>'. Forced wins on name collision.
     groups_map[name] = group_id;
     return { name, group_id, group_secret_hash, groups_map };
   }
 
-  const name = resolveGroupName(cwd, gitRoot, userConfig);
+  const name = resolveGroupName(cwd, gitRoot, userConfig, env);
   const secret = resolveGroupSecret(name, userConfig);
   const group_id = computeGroupId(secret);
   const group_secret_hash = computeGroupSecretHash(secret);

@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { resolveSummaryApiKey, buildSummaryProviderConfig, type Config } from "../shared/config.ts";
+import { resolveProvider, resolveSummaryApiKey, buildSummaryProviderConfig, type Config } from "../shared/config.ts";
 
 // Card 630e3d16 (M-SEC-3): server.ts used to pass
 // `config.summary_api_key ?? process.env.ANTHROPIC_API_KEY ?? null` into
@@ -44,27 +44,27 @@ function withFakeEnvKey(fn: () => void) {
 
 test("resolveSummaryApiKey: openai-compat provider never receives the env fallback", () => {
   withFakeEnvKey(() => {
-    expect(resolveSummaryApiKey("openai-compat", baseConfig)).toBeNull();
+    expect(resolveSummaryApiKey("openai-compat", baseConfig, process.env)).toBeNull();
   });
 });
 
 test("resolveSummaryApiKey: anthropic provider still falls back to the env value", () => {
   withFakeEnvKey(() => {
-    expect(resolveSummaryApiKey("anthropic", baseConfig)).toBe(FAKE_ENV_KEY);
+    expect(resolveSummaryApiKey("anthropic", baseConfig, process.env)).toBe(FAKE_ENV_KEY);
   });
 });
 
 test("resolveSummaryApiKey: explicit summary_api_key wins regardless of provider", () => {
   withFakeEnvKey(() => {
     const cfg: Config = { ...baseConfig, summary_api_key: EXPLICIT_KEY };
-    expect(resolveSummaryApiKey("openai-compat", cfg)).toBe(EXPLICIT_KEY);
-    expect(resolveSummaryApiKey("anthropic", cfg)).toBe(EXPLICIT_KEY);
+    expect(resolveSummaryApiKey("openai-compat", cfg, process.env)).toBe(EXPLICIT_KEY);
+    expect(resolveSummaryApiKey("anthropic", cfg, process.env)).toBe(EXPLICIT_KEY);
   });
 });
 
 test("resolveSummaryApiKey: none provider never receives the env fallback", () => {
   withFakeEnvKey(() => {
-    expect(resolveSummaryApiKey("none", baseConfig)).toBeNull();
+    expect(resolveSummaryApiKey("none", baseConfig, process.env)).toBeNull();
   });
 });
 
@@ -81,7 +81,7 @@ test("resolveSummaryApiKey: none provider never receives the env fallback", () =
 test("buildSummaryProviderConfig: summary_base_url auto-resolves to openai-compat and never leaks the env key into it", () => {
   withFakeEnvKey(() => {
     const cfg: Config = { ...baseConfig, summary_base_url: "http://127.0.0.1:9/v1" };
-    const result = buildSummaryProviderConfig(cfg);
+    const result = buildSummaryProviderConfig(cfg, process.env);
     expect(result.provider).toBe("openai-compat");
     expect(result.api_key).toBeNull();
     expect(result.base_url).toBe("http://127.0.0.1:9/v1");
@@ -90,8 +90,67 @@ test("buildSummaryProviderConfig: summary_base_url auto-resolves to openai-compa
 
 test("buildSummaryProviderConfig: no base_url auto-resolves to anthropic and keeps the env fallback", () => {
   withFakeEnvKey(() => {
-    const result = buildSummaryProviderConfig(baseConfig);
+    const result = buildSummaryProviderConfig(baseConfig, process.env);
     expect(result.provider).toBe("anthropic");
     expect(result.api_key).toBe(FAKE_ENV_KEY);
+  });
+});
+
+function withProcessKey(value: string | undefined, fn: () => void) {
+  const prev = process.env.ANTHROPIC_API_KEY;
+  if (value === undefined) delete process.env.ANTHROPIC_API_KEY;
+  else process.env.ANTHROPIC_API_KEY = value;
+  try {
+    fn();
+  } finally {
+    if (prev === undefined) delete process.env.ANTHROPIC_API_KEY;
+    else process.env.ANTHROPIC_API_KEY = prev;
+  }
+}
+
+test("resolveSummaryApiKey: anthropic fallback reads the passed env, not the process env", () => {
+  withProcessKey(undefined, () => {
+    expect(
+      resolveSummaryApiKey("anthropic", baseConfig, { ANTHROPIC_API_KEY: "session-key" }),
+      "key from the passed env while the process env has none"
+    ).toBe("session-key");
+  });
+  withProcessKey(FAKE_ENV_KEY, () => {
+    expect(
+      resolveSummaryApiKey("anthropic", baseConfig, { ANTHROPIC_API_KEY: "session-key" }),
+      "the passed env wins over a different process env key"
+    ).toBe("session-key");
+    expect(
+      resolveSummaryApiKey("anthropic", baseConfig, {}),
+      "an env without the key yields null even when the process env carries one"
+    ).toBeNull();
+  });
+});
+
+test("resolveProvider: auto detection reads the passed env, not the process env", () => {
+  withProcessKey(undefined, () => {
+    expect(
+      resolveProvider(baseConfig, { ANTHROPIC_API_KEY: "session-key" }),
+      "key in the passed env while the process env has none"
+    ).toBe("anthropic");
+  });
+  withProcessKey(FAKE_ENV_KEY, () => {
+    expect(
+      resolveProvider(baseConfig, {}),
+      "an env without the key resolves to none even when the process env carries one"
+    ).toBe("none");
+  });
+});
+
+test("buildSummaryProviderConfig: provider and key both follow the passed env", () => {
+  withProcessKey(FAKE_ENV_KEY, () => {
+    const result = buildSummaryProviderConfig(baseConfig, {});
+    expect(result.provider).toBe("none");
+    expect(result.api_key).toBeNull();
+  });
+  withProcessKey(undefined, () => {
+    const result = buildSummaryProviderConfig(baseConfig, { ANTHROPIC_API_KEY: "session-key" });
+    expect(result.provider).toBe("anthropic");
+    expect(result.api_key).toBe("session-key");
   });
 });

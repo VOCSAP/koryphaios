@@ -1,16 +1,20 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { readFileSync, statSync, unlinkSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { Socket } from "bun";
 import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { JSONRPCMessageSchema, type JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
+import type { BrokerEnsurer } from "./broker-ensure.ts";
+import { CONTEXT_RESUME_ACK_TTL_MS } from "./context-buffer.ts";
 import { createLogger, type Logger } from "./logger.ts";
 import {
   FRAME_TYPE,
   MAX_PAYLOAD,
   Opener,
   PlainFrameDecoder,
+  SEALED_FRAME_OVERHEAD,
   SealedFrameDecoder,
   Sealer,
   b64u,
@@ -18,14 +22,25 @@ import {
   buildChallenge,
   deriveSessionKeys,
   encodeFrame,
+  mintTicket,
   parseHello,
   verifyAuth,
+  verifyTicket,
   type Challenge,
   type Frame,
   type Hello,
+  type TicketClaims,
 } from "./mcp-daemon-protocol.ts";
 
 const STAGE_MS = 3000;
+const OUTPUT_CAP_BYTES = 8 * 1024 * 1024;
+const NOTIFICATION_CAP_BYTES = OUTPUT_CAP_BYTES / 2;
+const BUFFER_CAP_BYTES = NOTIFICATION_CAP_BYTES + OUTPUT_CAP_BYTES;
+const FAMILY_CLOSE_MS = 5000;
+const TICKET_INTERVAL_MS = 1000;
+const DROP_LOG_EVERY = 100;
+const MAX_GENERATION_FIELDS = 8;
+const MAX_GENERATION_TEXT = 256;
 const MAX_UNAUTHENTICATED = 32;
 const DEFAULT_MAX_SESSIONS = 512;
 // 64 KiB of env can JSON-escape to six bytes per control character, plus a
@@ -36,12 +51,63 @@ export const DAEMON_VERSION = "1";
 
 export type FamilyName = "peers" | "roadmap";
 
+export type CloseReason = "bye" | "socket" | "daemon_stop";
+
+export type ResumeOutcome =
+  | { kind: "none" }
+  | { kind: "accepted"; claims: TicketClaims }
+  | { kind: "refused"; cause: string };
+
+/** The claims a family knows; the daemon adds v, family, relay_pid, relay_pid_start and issued_at. */
+export type FamilyTicketClaims = Pick<
+  TicketClaims,
+  "writer_generation" | "instance_token" | "peer_id" | "group_id" | "notified_hwm" | "notice_at" | "outages"
+>;
+
+export interface DaemonSessionSettings {
+  contextResumeKeyTtlMs: number;
+  pollFallbackIntervalMs: number;
+  heartbeatIntervalMs: number;
+}
+
 export interface FamilyContext {
   sessionId: string;
   log: Logger;
+  home: string;
+  resume: ResumeOutcome;
+  /** Peers only. Coalesced: at most one TICKET frame per second, the latest claims winning. */
+  issueTicket(claims: FamilyTicketClaims): void;
+  brokers: BrokerEnsurer;
+  settings: DaemonSessionSettings;
 }
 
-export type FamilyFactory = (hello: Hello, ctx: FamilyContext) => Server | Promise<Server>;
+export interface FamilyHandle {
+  server: Server;
+  /** Called before server.close(), for 5 s at most; `daemon_stop` is a stop of the daemon, not of the peer. */
+  close(reason: CloseReason): Promise<void>;
+}
+
+export type FamilyBuild = Server | FamilyHandle;
+
+export type FamilyFactory = (hello: Hello, ctx: FamilyContext) => FamilyBuild | Promise<FamilyBuild>;
+
+/** Thrown by a send of the MCP transport when the connection holds too much unsent output for a notification to join it. */
+export class NotificationDropped extends Error {
+  constructor(readonly bytes: number) {
+    super(`notification of ${bytes} bytes dropped: the output buffer of the connection is full`);
+    this.name = "NotificationDropped";
+  }
+}
+
+const DEFAULT_SESSION_SETTINGS: DaemonSessionSettings = {
+  contextResumeKeyTtlMs: CONTEXT_RESUME_ACK_TTL_MS,
+  pollFallbackIntervalMs: 5_000,
+  heartbeatIntervalMs: 15_000,
+};
+
+const unconfiguredBrokers: BrokerEnsurer = {
+  ensure: () => Promise.reject(new Error("this daemon was started without a broker launcher")),
+};
 
 export interface DaemonClock {
   setTimeout(fn: () => void, ms: number): unknown;
@@ -61,6 +127,9 @@ export interface DaemonOptions {
   families: Partial<Record<FamilyName, FamilyFactory>>;
   clock?: DaemonClock;
   maxSessions?: number;
+  home?: string;
+  brokers?: BrokerEnsurer;
+  settings?: DaemonSessionSettings;
   key?: Buffer;
   control?: ControlHandler;
   onSessions?: (sessions: number) => void;
@@ -84,6 +153,7 @@ export interface DaemonStats {
   handshakeTimeouts: number;
   authRefused: number;
   preAuthFailures: number;
+  droppedNotifications: number;
 }
 
 export interface DaemonHandle {
@@ -290,8 +360,9 @@ class FrameTransport implements Transport {
   private closed = false;
   private readonly probes = new Map<string, (reply: JSONRPCMessage | null) => void>();
 
+  /** `emit` returns false when the connection refused the frame: the connection is closing, or a notification was dropped. */
   constructor(
-    private readonly emit: (text: string) => void,
+    private readonly emit: (text: string, droppable: boolean) => boolean,
     private readonly onTransportClose: () => void,
   ) {}
 
@@ -307,7 +378,11 @@ class FrameTransport implements Transport {
       }
     }
     if (this.closed) throw new Error("MCP connection closed");
-    this.emit(JSON.stringify(message));
+    const text = JSON.stringify(message);
+    const droppable = !("id" in message);
+    if (this.emit(text, droppable)) return;
+    if (droppable) throw new NotificationDropped(Buffer.byteLength(text));
+    throw new Error("MCP reply not sent: the connection is closing");
   }
 
   deliver(message: JSONRPCMessage): void {
@@ -331,27 +406,43 @@ class FrameTransport implements Transport {
   }
 }
 
-type CloseReason = "bye" | "socket" | "daemon_stop";
-
 class Session {
   private closed = false;
 
   constructor(
     readonly id: string,
-    readonly server: Server,
+    readonly handle: FamilyHandle,
     readonly transport: FrameTransport,
     readonly log: Logger,
+    private readonly clock: DaemonClock,
   ) {}
 
   async close(reason: CloseReason): Promise<void> {
     if (this.closed) return;
     this.closed = true;
+    await this.closeFamily(reason);
     try {
-      await this.server.close();
+      await this.handle.server.close();
     } catch (e) {
       this.log.error(`closing the MCP server failed (${reason})`, e);
     }
     this.log.info(`session closed reason=${reason}`);
+  }
+
+  private closeFamily(reason: CloseReason): Promise<void> {
+    return new Promise<void>((resolve) => {
+      const timer = this.clock.setTimeout(() => {
+        this.log.error(`the family close did not finish in ${FAMILY_CLOSE_MS} ms (${reason})`);
+        resolve();
+      }, FAMILY_CLOSE_MS);
+      Promise.resolve()
+        .then(() => this.handle.close(reason))
+        .catch((e) => this.log.error(`the family close failed (${reason})`, e))
+        .finally(() => {
+          this.clock.clearTimeout(timer);
+          resolve();
+        });
+    });
   }
 }
 
@@ -399,10 +490,15 @@ interface DaemonContext {
   log: Logger;
   clock: DaemonClock;
   maxSessions: number;
+  home: string;
+  brokers: BrokerEnsurer;
+  settings: DaemonSessionSettings;
   preAuth: PreAuthLog;
   control: ControlHandler | undefined;
   onSessions: ((sessions: number) => void) | undefined;
   settled: Array<() => void>;
+  /** Teardowns in progress; a connection leaves `all` when its teardown starts, not when it ends. */
+  teardowns: Set<Promise<void>>;
   listening: boolean;
   stopping: boolean;
   nextConnection: number;
@@ -411,6 +507,35 @@ interface DaemonContext {
   authenticated: Set<Connection>;
   live: Set<Connection>;
   counters: Omit<DaemonStats, "listening" | "sessions" | "unauthenticated" | "authenticated">;
+}
+
+function malformedClaims(claims: TicketClaims): string | null {
+  for (const name of ["instance_token", "peer_id", "group_id"] as const) {
+    if (typeof claims[name] !== "string" || claims[name] === "") return `ticket claim ${name} is not a non-empty string`;
+  }
+  for (const name of ["notified_hwm", "notice_at", "outages"] as const) {
+    const value = claims[name];
+    if (value === undefined && name !== "notified_hwm") continue;
+    if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+      return `ticket claim ${name} is not a non-negative integer`;
+    }
+  }
+  if (!boundedGeneration(claims.writer_generation)) return "ticket claim writer_generation is not a bounded generation";
+  return null;
+}
+
+// The shape of the generation is the family's; the daemon only bounds what it hands back.
+function boundedGeneration(value: unknown): boolean {
+  if (value === null) return true;
+  if (typeof value === "string") return value.length <= MAX_GENERATION_TEXT;
+  if (typeof value !== "object" || Array.isArray(value)) return false;
+  const entries = Object.entries(value);
+  if (entries.length > MAX_GENERATION_FIELDS) return false;
+  return entries.every(
+    ([name, field]) =>
+      name.length <= MAX_GENERATION_TEXT &&
+      (typeof field === "string" ? field.length <= MAX_GENERATION_TEXT : Number.isSafeInteger(field) && (field as number) >= 0),
+  );
 }
 
 type Stage = "auth" | "hello" | "building" | "live";
@@ -445,6 +570,11 @@ class Connection {
   private bytesIn = 0;
   private timer: unknown;
   private queue: Buffer[] = [];
+  private queuedBytes = 0;
+  private dropped = 0;
+  private ticketPending?: FamilyTicketClaims;
+  private ticketCooldown: unknown;
+  private hello?: Hello;
   private ending = false;
   private closed = false;
   private chain: Promise<void> = Promise.resolve();
@@ -517,9 +647,15 @@ class Connection {
 
   teardown(reason: CloseReason): Promise<void> {
     if (this.teardownDone === undefined) {
+      const { teardowns } = this.ctx;
       let finished!: () => void;
-      this.teardownDone = new Promise<void>((resolve) => (finished = resolve));
-      void this.runTeardown(reason).then(finished);
+      const done = new Promise<void>((resolve) => (finished = resolve));
+      this.teardownDone = done;
+      teardowns.add(done);
+      void this.runTeardown(reason).then(() => {
+        teardowns.delete(done);
+        finished();
+      });
     }
     return this.teardownDone;
   }
@@ -528,6 +664,7 @@ class Connection {
     const { ctx } = this;
     this.closed = true;
     if (this.timer !== undefined) ctx.clock.clearTimeout(this.timer);
+    if (this.ticketCooldown !== undefined) ctx.clock.clearTimeout(this.ticketCooldown);
     ctx.all.delete(this);
     ctx.unauthenticated.delete(this);
     ctx.authenticated.delete(this);
@@ -569,6 +706,7 @@ class Connection {
   private writeRaw(buf: Buffer): void {
     if (this.closed) return;
     this.queue.push(buf);
+    this.queuedBytes += buf.length;
     this.flush();
   }
 
@@ -577,10 +715,13 @@ class Connection {
       const head = this.queue[0] as Buffer;
       const written = this.socket.write(head);
       if (written < head.length) {
-        this.queue[0] = head.subarray(Math.max(written, 0));
+        const taken = Math.max(written, 0);
+        this.queue[0] = head.subarray(taken);
+        this.queuedBytes -= taken;
         return;
       }
       this.queue.shift();
+      this.queuedBytes -= head.length;
     }
     if (this.ending && !this.closed) this.socket.end();
   }
@@ -590,13 +731,73 @@ class Connection {
     this.flush();
   }
 
-  private sendSealed(type: number, payload: string | Buffer): void {
-    if (this.closed || !this.sealer) return;
+  /**
+   * False when the frame was not queued. The cap is checked before sealing: a
+   * sealed frame that is dropped would burn a counter the peer waits for.
+   * Notifications stop at 4 MiB of queued bytes and any other frame at 12 MiB,
+   * so a reply of up to 8 MiB always finds room behind a burst of notifications.
+   */
+  private sendSealed(type: number, payload: string | Buffer, droppable = false): boolean {
+    if (this.closed || !this.sealer) return false;
+    const body = typeof payload === "string" ? Buffer.from(payload) : payload;
+    const size = body.length + SEALED_FRAME_OVERHEAD;
+    if (this.queuedBytes + size > (droppable ? NOTIFICATION_CAP_BYTES : BUFFER_CAP_BYTES)) {
+      if (droppable) this.noteDropped(size);
+      else this.reject(`output buffer above ${BUFFER_CAP_BYTES} bytes at a frame of type ${type}`);
+      return false;
+    }
     try {
-      this.writeRaw(this.sealer.seal(type, typeof payload === "string" ? Buffer.from(payload) : payload));
+      this.writeRaw(this.sealer.seal(type, body));
+      return true;
     } catch (e) {
       this.reject("cannot seal a frame", e);
+      return false;
     }
+  }
+
+  private noteDropped(size: number): void {
+    this.ctx.counters.droppedNotifications++;
+    if (this.dropped++ % DROP_LOG_EVERY === 0) {
+      this.log.warn(`output buffer full: dropped a notification of ${size} bytes (${this.dropped} on this connection)`);
+    }
+  }
+
+  private issueTicket(claims: FamilyTicketClaims): void {
+    const hello = this.hello;
+    if (hello === undefined) return;
+    if (hello.family !== "peers") {
+      this.log.error(`the ${hello.family} family asked for a resume ticket`);
+      return;
+    }
+    this.ticketPending = claims;
+    if (this.stage === "live" && this.ticketCooldown === undefined) this.flushTicket(hello);
+  }
+
+  private flushTicket(hello: Hello): void {
+    const claims = this.ticketPending;
+    this.ticketPending = undefined;
+    if (claims === undefined || this.closed) return;
+    // Field by field, the daemon's own last: a family cannot override the binding to the relay.
+    const ticket = mintTicket(this.ctx.key, {
+      writer_generation: claims.writer_generation,
+      instance_token: claims.instance_token,
+      peer_id: claims.peer_id,
+      group_id: claims.group_id,
+      notified_hwm: claims.notified_hwm,
+      notice_at: claims.notice_at,
+      outages: claims.outages,
+      v: 1,
+      family: "peers",
+      relay_pid: hello.pid,
+      relay_pid_start: hello.pid_start,
+      issued_at: Date.now(),
+    });
+    this.sendSealed(FRAME_TYPE.TICKET, JSON.stringify({ ticket }));
+    if (this.closed) return;
+    this.ticketCooldown = this.ctx.clock.setTimeout(() => {
+      this.ticketCooldown = undefined;
+      this.flushTicket(hello);
+    }, TICKET_INTERVAL_MS);
   }
 
   private refuseSealed(code: string, message: string): void {
@@ -721,30 +922,63 @@ class Connection {
       this.refuseSealed("session_limit", `this daemon serves ${ctx.maxSessions} sessions at most`);
       return;
     }
+    const resume = this.checkResume(hello);
     this.stage = "building";
     this.arm();
-    await this.openSession(hello, factory);
+    await this.openSession(hello, factory, resume);
   }
 
-  private async openSession(hello: Hello, factory: FamilyFactory): Promise<void> {
+  // A refused ticket is not fatal: the session registers the ordinary way, and the relay waits for WELCOME.
+  private checkResume(hello: Hello): ResumeOutcome {
+    if (hello.resume_ticket === undefined) return { kind: "none" };
+    let cause: string;
+    if (hello.family !== "peers") {
+      cause = `the ${hello.family} family has no resume ticket`;
+    } else {
+      const verdict = verifyTicket(this.ctx.key, hello.resume_ticket, {
+        relayPid: hello.pid,
+        relayPidStart: hello.pid_start,
+        family: hello.family,
+      });
+      const malformed = verdict.ok ? malformedClaims(verdict.claims) : verdict.cause;
+      if (verdict.ok && malformed === null) return { kind: "accepted", claims: verdict.claims };
+      cause = malformed ?? "ticket refused";
+    }
+    this.log.warn(`resume ticket refused: ${cause}`);
+    this.sendSealed(FRAME_TYPE.ERROR, JSON.stringify({ code: "ticket_refused", message: cause }));
+    return { kind: "refused", cause };
+  }
+
+  private async openSession(hello: Hello, factory: FamilyFactory, resume: ResumeOutcome): Promise<void> {
     const { ctx } = this;
     const sessionId = randomUUID();
     const log = ctx.log.child(`s=${sessionId.slice(0, 8)}`);
     this.log = log;
-    let server: Server;
+    this.hello = hello;
+    let build: FamilyBuild;
     try {
-      server = await factory(hello, { sessionId, log });
+      build = await factory(hello, {
+        sessionId,
+        log,
+        home: ctx.home,
+        resume,
+        issueTicket: (claims) => this.issueTicket(claims),
+        brokers: ctx.brokers,
+        settings: ctx.settings,
+      });
     } catch (e) {
       log.error("family factory failed", e);
       this.refuseSealed("family_unavailable", "the family could not be built");
       return;
     }
+    const handle: FamilyHandle = "server" in build ? build : { server: build, close: async () => {} };
+    const server = handle.server;
     const transport = new FrameTransport(
-      (text) => this.sendSealed(FRAME_TYPE.MCP, text),
+      (text, droppable) => this.sendSealed(FRAME_TYPE.MCP, text, droppable),
       () => void this.teardown("socket"),
     );
     transport.onerror = (error) => log.error("MCP transport error", error);
-    const session = new Session(sessionId, server, transport, log);
+    const session = new Session(sessionId, handle, transport, log, ctx.clock);
     this.session = session;
     if (this.closed) {
       await session.close("socket");
@@ -764,12 +998,13 @@ class Connection {
     if (this.closed) return;
     this.sendSealed(
       FRAME_TYPE.WELCOME,
-      JSON.stringify({ session_id: sessionId, family: hello.family, tools_hash: toolsHash, resumed: false }),
+      JSON.stringify({ session_id: sessionId, family: hello.family, tools_hash: toolsHash, resumed: resume.kind === "accepted" }),
     );
     if (this.timer !== undefined) ctx.clock.clearTimeout(this.timer);
     this.timer = undefined;
     this.decoder.maxPayload = MAX_PAYLOAD;
     this.stage = "live";
+    this.flushTicket(hello);
     ctx.live.add(this);
     ctx.counters.sessionsOpened++;
     log.info(`session open family=${hello.family} pid=${hello.pid} cwd=${hello.cwd}`);
@@ -813,6 +1048,7 @@ export function startDaemon(opts: DaemonOptions): DaemonHandle {
     handshakeTimeouts: 0,
     authRefused: 0,
     preAuthFailures: 0,
+    droppedNotifications: 0,
   };
   const ctx: DaemonContext = {
     key,
@@ -822,10 +1058,14 @@ export function startDaemon(opts: DaemonOptions): DaemonHandle {
     log,
     clock,
     maxSessions: opts.maxSessions ?? DEFAULT_MAX_SESSIONS,
+    home: opts.home ?? homedir(),
+    brokers: opts.brokers ?? unconfiguredBrokers,
+    settings: opts.settings ?? DEFAULT_SESSION_SETTINGS,
     preAuth: new PreAuthLog(daemonLog, clock, counters),
     control: opts.control,
     onSessions: opts.onSessions,
     settled: [],
+    teardowns: new Set(),
     listening: false,
     stopping: false,
     nextConnection: 0,
@@ -875,7 +1115,8 @@ export function startDaemon(opts: DaemonOptions): DaemonHandle {
       ctx.stopping = true;
       if (ctx.listening) listener.stop(true);
       ctx.listening = false;
-      await Promise.all([...ctx.all].map((conn) => conn.teardown("daemon_stop")));
+      const closing = [...ctx.all].map((conn) => conn.teardown("daemon_stop"));
+      await Promise.all([...closing, ...ctx.teardowns]);
       ctx.preAuth.flush();
       daemonLog.info("stopped");
     },

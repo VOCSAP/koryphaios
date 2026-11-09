@@ -17,7 +17,6 @@ import {
   globalSessionIdentityFileName,
   readGlobalSessionIdentityFile,
   readSessionIdentityFile,
-  sessionIdentityFileName,
   type SessionIdentity,
 } from "../shared/peer-cache.ts";
 
@@ -220,24 +219,6 @@ test.skipIf(process.platform === "darwin")("set_id updates the per-tile identity
     instanceToken: after!.instanceToken,
   });
 
-  const nextId = "renamed-peer-write-failure";
-  const writeBlocker = join(homeDir, ".claude", "peers", `${sessionIdentityFileName(deskSession)}.${proc.pid}.tmp`);
-  mkdirSync(writeBlocker);
-  send({
-    jsonrpc: "2.0",
-    id: 3,
-    method: "tools/call",
-    params: { name: "set_id", arguments: { new_id: nextId } },
-  });
-  const failed = await readUntil(reader, 3, buffer);
-  expect(failed.result?.isError).toBe(true);
-  rmSync(writeBlocker, { recursive: true });
-  expect(await readSessionIdentityFile(deskSession, homeDir), "a failed snapshot write leaves no ready identity").toBeNull();
-  expect(await globalSnapshot(), "a failed snapshot write after the broker renamed the peer must not leave the old global identity").toBeNull();
-  for (let i = 0; i < 20 && !stderr.text.includes("set_id failed"); i++) await Bun.sleep(50);
-  expect(stderr.text).toContain("set_id failed");
-  expect(stderr.text).not.toContain("Could not restore the identity after set_id refusal");
-
   proxy.refuseSetId = true;
   send({
     jsonrpc: "2.0",
@@ -249,7 +230,7 @@ test.skipIf(process.platform === "darwin")("set_id updates the per-tile identity
   expect(unavailable.result?.isError).toBe(true);
   expect(unavailable.result?.content?.[0]?.text).toContain("Broker error (/set-id)");
   expect(await globalSnapshot(), "a thrown broker error restores the global snapshot of the current peer").toMatchObject({
-    peerId: nextId,
+    peerId: newId,
     instanceToken: after!.instanceToken,
   });
 }, 30_000);

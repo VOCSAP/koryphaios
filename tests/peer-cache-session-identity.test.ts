@@ -238,14 +238,8 @@ describe("session-identity file", () => {
 
   test("the Windows measurement reports to the logger it was given", async () => {
     const log = recordingLogger();
-    const saved = process.env.SystemRoot;
-    delete process.env.SystemRoot;
-    try {
-      expect(await withPlatform("win32", () => measureWriterGeneration(process.pid, log))).toBeNull();
-    } finally {
-      if (saved !== undefined) process.env.SystemRoot = saved;
-    }
-    expect(log.lines).toEqual(["error Cannot resolve an absolute System32 PowerShell path for process generation"]);
+    expect(await withPlatform("win32", () => measureWriterGeneration(0xffff_fffe, log))).toBeNull();
+    expect(log.lines).toEqual(["error Windows process generation measurement failed"]);
   });
 
   test.skipIf(process.platform === "darwin")("reader verification accepts the live writer process generation (needs a measurable process generation, refused on darwin)", async () => {
@@ -304,19 +298,13 @@ describe("session-identity file", () => {
     }
   });
 
-  test("writer surfaces an atomic write failure", async () => {
-    const sessionId = "write-failure";
-    await mkdir(join(peersDir, `${sessionIdentityFileName(sessionId)}.${process.pid}.tmp`));
-    await expect(writeSessionIdentityFile(sessionId, "peer", "group", "instance", tmpHome)).rejects.toThrow();
-  });
-
-  test("a failed atomic rename removes the temporary identity snapshot", async () => {
+  test("a failed atomic rename surfaces and removes the temporary identity snapshot", async () => {
     const sessionId = "rename-failure";
     const filename = sessionIdentityFileName(sessionId);
     await mkdir(join(peersDir, filename));
 
     await expect(writeSessionIdentityFile(sessionId, "peer", "group", "instance", tmpHome)).rejects.toThrow();
-    expect(await readdir(peersDir)).not.toContain(`${filename}.${process.pid}.tmp`);
+    expect((await readdir(peersDir)).filter((entry) => entry.startsWith(`${filename}.`))).toEqual([]);
   });
 
   test("no file at all resolves to null", async () => {

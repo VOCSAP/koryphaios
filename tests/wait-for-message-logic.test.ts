@@ -3,9 +3,14 @@
 // Both message-delivery paths (WS push and poll fallback) are exercised against
 // the same pure resolver, not assumed identical.
 
-import { test, expect } from "bun:test";
-import { readFileSync } from "node:fs";
+import { afterEach, expect, test } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { createPeersSession, type PeersSession } from "../shared/peers-session.ts";
+import { reachedWithin } from "./_bounded-await.ts";
 import {
   WAIT_FOR_MESSAGE_HARD_CAP_SEC,
   WAIT_FOR_MESSAGE_DEFAULT_SEC,
@@ -321,68 +326,228 @@ test("the same file under a server-/broker- prefix would NOT be collected (the e
   expect(isExempt("broker-wait-for-message.test.ts")).toBe(true);
 });
 
-// --- Wiring proof: both call sites actually invoke tryResolveWaiters, not just one ---
-// (CLAUDE.md: a consumer/producer pairing must be checked by grepping the real
-// call, not trusted from a comment -- e.g. DeckApi.onX shipped with zero emitters.)
+// --- The real peers session, driven over an in-memory MCP transport ---
 
-function extractFunctionBody(source: string, header: string): string {
-  const start = source.indexOf(header);
-  if (start === -1) throw new Error(`extractFunctionBody: header not found: ${header}`);
-  // Bounded to the next top-level declaration or section marker, not the end of
-  // the file, so a match isn't found merely because the identifier exists
-  // elsewhere.
-  // Also stops at the next 4-space-indented `case "`, so the same helper
-  // extracts a switch case's body too.
-  const rest = source.slice(start + header.length);
-  const nextMarkerRe = /\n(?:function |async function |\/\/ --- | {4}case ")/;
-  const end = rest.search(nextMarkerRe);
-  return end === -1 ? rest : rest.slice(0, end);
+interface Wire {
+  paths: string[];
+  /** What both /peek-messages and /poll-messages answer with. */
+  mailbox: WaitCandidateMessage[];
 }
 
-/** Strips // line comments and /* block comments *\/ so a match inside a
- * comment doesn't count as a real call (project precedent:
- * project_source_scan_regex_brittle_to_comment_insertion). */
-function stripComments(code: string): string {
-  return code.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+class FakeSocket {
+  static CLOSED = 3;
+  readyState = 0;
+  private listeners = new Map<string, Array<(event: unknown) => void>>();
+  addEventListener(type: string, listener: (event: unknown) => void): void {
+    this.listeners.set(type, [...(this.listeners.get(type) ?? []), listener]);
+  }
+  send(): void {}
+  close(): void {
+    this.readyState = FakeSocket.CLOSED;
+  }
+  emit(type: string, event: unknown = {}): void {
+    for (const listener of this.listeners.get(type) ?? []) listener(event);
+  }
 }
 
-test("connectWs's WS message handler calls tryResolveWaiters before falling back to mcp.notification()", () => {
-  const source = readFileSync(join(import.meta.dir, "..", "server.ts"), "utf-8");
-  const body = stripComments(extractFunctionBody(source, "function connectWs()"));
-  expect(body).toContain("tryResolveWaiters(");
-  expect(body).toContain("mcp.notification(");
-  expect(body.indexOf("tryResolveWaiters(")).toBeLessThan(body.indexOf("mcp.notification("));
+interface Rig {
+  session: PeersSession;
+  client: Client;
+  wire: Wire;
+  sockets: FakeSocket[];
+  channel: Array<{ method: string; params?: Record<string, unknown> }>;
+  home: string;
+}
+
+const rigs: Rig[] = [];
+
+afterEach(async () => {
+  for (const rig of rigs.splice(0)) {
+    await rig.client.close();
+    await rig.session.close("bye");
+    rmSync(rig.home, { recursive: true, force: true });
+  }
 });
 
-test("pollFallback calls tryResolveWaiters before falling back to mcp.notification()", () => {
-  const source = readFileSync(join(import.meta.dir, "..", "server.ts"), "utf-8");
-  const body = stripComments(extractFunctionBody(source, "async function pollFallback()"));
-  expect(body).toContain("tryResolveWaiters(");
-  expect(body).toContain("mcp.notification(");
-  expect(body.indexOf("tryResolveWaiters(")).toBeLessThan(body.indexOf("mcp.notification("));
+async function openRig(pollFallbackIntervalMs = 3_600_000): Promise<Rig> {
+  const home = mkdtempSync(join(tmpdir(), "cp-wait-logic-"));
+  const wire: Wire = { paths: [], mailbox: [] };
+  const sockets: FakeSocket[] = [];
+  class RecordedSocket extends FakeSocket {
+    constructor() {
+      super();
+      sockets.push(this);
+    }
+  }
+  const brokerFetch = async (input: unknown, init?: { body?: unknown }): Promise<Response> => {
+    const path = new URL(String(input)).pathname;
+    wire.paths.push(path);
+    if (path === "/register") {
+      const body = JSON.parse(String(init?.body)) as { role?: string };
+      return Response.json({ peer_id: "peer-1", instance_token: "token-1", inbox_binding: null, role: body.role ?? null });
+    }
+    if (path === "/peek-messages" || path === "/poll-messages") return Response.json({ messages: wire.mailbox });
+    return Response.json({ ok: true });
+  };
+  const session = createPeersSession(
+    {
+      env: { XDG_CONFIG_HOME: home, APPDATA: home, CLAUDE_PEERS_PORT: "17999", CLAUDE_PEERS_LOG_DIR: join(home, "logs") },
+      cwd: home,
+      pid: 777,
+      ppid: 4242,
+      stdinIsTty: false,
+    },
+    {
+      log: { log: () => {}, logError: () => {} },
+      home,
+      hostname: () => "test-host",
+      ensureBroker: async () => {},
+      measureWriterGeneration: async () => null,
+      settings: {
+        contextResumeKeyTtlMs: 300_000,
+        pollFallbackIntervalMs,
+        heartbeatIntervalMs: 3_600_000,
+        disconnectBoundMs: 3_000,
+        wsReconnectInitialMs: 60_000,
+      },
+      fetch: brokerFetch as unknown as typeof fetch,
+      WebSocket: RecordedSocket as unknown as typeof WebSocket,
+    }
+  );
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await session.server.connect(serverTransport);
+  const client = new Client({ name: "wait-logic-test", version: "1.0.0" });
+  const channel: Rig["channel"] = [];
+  client.fallbackNotificationHandler = async (notification) => {
+    if (notification.method === "notifications/claude/channel") channel.push(notification);
+  };
+  await client.connect(clientTransport);
+  const rig: Rig = { session, client, wire, sockets, channel, home };
+  rigs.push(rig);
+  await session.ready;
+  return rig;
+}
+
+async function until(condition: () => boolean, what: string): Promise<void> {
+  await reachedWithin(
+    (async () => {
+      while (!condition()) await new Promise((resolve) => setTimeout(resolve, 5));
+    })(),
+    what,
+    3000
+  );
+}
+
+async function flush(): Promise<void> {
+  for (let i = 0; i < 5; i++) await new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+function callsTo(rig: Rig, path: string): number {
+  return rig.wire.paths.filter((p) => p === path).length;
+}
+
+function textOf(result: unknown): string {
+  return (result as { content: Array<{ text: string }> }).content[0]?.text ?? "";
+}
+
+/** The session's socket, opened: the WebSocket path is live and pollFallback stands down. */
+async function openSocket(rig: Rig): Promise<FakeSocket> {
+  await until(() => rig.sockets.length >= 1, "the session's WebSocket");
+  const socket = rig.sockets[0]!;
+  socket.emit("open");
+  return socket;
+}
+
+/** A wait_for_message that has peeked once and registered its waiter. */
+async function startWait(rig: Rig, args: Record<string, unknown> = {}): Promise<{ waiting: Promise<unknown> }> {
+  const before = callsTo(rig, "/peek-messages");
+  const waiting = rig.client.callTool({ name: "wait_for_message", arguments: { timeout_sec: 60, ...args } });
+  await until(() => callsTo(rig, "/peek-messages") > before, "the wait's own peek");
+  await flush();
+  return { waiting };
+}
+
+function frame(from: string, id: number, text: string): { data: string } {
+  return { data: JSON.stringify({ type: "message", ...candidate(from, id), text }) };
+}
+
+async function stillPending(promise: Promise<unknown>): Promise<boolean> {
+  return Promise.race([promise.then(() => false), flush().then(() => true)]);
+}
+
+test("a WebSocket message with no wait pending is pushed to the channel", async () => {
+  const rig = await openRig();
+  const socket = await openSocket(rig);
+  socket.emit("message", frame("peer-a", 11, "no waiter here"));
+  await until(() => rig.channel.length === 1, "the channel notification");
+  expect(String(rig.channel[0]!.params?.content)).toContain("no waiter here");
 });
 
-test("server.ts registers a wait_for_message MCP tool", () => {
-  // Anchored on the TOOLS entry's own name key via regex, not a literal
-  // toContain, so formatter whitespace or line breaks around name: don't cause
-  // a false red.
-  const source = readFileSync(join(import.meta.dir, "..", "server.ts"), "utf-8");
-  expect(stripComments(source)).toMatch(/name:\s*"wait_for_message"/);
+test("a WebSocket message resolves the pending wait_for_message and is not also pushed to the channel", async () => {
+  const rig = await openRig();
+  const socket = await openSocket(rig);
+  const { waiting } = await startWait(rig);
+  socket.emit("message", frame("peer-a", 11, "answer via the websocket"));
+  const result = await reachedWithin(waiting, "the wait resolved by the WebSocket frame", 2000);
+  expect(textOf(result)).toContain("answer via the websocket");
+  await flush();
+  expect(rig.channel, "a message handed to its waiter was also pushed as a channel notification").toEqual([]);
+  expect(callsTo(rig, "/poll-messages"), "the wait consumed the message through /poll-messages").toBe(0);
 });
 
-// This literal must stay /peek-messages, never /poll-messages: poll-messages
-// marks messages delivered, and that distinction alone is what keeps
-// wait_for_message and pollFallback non-consuming so an expired or cancelled
-// wait can't destroy the message it just read.
-test("wait_for_message's opportunistic peek and pollFallback both call the non-consuming /peek-messages endpoint, never the consuming /poll-messages one", () => {
-  const source = readFileSync(join(import.meta.dir, "..", "server.ts"), "utf-8");
-  const waitBody = stripComments(extractFunctionBody(source, 'case "wait_for_message": {'));
-  const pollFallbackBody = stripComments(extractFunctionBody(source, "async function pollFallback()"));
+test("a WebSocket message from another sender than the wait's from_peer_id is pushed and leaves the wait pending", async () => {
+  const rig = await openRig();
+  const socket = await openSocket(rig);
+  const { waiting } = await startWait(rig, { from_peer_id: "peer-z" });
+  socket.emit("message", frame("peer-a", 11, "from the wrong sender"));
+  await until(() => rig.channel.length === 1, "the channel notification of the unmatched message");
+  expect(await stillPending(waiting), "a wait filtered on peer-z resolved with a message from peer-a").toBe(true);
+  socket.emit("message", frame("peer-z", 12, "from the awaited sender"));
+  const result = await reachedWithin(waiting, "the wait resolved by the awaited sender", 2000);
+  expect(textOf(result)).toContain("from the awaited sender");
+});
 
-  expect(waitBody).toContain('"/peek-messages"');
-  expect(waitBody).not.toContain('"/poll-messages"');
-  expect(pollFallbackBody).toContain('"/peek-messages"');
-  expect(pollFallbackBody).not.toContain('"/poll-messages"');
+test("pollFallback pushes a peeked message to the channel when no wait is pending", async () => {
+  const rig = await openRig(10);
+  rig.wire.mailbox = [{ ...candidate("peer-a", 21), text: "peeked with no waiter" }];
+  await until(() => rig.channel.length === 1, "the channel notification from the poll");
+  expect(String(rig.channel[0]!.params?.content)).toContain("peeked with no waiter");
+  expect(callsTo(rig, "/poll-messages")).toBe(0);
+});
+
+test("pollFallback resolves the pending wait_for_message instead of pushing to the channel", async () => {
+  const rig = await openRig(10);
+  const socket = await openSocket(rig);
+  const { waiting } = await startWait(rig);
+  rig.wire.mailbox = [{ ...candidate("peer-a", 22), text: "answer via the poll fallback" }];
+  socket.emit("close");
+  const result = await reachedWithin(waiting, "the wait resolved by the poll fallback", 2000);
+  expect(textOf(result)).toContain("answer via the poll fallback");
+  await flush();
+  expect(rig.channel, "a message handed to its waiter was also pushed as a channel notification").toEqual([]);
+  expect(callsTo(rig, "/poll-messages"), "the poll fallback consumed the message through /poll-messages").toBe(0);
+});
+
+test("wait_for_message peeks without consuming: only check_messages reaches /poll-messages", async () => {
+  const rig = await openRig();
+  rig.wire.mailbox = [{ ...candidate("peer-a", 31), text: "already waiting" }];
+  const result = await reachedWithin(
+    rig.client.callTool({ name: "wait_for_message", arguments: { timeout_sec: 60 } }),
+    "the wait answered by its opportunistic peek",
+    2000
+  );
+  expect(textOf(result)).toContain("already waiting");
+  expect(callsTo(rig, "/peek-messages")).toBeGreaterThanOrEqual(1);
+  expect(callsTo(rig, "/poll-messages"), "an expired or cancelled wait would destroy the message it read").toBe(0);
+
+  await rig.client.callTool({ name: "check_messages", arguments: {} });
+  expect(callsTo(rig, "/poll-messages")).toBe(1);
+});
+
+test("the peers session serves a wait_for_message tool", async () => {
+  const rig = await openRig();
+  const names = (await rig.client.listTools()).tools.map((tool) => tool.name);
+  expect(names).toContain("wait_for_message");
 });
 
 // These tests execute runWaitForMessage directly against fake dependencies --

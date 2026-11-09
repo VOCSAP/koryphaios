@@ -9,15 +9,18 @@ import { ListToolsRequestSchema, CallToolRequestSchema } from "@modelcontextprot
 import { createLogger, coreLogDir } from "./shared/logger.ts";
 import { readSessionIdentityFile } from "./shared/peer-cache.ts";
 import { OPERATOR_CEILING_ENV, OPERATOR_TOOLS, resolveMountCeiling } from "./shared/mount-ceiling.ts";
+import { resolveToolAllowlist, TOOLS_ENV_VAR } from "./shared/tool-allowlist.ts";
+import { loadConfig } from "./shared/config.ts";
+import type { CompanionIdentity } from "./shared/roadmap-dispatch.ts";
 import {
   DECK_ONLY_TOOLS,
-  TOOLS_ALLOWLIST,
+  createBrokerClient,
   handleGraphDraftPrepare,
   handleAskOperator,
   handleNotifyOperator,
   handleGraphDraftSend,
-  type CompanionIdentity,
-} from "./server.ts";
+  type OperatorToolContext,
+} from "./shared/peers-session.ts";
 
 const fileLog = createLogger({ dir: coreLogDir(), name: "server-deck", mirrorToConsole: false });
 
@@ -26,9 +29,24 @@ function log(msg: string) {
   fileLog.info(msg);
 }
 
+function logError(msg: string, e?: unknown) {
+  console.error(`[kory-operator] ${msg}`);
+  fileLog.error(msg, e);
+}
+
+// This process never registers a peer, so it has no role of its own.
+const toolContext: OperatorToolContext = {
+  broker: createBrokerClient(await loadConfig(process.env)),
+  env: process.env,
+  role: null,
+  cwd: process.cwd(),
+  log: { log, logError },
+};
+
 const DECK_TOOL_NAMES = OPERATOR_TOOLS;
 const CEILING = resolveMountCeiling(OPERATOR_CEILING_ENV, process.env[OPERATOR_CEILING_ENV], DECK_TOOL_NAMES);
 if (!CEILING.ok) log(`mount refused, no tool served: ${CEILING.reason}`);
+const TOOLS_ALLOWLIST = resolveToolAllowlist(process.env[TOOLS_ENV_VAR]);
 const DECK_TOOLS = DECK_ONLY_TOOLS.filter((tool) => {
   if (!CEILING.ok || !CEILING.value.includes(tool.name)) return false;
   if (tool.name === "notify_operator") {
@@ -95,20 +113,29 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
   }
   switch (name) {
     case "graph_draft_prepare":
-      return handleGraphDraftPrepare(args);
+      return handleGraphDraftPrepare(args, toolContext);
     case "ask_operator":
     case "ask_operator_wait":
-      return handleAskOperator(name, args, await resolveCompanionIdentity());
+      return handleAskOperator(name, args, await resolveCompanionIdentity(), toolContext);
     case "notify_operator":
-      return handleNotifyOperator(args, await resolveCompanionIdentity());
+      return handleNotifyOperator(args, await resolveCompanionIdentity(), toolContext);
     case "graph_draft_send":
-      return handleGraphDraftSend(args, await resolveCompanionIdentity());
+      return handleGraphDraftSend(args, await resolveCompanionIdentity(), toolContext);
     default:
       throw new Error(`Unknown tool: ${name}`);
   }
 });
 
 async function main() {
+  // Last-resort safety nets: leave a trace first, since Bun exits on an unhandled rejection.
+  process.on("uncaughtException", (e) => {
+    logError("uncaught exception, exiting", e);
+    process.exit(1);
+  });
+  process.on("unhandledRejection", (e) => {
+    logError("unhandled rejection, exiting", e);
+    process.exit(1);
+  });
   const transport = new StdioServerTransport(process.stdin, process.stdout);
   await mcp.connect(transport);
   log(`MCP connected, ${DECK_TOOLS.length} tools`);

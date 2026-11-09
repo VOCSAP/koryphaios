@@ -1,52 +1,35 @@
 import { test, expect } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { extractBracedBody, extractBracketedBody, findMatchingClose } from "./_braced-body";
+import { findMatchingClose } from "./_braced-body";
+import { DECK_ONLY_TOOLS, TOOLS } from "../shared/peers-session.ts";
 
 // Sweeps the actual domain of role-write paths -- every db statement in
 // broker.ts writing peers with role in its column list, and every MCP tool
-// schema in server.ts -- rather than enumerating scenarios, since there is no
-// bounded list of scenarios that could self-promote a role, only a bounded list
-// of write paths.
-// Scoped to broker.ts and server.ts only: blind to a peers write from another
-// file, or to role migrating to a different table.
+// schema the peers session declares -- rather than enumerating scenarios, since
+// there is no bounded list of scenarios that could self-promote a role, only a
+// bounded list of write paths.
+// Scoped to broker.ts and the peers session's tool registries only: blind to a
+// peers write from another file, or to role migrating to a different table.
 
 const BROKER_PATH = join(import.meta.dir, "..", "broker.ts");
-const SERVER_PATH = join(import.meta.dir, "..", "server.ts");
 
-/** LEG 1: no MCP tool inputSchema in server.ts declares a `role` argument. */
-export function findRoleArgumentInToolSchemas(src: string): string[] {
+/** LEG 1: no MCP tool inputSchema declares a `role` argument. */
+export function findRoleArgumentInToolSchemas(
+  tools: ReadonlyArray<{ name: string; inputSchema?: unknown }>
+): string[] {
   const failures: string[] = [];
-  const toolsMatch = /const TOOLS\s*=\s*\[/.exec(src);
-  if (!toolsMatch) {
-    return ["const TOOLS = [ ... ] not found in server.ts -- has the tool registry been renamed?"];
-  }
-  const toolsOpenIdx = toolsMatch.index + toolsMatch[0].length - 1;
-  const toolsBody = extractBracketedBody(src, toolsOpenIdx);
-
-  const inputSchemaRe = /inputSchema:\s*\{/g;
-  let m: RegExpExecArray | null;
   let schemaCount = 0;
-  while ((m = inputSchemaRe.exec(toolsBody))) {
+  for (const tool of tools) {
+    if (tool.inputSchema === undefined) continue;
     schemaCount++;
-    const schemaOpenIdx = m.index + m[0].length - 1;
-    const schemaBody = extractBracedBody(toolsBody, schemaOpenIdx);
-    // Best-effort tool name for a legible failure message -- look backward
-    // from this inputSchema to the nearest preceding `name: "..."`.
-    const before = toolsBody.slice(0, m.index);
-    const nameMatch = /name:\s*"([^"]+)"(?![\s\S]*name:\s*")/.exec(before);
-    const toolName = nameMatch ? nameMatch[1] : `<tool #${schemaCount}>`;
-
-    const propsMatch = /properties:\s*\{/.exec(schemaBody);
-    if (!propsMatch) continue; // an empty {} properties (e.g. whoami) has nothing to check
-    const propsOpenIdx = propsMatch.index + propsMatch[0].length - 1;
-    const propsBody = extractBracedBody(schemaBody, propsOpenIdx);
-    if (/(^|\n)\s*role\s*:\s*\{/.test(propsBody)) {
-      failures.push(`tool "${toolName}" declares a role-named inputSchema argument`);
+    const properties = (tool.inputSchema as { properties?: Record<string, unknown> }).properties ?? {};
+    if (Object.hasOwn(properties, "role")) {
+      failures.push(`tool "${tool.name}" declares a role-named inputSchema argument`);
     }
   }
   if (schemaCount === 0) {
-    failures.push("no inputSchema found inside TOOLS -- has the tool definition shape changed?");
+    failures.push("no inputSchema found in the tool registries -- has the tool definition shape changed?");
   }
   return failures;
 }
@@ -170,10 +153,15 @@ export function countBodyRoleReads(src: string): number {
   return (src.match(/\bbody\.role\b/g) ?? []).length;
 }
 
-test("LEG 1: no MCP tool inputSchema in server.ts declares a role argument", () => {
-  const src = readFileSync(SERVER_PATH, "utf-8");
-  const failures = findRoleArgumentInToolSchemas(src);
+test("LEG 1: no MCP tool inputSchema declared by the peers session or the operator family declares a role argument", () => {
+  const failures = findRoleArgumentInToolSchemas([...TOOLS, ...DECK_ONLY_TOOLS]);
   expect(failures).toEqual([]);
+});
+
+test("LEG 1 detector: a role property is reported by tool name and an empty registry is a failure, not a pass", () => {
+  const withRole = { name: "bad_tool", inputSchema: { type: "object", properties: { role: { type: "string" } } } };
+  expect(findRoleArgumentInToolSchemas([withRole])).toEqual(['tool "bad_tool" declares a role-named inputSchema argument']);
+  expect(findRoleArgumentInToolSchemas([]), "an empty registry must not read as a clean sweep").not.toEqual([]);
 });
 
 test("LEG 2: every peers-writing SQL statement touching role is called only from handleRegister", () => {

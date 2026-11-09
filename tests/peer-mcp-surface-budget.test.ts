@@ -1,53 +1,100 @@
-// Caps the total MCP surface (instructions plus TOOLS) the model reads on every
-// turn, since nothing else notices it silently growing back.
-// The extractor fails closed: a block that cannot be found, or measures
-// implausibly small, fails this test rather than passing quietly.
+// Caps the total MCP surface (instructions plus tools/list) the model reads on every
+// turn, since nothing else notices it silently growing back. The surface is
+// measured as the peers session serves it over MCP, not read from source text.
 
-import { test, expect, describe } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { createPeersSession, DECK_ONLY_TOOLS, TOOLS, type PeersSession } from "../shared/peers-session.ts";
 import { callRoadmapTool, ROADMAP_INSTRUCTIONS } from "../shared/roadmap-mcp.ts";
 import { ROADMAP_TOOLS } from "../shared/roadmap-tools.ts";
 
-const SRC = await Bun.file(new URL("../server.ts", import.meta.url)).text();
 const ROADMAP_CEILING_CHARS = 8_400;
 
 // Use characters because the test runner has no tokenizer; keep the ceiling
 // tight enough that one verbose description fails before small additions
 // accumulate.
-const CEILING_CHARS = 19_000;
-// Below this, the extractor lost a block: a full TOOLS array cannot fit in so little.
-const FLOOR_CHARS = 6_000;
+const CEILING_CHARS = 6_000;
+// Below this, the measurement lost a block: a full tool list cannot fit in so little.
+const FLOOR_CHARS = 5_000;
 
-function stripCommentLines(block: string): string {
-  return block
-    .split("\n")
-    .filter((line) => !/^\s*\/\//.test(line))
-    .join("\n");
+interface Surface {
+  instructions: string;
+  tools: Array<{ name: string; description?: string }>;
+  close(): Promise<void>;
 }
 
-export function measureInstructions(src: string): number {
-  const start = src.indexOf("instructions: `");
-  if (start < 0) throw new Error("instructions block not found in server.ts");
-  const end = src.indexOf("`,", start);
-  if (end < 0) throw new Error("instructions block is not terminated");
-  return end - start;
+async function openSurface(): Promise<Surface> {
+  const home = mkdtempSync(join(tmpdir(), "cp-surface-budget-"));
+  const brokerFetch = async (input: unknown, init?: { body?: unknown }): Promise<Response> => {
+    const path = new URL(String(input)).pathname;
+    if (path === "/register") {
+      const body = JSON.parse(String(init?.body)) as { role?: string };
+      return Response.json({ peer_id: "peer-1", instance_token: "token-1", inbox_binding: null, role: body.role ?? null });
+    }
+    if (path === "/peek-messages" || path === "/poll-messages") return Response.json({ messages: [] });
+    return Response.json({ ok: true });
+  };
+  class IdleSocket {
+    static CLOSED = 3;
+    readyState = 0;
+    addEventListener(): void {}
+    send(): void {}
+    close(): void {
+      this.readyState = IdleSocket.CLOSED;
+    }
+  }
+  const session: PeersSession = createPeersSession(
+    {
+      env: { XDG_CONFIG_HOME: home, APPDATA: home, CLAUDE_PEERS_PORT: "17999", CLAUDE_PEERS_LOG_DIR: join(home, "logs") },
+      cwd: home,
+      pid: 777,
+      ppid: 4242,
+      stdinIsTty: false,
+    },
+    {
+      log: { log: () => {}, logError: () => {} },
+      home,
+      hostname: () => "test-host",
+      ensureBroker: async () => {},
+      measureWriterGeneration: async () => null,
+      settings: {
+        contextResumeKeyTtlMs: 300_000,
+        pollFallbackIntervalMs: 3_600_000,
+        heartbeatIntervalMs: 3_600_000,
+        disconnectBoundMs: 3_000,
+        wsReconnectInitialMs: 60_000,
+      },
+      fetch: brokerFetch as unknown as typeof fetch,
+      WebSocket: IdleSocket as unknown as typeof WebSocket,
+    }
+  );
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await session.server.connect(serverTransport);
+  const client = new Client({ name: "surface-budget-test", version: "1.0.0" });
+  await client.connect(clientTransport);
+  await session.ready;
+  return {
+    instructions: client.getInstructions() ?? "",
+    tools: (await client.listTools()).tools,
+    close: async () => {
+      await client.close();
+      await session.close("bye");
+      rmSync(home, { recursive: true, force: true });
+    },
+  };
 }
 
-export function measureTools(src: string): number {
-  const start = src.indexOf("\nconst TOOLS = [");
-  if (start < 0) throw new Error("TOOLS array not found in server.ts");
-  const end = src.indexOf("\n];", start);
-  if (end < 0) throw new Error("TOOLS array is not terminated");
-  return stripCommentLines(src.slice(start, end)).length;
-}
-
-function toolBlock(src: string, name: string): string {
-  const marker = `    name: "${name}",`;
-  const start = src.indexOf(marker);
-  if (start < 0) throw new Error(`tool ${name} not found`);
-  const end = src.indexOf("\n  },", start);
-  if (end < 0) throw new Error(`tool ${name} block is not terminated`);
-  return src.slice(start, end);
-}
+let surface: Surface;
+beforeAll(async () => {
+  surface = await openSurface();
+});
+afterAll(async () => {
+  await surface?.close();
+});
 
 describe("the per-turn MCP surface stays under its cap", () => {
   test("kory-roadmap's schemas + instructions fit in ROADMAP_CEILING_CHARS", () => {
@@ -59,23 +106,30 @@ describe("the per-turn MCP surface stays under its cap", () => {
     ).toBeLessThanOrEqual(ROADMAP_CEILING_CHARS);
   });
 
-  test("instructions + TOOLS (comment lines excluded) fit in CEILING_CHARS", () => {
-    const total = measureInstructions(SRC) + measureTools(SRC);
-    expect(total).toBeGreaterThan(FLOOR_CHARS);
-    expect(total).toBeLessThanOrEqual(CEILING_CHARS);
+  test("the session serves every tool of TOOLS, so the measure covers the whole list", () => {
+    expect(surface.tools.map((tool) => tool.name)).toEqual(TOOLS.map((tool) => tool.name));
   });
 
-  test("the instructions block carries the peer-traffic rule, once", () => {
+  test("instructions + tools/list fit in CEILING_CHARS", () => {
+    const tools = JSON.stringify(surface.tools).length;
+    const total = surface.instructions.length + tools;
+    expect(total, "the served surface measures implausibly small: the instructions or the tool list went missing").toBeGreaterThan(FLOOR_CHARS);
+    expect(
+      total,
+      `claude-peers per-turn surface (instructions ${surface.instructions.length} + tools/list ${tools}) exceeds ${CEILING_CHARS} chars: move text out of the tool descriptions or the instructions, do not raise the ceiling`
+    ).toBeLessThanOrEqual(CEILING_CHARS);
+  });
+
+  test("the instructions carry the peer-traffic rule, once", () => {
     // The rule that stops an agent narrating every peer exchange to the
-    // operator. Asserted here because the block is otherwise untested, and
-    // its first sentence is what the model reads before any tool call.
-    const block = SRC.slice(SRC.indexOf("instructions: `"), SRC.indexOf("`,", SRC.indexOf("instructions: `")));
-    expect(block).toContain("do not narrate it to the operator");
-    expect(block).not.toContain("tapping you on the shoulder");
+    // operator: its first sentence is what the model reads before any tool call.
+    const rule = "do not narrate it to the operator";
+    expect(surface.instructions.split(rule).length - 1, "peer-traffic rule missing or repeated").toBe(1);
+    expect(surface.instructions).not.toContain("tapping you on the shoulder");
     // Dedup: the lock mechanics and the directive commands live in the tool
     // descriptions, not a second time here.
-    expect(block).not.toContain("409");
-    expect(block).not.toContain("magic_compact");
+    expect(surface.instructions).not.toContain("409");
+    expect(surface.instructions).not.toContain("magic_compact");
   });
 });
 
@@ -159,30 +213,11 @@ describe("kory-roadmap registry and handler", () => {
 
 describe("graph_draft_prepare: the invite gate is a mono-carrier", () => {
   test("the operator-invited restriction still lives somewhere the model reads", () => {
-    // Pins that a call to this tool is restricted to an operator-invited flow,
-    // since this description is now the only place the model reads that
-    // restriction.
-    const block = toolBlock(SRC, "graph_draft_prepare");
-    expect(block).toContain("OPERATOR-INVITED ONLY");
-    expect(block).toContain("never on your own initiative");
-  });
-});
-
-describe("the measure bites", () => {
-  test("an inflated description pushes the total over the cap, a comment does not", () => {
-    const filler = "x".repeat(CEILING_CHARS);
-    // Derives the inserted line separator from SRC's own line ending rather
-    // than the platform, since a Windows checkout can smudge the committed LF
-    // blob to CRLF and a hardcoded separator would then mismatch it.
-    const NL = SRC.includes("\r\n") ? "\r\n" : "\n";
-    const inflated = SRC.replace('name: "whoami",', `name: "whoami",${NL}    description: "${filler}",`);
-    expect(measureInstructions(inflated) + measureTools(inflated)).toBeGreaterThan(CEILING_CHARS);
-    const commented = SRC.replace('name: "whoami",', `name: "whoami",${NL}    // ${filler}`);
-    expect(measureTools(commented)).toBe(measureTools(SRC));
-  });
-
-  test("a missing block is an error, not a zero", () => {
-    expect(() => measureTools(SRC.replace("\nconst TOOLS = [", "\nconst TOOLZ = ["))).toThrow();
-    expect(() => measureInstructions(SRC.replace("instructions: `", "instructionz: `"))).toThrow();
+    // A call to this tool is restricted to an operator-invited flow, and this
+    // description is the only place the model reads that restriction.
+    const description = DECK_ONLY_TOOLS.find((tool) => tool.name === "graph_draft_prepare")?.description ?? "";
+    expect(description, "graph_draft_prepare is no longer declared by the operator family").not.toBe("");
+    expect(description).toContain("OPERATOR-INVITED ONLY");
+    expect(description).toContain("never on your own initiative");
   });
 });

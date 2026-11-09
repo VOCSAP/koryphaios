@@ -1,7 +1,7 @@
 import { test, expect, afterAll } from "bun:test";
 import { startBroker, stopBroker, scrubEnv, type TestBroker } from "./_helper.ts";
 import { DECK_TOOL_NAMES } from "../server-deck.ts";
-import { DECK_ONLY_TOOLS } from "../server.ts";
+import { DECK_ONLY_TOOLS } from "../shared/peers-session.ts";
 
 const DECK_ONLY_NAMES = [
   "graph_draft_prepare",

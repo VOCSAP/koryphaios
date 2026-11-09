@@ -10,6 +10,7 @@ import {
   PRE_AUTH_MAX_PAYLOAD,
   PlainFrameDecoder,
   ProtocolViolation,
+  SEALED_FRAME_OVERHEAD,
   Sealer,
   SealedFrameDecoder,
   b64u,
@@ -294,6 +295,11 @@ describe("session keys and sealed frames", () => {
     expect(deriveSessionKeys(key, challenge, authPayload, other, hs.relay_nonce).r2d.equals(keys.r2d)).toBe(false);
   });
 
+  test.each([0, 1, 4096])("a sealed frame is its payload plus SEALED_FRAME_OVERHEAD bytes (payload of %d)", (size) => {
+    const wire = new Sealer(keys.d2r).seal(FRAME_TYPE.MCP, Buffer.alloc(size, 7));
+    expect(wire.length).toBe(size + SEALED_FRAME_OVERHEAD);
+  });
+
   test("seals the relay-to-daemon fixture frames at counters 0 and 1", () => {
     const sealer = new Sealer(keys.r2d);
     for (const f of frames("r2d")) expect(sealer.seal(f.type, f.payload).toString("hex")).toBe(f.wire.toString("hex"));
@@ -530,6 +536,13 @@ describe("resume ticket", () => {
     const ticket = mintTicket(key, claims);
     expect(ticket.split(".")).toHaveLength(2);
     expect(verifyTicket(key, ticket, expected)).toEqual({ ok: true, claims });
+  });
+
+  test("the notice claims travel inside the MAC and are absent when not set", () => {
+    const withNotice: TicketClaims = { ...claims, notice_at: 1_700_000_100_000, outages: 3 };
+    expect(verifyTicket(key, mintTicket(key, withNotice), expected)).toEqual({ ok: true, claims: withNotice });
+    const parsed = verifyTicket(key, mintTicket(key, claims), expected) as { claims: TicketClaims };
+    expect("notice_at" in parsed.claims || "outages" in parsed.claims).toBe(false);
   });
 
   test("the MAC covers the claims: editing them without re-signing is refused", () => {

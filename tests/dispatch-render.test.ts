@@ -1,10 +1,6 @@
 import { test, expect } from "bun:test";
-import * as server from "../server.ts";
+import { renderDispatchOutcome } from "../shared/roadmap-dispatch.ts";
 import type { DispatchRequest } from "../shared/types.ts";
-
-const renderDispatchOutcome = (server as unknown as {
-  renderDispatchOutcome?: (request: DispatchRequest) => string;
-}).renderDispatchOutcome;
 
 function request(outcome: DispatchRequest["outcome"]): DispatchRequest {
   return {
@@ -19,9 +15,6 @@ function request(outcome: DispatchRequest["outcome"]): DispatchRequest {
 }
 
 test("dispatch rendering keeps refused and pending targets outside the hit line", () => {
-  expect(renderDispatchOutcome).toBeFunction();
-  if (!renderDispatchOutcome) throw new Error("renderDispatchOutcome is required");
-
   const text = renderDispatchOutcome(request({
     cards: [{
       id: "card-1",
@@ -42,9 +35,6 @@ test("dispatch rendering keeps refused and pending targets outside the hit line"
 });
 
 test("dispatch rendering treats omitted supplemental outcomes as empty", () => {
-  expect(renderDispatchOutcome).toBeFunction();
-  if (!renderDispatchOutcome) throw new Error("renderDispatchOutcome is required");
-
   const text = renderDispatchOutcome(request({
     cards: [{
       id: "card-1",

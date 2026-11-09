@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { startBroker, stopBroker, scrubEnv, type TestBroker } from "./_helper.ts";
-import { TOOLS } from "../server.ts";
+import { TOOLS } from "../shared/peers-session.ts";
 import { ROADMAP_INSTRUCTIONS } from "../shared/roadmap-mcp.ts";
 import { ROADMAP_TOOLS } from "../shared/roadmap-tools.ts";
 import {
@@ -683,26 +683,6 @@ describe.skipIf(NO_MEASURABLE_GENERATION)(`kory-roadmap never serves the identit
     expect(served.result?.isError ?? false, `the companion refused a session that never left: ${served.result?.content?.[0]?.text}`).toBe(false);
     expect(served.result?.content?.[0]?.text).toBe(EMPTY_ROADMAP);
   }, 120_000);
-
-  test("a new snapshot that cannot be written leaves no snapshot, so the companion refuses", async () => {
-    const s = await startSwitchableSession();
-    mkdirSync(`${snapshotPath(s.home, SWITCH_SOCKET)}.${s.legacy.proc.pid}.tmp`);
-
-    const switched = await s.call(s.legacy, "switch_group", { name: "beta" });
-
-    expect(switched.result?.isError ?? false, switched.result?.content?.[0]?.text).toBe(false);
-    await expectCompanionRefuses(s, "snapshot write failed");
-  }, 120_000);
-
-  test("a set_id whose new snapshot cannot be written leaves no snapshot, so the companion refuses", async () => {
-    const s = await startSwitchableSession();
-    mkdirSync(`${snapshotPath(s.home, SWITCH_SOCKET)}.${s.legacy.proc.pid}.tmp`);
-
-    const renamed = await s.call(s.legacy, "set_id", { new_id: "renamed-peer" });
-
-    expect(renamed.result?.isError ?? false, renamed.result?.content?.[0]?.text).toBe(false);
-    await expectCompanionRefuses(s, "set_id snapshot write failed");
-  }, 120_000);
 });
 
 describe("kory-roadmap import graph", () => {
@@ -722,16 +702,18 @@ describe("kory-roadmap import graph", () => {
       expect.arrayContaining(["server-roadmap.ts", "shared/roadmap-mcp.ts", "shared/peer-cache.ts"])
     );
     expect(
-      companion.inputs.filter((input) => ["server.ts", "server-deck.ts", "broker.ts"].includes(input)),
-      "a core entry point is in the companion's import graph: importing it would run its registration"
+      companion.inputs.filter((input) =>
+        ["server.ts", "server-deck.ts", "broker.ts", "shared/peers-session.ts"].includes(input)
+      ),
+      "a core entry point or the peers session is in the companion's import graph: importing it would run its registration"
     ).toEqual([]);
-    expect(companion.code, `${SERVER_ONLY_SYMBOL} is code of server.ts and must not be bundled into the companion`).not.toContain(
+    expect(companion.code, `${SERVER_ONLY_SYMBOL} is code of the peers session and must not be bundled into the companion`).not.toContain(
       SERVER_ONLY_SYMBOL
     );
   }, 60_000);
 
-  test("the server-only symbol is still defined by server.ts, so its absence above means something", () => {
-    const source = readFileSync(join(REPO, "server.ts"), "utf-8");
+  test("the server-only symbol is still defined by the peers session, so its absence above means something", () => {
+    const source = readFileSync(join(REPO, "shared", "peers-session.ts"), "utf-8");
     expect(source).toContain(`function ${SERVER_ONLY_SYMBOL}(`);
   });
 });

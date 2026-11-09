@@ -1,7 +1,8 @@
 import { createInterface } from 'node:readline'
 import { hostname } from 'node:os'
 import { readSessionIdentityFile } from '../../shared/peer-cache.ts'
-import { handleRoadmapDispatch, TOOLS_ALLOWLIST as PEERS_ALLOWLIST, type CompanionIdentity } from '../../shared/roadmap-dispatch.ts'
+import { handleRoadmapDispatch, type CompanionIdentity } from '../../shared/roadmap-dispatch.ts'
+import { resolveToolAllowlist, TOOLS_ENV_VAR } from '../../shared/tool-allowlist.ts'
 import { brokerHeaders, brokerUrl, loadBrokerConfig } from '../../shared/broker-config.ts'
 import { DECK_CEILING_ENV, DECK_ROLE_ENV, resolveMountCeiling, resolveMountRole } from '../../shared/mount-ceiling.ts'
 import { DIRECTIVE_ACCEPTS_PROMPT, directiveCommands } from '../src/main/directive'
@@ -14,7 +15,11 @@ import {
 
 const CONTROL_URL = process.env.DECK_CONTROL_URL ?? ''
 const CONTROL_TOKEN = process.env.DECK_CONTROL_TOKEN ?? ''
-const brokerConfig = loadBrokerConfig((message) => process.stderr.write(`[claude-peers] ${message}\n`)).config
+const brokerConfig = loadBrokerConfig(
+  (message) => process.stderr.write(`[claude-peers] ${message}\n`),
+  process.env
+).config
+const PEERS_ALLOWLIST = resolveToolAllowlist(process.env[TOOLS_ENV_VAR])
 const ROADMAP_DISPATCH_ENDPOINT = {
   url: brokerUrl(brokerConfig),
   headers: brokerHeaders(brokerConfig, { 'Content-Type': 'application/json' })

@@ -79,7 +79,7 @@ test("parseBooleanFlag: garbage/typo falls back to the file value rather than de
   expect(parseBooleanFlag("", false)).toBe(false);
 });
 
-// --- loadConfig() end-to-end: env > file > default, via XDG_CONFIG_HOME ---
+// --- loadConfig(process.env) end-to-end: env > file > default, via XDG_CONFIG_HOME ---
 
 const ENV_KEYS = [
   "XDG_CONFIG_HOME",
@@ -192,14 +192,14 @@ function readConfigLogContent(): string {
 
 test("loadConfig: no offline_replica key in the file defaults to false (local/remote unaffected)", async () => {
   writeConfigFile({ broker_url: "http://broker-host:7899" });
-  const cfg = await loadConfig();
+  const cfg = await loadConfig(process.env);
   expect(cfg.offline_replica).toBe(false);
   expect(brokerMode(cfg)).toBe("remote");
 });
 
 test("loadConfig: offline_replica: true in the file is picked up and yields replica mode", async () => {
   writeConfigFile({ broker_url: "http://broker-host:7899", offline_replica: true });
-  const cfg = await loadConfig();
+  const cfg = await loadConfig(process.env);
   expect(cfg.offline_replica).toBe(true);
   expect(brokerMode(cfg)).toBe("replica");
   expect(brokerUrl(cfg)).toBe(`http://127.0.0.1:${cfg.port}`);
@@ -209,13 +209,13 @@ test("loadConfig: offline_replica: true in the file is picked up and yields repl
 test("loadConfig: CLAUDE_PEERS_OFFLINE_REPLICA env overrides the file value in both directions", async () => {
   writeConfigFile({ broker_url: "http://broker-host:7899", offline_replica: true });
   process.env.CLAUDE_PEERS_OFFLINE_REPLICA = "0";
-  let cfg = await loadConfig();
+  let cfg = await loadConfig(process.env);
   expect(cfg.offline_replica).toBe(false);
   expect(brokerMode(cfg)).toBe("remote");
 
   writeConfigFile({ broker_url: "http://broker-host:7899" });
   process.env.CLAUDE_PEERS_OFFLINE_REPLICA = "yes";
-  cfg = await loadConfig();
+  cfg = await loadConfig(process.env);
   expect(cfg.offline_replica).toBe(true);
   expect(brokerMode(cfg)).toBe("replica");
 });
@@ -223,7 +223,7 @@ test("loadConfig: CLAUDE_PEERS_OFFLINE_REPLICA env overrides the file value in b
 test("loadConfig: a garbage env value falls back to the file value, not to a hardcoded default", async () => {
   writeConfigFile({ broker_url: "http://broker-host:7899", offline_replica: true });
   process.env.CLAUDE_PEERS_OFFLINE_REPLICA = "banana";
-  const cfg = await loadConfig();
+  const cfg = await loadConfig(process.env);
   expect(cfg.offline_replica).toBe(true);
 });
 
@@ -231,7 +231,7 @@ test("loadConfig: a garbage env value falls back to the file value, not to a har
 
 test("loadConfig: no serve_replicas key defaults to false, even on a broker that has a token", async () => {
   writeConfigFile({ broker_token: "a-token" });
-  const cfg = await loadConfig();
+  const cfg = await loadConfig(process.env);
   expect(
     cfg.serve_replicas,
     "a configured broker_token must not by itself turn a broker into an upstream"
@@ -240,38 +240,38 @@ test("loadConfig: no serve_replicas key defaults to false, even on a broker that
 
 test("loadConfig: serve_replicas: true in the file is picked up", async () => {
   writeConfigFile({ broker_token: "a-token", serve_replicas: true });
-  const cfg = await loadConfig();
+  const cfg = await loadConfig(process.env);
   expect(cfg.serve_replicas).toBe(true);
 });
 
 test("loadConfig: CLAUDE_PEERS_SERVE_REPLICAS overrides the file value in both directions", async () => {
   writeConfigFile({ serve_replicas: true });
   process.env.CLAUDE_PEERS_SERVE_REPLICAS = "0";
-  let cfg = await loadConfig();
+  let cfg = await loadConfig(process.env);
   expect(cfg.serve_replicas).toBe(false);
 
   writeConfigFile({});
   process.env.CLAUDE_PEERS_SERVE_REPLICAS = "yes";
-  cfg = await loadConfig();
+  cfg = await loadConfig(process.env);
   expect(cfg.serve_replicas).toBe(true);
 });
 
 test("loadConfig: a garbage CLAUDE_PEERS_SERVE_REPLICAS falls back to the file value, never to a hardcoded true", async () => {
   writeConfigFile({ serve_replicas: true });
   process.env.CLAUDE_PEERS_SERVE_REPLICAS = "banana";
-  expect((await loadConfig()).serve_replicas).toBe(true);
+  expect((await loadConfig(process.env)).serve_replicas).toBe(true);
 
   writeConfigFile({ serve_replicas: false });
   process.env.CLAUDE_PEERS_SERVE_REPLICAS = "banana";
   expect(
-    (await loadConfig()).serve_replicas,
+    (await loadConfig(process.env)).serve_replicas,
     "a mistyped env value must never grant the upstream role a config withholds"
   ).toBe(false);
 });
 
 test("serve_replicas is independent of the mode: replica and remote read it the same way", async () => {
   writeConfigFile({ broker_url: "http://broker-host:7899", offline_replica: true, serve_replicas: true });
-  const cfg = await loadConfig();
+  const cfg = await loadConfig(process.env);
   expect(brokerMode(cfg)).toBe("replica");
   // The loader records the operator's answer verbatim; refusing to ACT on it
   // is the broker's decision, asserted in tests/broker-roadmap-sync-routes.
@@ -280,41 +280,41 @@ test("serve_replicas is independent of the mode: replica and remote read it the 
 
 test("loadConfig: a config.json with a leading UTF-8 BOM still loads (F1), not a silent fallback to defaults", async () => {
   writeConfigFileWithBom({ port: 4321, groups: { alpha: "s3cr3t" } });
-  const cfg = await loadConfig();
+  const cfg = await loadConfig(process.env);
   expect(cfg.port).toBe(4321);
   expect(cfg.groups).toEqual({ alpha: "s3cr3t" });
 });
 
 test("loadConfig: a config.json written as UTF-16LE with BOM (PowerShell Out-File default) still loads its values", async () => {
   writeConfigFileUtf16LEBom({ port: 4321, groups: { alpha: "s3cr3t" } });
-  const cfg = await loadConfig();
+  const cfg = await loadConfig(process.env);
   expect(cfg.port).toBe(4321);
   expect(cfg.groups).toEqual({ alpha: "s3cr3t" });
 });
 
 test("loadConfig: a UTF-16BE config.json falls back to defaults and traces the failure, not a silent {}", async () => {
   writeConfigFileUtf16BEBom({ port: 4321 });
-  const cfg = await loadConfig();
+  const cfg = await loadConfig(process.env);
   expect(cfg.port).toBe(7899);
   expect(readConfigLogContent()).toContain("ignoring malformed config");
 });
 
 test("loadConfig: a UTF-16LE config.json without a BOM falls back to defaults and traces the failure, not a silent {}", async () => {
   writeConfigFileUtf16LENoBom({ port: 4321 });
-  const cfg = await loadConfig();
+  const cfg = await loadConfig(process.env);
   expect(cfg.port).toBe(7899);
   expect(readConfigLogContent()).toContain("ignoring malformed config");
 });
 
 test("loadConfig: a config.json path that is a directory falls back to defaults and names the real cause", async () => {
   writeConfigFileAsDirectory();
-  const cfg = await loadConfig();
+  const cfg = await loadConfig(process.env);
   expect(cfg.port).toBe(7899);
   expect(readConfigLogContent()).toContain("is a directory, not a file");
 });
 
 test("loadConfig: delegation policy defaults are available and identify their source", async () => {
-  const cfg = await loadConfig();
+  const cfg = await loadConfig(process.env);
   expect(cfg.delegation_policy).toMatchObject({
     available: true,
     values: { max_rearms: 3, lead_silence_sec: 300, max_deadline_sec: 14_400 },
@@ -330,7 +330,7 @@ test("loadConfig: delegation policy reads bounded file values", async () => {
     delegation_lead_silence_sec: 600,
     delegation_max_deadline_sec: 1_200,
   });
-  const cfg = await loadConfig();
+  const cfg = await loadConfig(process.env);
   expect(cfg.delegation_policy).toMatchObject({
     available: true,
     values: { max_rearms: 4, lead_silence_sec: 600, max_deadline_sec: 1_200 },
@@ -347,7 +347,7 @@ test("loadConfig: each strict delegation environment key overrides its file valu
   process.env.CLAUDE_PEERS_DELEGATION_MAX_REARMS = "5";
   process.env.CLAUDE_PEERS_DELEGATION_LEAD_SILENCE_SEC = "601";
   process.env.CLAUDE_PEERS_DELEGATION_MAX_DEADLINE_SEC = "1201";
-  const cfg = await loadConfig();
+  const cfg = await loadConfig(process.env);
   expect(cfg.delegation_policy).toMatchObject({
     available: true,
     values: { max_rearms: 5, lead_silence_sec: 601, max_deadline_sec: 1_201 },
@@ -364,7 +364,7 @@ test("loadConfig: delegation policy accepts the documented bounds for every key"
   for (const entry of cases) {
     for (const value of [entry.min, entry.max]) {
       writeConfigFile({ [entry.fileKey]: value });
-      const cfg = await loadConfig();
+      const cfg = await loadConfig(process.env);
       expect(cfg.delegation_policy.available).toBeTrue();
       expect(cfg.delegation_policy.values[entry.valueKey]).toBe(value);
       expect(cfg.delegation_policy.sources[entry.valueKey]).toBe("file");
@@ -380,14 +380,14 @@ test("marks the delegation policy unavailable for every invalid file/environment
   ] as const;
   for (const entry of cases) {
     writeConfigFile({ [entry.fileKey]: entry.invalidFile });
-    const fileCfg = await loadConfig();
+    const fileCfg = await loadConfig(process.env);
     expect(fileCfg.port).toBe(7899);
     expect(fileCfg.delegation_policy.available).toBeFalse();
     expect(fileCfg.delegation_policy.diagnostics.join(" ")).toContain(entry.valueKey);
 
     writeConfigFile({ [entry.fileKey]: entry.validFile });
     process.env[entry.envKey] = entry.invalidEnv;
-    const envCfg = await loadConfig();
+    const envCfg = await loadConfig(process.env);
     expect(envCfg.delegation_policy.available).toBeFalse();
     expect(envCfg.delegation_policy.diagnostics.join(" ")).toContain("environment");
     delete process.env[entry.envKey];
@@ -397,37 +397,37 @@ test("marks the delegation policy unavailable for every invalid file/environment
 // --- warn_untracked_reply: environment 0/1, then the global file, then active ---
 
 test("loadConfig: the untracked-reply warning is active by default, with no diagnostic", async () => {
-  expect((await loadConfig()).warn_untracked_reply).toEqual({ enabled: true, diagnostic: null });
+  expect((await loadConfig(process.env)).warn_untracked_reply).toEqual({ enabled: true, diagnostic: null });
 });
 
 test("loadConfig: warn_untracked_reply false in the file switches the warning off", async () => {
   writeConfigFile({ warn_untracked_reply: false });
-  expect((await loadConfig()).warn_untracked_reply).toEqual({ enabled: false, diagnostic: null });
+  expect((await loadConfig(process.env)).warn_untracked_reply).toEqual({ enabled: false, diagnostic: null });
   writeConfigFile({ warn_untracked_reply: true });
-  expect((await loadConfig()).warn_untracked_reply).toEqual({ enabled: true, diagnostic: null });
+  expect((await loadConfig(process.env)).warn_untracked_reply).toEqual({ enabled: true, diagnostic: null });
 });
 
 test("loadConfig: CLAUDE_PEERS_WARN_UNTRACKED_REPLY 0 or 1 beats the file in both directions", async () => {
   writeConfigFile({ warn_untracked_reply: true });
   process.env.CLAUDE_PEERS_WARN_UNTRACKED_REPLY = "0";
-  expect((await loadConfig()).warn_untracked_reply).toEqual({ enabled: false, diagnostic: null });
+  expect((await loadConfig(process.env)).warn_untracked_reply).toEqual({ enabled: false, diagnostic: null });
   writeConfigFile({ warn_untracked_reply: false });
   process.env.CLAUDE_PEERS_WARN_UNTRACKED_REPLY = "1";
-  expect((await loadConfig()).warn_untracked_reply).toEqual({ enabled: true, diagnostic: null });
+  expect((await loadConfig(process.env)).warn_untracked_reply).toEqual({ enabled: true, diagnostic: null });
 });
 
 test("loadConfig: an invalid environment value or file value keeps the warning active and says so", async () => {
   writeConfigFile({ warn_untracked_reply: false });
   for (const value of ["banana", "true", "00", " 0"]) {
     process.env.CLAUDE_PEERS_WARN_UNTRACKED_REPLY = value;
-    const cfg = await loadConfig();
+    const cfg = await loadConfig(process.env);
     expect(cfg.warn_untracked_reply.enabled, value).toBe(true);
     expect(cfg.warn_untracked_reply.diagnostic, value).toContain("CLAUDE_PEERS_WARN_UNTRACKED_REPLY");
   }
   delete process.env.CLAUDE_PEERS_WARN_UNTRACKED_REPLY;
   for (const value of ["false", 0, null, [false]]) {
     writeConfigFile({ warn_untracked_reply: value });
-    const cfg = await loadConfig();
+    const cfg = await loadConfig(process.env);
     expect(cfg.warn_untracked_reply.enabled, JSON.stringify(value)).toBe(true);
     expect(cfg.warn_untracked_reply.diagnostic, JSON.stringify(value)).toContain("warn_untracked_reply");
   }
@@ -436,7 +436,7 @@ test("loadConfig: an invalid environment value or file value keeps the warning a
 test("loadConfig: an empty environment value is an absent one", async () => {
   writeConfigFile({ warn_untracked_reply: false });
   process.env.CLAUDE_PEERS_WARN_UNTRACKED_REPLY = "";
-  expect((await loadConfig()).warn_untracked_reply).toEqual({ enabled: false, diagnostic: null });
+  expect((await loadConfig(process.env)).warn_untracked_reply).toEqual({ enabled: false, diagnostic: null });
 });
 
 // --- an env passed to loadConfig / loadBrokerConfig is the only source ---

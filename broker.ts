@@ -10,7 +10,14 @@ import { dirname, join } from "node:path";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import { brokerMode, isLoopbackBrokerUrl, loadConfig, operatorTrustFilePath, upstreamUrl } from "./shared/config.ts";
+import {
+  brokerMode,
+  isLoopbackBrokerUrl,
+  loadConfig,
+  operatorTrustFilePath,
+  settingsFilePath,
+  upstreamUrl,
+} from "./shared/config.ts";
 import {
   MAX_OPEN_DELEGATED_TASKS,
   isDelegationTaskAction,
@@ -307,7 +314,7 @@ import {
   SENTINEL_INSTANCE_TOKENS,
 } from "./shared/types.ts";
 
-const config = await loadConfig();
+const config = await loadConfig(process.env);
 const PORT = config.port;
 const DB_PATH = config.db;
 const BIND_HOST = config.bind_host ?? "127.0.0.1";
@@ -426,7 +433,7 @@ type OperatorTrustSnapshot =
   | { state: "invalid" };
 
 function loadOperatorTrustSnapshot(): OperatorTrustSnapshot {
-  const path = operatorTrustFilePath();
+  const path = operatorTrustFilePath(settingsFilePath(process.env));
   if (!existsSync(path)) return { state: "unconfigured" };
   try {
     return { state: "ready", trust: parseOperatorTrust(readFileSync(path, "utf8")) };

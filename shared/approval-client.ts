@@ -117,7 +117,7 @@ export function loadApprovalCredential(
 
 /** Convenience wrapper reading the path from the environment. */
 export function loadSessionApprovalCredential(
-  env: NodeJS.ProcessEnv = process.env
+  env: NodeJS.ProcessEnv
 ): SessionApprovalCredential | null {
   return loadApprovalCredential(env[APPROVAL_FILE_ENV]);
 }

@@ -1,8 +1,5 @@
 import type { InboxBindingConfirmation } from "./peer-cache.ts";
-import { resolveToolAllowlist, TOOLS_ENV_VAR } from "./tool-allowlist.ts";
 import type { DispatchRequest, DispatchRequestAddResponse } from "./types.ts";
-
-export const TOOLS_ALLOWLIST = resolveToolAllowlist(process.env[TOOLS_ENV_VAR]);
 
 export interface CompanionIdentity {
   host: string;

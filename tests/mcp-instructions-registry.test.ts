@@ -70,7 +70,8 @@ type Verdict = { carries: true; name: string } | { carries: false };
  * would fail this test on every Windows checkout.
  */
 const TRIAGED_DOMAIN_FILES: ReadonlyArray<{ file: string; verdict: Verdict }> = [
-  { file: "server.ts", verdict: { carries: true, name: "claude-peers" } },
+  { file: "server.ts", verdict: { carries: false } },
+  { file: "shared/peers-session.ts", verdict: { carries: true, name: "claude-peers" } },
   { file: "server-deck.ts", verdict: { carries: true, name: "kory-operator" } },
   { file: "server-roadmap.ts", verdict: { carries: false } },
   { file: "shared/roadmap-server.ts", verdict: { carries: true, name: "kory-roadmap" } },

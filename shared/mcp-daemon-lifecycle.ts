@@ -2,6 +2,7 @@ import { dlopen, FFIType, ptr } from "bun:ffi";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, extname, join, posix } from "node:path";
+import type { BrokerEnsurer } from "./broker-ensure.ts";
 import { createLogger, type Logger } from "./logger.ts";
 import { controlRequest, type ControlOutcome } from "./mcp-daemon-control.ts";
 import {
@@ -11,11 +12,12 @@ import {
   type DaemonClock,
   type DaemonHandle,
   type DaemonOptions,
+  type DaemonSessionSettings,
   type DaemonStats,
   type FamilyFactory,
   type FamilyName,
 } from "./mcp-daemon-server.ts";
-import { measureWriterGeneration } from "./process-generation.ts";
+import { measureWriterGeneration, processStartFiletime } from "./process-generation.ts";
 
 type Env = Record<string, string | undefined>;
 
@@ -214,35 +216,6 @@ export function codeFingerprint(codeDir: string): string {
   return hash.digest("hex");
 }
 
-const FILETIME_UNIX_EPOCH = 116444736000000000n;
-
-/** The FILETIME (100 ns ticks since 1601) of a PowerShell `ToString('o')` creation time, exact to the 7th decimal. */
-export function filetimeFromCreationUtc(iso: string): string | null {
-  const m = /^(\d{4})-(\d\d)-(\d\d)T(\d\d):(\d\d):(\d\d)\.(\d{1,7})\d*Z$/.exec(iso);
-  if (m === null) return null;
-  const seconds = Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]), Number(m[4]), Number(m[5]), Number(m[6])) / 1000;
-  const fraction = (m[7] as string).padEnd(7, "0");
-  return (BigInt(seconds) * 10_000_000n + BigInt(fraction) + FILETIME_UNIX_EPOCH).toString();
-}
-
-/**
- * Creation time of a process as a decimal FILETIME, read with GetProcessTimes as the relay reads it; null when the call fails.
- * The default handle is the pseudo handle of the current process.
- */
-export function processStartFiletime(handle = -1n): string | null {
-  const lib = dlopen("kernel32.dll", {
-    GetProcessTimes: { args: [FFIType.i64, FFIType.ptr, FFIType.ptr, FFIType.ptr, FFIType.ptr], returns: FFIType.i32 },
-  });
-  try {
-    // creation, exit, kernel and user times: each FILETIME is a little-endian u64.
-    const times = new BigUint64Array(4);
-    const ok = lib.symbols.GetProcessTimes(handle, ptr(times, 0), ptr(times, 8), ptr(times, 16), ptr(times, 24));
-    return ok === 0 ? null : (times[0] as bigint).toString();
-  } finally {
-    lib.close();
-  }
-}
-
 export interface PidStartProbes {
   platform?: NodeJS.Platform;
   windowsStart?: () => string | null;
@@ -254,7 +227,7 @@ export interface PidStartProbes {
  * empty, with a log line, when it cannot be measured: a daemon without it still serves.
  */
 export async function ownPidStart(log: Logger, probes: PidStartProbes = {}): Promise<string> {
-  const { platform = process.platform, windowsStart = processStartFiletime, run = runId } = probes;
+  const { platform = process.platform, windowsStart = () => processStartFiletime(process.pid), run = runId } = probes;
   try {
     if (platform === "win32") {
       const filetime = windowsStart();
@@ -357,6 +330,8 @@ export interface RunDaemonOptions {
   pidStart?: string;
   start?: (opts: DaemonOptions) => DaemonHandle;
   maxSessions?: number;
+  brokers?: BrokerEnsurer;
+  settings?: DaemonSessionSettings;
 }
 
 export interface DaemonRun {
@@ -494,6 +469,9 @@ export function runDaemon(opts: RunDaemonOptions): DaemonRun {
           families: opts.families,
           clock,
           maxSessions: opts.maxSessions,
+          home: opts.home,
+          brokers: opts.brokers,
+          settings: opts.settings,
           control: {
             status: () => ({
               pid: process.pid,
@@ -503,6 +481,7 @@ export function runDaemon(opts: RunDaemonOptions): DaemonRun {
               code_fingerprint: fingerprint,
               version: DAEMON_VERSION,
               sessions: daemon?.stats().sessions ?? 0,
+              dropped_notifications: daemon?.stats().droppedNotifications ?? 0,
             }),
             stop: () => void stop("control stop"),
           },

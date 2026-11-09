@@ -211,7 +211,10 @@ test(
     for (const body of registerBodies) expect(body.context_resume_version).toBe(CONTEXT_RESUME_VERSION);
     const [boot, sw] = registerBodies.map((body) => new Set(Object.keys(body)));
     const onlyOne = [...boot!].filter((k) => !sw!.has(k)).concat([...sw!].filter((k) => !boot!.has(k)));
-    expect(onlyOne.sort()).toEqual(["claude_cli_pid"]);
+    expect(onlyOne.sort(), "the two /register bodies must carry the same keys").toEqual([]);
+    for (const body of registerBodies) {
+      expect(body.claude_cli_pid, "claude_cli_pid is the parent of the server process, at boot and after switch_group").toBe(process.pid);
+    }
     expect(wire.length).toBeGreaterThanOrEqual(2);
     expect(wire.filter((w) => w.includes(cap))).toEqual([]);
 

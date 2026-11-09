@@ -10,7 +10,7 @@ import {
   formatLockContestedBy,
   formatRoadmapItemLine,
   formatRoadmapUpsertAck,
-} from "../server.ts";
+} from "../shared/roadmap-mcp.ts";
 import type { RoadmapItem } from "../shared/types.ts";
 
 function item(patch: Partial<RoadmapItem> = {}): RoadmapItem {

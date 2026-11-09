@@ -92,7 +92,7 @@ test("server.ts and the Deck resolve the same marker path, whatever the config e
     ]) {
       restore("APPDATA", env.APPDATA);
       restore("XDG_CONFIG_HOME", env.XDG_CONFIG_HOME);
-      expect(brokerStopMarkerPath(settingsFilePath()), JSON.stringify(env)).toBe(brokerStopMarkerPath(peersConfigPath(process.env)));
+      expect(brokerStopMarkerPath(settingsFilePath(process.env)), JSON.stringify(env)).toBe(brokerStopMarkerPath(peersConfigPath(process.env)));
     }
   } finally {
     restore("APPDATA", saved.APPDATA);
