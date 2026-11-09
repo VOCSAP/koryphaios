@@ -108,11 +108,10 @@ async function main() {
       settings: readPeersSessionSettings(process.env, logError),
     }
   );
-  await session.ready;
 
-  await session.server.connect(new StdioServerTransport(process.stdin, process.stdout));
-  log("MCP connected");
-
+  // Installed before the registration, which retries while the broker is absent:
+  // a closed stdin or a signal must end the session then too, or it would
+  // register for a client that is gone.
   let shuttingDown = false;
   const shutdown = async (stdinReason?: string) => {
     if (shuttingDown) return;
@@ -129,6 +128,21 @@ async function main() {
   process.on("SIGTERM", () => void shutdown());
   process.stdin.on("end", () => void shutdown("end"));
   process.stdin.on("close", () => void shutdown("close"));
+
+  // Connected before the registration ends: that is what reads stdin, so a closed
+  // stdin is seen while the registration retries, and the client's initialize is
+  // answered at once. A tool call waits for the registration.
+  await session.server.connect(new StdioServerTransport(process.stdin, process.stdout));
+  log("MCP connected");
+
+  try {
+    await session.ready;
+  } catch (e) {
+    // The registration was cancelled by the shutdown above, which exits 0.
+    if (shuttingDown) return;
+    throw e;
+  }
+  session.openChannel();
 }
 
 if (import.meta.main) {

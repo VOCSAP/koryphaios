@@ -524,7 +524,8 @@ export interface TicketClaims {
   family: "peers";
   relay_pid: number;
   relay_pid_start: string;
-  writer_generation: unknown;
+  /** `canonicalWriterGeneration` of the relay process, as the broker compares it. */
+  writer_generation: string | null;
   instance_token: string;
   peer_id: string;
   group_id: string;

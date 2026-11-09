@@ -59,7 +59,7 @@ function rig(over: Partial<BrokerEnsurerDeps> & { neverAlive?: boolean } = {}): 
         state.checks++;
         return state.health.alive;
       },
-      stopped: () => false,
+      stopped: () => null,
       locate: () => ({ command: "/bin/bun", script: "/code/broker.ts" }),
       spawn: (command, args, env) => {
         state.spawns.push({ command, args, env });
@@ -133,6 +133,65 @@ describe("single flight", () => {
     for (const secret of ["tok-AAA", "tok-BBB", "/x", "/a/", "/b/"]) expect(r2.lines[0], secret).not.toContain(secret);
   });
 
+  describe("a session that joins a launch with a settings file of its own", () => {
+    const stoppedForB = (settingsPath: string) => (settingsPath === "/b/config.json" ? "stopped at t" : null);
+
+    test("uses the broker the first session started, whatever its own stop marker says", async () => {
+      const r = rig({ stopped: stoppedForB });
+      const ensurer = createBrokerEnsurer(r.deps);
+      const [a, b] = await Promise.all([
+        ensurer.ensure(request({ settingsPath: "/a/config.json" })),
+        ensurer.ensure(request({ settingsPath: "/b/config.json" })),
+      ]);
+      expect(a).toEqual({ action: "started", script: "/code/broker.ts" });
+      expect(b).toEqual(a);
+      expect(r.spawns).toHaveLength(1);
+    });
+
+    test("is held down by its own stop marker when the first session got no live broker", async () => {
+      const r = rig({ neverAlive: true, stopped: stoppedForB });
+      const ensurer = createBrokerEnsurer(r.deps);
+      const [a, b] = await Promise.all([
+        ensurer.ensure(request({ settingsPath: "/a/config.json" })),
+        ensurer.ensure(request({ settingsPath: "/b/config.json" })),
+      ]);
+      expect(a).toMatchObject({ action: "failed" });
+      expect(b).toEqual({ action: "skipped", reason: "manual-stop", detail: "stopped at t" });
+    });
+
+    test("finds the broker already running whatever its own marker says", async () => {
+      const r = rig({ stopped: stoppedForB });
+      r.health.alive = true;
+      const ensurer = createBrokerEnsurer(r.deps);
+      const [a, b] = await Promise.all([
+        ensurer.ensure(request({ settingsPath: "/a/config.json" })),
+        ensurer.ensure(request({ settingsPath: "/b/config.json" })),
+      ]);
+      expect([a, b]).toEqual([{ action: "already-running" }, { action: "already-running" }]);
+    });
+
+    test("is still a remote broker whatever its own marker says", async () => {
+      const r = rig({ stopped: stoppedForB });
+      const ensurer = createBrokerEnsurer(r.deps);
+      const outcomes = await Promise.all([
+        ensurer.ensure(request({ url: "https://broker.example:7899", settingsPath: "/a/config.json" })),
+        ensurer.ensure(request({ url: "https://broker.example:7899", settingsPath: "/b/config.json" })),
+      ]);
+      expect(outcomes).toEqual([
+        { action: "skipped", reason: "remote-mode" },
+        { action: "skipped", reason: "remote-mode" },
+      ]);
+    });
+
+    test("does not read a marker when it shares the settings file of the launch", async () => {
+      let reads = 0;
+      const r = rig({ stopped: () => (reads++, null) });
+      const ensurer = createBrokerEnsurer(r.deps);
+      await Promise.all([ensurer.ensure(request({ settingsPath: "/a/config.json" })), ensurer.ensure(request({ settingsPath: "/a/config.json" }))]);
+      expect(reads).toBe(1);
+    });
+  });
+
   test("a finished flight is forgotten: the next ensure on the same URL starts again", async () => {
     const r = rig({ neverAlive: true });
     const ensurer = createBrokerEnsurer(r.deps);
@@ -161,7 +220,7 @@ describe("what ensure refuses to spawn for", () => {
     const r = rig({
       stopped: () => {
         markerReads++;
-        return true;
+        return "stopped at t";
       },
     });
     r.health.alive = true;
@@ -194,11 +253,19 @@ describe("what ensure refuses to spawn for", () => {
     const r = rig({ stopped: undefined });
     const ensurer = createBrokerEnsurer(r.deps);
 
-    writeBrokerStopMarker(brokerStopMarkerPath(settingsPath), { stopped_at: "t", by: "operator", killed_pid: null });
-    expect(await ensurer.ensure(request({ settingsPath }))).toEqual({ action: "skipped", reason: "manual-stop" });
+    writeBrokerStopMarker(brokerStopMarkerPath(settingsPath), { stopped_at: "2026-11-09T08:00:00Z", by: "operator", killed_pid: null });
+    expect(await ensurer.ensure(request({ settingsPath }))).toEqual({
+      action: "skipped",
+      reason: "manual-stop",
+      detail: "stopped at 2026-11-09T08:00:00Z",
+    });
 
     writeFileSync(brokerStopMarkerPath(settingsPath), "{ not json");
-    expect(await ensurer.ensure(request({ settingsPath }))).toEqual({ action: "skipped", reason: "manual-stop" });
+    expect(await ensurer.ensure(request({ settingsPath }))).toEqual({
+      action: "skipped",
+      reason: "manual-stop",
+      detail: expect.stringMatching(/^marker unreadable: .+/),
+    });
     expect(r.spawns).toHaveLength(0);
   });
 
@@ -237,7 +304,7 @@ describe("after the spawn", () => {
     const r = rig({ neverAlive: true, attempts: 4, pollMs: 250 });
     const outcome = await createBrokerEnsurer(r.deps).ensure(request());
     expect(r.sleeps).toEqual([250, 250, 250, 250]);
-    expect(outcome).toEqual({ action: "failed", script: "/code/broker.ts", reason: "no /health answer after 4 attempts" });
+    expect(outcome).toEqual({ action: "failed", script: "/code/broker.ts", reason: "no /health answer after 4 attempts", retryable: true });
     expect(r.lines.join("\n")).toContain("broker launch failed: no /health answer after 4 attempts");
   });
 

@@ -71,6 +71,7 @@ import {
   writeDeskSessionId,
   writeSessionIdentityFile as writeSessionIdentityFileUnguarded,
   writeGlobalSessionIdentityFile,
+  readGlobalSessionIdentityFile,
   readSessionIdentityFile,
   deleteGlobalSessionIdentityFile,
   deleteSessionIdentityFile as deleteSessionIdentityFileUnguarded,
@@ -121,6 +122,17 @@ import {
 import { resolveProjectKey } from "./project-key.ts";
 import { askOperatorWaitReply } from "./approval-outcome.ts";
 import type { UntrackedReplyPolicy } from "./types.ts";
+import { canonicalWriterGeneration } from "./relay-liveness.ts";
+import type {
+  CloseReason,
+  DaemonClock,
+  DaemonSessionSettings,
+  FamilyHandle,
+  FamilyTicketClaims,
+  ResumeOutcome,
+} from "./mcp-daemon-server.ts";
+
+export type { CloseReason };
 
 const PEER_ID_REGEX = /^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$/;
 
@@ -133,10 +145,14 @@ const NOTIFIED_IDS_MAX = 4096;
 const NOTIFY_FAILED_IDS_MAX = 1024;
 const PENDING_WAITERS_MAX = 8;
 const SESSION_CLOSED_MID_OPERATION = "This claude-peers session was closed during the operation";
+const CONTEXT_RESUME_KEYS_MAX = 256;
+const HEALTH_PROBE_TIMEOUT_MS = 3_000;
+const REGISTER_RETRY_INITIAL_MS = 1_000;
+const REGISTER_RETRY_MAX_MS = 30_000;
+// Two reconnections within this window share one channel notice.
+const NOTICE_GROUP_MS = 10 * 60 * 1000;
 
 export type SessionEnv = Readonly<Record<string, string | undefined>>;
-
-export type CloseReason = "bye" | "socket" | "daemon_stop";
 
 export interface PeersLog {
   log(msg: string): void;
@@ -151,14 +167,15 @@ export interface PeersSessionInput {
   /** The Claude Code process that spawned the MCP server. */
   ppid: number;
   stdinIsTty: boolean;
+  /** What the daemon made of the resume ticket the relay presented; absent for a stdio session. */
+  resume?: ResumeOutcome;
 }
 
-export interface PeersSessionSettings {
-  contextResumeKeyTtlMs: number;
-  pollFallbackIntervalMs: number;
-  heartbeatIntervalMs: number;
+export interface PeersSessionSettings extends DaemonSessionSettings {
   disconnectBoundMs: number;
   wsReconnectInitialMs: number;
+  registerRetryInitialMs?: number;
+  registerRetryMaxMs?: number;
 }
 
 export interface EnsureBrokerRequest {
@@ -170,19 +187,45 @@ export interface PeersSessionDeps {
   log: PeersLog;
   home: string;
   hostname(): string;
+  /**
+   * Starts the broker when it is local and absent. It traces its own refusals,
+   * and a rejection with `retryable: true` is retried by the session; any other
+   * rejection ends the registration.
+   */
   ensureBroker(request: EnsureBrokerRequest): Promise<void>;
   measureWriterGeneration(pid: number): Promise<WriterGeneration | null>;
   settings: PeersSessionSettings;
+  /** Called with the claims of a resume ticket after each change of identity or of notified_hwm. */
+  issueTicket?(claims: FamilyTicketClaims): void;
+  /** Sends the generation of `input.pid` as `pid_generation` at every /register, not only on a resume. */
+  sendPidGeneration?: boolean;
+  clock?: DaemonClock;
+  now?(): number;
   fetch?: typeof fetch;
   WebSocket?: typeof WebSocket;
   writeGlobalSessionIdentityFile?: typeof writeGlobalSessionIdentityFile;
 }
 
-export interface PeersSession {
-  readonly server: Server;
-  /** Resolves once the session is registered and its identity files are written. */
+export interface PeersSession extends FamilyHandle {
+  /**
+   * Resolves once the session is registered and its identity files are written.
+   * A broker that is absent is retried, not rejected.
+   */
   readonly ready: Promise<void>;
-  close(reason: CloseReason): Promise<void>;
+  /**
+   * Opens the WebSocket, the heartbeat and the poll, and sends the resume
+   * notice. Call it once the MCP transport is connected; the session calls it
+   * itself when the server is already connected at `ready`. Idempotent.
+   */
+  openChannel(): void;
+}
+
+/** The broker did not answer: the request never got an HTTP response. */
+export class BrokerUnreachableError extends Error {
+  constructor(path: string, cause: unknown) {
+    super(`Broker unreachable (${path}): ${cause instanceof Error ? cause.message : String(cause)}`);
+    this.name = "BrokerUnreachableError";
+  }
 }
 
 export interface BrokerClient {
@@ -202,6 +245,8 @@ export function createBrokerClient(config: Config, fetchImpl: typeof fetch = fet
         headers: brokerHeaders(config, { "Content-Type": "application/json" }),
         body: JSON.stringify(body),
         signal,
+      }).catch((e: unknown) => {
+        throw signal?.aborted ? e : new BrokerUnreachableError(path, e);
       });
       if (!res.ok) {
         const err = await res.text();
@@ -210,7 +255,9 @@ export function createBrokerClient(config: Config, fetchImpl: typeof fetch = fet
       return res.json() as Promise<T>;
     },
     async get<T>(path: string, signal?: AbortSignal): Promise<T> {
-      const res = await fetchImpl(`${url}${path}`, { headers: brokerHeaders(config), signal });
+      const res = await fetchImpl(`${url}${path}`, { headers: brokerHeaders(config), signal }).catch((e: unknown) => {
+        throw signal?.aborted ? e : new BrokerUnreachableError(path, e);
+      });
       if (!res.ok) {
         const err = await res.text();
         throw new Error(`Broker error (${path}): ${res.status} ${err}`);
@@ -261,7 +308,7 @@ async function getGitRoot(cwd: string, logError: (msg: string, e?: unknown) => v
   return null;
 }
 
-interface RegisterAttempt {
+export interface RegisterAttempt {
   path: string;
   bare: Record<string, unknown>;
   signed: Record<string, unknown> | null;
@@ -269,11 +316,101 @@ interface RegisterAttempt {
   requiresInboxBinding: boolean;
 }
 
-interface RegisterResult {
+export interface RegisterResult {
   reg: RegisterResponse;
   attested: boolean;
   inboxBinding: InboxBindingConfirmation | null;
   operatorId: string | null;
+}
+
+type BrokerPost = <T>(path: string, body: unknown, signal?: AbortSignal) => Promise<T>;
+
+/**
+ * Once a proof was sent, a failure is never followed by the bare body: the
+ * broker may have accepted the signed one (a lost answer), and a bare retry
+ * would then mint a second, unbound identity.
+ */
+export async function sendRegister(
+  attempt: RegisterAttempt,
+  post: BrokerPost,
+  signal: AbortSignal,
+  logError: (msg: string, e?: unknown) => void,
+): Promise<RegisterResult> {
+  if (attempt.signed) {
+    try {
+      const reg = await post<RegisterResponse>(attempt.path, attempt.signed, signal);
+      const inboxBinding = confirmedInboxBinding(reg.inbox_binding, attempt.credential, String(attempt.signed.group_id));
+      if (attempt.requiresInboxBinding && !inboxBinding) {
+        throw new Error("Kory Inbox registration was not confirmed by this claude-peers broker; update the broker and reconnect this session");
+      }
+      return { reg, attested: true, inboxBinding, operatorId: inboxBinding ? attempt.credential?.operatorId ?? null : null };
+    } catch (e) {
+      logError("The attested /register failed", e);
+      throw e;
+    }
+  }
+  const reg = await post<RegisterResponse>(attempt.path, attempt.bare, signal);
+  return { reg, attested: false, inboxBinding: null, operatorId: null };
+}
+
+/** The fields of an accepted resume ticket, checked. */
+export interface ResumeClaims {
+  instanceToken: string;
+  peerId: string;
+  groupId: string;
+  generation: WriterGeneration;
+  /** The generation in the form the broker compares (`pid_generation`). */
+  generationText: string;
+  notifiedHwm: number;
+  noticeAt: number | undefined;
+  outages: number | undefined;
+}
+
+function parseCanonicalGeneration(value: unknown, relayPid: number): WriterGeneration | null {
+  if (typeof value !== "string") return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null) return null;
+  const g = parsed as Record<string, unknown>;
+  if (g.pid !== relayPid) return null;
+  if (g.platform === "win32" && typeof g.creationUtc === "string" && g.creationUtc.length > 0) {
+    return { platform: "win32", pid: relayPid, creationUtc: g.creationUtc };
+  }
+  if (g.platform === "linux" && typeof g.startToken === "string" && typeof g.bootId === "string") {
+    return { platform: "linux", pid: relayPid, startToken: g.startToken, bootId: g.bootId };
+  }
+  return null;
+}
+
+/**
+ * The claims of a ticket the daemon accepted, or null when any field is
+ * malformed or the generation names another pid than this relay. Even then the
+ * ticket proves nothing: only the broker decides whether the token resumes.
+ */
+export function readResumeClaims(resume: ResumeOutcome | undefined, relayPid: number): ResumeClaims | null {
+  if (resume?.kind !== "accepted") return null;
+  const c = resume.claims;
+  const nonEmpty = (v: unknown): v is string => typeof v === "string" && v.length > 0;
+  if (!nonEmpty(c.instance_token) || !nonEmpty(c.peer_id) || !nonEmpty(c.group_id)) return null;
+  if (!Number.isSafeInteger(c.notified_hwm) || c.notified_hwm < 0) return null;
+  const generation = parseCanonicalGeneration(c.writer_generation, relayPid);
+  if (!generation) return null;
+  const noticeAt = typeof c.notice_at === "number" && Number.isFinite(c.notice_at) ? c.notice_at : undefined;
+  const outages = Number.isSafeInteger(c.outages) && (c.outages as number) >= 0 ? c.outages : undefined;
+  return {
+    instanceToken: c.instance_token,
+    peerId: c.peer_id,
+    groupId: c.group_id,
+    generation,
+    generationText: canonicalWriterGeneration(generation),
+    notifiedHwm: c.notified_hwm,
+    noticeAt,
+    outages,
+  };
 }
 
 function confirmedInboxBinding(
@@ -328,6 +465,8 @@ export function readPeersSessionSettings(
     heartbeatIntervalMs: HEARTBEAT_INTERVAL_MS,
     disconnectBoundMs: DISCONNECT_BOUND_MS,
     wsReconnectInitialMs: WS_RECONNECT_INITIAL_MS,
+    registerRetryInitialMs: REGISTER_RETRY_INITIAL_MS,
+    registerRetryMaxMs: REGISTER_RETRY_MAX_MS,
   };
 }
 
@@ -924,9 +1063,35 @@ export function createPeersSession(input: PeersSessionInput, deps: PeersSessionD
   let myInboxBinding: InboxBindingConfirmation | null = null;
   let myInboxOperatorId: string | null = null;
 
+  const clock: DaemonClock = deps.clock ?? {
+    setTimeout: (fn, ms) => setTimeout(fn, ms),
+    clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
+  };
+  const now = deps.now ?? Date.now;
+
   let closed = false;
   let closing: Promise<void> | null = null;
   const sessionAbort = new AbortController();
+
+  // What the daemon made of the resume ticket, and what came of it at the broker.
+  const resume: ResumeOutcome = input.resume ?? { kind: "none" };
+  const resumeClaims = readResumeClaims(resume, input.pid);
+  // True once the broker itself answered resumed:"token": the ticket is never a proof.
+  let identityKept = false;
+  // The highest message id already pushed in channel, or handed to a waiter.
+  let notifiedHwm = resumeClaims?.notifiedHwm ?? 0;
+  // The ids at or below it were pushed before the daemon restart: fixed once the broker resumed the token, 0 otherwise.
+  let resumeHwm = 0;
+  let noticeAt = resumeClaims?.noticeAt;
+  let outages = resumeClaims?.outages;
+  // Generation of the relay pid: measured once, or taken from the ticket.
+  let relayGeneration: WriterGeneration | null = resumeClaims?.generation ?? null;
+  let registered = false;
+  let channelOpen = false;
+  let openRequested = false;
+  // The error of the last failed registration attempt, answered to tool calls while it is retried.
+  let lastRegistrationError: string | null = null;
+  let wakeRegistrationRetry: (() => void) | null = null;
   const timers = new Set<ReturnType<typeof setTimeout>>();
   let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   let fallbackPollTimer: ReturnType<typeof setInterval> | null = null;
@@ -1044,28 +1209,8 @@ export function createPeersSession(input: PeersSessionInput, deps: PeersSessionD
     };
   }
 
-  /**
-   * Once a proof was sent, a failure is never followed by the bare body: the
-   * broker may have accepted the signed one (a lost answer), and a bare retry
-   * would then mint a second, unbound identity.
-   */
-  async function registerFetch(attempt: RegisterAttempt): Promise<RegisterResult> {
-    if (attempt.signed) {
-      try {
-        const reg = await brokerFetch<RegisterResponse>(attempt.path, attempt.signed, sessionAbort.signal);
-        const inboxBinding = confirmedInboxBinding(reg.inbox_binding, attempt.credential, String(attempt.signed.group_id));
-        if (attempt.requiresInboxBinding && !inboxBinding) {
-          throw new Error("Kory Inbox registration was not confirmed by this claude-peers broker; update the broker and reconnect this session");
-        }
-        return { reg, attested: true, inboxBinding, operatorId: inboxBinding ? attempt.credential?.operatorId ?? null : null };
-      } catch (e) {
-        logError("The attested /register failed", e);
-        throw e;
-      }
-    }
-    const reg = await brokerFetch<RegisterResponse>(attempt.path, attempt.bare, sessionAbort.signal);
-    return { reg, attested: false, inboxBinding: null, operatorId: null };
-  }
+  const registerFetch = (attempt: RegisterAttempt): Promise<RegisterResult> =>
+    sendRegister(attempt, brokerFetch, sessionAbort.signal, logError);
 
   // A final acknowledgement keeps the key for the broker's own purge window: a
   // replay on the next WS auth then re-acknowledges instead of notifying again.
@@ -1102,6 +1247,10 @@ export function createPeersSession(input: PeersSessionInput, deps: PeersSessionD
     const resumeKey = `${f.deposit_id}:${f.attempt_id}`;
     let notification = contextResumeNotifications.get(resumeKey);
     if (!notification) {
+      if (contextResumeNotifications.size >= CONTEXT_RESUME_KEYS_MAX) {
+        logError(`context resume refused for ${f.deposit_id}: ${CONTEXT_RESUME_KEYS_MAX} keys are already held`);
+        return;
+      }
       try {
         notification = mcp.notification({
           method: "notifications/claude/channel",
@@ -1192,6 +1341,8 @@ export function createPeersSession(input: PeersSessionInput, deps: PeersSessionD
           sent_at: string;
           delegation_context?: DelegationContext;
         };
+        // Pushed before the daemon restart (the token was resumed): still readable by check_messages, never pushed again.
+        if (f.id <= resumeHwm) return;
         // A pending wait_for_message is resolved before the channel push. Nothing
         // here marks the message delivered, so a waiter that does not match leaves
         // it exactly as untouched as with no waiter.
@@ -1200,6 +1351,7 @@ export function createPeersSession(input: PeersSessionInput, deps: PeersSessionD
         if (resolved.length > 0) {
           for (const w of resolved) w.resolve(f as WaitCandidateMessage);
           rememberNotified(f.id); // already handed to its waiter -- don't also notify it
+          raiseHwm(f.id);
           log(`Resolved ${resolved.length} wait_for_message call(s) from ${f.from_peer_id}`);
           return;
         }
@@ -1219,6 +1371,7 @@ export function createPeersSession(input: PeersSessionInput, deps: PeersSessionD
             },
           });
           rememberNotified(f.id);
+          raiseHwm(f.id);
           log(`Pushed message from ${fromDeck ? DECK_PEER_ID : f.from_peer_id}: ${f.text.slice(0, 80)}`);
         } catch (e) {
           log(`Notification dispatch failed: ${e instanceof Error ? e.message : String(e)}`);
@@ -1252,7 +1405,7 @@ export function createPeersSession(input: PeersSessionInput, deps: PeersSessionD
       const result = await brokerFetch<PollMessagesResponse>("/peek-messages", {
         instance_token: myInstanceToken,
       });
-      const fresh = selectFreshWaitCandidates(result.messages, notifiedMessageIds);
+      const fresh = selectFreshWaitCandidates(result.messages, notifiedMessageIds).filter((m) => m.id > resumeHwm);
       if (fresh.length === 0) return;
       // The broker already resolved the sender and never exposes routing tokens:
       // no /list-peers round trip.
@@ -1263,6 +1416,7 @@ export function createPeersSession(input: PeersSessionInput, deps: PeersSessionD
         if (resolved.length > 0) {
           for (const w of resolved) w.resolve(msg as WaitCandidateMessage);
           rememberNotified(msg.id);
+          raiseHwm(msg.id);
           continue;
         }
         const fromDeck = isDeckSender(msg.from_peer_id);
@@ -1281,6 +1435,7 @@ export function createPeersSession(input: PeersSessionInput, deps: PeersSessionD
             },
           });
           rememberNotified(msg.id);
+          raiseHwm(msg.id);
           notifyFailedIds.delete(msg.id);
         } catch (e) {
           // The message stays delivered=0 and is retried on the next poll; log the
@@ -1403,34 +1558,88 @@ export function createPeersSession(input: PeersSessionInput, deps: PeersSessionD
     await deleteGlobalSessionIdentityFile(messagingSocket, deps.home);
   }
 
-  async function writeGlobalCompanionIdentity(): Promise<void> {
-    await invalidateGlobalCompanionIdentity();
+  /** The generation of the relay pid: measured once per session, or taken from the resume ticket. */
+  async function getRelayGeneration(): Promise<WriterGeneration | null> {
+    relayGeneration ??= await deps.measureWriterGeneration(input.pid);
+    return relayGeneration;
+  }
+
+  /**
+   * A kept identity (the broker resumed the token) leaves the snapshot in place
+   * and rewrites it only when a field differs: deleting it would refuse the
+   * roadmap companion for the whole measure.
+   */
+  async function writeGlobalCompanionIdentity(keepSnapshot = false): Promise<void> {
+    if (!keepSnapshot) await invalidateGlobalCompanionIdentity();
     const messagingSocket = input.env.CLAUDE_CODE_MESSAGING_SOCKET;
     if (!messagingSocket || !myPeerId || !myInstanceToken) return;
-    const writerGeneration = await deps.measureWriterGeneration(input.pid);
+    const generation = await getRelayGeneration();
     if (closed) return;
-    if (!writerGeneration) {
+    if (!generation) {
       logError("Could not measure the process generation for the global roadmap companion");
       return;
     }
+    const projectKey = roadmapProjectKey();
+    const brokerUrlText = canonicalBrokerUrl(config);
     try {
+      if (keepSnapshot) {
+        const current = await readGlobalSessionIdentityFile(messagingSocket, deps.home);
+        if (
+          current &&
+          current.peerId === myPeerId &&
+          current.groupId === myGroupId &&
+          current.instanceToken === myInstanceToken &&
+          current.projectKey === projectKey &&
+          current.brokerUrl === brokerUrlText &&
+          current.writerGeneration &&
+          canonicalWriterGeneration(current.writerGeneration) === canonicalWriterGeneration(generation)
+        ) {
+          return;
+        }
+      }
       await writeGlobalIdentity(
         messagingSocket,
         myPeerId,
         myGroupId,
         myInstanceToken,
-        roadmapProjectKey(),
+        projectKey,
         deps.home,
-        writerGeneration,
-        canonicalBrokerUrl(config),
+        generation,
+        brokerUrlText,
       );
     } catch (error) {
       logError("Could not write the global roadmap companion identity", error);
     }
   }
 
+  function issueTicket(): void {
+    if (!deps.issueTicket || !myInstanceToken || !myPeerId) return;
+    try {
+      deps.issueTicket({
+        writer_generation: relayGeneration ? canonicalWriterGeneration(relayGeneration) : null,
+        instance_token: myInstanceToken,
+        peer_id: myPeerId,
+        group_id: myGroupId,
+        notified_hwm: notifiedHwm,
+        ...(noticeAt !== undefined ? { notice_at: noticeAt } : {}),
+        ...(outages !== undefined ? { outages } : {}),
+      });
+    } catch (e) {
+      logError("Could not issue a resume ticket", e);
+    }
+  }
+
+  function raiseHwm(id: number): void {
+    if (id <= notifiedHwm) return;
+    notifiedHwm = id;
+    issueTicket();
+  }
+
   /** Null once registered; the registration error, or a timeout notice, otherwise. */
   async function waitForReady(): Promise<string | null> {
+    if (lastRegistrationError !== null) {
+      return `claude-peers is not registered yet, the registration is retried: ${lastRegistrationError}`;
+    }
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       await Promise.race([
@@ -1528,6 +1737,9 @@ export function createPeersSession(input: PeersSessionInput, deps: PeersSessionD
       // Coalesced to null because JSON.stringify drops an undefined key,
       // which would make whoami's role field vanish instead of showing null.
       myRole = reg.role ?? null;
+      // A new token starts its own message stream.
+      notifiedHwm = 0;
+      resumeHwm = 0;
       // close() disconnects the instance registered here once this operation ends.
       if (closed) return toolFailure(SESSION_CLOSED_MID_OPERATION);
       await writePeerIdCache(myCwd, myPeerId, deps.home, input.env);
@@ -1541,6 +1753,7 @@ export function createPeersSession(input: PeersSessionInput, deps: PeersSessionD
       );
       await writeGlobalCompanionIdentity();
       await writeDeskSessionId(deps.home, input.env);
+      issueTicket();
       connectWs();
       return {
         content: [
@@ -1614,6 +1827,7 @@ export function createPeersSession(input: PeersSessionInput, deps: PeersSessionD
         myInboxOperatorId,
       );
       await writeGlobalCompanionIdentity();
+      issueTicket();
       return {
         content: [{ type: "text" as const, text: JSON.stringify(result) }],
       };
@@ -1925,7 +2139,7 @@ export function createPeersSession(input: PeersSessionInput, deps: PeersSessionD
                 { instance_token: myInstanceToken },
                 controller.signal
               );
-              return already.messages;
+              return already.messages.filter((m) => m.id > resumeHwm);
             } catch (e) {
               // An abort is expected control flow (the cap or a cancellation);
               // any other peek failure must leave a trace.
@@ -2069,17 +2283,49 @@ export function createPeersSession(input: PeersSessionInput, deps: PeersSessionD
     }
   });
 
-  async function disconnectBounded(token: string): Promise<void> {
+  async function disconnectBounded(token: string, timeoutMs: number): Promise<void> {
     try {
-      await brokerFetch("/disconnect", { instance_token: token }, AbortSignal.timeout(deps.settings.disconnectBoundMs));
+      await brokerFetch("/disconnect", { instance_token: token }, AbortSignal.timeout(timeoutMs));
       log("Disconnected (peer kept as dormant for resume)");
     } catch (e) {
       logError("Disconnect failed or timed out; the broker's stale sweep will mark the peer dormant", e);
     }
   }
 
-  function startConnections(): void {
-    if (closed) return;
+  /** One notice per opening after a daemon restart; reconnections within NOTICE_GROUP_MS share it. */
+  async function sendResumeNotice(): Promise<void> {
+    if (resume.kind === "none") return;
+    const t = now();
+    // A notice date in the future would silence every later notice.
+    if (noticeAt !== undefined && noticeAt > t) noticeAt = undefined;
+    if (noticeAt !== undefined && t - noticeAt < NOTICE_GROUP_MS) {
+      outages = (outages ?? 0) + 1;
+      issueTicket();
+      return;
+    }
+    const missed = outages ?? 0;
+    const base = identityKept
+      ? "claude-peers reconnected after a daemon restart; calls made during the outage failed; run check_messages"
+      : `claude-peers reconnected after a daemon restart; you are now peer \`${myPeerId}\``;
+    const text = missed > 0 ? `${base} (${missed} outage(s) since the previous notice)` : base;
+    noticeAt = t;
+    outages = 0;
+    issueTicket();
+    log(text);
+    try {
+      await mcp.notification({
+        method: "notifications/claude/channel",
+        params: { content: text, meta: { notice: "daemon_restart" } },
+      });
+    } catch (e) {
+      logError("The reconnection notice could not be sent", e);
+    }
+  }
+
+  function openChannel(): void {
+    openRequested = true;
+    if (!registered || closed || channelOpen) return;
+    channelOpen = true;
     connectWs();
     heartbeatTimer = setInterval(async () => {
       if (myInstanceToken) {
@@ -2093,6 +2339,46 @@ export function createPeersSession(input: PeersSessionInput, deps: PeersSessionD
     fallbackPollTimer = setInterval(() => {
       pollFallback().catch((e) => logError("pollFallback failed", e));
     }, deps.settings.pollFallbackIntervalMs);
+    void sendResumeNotice();
+  }
+
+  // Errors thrown by deps.ensureBroker: the caller traced them, and only `retryable` ones repeat.
+  const ensureFailures = new WeakSet<object>();
+
+  function isRetryable(e: unknown): boolean {
+    if (typeof e === "object" && e !== null && ensureFailures.has(e)) {
+      return (e as { retryable?: unknown }).retryable === true;
+    }
+    return e instanceof BrokerUnreachableError;
+  }
+
+  function waitRegistrationRetry(ms: number): Promise<void> {
+    return new Promise<void>((resolve) => {
+      const handle = clock.setTimeout(() => {
+        wakeRegistrationRetry = null;
+        resolve();
+      }, ms);
+      wakeRegistrationRetry = () => {
+        clock.clearTimeout(handle);
+        wakeRegistrationRetry = null;
+        resolve();
+      };
+    });
+  }
+
+  /** Only a broker that announces register_resume_version accepts resume_instance_token without a proof. */
+  async function brokerAnnouncesResume(): Promise<boolean> {
+    let health: { register_resume_version?: unknown };
+    try {
+      health = await brokerGet<{ register_resume_version?: unknown }>("/health", AbortSignal.timeout(HEALTH_PROBE_TIMEOUT_MS));
+    } catch (e) {
+      if (e instanceof Error && e.message.startsWith("Broker error (")) {
+        log("The broker's /health could not be read; registering without a resume");
+        return false;
+      }
+      throw e instanceof BrokerUnreachableError ? e : new BrokerUnreachableError("/health", e);
+    }
+    return typeof health.register_resume_version === "number" && health.register_resume_version >= 1;
   }
 
   async function startSession(): Promise<void> {
@@ -2104,14 +2390,9 @@ export function createPeersSession(input: PeersSessionInput, deps: PeersSessionD
     // would carry a token whose peer has no status filter downstream
     // (findPeerByInstanceToken): deleting it before /register closes that window.
     // The prior token stays in memory only because an attested resume must prove
-    // the instance being resumed.
+    // the instance being resumed. A valid resume ticket keeps the file: its
+    // readers hold a token that stays valid during the outage.
     const previousIdentity = await readSessionIdentityFile(input.env.CLAUDE_PEERS_DESK_SESSION ?? "", deps.home);
-    try {
-      await deleteSessionIdentityFile(input.env.CLAUDE_PEERS_DESK_SESSION ?? "");
-    } catch (e) {
-      logError("Failed to delete a stale session-identity file at boot", e);
-      if (input.env.CLAUDE_PEERS_DESK_SESSION?.trim()) throw e;
-    }
 
     log("Local context detection...");
     myGitRoot = await getGitRoot(myCwd, logError);
@@ -2131,8 +2412,6 @@ export function createPeersSession(input: PeersSessionInput, deps: PeersSessionD
     log(`Host: ${myHost}  client_pid: ${myClientPid}`);
     log(`Group: ${groupNameForId(groupId)} (id: ${groupId.slice(0, 8)})`);
 
-    await deps.ensureBroker({ url: broker.url, env: input.env });
-
     const initialSummary = heuristicSummary({
       cwd: myCwd,
       git_root: myGitRoot,
@@ -2141,43 +2420,107 @@ export function createPeersSession(input: PeersSessionInput, deps: PeersSessionD
     });
     log(`Heuristic summary: ${initialSummary}`);
 
-    await serializeIdentity(async () => {
-      if (closed) throw new Error("The session was closed before it registered");
-      const attempt = attestRegister(
-        "/register",
-        registerBody({ tty, summary: initialSummary, groupId, groupSecretHash }),
-        groupId,
-        previousIdentity?.instanceToken ?? null,
-      );
-      const { reg, attested, inboxBinding, operatorId } = await registerFetch(attempt);
-      myInstanceToken = reg.instance_token;
-      myPeerId = reg.peer_id;
-      myInboxAttested = attested;
-      myInboxBinding = inboxBinding;
-      myInboxOperatorId = operatorId;
-      myRegisteredAt = new Date().toISOString();
-      // reg.role can be undefined at runtime -- an older broker omits it from
-      // /register entirely, despite the string|null type.
-      // Coalesced to null because JSON.stringify drops an undefined key, which
-      // would make whoami's role field vanish instead of showing null.
-      myRole = reg.role ?? null;
-      // close() disconnects the instance registered here once this operation ends.
-      if (closed) throw new Error("The session was closed while it registered");
-      await writePeerIdCache(myCwd, myPeerId, deps.home, input.env);
-      await writeSessionIdentityFile(
-        input.env.CLAUDE_PEERS_DESK_SESSION ?? "",
-        myPeerId,
-        myGroupId,
-        myInstanceToken ?? "",
-        myInboxBinding,
-        myInboxOperatorId,
-      );
-      await writeGlobalCompanionIdentity();
-      // Deck back-channel: hand the real minted session id to the per-tile token file
-      // so the Deck maps tile -> session id deterministically (no-op outside the Deck).
-      await writeDeskSessionId(deps.home, input.env);
-      log(`Registered as peer '${myPeerId}'${attested ? ", attested by the run credential" : ""}`);
-    });
+    // The ticket names a token of another group than the one this env resolves
+    // to: nothing to resume.
+    const ticket = resumeClaims !== null && resumeClaims.groupId === groupId ? resumeClaims : null;
+
+    if (ticket === null) {
+      try {
+        await deleteSessionIdentityFile(input.env.CLAUDE_PEERS_DESK_SESSION ?? "");
+      } catch (e) {
+        logError("Failed to delete a stale session-identity file at boot", e);
+        if (input.env.CLAUDE_PEERS_DESK_SESSION?.trim()) throw e;
+      }
+    }
+
+    async function registerOnce(): Promise<void> {
+      try {
+        await deps.ensureBroker({ url: broker.url, env: input.env });
+      } catch (e) {
+        const error = e instanceof Error ? e : new Error(String(e));
+        ensureFailures.add(error);
+        throw error;
+      }
+      const resumeSent = ticket !== null && (await brokerAnnouncesResume());
+      let body = registerBody({ tty, summary: initialSummary, groupId, groupSecretHash });
+      if (resumeSent) {
+        body = { ...body, resume_instance_token: ticket.instanceToken, pid_generation: ticket.generationText };
+      } else if (deps.sendPidGeneration) {
+        const generation = await getRelayGeneration();
+        if (generation) body = { ...body, pid_generation: canonicalWriterGeneration(generation) };
+      }
+      await serializeIdentity(async () => {
+        if (closed) throw new Error("The session was closed before it registered");
+        const attempt = attestRegister(
+          "/register",
+          body,
+          groupId,
+          resumeSent ? ticket.instanceToken : previousIdentity?.instanceToken ?? null,
+        );
+        const { reg, attested, inboxBinding, operatorId } = await registerFetch(attempt);
+        // The broker alone decides: a ticket is never the proof of an identity.
+        identityKept = resumeSent && reg.resumed === "token";
+        if (resumeClaims !== null) {
+          resumeHwm = identityKept ? resumeClaims.notifiedHwm : 0;
+          if (!identityKept) notifiedHwm = 0;
+        }
+        myInstanceToken = reg.instance_token;
+        myPeerId = reg.peer_id;
+        myInboxAttested = attested;
+        myInboxBinding = inboxBinding;
+        myInboxOperatorId = operatorId;
+        myRegisteredAt = new Date().toISOString();
+        // reg.role can be undefined at runtime -- an older broker omits it from
+        // /register entirely, despite the string|null type.
+        // Coalesced to null because JSON.stringify drops an undefined key, which
+        // would make whoami's role field vanish instead of showing null.
+        myRole = reg.role ?? null;
+        // close() disconnects the instance registered here once this operation ends.
+        if (closed) throw new Error("The session was closed while it registered");
+        await writePeerIdCache(myCwd, myPeerId, deps.home, input.env);
+        await writeSessionIdentityFile(
+          input.env.CLAUDE_PEERS_DESK_SESSION ?? "",
+          myPeerId,
+          myGroupId,
+          myInstanceToken ?? "",
+          myInboxBinding,
+          myInboxOperatorId,
+        );
+        await writeGlobalCompanionIdentity(identityKept);
+        // Deck back-channel: hand the real minted session id to the per-tile token file
+        // so the Deck maps tile -> session id deterministically (no-op outside the Deck).
+        await writeDeskSessionId(deps.home, input.env);
+        if (deps.issueTicket) await getRelayGeneration();
+        issueTicket();
+        log(`Registered as peer '${myPeerId}'${attested ? ", attested by the run credential" : ""}${identityKept ? ", identity resumed" : ""}`);
+      });
+    }
+
+    let retryDelay = deps.settings.registerRetryInitialMs ?? REGISTER_RETRY_INITIAL_MS;
+    for (;;) {
+      try {
+        await registerOnce();
+        break;
+      } catch (e) {
+        if (closed || !isRetryable(e)) {
+          // The ticket kept the tile file for a registration that is now over: it holds a token nobody resumes.
+          if (!closed && ticket !== null) {
+            try {
+              await deleteSessionIdentityFile(input.env.CLAUDE_PEERS_DESK_SESSION ?? "");
+            } catch (deleteError) {
+              logError("Failed to delete the session-identity file after a failed registration", deleteError);
+            }
+          }
+          throw e;
+        }
+        lastRegistrationError = e instanceof Error ? e.message : String(e);
+        logError(`Registration failed, retrying in ${retryDelay} ms`, e);
+        await waitRegistrationRetry(retryDelay);
+        if (closed) throw new Error("The session was closed while it waited to register");
+        retryDelay = Math.min(retryDelay * 2, deps.settings.registerRetryMaxMs ?? REGISTER_RETRY_MAX_MS);
+      }
+    }
+    lastRegistrationError = null;
     if (config.warn_untracked_reply.diagnostic) log(config.warn_untracked_reply.diagnostic);
 
     // Background summary upgrade.
@@ -2203,12 +2546,16 @@ export function createPeersSession(input: PeersSessionInput, deps: PeersSessionD
       }
     })();
 
-    startConnections();
+    registered = true;
+    if (mcp.transport || openRequested) openChannel();
   }
 
   async function runClose(reason: CloseReason): Promise<void> {
+    // One deadline for the wait on the identity chain and for the /disconnect.
+    const deadline = now() + deps.settings.disconnectBoundMs;
     closed = true;
     sessionAbort.abort();
+    wakeRegistrationRetry?.();
     if (heartbeatTimer) clearInterval(heartbeatTimer);
     if (fallbackPollTimer) clearInterval(fallbackPollTimer);
     for (const timer of timers) clearTimeout(timer);
@@ -2225,7 +2572,7 @@ export function createPeersSession(input: PeersSessionInput, deps: PeersSessionD
     const settled = await Promise.race([
       identityQueue.then(() => true),
       new Promise<false>((resolve) => {
-        waitTimer = setTimeout(() => resolve(false), deps.settings.disconnectBoundMs);
+        waitTimer = setTimeout(() => resolve(false), Math.max(0, deadline - now()));
       }),
     ]);
     clearTimeout(waitTimer);
@@ -2242,7 +2589,11 @@ export function createPeersSession(input: PeersSessionInput, deps: PeersSessionD
     } catch (e) {
       logError("Failed to delete the global session snapshot on cleanup", e);
     }
-    if (reason !== "daemon_stop" && myInstanceToken) await disconnectBounded(myInstanceToken);
+    if (reason !== "daemon_stop" && myInstanceToken) {
+      const remaining = deadline - now();
+      if (remaining > 0) await disconnectBounded(myInstanceToken, remaining);
+      else logError("No time left to disconnect the peer; the broker's stale sweep will mark it dormant");
+    }
   }
 
   function close(reason: CloseReason): Promise<void> {
@@ -2251,8 +2602,10 @@ export function createPeersSession(input: PeersSessionInput, deps: PeersSessionD
   }
 
   const ready = startSession();
-  // The rejection reaches whoever awaits `ready` and every tool call; this only keeps it from being unhandled.
-  ready.catch(() => undefined);
+  ready.catch((e) => {
+    // An ensureBroker refusal was traced by its caller.
+    if (!closed && !(typeof e === "object" && e !== null && ensureFailures.has(e))) logError("Registration failed", e);
+  });
 
-  return { server: mcp, ready, close };
+  return { server: mcp, ready, close, openChannel };
 }

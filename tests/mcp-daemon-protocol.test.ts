@@ -523,7 +523,7 @@ describe("resume ticket", () => {
     family: "peers",
     relay_pid: 4242,
     relay_pid_start: "133750000000000000",
-    writer_generation: { kind: "windows", pid: 4242, start: "1" },
+    writer_generation: JSON.stringify({ platform: "win32", pid: 4242, creationUtc: "2026-11-08T17:22:36.7733341Z" }),
     instance_token: "tok",
     peer_id: "peer-1",
     group_id: "g",

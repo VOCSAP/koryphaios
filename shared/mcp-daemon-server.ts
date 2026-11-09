@@ -39,7 +39,6 @@ const BUFFER_CAP_BYTES = NOTIFICATION_CAP_BYTES + OUTPUT_CAP_BYTES;
 const FAMILY_CLOSE_MS = 5000;
 const TICKET_INTERVAL_MS = 1000;
 const DROP_LOG_EVERY = 100;
-const MAX_GENERATION_FIELDS = 8;
 const MAX_GENERATION_TEXT = 256;
 const MAX_UNAUTHENTICATED = 32;
 const DEFAULT_MAX_SESSIONS = 512;
@@ -520,22 +519,11 @@ function malformedClaims(claims: TicketClaims): string | null {
       return `ticket claim ${name} is not a non-negative integer`;
     }
   }
-  if (!boundedGeneration(claims.writer_generation)) return "ticket claim writer_generation is not a bounded generation";
+  const generation: unknown = claims.writer_generation;
+  if (generation !== null && (typeof generation !== "string" || generation.length > MAX_GENERATION_TEXT)) {
+    return `ticket claim writer_generation is not null or a text of at most ${MAX_GENERATION_TEXT} characters`;
+  }
   return null;
-}
-
-// The shape of the generation is the family's; the daemon only bounds what it hands back.
-function boundedGeneration(value: unknown): boolean {
-  if (value === null) return true;
-  if (typeof value === "string") return value.length <= MAX_GENERATION_TEXT;
-  if (typeof value !== "object" || Array.isArray(value)) return false;
-  const entries = Object.entries(value);
-  if (entries.length > MAX_GENERATION_FIELDS) return false;
-  return entries.every(
-    ([name, field]) =>
-      name.length <= MAX_GENERATION_TEXT &&
-      (typeof field === "string" ? field.length <= MAX_GENERATION_TEXT : Number.isSafeInteger(field) && (field as number) >= 0),
-  );
 }
 
 type Stage = "auth" | "hello" | "building" | "live";

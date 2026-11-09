@@ -6,17 +6,25 @@ import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 
-import { computeGroupId } from "../shared/config.ts";
+import { canonicalBrokerUrl, computeGroupId } from "../shared/config.ts";
+import type { FamilyTicketClaims, ResumeOutcome } from "../shared/mcp-daemon-server.ts";
+import type { TicketClaims } from "../shared/mcp-daemon-protocol.ts";
+import { resolveProjectKey } from "../shared/project-key.ts";
+import { canonicalWriterGeneration } from "../shared/relay-liveness.ts";
 import { DEPOSIT_CAPABILITY_ENV, hashCapability } from "../shared/context-buffer.ts";
 import {
   readGlobalSessionIdentityFile,
+  readSessionIdentityFile,
   writeGlobalSessionIdentityFile,
+  writeSessionIdentityFile,
   type WriterGeneration,
 } from "../shared/peer-cache.ts";
 import {
   createPeersSession,
   rememberBounded,
+  sendRegister,
   TOOLS,
+  type RegisterAttempt,
   type PeersSession,
   type PeersSessionDeps,
   type PeersSessionInput,
@@ -61,17 +69,37 @@ interface BrokerCall {
 interface FakeBroker {
   calls: BrokerCall[];
   gates: Map<string, Promise<void>>;
+  /** The next `times` requests to `path` fail: without any answer ("network") or with a 500 ("http"). */
+  failures: Map<string, { times: number; kind: "network" | "http" }>;
+  /** The /health body. */
+  health: Record<string, unknown>;
+  /** The token the broker agrees to resume, with the peer it belongs to. */
+  resumable: { token: string; peer: string } | null;
+  /** What /peek-messages and /poll-messages return. */
+  inbox: Array<Record<string, unknown>>;
   fetch: typeof fetch;
 }
 
 function fakeBroker(): FakeBroker {
   const calls: BrokerCall[] = [];
   const gates = new Map<string, Promise<void>>();
+  const failures = new Map<string, { times: number; kind: "network" | "http" }>();
+  const state = {
+    health: {} as Record<string, unknown>,
+    resumable: null as { token: string; peer: string } | null,
+    inbox: [] as Array<Record<string, unknown>>,
+  };
   let registrations = 0;
   const handler = async (input: unknown, init?: { body?: unknown; signal?: AbortSignal }): Promise<Response> => {
     const path = new URL(String(input)).pathname;
     const body = (init?.body ? JSON.parse(String(init.body)) : {}) as Record<string, unknown>;
     calls.push({ path, body });
+    const failure = failures.get(path);
+    if (failure && failure.times > 0) {
+      failure.times -= 1;
+      if (failure.kind === "network") throw new TypeError("fetch failed");
+      return new Response("broker exploded", { status: 500 });
+    }
     const gate = gates.get(path);
     if (gate) {
       await new Promise<void>((resolve, reject) => {
@@ -80,13 +108,25 @@ function fakeBroker(): FakeBroker {
       });
     }
     switch (path) {
+      case "/health":
+        return Response.json(state.health);
       case "/register":
+        if (state.resumable && body.resume_instance_token === state.resumable.token) {
+          return Response.json({
+            peer_id: state.resumable.peer,
+            instance_token: state.resumable.token,
+            inbox_binding: null,
+            role: body.role ?? null,
+            resumed: "token",
+          });
+        }
         registrations += 1;
         return Response.json({
           peer_id: `peer-${registrations}`,
           instance_token: `token-${registrations}`,
           inbox_binding: null,
           role: body.role ?? null,
+          ...(body.resume_instance_token !== undefined ? { resumed: false } : {}),
         });
       case "/set-id":
         return Response.json({ peer_id: body.new_peer_id, previous: "peer-1" });
@@ -94,14 +134,37 @@ function fakeBroker(): FakeBroker {
         return Response.json([]);
       case "/peek-messages":
       case "/poll-messages":
-        return Response.json({ messages: [] });
+        return Response.json({ messages: state.inbox });
       case "/group-stats":
         return Response.json({ groups: [] });
       default:
         return Response.json({ ok: true });
     }
   };
-  return { calls, gates, fetch: handler as unknown as typeof fetch };
+  return {
+    calls,
+    gates,
+    failures,
+    get health() {
+      return state.health;
+    },
+    set health(value: Record<string, unknown>) {
+      state.health = value;
+    },
+    get resumable() {
+      return state.resumable;
+    },
+    set resumable(value: { token: string; peer: string } | null) {
+      state.resumable = value;
+    },
+    get inbox() {
+      return state.inbox;
+    },
+    set inbox(value: Array<Record<string, unknown>>) {
+      state.inbox = value;
+    },
+    fetch: handler as unknown as typeof fetch,
+  };
 }
 
 /** Emits "close" synchronously on close(), like a socket that is closed locally. */
@@ -109,17 +172,46 @@ class FakeWebSocket {
   static CLOSED = 3;
   static instances: FakeWebSocket[] = [];
   readyState = 0;
-  private listeners = new Map<string, Array<() => void>>();
+  private listeners = new Map<string, Array<(event: unknown) => void>>();
   constructor() {
     FakeWebSocket.instances.push(this);
   }
-  addEventListener(type: string, listener: () => void): void {
+  addEventListener(type: string, listener: (event: unknown) => void): void {
     this.listeners.set(type, [...(this.listeners.get(type) ?? []), listener]);
   }
   send(): void {}
   close(): void {
     this.readyState = FakeWebSocket.CLOSED;
-    for (const listener of this.listeners.get("close") ?? []) listener();
+    for (const listener of this.listeners.get("close") ?? []) listener({});
+  }
+  /** Delivers a frame from the broker. */
+  receive(frame: Record<string, unknown>): void {
+    for (const listener of this.listeners.get("message") ?? []) listener({ data: JSON.stringify(frame) });
+  }
+}
+
+/** A clock that runs a timer only when the test says so, and remembers every delay asked for. */
+class FakeClock {
+  delays: number[] = [];
+  private timers: Array<{ fn: () => void; cancelled: boolean; fired: boolean }> = [];
+  setTimeout(fn: () => void, ms: number): unknown {
+    const timer = { fn, cancelled: false, fired: false };
+    this.timers.push(timer);
+    this.delays.push(ms);
+    return timer;
+  }
+  clearTimeout(handle: unknown): void {
+    (handle as { cancelled: boolean }).cancelled = true;
+  }
+  /** Runs the oldest timer still waiting. */
+  runNext(): void {
+    const timer = this.timers.find((t) => !t.cancelled && !t.fired);
+    if (!timer) throw new Error("no timer is waiting");
+    timer.fired = true;
+    timer.fn();
+  }
+  get waiting(): number {
+    return this.timers.filter((t) => !t.cancelled && !t.fired).length;
   }
 }
 
@@ -142,9 +234,18 @@ interface Harness {
   measured: number[];
   errors: string[];
   infos: string[];
+  /** The channel notifications the MCP client received. */
+  notifications: Array<{ method: string; params?: Record<string, unknown> }>;
+  /** The claims handed to deps.issueTicket, in order. */
+  tickets: FamilyTicketClaims[];
+  writes: { snapshot: number };
 }
 
 interface OpenOptions {
+  /** Adjusts the fake broker before the session starts. */
+  prepare?: (broker: FakeBroker) => void;
+  /** Leave the server and the client unconnected; see connectHarness. */
+  connect?: boolean;
   env?: Record<string, string>;
   groups?: Record<string, string>;
   /** More keys for the settings file, merged over `groups`. */
@@ -196,9 +297,12 @@ async function openSession(options: OpenOptions = {}): Promise<Harness> {
   };
   const broker = fakeBroker();
   for (const path of options.hang ?? []) broker.gates.set(path, new Promise<void>(() => {}));
+  options.prepare?.(broker);
   const measured: number[] = [];
   const errors: string[] = [];
   const infos: string[] = [];
+  const tickets: FamilyTicketClaims[] = [];
+  const writes = { snapshot: 0 };
   const session = createPeersSession(
     { env, cwd: home, pid: RELAY_PID, ppid: CLAUDE_PID, stdinIsTty: false, ...options.input },
     {
@@ -211,19 +315,32 @@ async function openSession(options: OpenOptions = {}): Promise<Harness> {
         return { ...GENERATION, pid };
       },
       settings: SETTINGS,
+      issueTicket: (claims) => tickets.push(claims),
       fetch: broker.fetch,
       WebSocket: FakeWebSocket as unknown as typeof WebSocket,
+      writeGlobalSessionIdentityFile: async (...args) => {
+        writes.snapshot += 1;
+        return writeGlobalSessionIdentityFile(...args);
+      },
       ...options.deps,
     }
   );
-  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  await session.server.connect(serverTransport);
   const client = new Client({ name: "peers-session-test", version: "1.0.0" });
-  await client.connect(clientTransport);
-  const harness: Harness = { session, client, broker, home, env, measured, errors, infos };
+  const notifications: Harness["notifications"] = [];
+  client.fallbackNotificationHandler = async (notification) => {
+    notifications.push(notification as Harness["notifications"][number]);
+  };
+  const harness: Harness = { session, client, broker, home, env, measured, errors, infos, notifications, tickets, writes };
   opened.push(harness);
+  if (options.connect !== false) await connectHarness(harness);
   if (!options.skipReady) await session.ready;
   return harness;
+}
+
+async function connectHarness(h: Harness): Promise<void> {
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await h.session.server.connect(serverTransport);
+  await h.client.connect(clientTransport);
 }
 
 function textOf(result: unknown): string {
@@ -677,8 +794,8 @@ describe("closing a session that still has work in flight", () => {
     expect(isError(await reachedWithin(renaming, "the set_id call"))).toBe(true);
   });
 
-  test("an operation that escapes the abort signal holds the close only for the bound, and the deletions still run", async () => {
-    // Mutation: waiting for the identity chain without a bound.
+  test("an operation that escapes the abort signal holds the close for the bound only, uses up the shared deadline and the deletions still run", async () => {
+    // Mutation: waiting for the identity chain without a bound, or giving /disconnect a deadline of its own.
     let measuring = false;
     const h = await openSession({
       skipReady: true,
@@ -698,7 +815,30 @@ describe("closing a session that still has work in flight", () => {
 
     expect(h.errors.some((message) => message.startsWith("An identity operation did not settle"))).toBe(true);
     expect(await readGlobalSessionIdentityFile(SOCKET, h.home)).toBeNull();
-    expect(callsTo(h, "/disconnect").map((c) => c.body.instance_token)).toEqual(["token-1"]);
+    expect(callsTo(h, "/disconnect"), "the wait used up the deadline: no /disconnect of its own").toEqual([]);
+    expect(h.errors.some((message) => message.startsWith("No time left to disconnect"))).toBe(true);
+  });
+
+  test("the /disconnect gets what is left of the deadline", async () => {
+    // Mutation: the /disconnect bounded by the whole setting instead of the remainder.
+    let reads = 0;
+    const h = await openSession({
+      deps: { now: () => (reads++ === 0 ? 1_000 : 1_400), settings: { ...SETTINGS, disconnectBoundMs: 500 } },
+    });
+    const timeouts: number[] = [];
+    const realTimeout = AbortSignal.timeout;
+    AbortSignal.timeout = (ms: number) => {
+      timeouts.push(ms);
+      return realTimeout.call(AbortSignal, ms);
+    };
+    try {
+      await reachedWithin(h.session.close("bye"), "close");
+    } finally {
+      AbortSignal.timeout = realTimeout;
+    }
+
+    expect(timeouts).toContain(100);
+    expect(timeouts).not.toContain(500);
   });
 
   test("close resolves when the broker never answers /disconnect", async () => {
@@ -765,5 +905,539 @@ describe("closing a session that still has work in flight", () => {
 
       expect(callsTo(h, "/set-summary")).toEqual([]);
     });
+  });
+});
+
+const TICKET_GENERATION = canonicalWriterGeneration(GENERATION);
+const KEPT_NOTICE = "claude-peers reconnected after a daemon restart; calls made during the outage failed; run check_messages";
+
+function ticket(over: Partial<TicketClaims> = {}): ResumeOutcome {
+  return {
+    kind: "accepted",
+    claims: {
+      v: 1,
+      family: "peers",
+      relay_pid: RELAY_PID,
+      relay_pid_start: "1",
+      writer_generation: TICKET_GENERATION,
+      instance_token: "token-old",
+      peer_id: "peer-old",
+      group_id: "default",
+      notified_hwm: 7,
+      issued_at: 0,
+      ...over,
+    },
+  };
+}
+
+/** The broker knows the ticket's token and announces the resume protocol. */
+function resumableBroker(broker: FakeBroker): void {
+  broker.health = { register_resume_version: 1 };
+  broker.resumable = { token: "token-old", peer: "peer-old" };
+}
+
+function channelTexts(h: Harness): string[] {
+  return h.notifications.map((n) => String(n.params?.content ?? ""));
+}
+
+/** A message as the broker sends it on the WebSocket and returns it from /peek-messages. */
+function messageFrame(id: number, text: string) {
+  return {
+    type: "message",
+    id,
+    from_peer_id: "peer-z",
+    from_summary: "",
+    from_host: "h",
+    from_cwd: "/",
+    text,
+    sent_at: "2026-01-01T00:00:00.000Z",
+  };
+}
+
+describe("resuming after a daemon restart", () => {
+  const keptSnapshot = async (home: string): Promise<void> => {
+    await writeGlobalSessionIdentityFile(
+      SOCKET,
+      "peer-old",
+      "default",
+      "token-old",
+      resolveProjectKey(null, null, home),
+      home,
+      GENERATION,
+      canonicalBrokerUrl({ broker_url: null, offline_replica: false, port: 17999 })
+    );
+  };
+
+  test("an accepted ticket resumes the token the broker agrees to, without a measure, a deletion or a rewrite of the snapshot", async () => {
+    // Mutation: deleting the snapshot first, measuring the generation again, or rewriting an unchanged snapshot.
+    const h = await openSession({
+      env: { CLAUDE_CODE_MESSAGING_SOCKET: SOCKET },
+      input: { resume: ticket() },
+      prepare: resumableBroker,
+      seed: keptSnapshot,
+    });
+
+    expect(callsTo(h, "/register")[0]?.body).toMatchObject({
+      resume_instance_token: "token-old",
+      pid_generation: TICKET_GENERATION,
+    });
+    expect(JSON.parse(textOf(await call(h, "whoami"))).peer_id).toBe("peer-old");
+    expect(h.measured).toEqual([]);
+    expect(h.writes.snapshot).toBe(0);
+    expect((await readGlobalSessionIdentityFile(SOCKET, h.home))?.peerId).toBe("peer-old");
+    expect(h.tickets.at(-1)).toMatchObject({
+      instance_token: "token-old",
+      peer_id: "peer-old",
+      group_id: "default",
+      notified_hwm: 7,
+      writer_generation: TICKET_GENERATION,
+    });
+    await until(() => channelTexts(h).length === 1, "the reconnection notice");
+    expect(channelTexts(h)).toEqual([KEPT_NOTICE]);
+  });
+
+  test("a snapshot that differs from the resumed identity is rewritten", async () => {
+    // Mutation: never rewriting a kept snapshot.
+    const h = await openSession({
+      env: { CLAUDE_CODE_MESSAGING_SOCKET: SOCKET },
+      input: { resume: ticket() },
+      prepare: resumableBroker,
+      seed: async (home) => {
+        await writeStaleSnapshot(home);
+      },
+    });
+
+    expect(h.writes.snapshot).toBe(1);
+    expect((await readGlobalSessionIdentityFile(SOCKET, h.home))?.peerId).toBe("peer-old");
+  });
+
+  test("a broker that does not announce register_resume_version gets the ordinary register and a notice that the identity changed", async () => {
+    // Mutation: sending resume_instance_token without the /health announcement.
+    const h = await openSession({
+      input: { resume: ticket() },
+      prepare: (broker) => {
+        broker.resumable = { token: "token-old", peer: "peer-old" };
+      },
+    });
+
+    const body = callsTo(h, "/register")[0]!.body;
+    expect(body.resume_instance_token).toBeUndefined();
+    expect(body.pid_generation).toBeUndefined();
+    await until(() => channelTexts(h).length === 1, "the reconnection notice");
+    expect(channelTexts(h)[0]).toContain("you are now peer `peer-1`");
+  });
+
+  test("a broker that refuses the token gives a new identity: the ticket is never taken as the proof", async () => {
+    // Mutation: taking the ticket's peer and token when the broker answered resumed:false.
+    const h = await openSession({
+      input: { resume: ticket() },
+      prepare: (broker) => {
+        broker.health = { register_resume_version: 1 };
+      },
+    });
+
+    expect(callsTo(h, "/register")[0]?.body.resume_instance_token).toBe("token-old");
+    expect(JSON.parse(textOf(await call(h, "whoami"))).peer_id).toBe("peer-1");
+    expect(h.tickets.at(-1)).toMatchObject({ instance_token: "token-1", peer_id: "peer-1", notified_hwm: 0 });
+    await until(() => channelTexts(h).length === 1, "the reconnection notice");
+    expect(channelTexts(h)[0]).toContain("you are now peer `peer-1`");
+
+    // The new token has its own message stream: nothing in it was pushed before.
+    FakeWebSocket.instances[0]!.receive(messageFrame(3, "first message of the new identity"));
+    await until(() => channelTexts(h).some((t) => t.includes("first message of the new identity")), "the push");
+  });
+
+  test("a switch_group starts a new message stream: the resumed hwm no longer filters", async () => {
+    // Mutation: keeping the filter base across switch_group.
+    const h = await openSession({
+      groups: { alpha: "alpha-secret", beta: "beta-secret" },
+      env: { CLAUDE_PEERS_GROUP: "default" },
+      input: { resume: ticket({ group_id: "default" }) },
+      prepare: resumableBroker,
+    });
+    await call(h, "switch_group", { name: "beta" });
+    FakeWebSocket.instances.at(-1)!.receive(messageFrame(3, "after the switch"));
+
+    await until(() => channelTexts(h).some((t) => t.includes("after the switch")), "the push");
+    expect(h.tickets.at(-1)).toMatchObject({ instance_token: "token-1", notified_hwm: 3 });
+  });
+
+  test("a refused ticket registers the ordinary way and says so", async () => {
+    const h = await openSession({ input: { resume: { kind: "refused", cause: "ticket mac does not verify" } }, prepare: resumableBroker });
+
+    expect(callsTo(h, "/register")[0]?.body.resume_instance_token).toBeUndefined();
+    await until(() => channelTexts(h).length === 1, "the reconnection notice");
+    expect(channelTexts(h)[0]).toContain("you are now peer `peer-1`");
+  });
+
+  test.each([
+    ["a group other than the one this env resolves to", { group_id: "another-group" }],
+    ["a generation of another pid", { writer_generation: canonicalWriterGeneration({ ...GENERATION, pid: 1 }) }],
+    ["a malformed generation", { writer_generation: { platform: "linux" } }],
+    ["a negative notified_hwm", { notified_hwm: -1 }],
+  ])("a ticket with %s is not sent to the broker", async (_name, over) => {
+    // Mutation: sending the token without checking the claims against this session.
+    const h = await openSession({ input: { resume: ticket(over as Partial<TicketClaims>) }, prepare: resumableBroker });
+
+    expect(callsTo(h, "/register")[0]?.body.resume_instance_token).toBeUndefined();
+  });
+
+  test("a message at or below notified_hwm is not pushed again, a newer one is, and the hwm rises with a ticket", async () => {
+    // Mutation: pushing every message, or not raising the hwm.
+    const h = await openSession({ input: { resume: ticket() }, prepare: resumableBroker });
+    await until(() => channelTexts(h).length === 1, "the reconnection notice");
+    const frame = (id: number, text: string) => ({
+      type: "message",
+      id,
+      from_peer_id: "peer-z",
+      from_summary: "",
+      from_host: "h",
+      from_cwd: "/",
+      text,
+      sent_at: "t",
+    });
+
+    FakeWebSocket.instances[0]!.receive(frame(5, "already pushed"));
+    FakeWebSocket.instances[0]!.receive(frame(7, "also already pushed"));
+    FakeWebSocket.instances[0]!.receive(frame(9, "brand new"));
+    await until(() => channelTexts(h).some((t) => t.includes("brand new")), "the new message");
+
+    expect(channelTexts(h).some((t) => t.includes("already pushed"))).toBe(false);
+    expect(h.tickets.at(-1)?.notified_hwm).toBe(9);
+  });
+
+  test("a message at or below the resumed hwm stays readable by check_messages", async () => {
+    // Mutation: dropping the message from the broker's answer instead of from the push.
+    const h = await openSession({
+      input: { resume: ticket({ notified_hwm: 10 }) },
+      prepare: (broker) => {
+        resumableBroker(broker);
+        broker.inbox = [messageFrame(9, "pushed before the restart")];
+      },
+    });
+    await until(() => channelTexts(h).length === 1, "the reconnection notice");
+
+    FakeWebSocket.instances[0]!.receive(messageFrame(9, "pushed before the restart"));
+    await flush();
+
+    expect(channelTexts(h).some((t) => t.includes("pushed before the restart"))).toBe(false);
+    expect(textOf(await call(h, "check_messages"))).toContain("pushed before the restart");
+  });
+
+  test("without a resume, an older message that was never pushed is still pushed after a newer one", async () => {
+    // Mutation: filtering on the live hwm, which rises with every push.
+    const h = await openSession();
+    const socket = FakeWebSocket.instances[0]!;
+
+    socket.receive(messageFrame(12, "newer"));
+    await until(() => channelTexts(h).length === 1, "the first push");
+    socket.receive(messageFrame(10, "older"));
+    await until(() => channelTexts(h).length === 2, "the second push");
+
+    expect(channelTexts(h)[1]).toContain("older");
+    expect(h.tickets.at(-1)?.notified_hwm).toBe(12);
+  });
+
+  test("without a resume, wait_for_message still returns an older message that was never pushed", async () => {
+    // Mutation: filtering the peek of wait_for_message on the live hwm.
+    const h = await openSession();
+    FakeWebSocket.instances[0]!.receive(messageFrame(12, "newer"));
+    await until(() => channelTexts(h).length === 1, "the first push");
+    h.broker.inbox = [messageFrame(10, "older but never pushed")];
+
+    const result = await reachedWithin(call(h, "wait_for_message", { timeout_sec: 5 }), "wait_for_message");
+
+    expect(textOf(result)).toContain("older but never pushed");
+  });
+
+  test("a push that failed is made again by the fallback poll, even after a newer message was pushed", async () => {
+    // Mutation: filtering on the live hwm, which rises with every push.
+    const h = await openSession({
+      connect: false,
+      deps: { settings: { ...SETTINGS, pollFallbackIntervalMs: 20 } },
+    });
+    h.session.openChannel();
+    const socket = FakeWebSocket.instances[0]!;
+    socket.receive(messageFrame(20, "failed once"));
+    await flush();
+    expect(channelTexts(h)).toEqual([]);
+
+    await connectHarness(h);
+    socket.receive(messageFrame(21, "newer"));
+    await until(() => channelTexts(h).some((t) => t.includes("newer")), "the newer push");
+    h.broker.inbox = [messageFrame(20, "failed once"), messageFrame(21, "newer")];
+    await until(() => channelTexts(h).some((t) => t.includes("failed once")), "the push of the failed message");
+  });
+
+  describe("the tile identity file", () => {
+    const TILE = "tile-under-test";
+
+    async function openWithTileFile(resume: ResumeOutcome | undefined) {
+      let ensureCalled = false;
+      const h = await openSession({
+        skipReady: true,
+        env: { CLAUDE_PEERS_DESK_SESSION: TILE },
+        input: { resume },
+        seed: async (home) => {
+          await writeSessionIdentityFile(TILE, "peer-old", "default", "token-old", home);
+        },
+        deps: {
+          ensureBroker: async () => {
+            ensureCalled = true;
+            return new Promise<void>(() => {});
+          },
+        },
+      });
+      await until(() => ensureCalled, "the broker check");
+      return readSessionIdentityFile(TILE, h.home);
+    }
+
+    test("is kept for a valid ticket, even if the registration never ends", async () => {
+      // Mutation: deleting it at boot whatever the ticket.
+      expect((await openWithTileFile(ticket()))?.peerId).toBe("peer-old");
+    });
+
+    test("kept for a valid ticket, is deleted once the registration fails for good", async () => {
+      // Mutation: leaving the file, and its old token, after the final failure.
+      const h = await openSession({
+        skipReady: true,
+        env: { CLAUDE_PEERS_DESK_SESSION: TILE },
+        input: { resume: ticket() },
+        seed: async (home) => {
+          await writeSessionIdentityFile(TILE, "peer-old", "default", "token-old", home);
+        },
+        deps: {
+          ensureBroker: async () => {
+            throw new Error("the local broker was stopped manually");
+          },
+        },
+      });
+
+      await expect(reachedWithin(h.session.ready, "ready")).rejects.toThrow("stopped manually");
+
+      expect(await readSessionIdentityFile(TILE, h.home)).toBeNull();
+    });
+
+    test("is deleted without a ticket", async () => {
+      expect(await openWithTileFile(undefined)).toBeNull();
+    });
+
+    test("is deleted for a ticket of another group", async () => {
+      // Mutation: keeping it on any accepted ticket.
+      expect(await openWithTileFile(ticket({ group_id: "another-group" }))).toBeNull();
+    });
+  });
+
+  test("tickets follow every change of identity", async () => {
+    // Mutation: no ticket after a registration, a set_id or a switch_group.
+    const h = await openSession({
+      groups: { alpha: "alpha-secret", beta: "beta-secret" },
+      env: { CLAUDE_PEERS_GROUP: "alpha", CLAUDE_CODE_MESSAGING_SOCKET: SOCKET },
+    });
+    expect(h.tickets).toHaveLength(1);
+    expect(h.tickets[0]).toMatchObject({
+      instance_token: "token-1",
+      peer_id: "peer-1",
+      group_id: computeGroupId("alpha-secret"),
+      notified_hwm: 0,
+      writer_generation: TICKET_GENERATION,
+    });
+
+    await call(h, "set_id", { new_id: "renamed-peer" });
+    expect(h.tickets.at(-1)).toMatchObject({ peer_id: "renamed-peer", instance_token: "token-1" });
+
+    await call(h, "switch_group", { name: "beta" });
+    expect(h.tickets.at(-1)).toMatchObject({ instance_token: "token-2", group_id: computeGroupId("beta-secret") });
+  });
+
+  describe("the notice", () => {
+    const NOW = 50_000_000;
+
+    test("reconnections within ten minutes of the previous notice share it and count as an outage", async () => {
+      // Mutation: sending a notice on every resume.
+      const h = await openSession({
+        input: { resume: ticket({ notice_at: NOW - 1_000, outages: 1 }) },
+        prepare: resumableBroker,
+        deps: { now: () => NOW },
+      });
+      await flush();
+
+      expect(channelTexts(h)).toEqual([]);
+      expect(h.tickets.at(-1)).toMatchObject({ notice_at: NOW - 1_000, outages: 2 });
+    });
+
+    test("an older notice is followed by a new one that counts the outages in between", async () => {
+      // Mutation: dropping the outage count, or not moving notice_at.
+      const h = await openSession({
+        input: { resume: ticket({ notice_at: NOW - 11 * 60 * 1000, outages: 2 }) },
+        prepare: resumableBroker,
+        deps: { now: () => NOW },
+      });
+      await until(() => channelTexts(h).length === 1, "the reconnection notice");
+
+      expect(channelTexts(h)[0]).toBe(`${KEPT_NOTICE} (2 outage(s) since the previous notice)`);
+      expect(h.tickets.at(-1)).toMatchObject({ notice_at: NOW, outages: 0 });
+    });
+
+    test("a notice date in the future does not silence the notice", async () => {
+      // Mutation: trusting notice_at without comparing it to now.
+      const h = await openSession({
+        input: { resume: ticket({ notice_at: NOW + 24 * 60 * 60 * 1000, outages: 0 }) },
+        prepare: resumableBroker,
+        deps: { now: () => NOW },
+      });
+      await until(() => channelTexts(h).length === 1, "the reconnection notice");
+
+      expect(h.tickets.at(-1)).toMatchObject({ notice_at: NOW, outages: 0 });
+    });
+
+    test("a session that never resumed sends no notice", async () => {
+      const h = await openSession();
+      await flush();
+
+      expect(channelTexts(h)).toEqual([]);
+    });
+  });
+});
+
+describe("a broker that is absent when the session registers", () => {
+  test("the registration is retried with a growing delay while tool calls answer the last error", async () => {
+    // Mutation: a constant delay, no retry, or tool calls that wait instead of answering.
+    const clock = new FakeClock();
+    const h = await openSession({
+      skipReady: true,
+      deps: { clock },
+      prepare: (broker) => broker.failures.set("/register", { times: 2, kind: "network" }),
+    });
+    await until(() => clock.waiting === 1, "the first retry timer");
+    expect(clock.delays).toEqual([1_000]);
+
+    const meanwhile = await reachedWithin(call(h, "whoami"), "a tool call during the outage");
+    expect(isError(meanwhile)).toBe(true);
+    expect(textOf(meanwhile)).toContain("fetch failed");
+
+    clock.runNext();
+    await until(() => clock.delays.length === 2, "the second retry timer");
+    expect(clock.delays).toEqual([1_000, 2_000]);
+    clock.runNext();
+    await reachedWithin(h.session.ready, "ready after the broker came back");
+
+    expect(callsTo(h, "/register")).toHaveLength(3);
+    expect(isError(await call(h, "whoami"))).toBe(false);
+  });
+
+  test("a close during the wait stops the retries", async () => {
+    // Mutation: a retry timer that close() does not cancel.
+    const clock = new FakeClock();
+    const h = await openSession({
+      skipReady: true,
+      deps: { clock },
+      prepare: (broker) => broker.failures.set("/register", { times: 5, kind: "network" }),
+    });
+    await until(() => clock.waiting === 1, "the retry timer");
+
+    await h.session.close("bye");
+
+    await expect(reachedWithin(h.session.ready, "ready after close")).rejects.toThrow("closed");
+    expect(clock.waiting).toBe(0);
+    expect(callsTo(h, "/register")).toHaveLength(1);
+  });
+
+  test("an answer from the broker that refuses the registration ends it, and the session logs why", async () => {
+    // Mutation: retrying any failure.
+    const h = await openSession({
+      skipReady: true,
+      prepare: (broker) => broker.failures.set("/register", { times: 1, kind: "http" }),
+    });
+
+    await expect(reachedWithin(h.session.ready, "ready")).rejects.toThrow("Broker error (/register): 500");
+    expect(h.errors).toContain("Registration failed");
+    expect(callsTo(h, "/register")).toHaveLength(1);
+  });
+
+  test("an ensureBroker refusal ends the registration without a second trace; a retryable one is retried", async () => {
+    // Mutation: logging the caller's own refusal again, or retrying a refusal that is not retryable.
+    const refused = await openSession({
+      skipReady: true,
+      deps: {
+        ensureBroker: async () => {
+          throw new Error("the local broker was stopped manually");
+        },
+      },
+    });
+    await expect(reachedWithin(refused.session.ready, "ready")).rejects.toThrow("stopped manually");
+    expect(refused.errors).not.toContain("Registration failed");
+
+    const clock = new FakeClock();
+    let attempts = 0;
+    const retrying = await openSession({
+      skipReady: true,
+      deps: {
+        clock,
+        ensureBroker: async () => {
+          attempts += 1;
+          if (attempts === 1) throw Object.assign(new Error("the broker is still starting"), { retryable: true });
+        },
+      },
+    });
+    await until(() => clock.waiting === 1, "the retry timer");
+    clock.runNext();
+    await reachedWithin(retrying.session.ready, "ready after the retry");
+    expect(attempts).toBe(2);
+  });
+});
+
+describe("the channel and its limits", () => {
+  test("the WebSocket opens only once the MCP transport is connected", async () => {
+    // Mutation: opening the channel as soon as the registration ends.
+    const h = await openSession({ connect: false });
+    expect(FakeWebSocket.instances).toHaveLength(0);
+
+    await connectHarness(h);
+    h.session.openChannel();
+    h.session.openChannel();
+
+    expect(FakeWebSocket.instances).toHaveLength(1);
+  });
+
+  test("a 257th live context resume key is refused and logged", async () => {
+    // Mutation: no bound on the keys.
+    const h = await openSession();
+    const socket = FakeWebSocket.instances[0]!;
+    for (let i = 0; i < 257; i++) {
+      socket.receive({
+        type: "context_resume",
+        deposit_id: `deposit-${i}`,
+        attempt_id: `attempt-${i}`,
+        deposited_at: "t",
+        head_at_deposit: null,
+        branch: "b",
+        git_root: "/",
+        text: "context",
+      });
+    }
+    await until(() => h.errors.some((message) => message.includes("keys are already held")), "the refusal");
+    await until(
+      () => h.notifications.filter((n) => (n.params?.meta as Record<string, unknown> | undefined)?.deposit_id !== undefined).length === 256,
+      "the 256 notifications"
+    );
+
+    expect(h.errors.filter((message) => message.includes("keys are already held"))).toHaveLength(1);
+  });
+
+  test("the signed and the bare /register both carry the session abort signal", async () => {
+    // Mutation: the signed branch posting without the signal.
+    const seen: Array<AbortSignal | undefined> = [];
+    const post = (async (_path: string, _body: unknown, signal?: AbortSignal) => {
+      seen.push(signal);
+      return { peer_id: "p", instance_token: "t", inbox_binding: null, role: null };
+    }) as unknown as Parameters<typeof sendRegister>[1];
+    const signal = new AbortController().signal;
+    const base: Omit<RegisterAttempt, "signed"> = { path: "/register", bare: { group_id: "g" }, credential: null, requiresInboxBinding: false };
+
+    await sendRegister({ ...base, signed: { group_id: "g" } }, post, signal, () => {});
+    await sendRegister({ ...base, signed: null }, post, signal, () => {});
+
+    expect(seen).toEqual([signal, signal]);
   });
 });

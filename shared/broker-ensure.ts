@@ -27,11 +27,12 @@ export interface BrokerEnsureRequest {
 }
 
 export type EnsureOutcome =
-  | { action: "skipped"; reason: "remote-mode" | "manual-stop" }
+  | { action: "skipped"; reason: "remote-mode" }
+  | { action: "skipped"; reason: "manual-stop"; detail: string }
   | { action: "already-running" }
   | { action: "not-found" }
   | { action: "started"; script: string }
-  | { action: "failed"; script: string; reason: string };
+  | { action: "failed"; script: string; reason: string; retryable?: true };
 
 export interface BrokerEnsurer {
   ensure(req: BrokerEnsureRequest): Promise<EnsureOutcome>;
@@ -40,8 +41,8 @@ export interface BrokerEnsurer {
 export interface BrokerEnsurerDeps {
   /** GET <url>/health: true when the broker answers 2xx. */
   isAlive(url: string): Promise<boolean>;
-  /** True while the operator's stop marker is present, malformed included; defaults to reading the marker. */
-  stopped?(settingsPath: string): boolean;
+  /** What the operator's stop marker says while it is present, malformed included; null otherwise. Defaults to reading the marker. */
+  stopped?(settingsPath: string): string | null;
   locate(): { command: string; script: string } | null;
   /** Starts the process detached; throws when the executable is missing. */
   spawn(command: string, args: string[], env: Record<string, string>): void;
@@ -159,8 +160,14 @@ export function daemonBrokerDeps(opts: DaemonBrokerDepsOptions): BrokerEnsurerDe
   };
 }
 
+function readStopDetail(settingsPath: string): string | null {
+  const reading = readBrokerStopMarker(brokerStopMarkerPath(settingsPath));
+  if (!reading.stopped) return null;
+  return reading.marker === null ? `marker unreadable: ${reading.problem}` : `stopped at ${reading.marker.stopped_at}`;
+}
+
 export function createBrokerEnsurer(deps: BrokerEnsurerDeps): BrokerEnsurer {
-  const stopped = deps.stopped ?? ((settingsPath: string) => readBrokerStopMarker(brokerStopMarkerPath(settingsPath)).stopped);
+  const stopped = deps.stopped ?? readStopDetail;
   const attempts = deps.attempts ?? DEFAULT_ATTEMPTS;
   const pollMs = deps.pollMs ?? DEFAULT_POLL_MS;
   const inFlight = new Map<string, Flight>();
@@ -168,7 +175,8 @@ export function createBrokerEnsurer(deps: BrokerEnsurerDeps): BrokerEnsurer {
   async function run(req: BrokerEnsureRequest, brokerVars: BrokerVars): Promise<EnsureOutcome> {
     if (!isLoopbackBrokerUrl(req.url)) return { action: "skipped", reason: "remote-mode" };
     if (await deps.isAlive(req.url)) return { action: "already-running" };
-    if (stopped(req.settingsPath)) return { action: "skipped", reason: "manual-stop" };
+    const stopDetail = stopped(req.settingsPath);
+    if (stopDetail !== null) return { action: "skipped", reason: "manual-stop", detail: stopDetail };
     let located: { command: string; script: string } | null;
     try {
       located = deps.locate();
@@ -185,12 +193,12 @@ export function createBrokerEnsurer(deps: BrokerEnsurerDeps): BrokerEnsurer {
       await deps.sleep(pollMs);
       if (await deps.isAlive(req.url)) return { action: "started", script: located.script };
     }
-    return failed(located.script, `no /health answer after ${attempts} attempts`);
+    return failed(located.script, `no /health answer after ${attempts} attempts`, true);
   }
 
-  function failed(script: string, reason: string): EnsureOutcome {
+  function failed(script: string, reason: string, retryable = false): EnsureOutcome {
     deps.log.error(`broker launch failed: ${reason}`);
-    return { action: "failed", script, reason };
+    return retryable ? { action: "failed", script, reason, retryable: true } : { action: "failed", script, reason };
   }
 
   return {
@@ -204,7 +212,17 @@ export function createBrokerEnsurer(deps: BrokerEnsurerDeps): BrokerEnsurer {
         if (differing.length > 0) {
           deps.log.warn(`ensure for ${key} joined a launch started with other broker settings: ${differing.join(", ")}`);
         }
-        return joined.outcome;
+        if (joined.settingsPath === req.settingsPath) return joined.outcome;
+        // The marker forbids launching, not using a live broker: the first session's launch was judged against its own marker.
+        const detail = stopped(req.settingsPath);
+        if (detail === null) return joined.outcome;
+        return joined.outcome.then((outcome): EnsureOutcome =>
+          outcome.action === "already-running" ||
+          outcome.action === "started" ||
+          (outcome.action === "skipped" && outcome.reason === "remote-mode")
+            ? outcome
+            : { action: "skipped", reason: "manual-stop", detail },
+        );
       }
       const outcome = run(req, brokerVars).finally(() => inFlight.delete(key));
       inFlight.set(key, { outcome, settingsPath: req.settingsPath, brokerVars });

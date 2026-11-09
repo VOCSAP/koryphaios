@@ -2,6 +2,8 @@ import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { brokerStopMarkerPath, writeBrokerStopMarker } from "../shared/broker-stop-marker.ts";
+import { settingsFilePath } from "../shared/config.ts";
 import type { Logger } from "../shared/logger.ts";
 import { controlRequest } from "../shared/mcp-daemon-control.ts";
 import {
@@ -1305,6 +1307,58 @@ describe("the entry point", () => {
           });
           expect(await reachedWithin(child.exited, "the daemon process to exit", EXIT_WAIT_MS)).toBe(0);
           expect(existsSync(statePath)).toBe(false);
+        });
+      } finally {
+        if (child.exitCode === null) child.kill();
+      }
+    },
+    ENTRY_TEST_MS,
+  );
+
+  test(
+    "a real process serves the peers family and reaches its broker ensurer: a stopped local broker is refused by name",
+    async () => {
+      const [port, brokerPort] = await freePorts(2);
+      const home = join(root, `entry${++counter}`);
+      const logDir = join(home, "logs");
+      linkTestKey(root, join(home, ".claude", "peers", "mcp-daemon.key"));
+      const repo = join(import.meta.dir, "..");
+      const child = Bun.spawn([process.execPath, join(repo, "mcp-daemon.ts")], {
+        cwd: home,
+        env: entryEnv(home, { CLAUDE_PEERS_MCP_DAEMON_PORT: String(port) }),
+        stdin: "ignore",
+        stdout: "ignore",
+        stderr: "pipe",
+      });
+      const stderr = collectText(child.stderr as ReadableStream<Uint8Array>);
+      const statePath = stateFilePath(join(home, ".claude", "peers"), port as number);
+      const sessionEnv = {
+        APPDATA: join(home, "AppData"),
+        XDG_CONFIG_HOME: join(home, ".config"),
+        CLAUDE_PEERS_PORT: String(brokerPort),
+      };
+      writeBrokerStopMarker(brokerStopMarkerPath(settingsFilePath(sessionEnv)), {
+        stopped_at: "2026-11-09T00:00:00.000Z",
+        by: "test",
+        killed_pid: null,
+      });
+      try {
+        await withChildReport(child, logDir, stderr, async () => {
+          await waitForState(child, () => existsSync(statePath));
+          const relay = await FakeRelay.open(port as number);
+          const welcome = await relay.welcome({
+            family: "peers",
+            code_root: daemonCodeRoot(realpathSync.native(repo)),
+            pid: process.pid,
+            env: sessionEnv,
+          });
+          expect(welcome.family).toBe("peers");
+          const reply = await relay.rpc(1, "tools/call", { name: "list_peers", arguments: { scope: "machine" } });
+          expect(reply.result.isError).toBe(true);
+          expect(reply.result.content[0].text).toContain("the local broker was stopped manually");
+          expect(reply.result.content[0].text).toContain("(stopped at 2026-11-09T00:00:00.000Z)");
+          expect(await controlRequest({ port: port as number, key, op: "stop" })).toEqual({ kind: "reply", body: { ok: true } });
+          expect(await reachedWithin(child.exited, "the daemon process to exit", EXIT_WAIT_MS)).toBe(0);
         });
       } finally {
         if (child.exitCode === null) child.kill();

@@ -12,6 +12,7 @@ scrubSessionEnv(process.env, log);
 const { createRoadmapServer } = await import("./shared/roadmap-server.ts");
 const { createBrokerEnsurer, daemonBrokerDeps } = await import("./shared/broker-ensure.ts");
 const { readPeersSessionSettings } = await import("./shared/peers-session.ts");
+const { createPeersFamily } = await import("./shared/peers-family.ts");
 
 const home = homedir();
 const codeDir = realpathSync.native(import.meta.dir);
@@ -25,7 +26,7 @@ const run = runDaemon({
   codeRoot: daemonCodeRoot(codeDir),
   codeDir,
   logDir,
-  families: { roadmap: (hello) => createRoadmapServer({ env: hello.env }) },
+  families: { roadmap: (hello) => createRoadmapServer({ env: hello.env }), peers: createPeersFamily() },
   brokers,
   settings: readPeersSessionSettings(process.env, (message) => log.error(message)),
 });

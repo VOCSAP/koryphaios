@@ -891,8 +891,11 @@ describe("the resume ticket at HELLO", () => {
 
   test.each([
     ["no generation", null],
-    ["a generation as text", "win32:4242:2026-11-08T17:22:36.7733341Z"],
-    ["a generation as a flat record", { platform: "win32", pid: 4242, creationUtc: "2026-11-08T17:22:36.7733341Z" }],
+    [
+      "the canonical text of a generation",
+      JSON.stringify({ platform: "win32", pid: 4242, creationUtc: "2026-11-08T17:22:36.7733341Z" }),
+    ],
+    ["a text of exactly 256 characters", "g".repeat(256)],
   ])("a bounded writer_generation is accepted: %s, with zero notice_at and outages", async (_name, writer_generation) => {
     const seam = seamFamily();
     const { daemon } = launch(harness(), { families: { peers: seam.factory } });
@@ -923,16 +926,14 @@ describe("the resume ticket at HELLO", () => {
     ["a notice_at that is text", ticketFor({ notice_at: "now" as unknown as number }), "notice_at"],
     ["a negative outages count", ticketFor({ outages: -1 }), "outages"],
     ["an outages count that is null", ticketFor({ outages: null as unknown as number }), "outages"],
-    ["a writer_generation that is a list", ticketFor({ writer_generation: [] }), "writer_generation"],
-    ["a writer_generation that is a number", ticketFor({ writer_generation: 7 }), "writer_generation"],
-    ["a writer_generation with a nested object", ticketFor({ writer_generation: { pid: 1, start: {} } }), "writer_generation"],
-    ["a writer_generation with a negative number", ticketFor({ writer_generation: { pid: -1 } }), "writer_generation"],
-    ["a writer_generation text above 256 characters", ticketFor({ writer_generation: "g".repeat(257) }), "writer_generation"],
+    ["a writer_generation that is a list", ticketFor({ writer_generation: [] as unknown as string }), "writer_generation"],
+    ["a writer_generation that is a number", ticketFor({ writer_generation: 7 as unknown as string }), "writer_generation"],
     [
-      "a writer_generation with nine fields",
-      ticketFor({ writer_generation: Object.fromEntries(Array.from({ length: 9 }, (_, i) => [`f${i}`, i])) }),
+      "a writer_generation that is a record instead of its canonical text",
+      ticketFor({ writer_generation: { platform: "win32", pid: 4242 } as unknown as string }),
       "writer_generation",
     ],
+    ["a writer_generation text above 256 characters", ticketFor({ writer_generation: "g".repeat(257) }), "writer_generation"],
     ["a string that is no ticket", "not-a-ticket", "ticket"],
   ])("%s: ERROR ticket_refused, then WELCOME on the same open connection", async (_name, ticket, cause) => {
     const seam = seamFamily();

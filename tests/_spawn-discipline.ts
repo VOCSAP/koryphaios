@@ -53,7 +53,7 @@ export const EXPECTED_LAUNCHES: Readonly<Record<string, number>> = {
   "server-roadmap-queue-order.test.ts": 1,
   "server-scrub-env-home-redirect.test.ts": 1,
   "server-set-id-identity.test.ts": 1,
-  "server-stdin-eof.test.ts": 1,
+  "server-stdin-eof.test.ts": 2,
   "server-tools-allowlist.test.ts": 1,
 };
 

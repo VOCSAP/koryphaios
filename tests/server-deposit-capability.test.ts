@@ -468,7 +468,12 @@ test(
       const switching = await launchServer(brokerUrl, settingsDir, "", logDir, { ...env, CLAUDE_PEERS_DESK_SESSION: switchDesk });
       await initialize(switching);
       await until(() => registers().some((r) => r.body.desk_session === switchDesk), `${fault}: boot /register reaches the broker`);
-      expect(await readSessionIdentityFile(switchDesk, settingsDir), `${fault}: boot snapshot is ready`).not.toBeNull();
+      let bootSnapshot = await readSessionIdentityFile(switchDesk, settingsDir);
+      for (let i = 0; i < 100 && !bootSnapshot; i++) {
+        await Bun.sleep(50);
+        bootSnapshot = await readSessionIdentityFile(switchDesk, settingsDir);
+      }
+      expect(bootSnapshot, `${fault}: boot snapshot is ready`).not.toBeNull();
 
       faults.set("/register", fault);
       switching.send({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "switch_group", arguments: { name: "alpha" } } });
