@@ -14,6 +14,7 @@ use claude_peers_relay::config::Config;
 use claude_peers_relay::discovery::{
     acquire_launch_lock, candidate_ports, clear_stale_marker, find_session, fnv1a32,
     launch_lock_file, release_launch_lock, stop_stuck, sweep, take_over_stale, Control, Found,
+    OrderedConnects,
 };
 use claude_peers_relay::fake::{FakeDaemon, FakeOptions};
 use claude_peers_relay::frame;
@@ -544,6 +545,149 @@ fn an_unauthenticated_error_on_the_lowest_port_makes_the_relay_try_the_next_cand
         "an ERROR nobody authenticated must not push the relay to the bun fallback"
     );
     assert_eq!(spawner.launches.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn free_ports_are_refused_long_before_the_connect_timeout() {
+    // Below both OS ephemeral ranges: a parallel test cannot be handed one of these.
+    let ports: Vec<u16> = (24_100u16..)
+        .filter(|p| TcpListener::bind(("127.0.0.1", *p)).is_ok())
+        .take(10)
+        .collect();
+    let mut r = rig(ports, &root_hash("mine"));
+    r.cfg.connect_timeout = Duration::from_secs(3);
+    let started = std::time::Instant::now();
+    let found = sweep(&r.cfg, &r.key, &hello_for(&r), None);
+    assert_eq!(found.free_ports, 10);
+    assert!(
+        started.elapsed() < Duration::from_millis(1500),
+        "a refused loopback connect waited for the connect timeout: {:?}",
+        started.elapsed()
+    );
+}
+
+fn refused(index: usize) -> std::io::Result<std::net::TcpStream> {
+    Err(std::io::Error::other(index.to_string()))
+}
+
+#[test]
+fn connect_results_come_out_in_port_order_whatever_the_order_they_settle_in() {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    thread::spawn(move || {
+        let out: Vec<(u16, String)> = OrderedConnects::new(vec![11, 12, 13], rx)
+            .map(|(p, r)| (p, r.expect_err("an error").to_string()))
+            .collect();
+        let _ = done_tx.send(out);
+    });
+    for index in [2, 1, 0] {
+        tx.send((index, refused(index))).expect("send");
+    }
+    let out = done_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("every settled result must be handed out");
+    assert_eq!(
+        out,
+        vec![(11, "0".into()), (12, "1".into()), (13, "2".into())]
+    );
+}
+
+#[test]
+fn the_lowest_connect_result_is_handed_out_without_waiting_for_the_higher_ports() {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    thread::spawn(move || {
+        let mut connects = OrderedConnects::new(vec![11, 12, 13], rx);
+        let first = connects.next().map(|(p, _)| p);
+        let _ = done_tx.send((first, connects.remaining()));
+    });
+    tx.send((0, refused(0))).expect("send");
+    let (first, remaining) = done_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("the lowest port must be handed out without waiting for the slower ones");
+    assert_eq!(first, Some(11));
+    assert_eq!(remaining, 2);
+    drop(tx);
+}
+
+#[test]
+fn a_connect_thread_that_died_costs_its_own_port_only() {
+    let (tx, rx) = std::sync::mpsc::channel();
+    tx.send((1, refused(1))).expect("send");
+    drop(tx);
+    let out: Vec<(u16, String)> = OrderedConnects::new(vec![11, 12], rx)
+        .map(|(p, r)| (p, r.expect_err("an error").to_string()))
+        .collect();
+    assert_eq!(
+        out,
+        vec![(11, "connect thread panicked".into()), (12, "1".into())]
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn a_refused_socket_option_is_logged_once_and_the_connect_still_succeeds() {
+    use claude_peers_relay::config::Logger;
+    use claude_peers_relay::discovery::loopback::connect_with;
+    use std::sync::atomic::AtomicBool;
+
+    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind");
+    let addr = listener.local_addr().expect("address");
+    let (logger, lines) = Logger::capturing("test-relay");
+    let logged = AtomicBool::new(false);
+    for _ in 0..2 {
+        connect_with(
+            addr,
+            Duration::from_secs(1),
+            &logger,
+            |_| Err(std::io::Error::other("refused")),
+            &logged,
+        )
+        .expect("a failed option must not fail the connect");
+    }
+    let lines = lines.lock().unwrap_or_else(|e| e.into_inner());
+    assert_eq!(
+        lines
+            .iter()
+            .filter(|l| l.contains("cannot disable SYN retransmission"))
+            .count(),
+        1,
+        "{lines:?}"
+    );
+}
+
+#[test]
+fn no_daemon_is_started_once_the_opening_deadline_passed_during_the_recheck() {
+    let mut r = rig(vec![free_port(), free_port()], &root_hash("mine"));
+    r.cfg.opening_deadline = Duration::from_millis(300);
+    let listener = TcpListener::bind(("127.0.0.1", r.cfg.candidates[0])).expect("bind");
+    thread::spawn(move || {
+        let mut held = Vec::new();
+        for (n, s) in listener.incoming().flatten().enumerate() {
+            if n > 0 {
+                held.push(s);
+            }
+        }
+    });
+    let spawner = NoSpawn(AtomicUsize::new(0));
+    let found = find_session(
+        &r.cfg,
+        &r.key,
+        &hello_for(&r),
+        true,
+        &spawner,
+        &Control::default(),
+    );
+    assert!(matches!(found, Found::Fallback(_)));
+    assert_eq!(
+        spawner.0.load(Ordering::SeqCst),
+        0,
+        "a daemon was started after the opening deadline"
+    );
+    assert!(
+        r.logged("1 candidates not examined"),
+        "the log must name the candidates left unexamined"
+    );
 }
 
 /// Accepts connections and writes `first` at once, then `drip` one byte at a time.

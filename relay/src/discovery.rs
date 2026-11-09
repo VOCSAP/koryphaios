@@ -2,6 +2,7 @@ use std::io::{self, ErrorKind, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpStream};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver};
 use std::sync::Mutex;
 use std::thread::{self, sleep};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -48,37 +49,156 @@ pub struct Sweep {
     pub fatal: Option<String>,
 }
 
-/// Connects to every candidate at once. On Windows a closed loopback port
-/// answers "refused" only after about two seconds, so a sequential pass over
-/// ten free ports would outlast the opening deadline.
-fn connect_all(cfg: &Config) -> Vec<(u16, io::Result<TcpStream>)> {
-    thread::scope(|s| {
-        let handles: Vec<_> = cfg
-            .candidates
-            .iter()
-            .map(|&port| {
-                (
-                    port,
-                    s.spawn(move || {
-                        TcpStream::connect_timeout(
-                            &SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
-                            cfg.connect_timeout,
-                        )
-                    }),
-                )
-            })
-            .collect();
-        handles
-            .into_iter()
-            .map(|(port, h)| {
-                (
-                    port,
-                    h.join()
-                        .unwrap_or_else(|_| Err(io::Error::other("connect thread panicked"))),
-                )
-            })
-            .collect()
-    })
+#[cfg(windows)]
+pub mod loopback {
+    use std::io;
+    use std::net::{SocketAddr, TcpStream};
+    use std::os::windows::io::AsRawSocket;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
+    use socket2::{Domain, Protocol, Socket, Type};
+    use windows_sys::Win32::Networking::WinSock::{
+        WSAIoctl, SIO_TCP_INITIAL_RTO, TCP_INITIAL_RTO_PARAMETERS,
+    };
+
+    use crate::config::Logger;
+
+    const UNSPECIFIED_RTT: u16 = 0xFFFF;
+    const NO_SYN_RETRANSMISSIONS: u8 = 0xFE;
+    static FAILURE_LOGGED: AtomicBool = AtomicBool::new(false);
+
+    fn no_syn_retransmission(socket: &Socket) -> io::Result<()> {
+        let params = TCP_INITIAL_RTO_PARAMETERS {
+            Rtt: UNSPECIFIED_RTT,
+            MaxSynRetransmissions: NO_SYN_RETRANSMISSIONS,
+        };
+        let mut returned = 0u32;
+        let rc = unsafe {
+            WSAIoctl(
+                socket.as_raw_socket() as usize,
+                SIO_TCP_INITIAL_RTO,
+                &params as *const _ as *const _,
+                std::mem::size_of::<TCP_INITIAL_RTO_PARAMETERS>() as u32,
+                std::ptr::null_mut(),
+                0,
+                &mut returned,
+                std::ptr::null_mut(),
+                None,
+            )
+        };
+        if rc != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    /// Windows re-sends the SYN twice after a reset, so a refused loopback
+    /// connect takes about two seconds and `connect_timeout` ends it first
+    /// with `TimedOut`. Without SYN retransmission the refusal is immediate.
+    /// When the option cannot be set, the connect is the plain one.
+    pub fn connect(addr: SocketAddr, timeout: Duration, log: &Logger) -> io::Result<TcpStream> {
+        connect_with(addr, timeout, log, no_syn_retransmission, &FAILURE_LOGGED)
+    }
+
+    /// `set` prepares the socket before the connect; its failure is logged
+    /// once per `logged` flag and never fails the connect.
+    pub fn connect_with(
+        addr: SocketAddr,
+        timeout: Duration,
+        log: &Logger,
+        set: impl Fn(&Socket) -> io::Result<()>,
+        logged: &AtomicBool,
+    ) -> io::Result<TcpStream> {
+        let socket = match Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)) {
+            Ok(s) => s,
+            Err(_) => return TcpStream::connect_timeout(&addr, timeout),
+        };
+        if let Err(e) = set(&socket) {
+            if !logged.swap(true, Ordering::Relaxed) {
+                log.line(&format!(
+                    "cannot disable SYN retransmission ({e}), a free port will cost a full connect timeout"
+                ));
+            }
+        }
+        socket.connect_timeout(&addr.into(), timeout)?;
+        Ok(socket.into())
+    }
+}
+
+#[cfg(not(windows))]
+pub mod loopback {
+    use std::io;
+    use std::net::{SocketAddr, TcpStream};
+    use std::time::Duration;
+
+    use crate::config::Logger;
+
+    pub fn connect(addr: SocketAddr, timeout: Duration, _log: &Logger) -> io::Result<TcpStream> {
+        TcpStream::connect_timeout(&addr, timeout)
+    }
+}
+
+type ConnectResult = (usize, io::Result<TcpStream>);
+
+/// The connect results of the candidates, handed out in port order, each one
+/// as soon as it and every lower port are settled.
+pub struct OrderedConnects {
+    rx: Receiver<ConnectResult>,
+    ports: Vec<u16>,
+    settled: Vec<Option<io::Result<TcpStream>>>,
+    next: usize,
+}
+
+impl OrderedConnects {
+    pub fn new(ports: Vec<u16>, rx: Receiver<ConnectResult>) -> OrderedConnects {
+        let settled = ports.iter().map(|_| None).collect();
+        OrderedConnects {
+            rx,
+            ports,
+            settled,
+            next: 0,
+        }
+    }
+
+    pub fn remaining(&self) -> usize {
+        self.ports.len() - self.next
+    }
+}
+
+impl Iterator for OrderedConnects {
+    type Item = (u16, io::Result<TcpStream>);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let port = *self.ports.get(self.next)?;
+        while self.settled[self.next].is_none() {
+            match self.rx.recv() {
+                Ok((index, result)) => self.settled[index] = Some(result),
+                Err(_) => {
+                    self.settled[self.next] = Some(Err(io::Error::other("connect thread panicked")))
+                }
+            }
+        }
+        let result = self.settled[self.next].take()?;
+        self.next += 1;
+        Some((port, result))
+    }
+}
+
+/// Starts a connect to every candidate at once. On Windows a closed loopback
+/// port can answer "refused" only after about two seconds, so a sequential
+/// pass over ten free ports would outlast the opening deadline.
+fn connect_all(cfg: &Config) -> OrderedConnects {
+    let (tx, rx) = mpsc::channel();
+    for (index, &port) in cfg.candidates.iter().enumerate() {
+        let tx = tx.clone();
+        let (timeout, log) = (cfg.connect_timeout, cfg.logger.clone());
+        thread::spawn(move || {
+            let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+            let _ = tx.send((index, loopback::connect(addr, timeout, &log)));
+        });
+    }
+    OrderedConnects::new(cfg.candidates.clone(), rx)
 }
 
 /// One pass over the candidates, in port order. The first WELCOME ends it.
@@ -88,12 +208,18 @@ fn connect_all(cfg: &Config) -> Vec<(u16, io::Result<TcpStream>)> {
 /// total for its whole handshake, and no candidate runs past `overall`.
 pub fn sweep(cfg: &Config, key: &[u8], hello: &[u8], overall: Option<Instant>) -> Sweep {
     let mut out = Sweep::default();
-    for (port, attempt) in connect_all(cfg) {
+    let mut connects = connect_all(cfg);
+    loop {
+        let unexamined = connects.remaining();
+        let Some((port, attempt)) = connects.next() else {
+            break;
+        };
         let mut deadline = Instant::now() + cfg.step_timeout * 3;
         if let Some(limit) = overall {
             if Instant::now() >= limit {
-                cfg.logger
-                    .line(&format!("port {port}: opening deadline reached, not tried"));
+                cfg.logger.line(&format!(
+                    "opening deadline reached at port {port}, {unexamined} candidates not examined"
+                ));
                 break;
             }
             deadline = deadline.min(limit);
@@ -519,6 +645,13 @@ pub fn find_session(
                     if let Some(s) = recheck.session {
                         release_launch_lock(cfg);
                         return Found::Session(Box::new(s));
+                    }
+                    if opening && started.elapsed() >= cfg.opening_deadline {
+                        release_launch_lock(cfg);
+                        return Found::Fallback(format!(
+                            "no daemon session opened within {} ms",
+                            cfg.opening_deadline.as_millis()
+                        ));
                     }
                     cfg.logger.line("starting the shared MCP daemon");
                     if let Err(e) = spawner.spawn(cfg) {
