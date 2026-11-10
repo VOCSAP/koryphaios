@@ -85,7 +85,7 @@ fn requests_while_the_daemon_is_away_fail_at_once_and_the_relay_stays_up() {
         reply["error"]["message"]
             .as_str()
             .unwrap_or("")
-            .contains("unreachable, reconnecting"),
+            .contains("was NOT executed, retry it"),
         "got {reply}"
     );
     client.send(json!({"jsonrpc": "2.0", "method": "notifications/cancelled"}));
@@ -315,6 +315,41 @@ fn a_daemon_that_refuses_the_session_is_named_in_the_error_and_retried_with_back
             .unwrap_or("")
             .contains("hello_invalid"),
         "the error must name the cause, got {reply}"
+    );
+}
+
+#[test]
+fn a_request_refused_while_the_daemon_is_absent_never_reaches_it_afterwards() {
+    let (r, daemon, client, _s) = start();
+    client.send(initialize(1));
+    client.wait_reply(json!(1));
+
+    daemon.set_refuse_hello(Some("hello_invalid"));
+    daemon.drop_connections();
+    wait_until("a logged refusal", || r.logged("hello_invalid"));
+    client.send(call(9, "never-run"));
+    let reply = client.wait_reply(json!(9));
+    assert!(
+        reply["error"]["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("was NOT executed"),
+        "got {reply}"
+    );
+
+    daemon.set_refuse_hello(None);
+    let mut next_id = 10;
+    wait_until("a call to succeed after the reconnect", || {
+        next_id += 1;
+        client.send(call(next_id, "after"));
+        client
+            .wait_reply(json!(next_id))
+            .get("result")
+            .is_some()
+    });
+    assert!(
+        !daemon.mcp_received().iter().any(|m| m.contains("never-run")),
+        "the refused call must not be delivered once the daemon is back"
     );
 }
 

@@ -19,7 +19,8 @@ const MAX_IN_FLIGHT: usize = 256;
 const MAX_QUEUED: usize = 64;
 const LOST: &str =
     "claude-peers daemon connection lost; this call may or may not have been executed";
-const UNREACHABLE: &str = "claude-peers daemon unreachable, reconnecting";
+const UNREACHABLE: &str =
+    "claude-peers daemon unreachable: this call was NOT executed, retry it once the daemon is back";
 
 enum Event {
     Stdin(String),
