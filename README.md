@@ -168,7 +168,7 @@ The broker daemon auto-starts on first launch.
 
 ### 1. On the broker host -- expose the broker publicly
 
-Add `CLAUDE_PEERS_BIND_HOST=0.0.0.0` (and optionally a bearer token) to the broker service. If any client PC will attach as a Mode 3 replica rather than a direct Mode 2 client, also set `CLAUDE_PEERS_SERVE_REPLICAS=1` -- it's optional and only needed to serve replicas, but every replica reports this broker unreachable without it:
+Add `CLAUDE_PEERS_BIND_HOST=0.0.0.0` and a bearer token to the broker service (the broker refuses to start beyond loopback without one). If any client PC will attach as a Mode 3 replica rather than a direct Mode 2 client, also set `CLAUDE_PEERS_SERVE_REPLICAS=1` -- it's optional and only needed to serve replicas, but every replica reports this broker unreachable without it:
 
 ```bash
 cat >/etc/claude-peers/claude-peers.env <<'EOF'
@@ -552,7 +552,7 @@ Every setting can be provided via an environment variable or via a JSON settings
 | `CLAUDE_PEERS_ANTHROPIC_MODEL`       | `anthropic_model`      | (alias)                              | server                | Backward-compat alias of `summary_model`                               |
 | `CLAUDE_PEERS_BROKER_URL`            | `broker_url`           | (none)                               | server                | HTTP mode: direct broker URL (e.g. `http://my-server:7899`). Overrides loopback. |
 | `CLAUDE_PEERS_BROKER_TOKEN`          | `broker_token`         | (none)                               | broker + server       | Bearer token for broker auth. Broker requires it on all requests (except `/health`); server sends it on every call. |
-| `CLAUDE_PEERS_BIND_HOST`             | `bind_host`            | `127.0.0.1`                          | broker                | Broker bind address. Set `0.0.0.0` to accept external connections.     |
+| `CLAUDE_PEERS_BIND_HOST`             | `bind_host`            | `127.0.0.1`                          | broker                | Broker bind address. Set `0.0.0.0` to accept external connections; the broker then refuses to start unless a broker token is set. |
 | `CLAUDE_PEERS_OFFLINE_REPLICA`       | `offline_replica`      | `false`                              | broker / server / cli / Deck | Opt-in for Mode 3 (see [Two deployment modes](#two-deployment-modes)). Accepts `1`/`true`/`yes`/`on` and `0`/`false`/`no`/`off`, case-insensitive; anything else falls back to the settings-file value. Has no effect without a remote `broker_url`. The upstream must have `serve_replicas: true` **and** a `broker_token` configured, or it refuses (403) the `/roadmap/sync/pull\|push\|lock` and `/federation/sync\|send` routes this mode depends on. |
 | `CLAUDE_PEERS_SERVE_REPLICAS`        | `serve_replicas`       | `false`                              | broker                | Opt-in, on the UPSTREAM broker only: without it, `/roadmap/sync/pull\|push\|lock` refuse (403) every replica even with a `broker_token` configured -- the explicit "I am willing to serve replicas" role flag (Mode 3 migration note above). Accepts the same spellings as `CLAUDE_PEERS_OFFLINE_REPLICA`. A broker itself running in `replica` mode never serves these routes even when this is also set (logs a startup warning). |
 | `CLAUDE_PEERS_SYNC_TICK_MS`          | (n/a)                  | `5000`                               | broker                | Mode 3 only: cadence of the replica's pull/push/lock/federation sync pass against its upstream. |

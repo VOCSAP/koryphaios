@@ -437,7 +437,7 @@ messaging, announcements, the operator inbox and the roadmap keep working. The
 Docker view *tests this for real* (a `curl /health` from inside the container)
 instead of guessing: with Docker Desktop it resolves natively; on a **native
 Linux engine** you must also bind the broker beyond loopback
-(`CLAUDE_PEERS_BIND_HOST=0.0.0.0`, ideally with a `broker_token`) or the badge
+(`CLAUDE_PEERS_BIND_HOST=0.0.0.0`, with a `broker_token`) or the badge
 turns "unreachable".
 
 **Resume.** Transcripts live in the auth volume

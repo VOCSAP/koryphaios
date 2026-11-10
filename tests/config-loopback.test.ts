@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { isLoopbackBrokerUrl } from "../shared/config.ts";
+import { bindHostRefusal, isLoopbackBrokerUrl } from "../shared/config.ts";
 
 // Bug F: server.ts ensureBroker() must skip spawning a local broker when the
 // configured BROKER_URL points to a remote host. isLoopbackBrokerUrl is the
@@ -31,4 +31,22 @@ test("isLoopbackBrokerUrl rejects malformed URL", () => {
 
 test("isLoopbackBrokerUrl is case-insensitive on hostname", () => {
   expect(isLoopbackBrokerUrl("http://LocalHost:7899")).toBe(true);
+});
+
+test("bindHostRefusal lets a loopback or unset bind host start without a token", () => {
+  for (const host of [null, "127.0.0.1", "127.0.0.2", "localhost", "LocalHost", "::1", "[::1]"]) {
+    expect(bindHostRefusal(host, null), `bind host ${String(host)}`).toBeNull();
+  }
+});
+
+test("bindHostRefusal refuses a bind host beyond loopback without a token", () => {
+  for (const host of ["0.0.0.0", "::", "192.168.10.23", "broker.example.com", ""]) {
+    const reason = bindHostRefusal(host, null);
+    expect(reason, `bind host ${JSON.stringify(host)}`).toContain("CLAUDE_PEERS_BROKER_TOKEN");
+  }
+  expect(bindHostRefusal("0.0.0.0", "")).not.toBeNull();
+});
+
+test("bindHostRefusal lets a bind host beyond loopback start with a token", () => {
+  expect(bindHostRefusal("0.0.0.0", "shared-secret")).toBeNull();
 });

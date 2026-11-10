@@ -16,6 +16,7 @@ import {
   type TestBroker,
   openBrokerDb,
 } from "./_helper.ts";
+import { reachedWithin } from "./_bounded-await.ts";
 import { ROADMAP_TITLE_MAX } from "../shared/roadmap-title.ts";
 import type {
   RegisterResponse,
@@ -305,6 +306,46 @@ test("a broker asked to replicate ITSELF refuses to start, loudly", async () => 
     exitCode,
   ]).toEqual(["a self-replicating configuration exits instead of running in a loop", 1]);
   expect(stderr).toContain("replica mode points at this very broker");
+}, 30_000);
+
+/**
+ * Boots a broker on 192.0.2.1 (RFC 5737), an address no interface owns: the
+ * bind itself fails, so nothing ever listens on a LAN interface whatever the
+ * guard decides.
+ */
+async function bootOnUnownedAddress(brokerToken: string | null): Promise<{ stderr: string; exitCode: number }> {
+  const probe = Bun.serve({ port: 0, fetch: () => new Response(null, { status: 404 }) });
+  const port = probe.port;
+  probe.stop(true);
+  const proc = Bun.spawn(["bun", "broker.ts"], {
+    env: scrubEnv(replica.tmpDir, {
+      CLAUDE_PEERS_PORT: String(port),
+      CLAUDE_PEERS_DB: `${replica.tmpDir}/open-bind.db`,
+      CLAUDE_PEERS_LOG_DIR: `${replica.tmpDir}/open-bind-logs`,
+      CLAUDE_PEERS_BIND_HOST: "192.0.2.1",
+      ...(brokerToken === null ? {} : { CLAUDE_PEERS_BROKER_TOKEN: brokerToken }),
+    }),
+    stdio: ["ignore", "ignore", "pipe"],
+  });
+  try {
+    const stderr = await reachedWithin(new Response(proc.stderr).text(), "the broker's stderr to close");
+    const exitCode = await reachedWithin(proc.exited, "the broker to exit");
+    return { stderr, exitCode };
+  } finally {
+    proc.kill();
+  }
+}
+
+test("a broker bound beyond loopback without a broker token refuses to start, loudly", async () => {
+  const { stderr, exitCode } = await bootOnUnownedAddress(null);
+  expect(stderr).toContain("exposes the broker beyond loopback without a broker token");
+  expect(exitCode).toBe(1);
+}, 30_000);
+
+test("a broker bound beyond loopback WITH a broker token gets past the bind guard", async () => {
+  const { stderr } = await bootOnUnownedAddress("open-bind-token");
+  expect(stderr).not.toContain("exposes the broker beyond loopback");
+  expect(stderr).toContain("Failed to start server");
 }, 30_000);
 
 test("a card written upstream reaches the replica", async () => {

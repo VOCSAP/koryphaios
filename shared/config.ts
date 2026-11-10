@@ -361,6 +361,19 @@ export function isLoopbackBrokerUrl(url: string): boolean {
   }
 }
 
+/**
+ * Why the broker must not start on this bind address, or null. A broker that
+ * listens beyond loopback with no token serves every route to the network
+ * unauthenticated. An empty string is not loopback: Bun binds it to 0.0.0.0.
+ */
+export function bindHostRefusal(bindHost: string | null, brokerToken: string | null): string | null {
+  if (bindHost === null || brokerToken) return null;
+  const host = bindHost.toLowerCase();
+  const loopback = host === "localhost" || host === "::1" || host === "[::1]" || /^127(\.\d{1,3}){3}$/.test(host);
+  if (loopback) return null;
+  return `CLAUDE_PEERS_BIND_HOST=${bindHost} exposes the broker beyond loopback without a broker token -- set CLAUDE_PEERS_BROKER_TOKEN (or broker_token), or bind 127.0.0.1`;
+}
+
 // --- v0.3: group resolution ---
 
 const PROJECT_FILE = ".claude-peers.json";

@@ -11,6 +11,7 @@ import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import {
+  bindHostRefusal,
   brokerMode,
   isLoopbackBrokerUrl,
   loadConfig,
@@ -350,7 +351,9 @@ const CLEAN_INTERVAL_MS = Math.max(
 // period before an owner-less lock is released, and sweep cadence.
 const LOCK_TTL_SEC = Math.max(1, parseInt(process.env.CLAUDE_PEERS_LOCK_TTL_SEC ?? "21600", 10));
 const LOCK_GRACE_SEC = Math.max(1, parseInt(process.env.CLAUDE_PEERS_LOCK_GRACE_SEC ?? "600", 10));
-const LOCK_SWEEP_SEC = Math.max(1, parseInt(process.env.CLAUDE_PEERS_LOCK_SWEEP_SEC ?? "60", 10));
+const lockSweepSecEnv = Number(process.env.CLAUDE_PEERS_LOCK_SWEEP_SEC ?? 60);
+const LOCK_SWEEP_SEC =
+  Number.isSafeInteger(lockSweepSecEnv) && lockSweepSecEnv >= 1 && lockSweepSecEnv <= 86_400 ? lockSweepSecEnv : 60;
 // Card aaf4537d: a PARKED card (Pause stop) is immune to the two clauses
 // above for up to this long -- its own, dedicated env var, never mixed with
 // LOCK_TTL_SEC/LOCK_GRACE_SEC (a park is an operator's 24h decision, not an
@@ -426,6 +429,18 @@ const MIRROR_ROW_SQL = "(via IS NOT NULL AND relay_id IS NULL)";
 // outlives the stderr of whoever spawned it (server.ts spawns it detached), so
 // it must own its on-disk trail. Console mirroring keeps `bun broker.ts` usable.
 const log = createLogger({ dir: coreLogDir(), name: "broker" }).child("broker");
+
+const bindRefusal = bindHostRefusal(config.bind_host, BROKER_TOKEN);
+if (bindRefusal) {
+  log.error(`${bindRefusal}, exiting`);
+  process.exit(1);
+}
+
+if (LOCK_SWEEP_SEC !== lockSweepSecEnv) {
+  log.warn("CLAUDE_PEERS_LOCK_SWEEP_SEC is not an integer between 1 and 86400, using 60", {
+    value: process.env.CLAUDE_PEERS_LOCK_SWEEP_SEC,
+  });
+}
 
 type OperatorTrustSnapshot =
   | { state: "ready"; trust: OperatorTrust }

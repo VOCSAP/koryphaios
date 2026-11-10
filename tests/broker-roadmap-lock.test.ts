@@ -4,6 +4,8 @@
 // in_progress, and the stale-lock sweep (TTL + owner gone).
 
 import { test, expect, beforeAll, afterAll } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   FIXTURE_OPERATOR,
   FIXTURE_OPERATOR_ID,
@@ -1671,3 +1673,29 @@ test("card 4441e883 (Trou A2, the negative control that carries the weight): an 
   expect(saved.body.item.locked_by_token).toBe(owner.body.instance_token);
   expect(saved.body.item.locked_by_token).not.toBe(thirdParty.body.instance_token);
 });
+
+test("a lock sweep period outside 1..86400 or not an integer falls back to the default, and says so", async () => {
+  // Above 2^31 ms a setInterval fires every few milliseconds instead of never.
+  const warning = "CLAUDE_PEERS_LOCK_SWEEP_SEC is not an integer between 1 and 86400";
+  const logOf = (b: TestBroker): string => readFileSync(join(b.tmpDir, "logs", "broker.log"), "utf8");
+  const cases = [
+    ["86401", true],
+    ["3000000000", true],
+    ["0", true],
+    ["-5", true],
+    ["abc", true],
+    ["1.5", true],
+    ["86400", false],
+    ["1", false],
+  ] as const;
+  const probes = await Promise.allSettled(cases.map(([value]) => startBroker({ CLAUDE_PEERS_LOCK_SWEEP_SEC: value })));
+  try {
+    cases.forEach(([value, warned], index) => {
+      const probe = probes[index]!;
+      if (probe.status === "rejected") throw probe.reason;
+      expect(logOf(probe.value).includes(warning), `value ${value}`).toBe(warned);
+    });
+  } finally {
+    await Promise.all(probes.map((probe) => (probe.status === "fulfilled" ? stopBroker(probe.value) : undefined)));
+  }
+}, 60_000);
