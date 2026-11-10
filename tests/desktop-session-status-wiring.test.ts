@@ -859,6 +859,30 @@ test("poll: model A then B reach the broadcast; a report older than the spawn is
   expect(modelOf(), "a /model switch reaches the broadcast").toBe("Sonnet");
 });
 
+// Mutants: dropping the in-place refresh leaves `at` at the first observation
+// (first expect red); returning true after it rebroadcasts every tick (second
+// expect red); dropping the `next.at >` guard lets an older report move it back.
+test("poll: an unchanged report refreshes the observation instant without a broadcast, and never moves it backwards", () => {
+  const { svc, broadcasts, peersDir } = setup();
+  const rt = svc.create({});
+  const atOf = (): number | undefined => svc.list().find((s) => s.id === rt.id)!.liveStatus?.at;
+
+  const first = Date.now() + 1000;
+  writeStatus(peersDir, rt.id, "Opus", first);
+  poll(svc);
+  expect(atOf()).toBe(first);
+
+  const before = broadcasts.length;
+  writeStatus(peersDir, rt.id, "Opus", first + 5000);
+  poll(svc);
+  expect(atOf(), "same values, newer report: the instant follows the observation").toBe(first + 5000);
+  expect(broadcasts.length, "the refresh is not broadcast to the renderers").toBe(before);
+
+  writeStatus(peersDir, rt.id, "Opus", first + 2000);
+  poll(svc);
+  expect(atOf(), "an older report never moves the instant back").toBe(first + 5000);
+});
+
 test("the status file is removed when the tile is closed for good", async () => {
   const { svc, peersDir } = setup();
   const rt = svc.create({});

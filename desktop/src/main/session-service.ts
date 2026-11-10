@@ -2173,7 +2173,10 @@ export class SessionService extends EventEmitter {
         reportError('session', `status file of "${def.name}" refused (${read.reason})`)
       }
     }
-    if (sameLiveStatus(r.liveStatus, next)) return false
+    if (sameLiveStatus(r.liveStatus, next)) {
+      if (r.liveStatus && next && next.at > r.liveStatus.at) r.liveStatus = { ...r.liveStatus, at: next.at }
+      return false
+    }
     r.liveStatus = next
     return true
   }

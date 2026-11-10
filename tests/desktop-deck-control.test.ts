@@ -3111,6 +3111,68 @@ test("deck_list_sessions: sessionView's `thinking` field carries 'working'/'idle
   expect(byId).toEqual({ a: "working", b: "idle", c: "unknown" });
 });
 
+// Mutants: `?? 0` on context_pct/context_window turns the null cases red; dropping
+// Math.max(0, ...) turns the clock-skew case red; spreading `...s` into the view
+// turns the exact key set red; reading `modelId` instead of `model` turns the
+// value case red.
+test("deck_list_sessions: model, context and observation age come from liveStatus, null (never 0) when the source has none", async () => {
+  const live = (extra: Partial<NonNullable<SessionRuntime["liveStatus"]>>): SessionRuntime["liveStatus"] => ({
+    model: "Opus",
+    modelId: "claude-opus-x",
+    contextPct: 42,
+    contextWindow: 200000,
+    at: Date.now() - 90_000,
+    ...extra
+  });
+  const state = {
+    sessions: [
+      fakeSession("rep", { liveStatus: live({}) }),
+      fakeSession("none", { liveStatus: null }),
+      fakeSession("compact", { liveStatus: live({ contextPct: null, contextWindow: null }) }),
+      fakeSession("skew", { liveStatus: live({ at: Date.now() + 60_000 }) })
+    ]
+  };
+  const srv = await startDeckControl(makeDeps(state));
+  servers.push(srv);
+
+  const listed = await call(srv, "deck_list_sessions");
+  const rows = (listed.body.result as { sessions: Record<string, unknown>[] }).sessions;
+  const byId = Object.fromEntries(rows.map((r) => [r.id as string, r]));
+  const pick = (id: string) => {
+    const r = byId[id]!;
+    return { model: r.model, context_pct: r.context_pct, context_window: r.context_window };
+  };
+
+  expect(pick("rep")).toEqual({ model: "Opus", context_pct: 42, context_window: 200000 });
+  expect(byId.rep!.status_age_s as number, "age is now minus the observation instant").toBeGreaterThanOrEqual(90);
+  expect(byId.rep!.status_age_s as number).toBeLessThanOrEqual(91);
+  expect(pick("none")).toEqual({ model: null, context_pct: null, context_window: null });
+  expect(byId.none!.status_age_s, "no source: age is null, not 0").toBeNull();
+  expect(pick("compact"), "a null percentage stays null while the model is known").toEqual({
+    model: "Opus",
+    context_pct: null,
+    context_window: null
+  });
+  expect(byId.skew!.status_age_s, "a source clock ahead of the Deck never yields a negative age").toBe(0);
+  expect(Object.keys(byId.rep!).sort(), "the view is an explicit pick: no modelId, path or token joins it").toEqual(
+    [
+      "context_pct",
+      "context_window",
+      "cwd",
+      "id",
+      "model",
+      "name",
+      "peer_id",
+      "rate_limited",
+      "status",
+      "status_age_s",
+      "supervisor",
+      "thinking",
+      "worktree_branch"
+    ]
+  );
+});
+
 // This branch lives in index.ts's confirmSpawnShellFields, not
 // bun-test-importable (electron: dialog), so it is covered by a source scan
 // on the real file instead; the behavioural halves are covered by the two

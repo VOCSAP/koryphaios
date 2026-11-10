@@ -375,6 +375,7 @@ function assertArgsAllowedForRestrictedCaller(entry: SpawnPlanEntry, restricted:
 
 /** Trimmed session view exposed to the supervisor (no ids it must not need). */
 function sessionView(s: SessionRuntime): Record<string, unknown> {
+  const live = s.liveStatus
   return {
     id: s.id,
     name: s.name,
@@ -390,7 +391,11 @@ function sessionView(s: SessionRuntime): Record<string, unknown> {
     rate_limited: s.rateLimited,
     cwd: s.cwd,
     worktree_branch: s.worktree?.branch ?? null,
-    supervisor: !!s.supervisor
+    supervisor: !!s.supervisor,
+    model: live?.model ?? null,
+    context_pct: live?.contextPct ?? null,
+    context_window: live?.contextWindow ?? null,
+    status_age_s: live ? Math.max(0, Math.round((Date.now() - live.at) / 1000)) : null
   }
 }
 

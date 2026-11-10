@@ -134,7 +134,7 @@ const TOOLS = [
   {
     name: 'deck_list_sessions',
     description:
-      'List the Deck sessions (id, name, peer_id, status, thinking, rate_limited, cwd, worktree_branch).',
+      'List the Deck sessions (id, name, peer_id, status, thinking, rate_limited, cwd, worktree_branch, model, context_pct, context_window, status_age_s). The last four come from the tile statusLine: status_age_s is the seconds since its last report; all four are null when the tile has none.',
     inputSchema: { type: 'object', properties: {} }
   },
   {
