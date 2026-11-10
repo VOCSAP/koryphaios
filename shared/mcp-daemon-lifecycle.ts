@@ -2,7 +2,8 @@ import { dlopen, FFIType, ptr } from "bun:ffi";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, extname, join, posix } from "node:path";
-import type { BrokerEnsurer } from "./broker-ensure.ts";
+import type { BrokerEnsureRequest, BrokerEnsurer } from "./broker-ensure.ts";
+import { brokerMode, brokerUrl, loadBrokerConfig, settingsFilePath } from "./broker-config.ts";
 import { createLogger, type Logger } from "./logger.ts";
 import { controlRequest, type ControlOutcome } from "./mcp-daemon-control.ts";
 import {
@@ -26,6 +27,8 @@ const PORT_SPAN = 1000;
 const CANDIDATE_COUNT = 10;
 const DEFAULT_IDLE_SEC = 600;
 const HANDSHAKE_WAIT_MS = 9000;
+// Must exceed HEALTH_TIMEOUT_MS: the broker spawn follows one /health probe and has to happen inside this wait.
+export const BROKER_FIRST_WAIT_MS = 3000;
 const FAILURE_WINDOW_MS = 60_000;
 const MAX_FAILURES_IN_WINDOW = 5;
 const PORT_ENV = "CLAUDE_PEERS_MCP_DAEMON_PORT";
@@ -331,7 +334,28 @@ export interface RunDaemonOptions {
   start?: (opts: DaemonOptions) => DaemonHandle;
   maxSessions?: number;
   brokers?: BrokerEnsurer;
+  /**
+   * The local broker to have running before the first listen: on Windows a process spawned while the daemon
+   * listens inherits the listening socket and keeps the port bound after the daemon exits. The wait is bounded
+   * by BROKER_FIRST_WAIT_MS, and only the spawn has to happen before the listen.
+   */
+  brokerBeforeListen?: BrokerEnsureRequest;
   settings?: DaemonSessionSettings;
+}
+
+/** The pre-listen request, only when the file configuration is the local mode: the broker of a replica or of a remote is not the daemon's to start. */
+export function brokerBeforeListenRequest(env: Env, log: Logger): BrokerEnsureRequest | undefined {
+  const { config } = loadBrokerConfig((message) => log.warn(message), env);
+  const mode = brokerMode(config);
+  if (mode !== "local") {
+    log.info(`broker not pre-ensured: ${mode}`);
+    return undefined;
+  }
+  return {
+    url: brokerUrl(config),
+    settingsPath: settingsFilePath(env),
+    env: Object.fromEntries(Object.entries(env).filter((entry): entry is [string, string] => entry[1] !== undefined)),
+  };
 }
 
 export interface DaemonRun {
@@ -433,7 +457,26 @@ export function runDaemon(opts: RunDaemonOptions): DaemonRun {
     return "free";
   }
 
+  async function ensureBrokerFirst(): Promise<void> {
+    const request = opts.brokerBeforeListen;
+    if (request === undefined || opts.brokers === undefined) return;
+    let timer: unknown;
+    try {
+      const outcome = await Promise.race([
+        opts.brokers.ensure(request),
+        new Promise<"late">((resolve) => (timer = clock.setTimeout(() => resolve("late"), BROKER_FIRST_WAIT_MS))),
+      ]);
+      if (outcome === "late") log.warn(`the broker is still starting after ${BROKER_FIRST_WAIT_MS} ms: listening anyway`);
+      else log.info(`broker before listen: ${outcome.action}`);
+    } catch (e) {
+      log.warn("the broker could not be ensured before the listen: listening anyway", e);
+    } finally {
+      if (timer !== undefined) clock.clearTimeout(timer);
+    }
+  }
+
   async function main(): Promise<number> {
+    await ensureBrokerFirst();
     const key = loadKey(join(peersDir, "mcp-daemon.key"), log);
     const pidStart = opts.pidStart ?? (await ownPidStart(log));
     const fingerprint = codeFingerprint(opts.codeDir);

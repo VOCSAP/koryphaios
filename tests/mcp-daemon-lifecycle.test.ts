@@ -2,11 +2,14 @@ import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { createBrokerEnsurer, HEALTH_TIMEOUT_MS, spawnDetachedBroker } from "../shared/broker-ensure.ts";
 import { brokerStopMarkerPath, writeBrokerStopMarker } from "../shared/broker-stop-marker.ts";
 import { settingsFilePath } from "../shared/config.ts";
 import type { Logger } from "../shared/logger.ts";
 import { controlRequest } from "../shared/mcp-daemon-control.ts";
 import {
+  BROKER_FIRST_WAIT_MS,
+  brokerBeforeListenRequest,
   candidatePorts,
   codeFingerprint,
   daemonCodeRoot,
@@ -1280,8 +1283,9 @@ async function withChildReport<T>(
   }
 }
 
+/** The stop marker keeps the daemon's pre-listen broker ensure from launching a real broker for the test. */
 function entryEnv(home: string, extra: Record<string, string>): Record<string, string> {
-  return {
+  const env = {
     PATH: process.env["PATH"] ?? "",
     SystemRoot: process.env["SystemRoot"] ?? "",
     TEMP: process.env["TEMP"] ?? tmpdir(),
@@ -1289,10 +1293,17 @@ function entryEnv(home: string, extra: Record<string, string>): Record<string, s
     HOME: home,
     USERPROFILE: home,
     APPDATA: join(home, "AppData"),
+    XDG_CONFIG_HOME: join(home, ".config"),
     CLAUDE_PEERS_LOG_DIR: join(home, "logs"),
     CLAUDE_PEERS_MCP_DAEMON_IDLE_SEC: "0",
     ...extra,
   };
+  writeBrokerStopMarker(brokerStopMarkerPath(settingsFilePath(env)), {
+    stopped_at: "2026-11-09T00:00:00.000Z",
+    by: "test",
+    killed_pid: null,
+  });
+  return env;
 }
 
 function waitForState(child: { exitCode: number | null }, found: () => boolean): Promise<void> {
@@ -1307,6 +1318,185 @@ function waitForState(child: { exitCode: number | null }, found: () => boolean):
     SERVE_WAIT_MS,
   );
 }
+
+describe("the broker before the first listen", () => {
+  const request = { url: "http://127.0.0.1:1", settingsPath: "unused", env: {} };
+  const ensured = { action: "already-running" } as const;
+
+  test("the broker is ensured before the daemon listens", async () => {
+    const [p0] = await freePorts(1);
+    const events: string[] = [];
+    const started = begin({
+      ports: [p0 as number],
+      brokerBeforeListen: request,
+      brokers: {
+        ensure: async (req) => {
+          events.push(`ensure ${req.url}`);
+          return ensured;
+        },
+      },
+      start: (opts) => {
+        events.push("listen");
+        const handle = startDaemon(opts);
+        handles.push(handle);
+        return handle;
+      },
+    });
+    await serving(started, p0 as number);
+    expect(events, "the broker has to be ensured before the listening socket exists").toEqual([`ensure ${request.url}`, "listen"]);
+  });
+
+  test("a broker that never settles delays the listen by the wait of the injected clock, no more", async () => {
+    expect(BROKER_FIRST_WAIT_MS, "the spawn follows a /health probe and has to fit inside the wait").toBeGreaterThan(HEALTH_TIMEOUT_MS);
+    const [p0] = await freePorts(1);
+    const clock = new FakeClock();
+    const started = begin({
+      ports: [p0 as number],
+      clock,
+      brokerBeforeListen: request,
+      brokers: { ensure: () => new Promise(() => undefined) },
+    });
+    await settle();
+    clock.advance(BROKER_FIRST_WAIT_MS - 1);
+    await settle();
+    expect(started.run.port()).toBeUndefined();
+    clock.advance(1);
+    await serving(started, p0 as number);
+    expect(logOf(started.logDir)).toContain(`still starting after ${BROKER_FIRST_WAIT_MS} ms: listening anyway`);
+  });
+
+  test("a broker that cannot be ensured does not keep the daemon from listening", async () => {
+    const [p0] = await freePorts(1);
+    const started = begin({
+      ports: [p0 as number],
+      brokerBeforeListen: request,
+      brokers: { ensure: () => Promise.reject(new Error("no bun")) },
+    });
+    await serving(started, p0 as number);
+    expect(logOf(started.logDir)).toContain("could not be ensured before the listen");
+  });
+
+  function configuredEnv(config: Record<string, unknown> | null): Record<string, string> {
+    const home = join(root, `cfg${++counter}`);
+    const env = { APPDATA: join(home, "AppData"), XDG_CONFIG_HOME: join(home, ".config") };
+    if (config !== null) {
+      const file = settingsFilePath(env);
+      mkdirSync(dirname(file), { recursive: true });
+      writeFileSync(file, JSON.stringify(config));
+    }
+    return env;
+  }
+
+  test("a local configuration gets a pre-listen request at the local broker URL", () => {
+    const { log } = recordingLog();
+    const env = { ...configuredEnv(null), CLAUDE_PEERS_PORT: "7123" };
+    expect(brokerBeforeListenRequest(env, log)).toEqual({
+      url: "http://127.0.0.1:7123",
+      settingsPath: settingsFilePath(env),
+      env,
+    });
+  });
+
+  for (const [mode, config] of [
+    ["replica", { broker_url: "http://192.0.2.1:7899", offline_replica: true }],
+    ["remote", { broker_url: "http://192.0.2.1:7899" }],
+  ] as const) {
+    test(`a ${mode} configuration is not pre-ensured: no ensure before the listen, and the reason is logged`, async () => {
+      const [p0] = await freePorts(1);
+      const { log, lines } = recordingLog();
+      const events: string[] = [];
+      const started = begin({
+        ports: [p0 as number],
+        brokerBeforeListen: brokerBeforeListenRequest(configuredEnv(config), log),
+        brokers: {
+          ensure: async () => {
+            events.push("ensure");
+            return ensured;
+          },
+        },
+        start: (opts) => {
+          events.push("listen");
+          const handle = startDaemon(opts);
+          handles.push(handle);
+          return handle;
+        },
+      });
+      await serving(started, p0 as number);
+      expect(events, `a ${mode} broker is not the daemon's to start`).toEqual(["listen"]);
+      expect(lines).toContain(`broker not pre-ensured: ${mode}`);
+    });
+  }
+
+  const connects = (port: number) =>
+    Bun.connect({ hostname: "127.0.0.1", port, socket: { data() {}, open() {}, close() {}, error() {} } }).then(
+      (socket) => {
+        socket.end();
+        return true;
+      },
+      () => false,
+    );
+
+  test.skipIf(process.platform !== "win32")(
+    "a process spawned after the listen keeps the daemon port bound, one spawned before does not (windows)",
+    async () => {
+      const sleeper = join(root, "sleeper.ts");
+      writeFileSync(sleeper, 'import { writeFileSync } from "node:fs";\nwriteFileSync(process.argv[2], String(process.pid));\nsetTimeout(() => {}, 30000);\n');
+      const env = Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined));
+      const { log } = recordingLog();
+      const pids: number[] = [];
+      const pidOf = async (file: string): Promise<number> => {
+        await until(() => existsSync(file), "the spawned process to write its pid");
+        const pid = Number(readFileSync(file, "utf8"));
+        pids.push(pid);
+        return pid;
+      };
+      try {
+        const [after, before] = await freePorts(2);
+        const lateFile = join(root, `late${++counter}.pid`);
+        const late = begin({
+          ports: [after as number],
+          start: (opts) => {
+            const handle = startDaemon(opts);
+            handles.push(handle);
+            spawnDetachedBroker(process.execPath, [sleeper, lateFile], env, log);
+            return handle;
+          },
+        });
+        await serving(late, after as number);
+        await late.run.stop("test");
+        await pidOf(lateFile);
+        expect(await connects(after as number), "the inherited listening socket no longer keeps the port bound: this proof is vacuous").toBe(true);
+
+        const earlyFile = join(root, `early${++counter}.pid`);
+        const ensurer = createBrokerEnsurer({
+          isAlive: async () => existsSync(earlyFile),
+          locate: () => ({ command: process.execPath, script: sleeper }),
+          spawn: (command, args, spawnEnv) => spawnDetachedBroker(command, [...args, earlyFile], spawnEnv, log),
+          sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+          baseEnv: env,
+          home: root,
+          log,
+          pollMs: 20,
+          stopped: () => null,
+        });
+        const early = begin({ ports: [before as number], brokers: ensurer, brokerBeforeListen: request });
+        await serving(early, before as number);
+        await early.run.stop("test");
+        const pid = await pidOf(earlyFile);
+        expect(() => process.kill(pid, 0), "the broker stand-in has to be alive when the port is probed").not.toThrow();
+        expect(await connects(before as number), "the daemon port stayed bound after the daemon stopped").toBe(false);
+      } finally {
+        for (const pid of pids) {
+          try {
+            process.kill(pid);
+          } catch {
+            // The stand-in already exited by itself.
+          }
+        }
+      }
+    },
+  );
+});
 
 describe("the entry point", () => {
   test(
@@ -1368,7 +1558,7 @@ describe("the entry point", () => {
       const repo = join(import.meta.dir, "..");
       const child = Bun.spawn([process.execPath, join(repo, "mcp-daemon.ts")], {
         cwd: home,
-        env: entryEnv(home, { CLAUDE_PEERS_MCP_DAEMON_PORT: String(port) }),
+        env: entryEnv(home, { CLAUDE_PEERS_MCP_DAEMON_PORT: String(port), CLAUDE_PEERS_PORT: String(brokerPort) }),
         stdin: "ignore",
         stdout: "ignore",
         stderr: "pipe",
@@ -1388,6 +1578,7 @@ describe("the entry point", () => {
       try {
         await withChildReport(child, logDir, stderr, async () => {
           await waitForState(child, () => existsSync(statePath));
+          expect(logOf(logDir), "the entry point has to ensure the broker before it listens").toContain("broker before listen: skipped");
           const relay = await FakeRelay.open(port as number);
           const welcome = await relay.welcome({
             family: "peers",

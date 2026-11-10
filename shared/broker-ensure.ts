@@ -18,7 +18,7 @@ export const BROKER_ENV_NAMES = [
 const BROKER_ENV_PREFIX = "CLAUDE_PEERS_DELEGATION_";
 const DEFAULT_ATTEMPTS = 30;
 const DEFAULT_POLL_MS = 200;
-const HEALTH_TIMEOUT_MS = 2000;
+export const HEALTH_TIMEOUT_MS = 2000;
 
 export interface BrokerEnsureRequest {
   url: string;

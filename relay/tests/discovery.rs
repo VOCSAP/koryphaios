@@ -136,6 +136,130 @@ fn a_free_port_is_counted_and_a_silent_listener_is_reported() {
 }
 
 #[test]
+fn a_mute_listener_ahead_does_not_spend_the_handshake_window_of_the_daemon_behind_it() {
+    let r = rig(vec![free_port(), free_port()], &root_hash("mine"));
+    let mute = FakeDaemon::start(
+        TcpListener::bind(("127.0.0.1", r.cfg.candidates[0])).expect("bind"),
+        FakeOptions {
+            key: r.key.clone(),
+            code_root: root_hash("mine"),
+            verify_relay: true,
+            tools_hash: "h".into(),
+            send_ticket: false,
+            hang: true,
+        },
+    );
+    let daemon = Arc::new(fake_on(&r, 1, &root_hash("mine")));
+    // The real daemon closes a connection whose handshake has not started within its stage window:
+    // a connection opened at probe time would be cut before the mute candidate runs out.
+    let stage_window = r.cfg.step_timeout / 4;
+    let cutter = daemon.clone();
+    thread::spawn(move || {
+        thread::sleep(stage_window);
+        cutter.drop_connections();
+    });
+    let found = sweep(&r.cfg, &r.key, &hello_for(&r), None);
+    assert!(
+        found.session.is_some(),
+        "the daemon behind a mute listener must still answer WELCOME"
+    );
+    assert_eq!(found.silent_ports, vec![mute.port]);
+    assert_eq!(daemon.hellos().len(), 1);
+}
+
+#[test]
+fn a_daemon_that_starts_listening_while_the_sweep_waits_on_a_mute_candidate_is_found_in_the_same_pass(
+) {
+    let r = rig(vec![free_port(), free_port()], &root_hash("mine"));
+    let accepted = Arc::new(AtomicUsize::new(0));
+    let mute_listener = TcpListener::bind(("127.0.0.1", r.cfg.candidates[0])).expect("bind");
+    let mute_port = r.cfg.candidates[0];
+    let counter = accepted.clone();
+    thread::spawn(move || {
+        let held: Vec<_> = mute_listener
+            .incoming()
+            .take(2)
+            .flatten()
+            .inspect(|_| {
+                counter.fetch_add(1, Ordering::SeqCst);
+            })
+            .collect();
+        thread::sleep(Duration::from_secs(3));
+        drop(held);
+    });
+    let (late_port, key) = (r.cfg.candidates[1], r.key.clone());
+    let starter = thread::spawn(move || {
+        // The second connection to the mute candidate is the sweep's handshake at its turn, after
+        // the probe of every candidate: the late port is free when it is probed.
+        let began = std::time::Instant::now();
+        while accepted.load(Ordering::SeqCst) < 2 && began.elapsed() < Duration::from_secs(5) {
+            thread::sleep(Duration::from_millis(1));
+        }
+        FakeDaemon::start(
+            TcpListener::bind(("127.0.0.1", late_port)).expect("bind"),
+            FakeOptions {
+                key,
+                code_root: root_hash("mine"),
+                verify_relay: true,
+                tools_hash: "h".into(),
+                send_ticket: false,
+                hang: false,
+            },
+        )
+    });
+    let found = sweep(&r.cfg, &r.key, &hello_for(&r), None);
+    let late = starter.join().expect("the late daemon starts");
+    assert!(
+        found.session.is_some(),
+        "a port found free by the probe must be tried again at its turn"
+    );
+    assert_eq!(late.hellos().len(), 1);
+    assert_eq!(found.silent_ports, vec![mute_port]);
+}
+
+#[test]
+fn a_silent_listener_is_traced_when_it_is_skipped_and_named_in_the_fallback_cause() {
+    let mut r = rig(vec![free_port()], &root_hash("mine"));
+    r.cfg.opening_deadline = Duration::from_millis(700);
+    let mute = FakeDaemon::start(
+        TcpListener::bind(("127.0.0.1", r.cfg.candidates[0])).expect("bind"),
+        FakeOptions {
+            key: r.key.clone(),
+            code_root: root_hash("mine"),
+            verify_relay: true,
+            tools_hash: "h".into(),
+            send_ticket: false,
+            hang: true,
+        },
+    );
+    let spawner = NoSpawn(AtomicUsize::new(0));
+    let found = find_session(
+        &r.cfg,
+        &r.key,
+        &hello_for(&r),
+        true,
+        &spawner,
+        &Control::default(),
+    );
+    let Found::Fallback(cause) = found else {
+        panic!("a daemon that never answers must end in a fallback")
+    };
+    assert!(
+        cause.contains(&format!("silent listeners seen on ports {}", mute.port)),
+        "the fallback cause must name the silent port: {cause}"
+    );
+    assert_eq!(
+        cause.matches(&mute.port.to_string()).count(),
+        1,
+        "a port seen in several passes is named once: {cause}"
+    );
+    assert!(
+        r.logged(&format!("port {}: no CHALLENGE within", mute.port)) && r.logged("(silent listener)"),
+        "the skip of a silent listener must leave a log line"
+    );
+}
+
+#[test]
 fn a_listener_that_does_not_know_the_key_never_receives_the_hello() {
     let r = rig(vec![free_port()], &root_hash("mine"));
     let listener = TcpListener::bind(("127.0.0.1", r.cfg.candidates[0])).expect("bind");
@@ -696,7 +820,7 @@ fn free_ports_are_refused_long_before_the_connect_timeout() {
     );
 }
 
-fn refused(index: usize) -> std::io::Result<std::net::TcpStream> {
+fn refused(index: usize) -> std::io::Result<()> {
     Err(std::io::Error::other(index.to_string()))
 }
 

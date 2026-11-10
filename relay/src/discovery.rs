@@ -139,14 +139,27 @@ pub mod loopback {
     }
 }
 
-type ConnectResult = (usize, io::Result<TcpStream>);
+/// Bounds the second connect to a port found free: a refusal is immediate once
+/// SYN retransmission is off, and a socket on which it could not be turned off
+/// must not cost a full `connect_timeout` at every port.
+const REPROBE_CONNECT_CAP: Duration = Duration::from_millis(50);
 
-/// The connect results of the candidates, handed out in port order, each one
+fn is_free(e: &io::Error) -> bool {
+    matches!(e.kind(), ErrorKind::ConnectionRefused | ErrorKind::TimedOut)
+}
+
+fn probe_is_stale(cfg: &Config, probed_at: Instant) -> bool {
+    probed_at.elapsed() >= cfg.connect_timeout
+}
+
+type ConnectResult = (usize, io::Result<()>);
+
+/// The probe results of the candidates, handed out in port order, each one
 /// as soon as it and every lower port are settled.
 pub struct OrderedConnects {
     rx: Receiver<ConnectResult>,
     ports: Vec<u16>,
-    settled: Vec<Option<io::Result<TcpStream>>>,
+    settled: Vec<Option<io::Result<()>>>,
     next: usize,
 }
 
@@ -167,7 +180,7 @@ impl OrderedConnects {
 }
 
 impl Iterator for OrderedConnects {
-    type Item = (u16, io::Result<TcpStream>);
+    type Item = (u16, io::Result<()>);
 
     fn next(&mut self) -> Option<Self::Item> {
         let port = *self.ports.get(self.next)?;
@@ -185,9 +198,12 @@ impl Iterator for OrderedConnects {
     }
 }
 
-/// Starts a connect to every candidate at once. On Windows a closed loopback
-/// port can answer "refused" only after about two seconds, so a sequential
-/// pass over ten free ports would outlast the opening deadline.
+/// Probes every candidate at once and closes each probe connection. On
+/// Windows a closed loopback port can answer "refused" only after about two
+/// seconds, so a sequential pass over ten free ports would outlast the opening
+/// deadline. The handshake runs on a connection opened at the candidate's own
+/// turn: a daemon starts its handshake clock at accept, and a mute listener
+/// ahead in the order would let that clock run out before the turn comes.
 fn connect_all(cfg: &Config) -> OrderedConnects {
     let (tx, rx) = mpsc::channel();
     for (index, &port) in cfg.candidates.iter().enumerate() {
@@ -195,7 +211,7 @@ fn connect_all(cfg: &Config) -> OrderedConnects {
         let (timeout, log) = (cfg.connect_timeout, cfg.logger.clone());
         thread::spawn(move || {
             let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
-            let _ = tx.send((index, loopback::connect(addr, timeout, &log)));
+            let _ = tx.send((index, loopback::connect(addr, timeout, &log).map(drop)));
         });
     }
     OrderedConnects::new(cfg.candidates.clone(), rx)
@@ -206,9 +222,13 @@ fn connect_all(cfg: &Config) -> OrderedConnects {
 /// connect that is refused or still unanswered at `connect_timeout` means no
 /// listener: the port is free. Each candidate gets three step timeouts in
 /// total for its whole handshake, and no candidate runs past `overall`.
+/// A port the probe found free is tried once more at its turn when the probe
+/// is older than `connect_timeout`: a daemon may have started to listen while
+/// the sweep waited on a lower candidate.
 pub fn sweep(cfg: &Config, key: &[u8], hello: &[u8], overall: Option<Instant>) -> Sweep {
     let mut out = Sweep::default();
     let mut connects = connect_all(cfg);
+    let probed_at = Instant::now();
     loop {
         let unexamined = connects.remaining();
         let Some((port, attempt)) = connects.next() else {
@@ -224,9 +244,18 @@ pub fn sweep(cfg: &Config, key: &[u8], hello: &[u8], overall: Option<Instant>) -
             }
             deadline = deadline.min(limit);
         }
-        let mut stream = match attempt {
+        let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+        let left = deadline.saturating_duration_since(Instant::now());
+        let opened = match attempt {
+            Ok(()) => loopback::connect(addr, cfg.connect_timeout.min(left), &cfg.logger),
+            Err(e) if probe_is_stale(cfg, probed_at) && is_free(&e) => {
+                loopback::connect(addr, REPROBE_CONNECT_CAP.min(left), &cfg.logger)
+            }
+            Err(e) => Err(e),
+        };
+        let mut stream = match opened {
             Ok(s) => s,
-            Err(e) if matches!(e.kind(), ErrorKind::ConnectionRefused | ErrorKind::TimedOut) => {
+            Err(e) if is_free(&e) => {
                 out.free_ports += 1;
                 continue;
             }
@@ -237,6 +266,7 @@ pub fn sweep(cfg: &Config, key: &[u8], hello: &[u8], overall: Option<Instant>) -
             }
         };
         let step = cfg.step_timeout;
+        let handshake_began = Instant::now();
         let result =
             auth::authenticate(&mut stream, key, step, deadline).and_then(|mut channel| {
                 let welcome = auth::exchange_hello(
@@ -259,7 +289,13 @@ pub fn sweep(cfg: &Config, key: &[u8], hello: &[u8], overall: Option<Instant>) -
                 });
                 return out;
             }
-            Err(ConnectError::Silent) => out.silent_ports.push(port),
+            Err(ConnectError::Silent) => {
+                cfg.logger.line(&format!(
+                    "port {port}: no CHALLENGE within {} ms, skipped (silent listener)",
+                    handshake_began.elapsed().as_millis()
+                ));
+                out.silent_ports.push(port);
+            }
             Err(ConnectError::Skip(why)) => {
                 cfg.logger.line(&format!("port {port}: {why}, skipped"))
             }
@@ -579,6 +615,29 @@ impl Control {
     }
 }
 
+fn remember_silent(seen: &mut Vec<u16>, ports: &[u16]) {
+    for port in ports {
+        if !seen.contains(port) {
+            seen.push(*port);
+        }
+    }
+}
+
+fn opening_timeout_cause(cfg: &Config, silent: &[u16]) -> String {
+    let mut cause = format!(
+        "no daemon session opened within {} ms",
+        cfg.opening_deadline.as_millis()
+    );
+    if !silent.is_empty() {
+        let ports: Vec<String> = silent.iter().map(u16::to_string).collect();
+        cause.push_str(&format!(
+            " (silent listeners seen on ports {})",
+            ports.join(", ")
+        ));
+    }
+    cause
+}
+
 /// Looks for a daemon session; starts the daemon when no candidate answers.
 /// With `opening` set it gives up after `opening_deadline` or on a fatal
 /// refusal, and the caller falls back to bun. Without it, it retries with
@@ -596,6 +655,7 @@ pub fn find_session(
     let overall = opening.then(|| started + cfg.opening_deadline);
     let mut backoff = cfg.backoff_min;
     let mut silent_since: Option<Instant> = None;
+    let mut silent_seen: Vec<u16> = Vec::new();
     loop {
         if ctl.stopped() {
             return Found::Stopped;
@@ -607,6 +667,7 @@ pub fn find_session(
         if let Some(s) = pass.session {
             return Found::Session(Box::new(s));
         }
+        remember_silent(&mut silent_seen, &pass.silent_ports);
         ctl.set_refusal(pass.fatal.clone());
         if let Some(cause) = pass.fatal.clone() {
             if opening {
@@ -614,10 +675,7 @@ pub fn find_session(
             }
         }
         if opening && started.elapsed() >= cfg.opening_deadline {
-            return Found::Fallback(format!(
-                "no daemon session opened within {} ms",
-                cfg.opening_deadline.as_millis()
-            ));
+            return Found::Fallback(opening_timeout_cause(cfg, &silent_seen));
         }
         if pass.silent_ports.is_empty() {
             silent_since = None;
@@ -646,12 +704,10 @@ pub fn find_session(
                         release_launch_lock(cfg);
                         return Found::Session(Box::new(s));
                     }
+                    remember_silent(&mut silent_seen, &recheck.silent_ports);
                     if opening && started.elapsed() >= cfg.opening_deadline {
                         release_launch_lock(cfg);
-                        return Found::Fallback(format!(
-                            "no daemon session opened within {} ms",
-                            cfg.opening_deadline.as_millis()
-                        ));
+                        return Found::Fallback(opening_timeout_cause(cfg, &silent_seen));
                     }
                     if recheck.free_ports == 0 || recheck.fatal.is_some() {
                         release_launch_lock(cfg);

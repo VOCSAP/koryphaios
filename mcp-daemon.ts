@@ -1,7 +1,7 @@
 import { realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { coreLogDir, createLogger } from "./shared/logger.ts";
-import { daemonCodeRoot, installProcessHandlers, osUsername, runDaemon, scrubSessionEnv } from "./shared/mcp-daemon-lifecycle.ts";
+import { brokerBeforeListenRequest, daemonCodeRoot, installProcessHandlers, osUsername, runDaemon, scrubSessionEnv } from "./shared/mcp-daemon-lifecycle.ts";
 
 const logDir = coreLogDir();
 const log = createLogger({ dir: logDir, name: "server", mirrorToConsole: false }).child("daemon");
@@ -27,6 +27,7 @@ const run = runDaemon({
   logDir,
   families: daemonFamilies(),
   brokers,
+  brokerBeforeListen: brokerBeforeListenRequest(process.env, log),
   settings: readPeersSessionSettings(process.env, (message) => log.error(message)),
 });
 
