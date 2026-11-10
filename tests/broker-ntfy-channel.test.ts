@@ -93,7 +93,7 @@ interface StubNtfy {
  * A minimal ntfy: health, a streaming subscribe, and a publish that fans out to
  * live subscribers. Enough to run the real two-topic loop on loopback.
  */
-function startStubNtfy(opts: { requireToken?: string; unhealthy?: boolean } = {}): StubNtfy {
+function startStubNtfy(opts: { requireToken?: string; unhealthy?: boolean; subscribeDelayMs?: number } = {}): StubNtfy {
   const seen: string[] = [];
   const published = new Map<string, Array<Record<string, unknown>>>();
   const subscribers = new Map<string, Set<ReadableStreamDefaultController<Uint8Array>>>();
@@ -141,6 +141,8 @@ function startStubNtfy(opts: { requireToken?: string; unhealthy?: boolean } = {}
       }
 
       if (url.searchParams.get("poll") === "1") return new Response("", { status: 200 });
+      // A slow subscription leg, as on a loaded runner: a publish made before it opens reaches nobody.
+      if (opts.subscribeDelayMs) await Bun.sleep(opts.subscribeDelayMs);
 
       // The subscription: held open, so the adapter reports itself ready
       // instead of hot-looping through reconnects for the whole suite.
@@ -196,6 +198,42 @@ async function until(check: () => Promise<boolean> | boolean, ms = 5000): Promis
   return false;
 }
 
+async function ntfyRow(b: TestBroker, op: Operator): Promise<Record<string, unknown>> {
+  const list = await signedPost<{ channels: Array<Record<string, unknown>> }>(b, "/approval/channel-list", {}, op);
+  return list.body.channels.find((c) => c.kind === "ntfy")!;
+}
+
+async function awaitNtfyConnected(b: TestBroker, op: Operator): Promise<void> {
+  expect(
+    await until(async () => (await ntfyRow(b, op)).connected === true),
+    "the broker never opened its ntfy replies subscription"
+  ).toBe(true);
+}
+
+async function awaitPaired(b: TestBroker, op: Operator): Promise<void> {
+  expect(await until(async () => (await ntfyRow(b, op)).paired === 1), "the pairing message never bound the topic").toBe(true);
+}
+
+/**
+ * channel-connect answers before the broker's replies subscription is open, and the stub hands a publish
+ * only to live subscribers: a pairing published in between is lost, so every caller waits for `connected`.
+ */
+async function connectNtfy(
+  b: TestBroker,
+  ntfy: StubNtfy,
+  op: Operator
+): Promise<{ status: number; body: { mobile_payload: string; pairing_code: string } }> {
+  const res = await signedPost<{ mobile_payload: string; pairing_code: string }>(
+    b,
+    "/approval/channel-connect",
+    { kind: "ntfy", server: ntfy.url },
+    op
+  );
+  expect(res.status, "channel-connect refused the stub ntfy").toBe(200);
+  await awaitNtfyConnected(b, op);
+  return res;
+}
+
 describe("ntfy enrolment", () => {
   test("connect mints two topics and hands back a scannable payload", async () => {
     const b = shared;
@@ -229,14 +267,8 @@ describe("ntfy enrolment", () => {
     const ntfy = startStubNtfy();
     const op = freshOperator();
 
-    await signedPost(b, "/approval/channel-connect", { kind: "ntfy", server: ntfy.url }, op);
-    const list = await signedPost<{ channels: Array<Record<string, unknown>> }>(
-      b,
-      "/approval/channel-list",
-      {},
-      op
-    );
-    const row = list.body.channels.find((c) => c.kind === "ntfy")!;
+    await connectNtfy(b, ntfy, op);
+    const row = await ntfyRow(b, op);
     expect(row.configured).toBe(true);
     expect(row.connected).toBe(true);
     // Not yet scanned: pairing is what creates the binding.
@@ -280,12 +312,7 @@ describe("ntfy enrolment", () => {
     const ntfy = startStubNtfy();
     const op = freshOperator();
 
-    const first = await signedPost<{ mobile_payload: string }>(
-      b,
-      "/approval/channel-connect",
-      { kind: "ntfy", server: ntfy.url },
-      op
-    );
+    const first = await connectNtfy(b, ntfy, op);
     const old = decodePairingPayload(first.body.mobile_payload)!;
     await ntfy.publishRaw(old.topic_replies, encodePair(old.code, "Lost phone"));
     const paired = await until(async () => {
@@ -300,12 +327,7 @@ describe("ntfy enrolment", () => {
     expect(paired).toBe(true);
 
     // The operator reconnects after losing the phone.
-    const reconnect = await signedPost<{ mobile_payload: string }>(
-      b,
-      "/approval/channel-connect",
-      { kind: "ntfy", server: ntfy.url },
-      op
-    );
+    const reconnect = await connectNtfy(b, ntfy, op);
     const fresh = decodePairingPayload(reconnect.body.mobile_payload)!;
     const list = await signedPost<{ channels: Array<Record<string, unknown>> }>(
       b,
@@ -405,23 +427,10 @@ describe("ntfy enrolment", () => {
     const ntfy = startStubNtfy();
     const op = freshOperator();
 
-    const first = await signedPost<{ mobile_payload: string }>(
-      b,
-      "/approval/channel-connect",
-      { kind: "ntfy", server: ntfy.url },
-      op
-    );
+    const first = await connectNtfy(b, ntfy, op);
     const good = decodePairingPayload(first.body.mobile_payload)!;
     await ntfy.publishRaw(good.topic_replies, encodePair(good.code, "Pixel 8"));
-    await until(async () => {
-      const list = await signedPost<{ channels: Array<Record<string, unknown>> }>(
-        b,
-        "/approval/channel-list",
-        {},
-        op
-      );
-      return list.body.channels.find((c) => c.kind === "ntfy")!.paired === 1;
-    });
+    await awaitPaired(b, op);
 
     // Now a Connect that cannot succeed: a private address nothing listens on.
     const failed = await signedPost<{ error: string }>(
@@ -499,15 +508,11 @@ describe("ntfy enrolment", () => {
 
   test("the pairing message from the phone binds the topic, and is confirmed", async () => {
     const b = shared;
-    const ntfy = startStubNtfy();
+    // Delayed so that a pairing published before the broker subscribes is lost, as on a slow runner.
+    const ntfy = startStubNtfy({ subscribeDelayMs: 300 });
     const op = freshOperator();
 
-    const conn = await signedPost<{ mobile_payload: string }>(
-      b,
-      "/approval/channel-connect",
-      { kind: "ntfy", server: ntfy.url },
-      op
-    );
+    const conn = await connectNtfy(b, ntfy, op);
     const payload = decodePairingPayload(conn.body.mobile_payload)!;
 
     // The phone scanned the QR and answers on the replies topic.
@@ -541,23 +546,10 @@ describe("ntfy enrolment", () => {
     const ntfy = startStubNtfy();
     const op = freshOperator();
 
-    const conn = await signedPost<{ mobile_payload: string }>(
-      b,
-      "/approval/channel-connect",
-      { kind: "ntfy", server: ntfy.url },
-      op
-    );
+    const conn = await connectNtfy(b, ntfy, op);
     const payload = decodePairingPayload(conn.body.mobile_payload)!;
     await ntfy.publishRaw(payload.topic_replies, encodePair(payload.code, "Pixel 8"));
-    await until(async () => {
-      const list = await signedPost<{ channels: Array<Record<string, unknown>> }>(
-        b,
-        "/approval/channel-list",
-        {},
-        op
-      );
-      return list.body.channels.find((c) => c.kind === "ntfy")!.paired === 1;
-    });
+    await awaitPaired(b, op);
 
     const added = await signedPost<{ approval: Approval }>(
       b,
@@ -633,13 +625,10 @@ describe("ntfy enrolment", () => {
     const op = freshOperator();
     const project = "github.com/vocsap/koryphaios";
 
-    const conn = await signedPost<{ mobile_payload: string }>(b, "/approval/channel-connect", { kind: "ntfy", server: ntfy.url }, op);
+    const conn = await connectNtfy(b, ntfy, op);
     const payload = decodePairingPayload(conn.body.mobile_payload)!;
     await ntfy.publishRaw(payload.topic_replies, encodePair(payload.code, "Pixel 8"));
-    await until(async () => {
-      const list = await signedPost<{ channels: Array<Record<string, unknown>> }>(b, "/approval/channel-list", {}, op);
-      return list.body.channels.find((c) => c.kind === "ntfy")!.paired === 1;
-    });
+    await awaitPaired(b, op);
 
     const added = await signedPost<{ approval: Approval }>(
       b,
@@ -681,13 +670,10 @@ describe("ntfy enrolment", () => {
     const op = freshOperator();
     const project = "github.com/vocsap/koryphaios";
 
-    const conn = await signedPost<{ mobile_payload: string }>(b, "/approval/channel-connect", { kind: "ntfy", server: ntfy.url }, op);
+    const conn = await connectNtfy(b, ntfy, op);
     const payload = decodePairingPayload(conn.body.mobile_payload)!;
     await ntfy.publishRaw(payload.topic_replies, encodePair(payload.code, "Pixel 8"));
-    await until(async () => {
-      const list = await signedPost<{ channels: Array<Record<string, unknown>> }>(b, "/approval/channel-list", {}, op);
-      return list.body.channels.find((c) => c.kind === "ntfy")!.paired === 1;
-    });
+    await awaitPaired(b, op);
 
     const added = await signedPost<{ approval: Approval }>(
       b,
@@ -786,23 +772,10 @@ describe("ntfy enrolment", () => {
     const ntfy = startStubNtfy();
     const op = freshOperator();
 
-    const conn = await signedPost<{ mobile_payload: string }>(
-      b,
-      "/approval/channel-connect",
-      { kind: "ntfy", server: ntfy.url },
-      op
-    );
+    const conn = await connectNtfy(b, ntfy, op);
     const payload = decodePairingPayload(conn.body.mobile_payload)!;
     await ntfy.publishRaw(payload.topic_replies, encodePair(payload.code, "Pixel 8"));
-    await until(async () => {
-      const list = await signedPost<{ channels: Array<Record<string, unknown>> }>(
-        b,
-        "/approval/channel-list",
-        {},
-        op
-      );
-      return list.body.channels.find((c) => c.kind === "ntfy")!.paired === 1;
-    });
+    await awaitPaired(b, op);
 
     const added = await signedPost<{ approval: Approval }>(
       b,
@@ -848,23 +821,10 @@ describe("ntfy enrolment", () => {
     const b = shared;
     const ntfy = startStubNtfy();
 
-    const conn = await signedPost<{ mobile_payload: string }>(
-      b,
-      "/approval/channel-connect",
-      { kind: "ntfy", server: ntfy.url },
-      mine
-    );
+    const conn = await connectNtfy(b, ntfy, mine);
     const payload = decodePairingPayload(conn.body.mobile_payload)!;
     await ntfy.publishRaw(payload.topic_replies, encodePair(payload.code, "Pixel 8"));
-    await until(async () => {
-      const list = await signedPost<{ channels: Array<Record<string, unknown>> }>(
-        b,
-        "/approval/channel-list",
-        {},
-        mine
-      );
-      return list.body.channels.find((c) => c.kind === "ntfy")!.paired === 1;
-    });
+    await awaitPaired(b, mine);
 
     // An approval belonging to somebody else entirely.
     const added = await signedPost<{ approval: Approval }>(
@@ -912,18 +872,8 @@ describe("ntfy enrolment", () => {
     const b = shared;
     const ntfy = startStubNtfy();
 
-    const aConn = await signedPost<{ mobile_payload: string }>(
-      b,
-      "/approval/channel-connect",
-      { kind: "ntfy", server: ntfy.url },
-      alice
-    );
-    const bConn = await signedPost<{ mobile_payload: string }>(
-      b,
-      "/approval/channel-connect",
-      { kind: "ntfy", server: ntfy.url },
-      bob
-    );
+    const aConn = await connectNtfy(b, ntfy, alice);
+    const bConn = await connectNtfy(b, ntfy, bob);
     const a = decodePairingPayload(aConn.body.mobile_payload)!;
     const c = decodePairingPayload(bConn.body.mobile_payload)!;
     expect(a.topic_notif).not.toBe(c.topic_notif);
@@ -933,15 +883,7 @@ describe("ntfy enrolment", () => {
       [bob, c],
     ] as const) {
       await ntfy.publishRaw(payload.topic_replies, encodePair(payload.code, "phone"));
-      await until(async () => {
-        const list = await signedPost<{ channels: Array<Record<string, unknown>> }>(
-          b,
-          "/approval/channel-list",
-          {},
-          op
-        );
-        return list.body.channels.find((x) => x.kind === "ntfy")!.paired === 1;
-      });
+      await awaitPaired(b, op);
     }
 
     // Alice's enrolment is still RUNNING after Bob's — it was not replaced.
@@ -1004,18 +946,8 @@ describe("ntfy enrolment", () => {
     const b = shared;
     const ntfy = startStubNtfy();
 
-    const aConn = await signedPost<{ pairing_code: string; mobile_payload: string }>(
-      b,
-      "/approval/channel-connect",
-      { kind: "ntfy", server: ntfy.url },
-      alice
-    );
-    const bConn = await signedPost<{ mobile_payload: string }>(
-      b,
-      "/approval/channel-connect",
-      { kind: "ntfy", server: ntfy.url },
-      bob
-    );
+    const aConn = await connectNtfy(b, ntfy, alice);
+    const bConn = await connectNtfy(b, ntfy, bob);
     const bobTopics = decodePairingPayload(bConn.body.mobile_payload)!;
 
     // Alice's code, redeemed on Bob's replies topic.
@@ -1051,8 +983,8 @@ describe("ntfy enrolment", () => {
     const b = shared;
     const ntfy = startStubNtfy();
 
-    await signedPost(b, "/approval/channel-connect", { kind: "ntfy", server: ntfy.url }, alice);
-    await signedPost(b, "/approval/channel-connect", { kind: "ntfy", server: ntfy.url }, bob);
+    await connectNtfy(b, ntfy, alice);
+    await connectNtfy(b, ntfy, bob);
     await signedPost(b, "/approval/channel-disconnect", { kind: "ntfy" }, bob);
 
     const aliceList = await signedPost<{ channels: Array<Record<string, unknown>> }>(
@@ -1116,6 +1048,8 @@ describe("ntfy enrolment", () => {
       ).toBe(true);
       const bootLog = await Bun.file(join(restarted.tmpDir, "logs", "broker.log")).text();
       expect(bootLog.match(/notify: ntfy started/g)).toHaveLength(1);
+      // "started" is logged before the replies subscription opens; the pairings below need it open.
+      await awaitNtfyConnected(restarted, alice);
 
       const db = openBrokerDb(source.dbPath);
       try {
