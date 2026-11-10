@@ -80,6 +80,12 @@ Colour is meaning. Do not repurpose these:
   same row. The light value is the info-toast amber `#9a6700`: a 1px
   outline needs 3:1 on both sides, and it measures 4.87 on white, 3.87 on
   `--selected`, 3.97 on the hover `--bg-3`.
+- **Context ring states** (`ContextRing.tsx`, 13px, Claude tiles only): a
+  measured reading is a solid arc in `--fg-dim` / `--action-prompt` /
+  `--danger` (70/90 bands); a source with no reading yet is the dashed full
+  ring (`.context-ring-unknown`); no report at all is the track crossed by a
+  diagonal bar at opacity 0.55 (`.context-ring-unavailable`), never an empty
+  track, which would read as 0%. A non-Claude tile shows no ring.
 - **Banner red `#a03030`** — full-width outage banner (state, not event).
 - **Gold `var(--glow)`** — the "enchanted glyph" attention halo (§5). User-
   configurable (AppConfig.glowColor); never reuse it for anything but

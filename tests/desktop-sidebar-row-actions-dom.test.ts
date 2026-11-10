@@ -178,10 +178,43 @@ test("the context ring names the model, so hiding the badge on a narrow row lose
   expect(ring?.querySelector("title")?.textContent).toContain("Haiku 4.5");
 });
 
-test("without a live status the overlay still carries the actions and no ring renders", () => {
+test("a measured ring says what it measures in its tooltip, and keeps a short spoken label", () => {
+  renderRow(session());
+  const ring = row().querySelector("svg.context-ring");
+  expect(ring?.querySelector("title")?.textContent).toContain("sidebar.contextRingScope");
+  expect(ring?.getAttribute("aria-label")).toContain("sidebar.contextRingTitle");
+  expect(ring?.getAttribute("aria-label"), "the scope sentence would be read on every row").not.toContain("sidebar.contextRingScope");
+});
+
+test("a ring with a source but no reading yet stays the dashed unknown ring, not unavailable", () => {
+  renderRow(session({ liveStatus: { ...LIVE, contextPct: null } }));
+  const ring = row().querySelector("svg.context-ring");
+  expect(ring?.classList.contains("context-ring-unknown")).toBe(true);
+  expect(ring?.classList.contains("context-ring-unavailable")).toBe(false);
+});
+
+test("without a live status the row shows an unavailable ring that says why, and keeps its actions", () => {
   renderRow(session({ liveStatus: null }));
-  expect(row().querySelector("svg.context-ring")).toBeNull();
+  const ring = row().querySelector("svg.context-ring");
+  expect(ring, "the ring vanished: an empty slot reads as a zero context").not.toBeNull();
+  expect(ring!.classList.contains("context-ring-unavailable")).toBe(true);
+  expect(ring!.getAttribute("aria-label")).toBe("sidebar.contextRingUnavailable");
+  expect(ring!.querySelector("title")?.textContent, "the tooltip must say why").toBe("sidebar.contextRingUnavailable");
+  expect(ring!.querySelector(".context-ring-fill"), "an unavailable ring draws no fill arc").toBeNull();
+  expect(ring!.querySelector(".context-ring-bar"), "the bar is what tells it apart from 0%").not.toBeNull();
+  expect(row().querySelector(".row-model"), "no model badge without a report").toBeNull();
   expect(overlayTitles()).toEqual(ROW_ACTION_TITLES);
+});
+
+test("a non-Claude tile has no context ring at all, and keeps its actions", () => {
+  renderRow(session({ claudeLaunch: false, liveStatus: null }));
+  expect(row().querySelector("svg.context-ring"), "a shell or codex tile can never report a context").toBeNull();
+  expect(overlayTitles()).toEqual(ROW_ACTION_TITLES);
+});
+
+test("a folded row shows no ring, measured or not", () => {
+  renderRow(session({ liveStatus: null }), true);
+  expect(row().querySelector("svg.context-ring")).toBeNull();
 });
 
 test("while renaming, the overlay drops the rename button and keeps the others", () => {

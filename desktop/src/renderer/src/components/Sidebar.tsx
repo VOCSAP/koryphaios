@@ -280,13 +280,13 @@ export function SessionRow({
           {GLYPH_BADGES.torchOut}
         </span>
       )}
-      {/* Model + context fill: the tile's own statusLine
-          report, null until the first one arrives or when the tile carries
-          no Deck statusLine (sandbox, non-claude command) -- both badges
-          vanish together rather than showing a stale or guessed reading.
+      {/* Model + context fill: the tile's own statusLine report. A non-Claude
+          tile can never report one, so it gets no ring. A Claude tile without
+          a report (none yet, stopped, sandbox, status line off) drops the
+          model badge and shows the barred ring: an empty slot would read as a
+          zero context, and the renderer cannot tell those causes apart.
           Dropped folded like the row actions: the model name needs width the
-          rail does not have, and showing the ring alone without its model
-          label would read as an unexplained dot. */}
+          rail does not have. */}
       {!collapsed && session.liveStatus && (
         <span
           className="row-model"
@@ -298,13 +298,17 @@ export function SessionRow({
           {shortModelLabel(session.liveStatus.modelId, session.liveStatus.model)}
         </span>
       )}
-      {!collapsed && session.liveStatus && (
-        <ContextRing
-          pct={session.liveStatus.contextPct}
-          contextWindow={session.liveStatus.contextWindow}
-          model={session.liveStatus.model}
-        />
-      )}
+      {!collapsed &&
+        session.claudeLaunch !== false &&
+        (session.liveStatus ? (
+          <ContextRing
+            pct={session.liveStatus.contextPct}
+            contextWindow={session.liveStatus.contextWindow}
+            model={session.liveStatus.model}
+          />
+        ) : (
+          <ContextRing unavailable pct={null} contextWindow={null} />
+        ))}
       {/* Row actions: dropped folded rather than shrunk. They are hover-revealed
           affordances acting on a row the rail no longer names; not rendering
           them also keeps them out of the tab order, which hiding them with

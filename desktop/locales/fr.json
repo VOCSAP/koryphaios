@@ -30,6 +30,8 @@
   "sidebar.contextRingTitle": "Contexte : {pct} % de {tokens} tokens",
   "sidebar.contextRingTitlePctOnly": "Contexte : {pct} %",
   "sidebar.contextRingUnknown": "Contexte : inconnu",
+  "sidebar.contextRingScope": "Part de la fenêtre de contexte, pas du seuil d'auto-compaction. Session principale seulement : les sous-agents ne sont pas comptés.",
+  "sidebar.contextRingUnavailable": "Contexte : indisponible. Cette tuile n'a envoyé aucune mesure : pas encore de rapport, tuile arrêtée, sandbox, ou ligne d'état désactivée.",
   "status.running": "en cours",
   "status.starting": "démarrage",
   "status.exited": "terminé",

@@ -13,14 +13,35 @@ const CIRCUMFERENCE = 2 * Math.PI * RADIUS
 export function ContextRing({
   pct,
   contextWindow,
-  model
+  model,
+  unavailable = false
 }: {
   pct: number | null
   contextWindow: number | null
   /** Named in the label: the row hides its model badge when narrow, the ring stays. */
   model?: string
+  /** The tile reports no context at all (no statusLine yet, sandbox, non-Claude). */
+  unavailable?: boolean
 }): React.JSX.Element {
   const t = useT()
+  if (unavailable) {
+    const label = t('sidebar.contextRingUnavailable')
+    // Track plus a diagonal bar: an empty track alone would read as a measured 0%.
+    return (
+      <svg
+        className="context-ring context-ring-unavailable"
+        width={SIZE}
+        height={SIZE}
+        viewBox={`0 0 ${SIZE} ${SIZE}`}
+        role="img"
+        aria-label={label}
+      >
+        <title>{label}</title>
+        <circle className="context-ring-track" cx={CENTER} cy={CENTER} r={RADIUS} />
+        <line className="context-ring-bar" x1={3} y1={10} x2={10} y2={3} />
+      </svg>
+    )
+  }
   const severity = ringSeverity(pct)
   const { dasharray, dashoffset } = ringDash(pct, CIRCUMFERENCE)
   const fill =
@@ -33,6 +54,8 @@ export function ContextRing({
           })
         : t('sidebar.contextRingTitlePctOnly', { pct: Math.round(clampPct(pct)) })
   const label = model ? `${model} · ${fill}` : fill
+  // The scope sentence is for the hover tooltip; read aloud on every row it is noise.
+  const tooltip = `${label}. ${t('sidebar.contextRingScope')}`
 
   return (
     <svg
@@ -43,7 +66,7 @@ export function ContextRing({
       role="img"
       aria-label={label}
     >
-      <title>{label}</title>
+      <title>{tooltip}</title>
       <circle className="context-ring-track" cx={CENTER} cy={CENTER} r={RADIUS} />
       <circle
         className="context-ring-fill"

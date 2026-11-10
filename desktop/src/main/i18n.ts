@@ -990,6 +990,10 @@ export const EN_DEFAULTS: Record<string, string> = {
   'sidebar.contextRingTitle': 'Context: {pct}% of {tokens} tokens',
   'sidebar.contextRingTitlePctOnly': 'Context: {pct}%',
   'sidebar.contextRingUnknown': 'Context: unknown',
+  'sidebar.contextRingScope':
+    'Share of the context window, not of the auto-compact threshold. Main session only: subagents are not counted.',
+  'sidebar.contextRingUnavailable':
+    'Context: unavailable. This tile has sent no reading: no report yet, tile stopped, sandbox, or status line turned off.',
   'diff.title': 'Diff — {name}',
   'diff.branchSection': 'Branch commits vs {base}',
   'diff.uncommittedSection': 'Uncommitted changes',

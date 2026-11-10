@@ -745,6 +745,19 @@ body {
   opacity: 0.6;
 }
 
+/* No source at all (no statusLine report: sandbox, non-Claude, or not yet):
+   track plus a diagonal bar, the mark of "not measured here". Dimmer than the
+   unknown ring, which at least has a source and will fill on the next reply. */
+.context-ring-unavailable {
+  opacity: 0.55;
+}
+
+.context-ring-bar {
+  stroke: var(--fg-dim);
+  stroke-width: 1.6;
+  stroke-linecap: round;
+}
+
 /* Quota badge under the peer id while a session sits at the limit screen. */
 .row-quota {
   font-size: 11px;
