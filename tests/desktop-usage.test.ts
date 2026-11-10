@@ -103,7 +103,8 @@ test("prewarming a changed shell keeps its version decision separate", async () 
     else process.env.PATH = originalPath;
     rmSync(dir, { recursive: true, force: true });
   }
-});
+  // Two cold PowerShell starts overran bun's 5 s default on windows-latest.
+}, 30_000);
 
 // ---------------------------------------------------------------------------
 // Codex parsers
