@@ -3,8 +3,11 @@
 // Usage: bun scripts/relay-setup.ts [--print-only]
 // It never writes the Claude Code configuration: the commands are printed for the
 // operator to run. --print-only skips the build and picks the form by binary presence.
-import { copyFileSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync } from "node:fs";
-import { resolve } from "node:path";
+// The env of the existing user-scope entries is carried into the printed commands,
+// except what looks like a secret.
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync } from "node:fs";
+import { homedir } from "node:os";
+import { join, resolve } from "node:path";
 
 const RELAY_BIN = "claude-peers-relay";
 const USAGE = "usage: bun scripts/relay-setup.ts [--print-only]";
@@ -49,6 +52,8 @@ export interface Deps {
   run: Runner;
   sourceFiles: () => string[];
   mtimeMs: (path: string) => number;
+  /** The Claude Code config text, null when the file does not exist. */
+  readClaudeConfig: () => string | null;
   out: (text: string) => void;
   err: (text: string) => void;
 }
@@ -97,9 +102,76 @@ export function shellQuote(p: string): string {
   return /^[A-Za-z0-9_\/:.@%+=,~-]+$/.test(p) ? p : `'${p.replace(/'/g, `'\\''`)}'`;
 }
 
-export function mcpAddCommands(form: Form, root: string): string[] {
+export const ENTRY_NAMES = ["claude-peers", "kory-roadmap"] as const;
+export type EntryName = (typeof ENTRY_NAMES)[number];
+export type EntryEnvs = Record<EntryName, Array<[name: string, value: string]>>;
+
+const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+// Read by server.ts and shared/. FORCE_GROUP holds the group secret and DEPOSIT_CAPABILITY is a capability: never carried.
+const CARRIED_ENV_NAMES: ReadonlySet<string> = new Set([
+  "CLAUDE_PEERS_BROKER_URL",
+  "CLAUDE_PEERS_GROUP",
+  "CLAUDE_PEERS_PORT",
+  "CLAUDE_PEERS_LOG_DIR",
+  "CLAUDE_PEERS_ROLE",
+  "CLAUDE_PEERS_TOOLS",
+  "CLAUDE_PEERS_POLL_FALLBACK_SEC",
+  "CLAUDE_PEERS_MCP_DAEMON_PORT",
+]);
+// The one printed form that means the same in bash, PowerShell and cmd: no quote, `%`, space, `$` or control byte.
+const SAFE_VALUE = /^[A-Za-z0-9_\/:.@+=-]*$/;
+const URL_CREDENTIALS = /^[A-Za-z][A-Za-z0-9+.-]*:\/\/[^/?#\s]*@/;
+
+function noEnvs(): EntryEnvs {
+  return { "claude-peers": [], "kory-roadmap": [] };
+}
+
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+export function claudeConfigPath(env: Record<string, string | undefined>, home: string): string {
+  return join(env.CLAUDE_CONFIG_DIR || home, ".claude.json");
+}
+
+// The config is a file this script does not own: names and values are untrusted
+// text that ends in a command pasted into a shell, and a note never holds a value.
+export function existingEnvs(configText: string | null): { envs: EntryEnvs; notes: string[] } {
+  const envs = noEnvs();
+  const notes: string[] = [];
+  if (configText === null) return { envs, notes };
+  let servers: unknown;
+  try {
+    servers = (JSON.parse(configText) as { mcpServers?: unknown } | null)?.mcpServers;
+  } catch {
+    notes.push("The Claude Code config is not valid JSON: the existing env is not carried.");
+    return { envs, notes };
+  }
+  if (!isRecord(servers)) return { envs, notes };
+  for (const name of ENTRY_NAMES) {
+    const entry = servers[name];
+    if (!isRecord(entry) || entry.env === undefined) continue;
+    if (!isRecord(entry.env)) {
+      notes.push(`${name}: env is not an object, not carried.`);
+      continue;
+    }
+    for (const [key, value] of Object.entries(entry.env)) {
+      if (!ENV_NAME.test(key)) {
+        notes.push(`${name}: an env name of ${key.length} characters is not a valid variable name, not carried.`);
+      } else if (!CARRIED_ENV_NAMES.has(key) || typeof value !== "string" || !SAFE_VALUE.test(value) || URL_CREDENTIALS.test(value)) {
+        notes.push(`${name}: ${key} not carried: add --env ${key}=<value> by hand.`);
+      } else {
+        envs[name].push([key, value]);
+      }
+    }
+  }
+  return { envs, notes };
+}
+
+export function mcpAddCommands(form: Form, root: string, envs: EntryEnvs = noEnvs()): string[] {
   const base = posix(root);
-  const add = (name: string) => `claude mcp add --scope user --transport stdio ${name} --`;
+  const add = (name: EntryName) =>
+    `claude mcp add --scope user --transport stdio ${name}${envs[name].map(([k, v]) => ` --env ${k}=${v}`).join("")} --`;
   if (form.kind === "relay") {
     const bin = shellQuote(posix(form.binary));
     return [
@@ -110,12 +182,12 @@ export function mcpAddCommands(form: Form, root: string): string[] {
   return [`${add("claude-peers")} bun ${shellQuote(`${base}/server.ts`)}`, `${add("kory-roadmap")} bun ${shellQuote(`${base}/server-roadmap.ts`)}`];
 }
 
-export function renderPlan(notes: string[], form: Form, root: string): string {
+export function renderPlan(notes: string[], form: Form, root: string, envs?: EntryEnvs): string {
   return [
     ...notes,
     `Commands for the ${form.kind} form:`,
     "Paste them into bash (Git Bash on Windows).",
-    ...mcpAddCommands(form, root),
+    ...mcpAddCommands(form, root, envs),
     "This script does not write the Claude Code configuration. If an entry already exists, remove it first: claude mcp remove <name> --scope user",
   ].join("\n");
 }
@@ -220,7 +292,15 @@ export function main(argv: string[], deps: Deps): number {
       );
     }
   }
-  deps.out(renderPlan(notes, chooseForm(installed, deps.fs.exists(installed)), deps.root));
+  let configText: string | null = null;
+  try {
+    configText = deps.readClaudeConfig();
+  } catch (e) {
+    notes.push(`Could not read the Claude Code config (${message(e)}): the existing env is not carried.`);
+  }
+  const existing = existingEnvs(configText);
+  notes.push(...existing.notes);
+  deps.out(renderPlan(notes, chooseForm(installed, deps.fs.exists(installed)), deps.root, existing.envs));
   return exitCode;
 }
 
@@ -243,6 +323,14 @@ function defaultDeps(): Deps {
     },
     sourceFiles: () => relaySources(root),
     mtimeMs: (p) => statSync(p).mtimeMs,
+    readClaudeConfig: () => {
+      try {
+        return readFileSync(claudeConfigPath(process.env, homedir()), "utf8");
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code === "ENOENT") return null;
+        throw e;
+      }
+    },
     out: (text) => console.log(text),
     err: (text) => console.error(text),
   };

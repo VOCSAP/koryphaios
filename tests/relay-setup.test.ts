@@ -2,6 +2,7 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { scrubEnv } from "./_scrub-env.ts";
 
 // Imported dynamically, with a harmless argv, to measure what the import itself does:
 // an unguarded main() would print here (and would build the relay without --print-only).
@@ -24,6 +25,8 @@ const {
   cargoArgs,
   cargoTarget,
   chooseForm,
+  claudeConfigPath,
+  existingEnvs,
   installBinary,
   installedBinaryPath,
   isOlderThanSources,
@@ -80,7 +83,16 @@ function memFs(initial: Record<string, number> = {}, refuse: Failure = () => fal
   return { fs, files, log };
 }
 
-function fakeDeps(opts: { files?: Record<string, number>; refuse?: Failure; run?: Deps["run"]; mtimes?: Record<string, number>; sources?: string[] } = {}) {
+function fakeDeps(
+  opts: {
+    files?: Record<string, number>;
+    refuse?: Failure;
+    run?: Deps["run"];
+    mtimes?: Record<string, number>;
+    sources?: string[];
+    readClaudeConfig?: Deps["readClaudeConfig"];
+  } = {},
+) {
   const mem = memFs(opts.files, opts.refuse);
   const out: string[] = [];
   const err: string[] = [];
@@ -103,6 +115,7 @@ function fakeDeps(opts: { files?: Record<string, number>; refuse?: Failure; run?
       mtimeCalls.push(p);
       return opts.mtimes?.[p] ?? 0;
     },
+    readClaudeConfig: opts.readClaudeConfig ?? (() => null),
     out: (t) => void out.push(t),
     err: (t) => void err.push(t),
   };
@@ -204,6 +217,162 @@ describe("printed commands", () => {
     const { deps, out } = fakeDeps();
     main(["--print-only"], deps);
     expect(out.join("\n"), "the single-quote escaping is POSIX only, the operator must be told which shell").toContain("Paste them into bash (Git Bash on Windows).");
+  });
+});
+
+const configWith = (peers?: unknown, roadmap?: unknown) =>
+  JSON.stringify({ mcpServers: { ...(peers === undefined ? {} : { "claude-peers": { env: peers } }), ...(roadmap === undefined ? {} : { "kory-roadmap": { env: roadmap } }) } });
+
+const BASH = Bun.which("bash");
+
+// Runs a script of printed commands in a real bash, `claude` replaced by a function
+// that prints its arguments: what the operator's shell would hand to claude.
+function argvsSeenByBash(commands: string[]): string[][] {
+  const script = ["claude() { printf '%s\\0' \"$@\"; printf '%s\\0' '--END--'; }", ...commands].join("\n");
+  const r = Bun.spawnSync([BASH!, "-c", script], { stdout: "pipe", stderr: "pipe", env: scrubEnv(work) });
+  expect(r.stderr.toString(), "a pasted value must not run anything").toBe("");
+  expect(r.exitCode).toBe(0);
+  return r.stdout
+    .toString()
+    .split("\0--END--\0")
+    .slice(0, -1)
+    .map((chunk) => chunk.split("\0").filter((word, i, all) => !(i === all.length - 1 && word === "")));
+}
+
+describe("env carried from the existing entries", () => {
+  const GROUP = "CLAUDE_PEERS_GROUP";
+
+  test("each family prints its own entry's env, before the -- separator, in both forms", () => {
+    const { envs, notes } = existingEnvs(configWith({ [GROUP]: "ovr-all", CLAUDE_PEERS_BROKER_URL: "http://192.168.10.23:7898" }, { [GROUP]: "other" }));
+    expect(notes).toEqual([]);
+    expect(mcpAddCommands({ kind: "bun" }, "/r", envs), "dropping the env, or giving a family the other one's, changes the group of the switched sessions").toEqual([
+      "claude mcp add --scope user --transport stdio claude-peers --env CLAUDE_PEERS_GROUP=ovr-all --env CLAUDE_PEERS_BROKER_URL=http://192.168.10.23:7898 -- bun /r/server.ts",
+      "claude mcp add --scope user --transport stdio kory-roadmap --env CLAUDE_PEERS_GROUP=other -- bun /r/server-roadmap.ts",
+    ]);
+    const [peers] = mcpAddCommands({ kind: "relay", binary: "/r/b" }, "/r", envs);
+    expect(peers, "the relay form takes the same --env words").toContain("claude-peers --env CLAUDE_PEERS_GROUP=ovr-all --env CLAUDE_PEERS_BROKER_URL=http://192.168.10.23:7898 -- /r/b --family peers");
+  });
+
+  test("a value outside the safe alphabet is never printed: a note holds the name only", () => {
+    const hostile = [
+      "ZZ b",
+      "ZZ'",
+      "ZZ'; Write-Output PWNED; #",
+      "ZZ%X%",
+      "ZZ$HOME",
+      "ZZ$(id)",
+      "ZZ`id`",
+      "ZZ~",
+      "ZZ&b",
+      "ZZ|b",
+      "ZZ>b",
+      "ZZ;b",
+      "ZZ*",
+      "ZZ\\b",
+      "ZZ\"",
+      "ZZ\nb",
+      "ZZ\rb",
+      "ZZ\u001b[31m",
+      "ZZ\u0000",
+      "ZZ?token=x",
+      "ZZ,b",
+    ];
+    for (const value of hostile) {
+      const { envs, notes } = existingEnvs(configWith({ [GROUP]: value }));
+      const label = JSON.stringify(value);
+      expect(envs["claude-peers"], `${label} was carried`).toEqual([]);
+      expect(notes, `${label}: one note, with the name and no part of the value`).toEqual([`claude-peers: ${GROUP} not carried: add --env ${GROUP}=<value> by hand.`]);
+    }
+  });
+
+  test("whatever is carried prints the same characters in bash, PowerShell and cmd", () => {
+    const values = ["ovr-all", "http://192.168.10.23:7899/x", "/var/log/kory", "C:/Users/me/logs", "a=b", "x@y.z", "7+1", ""];
+    const commands = values.map((value) => {
+      const { envs, notes } = existingEnvs(configWith({ [GROUP]: value }));
+      expect(notes, `value ${JSON.stringify(value)} was refused`).toEqual([]);
+      return mcpAddCommands({ kind: "bun" }, "/r", envs)[0]!;
+    });
+    for (const command of commands) {
+      expect(command, "a character with a meaning in some shell reached the line").toMatch(/^[A-Za-z0-9_\/:.@+= -]+$/);
+    }
+  });
+
+  test.skipIf(BASH === null)("a carried value reaches bash as exactly one argument (needs bash on PATH)", () => {
+    const values = ["ovr-all", "http://192.168.10.23:7899/x", "a=b", ""];
+    const commands = values.map((value) => mcpAddCommands({ kind: "bun" }, "/r", existingEnvs(configWith({ [GROUP]: value })).envs)[0]!);
+    const argvs = argvsSeenByBash(commands);
+    expect(argvs.length).toBe(values.length);
+    values.forEach((value, i) => {
+      expect(argvs[i], `value ${JSON.stringify(value)}`).toEqual(["mcp", "add", "--scope", "user", "--transport", "stdio", "claude-peers", "--env", `${GROUP}=${value}`, "--", "bun", "/r/server.ts"]);
+    });
+  });
+
+  test("only the listed names are carried: the secrets and every unknown name are not, and no value leaks", () => {
+    const { envs, notes } = existingEnvs(
+      configWith({
+        CLAUDE_PEERS_FORCE_GROUP: "grp-s3cr3t",
+        CLAUDE_PEERS_DEPOSIT_CAPABILITY: "cap-s3cr3t",
+        CLAUDE_PEERS_BROKER_TOKEN: "tok-s3cr3t",
+        MY_API_KEY: "key-s3cr3t",
+        CLAUDE_PEERS_BROKER_URL: "http://192.168.10.23:7898/x?token=url-s3cr3t",
+        [GROUP]: "ovr-all",
+      }),
+    );
+    expect(envs["claude-peers"], "only the listed name with a safe value survives").toEqual([[GROUP, "ovr-all"]]);
+    expect(notes.join("\n"), "a value leaked into a note").not.toContain("s3cr3t");
+    for (const name of ["CLAUDE_PEERS_FORCE_GROUP", "CLAUDE_PEERS_DEPOSIT_CAPABILITY", "CLAUDE_PEERS_BROKER_TOKEN", "MY_API_KEY", "CLAUDE_PEERS_BROKER_URL"]) {
+      expect(notes.join("\n"), `${name} gets a note`).toContain(`${name} not carried: add --env ${name}=<value> by hand.`);
+    }
+  });
+
+  test("a URL with credentials is not carried even though its characters are safe", () => {
+    const { envs, notes } = existingEnvs(configWith({ CLAUDE_PEERS_BROKER_URL: "http://user:pw-s3cr3t@192.168.10.23:7898" }));
+    expect(envs["claude-peers"]).toEqual([]);
+    expect(notes.join("\n")).not.toContain("s3cr3t");
+  });
+
+  test("an invalid name is reported by its length, never its text", () => {
+    const { notes } = existingEnvs(configWith({ "ZZ b\u001b[31m": "1" }));
+    expect(notes).toEqual(["claude-peers: an env name of 9 characters is not a valid variable name, not carried."]);
+  });
+
+  test("a config that cannot be used never throws and never blocks the commands", () => {
+    const invalid: Array<[string, string | null, number]> = [
+      ["no file", null, 0],
+      ["not JSON", "{", 1],
+      ["JSON null", "null", 0],
+      ["no servers", "{}", 0],
+      ["entries without env", JSON.stringify({ mcpServers: { "claude-peers": { command: "bun" } } }), 0],
+      ["env is an array", configWith(["A=1"]), 1],
+      ["names that are not variables", configWith({ "A B": "1", "1X": "1", "X=Y": "1", "": "1" }), 4],
+      ["a value that is not a string", configWith({ [GROUP]: 7 }), 1],
+    ];
+    for (const [label, text, expectedNotes] of invalid) {
+      const { envs, notes } = existingEnvs(text);
+      expect(notes.length, label).toBe(expectedNotes);
+      expect(envs, `${label}: nothing is carried`).toEqual({ "claude-peers": [], "kory-roadmap": [] });
+    }
+  });
+
+  test("main prints the carried env, and a config it cannot read becomes a note", () => {
+    const carried = fakeDeps({ readClaudeConfig: () => configWith({ [GROUP]: "ovr-all" }) });
+    main(["--print-only"], carried.deps);
+    expect(carried.out.join("\n"), "main must hand the env it read to the printed commands").toContain("claude-peers --env CLAUDE_PEERS_GROUP=ovr-all --");
+
+    const broken = fakeDeps({
+      readClaudeConfig: () => {
+        throw new Error("EACCES: permission denied");
+      },
+    });
+    expect(main(["--print-only"], broken.deps), "an unreadable config does not fail the setup").toBe(0);
+    expect(broken.out.join("\n")).toContain("Could not read the Claude Code config (EACCES: permission denied)");
+    expect(broken.out.join("\n"), "the commands are still printed").toContain("claude mcp add --scope user --transport stdio claude-peers");
+  });
+
+  test("CLAUDE_CONFIG_DIR moves the config file, the home directory is the default", () => {
+    expect(claudeConfigPath({ CLAUDE_CONFIG_DIR: "/cfg" }, "/home/op")).toBe(join("/cfg", ".claude.json"));
+    expect(claudeConfigPath({}, "/home/op")).toBe(join("/home/op", ".claude.json"));
+    expect(claudeConfigPath({ CLAUDE_CONFIG_DIR: "" }, "/home/op"), "an empty value is an absent one").toBe(join("/home/op", ".claude.json"));
   });
 });
 
