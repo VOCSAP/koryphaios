@@ -1,10 +1,10 @@
 import { test, expect, beforeAll, afterAll } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Database } from "bun:sqlite";
 import { pathToFileURL } from "node:url";
-import { BROKER_DB_BUSY_TIMEOUT_MS, openBrokerDb, startBroker, stopBroker } from "./_helper.ts";
+import { BROKER_DB_BUSY_TIMEOUT_MS, openBrokerDb, ownListeningLine, startBroker, stopBroker } from "./_helper.ts";
 
 const SLOW_BOOT_MS = 6000;
 const FAKE_BODY = "fake-slow-broker";
@@ -18,13 +18,20 @@ let lockHolder: string;
 
 const LOCK_RELEASE_DELAY_MS = 150;
 
+const LOG_LISTENING_IMPORTS = `import { appendFileSync, mkdirSync } from "node:fs";\nimport { join } from "node:path";\n`;
+const LOG_LISTENING_LINE =
+  `mkdirSync(process.env.CLAUDE_PEERS_LOG_DIR!, { recursive: true });\n` +
+  `appendFileSync(join(process.env.CLAUDE_PEERS_LOG_DIR!, "broker.log"), \`listening on 127.0.0.1:\${Number(process.env.CLAUDE_PEERS_PORT)}\\n\`);\n`;
+
 beforeAll(() => {
   scriptsDir = mkdtempSync(join(tmpdir(), "cp-fake-broker-"));
   slowBroker = join(scriptsDir, "slow.ts");
   writeFileSync(
     slowBroker,
-    `await Bun.sleep(${SLOW_BOOT_MS});\n` +
-      `Bun.serve({ port: Number(process.env.CLAUDE_PEERS_PORT), hostname: "127.0.0.1", fetch: () => new Response(${JSON.stringify(FAKE_BODY)}) });\n`
+    LOG_LISTENING_IMPORTS +
+      `await Bun.sleep(${SLOW_BOOT_MS});\n` +
+      `Bun.serve({ port: Number(process.env.CLAUDE_PEERS_PORT), hostname: "127.0.0.1", fetch: () => new Response(${JSON.stringify(FAKE_BODY)}) });\n` +
+      LOG_LISTENING_LINE
   );
   dyingBroker = join(scriptsDir, "dying.ts");
   writeFileSync(dyingBroker, `console.error(${JSON.stringify(STDERR_MARKER)});\nprocess.exit(3);\n`);
@@ -88,6 +95,78 @@ test("a live broker that never answers is killed once at the budget, never relau
   expect(message).toContain("alive but silent, killed at the budget");
   expect(["the budget bounds the wait", elapsed < 10_000]).toEqual(["the budget bounds the wait", true]);
 }, 30_000);
+
+const NEIGHBOUR_BODY = "neighbour-broker";
+const OWN_BODY = "own-broker";
+const LOSER_ALIVE_MS = 600;
+
+test("a broker that loses the bind to a neighbour on its port is never mistaken for the neighbour", async () => {
+  const lostBindBroker = join(scriptsDir, "lost-bind.ts");
+  writeFileSync(
+    lostBindBroker,
+    LOG_LISTENING_IMPORTS +
+      `const port = Number(process.env.CLAUDE_PEERS_PORT);\n` +
+      `if (port === Number(process.argv[2])) { await Bun.sleep(${LOSER_ALIVE_MS}); process.exit(1); }\n` +
+      `Bun.serve({ port, hostname: "127.0.0.1", fetch: () => new Response(${JSON.stringify(OWN_BODY)}) });\n` +
+      LOG_LISTENING_LINE
+  );
+  const neighbour = Bun.serve({
+    port: 0,
+    hostname: "127.0.0.1",
+    fetch: () => new Response(NEIGHBOUR_BODY),
+  });
+  const neighbourPort = neighbour.port;
+  let b: Awaited<ReturnType<typeof startBroker>> | undefined;
+  let body = "";
+  try {
+    b = await startBroker({}, { command: [process.execPath, lostBindBroker, String(neighbourPort)], port: neighbourPort });
+    body = await (await fetch(`${b.url}/health`)).text();
+  } finally {
+    neighbour.stop(true);
+    if (b) await stopBroker(b);
+  }
+  expect([
+    "the handle points at the process this call spawned, not at the broker already listening on the forced port",
+    body,
+    b !== undefined && b.port !== neighbourPort,
+  ]).toEqual([
+    "the handle points at the process this call spawned, not at the broker already listening on the forced port",
+    OWN_BODY,
+    true,
+  ]);
+}, 30_000);
+
+test("the listening-line check counts only a line for its own port, written after the attempt began", () => {
+  const dir = mkdtempSync(join(tmpdir(), "cp-listening-line-"));
+  const logPath = join(dir, "broker.log");
+  try {
+    writeFileSync(logPath, "INFO [claude-peers broker] listening on 127.0.0.1:4100 (db: x)\n");
+    const offset = statSync(logPath).size;
+    const verdicts: Record<string, boolean> = {
+      "no log file yet": ownListeningLine(join(dir, "absent.log"), 0, 4100),
+      "a line for the same port written before the attempt began": ownListeningLine(logPath, offset, 4100),
+      "the same line when the whole file is read": ownListeningLine(logPath, 0, 4100),
+    };
+    appendFileSync(logPath, "INFO [claude-peers broker] listening on 127.0.0.1:4101 (db: x)\n");
+    verdicts["a line for another port"] = ownListeningLine(logPath, offset, 4100);
+    verdicts["the attempt's own port"] = ownListeningLine(logPath, offset, 4101);
+    appendFileSync(logPath, "INFO [claude-peers broker] listening on 127.0.0.1:41000 (db: x)\n");
+    verdicts["a longer port sharing the digits"] = ownListeningLine(logPath, offset, 4100);
+    appendFileSync(logPath, "INFO [claude-peers broker] listening on [::1]:4100 (db: x)\n");
+    verdicts["another bind host"] = ownListeningLine(logPath, offset, 4100);
+    expect(verdicts).toEqual({
+      "no log file yet": false,
+      "a line for the same port written before the attempt began": false,
+      "the same line when the whole file is read": true,
+      "a line for another port": false,
+      "the attempt's own port": true,
+      "a longer port sharing the digits": false,
+      "another bind host": true,
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 const LOCK_HOLDER_START_BUDGET_MS = 5000;
 

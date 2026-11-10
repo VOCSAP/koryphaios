@@ -1,7 +1,7 @@
 import { Database } from "bun:sqlite";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import {
   buildAuthProof,
   buildInboxProof,
@@ -48,10 +48,15 @@ async function reserveEphemeralPort(): Promise<number> {
 }
 
 export interface StartBrokerOptions {
-  /** argv to spawn in place of `bun broker.ts`; it must serve /health on CLAUDE_PEERS_PORT. */
+  /**
+   * argv to spawn in place of `bun broker.ts`; it must serve /health on CLAUDE_PEERS_PORT and, once
+   * bound, append `listening on <host>:<port>` to broker.log in CLAUDE_PEERS_LOG_DIR.
+   */
   command?: string[];
   /** Wall-clock budget shared by every attempt. */
   budgetMs?: number;
+  /** Port of the first attempt, in place of the one the OS hands out; later attempts reserve a fresh one. */
+  port?: number;
   /** null leaves the policy absent; [] writes a valid policy with no trusted operators. */
   trustedOperators?: readonly string[] | null;
 }
@@ -84,6 +89,18 @@ async function readTail(path: string, chars: number): Promise<string> {
   return text.length > 0 ? text.slice(-chars) : "<empty>";
 }
 
+const BROKER_LOG_NAME = "broker.log";
+
+// Only the process that owns the bind writes this line (broker.ts, right after
+// Bun.serve), so seeing it in THIS attempt's log, for THIS attempt's port, is
+// what ties a 200 on /health to the process we spawned. `fromByte` skips what
+// an earlier attempt left in the same file.
+export function ownListeningLine(logPath: string, fromByte: number, port: number): boolean {
+  if (!existsSync(logPath)) return false;
+  const fresh = readFileSync(logPath).subarray(fromByte).toString("utf8");
+  return new RegExp(`listening on \\S+:${port}\\b`).test(fresh);
+}
+
 // The first timestamped line says when a broker first executed at all, the
 // last one how far its boot got.
 async function readLogEnds(path: string): Promise<string> {
@@ -110,7 +127,7 @@ export async function startBroker(
   // booting: killing it to try another port throws that boot away, which is
   // how a slow runner turned into three killed brokers in a row.
   for (let attempt = 0; attempt < 3 && Date.now() < deadline; attempt++) {
-    const port = await reserveEphemeralPort();
+    const port = attempt === 0 && options.port !== undefined ? options.port : await reserveEphemeralPort();
     const env = scrubEnv(tmpDir, {
       CLAUDE_PEERS_PORT: String(port),
       CLAUDE_PEERS_DB: dbPath,
@@ -121,22 +138,20 @@ export async function startBroker(
     });
     // A file, never an unread pipe: a pipe nobody drains can block the child.
     const stderrPath = join(tmpDir, `broker-stderr-${attempt}.log`);
+    const logPath = join(env.CLAUDE_PEERS_LOG_DIR ?? join(tmpDir, "logs"), BROKER_LOG_NAME);
+    const logOffset = existsSync(logPath) ? statSync(logPath).size : 0;
     const proc = Bun.spawn(command, {
       env,
       stdio: ["ignore", "ignore", Bun.file(stderrPath)],
     });
 
-    // A 200 on /health only proves that SOMEBODY listens on this port, never
-    // that it is the process we just spawned. When two concurrent test runs
-    // pick the same port, the other run's broker answers immediately while
-    // ours is still failing to bind and about to exit -- and the caller would
-    // get a handle whose url points at a FOREIGN broker (its db, its peers)
-    // with a dead `proc`, then ECONNREFUSED as soon as that run stops it.
-    // So readiness also requires our own process to still be alive, and not
-    // before it has had time to die. Measured on this machine: a foreign
-    // broker answers at +5 ms, our own at +70..85 ms, and a losing broker's
-    // exitCode becomes observable at +92 ms -- hence the settle window below
-    // (~2.7x the exit latency). A dead process breaks out immediately so the
+    // A 200 on /health only proves that SOMEBODY listens on this port. When
+    // two callers are handed the same port, the neighbour answers while ours
+    // is still failing to bind: a booting broker stays alive ~600 ms before it
+    // dies on EADDRINUSE, longer than any settle window. Readiness therefore
+    // also requires our own `listening on` line for this port, which only the
+    // process that owns the bind can have written. SETTLE_MS keeps the boot
+    // time callers have always seen. A dead process breaks out at once so the
     // `attempt` loop moves on to the next port.
     const SETTLE_MS = 250;
     const spawnedAt = Date.now();
@@ -147,7 +162,12 @@ export async function startBroker(
         const res = await fetch(`http://127.0.0.1:${port}/health`, {
           signal: AbortSignal.timeout(500),
         });
-        if (res.ok && Date.now() - spawnedAt >= SETTLE_MS && proc.exitCode === null) {
+        if (
+          res.ok &&
+          Date.now() - spawnedAt >= SETTLE_MS &&
+          proc.exitCode === null &&
+          ownListeningLine(logPath, logOffset, port)
+        ) {
           ready = true;
           break;
         }
@@ -170,7 +190,8 @@ export async function startBroker(
     failures.push(
       `attempt ${attempt} port ${port}: ${exitedOnItsOwn ? "exited" : "alive but silent, killed at the budget"}` +
         ` exitCode=${proc.exitCode} signalCode=${proc.signalCode} after ${Date.now() - spawnedAt}ms` +
-        `\n  broker.log (shared by all attempts) ${await readLogEnds(join(tmpDir, "logs", "broker.log"))}` +
+        `\n  own 'listening on' line for port ${port}: ${ownListeningLine(logPath, logOffset, port) ? "seen" : "absent"}` +
+        `\n  broker.log (shared by all attempts) ${await readLogEnds(logPath)}` +
         `\n  stderr tail: ${await readTail(stderrPath, STDERR_TAIL_CHARS)}`
     );
     if (!exitedOnItsOwn) break;
