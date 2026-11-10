@@ -1841,3 +1841,113 @@ test("a new run of the same group cannot reply to or close an entry of an earlie
   expect([reply.status, close.status]).toEqual([404, 404]);
   expect(entriesOf(w.run)[0]!.state).toBe("open");
 });
+
+// --- Run drain: state snapshot of the run's registry rows ---
+
+interface EntryStateWire {
+  message_id: number;
+  sent_at: string;
+  state: string;
+  settled_at: string | null;
+  close_reason?: string;
+  closed_by_authority?: string;
+  closed_by_peer_id?: string | null;
+}
+const entriesWire = (r: { body: unknown }): EntryStateWire[] => (r.body as { entries: EntryStateWire[] }).entries;
+
+// Mutants: run_ref dropped from the snapshot WHERE; the snapshot read outside the drain transaction (it would miss the rows drained in the same call).
+test("the run drain carries exactly the registry rows of its run, the ones of the messages it just drained included", async () => {
+  const { runs } = await newRuns("snap-scope", 2);
+  const [runA, runB] = runs as [RunCredential, RunCredential];
+  const a = await registerAttestedInstance(broker, runA, "hSnapA", "/snapA");
+  const b = await registerAttestedInstance(broker, runB, "hSnapB", "/snapB");
+  await depositToOperator(broker, a.body.instance_token, "from A", runA);
+  await depositToOperator(broker, b.body.instance_token, "from B", runB);
+  const [rowA] = entriesOf(runA) as [EntryRow];
+  const [rowB] = entriesOf(runB) as [EntryRow];
+
+  const first = await drainRun(runA, "snap-session");
+  expect(runTexts(first), "the message and its state arrive in the same call").toEqual(["from A"]);
+  expect(entriesWire(first)).toEqual([{ message_id: rowA.message_id, sent_at: rowA.sent_at, state: "open", settled_at: null }]);
+
+  const again = await drainRun(runA, "snap-session");
+  expect(runTexts(again), "the cursor is spent").toEqual([]);
+  expect(entriesWire(again).map((e) => e.message_id), "the snapshot is not a cursor").toEqual([rowA.message_id]);
+  expect(entriesWire(await drainRun(runB, "snap-session")).map((e) => e.message_id)).toEqual([rowB.message_id]);
+});
+
+// Mutants: the legacy drain given entries; the snapshot ignoring a state change.
+test("a closed and a responded entry show their state in the snapshot, and the legacy drain never carries entries", async () => {
+  const w = await depositedEntry("snap-state");
+  await depositToOperator(broker, w.token, "second", w.run);
+  const [closing, replying] = entriesOf(w.run) as [EntryRow, EntryRow];
+  const lead = await mintMandate(broker, w.run, "lead", "lead-snap");
+  await closeInbox(broker, w.run, lead, { entryId: closing.entry_id, reason: "no longer needed", instanceToken: w.token });
+  await replyTo(w.run, replying);
+
+  const byId = Object.fromEntries(entriesWire(await drainRun(w.run, "snap-state-session")).map((e) => [e.message_id, e]));
+  expect(byId[closing.message_id]).toMatchObject({
+    state: "closed",
+    close_reason: "no longer needed",
+    closed_by_authority: "lead",
+    closed_by_peer_id: w.peerId,
+  });
+  expect(byId[replying.message_id]).toMatchObject({ state: "responded" });
+  expect(byId[replying.message_id]).not.toHaveProperty("close_reason");
+
+  expect(Object.keys((await drain(w.g)).body)).toEqual(["messages"]);
+  expect(Object.keys((await drainAs(w.g, "snap-legacy")).body)).toEqual(["messages"]);
+});
+
+// Mutants: messageEntryView reused (leaks entry_id and excerpt); a spread of the row instead of the pick-list (leaks every column, a future one included).
+test("the snapshot is a pick-list: no entry id, excerpt, token or instance ref, and an unknown registry column stays out", async () => {
+  const w = await depositedEntry("snap-canary", "a recognisable excerpt body");
+  const lead = await mintMandate(broker, w.run, "lead", "lead-canary");
+  await closeInbox(broker, w.run, lead, { entryId: w.entry.entry_id, reason: "canary", instanceToken: w.token });
+  const db = openBrokerDb(broker.dbPath);
+  try {
+    db.run("ALTER TABLE inbox_message_entries ADD COLUMN snap_canary TEXT");
+    db.run("UPDATE inbox_message_entries SET snap_canary = 'CANARY-VALUE' WHERE run_ref = ?", [w.run.run]);
+  } finally {
+    db.close();
+  }
+
+  const read = await drainRun(w.run, "snap-canary-session");
+  const wire = JSON.stringify(entriesWire(read));
+  expect(Object.keys(entriesWire(read)[0]!).sort()).toEqual([
+    "close_reason",
+    "closed_by_authority",
+    "closed_by_peer_id",
+    "message_id",
+    "sent_at",
+    "settled_at",
+    "state",
+  ]);
+  for (const secret of [w.entry.entry_id, w.entry.excerpt, w.token, deriveInstanceRef(w.token), "CANARY-VALUE"]) {
+    expect(wire).not.toContain(secret);
+  }
+});
+
+// Mutants: LIMIT removed; ORDER BY ascending (the newest would fall out instead of the oldest).
+test("the snapshot holds at most 500 rows, the newest messages first", async () => {
+  const w = await depositedEntry("snap-cap");
+  const db = openBrokerDb(broker.dbPath);
+  try {
+    for (let i = 0; i < 505; i++) {
+      db.run(
+        `INSERT INTO inbox_message_entries (entry_id, operator_id, run_ref, group_id, project_key, message_id, sent_at,
+           author_instance_ref, author_peer_id_snapshot, reply_token, excerpt, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'ref', 'peer', '', '', ?)`,
+        [`m_${crypto.randomUUID()}`, FIXTURE_OPERATOR_ID, w.run.run, w.run.group, INBOX_TEST_PROJECT, 900000 + i, "2026-01-01T00:00:00.000Z", new Date().toISOString()]
+      );
+    }
+  } finally {
+    db.close();
+  }
+
+  const ids = entriesWire(await drainRun(w.run, "snap-cap-session")).map((e) => e.message_id);
+  expect(ids).toHaveLength(500);
+  expect(ids[0]).toBe(900504);
+  expect(ids, "ordered newest first").toEqual([...ids].sort((x, y) => y - x));
+  expect(ids).not.toContain(w.entry.message_id);
+});

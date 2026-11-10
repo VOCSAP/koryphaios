@@ -276,6 +276,7 @@ import type {
   InboxCloseRequest,
   InboxCloseResponse,
   InboxMessageEntryView,
+  InboxEntryStateView,
   InboxCloseAuthority,
   Peer,
   PublicPeer,
@@ -2551,6 +2552,12 @@ const selectRunInboxByCursor = db.prepare(
    WHERE m.to_token = ? AND m.group_id = ? AND m.id > ?
      AND ((m.inbox_operator_id = ? AND m.inbox_run_ref = ?) OR m.source_kind = 'system')
    ORDER BY m.id`
+);
+
+const selectRunEntryStates = db.prepare(
+  `SELECT * FROM inbox_message_entries
+    WHERE operator_id = ? AND run_ref = ? AND group_id = ?
+    ORDER BY message_id DESC LIMIT 500`
 );
 
 const advanceRunInboxCursor = db.prepare(
@@ -10227,7 +10234,13 @@ type RunInboxRow = {
 // IMMEDIATE takes the write lock at the first statement, so a second broker on
 // the same database cannot read the same cursor and deliver the batch twice.
 const drainRunInboxTx = db.transaction(
-  (sessionId: string, operatorId: string, runRef: string, groupId: string, now: string): RunInboxRow[] => {
+  (
+    sessionId: string,
+    operatorId: string,
+    runRef: string,
+    groupId: string,
+    now: string
+  ): { rows: RunInboxRow[]; entries: InboxEntryStateView[] } => {
     upsertRunInboxSession.run(sessionId, operatorId, runRef, groupId, now, now);
     const lastId =
       (selectRunInboxSession.get(sessionId, operatorId, runRef, groupId) as { last_id: number } | null)?.last_id ?? 0;
@@ -10238,7 +10251,8 @@ const drainRunInboxTx = db.transaction(
     if (rows.length > 0) {
       advanceRunInboxCursor.run(rows[rows.length - 1]!.id, sessionId, operatorId, runRef, groupId);
     }
-    return rows;
+    const entries = (selectRunEntryStates.all(operatorId, runRef, groupId) as MessageEntryRow[]).map(messageEntryStateView);
+    return { rows, entries };
   }
 );
 
@@ -10261,7 +10275,13 @@ function handleRunInboxDrain(
   const admitted = admitRunRead(body, "inbox-drain");
   if ("error" in admitted) return admitted;
   const { operator_id: operatorId, run_ref: runRef } = admitted.scope;
-  const rows = drainRunInboxTx.immediate(body.session_id as string, operatorId, runRef, body.group_id, new Date().toISOString());
+  const { rows, entries } = drainRunInboxTx.immediate(
+    body.session_id as string,
+    operatorId,
+    runRef,
+    body.group_id,
+    new Date().toISOString()
+  );
   return {
     messages: rows.map((r) => ({
       id: r.id,
@@ -10270,6 +10290,7 @@ function handleRunInboxDrain(
       sent_at: r.sent_at,
       ...(r.author_instance_ref ? { author_instance_hint: instanceHint(r.author_instance_ref) } : {}),
     })),
+    entries,
   };
 }
 
@@ -11656,6 +11677,23 @@ function messageEntryView(row: MessageEntryRow): InboxMessageEntryView {
     message_id: row.message_id,
     sent_at: row.sent_at,
     excerpt: row.excerpt,
+    state: row.state,
+    settled_at: row.settled_at,
+    ...(row.state === "closed" && row.close_reason !== null
+      ? {
+          close_reason: row.close_reason,
+          closed_by_authority: row.closed_by_authority as InboxCloseAuthority,
+          closed_by_peer_id: row.closed_by_peer_id_snapshot,
+        }
+      : {}),
+  };
+}
+
+/** Slim state projection for the Deck: no entry id, excerpt or token, so a new column stays private until named here. */
+function messageEntryStateView(row: MessageEntryRow): InboxEntryStateView {
+  return {
+    message_id: row.message_id,
+    sent_at: row.sent_at,
     state: row.state,
     settled_at: row.settled_at,
     ...(row.state === "closed" && row.close_reason !== null

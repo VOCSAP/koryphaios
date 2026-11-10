@@ -1561,6 +1561,8 @@ export interface OperatorInboxMessage {
 
 export interface OperatorInboxResponse {
   messages: OperatorInboxMessage[];
+  /** Run-scoped drain only: the run's registry rows (at most 500, newest message first). */
+  entries?: InboxEntryStateView[];
 }
 
 // --- Operator inbox purge (Courrier lot 1C, card 1e81ee7b broker half) ---
@@ -2005,6 +2007,17 @@ export interface InboxMessageEntryView {
   message_id: number;
   sent_at: string;
   excerpt: string;
+  state: "open" | "responded" | "closed";
+  settled_at: string | null;
+  close_reason?: string;
+  closed_by_authority?: InboxCloseAuthority;
+  closed_by_peer_id?: string | null;
+}
+
+/** State-only projection of a message entry: no entry id, excerpt or token. */
+export interface InboxEntryStateView {
+  message_id: number;
+  sent_at: string;
   state: "open" | "responded" | "closed";
   settled_at: string | null;
   close_reason?: string;
