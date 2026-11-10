@@ -46,6 +46,56 @@ function db(): Database {
   return openBrokerDb(broker.dbPath, { readonly: true });
 }
 
+// An unlisted sentinel-shaped token has no cleanStalePeers exemption, and this
+// broker's TTL is 0: a row stamped "now" is purged by the first tick that lands
+// in a later second. A future last_seen is never older than the cutoff.
+function plantProbeRow(instanceToken: string): void {
+  const conn = openBrokerDb(broker.dbPath);
+  try {
+    conn.run(
+      `INSERT OR IGNORE INTO peers
+         (instance_token, peer_id, group_id, pid, cwd, summary, registered_at, last_seen, host, client_pid, status)
+       VALUES (?, ?, 'default', 0, '', '', datetime('now'), datetime('now', '+1 day'), '', 0, 'dormant')`,
+      [instanceToken, `probe-${instanceToken}`]
+    );
+  } finally {
+    conn.close();
+  }
+}
+
+const SWEEP_WAIT_BUDGET_MS = 15_000;
+let sweepControlSeq = 0;
+
+// Plants an expired ordinary dormant row and waits until the broker purges it:
+// one call returns only after a cleanStalePeers tick ran after the call began,
+// and consecutive calls return after distinct ticks.
+async function awaitSweepTick(): Promise<void> {
+  const token = `sweep-control-${++sweepControlSeq}`;
+  const conn = openBrokerDb(broker.dbPath);
+  try {
+    conn.run(
+      `INSERT INTO peers
+         (instance_token, peer_id, group_id, pid, cwd, summary, registered_at, last_seen, host, client_pid, status)
+       VALUES (?, ?, 'default', 0, '', '', datetime('now'), '2000-01-01 00:00:00', '', 0, 'dormant')`,
+      [token, token]
+    );
+  } finally {
+    conn.close();
+  }
+  const deadline = Date.now() + SWEEP_WAIT_BUDGET_MS;
+  while (Date.now() < deadline) {
+    const reader = db();
+    try {
+      const row = reader.query("SELECT 1 FROM peers WHERE instance_token = ?").get(token);
+      if (row === null) return;
+    } finally {
+      reader.close();
+    }
+    await Bun.sleep(25);
+  }
+  throw new Error(`expired control row ${token} still present after ${SWEEP_WAIT_BUDGET_MS} ms: the cleanStalePeers sweep did not run`);
+}
+
 // ---------------------------------------------------------------------------
 // Volet 2: shape-based refusal at the 3 vulnerable routes
 // ---------------------------------------------------------------------------
@@ -74,15 +124,10 @@ test("send-message refuses a sentinel-shaped from_token", async () => {
 // what makes the probe independent of volet 2's OWN send-message guard: this
 // test must fail if poll/peek's guard is missing, regardless of send-message's.
 async function plantMessageTo(instanceToken: string, text: string): Promise<void> {
+  // FK requires a peers row for a non-seeded token like "__anything__".
+  plantProbeRow(instanceToken);
   const conn = openBrokerDb(broker.dbPath);
   try {
-    // FK requires a peers row for a non-seeded token like "__anything__".
-    conn.run(
-      `INSERT OR IGNORE INTO peers
-         (instance_token, peer_id, group_id, pid, cwd, summary, registered_at, last_seen, host, client_pid, status)
-       VALUES (?, ?, 'default', 0, '', '', datetime('now'), datetime('now'), '', 0, 'dormant')`,
-      [instanceToken, `probe-${instanceToken}`]
-    );
     const sender = await register(`hsp-plant-${text}`, `/sp-plant-${text}`);
     conn.run(
       `INSERT INTO messages (from_token, to_token, group_id, text, sent_at, delivered)
@@ -176,17 +221,7 @@ const guardProbes: ReadonlyArray<{ peerId: string; instanceToken: string }> = [
 ];
 
 async function ensureDormantRow(instanceToken: string): Promise<void> {
-  const conn = openBrokerDb(broker.dbPath);
-  try {
-    conn.run(
-      `INSERT OR IGNORE INTO peers
-         (instance_token, peer_id, group_id, pid, cwd, summary, registered_at, last_seen, host, client_pid, status)
-       VALUES (?, ?, 'default', 0, '', '', datetime('now'), datetime('now'), '', 0, 'dormant')`,
-      [instanceToken, `probe-${instanceToken}`]
-    );
-  } finally {
-    conn.close();
-  }
+  plantProbeRow(instanceToken);
 }
 
 for (const sentinel of guardProbes) {
@@ -234,12 +269,6 @@ for (const sentinel of guardProbes) {
   });
 
   test(`unregister refuses a sentinel-shaped instance_token -- worst case: does NOT delete the row or drain its inbox (${sentinel.peerId})`, async () => {
-    // This re-plants the row (like the disconnect/set-id probes above) because
-    // this file's broker runs with DORMANT_TTL_HOURS=0 and
-    // CLEAN_INTERVAL_SEC=1, purging any ordinary dormant row within a second.
-    // Residual, stated plainly: this narrows the race to one HTTP round trip
-    // inside a 1000ms sweep window, it does not close it. A sweep tick landing
-    // inside that window would still delete the row.
     await ensureDormantRow(sentinel.instanceToken);
     await plantMessageTo(sentinel.instanceToken, `unregister-destruction-probe-${sentinel.peerId}`);
     const before = countUndelivered(sentinel.instanceToken);
@@ -318,7 +347,7 @@ test("every SENTINEL_DEFINITIONS entry has a dormant seed row in 'default'", () 
   }
 });
 
-test("every SENTINEL_DEFINITIONS row survives cleanStalePeers regardless of TTL", async () => {
+test("every SENTINEL_DEFINITIONS row and a planted probe row survive cleanStalePeers regardless of TTL", async () => {
   // TTL=0 + a 1s clean interval (beforeAll) mean any ordinary dormant peer gets
   // purged almost immediately. Backdate every sentinel row's last_seen the same
   // way, then confirm cleanStalePeers's own reserved-token exemption (broker.ts,
@@ -335,8 +364,10 @@ test("every SENTINEL_DEFINITIONS row survives cleanStalePeers regardless of TTL"
   } finally {
     conn.close();
   }
+  plantProbeRow("__sweep-probe__");
 
-  await Bun.sleep(3000);
+  await awaitSweepTick();
+  await awaitSweepTick();
 
   const conn2 = db();
   try {
@@ -344,12 +375,17 @@ test("every SENTINEL_DEFINITIONS row survives cleanStalePeers regardless of TTL"
       const row = conn2
         .query("SELECT instance_token FROM peers WHERE instance_token = ?")
         .get(sentinel.instanceToken);
-      expect(row).not.toBeNull();
+      expect(row, `sentinel row ${sentinel.peerId} was purged by the sweep despite the reserved-token exemption`).not.toBeNull();
     }
   } finally {
     conn2.close();
   }
-}, 15_000);
+  expect(
+    peerRow("__sweep-probe__"),
+    "the probe row was purged by cleanStalePeers: probe rows planted for the per-sentinel tests are eligible for the TTL-0 sweep"
+  ).not.toBeNull();
+  // Above two SWEEP_WAIT_BUDGET_MS, so a sweep that never runs fails on awaitSweepTick's named error.
+}, 35_000);
 
 test("resolveSenderMeta maps every SENTINEL_DEFINITIONS entry's instance_token to its peer_id", async () => {
   // resolveSenderMeta is only reachable indirectly, and no live handler
