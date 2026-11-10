@@ -70,11 +70,11 @@ Full features, usage, build and packaging: **[desktop/README.md](desktop/README.
 
 ### Mode 1 -- Local broker (single PC)
 
-Broker runs on the same PC as your Claude Code sessions. See [Quick start (local)](#quick-start-local).
+Broker runs on the same PC as your Claude Code sessions. See [Install](#install).
 
 ### Mode 2 -- Remote broker via HTTP (multi-PC, LAN/Internet)
 
-`server.ts` runs locally on each PC and connects directly to a remote broker over HTTP. Suited for multi-PC setups and contributors. See [Quick start (HTTP)](#quick-start-http).
+`server.ts` runs locally on each PC and connects directly to a remote broker over HTTP. Suited for multi-PC setups and contributors. See [INSTALL.md](INSTALL.md#exposing-a-broker-beyond-loopback).
 
 ### Mode 3 -- Replica (offline-capable)
 
@@ -120,123 +120,31 @@ See `docs/DESIGN-OFFLINE-REPLICA.md` for the full protocol.
 
 ---
 
-## Quick start (local)
+## Install
 
-> Building the desktop binary yourself, or setting up a fresh machine
-> (toolchains, the Windows Spectre-libs gotcha)? The from-scratch checklist is
-> **[BUILDING.md](BUILDING.md)**.
-
-### 1. Install
-
-```bash
-git clone https://github.com/vocsap/koryphaios.git ~/koryphaios
-cd ~/koryphaios
-bun install
-```
-
-### 2. Register the MCP servers
-
-```bash
-claude mcp add --scope user --transport stdio claude-peers -- bun ~/koryphaios/server.ts
-claude mcp add --scope user --transport stdio kory-roadmap -- bun ~/koryphaios/server-roadmap.ts
-```
-
-`claude mcp add` never replaces an existing key: on a key already present it prints `already exists`, exits 1 and leaves the stored entry untouched. A machine that already has a `claude-peers` entry (the previous single-server form, which also served the roadmap tools) therefore has to be migrated by hand.
-
-`claude mcp add` without `--scope` writes to the **local** scope (this project, private to you), and `claude mcp get <key>` prints one entry only, the one that wins, on a `Scope:` line: `Local config`, `Project config` or `User config`. Measured with the same key in two scopes: a local entry hides a user entry and a project entry, and a user entry was shown over a project entry. An old entry left in another scope therefore hides or is hidden by the new one, and `claude mcp remove <key> --scope <scope>` only touches the scope it names (`No MCP server named "<key>" in user scope`, exit 1, on any other). Migration order:
-
-1. Read the existing entry: `claude mcp get claude-peers` and note its `Scope:` line (local, project or user). Run `claude mcp get kory-roadmap`: if it finds an entry, stop, that is a collision and its owner decides whether to keep or remove it.
-2. Back up the `claude-peers` entry: save the `get` output (command, args, `Environment:`) outside the repository.
-3. Add `kory-roadmap` with the second command above. It does not conflict with `claude-peers`, so a failure here leaves the old entry in place.
-4. Remove the old entry from the scope read in step 1: `claude mcp remove claude-peers --scope local`, `--scope project` or `--scope user`.
-5. Add `claude-peers` with the first command above, and carry over from the step 2 backup every `-e` variable and argument that the standard command does not already set (a custom `CLAUDE_PEERS_TOOLS`, another server path, and so on).
-6. Check: `claude mcp get claude-peers` must print `Scope: User config` and an `Environment:` that contains every variable carried over from the backup, and `claude mcp get kory-roadmap` must find its entry. Another scope on the first line means an old entry is still hiding the new one: repeat step 4 for that scope.
-
-### 3. Run Claude Code with the channel
-
-```bash
-claude --dangerously-load-development-channels server:claude-peers
-```
-
-Without `--dangerously-load-development-channels`, peer messages still work but you'll have to call `check_messages` manually.
-
-The broker daemon auto-starts on first launch.
-
----
-
-## Quick start (HTTP)
-
-### 1. On the broker host -- expose the broker publicly
-
-Add `CLAUDE_PEERS_BIND_HOST=0.0.0.0` and a bearer token to the broker service (the broker refuses to start beyond loopback without one). If any client PC will attach as a Mode 3 replica rather than a direct Mode 2 client, also set `CLAUDE_PEERS_SERVE_REPLICAS=1` -- it's optional and only needed to serve replicas, but every replica reports this broker unreachable without it:
-
-```bash
-cat >/etc/claude-peers/claude-peers.env <<'EOF'
-CLAUDE_PEERS_DB=/var/lib/claude-peers/peers.db
-CLAUDE_PEERS_BIND_HOST=0.0.0.0
-CLAUDE_PEERS_BROKER_TOKEN=your-shared-secret
-# CLAUDE_PEERS_SERVE_REPLICAS=1   # optional: only if replicas (Mode 3) will attach
-EOF
-systemctl restart claude-peers-broker
-curl http://127.0.0.1:7899/health   # still reachable on loopback too
-```
-
-**Turning `serve_replicas` on for an already-running broker:** it's read once at
-startup, so a config/env change needs a restart of the broker process to take
-effect. Verify it landed with `curl -s http://<upstream-host>:7899/health` and
-check the response includes `"serve_replicas":true`; keep `broker_token` set
-(it's still required alongside the flag). Set `serve_replicas: true` on the
-upstream **before** switching any client machine to `offline_replica` -- while
-you do, each replica keeps serving its own agents locally off the loopback
-broker, shows the offline banner with the pending-changes count, and logs the
-"upstream is not configured to serve replicas" hint once per process rather
-than spamming it every tick.
-
-Make sure your firewall allows TCP port 7899 from the outside.
-
-### 2. On each PC client
+Minimal path (Bun, Rust/cargo and Claude Code required). The complete guide
+-- prerequisites, modes, remote broker and token, the Deck, sandbox, checks,
+upgrade and rollback -- is **[INSTALL.md](INSTALL.md)**; a from-scratch
+toolchain checklist is **[BUILDING.md](BUILDING.md)**.
 
 ```bash
 git clone https://github.com/vocsap/koryphaios.git ~/koryphaios
 cd ~/koryphaios
 bun install
+bun scripts/relay-setup.ts     # builds the relay, prints the two `claude mcp add` commands
 ```
 
-Set `broker_url` and `broker_token` in your settings file (`%APPDATA%\claude-peers\config.json` on Windows, `~/.config/claude-peers/config.json` on Linux/macOS):
-
-```json
-{
-  "broker_url": "http://broker-host:7899",
-  "broker_token": "your-shared-secret",
-  "groups": { "mygroup": "group-secret" },
-  "default_group": "mygroup"
-}
-```
-
-Register the MCP servers:
-
-```bash
-claude mcp add --scope user --transport stdio claude-peers -- bun ~/koryphaios/server.ts
-claude mcp add --scope user --transport stdio kory-roadmap -- bun ~/koryphaios/server-roadmap.ts
-```
-
-Then launch Claude Code:
+Paste the two printed commands into Git Bash or a POSIX shell (not
+PowerShell), after removing any existing `claude-peers` / `kory-roadmap`
+entry (`claude mcp add` never replaces a key). Then:
 
 ```bash
 claude --dangerously-load-development-channels server:claude-peers
 ```
 
-### 3. Test it
-
-In one Claude session:
-
-> Run whoami
-
-You'll see your `peer_id`, current group, host, cwd, and `ws_connected: true`. Then:
-
-> List peers
-
-> Send a message to peer [peer_id]: what are you working on?
+In the session, run `whoami` and expect `ws_connected: true`, then
+`list_peers`. For a multi-PC setup, set `broker_url` and `broker_token` in the
+settings file (see [Configuration](#configuration)).
 
 ---
 
@@ -444,14 +352,7 @@ bun cli.ts mcp-daemon restart    # asks it to stop; the relays reconnect, start 
 
 The relay (`claude-peers-relay`) replaces `bun` as the `command` of each entry and copies the MCP traffic to the shared daemon. `--family` picks the served family, `--fallback` names the `server.ts` or `server-roadmap.ts` of the clone and also locates `mcp-daemon.ts`, and `--bun <path>` sets the interpreter for the daemon and the fallback (`bun` from the `PATH` when absent).
 
-`bun scripts/relay-setup.ts` builds the relay for the machine it runs on (`cargo build --release --locked` in `relay/`, with the static `musl` target on Linux, so the Rust target must be installed: `rustup target add x86_64-unknown-linux-musl`), installs it at `bin/<platform>-<arch>/claude-peers-relay[.exe]` (`win32-x64`, `linux-x64`, `darwin-arm64`...; never committed) and prints the two `claude mcp add` commands below with absolute paths. Without cargo, or when the build fails, it prints the `bun` form and says why. `bun scripts/relay-setup.ts --print-only` builds nothing and prints the relay form when the binary is already installed, the `bun` form otherwise. The script never writes the Claude Code configuration: run the printed commands yourself.
-
-```bash
-claude mcp add --scope user --transport stdio claude-peers -- <relay-binary> --family peers --fallback ~/koryphaios/server.ts
-claude mcp add --scope user --transport stdio kory-roadmap -- <relay-binary> --family roadmap --fallback ~/koryphaios/server-roadmap.ts
-```
-
-Until the peers family is served by the daemon, the `claude-peers` relay falls back to `bun server.ts` and `bun cli.ts mcp-daemon status` lists that session as a fallback. Working sessions stay on the `bun` form above until the manual validation of the daemon is done. Use the relay form for test sessions only, through a separate configuration file passed with `--mcp-config <file> --strict-mcp-config`, so that no other MCP entry applies:
+`bun scripts/relay-setup.ts` builds the relay and prints the two `claude mcp add` commands; what it builds, where it installs, which environment it carries and how to register the result are in [INSTALL.md](INSTALL.md#build-the-relay-and-print-the-registration-commands). When the peers family cannot be served by the daemon, the `claude-peers` relay falls back to `bun server.ts` and `bun cli.ts mcp-daemon status` lists that session as a fallback. To try the relay form in a test session without touching your registered entries, pass a separate configuration file with `--mcp-config <file> --strict-mcp-config`, so that no other MCP entry applies:
 
 ```json
 {

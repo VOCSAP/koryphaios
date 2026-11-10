@@ -134,7 +134,7 @@ peers must poll with `check_messages` instead of being pushed.
 For the **multi-PC / HTTP broker** mode (shared broker on a LAN or the
 Internet: `broker_url` + `broker_token` in the user config,
 `CLAUDE_PEERS_BIND_HOST` / `CLAUDE_PEERS_BROKER_TOKEN` on the broker host),
-follow [`README.md` → Quick start (HTTP)](README.md#quick-start-http).
+follow [`INSTALL.md` → Exposing a broker beyond loopback](INSTALL.md#exposing-a-broker-beyond-loopback).
 
 The **desktop app needs no extra MCP setup**: each tile it spawns gets the
 channel through the bundled deck-plugin, and the supervisor/demo bridges

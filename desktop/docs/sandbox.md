@@ -479,8 +479,8 @@ and is green only for a user-scope entry; **Re-test** refreshes it).
 **What the container must contain.** Both servers run from a copy of the Kory
 repository tree with `bun install` done, and `shared/` imports
 `desktop/src/shared`, so the server files alone fail with a missing-module
-error. That copy must never be the tree the host executes: the README registers
-`bun ~/koryphaios/server.ts` in the host's user scope, a sandboxed agent is
+error. That copy must never be the tree the host executes: INSTALL.md registers
+the host's own checkout in the host's user scope, a sandboxed agent is
 assumed compromised, and a tree it can write that the host later runs is the
 `settings.json` escape again. Two forms are safe: a custom image that bakes the
 repository in, or a `:ro` mount of a separate copy of the installation, never
@@ -502,9 +502,9 @@ claude mcp add --scope user --transport stdio kory-roadmap -- bun CORE/server-ro
 No broker URL goes in the entries: every sandboxed session already exports
 `CLAUDE_PEERS_BROKER_URL` pointing at the host broker, and the servers inherit
 it. `claude mcp add` refuses a key that already exists; migrating an older
-`claude-peers` entry follows the order given in the README (read its scope,
-back it up, add `kory-roadmap`, remove the old entry from its scope, add the
-new one, check with `claude mcp get`), run inside the container.
+`claude-peers` entry follows the order given in INSTALL.md (read its scope,
+back it up, remove the old entry from its scope, add the new ones, check with
+`claude mcp get`), run inside the container.
 
 **Identity of `kory-roadmap`.** It has no credential of its own. `claude-peers`
 writes a snapshot named after the session's `CLAUDE_CODE_MESSAGING_SOCKET`
