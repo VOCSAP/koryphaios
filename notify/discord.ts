@@ -422,8 +422,9 @@ export class DiscordChannel implements NotificationChannel {
   async post(binding: ChannelBinding, approval: Approval): Promise<PostedMessage | null> {
     const channel = await this.dmChannelFor(binding.address);
     if (!channel) return null;
-    const components =
-      approval.kind === "permission"
+    const components = approval.informational
+      ? []
+      : approval.kind === "permission"
         ? [
             {
               type: 1,

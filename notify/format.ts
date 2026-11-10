@@ -92,7 +92,9 @@ export function telegramView(approval: Approval): { message: string; whole: bool
   const hint =
     approval.kind === "permission"
       ? "Tap a button, or reply with instructions."
-      : "Reply to this message with your answer.";
+      : approval.informational
+        ? "Information: no answer is expected."
+        : "Reply to this message with your answer.";
   return fitVisibly(approval.question, TELEGRAM_QUESTION_MAX, TELEGRAM_TEXT_MAX, (body) =>
     [head, badge, "", escapeHtml(body), "", `<i>${escapeHtml(hint)}</i>`].join("\n")
   );
@@ -160,6 +162,7 @@ export const REFUSAL_NOTICES: Record<AnswerRefusal, string> = {
   "invalid-option": "Not sent: that option is not one of this request's choices.",
   "invalid-answer": "Not sent: this option could not be applied, answer it in Koryphaios.",
   "empty-answer": "Not sent: the answer was empty.",
+  "information-only": "Not sent: this is an information, it takes no answer.",
 };
 
 /**

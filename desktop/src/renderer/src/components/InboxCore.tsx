@@ -200,10 +200,12 @@ export function InboxCore(props: InboxCoreProps): React.JSX.Element {
   const entries = useMemo<InboxEntry[]>(() => {
     const byTimeDesc = (a: InboxEntry, b: InboxEntry): number => entryAt(b).localeCompare(entryAt(a))
     const closedIds = new Set(archive.closedQuestions.map((a) => a.id))
-    const blocking: InboxEntry[] = approvals
+    const pending: InboxEntry[] = approvals
       .filter((approval) => !closedIds.has(approval.id))
       .map((approval) => ({ kind: 'approval', approval }))
+    const blocking = pending.filter((e) => e.kind === 'approval' && !e.approval.informational)
     const rest: InboxEntry[] = [
+      ...pending.filter((e) => e.kind === 'approval' && e.approval.informational),
       ...messages.map((message): InboxEntry => ({ kind: 'message', message })),
       ...archive.closedQuestions.map((approval): InboxEntry => ({ kind: 'closed-question', approval }))
     ]
@@ -256,7 +258,7 @@ export function InboxCore(props: InboxCoreProps): React.JSX.Element {
   }
 
   const familyGlyph = (e: InboxEntry): React.JSX.Element => {
-    if (e.kind === 'approval') return GLYPH_BADGES.clepsydra
+    if (e.kind === 'approval') return e.approval.informational ? GLYPH_BADGES.beacon : GLYPH_BADGES.clepsydra
     if (e.kind === 'closed-question') return GLYPH_BADGES.archive
     if (e.kind === 'event') return GLYPH_BADGES.beacon
     return GLYPHS.agents
@@ -264,7 +266,7 @@ export function InboxCore(props: InboxCoreProps): React.JSX.Element {
 
   const familyLabel = (e: InboxEntry): string =>
     e.kind === 'approval'
-      ? t('inbox.familyBlocking')
+      ? t(e.approval.informational ? 'inbox.familyInformation' : 'inbox.familyBlocking')
       : e.kind === 'closed-question'
         ? t('inbox.stateClosed')
         : e.kind === 'event'
@@ -522,7 +524,10 @@ export function InboxCore(props: InboxCoreProps): React.JSX.Element {
               !(open.kind === 'message' && !canReplyToMessage) &&
               !(
                 open.kind === 'approval' &&
-                (!canAnswerVerdict || open.approval.kind === 'permission' || open.approval.absorbed_permission)
+                (!canAnswerVerdict ||
+                  open.approval.kind === 'permission' ||
+                  open.approval.absorbed_permission ||
+                  open.approval.informational)
               ) && (
                 <textarea
                   className="inbox-modal-reply"
@@ -562,7 +567,7 @@ export function InboxCore(props: InboxCoreProps): React.JSX.Element {
                   <>
                     {/* Not an ack: it ANSWERS with a refusal, which is what
                         releases the waiting agent. */}
-                    {canAnswerVerdict && !open.approval.absorbed_permission && (
+                    {canAnswerVerdict && !open.approval.absorbed_permission && !open.approval.informational && (
                       <button
                         className="btn danger"
                         disabled={sending}
@@ -586,7 +591,10 @@ export function InboxCore(props: InboxCoreProps): React.JSX.Element {
                     <button className="btn" onClick={closeEntry}>
                       {t('inbox.close')}
                     </button>
-                    {canAnswerVerdict && open.approval.kind !== 'permission' && !open.approval.absorbed_permission && (
+                    {canAnswerVerdict &&
+                      open.approval.kind !== 'permission' &&
+                      !open.approval.absorbed_permission &&
+                      !open.approval.informational && (
                       <button
                         className="primary"
                         disabled={sending || !draft.trim()}
@@ -634,7 +642,7 @@ export function InboxCore(props: InboxCoreProps): React.JSX.Element {
               {hookApproval
                 ? t('inbox.noteHook')
                 : open.kind === 'approval'
-                  ? t('inbox.noteBlocking')
+                  ? t(open.approval.informational ? 'inbox.noteInformation' : 'inbox.noteBlocking')
                   : open.kind === 'closed-question'
                     ? t('inbox.noteClosed')
                     : replyability === 'responded'

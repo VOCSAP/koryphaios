@@ -917,6 +917,7 @@ export const EN_DEFAULTS: Record<string, string> = {
   'inbox.familyMessage': 'Peer message',
   'inbox.familyEvent': 'Event',
   'inbox.familyBlocking': 'Blocking question',
+  'inbox.familyInformation': 'Information',
   'inbox.state.unread': 'Unread',
   'inbox.state.seen': 'Seen — still to handle',
   'inbox.state.acked': 'Acknowledged',
@@ -947,6 +948,7 @@ export const EN_DEFAULTS: Record<string, string> = {
   'inbox.navigateUnavailable': 'The requesting tile is not open in this window.',
   'inbox.noteBlocking':
     'An agent is waiting on this question. Answer or decline it; a question an agent asked by message can also be acknowledged (read, nothing to add). Closing keeps it here.',
+  'inbox.noteInformation': 'Nobody is waiting on this. Acknowledge it once read; closing keeps it here.',
   'inbox.noteHook': 'An agent is waiting on this request. Answering here releases it; closing keeps it here.',
   'inbox.handback': 'Answer in the terminal',
   'inbox.handbackTitle': 'Gives the request back to the tile\'s own menu, including "always allow"',

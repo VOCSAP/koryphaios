@@ -63,7 +63,7 @@ export function projectAvatarCounters(
 
   for (const row of pendingRows) {
     const open = row.status === 'pending' || row.status === 'expired_notif'
-    if (open && !awaitsModuleVerdict(row)) counters.waiting += 1
+    if (open && !row.informational && !awaitsModuleVerdict(row)) counters.waiting += 1
   }
 
   return { counters, unread: boundedUnread(unread, onInvalidUnread) }

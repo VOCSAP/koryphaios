@@ -26,7 +26,9 @@ export function pendingQuestionTarget(
   rows: readonly PendingQuestionRow[],
   sessions: readonly PendingQuestionSession[]
 ): PendingQuestionTarget {
-  const open = rows.filter((row) => row.status === 'pending' || row.status === 'expired_notif')
+  const open = rows.filter(
+    (row) => (row.status === 'pending' || row.status === 'expired_notif') && !row.informational
+  )
   let oldest: PendingQuestionRow | undefined
   for (const row of open) {
     if (!oldest || row.created_at.localeCompare(oldest.created_at) < 0) oldest = row

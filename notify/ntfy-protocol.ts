@@ -394,9 +394,10 @@ export function buildApprovalPublish(
     title,
     message,
     // 4 = high: a blocked session is the definition of time-sensitive, and the
-    // operator opted in to being interrupted by enabling the channel.
-    priority: 4,
-    tags: approval.kind === "permission" ? ["lock"] : ["question"],
+    // operator opted in to being interrupted by enabling the channel. An
+    // information blocks nobody and stays at ntfy's default, 3.
+    priority: approval.informational ? 3 : 4,
+    tags: approval.kind === "permission" ? ["lock"] : approval.informational ? ["information"] : ["question"],
     click: approvalClickUrl(approval.id),
     ...(actions.length ? { actions } : {}),
   };

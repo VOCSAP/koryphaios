@@ -64,6 +64,7 @@ interface FakeApproval {
   questions: unknown;
   mergeable: boolean;
   absorbed_permission: boolean;
+  informational: boolean;
   created_at: string;
   origin: { tile_ref: string };
 }
@@ -80,6 +81,7 @@ function approval(over: Partial<FakeApproval> = {}): FakeApproval {
     questions: null,
     mergeable: false,
     absorbed_permission: false,
+    informational: false,
     created_at: "2026-10-09T12:00:00.000Z",
     origin: { tile_ref: "tile-a" },
     ...over
@@ -292,6 +294,38 @@ test("a channel question's Ack reaches the Reclame callback as ack, not as a ver
   await click(container.querySelector(".inbox-entry"));
   await click(buttonLabelled("inbox.ack"));
   expect(calls.answers).toEqual([{ id: "ch", action: { kind: "ack" } }]);
+});
+
+// Mutants: any one of the informational guards removed from the modal (decline, reply field, reply button, label, note).
+test("an information is labelled as such and offers only Acknowledge and Close, with no reply field and no decline", async () => {
+  await mount({ approvals: [approval({ id: "fyi", kind: "question", informational: true, question: "build is green" })] });
+  await click(container.querySelector(".inbox-entry"));
+  const modal = container.querySelector(".inbox-modal")!;
+
+  expect(modal.querySelector(".inbox-modal-family")?.textContent).toBe("inbox.familyInformation");
+  expect(modal.querySelector(".inbox-modal-reply"), "no reply field").toBeNull();
+  expect(modal.querySelector(".inbox-modal-options"), "no option chip").toBeNull();
+  expect([...modal.querySelectorAll(".inbox-modal-actions button")].map((b) => b.textContent)).toEqual([
+    "inbox.ack",
+    "inbox.close"
+  ]);
+  expect([...modal.querySelectorAll(".inbox-modal-note")].map((n) => n.textContent)).toEqual(["inbox.noteInformation"]);
+  await click(buttonLabelled("inbox.ack"));
+  expect(calls.answers).toEqual([{ id: "fyi", action: { kind: "ack" } }]);
+});
+
+// Mutant: an information sorted with the blocking questions (it is newer, so it would ride on top).
+test("a blocking question stays above a newer information, which is listed with the rest", async () => {
+  await mount({
+    approvals: [
+      approval({ id: "fyi", kind: "question", informational: true, question: "fyi text", created_at: "2026-10-09T13:00:00.000Z" }),
+      approval({ id: "blocking", kind: "question", question: "blocking text", created_at: "2026-10-09T12:00:00.000Z" })
+    ],
+    messages: [MESSAGE]
+  });
+
+  const excerpts = [...container.querySelectorAll(".inbox-entry-excerpt")].map((e) => e.textContent);
+  expect(excerpts).toEqual(["blocking text", "fyi text", "see the build"]);
 });
 
 test("a hook request's Hand back reaches the Reclame callback as handback, not as a verdict", async () => {

@@ -265,6 +265,9 @@ describe("ask_operator over MCP stdio", () => {
     expect(names).toContain("ask_operator");
     const ask = res.result?.tools?.find((t) => t.name === "ask_operator");
     expect(ask?.inputSchema?.properties?.options?.maxItems).toBe(APPROVAL_OPTIONS_MAX);
+    // Mutant: the `blocking` entry removed from the ask_operator inputSchema.
+    expect(ask?.inputSchema?.properties?.blocking?.type).toBe("boolean");
+    expect(ask?.inputSchema?.required).toEqual(["title", "question"]);
   }, 60_000);
 
   test("the operator family advertises notify_operator and not roadmap_dispatch", async () => {
@@ -383,9 +386,41 @@ describe("ask_operator over MCP stdio", () => {
     expect(approval?.kind).toBe("question");
     expect(approval?.title).toBe("Migration");
     expect(approval?.options).toEqual(["A", "B"]);
+    // Mutant: the default of `blocking` flipped to false.
+    expect(approval?.informational).toBe(false);
     // The MCP tool signs with the RESTRICTED session credential.
     expect(approval?.origin.session_ref).toBe(`window-${h.run!.run}`);
     expect(res.result?.content?.[0]?.text).toContain(`Ticket "${approval!.id}"`);
+  }, 60_000);
+
+  // Mutants: `informational` dropped from the signed body; the non-boolean check removed; the information still answered with the question ticket text.
+  test("blocking:false deposits an information the broker stores as informational, and a non-boolean blocking is refused before any deposit", async () => {
+    const h = await boot(true);
+    h.send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/call",
+      params: { name: "ask_operator", arguments: { title: "FYI", question: "The build is green.", blocking: "false" } },
+    });
+    const refused = await reachedWithin(readUntil(h.reader, 1, h.buffer), "the refusal of a non-boolean blocking", 15_000);
+    expect(refused.result?.isError).toBe(true);
+    expect(refused.result?.content?.[0]?.text).toBe("blocking must be a boolean");
+
+    h.send({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "tools/call",
+      params: { name: "ask_operator", arguments: { title: "FYI", question: "The build is green.", blocking: false } },
+    });
+    const res = await reachedWithin(readUntil(h.reader, 2, h.buffer), "the information ticket", 15_000);
+
+    expect(res.result?.isError).toBeFalsy();
+    const approval = await firstApproval(h);
+    expect(approval).toMatchObject({ status: "pending", kind: "question", title: "FYI", informational: true });
+    const text = res.result?.content?.[0]?.text ?? "";
+    expect(text).toContain(`Ticket "${approval!.id}"`);
+    expect(text).toContain("Information deposited");
+    expect(text, "nothing is promised to arrive").not.toContain("will arrive");
   }, 60_000);
 
   test("an over-long question reaches the broker whole and is stored with the truncation marker", async () => {

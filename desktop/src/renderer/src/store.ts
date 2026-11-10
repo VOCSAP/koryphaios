@@ -520,7 +520,9 @@ export function inboxPendingCount(s: DeckState): number {
 /**
  * The single producer of the Courrier attention badge, shared by every
  * navigation bar -- bars must call this, never re-add the terms themselves.
- * Blocking questions count until resolved, drafts until opened.
+ * Blocking questions count until resolved, drafts until opened. An
+ * information counts like an unread message: it is in the way until
+ * acknowledged, but nobody is stopped on it.
  */
 export function inboxBadgeCount(s: DeckState): number {
   return inboxPendingCount(s) + s.pendingApprovals.length + s.graphDrafts.length
@@ -529,9 +531,10 @@ export function inboxBadgeCount(s: DeckState): number {
 /**
  * Whether an ACTION is awaited (drives the rail glyph's attention glow), as
  * opposed to something merely unread. Same single-producer rule as above.
+ * An information awaits nothing.
  */
 export function inboxAwaitsAction(s: DeckState): boolean {
-  return s.pendingApprovals.length + s.graphDrafts.length > 0
+  return s.pendingApprovals.some((a) => !a.informational) || s.graphDrafts.length > 0
 }
 
 /**

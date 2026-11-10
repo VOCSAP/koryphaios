@@ -51,6 +51,15 @@ describe("pendingQuestionTarget", () => {
     expect(pendingQuestionTarget(rows, [session("t1", true)])).toEqual({ kind: "inbox", approvalId: "pty" });
   });
 
+  // Mutant: `!row.informational` removed from the open filter.
+  test("an older information never hides a real question, and alone it leaves the waiting tile", () => {
+    const information = row({ id: "fyi", created_at: "2026-10-16T09:00:00.000Z", informational: true });
+    const question = row({ id: "ask", created_at: "2026-10-16T10:00:00.000Z" });
+    expect(pendingQuestionTarget([information, question], [])).toEqual({ kind: "inbox", approvalId: "ask" });
+    expect(pendingQuestionTarget([information], [session("t1"), session("t2", true)])).toEqual({ kind: "tile", id: "t2" });
+    expect(pendingQuestionTarget([information], [session("t1")])).toEqual({ kind: "none" });
+  });
+
   test("no open row: the first waiting tile in the service's order", () => {
     const sessions = [session("t1"), session("t2", true), session("t3", true)];
     expect(pendingQuestionTarget([], sessions)).toEqual({ kind: "tile", id: "t2" });

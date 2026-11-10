@@ -1985,6 +1985,8 @@ export interface Approval {
   mergeable: boolean;
   /** A permission was raised on this question's tile: it takes no verdict, only a terminal answer closes it. */
   absorbed_permission: boolean;
+  /** Deposited for the operator to read: no answer is awaited, none is accepted, and nothing is pushed to the asker. */
+  informational: boolean;
   answered_via: ApprovalVia | null;
   answer_kind: ApprovalAnswerKind | null;
   /** For `answers`, a readable summary of them, one line per question. */
@@ -2040,7 +2042,7 @@ export interface InboxCloseResponse {
 /** One open entry of a run; `author` is a display snapshot and authorizes nothing. */
 export interface InboxListItem {
   id: string;
-  type: "message" | "question";
+  type: "message" | "question" | "information";
   author: string | null;
   created_at: string;
   /** At most 280 code points. */
@@ -2093,6 +2095,8 @@ export interface ApprovalAddRequest {
    * refused. Absent or null reads as false; an older broker ignores it.
    */
   tile_only?: boolean;
+  /** An information: only on an attested channel question with merge 'never', no options and no questions. */
+  informational?: boolean;
   /**
    * AskUserQuestion questions: kind 'question', merge 'never', and a hook route
    * or a channel route to an active peer. `multi_select` defaults to false.

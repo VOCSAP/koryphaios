@@ -10,6 +10,8 @@ export interface HookAwaitRow {
   reply_route: string
   status: string
   origin: { tile_ref: string }
+  /** An information: nobody waits on it, so no counter and no "oldest question" target takes it. */
+  informational?: boolean
 }
 
 /** `tile_ref` is declared by the producer, never proven: it decides where the badge and the verdict panel show. */

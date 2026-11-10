@@ -3394,5 +3394,113 @@ describe("Attested channel questions", () => {
       expect(storedRow(w.b, answered.body.approval.id), "an answered row one minute past the cutoff, the same day").toBeFalsy();
       expect(storedRow(w.b, recent.body.approval.id), "a closed row one minute inside the window").toMatchObject({ status: "closed" });
     });
+
+    describe("an information (informational question)", () => {
+      const info = (token: string, over: Record<string, unknown> = {}) =>
+        ticket(token, { informational: true, title: "FYI", question: "The build is green.", ...over });
+
+      // Mutants: the informational guard removed from deliverApprovalAnswer (both the operator's acknowledgement and the lead's close push again).
+      test("acknowledged by the operator or closed by a lead, it pushes nothing to its asker, while a blocking question acknowledged does", async () => {
+        const w = await world("info-nopush");
+        const { other, lead } = await otherTileLead(w, "info-nopush-lead");
+        const acked = await ask(w.b, w.op, w.run, info(w.bound.instance_token, { title: "FYI ack" }));
+        const closedInfo = await ask(w.b, w.op, w.run, info(w.bound.instance_token, { title: "FYI close" }));
+        expect([acked.status, closedInfo.status]).toEqual([200, 200]);
+        const frames = await listen(w);
+
+        const ackRes = await signedPost(w.b, "/approval/claim", { id: acked.body.approval.id, via: "deck", acknowledge: true }, { cred: w.op.cred, operator_id: w.op.id });
+        const closeRes = await closeQuestion(w, lead, { entryId: closedInfo.body.approval.id, reason: "stale", instance: other.instance_token });
+        const control = await signedPost(w.b, "/approval/claim", { id: w.id, via: "deck", acknowledge: true }, { cred: w.op.cred, operator_id: w.op.id });
+        await settleSecondTicket(w, "marker");
+        await frameWith(frames, "marker");
+
+        expect([ackRes.status, closeRes.status, control.status]).toEqual([200, 200, 200]);
+        expect(storedRow(w.b, acked.body.approval.id)).toMatchObject({ status: "acknowledged" });
+        expect(storedRow(w.b, closedInfo.body.approval.id)).toMatchObject({ status: "closed", closed_by_authority: "lead" });
+        expect(messagesAbout(w, acked.body.approval.id), "the acknowledged information").toEqual([]);
+        expect(messagesAbout(w, closedInfo.body.approval.id), "the information closed by a lead").toEqual([]);
+        expect(messagesAbout(w, w.id), "control: a blocking question acknowledged is pushed").toHaveLength(1);
+        expect(frames, "the control push, then the marker").toHaveLength(2);
+      });
+
+      // Mutants: informational read as `type: "question"` in handleInboxList; rowToApproval not projecting the flag.
+      test("it is listed as an information, closable, and projected as informational; a blocking question is not", async () => {
+        const w = await world("info-list");
+        const lead = await mandateFor(w, "lead", "lead-info-list");
+        const fyi = await ask(w.b, w.op, w.run, info(w.bound.instance_token));
+
+        const listed = await listInbox<{ entries: Array<{ id: string; type: string; closable: boolean }> }>(w.b, w.run, lead, { instanceToken: w.bound.instance_token }, w.op.id);
+
+        expect(listed.status).toBe(200);
+        const byId = Object.fromEntries(listed.body.entries.map((e) => [e.id, e]));
+        expect(byId[fyi.body.approval.id]).toMatchObject({ type: "information", closable: true });
+        expect(byId[w.id]).toMatchObject({ type: "question" });
+        expect(fyi.body.approval).toMatchObject({ informational: true, reply_route: "channel", status: "pending" });
+        expect(storedRow(w.b, w.id)).toMatchObject({ informational: 0 });
+      });
+
+      // Mutants: the `informational = ?` filter dropped from the pending count; the information cap read from APPROVAL_MAX_PENDING; the cap not freed by an acknowledgement.
+      test("a burst of informations is refused on its own cap and never refuses a real question", async () => {
+        const b = await boot({ CLAUDE_PEERS_APPROVAL_MAX_PENDING: "3", CLAUDE_PEERS_APPROVAL_MAX_PENDING_INFO: "2" });
+        const op = newOperator();
+        const run = await mintRun(b, op, "g-info-cap");
+        const bound = await bindInstance(b, op, run, "hInfoCap", "/info-cap");
+        const raise = (over: Record<string, unknown>) => ask(b, op, run, ticket(bound.instance_token, over));
+
+        const infos = [await raise({ informational: true, title: "i1" }), await raise({ informational: true, title: "i2" })];
+        const overflow = await raise({ informational: true, title: "i3" });
+        const questions = [await raise({ title: "q1" }), await raise({ title: "q2" }), await raise({ title: "q3" })];
+        const questionOverflow = await raise({ title: "q4" });
+
+        expect(infos.map((r) => r.status)).toEqual([200, 200]);
+        expect({ status: overflow.status, error: overflow.body.error }).toEqual({ status: 429, error: "too many pending approvals" });
+        expect(questions.map((r) => r.status), "three real questions fit although two informations are pending").toEqual([200, 200, 200]);
+        expect(questionOverflow.status, "the question cap still binds").toBe(429);
+
+        await signedPost(b, "/approval/claim", { id: infos[0]!.body.approval.id, via: "deck", acknowledge: true }, { cred: op.cred, operator_id: op.id });
+        expect((await raise({ informational: true, title: "i4" })).status, "an acknowledged information frees its slot").toBe(200);
+      });
+
+      // Mutants: the refusal removed from the UPDATE guard; the refusal branch of the failure path removed.
+      test("it takes no answer of any kind, only an acknowledgement, and stays pending after the refusals", async () => {
+        const w = await world("info-answer");
+        const fyi = (await ask(w.b, w.op, w.run, info(w.bound.instance_token))).body.approval.id;
+        const claim = (payload: Record<string, unknown>) =>
+          signedPost<{ error?: string }>(w.b, "/approval/claim", { id: fyi, via: "deck", ...payload }, { cred: w.op.cred, operator_id: w.op.id });
+
+        const refused = [
+          await claim({ answer_kind: "text", answer_text: "thanks" }),
+          await claim({ answer_kind: "deny" }),
+          await claim({ answer_kind: "allow" }),
+        ];
+
+        expect(refused.map((r) => r.status)).toEqual([422, 422, 422]);
+        expect(refused[0]!.body.error).toContain("information");
+        expect(storedRow(w.b, fyi)).toMatchObject({ status: "pending", answer_kind: null });
+        expect((await claim({ acknowledge: true })).status).toBe(200);
+        expect(storedRow(w.b, fyi)).toMatchObject({ status: "acknowledged" });
+      });
+
+      // Mutants: the typeof check, the attestation check, or any one of the shape conditions removed.
+      test("it is refused unless it is an attested channel question with merge never, no options and no questions, and a non-boolean flag is never coerced", async () => {
+        const w = await world("info-shape");
+        const before = rowCount(w.b, w.op);
+        const bad = async (over: Record<string, unknown>) => (await ask(w.b, w.op, w.run, info(w.bound.instance_token, over))).status;
+
+        expect(await bad({ options: ["a"] }), "options").toBe(400);
+        expect(await bad({ kind: "permission" }), "a permission").toBe(400);
+        expect(await bad({ merge: "tile" }), "a mergeable row").toBe(400);
+        expect(await bad({ informational: "true" }), "a string flag").toBe(400);
+        expect(await bad({ informational: 1 }), "a numeric flag").toBe(400);
+        const unattested = await signedPost<{ error?: string }>(
+          w.b,
+          "/approval/add",
+          { kind: "question", title: "FYI", question: "q", merge: "never", informational: true, origin: { host: "bureau" } },
+          { cred: w.op.cred, operator_id: w.op.id }
+        );
+        expect(unattested.status, "an unsigned deposit").toBe(400);
+        expect(rowCount(w.b, w.op), "nothing was stored by the refusals").toBe(before);
+      });
+    });
   });
 });

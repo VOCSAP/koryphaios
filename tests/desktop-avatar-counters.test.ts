@@ -109,6 +109,13 @@ test('a request whose phone notification expired still claims, like in the Courr
   expect(faceFor([askOperator('expired_notif')])).toEqual({ face: 'reclame', waiting: 1, unread: 0 })
 })
 
+// Mutant: `!row.informational` removed from projectAvatarCounters.
+test('a pending information awaits nothing: it adds no waiting, beside a question that does', () => {
+  const information = { ...askOperator(), informational: true }
+  expect(faceFor([information])).toEqual({ face: 'travaille', waiting: 0, unread: 0 })
+  expect(faceFor([information, askOperator()])).toMatchObject({ face: 'reclame', waiting: 1 })
+})
+
 test('a closed request claims nothing', () => {
   const closed = ['answered', 'answered_terminal', 'abandoned', 'acknowledged'].map((status) => askOperator(status))
   expect(faceFor(closed)).toEqual({ face: 'travaille', waiting: 0, unread: 0 })

@@ -206,6 +206,19 @@ closed notice) arrives later as a channel message from `operator`; without a
 WebSocket it rides the poll fallback and `check_messages`. No tool reads a
 ticket.
 
+**Information (`ask_operator` with `blocking: false`).** The same attested
+channel question, stored with `pending_approvals.informational = 1` (signed
+inside the body, so a relay cannot add or drop it). It keeps the channel route
+because acknowledge, `inbox_close` and the run scoping all key on it;
+`deliverApprovalAnswer` returns early on the flag, which is what keeps BOTH the
+operator's acknowledgement and a lead's close from pushing anything to the
+asker. `settleApproval` refuses every answer kind on it (`information-only`,
+422): only the Deck's acknowledgement settles it. A phone shows it with no
+button and no reply invitation, and refuses a reply typed there. `inbox_list` types it
+`information`. Its pending rows are counted apart under
+`CLAUDE_PEERS_APPROVAL_MAX_PENDING_INFO` (50), and excluded from the question
+cap, so a burst of informations never refuses a real question with 429.
+
 **Notification channels (N3–N5).** Three gateways implement one interface
 (`notify/types.ts`: `post` / `settle` / `rejectLate`); `notify/registry.ts`
 owns the two rules they share — fan-out **bounded to one `operator_id`**

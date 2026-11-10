@@ -739,6 +739,10 @@ export const DECK_ONLY_TOOLS = [
           maxItems: APPROVAL_OPTIONS_MAX,
           description: "Optional suggested answers, offered as one-tap buttons.",
         },
+        blocking: {
+          type: "boolean" as const,
+          description: "false files an information: no reply, no options.",
+        },
       },
       required: ["title", "question"],
     },
@@ -1006,6 +1010,11 @@ export async function handleAskOperator(args: unknown, identity: CompanionIdenti
       };
     }
     const rawOptions = (args as { options?: unknown }).options;
+    const blocking = (args as { blocking?: unknown }).blocking;
+    if (blocking !== undefined && typeof blocking !== "boolean") {
+      return { content: [{ type: "text" as const, text: "blocking must be a boolean" }], isError: true };
+    }
+    const informational = blocking === false;
     const created = await ctx.broker.post<ApprovalAddResponse>(
       "/approval/add",
       signInboxBody(cred, {
@@ -1015,6 +1024,7 @@ export async function handleAskOperator(args: unknown, identity: CompanionIdenti
         options: Array.isArray(rawOptions) ? rawOptions.map(String) : [],
         session_ref: cred.sessionRef,
         merge: "never",
+        ...(informational ? { informational: true } : {}),
         reply_route: "channel",
         reply_peer_id: identity.peerId ?? undefined,
         origin: {
@@ -1038,6 +1048,16 @@ export async function handleAskOperator(args: unknown, identity: CompanionIdenti
           },
         ],
         isError: true,
+      };
+    }
+    if (informational) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `Information deposited for the operator. Ticket "${approvalId}". No answer will come and nothing is sent to you when the operator acknowledges it or a lead closes it. Carry on.`,
+          },
+        ],
       };
     }
     return {

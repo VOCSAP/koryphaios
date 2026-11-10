@@ -1819,6 +1819,7 @@ for (const column of [
   "closed_by_authority TEXT",
   "closed_by_instance_ref TEXT",
   "closed_by_peer_id_snapshot TEXT",
+  "informational INTEGER NOT NULL DEFAULT 0",
 ]) {
   try {
     db.run(`ALTER TABLE pending_approvals ADD COLUMN ${column}`);
@@ -10664,6 +10665,12 @@ const APPROVAL_MAX_PENDING = Math.max(
   1,
   parseInt(process.env.CLAUDE_PEERS_APPROVAL_MAX_PENDING ?? "200", 10)
 );
+// Informations never count against the cap above, nor questions against this
+// one: a burst of informations must not make a real question fail with 429.
+const APPROVAL_MAX_PENDING_INFO = Math.max(
+  1,
+  parseInt(process.env.CLAUDE_PEERS_APPROVAL_MAX_PENDING_INFO ?? "50", 10)
+);
 
 type ApprovalRow = {
   id: string;
@@ -10680,6 +10687,7 @@ type ApprovalRow = {
   reply_group: string;
   mergeable: number;
   absorbed_permission: number;
+  informational: number;
   kind: string;
   title: string;
   question: string;
@@ -10757,6 +10765,7 @@ function rowToApproval(row: ApprovalRow): Approval {
     reply_route: readReplyRoute(row),
     mergeable: row.mergeable !== 0,
     absorbed_permission: row.absorbed_permission !== 0,
+    informational: row.informational !== 0,
     kind: row.kind as Approval["kind"],
     title: row.title,
     question: row.question,
@@ -10950,6 +10959,10 @@ function resolveReplyRoute(
  */
 function deliverApprovalAnswer(row: ApprovalRow): void {
   if (row.reply_route !== "channel" || !row.reply_token) return;
+  // An information waits for nobody. It keeps the channel route because the
+  // acknowledge, close and scoping paths all key on it; this guard is what
+  // keeps both settle paths (operator ack, lead close) from pushing.
+  if (row.informational !== 0) return;
   const outcome = settledOutcome({
     status: row.status as ApprovalStatus,
     answer_kind: (row.answer_kind as Approval["answer_kind"]) ?? null,
@@ -11098,6 +11111,23 @@ function handleApprovalAdd(
   if (body.reply_route === "hook" && draft.value.merge !== "never") {
     return { error: "reply_route hook requires merge never", status: 400 };
   }
+  if (body.informational !== undefined && typeof body.informational !== "boolean") {
+    return { error: "informational must be a boolean", status: 400 };
+  }
+  const informational = body.informational === true;
+  if (
+    informational &&
+    (!asker ||
+      draft.value.kind !== "question" ||
+      draft.value.merge !== "never" ||
+      draft.value.options.length > 0 ||
+      draft.value.questions)
+  ) {
+    return {
+      error: "an information is an attested channel question with merge never, no options and no questions",
+      status: 400,
+    };
+  }
 
   // A session credential is pinned to its own session_ref: it can neither
   // impersonate another tile nor emit "anonymously". The comparison happens
@@ -11159,10 +11189,16 @@ function handleApprovalAdd(
   const pending = db
     .query(
       `SELECT COUNT(*) AS n FROM pending_approvals WHERE ${where.sql} AND status = 'pending'
+         AND informational = ?
          AND NOT (? AND tile_ref = ? AND mergeable = 1 AND kind = 'permission')`
     )
-    .get(...(where.params as never[]), replacesTilePermission ? 1 : 0, draft.value.tile_ref) as { n: number };
-  if (pending.n >= APPROVAL_MAX_PENDING) {
+    .get(
+      ...(where.params as never[]),
+      informational ? 1 : 0,
+      replacesTilePermission ? 1 : 0,
+      draft.value.tile_ref
+    ) as { n: number };
+  if (pending.n >= (informational ? APPROVAL_MAX_PENDING_INFO : APPROVAL_MAX_PENDING)) {
     return { error: "too many pending approvals", status: 429 };
   }
 
@@ -11200,9 +11236,9 @@ function handleApprovalAdd(
     db.run(
       `INSERT INTO pending_approvals
          (id, ${stamped.columns.join(", ")}, origin_host, origin_user, group_id, from_peer,
-          tile_ref, mergeable, absorbed_permission, reply_route, reply_token, reply_group, producer_secret_hash,
+          tile_ref, mergeable, absorbed_permission, informational, reply_route, reply_token, reply_group, producer_secret_hash,
           kind, title, question, options_json, questions_json, status, created_at, notif_expires_at${asker ? ", author_peer_id_snapshot" : ""})
-       VALUES (?, ${stamped.columns.map(() => "?").join(", ")}, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?${asker ? ", ?" : ""})`,
+       VALUES (?, ${stamped.columns.map(() => "?").join(", ")}, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?${asker ? ", ?" : ""})`,
       [
         id,
         ...stamped.values,
@@ -11213,6 +11249,7 @@ function handleApprovalAdd(
         draft.value.tile_ref,
         draft.value.merge === "tile" ? 1 : 0,
         draft.value.tile_only ? 1 : 0,
+        informational ? 1 : 0,
         reply.route,
         reply.token,
         reply.group,
@@ -11349,7 +11386,8 @@ function settleApproval(
         AND NOT (kind = 'permission' AND COALESCE(?, '') = 'text')
         AND NOT (absorbed_permission = 1 AND COALESCE(?, '') IN ('allow', 'deny', 'text', 'answers'))
         AND NOT (reply_route = 'hook' AND questions_json IS NOT NULL AND COALESCE(?, '') IN ('allow', 'deny', 'text'))
-        AND NOT (kind = 'question' AND reply_route NOT IN ('channel', 'hook') AND COALESCE(?, '') = 'allow')`,
+        AND NOT (kind = 'question' AND reply_route NOT IN ('channel', 'hook') AND COALESCE(?, '') = 'allow')
+        AND NOT (informational = 1 AND COALESCE(?, '') <> '')`,
     [
       status,
       via,
@@ -11363,6 +11401,7 @@ function settleApproval(
       answerKind,
       answerKind,
       answerKind,
+      answerKind,
     ]
   );
   if (res.changes === 0) {
@@ -11372,17 +11411,21 @@ function settleApproval(
     // is not theirs.
     const existing = db
       .query(
-        `SELECT kind, status, absorbed_permission, reply_route, questions_json FROM pending_approvals WHERE id = ? AND ${where.sql}`
+        `SELECT kind, status, absorbed_permission, informational, reply_route, questions_json FROM pending_approvals WHERE id = ? AND ${where.sql}`
       )
       .get(id, ...(where.params as never[])) as {
       kind: string;
       status: string;
       absorbed_permission: number;
+      informational: number;
       reply_route: string;
       questions_json: string | null;
     } | null;
     if (!existing) return { error: "unknown approval", status: 404 };
     const settleable = allowed.includes(`'${existing.status}'`);
+    if (existing.informational !== 0 && answerKind !== null && settleable) {
+      return { error: "an information takes no answer, only an acknowledgement", status: 422, refused: "information-only" };
+    }
     if (existing.kind === "permission" && answerKind === "text" && settleable) {
       return { error: "a permission takes allow or deny, not a text answer", status: 422, refused: "verdict-only" };
     }
@@ -11892,6 +11935,7 @@ type InboxListQuestionRow = {
   reply_route: string;
   kind: string;
   mergeable: number;
+  informational: number;
 };
 
 type InboxListCandidate = { at: number; id: string; createdAt: string; allowed: boolean; item: InboxListItem };
@@ -11927,7 +11971,7 @@ function handleInboxList(body: InboxListRequest & Record<string, unknown>): Inbo
   const questions = db
     .query(
       `SELECT id, operator_id, project_key, inbox_run_ref, inbox_group_id, author_instance_ref,
-              author_peer_id_snapshot, title, question, created_at, reply_route, kind, mergeable
+              author_peer_id_snapshot, title, question, created_at, reply_route, kind, mergeable, informational
          FROM pending_approvals
         WHERE ${actorWhere.sql} AND status IN ('pending','expired_notif') AND inbox_run_ref IS NOT NULL${after.sql.replace("{id}", "id")}
         ORDER BY julianday(created_at), id LIMIT ?`
@@ -11970,7 +12014,7 @@ function handleInboxList(body: InboxListRequest & Record<string, unknown>): Inbo
       }),
       item: {
         id: r.id,
-        type: "question" as const,
+        type: r.informational !== 0 ? ("information" as const) : ("question" as const),
         author: r.author_peer_id_snapshot,
         created_at: r.created_at,
         text: cutText(`${r.title} -- ${r.question}`, INBOX_LIST_TEXT_MAX),

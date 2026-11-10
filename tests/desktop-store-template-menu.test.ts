@@ -50,12 +50,33 @@ const api = new Proxy(
 );
 
 let useDeck: typeof import("../desktop/src/renderer/src/store").useDeck;
+let inboxAwaitsAction: typeof import("../desktop/src/renderer/src/store").inboxAwaitsAction;
+let inboxBadgeCount: typeof import("../desktop/src/renderer/src/store").inboxBadgeCount;
 
 beforeAll(async () => {
   (window as unknown as { api: unknown }).api = api;
   // The query gives a module record that the other files' mock.module of store.ts does not reach, and no teardown could undo.
-  ({ useDeck } = await import("../desktop/src/renderer/src/store.ts?real"));
+  ({ useDeck, inboxAwaitsAction, inboxBadgeCount } = await import("../desktop/src/renderer/src/store.ts?real"));
   await useDeck.getState().init();
+});
+
+// Mutant: inboxAwaitsAction counting every pending approval again.
+test("an information is counted by the Courrier badge but never lights the attention glow", () => {
+  const pending = (informational: boolean) => ({ informational }) as never;
+  useDeck.setState({
+    pendingApprovals: [pending(true)],
+    graphDrafts: [],
+    inboxMessages: [],
+    inboxAckState: {},
+    inboxArchive: { status: "unsupported", messages: {}, closedQuestions: [] } as never
+  });
+  const onlyInformation = [inboxAwaitsAction(useDeck.getState()), inboxBadgeCount(useDeck.getState())];
+  useDeck.setState({ pendingApprovals: [pending(true), pending(false)] });
+  const withQuestion = [inboxAwaitsAction(useDeck.getState()), inboxBadgeCount(useDeck.getState())];
+  useDeck.setState({ pendingApprovals: [] });
+
+  expect(onlyInformation).toEqual([false, 1]);
+  expect(withQuestion).toEqual([true, 2]);
 });
 
 test("every menu channel has a store subscription named after it", () => {

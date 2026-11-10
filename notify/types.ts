@@ -87,7 +87,8 @@ export interface NotificationChannel {
  * `text-only` -- a question typed into a tile takes a written answer, never an allow;
  * `invalid-option` -- the tapped option is not one of the request's choices;
  * `invalid-answer` -- the tapped option failed the request's answers validation;
- * `empty-answer` -- the written answer is empty once controls are stripped.
+ * `empty-answer` -- the written answer is empty once controls are stripped;
+ * `information-only` -- an information takes an acknowledgement, never an answer.
  */
 export type AnswerRefusal =
   | "verdict-only"
@@ -97,7 +98,8 @@ export type AnswerRefusal =
   | "text-only"
   | "invalid-option"
   | "invalid-answer"
-  | "empty-answer";
+  | "empty-answer"
+  | "information-only";
 
 /** What a gateway needs from the broker, injected so adapters stay testable. */
 export interface ChannelHost {

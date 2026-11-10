@@ -60,6 +60,7 @@ function approval(patch: Partial<Approval> = {}): Approval {
     reply_route: "hook",
     mergeable: false,
     absorbed_permission: false,
+    informational: false,
     answered_via: null,
     answer_kind: null,
     answer_text: null,
@@ -344,5 +345,59 @@ describe("Discord option buttons", () => {
     const rows = await posted(approval({ questions: [question(["x".repeat(200), "short"])] }));
     expect(rows[0]!.components[0]!.label.length).toBeLessThanOrEqual(80);
     expect(decodeCallback(rows[0]!.components[0]!.custom_id)?.optionIndex).toBe(0);
+  });
+});
+
+describe("an information on the phone", () => {
+  const info = approval({ reply_route: "channel", informational: true, title: "FYI", question: "The build is green." });
+  const asked = approval({ reply_route: "channel", title: "Ask", question: "Which one?" });
+
+  // Mutant: the informational branch removed from DiscordChannel.post (the free-text Answer button comes back).
+  test("Discord posts it with no component at all, while the same question asked keeps its Answer button", async () => {
+    const send = async (a: Approval) => {
+      const calls: Array<{ url: string; body: Record<string, unknown> }> = [];
+      const ch = new DiscordChannel({ token: "t", host: recordingHost([]), bindingFor: () => BINDING, fetchImpl: recordingFetch(calls, { id: "dm-1" }) });
+      await ch.post({ ...BINDING, kind: "discord" }, a);
+      return calls.find((c) => c.url.endsWith("/messages"))!.body.components as Array<{ components: Array<{ label: string }> }>;
+    };
+    expect(await send(info)).toEqual([]);
+    expect((await send(asked)).flatMap((r) => r.components.map((c) => c.label))).toEqual(["Answer…"]);
+  });
+
+  // Mutant: the informational branch removed from the Telegram hint.
+  test("Telegram sends no keyboard and no reply invitation, ntfy publishes no action", async () => {
+    const calls: Array<{ url: string; body: Record<string, unknown> }> = [];
+    const ch = new TelegramChannel({
+      token: "t",
+      host: recordingHost([]),
+      bindingFor: () => BINDING,
+      approvalForMessage: () => null,
+      fetchImpl: recordingFetch(calls, { ok: true, result: { message_id: 7 } }),
+    });
+    await ch.post(BINDING, info);
+    await ch.post(BINDING, asked);
+
+    const [sentInfo, sentAsked] = calls.map((c) => c.body);
+    expect(sentInfo!.reply_markup).toBeUndefined();
+    expect(String(sentInfo!.text)).not.toContain("Reply to this message");
+    expect(String(sentInfo!.text)).toContain("no answer is expected");
+    expect(String(sentAsked!.text)).toContain("Reply to this message with your answer.");
+    const deps = { server: "https://ntfy.sh", topicNotif: "a".repeat(48), topicReplies: "b".repeat(48) };
+    expect(buildApprovalPublish(info, "bureau", deps).actions).toBeUndefined();
+  });
+
+  // Mutants: priority or tags ignoring the informational flag.
+  test("ntfy publishes it at default priority with an information tag, a question stays high priority", () => {
+    const deps = { server: "https://ntfy.sh", topicNotif: "a".repeat(48), topicReplies: "b".repeat(48) };
+    const published = buildApprovalPublish(info, "bureau", deps);
+    const question = buildApprovalPublish(asked, "bureau", deps);
+    expect([published.priority, published.tags]).toEqual([3, ["information"]]);
+    expect([question.priority, question.tags]).toEqual([4, ["question"]]);
+  });
+
+  // Mutant: the 'information-only' entry of REFUSAL_NOTICES blanked (a phone reply reads as already handled).
+  test("a reply to it reads as a refusal with its reason, never as already handled", () => {
+    expect(answerNotice({ refused: "information-only" })).toBe(REFUSAL_NOTICES["information-only"]);
+    expect(REFUSAL_NOTICES["information-only"]).toContain("information");
   });
 });

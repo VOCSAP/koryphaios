@@ -175,6 +175,12 @@ Electron + React 19 + zustand, xterm terminals over node-pty. Sources in
   the dialog check (`matchPermissionDialog`, `permissionDialogShown`; verdict
   poll in `desktop/src/main/index.ts`). Decision and limits:
   [ADR 005](docs/adr/005-module-answered-approvals.md).
+  An `ask_operator` with `blocking: false` reaches the Courrier as an
+  **Information** (`Approval.informational`): listed under the blocking
+  questions, absent from the attention glow (`inboxAwaitsAction`), counted in the
+  Courrier badge like an unread message, and offering only Acknowledge and
+  Close (no Decline, no reply field). Acknowledging it tells the asking agent
+  nothing.
   Three channels are enrolled from `Settings > Notifications`: Telegram and
   Discord take a bot token, the **Parastatès** row takes an ntfy relay
   address (the broker mints the topics) and answers with a QR that is a

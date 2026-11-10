@@ -322,6 +322,8 @@ export interface Approval {
   reply_route: ApprovalReplyRoute
   mergeable: boolean
   absorbed_permission: boolean
+  /** Deposited to be read: nobody waits for it and only an acknowledgement settles it. */
+  informational: boolean
   answered_via: ApprovalVia | null
   answer_kind: ApprovalAnswerKind | null
   answer_text: string | null
