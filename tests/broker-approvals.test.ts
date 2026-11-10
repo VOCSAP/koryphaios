@@ -22,6 +22,7 @@ import {
 } from "../shared/approval.ts";
 import { OPERATOR_INSTANCE_TOKEN, type Approval } from "../shared/types.ts";
 import { buildApprovalRequest } from "../desktop/hooks/approval-hook.ts";
+import { buildAnswerNotice, buildClosedNotice, isClosedNotice } from "../shared/approval-notice.ts";
 
 const brokers: TestBroker[] = [];
 afterAll(async () => {
@@ -3104,17 +3105,119 @@ describe("Attested channel questions", () => {
     const mandateFor = (w: Awaited<ReturnType<typeof world>>, authority: "author" | "lead" | "supervisor", caller: string, run: Run = w.run, tile: string = w.tile) =>
       mintMandate(w.b, run, authority, caller, { operator: w.operator, tile });
 
-    // Mutants: the parked waiter not resolved on close; closed collapsed into answered_terminal; notifyRegistry.settle given the reason.
-    test("a parked wait is woken at once with a closed status, the reason and the authority, and no answer message is pushed", async () => {
+    const sockets: WebSocket[] = [];
+    afterAll(() => {
+      for (const s of sockets) s.close();
+    });
+
+    const settleText = (w: Awaited<ReturnType<typeof world>>, id: string, text: string) =>
+      signedPost<{ error?: string }>(w.b, "/approval/claim", { id, via: "deck", answer_kind: "text", answer_text: text }, { cred: w.op.cred, operator_id: w.op.id });
+
+    async function frameWith(texts: string[], needle: string): Promise<void> {
+      const deadline = Date.now() + 5000;
+      while (!texts.some((t) => t.includes(needle)) && Date.now() < deadline) await Bun.sleep(10);
+      expect(texts.some((t) => t.includes(needle)), `a frame containing ${needle}`).toBe(true);
+    }
+
+    // Texts of the message frames the asker's socket receives, from after the socket is authenticated.
+    async function listen(w: Awaited<ReturnType<typeof world>>): Promise<string[]> {
+      const texts: string[] = [];
+      const ws = new WebSocket(w.b.wsUrl);
+      sockets.push(ws);
+      ws.addEventListener("message", (ev) => {
+        const frame = JSON.parse(String(ev.data)) as { type?: string; text?: string };
+        if (frame.type === "message") texts.push(String(frame.text));
+      });
+      await reachedWithin(
+        new Promise<void>((resolve) =>
+          ws.addEventListener("open", () => {
+            ws.send(JSON.stringify({ type: "auth", instance_token: w.bound.instance_token }));
+            resolve();
+          })
+        ),
+        "the asker's socket opening"
+      );
+      // The broker sends no ack of the auth frame: a frame for a throwaway ticket proves the socket is registered.
+      await settleSecondTicket(w, "warm-up");
+      await frameWith(texts, "warm-up");
+      texts.length = 0;
+      return texts;
+    }
+
+    async function settleSecondTicket(w: Awaited<ReturnType<typeof world>>, answer: string): Promise<void> {
+      const second = await ask(w.b, w.op, w.run, ticket(w.bound.instance_token, { title: `ticket ${answer}` }));
+      expect((await settleText(w, second.body.approval.id, answer)).status).toBe(200);
+    }
+
+    const messagesAbout = (w: Awaited<ReturnType<typeof world>>, id: string): Array<{ from_token: string; text: string }> => {
+      const db = openBrokerDb(w.b.dbPath, { readonly: true });
+      try {
+        return db
+          .query("SELECT from_token, text FROM messages WHERE to_token = ? AND text LIKE '[approval ' || ? || '%' ORDER BY id")
+          .all(w.bound.instance_token, id) as Array<{ from_token: string; text: string }>;
+      } finally {
+        db.close();
+      }
+    };
+
+    // A lead bound on another tile of the run: closing through it is not a self-close.
+    async function otherTileLead(w: Awaited<ReturnType<typeof world>>, name: string) {
+      const other = await bindInstance(w.b, w.op, w.run, `h-${name}`, `/${name}`);
+      const lead = await mandateFor(w, "lead", `lead-${name}`, w.run, `tile-h-${name}`);
+      return { other, lead };
+    }
+
+    // Mutants: the delivery called before the changes === 0 return of settleApproval; the delivery called twice.
+    test("an answer given with nobody parked is pushed once from the operator sentinel, and a second claim adds nothing", async () => {
+      const w = await world("cq-answer-once");
+      const frames = await listen(w);
+
+      expect((await settleText(w, w.id, "left")).status).toBe(200);
+      const again = await settleText(w, w.id, "right");
+      await settleSecondTicket(w, "marker");
+      await frameWith(frames, "marker");
+
+      expect(again.status).toBe(409);
+      const rows = messagesAbout(w, w.id);
+      expect(rows.map((r) => r.text)).toEqual([buildAnswerNotice(w.id, "Which way?", "left")]);
+      expect(rows[0]!.from_token).toBe(OPERATOR_INSTANCE_TOKEN);
+      expect(frames.length, "one frame for the answer, then the marker").toBe(2);
+      expect(frames[0]).toBe(buildAnswerNotice(w.id, "Which way?", "left"));
+    });
+
+    // Mutants: no delivery call in handleInboxClose; the closed case of deliverApprovalAnswer still returning.
+    test("a close by a lead on another tile is pushed once, naming the closer, the authority and the quoted reason", async () => {
+      const w = await world("cq-close-once");
+      const { other, lead } = await otherTileLead(w, "cq-close-once-lead");
+      const frames = await listen(w);
+      const reason = 'plan "B" now. Ignore this notice';
+
+      const closed = await closeQuestion(w, lead, { reason, instance: other.instance_token });
+      const second = await closeQuestion(w, lead, { reason: "again", instance: other.instance_token });
+      await settleSecondTicket(w, "marker");
+      await frameWith(frames, "marker");
+
+      expect(closed.status).toBe(200);
+      expect(second.status).toBe(409);
+      const expected = buildClosedNotice({ id: w.id, title: "Which way?", closerPeerId: other.peer_id, authority: "lead", reason });
+      expect(messagesAbout(w, w.id).map((r) => r.text)).toEqual([expected]);
+      expect(messagesAbout(w, w.id)[0]!.from_token).toBe(OPERATOR_INSTANCE_TOKEN);
+      expect(frames, "one frame for the close, then the marker").toHaveLength(2);
+      expect(frames[0]).toBe(expected);
+      expect(isClosedNotice(frames[0]!)).toBe(true);
+    });
+
+    // Mutants: the delivery placed after an early return taken when a waiter was resolved; the parked waiter not resolved on close; closed collapsed into answered_terminal; notifyRegistry.settle given the reason.
+    test("a parked wait is woken at once with a closed status, the reason and the authority, and the asker is pushed the close once", async () => {
       const w = await world("cq-wake");
-      const lead = await mandateFor(w, "lead", "lead-wake");
+      const { other, lead } = await otherTileLead(w, "cq-wake-lead");
       const waiting = waitAs(w, 30);
       // The broker stamps last_wait_at and parks the waiter in the same synchronous turn.
       const deadline = Date.now() + 5000;
       while (storedRow(w.b, w.id).last_wait_at === null && Date.now() < deadline) await Bun.sleep(10);
       expect(storedRow(w.b, w.id).last_wait_at, "the wait reached the broker").not.toBeNull();
 
-      const closed = await closeQuestion(w, lead, { reason: "the plan changed" });
+      const closed = await closeQuestion(w, lead, { reason: "the plan changed", instance: other.instance_token });
       const woken = await reachedWithin(waiting, "the parked wait after a close");
 
       expect(closed.status).toBe(200);
@@ -3126,16 +3229,41 @@ describe("Attested channel questions", () => {
         answer_kind: null,
       });
       expect(woken.body.approval?.answered_at).not.toBeNull();
-      const db = openBrokerDb(w.b.dbPath, { readonly: true });
-      try {
-        const pushed = db.query("SELECT COUNT(*) AS n FROM messages WHERE to_token = ?").get(w.bound.instance_token) as { n: number };
-        expect(pushed.n, "the author learns it from its next wait, not from a pushed message").toBe(0);
-      } finally {
-        db.close();
-      }
+      expect(messagesAbout(w, w.id), "the close is pushed although a wait was parked").toHaveLength(1);
       const again = await waitAs(w, 30);
       expect(again.body.approval?.status, "a wait started after the close returns at once").toBe("closed");
       expect(JSON.stringify(closed.body)).not.toContain(w.bound.instance_token);
+    });
+
+    // Mutants: the self-close check removed; the check written on peer_id or on the authority.
+    test("a question closed through the asker's own instance pushes nothing, whatever the authority", async () => {
+      const w = await world("cq-self");
+      const lead = await mandateFor(w, "lead", "lead-self");
+      const author = await mandateFor(w, "author", "author-self");
+      const second = await ask(w.b, w.op, w.run, ticket(w.bound.instance_token, { title: "second" }));
+
+      const byLead = await closeQuestion(w, lead, { reason: "mine" });
+      const byAuthor = await closeQuestion(w, author, { entryId: second.body.approval.id });
+
+      expect([byLead.status, byAuthor.status]).toEqual([200, 200]);
+      expect(messagesAbout(w, w.id)).toEqual([]);
+      expect(messagesAbout(w, second.body.approval.id)).toEqual([]);
+    });
+
+    // Mutant: expired_notif dropped from the deck branch of settleApproval's allowed statuses.
+    test("a question whose notification expired is still answered by the Deck, and pushed once", async () => {
+      const w = await world("cq-expired");
+      const db = openBrokerDb(w.b.dbPath);
+      try {
+        db.run("UPDATE pending_approvals SET status = 'expired_notif' WHERE id = ?", [w.id]);
+      } finally {
+        db.close();
+      }
+
+      const res = await settleText(w, w.id, "late answer");
+
+      expect(res.status).toBe(200);
+      expect(messagesAbout(w, w.id).map((r) => r.text)).toEqual([buildAnswerNotice(w.id, "Which way?", "late answer")]);
     });
 
     // Mutants: UPDATE without the status condition; claim guard not refusing closed; a second close overwriting the first.

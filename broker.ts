@@ -138,6 +138,7 @@ import {
   type InboxGate,
 } from "./shared/approval.ts";
 import { settledOutcome } from "./shared/approval-outcome.ts";
+import { buildAnswerNotice, buildClosedNotice } from "./shared/approval-notice.ts";
 import { OPERATOR_TRUST_VERSION, parseOperatorTrust, type OperatorTrust } from "./shared/operator-trust.ts";
 import {
   createApprovalAuth,
@@ -10938,13 +10939,14 @@ function resolveReplyRoute(
 }
 
 /**
- * Deliver a settled answer to the agent as a claude-peers message, sent from
- * the reserved `operator` sentinel.
+ * Deliver how a question ended (an answer, or a close by another instance) to
+ * the agent as a claude-peers message, sent from the reserved `operator`
+ * sentinel.
  *
  * Reuses the ordinary message path wholesale (insert + WS push + poll
- * fallback): nothing new is invented, and `resolveSenderMeta` already maps the
- * sentinel to the `operator` peer_id on every receive path. server.ts renders
- * it with its own framing so the agent ACTS on it instead of acknowledging it.
+ * fallback): `resolveSenderMeta` already maps the sentinel to the `operator`
+ * peer_id on every receive path. server.ts frames an answer so the agent ACTS
+ * on it, and a close as information from another agent.
  */
 function deliverApprovalAnswer(row: ApprovalRow): void {
   if (row.reply_route !== "channel" || !row.reply_token) return;
@@ -10952,34 +10954,39 @@ function deliverApprovalAnswer(row: ApprovalRow): void {
     status: row.status as ApprovalStatus,
     answer_kind: (row.answer_kind as Approval["answer_kind"]) ?? null,
     answer_text: row.answer_text,
+    close_reason: row.close_reason ?? undefined,
+    closed_by_authority: (row.closed_by_authority as InboxCloseAuthority | null) ?? undefined,
+    closed_by_peer_id: row.closed_by_peer_id_snapshot ?? null,
   });
-  let answer: string;
+  let text: string;
   switch (outcome.kind) {
     case "text":
-      answer = outcome.text;
+      text = buildAnswerNotice(row.id, row.title, outcome.text);
       break;
     case "approved":
-      answer = "Approved.";
+      text = buildAnswerNotice(row.id, row.title, "Approved.");
       break;
     case "rejected":
-      answer = "Rejected.";
+      text = buildAnswerNotice(row.id, row.title, "Rejected.");
       break;
     case "acknowledged":
-      answer = "Acknowledged, no answer.";
+      text = buildAnswerNotice(row.id, row.title, "Acknowledged, no answer.");
+      break;
+    case "closed":
+      text = buildClosedNotice({
+        id: row.id,
+        title: row.title,
+        closerPeerId: outcome.peer,
+        authority: outcome.by,
+        reason: outcome.reason,
+      });
       break;
     // The agent already got the operator's answer through its own terminal.
     case "terminal":
     case "pending":
     case "gone":
-    // The author reads a close through its next /approval/wait, never as a push.
-    case "closed":
       return;
   }
-  const text = [
-    `[approval ${row.id}] ${row.title}`,
-    "",
-    answer,
-  ].join("\n");
   const sentAt = new Date().toISOString();
   try {
     const messageId = recordMessageTx(
@@ -11823,6 +11830,9 @@ function handleInboxClose(
   if (res.changes === 0 || after === null) return { error: "already-settled", status: 409, state: after?.status ?? "gone" };
   const approval = rowToApproval(after);
   log.info(`approval ${entryId}: closed by ${closure.authority}`);
+  // The asker's own tool result is its delivery; compared on the instance token,
+  // since a lead may close another tile's question and must still push.
+  if (authorToken !== row.reply_token) deliverApprovalAnswer(after);
   resolveApprovalWaiters(approval);
   void notifyRegistry.settle(approval, "closed").catch((e) => log.error("notify: settle failed", e));
   return { entry: approval };
