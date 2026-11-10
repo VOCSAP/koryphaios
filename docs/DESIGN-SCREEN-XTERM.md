@@ -12,7 +12,7 @@ Légende : **MESURÉ** identifie une exécution avec commande et sortie ; **DÉD
 
 ## 2. Structure actuelle
 
-**MESURÉ** : `git -C C:/Users/Olivier/workspace/koryphaios rev-parse --short HEAD` donne `3b5c2fb`. `git -C C:/Users/Olivier/workspace/koryphaios status --short`, avant rédaction, donne ` M .claude/settings.json`. Cette modification ne fait pas partie du travail.
+**MESURÉ** : `git -C <repo> rev-parse --short HEAD` donne `3b5c2fb`. `git -C <repo> status --short`, avant rédaction, donne ` M .claude/settings.json`. Cette modification ne fait pas partie du travail.
 
 | Frontière | Lecture et conséquence |
 |---|---|
@@ -100,7 +100,7 @@ Lecture des lignes : buffer **actif**, `getLine(baseY + y)` pour `0 <= y < rows`
 
 Le scrollback nul borne l'historique de lignes, pas la file d'entrée ni les chaînes OSC/DCS partielles.
 
-**MESURÉ par le test-engineer**, `bun C:/Users/Olivier/AppData/Local/Temp/xterm-probe-9128a5d9/overflow.mjs` : empiler des blocs sans rendre la main provoque `error: write data discarded, use flow control to avoid losing data`. Avaler cette erreur puis classifier l'écran donnerait une autorisation fondée sur des données perdues.
+**MESURÉ par le test-engineer**, `bun <tmp>/xterm-probe-9128a5d9/overflow.mjs` : empiler des blocs sans rendre la main provoque `error: write data discarded, use flow control to avoid losing data`. Avaler cette erreur puis classifier l'écran donnerait une autorisation fondée sur des données perdues.
 
 **Contrat proposé** : borne en unités UTF-16 et compte de chunks, avant admission à xterm ; réserve globale du service et réserve par vie. Point de départ à valider : 1 Mi d'unités en attente par tuile, 8 Mi globalement, 4096 chunks par tuile, 1 Mi d'unités reçues sans retour du parseur au repos. Les plafonds ne sont pas des mesures de charge normale. Un chunk trop grand est refusé avant appel, pas découpé pour contourner le budget. Borner aussi les cellules allouables ; au-delà du plafond convenu, miroir indisponible sans empêcher l'opérateur d'utiliser son terminal visible.
 
@@ -125,18 +125,18 @@ Fichiers de tests à migrer identifiés par AiDex, puis à revalider sur l'arbre
 
 ## 8. Mesures et qualification restante
 
-Les sondes sont hors dépôt dans `C:/Users/Olivier/AppData/Local/Temp/xterm-probe-9128a5d9/`. Aucun `npm install` dans `desktop/` n'est autorisé pour ces mesures. Les fichiers jetables ne sont pas les futurs tests de régression ; la réalisation devra en conserver les comportements dans les tests versionnés.
+Les sondes sont hors dépôt dans `<tmp>/xterm-probe-9128a5d9/`. Aucun `npm install` dans `desktop/` n'est autorisé pour ces mesures. Les fichiers jetables ne sont pas les futurs tests de régression ; la réalisation devra en conserver les comportements dans les tests versionnés.
 
 ### Mesures décisives
 
-- **MESURÉ par le test-engineer**, `bun install --cwd C:/Users/Olivier/AppData/Local/Temp/xterm-probe-9128a5d9` : `+ @xterm/headless@5.5.0` et `+ @xterm/xterm@5.5.0`. Bun 1.3.13. **MESURÉ par ses commandes** `bun C:/Users/Olivier/AppData/Local/Temp/xterm-probe-9128a5d9/smoke.mjs headless` et `bun C:/Users/Olivier/AppData/Local/Temp/xterm-probe-9128a5d9/smoke.mjs xterm` : les deux se construisent et parsèment sans DOM ; `SYNC after write(no cb): row0 = "" cursorX = 0`, puis après callback `row0 = "hello" cursorX = 5`. La file est réellement asynchrone.
-- **MESURÉ, rejoué par l'architecte**, `bun C:/Users/Olivier/AppData/Local/Temp/xterm-probe-9128a5d9/guardcmp.mjs` : `fixtures compared 31 verdict points 73` puis `xterm != manifest: 0 | xterm != model (state): 0 | rule differs (incl. same state): 0`. Le compteur de règles concerne les checkpoints ; les 73 états incluent les fins. Ce résultat ne mesure pas encore les nouveaux refus de disponibilité ni les resizes en cours de flux.
-- **MESURÉ, rejoué par l'architecte**, `ELECTRON_RUN_AS_NODE=1 C:/Users/Olivier/workspace/koryphaios/desktop/node_modules/electron/dist/electron.exe C:/Users/Olivier/AppData/Local/Temp/xterm-probe-9128a5d9/split.mjs` : `runtime node-like v24.18.0 | electron 43.1.1` ; `A2 mid-CSI state = 4 (row0 before J: "keep" ) after J row0 = "" state after = 0`. Le callback est passé alors que l'effacement reste incomplet. OSC et surrogate coupés sont aussi recollés dans cette sonde.
-- **MESURÉ par le test-engineer**, `bun C:/Users/Olivier/AppData/Local/Temp/xterm-probe-9128a5d9/fixtures.mjs` : `TOTAL files 32 rows 767 headless!=renderer rows 0 headless!=model rows 7 cursor diff h/r 0 h/m 1`. Les deux xterm coïncident sur ce corpus ; la grille maison diffère. Le manifeste de verdicts ne couvre que 31 fichiers, conformément à l'exclusion actuelle du replay : ne pas confondre les deux ensembles.
+- **MESURÉ par le test-engineer**, `bun install --cwd <tmp>/xterm-probe-9128a5d9` : `+ @xterm/headless@5.5.0` et `+ @xterm/xterm@5.5.0`. Bun 1.3.13. **MESURÉ par ses commandes** `bun <tmp>/xterm-probe-9128a5d9/smoke.mjs headless` et `bun <tmp>/xterm-probe-9128a5d9/smoke.mjs xterm` : les deux se construisent et parsèment sans DOM ; `SYNC after write(no cb): row0 = "" cursorX = 0`, puis après callback `row0 = "hello" cursorX = 5`. La file est réellement asynchrone.
+- **MESURÉ, rejoué par l'architecte**, `bun <tmp>/xterm-probe-9128a5d9/guardcmp.mjs` : `fixtures compared 31 verdict points 73` puis `xterm != manifest: 0 | xterm != model (state): 0 | rule differs (incl. same state): 0`. Le compteur de règles concerne les checkpoints ; les 73 états incluent les fins. Ce résultat ne mesure pas encore les nouveaux refus de disponibilité ni les resizes en cours de flux.
+- **MESURÉ, rejoué par l'architecte**, `ELECTRON_RUN_AS_NODE=1 <repo>/desktop/node_modules/electron/dist/electron.exe <tmp>/xterm-probe-9128a5d9/split.mjs` : `runtime node-like v24.18.0 | electron 43.1.1` ; `A2 mid-CSI state = 4 (row0 before J: "keep" ) after J row0 = "" state after = 0`. Le callback est passé alors que l'effacement reste incomplet. OSC et surrogate coupés sont aussi recollés dans cette sonde.
+- **MESURÉ par le test-engineer**, `bun <tmp>/xterm-probe-9128a5d9/fixtures.mjs` : `TOTAL files 32 rows 767 headless!=renderer rows 0 headless!=model rows 7 cursor diff h/r 0 h/m 1`. Les deux xterm coïncident sur ce corpus ; la grille maison diffère. Le manifeste de verdicts ne couvre que 31 fichiers, conformément à l'exclusion actuelle du replay : ne pas confondre les deux ensembles.
 
 ### Coût exploratoire, pas un seuil déjà accepté
 
-**MESURÉ par le test-engineer**, commandes `bun C:/Users/Olivier/AppData/Local/Temp/xterm-probe-9128a5d9/cost.mjs headless N 20`, avec `N` égal à 1, 8 ou 32, corpus de captures répété par tuile, 120×40, scrollback 0 :
+**MESURÉ par le test-engineer**, commandes `bun <tmp>/xterm-probe-9128a5d9/cost.mjs headless N 20`, avec `N` égal à 1, 8 ou 32, corpus de captures répété par tuile, 120×40, scrollback 0 :
 
 | Tuiles | Volume déclaré par la sonde | Temps total | RSS en charge | Delta RSS/base |
 |---:|---:|---:|---:|---:|
@@ -146,9 +146,9 @@ Les sondes sont hors dépôt dans `C:/Users/Olivier/AppData/Local/Temp/xterm-pro
 
 Les volumes comptent les caractères du corpus, pas une mesure du débit réseau UTF-8. RSS inclut le runtime, corpus, allocations transitoires et terminaux ; diviser le delta par N ne donne pas la mémoire résidente d'une tuile.
 
-**MESURÉ par le test-engineer**, comparaison complémentaire à dimensions égales, commandes `bun C:/Users/Olivier/AppData/Local/Temp/xterm-probe-9128a5d9/cost.mjs headless 32 20` et `bun C:/Users/Olivier/AppData/Local/Temp/xterm-probe-9128a5d9/cost.mjs model120 32 20`, deux passages : headless 1882/1671 ms, CPU user 1891/1906 ms, RSS 348,3/347,8 Mo ; modèle 2752/2785 ms, CPU user 2563/3015 ms, RSS 295,3/288,0 Mo. Le premier comparatif au modèle par défaut 400×200 n'est pas une comparaison à dimensions égales. Ces deux passages ne suffisent pas à établir un budget de production.
+**MESURÉ par le test-engineer**, comparaison complémentaire à dimensions égales, commandes `bun <tmp>/xterm-probe-9128a5d9/cost.mjs headless 32 20` et `bun <tmp>/xterm-probe-9128a5d9/cost.mjs model120 32 20`, deux passages : headless 1882/1671 ms, CPU user 1891/1906 ms, RSS 348,3/347,8 Mo ; modèle 2752/2785 ms, CPU user 2563/3015 ms, RSS 295,3/288,0 Mo. Le premier comparatif au modèle par défaut 400×200 n'est pas une comparaison à dimensions égales. Ces deux passages ne suffisent pas à établir un budget de production.
 
-**MESURÉ par le test-engineer**, `bun C:/Users/Olivier/AppData/Local/Temp/xterm-probe-9128a5d9/lifecycle.mjs headless 100` : `after 100 cycles heap=5.4MB rss=190MB`. **SUPPOSÉ** : absence de fuite durable non prouvée ; une autre sonde garde un heap élevé après dispose et n'a pas départagé rétention par le harnais et GC différé.
+**MESURÉ par le test-engineer**, `bun <tmp>/xterm-probe-9128a5d9/lifecycle.mjs headless 100` : `after 100 cycles heap=5.4MB rss=190MB`. **SUPPOSÉ** : absence de fuite durable non prouvée ; une autre sonde garde un heap élevé après dispose et n'a pas départagé rétention par le harnais et GC différé.
 
 ### Plan de qualification et seuils proposés
 
@@ -181,7 +181,7 @@ Limites de cette qualification :
 
 **Contrat proposé** : conserver `tests/_fixture-verdicts.ts` comme oracle explicite de HEAD. Tout écart est listé fixture/checkpoint/avant/après/raison et validé séparément, jamais accepté par régénération massive du manifeste. Vérifier la totalité du domaine de fixtures, dont les exclusions intentionnelles ; un nouveau fichier non classé doit faire échouer le test de couverture.
 
-Reprendre le patch adverse `C:/Users/Olivier/.agent-forge/scratch/e1370313-attempt3.patch` comme **source de scénarios**, pas comme code à réappliquer : ED0/ED1 préservent les portions de ligne appropriées, IL/DL déplacent la géométrie, sortie de `?1049` retrouve le picker principal. Les assertions de `rowStamp/cellStamp` du patch sont internes à l'ancienne tentative et ne doivent pas être simulées par des stamps de callbacks. Ajouter découpage à chaque frontière de ESC/CSI/OSC/DCS, surrogate haut/bas, `CSI 1.5 L`, resize pendant backlog, vie remplacée avant callback et dépassements de budget. Vrais sélecteurs : toujours refusés.
+Reprendre le patch adverse `<scratch>/e1370313-attempt3.patch` comme **source de scénarios**, pas comme code à réappliquer : ED0/ED1 préservent les portions de ligne appropriées, IL/DL déplacent la géométrie, sortie de `?1049` retrouve le picker principal. Les assertions de `rowStamp/cellStamp` du patch sont internes à l'ancienne tentative et ne doivent pas être simulées par des stamps de callbacks. Ajouter découpage à chaque frontière de ESC/CSI/OSC/DCS, surrogate haut/bas, `CSI 1.5 L`, resize pendant backlog, vie remplacée avant callback et dépassements de budget. Vrais sélecteurs : toujours refusés.
 
 **DÉDUIT**, patch adverse `:401-448,505-548` et `screen-model.ts:226-250` : les tests d'ordre de peinture visaient une nouvelle règle, alors que HEAD refuse tout picker visible. Changer d'émulateur ne démontre pas comment distinguer un écho numéroté d'un picker qui ressemble à cet écho. e1370313 doit retrouver ses trois captures numérotées et ses contre-exemples synthétiques, puis faire l'objet d'un choix de règle distinct. Ne pas réintroduire une émulation des déplacements de stamps à côté de xterm.
 

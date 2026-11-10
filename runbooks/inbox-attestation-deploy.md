@@ -3,6 +3,12 @@
 Public visé : l'opérateur qui met à jour un poste Koryphaios, avec ou sans
 broker distant.
 
+Marqueurs de substitution, à remplacer par les valeurs de VOTRE installation :
+`<clone>` est le clone que désigne `mcpServers["claude-peers"].args` de
+`~/.claude.json` (l'élément qui se termine par `server.ts`, sans ce nom de
+fichier), `<checkout>` le checkout de travail du dépôt, `<commit>` la révision
+qui porte le protocole.
+
 ## Objet
 
 Le dépôt de messages vers l'Inbox de l'opérateur (`ask_operator`,
@@ -161,9 +167,7 @@ mise à jour garde son ancien processus MCP et son ancienne identité.
    bun -e 'import { Database } from "bun:sqlite"; const db = new Database(process.env.CLAUDE_PEERS_DB ?? (process.env.HOME + "/.claude-peers.db"), { readonly: true }); console.log(db.query("SELECT COUNT(*) AS n FROM inbox_instance_bindings").get());'
    ```
 
-   La commande a été exécutée en lecture seule pendant la rédaction (elle a
-   rendu `{ n: 0 }` sur un poste dont le broker local n'avait pas encore
-   été mis à jour). `n: 0` avec des tuiles Kory ouvertes après le
+   La commande est en lecture seule. `n: 0` avec des tuiles Kory ouvertes après le
    déploiement indique que le broker local n'a pas le nouveau code ou que les
    tuiles n'ont pas été relancées. Adapter le chemin de la base si
    `CLAUDE_PEERS_DB` ou le fichier de config du broker en désigne un autre

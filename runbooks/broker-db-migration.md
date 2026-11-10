@@ -16,15 +16,25 @@ Chaque fait porte une etiquette:
 - **NON MESURE** -- non verifie. Une commande de decouverte est donnee a la
   place. **Ne jamais substituer une valeur devinee a un NON MESURE.**
 
+Marqueurs de substitution, a remplacer par les valeurs de VOTRE installation:
+
+| Marqueur | Sens | Comment l'obtenir |
+|---|---|---|
+| `<client-host>` | poste client qui lance le Deck et `cli.ts` | `hostname` |
+| `<broker-host>` | machine ou conteneur qui heberge le broker | `hostname` sur cette machine |
+| `<vmid>` | identifiant du conteneur LXC du broker | `pct list` sur l'hote Proxmox |
+| `<mcp-clone>` | clone que l'entree `claude-peers` de `~/.claude.json` designe | element de `mcpServers["claude-peers"].args` qui se termine par `server.ts`, sans ce nom de fichier |
+| `<repo>` | checkout de travail du depot (celui d'ou l'app `kory` est lancee) | `git rev-parse --show-toplevel` |
+
 ---
 
 ## 1. La topologie, mesuree
 
 | Element | Valeur | Source |
 |---|---|---|
-| Poste client | `DESKTOP-7B2CIVN`, fuseau **Europe/Paris** | MESURE |
-| Hote du broker | LXC `mcp-server`, `192.168.10.23`, fuseau **America/Sao_Paulo (UTC-3)** | MESURE, `date -u` |
-| Acces | `pct enter <id>` depuis Proxmox | operateur |
+| Poste client | `<client-host>`, fuseau a relever (`date +%Z`) | a mesurer |
+| Hote du broker | LXC `<broker-host>`, fuseau a relever (`date +%Z`; `date -u` pour l'UTC) | a mesurer |
+| Acces | `pct enter <vmid>` depuis l'hote Proxmox | operateur |
 | Stack | `/opt/mcp-server`, pilotee par `stack.sh` | MESURE |
 | Clone koryphaios sur la LXC | `/opt/mcp-server/claude-peers` (nom historique) | MESURE |
 | Conteneur | `claude-peers-broker`, image `mcp-server/claude-peers-broker:0.9.0` | `docker-compose.yml` |
@@ -36,10 +46,12 @@ Chaque fait porte une etiquette:
 directement visible et modifiable depuis l'hote. Aucun `docker cp` n'est
 necessaire, jamais.
 
-**Le decalage de fuseau de 5 h est un piege reel.** Un `ls -l` sur la LXC a
-rendu une mtime de `12:11` pour un fichier checkout a `17:11` heure de Paris,
-ce qui a l'air d'un fichier plus vieux que le commit dont il sort. Verifier
-avec `date -u` avant de conclure a une anomalie.
+**Un decalage de fuseau entre le poste client et la LXC est un piege reel.**
+Lors de l'execution du 2026-08-20 les deux hotes etaient decales de 5 h: un
+`ls -l` sur la LXC rendait une mtime anterieure de 5 h a l'heure du poste pour
+un fichier fraichement checkout, ce qui a l'air d'un fichier plus vieux que le
+commit dont il sort. Comparer `date` sur les deux hotes, et verifier avec
+`date -u` avant de conclure a une anomalie.
 
 ### Ce que le repertoire contient, et pourquoi on sauvegarde TOUT
 
@@ -78,7 +90,7 @@ chacune a ete introduite parce que son absence a produit un defaut reel:
    une decision humaine.
 6. **Transformer en JS, pas en SQL.** `LOWER()` de SQLite est **ASCII
    seulement**, `.toLowerCase()` de JS est **Unicode**. Mesure:
-   `"github.com/VOCSAP/ETE"` avec accents rend `.../EtE` en SQL contre
+   `"github.com/<owner>/ETE"` avec accents rend `.../EtE` en SQL contre
    `.../ete` en JS. Une migration en SQL aurait ecrit une TROISIEME forme, que
    plus aucun code ne produit, puis aurait declare la base propre. Nul sur
    `github.com`, non nul sur GitLab, Gitea ou tout hebergeur auto-heberge.
@@ -124,7 +136,7 @@ laquelle personne n'a pense.
 
 | # | Surface | Verdict du 2026-08-20 |
 |---|---|---|
-| 1 | Clone MCP `C:\Users\Olivier\workspace\koryphaios-mcp`, en HEAD detache, enregistre `--scope user` | **DOIT BOUGER**. Etant en scope user, il couvre TOUS les projets du poste d'un coup |
+| 1 | Clone MCP `<mcp-clone>`, en HEAD detache, enregistre `--scope user` | **DOIT BOUGER**. Etant en scope user, il couvre TOUS les projets du poste d'un coup |
 | 2 | L'app Koryphaios (`kory`) | **DOIT ETRE RECONSTRUITE**: `cd desktop && npm run build`. Elle tourne depuis le checkout interactif, donc elle a la source, mais `out/` ne suit pas tout seul |
 | 3 | Clone hote `/opt/mcp-server/claude-peers` qui build l'image du broker | **NE BOUGE PAS** pour une migration de donnees. Voir ci-dessous |
 
@@ -197,7 +209,7 @@ recuperation WAL automatique de SQLite.
 
 ## 6. La procedure
 
-Toutes les commandes sur la LXC, apres `pct enter <id>`, sauf mention.
+Toutes les commandes sur la LXC, apres `pct enter <vmid>`, sauf mention.
 
 ### Etape 1 -- amener le script, sans toucher au conteneur
 
@@ -210,7 +222,8 @@ ls -l scripts/<le-script>.ts
 ```
 
 Le commit attendu doit apparaitre et `status` doit etre **vide**. Ne pas
-conclure sur la mtime du fichier: le fuseau de la LXC decale de 5 h.
+conclure sur la mtime du fichier: le fuseau de la LXC peut differer de celui du
+poste (voir la section 1).
 
 ### Etape 2 -- arreter le seul broker
 
@@ -332,9 +345,9 @@ Sur le poste client, dans l'ordre: deplacer le clone MCP, reconstruire l'app,
 puis seulement relancer.
 
 ```bash
-git -C C:/Users/Olivier/workspace/koryphaios-mcp fetch origin experimental
-git -C C:/Users/Olivier/workspace/koryphaios-mcp checkout <sha>
-cd desktop && npm run build
+git -C <mcp-clone> fetch origin experimental
+git -C <mcp-clone> checkout <sha>
+cd <repo>/desktop && npm run build
 ```
 
 ### Etape 9 -- verifier, avec un CONTROLE NEGATIF

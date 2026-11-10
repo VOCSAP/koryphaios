@@ -41,8 +41,8 @@ Contrat à implémenter, pas comportement livré. Ajouter `transcript_path`, `pr
 
 **MESURÉ ici, relecture d'archives, pas relance PTY :**
 
-- `bun C:/Users/Olivier/.agent-forge/scratch/56689093/history.cjs T7-seq-ident-3 T7-seq-ident-4` → `PR2: matching tool_use=2 -> HISTORY(result 1639ms before PR) | CURRENT(result 1798ms after PR)` ; second essai : résultat précédent1655ms avant PR2. Causalité séquentielle observée2/2, pas garantie générale.
-- `bun C:/Users/Olivier/.agent-forge/scratch/56689093/states.cjs T9-late-flush-yes` → `PermissionRequest-1 +20024ms tr-state lines=25 resolved=1 unresolved=eLCBRD[Write msg=KzBq7C par=f1f6b085 pr=0c266f4f main]`. Le Bash est déjà terminé lors de sa première visibilité ; la règle conservatrice le laisse non corrélé.
+- `bun <scratch>/56689093/history.cjs T7-seq-ident-3 T7-seq-ident-4` → `PR2: matching tool_use=2 -> HISTORY(result 1639ms before PR) | CURRENT(result 1798ms after PR)` ; second essai : résultat précédent1655ms avant PR2. Causalité séquentielle observée2/2, pas garantie générale.
+- `bun <scratch>/56689093/states.cjs T9-late-flush-yes` → `PermissionRequest-1 +20024ms tr-state lines=25 resolved=1 unresolved=eLCBRD[Write msg=KzBq7C par=f1f6b085 pr=0c266f4f main]`. Le Bash est déjà terminé lors de sa première visibilité ; la règle conservatrice le laisse non corrélé.
 
 **SUPPOSÉ ici, mesures tierces corrigées par -10 :** visibilité retardée15ms à88s, aucun préfixe partiel observé sur13 runs N=2/3 ; «21 corrects/0 faux» signifie **5 identités indépendamment vérifiées +16 cohérentes**, pas21 preuves du contrat. **DÉDUIT**, `scratch/56689093/identity.cjs:31-33,43-50` : comparaison tronquée et vérité souvent par rang Post ; ne pas recycler ce script comme test de l'égalité complète. Challenge : filtrage des terminés réfuté ; version resserrée conditionnée au modèle de publication observé, non garantie universelle.
 

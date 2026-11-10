@@ -1,7 +1,7 @@
 # Modele d'evenements des notifications d'agent (Kory)
 
 Conception, 2026-08-19. Transport-agnostique par construction.
-Auteur : agent architecte, sur dispatch de `desktop-7b2civn-koryphaios-15`.
+Auteur : agent architecte, sur dispatch de `desktop-<client-host>-koryphaios-15`.
 Lecture seule sur le code ; aucun code de production ecrit.
 
 **Nom du fichier.** `docs/` (sans slash initial) matche `desktop/docs/` : tout
@@ -1448,7 +1448,7 @@ MESURE, charge utile du QR (`CompanionDialog.tsx`) :
 `` `${info.url}/#t=${info.pairingToken}${info.certFingerprint ? `&f=${...}` : ''}` ``
 soit **URL LAN + jeton d'appairage + empreinte du certificat**. Il ne porte
 **ni identifiant d'instance, ni libelle lisible**. Sans ajout, le menu de
-basculement du telephone afficherait une liste de `https://192.168.x.y:PORT`,
+basculement du telephone afficherait une liste de `https://<lan-address>:PORT`,
 sans moyen de distinguer koryphaios de kleos -- cad le cas d'usage meme de la
 fonction. **Le QR doit porter le `deck_id` de l'Option B et un libelle
 (`project_key` suffit, il est deja calcule).** C'est tout le travail cote Deck.

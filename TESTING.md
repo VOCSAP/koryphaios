@@ -342,7 +342,7 @@ injected by `cred` and never written:
 
 ```bash
 WSLENV=CLAUDE_CODE_OAUTH_TOKEN/u cred exec claude-code token --env CLAUDE_CODE_OAUTH_TOKEN -- \
-  wsl.exe -d NVIDIA-Workbench -- bash -lc 'python3 /mnt/c/Users/Olivier/workspace/koryphaios/scripts/probe-askuserquestion-hooks.py --hooks'
+  wsl.exe -d NVIDIA-Workbench -- bash -lc 'python3 <repo-as-seen-from-wsl>/scripts/probe-askuserquestion-hooks.py --hooks'
 ```
 
 It prints `CLI <version>`, one line per hook payload and a `VERDICT <M1|M3/M4|M5|M6>

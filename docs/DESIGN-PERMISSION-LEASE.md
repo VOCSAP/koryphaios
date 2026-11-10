@@ -129,7 +129,7 @@ Alternative rejetée : porter directement le TTL à trente jours. Cela cache la 
 
 #### M0 acquis, mais son périmètre n'est pas le Deck
 
-**Mesures tierces du test-engineer du 2026-10-08, Claude Code 2.1.294 sous Windows**, kit `~/.agent-forge/scratch/b29a4ea4-L85/m0/`, hook de sonde et hôte node-pty, pas le vrai hook ni le main du Deck :
+**Mesures tierces du test-engineer du 2026-10-08, Claude Code 2.1.294 sous Windows**, kit `<probe-kit>/`, hook de sonde et hôte node-pty, pas le vrai hook ni le main du Deck :
 
 - `proc.kill()` et le kill dur de Claude laissent Bun et un bash encore vivants à 45 s, avec ou sans Oui préalable. `exec bun` ne retire pas les deux intermédiaires bash de l'arbre observé.
 - `taskkill /PID <pty.pid> /T /F` **à la place de** `proc.kill()` a fermé tout l'arbre avant l'observation à 1,5 s, hôte vivant. La séquence taskkill puis proc.kill n'a pas été mesurée : c'est le contrat à valider, pas un résultat M0.
@@ -203,12 +203,12 @@ Les préparations de 3 et 2a peuvent avancer en parallèle après 0 ; 2a peut at
 
 **MESURÉ dans cette session** : `bun test ./tests/approval-hook.test.ts` a rendu `63 pass`, `0 fail`, `198 expect() calls`, `Ran 63 tests across 1 file. [14.40s]`. C'est une référence du code actuel, pas une preuve du bail proposé. Aucun gate complet, build ou typecheck exécuté.
 
-**M0, mesures du test-engineer, non rejouées par l'architecte** : spec `spec_c367b2b7`, Claude Code 2.1.294, Windows. Commande de sonde rapportée : `ELECTRON_RUN_AS_NODE=1 desktop/node_modules/electron/dist/electron.exe C:/Users/Olivier/.agent-forge/scratch/b29a4ea4-L85/m0/m0.cjs <id>`. Les sorties sont archivées dans `m0/res/<id>/summary.json` et `m0/res/<id>/log/h1.jsonl`. Elles ne certifient ni le vrai Deck ni le vrai `approval-hook`.
+**M0, mesures du test-engineer, non rejouées par l'architecte** : spec `spec_c367b2b7`, Claude Code 2.1.294, Windows. Commande de sonde rapportée : `ELECTRON_RUN_AS_NODE=1 desktop/node_modules/electron/dist/electron.exe <probe-kit>/m0.cjs <id>`. Les sorties sont archivées dans `m0/res/<id>/summary.json` et `m0/res/<id>/log/h1.jsonl`. Elles ne certifient ni le vrai Deck ni le vrai `approval-hook`.
 
 **MESURÉ ici : extraction des résultats archivés, pas nouvelle sonde OS.** Commande exécutée :
 
 ```text
-bun C:/Users/Olivier/.agent-forge/scratch/b29a4ea4-L85/m0/extract.cjs LC-tree-pty LC-pty-kill LC-claude-exact LC-inner-exact LC-exit-typed
+bun <probe-kit>/extract.cjs LC-tree-pty LC-pty-kill LC-claude-exact LC-inner-exact LC-exit-typed
 ```
 
 Lignes décisives, dans l'ordre des scénarios :
@@ -224,7 +224,7 @@ close taskkill /PID 33268 (powershell.exe, the PTY root) /T /F -> exit 0 atMsAft
 
 L'extracteur utilise `+` pour vivant, `-` pour mort, `-R` pour ancien PID réutilisé (`extract.cjs:3,20`). Le scénario `LC-inner-exact` est un nom absent, donc cette commande ne mesure pas la mort de l'hôte ; ce résultat repose sur le compte-rendu M0 du test-engineer. Ne pas créditer cinq mesures à quatre résultats.
 
-**MESURÉ ici : lecture des archives timeout.** Commande exécutée : `jq '{id, samples: .out.samples, events: .out.afterRelease.hookEvents}' C:/Users/Olivier/.agent-forge/scratch/b29a4ea4-L85/m0/res/TO-5/summary.json C:/Users/Olivier/.agent-forge/scratch/b29a4ea4-L85/m0/res/TO-2147484/summary.json`. Dans `TO-5`, le prélèvement `atSec: 5` porte `"bunAlive": false`, et les seuls événements finaux sont `"start@0"`, `"stdin-eof@6"`. Dans `TO-2147484`, le prélèvement `atSec: 15` porte `"bunAlive": true`, puis `"release-seen:allow@15445"`, `"output-written@15446"`, `"exit@15446"`. Le test-engineer rapporte les verdicts également appliqués pour `TO-4294968` et `TO-99999999` après environ 15 s, pour `TO-2147483` après 30 s et pour `TO-2147400` après 60 s.
+**MESURÉ ici : lecture des archives timeout.** Commande exécutée : `jq '{id, samples: .out.samples, events: .out.afterRelease.hookEvents}' <probe-kit>/res/TO-5/summary.json <probe-kit>/res/TO-2147484/summary.json`. Dans `TO-5`, le prélèvement `atSec: 5` porte `"bunAlive": false`, et les seuls événements finaux sont `"start@0"`, `"stdin-eof@6"`. Dans `TO-2147484`, le prélèvement `atSec: 15` porte `"bunAlive": true`, puis `"release-seen:allow@15445"`, `"output-written@15446"`, `"exit@15446"`. Le test-engineer rapporte les verdicts également appliqués pour `TO-4294968` et `TO-99999999` après environ 15 s, pour `TO-2147483` après 30 s et pour `TO-2147400` après 60 s.
 
 **Limites** : aucune attente de 25 jours mesurée ; aucune nouvelle sonde native exécutée pour cette révision ; pas de preuve de possession atomique d'un processus, de séquence taskkill puis proc.kill, de nettoyage du vrai Deck, ni de validation macOS/Linux. Le contrôle PID/date de M0 laisse une course check/use. L'ancienne justification par overflow du runner est réfutée, non conservée comme contrainte latente.
 

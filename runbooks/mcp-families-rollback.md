@@ -13,24 +13,32 @@ les surfaces ci-dessous dans leur état d'avant, dans l'ordre donné.
 Aucune donnée n'est migrée par ce lot (la feuille de route et ses lignes sont
 lues par les deux chemins) : le retour arrière ne restaure aucune base.
 
+Marqueurs de substitution, à remplacer par les valeurs de VOTRE installation :
+
+| Marqueur | Sens | Comment l'obtenir |
+|---|---|---|
+| `<mcp-clone>` | clone que désigne l'entrée `claude-peers` de `~/.claude.json` ; forme POSIX (`/c/...`) dans les commandes Git Bash, forme Windows entre guillemets simples dans `claude mcp add` | élément de `mcpServers["claude-peers"].args` qui se termine par `server.ts`, sans ce nom de fichier |
+| `<repo>` | checkout de travail du dépôt, à partir duquel on crée le checkout dédié de l'étape 4 | `git rev-parse --show-toplevel` |
+| `<claude-config>` | répertoire de configuration des agents, celui qui contient `agents/*.md` | emplacement de vos profils d'agents (souvent un sous-dossier de `~/.claude`) |
+| `<patch>` | patch conservé au déploiement, dont les lignes `+++` listent les profils modifiés | fichier produit par l'opérateur qui a déployé P5a ; à défaut, la liste vient de `grep -l 'mcp__kory-roadmap__' <claude-config>/agents/*.md` |
+
 ## Les surfaces à remettre
 
 | Surface | Où elle vit | Ce que le retrait y change |
 |---|---|---|
-| Binaires broker, CLI, serveur MCP | clone `C:/Users/Olivier/workspace/koryphaios-mcp` (celui que désigne `mcpServers["claude-peers"].args` de `~/.claude.json`) | `server.ts`, `server-deck.ts`, `server-roadmap.ts` et `shared/` changent de révision ; `broker.ts` et `cli.ts` sont lancés depuis ce même clone |
+| Binaires broker, CLI, serveur MCP | clone `<mcp-clone>` (celui que désigne `mcpServers["claude-peers"].args` de `~/.claude.json`) | `server.ts`, `server-deck.ts`, `server-roadmap.ts` et `shared/` changent de révision ; `broker.ts` et `cli.ts` sont lancés depuis ce même clone |
 | Entrées MCP utilisateur | `~/.claude.json`, clé `mcpServers` | entrée `kory-roadmap` ajoutée ; entrée `claude-peers` avec un éventuel `CLAUDE_PEERS_TOOLS` |
 | Volume d'auth du sandbox | volume Docker `kory-claude-auth` (`SANDBOX_AUTH_VOLUME`, `desktop/src/main/sandbox-command.ts`), monté sur `~/.claude` de chaque conteneur `kory-sbx-*` | entrées MCP utilisateur propres aux conteneurs (`desktop/docs/sandbox.md`) : `claude-peers` (avant ce lot avec `CLAUDE_PEERS_TOOLS`) et `kory-roadmap` vers `<CORE>/server-roadmap.ts`, fichier absent de `0df397d` |
-| Profils d'agents | `C:/Users/Olivier/.claude/claude-config/agents/*.md`, ceux listés dans l'en-tête du patch `C:/Users/Olivier/.agent-forge/scratch/mcp-families/global-agent-roadmap-mcp.patch` | `mcp__claude-peers__roadmap_*` remplacé par `mcp__kory-roadmap__roadmap_*` dans `tools:` |
+| Profils d'agents | `<claude-config>/agents/*.md`, ceux listés dans l'en-tête du patch `<patch>` | `mcp__claude-peers__roadmap_*` remplacé par `mcp__kory-roadmap__roadmap_*` dans `tools:` |
 | Deck packagé | installateur ou `win-unpacked` construit depuis `desktop/` | bundles `deck-plugin/mcp/*.mjs`, `deck-plugin/hooks/*.mjs`, `deck-plugin/hooks/hooks.json` embarqués par `extraResources` (`desktop/electron-builder.yml`) |
 | deck-plugin installé | `<resources>/deck-plugin` d'un Deck packagé, `desktop/deck-plugin` d'un Deck lancé depuis les sources (`deckPluginDirFor`, `desktop/src/main/session-command.ts`) | `roadmap-guard-hook.mjs` et `hooks.json` : préfixe `claude-peers` retiré |
 | Broker local du Deck | processus détaché, réutilisé tant qu'il répond sur `/health` | ne prend le code du clone qu'après arrêt et relance |
 | Broker distant (`broker_url`) ou amont d'une réplique (`offline_replica`) | autre machine ou conteneur, mis à jour séparément (`runbooks/broker-db-migration.md`) | rien : P5a ne modifie ni `broker.ts` ni `cli.ts` (voir l'étape 5) |
 
 Fait mesuré le jour de la rédaction : `git worktree list` ne dit pas la vérité
-sur le clone `koryphaios-mcp` (il y figure en `8029eb1` alors que
-`git -C C:/Users/Olivier/workspace/koryphaios-mcp rev-parse HEAD` rend `0df397d075c407e8498f688236c5249394ee5512`).
-C'est un clone indépendant : seule la commande `git -C <clone> rev-parse HEAD`
-fait foi.
+sur le clone MCP (il y figurait à une autre révision que celle que rendait
+`git -C <mcp-clone> rev-parse HEAD`). C'est un clone indépendant : seule la
+commande `git -C <clone> rev-parse HEAD` fait foi.
 
 ## Avant le déploiement : la fiche à remplir
 
@@ -38,7 +46,7 @@ Sans cette fiche le retour arrière n'est pas exécutable. À remplir avant de
 toucher à quoi que ce soit, à garder **hors de tout dépôt git** :
 
 ```bash
-M=/c/Users/Olivier/workspace/koryphaios-mcp
+M=<mcp-clone>
 git -C $M rev-parse HEAD                       # REV_AVANT, révision du clone avant déploiement
 jq '.mcpServers["claude-peers"]' ~/.claude.json  # entrée claude-peers à restaurer telle quelle
 jq -r '.mcpServers | keys[]' ~/.claude.json      # clés présentes (kory-roadmap doit être absente)
@@ -68,12 +76,13 @@ Si la machine passe par un broker distant ou par une réplique, relever aussi le
 et la révision déployée de ce broker distant (`git -C <dépôt du broker> rev-parse HEAD`
 sur sa machine), pour pouvoir montrer qu'elle n'a pas bougé.
 
-État relevé le 2026-10-29, avant tout déploiement de ce lot : le clone est à
-`0df397d075c407e8498f688236c5249394ee5512` ; l'entrée `claude-peers` a pour
-commande `bun`, pour argument `C:\Users\Olivier\workspace\koryphaios-mcp\server.ts`
-et pour seule variable d'environnement `CLAUDE_PEERS_GROUP` (donc pas de
-`CLAUDE_PEERS_TOOLS`) ; aucune clé `kory-roadmap`. Le volume d'auth du sandbox n'a
-pas été relevé ce jour-là (aucun conteneur interrogé) : à relever avec la fiche.
+Exemple de fiche relevée le 2026-10-29, avant tout déploiement de ce lot : le
+clone était à `0df397d075c407e8498f688236c5249394ee5512`, la dernière révision
+d'avant P5a, celle que vise ce retour arrière ; l'entrée `claude-peers` avait
+pour commande `bun`, pour argument `<mcp-clone>\server.ts` et pour seule variable
+d'environnement `CLAUDE_PEERS_GROUP` (donc pas de `CLAUDE_PEERS_TOOLS`) ; aucune
+clé `kory-roadmap`. Le volume d'auth du sandbox n'avait pas été relevé ce jour-là
+(aucun conteneur interrogé) : à relever avec la fiche.
 
 ## Ordre du retour arrière
 
@@ -104,7 +113,7 @@ C=$(docker ps --filter name=kory-sbx --format '{{.Names}}' | head -1)
 ### Étape 1 : les binaires broker, CLI et serveur (le clone)
 
 ```bash
-M=/c/Users/Olivier/workspace/koryphaios-mcp
+M=<mcp-clone>
 git -C $M status --short
 git -C $M fetch --all --prune
 git -C $M checkout --detach <REV_AVANT>
@@ -133,7 +142,7 @@ dans la fiche et retirer `kory-roadmap` :
 claude mcp get claude-peers
 claude mcp remove kory-roadmap --scope user
 claude mcp remove claude-peers --scope user
-claude mcp add --scope user --transport stdio claude-peers -e CLAUDE_PEERS_GROUP=<valeur de la fiche> -- bun 'C:\Users\Olivier\workspace\koryphaios-mcp\server.ts'
+claude mcp add --scope user --transport stdio claude-peers -e CLAUDE_PEERS_GROUP=<valeur de la fiche> -- bun '<mcp-clone>\server.ts'
 ```
 
 Le chemin Windows est entre guillemets simples : sans eux Git Bash retire les
@@ -149,7 +158,7 @@ et que la fiche n'en porte pas, il ne revient pas.
 Contrôles :
 
 1. `claude mcp get claude-peers` : `Scope: User config`, argument se terminant par
-   `koryphaios-mcp\server.ts`, `Environment:` identique à la fiche (sans
+   `<mcp-clone>\server.ts`, `Environment:` identique à la fiche (sans
    `CLAUDE_PEERS_TOOLS` si la fiche n'en avait pas).
 2. `claude mcp get kory-roadmap` ne trouve aucun serveur.
 3. `jq -r '.mcpServers | keys[]' ~/.claude.json` ne liste pas `kory-roadmap`.
@@ -219,7 +228,7 @@ l'aller-retour). La substitution suivante est exacte octet pour octet (aller-ret
 mesuré sur des copies de tous les profils du patch, `cmp` identique pour chacun) :
 
 ```bash
-P=/c/Users/Olivier/.agent-forge/scratch/mcp-families/global-agent-roadmap-mcp.patch
+P=<patch>   # forme POSIX (/c/...) du chemin
 L=$(mktemp)
 awk '/^\+\+\+ /{print $2}' $P | tr -d '\r' | tr '\134' '/' | sed 's|^C:|/c|' > $L
 while read -r f; do sed -b -i 's/mcp__kory-roadmap__roadmap_/mcp__claude-peers__roadmap_/g' "$f"; done < $L
@@ -230,7 +239,7 @@ Contrôles :
 1. `wc -l < $L` rend le nombre de fichiers de l'en-tête du patch, et
    `xargs grep -l 'mcp__claude-peers__roadmap_' < $L | wc -l` rend le même nombre.
 2. `xargs grep -l 'mcp__kory-roadmap__' < $L` ne rend rien.
-3. `grep -l 'mcp__kory-roadmap__' /c/Users/Olivier/.claude/claude-config/agents/*.md`
+3. `grep -l 'mcp__kory-roadmap__' <claude-config>/agents/*.md`
    ne rend rien. Un fichier qui apparaît ici est un profil créé ou édité après le
    déploiement : il a été converti par la substitution, le relire.
 
@@ -242,7 +251,7 @@ le déploiement les a renommés à la main et a ajouté `notify_operator`. Le ch
 retire l'outil sans erreur. Les remettre :
 
 ```bash
-T=/c/Users/Olivier/.claude/claude-config/agents/team-lead.md
+T=<claude-config>/agents/team-lead.md
 sed -b -i -e 's/mcp__kory-operator__notify_operator, //' -e 's/mcp__kory-deck__roadmap_dispatch/mcp__deck-lead__roadmap_dispatch/g' -e 's/mcp__kory-deck__/mcp__deck-control__/g' -e 's/mcp__kory-operator__/mcp__deck-lead__/g' $T
 ```
 
@@ -255,7 +264,7 @@ Reconstruire depuis `REV_AVANT`, dans un checkout dédié et jamais dans le
 checkout partagé :
 
 ```bash
-git -C /c/Users/Olivier/workspace/koryphaios worktree add --detach <dir> <REV_AVANT>
+git -C <repo> worktree add --detach <dir> <REV_AVANT>
 npm --prefix <dir>/desktop run build
 ```
 

@@ -24,7 +24,7 @@ DÉDUIT / prescription : **précisions contractuelles explicites**, à appliquer
 
 DÉDUIT / prescription : ces précisions ne doivent pas être présentées comme un changement silencieux de 003. **LIMITE NOMMÉE du cas c : unicité prioritaire sur restauration en double panne.** Le cas c garantit une recréation après échec de publication/show si l'ancienne ressource peut être détruite ou attestée détruite. S'il y a aussi échec de destruction et impossibilité d'attester sa disparition, la machine reste révoquée plutôt que violer « au plus une fenêtre vivante » : current=null, trace et aucune nouvelle allocation. Ce cumul de pannes est testé séparément et ne doit pas être dissimulé dans la formule « recréation toujours possible ».
 
-DÉDUIT, provenance de décision : cet arbitrage a été **ratifié par le team-lead `desktop-7b2civn-koryphaios-2` dans son message du 2026-10-01 à 13:43:04Z**. Le watchdog à 2 s peut confirmer une disparition dont closed a été manqué ; si la ressource reste vivante, un retry explicite est nécessaire, sans contourner la preuve de disparition. Aucune édition de 003 ni de la carte n'est effectuée ici.
+DÉDUIT, provenance de décision : cet arbitrage a été **ratifié par le team-lead `desktop-<client-host>-koryphaios-2` dans son message du 2026-10-01 à 13:43:04Z**. Le watchdog à 2 s peut confirmer une disparition dont closed a été manqué ; si la ressource reste vivante, un retry explicite est nécessaire, sans contourner la preuve de disparition. Aucune édition de 003 ni de la carte n'est effectuée ici.
 
 ## Current structure
 
@@ -53,7 +53,7 @@ DÉDUIT : `avatar-entry.ts:173-190` séquence nettoyage IPC, flush, destruction 
 
 **DÉDUIT / prescription : retenir B.** La force décisive est la séparation entre intention, opération exécutée et résultat durable. Un getter partagé ne porte ni l'identité de l'objet déplacé ni la dette de persistance. Ne pas introduire de bibliothèque de machines d'états : une union discriminée, une fonction de réduction et un interpréteur injectable suffisent à exprimer ce contrat.
 
-DÉDUIT, avis délégué et non mesure rejouée : le challenge indépendant du peer debugger `desktop-7b2civn-koryphaios-5` rend **TIENT sous conditions**. Ses objections sont intégrées : position appliquée indexée par token, aucun no-op natif crédité comme succès, événement natif distinct d'un résultat d'effet, destruction sans attente silencieuse infinie. Ce verdict ne prouve pas l'implémentation.
+DÉDUIT, avis délégué et non mesure rejouée : le challenge indépendant du peer debugger `desktop-<client-host>-koryphaios-5` rend **TIENT sous conditions**. Ses objections sont intégrées : position appliquée indexée par token, aucun no-op natif crédité comme succès, événement natif distinct d'un résultat d'effet, destruction sans attente silencieuse infinie. Ce verdict ne prouve pas l'implémentation.
 
 ## Target design & migration path
 
@@ -299,7 +299,7 @@ MESURÉ, `bun test ./tests/desktop-avatar-window-state.test.ts -t "h: "` : `4 pa
 
 ## État des preuves à la livraison de conception
 
-DÉDUIT, avis délégué : contrôle contractuel indépendant du peer debugger `desktop-7b2civn-koryphaios-5`, verdict final **CONFORME, documentation seule**, message du 2026-10-01 à 13:45:55Z. Les trois bloqueurs initiaux et le résiduel de retry ont été levés par sa relecture ; sa dernière demande d'expliciter le nouveau watchdog dans la cellule de retry est intégrée. Ce contrôle porte sur le contrat de conception, pas sur les tests futurs ou le runtime. Les agents spécialisés challenger/contract-auditor n'étaient pas exposés dans l'inventaire de cette session ; la contradiction et le contrôle ont été sollicités par le canal peer.
+DÉDUIT, avis délégué : contrôle contractuel indépendant du peer debugger `desktop-<client-host>-koryphaios-5`, verdict final **CONFORME, documentation seule**, message du 2026-10-01 à 13:45:55Z. Les trois bloqueurs initiaux et le résiduel de retry ont été levés par sa relecture ; sa dernière demande d'expliciter le nouveau watchdog dans la cellule de retry est intégrée. Ce contrôle porte sur le contrat de conception, pas sur les tests futurs ou le runtime. Les agents spécialisés challenger/contract-auditor n'étaient pas exposés dans l'inventaire de cette session ; la contradiction et le contrôle ont été sollicités par le canal peer.
 
 | Étiquette | Commande exacte | Sortie décisive et portée |
 | --- | --- | --- |

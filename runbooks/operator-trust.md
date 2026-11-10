@@ -14,6 +14,12 @@ Le fichier n'appartient ni à un dépôt, ni au `userData` du Deck. La commande
 l'autorité opérateur qu'aux clés de cette politique, lue une seule fois au
 démarrage : tout changement demande un redémarrage.
 
+Marqueurs de substitution, à remplacer par les valeurs de VOTRE installation :
+`<vmid>` est l'identifiant (`pct list`) de la LXC du broker distant, et
+l'« hôte Proxmox » est l'hyperviseur qui héberge cette LXC, d'où se lancent les
+commandes `pct`. Les chemins `/opt/mcp-server` et `/etc/mcp/claude-peers-trust`
+sont ceux de la stack du dépôt (`config/mcp-server/`), pas ceux d'une machine.
+
 ## Vérifications communes
 
 1. Exporter seulement la partie publique de l'identité Deck :

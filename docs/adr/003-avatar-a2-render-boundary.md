@@ -31,7 +31,7 @@ Le personnage doit rendre les états A1 sans devenir un second interprète de l'
 
 Retenir la frontière A et la persistance B. La séparation des capacités prime sur l'économie d'une entrée HTML. Publier le résultat de l'unique machine A1 ; ne jamais réhydrater une deuxième machine dans le renderer. La lecture reste sans effet métier ; le déplacement et le hit-test sont deux capacités explicites de présentation.
 
-Le challenge indépendant du reviewer `desktop-7b2civn-koryphaios-7` confirme cette frontière sous réserve de cibler l'émission et de garantir l'initialisation et le désabonnement. Ce verdict ne remplace pas les tests natifs de L3.
+Le challenge indépendant du reviewer `desktop-<client-host>-koryphaios-7` confirme cette frontière sous réserve de cibler l'émission et de garantir l'initialisation et le désabonnement. Ce verdict ne remplace pas les tests natifs de L3.
 
 ## Target design & migration path
 
@@ -115,7 +115,7 @@ Le choix persiste, pas l'état effectif imposé par l'OS. Un changement de préf
 
 ## Preuves et limites de la sonde Windows
 
-DÉDUIT du rapport délégué de l'explorer `desktop-7b2civn-koryphaios-3`, carte `8fb62e61` : Electron 43.1.1, Windows 11, écran principal 2560×1440 à 100 %. Les artefacts sont dans `~/.agent-forge/scratch/avatar-a2-probe/out/`. L'auteur n'a pas rejoué ces sondes ; l'explorer n'a pas conservé l'historique shell. Les commandes ci-dessous sont **reconstruites**, pas des commandes attestées par un journal.
+DÉDUIT du rapport délégué de l'explorer `desktop-<client-host>-koryphaios-3`, carte `8fb62e61` : Electron 43.1.1, Windows 11, écran principal 2560×1440 à 100 %. Les artefacts sont dans `<scratch>/avatar-a2-probe/out/`. L'auteur n'a pas rejoué ces sondes ; l'explorer n'a pas conservé l'historique shell. Les commandes ci-dessous sont **reconstruites**, pas des commandes attestées par un journal.
 
 Invocation reconstruite : `PROBE_MODE=<mode> PROBE_TAG=<tag> PROBE_ANIM=<animation> desktop/node_modules/electron/dist/electron.exe <dossier-sonde>` ; `PROBE_SCALE` sert aux essais fractionnaires. Les relevés rapportés sont :
 
