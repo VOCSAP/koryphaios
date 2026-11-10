@@ -10,6 +10,8 @@ export const BROKER_ENV_NAMES = [
   "CLAUDE_PEERS_DB",
   "CLAUDE_PEERS_BIND_HOST",
   "CLAUDE_PEERS_BROKER_TOKEN",
+  // In replica mode it is the upstream; the daemon scrub drops it, so without it the broker starts local.
+  "CLAUDE_PEERS_BROKER_URL",
   "CLAUDE_PEERS_OFFLINE_REPLICA",
   "CLAUDE_PEERS_SERVE_REPLICAS",
 ] as const;
