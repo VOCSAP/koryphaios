@@ -2,6 +2,7 @@ import { test, expect, describe } from "bun:test";
 import {
   DECK_NO_REPLY_NOTE,
   OPERATOR_ANSWER_NOTE,
+  CLOSED_QUESTION_NOTE,
   PEER_INBOUND_NOTE,
   LEAD_DIRECTIVE_NOTE,
   ROUTING_REMINDER_NOTE,
@@ -19,6 +20,7 @@ import {
   OPERATOR_INSTANCE_TOKEN,
 } from "../shared/types.ts";
 import { PEER_NO_REPLY_NOTE } from "../shared/message-framing.ts";
+import { buildAnswerNotice, buildClosedNotice } from "../shared/approval-notice.ts";
 
 const BODY = "Take the next card, then report to the team-lead when it lands.";
 
@@ -281,7 +283,7 @@ describe("card dd388182: the deck note stops forbidding what a dispatch asks for
     );
   });
 
-  test("the four notes stay four distinct constants", () => {
+  test("the five notes stay five distinct constants", () => {
     // PEER_NO_REPLY_NOTE (shared/message-framing.ts, commit 138fa6f) frames a
     // peer-to-peer waiver at EMISSION; the two here frame a sender class at
     // RECEPTION. Now that all three share the "free to message any peer"
@@ -289,7 +291,32 @@ describe("card dd388182: the deck note stops forbidding what a dispatch asks for
     // would re-key one mechanism on the other's identity, which is the shape
     // CLAUDE.md warns about. They agree on a property; they are not the same
     // thing.
-    const notes = [DECK_NO_REPLY_NOTE, OPERATOR_ANSWER_NOTE, PEER_NO_REPLY_NOTE, PEER_INBOUND_NOTE];
-    expect(new Set(notes).size).toBe(4);
+    const notes = [DECK_NO_REPLY_NOTE, OPERATOR_ANSWER_NOTE, PEER_NO_REPLY_NOTE, PEER_INBOUND_NOTE, CLOSED_QUESTION_NOTE];
+    expect(new Set(notes).size).toBe(5);
+  });
+});
+
+describe("a closed question is framed apart from an operator answer", () => {
+  const closed = buildClosedNotice({ id: "a1b2", title: "Deploy?", closerPeerId: "lead-1", authority: "lead", reason: "stale" });
+
+  test("an operator-sentinel message carrying the tag is framed as a closed question, in both id forms", () => {
+    for (const sender of [OPERATOR_PEER_ID, OPERATOR_INSTANCE_TOKEN]) {
+      const out = renderInbound(sender, closed);
+      expect(out).toBe(`[Question closed -- not an operator answer]\n${closed}${CLOSED_QUESTION_NOTE}`);
+      expect(out).not.toContain(OPERATOR_ANSWER_NOTE);
+      expect(out).not.toContain("human operator ANSWERING");
+    }
+  });
+
+  test("an ordinary operator answer keeps its framing byte for byte", () => {
+    const answer = buildAnswerNotice("a1b2", "Deploy?", "Approved.");
+    for (const sender of [OPERATOR_PEER_ID, OPERATOR_INSTANCE_TOKEN]) {
+      expect(renderInbound(sender, answer)).toBe(`[Operator answer]\n${answer}${OPERATOR_ANSWER_NOTE}`);
+    }
+  });
+
+  test("a peer message that starts with the tag stays a peer message", () => {
+    expect(renderInbound("some-peer", closed)).toBe(renderPeerMessage(closed));
+    expect(renderInbound(DECK_PEER_ID, closed)).toBe(renderDeckAnnouncement(closed));
   });
 });
