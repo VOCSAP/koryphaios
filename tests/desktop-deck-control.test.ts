@@ -4401,17 +4401,23 @@ test("deck_run_directive relays refused and pending targets apart from the injec
   const deps = makeDeps({ sessions: [] });
   deps.runDirective = async () => ({
     injected: [{ tileId: "t-a", peerId: "alpha" }],
-    refused: [{ tileId: "t-b", peerId: "beta", reason: "refused-modal" }],
+    refused: [
+      { tileId: "t-b", peerId: "beta", reason: "refused-modal" },
+      { tileId: "t-e", peerId: "epsilon", reason: "rate-limited" }
+    ],
     pending: [{ tileId: "t-c", peerId: "gamma" }],
     unreached: [{ peerId: "delta", reason: "no-live-target" as const }]
   });
   const srv = await startDeckControl(deps);
   servers.push(srv);
-  const res = await call(srv, "deck_run_directive", { directive: "clear", peer_ids: ["alpha", "beta", "gamma", "delta"] });
+  const res = await call(srv, "deck_run_directive", { directive: "clear", peer_ids: ["alpha", "beta", "gamma", "delta", "epsilon"] });
   expect(res.body.result).toEqual({
     directive: "clear",
     injected: ["alpha"],
-    refused: [{ peerId: "beta", reason: "refused-modal" }],
+    refused: [
+      { peerId: "beta", reason: "refused-modal" },
+      { peerId: "epsilon", reason: "rate-limited" }
+    ],
     pending: ["gamma"],
     unreached: [{ peerId: "delta", reason: "no-live-target" }]
   });

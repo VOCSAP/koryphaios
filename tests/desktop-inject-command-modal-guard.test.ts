@@ -26,21 +26,33 @@ test('injectCommand re-reads the xterm screen before each physical write', () =>
   expect(twoSynchronousScreenReadsGuardBothWrites(body)).toBe(true)
 })
 
-test('the injection refusal treats unavailable xterm reads as modal and logs their reason', () => {
+test('the injection refusal gives an unavailable xterm read its own reason and logs the cause', () => {
   const src = readFileSync(TILE_INJECTOR_PATH, 'utf-8')
-  const body = extractBody(src, /private refusal\(id: string\): DirectiveOutcome \| null \{/, 'refusal()')
+  const body = extractBody(src, /private refusal\(id: string\): InjectRefusal \| null \{/, 'refusal()')
   expect(body).toContain("screen.status === 'unavailable'")
-  expect(body).toContain('screen unavailable ${screen.reason}')
+  expect(body).toContain("return 'screen-unavailable'")
+  expect(body).toContain('${screen.reason}')
   expect(body).toContain('inspectInjectGuard(screen.snapshot)')
-  expect(body).toContain('needsAttention')
-  expect(body).toContain('rateLimited')
+  expect(body).toContain("return 'needs-attention'")
+  expect(body).toContain("return 'rate-limited'")
 })
 
-test("'refused-modal' is a member of DirectiveOutcome and its agent-stop mirror", () => {
+test('every injection refusal is a member of DirectiveOutcome, its agent-stop mirror and the Deck wire unions', () => {
+  const refusals = ['refused-modal', 'screen-unavailable', 'needs-attention', 'rate-limited']
   const session = readFileSync(SESSION_SERVICE_PATH, 'utf-8')
   const agentStop = readFileSync(join(import.meta.dir, '..', 'desktop', 'src', 'main', 'agent-stop.ts'), 'utf-8')
-  expect(/export type DirectiveOutcome = ([^\n]+)/.exec(session)?.[1]).toContain("'refused-modal'")
-  expect(/export type InjectOutcome = ([^\n]+)/.exec(agentStop)?.[1]).toContain("'refused-modal'")
+  expect(/export type DirectiveOutcome = ([^\n]+)/.exec(session)?.[1]).toContain('InjectRefusal')
+  expect(/export type InjectOutcome = ([^\n]+)/.exec(agentStop)?.[1]).toContain('StopRefusal')
+  const sessionRefusals = /export type InjectRefusal = ([^\n]+)/.exec(session)?.[1] ?? ''
+  const stopRefusals = /export type StopRefusal = ([^\n]+)/.exec(agentStop)?.[1] ?? ''
+  const wireTypes = readFileSync(join(import.meta.dir, '..', 'desktop', 'src', 'shared', 'types.ts'), 'utf-8')
+  const coreTypes = readFileSync(join(import.meta.dir, '..', 'shared', 'types.ts'), 'utf-8')
+  for (const reason of refusals) {
+    expect(sessionRefusals, `InjectRefusal lacks ${reason}`).toContain(`'${reason}'`)
+    expect(stopRefusals, `StopRefusal lacks ${reason}`).toContain(`'${reason}'`)
+    expect(wireTypes.split(`'${reason}'`).length - 1, `desktop wire types carry ${reason} in DirectiveDispatch.refused and StopOutcome.result`).toBeGreaterThanOrEqual(2)
+    expect(coreTypes, `DispatchRefusalReason lacks ${reason}`).toContain(`"${reason}"`)
+  }
 })
 
 test('SessionService passes its turn generation to command injection', () => {

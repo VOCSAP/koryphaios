@@ -90,7 +90,7 @@ Lecture des lignes : buffer **actif**, `getLine(baseY + y)` pour `0 <= y < rows`
 
 | Lecteur | Modification contractuelle |
 |---|---|
-| `TileInjector.injectCommand` | Revalider juste avant ESC **et** après `settleMs`, immédiatement avant texte+Enter, sans `await` entre la dernière lecture et cette écriture. Capturer la vie PTY en entrée et vérifier qu'elle n'a pas changé. Réexaminer aussi attention/quota au second point. Conserver `refused-modal`, raison technique dans le log. |
+| `TileInjector.injectCommand` | Revalider juste avant ESC **et** après `settleMs`, immédiatement avant texte+Enter, sans `await` entre la dernière lecture et cette écriture. Capturer la vie PTY en entrée et vérifier qu'elle n'a pas changé. Réexaminer aussi attention/quota au second point. Rendre une raison distincte (`screen-unavailable`, `needs-attention`, `rate-limited`) ; `refused-modal` reste réservé à la garde modale. |
 | `SessionService.interrupt('pause')` | Garde synchrone fermée sur indisponibilité ; `hard` conserve son contrat destructif explicite. |
 | `SessionService.remove` / fermeture gracieuse | Un état indisponible n'autorise pas `/exit` à l'aveugle. Conserver le repli vers destruction explicite ; recontrôler les écritures différées de la séquence de fermeture, pas seulement son entrée. |
 | `screenLines` puis approbations dans `index.ts` | Remplacer la lecture nullable par le résultat de disponibilité. Sur `unavailable`, tenir/refuser selon la fenêtre de dépôt existante, pour permission **et** non-permission. Ne jamais appeler `permissionDialogShown(null)` comme preuve d'absence. Revalider à la dernière écriture si le chemin contient une attente. |

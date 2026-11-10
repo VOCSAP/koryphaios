@@ -1747,7 +1747,14 @@ export interface GraphDraftOpenResponse {
 
 export type DispatchRequestStatus = "pending" | "done";
 
-export type DispatchRefusalReason = "refused-modal" | "busy-timeout" | "no-terminal" | "error";
+export type DispatchRefusalReason =
+  | "refused-modal"
+  | "screen-unavailable"
+  | "needs-attention"
+  | "rate-limited"
+  | "busy-timeout"
+  | "no-terminal"
+  | "error";
 
 /** One card the wave dispatched, and where it landed. */
 export interface DispatchedCard {

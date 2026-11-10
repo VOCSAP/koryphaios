@@ -111,7 +111,7 @@ function interrupt(id: string, mode: "pause" | "hard", self: object): string {
   const source = readFileSync(SESSION_SERVICE_PATH, "utf-8");
   const body = extractBody(
     source,
-    /interrupt\(id: string, mode: 'pause' \| 'hard'\): 'interrupted' \| 'no-terminal' \| 'refused-modal' \{/,
+    /interrupt\(id: string, mode: 'pause' \| 'hard'\): 'interrupted' \| 'no-terminal' \| InjectRefusal \{/,
     "interrupt()"
   );
   const run = new Function("id", "mode", "logInfo", body) as (this: object, id: string, mode: "pause" | "hard", logInfo: () => void) => string;

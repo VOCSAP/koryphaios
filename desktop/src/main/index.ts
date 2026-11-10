@@ -2312,8 +2312,8 @@ const dispatchNextInner = async (): Promise<DispatchResult> => {
           execute: executeDirective,
           journal: (line) => journal.add('dispatch', line),
           reportError: (message, error) => reportError('dispatch', message, error),
-          noteUnresolved: async (item) => {
-            await appendRoadmapContext(endpoint, item.id, unresolvedDirectiveNote(item))
+          noteUnresolved: async (item, report) => {
+            await appendRoadmapContext(endpoint, item.id, unresolvedDirectiveNote(item, report))
           }
         }))
       )

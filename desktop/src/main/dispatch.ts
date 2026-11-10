@@ -246,7 +246,8 @@ export async function dispatchNormalWave(
 
 /**
  * Two distinct fixed notes: an empty target_peer_ids can't be fixed by
- * re-queuing, an unreachable target can.
+ * re-queuing, an unreachable target can. A target that was live and refused
+ * gets a third note built from the report, naming each reason.
  */
 export const UNRESOLVED_TARGET_NOTE =
   '[dispatch] marked done with no live target resolved -- nothing was injected. Safe to re-queue once the requested target is reachable: no live session was touched.'
@@ -255,8 +256,12 @@ export const NO_TARGET_REQUESTED_NOTE =
   '[dispatch] marked done with zero target_peer_ids set -- nothing was ever requested, so nothing was injected. Re-queuing alone will NOT fix this: set target_peer_ids first.'
 
 /** Picks the note that matches why nothing was injected. */
-export function unresolvedDirectiveNote(item: RoadmapItem): string {
-  return item.target_peer_ids.length === 0 ? NO_TARGET_REQUESTED_NOTE : UNRESOLVED_TARGET_NOTE
+export function unresolvedDirectiveNote(item: RoadmapItem, report: DirectiveDispatch): string {
+  if (item.target_peer_ids.length === 0) return NO_TARGET_REQUESTED_NOTE
+  const refused = report.refused ?? []
+  if (refused.length === 0) return UNRESOLVED_TARGET_NOTE
+  const named = refused.map(({ peerId, reason }) => `${peerId} (${reason})`).join(', ')
+  return `[dispatch] marked done, nothing was injected: the live target(s) refused the command -- ${named}. Re-queue once they can take input.`
 }
 
 export interface DirectiveWaveDeps {
@@ -266,7 +271,7 @@ export interface DirectiveWaveDeps {
   journal: (line: string) => void
   reportError: (message: string, error: unknown) => void
   /** Called only after a valid directive settles with no writes or pending targets. */
-  noteUnresolved: (item: RoadmapItem) => Promise<void>
+  noteUnresolved: (item: RoadmapItem, report: DirectiveDispatch) => Promise<void>
 }
 
 /**
@@ -301,7 +306,7 @@ export async function runDirectiveWave(
       // Parse refusals use directive:null and must not receive unresolved notes.
       if (report.directive !== null && report.injected.length === 0 && (report.pending?.length ?? 0) === 0) {
         try {
-          await deps.noteUnresolved(item)
+          await deps.noteUnresolved(item, report)
         } catch (e) {
           deps.reportError(`could not post the unresolved-target note for "${item.title}"`, e)
         }

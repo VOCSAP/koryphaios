@@ -16,8 +16,8 @@ import { extractBracedBody } from "./_braced-body";
 const INDEX_PATH = join(import.meta.dir, "..", "desktop", "src", "main", "index.ts");
 const SRC = readFileSync(INDEX_PATH, "utf-8");
 
-const ANCHOR = "noteUnresolved: async (item) => {";
-const REQUIRED_CALL = "appendRoadmapContext(endpoint, item.id, unresolvedDirectiveNote(item))";
+const ANCHOR = "noteUnresolved: async (item, report) => {";
+const REQUIRED_CALL = "appendRoadmapContext(endpoint, item.id, unresolvedDirectiveNote(item, report))";
 
 export function findNoteUnresolvedBody(src: string): string {
   const start = src.indexOf(ANCHOR);
@@ -36,16 +36,17 @@ test("anti-vacuity: the noteUnresolved anchor appears exactly once in index.ts",
   expect(SRC.split(ANCHOR)).toHaveLength(2);
 });
 
-test("PRESENCE: noteUnresolved appends the real unresolvedDirectiveNote(item) through the append route, never a whole-context upsert", () => {
+test("PRESENCE: noteUnresolved appends the real unresolvedDirectiveNote(item, report) through the append route, never a whole-context upsert", () => {
   expect(appendsTheSelectedNote(findNoteUnresolvedBody(SRC))).toBe(true);
 });
 
-test("detector self-check: the PRESENCE predicate rejects a no-op stub, a whole-context upsert, a wrong card id, a hardcoded note and a reimplemented selector -- and accepts the real shape", () => {
+test("detector self-check: the PRESENCE predicate rejects a no-op stub, a whole-context upsert, a wrong card id, a hardcoded note, a reimplemented selector and a selector call that drops the report -- and accepts the real shape", () => {
   const mutants: Record<string, string> = {
     noop: `${ANCHOR}\n}`,
     upsertOverwrite: `${ANCHOR}\n  await upsertRoadmap(endpoint, key, { id: item.id, context: item.context + unresolvedDirectiveNote(item) })\n}`,
     upsertAlongside: `${ANCHOR}\n  await ${REQUIRED_CALL}\n  await upsertRoadmap(endpoint, key, { id: item.id, context: item.context })\n}`,
-    wrongCard: `${ANCHOR}\n  await appendRoadmapContext(endpoint, otherId, unresolvedDirectiveNote(item))\n}`,
+    wrongCard: `${ANCHOR}\n  await appendRoadmapContext(endpoint, otherId, unresolvedDirectiveNote(item, report))\n}`,
+    droppedReport: `${ANCHOR}\n  await appendRoadmapContext(endpoint, item.id, unresolvedDirectiveNote(item))\n}`,
     hardcoded: `${ANCHOR}\n  await appendRoadmapContext(endpoint, item.id, UNRESOLVED_TARGET_NOTE)\n}`,
     reimplemented: `${ANCHOR}\n  const note = item.target_peer_ids.length === 0 ? UNRESOLVED_TARGET_NOTE : NO_TARGET_REQUESTED_NOTE\n  await appendRoadmapContext(endpoint, item.id, note)\n}`,
   };

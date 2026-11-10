@@ -1505,7 +1505,15 @@ test("deck_run_directive lists an asynchronously rejected injection as refused w
 });
 
 test("every non-written outcome is refused with that reason and nothing is listed injected", async () => {
-  for (const reason of ["refused-modal", "busy-timeout", "no-terminal", "error"] as const) {
+  for (const reason of [
+    "refused-modal",
+    "screen-unavailable",
+    "needs-attention",
+    "rate-limited",
+    "busy-timeout",
+    "no-terminal",
+    "error"
+  ] as const) {
     const r = recorder([session("t1", "alpha")]);
     r.deps.injectCommand = () => (reason === "error" ? Promise.reject(new Error("boom")) : Promise.resolve(reason));
     const out = await runDirectiveForCaller("clear", ["alpha"], undefined, "team-lead-ab12", r.deps);
@@ -2001,6 +2009,36 @@ test("executeDirectiveItem reports a card injection refusal instead of an inject
     pending: [],
     unreached: []
   });
+});
+
+test("executeDirectiveItem keeps each distinct refusal reason on the card path", async () => {
+  for (const reason of ["screen-unavailable", "needs-attention", "rate-limited"] as const) {
+    const r = recorder([session("t1", "alpha")]);
+    r.deps.injectCommand = async () => reason;
+
+    const result = await executeDirectiveItem(
+      { id: "card-1", title: "Clear the team", directive: "clear", target_peer_ids: ["alpha"] },
+      r.deps
+    );
+
+    expect(result.refused, reason).toEqual([{ tileId: "t1", peerId: "alpha", reason }]);
+    expect(result.injected, reason).toEqual([]);
+  }
+});
+
+test("executeDirectiveItem leaves a reason the wire cannot name out of the card report and reports it", async () => {
+  const r = recorder([session("t1", "alpha"), session("t2", "beta")]);
+  r.deps.injectCommand = async (tileId) => (tileId === "t1" ? ("context_resume_unsupported" as never) : "rate-limited");
+
+  const result = await executeDirectiveItem(
+    { id: "card-1", title: "Clear the team", directive: "clear", target_peer_ids: ["alpha", "beta"] },
+    r.deps
+  );
+
+  expect(result.refused).toEqual([{ tileId: "t2", peerId: "beta", reason: "rate-limited" }]);
+  expect(r.errors).toHaveLength(1);
+  expect(r.errors[0]!.message).toContain('"alpha"');
+  expect(r.errors[0]!.message).toContain("context_resume_unsupported");
 });
 
 test("executeDirectiveItem reports an unresolved card injection as pending", async () => {

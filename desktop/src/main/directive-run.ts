@@ -148,8 +148,8 @@ export function runClearReloadInTurn(
 type DirectiveTarget = { tileId: string; peerId: string }
 
 /**
- * 'refused-modal' also covers needsAttention and rateLimited; 'error' is a rejected injection;
- * 'context_resume_unsupported' is a context clear the broker or the target's server cannot resume.
+ * 'error' is a rejected injection; 'context_resume_unsupported' is a context
+ * clear the broker or the target's server cannot resume.
  */
 export type DirectiveRefusalReason = Exclude<DirectiveOutcome, 'written'> | 'error' | 'context_resume_unsupported'
 
@@ -413,8 +413,15 @@ export async function executeDirectiveItem(
     return { id: item.id, title: item.title, directive: null, injected: [], unreached: [] }
   }
   const run = await runDirectiveOn(cmd, item.target_peer_ids, undefined, item.title, deps, options)
-  // A card directive carries no deposit id, the only source of 'context_resume_unsupported'.
-  return { id: item.id, title: item.title, directive: cmd, ...run, refused: run.refused as NonNullable<DirectiveDispatch['refused']> }
+  const refused: NonNullable<DirectiveDispatch['refused']> = []
+  for (const { tileId, peerId, reason } of run.refused) {
+    if (reason === 'context_resume_unsupported') {
+      deps.reportError(`directive card "${item.title}": ${reason} for "${peerId}" has no card report entry; left out`)
+      continue
+    }
+    refused.push({ tileId, peerId, reason })
+  }
+  return { id: item.id, title: item.title, directive: cmd, ...run, refused }
 }
 
 export async function runDirectiveForCaller(

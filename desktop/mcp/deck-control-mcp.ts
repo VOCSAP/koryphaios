@@ -183,7 +183,7 @@ const TOOLS = [
   {
     name: 'deck_run_directive',
     description:
-      'Run a directive on live peer tiles now, no card. clear is free, compact costs one inference, magic_compact uses the plugin, else compact. Result: injected = typed; refused = not typed (refused-modal|busy-timeout|no-terminal|error|context_resume_unsupported); pending = still queued; typed when the tile falls idle unless refused then (up to 120 s); do not resend; magic_compact is always pending; unreached = no single live tile carries that peer_id.',
+      'Run a directive on live peer tiles now, no card. clear is free, compact costs one inference, magic_compact uses the plugin, else compact. Result: injected = typed; refused = not typed: refused-modal|screen-unavailable|needs-attention|rate-limited|busy-timeout|no-terminal|error|context_resume_unsupported; pending = queued, may type later (120 s max), do not resend; magic_compact always pending; unreached = no single live tile has that peer_id.',
     inputSchema: {
       type: 'object',
       properties: {

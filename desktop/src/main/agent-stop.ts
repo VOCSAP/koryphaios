@@ -29,8 +29,11 @@ export function toInterruptMode(mode: StopMode): 'pause' | 'hard' {
 
 export type InterruptResult = 'interrupted' | 'no-terminal'
 
+/** Why a stop was refused whole, before any write; mirrors InjectRefusal (session-service.ts). */
+export type StopRefusal = 'refused-modal' | 'screen-unavailable' | 'needs-attention' | 'rate-limited'
+
 /** Mirrors SessionService.injectCommand's DirectiveOutcome (session-service.ts). */
-export type InjectOutcome = 'written' | 'no-terminal' | 'busy-timeout' | 'refused-modal'
+export type InjectOutcome = 'written' | 'no-terminal' | 'busy-timeout' | StopRefusal
 
 export interface StopOutcome {
   /** Tile id. Always present -- unlike peerId, which is null until the peer registers. */
@@ -81,7 +84,7 @@ export interface StopDeps {
    * doc for why. broadcastStop below always passes its own `mode` through
    * verbatim; there is no separate un-gated overload to fall back to.
    */
-  interrupt(id: string, mode: StopMode): InterruptResult | 'refused-modal'
+  interrupt(id: string, mode: StopMode): InterruptResult | StopRefusal
   injectCommand(id: string, command: string): Promise<InjectOutcome>
   journal(line: string): void
 }

@@ -120,9 +120,9 @@ test('an unavailable screen after Escape refuses the text submission', async () 
     reads: [clearScreen(), { status: 'unavailable', reason: 'screen-pending' }]
   })
 
-  expect(await injector.injectCommand('t1', '/clear')).toBe('refused-modal')
+  expect(await injector.injectCommand('t1', '/clear')).toBe('screen-unavailable')
   expect(commands(writes)).toEqual(['ESC'])
-  expect(logs).toEqual(['command injection refused-modal for t1: screen unavailable screen-pending'])
+  expect(logs).toEqual(['command injection screen-unavailable for t1: screen-pending'])
 })
 
 test('a replaced PTY life after Escape receives no command text', async () => {
@@ -388,9 +388,10 @@ test('an injection inside a sequence never waits for another turn of its own til
 
 test('each refusal writes nothing and names its outcome', async () => {
   for (const [options, expected] of [
-    [{ reads: [{ status: 'unavailable' as const, reason: 'screen-fault' as const }] }, 'refused-modal'],
-    [{ runtime: { needsAttention: true } }, 'refused-modal'],
-    [{ runtime: { rateLimited: true } }, 'refused-modal'],
+    [{ reads: [{ status: 'unavailable' as const, reason: 'screen-fault' as const }] }, 'screen-unavailable'],
+    [{ runtime: { needsAttention: true } }, 'needs-attention'],
+    [{ runtime: { rateLimited: true } }, 'rate-limited'],
+    [{ runtime: { needsAttention: true, rateLimited: true } }, 'needs-attention'],
     [{ lastOutputAt: Date.now() + 60_000 }, 'busy-timeout']
   ] as const) {
     const { injector, writes } = fixture(options)

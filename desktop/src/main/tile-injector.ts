@@ -7,7 +7,7 @@ import { encodeSubmittedKeystrokes } from './session-command'
 import { DIRECTIVE_IDLE_WAIT_MS } from './directive-run'
 import { MAGIC_TIMEOUT_MS } from './magic-compact'
 import { inspectInjectGuard, type XtermScreenRead } from './xterm-screen'
-import type { DirectiveOutcome } from './session-service'
+import type { DirectiveOutcome, InjectRefusal } from './session-service'
 
 const DIRECTIVE_IDLE_POLL_MS = 500
 const DIRECTIVE_SETTLE_MS = 120
@@ -158,11 +158,11 @@ export class TileInjector {
     return error
   }
 
-  private refusal(id: string): DirectiveOutcome | null {
+  private refusal(id: string): InjectRefusal | null {
     const screen = this.screenGuard.read(id)
     if (screen.status === 'unavailable') {
-      this.info('session', `command injection refused-modal for ${id}: screen unavailable ${screen.reason}`)
-      return 'refused-modal'
+      this.info('session', `command injection screen-unavailable for ${id}: ${screen.reason}`)
+      return 'screen-unavailable'
     }
     const guard = inspectInjectGuard(screen.snapshot)
     if (guard.state === 'modal') {
@@ -171,12 +171,12 @@ export class TileInjector {
       return 'refused-modal'
     }
     if (this.runtime.get(id)?.needsAttention) {
-      this.info('session', `command injection refused-modal for ${id}: needs attention`)
-      return 'refused-modal'
+      this.info('session', `command injection needs-attention for ${id}`)
+      return 'needs-attention'
     }
     if (this.runtime.get(id)?.rateLimited) {
-      this.info('session', `command injection refused-modal for ${id}: rate limited`)
-      return 'refused-modal'
+      this.info('session', `command injection rate-limited for ${id}`)
+      return 'rate-limited'
     }
     return null
   }

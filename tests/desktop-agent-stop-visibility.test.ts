@@ -24,7 +24,8 @@ function extractPredicate(src: string, fnName: string): (o: { result: string }) 
   return new Function('o', `return (${m[1]})`) as (o: { result: string }) => boolean
 }
 
-const RESULT_VALUES = ['interrupted', 'written', 'busy-timeout', 'no-terminal', 'error', 'refused-modal'] as const
+const REFUSAL_VALUES = ['refused-modal', 'screen-unavailable', 'needs-attention', 'rate-limited'] as const
+const RESULT_VALUES = ['interrupted', 'written', 'busy-timeout', 'no-terminal', 'error', ...REFUSAL_VALUES] as const
 
 describe("refused modal outcomes", () => {
   const src = readFileSync(SRC_PATH, 'utf-8')
@@ -36,17 +37,19 @@ describe("refused modal outcomes", () => {
     refusedModal: extractPredicate(src, 'refusedModal')
   }
 
-  test("refusedModal's predicate matches 'refused-modal' and nothing else", () => {
+  test("refusedModal's predicate matches every refusal reason and nothing else", () => {
     for (const v of RESULT_VALUES) {
-      expect(filters.refusedModal({ result: v })).toBe(v === 'refused-modal')
+      expect(filters.refusedModal({ result: v }), `result ${v}`).toBe((REFUSAL_VALUES as readonly string[]).includes(v))
     }
   })
 
-  test("other outcome filters do not absorb refused-modal", () => {
-    expect(filters.interrupted({ result: 'refused-modal' })).toBe(false)
-    expect(filters.transmitted({ result: 'refused-modal' })).toBe(false)
-    expect(filters.stragglers({ result: 'refused-modal' })).toBe(false)
-    expect(filters.unreachable({ result: 'refused-modal' })).toBe(false)
+  test("other outcome filters do not absorb any refusal reason", () => {
+    for (const v of REFUSAL_VALUES) {
+      expect(filters.interrupted({ result: v }), `interrupted absorbs ${v}`).toBe(false)
+      expect(filters.transmitted({ result: v }), `transmitted absorbs ${v}`).toBe(false)
+      expect(filters.stragglers({ result: v }), `stragglers absorbs ${v}`).toBe(false)
+      expect(filters.unreachable({ result: v }), `unreachable absorbs ${v}`).toBe(false)
+    }
   })
 
   test('every filter matches only its own outcome', () => {
@@ -115,7 +118,7 @@ describe("SessionService.interrupt()'s pause-only screen-state gate", () => {
   const SCREEN_GUARD_CHECK = /this\.screenGuard\.read\(id\)/
   const ATTENTION_CHECK = /this\.runtime\.get\(id\)\?\.needsAttention/
   const RATE_LIMITED_CHECK = /this\.runtime\.get\(id\)\?\.rateLimited/
-  const REFUSAL_RETURN = /return\s+'refused-modal'/g
+  const REFUSAL_RETURN = /return\s+'(?:refused-modal|screen-unavailable|needs-attention|rate-limited)'/g
 
   function pauseIsGatedBeforeEscape(body: string): boolean {
     const escIdx = body.search(ESC_WRITE)
@@ -272,10 +275,32 @@ describe("SessionService.interrupt()'s pause-only screen-state gate", () => {
     const pauseCase = makeInterruptStub({ screen: { read: () => ({ status: 'unavailable' as const, reason: 'screen-fault' as const }) } })
 
     expect(interrupt.call(pauseCase.self, (_scope, message) => logs.push(message), inspectInjectGuard, 'tile-a', 'pause')).toBe(
-      'refused-modal'
+      'screen-unavailable'
     )
     expect(pauseCase.writes).toEqual([])
-    expect(logs).toEqual(['pause interruption refused-modal for tile-a: screen unavailable screen-fault'])
+    expect(logs).toEqual(['pause interruption screen-unavailable for tile-a: screen-fault'])
+  })
+
+  test.each([
+    ['needs attention', { needsAttention: true }, 'needs-attention'],
+    ['a rate limit', { rateLimited: true }, 'rate-limited'],
+    ['both runtime flags at once', { needsAttention: true, rateLimited: true }, 'needs-attention']
+  ] as const)('%s refuses pause under its own reason, without an Escape write', (_name, flags, expected) => {
+    const body = extractInterruptBody(readFileSync(SESSION_SERVICE_PATH, 'utf-8'))
+    const interrupt = new Function('logInfo', 'inspectInjectGuard', 'id', 'mode', body) as (
+      this: unknown,
+      logInfo: (scope: string, message: string) => void,
+      guardFn: typeof inspectInjectGuard,
+      id: string,
+      mode: 'pause' | 'hard'
+    ) => string
+    const pauseCase = makeInterruptStub(flags)
+    expect(interrupt.call(pauseCase.self, () => undefined, inspectInjectGuard, 'tile-a', 'pause')).toBe(expected)
+    expect(pauseCase.writes).toEqual([])
+
+    const hardCase = makeInterruptStub(flags)
+    expect(interrupt.call(hardCase.self, () => undefined, inspectInjectGuard, 'tile-a', 'hard')).toBe('interrupted')
+    expect(hardCase.writes).toEqual(['\x1b'])
   })
 
   test("a clear tile interrupts under pause mode", () => {
@@ -295,7 +320,7 @@ describe("SessionService.interrupt()'s pause-only screen-state gate", () => {
   })
 
   function extractInjectCommandGuardPrologue(src: string): string {
-    const fnMatch = /private refusal\(id: string\): DirectiveOutcome \| null \{/.exec(src)
+    const fnMatch = /private refusal\(id: string\): InjectRefusal \| null \{/.exec(src)
     if (!fnMatch) throw new Error('refusal() not found in tile-injector.ts -- has it been renamed?')
     return extractBracedBody(src, fnMatch.index + fnMatch[0].length - 1)
   }
@@ -378,15 +403,27 @@ describe('broadcastStop forwards mode into deps.interrupt', () => {
     ])
   })
 
-  test("a refused-modal interrupt result reaches StopOutcome.result unchanged", async () => {
+  test.each(REFUSAL_VALUES)("a %s interrupt result reaches StopOutcome.result unchanged", async (reason) => {
     const { broadcastStop } = await import('../desktop/src/main/agent-stop.ts')
     const deps = {
       list: () => [{ id: 'a', peerId: 'peer-a', status: 'running' as const }],
-      interrupt: () => 'refused-modal' as const,
+      interrupt: () => reason,
       injectCommand: async () => 'written' as const,
       journal: () => {}
     }
     const { outcomes } = await broadcastStop('pause', deps as never)
-    expect(outcomes).toEqual([{ id: 'a', peerId: 'peer-a', result: 'refused-modal' }])
+    expect(outcomes).toEqual([{ id: 'a', peerId: 'peer-a', result: reason }])
+  })
+
+  test.each(REFUSAL_VALUES)("a %s soft-stop injection result reaches StopOutcome.result unchanged", async (reason) => {
+    const { broadcastStop } = await import('../desktop/src/main/agent-stop.ts')
+    const deps = {
+      list: () => [{ id: 'a', peerId: 'peer-a', status: 'running' as const }],
+      interrupt: () => 'interrupted' as const,
+      injectCommand: async () => reason,
+      journal: () => {}
+    }
+    const { outcomes } = await broadcastStop('soft', deps as never)
+    expect(outcomes).toEqual([{ id: 'a', peerId: 'peer-a', result: reason }])
   })
 })

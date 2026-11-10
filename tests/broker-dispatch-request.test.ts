@@ -3,8 +3,11 @@
 // an unanswered request comes back pending rather than an empty success.
 
 import { test, expect, beforeAll, afterAll } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { startBroker, stopBroker, post, livePid, type TestBroker } from "./_helper.ts";
 import type {
+  DispatchRefusalReason,
   DispatchRequest,
   DispatchRequestOutcome,
   RegisterResponse,
@@ -180,6 +183,87 @@ test("resolve round-trips the whole outcome, buckets included", async () => {
   expect(card?.refused).toEqual([{ peerId: "reviewer-4", reason: "refused-modal" }]);
   expect(card?.pending).toEqual(["reviewer-5"]);
   expect(res.body.request.outcome?.note).toBe("1 card dispatched");
+});
+
+const UNKNOWN_REASON_LINE = "refusal(s) with a reason this broker does not know";
+
+/** Every broker.log line the unknown-reason report wrote so far. */
+function unknownReasonLines(): string[] {
+  return readFileSync(join(broker.tmpDir, "logs", "broker.log"), "utf8")
+    .split("\n")
+    .filter((line) => line.includes(UNKNOWN_REASON_LINE));
+}
+
+test("resolve logs once per call the refusals whose reason it does not know, naming only peer and reason", async () => {
+  const peer = await register(PK);
+  const request = await park(peer);
+  const esc = String.fromCharCode(0x1b);
+  const before = unknownReasonLines().length;
+
+  const res = await post<AddRes>(`${broker.url}/dispatch-request/resolve`, {
+    id: request.id,
+    outcome: {
+      cards: [
+        {
+          ...OUTCOME.cards[0]!,
+          title: "title that must stay out of the log",
+          refused: [
+            { peerId: "peer-kept", reason: "refused-modal" },
+            { peerId: "peer-x", reason: "made-up-reason" },
+            { peerId: "peer-y", reason: `bad${esc}${"z".repeat(500)}` },
+            { peerId: "peer-z", reason: 42 },
+          ],
+        },
+      ],
+      note: "note that must stay out of the log",
+    },
+  });
+
+  expect(res.status).toBe(200);
+  expect(res.body.request.outcome?.cards[0]?.refused).toEqual([{ peerId: "peer-kept", reason: "refused-modal" }]);
+  const lines = unknownReasonLines().slice(before);
+  expect(lines).toHaveLength(1);
+  const line = lines[0]!;
+  expect(line).toContain("dropped 3 refusal(s)");
+  expect(line).toContain("peer-x (made-up-reason)");
+  expect(line).toContain("peer-z (<number>)");
+  expect(line).toContain("peer-y (bad");
+  expect(line).not.toContain(esc);
+  expect(line).not.toContain("z".repeat(100));
+  expect(line).not.toContain("peer-kept");
+  expect(line).not.toContain("must stay out of the log");
+});
+
+test("resolve keeps every refusal reason the Deck can report, one entry per reason", async () => {
+  const unknownLinesBefore = unknownReasonLines().length;
+  const reasons: DispatchRefusalReason[] = [
+    "refused-modal",
+    "screen-unavailable",
+    "needs-attention",
+    "rate-limited",
+    "busy-timeout",
+    "no-terminal",
+    "error",
+  ];
+  const peer = await register(PK);
+  const request = await park(peer);
+  const res = await post<AddRes>(`${broker.url}/dispatch-request/resolve`, {
+    id: request.id,
+    outcome: {
+      cards: [
+        {
+          ...OUTCOME.cards[0]!,
+          refused: reasons.map((reason, i) => ({ peerId: `peer-${i}`, reason })),
+        },
+      ],
+      note: "refusals",
+    },
+  });
+  expect(res.status).toBe(200);
+  expect(res.body.request.outcome?.cards[0]?.refused).toEqual(
+    reasons.map((reason, i) => ({ peerId: `peer-${i}`, reason }))
+  );
+  expect(unknownReasonLines()).toHaveLength(unknownLinesBefore);
 });
 
 test("resolve is idempotent: a retry returns the stored report, it does not overwrite it", async () => {

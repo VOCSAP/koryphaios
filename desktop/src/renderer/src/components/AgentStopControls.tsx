@@ -73,7 +73,7 @@ function unreachable(r: StopReport): StopOutcome[] {
  * could not be reached at all).
  */
 function refusedModal(r: StopReport): StopOutcome[] {
-  return r.outcomes.filter((o) => o.result === 'refused-modal')
+  return r.outcomes.filter((o) => o.result === 'refused-modal' || o.result === 'screen-unavailable' || o.result === 'needs-attention' || o.result === 'rate-limited')
 }
 
 /**

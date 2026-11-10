@@ -225,14 +225,19 @@ const PROMPT_INJECT_SETTLE_MS = 400
 const OUTPUT_SCAN_CAP = 65536
 
 /**
- * Outcome of injectCommand, journaled by the caller (CT3). 'refused-modal'
- * (Vague 10 A2-1, cards 5dbf3255/63ca372f) means the screen-state guard
- * refused the WHOLE sequence -- neither the pre-paste Escape nor the paste
- * itself was written -- because the tile looked like a modal dialog where
- * both gestures are destructive. Mirrored in agent-stop.ts's InjectOutcome;
- * update both together.
+ * Why an injection was refused whole -- neither the pre-paste Escape nor the
+ * paste was written. 'refused-modal': the screen looks like a dialog where both
+ * gestures are destructive. 'screen-unavailable': there is no screen to
+ * inspect. 'needs-attention' and 'rate-limited': the tile's runtime flags say
+ * the agent is waiting on the operator or on its quota.
  */
-export type DirectiveOutcome = 'written' | 'no-terminal' | 'busy-timeout' | 'refused-modal'
+export type InjectRefusal = 'refused-modal' | 'screen-unavailable' | 'needs-attention' | 'rate-limited'
+
+/**
+ * Outcome of injectCommand, journaled by the caller (CT3). Mirrored in
+ * agent-stop.ts's InjectOutcome; update both together.
+ */
+export type DirectiveOutcome = 'written' | 'no-terminal' | 'busy-timeout' | InjectRefusal
 
 const SANDBOX_BRIDGE_REFUSAL =
   "the tile runs in the sandbox, and the bridge config names the host Electron binary and 127.0.0.1, which inside the container is the container's own loopback"
@@ -1985,13 +1990,13 @@ export class SessionService extends EventEmitter {
    * mode has no default, deliberately: a default here would let a future caller
    * silently get the ungated path.
    */
-  interrupt(id: string, mode: 'pause' | 'hard'): 'interrupted' | 'no-terminal' | 'refused-modal' {
+  interrupt(id: string, mode: 'pause' | 'hard'): 'interrupted' | 'no-terminal' | InjectRefusal {
     if (!this.pty.isAlive(id)) return 'no-terminal'
     if (mode === 'pause') {
       const screen = this.screenGuard.read(id)
       if (screen.status === 'unavailable') {
-        logInfo('session', `pause interruption refused-modal for ${id}: screen unavailable ${screen.reason}`)
-        return 'refused-modal'
+        logInfo('session', `pause interruption screen-unavailable for ${id}: ${screen.reason}`)
+        return 'screen-unavailable'
       }
       const guard = inspectInjectGuard(screen.snapshot)
       if (guard.state === 'modal') {
@@ -2000,12 +2005,12 @@ export class SessionService extends EventEmitter {
         return 'refused-modal'
       }
       if (this.runtime.get(id)?.needsAttention) {
-        logInfo('session', `pause interruption refused-modal for ${id}: needs attention`)
-        return 'refused-modal'
+        logInfo('session', `pause interruption needs-attention for ${id}`)
+        return 'needs-attention'
       }
       if (this.runtime.get(id)?.rateLimited) {
-        logInfo('session', `pause interruption refused-modal for ${id}: rate limited`)
-        return 'refused-modal'
+        logInfo('session', `pause interruption rate-limited for ${id}`)
+        return 'rate-limited'
       }
     }
     if (!this.pty.write(id, '\x1b')) return 'no-terminal'

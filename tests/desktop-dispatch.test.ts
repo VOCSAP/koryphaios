@@ -470,11 +470,13 @@ function mockDirectiveDeps(
   const journaled: string[] = [];
   const reported: { message: string; error: unknown }[] = [];
   const noted: string[] = [];
+  const notedReports: DirectiveDispatch[] = [];
   return {
     order,
     journaled,
     reported,
     noted,
+    notedReports,
     deps: {
       markDone: async (it: RoadmapItem) => {
         order.push(`mark:${it.id}`);
@@ -486,10 +488,11 @@ function mockDirectiveDeps(
       },
       journal: (line: string) => journaled.push(line),
       reportError: (message: string, error: unknown) => reported.push({ message, error }),
-      noteUnresolved: async (it: RoadmapItem) => {
+      noteUnresolved: async (it: RoadmapItem, rep: DirectiveDispatch) => {
         order.push(`note:${it.id}`);
         if (opts.noteThrowsForIds?.has(it.id)) throw new Error(`note failed for ${it.id}`);
         noted.push(it.id);
+        notedReports.push(rep);
       }
     }
   };
@@ -695,12 +698,49 @@ test("runDirectiveWave: noteUnresolved throwing is reported, not fatal -- the wa
   expect(reported[0]!.error).toBeInstanceOf(Error);
 });
 
+test("runDirectiveWave: hands noteUnresolved the report that settled, so the note can name the refusals", async () => {
+  const refused = [{ tileId: "t1", peerId: "peer-a", reason: "rate-limited" as const }];
+  const refusedReport = report({ id: "a", directive: "clear", injected: [], refused });
+  const { notedReports, deps } = mockDirectiveDeps({ reports: { a: refusedReport } });
+
+  await runDirectiveWave([item({ id: "a", kind: "directive", directive: "clear" })], deps);
+
+  expect(notedReports).toEqual([refusedReport]);
+});
+
 test("unresolvedDirectiveNote: empty target_peer_ids gets the 'set targets first' note, not the re-queue one", () => {
-  expect(unresolvedDirectiveNote(item({ target_peer_ids: [] }))).toBe(NO_TARGET_REQUESTED_NOTE);
+  expect(unresolvedDirectiveNote(item({ target_peer_ids: [] }), report({ id: "a", directive: "clear" }))).toBe(
+    NO_TARGET_REQUESTED_NOTE
+  );
 });
 
 test("unresolvedDirectiveNote: a requested-but-unreachable target gets the re-queue note", () => {
-  expect(unresolvedDirectiveNote(item({ target_peer_ids: ["peer-a"] }))).toBe(UNRESOLVED_TARGET_NOTE);
+  expect(unresolvedDirectiveNote(item({ target_peer_ids: ["peer-a"] }), report({ id: "a", directive: "clear" }))).toBe(
+    UNRESOLVED_TARGET_NOTE
+  );
+});
+
+test("unresolvedDirectiveNote: targets that were live and refused get a note naming each peer and its reason, not 'no live target resolved'", () => {
+  const note = unresolvedDirectiveNote(
+    item({ target_peer_ids: ["peer-a", "peer-b"] }),
+    report({
+      id: "a",
+      directive: "clear",
+      refused: [
+        { tileId: "t1", peerId: "peer-a", reason: "needs-attention" },
+        { tileId: "t2", peerId: "peer-b", reason: "rate-limited" }
+      ]
+    })
+  );
+  expect(note).toContain("peer-a (needs-attention)");
+  expect(note).toContain("peer-b (rate-limited)");
+  expect(note).not.toContain("no live target resolved");
+});
+
+test("unresolvedDirectiveNote: an empty refused list is the unreachable case, not a refusal", () => {
+  expect(
+    unresolvedDirectiveNote(item({ target_peer_ids: ["peer-a"] }), report({ id: "a", directive: "clear", refused: [] }))
+  ).toBe(UNRESOLVED_TARGET_NOTE);
 });
 
 function mockDeps(opts: { announceReturns?: number; failIds?: Set<string> } = {}) {

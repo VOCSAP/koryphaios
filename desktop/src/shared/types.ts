@@ -1004,7 +1004,18 @@ export interface DirectiveDispatch {
   /** Requested peer_ids that reached no tile, each with its reason. */
   unreached: UnreachedDirectiveTarget[]
   /** Targets whose injection settled without writing to the terminal. */
-  refused?: { tileId: string; peerId: string; reason: 'refused-modal' | 'busy-timeout' | 'no-terminal' | 'error' }[]
+  refused?: {
+    tileId: string
+    peerId: string
+    reason:
+      | 'refused-modal'
+      | 'screen-unavailable'
+      | 'needs-attention'
+      | 'rate-limited'
+      | 'busy-timeout'
+      | 'no-terminal'
+      | 'error'
+  }[]
   /** Targets whose injection did not settle before the report deadline. */
   pending?: { tileId: string; peerId: string }[]
 }
@@ -1087,13 +1098,23 @@ export interface StopOutcome {
    * 'written' guarantees only that the pty write succeeded, not that the
    * terminal submitted it or the agent received or acted on it -- soft stop is
    * a request, not a guarantee.
-   * 'refused-modal' is reachable from two different guards (soft's own
-   * injectCommand guard, pause's own interrupt gate); 'hard' is deliberately
-   * left ungated and never produces this value.
+   * 'refused-modal', 'screen-unavailable', 'needs-attention' and 'rate-limited'
+   * are each reachable from two different guards (soft's own injectCommand
+   * guard, pause's own interrupt gate); 'hard' is deliberately left ungated
+   * and never produces them.
    * Hand-maintained mirror of DirectiveOutcome and InjectOutcome, with no
    * compile-time link between the three.
    */
-  result: 'interrupted' | 'written' | 'busy-timeout' | 'no-terminal' | 'error' | 'refused-modal'
+  result:
+    | 'interrupted'
+    | 'written'
+    | 'busy-timeout'
+    | 'no-terminal'
+    | 'error'
+    | 'refused-modal'
+    | 'screen-unavailable'
+    | 'needs-attention'
+    | 'rate-limited'
 }
 
 export interface StopReport {

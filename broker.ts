@@ -10590,20 +10590,35 @@ function cleanDispatchTargets(v: unknown): string[] {
 
 const DISPATCH_REFUSAL_REASONS = new Set<DispatchRefusalReason>([
   "refused-modal",
+  "screen-unavailable",
+  "needs-attention",
+  "rate-limited",
   "busy-timeout",
   "no-terminal",
   "error",
 ]);
 
+const DISPATCH_REFUSAL_LOG_TEXT = 64;
+
 function cleanDispatchRefusals(v: unknown): NonNullable<DispatchedCard["refused"]> {
   if (!Array.isArray(v)) return [];
-  return v.slice(0, DISPATCH_OUTCOME_MAX_TARGETS).flatMap((entry) => {
+  const unknownReasons: string[] = [];
+  const kept = v.slice(0, DISPATCH_OUTCOME_MAX_TARGETS).flatMap((entry) => {
     const refusal = (typeof entry === "object" && entry !== null ? entry : {}) as Record<string, unknown>;
     const peerId = cleanDispatchText(refusal.peerId, DISPATCH_OUTCOME_MAX_TEXT);
     const reason = refusal.reason;
-    if (!peerId || typeof reason !== "string" || !DISPATCH_REFUSAL_REASONS.has(reason as DispatchRefusalReason)) return [];
+    if (!peerId) return [];
+    if (typeof reason !== "string" || !DISPATCH_REFUSAL_REASONS.has(reason as DispatchRefusalReason)) {
+      const shown = typeof reason === "string" ? cleanDispatchText(reason, DISPATCH_REFUSAL_LOG_TEXT) : `<${typeof reason}>`;
+      unknownReasons.push(`${truncate(peerId, DISPATCH_REFUSAL_LOG_TEXT)} (${shown})`);
+      return [];
+    }
     return [{ peerId, reason: reason as DispatchRefusalReason }];
   });
+  if (unknownReasons.length > 0) {
+    log.warn(`dispatch outcome: dropped ${unknownReasons.length} refusal(s) with a reason this broker does not know: ${unknownReasons.join(", ")}`);
+  }
+  return kept;
 }
 
 /** Rebuild explicitly so unrecognized input fields cannot cross the agent boundary. */
