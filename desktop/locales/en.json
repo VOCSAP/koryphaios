@@ -755,6 +755,8 @@
   "toast.inboxAnswerSent": "Answer sent — the agent is released",
   "toast.inboxAckSent": "Acknowledged: the agent is released",
   "toast.inboxAnsweredElsewhere": "Already answered from another channel",
+  "toast.inboxAlreadyReplied": "You already replied to this message",
+  "toast.inboxReplyClosed": "This message was closed: no reply can be sent",
   "toast.approvalNotApplied": "Your answer was NOT typed into \"{tile}\": {reason}. Answer it in the terminal.",
   "toast.inboxDeleted": "Message deleted",
   "toast.linkInvalid": "Link not opened: this is not a link the Deck can follow",

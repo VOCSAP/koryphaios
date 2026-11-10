@@ -100,6 +100,7 @@ const EXPECTED_PROJECT_KEY_TABLES = [
   "dispatch_requests",
   "graph_drafts",
   "inbox_instance_bindings",
+  "inbox_message_entries",
   "peers",
   "pending_approvals",
   "roadmap_context_documents",

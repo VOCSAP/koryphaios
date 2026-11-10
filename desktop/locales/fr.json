@@ -755,6 +755,8 @@
   "toast.inboxAnswerSent": "Réponse envoyée — l'agent est débloqué",
   "toast.inboxAckSent": "Acquitté : l'agent est débloqué",
   "toast.inboxAnsweredElsewhere": "Déjà répondu depuis un autre canal",
+  "toast.inboxAlreadyReplied": "Tu as déjà répondu à ce message",
+  "toast.inboxReplyClosed": "Ce message a été clos : aucune réponse ne peut être envoyée",
   "toast.approvalNotApplied": "Ta réponse n'a PAS été tapée dans « {tile} » : {reason}. Réponds dans le terminal.",
   "toast.inboxDeleted": "Message supprimé",
   "toast.linkInvalid": "Lien non ouvert : ce n'est pas un lien que le Deck peut suivre",

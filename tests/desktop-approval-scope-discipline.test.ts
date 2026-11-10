@@ -14,7 +14,7 @@ const REPO_ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "..");
 const TABLE = "pending_approvals";
 
 /** The composers whose presence anywhere in the window proves scoping. */
-const SCOPE_MARKERS = ["${where.sql}", "stamped.columns"];
+const SCOPE_MARKERS = ["${where.sql}", "${actorWhere.sql}", "stamped.columns"];
 
 /**
  * `approvalTileWhere` is WEAKER than `approvalWhere` (no session_ref), so its
@@ -74,7 +74,7 @@ const UNSCOPED_BY_DESIGN: Record<string, string> = {
   // card d3f23918: anchored on the specific status pair and TTL comparison
   // unique to sweepApprovals's purge statement, not the bare table name, so an
   // unrelated unscoped DELETE elsewhere cannot silently match this exemption.
-  "status IN ('answered','abandoned','acknowledged','answered_terminal') AND created_at < datetime('now'":
+  "status IN ('answered','abandoned','acknowledged','answered_terminal','closed') AND julianday(created_at) < julianday('now'":
     "Retention purge (sweepApprovals). Same reason as the sweep above: a maintenance job with no caller and no identity to scope by.",
   "readonly [SCOPE_BRAND]":
     "Not SQL. The table name is the BRAND of the opaque scope type, which is deliberately named after the thing it authorises so a reader knows what it unlocks.",

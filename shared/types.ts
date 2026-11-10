@@ -1587,6 +1587,30 @@ export interface OperatorInboxPurgeResponse {
   deleted: number;
 }
 
+/**
+ * Reply to ONE deposit of a run, keyed by (message_id, sent_at). `auth` is an
+ * operator-signed v1 proof over the whole body for the reply door only.
+ */
+export interface OperatorInboxReplyRequest {
+  group_id: GroupId;
+  group_secret_hash: string | null;
+  run_ref: string;
+  message_id: number;
+  sent_at: string;
+  /** Minted once per reply by the caller; the same id retried is a replay, not a second reply. */
+  reply_id: string;
+  text: string;
+  auth?: ApprovalAuthProof;
+}
+
+export interface InboxCloseRequest {
+  inbox_operation: "close";
+  entry_id: string;
+  reason: string;
+  auth?: ApprovalAuthProof;
+  author?: { payload: Record<string, unknown>; auth: ApprovalAuthProof };
+}
+
 // --- Broker API: groups and identity introspection ---
 
 export interface GroupStatsRow {
@@ -1828,6 +1852,8 @@ export type ApprovalKind = "permission" | "question" | "plan";
  * acknowledged   -> the operator read it and gave no answer; never a refusal
  * answered_terminal -> the operator answered on the tile itself; which verdict
  *                   is unknown, so nothing is relayed or typed
+ * closed         -> the asking agent, its lead or its supervisor closed the
+ *                   question without an answer; irreversible, never a refusal
  */
 export type ApprovalStatus =
   | "pending"
@@ -1835,7 +1861,10 @@ export type ApprovalStatus =
   | "expired_notif"
   | "abandoned"
   | "acknowledged"
-  | "answered_terminal";
+  | "answered_terminal"
+  | "closed";
+
+export type InboxCloseAuthority = "author" | "lead" | "supervisor";
 
 /**
  * Shape of the answer. `text` carries a free-form operator prompt; `answers`
@@ -1963,6 +1992,34 @@ export interface Approval {
    * of the author instance of an attested question. Absent on any other row.
    */
   author_instance_hint?: string;
+  /** Set once status is `closed`; answered_at carries the close time. */
+  close_reason?: string;
+  closed_by_authority?: InboxCloseAuthority;
+  /** Display snapshot of the closing peer, null when its instance was inactive. */
+  closed_by_peer_id?: string | null;
+}
+
+/** Public projection of a message entry of the durable registry; no token, no digest. */
+export interface InboxMessageEntryView {
+  entry_id: string;
+  message_id: number;
+  sent_at: string;
+  excerpt: string;
+  state: "open" | "responded" | "closed";
+  settled_at: string | null;
+  close_reason?: string;
+  closed_by_authority?: InboxCloseAuthority;
+  closed_by_peer_id?: string | null;
+}
+
+export interface InboxCloseResponse {
+  entry: InboxMessageEntryView | Approval;
+}
+
+export interface OperatorInboxReplyResponse {
+  ok: true;
+  message_id: number | null;
+  replayed?: true;
 }
 
 export interface ApprovalAddRequest {

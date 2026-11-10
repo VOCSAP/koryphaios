@@ -42,7 +42,7 @@ export interface InboxReclameCapability {
 export interface InboxCourrierCapability {
   markSeen: (entry: AckableInboxEntry) => void
   ack: (entry: AckableInboxEntry) => void
-  reply?: (toPeerId: string, text: string) => Promise<InboxActionOutcome>
+  reply?: (message: InboxMessage, text: string) => Promise<InboxActionOutcome>
   /** Global: every reader of the group loses the message, not just this one. */
   deleteMessage?: (messageId: number) => Promise<InboxActionOutcome>
 }
@@ -232,10 +232,10 @@ export function InboxCore(props: InboxCoreProps): React.JSX.Element {
     })
   }
 
-  const sendReply = (toPeerId: string): void => {
+  const sendReply = (message: InboxMessage): void => {
     const reply = courrier.reply
     if (!reply || !draft.trim()) return
-    void run(() => reply(toPeerId, draft.trim()))
+    void run(() => reply(message, draft.trim()))
   }
 
   return (
@@ -490,7 +490,7 @@ export function InboxCore(props: InboxCoreProps): React.JSX.Element {
                       <button
                         className="primary"
                         disabled={sending || !draft.trim()}
-                        onClick={() => sendReply(open.message.from)}
+                        onClick={() => sendReply(open.message)}
                       >
                         {t('inbox.reply')}
                       </button>

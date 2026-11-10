@@ -16,7 +16,12 @@ import {
   purgeInboxDomains,
   applyInboxEffectsForScope,
   pollInboxForCapturedScope,
+  INBOX_DOOR_GATE,
+  rawInboxReplyEntry,
+  replyToInboxEntryCore,
 } from "../desktop/src/main/inbox-session.ts";
+import { INBOX_GATES } from "../shared/approval.ts";
+import type { OperatorInboxReplyResult } from "../desktop/src/main/broker-client.ts";
 import type { InboxEffectsScope } from "../desktop/src/main/inbox-session.ts";
 
 test("a response from a previous group has no inbox effects", () => {
@@ -67,6 +72,101 @@ test("the run signer only covers the active group, and signs with the operator f
   state.operator = "op";
   state.run = null;
   expect(signer()).toBeUndefined();
+});
+
+// Mutant: the drain ? drain : purge ternary, which signs a reply for the purge gate.
+test("every door signs for its own gate", () => {
+  expect(INBOX_DOOR_GATE).toEqual({
+    drain: INBOX_GATES.drain,
+    purge: INBOX_GATES.purge,
+    reply: INBOX_GATES.reply,
+  });
+  expect(new Set(Object.values(INBOX_DOOR_GATE)).size).toBe(3);
+});
+
+test("a reply target is accepted only as an integer id and a bounded sentAt", () => {
+  expect(rawInboxReplyEntry({ id: 7, sentAt: "2026-10-09T11:00:00.000Z", extra: 1 })).toEqual({ id: 7, sentAt: "2026-10-09T11:00:00.000Z" });
+  for (const bad of [null, undefined, "x", 7, {}, { id: "7", sentAt: "t" }, { id: 1.5, sentAt: "t" }, { id: 7, sentAt: "" }, { id: 7, sentAt: "x".repeat(65) }, { id: 7, sentAt: 3 }]) {
+    expect({ bad, got: rawInboxReplyEntry(bad) }).toEqual({ bad, got: null });
+  }
+});
+
+function replyWorld(over: { run?: boolean; send?: (replyId: string, call: number) => Promise<OperatorInboxReplyResult> } = {}) {
+  const sent: Array<{ id: number; sentAt: string; replyId: string; text: string }> = [];
+  const errors: string[] = [];
+  let ids = 0;
+  const deps = {
+    run: () => (over.run === false ? undefined : { runRef: "run-1", sign: () => ({}) }),
+    send: async (_run: unknown, entry: { id: number; sentAt: string }, replyId: string, text: string) => {
+      sent.push({ ...entry, replyId, text });
+      return over.send ? over.send(replyId, sent.length) : ({ kind: "sent", messageId: 9 } as OperatorInboxReplyResult);
+    },
+    newReplyId: () => `reply-${++ids}`,
+    onError: (message: string) => errors.push(message),
+  };
+  return { deps, sent, errors };
+}
+
+const ENTRY = { id: 7, sentAt: "2026-10-09T11:00:00.000Z" };
+
+test("a transport failure is retried once with the SAME reply id, then the reply is sent", async () => {
+  const w = replyWorld({
+    send: async (_id, call) => {
+      if (call === 1) throw new TypeError("connection reset");
+      return { kind: "sent", messageId: 9 };
+    },
+  });
+  expect(await replyToInboxEntryCore(w.deps, ENTRY, "on it")).toBe("sent");
+  // Mutant: a new reply id minted for the retry.
+  expect(w.sent.map((s) => s.replyId)).toEqual(["reply-1", "reply-1"]);
+  expect(w.errors).toHaveLength(1);
+});
+
+test("a status the broker answered is never retried and reads as unavailable, traced", async () => {
+  const w = replyWorld({
+    send: async () => {
+      throw Object.assign(new Error("operator-inbox/reply failed: 500"), { status: 500 });
+    },
+  });
+  expect(await replyToInboxEntryCore(w.deps, ENTRY, "x")).toBe("unavailable");
+  expect(w.sent).toHaveLength(1);
+  expect(w.errors).toHaveLength(1);
+});
+
+test("two transport failures in a row give up with unavailable after exactly two attempts", async () => {
+  const w = replyWorld({
+    send: async () => {
+      throw new TypeError("down");
+    },
+  });
+  expect(await replyToInboxEntryCore(w.deps, ENTRY, "x")).toBe("unavailable");
+  expect(w.sent).toHaveLength(2);
+});
+
+// Mutant: a fallback to the uncorrelated announce when no run signs.
+test("without a run signer nothing is sent at all", async () => {
+  const w = replyWorld({ run: false });
+  expect(await replyToInboxEntryCore(w.deps, ENTRY, "x")).toBe("unavailable");
+  expect(w.sent).toEqual([]);
+});
+
+// Mutant: the outcome read from an error text instead of the broker's status and state.
+test("each broker answer maps to its own outcome, and the operator's own second reply is told apart", async () => {
+  const outcome = async (result: OperatorInboxReplyResult) =>
+    replyToInboxEntryCore(replyWorld({ send: async () => result }).deps, ENTRY, "x");
+  expect(await outcome({ kind: "settled", state: "responded" })).toBe("already-replied");
+  expect(await outcome({ kind: "settled", state: "closed" })).toBe("closed");
+  expect(await outcome({ kind: "settled", state: "somewhere-else" })).toBe("settled");
+  expect(await outcome({ kind: "author-gone" })).toBe("author-gone");
+  expect(await outcome({ kind: "unknown-entry" })).toBe("unavailable");
+});
+
+// Mutant: the unknown-entry branch returns without reporting.
+test("an entry the broker does not know is traced, so the operator can learn why the reply was refused", async () => {
+  const w = replyWorld({ send: async () => ({ kind: "unknown-entry" }) });
+  expect(await replyToInboxEntryCore(w.deps, ENTRY, "x")).toBe("unavailable");
+  expect(w.errors).toHaveLength(1);
+  expect(w.errors[0]).toContain("does not know");
 });
 
 test("both domains are purged, the deletions of both are counted, and each refusal is reported on its own", async () => {

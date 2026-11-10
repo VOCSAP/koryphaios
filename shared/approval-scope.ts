@@ -240,12 +240,14 @@ const GATE_OPERATIONS = {
   [INBOX_GATES.mandateClose]: ["inbox-close"],
   [INBOX_GATES.drain]: ["inbox-drain"],
   [INBOX_GATES.purge]: ["inbox-purge"],
+  [INBOX_GATES.reply]: ["inbox-reply"],
 } as const satisfies Record<InboxGate, readonly ApprovalOperation[]>;
 
 const V1_ONLY_OPERATIONS: ReadonlySet<ApprovalOperation> = new Set<ApprovalOperation>([
   ...INBOX_OPERATIONS,
   "inbox-drain",
   "inbox-purge",
+  "inbox-reply",
 ]);
 
 declare const ACTOR_BRAND: unique symbol;
@@ -309,6 +311,40 @@ export function authorizeInboxEntry(actor: InboxActor, entry: InboxEntryProvenan
   );
 }
 
+/**
+ * THE SINGLE PRODUCER of the actor's scope clause on `pending_approvals`
+ * (inbox-attested questions). No optional parameter: a new dimension is added
+ * here and reaches every caller.
+ */
+export function approvalActorWhere(actor: InboxActor): { sql: string; params: unknown[] } {
+  const a = actorFields.get(actor);
+  if (!a) throw new Error("approvalActorWhere: not an actor minted by this module");
+  return {
+    sql: "operator_id = ? AND project_key = ? AND inbox_run_ref = ? AND inbox_group_id = ?",
+    params: [a.operator_id, a.project_key, a.run_ref, a.group_id],
+  };
+}
+
+/** The same clause on `inbox_message_entries`, whose scope columns carry other names. */
+export function messageEntryActorWhere(actor: InboxActor): { sql: string; params: unknown[] } {
+  const a = actorFields.get(actor);
+  if (!a) throw new Error("messageEntryActorWhere: not an actor minted by this module");
+  return {
+    sql: "operator_id = ? AND project_key = ? AND run_ref = ? AND group_id = ?",
+    params: [a.operator_id, a.project_key, a.run_ref, a.group_id],
+  };
+}
+
+/** What a close records about who closed: never the object itself. */
+export function inboxActorClosure(actor: InboxActor): {
+  authority: "author" | "lead" | "supervisor";
+  authorInstanceRef: string | null;
+} {
+  const a = actorFields.get(actor);
+  if (!a) throw new Error("inboxActorClosure: not an actor minted by this module");
+  return { authority: a.authority, authorInstanceRef: a.authorInstanceRef };
+}
+
 export type InboxActionOperation = "inbox-list" | "inbox-close";
 
 export interface ApprovalAuth {
@@ -316,8 +352,8 @@ export interface ApprovalAuth {
   /** Same checks as authenticateOperator, but the proof must be a v1 proof for exactly `gate`. */
   authenticateInbox(body: Body, op: ApprovalOperation, gate: InboxGate): AuthResult<ApprovalIdentity>;
   /**
-   * Verifies a mandate envelope and, when present, the author's own proof
-   * carried inside it. Returns an actor for authorizeInboxEntry; it exposes no
+   * Verifies a mandate envelope and the author's own proof carried inside
+   * it (required for a close). Returns an actor for authorizeInboxEntry; it exposes no
    * route and mutates nothing.
    */
   verifyInboxAction(body: Body, op: InboxActionOperation): AuthResult<InboxActor>;
@@ -493,8 +529,8 @@ export function createApprovalAuth(deps: ApprovalAuthDeps): ApprovalAuth {
   }
 
   /**
-   * The envelope is signed by a mandate under its own gate; the optional
-   * `author` member is a SECOND proof, signed by the run root under the
+   * The envelope is signed by a mandate under its own gate; the `author`
+   * member (required on close) is a SECOND proof, signed by the run root under the
    * author gate. Nothing in the body is an authority: the scope and the
    * authority come from the stored mandate, the author digest from a proof
    * whose root must be that mandate's parent and whose payload must repeat
@@ -515,6 +551,10 @@ export function createApprovalAuth(deps: ApprovalAuthDeps): ApprovalAuth {
       return { error: "inbox_operation does not match the route", status: 400 };
     }
     const projectKey = id.project_key ?? "";
+
+    if (op === "inbox-close" && body.author === undefined) {
+      return { error: "an author proof is required to close", status: 400 };
+    }
 
     let authorInstanceRef: string | null = null;
     if (body.author !== undefined) {

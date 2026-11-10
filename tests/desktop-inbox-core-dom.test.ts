@@ -45,7 +45,7 @@ const { InboxCore } = await import("../desktop/src/renderer/src/components/Inbox
 type Action = { kind: string; text?: string; answers?: Record<string, string[]> };
 interface Calls {
   answers: { id: string; action: Action }[];
-  replies: { to: string; text: string }[];
+  replies: { id: number; sentAt: string; text: string }[];
   deletes: number[];
   acks: string[];
   seen: string[];
@@ -148,8 +148,8 @@ function Host(opts: MountOptions): React.JSX.Element {
       ack: (e: { kind: string }) => calls.acks.push(e.kind),
       ...(opts.courrierWrites
         ? {
-            reply: (to: string, text: string) => {
-              calls.replies.push({ to, text });
+            reply: (message: { id: number; sentAt: string }, text: string) => {
+              calls.replies.push({ id: message.id, sentAt: message.sentAt, text });
               return settle();
             },
             deleteMessage: (id: number) => {
@@ -217,7 +217,8 @@ test("a Courrier given reply and delete shows both, sends the trimmed draft, the
   await click(container.querySelector(".inbox-entry"));
   typeReply("  on it  ");
   await click(buttonLabelled("inbox.reply"));
-  expect(calls.replies).toEqual([{ to: "peer-x", text: "on it" }]);
+  // Mutant: sendReply(open.message.from), which names the sender instead of the entry.
+  expect(calls.replies).toEqual([{ id: MESSAGE.id, sentAt: MESSAGE.sentAt, text: "on it" }]);
   expect(container.querySelector(".inbox-modal"), "settled closes the entry").toBeNull();
   expect(Object.values(calls.drafts), "settled clears the draft").toEqual([""]);
 });

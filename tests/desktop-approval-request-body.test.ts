@@ -437,7 +437,7 @@ test("every rejected Courrier or Reclame call is traced to the journal right bef
     expect(log.map((line) => line.replace("Error: ", ""))).toEqual([
       "report:inbox:delete of message 3 failed: delete-boom",
       "toast:inbox.delete",
-      "report:inbox:reply to peer-x failed: reply-boom",
+      "report:inbox:reply to message 3 failed: reply-boom",
       "toast:inbox.reply",
       "report:inbox:answer 'deny' on apr-d failed: decline-boom",
       "toast:inbox.reply",

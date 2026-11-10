@@ -4,7 +4,8 @@ import { mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { startBroker, stopBroker, post, approvalListBody, livePid, type TestBroker, openBrokerDb } from "./_helper.ts";
+import { startBroker, stopBroker, post, get, approvalListBody, livePid, closeInbox, mintMandate, type MandateCredential, type TestBroker, openBrokerDb } from "./_helper.ts";
+import { reachedWithin } from "./_bounded-await.ts";
 import {
   approvalWaitTimeoutSec,
   buildAuthProof,
@@ -3048,5 +3049,175 @@ describe("Attested channel questions", () => {
     await signedPost(b, "/approval/claim", { id: askB.body.approval.id, via: "deck", answer_kind: "allow" }, { cred: op.cred, operator_id: op.id });
     expect(await mark([askA.body.approval.id], runB.run), "another run cannot mark it").toBe(0);
     expect(await mark([askA.body.approval.id], runA.run)).toBe(1);
+  });
+
+  describe("close of a question without an answer", () => {
+    const ticket = (token: string, over: Record<string, unknown> = {}) =>
+      asking(token, { kind: "question", merge: "never", title: "Which way?", question: "Left or right?", ...over });
+
+    async function world(group: string) {
+      const b = await boot();
+      const op = newOperator();
+      const run = await mintRun(b, op, group);
+      const bound = await bindInstance(b, op, run, `h-${group}`, `/${group}`);
+      const asked = await ask(b, op, run, ticket(bound.instance_token));
+      expect(asked.status).toBe(200);
+      const operator = { cred: op.cred, id: op.id };
+      return { b, op, run, bound, id: asked.body.approval.id, operator };
+    }
+
+    const closeQuestion = (
+      w: Awaited<ReturnType<typeof world>>,
+      mandate: MandateCredential,
+      over: { entryId?: string; reason?: unknown; instance?: string | null; run?: Run } = {}
+    ) =>
+      closeInbox<{ entry?: Approval; error?: string; state?: string }>(
+        w.b,
+        over.run ?? w.run,
+        mandate,
+        { entryId: over.entryId ?? w.id, reason: over.reason ?? "no longer needed", instanceToken: over.instance === undefined ? w.bound.instance_token : over.instance },
+        w.op.id
+      );
+
+    const waitAs = (w: Awaited<ReturnType<typeof world>>, timeoutSec: number) =>
+      signedPost<{ approval?: Approval; pending?: boolean }>(
+        w.b,
+        "/approval/wait",
+        { id: w.id, timeout_sec: timeoutSec },
+        { cred: w.run.cred, operator_id: w.op.id, kind: "session", token_id: w.run.tokenId }
+      );
+
+    const mandateFor = (w: Awaited<ReturnType<typeof world>>, authority: "author" | "lead" | "supervisor", caller: string, run: Run = w.run) =>
+      mintMandate(w.b, run, authority, caller, { operator: w.operator });
+
+    // Mutants: the parked waiter not resolved on close; closed collapsed into answered_terminal; notifyRegistry.settle given the reason.
+    test("a parked wait is woken at once with a closed status, the reason and the authority, and no answer message is pushed", async () => {
+      const w = await world("cq-wake");
+      const lead = await mandateFor(w, "lead", "lead-wake");
+      const waiting = waitAs(w, 30);
+      // The broker stamps last_wait_at and parks the waiter in the same synchronous turn.
+      const deadline = Date.now() + 5000;
+      while (storedRow(w.b, w.id).last_wait_at === null && Date.now() < deadline) await Bun.sleep(10);
+      expect(storedRow(w.b, w.id).last_wait_at, "the wait reached the broker").not.toBeNull();
+
+      const closed = await closeQuestion(w, lead, { reason: "the plan changed" });
+      const woken = await reachedWithin(waiting, "the parked wait after a close");
+
+      expect(closed.status).toBe(200);
+      expect(woken.body.approval).toMatchObject({
+        id: w.id,
+        status: "closed",
+        close_reason: "the plan changed",
+        closed_by_authority: "lead",
+        answer_kind: null,
+      });
+      expect(woken.body.approval?.answered_at).not.toBeNull();
+      const db = openBrokerDb(w.b.dbPath, { readonly: true });
+      try {
+        const pushed = db.query("SELECT COUNT(*) AS n FROM messages WHERE to_token = ?").get(w.bound.instance_token) as { n: number };
+        expect(pushed.n, "the author learns it from its next wait, not from a pushed message").toBe(0);
+      } finally {
+        db.close();
+      }
+      const again = await waitAs(w, 30);
+      expect(again.body.approval?.status, "a wait started after the close returns at once").toBe("closed");
+      expect(JSON.stringify(closed.body)).not.toContain(w.bound.instance_token);
+    });
+
+    // Mutants: UPDATE without the status condition; claim guard not refusing closed; a second close overwriting the first.
+    test("a closed question is final: claim, second close and withdraw all answer 409 and nothing moves", async () => {
+      const w = await world("cq-final");
+      const lead = await mandateFor(w, "lead", "lead-final");
+      const supervisor = await mandateFor(w, "supervisor", "sup-final");
+      expect((await closeQuestion(w, lead, { reason: "first" })).status).toBe(200);
+
+      const claim = await signedPost<{ error?: string; state?: string }>(w.b, "/approval/claim", { id: w.id, via: "deck", answer_kind: "allow" }, { cred: w.op.cred, operator_id: w.op.id });
+      const second = await closeQuestion(w, supervisor, { reason: "second" });
+      const withdraw = await signedPost<{ error?: string; state?: string }>(w.b, "/approval/withdraw", { id: w.id }, { cred: w.op.cred, operator_id: w.op.id });
+
+      expect({ status: withdraw.status, state: withdraw.body.state }).toEqual({ status: 409, state: "closed" });
+      expect({ status: claim.status, state: claim.body.state }).toEqual({ status: 409, state: "closed" });
+      expect({ status: second.status, state: second.body.state }).toEqual({ status: 409, state: "closed" });
+      expect(storedRow(w.b, w.id)).toMatchObject({ status: "closed", close_reason: "first", closed_by_authority: "lead" });
+    });
+
+    test("a question answered first cannot be closed, and the answer stands", async () => {
+      const w = await world("cq-answered");
+      const lead = await mandateFor(w, "lead", "lead-answered");
+      await signedPost(w.b, "/approval/claim", { id: w.id, via: "deck", answer_kind: "text", answer_text: "left" }, { cred: w.op.cred, operator_id: w.op.id });
+
+      const late = await closeQuestion(w, lead);
+
+      expect({ status: late.status, state: late.body.state }).toEqual({ status: 409, state: "answered" });
+      expect(storedRow(w.b, w.id)).toMatchObject({ status: "answered", answer_text: "left", close_reason: null });
+    });
+
+    // Mutants: authority read from the body or from author_peer_id_snapshot; run or group dropped from approvalActorWhere; 404 and 403 swapped.
+    test("a question is closed by its author, never by another author, and another run's id reads as unknown", async () => {
+      const w = await world("cq-authority");
+      const other = await bindInstance(w.b, w.op, w.run, "h-cq-other", "/cq-other");
+      const authorMandate = await mandateFor(w, "author", "author-q");
+      const otherRun = await mintRun(w.b, w.op, "g-cq-authority-b");
+      const otherBound = await bindInstance(w.b, w.op, otherRun, "h-cq-b", "/cq-b");
+      const leadOther = await mandateFor(w, "lead", "lead-other-run", otherRun);
+
+      const byOtherAuthor = await closeQuestion(w, authorMandate, { instance: other.instance_token });
+      const crossRun = await closeQuestion(w, leadOther, { run: otherRun, instance: otherBound.instance_token });
+      const byAuthor = await closeQuestion(w, authorMandate, { reason: "withdrawn by me" });
+
+      expect(byOtherAuthor.status).toBe(403);
+      expect(crossRun.status, "an id of another run is indistinguishable from an unknown one").toBe(404);
+      expect(crossRun.body.error).toBe("unknown entry");
+      expect(byAuthor.status).toBe(200);
+      expect(storedRow(w.b, w.id)).toMatchObject({
+        status: "closed",
+        closed_by_authority: "author",
+        closed_by_peer_id_snapshot: w.bound.peer_id,
+        close_reason: "withdrawn by me",
+      });
+    });
+
+    // Mutant: the closable-shape check removed.
+    test("a permission and a mergeable question are not closable", async () => {
+      const w = await world("cq-shape");
+      const lead = await mandateFor(w, "lead", "lead-shape");
+      const permission = await ask(w.b, w.op, w.run, asking(w.bound.instance_token));
+      const mergeable = await ask(w.b, w.op, w.run, ticket(w.bound.instance_token, { merge: "tile", title: "Mergeable", tile_ref: "tile-1" }));
+
+      const refusals = [permission, mergeable].map((a) => a.body.approval.id);
+      const statuses: number[] = [];
+      for (const id of refusals) statuses.push((await closeQuestion(w, lead, { entryId: id })).status);
+
+      expect(statuses).toEqual([422, 422]);
+      expect(refusals.map((id) => storedRow(w.b, id).status)).toEqual(["pending", "pending"]);
+    });
+
+    // Mutants: 'closed' absent from the purge list; created_at compared as TEXT against datetime('now').
+    test("the retention sweep purges settled rows past the window, including closed ones and ISO stamps within the cutoff's day", async () => {
+      const w = await world("cq-sweep");
+      const lead = await mandateFor(w, "lead", "lead-sweep");
+      const closedId = w.id;
+      await closeQuestion(w, lead);
+      const answered = await ask(w.b, w.op, w.run, ticket(w.bound.instance_token, { title: "answered one" }));
+      await signedPost(w.b, "/approval/claim", { id: answered.body.approval.id, via: "deck", answer_kind: "text", answer_text: "x" }, { cred: w.op.cred, operator_id: w.op.id });
+      const recent = await ask(w.b, w.op, w.run, ticket(w.bound.instance_token, { title: "recent closed" }));
+      await closeQuestion(w, lead, { entryId: recent.body.approval.id });
+      const cutoffDays = (await get<{ approval_cutoff_days: number }>(`${w.b.url}/admin/purge-messages`)).body.approval_cutoff_days;
+      // One minute either side of the cutoff keeps both stamps on the cutoff's calendar day at any hour.
+      const past = (minutes: number) => new Date(Date.now() - cutoffDays * 86_400_000 - minutes * 60_000).toISOString();
+      const db = openBrokerDb(w.b.dbPath);
+      try {
+        db.run("UPDATE pending_approvals SET created_at = ? WHERE id IN (?, ?)", [past(1), closedId, answered.body.approval.id]);
+        db.run("UPDATE pending_approvals SET created_at = ? WHERE id = ?", [past(-1), recent.body.approval.id]);
+      } finally {
+        db.close();
+      }
+
+      await get(`${w.b.url}/admin/purge-messages`);
+
+      expect(storedRow(w.b, closedId), "a closed row past the window").toBeFalsy();
+      expect(storedRow(w.b, answered.body.approval.id), "an answered row one minute past the cutoff, the same day").toBeFalsy();
+      expect(storedRow(w.b, recent.body.approval.id), "a closed row one minute inside the window").toMatchObject({ status: "closed" });
+    });
   });
 });

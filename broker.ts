@@ -132,6 +132,9 @@ import {
   sanitizeAnswerForPty,
   validateApprovalAnswers,
   validateApprovalDraft,
+  validateCloseReason,
+  type ApprovalOperation,
+  type InboxGate,
 } from "./shared/approval.ts";
 import { settledOutcome } from "./shared/approval-outcome.ts";
 import { OPERATOR_TRUST_VERSION, parseOperatorTrust, type OperatorTrust } from "./shared/operator-trust.ts";
@@ -139,6 +142,10 @@ import {
   createApprovalAuth,
   approvalWhere,
   approvalTileWhere,
+  approvalActorWhere,
+  messageEntryActorWhere,
+  inboxActorClosure,
+  authorizeInboxEntry,
   stampInsert,
   assertStampSessionRef,
   isAuthError,
@@ -264,6 +271,12 @@ import type {
   OperatorInboxMessage,
   OperatorInboxPurgeRequest,
   OperatorInboxPurgeResponse,
+  OperatorInboxReplyRequest,
+  OperatorInboxReplyResponse,
+  InboxCloseRequest,
+  InboxCloseResponse,
+  InboxMessageEntryView,
+  InboxCloseAuthority,
   Peer,
   PublicPeer,
   Message,
@@ -1795,6 +1808,10 @@ for (const column of [
   "author_peer_id_snapshot TEXT",
   "source_kind TEXT",
   "provenance_version INTEGER",
+  "close_reason TEXT",
+  "closed_by_authority TEXT",
+  "closed_by_instance_ref TEXT",
+  "closed_by_peer_id_snapshot TEXT",
 ]) {
   try {
     db.run(`ALTER TABLE pending_approvals ADD COLUMN ${column}`);
@@ -1814,6 +1831,35 @@ db.run(`
     group_id TEXT NOT NULL,
     project_key TEXT NOT NULL,
     bound_at TEXT NOT NULL
+  )
+`);
+
+// Business state of a deposit to the operator, apart from `messages`, which is a
+// transport destroyed by unregister, by the Courrier purge and by the TTL. No
+// foreign key or cascade: none of those paths may touch this table.
+db.run(`
+  CREATE TABLE IF NOT EXISTS inbox_message_entries (
+    entry_id TEXT PRIMARY KEY,
+    operator_id TEXT NOT NULL,
+    run_ref TEXT NOT NULL,
+    group_id TEXT NOT NULL,
+    project_key TEXT NOT NULL,
+    message_id INTEGER NOT NULL,
+    sent_at TEXT NOT NULL,
+    author_instance_ref TEXT NOT NULL,
+    author_peer_id_snapshot TEXT NOT NULL,
+    reply_token TEXT NOT NULL,
+    excerpt TEXT NOT NULL,
+    state TEXT NOT NULL DEFAULT 'open',
+    created_at TEXT NOT NULL,
+    settled_at TEXT,
+    responded_reply_id TEXT,
+    responded_message_id INTEGER,
+    closed_by_authority TEXT,
+    closed_by_instance_ref TEXT,
+    closed_by_peer_id_snapshot TEXT,
+    close_reason TEXT,
+    UNIQUE (operator_id, run_ref, group_id, message_id, sent_at)
   )
 `);
 
@@ -2371,6 +2417,14 @@ const insertAgentMessage = db.prepare(`
   VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, 'agent', 1)
 `);
 
+const MESSAGE_ENTRY_EXCERPT_MAX = 280;
+
+const insertMessageEntry = db.prepare(`
+  INSERT INTO inbox_message_entries (entry_id, operator_id, run_ref, group_id, project_key,
+    message_id, sent_at, author_instance_ref, author_peer_id_snapshot, reply_token, excerpt, created_at)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+`);
+
 // Ordered by sent_at then id, not id alone: sent_at stays the primary sort key
 // so intended chronological order is preserved, while id only breaks a genuine
 // sent_at tie -- two sends can land in the same millisecond.
@@ -2595,6 +2649,22 @@ function recordMessage(
         ? insertMessage.run(fromToken, toToken, groupId, text, sentAt)
         : insertTaskMessage.run(fromToken, toToken, groupId, text, sentAt, taskId);
   const messageId = Number(result.lastInsertRowid);
+  if (provenance !== null) {
+    insertMessageEntry.run(
+      `m_${randomUUID()}`,
+      provenance.operator_id,
+      provenance.run_ref,
+      provenance.group_id,
+      provenance.project_key,
+      messageId,
+      sentAt,
+      provenance.author_instance_ref,
+      provenance.author_peer_id_snapshot,
+      fromToken,
+      Array.from(text).slice(0, MESSAGE_ENTRY_EXCERPT_MAX).join(""),
+      sentAt
+    );
+  }
   updateLastActivity.run(sentAt, fromToken);
   updateLastActivity.run(sentAt, toToken);
   ackPriorMessagesForSender.run(fromToken, groupId, messageId);
@@ -10100,26 +10170,32 @@ if (BROKER_MODE === "replica") {
   armSyncTimer(Math.min(SYNC_TICK_MS, 100));
 }
 
+const RUN_DOOR_GATES = {
+  "inbox-drain": INBOX_GATES.drain,
+  "inbox-purge": INBOX_GATES.purge,
+  "inbox-reply": INBOX_GATES.reply,
+} as const satisfies Partial<Record<ApprovalOperation, InboxGate>>;
+
 /**
- * A run-scoped read or purge is the Deck main's gesture: an operator-signed v1
- * proof over the whole body, naming the run, and the run must still hold a live
- * credential. The scope returned is built here from the proof and the stored
- * credential, never from a field of the body.
+ * A run-scoped read, purge or reply is the Deck main's gesture: an
+ * operator-signed v1 proof over the whole body, naming the run, and the run
+ * must still hold a live credential. The scope returned is built here from the
+ * proof and the stored credential, never from a field of the body.
  */
 function admitRunRead(
-  body: OperatorInboxRequest | OperatorInboxPurgeRequest,
-  op: "inbox-drain" | "inbox-purge"
+  body: OperatorInboxRequest | OperatorInboxPurgeRequest | OperatorInboxReplyRequest,
+  op: keyof typeof RUN_DOOR_GATES
 ): { scope: { operator_id: string; run_ref: string } } | { error: string; status: number } {
   if (typeof body.run_ref !== "string" || body.run_ref === "" || body.auth === undefined) {
     return { error: "run_ref and auth are required together", status: 400 };
   }
-  if (typeof body.session_id !== "string" || body.session_id.length === 0) {
+  if (op !== "inbox-reply" && (!("session_id" in body) || typeof body.session_id !== "string" || body.session_id.length === 0)) {
     return { error: "session_id is required for a run-scoped read", status: 400 };
   }
   const identity = approvalAuth.authenticateInbox(
     body as unknown as { auth?: ApprovalAuthProof } & Record<string, unknown>,
     op,
-    op === "inbox-drain" ? INBOX_GATES.drain : INBOX_GATES.purge
+    RUN_DOOR_GATES[op]
   );
   if (isAuthError(identity)) return identity;
   if (identity.kind !== "operator") return { error: "the operator key is required", status: 403 };
@@ -10594,6 +10670,11 @@ type ApprovalRow = {
   questions_json: string | null;
   answers_json: string | null;
   author_instance_ref?: string | null;
+  inbox_run_ref?: string | null;
+  inbox_group_id?: string | null;
+  close_reason?: string | null;
+  closed_by_authority?: string | null;
+  closed_by_peer_id_snapshot?: string | null;
 };
 
 /** A stored JSON column that fails to parse reads as null, with a trace. */
@@ -10664,6 +10745,13 @@ function rowToApproval(row: ApprovalRow): Approval {
     answered_at: row.answered_at,
     delivered_at: row.delivered_at,
     ...(row.author_instance_ref ? { author_instance_hint: instanceHint(row.author_instance_ref) } : {}),
+    ...(row.status === "closed" && row.close_reason != null
+      ? {
+          close_reason: row.close_reason,
+          closed_by_authority: row.closed_by_authority as InboxCloseAuthority,
+          closed_by_peer_id: row.closed_by_peer_id_snapshot ?? null,
+        }
+      : {}),
   };
 }
 
@@ -10850,6 +10938,8 @@ function deliverApprovalAnswer(row: ApprovalRow): void {
     case "terminal":
     case "pending":
     case "gone":
+    // The author reads a close through its next /approval/wait, never as a push.
+    case "closed":
       return;
   }
   const text = [
@@ -11188,7 +11278,7 @@ function settleApproval(
   status: "answered" | "acknowledged" | "answered_terminal",
   /** Validated JSON of an `answers` verdict; null for every other kind. */
   answersJson: string | null = null
-): { approval: Approval } | { error: string; status: number; refused?: AnswerRefusal } {
+): { approval: Approval } | { error: string; status: number; refused?: AnswerRefusal; state?: string } {
   const allowed = via === "deck" ? "('pending','expired_notif')" : "('pending')";
   const now = new Date().toISOString();
   const where = approvalWhere(scope);
@@ -11276,7 +11366,7 @@ function settleApproval(
     ) {
       return { error: "a module waits on these questions: answer them with answer_kind answers", status: 422, refused: "answers-only" };
     }
-    return { error: "already-settled", status: 409 };
+    return { error: "already-settled", status: 409, state: existing.status };
   }
   // Scoped as well, though the UPDATE above has just proved ownership: an
   // unscoped read here was safe only BECAUSE of what ran before it, which is
@@ -11296,7 +11386,7 @@ function settleApproval(
 
 function handleApprovalClaim(
   body: ApprovalClaimRequest & Record<string, unknown>
-): ApprovalClaimResponse | { error: string; status: number } {
+): ApprovalClaimResponse | { error: string; status: number; state?: string } {
   const id = typeof body.id === "string" ? body.id : "";
   // Card 1def56da: the id is read BEFORE authorization because authorizeTarget
   // resolves the object first and answers about THAT object, which is the whole
@@ -11505,7 +11595,7 @@ async function handleApprovalWait(
  */
 function handleApprovalWithdraw(
   body: ApprovalWithdrawRequest & Record<string, unknown>
-): ApprovalWithdrawResponse | { error: string; status: number } {
+): ApprovalWithdrawResponse | { error: string; status: number; state?: string } {
   const id = typeof body.id === "string" ? body.id : "";
   const authorized = approvalAuth.authorizeTarget<ApprovalRow>(body, "withdraw", id ? [id] : []);
   if (isAuthError(authorized)) return authorized;
@@ -11524,13 +11614,289 @@ function handleApprovalWithdraw(
       WHERE id = ? AND ${where.sql} AND status IN ('pending','expired_notif')`,
     [closedAt, id, ...(where.params as never[])]
   );
-  if (res.changes === 0) return { error: "already-settled", status: 409 };
+  if (res.changes === 0) {
+    const current = db
+      .query(`SELECT status FROM pending_approvals WHERE id = ? AND ${where.sql}`)
+      .get(id, ...(where.params as never[])) as { status: string } | null;
+    return { error: "already-settled", status: 409, ...(current ? { state: current.status } : {}) };
+  }
   const approval = rowToApproval({ ...row, status: "answered_terminal", answered_at: closedAt });
   log.info(`approval ${id}: withdrawn by its session`);
   resolveApprovalWaiters(approval);
   // Withdrawn because the dialog was answered or dismissed on the tile itself.
   void notifyRegistry.settle(approval, "terminal").catch((e) => log.error("notify: settle failed", e));
   return { approval };
+}
+
+type MessageEntryRow = {
+  entry_id: string;
+  operator_id: string;
+  run_ref: string;
+  group_id: string;
+  project_key: string;
+  message_id: number;
+  sent_at: string;
+  author_instance_ref: string;
+  author_peer_id_snapshot: string;
+  reply_token: string;
+  excerpt: string;
+  state: "open" | "responded" | "closed";
+  settled_at: string | null;
+  responded_reply_id: string | null;
+  responded_message_id: number | null;
+  closed_by_authority: string | null;
+  closed_by_peer_id_snapshot: string | null;
+  close_reason: string | null;
+};
+
+/** Public projection of a registry row: a pick-list, so a new column stays private until named here. */
+function messageEntryView(row: MessageEntryRow): InboxMessageEntryView {
+  return {
+    entry_id: row.entry_id,
+    message_id: row.message_id,
+    sent_at: row.sent_at,
+    excerpt: row.excerpt,
+    state: row.state,
+    settled_at: row.settled_at,
+    ...(row.state === "closed" && row.close_reason !== null
+      ? {
+          close_reason: row.close_reason,
+          closed_by_authority: row.closed_by_authority as InboxCloseAuthority,
+          closed_by_peer_id: row.closed_by_peer_id_snapshot,
+        }
+      : {}),
+  };
+}
+
+type HandlerFailure = { error: string; status: number; state?: string };
+
+const MESSAGE_ENTRY_ID_RE = /^m_[0-9a-f-]{36}$/;
+
+/**
+ * Closes one entry of the caller's run without an answer. The object is
+ * resolved inside the actor's scope FIRST (an id of another run reads exactly
+ * like an unknown one), then the actor's authority is checked, then the shape
+ * of the row, then the conditional UPDATE decides the single winner against a
+ * concurrent answer. The reason is agent text: it is stored and returned, and
+ * never written to a log or sent to a phone channel.
+ */
+function handleInboxClose(
+  body: InboxCloseRequest & Record<string, unknown>
+): InboxCloseResponse | HandlerFailure {
+  const actor = approvalAuth.verifyInboxAction(body, "inbox-close");
+  if (isAuthError(actor)) return actor;
+  const reason = validateCloseReason(body.reason);
+  if (!reason.ok) return { error: reason.error, status: 400 };
+  const entryId = body.entry_id;
+  if (typeof entryId !== "string") return { error: "entry_id is required", status: 400 };
+  const isMessage = MESSAGE_ENTRY_ID_RE.test(entryId);
+  if (!isMessage && !INBOX_RUN_REF_RE.test(entryId)) return { error: "entry_id has an unknown form", status: 400 };
+
+  const closure = inboxActorClosure(actor);
+  const now = new Date().toISOString();
+  const authorToken = String(body.author?.payload.instance_token ?? "");
+  const closerPeer =
+    (
+      db
+        .query("SELECT peer_id FROM peers WHERE instance_token = ? AND status = 'active'")
+        .get(authorToken) as { peer_id: string } | null
+    )?.peer_id ?? null;
+
+  if (isMessage) {
+    const where = messageEntryActorWhere(actor);
+    const row = db
+      .query(`SELECT * FROM inbox_message_entries WHERE entry_id = ? AND ${where.sql}`)
+      .get(entryId, ...(where.params as never[])) as MessageEntryRow | null;
+    if (!row) return { error: "unknown entry", status: 404 };
+    if (
+      !authorizeInboxEntry(actor, {
+        operator_id: row.operator_id,
+        run_ref: row.run_ref,
+        group_id: row.group_id,
+        project_key: row.project_key,
+        author_instance_ref: row.author_instance_ref,
+      })
+    ) {
+      log.warn("inbox close refused: the actor may not act on this entry", {
+        entry_id: row.entry_id,
+        authority: closure.authority,
+      });
+      return { error: "not allowed on this entry", status: 403 };
+    }
+    const res = db.run(
+      `UPDATE inbox_message_entries
+          SET state = 'closed', settled_at = ?, closed_by_authority = ?, closed_by_instance_ref = ?,
+              closed_by_peer_id_snapshot = ?, close_reason = ?, reply_token = ''
+        WHERE entry_id = ? AND ${where.sql} AND state = 'open'`,
+      [now, closure.authority, closure.authorInstanceRef, closerPeer, reason.value, entryId, ...(where.params as never[])]
+    );
+    const after = db
+      .query(`SELECT * FROM inbox_message_entries WHERE entry_id = ? AND ${where.sql}`)
+      .get(entryId, ...(where.params as never[])) as MessageEntryRow | null;
+    if (res.changes === 0 || after === null) return { error: "entry-settled", status: 409, state: after?.state ?? "gone" };
+    log.info(`inbox entry ${entryId}: closed by ${closure.authority}`);
+    return { entry: messageEntryView(after) };
+  }
+
+  const actorWhere = approvalActorWhere(actor);
+  const row = db
+    .query(`SELECT * FROM pending_approvals WHERE id = ? AND ${actorWhere.sql}`)
+    .get(entryId, ...(actorWhere.params as never[])) as ApprovalRow | null;
+  if (!row) return { error: "unknown entry", status: 404 };
+  if (
+    !authorizeInboxEntry(actor, {
+      operator_id: row.operator_id,
+      run_ref: row.inbox_run_ref ?? null,
+      group_id: row.inbox_group_id ?? null,
+      project_key: row.project_key,
+      author_instance_ref: row.author_instance_ref ?? null,
+    })
+  ) {
+    log.warn("inbox close refused: the actor may not act on this entry", {
+      entry_id: row.id,
+      authority: closure.authority,
+    });
+    return { error: "not allowed on this entry", status: 403 };
+  }
+  if (row.reply_route !== "channel" || row.kind !== "question" || row.mergeable !== 0) {
+    return { error: "not-closable", status: 422 };
+  }
+  const res = db.run(
+    `UPDATE pending_approvals
+        SET status = 'closed', answered_at = ?, closed_by_authority = ?, closed_by_instance_ref = ?,
+            closed_by_peer_id_snapshot = ?, close_reason = ?
+      WHERE id = ? AND ${actorWhere.sql} AND status IN ('pending','expired_notif')
+        AND reply_route = 'channel' AND kind = 'question' AND mergeable = 0`,
+    [now, closure.authority, closure.authorInstanceRef, closerPeer, reason.value, entryId, ...(actorWhere.params as never[])]
+  );
+  const after = db
+    .query(`SELECT * FROM pending_approvals WHERE id = ? AND ${actorWhere.sql}`)
+    .get(entryId, ...(actorWhere.params as never[])) as ApprovalRow | null;
+  if (res.changes === 0 || after === null) return { error: "already-settled", status: 409, state: after?.status ?? "gone" };
+  const approval = rowToApproval(after);
+  log.info(`approval ${entryId}: closed by ${closure.authority}`);
+  resolveApprovalWaiters(approval);
+  void notifyRegistry.settle(approval, "closed").catch((e) => log.error("notify: settle failed", e));
+  return { entry: approval };
+}
+
+type ReplyOutcome =
+  | { kind: "unknown" }
+  | { kind: "replayed"; messageId: number | null }
+  | { kind: "settled"; state: string }
+  | { kind: "gone" }
+  | { kind: "sent"; messageId: number; token: InstanceToken; groupId: string; text: string; sentAt: string };
+
+// IMMEDIATE takes the write lock at the first statement, so a second broker on
+// the same database cannot answer the same entry twice.
+const replyToMessageEntryTx = db.transaction(
+  (
+    key: { operatorId: string; runRef: string; groupId: string; messageId: number; sentAt: string },
+    replyId: string,
+    text: string,
+    now: string
+  ): ReplyOutcome => {
+    const row = db
+      .query(
+        `SELECT * FROM inbox_message_entries
+          WHERE operator_id = ? AND run_ref = ? AND group_id = ? AND message_id = ? AND sent_at = ?`
+      )
+      .get(key.operatorId, key.runRef, key.groupId, key.messageId, key.sentAt) as MessageEntryRow | null;
+    if (!row) return { kind: "unknown" };
+    if (row.state === "responded" && row.responded_reply_id === replyId) {
+      return { kind: "replayed", messageId: row.responded_message_id };
+    }
+    if (row.state !== "open") return { kind: "settled", state: row.state };
+    const target = db
+      .query(
+        "SELECT instance_token FROM peers WHERE instance_token = ? AND group_id = ? AND status = 'active' AND via IS NULL"
+      )
+      .get(row.reply_token, row.group_id) as { instance_token: InstanceToken } | null;
+    const binding = bindingOfToken(row.reply_token);
+    if (
+      !target ||
+      !binding ||
+      !sameRunScope(binding, {
+        operator_id: row.operator_id,
+        run_ref: row.run_ref,
+        group_id: row.group_id,
+        project_key: row.project_key,
+      })
+    ) {
+      return { kind: "gone" };
+    }
+    const inserted = insertMessage.run(DECK_INSTANCE_TOKEN, row.reply_token, row.group_id, text, now);
+    const messageId = Number(inserted.lastInsertRowid);
+    const settled = db.run(
+      `UPDATE inbox_message_entries
+          SET state = 'responded', settled_at = ?, responded_reply_id = ?, responded_message_id = ?, reply_token = ''
+        WHERE entry_id = ? AND state = 'open'`,
+      [now, replyId, messageId, row.entry_id]
+    );
+    if (settled.changes !== 1) throw new Error(`inbox entry ${row.entry_id}: reply lost the state race inside its own transaction`);
+    return { kind: "sent", messageId, token: target.instance_token, groupId: row.group_id, text, sentAt: now };
+  }
+);
+
+/**
+ * The operator's reply to ONE deposit of a run. The message insert and the
+ * transition to `responded` commit together: never a message sent to a closed
+ * entry, never an entry settled without its message. The target is the author
+ * INSTANCE recorded at deposit, so a peer_id taken over by another instance
+ * receives nothing.
+ */
+function handleOperatorInboxReply(
+  body: OperatorInboxReplyRequest
+): OperatorInboxReplyResponse | HandlerFailure {
+  const groupId = body.group_id;
+  if (!groupId) return { error: "group_id is required", status: 400 };
+  if (!groupMayCarryOperatorInbox(groupId)) {
+    log.warn(`operator-inbox/reply: refused reply in a secret-less group`, { group_id: groupId });
+    return { error: `The operator inbox does not exist in the '${groupId}' group: it pins no secret`, status: 403 };
+  }
+  const secretError = checkGroupSecret(groupId, body.group_secret_hash ?? null);
+  if (secretError) return secretError;
+  const admitted = admitRunRead(body, "inbox-reply");
+  if ("error" in admitted) return admitted;
+  if (typeof body.text !== "string" || body.text.length === 0 || body.text.length > MESSAGE_TEXT_MAX) {
+    return { error: `text must be a non-empty string of at most ${MESSAGE_TEXT_MAX} characters`, status: 400 };
+  }
+  if (typeof body.reply_id !== "string" || !INBOX_RUN_REF_RE.test(body.reply_id)) {
+    return { error: "reply_id must be a UUID", status: 400 };
+  }
+  if (typeof body.message_id !== "number" || !Number.isInteger(body.message_id)) {
+    return { error: "message_id must be an integer", status: 400 };
+  }
+  if (typeof body.sent_at !== "string" || body.sent_at.length === 0 || body.sent_at.length > 64) {
+    return { error: "sent_at must be a string of at most 64 characters", status: 400 };
+  }
+  const now = new Date().toISOString();
+  const outcome = replyToMessageEntryTx.immediate(
+    {
+      operatorId: admitted.scope.operator_id,
+      runRef: admitted.scope.run_ref,
+      groupId,
+      messageId: body.message_id,
+      sentAt: body.sent_at,
+    },
+    body.reply_id,
+    body.text,
+    now
+  );
+  switch (outcome.kind) {
+    case "unknown":
+      return { error: "unknown entry", status: 404 };
+    case "replayed":
+      return { ok: true, replayed: true, message_id: outcome.messageId };
+    case "settled":
+      return { error: "entry-settled", status: 409, state: outcome.state };
+    case "gone":
+      return { error: "author-gone", status: 410 };
+    case "sent":
+      updateLastActivity.run(outcome.sentAt, outcome.token);
+      pushDeckMessage(outcome.token, outcome.messageId, outcome.text, outcome.sentAt);
+      return { ok: true, message_id: outcome.messageId };
+  }
 }
 
 function requestedRunRef(body: { run_ref?: unknown }): string {
@@ -12127,13 +12493,26 @@ function sweepApprovals(): { expired: number; purged: number } {
   ).changes;
   const purged = db.run(
     `DELETE FROM pending_approvals
-      WHERE status IN ('answered','abandoned','acknowledged','answered_terminal') AND created_at < datetime('now', ?)`,
+      WHERE status IN ('answered','abandoned','acknowledged','answered_terminal','closed') AND julianday(created_at) < julianday('now', ?)`,
     [`-${APPROVAL_TTL_DAYS} days`]
+  ).changes;
+  const entriesDropped = db.run(
+    `DELETE FROM inbox_message_entries
+      WHERE julianday(created_at) < julianday('now', ?)
+        AND NOT EXISTS (
+          SELECT 1 FROM approval_session_tokens t
+           WHERE t.operator_id = inbox_message_entries.operator_id
+             AND t.run_ref = inbox_message_entries.run_ref
+             AND t.group_id = inbox_message_entries.group_id
+             AND t.inbox_purpose = 'run' AND t.revoked_at IS NULL AND t.expires_at > ?
+        )`,
+    [`-${APPROVAL_TTL_DAYS} days`, new Date().toISOString()]
   ).changes;
   // Pairing codes were only ever deleted when someone tried to redeem one, so
   // an operator who clicks Connect and never scans left a row behind for good.
   db.run("DELETE FROM approval_pairing_codes WHERE expires_at < ?", [new Date().toISOString()]);
   if (expired > 0) log.info(`approval notifications expired: ${expired}`);
+  if (entriesDropped > 0) log.info(`inbox message entries dropped past retention: ${entriesDropped}`);
   return { expired, purged };
 }
 
@@ -13203,6 +13582,26 @@ const server = Bun.serve<WsData>({
           }
           return Response.json(result);
         }
+        case "/operator-inbox/reply": {
+          const result = handleOperatorInboxReply(body as OperatorInboxReplyRequest);
+          if ("error" in result) {
+            return Response.json(
+              { error: result.error, ...(result.state !== undefined ? { state: result.state } : {}) },
+              { status: result.status }
+            );
+          }
+          return Response.json(result);
+        }
+        case "/inbox/close": {
+          const result = handleInboxClose(body as InboxCloseRequest & Record<string, unknown>);
+          if ("error" in result) {
+            return Response.json(
+              { error: result.error, ...(result.state !== undefined ? { state: result.state } : {}) },
+              { status: result.status }
+            );
+          }
+          return Response.json(result);
+        }
         case "/operator-inbox/purge": {
           const result = handleOperatorInboxPurge(body as OperatorInboxPurgeRequest);
           if ("error" in result) {
@@ -13398,14 +13797,20 @@ const server = Bun.serve<WsData>({
         case "/approval/claim": {
           const result = handleApprovalClaim(body as ApprovalClaimRequest & Record<string, unknown>);
           if ("error" in result) {
-            return Response.json({ error: result.error }, { status: result.status });
+            return Response.json(
+              { error: result.error, ...(result.state !== undefined ? { state: result.state } : {}) },
+              { status: result.status }
+            );
           }
           return Response.json(result);
         }
         case "/approval/withdraw": {
           const result = handleApprovalWithdraw(body as ApprovalWithdrawRequest & Record<string, unknown>);
           if ("error" in result) {
-            return Response.json({ error: result.error }, { status: result.status });
+            return Response.json(
+              { error: result.error, ...(result.state !== undefined ? { state: result.state } : {}) },
+              { status: result.status }
+            );
           }
           return Response.json(result);
         }

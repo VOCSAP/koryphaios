@@ -419,6 +419,84 @@ export function runInboxCall<T>(
   return post<T>(`${b.url}${path}`, { ...body, auth: operatorInboxProof(body, gate) });
 }
 
+export interface MandateCredential {
+  cred: ApprovalCredential;
+  tokenId: string;
+}
+
+export interface InboxOperatorKey {
+  cred: ApprovalCredential;
+  id: string;
+}
+
+const FIXTURE_OPERATOR_KEY: InboxOperatorKey = { cred: FIXTURE_OPERATOR, id: FIXTURE_OPERATOR_ID };
+
+/** A mandate hanging from `run`, minted by the operator key, for one authority. */
+export async function mintMandate(
+  b: TestBroker,
+  run: Pick<RunCredential, "tokenId">,
+  authority: "author" | "lead" | "supervisor",
+  caller: string,
+  options: { operator?: InboxOperatorKey; project?: string; send?: PostFn } = {}
+): Promise<MandateCredential> {
+  const operator = options.operator ?? FIXTURE_OPERATOR_KEY;
+  const cred = generateCredential();
+  const body = {
+    session_public_key: cred.publicKey,
+    session_ref: caller,
+    project_key: options.project ?? INBOX_TEST_PROJECT,
+    inbox: { version: 1, kind: "mandate", parent_token_id: run.tokenId, caller_ref: caller, authority },
+    public_key: operator.cred.publicKey,
+  };
+  const auth = buildInboxProof(operator.cred.privateKey, body, INBOX_GATES.mint, { kind: "operator", operator_id: operator.id });
+  const res = await (options.send ?? post)<{ token_id: string }>(`${b.url}/approval/token-mint`, { ...body, auth });
+  if (res.status !== 200) throw new Error(`mandate mint refused: ${res.status} ${JSON.stringify(res.body)}`);
+  return { cred, tokenId: res.body.token_id };
+}
+
+/**
+ * POST /inbox/close as the main would assemble it: the envelope signed by the
+ * mandate, carrying the instance proof signed by the run root. A null
+ * `instanceToken` sends no instance proof.
+ */
+export function closeInbox<T = { entry?: unknown; error?: string; state?: string }>(
+  b: TestBroker,
+  run: Pick<RunCredential, "cred" | "tokenId">,
+  mandate: MandateCredential,
+  close: { entryId: unknown; reason: unknown; instanceToken: string | null },
+  operatorId: string = FIXTURE_OPERATOR_ID,
+  send: PostFn = post
+) {
+  const core: Record<string, unknown> = { inbox_operation: "close", entry_id: close.entryId, reason: close.reason };
+  const sessionAs = (tokenId: string) => ({ kind: "session" as const, operator_id: operatorId, token_id: tokenId });
+  const body: Record<string, unknown> = { ...core };
+  if (close.instanceToken !== null) {
+    const payload = { ...core, instance_token: close.instanceToken };
+    body.author = {
+      payload,
+      auth: buildInboxProof(run.cred.privateKey, payload, INBOX_GATES.authorClose, sessionAs(run.tokenId)),
+    };
+  }
+  const auth = buildInboxProof(mandate.cred.privateKey, body, INBOX_GATES.mandateClose, sessionAs(mandate.tokenId));
+  return send<T>(`${b.url}/inbox/close`, { ...body, auth });
+}
+
+/** POST /operator-inbox/reply, signed by the operator key for the reply door. */
+export function replyInbox<T = { ok?: boolean; replayed?: boolean; message_id?: number; error?: string; state?: string }>(
+  b: TestBroker,
+  run: Pick<RunCredential, "group" | "secretHash" | "run">,
+  fields: Record<string, unknown>,
+  options: { gate?: InboxGate; runRef?: string } = {}
+) {
+  const body = {
+    group_id: run.group,
+    group_secret_hash: run.secretHash,
+    run_ref: options.runRef ?? run.run,
+    ...fields,
+  };
+  return post<T>(`${b.url}/operator-inbox/reply`, { ...body, auth: operatorInboxProof(body, options.gate ?? INBOX_GATES.reply) });
+}
+
 interface CoreRegistrationReply {
   result?: { isError?: boolean; content?: Array<{ text?: string }> };
   error?: { message?: string };

@@ -15,6 +15,8 @@ import {
   sha256Hex,
   groupId,
   mintRunCredential,
+  mintMandate,
+  closeInbox,
   operatorInboxProof,
   registerAttestedInstance,
   runInboxProof,
@@ -397,6 +399,41 @@ test("the operator inbox and the Deck's announcements never leave their broker",
       drained.body.messages?.map((m) => m.text),
       stored,
     ]).toEqual(["the deposit is in R1's inbox and in no other", 200, [question], [1, 0, 0]]);
+
+    const registryRows = (b: TestBroker): Array<{ entry_id: string }> => {
+      const db = openBrokerDb(b.dbPath, { readonly: true });
+      try {
+        return db.query("SELECT entry_id FROM inbox_message_entries WHERE run_ref = ?").all(run.run) as Array<{ entry_id: string }>;
+      } finally {
+        db.close();
+      }
+    };
+    const entryId = registryRows(R1)[0]!.entry_id;
+    const lead = await mintMandate(R1, run, "lead", "lead-federation", { send: post });
+    const closeReason = "federation canary reason";
+    const closed = await closeInbox(
+      R1,
+      run,
+      lead,
+      { entryId, reason: closeReason, instanceToken: depositor.body.instance_token },
+      undefined,
+      post
+    );
+    await settleBothReplicas();
+    expect(["the close landed", closed.status]).toEqual(["the close landed", 200]);
+    // Mutant: the registry or its handles ride a federation body.
+    expect([
+      "the registry row exists on R1 only",
+      [R1, U, R2].map((b) => registryRows(b).length),
+    ]).toEqual(["the registry row exists on R1 only", [1, 0, 0]]);
+    const wire = [...P1.exchanges, ...P2.exchanges].map((x) => `${x.request}\n${x.response}`).join("\n");
+    for (const [what, secret] of [
+      ["entry_id", entryId],
+      ["reply_token", depositor.body.instance_token],
+      ["close_reason", closeReason],
+    ] as const) {
+      expect([`no federation body carries the ${what}`, wire.includes(secret)]).toEqual([`no federation body carries the ${what}`, false]);
+    }
   } finally {
     await post(`${R1.url}/unregister`, { instance_token: depositor.body.instance_token });
   }

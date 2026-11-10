@@ -17,7 +17,7 @@ import {
   webContents
 } from 'electron'
 import { publicKeyFingerprint } from '../../../shared/operator-trust'
-import type { AppConfig, InboxOpenTarget, OperatorTrustStatusEvent } from '@shared/types'
+import type { AppConfig, InboxOpenTarget, InboxReplyOutcome, OperatorTrustStatusEvent } from '@shared/types'
 import { sanitizeGlowColor } from '@shared/palette'
 import { sanitizeLinkPatch } from '@shared/link-policy'
 import { loadConfig, saveConfig } from './store'
@@ -88,6 +88,7 @@ import {
   fetchGraphDrafts,
   fetchOperatorInbox,
   purgeOperatorInbox,
+  replyOperatorInbox,
   contextTransactionFields,
   readContextTransactionResponse,
   requireContextResumeSupport,
@@ -126,8 +127,10 @@ import {
   createInboxSessionTracker,
   createRunInboxSigner,
   createRunReadErrorSink,
+  INBOX_DOOR_GATE,
   purgeInboxDomains,
-  readOperatorInboxBoth
+  readOperatorInboxBoth,
+  replyToInboxEntryCore
 } from './inbox-session'
 import {
   appendRoadmapContext,
@@ -272,7 +275,6 @@ import {
   type ApprovalDeps,
   type SpawnGrantStore
 } from './approval-service'
-import { INBOX_GATES } from './approval-auth'
 import { createPendingApprovalsTick } from './hook-attention'
 import { pendingQuestionTarget } from './pending-question-target'
 import { matchPermissionDialog, permissionDialogShown } from './permission-dialog'
@@ -740,7 +742,7 @@ const runInboxSigner: () => RunInboxSigner | undefined = createRunInboxSigner({
   inboxRun: () => approvals.inboxRun(),
   operator: () => approvals.operator,
   activeGroupId: () => activeScope.groupId,
-  sign: (identity, body, door) => signOperatorBody(identity, body, door === 'drain' ? INBOX_GATES.drain : INBOX_GATES.purge)
+  sign: (identity, body, door) => signOperatorBody(identity, body, INBOX_DOOR_GATE[door])
 })
 const permissionLeases = new PermissionLeaseRuntime({
   stateDir: join(app.getPath('userData'), APP_STATE_SUBDIR),
@@ -3772,23 +3774,28 @@ app.whenReady().then(async () => {
       const res = await claimApproval(deps, { id, handback: true })
       return res !== null
     },
-    // Unified Courrier's reply-to-a-peer-message action: same sendAnnounce
-    // primitive as the existing team-lead/supervisor/assignment announces
-    // above, just addressed by the caller's own toPeerId instead of a role
-    // this process already knows.
-    announceTo: async (toPeerId: string, text: string): Promise<number> => {
-      try {
-        const { sent } = await sendAnnounce(
-          { groupId: activeScope.groupId, secret: activeScope.secret, text, toPeerId },
-          { endpoint: resolveBrokerEndpoint() }
-        )
-        if (sent > 0) journal.add('announce', `announce to ${toPeerId}: ${text.slice(0, 120)}`)
-        return sent
-      } catch (e) {
-        reportError('announce', 'targeted announce failed', e)
-        return 0
-      }
-    },
+    inboxReply: (entry: { id: number; sentAt: string }, text: string): Promise<InboxReplyOutcome> =>
+      replyToInboxEntryCore(
+        {
+          run: runInboxSigner,
+          send: (run, target, replyId, body) =>
+            replyOperatorInbox(
+              {
+                groupId: activeScope.groupId,
+                secret: activeScope.secret,
+                run,
+                messageId: target.id,
+                sentAt: target.sentAt,
+                replyId,
+                text: body
+              },
+              { endpoint: resolveBrokerEndpoint() }
+            ),
+          onError: (message, e) => reportError('inbox', message, e)
+        },
+        entry,
+        text
+      ),
     sandbox,
     sandboxGate,
     sandboxWarmTranscripts: warmSandboxTranscripts,

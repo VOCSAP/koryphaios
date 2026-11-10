@@ -142,6 +142,9 @@ export function renderSettled(approval: Approval, viaLabel: string): string {
     case "gone":
       // Nobody answered: no check mark, and the label is the reason, not a channel.
       return `✕ ${truncate(approval.title, 120)}: closed, ${viaLabel}`;
+    case "closed":
+      // The close reason is agent text: it never reaches a phone channel.
+      return `✕ ${truncate(approval.title, 120)}: closed without an answer`;
   }
   return `✓ ${truncate(approval.title, 120)} — handled via ${viaLabel}: ${verdict}`;
 }

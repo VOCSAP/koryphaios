@@ -196,6 +196,7 @@ export const INBOX_GATES = {
   mandateClose: "inbox-mandate:close",
   drain: "POST /operator-inbox",
   purge: "POST /operator-inbox/purge",
+  reply: "POST /operator-inbox/reply",
 } as const;
 
 export type InboxGate = (typeof INBOX_GATES)[keyof typeof INBOX_GATES];
@@ -361,6 +362,7 @@ export const APPROVAL_OPERATIONS = [
   // signed with the operator key: no token purpose opens either.
   "inbox-drain",
   "inbox-purge",
+  "inbox-reply",
   ...INBOX_OPERATIONS,
 ] as const;
 
@@ -477,6 +479,22 @@ function cleanQuestionText(s: string, keepNewlines: boolean): string {
     s.replace(INVISIBLE_CHARS, (c) => (KEPT_FOR_STRIP_CONTROL.has(c) ? c : "")),
     { keepNewlines }
   ).trim();
+}
+
+export const CLOSE_REASON_MAX = 500;
+
+/**
+ * The reason of a close is agent text (hostile input #4) that reaches a page,
+ * another agent's context and the journal: control bytes and line breaks are
+ * stripped, and a length outside 1..CLOSE_REASON_MAX is refused, never cut.
+ */
+export function validateCloseReason(raw: unknown): ValidationResult<string> {
+  if (typeof raw !== "string") return { ok: false, error: "reason must be a string" };
+  const value = cleanQuestionText(raw, false);
+  const length = Array.from(value).length;
+  if (length < 1) return { ok: false, error: "reason must not be empty" };
+  if (length > CLOSE_REASON_MAX) return { ok: false, error: `reason must be at most ${CLOSE_REASON_MAX} characters` };
+  return { ok: true, value };
 }
 
 /**

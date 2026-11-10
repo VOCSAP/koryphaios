@@ -434,8 +434,8 @@ describe("token purpose x operation (stored purpose decides, refusal by default)
 });
 
 describe("run-scoped inbox reads belong to the operator key alone", () => {
-  test("no token purpose opens inbox-drain or inbox-purge, a session cannot attempt them, the operator can", () => {
-    for (const op of ["inbox-drain", "inbox-purge"] as const) {
+  test("no token purpose opens inbox-drain, inbox-purge or inbox-reply, a session cannot attempt them, the operator can", () => {
+    for (const op of ["inbox-drain", "inbox-purge", "inbox-reply"] as const) {
       for (const purpose of ["legacy", "run", "mandate"] as const) {
         expect({ op, purpose, ok: isPurposeOperationAllowed(purpose, op) }).toEqual({ op, purpose, ok: false });
       }

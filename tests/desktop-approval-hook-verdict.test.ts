@@ -15,6 +15,7 @@ const BY_STATUS = {
   abandoned: () => "none",
   acknowledged: () => "none",
   answered_terminal: () => "none",
+  closed: () => "none",
 } satisfies Record<ApprovalStatus, (answerKind: unknown) => Kind>;
 
 /** The union's members as written in shared/types.ts, so a status added there fails at run time too. */

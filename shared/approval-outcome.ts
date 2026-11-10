@@ -3,7 +3,9 @@
 // One switch for all three, so an acknowledgement can never fall into the
 // refusal branch of a reader that only knew allow/deny/text.
 
-import type { Approval } from "./types.ts";
+import type { Approval, InboxCloseAuthority } from "./types.ts";
+
+type CloseFields = Pick<Approval, "close_reason" | "closed_by_authority" | "closed_by_peer_id">;
 
 export type SettledOutcome =
   | { kind: "pending" }
@@ -12,18 +14,26 @@ export type SettledOutcome =
   | { kind: "rejected" }
   | { kind: "acknowledged" }
   | { kind: "terminal" }
-  | { kind: "gone" };
+  | { kind: "gone" }
+  | { kind: "closed"; reason: string; by: InboxCloseAuthority; peer: string | null };
 
 function unreachable(value: never): never {
   throw new Error(`unhandled approval value: ${String(value)}`);
 }
 
 export function settledOutcome(
-  approval: Pick<Approval, "status" | "answer_kind" | "answer_text">
+  approval: Pick<Approval, "status" | "answer_kind" | "answer_text"> & CloseFields
 ): SettledOutcome {
   switch (approval.status) {
     case "pending":
       return { kind: "pending" };
+    case "closed":
+      return {
+        kind: "closed",
+        reason: approval.close_reason ?? "",
+        by: approval.closed_by_authority ?? "author",
+        peer: approval.closed_by_peer_id ?? null,
+      };
     case "acknowledged":
       return { kind: "acknowledged" };
     case "answered_terminal":
@@ -57,7 +67,7 @@ export const TERMINAL_WAIT_TEXT =
 
 /** The ask_operator / ask_operator_wait reply, or null while still pending. */
 export function askOperatorWaitReply(
-  approval: Pick<Approval, "status" | "answer_kind" | "answer_text" | "answered_via">
+  approval: Pick<Approval, "status" | "answer_kind" | "answer_text" | "answered_via"> & CloseFields
 ): { text: string; isError: boolean } | null {
   const outcome = settledOutcome(approval);
   switch (outcome.kind) {
@@ -73,6 +83,11 @@ export function askOperatorWaitReply(
       return { text: ACKNOWLEDGED_WAIT_TEXT, isError: false };
     case "terminal":
       return { text: TERMINAL_WAIT_TEXT, isError: false };
+    case "closed":
+      return {
+        text: `The question was closed by ${outcome.peer ?? `the ${outcome.by}`} (${outcome.by}) without an answer. Reason given: ${JSON.stringify(outcome.reason)}. This is not a refusal: ask again if it still matters.`,
+        isError: false,
+      };
     case "gone":
       return {
         text: "That question is no longer awaiting an answer (it expired or was withdrawn). Ask the operator on screen.",

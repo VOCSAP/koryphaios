@@ -7,6 +7,9 @@ import { test, expect, describe } from "bun:test";
 import {
   createApprovalAuth,
   approvalWhere,
+  approvalActorWhere,
+  messageEntryActorWhere,
+  inboxActorClosure,
   authorizeInboxEntry,
   stampInsert,
   assertStampSessionRef,
@@ -613,13 +616,14 @@ function inboxWorld() {
     authorGate?: InboxGate;
     mandateGate?: InboxGate;
     authorPayloadOver?: Record<string, unknown>;
+    coreOver?: Record<string, unknown>;
   }
   /** A mandate envelope, optionally carrying the author's own proof, as the main would assemble it. */
   function envelope(o: EnvelopeOptions = {}): Record<string, unknown> {
     const kind = o.mandate ?? "lead";
     const operation = o.operation ?? "close";
     const isList = operation === "list";
-    const core: Record<string, unknown> = { inbox_operation: operation, entry_id: o.entryId ?? "e1", reason: o.reason ?? "done" };
+    const core: Record<string, unknown> = { inbox_operation: operation, entry_id: o.entryId ?? "e1", reason: o.reason ?? "done", ...o.coreOver };
     const instance = o.instance === undefined ? null : o.instance;
     if (instance !== null) {
       const authorPayload = { ...core, instance_token: instance, ...o.authorPayloadOver };
@@ -920,24 +924,29 @@ describe("a mandate is only as live as its run parent", () => {
 });
 
 describe("verifyInboxAction: object first, then actor", () => {
-  test("a lead and a supervisor mandate yield an actor without any author proof", () => {
+  // Mutant: the `inbox-close` guard on a missing author proof removed in verifyInboxAction.
+  test("a close needs the author proof whatever the mandate, a list does not", () => {
     const w = inboxWorld();
-    for (const mandate of ["lead", "supervisor"] as const) {
-      expect({ mandate, refused: isAuthError(w.verify({ mandate })) }).toEqual({ mandate, refused: false });
+    for (const mandate of ["lead", "supervisor", "author"] as const) {
+      expect({ mandate, got: w.verify({ mandate }) }).toEqual({
+        mandate,
+        got: { error: "an author proof is required to close", status: 400 },
+      });
+      expect({ mandate, refused: isAuthError(w.verify({ mandate, instance: INSTANCE_A })) }).toEqual({ mandate, refused: false });
     }
+    expect(isAuthError(w.verify({ mandate: "lead", operation: "list" }, "inbox-list"))).toBe(false);
   });
 
   test("the scope and the authority come from the stored mandate, never from the body", () => {
     const w = inboxWorld();
-    const lead = w.actor({ mandate: "lead" });
+    const lead = w.actor({ mandate: "lead", instance: INSTANCE_A });
     expect(authorizeInboxEntry(lead, w.entry({ author_instance_ref: null }))).toBe(true);
     // A body that declares a bigger role or another run changes nothing: it is signed over, and ignored.
-    const forged = w.sign(
-      { inbox_operation: "close", entry_id: "e1", reason: "x", authority: "supervisor", run_ref: "other", group_id: "group-b" },
-      w.creds.author,
-      "m-author",
-      INBOX_GATES.mandateClose
-    );
+    const forged = w.envelope({
+      mandate: "author",
+      instance: INSTANCE_B,
+      coreOver: { authority: "supervisor", run_ref: "other", group_id: "group-b" },
+    });
     const got = w.auth.verifyInboxAction(forged as never, "inbox-close");
     expect(isAuthError(got)).toBe(false);
     if (isAuthError(got)) return;
@@ -946,7 +955,7 @@ describe("verifyInboxAction: object first, then actor", () => {
 
   test("an elevated mandate acts on its own run only, along every scope dimension", () => {
     const w = inboxWorld();
-    const lead = w.actor({ mandate: "lead" });
+    const lead = w.actor({ mandate: "lead", instance: INSTANCE_A });
     expect(authorizeInboxEntry(lead, w.entry())).toBe(true);
     for (const over of [
       { operator_id: "someone-else" },
@@ -960,11 +969,9 @@ describe("verifyInboxAction: object first, then actor", () => {
     }
   });
 
-  test("an author mandate without its own proof acts on nothing", () => {
+  test("an author mandate without its own proof yields no actor", () => {
     const w = inboxWorld();
-    const author = w.actor({ mandate: "author" });
-    expect(authorizeInboxEntry(author, w.entry())).toBe(false);
-    expect(authorizeInboxEntry(author, w.entry({ author_instance_ref: null }))).toBe(false);
+    expect(() => w.actor({ mandate: "author" })).toThrow("an author proof is required to close");
   });
 
   test("an author acts on the entries of the instance it proved and on no other", () => {
@@ -983,7 +990,7 @@ describe("verifyInboxAction: object first, then actor", () => {
 
   test("a copied or hand-built actor is refused", () => {
     const w = inboxWorld();
-    const real = w.actor({ mandate: "lead" });
+    const real = w.actor({ mandate: "lead", instance: INSTANCE_A });
     expect(authorizeInboxEntry({ ...real } as InboxActor, w.entry())).toBe(false);
     expect(authorizeInboxEntry(Object.assign({}, real), w.entry())).toBe(false);
     expect(authorizeInboxEntry({} as InboxActor, w.entry())).toBe(false);
@@ -1080,7 +1087,7 @@ describe("verifyInboxAction: the author proof inside the envelope", () => {
     const w = inboxWorld();
     const asRoot = w.sign({ inbox_operation: "close", entry_id: "e1" }, w.rootCred, "root", INBOX_GATES.mandateClose);
     expect(w.auth.verifyInboxAction(asRoot as never, "inbox-close")).toEqual({ error: "credential may not inbox-close", status: 403 });
-    const env = w.envelope({ mandate: "lead" });
+    const env = w.envelope({ mandate: "lead", instance: INSTANCE_A });
     expect(isAuthError(w.auth.verifyInboxAction(env as never, "inbox-close"))).toBe(false);
     expect(w.auth.verifyInboxAction(env as never, "inbox-close")).toEqual({ error: "replayed-proof", status: 401 });
   });
@@ -1099,5 +1106,90 @@ describe("verifyInboxAction: the author proof inside the envelope", () => {
     const w = inboxWorld();
     w.tokens["root"]!.revoked_at = new Date().toISOString();
     expect(w.verify({ mandate: "lead" })).toEqual({ error: "mandate parent revoked", status: 401 });
+  });
+});
+
+describe("the actor scope composers", () => {
+  // Mutants: a scope column removed from a composer, or a "1=1" clause returned for an unknown actor.
+  test("both composers carry the four scope columns, bound to the verified actor", () => {
+    const w = inboxWorld();
+    const actor = w.actor({ mandate: "lead", instance: INSTANCE_A });
+    const bound = [w.op.id, INBOX_PROJECT, INBOX_RUN, INBOX_GROUP];
+    expect(approvalActorWhere(actor)).toEqual({
+      sql: "operator_id = ? AND project_key = ? AND inbox_run_ref = ? AND inbox_group_id = ?",
+      params: bound,
+    });
+    expect(messageEntryActorWhere(actor)).toEqual({
+      sql: "operator_id = ? AND project_key = ? AND run_ref = ? AND group_id = ?",
+      params: bound,
+    });
+  });
+
+  test("a copied or hand-built actor makes every composer throw", () => {
+    const w = inboxWorld();
+    const real = w.actor({ mandate: "lead", instance: INSTANCE_A });
+    for (const fake of [{ ...real }, Object.assign({}, real), {}] as InboxActor[]) {
+      expect(() => approvalActorWhere(fake)).toThrow("not an actor minted by this module");
+      expect(() => messageEntryActorWhere(fake)).toThrow("not an actor minted by this module");
+      expect(() => inboxActorClosure(fake)).toThrow("not an actor minted by this module");
+    }
+  });
+
+  test("the closure facts are the stored authority and the digest of the proved instance", () => {
+    const w = inboxWorld();
+    expect(inboxActorClosure(w.actor({ mandate: "supervisor", instance: INSTANCE_B }))).toEqual({
+      authority: "supervisor",
+      authorInstanceRef: deriveInstanceRef(INSTANCE_B),
+    });
+  });
+});
+
+describe("the reply door is operator-key only and carries only its own operation", () => {
+  const replySigned = (w: ReturnType<typeof inboxWorld>, gate: InboxGate) => {
+    const payload = { group_id: INBOX_GROUP, run_ref: INBOX_RUN, message_id: 1, sent_at: "t", reply_id: "r", text: "x" };
+    return {
+      ...payload,
+      auth: buildInboxProof(w.op.cred.privateKey, payload, gate, { kind: "operator", operator_id: w.op.id }),
+    };
+  };
+
+  // Mutant: GATE_OPERATIONS[reply] mapped to "inbox-drain".
+  test("an operator proof for the reply gate opens inbox-reply and nothing else", () => {
+    const w = inboxWorld();
+    expect(isAuthError(w.auth.authenticateInbox(replySigned(w, INBOX_GATES.reply) as never, "inbox-reply", INBOX_GATES.reply))).toBe(false);
+    expect(w.auth.authenticateInbox(replySigned(w, INBOX_GATES.reply) as never, "inbox-drain", INBOX_GATES.reply)).toEqual({
+      error: "inbox-drain is not carried by this gate",
+      status: 403,
+    });
+  });
+
+  test("a proof signed for the drain gate is refused at the reply gate", () => {
+    const w = inboxWorld();
+    expect(w.auth.authenticateInbox(replySigned(w, INBOX_GATES.drain) as never, "inbox-reply", INBOX_GATES.reply)).toEqual({
+      error: "bad-signature",
+      status: 401,
+    });
+  });
+
+  // Mutant: "inbox-reply" removed from V1_ONLY_OPERATIONS.
+  test("a legacy proof cannot carry the operation", () => {
+    const w = inboxWorld();
+    expect(w.auth.authenticateOperator(signed({ x: 1 }, w.op) as never, "inbox-reply")).toEqual({
+      error: "inbox-reply requires a v1 proof",
+      status: 403,
+    });
+  });
+
+  // Mutant: "inbox-reply" added to INBOX_OPERATIONS or to PURPOSE_ALLOWED.run.
+  test("a run credential and a mandate cannot reply", () => {
+    const w = inboxWorld();
+    expect(w.auth.authenticateInbox(w.sign({ x: 1 }, w.rootCred, "root", INBOX_GATES.reply) as never, "inbox-reply", INBOX_GATES.reply)).toEqual({
+      error: "credential may not inbox-reply",
+      status: 403,
+    });
+    expect(w.auth.authenticateInbox(w.sign({ x: 1 }, w.creds.lead, "m-lead", INBOX_GATES.reply) as never, "inbox-reply", INBOX_GATES.reply)).toEqual({
+      error: "credential may not inbox-reply",
+      status: 403,
+    });
   });
 });

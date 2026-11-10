@@ -90,6 +90,10 @@ test("the Inbox provenance migration extends an older database twice over and ke
          FROM pending_approvals WHERE id = 'old-approval'`
     )
     .get();
+  const oldCloseColumns = db
+    .query(`SELECT close_reason, closed_by_authority, closed_by_instance_ref, closed_by_peer_id_snapshot FROM pending_approvals WHERE id = 'old-approval'`)
+    .get();
+  const registryRows = (db.query("SELECT COUNT(*) AS n FROM inbox_message_entries").get() as { n: number }).n;
   const oldToken = db
     .query(
       `SELECT inbox_purpose, inbox_version, run_ref, group_id, parent_token_id, caller_ref, authority
@@ -99,7 +103,10 @@ test("the Inbox provenance migration extends an older database twice over and ke
   db.close();
 
   // Each SELECT above names every added column, so a missing one throws before this line.
-  expect(tables).toEqual(expect.arrayContaining(["inbox_instance_bindings", "operator_inbox_run_sessions"]));
+  expect(tables).toEqual(expect.arrayContaining(["inbox_instance_bindings", "operator_inbox_run_sessions", "inbox_message_entries"]));
+  // Mutant: a backfill that promotes a historical message into the registry.
+  expect(registryRows, "the registry starts empty: no historical message becomes an entry").toBe(0);
+  expect(oldCloseColumns).toEqual({ close_reason: null, closed_by_authority: null, closed_by_instance_ref: null, closed_by_peer_id_snapshot: null });
   const nulls = (keys: string[]) => Object.fromEntries(keys.map((k) => [k, null]));
   expect(oldMessage, "a historical message is never promoted").toEqual(
     nulls(["inbox_operator_id", "inbox_run_ref", "inbox_group_id", "inbox_project_key", "author_instance_ref", "author_peer_id_snapshot", "source_kind", "provenance_version"])

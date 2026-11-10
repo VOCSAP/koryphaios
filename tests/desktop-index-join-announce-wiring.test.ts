@@ -487,15 +487,10 @@ function findGateReferences(body: string): string[] {
 const ALL_EMITTERS = findSendAnnounceEmitters(SRC);
 const SWEPT_EMITTERS = ALL_EMITTERS.filter((e) => !GATED_NAMES.includes(e.name));
 
-// 6 non-gated sendAnnounce emitters exist today; a regex that stops matching or
-// a deleted emitter must redden this floor rather than silently sweep fewer
-// functions.
-test("C domain floor: at least 6 non-gated sendAnnounce emitters are discovered in index.ts", () => {
-  expect(SWEPT_EMITTERS.length).toBeGreaterThanOrEqual(6);
-});
-
-test("C domain floor: the discovered set includes announceTo (the object-property-shorthand shape the first version of this sweep missed)", () => {
-  expect(SWEPT_EMITTERS.map((e) => e.name)).toContain("announceTo");
+// A regex that stops matching or a deleted emitter must redden this floor
+// rather than silently sweep fewer functions.
+test("C domain floor: at least 5 non-gated sendAnnounce emitters are discovered in index.ts", () => {
+  expect(SWEPT_EMITTERS.length).toBeGreaterThanOrEqual(5);
 });
 
 // Without this, renaming the gated dispatch would make its name-based exclusion

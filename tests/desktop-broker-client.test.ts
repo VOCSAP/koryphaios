@@ -11,6 +11,7 @@ import {
   sendAnnounce,
   fetchOperatorInbox,
   purgeOperatorInbox,
+  replyOperatorInbox,
   fetchDispatchRequests,
   resolveDispatchRequest
 } from "../desktop/src/main/broker-client.ts";
@@ -305,6 +306,65 @@ test("purgeOperatorInbox throws on a non-2xx response", async () => {
       { endpoint: { url: "http://x", token: null }, fetchFn }
     )
   ).rejects.toThrow("operator-inbox/purge failed: 403");
+});
+
+// --- replyOperatorInbox ------------------------------------------------------
+
+function replyWorld(status: number, json: unknown) {
+  const seen: { url: string; body: Record<string, unknown> } = { url: "", body: {} };
+  const signed: Array<{ body: Record<string, unknown>; door: string }> = [];
+  const fetchFn = (async (u: string | URL | Request, init?: RequestInit) => {
+    seen.url = String(u);
+    seen.body = JSON.parse(init!.body as string);
+    return new Response(JSON.stringify(json), { status });
+  }) as unknown as typeof fetch;
+  const run = {
+    runRef: "3f1c2a4e-9b7d-4c1e-8a2b-5d6e7f809a1b",
+    sign: (body: Record<string, unknown>, door: "drain" | "purge" | "reply") => {
+      signed.push({ body: { ...body }, door });
+      return { kind: "operator", door };
+    }
+  };
+  const call = () =>
+    replyOperatorInbox(
+      { groupId: "g1", secret: "s1", run, messageId: 7, sentAt: "2026-10-09T11:00:00.000Z", replyId: "rid-1", text: "on it" },
+      { endpoint: { url: "http://broker:7899", token: null }, fetchFn }
+    );
+  return { seen, signed, call };
+}
+
+// Mutants: message_id, sent_at or reply_id left out of the signed body; the door signed as another one.
+test("replyOperatorInbox signs the reply door over run_ref, message_id, sent_at and reply_id", async () => {
+  const w = replyWorld(200, { ok: true, message_id: 31 });
+  expect(await w.call()).toEqual({ kind: "sent", messageId: 31 });
+  expect(w.seen.url).toBe("http://broker:7899/operator-inbox/reply");
+  expect(w.signed.map((s) => s.door)).toEqual(["reply"]);
+  const { auth, ...sent } = w.seen.body;
+  expect(w.signed[0]!.body, "the signer saw exactly what was sent").toEqual(sent);
+  expect(auth).toEqual({ kind: "operator", door: "reply" });
+  expect(sent).toMatchObject({
+    run_ref: "3f1c2a4e-9b7d-4c1e-8a2b-5d6e7f809a1b",
+    message_id: 7,
+    sent_at: "2026-10-09T11:00:00.000Z",
+    reply_id: "rid-1",
+    text: "on it"
+  });
+});
+
+// Mutant: a 409 read as sent, or the answer read from the message text.
+test("replyOperatorInbox reads the HTTP status, and the state of a conflict from the body", async () => {
+  expect(await replyWorld(409, { error: "entry-settled", state: "responded" }).call()).toEqual({ kind: "settled", state: "responded" });
+  expect(await replyWorld(409, { error: "entry-settled", state: "closed" }).call()).toEqual({ kind: "settled", state: "closed" });
+  expect(await replyWorld(410, { error: "sent" }).call()).toEqual({ kind: "author-gone" });
+  expect(await replyWorld(404, { error: "sent" }).call()).toEqual({ kind: "unknown-entry" });
+});
+
+test("replyOperatorInbox throws a status-carrying error on any other status", async () => {
+  const error = await replyWorld(500, {}).call().then(
+    () => null,
+    (e: unknown) => e
+  );
+  expect((error as { status?: number }).status).toBe(500);
 });
 
 // ----- Dispatch requests (card bf76d37f) -----

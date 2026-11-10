@@ -424,15 +424,17 @@ export function buildAnnouncePayload(params: SendAnnounceParams): {
  * entries of `runRef`, and only for a proof of the operator key over the whole
  * body, so `sign` must be the operator's v1 signer for that door.
  */
+export type InboxDoor = 'drain' | 'purge' | 'reply'
+
 export interface RunInboxSigner {
   runRef: string
-  sign(body: Record<string, unknown>, door: 'drain' | 'purge'): unknown
+  sign(body: Record<string, unknown>, door: InboxDoor): unknown
 }
 
 function signRunInboxBody(
   base: Record<string, unknown>,
   run: RunInboxSigner,
-  door: 'drain' | 'purge'
+  door: InboxDoor
 ): Record<string, unknown> {
   const body = { ...base, run_ref: run.runRef }
   return { ...body, auth: run.sign(body, door) }
@@ -509,6 +511,67 @@ export async function purgeOperatorInbox(
   })
   if (!res.ok) throw new Error(`operator-inbox/purge failed: ${res.status}`)
   return ((await res.json()) as { deleted: number }).deleted
+}
+
+/** Outcome of a reply, read from the HTTP status and never from a message text. */
+export type OperatorInboxReplyResult =
+  | { kind: 'sent'; messageId: number | null }
+  | { kind: 'settled'; state: string }
+  | { kind: 'author-gone' }
+  | { kind: 'unknown-entry' }
+
+/** A status the reply door does not define; a transport failure never carries one. */
+export class OperatorInboxReplyHttpError extends Error {
+  constructor(readonly status: number) {
+    super(`operator-inbox/reply failed: ${status}`)
+  }
+}
+
+/**
+ * POST /operator-inbox/reply: answers ONE deposit of the run, keyed by
+ * (messageId, sentAt). The same `replyId` sent again is a replay on the
+ * broker, never a second message. Throws on a transport failure and on a status
+ * the door does not define.
+ */
+export async function replyOperatorInbox(
+  params: {
+    groupId: string
+    secret: string
+    run: RunInboxSigner
+    messageId: number
+    sentAt: string
+    replyId: string
+    text: string
+  },
+  deps: AnnounceDeps
+): Promise<OperatorInboxReplyResult> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+  if (deps.endpoint.token) headers['Authorization'] = `Bearer ${deps.endpoint.token}`
+  const f = deps.fetchFn ?? fetch
+  const base = {
+    group_id: params.groupId,
+    group_secret_hash: computeGroupSecretHash(params.secret),
+    message_id: params.messageId,
+    sent_at: params.sentAt,
+    reply_id: params.replyId,
+    text: params.text
+  }
+  const res = await f(`${deps.endpoint.url}/operator-inbox/reply`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(signRunInboxBody(base, params.run, 'reply'))
+  })
+  if (res.status === 200) {
+    const parsed = (await res.json()) as { message_id?: unknown }
+    return { kind: 'sent', messageId: typeof parsed.message_id === 'number' ? parsed.message_id : null }
+  }
+  if (res.status === 409) {
+    const parsed = (await res.json()) as { state?: unknown }
+    return { kind: 'settled', state: typeof parsed.state === 'string' ? parsed.state : 'unknown' }
+  }
+  if (res.status === 410) return { kind: 'author-gone' }
+  if (res.status === 404) return { kind: 'unknown-entry' }
+  throw new OperatorInboxReplyHttpError(res.status)
 }
 
 /** One pending graph draft parked on the broker (agent-escalated question). */

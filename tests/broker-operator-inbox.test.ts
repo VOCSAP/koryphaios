@@ -17,7 +17,7 @@ import {
   type TestBroker,
   openBrokerDb,
 } from "./_helper.ts";
-import { buildAuthProof, deriveInstanceRef, INBOX_GATES, type ApprovalCredential } from "../shared/approval.ts";
+import { buildAuthProof, buildInboxProof, deriveInstanceRef, INBOX_GATES, type ApprovalCredential } from "../shared/approval.ts";
 import {
   depositToOperator,
   mintRunCredential,
@@ -25,6 +25,9 @@ import {
   registerAttestedInstance,
   runInboxCall,
   runInboxProof,
+  mintMandate,
+  closeInbox,
+  replyInbox,
   INBOX_TEST_PROJECT,
   type RunCredential,
 } from "./_helper.ts";
@@ -1438,4 +1441,403 @@ test("the display hint tells two instances with the same snapshot apart and neve
   for (const secret of [a, b].flatMap((p) => [p.body.instance_token, deriveInstanceRef(p.body.instance_token)])) {
     expect(wire).not.toContain(secret);
   }
+});
+
+// --- Durable registry, correlated reply and close of message entries ---
+
+interface EntryRow {
+  entry_id: string;
+  operator_id: string;
+  run_ref: string;
+  group_id: string;
+  project_key: string;
+  message_id: number;
+  sent_at: string;
+  author_instance_ref: string;
+  author_peer_id_snapshot: string;
+  reply_token: string;
+  excerpt: string;
+  state: string;
+  settled_at: string | null;
+  responded_reply_id: string | null;
+  responded_message_id: number | null;
+  closed_by_authority: string | null;
+  closed_by_instance_ref: string | null;
+  closed_by_peer_id_snapshot: string | null;
+  close_reason: string | null;
+}
+
+const entriesOf = (run: RunCredential): EntryRow[] =>
+  operatorRows<EntryRow>("SELECT * FROM inbox_message_entries WHERE run_ref = ? ORDER BY message_id", run.run);
+
+const deckMessagesTo = (token: string): string[] =>
+  operatorRows<{ text: string }>(
+    "SELECT text FROM messages WHERE from_token = ? AND to_token = ? ORDER BY id",
+    DECK_INSTANCE_TOKEN,
+    token
+  ).map((r) => r.text);
+
+/** A run, a registered author instance and one deposit: everything a reply or a close acts on. */
+async function depositedEntry(label: string, text = "please look at this") {
+  const { g, runs } = await newRuns(label);
+  const run = runs[0]!;
+  const author = await registerAttestedInstance(broker, run, `h-${label}`, `/${label}`);
+  await depositToOperator(broker, author.body.instance_token, text, run);
+  const entry = entriesOf(run)[0]!;
+  return { g, run, author, token: author.body.instance_token, peerId: author.body.peer_id, entry };
+}
+
+const replyTo = (run: RunCredential, entry: EntryRow, replyId = crypto.randomUUID(), text = "go ahead", over: Record<string, unknown> = {}) =>
+  replyInbox(broker, run, { message_id: entry.message_id, sent_at: entry.sent_at, reply_id: replyId, text, ...over });
+
+// Mutant: the registry INSERT removed from recordMessage, or fed values from the request body.
+test("an attested deposit creates exactly one open registry row, stamped from the credential and the message row", async () => {
+  const { run, token, peerId, entry } = await depositedEntry("reg-stamp", "x".repeat(300));
+
+  expect(entriesOf(run)).toHaveLength(1);
+  const message = operatorRows<{ id: number; sent_at: string }>(
+    "SELECT id, sent_at FROM messages WHERE to_token = ? AND group_id = ?",
+    OPERATOR_INSTANCE_TOKEN,
+    run.group
+  )[0]!;
+  expect(entry).toMatchObject({
+    operator_id: FIXTURE_OPERATOR_ID,
+    run_ref: run.run,
+    group_id: run.group,
+    project_key: INBOX_TEST_PROJECT,
+    message_id: message.id,
+    sent_at: message.sent_at,
+    author_instance_ref: deriveInstanceRef(token),
+    author_peer_id_snapshot: peerId,
+    reply_token: token,
+    state: "open",
+    settled_at: null,
+  });
+  expect(entry.entry_id).toMatch(/^m_[0-9a-f-]{36}$/);
+  expect(Array.from(entry.excerpt), "the excerpt is bounded in code points").toHaveLength(280);
+  expect((await depositToOperator(broker, token, "a legacy-shaped claim", run, { inbox_run_ref: "forged", entry_id: "forged" })).body.ok).toBe(true);
+  expect(entriesOf(run).map((e) => e.run_ref)).toEqual([run.run, run.run]);
+});
+
+// Mutant: the registry insert moved outside the message transaction.
+test("a failing registry insert leaves no message either", async () => {
+  const { runs } = await newRuns("reg-atomic");
+  const run = runs[0]!;
+  const a = await registerAttestedInstance(broker, run, "hAtomic", "/atomic");
+  const db = openBrokerDb(broker.dbPath);
+  try {
+    db.run(
+      `CREATE TRIGGER reg_atomic_abort BEFORE INSERT ON inbox_message_entries WHEN NEW.run_ref = '${run.run}'
+       BEGIN SELECT RAISE(ABORT, 'registry refused'); END`
+    );
+    const refused = await depositToOperator(broker, a.body.instance_token, "must not land", run);
+    expect(refused.body.ok).not.toBe(true);
+    expect({ messages: rowsFor(run.group), entries: entriesOf(run).length }).toEqual({ messages: 0, entries: 0 });
+  } finally {
+    db.run("DROP TRIGGER IF EXISTS reg_atomic_abort");
+    db.close();
+  }
+  expect((await depositToOperator(broker, a.body.instance_token, "lands now", run)).body.ok).toBe(true);
+  expect(entriesOf(run)).toHaveLength(1);
+});
+
+// Mutants: a DELETE or cascade on the registry in handleUnregister, in the Courrier purge or in the TTL sweep.
+test("the registry survives the author's unregister, a Courrier purge by id and by session, and the message TTL", async () => {
+  const { g, run, token, entry } = await depositedEntry("reg-survive");
+  await drainRun(run, "survive-session");
+  await purgeRun(run, "survive-session", "ids", [entry.message_id]);
+  await purgeRun(run, "survive-session", "session");
+  await post(`${broker.url}/unregister`, { instance_token: token });
+  const db = openBrokerDb(broker.dbPath);
+  try {
+    db.run("UPDATE messages SET sent_at = '2000-01-01T00:00:00.000Z' WHERE group_id = ?", [g.id]);
+  } finally {
+    db.close();
+  }
+  await get(`${broker.url}/admin/purge-messages`);
+
+  expect(rowsFor(g.id), "the transport row is gone").toBe(0);
+  expect(entriesOf(run).map((e) => [e.entry_id, e.state])).toEqual([[entry.entry_id, "open"]]);
+});
+
+// Mutant: the registry GC ignores the live run credential, or compares created_at as TEXT.
+test("the sweep keeps an old entry whose run still holds a credential and drops one whose run does not", async () => {
+  const live = await depositedEntry("reg-gc-live");
+  const dead = await depositedEntry("reg-gc-dead");
+  const revoke = { session_ref: `window-${dead.run.run}`, public_key: FIXTURE_OPERATOR.publicKey };
+  await post(`${broker.url}/approval/token-revoke`, {
+    ...revoke,
+    auth: buildAuthProof(FIXTURE_OPERATOR.privateKey, revoke, { kind: "operator", operator_id: FIXTURE_OPERATOR_ID }),
+  });
+  const swept = await get<{ approval_cutoff_days: number }>(`${broker.url}/admin/purge-messages`);
+  const aged = (minutes: number) => new Date(Date.now() - swept.body.approval_cutoff_days * 86_400_000 - minutes * 60_000).toISOString();
+  const db = openBrokerDb(broker.dbPath);
+  try {
+    db.run("UPDATE inbox_message_entries SET created_at = ? WHERE run_ref IN (?, ?)", [aged(1), live.run.run, dead.run.run]);
+  } finally {
+    db.close();
+  }
+  await get(`${broker.url}/admin/purge-messages`);
+
+  expect(entriesOf(live.run)).toHaveLength(1);
+  expect(entriesOf(dead.run)).toHaveLength(0);
+});
+
+// Mutants: the settling UPDATE or the message insert dropped from the reply transaction.
+test("a reply settles the entry and sends the author exactly one message from the deck", async () => {
+  const { run, token, entry } = await depositedEntry("rep-happy");
+
+  const sent = await replyTo(run, entry, crypto.randomUUID(), "go ahead");
+
+  expect(sent.status).toBe(200);
+  expect(sent.body.ok).toBe(true);
+  expect(deckMessagesTo(token)).toEqual(["go ahead"]);
+  expect(entriesOf(run)[0]).toMatchObject({ state: "responded", responded_message_id: sent.body.message_id });
+  expect(entriesOf(run)[0]!.settled_at).not.toBeNull();
+  // Mutant: the raw instance token kept in the registry after the reply.
+  expect(entriesOf(run)[0]!.reply_token).toBe("");
+});
+
+test("the same reply id replays once without a second message, a different one is a conflict that names the state", async () => {
+  const { run, token, entry } = await depositedEntry("rep-replay");
+  const replyId = crypto.randomUUID();
+  const first = await replyTo(run, entry, replyId, "first");
+
+  const replay = await replyTo(run, entry, replyId, "first");
+  const second = await replyTo(run, entry, crypto.randomUUID(), "second");
+
+  expect({ status: replay.status, replayed: replay.body.replayed, id: replay.body.message_id }).toEqual({
+    status: 200,
+    replayed: true,
+    id: first.body.message_id,
+  });
+  expect({ status: second.status, error: second.body.error, state: second.body.state }).toEqual({
+    status: 409,
+    error: "entry-settled",
+    state: "responded",
+  });
+  expect(deckMessagesTo(token), "the author received one message, not three").toEqual(["first"]);
+});
+
+// Mutant: the entry keyed by message id alone.
+test("the key is (message_id, sent_at) inside the run of the proof: another sent_at, another run's proof and an unknown id are all 404", async () => {
+  const { runs } = await newRuns("rep-key", 2);
+  const [runA, runB] = runs as [RunCredential, RunCredential];
+  const a = await registerAttestedInstance(broker, runA, "hKeyA", "/keyA");
+  await depositToOperator(broker, a.body.instance_token, "for A", runA);
+  const entry = entriesOf(runA)[0]!;
+
+  const wrongTime = await replyTo(runA, entry, undefined, "x", { sent_at: "2000-01-01T00:00:00.000Z" });
+  const otherRun = await replyTo(runB, entry);
+  const unknown = await replyTo(runA, entry, undefined, "x", { message_id: entry.message_id + 9999 });
+
+  expect([wrongTime.status, otherRun.status, unknown.status]).toEqual([404, 404, 404]);
+  expect(wrongTime.body.error).toBe("unknown entry");
+  expect(deckMessagesTo(a.body.instance_token)).toEqual([]);
+  expect(entriesOf(runA)[0]!.state).toBe("open");
+});
+
+// Mutants: reply mapped to the drain operation, a run or mandate proof accepted, a drain-gate proof accepted.
+test("only the operator key opens the reply door, for its own gate", async () => {
+  const { run, entry } = await depositedEntry("rep-gate");
+  const mandate = await mintMandate(broker, run, "lead", "lead-gate");
+  const body = { group_id: run.group, group_secret_hash: run.secretHash, run_ref: run.run, message_id: entry.message_id, sent_at: entry.sent_at, reply_id: crypto.randomUUID(), text: "x" };
+  const withAuth = (auth: unknown) => post<{ error?: string }>(`${broker.url}/operator-inbox/reply`, { ...body, auth });
+
+  const refusals = [
+    await withAuth(runInboxProof(run, body, INBOX_GATES.reply)),
+    await withAuth(buildInboxProof(mandate.cred.privateKey, body, INBOX_GATES.reply, { kind: "session", operator_id: FIXTURE_OPERATOR_ID, token_id: mandate.tokenId })),
+    await withAuth(operatorInboxProof(body, INBOX_GATES.drain)),
+    await withAuth(buildAuthProof(FIXTURE_OPERATOR.privateKey, body, { kind: "operator", operator_id: FIXTURE_OPERATOR_ID })),
+    await post<{ error?: string }>(`${broker.url}/operator-inbox/reply`, body),
+  ];
+
+  expect(refusals.map((r) => r.status)).toEqual([403, 403, 401, 401, 400]);
+  expect(entriesOf(run)[0]!.state).toBe("open");
+});
+
+test("a reply is validated at the door: text, reply id, message id and sent_at", async () => {
+  const { run, entry } = await depositedEntry("rep-valid");
+  const statuses: number[] = [];
+  for (const over of [
+    { text: "" },
+    { text: 7 },
+    { reply_id: "not-a-uuid" },
+    { message_id: 1.5 },
+    { message_id: "1" },
+    { sent_at: "" },
+    { sent_at: "x".repeat(65) },
+  ]) {
+    statuses.push((await replyTo(run, entry, undefined, "ok", over)).status);
+  }
+  expect(statuses).toEqual([400, 400, 400, 400, 400, 400, 400]);
+  expect(entriesOf(run)[0]!.state).toBe("open");
+});
+
+// Mutant: the reply target resolved by peer_id.
+test("a peer_id taken over by another instance receives nothing: the reply is 410 and the entry stays open", async () => {
+  const { run, author, token, peerId, entry } = await depositedEntry("rep-reuse");
+  await post(`${broker.url}/unregister`, { instance_token: token });
+  const heir = await registerAttestedInstance(broker, run, "hHeir", "/heir");
+  await post(`${broker.url}/set-id`, { instance_token: heir.body.instance_token, new_peer_id: peerId });
+
+  const gone = await replyTo(run, entry);
+
+  expect({ status: gone.status, error: gone.body.error }).toEqual({ status: 410, error: "author-gone" });
+  expect(deckMessagesTo(heir.body.instance_token)).toEqual([]);
+  expect(entriesOf(run)[0]!.state).toBe("open");
+  expect(author.body.peer_id).toBe(peerId);
+});
+
+// Mutant: the author token's binding is not compared with the entry's run.
+test("an author whose token is still active but bound to another run is gone: 410, nothing sent", async () => {
+  const { run, token, entry } = await depositedEntry("rep-rebound");
+  const other = await mintRunCredential(broker, { id: run.group, hash: run.secretHash });
+  const db = openBrokerDb(broker.dbPath);
+  try {
+    db.run("UPDATE inbox_instance_bindings SET run_ref = ? WHERE author_instance_ref = ?", [other.run, deriveInstanceRef(token)]);
+  } finally {
+    db.close();
+  }
+
+  const gone = await replyTo(run, entry);
+
+  expect({ status: gone.status, error: gone.body.error }).toEqual({ status: 410, error: "author-gone" });
+  expect(deckMessagesTo(token)).toEqual([]);
+  expect(entriesOf(run)[0]!.state).toBe("open");
+});
+
+test("an author who renames itself still receives the reply", async () => {
+  const { run, token, entry } = await depositedEntry("rep-rename");
+  await post(`${broker.url}/set-id`, { instance_token: token, new_peer_id: "renamed-author" });
+
+  expect((await replyTo(run, entry, undefined, "after the rename")).status).toBe(200);
+  expect(deckMessagesTo(token)).toEqual(["after the rename"]);
+});
+
+// Mutants: the actor's authority read from the body, a missing author proof accepted, the object resolved outside the actor scope.
+test("a message entry is closed by its author, its lead and its supervisor, never by another author or another run", async () => {
+  const { runs } = await newRuns("cls-msg", 2);
+  const [run, otherRun] = runs as [RunCredential, RunCredential];
+  const a1 = await registerAttestedInstance(broker, run, "hCls1", "/cls1");
+  const a2 = await registerAttestedInstance(broker, run, "hCls2", "/cls2");
+  const b = await registerAttestedInstance(broker, otherRun, "hClsB", "/clsB");
+  for (const [t, r, label] of [[a1, run, "one"], [a1, run, "two"], [a1, run, "three"], [a1, run, "four"], [b, otherRun, "other"]] as const) {
+    await depositToOperator(broker, t.body.instance_token, label, r);
+  }
+  const [e1, e2, e3, e4] = entriesOf(run) as [EntryRow, EntryRow, EntryRow, EntryRow];
+  const authorOf = await mintMandate(broker, run, "author", "author-1");
+  const lead = await mintMandate(broker, run, "lead", "lead-1");
+  const supervisor = await mintMandate(broker, run, "supervisor", "supervisor-1");
+  const leadOther = await mintMandate(broker, otherRun, "lead", "lead-other");
+  const close = (r: RunCredential, m: typeof lead, e: EntryRow, instance: string | null, reason: unknown = "done") =>
+    closeInbox(broker, r, m, { entryId: e.entry_id, reason, instanceToken: instance });
+
+  const byAuthor = await close(run, authorOf, e1, a1.body.instance_token, "finished here");
+  const byOtherAuthor = await close(run, authorOf, e2, a2.body.instance_token);
+  const byLead = await close(run, lead, e2, a2.body.instance_token, "stale");
+  const bySupervisor = await close(run, supervisor, e3, a2.body.instance_token, "superseded");
+  const crossRun = await close(otherRun, leadOther, e4, b.body.instance_token);
+  const withoutProof = await close(run, lead, e4, null);
+
+  expect(byAuthor.status).toBe(200);
+  expect(byOtherAuthor.status, "another author of the same run").toBe(403);
+  expect(byLead.status).toBe(200);
+  expect(bySupervisor.status).toBe(200);
+  expect(crossRun.status, "a lead of run B on an entry of run A, indistinguishable from an unknown id").toBe(404);
+  expect(withoutProof.status, "the instance proof is mandatory for a lead too").toBe(400);
+  const rows = Object.fromEntries(entriesOf(run).map((e) => [e.message_id, e]));
+  expect(rows[e1.message_id]).toMatchObject({
+    state: "closed",
+    closed_by_authority: "author",
+    closed_by_instance_ref: deriveInstanceRef(a1.body.instance_token),
+    closed_by_peer_id_snapshot: a1.body.peer_id,
+    close_reason: "finished here",
+    reply_token: "",
+  });
+  expect(rows[e2.message_id]).toMatchObject({ state: "closed", closed_by_authority: "lead", close_reason: "stale" });
+  expect(rows[e3.message_id]).toMatchObject({ state: "closed", closed_by_authority: "supervisor" });
+  expect(rows[e4.message_id]!.state).toBe("open");
+  expect(entriesOf(otherRun)[0]!.state).toBe("open");
+  expect(JSON.stringify(byAuthor.body)).not.toContain(a1.body.instance_token);
+  expect(JSON.stringify(byAuthor.body)).not.toContain(deriveInstanceRef(a1.body.instance_token));
+});
+
+// Mutants: a boundary dropped, the reason truncated instead of refused, control bytes kept.
+test("a close reason outside 1..500 code points is a 400 with no write, and control bytes are stripped before storage", async () => {
+  const { run, token, entry } = await depositedEntry("cls-reason");
+  const lead = await mintMandate(broker, run, "lead", "lead-reason");
+  const close = (reason: unknown) => closeInbox(broker, run, lead, { entryId: entry.entry_id, reason, instanceToken: token });
+
+  const statuses = [await close(undefined), await close(""), await close("   "), await close(7), await close("x".repeat(501))].map((r) => r.status);
+  expect(statuses).toEqual([400, 400, 400, 400, 400]);
+  expect(entriesOf(run)[0]!.state).toBe("open");
+
+  expect((await close(`line one\nline two${String.fromCharCode(7)}`)).status).toBe(200);
+  expect(entriesOf(run)[0]!.close_reason).toBe("line one line two");
+});
+
+test("an entry id of an unknown form is a 400, an unknown one a 404, and neither writes", async () => {
+  const { run, token } = await depositedEntry("cls-form");
+  const lead = await mintMandate(broker, run, "lead", "lead-form");
+  const close = (entryId: unknown) => closeInbox(broker, run, lead, { entryId, reason: "x", instanceToken: token });
+
+  expect([
+    (await close("42")).status,
+    (await close(undefined)).status,
+    (await close("m_short")).status,
+    (await close("m_" + "Z".repeat(36))).status,
+    (await close("m_" + crypto.randomUUID())).status,
+    (await close(crypto.randomUUID())).status,
+  ]).toEqual([400, 400, 400, 400, 404, 404]);
+});
+
+// Mutants: UPDATE without state='open'; closed_by_* overwritten by a second close.
+test("reply and close race to one winner in both orders, and the loser is told the winner's state", async () => {
+  const first = await depositedEntry("race-a");
+  const leadA = await mintMandate(broker, first.run, "lead", "lead-race-a");
+  const closed = await closeInbox(broker, first.run, leadA, { entryId: first.entry.entry_id, reason: "no longer needed", instanceToken: first.token });
+  const lateReply = await replyTo(first.run, first.entry);
+  const secondClose = await closeInbox(broker, first.run, leadA, { entryId: first.entry.entry_id, reason: "overwritten?", instanceToken: first.token });
+
+  expect(closed.status).toBe(200);
+  expect({ status: lateReply.status, state: lateReply.body.state }).toEqual({ status: 409, state: "closed" });
+  expect({ status: secondClose.status, state: (secondClose.body as { state?: string }).state }).toEqual({ status: 409, state: "closed" });
+  expect(deckMessagesTo(first.token), "no message went to a closed entry").toEqual([]);
+  expect(entriesOf(first.run)[0]).toMatchObject({ state: "closed", close_reason: "no longer needed" });
+
+  const second = await depositedEntry("race-b");
+  const leadB = await mintMandate(broker, second.run, "lead", "lead-race-b");
+  expect((await replyTo(second.run, second.entry)).status).toBe(200);
+  const lateClose = await closeInbox(broker, second.run, leadB, { entryId: second.entry.entry_id, reason: "too late", instanceToken: second.token });
+  expect({ status: lateClose.status, state: (lateClose.body as { state?: string }).state }).toEqual({ status: 409, state: "responded" });
+  expect(entriesOf(second.run)[0]).toMatchObject({ state: "responded", close_reason: null, closed_by_authority: null });
+});
+
+test("a concurrent reply and close leave exactly one winner and a consistent state", async () => {
+  const w = await depositedEntry("race-par");
+  const lead = await mintMandate(broker, w.run, "lead", "lead-race-par");
+  const [closed, replied] = await Promise.all([
+    closeInbox(broker, w.run, lead, { entryId: w.entry.entry_id, reason: "parallel", instanceToken: w.token }),
+    replyTo(w.run, w.entry),
+  ]);
+
+  expect([closed.status, replied.status].sort()).toEqual([200, 409]);
+  const state = entriesOf(w.run)[0]!.state;
+  expect(state).toBe(closed.status === 200 ? "closed" : "responded");
+  expect(deckMessagesTo(w.token)).toHaveLength(state === "responded" ? 1 : 0);
+});
+
+// Mutant: a registry row created for a deposit made by a restarted Deck's new run, or a state reset to open.
+test("a new run of the same group cannot reply to or close an entry of an earlier run", async () => {
+  const w = await depositedEntry("run-restart");
+  const next = await mintRunCredential(broker, w.g);
+  const nextLead = await mintMandate(broker, next, "lead", "lead-next");
+  const nextInstance = await registerAttestedInstance(broker, next, "hNext", "/next");
+
+  const reply = await replyTo(next, w.entry);
+  const close = await closeInbox(broker, next, nextLead, { entryId: w.entry.entry_id, reason: "x", instanceToken: nextInstance.body.instance_token });
+
+  expect([reply.status, close.status]).toEqual([404, 404]);
+  expect(entriesOf(w.run)[0]!.state).toBe("open");
 });

@@ -3,8 +3,10 @@ import {
   APPROVAL_FREE_TEXT_MAX,
   APPROVAL_OPTIONS_MAX,
   APPROVAL_QUESTIONS_MAX,
+  CLOSE_REASON_MAX,
   validateApprovalAnswers,
   validateApprovalDraft,
+  validateCloseReason,
 } from "../shared/approval.ts";
 import { settledOutcome } from "../shared/approval-outcome.ts";
 import type { ApprovalQuestion } from "../shared/types.ts";
@@ -282,5 +284,27 @@ test("an answers verdict reads back as its summary for every human or agent read
   expect(settledOutcome({ status: "answered", answer_kind: "answers", answer_text: "Q?: A" })).toEqual({
     kind: "text",
     text: "Q?: A",
+  });
+});
+
+describe("the reason of a close", () => {
+  test("a reason is stripped of control bytes and line breaks, then trimmed", () => {
+    const r = validateCloseReason(`  ${BEL}done\r\nfor now${BEL}  `);
+    expect(r).toEqual({ ok: true, value: "done for now" });
+  });
+
+  // Mutants: the lower bound dropped, the upper bound dropped, a cut instead of a refusal.
+  test("empty, blank, control-only, non-string and over-long reasons are refused, never cut", () => {
+    for (const bad of ["", "   ", `${ESC}\r\n`, undefined, null, 7, {}]) {
+      expect({ bad, ok: validateCloseReason(bad).ok }).toEqual({ bad, ok: false });
+    }
+    expect(validateCloseReason("x".repeat(CLOSE_REASON_MAX)).ok).toBe(true);
+    expect(validateCloseReason("x".repeat(CLOSE_REASON_MAX + 1)).ok).toBe(false);
+  });
+
+  test("the bound counts code points, not UTF-16 units", () => {
+    const pair = String.fromCodePoint(0x1f600);
+    expect(validateCloseReason(pair.repeat(CLOSE_REASON_MAX)).ok).toBe(true);
+    expect(validateCloseReason(pair.repeat(CLOSE_REASON_MAX + 1)).ok).toBe(false);
   });
 });

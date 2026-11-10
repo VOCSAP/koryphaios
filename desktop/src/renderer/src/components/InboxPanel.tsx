@@ -92,17 +92,27 @@ export function InboxPanel(): React.JSX.Element {
   const courrier: InboxCourrierCapability = {
     markSeen: markInboxSeen,
     ack: ackInboxEntry,
-    reply: async (toPeerId, text) => {
+    reply: async (message, text) => {
       try {
-        const ok = await window.api.inboxReply(toPeerId, text)
-        if (!ok) {
+        const outcome = await window.api.inboxReply({ id: message.id, sentAt: message.sentAt }, text)
+        if (outcome === 'author-gone' || outcome === 'unavailable') {
           showToast('toast.inboxReplyRefused', 'error')
           return 'failed'
         }
-        showToast('toast.inboxReplySent')
+        if (outcome === 'closed') {
+          showToast('toast.inboxReplyClosed', 'error')
+          return 'failed'
+        }
+        showToast(
+          outcome === 'sent'
+            ? 'toast.inboxReplySent'
+            : outcome === 'already-replied'
+              ? 'toast.inboxAlreadyReplied'
+              : 'toast.inboxAnsweredElsewhere'
+        )
         return 'settled'
       } catch (e) {
-        window.api.reportError('inbox', `reply to ${toPeerId} failed: ${errorText(e)}`)
+        window.api.reportError('inbox', `reply to message ${message.id} failed: ${errorText(e)}`)
         showToast(`${t('inbox.reply')}: ${errorText(e)}`, 'error', { raw: true })
         return 'failed'
       }

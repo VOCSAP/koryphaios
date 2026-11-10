@@ -16,6 +16,7 @@ import type {
   HelpExchange,
   I18nPayload,
   DeckGraphDraft,
+  InboxReplyOutcome,
   LaunchConfig,
   OperatorTrustStatusEvent,
   RoadmapListFilters,
@@ -53,7 +54,7 @@ import {
   loadAckStateWithMigrationSeed,
   loadInboxHistory
 } from './inbox-store'
-import { classifyInboxDeleteIds } from './inbox-session'
+import { classifyInboxDeleteIds, rawInboxReplyEntry } from './inbox-session'
 import {
   buildDigestSystemPrompt,
   collectSources,
@@ -234,8 +235,8 @@ interface IpcDeps {
   approvalAnswers: (id: string, answers: Record<string, string[]>) => Promise<boolean>
   /** Give a module-served request back to the native terminal menu. */
   approvalHandback: (id: string) => Promise<boolean>
-  /** Reply to an ordinary (family 1) inbox message: a plain targeted announce, not correlated to anything broker-side. */
-  announceTo: (toPeerId: string, text: string) => Promise<number>
+  /** Reply to one entry of this run's Courrier, addressed by its (id, sentAt) key. */
+  inboxReply: (entry: { id: number; sentAt: string }, text: string) => Promise<InboxReplyOutcome>
   /**
    * Courrier lot 1D (card 1e81ee7b): session-scope purge, called after each
    * of the three classifying gestures (app:new-clear, a successful
@@ -303,7 +304,7 @@ export function registerIpc({
   approvalAllow,
   approvalAnswers,
   approvalHandback,
-  announceTo,
+  inboxReply,
   purgeInboxSession,
   inboxDelete,
   ensureControlServer,
@@ -1558,12 +1559,9 @@ export function registerIpc({
     return inboxDelete(valid)
   })
 
-  // ask_operator lot (Etape A): the unified Courrier actions. `id` /
-  // `toPeerId` / `text` all originate in the renderer (hostile input #3) --
-  // coerced to string here and re-validated broker-side by the resolve of
-  // approvalReply/approvalDecline/approvalAllow/announceTo, which scope by
-  // the CURRENT operator's own credential rather than trusting anything in
-  // the payload.
+  // Renderer args are hostile input #3: ids are coerced to strings, the reply
+  // entry is shape-checked, and the broker scopes every action by the
+  // operator's own credential rather than anything in the payload.
   regHandle('approvals:reply', (_e, id: string, text: string) =>
     approvalReply(String(id ?? ''), String(text ?? ''))
   )
@@ -1574,9 +1572,14 @@ export function registerIpc({
     handleAnswersIpc(id, rawAnswers, approvalAnswers)
   )
   regHandle('approvals:handback', (_e, id: string) => approvalHandback(String(id ?? '')))
-  regHandle('inbox:reply', (_e, toPeerId: string, text: string) =>
-    announceTo(String(toPeerId ?? ''), String(text ?? ''))
-  )
+  regHandle('inbox:reply', (_e, rawEntry: unknown, text: unknown) => {
+    const entry = rawInboxReplyEntry(rawEntry)
+    if (entry === null || typeof text !== 'string') {
+      reportError('inbox', `inbox:reply received a malformed entry or text (entry ${typeof rawEntry}, text ${typeof text})`)
+      return Promise.reject(new Error('inbox:reply: malformed entry or text'))
+    }
+    return inboxReply(entry, text)
+  })
 
   // Local Courrier read-state (family 1/2 only -- see AckableInboxEntry).
   // `entry` is typed to exclude 'approval' at compile time; inboxEntryKey

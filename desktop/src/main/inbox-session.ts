@@ -1,25 +1,93 @@
 import { randomUUID } from 'node:crypto'
-import type { RunInboxSigner } from './broker-client'
+import type { InboxDoor, OperatorInboxReplyResult, RunInboxSigner } from './broker-client'
+import { INBOX_GATES, type InboxGate } from './approval-auth'
 import { appendInboxHistory, clearInboxHistory, deleteInboxHistoryEntries } from './inbox-store'
 import type { SessionDirAccessor } from './session-state'
-import type { InboxMessage } from '../shared/types'
+import type { InboxMessage, InboxReplyOutcome } from '../shared/types'
+
+/** The gate each door is signed for; total, so a new door cannot be signed for another one's gate. */
+export const INBOX_DOOR_GATE = {
+  drain: INBOX_GATES.drain,
+  purge: INBOX_GATES.purge,
+  reply: INBOX_GATES.reply
+} as const satisfies Record<InboxDoor, InboxGate>
 
 /**
  * The run signer for the inbox of the ACTIVE group, or undefined: a run
  * credential prepared for another group but not yet published never signs a
- * read or a purge of this one.
+ * read, a purge or a reply of this one.
  */
 export function createRunInboxSigner<Identity>(deps: {
   inboxRun: () => { runRef: string; groupId: string } | null
   operator: () => Identity | null
   activeGroupId: () => string
-  sign: (identity: Identity, body: Record<string, unknown>, door: 'drain' | 'purge') => unknown
+  sign: (identity: Identity, body: Record<string, unknown>, door: InboxDoor) => unknown
 }): () => RunInboxSigner | undefined {
   return () => {
     const run = deps.inboxRun()
     const identity = deps.operator()
     if (!run || identity === null || run.groupId !== deps.activeGroupId()) return undefined
     return { runRef: run.runRef, sign: (body, door) => deps.sign(identity, body, door) }
+  }
+}
+
+/** The (id, sentAt) key of a renderer-supplied reply target, or null for any other shape. */
+export function rawInboxReplyEntry(raw: unknown): { id: number; sentAt: string } | null {
+  if (typeof raw !== 'object' || raw === null) return null
+  const { id, sentAt } = raw as { id?: unknown; sentAt?: unknown }
+  if (typeof id !== 'number' || !Number.isInteger(id)) return null
+  if (typeof sentAt !== 'string' || sentAt.length === 0 || sentAt.length > 64) return null
+  return { id, sentAt }
+}
+
+/**
+ * Replies to one entry of the run. The reply id is minted once and reused on a
+ * transport failure, so a response lost on the way back replays on the broker
+ * instead of sending a second message. Without a run signer nothing is sent:
+ * there is no uncorrelated fallback.
+ */
+export async function replyToInboxEntryCore(
+  deps: {
+    run: () => RunInboxSigner | undefined
+    send: (
+      run: RunInboxSigner,
+      entry: { id: number; sentAt: string },
+      replyId: string,
+      text: string
+    ) => Promise<OperatorInboxReplyResult>
+    newReplyId?: () => string
+    onError: (message: string, e: unknown) => void
+  },
+  entry: { id: number; sentAt: string },
+  text: string
+): Promise<InboxReplyOutcome> {
+  const run = deps.run()
+  if (!run) return 'unavailable'
+  const replyId = (deps.newReplyId ?? randomUUID)()
+  let result: OperatorInboxReplyResult | null = null
+  for (let attempt = 0; attempt < 2 && result === null; attempt++) {
+    try {
+      result = await deps.send(run, entry, replyId, text)
+    } catch (e) {
+      deps.onError('the Courrier reply failed', e)
+      const answeredByBroker = typeof (e as { status?: unknown }).status === 'number'
+      if (answeredByBroker) return 'unavailable'
+    }
+  }
+  if (result === null) return 'unavailable'
+  switch (result.kind) {
+    case 'sent':
+      return 'sent'
+    case 'settled':
+      return result.state === 'responded' ? 'already-replied' : result.state === 'closed' ? 'closed' : 'settled'
+    case 'author-gone':
+      return 'author-gone'
+    case 'unknown-entry':
+      deps.onError(
+        'the Courrier reply targeted an entry the broker does not know (a message from before this run)',
+        new Error(`unknown entry ${entry.id}`)
+      )
+      return 'unavailable'
   }
 }
 

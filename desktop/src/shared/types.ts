@@ -273,6 +273,8 @@ export type ApprovalStatus =
   | 'abandoned'
   | 'acknowledged'
   | 'answered_terminal'
+  | 'closed'
+export type InboxCloseAuthority = 'author' | 'lead' | 'supervisor'
 export type ApprovalKind = 'permission' | 'question' | 'plan'
 export type ApprovalVia = 'deck' | 'telegram' | 'discord' | 'ntfy'
 export type ApprovalReplyRoute = 'channel' | 'pty' | 'hook'
@@ -331,6 +333,10 @@ export interface Approval {
   delivered_at: string | null
   /** Display only, never a key or a proof: the last 12 characters of the digest of the author instance of an attested question. */
   author_instance_hint?: string
+  /** Set once status is 'closed'; answered_at carries the close time. */
+  close_reason?: string
+  closed_by_authority?: InboxCloseAuthority
+  closed_by_peer_id?: string | null
 }
 
 /** One notification channel as the Settings screen sees it. */
@@ -1830,6 +1836,13 @@ export interface InboxMessage {
 }
 
 /**
+ * Result of a Courrier reply. 'already-replied' is this operator's own earlier
+ * reply, 'closed' an entry closed without an answer, 'settled' any other
+ * terminal state of the entry.
+ */
+export type InboxReplyOutcome = 'sent' | 'already-replied' | 'closed' | 'settled' | 'author-gone' | 'unavailable'
+
+/**
  * Unified Courrier entry (ask_operator lot, Etape A): the three families the
  * inbox panel renders are STRUCTURALLY distinct, not flagged by a boolean —
  * `kind` discriminates a plain peer message (repliable, uncorrelated,
@@ -2524,14 +2537,11 @@ export interface DeckApi {
    */
   approvalHandback(id: string): Promise<boolean>
   /**
-   * Reply to an ordinary (family 1) inbox message: not correlated, not a
-   * resolution — a plain targeted announce. Resolves to the recipient
-   * count from the underlying /announce call (0 or 1 for a single named
-   * peer in practice), not a boolean: "sent to nobody" (the peer went
-   * offline between the list refresh and the reply) is real information a
-   * boolean would destroy.
+   * Reply to ONE message of this run's Courrier, addressed by its
+   * (id, sentAt) key: the broker settles the entry only with the message it
+   * sends, and routes it to the author instance recorded at deposit.
    */
-  inboxReply(toPeerId: string, text: string): Promise<number>
+  inboxReply(entry: { id: number; sentAt: string }, text: string): Promise<InboxReplyOutcome>
   /**
    * Persisted local state of every family 1/2 Courrier entry, keyed by the
    * same synthetic key `inboxMarkSeen`/`inboxAck` derive (see
