@@ -199,22 +199,14 @@ function makeDataHandler(gateActive: boolean) {
   };
 }
 
-// MAJOR 1: mutating away the `if (!this.quotaGateActive(e.id))` condition
-// (leaving quotaDetector.feed unconditional) left every prior test green --
-// nothing exercised this exact handler. This is the SOLE load-bearing gate
-// (autoResume()'s own quotaGateActive check is unreachable defense-in-depth,
-// since autoResume only fires from 'resume-due', which only fires if feed
-// ran in the first place -- see quotaGateActive's doc comment above).
-test("MAJOR (mutation review): the pty data handler does NOT feed quotaDetector when the gate is active", () => {
-  const h = makeDataHandler(true);
-  h.run({ id: "a", data: "some output" });
-  expect(h.feedCalls).toEqual([]);
-});
-
-test("MAJOR (mutation review): the pty data handler DOES feed quotaDetector when the gate is not active", () => {
-  const h = makeDataHandler(false);
-  h.run({ id: "a", data: "some output" });
-  expect(h.feedCalls).toEqual(["a"]);
+// Mutant: `if (!this.quotaGateActive(e.id))` put back in front of quotaDetector.feed
+// (a default claude tile would stop being observed).
+test("the pty data handler feeds quotaDetector whether or not the auto-resume gate is active", () => {
+  for (const gateActive of [true, false]) {
+    const h = makeDataHandler(gateActive);
+    h.run({ id: "a", data: "some output" });
+    expect(h.feedCalls, `gate active: ${gateActive}`).toEqual(["a"]);
+  }
 });
 
 function extractStartPtyBody(src: string): string {

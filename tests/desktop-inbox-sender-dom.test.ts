@@ -30,7 +30,7 @@ const { act, React, createRoot, create } = await import("../desktop/tests-suppor
 // FakeDeckState covers exactly what InboxPanel.tsx and i18n's useT() read; both
 // resolve '../store' and './store' to the same file, so one mock.module call
 // covers both call sites.
-type FakeSession = { id: string; name: string };
+type FakeSession = { id: string; name: string; rateLimited?: boolean; status?: string };
 interface FakeApprovalOrigin {
   tile_ref: string;
 }
@@ -53,6 +53,8 @@ interface FakeDeckState {
   pendingApprovals: FakeApproval[];
   sessions: FakeSession[];
   inboxAckState: Record<string, string>;
+  quotaEpisode: { id: string; startedAt: number } | null;
+  quotaNoticeShown: boolean;
   inboxArchive: { status: string; messages: Record<string, unknown>; closedQuestions: unknown[] };
   inboxReplyDrafts: Record<string, string>;
   approvalDrafts: Record<string, unknown>;
@@ -60,6 +62,7 @@ interface FakeDeckState {
   dict: Record<string, string>;
   remote: boolean;
   openInbox: (open: boolean) => void;
+  focusTile: (id: string) => void;
   openGraphDraft: () => void;
   markInboxSeen: () => void;
   ackInboxEntry: () => void;
@@ -70,6 +73,7 @@ interface FakeDeckState {
 }
 
 let inboxCalls: boolean[] = [];
+let focusCalls: string[] = [];
 
 function initialFakeState(): FakeDeckState {
   return {
@@ -77,6 +81,8 @@ function initialFakeState(): FakeDeckState {
     pendingApprovals: [],
     sessions: [],
     inboxAckState: {},
+    quotaEpisode: null,
+    quotaNoticeShown: false,
     inboxArchive: { status: "unsupported", messages: {}, closedQuestions: [] },
     inboxReplyDrafts: {},
     approvalDrafts: {},
@@ -85,6 +91,9 @@ function initialFakeState(): FakeDeckState {
     remote: false,
     openInbox: (open) => {
       inboxCalls.push(open);
+    },
+    focusTile: (id) => {
+      focusCalls.push(id);
     },
     openGraphDraft: () => {},
     markInboxSeen: () => {},
@@ -127,6 +136,7 @@ beforeEach(() => {
   jest.useFakeTimers();
   setSystemTime(new Date("2026-01-02T12:00:00.000Z"));
   inboxCalls = [];
+  focusCalls = [];
   resetFakeStore();
   container = document.createElement("div");
   document.body.appendChild(container);
@@ -203,6 +213,88 @@ async function answerFirstHookPermission(): Promise<void> {
 function senderSpan(): HTMLElement | null {
   return container.querySelector(".inbox-entry-from");
 }
+
+// Mutants: the panel ignoring the shown flag; the count taken without the live-tile filter; the singular key dropped.
+test("the quota notice is listed once shown, counts the live limited tiles, and is hidden when unshown or acknowledged", () => {
+  const episode = { id: "quota:1700000000000", startedAt: 1_700_000_000_000 };
+  const tiles: FakeSession[] = [
+    { id: "a", name: "a", rateLimited: true, status: "running" },
+    { id: "b", name: "b", rateLimited: true, status: "running" },
+    { id: "c", name: "c", rateLimited: true, status: "exited" }
+  ];
+  const excerpts = (): string[] => [...container.querySelectorAll(".inbox-entry-event .inbox-entry-excerpt")].map((e) => e.textContent ?? "");
+  const render = (state: Partial<FakeDeckState>): void => {
+    act(() => {
+      fakeUseDeck.setState({ sessions: tiles, ...state });
+      root.render(React.createElement(InboxPanel));
+    });
+  };
+
+  render({ quotaEpisode: episode, quotaNoticeShown: false });
+  expect(excerpts(), "not shown before the delay").toEqual([]);
+
+  render({ quotaNoticeShown: true });
+  expect(excerpts(), "two live limited tiles read as the plural form").toEqual(["inbox.quotaEvent"]);
+
+  render({ sessions: [tiles[0]!, tiles[2]!] });
+  expect(excerpts(), "an exited tile is not counted: one live tile reads as the singular form").toEqual(["inbox.quotaEventOne"]);
+
+  const key = `evt:${new Date(episode.startedAt).toISOString()}:${episode.id}`;
+  render({ inboxAckState: { [key]: "acked" } });
+  expect(excerpts()).toEqual([]);
+});
+
+// Mutants: renderEventNavigate not passed by InboxPanel; focusTile removed from QuotaNavigate; the live filter dropped from its target.
+test("the quota notice's navigation focuses the first live limited tile and closes the Courrier", () => {
+  const episode = { id: "quota:1700000000000", startedAt: 1_700_000_000_000 };
+  act(() => {
+    fakeUseDeck.setState({
+      quotaEpisode: episode,
+      quotaNoticeShown: true,
+      sessions: [
+        { id: "gone", name: "gone", rateLimited: true, status: "exited" },
+        { id: "first", name: "first", rateLimited: true, status: "running" },
+        { id: "second", name: "second", rateLimited: true, status: "running" }
+      ]
+    });
+    root.render(React.createElement(InboxPanel));
+  });
+  act(() => {
+    (container.querySelector(".inbox-entry-event") as HTMLElement).click();
+  });
+
+  act(() => {
+    (container.querySelector(".inbox-goto-btn") as HTMLElement).click();
+  });
+
+  expect(focusCalls).toEqual(["first"]);
+  expect(inboxCalls).toEqual([false]);
+});
+
+// Mutant: the unavailable reason removed from QuotaNavigate.
+test("the quota notice's navigation is disabled with its reason when no live tile is limited", () => {
+  act(() => {
+    fakeUseDeck.setState({
+      quotaEpisode: { id: "quota:1700000000000", startedAt: 1_700_000_000_000 },
+      quotaNoticeShown: true,
+      sessions: [{ id: "gone", name: "gone", rateLimited: true, status: "exited" }]
+    });
+    root.render(React.createElement(InboxPanel));
+  });
+  act(() => {
+    (container.querySelector(".inbox-entry-event") as HTMLElement).click();
+  });
+
+  const button = container.querySelector(".inbox-goto-btn") as HTMLButtonElement;
+  act(() => {
+    button.click();
+  });
+
+  expect(button.disabled).toBe(true);
+  expect(container.querySelector(".inbox-goto-reason")?.textContent).toBe("inbox.navigateUnavailable");
+  expect(focusCalls).toEqual([]);
+  expect(inboxCalls).toEqual([]);
+});
 
 test("resolved sender: tile_ref matches a live session -> name only, no <code>, no unresolved text", () => {
   renderPanel(

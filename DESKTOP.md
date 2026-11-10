@@ -181,6 +181,12 @@ Electron + React 19 + zustand, xterm terminals over node-pty. Sources in
   Courrier badge like an unread message, and offering only Acknowledge and
   Close (no Decline, no reply field). Acknowledging it tells the asking agent
   nothing.
+  A quota episode (one or more live tiles `rateLimited`) adds one local Courrier
+  event, "Quota expired - see the X peers", derived in the renderer store
+  (`desktop/src/shared/quota-notice.ts`), never sent to the broker or a phone.
+  It is listed after 30 s of continuous episode, X is recomputed, it leaves when
+  X is 0, and its id carries the episode start so an acknowledgement hides that
+  episode only.
   Three channels are enrolled from `Settings > Notifications`: Telegram and
   Discord take a bot token, the **Parastatès** row takes an ntfy relay
   address (the broker mints the topics) and answers with a QR that is a

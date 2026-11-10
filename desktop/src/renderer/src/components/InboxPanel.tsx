@@ -3,6 +3,8 @@ import { useT } from '../i18n'
 import { resolveApprovalSender } from '../inbox-sender'
 import { linkedText } from './LinkedText'
 import { ApprovalNavigate } from './ApprovalNavigate'
+import { QuotaNavigate } from './QuotaNavigate'
+import { limitedSessionIds, listedQuotaEpisode, quotaNoticeEntry } from '../../../shared/quota-notice'
 import { useHookApprovalSettle } from './HookApprovalAnswer'
 import { canAnswerVerdict as verdictAllowed } from './verdict-remote'
 import {
@@ -21,6 +23,8 @@ export function InboxPanel(): React.JSX.Element {
   const archive = useDeck((s) => s.inboxArchive)
   const sessions = useDeck((s) => s.sessions)
   const ackState = useDeck((s) => s.inboxAckState)
+  const quotaEpisode = useDeck((s) => s.quotaEpisode)
+  const quotaNoticeShown = useDeck((s) => s.quotaNoticeShown)
   const replyDrafts = useDeck((s) => s.inboxReplyDrafts)
   const approvalDrafts = useDeck((s) => s.approvalDrafts)
   const drafts = useDeck((s) => s.graphDrafts)
@@ -131,6 +135,12 @@ export function InboxPanel(): React.JSX.Element {
     }
   }
 
+  const listedEpisode = listedQuotaEpisode(quotaEpisode, quotaNoticeShown, ackState)
+  const limitedCount = limitedSessionIds(sessions).length
+  const events = listedEpisode
+    ? [quotaNoticeEntry(listedEpisode, t(limitedCount === 1 ? 'inbox.quotaEventOne' : 'inbox.quotaEvent', { n: limitedCount }))]
+    : undefined
+
   const leading =
     drafts.length > 0 ? (
       <div className="inbox-drafts">
@@ -171,6 +181,15 @@ export function InboxPanel(): React.JSX.Element {
       renderNavigate={(approval, closeEntry) => (
         <ApprovalNavigate
           approval={approval}
+          onNavigated={() => {
+            closeEntry()
+            openInbox(false)
+          }}
+        />
+      )}
+      events={events}
+      renderEventNavigate={(_event, closeEntry) => (
+        <QuotaNavigate
           onNavigated={() => {
             closeEntry()
             openInbox(false)

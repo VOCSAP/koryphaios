@@ -163,15 +163,21 @@ class Timers {
   }
 }
 
-function autoResume(id: string, self: object, timers: Timers): void {
+function autoResume(
+  id: string,
+  self: object,
+  timers: Timers,
+  logInfo: (scope: string, message: string) => void = () => {}
+): void {
   const source = readFileSync(SESSION_SERVICE_PATH, "utf-8");
   const body = extractBody(source, /private autoResume\(id: string\): void \{/, "autoResume()");
-  const run = new Function("id", "setTimeout", body) as (
+  const run = new Function("id", "setTimeout", "logInfo", body) as (
     this: object,
     id: string,
-    setTimeout: Timers["setTimeout"]
+    setTimeout: Timers["setTimeout"],
+    logInfo: (scope: string, message: string) => void
   ) => void;
-  run.call(self, id, timers.setTimeout.bind(timers));
+  run.call(self, id, timers.setTimeout.bind(timers), logInfo);
 }
 
 function startupAck(id: string, self: object, timers: Timers): void {
@@ -300,6 +306,7 @@ test("autoResume emits no resumed event when any required write is rejected", ()
       defs: [{ id: "tile", autoResume: true }],
       runtime: new Map([["tile", { rateLimited: true, resumeAt: 42 }]]),
       quotaGateActive: () => false,
+      quotaDetector: { hasNativeResume: () => false },
       getConfig: () => ({ autoResumeQuota: true }),
       pty: {
         isAlive: () => true,
@@ -326,6 +333,7 @@ test("autoResume publishes resumed after Escape, continue and Return are accepte
     defs: [{ id: "tile", autoResume: true }],
     runtime: new Map([["tile", { rateLimited: true, resumeAt: 42 }]]),
     quotaGateActive: () => false,
+    quotaDetector: { hasNativeResume: () => false },
     getConfig: () => ({ autoResumeQuota: true }),
     pty: { isAlive: () => true, write: () => true },
     emit: (_event: string, payload: unknown) => events.push(payload)
@@ -335,6 +343,38 @@ test("autoResume publishes resumed after Escape, continue and Return are accepte
   expect(events).toEqual([]);
   timers.fire(100);
   expect(events).toEqual([{ id: "tile", limited: true, resetAt: 42, resumed: true }]);
+});
+
+// Mutants: the `hasNativeResume` return removed from autoResume() (Escape cancels the CLI's own resume); the `quotaGateActive` return removed (a default claude tile starts typing).
+test("autoResume types nothing while the CLI resumes the episode itself, traces why, and nothing while the default gate is active", () => {
+  const attempt = (over: { gate: boolean; native: boolean }) => {
+    const timers = new Timers();
+    const writes: string[] = [];
+    const traces: string[] = [];
+    const self = {
+      defs: [{ id: "tile", autoResume: true }],
+      runtime: new Map([["tile", { rateLimited: true, resumeAt: 42 }]]),
+      quotaGateActive: () => over.gate,
+      quotaDetector: { hasNativeResume: (id: string) => over.native && id === "tile" },
+      getConfig: () => ({ autoResumeQuota: true }),
+      pty: { isAlive: () => true, write: (_id: string, data: string) => (writes.push(data), true) },
+      emit: () => {}
+    };
+    autoResume("tile", self, timers, (scope, message) => traces.push(`${scope}: ${message}`));
+    timers.fire(100);
+    return { writes, traces };
+  };
+
+  const native = attempt({ gate: false, native: true });
+  expect(native.writes).toEqual([]);
+  expect(native.traces).toHaveLength(1);
+  expect(native.traces[0]).toContain("tile");
+  expect(attempt({ gate: true, native: false }).writes).toEqual([]);
+  expect(attempt({ gate: false, native: false }).writes, "control: the same tile types when the CLI does not resume").toEqual([
+    "\x1b",
+    "continue",
+    "\r"
+  ]);
 });
 
 test("a quota auto-resume types into the live PTY and prepares nothing, neither a launch nor a mod plan", async () => {

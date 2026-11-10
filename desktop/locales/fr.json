@@ -720,6 +720,8 @@
   "inbox.familyEvent": "Événement",
   "inbox.familyBlocking": "Question bloquante",
   "inbox.familyInformation": "Information",
+  "inbox.quotaEvent": "Quota expiré - voir les {n} peers",
+  "inbox.quotaEventOne": "Quota expiré - voir le peer",
   "inbox.state.unread": "Non lu",
   "inbox.state.seen": "Vu — encore à traiter",
   "inbox.state.acked": "Acquitté",

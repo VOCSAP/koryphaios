@@ -8,6 +8,7 @@ import { afterAll, beforeAll, expect, mock, test } from "bun:test";
 import * as sharedTypes from "../desktop/src/shared/types.ts";
 import * as sharedRoadmapSync from "../desktop/src/shared/roadmap-sync.ts";
 import * as sharedInboxPending from "../desktop/src/shared/inbox-pending.ts";
+import * as sharedQuotaNotice from "../desktop/src/shared/quota-notice.ts";
 import * as sharedTemplateApply from "../desktop/src/shared/template-apply-outcome.ts";
 import * as sharedWorkspaceRestore from "../desktop/src/shared/workspace-restore-outcome.ts";
 import * as sharedCompanion from "../desktop/src/shared/companion.ts";
@@ -22,6 +23,7 @@ mock.module("@shared/types", () => sharedTypes);
 mock.module("@shared/companion", () => sharedCompanion);
 mock.module("@shared/roadmap-sync", () => sharedRoadmapSync);
 mock.module("@shared/inbox-pending", () => sharedInboxPending);
+mock.module("@shared/quota-notice", () => sharedQuotaNotice);
 mock.module("@shared/template-apply-outcome", () => sharedTemplateApply);
 mock.module("@shared/workspace-restore-outcome", () => sharedWorkspaceRestore);
 
@@ -77,6 +79,38 @@ test("an information is counted by the Courrier badge but never lights the atten
 
   expect(onlyInformation).toEqual([false, 1]);
   expect(withQuestion).toEqual([true, 2]);
+});
+
+// Mutants: the sessions subscription removed; the badge term removed; the acknowledged key ignored; the attention glow counting the notice.
+test("tiles in a quota episode open one episode, and the Courrier badge counts the notice only while it is listed", () => {
+  const tile = (id: string) => ({ id, rateLimited: true, status: "running" }) as never;
+  useDeck.setState({
+    pendingApprovals: [],
+    graphDrafts: [],
+    inboxMessages: [],
+    inboxAckState: {},
+    inboxArchive: { status: "unsupported", messages: {}, closedQuestions: [] } as never
+  });
+
+  useDeck.setState({ sessions: [tile("a"), tile("b")] });
+  const opened = useDeck.getState().quotaEpisode;
+  expect(opened?.id).toMatch(/^quota:\d+$/);
+  expect(useDeck.getState().quotaNoticeShown, "not listed before the delay").toBe(false);
+  expect(inboxBadgeCount(useDeck.getState())).toBe(0);
+
+  useDeck.setState({ quotaNoticeShown: true });
+  expect(inboxBadgeCount(useDeck.getState())).toBe(1);
+  expect(inboxAwaitsAction(useDeck.getState()), "an information awaits nothing").toBe(false);
+  useDeck.setState({ sessions: [tile("a")] });
+  expect(useDeck.getState().quotaEpisode, "X moving inside the episode keeps it").toBe(opened);
+
+  const key = sharedTypes.inboxEntryKey(sharedQuotaNotice.quotaNoticeEntry(opened!, ""));
+  useDeck.setState({ inboxAckState: { [key]: "acked" } });
+  expect(inboxBadgeCount(useDeck.getState())).toBe(0);
+
+  useDeck.setState({ sessions: [] });
+  expect(useDeck.getState().quotaEpisode).toBeNull();
+  expect(useDeck.getState().quotaNoticeShown).toBe(false);
 });
 
 test("every menu channel has a store subscription named after it", () => {

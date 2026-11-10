@@ -31,6 +31,9 @@ import { formQuestions, type QuestionDraft } from './approval-answers'
  */
 
 export type InboxApproval = Extract<InboxEntry, { kind: 'approval' }>['approval']
+export type InboxEvent = Extract<InboxEntry, { kind: 'event' }>
+
+const NO_EVENTS: readonly InboxEvent[] = []
 
 export type InboxAnswerAction =
   | { kind: 'allow' }
@@ -76,6 +79,9 @@ export interface InboxCoreProps {
   resolveSender: (approval: InboxApproval) => ApprovalSenderResolution
   renderText?: (text: string) => ReactNode
   renderNavigate?: (approval: InboxApproval, closeEntry: () => void) => ReactNode
+  /** Events the host derived (no recipient, ackable); listed with the messages, newest first. */
+  events?: readonly InboxEvent[]
+  renderEventNavigate?: (event: InboxEvent, closeEntry: () => void) => ReactNode
   /** Host content above the list; while present, the empty state stays hidden. */
   leading?: ReactNode
   seedApprovalId: string | null
@@ -179,6 +185,7 @@ export function InboxCore(props: InboxCoreProps): React.JSX.Element {
   const { t, messages, approvals, archive, reclame, courrier, replyDrafts, onReplyDraft, seedApprovalId, onSeedConsumed } =
     props
   const renderText = props.renderText ?? plainText
+  const events = props.events ?? NO_EVENTS
   const canAnswerVerdict = reclame !== null
   const [openKey, setOpenKey] = useState<string | null>(null)
   const [sending, setSending] = useState(false)
@@ -206,11 +213,12 @@ export function InboxCore(props: InboxCoreProps): React.JSX.Element {
     const blocking = pending.filter((e) => e.kind === 'approval' && !e.approval.informational)
     const rest: InboxEntry[] = [
       ...pending.filter((e) => e.kind === 'approval' && e.approval.informational),
+      ...events,
       ...messages.map((message): InboxEntry => ({ kind: 'message', message })),
       ...archive.closedQuestions.map((approval): InboxEntry => ({ kind: 'closed-question', approval }))
     ]
     return [...blocking.sort(byTimeDesc), ...rest.sort(byTimeDesc)]
-  }, [messages, approvals, archive.closedQuestions])
+  }, [messages, approvals, events, archive.closedQuestions])
 
   const open = entries.find((e) => reactKey(e) === openKey) ?? null
   // Closes the modal rather than leaving it open on an entry that vanished
@@ -468,6 +476,7 @@ export function InboxCore(props: InboxCoreProps): React.JSX.Element {
             {closure && <ClosedBanner t={t} closure={closure} report={props.report} />}
 
             {open.kind === 'approval' && props.renderNavigate?.(open.approval, closeEntry)}
+            {open.kind === 'event' && props.renderEventNavigate?.(open, closeEntry)}
 
             {open.kind === 'approval' && !canAnswerVerdict && (
               <div className="inbox-modal-note">{t('inbox.verdictRemoteBlocked')}</div>

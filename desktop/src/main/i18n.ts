@@ -918,6 +918,8 @@ export const EN_DEFAULTS: Record<string, string> = {
   'inbox.familyEvent': 'Event',
   'inbox.familyBlocking': 'Blocking question',
   'inbox.familyInformation': 'Information',
+  'inbox.quotaEvent': 'Quota expired - see the {n} peers',
+  'inbox.quotaEventOne': 'Quota expired - see the peer',
   'inbox.state.unread': 'Unread',
   'inbox.state.seen': 'Seen — still to handle',
   'inbox.state.acked': 'Acknowledged',

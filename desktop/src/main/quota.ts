@@ -50,18 +50,34 @@ function stripForDetection(s: string): string {
 // words alone are not enough: once spaces are restored, a sentence an agent wrote
 // reads the same, and a forged limit refuses the lead's directives.
 const CLI_ROW = '^[^\\S\\r\\n]{0,32}\\u23bf[^\\S\\r\\n]{1,16}'
-const HIT = "you(?:['’]ve|\\s+have)\\s+hit\\s+your\\s+(?:session\\s+)?limit"
+const HIT = "you(?:['’]ve|\\s+have)\\s+hit\\s+your\\s+(?:(?:session|weekly|\\d{1,2}-hour|opus|sonnet)\\s+){0,2}limit"
 const REACHED = '(?:(?:usage|\\d{1,2}-hour|weekly|spend|opus|sonnet)\\s+)?limit\\s+reached\\b'
 const CLOCK = '(\\d{1,2}(?::\\d{2})?\\s*[ap]m)'
 const cliRow = (body: string): RegExp => new RegExp(CLI_ROW + body, 'im')
+
+// The two other rows of the native notice open with U+25CF or U+26A0. U+25CF
+// also opens every assistant message, so these rows are accepted only with the
+// clock the CLI prints, never as a bare phrase.
+const NOTICE_ROW = '^[^\\S\\r\\n]{0,32}[\\u25cf\\u26a0][^\\S\\r\\n]{1,16}'
+const USAGE_LIMIT = 'usage\\s+limit\\s+reached\\b'
+const noticeRow = (body: string): RegExp => new RegExp(NOTICE_ROW + body, 'im')
 
 // Time-capturing patterns, tried in order. Group 1 = clock ("2pm", "10:30am").
 const TIME_PATTERNS = [
   // "You've hit your limit · resets 10pm (Europe/London)"
   cliRow(`${HIT}.{0,200}?resets?\\s+${CLOCK}`),
   // "5-hour limit reached ∙ resets 2pm"
-  cliRow(`${REACHED}.{0,200}?resets?\\s+${CLOCK}`)
+  cliRow(`${REACHED}.{0,200}?resets?\\s+${CLOCK}`),
+  // U+25CF row: "Usage limit reached · continuing automatically at 10:31pm · esc to cancel"
+  noticeRow(`${USAGE_LIMIT}.{0,200}?continuing\\s+automatically\\s+at\\s+${CLOCK}`),
+  // U+26A0 row: "Usage limit reached · limit resets 10:31pm"
+  noticeRow(`${USAGE_LIMIT}.{0,200}?limit\\s+resets?\\s+${CLOCK}`)
 ]
+
+// The CLI resumes this episode itself at the printed time; a keystroke from the
+// Deck would cancel it. At 40 columns it wraps this row over several lines, so
+// the gap crosses line breaks.
+const NATIVE_RESUME = noticeRow(`${USAGE_LIMIT}[\\s\\S]{0,200}?continuing\\s+automatically\\b`)
 
 // "Limit reached (resets 8m)" / "resets 45m" -> minutes from now.
 const MINUTES_PATTERN = cliRow(`(?:${HIT}|${REACHED}).{0,200}?resets?\\s+(\\d{1,3})m\\b`)
@@ -97,6 +113,8 @@ export function parseResetClock(clock: string, nowMs: number): number | null {
 export interface RateLimitMatch {
   /** Epoch ms to resume at, or null when the message carried no usable time. */
   resetAt: number | null
+  /** The window also holds the row announcing the CLI's own automatic resume. Absent otherwise. */
+  nativeResume?: true
 }
 
 /**
@@ -104,6 +122,12 @@ export interface RateLimitMatch {
  * when nothing matches. Pure function, exported for the test suite.
  */
 export function detectRateLimit(text: string, nowMs: number): RateLimitMatch | null {
+  const match = detectResetTime(text, nowMs)
+  if (!match) return null
+  return NATIVE_RESUME.test(text) ? { ...match, nativeResume: true } : match
+}
+
+function detectResetTime(text: string, nowMs: number): RateLimitMatch | null {
   for (const re of TIME_PATTERNS) {
     const m = re.exec(text)
     if (m) return { resetAt: parseResetClock(m[1] ?? '', nowMs) }
@@ -146,6 +170,8 @@ interface SessionState {
   limitedAt: number
   /** now() when 'resume-due' last fired in the current episode, or null. */
   resumeDueAt: number | null
+  /** The episode's window held the row announcing the CLI's own automatic resume. */
+  nativeResume: boolean
   /**
    * A running turn ends the episode: the user resumed manually or the
    * injected "continue" was accepted. Title cue on: a limit screen only
@@ -198,11 +224,18 @@ export class QuotaDetector extends EventEmitter {
     st.limited = true
     st.limitedAt = this.now()
     st.resetAt = match.resetAt
+    st.nativeResume = match.nativeResume === true
     st.sent = false
     st.resumeDueAt = null
     st.buf = '' // stale text must not re-trigger after the episode ends
     this.armTimer(id, st)
     this.emit('limit', { id, resetAt: st.resetAt } satisfies QuotaLimitEvent)
+  }
+
+  /** True while `id` has an open episode that the CLI resumes by itself. */
+  hasNativeResume(id: string): boolean {
+    const st = this.sessions.get(id)
+    return st !== undefined && st.limited && st.nativeResume
   }
 
   /** Forget a session (exit/remove/respawn): cancel timer, drop state. */
@@ -220,7 +253,7 @@ export class QuotaDetector extends EventEmitter {
   private state(id: string): SessionState {
     let st = this.sessions.get(id)
     if (!st) {
-      st = { buf: '', limited: false, resetAt: null, sent: false, timer: null, limitedAt: 0, resumeDueAt: null, busy: createBusyCue({ title: true }) }
+      st = { buf: '', limited: false, resetAt: null, sent: false, timer: null, limitedAt: 0, resumeDueAt: null, nativeResume: false, busy: createBusyCue({ title: true }) }
       this.sessions.set(id, st)
     }
     return st

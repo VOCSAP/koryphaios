@@ -119,8 +119,12 @@ afterEach(() => {
 const UNSUPPORTED = { status: "unsupported", messages: {}, closedQuestions: [] } as const;
 const reports: string[] = [];
 
+const QUOTA_EVENT = { kind: "event", id: "quota:1700000000000", text: "quota text", at: "2026-10-09T12:30:00.000Z" } as const;
+
 interface MountOptions {
   messages?: (typeof MESSAGE)[];
+  events?: (typeof QUOTA_EVENT)[];
+  eventNavigate?: boolean;
   approvals?: FakeApproval[];
   archive?: unknown;
   reclame?: boolean;
@@ -176,6 +180,10 @@ function Host(opts: MountOptions): React.JSX.Element {
     onApprovalDraft: (id: string, d: unknown) => setApprovalDrafts((all) => ({ ...all, [id]: d })),
     resolveSender: () => ({ resolved: true, name: "worker" }),
     renderNavigate: () => React.createElement("span", { className: "nav-marker" }),
+    events: opts.events,
+    renderEventNavigate: opts.eventNavigate
+      ? (event: { id: string }) => React.createElement("span", { className: "event-nav-marker" }, event.id)
+      : undefined,
     seedApprovalId: null,
     onSeedConsumed: () => {},
     onClose: () => {}
@@ -326,6 +334,25 @@ test("a blocking question stays above a newer information, which is listed with 
 
   const excerpts = [...container.querySelectorAll(".inbox-entry-excerpt")].map((e) => e.textContent);
   expect(excerpts).toEqual(["blocking text", "fyi text", "see the build"]);
+});
+
+// Mutants: `...events` dropped from the entries; the `renderEventNavigate` slot dropped from the modal.
+test("a host-derived event is listed with the messages, offers the host's navigation and is acknowledged through the Courrier", async () => {
+  await mount({ events: [QUOTA_EVENT], messages: [MESSAGE], eventNavigate: true });
+
+  expect([...container.querySelectorAll(".inbox-entry-excerpt")].map((e) => e.textContent)).toEqual(["quota text", "see the build"]);
+  await click(container.querySelector(".inbox-entry-event"));
+  const modal = container.querySelector(".inbox-modal")!;
+  expect(modal.querySelector(".event-nav-marker")?.textContent).toBe(QUOTA_EVENT.id);
+  expect(modal.querySelector(".inbox-modal-reply"), "an event has no recipient").toBeNull();
+  await click(buttonLabelled("inbox.ack"));
+  expect(calls.acks).toEqual(["event"]);
+});
+
+test("an event without a host navigation shows no navigation slot", async () => {
+  await mount({ events: [QUOTA_EVENT] });
+  await click(container.querySelector(".inbox-entry-event"));
+  expect(container.querySelector(".event-nav-marker")).toBeNull();
 });
 
 test("a hook request's Hand back reaches the Reclame callback as handback, not as a verdict", async () => {

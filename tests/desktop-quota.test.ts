@@ -64,6 +64,13 @@ const CAPTURED_REFERENCE_LIMIT =
 const EXCERPT_TRUST_DIALOG =
   "\x1b[1m\x1b[3;2HAccessing\x1b[1Cworkspace:\x1b[m\x1b[7;2HQuick\x1b[1Csafety\x1b[1Ccheck:\x1b[1CIs\x1b[1Cthis\x1b[1Ca\x1b[1Cproject\x1b[1Cyou\x1b[1Ccreated?\x1b[38;2;153;153;153m\x1b[18;2HEnter\x1b[1Cto\x1b[1Cconfirm\x1b[1C·\x1b[1CEsc\x1b[1Cto\x1b[1Ccancel";
 
+// Raw PTY bytes of Claude Code 2.1.322 at 80 columns on a real plan 429: the three notice rows arrive in one chunk.
+const CAPTURED_NATIVE_5H = "\u001b[?25l\u001b[38;2;153;153;153m\u001b[7;1H  ⎿  \u001b[38;2;255;107;128mYou've hit your 5-hour limit · resets 10:31pm (Europe/Paris)\u001b[m\r\n\u001b[K\u001b[38;2;153;153;153m\r\n●\u001b[1CUsage limit reached · continuing automatically at 10:31pm · esc to \u001b[m\r\n  \u001b[38;2;153;153;153mcancel\u001b[K\u001b[m\r\n\u001b[K\u001b[38;2;153;153;153m\r\n✻ Baked for 0s · done 20:31\u001b[K\u001b[m\u001b[13;3H\u001b[K\u001b[38;2;136;136;136m\r\n────────────────────────────────────────────────────────────────────────────────\u001b[m\r\n❯ \u001b[38;2;136;136;136m\r\n────────────────────────────────────────────────────────────────────────────────\u001b[38;2;255;255;255m\u001b[17;3H⚠\u001b[1CUsage\u001b[1Climit\u001b[1Creached\u001b[1C·\u001b[1Climit\u001b[1Cresets\u001b[1C10:31pm\u001b[18;5HContinuing\u001b[1Cautomatically\u001b[1Cat\u001b[1C10:31pm\u001b[1C·\u001b[1CEsc\u001b[1Cto\u001b[1Ccancel\u001b[38;2;153;153;153m\u001b[19;3HSLPROBE\u001b[51C◐\u001b[1Cmedium\u001b[1C·\u001b[1C/effort\u001b[38;2;255;193;7m\u001b[20;3H⏵⏵\u001b[1Cauto\u001b[1Cmode\u001b[1Con \u001b[38;2;153;153;153m(shift+tab\u001b[1Cto\u001b[1Ccycle)\u001b[1C·\u001b[1C←\u001b[1Cfor\u001b[1Cagents\u001b[15;3H\u001b[?25h";
+const CAPTURED_NATIVE_WEEKLY = "\u001b[?25l\u001b[38;2;153;153;153m\u001b[7;1H  ⎿  \u001b[38;2;255;107;128mYou've hit your weekly limit · resets 10:32pm (Europe/Paris)\u001b[m\r\n\u001b[K\u001b[38;2;153;153;153m\r\n●\u001b[1CUsage limit reached · continuing automatically at 10:32pm · esc to \u001b[m\r\n  \u001b[38;2;153;153;153mcancel\u001b[K\u001b[m\r\n\u001b[K\u001b[38;2;153;153;153m\r\n✻ Sautéed for 0s · done 20:32\u001b[K\u001b[m\u001b[13;3H\u001b[K\u001b[38;2;136;136;136m\r\n────────────────────────────────────────────────────────────────────────────────\u001b[m\r\n❯ \u001b[38;2;136;136;136m\r\n────────────────────────────────────────────────────────────────────────────────\u001b[38;2;255;255;255m\u001b[17;3H⚠\u001b[1CUsage\u001b[1Climit\u001b[1Creached\u001b[1C·\u001b[1Climit\u001b[1Cresets\u001b[1C10:32pm\u001b[18;5HContinuing\u001b[1Cautomatically\u001b[1Cat\u001b[1C10:32pm\u001b[1C·\u001b[1CEsc\u001b[1Cto\u001b[1Ccancel\u001b[38;2;153;153;153m\u001b[19;3HSLPROBE\u001b[51C◐\u001b[1Cmedium\u001b[1C·\u001b[1C/effort\u001b[38;2;255;193;7m\u001b[20;3H⏵⏵\u001b[1Cauto\u001b[1Cmode\u001b[1Con \u001b[38;2;153;153;153m(shift+tab\u001b[1Cto\u001b[1Ccycle)\u001b[1C·\u001b[1C←\u001b[1Cfor\u001b[1Cagents\u001b[15;3H\u001b[?25h";
+
+// The same screen at 40 columns: the notice wraps over several rows, 'continuing automatically' sits on the second.
+const CAPTURED_NATIVE_40 = "\u001b[?25l\u001b[38;2;153;153;153m\u001b[7;1H  ⎿  \u001b[38;2;255;107;128mYou've hit your 5-hour limit · \u001b[m\r\n \u001b[1C   \u001b[38;2;255;107;128mresets 8:50pm (Europe/Paris)\u001b[38;2;153;153;153m\u001b[10;1H● Usage limit reached ·\u001b[K\u001b[m\r\n  \u001b[38;2;153;153;153mcontinuing automatically at \u001b[m\r\n  \u001b[38;2;153;153;153m8:50pm · esc to cancel\u001b[K\u001b[m\u001b[13;3H\u001b[K\u001b[38;2;153;153;153m\r\n✻\u001b[1CBaked for 0s · done\u001b[1C20:48\u001b[K\u001b[38;2;136;136;136m\u001b[16;1H────────────────────────────────────────\u001b[m\r\n❯ \u001b[38;2;136;136;136m\r\n────────────────────────────────────────\u001b[38;2;255;255;255m\u001b[19;3H⚠\u001b[1CUsage\u001b[1Climit\u001b[1Creached\u001b[1C·\u001b[1Climit\u001b[1Cresets\u001b[20;3H8:50pm\u001b[21;5HContinuing\u001b[1Cautomatically\u001b[1Cat\u001b[1C8:50pm\u001b[22;5H·\u001b[1CEsc\u001b[1Cto\u001b[1Ccancel\u001b[38;2;255;193;7m\u001b[23;3H⏵⏵\u001b[1Cauto\u001b[1Cmode\u001b[1Con \u001b[38;2;153;153;153m(shift+tab\u001b[1Cto\u001b[1Ccycle)\u001b[24;21H◐\u001b[1Cmedium\u001b[1C·\u001b[1C/effort\u001b[17;3H\u001b[?25h";
+
 // ----- parseResetClock -----
 
 test("parses plain and minuted clocks, am/pm, spaces", () => {
@@ -318,6 +325,74 @@ test("stripAnsi stays a bare strip: a cursor-forward move leaves no space", () =
 
 test("a rate-limited sentence in a CLI row is not a quota notice", () => {
   expect(detectRateLimit("⎿  The request was rate limited", todayAt(9, 0))).toBeNull();
+});
+
+// Each row is stripped from the real capture above and tested alone, so removing one pattern turns exactly its row red.
+test.each([
+  ["the 5-hour limit row", "  ⎿  You've hit your 5-hour limit · resets 10:31pm (Europe/Paris)", todayAt(22, 31), false],
+  ["the weekly limit row", "  ⎿  You've hit your weekly limit · resets 10:32pm (Europe/Paris)", todayAt(22, 32), false],
+  ["the continuing-automatically row", "● Usage limit reached · continuing automatically at 10:31pm · esc to ", todayAt(22, 31), true],
+  ["the footer row", "⚠ Usage limit reached · limit resets 10:31pm", todayAt(22, 31), false]
+])("Claude Code 2.1.322: %s is a quota notice that carries its reset clock", (_label, row, resetAt, nativeResume) => {
+  const match = detectRateLimit(row, todayAt(9, 0));
+  expect(match?.resetAt).toBe(resetAt);
+  expect(match?.nativeResume === true).toBe(nativeResume);
+});
+
+test.each([
+  ["5-hour", CAPTURED_NATIVE_5H, todayAt(22, 31)],
+  ["weekly", CAPTURED_NATIVE_WEEKLY, todayAt(22, 32)]
+])("the %s notice screen as the CLI paints it raises one limit with its clock and marks the CLI's own resume", (_label, chunk, resetAt) => {
+  const d = new QuotaDetector(() => todayAt(9, 0));
+  const ev = collect(d);
+  d.feed("s1", chunk);
+  expect(ev.limits).toEqual([{ id: "s1", resetAt }]);
+  expect(d.hasNativeResume("s1")).toBe(true);
+  expect(d.hasNativeResume("other")).toBe(false);
+  d.stop();
+});
+
+// Mutant: `[\s\S]` replaced by `.` in NATIVE_RESUME (a wrapped notice goes unmarked).
+test("the notice wrapped over several rows at 40 columns still marks the CLI's own resume", () => {
+  const d = new QuotaDetector(() => todayAt(9, 0));
+  const ev = collect(d);
+  d.feed("s1", CAPTURED_NATIVE_40);
+  expect(ev.limits).toEqual([{ id: "s1", resetAt: todayAt(20, 50) }]);
+  expect(d.hasNativeResume("s1")).toBe(true);
+  d.stop();
+});
+
+test("an episode without the continuing-automatically row is not marked as resumed by the CLI", () => {
+  const d = new QuotaDetector(() => todayAt(9, 0));
+  d.feed("s1", "⎿  You've hit your 5-hour limit · resets 10:31pm (Europe/Paris)");
+  expect(d.hasNativeResume("s1")).toBe(false);
+  expect(detectRateLimit("⎿  You've hit your 5-hour limit · resets 10:31pm", todayAt(9, 0))).toEqual({ resetAt: todayAt(22, 31) });
+  d.stop();
+});
+
+test("the CLI's own resume mark ends with the episode", () => {
+  let now = todayAt(9, 0);
+  const d = new QuotaDetector(() => now);
+  const ev = collect(d);
+  d.feed("s1", CAPTURED_NATIVE_5H);
+  expect(d.hasNativeResume("s1")).toBe(true);
+  now += 2000;
+  d.feed("s1", "⠹ working… esc to interrupt");
+  expect(ev.clears).toEqual(["s1"]);
+  expect(d.hasNativeResume("s1")).toBe(false);
+  d.stop();
+});
+
+test("a bare 'Usage limit reached' row, or one without a clock, is no quota notice", () => {
+  for (const row of [
+    "● Usage limit reached",
+    "● Usage limit reached · continuing automatically",
+    "⚠ Usage limit reached",
+    "  Usage limit reached · limit resets 10:31pm",
+    "● It said: Usage limit reached · limit resets 10:31pm"
+  ]) {
+    expect(detectRateLimit(row, todayAt(9, 0)), row).toBeNull();
+  }
 });
 
 test("busy cues end the episode (manual or auto resume) and re-arm detection", () => {

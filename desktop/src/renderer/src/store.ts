@@ -32,6 +32,12 @@ import {
   queueReplacedDelta
 } from '@shared/roadmap-sync'
 import { countPendingInboxMessages } from '@shared/inbox-pending'
+import {
+  createQuotaNoticeTracker,
+  limitedSessionIds,
+  listedQuotaEpisode,
+  type QuotaEpisode
+} from '@shared/quota-notice'
 import { shouldShowTemplateAppliedToast } from '@shared/template-apply-outcome'
 import { workspaceRestoreToastKeyFor } from '@shared/workspace-restore-outcome'
 import { keepDrafts, type QuestionDraft } from './components/approval-answers'
@@ -142,6 +148,10 @@ interface DeckState {
    * An ABSENT key is the third state ('unread') and is never written.
    */
   inboxAckState: Record<string, InboxAckStatus>
+  /** The open quota episode (tiles rate limited right now), or null; fed by the sessions, see quotaTracker. */
+  quotaEpisode: QuotaEpisode | null
+  /** The open episode has lasted long enough for the Courrier to list it. */
+  quotaNoticeShown: boolean
   /**
    * Reply drafts in flight, keyed by the same entry key. Lives in the store
    * and not in the panel: `InboxPanel` is unmounted when the Courrier is
@@ -522,10 +532,12 @@ export function inboxPendingCount(s: DeckState): number {
  * navigation bar -- bars must call this, never re-add the terms themselves.
  * Blocking questions count until resolved, drafts until opened. An
  * information counts like an unread message: it is in the way until
- * acknowledged, but nobody is stopped on it.
+ * acknowledged, but nobody is stopped on it. So does the quota notice while
+ * it is listed.
  */
 export function inboxBadgeCount(s: DeckState): number {
-  return inboxPendingCount(s) + s.pendingApprovals.length + s.graphDrafts.length
+  const quotaNotice = listedQuotaEpisode(s.quotaEpisode, s.quotaNoticeShown, s.inboxAckState) === null ? 0 : 1
+  return inboxPendingCount(s) + s.pendingApprovals.length + s.graphDrafts.length + quotaNotice
 }
 
 /**
@@ -589,6 +601,8 @@ export const useDeck = create<DeckState>((set, get) => ({
   pendingApprovals: [],
   inboxArchive: { status: 'pending', messages: {}, closedQuestions: [] },
   inboxAckState: {},
+  quotaEpisode: null,
+  quotaNoticeShown: false,
   inboxReplyDrafts: {},
   approvalDrafts: {},
   graphDrafts: [],
@@ -1377,3 +1391,17 @@ export const useDeck = create<DeckState>((set, get) => ({
     })
   }
 }))
+
+// Feeds the quota notice from the sessions, wherever they are set: init, the
+// sessions broadcast and a remote refresh all reach it through the store.
+const quotaTracker = createQuotaNoticeTracker(
+  {
+    now: () => Date.now(),
+    setTimer: (run, ms) => setTimeout(run, ms),
+    clearTimer: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>)
+  },
+  ({ episode, shown }) => useDeck.setState({ quotaEpisode: episode, quotaNoticeShown: shown })
+)
+useDeck.subscribe((state, previous) => {
+  if (state.sessions !== previous.sessions) quotaTracker.observe(limitedSessionIds(state.sessions).length)
+})

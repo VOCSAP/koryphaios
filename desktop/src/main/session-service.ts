@@ -396,7 +396,7 @@ export class SessionService extends EventEmitter {
       this.emit('data', e)
       this.outputAt.set(e.id, Date.now())
       this.thinkingDetector.feed(e.id, e.data)
-      if (!this.quotaGateActive(e.id)) this.quotaDetector.feed(e.id, e.data)
+      this.quotaDetector.feed(e.id, e.data)
       this.attentionDetector.feed(e.id, e.data)
       this.startupAckDetector.feed(e.id, e.data)
       const oscSnap = this.oscParserFor(e.id).feed(e.data)
@@ -1912,9 +1912,9 @@ export class SessionService extends EventEmitter {
   }
 
   /**
-   * True when the Deck's own quota detector+injector must stay off for a claude
+   * True when the Deck must not type the auto-resume keystrokes into a claude
    * session; gates only the default path where autoResume is undefined, never
-   * an explicit per-session override.
+   * an explicit per-session override. Detection runs either way.
    * An operator who explicitly sets autoResume (true or false) always wins over
    * this gate.
    */
@@ -1934,7 +1934,8 @@ export class SessionService extends EventEmitter {
    * Injects Escape, a 100ms settle, then 'continue' + Enter, exactly what a
    * human would type.
    * Fires only when quotaGateActive(id) is false, auto-resume is enabled, the
-   * PTY is alive, and the episode is still open.
+   * PTY is alive, the episode is still open and the CLI does not resume it by
+   * itself: that Escape would cancel the CLI's own resume.
    */
   private autoResume(id: string): void {
     const def = this.defs.find((d) => d.id === id)
@@ -1943,6 +1944,10 @@ export class SessionService extends EventEmitter {
     if (this.quotaGateActive(id)) return
     const enabled = def.autoResume ?? this.getConfig().autoResumeQuota
     if (!enabled || !r.rateLimited || !this.pty.isAlive(id)) return
+    if (this.quotaDetector.hasNativeResume(id)) {
+      logInfo('quota', `auto-resume skipped for ${id}: the CLI resumes this episode by itself and an Escape would cancel it`)
+      return
+    }
 
     if (!this.pty.write(id, '\x1b')) return
     const t = setTimeout(() => {
