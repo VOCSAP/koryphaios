@@ -18,6 +18,7 @@ export function InboxPanel(): React.JSX.Element {
   const t = useT()
   const messages = useDeck((s) => s.inboxMessages)
   const approvals = useDeck((s) => s.pendingApprovals)
+  const archive = useDeck((s) => s.inboxArchive)
   const sessions = useDeck((s) => s.sessions)
   const ackState = useDeck((s) => s.inboxAckState)
   const replyDrafts = useDeck((s) => s.inboxReplyDrafts)
@@ -156,6 +157,8 @@ export function InboxPanel(): React.JSX.Element {
       t={t}
       messages={messages}
       approvals={approvals}
+      archive={archive}
+      report={(message) => window.api.reportError('inbox', message)}
       readStates={ackState}
       reclame={reclame}
       courrier={courrier}

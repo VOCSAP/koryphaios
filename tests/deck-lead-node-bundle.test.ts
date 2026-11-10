@@ -64,7 +64,7 @@ async function readUntil(
   throw new Error(`no JSON-RPC response with id ${wantedId}`);
 }
 
-test("the node-bundled server-deck.mjs starts under node, answers initialize, and lists exactly the 5 named tools", async () => {
+test("the node-bundled server-deck.mjs starts under node, answers initialize, and lists exactly the 7 named tools", async () => {
   const outDir = mkdtempSync(join(tmpdir(), "cp-deck-bundle-"));
   dirs.push(outDir);
   const outfile = join(outDir, "server-deck.mjs");
@@ -131,6 +131,6 @@ test("the node-bundled server-deck.mjs starts under node, answers initialize, an
   };
   const names = (listResponse.result?.tools ?? []).map((t) => t.name).sort();
   expect(names).toEqual(
-    ["ask_operator", "ask_operator_wait", "notify_operator", "graph_draft_prepare", "graph_draft_send"].sort()
+    ["ask_operator", "ask_operator_wait", "notify_operator", "graph_draft_prepare", "graph_draft_send", "inbox_list", "inbox_close"].sort()
   );
 }, 30_000);

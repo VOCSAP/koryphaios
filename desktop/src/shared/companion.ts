@@ -172,6 +172,7 @@ export const COMPANION_MANIFEST = {
   inboxMarkSeen: { kind: 'invoke', channel: 'inbox:mark-seen' },
   inboxAck: { kind: 'invoke', channel: 'inbox:ack' },
   inboxDelete: { kind: 'invoke', channel: 'inbox:delete' },
+  inboxArchive: { kind: 'invoke', channel: 'inbox:archive' },
 
   // companion control (desktop window only — a remote must never manage its
   // own bridge: starting/stopping the server is a physical-presence action)
@@ -226,6 +227,7 @@ export const COMPANION_MANIFEST = {
   onSessionAttention: { kind: 'event', channel: 'session:attention' },
   onInboxMessages: { kind: 'event', channel: 'inbox:new' },
   onInboxCleared: { kind: 'event', channel: 'inbox:cleared' },
+  onInboxArchive: { kind: 'event', channel: 'inbox:archive-changed' },
   onPendingApprovals: { kind: 'event', channel: 'approvals:pending' },
   onGraphDrafts: { kind: 'event', channel: 'graphDrafts:update' },
   onRoadmapSync: { kind: 'event', channel: 'roadmap:sync' },
@@ -401,6 +403,7 @@ export const CHANNEL_TIERS: Readonly<Record<string, 0 | 1 | 2 | 3>> = {
   'usage:read': 0,
   'inbox:history': 0,
   'inbox:ack-state': 0,
+  'inbox:archive': 0,
   'inbox:mark-seen': 1,
   'inbox:ack': 1,
   // Deletes SHARED broker state (any Deck attached to the group, not just

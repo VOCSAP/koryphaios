@@ -194,18 +194,23 @@ export function mergeInboxReads<T extends { id: number }>(legacy: readonly T[], 
   return [...byId.values()].sort((a, b) => a.id - b.id)
 }
 
+/**
+ * `run` is the entry-state snapshot of the run read, null when there was no
+ * run read or it failed. The legacy read never carries one.
+ */
 export async function readOperatorInboxBoth<T extends { id: number }>(deps: {
   readLegacy: () => Promise<T[]>
-  readRun?: () => Promise<T[]>
+  readRun?: () => Promise<{ rows: T[]; entries?: unknown }>
   onRunError: (e: unknown) => void
-}): Promise<T[]> {
+}): Promise<{ rows: T[]; run: { entries: unknown } | null }> {
   const legacy = await deps.readLegacy()
-  if (!deps.readRun) return legacy
+  if (!deps.readRun) return { rows: legacy, run: null }
   try {
-    return mergeInboxReads(legacy, await deps.readRun())
+    const run = await deps.readRun()
+    return { rows: mergeInboxReads(legacy, run.rows), run: { entries: run.entries } }
   } catch (e) {
     deps.onRunError(e)
-    return legacy
+    return { rows: legacy, run: null }
   }
 }
 
@@ -262,6 +267,12 @@ export interface InboxWireRow {
   sent_at: string
 }
 
+/** What a poll read: the merged rows, and the run's entry states with the run they belong to. */
+export interface InboxPollRead {
+  rows: InboxWireRow[]
+  run: { runRef: string; entries: unknown; seq: number } | null
+}
+
 export interface InboxEffectsDeps {
   sessionDir: SessionDirAccessor
   epoch: () => number
@@ -271,12 +282,14 @@ export interface InboxEffectsDeps {
   deleteBroker: (ids: number[]) => Promise<number>
   broadcast: (channel: 'inbox:new' | 'inbox:cleared', payload?: unknown) => void
   notify: (batch: InboxMessage[]) => void
+  /** `scopeKey` is `epoch:groupId:runRef`; called only while the polled scope is still the live one. */
+  applyEntryStates: (scopeKey: string, entries: unknown, seq: number) => void
   info: (message: string) => void
   error: (message: string, e: unknown) => void
 }
 
 export interface InboxEffects {
-  poll: (read: (captured: InboxEffectsScope) => Promise<InboxWireRow[]>) => Promise<void>
+  poll: (read: (captured: InboxEffectsScope) => Promise<InboxPollRead>) => Promise<void>
   purge: () => Promise<void>
   delete: (ids: number[]) => Promise<number>
   /** Journal-write retries that belong to the current scope. */
@@ -326,7 +339,8 @@ export function createInboxEffects(deps: InboxEffectsDeps): InboxEffects {
     pollInboxForCapturedScope({
       context,
       read,
-      apply: (rows, captured) => {
+      apply: ({ rows, run }, captured) => {
+        if (run) deps.applyEntryStates(`${captured.epoch}:${captured.groupId}:${run.runRef}`, run.entries, run.seq)
         if (rows.length === 0 && retry.length === 0) return
         if (!writable('history append')) return
         const batch: InboxMessage[] = rows.map((m) => ({ id: m.id, from: m.from_peer_id, text: m.text, sentAt: m.sent_at }))

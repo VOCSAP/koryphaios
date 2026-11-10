@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { randomBytes } from "node:crypto";
+import { EventEmitter } from "node:events";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -19,11 +20,17 @@ import {
   writeSessionIdentityFile,
   type WriterGeneration,
 } from "../shared/peer-cache.ts";
+import { generateCredential, INBOX_GATES, verifyInboxProof, type ApprovalAuthProof } from "../shared/approval.ts";
+import type { CompanionIdentity } from "../shared/roadmap-dispatch.ts";
 import {
   createPeersSession,
+  handleGraphDraftPrepare,
+  handleInboxClose,
+  handleInboxList,
   rememberBounded,
   sendRegister,
   TOOLS,
+  type OperatorToolContext,
   type RegisterAttempt,
   type PeersSession,
   type PeersSessionDeps,
@@ -1577,5 +1584,170 @@ describe("the channel and its limits", () => {
     await sendRegister({ ...base, signed: null }, post, signal, () => {});
 
     expect(seen).toEqual([signal, signal]);
+  });
+});
+
+describe("the kory-operator inbox tools", () => {
+  const RUN = "11111111-1111-4111-8111-111111111111";
+  const TILE_INSTANCE = ["tile", "instance", "marker"].join("-");
+  const DECK_BEARER = ["deck", "bearer"].join("-");
+  const runRoot = generateCredential();
+  const identity: CompanionIdentity = {
+    host: "h",
+    peerId: "lead-peer",
+    groupId: "g-run",
+    instanceToken: TILE_INSTANCE,
+    inboxBinding: { version: 1, runRef: RUN, groupId: "g-run" },
+    operatorId: "op-1",
+    projectKey: "",
+    fromPeer: "lead-peer",
+  };
+  let credDir = "";
+  beforeEach(() => {
+    credDir = mkdtempSync(join(tmpdir(), "inbox-tools-"));
+  });
+  afterEach(() => rmSync(credDir, { recursive: true, force: true }));
+
+  function writeCred(over: Record<string, unknown> = {}): string {
+    const file = join(credDir, "cred.json");
+    writeFileSync(file, JSON.stringify({
+      brokerUrl: "http://broker.test", operatorId: "op-1", tokenId: "root-id", privateKey: runRoot.privateKey, publicKey: runRoot.publicKey,
+      inbox: { version: 1, run_ref: RUN, group_id: "g-run" }, ...over,
+    }));
+    return file;
+  }
+
+  function ctx(answer: unknown, opts: { status?: number; credFile?: string | null; deck?: { url: string; token: string } } = {}) {
+    const sent: Array<{ url: string; headers: Record<string, string>; body: Record<string, unknown> }> = [];
+    const errors: string[] = [];
+    const credFile = opts.credFile === undefined ? writeCred() : opts.credFile;
+    const context: OperatorToolContext = {
+      broker: {} as never,
+      env: credFile ? { CLAUDE_PEERS_APPROVAL_FILE: credFile } : {},
+      role: null,
+      cwd: "/",
+      log: { log: () => {}, logError: (m: string) => void errors.push(m) },
+      deck: {
+        ...(opts.deck ?? { url: "http://deck.test", token: DECK_BEARER }),
+        fetch: (async (url: string, init: RequestInit) => {
+          sent.push({ url, headers: init.headers as Record<string, string>, body: JSON.parse(String(init.body)) });
+          return new Response(JSON.stringify({ ok: true, result: answer }), { status: opts.status ?? 200 });
+        }) as never,
+      },
+    };
+    return { context, sent, errors };
+  }
+  const textOf = (r: { content: Array<{ text: string }> }) => r.content[0]!.text;
+
+  // Mutants: the raw reason signed; the list gate used for a close; the args spread into the body.
+  test("inbox_close signs the cleaned reason under the author close gate and sends only op and the author proof", async () => {
+    const h = ctx({ outcome: "closed", id: "m_x" });
+    const got = await handleInboxClose(
+      { id: "m_x", reason: `no longer\nneeded${String.fromCharCode(7)}`, role: "supervisor", authority: "supervisor", run_ref: "r", author: "forged" },
+      identity,
+      h.context
+    );
+
+    expect(textOf(got)).toBe("Closed m_x.");
+    expect("isError" in got).toBe(false);
+    expect(h.sent).toHaveLength(1);
+    expect(h.sent[0]!.url).toBe("http://deck.test/inbox");
+    expect(h.sent[0]!.headers.Authorization).toBe(`Bearer ${DECK_BEARER}`);
+    const body = h.sent[0]!.body as { op: string; author: { payload: Record<string, unknown>; auth: ApprovalAuthProof } };
+    expect(Object.keys(body).sort()).toEqual(["author", "op"]);
+    expect(body.op).toBe("close");
+    expect(body.author.payload).toEqual({ inbox_operation: "close", entry_id: "m_x", reason: "no longer needed", instance_token: TILE_INSTANCE });
+    expect(verifyInboxProof(runRoot.publicKey, body.author.payload, body.author.auth, INBOX_GATES.authorClose).ok).toBe(true);
+    expect(verifyInboxProof(runRoot.publicKey, body.author.payload, body.author.auth, INBOX_GATES.authorList).ok).toBe(false);
+    expect((body.author.auth as { token_id?: string }).token_id).toBe("root-id");
+  });
+
+  // Mutants: inbox_list signed under the close gate; the cursor dropped or moved into the signed payload.
+  test("inbox_list signs under the author list gate, passes the cursor beside the proof and renders the page as JSON", async () => {
+    const page = { outcome: "listed", entries: [{ id: "m_1", type: "message", author: "p", created_at: "t", text: "x", closable: true }], next_cursor: "n2" };
+    const h = ctx(page);
+    const got = await handleInboxList({ cursor: "n1", limit: 99 }, identity, h.context);
+
+    expect(JSON.parse(textOf(got))).toEqual({ entries: page.entries, next_cursor: "n2" });
+    const body = h.sent[0]!.body as { op: string; cursor: string; author: { payload: Record<string, unknown>; auth: ApprovalAuthProof } };
+    expect(Object.keys(body).sort()).toEqual(["author", "cursor", "op"]);
+    expect(body.cursor).toBe("n1");
+    expect(body.author.payload).toEqual({ inbox_operation: "list", instance_token: TILE_INSTANCE });
+    expect(verifyInboxProof(runRoot.publicKey, body.author.payload, body.author.auth, INBOX_GATES.authorList).ok).toBe(true);
+  });
+
+  // Mutant: the rendering chosen from a text instead of the typed outcome.
+  test("each close outcome renders its own sentence, and a failure is an error", async () => {
+    const cases: Array<[unknown, string]> = [
+      [{ outcome: "settled", state: "closed" }, "Not closed: the item is already closed."],
+      [{ outcome: "unknown" }, "Not closed: no open item m_x in this run."],
+      [{ outcome: "forbidden" }, "Not closed: you may not close this item."],
+      [{ outcome: "not-closable" }, "Not closed: this item has no closable answer route."],
+      [{ outcome: "invalid", message: "id is not an inbox entry id" }, "Not closed: id is not an inbox entry id"],
+      [{ outcome: "unavailable", cause: "mandate not ready" }, "inbox_close unavailable: mandate not ready. Retry later."],
+    ];
+    for (const [answer, text] of cases) {
+      const got = await handleInboxClose({ id: "m_x", reason: "r" }, identity, ctx(answer).context);
+      expect({ answer, text: textOf(got), isError: (got as { isError?: boolean }).isError }).toEqual({ answer, text, isError: true });
+    }
+  });
+
+  // Mutants: a missing credential, registration or Deck endpoint still posting; an invalid reason still posting.
+  test("without the run credential, a confirmed registration or the Deck endpoint, or with an invalid argument, nothing is posted", async () => {
+    const unconfirmed: CompanionIdentity = { ...identity, inboxBinding: null };
+    const runs: Array<[ReturnType<typeof ctx>, unknown, CompanionIdentity, RegExp]> = [
+      [ctx({}, { credFile: null }), { id: "m_x", reason: "r" }, identity, /^inbox_close unavailable: the run credential is unavailable/],
+      [ctx({}), { id: "m_x", reason: "r" }, unconfirmed, /^inbox_close unavailable: Inbox registration is not yet confirmed/],
+      [ctx({}, { deck: { url: "", token: DECK_BEARER } }), { id: "m_x", reason: "r" }, identity, /^inbox_close unavailable: the Deck control endpoint/],
+      [ctx({}, { deck: { url: "http://deck.test", token: "" } }), { id: "m_x", reason: "r" }, identity, /^inbox_close unavailable: the Deck control endpoint/],
+      [ctx({}), { id: "m_x", reason: "" }, identity, /^Not closed: reason must not be empty/],
+      [ctx({}), { id: "m_x", reason: "x".repeat(501) }, identity, /^Not closed: reason must be at most 500/],
+      [ctx({}), { id: "i".repeat(65), reason: "r" }, identity, /^Not closed: id must be/],
+    ];
+    for (const [h, args, who, pattern] of runs) {
+      const got = await handleInboxClose(args, who, h.context);
+      expect(textOf(got)).toMatch(pattern);
+      expect(h.sent).toEqual([]);
+    }
+    const listNoCred = ctx({}, { credFile: null });
+    expect(textOf(await handleInboxList({}, identity, listNoCred.context))).toMatch(/^inbox_list unavailable: the run credential/);
+    const listBadCursor = ctx({});
+    expect(textOf(await handleInboxList({ cursor: "" }, identity, listBadCursor.context))).toMatch(/^inbox_list refused: cursor/);
+    expect([...listNoCred.sent, ...listBadCursor.sent]).toEqual([]);
+  });
+
+  // Mutant: the one-shot spawned with ctx.env unchanged.
+  test("the graph_draft_prepare one-shot never inherits the tile's deck-control endpoint or Bearer", async () => {
+    const envs: Array<Record<string, string | undefined>> = [];
+    const h = ctx({});
+    h.context.env = { DECK_CONTROL_URL: "http://deck.test", DECK_CONTROL_TOKEN: DECK_BEARER, deck_control_extra: "x", KEPT: "1" };
+    h.context.spawn = ((_cmd: string, _args: string[], opts: { env: Record<string, string | undefined> }) => {
+      envs.push(opts.env);
+      const proc = new EventEmitter() as EventEmitter & { stdout: EventEmitter & { setEncoding(): void }; stderr: EventEmitter & { setEncoding(): void }; kill(): void };
+      proc.stdout = Object.assign(new EventEmitter(), { setEncoding: () => {} });
+      proc.stderr = Object.assign(new EventEmitter(), { setEncoding: () => {} });
+      proc.kill = () => {};
+      queueMicrotask(() => {
+        proc.stdout.emit("data", "# A title\nthe prompt");
+        proc.emit("close", 0, null);
+      });
+      return proc;
+    }) as never;
+
+    const got = await handleGraphDraftPrepare({ question: "why?" }, h.context);
+
+    expect("isError" in got).toBe(false);
+    expect(envs).toEqual([{ KEPT: "1" }]);
+  });
+
+  test("a Deck answering 401 is unavailable, and no log line carries the reason or the instance", async () => {
+    const h = ctx({}, { status: 401 });
+    const got = await handleInboxClose({ id: "m_x", reason: "SECRET-REASON" }, identity, h.context);
+    expect(textOf(got)).toBe("inbox_close unavailable: the Deck answered 401. Retry later.");
+    expect(h.errors.length).toBeGreaterThan(0);
+    for (const line of h.errors) {
+      expect(line).not.toContain("SECRET-REASON");
+      expect(line).not.toContain(TILE_INSTANCE);
+    }
   });
 });

@@ -37,6 +37,7 @@ function sliceAuth(): ReturnType<typeof createApprovalAuth> {
     queryOne: <T,>(): T => ({ public_key: op.publicKey }) as T,
     queryAll: <T,>(): T[] => [],
     run: (): void => {},
+    instanceOnTile: (): boolean => false,
     resolveTrustedOperator: (): string => op.publicKey,
     rememberNonce: (): boolean => true,
   });

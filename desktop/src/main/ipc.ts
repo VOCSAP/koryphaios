@@ -16,6 +16,7 @@ import type {
   HelpExchange,
   I18nPayload,
   DeckGraphDraft,
+  InboxArchiveSnapshot,
   InboxReplyOutcome,
   LaunchConfig,
   OperatorTrustStatusEvent,
@@ -246,6 +247,8 @@ interface IpcDeps {
   purgeInboxSession: () => Promise<void>
   /** Courrier lot 1E (card 1e81ee7b): manual delete, see inbox-store.ts. */
   inboxDelete: (ids: number[]) => Promise<number>
+  /** Current archive of the run's settled entries. */
+  inboxArchive: () => InboxArchiveSnapshot
   /**
    * SESSION-scoped state dir of this window, sessions/<groupId>/ under the
    * shared state dir (session-state.ts). Every file that belongs to the
@@ -307,6 +310,7 @@ export function registerIpc({
   inboxReply,
   purgeInboxSession,
   inboxDelete,
+  inboxArchive,
   ensureControlServer,
   sessionStateDir,
   ttsr,
@@ -1593,6 +1597,7 @@ export function registerIpc({
       journal.add('error', `inbox ack migration-seed persist failed: ${e instanceof Error ? e.message : String(e)}`)
     )
   )
+  regHandle('inbox:archive', () => inboxArchive())
   regHandle('inbox:mark-seen', (_e, entry: AckableInboxEntry) =>
     appendSeenKey(sessionStateDir(), inboxEntryKey(entry), undefined, (e) =>
       journal.add('error', `inbox seen persist failed: ${e instanceof Error ? e.message : String(e)}`)

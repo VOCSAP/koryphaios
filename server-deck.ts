@@ -19,6 +19,8 @@ import {
   handleAskOperator,
   handleNotifyOperator,
   handleGraphDraftSend,
+  handleInboxClose,
+  handleInboxList,
   type OperatorToolContext,
 } from "./shared/peers-session.ts";
 
@@ -41,6 +43,7 @@ const toolContext: OperatorToolContext = {
   role: null,
   cwd: process.cwd(),
   log: { log, logError },
+  deck: { url: process.env.DECK_CONTROL_URL || "", token: process.env.DECK_CONTROL_TOKEN || "" },
 };
 
 const DECK_TOOL_NAMES = OPERATOR_TOOLS;
@@ -121,6 +124,10 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
       return handleNotifyOperator(args, await resolveCompanionIdentity(), toolContext);
     case "graph_draft_send":
       return handleGraphDraftSend(args, await resolveCompanionIdentity(), toolContext);
+    case "inbox_list":
+      return handleInboxList(args, await resolveCompanionIdentity(), toolContext);
+    case "inbox_close":
+      return handleInboxClose(args, await resolveCompanionIdentity(), toolContext);
     default:
       throw new Error(`Unknown tool: ${name}`);
   }

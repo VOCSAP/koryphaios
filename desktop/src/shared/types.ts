@@ -1856,6 +1856,28 @@ export type InboxEntry =
   | { kind: 'message'; message: InboxMessage }
   | { kind: 'event'; id: string; text: string; at: string }
   | { kind: 'approval'; approval: Approval }
+  | { kind: 'closed-question'; approval: Approval }
+
+/** Business state of one message entry of the run, as the broker's registry reports it. */
+export interface InboxEntryState {
+  state: 'open' | 'responded' | 'closed'
+  settledAt: string | null
+  closeReason?: string
+  closedByAuthority?: InboxCloseAuthority
+  closedByPeerId?: string | null
+}
+
+/**
+ * What main holds of the run's settled entries, pushed whole on every change.
+ * 'pending': no run read has succeeded yet; 'unsupported': the broker answers
+ * without entry states; 'ready': `messages` is the broker's snapshot, keyed by
+ * `inboxEntryKey`.
+ */
+export interface InboxArchiveSnapshot {
+  status: 'pending' | 'unsupported' | 'ready'
+  messages: Record<string, InboxEntryState>
+  closedQuestions: Approval[]
+}
 
 /**
  * The subset of InboxEntry an ACK is meaningful for. Acknowledging a
@@ -2572,6 +2594,8 @@ export interface DeckApi {
    * (including this window) re-hydrates from `inboxHistory()`.
    */
   inboxDelete(ids: number[]): Promise<number>
+  /** Current archive of the run's settled entries; the subscription below keeps it fresh. */
+  inboxArchive(): Promise<InboxArchiveSnapshot>
 
   // companion LAN bridge (PLAN MB1/MB2) — desktop window only; a remote
   // client gets 'remote-blocked' on all three (physical-presence actions).
@@ -2731,6 +2755,8 @@ export interface DeckApi {
    * re-hydrate via `inboxHistory()` rather than reconciling a diff.
    */
   onInboxCleared(cb: () => void): () => void
+  /** The whole archive of the run's settled entries, pushed only when it changed. */
+  onInboxArchive(cb: (archive: InboxArchiveSnapshot) => void): () => void
   /**
    * Full pending/expired_notif approval list for this operator (family 3,
    * non-destructive broker poll — same replace-whole-state contract as

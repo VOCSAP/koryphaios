@@ -497,6 +497,13 @@ export function validateCloseReason(raw: unknown): ValidationResult<string> {
   return { ok: true, value };
 }
 
+const INBOX_ENTRY_ID_RE = /^(?:m_[0-9a-f-]{36}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/;
+
+/** A message entry (`m_` + 36) or a question id (lowercase UUID); the `m_` prefix decides which. */
+export function isInboxEntryId(v: unknown): v is string {
+  return typeof v === "string" && INBOX_ENTRY_ID_RE.test(v);
+}
+
 /**
  * Questions come from an agent (hostile input #4) and their text reaches the
  * operator, so every string is stripped and capped. Anything that would make

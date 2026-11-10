@@ -45,6 +45,7 @@ interface TokenRow {
   parent_token_id?: string | null;
   authority?: string | null;
   caller_ref?: string | null;
+  tile_hash?: string | null;
 }
 
 /**
@@ -57,14 +58,17 @@ function fakeDb(seed: {
   tokens?: Record<string, TokenRow>;
   trustedOperators?: Record<string, string>;
   bindings?: Record<string, InboxInstanceBinding>;
+  tiles?: Record<string, { group_id: string; tile_hash: string }>;
 } = {}): {
   deps: ApprovalAuthDeps;
   nonces: string[];
+  tileCalls: Array<[string, string, string]>;
 } {
   const operators = seed.operators ?? {};
   const tokens = seed.tokens ?? {};
   const trustedOperators = seed.trustedOperators ?? operators;
   const nonces: string[] = [];
+  const tileCalls: Array<[string, string, string]> = [];
   const deps: ApprovalAuthDeps = {
     queryOne<T>(sql: string, params: unknown[]): T | null {
       if (sql.includes("approval_operators")) {
@@ -94,8 +98,13 @@ function fakeDb(seed: {
     resolveInstanceBinding(instanceRef: string): InboxInstanceBinding | null {
       return seed.bindings?.[instanceRef] ?? null;
     },
+    instanceOnTile(instanceToken: string, groupId: string, tileHash: string): boolean {
+      tileCalls.push([instanceToken, groupId, tileHash]);
+      const tile = seed.tiles?.[instanceToken];
+      return tile !== undefined && tile.group_id === groupId && tile.tile_hash === tileHash;
+    },
   };
-  return { deps, nonces };
+  return { deps, nonces, tileCalls };
 }
 
 function newOperator(): { cred: ApprovalCredential; id: string } {
@@ -189,6 +198,7 @@ describe("approvalWhere is the single clause producer", () => {
     // row path, where a legacy row's '' actually arrives.
     const legacyRow = { id: "ap-old", operator_id: "op-1", project_key: "" };
     const auth = createApprovalAuth({
+      instanceOnTile: (): boolean => false,
       queryOne: <T,>(): T => legacyRow as T,
       queryAll: <T,>(): T[] => [],
       run: (): void => {},
@@ -484,6 +494,7 @@ describe("the gateway path, the one scope with no credential", () => {
     trusted = true
   ): ReturnType<typeof createApprovalAuth> {
     const deps: ApprovalAuthDeps = {
+      instanceOnTile: (): boolean => false,
       queryOne<T>(sql: string, params: unknown[]): T | null {
         if (!sql.includes("pending_approvals")) throw new Error(`unexpected: ${sql}`);
         return String(params[0]) === row.id ? (row as T) : null;
@@ -550,6 +561,7 @@ const INBOX_PROJECT = "github.com/vocsap/koryphaios";
 const INSTANCE_A = "instance-token-A";
 const INSTANCE_B = "instance-token-B";
 const UNREGISTERED_INSTANCE = "instance-nobody-registered";
+const TILE_HASH = "tile-hash-of-the-caller";
 
 /**
  * One operator, one live run root, three mandates hanging from it and two bound
@@ -578,6 +590,7 @@ function inboxWorld() {
       parent_token_id: "root",
       authority,
       caller_ref: `${authority}-1`,
+      tile_hash: TILE_HASH,
     });
   const tokens: Record<string, TokenRow> = {
     root: base(rootCred, { inbox_purpose: "run", run_ref: INBOX_RUN, group_id: INBOX_GROUP }),
@@ -590,7 +603,11 @@ function inboxWorld() {
     [deriveInstanceRef(INSTANCE_A)]: { ...binding },
     [deriveInstanceRef(INSTANCE_B)]: { ...binding },
   };
-  const { deps } = fakeDb({ operators: { [op.id]: op.cred.publicKey }, tokens, bindings });
+  const tiles: Record<string, { group_id: string; tile_hash: string }> = {
+    [INSTANCE_A]: { group_id: INBOX_GROUP, tile_hash: TILE_HASH },
+    [INSTANCE_B]: { group_id: INBOX_GROUP, tile_hash: TILE_HASH },
+  };
+  const { deps, tileCalls } = fakeDb({ operators: { [op.id]: op.cred.publicKey }, tokens, bindings, tiles });
   const auth = createApprovalAuth(deps);
   const sign = (payload: Record<string, unknown>, cred: ApprovalCredential, tokenId: string, gate: InboxGate) => ({
     ...payload,
@@ -644,7 +661,7 @@ function inboxWorld() {
     if (isAuthError(got)) throw new Error(`actor refused: ${got.error}`);
     return got;
   };
-  return { op, rootCred, creds, tokens, bindings, auth, sign, entry, envelope, verify, actor };
+  return { op, rootCred, creds, tokens, bindings, tiles, tileCalls, auth, sign, entry, envelope, verify, actor };
 }
 
 describe("Inbox token purpose is read from the stored row", () => {
@@ -704,7 +721,7 @@ describe("Inbox token purpose is read from the stored row", () => {
     expect(isAuthError(asRun)).toBe(false);
     if (isAuthError(asRun)) return;
     expect(asRun.purpose).toBe("run");
-    expect(asRun.inbox).toEqual({ run_ref: INBOX_RUN, group_id: INBOX_GROUP, parent_token_id: null, authority: null, caller_ref: null });
+    expect(asRun.inbox).toEqual({ run_ref: INBOX_RUN, group_id: INBOX_GROUP, parent_token_id: null, authority: null, caller_ref: null, tile_hash: null });
   });
 
   test("a v1 proof is accepted only at its own gate and a legacy proof is not accepted as v1", () => {
@@ -924,17 +941,49 @@ describe("a mandate is only as live as its run parent", () => {
 });
 
 describe("verifyInboxAction: object first, then actor", () => {
-  // Mutant: the `inbox-close` guard on a missing author proof removed in verifyInboxAction.
-  test("a close needs the author proof whatever the mandate, a list does not", () => {
+  // Mutants: the missing-author-proof guard removed, or limited to inbox-close again.
+  test("a close and a list both need the author proof whatever the mandate", () => {
     const w = inboxWorld();
     for (const mandate of ["lead", "supervisor", "author"] as const) {
       expect({ mandate, got: w.verify({ mandate }) }).toEqual({
         mandate,
         got: { error: "an author proof is required to close", status: 400 },
       });
+      expect({ mandate, got: w.verify({ mandate, operation: "list" }, "inbox-list") }).toEqual({
+        mandate,
+        got: { error: "an author proof is required to list", status: 400 },
+      });
       expect({ mandate, refused: isAuthError(w.verify({ mandate, instance: INSTANCE_A })) }).toEqual({ mandate, refused: false });
+      expect({ mandate, refused: isAuthError(w.verify({ mandate, operation: "list", instance: INSTANCE_A }, "inbox-list")) }).toEqual({ mandate, refused: false });
     }
-    expect(isAuthError(w.verify({ mandate: "lead", operation: "list" }, "inbox-list"))).toBe(false);
+  });
+
+  // Mutants: the tile check removed; a mandate without tile_hash accepted; instanceOnTile fed the proof's token and the mandate's tile swapped for another value.
+  test("the proved instance must be registered from the mandate's tile, for a close and a list", () => {
+    for (const operation of ["close", "list"] as const) {
+      const op = operation === "list" ? "inbox-list" : "inbox-close";
+      const w = inboxWorld();
+      expect(isAuthError(w.verify({ mandate: "lead", operation, instance: INSTANCE_A }, op))).toBe(false);
+      expect(w.tileCalls.at(-1)).toEqual([INSTANCE_A, INBOX_GROUP, TILE_HASH]);
+
+      w.tiles[INSTANCE_A] = { group_id: INBOX_GROUP, tile_hash: "another-tile" };
+      expect({ operation, got: w.verify({ mandate: "lead", operation, instance: INSTANCE_A }, op) }).toEqual({
+        operation,
+        got: { error: "author instance is not the mandate's tile", status: 403 },
+      });
+      delete w.tiles[INSTANCE_A];
+      expect({ operation, got: w.verify({ mandate: "supervisor", operation, instance: INSTANCE_A }, op) }).toEqual({
+        operation,
+        got: { error: "author instance is not the mandate's tile", status: 403 },
+      });
+
+      const unbound = inboxWorld();
+      unbound.tokens["m-lead"]!.tile_hash = null;
+      expect({ operation, got: unbound.verify({ mandate: "lead", operation, instance: INSTANCE_A }, op) }).toEqual({
+        operation,
+        got: { error: "mandate is not bound to a tile", status: 403 },
+      });
+    }
   });
 
   test("the scope and the authority come from the stored mandate, never from the body", () => {

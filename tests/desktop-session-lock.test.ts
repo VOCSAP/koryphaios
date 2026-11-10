@@ -206,7 +206,7 @@ async function leadRig() {
   let mintedCallerId = "";
   const { svc } = setup(() => ({ mcpConfig: "/state/team-lead.json", callerId: mintedCallerId }));
   const srv = await startDeckControl({
-    inboxMandates: { request: () => {}, release: () => {} },
+    inboxMandates: { request: () => {}, release: () => {}, releaseTile: () => {} },
     listSessions: () => svc.list().map((s) => ({ ...s, mintedCallerId: svc.mintedCallerOf(s.id) }))
   } as never);
   servers.push(srv);

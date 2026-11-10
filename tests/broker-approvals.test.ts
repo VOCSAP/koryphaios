@@ -1,10 +1,11 @@
 import { test, expect, describe, afterAll } from "bun:test";
 import { Database } from "bun:sqlite";
 import { mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { startBroker, stopBroker, post, get, approvalListBody, livePid, closeInbox, mintMandate, type MandateCredential, type TestBroker, openBrokerDb } from "./_helper.ts";
+import { startBroker, stopBroker, post, get, approvalListBody, livePid, closeInbox, listInbox, mintMandate, type MandateCredential, type TestBroker, openBrokerDb } from "./_helper.ts";
 import { reachedWithin } from "./_bounded-await.ts";
 import {
   approvalWaitTimeoutSec,
@@ -2348,12 +2349,13 @@ describe("Inbox run roots and mandates (token routes)", () => {
   }
 
   const runBlock = (run = RUN_A, group = "group-a") => ({ version: 1, kind: "run", run_ref: run, group_id: group });
-  const mandateBlock = (parent: string, authority = "lead", caller = "caller-1") => ({
+  const mandateBlock = (parent: string, authority = "lead", caller = "caller-1", tile = "tile-1") => ({
     version: 1,
     kind: "mandate",
     parent_token_id: parent,
     caller_ref: caller,
     authority,
+    desk_session: tile,
   });
 
   const mint = (
@@ -2458,6 +2460,10 @@ describe("Inbox run roots and mandates (token routes)", () => {
       { ...runBlock(), kind: "root" },
       { version: 1, kind: "mandate", parent_token_id: "x", caller_ref: "", authority: "lead" },
       { version: 1, kind: "mandate", parent_token_id: "x", caller_ref: "c", authority: "owner" },
+      { version: 1, kind: "mandate", parent_token_id: "x", caller_ref: "c", authority: "lead" },
+      { version: 1, kind: "mandate", parent_token_id: "x", caller_ref: "c", authority: "lead", desk_session: "   " },
+      { version: 1, kind: "mandate", parent_token_id: "x", caller_ref: "c", authority: "lead", desk_session: 7 },
+      { version: 1, kind: "mandate", parent_token_id: "x", caller_ref: "c", authority: "lead", desk_session: "t".repeat(129) },
     ]) {
       const cred = generateCredential();
       const res = await mint(b, op, cred, inbox);
@@ -2669,8 +2675,8 @@ describe("Inbox run roots and mandates (token routes)", () => {
     const db = openBrokerDb(b.dbPath);
     db.run("UPDATE approval_session_tokens SET expires_at = ? WHERE token_id = ?", [short, rootId]);
     db.close();
-    const renew = (authority: string, caller = "window-r-caller-0") =>
-      mint(b, op, mandate.cred, mandateBlock(rootId, authority, caller), {
+    const renew = (authority: string, caller = "window-r-caller-0", tile = "tile-1") =>
+      mint(b, op, mandate.cred, mandateBlock(rootId, authority, caller, tile), {
         session_ref: "window-r-caller-0",
         renew_only: true,
         ttl_hours: 24,
@@ -2682,6 +2688,13 @@ describe("Inbox run roots and mandates (token routes)", () => {
 
     expect((await renew("supervisor")).status, "authority is part of the scope").toBe(409);
     expect((await renew("lead", "another-caller")).status, "caller_ref is part of the scope").toBe(409);
+    const tileBefore = rowOf(b, mandate.token_id)!.tile_hash;
+    expect((await renew("lead", "window-r-caller-0", "another-tile")).status, "the tile is part of the scope").toBe(409);
+    expect(rowOf(b, mandate.token_id)!.tile_hash, "a refused renewal leaves the tile untouched").toBe(tileBefore);
+    const remint = await mint(b, op, mandate.cred, mandateBlock(rootId, "lead", "window-r-caller-0", "another-tile"), { session_ref: "window-r-caller-0" });
+    expect({ status: remint.status, error: remint.body.error }, "a second mint cannot move the tile either").toEqual({ status: 409, error: "inbox token scope is immutable" });
+    expect(rowOf(b, mandate.token_id)!.tile_hash).toBe(tileBefore);
+    expect(tileBefore).toBe(createHash("sha256").update("tile-1").digest("hex"));
 
     await signedPost(b, "/approval/token-revoke", { token_id: rootId }, { cred: op.cred, operator_id: op.id });
     expect((await renew("lead")).status, "revoked with its parent").toBe(409);
@@ -2849,6 +2862,7 @@ describe("Attested channel questions", () => {
     const body = {
       pid: livePid(), cwd, git_root: null, tty: null, summary: "", host, client_pid: 1,
       project_key: null, group_id: run.group, group_secret_hash: SECRET, inbox_operation: "register",
+      desk_session: `tile-${host}`,
     };
     const auth = buildInboxProof(run.cred.privateKey, body, INBOX_GATES.register, {
       kind: "session",
@@ -3063,7 +3077,7 @@ describe("Attested channel questions", () => {
       const asked = await ask(b, op, run, ticket(bound.instance_token));
       expect(asked.status).toBe(200);
       const operator = { cred: op.cred, id: op.id };
-      return { b, op, run, bound, id: asked.body.approval.id, operator };
+      return { b, op, run, bound, tile: `tile-h-${group}`, id: asked.body.approval.id, operator };
     }
 
     const closeQuestion = (
@@ -3087,8 +3101,8 @@ describe("Attested channel questions", () => {
         { cred: w.run.cred, operator_id: w.op.id, kind: "session", token_id: w.run.tokenId }
       );
 
-    const mandateFor = (w: Awaited<ReturnType<typeof world>>, authority: "author" | "lead" | "supervisor", caller: string, run: Run = w.run) =>
-      mintMandate(w.b, run, authority, caller, { operator: w.operator });
+    const mandateFor = (w: Awaited<ReturnType<typeof world>>, authority: "author" | "lead" | "supervisor", caller: string, run: Run = w.run, tile: string = w.tile) =>
+      mintMandate(w.b, run, authority, caller, { operator: w.operator, tile });
 
     // Mutants: the parked waiter not resolved on close; closed collapsed into answered_terminal; notifyRegistry.settle given the reason.
     test("a parked wait is woken at once with a closed status, the reason and the authority, and no answer message is pushed", async () => {
@@ -3157,11 +3171,12 @@ describe("Attested channel questions", () => {
       const w = await world("cq-authority");
       const other = await bindInstance(w.b, w.op, w.run, "h-cq-other", "/cq-other");
       const authorMandate = await mandateFor(w, "author", "author-q");
+      const otherAuthorMandate = await mandateFor(w, "author", "author-q-other", w.run, "tile-h-cq-other");
       const otherRun = await mintRun(w.b, w.op, "g-cq-authority-b");
       const otherBound = await bindInstance(w.b, w.op, otherRun, "h-cq-b", "/cq-b");
-      const leadOther = await mandateFor(w, "lead", "lead-other-run", otherRun);
+      const leadOther = await mandateFor(w, "lead", "lead-other-run", otherRun, "tile-h-cq-b");
 
-      const byOtherAuthor = await closeQuestion(w, authorMandate, { instance: other.instance_token });
+      const byOtherAuthor = await closeQuestion(w, otherAuthorMandate, { instance: other.instance_token });
       const crossRun = await closeQuestion(w, leadOther, { run: otherRun, instance: otherBound.instance_token });
       const byAuthor = await closeQuestion(w, authorMandate, { reason: "withdrawn by me" });
 
@@ -3175,6 +3190,38 @@ describe("Attested channel questions", () => {
         closed_by_peer_id_snapshot: w.bound.peer_id,
         close_reason: "withdrawn by me",
       });
+    });
+
+    // Mutants: the status filter of the question SELECT dropped; closable true whatever the route, kind or merge.
+    test("the list carries the run's pending and notification-expired questions only, with their closable shape", async () => {
+      const w = await world("cq-list");
+      const lead = await mandateFor(w, "lead", "lead-list");
+      const ids = { pending: w.id } as Record<string, string>;
+      for (const name of ["expired", "answered", "acknowledged", "closed", "pty"]) {
+        ids[name] = (await ask(w.b, w.op, w.run, ticket(w.bound.instance_token, { title: name }))).body.approval.id;
+      }
+      ids.permission = (await ask(w.b, w.op, w.run, asking(w.bound.instance_token))).body.approval.id;
+      ids.mergeable = (await ask(w.b, w.op, w.run, ticket(w.bound.instance_token, { merge: "tile", title: "Mergeable", tile_ref: "tile-1" }))).body.approval.id;
+      const db = openBrokerDb(w.b.dbPath);
+      try {
+        db.run("UPDATE pending_approvals SET status = 'expired_notif' WHERE id = ?", [ids.expired!]);
+        db.run("UPDATE pending_approvals SET reply_route = 'pty' WHERE id = ?", [ids.pty!]);
+      } finally {
+        db.close();
+      }
+      await signedPost(w.b, "/approval/claim", { id: ids.answered, via: "deck", answer_kind: "text", answer_text: "left" }, { cred: w.op.cred, operator_id: w.op.id });
+      await signedPost(w.b, "/approval/claim", { id: ids.acknowledged, via: "deck", acknowledge: true }, { cred: w.op.cred, operator_id: w.op.id });
+      await closeQuestion(w, lead, { entryId: ids.closed });
+
+      const listed = await listInbox<{ entries: Array<{ id: string; type: string; text: string; closable: boolean }> }>(w.b, w.run, lead, { instanceToken: w.bound.instance_token }, w.op.id);
+
+      expect(listed.status).toBe(200);
+      const byId = Object.fromEntries(listed.body.entries.map((e) => [e.id, e]));
+      expect(Object.keys(byId).sort()).toEqual([ids.pending!, ids.expired!, ids.pty!, ids.permission!, ids.mergeable!].sort());
+      expect(byId[ids.mergeable!]!.closable, "a mergeable question has no closable answer route").toBe(false);
+      expect(byId[ids.pending!]).toMatchObject({ type: "question", text: "Which way? -- Left or right?", closable: true });
+      expect(byId[ids.expired!]!.closable).toBe(true);
+      expect([byId[ids.pty!]!.closable, byId[ids.permission!]!.closable], "a pty route and a permission have no closable answer route").toEqual([false, false]);
     });
 
     // Mutant: the closable-shape check removed.

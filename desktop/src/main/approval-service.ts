@@ -63,7 +63,7 @@ export type InboxAuthority = 'author' | 'lead' | 'supervisor'
 
 export type ApprovalTokenInboxBlock =
   | { version: 1; kind: 'run'; run_ref: string; group_id: string }
-  | { version: 1; kind: 'mandate'; parent_token_id: string; caller_ref: string; authority: InboxAuthority }
+  | { version: 1; kind: 'mandate'; parent_token_id: string; caller_ref: string; authority: InboxAuthority; desk_session: string }
 
 export interface MintedToken {
   token_id: string
@@ -519,6 +519,19 @@ export async function fetchPendingApprovals(deps: ApprovalDeps): Promise<Approva
   return [...(pending.approvals ?? []), ...(expired.approvals ?? [])].sort((a, b) =>
     b.created_at.localeCompare(a.created_at)
   )
+}
+
+/**
+ * Questions of this run an agent closed. Without a run the broker matches no
+ * attested row, so the list is empty rather than another run's.
+ */
+export async function fetchClosedQuestions(deps: ApprovalDeps): Promise<Approval[]> {
+  const res = await signedPost<{ approvals: Approval[] }>(deps, '/approval/list', {
+    project_key: deps.projectKey,
+    status: 'closed',
+    ...runRefField(deps)
+  })
+  return res.approvals ?? []
 }
 
 export async function markVerdictsDelivered(deps: ApprovalDeps, ids: string[]): Promise<number> {

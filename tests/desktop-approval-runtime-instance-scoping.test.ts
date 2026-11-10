@@ -374,10 +374,12 @@ describe("mandateBridge", () => {
     const bridge = mandateBridge({
       requestMandate: (ref, authority) => calls.push(`request:${ref}:${authority}`),
       releaseMandate: (ref) => calls.push(`release:${ref}`),
+      releaseMandateTile: (tile) => calls.push(`release-tile:${tile}`),
     });
     bridge.request("lead-1", "lead");
     bridge.release("lead-1");
-    expect(calls).toEqual(["request:lead-1:lead", "release:lead-1"]);
+    bridge.releaseTile("tile-1");
+    expect(calls).toEqual(["request:lead-1:lead", "release:lead-1", "release-tile:tile-1"]);
   });
 });
 

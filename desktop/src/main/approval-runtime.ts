@@ -121,7 +121,21 @@ interface MandateEntry {
   sessionRef: string
   /** The root a ready mandate hangs from; renewals and revocations go through it. */
   root: RunRoot | null
+  /** The tile (its desk session) the mandate acts for; nothing is minted until one is known. */
+  deskSession: string | null
+  /** The mint ensureMandate is waiting on, shared by concurrent callers. */
+  inFlight: Promise<ReadyMandate | null> | null
 }
+
+/** A ready mandate with the broker it was minted at, which is where it must be used. */
+export interface ReadyMandate {
+  tokenId: string
+  privateKey: string
+  expiresAt: string
+  deps: ApprovalDeps
+}
+
+export const MANDATE_WAIT_MS = 10_000
 
 export interface ApprovalRuntimeOptions {
   stateDir: string
@@ -641,7 +655,7 @@ export class ApprovalRuntime {
         this.armed = true
         const root: RunRoot = { tokenId: prepared.debt.tokenId, deps: prepared.debt.deps, runRef: prepared.runRef, groupId: prepared.target.groupId, expiresAt: prepared.expiresAt }
         this.root = root
-        for (const [callerRef, entry] of this.mandates) void this.mintMandate(callerRef, entry, root)
+        for (const [callerRef, entry] of this.mandates) if (entry.deskSession) void this.startMandateMint(callerRef, entry, root)
         if (prepared.renewal) {
           this.renewal = prepared.renewal
           this.scheduleRenewal(prepared.generation)
@@ -713,9 +727,9 @@ export class ApprovalRuntime {
 
   /**
    * Registers a deck-control caller's mandate. The authority comes from the
-   * main's provisioning path, never from a label or a role. Minted at once when
-   * a run credential is published, otherwise as soon as one is; until then the
-   * mandate is pending and grants nothing.
+   * main's provisioning path, never from a label or a role. Nothing is minted
+   * here: the broker binds a mandate to a tile, which is known only at the
+   * caller's first Inbox action (ensureMandate).
    */
   requestMandate(callerRef: string, authority: InboxAuthority): void {
     const existing = this.mandates.get(callerRef)
@@ -730,10 +744,86 @@ export class ApprovalRuntime {
       status: { state: 'pending' },
       attempt: 0,
       sessionRef: `window-${this.opts.runId}:${callerRef}`.slice(0, 128),
-      root: null
+      root: null,
+      deskSession: null,
+      inFlight: null
     }
     this.mandates.set(callerRef, entry)
-    if (this.armed && this.root) void this.mintMandate(callerRef, entry, this.root)
+  }
+
+  /**
+   * The caller's mandate for `deskSession`, minted on first use. A mandate held
+   * for another tile is revoked and minted again for this one; concurrent calls
+   * share one mint. Null when no run credential is published, the mint fails,
+   * or it does not settle within MANDATE_WAIT_MS.
+   */
+  async ensureMandate(callerRef: string, deskSession: string, signal?: AbortSignal): Promise<ReadyMandate | null> {
+    const entry = this.mandates.get(callerRef)
+    if (!entry || signal?.aborted) return null
+    if (entry.deskSession !== deskSession) {
+      this.unbindMandate(callerRef, entry)
+      entry.deskSession = deskSession
+    }
+    const ready = this.readyMandate(entry)
+    if (ready) return ready
+    const root = this.root
+    if (!this.armed || !root) return null
+    return this.boundedMandateWait(entry.inFlight ?? this.startMandateMint(callerRef, entry, root), callerRef, signal)
+  }
+
+  private startMandateMint(callerRef: string, entry: MandateEntry, root: RunRoot): Promise<ReadyMandate | null> {
+    // mintMandate bumps attempt synchronously; any later bump (another tile, a release, a dropped root) voids this wait.
+    const attempt = entry.attempt + 1
+    const pending = this.mintMandate(callerRef, entry, root).then(() => (entry.attempt === attempt ? this.readyMandate(entry) : null))
+    entry.inFlight = pending
+    void pending.finally(() => {
+      if (entry.inFlight === pending) entry.inFlight = null
+    })
+    return pending
+  }
+
+  /** Revokes every mandate bound to this tile; the entries keep their authority and wait for a tile again. */
+  releaseMandateTile(deskSession: string): void {
+    for (const [callerRef, entry] of this.mandates) {
+      if (entry.deskSession === deskSession) this.unbindMandate(callerRef, entry)
+    }
+  }
+
+  private unbindMandate(callerRef: string, entry: MandateEntry): void {
+    entry.attempt += 1
+    const status = entry.status
+    if (status.state === 'ready' && entry.root) void this.revokeMandateToken(entry.root, status.tokenId, callerRef)
+    entry.status = { state: 'pending' }
+    entry.root = null
+    entry.deskSession = null
+    entry.inFlight = null
+  }
+
+  private readyMandate(entry: MandateEntry): ReadyMandate | null {
+    const status = entry.status
+    if (status.state !== 'ready' || !entry.root || this.now() >= Date.parse(status.expiresAt)) return null
+    return { tokenId: status.tokenId, privateKey: status.privateKey, expiresAt: status.expiresAt, deps: entry.root.deps }
+  }
+
+  private async boundedMandateWait(pending: Promise<ReadyMandate | null>, callerRef: string, signal?: AbortSignal): Promise<ReadyMandate | null> {
+    let timer: unknown
+    let onAbort: (() => void) | undefined
+    const giveUp = new Promise<null>((resolve) => {
+      const callback = (): void => {
+        reportError('approvals', `the mandate of ${callerRef} was not ready within ${MANDATE_WAIT_MS} ms`)
+        resolve(null)
+      }
+      timer = this.opts.setTimeout ? this.opts.setTimeout(callback, MANDATE_WAIT_MS) : setTimeout(callback, MANDATE_WAIT_MS)
+      onAbort = () => resolve(null)
+      signal?.addEventListener('abort', onAbort, { once: true })
+    })
+    try {
+      return await Promise.race([pending, giveUp])
+    } finally {
+      if (this.opts.clearTimeout) this.opts.clearTimeout(timer)
+      else clearTimeout(timer as ReturnType<typeof setTimeout>)
+      if (onAbort) signal?.removeEventListener('abort', onAbort)
+    }
   }
 
   /** Local access first, then the broker: a mint landing later is revoked, never published. */
@@ -747,7 +837,7 @@ export class ApprovalRuntime {
     if (status.state === 'ready' && entry.root) void this.revokeMandateToken(entry.root, status.tokenId, callerRef)
   }
 
-  /** What a future Inbox action may use for this caller; an expired mandate is not ready. */
+  /** The caller's current mandate state; an expired mandate reads as refused. */
   mandateState(callerRef: string): MandateState | null {
     const entry = this.mandates.get(callerRef)
     if (!entry) return null
@@ -764,10 +854,13 @@ export class ApprovalRuntime {
       entry.attempt += 1
       entry.status = { state: 'pending' }
       entry.root = null
+      entry.inFlight = null
     }
   }
 
   private async mintMandate(callerRef: string, entry: MandateEntry, root: RunRoot): Promise<void> {
+    const deskSession = entry.deskSession
+    if (!deskSession) return
     const attempt = ++entry.attempt
     entry.status = { state: 'pending' }
     const cred = generateCredential()
@@ -778,7 +871,7 @@ export class ApprovalRuntime {
       const minted = await mintSessionToken(root.deps, {
         sessionPublicKey: cred.publicKey,
         sessionRef: entry.sessionRef,
-        inbox: { version: 1, kind: 'mandate', parent_token_id: root.tokenId, caller_ref: callerRef, authority: entry.authority }
+        inbox: { version: 1, kind: 'mandate', parent_token_id: root.tokenId, caller_ref: callerRef, authority: entry.authority, desk_session: deskSession }
       })
       if (!current()) {
         await this.revokeMandateToken(root, tokenId, callerRef)
@@ -810,9 +903,10 @@ export class ApprovalRuntime {
     await Promise.allSettled([...this.mandates].map(async ([callerRef, entry]) => {
       if (signal.aborted || this.root !== root) return
       const status = entry.status
-      if (status.state === 'pending') return
+      const deskSession = entry.deskSession
+      if (status.state === 'pending' || !deskSession) return
       if (status.state === 'refused' || entry.root !== root || this.now() >= Date.parse(status.expiresAt)) {
-        void this.mintMandate(callerRef, entry, root)
+        void this.startMandateMint(callerRef, entry, root)
         return
       }
       const attempt = entry.attempt
@@ -820,7 +914,7 @@ export class ApprovalRuntime {
         const response = await renewSessionToken(root.deps, {
           sessionPublicKey: status.publicKey,
           sessionRef: entry.sessionRef,
-          inbox: { version: 1, kind: 'mandate', parent_token_id: root.tokenId, caller_ref: callerRef, authority: entry.authority },
+          inbox: { version: 1, kind: 'mandate', parent_token_id: root.tokenId, caller_ref: callerRef, authority: entry.authority, desk_session: deskSession },
           signal
         })
         if (this.mandates.get(callerRef) !== entry || entry.attempt !== attempt || this.root !== root) return
@@ -865,13 +959,15 @@ export class ApprovalRuntime {
   }
 }
 
-export function mandateBridge(runtime: Pick<ApprovalRuntime, 'requestMandate' | 'releaseMandate'>): {
+export function mandateBridge(runtime: Pick<ApprovalRuntime, 'requestMandate' | 'releaseMandate' | 'releaseMandateTile'>): {
   request: (callerRef: string, authority: InboxAuthority) => void
   release: (callerRef: string) => void
+  releaseTile: (deskSession: string) => void
 } {
   return {
     request: (callerRef, authority) => runtime.requestMandate(callerRef, authority),
-    release: (callerRef) => runtime.releaseMandate(callerRef)
+    release: (callerRef) => runtime.releaseMandate(callerRef),
+    releaseTile: (deskSession) => runtime.releaseMandateTile(deskSession)
   }
 }
 

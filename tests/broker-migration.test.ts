@@ -96,7 +96,7 @@ test("the Inbox provenance migration extends an older database twice over and ke
   const registryRows = (db.query("SELECT COUNT(*) AS n FROM inbox_message_entries").get() as { n: number }).n;
   const oldToken = db
     .query(
-      `SELECT inbox_purpose, inbox_version, run_ref, group_id, parent_token_id, caller_ref, authority
+      `SELECT inbox_purpose, inbox_version, run_ref, group_id, parent_token_id, caller_ref, authority, tile_hash
          FROM approval_session_tokens WHERE token_id = 'old-token'`
     )
     .get();
@@ -115,7 +115,7 @@ test("the Inbox provenance migration extends an older database twice over and ke
     nulls(["inbox_run_ref", "inbox_group_id", "author_instance_ref", "author_peer_id_snapshot", "source_kind", "provenance_version"])
   );
   expect(oldToken, "a historical token stays legacy").toEqual(
-    nulls(["inbox_purpose", "inbox_version", "run_ref", "group_id", "parent_token_id", "caller_ref", "authority"])
+    nulls(["inbox_purpose", "inbox_version", "run_ref", "group_id", "parent_token_id", "caller_ref", "authority", "tile_hash"])
   );
 });
 

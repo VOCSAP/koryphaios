@@ -61,6 +61,7 @@ export interface InboxTokenScope {
   readonly parent_token_id: string | null;
   readonly authority: string | null;
   readonly caller_ref: string | null;
+  readonly tile_hash: string | null;
 }
 
 declare const SCOPE_BRAND: unique symbol;
@@ -202,6 +203,8 @@ export interface ApprovalAuthDeps {
    * author proof is refused.
    */
   resolveInstanceBinding?(instanceRef: string): InboxInstanceBinding | null;
+  /** Whether this instance is an active peer registered in `groupId` from the tile whose desk-session digest is `tileHash`. */
+  instanceOnTile(instanceToken: string, groupId: string, tileHash: string): boolean;
 }
 
 export interface InboxInstanceBinding {
@@ -226,6 +229,7 @@ interface TokenRow {
   parent_token_id?: string | null;
   authority?: string | null;
   caller_ref?: string | null;
+  tile_hash?: string | null;
 }
 
 // A total mapping prevents a new proof gate from accepting an operation by omission.
@@ -353,7 +357,7 @@ export interface ApprovalAuth {
   authenticateInbox(body: Body, op: ApprovalOperation, gate: InboxGate): AuthResult<ApprovalIdentity>;
   /**
    * Verifies a mandate envelope and the author's own proof carried inside
-   * it (required for a close). Returns an actor for authorizeInboxEntry; it exposes no
+   * it (required for a list and a close). Returns an actor for authorizeInboxEntry; it exposes no
    * route and mutates nothing.
    */
   verifyInboxAction(body: Body, op: InboxActionOperation): AuthResult<InboxActor>;
@@ -389,7 +393,7 @@ export function createApprovalAuth(deps: ApprovalAuthDeps): ApprovalAuth {
   }
 
   const TOKEN_COLUMNS = `public_key, operator_id, session_ref, project_key, revoked_at, expires_at,
-           inbox_purpose, run_ref, group_id, parent_token_id, authority, caller_ref`;
+           inbox_purpose, run_ref, group_id, parent_token_id, authority, caller_ref, tile_hash`;
 
   /** A mandate is only as live as its run parent: revoked, expired or foreign parent = unusable. */
   function mandateParentRefusal(row: TokenRow): AuthError | null {
@@ -504,6 +508,7 @@ export function createApprovalAuth(deps: ApprovalAuthDeps): ApprovalAuth {
           parent_token_id: tokenRow.parent_token_id ?? null,
           authority: tokenRow.authority ?? null,
           caller_ref: tokenRow.caller_ref ?? null,
+          tile_hash: tokenRow.tile_hash ?? null,
         };
       }
     }
@@ -530,11 +535,12 @@ export function createApprovalAuth(deps: ApprovalAuthDeps): ApprovalAuth {
 
   /**
    * The envelope is signed by a mandate under its own gate; the `author`
-   * member (required on close) is a SECOND proof, signed by the run root under the
+   * member (required) is a SECOND proof, signed by the run root under the
    * author gate. Nothing in the body is an authority: the scope and the
    * authority come from the stored mandate, the author digest from a proof
-   * whose root must be that mandate's parent and whose payload must repeat
-   * the envelope's operation, entry and reason.
+   * whose root must be that mandate's parent, whose payload must repeat
+   * the envelope's operation, entry and reason, and whose instance must be
+   * registered from the mandate's tile.
    */
   function verifyInboxAction(body: Body, op: InboxActionOperation): AuthResult<InboxActor> {
     const isList = op === "inbox-list";
@@ -552,60 +558,62 @@ export function createApprovalAuth(deps: ApprovalAuthDeps): ApprovalAuth {
     }
     const projectKey = id.project_key ?? "";
 
-    if (op === "inbox-close" && body.author === undefined) {
-      return { error: "an author proof is required to close", status: 400 };
+    if (body.author === undefined) {
+      return { error: `an author proof is required to ${isList ? "list" : "close"}`, status: 400 };
     }
 
-    let authorInstanceRef: string | null = null;
-    if (body.author !== undefined) {
-      const author = body.author;
-      if (
-        typeof author !== "object" || author === null ||
-        typeof (author as { payload?: unknown }).payload !== "object" ||
-        (author as { payload?: unknown }).payload === null ||
-        typeof (author as { auth?: unknown }).auth !== "object" ||
-        (author as { auth?: unknown }).auth === null
-      ) {
-        return { error: "author proof is malformed", status: 400 };
-      }
-      const payload = (author as { payload: Record<string, unknown> }).payload;
-      const authorBody: Body = { ...payload, auth: (author as { auth: ApprovalAuthProof }).auth };
-      const authorId = authenticate(
-        authorBody,
-        "inbox-author-proof",
-        isList ? INBOX_GATES.authorList : INBOX_GATES.authorClose
-      );
-      if (isAuthError(authorId)) return authorId;
-      if (
-        authorId.kind !== "session" ||
-        authorId.token_id !== id.inbox.parent_token_id ||
-        authorId.operator_id !== id.operator_id
-      ) {
-        return { error: "author proof root is not the mandate's parent", status: 403 };
-      }
-      if (
-        payload.inbox_operation !== body.inbox_operation ||
-        (payload.entry_id ?? null) !== (body.entry_id ?? null) ||
-        (payload.reason ?? null) !== (body.reason ?? null)
-      ) {
-        return { error: "author proof does not match the envelope", status: 403 };
-      }
-      const token = payload.instance_token;
-      if (typeof token !== "string" || token.length === 0) {
-        return { error: "author proof carries no instance", status: 400 };
-      }
-      const ref = deriveInstanceRef(token);
-      const binding = deps.resolveInstanceBinding?.(ref) ?? null;
-      if (
-        !binding ||
-        binding.operator_id !== id.operator_id ||
-        binding.run_ref !== id.inbox.run_ref ||
-        binding.group_id !== id.inbox.group_id ||
-        binding.project_key !== projectKey
-      ) {
-        return { error: "author instance is not bound to this run", status: 403 };
-      }
-      authorInstanceRef = ref;
+    const author = body.author;
+    if (
+      typeof author !== "object" || author === null ||
+      typeof (author as { payload?: unknown }).payload !== "object" ||
+      (author as { payload?: unknown }).payload === null ||
+      typeof (author as { auth?: unknown }).auth !== "object" ||
+      (author as { auth?: unknown }).auth === null
+    ) {
+      return { error: "author proof is malformed", status: 400 };
+    }
+    const payload = (author as { payload: Record<string, unknown> }).payload;
+    const authorBody: Body = { ...payload, auth: (author as { auth: ApprovalAuthProof }).auth };
+    const authorId = authenticate(
+      authorBody,
+      "inbox-author-proof",
+      isList ? INBOX_GATES.authorList : INBOX_GATES.authorClose
+    );
+    if (isAuthError(authorId)) return authorId;
+    if (
+      authorId.kind !== "session" ||
+      authorId.token_id !== id.inbox.parent_token_id ||
+      authorId.operator_id !== id.operator_id
+    ) {
+      return { error: "author proof root is not the mandate's parent", status: 403 };
+    }
+    if (
+      payload.inbox_operation !== body.inbox_operation ||
+      (payload.entry_id ?? null) !== (body.entry_id ?? null) ||
+      (payload.reason ?? null) !== (body.reason ?? null)
+    ) {
+      return { error: "author proof does not match the envelope", status: 403 };
+    }
+    const token = payload.instance_token;
+    if (typeof token !== "string" || token.length === 0) {
+      return { error: "author proof carries no instance", status: 400 };
+    }
+    const ref = deriveInstanceRef(token);
+    const binding = deps.resolveInstanceBinding?.(ref) ?? null;
+    if (
+      !binding ||
+      binding.operator_id !== id.operator_id ||
+      binding.run_ref !== id.inbox.run_ref ||
+      binding.group_id !== id.inbox.group_id ||
+      binding.project_key !== projectKey
+    ) {
+      return { error: "author instance is not bound to this run", status: 403 };
+    }
+    // Refuses a main-side mis-assembly (one tile's proof under another caller's mandate); tile_hash is the
+    // desk_session the instance declared at /register, not a secret: the deck-control Bearer is the barrier.
+    if (!id.inbox.tile_hash) return { error: "mandate is not bound to a tile", status: 403 };
+    if (!deps.instanceOnTile(token, id.inbox.group_id, id.inbox.tile_hash)) {
+      return { error: "author instance is not the mandate's tile", status: 403 };
     }
 
     return mintActor({
@@ -614,7 +622,7 @@ export function createApprovalAuth(deps: ApprovalAuthDeps): ApprovalAuth {
       group_id: id.inbox.group_id,
       project_key: projectKey,
       authority,
-      authorInstanceRef,
+      authorInstanceRef: ref,
     });
   }
 

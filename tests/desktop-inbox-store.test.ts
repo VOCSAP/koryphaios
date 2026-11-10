@@ -15,8 +15,15 @@ import {
   loadInboxHistory,
   pendingInboxCounter,
 } from "../desktop/src/main/inbox-store.ts";
-import { countPendingInboxMessages } from "../desktop/src/shared/inbox-pending.ts";
-import { inboxEntryKey, type InboxMessage } from "../desktop/src/shared/types.ts";
+import { countPendingInboxMessages, messageReplyability } from "../desktop/src/shared/inbox-pending.ts";
+import {
+  inboxEntryKey,
+  type InboxArchiveSnapshot,
+  type InboxEntryState,
+  type InboxMessage
+} from "../desktop/src/shared/types.ts";
+
+const NO_STATES = () => ({ version: 0, messages: {} });
 
 function dir(): string {
   return mkdtempSync(join(tmpdir(), "cp-inbox-"));
@@ -134,22 +141,22 @@ const key = (m: InboxMessage): string => inboxEntryKey({ kind: "message", messag
 test("a message counts as pending until acked: unread and seen both count", () => {
   const messages = [msg(1), msg(2), msg(3)];
   const ack = { [key(msg(2))]: "seen" as const, [key(msg(3))]: "acked" as const };
-  expect(countPendingInboxMessages(messages, ack)).toBe(2);
-  expect(countPendingInbox(messages, [], ack)).toBe(2);
+  expect(countPendingInboxMessages(messages, ack, {})).toBe(2);
+  expect(countPendingInbox(messages, [], ack, {})).toBe(2);
 });
 
 test("main counts the journal plus the unjournaled batches once each, capped like the renderer list", () => {
-  expect(countPendingInbox([msg(1), msg(2)], [msg(2), msg(3)], {})).toBe(3);
+  expect(countPendingInbox([msg(1), msg(2)], [msg(2), msg(3)], {}, {})).toBe(3);
   const many = Array.from({ length: INBOX_HISTORY_CAP + 10 }, (_, i) => msg(i + 1));
   const ackOldest = Object.fromEntries(many.slice(0, 10).map((m) => [key(m), "acked" as const]));
-  expect(countPendingInbox(many, [], {}), "only the newest entries stay in the list").toBe(INBOX_HISTORY_CAP);
-  expect(countPendingInbox(many, [], ackOldest), "acks on entries past the cap change nothing").toBe(INBOX_HISTORY_CAP);
+  expect(countPendingInbox(many, [], {}, {}), "only the newest entries stay in the list").toBe(INBOX_HISTORY_CAP);
+  expect(countPendingInbox(many, [], ackOldest, {}), "acks on entries past the cap change nothing").toBe(INBOX_HISTORY_CAP);
 });
 
 test("the Avatar's counter follows the journal and the ack file on disk, and the unjournaled batches", () => {
   const d = dir();
   const unjournaled: InboxMessage[] = [];
-  const count = pendingInboxCounter(() => d, () => unjournaled);
+  const count = pendingInboxCounter(() => d, () => unjournaled, NO_STATES);
   expect(count()).toBe(0);
   appendInboxHistory(d, [msg(1), msg(2)]);
   expect(count()).toBe(2);
@@ -164,7 +171,7 @@ test("the Avatar's counter follows the journal and the ack file on disk, and the
 test("the Avatar's counter traces a corrupt journal once per file change, not on every heartbeat", () => {
   const d = dir();
   const traces: string[] = [];
-  const count = pendingInboxCounter(() => d, () => [], (message) => void traces.push(message));
+  const count = pendingInboxCounter(() => d, () => [], NO_STATES, (message) => void traces.push(message));
   for (let i = 0; i < 3; i++) expect(count()).toBe(0);
   expect(traces, "absent files are a normal empty state").toEqual([]);
 
@@ -204,7 +211,7 @@ test("the counter sees a seen -> acked move even when the ack file keeps its siz
   appendSeenKey(d, key(msg(1)));
   const frozen = new Date(1_700_000_000_000);
   utimesSync(inboxAckFile(d), frozen, frozen);
-  const count = pendingInboxCounter(() => d, () => []);
+  const count = pendingInboxCounter(() => d, () => [], NO_STATES);
   expect(count()).toBe(1);
   const before = statSync(inboxAckFile(d), { bigint: true });
   appendAckedKey(d, key(msg(1)));
@@ -219,5 +226,50 @@ test("the Courrier badge in the renderer counts with the same rule as main", () 
   const start = store.indexOf("export function inboxPendingCount(");
   const body = store.slice(start, store.indexOf("\n}", start));
   expect(start, "inboxPendingCount still exists").toBeGreaterThan(-1);
-  expect(body).toMatch(/return countPendingInboxMessages\(s\.inboxMessages, s\.inboxAckState\)/);
+  expect(body).toMatch(
+    /return countPendingInboxMessages\(s\.inboxMessages, s\.inboxAckState, s\.inboxArchive\.messages\)/
+  );
+});
+
+const state = (s: InboxEntryState["state"]): InboxEntryState => ({ state: s, settledAt: s === "open" ? null : "2026-01-01T00:00:00Z" });
+
+test("a closed message does not count whatever its read state; open and responded count until acknowledged", () => {
+  const states = { [key(msg(1))]: state("closed"), [key(msg(2))]: state("responded"), [key(msg(3))]: state("open") };
+  const messages = [msg(1), msg(2), msg(3), msg(4)];
+  // Mutant: the third parameter ignored (closed counted), or `responded` excluded as well (2 instead of 3).
+  expect(countPendingInboxMessages(messages, {}, states)).toBe(3);
+  expect(countPendingInboxMessages(messages, { [key(msg(1))]: "seen" }, states), "a seen closed message stays out").toBe(3);
+  expect(countPendingInboxMessages(messages, { [key(msg(2))]: "acked" }, states)).toBe(2);
+  expect(countPendingInbox(messages, [], {}, states), "main applies the same rule").toBe(3);
+});
+
+test("the Avatar's counter recomputes when only the archive version moves, with no file written", () => {
+  const d = dir();
+  appendInboxHistory(d, [msg(1), msg(2)]);
+  let current = { version: 0, messages: {} as Record<string, InboxEntryState> };
+  const count = pendingInboxCounter(() => d, () => [], () => current);
+  expect(count()).toBe(2);
+  current = { version: 1, messages: { [key(msg(1))]: state("closed") } };
+  // Mutant: `version` removed from the cache key.
+  expect(count()).toBe(1);
+});
+
+const archive = (status: InboxArchiveSnapshot["status"], messages: Record<string, InboxEntryState> = {}): InboxArchiveSnapshot => ({
+  status,
+  messages,
+  closedQuestions: []
+});
+
+test("what a message offers follows the archive: its state, absent from a ready one, unknown while pending, the broker decides on an old broker", () => {
+  const m = msg(1);
+  const ready = archive("ready", { [key(m)]: state("closed"), [key(msg(2))]: state("responded"), [key(msg(3))]: state("open") });
+  expect(messageReplyability(ready, m)).toBe("closed");
+  expect(messageReplyability(ready, msg(2))).toBe("responded");
+  expect(messageReplyability(ready, msg(3))).toBe("open");
+  // Mutant: a key absent from the snapshot read as 'open'.
+  expect(messageReplyability(ready, msg(9))).toBe("not-this-run");
+  // Mutant: 'pending' read as 'open'.
+  expect(messageReplyability(archive("pending"), m)).toBe("unknown");
+  // Mutant: 'unsupported' read as 'not-this-run'.
+  expect(messageReplyability(archive("unsupported"), m)).toBe("legacy-broker");
 });

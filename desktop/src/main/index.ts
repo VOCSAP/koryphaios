@@ -100,7 +100,9 @@ import {
   type ContextTransactionResponse,
   type RunInboxSigner
 } from './broker-client'
-import { discardUnscopedInboxFiles, pendingInboxCounter } from './inbox-store'
+import { createApprovalListsTick, createInboxArchive } from './inbox-archive'
+import { discardUnscopedInboxFiles, loadAckState, loadInboxHistory, pendingInboxCounter } from './inbox-store'
+import { createInboxActions } from './inbox-actions'
 import { spawn as spawnProcess } from 'node:child_process'
 import {
   adoptedBrokerNotice,
@@ -262,6 +264,7 @@ import {
   consumeSpawnGrant,
   countInFlightSpawnGrants,
   disconnectChannel,
+  fetchClosedQuestions,
   fetchPendingApprovals,
   fetchUndeliveredVerdicts,
   listChannels,
@@ -1785,6 +1788,12 @@ const notifyInbox = (batch: { from: string; text: string }[]): void => {
 
 const runReadErrors = createRunReadErrorSink((message, e) => reportError('inbox', message, e))
 
+let archiveSeq = 0
+const inboxArchive = createInboxArchive({
+  onChange: (snapshot) => broadcast('inbox:archive-changed', snapshot),
+  report: (message, e) => reportError('inbox', message, e)
+})
+
 const inboxEffects = createInboxEffects({
   sessionDir,
   epoch: () => scopeWiring.scopeEpoch(),
@@ -1822,6 +1831,7 @@ const inboxEffects = createInboxEffects({
   },
   broadcast,
   notify: notifyInbox,
+  applyEntryStates: inboxArchive.applyMessageStates,
   info: (message) => logInfo('inbox', message),
   error: (message, e) => reportError('inbox', message, e)
 })
@@ -1830,22 +1840,23 @@ const pollOperatorInbox = async (): Promise<void> => {
   brokerHealth.setManualStop(readManualStop())
   try {
     await inboxEffects.poll(async (captured) => {
+      const seq = ++archiveSeq
       const endpoint = resolveBrokerEndpoint()
       const read = { groupId: activeScope.groupId, secret: activeScope.secret, sessionId: captured.sessionId }
       const run = runInboxSigner()
-      const messages = await readOperatorInboxBoth({
-        readLegacy: () => fetchOperatorInbox(read, { endpoint }),
+      const { rows, run: runRead } = await readOperatorInboxBoth({
+        readLegacy: async () => (await fetchOperatorInbox(read, { endpoint })).messages,
         readRun: run
           ? async () => {
-              const rows = await fetchOperatorInbox({ ...read, run }, { endpoint })
+              const { messages, entries } = await fetchOperatorInbox({ ...read, run }, { endpoint })
               runReadErrors.onRunSuccess()
-              return rows
+              return { rows: messages, entries }
             }
           : undefined,
         onRunError: runReadErrors.onRunError
       })
       brokerHealth.recordSuccess()
-      return messages
+      return { rows, run: run && runRead ? { runRef: run.runRef, entries: runRead.entries, seq } : null }
     })
   } catch (e) {
     // Broker down / unreachable: the next tick retries; the health tracker
@@ -2043,6 +2054,19 @@ const pollPendingApprovals = createPendingApprovalsTick({
     lastPendingApprovals = []
   },
   report: (text, err) => reportError('approvals', text, err)
+})
+
+const pollApprovalLists = createApprovalListsTick({
+  deps: () => approvals.deps(),
+  scopeKey: () => {
+    const run = runInboxSigner()
+    return run ? `${scopeWiring.scopeEpoch()}:${activeScope.groupId}:${run.runRef}` : null
+  },
+  fetchClosed: fetchClosedQuestions,
+  applyClosed: inboxArchive.applyClosedQuestions,
+  nextSeq: () => ++archiveSeq,
+  pending: pollPendingApprovals,
+  report: (message, e) => reportError('approvals', message, e)
 })
 
 /**
@@ -3083,6 +3107,10 @@ const cleanupTeamLeadMcpFile = (callerId: string): void => {
 
 const controlDeps: DeckControlDeps = {
   inboxMandates: mandateBridge(approvals),
+  inbox: createInboxActions({
+    mandate: (callerId, tile, signal) => approvals.ensureMandate(callerId, tile, signal),
+    localCourrier: () => ({ history: loadInboxHistory(sessionDir()), acks: loadAckState(sessionDir()) })
+  }),
   listAgents: () => listAgents(getConfig().projectDir),
   listModels: () => resolveLaunchConfig(getConfig().projectDir).models,
   listPresets: () => resolveLaunchConfig(getConfig().projectDir).presets,
@@ -3402,7 +3430,10 @@ async function openOldestPendingQuestion(): Promise<void> {
 avatarClient = createAvatarClient({
   ...avatarOptions,
   pendingApprovals: () => lastPendingApprovals,
-  inboxUnread: pendingInboxCounter(sessionDir, inboxEffects.pendingMessages),
+  inboxUnread: pendingInboxCounter(sessionDir, inboxEffects.pendingMessages, () => ({
+    version: inboxArchive.version(),
+    messages: inboxArchive.snapshot().messages
+  })),
   openQuestion: () => openOldestPendingQuestion()
 })
 let avatarDetach: Promise<void> = Promise.resolve()
@@ -3734,7 +3765,7 @@ app.whenReady().then(async () => {
       void pollOperatorInbox()
       void pollGraphDrafts()
       void pollApprovalVerdicts()
-      void pollPendingApprovals()
+      void pollApprovalLists()
       void pollDispatchRequests()
       void pollRoadmapSync()
     },
@@ -3774,8 +3805,8 @@ app.whenReady().then(async () => {
       const res = await claimApproval(deps, { id, handback: true })
       return res !== null
     },
-    inboxReply: (entry: { id: number; sentAt: string }, text: string): Promise<InboxReplyOutcome> =>
-      replyToInboxEntryCore(
+    inboxReply: async (entry: { id: number; sentAt: string }, text: string): Promise<InboxReplyOutcome> => {
+      const outcome = await replyToInboxEntryCore(
         {
           run: runInboxSigner,
           send: (run, target, replyId, body) =>
@@ -3795,12 +3826,16 @@ app.whenReady().then(async () => {
         },
         entry,
         text
-      ),
+      )
+      if (outcome !== 'unavailable') void pollOperatorInbox()
+      return outcome
+    },
     sandbox,
     sandboxGate,
     sandboxWarmTranscripts: warmSandboxTranscripts,
     purgeInboxSession,
     inboxDelete,
+    inboxArchive: () => inboxArchive.snapshot(),
     ttsr,
     serve,
     serveApprovalsFile: approvalsFile,
@@ -3860,7 +3895,7 @@ app.whenReady().then(async () => {
     void pollOperatorInbox()
     void pollGraphDrafts()
     void pollApprovalVerdicts()
-    void pollPendingApprovals()
+    void pollApprovalLists()
     // Card bf76d37f: same cadence, same best-effort contract as its four
     // siblings -- a tick that cannot reach the broker simply retries later.
     void pollDispatchRequests()

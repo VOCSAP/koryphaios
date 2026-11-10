@@ -185,7 +185,7 @@ test("a demo tile's token is released by the tile's final removal or clean exit,
   let released = 0;
   let n = 0;
   const srv = await startDeckControl({
-    inboxMandates: { request: () => {}, release: () => {} },
+    inboxMandates: { request: () => {}, release: () => {}, releaseTile: () => {} },
     listSessions: () => [],
     getSpawnCap: () => 8,
     approveSpawn: async (entries: unknown[]) => ({ pending: false, decisions: entries.map(() => true) }),
@@ -556,6 +556,11 @@ test("buildMintTeamLeadBridge mints with mintCaller('team-lead', TEAM_LEAD_DECK_
     expect(toolsEnv.split(",")).toEqual([...TEAM_LEAD_DECK_TOOLS, "roadmap_dispatch"]);
     expect(written.mcpServers["kory-deck"].env.DECK_CONTROL_ROLE).toBe("lead");
     expect(written.mcpServers["kory-operator"].env.KORY_OPERATOR_TOOLS.split(",")).toEqual([...OPERATOR_TOOLS]);
+    expect(
+      [written.mcpServers["kory-operator"].env.DECK_CONTROL_URL, written.mcpServers["kory-operator"].env.DECK_CONTROL_TOKEN],
+      "the operator family carries the lead's own minted Bearer, the same as its kory-deck mount"
+    ).toEqual(["http://127.0.0.1:9999", "tok-123"]);
+    expect(written.mcpServers["kory-operator"].env.DECK_CONTROL_TOKEN).toBe(written.mcpServers["kory-deck"].env.DECK_CONTROL_TOKEN);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

@@ -27,6 +27,7 @@ import {
   runInboxProof,
   mintMandate,
   closeInbox,
+  listInbox,
   replyInbox,
   INBOX_TEST_PROJECT,
   type RunCredential,
@@ -34,6 +35,14 @@ import {
 // The sentinel token is imported rather than re-typed, so seed and assertion
 // cannot silently agree with each other while testing an unrelated row.
 import { DECK_INSTANCE_TOKEN, OPERATOR_INSTANCE_TOKEN, SENTINEL_DEFINITIONS, type Approval } from "../shared/types.ts";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { startDeckControl, type DeckControlDeps } from "../desktop/src/main/deck-control.ts";
+import { createInboxActions } from "../desktop/src/main/inbox-actions.ts";
+import { handleInboxClose, handleInboxList, type OperatorToolContext } from "../shared/peers-session.ts";
+import type { CompanionIdentity } from "../shared/roadmap-dispatch.ts";
+import { reachedWithin } from "./_bounded-await.ts";
 
 let broker: TestBroker;
 
@@ -1465,6 +1474,7 @@ interface EntryRow {
   closed_by_instance_ref: string | null;
   closed_by_peer_id_snapshot: string | null;
   close_reason: string | null;
+  created_at: string;
 }
 
 const entriesOf = (run: RunCredential): EntryRow[] =>
@@ -1477,14 +1487,19 @@ const deckMessagesTo = (token: string): string[] =>
     token
   ).map((r) => r.text);
 
-/** A run, a registered author instance and one deposit: everything a reply or a close acts on. */
+/**
+ * A run, a registered author instance and one deposit: everything a reply or a
+ * close acts on. The author is registered from tile `tile`, so a mandate minted
+ * for that tile may prove with the author's instance.
+ */
 async function depositedEntry(label: string, text = "please look at this") {
   const { g, runs } = await newRuns(label);
   const run = runs[0]!;
-  const author = await registerAttestedInstance(broker, run, `h-${label}`, `/${label}`);
+  const tile = `tile-${label}`;
+  const author = await registerAttestedInstance(broker, run, `h-${label}`, `/${label}`, { desk_session: tile });
   await depositToOperator(broker, author.body.instance_token, text, run);
   const entry = entriesOf(run)[0]!;
-  return { g, run, author, token: author.body.instance_token, peerId: author.body.peer_id, entry };
+  return { g, run, author, tile, token: author.body.instance_token, peerId: author.body.peer_id, entry };
 }
 
 const replyTo = (run: RunCredential, entry: EntryRow, replyId = crypto.randomUUID(), text = "go ahead", over: Record<string, unknown> = {}) =>
@@ -1639,8 +1654,8 @@ test("the key is (message_id, sent_at) inside the run of the proof: another sent
 
 // Mutants: reply mapped to the drain operation, a run or mandate proof accepted, a drain-gate proof accepted.
 test("only the operator key opens the reply door, for its own gate", async () => {
-  const { run, entry } = await depositedEntry("rep-gate");
-  const mandate = await mintMandate(broker, run, "lead", "lead-gate");
+  const { run, tile, entry } = await depositedEntry("rep-gate");
+  const mandate = await mintMandate(broker, run, "lead", "lead-gate", { tile });
   const body = { group_id: run.group, group_secret_hash: run.secretHash, run_ref: run.run, message_id: entry.message_id, sent_at: entry.sent_at, reply_id: crypto.randomUUID(), text: "x" };
   const withAuth = (auth: unknown) => post<{ error?: string }>(`${broker.url}/operator-inbox/reply`, { ...body, auth });
 
@@ -1719,24 +1734,27 @@ test("an author who renames itself still receives the reply", async () => {
 test("a message entry is closed by its author, its lead and its supervisor, never by another author or another run", async () => {
   const { runs } = await newRuns("cls-msg", 2);
   const [run, otherRun] = runs as [RunCredential, RunCredential];
-  const a1 = await registerAttestedInstance(broker, run, "hCls1", "/cls1");
-  const a2 = await registerAttestedInstance(broker, run, "hCls2", "/cls2");
-  const b = await registerAttestedInstance(broker, otherRun, "hClsB", "/clsB");
+  const a1 = await registerAttestedInstance(broker, run, "hCls1", "/cls1", { desk_session: "cls-tile-a1" });
+  const a2 = await registerAttestedInstance(broker, run, "hCls2", "/cls2", { desk_session: "cls-tile-a2" });
+  const leadTile = await registerAttestedInstance(broker, run, "hClsL", "/clsL", { desk_session: "cls-tile-lead" });
+  const supTile = await registerAttestedInstance(broker, run, "hClsS", "/clsS", { desk_session: "cls-tile-sup" });
+  const b = await registerAttestedInstance(broker, otherRun, "hClsB", "/clsB", { desk_session: "cls-tile-b" });
   for (const [t, r, label] of [[a1, run, "one"], [a1, run, "two"], [a1, run, "three"], [a1, run, "four"], [b, otherRun, "other"]] as const) {
     await depositToOperator(broker, t.body.instance_token, label, r);
   }
   const [e1, e2, e3, e4] = entriesOf(run) as [EntryRow, EntryRow, EntryRow, EntryRow];
-  const authorOf = await mintMandate(broker, run, "author", "author-1");
-  const lead = await mintMandate(broker, run, "lead", "lead-1");
-  const supervisor = await mintMandate(broker, run, "supervisor", "supervisor-1");
-  const leadOther = await mintMandate(broker, otherRun, "lead", "lead-other");
+  const authorOf = await mintMandate(broker, run, "author", "author-1", { tile: "cls-tile-a1" });
+  const otherAuthor = await mintMandate(broker, run, "author", "author-2", { tile: "cls-tile-a2" });
+  const lead = await mintMandate(broker, run, "lead", "lead-1", { tile: "cls-tile-lead" });
+  const supervisor = await mintMandate(broker, run, "supervisor", "supervisor-1", { tile: "cls-tile-sup" });
+  const leadOther = await mintMandate(broker, otherRun, "lead", "lead-other", { tile: "cls-tile-b" });
   const close = (r: RunCredential, m: typeof lead, e: EntryRow, instance: string | null, reason: unknown = "done") =>
     closeInbox(broker, r, m, { entryId: e.entry_id, reason, instanceToken: instance });
 
   const byAuthor = await close(run, authorOf, e1, a1.body.instance_token, "finished here");
-  const byOtherAuthor = await close(run, authorOf, e2, a2.body.instance_token);
-  const byLead = await close(run, lead, e2, a2.body.instance_token, "stale");
-  const bySupervisor = await close(run, supervisor, e3, a2.body.instance_token, "superseded");
+  const byOtherAuthor = await close(run, otherAuthor, e2, a2.body.instance_token);
+  const byLead = await close(run, lead, e2, leadTile.body.instance_token, "stale");
+  const bySupervisor = await close(run, supervisor, e3, supTile.body.instance_token, "superseded");
   const crossRun = await close(otherRun, leadOther, e4, b.body.instance_token);
   const withoutProof = await close(run, lead, e4, null);
 
@@ -1755,8 +1773,13 @@ test("a message entry is closed by its author, its lead and its supervisor, neve
     close_reason: "finished here",
     reply_token: "",
   });
-  expect(rows[e2.message_id]).toMatchObject({ state: "closed", closed_by_authority: "lead", close_reason: "stale" });
-  expect(rows[e3.message_id]).toMatchObject({ state: "closed", closed_by_authority: "supervisor" });
+  expect(rows[e2.message_id]).toMatchObject({
+    state: "closed",
+    closed_by_authority: "lead",
+    closed_by_peer_id_snapshot: leadTile.body.peer_id,
+    close_reason: "stale",
+  });
+  expect(rows[e3.message_id]).toMatchObject({ state: "closed", closed_by_authority: "supervisor", closed_by_peer_id_snapshot: supTile.body.peer_id });
   expect(rows[e4.message_id]!.state).toBe("open");
   expect(entriesOf(otherRun)[0]!.state).toBe("open");
   expect(JSON.stringify(byAuthor.body)).not.toContain(a1.body.instance_token);
@@ -1765,8 +1788,8 @@ test("a message entry is closed by its author, its lead and its supervisor, neve
 
 // Mutants: a boundary dropped, the reason truncated instead of refused, control bytes kept.
 test("a close reason outside 1..500 code points is a 400 with no write, and control bytes are stripped before storage", async () => {
-  const { run, token, entry } = await depositedEntry("cls-reason");
-  const lead = await mintMandate(broker, run, "lead", "lead-reason");
+  const { run, tile, token, entry } = await depositedEntry("cls-reason");
+  const lead = await mintMandate(broker, run, "lead", "lead-reason", { tile });
   const close = (reason: unknown) => closeInbox(broker, run, lead, { entryId: entry.entry_id, reason, instanceToken: token });
 
   const statuses = [await close(undefined), await close(""), await close("   "), await close(7), await close("x".repeat(501))].map((r) => r.status);
@@ -1778,8 +1801,8 @@ test("a close reason outside 1..500 code points is a 400 with no write, and cont
 });
 
 test("an entry id of an unknown form is a 400, an unknown one a 404, and neither writes", async () => {
-  const { run, token } = await depositedEntry("cls-form");
-  const lead = await mintMandate(broker, run, "lead", "lead-form");
+  const { run, tile, token } = await depositedEntry("cls-form");
+  const lead = await mintMandate(broker, run, "lead", "lead-form", { tile });
   const close = (entryId: unknown) => closeInbox(broker, run, lead, { entryId, reason: "x", instanceToken: token });
 
   expect([
@@ -1795,7 +1818,7 @@ test("an entry id of an unknown form is a 400, an unknown one a 404, and neither
 // Mutants: UPDATE without state='open'; closed_by_* overwritten by a second close.
 test("reply and close race to one winner in both orders, and the loser is told the winner's state", async () => {
   const first = await depositedEntry("race-a");
-  const leadA = await mintMandate(broker, first.run, "lead", "lead-race-a");
+  const leadA = await mintMandate(broker, first.run, "lead", "lead-race-a", { tile: first.tile });
   const closed = await closeInbox(broker, first.run, leadA, { entryId: first.entry.entry_id, reason: "no longer needed", instanceToken: first.token });
   const lateReply = await replyTo(first.run, first.entry);
   const secondClose = await closeInbox(broker, first.run, leadA, { entryId: first.entry.entry_id, reason: "overwritten?", instanceToken: first.token });
@@ -1807,7 +1830,7 @@ test("reply and close race to one winner in both orders, and the loser is told t
   expect(entriesOf(first.run)[0]).toMatchObject({ state: "closed", close_reason: "no longer needed" });
 
   const second = await depositedEntry("race-b");
-  const leadB = await mintMandate(broker, second.run, "lead", "lead-race-b");
+  const leadB = await mintMandate(broker, second.run, "lead", "lead-race-b", { tile: second.tile });
   expect((await replyTo(second.run, second.entry)).status).toBe(200);
   const lateClose = await closeInbox(broker, second.run, leadB, { entryId: second.entry.entry_id, reason: "too late", instanceToken: second.token });
   expect({ status: lateClose.status, state: (lateClose.body as { state?: string }).state }).toEqual({ status: 409, state: "responded" });
@@ -1816,7 +1839,7 @@ test("reply and close race to one winner in both orders, and the loser is told t
 
 test("a concurrent reply and close leave exactly one winner and a consistent state", async () => {
   const w = await depositedEntry("race-par");
-  const lead = await mintMandate(broker, w.run, "lead", "lead-race-par");
+  const lead = await mintMandate(broker, w.run, "lead", "lead-race-par", { tile: w.tile });
   const [closed, replied] = await Promise.all([
     closeInbox(broker, w.run, lead, { entryId: w.entry.entry_id, reason: "parallel", instanceToken: w.token }),
     replyTo(w.run, w.entry),
@@ -1832,14 +1855,334 @@ test("a concurrent reply and close leave exactly one winner and a consistent sta
 test("a new run of the same group cannot reply to or close an entry of an earlier run", async () => {
   const w = await depositedEntry("run-restart");
   const next = await mintRunCredential(broker, w.g);
-  const nextLead = await mintMandate(broker, next, "lead", "lead-next");
-  const nextInstance = await registerAttestedInstance(broker, next, "hNext", "/next");
+  const nextLead = await mintMandate(broker, next, "lead", "lead-next", { tile: "tile-next" });
+  const nextInstance = await registerAttestedInstance(broker, next, "hNext", "/next", { desk_session: "tile-next" });
 
   const reply = await replyTo(next, w.entry);
   const close = await closeInbox(broker, next, nextLead, { entryId: w.entry.entry_id, reason: "x", instanceToken: nextInstance.body.instance_token });
 
   expect([reply.status, close.status]).toEqual([404, 404]);
   expect(entriesOf(w.run)[0]!.state).toBe("open");
+});
+
+// --- Mandate bound to its tile, and the run's open-entry list ---
+
+type ListItem = { id: string; type: string; author: string | null; created_at: string; text: string; closable: boolean; message_id?: number; sent_at?: string };
+type ListBody = { entries?: ListItem[]; next_cursor?: string | null; error?: string };
+const setPeerStatus = (token: string, status: string): void => {
+  const db = openBrokerDb(broker.dbPath);
+  try {
+    db.run("UPDATE peers SET status = ? WHERE instance_token = ?", [status, token]);
+  } finally {
+    db.close();
+  }
+};
+
+// Mutants: instanceOnTile answering true; the tile check skipped for a list; the mandate pinned to the first instance that used it.
+test("a lead mandate acts only through an instance of its own tile: another tile of the run is 403 for close and list, a restarted tile passes, an inactive one does not", async () => {
+  const w = await depositedEntry("tile-bind");
+  await depositToOperator(broker, w.token, "second", w.run);
+  const [first, second] = entriesOf(w.run) as [EntryRow, EntryRow];
+  const lead = await registerAttestedInstance(broker, w.run, "hTileL", "/tileL", { desk_session: "tile-bind-lead" });
+  const mandate = await mintMandate(broker, w.run, "lead", "lead-tile-bind", { tile: "tile-bind-lead" });
+
+  const foreignClose = await closeInbox(broker, w.run, mandate, { entryId: first.entry_id, reason: "x", instanceToken: w.token });
+  const foreignList = await listInbox<ListBody>(broker, w.run, mandate, { instanceToken: w.token });
+  expect([foreignClose.status, foreignList.status]).toEqual([403, 403]);
+  expect(foreignClose.body.error).toBe("author instance is not the mandate's tile");
+  expect(entriesOf(w.run).map((e) => e.state), "a refused close writes nothing").toEqual(["open", "open"]);
+
+  expect((await listInbox<ListBody>(broker, w.run, mandate, { instanceToken: lead.body.instance_token })).status).toBe(200);
+  const restarted = await registerAttestedInstance(broker, w.run, "hTileL", "/tileL-restarted", { desk_session: "tile-bind-lead" });
+  expect(restarted.body.instance_token).not.toBe(lead.body.instance_token);
+  const afterRestart = await closeInbox(broker, w.run, mandate, { entryId: first.entry_id, reason: "stale", instanceToken: restarted.body.instance_token });
+  expect(afterRestart.status, "the same tile with a new instance keeps its mandate").toBe(200);
+  expect(entriesOf(w.run)[0]).toMatchObject({ state: "closed", closed_by_authority: "lead", closed_by_peer_id_snapshot: restarted.body.peer_id });
+
+  setPeerStatus(restarted.body.instance_token, "dormant");
+  const inactive = await closeInbox(broker, w.run, mandate, { entryId: second.entry_id, reason: "x", instanceToken: restarted.body.instance_token });
+  expect(inactive.status, "an instance of the tile that is no longer active").toBe(403);
+  expect(entriesOf(w.run)[1]!.state).toBe("open");
+});
+
+// Mutant: the group clause of instanceOnTile dropped.
+test("an instance of the mandate's tile whose session row is in another group is refused", async () => {
+  const w = await depositedEntry("tile-group");
+  const lead = await registerAttestedInstance(broker, w.run, "hGroupL", "/groupL", { desk_session: "tile-group-lead" });
+  const mandate = await mintMandate(broker, w.run, "lead", "lead-tile-group", { tile: "tile-group-lead" });
+  const db = openBrokerDb(broker.dbPath);
+  try {
+    db.run("UPDATE peer_sessions SET group_id = ? WHERE instance_token = ?", ["another-group", lead.body.instance_token]);
+  } finally {
+    db.close();
+  }
+
+  const close = await closeInbox(broker, w.run, mandate, { entryId: w.entry.entry_id, reason: "x", instanceToken: lead.body.instance_token });
+
+  expect({ status: close.status, error: close.body.error }).toEqual({ status: 403, error: "author instance is not the mandate's tile" });
+  expect(entriesOf(w.run)[0]!.state).toBe("open");
+});
+
+// Mutant: authority or tile derived from the displayed peer_id.
+test("a peer that takes the lead's peer_id after a rename gets 403 under the lead's mandate", async () => {
+  const w = await depositedEntry("tile-reuse");
+  const lead = await registerAttestedInstance(broker, w.run, "hReuseL", "/reuseL", { desk_session: "tile-reuse-lead" });
+  const mandate = await mintMandate(broker, w.run, "lead", "lead-reuse", { tile: "tile-reuse-lead" });
+  const leadPeerId = lead.body.peer_id;
+  await post(`${broker.url}/set-id`, { instance_token: lead.body.instance_token, new_peer_id: "lead-renamed" });
+  const heir = await registerAttestedInstance(broker, w.run, "hReuseH", "/reuseH", { desk_session: "tile-reuse-heir" });
+  await post(`${broker.url}/set-id`, { instance_token: heir.body.instance_token, new_peer_id: leadPeerId });
+
+  const close = await closeInbox(broker, w.run, mandate, { entryId: w.entry.entry_id, reason: "x", instanceToken: heir.body.instance_token });
+
+  expect(close.status).toBe(403);
+  expect(entriesOf(w.run)[0]!.state).toBe("open");
+});
+
+// Mutant: the author proof checked against the envelope's run instead of the mandate's parent.
+test("two Decks restoring the same workspace share a desk session id, and neither acts through the other's tile", async () => {
+  const { runs } = await newRuns("tile-twin", 2);
+  const [deckA, deckB] = runs as [RunCredential, RunCredential];
+  const tileA = await registerAttestedInstance(broker, deckA, "hTwinA", "/twinA", { desk_session: "restored-tile" });
+  const tileB = await registerAttestedInstance(broker, deckB, "hTwinB", "/twinB", { desk_session: "restored-tile" });
+  await depositToOperator(broker, tileA.body.instance_token, "in deck A", deckA);
+  const entry = entriesOf(deckA)[0]!;
+  const mandateA = await mintMandate(broker, deckA, "lead", "lead-twin-a", { tile: "restored-tile" });
+
+  const proofSignedByA = await closeInbox(broker, deckA, mandateA, { entryId: entry.entry_id, reason: "x", instanceToken: tileB.body.instance_token });
+  const proofSignedByB = await closeInbox(broker, { cred: deckB.cred, tokenId: deckB.tokenId }, mandateA, { entryId: entry.entry_id, reason: "x", instanceToken: tileB.body.instance_token });
+
+  expect([proofSignedByA.status, proofSignedByB.status]).toEqual([403, 403]);
+  expect(entriesOf(deckA)[0]!.state).toBe("open");
+});
+
+// Mutants: state omitted from the list SELECT; next_cursor taken from the last row kept; the keyset not strict.
+test("the list pages 20 open entries then the rest, oldest first, skips settled ones and stays exact across a close between pages", async () => {
+  const { runs } = await newRuns("list-page", 2);
+  const [run, otherRun] = runs as [RunCredential, RunCredential];
+  const author = await registerAttestedInstance(broker, run, "hListA", "/listA", { desk_session: "list-tile-a" });
+  const lead = await registerAttestedInstance(broker, run, "hListL", "/listL", { desk_session: "list-tile-lead" });
+  const other = await registerAttestedInstance(broker, otherRun, "hListO", "/listO", { desk_session: "list-tile-o" });
+  for (let i = 0; i < 27; i++) await depositToOperator(broker, author.body.instance_token, `note ${i}`, run);
+  await depositToOperator(broker, other.body.instance_token, "other run", otherRun);
+  const all = entriesOf(run);
+  const mandate = await mintMandate(broker, run, "lead", "lead-list", { tile: "list-tile-lead" });
+  const asLead = (cursor?: unknown) => listInbox<ListBody>(broker, run, mandate, { instanceToken: lead.body.instance_token, cursor });
+  await replyTo(run, all[0]!);
+  await closeInbox(broker, run, mandate, { entryId: all[1]!.entry_id, reason: "gone", instanceToken: lead.body.instance_token });
+
+  const page1 = await asLead();
+  expect(page1.status).toBe(200);
+  expect(page1.body.entries).toHaveLength(20);
+  expect(page1.body.next_cursor).toEqual(expect.any(String));
+  const all2 = [...page1.body.entries!].find((e) => e.id === all[2]!.entry_id) ?? null;
+  expect(all2).toEqual({
+    id: all[2]!.entry_id,
+    type: "message",
+    author: author.body.peer_id,
+    created_at: expect.any(String),
+    text: "note 2",
+    closable: true,
+    message_id: all[2]!.message_id,
+    sent_at: all[2]!.sent_at,
+  });
+  await closeInbox(broker, run, mandate, { entryId: page1.body.entries![5]!.id, reason: "between pages", instanceToken: lead.body.instance_token });
+  const page2 = await asLead(page1.body.next_cursor);
+
+  expect(page2.body.entries).toHaveLength(5);
+  expect(page2.body.next_cursor).toBeNull();
+  const seen = [...page1.body.entries!, ...page2.body.entries!].map((e) => e.id);
+  const byInstantThenId = (rows: Array<{ id: string; at: number }>) =>
+    [...rows].sort((a, b) => a.at - b.at || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)).map((r) => r.id);
+  const open = all.slice(2).map((e) => ({ id: e.entry_id, at: Date.parse(e.created_at) }));
+  expect(seen, "every open entry once, oldest first, none of another run").toEqual(byInstantThenId(open));
+});
+
+// Mutants: authorizeInboxEntry not applied to the list; next_cursor taken from the last row kept instead of the last row read.
+test("an author lists only its own entries, and a page whose rows were all filtered out still hands a cursor", async () => {
+  const { runs } = await newRuns("list-author", 1);
+  const run = runs[0]!;
+  const mine = await registerAttestedInstance(broker, run, "hMine", "/mine", { desk_session: "list-mine" });
+  const theirs = await registerAttestedInstance(broker, run, "hTheirs", "/theirs", { desk_session: "list-theirs" });
+  for (let i = 0; i < 21; i++) await depositToOperator(broker, theirs.body.instance_token, `theirs ${i}`, run);
+  await depositToOperator(broker, mine.body.instance_token, "mine", run);
+  const db = openBrokerDb(broker.dbPath);
+  try {
+    // Deposits a millisecond apart can tie; the author's entry must be the 22nd row.
+    db.run("UPDATE inbox_message_entries SET created_at = ? WHERE author_instance_ref = ?", ["2099-01-01T00:00:00.000Z", deriveInstanceRef(mine.body.instance_token)]);
+  } finally {
+    db.close();
+  }
+  const mandate = await mintMandate(broker, run, "author", "author-list", { tile: "list-mine" });
+
+  const page1 = await listInbox<ListBody>(broker, run, mandate, { instanceToken: mine.body.instance_token });
+  const page2 = await listInbox<ListBody>(broker, run, mandate, { instanceToken: mine.body.instance_token, cursor: page1.body.next_cursor });
+
+  expect(page1.body.entries).toEqual([]);
+  expect(page1.body.next_cursor).toEqual(expect.any(String));
+  expect(page2.body.entries!.map((e) => e.text)).toEqual(["mine"]);
+  expect(page2.body.next_cursor).toBeNull();
+});
+
+// Mutant: the keyset compares created_at as TEXT; a malformed cursor read as no cursor.
+test("the cursor orders on the instant, not on the text of the timestamp, and a malformed cursor is a 400", async () => {
+  const w = await depositedEntry("list-instant");
+  await depositToOperator(broker, w.token, "later", w.run);
+  const [early, late] = entriesOf(w.run) as [EntryRow, EntryRow];
+  const db = openBrokerDb(broker.dbPath);
+  try {
+    db.run("UPDATE inbox_message_entries SET created_at = ? WHERE entry_id = ?", ["2030-01-01T10:00:00.000+05:00", early.entry_id]);
+    db.run("UPDATE inbox_message_entries SET created_at = ? WHERE entry_id = ?", ["2030-01-01T06:00:00.000Z", late.entry_id]);
+  } finally {
+    db.close();
+  }
+  const mandate = await mintMandate(broker, w.run, "lead", "lead-instant", { tile: w.tile });
+  const cursor = Buffer.from(JSON.stringify({ t: "2030-01-01T10:00:00.000+05:00", id: early.entry_id })).toString("base64url");
+
+  const afterEarly = await listInbox<ListBody>(broker, w.run, mandate, { instanceToken: w.token, cursor });
+  expect(afterEarly.body.entries!.map((e) => e.id), "05:00Z sorts before 06:00Z").toEqual([late.entry_id]);
+
+  const refused: number[] = [];
+  for (const bad of ["", 7, "!!", Buffer.from("{}").toString("base64url"), Buffer.from(JSON.stringify({ t: "x", id: early.entry_id })).toString("base64url"), Buffer.from(JSON.stringify({ t: early.created_at, id: "42" })).toString("base64url"), "a".repeat(257)]) {
+    refused.push((await listInbox<ListBody>(broker, w.run, mandate, { instanceToken: w.token, cursor: bad })).status);
+  }
+  expect(refused).toEqual([400, 400, 400, 400, 400, 400, 400]);
+});
+
+// Mutant: a row projected by spread instead of the pick-list.
+test("a listed entry carries the pick-list only: no reply token, instance digest, tile or caller", async () => {
+  const w = await depositedEntry("list-canary", "canary list body");
+  const mandate = await mintMandate(broker, w.run, "lead", "lead-list-canary", { tile: w.tile });
+  const db = openBrokerDb(broker.dbPath);
+  try {
+    db.run("ALTER TABLE inbox_message_entries ADD COLUMN list_canary TEXT");
+    db.run("UPDATE inbox_message_entries SET list_canary = 'LIST-CANARY' WHERE run_ref = ?", [w.run.run]);
+  } finally {
+    db.close();
+  }
+
+  const read = await listInbox<ListBody>(broker, w.run, mandate, { instanceToken: w.token });
+  const wire = JSON.stringify(read.body);
+  expect(Object.keys(read.body.entries![0]!).sort()).toEqual(["author", "closable", "created_at", "id", "message_id", "sent_at", "text", "type"]);
+  for (const secret of [w.entry.reply_token, w.token, deriveInstanceRef(w.token), "LIST-CANARY", "lead-list-canary"]) {
+    expect(wire).not.toContain(secret);
+  }
+});
+
+/**
+ * The real tile tools, a real deck-control server and the main's inbox
+ * actions in front of the shared broker, for a supervisor tile of `w`'s run.
+ */
+async function inboxToolChain(w: Awaited<ReturnType<typeof depositedEntry>>, label: string) {
+  const tile = `${label}-sup-tile`;
+  const supTile = await registerAttestedInstance(broker, w.run, `h-${label}-sup`, `/${label}-sup`, { desk_session: tile });
+  const minted = await mintMandate(broker, w.run, "supervisor", `supervisor-${label}`, { tile });
+  const ready = {
+    tokenId: minted.tokenId,
+    privateKey: minted.cred.privateKey,
+    expiresAt: "2099-01-01T00:00:00.000Z",
+    deps: { endpoint: { url: broker.url, token: null }, identity: { operatorId: FIXTURE_OPERATOR_ID }, projectKey: INBOX_TEST_PROJECT },
+  } as never;
+  const asked: string[] = [];
+  const deps = {
+    inboxMandates: { request: () => {}, release: () => {}, releaseTile: () => {} },
+    listSessions: () => [{ id: tile, supervisor: true, status: "running" }],
+    inbox: createInboxActions({
+      mandate: async (callerId, forTile) => {
+        asked.push(`${callerId}@${forTile}`);
+        return ready;
+      },
+      localCourrier: () => ({ history: [{ id: w.entry.message_id, from: w.peerId, text: "x", sentAt: w.entry.sent_at }], acks: {} }),
+    }),
+  } as unknown as DeckControlDeps;
+  const control = await startDeckControl(deps);
+  const credDir = mkdtempSync(join(tmpdir(), "inbox-chain-"));
+  const credFile = join(credDir, "run-cred.json");
+  writeFileSync(credFile, JSON.stringify({
+    brokerUrl: broker.url, operatorId: FIXTURE_OPERATOR_ID, tokenId: w.run.tokenId,
+    privateKey: w.run.cred.privateKey, publicKey: w.run.cred.publicKey,
+    inbox: { version: 1, run_ref: w.run.run, group_id: w.run.group },
+  }));
+  const ctx: OperatorToolContext = {
+    broker: {} as never,
+    env: { CLAUDE_PEERS_APPROVAL_FILE: credFile },
+    role: null,
+    cwd: "/",
+    log: { log: () => {}, logError: () => {} },
+    deck: { url: control.url, token: control.token },
+  };
+  const identity: CompanionIdentity = {
+    host: `h-${label}-sup`, peerId: supTile.body.peer_id, groupId: w.run.group, instanceToken: supTile.body.instance_token,
+    inboxBinding: { version: 1, runRef: w.run.run, groupId: w.run.group }, operatorId: FIXTURE_OPERATOR_ID, projectKey: "", fromPeer: supTile.body.peer_id,
+  };
+  return {
+    supTile, tile, asked, ctx, identity,
+    stop: () => {
+      control.close();
+      rmSync(credDir, { recursive: true, force: true });
+    },
+  };
+}
+
+// Mutant: any signature, gate or body field the tile, the Deck main and the broker disagree on.
+test("end to end: the tile tools through deck-control and the main's mandate envelope list then close an entry at the broker", async () => {
+  const w = await depositedEntry("chain-e2e");
+  const chain = await inboxToolChain(w, "chain-e2e");
+  try {
+    const listed = await handleInboxList({}, chain.identity, chain.ctx);
+    expect(JSON.parse(listed.content[0]!.text)).toEqual({
+      entries: [{ id: w.entry.entry_id, type: "message", author: w.peerId, created_at: expect.any(String), text: w.entry.excerpt, closable: true }],
+      next_cursor: null,
+    });
+    const closed = await handleInboxClose({ id: w.entry.entry_id, reason: "superseded by the plan" }, chain.identity, chain.ctx);
+    const again = await handleInboxClose({ id: w.entry.entry_id, reason: "superseded by the plan" }, chain.identity, chain.ctx);
+
+    expect(closed.content[0]!.text).toBe(`Closed ${w.entry.entry_id}.`);
+    expect(again.content[0]!.text).toBe("Not closed: the item is already closed.");
+    expect(entriesOf(w.run)[0]).toMatchObject({
+      state: "closed",
+      closed_by_authority: "supervisor",
+      closed_by_peer_id_snapshot: chain.supTile.body.peer_id,
+      close_reason: "superseded by the plan",
+    });
+    expect(chain.asked.every((a) => a === `supervisor@${chain.tile}`)).toBe(true);
+  } finally {
+    chain.stop();
+  }
+});
+
+// Mutant: the tool chain reaching the broker without waking the author's parked wait.
+test("end to end: inbox_close on an attested question wakes the author's parked wait with closed", async () => {
+  const w = await depositedEntry("chain-question");
+  const chain = await inboxToolChain(w, "chain-question");
+  try {
+    const askBody: Record<string, unknown> = {
+      project_key: INBOX_TEST_PROJECT, kind: "question", merge: "never", title: "Which way?", question: "Left or right?",
+      reply_route: "channel", origin: { host: "h-chain-question" }, instance_token: w.token, public_key: w.run.cred.publicKey,
+    };
+    const asked = await post<{ approval: Approval }>(`${broker.url}/approval/add`, { ...askBody, auth: runInboxProof(w.run, askBody, INBOX_GATES.channel) });
+    expect(asked.status).toBe(200);
+    const questionId = asked.body.approval.id;
+    const waitBody = { project_key: INBOX_TEST_PROJECT, id: questionId, timeout_sec: 30, public_key: w.run.cred.publicKey };
+    const waiting = post<{ approval?: Approval }>(`${broker.url}/approval/wait`, {
+      ...waitBody,
+      auth: buildAuthProof(w.run.cred.privateKey, waitBody, { kind: "session", operator_id: FIXTURE_OPERATOR_ID, token_id: w.run.tokenId }),
+    });
+    let settled = false;
+    void waiting.then(() => {
+      settled = true;
+    });
+    await get(`${broker.url}/health`);
+    expect(settled, "the wait is parked, not answered, before the close").toBe(false);
+
+    const closed = await handleInboxClose({ id: questionId, reason: "no longer needed" }, chain.identity, chain.ctx);
+    const woken = await reachedWithin(waiting, "the parked wait after the tool's close");
+
+    expect(closed.content[0]!.text).toBe(`Closed ${questionId}.`);
+    expect(woken.body.approval).toMatchObject({ id: questionId, status: "closed", close_reason: "no longer needed", closed_by_authority: "supervisor" });
+  } finally {
+    chain.stop();
+  }
 });
 
 // --- Run drain: state snapshot of the run's registry rows ---
@@ -1881,7 +2224,7 @@ test("a closed and a responded entry show their state in the snapshot, and the l
   const w = await depositedEntry("snap-state");
   await depositToOperator(broker, w.token, "second", w.run);
   const [closing, replying] = entriesOf(w.run) as [EntryRow, EntryRow];
-  const lead = await mintMandate(broker, w.run, "lead", "lead-snap");
+  const lead = await mintMandate(broker, w.run, "lead", "lead-snap", { tile: w.tile });
   await closeInbox(broker, w.run, lead, { entryId: closing.entry_id, reason: "no longer needed", instanceToken: w.token });
   await replyTo(w.run, replying);
 
@@ -1902,7 +2245,7 @@ test("a closed and a responded entry show their state in the snapshot, and the l
 // Mutants: messageEntryView reused (leaks entry_id and excerpt); a spread of the row instead of the pick-list (leaks every column, a future one included).
 test("the snapshot is a pick-list: no entry id, excerpt, token or instance ref, and an unknown registry column stays out", async () => {
   const w = await depositedEntry("snap-canary", "a recognisable excerpt body");
-  const lead = await mintMandate(broker, w.run, "lead", "lead-canary");
+  const lead = await mintMandate(broker, w.run, "lead", "lead-canary", { tile: w.tile });
   await closeInbox(broker, w.run, lead, { entryId: w.entry.entry_id, reason: "canary", instanceToken: w.token });
   const db = openBrokerDb(broker.dbPath);
   try {

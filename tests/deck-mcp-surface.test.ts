@@ -1,4 +1,4 @@
-// Surface test for the second MCP entrypoint: exactly the five Kory-only
+// Surface test for the second MCP entrypoint: exactly the seven Kory-only
 // tools, and an instructions block that is served at all. What that block
 // must SAY is pinned once, against the node bundle the Deck actually
 // spawns; splitting it that way keeps the sentence from living in two
@@ -15,7 +15,7 @@ interface JsonRpcResponse {
   id?: number;
   result?: {
     instructions?: string;
-    tools?: Array<{ name: string }>;
+    tools?: Array<{ name: string; inputSchema?: { properties?: Record<string, unknown>; required?: string[] } }>;
   };
 }
 
@@ -95,17 +95,33 @@ describe("server-deck.ts surface", () => {
     expect((initRes.result?.instructions ?? "").length).toBeGreaterThan(0);
   }, 30_000);
 
-  test("exposes exactly the five Kory-only tools", async () => {
+  test("exposes exactly the seven Kory-only tools, the inbox ones with their declared arguments", async () => {
     const { reader, buffer, send } = await boot();
     send({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} });
     const res = await readUntil(reader, 1, buffer);
-    const names = (res.result?.tools ?? []).map((t) => t.name).sort();
+    const tools = res.result?.tools ?? [];
+    const names = tools.map((t) => t.name).sort();
     expect(names).toEqual([
       "ask_operator",
       "ask_operator_wait",
       "graph_draft_prepare",
       "graph_draft_send",
+      "inbox_close",
+      "inbox_list",
       "notify_operator",
     ]);
+    const schemaOf = (name: string) => tools.find((t) => t.name === name)?.inputSchema;
+    expect(schemaOf("inbox_list")).toMatchObject({ properties: { cursor: { type: "string" } } });
+    expect(schemaOf("inbox_list")?.required ?? []).toEqual([]);
+    expect(schemaOf("inbox_close")).toMatchObject({
+      properties: { id: { type: "string" }, reason: { type: "string" } },
+      required: ["id", "reason"],
+    });
+    for (const name of ["inbox_list", "inbox_close"]) {
+      expect({ name, keys: Object.keys(schemaOf(name)?.properties ?? {}).sort() }).toEqual({
+        name,
+        keys: name === "inbox_list" ? ["cursor"] : ["id", "reason"],
+      });
+    }
   }, 30_000);
 });

@@ -107,6 +107,8 @@ function makeDeps(state: { sessions: SessionRuntime[] }): DeckControlDeps & {
   restarted: string[];
   leadMcpCalls: { token: string; callerId: string; allowedTools: readonly string[] }[];
   revokedLeadCallerIds: string[];
+  releasedTiles: string[];
+  inboxRuns: Array<{ callerId: string; tile: string; authority: string; request: unknown }>;
   demoMints: Array<{ mcpConfig: string; released: number; release(): void }>;
   spawnOpts: { checkpoint: boolean; hasLead: boolean }[];
   sessionSpawnOpts: Array<{ hasDeckLeadTools?: boolean } | undefined>;
@@ -130,6 +132,8 @@ function makeDeps(state: { sessions: SessionRuntime[] }): DeckControlDeps & {
   const sessionSpawnOpts: Array<{ hasDeckLeadTools?: boolean } | undefined> = [];
   const leadMcpCalls: { token: string; callerId: string; allowedTools: readonly string[] }[] = [];
   const revokedLeadCallerIds: string[] = [];
+  const releasedTiles: string[] = [];
+  const inboxRuns: Array<{ callerId: string; tile: string; authority: string; request: unknown }> = [];
   const demoMints: Array<{ mcpConfig: string; released: number; release(): void }> = [];
   const directiveRuns: { directive: string; peerIds: string[]; prompt: string | undefined; callerId: string }[] = [];
   let n = 0;
@@ -147,7 +151,15 @@ function makeDeps(state: { sessions: SessionRuntime[] }): DeckControlDeps & {
     revokedLeadCallerIds,
     spawnOpts,
     sessionSpawnOpts,
-    inboxMandates: { request: () => {}, release: () => {} },
+    releasedTiles,
+    inboxRuns,
+    inboxMandates: { request: () => {}, release: () => {}, releaseTile: (tile) => releasedTiles.push(tile) },
+    inbox: {
+      run: async (callerId, tile, authority, request) => {
+        inboxRuns.push({ callerId, tile, authority, request });
+        return { outcome: "closed", id: "m_x" };
+      }
+    },
     listAgents: () => ["team-lead", "dev", "reviewer"],
     listModels: () => [{ id: "opus", label: "Opus" }],
     listPresets: () => [],
@@ -580,7 +592,8 @@ test("a caller's mandate authority comes from the provisioning path, never from 
     ...makeDeps(state),
     inboxMandates: {
       request: (callerRef: string, authority: string) => requested.push([callerRef, authority]),
-      release: (callerRef: string) => released.push(callerRef)
+      release: (callerRef: string) => released.push(callerRef),
+      releaseTile: () => {}
     }
   };
   const srv = await startDeckControl(deps);
@@ -598,6 +611,123 @@ test("a caller's mandate authority comes from the provisioning path, never from 
 
   expect(srv.revokeCallerForSession(tile.id)).toBe(leadCaller);
   expect(released, "a revoked caller releases its mandate").toEqual([leadCaller]);
+});
+
+// ----- POST /inbox: the kory-operator inbox tools' door -----
+
+const ENTRY_ID = "m_" + "0123abcd-0123-4123-8123-0123456789ab";
+const TILE_INSTANCE = ["tile", "instance", "marker"].join("-");
+const WRONG_BEARER = ["wrong", "bearer"].join("-");
+const closeBody = (over: Record<string, unknown> = {}, payloadOver: Record<string, unknown> = {}) => ({
+  op: "close",
+  author: {
+    payload: { inbox_operation: "close", entry_id: ENTRY_ID, reason: "stale", instance_token: TILE_INSTANCE, ...payloadOver },
+    auth: { sig: "s" }
+  },
+  ...over
+});
+
+async function postInbox(srv: DeckControlServer, body: unknown, bearer?: string): Promise<{ status: number; body: { ok?: boolean; result?: { outcome?: string; cause?: string; message?: string; id?: string }; error?: string } }> {
+  const res = await fetch(`${srv.url}/inbox`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${bearer ?? srv.token}` },
+    body: typeof body === "string" ? body : JSON.stringify(body)
+  });
+  return { status: res.status, body: (await res.json()) as never };
+}
+
+// Mutants: authority or tile read from the body; /inbox answering an unknown Bearer.
+test("/inbox runs with the caller table's authority and the caller's own tile, whatever the body claims", async () => {
+  const state = { sessions: [] as SessionRuntime[] };
+  const deps = makeDeps(state);
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+  const lead = srv.mintCaller("team-lead", TEAM_LEAD_DECK_TOOLS, "lead");
+  state.sessions.push(fakeSession("lead-tile", { mintedCallerId: lead.callerId }), fakeSession("other-tile"));
+
+  const unknown = await postInbox(srv, closeBody(), WRONG_BEARER);
+  const forged = await postInbox(srv, closeBody({ authority: "supervisor", role: "supervisor", tile: "other-tile", run_ref: "x" }), lead.token);
+
+  expect(unknown.status).toBe(401);
+  expect(forged.status).toBe(200);
+  expect(forged.body.result).toEqual({ outcome: "closed", id: "m_x" });
+  expect(deps.inboxRuns).toHaveLength(1);
+  expect(deps.inboxRuns[0]).toMatchObject({ callerId: lead.callerId, tile: "lead-tile", authority: "lead" });
+  expect(deps.inboxRuns[0]!.request).toEqual({
+    op: "close",
+    entryId: ENTRY_ID,
+    author: { payload: { inbox_operation: "close", entry_id: ENTRY_ID, reason: "stale", instance_token: TILE_INSTANCE }, auth: { sig: "s" } }
+  });
+});
+
+// Mutant: the first live supervisor tile taken when two are live.
+test("/inbox resolves the supervisor Bearer to the one live supervisor tile, and refuses none or two", async () => {
+  const state = { sessions: [fakeSession("old-sup", { supervisor: true, status: "exited" })] as SessionRuntime[] };
+  const deps = makeDeps(state);
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+
+  const none = await postInbox(srv, closeBody());
+  state.sessions.push(fakeSession("sup", { supervisor: true }));
+  const one = await postInbox(srv, closeBody());
+  state.sessions.push(fakeSession("sup-2", { supervisor: true }));
+  const two = await postInbox(srv, closeBody());
+
+  expect(none.body.result).toEqual({ outcome: "unavailable", cause: "no tile for this caller" });
+  expect(one.body.result?.outcome).toBe("closed");
+  expect(two.body.result).toEqual({ outcome: "unavailable", cause: "ambiguous supervisor tile" });
+  expect(deps.inboxRuns.map((r) => [r.callerId, r.tile, r.authority])).toEqual([["supervisor", "sup", "supervisor"]]);
+});
+
+// Mutants: author.payload keys not checked exactly; an oversized or malformed body forwarded.
+test("/inbox refuses a payload asserting a role, a malformed body and an oversized one without running anything", async () => {
+  const state = { sessions: [fakeSession("sup", { supervisor: true })] as SessionRuntime[] };
+  const deps = makeDeps(state);
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+
+  const role = await postInbox(srv, closeBody({}, { authority: "supervisor" }));
+  const op = await postInbox(srv, closeBody({ op: "delete" }));
+  const notJson = await postInbox(srv, "{not json");
+  const huge = await postInbox(srv, closeBody({ pad: "x".repeat(70 * 1024) }));
+
+  expect(role.body.result).toEqual({ outcome: "invalid", message: "author payload carries unexpected fields" });
+  expect(op.body.result?.outcome).toBe("invalid");
+  expect(notJson.status).toBe(400);
+  expect(huge.status).toBe(413);
+  expect(deps.inboxRuns).toEqual([]);
+});
+
+// Mutant: the inbox tools routed through /call, under the kory-deck allow-list.
+test("the inbox tools are not deck tools: /call refuses inbox_close for a lead and for the supervisor", async () => {
+  const state = { sessions: [] as SessionRuntime[] };
+  const deps = makeDeps(state);
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+  const lead = srv.mintCaller("team-lead", TEAM_LEAD_DECK_TOOLS, "lead");
+
+  const asLead = await call(srv, "inbox_close", { id: ENTRY_ID, reason: "x" }, lead.token);
+  const asSupervisor = await call(srv, "inbox_close", { id: ENTRY_ID, reason: "x" });
+
+  expect([asLead.status, asSupervisor.status]).toEqual([403, 400]);
+  expect(deps.inboxRuns).toEqual([]);
+});
+
+// Mutant: the tile release left out of revokeCallerForSession, which leaves the reused supervisor Bearer's mandate live.
+test("a tile's final removal releases the mandates bound to it, the supervisor's included", async () => {
+  const state = { sessions: [fakeSession("sup", { supervisor: true })] as SessionRuntime[] };
+  const deps = makeDeps(state);
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+  const lead = srv.mintCaller("team-lead", TEAM_LEAD_DECK_TOOLS, "lead");
+  state.sessions.push(fakeSession("lead-tile", { mintedCallerId: lead.callerId }));
+
+  expect(srv.revokeCallerForSession("sup"), "the supervisor has no minted caller").toBeNull();
+  expect(srv.revokeCallerForSession("lead-tile")).toBe(lead.callerId);
+
+  expect(deps.releasedTiles).toEqual(["sup", "lead-tile"]);
+  expect((await postInbox(srv, closeBody())).status, "the supervisor Bearer survives its tile").toBe(200);
+  expect((await postInbox(srv, closeBody(), lead.token)).status, "a removed lead's Bearer is dead").toBe(401);
 });
 
 test("deck_close_session: a team-lead closes another unlocked peer by peer_id", async () => {
@@ -2062,6 +2192,8 @@ test("writeSupervisorMcpConfig mounts the separated kory operator and deck serve
   expect(parsed.mcpServers["kory-operator"]!.args).toEqual([join(dirname(mcpScriptPath), "server-deck.mjs")]);
   expect(parsed.mcpServers["kory-operator"]!.env).toEqual({
     ELECTRON_RUN_AS_NODE: "1",
+    DECK_CONTROL_URL: "http://127.0.0.1:1234",
+    DECK_CONTROL_TOKEN: "tok",
     [OPERATOR_CEILING_ENV]: encodeMountCeiling(OPERATOR_TOOLS)
   });
   expect(SUPERVISOR_BRIEFING).toContain("deck_list_agents");
@@ -2132,6 +2264,8 @@ test("writeSupervisorMcpConfig also writes the deck-lead key, deck-control untou
   expect(operator.args).toEqual([join(dirname(mcpScriptPath), "server-deck.mjs")]);
   expect(operator.env).toEqual({
     ELECTRON_RUN_AS_NODE: "1",
+    DECK_CONTROL_URL: "http://127.0.0.1:1234",
+    DECK_CONTROL_TOKEN: "tok",
     [OPERATOR_CEILING_ENV]: encodeMountCeiling(OPERATOR_TOOLS)
   });
 });
@@ -2160,6 +2294,8 @@ test("writeTeamLeadMcpConfig also writes the deck-lead key, same shape as the su
   expect(operator.args).toEqual([join(dirname(mcpScriptPath), "server-deck.mjs")]);
   expect(operator.env).toEqual({
     ELECTRON_RUN_AS_NODE: "1",
+    DECK_CONTROL_URL: "http://127.0.0.1:1234",
+    DECK_CONTROL_TOKEN: "tok",
     [OPERATOR_CEILING_ENV]: encodeMountCeiling(OPERATOR_TOOLS)
   });
   expect(parsed.mcpServers["kory-deck"]!.env.DECK_CONTROL_TOOLS).toBe([...TEAM_LEAD_DECK_TOOLS, "roadmap_dispatch"].join(","));
@@ -2392,6 +2528,7 @@ const REVIEWED_DECK_CONTROL_DEPS = [
   "confirmSpawnShellFields",
   "createWorktree",
   "getSpawnCap",
+  "inbox",
   "inboxMandates",
   "journal",
   "listAgents",

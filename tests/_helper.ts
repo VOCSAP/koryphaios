@@ -431,13 +431,17 @@ export interface InboxOperatorKey {
 
 const FIXTURE_OPERATOR_KEY: InboxOperatorKey = { cred: FIXTURE_OPERATOR, id: FIXTURE_OPERATOR_ID };
 
-/** A mandate hanging from `run`, minted by the operator key, for one authority. */
+/**
+ * A mandate hanging from `run`, minted by the operator key, for one authority,
+ * acting for the tile whose desk session is `tile`: only an instance registered
+ * with that `desk_session` can prove under it.
+ */
 export async function mintMandate(
   b: TestBroker,
   run: Pick<RunCredential, "tokenId">,
   authority: "author" | "lead" | "supervisor",
   caller: string,
-  options: { operator?: InboxOperatorKey; project?: string; send?: PostFn } = {}
+  options: { tile: string; operator?: InboxOperatorKey; project?: string; send?: PostFn }
 ): Promise<MandateCredential> {
   const operator = options.operator ?? FIXTURE_OPERATOR_KEY;
   const cred = generateCredential();
@@ -445,7 +449,7 @@ export async function mintMandate(
     session_public_key: cred.publicKey,
     session_ref: caller,
     project_key: options.project ?? INBOX_TEST_PROJECT,
-    inbox: { version: 1, kind: "mandate", parent_token_id: run.tokenId, caller_ref: caller, authority },
+    inbox: { version: 1, kind: "mandate", parent_token_id: run.tokenId, caller_ref: caller, authority, desk_session: options.tile },
     public_key: operator.cred.publicKey,
   };
   const auth = buildInboxProof(operator.cred.privateKey, body, INBOX_GATES.mint, { kind: "operator", operator_id: operator.id });
@@ -479,6 +483,29 @@ export function closeInbox<T = { entry?: unknown; error?: string; state?: string
   }
   const auth = buildInboxProof(mandate.cred.privateKey, body, INBOX_GATES.mandateClose, sessionAs(mandate.tokenId));
   return send<T>(`${b.url}/inbox/close`, { ...body, auth });
+}
+
+/** POST /inbox/list, assembled like closeInbox; a null `instanceToken` sends no instance proof. */
+export function listInbox<T = { entries?: Array<Record<string, unknown>>; next_cursor?: string | null; error?: string }>(
+  b: TestBroker,
+  run: Pick<RunCredential, "cred" | "tokenId">,
+  mandate: MandateCredential,
+  list: { instanceToken: string | null; cursor?: unknown },
+  operatorId: string = FIXTURE_OPERATOR_ID,
+  send: PostFn = post
+) {
+  const core: Record<string, unknown> = { inbox_operation: "list" };
+  const sessionAs = (tokenId: string) => ({ kind: "session" as const, operator_id: operatorId, token_id: tokenId });
+  const body: Record<string, unknown> = { ...core, ...(list.cursor !== undefined ? { cursor: list.cursor } : {}) };
+  if (list.instanceToken !== null) {
+    const payload = { ...core, instance_token: list.instanceToken };
+    body.author = {
+      payload,
+      auth: buildInboxProof(run.cred.privateKey, payload, INBOX_GATES.authorList, sessionAs(run.tokenId)),
+    };
+  }
+  const auth = buildInboxProof(mandate.cred.privateKey, body, INBOX_GATES.mandateList, sessionAs(mandate.tokenId));
+  return send<T>(`${b.url}/inbox/list`, { ...body, auth });
 }
 
 /** POST /operator-inbox/reply, signed by the operator key for the reply door. */

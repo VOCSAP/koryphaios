@@ -22,7 +22,9 @@ import {
 } from "../desktop/src/main/inbox-session.ts";
 import { INBOX_GATES } from "../shared/approval.ts";
 import type { OperatorInboxReplyResult } from "../desktop/src/main/broker-client.ts";
-import type { InboxEffectsScope } from "../desktop/src/main/inbox-session.ts";
+import type { InboxEffectsScope, InboxPollRead, InboxWireRow } from "../desktop/src/main/inbox-session.ts";
+
+const rd = (rows: InboxWireRow[]): InboxPollRead => ({ rows, run: null });
 
 test("a response from a previous group has no inbox effects", () => {
   const effects: string[] = [];
@@ -217,12 +219,32 @@ test("a run read failure is reported once per distinct cause, and again after a 
 test("the legacy and run reads merge by id: a notification returned by both is shown once, in id order", async () => {
   const merged = await readOperatorInboxBoth({
     readLegacy: async () => [{ id: 3, text: "system" }, { id: 1, text: "legacy" }],
-    readRun: async () => [{ id: 2, text: "attested" }, { id: 3, text: "system" }],
+    readRun: async () => ({ rows: [{ id: 2, text: "attested" }, { id: 3, text: "system" }] }),
     onRunError: () => {
       throw new Error("no run error expected");
     },
   });
-  expect(merged.map((m) => m.id)).toEqual([1, 2, 3]);
+  expect(merged.rows.map((m) => m.id)).toEqual([1, 2, 3]);
+});
+
+test("the entry states come from the run read: absent without a run, absent when it fails, the broker's value when it answers", async () => {
+  const onRunError = () => {};
+  const none = await readOperatorInboxBoth({ readLegacy: async () => [{ id: 1 }], onRunError });
+  expect(none.run, "no run read, no entry states").toBeNull();
+  const failed = await readOperatorInboxBoth({
+    readLegacy: async () => [{ id: 1 }],
+    readRun: async () => {
+      throw new Error("403");
+    },
+    onRunError,
+  });
+  expect(failed.run, "a failed run read keeps the previous snapshot: nothing to apply").toBeNull();
+  const entries = [{ message_id: 2 }];
+  const ok = await readOperatorInboxBoth({ readLegacy: async () => [{ id: 1 }], readRun: async () => ({ rows: [], entries }), onRunError });
+  // Mutant: entries taken from the legacy read, or dropped from the run result.
+  expect(ok.run).toEqual({ entries });
+  const old = await readOperatorInboxBoth({ readLegacy: async () => [{ id: 1 }], readRun: async () => ({ rows: [] }), onRunError });
+  expect(old.run, "a broker without the field is a run read WITHOUT entries, not a failed read").toEqual({ entries: undefined });
 });
 
 test("a failed run read is reported and never hides the legacy read; a failed legacy read rejects", async () => {
@@ -234,7 +256,7 @@ test("a failed run read is reported and never hides the legacy read; a failed le
     },
     onRunError: (e) => errors.push(e),
   });
-  expect(merged.map((m) => m.id)).toEqual([1]);
+  expect(merged.rows.map((m) => m.id)).toEqual([1]);
   expect(errors).toHaveLength(1);
   let runReads = 0;
   await expect(
@@ -244,7 +266,7 @@ test("a failed run read is reported and never hides the legacy read; a failed le
       },
       readRun: async () => {
         runReads++;
-        return [{ id: 2 }];
+        return { rows: [{ id: 2 }] };
       },
       onRunError: () => {},
     }),
@@ -254,7 +276,7 @@ test("a failed run read is reported and never hides the legacy read; a failed le
 
 test("without a run read only the legacy entries come back", async () => {
   const merged = await readOperatorInboxBoth({ readLegacy: async () => [{ id: 5 }], onRunError: () => {} });
-  expect(merged.map((m) => m.id)).toEqual([5]);
+  expect(merged.rows.map((m) => m.id)).toEqual([5]);
 });
 
 function pollRig(initial: InboxEffectsScope, whileReading: (state: InboxEffectsScope) => void) {
@@ -503,6 +525,7 @@ function effectsRig() {
     errors: [] as string[],
     broadcasts: [] as string[],
     notified: [] as number[][],
+    entryStates: [] as Array<{ scopeKey: string; entries: unknown; seq: number }>,
     switchToN: () => Object.assign(live, { epoch: 1, groupId: GROUP_N, sessionId: "n" }),
     switchToP: () => Object.assign(live, { epoch: 0, groupId: GROUP_P, sessionId: "p" }),
     close: () => {
@@ -526,6 +549,7 @@ function effectsRig() {
     },
     broadcast: (channel) => rig.broadcasts.push(channel),
     notify: (batch) => rig.notified.push(batch.map((m) => m.id)),
+    applyEntryStates: (scopeKey, entries, seq) => rig.entryStates.push({ scopeKey, entries, seq }),
     info: (message) => rig.info.push(message),
     error: (message) => rig.errors.push(message),
   });
@@ -603,7 +627,7 @@ test("a manual delete whose group alone changed during the broker await removes 
 
 test("a poll result is journaled in the live scope's directory and announced", async () => {
   const rig = effectsRig();
-  await rig.effects.poll(async () => [ROW_41]);
+  await rig.effects.poll(async () => rd([ROW_41]));
   expect(loadInboxHistory(rig.dirP).map((m) => m.id)).toEqual([41]);
   expect(rig.broadcasts).toEqual(["inbox:new"]);
   expect(rig.notified).toEqual([[41]]);
@@ -611,7 +635,7 @@ test("a poll result is journaled in the live scope's directory and announced", a
 
 test("a poll with nothing to write neither writes a batch nor announces an empty one", async () => {
   const rig = effectsRig();
-  await rig.effects.poll(async () => []);
+  await rig.effects.poll(async () => rd([]));
   expect(existsSync(inboxHistoryFile(rig.dirP))).toBe(false);
   expect(rig.broadcasts).toEqual([]);
   expect(rig.notified).toEqual([]);
@@ -620,12 +644,12 @@ test("a poll with nothing to write neither writes a batch nor announces an empty
 test("a poll whose only queued entries belong to another scope writes nothing and announces nothing", async () => {
   const rig = effectsRig();
   rig.breakJournal(rig.dirP);
-  await rig.effects.poll(async () => [ROW_41]);
+  await rig.effects.poll(async () => rd([ROW_41]));
   rig.repairJournal(rig.dirP);
   rig.switchToN();
   rig.broadcasts.length = 0;
   rig.notified.length = 0;
-  await rig.effects.poll(async () => []);
+  await rig.effects.poll(async () => rd([]));
   expect(existsSync(inboxHistoryFile(rig.dirN)), "no empty journal is written for the new scope").toBe(false);
   expect(rig.broadcasts).toEqual([]);
   expect(rig.notified).toEqual([]);
@@ -634,11 +658,11 @@ test("a poll whose only queued entries belong to another scope writes nothing an
 test("a replayed entry is journaled without being announced a second time", async () => {
   const rig = effectsRig();
   rig.breakJournal(rig.dirP);
-  await rig.effects.poll(async () => [ROW_41]);
+  await rig.effects.poll(async () => rd([ROW_41]));
   rig.repairJournal(rig.dirP);
   rig.broadcasts.length = 0;
   rig.notified.length = 0;
-  await rig.effects.poll(async () => []);
+  await rig.effects.poll(async () => rd([]));
   expect(loadInboxHistory(rig.dirP).map((m) => m.id)).toEqual([41]);
   expect(rig.broadcasts).toEqual([]);
   expect(rig.notified).toEqual([]);
@@ -648,18 +672,38 @@ test("a poll whose scope changed during the read writes nothing and leaves a tra
   const rig = effectsRig();
   await rig.effects.poll(async () => {
     rig.switchToN();
-    return [ROW_41];
+    return rd([ROW_41]);
   });
   expect(loadInboxHistory(rig.dirP)).toEqual([]);
   expect(loadInboxHistory(rig.dirN)).toEqual([]);
   expect(rig.info.some((m) => m.includes("dropped"))).toBe(true);
 });
 
+test("a poll hands the run's entry states to the archive under epoch:group:run, even with nothing to journal", async () => {
+  const rig = effectsRig();
+  const entries = [{ message_id: 41 }];
+  await rig.effects.poll(async () => ({ rows: [], run: { runRef: "run-1", entries, seq: 7 } }));
+  // Mutant: the apply is skipped by the empty-batch early return.
+  expect(rig.entryStates).toEqual([{ scopeKey: `0:${GROUP_P}:run-1`, entries, seq: 7 }]);
+  await rig.effects.poll(async () => rd([ROW_41]));
+  expect(rig.entryStates, "a read without a run read leaves the archive untouched").toHaveLength(1);
+});
+
+test("entry states read for a scope that changed during the read are not applied", async () => {
+  const rig = effectsRig();
+  await rig.effects.poll(async () => {
+    rig.switchToN();
+    return { rows: [], run: { runRef: "run-1", entries: [], seq: 7 } };
+  });
+  // Mutant: applyEntryStates called outside the scope guard.
+  expect(rig.entryStates).toEqual([]);
+});
+
 test("a poll resuming after the session state closed does not recreate the removed directory", async () => {
   const rig = effectsRig();
   await rig.effects.poll(async () => {
     rig.close();
-    return [ROW_41];
+    return rd([ROW_41]);
   });
   expect(existsSync(rig.dirP)).toBe(false);
   expect(rig.info.some((m) => m.includes("history append skipped"))).toBe(true);
@@ -684,12 +728,12 @@ test("a manual delete resuming after the session state closed does not recreate 
 test("a journal write that failed under one scope is never replayed after the scope changed", async () => {
   const rig = effectsRig();
   rig.breakJournal(rig.dirP);
-  await rig.effects.poll(async () => [ROW_41]);
+  await rig.effects.poll(async () => rd([ROW_41]));
   expect(rig.effects.pendingMessages().map((m) => m.id), "the failed write is held for the scope that read it").toEqual([41]);
   rig.repairJournal(rig.dirP);
   rig.switchToN();
   expect(rig.effects.pendingMessages(), "the held entry is not counted under the new scope").toEqual([]);
-  await rig.effects.poll(async () => []);
+  await rig.effects.poll(async () => rd([]));
   expect(loadInboxHistory(rig.dirN), "the entry of the old scope is written nowhere").toEqual([]);
   expect(loadInboxHistory(rig.dirP)).toEqual([]);
   expect(rig.info.some((m) => m.includes("another scope dropped"))).toBe(true);
@@ -698,10 +742,10 @@ test("a journal write that failed under one scope is never replayed after the sc
 test("a journal write that failed is replayed into the journal once it is writable again", async () => {
   const rig = effectsRig();
   rig.breakJournal(rig.dirP);
-  await rig.effects.poll(async () => [ROW_41]);
+  await rig.effects.poll(async () => rd([ROW_41]));
   expect(rig.errors.some((m) => m.includes("history write failed"))).toBe(true);
   rig.repairJournal(rig.dirP);
-  await rig.effects.poll(async () => []);
+  await rig.effects.poll(async () => rd([]));
   expect(loadInboxHistory(rig.dirP).map((m) => m.id)).toEqual([41]);
   expect(rig.effects.pendingMessages()).toEqual([]);
 });
@@ -709,18 +753,18 @@ test("a journal write that failed is replayed into the journal once it is writab
 test("a purge empties the retry queue: a poll after it replays nothing", async () => {
   const rig = effectsRig();
   rig.breakJournal(rig.dirP);
-  await rig.effects.poll(async () => [ROW_41]);
+  await rig.effects.poll(async () => rd([ROW_41]));
   rig.repairJournal(rig.dirP);
   await rig.effects.purge();
   expect(rig.effects.pendingMessages()).toEqual([]);
-  await rig.effects.poll(async () => []);
+  await rig.effects.poll(async () => rd([]));
   expect(loadInboxHistory(rig.dirP), "the purged entry is not written back").toEqual([]);
 });
 
 test("a purge empties the retry queue of the captured scope even when the local truncation is skipped", async () => {
   const rig = effectsRig();
   rig.breakJournal(rig.dirP);
-  await rig.effects.poll(async () => [ROW_41]);
+  await rig.effects.poll(async () => rd([ROW_41]));
   rig.repairJournal(rig.dirP);
   rig.during = async () => {
     rig.switchToN();
@@ -733,18 +777,18 @@ test("a purge empties the retry queue of the captured scope even when the local 
 test("a manual delete drops its ids from the retry queue and replays the others", async () => {
   const rig = effectsRig();
   rig.breakJournal(rig.dirP);
-  await rig.effects.poll(async () => [ROW_41, ROW_42]);
+  await rig.effects.poll(async () => rd([ROW_41, ROW_42]));
   rig.repairJournal(rig.dirP);
   await rig.effects.delete([41]);
   expect(rig.effects.pendingMessages().map((m) => m.id)).toEqual([42]);
-  await rig.effects.poll(async () => []);
+  await rig.effects.poll(async () => rd([]));
   expect(loadInboxHistory(rig.dirP).map((m) => m.id), "the deleted id is not written back, the other one is").toEqual([42]);
 });
 
 test("a manual delete drops its ids from the retry queue of the captured scope even when the local removal is skipped", async () => {
   const rig = effectsRig();
   rig.breakJournal(rig.dirP);
-  await rig.effects.poll(async () => [ROW_41, ROW_42]);
+  await rig.effects.poll(async () => rd([ROW_41, ROW_42]));
   rig.repairJournal(rig.dirP);
   rig.during = async () => {
     rig.switchToN();

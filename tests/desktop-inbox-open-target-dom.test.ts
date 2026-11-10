@@ -35,6 +35,7 @@ interface FakeDeckState {
   pendingApprovals: FakeApproval[];
   sessions: unknown[];
   inboxAckState: Record<string, string>;
+  inboxArchive: { status: string; messages: Record<string, unknown>; closedQuestions: unknown[] };
   inboxReplyDrafts: Record<string, string>;
   approvalDrafts: Record<string, unknown>;
   graphDrafts: unknown[];
@@ -60,6 +61,7 @@ function initialFakeState(): FakeDeckState {
     pendingApprovals: [],
     sessions: [],
     inboxAckState: {},
+    inboxArchive: { status: "unsupported", messages: {}, closedQuestions: [] },
     inboxReplyDrafts: {},
     approvalDrafts: {},
     graphDrafts: [],

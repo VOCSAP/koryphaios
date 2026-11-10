@@ -377,7 +377,7 @@ test("messaging: replica to replica, replica to upstream and back, delivered onc
 
 test("the operator inbox and the Deck's announcements never leave their broker", async () => {
   const run = await mintRunCredential(R1, { id: G, hash: H }, undefined, post);
-  const depositor = await registerAttestedInstance(R1, run, "host-depositor", "/work/depositor", {}, post);
+  const depositor = await registerAttestedInstance(R1, run, "host-depositor", "/work/depositor", { desk_session: "tile-depositor" }, post);
   try {
     const question = "a question for my operator";
     const deposit = { from_token: depositor.body.instance_token, to_peer_id: "operator", text: question };
@@ -409,7 +409,7 @@ test("the operator inbox and the Deck's announcements never leave their broker",
       }
     };
     const entryId = registryRows(R1)[0]!.entry_id;
-    const lead = await mintMandate(R1, run, "lead", "lead-federation", { send: post });
+    const lead = await mintMandate(R1, run, "lead", "lead-federation", { send: post, tile: "tile-depositor" });
     const closeReason = "federation canary reason";
     const closed = await closeInbox(
       R1,

@@ -258,6 +258,7 @@ const api: DeckApi = {
   inboxMarkSeen: (entry) => ipcRenderer.invoke('inbox:mark-seen', entry),
   inboxAck: (entry) => ipcRenderer.invoke('inbox:ack', entry),
   inboxDelete: (ids: number[]) => ipcRenderer.invoke('inbox:delete', ids),
+  inboxArchive: () => ipcRenderer.invoke('inbox:archive'),
 
   companionStart: () => ipcRenderer.invoke('companion:start'),
   companionStop: () => ipcRenderer.invoke('companion:stop'),
@@ -288,6 +289,7 @@ const api: DeckApi = {
     subscribe('session:attention', cb),
   onInboxMessages: (cb: (messages: InboxMessage[]) => void) => subscribe('inbox:new', cb),
   onInboxCleared: (cb: () => void) => subscribe('inbox:cleared', () => cb()),
+  onInboxArchive: (cb) => subscribe('inbox:archive-changed', cb),
   onPendingApprovals: (cb) => subscribe('approvals:pending', cb),
   onGraphDrafts: (cb) => subscribe('graphDrafts:update', cb),
   onRoadmapSync: (cb: (event: RoadmapSyncEvent) => void) => subscribe('roadmap:sync', cb),

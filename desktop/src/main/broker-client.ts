@@ -449,6 +449,16 @@ export interface OperatorInboxMessage {
 }
 
 /**
+ * A drain. `entries` is the run's entry-state snapshot, left unvalidated here
+ * (the archive checks each row) and absent from a broker that predates it or
+ * from the legacy read.
+ */
+export interface OperatorInboxRead {
+  messages: OperatorInboxMessage[]
+  entries?: unknown
+}
+
+/**
  * POST /operator-inbox (PLAN C12): drain the messages agents sent to the
  * reserved 'operator' peer of this window's group. Throws on failure so the
  * polling caller can swallow it.
@@ -463,7 +473,7 @@ export interface OperatorInboxMessage {
 export async function fetchOperatorInbox(
   params: { groupId: string; secret: string; sessionId?: string; run?: RunInboxSigner },
   deps: AnnounceDeps
-): Promise<OperatorInboxMessage[]> {
+): Promise<OperatorInboxRead> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
   if (deps.endpoint.token) headers['Authorization'] = `Bearer ${deps.endpoint.token}`
   const f = deps.fetchFn ?? fetch
@@ -478,7 +488,8 @@ export async function fetchOperatorInbox(
     body: JSON.stringify(params.run ? signRunInboxBody(base, params.run, 'drain') : base)
   })
   if (!res.ok) throw new Error(`operator-inbox failed: ${res.status}`)
-  return ((await res.json()) as { messages: OperatorInboxMessage[] }).messages
+  const body = (await res.json()) as { messages: OperatorInboxMessage[]; entries?: unknown }
+  return body.entries === undefined ? { messages: body.messages } : { messages: body.messages, entries: body.entries }
 }
 
 /**

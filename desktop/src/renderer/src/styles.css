@@ -5038,6 +5038,28 @@ body:has(.rm-modal) .rm-conflict-modal {
   border-left-color: #b678ff;
 }
 
+/* A question an agent closed: nobody waits on it any more, so it takes the
+   neutral dim tone, never the violet "needs you" one. */
+.inbox-entry-closed-question {
+  border-left-color: var(--fg-dim);
+}
+
+.inbox-entry-closed-question .inbox-entry-mark {
+  color: var(--fg-dim);
+}
+
+.inbox-entry-closed-badge {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 6px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  font-size: 10px;
+  color: var(--fg-dim);
+}
+
 /* Acked: still listed (the operator can re-open it), visibly out of the way.
    The dimming is the LAST cue, never the only one — the check glyph in the
    actions is what reads in monochrome. */
@@ -5537,6 +5559,66 @@ body:has(.rm-modal) .rm-conflict-modal {
   margin-top: 10px;
   font-size: 11px;
   color: var(--fg-dim);
+}
+
+/* Closure of a message or question by an agent. Neutral on purpose: nothing was
+   destroyed (no red) and it is not transient (no amber). The reason is agent
+   text, so it must wrap even without a space. */
+.inbox-closed-banner {
+  margin-top: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-3);
+  color: var(--fg);
+  font-size: 12px;
+}
+
+.inbox-closed-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.inbox-closed-line > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.inbox-closed-glyph {
+  flex: none;
+  display: inline-flex;
+  color: var(--fg-dim);
+}
+
+.inbox-closed-reason-line {
+  margin-top: 4px;
+}
+
+.inbox-closed-label {
+  color: var(--fg-dim);
+}
+
+.inbox-closed-reason {
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+/* The operator's unsent reply, kept readable after its entry settled. */
+.inbox-modal-draft-orphan {
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--fg-dim);
+}
+
+.inbox-modal-draft-label {
+  font-size: 11px;
+}
+
+.inbox-modal-draft-text {
+  color: var(--fg);
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
 }
 
 .inbox-msg-meta {

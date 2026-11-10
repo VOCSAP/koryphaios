@@ -3,7 +3,15 @@ import { GLYPHS, GLYPH_ACTIONS, GLYPH_BADGES } from './icons'
 import type { TFn } from '../i18n'
 import type { ApprovalSenderResolution } from '../inbox-sender'
 import { inboxEntryKey } from '../../../shared/types'
-import type { AckableInboxEntry, InboxAckStatus, InboxEntry, InboxMessage } from '../../../shared/types'
+import type {
+  AckableInboxEntry,
+  InboxAckStatus,
+  InboxArchiveSnapshot,
+  InboxCloseAuthority,
+  InboxEntry,
+  InboxMessage
+} from '../../../shared/types'
+import { messageReplyability } from '../../../shared/inbox-pending'
 import { verdictAnswerKindFor } from './approval-verdict'
 import { ApprovalRequestBody } from './ApprovalRequestBody'
 import { ApprovalAnswerForm } from './ApprovalAnswerForm'
@@ -14,7 +22,9 @@ import { formQuestions, type QuestionDraft } from './approval-answers'
  * Three entry families: a peer message (repliable, ackable), an event (no
  * recipient, ackable), and a blocking question (an agent stays stopped until
  * it is settled broker-side, never by a local dismissal, so it never reaches
- * the ack callback). Closing the modal never acks.
+ * the ack callback). A fourth structural kind, a question an agent closed, is
+ * a read-only consultation: it offers Close and nothing else. Closing the
+ * modal never acks.
  *
  * Store-free by contract: every effect leaves through a capability callback,
  * so a host other than the Deck (the avatar's bubble) renders the same list.
@@ -51,6 +61,10 @@ export interface InboxCoreProps {
   t: TFn
   messages: readonly InboxMessage[]
   approvals: readonly InboxApproval[]
+  /** Settled entries of the run: decides what a message offers and lists the closed questions. */
+  archive: InboxArchiveSnapshot
+  /** Trace of a value the banner could not render. */
+  report?: (message: string) => void
   readStates: Readonly<Record<string, InboxAckStatus>>
   reclame: InboxReclameCapability | null
   courrier: InboxCourrierCapability
@@ -77,6 +91,56 @@ function entryAt(e: InboxEntry): string {
   return e.approval.created_at
 }
 
+/** Local `DD/MM/YYYY` and `HH:MM:SS`, the same in every locale. */
+export function formatCloseStamp(iso: string): { date: string; time: string; valid: boolean } {
+  const at = new Date(iso)
+  if (Number.isNaN(at.getTime())) return { date: iso, time: '--:--:--', valid: false }
+  const p = (n: number): string => String(n).padStart(2, '0')
+  return {
+    date: `${p(at.getDate())}/${p(at.getMonth() + 1)}/${at.getFullYear()}`,
+    time: `${p(at.getHours())}:${p(at.getMinutes())}:${p(at.getSeconds())}`,
+    valid: true
+  }
+}
+
+interface ClosureInfo {
+  at: string | null
+  peer: string | null
+  authority: InboxCloseAuthority | undefined
+  reason: string | undefined
+}
+
+function ClosedBanner(props: { t: TFn; closure: ClosureInfo; report?: (message: string) => void }): React.JSX.Element {
+  const { t, closure, report } = props
+  const stamp = formatCloseStamp(closure.at ?? '')
+  const reportRef = useRef(report)
+  reportRef.current = report
+  useEffect(() => {
+    if (!stamp.valid) reportRef.current?.(`closure banner: unreadable close time ${JSON.stringify(closure.at)}`)
+  }, [stamp.valid, closure.at])
+  const line = closure.peer
+    ? t('inbox.closedBy', { peer: closure.peer, date: stamp.date, time: stamp.time })
+    : t('inbox.closedByAuthority', {
+        authority: closure.authority ? t(`inbox.closedAuthority.${closure.authority}`) : '?',
+        date: stamp.date,
+        time: stamp.time
+      })
+  return (
+    <div className="inbox-closed-banner" role="note">
+      <div className="inbox-closed-line">
+        <span className="inbox-closed-glyph">{GLYPH_BADGES.archive}</span>
+        <span>{line}</span>
+      </div>
+      {closure.reason && (
+        <div className="inbox-closed-reason-line">
+          <span className="inbox-closed-label">{t('inbox.closedReason')}</span>{' '}
+          <span className="inbox-closed-reason">{closure.reason}</span>
+        </div>
+      )}
+    </div>
+  )
+}
+
 function listTimestamp(e: InboxEntry, today: Date): string {
   const at = new Date(entryAt(e))
   const isToday =
@@ -92,12 +156,13 @@ function entryText(e: InboxEntry): string {
   return displayApprovalText(e.approval.question)
 }
 
+// A question keeps its key when it closes, so the modal open on it stays open.
 function reactKey(e: InboxEntry): string {
-  return e.kind === 'approval' ? `apr:${e.approval.id}` : inboxEntryKey(e)
+  return e.kind === 'approval' || e.kind === 'closed-question' ? `apr:${e.approval.id}` : inboxEntryKey(e)
 }
 
 function ackable(e: InboxEntry): AckableInboxEntry | null {
-  return e.kind === 'approval' ? null : e
+  return e.kind === 'approval' || e.kind === 'closed-question' ? null : e
 }
 
 const plainText = (text: string): ReactNode => text
@@ -111,7 +176,7 @@ const plainText = (text: string): ReactNode => text
 const GONE_PEER = '<gone>'
 
 export function InboxCore(props: InboxCoreProps): React.JSX.Element {
-  const { t, messages, approvals, reclame, courrier, replyDrafts, onReplyDraft, seedApprovalId, onSeedConsumed } =
+  const { t, messages, approvals, archive, reclame, courrier, replyDrafts, onReplyDraft, seedApprovalId, onSeedConsumed } =
     props
   const renderText = props.renderText ?? plainText
   const canAnswerVerdict = reclame !== null
@@ -130,12 +195,20 @@ export function InboxCore(props: InboxCoreProps): React.JSX.Element {
 
   // Blocking questions ride on TOP whatever their age — they are the only
   // family where someone is stopped waiting; the rest is newest-first.
+  // A question present in both lists is shown once, as closed: the closed copy
+  // is broadcast first, so the pending copy is the stale one.
   const entries = useMemo<InboxEntry[]>(() => {
     const byTimeDesc = (a: InboxEntry, b: InboxEntry): number => entryAt(b).localeCompare(entryAt(a))
-    const blocking: InboxEntry[] = approvals.map((approval) => ({ kind: 'approval', approval }))
-    const rest: InboxEntry[] = messages.map((message) => ({ kind: 'message', message }))
+    const closedIds = new Set(archive.closedQuestions.map((a) => a.id))
+    const blocking: InboxEntry[] = approvals
+      .filter((approval) => !closedIds.has(approval.id))
+      .map((approval) => ({ kind: 'approval', approval }))
+    const rest: InboxEntry[] = [
+      ...messages.map((message): InboxEntry => ({ kind: 'message', message })),
+      ...archive.closedQuestions.map((approval): InboxEntry => ({ kind: 'closed-question', approval }))
+    ]
     return [...blocking.sort(byTimeDesc), ...rest.sort(byTimeDesc)]
-  }, [messages, approvals])
+  }, [messages, approvals, archive.closedQuestions])
 
   const open = entries.find((e) => reactKey(e) === openKey) ?? null
   // Closes the modal rather than leaving it open on an entry that vanished
@@ -146,6 +219,8 @@ export function InboxCore(props: InboxCoreProps): React.JSX.Element {
 
   const readState = (e: InboxEntry): ReadState => {
     const a = ackable(e)
+    // Nothing is left to handle on a closed question: shown out of the way.
+    if (e.kind === 'closed-question') return 'acked'
     if (!a) return 'unread'
     return props.readStates[inboxEntryKey(a)] ?? 'unread'
   }
@@ -166,7 +241,7 @@ export function InboxCore(props: InboxCoreProps): React.JSX.Element {
 
   const senderOf = (e: InboxEntry): ReactNode => {
     if (e.kind === 'message') return e.message.from
-    if (e.kind === 'approval') {
+    if (e.kind === 'approval' || e.kind === 'closed-question') {
       const res = props.resolveSender(e.approval)
       if (res.resolved) return res.name
       return res.raw ? (
@@ -182,6 +257,7 @@ export function InboxCore(props: InboxCoreProps): React.JSX.Element {
 
   const familyGlyph = (e: InboxEntry): React.JSX.Element => {
     if (e.kind === 'approval') return GLYPH_BADGES.clepsydra
+    if (e.kind === 'closed-question') return GLYPH_BADGES.archive
     if (e.kind === 'event') return GLYPH_BADGES.beacon
     return GLYPHS.agents
   }
@@ -189,18 +265,51 @@ export function InboxCore(props: InboxCoreProps): React.JSX.Element {
   const familyLabel = (e: InboxEntry): string =>
     e.kind === 'approval'
       ? t('inbox.familyBlocking')
-      : e.kind === 'event'
-        ? t('inbox.familyEvent')
-        : t('inbox.familyMessage')
+      : e.kind === 'closed-question'
+        ? t('inbox.stateClosed')
+        : e.kind === 'event'
+          ? t('inbox.familyEvent')
+          : t('inbox.familyMessage')
+
+  const replyability = open?.kind === 'message' ? messageReplyability(archive, open.message) : null
+  const closure = ((): ClosureInfo | null => {
+    if (open?.kind === 'closed-question') {
+      const a = open.approval
+      return { at: a.answered_at, peer: a.closed_by_peer_id ?? null, authority: a.closed_by_authority, reason: a.close_reason }
+    }
+    if (open?.kind === 'message' && replyability === 'closed') {
+      const s = archive.messages[inboxEntryKey(open)]
+      if (s) return { at: s.settledAt, peer: s.closedByPeerId ?? null, authority: s.closedByAuthority, reason: s.closeReason }
+    }
+    return null
+  })()
+  const canReplyToMessage =
+    open?.kind === 'message' &&
+    open.message.from !== GONE_PEER &&
+    !!courrier.reply &&
+    (replyability === 'open' || replyability === 'legacy-broker')
 
   // The module waits on these itself: answered through ApprovalAnswerForm only,
   // never by the chips or the free reply, which it would read as no verdict.
   const hookApproval = open?.kind === 'approval' && open.approval.reply_route === 'hook' ? open.approval : null
   const draftKey = open ? reactKey(open) : ''
   const draft = replyDrafts[draftKey] ?? ''
-  const closeEntry = (): void => setOpenKey(null)
+  // A draft left behind by a settled entry is shown read-only, then dropped with the modal.
+  const orphanDraft =
+    draft.trim() !== '' &&
+    (open?.kind === 'closed-question' ||
+      replyability === 'closed' ||
+      replyability === 'responded' ||
+      replyability === 'not-this-run')
+  const closeEntry = (): void => {
+    if (orphanDraft) onReplyDraft(draftKey, '')
+    setOpenKey(null)
+  }
 
-  const closeIfStillOpen = (actedKey: string): void => setOpenKey((cur) => (cur === actedKey ? null : cur))
+  const closeIfStillOpen = (actedKey: string): void => {
+    if (orphanDraft && actedKey === draftKey) onReplyDraft(draftKey, '')
+    setOpenKey((cur) => (cur === actedKey ? null : cur))
+  }
 
   const run = async (act: () => Promise<InboxActionOutcome>): Promise<void> => {
     // A ref, not `sending`: two gestures in one tick both read the stale state.
@@ -274,8 +383,15 @@ export function InboxCore(props: InboxCoreProps): React.JSX.Element {
                 <span className="inbox-entry-meta">
                   {/* Shape, not only colour: filled disc = unread, ring = seen,
                       nothing (a check lands in the actions) = acked. */}
-                  <span className={`inbox-entry-dot is-${state}`} title={t(`inbox.state.${state}`)} />
+                  <span className={`inbox-entry-dot is-${state}`} title={e.kind === 'closed-question' ? t('inbox.stateClosed') : t(`inbox.state.${state}`)} />
                   <span className="inbox-entry-from">{senderOf(e)}</span>
+                  {(e.kind === 'closed-question' ||
+                    (e.kind === 'message' && messageReplyability(archive, e.message) === 'closed')) && (
+                    <span className="inbox-entry-closed-badge">
+                      {GLYPH_BADGES.archive}
+                      {t('inbox.stateClosed')}
+                    </span>
+                  )}
                   <span className="inbox-entry-time">{listTimestamp(e, today)}</span>
                 </span>
                 <span className="inbox-entry-excerpt">{entryText(e)}</span>
@@ -332,11 +448,11 @@ export function InboxCore(props: InboxCoreProps): React.JSX.Element {
               </button>
             </header>
             <div className="inbox-modal-time">{new Date(entryAt(open)).toLocaleString()}</div>
-            {open.kind === 'approval' && open.approval.title && (
+            {(open.kind === 'approval' || open.kind === 'closed-question') && open.approval.title && (
               <div className="inbox-modal-subject">{open.approval.title}</div>
             )}
             {!(hookApproval && canAnswerVerdict && formQuestions(hookApproval)) &&
-              (open.kind === 'approval' ? (
+              (open.kind === 'approval' || open.kind === 'closed-question' ? (
                 <ApprovalRequestBody
                   t={t}
                   approval={open.approval}
@@ -346,6 +462,8 @@ export function InboxCore(props: InboxCoreProps): React.JSX.Element {
               ) : (
                 <div className="inbox-modal-text">{renderText(entryText(open))}</div>
               ))}
+
+            {closure && <ClosedBanner t={t} closure={closure} report={props.report} />}
 
             {open.kind === 'approval' && props.renderNavigate?.(open.approval, closeEntry)}
 
@@ -392,9 +510,16 @@ export function InboxCore(props: InboxCoreProps): React.JSX.Element {
             {open.kind === 'message' && open.message.from === GONE_PEER && (
               <div className="inbox-modal-note">{t('inbox.senderGone')}</div>
             )}
+            {orphanDraft && (
+              <div className="inbox-modal-draft-orphan">
+                <span className="inbox-modal-draft-label">{t('inbox.unsentDraft')}</span>{' '}
+                <span className="inbox-modal-draft-text">{draft}</span>
+              </div>
+            )}
             {open.kind !== 'event' &&
+              open.kind !== 'closed-question' &&
               !hookApproval &&
-              !(open.kind === 'message' && (open.message.from === GONE_PEER || !courrier.reply)) &&
+              !(open.kind === 'message' && !canReplyToMessage) &&
               !(
                 open.kind === 'approval' &&
                 (!canAnswerVerdict || open.approval.kind === 'permission' || open.approval.absorbed_permission)
@@ -425,6 +550,12 @@ export function InboxCore(props: InboxCoreProps): React.JSX.Element {
                   {t('inbox.close')}
                 </button>
               </ApprovalAnswerForm>
+            ) : open.kind === 'closed-question' ? (
+              <div className="modal-actions inbox-modal-actions">
+                <button className="btn" onClick={closeEntry}>
+                  {t('inbox.close')}
+                </button>
+              </div>
             ) : (
               <div className="modal-actions inbox-modal-actions">
                 {open.kind === 'approval' ? (
@@ -486,7 +617,7 @@ export function InboxCore(props: InboxCoreProps): React.JSX.Element {
                         {t('inbox.delete')}
                       </button>
                     )}
-                    {open.kind === 'message' && open.message.from !== GONE_PEER && courrier.reply && (
+                    {open.kind === 'message' && canReplyToMessage && (
                       <button
                         className="primary"
                         disabled={sending || !draft.trim()}
@@ -500,7 +631,19 @@ export function InboxCore(props: InboxCoreProps): React.JSX.Element {
               </div>
             )}
             <div className="inbox-modal-note">
-              {hookApproval ? t('inbox.noteHook') : open.kind === 'approval' ? t('inbox.noteBlocking') : t('inbox.noteClose')}
+              {hookApproval
+                ? t('inbox.noteHook')
+                : open.kind === 'approval'
+                  ? t('inbox.noteBlocking')
+                  : open.kind === 'closed-question'
+                    ? t('inbox.noteClosed')
+                    : replyability === 'responded'
+                      ? t('inbox.noteResponded')
+                      : replyability === 'not-this-run'
+                        ? t('inbox.notePreviousRun')
+                        : replyability === 'unknown'
+                          ? t('inbox.noteStateUnknown')
+                          : t('inbox.noteClose')}
             </div>
           </div>
         </div>

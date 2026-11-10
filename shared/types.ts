@@ -1613,6 +1613,14 @@ export interface InboxCloseRequest {
   author?: { payload: Record<string, unknown>; auth: ApprovalAuthProof };
 }
 
+export interface InboxListRequest {
+  inbox_operation: "list";
+  /** Opaque, from the previous page's next_cursor. */
+  cursor?: string;
+  auth?: ApprovalAuthProof;
+  author?: { payload: Record<string, unknown>; auth: ApprovalAuthProof };
+}
+
 // --- Broker API: groups and identity introspection ---
 
 export interface GroupStatsRow {
@@ -2029,6 +2037,26 @@ export interface InboxCloseResponse {
   entry: InboxMessageEntryView | Approval;
 }
 
+/** One open entry of a run; `author` is a display snapshot and authorizes nothing. */
+export interface InboxListItem {
+  id: string;
+  type: "message" | "question";
+  author: string | null;
+  created_at: string;
+  /** At most 280 code points. */
+  text: string;
+  closable: boolean;
+  /** Message entries only: the Deck's local key, removed before an agent sees the item. */
+  message_id?: number;
+  sent_at?: string;
+}
+
+export interface InboxListResponse {
+  /** A page may hold fewer than its size: continue while next_cursor is not null. */
+  entries: InboxListItem[];
+  next_cursor: string | null;
+}
+
 export interface OperatorInboxReplyResponse {
   ok: true;
   message_id: number | null;
@@ -2187,6 +2215,8 @@ export type ApprovalTokenInbox =
       parent_token_id: string;
       caller_ref: string;
       authority: "author" | "lead" | "supervisor";
+      /** The tile the mandate acts for: an instance proved under it must be registered from that tile. */
+      desk_session: string;
     };
 
 /** Deck mints a restricted per-session token (never the operator key). */

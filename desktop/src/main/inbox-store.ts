@@ -9,7 +9,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { writeFileAtomic } from './atomic-write'
 import { join } from 'node:path'
 import { countPendingInboxMessages } from '../shared/inbox-pending'
-import { inboxEntryKey, type InboxAckStatus, type InboxMessage } from '../shared/types'
+import { inboxEntryKey, type InboxAckStatus, type InboxEntryState, type InboxMessage } from '../shared/types'
 import { reportError } from './log'
 
 export const INBOX_HISTORY_CAP = 500
@@ -282,11 +282,12 @@ export function discardUnscopedInboxFiles(stateDir: string): UnscopedInboxDiscar
 export function countPendingInbox(
   history: readonly InboxMessage[],
   unjournaled: readonly InboxMessage[],
-  ackState: Readonly<Record<string, InboxAckStatus>>
+  ackState: Readonly<Record<string, InboxAckStatus>>,
+  entryStates: Readonly<Record<string, InboxEntryState>>
 ): number {
   const byId = new Map<number, InboxMessage>()
   for (const message of [...history, ...unjournaled]) if (!byId.has(message.id)) byId.set(message.id, message)
-  return countPendingInboxMessages([...byId.values()].slice(-INBOX_HISTORY_CAP), ackState)
+  return countPendingInboxMessages([...byId.values()].slice(-INBOX_HISTORY_CAP), ackState, entryStates)
 }
 
 // A seen -> acked move keeps the ack file's size, so the size and a millisecond mtime alone can miss it;
@@ -296,10 +297,14 @@ function fileStamp(file: string): string {
   return stat ? `${stat.ino}:${stat.mtimeNs}:${stat.size}` : 'absent'
 }
 
-/** Avoid reparsing both journals on every five-second Avatar heartbeat. */
+/**
+ * Avoid reparsing both journals on every five-second Avatar heartbeat. A
+ * closure writes neither file, so the archive's `version` joins the cache key.
+ */
 export function pendingInboxCounter(
   sessionDir: () => string,
   unjournaled: () => readonly InboxMessage[],
+  entryStates: () => { version: number; messages: Readonly<Record<string, InboxEntryState>> },
   onReadError: InboxReadErrorSink = traceInboxRead
 ): () => number {
   let lastKey = ''
@@ -307,9 +312,16 @@ export function pendingInboxCounter(
   return () => {
     const dir = sessionDir()
     const pending = unjournaled()
-    const key = [dir, fileStamp(inboxHistoryFile(dir)), fileStamp(inboxAckFile(dir)), pending.map((m) => m.id).join(',')].join('|')
+    const states = entryStates()
+    const key = [
+      dir,
+      fileStamp(inboxHistoryFile(dir)),
+      fileStamp(inboxAckFile(dir)),
+      pending.map((m) => m.id).join(','),
+      states.version
+    ].join('|')
     if (key !== lastKey) {
-      lastCount = countPendingInbox(loadInboxHistory(dir, onReadError), pending, loadAckState(dir, onReadError))
+      lastCount = countPendingInbox(loadInboxHistory(dir, onReadError), pending, loadAckState(dir, onReadError), states.messages)
       lastKey = key
     }
     return lastCount

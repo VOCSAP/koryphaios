@@ -158,7 +158,9 @@ test("the Avatar client reads the poll's last list and the Courrier's pending me
   const clientBody = extractParenBody(index, index.indexOf("(", avatarClientAssignment));
   expect(clientBody).toMatch(/pendingApprovals: \(\) => lastPendingApprovals/);
   expect(
-    clientBody.match(/inboxUnread: pendingInboxCounter\(sessionDir, inboxEffects\.pendingMessages\)/g) ?? [],
+    clientBody.match(
+      /inboxUnread: pendingInboxCounter\(sessionDir, inboxEffects\.pendingMessages, \(\) => \(\{\s*version: inboxArchive\.version\(\),\s*messages: inboxArchive\.snapshot\(\)\.messages\s*\}\)\)/g
+    ) ?? [],
     "the Avatar's unread count is fed by the factory's epoch-filtered pending list, in code and exactly once"
   ).toHaveLength(1);
 });

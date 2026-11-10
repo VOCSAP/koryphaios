@@ -129,6 +129,7 @@ import {
   deriveInstanceRef,
   deriveTokenId,
   INBOX_GATES,
+  isInboxEntryId,
   sanitizeAnswerForPty,
   validateApprovalAnswers,
   validateApprovalDraft,
@@ -275,6 +276,9 @@ import type {
   OperatorInboxReplyResponse,
   InboxCloseRequest,
   InboxCloseResponse,
+  InboxListItem,
+  InboxListRequest,
+  InboxListResponse,
   InboxMessageEntryView,
   InboxEntryStateView,
   InboxCloseAuthority,
@@ -1663,6 +1667,7 @@ for (const column of [
   "parent_token_id TEXT",
   "caller_ref TEXT",
   "authority TEXT",
+  "tile_hash TEXT",
 ]) {
   try {
     db.run(`ALTER TABLE approval_session_tokens ADD COLUMN ${column}`);
@@ -10823,6 +10828,13 @@ const approvalAuth = createApprovalAuth({
   },
   rememberNonce,
   resolveInstanceBinding: bindingByRef,
+  instanceOnTile: (instanceToken, groupId, tileHash) =>
+    db
+      .query(
+        `SELECT 1 FROM peer_sessions s JOIN peers p ON p.instance_token = s.instance_token
+          WHERE s.instance_token = ? AND s.group_id = ? AND s.desk_session_hash = ? AND p.status = 'active' LIMIT 1`
+      )
+      .get(instanceToken, groupId, tileHash) !== null,
 });
 
 // Long-poll registry: /approval/wait parks here until a claim resolves it.
@@ -11708,8 +11720,6 @@ function messageEntryStateView(row: MessageEntryRow): InboxEntryStateView {
 
 type HandlerFailure = { error: string; status: number; state?: string };
 
-const MESSAGE_ENTRY_ID_RE = /^m_[0-9a-f-]{36}$/;
-
 /**
  * Closes one entry of the caller's run without an answer. The object is
  * resolved inside the actor's scope FIRST (an id of another run reads exactly
@@ -11727,8 +11737,8 @@ function handleInboxClose(
   if (!reason.ok) return { error: reason.error, status: 400 };
   const entryId = body.entry_id;
   if (typeof entryId !== "string") return { error: "entry_id is required", status: 400 };
-  const isMessage = MESSAGE_ENTRY_ID_RE.test(entryId);
-  if (!isMessage && !INBOX_RUN_REF_RE.test(entryId)) return { error: "entry_id has an unknown form", status: 400 };
+  if (!isInboxEntryId(entryId)) return { error: "entry_id has an unknown form", status: 400 };
+  const isMessage = entryId.startsWith("m_");
 
   const closure = inboxActorClosure(actor);
   const now = new Date().toISOString();
@@ -11816,6 +11826,156 @@ function handleInboxClose(
   resolveApprovalWaiters(approval);
   void notifyRegistry.settle(approval, "closed").catch((e) => log.error("notify: settle failed", e));
   return { entry: approval };
+}
+
+const INBOX_LIST_PAGE = 20;
+const INBOX_LIST_TEXT_MAX = 280;
+const INBOX_CURSOR_MAX = 256;
+const INBOX_CURSOR_TIME_MAX = 40;
+
+type InboxListCursor = { t: string; id: string };
+
+/** base64url of `{"t":<created_at>,"id":<entry id>}`, the last row a page traversed. */
+function parseInboxCursor(raw: unknown): InboxListCursor | null | HandlerFailure {
+  if (raw === undefined) return null;
+  const refused = { error: "cursor is invalid", status: 400 };
+  if (typeof raw !== "string" || raw.length === 0 || raw.length > INBOX_CURSOR_MAX) return refused;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(Buffer.from(raw, "base64url").toString("utf8"));
+  } catch {
+    // The refusal reaches the caller as a 400; the cursor is agent text and is not logged.
+    return refused;
+  }
+  const c = parsed as { t?: unknown; id?: unknown } | null;
+  if (
+    typeof c !== "object" || c === null ||
+    typeof c.t !== "string" || c.t.length > INBOX_CURSOR_TIME_MAX || !Number.isFinite(Date.parse(c.t)) ||
+    !isInboxEntryId(c.id)
+  ) {
+    return refused;
+  }
+  return { t: c.t, id: c.id };
+}
+
+function cutText(s: string, max: number): string {
+  const points = Array.from(s);
+  return points.length <= max ? s : points.slice(0, max).join("");
+}
+
+type InboxListMessageRow = Pick<
+  MessageEntryRow,
+  "entry_id" | "operator_id" | "run_ref" | "group_id" | "project_key" | "message_id" | "sent_at" | "author_instance_ref" | "author_peer_id_snapshot" | "excerpt"
+> & { created_at: string };
+
+type InboxListQuestionRow = {
+  id: string;
+  operator_id: string;
+  project_key: string;
+  inbox_run_ref: string | null;
+  inbox_group_id: string | null;
+  author_instance_ref: string | null;
+  author_peer_id_snapshot: string | null;
+  title: string;
+  question: string;
+  created_at: string;
+  reply_route: string;
+  kind: string;
+  mergeable: number;
+};
+
+type InboxListCandidate = { at: number; id: string; createdAt: string; allowed: boolean; item: InboxListItem };
+
+/**
+ * The open entries of the caller's run, oldest first, one page at a time.
+ * Both tables are read inside the actor's scope and ordered on
+ * (julianday(created_at), id), never on the TEXT of the timestamp. The cursor
+ * is the last row the page TRAVERSED, so a row the per-row authorization drops
+ * is never read again and a close between two pages neither skips nor repeats.
+ * Read only, and nothing of the content is logged.
+ */
+function handleInboxList(body: InboxListRequest & Record<string, unknown>): InboxListResponse | HandlerFailure {
+  const actor = approvalAuth.verifyInboxAction(body, "inbox-list");
+  if (isAuthError(actor)) return actor;
+  const cursor = parseInboxCursor(body.cursor);
+  if (cursor !== null && "error" in cursor) return cursor;
+  const after = cursor
+    ? { sql: " AND (julianday(created_at) > julianday(?) OR (julianday(created_at) = julianday(?) AND {id} > ?))", params: [cursor.t, cursor.t, cursor.id] }
+    : { sql: "", params: [] as string[] };
+
+  const msgWhere = messageEntryActorWhere(actor);
+  const messages = db
+    .query(
+      `SELECT entry_id, operator_id, run_ref, group_id, project_key, message_id, sent_at,
+              author_instance_ref, author_peer_id_snapshot, excerpt, created_at
+         FROM inbox_message_entries
+        WHERE ${msgWhere.sql} AND state = 'open'${after.sql.replace("{id}", "entry_id")}
+        ORDER BY julianday(created_at), entry_id LIMIT ?`
+    )
+    .all(...(msgWhere.params as never[]), ...(after.params as never[]), INBOX_LIST_PAGE + 1) as InboxListMessageRow[];
+  const actorWhere = approvalActorWhere(actor);
+  const questions = db
+    .query(
+      `SELECT id, operator_id, project_key, inbox_run_ref, inbox_group_id, author_instance_ref,
+              author_peer_id_snapshot, title, question, created_at, reply_route, kind, mergeable
+         FROM pending_approvals
+        WHERE ${actorWhere.sql} AND status IN ('pending','expired_notif') AND inbox_run_ref IS NOT NULL${after.sql.replace("{id}", "id")}
+        ORDER BY julianday(created_at), id LIMIT ?`
+    )
+    .all(...(actorWhere.params as never[]), ...(after.params as never[]), INBOX_LIST_PAGE + 1) as InboxListQuestionRow[];
+
+  const candidates: InboxListCandidate[] = [
+    ...messages.map((r) => ({
+      at: Date.parse(r.created_at),
+      id: r.entry_id,
+      createdAt: r.created_at,
+      allowed: authorizeInboxEntry(actor, {
+        operator_id: r.operator_id,
+        run_ref: r.run_ref,
+        group_id: r.group_id,
+        project_key: r.project_key,
+        author_instance_ref: r.author_instance_ref,
+      }),
+      item: {
+        id: r.entry_id,
+        type: "message" as const,
+        author: r.author_peer_id_snapshot,
+        created_at: r.created_at,
+        text: cutText(r.excerpt, INBOX_LIST_TEXT_MAX),
+        closable: true,
+        message_id: r.message_id,
+        sent_at: r.sent_at,
+      },
+    })),
+    ...questions.map((r) => ({
+      at: Date.parse(r.created_at),
+      id: r.id,
+      createdAt: r.created_at,
+      allowed: authorizeInboxEntry(actor, {
+        operator_id: r.operator_id,
+        run_ref: r.inbox_run_ref,
+        group_id: r.inbox_group_id,
+        project_key: r.project_key,
+        author_instance_ref: r.author_instance_ref,
+      }),
+      item: {
+        id: r.id,
+        type: "question" as const,
+        author: r.author_peer_id_snapshot,
+        created_at: r.created_at,
+        text: cutText(`${r.title} -- ${r.question}`, INBOX_LIST_TEXT_MAX),
+        closable: r.reply_route === "channel" && r.kind === "question" && r.mergeable === 0,
+      },
+    })),
+  ];
+  candidates.sort((a, b) => a.at - b.at || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  const page = candidates.slice(0, INBOX_LIST_PAGE);
+  const last = page[page.length - 1];
+  const nextCursor =
+    candidates.length > INBOX_LIST_PAGE && last
+      ? Buffer.from(JSON.stringify({ t: last.createdAt, id: last.id })).toString("base64url")
+      : null;
+  return { entries: page.filter((c) => c.allowed).map((c) => c.item), next_cursor: nextCursor };
 }
 
 type ReplyOutcome =
@@ -12234,10 +12394,12 @@ interface InboxTokenRow {
   parent_token_id: string | null;
   caller_ref: string | null;
   authority: string | null;
+  tile_hash: string | null;
 }
 
 const INBOX_TOKEN_COLUMNS =
-  "operator_id, public_key, session_ref, project_key, revoked_at, expires_at, inbox_purpose, run_ref, group_id, parent_token_id, caller_ref, authority";
+  "operator_id, public_key, session_ref, project_key, revoked_at, expires_at, inbox_purpose, run_ref, group_id, parent_token_id, caller_ref, authority, tile_hash";
+const INBOX_DESK_SESSION_MAX = 128;
 
 /**
  * Inbox run roots and mandates. The scope of a token is fixed at mint: a
@@ -12290,6 +12452,7 @@ function handleInboxTokenMint(
   let parentTokenId: string | null = null;
   let callerRef: string | null = null;
   let authority: string | null = null;
+  let tileHash: string | null = null;
 
   if (block.kind === "run") {
     const rawRun = typeof block.run_ref === "string" ? block.run_ref.toLowerCase() : "";
@@ -12310,6 +12473,10 @@ function handleInboxTokenMint(
     }
     if (typeof block.authority !== "string" || !INBOX_AUTHORITIES.has(block.authority)) {
       return { error: "inbox.authority must be author, lead or supervisor", status: 400 };
+    }
+    const deskSession = typeof block.desk_session === "string" ? block.desk_session.trim() : "";
+    if (deskSession.length === 0 || deskSession.length > INBOX_DESK_SESSION_MAX) {
+      return { error: "inbox.desk_session must be 1..128 characters", status: 400 };
     }
     // Only a LIVE run root of the same operator can parent a mandate: no
     // mandate-to-mandate chain, and the scope is copied, never chosen.
@@ -12338,6 +12505,7 @@ function handleInboxTokenMint(
     parentTokenId = parentId;
     callerRef = caller;
     authority = block.authority;
+    tileHash = deskSessionHash(deskSession);
   } else {
     return { error: "inbox.kind must be run or mandate", status: 400 };
   }
@@ -12360,7 +12528,8 @@ function handleInboxTokenMint(
     row.group_id === groupId &&
     row.parent_token_id === parentTokenId &&
     row.caller_ref === callerRef &&
-    row.authority === authority;
+    row.authority === authority &&
+    row.tile_hash === tileHash;
 
   if (body.renew_only === true) {
     if (!existing || !sameScope(existing) || existing.expires_at <= nowIso) {
@@ -12372,12 +12541,12 @@ function handleInboxTokenMint(
         WHERE token_id = ? AND operator_id = ? AND public_key = ?
           AND session_ref = ? AND project_key = ? AND inbox_purpose = ?
           AND run_ref = ? AND group_id = ?
-          AND parent_token_id IS ? AND caller_ref IS ? AND authority IS ?
+          AND parent_token_id IS ? AND caller_ref IS ? AND authority IS ? AND tile_hash IS ?
           AND revoked_at IS NULL AND expires_at > ?`,
       [
         expiresAt, tokenId, auth.operator_id, sessionPublicKey,
         sessionRef, projectKey, purpose, runRef, groupId,
-        parentTokenId, callerRef, authority, nowIso,
+        parentTokenId, callerRef, authority, tileHash, nowIso,
       ]
     );
     if (renewal.changes !== 1) return { error: "session token is not renewable", status: 409 };
@@ -12397,11 +12566,11 @@ function handleInboxTokenMint(
   db.run(
     `INSERT INTO approval_session_tokens
        (token_id, operator_id, public_key, session_ref, project_key, created_at, expires_at, revoked_at,
-        inbox_purpose, inbox_version, run_ref, group_id, parent_token_id, caller_ref, authority)
-     VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, 1, ?, ?, ?, ?, ?)`,
+        inbox_purpose, inbox_version, run_ref, group_id, parent_token_id, caller_ref, authority, tile_hash)
+     VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, 1, ?, ?, ?, ?, ?, ?)`,
     [
       tokenId, auth.operator_id, sessionPublicKey, sessionRef, projectKey, nowIso, expiresAt,
-      purpose, runRef, groupId, parentTokenId, callerRef, authority,
+      purpose, runRef, groupId, parentTokenId, callerRef, authority, tileHash,
     ]
   );
   return { token_id: tokenId, expires_at: expiresAt, capabilities };
@@ -13638,6 +13807,11 @@ const server = Bun.serve<WsData>({
               { status: result.status }
             );
           }
+          return Response.json(result);
+        }
+        case "/inbox/list": {
+          const result = handleInboxList(body as InboxListRequest & Record<string, unknown>);
+          if ("error" in result) return Response.json({ error: result.error }, { status: result.status });
           return Response.json(result);
         }
         case "/operator-inbox/purge": {

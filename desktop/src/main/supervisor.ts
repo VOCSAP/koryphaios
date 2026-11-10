@@ -166,6 +166,8 @@ function buildDeckControlMcpConfig(
         args: [deckLeadScriptPath(input.mcpScriptPath)],
         env: {
           ELECTRON_RUN_AS_NODE: '1',
+          DECK_CONTROL_URL: input.controlUrl,
+          DECK_CONTROL_TOKEN: input.controlToken,
           [OPERATOR_CEILING_ENV]: checkedCeiling(OPERATOR_CEILING_ENV, OPERATOR_TOOLS, OPERATOR_TOOLS)
         }
       }

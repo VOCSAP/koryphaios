@@ -6,6 +6,7 @@ import {
   claimApproval,
   settleAnsweredInTerminal,
   ackApproval,
+  fetchClosedQuestions,
   fetchPendingApprovals,
   fetchUndeliveredVerdicts,
   markVerdictsDelivered,
@@ -191,6 +192,17 @@ test("the list and delivered calls name this window's run, on every request", as
     ["/approval/list", deps.runRef],
     ["/approval/delivered", deps.runRef]
   ]);
+});
+
+test("fetchClosedQuestions lists the closed status of this project and run in a single request", async () => {
+  const deps = { ...makeDeps("proj-closed"), runRef: "3f1c2a4e-9b7d-4c1e-8a2b-5d6e7f809a1b" };
+  await fetchClosedQuestions(deps);
+  expect(calls.length).toBe(1);
+  expect(new URL(calls[0]!.url).pathname).toBe("/approval/list");
+  // Mutant: status 'pending' (re-lists the live questions) or run_ref dropped (another run's closed rows).
+  expect(calls[0]!.body.status).toBe("closed");
+  expect(calls[0]!.body.project_key).toBe("proj-closed");
+  expect(calls[0]!.body.run_ref).toBe(deps.runRef);
 });
 
 test("an Inbox mint and its renewal carry the inbox block under a v1 proof for the mint door", async () => {

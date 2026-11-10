@@ -221,6 +221,24 @@ test("fetchOperatorInbox omits session_id from the body when absent -- legacy sh
   expect("session_id" in body).toBe(false);
 });
 
+test("fetchOperatorInbox returns the entries the body carries and leaves them absent otherwise", async () => {
+  const entries = [{ message_id: 4, sent_at: "2026-01-01T00:00:00Z", state: "closed", settled_at: null }];
+  const read = (body: unknown) =>
+    fetchOperatorInbox(
+      { groupId: "g1", secret: "s1" },
+      {
+        endpoint: { url: "http://x", token: null },
+        fetchFn: (async () => new Response(JSON.stringify(body), { status: 200 })) as unknown as typeof fetch,
+      }
+    );
+  const withEntries = await read({ messages: [], entries });
+  expect(withEntries.entries).toEqual(entries);
+  // Mutant: `entries: []` as a default, which a broker without the field would turn into a ready, empty archive.
+  const withoutEntries = await read({ messages: [] });
+  expect("entries" in withoutEntries, "an older broker's answer has no entries key").toBe(false);
+  expect(withoutEntries.messages).toEqual([]);
+});
+
 test("a run-scoped read and purge sign the whole body, run_ref included, for their own door; without a run the body carries neither", async () => {
   const bodies: Record<string, unknown>[] = [];
   const fetchFn = (async (_url: string | URL | Request, init?: RequestInit) => {

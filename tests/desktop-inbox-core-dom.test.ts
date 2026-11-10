@@ -40,7 +40,8 @@ const bridgeTouches: string[] = [];
   }
 );
 
-const { InboxCore } = await import("../desktop/src/renderer/src/components/InboxCore.tsx");
+const { InboxCore, formatCloseStamp } = await import("../desktop/src/renderer/src/components/InboxCore.tsx");
+const { inboxEntryKey } = await import("../desktop/src/shared/types.ts");
 
 type Action = { kind: string; text?: string; answers?: Record<string, string[]> };
 interface Calls {
@@ -98,6 +99,7 @@ beforeEach(() => {
   outcome = "settled";
   storeReads.length = 0;
   bridgeTouches.length = 0;
+  reports.length = 0;
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
@@ -112,9 +114,13 @@ afterEach(() => {
   expect(bridgeTouches, "window.api is never touched: every effect leaves through a capability").toEqual([]);
 });
 
+const UNSUPPORTED = { status: "unsupported", messages: {}, closedQuestions: [] } as const;
+const reports: string[] = [];
+
 interface MountOptions {
   messages?: (typeof MESSAGE)[];
   approvals?: FakeApproval[];
+  archive?: unknown;
   reclame?: boolean;
   courrierWrites?: boolean;
 }
@@ -130,7 +136,10 @@ function Host(opts: MountOptions): React.JSX.Element {
         })
       : Promise.resolve(outcome);
   return React.createElement(InboxCore, {
-    t: (key: string) => key,
+    t: (key: string, params?: Record<string, string>) =>
+      params ? `${key}|${Object.entries(params).map(([k, v]) => `${k}=${v}`).join("|")}` : key,
+    report: (message: string) => reports.push(message),
+    archive: opts.archive ?? UNSUPPORTED,
     messages: opts.messages ?? [],
     approvals: (opts.approvals ?? []) as never,
     readStates: {},
@@ -164,6 +173,7 @@ function Host(opts: MountOptions): React.JSX.Element {
     approvalDrafts: approvalDrafts as never,
     onApprovalDraft: (id: string, d: unknown) => setApprovalDrafts((all) => ({ ...all, [id]: d })),
     resolveSender: () => ({ resolved: true, name: "worker" }),
+    renderNavigate: () => React.createElement("span", { className: "nav-marker" }),
     seedApprovalId: null,
     onSeedConsumed: () => {},
     onClose: () => {}
@@ -341,4 +351,185 @@ test("a delete settling after another entry was opened leaves that other entry o
   expect(container.querySelector(".inbox-modal .inbox-modal-text")?.textContent, "B is still the open entry").toBe(
     "rm -rf build"
   );
+});
+
+// --- Settled entries: closed, responded, previous run ------------------------
+
+const CLOSED_AT = new Date(2026, 10, 3, 9, 5, 7).toISOString();
+const MSG_KEY = inboxEntryKey({ kind: "message", message: MESSAGE });
+
+const settled = (over: Record<string, unknown> = {}) => ({
+  state: "closed",
+  settledAt: CLOSED_AT,
+  closedByPeerId: "worker-2",
+  closedByAuthority: "author",
+  closeReason: "done",
+  ...over
+});
+const ready = (messages: Record<string, unknown>, closedQuestions: unknown[] = []) => ({
+  status: "ready",
+  messages,
+  closedQuestions
+});
+const closedQuestion = (over: Record<string, unknown> = {}) =>
+  approval({
+    id: "cq",
+    kind: "question",
+    status: "closed",
+    options: ["main", "dev"],
+    answered_at: CLOSED_AT,
+    closed_by_peer_id: "worker-2",
+    closed_by_authority: "author",
+    close_reason: "done",
+    ...over
+  } as Partial<FakeApproval>);
+const modalButtons = (): (string | null)[] =>
+  [...container.querySelectorAll(".inbox-modal-actions button")].map((b) => b.textContent);
+const notes = (): string[] => [...container.querySelectorAll(".inbox-modal-note")].map((n) => n.textContent ?? "");
+
+test("formatCloseStamp writes the local date and time with zeros, the same in every locale", () => {
+  // Mutant: the month printed without +1, or toLocaleString.
+  expect(formatCloseStamp(CLOSED_AT)).toEqual({ date: "03/11/2026", time: "09:05:07", valid: true });
+  expect(formatCloseStamp("nope")).toEqual({ date: "nope", time: "--:--:--", valid: false });
+});
+
+test("a closed message shows who closed it, when and why, offers no reply, and keeps ack, close and delete", async () => {
+  await mount({ messages: [MESSAGE], courrierWrites: true, archive: ready({ [MSG_KEY]: settled() }) });
+  expect(container.querySelector(".inbox-entry-closed-badge"), "the list row carries the closed pastille").not.toBeNull();
+  await click(container.querySelector(".inbox-entry"));
+  const banner = container.querySelector(".inbox-closed-banner")!;
+  expect(banner.textContent).toContain("inbox.closedBy|peer=worker-2|date=03/11/2026|time=09:05:07");
+  expect(banner.querySelector(".inbox-closed-reason")?.textContent).toBe("done");
+  // Mutant: the Reply button conditioned by courrier.reply alone.
+  expect(container.querySelector(".inbox-modal-reply")).toBeNull();
+  expect(buttonLabelled("inbox.reply")).toBeUndefined();
+  expect(modalButtons()).toEqual(["inbox.ack", "inbox.close", "inbox.delete"]);
+});
+
+test("a closure reason is agent text: markup and links show literally, no element is created", async () => {
+  const reason = "<b>x</b> https://exemple.invalid";
+  await mount({
+    messages: [MESSAGE],
+    archive: ready({ [MSG_KEY]: settled({ closeReason: reason }) })
+  });
+  await click(container.querySelector(".inbox-entry"));
+  const banner = container.querySelector(".inbox-closed-banner")!;
+  // Mutant: the reason passed through renderText / linkedText.
+  expect(banner.querySelector("b")).toBeNull();
+  expect(banner.querySelector("a")).toBeNull();
+  expect(banner.querySelector(".inbox-closed-reason")?.textContent).toBe(reason);
+});
+
+test("a closure by an instance-less authority names the translated authority, not an empty peer", async () => {
+  await mount({
+    messages: [MESSAGE],
+    archive: ready({ [MSG_KEY]: settled({ closedByPeerId: null, closedByAuthority: "lead" }) })
+  });
+  await click(container.querySelector(".inbox-entry"));
+  // Mutant: `peer ?? ''` instead of the authority variant.
+  expect(container.querySelector(".inbox-closed-line")?.textContent).toContain(
+    "inbox.closedByAuthority|authority=inbox.closedAuthority.lead|date=03/11/2026|time=09:05:07"
+  );
+});
+
+test("an unreadable close time is shown as dashes and traced once, not on every render", async () => {
+  const archive = ready({ [MSG_KEY]: settled({ settledAt: "garbage" }) });
+  await mount({ messages: [MESSAGE], archive });
+  await click(container.querySelector(".inbox-entry"));
+  expect(container.querySelector(".inbox-closed-line")?.textContent).toContain("time=--:--:--");
+  await mount({ messages: [MESSAGE], archive });
+  expect(reports).toHaveLength(1);
+});
+
+test("a question an agent closed is a read-only consultation: closure banner, note, and Close alone", async () => {
+  await mount({ approvals: [], archive: ready({}, [closedQuestion()]) });
+  expect(container.querySelector(".inbox-entry-closed-question"), "listed as its own family").not.toBeNull();
+  await click(container.querySelector(".inbox-entry"));
+  const modal = container.querySelector(".inbox-modal")!;
+  // Mutant: the closed question rendered as the approval family (decline, chips, reply, navigate come back).
+  expect(modal.querySelector(".inbox-modal-options")).toBeNull();
+  expect(modal.querySelector(".inbox-modal-reply")).toBeNull();
+  expect(modal.querySelector(".nav-marker")).toBeNull();
+  expect(modalButtons()).toEqual(["inbox.close"]);
+  expect(notes()).toEqual(["inbox.noteClosed"]);
+  expect(modal.querySelector(".inbox-closed-banner")?.textContent).toContain("peer=worker-2");
+});
+
+test("a question that closes under an open modal keeps the modal open on the banner and shows the unsent draft read-only", async () => {
+  await mount({ approvals: [approval({ id: "cq", kind: "question", options: [] })] });
+  await click(container.querySelector(".inbox-entry"));
+  typeReply("half an answer");
+  await act(async () => {
+    root.render(React.createElement(Host, { approvals: [], archive: ready({}, [closedQuestion({ options: [] })]) }));
+  });
+  // Mutant: reactKey `cq:<id>` for the closed family (the modal would close).
+  expect(container.querySelector(".inbox-modal")).not.toBeNull();
+  expect(container.querySelector(".inbox-closed-banner")).not.toBeNull();
+  expect(container.querySelector(".inbox-modal-reply"), "the field is gone").toBeNull();
+  expect(container.querySelector(".inbox-modal-draft-orphan")?.textContent).toContain("half an answer");
+  await click(buttonLabelled("inbox.close"));
+  expect(Object.values(calls.drafts), "closing the modal drops the orphan draft").toEqual([""]);
+});
+
+test("a closed question's list marker is named closed, not acknowledged", async () => {
+  await mount({ archive: ready({}, [closedQuestion()]) });
+  // Mutant: the marker keeps the read-state title ('inbox.state.acked').
+  expect(container.querySelector(".inbox-entry-dot")?.getAttribute("title")).toBe("inbox.stateClosed");
+});
+
+test("a draft left on a message whose entry settled or belongs to a previous run is shown read-only and dropped when the message is deleted", async () => {
+  const rerender = async (archive: unknown): Promise<void> => {
+    await act(async () => {
+      root.render(React.createElement(Host, { messages: [MESSAGE], courrierWrites: true, archive }));
+    });
+  };
+  await mount({ messages: [MESSAGE], courrierWrites: true, archive: ready({ [MSG_KEY]: settled({ state: "open" }) }) });
+  await click(container.querySelector(".inbox-entry"));
+  typeReply("half an answer");
+  await rerender(ready({}));
+  expect(container.querySelector(".inbox-modal-draft-orphan")?.textContent, "a previous-run message keeps the draft readable").toContain("half an answer");
+  await rerender(ready({ [MSG_KEY]: settled() }));
+  expect(container.querySelector(".inbox-modal-draft-orphan")?.textContent).toContain("half an answer");
+  await click(buttonLabelled("inbox.delete"));
+  // Mutant: the orphan draft is not cleared when the entry is closed by a delete.
+  expect(Object.values(calls.drafts)).toEqual([""]);
+});
+
+test("a question present as pending and as closed is listed once, as closed", async () => {
+  await mount({
+    approvals: [approval({ id: "cq", kind: "question", options: [] })],
+    archive: ready({}, [closedQuestion()])
+  });
+  expect(container.querySelectorAll(".inbox-entry")).toHaveLength(1);
+  expect(container.querySelector(".inbox-entry-closed-question")).not.toBeNull();
+});
+
+test("a responded message offers no reply and says why", async () => {
+  await mount({ messages: [MESSAGE], courrierWrites: true, archive: ready({ [MSG_KEY]: settled({ state: "responded" }) }) });
+  await click(container.querySelector(".inbox-entry"));
+  expect(container.querySelector(".inbox-modal-reply")).toBeNull();
+  expect(modalButtons()).toEqual(["inbox.ack", "inbox.close", "inbox.delete"]);
+  expect(notes()).toEqual(["inbox.noteResponded"]);
+  expect(container.querySelector(".inbox-closed-banner"), "responded is not a closure").toBeNull();
+});
+
+test("what a message offers follows the archive: open and an old broker reply, an unknown or previous-run one does not", async () => {
+  await mount({ messages: [MESSAGE], courrierWrites: true, archive: ready({ [MSG_KEY]: settled({ state: "open" }) }) });
+  await click(container.querySelector(".inbox-entry"));
+  expect(container.querySelector(".inbox-modal-reply")).not.toBeNull();
+  const rerender = async (archive: unknown): Promise<void> => {
+    await act(async () => {
+      root.render(React.createElement(Host, { messages: [MESSAGE], courrierWrites: true, archive }));
+    });
+  };
+  await rerender(ready({}));
+  expect(container.querySelector(".inbox-modal-reply"), "absent from a ready snapshot: a previous run").toBeNull();
+  expect(notes()).toEqual(["inbox.notePreviousRun"]);
+  await rerender({ status: "pending", messages: {}, closedQuestions: [] });
+  expect(container.querySelector(".inbox-modal-reply")).toBeNull();
+  expect(notes()).toEqual(["inbox.noteStateUnknown"]);
+  // Mutant: legacy-broker hides Reply.
+  await rerender(UNSUPPORTED);
+  expect(container.querySelector(".inbox-modal-reply"), "an old broker keeps the reply, the broker decides").not.toBeNull();
+  expect(buttonLabelled("inbox.reply")).toBeDefined();
 });

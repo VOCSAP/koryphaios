@@ -2,7 +2,7 @@ import { afterAll, afterEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ApprovalRuntime, approvalCredFileName } from "../desktop/src/main/approval-runtime.ts";
+import { ApprovalRuntime, approvalCredFileName, MANDATE_WAIT_MS } from "../desktop/src/main/approval-runtime.ts";
 import { deriveTokenId } from "../desktop/src/main/approval-auth.ts";
 import { onDeckError } from "../desktop/src/main/log.ts";
 import type { SecretCipher } from "../desktop/src/main/scope-secrets.ts";
@@ -549,6 +549,7 @@ describe("ApprovalRuntime run mandates", () => {
     expect(instance.mandateState("team-lead-ab12")).toEqual({ state: "pending" });
 
     expect(await instance.arm()).toBe(true);
+    void instance.ensureMandate("team-lead-ab12", "tile-team-lead-ab12");
     await until(() => instance.mandateState("team-lead-ab12")?.state === "ready", "the mandate becomes ready");
     const rootToken = deriveTokenId(rootMints(requests)[0]!.body.session_public_key as string);
     expect(mandateMints(requests)[0]!.body.inbox).toEqual({
@@ -556,7 +557,8 @@ describe("ApprovalRuntime run mandates", () => {
       kind: "mandate",
       parent_token_id: rootToken,
       caller_ref: "team-lead-ab12",
-      authority: "lead"
+      authority: "lead",
+      desk_session: "tile-team-lead-ab12"
     });
     await instance.disarm();
   });
@@ -570,6 +572,7 @@ describe("ApprovalRuntime run mandates", () => {
     const instance = runtime(stateDir(), "mandate-late", clock());
     expect(await instance.arm()).toBe(true);
     instance.requestMandate("caller-1", "author");
+    void instance.ensureMandate("caller-1", "tile-caller-1");
     await until(() => mandateMints(requests).length === 1, "the mandate mint reaches the broker");
 
     instance.releaseMandate("caller-1");
@@ -592,6 +595,7 @@ describe("ApprovalRuntime run mandates", () => {
     const instance = runtime(stateDir(), "mandate-dropped-in-flight", clock());
     expect(await instance.arm()).toBe(true);
     instance.requestMandate("caller-d", "author");
+    void instance.ensureMandate("caller-d", "tile-caller-d");
     await until(() => mandateMints(requests).length === 1, "the mandate mint reaches the broker");
 
     await instance.disarm();
@@ -610,6 +614,7 @@ describe("ApprovalRuntime run mandates", () => {
     const instance = runtime(stateDir(), "mandate-renew", timing);
     instance.requestMandate("supervisor", "supervisor");
     expect(await instance.arm()).toBe(true);
+    void instance.ensureMandate("supervisor", "tile-supervisor");
     await until(() => instance.mandateState("supervisor")?.state === "ready", "the mandate becomes ready");
     const minted = mandateMints(requests)[0]!;
 
@@ -634,6 +639,7 @@ describe("ApprovalRuntime run mandates", () => {
     const instance = runtime(stateDir(), "mandate-renew-fail", timing);
     instance.requestMandate("supervisor", "supervisor");
     expect(await instance.arm()).toBe(true);
+    void instance.ensureMandate("supervisor", "tile-supervisor");
     await until(() => instance.mandateState("supervisor")?.state === "ready", "the mandate becomes ready");
 
     timing.planned[0]!.callback();
@@ -650,6 +656,7 @@ describe("ApprovalRuntime run mandates", () => {
     const instance = runtime(stateDir(), "mandate-release-ready", clock());
     instance.requestMandate("caller-rel", "author");
     expect(await instance.arm()).toBe(true);
+    void instance.ensureMandate("caller-rel", "tile-caller-rel");
     await until(() => instance.mandateState("caller-rel")?.state === "ready", "the mandate becomes ready");
     const tokenId = (instance.mandateState("caller-rel") as { tokenId: string }).tokenId;
     expect(tokenId).toBe(deriveTokenId(mandateMints(requests)[0]!.body.session_public_key as string));
@@ -667,6 +674,7 @@ describe("ApprovalRuntime run mandates", () => {
     const instance = runtime(stateDir(), "mandate-drop", clock());
     instance.requestMandate("caller-drop", "lead");
     expect(await instance.arm()).toBe(true);
+    void instance.ensureMandate("caller-drop", "tile-caller-drop");
     await until(() => instance.mandateState("caller-drop")?.state === "ready", "the mandate becomes ready");
     await instance.disarm();
     expect(instance.mandateState("caller-drop")).toEqual({ state: "pending" });
@@ -679,12 +687,14 @@ describe("ApprovalRuntime run mandates", () => {
     const instance = runtime(stateDir(), "mandate-hung", timing);
     instance.requestMandate("supervisor", "supervisor");
     expect(await instance.arm()).toBe(true);
+    void instance.ensureMandate("supervisor", "tile-supervisor");
     await until(() => instance.mandateState("supervisor")?.state === "ready", "the mandate becomes ready");
 
     timing.planned[0]!.callback();
     await until(() => signals.length === 1, "the mandate renewal reaches the silent broker");
-    await until(() => timing.planned.length === 2, "the parent renewal completed and scheduled its successor");
-    timing.planned[1]!.callback();
+    const renewals = () => timing.planned.filter((t) => t.delayMs !== MANDATE_WAIT_MS);
+    await until(() => renewals().length === 2, "the parent renewal completed and scheduled its successor");
+    renewals()[1]!.callback();
     await until(
       () => requests.filter((r) => (r.body.inbox as { kind?: string }).kind === "run" && r.body.renew_only === true).length === 2,
       "the next parent renewal is not held by the hung mandate"
@@ -704,6 +714,8 @@ describe("ApprovalRuntime run mandates", () => {
     instance.requestMandate("blocked", "author");
     instance.requestMandate("ready", "lead");
     expect(await instance.arm()).toBe(true);
+    void instance.ensureMandate("blocked", "tile-blocked");
+    void instance.ensureMandate("ready", "tile-ready");
     await until(() => instance.mandateState("blocked")?.state === "ready" && instance.mandateState("ready")?.state === "ready", "both mandates become ready");
 
     timing.planned[0]!.callback();
@@ -719,11 +731,141 @@ describe("ApprovalRuntime run mandates", () => {
     const instance = runtime(stateDir(), "mandate-retry", timing);
     instance.requestMandate("caller-retry", "author");
     expect(await instance.arm()).toBe(true);
+    void instance.ensureMandate("caller-retry", "tile-caller-retry");
     await until(() => instance.mandateState("caller-retry")?.state === "refused", "the first mint is refused");
 
     timing.planned[0]!.callback();
     await until(() => mandateMints(requests).length === 2, "the renewal mints the mandate again");
     await until(() => instance.mandateState("caller-retry")?.state === "ready", "the new mandate becomes ready");
+    await instance.disarm();
+  });
+
+  // Mutants: a mint started by requestMandate or by the publish of the root for an entry without tile; ensureMandate without its in-flight memo.
+  test("nothing is minted until a tile asks, and two concurrent asks share one mint for that tile", async () => {
+    const requests = mandateBroker();
+    const instance = runtime(stateDir(), "mandate-lazy", clock());
+    instance.requestMandate("lazy", "lead");
+    expect(await instance.arm()).toBe(true);
+    for (let i = 0; i < 10; i++) await nextTurn();
+    expect(mandateMints(requests), "a caller without a tile has no mandate at the broker").toHaveLength(0);
+    expect(instance.mandateState("lazy")).toEqual({ state: "pending" });
+
+    const [a, b] = await Promise.all([instance.ensureMandate("lazy", "tile-L"), instance.ensureMandate("lazy", "tile-L")]);
+
+    expect(mandateMints(requests)).toHaveLength(1);
+    expect((mandateMints(requests)[0]!.body.inbox as { desk_session?: string }).desk_session).toBe("tile-L");
+    expect(a?.tokenId).toBe(deriveTokenId(mandateMints(requests)[0]!.body.session_public_key as string));
+    expect(b?.tokenId).toBe(a?.tokenId);
+    expect((await instance.ensureMandate("lazy", "tile-L"))?.tokenId, "a ready mandate is reused").toBe(a?.tokenId);
+    expect(mandateMints(requests)).toHaveLength(1);
+    await instance.disarm();
+  });
+
+  // Mutant: the mandate of another tile reused instead of revoked and minted again.
+  test("a mandate asked for by another tile is revoked and minted again for that tile", async () => {
+    const requests = mandateBroker();
+    const instance = runtime(stateDir(), "mandate-move", clock());
+    instance.requestMandate("mover", "supervisor");
+    expect(await instance.arm()).toBe(true);
+    const first = await instance.ensureMandate("mover", "tile-old");
+    const second = await instance.ensureMandate("mover", "tile-new");
+
+    expect(second?.tokenId).not.toBe(first?.tokenId);
+    expect(mandateMints(requests).map((r) => (r.body.inbox as { desk_session?: string; authority?: string })))
+      .toMatchObject([{ desk_session: "tile-old", authority: "supervisor" }, { desk_session: "tile-new", authority: "supervisor" }]);
+    await until(() => requests.some((r) => r.path === "/approval/token-revoke" && r.body.token_id === first?.tokenId), "the old tile's mandate is revoked");
+    await instance.disarm();
+  });
+
+  // Mutants: releaseMandateTile leaving the token live, or dropping the entry and its authority.
+  test("releasing a tile revokes its mandate, keeps the caller's authority, and the next tile gets a fresh one", async () => {
+    const requests = mandateBroker();
+    const instance = runtime(stateDir(), "mandate-release-tile", clock());
+    instance.requestMandate("supervisor", "supervisor");
+    expect(await instance.arm()).toBe(true);
+    const first = await instance.ensureMandate("supervisor", "tile-sup-1");
+
+    instance.releaseMandateTile("tile-other");
+    expect(instance.mandateState("supervisor")?.state, "another tile's release touches nothing").toBe("ready");
+    instance.releaseMandateTile("tile-sup-1");
+    expect(instance.mandateState("supervisor")).toEqual({ state: "pending" });
+    await until(() => requests.some((r) => r.path === "/approval/token-revoke" && r.body.token_id === first?.tokenId), "the released tile's mandate is revoked");
+
+    const next = await instance.ensureMandate("supervisor", "tile-sup-2");
+    expect(next?.tokenId).not.toBe(first?.tokenId);
+    expect(mandateMints(requests)[1]!.body.inbox).toMatchObject({ authority: "supervisor", desk_session: "tile-sup-2" });
+    await instance.disarm();
+  });
+
+  // Mutant: ensureMandate minting without a published run credential, or ignoring an aborted signal.
+  test("without a run credential, for an unknown caller, or once aborted, ensureMandate answers null", async () => {
+    let release = (): void => {};
+    const hold = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const requests = mandateBroker({ holdMandateMint: hold });
+    const instance = runtime(stateDir(), "mandate-null", clock());
+    instance.requestMandate("idle", "lead");
+    expect(await instance.ensureMandate("idle", "tile-I"), "no root yet").toBeNull();
+    expect(mandateMints(requests)).toHaveLength(0);
+    expect(await instance.arm()).toBe(true);
+    expect(await instance.ensureMandate("nobody", "tile-I")).toBeNull();
+
+    const controller = new AbortController();
+    const waiting = instance.ensureMandate("idle", "tile-I", controller.signal);
+    await until(() => mandateMints(requests).length === 1, "the mint reaches the broker");
+    controller.abort();
+    expect(await reachedWithin(waiting, "an aborted wait")).toBeNull();
+    release();
+    await instance.disarm();
+  });
+
+  // Mutant: the in-flight mint resolved by re-reading the entry, which then belongs to another tile.
+  test("a waiter for tile A must not receive the mandate minted for tile B", async () => {
+    let release = (): void => {};
+    const hold = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const requests = mandateBroker({ holdMandateMint: hold });
+    const instance = runtime(stateDir(), "mandate-two-tiles", clock());
+    instance.requestMandate("mover", "lead");
+    expect(await instance.arm()).toBe(true);
+
+    const forA = instance.ensureMandate("mover", "tile-A");
+    await until(() => mandateMints(requests).length === 1, "the mint for tile A reaches the broker");
+    const forB = instance.ensureMandate("mover", "tile-B");
+    await until(() => mandateMints(requests).length === 2, "the mint for tile B reaches the broker");
+    release();
+
+    expect(await reachedWithin(forA, "the tile A wait")).toBeNull();
+    const b = await reachedWithin(forB, "the tile B wait");
+    expect(b?.tokenId).toBe(deriveTokenId(mandateMints(requests)[1]!.body.session_public_key as string));
+    expect((mandateMints(requests)[1]!.body.inbox as { desk_session?: string }).desk_session).toBe("tile-B");
+    await instance.disarm();
+  });
+
+  // Mutants: the wait bound on the global timer instead of the injected one; the bound never resolving.
+  test("a mint that does not settle gives up at the injected MANDATE_WAIT_MS timer, traced", async () => {
+    const timing = clock();
+    const errors: string[] = [];
+    onDeckError((_scope, text) => errors.push(text));
+    let release = (): void => {};
+    const hold = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const requests = mandateBroker({ holdMandateMint: hold });
+    const instance = runtime(stateDir(), "mandate-bound", timing);
+    instance.requestMandate("slow", "lead");
+    expect(await instance.arm()).toBe(true);
+    const waiting = instance.ensureMandate("slow", "tile-S");
+    await until(() => mandateMints(requests).length === 1, "the mint reaches the broker");
+
+    const bound = timing.planned.find((t) => t.delayMs === MANDATE_WAIT_MS && !t.cleared);
+    expect(bound, "the wait is bounded by the injected timer").toBeDefined();
+    bound!.callback();
+    expect(await reachedWithin(waiting, "the bounded wait")).toBeNull();
+    expect(errors.some((e) => e.includes(`the mandate of slow was not ready within ${MANDATE_WAIT_MS} ms`))).toBe(true);
+    release();
     await instance.disarm();
   });
 });

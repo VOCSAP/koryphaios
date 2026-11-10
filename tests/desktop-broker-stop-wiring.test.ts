@@ -155,7 +155,7 @@ test("the marker is read right before the startup launch, in code and not in a c
   );
 });
 
-function pollOperatorInboxWith(order: string[], fetch: () => Promise<unknown[]>): () => Promise<void> {
+function pollOperatorInboxWith(order: string[], fetch: () => Promise<{ messages: unknown[] }>): () => Promise<void> {
   const text = source();
   const start = text.indexOf("const pollOperatorInbox = async (): Promise<void> => {");
   if (start < 0) throw new Error("index.ts: pollOperatorInbox is unavailable");
@@ -176,6 +176,7 @@ function pollOperatorInboxWith(order: string[], fetch: () => Promise<unknown[]>)
      const currentInboxSessionId = () => "session";
      const resolveBrokerEndpoint = () => ({ url: "http://127.0.0.1:7899" });
      const runInboxSigner = () => undefined;
+     let archiveSeq = 0;
      const runReadErrors = { onRunError: () => {}, onRunSuccess: () => {} };
      const inboxEffects = {
        poll: (read) => pollInboxForCapturedScope({
@@ -191,7 +192,7 @@ function pollOperatorInboxWith(order: string[], fetch: () => Promise<unknown[]>)
 
 test("every health tick reads the marker before the poll that feeds the tracker", async () => {
   const order: string[] = [];
-  await pollOperatorInboxWith(order, async () => [])();
+  await pollOperatorInboxWith(order, async () => ({ messages: [] }))();
   expect(order).toEqual(["readManualStop", "setManualStop", "fetch", "recordSuccess"]);
 });
 

@@ -9,6 +9,8 @@ export const OPERATOR_TOOLS = [
   "notify_operator",
   "graph_draft_prepare",
   "graph_draft_send",
+  "inbox_list",
+  "inbox_close",
 ] as const;
 
 export const OPERATOR_CEILING_ENV = "KORY_OPERATOR_TOOLS";

@@ -10,6 +10,7 @@ import type {
   DeckView,
   HelpSelection,
   InboxAckStatus,
+  InboxArchiveSnapshot,
   InboxEntry,
   InboxMessage,
   LocaleOption,
@@ -130,6 +131,12 @@ interface DeckState {
    * them even while the panel is closed — the one family where someone waits.
    */
   pendingApprovals: InboxApproval[]
+  /**
+   * Settled entries of the current run (closed, responded), pushed whole by
+   * main. Decides what the Courrier may offer on a message and which messages
+   * the badge leaves out.
+   */
+  inboxArchive: InboxArchiveSnapshot
   /**
    * Durable read-state of the family 1/2 entries, keyed by `inboxEntryKey()`.
    * An ABSENT key is the third state ('unread') and is never written.
@@ -507,7 +514,7 @@ export function routeSandboxAuth(e: unknown): boolean {
  * restart.
  */
 export function inboxPendingCount(s: DeckState): number {
-  return countPendingInboxMessages(s.inboxMessages, s.inboxAckState)
+  return countPendingInboxMessages(s.inboxMessages, s.inboxAckState, s.inboxArchive.messages)
 }
 
 /**
@@ -577,6 +584,7 @@ export const useDeck = create<DeckState>((set, get) => ({
   inboxOpen: false,
   inboxSeed: null,
   pendingApprovals: [],
+  inboxArchive: { status: 'pending', messages: {}, closedQuestions: [] },
   inboxAckState: {},
   inboxReplyDrafts: {},
   approvalDrafts: {},
@@ -753,6 +761,13 @@ export const useDeck = create<DeckState>((set, get) => ({
     window.api.onPendingApprovals((approvals) =>
       set((s) => ({ pendingApprovals: approvals, approvalDrafts: keepDrafts(s.approvalDrafts, approvals) }))
     )
+    // Settled entries of the run: pushed whole on every change, read once so a
+    // window opened mid-run starts from the current state.
+    window.api.onInboxArchive((inboxArchive) => set({ inboxArchive }))
+    void window.api
+      .inboxArchive()
+      .then((inboxArchive) => set({ inboxArchive }))
+      .catch((e) => window.api.reportError('store', `inbox archive: ${errorText(e)}`))
     // Durable read-state of the family 1/2 entries, read once at startup: the
     // three Courrier states must survive a Deck restart, so 'seen' is not a
     // render-time flag.

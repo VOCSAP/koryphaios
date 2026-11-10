@@ -8,7 +8,7 @@
 // Does not resist a hostile sibling tile reading another tile's mcp-config
 // token file; it only separates two cooperating authorities by role.
 
-import { createServer, type Server } from 'node:http'
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { randomBytes } from 'node:crypto'
 import type {
   CreateSessionInput,
@@ -28,9 +28,12 @@ import { EMBEDDED_AGENTS, getEmbeddedAgent, type EmbeddedAgent } from './team-em
 import { TEAM_PLAYBOOK } from './team-embedded'
 import { TEAM_LEAD_DECK_TOOLS } from './supervisor'
 import { createSpawnCap, SPAWN_CAP } from './spawn-cap'
+import { parseInboxRequest, type InboxActionOutcome, type InboxActionRequest } from './inbox-actions'
 import { reportError } from './log'
 
 export { SPAWN_CAP } from './spawn-cap'
+
+const INBOX_BODY_MAX = 64 * 1024
 
 /** Sync wait for a spawned session's peer_id (deck_spawn_session default). */
 export const WAIT_PEER_TIMEOUT_MS = 90_000
@@ -95,6 +98,12 @@ export interface DeckControlDeps {
   inboxMandates: {
     request(callerRef: string, authority: CallerAuthority): void
     release(callerRef: string): void
+    /** Revokes the mandates acting for this tile, whoever holds them. */
+    releaseTile(deskSession: string): void
+  }
+  /** One inbox action for a caller, its authority and its tile, all resolved here and never read from the body. */
+  inbox: {
+    run(callerId: string, tile: string, authority: CallerAuthority, request: InboxActionRequest): Promise<InboxActionOutcome>
   }
   listAgents(): string[]
   listModels(): ModelOption[]
@@ -454,6 +463,23 @@ export function startDeckControl(
     )
   }
 
+  /**
+   * The tile an inbox action of this caller acts for. A minted caller belongs
+   * to the one session minted for it; the historical 'supervisor' token to the
+   * one live supervisor tile. Zero or two candidates is never resolved by
+   * picking one.
+   */
+  function tileOfCaller(callerId: string): { tile: string } | { unavailable: string } {
+    const sessions = deps.listSessions()
+    const candidates =
+      callerId === 'supervisor'
+        ? sessions.filter((s) => s.supervisor && s.status !== 'exited')
+        : sessions.filter((s) => callerForSession(s.id) === callerId)
+    if (candidates.length === 1) return { tile: candidates[0]!.id }
+    if (candidates.length === 0) return { unavailable: 'no tile for this caller' }
+    return { unavailable: callerId === 'supervisor' ? 'ambiguous supervisor tile' : 'ambiguous tile for this caller' }
+  }
+
   /** Embedded team-lead tiles spawned under sandbox: born without the deck-control bridge. */
   const bridgeRefusedSessions = new Set<string>()
 
@@ -485,6 +511,9 @@ export function startDeckControl(
     const demo = sessionDemoSlot.get(sessionId)
     if (demo) releaseDemoSlot(demo)
     bridgeRefusedSessions.delete(sessionId)
+    // The supervisor's Bearer outlives its tile (the next supervisor tile reuses
+    // it), so its mandate is released by tile, not by caller.
+    deps.inboxMandates.releaseTile(sessionId)
     const callerId = callerForSession(sessionId)
     if (!callerId) return null
     revokeCaller(callerId)
@@ -1000,6 +1029,55 @@ export function startDeckControl(
     }
   }
 
+  function serveInbox(
+    req: IncomingMessage,
+    res: ServerResponse,
+    caller: CallerEntry,
+    deny: (code: number, msg: string) => void
+  ): void {
+    let body = ''
+    let tooLarge = false
+    req.setEncoding('utf8')
+    req.on('data', (chunk) => {
+      if (tooLarge) return
+      body += chunk
+      if (body.length > INBOX_BODY_MAX) {
+        tooLarge = true
+        deny(413, 'request too large')
+        req.destroy()
+      }
+    })
+    req.on('end', () => {
+      if (tooLarge) return
+      void (async () => {
+        const reply = (result: InboxActionOutcome): void => {
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ ok: true, result }))
+        }
+        let parsed: unknown
+        try {
+          parsed = JSON.parse(body)
+        } catch {
+          // Answered as a 400: the tile reports it, and the body is agent text, not logged.
+          return deny(400, 'invalid JSON')
+        }
+        const request = parseInboxRequest(parsed)
+        if ('invalid' in request) return reply({ outcome: 'invalid', message: request.invalid })
+        const tile = tileOfCaller(caller.callerId)
+        if ('unavailable' in tile) {
+          reportError('deck-control', `inbox ${request.op} by ${caller.callerId} refused: ${tile.unavailable}`)
+          return reply({ outcome: 'unavailable', cause: tile.unavailable })
+        }
+        try {
+          reply(await deps.inbox.run(caller.callerId, tile.tile, caller.authority, request))
+        } catch (e) {
+          reportError('deck-control', `inbox ${request.op} by ${caller.callerId} failed`, e)
+          reply({ outcome: 'unavailable', cause: 'internal error' })
+        }
+      })()
+    })
+  }
+
   const server: Server = createServer((req, res) => {
     const deny = (code: number, msg: string): void => {
       res.writeHead(code, { 'content-type': 'application/json' })
@@ -1013,6 +1091,8 @@ export function startDeckControl(
       res.writeHead(200, { 'content-type': 'application/json' })
       return res.end(JSON.stringify({ ok: true }))
     }
+    // Outside /call on purpose: allowedTools also caps the kory-deck mount, which the inbox tools must not join.
+    if (req.method === 'POST' && req.url === '/inbox') return serveInbox(req, res, caller, deny)
     if (req.method !== 'POST' || req.url !== '/call') return deny(404, 'not found')
 
     let body = ''
