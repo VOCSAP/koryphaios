@@ -240,24 +240,60 @@ async function readClaudeUsage(deps: Required<UsageDeps>): Promise<UsageProvider
 // ---------------------------------------------------------------------------
 // Codex — `codex app-server` JSON-RPC, fallback newest session rollout file
 
-/** Read one RateLimitWindow-ish object in either camelCase or snake_case. */
-function codexWindow(v: unknown, key: UsageWindow['key']): UsageWindow | null {
+let codexFallbackReported = false
+const CODEX_SESSION_WINDOW_MS = 5 * 3_600_000
+const CODEX_MAX_SESSION_DURATION_S = 86_400
+
+/** Window length in seconds: app-server windowDurationMins, rollout window_minutes, wham limit_window_seconds. */
+function codexDurationSeconds(v: Record<string, unknown>): number | null {
+  const secs = num(v.limit_window_seconds ?? v.limitWindowSeconds)
+  if (secs !== null && secs > 0) return secs
+  const mins = num(v.windowDurationMins ?? v.window_minutes)
+  return mins !== null && mins > 0 ? mins * 60 : null
+}
+
+/**
+ * Read one RateLimitWindow-ish object in either camelCase or snake_case. The
+ * key comes from the window length; without one, from the slot, except that a
+ * reset further away than a 5 h window can last forces `week`.
+ */
+function codexWindow(
+  v: unknown,
+  slotKey: UsageWindow['key'],
+  now: number,
+  onFallback: (msg: string) => void
+): UsageWindow | null {
   if (!isRecord(v)) return null
   const pct = num(v.usedPercent ?? v.used_percent)
   if (pct === null) return null
-  return {
-    key,
-    label: null,
-    usedPercent: clampPct(pct),
-    resetsAt: toEpochMs(v.resetsAt ?? v.resets_at ?? v.reset_at)
+  const resetsAt = toEpochMs(v.resetsAt ?? v.resets_at ?? v.reset_at)
+  const duration = codexDurationSeconds(v)
+  let key: UsageWindow['key']
+  if (duration !== null) {
+    key = duration <= CODEX_MAX_SESSION_DURATION_S ? 'session' : 'week'
+  } else {
+    key = resetsAt !== null && resetsAt - now > CODEX_SESSION_WINDOW_MS ? 'week' : slotKey
+    onFallback(`codex rate-limit window carries no duration; classified ${key} from slot ${slotKey} and reset time`)
   }
+  return { key, label: null, usedPercent: clampPct(pct), resetsAt }
+}
+
+export interface CodexParseOpts {
+  now?: number
+  /** Called for each window classified without a duration; the caller dedups. */
+  onFallback?: (msg: string) => void
 }
 
 /** Parse an account/rateLimits/read result. Pure, exported for tests. */
-export function parseCodexRateLimits(result: unknown): {
+export function parseCodexRateLimits(
+  result: unknown,
+  opts: CodexParseOpts = {}
+): {
   windows: UsageWindow[]
   plan: string | null
 } {
+  const now = opts.now ?? Date.now()
+  const onFallback = opts.onFallback ?? (() => {})
   const windows: UsageWindow[] = []
   let plan: string | null = null
   const snap = isRecord(result)
@@ -268,9 +304,9 @@ export function parseCodexRateLimits(result: unknown): {
         : result
     : null
   if (!snap) return { windows, plan }
-  const primary = codexWindow(snap.primary ?? snap.primary_window, 'session')
+  const primary = codexWindow(snap.primary ?? snap.primary_window, 'session', now, onFallback)
   if (primary) windows.push(primary)
-  const secondary = codexWindow(snap.secondary ?? snap.secondary_window, 'week')
+  const secondary = codexWindow(snap.secondary ?? snap.secondary_window, 'week', now, onFallback)
   if (secondary) windows.push(secondary)
   if (typeof snap.planType === 'string') plan = snap.planType
   else if (typeof snap.plan_type === 'string') plan = snap.plan_type
@@ -282,7 +318,10 @@ export function parseCodexRateLimits(result: unknown): {
  * Scan a session rollout file's text (newest last) for the latest token_count
  * event carrying a rate_limits snapshot. Pure, exported for tests.
  */
-export function parseCodexSessionText(text: string): {
+export function parseCodexSessionText(
+  text: string,
+  opts: CodexParseOpts = {}
+): {
   windows: UsageWindow[]
   plan: string | null
 } | null {
@@ -296,7 +335,7 @@ export function parseCodexSessionText(text: string): {
       const payload = isRecord(row.payload) ? row.payload : row
       const rl = payload.rate_limits ?? payload.rateLimits
       if (!isRecord(rl)) continue
-      const parsed = parseCodexRateLimits({ rateLimits: rl })
+      const parsed = parseCodexRateLimits({ rateLimits: rl }, opts)
       if (parsed.windows.length > 0) return parsed
     } catch {
       continue // truncated tail line of a live session file — keep scanning up
@@ -421,9 +460,17 @@ async function readCodexUsage(deps: Required<UsageDeps>): Promise<UsageProviderR
     connected = false // signed-out state; the app-server would fail anyway
   }
   if (!connected) return { ...base, status: 'not-connected' }
+  const parseOpts: CodexParseOpts = {
+    now: deps.now(),
+    onFallback: (msg) => {
+      if (codexFallbackReported) return
+      codexFallbackReported = true
+      deps.report(msg)
+    }
+  }
   try {
     const result = await deps.runCodexRpc(deps.shell)
-    const parsed = parseCodexRateLimits(result)
+    const parsed = parseCodexRateLimits(result, parseOpts)
     if (parsed.windows.length > 0) return { ...base, status: 'ok', ...parsed }
   } catch (err) {
     deps.report('codex app-server rate-limits read failed', err)
@@ -433,7 +480,7 @@ async function readCodexUsage(deps: Required<UsageDeps>): Promise<UsageProviderR
     const file = await newestCodexSessionFile(join(codexHome, 'sessions'))
     if (file) {
       const text = await readFile(file, 'utf8')
-      const parsed = parseCodexSessionText(text)
+      const parsed = parseCodexSessionText(text, parseOpts)
       if (parsed) return { ...base, status: 'ok', stale: true, ...parsed }
     }
   } catch (err) {
@@ -831,4 +878,5 @@ export function resetUsageCaches(): void {
   antigravityRefreshed = null
   antigravitySecretCache = undefined
   usedProviders.clear()
+  codexFallbackReported = false
 }

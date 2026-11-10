@@ -124,6 +124,81 @@ test("parseCodexRateLimits reads the app-server camelCase shape", () => {
   expect(plan).toBe("plus");
 });
 
+const NOW = 1_770_000_000_000;
+const inSeconds = (ms: number): number => Math.floor((NOW + ms) / 1000);
+
+// Kills: classify by slot again (primary -> session whatever its length).
+test("parseCodexRateLimits puts a weekly primary on the week gauge (prolite)", () => {
+  const { windows } = parseCodexRateLimits(
+    {
+      rateLimits: {
+        planType: "prolite",
+        primary: { usedPercent: 64, windowDurationMins: 10080, resetsAt: inSeconds(86_400_000) },
+        secondary: null
+      }
+    },
+    { now: NOW }
+  );
+  expect(windows.map((w) => w.key)).toEqual(["week"]);
+  expect(windows[0]?.usedPercent).toBe(64);
+});
+
+// Kills: classify by slot again; a duration read from only one field name.
+test("parseCodexRateLimits classifies by length whatever the slot order or field name", () => {
+  const { windows } = parseCodexRateLimits(
+    {
+      primary_window: { used_percent: 80, limit_window_seconds: 604800, reset_at: inSeconds(86_400_000) },
+      secondary_window: { used_percent: 10, window_minutes: 300, resets_at: inSeconds(3_600_000) }
+    },
+    { now: NOW }
+  );
+  expect(windows.map((w) => [w.key, w.usedPercent])).toEqual([
+    ["week", 80],
+    ["session", 10]
+  ]);
+});
+
+// Kills: dropping the reset-time inference, or the trace, or tracing without dedup upstream.
+test("parseCodexRateLimits falls back to slot then reset time without a duration, and says so", () => {
+  const traces: string[] = [];
+  const onFallback = (m: string): void => void traces.push(m);
+  const slot = parseCodexRateLimits(
+    { primary: { usedPercent: 5, resetsAt: inSeconds(3_600_000) }, secondary: { usedPercent: 6, resetsAt: inSeconds(86_400_000) } },
+    { now: NOW, onFallback }
+  );
+  expect(slot.windows.map((w) => w.key)).toEqual(["session", "week"]);
+  expect(traces).toHaveLength(2);
+  const far = parseCodexRateLimits(
+    { primary: { usedPercent: 64, resetsAt: inSeconds(6 * 3_600_000) }, secondary: null },
+    { now: NOW }
+  );
+  expect(far.windows.map((w) => w.key)).toEqual(["week"]);
+});
+
+// Kills: reporting on every poll instead of once per process.
+test("readUsage reports the duration-less codex fallback once across polls", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "kory-codex-"));
+  try {
+    mkdirSync(join(dir, ".codex"), { recursive: true });
+    writeFileSync(join(dir, ".codex", "auth.json"), "{}");
+    const reports: string[] = [];
+    const deps = {
+      shell: "bash",
+      home: dir,
+      env: {},
+      probe: async (bin: string) => bin === "codex",
+      runCodexRpc: async () => ({ rateLimits: { primary: { usedPercent: 5, resetsAt: 1770003600 } } }),
+      report: (m: string) => void reports.push(m),
+      now: () => NOW
+    };
+    await readUsage(deps, { refresh: true });
+    await readUsage(deps, { refresh: true });
+    expect(reports.filter((m) => m.includes("no duration"))).toHaveLength(1);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("parseCodexSessionText finds the LAST rate_limits snapshot (snake_case)", () => {
   const line = (pct: number): string =>
     JSON.stringify({
