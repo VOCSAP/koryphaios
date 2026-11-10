@@ -139,7 +139,7 @@ test("an ordinary peer target is still framed, so the exclusion is not blanket",
   // Negative control for the test above: without this, an implementation that
   // suppressed the framing for EVERY target would pass the operator test while
   // silently disabling the whole feature.
-  expect(composeOutboundMessage(SAMPLE, false, "desktop-7b2civn-koryphaios-15")).toBe(
+  expect(composeOutboundMessage(SAMPLE, false, "desktop-testbox-koryphaios-15")).toBe(
     `${SAMPLE}${PEER_NO_REPLY_NOTE}`
   );
   // Target absent (the shape every pre-existing caller has) must behave like an

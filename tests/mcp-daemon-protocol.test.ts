@@ -403,7 +403,7 @@ describe("HELLO validation", () => {
     ppid: 100,
     pid_start: "133750000000000000",
     ppid_start: "",
-    cwd: "C:\\Users\\Olivier\\workspace",
+    cwd: "C:\\Users\\user\\workspace",
     stdin_is_tty: false,
     env: { PATH: "x" },
     replay: false,
@@ -416,7 +416,7 @@ describe("HELLO validation", () => {
     expect(validateHello(hello({ family: "roadmap", resume_ticket: "t" }), 1)).toMatchObject({ ok: true });
   });
 
-  test.each(["/home/olivier/work", "C:\\Users\\x", "C:/Users/x", "\\\\server\\share\\x"])(
+  test.each(["/home/user/work", "C:\\Users\\x", "C:/Users/x", "\\\\server\\share\\x"])(
     "accepts the absolute cwd %s",
     (cwd) => {
       expect(validateHello(hello({ cwd }), 1)).toMatchObject({ ok: true });

@@ -78,7 +78,7 @@ describe("adopting the approvals pairing", () => {
 
   test("a COMPANION QR is refused here — the two QRs do not overlap", () => {
     const store = new MemoryStore();
-    expect(adoptPairing(store, "https://192.168.1.20:8443/#t=tok", T0, "Pixel 8")).toBeNull();
+    expect(adoptPairing(store, "https://10.0.0.20:8443/#t=tok", T0, "Pixel 8")).toBeNull();
     expect(loadPairing(store)).toBeNull();
   });
 
@@ -112,7 +112,7 @@ describe("adopting the approvals pairing", () => {
 describe("the two pairings are independent (the N5 split)", () => {
   test("forgetting every companion host leaves approvals paired", () => {
     const store = new MemoryStore();
-    addHost(store, parseCompanionQr("https://192.168.1.20:8443/#t=tok")!, T0);
+    addHost(store, parseCompanionQr("https://10.0.0.20:8443/#t=tok")!, T0);
     adoptPairing(store, PAYLOAD, T0, "Pixel 8");
     store.remove(HOSTS_KEY);
     expect(loadHosts(store).hosts).toHaveLength(0);
@@ -122,7 +122,7 @@ describe("the two pairings are independent (the N5 split)", () => {
 
   test("unpairing approvals leaves the companion hosts alone", () => {
     const store = new MemoryStore();
-    addHost(store, parseCompanionQr("https://192.168.1.20:8443/#t=tok")!, T0);
+    addHost(store, parseCompanionQr("https://10.0.0.20:8443/#t=tok")!, T0);
     adoptPairing(store, PAYLOAD, T0, "Pixel 8");
     forgetPairing(store);
     expect(loadPairing(store)).toBeNull();
@@ -131,7 +131,7 @@ describe("the two pairings are independent (the N5 split)", () => {
 
   test("the inbox is emptied with the pairing, not with the Decks", () => {
     const store = new MemoryStore();
-    addHost(store, parseCompanionQr("https://192.168.1.20:8443/#t=tok")!, T0);
+    addHost(store, parseCompanionQr("https://10.0.0.20:8443/#t=tok")!, T0);
     adoptPairing(store, PAYLOAD, T0, "Pixel 8");
     saveInbox(store, applyEffect([], classify(request("appr-1"), T0), T0));
     expect(loadInbox(store, T0)).toHaveLength(1);

@@ -123,7 +123,7 @@ test.each([
 // owner.
 
 test("matchesLockOwner: THE DEFECT THIS CARD CLOSES -- a same-peer_id homonym registered in a DIFFERENT group must NOT satisfy the lock, even though the OLD bare-peer_id comparison this replaces would have said it did", () => {
-  const homonymPeerId = "desktop-7b2civn-koryphaios";
+  const homonymPeerId = "desktop-testbox-koryphaios";
   const trueOwnerGroup = "1457f96c63fc";
   const homonymGroup = "default";
 
@@ -187,17 +187,17 @@ test.each([
   // conflated as one identity.
   [
     "'cli:'-prefixed locked_by matches itself as an ordinary opaque string (same peer_id, same group)",
-    "cli:desktop-7b2civn",
+    "cli:desktop-testbox",
     "g1",
-    "cli:desktop-7b2civn",
+    "cli:desktop-testbox",
     "g1",
     true,
   ],
   [
     "the bare form and its 'cli:'-prefixed counterpart are NOT the same identity to this comparator -- no prefix-stripping, no special-casing",
-    "cli:desktop-7b2civn",
+    "cli:desktop-testbox",
     "g1",
-    "desktop-7b2civn",
+    "desktop-testbox",
     "g1",
     false,
   ],

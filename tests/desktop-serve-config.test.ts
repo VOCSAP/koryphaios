@@ -233,7 +233,7 @@ test('rejects a control or format character hidden in the command or an env valu
 
 test('holds url and health to the loopback host and port of the server the action starts', async () => {
   const rejected: Array<{ field: 'url' | 'health'; value: string; port?: number }> = [
-    { field: 'url', value: 'http://192.168.1.10:${PORT}/' },
+    { field: 'url', value: 'http://192.0.2.10:${PORT}/' },
     { field: 'health', value: 'http://169.254.169.254:${PORT}/latest/meta-data' },
     { field: 'health', value: 'http://localhost.evil.test:${PORT}/' },
     { field: 'health', value: 'http://[::1]:${PORT}/' },

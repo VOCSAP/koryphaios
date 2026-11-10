@@ -83,7 +83,7 @@ test("a private instance adopting a running loopback broker is reported when the
 
 test("no notice for the operator's own Deck: BROKER_URL in the user environment, offline_replica alone in the file, default profile", () => {
   const cfg = tmpConfig({ offline_replica: true });
-  const env = { CLAUDE_PEERS_BROKER_URL: "http://192.168.10.23:7899", CLAUDE_PEERS_BROKER_TOKEN: "t" } as unknown as NodeJS.ProcessEnv;
+  const env = { CLAUDE_PEERS_BROKER_URL: "http://192.0.2.23:7899", CLAUDE_PEERS_BROKER_TOKEN: "t" } as unknown as NodeJS.ProcessEnv;
   expect(adoptedBrokerNotice(env, cfg, "already-running", LOOPBACK, false)).toBeNull();
 });
 

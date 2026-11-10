@@ -18,7 +18,7 @@ test("isLoopbackBrokerUrl accepts IPv6 loopback in brackets", () => {
 });
 
 test("isLoopbackBrokerUrl rejects LAN IPv4 (HTTP remote)", () => {
-  expect(isLoopbackBrokerUrl("http://192.168.10.23:7899")).toBe(false);
+  expect(isLoopbackBrokerUrl("http://192.0.2.23:7899")).toBe(false);
 });
 
 test("isLoopbackBrokerUrl rejects public DNS name", () => {
@@ -40,7 +40,7 @@ test("bindHostRefusal lets a loopback or unset bind host start without a token",
 });
 
 test("bindHostRefusal refuses a bind host beyond loopback without a token", () => {
-  for (const host of ["0.0.0.0", "::", "192.168.10.23", "broker.example.com", ""]) {
+  for (const host of ["0.0.0.0", "::", "192.0.2.23", "broker.example.com", ""]) {
     const reason = bindHostRefusal(host, null);
     expect(reason, `bind host ${JSON.stringify(host)}`).toContain("CLAUDE_PEERS_BROKER_TOKEN");
   }

@@ -11,14 +11,14 @@ const YOU = "(you)";
 test("aligns the equals signs on the longest peer id", () => {
   const out = formatPeerTable(
     [
-      { peerId: "desktop-7b2civn-koryphaios-2", name: "team-lead" },
-      { peerId: "desktop-7b2civn-koryphaios-12", name: "reviewer" },
+      { peerId: "desktop-testbox-koryphaios-2", name: "team-lead" },
+      { peerId: "desktop-testbox-koryphaios-12", name: "reviewer" },
     ],
     YOU,
   );
   const [first, second] = out.split("\n");
-  expect(first).toBe("desktop-7b2civn-koryphaios-2   = team-lead");
-  expect(second).toBe("desktop-7b2civn-koryphaios-12  = reviewer");
+  expect(first).toBe("desktop-testbox-koryphaios-2   = team-lead");
+  expect(second).toBe("desktop-testbox-koryphaios-12  = reviewer");
   // The point of the padding: every row's `=` sits at the same column.
   expect(first!.indexOf("=")).toBe(second!.indexOf("="));
 });

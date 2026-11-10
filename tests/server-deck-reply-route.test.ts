@@ -212,7 +212,7 @@ async function bootDeck(
         sessionRef: `window-${opts.run.run}`,
         privateKey: opts.run.cred.privateKey,
         publicKey: opts.run.cred.publicKey,
-        osUserHash: "hash-of-olivier",
+        osUserHash: "hash-of-alice",
         inbox: { version: 1, run_ref: opts.run.run, group_id: opts.run.group },
       })
     );
@@ -235,7 +235,7 @@ async function bootDeck(
         sessionRef: "deck-tile-1",
         privateKey: sessionCred.privateKey,
         publicKey: sessionCred.publicKey,
-        osUserHash: "hash-of-olivier",
+        osUserHash: "hash-of-alice",
       })
     );
   }

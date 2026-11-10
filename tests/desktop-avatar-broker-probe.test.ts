@@ -64,10 +64,10 @@ test('probes only loopback or the configured broker, always on the fixed /health
   expect(avatarBrokerProbeUrl(localBroker, [])).toBe('http://127.0.0.1:7899/health')
   expect(avatarBrokerProbeUrl('http://localhost:7899/some/path?x=1#frag', [])).toBe('http://localhost:7899/health')
   expect(avatarBrokerProbeUrl('http://[::1]:7899', [])).toBe('http://[::1]:7899/health')
-  expect(avatarBrokerProbeUrl('https://192.168.10.23:7899/', ['https://192.168.10.23:7899'])).toBe('https://192.168.10.23:7899/health')
+  expect(avatarBrokerProbeUrl('https://192.0.2.23:7899/', ['https://192.0.2.23:7899'])).toBe('https://192.0.2.23:7899/health')
 
-  expect(avatarBrokerProbeUrl('https://192.168.10.23:7899', [])).toBeNull()
-  expect(avatarBrokerProbeUrl('https://192.168.10.23:7899', ['http://192.168.10.23:7899'])).toBeNull()
+  expect(avatarBrokerProbeUrl('https://192.0.2.23:7899', [])).toBeNull()
+  expect(avatarBrokerProbeUrl('https://192.0.2.23:7899', ['http://192.0.2.23:7899'])).toBeNull()
   expect(avatarBrokerProbeUrl('http://evil.example:7899', [localBroker])).toBeNull()
   expect(avatarBrokerProbeUrl('http://user:secret@127.0.0.1:7899', [])).toBeNull()
   expect(avatarBrokerProbeUrl('ftp://127.0.0.1:7899', [])).toBeNull()

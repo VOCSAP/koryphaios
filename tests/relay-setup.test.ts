@@ -243,14 +243,14 @@ describe("env carried from the existing entries", () => {
   const GROUP = "CLAUDE_PEERS_GROUP";
 
   test("each family prints its own entry's env, before the -- separator, in both forms", () => {
-    const { envs, notes } = existingEnvs(configWith({ [GROUP]: "ovr-all", CLAUDE_PEERS_BROKER_URL: "http://192.168.10.23:7898" }, { [GROUP]: "other" }));
+    const { envs, notes } = existingEnvs(configWith({ [GROUP]: "ovr-all", CLAUDE_PEERS_BROKER_URL: "http://192.0.2.23:7898" }, { [GROUP]: "other" }));
     expect(notes).toEqual([]);
     expect(mcpAddCommands({ kind: "bun" }, "/r", envs), "dropping the env, or giving a family the other one's, changes the group of the switched sessions").toEqual([
-      "claude mcp add --scope user --transport stdio claude-peers --env CLAUDE_PEERS_GROUP=ovr-all --env CLAUDE_PEERS_BROKER_URL=http://192.168.10.23:7898 -- bun /r/server.ts",
+      "claude mcp add --scope user --transport stdio claude-peers --env CLAUDE_PEERS_GROUP=ovr-all --env CLAUDE_PEERS_BROKER_URL=http://192.0.2.23:7898 -- bun /r/server.ts",
       "claude mcp add --scope user --transport stdio kory-roadmap --env CLAUDE_PEERS_GROUP=other -- bun /r/server-roadmap.ts",
     ]);
     const [peers] = mcpAddCommands({ kind: "relay", binary: "/r/b" }, "/r", envs);
-    expect(peers, "the relay form takes the same --env words").toContain("claude-peers --env CLAUDE_PEERS_GROUP=ovr-all --env CLAUDE_PEERS_BROKER_URL=http://192.168.10.23:7898 -- /r/b --family peers");
+    expect(peers, "the relay form takes the same --env words").toContain("claude-peers --env CLAUDE_PEERS_GROUP=ovr-all --env CLAUDE_PEERS_BROKER_URL=http://192.0.2.23:7898 -- /r/b --family peers");
   });
 
   test("a value outside the safe alphabet is never printed: a note holds the name only", () => {
@@ -286,7 +286,7 @@ describe("env carried from the existing entries", () => {
   });
 
   test("whatever is carried prints the same characters in bash, PowerShell and cmd", () => {
-    const values = ["ovr-all", "http://192.168.10.23:7899/x", "/var/log/kory", "C:/Users/me/logs", "a=b", "x@y.z", "7+1", ""];
+    const values = ["ovr-all", "http://192.0.2.23:7899/x", "/var/log/kory", "C:/Users/me/logs", "a=b", "x@y.z", "7+1", ""];
     const commands = values.map((value) => {
       const { envs, notes } = existingEnvs(configWith({ [GROUP]: value }));
       expect(notes, `value ${JSON.stringify(value)} was refused`).toEqual([]);
@@ -298,7 +298,7 @@ describe("env carried from the existing entries", () => {
   });
 
   test.skipIf(BASH === null)("a carried value reaches bash as exactly one argument (needs bash on PATH)", () => {
-    const values = ["ovr-all", "http://192.168.10.23:7899/x", "a=b", ""];
+    const values = ["ovr-all", "http://192.0.2.23:7899/x", "a=b", ""];
     const commands = values.map((value) => mcpAddCommands({ kind: "bun" }, "/r", existingEnvs(configWith({ [GROUP]: value })).envs)[0]!);
     const argvs = argvsSeenByBash(commands);
     expect(argvs.length).toBe(values.length);
@@ -314,7 +314,7 @@ describe("env carried from the existing entries", () => {
         CLAUDE_PEERS_DEPOSIT_CAPABILITY: "cap-s3cr3t",
         CLAUDE_PEERS_BROKER_TOKEN: "tok-s3cr3t",
         MY_API_KEY: "key-s3cr3t",
-        CLAUDE_PEERS_BROKER_URL: "http://192.168.10.23:7898/x?token=url-s3cr3t",
+        CLAUDE_PEERS_BROKER_URL: "http://192.0.2.23:7898/x?token=url-s3cr3t",
         [GROUP]: "ovr-all",
       }),
     );
@@ -326,7 +326,7 @@ describe("env carried from the existing entries", () => {
   });
 
   test("a URL with credentials is not carried even though its characters are safe", () => {
-    const { envs, notes } = existingEnvs(configWith({ CLAUDE_PEERS_BROKER_URL: "http://user:pw-s3cr3t@192.168.10.23:7898" }));
+    const { envs, notes } = existingEnvs(configWith({ CLAUDE_PEERS_BROKER_URL: "http://user:pw-s3cr3t@192.0.2.23:7898" }));
     expect(envs["claude-peers"]).toEqual([]);
     expect(notes.join("\n")).not.toContain("s3cr3t");
   });

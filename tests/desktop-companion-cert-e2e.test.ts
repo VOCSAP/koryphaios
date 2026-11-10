@@ -44,7 +44,7 @@ function legacyStateDirFs(): CertFs {
 }
 
 test('regenerating over a legacy stateDir with the real generateCert() yields a SHA-256 signed cert', async () => {
-  const lanAddr = '192.168.1.77'
+  const lanAddr = '192.0.2.77'
   const { attrs, options } = buildCertRequest(lanAddr)
   const fs = legacyStateDirFs()
 
@@ -92,8 +92,8 @@ test('regenerating over a legacy stateDir with the real generateCert() yields a 
 // a certificate whose SAN carries an address the server does not currently bind
 // to.
 test('a cert cached for an OLD LAN address is regenerated with the NEW address in its SAN when the address changes', async () => {
-  const oldAddr = '192.168.1.10'
-  const newAddr = '192.168.1.20'
+  const oldAddr = '192.0.2.10'
+  const newAddr = '192.0.2.20'
 
   // Seed the stateDir with a REAL cert generated for the old address, at the
   // current version -- this is the "everything else matches, only the

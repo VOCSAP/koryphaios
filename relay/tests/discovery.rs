@@ -60,8 +60,8 @@ fn port_derivation_matches_the_values_bun_computed() {
 #[test]
 fn username_case_does_not_change_the_candidates() {
     assert_eq!(
-        candidate_ports("Olivier", None),
-        candidate_ports("olivier", None)
+        candidate_ports("Alice", None),
+        candidate_ports("alice", None)
     );
 }
 

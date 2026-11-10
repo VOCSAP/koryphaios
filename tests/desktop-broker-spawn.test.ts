@@ -246,17 +246,17 @@ test("the real Windows entry of an operator is recognised, and only its CLAUDE_P
         mcpServers: {
           "claude-peers": {
             command: "bun",
-            args: ["C:\\Users\\Olivier\\workspace\\koryphaios-mcp\\server.ts"],
+            args: ["C:\\Users\\user\\workspace\\koryphaios-mcp\\server.ts"],
             env: { CLAUDE_PEERS_GROUP: "ovr-all", PATH: "C:\\evil", HOME: "C:\\elsewhere" },
             alwaysLoad: true,
           },
         },
       }),
     },
-    ["C:\\Users\\Olivier\\workspace\\koryphaios-mcp\\broker.ts"]
+    ["C:\\Users\\user\\workspace\\koryphaios-mcp\\broker.ts"]
   );
   expect(locateBrokerScript(CLAUDE_JSON, APP_ROOT, deps), "the entry's own env reaches the broker, minus anything outside the CLAUDE_PEERS_ namespace").toEqual({
-    script: "C:\\Users\\Olivier\\workspace\\koryphaios-mcp\\broker.ts",
+    script: "C:\\Users\\user\\workspace\\koryphaios-mcp\\broker.ts",
     command: "bun",
     env: { CLAUDE_PEERS_GROUP: "ovr-all" },
     source: "claude-json",
@@ -275,12 +275,12 @@ test("the entry's variables are handed to the spawned broker", async () => {
 });
 
 test("the bun directory is appended to the PATH key that already exists, whatever its casing", () => {
-  const windows = withPathEntry({ Path: "C:\\Windows", OTHER: "x" }, "C:\\Users\\Olivier\\.bun\\bin", ";");
+  const windows = withPathEntry({ Path: "C:\\Windows", OTHER: "x" }, "C:\\Users\\user\\.bun\\bin", ";");
   expect(Object.keys(windows).sort(), "a child must never receive both Path and PATH: which one wins is not ours to decide").toEqual([
     "OTHER",
     "Path",
   ]);
-  expect(windows.Path, "the existing Windows value is kept and extended").toBe("C:\\Windows;C:\\Users\\Olivier\\.bun\\bin");
+  expect(windows.Path, "the existing Windows value is kept and extended").toBe("C:\\Windows;C:\\Users\\user\\.bun\\bin");
   const posix = withPathEntry({ PATH: "/usr/bin" }, "/home/op/.bun/bin", ":");
   expect(posix.PATH, "the posix key is extended the same way").toBe("/usr/bin:/home/op/.bun/bin");
   const empty = withPathEntry({}, "/home/op/.bun/bin", ":");

@@ -84,9 +84,9 @@ describe("normalizeNtfyServer", () => {
   });
 
   test("allows plain http on a private address (self-hosted LAN)", () => {
-    expect(normalizeNtfyServer("http://192.168.1.20:8080")).toEqual({
+    expect(normalizeNtfyServer("http://10.0.0.20:8080")).toEqual({
       ok: true,
-      value: "http://192.168.1.20:8080",
+      value: "http://10.0.0.20:8080",
     });
   });
 
@@ -141,7 +141,7 @@ describe("pairing payload", () => {
   });
 
   test("rejects a companion URL, junk, and a wrong version", () => {
-    expect(decodePairingPayload("https://192.168.1.5:8443/#t=abc")).toBeNull();
+    expect(decodePairingPayload("https://10.0.0.5:8443/#t=abc")).toBeNull();
     expect(decodePairingPayload("{")).toBeNull();
     expect(decodePairingPayload(JSON.stringify({ ...base, v: 2, mode: "approvals" }))).toBeNull();
   });

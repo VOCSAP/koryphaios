@@ -44,9 +44,9 @@
     "rule": "47000 + (fnv1a32(lowercase username utf8) mod 1000), then the 9 following ports",
     "cases": [
       {
-        "username": "olivier",
-        "fnv1a32": 4130280175,
-        "base_port": 47175
+        "username": "carol",
+        "fnv1a32": 1728614162,
+        "base_port": 47162
       },
       {
         "username": "alice",
@@ -79,12 +79,12 @@
     "rule": "lowercase hex sha256 of the UTF-8 canonical directory path string",
     "cases": [
       {
-        "path": "C:\\Users\\Olivier\\workspace\\koryphaios",
-        "sha256": "965b2c85a41f9703acf9776d8b80a598c88879cd932dcb6bd1b76a2dc6393dcd"
+        "path": "C:\\Users\\user\\workspace\\koryphaios",
+        "sha256": "b783e23753401035d4a62d4c3d6c22faa294cc51b53c3d98d64d60b0f7f530b7"
       },
       {
-        "path": "/home/olivier/koryphaios-mcp",
-        "sha256": "1354df2945c820cd92cb5086e64512d0c071cbf0d5e5ae8c9eb9131a4ccc2230"
+        "path": "/home/user/koryphaios-mcp",
+        "sha256": "d2b88f9b52a453d17b4ce37acf3cee836c229d6ae74b9f731a73f52ee9ff0c27"
       },
       {
         "path": "/tmp/x",

@@ -82,13 +82,13 @@ test('on-disk cert with an OLDER (but present) version number is also regenerate
 // browser warning goes permanent again for the same reason. Same model as
 // the version tests above.
 test('on-disk cert with a matching version but a DIFFERENT stored address is regenerated', async () => {
-  const fs = memFs(JSON.stringify({ key: 'old-addr-key', cert: 'old-addr-cert', version: 9, addr: '192.168.1.1' }))
+  const fs = memFs(JSON.stringify({ key: 'old-addr-key', cert: 'old-addr-cert', version: 9, addr: '192.0.2.1' }))
   let calls = 0
   const generate = () => {
     calls++
     return { key: 'new-addr-key', cert: 'new-addr-cert' } satisfies CertMaterial
   }
-  const result = await loadOrCreateCert('/x/companion-cert.json', generate, 9, '192.168.1.99', fs, () => {})
+  const result = await loadOrCreateCert('/x/companion-cert.json', generate, 9, '192.0.2.99', fs, () => {})
 
   expect(calls).toBe(1)
   expect(result).toEqual({ key: 'new-addr-key', cert: 'new-addr-cert' })
@@ -96,7 +96,7 @@ test('on-disk cert with a matching version but a DIFFERENT stored address is reg
     key: 'new-addr-key',
     cert: 'new-addr-cert',
     version: 9,
-    addr: '192.168.1.99'
+    addr: '192.0.2.99'
   })
 })
 
@@ -217,7 +217,7 @@ test('buildCertRequest SAN always carries the given LAN IP as a type-7 (IP) altN
 // with no `critical` field silently becomes critical=false, diverging from
 // selfsigned's own per-extension defaults.
 test('buildCertRequest replicates the full default extension set INCLUDING each extension\'s critical flag, matching selfsigned\'s own defaults exactly (selfsigned override trap)', () => {
-  const { options } = buildCertRequest('192.168.1.1')
+  const { options } = buildCertRequest('192.0.2.1')
   const pairs = options.extensions
     .map((e) => [e.name, e.critical ?? false] as const)
     .sort(([a], [b]) => a.localeCompare(b))
@@ -230,7 +230,7 @@ test('buildCertRequest replicates the full default extension set INCLUDING each 
 })
 
 test('buildCertRequest SAN also keeps a DNS entry for the commonName (unchanged from prior behaviour)', () => {
-  const { attrs, options } = buildCertRequest('192.168.1.1')
+  const { attrs, options } = buildCertRequest('192.0.2.1')
   const cn = attrs.find((a) => a.name === 'commonName')?.value
   expect(cn).toBeDefined()
   const san = options.extensions.find((e) => e.name === 'subjectAltName')

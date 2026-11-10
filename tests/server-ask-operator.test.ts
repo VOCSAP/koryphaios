@@ -189,7 +189,7 @@ async function boot(
         sessionRef: `window-${run.run}`,
         privateKey: run.cred.privateKey,
         publicKey: run.cred.publicKey,
-        osUserHash: "hash-of-olivier",
+        osUserHash: "hash-of-alice",
         inbox: { version: 1, run_ref: run.run, group_id: run.group },
       }),
       { mode: 0o600 }

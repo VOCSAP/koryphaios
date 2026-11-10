@@ -35,7 +35,7 @@ describe("sender-class predicates", () => {
   });
 
   test("an ordinary peer, an empty id and a near-miss are neither", () => {
-    for (const id of ["desktop-7b2civn-koryphaios-15", "", "<dormant peer>", "decking", "operators"]) {
+    for (const id of ["desktop-testbox-koryphaios-15", "", "<dormant peer>", "decking", "operators"]) {
       expect(isDeckSender(id)).toBe(false);
       expect(isOperatorSender(id)).toBe(false);
     }
@@ -75,7 +75,7 @@ describe("renderInbound, the single enforcer", () => {
     // peer class now has a note of its own, so the control becomes: body
     // first, untouched, then PEER_INBOUND_NOTE, and NOT one of the two
     // sentinel framings (a blanket deck framing would fail here).
-    const out = renderInbound("desktop-7b2civn-koryphaios-15", BODY);
+    const out = renderInbound("desktop-testbox-koryphaios-15", BODY);
     expect(out).toBe(`${BODY}${PEER_INBOUND_NOTE}`);
     expect(out).toBe(renderPeerMessage(BODY));
     expect(out.startsWith(BODY)).toBe(true);

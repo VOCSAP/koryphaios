@@ -334,7 +334,7 @@ describe("ensureBrokerFor", () => {
   });
 
   test("a remote broker is never launched: the real ensurer behind the adapter spawns nothing for it", async () => {
-    const remote = "http://192.168.10.23:7899";
+    const remote = "http://192.0.2.23:7899";
     const spawns: string[] = [];
     const probes: string[] = [];
     const { log } = recordingLog();

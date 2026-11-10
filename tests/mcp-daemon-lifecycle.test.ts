@@ -170,10 +170,10 @@ describe("account name", () => {
   });
 
   test("reads GetUserNameW on Windows and the POSIX probe elsewhere", () => {
-    expect(osUsername(windows("Olivier"))).toBe("Olivier");
+    expect(osUsername(windows("Alice"))).toBe("Alice");
     expect(
-      osUsername({ platform: "linux", posixUserName: () => "olivier", windowsUserName: () => null }),
-    ).toBe("olivier");
+      osUsername({ platform: "linux", posixUserName: () => "alice", windowsUserName: () => null }),
+    ).toBe("alice");
   });
 
   test.each([[""], ["  "]])("refuses the name %j", (name) => {
@@ -214,7 +214,7 @@ describe("account name", () => {
       seen.push([command, args]);
       return { exitCode, stdout, stderr };
     };
-    expect(idRealUserName(answer(0, "olivier\n"))).toBe("olivier");
+    expect(idRealUserName(answer(0, "alice\n"))).toBe("alice");
     expect(seen[0]?.[0]).toMatch(/(^|\/)id$/);
     expect(seen[0]?.[1]).toEqual(["-run"]);
     expect(() => idRealUserName(answer(1, "", "id: cannot find name for user ID 4242\n"))).toThrow(
@@ -223,7 +223,7 @@ describe("account name", () => {
     expect(() => osUsername(systemUsernameProbes("linux", answer(0, "\n")))).toThrow("the user name from id -run is empty");
     expect(() => osUsername(systemUsernameProbes("darwin", answer(127, "", "not found")))).toThrow("id -run exited 127: not found");
     seen.length = 0;
-    expect(osUsername(systemUsernameProbes("darwin", answer(0, "olivier\n")))).toBe("olivier");
+    expect(osUsername(systemUsernameProbes("darwin", answer(0, "alice\n")))).toBe("alice");
     expect(seen.map(([, args]) => args)).toEqual([["-run"]]);
   });
 
@@ -369,16 +369,16 @@ describe("candidate ports", () => {
   });
 
   test("the user name is lower-cased before hashing", () => {
-    expect(candidatePorts("OLIVIER", {}, log)).toEqual(candidatePorts("olivier", {}, log));
+    expect(candidatePorts("ALICE", {}, log)).toEqual(candidatePorts("alice", {}, log));
   });
 
   test("the environment variable replaces the list with that single port", () => {
-    expect(candidatePorts("olivier", { CLAUDE_PEERS_MCP_DAEMON_PORT: "50123" }, log)).toEqual([50123]);
+    expect(candidatePorts("alice", { CLAUDE_PEERS_MCP_DAEMON_PORT: "50123" }, log)).toEqual([50123]);
   });
 
   test.each(["abc", "0", "70000", "12.5", "-3"])("an invalid port override %p is logged and ignored", (value) => {
     const recorded = recordingLog();
-    expect(candidatePorts("olivier", { CLAUDE_PEERS_MCP_DAEMON_PORT: value }, recorded.log)).toHaveLength(10);
+    expect(candidatePorts("alice", { CLAUDE_PEERS_MCP_DAEMON_PORT: value }, recorded.log)).toHaveLength(10);
     expect(recorded.lines.some((l) => l.includes("CLAUDE_PEERS_MCP_DAEMON_PORT"))).toBe(true);
   });
 
