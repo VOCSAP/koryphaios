@@ -343,9 +343,11 @@ test("a broker bound beyond loopback without a broker token refuses to start, lo
 }, 30_000);
 
 test("a broker bound beyond loopback WITH a broker token gets past the bind guard", async () => {
-  const { stderr } = await bootOnUnownedAddress("open-bind-token");
+  const { stderr, exitCode } = await bootOnUnownedAddress("open-bind-token");
   expect(stderr).not.toContain("exposes the broker beyond loopback");
-  expect(stderr).toContain("Failed to start server");
+  // Bun words the bind failure per platform: "Failed to start server" on Windows and macOS, EADDRNOTAVAIL on Linux.
+  expect(stderr, "the broker must reach Bun.serve and fail to bind there").toMatch(/Failed to start server|EADDRNOTAVAIL/);
+  expect(exitCode).not.toBe(0);
 }, 30_000);
 
 test("a card written upstream reaches the replica", async () => {
