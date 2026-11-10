@@ -149,7 +149,6 @@ describe("server-deck.ts honors CLAUDE_PEERS_TOOLS under its mount ceiling", () 
     const h = await bootRestricted(undefined);
     expect(await listedNames(h)).toEqual([
       "ask_operator",
-      "ask_operator_wait",
       "graph_draft_prepare",
       "graph_draft_send",
       "inbox_close",
@@ -199,6 +198,7 @@ describe("server-deck.ts mount ceiling (KORY_OPERATOR_TOOLS)", () => {
     ["a duplicated name", "ask_operator,ask_operator"],
     ["an empty entry", "ask_operator,"],
     ["a space after the comma", "ask_operator, notify_operator"],
+    ["a removed tool name", "ask_operator,ask_operator_wait"],
   ];
 
   for (const [label, ceiling] of MALFORMED) {
@@ -233,9 +233,8 @@ describe("server-deck.ts mount ceiling (KORY_OPERATOR_TOOLS)", () => {
     expect(await listedNames(h)).toEqual([]);
   }, 30_000);
 
-  test("every operator tool is refused by name on a refused surface, graph_draft_prepare and ask_operator_wait included, with no broker traffic", async () => {
+  test("every operator tool is refused by name on a refused surface, graph_draft_prepare included, with no broker traffic", async () => {
     expect(OPERATOR_TOOLS).toContain("graph_draft_prepare");
-    expect(OPERATOR_TOOLS).toContain("ask_operator_wait");
     const h = await bootRestricted(undefined, null);
     let id = 1;
     for (const name of OPERATOR_TOOLS) {

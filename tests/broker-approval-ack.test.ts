@@ -18,7 +18,7 @@ import {
   generateCredential,
   type ApprovalCredential,
 } from "../shared/approval.ts";
-import { askOperatorWaitReply, settledOutcome } from "../shared/approval-outcome.ts";
+import { settledOutcome } from "../shared/approval-outcome.ts";
 import { renderSettled } from "../notify/format.ts";
 import type { Approval } from "../shared/types.ts";
 
@@ -193,14 +193,8 @@ describe("acknowledging a channel-route question", () => {
     expect([ackRow.status, ackRow.answer_kind]).toEqual(["acknowledged", null]);
     expect([denyRow.status, denyRow.answer_kind]).toEqual(["answered", "deny"]);
 
-    const ackReply = askOperatorWaitReply(ackRow);
-    const denyReply = askOperatorWaitReply(denyRow);
-    expect(ackReply?.isError).toBe(false);
-    expect(ackReply?.text).toContain("acknowledged");
-    expect(ackReply?.text).not.toContain("rejected");
-    expect(denyReply?.isError).toBe(false);
-    expect(denyReply?.text).toContain("no / rejected");
-    expect(denyReply?.text).not.toContain("acknowledged");
+    expect(settledOutcome(ackRow)).toEqual({ kind: "acknowledged" });
+    expect(settledOutcome(denyRow)).toEqual({ kind: "rejected" });
 
     const ackMsg = await waitForApprovalMessage(peer.frames, acked.id);
     const denyMsg = await waitForApprovalMessage(peer.frames, declined.id);
@@ -690,22 +684,6 @@ describe("settledOutcome and its readers", () => {
     expect(settledOutcome({ ...base, status: "pending", answer_kind: null })).toEqual({ kind: "pending" });
   });
 
-  test("an allow reads as approved and a deny as rejected in the ask_operator reply", () => {
-    const allow = askOperatorWaitReply({ ...base, status: "answered", answer_kind: "allow" });
-    expect(allow?.isError).toBe(false);
-    expect(allow?.text).toContain("approved");
-    const deny = askOperatorWaitReply({ ...base, status: "answered", answer_kind: "deny" });
-    expect(deny?.isError).toBe(false);
-    expect(deny?.text).toContain("rejected");
-  });
-
-  test("a withdrawn question is still an error, distinct from an acknowledgement", () => {
-    const gone = askOperatorWaitReply({ ...base, status: "abandoned", answer_kind: null });
-    expect(gone?.isError).toBe(true);
-    expect(gone?.text).toContain("withdrawn");
-    expect(askOperatorWaitReply({ ...base, status: "pending", answer_kind: null })).toBeNull();
-  });
-
   test("the phone copy of an acknowledged approval never reads as rejected", () => {
     const approval = {
       title: "Finding",
@@ -721,16 +699,12 @@ describe("settledOutcome and its readers", () => {
   test("a terminal answer reads as answered in the terminal, never as a verdict or a withdrawal", () => {
     const terminal = { ...base, status: "answered_terminal" as const, answer_kind: null };
     expect(settledOutcome(terminal)).toEqual({ kind: "terminal" });
-    const reply = askOperatorWaitReply(terminal);
-    expect(reply?.isError, "the operator did answer: this is not a withdrawn question").toBe(false);
-    expect(reply?.text).toContain("terminal");
     const phone = renderSettled({ title: "Bash", ...terminal } as unknown as Approval, "deck");
     expect(phone).toContain("answered in the terminal");
     expect(phone).not.toMatch(/approved|rejected|closed/);
   });
 
-  // Mutants: closed read as rejected or as gone; the reason concatenated raw instead of JSON-encoded.
-  test("a closed question is neither a refusal nor a withdrawal, and quotes its reason as data", () => {
+  test("a closed question maps to the closed outcome with its closer and reason", () => {
     const closed = {
       ...base,
       status: "closed" as const,
@@ -745,13 +719,6 @@ describe("settledOutcome and its readers", () => {
       by: "lead",
       peer: "team-lead",
     });
-    const reply = askOperatorWaitReply(closed);
-    expect(reply?.isError).toBe(false);
-    expect(reply?.text).toContain("closed by team-lead (lead) without an answer");
-    expect(reply?.text).toContain(JSON.stringify(closed.close_reason));
-    expect(reply?.text).not.toContain("rejected");
-    expect(reply?.text).not.toContain("no longer awaiting");
-    expect(askOperatorWaitReply({ ...closed, closed_by_peer_id: null })?.text).toContain("closed by the lead (lead)");
   });
 
   test("the phone copy of a closed question carries no reason", () => {

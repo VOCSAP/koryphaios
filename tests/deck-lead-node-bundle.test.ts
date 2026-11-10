@@ -64,7 +64,7 @@ async function readUntil(
   throw new Error(`no JSON-RPC response with id ${wantedId}`);
 }
 
-test("the node-bundled server-deck.mjs starts under node, answers initialize, and lists exactly the 7 named tools", async () => {
+test("the node-bundled server-deck.mjs starts under node, answers initialize, and lists exactly the 6 named tools", async () => {
   const outDir = mkdtempSync(join(tmpdir(), "cp-deck-bundle-"));
   dirs.push(outDir);
   const outfile = join(outDir, "server-deck.mjs");
@@ -120,7 +120,7 @@ test("the node-bundled server-deck.mjs starts under node, answers initialize, an
   const instructions = initResponse.result?.instructions ?? "";
   expect(instructions.length).toBeGreaterThan(0);
   expect(instructions.length).toBeLessThan(400);
-  expect(instructions).toContain("Use ask_operator for blocking questions and notify_operator for one-way signed notices");
+  expect(instructions).toContain("ask_operator posts a question and returns a ticket at once; the answer comes later as a channel message. notify_operator sends a one-way signed notice");
 
   // This diagnostic is emitted only when Node evaluates a Bun-only config path.
   expect(stderrChunks.join("")).not.toContain("Bun is not defined");
@@ -131,6 +131,6 @@ test("the node-bundled server-deck.mjs starts under node, answers initialize, an
   };
   const names = (listResponse.result?.tools ?? []).map((t) => t.name).sort();
   expect(names).toEqual(
-    ["ask_operator", "ask_operator_wait", "notify_operator", "graph_draft_prepare", "graph_draft_send", "inbox_list", "inbox_close"].sort()
+    ["ask_operator", "notify_operator", "graph_draft_prepare", "graph_draft_send", "inbox_list", "inbox_close"].sort()
   );
 }, 30_000);

@@ -24,6 +24,7 @@ import { generateCredential, INBOX_GATES, verifyInboxProof, type ApprovalAuthPro
 import type { CompanionIdentity } from "../shared/roadmap-dispatch.ts";
 import {
   createPeersSession,
+  handleAskOperator,
   handleGraphDraftPrepare,
   handleInboxClose,
   handleInboxList,
@@ -1660,6 +1661,24 @@ describe("the kory-operator inbox tools", () => {
     expect(verifyInboxProof(runRoot.publicKey, body.author.payload, body.author.auth, INBOX_GATES.authorClose).ok).toBe(true);
     expect(verifyInboxProof(runRoot.publicKey, body.author.payload, body.author.auth, INBOX_GATES.authorList).ok).toBe(false);
     expect((body.author.auth as { token_id?: string }).token_id).toBe("root-id");
+  });
+
+  // Mutant: the /approval/wait call put back after the add.
+  test("ask_operator posts /approval/add and nothing else, and returns the stored ticket", async () => {
+    const posts: string[] = [];
+    const h = ctx({});
+    h.context.broker = {
+      post: async (path: string) => {
+        posts.push(path);
+        return { approval: { id: "appr-42", reply_route: "channel" } };
+      },
+    } as never;
+    const got = await handleAskOperator({ title: "t", question: "q" }, identity, h.context);
+
+    expect(posts).toEqual(["/approval/add"]);
+    expect("isError" in got).toBe(false);
+    expect(textOf(got)).toContain('Ticket "appr-42"');
+    expect(textOf(got)).toContain("NOT the answer");
   });
 
   // Mutants: inbox_list signed under the close gate; the cursor dropped or moved into the signed payload.

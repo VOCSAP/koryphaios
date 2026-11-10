@@ -7,14 +7,13 @@ const DECK_ONLY_NAMES = [
   "graph_draft_prepare",
   "graph_draft_send",
   "ask_operator",
-  "ask_operator_wait",
   "notify_operator",
   "inbox_list",
   "inbox_close",
 ] as const;
-const NOT_IN_CORE = [...DECK_ONLY_NAMES, "roadmap_dispatch"] as const;
+const NOT_IN_CORE = [...DECK_ONLY_NAMES, "ask_operator_wait", "roadmap_dispatch"] as const;
 
-test("server-deck.ts serves exactly the seven operator-family tools that server.ts declares", () => {
+test("server-deck.ts serves exactly the six operator-family tools that server.ts declares", () => {
   expect(new Set<string>(DECK_ONLY_NAMES)).toEqual(new Set(DECK_ONLY_TOOLS.map((t) => t.name)));
   expect(new Set<string>(DECK_ONLY_NAMES)).toEqual(new Set(DECK_TOOL_NAMES));
 });

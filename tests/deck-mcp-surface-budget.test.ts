@@ -14,7 +14,7 @@ const { DECK_TOOL_NAMES, mcp } = await import("../server-deck.ts?ceiling=full").
 
 type DeckTool = { name: string; description?: string; inputSchema: unknown };
 
-const DECK_CEILING_CHARS = 3_423;
+const DECK_CEILING_CHARS = 3_143;
 const DECK_FLOOR_CHARS = 2_700;
 const DECK_INSTRUCTIONS_MAX_CHARS = 400;
 

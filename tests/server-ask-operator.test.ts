@@ -22,6 +22,7 @@ import {
 import { APPROVAL_OPTIONS_MAX, buildAuthProof } from "../shared/approval.ts";
 import { writeSessionIdentityFile } from "../shared/peer-cache.ts";
 import type { Approval } from "../shared/types.ts";
+import { reachedWithin } from "./_bounded-await.ts";
 import { resolveProjectKey } from "../shared/project-key.ts";
 import { computeProjectKey } from "../shared/summarize.ts";
 import { OPERATOR_CEILING_ENV, OPERATOR_TOOLS, encodeMountCeiling } from "../shared/mount-ceiling.ts";
@@ -262,7 +263,6 @@ describe("ask_operator over MCP stdio", () => {
     const res = await readUntil(h.reader, 1, h.buffer);
     const names = (res.result?.tools ?? []).map((t) => t.name);
     expect(names).toContain("ask_operator");
-    expect(names).toContain("ask_operator_wait");
     const ask = res.result?.tools?.find((t) => t.name === "ask_operator");
     expect(ask?.inputSchema?.properties?.options?.maxItems).toBe(APPROVAL_OPTIONS_MAX);
   }, 60_000);
@@ -316,7 +316,6 @@ describe("ask_operator over MCP stdio", () => {
   test("a refused surface stops every operator tool before transport, with a live credential and valid arguments", async () => {
     const VALID: Record<(typeof OPERATOR_TOOLS)[number], Record<string, unknown>> = {
       ask_operator: { title: "t", question: "q" },
-      ask_operator_wait: { ticket: "x" },
       notify_operator: { message: "m" },
       graph_draft_prepare: { question: "q" },
       graph_draft_send: { title: "t", prompt: "p" },
@@ -363,7 +362,7 @@ describe("ask_operator over MCP stdio", () => {
     expect(text).toContain("Restart the session");
   }, 60_000);
 
-  test("the operator's free text comes back as the tool result", async () => {
+  test("the ticket comes back while the question is still pending", async () => {
     const h = await boot(true);
     h.send({
       jsonrpc: "2.0",
@@ -375,34 +374,18 @@ describe("ask_operator over MCP stdio", () => {
       },
     });
 
+    const res = await reachedWithin(readUntil(h.reader, 1, h.buffer), "ask_operator result before any claim", 15_000);
+    expect(res.result?.isError).toBeFalsy();
+
     const approval = await firstApproval(h);
     expect(approval).not.toBeNull();
+    expect(approval?.status).toBe("pending");
     expect(approval?.kind).toBe("question");
     expect(approval?.title).toBe("Migration");
     expect(approval?.options).toEqual(["A", "B"]);
     // The MCP tool signs with the RESTRICTED session credential.
     expect(approval?.origin.session_ref).toBe(`window-${h.run!.run}`);
-
-    expect(await claim(h, approval!.id, "text", "go with B, but keep a backup")).toBe(200);
-
-    const res = await readUntil(h.reader, 1, h.buffer);
-    expect(res.result?.isError).toBeFalsy();
-    expect(res.result?.content?.[0]?.text).toContain("go with B, but keep a backup");
-    expect(res.result?.content?.[0]?.text).toContain("telegram");
-  }, 60_000);
-
-  test("a deny verdict is rendered as a rejection, not raw JSON", async () => {
-    const h = await boot(true);
-    h.send({
-      jsonrpc: "2.0",
-      id: 1,
-      method: "tools/call",
-      params: { name: "ask_operator", arguments: { title: "Deploy", question: "Ship it?" } },
-    });
-    const approval = await firstApproval(h);
-    expect(await claim(h, approval!.id, "deny")).toBe(200);
-    const res = await readUntil(h.reader, 1, h.buffer);
-    expect(res.result?.content?.[0]?.text).toContain("rejected");
+    expect(res.result?.content?.[0]?.text).toContain(`Ticket "${approval!.id}"`);
   }, 60_000);
 
   test("an over-long question reaches the broker whole and is stored with the truncation marker", async () => {
@@ -454,15 +437,4 @@ describe("ask_operator over MCP stdio", () => {
     expect(accepted.result?.isError).toBeFalsy();
   }, 60_000);
 
-  test("ask_operator_wait on an unknown ticket errors rather than blocking", async () => {
-    const h = await boot(true);
-    h.send({
-      jsonrpc: "2.0",
-      id: 1,
-      method: "tools/call",
-      params: { name: "ask_operator_wait", arguments: { ticket: "does-not-exist" } },
-    });
-    const res = await readUntil(h.reader, 1, h.buffer);
-    expect(res.result?.isError).toBe(true);
-  }, 60_000);
 });

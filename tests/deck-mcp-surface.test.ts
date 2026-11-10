@@ -95,7 +95,17 @@ describe("server-deck.ts surface", () => {
     expect((initRes.result?.instructions ?? "").length).toBeGreaterThan(0);
   }, 30_000);
 
-  test("exposes exactly the seven Kory-only tools, the inbox ones with their declared arguments", async () => {
+  test("neither tools/list nor the instructions name the removed ask_operator_wait", async () => {
+    const { reader, buffer, send, initRes } = await boot();
+    send({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} });
+    const res = await readUntil(reader, 1, buffer);
+    const names = (res.result?.tools ?? []).map((t) => t.name);
+    expect(names.length).toBeGreaterThan(0);
+    expect(names).not.toContain("ask_operator_wait");
+    expect(initRes.result?.instructions ?? "").not.toContain("ask_operator_wait");
+  }, 30_000);
+
+  test("exposes exactly the six Kory-only tools, the inbox ones with their declared arguments", async () => {
     const { reader, buffer, send } = await boot();
     send({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} });
     const res = await readUntil(reader, 1, buffer);
@@ -103,7 +113,6 @@ describe("server-deck.ts surface", () => {
     const names = tools.map((t) => t.name).sort();
     expect(names).toEqual([
       "ask_operator",
-      "ask_operator_wait",
       "graph_draft_prepare",
       "graph_draft_send",
       "inbox_close",

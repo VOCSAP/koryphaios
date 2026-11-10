@@ -5,7 +5,6 @@
 
 export const OPERATOR_TOOLS = [
   "ask_operator",
-  "ask_operator_wait",
   "notify_operator",
   "graph_draft_prepare",
   "graph_draft_send",

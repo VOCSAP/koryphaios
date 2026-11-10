@@ -63,7 +63,7 @@ const mcp = new Server(
   {
     capabilities: { tools: {} },
     instructions: CEILING.ok
-      ? "Kory operator tools for a lead or supervisor tile. Use ask_operator for blocking questions and notify_operator for one-way signed notices."
+      ? "Kory operator tools for a lead or supervisor tile. ask_operator posts a question and returns a ticket at once; the answer comes later as a channel message. notify_operator sends a one-way signed notice."
       : "No operator tool is served: the mount ceiling is missing or invalid.",
   }
 );
@@ -118,8 +118,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
     case "graph_draft_prepare":
       return handleGraphDraftPrepare(args, toolContext);
     case "ask_operator":
-    case "ask_operator_wait":
-      return handleAskOperator(name, args, await resolveCompanionIdentity(), toolContext);
+      return handleAskOperator(args, await resolveCompanionIdentity(), toolContext);
     case "notify_operator":
       return handleNotifyOperator(args, await resolveCompanionIdentity(), toolContext);
     case "graph_draft_send":
