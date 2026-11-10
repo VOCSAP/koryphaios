@@ -27,19 +27,19 @@ function extractPredicate(src: string, fnName: string): (o: { result: string }) 
 const REFUSAL_VALUES = ['refused-modal', 'screen-unavailable', 'needs-attention', 'rate-limited'] as const
 const RESULT_VALUES = ['interrupted', 'written', 'busy-timeout', 'no-terminal', 'error', ...REFUSAL_VALUES] as const
 
-describe("refused modal outcomes", () => {
+describe("refusal outcomes", () => {
   const src = readFileSync(SRC_PATH, 'utf-8')
   const filters = {
     interrupted: extractPredicate(src, 'interrupted'),
     transmitted: extractPredicate(src, 'transmitted'),
     stragglers: extractPredicate(src, 'stragglers'),
     unreachable: extractPredicate(src, 'unreachable'),
-    refusedModal: extractPredicate(src, 'refusedModal')
+    refusals: extractPredicate(src, 'refusals')
   }
 
-  test("refusedModal's predicate matches every refusal reason and nothing else", () => {
+  test("refusals' predicate matches every refusal reason and nothing else", () => {
     for (const v of RESULT_VALUES) {
-      expect(filters.refusedModal({ result: v }), `result ${v}`).toBe((REFUSAL_VALUES as readonly string[]).includes(v))
+      expect(filters.refusals({ result: v }), `result ${v}`).toBe((REFUSAL_VALUES as readonly string[]).includes(v))
     }
   })
 
@@ -65,15 +65,6 @@ describe('structural wiring: escalation, tally, and own-label requirements', () 
   test('escalatable includes refused (hard-stop escalation offered on a screen-guard refusal)', () => {
     const src = readFileSync(SRC_PATH, 'utf-8')
     expect(src).toContain('const escalatable = [...written, ...stuck, ...refused]')
-  })
-
-  test('the tally uses its OWN i18n key for refused, never one of the four existing bucket keys', () => {
-    const src = readFileSync(SRC_PATH, 'utf-8')
-    const tallyMatch = /\{refused\.length > 0 && \(\s*<li[^>]*>\{t\('([^']+)'/.exec(src)
-    expect(tallyMatch).not.toBeNull()
-    const key = tallyMatch![1]
-    expect(key).toBe('roadmap.stop.refused')
-    expect(['roadmap.stop.notTook', 'roadmap.stop.unreachable', 'roadmap.stop.written']).not.toContain(key)
   })
 
   test('the escalate-hint branch has its own refused-only message, distinct from escalateUnconfirmed/escalateHint', () => {

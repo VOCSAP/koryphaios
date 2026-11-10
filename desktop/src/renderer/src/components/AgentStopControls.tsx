@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
+import { createPortal } from 'react-dom'
 import type { DeckApi, StopMode, StopOutcome, StopReport, StopState } from '@shared/types'
 import { GLYPH_ACTIONS } from './icons'
 import { ConfirmDialog } from './ConfirmDialog'
@@ -61,20 +62,49 @@ function unreachable(r: StopReport): StopOutcome[] {
 }
 
 /**
- * The screen-state guard refused to write anything at all — not busy, not
- * unreachable, not confirmed-sent — because the tile looked like an open dialog
- * where either gesture could quit the session or accept something in the
- * operator's name.
- * Reachable from two separate guards: soft's own injectCommand guard and
- * pause's own interrupt gate on the same union; hard is deliberately ungated
- * and never lands here.
+ * A guard refused to write anything at all — not busy, not unreachable, not
+ * confirmed-sent. Reachable from soft's injectCommand guard and pause's
+ * interrupt gate; hard is deliberately ungated and never lands here.
  * Kept as its own bucket rather than folded into stragglers (would falsely
  * claim the agent is still busy) or unreachable (would falsely claim the tile
  * could not be reached at all).
  */
-function refusedModal(r: StopReport): StopOutcome[] {
+function refusals(r: StopReport): StopOutcome[] {
   return r.outcomes.filter((o) => o.result === 'refused-modal' || o.result === 'screen-unavailable' || o.result === 'needs-attention' || o.result === 'rate-limited')
 }
+
+type Refusal = Extract<StopOutcome['result'], 'refused-modal' | 'screen-unavailable' | 'needs-attention' | 'rate-limited'>
+
+/**
+ * One sentence per refusal, because each one calls for a different gesture
+ * from the operator (answer the agent, wait for the limit, look at the tile).
+ * Key order is the producer's priority order, so the boxes read the same way
+ * the guard decided.
+ */
+const REFUSAL_COPY = {
+  'screen-unavailable': {
+    tally: 'roadmap.stop.refusedScreen',
+    title: 'roadmap.stop.refusedScreenTitle',
+    note: 'roadmap.stop.refusedScreenNote'
+  },
+  'refused-modal': {
+    tally: 'roadmap.stop.refusedModal',
+    title: 'roadmap.stop.refusedModalTitle',
+    note: 'roadmap.stop.refusedModalNote'
+  },
+  'needs-attention': {
+    tally: 'roadmap.stop.refusedAttention',
+    title: 'roadmap.stop.refusedAttentionTitle',
+    note: 'roadmap.stop.refusedAttentionNote'
+  },
+  'rate-limited': {
+    tally: 'roadmap.stop.refusedRateLimit',
+    title: 'roadmap.stop.refusedRateLimitTitle',
+    note: 'roadmap.stop.refusedRateLimitNote'
+  }
+} as const satisfies Record<Refusal, { tally: string; title: string; note: string }>
+
+const REFUSAL_ORDER = Object.keys(REFUSAL_COPY) as Refusal[]
 
 /**
  * The stragglers an escalation can actually reach. A straggler whose `peerId`
@@ -235,19 +265,24 @@ export function AgentStopControls({ t }: { t: TFn }): React.JSX.Element {
         </button>
       </span>
 
-      {confirm && (
-        <ConfirmDialog
-          title={confirmTitle(confirm)}
-          message={confirmMessage(confirm)}
-          confirmLabel={t(`roadmap.stop.${confirm}`)}
-          tone={confirm === 'hard' ? 'danger' : 'neutral'}
-          onConfirm={() => void run(confirm, targets)}
-          onCancel={() => {
-            setConfirm(null)
-            setTargets(null)
-          }}
-        />
-      )}
+      {/* Portalled: these controls sit in the in-progress column head, whose
+          uppercase, letter-spacing, size and amber would otherwise be
+          inherited by every line of the dialog. */}
+      {confirm &&
+        createPortal(
+          <ConfirmDialog
+            title={confirmTitle(confirm)}
+            message={confirmMessage(confirm)}
+            confirmLabel={t(`roadmap.stop.${confirm}`)}
+            tone={confirm === 'hard' ? 'danger' : 'neutral'}
+            onConfirm={() => void run(confirm, targets)}
+            onCancel={() => {
+              setConfirm(null)
+              setTargets(null)
+            }}
+          />,
+          document.body
+        )}
 
       {(report || failure) && (
         <StopReportModal
@@ -269,7 +304,7 @@ export function AgentStopControls({ t }: { t: TFn }): React.JSX.Element {
   )
 }
 
-function StopReportModal({
+export function StopReportModal({
   report,
   failure,
   t,
@@ -286,7 +321,10 @@ function StopReportModal({
   const written = report ? transmitted(report) : []
   const stuck = report ? stragglers(report) : []
   const lost = report ? unreachable(report) : []
-  const refused = report ? refusedModal(report) : []
+  const refused = report ? refusals(report) : []
+  const refusedBy = REFUSAL_ORDER.map((reason) => [reason, refused.filter((o) => o.result === reason)] as const).filter(
+    ([, list]) => list.length > 0
+  )
   /* Escalation targets unconfirmed transmissions, busy refusals, AND
      screen-guard refusals. The asymmetry is deliberate: `busy-timeout`
      proves nothing was sent, a write only proves a write, and
@@ -304,7 +342,7 @@ function StopReportModal({
   const locks = report?.locks ?? {}
   const title = report ? t(`roadmap.stop.report.${report.mode}`) : t('roadmap.stop.report.failed')
 
-  return (
+  return createPortal(
     <div className="modal-backdrop" onMouseDown={onClose}>
       <div className="modal rm-stop-report" onMouseDown={(e) => e.stopPropagation()}>
         <div className="modal-head">
@@ -328,9 +366,11 @@ function StopReportModal({
               {stuck.length > 0 && (
                 <li className="rm-stop-stuck">{t('roadmap.stop.notTook', { count: stuck.length })}</li>
               )}
-              {refused.length > 0 && (
-                <li className="rm-stop-stuck">{t('roadmap.stop.refused', { count: refused.length })}</li>
-              )}
+              {refusedBy.map(([reason, list]) => (
+                <li key={reason} className="rm-stop-stuck">
+                  {t(REFUSAL_COPY[reason].tally, { count: list.length })}
+                </li>
+              ))}
               {lost.length > 0 && (
                 <li className="rm-stop-lost">{t('roadmap.stop.unreachable', { count: lost.length })}</li>
               )}
@@ -385,26 +425,23 @@ function StopReportModal({
               </div>
             )}
 
-            {/* Own box, own honest label (team-lead, 2026-08-17): a screen-guard
-                refusal is neither a straggler ("still busy" would be false --
-                the tile may be sitting idle at a dialog) nor written-unconfirmed
-                (nothing was sent at all). Reuses the stragglers box archetype
-                (amber, same shape) rather than inventing new CSS -- the copy
-                below is what carries the actual distinction. */}
-            {refused.length > 0 && (
-              <div className="rm-stop-stragglers">
-                <h3>{t('roadmap.stop.refusedTitle')}</h3>
+            {/* A refusal is neither a straggler (the tile may sit idle) nor
+                written-unconfirmed (nothing was sent): the stragglers box
+                archetype, one box per reason, the copy carrying the reason. */}
+            {refusedBy.map(([reason, list]) => (
+              <div key={reason} className="rm-stop-stragglers" data-refusal={reason}>
+                <h3>{t(REFUSAL_COPY[reason].title)}</h3>
                 <ul>
-                  {refused.map((o) => (
+                  {list.map((o) => (
                     <li key={o.id}>
                       <span className="rm-stop-peer">{o.peerId ?? t('roadmap.stop.noPeer')}</span>
                       <span className="rm-stop-tile">{o.id.slice(0, 8)}</span>
                     </li>
                   ))}
                 </ul>
-                <p className="rm-stop-note">{t('roadmap.stop.refusedNote')}</p>
+                <p className="rm-stop-note">{t(REFUSAL_COPY[reason].note)}</p>
               </div>
-            )}
+            ))}
 
             {/* Requested peer ids that matched NO live tile. Distinct from a
                 straggler, and rendered even when there is none of those: a
@@ -463,6 +500,7 @@ function StopReportModal({
           )}
         </div>
       </div>
-    </div>
+    </div>,
+    document.body
   )
 }

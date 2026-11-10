@@ -3745,15 +3745,8 @@ body:has(.rm-modal) .rm-conflict-modal {
 /* Post-action report. Amber is the "still busy" tone (DESIGN.md §2, transient
    state): those agents did NOT take the stop, and they are the reason the
    operator clicked in the first place -- so they get a framed block of their
-   own, not a line lost in a tally.
-
-   The explicit `color` is the load-bearing line, not decoration: this modal is
-   rendered INSIDE the "in progress" column head, and `.rm-col-head-in_progress`
-   sets amber -- so without it EVERY unstyled string here (title, peer ids, any
-   block added later) inherits the alarm. Measured 2026-08-12: the neutral
-   "transmitted" block declared --border/--bg-2/--fg-dim and its peer id still
-   computed rgb(224,179,65). Neutralising at the root instead of per child means
-   amber below is always a DELIBERATE opt-in, where it actually accuses. */
+   own, not a line lost in a tally. Amber below is always a deliberate opt-in
+   over the neutral root colour. */
 .rm-stop-report {
   width: 420px;
   max-width: 90vw;
