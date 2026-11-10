@@ -163,6 +163,46 @@ export function integrationArgv(files: readonly string[]): string[] {
   return ["bun", "test", "--timeout", String(DEFAULT_TEST_TIMEOUT_MS), ...files.map((f) => `tests/${f}`)];
 }
 
+export interface StreamSinks {
+  out?: (chunk: string) => void;
+  err?: (chunk: string) => void;
+}
+
+// A synchronous spawn would hold the output until exit and reprint it in one
+// burst, so the CI log would stamp every line with the same time. Both pipes
+// are drained together: a child blocked on a full stderr pipe never exits.
+async function drain(stream: ReadableStream<Uint8Array>, sink: (chunk: string) => void): Promise<string> {
+  const decoder = new TextDecoder();
+  let all = "";
+  for await (const part of stream) {
+    const text = decoder.decode(part, { stream: true });
+    if (text) {
+      all += text;
+      sink(text);
+    }
+  }
+  const tail = decoder.decode();
+  if (tail) {
+    all += tail;
+    sink(tail);
+  }
+  return all;
+}
+
+export async function runStreaming(
+  argv: string[],
+  cwd: string,
+  sinks: StreamSinks = {},
+): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+  const proc = Bun.spawn(argv, { cwd, stdout: "pipe", stderr: "pipe" });
+  const [stdout, stderr, exitCode] = await Promise.all([
+    drain(proc.stdout, sinks.out ?? ((c) => void process.stdout.write(c))),
+    drain(proc.stderr, sinks.err ?? ((c) => void process.stderr.write(c))),
+    proc.exited,
+  ]);
+  return { exitCode, stdout, stderr };
+}
+
 function escapeRegExp(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }

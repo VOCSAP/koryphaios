@@ -6,7 +6,7 @@
 // neighbour.
 // Exit code is non-zero if any invocation -- the clean batch or any single
 // contaminated file -- fails.
-import { EXEMPTIONS, listTestFiles, partitionTests, REPO_ROOT } from "./pure-module-partition.ts";
+import { EXEMPTIONS, listTestFiles, partitionTests, REPO_ROOT, runStreaming } from "./pure-module-partition.ts";
 
 interface InvocationResult {
   label: string;
@@ -27,21 +27,13 @@ interface InvocationResult {
  */
 const RECAP_RE = /Ran (\d+) tests? across/;
 
-function runBunTest(label: string, files: string[]): InvocationResult {
+async function runBunTest(label: string, files: string[]): Promise<InvocationResult> {
   const start = Date.now();
-  const proc = Bun.spawnSync(["bun", "test", ...files.map((f) => `tests/${f}`)], {
-    cwd: REPO_ROOT,
-    stdout: "pipe",
-    stderr: "pipe",
-  });
+  const proc = await runStreaming(["bun", "test", ...files.map((f) => `tests/${f}`)], REPO_ROOT);
   const ms = Date.now() - start;
-  const stdout = proc.stdout.toString();
-  const stderr = proc.stderr.toString();
-  process.stdout.write(stdout);
-  process.stderr.write(stderr);
-  const recapMatch = `${stdout}${stderr}`.match(RECAP_RE);
+  const recapMatch = `${proc.stdout}${proc.stderr}`.match(RECAP_RE);
   const testsRan = recapMatch ? Number(recapMatch[1]) : null;
-  const exitCode = testsRan === null || testsRan < 1 ? 1 : (proc.exitCode ?? 1);
+  const exitCode = testsRan === null || testsRan < 1 ? 1 : proc.exitCode;
   return { label, fileCount: files.length, exitCode, ms, testsRan };
 }
 
@@ -82,10 +74,10 @@ console.log(
 
 const results: InvocationResult[] = [];
 if (clean.length > 0) {
-  results.push(runBunTest("clean batch", clean));
+  results.push(await runBunTest("clean batch", clean));
 }
 for (const file of contaminated) {
-  results.push(runBunTest(file, [file]));
+  results.push(await runBunTest(file, [file]));
 }
 
 // D2: zero invocations (e.g. an empty tests/ tree, or every file exempted)

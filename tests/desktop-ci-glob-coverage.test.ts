@@ -4,7 +4,8 @@
 // EXEMPTIONS itself is imported from scripts/pure-module-partition.ts rather
 // than redefined here, so there is one copy of the gating table.
 
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, test } from "bun:test";
 import ts from "typescript6";
@@ -29,6 +30,7 @@ import {
   NATIVE_DEPS_REASON_MARKER,
   DEFAULT_TEST_TIMEOUT_MS,
   integrationArgv,
+  runStreaming,
 } from "../scripts/pure-module-partition.ts";
 
 const REPO_ROOT = join(import.meta.dir, "..");
@@ -215,6 +217,57 @@ test("the integration step's run: line invokes exactly the integration partition
 test("the integration command line is bun test with the 30 s per-test floor, then each file under tests/", () => {
   expect(DEFAULT_TEST_TIMEOUT_MS).toBe(30_000);
   expect(integrationArgv(["a.test.ts", "b.test.ts"])).toEqual(["bun", "test", "--timeout", String(DEFAULT_TEST_TIMEOUT_MS), "tests/a.test.ts", "tests/b.test.ts"]);
+});
+
+// The child prints "first", then waits (bounded) for a release file that only
+// the parent's sink can create, so "second" appears only if the parent saw
+// "first" while the child was still running. A helper that holds the output
+// until exit never releases the child and the stdout ends in TIMEOUT.
+const RELEASE_CHILD = `
+const fs = require("node:fs");
+const flag = process.argv[2];
+process.stdout.write("first\\n");
+const deadline = Date.now() + 3000;
+while (!fs.existsSync(flag) && Date.now() < deadline) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
+process.stdout.write(fs.existsSync(flag) ? "second\\n" : "TIMEOUT\\n");
+process.stderr.write("err-line\\n");
+process.exitCode = 7;
+`;
+
+test("runStreaming hands a chunk to the sink while the child is still running, keeps the child exit code and captures stdout and stderr apart", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "run-streaming-"));
+  try {
+    const flag = join(dir, "release");
+    const script = join(dir, "child.cjs");
+    writeFileSync(script, RELEASE_CHILD);
+    const seenOut: string[] = [];
+    const seenErr: string[] = [];
+    const r = await runStreaming([process.execPath, script, flag], dir, {
+      out: (chunk) => {
+        seenOut.push(chunk);
+        if (chunk.includes("first")) writeFileSync(flag, "go");
+      },
+      err: (chunk) => seenErr.push(chunk),
+    });
+    expect(r.stdout).toBe("first\nsecond\n");
+    expect(r.stderr).toBe("err-line\n");
+    expect(r.exitCode).toBe(7);
+    expect(seenOut.join("")).toBe(r.stdout);
+    expect(seenErr.join("")).toBe(r.stderr);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// The script runs `bun test` at import, so the wiring can only be read as text.
+test("the integration script reads the child through runStreaming", () => {
+  const source = readFileSync(join(REPO_ROOT, "scripts", "partition-integration-tests.ts"), "utf-8");
+  expect(source).toContain("await runStreaming(integrationArgv(");
+});
+
+test("the pure-module script reads each child through runStreaming", () => {
+  const source = readFileSync(join(REPO_ROOT, "scripts", "partition-pure-tests.ts"), "utf-8");
+  expect(source).toContain('await runStreaming(["bun", "test"');
 });
 
 test("the integration step carries no continue-on-error / if: neutralization (present, not decorative)", () => {

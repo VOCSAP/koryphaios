@@ -10,7 +10,7 @@
 // ephemeral port, so running them serially in one process is expected to be
 // safe.
 import { readdirSync } from "node:fs";
-import { EXEMPTIONS, exemptedFiles, integrationArgv, isExempt, listTestFiles, REPO_ROOT, TESTS_DIR } from "./pure-module-partition.ts";
+import { EXEMPTIONS, exemptedFiles, integrationArgv, isExempt, listTestFiles, REPO_ROOT, runStreaming, TESTS_DIR } from "./pure-module-partition.ts";
 
 interface InvocationResult {
   exitCode: number;
@@ -27,22 +27,14 @@ interface InvocationResult {
 // An unparseable recap fails, never a default pass.
 const RECAP_RE = /Ran (\d+) tests? across (\d+) files?/;
 
-function runBunTest(files: string[]): InvocationResult {
+async function runBunTest(files: string[]): Promise<InvocationResult> {
   const start = Date.now();
-  const proc = Bun.spawnSync(integrationArgv(files), {
-    cwd: REPO_ROOT,
-    stdout: "pipe",
-    stderr: "pipe",
-  });
+  const proc = await runStreaming(integrationArgv(files), REPO_ROOT);
   const ms = Date.now() - start;
-  const stdout = proc.stdout.toString();
-  const stderr = proc.stderr.toString();
-  process.stdout.write(stdout);
-  process.stderr.write(stderr);
-  const recapMatch = `${stdout}${stderr}`.match(RECAP_RE);
+  const recapMatch = `${proc.stdout}${proc.stderr}`.match(RECAP_RE);
   const testsRan = recapMatch ? Number(recapMatch[1]) : null;
   const filesRan = recapMatch ? Number(recapMatch[2]) : null;
-  const exitCode = testsRan === null || testsRan < 1 || filesRan === null || filesRan < files.length ? 1 : (proc.exitCode ?? 1);
+  const exitCode = testsRan === null || testsRan < 1 || filesRan === null || filesRan < files.length ? 1 : proc.exitCode;
   return { exitCode, ms, testsRan, filesRan };
 }
 
@@ -70,7 +62,7 @@ if (!filesMatch) {
 
 console.log(`[partition-integration-tests] ${allFiles.length} tests/*.test.ts on disk -> ${files.length} exempted (integration) files: ${files.join(", ")}`);
 
-const result = runBunTest(files);
+const result = await runBunTest(files);
 
 const ranNote =
   result.testsRan === null || result.filesRan === null
