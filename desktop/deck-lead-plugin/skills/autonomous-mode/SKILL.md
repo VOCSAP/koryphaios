@@ -60,7 +60,7 @@ Tu décides seul :
 
 Une question sans réponse ne bloque que sa propre ligne. Tu ne restes jamais en attente : tu passes à une autre carte ou tâche non bloquée du lot, et la question imprimée dit ce qui continue pendant que l'opérateur décide (« En attendant : je passe à <carte> »). Si plus rien n'est débloqué, la question le dit et tu t'arrêtes là.
 
-Si `ask_operator` rend un ticket, tu passes à une carte non bloquée et tu rappelles plus tard `ask_operator_wait` avec ce ticket ; tu ne supposes jamais la réponse.
+`ask_operator` rend toujours un ticket aussitôt, jamais la réponse : la réponse, ou l'avis que la question a été fermée, arrive plus tard comme message du canal claude-peers de l'expéditeur `operator`. Tu passes à une carte non bloquée, ou tu termines ton tour ; tu n'appelles rien pour attendre et tu ne supposes jamais la réponse. Si tu crains qu'un message soit perdu, `check_messages` le relit. Une question à laquelle l'opérateur a répondu à l'écran se ferme avec `inbox_close`.
 
 Si `ask_operator` est absent de ta session ou répond en erreur (approbations distantes non armées), pose la question à l'écran et marque la carte `triage: needs-info` par `roadmap_update`.
 

@@ -31,7 +31,7 @@ acks to the supervisor.)
 ## Operator inbox (✉, agents → operator)
 
 The lead and the supervisor write to the human with `notify_operator` (one-way
-notice) or `ask_operator` (blocking question); a worker goes through its lead,
+notice) or `ask_operator` (question, answered later by a channel message); a worker goes through its lead,
 and `send_message` to `operator` is refused. The window drains the broker inbox
 every 10 s into the Inbox panel (unread bubble on the rail) with one system
 notification per batch.

@@ -45,7 +45,7 @@ PermissionRequest hook/module -> client signé -> /approval/*
 |---|---|---|
 | C | `claude-peers`, global | `list_peers`, `send_message`, `check_messages`, `wait_for_message`, `whoami`, `set_summary`, `set_id`, `list_groups`, `switch_group` |
 | R | `kory-roadmap`, global | `roadmap_list`, `roadmap_get`, `roadmap_add`, `roadmap_update`, `roadmap_append_context`, `roadmap_archive` |
-| O | `kory-operator`, lead/superviseur Kory | `ask_operator`, `ask_operator_wait`, `notify_operator`, `graph_draft_prepare`, `graph_draft_send` |
+| O | `kory-operator`, lead/superviseur Kory | `ask_operator`, `notify_operator`, `graph_draft_prepare`, `graph_draft_send` |
 | D | `kory-deck`, lead/superviseur Kory | `deck_spawn_session`, `deck_spawn_team`, `deck_close_session`, `deck_run_directive`, `deck_team_playbook`, `deck_team_agents`, `deck_list_agents`, `deck_list_models`, `deck_list_presets`, `deck_list_sessions`, `deck_sandbox_exec`, `deck_restart_session`, `deck_close_all`, `deck_create_worktree`, `deck_list_worktrees`, `deck_remove_worktree`, `deck_list_templates`, `deck_apply_template`, `deck_save_template`, `deck_announce`, `roadmap_dispatch` |
 | V | `demo-browser`, hors familles, agent démo | `demo_read`, `demo_navigate`, `demo_click`, `demo_type`, `demo_wait` |
 

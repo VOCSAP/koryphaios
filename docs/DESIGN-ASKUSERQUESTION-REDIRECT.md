@@ -128,13 +128,14 @@ repli de l'`AttentionDetector` (§2, point ouvert P6).
 
 Le pipeline d'approbation est complet et n'est PAS à dupliquer :
 
-- **Producteur déclaratif** : `ask_operator` / `ask_operator_wait`
+- **Producteur déclaratif** : `ask_operator`
   (`server.ts`, `handleAskOperator`). Lit le credential de session
   (`CLAUDE_PEERS_APPROVAL_FILE`, `shared/approval-client.ts`), poste
   `/approval/add` avec `kind: "question"`, `title`, `question`, `options[]`
   (≤ 10), `merge: "never"`, `reply_route: "channel"` si la session a une
-  identité pair sinon `"pty"`, puis `/approval/wait` par tranches de 90 s avec
-  ticket. La valeur de retour de l'outil EST la réponse.
+  identité pair sinon `"pty"`, puis rend le ticket aussitôt, sans attendre.
+  La réponse arrive plus tard comme message de canal de l'expéditeur
+  `operator`.
 - **Producteur structurel** : `desktop/hooks/approval-hook.ts`, câblé sur
   `PermissionRequest` (matcher vide, donc TOUTES les tuiles) et `Notification`
   (matcher vide, liste d'admission interne réduite à `agent_needs_input`).
@@ -314,8 +315,8 @@ servie quand même, correctement. C'est le filet, sans faux Allow/Deny.
 - **Le hook répond lui-même (M2, `updatedInput.answers`)** : il devrait BLOQUER
   jusqu'au verdict sans rien afficher dans la tuile (viole R1 de
   `docs/DESIGN-NOTIFY-EVENTS.md`), repose sur un comportement non documenté,
-  et fait de la durée du hook la borne de l'attente là où `ask_operator_wait`
-  est reprenable indéfiniment.
+  et fait de la durée du hook la borne de l'attente là où `ask_operator`
+  rend un ticket et n'attend pas.
 - **Volet A partout, en donnant `ask_operator` à toutes les tuiles** : ce serait
   revenir sur la décision c9269fef, que le câblage actuel applique (huit tuiles
   sur dix relisent cinq outils inutiles à chaque tour). Le volet B rend ce

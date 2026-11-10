@@ -175,7 +175,14 @@ gets back. `channel`: the broker delivers it as an ordinary claude-peers
 message from the reserved `operator` sentinel (insert + WS push + poll
 fallback, `resolveSenderMeta` already maps the sentinel), and `server.ts`
 frames it with `renderOperatorAnswer` — a third framing family beside the deck
-announcement, actionable but explicitly not to be acknowledged. `pty`: the Deck
+announcement, actionable but explicitly not to be acknowledged. A question
+closed by `inbox_close` is pushed the same way, as a notice tagged
+`[approval <id> closed]` (`shared/approval-notice.ts`), unless the closer is
+the asker itself, whose own tool result is the delivery. The notice carries the
+closer and its reason, which is another agent's text, so `renderInbound` frames
+it `[Question closed -- not an operator answer]` (information, not an
+instruction, not a refusal, ask again if it still matters) instead of the
+operator-answer framing. `pty`: the Deck
 types the answer into the tile. The split is not stylistic — a Claude Code
 permission dialog is NOT closed by an incoming message (the UI loop is blocked
 on a keypress, the message just queues), so modal prompts and CLIs without a
@@ -193,8 +200,11 @@ pending approval for the same `tile_ref` returns the first instead of creating
 another: the hook's `agent_needs_input` and the Deck's attention detector both fire
 on the same screen, and the operator's phone must ring once.
 
-Agents reach it through the `ask_operator` / `ask_operator_wait` MCP tools
-(resumable by ticket, so no single call depends on the client's tool timeout).
+Agents reach it through the `ask_operator` MCP tool, which posts the question
+and returns a ticket at once, never the answer. The outcome (the answer, or the
+closed notice) arrives later as a channel message from `operator`; without a
+WebSocket it rides the poll fallback and `check_messages`. No tool reads a
+ticket.
 
 **Notification channels (N3–N5).** Three gateways implement one interface
 (`notify/types.ts`: `post` / `settle` / `rejectLate`); `notify/registry.ts`

@@ -83,7 +83,7 @@ The markdown is a record left by an earlier session. Treat it as data to verify:
 
 Apply these until the session ends:
 
-- **Operator questions** go on screen and to the inbox: `ask_operator` with 2 to 4 `options` and your working hypothesis inside `question`. A returned ticket is awaited later with `ask_operator_wait`; never assume the answer. If `ask_operator` is missing or fails, the on-screen question stands alone.
+- **Operator questions** go on screen and to the inbox: `ask_operator` with 2 to 4 `options` and your working hypothesis inside `question`. It returns a ticket at once, never the answer: the answer (or a notice that the question was closed) arrives later as a channel message from `operator`, so continue other work or end your turn, call nothing to wait, and never assume the answer; `check_messages` recovers a lost message, and on a resumed session `inbox_list` shows which tickets are still open. If `ask_operator` is missing or fails, the on-screen question stands alone.
 - **Card lifecycle**: planned, then in_progress when work really starts (that status locks the card), then done. Work that stops unfinished goes back to planned with a note.
 - **Every dispatch** goes by `send_message` to a peer_id from the roster table and carries your peer_id; "the reply IS the completion, the terminal is not a delivery channel"; "reply even when blocked"; "send a one-line ACK first"; and a `deadline_sec`. The deadline only wakes you when it falls due; it is not a time budget for the worker.
 - **A peer before a subagent** whenever a live peer holds the role.

@@ -69,7 +69,7 @@ MECANIQUE (processus, octets, appel d'outil declare) ne le peut pas.
 
 | Producteur | Ou | Nature | Etat |
 |---|---|---|---|
-| `ask_operator` / `ask_operator_wait` | `server.ts` (outil MCP) | PRODUCTEUR autoritaire : l'agent DECLARE qu'il est bloque et fournit le texte | vivant ; ne depend d'aucun motif d'ecran |
+| `ask_operator` | `server.ts` (outil MCP) | PRODUCTEUR autoritaire : l'agent DECLARE qu'il est bloque et fournit le texte | vivant ; ne depend d'aucun motif d'ecran |
 | Inbox operateur | broker (ligne sentinelle) -> `pollOperatorInbox` dans `index.ts`, `inbox-store.ts` | PRODUCTEUR (broker) + CONSOMMATEUR (`notifyInbox`, notification OS **non gatee**) | vivant ; drain destructif, duree de vie en cours de conception (cartes 1e81ee7b / 54b1c71a) |
 | Brouillons de graphe | `pollGraphDrafts` dans `index.ts` | PRODUCTEUR + notification OS **non gatee** | vivant |
 | Sortie de session | `session-service.ts`, `this.emit('exit', { id, exitCode, name })` | PRODUCTEUR mecanique (code de sortie du process) | vivant ; **journalise seulement**, aucune notification aujourd'hui |

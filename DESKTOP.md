@@ -84,8 +84,8 @@ Electron + React 19 + zustand, xterm terminals over node-pty. Sources in
   command hook (`desktop/hooks/approval-hook.ts`, timeout 2 147 400 s in
   `desktop/deck-plugin/hooks/hooks.json`), the `ask_operator` MCP tool (open
   questions: no hook covers `AskUserQuestion` or plan approval, and the
-  tool's return value IS the answer, so free text reaches the agent with no
-  keystrokes), and `attention.ts` as the fallback for non-Claude CLIs.
+  answer comes back as a channel message, so free text reaches the agent with
+  no keystrokes), and `attention.ts` as the fallback for non-Claude CLIs.
   Answering IN the Deck settles the approval, which invalidates the remote
   notification (and vice versa: the broker's conditional update makes them
   exclusive). The initial credential expires after 24 h. When the broker
