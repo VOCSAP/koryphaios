@@ -481,6 +481,7 @@ export function runDaemon(opts: RunDaemonOptions): DaemonRun {
     const pidStart = opts.pidStart ?? (await ownPidStart(log));
     const fingerprint = codeFingerprint(opts.codeDir);
     const ports = opts.ports ?? candidatePorts(opts.username, opts.env, log);
+    const rejectedPorts = new Set<number>();
     let target = -1;
     for (let attempt = 0; attempt < ports.length + 3 && daemon === undefined; attempt++) {
       if (stopRequested !== undefined) {
@@ -488,13 +489,16 @@ export function runDaemon(opts: RunDaemonOptions): DaemonRun {
         return 0;
       }
       const scans = await scan(ports, key);
-      target = scans.findIndex((s) => s.outcome.kind === "free");
+      target = scans.findIndex((s) => s.outcome.kind === "free" && !rejectedPorts.has(s.port));
       if (target < 0) {
         log.error(`every candidate port is held by another program or another code root: ${ports.join(", ")}`);
         removeFile(lock, log);
         return 1;
       }
-      for (const skipped of scans.slice(0, target)) log.info(`port ${skipped.port} skipped: ${describeSkipped(skipped)}`);
+      for (const skipped of scans.slice(0, target)) {
+        const reason = rejectedPorts.has(skipped.port) ? "rejected by an earlier listen" : describeSkipped(skipped);
+        log.info(`port ${skipped.port} skipped: ${reason}`);
+      }
       const lower = sameRoot(scans.slice(0, target));
       if (lower !== undefined) {
         log.info(`a daemon of this code root already listens on ${lower.port}: exiting`);
@@ -536,6 +540,7 @@ export function runDaemon(opts: RunDaemonOptions): DaemonRun {
         });
       } catch (e) {
         if (!isPortTaken(e)) throw e;
+        rejectedPorts.add(port);
         log.warn(`port ${port} is taken (${errnoCode(e)}): scanning again`);
       }
     }

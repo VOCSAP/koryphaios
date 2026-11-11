@@ -983,9 +983,27 @@ describe("one daemon per code root, lowest port first", () => {
         return handle;
       },
     });
-    await serving(started, p0 as number);
+    await serving(started, p1 as number);
     expect(calls).toBe(2);
     expect(logOf(started.logDir)).toContain(`is taken (${code})`);
+  });
+
+  test("a port that keeps refusing listen is skipped for the next candidate", async () => {
+    const [p0, p1] = await freePorts(2);
+    const attempted: number[] = [];
+    const started = begin({
+      ports: [p0 as number, p1 as number],
+      start: (opts) => {
+        attempted.push(opts.port);
+        if (opts.port === p0) throw Object.assign(new Error("listen failed"), { code: "EADDRINUSE" });
+        const handle = startDaemon(opts);
+        handles.push(handle);
+        return handle;
+      },
+    });
+    await serving(started, p1 as number);
+    expect(attempted).toEqual([p0 as number, p1 as number]);
+    expect(logOf(started.logDir)).toContain(`port ${p0} skipped: rejected by an earlier listen`);
   });
 
   test("any other listen error ends the run with exit 1 and a log line", async () => {
