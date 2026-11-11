@@ -778,6 +778,39 @@ describe("an Inbox operation has no legacy form, and a door carries only its own
     }
   });
 
+  test("tile telemetry requires its dedicated v1 operator proof", () => {
+    const w = inboxWorld();
+    const payload = { run_ref: INBOX_RUN };
+    const legacy = signed(payload, w.op);
+    expect(w.auth.authenticateOperator(legacy as never, "tile-telemetry" as never)).toEqual({
+      error: "tile-telemetry requires a v1 proof",
+      status: 403,
+    });
+
+    const runProof = w.sign(payload, w.rootCred, "root", INBOX_GATES.tileTelemetry as never);
+    expect(w.auth.authenticateInbox(runProof as never, "tile-telemetry" as never, INBOX_GATES.tileTelemetry as never)).toEqual({
+      error: "credential may not tile-telemetry",
+      status: 403,
+    });
+
+    const operatorPayload = { ...payload, public_key: w.op.cred.publicKey };
+    const operatorProof = {
+      ...operatorPayload,
+      auth: buildInboxProof(w.op.cred.privateKey, operatorPayload, INBOX_GATES.tileTelemetry as never, {
+        kind: "operator",
+        operator_id: w.op.id,
+      }),
+    };
+    expect(w.auth.authenticateInbox(operatorProof as never, "tile-telemetry" as never, INBOX_GATES.tileTelemetry as never)).toMatchObject({
+      kind: "operator",
+      operator_id: w.op.id,
+    });
+    expect(w.auth.authenticateInbox(operatorProof as never, "tile-telemetry" as never, INBOX_GATES.drain)).toEqual({
+      error: "tile-telemetry is not carried by this gate",
+      status: 403,
+    });
+  });
+
   test("a valid v1 proof is refused under a door that does not carry the operation", () => {
     const w = inboxWorld();
     const refused = { error: expect.stringContaining("is not carried by this gate"), status: 403 };

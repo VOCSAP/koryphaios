@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { homedir, release } from 'node:os'
 import { existsSync } from 'node:fs'
 import { basename, join } from 'node:path'
@@ -88,6 +88,8 @@ import type { JoinAnnounceIntent } from '@shared/announce'
 import { peerToolsEnvValue } from './session-env'
 import { PermissionLeaseRuntime, type PermissionLeaseHandle } from './permission-lease-runtime'
 import { mintDepositCapability } from './deposit-capability'
+import { TileTelemetryPublisher } from './peer-telemetry-publisher'
+import { TELEMETRY_CAPABILITY_ENV } from '../../../shared/peer-telemetry'
 import { windowsPtyFor } from '../shared/windows-pty'
 import { isToolNameList } from '../shared/tool-names'
 import { assertClodexContextInput, clodexContextEnv, isClodexContextTokens } from '../shared/clodex-context'
@@ -364,6 +366,7 @@ export class SessionService extends EventEmitter {
   private sessionHandoffLaunches = new Map<string, SessionHandoffLaunch>()
   private thalposDetector: (() => ThalposStatus) | null = null
   private thalposTraced = new Set<string>()
+  private peerTelemetryPublisher: TileTelemetryPublisher | null = null
 
   constructor(
     private getConfig: () => AppConfig,
@@ -411,6 +414,7 @@ export class SessionService extends EventEmitter {
       this.activityTrackerFor(e.id).observe(oscSnap.titleSeq)
     })
     this.pty.on('exit', ({ id, exitCode }: { id: string; exitCode: number }) => {
+      void this.peerTelemetryPublisher?.stop(id)
       this.revokePermissionLease(id)
       this.clearSessionHandoff(id)
       // This listener receives spontaneous exits only.
@@ -584,6 +588,10 @@ export class SessionService extends EventEmitter {
     this.thalposDetector = detector
   }
 
+  setPeerTelemetryPublisher(publisher: TileTelemetryPublisher): void {
+    this.peerTelemetryPublisher = publisher
+  }
+
   setSessionHandoffLaunchProvider(provider: SessionHandoffLaunchProvider): void {
     this.sessionHandoffLaunchProvider = provider
   }
@@ -722,6 +730,7 @@ export class SessionService extends EventEmitter {
     this.screenGuard.stop()
     this.pendingPrompt.clear()
     this.revokeAllPermissionLeases()
+    for (const def of this.defs) void this.peerTelemetryPublisher?.stop(def.id)
     this.pty.killAll()
   }
 
@@ -1013,6 +1022,7 @@ export class SessionService extends EventEmitter {
       if (!def) return
       this.revokePermissionLease(id)
       this.clearSessionHandoff(id)
+      void this.peerTelemetryPublisher?.stop(id)
       this.emit('removed', { id: def.id, name: def.name })
       if (def.sessionId) this.registry.release(def.sessionId)
       this.killWithTrace(id, 'force cleanup')
@@ -1098,6 +1108,7 @@ export class SessionService extends EventEmitter {
     this.revokeAllPermissionLeases()
     for (const d of this.defs) {
       this.clearSessionHandoff(d.id)
+      void this.peerTelemetryPublisher?.stop(d.id)
       this.emit('removed', { id: d.id, name: d.name })
       if (d.sessionId) this.registry.release(d.sessionId)
     }
@@ -1187,7 +1198,10 @@ export class SessionService extends EventEmitter {
     for (const plan of modPlans?.values() ?? []) preservedAttemptIds.add(plan.attemptId)
     this.launchAttempts?.cancelAllExcept(preservedAttemptIds)
     this.revokeAllPermissionLeases()
-    for (const d of this.defs) this.emit('removed', { id: d.id, name: d.name })
+    for (const d of this.defs) {
+      void this.peerTelemetryPublisher?.stop(d.id)
+      this.emit('removed', { id: d.id, name: d.name })
+    }
     this.pty.killAll()
     for (const d of this.defs) void this.cleanupSandbox(d.id, d.name)
     this.thinkingDetector.stop()
@@ -1462,6 +1476,7 @@ export class SessionService extends EventEmitter {
     if (!def) return Promise.reject(new Error(`unknown session ${id}`))
 
     this.revokePermissionLease(id)
+    void this.peerTelemetryPublisher?.stop(id)
     const restart = (async (): Promise<SessionRuntime> => {
       await this.cleanupSandbox(def.id, def.name)
       if (modPlan && this.launchAttempts && !this.launchAttempts.isCurrent(modPlan.attemptId)) {
@@ -1729,10 +1744,13 @@ export class SessionService extends EventEmitter {
     this.registry.add(def.sessionId)
 
     const r = this.runtime.get(def.id)
+    const telemetryCapability = sandboxed ? null : randomBytes(32).toString('hex')
+    const telemetryLaunchHash = telemetryCapability === null ? null : createHash('sha256').update(telemetryCapability).digest('hex')
 
     const sessionEnv = {
       ...this.getScopeEnv(),
       CLAUDE_PEERS_DESK_SESSION: def.id,
+      ...(telemetryCapability !== null ? { [TELEMETRY_CAPABILITY_ENV]: telemetryCapability } : null),
       CLAUDE_PEERS_DESK_TILE_CWD: def.cwd,
       CLAUDE_PEERS_ROLE: def.role ?? '',
       CLAUDE_PEERS_SUPERVISOR: def.supervisor === true ? '1' : '0',
@@ -1753,6 +1771,7 @@ export class SessionService extends EventEmitter {
 
     // The supervisor stays on the host because it pilots the Deck through its host-only MCP harness.
     this.sandboxCleanup.delete(def.id)
+    let wrapped = false
     if (!def.supervisor) {
       try {
         const wrapper = this.getSandboxWrapper()
@@ -1776,6 +1795,7 @@ export class SessionService extends EventEmitter {
           }
           command = wrapper.wrap(def.id, def.sessionId, command, def.cwd, sessionEnv)
           this.sandboxCleanup.set(def.id, () => wrapper.cleanup(def.id))
+          wrapped = true
         }
       } catch (e) {
         if (handoffLaunch) this.discardSessionHandoff(handoffLaunch)
@@ -1859,6 +1879,7 @@ export class SessionService extends EventEmitter {
         sessionEnv,
         ({ id, cols, rows }) => this.screenGuard.start(id, cols, rows)
       )
+      if (telemetryLaunchHash !== null && !wrapped) this.peerTelemetryPublisher?.start(def.id, telemetryLaunchHash)
       if (handoffLaunch) this.sessionHandoffLaunches.set(def.id, handoffLaunch)
       this.deadWriteReported.delete(def.id)
     } catch (e) {
@@ -2187,6 +2208,15 @@ export class SessionService extends EventEmitter {
       } else {
         reportError('session', `status file of "${def.name}" refused (${read.reason})`)
       }
+    }
+    if (read.kind === 'ok') {
+      this.peerTelemetryPublisher?.publish(def.id, {
+        model: read.status.model,
+        modelId: read.status.modelId,
+        contextPct: read.status.contextPct,
+        contextWindow: read.status.contextWindow,
+        observedAt: read.status.at
+      })
     }
     if (sameLiveStatus(r.liveStatus, next)) {
       if (r.liveStatus && next && next.at > r.liveStatus.at) r.liveStatus = { ...r.liveStatus, at: next.at }

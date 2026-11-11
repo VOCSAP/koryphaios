@@ -4,7 +4,25 @@ import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { Database } from "bun:sqlite";
-import { startBroker, stopBroker, post, livePid, sha256Hex, groupId, type TestBroker, openBrokerDb } from "./_helper.ts";
+import {
+  startBroker,
+  stopBroker,
+  post,
+  livePid,
+  sha256Hex,
+  groupId,
+  mintRunCredential,
+  operatorInboxProof,
+  registerAttestedInstance,
+  runInboxProof,
+  FIXTURE_OPERATOR,
+  FIXTURE_OPERATOR_ID,
+  type RunCredential,
+  type TestBroker,
+  openBrokerDb,
+} from "./_helper.ts";
+import { extractBracedBody } from "./_braced-body.ts";
+import { buildAuthProof, INBOX_GATES } from "../shared/approval.ts";
 import { fetchTilePeers, TILE_PEERS_TIMEOUT_MS } from "../desktop/src/main/broker-client.ts";
 import { PEER_POLL_MS, TilePeerPoller, type TilePeerBinding } from "../desktop/src/main/peer-state.ts";
 
@@ -17,7 +35,7 @@ let GROUP = "";
 let PASSPHRASE_HASH = "";
 
 beforeAll(async () => {
-  broker = await startBroker({ CLAUDE_PEERS_CLEAN_INTERVAL_SEC: "1" });
+  broker = await startBroker({ CLAUDE_PEERS_CLEAN_INTERVAL_SEC: "1", CLAUDE_PEERS_DORMANT_SWEEP_SEC: "1" });
   GROUP = await groupId(GROUP_PASSPHRASE);
   PASSPHRASE_HASH = await sha256Hex(GROUP_PASSPHRASE);
 });
@@ -130,7 +148,7 @@ describe("/tile-peers resolves a tile to its own registration", () => {
     expect((await tilePeers(["tile-hashless"])).body.peers).toEqual([{ peer_id: tile.peer_id, status: "active" }]);
   });
 
-  test("known limit (card 2327907c): a sandboxed tile restarted while its previous server.ts is still active resolves to that previous peer", async () => {
+  test("a sandboxed tile restarted while its previous server.ts is still active resolves to that previous peer", async () => {
     const previous = await register("tile-sandbox-restart", { host: "0f3c9a1b2d4e", cwd: "/workspace" });
     const restarted = await register("tile-sandbox-restart", { host: "0f3c9a1b2d4e", cwd: "/workspace" });
     expect(restarted.peer_id).not.toBe(previous.peer_id);
@@ -193,6 +211,452 @@ describe("/tile-peers resolves a tile to its own registration", () => {
       { endpoint: { url: broker.url, token: null } }
     );
     expect(peers).toEqual([{ peer_id: tile.peer_id, status: "active" }]);
+  });
+});
+
+describe("peer telemetry stays bound to one attested launch", () => {
+  const TELEMETRY = {
+    model: "Claude Opus 4.6",
+    modelId: "claude-opus-4-6",
+    contextPct: 42,
+    contextWindow: 200_000,
+    observedAt: 1_731_234_567_890,
+  };
+  const DEAD_PID = 999_999_999;
+  let tileSeq = 0;
+
+  interface Tile {
+    run: RunCredential;
+    desk: string;
+    cap: string;
+    cwd: string;
+    token: string;
+    peerId: string;
+  }
+  type ListedPeer = Record<string, unknown> & { peer_id: string; telemetry?: Record<string, unknown> };
+
+  async function newTelemetryRun(): Promise<RunCredential> {
+    await register("telemetry-group-seed");
+    return mintRunCredential(broker, { id: GROUP, hash: PASSPHRASE_HASH });
+  }
+
+  async function launchTile(run: RunCredential, over: { desk?: string; cap?: string; cwd?: string } = {}): Promise<Tile> {
+    const n = ++tileSeq;
+    const tile = {
+      run,
+      desk: over.desk ?? `telemetry-desk-${n}`,
+      cap: over.cap ?? n.toString(16).padStart(64, "0"),
+      cwd: over.cwd ?? `C:\\telemetry\\tile-${n}`,
+    };
+    const res = await registerAttestedInstance(broker, run, DECK_HOST, tile.cwd, {
+      desk_session: tile.desk,
+      telemetry_capability_hash: tile.cap,
+    });
+    expect(res.status).toBe(200);
+    return { ...tile, token: res.body.instance_token, peerId: res.body.peer_id };
+  }
+
+  async function reregister(tile: Tile, extras: Record<string, unknown> = {}) {
+    const res = await registerAttestedInstance(broker, tile.run, DECK_HOST, tile.cwd, {
+      desk_session: tile.desk,
+      telemetry_capability_hash: tile.cap,
+      resume_instance_token: tile.token,
+      ...extras,
+    });
+    expect(res.status).toBe(200);
+    return res.body;
+  }
+
+  function telemetryCall(tile: Tile, action: "publish" | "stop", over: Record<string, unknown> = {}) {
+    const payload = {
+      run_ref: tile.run.run,
+      group_id: tile.run.group,
+      desk_session: tile.desk,
+      launch_hash: tile.cap,
+      action,
+      ...(action === "publish" ? { snapshot: TELEMETRY } : {}),
+      ...over,
+    };
+    return post<{ outcome?: string; ok?: boolean }>(`${broker.url}/tile-telemetry`, {
+      ...payload,
+      auth: operatorInboxProof(payload, INBOX_GATES.tileTelemetry),
+    });
+  }
+
+  async function newObserver(): Promise<string> {
+    return (await register(`telemetry-observer-${++tileSeq}`)).instance_token;
+  }
+
+  async function listedPeer(observer: string, peerId: string): Promise<ListedPeer | undefined> {
+    const res = await post<ListedPeer[]>(`${broker.url}/list-peers`, {
+      instance_token: observer,
+      scope: "machine",
+      cwd: "",
+      git_root: null,
+    });
+    expect(res.status).toBe(200);
+    return res.body.find((p) => p.peer_id === peerId);
+  }
+
+  async function publishedAndVisible(tile: Tile, observer: string, snapshot = TELEMETRY): Promise<void> {
+    expect((await telemetryCall(tile, "publish", { snapshot })).body).toEqual({ outcome: "updated" });
+    expect((await listedPeer(observer, tile.peerId))?.telemetry, "the snapshot is listed before the purge").toEqual(snapshot);
+  }
+
+  async function expectRevivedWithoutSnapshot(tile: Tile, observer: string, why: string): Promise<void> {
+    const entry = await listedPeer(observer, tile.peerId);
+    expect(entry, `${why}: the revived peer is listed again, so an absent snapshot is not an absent peer`).toBeDefined();
+    expect(entry?.telemetry, `${why}: the old snapshot must not come back with the identity`).toBeUndefined();
+    expect(
+      (await telemetryCall(tile, "publish")).body,
+      `${why}: the registry kept no memory of the old observation, so the same sample is new`
+    ).toEqual({ outcome: "updated" });
+  }
+
+  async function until<T>(read: () => Promise<T> | T, done: (value: T) => boolean, what: string, timeoutMs = 8000): Promise<T> {
+    const deadline = Date.now() + timeoutMs;
+    let last = await read();
+    while (!done(last)) {
+      if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}; last=${JSON.stringify(last)}`);
+      await Bun.sleep(50);
+      last = await read();
+    }
+    return last;
+  }
+
+  test("a collision removes the first snapshot instead of selecting one peer", async () => {
+    await register("telemetry-group-seed");
+    const run = await mintRunCredential(broker, { id: GROUP, hash: PASSPHRASE_HASH });
+    const capabilityHash = "a".repeat(64);
+    const first = await registerAttestedInstance(broker, run, DECK_HOST, "C:\\telemetry", {
+      desk_session: "telemetry-tile",
+      telemetry_capability_hash: capabilityHash,
+    });
+    expect(first.status).toBe(200);
+    const payload = {
+      run_ref: run.run,
+      group_id: run.group,
+      desk_session: "telemetry-tile",
+      launch_hash: capabilityHash,
+      action: "publish" as const,
+      snapshot: {
+        model: "Claude Opus 4.6",
+        modelId: "claude-opus-4-6",
+        contextPct: 42,
+        contextWindow: 200_000,
+        observedAt: 1_731_234_567_890,
+      },
+    };
+    const published = await post<{ outcome: string }>(`${broker.url}/tile-telemetry`, {
+      ...payload,
+      auth: operatorInboxProof(payload, INBOX_GATES.tileTelemetry),
+    });
+    expect(published).toEqual({ status: 200, body: { outcome: "updated" } });
+
+    const second = await registerAttestedInstance(broker, run, DECK_HOST, "C:\\telemetry", {
+      desk_session: "telemetry-tile",
+      telemetry_capability_hash: capabilityHash,
+    });
+    expect(second.status).toBe(200);
+    const peers = await (await fetch(`${broker.url}/admin/peers`)).json() as Array<Record<string, unknown>>;
+    for (const peerId of [first.body.peer_id, second.body.peer_id]) {
+      expect(peers.find((peer) => peer.peer_id === peerId)?.telemetry, peerId).toBeUndefined();
+    }
+  });
+
+  test("/unregister forgets the owner in the telemetry registry", () => {
+    const src = readFileSync(join(import.meta.dir, "..", "broker.ts"), "utf-8").replace(/\r\n/g, "\n");
+    const anchor = src.indexOf('case "/unregister": {');
+    expect(anchor, "the /unregister case exists in broker.ts").toBeGreaterThan(-1);
+    const body = extractBracedBody(src, src.indexOf("{", anchor));
+    expect(
+      body,
+      "/unregister must call peerTelemetryRegistry.forgetOwner or the owner's link and snapshot outlive the peer"
+    ).toContain("peerTelemetryRegistry.forgetOwner(");
+  });
+
+  test("refuses legacy, run-key and expired-run telemetry proofs", async () => {
+    await register("telemetry-proof-seed");
+    const run = await mintRunCredential(broker, { id: GROUP, hash: PASSPHRASE_HASH });
+    const payload = {
+      run_ref: run.run,
+      group_id: run.group,
+      desk_session: "proof-tile",
+      launch_hash: "b".repeat(64),
+      action: "stop" as const,
+    };
+    const legacy = await post(`${broker.url}/tile-telemetry`, {
+      ...payload,
+      auth: buildAuthProof(FIXTURE_OPERATOR.privateKey, payload, {
+        kind: "operator",
+        operator_id: FIXTURE_OPERATOR_ID,
+      }),
+    });
+    expect(legacy.status).toBe(401);
+    const asRun = await post(`${broker.url}/tile-telemetry`, {
+      ...payload,
+      auth: runInboxProof(run, payload, INBOX_GATES.tileTelemetry),
+    });
+    expect(asRun.status).toBe(403);
+    const noRun = { ...payload, run_ref: randomUUID() };
+    const expired = await post(`${broker.url}/tile-telemetry`, {
+      ...noRun,
+      auth: operatorInboxProof(noRun, INBOX_GATES.tileTelemetry),
+    });
+    expect(expired.status).toBe(403);
+  });
+
+  test("a publication naming another group than the run's is refused for want of a live credential", async () => {
+    const run = await newTelemetryRun();
+    const tile = await launchTile(run);
+    const observer = await newObserver();
+    const foreign = await telemetryCall(tile, "publish", { group_id: await groupId(randomUUID()) });
+    expect(foreign.status, "the run credential is live in its own group only").toBe(403);
+    expect((await listedPeer(observer, tile.peerId))?.telemetry).toBeUndefined();
+    await publishedAndVisible(tile, observer);
+  });
+
+  test("a disconnect drops the snapshot, so the peer resumed by its token starts without one", async () => {
+    const tile = await launchTile(await newTelemetryRun());
+    const observer = await newObserver();
+    await publishedAndVisible(tile, observer);
+
+    await post(`${broker.url}/disconnect`, { instance_token: tile.token });
+    const back = await reregister(tile);
+    expect(back.instance_token, "the resume gives the same identity back").toBe(tile.token);
+    await expectRevivedWithoutSnapshot(tile, observer, "disconnect");
+  });
+
+  test("a heartbeat sweep that makes a peer dormant drops its snapshot", async () => {
+    const tile = await launchTile(await newTelemetryRun());
+    const observer = await newObserver();
+    await publishedAndVisible(tile, observer);
+
+    withDb((db) =>
+      db.run("UPDATE peers SET last_seen = ? WHERE instance_token = ?", [new Date(Date.now() - 3_600_000).toISOString(), tile.token])
+    );
+    const status = () =>
+      withDb((db) => (db.query("SELECT status FROM peers WHERE instance_token = ?").get(tile.token) as { status: string }).status);
+    await until(status, (s) => s === "dormant", "the sweep to make the silent peer dormant");
+
+    await reregister(tile);
+    await expectRevivedWithoutSnapshot(tile, observer, "sweep");
+  }, 15_000);
+
+  test("registering over a peer whose process died drops its snapshot before reviving it", async () => {
+    const tile = await launchTile(await newTelemetryRun());
+    const observer = await newObserver();
+    await publishedAndVisible(tile, observer);
+
+    withDb((db) => db.run("UPDATE peers SET pid = ? WHERE instance_token = ?", [DEAD_PID, tile.token]));
+    const back = await reregister(tile);
+    expect(back.instance_token, "the dead peer's own row is revived").toBe(tile.token);
+    await expectRevivedWithoutSnapshot(tile, observer, "dead pid");
+  });
+
+  test("a cleanup tick that finds a peer's process dead drops its snapshot", async () => {
+    const tile = await launchTile(await newTelemetryRun());
+    const observer = await newObserver();
+    await publishedAndVisible(tile, observer);
+
+    withDb((db) => db.run("UPDATE peers SET pid = ? WHERE instance_token = ?", [DEAD_PID, tile.token]));
+    const status = () =>
+      withDb((db) => (db.query("SELECT status FROM peers WHERE instance_token = ?").get(tile.token) as { status: string }).status);
+    await until(status, (s) => s === "dormant", "the cleanup tick to make the peer with a dead process dormant");
+
+    await reregister(tile);
+    await expectRevivedWithoutSnapshot(tile, observer, "cleanup tick");
+  }, 15_000);
+
+  test("a dormant peer whose process died is revived by its session key without its snapshot", async () => {
+    const tile = await launchTile(await newTelemetryRun());
+    const observer = await newObserver();
+    await publishedAndVisible(tile, observer);
+
+    await post(`${broker.url}/disconnect`, { instance_token: tile.token });
+    withDb((db) => db.run("UPDATE peers SET pid = ? WHERE instance_token = ?", [DEAD_PID, tile.token]));
+    const back = await reregister(tile);
+    expect(back.instance_token, "the dormant row is resurrected, not replaced").toBe(tile.token);
+    await expectRevivedWithoutSnapshot(tile, observer, "dormant resurrection");
+  });
+
+  test("a resume by token of a live peer keeps the snapshot it already published", async () => {
+    const tile = await launchTile(await newTelemetryRun());
+    const observer = await newObserver();
+    await publishedAndVisible(tile, observer);
+
+    const back = await reregister(tile);
+    expect(back.instance_token).toBe(tile.token);
+    expect((await listedPeer(observer, tile.peerId))?.telemetry, "re-registering the same token is not a new launch").toEqual(TELEMETRY);
+    expect((await telemetryCall(tile, "publish")).body).toEqual({ outcome: "unchanged" });
+  });
+
+  test("a registration that collides with a live launch silences both peers", async () => {
+    const run = await newTelemetryRun();
+    const first = await launchTile(run);
+    const observer = await newObserver();
+    await publishedAndVisible(first, observer);
+
+    const second = await registerAttestedInstance(broker, run, DECK_HOST, first.cwd, {
+      desk_session: first.desk,
+      telemetry_capability_hash: first.cap,
+      resume_instance_token: first.token,
+      pid: broker.proc.pid,
+    });
+    expect(second.status).toBe(200);
+    expect(second.body.instance_token, "the live holder of the session key is not taken over").not.toBe(first.token);
+
+    for (const [who, peerId] of [["first", first.peerId], ["second", second.body.peer_id]] as const) {
+      const entry = await listedPeer(observer, peerId);
+      expect(entry, `${who} peer is listed`).toBeDefined();
+      expect(entry?.telemetry, `${who} peer: two live peers of one launch cannot be told apart`).toBeUndefined();
+    }
+
+    await post(`${broker.url}/disconnect`, { instance_token: second.body.instance_token });
+    const alone = await listedPeer(observer, first.peerId);
+    expect(alone, "the first peer is the only live one of its launch again").toBeDefined();
+    expect(alone?.telemetry, "the observation the collision dropped is not restored by the other peer leaving").toBeUndefined();
+  });
+
+  test("a stop drops the snapshot and a later register or publish recreates nothing", async () => {
+    const tile = await launchTile(await newTelemetryRun());
+    const observer = await newObserver();
+    await publishedAndVisible(tile, observer);
+
+    expect((await telemetryCall(tile, "stop")).body).toEqual({ ok: true });
+    expect((await listedPeer(observer, tile.peerId))?.telemetry).toBeUndefined();
+
+    await reregister(tile);
+    expect((await telemetryCall(tile, "publish")).body, "the closed launch refuses a late publication").toEqual({ outcome: "closed" });
+    expect((await listedPeer(observer, tile.peerId))?.telemetry).toBeUndefined();
+  });
+
+  test("a stop for one tile leaves the sibling tiles of the same run publishing", async () => {
+    const run = await newTelemetryRun();
+    const closing = await launchTile(run);
+    const sibling = await launchTile(run);
+    const observer = await newObserver();
+    await publishedAndVisible(closing, observer);
+    await publishedAndVisible(sibling, observer);
+
+    expect((await telemetryCall(closing, "stop")).body).toEqual({ ok: true });
+
+    expect((await listedPeer(observer, sibling.peerId))?.telemetry, "the sibling tile never asked to stop").toEqual(TELEMETRY);
+    const next = { ...TELEMETRY, observedAt: TELEMETRY.observedAt + 1, contextPct: 43 };
+    expect((await telemetryCall(sibling, "publish", { snapshot: next })).body, "the sibling still publishes").toEqual({
+      outcome: "updated",
+    });
+  });
+
+  test("a run whose credential lapsed loses the snapshots of its tiles while they stay active", async () => {
+    const run = await newTelemetryRun();
+    const tile = await launchTile(run);
+    const observer = await newObserver();
+    await publishedAndVisible(tile, observer);
+
+    withDb((db) => db.run("UPDATE approval_session_tokens SET revoked_at = ? WHERE token_id = ?", [new Date().toISOString(), run.tokenId]));
+    const entry = await until(
+      () => listedPeer(observer, tile.peerId),
+      (e) => e !== undefined && e.telemetry === undefined,
+      "the lapsed run to lose its telemetry"
+    );
+    expect(entry?.status, "the peer itself is still listed as active").toBe("active");
+  }, 15_000);
+
+  test("a publication refused for a lapsed credential drops the run's snapshots on the spot", async () => {
+    const run = await newTelemetryRun();
+    const tile = await launchTile(run);
+    const observer = await newObserver();
+    await publishedAndVisible(tile, observer);
+
+    withDb((db) => db.run("UPDATE approval_session_tokens SET revoked_at = ? WHERE token_id = ?", [new Date().toISOString(), run.tokenId]));
+    expect((await telemetryCall(tile, "publish")).status).toBe(403);
+    expect((await listedPeer(observer, tile.peerId))?.telemetry).toBeUndefined();
+  });
+
+  test("the listed telemetry holds exactly the five public fields and nothing private reaches the peer entry", async () => {
+    const tile = await launchTile(await newTelemetryRun());
+    const observer = await newObserver();
+    const sent = { ...TELEMETRY, instance_token: "wire-extra-token", run_ref: "wire-extra-run" };
+    expect((await telemetryCall(tile, "publish", { snapshot: sent })).body).toEqual({ outcome: "updated" });
+
+    const entry = await listedPeer(observer, tile.peerId);
+    expect(entry?.telemetry, "the snapshot is listed").toBeDefined();
+    expect(Object.keys(entry!.telemetry!).sort(), "telemetry carries these five keys and no wire extra").toEqual([
+      "contextPct",
+      "contextWindow",
+      "model",
+      "modelId",
+      "observedAt",
+    ]);
+    expect(entry!.telemetry).toEqual(TELEMETRY);
+
+    const text = JSON.stringify(entry);
+    const privateValues: Record<string, string> = {
+      "instance token": tile.token,
+      "run_ref": tile.run.run,
+      "operator_id": FIXTURE_OPERATOR_ID,
+      "launch capability hash": tile.cap,
+      "desk session": tile.desk,
+      "desk session hash": await sha256Hex(tile.desk),
+      "wire-extra token": "wire-extra-token",
+      "wire-extra run": "wire-extra-run",
+    };
+    for (const [what, value] of Object.entries(privateValues)) {
+      expect(text.includes(value), `the ${what} must not appear anywhere in the listed peer`).toBe(false);
+    }
+    const names: string[] = [];
+    const collect = (value: unknown): void => {
+      if (typeof value !== "object" || value === null) return;
+      for (const [key, inner] of Object.entries(value)) {
+        names.push(key);
+        collect(inner);
+      }
+    };
+    collect(entry);
+    expect(
+      names.filter((n) => /hash|token|run_ref|operator|capability|desk/i.test(n)),
+      "no private field name appears in the listed peer"
+    ).toEqual([]);
+  });
+
+  test.each([
+    ["both context fields", { contextPct: null, contextWindow: null }],
+    ["the percentage alone", { contextPct: null, contextWindow: 200_000 }],
+    ["the window alone", { contextPct: 42, contextWindow: null }],
+  ] as const)("an unknown context stays null in the listed telemetry: %s", async (_label, context) => {
+    const tile = await launchTile(await newTelemetryRun());
+    const observer = await newObserver();
+    const snapshot = { ...TELEMETRY, ...context };
+    expect((await telemetryCall(tile, "publish", { snapshot })).body).toEqual({ outcome: "updated" });
+
+    const listed = (await listedPeer(observer, tile.peerId))?.telemetry;
+    expect(listed, "the snapshot is listed").toBeDefined();
+    expect(listed!.contextPct, "an unknown percentage is null, never 0 and never absent").toBe(context.contextPct);
+    expect(listed!.contextWindow, "an unknown window is null, never 0 and never absent").toBe(context.contextWindow);
+    expect(listed, "the other fields of the snapshot are untouched").toEqual(snapshot);
+  });
+
+  test.each([
+    ["distinct tile ids", false],
+    ["one tile id restarted under another launch hash", true],
+  ] as const)("two tiles in one cwd do not share telemetry (%s)", async (_label, sameDesk) => {
+    const run = await newTelemetryRun();
+    const cwd = `C:\\telemetry\\shared-cwd-${++tileSeq}`;
+    const a = await launchTile(run, { cwd, desk: `telemetry-shared-desk-${tileSeq}` });
+    const b = await launchTile(run, { cwd, desk: sameDesk ? a.desk : `telemetry-other-desk-${tileSeq}` });
+    expect(b.token).not.toBe(a.token);
+    const observer = await newObserver();
+
+    const mine = { ...TELEMETRY, contextPct: 10 };
+    const theirs = { ...TELEMETRY, contextPct: 90, modelId: "claude-sonnet-4-6" };
+    expect((await telemetryCall(a, "publish", { snapshot: mine })).body).toEqual({ outcome: "updated" });
+    expect((await listedPeer(observer, a.peerId))?.telemetry, "tile A lists its own sample").toEqual(mine);
+    expect((await listedPeer(observer, b.peerId))?.telemetry, "tile B has published nothing").toBeUndefined();
+
+    expect((await telemetryCall(b, "publish", { snapshot: theirs })).body).toEqual({ outcome: "updated" });
+    expect((await listedPeer(observer, a.peerId))?.telemetry, "tile A keeps its own sample").toEqual(mine);
+    expect((await listedPeer(observer, b.peerId))?.telemetry, "tile B lists its own sample").toEqual(theirs);
   });
 });
 

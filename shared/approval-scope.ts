@@ -245,6 +245,7 @@ const GATE_OPERATIONS = {
   [INBOX_GATES.drain]: ["inbox-drain"],
   [INBOX_GATES.purge]: ["inbox-purge"],
   [INBOX_GATES.reply]: ["inbox-reply"],
+  [INBOX_GATES.tileTelemetry]: ["tile-telemetry"],
 } as const satisfies Record<InboxGate, readonly ApprovalOperation[]>;
 
 const V1_ONLY_OPERATIONS: ReadonlySet<ApprovalOperation> = new Set<ApprovalOperation>([
@@ -252,6 +253,7 @@ const V1_ONLY_OPERATIONS: ReadonlySet<ApprovalOperation> = new Set<ApprovalOpera
   "inbox-drain",
   "inbox-purge",
   "inbox-reply",
+  "tile-telemetry",
 ]);
 
 declare const ACTOR_BRAND: unique symbol;

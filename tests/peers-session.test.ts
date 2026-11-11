@@ -13,6 +13,7 @@ import type { TicketClaims } from "../shared/mcp-daemon-protocol.ts";
 import { resolveProjectKey } from "../shared/project-key.ts";
 import { canonicalWriterGeneration } from "../shared/relay-liveness.ts";
 import { DEPOSIT_CAPABILITY_ENV, hashCapability } from "../shared/context-buffer.ts";
+import { TELEMETRY_CAPABILITY_ENV } from "../shared/peer-telemetry.ts";
 import {
   readGlobalSessionIdentityFile,
   readSessionIdentityFile,
@@ -66,6 +67,7 @@ const IDENTITY_KEYS = [
   "desk_session",
   "cc_session_id",
   "deposit_capability_hash",
+  "telemetry_capability_hash",
   "context_resume_version",
 ];
 
@@ -494,8 +496,6 @@ describe("two sessions in one process", () => {
 
 describe("registration", () => {
   test("the boot and switch_group /register bodies carry every identity key, filled from the session env and pids", async () => {
-    // Mutation: one site builds its body by hand, or any key (cc_session_id,
-    // claude_cli_pid, ...) is dropped from the shared builder, or pid is process.pid.
     // A blank but defined desk session keeps the Inbox credential out of this test.
     const capability = randomBytes(32).toString("hex");
     const h = await openSession({
@@ -506,6 +506,7 @@ describe("registration", () => {
         CLAUDE_PEERS_DESK_SESSION: " ",
         CLAUDE_CODE_SESSION_ID: "cc-session-1",
         [DEPOSIT_CAPABILITY_ENV]: capability,
+        [TELEMETRY_CAPABILITY_ENV]: capability,
       },
     });
     expect(isError(await call(h, "switch_group", { name: "beta" }))).toBe(false);
@@ -522,9 +523,21 @@ describe("registration", () => {
         desk_session: " ",
         cc_session_id: "cc-session-1",
         deposit_capability_hash: hashCapability(capability),
+        telemetry_capability_hash: hashCapability(capability),
       });
     }
     expect(RELAY_PID).not.toBe(process.pid);
+  });
+
+  test("an empty telemetry capability is omitted at boot and after switch_group", async () => {
+    const h = await openSession({
+      groups: { alpha: "alpha-secret", beta: "beta-secret" },
+      env: { CLAUDE_PEERS_GROUP: "alpha", [TELEMETRY_CAPABILITY_ENV]: "" },
+    });
+    expect(isError(await call(h, "switch_group", { name: "beta" }))).toBe(false);
+    for (const body of callsTo(h, "/register").map((call) => call.body)) {
+      expect(body).not.toHaveProperty("telemetry_capability_hash");
+    }
   });
 
   test("the writer generation is measured on the relay pid, not on the host process", async () => {

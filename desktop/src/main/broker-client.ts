@@ -25,6 +25,7 @@ import type {
   TilePeersResponse
 } from '../../../shared/types'
 import type { DeckBrokerMode } from '../shared/types'
+import type { PeerTelemetrySnapshot } from '../../../shared/peer-telemetry'
 
 export interface BrokerEndpoint {
   url: string
@@ -438,6 +439,48 @@ function signRunInboxBody(
 ): Record<string, unknown> {
   const body = { ...base, run_ref: run.runRef }
   return { ...body, auth: run.sign(body, door) }
+}
+
+export interface TileTelemetrySigner {
+  runRef: string
+  sign(body: Record<string, unknown>): unknown
+}
+
+export type TileTelemetryParams = {
+  groupId: string
+  deskSession: string
+  launchHash: string
+  signer: TileTelemetrySigner
+} & (
+  | { action: 'publish'; snapshot: PeerTelemetrySnapshot }
+  | { action: 'stop' }
+)
+
+export async function postTileTelemetry(params: TileTelemetryParams, deps: AnnounceDeps): Promise<void> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+  if (deps.endpoint.token) headers.Authorization = `Bearer ${deps.endpoint.token}`
+  const base = {
+    run_ref: params.signer.runRef,
+    group_id: params.groupId,
+    desk_session: params.deskSession,
+    launch_hash: params.launchHash,
+    action: params.action,
+    ...(params.action === 'publish' ? { snapshot: params.snapshot } : {})
+  }
+  const body = { ...base, auth: params.signer.sign(base) }
+  const f = deps.fetchFn ?? fetch
+  const res = await f(`${deps.endpoint.url}/tile-telemetry`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(TILE_PEERS_TIMEOUT_MS)
+  })
+  if (res.ok) return
+  if (res.status === 409) {
+    const outcome = await res.json().then((parsed: { outcome?: unknown } | null) => parsed?.outcome, () => undefined)
+    if (outcome === 'unattributed' || outcome === 'unchanged') return
+  }
+  throw new Error(`tile-telemetry failed: ${res.status}`)
 }
 
 /** One drained operator-inbox message (PLAN C12). */

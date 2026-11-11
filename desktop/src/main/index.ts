@@ -25,6 +25,7 @@ import { buildAppMenu } from './menu'
 import { rendererMenuActions, SAVE_TEMPLATE_ITEM_ID } from './menu-template'
 import { safeExternalUrl } from './external-url'
 import { SessionService, type DirectiveOutcome } from './session-service'
+import { TileTelemetryPublisher } from './peer-telemetry-publisher'
 import { PermissionLeaseRuntime } from './permission-lease-runtime'
 import {
   createMissingDirTracker,
@@ -87,6 +88,7 @@ import {
   fetchDispatchRequests,
   fetchGraphDrafts,
   fetchOperatorInbox,
+  postTileTelemetry,
   purgeOperatorInbox,
   replyOperatorInbox,
   contextTransactionFields,
@@ -223,7 +225,7 @@ import { mintDemoTile, readUserMcpServers, writeDemoMcpConfig } from './demo-dri
 import { startDesignEndpoint, type DesignEndpoint } from './design-endpoint'
 import { createClodexController, type ClodexController } from './clodex-lifecycle-controller'
 import { announceModelsChanged } from './model-registry'
-import { createBeforeQuitHandler } from './before-quit'
+import { closeTelemetryThenApprovals, createBeforeQuitHandler } from './before-quit'
 import { ServeService } from './serve-service'
 import { SERVE_QUIT_DEADLINE_MS } from './serve-lifecycle'
 import {
@@ -285,6 +287,7 @@ import { matchPermissionDialog, permissionDialogShown } from './permission-dialo
 import { trustPromptShown } from './attention'
 import { applyEnrolment, ensureOperatorIdentity, exportEnrolment } from './operator-identity'
 import { buildAuthProof, type Approval } from './approval-auth'
+import { INBOX_GATES } from '../../../shared/approval'
 import { addEventSink, broadcast, regHandle } from './api-registry'
 import { CompanionServer } from './companion-server'
 import {
@@ -753,6 +756,15 @@ const runInboxSigner: () => RunInboxSigner | undefined = createRunInboxSigner({
   activeGroupId: () => activeScope.groupId,
   sign: (identity, body, door) => signOperatorBody(identity, body, INBOX_DOOR_GATE[door])
 })
+const tileTelemetrySigner = () => {
+  const run = approvals.inboxRun()
+  const identity = approvals.operator
+  if (!run || identity === null || run.groupId !== activeScope.groupId) return undefined
+  return {
+    runRef: run.runRef,
+    sign: (body: Record<string, unknown>) => signOperatorBody(identity, body, INBOX_GATES.tileTelemetry)
+  }
+}
 const permissionLeases = new PermissionLeaseRuntime({
   stateDir: join(app.getPath('userData'), APP_STATE_SUBDIR),
   runId: approvalRunId,
@@ -809,6 +821,16 @@ const service = new SessionService(
   }),
   permissionLeases
 )
+
+const tileTelemetryPublisher = new TileTelemetryPublisher({
+  send: async (draft) => {
+    const signer = tileTelemetrySigner()
+    if (!signer) throw new Error('operator telemetry signer unavailable')
+    await postTileTelemetry({ ...draft, groupId: activeScope.groupId, signer }, { endpoint: resolveBrokerEndpoint() })
+  },
+  report: (message, error) => reportError('peer-telemetry', message, error)
+})
+service.setPeerTelemetryPublisher(tileTelemetryPublisher)
 
 const statusLineUnavailableTracker = createMissingDirTracker()
 const getStatusLineSettings = (): string => {
@@ -4009,9 +4031,20 @@ const runBeforeQuit = createBeforeQuitHandler({
     // Dropping the socket is itself the revocation: the phone sees it and shows
     // "host disconnected".
     { label: 'companionServer', run: () => void companionServer?.stop(true) },
-    // A stale credential surviving the app would keep raising approvals nobody
-    // applies.
-    { label: 'approvals', timeoutMs: 2_000, run: () => approvals.close() },
+    {
+      label: 'tileTelemetryThenApprovals',
+      timeoutMs: 5_000,
+      run: () =>
+        closeTelemetryThenApprovals({
+          closeTelemetry: () => tileTelemetryPublisher.close(),
+          // A stale credential surviving the app would keep raising approvals
+          // nobody applies.
+          closeApprovals: () => approvals.close(),
+          onError: reportError,
+          telemetryTimeoutMs: 2_000,
+          approvalsTimeoutMs: 2_000
+        })
+    },
     { label: 'scopeEnv', run: () => activeScopeEnv.cleanup() }
   ],
   release: () =>

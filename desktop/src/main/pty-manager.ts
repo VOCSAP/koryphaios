@@ -165,6 +165,7 @@ export class PtyManager extends EventEmitter {
     if (!request.extraEnv || !('KORY_STATUS_FALLBACK' in request.extraEnv)) delete env.KORY_STATUS_FALLBACK
     if (!request.extraEnv || !('KORY_PERMISSION_LEASE' in request.extraEnv)) env.KORY_PERMISSION_LEASE = ''
     if (!request.extraEnv || !('CLAUDE_PEERS_DEPOSIT_CAPABILITY' in request.extraEnv)) env.CLAUDE_PEERS_DEPOSIT_CAPABILITY = ''
+    if (!request.extraEnv || !('CLAUDE_PEERS_TELEMETRY_CAPABILITY' in request.extraEnv)) env.CLAUDE_PEERS_TELEMETRY_CAPABILITY = ''
 
     const proc = this.pty.spawn(file, args, {
       name: 'xterm-256color',

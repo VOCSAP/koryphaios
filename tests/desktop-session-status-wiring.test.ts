@@ -1,12 +1,9 @@
-// SessionService wiring of the per-tile statusLine report, driven through the
-// real class: which spawns get `--settings`, and what the peer poll broadcasts
-// from the status file. node-pty is replaced by a fake that records the spawn
-// line, store.ts (electron) by a no-op persist; the `@shared/*` aliases, which
-// bun does not resolve from desktop/, are pointed at the real modules.
 import { test, expect, mock, afterEach, spyOn } from "bun:test";
+import { createHash } from "node:crypto";
 import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync, rmSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { extractParenBody } from "./_braced-body.ts";
 import { ATTENTION_CONFIRMATION_DELAY_MS } from "../desktop/src/main/attention.ts";
 
 const SHARED = join(import.meta.dir, "..", "desktop", "src", "shared");
@@ -70,6 +67,7 @@ const { encodeProjectDir } = await import("../desktop/src/main/session-transcrip
 const { STATUS_FILE_VERSION } = await import("../desktop/src/shared/session-status.ts");
 const { STATUS_SILENCE_MS, STALE_STATUS_FILE_MS } = await import("../desktop/src/main/session-status-file.ts");
 const { onDeckError } = await import("../desktop/src/main/log.ts");
+const { buildLaunchScript, sandboxifyEnv } = await import("../desktop/src/main/sandbox-command.ts");
 
 const SETTINGS = '{"statusLine":{"type":"command","command":"bun statusline"}}';
 const TILE_SETTINGS = '{"tui":"default","env":{"CLAUDE_CODE_NO_FLICKER":"0","CLAUDE_CODE_NATIVE_CURSOR":"1"},"statusLine":{"type":"command","command":"bun statusline"}}';
@@ -154,6 +152,193 @@ test("a host Claude Code tile gets one settings file and marks the fallback writ
   expect(lastLine(), "host settings are never inline JSON").not.toContain(TILE_SETTINGS);
   expect(lastLine(), "host tile receives a settings path").toMatch(/--settings '[^']+\.json'/);
   expect(spawned.at(-1)!.env.KORY_STATUS_FALLBACK).toBe("1");
+});
+
+test("each restart of a host tile mints and hashes a fresh telemetry capability", async () => {
+  const { svc } = setup();
+  const launchHashes: string[] = [];
+  svc.setPeerTelemetryPublisher({
+    start: (_tileId: string, launchHash: string) => launchHashes.push(launchHash),
+    stop: () => Promise.resolve(),
+    publish: () => {}
+  } as never);
+
+  svc.create({});
+  const first = spawned.at(-1)!.env.CLAUDE_PEERS_TELEMETRY_CAPABILITY;
+  expect(first).toMatch(/^[0-9a-f]{64}$/);
+  expect(launchHashes).toEqual([createHash("sha256").update(first).digest("hex")]);
+
+  spawned.at(-1)!.exit(1);
+  await svc.restart(svc.list()[0]!.id);
+  const second = spawned.at(-1)!.env.CLAUDE_PEERS_TELEMETRY_CAPABILITY;
+  expect(second).toMatch(/^[0-9a-f]{64}$/);
+  expect(second).not.toBe(first);
+  expect(launchHashes).toEqual([
+    createHash("sha256").update(first).digest("hex"),
+    createHash("sha256").update(second).digest("hex")
+  ]);
+});
+
+test("a sandboxed tile gets no telemetry capability: not in the env, not in the launch script, and no publisher start", () => {
+  const sbx = mkdtempSync(join(tmpdir(), "kory-sbx-peers-"));
+  tmpDirs.push(sbx);
+  const { svc } = setup({ sandboxPeersDir: sbx });
+  const started: string[] = [];
+  svc.setPeerTelemetryPublisher({
+    start: (tileId: string) => started.push(tileId),
+    stop: () => Promise.resolve(),
+    publish: () => {}
+  } as never);
+  const wrapperEnvKeys: string[][] = [];
+  const scripts: string[] = [];
+  svc.setSandboxProvider(() => ({
+    engine: "docker",
+    containerId: "sandbox",
+    wrap: (_tileId: string, _sessionId: string, command: string, _cwd: string, env: Record<string, string>) => {
+      wrapperEnvKeys.push(Object.keys(env));
+      scripts.push(buildLaunchScript({ command, cwd: "/work", env: sandboxifyEnv(env, () => null) }, "/run/pid"));
+      return command;
+    },
+    cleanup: () => Promise.resolve()
+  }) as never);
+
+  svc.create({});
+
+  expect(wrapperEnvKeys, "the sandbox wrapper is reached").toHaveLength(1);
+  expect(wrapperEnvKeys[0], "the env handed to the sandbox wrapper carries no capability").not.toContain("CLAUDE_PEERS_TELEMETRY_CAPABILITY");
+  expect(scripts[0], "the launch script written for the container carries no capability").not.toContain("CLAUDE_PEERS_TELEMETRY_CAPABILITY");
+  expect(spawned.at(-1)!.env.CLAUDE_PEERS_TELEMETRY_CAPABILITY || "", "the spawned process env carries no capability").toBe("");
+  expect(started, "the publisher never starts for a sandboxed tile").toEqual([]);
+});
+
+test("a tile the sandbox wrapper actually wraps never starts the publisher, even if the sandbox directory read says host", () => {
+  const { svc } = setup();
+  const started: string[] = [];
+  svc.setPeerTelemetryPublisher({
+    start: (tileId: string) => started.push(tileId),
+    stop: () => Promise.resolve(),
+    publish: () => {}
+  } as never);
+  let wrapped = 0;
+  svc.setSandboxProvider(() => ({
+    engine: "docker",
+    containerId: "sandbox",
+    wrap: (_tileId: string, _sessionId: string, command: string) => {
+      wrapped += 1;
+      return command;
+    },
+    cleanup: () => Promise.resolve()
+  }) as never);
+
+  svc.create({});
+
+  expect(wrapped, "the sandbox wrapper is reached").toBe(1);
+  expect(started).toEqual([]);
+});
+
+test("a host tile keeps its telemetry capability and starts the publisher with its hash", () => {
+  const { svc } = setup();
+  const started: Array<[string, string]> = [];
+  svc.setPeerTelemetryPublisher({
+    start: (tileId: string, launchHash: string) => started.push([tileId, launchHash]),
+    stop: () => Promise.resolve(),
+    publish: () => {}
+  } as never);
+
+  const tile = svc.create({});
+
+  const capability = spawned.at(-1)!.env.CLAUDE_PEERS_TELEMETRY_CAPABILITY!;
+  expect(capability).toMatch(/^[0-9a-f]{64}$/);
+  expect(started).toEqual([[tile.id, createHash("sha256").update(capability).digest("hex")]]);
+});
+
+test("each tile ending path stops telemetry for its own launch", async () => {
+  const stops: string[] = [];
+  const publisher = {
+    start: () => {},
+    publish: () => {},
+    stop: (id: string) => {
+      stops.push(id);
+      return Promise.resolve();
+    }
+  };
+  const exercise = async (end: (svc: InstanceType<typeof SessionService>, id: string) => Promise<void> | void) => {
+    const { svc } = setup();
+    svc.setPeerTelemetryPublisher(publisher as never);
+    const tile = svc.create({});
+    await end(svc, tile.id);
+    expect(stops.splice(0), "the ending path stops telemetry for the launch it ends").toEqual([tile.id]);
+  };
+
+  await exercise(async (_svc, _id) => { spawned.at(-1)!.exit(1); await Promise.resolve(); });
+  await exercise((svc, id) => svc.remove(id));
+  await exercise((svc) => svc.closeAll());
+  await exercise((svc, id) => svc.restart(id));
+  await exercise((svc) => svc.restoreFrom([]));
+  await exercise((svc) => svc.stop());
+});
+
+test("poll publishes the source observation instant before checking displayed status equality", () => {
+  const { svc, peersDir } = setup();
+  const sent: Array<{ observedAt: number }> = [];
+  svc.setPeerTelemetryPublisher({
+    start: () => {},
+    stop: () => Promise.resolve(),
+    publish: (_id: string, snapshot: { observedAt: number }) => sent.push(snapshot)
+  } as never);
+  const tile = svc.create({});
+  const observedAt = Date.now() + 60_000;
+  writeStatus(peersDir, tile.id, "Opus", observedAt);
+  poll(svc);
+
+  const laterObservedAt = observedAt + 1;
+  writeStatus(peersDir, tile.id, "Opus", laterObservedAt);
+  poll(svc);
+
+  expect(
+    sent.map((snapshot) => snapshot.observedAt),
+    "broker telemetry publishes each source observation before sameLiveStatus returns"
+  ).toEqual([observedAt, laterObservedAt]);
+});
+
+test.each([
+  ["explicit nulls", { pct: null, size: null }],
+  ["absent keys", {}],
+] as const)("poll hands the publisher null, not 0, for an unknown context (%s)", (_label, context) => {
+  const { svc, peersDir } = setup();
+  const sent: Array<Record<string, unknown>> = [];
+  svc.setPeerTelemetryPublisher({
+    start: () => {},
+    stop: () => Promise.resolve(),
+    publish: (_id: string, snapshot: Record<string, unknown>) => sent.push(snapshot)
+  } as never);
+  const tile = svc.create({});
+  const observedAt = Date.now() + 60_000;
+  mkdirSync(peersDir, { recursive: true });
+  writeFileSync(
+    join(peersDir, `desk-status-${tile.id}.json`),
+    JSON.stringify({ v: STATUS_FILE_VERSION, model_id: "id-Opus", model: "Opus", ...context, at: observedAt })
+  );
+  poll(svc);
+
+  expect(sent, "the status file is published once, so the null assertions below are not vacuous").toHaveLength(1);
+  expect(sent[0]!.modelId, "the identity of the status file reaches the publisher").toBe("id-Opus");
+  expect(sent[0]!.contextPct, "an unknown percentage reaches the publisher as null, never 0").toBeNull();
+  expect(sent[0]!.contextWindow, "an unknown window reaches the publisher as null, never 0").toBeNull();
+});
+
+test("index creates the telemetry publisher and binds it to SessionService", () => {
+  const source = readFileSync(join(import.meta.dir, "..", "desktop", "src", "main", "index.ts"), "utf8");
+  const constructAnchor = "new TileTelemetryPublisher(";
+  const constructAt = source.indexOf(constructAnchor);
+  expect(constructAt, "index.ts must create the tile telemetry publisher").toBeGreaterThanOrEqual(0);
+  const openIdx = constructAt + constructAnchor.length - 1;
+  const args = extractParenBody(source, openIdx, true);
+  const afterConstruct = source.slice(openIdx + args.length + 2).trimStart();
+  expect(
+    afterConstruct.startsWith("service.setPeerTelemetryPublisher(tileTelemetryPublisher)"),
+    "the created publisher must be bound to SessionService by the statement right after its construction"
+  ).toBe(true);
 });
 
 test("a host tile without a settings file is not spawned", () => {

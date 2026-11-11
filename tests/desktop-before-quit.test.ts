@@ -1,7 +1,9 @@
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { createBeforeQuitHandler } from "../desktop/src/main/before-quit.ts";
+import { closeTelemetryThenApprovals, createBeforeQuitHandler } from "../desktop/src/main/before-quit.ts";
+import { reachedWithin } from "./_bounded-await.ts";
+import { extractParenBody } from "./_braced-body.ts";
 import { SERVE_QUIT_DEADLINE_MS } from "../desktop/src/main/serve-lifecycle.ts";
 
 interface Harness {
@@ -84,8 +86,20 @@ function pendingRelease(): { release: () => Promise<string>; settle: () => void 
   return { release: () => pending, settle };
 }
 
-function hasBoundedApprovalClose(source: string): boolean {
-  return source.includes("{ label: 'approvals', timeoutMs: 2_000, run: () => approvals.close() }");
+function hasSequencedTelemetryAndApprovalsEffect(source: string): boolean {
+  const callAnchor = "closeTelemetryThenApprovals(";
+  const callAt = source.indexOf(callAnchor);
+  if (callAt < 0) return false;
+  const header = /label: 'tileTelemetryThenApprovals',\s*timeoutMs: (\d[\d_]*),\s*run: \(\) =>\s*$/.exec(source.slice(0, callAt));
+  if (!header) return false;
+  const body = extractParenBody(source, callAt + callAnchor.length - 1, true);
+  const bound = (key: string) => Number(new RegExp(`${key}: (\\d[\\d_]*)`).exec(body)?.[1]?.replaceAll("_", ""));
+  return (
+    body.includes("closeTelemetry: () => tileTelemetryPublisher.close()") &&
+    body.includes("closeApprovals: () => approvals.close()") &&
+    body.includes("onError: reportError") &&
+    Number(header[1]!.replaceAll("_", "")) > bound("telemetryTimeoutMs") + bound("approvalsTimeoutMs")
+  );
 }
 
 interface ServeShutdownDeps {
@@ -138,10 +152,76 @@ function serveShutdownDeps(order: string[], quit: (options: { deadlineMs?: numbe
   }
 }
 
-test("the main process bounds and awaits approval revocation at quit", () => {
-  const source = readFileSync(join(import.meta.dir, "..", "desktop", "src", "main", "index.ts"), "utf8");
-  expect(hasBoundedApprovalClose(source)).toBe(true);
-  expect(hasBoundedApprovalClose(source.replace("run: () => approvals.close()", "run: () => void approvals.close()"))).toBe(false);
+// index.ts imports electron and cannot be loaded under bun, so the call site is
+// pinned by one anchor; the sequencing itself is executed below.
+test("the main process quits through one effect that sequences telemetry then approvals, bounded above both closes", () => {
+  const source = readIndex();
+  expect(hasSequencedTelemetryAndApprovalsEffect(source), "the quit plan must hold one effect calling closeTelemetryThenApprovals").toBe(true);
+  expect(
+    hasSequencedTelemetryAndApprovalsEffect(source.replace("closeApprovals: () => approvals.close()", "closeApprovals: () => void approvals.close()")),
+    "an approvals close that is not returned escapes its bound"
+  ).toBe(false);
+  expect(source.split("approvals.close()"), "no second approvals close may race the telemetry stops").toHaveLength(2);
+});
+
+function sequenceHarness(opts: { closeTelemetry: () => void | Promise<void>; telemetryTimeoutMs?: number; approvalsTimeoutMs?: number; closeApprovals?: () => void | Promise<void> }) {
+  const order: string[] = [];
+  const errors: { message: string; error?: unknown }[] = [];
+  const run = closeTelemetryThenApprovals({
+    closeTelemetry: () => {
+      order.push("telemetry started");
+      return opts.closeTelemetry();
+    },
+    closeApprovals: () => {
+      order.push("approvals closed");
+      return opts.closeApprovals?.();
+    },
+    onError: (_scope, message, error) => errors.push({ message, error }),
+    telemetryTimeoutMs: opts.telemetryTimeoutMs ?? 2_000,
+    approvalsTimeoutMs: opts.approvalsTimeoutMs ?? 2_000,
+  });
+  return { order, errors, run };
+}
+
+test("approvals close only after a slow telemetry close has settled", async () => {
+  let settle = (): void => {};
+  const slow = new Promise<void>((resolve) => {
+    settle = () => {
+      order.push("telemetry settled");
+      resolve();
+    };
+  });
+  const { order, errors, run } = sequenceHarness({ closeTelemetry: () => slow });
+  for (let turn = 0; turn < 5; turn++) await Promise.resolve();
+  expect(order, "approvals must not be revoked while the telemetry stops are in flight").toEqual(["telemetry started"]);
+  settle();
+  await reachedWithin(run, "sequence settling");
+  expect(order).toEqual(["telemetry started", "telemetry settled", "approvals closed"]);
+  expect(errors).toEqual([]);
+});
+
+test.each([
+  ["rejects", () => Promise.reject(new Error("stop refused"))],
+  ["throws synchronously", () => { throw new Error("stop exploded"); }],
+] as const)("approvals still close, after the failure is traced, when the telemetry close %s", async (_how, closeTelemetry) => {
+  const { order, errors, run } = sequenceHarness({ closeTelemetry });
+  await reachedWithin(run, "sequence settling");
+  expect(order).toEqual(["telemetry started", "approvals closed"]);
+  expect(errors.map((e) => e.message)).toEqual(["tile telemetry close failed; approvals close follows"]);
+  expect(errors[0]!.error).toBeInstanceOf(Error);
+});
+
+test("approvals still close, after a timeout is traced, when the telemetry close never settles", async () => {
+  const { order, errors, run } = sequenceHarness({ closeTelemetry: () => new Promise<void>(() => {}), telemetryTimeoutMs: 20 });
+  await reachedWithin(run, "sequence settling");
+  expect(order).toEqual(["telemetry started", "approvals closed"]);
+  expect(errors.map((e) => e.message)).toEqual(["tile telemetry close failed; approvals close follows"]);
+  expect((errors[0]!.error as Error).message).toContain("timed out after 20ms");
+});
+
+test("an approvals close that never settles rejects within its own bound", async () => {
+  const { run } = sequenceHarness({ closeTelemetry: () => {}, closeApprovals: () => new Promise<void>(() => {}), approvalsTimeoutMs: 20 });
+  await expect(reachedWithin(run, "sequence settling")).rejects.toThrow("timed out after 20ms");
 });
 
 test("Serve shutdown closes the session dir, quits Serve under its deadline, then removes the session state", async () => {

@@ -57,6 +57,40 @@ describe("formatPeer: a local peer renders exactly as before federation", () => 
   });
 });
 
+describe("formatPeer: telemetry", () => {
+  test.each([
+    [48.4, 200000, "Telemetry: Opus · context 48% · 200k · 2m ago"],
+    [48.6, 1000000, "Telemetry: Opus · context 49% · 1M · 2m ago"],
+    [48.6, 1500000, "Telemetry: Opus · context 49% · 1.5M · 2m ago"],
+  ])("renders the source observation compactly", (contextPct, contextWindow, expected) => {
+    const block = formatPeer(peer({
+      telemetry: { model: "Opus", modelId: "claude-opus-4", contextPct, contextWindow, observedAt: NOW - 120_000 }
+    }), NOW);
+    expect(lines(block)).toContain(expected);
+  });
+
+  test("keeps an unknown context unknown and omits an unknown window", () => {
+    const block = formatPeer(peer({
+      telemetry: { model: "Sonnet", modelId: "claude-sonnet-4", contextPct: null, contextWindow: null, observedAt: NOW - 15_000 }
+    }), NOW);
+    expect(lines(block)).toContain("Telemetry: Sonnet · context unknown · 15s ago");
+    expect(block).not.toContain("0%");
+  });
+
+  test("reports future observations as clock skew", () => {
+    const block = formatPeer(peer({
+      telemetry: { model: "Opus", modelId: "claude-opus-4", contextPct: 48, contextWindow: 200000, observedAt: NOW + 1 }
+    }), NOW);
+    expect(lines(block)).toContain("Telemetry: Opus · context 48% · 200k · clock skew");
+    expect(block).not.toContain("-1");
+    expect(block).not.toContain("just now");
+  });
+
+  test("renders no telemetry line when the broker did not project one", () => {
+    expect(lines(formatPeer(peer(), NOW)).some((line) => line.startsWith("Telemetry: "))).toBe(false);
+  });
+});
+
 describe("formatPeer: the Via: line", () => {
   test("via 'upstream' names the central broker", () => {
     const block = formatPeer(peer({ via: "upstream" }), NOW);

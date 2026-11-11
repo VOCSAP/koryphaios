@@ -318,6 +318,16 @@ test("sandboxifyEnv translates the FORCE_GROUP file transport inline", () => {
 // agent greets the operator with "Select login method" although the volume
 // holds valid credentials. Forcing the config root onto the mounted dir is
 // what makes one login serve every container.
+test("sandboxifyEnv drops the telemetry capability, so no launch script can export it", () => {
+  const env = { CLAUDE_PEERS_TELEMETRY_CAPABILITY: "c".repeat(64), CLAUDE_PEERS_DESK_SESSION: "tile-1" };
+  const out = sandboxifyEnv(env, () => null);
+  expect(out).not.toHaveProperty("CLAUDE_PEERS_TELEMETRY_CAPABILITY");
+  expect(out.CLAUDE_PEERS_DESK_SESSION, "the rest of the env still passes through").toBe("tile-1");
+  const script = buildLaunchScript({ command: "claude", cwd: "/work", env: out }, "/kory-run/pid-tile-1");
+  expect(script).not.toContain("CLAUDE_PEERS_TELEMETRY_CAPABILITY");
+  expect(script).not.toContain("c".repeat(64));
+});
+
 test("sandboxifyEnv forces the config root onto the shared volume", () => {
   expect(sandboxifyEnv({}, () => null).CLAUDE_CONFIG_DIR).toBe("/home/kory/.claude");
   // A host value is a Windows path here: it must never win.

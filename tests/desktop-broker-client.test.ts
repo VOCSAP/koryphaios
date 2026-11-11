@@ -10,6 +10,7 @@ import {
   buildAnnouncePayload,
   sendAnnounce,
   fetchOperatorInbox,
+  postTileTelemetry,
   purgeOperatorInbox,
   replyOperatorInbox,
   fetchDispatchRequests,
@@ -56,6 +57,137 @@ test("resolveBrokerEndpoint: env overrides the config file", () => {
 test("resolveBrokerEndpoint tolerates a missing config file", () => {
   const ep = resolveBrokerEndpoint({ CLAUDE_PEERS_PORT: "8000" } as unknown as NodeJS.ProcessEnv, "/no/such/config.json");
   expect(ep.url).toBe("http://127.0.0.1:8000");
+});
+
+test("postTileTelemetry signs the complete publish body with the operator proof", async () => {
+  let request: Request | undefined;
+  await postTileTelemetry({
+    groupId: "group",
+    deskSession: "tile",
+    launchHash: "a".repeat(64),
+    action: "publish",
+    snapshot: { model: "Opus", modelId: "claude-opus-4", contextPct: null, contextWindow: 200000, observedAt: 1234 },
+    signer: { runRef: "run", sign: (body) => ({ signed: body }) }
+  }, {
+    endpoint: { url: "http://broker.test", token: "operator-token" },
+    fetchFn: async (input, init) => {
+      request = new Request(input, init);
+      return new Response("{}", { status: 200 });
+    }
+  });
+  expect(request!.url).toBe("http://broker.test/tile-telemetry");
+  expect(request!.headers.get("Authorization")).toBe("Bearer operator-token");
+  expect(await request!.json()).toEqual({
+    run_ref: "run",
+    group_id: "group",
+    desk_session: "tile",
+    launch_hash: "a".repeat(64),
+    action: "publish",
+    snapshot: { model: "Opus", modelId: "claude-opus-4", contextPct: null, contextWindow: 200000, observedAt: 1234 },
+    auth: {
+      signed: {
+        run_ref: "run",
+        group_id: "group",
+        desk_session: "tile",
+        launch_hash: "a".repeat(64),
+        action: "publish",
+        snapshot: { model: "Opus", modelId: "claude-opus-4", contextPct: null, contextWindow: 200000, observedAt: 1234 }
+      }
+    }
+  });
+});
+
+test("postTileTelemetry gives up on a POST that never answers, within a bounded time", async () => {
+  const controller = new AbortController();
+  const requested: number[] = [];
+  const original = AbortSignal.timeout;
+  AbortSignal.timeout = ((ms: number) => {
+    requested.push(ms);
+    return controller.signal;
+  }) as typeof AbortSignal.timeout;
+  try {
+    const pending = postTileTelemetry({
+      groupId: "group",
+      deskSession: "tile",
+      launchHash: "a".repeat(64),
+      action: "stop",
+      signer: { runRef: "run", sign: (body) => ({ signed: body }) }
+    }, {
+      endpoint: { url: "http://broker.test", token: null },
+      fetchFn: (_input, init) =>
+        new Promise<Response>((_resolve, reject) => {
+          const signal = init?.signal;
+          if (!signal) return reject(new Error("fetch called without a signal"));
+          signal.addEventListener("abort", () => reject(new Error("aborted")));
+        })
+    });
+    controller.abort();
+    await expect(pending).rejects.toThrow("aborted");
+    expect(requested).toHaveLength(1);
+    expect(requested[0]).toBeGreaterThan(0);
+    expect(requested[0]).toBeLessThanOrEqual(10_000);
+  } finally {
+    AbortSignal.timeout = original;
+  }
+});
+
+test("postTileTelemetry signs a stop without attaching a stale snapshot", async () => {
+  let request: Request | undefined;
+  await postTileTelemetry({
+    groupId: "group",
+    deskSession: "tile",
+    launchHash: "b".repeat(64),
+    action: "stop",
+    signer: { runRef: "run", sign: (body) => ({ signed: body }) }
+  }, {
+    endpoint: { url: "http://broker.test", token: null },
+    fetchFn: async (input, init) => {
+      request = new Request(input, init);
+      return new Response("{}", { status: 200 });
+    }
+  });
+
+  expect(await request!.json()).toEqual({
+    run_ref: "run",
+    group_id: "group",
+    desk_session: "tile",
+    launch_hash: "b".repeat(64),
+    action: "stop",
+    auth: {
+      signed: {
+        run_ref: "run",
+        group_id: "group",
+        desk_session: "tile",
+        launch_hash: "b".repeat(64),
+        action: "stop"
+      }
+    }
+  });
+});
+
+function telemetryAnswer(status: number, body: unknown): Promise<void> {
+  return postTileTelemetry({
+    groupId: "group",
+    deskSession: "tile",
+    launchHash: "a".repeat(64),
+    action: "publish",
+    snapshot: { model: "Opus", modelId: "claude-opus-4", contextPct: null, contextWindow: 200000, observedAt: 1 },
+    signer: { runRef: "run", sign: (b) => ({ signed: b }) }
+  }, {
+    endpoint: { url: "http://broker.test", token: null },
+    fetchFn: async () => Response.json(body, { status })
+  });
+}
+
+test("postTileTelemetry resolves on a 409 unattributed or unchanged answer", async () => {
+  await telemetryAnswer(409, { outcome: "unattributed" });
+  await telemetryAnswer(409, { outcome: "unchanged" });
+});
+
+test("postTileTelemetry still throws on a 409 closed answer and on other failures", async () => {
+  await expect(telemetryAnswer(409, { outcome: "closed" })).rejects.toThrow("409");
+  await expect(telemetryAnswer(409, { outcome: "stale" })).rejects.toThrow("409");
+  await expect(telemetryAnswer(500, { error: "boom" })).rejects.toThrow("500");
 });
 
 // ----- adopting a loopback broker the caller's BROKER_URL did not choose -----

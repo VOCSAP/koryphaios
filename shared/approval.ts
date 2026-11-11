@@ -181,9 +181,9 @@ export function buildAuthProof(
 export const INBOX_PROOF_VERSION = 1;
 
 /**
- * One constant per door that accepts an Inbox proof. The verifier owns the
- * gate: a proof never declares which door it was meant for, so a proof signed
- * for one door cannot be replayed at another.
+ * One constant per door that accepts a v1 proof. The verifier owns the gate:
+ * a proof never declares which door it was meant for, so a proof signed for one
+ * door cannot be replayed at another.
  */
 export const INBOX_GATES = {
   register: "POST /register",
@@ -197,6 +197,7 @@ export const INBOX_GATES = {
   drain: "POST /operator-inbox",
   purge: "POST /operator-inbox/purge",
   reply: "POST /operator-inbox/reply",
+  tileTelemetry: "POST /tile-telemetry",
 } as const;
 
 export type InboxGate = (typeof INBOX_GATES)[keyof typeof INBOX_GATES];
@@ -363,6 +364,7 @@ export const APPROVAL_OPERATIONS = [
   "inbox-drain",
   "inbox-purge",
   "inbox-reply",
+  "tile-telemetry",
   ...INBOX_OPERATIONS,
 ] as const;
 

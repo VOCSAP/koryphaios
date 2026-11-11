@@ -178,7 +178,7 @@ function executeLeaseCreationFailure(source: string) {
     "sessionEnv",
     "isClaudeLaunch",
     "reportError",
-    `let r = null;\nlet handoffLaunch = null;\n${body
+    `let r = null;\nlet handoffLaunch = null;\nlet telemetryLaunchHash = null;\n${body
       .slice(start)
       .replace("let permissionLease: PermissionLeaseHandle | null = null", "let permissionLease = null")}\nreturn sessionEnv;`
   ) as (

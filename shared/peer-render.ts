@@ -32,6 +32,20 @@ export function formatDuration(ms: number): string {
   return `${Math.floor(hours / 24)}d`;
 }
 
+function formatTokenWindow(tokens: number): string {
+  const unit = tokens >= 1_000_000 ? 1_000_000 : 1_000;
+  const suffix = tokens >= 1_000_000 ? "M" : "k";
+  const rounded = Math.round((tokens / unit) * 10) / 10;
+  return `${Number.isInteger(rounded) ? rounded : rounded.toFixed(1)}${suffix}`;
+}
+
+function formatTelemetry(p: NonNullable<PublicPeer["telemetry"]>, now: number): string {
+  const context = p.contextPct === null ? "context unknown" : `context ${Math.round(p.contextPct)}%`;
+  const window = p.contextWindow === null ? [] : [formatTokenWindow(p.contextWindow)];
+  const age = p.observedAt > now ? "clock skew" : `${formatDuration(now - p.observedAt)} ago`;
+  return `Telemetry: ${p.model} · ${context} · ${[...window, age].join(" · ")}`;
+}
+
 export function formatPeer(p: PublicPeer, now: number = Date.now()): string {
   const statusLabel = { active: "🟢 active", sleep: "🟡 sleep", closed: "🔴 closed" }[p.activity_status];
   const idLine = p.host ? `peer_id: ${p.peer_id}  (${p.host})` : `peer_id: ${p.peer_id}`;
@@ -53,6 +67,7 @@ export function formatPeer(p: PublicPeer, now: number = Date.now()): string {
   if (p.upstream_peer_id && p.upstream_peer_id !== p.peer_id) {
     parts.push(`Federated as: ${p.upstream_peer_id}`);
   }
+  if (p.telemetry) parts.push(formatTelemetry(p.telemetry, now));
   parts.push(`Last exchange: ${formatElapsed(p.last_activity_at, now)}`);
   return parts.join("\n  ");
 }

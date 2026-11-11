@@ -411,6 +411,7 @@ export function sandboxifyEnv(
 ): Record<string, string> {
   const out: Record<string, string> = {}
   for (const [key, value] of Object.entries(env)) {
+    if (key === 'CLAUDE_PEERS_TELEMETRY_CAPABILITY') continue
     if (key === 'CLAUDE_PEERS_FORCE_GROUP_FILE') {
       if (value) {
         const secret = readSecretFile(value)

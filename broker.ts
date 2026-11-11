@@ -45,6 +45,8 @@ import {
   type ContextDepositResponse,
 } from "./shared/context-buffer.ts";
 import { ContextRegistry } from "./shared/context-registry.ts";
+import { validateTileTelemetryRequest } from "./shared/peer-telemetry.ts";
+import { createPeerTelemetryRegistry } from "./shared/peer-telemetry-registry.ts";
 import { guardedInterval as guardInterval } from "./shared/guarded-interval.ts";
 import { measureWriterGeneration } from "./shared/process-generation.ts";
 import {
@@ -2070,6 +2072,20 @@ function deriveDefaultId(host: string, cwd: string, groupId: GroupId): string {
 // registered from the same machine. Cross-machine peers are reaped via the
 // heartbeat staleness sweep (sweepInactivePeers).
 const BROKER_HOST = hostname();
+const peerTelemetryRegistry = createPeerTelemetryRegistry({ isLive: peerIsLive });
+
+function purgeTelemetryRunsWithoutLiveCredential(): void {
+  for (const run of peerTelemetryRegistry.runs()) {
+    const live = db.query(
+      `SELECT EXISTS(
+         SELECT 1 FROM approval_session_tokens
+          WHERE operator_id = ? AND inbox_purpose = 'run' AND run_ref = ? AND group_id = ?
+            AND revoked_at IS NULL AND expires_at > ?
+       ) AS live`
+    ).get(run.operatorId, run.runRef, run.groupId, new Date().toISOString()) as { live: number };
+    if (live.live !== 1) peerTelemetryRegistry.forgetRun(run);
+  }
+}
 
 function cleanStalePeers(): void {
   // Phase 1: bascule active -> dormant pour les pids morts (same-host only).
@@ -2086,6 +2102,7 @@ function cleanStalePeers(): void {
         "UPDATE peers SET status = 'dormant' WHERE instance_token = ?",
         [peer.instance_token]
       );
+      peerTelemetryRegistry.forgetOwner(peer.instance_token);
     }
   }
 
@@ -2103,6 +2120,7 @@ function cleanStalePeers(): void {
   for (const { instance_token } of expired) {
     purgeDormantPeerTx(instance_token);
   }
+  purgeTelemetryRunsWithoutLiveCredential();
 }
 
 // Must clear BOTH FK directions before deleting the peer row (messages.from_token
@@ -2112,6 +2130,7 @@ const purgeDormantPeerTx = db.transaction((instance_token: string) => {
   db.run("DELETE FROM messages WHERE from_token = ? OR to_token = ?", [instance_token, instance_token]);
   db.run("DELETE FROM peer_sessions WHERE instance_token = ?", [instance_token]);
   db.run("DELETE FROM peers WHERE instance_token = ?", [instance_token]);
+  peerTelemetryRegistry.forgetOwner(instance_token);
 });
 
 cleanStalePeers();
@@ -2146,6 +2165,7 @@ async function sweepInactivePeers(): Promise<void> {
       token,
       cutoff,
     ]);
+    peerTelemetryRegistry.forgetOwner(token);
   };
   // Everything that needs no measure is judged in one synchronous block, so a
   // pass stays atomic for all rows but the few whose process must be measured.
@@ -2162,6 +2182,7 @@ async function sweepInactivePeers(): Promise<void> {
       dormantUnlessHeartbeat(row.instance_token);
     }
   }
+  purgeTelemetryRunsWithoutLiveCredential();
 }
 guardedInterval("sweepInactivePeers", sweepInactivePeers, SWEEP_INTERVAL_SEC * 1000);
 
@@ -3109,6 +3130,7 @@ function handleRegister(body: RegisterRequest): RegisterResponse | { error: stri
           "UPDATE peers SET status = 'dormant' WHERE instance_token = ?",
           [existingPeer.instance_token]
         );
+        peerTelemetryRegistry.forgetOwner(existingPeer.instance_token);
         existingPeer.status = "dormant";
       }
     }
@@ -3343,6 +3365,63 @@ function bindDepositCapability(body: RegisterRequest, instanceToken: string, res
   else contextRegistry.onRegister(instanceToken, hash, resumeVersion);
 }
 
+function bindPeerTelemetry(body: RegisterRequest, instanceToken: string): void {
+  const scope = bindingOfToken(instanceToken);
+  const capabilityHash = body.telemetry_capability_hash;
+  if (!scope || !isCapabilityHashShape(capabilityHash)) return;
+  peerTelemetryRegistry.register({
+    instanceToken,
+    operatorId: scope.operator_id,
+    runRef: scope.run_ref,
+    groupId: scope.group_id,
+    deskSessionHash: deskSessionHash(body.desk_session),
+    capabilityHash,
+  });
+}
+
+function handleTileTelemetry(body: unknown): Response {
+  const request = validateTileTelemetryRequest(body);
+  if (!request) return Response.json({ error: "invalid tile telemetry request" }, { status: 400 });
+  const identity = approvalAuth.authenticateInbox(
+    body as { auth?: ApprovalAuthProof } & Record<string, unknown>,
+    "tile-telemetry",
+    INBOX_GATES.tileTelemetry
+  );
+  if (isAuthError(identity)) return Response.json({ error: identity.error }, { status: identity.status });
+  if (identity.kind !== "operator") return Response.json({ error: "the operator key is required" }, { status: 403 });
+  const live = db.query(
+    `SELECT EXISTS(
+       SELECT 1 FROM approval_session_tokens
+        WHERE operator_id = ? AND inbox_purpose = 'run' AND run_ref = ? AND group_id = ?
+          AND revoked_at IS NULL AND expires_at > ?
+     ) AS live`
+  ).get(identity.operator_id, request.run_ref, request.group_id, new Date().toISOString()) as { live: number };
+  const run = { operatorId: identity.operator_id, runRef: request.run_ref, groupId: request.group_id };
+  if (live.live !== 1) {
+    peerTelemetryRegistry.forgetRun(run);
+    return Response.json({ error: "no live credential for this run" }, { status: 403 });
+  }
+  const launch = {
+    ...run,
+    deskSessionHash: deskSessionHash(request.desk_session),
+    capabilityHash: request.launch_hash,
+  };
+  if (request.action === "stop") {
+    peerTelemetryRegistry.stop(launch);
+    return Response.json({ ok: true });
+  }
+  const outcome = peerTelemetryRegistry.publish({
+    ...launch,
+    snapshot: request.snapshot,
+  });
+  if (outcome.outcome === "stale") return Response.json(outcome, { status: 409 });
+  if (outcome.outcome === "conflict") return Response.json(outcome, { status: 409 });
+  if (outcome.outcome === "unattributed") return Response.json(outcome, { status: 409 });
+  if (outcome.outcome === "ambiguous") return Response.json(outcome, { status: 409 });
+  if (outcome.outcome === "closed") return Response.json(outcome, { status: 409 });
+  return Response.json(outcome);
+}
+
 const DEPOSIT_REFUSAL_TEXT: Record<ContextDepositRefusal["reason"], string> = {
   bad_body: "malformed deposit body",
   empty_text: "the deposit text is empty",
@@ -3527,12 +3606,9 @@ function handleContextAck(body: unknown): Response {
   return Response.json(outcome);
 }
 
-// B1: the shape of a peer row on the HTTP boundary, as a pick-list so that a
-// column added to peers is NOT published until it is named here. Retained on
-// purpose: instance_token, pid, client_pid, claude_cli_pid (the impersonation
-// and local-process capabilities), relay_id, relay_ref and relay_base (the
-// federation keys and the name last proposed for a relayed row).
+// Explicit projection fails closed when Peer gains private fields.
 function toPublicPeer(p: Peer): PublicPeer {
+  const telemetry = peerTelemetryRegistry.telemetryFor(p.instance_token);
   return {
     peer_id: p.peer_id,
     group_id: p.group_id,
@@ -3550,6 +3626,17 @@ function toPublicPeer(p: Peer): PublicPeer {
     role: p.role,
     via: p.via,
     upstream_peer_id: p.upstream_peer_id,
+    ...(telemetry
+      ? {
+          telemetry: {
+            model: telemetry.model,
+            modelId: telemetry.modelId,
+            contextPct: telemetry.contextPct,
+            contextWindow: telemetry.contextWindow,
+            observedAt: telemetry.observedAt,
+          },
+        }
+      : {}),
   };
 }
 
@@ -13792,8 +13879,11 @@ const server = Bun.serve<WsData>({
           if (registered.resume_instance_token !== undefined && result.resumed === undefined) result.resumed = false;
           if (registered.pid_generation !== undefined) recordPidGeneration.run(registered.pid_generation, result.instance_token);
           bindDepositCapability(registered, result.instance_token, result.resumed === "token");
+          bindPeerTelemetry(registered, result.instance_token);
           return Response.json(result);
         }
+        case "/tile-telemetry":
+          return handleTileTelemetry(body);
         case "/heartbeat": {
           const result = handleHeartbeat(body as HeartbeatRequest);
           if (result && "error" in result) return Response.json({ ok: false, error: result.error });
@@ -13808,12 +13898,14 @@ const server = Bun.serve<WsData>({
           const result = handleDisconnect(body as DisconnectRequest);
           if (result && "error" in result) return Response.json({ ok: false, error: result.error });
           contextRegistry.forgetOwner((body as DisconnectRequest).instance_token);
+          peerTelemetryRegistry.forgetOwner((body as DisconnectRequest).instance_token);
           return Response.json({ ok: true });
         }
         case "/unregister": {
           const result = handleUnregister(body as UnregisterRequest);
           if (result && "error" in result) return Response.json({ ok: false, error: result.error });
           contextRegistry.forgetOwner((body as UnregisterRequest).instance_token);
+          peerTelemetryRegistry.forgetOwner((body as UnregisterRequest).instance_token);
           return Response.json({ ok: true });
         }
         case "/set-id": {

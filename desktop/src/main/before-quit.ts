@@ -39,6 +39,29 @@ function withinEffectDeadline(run: Promise<void>, timeoutMs: number | undefined)
   })
 }
 
+export interface TelemetryThenApprovalsDeps {
+  readonly closeTelemetry: () => void | Promise<void>
+  readonly closeApprovals: () => void | Promise<void>
+  readonly onError: QuitErrorSink
+  readonly telemetryTimeoutMs: number
+  readonly approvalsTimeoutMs: number
+}
+
+/**
+ * Effects run concurrently, so two closes that depend on each other are one
+ * effect. Revoking the approvals credential first would make the broker refuse
+ * the telemetry stops; a telemetry failure or timeout is traced and never
+ * keeps the approvals close from running. An approvals failure rejects.
+ */
+export async function closeTelemetryThenApprovals(deps: TelemetryThenApprovalsDeps): Promise<void> {
+  try {
+    await withinEffectDeadline(Promise.resolve().then(deps.closeTelemetry), deps.telemetryTimeoutMs)
+  } catch (error) {
+    deps.onError('main', 'tile telemetry close failed; approvals close follows', error)
+  }
+  await withinEffectDeadline(Promise.resolve().then(deps.closeApprovals), deps.approvalsTimeoutMs)
+}
+
 /**
  * @returns a handler that runs the plan once and cancels every quit until its
  * own `quit` call is the one being served.

@@ -178,6 +178,13 @@ describe("credential scope (PLAN §6.8)", () => {
       expect(isOperationAllowed("operator", op)).toBe(true);
     }
   });
+
+  test("tile telemetry is an operator-only operation outside the Inbox family", () => {
+    expect(APPROVAL_OPERATIONS).toContain("tile-telemetry");
+    expect(INBOX_OPERATIONS).not.toContain("tile-telemetry");
+    expect(isOperationAllowed("operator", "tile-telemetry" as never)).toBe(true);
+    expect(isOperationAllowed("session", "tile-telemetry" as never)).toBe(false);
+  });
 });
 
 describe("draft validation (agent-supplied, hostile input #4)", () => {

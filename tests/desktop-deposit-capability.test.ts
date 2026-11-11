@@ -35,12 +35,21 @@ function executeSessionEnvLiteral(source: string): Record<string, string> {
   const at = body.indexOf("const sessionEnv = {");
   if (at < 0) throw new Error("sessionEnv literal not found");
   const literal = extractBracedBody(body, body.indexOf("{", at));
-  const run = new Function("def", "koryModuleServed", "fallbackInjected", `return {${literal}};`) as (
+  const run = new Function(
+    "def",
+    "koryModuleServed",
+    "fallbackInjected",
+    "telemetryCapability",
+    "TELEMETRY_CAPABILITY_ENV",
+    `return {${literal}};`
+  ) as (
     def: { id: string; role?: string },
     koryModuleServed: boolean,
-    fallbackInjected: boolean
+    fallbackInjected: boolean,
+    telemetryCapability: string | null,
+    telemetryCapabilityEnv: string
   ) => Record<string, string>;
-  return run.call({ getScopeEnv: () => ({}) }, { id: "tile-1" }, false, false);
+  return run.call({ getScopeEnv: () => ({}) }, { id: "tile-1" }, false, false, null, "CLAUDE_PEERS_TELEMETRY_CAPABILITY");
 }
 
 /** Runs the real minting statement of startPty with the real mint. */
@@ -153,6 +162,41 @@ test("clears inherited capability", async () => {
   }
 });
 
+const TELEMETRY_ENV = "CLAUDE_PEERS_TELEMETRY_CAPABILITY";
+
+test("one-shot PTY commands clear an inherited telemetry capability", () => {
+  const dir = mkdtempSync(join(tmpdir(), "telemetry-capability-pty-run-"));
+  const probe = join(dir, "pty-run.test.ts");
+  writeFileSync(
+    probe,
+    `import { expect, mock, test } from "bun:test";
+let capability = "unset";
+mock.module("node-pty", () => ({
+  spawn: (_file: string, _args: string[], options: { env: Record<string, string> }) => {
+    capability = options.env.${TELEMETRY_ENV};
+    return { onData: () => {}, onExit: (callback: (event: { exitCode: number }) => void) => callback({ exitCode: 0 }) };
+  },
+}));
+const { runPtyCommand } = await import(${JSON.stringify(pathToFileURL(PTY_RUN_PATH).href)});
+test("clears inherited telemetry capability", async () => {
+  await runPtyCommand({ command: "true", shell: "bash", cwd: process.cwd(), timeoutMs: 1_000 });
+  expect(capability).toBe("");
+});
+`
+  );
+  try {
+    const result = Bun.spawnSync(["bun", "test", probe], {
+      cwd: process.cwd(),
+      env: { ...process.env, [TELEMETRY_ENV]: "f".repeat(64) },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    expect(result.exitCode, result.stderr.toString()).toBe(0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 class FakePty {
   constructor(readonly pid: number) {}
   onData(): void {}
@@ -186,5 +230,31 @@ test("a capability present in the Deck's own environment never reaches a PTY tha
   } finally {
     if (previous === undefined) delete process.env[DEPOSIT_CAPABILITY_ENV];
     else process.env[DEPOSIT_CAPABILITY_ENV] = previous;
+  }
+});
+
+test("a telemetry capability present in the Deck's own environment never reaches a PTY that was not given one", () => {
+  const envs: Array<Record<string, string | undefined>> = [];
+  const manager = new PtyManager({
+    pty: {
+      spawn: ((_file: string, _args: string[], options: { env: Record<string, string | undefined> }) => {
+        envs.push(options.env);
+        return new FakePty(envs.length) as unknown as IPty;
+      }) as never,
+    },
+    setTimeout: (() => 0 as unknown as NodeJS.Timeout) as never,
+    clearTimeout: () => {},
+    reportError: () => {},
+  });
+  const previous = process.env[TELEMETRY_ENV];
+  process.env[TELEMETRY_ENV] = "f".repeat(64);
+  try {
+    manager.spawn("tile-a", "C:/work", { command: "claude", shell: "bash", interactive: false }, {});
+    manager.spawn("tile-b", "C:/work", { command: "claude", shell: "bash", interactive: false });
+    manager.spawn("tile-c", "C:/work", { command: "claude", shell: "bash", interactive: false }, { [TELEMETRY_ENV]: "given" });
+    expect(envs.map((e) => e[TELEMETRY_ENV])).toEqual(["", "", "given"]);
+  } finally {
+    if (previous === undefined) delete process.env[TELEMETRY_ENV];
+    else process.env[TELEMETRY_ENV] = previous;
   }
 });

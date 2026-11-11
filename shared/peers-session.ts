@@ -80,7 +80,8 @@ import {
 } from "./peer-cache.ts";
 import { inboxDepositReadiness } from "./inbox-readiness.ts";
 import type { CompanionIdentity } from "./roadmap-dispatch.ts";
-import { CONTEXT_RESUME_ACK_TTL_MS, CONTEXT_RESUME_VERSION, depositCapabilityHashFromEnv } from "./context-buffer.ts";
+import { CONTEXT_RESUME_ACK_TTL_MS, CONTEXT_RESUME_VERSION, depositCapabilityHashFromEnv, hashCapability } from "./context-buffer.ts";
+import { TELEMETRY_CAPABILITY_ENV } from "./peer-telemetry.ts";
 import { APPROVAL_OPTIONS_MAX, buildInboxProof, validateCloseReason } from "./approval.ts";
 import {
   INBOX_GATES,
@@ -1309,13 +1310,14 @@ export function createPeersSession(input: PeersSessionInput, deps: PeersSessionD
   let wsReconnectTimer: ReturnType<typeof setTimeout> | null = null;
   let wsReconnectDelay: number = deps.settings.wsReconnectInitialMs;
 
-  /** The body both /register sites send; they differ only in the fields passed in. */
   function registerBody(fields: {
     tty: string | null;
     summary: string;
     groupId: string;
     groupSecretHash: string | null;
   }): Record<string, unknown> {
+    const telemetryCapability = input.env[TELEMETRY_CAPABILITY_ENV];
+    const telemetryCapabilityHash = telemetryCapability ? hashCapability(telemetryCapability) : undefined;
     return {
       pid: input.pid,
       cwd: myCwd,
@@ -1333,6 +1335,7 @@ export function createPeersSession(input: PeersSessionInput, deps: PeersSessionD
       desk_session: input.env.CLAUDE_PEERS_DESK_SESSION,
       cc_session_id: input.env.CLAUDE_CODE_SESSION_ID,
       deposit_capability_hash: depositCapabilityHashFromEnv(input.env),
+      ...(telemetryCapabilityHash ? { telemetry_capability_hash: telemetryCapabilityHash } : {}),
       context_resume_version: CONTEXT_RESUME_VERSION,
     };
   }

@@ -1,4 +1,5 @@
 import type { DelegationPolicy, DelegationTaskAction, DelegationTaskStatus } from "./delegated-task.ts";
+import type { PeerTelemetrySnapshot } from "./peer-telemetry.ts";
 
 // Display name for a peer, mutable via set_id, unique per (peer_id, group_id).
 export type PeerId = string;
@@ -60,7 +61,7 @@ export type PeerStatus = "active" | "dormant";
 export type ActivityStatus = "active" | "sleep" | "closed";
 
 /**
- * The peer shape crossing the broker's HTTP boundary (B1). The routing token
+ * The peer shape crossing the broker's HTTP boundary. The routing token
  * (instance_token) and the local PIDs are the impersonation capability and are
  * NEVER serialized to a client — only these public columns are. list-peers and
  * admin/peers both project to this shape.
@@ -72,6 +73,7 @@ export type PublicPeer = Omit<Peer, "instance_token" | "pid" | "client_pid"> & {
    * timestamp of the cut). Absent or null otherwise. Lives in no column.
    */
   link_down_since?: string | null;
+  telemetry?: PeerTelemetrySnapshot;
 };
 
 export interface Message {
@@ -121,7 +123,7 @@ export interface RegisterRequest {
   // broker-side. Never trust this field as authorization proof.
   role?: string;
   /**
-   * Card 3d121a74 lot L3-a. The Deck's per-tile token
+   * The Deck's per-tile token
    * (CLAUDE_PEERS_DESK_SESSION), part of the broker's identity KEY: it decides
    * WHICH peer_sessions row, so N agents sharing one directory each own one
    * instead of fighting over a single row. A randomUUID stable across /clear,
@@ -133,7 +135,7 @@ export interface RegisterRequest {
    */
   desk_session?: string;
   /**
-   * Card 3d121a74 lot L3-a. The CURRENT Claude Code session id
+   * The CURRENT Claude Code session id
    * (CLAUDE_CODE_SESSION_ID). Deliberately NOT part of the key -- it rotates
    * on /clear, which would move the key under a living tile -- it is STORED in
    * the row and only decides whether an existing row may be reclaimed after
@@ -149,6 +151,8 @@ export interface RegisterRequest {
    * refused while two active peers share this hash.
    */
   deposit_capability_hash?: string;
+  /** sha256 hex of this launch's CLAUDE_PEERS_TELEMETRY_CAPABILITY, never the raw value. */
+  telemetry_capability_hash?: string;
   /**
    * Context resume protocol version this server speaks. A self-declaration
    * kept in RAM next to the capability binding, never stored or published; a
