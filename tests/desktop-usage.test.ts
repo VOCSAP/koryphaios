@@ -21,6 +21,10 @@ import {
   supportsKoryTelemetry
 } from "../desktop/src/main/usage-service.ts";
 
+const hostClaudeVersion = (await import("../desktop/src/main/usage-service.ts") as typeof import("../desktop/src/main/usage-service.ts") & {
+  hostClaudeVersion?: (shell: string) => string | null;
+}).hostClaudeVersion;
+
 beforeEach(() => resetUsageCaches());
 
 // ---------------------------------------------------------------------------
@@ -86,6 +90,8 @@ test("prewarming a changed shell keeps its version decision separate", async () 
       await prewarmClaudeVersion(alternateShell);
       expect(hostSupportsKoryTelemetry("powershell.exe")).toBe(true);
       expect(hostSupportsKoryTelemetry(alternateShell)).toBe(false);
+      expect(hostClaudeVersion?.("powershell.exe")).toBe("2.1.289");
+      expect(hostClaudeVersion?.(alternateShell)).toBe("2.1.288");
     } else {
       const compatibleShell = join(dir, "compatible-shell");
       const incompatibleShell = join(dir, "incompatible-shell");
@@ -97,6 +103,8 @@ test("prewarming a changed shell keeps its version decision separate", async () 
       await prewarmClaudeVersion(incompatibleShell);
       expect(hostSupportsKoryTelemetry(compatibleShell)).toBe(true);
       expect(hostSupportsKoryTelemetry(incompatibleShell)).toBe(false);
+      expect(hostClaudeVersion?.(compatibleShell)).toBe("2.1.289");
+      expect(hostClaudeVersion?.(incompatibleShell)).toBe("2.1.288");
     }
   } finally {
     if (originalPath === undefined) delete process.env.PATH;

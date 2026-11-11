@@ -185,6 +185,10 @@ export function prewarmClaudeVersion(shell: string): Promise<void> {
   return resolveClaudeVersion(shell).then(() => undefined)
 }
 
+export function hostClaudeVersion(shell: string): string | null {
+  return claudeVersionCache.get(shell)?.observedVersion ?? null
+}
+
 export function hostSupportsKoryTelemetry(shell: string): boolean {
   return supportsKoryTelemetry(claudeVersionCache.get(shell)?.observedVersion ?? null)
 }

@@ -10,7 +10,8 @@ import type {
   SessionDef,
   SessionLiveStatus,
   SessionRuntime,
-  SessionStatus
+  SessionStatus,
+  ThalposStatus
 } from '@shared/types'
 import { PtyManager, validPtyDimensions } from './pty-manager'
 import { hasEnabledMods, type LaunchAttemptRegistry, type LaunchModCopy, type LaunchModPlan } from './mod-launch-plan'
@@ -361,6 +362,8 @@ export class SessionService extends EventEmitter {
   private verifyModWorkingCopy: ((copy: LaunchModCopy) => { ok: true } | { ok: false; reason: string }) | null = null
   private sessionHandoffLaunchProvider: SessionHandoffLaunchProvider | null = null
   private sessionHandoffLaunches = new Map<string, SessionHandoffLaunch>()
+  private thalposDetector: (() => ThalposStatus) | null = null
+  private thalposTraced = new Set<string>()
 
   constructor(
     private getConfig: () => AppConfig,
@@ -575,6 +578,10 @@ export class SessionService extends EventEmitter {
 
   setTileSettingsFileProvider(provider: (settings: string) => string): void {
     this.writeTileSettingsFile = provider
+  }
+
+  setThalposDetector(detector: () => ThalposStatus): void {
+    this.thalposDetector = detector
   }
 
   setSessionHandoffLaunchProvider(provider: SessionHandoffLaunchProvider): void {
@@ -1731,6 +1738,7 @@ export class SessionService extends EventEmitter {
       CLAUDE_PEERS_SUPERVISOR: def.supervisor === true ? '1' : '0',
       KORY_PERMISSION_LEASE: '',
       CLAUDE_PEERS_DEPOSIT_CAPABILITY: '',
+      THALPOS_AUTOSTART: '',
       KORY_APPROVAL_MODULE: koryModuleServed ? '1' : '',
       ...(fallbackInjected ? { KORY_STATUS_FALLBACK: '1' } : null)
     }
@@ -1824,6 +1832,13 @@ export class SessionService extends EventEmitter {
       r.liveStatusAttentionAt = 0
     }
     if (!sandboxed && isClaudeLaunch(base)) sessionEnv.CLAUDE_PEERS_DEPOSIT_CAPABILITY = mintDepositCapability()
+    if (!sandboxed && isClaudeLaunch(base) && cfg.thalposAutostart === true && this.thalposDetector?.().usable === true) {
+      sessionEnv.THALPOS_AUTOSTART = '1'
+      if (!this.thalposTraced.has(def.id)) {
+        this.thalposTraced.add(def.id)
+        logInfo('thalpos', `THALPOS_AUTOSTART exported to the tile "${def.name}"`)
+      }
+    }
     let permissionLease: PermissionLeaseHandle | null = null
     if (!sandboxed && isClaudeLaunch(base) && this.permissionLeases) {
       try {

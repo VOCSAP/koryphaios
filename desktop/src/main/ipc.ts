@@ -12,6 +12,7 @@ import type {
   AssignResult,
   CreateSessionInput,
   ChoregosMod,
+  ThalposStatus,
   DispatchResult,
   HelpExchange,
   I18nPayload,
@@ -137,6 +138,7 @@ import { workspaceRestoreOrThrow } from '@shared/workspace-restore-outcome'
 import { registerWorkspaceRestoreHandler } from './workspace-restore-effects'
 import { availableLocales, loadDict, resolveLocale } from './i18n'
 import { reportError } from './log'
+import { prewarmAndDetectThalpos } from './thalpos-detect'
 import { sessionSkillsHandlers } from './session-skills'
 
 /**
@@ -173,6 +175,8 @@ interface IpcDeps {
   setConfig: (patch: Partial<AppConfig>) => AppConfig
   sessionSkillsDir: string
   listMods: () => ChoregosMod[]
+  prewarmClaudeVersion: (shell: string) => Promise<void>
+  getThalposStatus: () => ThalposStatus
   /** safeStorage-backed cipher (index.ts): local-provider API keys (C29). */
   secretCipher: SecretCipher
   getWindow: () => BrowserWindow | null
@@ -281,6 +285,8 @@ export function registerIpc({
   setConfig,
   sessionSkillsDir,
   listMods,
+  prewarmClaudeVersion,
+  getThalposStatus,
   secretCipher,
   getWindow,
   announce,
@@ -677,6 +683,11 @@ export function registerIpc({
   regHandle('skills:get', (_e, ...args: unknown[]) => sessionSkills.get(...args))
   regHandle('skills:set', (_e, value: unknown, ...args: unknown[]) => sessionSkills.set(value, ...args))
   regHandle('mods:list', () => listMods())
+  regHandle('thalpos:status', () => prewarmAndDetectThalpos({
+    prewarm: () => prewarmClaudeVersion(getConfig().shell),
+    detect: getThalposStatus,
+    report: reportError
+  }))
   // ----- claude-peers core config (Settings > Broker) -----
   // The FILE PATH is resolved main-side and is never a renderer argument, so
   // the only untrusted value crossing this boundary is the boolean --

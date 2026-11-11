@@ -116,6 +116,7 @@ const api: DeckApi = {
   getSessionSkills: () => ipcRenderer.invoke('skills:get'),
   setSessionSkills: (value: SessionSkillSettings) => ipcRenderer.invoke('skills:set', value),
   listMods: () => ipcRenderer.invoke('mods:list'),
+  getThalposStatus: () => ipcRenderer.invoke('thalpos:status'),
   getPeersConfig: () => ipcRenderer.invoke('peersConfig:get'),
   setOfflineReplica: (value: boolean) => ipcRenderer.invoke('peersConfig:setOfflineReplica', value),
   pickDirectory: () => ipcRenderer.invoke('dialog:pickDirectory'),

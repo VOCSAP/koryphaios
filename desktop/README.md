@@ -45,6 +45,18 @@ discovery.
   automatically (one shot per episode). Off by default -- enable it in
   Settings > General, or per session via the sidebar right-click menu. The
   status dot turns orange with an "auto-resume at HH:MM" badge while waiting.
+- **Prompt-cache keep-warm (opt-in, thalpos).** An idle session loses its
+  prompt cache after about an hour and pays to rebuild it. The optional
+  `thalpos@choregos` plugin keeps it warm with a forked ping and adds no turn to
+  the transcript. Install it in Claude Code; Kory supports it. Consent lives in
+  the plugin: set its `autostart` option in your user settings. Kory then offers
+  the Settings > General box "Keep the prompt cache warm" (off by default, greyed
+  with the reason while thalpos is not usable), and when it is checked each new
+  or resumed non-sandbox Claude tile starts with `THALPOS_AUTOSTART=1` in its
+  environment. Kory types nothing into the terminal. A project can enable the
+  same behaviour for any session, Kory or not, by putting `THALPOS_AUTOSTART` in
+  the `env` block of its `.claude/settings.json` (shared) or
+  `.claude/settings.local.json` (personal).
 - **Remote approvals (opt-in).** When a session stops and waits for you, the
   question can reach your phone over Telegram or Discord, and your answer comes
   back to the agent — free text, not just yes/no. Enrolment is a Connect button
@@ -318,7 +330,8 @@ selected category's fields on the right. Opened from the sidebar gear, the
 button): discrete inputs on change, free-text inputs on blur.
 
 - **General** -- **language** (Auto + the languages present as `locales/*.json`,
-  labelled in their native name), re-open-on-launch, remember scope secrets.
+  labelled in their native name), re-open-on-launch, remember scope secrets,
+  quota auto-resume, and the thalpos prompt-cache keep-warm box.
 - **Appearance** -- theme (dark / light), font size, display mode, session colour palette.
 - **Terminal** -- project directory, launch command (global), shell override, interactive shell.
 

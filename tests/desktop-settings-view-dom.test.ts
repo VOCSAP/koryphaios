@@ -36,6 +36,9 @@ let reportedErrors: Array<[string, string]> = [];
 type ModOffer = string | { name: string; globallyActive: boolean };
 
 let listModsImpl: () => Promise<ModOffer[]> = () => Promise.resolve([]);
+type ThalposStatusReply = { usable: true; maxHours: number } | { usable: false; reason: string };
+const THALPOS_USABLE: ThalposStatusReply = { usable: true, maxHours: 12 };
+let thalposStatusImpl: () => Promise<ThalposStatusReply> = () => Promise.resolve(THALPOS_USABLE);
 const KORY_STORAGE = { mode: "kory", instructions: "" } as const;
 const NO_SKILLS: SessionSkillSettings = { version: 2, addendum: { start: "", end: "", stop: "" }, storage: KORY_STORAGE };
 let getSkillsImpl: () => Promise<SessionSkillSettings> = () => Promise.resolve(NO_SKILLS);
@@ -72,11 +75,13 @@ beforeEach(() => {
   updateConfigCalls = [];
   reportedErrors = [];
   listModsImpl = () => Promise.resolve([]);
+  thalposStatusImpl = () => Promise.resolve(THALPOS_USABLE);
   getSkillsImpl = () => Promise.resolve(NO_SKILLS);
   setSkillsImpl = (value) => Promise.resolve(value);
   setSkillsCalls = [];
   (globalThis as unknown as { window: { api: Record<string, unknown> } }).window.api = {
     listMods: () => listModsImpl(),
+    getThalposStatus: () => thalposStatusImpl(),
     getSessionSkills: () => getSkillsImpl(),
     setSessionSkills: (value: SessionSkillSettings) => {
       setSkillsCalls.push(value);
@@ -318,6 +323,68 @@ test("a write that settles after the stored config changed elsewhere resumes fro
     writes[1]?.patch,
     "the choices to send must be re-read from the stored config at settlement, not from the render the click was made in"
   ).toEqual({ enabledMods: { gamma: true, beta: true } });
+});
+
+async function mountThalpos(status: () => Promise<ThalposStatusReply>, config: Partial<AppConfig> = {}): Promise<void> {
+  fakeUseDeck.setState({ ...deckState({}), config: { ...DEFAULT_CONFIG, ...config } }, true);
+  thalposStatusImpl = status;
+  await act(async () => {
+    root.render(React.createElement(SettingsView));
+    for (let i = 0; i < 4; i++) await Promise.resolve();
+  });
+}
+
+const thalposBox = (): HTMLInputElement => modCheckbox("settings.thalposAutostart")!;
+const thalposHelp = (): string => thalposBox().closest("label")!.nextElementSibling!.textContent ?? "";
+
+test("a pending thalpos status keeps the box greyed and says it is checking", async () => {
+  let resolveStatus: (status: ThalposStatusReply) => void = () => {};
+  const pending = new Promise<ThalposStatusReply>((resolve) => { resolveStatus = resolve; });
+  await mountThalpos(() => pending);
+  expect(thalposBox().disabled).toBe(true);
+  expect(thalposHelp()).toBe("settings.thalposChecking");
+  resolveStatus(THALPOS_USABLE);
+  await flush();
+  expect(thalposHelp()).toBe("settings.thalposAutostartHelp");
+});
+
+test("the thalpos box is unchecked by default and a click writes the choice when thalpos is usable", async () => {
+  await mountThalpos(() => Promise.resolve(THALPOS_USABLE));
+  expect(thalposBox(), "the thalpos switch must be visible").not.toBeUndefined();
+  expect(thalposBox().checked).toBe(false);
+  expect(thalposBox().disabled).toBe(false);
+  expect(thalposHelp()).toBe("settings.thalposAutostartHelp");
+  await click(thalposBox());
+  expect(updateConfigCalls).toEqual([{ thalposAutostart: true }]);
+});
+
+test.each([
+  ["disabled", "settings.thalposReason.disabled"],
+  ["not-installed", "settings.thalposReason.not-installed"],
+  ["plugin-too-old", "settings.thalposReason.plugin-too-old"],
+  ["cli-too-old", "settings.thalposReason.cli-too-old"],
+  ["autostart-off", "settings.thalposReason.autostart-off"],
+  ["settings-unreadable", "settings.thalposReason.settings-unreadable"],
+  ["installed-unreadable", "settings.thalposReason.installed-unreadable"]
+])("an unusable thalpos (%s) greys the box, says why and ignores a click", async (reason, key) => {
+  await mountThalpos(() => Promise.resolve({ usable: false, reason }));
+  expect(thalposBox().disabled).toBe(true);
+  expect(thalposHelp()).toBe(key);
+  await click(thalposBox());
+  expect(updateConfigCalls).toEqual([]);
+});
+
+test("a stored thalpos choice stays shown as checked while the box is greyed", async () => {
+  await mountThalpos(() => Promise.resolve({ usable: false, reason: "disabled" }), { thalposAutostart: true });
+  expect(thalposBox().checked).toBe(true);
+  expect(thalposBox().disabled).toBe(true);
+});
+
+test("a failing thalpos status leaves the box greyed, explains the failure and traces it", async () => {
+  await mountThalpos(() => Promise.reject(new Error("status unreadable")));
+  expect(thalposBox().disabled).toBe(true);
+  expect(thalposHelp()).toBe("settings.thalposReason.status-unavailable");
+  expect(reportedErrors.filter(([scope, message]) => scope === "settings" && message.includes("status unreadable"))).toHaveLength(1);
 });
 
 test("no mod section is rendered when the lock offers nothing", async () => {

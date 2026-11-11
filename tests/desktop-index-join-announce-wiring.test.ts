@@ -616,6 +616,33 @@ test("config:set removes a non-boolean normalizeTerminalCopy patch", () => {
   expect(reports).toEqual([["config", "rejected config:set normalizeTerminalCopy (false)"]]);
 });
 
+test("config:set removes a non-boolean thalposAutostart patch and keeps a boolean one", () => {
+  const reports: Array<[string, string]> = [];
+  const config: Record<string, unknown> = { theme: "dark", agentSpawnCap: 4, clodexAutoStart: false, ttsrDisabled: [], thalposAutostart: false };
+  const { setConfig } = registerSetConfig({
+    config,
+    reportError: (scope: string, message: string) => reports.push([scope, message]),
+    sanitizeGlowColor: (value: string) => value,
+    sanitizeSpawnCap: () => 4,
+    sanitizeLinkPatch: (patch: Record<string, unknown>) => patch,
+    applyProviderKeyPatch: () => [],
+    secretCipher: {},
+    sanitizeTtsrDisabled: (value: unknown) => value,
+    prewarmClaudeVersion: () => undefined,
+    saveConfig: () => undefined,
+    nativeTheme: { themeSource: "" },
+    applyClodexAutoStart: () => undefined,
+    ttsr: { recompileAll: () => undefined },
+    broadcast: () => undefined,
+    sanitizeConfigForRenderer: (value: Record<string, unknown>) => value
+  });
+
+  expect(setConfig({ thalposAutostart: "true" }).thalposAutostart).toBe(false);
+  expect(reports).toEqual([["config", "rejected config:set thalposAutostart (true)"]]);
+  expect(setConfig({ thalposAutostart: true }).thalposAutostart).toBe(true);
+  expect(reports).toHaveLength(1);
+});
+
 // Three degradation routes are each closed by a separate test: the domain
 // shrinking (floor >= 6), the exclusion becoming vacuous (gated dispatch
 // renamed), and the gate reaching a general emitter by delegation (caller-set

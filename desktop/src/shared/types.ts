@@ -365,6 +365,19 @@ export interface ChoregosMod {
   globallyActive: boolean
 }
 
+export type ThalposRefusal =
+  | 'disabled'
+  | 'not-installed'
+  | 'plugin-too-old'
+  | 'cli-too-old'
+  | 'autostart-off'
+  | 'settings-unreadable'
+  | 'installed-unreadable'
+  | 'status-unavailable'
+
+/** Whether the thalpos keep-warm plugin can be started by the Deck, read from the user-scope Claude Code files. */
+export type ThalposStatus = { usable: true; maxHours: number } | { usable: false; reason: ThalposRefusal }
+
 export interface AppConfig {
   /** Default working directory used as the base for new sessions. */
   projectDir: string
@@ -440,6 +453,12 @@ export interface AppConfig {
    * Code's footer hints in the tile; read at each spawn.
    */
   liveStatusLine: boolean
+  /**
+   * Set THALPOS_AUTOSTART in the env of each non-sandbox Claude tile so the
+   * thalpos plugin keeps the prompt cache warm from the first turn. Only
+   * effective while the user-scope thalpos detection is usable; read at each spawn.
+   */
+  thalposAutostart: boolean
   /** Remote approvals: notify a phone when a session blocks, and accept the
    * answer back. Opt-in; a project can only restrict it, never enable it. */
   mobileApprovals: boolean
@@ -2273,6 +2292,7 @@ export interface DeckApi {
   getSessionSkills(): Promise<SessionSkillSettings>
   setSessionSkills(value: SessionSkillSettings): Promise<SessionSkillSettings>
   listMods(): Promise<ChoregosMod[]>
+  getThalposStatus(): Promise<ThalposStatus>
   pickDirectory(): Promise<string | null>
   /** Read-only summary of the claude-peers core config (never the token value). */
   getPeersConfig(): Promise<PeersConfigSummary>

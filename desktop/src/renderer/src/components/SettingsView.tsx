@@ -3,7 +3,7 @@ import { BrokerSettings } from './BrokerSettings'
 import { NotificationChannels } from './NotificationChannels'
 import { RulesSettings } from './RulesSettings'
 import { SkillsSettings } from './SkillsSettings'
-import type { AppConfig, ChoregosMod, DisplayMode, LaunchPreset, ModelOption } from '@shared/types'
+import type { AppConfig, ChoregosMod, DisplayMode, LaunchPreset, ModelOption, ThalposRefusal, ThalposStatus } from '@shared/types'
 import {
   clodexSettingUnavailable,
   targetKey,
@@ -30,6 +30,17 @@ const CATEGORIES: { id: Category; key: string }[] = [
   { id: 'rules', key: 'settings.catRules' },
   { id: 'skills', key: 'settings.catSkills' }
 ]
+
+const THALPOS_REASON_KEYS: Record<ThalposRefusal, string> = {
+  disabled: 'settings.thalposReason.disabled',
+  'not-installed': 'settings.thalposReason.not-installed',
+  'plugin-too-old': 'settings.thalposReason.plugin-too-old',
+  'cli-too-old': 'settings.thalposReason.cli-too-old',
+  'autostart-off': 'settings.thalposReason.autostart-off',
+  'settings-unreadable': 'settings.thalposReason.settings-unreadable',
+  'installed-unreadable': 'settings.thalposReason.installed-unreadable',
+  'status-unavailable': 'settings.thalposReason.status-unavailable'
+}
 
 const DISPLAY_MODE_KEYS: { value: DisplayMode; key: string }[] = [
   { value: '1x1', key: 'mode.1x1' },
@@ -61,6 +72,13 @@ export function SettingsView(): React.JSX.Element {
   useEffect(() => {
     void window.api.listMods().then(setMods).catch((error: unknown) => {
       window.api.reportError('settings', `failed to list choregos mods: ${String(error)}`)
+    })
+  }, [])
+  const [thalpos, setThalpos] = useState<ThalposStatus | null>(null)
+  useEffect(() => {
+    void window.api.getThalposStatus().then(setThalpos).catch((error: unknown) => {
+      window.api.reportError('settings', `failed to read the thalpos status: ${String(error)}`)
+      setThalpos({ usable: false, reason: 'status-unavailable' })
     })
   }, [])
 
@@ -254,6 +272,21 @@ export function SettingsView(): React.JSX.Element {
                 <span>{t('settings.liveStatusLine')}</span>
               </label>
               <small className="field-check-help">{t('settings.liveStatusLineHelp')}</small>
+
+              <label className="field field-check">
+                <input
+                  type="checkbox"
+                  checked={config.thalposAutostart === true}
+                  disabled={thalpos?.usable !== true}
+                  onChange={(e) => set('thalposAutostart', e.target.checked)}
+                />
+                <span>{t('settings.thalposAutostart')}</span>
+              </label>
+              <small className="field-check-help">
+                {thalpos === null
+                  ? t('settings.thalposChecking')
+                  : !thalpos.usable ? t(THALPOS_REASON_KEYS[thalpos.reason]) : t('settings.thalposAutostartHelp')}
+              </small>
 
               {mods.length > 0 && (
                 <>

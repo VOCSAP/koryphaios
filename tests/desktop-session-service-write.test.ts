@@ -699,6 +699,72 @@ test("a launched tile exports its own cwd as its identity cwd whatever the Deck'
   }
 });
 
+const THALPOS_USABLE = { usable: true as const, maxHours: 12 };
+const THALPOS_UNUSABLE = { usable: false as const, reason: "disabled" as const };
+
+type ThalposSetup = {
+  config: Record<string, unknown>;
+  detector: (() => typeof THALPOS_USABLE | typeof THALPOS_UNUSABLE) | null;
+  sandboxed: boolean;
+  create: Record<string, unknown>;
+};
+const THALPOS_BASE: ThalposSetup = { config: { thalposAutostart: true }, detector: () => THALPOS_USABLE, sandboxed: false, create: {} };
+
+function thalposTile(setup: ThalposSetup, spawn: "fresh" | "resume"): string | undefined {
+  const home = mkdtempSync(join(tmpdir(), "kory-pty-thalpos-"));
+  const cwd = join(home, "project");
+  const service = createSessionService(home, cwd, setup.config);
+  if (setup.detector) service.setThalposDetector(setup.detector);
+  if (setup.sandboxed) {
+    service.setSandboxProvider(
+      () => ({ wrap: (_tileId: string, _sessionId: string, command: string) => command, cleanup: async () => {} }),
+      undefined,
+      () => "/sandbox/peers"
+    );
+  }
+  const inherited = process.env.THALPOS_AUTOSTART;
+  process.env.THALPOS_AUTOSTART = "1";
+  try {
+    service.create(setup.create);
+    if (spawn === "resume") {
+      const [def] = service.captureSessions();
+      if (!def?.sessionId) throw new Error("the tile has no session id to resume");
+      const projects = join(home, ".claude", "projects", encodeProjectDir(def.cwd));
+      mkdirSync(projects, { recursive: true });
+      writeFileSync(join(projects, `${def.sessionId}.jsonl`), "{}\n", "utf-8");
+      const spawned = sessionPtys.length;
+      service.restoreFrom([{ ...def }]);
+      expect(sessionPtys.length - spawned, "control: the resume starts a PTY").toBe(1);
+      expect(sessionPtys.at(-1)?.args.join(" "), "control: that PTY is a real resume").toContain("--resume");
+    }
+    return sessionPtys.at(-1)!.env.THALPOS_AUTOSTART;
+  } finally {
+    if (inherited === undefined) delete process.env.THALPOS_AUTOSTART;
+    else process.env.THALPOS_AUTOSTART = inherited;
+    service.closeAll();
+    for (const pty of sessionPtys.splice(0)) pty.exit();
+    rmSync(home, { recursive: true, force: true });
+  }
+}
+
+test.each(["fresh", "resume"] as const)("a %s Claude tile exports THALPOS_AUTOSTART=1 when the box is checked and thalpos is usable", (spawn) => {
+  expect(thalposTile(THALPOS_BASE, spawn)).toBe("1");
+});
+
+test.each([
+  ["the box is unchecked", { ...THALPOS_BASE, config: { thalposAutostart: false } }],
+  ["the box is absent from the config", { ...THALPOS_BASE, config: {} }],
+  ["the box holds a string", { ...THALPOS_BASE, config: { thalposAutostart: "true" } }],
+  ["thalpos is not usable", { ...THALPOS_BASE, detector: () => THALPOS_UNUSABLE }],
+  ["no detector is wired", { ...THALPOS_BASE, detector: null }],
+  ["the tile runs in the sandbox", { ...THALPOS_BASE, sandboxed: true }],
+  ["the tile is not a Claude launch", { ...THALPOS_BASE, create: { command: "codex" } }]
+] as [string, ThalposSetup][])("a tile never exports THALPOS_AUTOSTART, nor inherits the Deck's value, when %s", (_name, setup) => {
+  for (const spawn of ["fresh", "resume"] as const) {
+    expect(thalposTile(setup, spawn) || "", `${spawn} spawn`).toBe("");
+  }
+});
+
 test("SessionService.closeAll retries a retired PTY after its final definition is removed", async () => {
   const home = mkdtempSync(join(tmpdir(), "kory-pty-close-all-"));
   const cwd = join(home, "project");

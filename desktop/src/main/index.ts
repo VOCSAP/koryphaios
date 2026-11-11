@@ -17,7 +17,7 @@ import {
   webContents
 } from 'electron'
 import { publicKeyFingerprint } from '../../../shared/operator-trust'
-import type { AppConfig, InboxOpenTarget, InboxReplyOutcome, OperatorTrustStatusEvent } from '@shared/types'
+import type { AppConfig, InboxOpenTarget, InboxReplyOutcome, OperatorTrustStatusEvent, ThalposStatus } from '@shared/types'
 import { sanitizeGlowColor } from '@shared/palette'
 import { sanitizeLinkPatch } from '@shared/link-policy'
 import { loadConfig, saveConfig } from './store'
@@ -35,7 +35,7 @@ import {
 } from './session-command'
 import { buildStatusLineSettings, statusLineHookPath, writeTileSettings } from './statusline-settings'
 import { createSessionHandoffLaunch, purgeSessionHandoffDrafts } from './session-handoff'
-import { hostSupportsKoryTelemetry, prewarmClaudeVersion } from './usage-service'
+import { hostClaudeVersion, hostSupportsKoryTelemetry, prewarmClaudeVersion } from './usage-service'
 import { registerIpc, resolveDocsDir } from './ipc'
 import { parseCliContext } from './cli-context'
 import { computeScope, buildScopeEnv, resolveAdoptedScope, type Scope, type ScopeEnv } from './scope'
@@ -185,6 +185,7 @@ import type { SessionRuntime } from '@shared/types'
 import { listAgents } from './agents'
 import { createSessionWithWorktree, restartSessionGated } from './create-session'
 import { hasEnabledMods, LaunchAttemptRegistry, prepareLaunchModPlan, prepareRestorePlans } from './mod-launch-plan'
+import { detectThalpos } from './thalpos-detect'
 import { activeClaudePlugins, enabledModsFromLock, ensureModWorkingCopy, listLockedMods, loadModsLock, verifyModWorkingCopy } from './mods-working-copy'
 import { SandboxService, type SandboxLaunch } from './sandbox-service'
 import {
@@ -555,6 +556,11 @@ const setConfig = (patch: Partial<AppConfig>): AppConfig => {
     const { normalizeTerminalCopy: _ignored, ...rest } = patch
     patch = rest
   }
+  if (patch.thalposAutostart !== undefined && typeof patch.thalposAutostart !== 'boolean') {
+    reportError('config', `rejected config:set thalposAutostart (${String(patch.thalposAutostart).slice(0, 40)})`)
+    const { thalposAutostart: _ignored, ...rest } = patch
+    patch = rest
+  }
   if (patch.startSupervisorOnLaunch !== undefined && typeof patch.startSupervisorOnLaunch !== 'boolean') {
     reportError('config', `rejected config:set startSupervisorOnLaunch (${String(patch.startSupervisorOnLaunch).slice(0, 40)})`)
     const { startSupervisorOnLaunch: _ignored, ...rest } = patch
@@ -859,6 +865,24 @@ service.on('created', (r: SessionRuntime) => {
 // only) — every engine call is on-demand. The settings live in the operator's
 // app-state sandbox.json (never a repo file, hostile input #1).
 const claudeHomeDir = process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude')
+const getThalposStatus = (): ThalposStatus =>
+  detectThalpos({
+    configDir: claudeHomeDir,
+    cliVersion: hostClaudeVersion(config.shell) ?? undefined,
+    readFile: (path) => {
+      try {
+        return readFileSync(path, 'utf-8')
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
+        throw error
+      }
+    }
+  })
+const prewarmThalposStatus = async (shell: string): Promise<void> => {
+  await prewarmClaudeVersion(shell)
+  if (hostClaudeVersion(shell) === null) throw new Error('Claude Code version unavailable after prewarm')
+}
+service.setThalposDetector(getThalposStatus)
 const sandbox = new SandboxService({
   projectDir: cliContext.projectDir,
   projectKey: computeDeckProjectKey(cliContext.projectDir),
@@ -3736,6 +3760,8 @@ app.whenReady().then(async () => {
     getConfig,
     setConfig,
     sessionSkillsDir: sessionSkillsStateDir,
+    prewarmClaudeVersion: prewarmThalposStatus,
+    getThalposStatus,
     listMods: () => {
       const globalActive = activeClaudePlugins([join(homedir(), '.claude', 'settings.json')])
       return listLockedMods(modDistDir).map((name) => ({ name, globallyActive: globalActive.has(name) }))

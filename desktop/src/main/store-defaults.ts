@@ -33,6 +33,7 @@ export const DEFAULT_CONFIG: AppConfig = {
   leadPattern: 'team-lead',
   notifyAttention: true,
   liveStatusLine: true,
+  thalposAutostart: false,
   mobileApprovals: false,
   supervisorSpawnMode: 'hands-free',
   startSupervisorOnLaunch: true,
