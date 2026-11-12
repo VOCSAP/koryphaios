@@ -163,7 +163,7 @@ jobs:
         # deleted. The strict rebuild below is the real ABI gate.
         run: npm install
 
-      # electron@43's package.json declares no postinstall script (measured:
+      # Electron's package.json declares no postinstall script (measured:
       # no "scripts" key at all): npm install alone never fetches the binary
       # or writes node_modules/electron/path.txt. install.js is idempotent
       # (exits 0 if already installed) and is the only thing that does.

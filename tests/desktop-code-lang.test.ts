@@ -149,7 +149,7 @@ test("the total budget degrades as a prefix, not all-or-nothing", () => {
 });
 
 test("the caps stay at the values their measurement justifies", () => {
-  // ~4.2 ms per KB in the renderer (Electron 43 / V8): 64 KB is a ~270 ms
+  // ~4.2 ms per KB in the renderer: 64 KB is a ~270 ms
   // worst-case freeze and still covers 98.3% of this repo's files. Raising
   // either number is a deliberate act that has to come here first.
   expect(HIGHLIGHT_MAX_BLOCK_CHARS).toBe(65536);

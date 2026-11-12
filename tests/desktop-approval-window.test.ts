@@ -420,7 +420,7 @@ test('refuses and reports navigation and load failures', async () => {
   const reload = harness()
   reload.controller.open(document)
   reload.windows[0]!.fire('contents:did-finish-load')
-  // Electron 43 shape: the details event first, then the deprecated positional url, isInPlace, isMainFrame.
+  // Electron shape: the details event first, then the deprecated positional url, isInPlace, isMainFrame.
   reload.windows[0]!.fireWithDetails('contents:did-start-navigation', { url: 'approval.html', isMainFrame: true, isSameDocument: false }, 'approval.html', false, true)
   expect(reload.verdicts).toEqual(['refuse'])
   expect(reload.reports).toContain('Approval window reload was refused')
