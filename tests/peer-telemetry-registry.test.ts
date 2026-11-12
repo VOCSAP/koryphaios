@@ -1,8 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import {
+  createPeerTelemetryImportCache,
   createPeerTelemetryRegistry,
   MAX_CLOSED_DESKS_PER_RUN,
   MAX_CLOSED_LAUNCHES_PER_DESK,
+  MAX_REPORTED_TELEMETRY_REFUSALS,
 } from "../shared/peer-telemetry-registry.ts";
 
 const RUN = { operatorId: "operator-a", runRef: "run-a", groupId: "group-a" };
@@ -239,5 +241,92 @@ describe("peer telemetry registry", () => {
     expect(registry.publish({ ...link("after", { deskSessionHash: "desk-after" }), snapshot })).toEqual({
       outcome: "updated",
     });
+  });
+});
+
+describe("imported peer telemetry", () => {
+  test("rejects invalid, stale and conflicting snapshots without changing the visible value", () => {
+    const cache = createPeerTelemetryImportCache();
+    expect(cache.applyNamespace("upstream", new Map([["token-a", snapshot]])).refusedCount).toBe(0);
+    expect(cache.read("upstream", "token-a")).toEqual(snapshot);
+
+    const invalid = cache.applyNamespace("upstream", new Map([["token-a", { ...snapshot, contextPct: 101 }]]));
+    expect(invalid).toEqual({ refusedCount: 1, refused: [{ token: "token-a", reason: "invalid" }] });
+    expect(cache.read("upstream", "token-a")).toEqual(snapshot);
+
+    const stale = cache.applyNamespace("upstream", new Map([["token-a", { ...snapshot, observedAt: snapshot.observedAt - 1 }]]));
+    expect(stale).toEqual({ refusedCount: 1, refused: [{ token: "token-a", reason: "stale" }] });
+    const conflict = cache.applyNamespace("upstream", new Map([["token-a", { ...snapshot, contextPct: 43 }]]));
+    expect(conflict).toEqual({ refusedCount: 1, refused: [{ token: "token-a", reason: "conflict" }] });
+    expect(cache.read("upstream", "token-a")).toEqual(snapshot);
+  });
+
+  test("a refused peer freezes only itself: the others advance and absent tokens are retracted", () => {
+    const cache = createPeerTelemetryImportCache();
+    const at = (observedAt: number) => ({ ...snapshot, observedAt });
+    cache.applyNamespace("upstream", new Map([["token-a", at(10)], ["token-b", at(10)], ["token-c", at(10)]]));
+    const result = cache.applyNamespace("upstream", new Map([["token-a", at(11)], ["token-b", at(9)]]));
+    expect(result).toEqual({ refusedCount: 1, refused: [{ token: "token-b", reason: "stale" }] });
+    expect(["the valid peer advances", cache.read("upstream", "token-a")?.observedAt]).toEqual(["the valid peer advances", 11]);
+    expect(["the stale peer keeps its own value", cache.read("upstream", "token-b")?.observedAt]).toEqual([
+      "the stale peer keeps its own value",
+      10,
+    ]);
+    expect(["an absent token is retracted", cache.read("upstream", "token-c")]).toEqual(["an absent token is retracted", null]);
+  });
+
+  test("an invalid entry next to a valid one is refused alone, and a new invalid token stays absent", () => {
+    const cache = createPeerTelemetryImportCache();
+    cache.applyNamespace("upstream", new Map([["token-b", snapshot]]));
+    const result = cache.applyNamespace(
+      "upstream",
+      new Map<string, unknown>([
+        ["token-a", { ...snapshot, observedAt: snapshot.observedAt + 1 }],
+        ["token-b", { ...snapshot, contextPct: 101 }],
+        ["token-d", { ...snapshot, contextPct: 101 }],
+      ])
+    );
+    expect(result.refusedCount).toBe(2);
+    expect(["the valid peer is imported", cache.read("upstream", "token-a")?.observedAt]).toEqual([
+      "the valid peer is imported",
+      snapshot.observedAt + 1,
+    ]);
+    expect(["the invalid peer keeps its visible value", cache.read("upstream", "token-b")]).toEqual([
+      "the invalid peer keeps its visible value",
+      snapshot,
+    ]);
+    expect(["an invalid peer without a value stays absent", cache.read("upstream", "token-d")]).toEqual([
+      "an invalid peer without a value stays absent",
+      null,
+    ]);
+  });
+
+  test("the reported refusals are bounded while the count stays exact", () => {
+    const cache = createPeerTelemetryImportCache();
+    const directory = new Map<string, unknown>();
+    for (let i = 0; i < MAX_REPORTED_TELEMETRY_REFUSALS + 5; i++) directory.set(`token-${i}`, { bad: true });
+    const result = cache.applyNamespace("upstream", directory);
+    expect([result.refusedCount, result.refused.length]).toEqual([
+      MAX_REPORTED_TELEMETRY_REFUSALS + 5,
+      MAX_REPORTED_TELEMETRY_REFUSALS,
+    ]);
+  });
+
+  test("removes absent entries and accepts the same source timestamp after removal", () => {
+    const cache = createPeerTelemetryImportCache();
+    cache.applyNamespace("upstream", new Map([["token-a", snapshot]]));
+    expect(cache.applyNamespace("upstream", new Map()).refusedCount).toBe(0);
+    expect(cache.read("upstream", "token-a")).toBeNull();
+    expect(cache.applyNamespace("upstream", new Map([["token-a", snapshot]])).refusedCount).toBe(0);
+    expect(cache.read("upstream", "token-a")).toEqual(snapshot);
+  });
+
+  test("keeps namespace directories isolated", () => {
+    const cache = createPeerTelemetryImportCache();
+    cache.applyNamespace("upstream", new Map([["token-a", snapshot]]));
+    cache.applyNamespace("replica", new Map([["token-b", { ...snapshot, contextPct: null, contextWindow: null }]]));
+    cache.applyNamespace("upstream", new Map());
+    expect(cache.read("upstream", "token-a")).toBeNull();
+    expect(cache.read("replica", "token-b")).toEqual({ ...snapshot, contextPct: null, contextWindow: null });
   });
 });

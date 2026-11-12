@@ -138,4 +138,10 @@ describe("peer telemetry wire validation", () => {
       }
     });
   });
+
+  test("returns only the five public snapshot fields", () => {
+    const parsed = validatePeerTelemetrySnapshot({ ...snapshot, instance_token: "private", launch_hash: "a".repeat(64) });
+    expect(parsed).toEqual(snapshot);
+    expect(Object.keys(parsed ?? {}).sort()).toEqual(["contextPct", "contextWindow", "model", "modelId", "observedAt"]);
+  });
 });

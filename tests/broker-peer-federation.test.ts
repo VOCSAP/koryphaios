@@ -7,8 +7,11 @@
 
 import { test, expect, beforeAll, afterAll, beforeEach } from "bun:test";
 import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import {
+  FIXTURE_OPERATOR_ID,
   startBroker,
   stopBroker,
   livePid,
@@ -25,6 +28,7 @@ import {
   openBrokerDb,
 } from "./_helper.ts";
 import { deriveInstanceRef, INBOX_GATES } from "../shared/approval.ts";
+import type { PeerTelemetrySnapshot } from "../shared/peer-telemetry.ts";
 import { startUpstreamProxy, type UpstreamProxy } from "./_upstream-proxy.ts";
 import type {
   DeliveredMessage,
@@ -99,13 +103,14 @@ function replicaLabel(b: TestBroker): string {
   }
 }
 
-function startReplica(proxy: UpstreamProxy): Promise<TestBroker> {
+function startReplica(proxy: UpstreamProxy, extraEnv: Record<string, string> = {}): Promise<TestBroker> {
   return startBroker({
     CLAUDE_PEERS_BROKER_URL: proxy.url,
     CLAUDE_PEERS_BROKER_TOKEN: TOKEN,
     CLAUDE_PEERS_OFFLINE_REPLICA: "1",
     CLAUDE_PEERS_SYNC_TICK_MS: "200",
     CLAUDE_PEERS_FEDERATION_GRACE_SEC: String(GRACE_SEC),
+    ...extraEnv,
   });
 }
 
@@ -228,6 +233,158 @@ function countMessages(b: TestBroker, where: string, ...params: (string | number
   } finally {
     db.close();
   }
+}
+
+interface TelemetryTile {
+  b: TestBroker;
+  host: string;
+  cwd: string;
+  run: RunCredential;
+  desk: string;
+  launchHash: string;
+  token: string;
+  beat: ReturnType<typeof setInterval> | null;
+}
+
+let tileSeq = 0;
+
+async function launchTile(b: TestBroker, label: string): Promise<TelemetryTile> {
+  const n = ++tileSeq;
+  const run = await mintRunCredential(b, { id: G, hash: H }, undefined, post);
+  const launchHash = await sha256Hex(`${crypto.randomUUID()}${crypto.randomUUID()}`.replaceAll("-", ""));
+  const host = `h${n}-${label}`;
+  const cwd = `/work/${label}`;
+  const desk = `desk-${label}-${crypto.randomUUID()}`;
+  const reg = await registerAttestedInstance(
+    b,
+    run,
+    host,
+    cwd,
+    { desk_session: desk, telemetry_capability_hash: launchHash },
+    post
+  );
+  expect([`register tile ${label}`, reg.status]).toEqual([`register tile ${label}`, 200]);
+  // Only the upstream sweeps a foreign-host peer without a heartbeat.
+  const beat =
+    b === U
+      ? setInterval(() => {
+          void post(`${U.url}/heartbeat`, { instance_token: reg.body.instance_token });
+        }, 500)
+      : null;
+  return { b, host, cwd, run, desk, launchHash, token: reg.body.instance_token, beat };
+}
+
+async function dropTile(t: TelemetryTile): Promise<void> {
+  if (t.beat) clearInterval(t.beat);
+  await post(`${t.b.url}/unregister`, { instance_token: t.token });
+}
+
+async function withTiles(
+  body: (launch: (b: TestBroker, label: string) => Promise<TelemetryTile>) => Promise<void>
+): Promise<void> {
+  const launched: TelemetryTile[] = [];
+  try {
+    await body(async (b, label) => {
+      const tile = await launchTile(b, label);
+      launched.push(tile);
+      return tile;
+    });
+  } finally {
+    for (const tile of launched) await dropTile(tile);
+  }
+}
+
+function tileTelemetry(t: TelemetryTile, action: "publish" | "stop", snapshot?: PeerTelemetrySnapshot) {
+  const payload = {
+    run_ref: t.run.run,
+    group_id: t.run.group,
+    desk_session: t.desk,
+    launch_hash: t.launchHash,
+    action,
+    ...(snapshot ? { snapshot } : {}),
+  };
+  return post<{ outcome?: string; ok?: boolean }>(`${t.b.url}/tile-telemetry`, {
+    ...payload,
+    auth: operatorInboxProof(payload, INBOX_GATES.tileTelemetry),
+  });
+}
+
+async function publishTelemetry(t: TelemetryTile, snapshot: PeerTelemetrySnapshot, label: string): Promise<void> {
+  const res = await tileTelemetry(t, "publish", snapshot);
+  expect([`${label}: publish`, res.status, res.body]).toEqual([`${label}: publish`, 200, { outcome: "updated" }]);
+}
+
+async function resumeTile(t: TelemetryTile): Promise<void> {
+  const res = await registerAttestedInstance(
+    t.b,
+    t.run,
+    t.host,
+    t.cwd,
+    { desk_session: t.desk, telemetry_capability_hash: t.launchHash, resume_instance_token: t.token },
+    post
+  );
+  expect(["a resume gives the same identity back", res.status, res.body.instance_token]).toEqual([
+    "a resume gives the same identity back",
+    200,
+    t.token,
+  ]);
+}
+
+function viewerToken(viewer: TestBroker): string {
+  return viewer === R1 ? A.instance_token : viewer === R2 ? B.instance_token : C.instance_token;
+}
+
+async function seenFrom(viewer: TestBroker, tile: TelemetryTile): Promise<PublicPeer | undefined> {
+  return (await listPeers(viewer, viewerToken(viewer))).find((p) => p.host === tile.host);
+}
+
+async function listedHosts(viewer: TestBroker): Promise<string[]> {
+  return (await listPeers(viewer, viewerToken(viewer))).map((p) => p.host);
+}
+
+function waitTelemetry(
+  viewer: TestBroker,
+  tile: TelemetryTile,
+  expected: PeerTelemetrySnapshot | undefined,
+  what: string
+): Promise<PublicPeer> {
+  return pollUntil(what, async () => {
+    const p = await seenFrom(viewer, tile);
+    const done =
+      p !== undefined && (expected === undefined ? p.telemetry === undefined : isDeepStrictEqual(p.telemetry, expected));
+    return {
+      done,
+      value: p === undefined ? { listed: false, hosts: await listedHosts(viewer) } : { listed: true, telemetry: p.telemetry },
+    };
+  }) as Promise<PublicPeer>;
+}
+
+async function adminRow(b: TestBroker, tile: TelemetryTile): Promise<PublicPeer | undefined> {
+  const rows = await getAuth<PublicPeer[]>(`${b.url}/admin/peers?include_dormant=1`);
+  return rows.find((p) => p.host === tile.host);
+}
+
+function waitDormantWithoutTelemetry(b: TestBroker, tile: TelemetryTile, what: string): Promise<unknown> {
+  return pollUntil(what, async () => {
+    const row = await adminRow(b, tile);
+    return {
+      done: row !== undefined && row.status === "dormant" && row.telemetry === undefined,
+      value: row === undefined ? null : { status: row.status, telemetry: row.telemetry },
+    };
+  });
+}
+
+const OBSERVED_FROM = Date.now();
+
+function observation(model: string, over: Partial<PeerTelemetrySnapshot> = {}): PeerTelemetrySnapshot {
+  return {
+    model,
+    modelId: model.toLowerCase().replaceAll(" ", "-"),
+    contextPct: 37.5,
+    contextWindow: 1_000_000,
+    observedAt: OBSERVED_FROM - 600_000,
+    ...over,
+  };
 }
 
 beforeAll(async () => {
@@ -810,7 +967,225 @@ test("a replica's relayed send says tracking is unavailable and offers no messag
   await receive("B receives the relayed request", R2, B.instance_token, "relayed request with a policy");
 }, 30_000);
 
-test("the run scope, digest and token of a bound instance never travel in a federation exchange", async () => {
+test("a tile's telemetry reaches every other broker exact, on one hop and across the upstream, with nulls kept and its age never renewed", async () => {
+  await withTiles(async (launch) => {
+    const r1 = await launch(R1, "hops-r1");
+    const u = await launch(U, "hops-u");
+    const r2 = await launch(R2, "hops-r2");
+    const seen = {
+      r1: observation("Claude Opus 4.6"),
+      u: observation("Claude Haiku 4.5", { contextPct: null, contextWindow: null, observedAt: OBSERVED_FROM - 120_000 }),
+      r2: observation("Claude Sonnet 4.5", { contextPct: 0, contextWindow: 200_000, observedAt: OBSERVED_FROM - 900_000 }),
+    };
+    await publishTelemetry(r1, seen.r1, "R1 tile");
+    await publishTelemetry(u, seen.u, "U tile");
+    await publishTelemetry(r2, seen.r2, "R2 tile");
+
+    const views: Array<[string, TestBroker, TelemetryTile, PeerTelemetrySnapshot]> = [
+      ["R1 tile seen on its own broker", R1, r1, seen.r1],
+      ["U tile seen on its own broker", U, u, seen.u],
+      ["R2 tile seen on its own broker", R2, r2, seen.r2],
+      ["R1 -> U", U, r1, seen.r1],
+      ["R2 -> U", U, r2, seen.r2],
+      ["U -> R1", R1, u, seen.u],
+      ["U -> R2", R2, u, seen.u],
+      ["R2 -> U -> R1", R1, r2, seen.r2],
+      ["R1 -> U -> R2", R2, r1, seen.r1],
+    ];
+    for (const [hop, viewer, tile, expected] of views) {
+      await waitTelemetry(viewer, tile, expected, `${hop}: the observation arrives`);
+    }
+
+    await settleBothReplicas();
+    for (const [hop, viewer, tile, expected] of views) {
+      const p = await seenFrom(viewer, tile);
+      expect(p?.telemetry, `${hop}: five fields exact, observedAt as the source observed it, after several passes`).toStrictEqual(expected);
+    }
+
+    const newer = { ...seen.r1, contextPct: 61.25, observedAt: seen.r1.observedAt + 30_000 };
+    await publishTelemetry(r1, newer, "R1 tile, newer");
+    await waitTelemetry(U, r1, newer, "R1 -> U: a newer observation replaces the older");
+    await waitTelemetry(R2, r1, newer, "R1 -> U -> R2: a newer observation replaces the older");
+  });
+}, 60_000);
+
+test("a stop retracts a tile's telemetry on every broker that imported it, a disconnect does too, and the same observation is shown again after a resume", async () => {
+  await withTiles(async (launch) => {
+    const r1Stopped = await launch(R1, "retract-r1");
+    const uStopped = await launch(U, "retract-u");
+    const r1Cycled = await launch(R1, "cycle");
+    const seen = {
+      r1Stopped: observation("Claude Opus 4.6"),
+      uStopped: observation("Claude Haiku 4.5", { observedAt: OBSERVED_FROM - 200_000 }),
+      r1Cycled: observation("Claude Sonnet 4.5", { contextPct: 12, observedAt: OBSERVED_FROM - 400_000 }),
+    };
+    await publishTelemetry(r1Stopped, seen.r1Stopped, "R1 tile to stop");
+    await publishTelemetry(uStopped, seen.uStopped, "U tile to stop");
+    await publishTelemetry(r1Cycled, seen.r1Cycled, "R1 tile to cycle");
+    await waitTelemetry(U, r1Stopped, seen.r1Stopped, "R1 -> U before the stop");
+    await waitTelemetry(R2, r1Stopped, seen.r1Stopped, "R1 -> U -> R2 before the stop");
+    await waitTelemetry(R1, uStopped, seen.uStopped, "U -> R1 before the stop");
+    await waitTelemetry(R2, uStopped, seen.uStopped, "U -> R2 before the stop");
+    await waitTelemetry(U, r1Cycled, seen.r1Cycled, "R1 -> U before the disconnect");
+    await waitTelemetry(R2, r1Cycled, seen.r1Cycled, "R1 -> U -> R2 before the disconnect");
+
+    expect(["a stop is accepted on R1", (await tileTelemetry(r1Stopped, "stop")).body]).toEqual(["a stop is accepted on R1", { ok: true }]);
+    expect(["a stop is accepted on U", (await tileTelemetry(uStopped, "stop")).body]).toEqual(["a stop is accepted on U", { ok: true }]);
+    await waitTelemetry(U, r1Stopped, undefined, "R1 stop retracted on U, the peer still listed");
+    await waitTelemetry(R2, r1Stopped, undefined, "R1 stop retracted on R2, the peer still listed");
+    await waitTelemetry(R1, uStopped, undefined, "U stop retracted on R1, the peer still listed");
+    await waitTelemetry(R2, uStopped, undefined, "U stop retracted on R2, the peer still listed");
+    await settleBothReplicas();
+    for (const [where, viewer, tile] of [
+      ["U", U, r1Stopped],
+      ["R2", R2, r1Stopped],
+      ["R1", R1, uStopped],
+      ["R2", R2, uStopped],
+    ] as const) {
+      const p = await seenFrom(viewer, tile);
+      expect([`a retracted observation does not come back on ${where}`, p !== undefined, p?.telemetry]).toEqual([
+        `a retracted observation does not come back on ${where}`,
+        true,
+        undefined,
+      ]);
+    }
+    expect(
+      (await seenFrom(R2, r1Cycled))?.telemetry,
+      "the stop of one tile leaves the observation of its sibling in place"
+    ).toStrictEqual(seen.r1Cycled);
+
+    await post(`${R1.url}/disconnect`, { instance_token: r1Cycled.token });
+    await waitDormantWithoutTelemetry(U, r1Cycled, "U holds the disconnected tile dormant, without its observation");
+    await waitDormantWithoutTelemetry(R2, r1Cycled, "R2 holds the disconnected tile dormant, without its observation");
+
+    await resumeTile(r1Cycled);
+    for (const viewer of [U, R2]) {
+      const back = await pollUntil("the resumed tile is listed again", async () => {
+        const p = await seenFrom(viewer, r1Cycled);
+        return { done: p !== undefined, value: p?.telemetry };
+      });
+      expect(back, "a resumed tile starts without the observation it had before the disconnect").toBeUndefined();
+    }
+    await publishTelemetry(r1Cycled, seen.r1Cycled, "R1 tile after its resume, same observation");
+    await waitTelemetry(U, r1Cycled, seen.r1Cycled, "R1 -> U: the same observation is shown again");
+    await waitTelemetry(R2, r1Cycled, seen.r1Cycled, "R1 -> U -> R2: the same observation is shown again");
+  });
+}, 90_000);
+
+test("an outage keeps the last observation with its real age through the grace, drops it after, and the return shows the live source", async () => {
+  try {
+    await outageWithTiles();
+  } finally {
+    P1.blocked = false;
+  }
+}, 90_000);
+
+async function outageWithTiles(): Promise<void> {
+  await withTiles(async (launch) => {
+    const upstreamTile = await launch(U, "outage-u");
+    const retractedTile = await launch(U, "gone");
+    const replicaTile = await launch(R1, "outage-r1");
+    const seen = {
+      upstreamTile: observation("Claude Opus 4.6", { observedAt: OBSERVED_FROM - 300_000 }),
+      retractedTile: observation("Claude Haiku 4.5", { observedAt: OBSERVED_FROM - 310_000 }),
+      replicaTile: observation("Claude Sonnet 4.5", { observedAt: OBSERVED_FROM - 320_000 }),
+    };
+    await publishTelemetry(upstreamTile, seen.upstreamTile, "U tile");
+    await publishTelemetry(retractedTile, seen.retractedTile, "U tile to retract");
+    await publishTelemetry(replicaTile, seen.replicaTile, "R1 tile");
+    await waitTelemetry(R1, upstreamTile, seen.upstreamTile, "U -> R1 before the outage");
+    await waitTelemetry(R1, retractedTile, seen.retractedTile, "U -> R1 before the outage, tile to retract");
+    await waitTelemetry(U, replicaTile, seen.replicaTile, "R1 -> U before the outage");
+
+    await goOffline(P1, R1);
+    const inGrace = await seenFrom(R1, upstreamTile);
+    expect([
+      "within the grace the mirror keeps the last observation with the age its source gave it",
+      typeof inGrace?.link_down_since,
+      inGrace?.telemetry,
+    ]).toStrictEqual(["within the grace the mirror keeps the last observation with the age its source gave it", "string", seen.upstreamTile]);
+
+    await waitDormantWithoutTelemetry(U, replicaTile, "U keeps no observation for a replica tile that went silent");
+    await pollUntil("beyond the grace the mirrors vanish from A's list", async () => {
+      const peers = (await listPeers(R1, A.instance_token)).filter((p) => p.via !== null);
+      return { done: peers.length === 0, value: names(peers) };
+    });
+    for (const tile of [upstreamTile, retractedTile]) {
+      const row = await adminRow(R1, tile);
+      expect([
+        "beyond the grace the replica keeps no observation of a mirror",
+        row?.status,
+        row?.telemetry,
+      ]).toEqual(["beyond the grace the replica keeps no observation of a mirror", "dormant", undefined]);
+    }
+
+    await post(`${U.url}/disconnect`, { instance_token: upstreamTile.token });
+    await resumeTile(upstreamTile);
+    const older = { ...seen.upstreamTile, model: "Claude Opus 4.1", modelId: "claude-opus-4.1", observedAt: OBSERVED_FROM - 900_000 };
+    await publishTelemetry(upstreamTile, older, "U tile, an older observation after its resume");
+    expect(["U retracts a tile during the outage", (await tileTelemetry(retractedTile, "stop")).body]).toEqual([
+      "U retracts a tile during the outage",
+      { ok: true },
+    ]);
+
+    await goOnline(P1, R1);
+    await waitTelemetry(R1, upstreamTile, older, "the return shows what the live source now holds, not what the replica remembered");
+    await waitTelemetry(R1, retractedTile, undefined, "the return shows no observation for a tile the source retracted");
+    await waitTelemetry(U, replicaTile, seen.replicaTile, "the replica tile is back on U with the age it was observed at");
+    await settleBothReplicas();
+    expect(
+      (await seenFrom(R1, upstreamTile))?.telemetry,
+      "the live observation holds after several passes"
+    ).toStrictEqual(older);
+  });
+}
+
+test("an upstream answering under another identity drops what the replica imported, and the return rehydrates from the live source", async () => {
+  await withTiles(async (launch) => {
+    const tile = await launch(U, "reset-u");
+    const before = observation("Claude Opus 4.6", { observedAt: OBSERVED_FROM - 300_000 });
+    await publishTelemetry(tile, before, "U tile");
+    await waitTelemetry(R1, tile, before, "U -> R1 before the reset");
+
+    P1.intercept = (path) =>
+      path === "/federation/sync"
+        ? Response.json({
+            upstream_id: "dddddddd-4444-4444-8444-444444444444",
+            assigned: [],
+            refused_groups: [],
+            peers: [],
+            messages: [],
+          })
+        : null;
+    const older = observation("Claude Opus 4.1", { observedAt: OBSERVED_FROM - 900_000 });
+    try {
+      await waitDormantWithoutTelemetry(R1, tile, "R1 shows no observation of a mirror under a new upstream identity");
+      await post(`${U.url}/disconnect`, { instance_token: tile.token });
+      await resumeTile(tile);
+      await publishTelemetry(tile, older, "U tile, an older observation after its resume");
+    } finally {
+      P1.intercept = null;
+    }
+    await pollUntil("the real upstream is back", async () => {
+      const s = await syncStatus(R1);
+      return { done: s.federation?.active === true, value: s.federation };
+    });
+    await waitTelemetry(R1, tile, older, "the return shows what the live source now holds, not what the replica remembered");
+  });
+}, 60_000);
+
+function rowTokens(b: TestBroker, host: string): string[] {
+  const db = openBrokerDb(b.dbPath, { readonly: true });
+  try {
+    return (db.query("SELECT instance_token FROM peers WHERE host = ?").all(host) as { instance_token: string }[]).map(
+      (r) => r.instance_token
+    );
+  } finally {
+    db.close();
+  }
+}
+
+test("the run scope, digest, token and launch identity of a bound instance never travel in a federation exchange, telemetry included", async () => {
   const group = { id: G, hash: H };
   const onUpstream = await mintRunCredential(U, group, undefined, post);
   const onReplica = await mintRunCredential(R1, group, undefined, post);
@@ -818,27 +1193,175 @@ test("the run scope, digest and token of a bound instance never travel in a fede
   const boundOnUpstream = await registerAttestedInstance(U, onUpstream, "host-bound-u", "/work/bound-u", {}, post);
   const boundOnReplica = await registerAttestedInstance(R1, onReplica, "host-bound-r", "/work/bound-r", {}, post);
   try {
-    await settleBothReplicas();
-    await settleBothReplicas();
+    await withTiles(async (launch) => {
+      const tiles = {
+        r1: await launch(R1, "wire-r1"),
+        u: await launch(U, "wire-u"),
+        r2: await launch(R2, "wire-r2"),
+      };
+      const marked = (key: keyof typeof tiles) => observation(`Wire Probe ${key}`, { observedAt: OBSERVED_FROM - 60_000 });
+      for (const key of ["r1", "u", "r2"] as const) await publishTelemetry(tiles[key], marked(key), `${key} tile`);
+      await waitTelemetry(R2, tiles.r1, marked("r1"), "R1 -> U -> R2");
+      await waitTelemetry(R1, tiles.r2, marked("r2"), "R2 -> U -> R1");
+      await waitTelemetry(R1, tiles.u, marked("u"), "U -> R1");
+      await waitTelemetry(R2, tiles.u, marked("u"), "U -> R2");
+      await settleBothReplicas();
+      await settleBothReplicas();
 
-    const wire = [...P1.exchanges.slice(from[0]), ...P2.exchanges.slice(from[1])]
-      .map((e) => `${e.request}\n${e.response}`)
-      .join("\n");
-    for (const peer of [boundOnUpstream, boundOnReplica]) {
-      expect(wire, "the exchange is not empty: the bound peer travels by name").toContain(peer.body.peer_id);
-    }
-    const secrets = [
-      ...[boundOnUpstream, boundOnReplica].flatMap((p) => {
-        const ref = deriveInstanceRef(p.body.instance_token);
-        return [p.body.instance_token, ref, ref.slice(-12)];
-      }),
-      ...[onUpstream, onReplica].flatMap((r) => [r.run, r.tokenId, r.cred.publicKey]),
-    ];
-    for (const secret of secrets) {
-      expect(wire.includes(secret), `a private Inbox value travelled: ${secret.slice(0, 12)}`).toBe(false);
-    }
+      const slice = (proxy: UpstreamProxy, start: number) => proxy.exchanges.slice(start);
+      const requests = (xs: UpstreamProxy["exchanges"]) => xs.map((e) => e.request).join("\n");
+      const responses = (xs: UpstreamProxy["exchanges"]) => xs.map((e) => e.response).join("\n");
+      const p1 = slice(P1, from[0]);
+      const p2 = slice(P2, from[1]);
+      const wire = [...p1, ...p2].map((e) => `${e.request}\n${e.response}`).join("\n");
+      for (const peer of [boundOnUpstream, boundOnReplica]) {
+        expect(wire, "the exchange is not empty: the bound peer travels by name").toContain(peer.body.peer_id);
+      }
+      for (const [what, body, key] of [
+        ["R1 exports its tile's telemetry to U", requests(p1), "r1"],
+        ["U hands R1's tile to R2: the second hop of the chain", responses(p2), "r1"],
+        ["R2 exports its tile's telemetry to U", requests(p2), "r2"],
+        ["U hands R2's tile to R1: the second hop of the chain", responses(p1), "r2"],
+        ["U hands its own tile to R1", responses(p1), "u"],
+        ["U hands its own tile to R2", responses(p2), "u"],
+      ] as const) {
+        expect(body, `${what}: telemetry rides this body, so the confidentiality scan below reads it`).toContain(
+          marked(key).modelId
+        );
+      }
+
+      const secrets: Array<[string, string]> = [
+        ...[boundOnUpstream, boundOnReplica].flatMap((p): Array<[string, string]> => {
+          const ref = deriveInstanceRef(p.body.instance_token);
+          return [
+            ["bound instance token", p.body.instance_token],
+            ["bound instance ref", ref],
+            ["bound instance ref tail", ref.slice(-12)],
+          ];
+        }),
+        ...[onUpstream, onReplica].flatMap((r): Array<[string, string]> => [
+          ["bound run_ref", r.run],
+          ["bound run token id", r.tokenId],
+          ["bound run public key", r.cred.publicKey],
+        ]),
+        ["operator id", FIXTURE_OPERATOR_ID],
+      ];
+      for (const [key, tile] of Object.entries(tiles)) {
+        for (const b of [U, R1, R2]) {
+          for (const token of rowTokens(b, tile.host)) {
+            secrets.push([`${key} tile row token held by ${b === U ? "U" : b === R1 ? "R1" : "R2"}`, token]);
+            const ref = deriveInstanceRef(token);
+            secrets.push([`${key} tile instance ref`, ref], [`${key} tile instance ref tail`, ref.slice(-12)]);
+          }
+        }
+        secrets.push(
+          [`${key} tile run_ref`, tile.run.run],
+          [`${key} tile run token id`, tile.run.tokenId],
+          [`${key} tile run public key`, tile.run.cred.publicKey],
+          [`${key} tile launch hash`, tile.launchHash],
+          [`${key} tile desk session`, tile.desk],
+          [`${key} tile desk session hash`, createHash("sha256").update(tile.desk).digest("hex")]
+        );
+      }
+      for (const [what, secret] of secrets) {
+        expect(wire.includes(secret), `a private value travelled in a federation request or response: ${what}`).toBe(false);
+      }
+    });
   } finally {
     await post(`${U.url}/unregister`, { instance_token: boundOnUpstream.body.instance_token });
     await post(`${R1.url}/unregister`, { instance_token: boundOnReplica.body.instance_token });
   }
-}, 40_000);
+}, 60_000);
+
+function backdateMirror(b: TestBroker, host: string): number {
+  const db = openBrokerDb(b.dbPath);
+  try {
+    return db.run("UPDATE peers SET last_seen = ? WHERE host = ? AND via IS NOT NULL AND relay_id IS NULL", [
+      new Date(Date.now() - 3_600_000).toISOString(),
+      host,
+    ]).changes;
+  } finally {
+    db.close();
+  }
+}
+
+function mirrorLastSeen(b: TestBroker, host: string): string | undefined {
+  const db = openBrokerDb(b.dbPath, { readonly: true });
+  try {
+    const row = db.query("SELECT last_seen FROM peers WHERE host = ? AND via IS NOT NULL AND relay_id IS NULL").get(host) as
+      | { last_seen: string }
+      | null;
+    return row?.last_seen;
+  } finally {
+    db.close();
+  }
+}
+
+async function waitMirrorRestamps(b: TestBroker, host: string, n: number): Promise<void> {
+  let last = mirrorLastSeen(b, host);
+  let changes = 0;
+  await pollUntil(`${n} failed passes restamp the mirror`, async () => {
+    const now = mirrorLastSeen(b, host);
+    if (now !== last) {
+      last = now;
+      changes += 1;
+    }
+    return { done: changes >= n, value: changes };
+  });
+}
+
+test("a mirror the link stopped refreshing goes dormant on the replica and stops showing its observation", async () => {
+  // The mirror cutoff cannot go under 120 s by env, so the row is aged by hand
+  // and the 1 s sweep does the rest. Every pass, failed ones inside the grace
+  // included, restamps last_seen: the link is cut with a long grace, and the
+  // row is aged right after a restamp, when the next failed pass (backoff
+  // doubling from 0.8 s) is farther than one sweep tick.
+  const P3 = startUpstreamProxy(U.url);
+  let R3: TestBroker | null = null;
+  let r3Token: string | null = null;
+  try {
+    R3 = await startReplica(P3, {
+      CLAUDE_PEERS_DORMANT_SWEEP_SEC: "1",
+      CLAUDE_PEERS_FEDERATION_GRACE_SEC: "600",
+    });
+    r3Token = (await register(R3, "host-r3", "/work/r3")).instance_token;
+    const replica = R3;
+    await withTiles(async (launch) => {
+      const tile = await launch(R2, "stale-mirror");
+      const seen = observation("Claude Opus 4.6", { observedAt: OBSERVED_FROM - 300_000 });
+      await publishTelemetry(tile, seen, "R2 tile");
+      const before = await pollUntil("R2 -> U -> R3 before the link is cut", async () => {
+        const row = await adminRow(replica, tile);
+        return {
+          done: row?.status === "active" && isDeepStrictEqual(row.telemetry, seen),
+          value: row === undefined ? null : { status: row.status, telemetry: row.telemetry },
+        };
+      });
+      expect(["the mirror is active and shows its observation before it ages", before]).toEqual([
+        "the mirror is active and shows its observation before it ages",
+        { status: "active", telemetry: seen },
+      ]);
+
+      await goOffline(P3, replica);
+      await waitMirrorRestamps(replica, tile.host, 3);
+      expect(["one mirror row is aged", backdateMirror(replica, tile.host)]).toEqual(["one mirror row is aged", 1]);
+      await waitDormantWithoutTelemetry(replica, tile, "R3 sweeps the aged mirror: dormant, no observation");
+    });
+  } finally {
+    try {
+      if (R3 !== null && r3Token !== null) {
+        await goOnline(P3, R3);
+        await post(`${R3.url}/unregister`, { instance_token: r3Token });
+        await pollUntil("U drops the host-r3 peer R3 relayed", async () => {
+          const rows = (await getAuth<PublicPeer[]>(`${U.url}/admin/peers?include_dormant=1`)).filter(
+            (p) => p.host === "host-r3" && p.status === "active"
+          );
+          return { done: rows.length === 0, value: rows.map((p) => p.peer_id) };
+        });
+      }
+    } finally {
+      if (R3 !== null) await stopBroker(R3);
+      P3.stop();
+    }
+  }
+}, 60_000);

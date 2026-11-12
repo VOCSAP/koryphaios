@@ -100,8 +100,22 @@ export function findRoleWritesOutsideHandleRegister(src: string): string[] {
       continue;
     }
     const paren = at + needle.length - 1;
-    const paramsEnd = findMatchingClose(src, paren, "(", ")");
-    const bodyStart = src.indexOf("{", needle.startsWith("const") ? paren : paramsEnd);
+    let bodyStart: number;
+    if (needle.startsWith("const")) {
+      // The transaction callback is an arrow whose return type may be an
+      // inline object type: its body is the brace right after `=>`, not the
+      // first brace after the parameter list.
+      const arrowParams = /^\s*\(/.exec(src.slice(paren + 1));
+      const paramsEnd = arrowParams ? findMatchingClose(src, paren + arrowParams[0].length, "(", ")") : -1;
+      const arrow = arrowParams ? /^\s*(?::[^=]*)?=>\s*\{/.exec(src.slice(paramsEnd)) : null;
+      if (!arrow) {
+        failures.push(`${needle} is no longer followed by an arrow callback with a braced body -- update the sweep`);
+        continue;
+      }
+      bodyStart = paramsEnd + arrow[0].length - 1;
+    } else {
+      bodyStart = src.indexOf("{", findMatchingClose(src, paren, "(", ")"));
+    }
     const bodyEnd = findMatchingClose(src, bodyStart, "{", "}");
     const region = { start: bodyStart, end: bodyEnd };
     if (!/\bnormalizeRole\(/.test(src.slice(region.start, region.end))) {

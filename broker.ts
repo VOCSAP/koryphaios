@@ -46,7 +46,8 @@ import {
 } from "./shared/context-buffer.ts";
 import { ContextRegistry } from "./shared/context-registry.ts";
 import { validateTileTelemetryRequest } from "./shared/peer-telemetry.ts";
-import { createPeerTelemetryRegistry } from "./shared/peer-telemetry-registry.ts";
+import { createPeerTelemetryImportCache, createPeerTelemetryRegistry } from "./shared/peer-telemetry-registry.ts";
+import type { PeerTelemetrySnapshot } from "./shared/peer-telemetry.ts";
 import { guardedInterval as guardInterval } from "./shared/guarded-interval.ts";
 import { measureWriterGeneration } from "./shared/process-generation.ts";
 import {
@@ -2074,6 +2075,63 @@ function deriveDefaultId(host: string, cwd: string, groupId: GroupId): string {
 const BROKER_HOST = hostname();
 const peerTelemetryRegistry = createPeerTelemetryRegistry({ isLive: peerIsLive });
 
+// Telemetry imported through federation stays in RAM beside the launch
+// registry. A namespace is the answering side's identity (the replica id on an
+// upstream, the upstream id on a replica); a key is the LOCAL token of the
+// relayed or mirrored row, never a value read off the wire.
+const peerTelemetryImports = createPeerTelemetryImportCache();
+const telemetryImportNamespaces = new Set<string>();
+let federationImportNamespace: string | null = null;
+
+type TelemetryImportAction =
+  | { kind: "replace"; namespace: string; directory: Map<string, unknown> }
+  | { kind: "drop"; namespace: string };
+
+function applyTelemetryImports(actions: TelemetryImportAction[]): void {
+  for (const action of actions) {
+    if (action.kind === "drop") {
+      peerTelemetryImports.removeNamespace(action.namespace);
+      telemetryImportNamespaces.delete(action.namespace);
+      continue;
+    }
+    telemetryImportNamespaces.add(action.namespace);
+    const result = peerTelemetryImports.applyNamespace(action.namespace, action.directory);
+    if (result.refusedCount > 0) {
+      log.warn("federation: telemetry entries were refused, each peer keeps its previous observation", {
+        refusedCount: result.refusedCount,
+        reasons: result.refused.map((r) => r.reason),
+      });
+    }
+  }
+}
+
+function forgetImportedTelemetry(token: InstanceToken): void {
+  for (const namespace of telemetryImportNamespaces) peerTelemetryImports.removeToken(namespace, token);
+}
+
+function resolvePeerTelemetry(p: { instance_token: InstanceToken; via: string | null }): PeerTelemetrySnapshot | null {
+  if (p.via === null) return peerTelemetryRegistry.telemetryFor(p.instance_token);
+  if (BROKER_MODE === "replica") {
+    return federationImportNamespace === null
+      ? null
+      : peerTelemetryImports.read(federationImportNamespace, p.instance_token);
+  }
+  const row = db.query("SELECT relay_id FROM peers WHERE instance_token = ?").get(p.instance_token) as
+    | { relay_id: string | null }
+    | null;
+  return row?.relay_id ? peerTelemetryImports.read(row.relay_id, p.instance_token) : null;
+}
+
+function telemetryFields(t: PeerTelemetrySnapshot): PeerTelemetrySnapshot {
+  return {
+    model: t.model,
+    modelId: t.modelId,
+    contextPct: t.contextPct,
+    contextWindow: t.contextWindow,
+    observedAt: t.observedAt,
+  };
+}
+
 function purgeTelemetryRunsWithoutLiveCredential(): void {
   for (const run of peerTelemetryRegistry.runs()) {
     const live = db.query(
@@ -2131,6 +2189,7 @@ const purgeDormantPeerTx = db.transaction((instance_token: string) => {
   db.run("DELETE FROM peer_sessions WHERE instance_token = ?", [instance_token]);
   db.run("DELETE FROM peers WHERE instance_token = ?", [instance_token]);
   peerTelemetryRegistry.forgetOwner(instance_token);
+  forgetImportedTelemetry(instance_token);
 });
 
 cleanStalePeers();
@@ -2166,6 +2225,7 @@ async function sweepInactivePeers(): Promise<void> {
       cutoff,
     ]);
     peerTelemetryRegistry.forgetOwner(token);
+    forgetImportedTelemetry(token);
   };
   // Everything that needs no measure is judged in one synchronous block, so a
   // pass stays atomic for all rows but the few whose process must be measured.
@@ -2174,9 +2234,13 @@ async function sweepInactivePeers(): Promise<void> {
     dormantUnlessHeartbeat(row.instance_token);
     return false;
   });
+  const staleMirrors = db
+    .query(`SELECT instance_token FROM peers WHERE status = 'active' AND last_seen < ? AND ${MIRROR_ROW_SQL}`)
+    .all(mirrorCutoff) as { instance_token: InstanceToken }[];
   db.run(`UPDATE peers SET status = 'dormant' WHERE status = 'active' AND last_seen < ? AND ${MIRROR_ROW_SQL}`, [
     mirrorCutoff,
   ]);
+  for (const mirror of staleMirrors) forgetImportedTelemetry(mirror.instance_token);
   for (const row of toMeasure) {
     if (!(await keepsActiveWithoutHeartbeat(BROKER_MODE, row, BROKER_HOST, measureGeneration))) {
       dormantUnlessHeartbeat(row.instance_token);
@@ -3608,7 +3672,7 @@ function handleContextAck(body: unknown): Response {
 
 // Explicit projection fails closed when Peer gains private fields.
 function toPublicPeer(p: Peer): PublicPeer {
-  const telemetry = peerTelemetryRegistry.telemetryFor(p.instance_token);
+  const telemetry = resolvePeerTelemetry(p);
   return {
     peer_id: p.peer_id,
     group_id: p.group_id,
@@ -7490,6 +7554,7 @@ type PeerRow = Omit<Peer, "activity_status">;
 
 /** Pick-list: what a replica learns about a remote peer. No token, no PID, no relay key. */
 function toFederatedPeer(p: PeerRow): FederatedPeer {
+  const telemetry = resolvePeerTelemetry(p);
   return {
     peer_id: p.peer_id,
     group_id: p.group_id,
@@ -7503,6 +7568,7 @@ function toFederatedPeer(p: PeerRow): FederatedPeer {
     last_seen: p.last_seen,
     last_activity_at: p.last_activity_at,
     via: p.via ?? "upstream",
+    ...(telemetry ? { telemetry: telemetryFields(telemetry) } : {}),
   };
 }
 
@@ -7539,7 +7605,9 @@ function handleFederationSync(
   const ack = Array.isArray(body.ack)
     ? body.ack.filter((id): id is number => typeof id === "number" && Number.isInteger(id)).slice(0, FEDERATION_MAX_ACK)
     : [];
-  return federationSyncTx(replicaId, body.groups, body.peers, ack, new Date().toISOString());
+  const { response, telemetry } = federationSyncTx(replicaId, body.groups, body.peers, ack, new Date().toISOString());
+  applyTelemetryImports(telemetry);
+  return response;
 }
 
 /**
@@ -7555,8 +7623,9 @@ const federationSyncTx = db.transaction(
     peers: FederationRelayPeer[],
     ack: number[],
     now: string
-  ): FederationSyncResponse => {
+  ): { response: FederationSyncResponse; telemetry: TelemetryImportAction[] } => {
     const via = replicaId.slice(0, RELAY_ID_CHARS);
+    const directory = new Map<string, unknown>();
     const accepted = new Set<GroupId>();
     const refusedGroups: FederationSyncResponse["refused_groups"] = [];
     // A group is PINNED only when a presented peer lives in it: listing a
@@ -7641,6 +7710,7 @@ const federationSyncTx = db.transaction(
           [name, p.peer_id, now, host, cwd, gitRoot, projectKey, summary, role, lastActivityAt, via, existing.instance_token]
         );
         present.push(existing.instance_token);
+        if (p.telemetry !== undefined) directory.set(existing.instance_token, p.telemetry);
       } else {
         // The internal token is minted here and never returned: the replica
         // addresses this row by (replica_id, relay_ref) only.
@@ -7653,6 +7723,7 @@ const federationSyncTx = db.transaction(
           [token, name, p.group_id, cwd, gitRoot, summary, now, now, lastActivityAt, host, projectKey, role, replicaId, p.relay_ref, p.peer_id, via]
         );
         present.push(token);
+        if (p.telemetry !== undefined) directory.set(token, p.telemetry);
       }
       assigned.push({ relay_ref: p.relay_ref, peer_id: name });
     }
@@ -7717,7 +7788,10 @@ const federationSyncTx = db.transaction(
         sent_at: m.sent_at,
       }));
     }
-    return { upstream_id: BROKER_ID, assigned, peers: remotePeers, messages, refused_groups: refusedGroups };
+    return {
+      response: { upstream_id: BROKER_ID, assigned, peers: remotePeers, messages, refused_groups: refusedGroups },
+      telemetry: [{ kind: "replace", namespace: replicaId, directory }],
+    };
   }
 );
 
@@ -9798,7 +9872,12 @@ const applyFederationTx = db.transaction(
     upstreamId: string,
     byRef: Map<string, LocalRelayRow>,
     now: string
-  ): { acked: number[]; pushes: { token: InstanceToken; id: number; sender: SenderMeta; text: string; sent_at: string }[] } => {
+  ): {
+    acked: number[];
+    pushes: { token: InstanceToken; id: number; sender: SenderMeta; text: string; sent_at: string }[];
+    telemetry: TelemetryImportAction[];
+  } => {
+    const directory = new Map<string, unknown>();
     for (const a of Array.isArray(body.assigned) ? body.assigned : []) {
       if (!a || typeof a !== "object" || typeof a.relay_ref !== "string" || typeof a.peer_id !== "string") continue;
       const local = byRef.get(a.relay_ref);
@@ -9829,7 +9908,9 @@ const applyFederationTx = db.transaction(
         });
         continue;
       }
-      present.push(upsertMirror(fp, fp.status === "dormant" ? "dormant" : "active", now));
+      const mirrorToken = upsertMirror(fp, fp.status === "dormant" ? "dormant" : "active", now);
+      present.push(mirrorToken);
+      if (fp.status !== "dormant" && fp.telemetry !== undefined) directory.set(mirrorToken, fp.telemetry);
     }
     const notPresent = present.length ? `AND instance_token NOT IN (${present.map(() => "?").join(", ")})` : "";
     db.run(`UPDATE peers SET status = 'dormant', last_seen = ? WHERE via IS NOT NULL AND status = 'active' ${notPresent}`, [
@@ -9924,7 +10005,7 @@ const applyFederationTx = db.transaction(
         pushes.push({ token: to.instance_token, id: Number(inserted.lastInsertRowid), sender: from, text: m.text, sent_at: sentAt });
       }
     }
-    return { acked, pushes };
+    return { acked, pushes, telemetry: [{ kind: "replace", namespace: upstreamId, directory }] };
   }
 );
 
@@ -10006,6 +10087,7 @@ async function federationPass(): Promise<void> {
     const peers: FederationRelayPeer[] = locals.map((row) => {
       const ref = relayRef(row.instance_token);
       byRef.set(ref, row);
+      const telemetry = resolvePeerTelemetry({ instance_token: row.instance_token, via: null });
       return {
         relay_ref: ref,
         peer_id: row.peer_id,
@@ -10017,6 +10099,7 @@ async function federationPass(): Promise<void> {
         summary: row.summary,
         role: row.role,
         last_activity_at: row.last_activity_at,
+        ...(telemetry ? { telemetry: telemetryFields(telemetry) } : {}),
       };
     });
     const groups = [...new Set(locals.map((r) => r.group_id))].map((gid) => ({
@@ -10042,7 +10125,8 @@ async function federationPass(): Promise<void> {
         // Nothing can reach a remote peer through this upstream: what was
         // mirrored or queued from an earlier, federating answer is settled now.
         federationUnsupported = true;
-        const dropped = dropFederationTx(now, "the upstream broker does not federate peers.");
+        const { dropped, telemetry } = dropFederationTx(now, "the upstream broker does not federate peers.");
+        applyTelemetryImports(telemetry);
         for (const d of dropped) pushDeckMessage(d.token, d.id, d.text, now);
         if (dropped.length > 0) {
           log.warn(`federation: ${dropped.length} queued message(s) dropped, the upstream does not federate peers`);
@@ -10063,6 +10147,13 @@ async function federationPass(): Promise<void> {
     federationRelayedCount = peers.length;
     await federationFlushQueue();
     const applied = applyFederationTx(res.body, res.body.upstream_id, byRef, now);
+    const imports: TelemetryImportAction[] = [];
+    if (federationImportNamespace !== null && federationImportNamespace !== res.body.upstream_id) {
+      imports.push({ kind: "drop", namespace: federationImportNamespace });
+    }
+    imports.push(...applied.telemetry);
+    applyTelemetryImports(imports);
+    federationImportNamespace = res.body.upstream_id;
     federationPendingAck = applied.acked;
     federationRefusedGroupsCount = Array.isArray(res.body.refused_groups) ? res.body.refused_groups.length : 0;
     for (const g of Array.isArray(res.body.refused_groups) ? res.body.refused_groups : []) {
@@ -10086,7 +10177,10 @@ async function federationPass(): Promise<void> {
  * 404 does when the upstream turns out not to federate.
  */
 const dropFederationTx = db.transaction(
-  (now: string, reason: string): { token: InstanceToken; id: number; text: string }[] => {
+  (
+    now: string,
+    reason: string
+  ): { dropped: { token: InstanceToken; id: number; text: string }[]; telemetry: TelemetryImportAction[] } => {
     db.run("UPDATE peers SET status = 'dormant', last_seen = ? WHERE via IS NOT NULL AND status = 'active'", [now]);
     const queued = db
       .query(
@@ -10101,7 +10195,10 @@ const dropFederationTx = db.transaction(
       const text = `Your message to '${row.mirror_peer_id}' (sent ${ageSec(row.sent_at, now)}s ago) was dropped: ${reason}`;
       dropped.push({ token: row.from_token, id: dropQueuedMessageTx(row, text, now), text });
     }
-    return dropped;
+    return {
+      dropped,
+      telemetry: federationImportNamespace === null ? [] : [{ kind: "drop", namespace: federationImportNamespace }],
+    };
   }
 );
 
@@ -10121,7 +10218,8 @@ function federationAfterFailedPass(): void {
   if (federationGraceExpired) return;
   federationGraceExpired = true;
   const minutes = Math.max(1, Math.round(downMs / 60_000));
-  const dropped = dropFederationTx(now, `the upstream broker stayed unreachable for ${minutes} min.`);
+  const { dropped, telemetry } = dropFederationTx(now, `the upstream broker stayed unreachable for ${minutes} min.`);
+  applyTelemetryImports(telemetry);
   for (const d of dropped) pushDeckMessage(d.token, d.id, d.text, now);
   log.warn(
     `federation: upstream unreachable beyond the ${FEDERATION_GRACE_SEC}s grace: remote peers hidden, ${dropped.length} queued message(s) dropped and their senders told`

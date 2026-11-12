@@ -1,4 +1,4 @@
-import type { PeerTelemetrySnapshot } from "./peer-telemetry.ts";
+import { validatePeerTelemetrySnapshot, type PeerTelemetrySnapshot } from "./peer-telemetry.ts";
 
 export interface PeerTelemetryLink {
   instanceToken: string;
@@ -194,6 +194,82 @@ export function createPeerTelemetryRegistry(deps: PeerTelemetryRegistryDeps): Pe
       const tokens = candidates(launchKey(link));
       if (tokens.length !== 1 || tokens[0] !== instanceToken) return null;
       return snapshots.get(instanceToken) ?? null;
+    },
+  };
+}
+
+export type PeerTelemetryRefusalReason = "invalid" | "stale" | "conflict";
+
+export const MAX_REPORTED_TELEMETRY_REFUSALS = 8;
+
+export interface PeerTelemetryImportResult {
+  refusedCount: number;
+  refused: { token: string; reason: PeerTelemetryRefusalReason }[];
+}
+
+export interface PeerTelemetryImportCache {
+  applyNamespace(namespace: string, directory: ReadonlyMap<string, unknown>): PeerTelemetryImportResult;
+  removeToken(namespace: string, token: string): void;
+  removeNamespace(namespace: string): void;
+  read(namespace: string, token: string): PeerTelemetrySnapshot | null;
+}
+
+function copySnapshot(snapshot: PeerTelemetrySnapshot): PeerTelemetrySnapshot {
+  return {
+    model: snapshot.model,
+    modelId: snapshot.modelId,
+    contextPct: snapshot.contextPct,
+    contextWindow: snapshot.contextWindow,
+    observedAt: snapshot.observedAt,
+  };
+}
+
+export function createPeerTelemetryImportCache(): PeerTelemetryImportCache {
+  const directories = new Map<string, Map<string, PeerTelemetrySnapshot>>();
+
+  return {
+    applyNamespace(namespace, directory): PeerTelemetryImportResult {
+      const current = directories.get(namespace);
+      const next = new Map<string, PeerTelemetrySnapshot>();
+      const refused: PeerTelemetryImportResult["refused"] = [];
+      let refusedCount = 0;
+      const refuse = (token: string, reason: PeerTelemetryRefusalReason): void => {
+        refusedCount++;
+        if (refused.length < MAX_REPORTED_TELEMETRY_REFUSALS) refused.push({ token, reason });
+        const visible = current?.get(token);
+        if (visible) next.set(token, visible);
+      };
+      for (const [token, raw] of directory) {
+        const snapshot = validatePeerTelemetrySnapshot(raw);
+        if (!snapshot) {
+          refuse(token, "invalid");
+          continue;
+        }
+        const visible = current?.get(token);
+        if (visible && snapshot.observedAt < visible.observedAt) {
+          refuse(token, "stale");
+          continue;
+        }
+        if (visible && snapshot.observedAt === visible.observedAt && !sameSnapshot(visible, snapshot)) {
+          refuse(token, "conflict");
+          continue;
+        }
+        next.set(token, copySnapshot(snapshot));
+      }
+      directories.set(namespace, next);
+      return { refusedCount, refused };
+    },
+    removeToken(namespace, token): void {
+      const directory = directories.get(namespace);
+      if (!directory) return;
+      directory.delete(token);
+    },
+    removeNamespace(namespace): void {
+      directories.delete(namespace);
+    },
+    read(namespace, token): PeerTelemetrySnapshot | null {
+      const snapshot = directories.get(namespace)?.get(token);
+      return snapshot ? copySnapshot(snapshot) : null;
     },
   };
 }

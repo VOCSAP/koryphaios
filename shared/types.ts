@@ -892,7 +892,7 @@ export interface RoadmapSyncResolveResponse {
   item: RoadmapItem;
 }
 
-// --- Peer federation (DESIGN-PEER-FEDERATION §4): a replica relays its peers ---
+// --- Peer federation: a replica relays its peers ---
 
 /** A local peer as the replica presents it upstream. Pick-list: no token, no PID. */
 export interface FederationRelayPeer {
@@ -907,6 +907,7 @@ export interface FederationRelayPeer {
   summary: string;
   role: string | null;
   last_activity_at: string | null;
+  telemetry?: PeerTelemetrySnapshot;
 }
 
 /** A remote peer as the upstream hands it to a replica. Pick-list. */
@@ -924,6 +925,7 @@ export interface FederatedPeer {
   last_activity_at: string | null;
   /** 'upstream' for a native upstream peer, else the 8-char label of the relaying replica. */
   via: string;
+  telemetry?: PeerTelemetrySnapshot;
 }
 
 /** An undelivered upstream message addressed to one of the replica's relayed peers. */

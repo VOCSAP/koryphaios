@@ -15,7 +15,13 @@ import {
   groupId,
   type TestBroker,
   openBrokerDb,
+  mintRunCredential,
+  registerAttestedInstance,
+  operatorInboxProof,
 } from "./_helper.ts";
+import { INBOX_GATES } from "../shared/approval.ts";
+import type { PeerTelemetrySnapshot } from "../shared/peer-telemetry.ts";
+import { startUpstreamProxy, type UpstreamProxy } from "./_upstream-proxy.ts";
 import type {
   FederationRelayPeer,
   FederationSyncRequest,
@@ -750,3 +756,408 @@ test("send refuses a text beyond the shared cap, on the federation route as on /
   });
   expect(["the same cap holds on /send-message", local.body.ok]).toEqual(["the same cap holds on /send-message", false]);
 });
+// --- Peer telemetry across federation: carried as the producer observed it ---
+
+const SNAP: PeerTelemetrySnapshot = {
+  model: "Claude Opus 4.6",
+  modelId: "claude-opus-4-6",
+  contextPct: 42,
+  contextWindow: 200_000,
+  observedAt: 1_731_234_567_890,
+};
+
+function snap(over: Partial<PeerTelemetrySnapshot> = {}): PeerTelemetrySnapshot {
+  return { ...SNAP, ...over };
+}
+
+async function listedTelemetry(b: TestBroker, observer: string, peerId: string): Promise<unknown> {
+  return (await listPeers(b, observer)).find((p) => p.peer_id === peerId)?.telemetry;
+}
+
+async function adminTelemetry(b: TestBroker, peerId: string, group = "default"): Promise<unknown> {
+  return (await adminPeers(b)).find((r) => r.peer_id === peerId && r.group_id === group)?.telemetry;
+}
+
+test("a relayed peer's telemetry is listed by a native peer and handed to another replica, observedAt untouched", async () => {
+  const native = await register(upstream, "tel-host-1", "/tel/1");
+  const own = await sync(upstream, syncBody({ peers: [relayPeer({ relay_ref: ref("tel-1"), peer_id: "tel-one", telemetry: snap() })] }));
+  expect(["the pass carrying telemetry is served", own.status]).toEqual(["the pass carrying telemetry is served", 200]);
+  expect([
+    "the caller's own response never echoes its relayed row back",
+    own.body.peers.some((p) => p.peer_id === "tel-one"),
+  ]).toEqual(["the caller's own response never echoes its relayed row back", false]);
+
+  expect(["a native peer reads the snapshot as the replica sent it", await listedTelemetry(upstream, native.instance_token, "tel-one")]).toEqual([
+    "a native peer reads the snapshot as the replica sent it",
+    SNAP,
+  ]);
+
+  const other = await sync(upstream, syncBody({ replica_id: OTHER_REPLICA, peers: [] }));
+  expect([
+    "another replica receives it through the directory, with the producer's observedAt",
+    other.body.peers.find((p) => p.peer_id === "tel-one")?.telemetry,
+  ]).toEqual(["another replica receives it through the directory, with the producer's observedAt", SNAP]);
+});
+
+test("a native peer's launch telemetry rides the directory handed to a replica", async () => {
+  const phrase = "tel-local-phrase";
+  const group = { id: await groupId(phrase), hash: await sha256Hex(phrase) };
+  await register(upstream, "tel-seed-host", "/tel/seed", group);
+  const run = await mintRunCredential(upstream, group, undefined, postAuth);
+  const desk = "tel-local-desk";
+  const launchHash = "a".repeat(64);
+  const tile = await registerAttestedInstance(
+    upstream,
+    run,
+    hostname(),
+    "/tel/tile",
+    { desk_session: desk, telemetry_capability_hash: launchHash },
+    postAuth
+  );
+  expect(["the tile registers", tile.status]).toEqual(["the tile registers", 200]);
+  const payload = { run_ref: run.run, group_id: run.group, desk_session: desk, launch_hash: launchHash, action: "publish", snapshot: SNAP };
+  const published = await postAuth<{ outcome?: string }>(`${upstream.url}/tile-telemetry`, {
+    ...payload,
+    auth: operatorInboxProof(payload, INBOX_GATES.tileTelemetry),
+  });
+  expect(["the launch snapshot is accepted", published.body.outcome]).toEqual(["the launch snapshot is accepted", "updated"]);
+
+  const res = await sync(
+    upstream,
+    syncBody({ groups: [{ group_id: group.id, group_secret_hash: group.hash }], peers: [] })
+  );
+  expect([
+    "the replica receives the native tile's snapshot with the producer's observedAt",
+    res.body.peers.find((p) => p.peer_id === tile.body.peer_id)?.telemetry,
+  ]).toEqual(["the replica receives the native tile's snapshot with the producer's observedAt", SNAP]);
+});
+
+test("an import is replaced per directory: newer wins, older and conflicting are refused, absence retracts", async () => {
+  const native = await register(upstream, "tel-host-2", "/tel/2");
+  const present = (telemetry?: PeerTelemetrySnapshot) =>
+    sync(upstream, syncBody({ peers: [relayPeer({ relay_ref: ref("tel-2"), peer_id: "tel-two", telemetry })] }));
+  const shown = () => listedTelemetry(upstream, native.instance_token, "tel-two");
+
+  await present(snap());
+  expect(["first observation", await shown()]).toEqual(["first observation", SNAP]);
+  await present(snap({ observedAt: SNAP.observedAt - 1, contextPct: 99 }));
+  expect(["an older observation is refused", await shown()]).toEqual(["an older observation is refused", SNAP]);
+  await present(snap({ contextPct: 99 }));
+  expect(["the same date with other content is refused", await shown()]).toEqual([
+    "the same date with other content is refused",
+    SNAP,
+  ]);
+  const newer = snap({ observedAt: SNAP.observedAt + 10, contextPct: 55 });
+  await present(newer);
+  expect(["a newer observation replaces it", await shown()]).toEqual(["a newer observation replaces it", newer]);
+  await present(undefined);
+  expect(["a directory without the sub-object retracts it", await shown()]).toEqual([
+    "a directory without the sub-object retracts it",
+    undefined,
+  ]);
+  await present(newer);
+  expect(["after a retraction the same observation is accepted again", await shown()]).toEqual([
+    "after a retraction the same observation is accepted again",
+    newer,
+  ]);
+});
+
+test("a malformed sub-object is refused whole and leaves the visible observation in place", async () => {
+  const native = await register(upstream, "tel-host-3", "/tel/3");
+  const peer = (telemetry: unknown) =>
+    sync(upstream, syncBody({ peers: [relayPeer({ relay_ref: ref("tel-3"), peer_id: "tel-three", telemetry: telemetry as PeerTelemetrySnapshot })] }));
+  await peer(snap());
+  const bad = await peer({ ...SNAP, contextPct: Number.NaN });
+  expect(["the pass itself is served", bad.status]).toEqual(["the pass itself is served", 200]);
+  expect(["the previous observation stays", await listedTelemetry(upstream, native.instance_token, "tel-three")]).toEqual([
+    "the previous observation stays",
+    SNAP,
+  ]);
+});
+
+test("each replica's imports are its own: another replica's pass leaves them, and a shared relay_ref is two rows", async () => {
+  const native = await register(upstream, "tel-host-4", "/tel/4");
+  const a = snap({ contextPct: 10 });
+  const b = snap({ contextPct: 20, observedAt: SNAP.observedAt + 5 });
+  await sync(upstream, syncBody({ peers: [relayPeer({ relay_ref: ref("tel-shared"), peer_id: "tel-ns-a", telemetry: a })] }));
+  await sync(
+    upstream,
+    syncBody({ replica_id: OTHER_REPLICA, peers: [relayPeer({ relay_ref: ref("tel-shared"), peer_id: "tel-ns-b", telemetry: b })] })
+  );
+  expect([
+    "the same relay_ref from two replicas keeps two snapshots",
+    await listedTelemetry(upstream, native.instance_token, "tel-ns-a"),
+    await listedTelemetry(upstream, native.instance_token, "tel-ns-b"),
+  ]).toEqual(["the same relay_ref from two replicas keeps two snapshots", a, b]);
+
+  await sync(upstream, syncBody({ peers: [] }));
+  expect([
+    "a pass of the first replica retracts its own and leaves the other's",
+    await adminTelemetry(upstream, "tel-ns-a"),
+    await adminTelemetry(upstream, "tel-ns-b"),
+  ]).toEqual(["a pass of the first replica retracts its own and leaves the other's", undefined, b]);
+});
+
+test("the same peer_id in two groups of one replica keeps two snapshots", async () => {
+  const x = { id: await groupId("tel-gx"), hash: await sha256Hex("tel-gx") };
+  const y = { id: await groupId("tel-gy"), hash: await sha256Hex("tel-gy") };
+  await register(upstream, "tel-gx-host", "/tel/gx", x);
+  await register(upstream, "tel-gy-host", "/tel/gy", y);
+  const tx = snap({ contextPct: 11 });
+  const ty = snap({ contextPct: 22 });
+  await sync(
+    upstream,
+    syncBody({
+      groups: [
+        { group_id: x.id, group_secret_hash: x.hash },
+        { group_id: y.id, group_secret_hash: y.hash },
+      ],
+      peers: [
+        relayPeer({ relay_ref: ref("tel-twin-x"), peer_id: "tel-twin", group_id: x.id, telemetry: tx }),
+        relayPeer({ relay_ref: ref("tel-twin-y"), peer_id: "tel-twin", group_id: y.id, telemetry: ty }),
+      ],
+    })
+  );
+  expect([
+    "each group's homonym carries its own snapshot",
+    await adminTelemetry(upstream, "tel-twin", x.id),
+    await adminTelemetry(upstream, "tel-twin", y.id),
+  ]).toEqual(["each group's homonym carries its own snapshot", tx, ty]);
+});
+
+test("a group refused on a later pass imports nothing and retracts what the row showed", async () => {
+  const g = { id: await groupId("tel-refused"), hash: await sha256Hex("tel-refused") };
+  await register(upstream, "tel-refused-host", "/tel/refused", g);
+  const pass = (hash: string, telemetry: PeerTelemetrySnapshot) =>
+    sync(
+      upstream,
+      syncBody({
+        groups: [{ group_id: g.id, group_secret_hash: hash }],
+        peers: [relayPeer({ relay_ref: ref("tel-refused"), peer_id: "tel-refused-peer", group_id: g.id, telemetry })],
+      })
+    );
+  await pass(g.hash, SNAP);
+  expect(["accepted pass", await adminTelemetry(upstream, "tel-refused-peer", g.id)]).toEqual(["accepted pass", SNAP]);
+  const refused = await pass(await sha256Hex("wrong"), snap({ observedAt: SNAP.observedAt + 99 }));
+  expect(["the group is named refused", refused.body.refused_groups.map((r) => r.group_id)]).toEqual([
+    "the group is named refused",
+    [g.id],
+  ]);
+  expect(["nothing of the refused pass is shown", await adminTelemetry(upstream, "tel-refused-peer", g.id)]).toEqual([
+    "nothing of the refused pass is shown",
+    undefined,
+  ]);
+});
+
+test("a peer that turns dormant shows no telemetry", async () => {
+  await sync(upstream, syncBody({ peers: [relayPeer({ relay_ref: ref("tel-dormant"), peer_id: "tel-dormant", telemetry: snap() })] }));
+  expect(["listed while present", await adminTelemetry(upstream, "tel-dormant")]).toEqual(["listed while present", SNAP]);
+  await sync(upstream, syncBody({ peers: [] }));
+  const row = (await adminPeers(upstream)).find((r) => r.peer_id === "tel-dormant");
+  expect(["the row is dormant", row?.status]).toEqual(["the row is dormant", "dormant"]);
+  expect(["and carries no snapshot", row?.telemetry]).toEqual(["and carries no snapshot", undefined]);
+});
+
+test("a pass whose transaction rolls back applies no telemetry", async () => {
+  const native = await register(upstream, "tel-host-rb", "/tel/rb");
+  await sync(
+    upstream,
+    syncBody({
+      peers: [
+        relayPeer({ relay_ref: ref("tel-rb-p"), peer_id: "tel-rb-p", telemetry: snap() }),
+        relayPeer({ relay_ref: ref("tel-rb-q"), peer_id: "tel-rb-q" }),
+      ],
+    })
+  );
+  const db = openBrokerDb(upstream.dbPath);
+  try {
+    db.run(
+      "CREATE TRIGGER tel_rollback BEFORE UPDATE ON peers WHEN OLD.status = 'active' AND NEW.status = 'dormant' BEGIN SELECT RAISE(ABORT, 'rollback probe'); END"
+    );
+    const newer = snap({ observedAt: SNAP.observedAt + 1_000, contextPct: 77 });
+    const failed = await sync(
+      upstream,
+      syncBody({ peers: [relayPeer({ relay_ref: ref("tel-rb-p"), peer_id: "tel-rb-p", telemetry: newer })] })
+    );
+    expect(["the pass fails as a whole", failed.status >= 500]).toEqual(["the pass fails as a whole", true]);
+    expect(["the rolled-back directory is not applied", await listedTelemetry(upstream, native.instance_token, "tel-rb-p")]).toEqual([
+      "the rolled-back directory is not applied",
+      SNAP,
+    ]);
+  } finally {
+    db.run("DROP TRIGGER IF EXISTS tel_rollback");
+    db.close();
+  }
+});
+
+// --- The replica half: a real replica behind a proxy this file controls ---
+
+const REPLICA_GRACE_SEC = 2;
+let rigReplica: TestBroker | null = null;
+let rigProxy: UpstreamProxy | null = null;
+
+afterAll(async () => {
+  rigProxy?.stop();
+  if (rigReplica) await stopBroker(rigReplica);
+});
+
+async function replicaRig(): Promise<{ replica: TestBroker; proxy: UpstreamProxy }> {
+  if (!rigReplica || !rigProxy) {
+    rigProxy = startUpstreamProxy(upstream.url);
+    rigReplica = await startPlainBroker({
+      CLAUDE_PEERS_BROKER_URL: rigProxy.url,
+      CLAUDE_PEERS_BROKER_TOKEN: TOKEN,
+      CLAUDE_PEERS_OFFLINE_REPLICA: "1",
+      CLAUDE_PEERS_SYNC_TICK_MS: "200",
+      CLAUDE_PEERS_FEDERATION_GRACE_SEC: String(REPLICA_GRACE_SEC),
+    });
+  }
+  return { replica: rigReplica, proxy: rigProxy };
+}
+
+async function eventually<T>(what: string, read: () => Promise<T>, done: (value: T) => boolean, budgetMs = 15_000): Promise<T> {
+  const deadline = Date.now() + budgetMs;
+  let last = await read();
+  while (!done(last)) {
+    if (Date.now() > deadline) throw new Error(`${what}: timed out; last=${JSON.stringify(last)}`);
+    await Bun.sleep(60);
+    last = await read();
+  }
+  return last;
+}
+
+async function replicaPasses(replica: TestBroker, n: number): Promise<void> {
+  const stamp = async () =>
+    (await postAuth<{ last_sync_at: string | null }>(`${replica.url}/roadmap/sync/status`, {})).body.last_sync_at;
+  let seen = await stamp();
+  let count = 0;
+  await eventually("replica passes", async () => {
+    const now = await stamp();
+    if (now !== seen) {
+      seen = now;
+      count += 1;
+    }
+    return count;
+  }, (c) => c >= n);
+}
+
+test("a replica's local tile telemetry reaches the upstream's native peers as published", async () => {
+  const { replica, proxy } = await replicaRig();
+  const phrase = "tel-out-phrase";
+  const group = { id: await groupId(phrase), hash: await sha256Hex(phrase) };
+  const observer = await register(upstream, "tel-out-observer", "/tel/out/obs", group);
+  await register(replica, "tel-out-seed", "/tel/out/seed", group);
+  const run = await mintRunCredential(replica, group, undefined, postAuth);
+  const desk = "tel-out-desk";
+  const launchHash = "b".repeat(64);
+  const tile = await registerAttestedInstance(
+    replica,
+    run,
+    hostname(),
+    "/tel/out/tile",
+    { desk_session: desk, telemetry_capability_hash: launchHash },
+    postAuth
+  );
+  expect(["the tile registers on the replica", tile.status]).toEqual(["the tile registers on the replica", 200]);
+  const payload = { run_ref: run.run, group_id: run.group, desk_session: desk, launch_hash: launchHash, action: "publish", snapshot: SNAP };
+  const published = await postAuth<{ outcome?: string }>(`${replica.url}/tile-telemetry`, {
+    ...payload,
+    auth: operatorInboxProof(payload, INBOX_GATES.tileTelemetry),
+  });
+  expect(["the replica accepts the launch snapshot", published.body.outcome]).toEqual(["the replica accepts the launch snapshot", "updated"]);
+
+  const seen = await eventually(
+    "the upstream lists the replica's tile with its snapshot",
+    async () =>
+      (await listPeers(upstream, observer.instance_token)).find(
+        (p) => p.peer_id === tile.body.peer_id && p.telemetry !== undefined
+      )?.telemetry,
+    (t) => t !== undefined
+  );
+  expect(["the upstream shows the replica's snapshot with the producer's observedAt", seen]).toEqual([
+    "the upstream shows the replica's snapshot with the producer's observedAt",
+    SNAP,
+  ]);
+  const wire = proxy.exchanges
+    .filter((e) => e.path === "/federation/sync")
+    .map((e) => JSON.parse(e.request) as FederationSyncRequest)
+    .flatMap((r) => r.peers)
+    .find((p) => p.peer_id === tile.body.peer_id && p.telemetry !== undefined);
+  expect(["the wire carries the five fields and nothing else", Object.keys(wire?.telemetry ?? {}).sort()]).toEqual([
+    "the wire carries the five fields and nothing else",
+    ["contextPct", "contextWindow", "model", "modelId", "observedAt"],
+  ]);
+}, 40_000);
+
+test("a replica shows the telemetry of a mirrored peer as the upstream observed it, keeps it through the grace, drops it at its end", async () => {
+  const { replica, proxy } = await replicaRig();
+  const observer = await register(replica, "tel-in-observer", "/tel/in/obs");
+  const upstreamId = (await sync(upstream, syncBody({ replica_id: "scripted-replica-01" }))).body.upstream_id;
+  const mirror = (telemetry?: PeerTelemetrySnapshot): FederationSyncResponse => ({
+    upstream_id: upstreamId,
+    assigned: [],
+    peers: [
+      {
+        peer_id: "tel-mirror",
+        group_id: "default",
+        host: "far-host",
+        cwd: "/far",
+        git_root: null,
+        project_key: null,
+        summary: "",
+        role: null,
+        status: "active",
+        last_seen: new Date().toISOString(),
+        last_activity_at: null,
+        via: "upstream",
+        ...(telemetry ? { telemetry } : {}),
+      },
+    ],
+    messages: [],
+    refused_groups: [],
+  });
+  let scripted: FederationSyncResponse | null = mirror(SNAP);
+  proxy.intercept = (path) => (path === "/federation/sync" && scripted ? Response.json(scripted) : null);
+  const shown = () => listedTelemetry(replica, observer.instance_token, "tel-mirror");
+  try {
+    await eventually("the mirror shows the snapshot", shown, (t) => t !== undefined);
+    expect(["the replica shows the observation with the upstream's observedAt", await shown()]).toEqual([
+      "the replica shows the observation with the upstream's observedAt",
+      SNAP,
+    ]);
+
+    scripted = mirror(snap({ observedAt: SNAP.observedAt - 1, contextPct: 99 }));
+    await replicaPasses(replica, 2);
+    expect(["an older observation is refused", await shown()]).toEqual(["an older observation is refused", SNAP]);
+
+    scripted = mirror();
+    await eventually("a directory without the sub-object retracts it", shown, (t) => t === undefined);
+
+    scripted = mirror(SNAP);
+    await eventually("the same observation is accepted again after the retraction", shown, (t) => t !== undefined);
+
+    proxy.blocked = true;
+    await eventually(
+      "the replica notices the outage",
+      async () => (await postAuth<{ online: boolean }>(`${replica.url}/roadmap/sync/status`, {})).body.online,
+      (online) => online === false
+    );
+    expect(["within the grace the last observation stays, with its real date", await shown()]).toEqual([
+      "within the grace the last observation stays, with its real date",
+      SNAP,
+    ]);
+    await eventually(
+      "the end of the grace drops the namespace",
+      () => adminTelemetry(replica, "tel-mirror"),
+      (t) => t === undefined
+    );
+    const dormant = (await adminPeers(replica)).find((r) => r.peer_id === "tel-mirror");
+    expect(["the mirror is dormant by then, so the empty answer is the drop and not a hidden row", dormant?.status]).toEqual([
+      "the mirror is dormant by then, so the empty answer is the drop and not a hidden row",
+      "dormant",
+    ]);
+  } finally {
+    proxy.blocked = false;
+    proxy.intercept = null;
+  }
+}, 40_000);
