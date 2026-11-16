@@ -46,6 +46,7 @@
     "../shared/canonical-config-path.ts",
     "../shared/broker-config.ts",
     "../shared/roadmap-dispatch.ts",
+    "../shared/roadmap-append.ts",
     "../shared/tool-allowlist.ts",
     "../shared/mount-ceiling.ts",
     "../shared/logger.ts",

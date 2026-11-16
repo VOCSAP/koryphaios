@@ -105,13 +105,38 @@ test("watchIdleLocks releases through idleSweepRequest and traces its failure", 
   ]);
 });
 
-test("stopRoadmapItem releases through operatorStopRequest and never carries the sweep marker", () => {
+function bodyOf(src: string, declaration: RegExp): string {
+  const declMatch = declaration.exec(src);
+  expect(["declaration found: " + declaration.source, declMatch !== null]).toEqual(["declaration found: " + declaration.source, true]);
+  return extractBracedBody(src, declMatch!.index + declMatch![0].length - 1);
+}
+
+test("the status-write sites of index.ts call their orchestration and guarded write, never a bare upsertRoadmap", () => {
+  const src = readFileSync(INDEX_PATH, "utf-8");
+  const dispatchNextInner = /const\s+dispatchNextInner\s*=\s*async\s*\([^)]*\)\s*:\s*Promise<DispatchResult>\s*=>\s*\{/;
+  const sites: [string, RegExp, RegExp[]][] = [
+    ["dispatchNextInner", dispatchNextInner, [/markDone:\s*async\s*\(item\)\s*=>\s*\(await markDirectiveDone\(item,\s*guardedWriteIo\(endpoint,\s*key\)\)\)\.written\s*\?\s*undefined\s*:\s*'skipped'/, /upsert:\s*async\s*\(item\)\s*=>\s*\(await unqueueDispatched\(item,\s*guardedWriteIo\(endpoint,\s*key\)\)\)\.written\s*\?\s*undefined\s*:\s*'skipped'/, /warn:\s*warnDispatch\b/]],
+    ["assignRoadmapItem", /const\s+assignRoadmapItem\s*=\s*async\s*\([^)]*\)\s*:\s*Promise<AssignResult>\s*=>\s*\{/, [/runAssign\(id,\s*peerId,/, /write:\s*\(item\)\s*=>\s*assignInProgress\(item,\s*guardedWriteIo\(endpoint\(\),\s*key\(\)\)\),/, /warn:\s*warnDispatch\b/]],
+    ["stopRoadmapItem", /const\s+stopRoadmapItem\s*=\s*async\s*\([^)]*\)\s*:\s*Promise<StopResult>\s*=>\s*\{/, [/runStop\(id,/, /write:\s*\(item\)\s*=>\s*requestOperatorStop\(item,\s*guardedWriteIo\(endpoint\(\),\s*key\(\)\)\),/]],
+    ["warnDispatch", /const\s+warnDispatch\s*=\s*\(line:\s*string\)\s*:\s*void\s*=>\s*\{/, [/logWarn\('dispatch',\s*line\)/, /journal\.add\('dispatch',/]],
+    ["watchDispatched", /const\s+watchDispatched\s*=\s*async\s*\([^)]*\)\s*:\s*Promise<void>\s*=>\s*\{/, [/dispatchSucceeded\s*=\s*dispatchTracked\(r\)/]]
+  ];
+  for (const [site, declaration, calls] of sites) {
+    const body = bodyOf(src, declaration);
+    for (const call of calls) {
+      expect([site + " calls " + call.source, call.test(body)]).toEqual([site + " calls " + call.source, true]);
+    }
+    expect([site + " has no bare upsertRoadmap", /upsertRoadmap\(/.test(body)]).toEqual([site + " has no bare upsertRoadmap", false]);
+  }
+});
+
+test("stopRoadmapItem writes through requestOperatorStop and never carries the sweep marker", () => {
   const src = readFileSync(INDEX_PATH, "utf-8");
   const declMatch = /const\s+stopRoadmapItem\s*=\s*async\s*\([^)]*\)\s*:\s*Promise<StopResult>\s*=>\s*\{/.exec(src);
   expect(declMatch).not.toBeNull();
   const body = extractBracedBody(src, declMatch!.index + declMatch![0].length - 1);
-  expect(["stop payload comes from operatorStopRequest(item)", /upsertRoadmap\([^)]*operatorStopRequest\(item\)\)/.test(body)]).toEqual([
-    "stop payload comes from operatorStopRequest(item)",
+  expect(["the stop write is requestOperatorStop(item, ...)", /requestOperatorStop\(item,/.test(body)]).toEqual([
+    "the stop write is requestOperatorStop(item, ...)",
     true,
   ]);
   expect(["the stop never names the sweep builder or marker", /idleSweepRequest|change_origin|idle_lock_sweep/.test(body)]).toEqual([

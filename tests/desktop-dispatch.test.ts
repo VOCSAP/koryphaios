@@ -11,8 +11,10 @@ import {
   composeDispatchText,
   composeMultiDispatchText,
   composeStopText,
+  createFailureReporter,
   dependencyHoldReason,
   dispatchNormalWave,
+  dispatchTracked,
   firstQueued,
   nextBarrierPending,
   nextDispatchedState,
@@ -20,16 +22,30 @@ import {
   NO_TARGET_REQUESTED_NOTE,
   queuedItems,
   resolveDependency,
+  runAssign,
   runDirectiveWave,
   runDispatchRequestPoll,
+  runStop,
   splitWave,
   UNRESOLVED_TARGET_NOTE,
-  unresolvedDirectiveNote
+  unresolvedDirectiveNote,
+  type AssignDeps,
+  type StopDeps
 } from "../desktop/src/main/dispatch.ts";
+import {
+  assignInProgress,
+  markDirectiveDone,
+  requestOperatorStop,
+  unqueueDispatched,
+  type GuardedWriteIo
+} from "../desktop/src/main/roadmap-guarded-write.ts";
+import { RoadmapRequestError } from "../desktop/src/main/roadmap-service.ts";
+import { formatRoadmapStaleSaveError } from "../shared/roadmap-append.ts";
 import type {
   DirectiveDispatch,
   DispatchResult,
-  RoadmapItem
+  RoadmapItem,
+  RoadmapUpsertFields
 } from "../desktop/src/shared/types";
 // The dispatch-request shapes are the BROKER's, declared once at the repo root
 // and imported by the three main-process consumers -- not mirrored Deck-side.
@@ -478,7 +494,7 @@ function mockDirectiveDeps(
     noted,
     notedReports,
     deps: {
-      markDone: async (it: RoadmapItem) => {
+      markDone: async (it: RoadmapItem): Promise<void | "skipped"> => {
         order.push(`mark:${it.id}`);
       },
       execute: async (it: RoadmapItem): Promise<DirectiveDispatch> => {
@@ -746,10 +762,13 @@ test("unresolvedDirectiveNote: an empty refused list is the unreachable case, no
 function mockDeps(opts: { announceReturns?: number; failIds?: Set<string> } = {}) {
   const announced: string[] = [];
   const upserted: string[] = [];
+  const warned: string[] = [];
   return {
     announced,
     upserted,
+    warned,
     deps: {
+      warn: (line: string) => warned.push(line),
       announce: async (text: string) => {
         announced.push(text);
         return opts.announceReturns ?? 1;
@@ -1140,7 +1159,7 @@ test("SOURCE SCAN (weak): DispatchResult.dispatched is produced AND reaches the 
   expect(src).toContain("dispatched: announcedMembers");
 });
 
-type RetryRun = { barrierPending: boolean; dispatched: number; lines: string[] };
+type RetryRun = { barrierPending: boolean; dispatched: number; lines: string[]; allLines: string[] };
 
 /**
  * Executes the REAL body of watchDispatched (index.ts, not importable under
@@ -1152,27 +1171,31 @@ type RetryRun = { barrierPending: boolean; dispatched: number; lines: string[] }
  * One tracked item finishing on this tick is what makes the barrier re-check
  * the head, so every run starts from that state.
  */
-async function runWatchRetry(roadmap: RoadmapItem[]): Promise<RetryRun> {
+async function runWatchRetry(
+  roadmap: RoadmapItem[],
+  result: DispatchResult = { sent: true, title: "dispatched", dispatched: [{ id: "w", title: "dispatched", kind: "feature" }] }
+): Promise<RetryRun> {
   const watch = sliceBetween(indexSource(), "const watchDispatched = async (): Promise<void> => {", "\n}");
   const start = watch.indexOf("const items = await listRoadmap(");
-  const end = watch.lastIndexOf("} catch {");
+  const end = watch.lastIndexOf("} catch (e) {");
   if (start < 0 || end < start) throw new Error("watchDispatched body not found");
-  const fn = `async function watchBody(endpoint, key, listRoadmap, dispatchedIds, barrierPending, nextDispatchedState, autoDispatchHold, dependencyHoldReason, nextBarrierPending, firstQueued, dispatchNext, journal) {\n${watch.slice(start, end)}\nreturn barrierPending\n}`;
+  const fn = `async function watchBody(endpoint, key, listRoadmap, dispatchedIds, barrierPending, nextDispatchedState, autoDispatchHold, dependencyHoldReason, nextBarrierPending, firstQueued, dispatchTracked, dispatchNext, journal, dispatchWatchFailures) {\n${watch.slice(start, end)}\nreturn barrierPending\n}`;
   const js = new Bun.Transpiler({ loader: "ts" }).transformSync(fn);
   const watchBody = new Function(`${js}\nreturn watchBody`)();
   const finished = item({ id: "finished-wave-member", status: "done" });
-  const run: RetryRun = { barrierPending: false, dispatched: 0, lines: [] };
+  const run: RetryRun = { barrierPending: false, dispatched: 0, lines: [], allLines: [] };
   const listRoadmap = async (_endpoint: string, _key: string, opts: { include_archived?: boolean }) =>
     [finished, ...roadmap].filter((i) => opts.include_archived || i.status !== "archived");
   const dispatchNext = async (): Promise<DispatchResult> => {
     run.dispatched++;
-    return { sent: true, title: "dispatched" } as DispatchResult;
+    return result;
   };
   const journal = { add: (_channel: string, line: string) => run.lines.push(line) };
   run.barrierPending = await watchBody(
     "endpoint", "key", listRoadmap, new Map([[finished.id, { claimed: true }]]), false,
-    nextDispatchedState, autoDispatchHold, dependencyHoldReason, nextBarrierPending, firstQueued, dispatchNext, journal
+    nextDispatchedState, autoDispatchHold, dependencyHoldReason, nextBarrierPending, firstQueued, dispatchTracked, dispatchNext, journal, createFailureReporter(() => undefined)
   );
+  run.allLines = run.lines;
   run.lines = run.lines.filter((l) => l.startsWith("wave barrier"));
   return run;
 }
@@ -1203,4 +1226,355 @@ test("watchDispatched: a dependency on an archived card lets the head dispatch",
   const run = await runWatchRetry([dep, head]);
   expect(run.dispatched).toBe(1);
   expect(run.barrierPending).toBe(false);
+});
+
+function wavePool(cards: RoadmapItem[]) {
+  const live = new Map(cards.map((c) => [c.id, { ...c, content_rev: 1 }]));
+  const writes: RoadmapUpsertFields[] = [];
+  const io: GuardedWriteIo = {
+    read: async (id) => live.get(id) ?? null,
+    write: async (fields) => {
+      writes.push(fields);
+      const cur = live.get(fields.id!)!;
+      if (fields.expected_content_rev !== undefined && fields.expected_content_rev !== cur.content_rev) {
+        throw new RoadmapRequestError(formatRoadmapStaleSaveError("the card changed"), 409, "/roadmap/upsert");
+      }
+      const { id: _id, expected_content_rev: _token, ...rest } = fields;
+      const next = { ...cur, ...(rest as Partial<RoadmapItem>), content_rev: cur.content_rev! + 1 };
+      live.set(cur.id, next);
+      return next;
+    },
+    trace: () => {}
+  };
+  const edit = (id: string, patch: Partial<RoadmapItem>) =>
+    live.set(id, { ...live.get(id)!, ...patch, content_rev: live.get(id)!.content_rev! + 1 });
+  const snapshot = (id: string): RoadmapItem => ({ ...live.get(id)! });
+  return { live, writes, io, edit, snapshot };
+}
+
+test("dispatchNormalWave: a member closed during the announce keeps its state; the wave is still sent and names the skipped card", async () => {
+  for (const closed of ["done", "archived"] as const) {
+    const pool = wavePool([item({ id: "a", title: "A", status: "idea", queue: 1 })]);
+    const snap = pool.snapshot("a");
+    const warned: string[] = [];
+    let announces = 0;
+    const out = await dispatchNormalWave([snap], {
+      announce: async () => {
+        announces++;
+        pool.edit("a", { status: closed });
+        return 1;
+      },
+      upsert: async (it) => ((await unqueueDispatched(it, pool.io)).written ? undefined : "skipped"),
+      warn: (line) => warned.push(line)
+    });
+    expect(announces).toBe(1);
+    expect(pool.live.get("a")!.status).toBe(closed);
+    expect(pool.writes).toHaveLength(1);
+    expect(out.dispatched).toEqual([]);
+    expect(out.failed).toEqual([]);
+    expect(out.skipped.map((i) => i.id)).toEqual(["a"]);
+    expect(out.result).toEqual({ sent: true, skipped: [{ id: "a", title: "A", kind: "feature" }] });
+    expect(warned).toHaveLength(1);
+    expect(warned[0]).toContain('"A"');
+  }
+});
+
+test("dispatchNormalWave: a member edited during the announce is still unqueued after the re-read, a closed sibling is skipped and warned", async () => {
+  const pool = wavePool([
+    item({ id: "a", title: "A", status: "idea", queue: 1 }),
+    item({ id: "b", title: "B", status: "planned", queue: 1 }),
+    item({ id: "c", title: "C", status: "planned", queue: 1 })
+  ]);
+  const wave = ["a", "b", "c"].map((id) => pool.snapshot(id));
+  const warned: string[] = [];
+  const out = await dispatchNormalWave(wave, {
+    announce: async () => {
+      pool.edit("a", { title: "A renamed" });
+      pool.edit("b", { status: "done" });
+      return 1;
+    },
+    upsert: async (it) => ((await unqueueDispatched(it, pool.io)).written ? undefined : "skipped"),
+    warn: (line) => warned.push(line)
+  });
+  expect(out.dispatched.map((i) => i.id)).toEqual(["a", "c"]);
+  expect(out.skipped.map((i) => i.id)).toEqual(["b"]);
+  expect(out.result).toEqual({
+    sent: true,
+    count: 2,
+    titles: ["A", "C"],
+    skipped: [{ id: "b", title: "B", kind: "feature" }]
+  });
+  expect(warned).toHaveLength(1);
+  expect(pool.live.get("a")).toMatchObject({ title: "A renamed", status: "planned", queue: null });
+  expect(pool.live.get("b")!.status).toBe("done");
+});
+
+test("dispatchTracked: only a wave that left a tracked member counts as in flight", () => {
+  const member = { id: "a", title: "A", kind: "feature" };
+  expect(dispatchTracked({ sent: true, title: "A", dispatched: [member] })).toBe(true);
+  expect(dispatchTracked({ sent: true, skipped: [member] })).toBe(false);
+  expect(dispatchTracked({ sent: false, reason: "no-lead" })).toBe(false);
+});
+
+test("composeDispatchOutcome: a wave whose cards all closed is not reported as nothing eligible", () => {
+  const outcome = composeDispatchOutcome({ sent: true, skipped: [{ id: "a", title: "A", kind: "feature" }] });
+  expect(outcome.cards).toEqual([]);
+  expect(outcome.note).toContain("closed before they were unqueued");
+  expect(outcome.note).not.toContain("nothing eligible");
+});
+
+test("runDirectiveWave: a directive closed since it was read is not executed and not reported as an error", async () => {
+  const pool = wavePool([item({ id: "d", kind: "directive", directive: "clear", status: "planned", queue: 1 })]);
+  const snap = pool.snapshot("d");
+  pool.edit("d", { status: "done" });
+  const { order, reported, deps } = mockDirectiveDeps();
+  deps.markDone = async (it: RoadmapItem) => ((await markDirectiveDone(it, pool.io)).written ? undefined : "skipped");
+  const executed = await runDirectiveWave([snap], deps);
+  expect(order).toEqual([]);
+  expect(executed).toEqual([]);
+  expect(reported).toEqual([]);
+  expect(pool.live.get("d")).toMatchObject({ status: "done" });
+  expect(pool.writes).toHaveLength(1);
+});
+
+test("runDirectiveWave: a directive edited since it was read is marked done with the fresh token, then executed", async () => {
+  const pool = wavePool([item({ id: "d", kind: "directive", directive: "clear", status: "planned", queue: 1 })]);
+  const snap = pool.snapshot("d");
+  pool.edit("d", { title: "renamed" });
+  const { order, deps } = mockDirectiveDeps();
+  deps.markDone = async (it: RoadmapItem) => ((await markDirectiveDone(it, pool.io)).written ? undefined : "skipped");
+  await runDirectiveWave([snap], deps);
+  expect(order[0]).toBe("execute:d");
+  expect(pool.writes.map((w) => w.expected_content_rev)).toEqual([1, 2]);
+  expect(pool.live.get("d")).toMatchObject({ status: "done", queue: null });
+});
+
+test("runDirectiveWave: a skipped directive does not stop its siblings", async () => {
+  const { order, deps } = mockDirectiveDeps();
+  deps.markDone = async (it: RoadmapItem) => (it.id === "a" ? "skipped" : undefined);
+  await runDirectiveWave(
+    [item({ id: "a", kind: "directive", directive: "clear" }), item({ id: "b", kind: "directive", directive: "compact" })],
+    deps
+  );
+  expect(order.filter((o) => o.startsWith("execute:"))).toEqual(["execute:b"]);
+});
+
+function assignHarness(pool: ReturnType<typeof wavePool>, over: Partial<AssignDeps> = {}) {
+  const log = { announced: [] as string[], journaled: [] as string[], warned: [] as string[], errors: [] as unknown[] };
+  const deps: AssignDeps = {
+    read: async (id) => (pool.live.has(id) ? pool.snapshot(id) : null),
+    announce: async (_item, target) => {
+      log.announced.push(target);
+      return 1;
+    },
+    write: (it) => assignInProgress(it, pool.io),
+    journal: (line) => log.journaled.push(line),
+    warn: (line) => log.warned.push(line),
+    reportError: (_message, error) => log.errors.push(error),
+    ...over
+  };
+  return { deps, log };
+}
+
+test("runAssign: a card closed after the read is announced, then reported sent with the write skipped and a warning", async () => {
+  const pool = wavePool([item({ id: "a", title: "A", status: "planned", queue: 1 })]);
+  const { deps, log } = assignHarness(pool, {
+    announce: async () => {
+      pool.edit("a", { status: "done" });
+      return 1;
+    }
+  });
+  const result = await runAssign("a", " peer-1 ", deps);
+  expect(result).toEqual({ sent: true, writeSkipped: true });
+  expect(log.warned).toHaveLength(1);
+  expect(log.warned[0]).toContain('"A"');
+  expect(log.journaled).toEqual([]);
+  expect(pool.live.get("a")!.status).toBe("done");
+});
+
+test("runAssign: an announce that reaches no peer writes nothing and warns nothing", async () => {
+  const pool = wavePool([item({ id: "a", status: "planned", queue: 1 })]);
+  const { deps, log } = assignHarness(pool, { announce: async () => 0 });
+  expect(await runAssign("a", "peer-1", deps)).toEqual({ sent: false });
+  expect(pool.writes).toEqual([]);
+  expect(log.warned).toEqual([]);
+});
+
+test("runAssign: a written assignment is journaled and carries no skip flag", async () => {
+  const pool = wavePool([item({ id: "a", title: "A", status: "planned", queue: 1 })]);
+  const { deps, log } = assignHarness(pool);
+  expect(await runAssign("a", "peer-1", deps)).toEqual({ sent: true });
+  expect(log.announced).toEqual(["peer-1"]);
+  expect(log.journaled).toHaveLength(1);
+  expect(pool.live.get("a")).toMatchObject({ status: "in_progress", queue: null });
+});
+
+test("runAssign: a blank peer or an unknown card announces nothing; a throwing write is reported and answers sent:false", async () => {
+  const pool = wavePool([item({ id: "a", status: "planned", queue: 1 })]);
+  const blank = assignHarness(pool);
+  expect(await runAssign("a", "   ", blank.deps)).toEqual({ sent: false });
+  expect(await runAssign("missing", "peer-1", blank.deps)).toEqual({ sent: false });
+  expect(blank.log.announced).toEqual([]);
+
+  const boom = new Error("write failed");
+  const failing = assignHarness(pool, {
+    write: async () => {
+      throw boom;
+    }
+  });
+  expect(await runAssign("a", "peer-1", failing.deps)).toEqual({ sent: false });
+  expect(failing.log.errors).toEqual([boom]);
+});
+
+function stopHarness(pool: ReturnType<typeof wavePool>, over: Partial<StopDeps> = {}) {
+  const log = { order: [] as string[], journaled: [] as string[], errors: [] as unknown[] };
+  const deps: StopDeps = {
+    read: async (id) => (pool.live.has(id) ? pool.snapshot(id) : null),
+    write: async (it) => {
+      log.order.push("write");
+      return requestOperatorStop(it, pool.io);
+    },
+    notify: async () => {
+      log.order.push("notify");
+      return "supervisor";
+    },
+    journal: (line) => log.journaled.push(line),
+    reportError: (_message, error) => log.errors.push(error),
+    ...over
+  };
+  return { deps, log };
+}
+
+const runningCard = () => item({ id: "a", title: "A", status: "in_progress", locked: true, locked_by: "p1", queue: null });
+
+test("runStop: the guarded write comes before the notice, and a written stop reports how the notice went out", async () => {
+  const pool = wavePool([runningCard()]);
+  const { deps, log } = stopHarness(pool);
+  expect(await runStop("a", deps)).toEqual({ stopped: true, via: "supervisor" });
+  expect(log.order).toEqual(["write", "notify"]);
+  expect(pool.live.get("a")).toMatchObject({ status: "planned", locked: false });
+  expect(log.journaled).toHaveLength(1);
+});
+
+test("runStop: a card that changed between the read and the write sends no notice", async () => {
+  const pool = wavePool([runningCard()]);
+  const { deps, log } = stopHarness(pool, {
+    read: async (id) => {
+      const seen = pool.snapshot(id);
+      pool.edit(id, { status: "done" });
+      return seen;
+    }
+  });
+  expect(await runStop("a", deps)).toEqual({ stopped: false, via: "none", reason: "card-changed" });
+  expect(log.order).toEqual(["write"]);
+  expect(log.journaled).toEqual([]);
+  expect(pool.live.get("a")!.status).toBe("done");
+});
+
+test("runStop: a notice that fails after the write still answers stopped:true via none and is reported", async () => {
+  const pool = wavePool([runningCard()]);
+  const down = new Error("broker unreachable");
+  const { deps, log } = stopHarness(pool, {
+    notify: async () => {
+      throw down;
+    }
+  });
+  expect(await runStop("a", deps)).toEqual({ stopped: true, via: "none" });
+  expect(log.errors).toEqual([down]);
+  expect(pool.live.get("a")!.status).toBe("planned");
+});
+
+test("runStop: a write that throws is reported once and rethrown unchanged, with no notice", async () => {
+  const pool = wavePool([runningCard()]);
+  const stale = new RoadmapRequestError(formatRoadmapStaleSaveError("the card changed"), 409, "/roadmap/upsert");
+  const { deps, log } = stopHarness(pool, {
+    write: async () => {
+      throw stale;
+    }
+  });
+  await expect(runStop("a", deps)).rejects.toBe(stale);
+  expect(log.errors).toEqual([stale]);
+  expect(log.order).toEqual([]);
+});
+
+test("runStop: an unknown card answers not-found without writing or notifying", async () => {
+  const pool = wavePool([runningCard()]);
+  const { deps, log } = stopHarness(pool);
+  expect(await runStop("missing", deps)).toEqual({ stopped: false, via: "none", reason: "not-found" });
+  expect(log.order).toEqual([]);
+  expect(pool.writes).toEqual([]);
+});
+
+test("watchDispatched: a dispatched wave whose cards all closed is not tracked, so the barrier re-arms instead of stalling", async () => {
+  const head = item({ id: "a", title: "Next head", queue: 1 });
+  const run = await runWatchRetry([head], { sent: true, skipped: [{ id: "x", title: "X", kind: "feature" }] });
+  expect(run.dispatched).toBe(1);
+  expect(run.barrierPending).toBe(true);
+  expect(run.allLines.some((l) => l.startsWith("auto-dispatched"))).toBe(false);
+  expect(run.lines.join("\n")).toContain("every announced card closed meanwhile");
+});
+
+test("runStop: the notice and the journal carry the title of the card that was written, not the one first read", async () => {
+  const pool = wavePool([runningCard()]);
+  const notified: string[] = [];
+  const { deps, log } = stopHarness(pool, {
+    read: async (id) => {
+      const seen = pool.snapshot(id);
+      pool.edit(id, { title: "A renamed" });
+      return seen;
+    },
+    notify: async (it) => {
+      notified.push(it.title);
+      return "broadcast";
+    }
+  });
+  expect(await runStop("a", deps)).toEqual({ stopped: true, via: "broadcast" });
+  expect(pool.writes.map((w) => w.expected_content_rev)).toEqual([1, 2]);
+  expect(notified).toEqual(["A renamed"]);
+  expect(log.journaled[0]).toContain("A renamed");
+});
+
+async function runWatchTicks(outcomes: (Error | null)[], dispatchFailure: Error | null = null): Promise<string[]> {
+  const watch = sliceBetween(indexSource(), "const watchDispatched = async (): Promise<void> => {", "\n}");
+  const start = watch.indexOf("const items = await listRoadmap(");
+  if (start < 0) throw new Error("watchDispatched body not found");
+  const fn = `async function tick(endpoint, key, listRoadmap, dispatchedIds, barrierPending, nextDispatchedState, autoDispatchHold, dependencyHoldReason, nextBarrierPending, firstQueued, dispatchTracked, dispatchNext, journal, dispatchWatchFailures) {\ntry {\n${watch.slice(start)}\n}`;
+  const js = new Bun.Transpiler({ loader: "ts" }).transformSync(fn);
+  const tick = new Function(`${js}\nreturn tick`)();
+  const reports: string[] = [];
+  const failures = createFailureReporter((error) => reports.push((error as Error).message));
+  const pending = [...outcomes];
+  const listRoadmap = async () => {
+    const next = pending.shift();
+    if (next) throw next;
+    return dispatchFailure ? [item({ id: "h", queue: 1 })] : [];
+  };
+  for (let i = 0; i < outcomes.length; i++) {
+    await tick(
+      "endpoint", "key", listRoadmap, new Map(), dispatchFailure !== null,
+      nextDispatchedState, autoDispatchHold, dependencyHoldReason, nextBarrierPending, firstQueued,
+      dispatchTracked,
+      async () => {
+        if (dispatchFailure) throw dispatchFailure;
+        return { sent: false };
+      },
+      { add: () => undefined }, failures
+    );
+  }
+  return reports;
+}
+
+test("watchDispatched: the same failure on consecutive ticks is traced once", async () => {
+  expect(await runWatchTicks([new Error("broker down"), new Error("broker down"), new Error("broker down")])).toEqual([
+    "broker down"
+  ]);
+});
+
+test("watchDispatched: a different failure, or the same one after a successful tick, is traced again", async () => {
+  expect(await runWatchTicks([new Error("a"), new Error("b")])).toEqual(["a", "b"]);
+  expect(await runWatchTicks([new Error("down"), null, new Error("down")])).toEqual(["down", "down"]);
+});
+
+test("watchDispatched: a tick that fails after the roadmap read does not reset the failure memory", async () => {
+  expect(await runWatchTicks([null, null], new Error("dispatch exploded"))).toEqual(["dispatch exploded"]);
 });

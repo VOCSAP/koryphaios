@@ -7,7 +7,15 @@
 //
 // No electron imports so it is unit-testable under `bun test`.
 
-import type { DirectiveDispatch, DispatchResult, RoadmapItem } from '../shared/types'
+import type {
+  AssignResult,
+  DirectiveDispatch,
+  DispatchedWaveMember,
+  DispatchResult,
+  RoadmapItem,
+  StopResult
+} from '../shared/types'
+import type { GuardedWriteResult } from './roadmap-guarded-write'
 // Dispatch-request shapes come from the REPO-ROOT shared/types.ts, the broker's
 // own file: main-side only (no renderer/preload consumer), and
 // desktop/tsconfig.node.json already carries the root file in its program.
@@ -207,7 +215,9 @@ export function splitWave(wave: RoadmapItem[]): { directives: RoadmapItem[]; nor
 /** Network calls injected into dispatchNormalWave, so it stays unit-testable. */
 export interface DispatchWaveDeps {
   announce: (text: string) => Promise<number>
-  upsert: (item: RoadmapItem) => Promise<void>
+  /** 'skipped': the card closed since it was read; it is neither dispatched nor failed. */
+  upsert: (item: RoadmapItem) => Promise<void | 'skipped'>
+  warn: (line: string) => void
 }
 
 /**
@@ -218,30 +228,61 @@ export interface DispatchWaveDeps {
  * stay behavior-identical; N>1 additionally carries count/titles.
  * If every member's upsert throws, the wave reports {sent:false,
  * reason:'error'} even though the announce already reached the lead.
+ * A skipped member is warned about and listed in `result.skipped`; a wave
+ * with only skipped members is still {sent:true}, the announce having been
+ * delivered.
  */
 export async function dispatchNormalWave(
   normal: RoadmapItem[],
   deps: DispatchWaveDeps
-): Promise<{ result: DispatchResult; dispatched: RoadmapItem[]; failed: { item: RoadmapItem; error: unknown }[] }> {
-  if (normal.length === 0) return { result: { sent: false, reason: 'empty-queue' }, dispatched: [], failed: [] }
+): Promise<{
+  result: DispatchResult
+  dispatched: RoadmapItem[]
+  failed: { item: RoadmapItem; error: unknown }[]
+  skipped: RoadmapItem[]
+}> {
+  if (normal.length === 0) {
+    return { result: { sent: false, reason: 'empty-queue' }, dispatched: [], failed: [], skipped: [] }
+  }
   const sent = await deps.announce(composeMultiDispatchText(normal))
-  if (sent === 0) return { result: { sent: false, reason: 'no-lead' }, dispatched: [], failed: [] }
+  if (sent === 0) return { result: { sent: false, reason: 'no-lead' }, dispatched: [], failed: [], skipped: [] }
   const dispatched: RoadmapItem[] = []
   const failed: { item: RoadmapItem; error: unknown }[] = []
+  const skipped: RoadmapItem[] = []
   for (const item of normal) {
     try {
-      await deps.upsert(item)
-      dispatched.push(item)
+      if ((await deps.upsert(item)) === 'skipped') {
+        skipped.push(item)
+        deps.warn(
+          `wave member "${item.title}" was announced to the lead but its card closed before it was unqueued: the lead holds an order for a closed card`
+        )
+      } else dispatched.push(item)
     } catch (error) {
       failed.push({ item, error })
     }
   }
-  if (dispatched.length === 0) return { result: { sent: false, reason: 'error' }, dispatched, failed }
+  const withSkipped = (r: DispatchResult): DispatchResult =>
+    skipped.length === 0
+      ? r
+      : { ...r, skipped: skipped.map((i): DispatchedWaveMember => ({ id: i.id, title: i.title, kind: i.kind })) }
+  if (dispatched.length === 0) {
+    const result: DispatchResult = failed.length === 0 ? { sent: true } : { sent: false, reason: 'error' }
+    return { result: withSkipped(result), dispatched, failed, skipped }
+  }
   const result: DispatchResult =
     dispatched.length === 1
       ? { sent: true, title: dispatched[0]!.title }
       : { sent: true, count: dispatched.length, titles: dispatched.map((i) => i.title) }
-  return { result, dispatched, failed }
+  return { result: withSkipped(result), dispatched, failed, skipped }
+}
+
+/**
+ * True when the wave left at least one tracked member: a wave whose members
+ * were all skipped is sent but tracks nothing, so the barrier must not treat it
+ * as in flight.
+ */
+export function dispatchTracked(result: DispatchResult): boolean {
+  return result.sent && (result.dispatched?.length ?? 0) > 0
 }
 
 /**
@@ -265,7 +306,8 @@ export function unresolvedDirectiveNote(item: RoadmapItem, report: DirectiveDisp
 }
 
 export interface DirectiveWaveDeps {
-  markDone: (item: RoadmapItem) => Promise<void>
+  /** 'skipped': the card closed since it was read; its command is not run. */
+  markDone: (item: RoadmapItem) => Promise<void | 'skipped'>
   /** Uses executor-owned resolver buckets so this layer never re-derives liveness. */
   execute: (item: RoadmapItem) => Promise<DirectiveDispatch>
   journal: (line: string) => void
@@ -293,7 +335,7 @@ export async function runDirectiveWave(
   const executed: DirectiveDispatch[] = []
   for (const item of directives) {
     const label = isDirectiveCommand(item.directive) ? directiveKeys(item.directive) : `${item.directive ?? '?'}`
-    await deps.markDone(item)
+    if ((await deps.markDone(item)) === 'skipped') continue
     try {
       const report = await deps.execute(item)
       executed.push(report)
@@ -361,7 +403,8 @@ export function composeDispatchOutcome(result: DispatchResult): DispatchRequestO
 
 /** One readable line, used as-is by the requesting agent. */
 function dispatchOutcomeNote(result: DispatchResult, cardCount: number): string {
-  if (cardCount === 0) {
+  const skipped = result.skipped?.length ?? 0
+  if (cardCount === 0 && skipped === 0) {
     // Not an error, and the reason matters: an empty queue and a missing
     // team-lead are both "nothing happened", for very different operator
     // actions.
@@ -371,6 +414,9 @@ function dispatchOutcomeNote(result: DispatchResult, cardCount: number): string 
   const announced = result.dispatched?.length ?? 0
   const parts = [
     announced > 0 ? `${announced} card${announced === 1 ? '' : 's'} announced to the team-lead` : '',
+    skipped > 0
+      ? `${skipped} card${skipped === 1 ? '' : 's'} announced to the team-lead but closed before they were unqueued`
+      : '',
     directives > 0 ? `${directives} directive card${directives === 1 ? '' : 's'} executed by the Deck` : ''
   ].filter(Boolean)
   return parts.join('; ')
@@ -491,4 +537,95 @@ export function composeStopText(item: RoadmapItem, viaSupervisor: boolean): stri
     )
   }
   return head.join('\n')
+}
+
+export interface AssignDeps {
+  read: (id: string) => Promise<RoadmapItem | null>
+  /** Number of peers the targeted announce reached. */
+  announce: (item: RoadmapItem, target: string) => Promise<number>
+  write: (item: RoadmapItem) => Promise<GuardedWriteResult>
+  journal: (line: string) => void
+  warn: (line: string) => void
+  reportError: (message: string, error: unknown) => void
+}
+
+/**
+ * The peer hears the order before the card moves, so a skipped write leaves a
+ * peer holding an order for a changed card: sent stays true, writeSkipped says so.
+ */
+export async function runAssign(id: string, peerId: string, deps: AssignDeps): Promise<AssignResult> {
+  const target = peerId.trim()
+  if (!target) return { sent: false }
+  try {
+    const item = await deps.read(id)
+    if (!item) return { sent: false }
+    if ((await deps.announce(item, target)) === 0) return { sent: false }
+    if (!(await deps.write(item)).written) {
+      deps.warn(
+        `item "${item.title}" was assigned to "${target}" but its card closed before it moved to in_progress: the peer holds an order for a closed card`
+      )
+      return { sent: true, writeSkipped: true }
+    }
+    deps.journal(`item "${item.title}" assigned to "${target}"`)
+    return { sent: true }
+  } catch (e) {
+    deps.reportError('assign failed', e)
+    return { sent: false }
+  }
+}
+
+export interface StopDeps {
+  read: (id: string) => Promise<RoadmapItem | null>
+  write: (item: RoadmapItem) => Promise<GuardedWriteResult>
+  /** Delivers the stop notice and says how it went out. */
+  notify: (item: RoadmapItem) => Promise<StopResult['via']>
+  journal: (line: string) => void
+  reportError: (message: string, error: unknown) => void
+}
+
+/**
+ * The write comes first because the notice states the card is unlocked and back
+ * to planned.
+ */
+export async function runStop(id: string, deps: StopDeps): Promise<StopResult> {
+  const item = await deps.read(id)
+  if (!item) return { stopped: false, via: 'none', reason: 'not-found' }
+  let written: GuardedWriteResult
+  try {
+    written = await deps.write(item)
+  } catch (e) {
+    deps.reportError(`stop of "${item.title}" could not be written`, e)
+    throw e
+  }
+  if (!written.written) return { stopped: false, via: 'none', reason: 'card-changed' }
+  let via: StopResult['via'] = 'none'
+  try {
+    via = await deps.notify(written.item)
+  } catch (e) {
+    deps.reportError(`stop notice for "${written.item.title}" failed after the card was released`, e)
+  }
+  deps.journal(`stop requested on "${written.item.title}" (via ${via})`)
+  return { stopped: true, via }
+}
+
+/**
+ * One report per distinct failure of a polled call: a repeat of the last
+ * message stays silent until a fully successful run calls recovered().
+ */
+export function createFailureReporter(report: (error: unknown) => void): {
+  failed: (error: unknown) => void
+  recovered: () => void
+} {
+  let last: string | null = null
+  return {
+    failed: (error) => {
+      const message = error instanceof Error ? error.message : String(error)
+      if (message === last) return
+      last = message
+      report(error)
+    },
+    recovered: () => {
+      last = null
+    }
+  }
 }

@@ -23,6 +23,15 @@ import {
   RoadmapRequestError
 } from "../desktop/src/main/roadmap-service.ts";
 import { idleSweepRequest, operatorStopRequest } from "../desktop/src/main/roadmap-release-request.ts";
+import {
+  assignInProgress,
+  markDirectiveDone,
+  requestOperatorStop,
+  unqueueDispatched,
+  type GuardedWriteIo,
+  type GuardedWriteResult
+} from "../desktop/src/main/roadmap-guarded-write.ts";
+import type { RoadmapItem, RoadmapUpsertFields } from "../desktop/src/shared/types";
 import { isRoadmapStaleSaveError } from "../shared/roadmap-append.ts";
 import { normalizeRemoteUrl as coreNormalize } from "../shared/summarize.ts";
 import { buildAuthProof, deriveOperatorId, generateCredential } from "../shared/approval.ts";
@@ -333,3 +342,60 @@ test("with no signer configured, an operator-authored write is refused, loudly",
     });
   }
 });
+
+type GuardedSite = {
+  name: string;
+  create: RoadmapUpsertFields;
+  run: (snapshot: RoadmapItem, io: GuardedWriteIo) => Promise<GuardedWriteResult>;
+  applied: Partial<RoadmapItem>;
+};
+
+const GUARDED_SITES: GuardedSite[] = [
+  {
+    name: "directive done-write",
+    create: { kind: "directive", directive: "clear", status: "planned", queue: 1 },
+    run: markDirectiveDone,
+    applied: { status: "done", queue: null }
+  },
+  { name: "dispatch unqueue", create: { status: "idea", queue: 1 }, run: unqueueDispatched, applied: { status: "planned", queue: null } },
+  { name: "assignment", create: { status: "planned", queue: 1 }, run: assignInProgress, applied: { status: "in_progress", queue: null } },
+  { name: "operator stop", create: { status: "in_progress" }, run: requestOperatorStop, applied: { status: "planned" } }
+];
+
+for (const site of GUARDED_SITES) {
+  const setup = async (concurrent: (endpoint: { url: string; token: null }, id: string) => Promise<unknown>) => {
+    const endpoint = { url: broker.url, token: null };
+    const key = "github.com/acme/guarded-" + site.name.replace(/\W+/g, "-") + "-" + Math.random().toString(36).slice(2, 8);
+    const created = await upsertRoadmap(endpoint, key, { title: "guarded target", ...site.create });
+    const snapshot = (await listRoadmap(endpoint, key, {})).find((i) => i.id === created.id)!;
+    await concurrent(endpoint, created.id);
+    const traces: string[] = [];
+    const io: GuardedWriteIo = {
+      read: async (id) => (await listRoadmap(endpoint, key, {})).find((i) => i.id === id) ?? null,
+      write: (fields) => upsertRoadmap(endpoint, key, fields),
+      trace: (line) => traces.push(line)
+    };
+    const result = await site.run(snapshot, io);
+    const stored = (await listRoadmap(endpoint, key, { include_archived: true })).find((i) => i.id === created.id)!;
+    return { result, stored, traces };
+  };
+
+  test(`${site.name}: a card done between the read and the write stays done`, async () => {
+    const { result, stored, traces } = await setup((endpoint, id) => upsertRoadmap(endpoint, "ignored", { id, status: "done" }));
+    expect(result).toEqual({ written: false, reason: "ineligible" });
+    expect(stored.status).toBe("done");
+    expect(traces).toHaveLength(1);
+  });
+
+  test(`${site.name}: a card archived between the read and the write stays archived`, async () => {
+    const { result, stored } = await setup((endpoint, id) => archiveRoadmap(endpoint, id));
+    expect(result).toEqual({ written: false, reason: "gone" });
+    expect(stored.status).toBe("archived");
+  });
+
+  test(`${site.name}: a title edited between the read and the write still gets the decision, once`, async () => {
+    const { result, stored } = await setup((endpoint, id) => upsertRoadmap(endpoint, "ignored", { id, title: "renamed meanwhile" }));
+    expect(result.written).toBe(true);
+    expect(stored).toMatchObject({ title: "renamed meanwhile", ...site.applied });
+  });
+}

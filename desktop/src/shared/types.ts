@@ -1075,6 +1075,8 @@ export interface DispatchResult {
    * like `directives` is absent when nothing was executed.
    */
   dispatched?: DispatchedWaveMember[]
+  /** Members announced to the team-lead whose card closed before the unqueue write; none of them is tracked. */
+  skipped?: DispatchedWaveMember[]
 }
 
 /** Identity of one announced wave member (card bf76d37f). */
@@ -1091,8 +1093,10 @@ export interface DispatchedWaveMember {
 
 /** Result of a direct assignment to one chosen peer (PLAN K6). */
 export interface AssignResult {
-  /** The targeted announce reached the peer and the item moved to in_progress. */
+  /** The targeted announce reached the peer. */
   sent: boolean
+  /** The announce was delivered but the card changed before it moved to in_progress. */
+  writeSkipped?: boolean
 }
 
 /** Result of an operator stop on an in_progress item (PLAN K3). */
@@ -1101,6 +1105,8 @@ export interface StopResult {
   stopped: boolean
   /** How the stop notice went out: coordinated by the supervisor, broadcast to the group, or not delivered (no active peer). */
   via: 'supervisor' | 'broadcast' | 'none'
+  /** Why nothing was stopped; absent when stopped is true. */
+  reason?: 'not-found' | 'card-changed'
 }
 
 // ----- multi-tile stop broadcast (card aaf4537d, lot 3) -----

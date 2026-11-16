@@ -151,13 +151,17 @@ import {
   autoDispatchHold,
   composeAssignText,
   composeStopText,
+  createFailureReporter,
   dependencyHoldReason,
   dispatchNormalWave,
+  dispatchTracked,
   firstQueued,
   nextBarrierPending,
   nextDispatchedState,
+  runAssign,
   runDirectiveWave,
   runDispatchRequestPoll,
+  runStop,
   splitWave,
   unresolvedDirectiveNote,
   type DispatchedEntry
@@ -165,7 +169,14 @@ import {
 import { createDirectiveBindings, runClearReloadInTurn, type ClearReloadHost, type DirectiveRunDeps } from './directive-run'
 import { decidePeerAnnounce } from './peer-rotation'
 import { ownsIdleLock } from './idle-lock'
-import { idleSweepRequest, operatorStopRequest } from './roadmap-release-request'
+import { idleSweepRequest } from './roadmap-release-request'
+import {
+  assignInProgress,
+  markDirectiveDone,
+  requestOperatorStop,
+  unqueueDispatched,
+  type GuardedWriteIo
+} from './roadmap-guarded-write'
 import type {
   AssignResult,
   DirectiveDispatch,
@@ -2322,6 +2333,17 @@ const directiveRunDeps: DirectiveRunDeps = {
 const directiveBindings = createDirectiveBindings(directiveRunDeps)
 const executeDirective = async (item: RoadmapItem): Promise<DirectiveDispatch> => directiveBindings.executeDirective(item)
 
+const guardedWriteIo = (endpoint: BrokerEndpoint, key: string): GuardedWriteIo => ({
+  read: async (id) => (await listRoadmap(endpoint, key, {})).find((i) => i.id === id) ?? null,
+  write: (fields) => upsertRoadmap(endpoint, key, fields),
+  trace: (line) => logInfo('dispatch', line)
+})
+
+const warnDispatch = (line: string): void => {
+  logWarn('dispatch', line)
+  journal.add('dispatch', `warning: ${line}`)
+}
+
 const dispatchNextInner = async (): Promise<DispatchResult> => {
   const executedDirectives: DirectiveDispatch[] = []
   const announcedMembers: DispatchedWaveMember[] = []
@@ -2353,9 +2375,8 @@ const dispatchNextInner = async (): Promise<DispatchResult> => {
       // rationale and the accepted gap this ordering trades for.
       executedDirectives.push(
         ...(await runDirectiveWave(directives, {
-          markDone: async (item) => {
-            await upsertRoadmap(endpoint, key, { id: item.id, queue: null, status: 'done' })
-          },
+          markDone: async (item) =>
+            (await markDirectiveDone(item, guardedWriteIo(endpoint, key))).written ? undefined : 'skipped',
           execute: executeDirective,
           journal: (line) => journal.add('dispatch', line),
           reportError: (message, error) => reportError('dispatch', message, error),
@@ -2367,13 +2388,9 @@ const dispatchNextInner = async (): Promise<DispatchResult> => {
       if (normal.length === 0) continue // all-directive wave: pull the next one
       const { result, dispatched, failed } = await dispatchNormalWave(normal, {
         announce: (text) => announceToLead(text),
-        upsert: async (item) => {
-          await upsertRoadmap(endpoint, key, {
-            id: item.id,
-            queue: null,
-            status: item.status === 'idea' ? 'planned' : item.status
-          })
-        }
+        upsert: async (item) =>
+          (await unqueueDispatched(item, guardedWriteIo(endpoint, key))).written ? undefined : 'skipped',
+        warn: warnDispatch
       })
       for (const item of dispatched) dispatchedIds.set(item.id, { claimed: false })
       // Card bf76d37f: the announced members' IDENTITY, from the same
@@ -2436,6 +2453,10 @@ const pollDispatchRequests = async (): Promise<void> => {
   }
 }
 
+const dispatchWatchFailures = createFailureReporter((e) =>
+  reportError('dispatch', 'the auto-dispatch watcher failed', e)
+)
+
 const watchDispatched = async (): Promise<void> => {
   if (dispatchedIds.size === 0 && !barrierPending) return
   try {
@@ -2486,9 +2507,9 @@ const watchDispatched = async (): Promise<void> => {
       if (hold === null) {
         attempted = true
         const r = await dispatchNext()
-        dispatchSucceeded = r.sent
-        dispatchReason = r.reason
-        if (r.sent) {
+        dispatchSucceeded = dispatchTracked(r)
+        dispatchReason = r.reason ?? (r.sent && !dispatchSucceeded ? 'every announced card closed meanwhile' : undefined)
+        if (dispatchSucceeded) {
           journal.add(
             'dispatch',
             r.count
@@ -2535,8 +2556,9 @@ const watchDispatched = async (): Promise<void> => {
         journal.add('dispatch', 'wave barrier: cleared, queue advancing')
       }
     }
-  } catch {
-    // Broker down: the next tick retries.
+    dispatchWatchFailures.recovered()
+  } catch (e) {
+    dispatchWatchFailures.failed(e)
   }
 }
 
@@ -2580,74 +2602,65 @@ let dispatchTimer: NodeJS.Timeout | null = null
 // in_progress (unqueued). The lock arrives when the agent actually claims it
 // with its own roadmap_update, like the launch/dispatch flows.
 const assignRoadmapItem = async (id: string, peerId: string): Promise<AssignResult> => {
-  const target = peerId.trim()
-  if (!target) return { sent: false }
-  try {
-    const endpoint = resolveBrokerEndpoint()
-    const key = computeDeckProjectKey(config.projectDir)
-    const items = await listRoadmap(endpoint, key, {})
-    const item = items.find((i) => i.id === id)
-    if (!item) return { sent: false }
-    const { sent } = await sendAnnounce(
-      {
-        groupId: activeScope.groupId,
-        secret: activeScope.secret,
-        text: composeAssignText(item),
-        toPeerId: target
-      },
-      { endpoint }
-    )
-    if (sent === 0) return { sent: false }
-    await upsertRoadmap(endpoint, key, { id: item.id, status: 'in_progress', queue: null })
-    journal.add('dispatch', `item "${item.title}" assigned to "${target}"`)
-    return { sent: true }
-  } catch (e) {
-    reportError('dispatch', 'assign failed', e)
-    return { sent: false }
-  }
+  const endpoint = brokerEndpointOnce()
+  const key = (): string => computeDeckProjectKey(config.projectDir)
+  return runAssign(id, peerId, {
+    read: async (itemId) => (await listRoadmap(endpoint(), key(), {})).find((i) => i.id === itemId) ?? null,
+    announce: async (item, target) =>
+      (
+        await sendAnnounce(
+          {
+            groupId: activeScope.groupId,
+            secret: activeScope.secret,
+            text: composeAssignText(item),
+            toPeerId: target
+          },
+          { endpoint: endpoint() }
+        )
+      ).sent,
+    write: (item) => assignInProgress(item, guardedWriteIo(endpoint(), key())),
+    journal: (line) => journal.add('dispatch', line),
+    warn: warnDispatch,
+    reportError: (message, error) => reportError('dispatch', message, error)
+  })
 }
 
 // ----- Operator stop on an in_progress item (PLAN K3) -----
-// Notifies the agents (via the SUPERVISOR when one is live, so the operator
-// gets a report back through the inbox; group broadcast otherwise), then
-// releases the lock and drops the item back to 'planned'. The stop text is a
+// Releases the lock and drops the item back to 'planned', then notifies the
+// agents (via the SUPERVISOR when one is live, so the operator gets a report
+// back through the inbox; group broadcast otherwise). The stop text is a
 // CODE CONSTANT (C8 rule) composed in dispatch.ts.
 const stopRoadmapItem = async (id: string): Promise<StopResult> => {
-  const endpoint = resolveBrokerEndpoint()
-  const key = computeDeckProjectKey(config.projectDir)
-  const items = await listRoadmap(endpoint, key, {})
-  const item = items.find((i) => i.id === id)
-  if (!item) return { stopped: false, via: 'none' }
-
-  // Notify first (while the item still names the working peer), then unlock.
-  let via: StopResult['via'] = 'none'
-  const supervisor = service
-    .list()
-    .find((s) => s.supervisor && s.status !== 'exited' && s.peerId)
-  if (supervisor) {
-    try {
-      const { sent } = await sendAnnounce(
-        {
-          groupId: activeScope.groupId,
-          secret: activeScope.secret,
-          text: composeStopText(item, true),
-          toPeerId: supervisor.peerId!
-        },
-        { endpoint }
-      )
-      if (sent > 0) via = 'supervisor'
-    } catch {
-      // Supervisor unreachable: fall through to the group broadcast.
-    }
-  }
-  if (via === 'none') {
-    const sent = await broadcastAnnounce(composeStopText(item, false))
-    if (sent > 0) via = 'broadcast'
-  }
-
-  await upsertRoadmap(endpoint, key, operatorStopRequest(item))
-  journal.add('dispatch', `stop requested on "${item.title}" (via ${via})`)
-  return { stopped: true, via }
+  const endpoint = brokerEndpointOnce()
+  const key = (): string => computeDeckProjectKey(config.projectDir)
+  return runStop(id, {
+    read: async (itemId) => (await listRoadmap(endpoint(), key(), {})).find((i) => i.id === itemId) ?? null,
+    write: (item) => requestOperatorStop(item, guardedWriteIo(endpoint(), key())),
+    notify: async (item) => {
+      const supervisor = service
+        .list()
+        .find((s) => s.supervisor && s.status !== 'exited' && s.peerId)
+      if (supervisor) {
+        try {
+          const { sent } = await sendAnnounce(
+            {
+              groupId: activeScope.groupId,
+              secret: activeScope.secret,
+              text: composeStopText(item, true),
+              toPeerId: supervisor.peerId!
+            },
+            { endpoint: endpoint() }
+          )
+          if (sent > 0) return 'supervisor'
+        } catch (e) {
+          logWarn('dispatch', 'stop notice to the supervisor failed, falling back to the group broadcast', e)
+        }
+      }
+      return (await broadcastAnnounce(composeStopText(item, false))) > 0 ? 'broadcast' : 'none'
+    },
+    journal: (line) => journal.add('dispatch', line),
+    reportError: (message, error) => reportError('dispatch', message, error)
+  })
 }
 
 // Releases an item's lock (an in_progress item back to 'planned') when its
