@@ -1,4 +1,4 @@
-/** Maximum resulting living-context length, measured in Unicode code points. */
+/** Default maximum resulting living-context length, measured in Unicode code points. */
 export const ROADMAP_APPEND_RESULT_MAX_CHARS = 16000;
 
 /**

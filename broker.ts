@@ -100,6 +100,7 @@ import {
 import {
   createSqliteRoadmapContextAppendCasStore,
   mapRoadmapContextAppendFailure,
+  parseRoadmapContextMaxChars,
   runRoadmapContextAppendCas,
 } from "./shared/roadmap-append-cas.ts";
 import {
@@ -108,7 +109,7 @@ import {
   runRoadmapContextDocumentDeportCas,
   validateRoadmapContextDocumentLimits,
 } from "./shared/roadmap-context-document-cas.ts";
-import { formatRoadmapStaleSaveError, ROADMAP_APPEND_RESULT_MAX_CHARS } from "./shared/roadmap-append.ts";
+import { formatRoadmapStaleSaveError } from "./shared/roadmap-append.ts";
 import { isValidQueueRank } from "./shared/roadmap-queue.ts";
 import {
   contentEquals,
@@ -530,6 +531,15 @@ const FEDERATION_GRACE_SEC = (() => {
     return 600;
   }
   return parsed;
+})();
+
+const ROADMAP_CONTEXT_MAX_CHARS = (() => {
+  const parsed = parseRoadmapContextMaxChars(process.env.CLAUDE_PEERS_ROADMAP_CONTEXT_MAX_CHARS);
+  if (!parsed.ok) {
+    log.error(`${parsed.message}, exiting`);
+    process.exit(1);
+  }
+  return parsed.value;
 })();
 
 // Replicating on ONESELF is a configuration error, not a case to tolerate: the
@@ -6774,6 +6784,7 @@ function handleRoadmapContextAppend(
     text: body.text,
     supersedes,
     operatorId: author.operator_id ?? null,
+    liveMaxChars: ROADMAP_CONTEXT_MAX_CHARS,
     now: () => new Date().toISOString(),
     store: createSqliteRoadmapContextAppendCasStore(db),
   });
@@ -6850,6 +6861,7 @@ function handleRoadmapContextDocumentDeport(
       targets: body.targets,
       author: author.by,
       operatorId: author.operator_id ?? null,
+      liveMaxChars: ROADMAP_CONTEXT_MAX_CHARS,
       now: () => new Date().toISOString(),
       nextId: randomUUID,
       store: createSqliteRoadmapContextDocumentCasStore(db),
@@ -8235,12 +8247,8 @@ function validateContextDocumentSync(
     ) {
       return { error: "document.units repeats or has an invalid source_target", status: 400 };
     }
-    if (
-      typeof unit.raw !== "string" ||
-      unit.raw.length > ROADMAP_APPEND_RESULT_MAX_CHARS ||
-      !isValidRoadmapContextDocumentText(unit.raw)
-    ) {
-      return { error: "document.units contains invalid, oversized, or NUL-bearing text", status: 400 };
+    if (typeof unit.raw !== "string" || !isValidRoadmapContextDocumentText(unit.raw)) {
+      return { error: "document.units contains invalid or NUL-bearing text", status: 400 };
     }
     if (typeof unit.deported_at !== "string" || Number.isNaN(Date.parse(unit.deported_at))) {
       return { error: "document.units contains a unit with an unparsable deported_at", status: 400 };

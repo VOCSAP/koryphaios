@@ -3,7 +3,6 @@ import {
   getUniqueRoadmapAppendTimestamp,
   parseRoadmapContext,
   planRoadmapContextAppend,
-  ROADMAP_APPEND_RESULT_MAX_CHARS,
   validateRoadmapSupersedeTargets,
 } from "./roadmap-append.ts";
 import type {
@@ -84,6 +83,7 @@ function planRoadmapContextDocumentDeport(opts: {
   targets: readonly string[];
   author: string;
   documentId: string;
+  liveMaxChars: number;
   nowIso: string;
   nextId: () => string;
 }): Exclude<RoadmapContextDocumentDeportResult, { ok: true }> | { ok: true; document: RoadmapContextDocument; context: string } {
@@ -134,11 +134,11 @@ function planRoadmapContextDocumentDeport(opts: {
   if (!link.ok) {
     return { ok: false, code: "invalid_document_text", message: link.message };
   }
-  if (link.resultLiveLength > ROADMAP_APPEND_RESULT_MAX_CHARS) {
+  if (link.resultLiveLength > opts.liveMaxChars) {
     return {
       ok: false,
       code: "living_context_too_large",
-      message: `context document link would exceed the ${ROADMAP_APPEND_RESULT_MAX_CHARS}-char living-context cap`,
+      message: `context document link would exceed the ${opts.liveMaxChars}-char living-context cap`,
     };
   }
 
@@ -222,6 +222,7 @@ export function runRoadmapContextDocumentDeportCas(opts: {
   targets: readonly string[];
   author: string;
   operatorId?: string | null;
+  liveMaxChars: number;
   now: () => string;
   nextId: () => string;
   store: RoadmapContextDocumentCasStore;
@@ -236,6 +237,7 @@ export function runRoadmapContextDocumentDeportCas(opts: {
       targets: opts.targets,
       author: opts.author,
       documentId,
+      liveMaxChars: opts.liveMaxChars,
       nowIso: opts.now(),
       nextId: opts.nextId,
     });

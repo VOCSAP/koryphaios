@@ -2090,22 +2090,23 @@ test("local deportation refuses raw document text above 65536 characters without
   }
 }, 30_000);
 
-test("context document sync bounds one unit by the roadmap context cap", async () => {
+test("context document sync accepts a unit wider than the roadmap context cap and stores its text whole", async () => {
   const b = shared;
-  const response = await post<{ error?: string }>(
+  const raw = "x".repeat(16_001);
+  const response = await post<RoadmapContextDocumentSyncPushResponse>(
     `${b.url}/roadmap/context-document/sync/push`,
     {
       replica_id: R1,
       document: syncDocument("document-sync-cap", [{
         id: "unit-sync-cap",
         source_target: "body",
-        raw: "x".repeat(16_001),
+        raw,
         deported_at: "2026-09-23T14:00:00.000Z",
         position: 0,
       }]),
     },
   );
-  expect(response.status).toBe(400);
+  expect([response.status, response.body.document.units.map((unit) => unit.raw === raw)]).toEqual([200, [true]]);
 }, 30_000);
 
 test("context document sync rejects every valid immutable-field divergence", async () => {

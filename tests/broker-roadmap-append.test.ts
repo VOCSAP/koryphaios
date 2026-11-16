@@ -4,6 +4,7 @@ import { startBroker, stopBroker, post, type TestBroker, openBrokerDb } from "./
 import type { RoadmapItem } from "../shared/types.ts";
 import { ROADMAP_STALE_SAVE_MARKER } from "../shared/roadmap-append.ts";
 import {
+  ROADMAP_APPEND_RAW_RESULT_MAX_CHARS,
   createSqliteRoadmapContextAppendCasStore,
   mapRoadmapContextAppendFailure,
   runRoadmapContextAppendCas,
@@ -17,13 +18,19 @@ import {
 } from "../shared/roadmap-append.ts";
 
 let broker: TestBroker;
+let raised: TestBroker;
+let maxed: TestBroker;
 
 beforeAll(async () => {
-  broker = await startBroker();
+  [broker, raised, maxed] = await Promise.all([
+    startBroker(),
+    startBroker({ CLAUDE_PEERS_ROADMAP_CONTEXT_MAX_CHARS: "20000" }),
+    startBroker({ CLAUDE_PEERS_ROADMAP_CONTEXT_MAX_CHARS: "64000" }),
+  ]);
 });
 
 afterAll(async () => {
-  await stopBroker(broker);
+  await Promise.all([stopBroker(broker), stopBroker(raised), stopBroker(maxed)]);
 });
 
 const PK = "github.com/vocsap/append-repo";
@@ -99,6 +106,7 @@ test("CAS increments a colliding timestamp before constructing an append", () =>
       author: "author",
       text: "replacement",
       now: () => timestamp,
+      liveMaxChars: ROADMAP_APPEND_RESULT_MAX_CHARS,
       store: createSqliteRoadmapContextAppendCasStore(db),
     });
 
@@ -126,6 +134,7 @@ test("CAS chooses a new timestamp when a stale write consumes its first target",
       author: "author",
       text: "replacement",
       now: () => timestamp,
+      liveMaxChars: ROADMAP_APPEND_RESULT_MAX_CHARS,
       store: {
         read: base.read,
         append: (input) => {
@@ -165,6 +174,7 @@ test("CAS retries a stale content revision and preserves the intervening context
       author: "author",
       text: "replacement",
       now: () => "2026-09-22T12:00:00.000Z",
+      liveMaxChars: ROADMAP_APPEND_RESULT_MAX_CHARS,
       store: {
         read: base.read,
         append: (input) => {
@@ -201,6 +211,7 @@ test("CAS replans targets after a stale revision", () => {
       text: "replacement",
       supersedes: [target],
       now: () => "2026-09-22T12:01:00.000Z",
+      liveMaxChars: ROADMAP_APPEND_RESULT_MAX_CHARS,
       store: {
         read: base.read,
         append: (input) => {
@@ -703,6 +714,132 @@ test("append failure codes map to their HTTP statuses", () => {
     expect(mapRoadmapContextAppendFailure({ ok: false, code, message: code }, true).status).toBe(400);
   }
 
-  expect(mapRoadmapContextAppendFailure({ ok: false, code: "live_cap", plan, existingContext: "existing" }, true).status).toBe(409);
+  expect(mapRoadmapContextAppendFailure({ ok: false, code: "live_cap", plan, existingContext: "existing", liveMaxChars: 16000 }, true).status).toBe(409);
   expect(mapRoadmapContextAppendFailure({ ok: false, code: "raw_cap", plan }, true).status).toBe(409);
 });
+
+const RAISED_LIMIT = 20000;
+
+function postOn<T>(b: TestBroker, path: string, body: Record<string, unknown>) {
+  return post<T>(`${b.url}${path}`, { project_key: PK, ...body });
+}
+
+async function seedOn(b: TestBroker, body: Record<string, unknown>): Promise<RoadmapItem> {
+  const res = await postOn<UpsertRes>(b, "/roadmap/upsert", { by: "seed-fixture", title: "append target", ...body });
+  expect(res.status).toBe(200);
+  return res.body.item;
+}
+
+function appendOn(b: TestBroker, body: Record<string, unknown>) {
+  return postOn<AppendRes | AppendErr>(b, "/roadmap/append-context", body);
+}
+
+async function storedContext(b: TestBroker, id: string): Promise<string> {
+  const res = await postOn<{ items: RoadmapItem[] }>(b, "/roadmap/list", { include_archived: true });
+  return res.body.items.find((candidate) => candidate.id === id)!.context;
+}
+
+test("a raised limit accepts what the default refuses and refuses the next code point naming its own value", async () => {
+  const author = "author";
+  const text = "z";
+  for (const total of [ROADMAP_APPEND_RESULT_MAX_CHARS + 1, RAISED_LIMIT]) {
+    const item = await seedOn(raised, { context: "x".repeat(total - headerLenFor(author) - text.length) });
+    const res = await appendOn(raised, { id: item.id, by: author, text });
+    expect([total, res.status]).toEqual([total, 200]);
+    expect(getRoadmapContextLiveLength((res.body as AppendRes).item.context)).toBe(total);
+  }
+
+  const over = await seedOn(raised, { context: "x".repeat(RAISED_LIMIT + 1 - headerLenFor(author) - text.length) });
+  const refused = await appendOn(raised, { id: over.id, by: author, text });
+  expect(refused.status).toBe(409);
+  const error = (refused.body as AppendErr).error;
+  expect(error).toContain(`${RAISED_LIMIT}-char cap`);
+  expect(error).not.toContain(`${ROADMAP_APPEND_RESULT_MAX_CHARS}-char`);
+  expect(error).toContain("supersedes");
+});
+
+test("a context already above the limit is neither truncated nor rewritten, and an append that supersedes it under the limit succeeds", async () => {
+  const oldAt = "2026-09-22T12:00:00.000Z";
+  const context = buildRoadmapAppendHeader(oldAt, "old-author") + "x".repeat(RAISED_LIMIT + 2000);
+  const item = await seedOn(raised, { context });
+
+  const stays = await appendOn(raised, { id: item.id, by: "author", text: "no supersession" });
+  expect(stays.status).toBe(409);
+  expect((stays.body as AppendErr).error).toContain(`${RAISED_LIMIT}-char cap`);
+  expect(await storedContext(raised, item.id)).toBe(context);
+
+  const shrinks = await appendOn(raised, { id: item.id, by: "author", text: "replacement", supersedes: [oldAt] });
+  expect(shrinks.status).toBe(200);
+  const stored = (shrinks.body as AppendRes).item.context;
+  expect(stored.startsWith(context)).toBe(true);
+  expect(getRoadmapContextLiveLength(stored)).toBeLessThan(RAISED_LIMIT);
+});
+
+test("the raw safety bound still refuses when the living limit is at its highest", async () => {
+  const context = rawHeavyLivingContext();
+  expect(context.length).toBeGreaterThan(ROADMAP_APPEND_RAW_RESULT_MAX_CHARS);
+  expect(getRoadmapContextLiveLength(context)).toBeLessThan(ROADMAP_APPEND_RAW_RESULT_MAX_CHARS);
+  const item = await seedOn(maxed, { context });
+
+  const res = await appendOn(maxed, { id: item.id, by: "author", text: "replacement" });
+
+  expect(res.status).toBe(409);
+  const error = (res.body as AppendErr).error;
+  expect(error).toContain("safety cap");
+  expect(error).not.toContain("Oldest living units");
+  expect(await storedContext(maxed, item.id)).toBe(context);
+});
+
+test("a concurrent write that fills the card is judged against the limit on the retry, not lost", () => {
+  const db = new Database(":memory:");
+  try {
+    db.run("CREATE TABLE roadmap_items (id TEXT PRIMARY KEY, context TEXT, content_rev INTEGER, operator_id TEXT)");
+    db.run("INSERT INTO roadmap_items VALUES (?, ?, ?, ?)", ["item", "original", 1, null]);
+    const base = createSqliteRoadmapContextAppendCasStore(db);
+    const filler = "x".repeat(380);
+    let writes = 0;
+    const result = runRoadmapContextAppendCas({
+      id: "item",
+      author: "author",
+      text: "replacement",
+      liveMaxChars: 400,
+      now: () => "2026-09-22T12:00:00.000Z",
+      store: {
+        read: base.read,
+        append: (input) => {
+          writes += 1;
+          db.run("UPDATE roadmap_items SET context = ?, content_rev = content_rev + 1 WHERE id = ?", [filler, "item"]);
+          return base.append(input);
+        },
+      },
+    });
+
+    expect(result).toMatchObject({ ok: false, code: "live_cap", liveMaxChars: 400 });
+    expect(writes).toBe(1);
+    const row = db.query("SELECT context FROM roadmap_items WHERE id = ?").get("item") as { context: string };
+    expect(row.context).toBe(filler);
+  } finally {
+    db.close();
+  }
+});
+
+test("the living-cap refusal names the limit it was given", () => {
+  const plan = planRoadmapContextAppend({
+    existingContext: "existing",
+    text: "replacement",
+    author: "author",
+    nowIso: "2026-09-22T12:00:00.000Z",
+  });
+  if (!plan.ok) throw new Error(plan.message);
+
+  const mapped = mapRoadmapContextAppendFailure(
+    { ok: false, code: "live_cap", plan, existingContext: "existing", liveMaxChars: 123 },
+    true,
+  );
+  expect(mapped.error).toContain("123-char cap");
+});
+
+test("a broker refuses to start on a malformed context limit and says which variable", async () => {
+  const refused = startBroker({ CLAUDE_PEERS_ROADMAP_CONTEXT_MAX_CHARS: "16k" });
+  await expect(refused).rejects.toThrow("CLAUDE_PEERS_ROADMAP_CONTEXT_MAX_CHARS");
+}, 30_000);

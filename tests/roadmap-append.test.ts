@@ -1,5 +1,12 @@
 import { test, expect } from "bun:test";
 import {
+  ROADMAP_APPEND_RAW_RESULT_MAX_CHARS,
+  parseRoadmapContextMaxChars,
+  runRoadmapContextAppendCas,
+  type RoadmapContextAppendCasStore,
+} from "../shared/roadmap-append-cas.ts";
+import {
+  ROADMAP_APPEND_RESULT_MAX_CHARS,
   ROADMAP_APPEND_HEADER_OPEN,
   ROADMAP_APPEND_HEADER_CLOSE,
   ROADMAP_APPEND_BODY_TARGET,
@@ -489,4 +496,40 @@ test("an edited draft cannot be rebased onto a raw projection, so nothing is mer
   expect(getRoadmapContextEditorProjection(fresh).mode).toBe("raw");
   expect(rebaseRoadmapContextDraft(opened, fresh, "origin, edited")).toEqual({ ok: false, code: "raw_projection" });
   expect(rebaseRoadmapContextDraft(opened, fresh, "origin")).toEqual({ ok: true, context: fresh });
+});
+
+test("the context cap is the default when its variable is absent and any decimal integer from 1 to the raw bound otherwise", () => {
+  expect(parseRoadmapContextMaxChars(undefined)).toEqual({ ok: true, value: ROADMAP_APPEND_RESULT_MAX_CHARS });
+  for (const [raw, value] of [["1", 1], ["16000", 16000], ["32000", 32000], ["64000", 64000]] as const) {
+    expect(parseRoadmapContextMaxChars(raw), raw).toEqual({ ok: true, value });
+  }
+});
+
+test("the context cap refuses everything but a strict decimal integer in range, naming the variable and the bound", () => {
+  const refused = [
+    "", " ", "NaN", "abc", "16000abc", "16000 ", " 16000", "16k", "1e4", "0x10", "16000.0", "16000.5",
+    "+5", "-1", "0", "00", "016000", "64001", "99999", "100000", "Infinity",
+    String.fromCodePoint(0xff11, 0xff16, 0xff10, 0xff10, 0xff10), String.fromCodePoint(0x661, 0x666, 0x660, 0x660, 0x660),
+  ];
+  for (const raw of refused) {
+    const parsed = parseRoadmapContextMaxChars(raw);
+    expect(parsed.ok, JSON.stringify(raw)).toBe(false);
+    if (parsed.ok) continue;
+    expect(parsed.message, JSON.stringify(raw)).toContain("CLAUDE_PEERS_ROADMAP_CONTEXT_MAX_CHARS");
+    expect(parsed.message, JSON.stringify(raw)).toContain(String(ROADMAP_APPEND_RAW_RESULT_MAX_CHARS));
+  }
+});
+
+test("the effective context cap counts code points, not UTF-16 units", () => {
+  const author = "author";
+  const limit = buildRoadmapAppendHeader(NOW, author).length + 5;
+  const store: RoadmapContextAppendCasStore = {
+    read: () => ({ context: "", contentRev: 1 }),
+    append: () => true,
+  };
+  const run = (text: string) =>
+    runRoadmapContextAppendCas({ id: "item", author, text, liveMaxChars: limit, now: () => NOW, store });
+
+  expect(run("\u{1F600}".repeat(5)).ok).toBe(true);
+  expect(run("\u{1F600}".repeat(6))).toMatchObject({ ok: false, code: "live_cap", liveMaxChars: limit });
 });

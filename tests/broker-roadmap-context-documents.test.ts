@@ -9,6 +9,7 @@ import {
 import {
   createSqliteRoadmapContextDocumentCasStore,
   isValidRoadmapContextDocumentText,
+  MAX_CONTEXT_DOCUMENT_TOTAL_CHARS,
   runRoadmapContextDocumentDeportCas,
 } from "../shared/roadmap-context-document-cas.ts";
 import {
@@ -20,13 +21,24 @@ import {
 } from "../shared/types.ts";
 
 let broker: TestBroker;
+let lowCap: TestBroker;
+
+const LOW_LIMIT = 1000;
+const LOW_CAP_TOKEN = "low-cap-token";
 
 beforeAll(async () => {
-  broker = await startBroker();
+  [broker, lowCap] = await Promise.all([
+    startBroker(),
+    startBroker({
+      CLAUDE_PEERS_ROADMAP_CONTEXT_MAX_CHARS: String(LOW_LIMIT),
+      CLAUDE_PEERS_BROKER_TOKEN: LOW_CAP_TOKEN,
+      CLAUDE_PEERS_SERVE_REPLICAS: "1",
+    }),
+  ]);
 });
 
 afterAll(async () => {
-  await stopBroker(broker);
+  await Promise.all([stopBroker(broker), stopBroker(lowCap)]);
 });
 
 const PK = "github.com/vocsap/context-documents-repo";
@@ -508,6 +520,7 @@ test("CAS retries after a concurrent content revision and uses the current unit"
     projectKey: PK,
     targets: ["body"],
     author: "fixture-author",
+    liveMaxChars: ROADMAP_APPEND_RESULT_MAX_CHARS,
     now: () => "2026-09-23T08:00:00.000Z",
     nextId: () => `id-${next++}`,
     store: {
@@ -634,4 +647,84 @@ test("archiving and restoring a card preserves its context document and link", a
   const afterRestore = await getDocument({ id: item.id, document_id: document.id });
   expect(afterRestore.status).toBe(200);
   expect((afterRestore.body as DocumentGetResponse).document).toEqual(document);
+});
+
+async function postLow<T>(path: string, body: Record<string, unknown>): Promise<{ status: number; body: T }> {
+  const res = await fetch(`${lowCap.url}${path}`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${LOW_CAP_TOKEN}` },
+    body: JSON.stringify({ project_key: PK, ...body }),
+  });
+  return { status: res.status, body: (await res.json()) as T };
+}
+
+async function seedLow(context: string): Promise<RoadmapItem> {
+  const res = await postLow<UpsertResponse>("/roadmap/upsert", {
+    by: "fixture-author",
+    title: "low-cap document target",
+    context,
+  });
+  expect(res.status).toBe(200);
+  return res.body.item;
+}
+
+test("deportation follows the broker's context cap rather than the default", async () => {
+  const target = "2026-09-23T09:00:05.000Z";
+  const context = `${"x".repeat(LOW_LIMIT + 200)}${buildRoadmapAppendHeader(target, "append-author")}append`;
+
+  const low = await seedLow(context);
+  const refused = await postLow<DocumentResponse | ErrorResponse>("/roadmap/context-document/deport", {
+    id: low.id,
+    by: "fixture-author",
+    targets: [target],
+  });
+  expect(refused.status).toBe(400);
+  expect((refused.body as ErrorResponse).error).toContain(`${LOW_LIMIT}-char living-context cap`);
+
+  const standard = await seed({ context });
+  const accepted = await deport({ id: standard.id, by: "fixture-author", targets: [target] });
+  expect(accepted.status).toBe(200);
+});
+
+test("deportation that brings a card above the cap back under it succeeds without touching what stays", async () => {
+  const target = "2026-09-23T09:00:06.000Z";
+  const kept = "x".repeat(600);
+  const item = await seedLow(`${kept}${buildRoadmapAppendHeader(target, "append-author")}${"y".repeat(700)}`);
+
+  const res = await postLow<DocumentResponse | ErrorResponse>("/roadmap/context-document/deport", {
+    id: item.id,
+    by: "fixture-author",
+    targets: [target],
+  });
+
+  expect(res.status).toBe(200);
+  const context = (res.body as DocumentResponse).item.context;
+  expect(context.startsWith(kept)).toBe(true);
+  expect(context).toContain("Context document");
+  expect(context).not.toContain("y".repeat(10));
+});
+
+test("a synced document unit wider than this broker's cap but within the document limits is stored whole", async () => {
+  const push = (id: string, raw: string) =>
+    postLow<{ document: { units: { raw: string }[] } } | ErrorResponse>("/roadmap/context-document/sync/push", {
+      replica_id: "replica-low",
+      document: {
+        id,
+        roadmap_item_id: "card-low-cap-sync",
+        project_key: PK,
+        created_by: "cli:document-host:document-user",
+        created_at: "2026-09-23T14:00:00.000Z",
+        units: [{ id: `${id}-unit`, source_target: "body", raw, deported_at: "2026-09-23T14:00:00.000Z", position: 0 }],
+      },
+    });
+
+  const wide = "x".repeat(ROADMAP_APPEND_RESULT_MAX_CHARS + LOW_LIMIT);
+  expect(wide.length).toBeLessThan(MAX_CONTEXT_DOCUMENT_TOTAL_CHARS);
+  const accepted = await push("document-low-wide", wide);
+  expect(accepted.status).toBe(200);
+  expect((accepted.body as { document: { units: { raw: string }[] } }).document.units[0]!.raw.length).toBe(wide.length);
+
+  const beyond = await push("document-low-beyond", "x".repeat(MAX_CONTEXT_DOCUMENT_TOTAL_CHARS + 1));
+  expect(beyond.status).toBe(400);
+  expect((beyond.body as ErrorResponse).error).toContain("MAX_CONTEXT_DOCUMENT_TOTAL_CHARS");
 });

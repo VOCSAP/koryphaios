@@ -10,6 +10,23 @@ import {
 
 export const ROADMAP_APPEND_RAW_RESULT_MAX_CHARS = 64000;
 export const ROADMAP_APPEND_CAS_ATTEMPTS = 4;
+export const ROADMAP_CONTEXT_MAX_CHARS_ENV = "CLAUDE_PEERS_ROADMAP_CONTEXT_MAX_CHARS";
+
+export type RoadmapContextMaxCharsParse = { ok: true; value: number } | { ok: false; message: string };
+
+export function parseRoadmapContextMaxChars(raw: string | undefined): RoadmapContextMaxCharsParse {
+  if (raw === undefined) return { ok: true, value: ROADMAP_APPEND_RESULT_MAX_CHARS };
+  const value = /^[1-9][0-9]{0,4}$/.test(raw) ? Number(raw) : Number.NaN;
+  if (!(value >= 1 && value <= ROADMAP_APPEND_RAW_RESULT_MAX_CHARS)) {
+    return {
+      ok: false,
+      message:
+        `${ROADMAP_CONTEXT_MAX_CHARS_ENV}=${JSON.stringify(raw)} is not a decimal integer between 1 and ` +
+        `${ROADMAP_APPEND_RAW_RESULT_MAX_CHARS}`,
+    };
+  }
+  return { ok: true, value };
+}
 
 type SuccessfulRoadmapContextAppendPlan = Extract<RoadmapContextAppendPlan, { ok: true }>;
 
@@ -34,7 +51,13 @@ export type RoadmapContextAppendCasResult =
   | { ok: true; plan: SuccessfulRoadmapContextAppendPlan }
   | { ok: false; code: "unknown_roadmap_item" }
   | { ok: false; code: "concurrent_change" }
-  | { ok: false; code: "live_cap"; plan: SuccessfulRoadmapContextAppendPlan; existingContext: string }
+  | {
+      ok: false;
+      code: "live_cap";
+      plan: SuccessfulRoadmapContextAppendPlan;
+      existingContext: string;
+      liveMaxChars: number;
+    }
   | { ok: false; code: "raw_cap"; plan: SuccessfulRoadmapContextAppendPlan }
   | Exclude<RoadmapContextAppendPlan, { ok: true }>;
 
@@ -73,7 +96,7 @@ export function mapRoadmapContextAppendFailure(
     case "live_cap":
       return {
         error:
-          `append would push living context over the ${ROADMAP_APPEND_RESULT_MAX_CHARS}-char cap. ` +
+          `append would push living context over the ${result.liveMaxChars}-char cap. ` +
           `Oldest living units: ${describeOldestLivingRoadmapContextUnits(result.existingContext)}. ` +
           "Supersede those targets in this append through `supersedes`, or move material to a child roadmap card and leave its id8 pointer in context.",
         status: 409,
@@ -125,6 +148,7 @@ export function runRoadmapContextAppendCas(opts: {
   text: string;
   supersedes?: readonly string[];
   operatorId?: string | null;
+  liveMaxChars: number;
   now: () => string;
   store: RoadmapContextAppendCasStore;
 }): RoadmapContextAppendCasResult {
@@ -141,8 +165,8 @@ export function runRoadmapContextAppendCas(opts: {
       supersedes: opts.supersedes,
     });
     if (!plan.ok) return plan;
-    if (plan.resultLiveLength > ROADMAP_APPEND_RESULT_MAX_CHARS) {
-      return { ok: false, code: "live_cap", plan, existingContext };
+    if (plan.resultLiveLength > opts.liveMaxChars) {
+      return { ok: false, code: "live_cap", plan, existingContext, liveMaxChars: opts.liveMaxChars };
     }
     if ([...plan.result].length > ROADMAP_APPEND_RAW_RESULT_MAX_CHARS) {
       return { ok: false, code: "raw_cap", plan };
