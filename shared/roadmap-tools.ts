@@ -2,7 +2,7 @@ export const ROADMAP_TOOLS = [
   {
     name: "roadmap_list",
     description:
-      "List the project's shared roadmap (persistent backlog scoped to this repository, shared across sessions). Always pass a filter (statuses, kinds, q ...) so you do not load the whole board. Within a filter: OR; between filters: AND. Archived items hidden unless include_archived.",
+      "List the project's shared roadmap. Always pass a filter (statuses, kinds, q ...) so you do not load the whole board. Within a filter: OR; between filters: AND. Archived items hidden unless include_archived.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -47,6 +47,17 @@ export const ROADMAP_TOOLS = [
           description: "Widen `q` to rationale and context.",
         },
         include_archived: { type: "boolean" as const, description: "Default false." },
+        date: {
+          type: "object" as const,
+          description:
+            "Window [since, before), at least one bound: ISO with zone (Z or +02:00) or Nh/Nd/Nw ago. updated = content change; unknown dates excluded.",
+          properties: {
+            field: { type: "string" as const, enum: ["created", "updated"] },
+            since: { type: "string" as const },
+            before: { type: "string" as const },
+          },
+          required: ["field"],
+        },
         order: {
           type: "string" as const,
           enum: ["queue"],
@@ -81,7 +92,7 @@ export const ROADMAP_TOOLS = [
   {
     name: "roadmap_add",
     description:
-      "Add an item to the project's shared roadmap: a feature, bug, tech debt or idea you want to survive this session. Only title is required (defaults: kind=feature, priority=could, value/effort=medium, status=idea). Always fill `context`. kind='directive' is a control card the Deck executes on target_peer_ids (team leads only).",
+      "Add an item to the project's shared roadmap: a feature, bug, tech debt or idea you want to survive this session. Only title is required. Always fill `context`. kind='directive' is a control card the Deck executes on target_peer_ids (team leads only).",
     inputSchema: {
       type: "object" as const,
       properties: {

@@ -10,6 +10,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createPeersSession, DECK_ONLY_TOOLS, TOOLS, type PeersSession } from "../shared/peers-session.ts";
 import { callRoadmapTool, ROADMAP_INSTRUCTIONS } from "../shared/roadmap-mcp.ts";
+import { createRoadmapServer } from "../shared/roadmap-server.ts";
 import { ROADMAP_TOOLS } from "../shared/roadmap-tools.ts";
 
 const ROADMAP_CEILING_CHARS = 8_400;
@@ -104,6 +105,25 @@ describe("the per-turn MCP surface stays under its cap", () => {
       total,
       `kory-roadmap per-turn surface (schemas ${schemas} + instructions ${ROADMAP_INSTRUCTIONS.length}) exceeds ${ROADMAP_CEILING_CHARS} chars: move text out of the tool descriptions or the instructions, do not raise the ceiling`
     ).toBeLessThanOrEqual(ROADMAP_CEILING_CHARS);
+  });
+
+  test("the roadmap server's served tools/list + instructions fit in ROADMAP_CEILING_CHARS", async () => {
+    const server = createRoadmapServer({ env: {} });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "roadmap-budget-probe", version: "1.0.0" });
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      const served = (await client.listTools()).tools;
+      expect(served.map((tool) => tool.name), "the served list lost a roadmap tool").toEqual(ROADMAP_TOOLS.map((tool) => tool.name));
+      const instructions = client.getInstructions() ?? "";
+      const total = JSON.stringify(served).length + instructions.length;
+      expect(
+        total,
+        `kory-roadmap served surface (tools/list ${JSON.stringify(served).length} + instructions ${instructions.length}) exceeds ${ROADMAP_CEILING_CHARS} chars: shorten a description, do not raise the ceiling`
+      ).toBeLessThanOrEqual(ROADMAP_CEILING_CHARS);
+    } finally {
+      await client.close();
+    }
   });
 
   test("the session serves every tool of TOOLS, so the measure covers the whole list", () => {

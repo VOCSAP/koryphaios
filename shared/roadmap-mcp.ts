@@ -10,6 +10,7 @@ import {
   type RoadmapContextDocument,
   type RoadmapContextDocumentListResponse,
   type RoadmapContextDocumentOmissions,
+  type RoadmapDateFilter,
   type RoadmapItem,
   type RoadmapListResponse,
   type RoadmapUpsertAckField,
@@ -267,6 +268,7 @@ export async function callRoadmapTool(
           tags?: string[];
           q?: string;
           q_deep?: boolean;
+          date?: RoadmapDateFilter;
           order?: string;
         };
         const { items } = await brokerFetch<RoadmapListResponse>("/roadmap/list", {
@@ -285,6 +287,7 @@ export async function callRoadmapTool(
           tags: a.tags,
           q: a.q,
           q_deep: a.q_deep,
+          date: a.date,
         });
         if (items.length === 0) {
           return {

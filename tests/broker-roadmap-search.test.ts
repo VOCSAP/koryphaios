@@ -1,5 +1,5 @@
 import { test, expect, beforeAll, afterAll } from "bun:test";
-import { startBroker, stopBroker, post, openBrokerDb } from "./_helper.ts";
+import { startBroker, stopBroker, post, openBrokerDb, deckAuthored } from "./_helper.ts";
 import type { RoadmapItem, RoadmapListResponse } from "../shared/types.ts";
 
 let broker: Awaited<ReturnType<typeof startBroker>>;
@@ -330,3 +330,205 @@ test("with_facets + include_archived:true widens the reference set the facets ar
   expect(included.body.facets!.status.find((b) => b.value === "archived")!.count).toBe(1);
   expect(included.body.facets!.reference_total).toBe(1);
 });
+
+const DPK = "github.com/vocsap/roadmap-date-fixture";
+const DAY_MS = 86_400_000;
+
+async function importCards(projectKey: string, cards: Record<string, unknown>[]): Promise<void> {
+  const res = await post(`${broker.url}/roadmap/import`, { project_key: projectKey, by: "date-fixture", items: cards });
+  expect(res.status).toBe(200);
+}
+
+function card(id: string, fields: Record<string, unknown>) {
+  return { id, kind: "feature", title: `date fixture ${id.slice(0, 8)} zzdatefix`, ...fields };
+}
+
+async function dateList(body: Record<string, unknown>, projectKey = DPK) {
+  return post<RoadmapListResponse & { error?: string }>(`${broker.url}/roadmap/list`, { project_key: projectKey, ...body });
+}
+
+function ids(res: { body: RoadmapListResponse }): string[] {
+  return res.body.items.map((i) => i.id).sort();
+}
+
+const c1 = crypto.randomUUID();
+const c2 = crypto.randomUUID();
+const c3 = crypto.randomUUID();
+
+test("date: [since, before) on each axis, boundaries exact, an unknown date matches no range", async () => {
+  await importCards(DPK, [
+    card(c1, { created_at: "2026-01-10T00:00:00.000Z", content_updated_at: "2026-02-10T00:00:00.000Z" }),
+    card(c2, { created_at: "2026-01-11T00:00:00.000Z" }),
+    card(c3, {
+      created_at: "2026-01-12T00:00:00.000Z",
+      updated_at: "2026-01-01T00:00:00.000Z",
+      content_updated_at: "2026-02-12T00:00:00.000Z",
+    }),
+  ]);
+  const mine: string[] = [c1, c2, c3].sort();
+  const only = (res: { body: RoadmapListResponse }) => ids(res).filter((id) => mine.includes(id));
+
+  expect(only(await dateList({ date: { field: "created", since: "2026-01-11T00:00:00Z" } }))).toEqual([c2, c3].sort());
+  expect(only(await dateList({ date: { field: "created", before: "2026-01-12T00:00:00Z" } }))).toEqual([c1, c2].sort());
+  expect(only(await dateList({ date: { field: "created", since: "2026-01-11T00:00:00Z", before: "2026-01-12T00:00:00Z" } }))).toEqual([c2]);
+  expect(only(await dateList({ date: { field: "created", since: "2026-01-11T02:00:00+02:00" } }))).toEqual([c2, c3].sort());
+
+  expect(only(await dateList({ date: { field: "updated", since: "2026-02-01T00:00:00Z" } })), "an unknown date is not recent").toEqual(
+    [c1, c3].sort()
+  );
+  expect(only(await dateList({ date: { field: "updated", before: "2026-02-11T00:00:00Z" } })), "an unknown date is not old either").toEqual([c1]);
+  expect(only(await dateList({ date: { field: "updated", since: "2026-02-10T00:00:00Z", before: "2026-02-12T00:00:00Z" } }))).toEqual([c1]);
+  expect(
+    only(await dateList({ date: { field: "updated", since: "2026-01-01T00:00:00Z", before: "2026-01-02T00:00:00Z" } })),
+    "the technical updated_at is not the content date"
+  ).toEqual([]);
+});
+
+test("date: created_at in SQLite form and in ISO form are compared as instants", async () => {
+  const sqliteForm = crypto.randomUUID();
+  const isoForm = crypto.randomUUID();
+  await importCards(DPK, [card(sqliteForm, {}), card(isoForm, { created_at: "2026-03-05T10:00:00.000Z" })]);
+  const db = openBrokerDb(broker.dbPath);
+  db.run("UPDATE roadmap_items SET created_at = '2026-03-05 10:00:00' WHERE id = ?", [sqliteForm]);
+  db.close();
+
+  const res = await dateList({ date: { field: "created", since: "2026-03-05T10:00:00Z", before: "2026-03-05T10:00:01Z" } });
+  expect(ids(res).filter((id) => id === sqliteForm || id === isoForm)).toEqual([sqliteForm, isoForm].sort());
+  const earlier = await dateList({ date: { field: "created", before: "2026-03-05T10:00:00Z" } });
+  expect(ids(earlier)).not.toContain(sqliteForm);
+  expect(ids(earlier)).not.toContain(isoForm);
+});
+
+test("date: every search branch inherits the clause, and it composes with the other filters", async () => {
+  const fts = await dateList({ q: "zzdatefix", date: { field: "created", since: "2026-01-11T00:00:00Z", before: "2026-01-12T00:00:00Z" } });
+  expect(ids(fts), "FTS branch").toEqual([c2]);
+
+  const prefix = c2.slice(0, 8);
+  const hit = await dateList({ q: prefix, date: { field: "created", since: "2026-01-11T00:00:00Z", before: "2026-01-12T00:00:00Z" } });
+  expect(ids(hit), "FTS plus id-prefix branch").toEqual([c2]);
+  const miss = await dateList({ q: prefix, date: { field: "created", since: "2026-01-12T00:00:00Z" } });
+  expect(ids(miss), "the id-prefix match still obeys the range").toEqual([]);
+
+  const plain = await dateList({ date: { field: "created", since: "2026-01-11T00:00:00Z", before: "2026-01-12T00:00:00Z" } });
+  expect(ids(plain), "no-text branch").toEqual([c2]);
+
+  const combined = await dateList({
+    q: "zzdatefix",
+    kinds: ["feature"],
+    statuses: ["idea"],
+    date: { field: "updated", since: "2026-02-11T00:00:00Z" },
+  });
+  expect(ids(combined), "date AND the other criteria").toEqual([c3]);
+  const noMatch = await dateList({ q: "zzdatefix", kinds: ["bug"], date: { field: "updated", since: "2026-02-11T00:00:00Z" } });
+  expect(ids(noMatch)).toEqual([]);
+});
+
+test("date: facets stay computed over the unfiltered reference set", async () => {
+  const unfiltered = await dateList({ with_facets: true });
+  const filtered = await dateList({ with_facets: true, date: { field: "created", since: "2026-01-12T00:00:00Z", before: "2026-01-13T00:00:00Z" } });
+  expect(ids(filtered)).toEqual([c3]);
+  expect(filtered.body.facets, "a date range narrows the items, never the facet counts").toEqual(unfiltered.body.facets);
+});
+
+test("date: a filter that is not a valid interval is refused 400 with a named reason", async () => {
+  const refused: [string, unknown][] = [
+    ["unknown axis", { field: "updated_at", since: "1d" }],
+    ["not an object", "today"],
+    ["no bound", { field: "created" }],
+    ["zone-less date", { field: "created", since: "2026-01-11T00:00:00" }],
+    ["impossible day", { field: "created", since: "2026-02-30T00:00:00Z" }],
+    ["bound of the wrong type", { field: "created", since: 5 }],
+    ["since after before", { field: "created", since: "2026-01-12T00:00:00Z", before: "2026-01-11T00:00:00Z" }],
+    ["equal bounds", { field: "created", since: "2026-01-12T00:00:00Z", before: "2026-01-12T00:00:00Z" }],
+    ["relative out of range", { field: "created", since: "999999999w" }],
+  ];
+  for (const [what, date] of refused) {
+    const res = await dateList({ date });
+    expect(res.status, what).toBe(400);
+    expect(res.body.error, what).toContain("date");
+  }
+});
+
+test("date: a card created yesterday and never touched is absent from 'created since 24h'", async () => {
+  const pk = "github.com/vocsap/roadmap-date-acceptance-yesterday";
+  const id = crypto.randomUUID();
+  const yesterday = new Date(Date.now() - 30 * 3_600_000).toISOString();
+  await importCards(pk, [card(id, { created_at: yesterday, content_updated_at: yesterday })]);
+  const res = await dateList({ date: { field: "created", since: "24h" } }, pk);
+  expect(res.status).toBe(200);
+  expect(ids(res)).toEqual([]);
+  const wider = await dateList({ date: { field: "created", since: "48h" } }, pk);
+  expect(ids(wider)).toEqual([id]);
+});
+
+test("date: a card created last week and edited today is in 'updated since 24h' but not in 'created since 24h'", async () => {
+  const pk = "github.com/vocsap/roadmap-date-acceptance-edited";
+  const id = crypto.randomUUID();
+  const lastWeek = new Date(Date.now() - 7 * DAY_MS).toISOString();
+  await importCards(pk, [card(id, { created_at: lastWeek, content_updated_at: lastWeek })]);
+  const edit = await post(`${broker.url}/roadmap/upsert`, { project_key: pk, by: "date-editor", id, description: "enriched today" });
+  expect(edit.status).toBe(200);
+
+  expect(ids(await dateList({ date: { field: "updated", since: "24h" } }, pk))).toEqual([id]);
+  expect(ids(await dateList({ date: { field: "created", since: "24h" } }, pk))).toEqual([]);
+});
+
+test("date: a card only reordered is absent from 'updated since 24h'", async () => {
+  const pk = "github.com/vocsap/roadmap-date-acceptance-reorder";
+  const id = crypto.randomUUID();
+  const lastWeek = new Date(Date.now() - 7 * DAY_MS).toISOString();
+  await importCards(pk, [card(id, { status: "planned", created_at: lastWeek, content_updated_at: lastWeek })]);
+  const reordered = await post<{ items: RoadmapItem[] }>(
+    `${broker.url}/roadmap/reorder`,
+    deckAuthored({ project_key: pk, ids: [id], waves: [[id]] })
+  );
+  expect(reordered.status).toBe(200);
+  expect(reordered.body.items.find((i) => i.id === id)!.queue, "the reorder really moved the card").toBe(1);
+
+  expect(ids(await dateList({ date: { field: "updated", since: "24h" } }, pk))).toEqual([]);
+  expect(ids(await dateList({ date: { field: "updated", since: "8d" } }, pk))).toEqual([id]);
+});
+
+test("date: a card only released by the lock sweep is absent from 'updated since 24h'", async () => {
+  const sweeping = await startBroker({
+    CLAUDE_PEERS_LOCK_TTL_SEC: "2",
+    CLAUDE_PEERS_LOCK_GRACE_SEC: "3600",
+    CLAUDE_PEERS_LOCK_SWEEP_SEC: "1",
+  });
+  try {
+    const pk = "github.com/vocsap/roadmap-date-acceptance-sweep";
+    const claimed = await post<{ item: RoadmapItem }>(`${sweeping.url}/roadmap/upsert`, {
+      project_key: pk,
+      by: "sweep-victim",
+      title: "claimed then abandoned",
+      status: "in_progress",
+    });
+    expect(claimed.body.item.locked).toBe(true);
+    const lastWeek = new Date(Date.now() - 7 * DAY_MS).toISOString();
+    const db = openBrokerDb(sweeping.dbPath);
+    db.run(
+      "UPDATE roadmap_items SET created_at = ?, content_updated_at = ?, updated_at = datetime('now', '-60 seconds') WHERE id = ?",
+      [lastWeek, lastWeek, claimed.body.item.id]
+    );
+    db.close();
+
+    const deadline = Date.now() + 12_000;
+    let released: RoadmapItem | undefined;
+    while (Date.now() < deadline) {
+      const res = await post<RoadmapListResponse>(`${sweeping.url}/roadmap/list`, { project_key: pk });
+      released = res.body.items.find((i) => i.id === claimed.body.item.id);
+      if (released && !released.locked) break;
+      await Bun.sleep(300);
+    }
+    expect(released?.locked, "the sweep released the card").toBe(false);
+    expect(released?.status).toBe("planned");
+
+    const recent = await post<RoadmapListResponse>(`${sweeping.url}/roadmap/list`, {
+      project_key: pk,
+      date: { field: "updated", since: "24h" },
+    });
+    expect(recent.body.items).toEqual([]);
+  } finally {
+    await stopBroker(sweeping);
+  }
+}, 30_000);

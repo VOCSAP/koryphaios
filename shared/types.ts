@@ -1208,6 +1208,19 @@ export function findUncoveredAckFields(
   };
 }
 
+/** `created` reads created_at, `updated` reads content_updated_at (never updated_at). */
+export type RoadmapDateField = "created" | "updated";
+
+/**
+ * Interval [since, before), at least one bound. A bound is an ISO date with
+ * `Z` or an explicit offset, or a relative `Nh` / `Nd` / `Nw`. A card whose date
+ * is unknown (NULL) matches no range.
+ */
+export type RoadmapDateFilter = { field: RoadmapDateField } & (
+  | { since: string; before?: string }
+  | { since?: string; before: string }
+);
+
 export interface RoadmapListRequest {
   project_key: string;
   kind?: RoadmapKind;
@@ -1241,6 +1254,8 @@ export interface RoadmapListRequest {
   q?: string;
   /** Widen `q` to also search rationale+context. Ignored when `q` is absent. */
   q_deep?: boolean;
+  /** Date range on one axis, applied on every search branch. Facets stay unfiltered. */
+  date?: RoadmapDateFilter;
   /**
    * Also compute `RoadmapFacets` over the project's reference set (this
    * project's items after `include_archived` alone -- no other filter

@@ -28,6 +28,7 @@ interface FrontRequest {
   path: string;
   project_key: unknown;
   by: unknown;
+  date: unknown;
 }
 
 interface Front {
@@ -76,7 +77,7 @@ function startFront(target: string): Front {
       const path = new URL(req.url).pathname;
       const text = await req.text();
       const body = (text ? JSON.parse(text) : {}) as Record<string, unknown>;
-      front.requests.push({ path, project_key: body.project_key, by: body.by });
+      front.requests.push({ path, project_key: body.project_key, by: body.by, date: body.date });
       const upstream = await fetch(new URL(path, target), {
         method: req.method,
         headers: { "content-type": "application/json" },
@@ -424,6 +425,52 @@ test.skipIf(!GENERATION_MEASURABLE)(
     expect(blocked.isError).toBe(true);
     expect(blocked.text).toContain("tool not available");
     expect(narrow.front.requests, "a tool outside the allowlist must not reach the broker").toEqual([]);
+  },
+  30_000,
+);
+
+test.skipIf(!GENERATION_MEASURABLE)(
+  `the daemon's tools/list declares roadmap_list's date argument (${NEEDS_GENERATION})`,
+  async () => {
+    const session = await openSession("date-list", { projectKey: PROJECT_ALPHA, snapshot: "none" });
+
+    const listed = (await session.relay.rpc("tools/list")).result.tools as Array<{ name: string; inputSchema: any }>;
+    const date = listed.find((tool) => tool.name === "roadmap_list")?.inputSchema.properties.date;
+    expect(Object.keys(date?.properties ?? {}).sort(), "date lost a key in the daemon's served schema").toEqual([
+      "before",
+      "field",
+      "since",
+    ]);
+    expect(date?.required).toEqual(["field"]);
+  },
+  30_000,
+);
+
+test.skipIf(!GENERATION_MEASURABLE)(
+  `a date window sent through the daemon reaches the real broker, which filters on it and refuses a bad one (${NEEDS_GENERATION})`,
+  async () => {
+    const session = await openSession("date-call", { projectKey: PROJECT_ALPHA });
+
+    const recent = await session.relay.callTool("roadmap_list", { date: { field: "created", since: "1h" } });
+    expect(recent.isError, recent.text).toBe(false);
+    expect(recent.text, "a card created just now is inside the last hour").toContain(TITLE_ALPHA);
+
+    const old = await session.relay.callTool("roadmap_list", { date: { field: "created", before: "1h" } });
+    expect(old.isError, old.text).toBe(false);
+    expect(old.text, "a card created just now is not older than an hour").not.toContain(TITLE_ALPHA);
+
+    const refused = await session.relay.callTool("roadmap_list", { date: { field: "modified", since: "1h" } });
+    expect(refused.isError, "the broker's 400 must come back as a tool error").toBe(true);
+    expect(refused.text).toContain("400");
+
+    expect(
+      session.front.requests.map((r) => r.date),
+      "each call must reach the broker with its own date, verbatim",
+    ).toEqual([
+      { field: "created", since: "1h" },
+      { field: "created", before: "1h" },
+      { field: "modified", since: "1h" },
+    ]);
   },
   30_000,
 );

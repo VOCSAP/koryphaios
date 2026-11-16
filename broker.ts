@@ -111,6 +111,7 @@ import {
 } from "./shared/roadmap-context-document-cas.ts";
 import { formatRoadmapStaleSaveError } from "./shared/roadmap-append.ts";
 import { isValidQueueRank } from "./shared/roadmap-queue.ts";
+import { resolveRoadmapDateFilter, type RoadmapDateWindow } from "./shared/roadmap-date-filter.ts";
 import {
   adoptedContentDate,
   changeOriginRefusal,
@@ -5859,6 +5860,13 @@ function handleRoadmapList(
     return { error: "invalid kind/status/priority/effort/value/triage filter", status: 400 };
   }
 
+  let dateWindow: RoadmapDateWindow | null = null;
+  if (body.date !== undefined) {
+    const resolved = resolveRoadmapDateFilter(body.date, new Date());
+    if (!resolved.ok) return { error: resolved.error, status: 400 };
+    dateWindow = resolved.window;
+  }
+
   const includeArchived = !!body.include_archived;
 
   // Unknown tag value is a 400, not a silent empty result -- a typo must not
@@ -5949,6 +5957,17 @@ function handleRoadmapList(
       .map(() => "?")
       .join(", ")}))`;
     params.push(...tagsEff);
+  }
+  // julianday, not a string compare: created_at is SQLite's `YYYY-MM-DD HH:MM:SS`
+  // on create but may carry ISO from an import. An unknown date (NULL) yields
+  // NULL here and matches no range.
+  if (dateWindow?.sinceIso) {
+    sql += ` AND julianday(t.${dateWindow.column}) >= julianday(?)`;
+    params.push(dateWindow.sinceIso);
+  }
+  if (dateWindow?.beforeIso) {
+    sql += ` AND julianday(t.${dateWindow.column}) < julianday(?)`;
+    params.push(dateWindow.beforeIso);
   }
 
   // Only order by relevance when a text query was actually present -- never

@@ -1172,11 +1172,14 @@ export interface RoadmapListResponse {
   facets?: unknown
 }
 
-/**
- * Mirror of the core shared/types.ts RoadmapListRequest (card 3b0fda5f).
- * Keep in sync. `project_key` is stamped by the main process, not sent by
- * the renderer -- same convention as RoadmapListFilters above.
- */
+export type RoadmapDateField = 'created' | 'updated'
+
+export type RoadmapDateFilter = { field: RoadmapDateField } & (
+  | { since: string; before?: string }
+  | { since?: string; before: string }
+)
+
+/** `project_key` is stamped by the main process, never sent by the renderer. */
 export interface RoadmapQuery {
   kind?: RoadmapKind
   status?: RoadmapStatus
@@ -1192,6 +1195,7 @@ export interface RoadmapQuery {
   tags?: string[]
   q?: string
   q_deep?: boolean
+  date?: RoadmapDateFilter
   with_facets?: boolean
 }
 

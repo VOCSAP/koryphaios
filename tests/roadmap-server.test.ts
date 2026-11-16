@@ -46,7 +46,13 @@ function startBroker(): Broker {
       const path = new URL(req.url).pathname;
       const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
       broker.requests.push({ path, body });
-      if (path === "/roadmap/list") return Response.json({ items: [] });
+      if (path === "/roadmap/list") {
+        const date = body.date as { field?: unknown } | undefined;
+        if (date && date.field !== "created" && date.field !== "updated") {
+          return Response.json({ error: "date.field must be created or updated" }, { status: 400 });
+        }
+        return Response.json({ items: [] });
+      }
       return Response.json({ error: `unexpected route ${path}` }, { status: 404 });
     },
   });
@@ -105,8 +111,12 @@ async function connect(server: Server): Promise<Client> {
   return client;
 }
 
-async function callTool(client: Client, name: string): Promise<{ isError: boolean; text: string }> {
-  const result = (await client.callTool({ name, arguments: {} })) as {
+async function callTool(
+  client: Client,
+  name: string,
+  args: Record<string, unknown> = {}
+): Promise<{ isError: boolean; text: string }> {
+  const result = (await client.callTool({ name, arguments: args })) as {
     isError?: boolean;
     content: Array<{ type: string; text: string }>;
   };
@@ -311,3 +321,35 @@ test("the tool allowlist comes from the env argument, not from process.env", asy
   expect(await callTool(restrictedClient, "roadmap_get")).toEqual({ isError: true, text: "Error: tool not available: roadmap_get" });
   expect(restricted.broker.requests, "a tool outside the allowlist must not reach the broker").toEqual([]);
 });
+
+test("tools/list shows roadmap_list's date argument with its three keys and the required field", async () => {
+  const s = newSession("datelist");
+  const client = await connect(createRoadmapServer({ env: s.env, home: s.home }));
+
+  const listed = (await client.listTools()).tools.find((tool) => tool.name === "roadmap_list");
+  const date = (listed?.inputSchema.properties as Record<string, any> | undefined)?.date;
+  expect(Object.keys(date?.properties ?? {}).sort(), "date lost a key in the served schema").toEqual(["before", "field", "since"]);
+  expect(date?.properties.field.enum).toEqual(["created", "updated"]);
+  expect(date?.required).toEqual(["field"]);
+});
+
+test.skipIf(!GENERATION_MEASURABLE)(
+  `tools/call forwards date to the broker untouched and surfaces a broker 400 as a tool error (${NEEDS_GENERATION})`,
+  async () => {
+    const s = newSession("datecall");
+    await writeSnapshot(s);
+    const client = await connect(createRoadmapServer({ env: s.env, home: s.home }));
+    const date = { field: "updated", since: "7d", before: "2026-11-16T00:00:00Z" };
+
+    expect(await callTool(client, "roadmap_list", { date })).toEqual({ isError: false, text: EMPTY_ROADMAP });
+    expect(s.broker.requests.at(-1)?.body.date, "date must reach the broker body verbatim").toEqual(date);
+
+    const refused = await callTool(client, "roadmap_list", { date: { field: "modified", since: "7d" } });
+    expect(refused.isError).toBe(true);
+    expect(refused.text, "the broker's named refusal must reach the caller").toContain("date.field must be created or updated");
+
+    await callTool(client, "roadmap_list");
+    expect("date" in s.broker.requests.at(-1)!.body, "a call without date must not send one").toBe(false);
+  },
+  60_000
+);
