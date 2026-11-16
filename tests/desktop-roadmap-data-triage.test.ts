@@ -65,15 +65,16 @@ interface SearchCall {
 }
 
 let calls: SearchCall[] = [];
-/** Queries carrying no dimension: the hook's unfiltered poll, answered at once. */
+let polls: RoadmapQuery[] = [];
 function isPollQuery(q: RoadmapQuery): boolean {
-  return q.triages === undefined && q.kinds === undefined && q.q === undefined;
+  return "with_facets" in q;
 }
 
 function installApi(): void {
   (globalThis as unknown as { window: { api: unknown } }).window.api = {
     roadmapSearch: (query: RoadmapQuery) => {
       if (isPollQuery(query)) {
+        polls.push(query);
         return Promise.resolve({ items: UNFILTERED, facets: null });
       }
       return new Promise((resolvePromise, rejectPromise) => {
@@ -109,6 +110,7 @@ const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
 
 beforeEach(async () => {
   calls = [];
+  polls = [];
   installApi();
   container = document.createElement("div");
   document.body.appendChild(container);
@@ -207,4 +209,51 @@ test("a superseded request that REJECTS raises no error on a filter nobody is wa
     hook.error,
     "the failure of a request the hook itself abandoned must never reach the operator's banner"
   ).toBeNull();
+});
+
+const CREATED_TODAY: RoadmapQuery["date"] = {
+  field: "created",
+  since: "2026-11-15T23:00:00.000Z",
+  before: "2026-11-16T23:00:00.000Z"
+};
+
+test("a date filter alone launches the filtering call, carrying the date", async () => {
+  await setCriteria({ date: CREATED_TODAY });
+  await settleDebounce();
+  expect(calls, "a date is a criterion: alone, it must issue exactly one filtering call").toHaveLength(1);
+  expect(calls[0]!.query.date, "the filtering call carries the date as the broker reads it").toEqual(CREATED_TODAY);
+});
+
+test("the unfiltered call never sends the date, and the queue stays the unfiltered set", async () => {
+  await setCriteria({ date: { field: "updated", since: "7d" } });
+  await settleDebounce();
+  await act(async () => {
+    calls[0]!.resolve([item({ id: "recent-only" })]);
+    await sleep(0);
+  });
+  expect(hook.board.map((i) => i.id), "the board shows the dated answer").toEqual(["recent-only"]);
+  expect(polls.length, "the unfiltered call ran at least once").toBeGreaterThan(0);
+  expect(
+    polls.filter((q) => q.date !== undefined),
+    "the queue truth and facet reference set must never be narrowed by a date"
+  ).toEqual([]);
+  expect(
+    (hook.queue as unknown as { all: RoadmapItem[] }).all.map((i) => i.id),
+    "the queue is minted from the unfiltered call, never from the dated board"
+  ).toEqual(["unfiltered-1", "unfiltered-2"]);
+});
+
+test("removing the date drops a dated response still in flight", async () => {
+  await setCriteria({ date: CREATED_TODAY });
+  await settleDebounce();
+  expect(calls, "the dated call must be in flight before the date is removed").toHaveLength(1);
+  await setCriteria({});
+  await act(async () => {
+    calls[0]!.resolve([item({ id: "stale-dated" })]);
+    await sleep(0);
+  });
+  expect(
+    hook.board.map((i) => i.id),
+    "a dated answer landing after the date was removed must not replace the unfiltered board"
+  ).toEqual(["unfiltered-1", "unfiltered-2"]);
 });

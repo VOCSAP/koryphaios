@@ -3297,6 +3297,74 @@ svg.glyph {
   font-size: 11px;
 }
 
+/* The date axes are exclusive, so radios, unlike the multi-choice dimensions. */
+.rm-date-option {
+  gap: 8px;
+  cursor: pointer;
+}
+
+/* The editor toggle sits in the radio column: same 14px slot, glyph centred. */
+.rm-date-disclosure {
+  display: inline-flex;
+  flex: 0 0 14px;
+  justify-content: center;
+  color: var(--fg-dim);
+}
+
+.rm-date-axis {
+  display: flex;
+  gap: 14px;
+  padding-bottom: 4px;
+  margin-bottom: 4px;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+}
+
+.rm-date-axis .rm-date-option {
+  width: auto;
+  flex: 0 0 auto;
+}
+
+.rm-date-presets {
+  display: flex;
+  flex-direction: column;
+}
+
+/* Indented to the label column of the radio above it (14px box + 8px gap), so
+   the fields read as belonging to "Custom range" and not as a new section. */
+.rm-date-custom {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 4px 0 6px 22px;
+  font-size: 12px;
+}
+
+.rm-date-custom .field {
+  margin-bottom: 0;
+}
+
+.rm-date-input {
+  min-width: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Compound selector: `.field input:not([type])` (0,2,1) declares the border
+   shorthand and would win over a bare class. */
+.field input.rm-date-input[aria-invalid='true'] {
+  border-color: var(--danger);
+}
+
+.rm-date-custom .field-error {
+  margin-top: 0;
+  font-size: 11px;
+}
+
+.rm-date-apply {
+  align-self: flex-start;
+  padding: 4px 12px;
+  font-size: 12px;
+}
+
 /* ---------- Kanban board (PLAN K1): one column per status. ---------- */
 
 .rm-board {

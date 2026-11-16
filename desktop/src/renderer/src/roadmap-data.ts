@@ -32,6 +32,7 @@ export function hasActiveCriteria(c: RoadmapQuery): boolean {
       c.values?.length ||
       c.triages?.length ||
       c.tags?.length ||
+      c.date ||
       (c.q && c.q.trim() !== '')
   )
 }

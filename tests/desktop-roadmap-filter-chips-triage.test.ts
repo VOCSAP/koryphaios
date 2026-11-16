@@ -113,6 +113,36 @@ test("removing the last triage chip drops the key instead of leaving an empty ar
   ).toBeUndefined();
 });
 
+test("a date filter gets one chip naming its axis and its period", () => {
+  criteria = { date: { field: "updated", since: "7d" } };
+  mount();
+  expect(chipLabels(), "the chip says which date and which period, in one label").toEqual([
+    "roadmap.filter.dateField.updated: roadmap.filter.datePreset.7d"
+  ]);
+});
+
+test("removing the date chip keeps every other criterion", () => {
+  criteria = { date: { field: "created", since: "30d" }, triages: ["needs-info"], q: "lock" };
+  mount();
+  clickChip("roadmap.filter.dateField.created: roadmap.filter.datePreset.30d");
+  expect(setCriteriaCalls, "one click must write the criteria once").toHaveLength(1);
+  expect(
+    setCriteriaCalls[0],
+    "only the date leaves; the role and the search keep filtering"
+  ).toEqual({ date: undefined, triages: ["needs-info"], q: "lock" });
+});
+
+test("clear-all takes the date filter with it", () => {
+  criteria = { date: { field: "created", since: "7d" } };
+  mount();
+  const clear = container.querySelector(".rm-filter-chip-clear") as HTMLButtonElement | null;
+  if (!clear) throw new Error("no clear-all chip rendered while only a date was active");
+  act(() => {
+    clear.click();
+  });
+  expect(setCriteriaCalls[0]!.date, "a reset that leaves the date would keep the board narrowed").toBeUndefined();
+});
+
 test("clear-all takes the triage filter with it", () => {
   criteria = { triages: ["ready-for-agent"] };
   mount();

@@ -1,5 +1,6 @@
-import { useState } from 'react'
+import { useId, useState } from 'react'
 import type {
+  RoadmapDateField,
   RoadmapFacetBucket,
   RoadmapFacets,
   RoadmapKind,
@@ -12,6 +13,12 @@ import { ROADMAP_TRIAGE_ROLES } from '@shared/types'
 import { GLYPH_ACTIONS, GLYPH_BADGES } from './icons'
 import { KIND_ICONS } from './RoadmapItemModal'
 import type { TFn } from '../i18n'
+import {
+  classifyDateFilter,
+  customDateFilter,
+  presetDateFilter,
+  type DatePreset
+} from '../roadmap-date-range'
 
 // Card 3b0fda5f: LEFT SIDE PANEL (not a modal), one collapsible section per
 // filter dimension, checkbox + facet count per value, per-section Reset and
@@ -149,6 +156,202 @@ function FilterSection<T extends string>({
   )
 }
 
+const DATE_FIELDS: RoadmapDateField[] = ['created', 'updated']
+const DATE_PRESETS: DatePreset[] = ['today', '7d', '30d']
+type DateChoice = DatePreset | 'custom'
+type DateError = 'empty' | 'format' | 'order'
+
+/** Every value lives on RoadmapFilterPanel: this body unmounts when its section
+ *  or the panel folds, and must hand back what was typed when it reopens. */
+interface DateSectionProps {
+  criteria: RoadmapQuery
+  setCriteria: (next: RoadmapQuery) => void
+  axis: RoadmapDateField
+  onAxis: (field: RoadmapDateField) => void
+  customOpen: boolean
+  setCustomOpen: (open: boolean) => void
+  from: string
+  setFrom: (v: string) => void
+  through: string
+  setThrough: (v: string) => void
+  error: DateError | null
+  setError: (e: DateError | null) => void
+  collapsed: boolean
+  onToggleCollapse: () => void
+  t: TFn
+}
+
+function DateSection({
+  criteria,
+  setCriteria,
+  axis,
+  onAxis,
+  customOpen,
+  setCustomOpen,
+  from,
+  setFrom,
+  through,
+  setThrough,
+  error,
+  setError,
+  collapsed,
+  onToggleCollapse,
+  t
+}: DateSectionProps): React.JSX.Element {
+  const axisName = useId()
+  const presetName = useId()
+  const fromId = useId()
+  const throughId = useId()
+  const errorId = useId()
+  const editorId = useId()
+  const shape = criteria.date ? classifyDateFilter(criteria.date, new Date()) : null
+  // What is checked is what the board is filtered by, never what is being typed:
+  // the editor is a draft until Apply, so it opens from its own control.
+  const applied: DateChoice | null = shape ? (shape.kind === 'preset' ? shape.preset : 'custom') : null
+
+  const choose = (next: DatePreset): void => {
+    setCustomOpen(false)
+    setError(null)
+    setCriteria({ ...criteria, date: presetDateFilter(axis, next, new Date()) })
+  }
+
+  const toggleEditor = (): void => {
+    if (!customOpen && shape?.kind === 'range' && from === '' && through === '') {
+      setFrom(shape.from ?? '')
+      setThrough(shape.through ?? '')
+    }
+    setCustomOpen(!customOpen)
+  }
+
+  const apply = (): void => {
+    const result = customDateFilter(axis, from, through)
+    if (!result.ok) {
+      setError(result.reason)
+      return
+    }
+    setError(null)
+    setCriteria({ ...criteria, date: result.filter })
+  }
+
+  const onFieldKey = (e: React.KeyboardEvent<HTMLInputElement>): void => {
+    if (e.key === 'Enter') apply()
+  }
+
+  return (
+    <div className="rm-filter-section">
+      <div className="rm-filter-section-head">
+        <button type="button" className="rm-filter-section-toggle" onClick={onToggleCollapse}>
+          {t('roadmap.filter.date')}
+        </button>
+        {criteria.date && (
+          <button
+            type="button"
+            className="rm-filter-section-reset"
+            onClick={() => setCriteria({ ...criteria, date: undefined })}
+          >
+            {t('roadmap.filter.reset')}
+          </button>
+        )}
+      </div>
+      {!collapsed && (
+        <div className="rm-filter-section-body">
+          <div className="rm-date-axis" role="radiogroup" aria-label={t('roadmap.filter.dateAxis')}>
+            {DATE_FIELDS.map((f) => (
+              <label key={f} className={`rm-filter-value rm-date-option${axis === f ? ' is-on' : ''}`}>
+                <input
+                  type="radio"
+                  name={axisName}
+                  value={f}
+                  checked={axis === f}
+                  onChange={() => onAxis(f)}
+                />
+                <span className="rm-filter-value-label">{t(`roadmap.filter.dateField.${f}`)}</span>
+              </label>
+            ))}
+          </div>
+          <div className="rm-date-presets" role="radiogroup" aria-label={t('roadmap.filter.datePeriod')}>
+            {DATE_PRESETS.map((p) => (
+              <label key={p} className={`rm-filter-value rm-date-option${applied === p ? ' is-on' : ''}`}>
+                <input
+                  type="radio"
+                  name={presetName}
+                  value={p}
+                  checked={applied === p}
+                  onChange={() => choose(p)}
+                />
+                <span className="rm-filter-value-label">{t(`roadmap.filter.datePreset.${p}`)}</span>
+              </label>
+            ))}
+          </div>
+          <button
+            type="button"
+            className={`rm-filter-value rm-date-option${applied === 'custom' ? ' is-on' : ''}`}
+            aria-expanded={customOpen}
+            aria-controls={editorId}
+            onClick={toggleEditor}
+          >
+            <span className="rm-date-disclosure" aria-hidden="true">
+              {customOpen ? GLYPH_ACTIONS.minus : GLYPH_ACTIONS.plus}
+            </span>
+            <span className="rm-filter-value-label">{t('roadmap.filter.datePreset.custom')}</span>
+          </button>
+          {customOpen && (
+            <div className="rm-date-custom" id={editorId}>
+              <label className="field" htmlFor={fromId}>
+                <span>{t('roadmap.filter.dateFrom')}</span>
+                <input
+                  id={fromId}
+                  className="rm-date-input"
+                  value={from}
+                  inputMode="numeric"
+                  maxLength={10}
+                  placeholder={t('roadmap.filter.datePlaceholder')}
+                  aria-invalid={error !== null || undefined}
+                  aria-describedby={error ? errorId : undefined}
+                  onChange={(e) => {
+                    setFrom(e.target.value)
+                    setError(null)
+                  }}
+                  onKeyDown={onFieldKey}
+                />
+              </label>
+              <label className="field" htmlFor={throughId}>
+                <span>{t('roadmap.filter.dateThrough')}</span>
+                <input
+                  id={throughId}
+                  className="rm-date-input"
+                  value={through}
+                  inputMode="numeric"
+                  maxLength={10}
+                  placeholder={t('roadmap.filter.datePlaceholder')}
+                  aria-invalid={error !== null || undefined}
+                  aria-describedby={error ? errorId : undefined}
+                  onChange={(e) => {
+                    setThrough(e.target.value)
+                    setError(null)
+                  }}
+                  onKeyDown={onFieldKey}
+                />
+              </label>
+              {error && (
+                <small id={errorId} className="field-error" role="alert">
+                  {t(`roadmap.filter.dateError.${error}`)}
+                </small>
+              )}
+              <button type="button" className="primary rm-date-apply" onClick={apply}>
+                {t('roadmap.filter.dateApply')}
+              </button>
+            </div>
+          )}
+          {axis === 'updated' && (
+            <div className="rm-filter-section-note">{t('roadmap.filter.dateUpdatedNote')}</div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
 export interface RoadmapFilterPanelProps {
   criteria: RoadmapQuery
   setCriteria: (next: RoadmapQuery) => void
@@ -186,6 +389,30 @@ export function RoadmapFilterPanel({
   // whole tag set, so narrowing here cannot hide a value the operator could
   // reach otherwise.
   const [tagQuery, setTagQuery] = useState('')
+  const [dateAxis, setDateAxis] = useState<RoadmapDateField>('created')
+  const [dateCustomOpen, setDateCustomOpen] = useState(false)
+  const [dateFrom, setDateFrom] = useState('')
+  const [dateThrough, setDateThrough] = useState('')
+  const [dateError, setDateError] = useState<DateError | null>(null)
+  // The date leaves through the chip bar and Clear all too, which never reach
+  // this panel's setters: the draft is dropped on the transition itself.
+  const [seenDate, setSeenDate] = useState(criteria.date)
+  if (seenDate !== criteria.date) {
+    setSeenDate(criteria.date)
+    if (seenDate && !criteria.date) {
+      setDateCustomOpen(false)
+      setDateFrom('')
+      setDateThrough('')
+      setDateError(null)
+    }
+  }
+  // An applied filter names its own field; the local axis only speaks while no
+  // date is applied, so a chip removal can never leave the two disagreeing.
+  const axis = criteria.date?.field ?? dateAxis
+  const chooseAxis = (field: RoadmapDateField): void => {
+    setDateAxis(field)
+    if (criteria.date) setCriteria({ ...criteria, date: { ...criteria.date, field } })
+  }
   const tagNeedle = tagQuery.trim().toLowerCase()
   const activeTags = criteria.tags ?? []
   // An ACTIVE tag survives the needle. Making a checked box disappear under a
@@ -299,6 +526,23 @@ export function RoadmapFilterPanel({
             </span>
           </label>
 
+          <DateSection
+            criteria={criteria}
+            setCriteria={setCriteria}
+            axis={axis}
+            onAxis={chooseAxis}
+            customOpen={dateCustomOpen}
+            setCustomOpen={setDateCustomOpen}
+            from={dateFrom}
+            setFrom={setDateFrom}
+            through={dateThrough}
+            setThrough={setDateThrough}
+            error={dateError}
+            setError={setDateError}
+            collapsed={!!collapsed.date}
+            onToggleCollapse={() => toggleSection('date')}
+            t={t}
+          />
           <FilterSection
             titleKey="roadmap.filter.kind"
             values={KINDS}

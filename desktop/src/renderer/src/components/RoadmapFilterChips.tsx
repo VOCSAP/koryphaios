@@ -1,6 +1,7 @@
 import type { RoadmapQuery } from '@shared/types'
 import { GLYPH_ACTIONS, GLYPH_BADGES } from './icons'
 import type { TFn } from '../i18n'
+import { classifyDateFilter } from '../roadmap-date-range'
 
 // Removable chips for every active criterion, reachable outside the collapsible
 // filter panel so an active filter is visible without reopening it.
@@ -111,6 +112,23 @@ export function RoadmapFilterChips({
       key: 'q',
       label: `${t('roadmap.filter.search')}: ${criteria.q}`,
       onRemove: () => setCriteria({ ...criteria, q: undefined })
+    })
+  }
+
+  if (criteria.date) {
+    const shape = classifyDateFilter(criteria.date, new Date())
+    const range =
+      shape.kind === 'preset'
+        ? t(`roadmap.filter.datePreset.${shape.preset}`)
+        : shape.from && shape.through
+          ? t('roadmap.filter.dateRange', { from: shape.from, through: shape.through })
+          : shape.from
+            ? t('roadmap.filter.dateSince', { from: shape.from })
+            : t('roadmap.filter.dateUntil', { through: shape.through ?? '' })
+    chips.push({
+      key: 'date',
+      label: `${t(`roadmap.filter.dateField.${criteria.date.field}`)}: ${range}`,
+      onRemove: () => setCriteria({ ...criteria, date: undefined })
     })
   }
 
