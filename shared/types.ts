@@ -603,18 +603,6 @@ export interface RoadmapItem {
    */
   locked_group: string | null;
   /**
-   * Never guessed or backfilled: null on every pre-existing row, and null is
-   * also the permanent, correct value for a claim that could not be proven via
-   * a real instance_token -- falling back to the display peer_id here would
-   * defeat the point of this column.
-   * Stamped only when the write actually claims the lock, never overwritten by
-   * an ordinary third-party write.
-   * Does not make a lock survive a restart for most callers: re-registering
-   * into a session_key collision mints a fresh instance_token, so most sessions
-   * do not carry the same token across a reconnect.
-   */
-  locked_by_token: string | null;
-  /**
    * kind 'directive' (CT1): the app-executed command; null for every other
    * kind. Persisted so the card survives broker restarts like any roadmap row.
    */
@@ -728,10 +716,9 @@ export type RoadmapSyncContent = Pick<RoadmapItem, RoadmapSyncContentField>;
 
 /**
  * One row served by /roadmap/sync/pull: the public item plus the two upstream
- * revision counters. Built by a pick-list, so `locked_by_token` and
- * `operator_id` can never ride along.
+ * revision counters. Built by a pick-list, so `operator_id` can never ride along.
  */
-export type RoadmapSyncRow = Omit<RoadmapItem, "locked_by_token" | "operator_id" | "dispatch_state_tag"> & {
+export type RoadmapSyncRow = Omit<RoadmapItem, "operator_id" | "dispatch_state_tag"> & {
   rev: number;
   content_rev: number;
 };
@@ -1389,6 +1376,11 @@ export interface RoadmapUpsertRequest {
 
 export interface RoadmapUpsertResponse {
   item: RoadmapItem;
+  /**
+   * Whether the caller's own proven instance_token holds this card's work-lock.
+   * Computed by the broker for the caller alone: the token itself never leaves it.
+   */
+  held_by_you: boolean;
 }
 
 export interface RoadmapContextAppendRequest {

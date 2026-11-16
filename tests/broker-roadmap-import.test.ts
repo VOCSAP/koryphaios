@@ -156,6 +156,26 @@ test("force-importing a locked card with no lock fields in the file preserves lo
   expect(after.locked_at).toBe(originalLockedAt);
 });
 
+test("an import file cannot name the lock holder's credential", async () => {
+  const id = crypto.randomUUID();
+  const fileSupplied = "holder-named-by-the-file";
+  const res = await post<ImportRes>(`${broker.url}/roadmap/import`, {
+    project_key: PK,
+    by: "importer-peer",
+    items: [{ id, kind: "feature", title: "file-supplied holder", locked: true, locked_by: "file-owner", locked_by_token: fileSupplied }],
+  });
+  expect(res.status).toBe(200);
+  expect(res.body.imported).toBe(1);
+
+  const db = openBrokerDb(broker.dbPath, { readonly: true });
+  try {
+    const row = db.query("SELECT locked, locked_by_token FROM roadmap_items WHERE id = ?").get(id);
+    expect(row).toEqual({ locked: 1, locked_by_token: null });
+  } finally {
+    db.close();
+  }
+});
+
 test("a brand-new imported item with no lock fields defaults to unlocked (not the row that doesn't exist yet)", async () => {
   const id = crypto.randomUUID();
   const res = await post<ImportRes>(`${broker.url}/roadmap/import`, {

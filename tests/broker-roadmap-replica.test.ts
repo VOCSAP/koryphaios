@@ -1524,12 +1524,12 @@ test("a lock taken on the replica is relayed upstream, and one taken upstream bl
     "the mirrored lock shows the holder but carries no credential",
     mirrored.locked,
     mirrored.locked_by,
-    mirrored.locked_by_token,
+    JSON.stringify(mirrored).includes(nativePeer.body.instance_token),
   ]).toEqual([
     "the mirrored lock shows the holder but carries no credential",
     true,
     nativePeer.body.peer_id,
-    null,
+    false,
   ]);
   const refused = await post<{ error?: string }>(`${replica.url}/roadmap/upsert`, {
     project_key: PK,
@@ -1980,6 +1980,15 @@ test("an arbitration carries no credential and no operator proof, on either side
     [],
     "the upstream's version",
   ]);
+  const resolved = await post<{ item: RoadmapItem }>(
+    `${replica.url}/roadmap/sync/resolve`,
+    deckAuthored({ id: card.id, choice: "local" })
+  );
+  expect(resolved.status).toBe(200);
+  expect(
+    JSON.stringify([conflict, reread, resolved.body]),
+    "no arbitration reply holds a token value, the stored one or the one planted in the remote blob"
+  ).not.toMatch(new RegExp(`${stored.locked_by_token!}|a-token-that-must-not-travel`));
 }, 60_000);
 
 test("a batch full of rows the upstream refuses never starves the row behind them", async () => {

@@ -14,6 +14,15 @@ const PK = "github.com/vocsap/lock-abandoned-event-repo";
 type UpsertRes = { item: RoadmapItem };
 type InboxRes = { messages: { id: number; from_peer_id: string; text: string; sent_at: string }[] } | { error: string };
 
+function storedLockToken(b: TestBroker, id: string): string | null {
+  const db = openBrokerDb(b.dbPath, { readonly: true });
+  try {
+    return (db.query("SELECT locked_by_token AS token FROM roadmap_items WHERE id = ?").get(id) as { token: string | null }).token;
+  } finally {
+    db.close();
+  }
+}
+
 async function pollUntil<T>(
   budgetMs: number,
   intervalMs: number,
@@ -65,7 +74,7 @@ test("releaseStaleLocks: a lock swept for TTL in a secret group deposits exactly
       return { done: found.locked === false, value: found };
     });
     expect(after.status).toBe("planned");
-    expect(after.locked_by_token).toBe(null);
+    expect(storedLockToken(b, held.body.item.id)).toBe(null);
 
     const drain = await post<InboxRes>(`${b.url}/operator-inbox`, {
       group_id: g.id, group_secret_hash: g.hash,
@@ -260,7 +269,7 @@ test("releaseStaleLocks: a lock swept by clause 2 (owner-gone, not TTL) deposits
       return { done: found.locked === false, value: found };
     });
     expect(after.status).toBe("planned");
-    expect(after.locked_by_token).toBe(null);
+    expect(storedLockToken(b, held.body.item.id)).toBe(null);
 
     const drain = await post<InboxRes>(`${b.url}/operator-inbox`, {
       group_id: g.id, group_secret_hash: g.hash,

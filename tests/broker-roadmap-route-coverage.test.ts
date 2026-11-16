@@ -10,7 +10,7 @@
 import { test, expect, beforeAll, afterAll } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { startBroker, stopBroker, post, livePid, type TestBroker } from "./_helper.ts";
+import { startBroker, stopBroker, post, livePid, discoverRoadmapRoutes, type TestBroker } from "./_helper.ts";
 import type { RegisterResponse, RoadmapItem } from "../shared/types.ts";
 
 let broker: TestBroker;
@@ -27,26 +27,6 @@ afterAll(async () => {
 
 const PK = "github.com/vocsap/route-coverage-repo";
 const BROKER_SRC = join(import.meta.dir, "..", "broker.ts");
-
-/**
- * Every "/roadmap/..." route literal the broker source mentions.
- *
- * The tail is "everything up to the closing quote", NOT `[a-z-]+`: a shape the
- * regex cannot express is invisible to every assertion below at once, since all
- * three consume this one extraction. `[a-z-]+` covered only FLAT routes, so a
- * nested `/roadmap/lot/reorder` (already proposed in WORKFLOW-LOTS-DESIGN.md)
- * would have been silently undiscovered -- the file would have caught the
- * domain SHRINKING while missing it GROWING out of shape. Over-matching is the
- * safe direction here: an odd capture lands in neither classification set and
- * fails the test CLOSED.
- */
-function discoverRoadmapRoutes(source: string): string[] {
-  const found = new Set<string>();
-  for (const m of source.matchAll(/["'`](\/roadmap\/[^"'`\s]+)["'`]/g)) {
-    found.add(m[1]!);
-  }
-  return [...found].sort();
-}
 
 // ---------------------------------------------------------------------------
 // Classification. Anything discovered and NOT listed here is, by construction,

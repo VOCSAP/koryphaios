@@ -1105,7 +1105,7 @@ try {
 // the permanent, correct value for any claim resolveRoadmapAuthor could not
 // prove via a real instance_token (an unproven claim, or an operator/deck-
 // signed write) -- this column is never guessed or backfilled from
-// `locked_by`. See RoadmapItem.locked_by_token's doc comment for the full
+// `locked_by`. See RoadmapRow.locked_by_token's doc comment for the full
 // contract.
 try {
   db.run("ALTER TABLE roadmap_items ADD COLUMN locked_by_token TEXT");
@@ -5205,6 +5205,15 @@ type RoadmapRow = Omit<
   // NULLable column (no DEFAULT), unlike RoadmapItem.operator_id?: string --
   // bun:sqlite hands back NULL as null, not undefined.
   operator_id: string | null;
+  /**
+   * The lock holder's raw instance_token, a credential: it exists on the row
+   * only, never on RoadmapItem, so no response can carry it. NULL on every
+   * pre-existing row and for a claim that could not be proven by a real
+   * instance_token (the display peer_id is never a fallback). Stamped only
+   * when a write actually claims the lock, never by an ordinary third-party
+   * write.
+   */
+  locked_by_token: string | null;
   inactive: number;
   // Free-text columns as SQLite returns them; the enums are narrowed on read,
   // never trusted, so a hand-edited database cannot inject a scope value the
@@ -5291,7 +5300,6 @@ function rowToRoadmapItem(row: RoadmapRow): RoadmapItem {
     locked_by: row.locked_by ?? null,
     locked_at: row.locked_at ?? null,
     locked_group: row.locked_group ?? null,
-    locked_by_token: row.locked_by_token ?? null,
     // string|null (SQLite) -> string|undefined (RoadmapItem's optional field).
     operator_id: row.operator_id ?? undefined,
     inactive: row.inactive === 1,
@@ -5418,6 +5426,15 @@ function getRoadmapItem(id: string): RoadmapItem | null {
  */
 function getRoadmapRow(id: string): RoadmapRow | null {
   return db.query("SELECT * FROM roadmap_items WHERE id = ?").get(id) as RoadmapRow | null;
+}
+
+/** held_by_you is the only trace of the lock holder's token a caller ever receives, and only its own. */
+function upsertResponse(id: string, author: RoadmapAuthor): RoadmapUpsertResponse {
+  const row = getRoadmapRow(id)!;
+  return {
+    item: rowToRoadmapItem(row),
+    held_by_you: author.instance_token !== undefined && row.locked_by_token === author.instance_token,
+  };
 }
 
 type RoadmapContextDocumentRow = {
@@ -5649,7 +5666,7 @@ interface RoadmapAuthor {
    * `undefined` on the reserved-name/operator branch (a signature proves a
    * human, not a peer session -- there is no token to name) and on the
    * unproven fallback (no token was presented at all). Callers stamp this
-   * onto `RoadmapItem.locked_by_token` ONLY on an actual lock claim (see
+   * onto `RoadmapRow.locked_by_token` ONLY on an actual lock claim (see
    * that field's doc comment) -- NEVER derived from `by`/`group_id`, and
    * never guessed when this is `undefined`.
    */
@@ -6198,8 +6215,9 @@ function handleRoadmapUpsert(
 
   if (body.id) {
     // Partial patch: omitted fields keep their value; project_key never moves.
-    const existing = getRoadmapItem(body.id);
-    if (!existing) return { error: "unknown roadmap item", status: 404 };
+    const existingRow = getRoadmapRow(body.id);
+    if (!existingRow) return { error: "unknown roadmap item", status: 404 };
+    const existing = rowToRoadmapItem(existingRow);
     const markedRelease = body.change_origin !== undefined;
     if (markedRelease && !(existing.locked && existing.status === "in_progress")) {
       return { error: "change_origin only releases a locked in_progress card", status: 400 };
@@ -6434,7 +6452,7 @@ function handleRoadmapUpsert(
     const nextLockedGroup = resolveLockedGroup(resolvedLock, existing.locked_group, authorLockedGroup);
     // Card 4441e883, mecanisme B: same claimed-only discipline, one column
     // over -- see resolveLockedByToken's doc comment in shared/roadmap-lock.ts.
-    const nextLockedByToken = resolveLockedByToken(resolvedLock, existing.locked_by_token, author.instance_token);
+    const nextLockedByToken = resolveLockedByToken(resolvedLock, existingRow.locked_by_token, author.instance_token);
     // The park is scoped to the operator who parked it -- a separate question
     // from the peer-lock reclaim above.
     // It survives every write except the same operator reversing their own
@@ -6549,7 +6567,7 @@ function handleRoadmapUpsert(
     ) {
       db.run(`UPDATE roadmap_items SET ${CLEAR_LOCK_RELAY_SET} WHERE id = ?`, [body.id]);
     }
-    return { item: getRoadmapItem(body.id)! };
+    return upsertResponse(body.id, author);
   }
 
   // Create.
@@ -6618,7 +6636,7 @@ function handleRoadmapUpsert(
   const createLockedGroup = createLocked ? (author.group_id ?? null) : null;
   // Card 4441e883, mecanisme B: same discipline, one column over -- NULL
   // unless the creating author's OWN instance_token was proven (see
-  // RoadmapItem.locked_by_token's doc comment; never derived from `by`).
+  // RoadmapRow.locked_by_token's doc comment; never derived from `by`).
   const createLockedByToken = createLocked ? (author.instance_token ?? null) : null;
 
   const createTriage = body.triage ?? null;
@@ -6671,7 +6689,7 @@ function handleRoadmapUpsert(
       new Date().toISOString(),
     ]
   );
-  return { item: getRoadmapItem(id)! };
+  return upsertResponse(id, author);
 }
 
 // Card c33a5968: no inactive guard here, deliberately -- this handler forces
@@ -7439,18 +7457,9 @@ function handleRoadmapImport(body: {
             ? it.locked_group
             : null
           : (existing?.locked_group ?? null);
-      // Card 4441e883: same file-wins/existing-wins discipline as
-      // locked_group just above, and the same reasoning for skipping a
-      // charset check -- it is never compared as an identity CLAIM on this
-      // route (the unconditional locked-and-!force skip above is this
-      // route's entire answer to an untrustworthy `by`), it is compared only
-      // against a value resolveRoadmapAuthor itself resolved elsewhere.
-      const lockedByTokenVal =
-        it.locked_by_token !== undefined
-          ? typeof it.locked_by_token === "string"
-            ? it.locked_by_token
-            : null
-          : (existing?.locked_by_token ?? null);
+      // Never read from the file: an export carries no credential, and a
+      // file-supplied token would name an arbitrary lock holder.
+      const lockedByTokenVal = existingRow?.locked_by_token ?? null;
       // Card aaf4537d: same file-wins/existing-wins discipline as the three
       // lock columns just above (a re-import of a parked card must not
       // silently unpark it, and a file that WAS built from a parked export

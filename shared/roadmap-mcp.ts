@@ -176,9 +176,9 @@ export function formatRoadmapUpsertAck(opts: {
   item: RoadmapItem;
   args: Record<string, unknown>;
   domain: readonly RoadmapUpsertAckField[];
-  holderInstanceToken?: string;
+  heldByYou?: boolean;
 }): string {
-  const { label, item, args, domain, holderInstanceToken } = opts;
+  const { label, item, args, domain, heldByYou } = opts;
   const passed: string[] = [];
   const untouched: string[] = [];
   for (const field of domain) {
@@ -216,7 +216,7 @@ export function formatRoadmapUpsertAck(opts: {
   const lines = [`Roadmap item ${label}: ${item.id.slice(0, 8)}`];
   if (passed.length) lines.push(`  ${passedLabel}: ${passed.join(", ")}`);
   if (untouched.length) lines.push(`  ${untouchedLabel}: ${untouched.join(", ")}`);
-  if (holderInstanceToken !== undefined && item.locked_by_token !== null && item.locked_by_token === holderInstanceToken) {
+  if (heldByYou === true) {
     const since = item.locked_at !== null ? formatLockedAtHHMM(item.locked_at) : "an unknown time";
     lines.push(`  you hold this card's work-lock (since ${since}) -- if only your own part is done, pass locked:false while leaving status:in_progress so the card stays claimed for the rest`);
   }
@@ -345,7 +345,7 @@ export async function callRoadmapTool(
       }
       case "roadmap_add": {
         const a = args as Record<string, unknown> & { title: string };
-        const { item } = await brokerFetch<RoadmapUpsertResponse>("/roadmap/upsert", {
+        const { item, held_by_you } = await brokerFetch<RoadmapUpsertResponse>("/roadmap/upsert", {
           project_key: identity.projectKey,
           by: identity.peerId,
           ...proof,
@@ -372,7 +372,7 @@ export async function callRoadmapTool(
               item,
               args: a,
               domain: ROADMAP_ADD_ACK_FIELDS,
-              holderInstanceToken: identity.instanceToken,
+              heldByYou: held_by_you,
             }),
           }],
         };
@@ -380,7 +380,7 @@ export async function callRoadmapTool(
       case "roadmap_update": {
         const a = args as Record<string, unknown> & { id: string };
         const id = await resolveRoadmapId(a.id, context);
-        const { item } = await brokerFetch<RoadmapUpsertResponse>("/roadmap/upsert", {
+        const { item, held_by_you } = await brokerFetch<RoadmapUpsertResponse>("/roadmap/upsert", {
           id,
           by: identity.peerId,
           ...proof,
@@ -410,7 +410,7 @@ export async function callRoadmapTool(
               item,
               args: a,
               domain: ROADMAP_UPDATE_ACK_FIELDS,
-              holderInstanceToken: identity.instanceToken,
+              heldByYou: held_by_you,
             }),
           }],
         };

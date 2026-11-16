@@ -40,7 +40,6 @@ function item(patch: Partial<RoadmapItem> = {}): RoadmapItem {
     locked_by: "agent-a",
     locked_at: "2026-09-01T08:30:00.000Z",
     locked_group: "default",
-    locked_by_token: null,
     inactive: false,
     lock_parked_at: null,
     lock_parked_by: null,

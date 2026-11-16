@@ -4,21 +4,25 @@
 // in_progress, and the stale-lock sweep (TTL + owner gone).
 
 import { test, expect, beforeAll, afterAll } from "bun:test";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   FIXTURE_OPERATOR,
   FIXTURE_OPERATOR_ID,
   startBroker,
   stopBroker,
+  get,
   post,
   livePid,
+  discoverRoadmapRoutes,
   type TestBroker,
   deckAuthored,
   openBrokerDb,
 } from "./_helper.ts";
 import { ROADMAP_IMPORT_COLUMNS, findUncoveredRoadmapColumns, type RoadmapItem } from "../shared/types.ts";
 import { buildAuthProof } from "../shared/approval.ts";
+import { scrubEnv } from "./_scrub-env.ts";
 
 let broker: TestBroker;
 
@@ -32,7 +36,7 @@ afterAll(async () => {
 
 const PK = "github.com/vocsap/lock-repo";
 
-type UpsertRes = { item: RoadmapItem };
+type UpsertRes = { item: RoadmapItem; held_by_you?: boolean };
 
 async function add(fields: Record<string, unknown>): Promise<RoadmapItem> {
   const res = await post<UpsertRes>(`${broker.url}/roadmap/upsert`, {
@@ -674,7 +678,9 @@ test("card e344fa79: rowToRoadmapItem's response covers every roadmap_items colu
   // the operator DOES see (sync_state, lock_scope, lock_contested_by) are
   // absent from this list precisely because they must be emitted, and so is
   // content_rev: the Deck Save sends it back as its compare-and-swap revision.
+  // locked_by_token is the odd one out: a credential, never a sync field.
   const INTERNAL_ONLY_COLUMNS = [
+    "locked_by_token",
     "rev",
     "sync_base_rev",
     "sync_base",
@@ -1122,7 +1128,8 @@ test("force:true steal by a proven peer in the SAME group still succeeds and sta
   expect(forced.status).toBe(200);
   expect(forced.body.item.locked_by).toBe(teammate.body.peer_id);
   expect(forced.body.item.locked_group).toBe(groupId);
-  expect(forced.body.item.locked_by_token).toBe(teammate.body.instance_token);
+  expect(heldLockColumns(forced.body.item.id).locked_by_token).toBe(teammate.body.instance_token);
+  expect(forced.body.held_by_you).toBe(true);
 });
 
 // A signed operator is not a peer and carries no group to compare against
@@ -1521,7 +1528,7 @@ test("release:true + locked:true from a same-group teammate is a reprise: re-sta
     title: "locked by its owner, about to be reclaimed by a same-group successor",
     status: "in_progress",
   });
-  expect(item.body.item.locked_by_token).toBe(owner.body.instance_token);
+  expect(heldLockColumns(item.body.item.id).locked_by_token).toBe(owner.body.instance_token);
 
   const reprise = await post<UpsertRes & { error?: string }>(`${broker.url}/roadmap/upsert`, {
     id: item.body.item.id,
@@ -1534,7 +1541,8 @@ test("release:true + locked:true from a same-group teammate is a reprise: re-sta
   expect(reprise.body.item.locked).toBe(true);
   expect(reprise.body.item.locked_by).toBe(successor.body.peer_id);
   expect(reprise.body.item.locked_group).toBe(groupId);
-  expect(reprise.body.item.locked_by_token).toBe(successor.body.instance_token);
+  expect(heldLockColumns(item.body.item.id).locked_by_token).toBe(successor.body.instance_token);
+  expect(reprise.body.held_by_you).toBe(true);
 
   // The loud 409 that makes this safe: a bare context edit stays open to
   // everyone by design (guard fires on status/lock moves only), so the
@@ -1637,7 +1645,7 @@ test("card 4441e883 (Trou A1): a proven author's claim stamps locked_by_token = 
   expect(reg.status).toBe(200);
 
   const created = await add({ title: "A1: claimed via a proven author" });
-  expect(created.locked_by_token).toBeNull(); // unlocked, no claim yet
+  expect(heldLockColumns(created.id).locked_by_token).toBeNull();
 
   const claim = await post<UpsertRes>(`${broker.url}/roadmap/upsert`, {
     id: created.id,
@@ -1648,10 +1656,8 @@ test("card 4441e883 (Trou A1): a proven author's claim stamps locked_by_token = 
   expect(claim.status).toBe(200);
   expect(claim.body.item.locked).toBe(true);
   expect(claim.body.item.locked_by).toBe(reg.body.peer_id);
-  // THE ASSERTION THAT MATTERS: the response's own token, not a guess derived
-  // from `by` -- resolveLockedByToken's whole reason to exist (RoadmapItem.
-  // locked_by_token's doc comment: "LE BACKFILL NE DEVINE JAMAIS").
-  expect(claim.body.item.locked_by_token).toBe(reg.body.instance_token);
+  expect(heldLockColumns(created.id).locked_by_token).toBe(reg.body.instance_token);
+  expect(claim.body.held_by_you).toBe(true);
 });
 
 test("card 4441e883 (Trou A2, the negative control that carries the weight): an ordinary third-party write on an already-locked card preserves the true owner's proven token, never overwrites or nulls it", async () => {
@@ -1675,7 +1681,7 @@ test("card 4441e883 (Trou A2, the negative control that carries the weight): an 
     status: "in_progress",
   });
   expect(item.body.item.locked).toBe(true);
-  expect(item.body.item.locked_by_token).toBe(owner.body.instance_token);
+  expect(heldLockColumns(item.body.item.id).locked_by_token).toBe(owner.body.instance_token);
 
   // Neither `status` nor `locked` -- an ORDINARY write, exactly the shape the
   // sibling locked_group test above uses. Must not reassign locked_by_token
@@ -1689,8 +1695,161 @@ test("card 4441e883 (Trou A2, the negative control that carries the weight): an 
   expect(saved.status).toBe(200);
   expect(saved.body.item.locked).toBe(true);
   expect(saved.body.item.locked_by).toBe(owner.body.peer_id);
-  expect(saved.body.item.locked_by_token).toBe(owner.body.instance_token);
-  expect(saved.body.item.locked_by_token).not.toBe(thirdParty.body.instance_token);
+  expect(heldLockColumns(item.body.item.id).locked_by_token).toBe(owner.body.instance_token);
+  expect(saved.body.held_by_you).toBe(false);
+  expect(JSON.stringify(saved.body)).not.toContain(owner.body.instance_token);
+
+  const ownersNextWrite = await post<UpsertRes>(`${broker.url}/roadmap/upsert`, {
+    id: item.body.item.id,
+    by: owner.body.peer_id,
+    instance_token: owner.body.instance_token,
+    context: "the owner writes again after the third party edit",
+  });
+  expect(ownersNextWrite.body.held_by_you).toBe(true);
+});
+
+async function registerPeer(tag: string, groupId: string): Promise<{ instance_token: string; peer_id: string }> {
+  const reg = await post<{ instance_token: string; peer_id: string }>(`${broker.url}/register`, {
+    pid: livePid(), cwd: `/tmp/${tag}`, git_root: null, tty: null,
+    summary: "", host: `h-${tag}`, client_pid: livePid(), claude_cli_pid: 1,
+    project_key: PK, group_id: groupId, group_secret_hash: null,
+  });
+  expect(reg.status).toBe(200);
+  return reg.body;
+}
+
+test("the upsert response tells a proven holder it holds the work-lock, and tells anyone else or an unproven writer it does not", async () => {
+  const holder = await registerPeer("held-by-you-holder", "held-by-you-group-a");
+  const other = await registerPeer("held-by-you-other", "held-by-you-group-b");
+
+  const claimed = await post<UpsertRes>(`${broker.url}/roadmap/upsert`, {
+    project_key: PK,
+    by: holder.peer_id,
+    instance_token: holder.instance_token,
+    title: "held_by_you: claimed by a proven holder",
+    status: "in_progress",
+  });
+  expect(claimed.body.held_by_you).toBe(true);
+
+  const othersWrite = await post<UpsertRes>(`${broker.url}/roadmap/upsert`, {
+    id: claimed.body.item.id,
+    by: other.peer_id,
+    instance_token: other.instance_token,
+    context: "an ordinary edit from a peer that does not hold the lock",
+  });
+  expect(othersWrite.status).toBe(200);
+  expect(othersWrite.body.item.locked).toBe(true);
+  expect(othersWrite.body.held_by_you).toBe(false);
+
+  const holdersNextWrite = await post<UpsertRes>(`${broker.url}/roadmap/upsert`, {
+    id: claimed.body.item.id,
+    by: holder.peer_id,
+    instance_token: holder.instance_token,
+    context: "the holder writes again after a third party edited the card",
+  });
+  expect(holdersNextWrite.body.held_by_you).toBe(true);
+
+  const unprovenClaim = await post<UpsertRes>(`${broker.url}/roadmap/upsert`, {
+    project_key: PK,
+    by: "unproven-claimant",
+    title: "held_by_you: locked by a writer with no instance_token",
+    status: "in_progress",
+  });
+  expect(unprovenClaim.body.item.locked).toBe(true);
+  expect(unprovenClaim.body.held_by_you).toBe(false);
+});
+
+// A route in neither table below, and not probed by the guard, is unclassified: a new route defaults to "must be probed".
+const ROUTES_WITHOUT_CARD: Record<string, string> = {
+  "/roadmap/context-document/get": "returns one context document, no card",
+  "/roadmap/context-document/list": "returns a document count or documents, no card",
+  "/roadmap/context-document/sync/pull": "returns documents to a replica, no card",
+  "/roadmap/context-document/sync/push": "returns one document, no card",
+  "/roadmap/dispatch-atomic": "returns id, title and kind per card, after the write released the lock",
+  "/roadmap/import": "returns the imported count and the skipped ids",
+  "/roadmap/lock-park": "returns peer ids",
+  "/roadmap/lock-release": "returns peer ids",
+  "/roadmap/sync/status": "returns counters",
+};
+
+// Served only by an upstream or a replica broker, which this file's broker is not.
+const ROUTES_PROBED_ELSEWHERE: Record<string, string> = {
+  "/roadmap/sync/pull": "tests/broker-roadmap-sync-routes.test.ts compares the stored token value to the pulled page",
+  "/roadmap/sync/push": "tests/broker-roadmap-sync-routes.test.ts compares it to the refused push reply",
+  "/roadmap/sync/lock": "same rowToSyncRow projection as pull and push",
+  "/roadmap/sync/conflicts": "tests/broker-roadmap-replica.test.ts compares it to both sides of a conflict",
+  "/roadmap/sync/resolve": "tests/broker-roadmap-replica.test.ts compares it to the resolve reply",
+};
+
+test("a lock holder's instance_token value appears in no roadmap response, and every roadmap route is probed or classified", async () => {
+  const LEAK_PK = "github.com/vocsap/token-leak-repo";
+  const groupId = "token-leak-group";
+  const holder = await registerPeer("token-leak-holder", groupId);
+  const teammate = await registerPeer("token-leak-teammate", groupId);
+  const stranger = await registerPeer("token-leak-stranger", "token-leak-other-group");
+  const proof = (peer: { instance_token: string; peer_id: string }) => ({ by: peer.peer_id, instance_token: peer.instance_token });
+
+  const seen: { route: string; text: string; rendersCard: boolean }[] = [];
+  const call = async (route: string, body: unknown, cardId: string | null): Promise<UpsertRes> => {
+    const res = await post<UpsertRes>(`${broker.url}${route}`, body);
+    const text = JSON.stringify(res.body);
+    seen.push({ route, text, rendersCard: res.status === 200 && cardId !== null && text.includes(cardId) });
+    return res.body;
+  };
+
+  const queued = await call("/roadmap/upsert", {
+    project_key: LEAK_PK, ...proof(holder), title: "token leak: locked and queued", status: "in_progress", queue: 1,
+  }, null);
+  const spare = await call("/roadmap/upsert", {
+    project_key: LEAK_PK, ...proof(holder), title: "token leak: locked, to be archived", status: "in_progress",
+  }, null);
+  const documented = await call("/roadmap/upsert", {
+    project_key: LEAK_PK, ...proof(holder), title: "token leak: locked, to be deported", status: "in_progress", context: "a context to deport",
+  }, null);
+  expect(heldLockColumns(queued.item.id).locked_by_token, "the premise: the stored column holds the token").toBe(holder.instance_token);
+
+  await call("/roadmap/list", { project_key: LEAK_PK, include_archived: true }, queued.item.id);
+  await call("/roadmap/upsert", { id: queued.item.id, ...proof(stranger), context: "an ordinary edit by a stranger" }, queued.item.id);
+  await call("/roadmap/append-context", { id: queued.item.id, ...proof(stranger), text: "appended by a stranger" }, queued.item.id);
+  await call("/roadmap/context-document/deport", { id: documented.item.id, project_key: LEAK_PK, ...proof(holder), targets: ["body"] }, documented.item.id);
+  await call("/roadmap/reorder", { project_key: LEAK_PK, ...proof(teammate), ids: [queued.item.id], waves: [[queued.item.id]] }, queued.item.id);
+  await call("/roadmap/archive", { id: queued.item.id, ...proof(stranger) }, queued.item.id);
+  await call("/roadmap/archive", { id: spare.item.id, ...proof(holder) }, spare.item.id);
+
+  const exported = await get(`${broker.url}/roadmap/export?project_key=${encodeURIComponent(LEAK_PK)}`);
+  const exportedText = JSON.stringify(exported.body);
+  seen.push({ route: "/roadmap/export", text: exportedText, rendersCard: exported.status === 200 && exportedText.includes(queued.item.id) });
+
+  const cfgDir = mkdtempSync(join(tmpdir(), "cp-leak-cfg-"));
+  try {
+    const cli = Bun.spawn(["bun", join(import.meta.dir, "..", "cli.ts"), "roadmap-export", LEAK_PK], {
+      env: scrubEnv(cfgDir, { CLAUDE_PEERS_BROKER_URL: broker.url }),
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [out, err, code] = await Promise.all([new Response(cli.stdout).text(), new Response(cli.stderr).text(), cli.exited]);
+    expect(code, err).toBe(0);
+    expect(out, "the CLI export must name the locked card, or its leak check proves nothing").toContain(queued.item.id);
+    seen.push({ route: "cli roadmap-export", text: out, rendersCard: false });
+  } finally {
+    rmSync(cfgDir, { recursive: true, force: true });
+  }
+
+  const discovered = discoverRoadmapRoutes(readFileSync(join(import.meta.dir, "..", "broker.ts"), "utf8"));
+  const probed = new Set(seen.filter((s) => s.rendersCard).map((s) => s.route));
+  const classified = { ...ROUTES_WITHOUT_CARD, ...ROUTES_PROBED_ELSEWHERE };
+  expect(
+    discovered.filter((route) => !probed.has(route) && !(route in classified)),
+    "roadmap routes neither probed here nor classified"
+  ).toEqual([]);
+  expect(
+    Object.keys(classified).filter((route) => !discovered.includes(route) || probed.has(route)),
+    "classified routes that no longer exist, or that are probed after all"
+  ).toEqual([]);
+  expect(Object.entries(classified).filter(([, why]) => why.trim() === ""), "a classification without a reason").toEqual([]);
+
+  const leaking = seen.filter((s) => s.text.includes(holder.instance_token)).map((s) => s.route);
+  expect(leaking, "responses carrying the holder's instance_token").toEqual([]);
 });
 
 test("a lock sweep period outside 1..86400 or not an integer falls back to the default, and says so", async () => {

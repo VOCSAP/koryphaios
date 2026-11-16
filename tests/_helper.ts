@@ -544,3 +544,17 @@ export async function awaitCoreRegistered(
   const refusal = reply.error?.message ?? (reply.result?.isError ? reply.result.content?.[0]?.text : undefined);
   if (refusal !== undefined) throw new Error(`the core peers session did not register before the companion started: ${refusal}`);
 }
+
+/**
+ * Every "/roadmap/..." route literal the broker source mentions. The tail is
+ * everything up to the closing quote, not `[a-z-]+`: a shape the regex cannot
+ * express is invisible to every assertion built on it, and over-matching fails
+ * closed.
+ */
+export function discoverRoadmapRoutes(source: string): string[] {
+  const found = new Set<string>();
+  for (const m of source.matchAll(/["'`](\/roadmap\/[^"'`\s]+)["'`]/g)) {
+    found.add(m[1]!);
+  }
+  return [...found].sort();
+}

@@ -676,6 +676,7 @@ test("a pulled row never carries locked_by_token or operator_id, which the store
     "a replica never receives a dispatch state tag, local to the broker that computed it",
     "dispatch_state_tag" in row,
   ]).toEqual(["a replica never receives a dispatch state tag, local to the broker that computed it", false]);
+  expect(JSON.stringify(page.body), "no field of the pulled page holds the stored token's value").not.toContain(stored.locked_by_token!);
   // The rest of the lock state does travel: the point is the credential, not the lock.
   expect(row.locked).toBe(true);
   expect(row.locked_by).toBe(reg.body.peer_id);
@@ -868,6 +869,33 @@ test("push is refused on a card the upstream work-locks for a holder this replic
     heldRow.content_rev,
     true,
   ]);
+  expect(
+    JSON.stringify([refused.body, afterRefusal]),
+    "neither the refused push reply nor the pulled row holds the holder's token value"
+  ).not.toContain(heldToken!);
+
+  const contested = await post<RoadmapSyncLockClaimResponse>(`${b.url}/roadmap/sync/lock`, {
+    replica_id: R1,
+    id: held.body.item.id,
+    action: "claim",
+    owner: { peer_id: "agent-remote", group_id: "default" },
+  });
+  const foreignRelease = await post<RoadmapSyncLockReleaseResponse>(`${b.url}/roadmap/sync/lock`, {
+    replica_id: R1,
+    id: held.body.item.id,
+    action: "release",
+    owner: { peer_id: "agent-remote", group_id: "default" },
+  });
+  expect(heldToken, "the premise: the row holds a token to look for").toBeTruthy();
+  expect([contested.status, contested.body.item.id, foreignRelease.body.item?.id], "both replies render the held card").toEqual([
+    409,
+    held.body.item.id,
+    held.body.item.id,
+  ]);
+  expect(
+    JSON.stringify([contested.body, foreignRelease.body]),
+    "neither sync/lock reply holds the holder's token value"
+  ).not.toContain(heldToken!);
 
   // The lock THIS replica relays is not somebody else's: its own agent's
   // edits keep flowing while it holds the card.
