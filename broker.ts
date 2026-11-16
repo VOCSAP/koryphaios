@@ -45,9 +45,14 @@ import {
   type ContextDepositResponse,
 } from "./shared/context-buffer.ts";
 import { ContextRegistry } from "./shared/context-registry.ts";
-import { validateTileTelemetryRequest } from "./shared/peer-telemetry.ts";
+import {
+  messageContextFromTelemetry,
+  messageContextWireFields,
+  validateMessageContextPair,
+  validateTileTelemetryRequest,
+} from "./shared/peer-telemetry.ts";
 import { createPeerTelemetryImportCache, createPeerTelemetryRegistry } from "./shared/peer-telemetry-registry.ts";
-import type { PeerTelemetrySnapshot } from "./shared/peer-telemetry.ts";
+import type { MessageContextSnapshot, MessageContextSource, PeerTelemetrySnapshot } from "./shared/peer-telemetry.ts";
 import { guardedInterval as guardInterval } from "./shared/guarded-interval.ts";
 import { measureWriterGeneration } from "./shared/process-generation.ts";
 import {
@@ -851,6 +856,16 @@ try {
 } catch (e) {
   const msg = e instanceof Error ? e.message : String(e);
   if (!msg.includes("duplicate column name")) log.error(`migration: ${msg}`);
+}
+
+// Nullable, no DEFAULT and no backfill: 0 is a real reading, unknown must stay NULL.
+for (const column of ["from_context_pct REAL", "from_context_observed_at INTEGER"]) {
+  try {
+    db.run(`ALTER TABLE messages ADD COLUMN ${column}`);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (!msg.includes("duplicate column name")) log.error(`migration: ${msg}`);
+  }
 }
 
 db.run(`
@@ -2510,6 +2525,10 @@ const insertAgentMessage = db.prepare(`
   VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, 'agent', 1)
 `);
 
+const setMessageContext = db.prepare(
+  `UPDATE messages SET from_context_pct = ?, from_context_observed_at = ? WHERE id = ?`
+);
+
 const MESSAGE_ENTRY_EXCERPT_MAX = 280;
 
 const insertMessageEntry = db.prepare(`
@@ -2727,7 +2746,8 @@ function recordMessage(
   text: string,
   sentAt: string,
   taskId: string | null = null,
-  provenance: MessageProvenance | null = null
+  provenance: MessageProvenance | null = null,
+  context: MessageContextSnapshot | null
 ): number {
   const result =
     provenance !== null
@@ -2748,6 +2768,7 @@ function recordMessage(
         ? insertMessage.run(fromToken, toToken, groupId, text, sentAt)
         : insertTaskMessage.run(fromToken, toToken, groupId, text, sentAt, taskId);
   const messageId = Number(result.lastInsertRowid);
+  if (context !== null) setMessageContext.run(context.contextPct, context.observedAt, messageId);
   if (provenance !== null) {
     insertMessageEntry.run(
       `m_${randomUUID()}`,
@@ -3989,7 +4010,13 @@ type UntrackedSend = { policy: UntrackedReplyPolicy; expectsReply: boolean };
 // The decision and the insertion share one transaction: two concurrent sends cannot both see the
 // same history. Only ids, tokens and the group are compared.
 const recordUnlessUnanswered = db.transaction(
-  (sender: MessageSender, target: MessageTarget, text: string, sentAt: string): number | null => {
+  (
+    sender: MessageSender,
+    target: MessageTarget,
+    text: string,
+    sentAt: string,
+    context: MessageContextSnapshot | null
+  ): number | null => {
     const answered = db.query(
       `SELECT 1 FROM messages
         WHERE group_id = ? AND from_token = ? AND to_token = ?
@@ -4000,7 +4027,9 @@ const recordUnlessUnanswered = db.transaction(
       sender.group_id, target.instance_token, sender.instance_token,
       sender.group_id, sender.instance_token, target.instance_token
     );
-    return answered ? recordMessage(sender.instance_token, target.instance_token, sender.group_id, text, sentAt) : null;
+    return answered
+      ? recordMessage(sender.instance_token, target.instance_token, sender.group_id, text, sentAt, null, null, context)
+      : null;
   }
 );
 
@@ -4067,8 +4096,9 @@ async function sendOrdinaryMessage(
   targetId: string,
   text: string,
   taskId: string | null = null,
-  untracked?: UntrackedSend,
-  provenance: MessageProvenance | null = null
+  untracked: UntrackedSend | undefined,
+  provenance: MessageProvenance | null,
+  context: MessageContextSnapshot | null
 ): Promise<SendMessageResponse> {
   if (text.length > MESSAGE_TEXT_MAX) {
     return { ok: false, error: `text must be a string of at most ${MESSAGE_TEXT_MAX} characters` };
@@ -4106,7 +4136,9 @@ async function sendOrdinaryMessage(
   const withTracking = (response: SendMessageResponse): SendMessageResponse =>
     response.ok && unavailable !== undefined ? { ...response, tracking_unavailable: unavailable } : response;
   if (BROKER_MODE === "replica" && target.via !== null) {
-    return withTracking(await relayOutboundMessage(sender, { ...target, upstream_peer_id: target.upstream_peer_id ?? target.peer_id }, text));
+    return withTracking(
+      await relayOutboundMessage(sender, { ...target, upstream_peer_id: target.upstream_peer_id ?? target.peer_id }, text, context)
+    );
   }
   const sentAt = new Date().toISOString();
   const refusable =
@@ -4116,8 +4148,8 @@ async function sendOrdinaryMessage(
     target.instance_token !== sender.instance_token &&
     unavailable === undefined;
   const messageId = refusable
-    ? recordUnlessUnanswered(sender, target, text, sentAt)
-    : recordMessageTx(sender.instance_token, target.instance_token, sender.group_id, text, sentAt, taskId, provenance);
+    ? recordUnlessUnanswered(sender, target, text, sentAt, context)
+    : recordMessageTx(sender.instance_token, target.instance_token, sender.group_id, text, sentAt, taskId, provenance, context);
   if (messageId === null) return { ok: false, error: UNTRACKED_REPLY_REFUSAL };
   pushPeerMessage(target.instance_token, messageId, sender, text, sentAt);
   return withTracking(taskId === null ? { ok: true, message_id: messageId } : { ok: true });
@@ -4144,7 +4176,15 @@ function messageForTask(
 }
 
 const createDelegatedTaskTx = db.transaction(
-  (sender: MessageSender, target: MessageTarget, deadlineSec: number, label: string, text: string, nowMs: number) => {
+  (
+    sender: MessageSender,
+    target: MessageTarget,
+    deadlineSec: number,
+    label: string,
+    text: string,
+    nowMs: number,
+    context: MessageContextSnapshot | null
+  ) => {
     const open = db.query(
       "SELECT COUNT(*) AS n FROM delegated_tasks WHERE group_id = ? AND delegator_token = ? AND status <> 'closed'"
     ).get(sender.group_id, sender.instance_token) as { n: number };
@@ -4175,13 +4215,18 @@ const createDelegatedTaskTx = db.transaction(
         now,
       ]
     );
-    const messageId = recordMessage(sender.instance_token, target.instance_token, sender.group_id, text, now, taskId);
+    const messageId = recordMessage(sender.instance_token, target.instance_token, sender.group_id, text, now, taskId, null, context);
     return { row: taskRow(taskId, sender.group_id)!, messageId, sentAt: now };
   }
 );
 
 const closeDelegatedTaskTx = db.transaction(
-  (row: DelegatedTaskRow, sender: MessageSender, report: { target: MessageTarget; text: string } | null) => {
+  (
+    row: DelegatedTaskRow,
+    sender: MessageSender,
+    report: { target: MessageTarget; text: string } | null,
+    context: MessageContextSnapshot | null
+  ) => {
     if (row.status === "closed") return { row, messageId: null, sentAt: null };
     const now = new Date().toISOString();
     db.run(
@@ -4192,14 +4237,22 @@ const closeDelegatedTaskTx = db.transaction(
       [now, now, sender.instance_token, row.task_id, row.group_id]
     );
     const messageId = report
-      ? recordMessage(sender.instance_token, report.target.instance_token, sender.group_id, report.text, now, row.task_id)
+      ? recordMessage(sender.instance_token, report.target.instance_token, sender.group_id, report.text, now, row.task_id, null, context)
       : null;
     return { row: taskRow(row.task_id, row.group_id)!, messageId, sentAt: report ? now : null };
   }
 );
 
 const rearmDelegatedTaskTx = db.transaction(
-  (row: DelegatedTaskRow, sender: MessageSender, target: MessageTarget, text: string, deadlineSec: number, nowMs: number) => {
+  (
+    row: DelegatedTaskRow,
+    sender: MessageSender,
+    target: MessageTarget,
+    text: string,
+    deadlineSec: number,
+    nowMs: number,
+    context: MessageContextSnapshot | null
+  ) => {
     const now = new Date(nowMs).toISOString();
     const result =
       row.status === "armed"
@@ -4217,18 +4270,26 @@ const rearmDelegatedTaskTx = db.transaction(
             [nowMs + deadlineSec * 1000, now, row.task_id, row.group_id, nowMs]
           );
     if (result.changes !== 1) return null;
-    const messageId = recordMessage(sender.instance_token, target.instance_token, sender.group_id, text, now, row.task_id);
+    const messageId = recordMessage(sender.instance_token, target.instance_token, sender.group_id, text, now, row.task_id, null, context);
     return { row: taskRow(row.task_id, row.group_id)!, messageId, sentAt: now };
   }
 );
 
-async function handleSendMessage(body: SendMessageRequest): Promise<SendMessageResponse & { status?: number }> {
+async function handleSendMessage(
+  body: SendMessageRequest,
+  source: MessageContextSource = { kind: "local" }
+): Promise<SendMessageResponse & { status?: number }> {
   if (isSentinelInstanceToken(body.from_token)) {
     log.warn(`send-message: refused sentinel-shaped from_token`, { from_token: body.from_token.slice(0, 64) });
     return { ok: false, error: "from_token cannot be a reserved sentinel identity" };
   }
   const sender = senderForDelegation(body.from_token);
   if (!sender) return { ok: false, error: "Sender not registered" };
+  // Frozen before any await: the registry is directory state and moves on while this send runs.
+  const context =
+    source.kind === "local"
+      ? messageContextFromTelemetry(peerTelemetryRegistry.telemetryFor(sender.instance_token))
+      : source.snapshot;
   if (body.untracked_reply_policy !== undefined && body.untracked_reply_policy !== "lead" && body.untracked_reply_policy !== "warn") {
     return { ok: false, error: "untracked_reply_policy must be 'lead' or 'warn'" };
   }
@@ -4249,9 +4310,9 @@ async function handleSendMessage(body: SendMessageRequest): Promise<SendMessageR
     if (body.to_peer_id === OPERATOR_PEER_ID) {
       const admitted = admitOperatorDeposit(body, sender);
       if ("error" in admitted) return { ok: false, error: admitted.error, status: admitted.status };
-      return sendOrdinaryMessage(sender, body.to_peer_id, body.text, null, untracked, admitted.provenance);
+      return sendOrdinaryMessage(sender, body.to_peer_id, body.text, null, untracked, admitted.provenance, context);
     }
-    return sendOrdinaryMessage(sender, body.to_peer_id, body.text, null, untracked);
+    return sendOrdinaryMessage(sender, body.to_peer_id, body.text, null, untracked, null, context);
   }
   if (hasTaskAction && !isDelegationTaskAction(body.task_action)) {
     return { ok: false, error: "task_action must be 'close'" };
@@ -4288,7 +4349,7 @@ async function handleSendMessage(body: SendMessageRequest): Promise<SendMessageR
     if (target.instance_token === sender.instance_token || sender.via !== null || target.via !== null) {
       return { ok: false, error: "Tracked tasks require two distinct local peers" };
     }
-    const created = createDelegatedTaskTx(sender, target, deadline.value, label.value, body.text, Date.now());
+    const created = createDelegatedTaskTx(sender, target, deadline.value, label.value, body.text, Date.now(), context);
     if (!created) return { ok: false, error: `You already have ${MAX_OPEN_DELEGATED_TASKS} open delegated tasks in this group` };
     pushPeerMessage(target.instance_token, created.messageId, sender, body.text, created.sentAt);
     return { ok: true, task: toDelegatedTask(created.row) };
@@ -4304,7 +4365,7 @@ async function handleSendMessage(body: SendMessageRequest): Promise<SendMessageR
     if (task.status === "closed") return { ok: true, task: toDelegatedTask(task) };
     const report = body.text === undefined && body.to_peer_id === undefined ? null : messageForTask(body, task, sender);
     if (report && "error" in report) return { ok: false, error: report.error };
-    const closed = closeDelegatedTaskTx(task, sender, report);
+    const closed = closeDelegatedTaskTx(task, sender, report, context);
     if (report && closed.messageId !== null && closed.sentAt !== null) {
       pushPeerMessage(report.target.instance_token, closed.messageId, sender, report.text, closed.sentAt);
     }
@@ -4325,7 +4386,7 @@ async function handleSendMessage(body: SendMessageRequest): Promise<SendMessageR
     }
     const report = messageForTask(body, task, sender);
     if ("error" in report) return { ok: false, error: report.error };
-    const rearmed = rearmDelegatedTaskTx(task, sender, report.target, report.text, deadline.value, nowMs);
+    const rearmed = rearmDelegatedTaskTx(task, sender, report.target, report.text, deadline.value, nowMs, context);
     if (!rearmed) return { ok: false, error: "Task cannot be rearmed in its current state" };
     pushPeerMessage(report.target.instance_token, rearmed.messageId, sender, report.text, rearmed.sentAt);
     return { ok: true, task: toDelegatedTask(rearmed.row) };
@@ -4333,7 +4394,7 @@ async function handleSendMessage(body: SendMessageRequest): Promise<SendMessageR
 
   const report = messageForTask(body, task, sender);
   if ("error" in report) return { ok: false, error: report.error };
-  return sendOrdinaryMessage(sender, report.target.peer_id, report.text, task.task_id);
+  return sendOrdinaryMessage(sender, report.target.peer_id, report.text, task.task_id, undefined, null, context);
 }
 
 function handleDelegationsList(body: DelegationsListRequest): TaskResult<DelegationsListResponse> {
@@ -4361,7 +4422,7 @@ function handleDelegationsClose(body: DelegationsCloseRequest): TaskResult<Deleg
   if (!isDelegationTaskId(body.task_id)) return { error: "task_id must be a UUID", status: 400 };
   const task = taskForParticipant(body.task_id, sender);
   if ("error" in task) return task;
-  return { task: toDelegatedTask(closeDelegatedTaskTx(task, sender, null).row) };
+  return { task: toDelegatedTask(closeDelegatedTaskTx(task, sender, null, null).row) };
 }
 
 type AttachedSourceRow = {
@@ -4759,6 +4820,17 @@ function flushContextResumesForToken(instanceToken: InstanceToken): void {
 /** Upper bound of a message body, on the local route and the federation relay alike. */
 const MESSAGE_TEXT_MAX = 64 * 1024;
 
+function persistedContextFields(row: { from_context_pct: number | null; from_context_observed_at: number | null }) {
+  return messageContextWireFields(validateMessageContextPair(row.from_context_pct, row.from_context_observed_at));
+}
+
+function messageContextFields(messageId: number) {
+  const row = db
+    .query("SELECT from_context_pct, from_context_observed_at FROM messages WHERE id = ?")
+    .get(messageId) as { from_context_pct: number | null; from_context_observed_at: number | null } | null;
+  return row ? persistedContextFields(row) : {};
+}
+
 /** Fire-and-forget WS push of a peer-to-peer message to a connected recipient. */
 function pushPeerMessage(
   token: InstanceToken,
@@ -4782,6 +4854,7 @@ function pushPeerMessage(
         text,
         sent_at: sentAt,
         ...(delegationContext ? { delegation_context: delegationContext } : {}),
+        ...messageContextFields(messageId),
       })
     );
   } catch (e) {
@@ -4913,6 +4986,7 @@ function flushPendingForToken(token: InstanceToken, group_id: string): void {
           text: row.text,
           sent_at: row.sent_at,
           ...(delegationContext ? { delegation_context: delegationContext } : {}),
+          ...persistedContextFields(row),
         })
       );
       // Do NOT markDelivered: same rationale as handleSendMessage.
@@ -4936,6 +5010,7 @@ function toDeliveredMessage(
     sent_at: r.sent_at,
     delivered: Boolean(r.delivered),
     ...(delegationContext ? { delegation_context: delegationContext } : {}),
+    ...persistedContextFields(r),
   };
 }
 
@@ -7763,7 +7838,8 @@ const federationSyncTx = db.transaction(
       // inbox are local to each broker.
       const waiting = db
         .query(
-          `SELECT m.id, m.from_token, m.group_id, m.text, m.sent_at, p.relay_ref AS to_ref
+          `SELECT m.id, m.from_token, m.group_id, m.text, m.sent_at, m.from_context_pct, m.from_context_observed_at,
+                  p.relay_ref AS to_ref
              FROM messages m JOIN peers p ON p.instance_token = m.to_token
             WHERE m.delivered = 0 AND p.relay_id = ? AND p.status = 'active'
               AND p.group_id IN (${groupsIn})
@@ -7777,6 +7853,8 @@ const federationSyncTx = db.transaction(
         group_id: GroupId;
         text: string;
         sent_at: string;
+        from_context_pct: number | null;
+        from_context_observed_at: number | null;
         to_ref: string;
       }[];
       messages = waiting.map((m) => ({
@@ -7786,6 +7864,7 @@ const federationSyncTx = db.transaction(
         group_id: m.group_id,
         text: m.text,
         sent_at: m.sent_at,
+        ...persistedContextFields(m),
       }));
     }
     return {
@@ -7794,6 +7873,24 @@ const federationSyncTx = db.transaction(
     };
   }
 );
+
+// One warning per door and remote broker: the drop is identical whatever the bad value, so more lines add only noise.
+function federatedContextPair(
+  wire: { from_context_pct?: unknown; from_context_observed_at?: unknown },
+  door: "send" | "pull",
+  scope: string
+): MessageContextSnapshot | null {
+  if (wire.from_context_pct === undefined && wire.from_context_observed_at === undefined) return null;
+  const pair = validateMessageContextPair(wire.from_context_pct, wire.from_context_observed_at);
+  if (!pair) {
+    federationWarnOnce(
+      `context-pair:${door}:${scope.slice(0, 64)}`,
+      "federation: a message carried an invalid sender context pair, the pair was dropped and the message kept",
+      { door, pct_type: typeof wire.from_context_pct, observed_at_type: typeof wire.from_context_observed_at }
+    );
+  }
+  return pair;
+}
 
 /**
  * The sender is resolved as an OBJECT first -- the row relayed by this very
@@ -7824,7 +7921,10 @@ async function handleFederationSend(
     .query("SELECT instance_token FROM peers WHERE relay_id = ? AND relay_ref = ?")
     .get(replicaId, body.from_ref) as { instance_token: InstanceToken } | null;
   if (!sender) return { error: "from_ref is not a peer relayed by this replica", status: 404 };
-  return handleSendMessage({ from_token: sender.instance_token, to_peer_id: body.to_peer_id, text: body.text });
+  return handleSendMessage(
+    { from_token: sender.instance_token, to_peer_id: body.to_peer_id, text: body.text },
+    { kind: "federated", snapshot: federatedContextPair(body, "send", replicaId) }
+  );
 }
 
 /**
@@ -9991,10 +10091,21 @@ const applyFederationTx = db.transaction(
       // Keyed by the answering broker AND its id: after an upstream database
       // reset a reused id is a different message, inserted and acked anew.
       const federationId = `${upstreamId}:${m.id}`;
+      const context = federatedContextPair(m, "pull", upstreamId);
       const inserted = db.run(
-        `INSERT OR IGNORE INTO messages (from_token, to_token, group_id, text, sent_at, delivered, federation_id)
-         VALUES (?, ?, ?, ?, ?, 0, ?)`,
-        [from.instance_token, to.instance_token, m.group_id, m.text, sentAt, federationId]
+        `INSERT OR IGNORE INTO messages (from_token, to_token, group_id, text, sent_at, delivered, federation_id,
+           from_context_pct, from_context_observed_at)
+         VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?)`,
+        [
+          from.instance_token,
+          to.instance_token,
+          m.group_id,
+          m.text,
+          sentAt,
+          federationId,
+          context?.contextPct ?? null,
+          context?.observedAt ?? null,
+        ]
       );
       const held =
         inserted.changes > 0 ||
@@ -10015,6 +10126,8 @@ type QueuedRow = {
   group_id: GroupId;
   text: string;
   sent_at: string;
+  from_context_pct: number | null;
+  from_context_observed_at: number | null;
   mirror_peer_id: string;
   upstream_peer_id: string | null;
 };
@@ -10035,7 +10148,8 @@ const dropQueuedMessageTx = db.transaction((row: QueuedRow, text: string, now: s
 async function federationFlushQueue(): Promise<void> {
   const rows = db
     .query(
-      `SELECT m.id, m.from_token, m.group_id, m.text, m.sent_at, p.peer_id AS mirror_peer_id, p.upstream_peer_id
+      `SELECT m.id, m.from_token, m.group_id, m.text, m.sent_at, m.from_context_pct, m.from_context_observed_at,
+              p.peer_id AS mirror_peer_id, p.upstream_peer_id
          FROM messages m JOIN peers p ON p.instance_token = m.to_token
         WHERE m.delivered = 0 AND p.via IS NOT NULL
         ORDER BY m.id ASC`
@@ -10047,6 +10161,7 @@ async function federationFlushQueue(): Promise<void> {
       from_ref: relayRef(row.from_token),
       to_peer_id: row.upstream_peer_id ?? row.mirror_peer_id,
       text: row.text,
+      ...persistedContextFields(row),
     });
     if (res.status === 200 && res.body && res.body.ok) {
       markDelivered.run(row.id);
@@ -10236,7 +10351,8 @@ function federationAfterFailedPass(): void {
 async function relayOutboundMessage(
   sender: SenderMeta & { group_id: GroupId },
   target: { instance_token: InstanceToken; peer_id: string; upstream_peer_id: string },
-  text: string
+  text: string,
+  context: MessageContextSnapshot | null
 ): Promise<SendMessageResponse> {
   const sentAt = new Date().toISOString();
   if (federationUnsupported) return { ok: false, error: unfederatedPeerError(target.peer_id) };
@@ -10247,6 +10363,7 @@ async function relayOutboundMessage(
         from_ref: relayRef(sender.instance_token),
         to_peer_id: target.upstream_peer_id,
         text,
+        ...messageContextWireFields(context),
       });
       if (res.status === 200 && res.body && typeof res.body.ok === "boolean") {
         updateLastActivity.run(sentAt, sender.instance_token);
@@ -10270,7 +10387,7 @@ async function relayOutboundMessage(
       error: `Peer '${target.peer_id}' is unreachable: the upstream broker has been unreachable for longer than the ${FEDERATION_GRACE_SEC}s federation grace`,
     };
   }
-  recordMessageTx(sender.instance_token, target.instance_token, sender.group_id, text, sentAt);
+  recordMessageTx(sender.instance_token, target.instance_token, sender.group_id, text, sentAt, null, null, context);
   return { ok: true, queued: true, grace_left_sec: graceLeft };
 }
 
@@ -11207,7 +11324,10 @@ function deliverApprovalAnswer(row: ApprovalRow): void {
       row.reply_token as InstanceToken,
       row.reply_group as GroupId,
       text,
-      sentAt
+      sentAt,
+      null,
+      null,
+      null
     );
     const ws = wsPool.get(row.reply_token as InstanceToken);
     if (ws && ws.readyState === 1) {

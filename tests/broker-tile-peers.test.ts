@@ -658,6 +658,223 @@ describe("peer telemetry stays bound to one attested launch", () => {
     expect((await listedPeer(observer, a.peerId))?.telemetry, "tile A keeps its own sample").toEqual(mine);
     expect((await listedPeer(observer, b.peerId))?.telemetry, "tile B lists its own sample").toEqual(theirs);
   });
+
+  describe("a message carries the sender's context fill frozen at send time", () => {
+    const SAMPLE_A = { ...TELEMETRY, contextPct: 42, observedAt: 1_731_300_000_000 };
+    const SAMPLE_B = { ...TELEMETRY, contextPct: 77, observedAt: 1_731_300_060_000 };
+    const AT_A = { from_context_pct: SAMPLE_A.contextPct, from_context_observed_at: SAMPLE_A.observedAt };
+
+    type Wire = Record<string, unknown>;
+    type Recipient = { peer_id: string; instance_token: string };
+    const sockets: WebSocket[] = [];
+    afterAll(() => {
+      for (const ws of sockets) ws.close();
+    });
+
+    const contextOf = (m: Wire) => ({ from_context_pct: m.from_context_pct, from_context_observed_at: m.from_context_observed_at });
+
+    async function publish(tile: Tile, snapshot: Record<string, unknown>): Promise<void> {
+      expect((await telemetryCall(tile, "publish", { snapshot })).body).toEqual({ outcome: "updated" });
+    }
+
+    async function newRecipient(): Promise<Recipient> {
+      return register(`context-recipient-${++tileSeq}`);
+    }
+
+    async function connectSocket(token: string): Promise<Wire[]> {
+      const frames: Wire[] = [];
+      const ws = new WebSocket(broker.wsUrl);
+      sockets.push(ws);
+      ws.addEventListener("message", (ev) => frames.push(JSON.parse(String(ev.data)) as Wire));
+      await new Promise<void>((resolve, reject) => {
+        ws.addEventListener("open", () => {
+          ws.send(JSON.stringify({ type: "auth", instance_token: token }));
+          resolve();
+        });
+        ws.addEventListener("error", () => reject(new Error("ws error")));
+      });
+      return frames;
+    }
+
+    async function frameWith(frames: Wire[], text: string): Promise<Wire> {
+      return (await until(
+        () => frames.find((f) => f.type === "message" && f.text === text),
+        (f) => f !== undefined,
+        `a frame carrying ${text}`
+      ))!;
+    }
+
+    async function peeked(token: string, text: string): Promise<Wire> {
+      const res = await post<{ messages: Wire[] }>(`${broker.url}/peek-messages`, { instance_token: token });
+      const hit = res.body.messages.find((m) => m.text === text);
+      expect(hit, `peek lists ${text}`).toBeDefined();
+      return hit!;
+    }
+
+    async function sendFrom(tile: Tile, to: Recipient, extras: Record<string, unknown> = {}): Promise<{ text: string; ok: unknown; task?: { task_id: string } }> {
+      const text = `context-message-${++tileSeq}`;
+      const res = await post<{ ok?: boolean; task?: { task_id: string } }>(`${broker.url}/send-message`, {
+        from_token: tile.token,
+        to_peer_id: to.peer_id,
+        text,
+        ...extras,
+      });
+      expect(res.status).toBe(200);
+      return { text, ok: res.body.ok, task: res.body.task };
+    }
+
+    async function openTask(tile: Tile, to: Recipient): Promise<string> {
+      const created = await sendFrom(tile, to, { deadline_sec: 60, task_label: `context task ${tileSeq}` });
+      expect(created.task, "the setup task is created").toBeDefined();
+      return created.task!.task_id;
+    }
+
+    const scenarios: Array<[string, (tile: Tile, to: Recipient) => Promise<string>]> = [
+      ["an ordinary message", async (tile, to) => (await sendFrom(tile, to)).text],
+      [
+        "an ordinary message that the broker may refuse",
+        async (tile, to) => {
+          const answered = await post(`${broker.url}/send-message`, {
+            from_token: to.instance_token,
+            to_peer_id: tile.peerId,
+            text: `context-answer-${++tileSeq}`,
+          });
+          expect(answered.status).toBe(200);
+          const sent = await sendFrom(tile, to, { untracked_reply_policy: "lead", expects_reply: true });
+          expect(sent.ok, "the sender was answered, so the message is recorded").toBe(true);
+          return sent.text;
+        },
+      ],
+      ["a task creation", async (tile, to) => (await sendFrom(tile, to, { deadline_sec: 60, task_label: "context creation" })).text],
+      [
+        "a citation of a task",
+        async (tile, to) => (await sendFrom(tile, to, { task_id: await openTask(tile, to) })).text,
+      ],
+      [
+        "a rearm",
+        async (tile, to) => (await sendFrom(tile, to, { task_id: await openTask(tile, to), deadline_sec: 600 })).text,
+      ],
+      [
+        "a closing report",
+        async (tile, to) => (await sendFrom(tile, to, { task_id: await openTask(tile, to), task_action: "close" })).text,
+      ],
+    ];
+
+    test.each(scenarios)("%s keeps the sample published at send time on every read path", async (name, send) => {
+      const tile = await launchTile(await newTelemetryRun());
+      const to = await newRecipient();
+      await publish(tile, SAMPLE_A);
+      const live = await connectSocket(to.instance_token);
+      const text = await send(tile, to);
+      await publish(tile, SAMPLE_B);
+
+      expect(contextOf(await frameWith(live, text)), `${name}: the immediate push`).toEqual(AT_A);
+      expect(contextOf(await peeked(to.instance_token, text)), `${name}: the poll read, after a newer sample`).toEqual(AT_A);
+      const replayed = await connectSocket(to.instance_token);
+      expect(contextOf(await frameWith(replayed, text)), `${name}: the replay on a new connection`).toEqual(AT_A);
+    });
+
+    test("a real 0 percent is kept and an unknown percentage is absent, never 0", async () => {
+      const tile = await launchTile(await newTelemetryRun());
+      const to = await newRecipient();
+      await publish(tile, { ...SAMPLE_A, contextPct: 0 });
+      const zero = await sendFrom(tile, to);
+      await publish(tile, { ...SAMPLE_B, contextPct: null });
+      const unknown = await sendFrom(tile, to);
+
+      expect(contextOf(await peeked(to.instance_token, zero.text))).toEqual({
+        from_context_pct: 0,
+        from_context_observed_at: SAMPLE_A.observedAt,
+      });
+      const absent = await peeked(to.instance_token, unknown.text);
+      expect(Object.hasOwn(absent, "from_context_pct"), "no percentage field for an unknown fill").toBe(false);
+      expect(Object.hasOwn(absent, "from_context_observed_at"), "no observation time without a percentage").toBe(false);
+    });
+
+    test("a sender that never published has no context, and a body field is never a source", async () => {
+      const silent = await launchTile(await newTelemetryRun());
+      const to = await newRecipient();
+      const forged = { from_context_pct: 99, from_context_observed_at: 5 };
+      const sent = await sendFrom(silent, to, forged);
+      const absent = await peeked(to.instance_token, sent.text);
+      expect(Object.hasOwn(absent, "from_context_pct"), "a forged percentage is not stored").toBe(false);
+      expect(Object.hasOwn(absent, "from_context_observed_at")).toBe(false);
+
+      const publishing = await launchTile(await newTelemetryRun());
+      await publish(publishing, SAMPLE_A);
+      const overridden = await sendFrom(publishing, to, forged);
+      expect(contextOf(await peeked(to.instance_token, overridden.text)), "the registry wins over the body").toEqual(AT_A);
+    });
+
+    test("two senders with the same name in different groups keep their own sample", async () => {
+      const other = {
+        id: await groupId(randomUUID()),
+        hash: await sha256Hex(randomUUID()),
+      };
+      const seed = await post(`${broker.url}/register`, {
+        pid: livePid(),
+        cwd: DECK_CWD,
+        git_root: null,
+        tty: null,
+        summary: "",
+        host: DECK_HOST,
+        client_pid: 1,
+        project_key: null,
+        group_id: other.id,
+        group_secret_hash: other.hash,
+        desk_session: `context-other-seed-${++tileSeq}`,
+      });
+      expect(seed.status).toBe(200);
+      const otherRun = await mintRunCredential(broker, other);
+      const cwd = `C:\\telemetry\\same-name-${++tileSeq}`;
+      const first = await launchTile(await newTelemetryRun(), { cwd });
+      const second = await launchTile(otherRun, { cwd });
+      expect(second.peerId, "the two tiles carry the same peer_id").toBe(first.peerId);
+
+      const firstTo = await newRecipient();
+      const secondTo = (
+        await post<Recipient>(`${broker.url}/register`, {
+          pid: livePid(),
+          cwd: "C:\\telemetry\\other-recipient",
+          git_root: null,
+          tty: null,
+          summary: "",
+          host: DECK_HOST,
+          client_pid: 1,
+          project_key: null,
+          group_id: other.id,
+          group_secret_hash: other.hash,
+          desk_session: `context-other-recipient-${++tileSeq}`,
+        })
+      ).body;
+      await publish(first, { ...SAMPLE_A, contextPct: 11 });
+      await publish(second, { ...SAMPLE_B, contextPct: 88 });
+      const fromFirst = await sendFrom(first, firstTo);
+      const fromSecond = await sendFrom(second, secondTo);
+
+      expect(contextOf(await peeked(firstTo.instance_token, fromFirst.text))).toEqual({
+        from_context_pct: 11,
+        from_context_observed_at: SAMPLE_A.observedAt,
+      });
+      expect(contextOf(await peeked(secondTo.instance_token, fromSecond.text))).toEqual({
+        from_context_pct: 88,
+        from_context_observed_at: SAMPLE_B.observedAt,
+      });
+    });
+
+    test("a message sent before the registry forgot its sender keeps its sample", async () => {
+      const tile = await launchTile(await newTelemetryRun());
+      const to = await newRecipient();
+      const observer = await newObserver();
+      await publish(tile, SAMPLE_A);
+      const sent = await sendFrom(tile, to);
+
+      await post(`${broker.url}/disconnect`, { instance_token: tile.token });
+      await reregister(tile);
+      expect((await listedPeer(observer, tile.peerId))?.telemetry, "the registry no longer holds the sample").toBeUndefined();
+      expect(contextOf(await peeked(to.instance_token, sent.text))).toEqual(AT_A);
+    });
+  });
 });
 
 describe("/tile-peers refuses a caller that cannot prove the group", () => {

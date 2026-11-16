@@ -82,6 +82,42 @@ export function validatePeerTelemetrySnapshot(value: unknown): PeerTelemetrySnap
   };
 }
 
+/** The sender's context fill frozen at send time, with the time of the source sample. */
+export interface MessageContextSnapshot {
+  contextPct: number;
+  observedAt: number;
+}
+
+/** Where a message's context snapshot comes from; never read from a /send-message body. */
+export type MessageContextSource =
+  | { kind: "local" }
+  | { kind: "federated"; snapshot: MessageContextSnapshot | null };
+
+/** Fields a message carries on the wire: both present or both absent. */
+export interface MessageContextWireFields {
+  from_context_pct?: number;
+  from_context_observed_at?: number;
+}
+
+// Not validNullablePct: a message pair is refused when out of range, never clamped.
+export function validateMessageContextPair(pct: unknown, observedAt: unknown): MessageContextSnapshot | null {
+  if (typeof pct !== "number" || !Number.isFinite(pct) || pct < 0 || pct > 100) return null;
+  if (typeof observedAt !== "number" || !Number.isSafeInteger(observedAt) || observedAt < 0) return null;
+  return { contextPct: pct, observedAt };
+}
+
+export function messageContextFromTelemetry(
+  telemetry: Pick<PeerTelemetrySnapshot, "contextPct" | "observedAt"> | null | undefined,
+): MessageContextSnapshot | null {
+  if (!telemetry) return null;
+  return validateMessageContextPair(telemetry.contextPct, telemetry.observedAt);
+}
+
+export function messageContextWireFields(snapshot: MessageContextSnapshot | null): MessageContextWireFields {
+  if (!snapshot) return {};
+  return { from_context_pct: snapshot.contextPct, from_context_observed_at: snapshot.observedAt };
+}
+
 export function validateTileTelemetryRequest(value: unknown): TileTelemetryRequest | null {
   if (!isRecord(value)) return null;
   if (!validString(value.run_ref, 128)) return null;

@@ -17,6 +17,7 @@ import {
   type DelegationTaskRef,
 } from "./types.ts";
 import { isClosedNotice } from "./approval-notice.ts";
+import { validateMessageContextPair } from "./peer-telemetry.ts";
 
 // Deck sentinel messages are one-way operator broadcasts and must not trigger
 // the default reply behaviour; since that instruction is global, the no-reply
@@ -116,19 +117,54 @@ export function renderInbound(
   return `${framed}${renderDelegationNote(fromPeerId, delegation)}`;
 }
 
+// Not the routing-note filter of renderInbound: a supervisor reads the pair without getting those notes.
+export function receivesSenderContext(role: string | null | undefined, supervisorEnv: string | undefined): boolean {
+  return role === "team-lead" || supervisorEnv === "1";
+}
+
+export interface SenderContextFields {
+  from_context_pct?: number | null;
+  from_context_observed_at?: number | null;
+}
+
+export interface SenderContextDisplay {
+  meta: { from_context_pct: string; from_context_observed_at: string };
+  text: string;
+}
+
+export function senderContextDisplay(
+  fromPeerId: string,
+  fields: SenderContextFields,
+  recipientSees: boolean
+): SenderContextDisplay | null {
+  if (!recipientSees || isDeckSender(fromPeerId) || isOperatorSender(fromPeerId)) return null;
+  const pair = validateMessageContextPair(fields.from_context_pct, fields.from_context_observed_at);
+  if (!pair) return null;
+  const pct = pair.contextPct;
+  // A safe integer can still lie outside the Date range, where toISOString throws.
+  const date = new Date(pair.observedAt);
+  const observedAt = Number.isNaN(date.getTime()) ? String(pair.observedAt) : date.toISOString();
+  return {
+    meta: { from_context_pct: String(pct), from_context_observed_at: observedAt },
+    text: `sender context ${pct}%, observed_at ${observedAt}`,
+  };
+}
+
 export function formatInboundLine(
   fromPeerId: string,
   text: string,
   sentAt: string,
   recipientRole: string | null,
-  delegation?: DelegationContext
+  delegation?: DelegationContext,
+  senderContext?: SenderContextDisplay | null
 ): string {
   const label = isOperatorSender(fromPeerId)
     ? OPERATOR_PEER_ID
     : isDeckSender(fromPeerId)
       ? DECK_PEER_ID
       : fromPeerId || "<dormant peer>";
-  return `From ${label} (${sentAt}):\n${renderInbound(fromPeerId, text, recipientRole, delegation)}`;
+  const header = senderContext ? `${sentAt}, ${senderContext.text}` : sentAt;
+  return `From ${label} (${header}):\n${renderInbound(fromPeerId, text, recipientRole, delegation)}`;
 }
 
 // Like PEER_INBOUND_NOTE, neither note says anything about replying to the

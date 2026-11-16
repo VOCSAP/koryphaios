@@ -84,6 +84,8 @@ export interface Message {
   text: string;
   sent_at: string; // ISO timestamp
   delivered: boolean;
+  from_context_pct: number | null;
+  from_context_observed_at: number | null;
 }
 
 // Broker-internal row representations (used by SQL queries, not the public API).
@@ -363,6 +365,8 @@ export interface DeliveredMessage {
   sent_at: string;
   delivered: boolean;
   delegation_context?: DelegationContext;
+  from_context_pct?: number;
+  from_context_observed_at?: number;
 }
 
 export interface PollMessagesResponse {
@@ -941,6 +945,8 @@ export interface FederatedMessage {
   group_id: GroupId;
   text: string;
   sent_at: string;
+  from_context_pct?: number;
+  from_context_observed_at?: number;
 }
 
 export interface FederationSyncRequest {
@@ -971,6 +977,8 @@ export interface FederationSendRequest {
   from_ref: string;
   to_peer_id: PeerId;
   text: string;
+  from_context_pct?: number;
+  from_context_observed_at?: number;
 }
 
 /** Broker-wide federation counters, published with the replication snapshot. */
@@ -1673,6 +1681,8 @@ export interface WsMessageFrame {
   from_cwd: string;
   text: string;
   sent_at: string;
+  from_context_pct?: number;
+  from_context_observed_at?: number;
 }
 
 export interface ContextResumeFrame {

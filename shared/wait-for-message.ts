@@ -65,6 +65,8 @@ export interface WaitCandidateMessage {
   readonly text: string;
   readonly sent_at: string;
   readonly delegation_context?: DelegationContext;
+  readonly from_context_pct?: number;
+  readonly from_context_observed_at?: number;
 }
 
 /** True if `candidate` satisfies an optional from_peer_id filter. */

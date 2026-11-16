@@ -1,6 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import {
   PEER_TELEMETRY_CONTEXT_WINDOW_MAX,
+  messageContextFromTelemetry,
+  messageContextWireFields,
+  validateMessageContextPair,
+  type MessageContextSnapshot,
   validatePeerTelemetrySnapshot,
   validateTileTelemetryRequest,
 } from "../shared/peer-telemetry.ts";
@@ -136,6 +140,49 @@ describe("peer telemetry wire validation", () => {
       for (const invalid of ["delete", "Publish", "", undefined, 1]) {
         expect(validateTileTelemetryRequest({ ...common, action: invalid, snapshot }), `action ${String(invalid)}`).toBeNull();
       }
+    });
+  });
+
+  describe("message context pair", () => {
+    test("keeps a real 0 and decimals, with observedAt intact", () => {
+      expect(validateMessageContextPair(0, 1_731_234_567_890)).toEqual({ contextPct: 0, observedAt: 1_731_234_567_890 });
+      expect(validateMessageContextPair(100, 0)).toEqual({ contextPct: 100, observedAt: 0 });
+      expect(validateMessageContextPair(42.5, 7)).toEqual({ contextPct: 42.5, observedAt: 7 });
+    });
+
+    test("refuses a pct that is not a finite number in [0,100], without clamping or coercing", () => {
+      for (const invalid of [NaN, Infinity, -Infinity, -0.01, 100.01, "42", true, null, undefined, {}]) {
+        expect(validateMessageContextPair(invalid, 5), `pct ${String(invalid)}`).toBeNull();
+      }
+    });
+
+    test("refuses an observedAt that is not a non-negative safe integer", () => {
+      for (const invalid of [NaN, Infinity, 1.5, -1, Number.MAX_SAFE_INTEGER + 1, "5", true, null, undefined]) {
+        expect(validateMessageContextPair(10, invalid), `observedAt ${String(invalid)}`).toBeNull();
+      }
+    });
+
+    test("refuses a half pair", () => {
+      expect(validateMessageContextPair(10, undefined)).toBeNull();
+      expect(validateMessageContextPair(undefined, 10)).toBeNull();
+    });
+
+    test("derives a snapshot from telemetry: null pct is absent, 0 is a value, observedAt is the sample time", () => {
+      expect(messageContextFromTelemetry({ contextPct: null, observedAt: 5 })).toBeNull();
+      expect(messageContextFromTelemetry({ contextPct: 0, observedAt: 5 })).toEqual({ contextPct: 0, observedAt: 5 });
+      expect(messageContextFromTelemetry(null)).toBeNull();
+      expect(messageContextFromTelemetry(undefined)).toBeNull();
+      expect(messageContextFromTelemetry({ contextPct: 61, observedAt: 1_000 })?.observedAt).toBe(1_000);
+    });
+
+    test("projects only the two numbers, both or neither", () => {
+      expect(messageContextWireFields(null)).toEqual({});
+      expect(messageContextWireFields({ contextPct: 0, observedAt: 9 })).toEqual({
+        from_context_pct: 0,
+        from_context_observed_at: 9,
+      });
+      const polluted = { contextPct: 3, observedAt: 4, instance_token: "private" } as MessageContextSnapshot;
+      expect(Object.keys(messageContextWireFields(polluted)).sort()).toEqual(["from_context_observed_at", "from_context_pct"]);
     });
   });
 

@@ -6,7 +6,7 @@
 // older version that does not federate.
 
 import { test, expect, beforeAll, afterAll, beforeEach } from "bun:test";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
@@ -248,7 +248,7 @@ interface TelemetryTile {
 
 let tileSeq = 0;
 
-async function launchTile(b: TestBroker, label: string): Promise<TelemetryTile> {
+async function launchTile(b: TestBroker, label: string, extras: Record<string, unknown> = {}): Promise<TelemetryTile> {
   const n = ++tileSeq;
   const run = await mintRunCredential(b, { id: G, hash: H }, undefined, post);
   const launchHash = await sha256Hex(`${crypto.randomUUID()}${crypto.randomUUID()}`.replaceAll("-", ""));
@@ -260,7 +260,7 @@ async function launchTile(b: TestBroker, label: string): Promise<TelemetryTile> 
     run,
     host,
     cwd,
-    { desk_session: desk, telemetry_capability_hash: launchHash },
+    { desk_session: desk, telemetry_capability_hash: launchHash, ...extras },
     post
   );
   expect([`register tile ${label}`, reg.status]).toEqual([`register tile ${label}`, 200]);
@@ -280,12 +280,12 @@ async function dropTile(t: TelemetryTile): Promise<void> {
 }
 
 async function withTiles(
-  body: (launch: (b: TestBroker, label: string) => Promise<TelemetryTile>) => Promise<void>
+  body: (launch: (b: TestBroker, label: string, extras?: Record<string, unknown>) => Promise<TelemetryTile>) => Promise<void>
 ): Promise<void> {
   const launched: TelemetryTile[] = [];
   try {
-    await body(async (b, label) => {
-      const tile = await launchTile(b, label);
+    await body(async (b, label, extras) => {
+      const tile = await launchTile(b, label, extras);
       launched.push(tile);
       return tile;
     });
@@ -1174,6 +1174,18 @@ test("an upstream answering under another identity drops what the replica import
   });
 }, 60_000);
 
+function storedPids(b: TestBroker, host: string): { client_pid: number; claude_cli_pid: number } {
+  const db = openBrokerDb(b.dbPath, { readonly: true });
+  try {
+    return db.query("SELECT client_pid, claude_cli_pid FROM peers WHERE host = ? AND via IS NULL").get(host) as {
+      client_pid: number;
+      claude_cli_pid: number;
+    };
+  } finally {
+    db.close();
+  }
+}
+
 function rowTokens(b: TestBroker, host: string): string[] {
   const db = openBrokerDb(b.dbPath, { readonly: true });
   try {
@@ -1190,21 +1202,47 @@ test("the run scope, digest, token and launch identity of a bound instance never
   const onUpstream = await mintRunCredential(U, group, undefined, post);
   const onReplica = await mintRunCredential(R1, group, undefined, post);
   const from = [P1.exchanges.length, P2.exchanges.length] as const;
-  const boundOnUpstream = await registerAttestedInstance(U, onUpstream, "host-bound-u", "/work/bound-u", {}, post);
-  const boundOnReplica = await registerAttestedInstance(R1, onReplica, "host-bound-r", "/work/bound-r", {}, post);
+  const pids = {
+    boundU: { client_pid: 7_340_101, claude_cli_pid: 7_340_102 },
+    boundR: { client_pid: 7_340_201, claude_cli_pid: 7_340_202 },
+    r1: { client_pid: 7_340_301, claude_cli_pid: 7_340_302 },
+    u: { client_pid: 7_340_401, claude_cli_pid: 7_340_402 },
+    r2: { client_pid: 7_340_501, claude_cli_pid: 7_340_502 },
+  };
+  const boundOnUpstream = await registerAttestedInstance(U, onUpstream, "host-bound-u", "/work/bound-u", pids.boundU, post);
+  const boundOnReplica = await registerAttestedInstance(R1, onReplica, "host-bound-r", "/work/bound-r", pids.boundR, post);
   try {
     await withTiles(async (launch) => {
       const tiles = {
-        r1: await launch(R1, "wire-r1"),
-        u: await launch(U, "wire-u"),
-        r2: await launch(R2, "wire-r2"),
+        r1: await launch(R1, "wire-r1", pids.r1),
+        u: await launch(U, "wire-u", pids.u),
+        r2: await launch(R2, "wire-r2", pids.r2),
       };
+      for (const [what, b, host, expected] of [
+        ["bound on U", U, "host-bound-u", pids.boundU],
+        ["bound on R1", R1, "host-bound-r", pids.boundR],
+        ["tile r1", R1, tiles.r1.host, pids.r1],
+        ["tile u", U, tiles.u.host, pids.u],
+        ["tile r2", R2, tiles.r2.host, pids.r2],
+      ] as const) {
+        expect([what, storedPids(b, host)], `${what}: the PIDs the guard looks for are the ones the broker holds`).toEqual([what, expected]);
+      }
       const marked = (key: keyof typeof tiles) => observation(`Wire Probe ${key}`, { observedAt: OBSERVED_FROM - 60_000 });
       for (const key of ["r1", "u", "r2"] as const) await publishTelemetry(tiles[key], marked(key), `${key} tile`);
       await waitTelemetry(R2, tiles.r1, marked("r1"), "R1 -> U -> R2");
       await waitTelemetry(R1, tiles.r2, marked("r2"), "R2 -> U -> R1");
       await waitTelemetry(R1, tiles.u, marked("u"), "U -> R1");
       await waitTelemetry(R2, tiles.u, marked("u"), "U -> R2");
+      for (const [what, from, to, target, token] of [
+        ["R1 tile to R2", tiles.r1, "bob", R2, B.instance_token],
+        ["U tile to R1", tiles.u, "alice", R1, A.instance_token],
+        ["R2 tile to U", tiles.r2, "carol", U, C.instance_token],
+      ] as const) {
+        const text = `wire probe message: ${what}`;
+        expect([what, (await send(from.b, from.token, to, text)).ok]).toEqual([what, true]);
+        const got = await receive(`${what} is delivered`, target, token, text);
+        expect([what, pairOf(got)]).toEqual([what, { from_context_pct: 37.5, from_context_observed_at: OBSERVED_FROM - 60_000 }]);
+      }
       await settleBothReplicas();
       await settleBothReplicas();
 
@@ -1263,14 +1301,292 @@ test("the run scope, digest, token and launch identity of a bound instance never
           [`${key} tile desk session hash`, createHash("sha256").update(tile.desk).digest("hex")]
         );
       }
+      for (const [what, body] of [
+        ["R1 relays a tile's message to U", requests(p1)],
+        ["U hands a tile's message to R1", responses(p1)],
+        ["U hands a tile's message to R2", responses(p2)],
+        ["R2 relays a tile's message to U", requests(p2)],
+      ] as const) {
+        expect(body, `${what}: the sample rides this body, so the confidentiality scan reads a message`).toContain(
+          `"from_context_pct":37.5`
+        );
+      }
       for (const [what, secret] of secrets) {
         expect(wire.includes(secret), `a private value travelled in a federation request or response: ${what}`).toBe(false);
       }
+
+      const privatePids = new Map<string, string>(
+        Object.entries(pids).flatMap(([who, p]) => [
+          [String(p.client_pid), `${who} client_pid`],
+          [String(p.claude_cli_pid), `${who} claude_cli_pid`],
+        ])
+      );
+      const visited = new Map<string, number>();
+      const leaks: string[] = [];
+      const walk = (value: unknown, path: string): void => {
+        if (value !== null && typeof value === "object") {
+          for (const [key, inner] of Object.entries(value)) walk(inner, `${path}.${key}`);
+          return;
+        }
+        const side = path.slice(0, path.indexOf("["));
+        visited.set(side, (visited.get(side) ?? 0) + 1);
+        const owner = privatePids.get(String(value));
+        if (owner !== undefined) leaks.push(`${owner} at ${path}`);
+      };
+      for (const [side, texts] of [
+        ["P1 request", p1.map((e) => e.request)],
+        ["P1 response", p1.map((e) => e.response)],
+        ["P2 request", p2.map((e) => e.request)],
+        ["P2 response", p2.map((e) => e.response)],
+      ] as const) {
+        texts.forEach((text, index) => {
+          if (text) walk(JSON.parse(text) as unknown, `${side}[${index}]`);
+        });
+      }
+      for (const side of ["P1 request", "P1 response", "P2 request", "P2 response"]) {
+        expect(visited.get(side) ?? 0, `${side}: the scan read primitives of real exchanges`).toBeGreaterThan(0);
+      }
+      expect(leaks, "a client_pid or claude_cli_pid VALUE travelled in a federation request or response").toEqual([]);
     });
   } finally {
     await post(`${U.url}/unregister`, { instance_token: boundOnUpstream.body.instance_token });
     await post(`${R1.url}/unregister`, { instance_token: boundOnReplica.body.instance_token });
   }
+}, 60_000);
+
+function pairOf(m: Partial<DeliveredMessage>): Record<string, unknown> {
+  return { from_context_pct: m.from_context_pct, from_context_observed_at: m.from_context_observed_at };
+}
+
+function expectNoPair(m: DeliveredMessage, what: string): void {
+  expect(
+    [what, Object.hasOwn(m, "from_context_pct"), Object.hasOwn(m, "from_context_observed_at")],
+    `${what}: neither field is present`
+  ).toEqual([what, false, false]);
+}
+
+function storedPair(b: TestBroker, federationId: string): Record<string, unknown> | null {
+  const db = openBrokerDb(b.dbPath, { readonly: true });
+  try {
+    return db
+      .query("SELECT from_context_pct, from_context_observed_at FROM messages WHERE federation_id = ?")
+      .get(federationId) as Record<string, unknown> | null;
+  } finally {
+    db.close();
+  }
+}
+
+function brokerLog(b: TestBroker): string {
+  const dir = join(b.tmpDir, "logs");
+  return readdirSync(dir)
+    .map((f) => readFileSync(join(dir, f), "utf-8"))
+    .join("\n");
+}
+
+const PAIR_DIAGNOSTIC = "invalid sender context pair";
+
+function diagnosticCount(b: TestBroker): number {
+  return brokerLog(b).split(PAIR_DIAGNOSTIC).length - 1;
+}
+
+async function injectPulledMessage(
+  proxy: UpstreamProxy,
+  replica: TestBroker,
+  toToken: string,
+  message: Record<string, unknown>
+): Promise<string> {
+  const last = [...proxy.exchanges].reverse().find((e) => e.path === "/federation/sync");
+  expect(last, "a real sync answer to copy").toBeDefined();
+  const base = JSON.parse(last!.response) as { upstream_id: string };
+  const toRef = createHash("sha256").update(toToken).digest("hex").slice(0, 32);
+  let served = false;
+  proxy.intercept = (path) => {
+    if (path !== "/federation/sync" || served) return null;
+    served = true;
+    return Response.json({ ...base, messages: [{ ...message, to_ref: toRef }] });
+  };
+  try {
+    await pollUntil("the replica pulls the injected message", async () => ({ done: served, value: served }));
+  } finally {
+    proxy.intercept = null;
+  }
+  return `${base.upstream_id}:${message.id}`;
+}
+
+let injectedId = 900_000_000;
+
+function pulledFrom(sender: PublicPeer, text: string, extra: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    id: ++injectedId,
+    from_peer_id: sender.peer_id,
+    from_summary: "",
+    from_host: sender.host,
+    from_cwd: "",
+    group_id: G,
+    text,
+    sent_at: new Date().toISOString(),
+    ...extra,
+  };
+}
+
+test("a message carries its sender's context sample unchanged between brokers: U to R1, R1 to U, R1 across U to R2", async () => {
+  await withTiles(async (launch) => {
+    const u = await launch(U, "ctx-u");
+    const r1 = await launch(R1, "ctx-r1");
+    const sampleU = observation("Ctx Upstream", { contextPct: 0, observedAt: OBSERVED_FROM - 120_000 });
+    const sampleR1 = observation("Ctx Replica", { contextPct: 61.5, observedAt: OBSERVED_FROM - 90_000 });
+    await publishTelemetry(u, sampleU, "U tile");
+    await publishTelemetry(r1, sampleR1, "R1 tile");
+    await waitTelemetry(U, r1, sampleR1, "U imports R1's tile, so it is relayed");
+    await waitTelemetry(R1, u, sampleU, "R1 mirrors U's tile");
+
+    expect((await send(U, u.token, "alice", "ctx U to R1")).ok).toBe(true);
+    expect(pairOf(await receive("A receives U's tile message", R1, A.instance_token, "ctx U to R1")), "a real 0 survives the hop").toEqual({
+      from_context_pct: 0,
+      from_context_observed_at: sampleU.observedAt,
+    });
+    const expectedR1 = { from_context_pct: 61.5, from_context_observed_at: sampleR1.observedAt };
+    expect((await send(R1, r1.token, "carol", "ctx R1 to U")).ok).toBe(true);
+    expect(pairOf(await receive("C receives R1's tile message", U, C.instance_token, "ctx R1 to U"))).toEqual(expectedR1);
+    expect((await send(R1, r1.token, "bob", "ctx R1 to R2")).ok).toBe(true);
+    expect(pairOf(await receive("B receives R1's tile message", R2, B.instance_token, "ctx R1 to R2"))).toEqual(expectedR1);
+  });
+}, 60_000);
+
+test("a message that waited out an outage leaves with the sample it was sent with, not the sample of the drain", async () => {
+  await withTiles(async (launch) => {
+    const u = await launch(U, "ctx-cut-u");
+    const r1 = await launch(R1, "ctx-cut-r1");
+    const sentUnder = (label: string, pct: number) => observation(label, { contextPct: pct, observedAt: OBSERVED_FROM - 80_000 + pct });
+    await publishTelemetry(u, sentUnder("Cut Upstream", 20), "U tile");
+    await publishTelemetry(r1, sentUnder("Cut Replica", 30), "R1 tile");
+    await waitTelemetry(U, r1, sentUnder("Cut Replica", 30), "U imports R1's tile, so it is relayed");
+    await waitTelemetry(R1, u, sentUnder("Cut Upstream", 20), "R1 mirrors U's tile");
+
+    await goOffline(P1, R1);
+    try {
+      const queued = await send(R1, r1.token, "bob", "ctx queued on R1");
+      expect(["the replica queues the message", queued.ok, queued.queued]).toEqual(["the replica queues the message", true, true]);
+      expect((await send(U, u.token, "alice", "ctx waiting on U")).ok).toBe(true);
+      await publishTelemetry(r1, sentUnder("Cut Replica", 90), "R1 tile, a newer sample");
+      await publishTelemetry(u, sentUnder("Cut Upstream", 80), "U tile, a newer sample");
+    } finally {
+      await goOnline(P1, R1);
+    }
+    expect(pairOf(await receive("B receives what R1 queued", R2, B.instance_token, "ctx queued on R1"))).toEqual({
+      from_context_pct: 30,
+      from_context_observed_at: OBSERVED_FROM - 80_000 + 30,
+    });
+    expect(pairOf(await receive("A receives what waited on U", R1, A.instance_token, "ctx waiting on U"))).toEqual({
+      from_context_pct: 20,
+      from_context_observed_at: OBSERVED_FROM - 80_000 + 20,
+    });
+  });
+}, 90_000);
+
+test("an upstream drops an invalid or absent pair at its door, keeps the message, and never fills it from what it imported", async () => {
+  await withTiles(async (launch) => {
+    const r1 = await launch(R1, "ctx-door-r1");
+    const imported = observation("Door Replica", { contextPct: 44, observedAt: OBSERVED_FROM - 70_000 });
+    await publishTelemetry(r1, imported, "R1 tile");
+    await waitTelemetry(U, r1, imported, "U holds an imported sample for the tile");
+    const udb = openBrokerDb(U.dbPath, { readonly: true });
+    let route: { relay_id: string; relay_ref: string };
+    try {
+      route = udb.query("SELECT relay_id, relay_ref FROM peers WHERE host = ? AND relay_id IS NOT NULL").get(r1.host) as typeof route;
+    } finally {
+      udb.close();
+    }
+    const direct = (text: string, extra: Record<string, unknown>) =>
+      post<SendMessageResponse>(`${U.url}/federation/send`, {
+        replica_id: route.relay_id,
+        from_ref: route.relay_ref,
+        to_peer_id: "carol",
+        text,
+        ...extra,
+      });
+
+    const absent = await direct("door absent pair", {});
+    expect(absent.body.ok).toBe(true);
+    expectNoPair(await receive("C receives the message without a pair", U, C.instance_token, "door absent pair"), "absent pair");
+    expect(brokerLog(U), "an absent pair is a legacy sender, not a defect").not.toContain(PAIR_DIAGNOSTIC);
+
+    const invalid: Array<[string, Record<string, unknown>]> = [
+      ["a text percentage", { from_context_pct: "70", from_context_observed_at: 1_000 }],
+      ["a half pair", { from_context_pct: 70 }],
+      ["an explicit null", { from_context_pct: null, from_context_observed_at: 1_000 }],
+      ["a percentage above 100", { from_context_pct: 100.5, from_context_observed_at: 1_000 }],
+      ["a fractional observation time", { from_context_pct: 70, from_context_observed_at: 1.5 }],
+    ];
+    for (const [what, extra] of invalid) {
+      const text = `door invalid pair: ${what}`;
+      expect([what, (await direct(text, extra)).body.ok]).toEqual([what, true]);
+      expectNoPair(await receive(`C receives ${what}`, U, C.instance_token, text), what);
+    }
+    expect(diagnosticCount(U), `${invalid.length} invalid pairs through one door from one replica are said once, not each time`).toBe(1);
+
+    const valid = await direct("door valid pair", { from_context_pct: 12.5, from_context_observed_at: 4_000 });
+    expect(valid.body.ok).toBe(true);
+    expect(pairOf(await receive("C receives the valid pair", U, C.instance_token, "door valid pair"))).toEqual({
+      from_context_pct: 12.5,
+      from_context_observed_at: 4_000,
+    });
+  });
+}, 60_000);
+
+test("a replica drops an invalid or absent pair it pulls, keeps the message, and never fills it from what it imported", async () => {
+  await withTiles(async (launch) => {
+    const u = await launch(U, "ctx-pull-u");
+    const imported = observation("Pull Upstream", { contextPct: 55, observedAt: OBSERVED_FROM - 65_000 });
+    await publishTelemetry(u, imported, "U tile");
+    await waitTelemetry(R1, u, imported, "R1 holds an imported sample for the mirror");
+    const sender = (await seenFrom(R1, u))!;
+
+    await injectPulledMessage(P1, R1, A.instance_token, pulledFrom(sender, "pull absent pair"));
+    expectNoPair(await receive("A receives the message without a pair", R1, A.instance_token, "pull absent pair"), "absent pair");
+    expect(brokerLog(R1), "an absent pair is a legacy upstream, not a defect").not.toContain(PAIR_DIAGNOSTIC);
+
+    for (const [what, extra] of [
+      ["a text percentage", { from_context_pct: "70", from_context_observed_at: 1_000 }],
+      ["a half pair", { from_context_observed_at: 1_000 }],
+      ["a negative percentage", { from_context_pct: -1, from_context_observed_at: 1_000 }],
+    ] as const) {
+      const text = `pull invalid pair: ${what}`;
+      await injectPulledMessage(P1, R1, A.instance_token, pulledFrom(sender, text, extra));
+      expectNoPair(await receive(`A receives ${what}`, R1, A.instance_token, text), what);
+    }
+    expect(diagnosticCount(R1), "three invalid pairs through one door from one upstream are said once, not each time").toBe(1);
+
+    await injectPulledMessage(
+      P1,
+      R1,
+      A.instance_token,
+      pulledFrom(sender, "pull valid pair", { from_context_pct: 12.5, from_context_observed_at: 4_000 })
+    );
+    expect(pairOf(await receive("A receives the valid pair", R1, A.instance_token, "pull valid pair"))).toEqual({
+      from_context_pct: 12.5,
+      from_context_observed_at: 4_000,
+    });
+  });
+}, 60_000);
+
+test("a message pulled again keeps the sample of its first delivery", async () => {
+  await withTiles(async (launch) => {
+    const u = await launch(U, "ctx-again-u");
+    await publishTelemetry(u, observation("Again Upstream"), "U tile");
+    await waitTelemetry(R1, u, observation("Again Upstream"), "R1 mirrors U's tile");
+    const sender = (await seenFrom(R1, u))!;
+    const first = pulledFrom(sender, "pulled twice", { from_context_pct: 10, from_context_observed_at: 1_000 });
+    const federationId = await injectPulledMessage(P1, R1, A.instance_token, first);
+    await receive("A receives the message once", R1, A.instance_token, "pulled twice");
+    await injectPulledMessage(P1, R1, A.instance_token, { ...first, from_context_pct: 90, from_context_observed_at: 9_000 });
+    await waitPasses(R1, 2);
+    expect(["one row, still the first sample", countMessages(R1, "federation_id = ?", federationId), storedPair(R1, federationId)]).toEqual([
+      "one row, still the first sample",
+      1,
+      { from_context_pct: 10, from_context_observed_at: 1_000 },
+    ]);
+  });
 }, 60_000);
 
 function backdateMirror(b: TestBroker, host: string): number {

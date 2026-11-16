@@ -63,7 +63,10 @@ import {
 import {
   formatInboundLine,
   isDeckSender,
+  receivesSenderContext,
   renderInbound,
+  senderContextDisplay,
+  type SenderContextFields,
 } from "./inbound-framing.ts";
 import {
   writePeerIdCache,
@@ -1214,6 +1217,8 @@ export function createPeersSession(input: PeersSessionInput, deps: PeersSessionD
   // The role echoed back by /register: the transport wins on every register call,
   // dormant resume included. Only whoami and the inbound framing read it.
   let myRole: string | null = null;
+  const senderContextFor = (m: { from_peer_id: string } & SenderContextFields) =>
+    senderContextDisplay(m.from_peer_id, m, receivesSenderContext(myRole, input.env.CLAUDE_PEERS_SUPERVISOR));
   let myInboxAttested = false;
   let myInboxBinding: InboxBindingConfirmation | null = null;
   let myInboxOperatorId: string | null = null;
@@ -1497,6 +1502,8 @@ export function createPeersSession(input: PeersSessionInput, deps: PeersSessionD
           text: string;
           sent_at: string;
           delegation_context?: DelegationContext;
+          from_context_pct?: number | null;
+          from_context_observed_at?: number | null;
         };
         // Pushed before the daemon restart (the token was resumed): still readable by check_messages, never pushed again.
         if (f.id <= resumeHwm) return;
@@ -1524,6 +1531,7 @@ export function createPeersSession(input: PeersSessionInput, deps: PeersSessionD
                 from_cwd: f.from_cwd,
                 from_host: f.from_host,
                 sent_at: f.sent_at,
+                ...senderContextFor(f)?.meta,
               },
             },
           });
@@ -1588,6 +1596,7 @@ export function createPeersSession(input: PeersSessionInput, deps: PeersSessionD
                 from_cwd: msg.from_cwd,
                 from_host: msg.from_host,
                 sent_at: msg.sent_at,
+                ...senderContextFor(msg)?.meta,
               },
             },
           });
@@ -2265,7 +2274,7 @@ export function createPeersSession(input: PeersSessionInput, deps: PeersSessionD
           }
           // The broker resolves from_peer_id: no /list-peers needed.
           const lines = result.messages.map((m) =>
-            formatInboundLine(m.from_peer_id, m.text, m.sent_at, myRole, m.delegation_context)
+            formatInboundLine(m.from_peer_id, m.text, m.sent_at, myRole, m.delegation_context, senderContextFor(m))
           );
           return {
             content: [
@@ -2358,7 +2367,8 @@ export function createPeersSession(input: PeersSessionInput, deps: PeersSessionD
                   outcome.message.text,
                   outcome.message.sent_at,
                   myRole,
-                  outcome.message.delegation_context
+                  outcome.message.delegation_context,
+                  senderContextFor(outcome.message)
                 ),
               },
             ],

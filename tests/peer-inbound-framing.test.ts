@@ -12,6 +12,9 @@ import {
   renderDeckAnnouncement,
   renderOperatorAnswer,
   renderInbound,
+  formatInboundLine,
+  receivesSenderContext,
+  senderContextDisplay,
 } from "../shared/inbound-framing.ts";
 import {
   DECK_PEER_ID,
@@ -318,5 +321,119 @@ describe("a closed question is framed apart from an operator answer", () => {
   test("a peer message that starts with the tag stays a peer message", () => {
     expect(renderInbound("some-peer", closed)).toBe(renderPeerMessage(closed));
     expect(renderInbound(DECK_PEER_ID, closed)).toBe(renderDeckAnnouncement(closed));
+  });
+});
+
+describe("the sender's context fill is rendered for a team-lead or a supervisor only", () => {
+  const PAIR = { from_context_pct: 42.5, from_context_observed_at: 1_700_000_000_000 };
+
+  test("a team-lead recipient and a supervisor-flagged recipient see it, any other role does not", () => {
+    expect(receivesSenderContext("team-lead", undefined)).toBe(true);
+    expect(receivesSenderContext("worker", "1")).toBe(true);
+    expect(receivesSenderContext(null, "1")).toBe(true);
+    for (const role of ["worker", "supervisor", "", null, undefined, "Team-Lead", "team-lead "]) {
+      expect(receivesSenderContext(role, undefined), `role ${JSON.stringify(role)}`).toBe(false);
+    }
+  });
+
+  test("only the exact string '1' counts as the supervisor flag", () => {
+    for (const flag of ["true", "yes", "0", "", "2", " 1", "1 ", "on"]) {
+      expect(receivesSenderContext("worker", flag), `flag ${JSON.stringify(flag)}`).toBe(false);
+    }
+  });
+
+  test("a recipient that does not see it gets nothing, even with a valid pair", () => {
+    expect(senderContextDisplay("peer-z", PAIR, false)).toBeNull();
+  });
+
+  test("deck and operator senders carry no context, in both id forms", () => {
+    for (const sender of [DECK_PEER_ID, DECK_INSTANCE_TOKEN, OPERATOR_PEER_ID, OPERATOR_INSTANCE_TOKEN]) {
+      expect(senderContextDisplay(sender, PAIR, true), sender).toBeNull();
+    }
+  });
+
+  test("an ordinary peer and a dormant sender (empty id) get the pair, as strings in meta", () => {
+    for (const sender of ["peer-z", ""]) {
+      const shown = senderContextDisplay(sender, PAIR, true);
+      expect(shown?.meta).toEqual({ from_context_pct: "42.5", from_context_observed_at: "2023-11-14T22:13:20.000Z" });
+      expect(shown?.text).toBe("sender context 42.5%, observed_at 2023-11-14T22:13:20.000Z");
+    }
+  });
+
+  test("only the two projected fields leave the helper, whatever else the input object carries", () => {
+    const canaries = ["canary-instance-value", "canary-from-value", "424242", "canary-body-value"];
+    const hostile = {
+      ...PAIR,
+      instance_token: canaries[0],
+      from_token: canaries[1],
+      pid: Number(canaries[2]),
+      text: canaries[3],
+    };
+    const shown = senderContextDisplay("peer-z", hostile, true);
+
+    expect(Object.keys(shown?.meta ?? {}).sort()).toEqual(["from_context_observed_at", "from_context_pct"]);
+    expect(Object.keys(shown ?? {}).sort()).toEqual(["meta", "text"]);
+    const serialized = JSON.stringify(shown);
+    for (const canary of canaries) expect(serialized, canary).not.toContain(canary);
+  });
+
+  test("a real 0 is rendered, not read as absent, and observed_at 0 is the epoch", () => {
+    const shown = senderContextDisplay("peer-z", { from_context_pct: 0, from_context_observed_at: 0 }, true);
+    expect(shown?.meta).toEqual({ from_context_pct: "0", from_context_observed_at: "1970-01-01T00:00:00.000Z" });
+  });
+
+  test("the bounds of the pct range are rendered", () => {
+    expect(senderContextDisplay("peer-z", { from_context_pct: 100, from_context_observed_at: 1 }, true)?.meta.from_context_pct).toBe("100");
+  });
+
+  test("an observed_at outside the Date range keeps the pct and prints the raw milliseconds without throwing", () => {
+    const outside = 8_640_000_000_000_001;
+    expect(Number.isSafeInteger(outside)).toBe(true);
+    const shown = senderContextDisplay("peer-z", { from_context_pct: 12, from_context_observed_at: outside }, true);
+    expect(shown?.meta).toEqual({ from_context_pct: "12", from_context_observed_at: String(outside) });
+    expect(shown?.text).toBe(`sender context 12%, observed_at ${outside}`);
+  });
+
+  test("the last observed_at inside the Date range is still ISO", () => {
+    const shown = senderContextDisplay("peer-z", { from_context_pct: 12, from_context_observed_at: 8_640_000_000_000_000 }, true);
+    expect(shown?.meta.from_context_observed_at).toBe("+275760-09-13T00:00:00.000Z");
+  });
+
+  test.each([
+    ["no field", {}],
+    ["null pair", { from_context_pct: null, from_context_observed_at: null }],
+    ["only the pct", { from_context_pct: 10 }],
+    ["only the observed_at", { from_context_observed_at: 10 }],
+    ["a null pct", { from_context_pct: null, from_context_observed_at: 10 }],
+    ["a NaN pct", { from_context_pct: Number.NaN, from_context_observed_at: 10 }],
+    ["an infinite pct", { from_context_pct: Number.POSITIVE_INFINITY, from_context_observed_at: 10 }],
+    ["a string pct", { from_context_pct: "10", from_context_observed_at: 10 }],
+    ["a string observed_at", { from_context_pct: 10, from_context_observed_at: "10" }],
+    ["a fractional observed_at", { from_context_pct: 10, from_context_observed_at: 10.5 }],
+    ["a pct above 100", { from_context_pct: 150, from_context_observed_at: 10 }],
+    ["a negative pct", { from_context_pct: -1, from_context_observed_at: 10 }],
+    ["a negative observed_at", { from_context_pct: 10, from_context_observed_at: -1 }],
+    ["an observed_at beyond the safe integers", { from_context_pct: 10, from_context_observed_at: 2 ** 53 }],
+  ])("%s renders nothing", (_name, fields) => {
+    expect(senderContextDisplay("peer-z", fields as never, true)).toBeNull();
+  });
+
+  test("the header of a text path carries the pair next to sent_at, and is byte-identical without it", () => {
+    const shown = senderContextDisplay("peer-z", PAIR, true);
+    const withPair = formatInboundLine("peer-z", BODY, "2026-01-01T00:00:00.000Z", "team-lead", undefined, shown);
+    expect(withPair.startsWith(`From peer-z (2026-01-01T00:00:00.000Z, ${shown?.text}):\n`)).toBe(true);
+    const without = formatInboundLine("peer-z", BODY, "2026-01-01T00:00:00.000Z", "team-lead");
+    expect(without.startsWith("From peer-z (2026-01-01T00:00:00.000Z):\n")).toBe(true);
+    expect(formatInboundLine("peer-z", BODY, "t", "team-lead", undefined, null)).toBe(
+      formatInboundLine("peer-z", BODY, "t", "team-lead")
+    );
+  });
+
+  test("the routing notes stay team-lead only: a supervisor-flagged worker gets the pair but no routing note", () => {
+    const shown = senderContextDisplay("peer-z", PAIR, receivesSenderContext("worker", "1"));
+    const line = formatInboundLine("peer-z", BODY, "t", "worker", undefined, shown);
+    expect(line).toContain("sender context");
+    expect(line).not.toContain(ROUTING_REMINDER_NOTE);
+    expect(line).not.toContain(LEAD_DIRECTIVE_NOTE);
   });
 });

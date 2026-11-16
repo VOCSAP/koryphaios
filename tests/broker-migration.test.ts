@@ -122,6 +122,41 @@ test("the Inbox provenance migration extends an older database twice over and ke
   );
 });
 
+test("the sender context columns extend an older messages table twice over and leave every old row NULL", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "cp-legacy-context-"));
+  seededDirs.push(dir);
+  const dbPath = join(dir, "peers.db");
+  const seed = new Database(dbPath);
+  seed.run(`CREATE TABLE messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, from_token TEXT NOT NULL, to_token TEXT NOT NULL,
+    group_id TEXT NOT NULL, text TEXT NOT NULL, sent_at TEXT NOT NULL, delivered INTEGER NOT NULL DEFAULT 0)`);
+  seed.run("INSERT INTO messages (from_token, to_token, group_id, text, sent_at) VALUES ('old-from', 'old-to', 'g-old', 'old note', ?)", [
+    new Date().toISOString(),
+  ]);
+  seed.close();
+
+  const b1 = await startBroker({ CLAUDE_PEERS_DB: dbPath });
+  const b2 = await startBroker({ CLAUDE_PEERS_DB: dbPath });
+  brokers.push(b2, b1);
+
+  const db = openBrokerDb(dbPath, { readonly: true });
+  const columns = db.query("PRAGMA table_info(messages)").all() as { name: string; type: string; dflt_value: string | null }[];
+  const oldRow = db.query("SELECT from_context_pct, from_context_observed_at FROM messages WHERE text = 'old note'").get();
+  db.close();
+
+  const added = Object.fromEntries(
+    columns.filter((c) => c.name.startsWith("from_context_")).map((c) => [c.name, { type: c.type, dflt_value: c.dflt_value }])
+  );
+  expect(added, "two nullable columns without a default, added once each").toEqual({
+    from_context_pct: { type: "REAL", dflt_value: null },
+    from_context_observed_at: { type: "INTEGER", dflt_value: null },
+  });
+  expect(oldRow, "a historical message has no sample, which is not a reading of 0").toEqual({
+    from_context_pct: null,
+    from_context_observed_at: null,
+  });
+});
+
 test("migration adds claude_cli_pid column to peers", async () => {
   const b = await startBroker();
   brokers.push(b);

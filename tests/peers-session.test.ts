@@ -11,6 +11,7 @@ import { canonicalBrokerUrl, computeGroupId } from "../shared/config.ts";
 import type { FamilyTicketClaims, ResumeOutcome } from "../shared/mcp-daemon-server.ts";
 import type { TicketClaims } from "../shared/mcp-daemon-protocol.ts";
 import { resolveProjectKey } from "../shared/project-key.ts";
+import { DECK_PEER_ID } from "../shared/types.ts";
 import { canonicalWriterGeneration } from "../shared/relay-liveness.ts";
 import { DEPOSIT_CAPABILITY_ENV, hashCapability } from "../shared/context-buffer.ts";
 import { TELEMETRY_CAPABILITY_ENV } from "../shared/peer-telemetry.ts";
@@ -1781,5 +1782,235 @@ describe("the kory-operator inbox tools", () => {
       expect(line).not.toContain("SECRET-REASON");
       expect(line).not.toContain(TILE_INSTANCE);
     }
+  });
+});
+
+describe("the sender's context fill, on each reception path of a team-lead or supervisor", () => {
+  const OBSERVED = 1_700_000_000_000;
+  const OBSERVED_ISO = "2023-11-14T22:13:20.000Z";
+  const PCT_KEYS = ["from_context_pct", "from_context_observed_at"] as const;
+  const withPair = (frame: Record<string, unknown>, pct = 37) => ({
+    ...frame,
+    from_context_pct: pct,
+    from_context_observed_at: OBSERVED,
+  });
+  const metaOf = (h: Harness, index = 0) => (h.notifications[index]?.params?.meta ?? {}) as Record<string, unknown>;
+  const LEAD = { CLAUDE_PEERS_ROLE: "team-lead" };
+
+  const SEEN: Array<[string, Record<string, string>]> = [
+    ["a team-lead", LEAD],
+    ["a supervisor-flagged worker", { CLAUDE_PEERS_ROLE: "worker", CLAUDE_PEERS_SUPERVISOR: "1" }],
+  ];
+  const NOT_SEEN: Array<[string, Record<string, string>]> = [
+    ["a plain worker", { CLAUDE_PEERS_ROLE: "worker" }],
+    ["a role named supervisor without the flag", { CLAUDE_PEERS_ROLE: "supervisor" }],
+    ["a truthy flag that is not '1'", { CLAUDE_PEERS_ROLE: "worker", CLAUDE_PEERS_SUPERVISOR: "true" }],
+  ];
+
+  test.each(SEEN)("WS push: %s gets the pair as string meta next to from_summary", async (_name, env) => {
+    const h = await openSession({ env });
+    FakeWebSocket.instances[0]!.receive(withPair(messageFrame(1, "hello")));
+    await until(() => h.notifications.length === 1, "the push");
+
+    expect(metaOf(h).from_context_pct).toBe("37");
+    expect(metaOf(h).from_context_observed_at).toBe(OBSERVED_ISO);
+  });
+
+  test.each(NOT_SEEN)("WS push: %s gets neither field", async (_name, env) => {
+    const h = await openSession({ env });
+    FakeWebSocket.instances[0]!.receive(withPair(messageFrame(1, "hello")));
+    await until(() => h.notifications.length === 1, "the push");
+
+    for (const key of PCT_KEYS) expect(metaOf(h)).not.toHaveProperty(key);
+  });
+
+  const CANARIES = ["canary-instance-value", "canary-from-value", "424242"];
+  const HOSTILE = { instance_token: CANARIES[0], from_token: CANARIES[1], pid: 424242 };
+  const META_KEYS = [
+    "from_context_observed_at",
+    "from_context_pct",
+    "from_cwd",
+    "from_host",
+    "from_peer_id",
+    "from_summary",
+    "sent_at",
+  ];
+
+  test("WS push: the meta carries exactly the known keys, nothing else from the frame", async () => {
+    const h = await openSession({ env: LEAD });
+    FakeWebSocket.instances[0]!.receive({ ...withPair(messageFrame(1, "hello")), ...HOSTILE });
+    await until(() => h.notifications.length === 1, "the push");
+
+    expect(Object.keys(metaOf(h)).sort()).toEqual(META_KEYS);
+    const serialized = JSON.stringify(h.notifications[0]);
+    for (const canary of CANARIES) expect(serialized, canary).not.toContain(canary);
+  });
+
+  test("fallback poll: the meta carries exactly the known keys, nothing else from the message", async () => {
+    const h = await openSession({
+      env: LEAD,
+      deps: { settings: { ...SETTINGS, pollFallbackIntervalMs: 20 } },
+      prepare: (broker) => {
+        broker.inbox = [{ ...withPair(messageFrame(5, "from the poll")), ...HOSTILE }];
+      },
+    });
+    await until(() => h.notifications.length === 1, "the poll push");
+
+    expect(Object.keys(metaOf(h)).sort()).toEqual(META_KEYS);
+    const serialized = JSON.stringify(h.notifications[0]);
+    for (const canary of CANARIES) expect(serialized, canary).not.toContain(canary);
+  });
+
+  test("WS push: a real 0 is rendered as '0'", async () => {
+    const h = await openSession({ env: LEAD });
+    FakeWebSocket.instances[0]!.receive(withPair(messageFrame(1, "hello"), 0));
+    await until(() => h.notifications.length === 1, "the push");
+
+    expect(metaOf(h).from_context_pct).toBe("0");
+  });
+
+  test("WS push: a half pair and an absent pair render nothing", async () => {
+    const h = await openSession({ env: LEAD });
+    const socket = FakeWebSocket.instances[0]!;
+    socket.receive({ ...messageFrame(1, "half"), from_context_pct: 10 });
+    socket.receive(messageFrame(2, "none"));
+    await until(() => h.notifications.length === 2, "both pushes");
+
+    for (const index of [0, 1]) for (const key of PCT_KEYS) expect(metaOf(h, index)).not.toHaveProperty(key);
+  });
+
+  test.each([150, -1])("WS push: a pct of %d renders no pair", async (pct) => {
+    const h = await openSession({ env: LEAD });
+    FakeWebSocket.instances[0]!.receive(withPair(messageFrame(1, "out of range"), pct));
+    await until(() => h.notifications.length === 1, "the push");
+
+    for (const key of PCT_KEYS) expect(metaOf(h)).not.toHaveProperty(key);
+  });
+
+  test("WS push: a deck sender carries no pair even when the frame has one", async () => {
+    const h = await openSession({ env: LEAD });
+    FakeWebSocket.instances[0]!.receive(withPair({ ...messageFrame(1, "announce"), from_peer_id: DECK_PEER_ID }));
+    await until(() => h.notifications.length === 1, "the push");
+
+    for (const key of PCT_KEYS) expect(metaOf(h)).not.toHaveProperty(key);
+  });
+
+  test("WS replay: a frame delivered on the reconnected socket carries the pair", async () => {
+    const h = await openSession({ env: LEAD });
+    FakeWebSocket.instances[0]!.close();
+    await until(() => FakeWebSocket.instances.length === 2, "the reconnected socket");
+
+    FakeWebSocket.instances[1]!.receive(withPair(messageFrame(3, "replayed"), 81));
+    await until(() => h.notifications.length === 1, "the replayed push");
+
+    expect(metaOf(h).from_context_pct).toBe("81");
+    expect(metaOf(h).from_context_observed_at).toBe(OBSERVED_ISO);
+  });
+
+  test.each(SEEN)("fallback poll, WS never connected: %s gets the pair as meta", async (_name, env) => {
+    const h = await openSession({
+      env,
+      deps: { settings: { ...SETTINGS, pollFallbackIntervalMs: 20 } },
+      prepare: (broker) => {
+        broker.inbox = [withPair(messageFrame(5, "from the poll"), 64)];
+      },
+    });
+    await until(() => h.notifications.length === 1, "the poll push");
+
+    expect(metaOf(h).from_context_pct).toBe("64");
+    expect(metaOf(h).from_context_observed_at).toBe(OBSERVED_ISO);
+  });
+
+  test.each(NOT_SEEN)("fallback poll: %s gets neither field", async (_name, env) => {
+    const h = await openSession({
+      env,
+      deps: { settings: { ...SETTINGS, pollFallbackIntervalMs: 20 } },
+      prepare: (broker) => {
+        broker.inbox = [withPair(messageFrame(5, "from the poll"), 64)];
+      },
+    });
+    await until(() => h.notifications.length === 1, "the poll push");
+
+    for (const key of PCT_KEYS) expect(metaOf(h)).not.toHaveProperty(key);
+  });
+
+  test.each(SEEN)("check_messages: %s reads the pair in the text header", async (_name, env) => {
+    const h = await openSession({
+      env,
+      prepare: (broker) => {
+        broker.inbox = [withPair(messageFrame(6, "queued"), 12.5)];
+      },
+    });
+
+    const text = textOf(await call(h, "check_messages"));
+
+    expect(text).toContain(`From peer-z (2026-01-01T00:00:00.000Z, sender context 12.5%, observed_at ${OBSERVED_ISO}):`);
+  });
+
+  test.each(NOT_SEEN)("check_messages: %s reads no pair", async (_name, env) => {
+    const h = await openSession({
+      env,
+      prepare: (broker) => {
+        broker.inbox = [withPair(messageFrame(6, "queued"), 12.5)];
+      },
+    });
+
+    const text = textOf(await call(h, "check_messages"));
+
+    expect(text).toContain("From peer-z (2026-01-01T00:00:00.000Z):");
+    expect(text).not.toContain("sender context");
+  });
+
+  test("wait_for_message, matched by the opportunistic peek: the header carries the pair", async () => {
+    const h = await openSession({
+      env: LEAD,
+      prepare: (broker) => {
+        broker.inbox = [withPair(messageFrame(7, "already there"), 55)];
+      },
+    });
+
+    const text = textOf(await reachedWithin(call(h, "wait_for_message", { timeout_sec: 5 }), "wait_for_message"));
+
+    expect(text).toContain(`sender context 55%, observed_at ${OBSERVED_ISO}`);
+  });
+
+  test("wait_for_message, resolved by a WS frame: the header carries the pair", async () => {
+    const h = await openSession({ env: LEAD });
+    const waiting = call(h, "wait_for_message", { timeout_sec: 5 });
+    await until(() => callsTo(h, "/peek-messages").length >= 1, "the opportunistic peek");
+    await flush();
+
+    FakeWebSocket.instances[0]!.receive(withPair(messageFrame(8, "arrives later"), 71));
+    const text = textOf(await reachedWithin(waiting, "wait_for_message"));
+
+    expect(text).toContain(`sender context 71%, observed_at ${OBSERVED_ISO}`);
+  });
+
+  test("wait_for_message, resolved by the fallback poll: the header carries the pair", async () => {
+    const h = await openSession({
+      env: LEAD,
+      deps: { settings: { ...SETTINGS, pollFallbackIntervalMs: 20 } },
+    });
+    const waiting = call(h, "wait_for_message", { timeout_sec: 5 });
+    await until(() => callsTo(h, "/peek-messages").length >= 1, "the opportunistic peek");
+    h.broker.inbox = [withPair(messageFrame(9, "found by the poll"), 29)];
+
+    const text = textOf(await reachedWithin(waiting, "wait_for_message"));
+
+    expect(text).toContain(`sender context 29%, observed_at ${OBSERVED_ISO}`);
+  });
+
+  test("wait_for_message: a worker reads no pair on any resolution", async () => {
+    const h = await openSession({
+      env: { CLAUDE_PEERS_ROLE: "worker" },
+      prepare: (broker) => {
+        broker.inbox = [withPair(messageFrame(7, "already there"), 55)];
+      },
+    });
+
+    const text = textOf(await reachedWithin(call(h, "wait_for_message", { timeout_sec: 5 }), "wait_for_message"));
+
+    expect(text).toContain("already there");
+    expect(text).not.toContain("sender context");
   });
 });
