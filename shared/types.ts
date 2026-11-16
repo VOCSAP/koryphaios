@@ -564,6 +564,12 @@ export interface RoadmapItem {
    */
   content_updated_at: string | null;
   content_rev?: number;
+  /**
+   * SHA-256 of the operational state a dispatch depends on and content_rev does
+   * not cover (queue, lock, park, relay, contest, sync state). Computed on read
+   * by the broker that holds the card; never replicated, never an authorization.
+   */
+  dispatch_state_tag?: string;
   /** Set when archived (soft delete, reversible); null otherwise. */
   deleted_at: string | null;
   /**
@@ -725,7 +731,7 @@ export type RoadmapSyncContent = Pick<RoadmapItem, RoadmapSyncContentField>;
  * revision counters. Built by a pick-list, so `locked_by_token` and
  * `operator_id` can never ride along.
  */
-export type RoadmapSyncRow = Omit<RoadmapItem, "locked_by_token" | "operator_id"> & {
+export type RoadmapSyncRow = Omit<RoadmapItem, "locked_by_token" | "operator_id" | "dispatch_state_tag"> & {
   rev: number;
   content_rev: number;
 };
@@ -1835,6 +1841,106 @@ export interface DispatchRequestOutcome {
   cards: DispatchedCard[];
   /** One line readable as-is, notably when `cards` is empty. */
   note: string;
+}
+
+export type AtomicDispatchMode = "wave" | "assign";
+export type AtomicDispatchTargetKind = "lead" | "sole-active-fallback" | "assignee";
+
+export interface AtomicDispatchMember {
+  id: string;
+  /** The card's content_rev as the Deck read it. */
+  expected_content_rev: number;
+  /** The card's dispatch_state_tag as the Deck read it. */
+  expected_dispatch_state_tag: string;
+}
+
+export interface AtomicDispatchIntent {
+  /** This broker's persistent identity. */
+  broker_id: string;
+  /** `<deadline_ms>:<uuid>`; the deadline is the last instant the operation may act. */
+  operation_id: string;
+  project_key: string;
+  group_id: GroupId;
+  mode: AtomicDispatchMode;
+  target_kind: AtomicDispatchTargetKind;
+  /** The ACTIVE local peer receiving the message; never substituted by the broker. */
+  to_peer_id: string;
+  members: AtomicDispatchMember[];
+}
+
+export interface AtomicDispatchRequest {
+  action: "execute" | "resolve";
+  intent: AtomicDispatchIntent;
+  group_secret_hash: string | null;
+  by?: string;
+  public_key?: string;
+  auth?: ApprovalAuthProof;
+}
+
+export interface AtomicDispatchCard {
+  id: string;
+  title: string;
+  kind: RoadmapKind;
+}
+
+export type AtomicDispatchRefusal =
+  | "no-target"
+  | "card-changed"
+  | "queue-changed"
+  | "ineligible"
+  | "cancelled-before-execution"
+  | "write-failed";
+
+/** What the broker recorded for one operation; `unknown` is never stored. */
+export type AtomicDispatchOutcome =
+  | {
+      delivery: "sent";
+      operation_id: string;
+      message_id: number;
+      cards: AtomicDispatchCard[];
+    }
+  | {
+      delivery: "not-sent";
+      operation_id: string;
+      reason: AtomicDispatchRefusal;
+      card_ids: string[];
+    };
+
+export type AtomicDispatchUnknownReason =
+  | "transport"
+  | "invalid-response"
+  | "expired"
+  | "broker-mismatch"
+  | "outcome-unavailable";
+
+export type AtomicDispatchDelivery =
+  | AtomicDispatchOutcome
+  | {
+      delivery: "unknown";
+      operation_id: string;
+      reason: AtomicDispatchUnknownReason;
+    };
+
+export type AtomicDispatchErrorCode =
+  | "dispatch-operation-mismatch"
+  | "dispatch-operation-expired"
+  | "dispatch-broker-mismatch"
+  | "dispatch-capacity-exceeded"
+  | "dispatch-invalid-request";
+
+export interface AtomicDispatchError {
+  code: AtomicDispatchErrorCode;
+  error: string;
+}
+
+/** What a client needs before it signs its first request. */
+export interface AtomicDispatchCapability {
+  version: 1;
+  broker_id: string;
+  /** Longest an operation_id deadline may lie ahead of the broker's clock. */
+  max_operation_ms: number;
+  max_members: number;
+  registry_capacity: number;
 }
 
 export interface DispatchRequest {

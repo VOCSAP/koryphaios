@@ -22,6 +22,11 @@ import type { GuardedWriteResult } from './roadmap-guarded-write'
 // Type-only, so the repo-root bun harness never resolves it at runtime.
 import type { DispatchedCard, DispatchRequest, DispatchRequestOutcome } from '../../../shared/types'
 import { queuedItems, resolveDependency } from '../shared/workflow'
+import {
+  composeAssignText,
+  composeDispatchText,
+  composeMultiDispatchText
+} from '../../../shared/roadmap-dispatch-message'
 import { dispatchedTargetsTail } from './directive-journal'
 import { directiveKeys, isDirectiveCommand } from './directive'
 
@@ -134,65 +139,7 @@ export function nextDispatchedState(entry: DispatchedEntry, item: RoadmapItem | 
   }
 }
 
-/**
- * Full-detail snapshot lines for one item, shared by the single- and
- * multi-item dispatch composers below. Conditional fields collapse to ''
- * (filtered by the caller) when empty, same as the original inline shape.
- */
-function itemSnapshotLines(item: RoadmapItem): string[] {
-  return [
-    `Title: ${item.title}`,
-    `Kind: ${item.kind} | Priority: ${item.priority} | Value: ${item.value} | Effort: ${item.effort} | Status: ${item.status}`,
-    item.description ? `Description: ${item.description}` : '',
-    item.rationale ? `Rationale: ${item.rationale}` : '',
-    item.context ? `Context (operator briefing): ${item.context}` : '',
-    item.tags.length ? `Tags: ${item.tags.join(', ')}` : '',
-    item.depends_on.length ? `Depends on: ${item.depends_on.map((d) => d.slice(0, 8)).join(', ')}` : ''
-  ]
-}
-
-/**
- * The targeted announce sent to the team-lead when an item is dispatched:
- * the full item plus the workflow contract (assign, keep the status current).
- */
-export function composeDispatchText(item: RoadmapItem): string {
-  const lines = [
-    `Next roadmap item from the operator's dispatch queue (id ${item.id.slice(0, 8)}):`,
-    '',
-    ...itemSnapshotLines(item),
-    '',
-    'As team-lead: take it yourself or brief another peer with send_message. Use roadmap_get for full context, set the item in_progress with roadmap_update when the work REALLY starts (this locks it under the working peer), done when complete. Keep its status current — the Deck auto-dispatches the next queued item when this one is done.'
-  ].filter((l) => l !== '')
-  return lines.join('\n')
-}
-
-/**
- * One announce for a whole head wave (N>=1 items sharing the head rank), so
- * the lead decides the parallelization. N=1 delegates to composeDispatchText
- * and stays byte-identical to the mono-item announce. Code constant, never an
- * operator/repo template.
- * An extra-agent request is routed through the supervisor via send_message:
- * only the supervisor holds deck-control's spawn tools, behind its own
- * operator confirmation gate.
- */
-export function composeMultiDispatchText(items: RoadmapItem[]): string {
-  if (items.length <= 1) return composeDispatchText(items[0]!)
-  const lines: string[] = [
-    `${items.length} roadmap items from the operator's dispatch queue, to process IN PARALLEL (ids ${items
-      .map((i) => i.id.slice(0, 8))
-      .join(', ')}):`,
-    ''
-  ]
-  items.forEach((item, i) => {
-    if (i > 0) lines.push('---')
-    lines.push(`[${i + 1}/${items.length}] id ${item.id.slice(0, 8)}:`, ...itemSnapshotLines(item))
-  })
-  lines.push(
-    '',
-    "As team-lead: distribute these across your team via send_message, respecting each role — you do NOT need to take them all yourself. If the team cannot absorb the parallelism, ask the SUPERVISOR (send_message) to spawn an additional agent — you have no direct spawn capability. Use roadmap_get for full context on each item, set an item in_progress with roadmap_update when work REALLY starts on it (this locks it under the working peer), done when complete. Keep each item's status current — the Deck auto-dispatches the next queued wave when this one fully completes."
-  )
-  return lines.filter((l) => l !== '').join('\n')
-}
+export { composeDispatchText, composeMultiDispatchText, composeAssignText }
 
 /**
  * Partitions a head wave (roadmap card 5852c074) into directive cards and
@@ -492,29 +439,6 @@ export function nextBarrierPending(
   if (dispatchSucceeded) return false
   if (dispatchedSize > 0) return current
   return queueHasHead
-}
-
-/**
- * Direct assignment of an item to ONE chosen peer (PLAN K6, the operator's
- * "process now" flow): the full item plus the take-it-now contract. Targeted
- * announce, so unlike the dispatch text there is no team-lead relaying step.
- * CODE CONSTANT (C8 rule).
- */
-export function composeAssignText(item: RoadmapItem): string {
-  const lines = [
-    `The operator assigned THIS roadmap item to you — take it now (id ${item.id.slice(0, 8)}):`,
-    '',
-    `Title: ${item.title}`,
-    `Kind: ${item.kind} | Priority: ${item.priority} | Value: ${item.value} | Effort: ${item.effort} | Status: ${item.status}`,
-    item.description ? `Description: ${item.description}` : '',
-    item.rationale ? `Rationale: ${item.rationale}` : '',
-    item.context ? `Context (operator briefing): ${item.context}` : '',
-    item.tags.length ? `Tags: ${item.tags.join(', ')}` : '',
-    item.depends_on.length ? `Depends on: ${item.depends_on.map((d) => d.slice(0, 8)).join(', ')}` : '',
-    '',
-    'Pause your current step if needed. Use roadmap_get for full context, set the item to in_progress with roadmap_update when you actually start (this locks it under your peer_id), done when complete — or back to planned if you must abandon it.'
-  ].filter((l) => l !== '')
-  return lines.join('\n')
 }
 
 /**

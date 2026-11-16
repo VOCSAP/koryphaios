@@ -238,6 +238,13 @@ const DECK_WRITE_ROUTES = [
     body: (id: string) => ({ id, choice: "local" }),
     signedStatus: 409,
   },
+  // No real peer or card is needed: a signed empty intent passes the author gate
+  // and is then refused 400 by the intent validation, which is unreachable before it.
+  {
+    route: "/roadmap/dispatch-atomic",
+    body: () => ({ action: "resolve", intent: {} }),
+    signedStatus: 400,
+  },
 ] as const;
 
 /** Status a signed operator write earns on THIS broker; 200 unless stated. */

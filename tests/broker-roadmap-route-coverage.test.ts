@@ -147,6 +147,9 @@ const GUARDED_PROBES: Record<string, (ctx: ProbeCtx) => Record<string, unknown>>
 const OPERATOR_GUARDED_PROBES: Record<string, (ctx: ProbeCtx) => Record<string, unknown>> = {
   "/roadmap/lock-park": (c) => ({ project_key: PK, by: c.victimPeerId, peer_ids: [c.victimPeerId] }),
   "/roadmap/lock-release": (c) => ({ project_key: PK, by: c.victimPeerId, peer_ids: [c.victimPeerId] }),
+  // The author is resolved before the intent is read, so an empty intent still
+  // reaches the operator-privilege gate.
+  "/roadmap/dispatch-atomic": (c) => ({ by: c.victimPeerId, action: "resolve", intent: {} }),
 };
 
 interface ProbeCtx {
@@ -180,6 +183,7 @@ const EXPECTED_ROUTES = [
   "/roadmap/context-document/list",
   "/roadmap/context-document/sync/pull",
   "/roadmap/context-document/sync/push",
+  "/roadmap/dispatch-atomic",
   "/roadmap/export",
   "/roadmap/import",
   "/roadmap/list",
@@ -466,6 +470,10 @@ const EXEMPT_INACTIVE_HANDLERS = new Set([
   "releaseStaleLocks",
 ]);
 
+const DELEGATING_INACTIVE_HANDLERS: Record<string, string> = {
+  handleRoadmapDispatchAtomic: "atomicDispatchDeps",
+};
+
 /**
  * `discoverRoadmapHandlers`'s regex is deliberately over-inclusive (same
  * philosophy as discoverRoadmapRoutes above), so it also finds the two
@@ -491,6 +499,7 @@ function unclassifiedInactiveHandlers(handlers: string[]): string[] {
     (h) =>
       !GUARDED_INACTIVE_HANDLERS.has(h) &&
       !EXEMPT_INACTIVE_HANDLERS.has(h) &&
+      !(h in DELEGATING_INACTIVE_HANDLERS) &&
       !READ_ONLY_INACTIVE_HANDLERS.has(h) &&
       !REPLICATION_INACTIVE_HANDLERS.has(h)
   );
@@ -504,6 +513,7 @@ const EXPECTED_INACTIVE_HANDLERS = [
   "handleRoadmapContextDocumentList",
   "handleRoadmapContextDocumentSyncPull",
   "handleRoadmapContextDocumentSyncPush",
+  "handleRoadmapDispatchAtomic",
   "handleRoadmapExport",
   "handleRoadmapImport",
   "handleRoadmapList",
@@ -584,6 +594,19 @@ test("every GUARDED handler's body calls both inactive predicates the expected n
     const expected = EXPECTED_INACTIVE_GUARD_CALL_COUNTS[name]!;
     expect([name, countOccurrences(body, "refusesInactiveClaim(")]).toEqual([name, expected.claim]);
     expect([name, countOccurrences(body, "refusesInactiveToggle(")]).toEqual([name, expected.toggle]);
+  }
+});
+
+test("every DELEGATING handler writes no card itself and reaches handleRoadmapUpsert through its delegate", () => {
+  const source = readFileSync(BROKER_SRC, "utf8");
+  for (const [name, delegate] of Object.entries(DELEGATING_INACTIVE_HANDLERS)) {
+    const cardWrite = /\b(update|insert\s+into|delete\s+from|replace\s+into)\s+roadmap_items\b/i;
+    const body = stripComments(extractFunctionBody(source, name));
+    expect([name, cardWrite.test(body)]).toEqual([name, false]);
+    expect([name, body.includes(`${delegate}(`)]).toEqual([name, true]);
+    const delegateBody = stripComments(extractFunctionBody(source, delegate));
+    expect([delegate, cardWrite.test(delegateBody)]).toEqual([delegate, false]);
+    expect([delegate, countOccurrences(delegateBody, "handleRoadmapUpsert(")]).toEqual([delegate, 1]);
   }
 });
 

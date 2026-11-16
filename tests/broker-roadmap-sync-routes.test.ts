@@ -672,6 +672,10 @@ test("a pulled row never carries locked_by_token or operator_id, which the store
     "a replica never receives the operator signature of an upstream write",
     "operator_id" in row,
   ]).toEqual(["a replica never receives the operator signature of an upstream write", false]);
+  expect([
+    "a replica never receives a dispatch state tag, local to the broker that computed it",
+    "dispatch_state_tag" in row,
+  ]).toEqual(["a replica never receives a dispatch state tag, local to the broker that computed it", false]);
   // The rest of the lock state does travel: the point is the credential, not the lock.
   expect(row.locked).toBe(true);
   expect(row.locked_by).toBe(reg.body.peer_id);

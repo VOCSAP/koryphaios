@@ -32,6 +32,14 @@ import { createLogger, coreLogDir } from "./shared/logger.ts";
 import { projectKeyCaseRefusal, validateProjectKey } from "./shared/project-key.ts";
 import { roadmapTitleRefusal } from "./shared/roadmap-title.ts";
 import {
+  DISPATCH_OPERATIONS_DDL,
+  atomicDispatchCapability,
+  dispatchStateTag,
+  runAtomicDispatch,
+  type AtomicDispatchDeps,
+  type AtomicDispatchHttp,
+} from "./shared/roadmap-dispatch-atomic.ts";
+import {
   CONTEXT_DEPOSIT_MAX_BODY_BYTES,
   CONTEXT_RESUME_VERSION,
   REGISTER_RESUME_VERSION,
@@ -109,7 +117,7 @@ import {
   runRoadmapContextDocumentDeportCas,
   validateRoadmapContextDocumentLimits,
 } from "./shared/roadmap-context-document-cas.ts";
-import { formatRoadmapStaleSaveError } from "./shared/roadmap-append.ts";
+import { formatRoadmapStaleSaveError, isRoadmapStaleSaveError } from "./shared/roadmap-append.ts";
 import { isValidQueueRank } from "./shared/roadmap-queue.ts";
 import { resolveRoadmapDateFilter, type RoadmapDateWindow } from "./shared/roadmap-date-filter.ts";
 import {
@@ -1259,6 +1267,8 @@ function ensureBrokerId(): string {
   return minted;
 }
 const BROKER_ID = ensureBrokerId();
+
+for (const ddl of DISPATCH_OPERATIONS_DDL) db.run(ddl);
 
 // Rows written before this migration all carry rev = 0, and the pull cursor is
 // exclusive (`rev > since_rev`, starting at 0) -- left at 0 they would be
@@ -4964,6 +4974,97 @@ function handleAnnounce(body: AnnounceRequest): AnnounceResponse | { error: stri
   return { sent };
 }
 
+function handleRoadmapDispatchAtomic(
+  body: Record<string, unknown>
+): AtomicDispatchHttp | { status: number; body: { error: string } } {
+  const author = resolveRoadmapAuthor(body, "/roadmap/dispatch-atomic");
+  if ("error" in author) return { status: author.status, body: { error: author.error } };
+  if (author.operator_id === undefined) {
+    return { status: 403, body: { error: "an atomic dispatch must be signed with the operator credential" } };
+  }
+  const rawIntent = body.intent;
+  const rawGroup =
+    typeof rawIntent === "object" && rawIntent !== null ? (rawIntent as { group_id?: unknown }).group_id : undefined;
+  if (typeof rawGroup === "string") {
+    const secretError = checkGroupSecret(
+      rawGroup,
+      typeof body.group_secret_hash === "string" ? body.group_secret_hash : null
+    );
+    if (secretError) return { status: secretError.status, body: { error: secretError.error } };
+  }
+  return runAtomicDispatch(atomicDispatchDeps(author), author.operator_id, body);
+}
+
+function atomicDispatchDeps(author: RoadmapAuthor): AtomicDispatchDeps {
+  return {
+    db,
+    now: () => Date.now(),
+    brokerId: BROKER_ID,
+    isPeerId: (value) => PEER_ID_REGEX.test(value) && !RESERVED_PEER_IDS.includes(value),
+    findTarget: (groupId, peerId) => {
+      const row = db
+        .query(
+          "SELECT instance_token FROM peers WHERE group_id = ? AND peer_id = ? AND status = 'active' AND via IS NULL"
+        )
+        .get(groupId, peerId) as { instance_token: InstanceToken } | null;
+      return row ? { token: row.instance_token } : null;
+    },
+    loadMember: (id) => {
+      const row = getRoadmapRow(id);
+      if (!row) return null;
+      return {
+        id: row.id,
+        project_key: row.project_key,
+        kind: row.kind,
+        status: row.status,
+        inactive: row.inactive === 1,
+        deleted_at: row.deleted_at,
+        queue: row.queue,
+        content_rev: row.content_rev,
+        state_tag: dispatchStateTag(row, BROKER_ID),
+      };
+    },
+    headWaveIds: (projectKey) => {
+      // ORDER BY queue, id is the queue order the Deck derives (BINARY collation).
+      const rows = db
+        .query(
+          `SELECT id, queue FROM roadmap_items
+            WHERE project_key = ? AND queue IS NOT NULL AND status NOT IN ('done', 'archived')
+            ORDER BY queue, id`
+        )
+        .all(projectKey) as { id: string; queue: number }[];
+      const head = rows[0]?.queue;
+      return rows.filter((r) => r.queue === head).map((r) => r.id);
+    },
+    writeMember: (member, patch, expectedContentRev) => {
+      const result = handleRoadmapUpsert(
+        {
+          id: member.id,
+          by: author.by,
+          status: patch.status,
+          queue: patch.queue,
+          expected_content_rev: expectedContentRev,
+        } as RoadmapUpsertRequest,
+        author
+      );
+      if ("error" in result) {
+        return {
+          ok: false,
+          reason: result.status === 409 && isRoadmapStaleSaveError(result.error) ? "card-changed" : "ineligible",
+        };
+      }
+      return { ok: true, card: result.item };
+    },
+    insertMessage: (token, groupId, text, sentAt) => {
+      const res = insertMessage.run(DECK_INSTANCE_TOKEN, token as InstanceToken, groupId, text, sentAt);
+      updateLastActivity.run(sentAt, token as InstanceToken);
+      return Number(res.lastInsertRowid);
+    },
+    push: ({ token, messageId, text, sentAt }) => pushDeckMessage(token as InstanceToken, messageId, text, sentAt),
+    warn: (message, detail) => log.warn(message, detail),
+  };
+}
+
 // Card 1d9f25e5: group_id comes from the CALLER, not from a lookup here.
 // The single caller (ws-auth handshake, ~line 4715) already reads it off the
 // same peers row it just used to confirm `status = 'active'`, one query
@@ -5180,6 +5281,7 @@ function rowToRoadmapItem(row: RoadmapRow): RoadmapItem {
     updated_at: row.updated_at,
     content_updated_at: row.content_updated_at,
     content_rev: row.content_rev,
+    dispatch_state_tag: dispatchStateTag(row, BROKER_ID),
     deleted_at: row.deleted_at,
     queue: row.queue,
     directive: row.directive ?? null,
@@ -6022,10 +6124,15 @@ function refusesTriageContradiction(
   return nextTriage === "wontfix" && nextPriority !== "wont";
 }
 
+/**
+ * `provenAuthor`: a caller that already verified the operator proof of this
+ * very request (the atomic dispatch writes N cards under one proof) passes it.
+ */
 function handleRoadmapUpsert(
-  body: RoadmapUpsertRequest
+  body: RoadmapUpsertRequest,
+  provenAuthor?: RoadmapAuthor
 ): RoadmapUpsertResponse | { error: string; status: number } {
-  const author = resolveRoadmapAuthor(body, "/roadmap/upsert");
+  const author = provenAuthor ?? resolveRoadmapAuthor(body, "/roadmap/upsert");
   if ("error" in author) return author;
   const by = author.by;
   if (
@@ -14110,6 +14217,7 @@ const server = Bun.serve<WsData>({
           serve_replicas: SERVE_REPLICAS,
           delegation_policy: DELEGATION_POLICY,
           untracked_reply_version: UNTRACKED_REPLY_VERSION,
+          atomic_dispatch: atomicDispatchCapability(BROKER_ID),
           // Only a replica has an upstream to be online against; on the other
           // modes the field is absent rather than a misleading `true`.
           ...(BROKER_MODE === "replica"
@@ -14309,6 +14417,10 @@ const server = Bun.serve<WsData>({
             return Response.json({ error: result.error }, { status: result.status });
           }
           return Response.json(result);
+        }
+        case "/roadmap/dispatch-atomic": {
+          const result = handleRoadmapDispatchAtomic(body as Record<string, unknown>);
+          return Response.json(result.body, { status: result.status });
         }
         case "/roadmap/upsert": {
           const result = handleRoadmapUpsert(body as RoadmapUpsertRequest);

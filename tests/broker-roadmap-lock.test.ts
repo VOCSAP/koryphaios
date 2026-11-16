@@ -687,7 +687,9 @@ test("card e344fa79: rowToRoadmapItem's response covers every roadmap_items colu
   // Equality, not a subset check: a public column dropped from the projection
   // and an unclassified new column both land here and both fail.
   expect(missing).toEqual(INTERNAL_ONLY_COLUMNS);
-  expect(extra).toEqual([]); // a key in the response with no backing column
+  // A key with no backing column is a defect, except the one computed on read
+  // from several columns.
+  expect(extra).toEqual(["dispatch_state_tag"]);
 
   // Sanity companion, not a substitute for the two checks above: the schema
   // and ROADMAP_IMPORT_COLUMNS (a list maintained independently, for a

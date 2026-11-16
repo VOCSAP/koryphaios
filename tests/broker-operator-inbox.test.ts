@@ -338,6 +338,13 @@ const RECIPIENT_ROUTES: Record<string, RecipientClassification> = {
     reason:
       "The targeted-announce resolution filters status='active' and the sentinel rows are seeded permanently dormant, so 'operator' resolves to nothing and the route 404s before any insert. Contingent on BOTH properties -- probed live below, not merely asserted here.",
   },
+  AtomicDispatchIntent: {
+    field: "to_peer_id",
+    route: "/roadmap/dispatch-atomic",
+    verdict: "guarded",
+    reason:
+      "The intent's peer id is refused when it is a reserved identity (isPeerId in atomicDispatchDeps) before any lookup, and the target lookup filters status='active' on local rows, so a sentinel never resolves. Proven by tests/broker-roadmap-dispatch-atomic.test.ts.",
+  },
   RoadmapItem: {
     field: "target_peer_ids",
     route: "/roadmap/import",
