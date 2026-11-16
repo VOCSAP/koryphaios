@@ -15,6 +15,7 @@ import { join } from 'node:path'
 // types travel with them: they are what makes each POST body below a checked
 // shape instead of an object literal nobody validates.
 import type {
+  AtomicDispatchCapability,
   DispatchRequest,
   DispatchRequestListRequest,
   DispatchRequestListResponse,
@@ -62,6 +63,48 @@ export async function fetchOperatorTrustHealth(
   const res = await fetchImpl(`${endpoint.url}/health`, { signal: AbortSignal.timeout(2000) })
   if (!res.ok) return null
   return parseOperatorTrustHealth(await res.json())
+}
+
+/** Slack an operation deadline keeps under the broker's maximum lifetime. */
+export const ATOMIC_OPERATION_MARGIN_MS = 5_000
+
+/**
+ * What a broker's /health says about the atomic dispatch route. null means the
+ * property is absent: an old broker. Anything else that is not a usable
+ * capability rejects, like an unreachable or unreadable /health, so only a
+ * certain absence ever selects the previous announce-then-write order.
+ */
+export async function fetchAtomicDispatchCapability(
+  endpoint: BrokerEndpoint,
+  fetchImpl: typeof fetch = fetch
+): Promise<AtomicDispatchCapability | null> {
+  const res = await fetchImpl(`${endpoint.url}/health`, { signal: AbortSignal.timeout(2000) })
+  if (!res.ok) throw new Error(`broker /health answered ${res.status}`)
+  const health: unknown = await res.json()
+  if (!health || typeof health !== 'object') throw new Error('broker /health is not an object')
+  if (!('atomic_dispatch' in health)) return null
+  const c = (health as { atomic_dispatch: unknown }).atomic_dispatch as Record<string, unknown> | null
+  const positive = (v: unknown): v is number => typeof v === 'number' && Number.isSafeInteger(v) && v > 0
+  if (
+    !c ||
+    typeof c !== 'object' ||
+    c.version !== 1 ||
+    typeof c.broker_id !== 'string' ||
+    !/^[A-Za-z0-9-]{8,64}$/.test(c.broker_id) ||
+    !positive(c.max_operation_ms) ||
+    c.max_operation_ms <= ATOMIC_OPERATION_MARGIN_MS ||
+    !positive(c.max_members) ||
+    !positive(c.registry_capacity)
+  ) {
+    throw new Error('broker /health carries an atomic_dispatch capability this Deck cannot use: dispatch refused, not sent in the previous order')
+  }
+  return {
+    version: 1,
+    broker_id: c.broker_id,
+    max_operation_ms: c.max_operation_ms,
+    max_members: c.max_members,
+    registry_capacity: c.registry_capacity
+  }
 }
 
 /** The broker, or the server owning the target, cannot resume a deposit: retrying the same call cannot succeed. */

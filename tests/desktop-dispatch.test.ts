@@ -4,6 +4,7 @@ import { test, expect } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
+  atomicOperationId,
   autoDispatchHold,
   canAutoDispatchNext,
   composeAssignText,
@@ -11,10 +12,15 @@ import {
   composeDispatchText,
   composeMultiDispatchText,
   composeStopText,
+  createAssigner,
+  createDispatcher,
+  createDispatchRequestPoller,
   createFailureReporter,
+  createUnconfirmedGate,
   dependencyHoldReason,
   dispatchNormalWave,
   dispatchTracked,
+  dispatchWave,
   firstQueued,
   nextBarrierPending,
   nextDispatchedState,
@@ -26,12 +32,18 @@ import {
   runDirectiveWave,
   runDispatchRequestPoll,
   runStop,
+  settleUnconfirmed,
   splitWave,
   UNRESOLVED_TARGET_NOTE,
   unresolvedDirectiveNote,
   type AssignDeps,
+  type AtomicPort,
+  type AtomicWaveDeps,
+  type DispatcherDeps,
   type StopDeps
 } from "../desktop/src/main/dispatch.ts";
+import { fetchAtomicDispatchCapability } from "../desktop/src/main/broker-client.ts";
+import { findMatchingClose } from "./_braced-body.ts";
 import {
   assignInProgress,
   markDirectiveDone,
@@ -51,7 +63,13 @@ import type {
 // and imported by the three main-process consumers -- not mirrored Deck-side.
 // This test must read them from the same place they do, or it would pin a copy
 // nobody uses.
-import type { DispatchRequest, DispatchRequestOutcome } from "../shared/types";
+import type {
+  AtomicDispatchDelivery,
+  AtomicDispatchIntent,
+  AtomicDispatchRefusal,
+  DispatchRequest,
+  DispatchRequestOutcome
+} from "../shared/types";
 
 function item(over: Partial<RoadmapItem>): RoadmapItem {
   return {
@@ -1143,20 +1161,7 @@ test("SOURCE SCAN (weak): the poller's three deps are the REAL ones, not stubs",
   expect(src).toContain("dispatch: () => dispatchNext()");
   expect(src).toContain("resolve: (id, outcome) => resolveDispatchRequest(id, outcome, { endpoint })");
   // The park branch reads the EXISTING guard rather than declaring a new one.
-  expect(src).toContain("inFlight: () => dispatchInFlight !== null");
-});
-
-test("SOURCE SCAN (weak): DispatchResult.dispatched is produced AND reaches the result", () => {
-  const src = indexSource();
-  // Producer: fed from the same `dispatched` array that drives dispatchedIds,
-  // so the outcome and the tracked set can never name different cards.
-  expect(src).toContain(
-    "announcedMembers.push(...dispatched.map((i) => ({ id: i.id, title: i.title, kind: i.kind })))"
-  );
-  // ...and CONSUMED: producing the array then dropping it on the floor was a
-  // green mutation, because pinning the push alone says nothing about whether
-  // its result ever reaches the returned DispatchResult.
-  expect(src).toContain("dispatched: announcedMembers");
+  expect(src).toContain("inFlight: dispatcher.inFlight");
 });
 
 type RetryRun = { barrierPending: boolean; dispatched: number; lines: string[]; allLines: string[] };
@@ -1577,4 +1582,907 @@ test("watchDispatched: a different failure, or the same one after a successful t
 
 test("watchDispatched: a tick that fails after the roadmap read does not reset the failure memory", async () => {
   expect(await runWatchTicks([null, null], new Error("dispatch exploded"))).toEqual(["dispatch exploded"]);
+});
+
+const BROKER_ID = "11111111-aaaa-bbbb-cccc-222222222222";
+const CAPABILITY = { version: 1 as const, broker_id: BROKER_ID, max_operation_ms: 600_000, max_members: 50, registry_capacity: 2000 };
+const TAG = "a".repeat(64);
+
+function tokened(over: Partial<RoadmapItem>): RoadmapItem {
+  return item({ content_rev: 3, dispatch_state_tag: TAG, queue: 1, ...over });
+}
+
+type Answer = (action: "execute" | "resolve", intent: AtomicDispatchIntent) => AtomicDispatchDelivery;
+
+function sentOf(intent: AtomicDispatchIntent, ids?: string[]): AtomicDispatchDelivery {
+  const members = intent.members.filter((m) => !ids || ids.includes(m.id));
+  return {
+    delivery: "sent",
+    operation_id: intent.operation_id,
+    message_id: 7,
+    cards: members.map((m) => ({ id: m.id, title: `title ${m.id}`, kind: "feature" as const }))
+  };
+}
+const notSentOf = (intent: AtomicDispatchIntent, reason: AtomicDispatchRefusal, ids: string[] = []): AtomicDispatchDelivery => ({
+  delivery: "not-sent",
+  operation_id: intent.operation_id,
+  reason,
+  card_ids: ids
+});
+const unknownOf = (intent: AtomicDispatchIntent, reason: "transport" | "expired" | "broker-mismatch" = "transport"): AtomicDispatchDelivery => ({
+  delivery: "unknown",
+  operation_id: intent.operation_id,
+  reason
+});
+
+let operationSeq = 0;
+
+function scriptedPort(answers: Answer[]): { port: AtomicPort; posted: { action: string; intent: AtomicDispatchIntent }[] } {
+  const posted: { action: string; intent: AtomicDispatchIntent }[] = [];
+  const port: AtomicPort = {
+    capability: CAPABILITY,
+    projectKey: "k",
+    groupId: "group-1",
+    newOperationId: () => `1000:op-${++operationSeq}`,
+    post: async (action, intent) => {
+      posted.push({ action, intent });
+      const answer = answers[posted.length - 1];
+      if (!answer) throw new Error(`unexpected post #${posted.length} (${action})`);
+      return answer(action, intent);
+    }
+  };
+  return { port, posted };
+}
+
+function waveDeps(port: AtomicPort, over: Partial<AtomicWaveDeps> = {}): AtomicWaveDeps & { lines: string[] } {
+  const lines: string[] = [];
+  return {
+    port,
+    target: () => ({ peerId: "lead-1", kind: "lead" }),
+    reread: async () => [],
+    journal: (l) => lines.push(`journal: ${l}`),
+    warn: (l) => lines.push(`warn: ${l}`),
+    ...over,
+    lines
+  };
+}
+
+const A = tokened({ id: "aaaaaaaa-0000-0000-0000-00000000000a", title: "Card A" });
+const B = tokened({ id: "bbbbbbbb-0000-0000-0000-00000000000b", title: "Card B", content_rev: 5 });
+
+const legacyMustNotRun = {
+  announce: async (): Promise<number> => {
+    throw new Error("legacy announce must not run on the atomic path");
+  },
+  upsert: async (): Promise<void> => {
+    throw new Error("legacy upsert must not run on the atomic path");
+  },
+  warn: (): void => {
+    throw new Error("legacy warn must not run on the atomic path");
+  }
+};
+
+test("atomic wave: one execute carries every member's tokens and the lead, and only the sent members are tracked", async () => {
+  const { port, posted } = scriptedPort([(_a, i) => sentOf(i)]);
+  const out = await dispatchWave([A, B], { atomic: waveDeps(port), legacy: legacyMustNotRun, trace: () => {} });
+  expect(posted.map((p) => p.action)).toEqual(["execute"]);
+  expect(posted[0]!.intent).toMatchObject({
+    broker_id: BROKER_ID,
+    project_key: "k",
+    group_id: "group-1",
+    mode: "wave",
+    target_kind: "lead",
+    to_peer_id: "lead-1",
+    members: [
+      { id: A.id, expected_content_rev: 3, expected_dispatch_state_tag: TAG },
+      { id: B.id, expected_content_rev: 5, expected_dispatch_state_tag: TAG }
+    ]
+  });
+  expect(out.result).toMatchObject({ sent: true, delivery: "sent", count: 2, titles: ["Card A", "Card B"] });
+  expect(out.dispatched.map((i) => i.id)).toEqual([A.id, B.id]);
+  expect(out.pending).toBeNull();
+});
+
+const wrongCards: [string, (i: AtomicDispatchIntent) => AtomicDispatchDelivery][] = [
+  ["a card missing", (i) => sentOf(i, [A.id])],
+  [
+    "a card too many",
+    (i) => {
+      const full = sentOf(i);
+      return full.delivery === "sent" ? { ...full, cards: [...full.cards, { id: "eeeeeeee-0000-0000-0000-00000000000e", title: "Stranger", kind: "feature" as const }] } : full;
+    }
+  ],
+  [
+    "a card listed twice",
+    (i) => {
+      const full = sentOf(i);
+      return full.delivery === "sent" ? { ...full, cards: [full.cards[0]!, full.cards[0]!] } : full;
+    }
+  ]
+];
+
+test.each(wrongCards)("atomic wave: a sent outcome with %s is unknown, settled by resolve and tracks nothing", async (_name, answer) => {
+  const { port, posted } = scriptedPort([(_a, i) => answer(i), (_a, i) => answer(i)]);
+  const out = await dispatchWave([A, B], { atomic: waveDeps(port), legacy: legacyMustNotRun, trace: () => {} });
+  expect(posted.map((p) => p.action)).toEqual(["execute", "resolve"]);
+  expect(posted[1]!.intent.operation_id).toBe(posted[0]!.intent.operation_id);
+  expect(out.result).toMatchObject({ sent: false, delivery: "unknown", reason: "unconfirmed" });
+  expect(out.dispatched).toEqual([]);
+  expect(out.pending?.members.map((m) => m.id)).toEqual([A.id, B.id]);
+});
+
+test("atomic wave: a sent outcome naming exactly the members in another order is accepted", async () => {
+  const { port } = scriptedPort([
+    (_a, i) => {
+      const full = sentOf(i);
+      return full.delivery === "sent" ? { ...full, cards: [...full.cards].reverse() } : full;
+    }
+  ]);
+  const out = await dispatchWave([A, B], { atomic: waveDeps(port), legacy: legacyMustNotRun, trace: () => {} });
+  expect(out.result).toMatchObject({ sent: true, delivery: "sent" });
+  expect(out.dispatched.map((i) => i.id)).toEqual([A.id, B.id]);
+});
+
+test("atomic wave: a first answer that is wrong and a resolve that is right settle as sent", async () => {
+  const { port } = scriptedPort([(_a, i) => sentOf(i, [A.id]), (_a, i) => sentOf(i)]);
+  const out = await dispatchWave([A, B], { atomic: waveDeps(port), legacy: legacyMustNotRun, trace: () => {} });
+  expect(out.result).toMatchObject({ sent: true, delivery: "sent", count: 2 });
+});
+
+test("atomic wave: no lead and no sole session means no request and no card touched", async () => {
+  const { port, posted } = scriptedPort([]);
+  const out = await dispatchWave([A], { atomic: waveDeps(port, { target: () => null }), legacy: legacyMustNotRun, trace: () => {} });
+  expect(posted).toHaveLength(0);
+  expect(out.result).toEqual({ sent: false, reason: "no-lead" });
+});
+
+test("atomic wave: the sole active session is addressed with its own target kind", async () => {
+  const { port, posted } = scriptedPort([(_a, i) => sentOf(i)]);
+  await dispatchWave([A], { atomic: waveDeps(port, { target: () => ({ peerId: "solo-1", kind: "sole-active-fallback" }) }), legacy: legacyMustNotRun, trace: () => {} });
+  expect(posted[0]!.intent).toMatchObject({ target_kind: "sole-active-fallback", to_peer_id: "solo-1" });
+});
+
+test("atomic wave: card-changed re-reads and retries ONCE under a new operation id with the fresh tokens", async () => {
+  const fresh = tokened({ id: A.id, title: "Card A", content_rev: 9 });
+  const { port, posted } = scriptedPort([(_a, i) => notSentOf(i, "card-changed", [A.id]), (_a, i) => sentOf(i)]);
+  const deps = waveDeps(port, { reread: async () => [fresh] });
+  const out = await dispatchWave([A, B], { atomic: deps, legacy: legacyMustNotRun, trace: () => {} });
+  expect(posted.map((p) => p.action)).toEqual(["execute", "execute"]);
+  expect(posted[1]!.intent.operation_id).not.toBe(posted[0]!.intent.operation_id);
+  expect(posted[1]!.intent.members).toEqual([{ id: A.id, expected_content_rev: 9, expected_dispatch_state_tag: TAG }]);
+  expect(out.dispatched.map((i) => i.id)).toEqual([A.id]);
+  expect(out.result).toMatchObject({ sent: true, delivery: "sent", notSent: [{ id: B.id, title: "Card B" }] });
+  expect(deps.lines.join("\n")).toContain('card "Card B" left the wave before the retry');
+});
+
+test("atomic wave: queue-changed is retried too, and a second refusal is final", async () => {
+  const { port, posted } = scriptedPort([(_a, i) => notSentOf(i, "queue-changed", [A.id]), (_a, i) => notSentOf(i, "card-changed", [A.id])]);
+  const out = await dispatchWave([A], { atomic: waveDeps(port, { reread: async () => [A] }), legacy: legacyMustNotRun, trace: () => {} });
+  expect(posted).toHaveLength(2);
+  expect(out.result).toMatchObject({ sent: false, delivery: "not-sent", reason: "card-changed", notSent: [{ id: A.id }] });
+  expect(out.dispatched).toEqual([]);
+});
+
+test("atomic wave: a re-read that finds nothing left sends nothing and names every card", async () => {
+  const { port, posted } = scriptedPort([(_a, i) => notSentOf(i, "queue-changed", [A.id, B.id])]);
+  const out = await dispatchWave([A, B], { atomic: waveDeps(port), legacy: legacyMustNotRun, trace: () => {} });
+  expect(posted).toHaveLength(1);
+  expect(out.result).toMatchObject({ sent: false, delivery: "not-sent", reason: "queue-changed" });
+  expect(out.result.notSent?.map((m) => m.id)).toEqual([A.id, B.id]);
+});
+
+test.each<AtomicDispatchRefusal>(["ineligible", "write-failed", "cancelled-before-execution"])(
+  "atomic wave: %s is not retried and names the refusal",
+  async (reason) => {
+    const { port, posted } = scriptedPort([(_a, i) => notSentOf(i, reason, [B.id])]);
+    const out = await dispatchWave([A, B], { atomic: waveDeps(port), legacy: legacyMustNotRun, trace: () => {} });
+    expect(posted).toHaveLength(1);
+    expect(out.result).toMatchObject({ sent: false, delivery: "not-sent", reason, notSent: [{ id: B.id }] });
+    expect(out.dispatched).toEqual([]);
+  }
+);
+
+test("atomic wave: no-target keeps the no-lead reason the barrier already words", async () => {
+  const { port } = scriptedPort([(_a, i) => notSentOf(i, "no-target")]);
+  const out = await dispatchWave([A, B], { atomic: waveDeps(port), legacy: legacyMustNotRun, trace: () => {} });
+  expect(out.result).toMatchObject({ sent: false, delivery: "not-sent", reason: "no-lead" });
+  expect(out.result.notSent?.map((m) => m.id)).toEqual([A.id, B.id]);
+});
+
+test("atomic wave: a lost answer is settled by resolve under the SAME operation id and tracked when it was sent", async () => {
+  const { port, posted } = scriptedPort([(_a, i) => unknownOf(i), (_a, i) => sentOf(i)]);
+  const out = await dispatchWave([A], { atomic: waveDeps(port), legacy: legacyMustNotRun, trace: () => {} });
+  expect(posted.map((p) => p.action)).toEqual(["execute", "resolve"]);
+  expect(posted[1]!.intent).toEqual(posted[0]!.intent);
+  expect(out.result).toMatchObject({ sent: true, delivery: "sent" });
+  expect(out.dispatched.map((i) => i.id)).toEqual([A.id]);
+});
+
+test("atomic wave: an answer still unknown after resolve is never resent, tracks nothing and keeps the operation to settle later", async () => {
+  const { port, posted } = scriptedPort([(_a, i) => unknownOf(i), (_a, i) => unknownOf(i, "expired")]);
+  const out = await dispatchWave([A, B], { atomic: waveDeps(port), legacy: legacyMustNotRun, trace: () => {} });
+  expect(posted.map((p) => p.action)).toEqual(["execute", "resolve"]);
+  expect(out.result).toMatchObject({ sent: false, delivery: "unknown", reason: "unconfirmed" });
+  expect(out.result.unconfirmed?.map((m) => m.id)).toEqual([A.id, B.id]);
+  expect(out.dispatched).toEqual([]);
+  expect(out.pending?.intent.operation_id).toBe(posted[0]!.intent.operation_id);
+  expect(out.pending?.members.map((m) => m.id)).toEqual([A.id, B.id]);
+});
+
+test("atomic wave: unknown that resolve turns into a refusal is not treated as sent and starts no new operation", async () => {
+  const { port, posted } = scriptedPort([(_a, i) => unknownOf(i), (_a, i) => notSentOf(i, "cancelled-before-execution")]);
+  const out = await dispatchWave([A], { atomic: waveDeps(port), legacy: legacyMustNotRun, trace: () => {} });
+  expect(posted).toHaveLength(2);
+  expect(out.result).toMatchObject({ sent: false, delivery: "not-sent", reason: "cancelled-before-execution" });
+  expect(out.pending).toBeNull();
+});
+
+test("atomic wave: a member without a revision or a state tag fails loudly before any request", async () => {
+  const { port, posted } = scriptedPort([]);
+  const bare = item({ id: "cccccccc-0000-0000-0000-00000000000c", title: "Bare" });
+  await expect(dispatchWave([bare], { atomic: waveDeps(port), legacy: legacyMustNotRun, trace: () => {} })).rejects.toThrow(
+    "carries no revision or state tag"
+  );
+  expect(posted).toHaveLength(0);
+});
+
+test("atomic wave: more members than the broker accepts fails before any request", async () => {
+  const { port, posted } = scriptedPort([]);
+  const many = Array.from({ length: CAPABILITY.max_members + 1 }, (_, n) => tokened({ id: `dddddddd-0000-0000-0000-${String(n).padStart(12, "0")}` }));
+  await expect(dispatchWave(many, { atomic: waveDeps(port), legacy: legacyMustNotRun, trace: () => {} })).rejects.toThrow("exceed the 50");
+  expect(posted).toHaveLength(0);
+});
+
+test("a broker without the capability keeps the previous announce-then-write order and traces it", async () => {
+  const order: string[] = [];
+  const out = await dispatchWave([A, B], {
+    atomic: null,
+    legacy: {
+      announce: async () => {
+        order.push("announce");
+        return 1;
+      },
+      upsert: async () => {
+        order.push("upsert");
+      },
+      warn: () => {}
+    },
+    trace: (line) => order.push(`trace: ${line}`)
+  });
+  expect(order[0]).toContain("trace: broker serves no atomic dispatch");
+  expect(order.slice(1)).toEqual(["announce", "upsert", "upsert"]);
+  expect(out.result).toMatchObject({ sent: true, count: 2 });
+  expect(out.result.delivery).toBeUndefined();
+});
+
+test("atomicOperationId puts the deadline inside the broker's maximum and keeps the uuid", () => {
+  expect(atomicOperationId(1_000, "uuid-1", CAPABILITY)).toBe("301000:uuid-1");
+  expect(atomicOperationId(1_000, "uuid-1", { ...CAPABILITY, max_operation_ms: 60_000 })).toBe("56000:uuid-1");
+});
+
+test("settleUnconfirmed: resolve answers decide, and only the operator gives up on an answer that cannot come back", async () => {
+  const intent: AtomicDispatchIntent = {
+    broker_id: BROKER_ID,
+    operation_id: "1000:op-1",
+    project_key: "k",
+    group_id: "group-1",
+    mode: "wave",
+    target_kind: "lead",
+    to_peer_id: "lead-1",
+    members: [A, B].map((i) => ({ id: i.id, expected_content_rev: 3, expected_dispatch_state_tag: TAG }))
+  };
+  const pending = { intent, members: [{ id: A.id, title: "Card A", kind: "feature" }, { id: B.id, title: "Card B", kind: "feature" }] };
+  const answer = (a: AtomicDispatchDelivery): AtomicPort => ({ ...scriptedPort([]).port, post: async () => a });
+  const op = intent.operation_id;
+  const sent: AtomicDispatchDelivery = {
+    delivery: "sent",
+    operation_id: op,
+    message_id: 1,
+    cards: pending.members.map((m) => ({ id: m.id, title: m.title, kind: "feature" as const }))
+  };
+  expect(await settleUnconfirmed(pending, answer(sent), false)).toEqual({ state: "sent", members: pending.members });
+  const partial: AtomicDispatchDelivery = { ...sent, cards: sent.cards.slice(0, 1) };
+  expect(await settleUnconfirmed(pending, answer(partial), false)).toEqual({ state: "unknown" });
+  expect(await settleUnconfirmed(pending, answer({ delivery: "not-sent", operation_id: op, reason: "cancelled-before-execution", card_ids: [] }), false)).toEqual({ state: "not-sent", members: [] });
+  const expired: AtomicDispatchDelivery = { delivery: "unknown", operation_id: op, reason: "expired" };
+  expect(await settleUnconfirmed(pending, answer(expired), false)).toEqual({ state: "unknown" });
+  expect(await settleUnconfirmed(pending, answer(expired), true)).toEqual({ state: "abandoned", members: [] });
+  const mismatch: AtomicDispatchDelivery = { delivery: "unknown", operation_id: op, reason: "broker-mismatch" };
+  expect(await settleUnconfirmed(pending, answer(mismatch), true)).toEqual({ state: "abandoned", members: [] });
+  const lost: AtomicDispatchDelivery = { delivery: "unknown", operation_id: op, reason: "transport" };
+  expect(await settleUnconfirmed(pending, answer(lost), true)).toEqual({ state: "unknown" });
+  expect(await settleUnconfirmed(pending, null, false)).toEqual({ state: "unknown" });
+  expect(await settleUnconfirmed(pending, null, true)).toEqual({ state: "abandoned", members: [] });
+});
+
+function assignDeps(port: AtomicPort | null, reads: (RoadmapItem | null)[]): AssignDeps & { calls: string[] } {
+  const calls: string[] = [];
+  let read = 0;
+  return {
+    atomic: port,
+    read: async () => reads[Math.min(read++, reads.length - 1)] ?? null,
+    announce: async () => {
+      calls.push("announce");
+      return 1;
+    },
+    write: async () => {
+      calls.push("write");
+      return { written: true, item: A };
+    },
+    journal: (l) => calls.push(`journal: ${l}`),
+    warn: (l) => calls.push(`warn: ${l}`),
+    reportError: (m) => calls.push(`error: ${m}`),
+    calls
+  };
+}
+
+test("atomic assign: one execute to the chosen peer, no announce and no separate write", async () => {
+  const { port, posted } = scriptedPort([(_a, i) => sentOf(i)]);
+  const deps = assignDeps(port, [A]);
+  expect(await runAssign(A.id, " worker-9 ", deps)).toEqual({ sent: true, delivery: "sent" });
+  expect(posted[0]!.intent).toMatchObject({ mode: "assign", target_kind: "assignee", to_peer_id: "worker-9", members: [{ id: A.id }] });
+  expect(deps.calls).toEqual(['journal: item "Card A" assigned to "worker-9"']);
+});
+
+test("atomic assign: card-changed re-reads once and retries under a new operation id", async () => {
+  const fresh = tokened({ id: A.id, title: "Card A", content_rev: 8 });
+  const { port, posted } = scriptedPort([(_a, i) => notSentOf(i, "card-changed", [A.id]), (_a, i) => sentOf(i)]);
+  expect(await runAssign(A.id, "worker-9", assignDeps(port, [A, fresh]))).toEqual({ sent: true, delivery: "sent" });
+  expect(posted[1]!.intent.operation_id).not.toBe(posted[0]!.intent.operation_id);
+  expect(posted[1]!.intent.members[0]!.expected_content_rev).toBe(8);
+});
+
+test("atomic assign: a card that vanished before the retry, a refusal and an unknown answer all report sent:false", async () => {
+  const gone = scriptedPort([(_a, i) => notSentOf(i, "card-changed", [A.id])]);
+  expect(await runAssign(A.id, "worker-9", assignDeps(gone.port, [A, null]))).toEqual({ sent: false, delivery: "not-sent", reason: "card-changed" });
+  const refused = scriptedPort([(_a, i) => notSentOf(i, "no-target")]);
+  expect(await runAssign(A.id, "ghost-1", assignDeps(refused.port, [A]))).toEqual({ sent: false, delivery: "not-sent", reason: "no-target" });
+  const lost = scriptedPort([(_a, i) => unknownOf(i), (_a, i) => unknownOf(i)]);
+  const deps = assignDeps(lost.port, [A]);
+  expect(await runAssign(A.id, "worker-9", deps)).toEqual({ sent: false, delivery: "unknown", reason: "unconfirmed" });
+  expect(lost.posted.map((p) => p.action)).toEqual(["execute", "resolve"]);
+  expect(deps.calls.join("\n")).toContain("unconfirmed after resolve");
+});
+
+test("assign without the capability keeps the previous order", async () => {
+  const deps = assignDeps(null, [A]);
+  expect(await runAssign(A.id, "worker-9", deps)).toEqual({ sent: true });
+  expect(deps.calls.slice(0, 2)).toEqual(["announce", "write"]);
+});
+
+test("a dispatch request outcome names a refusal and an unconfirmed delivery instead of 'nothing eligible'", () => {
+  const notSent = composeDispatchOutcome({ sent: false, delivery: "not-sent", reason: "queue-changed", notSent: [{ id: A.id, title: "Card A", kind: "feature" }] });
+  expect(notSent.cards).toEqual([]);
+  expect(notSent.note).toContain("not sent (queue-changed)");
+  expect(notSent.note).toContain('"Card A"');
+  expect(notSent.note).not.toContain("nothing eligible");
+  const unknown = composeDispatchOutcome({ sent: false, delivery: "unknown", reason: "unconfirmed", unconfirmed: [{ id: A.id, title: "Card A", kind: "feature" }] });
+  expect(unknown.cards).toEqual([]);
+  expect(unknown.note).toContain("NOT confirmed");
+  expect(unknown.note).toContain('"Card A"');
+  const subset = composeDispatchOutcome({
+    sent: true,
+    delivery: "sent",
+    dispatched: [{ id: A.id, title: "Card A", kind: "feature" }],
+    notSent: [{ id: B.id, title: "Card B", kind: "feature" }]
+  });
+  expect(subset.cards.map((c) => c.id)).toEqual([A.id]);
+  expect(subset.note).toContain('"Card B" not sent');
+});
+
+async function unknownWave(): Promise<{ pending: NonNullable<Awaited<ReturnType<typeof dispatchWave>>["pending"]>; operationId: string }> {
+  const first = scriptedPort([(_a, i) => unknownOf(i), (_a, i) => unknownOf(i)]);
+  const out = await dispatchWave([A], { atomic: waveDeps(first.port), legacy: legacyMustNotRun, trace: () => {} });
+  return { pending: out.pending!, operationId: first.posted[0]!.intent.operation_id };
+}
+
+test("while a delivery is unconfirmed the next dispatch only resolves it under the same operation id and never executes again", async () => {
+  const { pending, operationId } = await unknownWave();
+  const gate = createUnconfirmedGate(() => {});
+  gate.remember(pending);
+  const next = scriptedPort([(_a, i) => unknownOf(i)]);
+  const early = await gate.beforeDispatch(next.port, false, () => {});
+  expect(early).toMatchObject({ sent: false, delivery: "unknown", reason: "unconfirmed", unconfirmed: [{ id: A.id }] });
+  expect(next.posted.map((p) => p.action)).toEqual(["resolve"]);
+  expect(next.posted[0]!.intent.operation_id).toBe(operationId);
+  const again = scriptedPort([(_a, i) => unknownOf(i)]);
+  expect(await gate.beforeDispatch(again.port, false, () => {})).toMatchObject({ delivery: "unknown" });
+});
+
+test("an unconfirmed delivery that resolve says was sent is tracked once, reported as sent, and the gate opens", async () => {
+  const { pending } = await unknownWave();
+  const journal: string[] = [];
+  const gate = createUnconfirmedGate((l) => journal.push(l));
+  gate.remember(pending);
+  const tracked: string[] = [];
+  const next = scriptedPort([(_a, i) => sentOf(i)]);
+  const early = await gate.beforeDispatch(next.port, false, (members) => tracked.push(...members.map((m) => m.id)));
+  expect(early).toMatchObject({ sent: true, delivery: "sent", dispatched: [{ id: A.id }] });
+  expect(tracked).toEqual([A.id]);
+  expect(journal.join("\n")).toContain("1 item(s) were sent");
+  const after = scriptedPort([]);
+  expect(await gate.beforeDispatch(after.port, false, () => {})).toBeNull();
+  expect(after.posted).toHaveLength(0);
+});
+
+test("an unconfirmed delivery that resolve says was not sent lets the dispatch go on and tracks nothing", async () => {
+  const { pending } = await unknownWave();
+  const gate = createUnconfirmedGate(() => {});
+  gate.remember(pending);
+  const tracked: string[] = [];
+  const next = scriptedPort([(_a, i) => notSentOf(i, "cancelled-before-execution")]);
+  expect(await gate.beforeDispatch(next.port, false, (m) => tracked.push(...m.map((x) => x.id)))).toBeNull();
+  expect(tracked).toEqual([]);
+});
+
+test("only the operator's own dispatch gives up on an answer that can never come back", async () => {
+  const { pending } = await unknownWave();
+  const expired: Answer = (_a, i) => unknownOf(i, "expired");
+  const auto = createUnconfirmedGate(() => {});
+  auto.remember(pending);
+  expect(await auto.beforeDispatch(scriptedPort([expired]).port, false, () => {})).toMatchObject({ delivery: "unknown" });
+  const manual = createUnconfirmedGate(() => {});
+  manual.remember(pending);
+  expect(await manual.beforeDispatch(scriptedPort([expired]).port, true, () => {})).toBeNull();
+});
+
+test("remembering nothing keeps the unconfirmed delivery already held", async () => {
+  const { pending } = await unknownWave();
+  const gate = createUnconfirmedGate(() => {});
+  gate.remember(pending);
+  gate.remember(null);
+  expect(await gate.beforeDispatch(scriptedPort([(_a, i) => unknownOf(i)]).port, false, () => {})).toMatchObject({ delivery: "unknown" });
+});
+
+function healthOf(body: unknown, status = 200): typeof fetch {
+  return (async () => new Response(typeof body === "string" ? body : JSON.stringify(body), { status })) as unknown as typeof fetch;
+}
+
+const GOOD_CAPABILITY = { version: 1 as const, broker_id: BROKER_ID, max_operation_ms: 600_000, max_members: 50, registry_capacity: 2000 };
+const EP = { url: "http://127.0.0.1:1", token: null };
+
+test("the capability is absent only when /health says nothing about it", async () => {
+  expect(await fetchAtomicDispatchCapability(EP, healthOf({ status: "ok" }))).toBeNull();
+  expect(await fetchAtomicDispatchCapability(EP, healthOf({ status: "ok", atomic_dispatch: GOOD_CAPABILITY }))).toEqual(GOOD_CAPABILITY);
+});
+
+test.each<[string, unknown]>([
+  ["null", { atomic_dispatch: null }],
+  ["a bare version", { atomic_dispatch: { version: 1 } }],
+  ["an unknown version", { atomic_dispatch: { ...GOOD_CAPABILITY, version: 2 } }],
+  ["a lifetime no longer than the margin", { atomic_dispatch: { ...GOOD_CAPABILITY, max_operation_ms: 5_000 } }],
+  ["a malformed broker id", { atomic_dispatch: { ...GOOD_CAPABILITY, broker_id: "x" } }],
+  ["a non-positive limit", { atomic_dispatch: { ...GOOD_CAPABILITY, max_members: 0 } }],
+  ["a string", { atomic_dispatch: "yes" }]
+])("a present but unusable capability (%s) rejects instead of selecting the previous order", async (_name, health) => {
+  await expect(fetchAtomicDispatchCapability(EP, healthOf(health))).rejects.toThrow("cannot use");
+});
+
+test("an unreadable or failing /health rejects too", async () => {
+  await expect(fetchAtomicDispatchCapability(EP, healthOf("not json"))).rejects.toThrow();
+  await expect(fetchAtomicDispatchCapability(EP, healthOf({}, 503))).rejects.toThrow("503");
+  await expect(fetchAtomicDispatchCapability(EP, healthOf("null"))).rejects.toThrow("not an object");
+});
+
+type HarnessOver = Partial<Omit<DispatcherDeps, "openRun">> & {
+  readPort?: () => Promise<AtomicPort | null>;
+  openRun?: DispatcherDeps["openRun"];
+};
+
+function harness(over: HarnessOver = {}, queue: RoadmapItem[] = [A, B]) {
+  const calls: string[] = [];
+  const tracked: string[] = [];
+  const errors: string[] = [];
+  const journal: string[] = [];
+  const { readPort, openRun, ...rest } = over;
+  const deps: DispatcherDeps = {
+    openRun:
+      openRun ??
+      (async () => {
+        calls.push("readPort");
+        const port = readPort ? await readPort() : null;
+        return {
+          port,
+          list: async () => {
+            calls.push("list");
+            return queue;
+          },
+          directives: {
+            markDone: async () => {
+              calls.push("markDone");
+              return undefined;
+            },
+            execute: async (d) => {
+              calls.push("execute-directive");
+              return { id: d.id, title: d.title, directive: "clear", injected: [], unreached: [] };
+            },
+            journal: () => {},
+            reportError: () => {},
+            noteUnresolved: async () => {}
+          },
+          legacy: {
+            announce: async () => {
+              calls.push("announce");
+              return 1;
+            },
+            upsert: async () => {
+              calls.push("upsert");
+            },
+            warn: () => {}
+          }
+        };
+      }),
+    target: () => ({ peerId: "lead-1", kind: "lead" }),
+    track: (members) => tracked.push(...members.map((m) => m.id)),
+    journal: (l) => journal.push(l),
+    warn: () => {},
+    trace: () => calls.push("trace"),
+    reportError: (m) => errors.push(m),
+    ...rest
+  };
+  return { dispatcher: createDispatcher(deps), calls, tracked, errors, journal };
+}
+
+const portQueue = (...ports: AtomicPort[]) => async (): Promise<AtomicPort | null> => ports.shift() ?? null;
+
+test("dispatch: a capability that cannot be read sends nothing in either order and says so", async () => {
+  const h = harness({
+    readPort: async () => {
+      throw new Error("health down");
+    }
+  });
+  expect(await h.dispatcher.dispatch(true)).toEqual({ sent: false, reason: "error" });
+  expect(h.calls).toEqual(["readPort"]);
+  expect(h.errors).toEqual(["dispatch failed"]);
+});
+
+test("dispatch: no capability at all keeps the previous order, after a trace", async () => {
+  const h = harness();
+  const result = await h.dispatcher.dispatch(false);
+  expect(h.calls).toEqual(["readPort", "list", "trace", "announce", "upsert", "upsert"]);
+  expect(result).toMatchObject({ sent: true, count: 2 });
+  expect(h.tracked).toEqual([A.id, B.id]);
+});
+
+test("dispatch: the capability is read before anything is listed or sent, and only confirmed members are tracked", async () => {
+  const { port } = scriptedPort([(_a, i) => sentOf(i)]);
+  const h = harness({ readPort: async () => port });
+  const result = await h.dispatcher.dispatch(false);
+  expect(h.calls).toEqual(["readPort", "list"]);
+  expect(result).toMatchObject({ sent: true, delivery: "sent", dispatched: [{ id: A.id }, { id: B.id }] });
+  expect(h.tracked).toEqual([A.id, B.id]);
+});
+
+test("dispatch: a refusal tracks nothing", async () => {
+  const { port } = scriptedPort([(_a, i) => notSentOf(i, "ineligible", [A.id])]);
+  const h = harness({ readPort: async () => port });
+  const result = await h.dispatcher.dispatch(false);
+  expect(result).toMatchObject({ sent: false, delivery: "not-sent", reason: "ineligible" });
+  expect(result.dispatched).toBeUndefined();
+  expect(h.tracked).toEqual([]);
+});
+
+test("dispatch: directive cards run before the wave and are reported with it", async () => {
+  const directive = tokened({ id: "cccccccc-0000-0000-0000-00000000000c", title: "Dir", kind: "directive", directive: "clear" });
+  const { port } = scriptedPort([(_a, i) => sentOf(i)]);
+  const h = harness({ readPort: async () => port }, [A, directive]);
+  const result = await h.dispatcher.dispatch(false);
+  expect(h.calls).toEqual(["readPort", "list", "markDone", "execute-directive"]);
+  expect(result.directives?.map((d) => d.id)).toEqual([directive.id]);
+  expect(result.dispatched?.map((m) => m.id)).toEqual([A.id]);
+});
+
+test("dispatch: a delivery left unknown is remembered, and the next call only resolves it under the same operation id before any read", async () => {
+  const first = scriptedPort([(_a, i) => unknownOf(i), (_a, i) => unknownOf(i)]);
+  const second = scriptedPort([(_a, i) => unknownOf(i)]);
+  const h = harness({ readPort: portQueue(first.port, second.port) });
+  expect(await h.dispatcher.dispatch(false)).toMatchObject({ sent: false, delivery: "unknown", reason: "unconfirmed" });
+  expect(h.calls.filter((c) => c === "list")).toHaveLength(1);
+  expect(await h.dispatcher.dispatch(false)).toMatchObject({ sent: false, delivery: "unknown", unconfirmed: [{ id: A.id }, { id: B.id }] });
+  expect(second.posted.map((p) => p.action)).toEqual(["resolve"]);
+  expect(second.posted[0]!.intent.operation_id).toBe(first.posted[0]!.intent.operation_id);
+  expect(h.calls.filter((c) => c === "list")).toHaveLength(1);
+  expect(h.tracked).toEqual([]);
+});
+
+test("dispatch: a remembered delivery that resolve confirms is tracked, reported, and sends nothing new", async () => {
+  const first = scriptedPort([(_a, i) => unknownOf(i), (_a, i) => unknownOf(i)]);
+  const second = scriptedPort([(_a, i) => sentOf(i)]);
+  const h = harness({ readPort: portQueue(first.port, second.port) });
+  await h.dispatcher.dispatch(false);
+  const result = await h.dispatcher.dispatch(false);
+  expect(result).toMatchObject({ sent: true, delivery: "sent", dispatched: [{ id: A.id }, { id: B.id }] });
+  expect(h.tracked).toEqual([A.id, B.id]);
+  expect(second.posted.map((p) => p.action)).toEqual(["resolve"]);
+  expect(h.calls.filter((c) => c === "list")).toHaveLength(1);
+});
+
+test("dispatch: only the operator's own dispatch gives up on a delivery whose answer cannot come back", async () => {
+  const first = scriptedPort([(_a, i) => unknownOf(i), (_a, i) => unknownOf(i)]);
+  const auto = scriptedPort([(_a, i) => unknownOf(i, "expired")]);
+  const manual = scriptedPort([(_a, i) => unknownOf(i, "expired"), (_a, i) => sentOf(i)]);
+  const h = harness({ readPort: portQueue(first.port, auto.port, manual.port) });
+  await h.dispatcher.dispatch(false);
+  expect(await h.dispatcher.dispatch(false)).toMatchObject({ delivery: "unknown" });
+  expect(h.calls.filter((c) => c === "list")).toHaveLength(1);
+  const result = await h.dispatcher.dispatch(true);
+  expect(result).toMatchObject({ sent: true, delivery: "sent" });
+  expect(manual.posted.map((p) => p.action)).toEqual(["resolve", "execute"]);
+  expect(h.journal.join("\n")).toContain("given up by the operator");
+});
+
+test("dispatch: overlapping calls share one run", async () => {
+  const { port, posted } = scriptedPort([(_a, i) => sentOf(i)]);
+  const h = harness({ readPort: async () => port });
+  const one = h.dispatcher.dispatch(false);
+  const two = h.dispatcher.dispatch(true);
+  expect(h.dispatcher.inFlight()).toBe(true);
+  expect(await two).toBe(await one);
+  expect(posted).toHaveLength(1);
+  expect(h.dispatcher.inFlight()).toBe(false);
+});
+
+function assignerHarness(readPort: () => Promise<AtomicPort | null>) {
+  const calls: string[] = [];
+  const order: string[] = [];
+  const journal: string[] = [];
+  const errors: string[] = [];
+  const assign = createAssigner({
+    openRun: async () => ({
+      port: await readPort(),
+      read: async (id) => [A, B].find((i) => i.id === id) ?? null,
+      announce: async () => {
+        calls.push("announce");
+        order.push("announce");
+        return 1;
+      },
+      write: async () => {
+        calls.push("write");
+        order.push("write");
+        return { written: true, item: A };
+      }
+    }),
+    journal: (l) => {
+      journal.push(l);
+      order.push(`journal: ${l}`);
+    },
+    warn: () => {},
+    reportError: (m) => errors.push(m),
+    trace: () => calls.push("trace")
+  });
+  return { assign, calls, order, journal, errors };
+}
+
+test("assign: a capability that cannot be read sends nothing in either order", async () => {
+  const h = assignerHarness(async () => {
+    throw new Error("health down");
+  });
+  expect(await h.assign(A.id, "worker-9")).toEqual({ sent: false, reason: "error" });
+  expect(h.calls).toEqual([]);
+  expect(h.errors).toHaveLength(1);
+});
+
+test("assign: no capability keeps the previous order, after a trace", async () => {
+  const h = assignerHarness(async () => null);
+  expect(await h.assign(A.id, "worker-9")).toEqual({ sent: true });
+  expect(h.calls).toEqual(["trace", "announce", "write"]);
+});
+
+test("assign: an assignment left unknown is resolved under the same operation id before any new one, and never re-executed", async () => {
+  const first = scriptedPort([(_a, i) => unknownOf(i), (_a, i) => unknownOf(i)]);
+  const again = scriptedPort([(_a, i) => unknownOf(i)]);
+  const settled = scriptedPort([(_a, i) => sentOf(i)]);
+  const fresh = scriptedPort([(_a, i) => sentOf(i)]);
+  const h = assignerHarness(portQueue(first.port, again.port, settled.port, fresh.port));
+  expect(await h.assign(A.id, "worker-9")).toEqual({ sent: false, delivery: "unknown", reason: "unconfirmed" });
+  expect(await h.assign(A.id, "worker-9")).toEqual({ sent: false, delivery: "unknown", reason: "unconfirmed" });
+  expect(again.posted.map((p) => p.action)).toEqual(["resolve"]);
+  expect(again.posted[0]!.intent.operation_id).toBe(first.posted[0]!.intent.operation_id);
+  expect(await h.assign(A.id, "worker-9")).toEqual({ sent: true, delivery: "sent" });
+  expect(settled.posted.map((p) => p.action)).toEqual(["resolve"]);
+  expect(await h.assign(A.id, "worker-9")).toEqual({ sent: true, delivery: "sent" });
+  expect(fresh.posted.map((p) => p.action)).toEqual(["execute"]);
+  expect(fresh.posted[0]!.intent.operation_id).not.toBe(first.posted[0]!.intent.operation_id);
+});
+
+test("assign: an unknown assignment of one card does not hold another card", async () => {
+  const first = scriptedPort([(_a, i) => unknownOf(i), (_a, i) => unknownOf(i)]);
+  const other = scriptedPort([(_a, i) => sentOf(i)]);
+  const h = assignerHarness(portQueue(first.port, other.port));
+  await h.assign(A.id, "worker-9");
+  expect(await h.assign(B.id, "worker-9")).toEqual({ sent: true, delivery: "sent" });
+  expect(other.posted.map((p) => p.action)).toEqual(["execute"]);
+});
+
+test("assign: the operator's next click gives up on an answer that cannot come back, and says so", async () => {
+  const first = scriptedPort([(_a, i) => unknownOf(i), (_a, i) => unknownOf(i)]);
+  const next = scriptedPort([(_a, i) => unknownOf(i, "expired"), (_a, i) => sentOf(i)]);
+  const h = assignerHarness(portQueue(first.port, next.port));
+  await h.assign(A.id, "worker-9");
+  expect(await h.assign(A.id, "worker-9")).toEqual({ sent: true, delivery: "sent" });
+  expect(next.posted.map((p) => p.action)).toEqual(["resolve", "execute"]);
+  expect(h.journal.join("\n")).toContain('unconfirmed assignment of "Card A" given up by the operator');
+});
+
+test("the dispatch request poll reports a failure once, again only after a good tick, and never swallows it", async () => {
+  const reported: string[] = [];
+  const outcomes: (Error | null)[] = [new Error("broker down"), new Error("broker down"), null, new Error("broker down"), new Error("other")];
+  const poll = createDispatchRequestPoller({
+    run: async () => {
+      const next = outcomes.shift();
+      if (next) throw next;
+    },
+    reportFailure: (e) => reported.push((e as Error).message)
+  });
+  for (let n = 0; n < 5; n++) await poll();
+  expect(reported).toEqual(["broker down", "broker down", "other"]);
+});
+
+test("assign: an assignment left unknown is given up in the journal, before any announce, when the capability is gone at the next click", async () => {
+  const first = scriptedPort([(_a, i) => unknownOf(i), (_a, i) => unknownOf(i)]);
+  const h = assignerHarness(portQueue(first.port));
+  expect(await h.assign(A.id, "worker-9")).toEqual({ sent: false, delivery: "unknown", reason: "unconfirmed" });
+  expect(await h.assign(A.id, "worker-9")).toEqual({ sent: true });
+  const gaveUp = h.order.findIndex((l) => l.includes('unconfirmed assignment of "Card A" given up by the operator'));
+  expect(gaveUp).toBeGreaterThanOrEqual(0);
+  expect(gaveUp).toBeLessThan(h.order.indexOf("announce"));
+});
+
+test("assign: while an assignment is unconfirmed the card is not read again before it is settled", async () => {
+  const ports = [scriptedPort([(_a, i) => unknownOf(i), (_a, i) => unknownOf(i)]).port, scriptedPort([(_a, i) => unknownOf(i)]).port];
+  const reads: string[] = [];
+  const assign = createAssigner({
+    openRun: async () => ({
+      port: ports.shift() ?? null,
+      read: async (id) => {
+        reads.push(id);
+        return A;
+      },
+      announce: async () => 1,
+      write: async () => ({ written: true, item: A })
+    }),
+    journal: () => {},
+    warn: () => {},
+    reportError: () => {},
+    trace: () => {}
+  });
+  await assign(A.id, "worker-9");
+  expect(reads).toEqual([A.id]);
+  expect(await assign(A.id, "worker-9")).toMatchObject({ delivery: "unknown" });
+  expect(reads).toEqual([A.id]);
+});
+
+test("dispatch: one run opens one context, and the first list, the reread and the directives all come from it", async () => {
+  const used: string[] = [];
+  let opens = 0;
+  const { port } = scriptedPort([(_a, i) => notSentOf(i, "card-changed", [A.id]), (_a, i) => sentOf(i)]);
+  const directive = tokened({ id: "cccccccc-0000-0000-0000-00000000000c", title: "Dir", kind: "directive", directive: "clear" });
+  const h = harness({
+    openRun: async () => {
+      opens += 1;
+      const run = `run-${opens}`;
+      return {
+        port,
+        list: async () => {
+          used.push(`${run}:list`);
+          return [A, B, directive];
+        },
+        directives: {
+          markDone: async () => {
+            used.push(`${run}:markDone`);
+            return undefined;
+          },
+          execute: async (d) => ({ id: d.id, title: d.title, directive: "clear", injected: [], unreached: [] }),
+          journal: () => {},
+          reportError: () => {},
+          noteUnresolved: async () => {}
+        },
+        legacy: legacyMustNotRun
+      };
+    }
+  });
+  await h.dispatcher.dispatch(false);
+  expect(opens).toBe(1);
+  expect(used).toEqual(["run-1:list", "run-1:markDone", "run-1:list"]);
+});
+
+test("dispatch: the previous-order effects of a run come from the run that read the capability", async () => {
+  const used: string[] = [];
+  let opens = 0;
+  const h = harness({
+    openRun: async () => {
+      opens += 1;
+      const run = `run-${opens}`;
+      return {
+        port: null,
+        list: async () => [A, B],
+        directives: { markDone: async () => undefined, execute: async (d) => ({ id: d.id, title: d.title, directive: "clear", injected: [], unreached: [] }), journal: () => {}, reportError: () => {}, noteUnresolved: async () => {} },
+        legacy: {
+          announce: async () => {
+            used.push(`${run}:announce`);
+            return 1;
+          },
+          upsert: async () => {
+            used.push(`${run}:upsert`);
+          },
+          warn: () => {}
+        }
+      };
+    }
+  });
+  await h.dispatcher.dispatch(false);
+  expect(opens).toBe(1);
+  expect(used).toEqual(["run-1:announce", "run-1:upsert", "run-1:upsert"]);
+});
+
+test("assign: one assignment opens one context, and the read, the retry read, the announce and the write all come from it", async () => {
+  const used: string[] = [];
+  let opens = 0;
+  const { port } = scriptedPort([(_a, i) => notSentOf(i, "card-changed", [A.id]), (_a, i) => sentOf(i)]);
+  const assign = createAssigner({
+    openRun: async () => {
+      opens += 1;
+      const run = `run-${opens}`;
+      return {
+        port,
+        read: async (id) => {
+          used.push(`${run}:read`);
+          return [A, B].find((i) => i.id === id) ?? null;
+        },
+        announce: async () => {
+          used.push(`${run}:announce`);
+          return 1;
+        },
+        write: async () => {
+          used.push(`${run}:write`);
+          return { written: true, item: A };
+        }
+      };
+    },
+    journal: () => {},
+    warn: () => {},
+    reportError: () => {},
+    trace: () => {}
+  });
+  expect(await assign(A.id, "worker-9")).toEqual({ sent: true, delivery: "sent" });
+  expect(opens).toBe(1);
+  expect(used).toEqual(["run-1:read", "run-1:read"]);
+  const previous = createAssigner({
+    openRun: async () => {
+      opens += 1;
+      const run = `run-${opens}`;
+      return {
+        port: null,
+        read: async (id) => {
+          used.push(`${run}:read`);
+          return [A, B].find((i) => i.id === id) ?? null;
+        },
+        announce: async () => {
+          used.push(`${run}:announce`);
+          return 1;
+        },
+        write: async () => {
+          used.push(`${run}:write`);
+          return { written: true, item: A };
+        }
+      };
+    },
+    journal: () => {},
+    warn: () => {},
+    reportError: () => {},
+    trace: () => {}
+  });
+  await previous(B.id, "worker-9");
+  expect(used.slice(2)).toEqual(["run-2:read", "run-2:announce", "run-2:write"]);
+});
+
+test("SOURCE SCAN (weak): the dispatcher and the assigner resolve the broker endpoint once each, inside openRun", () => {
+  const src = indexSource();
+  for (const anchor of ["const dispatcher = createDispatcher({", "const assignRoadmapItem = createAssigner({"]) {
+    const at = src.indexOf(anchor);
+    if (at < 0) throw new Error(`anchor not found: ${anchor}`);
+    const open = at + anchor.length - 1;
+    const body = src.slice(open, findMatchingClose(src, open, "{", "}", true));
+    expect([anchor, body.split("resolveBrokerEndpoint(").length - 1]).toEqual([anchor, 1]);
+  }
 });

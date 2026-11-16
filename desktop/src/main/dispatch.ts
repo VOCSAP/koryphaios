@@ -20,13 +20,22 @@ import type { GuardedWriteResult } from './roadmap-guarded-write'
 // own file: main-side only (no renderer/preload consumer), and
 // desktop/tsconfig.node.json already carries the root file in its program.
 // Type-only, so the repo-root bun harness never resolves it at runtime.
-import type { DispatchedCard, DispatchRequest, DispatchRequestOutcome } from '../../../shared/types'
-import { queuedItems, resolveDependency } from '../shared/workflow'
+import type {
+  AtomicDispatchCapability,
+  AtomicDispatchDelivery,
+  AtomicDispatchIntent,
+  AtomicDispatchMember,
+  DispatchedCard,
+  DispatchRequest,
+  DispatchRequestOutcome
+} from '../../../shared/types'
+import { queuedItems, resolveDependency, wavesOf } from '../shared/workflow'
 import {
   composeAssignText,
   composeDispatchText,
   composeMultiDispatchText
 } from '../../../shared/roadmap-dispatch-message'
+import { ATOMIC_OPERATION_MARGIN_MS } from './broker-client'
 import { dispatchedTargetsTail } from './directive-journal'
 import { directiveKeys, isDirectiveCommand } from './directive'
 
@@ -232,6 +241,255 @@ export function dispatchTracked(result: DispatchResult): boolean {
   return result.sent && (result.dispatched?.length ?? 0) > 0
 }
 
+const OPERATION_LIFETIME_MS = 300_000
+
+export interface AtomicPort {
+  capability: AtomicDispatchCapability
+  projectKey: string
+  groupId: string
+  /** A fresh id per attempt; only an unknown answer is settled under the id it was sent with. */
+  newOperationId: () => string
+  /** Signs and posts. A lost or unreadable answer is `unknown`, never a throw. */
+  post: (action: 'execute' | 'resolve', intent: AtomicDispatchIntent) => Promise<AtomicDispatchDelivery>
+}
+
+export function atomicOperationId(nowMs: number, uuid: string, capability: AtomicDispatchCapability): string {
+  const lifetime = Math.min(OPERATION_LIFETIME_MS, capability.max_operation_ms - ATOMIC_OPERATION_MARGIN_MS)
+  return `${nowMs + lifetime}:${uuid}`
+}
+
+const toMember = (item: RoadmapItem): DispatchedWaveMember => ({ id: item.id, title: item.title, kind: item.kind })
+
+function tokensOf(item: RoadmapItem): AtomicDispatchMember {
+  if (item.content_rev === undefined || item.dispatch_state_tag === undefined) {
+    throw new Error(`card "${item.title}" carries no revision or state tag, so the broker cannot check it is unchanged`)
+  }
+  return { id: item.id, expected_content_rev: item.content_rev, expected_dispatch_state_tag: item.dispatch_state_tag }
+}
+
+type SentDelivery = Extract<AtomicDispatchDelivery, { delivery: 'sent' }>
+
+/** A sent outcome confirms exactly the intent's members: none missing, none extra, none twice. */
+function confirmsEveryMember(intent: AtomicDispatchIntent, sent: SentDelivery): boolean {
+  const ids = sent.cards.map((c) => c.id)
+  return (
+    ids.length === intent.members.length &&
+    new Set(ids).size === ids.length &&
+    intent.members.every((m) => ids.includes(m.id))
+  )
+}
+
+/** An outcome that does not match what was asked is no outcome: it is unknown and gets settled. */
+function checkedAnswer(intent: AtomicDispatchIntent, answer: AtomicDispatchDelivery): AtomicDispatchDelivery {
+  if (answer.delivery !== 'sent' || confirmsEveryMember(intent, answer)) return answer
+  return { delivery: 'unknown', operation_id: intent.operation_id, reason: 'invalid-response' }
+}
+
+async function attemptAtomic(
+  port: AtomicPort,
+  mode: AtomicDispatchIntent['mode'],
+  targetKind: AtomicDispatchIntent['target_kind'],
+  toPeerId: string,
+  items: RoadmapItem[]
+): Promise<{ delivery: AtomicDispatchDelivery; intent: AtomicDispatchIntent }> {
+  if (items.length > port.capability.max_members) {
+    throw new Error(`${items.length} cards exceed the ${port.capability.max_members} the broker accepts in one dispatch`)
+  }
+  const intent: AtomicDispatchIntent = {
+    broker_id: port.capability.broker_id,
+    operation_id: port.newOperationId(),
+    project_key: port.projectKey,
+    group_id: port.groupId,
+    mode,
+    target_kind: targetKind,
+    to_peer_id: toPeerId,
+    members: items.map(tokensOf)
+  }
+  const first = checkedAnswer(intent, await port.post('execute', intent))
+  if (first.delivery !== 'unknown') return { delivery: first, intent }
+  return { delivery: checkedAnswer(intent, await port.post('resolve', intent)), intent }
+}
+
+/** A delivery that stayed unknown: kept so a later tick settles it under the same id instead of resending. */
+export interface PendingDispatch {
+  intent: AtomicDispatchIntent
+  members: DispatchedWaveMember[]
+}
+
+export interface AtomicWaveDeps {
+  port: AtomicPort
+  /** The lead, or the only active session; null when no request must be made at all. */
+  target: () => { peerId: string; kind: 'lead' | 'sole-active-fallback' } | null
+  /** The normal members of the head wave as the broker lists them now. */
+  reread: () => Promise<RoadmapItem[]>
+  journal: (line: string) => void
+  warn: (line: string) => void
+}
+
+export interface WaveOutcome {
+  result: DispatchResult
+  /** Only members the broker confirmed sent. */
+  dispatched: RoadmapItem[]
+  failed: { item: RoadmapItem; error: unknown }[]
+  pending: PendingDispatch | null
+}
+
+export function sentPayload(members: DispatchedWaveMember[]): Pick<DispatchResult, 'title' | 'count' | 'titles'> {
+  return members.length === 1
+    ? { title: members[0]!.title }
+    : { count: members.length, titles: members.map((m) => m.title) }
+}
+
+/**
+ * A refusal that proves a card or the queue moved is retried once on a fresh
+ * read under a new operation id; an unknown answer is settled, never resent.
+ */
+export async function dispatchWaveAtomic(normal: RoadmapItem[], deps: AtomicWaveDeps): Promise<WaveOutcome> {
+  const none = (result: DispatchResult): WaveOutcome => ({ result, dispatched: [], failed: [], pending: null })
+  if (normal.length === 0) return none({ sent: false, reason: 'empty-queue' })
+  const target = deps.target()
+  if (!target) return none({ sent: false, reason: 'no-lead' })
+  let members = normal
+  let left: DispatchedWaveMember[] = []
+  for (let attempt = 0; ; attempt++) {
+    const { delivery, intent } = await attemptAtomic(deps.port, 'wave', target.kind, target.peerId, members)
+    if (delivery.delivery === 'sent') {
+      const dispatched = members
+      deps.journal(
+        `wave of ${dispatched.length} item(s) sent to ${target.kind === 'lead' ? 'the lead' : 'the only active session'} "${target.peerId}"`
+      )
+      const sentMembers = dispatched.map(toMember)
+      return {
+        result: {
+          sent: true,
+          delivery: 'sent',
+          ...sentPayload(sentMembers),
+          dispatched: sentMembers,
+          ...(left.length > 0 ? { notSent: left } : {})
+        },
+        dispatched,
+        failed: [],
+        pending: null
+      }
+    }
+    if (delivery.delivery === 'unknown') {
+      const unconfirmed = members.map(toMember)
+      deps.warn(`wave delivery to "${target.peerId}" is unconfirmed after resolve (${delivery.reason}): not resent`)
+      return {
+        result: {
+          sent: false,
+          delivery: 'unknown',
+          reason: 'unconfirmed',
+          unconfirmed,
+          ...(left.length > 0 ? { notSent: left } : {})
+        },
+        dispatched: [],
+        failed: [],
+        pending: { intent, members: unconfirmed }
+      }
+    }
+    if (attempt === 0 && (delivery.reason === 'card-changed' || delivery.reason === 'queue-changed')) {
+      const fresh = await deps.reread()
+      const freshIds = new Set(fresh.map((i) => i.id))
+      left = normal.filter((i) => !freshIds.has(i.id)).map(toMember)
+      for (const m of left) deps.warn(`card "${m.title}" left the wave before the retry: not sent`)
+      if (fresh.length === 0) {
+        return none({ sent: false, delivery: 'not-sent', reason: delivery.reason, notSent: normal.map(toMember) })
+      }
+      members = fresh
+      continue
+    }
+    const named = delivery.card_ids.length > 0 ? members.filter((m) => delivery.card_ids.includes(m.id)) : members
+    return none({
+      sent: false,
+      delivery: 'not-sent',
+      reason: delivery.reason === 'no-target' ? 'no-lead' : delivery.reason,
+      notSent: [...named.map(toMember), ...left]
+    })
+  }
+}
+
+export interface DispatchWaveSelection {
+  /** null when the broker does not serve the atomic route. */
+  atomic: AtomicWaveDeps | null
+  legacy: DispatchWaveDeps
+  trace: (line: string) => void
+}
+
+export async function dispatchWave(normal: RoadmapItem[], selection: DispatchWaveSelection): Promise<WaveOutcome> {
+  if (selection.atomic) return dispatchWaveAtomic(normal, selection.atomic)
+  selection.trace('broker serves no atomic dispatch: the wave is announced before its cards are written (previous order)')
+  const previous = await dispatchNormalWave(normal, selection.legacy)
+  return { result: previous.result, dispatched: previous.dispatched, failed: previous.failed, pending: null }
+}
+
+export type SettledDispatch =
+  | { state: 'sent'; members: DispatchedWaveMember[] }
+  | { state: 'not-sent' | 'abandoned'; members: [] }
+  | { state: 'unknown' }
+
+/**
+ * Asks the broker again under the original operation id. Only the operator's own
+ * dispatch may give up on a delivery whose answer can never come back (deadline
+ * passed, or the broker is not the one that was asked).
+ */
+export async function settleUnconfirmed(
+  pending: PendingDispatch,
+  port: AtomicPort | null,
+  manual: boolean
+): Promise<SettledDispatch> {
+  if (!port) return manual ? { state: 'abandoned', members: [] } : { state: 'unknown' }
+  const answer = checkedAnswer(pending.intent, await port.post('resolve', pending.intent))
+  if (answer.delivery === 'sent') return { state: 'sent', members: pending.members }
+  if (answer.delivery === 'not-sent') return { state: 'not-sent', members: [] }
+  const final = answer.reason === 'expired' || answer.reason === 'broker-mismatch'
+  return manual && final ? { state: 'abandoned', members: [] } : { state: 'unknown' }
+}
+
+export interface UnconfirmedGate {
+  /** Remembers a wave whose delivery stayed unknown; null leaves what is already remembered. */
+  remember: (pending: PendingDispatch | null) => void
+  /**
+   * The result to return instead of dispatching while a delivery is unconfirmed,
+   * or null when the dispatch may go on. A delivery that turns out sent is
+   * handed to `track`; nothing new is ever sent in the same call.
+   */
+  beforeDispatch: (
+    port: AtomicPort | null,
+    manual: boolean,
+    track: (members: DispatchedWaveMember[]) => void
+  ) => Promise<DispatchResult | null>
+}
+
+export function createUnconfirmedGate(journal: DispatcherDeps['journal']): UnconfirmedGate {
+  let pending: PendingDispatch | null = null
+  return {
+    remember: (next) => {
+      if (next) pending = next
+    },
+    beforeDispatch: async (port, manual, track) => {
+      if (!pending) return null
+      const current = pending
+      const settled = await settleUnconfirmed(current, port, manual)
+      if (settled.state === 'unknown') {
+        return { sent: false, delivery: 'unknown', reason: 'unconfirmed', unconfirmed: current.members }
+      }
+      pending = null
+      if (settled.state === 'sent') {
+        track(settled.members)
+        journal(`unconfirmed wave delivery settled: ${settled.members.length} item(s) were sent`)
+        return { sent: true, delivery: 'sent', ...sentPayload(settled.members), dispatched: settled.members }
+      }
+      journal(
+        settled.state === 'abandoned'
+          ? 'unconfirmed wave delivery given up by the operator: it may have reached the lead'
+          : 'unconfirmed wave delivery settled: it was not sent'
+      )
+      return null
+    }
+  }
+}
+
 /**
  * Two distinct fixed notes: an empty target_peer_ids can't be fixed by
  * re-queuing, an unreachable target can. A target that was live and refused
@@ -350,6 +608,15 @@ export function composeDispatchOutcome(result: DispatchResult): DispatchRequestO
 
 /** One readable line, used as-is by the requesting agent. */
 function dispatchOutcomeNote(result: DispatchResult, cardCount: number): string {
+  const titles = (members: DispatchedWaveMember[] | undefined): string =>
+    (members ?? []).map((m) => `"${m.title}"`).join(', ')
+  if (result.delivery === 'unknown') {
+    return `delivery NOT confirmed for ${titles(result.unconfirmed) || 'the wave'}: the order may or may not have reached the team-lead and was not resent; check before requesting again`
+  }
+  if (result.delivery === 'not-sent') {
+    const named = titles(result.notSent)
+    return `not sent (${result.reason ?? 'refused'})${named ? `: ${named}` : ''}; no card was moved and nothing was announced`
+  }
   const skipped = result.skipped?.length ?? 0
   if (cardCount === 0 && skipped === 0) {
     // Not an error, and the reason matters: an empty queue and a missing
@@ -363,6 +630,9 @@ function dispatchOutcomeNote(result: DispatchResult, cardCount: number): string 
     announced > 0 ? `${announced} card${announced === 1 ? '' : 's'} announced to the team-lead` : '',
     skipped > 0
       ? `${skipped} card${skipped === 1 ? '' : 's'} announced to the team-lead but closed before they were unqueued`
+      : '',
+    (result.notSent?.length ?? 0) > 0
+      ? `${titles(result.notSent)} not sent: left the wave before the retry`
       : '',
     directives > 0 ? `${directives} directive card${directives === 1 ? '' : 's'} executed by the Deck` : ''
   ].filter(Boolean)
@@ -471,18 +741,87 @@ export interface AssignDeps {
   journal: (line: string) => void
   warn: (line: string) => void
   reportError: (message: string, error: unknown) => void
+  /** Set when the broker serves the atomic route; announce and write are then not used. */
+  atomic?: AtomicPort | null
+  /** Settles an assignment left unknown before another one of the same card may start. */
+  gate?: AssignGate
+}
+
+export interface AssignGate {
+  remember: (cardId: string, pending: PendingDispatch) => void
+  /** The result to return instead of a new assignment of this card while an earlier one is unconfirmed, or null. */
+  beforeAssign: (cardId: string, port: AtomicPort | null) => Promise<AssignResult | null>
+}
+
+// Per card: an unknown order about one card says nothing about another.
+export function createAssignGate(journal: AssignDeps['journal']): AssignGate {
+  const pending = new Map<string, PendingDispatch>()
+  return {
+    remember: (cardId, next) => {
+      pending.set(cardId, next)
+    },
+    beforeAssign: async (cardId, port) => {
+      const current = pending.get(cardId)
+      if (!current) return null
+      const title = current.members[0]?.title ?? cardId
+      // A new assignment is the operator's own gesture, so it may give up like a manual dispatch.
+      const settled = await settleUnconfirmed(current, port, true)
+      if (settled.state === 'unknown') return { sent: false, delivery: 'unknown', reason: 'unconfirmed' }
+      pending.delete(cardId)
+      if (settled.state === 'sent') {
+        journal(`unconfirmed assignment of "${title}" settled: it was sent`)
+        return { sent: true, delivery: 'sent' }
+      }
+      journal(
+        settled.state === 'abandoned'
+          ? `unconfirmed assignment of "${title}" given up by the operator: it may have reached the peer`
+          : `unconfirmed assignment of "${title}" settled: it was not sent`
+      )
+      return null
+    }
+  }
+}
+
+async function assignAtomic(item: RoadmapItem, target: string, port: AtomicPort, deps: AssignDeps): Promise<AssignResult> {
+  let current = item
+  for (let attempt = 0; ; attempt++) {
+    const { delivery, intent } = await attemptAtomic(port, 'assign', 'assignee', target, [current])
+    if (delivery.delivery === 'sent') {
+      deps.journal(`item "${current.title}" assigned to "${target}"`)
+      return { sent: true, delivery: 'sent' }
+    }
+    if (delivery.delivery === 'unknown') {
+      deps.warn(`assignment of "${current.title}" to "${target}" is unconfirmed after resolve (${delivery.reason}): not resent`)
+      deps.gate?.remember(current.id, { intent, members: [toMember(current)] })
+      return { sent: false, delivery: 'unknown', reason: 'unconfirmed' }
+    }
+    if (attempt === 0 && delivery.reason === 'card-changed') {
+      const fresh = await deps.read(current.id)
+      if (fresh) {
+        current = fresh
+        continue
+      }
+    }
+    return { sent: false, delivery: 'not-sent', reason: delivery.reason }
+  }
 }
 
 /**
- * The peer hears the order before the card moves, so a skipped write leaves a
- * peer holding an order for a changed card: sent stays true, writeSkipped says so.
+ * Without the atomic route the peer hears the order before the card moves, so a
+ * skipped write leaves a peer holding an order for a changed card: sent stays
+ * true, writeSkipped says so.
  */
 export async function runAssign(id: string, peerId: string, deps: AssignDeps): Promise<AssignResult> {
   const target = peerId.trim()
   if (!target) return { sent: false }
   try {
+    if (deps.gate) {
+      const early = await deps.gate.beforeAssign(id, deps.atomic ?? null)
+      if (early) return early
+    }
     const item = await deps.read(id)
     if (!item) return { sent: false }
+    if (deps.atomic) return await assignAtomic(item, target, deps.atomic, deps)
     if ((await deps.announce(item, target)) === 0) return { sent: false }
     if (!(await deps.write(item)).written) {
       deps.warn(
@@ -550,6 +889,173 @@ export function createFailureReporter(report: (error: unknown) => void): {
     },
     recovered: () => {
       last = null
+    }
+  }
+}
+
+function headNormalMembers(items: RoadmapItem[]): RoadmapItem[] {
+  const byId = new Map(items.map((i) => [i.id, i]))
+  const ids = wavesOf(queuedItems(items))[0] ?? []
+  return splitWave(ids.map((id) => byId.get(id)).filter((i): i is RoadmapItem => i !== undefined)).normal
+}
+
+/** What one dispatch run uses: all derived from a single endpoint and project key, resolved once. */
+export interface DispatchRun {
+  /** The broker's atomic capability as a port; null on a broker that certainly has none. */
+  port: AtomicPort | null
+  list: () => Promise<RoadmapItem[]>
+  directives: DirectiveWaveDeps
+  legacy: DispatchWaveDeps
+}
+
+export interface DispatcherDeps {
+  /** Called once per run; rejects when the capability cannot be read. */
+  openRun: () => Promise<DispatchRun>
+  target: AtomicWaveDeps['target']
+  /** Registers members the broker confirmed sent, so the auto-dispatch barrier waits on them. */
+  track: (members: DispatchedWaveMember[]) => void
+  journal: (line: string) => void
+  warn: (line: string) => void
+  trace: (line: string) => void
+  reportError: (message: string, error: unknown) => void
+}
+
+export interface Dispatcher {
+  /** `manual` is the operator's own button: the only caller that may give up on an unconfirmed delivery. */
+  dispatch: (manual: boolean) => Promise<DispatchResult>
+  inFlight: () => boolean
+}
+
+/**
+ * The whole sequence of one dispatch with only its effects injected: capability
+ * first, the unconfirmed delivery before any read or send, directives, then the
+ * wave. Overlapping calls share one run, since two runs could double-inject a
+ * directive.
+ */
+export function createDispatcher(deps: DispatcherDeps): Dispatcher {
+  const gate = createUnconfirmedGate(deps.journal)
+  let running: Promise<DispatchResult> | null = null
+
+  const once = async (manual: boolean): Promise<DispatchResult> => {
+    const executedDirectives: DirectiveDispatch[] = []
+    const announcedMembers: DispatchedWaveMember[] = []
+    // Attached to every exit; each half stays absent when empty, so a dispatch
+    // that executed no directive or announced nothing keeps its plain shape.
+    const withReports = (r: DispatchResult): DispatchResult => ({
+      ...r,
+      ...(executedDirectives.length > 0 ? { directives: executedDirectives } : {}),
+      ...(announcedMembers.length > 0 ? { dispatched: announcedMembers } : {})
+    })
+    try {
+      const run = await deps.openRun()
+      const port = run.port
+      const early = await gate.beforeDispatch(port, manual, deps.track)
+      if (early) return withReports(early)
+      // Directive-only waves drain first; the guard bounds the loop should a done-write fail to advance it.
+      for (let guard = 0; guard < 64; guard++) {
+        const items = await run.list()
+        const waveIds = wavesOf(queuedItems(items))[0]
+        if (!waveIds || waveIds.length === 0) return withReports({ sent: false, reason: 'empty-queue' })
+        const byId = new Map(items.map((i) => [i.id, i]))
+        const wave = waveIds.map((id) => byId.get(id)).filter((i): i is RoadmapItem => i !== undefined)
+        const { directives, normal } = splitWave(wave)
+        executedDirectives.push(...(await runDirectiveWave(directives, run.directives)))
+        if (normal.length === 0) continue
+        const { result, dispatched, failed, pending } = await dispatchWave(normal, {
+          atomic: port
+            ? {
+                port,
+                target: deps.target,
+                reread: async () => headNormalMembers(await run.list()),
+                journal: deps.journal,
+                warn: deps.warn
+              }
+            : null,
+          legacy: run.legacy,
+          trace: deps.trace
+        })
+        gate.remember(pending)
+        // The same `dispatched` array feeds the barrier and the outcome reported to a
+        // requesting agent, so the two can never name different cards.
+        deps.track(dispatched.map(toMember))
+        announcedMembers.push(...dispatched.map(toMember))
+        for (const { item, error } of failed) {
+          deps.reportError(`wave member "${item.title}" failed to unqueue, not tracked`, error)
+        }
+        return withReports(result)
+      }
+      return withReports({ sent: false, reason: 'error' })
+    } catch (e) {
+      deps.reportError('dispatch failed', e)
+      return withReports({ sent: false, reason: 'error' })
+    }
+  }
+
+  return {
+    dispatch: (manual) => {
+      if (running) return running
+      running = once(manual).finally(() => {
+        running = null
+      })
+      return running
+    },
+    inFlight: () => running !== null
+  }
+}
+
+/** What one assignment uses: all derived from a single endpoint and project key, resolved once. */
+export interface AssignRun {
+  port: AtomicPort | null
+  read: AssignDeps['read']
+  announce: AssignDeps['announce']
+  write: AssignDeps['write']
+}
+
+export interface AssignerDeps {
+  /** Called once per assignment; rejects when the capability cannot be read. */
+  openRun: () => Promise<AssignRun>
+  journal: AssignDeps['journal']
+  warn: AssignDeps['warn']
+  reportError: AssignDeps['reportError']
+  trace: (line: string) => void
+}
+
+/** Capability first: a broker whose capability cannot be read gets no assignment in either order. */
+export function createAssigner(deps: AssignerDeps): (id: string, peerId: string) => Promise<AssignResult> {
+  const gate = createAssignGate(deps.journal)
+  return async (id, peerId) => {
+    let run: AssignRun
+    try {
+      run = await deps.openRun()
+    } catch (e) {
+      deps.reportError('assign: the broker capability could not be read, nothing was sent', e)
+      return { sent: false, reason: 'error' }
+    }
+    if (!run.port) deps.trace('broker serves no atomic dispatch: the assignment is announced before its card is written (previous order)')
+    return runAssign(id, peerId, {
+      read: run.read,
+      announce: run.announce,
+      write: run.write,
+      atomic: run.port,
+      gate,
+      journal: deps.journal,
+      warn: deps.warn,
+      reportError: deps.reportError
+    })
+  }
+}
+
+export function createDispatchRequestPoller(deps: {
+  run: () => Promise<void>
+  reportFailure: (error: unknown) => void
+}): () => Promise<void> {
+  const failures = createFailureReporter(deps.reportFailure)
+  return async () => {
+    try {
+      await deps.run()
+      failures.recovered()
+    } catch (e) {
+      failures.failed(e)
     }
   }
 }

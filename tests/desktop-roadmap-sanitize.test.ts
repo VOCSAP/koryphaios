@@ -185,7 +185,7 @@ test("PICK-LIST, not spread: an unknown broker field does not travel through", (
   const item = sanitizeRoadmapItem({ ...wellFormed(), surprise_extra_field: "x" }) as RoadmapItem;
   expect(item).not.toBeNull();
   expect(Object.keys(item)).not.toContain("surprise_extra_field");
-  expect(Object.keys(item)).toHaveLength(33);
+  expect(Object.keys(item)).toHaveLength(34);
 });
 
 test("content_updated_at survives as the broker's content date, and anything but a string reads as unknown (null)", () => {
@@ -204,6 +204,15 @@ test("content_rev survives as the Save's revision, and a malformed one is droppe
   expect(sanitized({ content_rev: "17" }).content_rev).toBeUndefined();
   expect(sanitized({ content_rev: Number.NaN }).content_rev).toBeUndefined();
   expect(sanitized({}).content_rev).toBeUndefined();
+});
+
+test("dispatch_state_tag survives as the broker's 64-hex digest, and anything else is dropped rather than sent back", () => {
+  const tag = "ab".repeat(32);
+  expect(sanitized({ dispatch_state_tag: tag }).dispatch_state_tag).toBe(tag);
+  expect(sanitized({ dispatch_state_tag: tag.toUpperCase() }).dispatch_state_tag).toBeUndefined();
+  expect(sanitized({ dispatch_state_tag: "abc" }).dispatch_state_tag).toBeUndefined();
+  expect(sanitized({ dispatch_state_tag: 12 }).dispatch_state_tag).toBeUndefined();
+  expect(sanitized({}).dispatch_state_tag).toBeUndefined();
 });
 
 test("locked_group survives when the broker sends it, and coerces non-string to null", () => {

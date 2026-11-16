@@ -711,6 +711,8 @@ export interface RoadmapItem {
   /** Last real content change, ISO UTC; null when unknown (mirror of core RoadmapItem). */
   content_updated_at: string | null
   content_rev?: number
+  /** Operational-state digest an atomic dispatch sends back with content_rev; absent on a broker that does not serve it. */
+  dispatch_state_tag?: string
   deleted_at: string | null
   /** Dispatch-queue position (PLAN C15), 1-based; null = not queued. */
   queue: number | null
@@ -1056,8 +1058,19 @@ export interface DispatchResult {
    */
   count?: number
   titles?: string[]
-  /** Failure reason when not sent: 'empty-queue' | 'no-lead' | 'error'. */
+  /**
+   * Why nothing was sent: 'empty-queue' | 'no-lead' | 'error', or the broker's refusal
+   * ('card-changed' | 'queue-changed' | 'ineligible' | 'write-failed' | 'cancelled-before-execution')
+   * when `delivery` is 'not-sent', or 'unconfirmed' when it is 'unknown'.
+   */
   reason?: string
+  /**
+   * What the broker confirmed. 'sent': cards written and announced in one commit.
+   * 'not-sent': nothing was written or announced. 'unknown': the answer was lost and
+   * could not be settled, the order may or may not have reached the lead; never resent.
+   * Absent on the pre-atomic path (a broker without the route) and when no request was made.
+   */
+  delivery?: 'sent' | 'not-sent' | 'unknown'
   /**
    * Directive cards the Deck executed itself during this dispatch, one entry
    * per card whose execution resolved, in execution order. Independent of sent,
@@ -1075,8 +1088,12 @@ export interface DispatchResult {
    * like `directives` is absent when nothing was executed.
    */
   dispatched?: DispatchedWaveMember[]
-  /** Members announced to the team-lead whose card closed before the unqueue write; none of them is tracked. */
+  /** Pre-atomic path only: members announced to the team-lead whose card closed before the unqueue write; none of them is tracked. */
   skipped?: DispatchedWaveMember[]
+  /** Cards this dispatch did not send: named by a refusal, or left out when the wave was re-read for the single retry. */
+  notSent?: DispatchedWaveMember[]
+  /** Cards of a delivery that stayed unknown after resolve. */
+  unconfirmed?: DispatchedWaveMember[]
 }
 
 /** Identity of one announced wave member (card bf76d37f). */
@@ -1093,9 +1110,13 @@ export interface DispatchedWaveMember {
 
 /** Result of a direct assignment to one chosen peer (PLAN K6). */
 export interface AssignResult {
-  /** The targeted announce reached the peer. */
+  /** The card moved to in_progress and the peer's message is stored, confirmed by the broker. */
   sent: boolean
-  /** The announce was delivered but the card changed before it moved to in_progress. */
+  /** Same meaning as DispatchResult.delivery; absent on the pre-atomic path. */
+  delivery?: 'sent' | 'not-sent' | 'unknown'
+  /** Why nothing was sent: the broker's refusal, 'unconfirmed', or 'error'. */
+  reason?: string
+  /** Pre-atomic path only: the announce was delivered but the card changed before it moved to in_progress. */
   writeSkipped?: boolean
 }
 

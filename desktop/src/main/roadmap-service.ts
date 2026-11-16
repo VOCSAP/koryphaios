@@ -9,6 +9,12 @@ import { reportError } from './log'
 import { normalizeRemoteUrl, resolveProjectKey } from '../../../shared/project-key'
 import type { BrokerEndpoint } from './broker-client'
 import type {
+  AtomicDispatchDelivery,
+  AtomicDispatchIntent,
+  AtomicDispatchOutcome,
+  AtomicDispatchRefusal
+} from '../../../shared/types'
+import type {
   RoadmapArchiveResponse,
   RoadmapContextAppendResponse,
   RoadmapFacetBucket,
@@ -252,6 +258,10 @@ export function sanitizeRoadmapItem(raw: unknown): RoadmapItem | null {
       typeof r.content_rev === 'number' && Number.isSafeInteger(r.content_rev) && r.content_rev >= 0
         ? r.content_rev
         : undefined,
+    dispatch_state_tag:
+      typeof r.dispatch_state_tag === 'string' && /^[0-9a-f]{64}$/.test(r.dispatch_state_tag)
+        ? r.dispatch_state_tag
+        : undefined,
     deleted_at: nullableStr(r.deleted_at),
     queue: queuePos(r.queue),
     locked: r.locked === true,
@@ -488,6 +498,109 @@ export async function upsertRoadmap(
     })
   )
   return sanitizeOne(res?.item, '/roadmap/upsert')
+}
+
+const ATOMIC_REFUSALS: readonly AtomicDispatchRefusal[] = [
+  'no-target',
+  'card-changed',
+  'queue-changed',
+  'ineligible',
+  'cancelled-before-execution',
+  'write-failed'
+]
+
+function atomicOutcome(raw: Record<string, unknown>, operationId: string, memberIds: string[]): AtomicDispatchOutcome | null {
+  if (raw.operation_id !== operationId) return null
+  if (raw.delivery === 'sent') {
+    if (typeof raw.message_id !== 'number' || !Number.isSafeInteger(raw.message_id) || !Array.isArray(raw.cards)) return null
+    const cards: Extract<AtomicDispatchOutcome, { delivery: 'sent' }>['cards'] = []
+    for (const c of raw.cards) {
+      if (!c || typeof c !== 'object') return null
+      const card = c as Record<string, unknown>
+      if (typeof card.id !== 'string' || typeof card.title !== 'string') return null
+      cards.push({ id: card.id, title: card.title, kind: oneOf(card.kind, KINDS, 'feature') })
+    }
+    const ids = cards.map((c) => c.id)
+    if (ids.length !== memberIds.length || new Set(ids).size !== ids.length || !memberIds.every((id) => ids.includes(id))) {
+      return null
+    }
+    return { delivery: 'sent', operation_id: operationId, message_id: raw.message_id, cards }
+  }
+  if (raw.delivery === 'not-sent') {
+    const reason = ATOMIC_REFUSALS.find((r) => r === raw.reason)
+    if (!reason) return null
+    return { delivery: 'not-sent', operation_id: operationId, reason, card_ids: strList(raw.card_ids) }
+  }
+  return null
+}
+
+/**
+ * POST /roadmap/dispatch-atomic. A lost, unreadable or failed-after-the-fact
+ * answer is `unknown`, never a refusal: the broker may have committed. A
+ * refusal that proves no effect (bad request, capacity, unsigned) throws.
+ */
+export async function postAtomicDispatch(
+  endpoint: BrokerEndpoint,
+  request: { action: 'execute' | 'resolve'; intent: AtomicDispatchIntent; groupSecretHash: string | null }
+): Promise<AtomicDispatchDelivery> {
+  const operationId = request.intent.operation_id
+  const unknown = (reason: 'transport' | 'invalid-response' | 'expired' | 'broker-mismatch'): AtomicDispatchDelivery => ({
+    delivery: 'unknown',
+    operation_id: operationId,
+    reason
+  })
+  const path = '/roadmap/dispatch-atomic'
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+  if (endpoint.token) headers['Authorization'] = `Bearer ${endpoint.token}`
+  const body = signedAsOperator({
+    by: DECK_AUTHOR,
+    action: request.action,
+    intent: request.intent,
+    group_secret_hash: request.groupSecretHash
+  })
+  let res: Response
+  try {
+    res = await fetch(`${endpoint.url}${path}`, { method: 'POST', headers, body: JSON.stringify(body) })
+  } catch (e) {
+    reportError('roadmap', `atomic dispatch ${request.action} lost its answer`, e)
+    return unknown('transport')
+  }
+  let parsed: Record<string, unknown> | null = null
+  try {
+    const json: unknown = await res.json()
+    parsed = json && typeof json === 'object' && !Array.isArray(json) ? (json as Record<string, unknown>) : null
+  } catch (e) {
+    if (res.status < 400 || res.status === 409 || res.status >= 500) {
+      reportError('roadmap', `atomic dispatch ${request.action}: unreadable answer (${res.status})`, e)
+      return unknown(res.status >= 500 ? 'transport' : 'invalid-response')
+    }
+  }
+  const code = typeof parsed?.code === 'string' ? parsed.code : null
+  if (code === 'dispatch-broker-mismatch') return unknown('broker-mismatch')
+  if (code === 'dispatch-operation-expired') return unknown('expired')
+  if (parsed && (res.status === 200 || res.status === 409) && code === null) {
+    const outcome = atomicOutcome(
+      parsed,
+      operationId,
+      request.intent.members.map((m) => m.id)
+    )
+    if (outcome) return outcome
+    if (
+      parsed.delivery === 'unknown' &&
+      parsed.operation_id === operationId &&
+      (parsed.reason === 'expired' || parsed.reason === 'outcome-unavailable')
+    ) {
+      return { delivery: 'unknown', operation_id: operationId, reason: parsed.reason }
+    }
+    reportError('roadmap', `atomic dispatch ${request.action}: answer ${res.status} is not a known outcome`)
+    return unknown('invalid-response')
+  }
+  if (res.status >= 500 && code !== 'dispatch-capacity-exceeded') {
+    reportError('roadmap', `atomic dispatch ${request.action}: broker answered ${res.status}`)
+    return unknown('transport')
+  }
+  const detail = typeof parsed?.error === 'string' ? parsed.error : ''
+  throw new RoadmapRequestError(detail || `roadmap request failed: ${res.status}`, res.status, path)
 }
 
 export async function appendRoadmapContext(

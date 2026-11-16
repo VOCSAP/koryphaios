@@ -85,6 +85,7 @@ import { credentialFailureReporter } from '../shared/workspace-restore-outcome'
 import { RESCOPE_WAIT_MS } from './scope-adoption'
 import {
   BrokerHealthTracker,
+  fetchAtomicDispatchCapability,
   fetchDispatchRequests,
   fetchGraphDrafts,
   fetchOperatorInbox,
@@ -143,27 +144,29 @@ import {
   fetchRoadmapConflicts,
   fetchRoadmapSyncStatus,
   listRoadmap,
+  postAtomicDispatch,
   RoadmapRequestError,
   upsertRoadmap
 } from './roadmap-service'
 import { createCheckpoint, purgeCheckpoints, restoreCommand } from './checkpoint-service'
 import {
+  atomicOperationId,
   autoDispatchHold,
   composeAssignText,
   composeStopText,
+  createAssigner,
+  createDispatcher,
+  createDispatchRequestPoller,
   createFailureReporter,
   dependencyHoldReason,
-  dispatchNormalWave,
   dispatchTracked,
   firstQueued,
   nextBarrierPending,
   nextDispatchedState,
-  runAssign,
-  runDirectiveWave,
   runDispatchRequestPoll,
   runStop,
-  splitWave,
   unresolvedDirectiveNote,
+  type AtomicPort,
   type DispatchedEntry
 } from './dispatch'
 import { createDirectiveBindings, runClearReloadInTurn, type ClearReloadHost, type DirectiveRunDeps } from './directive-run'
@@ -178,9 +181,7 @@ import {
   type GuardedWriteIo
 } from './roadmap-guarded-write'
 import type {
-  AssignResult,
   DirectiveDispatch,
-  DispatchedWaveMember,
   DispatchResult,
   RoadmapItem,
   RoadmapSyncConflict,
@@ -193,7 +194,7 @@ import {
   joinAnnounceTargets,
   type JoinAnnounceIntent
 } from '@shared/announce'
-import { isHead, queuedItems, wavesOf } from '@shared/workflow'
+import { isHead } from '@shared/workflow'
 import { APP_STATE_SUBDIR, runDataMigration } from './migrate-data-dir'
 import type { SessionRuntime } from '@shared/types'
 import { listAgents } from './agents'
@@ -2133,18 +2134,21 @@ const pollApprovalLists = createApprovalListsTick({
  * addressed with an explicit "no team-lead designated" mention (never silent
  * implicit routing). Best-effort like every announce.
  */
-const announceToLead = async (text: string): Promise<number> => {
-  if (!text.trim()) return 0
+const resolveLeadTarget = (): { peerId: string; kind: 'lead' | 'sole-active-fallback' } | null => {
   const live = service
     .list()
     .filter((s) => !s.supervisor && s.status !== 'exited' && s.peerId)
-  let target = live.find((s) => s.lead) ?? null
-  let body = text
-  if (!target) {
-    if (live.length !== 1) return 0
-    target = live[0]!
-    body = `${text}\n(No team-lead is designated; you are the only active session.)`
-  }
+  const lead = live.find((s) => s.lead)
+  if (lead) return { peerId: lead.peerId!, kind: 'lead' }
+  return live.length === 1 ? { peerId: live[0]!.peerId!, kind: 'sole-active-fallback' } : null
+}
+
+const announceToLead = async (text: string, endpoint: BrokerEndpoint): Promise<number> => {
+  if (!text.trim()) return 0
+  const target = resolveLeadTarget()
+  if (!target) return 0
+  const body =
+    target.kind === 'lead' ? text : `${text}\n(No team-lead is designated; you are the only active session.)`
   try {
     const { sent } = await sendAnnounce(
       {
@@ -2153,7 +2157,7 @@ const announceToLead = async (text: string): Promise<number> => {
         text: body,
         toPeerId: target.peerId
       },
-      { endpoint: resolveBrokerEndpoint() }
+      { endpoint }
     )
     if (sent > 0) {
       journal.add('dispatch', `to lead "${target.peerId}": ${text.slice(0, 120)}`)
@@ -2344,114 +2348,79 @@ const warnDispatch = (line: string): void => {
   journal.add('dispatch', `warning: ${line}`)
 }
 
-const dispatchNextInner = async (): Promise<DispatchResult> => {
-  const executedDirectives: DirectiveDispatch[] = []
-  const announcedMembers: DispatchedWaveMember[] = []
-  // Attached to EVERY exit rather than to the success path only. Each half is
-  // left absent when it stayed empty, so a dispatch that executed no directive
-  // card (or announced nothing) keeps the exact result shape it had before.
-  const withReports = (r: DispatchResult): DispatchResult => ({
-    ...r,
-    ...(executedDirectives.length > 0 ? { directives: executedDirectives } : {}),
-    ...(announcedMembers.length > 0 ? { dispatched: announcedMembers } : {})
-  })
-  try {
-    const endpoint = resolveBrokerEndpoint()
-    const key = computeDeckProjectKey(config.projectDir)
-    // Drain directive-only waves first: the Deck executes them itself (inject
-    // + mark done) and pulls the next wave. The guard bounds the loop should a
-    // done-write ever fail to advance it.
-    for (let guard = 0; guard < 64; guard++) {
-      const items = await listRoadmap(endpoint, key, {})
-      const waveIds = wavesOf(queuedItems(items))[0]
-      if (!waveIds || waveIds.length === 0) return withReports({ sent: false, reason: 'empty-queue' })
-      const byId = new Map(items.map((i) => [i.id, i]))
-      const wave = waveIds.map((id) => byId.get(id)).filter((i): i is RoadmapItem => i !== undefined)
-      const { directives, normal } = splitWave(wave)
-      // Directive members execute immediately, whatever the rest of the wave
-      // holds (CT3 contract, unchanged: the Deck runs them, never announced).
-      // Mark-then-execute, not execute-then-mark (card b1932a6a): see
-      // runDirectiveWave's doc comment in dispatch.ts for the cost-asymmetry
-      // rationale and the accepted gap this ordering trades for.
-      executedDirectives.push(
-        ...(await runDirectiveWave(directives, {
-          markDone: async (item) =>
-            (await markDirectiveDone(item, guardedWriteIo(endpoint, key))).written ? undefined : 'skipped',
-          execute: executeDirective,
-          journal: (line) => journal.add('dispatch', line),
-          reportError: (message, error) => reportError('dispatch', message, error),
-          noteUnresolved: async (item, report) => {
-            await appendRoadmapContext(endpoint, item.id, unresolvedDirectiveNote(item, report))
-          }
-        }))
-      )
-      if (normal.length === 0) continue // all-directive wave: pull the next one
-      const { result, dispatched, failed } = await dispatchNormalWave(normal, {
-        announce: (text) => announceToLead(text),
-        upsert: async (item) =>
-          (await unqueueDispatched(item, guardedWriteIo(endpoint, key))).written ? undefined : 'skipped',
-        warn: warnDispatch
-      })
-      for (const item of dispatched) dispatchedIds.set(item.id, { claimed: false })
-      // Card bf76d37f: the announced members' IDENTITY, from the same
-      // `dispatched` array that drives dispatchedIds above -- so the outcome
-      // reported to a requesting agent and the set this Deck actually tracks
-      // can never name different cards.
-      announcedMembers.push(...dispatched.map((i) => ({ id: i.id, title: i.title, kind: i.kind })))
-      for (const { item, error } of failed) {
-        reportError('dispatch', `wave member "${item.title}" failed to unqueue, not tracked`, error)
-      }
-      return withReports(result)
-    }
-    return withReports({ sent: false, reason: 'error' })
-  } catch (e) {
-    reportError('dispatch', 'dispatch failed', e)
-    return withReports({ sent: false, reason: 'error' })
+// Read /health on every dispatch: a broker restarted on another database has
+// another identity, and an unreachable broker must fail the dispatch, not read
+// as an old one that would be given the previous announce-then-write order.
+const resolveAtomicPort = async (endpoint: BrokerEndpoint, key: string): Promise<AtomicPort | null> => {
+  const capability = await fetchAtomicDispatchCapability(endpoint)
+  if (!capability) return null
+  const groupSecretHash = computeGroupSecretHash(activeScope.secret)
+  return {
+    capability,
+    projectKey: key,
+    groupId: activeScope.groupId,
+    newOperationId: () => atomicOperationId(Date.now(), randomUUID(), capability),
+    post: (action, intent) => postAtomicDispatch(endpoint, { action, intent, groupSecretHash })
   }
 }
 
-// Re-entrancy guard: dispatchNext is reachable both from the watchDispatched
-// timer and the operator's manual dispatch IPC. Two overlapping runs could read
-// the same head-of-queue directive before either marks it done and double-
-// inject it (a duplicate /clear could wipe a freshly re-entered context). A
-// single in-flight run is shared so concurrent callers coalesce onto it.
-let dispatchInFlight: Promise<DispatchResult> | null = null
-const dispatchNext = (): Promise<DispatchResult> => {
-  if (dispatchInFlight) return dispatchInFlight
-  dispatchInFlight = dispatchNextInner().finally(() => {
-    dispatchInFlight = null
-  })
-  return dispatchInFlight
-}
+const dispatcher = createDispatcher({
+  openRun: async () => {
+    const endpoint = resolveBrokerEndpoint()
+    const key = computeDeckProjectKey(config.projectDir)
+    const io = guardedWriteIo(endpoint, key)
+    return {
+      port: await resolveAtomicPort(endpoint, key),
+      list: () => listRoadmap(endpoint, key, {}),
+      directives: {
+        markDone: async (item) => ((await markDirectiveDone(item, io)).written ? undefined : 'skipped'),
+        execute: executeDirective,
+        journal: (line) => journal.add('dispatch', line),
+        reportError: (message, error) => reportError('dispatch', message, error),
+        noteUnresolved: async (item, report) => {
+          await appendRoadmapContext(endpoint, item.id, unresolvedDirectiveNote(item, report))
+        }
+      },
+      legacy: {
+        announce: (text) => announceToLead(text, endpoint),
+        upsert: async (item) => ((await unqueueDispatched(item, io)).written ? undefined : 'skipped'),
+        warn: warnDispatch
+      }
+    }
+  },
+  target: resolveLeadTarget,
+  track: (members) => {
+    for (const m of members) dispatchedIds.set(m.id, { claimed: false })
+  },
+  journal: (line) => journal.add('dispatch', line),
+  warn: warnDispatch,
+  trace: (line) => logInfo('dispatch', line),
+  reportError: (message, error) => reportError('dispatch', message, error)
+})
+
+
+// The automatic dispatch: the watcher and the agents' requests, never the operator's button.
+const dispatchNext = (): Promise<DispatchResult> => dispatcher.dispatch(false)
 
 // ----- Dispatch requests poll (card bf76d37f) -----
 // An agent asks the Deck, through its MCP tool, to dispatch the next wave; the
 // broker parks the request and this poller serves it on the same 10 s cadence
-// as the four pollers above. The DECISION (park vs serve, what to answer, what
-// to do with a throwing dispatch) lives in runDispatchRequestPoll (./dispatch)
-// so it is behaviourally testable; this wrapper only supplies the deps.
-//
-// `inFlight` READS dispatchNext's existing guard, declared just above -- it is
-// deliberately not a second guard, and not a queue behind the first: see
-// runDispatchRequestPoll's doc comment for why serving a coalesced run would
-// answer the requester about a dispatch it never caused.
-const pollDispatchRequests = async (): Promise<void> => {
-  try {
+// as the four pollers above. `inFlight` READS the dispatcher's guard: it is not a
+// second guard, and not a queue behind the first (see runDispatchRequestPoll).
+const pollDispatchRequests = createDispatchRequestPoller({
+  run: async () => {
     const endpoint = resolveBrokerEndpoint()
     const key = computeDeckProjectKey(config.projectDir)
     await runDispatchRequestPoll({
       list: () => fetchDispatchRequests(key, { endpoint }),
-      inFlight: () => dispatchInFlight !== null,
+      inFlight: dispatcher.inFlight,
       dispatch: () => dispatchNext(),
       resolve: (id, outcome) => resolveDispatchRequest(id, outcome, { endpoint }),
       reportError: (message, error) => reportError('dispatch', message, error)
     })
-  } catch {
-    // Broker down / unreachable: silent, the next tick retries. Same shape as
-    // the four pollers above -- only the LIST call can land here, since every
-    // per-request failure is already reported inside runDispatchRequestPoll.
-  }
-}
+  },
+  reportFailure: (e) => reportError('dispatch', 'the dispatch request poll failed', e)
+})
 
 const dispatchWatchFailures = createFailureReporter((e) =>
   reportError('dispatch', 'the auto-dispatch watcher failed', e)
@@ -2490,9 +2459,7 @@ const watchDispatched = async (): Promise<void> => {
           break
       }
     }
-    // Only the automatic dispatch path is gated here — the manual 'send first
-    // to team-lead' button calls dispatchNext() directly, unguarded, and stays
-    // the operator's escape hatch when the barrier holds.
+    // The manual button bypasses this barrier, not the unconfirmed-delivery gate.
     // barrierPending covers the case a pure dispatchedIds watch misses: the
     // queued head's dependency may be an item this Deck never dispatched, so
     // dispatchedIds itself never changes when that dependency resolves. retry
@@ -2540,7 +2507,9 @@ const watchDispatched = async (): Promise<void> => {
           attempted && !dispatchSucceeded
             ? dispatchReason === 'no-lead'
               ? 'no team-lead connected, waiting for a lead to connect'
-              : `dispatch failed (${dispatchReason ?? 'unknown'}), will retry (use "send first to team-lead" to override)`
+              : dispatchReason === 'unconfirmed'
+                ? 'last wave delivery unconfirmed, automatic advance suspended until the broker settles it or the operator dispatches by hand'
+                : `dispatch failed (${dispatchReason ?? 'unknown'}), will retry (use "send first to team-lead" to override)`
             : hold?.kind === 'dependency'
               ? dependencyHoldReason(hold)
               : 'next queued item has unmet dependencies, waiting (use "send first to team-lead" to override)'
@@ -2597,33 +2566,33 @@ const seedDispatchedFromRoadmap = async (): Promise<void> => {
 let dispatchTimer: NodeJS.Timeout | null = null
 
 // ----- Direct assignment to one chosen peer (PLAN K6) -----
-// The operator's "process now" flow: a targeted announce (CODE CONSTANT,
-// composeAssignText) to the selected live peer, then the item moves to
-// in_progress (unqueued). The lock arrives when the agent actually claims it
-// with its own roadmap_update, like the launch/dispatch flows.
-const assignRoadmapItem = async (id: string, peerId: string): Promise<AssignResult> => {
-  const endpoint = brokerEndpointOnce()
-  const key = (): string => computeDeckProjectKey(config.projectDir)
-  return runAssign(id, peerId, {
-    read: async (itemId) => (await listRoadmap(endpoint(), key(), {})).find((i) => i.id === itemId) ?? null,
-    announce: async (item, target) =>
-      (
-        await sendAnnounce(
-          {
-            groupId: activeScope.groupId,
-            secret: activeScope.secret,
-            text: composeAssignText(item),
-            toPeerId: target
-          },
-          { endpoint: endpoint() }
-        )
-      ).sent,
-    write: (item) => assignInProgress(item, guardedWriteIo(endpoint(), key())),
-    journal: (line) => journal.add('dispatch', line),
-    warn: warnDispatch,
-    reportError: (message, error) => reportError('dispatch', message, error)
-  })
-}
+const assignRoadmapItem = createAssigner({
+  openRun: async () => {
+    const endpoint = resolveBrokerEndpoint()
+    const key = computeDeckProjectKey(config.projectDir)
+    return {
+      port: await resolveAtomicPort(endpoint, key),
+      read: async (itemId) => (await listRoadmap(endpoint, key, {})).find((i) => i.id === itemId) ?? null,
+      announce: async (item, target) =>
+        (
+          await sendAnnounce(
+            {
+              groupId: activeScope.groupId,
+              secret: activeScope.secret,
+              text: composeAssignText(item),
+              toPeerId: target
+            },
+            { endpoint }
+          )
+        ).sent,
+      write: (item) => assignInProgress(item, guardedWriteIo(endpoint, key))
+    }
+  },
+  journal: (line) => journal.add('dispatch', line),
+  warn: warnDispatch,
+  reportError: (message, error) => reportError('dispatch', message, error),
+  trace: (line) => logInfo('dispatch', line)
+})
 
 // ----- Operator stop on an in_progress item (PLAN K3) -----
 // Releases the lock and drops the item back to 'planned', then notifies the
@@ -3813,7 +3782,7 @@ app.whenReady().then(async () => {
     ensureControlServer,
     sessionStateDir: sessionDir,
     journal,
-    dispatchNext,
+    dispatchNext: () => dispatcher.dispatch(true),
     stopRoadmapItem,
     assignRoadmapItem,
     checkpoint: checkpointBeforeSpawn,

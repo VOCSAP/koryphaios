@@ -113,10 +113,10 @@ function bodyOf(src: string, declaration: RegExp): string {
 
 test("the status-write sites of index.ts call their orchestration and guarded write, never a bare upsertRoadmap", () => {
   const src = readFileSync(INDEX_PATH, "utf-8");
-  const dispatchNextInner = /const\s+dispatchNextInner\s*=\s*async\s*\([^)]*\)\s*:\s*Promise<DispatchResult>\s*=>\s*\{/;
+  const dispatcher = /const\s+dispatcher\s*=\s*createDispatcher\(\{/;
   const sites: [string, RegExp, RegExp[]][] = [
-    ["dispatchNextInner", dispatchNextInner, [/markDone:\s*async\s*\(item\)\s*=>\s*\(await markDirectiveDone\(item,\s*guardedWriteIo\(endpoint,\s*key\)\)\)\.written\s*\?\s*undefined\s*:\s*'skipped'/, /upsert:\s*async\s*\(item\)\s*=>\s*\(await unqueueDispatched\(item,\s*guardedWriteIo\(endpoint,\s*key\)\)\)\.written\s*\?\s*undefined\s*:\s*'skipped'/, /warn:\s*warnDispatch\b/]],
-    ["assignRoadmapItem", /const\s+assignRoadmapItem\s*=\s*async\s*\([^)]*\)\s*:\s*Promise<AssignResult>\s*=>\s*\{/, [/runAssign\(id,\s*peerId,/, /write:\s*\(item\)\s*=>\s*assignInProgress\(item,\s*guardedWriteIo\(endpoint\(\),\s*key\(\)\)\),/, /warn:\s*warnDispatch\b/]],
+    ["dispatcher", dispatcher, [/markDone:\s*async\s*\(item\)\s*=>\s*\(\(await markDirectiveDone\(item,\s*io\)\)\.written\s*\?\s*undefined\s*:\s*'skipped'\)/, /upsert:\s*async\s*\(item\)\s*=>\s*\(\(await unqueueDispatched\(item,\s*io\)\)\.written\s*\?\s*undefined\s*:\s*'skipped'\)/, /warn:\s*warnDispatch\b/]],
+    ["assignRoadmapItem", /const\s+assignRoadmapItem\s*=\s*createAssigner\(\{/, [/write:\s*\(item\)\s*=>\s*assignInProgress\(item,\s*guardedWriteIo\(endpoint,\s*key\)\)/, /warn:\s*warnDispatch\b/]],
     ["stopRoadmapItem", /const\s+stopRoadmapItem\s*=\s*async\s*\([^)]*\)\s*:\s*Promise<StopResult>\s*=>\s*\{/, [/runStop\(id,/, /write:\s*\(item\)\s*=>\s*requestOperatorStop\(item,\s*guardedWriteIo\(endpoint\(\),\s*key\(\)\)\),/]],
     ["warnDispatch", /const\s+warnDispatch\s*=\s*\(line:\s*string\)\s*:\s*void\s*=>\s*\{/, [/logWarn\('dispatch',\s*line\)/, /journal\.add\('dispatch',/]],
     ["watchDispatched", /const\s+watchDispatched\s*=\s*async\s*\([^)]*\)\s*:\s*Promise<void>\s*=>\s*\{/, [/dispatchSucceeded\s*=\s*dispatchTracked\(r\)/]]

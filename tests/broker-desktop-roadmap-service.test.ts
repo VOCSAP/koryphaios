@@ -7,9 +7,31 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
-import { post, scrubEnv, startBroker, stopBroker, type TestBroker } from "./_helper.ts";
+import {
+  groupId,
+  livePid,
+  openBrokerDb,
+  post,
+  scrubEnv,
+  sha256Hex,
+  startBroker,
+  stopBroker,
+  type TestBroker
+} from "./_helper.ts";
+import { fetchAtomicDispatchCapability } from "../desktop/src/main/broker-client.ts";
+import {
+  atomicOperationId,
+  dispatchWave,
+  runAssign,
+  settleUnconfirmed,
+  type AssignDeps,
+  type AtomicPort,
+  type AtomicWaveDeps
+} from "../desktop/src/main/dispatch.ts";
+import { queuedItems, wavesOf } from "../desktop/src/shared/workflow.ts";
+import type { AtomicDispatchIntent } from "../shared/types.ts";
 import {
   normalizeRemoteUrl,
   appendRoadmapContext,
@@ -17,6 +39,7 @@ import {
   configureRoadmapSigner,
   resetRoadmapSigner,
   listRoadmap,
+  postAtomicDispatch,
   upsertRoadmap,
   archiveRoadmap,
   reorderRoadmap,
@@ -399,3 +422,307 @@ for (const site of GUARDED_SITES) {
     expect(stored).toMatchObject({ title: "renamed meanwhile", ...site.applied });
   });
 }
+
+let atomicSeq = 0;
+
+type PostWrap = (
+  real: AtomicPort["post"],
+  action: "execute" | "resolve",
+  intent: AtomicDispatchIntent,
+  n: number
+) => ReturnType<AtomicPort["post"]>;
+
+async function atomicScenario() {
+  atomicSeq += 1;
+  const secret = `lot-i-${atomicSeq}-${broker.port}`;
+  const group = { id: await groupId(secret), hash: await sha256Hex(secret) };
+  const register = async (name: string) =>
+    (
+      await post<{ peer_id: string; instance_token: string }>(`${broker.url}/register`, {
+        pid: livePid(),
+        cwd: `/lot-i/${name}${atomicSeq}`,
+        git_root: null,
+        tty: null,
+        summary: "",
+        host: `h${name}${atomicSeq}`,
+        client_pid: 1,
+        project_key: null,
+        group_id: group.id,
+        group_secret_hash: group.hash
+      })
+    ).body;
+  const lead = await register("lead");
+  const worker = await register("worker");
+  const endpoint = { url: broker.url, token: null };
+  const project = `github.com/vocsap/lot-i-${atomicSeq}`;
+  const capability = (await fetchAtomicDispatchCapability(endpoint))!;
+  const posted: { action: string; operationId: string }[] = [];
+  const portWith = (wrap?: PostWrap): AtomicPort => ({
+    capability,
+    projectKey: project,
+    groupId: group.id,
+    newOperationId: () => atomicOperationId(Date.now(), randomUUID(), capability),
+    post: (action, intent) => {
+      posted.push({ action, operationId: intent.operation_id });
+      const real: AtomicPort["post"] = (a, i) => postAtomicDispatch(endpoint, { action: a, intent: i, groupSecretHash: group.hash });
+      return wrap ? wrap(real, action, intent, posted.length) : real(action, intent);
+    }
+  });
+  const queued = async (count: number): Promise<RoadmapItem[]> => {
+    for (let n = 0; n < count; n++) {
+      await upsertRoadmap(endpoint, project, { title: `lot I card ${atomicSeq}.${n}`, status: "planned", queue: 1 });
+    }
+    return queuedItems(await listRoadmap(endpoint, project, {}));
+  };
+  const reread = async (): Promise<RoadmapItem[]> => {
+    const items = await listRoadmap(endpoint, project, {});
+    const ids = wavesOf(queuedItems(items))[0] ?? [];
+    return ids.map((id) => items.find((i) => i.id === id)!).filter((i) => i.kind !== "directive");
+  };
+  const messagesTo = (token: string): { id: number; text: string }[] => {
+    const db = openBrokerDb(broker.dbPath, { readonly: true });
+    try {
+      return db.query("SELECT id, text FROM messages WHERE to_token = ? ORDER BY id").all(token) as { id: number; text: string }[];
+    } finally {
+      db.close();
+    }
+  };
+  const waveDeps = (port: AtomicPort): AtomicWaveDeps => ({
+    port,
+    target: () => ({ peerId: lead.peer_id, kind: "lead" }),
+    reread,
+    journal: () => {},
+    warn: () => {}
+  });
+  const legacyMustNotRun = {
+    announce: async (): Promise<number> => {
+      throw new Error("legacy announce must not run");
+    },
+    upsert: async (): Promise<void> => {
+      throw new Error("legacy upsert must not run");
+    },
+    warn: (): void => {}
+  };
+  const assignDeps = (port: AtomicPort): AssignDeps => ({
+    atomic: port,
+    read: async (id) => (await listRoadmap(endpoint, project, {})).find((i) => i.id === id) ?? null,
+    announce: async () => {
+      throw new Error("legacy announce must not run");
+    },
+    write: async () => {
+      throw new Error("legacy write must not run");
+    },
+    journal: () => {},
+    warn: () => {},
+    reportError: () => {}
+  });
+  return { endpoint, project, lead, worker, posted, portWith, queued, messagesTo, waveDeps, legacyMustNotRun, assignDeps };
+}
+
+test("a wave goes through the route: cards written and one message stored for the lead in one dispatch", async () => {
+  const s = await atomicScenario();
+  const items = await s.queued(2);
+  const out = await dispatchWave(items, { atomic: s.waveDeps(s.portWith()), legacy: s.legacyMustNotRun, trace: () => {} });
+  expect(out.result).toMatchObject({ sent: true, delivery: "sent", count: 2 });
+  expect(out.dispatched.map((i) => i.id)).toEqual(items.map((i) => i.id));
+  const after = await listRoadmap(s.endpoint, s.project, {});
+  expect(after.map((i) => [i.status, i.queue])).toEqual([["planned", null], ["planned", null]]);
+  expect(s.messagesTo(s.lead.instance_token)).toHaveLength(1);
+  expect(s.messagesTo(s.worker.instance_token)).toHaveLength(0);
+});
+
+test("a card closed between the read and the execute is never announced and nothing moves", async () => {
+  const s = await atomicScenario();
+  const items = await s.queued(2);
+  await upsertRoadmap(s.endpoint, s.project, { id: items[1]!.id, status: "done", queue: null });
+  const out = await dispatchWave(items, { atomic: s.waveDeps(s.portWith()), legacy: s.legacyMustNotRun, trace: () => {} });
+  expect(out.result).toMatchObject({ sent: false, delivery: "not-sent", reason: "ineligible" });
+  expect(out.result.notSent?.map((m) => m.id)).toEqual([items[1]!.id]);
+  expect(out.dispatched).toEqual([]);
+  expect(s.messagesTo(s.lead.instance_token)).toHaveLength(0);
+  const first = (await listRoadmap(s.endpoint, s.project, {})).find((i) => i.id === items[0]!.id)!;
+  expect([first.status, first.queue]).toEqual(["planned", 1]);
+});
+
+test("a card edited between the read and the execute: one re-read, a new operation id, then the wave is sent", async () => {
+  const s = await atomicScenario();
+  const items = await s.queued(2);
+  await upsertRoadmap(s.endpoint, s.project, { id: items[0]!.id, title: "renamed meanwhile" });
+  const out = await dispatchWave(items, { atomic: s.waveDeps(s.portWith()), legacy: s.legacyMustNotRun, trace: () => {} });
+  expect(out.result).toMatchObject({ sent: true, delivery: "sent", count: 2 });
+  expect(s.posted.map((p) => p.action)).toEqual(["execute", "execute"]);
+  expect(s.posted[1]!.operationId).not.toBe(s.posted[0]!.operationId);
+  expect(s.messagesTo(s.lead.instance_token)).toHaveLength(1);
+});
+
+test("a lost execute answer is settled by resolve under the same operation id and yields ONE message", async () => {
+  const s = await atomicScenario();
+  const items = await s.queued(2);
+  const port = s.portWith(async (real, action, intent, n) => {
+    const answer = await real(action, intent);
+    return n === 1 ? { delivery: "unknown", operation_id: intent.operation_id, reason: "transport" } : answer;
+  });
+  const out = await dispatchWave(items, { atomic: s.waveDeps(port), legacy: s.legacyMustNotRun, trace: () => {} });
+  expect(s.posted.map((p) => p.action)).toEqual(["execute", "resolve"]);
+  expect(s.posted[1]!.operationId).toBe(s.posted[0]!.operationId);
+  expect(out.result).toMatchObject({ sent: true, delivery: "sent", count: 2 });
+  expect(out.dispatched).toHaveLength(2);
+  expect(s.messagesTo(s.lead.instance_token)).toHaveLength(1);
+});
+
+test("a delivery that stays unknown is not resent: no second message, the operation is kept, a later resolve settles it", async () => {
+  const s = await atomicScenario();
+  const items = await s.queued(1);
+  const lostAlways = s.portWith(async (real, action, intent, n) => {
+    if (n === 1) await real(action, intent);
+    return { delivery: "unknown", operation_id: intent.operation_id, reason: "transport" };
+  });
+  const out = await dispatchWave(items, { atomic: s.waveDeps(lostAlways), legacy: s.legacyMustNotRun, trace: () => {} });
+  expect(out.result).toMatchObject({ sent: false, delivery: "unknown", reason: "unconfirmed" });
+  expect(out.dispatched).toEqual([]);
+  expect(s.messagesTo(s.lead.instance_token)).toHaveLength(1);
+  const settled = await settleUnconfirmed(out.pending!, s.portWith(), false);
+  expect(settled).toMatchObject({ state: "sent", members: [{ id: items[0]!.id }] });
+  expect(s.messagesTo(s.lead.instance_token)).toHaveLength(1);
+});
+
+test("an assignment goes through the route: the chosen peer, not the lead, hears it and the card moves to in_progress", async () => {
+  const s = await atomicScenario();
+  const [item] = await s.queued(1);
+  const result = await runAssign(item!.id, s.worker.peer_id, s.assignDeps(s.portWith()));
+  expect(result).toEqual({ sent: true, delivery: "sent" });
+  const after = (await listRoadmap(s.endpoint, s.project, {})).find((i) => i.id === item!.id)!;
+  expect([after.status, after.queue]).toEqual(["in_progress", null]);
+  expect(s.messagesTo(s.worker.instance_token)).toHaveLength(1);
+  expect(s.messagesTo(s.lead.instance_token)).toHaveLength(0);
+});
+
+test("an assignment of a card closed since the read announces nothing", async () => {
+  const s = await atomicScenario();
+  const [item] = await s.queued(1);
+  const deps = s.assignDeps(s.portWith());
+  const read = deps.read;
+  let first = true;
+  deps.read = async (id) => {
+    const seen = await read(id);
+    if (first) {
+      first = false;
+      await upsertRoadmap(s.endpoint, s.project, { id, status: "done", queue: null });
+    }
+    return seen;
+  };
+  expect(await runAssign(item!.id, s.worker.peer_id, deps)).toEqual({ sent: false, delivery: "not-sent", reason: "ineligible" });
+  expect(s.messagesTo(s.worker.instance_token)).toHaveLength(0);
+});
+
+test("the broker capability is read from /health: served, absent on an old broker, and an unreachable broker rejects", async () => {
+  const served = await fetchAtomicDispatchCapability({ url: broker.url, token: null });
+  expect(served).toMatchObject({ version: 1, max_members: expect.any(Number) });
+  const old = Bun.serve({ port: 0, fetch: () => Response.json({ status: "ok" }) });
+  try {
+    expect(await fetchAtomicDispatchCapability({ url: `http://127.0.0.1:${old.port}`, token: null })).toBeNull();
+  } finally {
+    old.stop(true);
+  }
+  const closed = Bun.serve({ port: 0, fetch: () => new Response("x") });
+  const closedUrl = `http://127.0.0.1:${closed.port}`;
+  closed.stop(true);
+  await expect(fetchAtomicDispatchCapability({ url: closedUrl, token: null })).rejects.toThrow();
+});
+
+const POST_OP = "1000:00000000-0000-4000-8000-000000000001";
+const POST_INTENT: AtomicDispatchIntent = {
+  broker_id: "11111111-aaaa-bbbb-cccc-222222222222",
+  operation_id: POST_OP,
+  project_key: "github.com/vocsap/post-atomic",
+  group_id: "group-1",
+  mode: "wave",
+  target_kind: "lead",
+  to_peer_id: "lead-1",
+  members: [{ id: "aaaaaaaa-0000-0000-0000-00000000000a", expected_content_rev: 1, expected_dispatch_state_tag: "a".repeat(64) }]
+};
+
+async function postAgainst(
+  respond: () => Response,
+  action: "execute" | "resolve" = "execute"
+): Promise<{ answer: unknown; sent: Record<string, unknown> | null }> {
+  let sent: Record<string, unknown> | null = null;
+  const stub = Bun.serve({
+    port: 0,
+    fetch: async (req) => {
+      sent = (await req.json()) as Record<string, unknown>;
+      return respond();
+    }
+  });
+  try {
+    const answer = await postAtomicDispatch({ url: `http://127.0.0.1:${stub.port}`, token: null }, { action, intent: POST_INTENT, groupSecretHash: "h".repeat(8) }).catch(
+      (e: Error) => e
+    );
+    return { answer, sent };
+  } finally {
+    stub.stop(true);
+  }
+}
+
+const json = (status: number, body: unknown): Response => Response.json(body, { status });
+const sentCards = () => POST_INTENT.members.map((m) => ({ id: m.id, title: "A", kind: "feature" }));
+const unknownAnswer = (reason: string) => ({ delivery: "unknown", operation_id: POST_OP, reason });
+
+test("postAtomicDispatch signs the request as the operator with the intent and the group hash", async () => {
+  const { sent } = await postAgainst(() => json(200, { delivery: "sent", operation_id: POST_OP, message_id: 3, cards: [] }), "resolve");
+  expect(sent).toMatchObject({ by: "deck", action: "resolve", group_secret_hash: "hhhhhhhh", intent: { operation_id: POST_OP } });
+  expect(typeof (sent as { auth?: unknown }).auth).toBe("object");
+});
+
+test("postAtomicDispatch returns the broker's recorded outcome, sent or not-sent", async () => {
+  const sentBody = { delivery: "sent", operation_id: POST_OP, message_id: 3, cards: [{ id: POST_INTENT.members[0]!.id, title: "A", kind: "feature" }] };
+  expect((await postAgainst(() => json(200, sentBody))).answer).toEqual(sentBody);
+  const refused = { delivery: "not-sent", operation_id: POST_OP, reason: "card-changed", card_ids: ["a"] };
+  expect((await postAgainst(() => json(409, refused))).answer).toEqual(refused);
+});
+
+test.each<[string, () => Response, ReturnType<typeof unknownAnswer>]>([
+  ["a broker that is not the one asked", () => json(409, { code: "dispatch-broker-mismatch", error: "x" }), unknownAnswer("broker-mismatch")],
+  ["an operation past its deadline", () => json(409, { code: "dispatch-operation-expired", error: "x" }), unknownAnswer("expired")],
+  ["a resolve whose result was purged", () => json(200, unknownAnswer("expired")), unknownAnswer("expired")],
+  ["a broker error with a body", () => json(500, { error: "boom" }), unknownAnswer("transport")],
+  ["a broker error with no JSON", () => new Response("<html>bad gateway</html>", { status: 502 }), unknownAnswer("transport")],
+  ["a success with no JSON", () => new Response("ok", { status: 200 }), unknownAnswer("invalid-response")],
+  ["an outcome for another operation", () => json(200, { delivery: "sent", operation_id: "9999:other", message_id: 1, cards: [] }), unknownAnswer("invalid-response")],
+  ["a sent outcome with a card missing", () => json(200, { delivery: "sent", operation_id: POST_OP, message_id: 1, cards: [] }), unknownAnswer("invalid-response")],
+  [
+    "a sent outcome with a card too many",
+    () => json(200, { delivery: "sent", operation_id: POST_OP, message_id: 1, cards: [...sentCards(), { id: "eeeeeeee-0000-0000-0000-00000000000e", title: "S", kind: "feature" }] }),
+    unknownAnswer("invalid-response")
+  ],
+  [
+    "a sent outcome with a card listed twice",
+    () => json(200, { delivery: "sent", operation_id: POST_OP, message_id: 1, cards: [...sentCards(), ...sentCards()] }),
+    unknownAnswer("invalid-response")
+  ]
+])("postAtomicDispatch reads %s as unknown, never as a refusal", async (_name, respond, expected) => {
+  expect((await postAgainst(respond)).answer).toEqual(expected);
+});
+
+test("postAtomicDispatch reads a lost connection as unknown transport", async () => {
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (() => Promise.reject(new TypeError("connection refused"))) as unknown as typeof fetch;
+  try {
+    const answer = await postAtomicDispatch({ url: "http://127.0.0.1:1", token: null }, { action: "execute", intent: POST_INTENT, groupSecretHash: null });
+    expect(answer as unknown).toEqual(unknownAnswer("transport"));
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test.each<[string, () => Response, number, string]>([
+  ["a same-id different-intent mismatch", () => json(409, { code: "dispatch-operation-mismatch", error: "other intent" }), 409, "other intent"],
+  ["an invalid request", () => json(400, { code: "dispatch-invalid-request", error: "bad intent" }), 400, "bad intent"],
+  ["a full registry", () => json(503, { code: "dispatch-capacity-exceeded", error: "registry full" }), 503, "registry full"],
+  ["an unsigned write", () => json(401, { error: "sign the write" }), 401, "sign the write"],
+  ["a refusal with no JSON", () => new Response("denied", { status: 403 }), 403, "roadmap request failed: 403"]
+])("postAtomicDispatch throws on %s, since nothing was executed", async (_name, respond, status, message) => {
+  const { answer } = await postAgainst(respond);
+  expect(answer).toBeInstanceOf(RoadmapRequestError);
+  expect([(answer as RoadmapRequestError).status, (answer as Error).message]).toEqual([status, message]);
+});
