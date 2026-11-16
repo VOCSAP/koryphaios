@@ -345,6 +345,17 @@ test("locked rejects non-boolean values", async () => {
 
 // ----- stale-lock sweep -----
 
+const SWEEP_PINNED_DATE = "2020-01-01T00:00:00.000Z";
+
+function pinContentDate(b: TestBroker, id: string): void {
+  const db = openBrokerDb(b.dbPath);
+  try {
+    db.run("UPDATE roadmap_items SET content_updated_at = ? WHERE id = ?", [SWEEP_PINNED_DATE, id]);
+  } finally {
+    db.close();
+  }
+}
+
 test("TTL sweep releases a lock with no recent write and drops status to planned", async () => {
   const b = await startBroker({
     CLAUDE_PEERS_LOCK_TTL_SEC: "2",
@@ -359,6 +370,7 @@ test("TTL sweep releases a lock with no recent write and drops status to planned
       status: "in_progress",
     });
     expect(res.body.item.locked).toBe(true);
+    pinContentDate(b, res.body.item.id);
 
     // Backdate updated_at well past the 2s TTL, then poll for the next sweep
     // tick to observe it -- was a fixed `await Bun.sleep(2_500)` (card
@@ -386,6 +398,7 @@ test("TTL sweep releases a lock with no recent write and drops status to planned
     expect(item.locked_by).toBeNull();
     expect(item.status).toBe("planned");
     expect(item.updated_by).toBe("lock-sweep");
+    expect(item.content_updated_at, "the sweep moved status but dated no content").toBe(SWEEP_PINNED_DATE);
   } finally {
     await stopBroker(b);
   }
@@ -482,6 +495,7 @@ test("owner-gone sweep releases after grace, but an active owner keeps the lock"
     // wrong reason, the day locking itself breaks (card 365561ba review).
     expect(held.body.item.locked).toBe(true);
     expect(ghost.body.item.locked).toBe(true);
+    pinContentDate(b, ghost.body.item.id);
 
     // SQLite's datetime() truncates both sides to whole seconds, so combined
     // with the 1s sweep tick the release is only guaranteed observable within
@@ -506,6 +520,7 @@ test("owner-gone sweep releases after grace, but an active owner keeps the lock"
     expect(heldAfter!.status).toBe("in_progress");
     expect(ghostAfter.status).toBe("planned");
     expect(ghostAfter.updated_by).toBe("lock-sweep");
+    expect(ghostAfter.content_updated_at, "the owner-gone sweep dated no content").toBe(SWEEP_PINNED_DATE);
   } finally {
     await stopBroker(b);
   }
@@ -705,6 +720,7 @@ test("park TTL sweep (clause 3): releases an EXPIRED park (T-(ttl+1s)) but leave
     });
     expect(inside.body.item.locked).toBe(true);
     expect(outside.body.item.locked).toBe(true);
+    pinContentDate(b, outside.body.item.id);
 
     const db = openBrokerDb(b.dbPath);
     // T-(ttl-1s): parked 3s ago against a 4s TTL -- 1s still remains, must
@@ -738,6 +754,7 @@ test("park TTL sweep (clause 3): releases an EXPIRED park (T-(ttl+1s)) but leave
     expect(outsideAfter.lock_parked_at).toBeNull();
     expect(outsideAfter.lock_parked_by).toBeNull();
     expect(outsideAfter.updated_by).toBe("lock-sweep");
+    expect(outsideAfter.content_updated_at, "the park-expiry sweep dated no content").toBe(SWEEP_PINNED_DATE);
   } finally {
     await stopBroker(b);
   }

@@ -185,7 +185,15 @@ test("PICK-LIST, not spread: an unknown broker field does not travel through", (
   const item = sanitizeRoadmapItem({ ...wellFormed(), surprise_extra_field: "x" }) as RoadmapItem;
   expect(item).not.toBeNull();
   expect(Object.keys(item)).not.toContain("surprise_extra_field");
-  expect(Object.keys(item)).toHaveLength(32);
+  expect(Object.keys(item)).toHaveLength(33);
+});
+
+test("content_updated_at survives as the broker's content date, and anything but a string reads as unknown (null)", () => {
+  expect(sanitized({ content_updated_at: "2026-11-16T10:00:00.000Z" }).content_updated_at).toBe("2026-11-16T10:00:00.000Z");
+  expect(sanitized({ content_updated_at: null }).content_updated_at).toBeNull();
+  expect(sanitized({ content_updated_at: 1763287200000 }).content_updated_at).toBeNull();
+  expect(sanitized({}).content_updated_at).toBeNull();
+  expect("content_updated_at" in sanitized({})).toBe(true);
 });
 
 test("content_rev survives as the Save's revision, and a malformed one is dropped rather than coerced", () => {

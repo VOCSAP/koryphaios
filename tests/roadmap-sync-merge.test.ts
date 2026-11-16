@@ -162,3 +162,14 @@ test("the sweep auto-resolution reads the CONTENT: only a lone in_progress -> pl
     isSweepOnlyStatusChange(base, content({ status: "in_progress" })),
   ]).toEqual(["an upstream that came back to the base changed nothing to arbitrate", true]);
 });
+
+test("the content date rides outside the content contract: never picked, never compared, never merged", () => {
+  const dated = { ...content(), content_updated_at: "2026-01-02T03:04:05.006Z" };
+  const other = { ...content(), content_updated_at: "2027-07-08T09:10:11.012Z" };
+  expect(ROADMAP_SYNC_CONTENT_FIELDS as readonly string[]).not.toContain("content_updated_at");
+  expect(Object.keys(pickSyncContent(dated))).not.toContain("content_updated_at");
+  expect(contentEquals(dated, other), "two sides differing only by date are not in conflict").toBe(true);
+  const merged = mergeReopen(content(), content({ title: "local title" }), content({ description: "remote description" }));
+  expect(Object.keys(merged)).not.toContain("content_updated_at");
+  expect(parseSyncContent(JSON.stringify({ ...dated }))).toEqual(content());
+});

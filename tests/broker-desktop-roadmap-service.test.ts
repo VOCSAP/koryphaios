@@ -22,6 +22,7 @@ import {
   reorderRoadmap,
   RoadmapRequestError
 } from "../desktop/src/main/roadmap-service.ts";
+import { idleSweepRequest, operatorStopRequest } from "../desktop/src/main/roadmap-release-request.ts";
 import { isRoadmapStaleSaveError } from "../shared/roadmap-append.ts";
 import { normalizeRemoteUrl as coreNormalize } from "../shared/summarize.ts";
 import { buildAuthProof, deriveOperatorId, generateCredential } from "../shared/approval.ts";
@@ -142,6 +143,44 @@ test("list/upsert/archive round-trip against a live broker", async () => {
   expect(after.map((i) => i.id)).not.toContain(created.id);
   const withArchived = await listRoadmap(endpoint, key, { include_archived: true });
   expect(withArchived.map((i) => i.id)).toContain(created.id);
+});
+
+test("the idle sweep keeps a card's content date, the operator stop and the dispatch writes move it", async () => {
+  const endpoint = { url: broker.url, token: null };
+  const key = "github.com/acme/deck-content-date";
+  const dateOf = async (id: string): Promise<string | null> =>
+    (await listRoadmap(endpoint, key, {})).find((i) => i.id === id)!.content_updated_at;
+
+  const created = await upsertRoadmap(endpoint, key, { title: "Content date", kind: "idea", status: "idea" });
+  expect(typeof created.content_updated_at).toBe("string");
+
+  const planned = await upsertRoadmap(endpoint, key, { id: created.id, queue: null, status: "planned" });
+  expect(planned.content_updated_at).not.toBe(created.content_updated_at);
+  const dequeued = await upsertRoadmap(endpoint, key, { id: created.id, queue: null, status: "planned" });
+  expect(dequeued.content_updated_at).toBe(planned.content_updated_at);
+
+  const assigned = await upsertRoadmap(endpoint, key, { id: created.id, status: "in_progress", queue: null });
+  expect(assigned.content_updated_at).not.toBe(planned.content_updated_at);
+
+  const locked = await upsertRoadmap(endpoint, key, { id: created.id, locked: true });
+  expect(locked.locked).toBe(true);
+  const swept = await upsertRoadmap(endpoint, key, idleSweepRequest(locked));
+  expect(swept.status).toBe("planned");
+  expect(swept.content_updated_at).toBe(assigned.content_updated_at);
+  expect(await dateOf(created.id)).toBe(assigned.content_updated_at);
+
+  const reassigned = await upsertRoadmap(endpoint, key, { id: created.id, status: "in_progress", queue: null });
+  const stopped = await upsertRoadmap(endpoint, key, operatorStopRequest(reassigned));
+  expect(stopped.status).toBe("planned");
+  expect(stopped.content_updated_at).not.toBe(reassigned.content_updated_at);
+
+  const appended = await appendRoadmapContext(endpoint, created.id, "directive report");
+  expect(appended.content_updated_at).not.toBe(stopped.content_updated_at);
+
+  await upsertRoadmap(endpoint, key, { id: created.id, queue: 1 });
+  const done = await upsertRoadmap(endpoint, key, { id: created.id, queue: null, status: "done" });
+  expect(done.status).toBe("done");
+  expect(done.content_updated_at).not.toBe(appended.content_updated_at);
 });
 
 // upsertRoadmap relies on `...fields` spread to carry inactive onto the wire; a

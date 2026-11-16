@@ -1,7 +1,7 @@
 // Workflow lane: atomic dispatch-queue rewrite via /roadmap/reorder.
 
 import { test, expect, beforeAll, beforeEach, afterAll } from "bun:test";
-import { startBroker, stopBroker, post, livePid, type TestBroker , deckAuthored } from "./_helper.ts";
+import { startBroker, stopBroker, post, livePid, type TestBroker , deckAuthored, openBrokerDb } from "./_helper.ts";
 import type { RoadmapItem } from "../shared/types.ts";
 
 let broker: TestBroker;
@@ -453,4 +453,25 @@ test("V-A NEGATIVE CONTROL: an empty-ids clear from the SAME group, or 'deck', s
   });
   const deckClear = await reorder({ ids: [], waves: [] });
   expect(deckClear.status).toBe(200);
+});
+
+test("reorder and dequeue move the queue and leave every card's content date alone", async () => {
+  const a = await create("wf date a", { queue: 1 });
+  const b = await create("wf date b", { queue: 2 });
+  const pinned = "2020-01-01T00:00:00.000Z";
+  const db = openBrokerDb(broker.dbPath);
+  db.run("UPDATE roadmap_items SET content_updated_at = ? WHERE id IN (?, ?)", [pinned, a.id, b.id]);
+  db.close();
+
+  const swapped = await reorder({ ids: [b.id, a.id], waves: [[b.id], [a.id]] });
+  expect(swapped.status).toBe(200);
+  const items = (swapped.body as { items: RoadmapItem[] }).items;
+  expect(items.map((i) => [i.id, i.queue])).toEqual([[b.id, 1], [a.id, 2]]);
+  expect(items.map((i) => i.content_updated_at), "a rewritten rank dates nothing").toEqual([pinned, pinned]);
+
+  const dequeued = await upsert({ id: a.id, queue: null });
+  const afterDequeue = (dequeued.body as { item: RoadmapItem }).item;
+  expect(afterDequeue.queue).toBeNull();
+  expect(afterDequeue.status).toBe("planned");
+  expect(afterDequeue.content_updated_at, "a dequeue planned -> planned dates nothing").toBe(pinned);
 });

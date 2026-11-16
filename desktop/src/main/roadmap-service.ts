@@ -247,6 +247,7 @@ export function sanitizeRoadmapItem(raw: unknown): RoadmapItem | null {
     updated_by: str(r.updated_by),
     created_at: str(r.created_at),
     updated_at: str(r.updated_at),
+    content_updated_at: nullableStr(r.content_updated_at),
     content_rev:
       typeof r.content_rev === 'number' && Number.isSafeInteger(r.content_rev) && r.content_rev >= 0
         ? r.content_rev
@@ -460,6 +461,15 @@ export async function searchRoadmap(
     items: sanitizeList(res?.items, '/roadmap/list (search)'),
     facets: query.with_facets ? sanitizeFacets(res?.facets) : null
   }
+}
+
+/**
+ * change_origin is the main process's own marker (the idle-lock watcher); a
+ * body that comes from the renderer or a paired companion never carries it.
+ */
+export function withoutChangeOrigin(fields: RoadmapUpsertFields): RoadmapUpsertFields {
+  const { change_origin: _origin, ...rest } = fields
+  return rest
 }
 
 export async function upsertRoadmap(

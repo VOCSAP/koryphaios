@@ -94,3 +94,8 @@ test("every triage role is a value the card type accepts", () => {
     "wontfix",
   ]);
 });
+
+test("neither contract lists the content date: it is metadata of the retained content, not a field to arbitrate", () => {
+  expect([...CORE_FIELDS] as string[]).not.toContain("content_updated_at");
+  expect([...DECK_FIELDS] as string[]).not.toContain("content_updated_at");
+});

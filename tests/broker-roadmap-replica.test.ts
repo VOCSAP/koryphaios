@@ -72,6 +72,8 @@ let documentPullImmutableConflict: { documentId: string; unit: RoadmapContextDoc
 let documentPullExtra: unknown[] = [];
 /** Rows the proxy prepends to every roadmap pull page, as a broken upstream could serve them. */
 let roadmapPullExtra: unknown[] = [];
+/** Runs once between the upstream accepting a push and the replica reading the answer. */
+let duringNextPush: (() => Promise<void>) | null = null;
 
 beforeAll(async () => {
   // The upstream takes the ROLE explicitly (serve_replicas) on top of the token:
@@ -104,6 +106,11 @@ beforeAll(async () => {
         headers,
         body,
       });
+      if (duringNextPush && url.pathname === "/roadmap/sync/push" && req.method === "POST") {
+        const hook = duringNextPush;
+        duringNextPush = null;
+        await hook();
+      }
       if (roadmapPullExtra.length > 0 && url.pathname === "/roadmap/sync/pull" && req.method === "POST") {
         const payload = await response.json() as { items: unknown[]; next_rev: number };
         return new Response(JSON.stringify({ ...payload, items: [...roadmapPullExtra, ...payload.items] }), {
@@ -2737,4 +2744,158 @@ test("a conflict whose upstream content moved since the base stays parked across
 
   expect(await conflictIds(), "an upstream edit since the base is the operator's to arbitrate").toContain(card.id);
   expect((await itemOn(upstream, card.id))!.description).toBe("the upstream's version");
+}, 60_000);
+
+test("the content date a card was given where it was edited is the one the other broker holds", async () => {
+  const born = await createOn(upstream, { by: "agent-upstream", title: "dated across the pair", description: "v1" });
+  const pulled = await waitForItem("the card reaches the replica", replica, born.id, (i) => i.description === "v1");
+  expect(pulled.content_updated_at, "pull INSERT carries the upstream's date, not the reception instant").toBe(
+    born.content_updated_at
+  );
+
+  await Bun.sleep(20);
+  const upstreamEdit = await createOn(upstream, { id: born.id, by: "agent-upstream", description: "v2" });
+  expect(upstreamEdit.content_updated_at).not.toBe(born.content_updated_at);
+  const repulled = await waitForItem("the edit reaches the replica", replica, born.id, (i) => i.description === "v2");
+  expect(repulled.content_updated_at, "a clean pull adopts the date of the content it adopts").toBe(
+    upstreamEdit.content_updated_at
+  );
+
+  await Bun.sleep(20);
+  const replicaEdit = await createOn(replica, { id: born.id, by: "agent-local", description: "v3" });
+  expect(replicaEdit.content_updated_at).not.toBe(upstreamEdit.content_updated_at);
+  const pushed = await waitForItem("the replica edit reaches the upstream", upstream, born.id, (i) => i.description === "v3");
+  expect(pushed.content_updated_at, "a push adopts the date of the content it carries").toBe(replicaEdit.content_updated_at);
+
+  const reordered = await createOn(upstream, { id: born.id, by: "agent-upstream", queue: 9 });
+  expect(reordered.content_updated_at, "a rank move is no content change").toBe(replicaEdit.content_updated_at);
+  const replicaAfterRank = await waitForItem("the rank reaches the replica", replica, born.id, (i) => i.queue === 9);
+  expect(replicaAfterRank.content_updated_at, "a rank-only pull dates nothing").toBe(replicaEdit.content_updated_at);
+}, 40_000);
+
+test("a conflict resolved remote, local or merged keeps the date of the side whose content stays", async () => {
+  const cards: RoadmapItem[] = [];
+  for (const choice of ["remote", "local", "merge_reopen"]) {
+    cards.push(
+      await createOn(upstream, { by: "agent-upstream", title: `dated conflict ${choice}`, description: "common base" })
+    );
+  }
+  for (const card of cards) {
+    await waitForItem("conflict fixture reaches the replica", replica, card.id, (i) => i.description === "common base");
+  }
+
+  await goOffline();
+  const localSide: RoadmapItem[] = [];
+  const remoteSide: RoadmapItem[] = [];
+  for (const card of cards) {
+    await Bun.sleep(5);
+    localSide.push(
+      await createOn(replica, { id: card.id, by: "agent-local", description: "the replica's version", rationale: "written offline" })
+    );
+    await Bun.sleep(5);
+    remoteSide.push(await createOn(upstream, { id: card.id, by: "agent-upstream", description: "the upstream's version" }));
+  }
+  await goOnline();
+  await pollUntil("the three cards are reported in conflict", 15_000, async () => {
+    const ids = await conflictIds();
+    return { done: cards.every((c) => ids.includes(c.id)), value: ids };
+  });
+
+  const resolve = (id: string, choice: string) =>
+    post<{ item: RoadmapItem }>(`${replica.url}/roadmap/sync/resolve`, deckAuthored({ id, choice }));
+
+  const remoteChoice = await resolve(cards[0]!.id, "remote");
+  expect(remoteChoice.body.item.content_updated_at, "'remote' keeps the remote date").toBe(remoteSide[0]!.content_updated_at);
+
+  const localChoice = await resolve(cards[1]!.id, "local");
+  expect(localChoice.body.item.content_updated_at, "'local' keeps the local date").toBe(localSide[1]!.content_updated_at);
+  const pushed = await waitForItem("the kept local version reaches the upstream", upstream, cards[1]!.id, (i) => i.description === "the replica's version");
+  expect(pushed.content_updated_at).toBe(localSide[1]!.content_updated_at);
+
+  const merged = await resolve(cards[2]!.id, "merge_reopen");
+  const mergedDate = merged.body.item.content_updated_at!;
+  expect(mergedDate, "a merge equal to neither side is new content").toMatch(/^\d{4}-\d{2}-\d{2}T/);
+  expect(mergedDate > localSide[2]!.content_updated_at!, "dated after the local side").toBe(true);
+  expect(mergedDate > remoteSide[2]!.content_updated_at!, "dated after the remote side, never the max of the two sides' dates").toBe(true);
+
+  await pollUntil("every conflict is cleared", 15_000, async () => {
+    const ids = await conflictIds();
+    return { done: cards.every((c) => !ids.includes(c.id)), value: ids };
+  });
+}, 60_000);
+
+test("an edit landing on the replica while its push is in flight keeps its own date through the acknowledgement", async () => {
+  const card = await createOn(replica, { by: "agent-local", title: "edited during its push", description: "sent version" });
+  await waitForItem("the card reaches the upstream", upstream, card.id, (i) => i.title === "edited during its push");
+
+  await Bun.sleep(20);
+  const sentEdit = await createOn(replica, { id: card.id, by: "agent-local", description: "sent version two" });
+  let inFlight: RoadmapItem | null = null;
+  duringNextPush = async () => {
+    await Bun.sleep(20);
+    inFlight = await createOn(replica, { id: card.id, by: "agent-local", description: "edited while in flight" });
+  };
+  await waitForItem("the in-flight edit reaches the upstream", upstream, card.id, (i) => i.description === "edited while in flight");
+  expect(inFlight, "the hook ran during a push").not.toBeNull();
+  const edit = inFlight as unknown as RoadmapItem;
+  expect(edit.content_updated_at).not.toBe(sentEdit.content_updated_at);
+  expect((await itemOn(replica, card.id))!.content_updated_at, "the acknowledgement never re-dates the card").toBe(edit.content_updated_at);
+  expect((await itemOn(upstream, card.id))!.content_updated_at).toBe(edit.content_updated_at);
+}, 40_000);
+
+test("a merge equal to one side keeps that side's date, whatever it is, including unknown", async () => {
+  const names = ["equals the remote side", "equals the local side", "equals a remote side whose date is unknown"];
+  const cards: RoadmapItem[] = [];
+  for (const name of names) {
+    cards.push(await createOn(upstream, { by: "agent-upstream", title: `merge ${name}`, status: "planned", description: "common base" }));
+  }
+  for (const card of cards) {
+    await waitForItem("merge fixture reaches the replica", replica, card.id, (i) => i.description === "common base");
+  }
+
+  await goOffline();
+  const localSide: RoadmapItem[] = [];
+  const remoteSide: RoadmapItem[] = [];
+  for (const [index, card] of cards.entries()) {
+    await Bun.sleep(5);
+    const localExtra = index === 1 ? { rationale: "local extra" } : {};
+    const remoteExtra = index === 1 ? {} : { rationale: "upstream extra" };
+    localSide.push(await createOn(replica, { id: card.id, by: "agent-local", description: "shared", ...localExtra }));
+    await Bun.sleep(5);
+    remoteSide.push(await createOn(upstream, { id: card.id, by: "agent-upstream", description: "shared", ...remoteExtra }));
+  }
+  await goOnline();
+  await pollUntil("the three cards are reported in conflict", 15_000, async () => {
+    const ids = await conflictIds();
+    return { done: cards.every((c) => ids.includes(c.id)), value: ids };
+  });
+
+  const upstreamDb = openBrokerDb(upstream.dbPath);
+  upstreamDb.run("UPDATE roadmap_items SET content_updated_at = NULL WHERE id = ?", [cards[2]!.id]);
+  upstreamDb.close();
+  await pollUntil("the parked remote row carries the unknown date", 15_000, async () => {
+    const res = await post<RoadmapSyncConflictsResponse>(`${replica.url}/roadmap/sync/conflicts`, { project_key: PK });
+    const remote = res.body.items.find((c) => c.local.id === cards[2]!.id)?.remote;
+    return { done: remote !== undefined && remote.content_updated_at === null, value: remote?.content_updated_at };
+  });
+
+  const merge = (id: string) =>
+    post<{ item: RoadmapItem }>(`${replica.url}/roadmap/sync/resolve`, deckAuthored({ id, choice: "merge_reopen" }));
+
+  const equalRemote = (await merge(cards[0]!.id)).body.item;
+  expect(equalRemote.rationale).toBe("upstream extra");
+  expect(equalRemote.content_updated_at, "a merge equal to the remote side keeps its date").toBe(remoteSide[0]!.content_updated_at);
+
+  const equalLocal = (await merge(cards[1]!.id)).body.item;
+  expect(equalLocal.rationale).toBe("local extra");
+  expect(equalLocal.content_updated_at, "a merge equal to the local side changes nothing").toBe(localSide[1]!.content_updated_at);
+
+  const equalUnknown = (await merge(cards[2]!.id)).body.item;
+  expect(equalUnknown.rationale).toBe("upstream extra");
+  expect(equalUnknown.content_updated_at, "an unknown remote date stays unknown with its content").toBeNull();
+
+  await pollUntil("every merge conflict is cleared", 15_000, async () => {
+    const ids = await conflictIds();
+    return { done: cards.every((c) => !ids.includes(c.id)), value: ids };
+  });
 }, 60_000);

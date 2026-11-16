@@ -97,9 +97,9 @@ function rawHeavyLivingContext(): string {
 test("CAS increments a colliding timestamp before constructing an append", () => {
   const db = new Database(":memory:");
   try {
-    db.run("CREATE TABLE roadmap_items (id TEXT PRIMARY KEY, context TEXT, content_rev INTEGER, operator_id TEXT)");
+    db.run("CREATE TABLE roadmap_items (id TEXT PRIMARY KEY, context TEXT, content_rev INTEGER, operator_id TEXT, content_updated_at TEXT)");
     const timestamp = "2026-09-22T12:00:00.000Z";
-    db.run("INSERT INTO roadmap_items VALUES (?, ?, ?, ?)", ["item", buildRoadmapAppendHeader(timestamp, "a") + "first", 1, null]);
+    db.run("INSERT INTO roadmap_items (id, context, content_rev, operator_id) VALUES (?, ?, ?, ?)", ["item", buildRoadmapAppendHeader(timestamp, "a") + "first", 1, null]);
 
     const result = runRoadmapContextAppendCas({
       id: "item",
@@ -124,8 +124,8 @@ test("CAS increments a colliding timestamp before constructing an append", () =>
 test("CAS chooses a new timestamp when a stale write consumes its first target", () => {
   const db = new Database(":memory:");
   try {
-    db.run("CREATE TABLE roadmap_items (id TEXT PRIMARY KEY, context TEXT, content_rev INTEGER, operator_id TEXT)");
-    db.run("INSERT INTO roadmap_items VALUES (?, ?, ?, ?)", ["item", "original", 1, null]);
+    db.run("CREATE TABLE roadmap_items (id TEXT PRIMARY KEY, context TEXT, content_rev INTEGER, operator_id TEXT, content_updated_at TEXT)");
+    db.run("INSERT INTO roadmap_items (id, context, content_rev, operator_id) VALUES (?, ?, ?, ?)", ["item", "original", 1, null]);
     const base = createSqliteRoadmapContextAppendCasStore(db);
     const timestamp = "2026-09-22T12:00:00.000Z";
     let writes = 0;
@@ -165,8 +165,8 @@ test("CAS chooses a new timestamp when a stale write consumes its first target",
 test("CAS retries a stale content revision and preserves the intervening context", () => {
   const db = new Database(":memory:");
   try {
-    db.run("CREATE TABLE roadmap_items (id TEXT PRIMARY KEY, context TEXT, content_rev INTEGER, operator_id TEXT)");
-    db.run("INSERT INTO roadmap_items VALUES (?, ?, ?, ?)", ["item", "original", 1, null]);
+    db.run("CREATE TABLE roadmap_items (id TEXT PRIMARY KEY, context TEXT, content_rev INTEGER, operator_id TEXT, content_updated_at TEXT)");
+    db.run("INSERT INTO roadmap_items (id, context, content_rev, operator_id) VALUES (?, ?, ?, ?)", ["item", "original", 1, null]);
     const base = createSqliteRoadmapContextAppendCasStore(db);
     let writes = 0;
     const result = runRoadmapContextAppendCas({
@@ -200,9 +200,9 @@ test("CAS retries a stale content revision and preserves the intervening context
 test("CAS replans targets after a stale revision", () => {
   const db = new Database(":memory:");
   try {
-    db.run("CREATE TABLE roadmap_items (id TEXT PRIMARY KEY, context TEXT, content_rev INTEGER, operator_id TEXT)");
+    db.run("CREATE TABLE roadmap_items (id TEXT PRIMARY KEY, context TEXT, content_rev INTEGER, operator_id TEXT, content_updated_at TEXT)");
     const target = "2026-09-22T12:00:00.000Z";
-    db.run("INSERT INTO roadmap_items VALUES (?, ?, ?, ?)", ["item", buildRoadmapAppendHeader(target, "a") + "obsolete", 1, null]);
+    db.run("INSERT INTO roadmap_items (id, context, content_rev, operator_id) VALUES (?, ?, ?, ?)", ["item", buildRoadmapAppendHeader(target, "a") + "obsolete", 1, null]);
     const base = createSqliteRoadmapContextAppendCasStore(db);
     let writes = 0;
     const result = runRoadmapContextAppendCas({
@@ -793,8 +793,8 @@ test("the raw safety bound still refuses when the living limit is at its highest
 test("a concurrent write that fills the card is judged against the limit on the retry, not lost", () => {
   const db = new Database(":memory:");
   try {
-    db.run("CREATE TABLE roadmap_items (id TEXT PRIMARY KEY, context TEXT, content_rev INTEGER, operator_id TEXT)");
-    db.run("INSERT INTO roadmap_items VALUES (?, ?, ?, ?)", ["item", "original", 1, null]);
+    db.run("CREATE TABLE roadmap_items (id TEXT PRIMARY KEY, context TEXT, content_rev INTEGER, operator_id TEXT, content_updated_at TEXT)");
+    db.run("INSERT INTO roadmap_items (id, context, content_rev, operator_id) VALUES (?, ?, ?, ?)", ["item", "original", 1, null]);
     const base = createSqliteRoadmapContextAppendCasStore(db);
     const filler = "x".repeat(380);
     let writes = 0;
@@ -843,3 +843,83 @@ test("a broker refuses to start on a malformed context limit and says which vari
   const refused = startBroker({ CLAUDE_PEERS_ROADMAP_CONTEXT_MAX_CHARS: "16k" });
   await expect(refused).rejects.toThrow("CLAUDE_PEERS_ROADMAP_CONTEXT_MAX_CHARS");
 }, 30_000);
+
+const LONG_AGO = "2000-01-01T00:00:00.000Z";
+const OLD_UPDATED_AT = "2000-01-01 00:00:00";
+
+function pinDates(id: string): void {
+  const db = openBrokerDb(broker.dbPath);
+  try {
+    db.run("UPDATE roadmap_items SET content_updated_at = ?, updated_at = ? WHERE id = ?", [LONG_AGO, OLD_UPDATED_AT, id]);
+  } finally {
+    db.close();
+  }
+}
+
+test("a successful append dates the card and leaves updated_at alone, a second one dates it again", async () => {
+  const item = await seed();
+  pinDates(item.id);
+  const first = await append({ id: item.id, by: "dating-peer", text: "a first fact" });
+  expect(first.status).toBe(200);
+  const afterFirst = (first.body as AppendRes).item;
+  expect(afterFirst.content_updated_at).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+  expect(afterFirst.content_updated_at).not.toBe(LONG_AGO);
+  expect(afterFirst.updated_at, "the lock TTL clock is untouched").toBe(OLD_UPDATED_AT);
+
+  pinDates(item.id);
+  const second = await append({ id: item.id, by: "dating-peer", text: "a second, different fact" });
+  expect((second.body as AppendRes).item.content_updated_at, "a new unit is a new change").not.toBe(LONG_AGO);
+});
+
+test("a refused append dates nothing", async () => {
+  const item = await seed({ context: "existing context" });
+  pinDates(item.id);
+  const missingTarget = await append({ id: item.id, by: "dating-peer", text: "x", supersedes: ["2000-01-01T00:00:00.000Z"] });
+  expect(missingTarget.status).toBe(400);
+  const emptyText = await append({ id: item.id, by: "dating-peer", text: "" });
+  expect(emptyText.status).toBe(400);
+  const after = (await listAll()).find((i) => i.id === item.id)!;
+  expect(after.content_updated_at).toBe(LONG_AGO);
+  expect(after.context).toBe("existing context");
+});
+
+test("CAS dates the card with its own clock on success, and not at all when every attempt loses", () => {
+  const db = new Database(":memory:");
+  try {
+    db.run("CREATE TABLE roadmap_items (id TEXT PRIMARY KEY, context TEXT, content_rev INTEGER, operator_id TEXT, content_updated_at TEXT)");
+    db.run("INSERT INTO roadmap_items (id, context, content_rev, operator_id) VALUES (?, ?, ?, ?)", ["item", "original", 1, null]);
+    const base = createSqliteRoadmapContextAppendCasStore(db);
+    const opts = {
+      id: "item",
+      author: "author",
+      text: "a fact",
+      now: () => "2026-09-22T12:00:00.000Z",
+      liveMaxChars: ROADMAP_APPEND_RESULT_MAX_CHARS,
+    };
+
+    const alwaysLosing = runRoadmapContextAppendCas({
+      ...opts,
+      store: {
+        read: base.read,
+        append: (input) => {
+          db.run("UPDATE roadmap_items SET content_rev = content_rev + 1 WHERE id = ?", ["item"]);
+          return base.append(input);
+        },
+      },
+    });
+    expect(alwaysLosing).toMatchObject({ ok: false, code: "concurrent_change" });
+    const lost = db.query("SELECT content_updated_at FROM roadmap_items WHERE id = ?").get("item") as {
+      content_updated_at: string | null;
+    };
+    expect(lost.content_updated_at, "a lost CAS attempt dates nothing").toBeNull();
+
+    const won = runRoadmapContextAppendCas({ ...opts, store: base });
+    expect(won).toMatchObject({ ok: true });
+    const stored = db.query("SELECT content_updated_at FROM roadmap_items WHERE id = ?").get("item") as {
+      content_updated_at: string | null;
+    };
+    expect(stored.content_updated_at).toBe("2026-09-22T12:00:00.000Z");
+  } finally {
+    db.close();
+  }
+});

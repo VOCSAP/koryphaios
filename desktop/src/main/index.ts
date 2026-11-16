@@ -164,7 +164,8 @@ import {
 } from './dispatch'
 import { createDirectiveBindings, runClearReloadInTurn, type ClearReloadHost, type DirectiveRunDeps } from './directive-run'
 import { decidePeerAnnounce } from './peer-rotation'
-import { lockReleasePatch, ownsIdleLock } from './idle-lock'
+import { ownsIdleLock } from './idle-lock'
+import { idleSweepRequest, operatorStopRequest } from './roadmap-release-request'
 import type {
   AssignResult,
   DirectiveDispatch,
@@ -2644,7 +2645,7 @@ const stopRoadmapItem = async (id: string): Promise<StopResult> => {
     if (sent > 0) via = 'broadcast'
   }
 
-  await upsertRoadmap(endpoint, key, lockReleasePatch(item))
+  await upsertRoadmap(endpoint, key, operatorStopRequest(item))
   journal.add('dispatch', `stop requested on "${item.title}" (via ${via})`)
   return { stopped: true, via }
 }
@@ -2676,7 +2677,7 @@ const watchIdleLocks = async (): Promise<void> => {
       if (!owner) continue // not one of our tiles: the broker sweep owns it
       const last = service.lastOutputAt(owner.id)
       if (last === null || Date.now() - last < LOCK_IDLE_MS) continue
-      await upsertRoadmap(endpoint, key, lockReleasePatch(item))
+      await upsertRoadmap(endpoint, key, idleSweepRequest(item))
       journal.add('dispatch', `lock released on "${item.title}" (session "${owner.name}" idle)`)
     }
   } catch (e) {

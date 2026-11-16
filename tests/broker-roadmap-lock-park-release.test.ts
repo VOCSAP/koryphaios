@@ -517,3 +517,47 @@ test("lock-release: an EXPIRED park (past LOCK_PARK_TTL_SEC) by operator A no lo
   expect(row.lock_parked_at).toBeNull();
   expect(row.lock_parked_by).toBeNull();
 });
+
+const PINNED_DATE = "2020-01-01T00:00:00.000Z";
+
+function pinContentDate(id: string): void {
+  const db = openBrokerDb(broker.dbPath);
+  db.run("UPDATE roadmap_items SET content_updated_at = ? WHERE id = ?", [PINNED_DATE, id]);
+  db.close();
+}
+
+function contentDateOf(id: string): string | null {
+  return (readItem(id) as unknown as { content_updated_at: string | null }).content_updated_at;
+}
+
+test("lock-park leaves the content date alone while it parks", async () => {
+  const id = await createItem("lock-park: date untouched");
+  lockDirectly(id, "peer-date-park");
+  pinContentDate(id);
+  const res = await post<LockParkRes>(`${broker.url}/roadmap/lock-park`, deckAuthored({ project_key: PK, peer_ids: ["peer-date-park"] }));
+  expect(res.body.parked).toEqual(["peer-date-park"]);
+  expect(readItem(id).lock_parked_at, "the park itself happened").not.toBeNull();
+  expect(contentDateOf(id)).toBe(PINNED_DATE);
+});
+
+test("lock-release dates an in_progress card it returns to planned, and not a card it only unlocks", async () => {
+  const working = await createItem("lock-release: in_progress to planned");
+  lockDirectly(working, "peer-date-release");
+  pinContentDate(working);
+  const idle = await createItem("lock-release: lock only");
+  lockDirectly(idle, "peer-date-lock-only");
+  const direct = openBrokerDb(broker.dbPath);
+  direct.run("UPDATE roadmap_items SET status = 'planned' WHERE id = ?", [idle]);
+  direct.close();
+  pinContentDate(idle);
+
+  const res = await post<LockParkRes>(
+    `${broker.url}/roadmap/lock-release`,
+    deckAuthored({ project_key: PK, peer_ids: ["peer-date-release", "peer-date-lock-only"] })
+  );
+  expect(res.body.released?.sort()).toEqual(["peer-date-lock-only", "peer-date-release"]);
+  expect(readItem(working).status).toBe("planned");
+  expect(contentDateOf(working), "a status change in_progress -> planned is a change").not.toBe(PINNED_DATE);
+  expect(readItem(idle).locked).toBe(0);
+  expect(contentDateOf(idle), "lock fields alone are no content change").toBe(PINNED_DATE);
+});

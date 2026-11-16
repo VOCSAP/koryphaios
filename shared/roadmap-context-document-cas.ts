@@ -49,6 +49,7 @@ export type RoadmapContextDocumentCasWrite = {
   expectedContentRev: number;
   context: string;
   operatorId: string | null;
+  contentUpdatedAt: string;
   document: RoadmapContextDocument;
 };
 
@@ -169,9 +170,10 @@ export function createSqliteRoadmapContextDocumentCasStore(
     const updated = db.run(
       `UPDATE roadmap_items
           SET context = ?,
-              operator_id = COALESCE(?, operator_id)
+              operator_id = COALESCE(?, operator_id),
+              content_updated_at = ?
         WHERE id = ? AND content_rev = ?`,
-      [write.context, write.operatorId, write.id, write.expectedContentRev],
+      [write.context, write.operatorId, write.contentUpdatedAt, write.id, write.expectedContentRev],
     );
     if (updated.changes === 0) return false;
 
@@ -254,6 +256,7 @@ export function runRoadmapContextDocumentDeportCas(opts: {
         expectedContentRev: row.contentRev,
         context: plan.context,
         operatorId: opts.operatorId ?? null,
+        contentUpdatedAt: document.created_at,
         document,
       })
     ) {

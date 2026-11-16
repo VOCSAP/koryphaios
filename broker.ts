@@ -112,6 +112,12 @@ import {
 import { formatRoadmapStaleSaveError } from "./shared/roadmap-append.ts";
 import { isValidQueueRank } from "./shared/roadmap-queue.ts";
 import {
+  adoptedContentDate,
+  changeOriginRefusal,
+  contentDateAfterWrite,
+  readContentDate,
+} from "./shared/roadmap-content-date.ts";
+import {
   contentEquals,
   isSweepOnlyStatusChange,
   mergeReopen,
@@ -1177,6 +1183,7 @@ for (const col of [
   "lock_relay_seen TEXT",
   "lock_contested_by TEXT NOT NULL DEFAULT '[]'",
   "lock_release_owner TEXT",
+  "content_updated_at TEXT DEFAULT NULL",
 ]) {
   try {
     db.run(`ALTER TABLE roadmap_items ADD COLUMN ${col}`);
@@ -5170,6 +5177,7 @@ function rowToRoadmapItem(row: RoadmapRow): RoadmapItem {
     updated_by: row.updated_by,
     created_at: row.created_at,
     updated_at: row.updated_at,
+    content_updated_at: row.content_updated_at,
     content_rev: row.content_rev,
     deleted_at: row.deleted_at,
     queue: row.queue,
@@ -6056,11 +6064,20 @@ function handleRoadmapUpsert(
   if (body.release !== undefined && typeof body.release !== "boolean") {
     return { error: "release must be a boolean", status: 400 };
   }
+  const changeOriginError = changeOriginRefusal(
+    body as unknown as Record<string, unknown>,
+    author.operator_id !== undefined
+  );
+  if (changeOriginError) return { error: changeOriginError, status: 400 };
 
   if (body.id) {
     // Partial patch: omitted fields keep their value; project_key never moves.
     const existing = getRoadmapItem(body.id);
     if (!existing) return { error: "unknown roadmap item", status: 404 };
+    const markedRelease = body.change_origin !== undefined;
+    if (markedRelease && !(existing.locked && existing.status === "in_progress")) {
+      return { error: "change_origin only releases a locked in_progress card", status: 400 };
+    }
     const compareContentRevision = body.expected_content_rev !== undefined;
 
     // Card e344fa79: the caller's OWN group -- `undefined` (author.group_id
@@ -6302,6 +6319,18 @@ function handleRoadmapUpsert(
     const keptParkedAt = parkOwnerIsAuthor || !parkStillLive ? null : existing.lock_parked_at;
     const keptParkedBy = parkOwnerIsAuthor || !parkStillLive ? null : existing.lock_parked_by;
 
+    // `next.deleted_at` is still the stored value here: the SQL below stamps or
+    // clears it from the status, so the comparison mirrors that rule.
+    const contentDate =
+      body.change_origin !== undefined
+        ? existing.content_updated_at
+        : contentDateAfterWrite(
+            pickSyncContent(existing),
+            pickSyncContent({ ...next, deleted_at: nextStatus === "archived" ? (existing.deleted_at ?? "archived") : null }),
+            existing.content_updated_at,
+            new Date().toISOString()
+          );
+
     // A status change away from 'archived' restores the item (clears the soft
     // delete); archiving through upsert stamps it like /roadmap/archive does.
     //
@@ -6320,6 +6349,7 @@ function handleRoadmapUpsert(
          operator_id = COALESCE(?, operator_id),
          inactive = ?,
          lock_parked_at = ?, lock_parked_by = ?,
+         content_updated_at = ?,
          updated_by = ?, updated_at = datetime('now'),
          deleted_at = CASE
            WHEN ? = 'archived' THEN COALESCE(deleted_at, datetime('now'))
@@ -6352,6 +6382,7 @@ function handleRoadmapUpsert(
         next.inactive ? 1 : 0,
         keptParkedAt,
         keptParkedBy,
+        contentDate,
         next.updated_by,
         next.status,
         body.id,
@@ -6481,9 +6512,9 @@ function handleRoadmapUpsert(
        (id, project_key, kind, title, description, rationale, context, priority, value,
         effort, status, triage, tags, depends_on, created_by, updated_by,
         created_at, updated_at, deleted_at, queue, directive, target_peer_ids, locked, locked_by, locked_group,
-        locked_by_token, locked_at, operator_id, inactive, lock_parked_at, lock_parked_by)
+        locked_by_token, locked_at, operator_id, inactive, lock_parked_at, lock_parked_by, content_updated_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'), NULL, ?, ?, ?, ?, ?, ?, ?,
-             CASE WHEN ? = 1 THEN datetime('now') ELSE NULL END, ?, ?, NULL, NULL)`,
+             CASE WHEN ? = 1 THEN datetime('now') ELSE NULL END, ?, ?, NULL, NULL, ?)`,
     [
       id,
       projectKey,
@@ -6511,6 +6542,7 @@ function handleRoadmapUpsert(
       createLocked ? 1 : 0,
       author.operator_id ?? null,
       createInactive ? 1 : 0,
+      new Date().toISOString(),
     ]
   );
   return { item: getRoadmapItem(id)! };
@@ -6572,9 +6604,10 @@ function handleRoadmapArchive(
        ${CLEAR_LOCK_SET},
        operator_id = COALESCE(?, operator_id),
        lock_parked_at = NULL, lock_parked_by = NULL, ${CLEAR_LOCK_RELAY_SET},
+       content_updated_at = CASE WHEN status = 'archived' AND deleted_at IS NOT NULL THEN content_updated_at ELSE ? END,
        updated_by = ?, updated_at = datetime('now')
      WHERE id = ?`,
-    [author.operator_id ?? null, by, body.id]
+    [author.operator_id ?? null, new Date().toISOString(), by, body.id]
   );
   return { item: getRoadmapItem(body.id)! };
 }
@@ -6740,13 +6773,14 @@ function handleRoadmapLockRelease(
            ${CLEAR_LOCK_SET}, operator_id = NULL,
            lock_parked_at = NULL, lock_parked_by = NULL, ${CLEAR_LOCK_RELAY_SET},
            status = CASE WHEN status = 'in_progress' THEN 'planned' ELSE status END,
+           content_updated_at = CASE WHEN status = 'in_progress' THEN ? ELSE content_updated_at END,
            updated_by = ?, updated_at = datetime('now')
          WHERE locked = 1 AND project_key = ? AND locked_by = ?
            AND (
              lock_parked_by IS NULL OR lock_parked_by = ?
              OR datetime(lock_parked_at) < datetime('now', ?)
            )`,
-        [author.by, projectKey, peerId, author.operator_id, `-${LOCK_PARK_TTL_SEC} seconds`]
+        [new Date().toISOString(), author.by, projectKey, peerId, author.operator_id, `-${LOCK_PARK_TTL_SEC} seconds`]
       );
       if (res.changes > 0) released.push(peerId);
     } catch (e) {
@@ -7433,7 +7467,16 @@ function handleRoadmapImport(body: {
         lock_relay_seen: existingRow?.lock_relay_seen ?? null,
         lock_contested_by: existingRow?.lock_contested_by ?? "[]",
         lock_release_owner: existingRow?.lock_release_owner ?? null,
+        content_updated_at: null,
       };
+      // An import is a copy of a snapshot: identical final content keeps the
+      // local date, anything else carries the file's own date (null when the
+      // file has none or an invalid one), never the import instant.
+      values.content_updated_at =
+        existing &&
+        contentEquals(pickSyncContent(existing), pickSyncContent(rowToRoadmapItem(values as unknown as RoadmapRow)))
+          ? existing.content_updated_at
+          : readContentDate(it.content_updated_at);
       insert.run(...ROADMAP_IMPORT_COLUMNS.map((column) => values[column]));
       // INSERT OR REPLACE fires the INSERT trigger, never the UPDATE one, so
       // the trigger that marks changed content dirty cannot see an import: a
@@ -7966,6 +8009,7 @@ function rowToSyncRow(row: RoadmapRow): RoadmapSyncRow {
     updated_by: item.updated_by,
     created_at: item.created_at,
     updated_at: item.updated_at,
+    content_updated_at: item.content_updated_at,
     deleted_at: item.deleted_at,
     queue: item.queue,
     directive: item.directive,
@@ -8139,6 +8183,7 @@ function validatePushItem(
       updated_by: authors.updated_by,
       created_at: it.created_at as string,
       updated_at: it.updated_at as string,
+      content_updated_at: readContentDate(it.content_updated_at),
     },
   };
 }
@@ -8523,6 +8568,7 @@ function handleRoadmapSyncPush(body: RoadmapSyncPushRequest): SyncPushResult {
          value = ?, effort = ?, status = ?, triage = ?, tags = ?, depends_on = ?, deleted_at = ?,
          directive = ?, target_peer_ids = ?, inactive = ?,
          queue = CASE WHEN ? = 1 THEN ? ELSE queue END,
+         content_updated_at = ?,
          updated_by = ?, updated_at = ?
        WHERE id = ?`,
       [
@@ -8531,6 +8577,11 @@ function handleRoadmapSyncPush(body: RoadmapSyncPushRequest): SyncPushResult {
         JSON.stringify(item.depends_on), item.deleted_at, item.directive,
         JSON.stringify(item.target_peer_ids), item.inactive ? 1 : 0,
         item.queue !== undefined ? 1 : 0, item.queue ?? null,
+        adoptedContentDate(
+          item.content_updated_at ?? null,
+          contentEquals(pickSyncContent(rowToRoadmapItem(existing)), pickSyncContent(item)),
+          existing.content_updated_at
+        ),
         item.updated_by, item.updated_at, item.id,
       ]
     );
@@ -8544,8 +8595,8 @@ function handleRoadmapSyncPush(body: RoadmapSyncPushRequest): SyncPushResult {
       `INSERT INTO roadmap_items
          (id, project_key, kind, title, description, rationale, context, priority, value,
           effort, status, triage, tags, depends_on, created_by, updated_by, created_at, updated_at,
-          deleted_at, queue, directive, target_peer_ids, locked, inactive)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`,
+          deleted_at, queue, directive, target_peer_ids, locked, inactive, content_updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
       [
         item.id, item.project_key, item.kind, item.title, item.description, item.rationale,
         item.context, item.priority, item.value, item.effort, item.status, item.triage,
@@ -8556,6 +8607,7 @@ function handleRoadmapSyncPush(body: RoadmapSyncPushRequest): SyncPushResult {
         // above, presence does not need to be distinguished on the INSERT.
         item.queue ?? null,
         item.directive, JSON.stringify(item.target_peer_ids), item.inactive ? 1 : 0,
+        item.content_updated_at ?? null,
       ]
     );
   }
@@ -8837,6 +8889,7 @@ function parseSyncRemote(id: string, raw: string | null): RoadmapSyncRow | null 
     updated_by: storedText(record.updated_by),
     created_at: storedText(record.created_at),
     updated_at: storedText(record.updated_at),
+    content_updated_at: readContentDate(record.content_updated_at),
     deleted_at: content.deleted_at,
     queue: storedInteger(record.queue),
     directive: content.directive,
@@ -8908,7 +8961,16 @@ function handleRoadmapSyncResolve(
 
   const writeRefusal = withApplying((): string | null => {
     if (applied !== null && !contentEquals(applied, localContent)) {
-      const refused = writeSyncContent(row.id, applied, author.by, new Date().toISOString());
+      const resolvedAt = new Date().toISOString();
+      // A merge equal to the upstream side keeps that side's date; one that is
+      // neither side is new content and is dated now.
+      const refused = writeSyncContent(
+        row.id,
+        applied,
+        contentEquals(applied, remoteContent) ? remote.content_updated_at : resolvedAt,
+        author.by,
+        resolvedAt
+      );
       if (refused) return refused;
     }
     clearSyncConflict(row.id, remote, dirty);
@@ -8949,6 +9011,7 @@ function syncTitleRefusal(title: unknown): string | null {
 function writeSyncContent(
   id: string,
   content: RoadmapSyncContent,
+  contentUpdatedAt: string | null,
   updatedBy: string,
   updatedAt: string
 ): string | null {
@@ -8959,6 +9022,7 @@ function writeSyncContent(
        kind = ?, title = ?, description = ?, rationale = ?, context = ?, priority = ?,
        value = ?, effort = ?, status = ?, triage = ?, tags = ?, depends_on = ?, deleted_at = ?,
        directive = ?, target_peer_ids = ?, inactive = ?,
+       content_updated_at = ?,
        updated_by = ?, updated_at = ?
      WHERE id = ?`,
     [
@@ -8966,7 +9030,7 @@ function writeSyncContent(
       content.priority, content.value, content.effort, content.status, content.triage,
       JSON.stringify(content.tags), JSON.stringify(content.depends_on), content.deleted_at,
       content.directive, JSON.stringify(content.target_peer_ids), content.inactive ? 1 : 0,
-      updatedBy, updatedAt, id,
+      contentUpdatedAt, updatedBy, updatedAt, id,
     ]
   );
   return null;
@@ -9192,6 +9256,7 @@ function applyPulledRow(remote: RoadmapSyncRow): boolean {
   const local = getRoadmapRow(remote.id);
   const content = pickSyncContent(remote);
   const contentJson = JSON.stringify(content);
+  const remoteContentDate = readContentDate(remote.content_updated_at);
   const createdBy = localAuthor(remote.created_by);
   const updatedBy = localAuthor(remote.updated_by);
   // Written on every branch that touches the lock columns, and never on its
@@ -9216,9 +9281,9 @@ function applyPulledRow(remote: RoadmapSyncRow): boolean {
           effort, status, triage, tags, depends_on, created_by, updated_by, created_at, updated_at,
           deleted_at, queue, directive, target_peer_ids, inactive,
           locked, locked_by, locked_group, locked_at, lock_scope, lock_contested_by,
-          sync_base_rev, sync_base, sync_dirty, sync_state)
+          sync_base_rev, sync_base, sync_dirty, sync_state, content_updated_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-               ?, ?, ?, ?, ?, ?, ?, ?, 0, 'clean')`,
+               ?, ?, ?, ?, ?, ?, ?, ?, 0, 'clean', ?)`,
       [
         remote.id, remote.project_key, content.kind, content.title, content.description,
         content.rationale, content.context, content.priority, content.value, content.effort,
@@ -9229,7 +9294,7 @@ function applyPulledRow(remote: RoadmapSyncRow): boolean {
         lockedRemotely ? 1 : 0, lockedRemotely ? remote.locked_by : null,
         lockedRemotely ? remote.locked_group : null, lockedRemotely ? remote.locked_at : null,
         lockedRemotely ? "remote" : null, contestedJson,
-        remote.content_rev, contentJson,
+        remote.content_rev, contentJson, remoteContentDate,
       ]
     );
     return false;
@@ -9273,7 +9338,17 @@ function applyPulledRow(remote: RoadmapSyncRow): boolean {
   ) {
     keepLocalAgainstSweep(remote);
   } else if (!dirty) {
-    const writeRefusal = writeSyncContent(remote.id, content, updatedBy, remote.updated_at);
+    const writeRefusal = writeSyncContent(
+      remote.id,
+      content,
+      adoptedContentDate(
+        remoteContentDate,
+        contentEquals(pickSyncContent(rowToRoadmapItem(local)), content),
+        local.content_updated_at
+      ),
+      updatedBy,
+      remote.updated_at
+    );
     if (writeRefusal) {
       log.warn(`roadmap sync: pulled card ${remote.id} skipped, ${writeRefusal}`);
       return false;
@@ -9555,6 +9630,7 @@ async function syncPushPass(): Promise<void> {
       // Named explicitly, never by the spread below: `queue` is outside the
       // content pick-list on purpose (see RoadmapSyncPushItem).
       queue: row.queue,
+      content_updated_at: row.content_updated_at,
       // Spread of a pick-list result, whose type is exactly the fifteen
       // content fields -- no table column can ride along.
       ...content,

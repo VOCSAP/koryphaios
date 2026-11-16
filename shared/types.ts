@@ -554,6 +554,15 @@ export interface RoadmapItem {
   updated_by: string;
   created_at: string;
   updated_at: string;
+  /**
+   * ISO UTC instant of the last real content or qualification change asked by
+   * an agent or the operator; null when unknown (cards that predate the
+   * column are never backfilled). Never set by lock sweeps, leases, queue
+   * moves or replication transport, and not writable through roadmap_add /
+   * roadmap_update. Metadata attached to the retained content, outside
+   * ROADMAP_SYNC_CONTENT_FIELDS: it never decides a conflict.
+   */
+  content_updated_at: string | null;
   content_rev?: number;
   /** Set when archived (soft delete, reversible); null otherwise. */
   deleted_at: string | null;
@@ -743,10 +752,13 @@ export interface RoadmapSyncPullResponse {
  * than this contract omits the key entirely, and that MUST NOT be read as
  * "clear the rank" -- the upstream SET only touches the column when the key
  * is present.
+ * `content_updated_at` follows the same rule: absent from an older replica,
+ * where it means "unknown", never "clear the date".
  */
 export type RoadmapSyncPushItem = RoadmapSyncContent &
   Pick<RoadmapItem, "id" | "project_key" | "created_by" | "updated_by" | "created_at" | "updated_at"> & {
     queue?: number | null;
+    content_updated_at?: string | null;
   };
 
 export interface RoadmapSyncPushRequest {
@@ -1050,6 +1062,7 @@ export const ROADMAP_IMPORT_COLUMNS = [
   "lock_relay_seen",
   "lock_contested_by",
   "lock_release_owner",
+  "content_updated_at",
 ] as const;
 
 export type RoadmapImportColumn = (typeof ROADMAP_IMPORT_COLUMNS)[number];
@@ -1275,6 +1288,10 @@ export interface RoadmapListResponse {
   facets?: RoadmapFacets;
 }
 
+export const ROADMAP_CHANGE_ORIGINS = ["idle_lock_sweep"] as const;
+
+export type RoadmapChangeOrigin = (typeof ROADMAP_CHANGE_ORIGINS)[number];
+
 /** Create (no id) or partially patch (id set) an item. Omitted fields keep. */
 export interface RoadmapUpsertRequest {
   id?: string;
@@ -1340,6 +1357,13 @@ export interface RoadmapUpsertRequest {
    * this field) -- refused 403 otherwise. See `RoadmapItem.inactive`.
    */
   inactive?: boolean;
+  /**
+   * Set only by the Deck's idle-lock watcher: the write is a machine lock
+   * release and must not date the card's content. Honoured only on an
+   * operator-signed write of the strict lock-release shape (status planned plus
+   * lock fields), refused 400 with any other field.
+   */
+  change_origin?: RoadmapChangeOrigin;
 }
 
 export interface RoadmapUpsertResponse {

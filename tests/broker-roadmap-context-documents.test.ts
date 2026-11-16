@@ -551,14 +551,19 @@ test("CAS retries after a concurrent content revision and uses the current unit"
 test("SQLite document CAS rejects stale revisions and rolls back a failed unit insert", () => {
   const db = new Database(":memory:");
   try {
-    db.run("CREATE TABLE roadmap_items (id TEXT PRIMARY KEY, context TEXT, content_rev INTEGER, operator_id TEXT)");
+    db.run("CREATE TABLE roadmap_items (id TEXT PRIMARY KEY, context TEXT, content_rev INTEGER, operator_id TEXT, content_updated_at TEXT)");
     db.run(
       "CREATE TABLE roadmap_context_documents (id TEXT PRIMARY KEY, roadmap_item_id TEXT, project_key TEXT, created_by TEXT, created_at TEXT)",
     );
     db.run(
       "CREATE TABLE roadmap_context_document_units (id TEXT PRIMARY KEY, document_id TEXT, source_target TEXT, raw TEXT, deported_at TEXT, position INTEGER, UNIQUE(document_id, source_target))",
     );
-    db.run("INSERT INTO roadmap_items VALUES (?, ?, ?, ?)", ["item", "original context", 2, null]);
+    db.run("INSERT INTO roadmap_items (id, context, content_rev, operator_id) VALUES (?, ?, ?, ?)", [
+      "item",
+      "original context",
+      2,
+      null,
+    ]);
     const store = createSqliteRoadmapContextDocumentCasStore(db);
     const baseDocument: RoadmapContextDocument = {
       id: "document-a",
@@ -582,6 +587,7 @@ test("SQLite document CAS rejects stale revisions and rolls back a failed unit i
       expectedContentRev: 1,
       context: "stale replacement",
       operatorId: null,
+      contentUpdatedAt: "2026-09-23T10:00:00.000Z",
       document: baseDocument,
     });
     expect(stale).toBe(false);
@@ -606,11 +612,16 @@ test("SQLite document CAS rejects stale revisions and rolls back a failed unit i
         expectedContentRev: 2,
         context: "replacement context",
         operatorId: null,
+        contentUpdatedAt: "2026-09-23T10:00:00.000Z",
         document: duplicateUnitDocument,
       }),
     ).toThrow();
-    const item = db.query("SELECT context FROM roadmap_items WHERE id = ?").get("item") as { context: string };
+    const item = db.query("SELECT context, content_updated_at FROM roadmap_items WHERE id = ?").get("item") as {
+      context: string;
+      content_updated_at: string | null;
+    };
     expect(item.context).toBe("original context");
+    expect(item.content_updated_at, "the card date rolls back with the failed document insert").toBeNull();
     expect((db.query("SELECT COUNT(*) AS count FROM roadmap_context_documents").get() as { count: number }).count).toBe(0);
   } finally {
     db.close();
@@ -727,4 +738,41 @@ test("a synced document unit wider than this broker's cap but within the documen
   const beyond = await push("document-low-beyond", "x".repeat(MAX_CONTEXT_DOCUMENT_TOTAL_CHARS + 1));
   expect(beyond.status).toBe(400);
   expect((beyond.body as ErrorResponse).error).toContain("MAX_CONTEXT_DOCUMENT_TOTAL_CHARS");
+});
+
+const DOC_LONG_AGO = "2000-01-01T00:00:00.000Z";
+const DOC_OLD_UPDATED_AT = "2000-01-01 00:00:00";
+
+function pinCardDates(id: string): void {
+  const db = openBrokerDb(broker.dbPath);
+  try {
+    db.run("UPDATE roadmap_items SET content_updated_at = ?, updated_at = ? WHERE id = ?", [DOC_LONG_AGO, DOC_OLD_UPDATED_AT, id]);
+  } finally {
+    db.close();
+  }
+}
+
+test("a deportation dates the parent card with its document and leaves updated_at alone", async () => {
+  const item = await seed({ context: "body context to deport" });
+  pinCardDates(item.id);
+  const res = await deport({ id: item.id, by: "cli:test-host:test-user", targets: ["body"] });
+  expect(res.status).toBe(200);
+  const created = res.body as DocumentResponse;
+  expect(created.item.content_updated_at).not.toBe(DOC_LONG_AGO);
+  expect(created.item.content_updated_at).toBe(created.document.created_at);
+  expect(created.item.updated_at, "the lock TTL clock is untouched").toBe(DOC_OLD_UPDATED_AT);
+});
+
+test("a refused deportation dates nothing and creates no document", async () => {
+  const item = await seed({ context: "body context kept" });
+  pinCardDates(item.id);
+  const refused = await deport({ id: item.id, by: "cli:test-host:test-user", targets: ["a-target-that-does-not-exist"] });
+  expect(refused.status).toBe(400);
+  const after = (await post<{ items: RoadmapItem[] }>(`${broker.url}/roadmap/list`, { project_key: PK })).body.items.find(
+    (i) => i.id === item.id
+  )!;
+  expect(after.content_updated_at).toBe(DOC_LONG_AGO);
+  expect(after.context).toBe("body context kept");
+  const docs = await listDocuments({ id: item.id, include_documents: false });
+  expect((docs.body as DocumentListResponse).document_count).toBe(0);
 });

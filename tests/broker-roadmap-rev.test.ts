@@ -271,3 +271,28 @@ test("lock scope is stamped on a replica only, and a local release records the o
     await stopBroker(plain);
   }
 }, 30_000);
+
+test("the content date is outside the content versioning: a date-only write bumps rev, never content_rev or the dirty flag", async () => {
+  const b = await startBroker();
+  const db = openDb(b);
+  try {
+    const created = await post<UpsertRes>(`${b.url}/roadmap/upsert`, { project_key: PK, by: "agent-date", title: "date versioning fixture" });
+    const id = created.body.item.id;
+    db.run("UPDATE roadmap_items SET sync_dirty = 0 WHERE id = ?", [id]);
+    const before = readRow(db, id);
+    const seqBefore = readSeq(db);
+
+    db.run("UPDATE roadmap_items SET content_updated_at = ? WHERE id = ?", ["2020-01-01T00:00:00.000Z", id]);
+    const after = readRow(db, id);
+    expect([
+      "a date-only write draws one revision (the pull cursor) and versions no content",
+      readSeq(db) - seqBefore,
+      after.content_rev === before.content_rev,
+      after.sync_dirty,
+    ]).toEqual(["a date-only write draws one revision (the pull cursor) and versions no content", 1, true, 0]);
+    expect(after.rev).toBeGreaterThan(before.rev);
+  } finally {
+    db.close();
+    await stopBroker(b);
+  }
+}, 20_000);

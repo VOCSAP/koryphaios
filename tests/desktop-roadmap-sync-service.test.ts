@@ -363,6 +363,25 @@ test("a null or unusable base stays null: 'never synced' is a state, not a failu
   expect(sanitizeSyncConflicts([wellFormedConflict({ base: [] })])[0]!.base).toBeNull();
 });
 
+test("content_updated_at reaches both full snapshots of a conflict, known or unknown, and never the base", () => {
+  const [known] = sanitizeSyncConflicts([
+    wellFormedConflict({
+      local: wellFormedItem({ content_updated_at: "2026-11-10T08:00:00.000Z" }),
+      remote: wellFormedItem({ content_updated_at: "2026-11-12T09:30:00.000Z", rev: 4, content_rev: 3 }),
+      base: { title: "b", content_updated_at: "2026-11-01T00:00:00.000Z" },
+    }),
+  ]);
+  expect(known!.local.content_updated_at).toBe("2026-11-10T08:00:00.000Z");
+  expect(known!.remote.content_updated_at).toBe("2026-11-12T09:30:00.000Z");
+  expect(Object.keys(known!.base!)).not.toContain("content_updated_at");
+
+  const [unknown] = sanitizeSyncConflicts([
+    wellFormedConflict({ remote: wellFormedItem({ content_updated_at: 42, rev: 4, content_rev: 3 }) }),
+  ]);
+  expect(unknown!.local.content_updated_at).toBeNull();
+  expect(unknown!.remote.content_updated_at).toBeNull();
+});
+
 // ---------------------------------------------------------------------------
 // 3. The diff the dialog renders (pure)
 // ---------------------------------------------------------------------------
@@ -390,6 +409,22 @@ test("only the fields that DIFFER are listed", () => {
 
 test("two identical sides produce no line at all", () => {
   expect(conflictFieldDiffs(conflict({}, {}))).toEqual([]);
+});
+
+test("two sides that differ only by content_updated_at are NOT a conflict line", () => {
+  expect(
+    conflictFieldDiffs(
+      conflict({ content_updated_at: "2026-11-10T08:00:00.000Z" }, { content_updated_at: null }),
+    ),
+  ).toEqual([]);
+  expect(
+    conflictFieldDiffs(
+      conflict(
+        { title: "a", content_updated_at: "2026-11-10T08:00:00.000Z" },
+        { title: "b", content_updated_at: "2026-11-12T09:30:00.000Z" },
+      ),
+    ).map((d) => d.field),
+  ).toEqual(["title"]);
 });
 
 test("the lifecycle fields are listed FIRST and marked, whatever the column order", () => {

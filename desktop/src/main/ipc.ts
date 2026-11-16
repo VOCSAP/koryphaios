@@ -74,7 +74,8 @@ import {
   reorderRoadmap,
   resolveRoadmapConflict,
   searchRoadmap,
-  upsertRoadmap
+  upsertRoadmap,
+  withoutChangeOrigin
 } from './roadmap-service'
 import { validateReorderWaves } from './roadmap-reorder-validate'
 import {
@@ -759,7 +760,7 @@ export function registerIpc({
   })
   regHandle('roadmap:upsert', (_e, fields: RoadmapUpsertFields) => {
     const { endpoint, key } = roadmapCtx()
-    return upsertRoadmap(endpoint, key, fields ?? {})
+    return upsertRoadmap(endpoint, key, withoutChangeOrigin(fields ?? {}))
   })
   regHandle('roadmap:archive', (_e, id: string) => {
     const { endpoint } = roadmapCtx()

@@ -82,14 +82,18 @@ test("PRESENCE: watchIdleLocks wires ownsIdleLock with the group-aware arguments
   expect(findWatchIdleLocksWiringFailures(src)).toEqual([]);
 });
 
-test("watchIdleLocks releases through lockReleasePatch and traces its failure", () => {
+test("watchIdleLocks releases through idleSweepRequest and traces its failure", () => {
   const src = readFileSync(INDEX_PATH, "utf-8");
   const declMatch = /const\s+watchIdleLocks\s*=\s*async\s*\([^)]*\)\s*:\s*Promise<void>\s*=>\s*\{/.exec(src);
   expect(declMatch).not.toBeNull();
   const body = extractBracedBody(src, declMatch!.index + declMatch![0].length - 1);
-  expect(["release payload comes from lockReleasePatch(item)", /upsertRoadmap\([^)]*lockReleasePatch\(item\)\)/.test(body)]).toEqual([
-    "release payload comes from lockReleasePatch(item)",
+  expect(["release payload comes from idleSweepRequest(item)", /upsertRoadmap\([^)]*idleSweepRequest\(item\)\)/.test(body)]).toEqual([
+    "release payload comes from idleSweepRequest(item)",
     true,
+  ]);
+  expect(["the watcher never builds the operator stop request", /operatorStopRequest/.test(body)]).toEqual([
+    "the watcher never builds the operator stop request",
+    false,
   ]);
   expect(["no hand-written status:'planned' release", /status:\s*'planned'/.test(body)]).toEqual([
     "no hand-written status:'planned' release",
@@ -98,6 +102,21 @@ test("watchIdleLocks releases through lockReleasePatch and traces its failure", 
   expect(["the catch traces through reportError", /catch\s*\(\s*\w+\s*\)\s*\{\s*reportError\(/.test(body)]).toEqual([
     "the catch traces through reportError",
     true,
+  ]);
+});
+
+test("stopRoadmapItem releases through operatorStopRequest and never carries the sweep marker", () => {
+  const src = readFileSync(INDEX_PATH, "utf-8");
+  const declMatch = /const\s+stopRoadmapItem\s*=\s*async\s*\([^)]*\)\s*:\s*Promise<StopResult>\s*=>\s*\{/.exec(src);
+  expect(declMatch).not.toBeNull();
+  const body = extractBracedBody(src, declMatch!.index + declMatch![0].length - 1);
+  expect(["stop payload comes from operatorStopRequest(item)", /upsertRoadmap\([^)]*operatorStopRequest\(item\)\)/.test(body)]).toEqual([
+    "stop payload comes from operatorStopRequest(item)",
+    true,
+  ]);
+  expect(["the stop never names the sweep builder or marker", /idleSweepRequest|change_origin|idle_lock_sweep/.test(body)]).toEqual([
+    "the stop never names the sweep builder or marker",
+    false,
   ]);
 });
 

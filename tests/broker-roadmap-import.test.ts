@@ -583,3 +583,90 @@ test("card aad5e954: the comparison NAMES an uncovered column (negative control)
   expect(dangling.missing).toEqual([]);
   expect(dangling.extra).toEqual(["queue"]);
 });
+
+const HISTORICAL = "2021-05-06T07:08:09.010Z";
+const OTHER_DATE = "2022-06-07T08:09:10.011Z";
+const LOCAL_DATE = "2020-01-01T00:00:00.000Z";
+
+async function importRaw(items: Record<string, unknown>[]): Promise<void> {
+  const res = await post<ImportRes | ImportErr>(`${broker.url}/roadmap/import`, {
+    project_key: PK,
+    by: "date-importer",
+    items,
+  });
+  expect(res.status).toBe(200);
+}
+
+async function storedDate(id: string): Promise<string | null> {
+  return (await listAll()).find((i) => i.id === id)!.content_updated_at;
+}
+
+function setLocalDate(id: string, value: string | null): void {
+  const db = openBrokerDb(broker.dbPath);
+  try {
+    db.run("UPDATE roadmap_items SET content_updated_at = ? WHERE id = ?", [value, id]);
+  } finally {
+    db.close();
+  }
+}
+
+async function datedLocalCard(title: string): Promise<RoadmapItem> {
+  const res = await post<UpsertRes>(`${broker.url}/roadmap/upsert`, { project_key: PK, by: "date-author", title });
+  expect(res.status).toBe(200);
+  setLocalDate(res.body.item.id, LOCAL_DATE);
+  return res.body.item;
+}
+
+test("import: a new card carries the file's historical date, and none when the file has none", async () => {
+  const dated = crypto.randomUUID();
+  const undated = crypto.randomUUID();
+  const invalid = crypto.randomUUID();
+  const sqliteShaped = crypto.randomUUID();
+  await importRaw([
+    { id: dated, kind: "feature", title: "dated in the file", content_updated_at: HISTORICAL },
+    { id: undated, kind: "feature", title: "undated in the file" },
+    { id: invalid, kind: "feature", title: "garbage date", content_updated_at: "yesterday" },
+    { id: sqliteShaped, kind: "feature", title: "sqlite-shaped date", content_updated_at: "2021-05-06 07:08:09" },
+  ]);
+  expect(await storedDate(dated)).toBe(HISTORICAL);
+  expect(await storedDate(undated), "never the import instant").toBeNull();
+  expect(await storedDate(invalid)).toBeNull();
+  expect(await storedDate(sqliteShaped)).toBeNull();
+});
+
+test("import: changed content without a date in the file leaves the date unknown, not the old local one", async () => {
+  const card = await datedLocalCard("local title");
+  await importRaw([importItem(card, { title: "title from an undated snapshot" })]);
+  const after = (await listAll()).find((i) => i.id === card.id)!;
+  expect(after.title).toBe("title from an undated snapshot");
+  expect(after.content_updated_at).toBeNull();
+});
+
+test("import: changed content carries the date of the snapshot that supplied it", async () => {
+  const card = await datedLocalCard("local title to replace");
+  await importRaw([importItem(card, { title: "title from a dated snapshot", content_updated_at: HISTORICAL })]);
+  expect(await storedDate(card.id)).toBe(HISTORICAL);
+});
+
+test("import: identical final content keeps the local date whatever date the file carries", async () => {
+  const card = await datedLocalCard("unchanged by the import");
+  await importRaw([importItem(card, { title: card.title, content_updated_at: OTHER_DATE })]);
+  expect(await storedDate(card.id)).toBe(LOCAL_DATE);
+  await importRaw([importItem(card, { title: card.title })]);
+  expect(await storedDate(card.id), "an undated identical snapshot erases nothing").toBe(LOCAL_DATE);
+});
+
+test("import: a duplicate id inside one file is judged against the first occurrence's result", async () => {
+  const id = crypto.randomUUID();
+  await importRaw([
+    { id, kind: "feature", title: "first occurrence", content_updated_at: HISTORICAL },
+    { id, kind: "feature", title: "first occurrence", content_updated_at: OTHER_DATE },
+  ]);
+  expect(await storedDate(id), "the second, identical occurrence keeps the first one's date").toBe(HISTORICAL);
+
+  await importRaw([
+    { id, kind: "feature", title: "first occurrence", content_updated_at: HISTORICAL },
+    { id, kind: "feature", title: "second, different occurrence", content_updated_at: OTHER_DATE },
+  ]);
+  expect(await storedDate(id)).toBe(OTHER_DATE);
+});

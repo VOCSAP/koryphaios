@@ -754,6 +754,54 @@ test("push: fast-forward accepted, stale base refused, unknown base refused, ins
   ]);
 }, 20_000);
 
+test("push: the card date travels with adopted content, is never invented, and never moves on identical content", async () => {
+  const b = shared;
+  const D1 = "2026-03-01T00:00:00.000Z";
+  const D2 = "2026-04-02T00:00:00.000Z";
+  const D3 = "2026-05-03T00:00:00.000Z";
+  const send = (item: RoadmapSyncPushItem, expected: number | null) =>
+    post<RoadmapSyncPushResponse>(`${b.url}/roadmap/sync/push`, {
+      replica_id: R1,
+      item,
+      expected_content_rev: expected,
+    });
+
+  const inserted = await send(pushItem({ id: "card-date-known", content_updated_at: D1 }), null);
+  expect(inserted.status).toBe(200);
+  expect(inserted.body.item.content_updated_at, "a new card carries the pushed date").toBe(D1);
+
+  const withoutKey = await send(pushItem({ id: "card-date-absent" }), null);
+  expect(withoutKey.body.item.content_updated_at, "an older replica sends no date: unknown, never now").toBeNull();
+  const nullDate = await send(pushItem({ id: "card-date-null", content_updated_at: null }), null);
+  expect(nullDate.body.item.content_updated_at).toBeNull();
+  const garbage = await send(pushItem({ id: "card-date-garbage", content_updated_at: "yesterday" }), null);
+  expect(garbage.status).toBe(200);
+  expect(garbage.body.item.content_updated_at).toBeNull();
+
+  const edited = await send(pushItem({ id: "card-date-known", description: "v2", content_updated_at: D2 }), inserted.body.content_rev);
+  expect(edited.body.item.content_updated_at, "adopted content brings its own date").toBe(D2);
+
+  const undated = await send(pushItem({ id: "card-date-known", description: "v3" }), edited.body.content_rev);
+  expect(undated.body.item.content_updated_at, "adopted content without a date is unknown, not the previous date").toBeNull();
+
+  const redated = await send(pushItem({ id: "card-date-known", description: "v4", content_updated_at: D2 }), undated.body.content_rev);
+  expect(redated.body.item.content_updated_at).toBe(D2);
+
+  const identical = await send(
+    pushItem({ id: "card-date-known", description: "v4", content_updated_at: D3 }),
+    redated.body.content_rev
+  );
+  expect(identical.status).toBe(200);
+  expect(identical.body.item.content_updated_at, "identical content keeps the receiver's date whatever the wire says").toBe(D2);
+
+  const queueOnly = await send(
+    pushItem({ id: "card-date-known", description: "v4", queue: 4 }),
+    identical.body.content_rev
+  );
+  expect(queueOnly.body.item.queue).toBe(4);
+  expect(queueOnly.body.item.content_updated_at, "a queue-only push fabricates nothing").toBe(D2);
+}, 20_000);
+
 test("push is refused on a card the upstream work-locks for a holder this replica does not relay", async () => {
   const b = shared;
   const reg = await post<RegisterResponse>(`${b.url}/register`, {
@@ -1230,6 +1278,12 @@ test("lock relay: claim, re-assert, contested annotation, and who may release", 
     title: "relayed lock",
   });
   const id = created.body.item.id;
+  const PINNED = "2020-01-01T00:00:00.000Z";
+  const pinDb = openBrokerDb(b.dbPath);
+  pinDb.run("UPDATE roadmap_items SET content_updated_at = ? WHERE id = ?", [PINNED, id]);
+  const dateNow = () =>
+    (pinDb.query("SELECT content_updated_at FROM roadmap_items WHERE id = ?").get(id) as { content_updated_at: string | null })
+      .content_updated_at;
 
   const claim = await post<RoadmapSyncLockClaimResponse>(`${b.url}/roadmap/sync/lock`, {
     replica_id: R1,
@@ -1240,6 +1294,7 @@ test("lock relay: claim, re-assert, contested annotation, and who may release", 
   expect([claim.status, claim.body.scope]).toEqual([200, "global"]);
   expect(claim.body.item.locked).toBe(true);
   expect(claim.body.item.locked_by).toBe("agent-a");
+  expect(dateNow(), "a relayed claim dates nothing").toBe(PINNED);
 
   const db = openBrokerDb(b.dbPath);
   const relayRow = db
@@ -1261,6 +1316,7 @@ test("lock relay: claim, re-assert, contested annotation, and who may release", 
   expect([contested.status, contested.body.scope]).toEqual([409, "contested"]);
   expect(contested.body.item.lock_contested_by).toEqual([`agent-b@${R2}`]);
   expect(contested.body.item.locked_by).toBe("agent-a");
+  expect(dateNow(), "a contest annotation dates nothing").toBe(PINNED);
 
   // Re-asserting the same lock is a heartbeat: it stays global, drops no
   // annotation of anybody else, and does not re-publish the row.
@@ -1281,6 +1337,7 @@ test("lock relay: claim, re-assert, contested annotation, and who may release", 
     "a heartbeat re-assertion does not bump the row's revision",
     afterReassert.rev,
   ]).toEqual(["a heartbeat re-assertion does not bump the row's revision", beforeReassert.rev]);
+  expect(dateNow(), "a lease heartbeat dates nothing").toBe(PINNED);
 
   // A release from anyone but the holder withdraws only its own annotation.
   const foreignRelease = await post<RoadmapSyncLockReleaseResponse>(`${b.url}/roadmap/sync/lock`, {
@@ -1315,7 +1372,9 @@ test("lock relay: claim, re-assert, contested annotation, and who may release", 
     .query("SELECT lock_relay, lock_relay_seen FROM roadmap_items WHERE id = ?")
     .get(id) as { lock_relay: string | null; lock_relay_seen: string | null };
   expect([cleared.lock_relay, cleared.lock_relay_seen]).toEqual([null, null]);
+  expect(dateNow(), "a relayed release dates nothing").toBe(PINNED);
   db.close();
+  pinDb.close();
 
   // The card must exist to be claimed; a release for a card the upstream
   // never had is a no-op the replica can retire.
@@ -1844,6 +1903,25 @@ test("context document sync routes require the upstream serving role", async () 
   });
   expect([pullResponse.status, pushResponse.status]).toEqual([403, 403]);
 }, 30_000);
+
+test("a replicated document arriving for a card does not date it", async () => {
+  const b = shared;
+  const dated = "2026-03-01T00:00:00.000Z";
+  const pushed = await post<RoadmapSyncPushResponse>(`${b.url}/roadmap/sync/push`, {
+    replica_id: R1,
+    item: pushItem({ id: "card-document-undated", content_updated_at: dated }),
+    expected_content_rev: null,
+  });
+  expect(pushed.status).toBe(200);
+  const document = syncDocument("document-for-dated-card", documentUnits("dated-card", 1, "replicated unit"));
+  const arrival = await post<RoadmapContextDocumentSyncPushResponse>(`${b.url}/roadmap/context-document/sync/push`, {
+    replica_id: R1,
+    document: { ...document, roadmap_item_id: "card-document-undated" },
+  });
+  expect(arrival.status).toBe(200);
+  const list = await post<{ items: RoadmapItem[] }>(`${b.url}/roadmap/list`, { project_key: PK });
+  expect(list.body.items.find((i) => i.id === "card-document-undated")!.content_updated_at).toBe(dated);
+}, 20_000);
 
 test("context document sync accepts only an exact immutable repeat", async () => {
   const b = shared;

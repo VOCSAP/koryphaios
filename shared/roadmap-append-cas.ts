@@ -40,6 +40,7 @@ export type RoadmapContextAppendCasWrite = {
   expectedContentRev: number;
   appended: string;
   operatorId: string | null;
+  contentUpdatedAt: string;
 };
 
 export type RoadmapContextAppendCasStore = {
@@ -129,13 +130,14 @@ export function createSqliteRoadmapContextAppendCasStore(
       if (!row) return null;
       return { context: row.context, contentRev: row.content_rev };
     },
-    append({ id, expectedContentRev, appended, operatorId }) {
+    append({ id, expectedContentRev, appended, operatorId, contentUpdatedAt }) {
       const result = db.run(
         `UPDATE roadmap_items
             SET context = COALESCE(context,'') || ?,
-                operator_id = COALESCE(?, operator_id)
+                operator_id = COALESCE(?, operator_id),
+                content_updated_at = ?
           WHERE id = ? AND content_rev = ?`,
-        [appended, operatorId, id, expectedContentRev],
+        [appended, operatorId, contentUpdatedAt, id, expectedContentRev],
       );
       return result.changes > 0;
     },
@@ -157,11 +159,12 @@ export function runRoadmapContextAppendCas(opts: {
     if (!row) return { ok: false, code: "unknown_roadmap_item" };
 
     const existingContext = row.context ?? "";
+    const now = opts.now();
     const plan = planRoadmapContextAppend({
       existingContext,
       text: opts.text,
       author: opts.author,
-      nowIso: getUniqueRoadmapAppendTimestamp(existingContext, opts.now()),
+      nowIso: getUniqueRoadmapAppendTimestamp(existingContext, now),
       supersedes: opts.supersedes,
     });
     if (!plan.ok) return plan;
@@ -177,6 +180,7 @@ export function runRoadmapContextAppendCas(opts: {
         expectedContentRev: row.contentRev,
         appended: plan.appended,
         operatorId: opts.operatorId ?? null,
+        contentUpdatedAt: now,
       })
     ) {
       return { ok: true, plan };

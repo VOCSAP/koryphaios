@@ -4,7 +4,7 @@
 // peers, so unregistering their author never touches them.
 
 import { test, expect, beforeAll, afterAll } from "bun:test";
-import { startBroker, stopBroker, post, livePid, type TestBroker , deckAuthored } from "./_helper.ts";
+import { startBroker, stopBroker, post, livePid, type TestBroker , deckAuthored, openBrokerDb } from "./_helper.ts";
 import type { RoadmapItem } from "../shared/types.ts";
 
 let broker: TestBroker;
@@ -512,4 +512,251 @@ test("items survive their author peer's unregister (no FK, plain-text attributio
   const survived = list.body.items.find((i) => i.id === item.id);
   expect(survived).toBeDefined();
   expect(survived!.created_by).toBe(authorId);
+});
+
+const LONG_AGO = "2020-01-01T00:00:00.000Z";
+const ISO_MS = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+
+function storedContentDate(id: string): string | null {
+  const db = openBrokerDb(broker.dbPath, { readonly: true });
+  try {
+    const row = db.query("SELECT content_updated_at FROM roadmap_items WHERE id = ?").get(id) as {
+      content_updated_at: string | null;
+    };
+    return row.content_updated_at;
+  } finally {
+    db.close();
+  }
+}
+
+function setStoredContentDate(id: string, value: string | null): void {
+  const db = openBrokerDb(broker.dbPath);
+  try {
+    db.run("UPDATE roadmap_items SET content_updated_at = ? WHERE id = ?", [value, id]);
+  } finally {
+    db.close();
+  }
+}
+
+async function datedLongAgo(fields: Record<string, unknown> = {}): Promise<RoadmapItem> {
+  const item = await add({ title: `dated ${crypto.randomUUID()}`, ...fields });
+  setStoredContentDate(item.id, LONG_AGO);
+  return item;
+}
+
+async function patchAs(id: string, fields: Record<string, unknown>, by = "test-peer") {
+  return post<UpsertRes>(`${broker.url}/roadmap/upsert`, { id, by, ...fields });
+}
+
+test("create dates the card at its creation instant", async () => {
+  const before = Date.now();
+  const item = await add({ title: "born dated" });
+  expect(item.content_updated_at).toMatch(ISO_MS);
+  expect(Date.parse(item.content_updated_at!)).toBeGreaterThanOrEqual(before - 1000);
+  expect(storedContentDate(item.id)).toBe(item.content_updated_at);
+});
+
+test("a real change to each content field dates the card", async () => {
+  const other = await add({ title: "a dependency target" });
+  const changes: [string, unknown][] = [
+    ["kind", "bug"],
+    ["title", "a renamed card"],
+    ["description", "now described"],
+    ["rationale", "now justified"],
+    ["context", "now briefed"],
+    ["priority", "must"],
+    ["value", "high"],
+    ["effort", "high"],
+    ["status", "planned"],
+    ["triage", "needs-info"],
+    ["tags", ["a-new-tag"]],
+    ["depends_on", [other.id]],
+  ];
+  for (const [field, value] of changes) {
+    const item = await datedLongAgo();
+    const res = await patchAs(item.id, { [field]: value });
+    expect(res.status, `patching ${field}`).toBe(200);
+    expect(res.body.item.content_updated_at, `${field} change dates the card`).toMatch(ISO_MS);
+    expect(res.body.item.content_updated_at, `${field} change moves the date forward`).not.toBe(LONG_AGO);
+  }
+});
+
+test("a real delta on directive or target_peer_ids dates the card, an identical one does not", async () => {
+  const item = await datedLongAgo({ kind: "directive", directive: "clear", target_peer_ids: ["peer-a"] });
+  const same = await patchAs(item.id, { directive: "clear", target_peer_ids: ["peer-a"] });
+  expect(same.status).toBe(200);
+  expect(same.body.item.content_updated_at, "an identical directive write").toBe(LONG_AGO);
+
+  const retargeted = await patchAs(item.id, { target_peer_ids: ["peer-a", "peer-b"] });
+  expect(retargeted.body.item.target_peer_ids).toEqual(["peer-a", "peer-b"]);
+  expect(retargeted.body.item.content_updated_at, "a target delta").not.toBe(LONG_AGO);
+
+  setStoredContentDate(item.id, LONG_AGO);
+  const recommanded = await patchAs(item.id, { directive: "compact" });
+  expect(recommanded.body.item.directive).toBe("compact");
+  expect(recommanded.body.item.content_updated_at, "a directive delta").not.toBe(LONG_AGO);
+});
+
+test("release:true alone on a card in_progress dates it, the card goes back to planned", async () => {
+  const item = await lockedInProgress();
+  const released = await patchAs(item.id, { release: true }, "lock-holder");
+  expect(released.status).toBe(200);
+  expect(released.body.item.status).toBe("planned");
+  expect(released.body.item.locked).toBe(false);
+  expect(released.body.item.content_updated_at).not.toBe(LONG_AGO);
+});
+
+test("archiving and reopening a card date it, inactive toggling too", async () => {
+  const item = await datedLongAgo();
+  const archived = await patchAs(item.id, { status: "archived" });
+  expect(archived.body.item.content_updated_at).not.toBe(LONG_AGO);
+  setStoredContentDate(item.id, LONG_AGO);
+  const reopened = await patchAs(item.id, { status: "idea" });
+  expect(reopened.body.item.content_updated_at).not.toBe(LONG_AGO);
+  setStoredContentDate(item.id, LONG_AGO);
+  const toggled = await post<UpsertRes>(`${broker.url}/roadmap/upsert`, deckAuthored({ id: item.id, inactive: true }));
+  expect(toggled.status).toBe(200);
+  expect(toggled.body.item.content_updated_at).not.toBe(LONG_AGO);
+});
+
+test("a write whose result equals the stored content leaves the date alone", async () => {
+  const item = await datedLongAgo({ priority: "should", tags: ["same"], context: "same context" });
+  const identical = await patchAs(item.id, {
+    title: item.title,
+    priority: "should",
+    tags: ["same"],
+    context: "same context",
+    status: item.status,
+    kind: item.kind,
+  });
+  expect(identical.status).toBe(200);
+  expect(identical.body.item.content_updated_at, "an identical retry dates nothing").toBe(LONG_AGO);
+  expect(identical.body.item.title).toBe(item.title);
+});
+
+test("attribution, queue and lock-only writes leave the date alone", async () => {
+  const item = await datedLongAgo();
+  const byOther = await patchAs(item.id, {}, "another-author");
+  expect(byOther.body.item.updated_by).toBe("another-author");
+  expect(byOther.body.item.content_updated_at, "attribution only").toBe(LONG_AGO);
+
+  const signed = await post<UpsertRes>(`${broker.url}/roadmap/upsert`, deckAuthored({ id: item.id }));
+  expect(signed.body.item.operator_id).toBeTruthy();
+  expect(signed.body.item.content_updated_at, "an operator signature alone").toBe(LONG_AGO);
+
+  const queued = await patchAs(item.id, { queue: 7 });
+  expect(queued.body.item.queue).toBe(7);
+  expect(queued.body.item.content_updated_at, "queue move").toBe(LONG_AGO);
+  const unqueued = await patchAs(item.id, { queue: null });
+  expect(unqueued.body.item.queue).toBeNull();
+  expect(unqueued.body.item.content_updated_at, "queue clear").toBe(LONG_AGO);
+
+  const claimed = await patchAs(item.id, { status: "in_progress" });
+  expect(claimed.body.item.content_updated_at, "taking the card in_progress is a status change").not.toBe(LONG_AGO);
+  setStoredContentDate(item.id, LONG_AGO);
+  const resumed = await patchAs(item.id, { locked: true });
+  expect(resumed.status).toBe(200);
+  expect(resumed.body.item.locked).toBe(true);
+  expect(resumed.body.item.content_updated_at, "re-taking a lock already held").toBe(LONG_AGO);
+});
+
+test("a refused write dates nothing", async () => {
+  const item = await datedLongAgo();
+  const refused = await patchAs(item.id, { title: "x".repeat(5000) });
+  expect(refused.status).toBe(400);
+  const stale = await patchAs(item.id, { title: "stale save", expected_content_rev: 0 });
+  expect(stale.status).toBe(409);
+  expect(storedContentDate(item.id)).toBe(LONG_AGO);
+});
+
+async function lockedInProgress(): Promise<RoadmapItem> {
+  const item = await datedLongAgo();
+  const claimed = await patchAs(item.id, { status: "in_progress" }, "lock-holder");
+  expect(claimed.body.item.locked).toBe(true);
+  setStoredContentDate(item.id, LONG_AGO);
+  return item;
+}
+
+const WATCHER_RELEASE = { status: "planned", locked: false, change_origin: "idle_lock_sweep" };
+
+test("the idle-lock watcher's marked release moves status without dating the card", async () => {
+  const item = await lockedInProgress();
+  const res = await post<UpsertRes>(
+    `${broker.url}/roadmap/upsert`,
+    deckAuthored({ id: item.id, project_key: PK, ...WATCHER_RELEASE })
+  );
+  expect(res.status).toBe(200);
+  expect(res.body.item.status).toBe("planned");
+  expect(res.body.item.locked).toBe(false);
+  expect(res.body.item.content_updated_at).toBe(LONG_AGO);
+});
+
+test("the operator's stop, the same release without the marker, dates the card", async () => {
+  const item = await lockedInProgress();
+  const res = await post<UpsertRes>(
+    `${broker.url}/roadmap/upsert`,
+    deckAuthored({ id: item.id, project_key: PK, status: "planned", locked: false })
+  );
+  expect(res.status).toBe(200);
+  expect(res.body.item.status).toBe("planned");
+  expect(res.body.item.content_updated_at).not.toBe(LONG_AGO);
+});
+
+test("the marker is refused, never silently honoured, outside the strict signed lock-release shape", async () => {
+  const item = await lockedInProgress();
+  const attempts: [string, Record<string, unknown>][] = [
+    ["an unsigned write", { id: item.id, by: "test-peer", ...WATCHER_RELEASE }],
+    ["a title change", deckAuthored({ id: item.id, title: "sneaky", ...WATCHER_RELEASE })],
+    ["a context change", deckAuthored({ id: item.id, context: "sneaky", ...WATCHER_RELEASE })],
+    ["a priority change", deckAuthored({ id: item.id, priority: "must", ...WATCHER_RELEASE })],
+    ["a status other than planned", deckAuthored({ id: item.id, ...WATCHER_RELEASE, status: "done" })],
+    ["no status", deckAuthored({ id: item.id, locked: false, change_origin: "idle_lock_sweep" })],
+    ["a create", deckAuthored({ project_key: PK, title: "new", ...WATCHER_RELEASE })],
+    ["an unknown origin", deckAuthored({ id: item.id, ...WATCHER_RELEASE, change_origin: "anything" })],
+  ];
+  for (const [what, body] of attempts) {
+    const res = await post<ErrRes>(`${broker.url}/roadmap/upsert`, body);
+    expect(res.status, what).toBe(400);
+  }
+  const after = await post<ListRes>(`${broker.url}/roadmap/list`, { project_key: PK });
+  const current = after.body.items.find((i) => i.id === item.id)!;
+  expect(current.status, "no refused attempt moved the card").toBe("in_progress");
+  expect(current.title).toBe(item.title);
+  expect(storedContentDate(item.id)).toBe(LONG_AGO);
+});
+
+test("the marker never reopens a card that is not locked and in_progress", async () => {
+  for (const status of ["done", "idea", "planned"] as const) {
+    const item = await datedLongAgo({ status });
+    const res = await post<ErrRes>(
+      `${broker.url}/roadmap/upsert`,
+      deckAuthored({ id: item.id, project_key: PK, ...WATCHER_RELEASE })
+    );
+    expect(res.status, `a marked release of a ${status} card`).toBe(400);
+    expect(res.body.error).toContain("locked in_progress");
+    const list = await post<ListRes>(`${broker.url}/roadmap/list`, { project_key: PK });
+    const current = list.body.items.find((i) => i.id === item.id)!;
+    expect(current.status, "the refused write moved nothing").toBe(status);
+    expect(current.content_updated_at).toBe(LONG_AGO);
+  }
+  const archived = await datedLongAgo();
+  await post(`${broker.url}/roadmap/archive`, { id: archived.id, by: "test-peer" });
+  setStoredContentDate(archived.id, LONG_AGO);
+  const refused = await post<ErrRes>(
+    `${broker.url}/roadmap/upsert`,
+    deckAuthored({ id: archived.id, project_key: PK, ...WATCHER_RELEASE })
+  );
+  expect(refused.status, "a stale snapshot cannot reopen an archived card").toBe(400);
+  expect(storedContentDate(archived.id)).toBe(LONG_AGO);
+});
+
+test("the archive route dates a real archive and leaves an already archived card alone", async () => {
+  const item = await datedLongAgo();
+  const first = await post<UpsertRes>(`${broker.url}/roadmap/archive`, { id: item.id, by: "test-peer" });
+  expect(first.body.item.status).toBe("archived");
+  expect(first.body.item.content_updated_at).not.toBe(LONG_AGO);
+  setStoredContentDate(item.id, LONG_AGO);
+  const second = await post<UpsertRes>(`${broker.url}/roadmap/archive`, { id: item.id, by: "test-peer" });
+  expect(second.status).toBe(200);
+  expect(second.body.item.content_updated_at, "archiving an archived card").toBe(LONG_AGO);
 });

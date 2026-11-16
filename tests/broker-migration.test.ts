@@ -238,3 +238,41 @@ test("roadmap_fts_au's AFTER UPDATE OF columns match the fts5 DDL columns (card 
     `roadmap_fts_au's AFTER UPDATE OF columns (${triggerCols.join(", ")}) must match the fts5 DDL columns (${tableCols.join(", ")}) -- a mismatch silently stops reindexing whichever column is missing from the OF clause`
   ).toEqual(tableCols);
 });
+
+test("content_updated_at is added without backfill or default: a card born before it stays NULL across two starts", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "cp-legacy-content-date-"));
+  seededDirs.push(dir);
+  const dbPath = join(dir, "peers.db");
+  const first = await startBroker({ CLAUDE_PEERS_DB: dbPath });
+  brokers.push(first);
+  const PK = "github.com/vocsap/claude-peers-mcp";
+  const born = await post<{ item: RoadmapItem }>(`${first.url}/roadmap/upsert`, { project_key: PK, by: "seed", title: "born before the column" });
+  expect(born.status).toBe(200);
+  first.proc.kill();
+  await first.proc.exited;
+
+  const downgrade = openBrokerDb(dbPath);
+  const triggers = downgrade
+    .query("SELECT name FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'roadmap_items'")
+    .all() as { name: string }[];
+  for (const t of triggers) downgrade.run(`DROP TRIGGER "${t.name}"`);
+  downgrade.run("ALTER TABLE roadmap_items DROP COLUMN content_updated_at");
+  downgrade.close();
+
+  const b1 = await startBroker({ CLAUDE_PEERS_DB: dbPath });
+  const b2 = await startBroker({ CLAUDE_PEERS_DB: dbPath });
+  brokers.push(b2, b1);
+  const fresh = await post<{ item: RoadmapItem }>(`${b2.url}/roadmap/upsert`, { project_key: PK, by: "seed", title: "born after the column" });
+
+  const db = openBrokerDb(dbPath, { readonly: true });
+  const column = (db.query("PRAGMA table_info(roadmap_items)").all() as { name: string; dflt_value: string | null; notnull: number }[]).find(
+    (c) => c.name === "content_updated_at"
+  );
+  const old = db.query("SELECT content_updated_at FROM roadmap_items WHERE id = ?").get(born.body.item.id) as { content_updated_at: string | null };
+  db.close();
+
+  expect(column, "the migration adds the column to a table that lacks it").toBeDefined();
+  expect([null, "NULL"], "no default: a default would date every historical card").toContain(column!.dflt_value);
+  expect(old.content_updated_at, "a card born before the column has an unknown date").toBeNull();
+  expect(fresh.body.item.content_updated_at, "a card born after the column is dated").toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+});

@@ -708,6 +708,8 @@ export interface RoadmapItem {
   updated_by: string
   created_at: string
   updated_at: string
+  /** Last real content change, ISO UTC; null when unknown (mirror of core RoadmapItem). */
+  content_updated_at: string | null
   content_rev?: number
   deleted_at: string | null
   /** Dispatch-queue position (PLAN C15), 1-based; null = not queued. */
@@ -980,6 +982,8 @@ export interface RoadmapUpsertFields {
    * that signer this field would 401, not silently write unsigned.
    */
   inactive?: boolean
+  /** Set only by the main-process idle-lock watcher (mirror of core RoadmapChangeOrigin). */
+  change_origin?: 'idle_lock_sweep'
 }
 
 /**
