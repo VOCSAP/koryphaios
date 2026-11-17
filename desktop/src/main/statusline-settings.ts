@@ -45,7 +45,11 @@ export function buildTileSettings(statusLineSettings?: string, handoffLaunch?: S
     ...status,
     ...(handoffLaunch ? {
       env: { ...environment, ...status.env, ...handoffLaunch.environment },
-      permissions: { allow: handoffLaunch.allowedTools }
+      permissions: {
+        allow: handoffLaunch.allowedTools,
+        // Not --add-dir: Claude Code asks to trust an --add-dir path at every launch, and its default answer exits.
+        additionalDirectories: [handoffLaunch.additionalDirectory.replace(/\\/g, '/')]
+      }
     } : {})
   })
 }

@@ -65,8 +65,6 @@ export interface SessionCommandInput {
   effort?: string
   /** Absolute paths to embedded plugins, passed on both fresh and resumed sessions. */
   pluginDirs?: readonly string[]
-  /** Extra directories Claude Code may access during this launch. */
-  additionalDirectories?: readonly string[]
   /**
    * Path to a generated .mcp config, emitted as `--mcp-config "<path>"` on
    * BOTH fresh and resume (not restored by --fork-session, like --effort).
@@ -157,14 +155,6 @@ function pluginFlags(pluginDirs?: readonly string[]): string {
     .map((pluginDir) => pluginDir.trim())
     .filter(Boolean)
     .map((pluginDir) => ` --plugin-dir "${pluginDir}"`)
-    .join('')
-}
-
-function additionalDirectoryFlags(directories?: readonly string[]): string {
-  return (directories ?? [])
-    .map((directory) => directory.trim())
-    .filter(Boolean)
-    .map((directory) => ` --add-dir "${directory}"`)
     .join('')
 }
 
@@ -297,23 +287,15 @@ export function buildSessionCommandLine(input: SessionCommandInput): string {
     // --effort, --mcp-config, --strict-mcp-config, --disallowedTools and
     // --settings are the exceptions (not auto-restored). --append-system-prompt-file
     // is restored from the transcript's prompt snapshot; re-passing it does not duplicate it.
-    // Ids are double-quoted even though they are UUID-shaped by construction:
-    // prevSessionId can originate from the desk-session back-channel, whose file
-    // lives in a dir mounted into sandbox containers (validated in
-    // desk-session.ts). Quoting is the second lock on that door.
-    return `${base}${pluginFlags(input.pluginDirs)}${additionalDirectoryFlags(input.additionalDirectories)}${mcpConfigFlag(input.mcpConfig)}${strictMcpConfigFlag(input.strictMcpConfig)}${disallowedToolsFlag(input.disallowedTools)}${appendSystemPromptFlag(input.appendSystemPromptFile)}${settingsFlag(input.settings)} --resume "${input.prevSessionId}" --fork-session --session-id "${input.sessionId}"${effortFlag(input.effort)}`
+    // Ids are quoted although UUID-shaped: prevSessionId can come from a file in a dir mounted into sandbox containers.
+    return `${base}${pluginFlags(input.pluginDirs)}${mcpConfigFlag(input.mcpConfig)}${strictMcpConfigFlag(input.strictMcpConfig)}${disallowedToolsFlag(input.disallowedTools)}${appendSystemPromptFlag(input.appendSystemPromptFile)}${settingsFlag(input.settings)} --resume "${input.prevSessionId}" --fork-session --session-id "${input.sessionId}"${effortFlag(input.effort)}`
   }
 
-  let line = `${base}${pluginFlags(input.pluginDirs)}${additionalDirectoryFlags(input.additionalDirectories)}${mcpConfigFlag(input.mcpConfig)}${strictMcpConfigFlag(input.strictMcpConfig)}${disallowedToolsFlag(input.disallowedTools)}${appendSystemPromptFlag(input.appendSystemPromptFile)} --session-id "${input.sessionId}"`
+  let line = `${base}${pluginFlags(input.pluginDirs)}${mcpConfigFlag(input.mcpConfig)}${strictMcpConfigFlag(input.strictMcpConfig)}${disallowedToolsFlag(input.disallowedTools)}${appendSystemPromptFlag(input.appendSystemPromptFile)} --session-id "${input.sessionId}"`
   const extra = input.args?.trim()
   if (extra) line += ` ${extra}`
   line += effortFlag(input.effort)
   line += settingsFlag(input.settings)
-  // No positional initial prompt here anymore (150eb188): session-service
-  // injects it as post-spawn PTY keystrokes via encodeInitialPromptKeystrokes
-  // below, once the tile is actually up, instead of composing it into argv
-  // (win32's CommandLineToArgvW re-parse corrupted it past the first embedded
-  // quote -- the same class of bug 07dc42c0 fixed for the headless adapters).
   return line
 }
 

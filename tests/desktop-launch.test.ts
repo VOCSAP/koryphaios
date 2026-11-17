@@ -350,18 +350,18 @@ test("resume inserts every --plugin-dir before --resume", () => {
   );
 });
 
-test("session handoff adds its fixed draft directory on fresh and resumed launches", () => {
+test("the command line no longer turns a structured additionalDirectories field into --add-dir, fresh or resumed", () => {
   const input = {
     baseCommand: "claude run",
     sessionId: "id-new",
+    pluginDirs: ["C:/res/deck-plugin"],
     additionalDirectories: ["C:/Users/test/AppData/session-handoffs/launch-a"]
   };
-  expect(buildSessionCommandLine({ ...input, mode: "fresh" })).toBe(
-    'claude run --add-dir "C:/Users/test/AppData/session-handoffs/launch-a" --session-id "id-new"'
-  );
-  expect(buildSessionCommandLine({ ...input, prevSessionId: "id-old", mode: "resume" })).toBe(
-    'claude run --add-dir "C:/Users/test/AppData/session-handoffs/launch-a" --resume "id-old" --fork-session --session-id "id-new"'
-  );
+  const fresh = buildSessionCommandLine({ ...input, mode: "fresh" });
+  const resume = buildSessionCommandLine({ ...input, prevSessionId: "id-old", mode: "resume" });
+  expect(fresh).toBe('claude run --plugin-dir "C:/res/deck-plugin" --session-id "id-new"');
+  expect(resume).toBe('claude run --plugin-dir "C:/res/deck-plugin" --resume "id-old" --fork-session --session-id "id-new"');
+  expect(fresh + resume).not.toContain("--add-dir");
 });
 
 test("empty plugin directories never emit a flag", () => {
@@ -522,7 +522,6 @@ test("the token after the tool-denial list is always a flag, fresh and resume, w
     baseCommand: "claude run",
     sessionId: "id-1",
     pluginDirs: ["/p/deck-plugin"],
-    additionalDirectories: ["/p/extra"],
     mcpConfig: "/state/demo-mcp.json",
     strictMcpConfig: true,
     disallowedTools: ["Write", "Edit"],

@@ -1697,7 +1697,6 @@ export class SessionService extends EventEmitter {
 
     let command: string
     if (effective === 'resume') {
-      // Fork the previous claude session into a fresh id (collision avoidance).
       const prev = def.sessionId
       def.sessionId = randomUUID()
       command = buildSessionCommandLine({
@@ -1706,7 +1705,6 @@ export class SessionService extends EventEmitter {
         prevSessionId: prev,
         effort: this.flagValue('effort', def.effort),
         pluginDirs,
-        additionalDirectories: handoffLaunch ? [handoffLaunch.additionalDirectory] : undefined,
         mcpConfig: this.mcpConfigForLaunch(def),
         strictMcpConfig: def.strictMcpConfig,
         disallowedTools: def.disallowedTools,
@@ -1715,7 +1713,6 @@ export class SessionService extends EventEmitter {
         mode: 'resume'
       })
     } else {
-      // Fresh launch (or a session that has never spawned yet).
       if (!def.sessionId) def.sessionId = randomUUID()
       command = buildSessionCommandLine({
         baseCommand: base,
@@ -1723,7 +1720,6 @@ export class SessionService extends EventEmitter {
         args: def.args,
         effort: this.flagValue('effort', def.effort),
         pluginDirs,
-        additionalDirectories: handoffLaunch ? [handoffLaunch.additionalDirectory] : undefined,
         mcpConfig: this.mcpConfigForLaunch(def),
         strictMcpConfig: def.strictMcpConfig,
         disallowedTools: def.disallowedTools,

@@ -176,8 +176,12 @@ test("session handoff capability reaches both launch modes and the child environ
   }
   expect(literals).toHaveLength(2);
   for (const literal of literals) {
-    expect(literal).toContain("additionalDirectories: handoffLaunch ? [handoffLaunch.additionalDirectory] : undefined,");
+    expect(literal, "a tile launch carries no directory flag; the draft directory travels in the tile settings").not.toContain("additionalDirectories");
   }
+  const code = codeOnly(body);
+  expect(code).toContain("const tileSettings = isClaudeLaunch(base) ? buildTileSettings(statusLineSettings, handoffLaunch ?? undefined) : undefined");
+  expect(code, "startPty names no directory flag: the draft directory travels in the tile settings").not.toContain("--add-dir");
+  expect(code.match(/\bhandoffLaunch\s*=(?!=)/g) ?? [], "handoffLaunch is assigned once, by the provider call").toHaveLength(1);
   expect(codeOnly(body)).toContain("if (handoffLaunch) Object.assign(sessionEnv, handoffLaunch.environment)");
   expect(codeOnly(body)).toContain("if (!sandboxed && isClaudeLaunch(base) && this.deckLeadPluginTiles.has(def.id) && deckLeadPluginDir && this.sessionHandoffLaunchProvider && sessionHandoffSupported(this.platform)) {");
 });

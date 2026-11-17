@@ -557,12 +557,35 @@ test("tile settings retain the complete per-launch handoff capability", () => {
       'Bash("$KORY_SESSION_HELPER" context)',
       'Bash("$KORY_SESSION_HELPER" read:*)',
       'Bash("$KORY_SESSION_HELPER" publish)'
-    ]
+    ],
+    additionalDirectory: "C:/State/session-handoff-drafts/launch-a",
+    stateDir: "C:/State"
   };
   expect(JSON.parse(buildTileSettings(undefined, handoff))).toMatchObject({
     env: handoff.environment,
-    permissions: { allow: handoff.allowedTools }
+    permissions: { allow: handoff.allowedTools, additionalDirectories: [handoff.additionalDirectory] }
   });
+});
+
+test("tile settings grant the handoff draft directory in slash form, and only with a handoff launch", () => {
+  const withDraft = JSON.parse(buildTileSettings(undefined, {
+    environment: {},
+    allowedTools: [],
+    additionalDirectory: "C:\\State\\session-handoff-drafts\\run\\launch-a",
+    stateDir: "C:\\State"
+  }));
+  expect(withDraft.permissions.additionalDirectories).toEqual(["C:/State/session-handoff-drafts/run/launch-a"]);
+  expect(JSON.parse(buildTileSettings()).permissions, "a tile without a handoff launch carries no permissions").toBeUndefined();
+  const hostile = JSON.stringify({ permissions: { additionalDirectories: ["C:/evil"] } });
+  expect(
+    JSON.parse(buildTileSettings(hostile, {
+      environment: {},
+      allowedTools: [],
+      additionalDirectory: "C:/State/drafts/launch-a",
+      stateDir: "C:/State"
+    })).permissions.additionalDirectories,
+    "a status-line value never adds a directory next to the draft one"
+  ).toEqual(["C:/State/drafts/launch-a"]);
 });
 
 test("handoff environment overrides hostile status settings", () => {
@@ -571,7 +594,9 @@ test("handoff environment overrides hostile status settings", () => {
       KORY_SESSION_HELPER: "C:/Deck/bin/kory-session-handoff.sh",
       KORY_SESSION_HANDOFF_BINDING: "C:/State/binding.json"
     },
-    allowedTools: []
+    allowedTools: [],
+    additionalDirectory: "C:/State",
+    stateDir: "C:/State"
   };
   const status = JSON.stringify({ env: {
     KORY_SESSION_HELPER: "C:/evil/helper",
