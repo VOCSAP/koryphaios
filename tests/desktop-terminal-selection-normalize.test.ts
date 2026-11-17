@@ -163,6 +163,25 @@ test('retire un cadre avec deux rangées de sélection partielles et une rangée
   expect(stripBoxFrame(selection, cols)).toEqual({ text: 'alpha\n  middle\n  omega', frameWidth: 4 })
 })
 
+test('répare une commande Prosopon de trois rangées séparées par CRLF', () => {
+  const cols = 215
+  const first = `echo "kory-copy-test-B one-two-three-four-five-six-seven-eight-nine-ten-eleven-twelve-thirteen-fourteen-fifteen-sixteen-seventeen-eighteen-nineteen-twenty-twentyone-twentytwo-twentythree-twentyfour-twentyfive- ${boxVertical}`
+  const middleBody = 'twentysix-twentyseven-twentyeight-twentynine-thirty-thirtyone-thirtytwo-thirtythree-thirtyfour-thirtyfive-thirtysix-thirtyseven-thirtyeight-thirtynine-forty-fortyone-fortytwo-fortythree-fortyfour-fortyfive'
+  const middle = `${boxVertical}   ${middleBody}${' '.repeat(5)}${boxVertical}`
+  const last = `${boxVertical}   END-B"`
+  const selection = [first, middle, last].join('\r\n')
+
+  expect([...middle]).toHaveLength(cols)
+  expect(normalizeTerminalSelection(selection, cols, { requireAgentIndent: true }))
+    .toBe(`${first.slice(0, -2)}${middleBody} END-B"`)
+})
+
+test('conserve un texte CRLF non encadré octet pour octet', () => {
+  const text = 'alpha\r\nbeta'
+
+  expect(stripBoxFrame(text, 215)).toEqual({ text, frameWidth: 0 })
+})
+
 test('laisse deux rangées partielles autour d’une complète non alignée intactes', () => {
   const text = `left ${boxVertical}\n${boxVertical} middle ${boxVertical}\n${boxVertical} right`
   const agentLike = `command ${boxVertical}\n${boxVertical}   continuation ${boxVertical}\n${boxVertical}   last`
