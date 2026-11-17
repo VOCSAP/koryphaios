@@ -4,10 +4,10 @@ import type {
   AvatarInboxSnapshotFrame,
   InboxOutcome
 } from '../shared/avatar-inbox-protocol'
-import { avatarBubbleMessageKey } from '../shared/avatar-bubble-view'
+import { avatarBubbleMessageKey, avatarBubblePendingCourrier } from '../shared/avatar-bubble-view'
 import type { AvatarDeckIdentity } from '../shared/avatar-state'
 import type { InboxAckStatus } from '../shared/types'
-import type { AvatarCommandResult, AvatarInboxSink } from './avatar-server'
+import { inboxGenerationOf, type AvatarAttachedDeck, type AvatarCommandResult, type AvatarInboxSink } from './avatar-server'
 import type { reportError } from './log'
 
 /** About ten full snapshots of messages: a mark of a message that left the snapshot is kept this long. */
@@ -52,6 +52,8 @@ export interface AvatarInboxService extends AvatarInboxSink {
   act(identity: AvatarDeckIdentity, action: AvatarInboxAction): Promise<AvatarInboxGestureResult>
   /** Records seen or acked for a message the Deck's current snapshot holds; acked is never lowered to seen. */
   markRead(identity: AvatarDeckIdentity, entry: AvatarInboxReadEntry, status: InboxAckStatus): AvatarInboxReadResult
+  /** The Deck's Courrier messages that inboxMessageDisposition counts; 0 without a box. */
+  pendingCourrier(identity: AvatarDeckIdentity): number
   /** The Avatar stops: every read state goes. */
   dispose(): void
 }
@@ -72,6 +74,44 @@ function deckKey(identity: AvatarDeckIdentity): string {
 }
 
 /**
+ * The face's unread count of one attachment: the local Courrier count when the
+ * attachment negotiated a3_inbox (0 for an empty or lost box, never a fall back
+ * to the Deck's counter), undefined for a Deck on its own legacy counter.
+ */
+export function avatarLocalUnread(
+  attached: readonly AvatarAttachedDeck[],
+  inbox: Pick<AvatarInboxService, 'pendingCourrier'>,
+  identity: AvatarDeckIdentity
+): number | undefined {
+  const deck = attached.find((candidate) => candidate.deckRunId === identity.deckRunId && candidate.broker_url === identity.broker_url)
+  return inboxGenerationOf(deck) === undefined ? undefined : inbox.pendingCourrier(identity)
+}
+
+export interface AvatarInboxWiringOptions {
+  send: AvatarInboxServiceOptions['send']
+  report: typeof reportError
+  attachedDecks(): readonly AvatarAttachedDeck[]
+  bubbleChanged(): void
+  dispatch(event: { kind: 'RefreshRequested' }): void
+}
+
+/** The inbox and the face's unread source, both fed by the same attachments; a change of the inbox redraws the bubble and the face. */
+export function createAvatarInboxWiring(options: AvatarInboxWiringOptions): {
+  inbox: AvatarInboxService
+  localUnread(identity: AvatarDeckIdentity): number | undefined
+} {
+  const inbox = createAvatarInboxService({
+    send: options.send,
+    report: options.report,
+    changed: () => {
+      options.bubbleChanged()
+      options.dispatch({ kind: 'RefreshRequested' })
+    }
+  })
+  return { inbox, localUnread: (identity) => avatarLocalUnread(options.attachedDecks(), inbox, identity) }
+}
+
+/**
  * In memory only, nothing reaches the disk. A box lives while its Deck's socket
  * is bound; a read state lives while the Deck stays attached on the same scope
  * generation, so a socket that drops and rebinds keeps what was read.
@@ -80,6 +120,12 @@ export function createAvatarInboxService(options: AvatarInboxServiceOptions): Av
   const boxes = new Map<string, Box>()
   const reads = new Map<string, DeckReads>()
   const inFlight = new Set<string>()
+
+  const pending = (key: string): number => {
+    const box = boxes.get(key)
+    if (!box) return 0
+    return avatarBubblePendingCourrier(box.identity, box.frame.scope_generation, box.frame.messages, reads.get(key)?.entries ?? new Map())
+  }
 
   return {
     receive(identity, frame) {
@@ -92,10 +138,14 @@ export function createAvatarInboxService(options: AvatarInboxServiceOptions): Av
       if (boxes.delete(deckKey(identity))) options.changed()
     },
     detach(identity) {
-      if (reads.delete(deckKey(identity))) options.changed()
+      reads.delete(deckKey(identity))
+      options.changed()
     },
     dispose() {
       reads.clear()
+    },
+    pendingCourrier(identity) {
+      return pending(deckKey(identity))
     },
     markRead(identity, entry, status) {
       const key = deckKey(identity)
@@ -105,6 +155,7 @@ export function createAvatarInboxService(options: AvatarInboxServiceOptions): Av
       if (!box.frame.messages.some((message) => message.id === entry.id && message.sent_at === entry.sentAt)) {
         return { refused: 'no_message' }
       }
+      const before = pending(key)
       let deck = reads.get(key)
       if (!deck) {
         deck = { scopeGeneration: entry.scopeGeneration, entries: new Map() }
@@ -118,6 +169,7 @@ export function createAvatarInboxService(options: AvatarInboxServiceOptions): Av
         if (deck.entries.size <= AVATAR_READ_CAP_PER_DECK) break
         deck.entries.delete(oldest)
       }
+      if (pending(key) !== before) options.changed()
       return { read }
     },
     boxes() {

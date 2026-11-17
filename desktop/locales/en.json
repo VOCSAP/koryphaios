@@ -768,7 +768,6 @@
   "inbox.closedReason": "Reason:",
   "inbox.stateClosed": "Closed",
   "inbox.noteClosed": "Nobody is waiting on this any more. It is shown for reading only; closing the view keeps it in the list.",
-  "inbox.noteResponded": "This message already has a reply and cannot be answered a second time.",
   "inbox.notePreviousRun": "This message comes from an earlier run of the Deck and can no longer be answered.",
   "inbox.noteStateUnknown": "The state of this message is not known yet, so it cannot be answered for now.",
   "inbox.unsentDraft": "Draft that was not sent:",

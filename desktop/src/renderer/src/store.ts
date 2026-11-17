@@ -512,16 +512,10 @@ export function routeSandboxAuth(e: unknown): boolean {
 }
 
 /**
- * Courrier entries still in the operator's way: family 1/2 entries whose
- * DURABLE state is anything but 'acked' (absent from the map = unread).
- *
- * This REPLACED a session counter (`inboxUnread`, now deleted rather than
- * left dead beside its successor): it started at 0 on every boot and was
- * zeroed the moment the panel opened, so ten unhandled messages showed a
- * badge of zero after a Deck restart — a confident zero over things nobody
- * had handled. The card's promise is that nothing leaves the operator's path
- * until acknowledged, and only the persisted state holds that across a
- * restart.
+ * Courrier messages still in the operator's way, by inboxMessageDisposition:
+ * not acknowledged, not closed and not answered. Read from the persisted ack
+ * state, not a session counter, so a Deck restart does not zero the badge
+ * over messages nobody handled.
  */
 export function inboxPendingCount(s: DeckState): number {
   return countPendingInboxMessages(s.inboxMessages, s.inboxAckState, s.inboxArchive.messages)

@@ -11,7 +11,7 @@ import type {
   InboxEntry,
   InboxMessage
 } from '../../../shared/types'
-import { messageReplyability } from '../../../shared/inbox-pending'
+import { inboxMessageDisposition, messageReplyability } from '../../../shared/inbox-pending'
 import { verdictAnswerKindFor } from './approval-verdict'
 import { ApprovalRequestBody } from './ApprovalRequestBody'
 import { ApprovalAnswerForm } from './ApprovalAnswerForm'
@@ -228,7 +228,8 @@ export function InboxCore(props: InboxCoreProps): React.JSX.Element {
   // family where someone is stopped waiting; the rest is newest-first.
   // A question present in both lists is shown once, as closed: the closed copy
   // is broadcast first, so the pending copy is the stale one.
-  const { entries, keys } = useMemo(() => {
+  const readStates = props.readStates
+  const { entries, keys, answered } = useMemo(() => {
     const byTimeDesc = (a: InboxEntry, b: InboxEntry): number => entryAt(b).localeCompare(entryAt(a))
     const closedKeys = new Set(archive.closedQuestions.map(approvalKey))
     const pending: InboxEntry[] = approvals
@@ -242,13 +243,19 @@ export function InboxCore(props: InboxCoreProps): React.JSX.Element {
       ...archive.closedQuestions.map((approval): InboxEntry => ({ kind: 'closed-question', approval }))
     ]
     const keys = new Map<InboxEntry, string>()
+    const answered: string[] = []
     const listed = [...blocking.sort(byTimeDesc), ...rest.sort(byTimeDesc)].filter((e) => {
       const key = hostKeyOf(e, entryKey, approvalKey)
-      if (key !== null) keys.set(e, key)
-      return key !== null
+      if (key === null) return false
+      if (e.kind === 'message' && !inboxMessageDisposition(archive.messages[key]?.state, readStates[key]).visible) {
+        answered.push(key)
+        return false
+      }
+      keys.set(e, key)
+      return true
     })
-    return { entries: listed, keys }
-  }, [messages, approvals, events, archive.closedQuestions, entryKey, approvalKey])
+    return { entries: listed, keys, answered }
+  }, [messages, approvals, events, archive.closedQuestions, archive.messages, readStates, entryKey, approvalKey])
 
   const reactKey = (e: InboxEntry): string => {
     const key = keys.get(e)
@@ -262,6 +269,10 @@ export function InboxCore(props: InboxCoreProps): React.JSX.Element {
   useEffect(() => {
     if (openKey && !open) setOpenKey(null)
   }, [openKey, open])
+
+  useEffect(() => {
+    for (const key of answered) if (replyDrafts[key]) onReplyDraft(key, '')
+  }, [answered, replyDrafts, onReplyDraft])
 
   const readState = (e: InboxEntry): ReadState => {
     const a = ackable(e)
@@ -345,7 +356,6 @@ export function InboxCore(props: InboxCoreProps): React.JSX.Element {
     draft.trim() !== '' &&
     (open?.kind === 'closed-question' ||
       replyability === 'closed' ||
-      replyability === 'responded' ||
       replyability === 'not-this-run')
   const closeEntry = (): void => {
     if (orphanDraft) onReplyDraft(draftKey, '')
@@ -698,13 +708,11 @@ export function InboxCore(props: InboxCoreProps): React.JSX.Element {
                     )
                   : open.kind === 'closed-question'
                     ? t('inbox.noteClosed')
-                    : replyability === 'responded'
-                      ? t('inbox.noteResponded')
-                      : replyability === 'not-this-run'
-                        ? t('inbox.notePreviousRun')
-                        : replyability === 'unknown'
-                          ? t('inbox.noteStateUnknown')
-                          : t('inbox.noteClose')}
+                    : replyability === 'not-this-run'
+                      ? t('inbox.notePreviousRun')
+                      : replyability === 'unknown'
+                        ? t('inbox.noteStateUnknown')
+                        : t('inbox.noteClose')}
             </div>
           </div>
         </div>

@@ -1,5 +1,10 @@
 import { expect, test } from 'bun:test'
-import { AVATAR_READ_CAP_PER_DECK, createAvatarInboxService } from '../desktop/src/main/avatar-inbox-service.ts'
+import {
+  AVATAR_READ_CAP_PER_DECK,
+  avatarLocalUnread,
+  createAvatarInboxService,
+  createAvatarInboxWiring
+} from '../desktop/src/main/avatar-inbox-service.ts'
 import { avatarBubbleMessageKey } from '../desktop/src/shared/avatar-bubble-view.ts'
 import { reachedWithin } from './_bounded-await.ts'
 import type { AvatarCommandResult } from '../desktop/src/main/avatar-server.ts'
@@ -190,7 +195,7 @@ test('a read state is purged on detach, on a scope generation change, and when t
 
   const before = changes.count
   inbox.detach(deck)
-  expect(changes.count).toBe(before)
+  expect(changes.count, 'a detach with nothing to purge still tells the face').toBe(before + 1)
   inbox.receive(deck, withMail([mail(1)], { seq: 5 }))
   inbox.markRead(deck, { scopeGeneration: 2, id: 1, sentAt: SENT }, 'seen')
   const afterMark = changes.count
@@ -222,4 +227,88 @@ test('read states per Deck are capped, the oldest touched leaving first', () => 
   expect(kept).toContain(avatarBubbleMessageKey(deck, 2, 1, SENT))
   expect(kept).not.toContain(avatarBubbleMessageKey(deck, 2, 2, SENT))
   expect(kept).toContain(avatarBubbleMessageKey(deck, 2, total, SENT))
+})
+
+const answered = (id: number): InboxRelayMessage => ({ ...mail(id), state: 'responded' })
+const closedMail = (id: number): InboxRelayMessage => ({ ...mail(id), state: 'closed' })
+
+test('the pending count skips answered and closed messages, drops on ack, and a change of it is published without a snapshot', () => {
+  const { inbox, changes } = service(idle)
+  inbox.receive(deck, withMail([mail(1), mail(2), answered(3), closedMail(4)]))
+  expect(inbox.pendingCourrier(deck)).toBe(2)
+  const afterReceive = changes.count
+
+  inbox.markRead(deck, { scopeGeneration: 2, id: 1, sentAt: SENT }, 'seen')
+  expect(inbox.pendingCourrier(deck), 'seen still counts').toBe(2)
+  expect(changes.count, 'a mark that moves nothing publishes nothing').toBe(afterReceive)
+
+  inbox.markRead(deck, { scopeGeneration: 2, id: 3, sentAt: SENT }, 'acked')
+  expect(inbox.pendingCourrier(deck), 'an answered message was never counted').toBe(2)
+  expect(changes.count).toBe(afterReceive)
+
+  inbox.markRead(deck, { scopeGeneration: 2, id: 1, sentAt: SENT }, 'acked')
+  expect(inbox.pendingCourrier(deck)).toBe(1)
+  expect(changes.count, 'the count moved: the face is told').toBe(afterReceive + 1)
+})
+
+test('the pending count of two Decks, two brokers or two generations sharing an id and a date stays apart', () => {
+  const sameRun = { deckRunId: deck.deckRunId, broker_url: 'http://127.0.0.1:7900' }
+  const { inbox } = service(idle)
+  inbox.receive(deck, withMail([mail(1)]))
+  inbox.receive(other, { ...withMail([mail(1)]), ...other })
+  inbox.receive(sameRun, { ...withMail([mail(1)]), ...sameRun })
+  inbox.markRead(deck, { scopeGeneration: 2, id: 1, sentAt: SENT }, 'acked')
+  expect([deck, other, sameRun].map((identity) => inbox.pendingCourrier(identity))).toEqual([0, 1, 1])
+  inbox.receive(deck, withMail([mail(1)], { seq: 2, scope_generation: 3 }))
+  expect(inbox.pendingCourrier(deck), 'a new generation starts unread').toBe(1)
+  expect(inbox.pendingCourrier({ deckRunId: 'unknown', broker_url: deck.broker_url }), 'no box, no count').toBe(0)
+})
+
+test('the face reads the local count of an a3_inbox attachment, 0 when its box is empty or lost, and nothing for a Deck on the legacy counter', () => {
+  const { inbox } = service(idle)
+  const context = { group_id: '1'.repeat(32), project_key: 'project-1', scope_generation: 2 }
+  const attachment = (identity: typeof deck, extra: Record<string, unknown> = {}) => ({
+    protocol_version: 1,
+    deckPid: 1,
+    projectDir: 'C:/work',
+    deckName: 'Deck',
+    ...identity,
+    ...extra
+  })
+  const a3 = attachment(deck, { capabilities: ['a3_context', 'a3_inbox'], context })
+  const legacy = attachment(other)
+  const noContext = attachment({ deckRunId: 'deck-run-3', broker_url: deck.broker_url }, { capabilities: ['a3_inbox'] })
+  const attached = [a3, legacy, noContext] as never
+  expect(avatarLocalUnread(attached, inbox, deck), 'a3 attachment with no box yet').toBe(0)
+  inbox.receive(deck, withMail([mail(1), mail(2)]))
+  expect(avatarLocalUnread(attached, inbox, deck)).toBe(2)
+  inbox.clear(deck)
+  expect(avatarLocalUnread(attached, inbox, deck), 'a lost socket does not fall back to the Deck counter').toBe(0)
+  inbox.receive(other, { ...withMail([mail(1)]), ...other })
+  expect(avatarLocalUnread(attached, inbox, other), 'an attachment without a3_inbox keeps the Deck counter').toBeUndefined()
+  expect(avatarLocalUnread(attached, inbox, { deckRunId: 'deck-run-3', broker_url: deck.broker_url }), 'a3_inbox without a context is not a3').toBeUndefined()
+  expect(avatarLocalUnread(attached, inbox, { deckRunId: 'gone', broker_url: deck.broker_url }), 'not attached').toBeUndefined()
+  expect(avatarLocalUnread(attached, inbox, { ...deck, broker_url: 'http://127.0.0.1:7900' }), 'same run, another broker').toBeUndefined()
+})
+
+test('a change of the inbox redraws the bubble and refreshes the face, and the face reads its count from the attachments the entry holds', () => {
+  const calls: string[] = []
+  const context = { group_id: '1'.repeat(32), project_key: 'project-1', scope_generation: 2 }
+  const a3 = { protocol_version: 1, deckPid: 1, projectDir: 'C:/work', deckName: 'Deck', ...deck, capabilities: ['a3_context', 'a3_inbox'], context }
+  let attached: unknown[] = [a3]
+  const wiring = createAvatarInboxWiring({
+    send: idle,
+    report: () => undefined,
+    attachedDecks: () => attached as never,
+    bubbleChanged: () => calls.push('bubble'),
+    dispatch: (event) => calls.push(event.kind)
+  })
+  wiring.inbox.receive(deck, withMail([mail(1), mail(2)]))
+  expect(calls).toEqual(['bubble', 'RefreshRequested'])
+  expect(wiring.localUnread(deck)).toBe(2)
+  wiring.inbox.markRead(deck, { scopeGeneration: 2, id: 1, sentAt: SENT }, 'acked')
+  expect(wiring.localUnread(deck), 'an ack moves the count the face reads').toBe(1)
+  expect(calls.slice(2), 'and the face is refreshed for it').toEqual(['bubble', 'RefreshRequested'])
+  attached = []
+  expect(wiring.localUnread(deck), 'a Deck no longer attached is on the legacy counter').toBeUndefined()
 })

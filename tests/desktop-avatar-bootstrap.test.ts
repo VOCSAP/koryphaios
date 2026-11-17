@@ -21,7 +21,7 @@ function publication(revision: number) {
 
 test('connects AvatarState attachment, broker state, suspicion and detach to the projection', () => {
   let now = 1_000
-  const bootstrap = createAvatarBootstrap({ theme: 'dark', locale: 'fr', now: () => now })
+  const bootstrap = createAvatarBootstrap({ theme: 'dark', locale: 'fr', now: () => now, localUnread: () => undefined })
   const identity = { deckRunId: 'deck-1', broker_url: 'https://broker.test' }
 
   bootstrap.state.receiveSnapshot({

@@ -15,7 +15,7 @@ import {
   loadInboxHistory,
   pendingInboxCounter,
 } from "../desktop/src/main/inbox-store.ts";
-import { countPendingInboxMessages, messageReplyability } from "../desktop/src/shared/inbox-pending.ts";
+import { countPendingInboxMessages, inboxMessageDisposition, messageReplyability } from "../desktop/src/shared/inbox-pending.ts";
 import {
   inboxEntryKey,
   type InboxArchiveSnapshot,
@@ -233,14 +233,25 @@ test("the Courrier badge in the renderer counts with the same rule as main", () 
 
 const state = (s: InboxEntryState["state"]): InboxEntryState => ({ state: s, settledAt: s === "open" ? null : "2026-01-01T00:00:00Z" });
 
-test("a closed message does not count whatever its read state; open and responded count until acknowledged", () => {
+test("the disposition of a message: answered is gone whatever the read state, closed stays listed uncounted, acked stays listed uncounted, the rest counts", () => {
+  const reads = [undefined, "seen", "acked"] as const;
+  for (const read of reads) expect(inboxMessageDisposition("responded", read)).toEqual({ visible: false, counted: false });
+  for (const read of reads) expect(inboxMessageDisposition("closed", read)).toEqual({ visible: true, counted: false });
+  for (const open of ["open", undefined] as const) {
+    expect(inboxMessageDisposition(open, "acked")).toEqual({ visible: true, counted: false });
+    expect(inboxMessageDisposition(open, "seen")).toEqual({ visible: true, counted: true });
+    expect(inboxMessageDisposition(open, undefined)).toEqual({ visible: true, counted: true });
+  }
+});
+
+test("a pending count skips answered and closed messages and acked ones, in the renderer's function and in main's", () => {
   const states = { [key(msg(1))]: state("closed"), [key(msg(2))]: state("responded"), [key(msg(3))]: state("open") };
   const messages = [msg(1), msg(2), msg(3), msg(4)];
-  // Mutant: the third parameter ignored (closed counted), or `responded` excluded as well (2 instead of 3).
-  expect(countPendingInboxMessages(messages, {}, states)).toBe(3);
-  expect(countPendingInboxMessages(messages, { [key(msg(1))]: "seen" }, states), "a seen closed message stays out").toBe(3);
-  expect(countPendingInboxMessages(messages, { [key(msg(2))]: "acked" }, states)).toBe(2);
-  expect(countPendingInbox(messages, [], {}, states), "main applies the same rule").toBe(3);
+  expect(countPendingInboxMessages(messages, {}, states), "open and a message with no state").toBe(2);
+  expect(countPendingInboxMessages(messages, { [key(msg(1))]: "seen" }, states), "a seen closed message stays out").toBe(2);
+  expect(countPendingInboxMessages(messages, { [key(msg(2))]: "seen" }, states), "an answered one stays out whatever its read state").toBe(2);
+  expect(countPendingInboxMessages(messages, { [key(msg(3))]: "acked" }, states)).toBe(1);
+  expect(countPendingInbox(messages, [], {}, states), "main applies the same rule").toBe(2);
 });
 
 test("the Avatar's counter recomputes when only the archive version moves, with no file written", () => {

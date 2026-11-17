@@ -136,6 +136,7 @@ async function setup(appearanceOverride: Partial<AvatarAppearance> = {}) {
     theme: () => 'dark',
     locale: 'en',
     now: () => NOW,
+    localUnread: () => undefined,
     reportError: (_scope, message) => {
       windowErrors.push(message)
     },

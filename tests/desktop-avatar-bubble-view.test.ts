@@ -231,6 +231,35 @@ describe('projectAvatarBubble', () => {
   })
 })
 
+describe('courrierPending', () => {
+  test('counts the messages the disposition counts over the attached Decks, by composite read key, two Decks reusing an id and a date staying apart', () => {
+    const sent = message(1).sent_at
+    const readsA = new Map<string, 'seen' | 'acked'>([
+      [avatarBubbleMessageKey(DECK_A, 1, 1, sent), 'acked'],
+      [avatarBubbleMessageKey(DECK_A, 1, 4, message(4).sent_at), 'acked'],
+      [avatarBubbleMessageKey(DECK_A, 1, 5, message(5).sent_at), 'seen']
+    ])
+    const messagesA = [
+      message(1),
+      message(2, { state: 'responded' }),
+      message(3, { state: 'closed' }),
+      message(4),
+      message(5)
+    ]
+    const model = projectAvatarBubble({
+      boxes: [box(DECK_A, { messages: messagesA, reads: readsA }), box(DECK_B, { messages: [message(1)] })],
+      decks,
+      lost: [],
+      now: 0
+    })
+    expect(model.courrierPending).toBe(2)
+    const alone = projectAvatarBubble({ boxes: [box(DECK_A, { messages: messagesA, reads: readsA })], decks, lost: [], now: 0 })
+    expect(alone.courrierPending, 'Deck B reads nothing of Deck A').toBe(1)
+    const detached = projectAvatarBubble({ boxes: [box(DECK_A, { messages: messagesA, reads: readsA })], decks: [decks[1]!], lost: [], now: 0 })
+    expect(detached.courrierPending, 'a box whose Deck is not attached is not counted').toBe(0)
+  })
+})
+
 describe('avatarBubbleReadApi', () => {
   test('markSeen and ack each invoke their own channel with the intent unchanged', async () => {
     const calls: Array<[string, unknown]> = []

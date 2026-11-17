@@ -150,7 +150,7 @@ export function BubbleApp({ api, clock = REAL_CLOCK }: { api: AvatarBubbleApi; c
 
   const waiting = cards.filter((c) => c.blocking && !c.settledElsewhere).length
   const informations = cards.filter((c) => !c.blocking && !c.settledElsewhere).length
-  const open = state.model.courrier.filter((m) => !m.closed && !m.answered).length
+  const open = state.model.courrierPending
   const hidden = state.model.truncated.approvals
   const read = (entry: AckableInboxEntry, gesture: 'markSeen' | 'ack'): void => {
     const m = courrier?.source(entry)

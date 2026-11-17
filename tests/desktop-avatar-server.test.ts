@@ -3,9 +3,11 @@ import { EventEmitter } from 'node:events'
 import { request } from 'node:https'
 import { connect } from 'node:tls'
 import { generateAvatarRunCertificate } from '../desktop/src/main/avatar-certificate.ts'
+import { createAvatarInboxService } from '../desktop/src/main/avatar-inbox-service.ts'
 import {
   createAvatarSocketHub,
   deckSocketEndpoints,
+  detachDeckInOrder,
   inboxGenerationOf,
   installAvatarServerErrorReporter,
   MAX_AVATAR_REQUEST_BYTES,
@@ -290,6 +292,49 @@ test('a context-free reattach does not lower the generation floor of the Deck', 
     })
     expect((await post(server, '/detach', JSON.stringify({ deckRunId: attach.deckRunId, broker_url: attach.broker_url }))).status).toBe(200)
     expect((await post(server, '/attach', JSON.stringify({ ...a3, context: { ...context, scope_generation: 1 } }))).status, 'a detach ends the attachment').toBe(200)
+  } finally {
+    await server.close()
+  }
+})
+
+test('a detach runs the state step, then the hub, then the inbox, and a refused state step stops it', () => {
+  const log: string[] = []
+  const steps = (stateAccepts: boolean) => ({
+    state: () => {
+      log.push('state')
+      return stateAccepts
+    },
+    hub: () => void log.push('hub'),
+    inbox: () => void log.push('inbox')
+  })
+  expect(detachDeckInOrder(steps(true))).toBe(true)
+  expect(log).toEqual(['state', 'hub', 'inbox'])
+  log.length = 0
+  expect(detachDeckInOrder(steps(false))).toBe(false)
+  expect(log).toEqual(['state'])
+})
+
+test('with the real inbox service, a detached or swept Deck makes one refresh that no longer lists it, bound socket or reads or not', async () => {
+  const listed: number[] = []
+  const watched: { state: AvatarState | null } = { state: null }
+  const inbox = createAvatarInboxService({
+    send: async () => ({ requestId: 'r', ok: true }),
+    report: () => undefined,
+    changed: () => void listed.push(watched.state!.summary().decks.length)
+  })
+  const { server, state, setNow } = await openServer({ inbox })
+  watched.state = state
+  try {
+    expect(await post(server, '/attach', JSON.stringify(attach))).toMatchObject({ status: 200 })
+    expect(state.summary().decks).toHaveLength(1)
+    expect((await post(server, '/detach', JSON.stringify({ deckRunId: attach.deckRunId, broker_url: attach.broker_url }))).status).toBe(200)
+    expect(listed, 'after /detach').toEqual([0])
+
+    listed.length = 0
+    expect(await post(server, '/attach', JSON.stringify(attach))).toMatchObject({ status: 200 })
+    setNow(15_000)
+    server.sweepDeadDecks(() => false)
+    expect(listed, 'after the sweep').toEqual([0])
   } finally {
     await server.close()
   }

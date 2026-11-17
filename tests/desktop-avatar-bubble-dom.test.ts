@@ -102,14 +102,14 @@ function message(over: Partial<Message> = {}): Message {
   };
 }
 
-function state(reclame: Card[], courrier: Message[] = [], generation = 7) {
+function state(reclame: Card[], courrier: Message[] = [], generation = 7, courrierPending = 0) {
   return {
     generation,
     theme: "dark",
     lang: "en",
     dict: {},
     anchor: "right",
-    model: { reclame, courrier, closed: [], truncated: { approvals: 0, messages: 0, closed: 0 }, nextChangeAt: null }
+    model: { reclame, courrier, courrierPending, closed: [], truncated: { approvals: 0, messages: 0, closed: 0 }, nextChangeAt: null }
   };
 }
 
@@ -479,6 +479,21 @@ test("a copy of a listed closed question gets no key and is reported once", () =
   expect(c.approvalKey(copy)).toBeNull();
   expect(c.approvalKey(copy)).toBeNull();
   expect(traces).toEqual(["bubble Courrier left out question q-1: not one the bubble listed"]);
+});
+
+const courrierBadge = (): string | null => container.querySelectorAll('[role="tab"]')[1]?.querySelector(".avb-tab-count")?.textContent ?? null;
+
+test("the Courrier badge shows the count main sends, not one counted from the listed messages", async () => {
+  await mount(state([], [message(), message({ id: 40 })], 7, 5));
+  expect(courrierBadge()).toBe("5");
+  await act(async () => push(state([], [message(), message({ id: 40 })], 7, 0)));
+  expect(courrierBadge()).toBeNull();
+});
+
+test("an answered message is not listed even when main still relays it, and the other Deck's twin stays", async () => {
+  await mount(state([], [message({ deckLabel: "alpha", answered: true }), message({ identity: OTHER_DECK, deckLabel: "beta" })]));
+  await openCourrier();
+  expect([...container.querySelectorAll(".inbox-entry-from")].map((n) => n.textContent)).toEqual(["beta · peer-9"]);
 });
 
 test("an empty Reclame says nothing is waiting", async () => {

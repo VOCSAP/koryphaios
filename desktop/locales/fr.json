@@ -768,7 +768,6 @@
   "inbox.closedReason": "Raison :",
   "inbox.stateClosed": "Clôturé",
   "inbox.noteClosed": "Plus personne n'attend ce point. Il est affiché en lecture seule ; fermer la vue le laisse dans la liste.",
-  "inbox.noteResponded": "Ce message a déjà reçu une réponse : on ne peut pas y répondre une seconde fois.",
   "inbox.notePreviousRun": "Ce message vient d'un lancement précédent du Deck : on ne peut plus y répondre.",
   "inbox.noteStateUnknown": "L'état de ce message n'est pas encore connu : on ne peut pas y répondre pour l'instant.",
   "inbox.unsentDraft": "Brouillon non envoyé :",

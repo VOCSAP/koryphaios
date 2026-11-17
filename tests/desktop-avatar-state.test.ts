@@ -207,3 +207,37 @@ test('the reachability of a broker URL is readable back, reachable until a probe
   expect(state.brokerReachable('http://127.0.0.1:7899')).toBe(false)
   expect(state.brokerReachable('http://127.0.0.1:7900')).toBe(true)
 })
+
+test('an attachment with a local unread count takes it instead of the Deck unread, never the sum, and 0 is a count not a fall back', () => {
+  const local = new Map<string, number | undefined>([
+    ['run-a', 2],
+    ['run-b', 0],
+    ['run-c', undefined]
+  ])
+  const state = new AvatarState({ now: () => 0, localUnread: (id) => local.get(id.deckRunId) })
+  state.receiveSnapshot({ ...snapshot('run-a'), unread: 5 })
+  state.receiveSnapshot({ ...snapshot('run-b'), unread: 4 })
+  state.receiveSnapshot({ ...snapshot('run-c'), unread: 3 })
+  const summary = state.summary()
+  expect(summary.decks.map((deck) => [deck.identity.deckRunId, deck.unread])).toEqual([
+    ['run-a', 2],
+    ['run-b', 0],
+    ['run-c', 3]
+  ])
+  expect(summary.unread).toBe(5)
+
+  const empty = new AvatarState({ now: () => 0, localUnread: () => 0 })
+  empty.receiveSnapshot({ ...snapshot('run-b'), unread: 4 })
+  expect(empty.summary()).toMatchObject({ unread: 0, face: 'endormi' })
+})
+
+test('the face follows a local unread count that moves between two snapshots', () => {
+  let count = 0
+  const state = new AvatarState({ now: () => 0, localUnread: () => count })
+  state.receiveSnapshot(snapshot('run-a'))
+  expect(state.summary().face).toBe('endormi')
+  count = 2
+  expect(state.summary()).toMatchObject({ unread: 2, face: 'courrier' })
+  count = 0
+  expect(state.summary().face).toBe('endormi')
+})

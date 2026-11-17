@@ -33,7 +33,7 @@ import { generateAvatarRunCertificate } from './avatar-certificate'
 import { createAvatarClickGesture } from './avatar-click-gesture'
 import { avatarAllowedBrokerUrls } from './avatar-deck-link'
 import { createDeckFocusGesture, deckProcessIsAlive } from './avatar-focus-gesture'
-import { createAvatarInboxService, type AvatarInboxService } from './avatar-inbox-service'
+import { createAvatarInboxWiring, type AvatarInboxService } from './avatar-inbox-service'
 import { allowForegroundWindow, runForegroundHelper } from './avatar-foreground'
 import { configureAvatarLifetime, type AvatarLifetimeLease } from './avatar-lifetime'
 import { ensureAvatarPrivateDir } from './avatar-private-dir'
@@ -111,6 +111,14 @@ async function startAvatar(): Promise<void> {
   const token = randomBytes(32).toString('base64url')
   const appearanceFile = join(stateDir, AVATAR_APPEARANCE_FILE)
   const locale = readAvatarLocale(stateDir, app.getLocale(), { reportError })
+  const inboxWiring = createAvatarInboxWiring({
+    send: (identity, action) =>
+      server ? server.sendInboxAction(identity, action) : Promise.reject(new Error('Avatar server is not running')),
+    report: reportError,
+    attachedDecks: () => server?.attachedDecks() ?? [],
+    bubbleChanged: () => bubble?.changed(),
+    dispatch: (event) => avatarAssembly?.controller.dispatch(event)
+  })
   const assembly = assembleAvatar({
     ipc: ipcMain,
     available: process.platform === 'win32',
@@ -123,6 +131,7 @@ async function startAvatar(): Promise<void> {
     theme: () => (nativeTheme.shouldUseDarkColors ? 'dark' : 'light'),
     locale,
     now: Date.now,
+    localUnread: inboxWiring.localUnread,
     reportError,
     gesture: createAvatarClickGesture({
       decks: () => avatarAssembly?.state.summary().decks ?? [],
@@ -136,12 +145,7 @@ async function startAvatar(): Promise<void> {
     clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>)
   })
   avatarAssembly = assembly
-  const inbox = createAvatarInboxService({
-    send: (identity, action) =>
-      server ? server.sendInboxAction(identity, action) : Promise.reject(new Error('Avatar server is not running')),
-    report: reportError,
-    changed: () => bubble?.changed()
-  })
+  const inbox = inboxWiring.inbox
   avatarInbox = inbox
   const shippedLocales = app.isPackaged ? join(process.resourcesPath, 'locales') : join(app.getAppPath(), 'locales')
   bubble = createAvatarBubbleWindow({

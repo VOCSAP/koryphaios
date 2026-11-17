@@ -6,9 +6,11 @@ import {
   type AvatarInboxContent,
   type InboxActionKind,
   type InboxRelayApproval,
+  type InboxRelayMessage,
   type InboxTruncation
 } from './avatar-inbox-protocol'
 import type { AvatarDeckIdentity } from './avatar-state'
+import { inboxMessageDisposition } from './inbox-pending'
 import type { ApprovalKind, InboxAckStatus, InboxCloseAuthority } from './types'
 
 /** How long a card whose gesture lost the race stays visible as settled elsewhere. */
@@ -104,6 +106,8 @@ export interface AvatarBubbleClosed {
 export interface AvatarBubbleModel {
   reclame: AvatarBubbleCard[]
   courrier: AvatarBubbleMessage[]
+  /** Messages of the A3 boxes that inboxMessageDisposition counts; the same number as the face's. */
+  courrierPending: number
   closed: AvatarBubbleClosed[]
   truncated: InboxTruncation
   /** When a settled-elsewhere card expires and the model must be projected again; null when none is shown. */
@@ -166,6 +170,18 @@ export function avatarBubbleGestures(approval: InboxRelayApproval): InboxActionK
   })
 }
 
+export function avatarBubblePendingCourrier(
+  identity: AvatarDeckIdentity,
+  scopeGeneration: number,
+  messages: readonly InboxRelayMessage[],
+  reads: ReadonlyMap<string, InboxAckStatus>
+): number {
+  return messages.filter(
+    (message) =>
+      inboxMessageDisposition(message.state, reads.get(avatarBubbleMessageKey(identity, scopeGeneration, message.id, message.sent_at))).counted
+  ).length
+}
+
 function projectCard(identity: AvatarDeckIdentity, deckLabel: string, approval: InboxRelayApproval): AvatarBubbleCard {
   const cut = approval.cut === true
   return {
@@ -215,6 +231,7 @@ export function projectAvatarBubble(input: AvatarBubbleInput): AvatarBubbleModel
   const courrier: AvatarBubbleMessage[] = []
   const closed: AvatarBubbleClosed[] = []
   const truncated: InboxTruncation = { approvals: 0, messages: 0, closed: 0 }
+  let courrierPending = 0
 
   for (const box of input.boxes) {
     const deckLabel = labelOf.get(deckKey(box.identity))
@@ -225,6 +242,7 @@ export function projectAvatarBubble(input: AvatarBubbleInput): AvatarBubbleModel
       const card = projectCard(identity, deckLabel, approval)
       if (!lostKeys.has(card.key)) cards.push(card)
     }
+    courrierPending += avatarBubblePendingCourrier(identity, box.scopeGeneration, box.messages, box.reads)
     for (const message of box.messages) {
       const key = avatarBubbleMessageKey(identity, box.scopeGeneration, message.id, message.sent_at)
       courrier.push({
@@ -265,7 +283,7 @@ export function projectAvatarBubble(input: AvatarBubbleInput): AvatarBubbleModel
   courrier.sort((a, b) => (a.sentAt < b.sentAt ? 1 : a.sentAt > b.sentAt ? -1 : 0))
   closed.sort((a, b) => (a.closedAt < b.closedAt ? 1 : a.closedAt > b.closedAt ? -1 : 0))
   const nextChangeAt = lost.length === 0 ? null : Math.min(...lost.map((entry) => entry.at)) + AVATAR_BUBBLE_SETTLED_ELSEWHERE_MS
-  return { reclame: cards, courrier, closed, truncated, nextChangeAt }
+  return { reclame: cards, courrier, courrierPending, closed, truncated, nextChangeAt }
 }
 
 export type AvatarBubbleTheme = 'dark' | 'light'

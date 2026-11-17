@@ -7,11 +7,25 @@ import {
 } from './types'
 
 /**
- * Courrier messages still in the operator's way: anything not 'acked' (absent
- * from the map is unread, 'seen' is opened but unresolved) and not closed by an
- * agent. A 'responded' message keeps counting until acknowledged. The one rule
- * shared by the Courrier badge in the renderer and the Avatar's unread count in
- * main; `entryStates` is required so a caller cannot forget closed entries.
+ * What the Courrier does with a message, from its business state and the local
+ * read state ('seen' is opened but unresolved, absent is unread): an answered
+ * message is gone, a closed one stays listed without counting, an acknowledged
+ * one stays listed (ticked) without counting. An unknown state (archive not
+ * ready) reads as open.
+ */
+export function inboxMessageDisposition(
+  state: InboxEntryState['state'] | undefined,
+  read: InboxAckStatus | undefined
+): { visible: boolean; counted: boolean } {
+  if (state === 'responded') return { visible: false, counted: false }
+  return { visible: true, counted: state !== 'closed' && read !== 'acked' }
+}
+
+/**
+ * Courrier messages still in the operator's way, by inboxMessageDisposition.
+ * The one rule shared by the Courrier badge in the renderer and the Avatar's
+ * unread count in main; `entryStates` is required so a caller cannot forget
+ * closed or answered entries.
  */
 export function countPendingInboxMessages(
   messages: readonly InboxMessage[],
@@ -20,8 +34,7 @@ export function countPendingInboxMessages(
 ): number {
   return messages.reduce((n, message) => {
     const key = inboxEntryKey({ kind: 'message', message })
-    if (ackState[key] === 'acked' || entryStates[key]?.state === 'closed') return n
-    return n + 1
+    return inboxMessageDisposition(entryStates[key]?.state, ackState[key]).counted ? n + 1 : n
   }, 0)
 }
 

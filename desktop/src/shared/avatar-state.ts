@@ -30,6 +30,12 @@ export interface AvatarStateTiming {
 
 export interface AvatarStateOptions {
   now(): number
+  /**
+   * The unread count an attachment that negotiated a3_inbox keeps locally, 0
+   * included; undefined for an attachment on the legacy Deck counter. It
+   * replaces the Deck's own unread, never adds to it.
+   */
+  localUnread?(identity: AvatarDeckIdentity): number | undefined
   heartbeatMs?: number
   suspectAfterMs?: number
 }
@@ -172,6 +178,7 @@ export class AvatarState {
       const brokerReachable = this.brokers.get(snapshot.identity.broker_url) ?? true
       return {
         ...copySnapshot(snapshot),
+        unread: this.options.localUnread?.(snapshot.identity) ?? snapshot.unread,
         suspect,
         brokerReachable,
         torchOut: suspect || !brokerReachable

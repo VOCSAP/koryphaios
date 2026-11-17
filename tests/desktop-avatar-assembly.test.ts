@@ -107,7 +107,9 @@ class MiniWindow implements AvatarBrowserWindow {
 
 const flush = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0))
 
-function setup(options: { geometry?: AvatarGeometry; seed?: AvatarAppearance; locale?: 'en' | 'fr' } = {}) {
+function setup(
+  options: { geometry?: AvatarGeometry; seed?: AvatarAppearance; locale?: 'en' | 'fr'; localUnread?: () => number | undefined } = {}
+) {
   const dir = tempDir()
   const file = join(dir, 'avatar-appearance.json')
   const target = { file }
@@ -142,6 +144,7 @@ function setup(options: { geometry?: AvatarGeometry; seed?: AvatarAppearance; lo
     theme: () => (dark ? 'dark' : 'light'),
     locale: options.locale ?? 'fr',
     now: () => 1_000,
+    localUnread: () => options.localUnread?.(),
     reportError,
     gesture: (kind) => { gestures.push(kind) },
     setTimeout: (callback, delay) => {
@@ -352,6 +355,24 @@ describe('Avatar assembly', () => {
 
     expect(summaries).toBe(1)
     expect(traySummary).toBe(window.sent.at(-1)!.summary)
+  })
+
+  test('the Tray summary follows the local unread count the assembly was given, not the unread the Deck announced', async () => {
+    let local: number | undefined = 0
+    const s = setup({ localUnread: () => local })
+    await s.open()
+    const deck = { deckRunId: 'deck-1', broker_url: 'http://127.0.0.1:7899' }
+    s.assembly.state.receiveSnapshot({
+      identity: deck,
+      counters: { working: 0, idle: 0, unknown: 0, waiting: 0, exited: 0, rateLimited: 0 },
+      unread: 4
+    })
+
+    expect(s.assembly.traySummary()).toMatchObject({ unread: 0, decks: [{ unread: 0 }] })
+    local = 2
+    expect(s.assembly.traySummary()).toMatchObject({ unread: 2, face: 'courrier', decks: [{ unread: 2 }] })
+    local = undefined
+    expect(s.assembly.traySummary().unread, 'a Deck on the legacy counter keeps what it announced').toBe(4)
   })
 
   test('the locale given to the assembly is the one the projection speaks', async () => {

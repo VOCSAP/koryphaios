@@ -380,7 +380,7 @@ visage.
 | 1 | **Panne** : au moins un Deck branché a une liaison suspecte ou un broker injoignable | masque grisé, fissure ; seules les pastilles des Decks concernés portent `torchOut`, les autres restent actives | fraîcheur du `/state` par branchement ; `/health` par broker | snapshot valide pour la liaison ; `/health` OK pour le broker ; retrait explicite du Deck ou mort confirmée | rouge bannière `#a03030` |
 | 2 | **Reclame** (niveau A) | sourcils leves, yeux tournes vers l'operateur, halo or, badge compteur ; mouvement selon le réglage ci-dessous, sans détection d'épisodes individuels en A2 | approbation `pending` ; `ask_operator` ; `attention` du Deck | l'approbation quitte `pending` ; le Deck baisse `waiting` | or `--glow` (c'est SA couleur) |
 | 3 | **Perdu** (niveau B) | masque tragique, une pastille grise avec `warning` ; pour un quota, une `clepsydra` | tuile `exited` non voulue ; `rateLimited` | relance de la tuile ; `resumeAt` atteint et tuile repartie | ambre `#e0b341` (quota), violet `#b678ff` (perdu) |
-| 4 | **Courrier** (niveau C) | expression neutre, badge caducee avec compteur | messages inbox non lus (curseur avatar) | lecture depuis la bulle, ou `seen` propage par le Deck | accent `--accent` |
+| 4 | **Courrier** (niveau C) | expression neutre, badge caducée avec compteur | messages encore à traiter selon leur état métier et la lecture locale de l'Avatar (§4.3) | acquittement local, réponse `responded` ou clôture `closed` ; `seen` seul ne retire rien du compteur | accent `--accent` |
 | 5 | **Travaille** | yeux qui parcourent, respiration régulière, pastilles actives ; mouvements soumis au réglage ci-dessous, activité agrégée par Deck en A2 | compteur `working > 0` d'au moins un Deck | `working == 0` partout pendant `ACTIVITY_IDLE_MS` | vert `#3ec46d` sur les pastilles |
 | 6 | **Endormi** | yeux mi-clos, respiration lente si le réglage l'autorise, orchestra à peine visible (les choreutes sont là, ils attendent) | `working == 0` partout, aucun etat 1-4, au moins un Deck branche | tout ce qui precede | `--fg-dim` |
 | 7 | **Seul** | yeux **entierement fermes**, aucune respiration, orchestra VIDE, masque legerement incline | aucun Deck branche (**DECIDE**, 2026-09-27) | un `attach` | `--fg-dim`, plus sombre qu'Endormi |
@@ -423,55 +423,99 @@ intervenir ? », « ca travaille beaucoup ? », « quoi exactement ? »).
 Deux garde-fous de conception :
 - **Aucun son par defaut.** Un son est un reglage explicite, par niveau, comme
   `notifyAttention` aujourd'hui.
-- **Aucune notification OS doublee.** Quand l'avatar est visible, il REMPLACE
-  les toasts OS que le Deck emet pour l'inbox et l'attention (le Deck sait
-  qu'il est branche) ; quand il est masque, le Deck reprend ses toasts.
-  **DECIDE (decision 14)** : « visible » = les trois a la fois : l'avatar
-  annonce la capacite `inbox` au branchement (donc le palier A3 est livre),
-  il n'est pas masque depuis le tray, il n'est pas en « ne pas deranger ».
-  Un avatar recouvert par une autre fenetre compte comme visible (non
-  mesurable de facon fiable ; le badge du tray prend le relais). Avant A3,
-  les toasts du Deck ne changent pas. Une
-  notification de trop detruit la valeur des autres (`DESIGN-NOTIFY-EVENTS.md`).
+- **Aucune notification OS doublée. L5c : décidé, non livré.** L'Avatar
+  remplace les toasts OS du Deck pour le Courrier et l'attention seulement
+  si les cinq conditions sont réunies : capacité de remplacement négociée,
+  service Inbox prêt, lien vivant, Avatar non masqué et hors
+  « ne pas déranger ». La capacité de relais `a3_inbox` seule ne suffit pas.
+  Un statut Avatar vers Deck passe sur le socket et porte un bail qui expire
+  localement côté Deck. Il suit l'incarnation de l'Avatar, l'attachement,
+  le scope courant et le socket. Un changement de ces identités, une perte
+  de lien ou l'expiration invalide le statut. Masquage, DND et perte de
+  disponibilité retirent le remplacement. Un statut inconnu ou périmé laisse
+  les notifications OS actives. La fermeture normale de la bulle ne rend pas
+  le service indisponible.
+  Les notifications OS des **graph-drafts ne sont jamais coupées** par cette
+  bascule. Les retours de geste du renderer restent également indépendants.
+  Un Avatar recouvert par une autre fenêtre compte comme visible : le badge
+  du tray prend le relais, sans tentative de mesurer l'occlusion. Tant que
+  L5c n'est pas livré, les toasts du Deck ne changent pas (décision 14).
 
 ### 4.3 La bulle
 
 Un clic sur l'avatar ouvre UNE bulle ancree au personnage, avec trois onglets
 qui ne sont que les etats 2, 4 et le cerveau :
 
-- **Reclame** : la file des approbations/questions de tous les Decks, une
-  carte par element, l'etiquette du Deck en tete, navigation `<` `>` et
-  compteur « 2 / 5 », les trois gestes existants (`allow` / `deny` /
-  reponse texte) qui appellent `POST /approval/claim` avec la cle operateur
-  MACHINE (comme le telephone), puis le Deck proprietaire livre le verdict
-  dans le PTY comme aujourd'hui. Une question `ask_operator` EST une
-  approbation de kind `question` : le `claim` porte la reponse texte et
-  l'outil la rend a l'agent comme valeur de retour, sans frappe. Le composant
-  de rendu est celui de `InboxPanel.tsx`, elargi ; on ne reinvente pas l'UI.
-- **Courrier** : les messages des agents, memes gestes `seen`/`acked`.
-  **DECIDE (operateur, 2026-09-27)** : un message LU dans l'avatar n'est pas
-  lu dans le Deck (deux curseurs, deux journaux, `seen`/`acked` ne
-  traversent pas) ; en revanche une **REPONSE** donnee d'un cote fait
-  disparaitre la notification des deux cotes. Trois cas, trois mecanismes :
-  - une approbation ou une question `ask_operator` : deja vrai par
-    construction, `claim` la sort de `pending` broker-side et les deux
-    lecteurs le voient au poll suivant ;
-  - un message de Courrier repondu DANS LE DECK (`announceTo`) : le Deck
-    pousse `{replied: <message id>}` a l'avatar sur le protocole de
-    branchement, l'avatar retire le message de son compteur (il reste lisible
-    dans l'onglet, marque « repondu depuis <deck> ») ;
-  - un message repondu DANS L'AVATAR (`send_message` depuis le peer `avatar`
-    du groupe vers l'expediteur, §4.5 ; l'agent voit une reponse de
-    `avatar`) : l'avatar publie `{replied: <message id>}` dans le flux de
-    commandes que le Deck vient chercher (§4.4), le Deck marque l'entree
-    `acked` avec la mention « repondu depuis l'avatar ». Tant que le peer
-    `avatar` n'est pas livre (palier A4), l'onglet Courrier de l'avatar est en
-    LECTURE SEULE : pas de bouton repondre, plutot qu'un relais par `/announce`
-    qui ferait parler le nom `deck`.
-  `replied` est donc le SEUL etat qui traverse, dans les deux sens ; l'id de
-  message du broker est la cle commune, le `group_id` la qualifie (deux
-  Decks, deux groupes, jamais de collision d'id inter-groupes puisque l'id est
-  global au broker, mais le message n'appartient qu'a un groupe).
+- **Réclame** : la file des approbations et questions de tous les Decks,
+  une carte par élément, l'étiquette du Deck en tête, navigation `<` `>` et
+  compteur « 2 / 5 ». L'Avatar envoie le geste au Deck propriétaire par
+  `inbox_action`, négocié avec `a3_inbox`. Le Deck valide la cible dans son
+  dernier snapshot relayé, puis règle le geste avec sa clé opérateur et
+  `via:'avatar'`. Le broker reste l'autorité du résultat. Une question
+  `ask_operator` est une approbation de kind `question` : sa réponse passe
+  par le canal de l'agent, sans frappe. Les permissions suivent leur route
+  de verdict. Le rendu réutilise `InboxCore`, sans accès au `DeckApi` depuis
+  l'Avatar.
+- **Courrier** : les messages des agents, avec les gestes locaux
+  `seen` et `acked`. Lire ou acquitter dans l'Avatar ne lit ni n'acquitte
+  dans le Deck. Le Deck relaie ses messages et leurs états métier ;
+  l'Avatar n'a pas de curseur de lecture broker propre.
+
+  **Lecture locale de l'Avatar (L5a-1).** Le main de l'Avatar tient les
+  états de lecture en mémoire, sous la clé
+  `(deckRunId, broker_url, scope_generation, id, sent_at)`.
+  Ils survivent à la fermeture de la bulle et au remplacement d'un snapshot
+  du même scope. Une coupure puis un rétablissement du socket conserve la
+  lecture tant que le Deck reste attaché dans cette génération.
+  Un `detach`, le retrait d'un Deck dont la mort est confirmée par le sweep,
+  un changement de génération ou l'arrêt de l'Avatar purge cette lecture.
+  Un plafond par Deck borne les métadonnées conservées. Ni contenu ni état
+  de lecture Avatar n'est écrit sur disque ; aucun `seen` ou `acked` local
+  n'est renvoyé au Deck.
+
+  **Disposition commune du Courrier (contrat L5a-2). Décidé par l'opérateur
+  le 2026-11-17, ticket `f5dcf49e` :** « Une fois répondu, le Deck et
+  l'Avatar ne doivent plus voir le message. Les deux portent la même
+  vision. » La réponse retire donc le message de la liste ET du compteur
+  des deux surfaces. Elle ne fabrique pas un acquittement local.
+
+  | État métier | Lecture locale | Liste du Courrier | Compteur |
+  |---|---|---|---|
+  | `responded` | quelconque | absent | non compté |
+  | `closed` | quelconque | consultable, avec la clôture | non compté |
+  | `open` | `acked` | consultable, acquitté | non compté |
+  | `open` | `seen` ou état absent | consultable | compté |
+
+  Un message répondu est **absent de la liste, conservé en données** selon
+  leur durée de vie actuelle. Masquer ne supprime ni le journal ni le
+  registre métier. Un état inconnu n'est pas une preuve de réponse.
+  La visibilité et le comptage suivent la même règle partagée, mais ne
+  sont pas un seul filtre : les clôtures et les acquittements manuels
+  restent consultables. L'arrivée de `responded` retire aussi un message
+  déjà ouvert, sans fermer un autre message ouvert entre-temps.
+
+  **`replied` est représenté par `responded` dans le snapshot**, sans second
+  événement. Une réponse Courrier du Deck passe par
+  `POST /operator-inbox/reply`, corrélée à `(message_id, sent_at)` dans le
+  run autorisé. Le broker inscrit la réponse et la transition métier
+  ensemble. Le Deck lit cet état et le relaie à l'Avatar. L'identité de
+  l'attachement et la génération qualifient la cible côté Avatar ; un id
+  numérique seul ne distingue pas deux brokers ou deux scopes.
+  Une approbation ou une question `ask_operator` suit sa propre clôture :
+  le `claim` la retire de `pending`, puis les vues reçoivent le résultat.
+  Un 409 sur une réponse Courrier suit l'état gagnant : `responded` masque
+  le message ; `closed` laisse la consultation de clôture. Un simple refus
+  de transport ne prouve pas une réponse et ne masque rien.
+
+  Le badge Courrier de la bulle et le visage doivent prendre le même
+  compteur du main Avatar, calculé depuis cette lecture locale et l'état
+  métier. Pour un ancien couple sans `a3_inbox`, le compteur envoyé par le
+  Deck reste le repli. Une boîte A3 vide vaut zéro : les deux compteurs ne
+  sont jamais additionnés pour un même attachement.
+  Sans le palier A4, le Courrier Avatar reste en **lecture seule** pour les
+  réponses : pas de bouton répondre ni de relais par `/announce`.
+  A4 devra produire la même transition métier corrélée, pas un événement
+  de lecture ou un acquittement synthétique.
 - **Demander** : un selecteur de Deck (label + projet, ou « tous »), un
   champ texte libre, la reponse en bulle. **Sans cerveau**, le texte est
   envoye a l'INTERLOCUTEUR du Deck choisi depuis le peer `avatar` (§4.5) et
@@ -493,11 +537,13 @@ deja la :
 - **Un sous-menu par Deck branche** : label, projet, compteur
   travaille/reclame ; cliquer **met la fenetre du Deck au premier plan**.
   Le jeton `deck-control` etant lecture seule, la commande ne rentre pas par
-  la : le Deck tient une connexion sortante vers l'avatar (WebSocket ou
-  long-poll sur l'endpoint de branchement) et y recoit un flux de commandes
-  qu'il a CONSENTIES a l'attache (`focus`, `replied`), enumere par une
-  pick-list cote Deck. L'avatar ne peut rien demander qui ne soit dans cette
-  liste. **Risque Windows, a mesurer au palier 0** : l'OS refuse qu'un
+  là : le Deck tient une connexion WebSocket sortante vers l'Avatar et y
+  reçoit les commandes consenties au branchement. `focus` et `open_question`
+  sont énumérées par la pick-list côté Deck ; `inbox_action` exige la
+  capacité `a3_inbox` négociée et sa propre validation. `replied` n'est pas
+  une commande : le snapshot porte l'état métier `responded` (§4.3).
+  L'Avatar ne peut rien demander hors de ces contrats.
+  **Risque Windows, a mesurer au palier 0** : l'OS refuse qu'un
   processus en arriere-plan passe sa fenetre au premier plan ; le Deck qui
   recoit `focus` risque de ne faire que clignoter dans la barre des taches.
   A mesurer : le clic tray (l'avatar a alors le premier plan) peut-il ceder
@@ -841,9 +887,10 @@ regarder la planche des masques a 2 m et dire lequel se lit.
 - Cote Deck : `ensureAvatar()` au demarrage sur le modele de
   `ensureLoopbackBroker` ; pousser les compteurs
   d'activite (derives de `SessionRuntime`, pur et teste) ; ouvrir la
-  connexion sortante qui recoit les commandes consenties (`focus` en A1,
-  `replied` en A3), pick-list `AVATAR_COMMANDS` cote Deck ; `detach` dans
-  `before-quit.ts` ; `avatar.autoAttach=true` par défaut globalement
+  connexion sortante qui reçoit les commandes consenties, avec la pick-list
+  `AVATAR_COMMANDS` côté Deck. A3 ajoute `inbox_action` sous capacité
+  négociée ; `replied` reste l'état `responded` du snapshot, pas une commande.
+  `detach` dans `before-quit.ts` ; `avatar.autoAttach=true` par défaut globalement
   (décision 1, §3.4), avec opt-out projet prioritaire. Ne pas confondre ce
   réglage avec le démarrage à l'ouverture de session OS, off par défaut.
 - Tray : icone a etat, sous-menu par Deck, DND, quitter. Aucune animation.
@@ -915,23 +962,41 @@ Découpage et gardes : `docs/DESIGN-AVATAR-A2-LOTS.md`. Skills `deck-design`,
 patte de `DESIGN.md` §5. La matrice mouvement × reduced-motion × face et le
 rejeu Windows font partie du contrat, pas seulement le rendu d'un SVG.
 
-### Palier A3 : inbox agregee
+### Palier A3 : inbox agrégée
 
-- L'avatar lit `POST /operator-inbox` par groupe avec son `session_id`, et
-  `/approval/list` par `project_key` avec la cle operateur ; range par
-  `group_id`.
-- Bulle « Reclame » et « Courrier » sur `InboxPanel.tsx` reutilise et elargi ;
-  `claim` par la cle operateur (approbations ET questions `ask_operator`) ;
-  reponse a un message de Courrier depuis le peer `avatar` du groupe (palier A4 ;
-  sans lui, l'onglet est en lecture seule) ; propagation `replied` dans les
-  deux sens (§4.3) ; navigation entre elements ; suppression des toasts OS du
-  Deck quand l'avatar est visible.
-- Tests : le tri par `group_id` avec deux Decks meme projet ; un `claim` 409
-  (le telephone a gagne) rend la carte « reglee ailleurs » et ne reste pas
-  `pending` a l'ecran ; aucun payload avatar->Deck ne porte le secret d'un
-  autre groupe ; un `replied` recu du Deck retire le message du compteur
-  avatar sans le marquer `seen` ; un `seen` avatar ne produit AUCUN message
-  vers le Deck.
+- Le Deck relaie les listes d'approbations et de Courrier qu'il a lues,
+  par `inbox_snapshot` sous capacité `a3_inbox` négociée. L'Avatar ne reçoit
+  ni credential de run ni secret de groupe et ne lit pas directement le
+  broker. Une boîte appartient à l'attachement `(deckRunId, broker_url)`
+  et à sa génération de scope ; le groupe ne donne aucun droit.
+- La bulle Réclame règle ses gestes par le Deck propriétaire, avec
+  `via:'avatar'`. Le Courrier réutilise `InboxCore` sans réponse ni
+  suppression de message. La réponse depuis le peer Avatar relève d'A4.
+  La lecture locale L5a-1 appartient au main Avatar, en mémoire et bornée
+  par Deck, sous la clé complète donnée en §4.3. Les gestes `seen` et
+  `acked` ne traversent pas vers le Deck.
+- Le contrat L5a-2 applique la disposition commune de §4.3 à la liste et
+  au compteur : `responded` disparaît des deux surfaces, mais reste en
+  données. `replied` est représenté par cet état dans le snapshot, sans
+  second événement et sans acquittement synthétique. Les compteurs du
+  badge et du visage viennent du main Avatar ; le compteur Deck ne sert
+  qu'au repli d'un ancien couple sans `a3_inbox`.
+- **L5c : décidé, non livré.** Le remplacement des toasts dépend d'une
+  capacité négociée, d'un service prêt, d'un lien vivant, de l'absence de
+  masquage et de DND. Le statut Avatar vers Deck sur le socket porte un
+  bail qui expire localement. Inconnu ou périmé laisse les toasts actifs.
+  Les graph-drafts restent hors de cette bascule (§4.2).
+- Tests : deux Decks du même projet restent distincts, même avec des ids
+  de messages identiques ; lecture conservée après fermeture de bulle ou
+  reconnexion dans le même scope, purgée sur detach, mort confirmée,
+  changement de génération et arrêt ; chaque ligne de la table de §4.3
+  est couverte pour le Deck et l'Avatar. Un `claim` 409 rend la carte
+  Réclame « réglée ailleurs ». Un `responded` retire le message de la
+  liste, de son modal et du compteur, sans marquer `seen` ni toucher un
+  autre message. Un geste `seen` Avatar ne produit aucun message vers le
+  Deck. Le repli legacy ne s'ajoute jamais au compteur A3 ; la perte de
+  chaque condition de remplacement réactive les toasts, sans couper ceux
+  des graph-drafts.
 
 ### Palier A4 : le dialogue par le peer `avatar` (§4.5)
 
@@ -1028,8 +1093,12 @@ reportee a l'endroit du document qu'elle tranche.
    un objet MACHINE alimente par branchement explicite (§3.4).
 2. **Vie de l'avatar** : il survit au dernier Deck ; etat « Seul », yeux
    entierement fermes (§3.5, §4.2 ligne 7).
-3. **Acquittement croise** : `seen`/`acked` ne traversent pas ; une REPONSE
-   donnee d'un cote eteint la notification des deux cotes (§4.3).
+3. **Lecture locale et réponse partagée** : `seen` et `acked` ne traversent
+   pas. Décision opérateur du 2026-11-17, ticket `f5dcf49e` : une réponse
+   retire le message de la liste ET du compteur du Deck et de l'Avatar,
+   sans supprimer les données. `replied` est représenté par `responded`
+   dans le snapshot, sans second événement. Les acquittements manuels et
+   les clôtures restent consultables selon la table de §4.3.
 4. **Jeton `deck-control` de l'avatar** : lecture seule, `deck_list_*`
    uniquement ; toute action passe par le broker ou par le flux de commandes
    que le Deck vient chercher (§3.2, §4.4).
@@ -1060,8 +1129,11 @@ Second tour (seance de questions sur ce brief) :
 12. **Jeton `deck-control`** : cree au palier B1, pas A1 (§3.2).
 13. **Version du protocole** : echangee au branchement ; Deck plus recent =
    l'avatar redemarre ; version inconnue = refus trace (§3.5).
-14. **Toasts du Deck** : coupes seulement si capacite `inbox` + avatar non
-   masque + hors « ne pas deranger » (§4.2).
+14. **Toasts du Deck, L5c : décidé, non livré** : coupés seulement si
+   capacité de remplacement négociée, service prêt, lien vivant, Avatar
+   non masqué et hors DND. Statut Avatar vers Deck sur le socket, bail
+   expirant localement ; inconnu ou périmé conserve les notifications OS.
+   Les graph-drafts ne sont jamais coupés par cette bascule (§4.2).
 15. **Calendrier** : A2 peut être engagé sans délai d'usage préalable d'A1 ;
    A3-B2 restent hors file jusqu'à décision de l'opérateur (§8).
 16. **Plusieurs brokers** : pris en charge des A1, `broker_url` fait partie

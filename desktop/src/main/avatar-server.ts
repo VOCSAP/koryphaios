@@ -155,6 +155,18 @@ export function inboxGenerationOf(deck: AvatarAttachedDeck | undefined): number 
   return deck?.capabilities?.includes('a3_inbox') ? deck.context?.scope_generation : undefined
 }
 
+/**
+ * The state goes first: the hub and inbox callbacks refresh the face, whose
+ * listing must already omit the Deck. A refused state step (a live Deck) stops
+ * the detach.
+ */
+export function detachDeckInOrder(steps: { state(): boolean; hub(): void; inbox(): void }): boolean {
+  if (!steps.state()) return false
+  steps.hub()
+  steps.inbox()
+  return true
+}
+
 function deckKey(identity: AvatarDeckIdentity): string {
   return JSON.stringify([identity.deckRunId, identity.broker_url])
 }
@@ -308,9 +320,14 @@ export async function startAvatarServer(options: AvatarServerOptions): Promise<A
         const key = deckKey(identity)
         const detached = attached.delete(key)
         highestGeneration.delete(key)
-        hub.detach(identity)
-        options.inbox?.detach(identity)
-        options.state.detach(identity)
+        detachDeckInOrder({
+          state: () => {
+            options.state.detach(identity)
+            return true
+          },
+          hub: () => hub.detach(identity),
+          inbox: () => options.inbox?.detach(identity)
+        })
         sendJson(response, 200, { ok: true, detached })
         return
       }
@@ -407,11 +424,15 @@ export async function startAvatarServer(options: AvatarServerOptions): Promise<A
             if (!deck.suspect) continue
             const attachedDeck = attached.get(deckKey(deck.identity))
             if (!attachedDeck) continue
-            if (!options.state.removeDeadDeck(deck.identity, !isAlive(attachedDeck.deckPid))) continue
-            attached.delete(deckKey(deck.identity))
-            highestGeneration.delete(deckKey(deck.identity))
-            hub.detach(deck.identity)
-            options.inbox?.detach(deck.identity)
+            detachDeckInOrder({
+              state: () => options.state.removeDeadDeck(deck.identity, !isAlive(attachedDeck.deckPid)),
+              hub: () => {
+                attached.delete(deckKey(deck.identity))
+                highestGeneration.delete(deckKey(deck.identity))
+                hub.detach(deck.identity)
+              },
+              inbox: () => options.inbox?.detach(deck.identity)
+            })
           }
         },
         focusDeck: hub.focusDeck,

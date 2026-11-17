@@ -591,13 +591,60 @@ test("a question present as pending and as closed is listed once, as closed", as
   expect(container.querySelector(".inbox-entry-closed-question")).not.toBeNull();
 });
 
-test("a responded message offers no reply and says why", async () => {
+test("an answered message is not listed, acknowledged or not", async () => {
   await mount({ messages: [MESSAGE], courrierWrites: true, archive: ready({ [MSG_KEY]: settled({ state: "responded" }) }) });
-  await click(container.querySelector(".inbox-entry"));
-  expect(container.querySelector(".inbox-modal-reply")).toBeNull();
-  expect(modalButtons()).toEqual(["inbox.ack", "inbox.close", "inbox.delete"]);
-  expect(notes()).toEqual(["inbox.noteResponded"]);
-  expect(container.querySelector(".inbox-closed-banner"), "responded is not a closure").toBeNull();
+  expect(container.querySelectorAll(".inbox-entry")).toHaveLength(0);
+  await act(async () => {
+    root.render(
+      React.createElement(Host, {
+        messages: [MESSAGE],
+        readStates: { [MSG_KEY]: "acked" },
+        archive: ready({ [MSG_KEY]: settled({ state: "responded" }) })
+      })
+    );
+  });
+  expect(container.querySelectorAll(".inbox-entry")).toHaveLength(0);
+});
+
+test("a message answered elsewhere leaves the list and its modal, keeps the other open modal and drops only its own draft", async () => {
+  const other = { ...MESSAGE, id: 8, from: "peer-y", text: "other" };
+  const OTHER_KEY = inboxEntryKey({ kind: "message", message: other });
+  const messages = [MESSAGE, other];
+  const readStates = {};
+  const approvals: FakeApproval[] = [];
+  const closedQuestions: unknown[] = [];
+  const render = async (archive: unknown): Promise<void> => {
+    await act(async () => {
+      root.render(React.createElement(Host, { messages, approvals, readStates, courrierWrites: true, archive }));
+    });
+  };
+  const open = ready({ [MSG_KEY]: settled({ state: "open" }), [OTHER_KEY]: settled({ state: "open" }) }, closedQuestions);
+  const answered = ready({ [MSG_KEY]: settled({ state: "responded" }), [OTHER_KEY]: settled({ state: "open" }) }, closedQuestions);
+  await render(open);
+  const entry = (from: string): Element =>
+    [...container.querySelectorAll(".inbox-entry")].find((e) => e.querySelector(".inbox-entry-from")?.textContent === from)!;
+  await click(entry("peer-x"));
+  typeReply("draft for x");
+  await render(answered);
+  expect(container.querySelector(".inbox-modal"), "the answered message's modal closes").toBeNull();
+  expect(calls.drafts[MSG_KEY], "its draft is dropped").toBe("");
+  await render(open);
+  await click(entry("peer-y"));
+  typeReply("draft for y");
+  await render(answered);
+  expect([...container.querySelectorAll(".inbox-entry-from")].map((n) => n.textContent)).toEqual(["peer-y"]);
+  expect(container.querySelector(".inbox-modal-text")?.textContent, "the other modal stays open").toBe("other");
+  expect(calls.drafts[OTHER_KEY], "another entry's draft is kept").toBe("draft for y");
+});
+
+test("an acknowledged message and a closed one stay listed", async () => {
+  const closedOne = { ...MESSAGE, id: 9, from: "peer-z" };
+  await mount({
+    messages: [MESSAGE, closedOne],
+    readStates: { [MSG_KEY]: "acked" },
+    archive: ready({ [MSG_KEY]: settled({ state: "open" }), [inboxEntryKey({ kind: "message", message: closedOne })]: settled() })
+  });
+  expect([...container.querySelectorAll(".inbox-entry-from")].map((n) => n.textContent).sort()).toEqual(["peer-x", "peer-z"]);
 });
 
 test("what a message offers follows the archive: open and an old broker reply, an unknown or previous-run one does not", async () => {

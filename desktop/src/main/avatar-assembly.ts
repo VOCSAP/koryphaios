@@ -1,4 +1,4 @@
-import type { AvatarState } from '../shared/avatar-state'
+import type { AvatarDeckIdentity, AvatarState } from '../shared/avatar-state'
 import type { AvatarViewGesture, AvatarViewState, AvatarViewSummary, AvatarViewTheme } from '../shared/avatar-view'
 import { avatarAppearanceDnd, type AvatarAppearance } from './avatar-appearance'
 import { createAvatarBootstrap } from './avatar-bootstrap'
@@ -20,6 +20,7 @@ export interface AvatarAssemblyOptions {
   theme(): AvatarViewTheme
   locale: SupportedLocale
   now(): number
+  localUnread(identity: AvatarDeckIdentity): number | undefined
   reportError(scope: string, message: string, error?: unknown): void
   gesture(kind: AvatarViewGesture): void | Promise<void>
   setTimeout(callback: () => void, delayMs: number): unknown
@@ -54,7 +55,12 @@ export function followAvatarScreens(source: AvatarScreenSource, onChange: () => 
 }
 
 export function assembleAvatar(options: AvatarAssemblyOptions): AvatarAssembly {
-  const { state, presentation } = createAvatarBootstrap({ theme: options.theme(), locale: options.locale, now: options.now })
+  const { state, presentation } = createAvatarBootstrap({
+    theme: options.theme(),
+    locale: options.locale,
+    now: options.now,
+    localUnread: options.localUnread
+  })
   const tray: { envelope: AvatarViewState | null } = { envelope: null }
   const controller = createAvatarWindowController({
     available: options.available,
