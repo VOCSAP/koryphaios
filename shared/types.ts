@@ -857,8 +857,9 @@ export interface RoadmapSyncStatus {
   refused_locks?: number;
   /**
    * Local dispatch-queue positions overwritten by the upstream order since this
-   * broker started (the queue is never pushed; a reorder made offline is lost
-   * at reconnection). Cumulative and monotonic so a poller can toast the delta.
+   * broker started (the queue rides with each push, but every pulled row other
+   * than the exact echo of an acknowledged push takes the rank back). Cumulative
+   * and monotonic so a poller can toast the delta.
    */
   queue_replaced?: number;
   locks?: { local: number; global: number; contested: number; remote: number };

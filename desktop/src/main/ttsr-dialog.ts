@@ -90,8 +90,8 @@ export function ttsrApprovalSpec(input: TtsrApprovalInput, isFr: boolean): Appro
       refuse: isFr ? 'Plus tard' : 'Not now',
       close: isFr ? 'Plus tard' : 'Not now',
       tooLong: isFr
-        ? `${where}\n\n${input.rules.length} règle(s), trop longues pour cette fenêtre. Relis-les et approuve-les dans Réglages › Règles ; d'ici là elles ne s'appliquent pas.`
-        : `${where}\n\n${input.rules.length} rule(s), too long for this dialog. Review and approve them in Settings › Rules; until then they do not apply.`
+        ? `${where}\n\n${input.rules.length} règle(s), trop longues pour que cette fenêtre les montre en entier : elles ne peuvent pas être approuvées ici et ne s'appliquent pas. Le fichier reste en attente et la demande reviendra.`
+        : `${where}\n\n${input.rules.length} rule(s), too long for this window to show in full: they cannot be approved here and do not apply. The file stays pending and the request will come back.`
     }
   )
 }

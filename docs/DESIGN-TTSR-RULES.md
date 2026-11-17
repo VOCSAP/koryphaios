@@ -317,7 +317,9 @@ Contenu du corps :
 2. **Format** : le §3 en condensé, plus un exemple complet.
 3. **Marche à suivre** : éditer le fichier, `check`, `test --expect match` sur
    un cas positif et `--expect none` sur un cas négatif, `scan`, puis
-   **prévenir l'opérateur** qu'une approbation l'attend dans Réglages › Règles.
+   **prévenir l'opérateur** qu'une approbation l'attend : la demande s'ouvre
+   dans la fenêtre d'approbation Kory, où l'opérateur l'approuve après l'avoir
+   lue en entier ; « Plus tard » laisse le fichier en attente.
    La règle est inactive tant qu'elle n'est pas approuvée ; ne pas le présenter
    comme fait.
 4. **Interdits** :
