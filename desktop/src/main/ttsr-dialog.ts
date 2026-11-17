@@ -1,15 +1,14 @@
-// Text of the startup approval dialog of a repo rules file, and the
-// sanitizer for any agent-authored text the Deck shows or logs. The operator
-// approves exactly what the dialog shows, so it shows every field of every
-// rule, in full; when that does not fit a dialog, the dialog offers no
-// Approve button at all and sends the operator to Settings > Rules.
+// Text of the startup approval of a repo rules file, and the sanitizer for any
+// agent-authored text the Deck shows or logs. The operator approves exactly
+// what is shown, so it shows every field of every rule, in full.
 //
 // Pure module, no electron: unit-tested under bun.
 
 import { ambiguousAlternationWarnings } from '../shared/ttsr-rules'
 import type { TtsrRule } from '../shared/ttsr-types'
+import { approvalDialogSpec, type ApprovalDialogSpec } from './serve-approval-dialog'
 
-/** Longest dialog body that still offers Approve in place. */
+/** Longest body the native fallback box still offers Approve for. */
 export const TTSR_DIALOG_MAX_CHARS = 4000
 export const TTSR_DIALOG_MAX_LINES = 60
 
@@ -62,4 +61,37 @@ export function approvalDialogBody(
   for (const w of warnings) lines.push(`${isFr ? 'avertissement' : 'warning'}: ${displaySafe(w)}`)
   const text = lines.join('\n')
   return { text, fits: text.length <= TTSR_DIALOG_MAX_CHARS && lines.length <= TTSR_DIALOG_MAX_LINES }
+}
+
+export interface TtsrApprovalInput {
+  rules: readonly TtsrRule[]
+  projectDir: string
+  rulesFile: string
+  bunUnavailable?: string
+}
+
+/** "Not now" is the refusal: the file stays pending and is asked again. */
+export function ttsrApprovalSpec(input: TtsrApprovalInput, isFr: boolean): ApprovalDialogSpec {
+  const body = approvalDialogBody(input.rules, isFr, approvalWarnings(input.rules, isFr, input.bunUnavailable))
+  const where = isFr
+    ? `Projet : ${displaySafe(input.projectDir)}\nFichier : ${input.rulesFile}`
+    : `Project: ${displaySafe(input.projectDir)}\nFile: ${input.rulesFile}`
+  return approvalDialogSpec(
+    { lines: [], detail: body.text, fits: body.fits },
+    {
+      message: isFr
+        ? 'Ce dépôt définit ses propres règles de garde pour les agents.'
+        : 'This repository defines its own guard rules for agents.',
+      lead: where,
+      trail: isFr
+        ? "Une règle « deny » bloque l'appel d'outil de l'agent ; une règle « warn » lui injecte son message. Toute modification du fichier demandera une nouvelle approbation. N'approuve que si tu fais confiance à ce dépôt."
+        : 'A "deny" rule blocks the agent\'s tool call; a "warn" rule injects its message. Any change to the file asks for approval again. Approve only if you trust this repository.',
+      approve: isFr ? 'Approuver' : 'Approve',
+      refuse: isFr ? 'Plus tard' : 'Not now',
+      close: isFr ? 'Plus tard' : 'Not now',
+      tooLong: isFr
+        ? `${where}\n\n${input.rules.length} règle(s), trop longues pour cette fenêtre. Relis-les et approuve-les dans Réglages › Règles ; d'ici là elles ne s'appliquent pas.`
+        : `${where}\n\n${input.rules.length} rule(s), too long for this dialog. Review and approve them in Settings › Rules; until then they do not apply.`
+    }
+  )
 }

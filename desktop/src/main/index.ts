@@ -55,7 +55,7 @@ import {
 } from './scope-secrets'
 import { applyProviderKeyPatch, sanitizeProviders } from './provider-secrets'
 import { GLOBAL_RULES_FILE, REPO_RULES_REL, TtsrService, type TtsrApprovalRequest } from './ttsr-service'
-import { approvalDialogBody, approvalWarnings, displaySafe } from './ttsr-dialog'
+import { ttsrApprovalSpec } from './ttsr-dialog'
 import { sanitizeTtsrDisabled } from './ttsr-toggles'
 import {
   globalConfigDir,
@@ -71,7 +71,7 @@ import { magicCompactPluginPresent } from './magic-compact'
 import { runMagicCompactInTurn } from './magic-compact-sequence'
 import { approve, commandHash, isApproved, resolveApprovedLaunchCommand } from './launch-approval'
 import { createStartupState, onStartupFailure, shouldQuitAfterAllWindowsClosed } from './approval-startup-state'
-import { approvalReaderPresentation, approvalWindowAssets, createApprovalNativeAdapter, createApprovalWindowController, routeApproval } from './approval-window'
+import { approvalReaderPresentation, approvalWindowAssets, createApprovalNativeAdapter, createApprovalRouter, createApprovalWindowController } from './approval-window'
 import { loadDict, resolveLocale } from './i18n'
 import { homedir, hostname } from 'node:os'
 import {
@@ -1012,52 +1012,16 @@ function composeSandboxAppendPrompt(sessionId: string, command: string, launch: 
 }
 
 /**
- * Approval dialog of a pending repo rules file: asynchronous, never on the
- * spawn path, at most one open per project root (TtsrService). It shows every
- * field of every rule in full, agent text neutralized: the operator approves
- * exactly what he reads. Too long for a dialog, it offers no Approve at all,
- * only Settings > Rules. "Not now" leaves the file pending.
+ * Approval of a pending repo rules file: asynchronous, never on the spawn path,
+ * at most one open per project root (TtsrService). "Not now" leaves the file pending.
  */
 async function promptTtsrApproval(req: TtsrApprovalRequest): Promise<boolean> {
-  const isFr = isFrLocale()
-  const body = approvalDialogBody(req.rules, isFr, approvalWarnings(req.rules, isFr, req.bunUnavailable))
-  const where = isFr
-    ? `Projet : ${displaySafe(req.projectDir)}\nFichier : ${REPO_RULES_REL}`
-    : `Project: ${displaySafe(req.projectDir)}\nFile: ${REPO_RULES_REL}`
-  const win = mainWindow
-  const show = (options: Electron.MessageBoxOptions): Promise<Electron.MessageBoxReturnValue> =>
-    win ? dialog.showMessageBox(win, options) : dialog.showMessageBox(options)
-  if (!body.fits) {
-    const { response } = await show({
-      type: 'warning',
-      buttons: isFr ? ['Ouvrir Réglages › Règles', 'Plus tard'] : ['Open Settings › Rules', 'Not now'],
-      defaultId: 1,
-      cancelId: 1,
-      title: 'Koryphaios',
-      message: isFr
-        ? 'Ce dépôt définit ses propres règles de garde pour les agents.'
-        : 'This repository defines its own guard rules for agents.',
-      detail: isFr
-        ? `${where}\n\n${req.rules.length} règle(s), trop longues pour cette fenêtre. Relis-les et approuve-les dans Réglages › Règles ; d'ici là elles ne s'appliquent pas.`
-        : `${where}\n\n${req.rules.length} rule(s), too long for this dialog. Review and approve them in Settings › Rules; until then they do not apply.`
-    })
-    if (response === 0) mainWindow?.webContents.send('menu:settings')
-    return false
-  }
-  const { response } = await show({
-    type: 'warning',
-    buttons: isFr ? ['Approuver', 'Plus tard'] : ['Approve', 'Not now'],
-    defaultId: 1,
-    cancelId: 1,
-    title: 'Koryphaios',
-    message: isFr
-      ? 'Ce dépôt définit ses propres règles de garde pour les agents.'
-      : 'This repository defines its own guard rules for agents.',
-    detail: isFr
-      ? `${where}\n\n${body.text}\n\nUne règle « deny » bloque l'appel d'outil de l'agent ; une règle « warn » lui injecte son message. Toute modification du fichier demandera une nouvelle approbation. N'approuve que si tu fais confiance à ce dépôt.`
-      : `${where}\n\n${body.text}\n\nA "deny" rule blocks the agent's tool call; a "warn" rule injects its message. Any change to the file asks for approval again. Approve only if you trust this repository.`
-  })
-  return response === 0
+  return await showApprovalDialog(
+    ttsrApprovalSpec(
+      { rules: req.rules, projectDir: req.projectDir, rulesFile: REPO_RULES_REL, bunUnavailable: req.bunUnavailable },
+      isFrLocale()
+    )
+  )
 }
 
 // Every spawn (create, restore, restart) compiles the tile's rules file here;
@@ -2722,28 +2686,31 @@ const approvalDialogMaxLines = (): number => {
   return maxLinesFor(display.workArea.height)
 }
 
-/** True only when the operator pressed the Approve button; a spec that does not fit has none. */
-const showApprovalDialog = async (spec: ApprovalDialogSpec): Promise<boolean> =>
-  await routeApproval(spec, {
-    native: async (nativeSpec) => {
-      const win = mainWindow && !mainWindow.isDestroyed() ? mainWindow : null
-      const options: Electron.MessageBoxOptions = {
-        type: 'warning',
-        title: 'Koryphaios',
-        message: nativeSpec.message,
-        detail: nativeSpec.detail,
-        buttons: nativeSpec.buttons,
-        defaultId: nativeSpec.defaultId,
-        cancelId: nativeSpec.cancelId
-      }
-      const answer = await (win ? dialog.showMessageBox(win, options) : dialog.showMessageBox(options))
-      return isApprovalAnswer(nativeSpec, answer.response)
-    },
-    reader: {
-      open: (document, onVerdict) => approvalReader.open(document, (verdict) => onVerdict(verdict === 'approve'))
-    },
-    report: (error) => reportError('main', 'approval reader failed to open', error)
-  })
+const routeTrustApproval = createApprovalRouter<ApprovalDialogSpec & { onShowFile?: () => void }>({
+  native: async (nativeSpec) => {
+    const win = mainWindow && !mainWindow.isDestroyed() ? mainWindow : null
+    const options: Electron.MessageBoxOptions = {
+      type: 'warning',
+      title: 'Koryphaios',
+      message: nativeSpec.message,
+      detail: nativeSpec.detail,
+      buttons: nativeSpec.buttons,
+      defaultId: nativeSpec.defaultId,
+      cancelId: nativeSpec.cancelId
+    }
+    const answer = await (win ? dialog.showMessageBox(win, options) : dialog.showMessageBox(options))
+    if (answer.response === nativeSpec.showFileIndex) nativeSpec.onShowFile?.()
+    return isApprovalAnswer(nativeSpec, answer.response)
+  },
+  reader: {
+    open: (document, onVerdict) => approvalReader.open(document, (verdict) => onVerdict(verdict === 'approve'))
+  },
+  report: (error) => reportError('main', 'approval reader', error)
+})
+
+/** True only when the operator approved; requests are shown one at a time in the approval window. */
+const showApprovalDialog = async (spec: ApprovalDialogSpec, onShowFile?: () => void): Promise<boolean> =>
+  await routeTrustApproval({ ...spec, onShowFile })
 
 const confirmShellFieldApproval = async (opts: ShellFieldApprovalOpts): Promise<boolean> => {
   const { key, value } = shellFieldApprovalCacheKey(opts)
@@ -3872,20 +3839,8 @@ app.whenReady().then(async () => {
     serveApprovalsFile: approvalsFile,
     confirmServe: async (prompt, servePath) => {
       const isFr = isFrLocale()
-      const win = mainWindow && !mainWindow.isDestroyed() ? mainWindow : null
       const spec = serveDialogSpec(renderServeApproval(prompt, { isFr, maxLines: approvalDialogMaxLines() }), isFr)
-      const options: Electron.MessageBoxOptions = {
-        type: 'warning',
-        title: 'Koryphaios',
-        message: spec.message,
-        detail: spec.detail,
-        buttons: spec.buttons,
-        defaultId: spec.defaultId,
-        cancelId: spec.cancelId
-      }
-      const { response } = win ? await dialog.showMessageBox(win, options) : await dialog.showMessageBox(options)
-      if (response === spec.showFileIndex) shell.showItemInFolder(servePath)
-      return isApprovalAnswer(spec, response)
+      return await showApprovalDialog(spec, () => shell.showItemInFolder(servePath))
     }
   })
   // Arm remote approvals BEFORE service.start(): restored sessions spawn there,

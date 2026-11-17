@@ -2,10 +2,12 @@ import { expect, test } from 'bun:test'
 import { join } from 'node:path'
 import { loadDict } from '../desktop/src/main/i18n.ts'
 import {
+  APPROVAL_WINDOW_SHOW_TIMEOUT_MS,
   approvalReaderPresentation,
   approvalWindowAssets,
   createApprovalNativeAdapter,
   routeApproval,
+  createApprovalRouter,
   createApprovalWindowController,
   type ApprovalWindowIpcHandler,
   type ApprovalWindowNativeAdapter,
@@ -117,10 +119,16 @@ function harness(loadFailure = false, view: ApprovalPresentation = presentation,
   const constructed: ApprovalWindowNativeConstructionOptions<FakeWindow>[] = []
   const reports: string[] = []
   const verdicts: string[] = []
+  const timers: Array<{ ms: number; fire: () => void; cancelled: boolean }> = []
   const native = createApprovalNativeAdapter({
     preload: 'approval-preload.js',
     html: 'approval.html',
     parent,
+    setTimer: (fire, ms) => {
+      const timer = { ms, fire, cancelled: false }
+      timers.push(timer)
+      return () => { timer.cancelled = true }
+    },
     createWindow(options) {
       constructed.push(options)
       const window = new FakeWindow(loadFailure)
@@ -145,7 +153,7 @@ function harness(loadFailure = false, view: ApprovalPresentation = presentation,
     presentation: () => view,
     ...limits
   })
-  return { controller, constructed, handlers, reports, sessions, verdicts, windows }
+  return { controller, constructed, handlers, reports, sessions, timers, verdicts, windows }
 }
 
 test('resolves the built approval preload and page from the main output directory', () => {
@@ -159,7 +167,7 @@ test('resolves the built approval preload and page from the main output director
 const settledWithin = (promise: Promise<unknown>): Promise<string> =>
   Promise.race([promise.then(String), new Promise<string>((resolve) => setTimeout(() => resolve('pending'), 0))])
 
-test('routes short approval to native and long approval only to the reader', async () => {
+test('opens every approval in the reader, the one that fits a native box included', async () => {
   let nativeCalls = 0
   let readerCalls = 0
   const reports: unknown[] = []
@@ -167,35 +175,127 @@ test('routes short approval to native and long approval only to the reader', asy
   const reader = { open: (_document: ApprovalDocument, settle: (approved: boolean) => void) => { readerCalls++; settle(true); return { kind: 'opened' as const } } }
   expect(await settledWithin(routeApproval({ approveIndex: 0, document }, { native: async () => { nativeCalls++; return true }, reader, report }))).toBe('true')
   expect(await settledWithin(routeApproval({ approveIndex: null, document }, { native: async () => { nativeCalls++; return true }, reader, report }))).toBe('true')
-  expect(nativeCalls).toBe(1)
-  expect(readerCalls).toBe(1)
+  expect(['native calls', nativeCalls, 'reader calls', readerCalls]).toEqual(['native calls', 0, 'reader calls', 2])
   expect(reports).toEqual([])
 })
 
-test('refuses busy or synchronously failing approval readers, tracing the failure', async () => {
-  const native = async () => true
-  const reports: unknown[] = []
-  const report = (error: unknown): void => { reports.push(error) }
-  expect(await settledWithin(routeApproval({ approveIndex: null, document }, { native, reader: { open: () => ({ kind: 'busy' }) }, report }))).toBe('false')
-  expect(reports, 'a busy reader is a refusal, not a failure').toEqual([])
-  const failure = new Error('open failed')
-  expect(await settledWithin(routeApproval({ approveIndex: null, document }, { native, reader: { open: () => { throw failure } }, report }))).toBe('false')
-  expect(reports, 'a reader that fails to open must leave a trace').toEqual([failure])
-})
-
-test('settles the opened approval when a second reader request is busy', async () => {
-  const { controller, windows } = harness()
-  const reader = {
-    open: (approval: ApprovalDocument, settle: (approved: boolean) => void) =>
-      controller.open(approval, (verdict) => settle(verdict === 'approve'))
+test('falls back to the native box, traced, only when the reader cannot be set up', async () => {
+  const thrown = new Error('open failed')
+  for (const [name, open] of [
+    ['open throws', () => { throw thrown }],
+    ['setup reported failed', () => ({ kind: 'failed' as const })]
+  ] as const) {
+    const reports: unknown[] = []
+    const shown: Array<number | null> = []
+    const native = async (spec: { approveIndex: number | null }) => { shown.push(spec.approveIndex); return spec.approveIndex !== null }
+    const result = await settledWithin(routeApproval({ approveIndex: 0, document }, { native, reader: { open }, report: (e) => { reports.push(e) } }))
+    expect([name, result, shown], `${name}: the native box decides`).toEqual([name, 'true', [0]])
+    expect(reports.length, `${name}: the fallback must leave a trace`).toBeGreaterThan(0)
+    if (name === 'open throws') expect(reports, 'the error that stopped the reader is the one traced').toContain(thrown)
   }
+})
+
+test('a busy reader is a traced refusal, never a silent one and never a native box', async () => {
+  let nativeCalls = 0
   const reports: unknown[] = []
-  const report = (error: unknown): void => { reports.push(error) }
-  const first = routeApproval({ approveIndex: null, document }, { native: async () => true, reader, report })
-  expect(await settledWithin(routeApproval({ approveIndex: null, document }, { native: async () => true, reader, report })), 'the busy request is refused').toBe('false')
+  const result = await settledWithin(routeApproval({ approveIndex: 0, document }, {
+    native: async () => { nativeCalls++; return true },
+    reader: { open: () => ({ kind: 'busy' as const }) },
+    report: (e) => { reports.push(e) }
+  }))
+  expect([result, nativeCalls, reports.length]).toEqual(['false', 0, 1])
+})
+
+test('the controller reports a window that fails during setup as failed, without a verdict', () => {
+  const handlers = new Map<string, ApprovalWindowIpcHandler>()
+  const reports: string[] = []
+  const verdicts: string[] = []
+  const controller = createApprovalWindowController({
+    ipc: { handle: (channel, handler) => handlers.set(channel, handler), removeHandler: (channel) => { handlers.delete(channel) } },
+    native: { open: (_generation, lifecycle) => lifecycle.failed(), close: () => {}, endpoint: () => null },
+    reportError: (_scope, message) => { reports.push(message) },
+    presentation: () => presentation
+  })
+  expect(controller.open(document, (verdict) => verdicts.push(verdict)).kind).toBe('failed')
+  expect(verdicts, 'a setup failure must not also deliver a refusal, or the caller never falls back').toEqual([])
+  expect(controller.open(document, (verdict) => verdicts.push(verdict)).kind, 'the failed request must not hold the reader busy').toBe('failed')
+})
+
+test('a window that fails after it opened is a refusal, never a second native box', async () => {
+  const { controller, reports } = harness(true)
+  let nativeCalls = 0
+  const result = routeApproval({ approveIndex: 0, document }, {
+    native: async () => { nativeCalls++; return true },
+    reader: { open: (approval, settle) => controller.open(approval, (verdict) => settle(verdict === 'approve')) },
+    report: () => {}
+  })
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  expect([await settledWithin(result), nativeCalls]).toEqual(['false', 0])
+  expect(reports).toContain('Approval window failed to load')
+})
+
+test('a second approval waits for the open one, then opens in its turn', async () => {
+  const { controller, windows } = harness()
+  const router = createApprovalRouter<{ approveIndex: number | null; document: ApprovalDocument }>({
+    native: async () => true,
+    reader: { open: (approval, settle) => controller.open(approval, (verdict) => settle(verdict === 'approve')) },
+    report: () => {}
+  })
+  const first = router({ approveIndex: 0, document })
+  const second = router({ approveIndex: 0, document })
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  expect([windows.length, await settledWithin(second)], 'the second request waits, it is not refused').toEqual([1, 'pending'])
   windows[0]!.fire('closed')
-  expect(await settledWithin(first), 'the open approval must receive its own refusal').toBe('false')
-  expect(reports).toEqual([])
+  expect(await settledWithin(first)).toBe('false')
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  expect(windows.length, 'the second request opens once the first is settled').toBe(2)
+  windows[1]!.fire('closed')
+  expect(await settledWithin(second)).toBe('false')
+})
+
+test('a reader that never shows is refused after the show timeout, and the next approval opens', async () => {
+  const { controller, reports, timers, windows } = harness()
+  const router = createApprovalRouter<{ approveIndex: number | null; document: ApprovalDocument }>({
+    native: async () => true,
+    reader: { open: (approval, settle) => controller.open(approval, (verdict) => settle(verdict === 'approve')) },
+    report: () => {}
+  })
+  const stuck = router({ approveIndex: 0, document })
+  const next = router({ approveIndex: 0, document })
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  expect(timers.map((t) => t.ms), 'the show deadline is armed with its named bound').toEqual([APPROVAL_WINDOW_SHOW_TIMEOUT_MS])
+  expect(await settledWithin(stuck)).toBe('pending')
+  timers[0]!.fire()
+  expect(await settledWithin(stuck), 'a reader that never showed is a refusal').toBe('false')
+  expect(windows[0]!.destroyed, 'the stuck window is closed').toBe(true)
+  expect(reports.some((r) => r.includes('did not show')), 'the timeout leaves a trace').toBe(true)
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  expect(windows.length, 'the queue moves on to the next approval').toBe(2)
+  windows[1]!.fire('ready-to-show')
+  expect([windows[1]!.shown, timers[1]!.cancelled], 'a reader that shows cancels its own deadline').toEqual([true, true])
+  windows[1]!.fire('closed')
+  expect(await settledWithin(next)).toBe('false')
+})
+
+test('a reader the operator closes before the show deadline leaves no late timeout trace', async () => {
+  const { controller, reports, timers, windows } = harness()
+  controller.open(document)
+  windows[0]!.fire('closed')
+  for (const timer of timers.filter((t) => !t.cancelled)) timer.fire()
+  expect(reports.filter((r) => r.includes('did not show')), 'a closed window has no show deadline left').toEqual([])
+})
+
+test('a request that throws does not block the ones queued behind it', async () => {
+  let calls = 0
+  const router = createApprovalRouter<{ approveIndex: number | null; document: ApprovalDocument }>({
+    native: async () => { calls++; if (calls === 1) throw new Error('native failed'); return true },
+    reader: { open: () => ({ kind: 'failed' as const }) },
+    report: () => {}
+  })
+  const first = router({ approveIndex: 0, document })
+  const second = router({ approveIndex: 0, document })
+  expect(await first.then(() => 'resolved', () => 'rejected')).toBe('rejected')
+  expect(await settledWithin(second)).toBe('true')
 })
 
 test('uses an ephemeral hardened partition and bounds traces for foreign or subframe IPC', async () => {
@@ -251,21 +351,24 @@ test('traces a foreign sender probing while no approval is open, and the sender 
   ])
 })
 
-test('delivers the refusal to the generation whose native window fails while opening', () => {
+test('answers failed, with no verdict and the reader freed, when the native window fails while opening', () => {
   const failures: [string, ApprovalWindowNativeAdapter['open']][] = [
     ['throws', () => { throw new Error('native open failed') }],
     ['fails synchronously', (_generation, lifecycle) => lifecycle.failed()]
   ]
   for (const [name, open] of failures) {
+    const reports: string[] = []
     const controller = createApprovalWindowController({
       ipc: { handle: () => {}, removeHandler: () => {} },
       native: { open, close: () => {}, endpoint: () => null },
-      reportError: () => {},
+      reportError: (_scope, message) => { reports.push(message) },
       presentation: () => presentation
     })
     const verdicts: string[] = []
-    expect(controller.open(document, (verdict) => { verdicts.push(verdict) }), name).toEqual({ kind: 'opened', generation: 1 })
-    expect(verdicts, `a native window that ${name} must still refuse its own request`).toEqual(['refuse'])
+    expect(controller.open(document, (verdict) => { verdicts.push(verdict) }), name).toEqual({ kind: 'failed' })
+    expect(verdicts, `a native window that ${name} leaves the decision to the caller's fallback`).toEqual([])
+    expect(controller.open(document).kind, `${name}: the next request is not refused as busy`).toBe('failed')
+    if (name === 'throws') expect(reports).toContain('Approval window could not open')
   }
 })
 

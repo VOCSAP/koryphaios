@@ -91,6 +91,16 @@ export interface ApprovalWindowNativeAdapterOptions<W extends ApprovalWindowBrow
   createWindow(options: ApprovalWindowNativeConstructionOptions<W>): W
   sessionFromPartition(partition: string): ApprovalWindowSession
   reportError(scope: string, message: string, error?: unknown): void
+  /** Injected for tests; returns a cancel function. */
+  setTimer?(callback: () => void, ms: number): () => void
+}
+
+/** A reader that never shows would hold every approval queued behind it. */
+export const APPROVAL_WINDOW_SHOW_TIMEOUT_MS = 30_000
+
+const realTimer = (callback: () => void, ms: number): (() => void) => {
+  const handle = setTimeout(callback, ms)
+  return () => clearTimeout(handle)
 }
 
 export interface ApprovalWindowControllerOptions {
@@ -111,22 +121,47 @@ export interface ApprovalRouteSpec {
 }
 
 export interface ApprovalRouteReader {
-  open(document: ApprovalDocument, onVerdict: (approved: boolean) => void): { kind: 'opened' | 'busy' }
+  /** 'failed': the window could not be set up and the verdict callback will never be called. */
+  open(document: ApprovalDocument, onVerdict: (approved: boolean) => void): { kind: 'opened' | 'busy' | 'failed' }
 }
 
-export async function routeApproval<T extends ApprovalRouteSpec>(
-  spec: T,
-  deps: { native(spec: T): Promise<boolean>; reader: ApprovalRouteReader; report(error: unknown): void }
-): Promise<boolean> {
-  if (spec.approveIndex !== null) return await deps.native(spec)
-  return await new Promise<boolean>((resolve) => {
+export interface ApprovalRouteDeps<T extends ApprovalRouteSpec> {
+  native(spec: T): Promise<boolean>
+  reader: ApprovalRouteReader
+  report(error: unknown): void
+}
+
+/**
+ * The reader for every request; the native box only when the reader could not be set up,
+ * and it still offers no Approve for a document it cannot show in full.
+ */
+export async function routeApproval<T extends ApprovalRouteSpec>(spec: T, deps: ApprovalRouteDeps<T>): Promise<boolean> {
+  let opened: { kind: 'opened' | 'busy' | 'failed' } | null = null
+  const verdict = new Promise<boolean>((resolve) => {
     try {
-      if (deps.reader.open(spec.document, resolve).kind === 'busy') resolve(false)
+      opened = deps.reader.open(spec.document, resolve)
     } catch (error) {
       deps.report(error)
-      resolve(false)
     }
   })
+  const kind = (opened as { kind: 'opened' | 'busy' | 'failed' } | null)?.kind ?? 'failed'
+  if (kind === 'opened') return await verdict
+  if (kind === 'busy') {
+    deps.report(new Error('approval reader busy: request refused'))
+    return false
+  }
+  deps.report(new Error('approval reader could not open: native fallback'))
+  return await deps.native(spec)
+}
+
+/** One approval at a time: a request arriving while another is open waits for it instead of being refused. */
+export function createApprovalRouter<T extends ApprovalRouteSpec>(deps: ApprovalRouteDeps<T>): (spec: T) => Promise<boolean> {
+  let tail: Promise<unknown> = Promise.resolve()
+  return (spec) => {
+    const run = tail.then(() => routeApproval(spec, deps))
+    tail = run.catch(() => undefined)
+    return run
+  }
 }
 
 export function approvalWindowAssets(mainDir: string): { preload: string; html: string } {
@@ -149,6 +184,7 @@ export function createApprovalNativeAdapter<W extends ApprovalWindowBrowserWindo
   return {
     open(generation, lifecycle) {
       let window: ApprovalWindowBrowserWindow
+      let cancelShowTimeout = (): void => {}
       try {
         const ephemeralPartition = partition()
         const approvalSession = options.sessionFromPartition(ephemeralPartition)
@@ -172,9 +208,17 @@ export function createApprovalNativeAdapter<W extends ApprovalWindowBrowserWindo
         })
         windows.set(generation, window)
         window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
-        window.on('ready-to-show', () => window.show())
+        cancelShowTimeout = (options.setTimer ?? realTimer)(() => {
+          options.reportError('approval-window', `Approval window did not show within ${APPROVAL_WINDOW_SHOW_TIMEOUT_MS} ms`)
+          lifecycle.failed()
+        }, APPROVAL_WINDOW_SHOW_TIMEOUT_MS)
+        window.on('ready-to-show', () => {
+          cancelShowTimeout()
+          window.show()
+        })
         window.on('close', () => lifecycle.closed())
         window.on('closed', () => {
+          cancelShowTimeout()
           windows.delete(generation)
           void Promise.all([approvalSession.clearStorageData(), approvalSession.clearCache()]).catch((error) => {
             options.reportError('approval-window', 'Approval window session cleanup failed', error)
@@ -207,6 +251,7 @@ export function createApprovalNativeAdapter<W extends ApprovalWindowBrowserWindo
           lifecycle.failed()
         })
       } catch (error) {
+        cancelShowTimeout()
         options.reportError('approval-window', 'Approval window setup failed', error)
         lifecycle.failed()
         return
@@ -311,7 +356,7 @@ function verdictIntent(args: unknown[]): { generation: number; fingerprint: stri
 }
 
 export function createApprovalWindowController(options: ApprovalWindowControllerOptions): {
-  open(document: ApprovalDocument, onVerdict?: (verdict: ApprovalVerdict) => void): { kind: 'opened'; generation: number } | { kind: 'busy' }
+  open(document: ApprovalDocument, onVerdict?: (verdict: ApprovalVerdict) => void): { kind: 'opened'; generation: number } | { kind: 'busy' } | { kind: 'failed' }
   dispose(): void
 } {
   const reportError = options.reportError ?? deckReportError
@@ -448,17 +493,30 @@ export function createApprovalWindowController(options: ApprovalWindowController
       const request = requestApproval(state, document)
       state = request.state
       if (request.kind === 'busy') return { kind: 'busy' }
-      verdictCallbacks.set(request.current.generation, onVerdict)
+      const generation = request.current.generation
+      verdictCallbacks.set(generation, onVerdict)
+      // A failure while the window is still being set up is reported as 'failed' with no
+      // verdict, so the caller can fall back; once open, a failure is a refusal.
+      let opening = true
+      let setupFailed = false
+      const fail = (closeWindow: boolean): void => {
+        if (opening) {
+          setupFailed = true
+          verdictCallbacks.delete(generation)
+        }
+        settle(generation, 'refuse', closeWindow)
+      }
       try {
-        options.native.open(request.current.generation, {
-          closed: () => settle(request.current.generation, 'refuse', false),
-          failed: () => settle(request.current.generation, 'refuse', true)
+        options.native.open(generation, {
+          closed: () => settle(generation, 'refuse', false),
+          failed: () => fail(true)
         })
       } catch (error) {
         reportError('approval-window', 'Approval window could not open', error)
-        settle(request.current.generation, 'refuse', false)
+        fail(false)
       }
-      return { kind: 'opened', generation: request.current.generation }
+      opening = false
+      return setupFailed ? { kind: 'failed' } : { kind: 'opened', generation }
     },
     dispose() {
       options.ipc.removeHandler(APPROVAL_WINDOW_CHANNELS.getState)

@@ -1,7 +1,3 @@
-// Startup approval dialog of a repo rules file: the operator approves exactly
-// what the dialog shows, so it must show every field of every rule in full,
-// agent text neutralized, and offer no Approve when that does not fit.
-
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -12,6 +8,7 @@ import {
   describeRuleForApproval,
   displaySafe,
   TTSR_DIALOG_MAX_CHARS,
+  ttsrApprovalSpec,
 } from "../desktop/src/main/ttsr-dialog";
 import type { TtsrRule } from "../desktop/src/shared/ttsr-types";
 import { extractBracedBody } from "./_braced-body";
@@ -93,19 +90,26 @@ test("approvalWarnings: the ambiguity advisories follow the rules, before the bu
   expect(body.text).toContain(`warning: ${bunMissingNotice(false)}`);
 });
 
-test("index.ts wiring: the dialog shows approvalDialogBody and offers no Approve when it does not fit", () => {
+test("the approval document carries every rule in full, its warnings and the bun notice, fitting or not", () => {
+  const input = { rules: [rule("a"), rule("b")], projectDir: "C:/repo", rulesFile: ".claude/rules.json", bunUnavailable: "spawn failed" };
+  const many = { ...input, rules: Array.from({ length: 40 }, (_, i) => rule(`r${i}`)) };
+  for (const [name, value] of [["fits", input], ["too long", many]] as const) {
+    const spec = ttsrApprovalSpec(value, false);
+    const body = approvalDialogBody(value.rules, false, approvalWarnings(value.rules, false, value.bunUnavailable));
+    expect(spec.document.detail, `${name}: the document shows the whole body`).toContain(body.text);
+    expect(spec.document.detail, `${name}: the bun notice is shown`).toContain(bunMissingNotice(false));
+    expect(spec.document.detail, `${name}: the file is named`).toContain(".claude/rules.json");
+    expect([name, spec.document.refuse]).toEqual([name, "Not now"]);
+  }
+  expect(ttsrApprovalSpec(input, false).approveIndex, "a body that fits the fallback box can be approved there").toBe(0);
+  expect(ttsrApprovalSpec(many, false).approveIndex, "the fallback box offers no Approve for a body it cannot show").toBeNull();
+});
+
+test("index.ts wiring: promptTtsrApproval shows the TTSR spec through the trust approval router", () => {
   const src = readFileSync(join(import.meta.dir, "..", "desktop", "src", "main", "index.ts"), "utf8");
   const anchor = src.indexOf("async function promptTtsrApproval(req: TtsrApprovalRequest): Promise<boolean>");
   expect(anchor, "promptTtsrApproval must exist in index.ts").toBeGreaterThan(-1);
   const fn = extractBracedBody(src, src.indexOf("{", anchor));
-  expect(fn, "the dialog body must come from approvalDialogBody (every rule, full text)").toContain("approvalDialogBody(req.rules");
-  expect(fn, "the dialog shows the ambiguity advisories and the probe's bun verdict").toContain(
-    "approvalWarnings(req.rules, isFr, req.bunUnavailable)"
-  );
-  expect(fn, "no truncation of the rule list").not.toContain("slice(0, 10)");
-  const notFits = fn.indexOf("if (!body.fits)");
-  expect(notFits, "a branch for content that does not fit").toBeGreaterThan(-1);
-  const branch = extractBracedBody(fn, fn.indexOf("{", notFits));
-  expect(branch, "the too-long dialog offers Settings, never Approve").not.toMatch(/'Approve'|'Approuver'/);
-  expect(branch).toContain("return false");
+  expect(fn.replace(/\s+/g, " ")).toContain("return await showApprovalDialog( ttsrApprovalSpec(");
+  expect(fn, "the probe's bun verdict reaches the document").toContain("bunUnavailable: req.bunUnavailable");
 });

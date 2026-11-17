@@ -3185,7 +3185,7 @@ test("deck_list_sessions: model, context and observation age come from liveStatu
 const INDEX_TS_PATH = join(import.meta.dir, "..", "desktop", "src", "main", "index.ts");
 
 const SHOW_APPROVAL_DIALOG_SIGNATURE =
-  /const showApprovalDialog = async \(spec: ApprovalDialogSpec\): Promise<boolean> =>\s+await routeApproval\(spec, \{\s+native: async \(nativeSpec\) => \{/g;
+  /const routeTrustApproval = createApprovalRouter<[^\n]*>\(\{\s+native: async \(nativeSpec\) => \{/g;
 
 const RESOLVE_TEMPLATE_INPUTS_SIGNATURE =
   /const resolveTemplateInputs = async \(path: string, attendance: CallerAttendance\): Promise<TemplateResolveResult> => \{/g;
@@ -3194,7 +3194,7 @@ type TemplateResolverProbeDeps = Record<string, unknown>;
 
 function extractShowApprovalDialogBody(src: string): string {
   const matches = [...src.matchAll(SHOW_APPROVAL_DIALOG_SIGNATURE)];
-  if (matches.length !== 1) throw new Error(`showApprovalDialog signature matched ${matches.length} times`);
+  if (matches.length !== 1) throw new Error(`routeTrustApproval native adapter matched ${matches.length} times`);
   const match = matches[0]!;
   return extractBracedBody(src, match.index + match[0].length - 1);
 }
@@ -3287,7 +3287,7 @@ test("confirmShellFieldApproval waits for the dialog verdict before approving", 
   expect(approvedProbe.approvals()).toBe(1);
 });
 
-test("showApprovalDialog's native path awaits Electron's asynchronous message box API", () => {
+test("the trust router's native fallback awaits Electron's asynchronous message box API", () => {
   const body = extractShowApprovalDialogBody(readFileSync(INDEX_TS_PATH, "utf-8"));
   expect(body).toContain("await (win ? dialog.showMessageBox(win, options) : dialog.showMessageBox(options))");
   expect(body).not.toContain("showMessageBoxSync");
