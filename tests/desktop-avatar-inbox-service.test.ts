@@ -1,8 +1,9 @@
 import { expect, test } from 'bun:test'
-import { createAvatarInboxService } from '../desktop/src/main/avatar-inbox-service.ts'
+import { AVATAR_READ_CAP_PER_DECK, createAvatarInboxService } from '../desktop/src/main/avatar-inbox-service.ts'
+import { avatarBubbleMessageKey } from '../desktop/src/shared/avatar-bubble-view.ts'
 import { reachedWithin } from './_bounded-await.ts'
 import type { AvatarCommandResult } from '../desktop/src/main/avatar-server.ts'
-import type { AvatarInboxAction, AvatarInboxSnapshotFrame } from '../desktop/src/shared/avatar-inbox-protocol.ts'
+import type { AvatarInboxAction, AvatarInboxSnapshotFrame, InboxRelayMessage } from '../desktop/src/shared/avatar-inbox-protocol.ts'
 
 const deck = { deckRunId: 'deck-run-1', broker_url: 'http://127.0.0.1:7899' }
 const other = { deckRunId: 'deck-run-2', broker_url: 'http://127.0.0.1:7899' }
@@ -40,16 +41,36 @@ function frame(ids: string[], seq = 1): AvatarInboxSnapshotFrame {
 function service(send: (identity: typeof deck, action: AvatarInboxAction) => Promise<AvatarCommandResult>) {
   const reports: string[] = []
   const sent: AvatarInboxAction[] = []
+  const changes = { count: 0 }
   const inbox = createAvatarInboxService({
     send: (identity, action) => {
       sent.push(action)
       return send(identity, action)
     },
     report: (_scope, message) => reports.push(message),
-    changed: () => {}
+    changed: () => {
+      changes.count += 1
+    }
   })
-  return { inbox, reports, sent }
+  return { inbox, reports, sent, changes }
 }
+
+const SENT = '2026-11-17T08:00:00.000Z'
+
+function mail(id: number, sentAt = SENT): InboxRelayMessage {
+  return { id, from_peer_id: 'peer-a', text: 'hi', sent_at: sentAt, state: 'open', closed_at: null, closed_by: null, reason: null }
+}
+
+function withMail(messages: InboxRelayMessage[], patch: Partial<AvatarInboxSnapshotFrame> = {}): AvatarInboxSnapshotFrame {
+  return { ...frame([]), messages, ...patch }
+}
+
+function readsOf(inbox: ReturnType<typeof service>['inbox'], identity: typeof deck = deck): string[] {
+  const box = inbox.boxes().find((candidate) => candidate.identity.deckRunId === identity.deckRunId && candidate.identity.broker_url === identity.broker_url)
+  return [...(box?.reads.keys() ?? [])]
+}
+
+const idle = async (): Promise<AvatarCommandResult> => ({ requestId: 'r', ok: true, outcome: 'won' })
 
 test('holds one box per Deck, replaced whole by each snapshot and erased on clear', () => {
   const { inbox } = service(async () => ({ requestId: 'r', ok: true, outcome: 'won' }))
@@ -108,4 +129,97 @@ test('a gesture on an id outside the box, or a second one in flight, never reach
   release({ requestId: 'r', ok: true, outcome: 'won' })
   expect(await reachedWithin(first, 'first gesture settled', 500)).toEqual({ outcome: 'won' })
   expect(sent).toEqual([{ approval_id: ID, action: 'allow' }])
+})
+
+test('a read state is keyed by Deck, broker, scope generation, id and send date, so two boxes holding the same id and date never share it', () => {
+  const sameRun = { deckRunId: deck.deckRunId, broker_url: 'http://127.0.0.1:7900' }
+  const { inbox, sent } = service(idle)
+  inbox.receive(deck, withMail([mail(1)]))
+  inbox.receive(other, { ...withMail([mail(1)]), ...other })
+  inbox.receive(sameRun, { ...withMail([mail(1)]), ...sameRun })
+  expect(inbox.markRead(deck, { scopeGeneration: 2, id: 1, sentAt: SENT }, 'seen')).toEqual({ read: 'seen' })
+  expect(readsOf(inbox)).toEqual([avatarBubbleMessageKey(deck, 2, 1, SENT)])
+  expect(readsOf(inbox, other)).toEqual([])
+  expect(readsOf(inbox, sameRun)).toEqual([])
+  expect(inbox.markRead(sameRun, { scopeGeneration: 2, id: 1, sentAt: SENT }, 'acked')).toEqual({ read: 'acked' })
+  expect(inbox.markRead(other, { scopeGeneration: 2, id: 1, sentAt: SENT }, 'acked')).toEqual({ read: 'acked' })
+  expect(inbox.boxes().map((box) => [box.identity.deckRunId, box.identity.broker_url, [...box.reads.values()]])).toEqual([
+    ['deck-run-1', 'http://127.0.0.1:7899', ['seen']],
+    ['deck-run-2', 'http://127.0.0.1:7899', ['acked']],
+    ['deck-run-1', 'http://127.0.0.1:7900', ['acked']]
+  ])
+  expect(sent).toEqual([])
+})
+
+test('a read state survives a socket drop and a new snapshot of the same scope, acked is never lowered to seen, and nothing goes back to the Deck', () => {
+  const { inbox, sent } = service(idle)
+  inbox.receive(deck, withMail([mail(1)]))
+  inbox.markRead(deck, { scopeGeneration: 2, id: 1, sentAt: SENT }, 'seen')
+  inbox.receive(deck, withMail([mail(1)], { seq: 2 }))
+  expect([...inbox.boxes()[0]!.reads.values()]).toEqual(['seen'])
+  inbox.clear(deck)
+  expect(inbox.boxes()).toEqual([])
+  inbox.receive(deck, withMail([mail(1)], { seq: 3 }))
+  expect([...inbox.boxes()[0]!.reads.values()]).toEqual(['seen'])
+  expect(inbox.markRead(deck, { scopeGeneration: 2, id: 1, sentAt: SENT }, 'acked')).toEqual({ read: 'acked' })
+  expect(inbox.markRead(deck, { scopeGeneration: 2, id: 1, sentAt: SENT }, 'seen')).toEqual({ read: 'acked' })
+  expect([...inbox.boxes()[0]!.reads.values()]).toEqual(['acked'])
+  expect(sent).toEqual([])
+})
+
+test('a read state is purged on detach, on a scope generation change, and when the Avatar stops', () => {
+  const { inbox, changes } = service(idle)
+  inbox.receive(deck, withMail([mail(1)]))
+  inbox.markRead(deck, { scopeGeneration: 2, id: 1, sentAt: SENT }, 'seen')
+
+  inbox.detach(deck)
+  expect(readsOf(inbox)).toEqual([])
+  inbox.receive(deck, withMail([mail(1)], { seq: 2 }))
+  expect(readsOf(inbox)).toEqual([])
+
+  inbox.markRead(deck, { scopeGeneration: 2, id: 1, sentAt: SENT }, 'seen')
+  inbox.receive(deck, withMail([mail(1)], { seq: 3, scope_generation: 3 }))
+  expect(readsOf(inbox)).toEqual([])
+  expect(inbox.markRead(deck, { scopeGeneration: 3, id: 1, sentAt: SENT }, 'seen')).toEqual({ read: 'seen' })
+  inbox.receive(deck, withMail([mail(1)], { seq: 4, scope_generation: 2 }))
+  expect(readsOf(inbox)).toEqual([])
+
+  inbox.markRead(deck, { scopeGeneration: 2, id: 1, sentAt: SENT }, 'seen')
+  inbox.dispose()
+  expect(readsOf(inbox)).toEqual([])
+
+  const before = changes.count
+  inbox.detach(deck)
+  expect(changes.count).toBe(before)
+  inbox.receive(deck, withMail([mail(1)], { seq: 5 }))
+  inbox.markRead(deck, { scopeGeneration: 2, id: 1, sentAt: SENT }, 'seen')
+  const afterMark = changes.count
+  inbox.detach(deck)
+  expect(changes.count).toBe(afterMark + 1)
+})
+
+test('a gesture on a stale generation, an absent message or a Deck without a box is refused and stores nothing', () => {
+  const { inbox } = service(idle)
+  expect(inbox.markRead(deck, { scopeGeneration: 2, id: 1, sentAt: SENT }, 'seen')).toEqual({ refused: 'no_box' })
+  inbox.receive(deck, withMail([mail(1)]))
+  expect(inbox.markRead(deck, { scopeGeneration: 1, id: 1, sentAt: SENT }, 'seen')).toEqual({ refused: 'stale_generation' })
+  expect(inbox.markRead(deck, { scopeGeneration: 2, id: 2, sentAt: SENT }, 'seen')).toEqual({ refused: 'no_message' })
+  expect(inbox.markRead(deck, { scopeGeneration: 2, id: 1, sentAt: '2026-11-17T09:00:00.000Z' }, 'seen')).toEqual({ refused: 'no_message' })
+  expect(inbox.markRead(other, { scopeGeneration: 2, id: 1, sentAt: SENT }, 'seen')).toEqual({ refused: 'no_box' })
+  expect(readsOf(inbox)).toEqual([])
+})
+
+test('read states per Deck are capped, the oldest touched leaving first', () => {
+  const { inbox } = service(idle)
+  const total = AVATAR_READ_CAP_PER_DECK + 5
+  inbox.receive(deck, withMail(Array.from({ length: total }, (_, index) => mail(index + 1))))
+  const mark = (id: number): unknown => inbox.markRead(deck, { scopeGeneration: 2, id, sentAt: SENT }, 'seen')
+  for (let id = 1; id <= AVATAR_READ_CAP_PER_DECK; id += 1) mark(id)
+  mark(1)
+  for (let id = AVATAR_READ_CAP_PER_DECK + 1; id <= total; id += 1) mark(id)
+  const kept = readsOf(inbox)
+  expect(kept).toHaveLength(AVATAR_READ_CAP_PER_DECK)
+  expect(kept).toContain(avatarBubbleMessageKey(deck, 2, 1, SENT))
+  expect(kept).not.toContain(avatarBubbleMessageKey(deck, 2, 2, SENT))
+  expect(kept).toContain(avatarBubbleMessageKey(deck, 2, total, SENT))
 })

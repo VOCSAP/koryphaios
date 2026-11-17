@@ -15,7 +15,8 @@ import {
 } from '../shared/avatar-bubble-view'
 import { parseAvatarInboxAction } from '../shared/avatar-inbox-protocol'
 import type { AvatarDeckIdentity } from '../shared/avatar-state'
-import type { AvatarInboxGestureResult } from './avatar-inbox-service'
+import type { InboxAckStatus } from '../shared/types'
+import type { AvatarInboxGestureResult, AvatarInboxReadEntry, AvatarInboxReadResult } from './avatar-inbox-service'
 import type { ApprovalWindowSession } from './approval-window'
 
 export interface AvatarBubbleWebContents {
@@ -254,6 +255,7 @@ export interface AvatarBubbleWindowOptions {
   boxes(): readonly AvatarBubbleBox[]
   decks(): readonly AvatarBubbleDeck[]
   act: (identity: AvatarDeckIdentity, action: ReturnType<typeof parseAvatarInboxAction>) => Promise<AvatarInboxGestureResult>
+  markRead(identity: AvatarDeckIdentity, entry: AvatarInboxReadEntry, status: InboxAckStatus): AvatarInboxReadResult
   focusDeck(identity: AvatarDeckIdentity): Promise<void>
   theme(): AvatarBubbleTheme
   lang: 'en' | 'fr'
@@ -283,6 +285,20 @@ function sameDeck(a: AvatarDeckIdentity, b: AvatarDeckIdentity): boolean {
 function readIdentity(value: Record<string, unknown>): AvatarDeckIdentity {
   if (typeof value.deckRunId !== 'string' || typeof value.broker_url !== 'string') throw new Error('Avatar bubble intent names no Deck')
   return { deckRunId: value.deckRunId, broker_url: value.broker_url }
+}
+
+function readEntry(value: Record<string, unknown>): AvatarInboxReadEntry {
+  const { scopeGeneration, id, sentAt } = value
+  if (
+    typeof scopeGeneration !== 'number' ||
+    !Number.isInteger(scopeGeneration) ||
+    typeof id !== 'number' ||
+    !Number.isInteger(id) ||
+    typeof sentAt !== 'string'
+  ) {
+    throw new Error('Avatar bubble intent names no message')
+  }
+  return { scopeGeneration, id, sentAt }
 }
 
 export function createAvatarBubbleWindow(options: AvatarBubbleWindowOptions): AvatarBubbleWindow {
@@ -396,6 +412,25 @@ export function createAvatarBubbleWindow(options: AvatarBubbleWindowOptions): Av
     return result
   }
 
+  const readGesture =
+    (status: InboxAckStatus): AvatarBubbleIpcHandler =>
+    async (event, ...args) => {
+      const open = requireCurrent(event)
+      let identity: AvatarDeckIdentity
+      let entry: AvatarInboxReadEntry
+      try {
+        const intent = requireIntent(open, args)
+        identity = readIdentity(intent)
+        entry = readEntry(intent)
+      } catch (error) {
+        return refuse(`Avatar bubble ${status} gesture was refused: ${error instanceof Error ? error.message : 'invalid'}`)
+      }
+      const result = options.markRead(identity, entry, status)
+      if ('refused' in result) return refuse(`Avatar bubble ${status} gesture was refused: ${result.refused}`)
+      push()
+      return result.read
+    }
+
   const focusDeck: AvatarBubbleIpcHandler = async (event, ...args) => {
     const open = requireCurrent(event)
     const identity = readIdentity(requireIntent(open, args))
@@ -430,6 +465,8 @@ export function createAvatarBubbleWindow(options: AvatarBubbleWindowOptions): Av
 
   options.ipc.handle(AVATAR_BUBBLE_CHANNELS.getState, getState)
   options.ipc.handle(AVATAR_BUBBLE_CHANNELS.act, act)
+  options.ipc.handle(AVATAR_BUBBLE_CHANNELS.markSeen, readGesture('seen'))
+  options.ipc.handle(AVATAR_BUBBLE_CHANNELS.ack, readGesture('acked'))
   options.ipc.handle(AVATAR_BUBBLE_CHANNELS.focusDeck, focusDeck)
   options.ipc.handle(AVATAR_BUBBLE_CHANNELS.close, closeHandler)
   options.ipc.handle(AVATAR_BUBBLE_CHANNELS.reportError, rendererError)
@@ -467,6 +504,8 @@ export function createAvatarBubbleWindow(options: AvatarBubbleWindowOptions): Av
       close()
       options.ipc.removeHandler(AVATAR_BUBBLE_CHANNELS.getState)
       options.ipc.removeHandler(AVATAR_BUBBLE_CHANNELS.act)
+      options.ipc.removeHandler(AVATAR_BUBBLE_CHANNELS.markSeen)
+      options.ipc.removeHandler(AVATAR_BUBBLE_CHANNELS.ack)
       options.ipc.removeHandler(AVATAR_BUBBLE_CHANNELS.focusDeck)
       options.ipc.removeHandler(AVATAR_BUBBLE_CHANNELS.close)
       options.ipc.removeHandler(AVATAR_BUBBLE_CHANNELS.reportError)

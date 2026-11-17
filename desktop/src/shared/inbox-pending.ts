@@ -27,10 +27,14 @@ export function countPendingInboxMessages(
 
 export type MessageReplyability = 'open' | 'responded' | 'closed' | 'not-this-run' | 'unknown' | 'legacy-broker'
 
-/** What the Courrier may offer on a message, from the archive of the current run. */
-export function messageReplyability(archive: InboxArchiveSnapshot, message: InboxMessage): MessageReplyability {
+/** What the Courrier may offer on a message, from the archive of the current run, indexed by `key` when the host gives one. */
+export function messageReplyability(
+  archive: InboxArchiveSnapshot,
+  message: InboxMessage,
+  key: string = inboxEntryKey({ kind: 'message', message })
+): MessageReplyability {
   if (archive.status === 'pending') return 'unknown'
   if (archive.status === 'unsupported') return 'legacy-broker'
-  const entry = archive.messages[inboxEntryKey({ kind: 'message', message })]
+  const entry = archive.messages[key]
   return entry ? entry.state : 'not-this-run'
 }

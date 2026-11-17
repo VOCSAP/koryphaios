@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { AvatarBubbleActOutcome, AvatarBubbleApi, AvatarBubbleCard, AvatarBubbleState } from '@shared/avatar-bubble-view'
 import type { AvatarInboxAction } from '@shared/avatar-inbox-protocol'
-import { inboxEntryKey, type AckableInboxEntry, type InboxAckStatus } from '../../../shared/types'
+import type { AckableInboxEntry } from '../../../shared/types'
 import { InboxCore } from '../components/InboxCore'
 import { GLYPHS, GLYPH_ACTIONS, GLYPH_BADGES } from '../components/icons'
 import { translate, type TFn } from '../translate'
@@ -58,7 +58,6 @@ export function BubbleApp({ api, clock = REAL_CLOCK }: { api: AvatarBubbleApi; c
   const [currentKey, setCurrentKey] = useState<string | null>(null)
   const [busyKey, setBusyKey] = useState<string | null>(null)
   const [notice, setNotice] = useState<Notice | null>(null)
-  const [readStates, setReadStates] = useState<Record<string, InboxAckStatus>>({})
   const pushed = useRef(false)
 
   useEffect(() => {
@@ -103,7 +102,7 @@ export function BubbleApp({ api, clock = REAL_CLOCK }: { api: AvatarBubbleApi; c
   }, [shownKey, clock])
   const armed = shownKey !== null && armedKey === shownKey
 
-  const courrier = useMemo(() => (state ? bubbleCourrier(state.model) : null), [state])
+  const courrier = useMemo(() => (state ? bubbleCourrier(state.model, (message) => api.reportError(message)) : null), [state, api])
 
   if (!state) {
     return (
@@ -153,8 +152,23 @@ export function BubbleApp({ api, clock = REAL_CLOCK }: { api: AvatarBubbleApi; c
   const informations = cards.filter((c) => !c.blocking && !c.settledElsewhere).length
   const open = state.model.courrier.filter((m) => !m.closed && !m.answered).length
   const hidden = state.model.truncated.approvals
-  const setRead = (entry: AckableInboxEntry, status: InboxAckStatus): void =>
-    setReadStates((all) => (all[inboxEntryKey(entry)] === 'acked' ? all : { ...all, [inboxEntryKey(entry)]: status }))
+  const read = (entry: AckableInboxEntry, gesture: 'markSeen' | 'ack'): void => {
+    const m = courrier?.source(entry)
+    if (!m) {
+      api.reportError(`bubble ${gesture} on an entry the bubble does not list: ${entry.kind}`)
+      return
+    }
+    api[gesture]({
+      generation: state.generation,
+      deckRunId: m.identity.deckRunId,
+      broker_url: m.identity.broker_url,
+      scopeGeneration: m.scopeGeneration,
+      id: m.id,
+      sentAt: m.sentAt
+    }).catch((error: unknown) => {
+      api.reportError(`bubble ${gesture} was refused: ${error instanceof Error ? error.message : String(error)}`)
+    })
+  }
 
   return (
     <div className="avb" data-anchor={state.anchor}>
@@ -213,9 +227,11 @@ export function BubbleApp({ api, clock = REAL_CLOCK }: { api: AvatarBubbleApi; c
                 messages={courrier.messages}
                 approvals={[]}
                 archive={courrier.archive}
-                readStates={readStates}
+                readStates={courrier.readStates}
+                entryKey={courrier.entryKey}
+                approvalKey={courrier.approvalKey}
                 reclame={null}
-                courrier={{ markSeen: (e) => setRead(e, 'seen'), ack: (e) => setRead(e, 'acked') }}
+                courrier={{ markSeen: (e) => read(e, 'markSeen'), ack: (e) => read(e, 'ack') }}
                 replyDrafts={NO_DRAFTS}
                 onReplyDraft={noop}
                 approvalDrafts={NO_DRAFTS}

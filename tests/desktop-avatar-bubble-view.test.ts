@@ -1,6 +1,9 @@
 import { describe, expect, test } from 'bun:test'
 import {
   AVATAR_BUBBLE_SETTLED_ELSEWHERE_MS,
+  AVATAR_BUBBLE_CHANNELS,
+  avatarBubbleMessageKey,
+  avatarBubbleReadApi,
   projectAvatarBubble,
   safeBlock,
   safeLine,
@@ -60,7 +63,9 @@ function box(identity: typeof DECK_A, patch: Partial<AvatarBubbleBox> = {}): Ava
     messages: [],
     closed: [],
     truncated: { approvals: 0, messages: 0, closed: 0 },
+    scopeGeneration: 1,
     settledLocally: new Set(),
+    reads: new Map(),
     ...patch
   }
 }
@@ -197,6 +202,48 @@ describe('projectAvatarBubble', () => {
     expect(model.courrier.map((entry) => [entry.id, entry.closed, entry.text])).toEqual([
       [2, false, `a\nb${REPLACEMENT}`],
       [1, true, 'hello']
+    ])
+  })
+
+  test('a message key names its Deck run, broker, scope generation, id and send date, and the projection carries that key', () => {
+    const sentAt = message(1).sent_at
+    const keys = [
+      avatarBubbleMessageKey(DECK_A, 1, 1, sentAt),
+      avatarBubbleMessageKey({ ...DECK_A, deckRunId: 'run-b' }, 1, 1, sentAt),
+      avatarBubbleMessageKey({ ...DECK_A, broker_url: 'http://127.0.0.1:7900' }, 1, 1, sentAt),
+      avatarBubbleMessageKey(DECK_A, 2, 1, sentAt),
+      avatarBubbleMessageKey(DECK_A, 1, 2, sentAt),
+      avatarBubbleMessageKey(DECK_A, 1, 1, '2026-11-17T10:00:09.000Z')
+    ]
+    expect(new Set(keys).size).toBe(keys.length)
+    const [entry] = projectAvatarBubble({ boxes: [box(DECK_A, { messages: [message(1)] })], decks, lost: [], now: 0 }).courrier
+    expect(entry).toMatchObject({ key: keys[0], scopeGeneration: 1, read: null })
+  })
+
+  test('a message takes its read state from its whole key: the same id and date at another Deck, generation or send date stays unread', () => {
+    const reads = new Map<string, 'seen' | 'acked'>([[avatarBubbleMessageKey(DECK_A, 1, 1, message(1).sent_at), 'acked']])
+    const readOf = (identity: typeof DECK_A, patch: Partial<AvatarBubbleBox>, sent: Partial<InboxRelayMessage> = {}) =>
+      projectAvatarBubble({ boxes: [box(identity, { messages: [message(1, sent)], reads, ...patch })], decks, lost: [], now: 0 }).courrier[0]!.read
+    expect(readOf(DECK_A, {})).toBe('acked')
+    expect(readOf(DECK_B, {})).toBeNull()
+    expect(readOf(DECK_A, { scopeGeneration: 2 })).toBeNull()
+    expect(readOf(DECK_A, {}, { sent_at: '2026-11-17T10:00:09.000Z' })).toBeNull()
+  })
+})
+
+describe('avatarBubbleReadApi', () => {
+  test('markSeen and ack each invoke their own channel with the intent unchanged', async () => {
+    const calls: Array<[string, unknown]> = []
+    const api = avatarBubbleReadApi(async (channel, intent) => {
+      calls.push([channel, intent])
+      return 'seen'
+    })
+    const intent = { generation: 1, ...DECK_A, scopeGeneration: 2, id: 3, sentAt: message(3).sent_at }
+    await api.markSeen(intent)
+    await api.ack(intent)
+    expect(calls).toEqual([
+      [AVATAR_BUBBLE_CHANNELS.markSeen, intent],
+      [AVATAR_BUBBLE_CHANNELS.ack, intent]
     ])
   })
 })

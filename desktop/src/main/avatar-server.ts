@@ -41,10 +41,11 @@ export interface AvatarServerOptions {
   inbox?: AvatarInboxSink
 }
 
-/** Where the snapshots of an a3_inbox Deck land; cleared when its socket goes away. */
+/** Where the snapshots of an a3_inbox Deck land; cleared when its socket goes away, detached when the Deck detaches. */
 export interface AvatarInboxSink {
   receive(identity: AvatarDeckIdentity, frame: AvatarInboxSnapshotFrame): void
   clear(identity: AvatarDeckIdentity): void
+  detach(identity: AvatarDeckIdentity): void
 }
 
 export interface AvatarAttachedDeck extends AvatarAttachRequest {}
@@ -289,6 +290,11 @@ export async function startAvatarServer(options: AvatarServerOptions): Promise<A
         }
         attached.set(key, { ...attach, ...(attach.capabilities === undefined ? {} : { capabilities }) })
         if (attach.context) highestGeneration.set(key, Math.max(highest ?? 0, attach.context.scope_generation))
+        if (previous && previous.context?.scope_generation !== attach.context?.scope_generation) {
+          const identity = { deckRunId: attach.deckRunId, broker_url: attach.broker_url }
+          options.inbox?.clear(identity)
+          options.inbox?.detach(identity)
+        }
         sendJson(response, 200, {
           ok: true,
           protocol_version: AVATAR_PROTOCOL_VERSION,
@@ -303,6 +309,7 @@ export async function startAvatarServer(options: AvatarServerOptions): Promise<A
         const detached = attached.delete(key)
         highestGeneration.delete(key)
         hub.detach(identity)
+        options.inbox?.detach(identity)
         options.state.detach(identity)
         sendJson(response, 200, { ok: true, detached })
         return
@@ -404,6 +411,7 @@ export async function startAvatarServer(options: AvatarServerOptions): Promise<A
             attached.delete(deckKey(deck.identity))
             highestGeneration.delete(deckKey(deck.identity))
             hub.detach(deck.identity)
+            options.inbox?.detach(deck.identity)
           }
         },
         focusDeck: hub.focusDeck,

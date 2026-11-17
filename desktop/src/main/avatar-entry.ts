@@ -33,7 +33,7 @@ import { generateAvatarRunCertificate } from './avatar-certificate'
 import { createAvatarClickGesture } from './avatar-click-gesture'
 import { avatarAllowedBrokerUrls } from './avatar-deck-link'
 import { createDeckFocusGesture, deckProcessIsAlive } from './avatar-focus-gesture'
-import { createAvatarInboxService } from './avatar-inbox-service'
+import { createAvatarInboxService, type AvatarInboxService } from './avatar-inbox-service'
 import { allowForegroundWindow, runForegroundHelper } from './avatar-foreground'
 import { configureAvatarLifetime, type AvatarLifetimeLease } from './avatar-lifetime'
 import { ensureAvatarPrivateDir } from './avatar-private-dir'
@@ -72,6 +72,7 @@ let tray: AvatarTray | null = null
 let brokerProbe: AvatarBrokerProbe | null = null
 let avatarAssembly: AvatarAssembly | null = null
 let bubble: AvatarBubbleWindow | null = null
+let avatarInbox: AvatarInboxService | null = null
 let stopFollowers: (() => void) | null = null
 
 const brokerMarkerPath = (): string => brokerStopMarkerPath(peersConfigPath())
@@ -141,6 +142,7 @@ async function startAvatar(): Promise<void> {
     report: reportError,
     changed: () => bubble?.changed()
   })
+  avatarInbox = inbox
   const shippedLocales = app.isPackaged ? join(process.resourcesPath, 'locales') : join(app.getAppPath(), 'locales')
   bubble = createAvatarBubbleWindow({
     ipc: ipcMain,
@@ -155,6 +157,7 @@ async function startAvatar(): Promise<void> {
     boxes: () => inbox.boxes(),
     decks: () => server?.attachedDecks() ?? [],
     act: (identity, action) => inbox.act(identity, action),
+    markRead: (identity, entry, status) => inbox.markRead(identity, entry, status),
     focusDeck: (identity) => focusFromTray(identity, 'focus'),
     theme: () => (nativeTheme.shouldUseDarkColors ? 'dark' : 'light'),
     lang: locale,
@@ -313,6 +316,8 @@ async function stopAvatar(): Promise<void> {
   stopFollowers = null
   bubble?.dispose()
   bubble = null
+  avatarInbox?.dispose()
+  avatarInbox = null
   avatarAssembly?.dispose()
   avatarAssembly = null
   brokerProbe?.stop()

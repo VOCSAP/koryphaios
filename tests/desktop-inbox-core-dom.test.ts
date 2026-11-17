@@ -130,6 +130,9 @@ interface MountOptions {
   reclame?: boolean;
   courrierWrites?: boolean;
   embedded?: boolean;
+  readStates?: Record<string, string>;
+  entryKey?: (entry: { kind: string; message?: typeof MESSAGE }) => string | null;
+  approvalKey?: (approval: FakeApproval) => string | null;
 }
 
 function Host(opts: MountOptions): React.JSX.Element {
@@ -149,7 +152,9 @@ function Host(opts: MountOptions): React.JSX.Element {
     archive: opts.archive ?? UNSUPPORTED,
     messages: opts.messages ?? [],
     approvals: (opts.approvals ?? []) as never,
-    readStates: {},
+    readStates: opts.readStates ?? {},
+    entryKey: opts.entryKey,
+    approvalKey: opts.approvalKey,
     reclame:
       opts.reclame === false
         ? null
@@ -614,4 +619,57 @@ test("what a message offers follows the archive: open and an old broker reply, a
   await rerender(UNSUPPORTED);
   expect(container.querySelector(".inbox-modal-reply"), "an old broker keeps the reply, the broker decides").not.toBeNull();
   expect(buttonLabelled("inbox.reply")).toBeDefined();
+});
+
+const entryFrom = (from: string): Element => {
+  const entry = [...container.querySelectorAll(".inbox-entry")].find((e) => e.querySelector(".inbox-entry-from")?.textContent === from);
+  if (!entry) throw new Error(`no entry from ${from}`);
+  return entry;
+};
+
+test("a host key tells apart two messages sharing an id and a send time, in read state, closure and modal", async () => {
+  const a = { ...MESSAGE, from: "alpha · peer-x" };
+  const b = { ...MESSAGE, from: "beta · peer-x" };
+  const entryKey = (e: { kind: string; message?: typeof MESSAGE }): string => `host:${e.message?.from}`;
+  await mount({
+    messages: [a, b],
+    entryKey,
+    readStates: { [entryKey({ kind: "message", message: a })]: "acked" },
+    archive: ready({ [entryKey({ kind: "message", message: a })]: settled() })
+  });
+  expect(container.querySelectorAll(".inbox-entry").length).toBe(2);
+  expect(entryFrom(a.from).className).toContain("is-acked");
+  expect(entryFrom(b.from).className).toContain("is-unread");
+  expect(entryFrom(a.from).querySelector(".inbox-entry-closed-badge")).not.toBeNull();
+  expect(entryFrom(b.from).querySelector(".inbox-entry-closed-badge")).toBeNull();
+  await click(entryFrom(a.from));
+  expect(container.querySelector(".inbox-closed-banner"), "A's modal reads A's closure").not.toBeNull();
+});
+
+test("an entry the host gives no key is left out of the list", async () => {
+  const a = { ...MESSAGE, from: "alpha" };
+  const b = { ...MESSAGE, from: "beta" };
+  await mount({
+    messages: [a, b],
+    entryKey: (e) => (e.message?.from === "alpha" ? "host:alpha" : null),
+    approvals: [approval()],
+    approvalKey: () => null
+  });
+  expect([...container.querySelectorAll(".inbox-entry-from")].map((n) => n.textContent)).toEqual(["alpha"]);
+});
+
+test("a pending question and a closed one sharing an id but not a host key are both listed", async () => {
+  const pending = approval({ id: "same", question: "pending in B" });
+  const closed = approval({ id: "same", question: "closed in A", status: "closed", answered_at: CLOSED_AT } as Partial<FakeApproval>);
+  await mount({
+    approvals: [pending],
+    archive: ready({}, [closed]),
+    approvalKey: (a) => (a === pending ? "host:B:same" : "host:A:same")
+  });
+  expect([...container.querySelectorAll(".inbox-entry-excerpt")].map((n) => n.textContent).sort()).toEqual(["closed in A", "pending in B"]);
+});
+
+test("without a host key the read state is indexed by inboxEntryKey", async () => {
+  await mount({ messages: [MESSAGE], readStates: { [MSG_KEY]: "seen" } });
+  expect(container.querySelector(".inbox-entry")?.className).toContain("is-seen");
 });

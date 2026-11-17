@@ -11,6 +11,7 @@ import type { Root } from "../desktop/tests-support/react-test-harness";
 
 const { act, React, createRoot } = await import("../desktop/tests-support/react-test-harness");
 const { BubbleApp, AVATAR_BUBBLE_ARM_MS } = await import("../desktop/src/renderer/src/avatar-bubble/BubbleApp.tsx");
+const { bubbleCourrier } = await import("../desktop/src/renderer/src/avatar-bubble/courrier.ts");
 
 const IDENTITY = { deckRunId: "run-1", broker_url: "http://127.0.0.1:7899" };
 
@@ -61,11 +62,13 @@ function card(over: Partial<Card> = {}): Card {
 interface Message {
   key: string;
   identity: typeof IDENTITY;
+  scopeGeneration: number;
   deckLabel: string;
   id: number;
   fromPeerId: string;
   text: string;
   sentAt: string;
+  read: "seen" | "acked" | null;
   closed: boolean;
   answered: boolean;
   closedAt: string | null;
@@ -76,14 +79,19 @@ interface Message {
 
 function message(over: Partial<Message> = {}): Message {
   const id = over.id ?? 41;
+  const identity = over.identity ?? IDENTITY;
+  const scopeGeneration = over.scopeGeneration ?? 3;
+  const sentAt = over.sentAt ?? "2026-11-17T09:00:00.000Z";
   return {
-    key: JSON.stringify([IDENTITY.deckRunId, IDENTITY.broker_url, id]),
-    identity: IDENTITY,
+    key: JSON.stringify([identity.deckRunId, identity.broker_url, scopeGeneration, id, sentAt]),
+    identity,
+    scopeGeneration,
     deckLabel: "koryphaios",
     id,
     fromPeerId: "peer-9",
     text: "L2 review approved",
-    sentAt: "2026-11-17T09:00:00.000Z",
+    sentAt,
+    read: null,
     closed: false,
     answered: false,
     closedAt: null,
@@ -108,12 +116,14 @@ function state(reclame: Card[], courrier: Message[] = [], generation = 7) {
 interface Calls {
   acts: unknown[];
   focus: unknown[];
+  reads: { gesture: string; intent: Record<string, unknown> }[];
   reports: string[];
 }
 
 let calls: Calls;
 let current: ReturnType<typeof state>;
 let actResult: () => Promise<{ outcome: string; reason?: string }>;
+let readResult: () => Promise<string>;
 let push: (next: unknown) => void = () => {};
 let container: HTMLDivElement;
 let root: Root;
@@ -135,6 +145,14 @@ function fakeApi() {
       calls.focus.push(intent);
       return Promise.resolve();
     },
+    markSeen: (intent: Record<string, unknown>) => {
+      calls.reads.push({ gesture: "markSeen", intent });
+      return readResult();
+    },
+    ack: (intent: Record<string, unknown>) => {
+      calls.reads.push({ gesture: "ack", intent });
+      return readResult();
+    },
     close: () => Promise.resolve(),
     reportError: (message: string) => {
       calls.reports.push(message);
@@ -143,8 +161,9 @@ function fakeApi() {
 }
 
 beforeEach(() => {
-  calls = { acts: [], focus: [], reports: [] };
+  calls = { acts: [], focus: [], reads: [], reports: [] };
   actResult = () => Promise.resolve({ outcome: "won" });
+  readResult = () => Promise.resolve("seen");
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
@@ -359,6 +378,107 @@ test("a closed message whose closer is unknown says when it closed, with no plac
   await click(container.querySelectorAll('[role="tab"]')[1]);
   await click(container.querySelector(".inbox-entry"));
   expect(container.querySelector(".inbox-closed-line")?.textContent).toBe("inbox.closedAt");
+});
+
+const OTHER_DECK = { deckRunId: "run-2", broker_url: "http://127.0.0.1:7900" };
+
+function entryFrom(label: string): HTMLElement {
+  const entry = [...container.querySelectorAll(".inbox-entry")].find((e) => e.querySelector(".inbox-entry-from")?.textContent === label);
+  if (!entry) throw new Error(`no entry from ${label}`);
+  return entry as HTMLElement;
+}
+
+async function openCourrier(): Promise<void> {
+  await click(container.querySelectorAll('[role="tab"]')[1]);
+}
+
+test("two Decks holding the same message id and send time keep their own read state and closure", async () => {
+  const a = message({ deckLabel: "alpha", closed: true, closedAt: "2026-11-17T09:30:00.000Z" });
+  const b = message({ identity: OTHER_DECK, deckLabel: "beta" });
+  await mount(state([], [a, b]));
+  await openCourrier();
+  expect(container.querySelectorAll(".inbox-entry").length).toBe(2);
+  expect(entryFrom("alpha · peer-9").querySelector(".inbox-entry-closed-badge"), "A is closed").not.toBeNull();
+  expect(entryFrom("beta · peer-9").querySelector(".inbox-entry-closed-badge"), "B stays open").toBeNull();
+  await click(entryFrom("alpha · peer-9").querySelector(".inbox-ack-btn"));
+  expect(calls.reads).toEqual([
+    { gesture: "ack", intent: { generation: 7, deckRunId: "run-1", broker_url: IDENTITY.broker_url, scopeGeneration: 3, id: 41, sentAt: a.sentAt } }
+  ]);
+  await act(async () => push(state([], [{ ...a, read: "acked" }, b])));
+  expect(entryFrom("alpha · peer-9").className).toContain("is-acked");
+  expect(entryFrom("beta · peer-9").className, "acknowledging A leaves B unread").toContain("is-unread");
+});
+
+test("a message read before the bubble closed is still read when it reopens", async () => {
+  const seen = state([], [message({ read: "seen" })]);
+  await mount(seen);
+  await openCourrier();
+  await click(container.querySelector(".inbox-entry"));
+  expect(calls.reads.map((r) => r.gesture), "opening asks main to mark it seen").toEqual(["markSeen"]);
+  await act(async () => {
+    root.unmount();
+  });
+  root = createRoot(container);
+  await mount(seen);
+  await openCourrier();
+  expect(container.querySelector(".inbox-entry")?.className).toContain("is-seen");
+});
+
+test("a read gesture main refuses is reported, not swallowed", async () => {
+  readResult = () => Promise.reject(new Error("stale_generation"));
+  await mount(state([], [message()]));
+  await openCourrier();
+  await click(container.querySelector(".inbox-ack-btn"));
+  expect(calls.reports.join("\n")).toContain("stale_generation");
+  expect(container.querySelector(".inbox-entry")?.className, "no local state stands in for main").toContain("is-unread");
+});
+
+test("two Decks closing the same approval id each open their own closed question", async () => {
+  const approvalId = "aaaaaaaa-0000-4000-8000-0000000000cc";
+  const closed = (identity: typeof IDENTITY, deckLabel: string, title: string) => ({
+    key: JSON.stringify([identity.deckRunId, identity.broker_url, approvalId]),
+    identity,
+    deckLabel,
+    approvalId,
+    title,
+    closedAt: "2026-11-17T09:30:00.000Z",
+    reason: null
+  });
+  const s = state([]);
+  s.model.closed = [closed(IDENTITY, "alpha", "close A"), closed(OTHER_DECK, "beta", "close B")] as never;
+  await mount(s);
+  await openCourrier();
+  const rows = [...container.querySelectorAll(".inbox-entry")];
+  expect(rows.map((r) => r.querySelector(".inbox-entry-excerpt")?.textContent)).toEqual(["close A", "close B"]);
+  await click(rows[1]);
+  const modal = container.querySelector(".inbox-modal")?.textContent ?? "";
+  expect(modal).toContain("close B");
+  expect(modal, "B's row does not open A's question").not.toContain("close A");
+});
+
+test("a copy of a listed message gets no key and is reported once", () => {
+  const traces: string[] = [];
+  const c = bubbleCourrier(state([], [message()]).model as never, (m) => traces.push(m));
+  const listed = c.messages[0]!;
+  expect(c.entryKey({ kind: "message", message: listed })).toBe(message().key);
+  const copy = { ...listed };
+  expect(c.entryKey({ kind: "message", message: copy })).toBeNull();
+  expect(c.entryKey({ kind: "message", message: copy })).toBeNull();
+  expect(traces).toEqual(["bubble Courrier left out message 41: not one the bubble listed"]);
+});
+
+test("a copy of a listed closed question gets no key and is reported once", () => {
+  const traces: string[] = [];
+  const s = state([]);
+  const key = JSON.stringify([IDENTITY.deckRunId, IDENTITY.broker_url, "q-1"]);
+  s.model.closed = [{ key, identity: IDENTITY, deckLabel: "alpha", approvalId: "q-1", title: "t", closedAt: "2026-11-17T09:30:00.000Z", reason: null }] as never;
+  const c = bubbleCourrier(s.model as never, (m) => traces.push(m));
+  const listed = c.archive.closedQuestions[0]!;
+  expect(c.approvalKey(listed)).toBe(key);
+  const copy = { ...listed };
+  expect(c.approvalKey(copy)).toBeNull();
+  expect(c.approvalKey(copy)).toBeNull();
+  expect(traces).toEqual(["bubble Courrier left out question q-1: not one the bubble listed"]);
 });
 
 test("an empty Reclame says nothing is waiting", async () => {

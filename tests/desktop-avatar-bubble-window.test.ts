@@ -16,7 +16,8 @@ import {
 import { AVATAR_BUBBLE_CHANNELS, AVATAR_BUBBLE_SETTLED_ELSEWHERE_MS, type AvatarBubbleBox, type AvatarBubbleState } from '../desktop/src/shared/avatar-bubble-view'
 import type { AvatarInboxAction, InboxRelayApproval } from '../desktop/src/shared/avatar-inbox-protocol'
 import type { AvatarDeckIdentity } from '../desktop/src/shared/avatar-state'
-import type { AvatarInboxGestureResult } from '../desktop/src/main/avatar-inbox-service'
+import { createAvatarInboxService, type AvatarInboxGestureResult, type AvatarInboxReadEntry } from '../desktop/src/main/avatar-inbox-service'
+import type { InboxAckStatus } from '../desktop/src/shared/types'
 import type { ApprovalWindowSession } from '../desktop/src/main/approval-window'
 
 const DECK = { deckRunId: 'run-a', broker_url: 'http://127.0.0.1:7899' }
@@ -69,8 +70,11 @@ function harness(initial: InboxRelayApproval[] = [approval(ID_1)], overrides: Pa
     messages: [],
     closed: [],
     truncated: { approvals: 0, messages: 0, closed: 0 },
-    settledLocally: new Set()
+    scopeGeneration: 1,
+    settledLocally: new Set(),
+    reads: new Map()
   }
+  const marked: Array<[AvatarDeckIdentity, AvatarInboxReadEntry, InboxAckStatus]> = []
   let placement: AvatarBubblePlacement | null = { rect: { x: 0, y: 0, width: 388, height: 560 }, anchor: 'left' }
   const native: AvatarBubbleNativeAdapter = {
     open(generation, _rect, lifecycle) {
@@ -94,6 +98,10 @@ function harness(initial: InboxRelayApproval[] = [approval(ID_1)], overrides: Pa
       acted.push([identity, action])
       if (outcome.outcome === 'won') box.settledLocally = new Set([...box.settledLocally, action.approval_id])
       return outcome
+    },
+    markRead: (identity, entry, status) => {
+      marked.push([identity, entry, status])
+      return { read: status }
     },
     focusDeck: async (identity) => {
       focused.push(identity)
@@ -128,6 +136,7 @@ function harness(initial: InboxRelayApproval[] = [approval(ID_1)], overrides: Pa
     closed,
     errors,
     acted,
+    marked,
     focused,
     timers,
     call,
@@ -289,6 +298,88 @@ describe('avatar bubble IPC', () => {
     h.bubble.open()
     h.bubble.changed()
     expect(h.endpoints.get(1)!.sent.map(([channel]) => channel)).toEqual([AVATAR_BUBBLE_CHANNELS.state])
+  })
+})
+
+describe('avatar bubble read gestures', () => {
+  const SENT = '2026-11-17T10:00:00.000Z'
+  const readIntent = (generation: number, patch: Record<string, unknown> = {}) => ({ generation, ...DECK, scopeGeneration: 1, id: 7, sentAt: SENT, ...patch })
+
+  test('markSeen and ack reach the inbox service with their own status and push the new state', async () => {
+    const h = harness()
+    h.bubble.open()
+    expect(await h.call(AVATAR_BUBBLE_CHANNELS.markSeen, 1, readIntent(1))).toBe('seen')
+    expect(await h.call(AVATAR_BUBBLE_CHANNELS.ack, 1, readIntent(1))).toBe('acked')
+    expect(h.marked).toEqual([
+      [DECK, { scopeGeneration: 1, id: 7, sentAt: SENT }, 'seen'],
+      [DECK, { scopeGeneration: 1, id: 7, sentAt: SENT }, 'acked']
+    ])
+    expect(h.endpoints.get(1)!.sent.map(([channel]) => channel)).toEqual([AVATAR_BUBBLE_CHANNELS.state, AVATAR_BUBBLE_CHANNELS.state])
+  })
+
+  test('a sender from an earlier window, a sub-frame or a stale window generation is refused and reaches no read state', async () => {
+    const h = harness()
+    h.bubble.open()
+    const stale = h.endpoints.get(1)!
+    h.bubble.close()
+    h.bubble.open()
+    for (const channel of [AVATAR_BUBBLE_CHANNELS.markSeen, AVATAR_BUBBLE_CHANNELS.ack]) {
+      const handler = h.handlers.get(channel)!
+      await expect(handler({ sender: stale, senderFrame: stale.mainFrame }, readIntent(2))).rejects.toThrow('not current')
+      const current = h.endpoints.get(2)!
+      await expect(handler({ sender: current, senderFrame: {} }, readIntent(2))).rejects.toThrow('not current')
+      await expect(h.call(channel, 2, readIntent(1))).rejects.toThrow('refused')
+    }
+    expect(h.marked).toEqual([])
+    expect(h.errors.filter((message) => message.includes('gesture was refused'))).toHaveLength(2)
+  })
+
+  test('an intent that names no Deck or no message is refused and traced', async () => {
+    const h = harness()
+    h.bubble.open()
+    const bad = [
+      readIntent(1, { id: 1.5 }),
+      readIntent(1, { id: '7' }),
+      readIntent(1, { scopeGeneration: Number.NaN }),
+      readIntent(1, { sentAt: 7 }),
+      readIntent(1, { deckRunId: undefined }),
+      { generation: 1, ...DECK }
+    ]
+    for (const intent of bad) await expect(h.call(AVATAR_BUBBLE_CHANNELS.markSeen, 1, intent)).rejects.toThrow('refused')
+    await expect(h.call(AVATAR_BUBBLE_CHANNELS.ack, 1)).rejects.toThrow('refused')
+    expect(h.marked).toEqual([])
+    expect(h.errors).toHaveLength(bad.length + 1)
+  })
+
+  test('a refusal from the inbox service is traced with its reason and rejects', async () => {
+    const h = harness(undefined, { markRead: () => ({ refused: 'stale_generation' }) })
+    h.bubble.open()
+    await expect(h.call(AVATAR_BUBBLE_CHANNELS.markSeen, 1, readIntent(1))).rejects.toThrow('stale_generation')
+    expect(h.errors).toEqual(['Avatar bubble seen gesture was refused: stale_generation'])
+    expect(h.endpoints.get(1)!.sent).toEqual([])
+  })
+
+  test('through the real inbox service the pushed state carries the read state, and a stale scope generation is refused', async () => {
+    const inbox = createAvatarInboxService({ send: async () => ({ requestId: 'r', ok: true }), report: () => undefined, changed: () => undefined })
+    inbox.receive(DECK, {
+      type: 'inbox_snapshot',
+      protocol_version: 1,
+      ...DECK,
+      scope_generation: 4,
+      seq: 1,
+      approvals: [],
+      messages: [{ id: 7, from_peer_id: 'peer-1', text: 'hi', sent_at: SENT, state: 'open', closed_at: null, closed_by: null, reason: null }],
+      closed: [],
+      truncated: { approvals: 0, messages: 0, closed: 0 }
+    })
+    const h = harness(undefined, { boxes: () => inbox.boxes(), markRead: (identity, entry, status) => inbox.markRead(identity, entry, status) })
+    h.bubble.open()
+    await expect(h.call(AVATAR_BUBBLE_CHANNELS.markSeen, 1, readIntent(1, { scopeGeneration: 3 }))).rejects.toThrow('stale_generation')
+    expect(await h.call(AVATAR_BUBBLE_CHANNELS.markSeen, 1, readIntent(1, { scopeGeneration: 4 }))).toBe('seen')
+    const pushed = h.endpoints.get(1)!.sent.at(-1)![1] as AvatarBubbleState
+    expect(pushed.model.courrier).toMatchObject([{ id: 7, scopeGeneration: 4, read: 'seen' }])
+    expect(await h.call(AVATAR_BUBBLE_CHANNELS.ack, 1, readIntent(1, { scopeGeneration: 4 }))).toBe('acked')
+    expect(await h.call(AVATAR_BUBBLE_CHANNELS.markSeen, 1, readIntent(1, { scopeGeneration: 4 }))).toBe('acked')
   })
 })
 

@@ -9,7 +9,7 @@ import {
   type InboxTruncation
 } from './avatar-inbox-protocol'
 import type { AvatarDeckIdentity } from './avatar-state'
-import type { ApprovalKind, InboxCloseAuthority } from './types'
+import type { ApprovalKind, InboxAckStatus, InboxCloseAuthority } from './types'
 
 /** How long a card whose gesture lost the race stays visible as settled elsewhere. */
 export const AVATAR_BUBBLE_SETTLED_ELSEWHERE_MS = 2_000
@@ -75,11 +75,14 @@ export interface AvatarBubbleCard {
 export interface AvatarBubbleMessage {
   key: string
   identity: AvatarDeckIdentity
+  scopeGeneration: number
   deckLabel: string
   id: number
   fromPeerId: string
   text: string
   sentAt: string
+  /** What this Avatar recorded; null while the operator has not read it. Never sent back to the Deck. */
+  read: InboxAckStatus | null
   closed: boolean
   answered: boolean
   closedAt: string | null
@@ -109,7 +112,10 @@ export interface AvatarBubbleModel {
 
 export interface AvatarBubbleBox extends AvatarInboxContent {
   identity: AvatarDeckIdentity
+  scopeGeneration: number
   settledLocally: ReadonlySet<string>
+  /** Read states of this Deck's messages, keyed by avatarBubbleMessageKey. */
+  reads: ReadonlyMap<string, InboxAckStatus>
 }
 
 export interface AvatarBubbleDeck {
@@ -136,6 +142,11 @@ function deckKey(identity: AvatarDeckIdentity): string {
 
 export function avatarBubbleCardKey(identity: AvatarDeckIdentity, approvalId: string): string {
   return JSON.stringify([identity.deckRunId, identity.broker_url, approvalId])
+}
+
+/** Two Decks, two scope generations or two sends sharing an id never share a read state. */
+export function avatarBubbleMessageKey(identity: AvatarDeckIdentity, scopeGeneration: number, id: number, sentAt: string): string {
+  return JSON.stringify([identity.deckRunId, identity.broker_url, scopeGeneration, id, sentAt])
 }
 
 /**
@@ -215,9 +226,12 @@ export function projectAvatarBubble(input: AvatarBubbleInput): AvatarBubbleModel
       if (!lostKeys.has(card.key)) cards.push(card)
     }
     for (const message of box.messages) {
+      const key = avatarBubbleMessageKey(identity, box.scopeGeneration, message.id, message.sent_at)
       courrier.push({
-        key: JSON.stringify([identity.deckRunId, identity.broker_url, message.id]),
+        key,
         identity,
+        scopeGeneration: box.scopeGeneration,
+        read: box.reads.get(key) ?? null,
         deckLabel,
         id: message.id,
         fromPeerId: safeLine(message.from_peer_id),
@@ -285,19 +299,41 @@ export interface AvatarBubbleFocusIntent {
   broker_url: string
 }
 
+export interface AvatarBubbleReadIntent {
+  generation: number
+  deckRunId: string
+  broker_url: string
+  scopeGeneration: number
+  id: number
+  sentAt: string
+}
+
 export const AVATAR_BUBBLE_CHANNELS = {
   getState: 'avatar-bubble:get-state',
   state: 'avatar-bubble:state',
   act: 'avatar-bubble:act',
+  markSeen: 'avatar-bubble:mark-seen',
+  ack: 'avatar-bubble:ack',
   focusDeck: 'avatar-bubble:focus-deck',
   close: 'avatar-bubble:close',
   reportError: 'avatar-bubble:report-error'
 } as const
 
+export function avatarBubbleReadApi(
+  invoke: (channel: string, intent: AvatarBubbleReadIntent) => Promise<unknown>
+): Pick<AvatarBubbleApi, 'markSeen' | 'ack'> {
+  return {
+    markSeen: (intent) => invoke(AVATAR_BUBBLE_CHANNELS.markSeen, intent) as Promise<InboxAckStatus>,
+    ack: (intent) => invoke(AVATAR_BUBBLE_CHANNELS.ack, intent) as Promise<InboxAckStatus>
+  }
+}
+
 export interface AvatarBubbleApi {
   getState(): Promise<AvatarBubbleState>
   onState(callback: (state: AvatarBubbleState) => void): () => void
   act(intent: AvatarBubbleActIntent): Promise<{ outcome: AvatarBubbleActOutcome; reason?: string }>
+  markSeen(intent: AvatarBubbleReadIntent): Promise<InboxAckStatus>
+  ack(intent: AvatarBubbleReadIntent): Promise<InboxAckStatus>
   focusDeck(intent: AvatarBubbleFocusIntent): Promise<void>
   close(): Promise<void>
   reportError(message: string): void

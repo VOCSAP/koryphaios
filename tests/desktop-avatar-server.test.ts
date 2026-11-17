@@ -12,6 +12,7 @@ import {
   observeAvatarRequest,
   startAvatarServer,
   type AvatarDeckSocket,
+  type AvatarInboxSink,
   type AvatarServer,
   type AvatarSocketHub,
   type AvatarSocketHubOptions
@@ -35,7 +36,9 @@ interface AvatarResponse {
   body: Record<string, unknown>
 }
 
-async function openServer(options: { allowedBrokerUrls?: readonly string[] } = {}): Promise<{ server: AvatarServer; state: AvatarState; reports: string[]; setNow(now: number): void }> {
+async function openServer(
+  options: { allowedBrokerUrls?: readonly string[]; inbox?: AvatarInboxSink } = {}
+): Promise<{ server: AvatarServer; state: AvatarState; reports: string[]; setNow(now: number): void }> {
   let now = 0
   const state = new AvatarState({ now: () => now })
   const reports: string[] = []
@@ -45,7 +48,8 @@ async function openServer(options: { allowedBrokerUrls?: readonly string[] } = {
     state,
     token,
     report: (_scope, message) => reports.push(message),
-    allowedBrokerUrls: () => options.allowedBrokerUrls ?? [attach.broker_url]
+    allowedBrokerUrls: () => options.allowedBrokerUrls ?? [attach.broker_url],
+    ...(options.inbox ? { inbox: options.inbox } : {})
   })
   return { server, state, reports, setNow: (next) => { now = next } }
 }
@@ -291,6 +295,28 @@ test('a context-free reattach does not lower the generation floor of the Deck', 
   }
 })
 
+test('an accepted attach on another scope generation empties the inbox at once, one on the same generation does not', async () => {
+  const { sink, calls } = inboxLog()
+  const { server } = await openServer({ inbox: sink })
+  const context = { group_id: '11111111111111111111111111111111', project_key: 'project-1', scope_generation: 2 }
+  const a3 = { ...attach, capabilities: ['a3_context' as const, 'a3_inbox' as const] }
+  const purged = [`clear ${attach.deckRunId} ${attach.broker_url}`, `detach ${attach.deckRunId} ${attach.broker_url}`]
+  try {
+    expect((await post(server, '/attach', JSON.stringify({ ...a3, context }))).status).toBe(200)
+    expect((await post(server, '/attach', JSON.stringify({ ...a3, context }))).status).toBe(200)
+    expect(calls, 'first attach and a same-generation reattach').toEqual([])
+    expect((await post(server, '/attach', JSON.stringify({ ...a3, context: { ...context, scope_generation: 1 } }))).status).toBe(409)
+    expect(calls, 'a refused attach').toEqual([])
+    expect((await post(server, '/attach', JSON.stringify({ ...a3, context: { ...context, scope_generation: 3 } }))).status).toBe(200)
+    expect(calls).toEqual(purged)
+    calls.length = 0
+    expect((await post(server, '/attach', JSON.stringify(a3))).status).toBe(200)
+    expect(calls, 'a reattach without a context after a generation with an inbox').toEqual(purged)
+  } finally {
+    await server.close()
+  }
+})
+
 test('rejects an attach PID that cannot prove Deck process ownership', async () => {
   const { server } = await openServer()
   try {
@@ -305,8 +331,21 @@ test('rejects an attach PID that cannot prove Deck process ownership', async () 
   }
 })
 
-test('removes a suspect Deck only when its PID confirms it is dead', async () => {
-  const { server, state, setNow } = await openServer()
+function inboxLog(): { sink: AvatarInboxSink; calls: string[] } {
+  const calls: string[] = []
+  return {
+    calls,
+    sink: {
+      receive: () => undefined,
+      clear: (identity) => calls.push(`clear ${identity.deckRunId} ${identity.broker_url}`),
+      detach: (identity) => calls.push(`detach ${identity.deckRunId} ${identity.broker_url}`)
+    }
+  }
+}
+
+test('removes a suspect Deck only when its PID confirms it is dead, and its read states go with it', async () => {
+  const { sink, calls } = inboxLog()
+  const { server, state, setNow } = await openServer({ inbox: sink })
   try {
     expect(await post(server, '/attach', JSON.stringify(attach))).toMatchObject({ status: 200 })
     setNow(15_000)
@@ -314,10 +353,17 @@ test('removes a suspect Deck only when its PID confirms it is dead', async () =>
     const probed: number[] = []
     server.sweepDeadDecks((pid) => {
       probed.push(pid)
+      return true
+    })
+    expect(calls).toEqual([])
+
+    server.sweepDeadDecks((pid) => {
+      probed.push(pid)
       return false
     })
 
-    expect(probed).toEqual([attach.deckPid])
+    expect(probed).toEqual([attach.deckPid, attach.deckPid])
+    expect(calls).toEqual([`detach ${attach.deckRunId} ${attach.broker_url}`])
     expect(server.attachedDecks()).toEqual([])
     expect(state.summary()).toMatchObject({ face: 'seul', decks: [] })
   } finally {
@@ -860,7 +906,8 @@ function inboxHub(negotiated = true) {
     inboxGeneration: (identity) => (negotiated && identity.deckRunId === deck.deckRunId ? 3 : undefined),
     inbox: {
       receive: (identity, frame) => received.push([identity.deckRunId, frame.seq]),
-      clear: (identity) => cleared.push(identity.deckRunId)
+      clear: (identity) => cleared.push(identity.deckRunId),
+      detach: () => undefined
     }
   })
   return { ...opened, received, cleared }
@@ -923,6 +970,26 @@ test('sends an inbox action as a command carrying its payload and returns the De
   expect(socket.sent.at(-1)).toMatchObject({ type: 'command', command: 'inbox_action', inbox: action, ...deck })
   socket.receive({ type: 'command_result', requestId: lastRequestId(socket), ok: true, outcome: 'refused', reason: 'informational' })
   expect(await settledWithin(sent)).toMatchObject({ ok: true, outcome: 'refused', reason: 'informational' })
+})
+
+test('a /detach reaches the inbox sink, whose read states live as long as the attachment', async () => {
+  const detached: string[] = []
+  const server = await startAvatarServer({
+    avatarRunId: 'avatar-run-1',
+    certificate: await certificate,
+    state: new AvatarState({ now: () => 0 }),
+    token,
+    report: () => undefined,
+    inbox: { receive: () => undefined, clear: () => undefined, detach: (identity) => detached.push(identity.deckRunId) }
+  })
+  try {
+    expect((await post(server, '/attach', JSON.stringify(attach))).status).toBe(200)
+    expect(detached).toEqual([])
+    await post(server, '/detach', JSON.stringify({ deckRunId: attach.deckRunId, broker_url: attach.broker_url }))
+    expect(detached).toEqual([attach.deckRunId])
+  } finally {
+    await server.close()
+  }
 })
 
 test('refuses the A3 context when the server was given no broker allow-list', async () => {

@@ -4,9 +4,14 @@ import type {
   AvatarInboxSnapshotFrame,
   InboxOutcome
 } from '../shared/avatar-inbox-protocol'
+import { avatarBubbleMessageKey } from '../shared/avatar-bubble-view'
 import type { AvatarDeckIdentity } from '../shared/avatar-state'
+import type { InboxAckStatus } from '../shared/types'
 import type { AvatarCommandResult, AvatarInboxSink } from './avatar-server'
 import type { reportError } from './log'
+
+/** About ten full snapshots of messages: a mark of a message that left the snapshot is kept this long. */
+export const AVATAR_READ_CAP_PER_DECK = 500
 
 /**
  * What a gesture became. 'busy' is a second gesture on an id already in
@@ -17,11 +22,23 @@ export type AvatarInboxGestureResult =
   | { outcome: InboxOutcome; reason?: string }
   | { outcome: 'busy' | 'unknown' | 'failed' }
 
+export interface AvatarInboxReadEntry {
+  scopeGeneration: number
+  id: number
+  sentAt: string
+}
+
+export type AvatarInboxReadRefusal = 'no_box' | 'stale_generation' | 'no_message'
+
+export type AvatarInboxReadResult = { read: InboxAckStatus } | { refused: AvatarInboxReadRefusal }
+
 export interface AvatarInboxBox extends AvatarInboxContent {
   identity: AvatarDeckIdentity
   scopeGeneration: number
   /** Ids this Avatar settled since the snapshot; the next snapshot is authoritative. */
   settledLocally: ReadonlySet<string>
+  /** Read states of this Deck's messages, keyed by avatarBubbleMessageKey. */
+  reads: ReadonlyMap<string, InboxAckStatus>
 }
 
 export interface AvatarInboxServiceOptions {
@@ -33,6 +50,10 @@ export interface AvatarInboxServiceOptions {
 export interface AvatarInboxService extends AvatarInboxSink {
   boxes(): AvatarInboxBox[]
   act(identity: AvatarDeckIdentity, action: AvatarInboxAction): Promise<AvatarInboxGestureResult>
+  /** Records seen or acked for a message the Deck's current snapshot holds; acked is never lowered to seen. */
+  markRead(identity: AvatarDeckIdentity, entry: AvatarInboxReadEntry, status: InboxAckStatus): AvatarInboxReadResult
+  /** The Avatar stops: every read state goes. */
+  dispose(): void
 }
 
 interface Box {
@@ -41,22 +62,63 @@ interface Box {
   settledLocally: Set<string>
 }
 
+interface DeckReads {
+  scopeGeneration: number
+  entries: Map<string, InboxAckStatus>
+}
+
 function deckKey(identity: AvatarDeckIdentity): string {
   return JSON.stringify([identity.deckRunId, identity.broker_url])
 }
 
-/** In memory only: a box lives while its Deck's socket is bound, and nothing reaches the disk. */
+/**
+ * In memory only, nothing reaches the disk. A box lives while its Deck's socket
+ * is bound; a read state lives while the Deck stays attached on the same scope
+ * generation, so a socket that drops and rebinds keeps what was read.
+ */
 export function createAvatarInboxService(options: AvatarInboxServiceOptions): AvatarInboxService {
   const boxes = new Map<string, Box>()
+  const reads = new Map<string, DeckReads>()
   const inFlight = new Set<string>()
 
   return {
     receive(identity, frame) {
-      boxes.set(deckKey(identity), { identity, frame, settledLocally: new Set() })
+      const key = deckKey(identity)
+      if (reads.get(key)?.scopeGeneration !== frame.scope_generation) reads.delete(key)
+      boxes.set(key, { identity, frame, settledLocally: new Set() })
       options.changed()
     },
     clear(identity) {
       if (boxes.delete(deckKey(identity))) options.changed()
+    },
+    detach(identity) {
+      if (reads.delete(deckKey(identity))) options.changed()
+    },
+    dispose() {
+      reads.clear()
+    },
+    markRead(identity, entry, status) {
+      const key = deckKey(identity)
+      const box = boxes.get(key)
+      if (!box) return { refused: 'no_box' }
+      if (box.frame.scope_generation !== entry.scopeGeneration) return { refused: 'stale_generation' }
+      if (!box.frame.messages.some((message) => message.id === entry.id && message.sent_at === entry.sentAt)) {
+        return { refused: 'no_message' }
+      }
+      let deck = reads.get(key)
+      if (!deck) {
+        deck = { scopeGeneration: entry.scopeGeneration, entries: new Map() }
+        reads.set(key, deck)
+      }
+      const messageKey = avatarBubbleMessageKey(identity, entry.scopeGeneration, entry.id, entry.sentAt)
+      const read = deck.entries.get(messageKey) === 'acked' ? 'acked' : status
+      deck.entries.delete(messageKey)
+      deck.entries.set(messageKey, read)
+      for (const oldest of deck.entries.keys()) {
+        if (deck.entries.size <= AVATAR_READ_CAP_PER_DECK) break
+        deck.entries.delete(oldest)
+      }
+      return { read }
     },
     boxes() {
       return [...boxes.values()].map((box) => ({
@@ -66,7 +128,8 @@ export function createAvatarInboxService(options: AvatarInboxServiceOptions): Av
         messages: box.frame.messages,
         closed: box.frame.closed,
         truncated: box.frame.truncated,
-        settledLocally: new Set(box.settledLocally)
+        settledLocally: new Set(box.settledLocally),
+        reads: new Map(reads.get(deckKey(box.identity))?.entries)
       }))
     },
     async act(identity, action) {
