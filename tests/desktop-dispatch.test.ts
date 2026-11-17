@@ -1970,6 +1970,32 @@ test("a dispatch request outcome names a refusal and an unconfirmed delivery ins
   expect(subset.note).toContain('"Card B" not sent');
 });
 
+test("a refused wave whose head also executed a directive says the directive ran instead of 'nothing was announced'", () => {
+  const out = composeDispatchOutcome({
+    sent: false,
+    delivery: "not-sent",
+    reason: "queue-changed",
+    notSent: [{ id: A.id, title: "Card A", kind: "feature" }],
+    directives: [{ id: "d1", title: "Clear", injected: [{ peerId: "worker-9" }], unreached: [] } as never]
+  });
+  expect(out.cards.map((c) => c.kind)).toEqual(["directive"]);
+  expect(out.note).toContain("not sent (queue-changed)");
+  expect(out.note).toContain("1 directive card executed by the Deck");
+  expect(out.note).not.toContain("nothing was announced");
+});
+
+test("an unconfirmed wave whose head also executed a directive still says the directive ran", () => {
+  const out = composeDispatchOutcome({
+    sent: false,
+    delivery: "unknown",
+    reason: "unconfirmed",
+    unconfirmed: [{ id: A.id, title: "Card A", kind: "feature" }],
+    directives: [{ id: "d1", title: "Clear", injected: [{ peerId: "worker-9" }], unreached: [] } as never]
+  });
+  expect(out.note).toContain("NOT confirmed");
+  expect(out.note).toContain("1 directive card executed by the Deck");
+});
+
 async function unknownWave(): Promise<{ pending: NonNullable<Awaited<ReturnType<typeof dispatchWave>>["pending"]>; operationId: string }> {
   const first = scriptedPort([(_a, i) => unknownOf(i), (_a, i) => unknownOf(i)]);
   const out = await dispatchWave([A], { atomic: waveDeps(first.port), legacy: legacyMustNotRun, trace: () => {} });
@@ -2283,6 +2309,29 @@ test("assign: an assignment left unknown is resolved under the same operation id
   expect(await h.assign(A.id, "worker-9")).toEqual({ sent: true, delivery: "sent" });
   expect(fresh.posted.map((p) => p.action)).toEqual(["execute"]);
   expect(fresh.posted[0]!.intent.operation_id).not.toBe(first.posted[0]!.intent.operation_id);
+});
+
+test("assign: a click for another peer that only settles an earlier assignment as sent names the earlier peer and sends nothing", async () => {
+  const first = scriptedPort([(_a, i) => unknownOf(i), (_a, i) => unknownOf(i)]);
+  const settled = scriptedPort([(_a, i) => sentOf(i)]);
+  const h = assignerHarness(portQueue(first.port, settled.port));
+  await h.assign(A.id, "worker-9");
+  expect(await h.assign(A.id, " worker-7 ")).toEqual({
+    sent: false,
+    delivery: "not-sent",
+    reason: "earlier-assignment-sent",
+    earlierTo: "worker-9"
+  });
+  expect(settled.posted.map((p) => [p.action, p.intent.to_peer_id])).toEqual([["resolve", "worker-9"]]);
+  expect(h.calls).not.toContain("announce");
+});
+
+test("assign: a click for the same peer written with surrounding spaces is the same peer when an earlier assignment settles as sent", async () => {
+  const first = scriptedPort([(_a, i) => unknownOf(i), (_a, i) => unknownOf(i)]);
+  const settled = scriptedPort([(_a, i) => sentOf(i)]);
+  const h = assignerHarness(portQueue(first.port, settled.port));
+  await h.assign(A.id, "worker-9");
+  expect(await h.assign(A.id, " worker-9 ")).toEqual({ sent: true, delivery: "sent" });
 });
 
 test("assign: an unknown assignment of one card does not hold another card", async () => {

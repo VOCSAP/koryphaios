@@ -36,6 +36,7 @@ export function dispatchFeedback(r: DispatchResult): ToastFeedback {
 
 export function assignFeedback(r: AssignResult): ToastFeedback {
   if (isUnconfirmed(r)) return { key: 'toast.orderUnconfirmed', level: 'info' }
+  if (r.earlierTo !== undefined) return { key: 'toast.assignEarlierSent', level: 'info', params: { peer: r.earlierTo } }
   if (r.sent) {
     if (r.writeSkipped) return { key: 'toast.assignSkipped', level: 'info' }
     return { key: 'toast.assignSent', level: 'success' }

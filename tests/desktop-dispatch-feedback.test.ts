@@ -106,6 +106,12 @@ describe("selection", () => {
     });
   }
 
+  test("assign, a click that only confirmed an earlier assignment to another peer names that peer and is not a success", () => {
+    expect(
+      assignFeedback({ sent: false, delivery: "not-sent", reason: "earlier-assignment-sent", earlierTo: "peer-a" })
+    ).toEqual({ key: "toast.assignEarlierSent", level: "info", params: { peer: "peer-a" } });
+  });
+
   const stopCases: Array<[string, StopResult, string, string]> = [
     ["card-changed", { stopped: false, via: "none", reason: "card-changed" }, "toast.stopCardChanged", "info"],
     ["not-found", { stopped: false, via: "none", reason: "not-found" }, "toast.stopNotFound", "info"],
@@ -364,6 +370,18 @@ describe("RoadmapView", () => {
     await click(buttonByText(document, "peer-worker", ".rm-assign-row"));
     expect(toasts).toEqual([{ key: "toast.orderUnconfirmed", level: "info", params: undefined }]);
   });
+
+  test("an assignment that only confirmed an earlier one to another peer names that peer", async () => {
+    assignResult = { sent: false, delivery: "not-sent", reason: "earlier-assignment-sent", earlierTo: "peer-a" };
+    await mount(RoadmapView);
+    const target = [...container.querySelectorAll<HTMLElement>(".rm-card")].find((c) => c.textContent?.includes("free-card"));
+    await act(async () => {
+      target!.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 10, clientY: 10 }));
+    });
+    await click(buttonByText(document, "roadmap.menuAssign", '.context-menu [role="menuitem"]'));
+    await click(buttonByText(document, "peer-worker", ".rm-assign-row"));
+    expect(toasts).toEqual([{ key: "toast.assignEarlierSent", level: "info", params: { peer: "peer-a" } }]);
+  });
 });
 
 describe("RoadmapList", () => {
@@ -390,5 +408,14 @@ describe("RoadmapList", () => {
     await click(buttonByText(document, "roadmap.launchAgent", ".rm-detail-actions button"));
     await click(buttonByText(document, "peer-worker", ".msheet-item"));
     expect(toasts).toEqual([{ key: "toast.orderCardChanged", level: "info", params: undefined }]);
+  });
+
+  test("an assignment that only confirmed an earlier one to another peer names that peer", async () => {
+    assignResult = { sent: false, delivery: "not-sent", reason: "earlier-assignment-sent", earlierTo: "peer-a" };
+    await mount(RoadmapList);
+    await openCard(".mrm-card", "free-card");
+    await click(buttonByText(document, "roadmap.launchAgent", ".rm-detail-actions button"));
+    await click(buttonByText(document, "peer-worker", ".msheet-item"));
+    expect(toasts).toEqual([{ key: "toast.assignEarlierSent", level: "info", params: { peer: "peer-a" } }]);
   });
 });

@@ -1113,6 +1113,8 @@ export const EN_DEFAULTS: Record<string, string> = {
   'toast.orderCardChanged': 'Card(s) changed meanwhile. No order sent.',
   'toast.orderUnconfirmed': 'Delivery not confirmed. Check the journal before sending again.',
   'toast.dispatchSkipped': 'Partial dispatch: {sent} card(s) taken on, {n} announced to the team-lead but closed meanwhile.',
+  'toast.assignEarlierSent':
+    'Nothing sent: the earlier assignment of this card, to {peer}, is now confirmed. Stop it before assigning the card again.',
   'toast.assignSkipped': 'Order sent, but the card closed meanwhile: the agent holds an order for a closed card.',
   'toast.orderNotSent': 'Order not sent: the broker refused it.',
   'roadmap.confirmDoneTitle': 'Mark as done?',

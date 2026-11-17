@@ -895,6 +895,7 @@
   "toast.orderCardChanged": "Carte(s) modifiée(s) entre-temps. Aucun ordre envoyé.",
   "toast.orderUnconfirmed": "Livraison non confirmée. Vérifie le journal avant de renvoyer.",
   "toast.dispatchSkipped": "Envoi partiel : {sent} carte(s) prise(s) en charge, {n} annoncée(s) au team-lead puis fermée(s) entre-temps.",
+  "toast.assignEarlierSent": "Rien n'a été envoyé : l'assignation précédente de cette carte, à {peer}, est maintenant confirmée. Arrête-la avant de réassigner la carte.",
   "toast.assignSkipped": "Ordre envoyé, mais la carte a été fermée entre-temps : l'agent a un ordre sur une carte fermée.",
   "toast.orderNotSent": "Ordre non envoyé : le broker l'a refusé.",
   "roadmap.confirmDoneTitle": "Marquer comme terminé ?",

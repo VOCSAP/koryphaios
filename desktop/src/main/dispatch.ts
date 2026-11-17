@@ -610,12 +610,17 @@ export function composeDispatchOutcome(result: DispatchResult): DispatchRequestO
 function dispatchOutcomeNote(result: DispatchResult, cardCount: number): string {
   const titles = (members: DispatchedWaveMember[] | undefined): string =>
     (members ?? []).map((m) => `"${m.title}"`).join(', ')
+  const ran = result.directives?.length ?? 0
+  const ranNote = `${ran} directive card${ran === 1 ? '' : 's'} executed by the Deck`
   if (result.delivery === 'unknown') {
-    return `delivery NOT confirmed for ${titles(result.unconfirmed) || 'the wave'}: the order may or may not have reached the team-lead and was not resent; check before requesting again`
+    const unconfirmed = `delivery NOT confirmed for ${titles(result.unconfirmed) || 'the wave'}: the order may or may not have reached the team-lead and was not resent; check before requesting again`
+    return ran === 0 ? unconfirmed : `${unconfirmed}; ${ranNote}`
   }
   if (result.delivery === 'not-sent') {
     const named = titles(result.notSent)
-    return `not sent (${result.reason ?? 'refused'})${named ? `: ${named}` : ''}; no card was moved and nothing was announced`
+    const head = `not sent (${result.reason ?? 'refused'})${named ? `: ${named}` : ''}`
+    if (ran === 0) return `${head}; no card was moved and nothing was announced`
+    return `${head}; no card of the wave was moved or announced; ${ranNote}`
   }
   const skipped = result.skipped?.length ?? 0
   if (cardCount === 0 && skipped === 0) {
@@ -749,8 +754,8 @@ export interface AssignDeps {
 
 export interface AssignGate {
   remember: (cardId: string, pending: PendingDispatch) => void
-  /** The result to return instead of a new assignment of this card while an earlier one is unconfirmed, or null. */
-  beforeAssign: (cardId: string, port: AtomicPort | null) => Promise<AssignResult | null>
+  /** The result to return instead of a new assignment of this card to `target` while an earlier one is unconfirmed, or null. */
+  beforeAssign: (cardId: string, port: AtomicPort | null, target: string) => Promise<AssignResult | null>
 }
 
 // Per card: an unknown order about one card says nothing about another.
@@ -760,7 +765,7 @@ export function createAssignGate(journal: AssignDeps['journal']): AssignGate {
     remember: (cardId, next) => {
       pending.set(cardId, next)
     },
-    beforeAssign: async (cardId, port) => {
+    beforeAssign: async (cardId, port, target) => {
       const current = pending.get(cardId)
       if (!current) return null
       const title = current.members[0]?.title ?? cardId
@@ -769,8 +774,10 @@ export function createAssignGate(journal: AssignDeps['journal']): AssignGate {
       if (settled.state === 'unknown') return { sent: false, delivery: 'unknown', reason: 'unconfirmed' }
       pending.delete(cardId)
       if (settled.state === 'sent') {
-        journal(`unconfirmed assignment of "${title}" settled: it was sent`)
-        return { sent: true, delivery: 'sent' }
+        const earlierTo = current.intent.to_peer_id
+        journal(`unconfirmed assignment of "${title}" to "${earlierTo}" settled: it was sent`)
+        if (earlierTo === target) return { sent: true, delivery: 'sent' }
+        return { sent: false, delivery: 'not-sent', reason: 'earlier-assignment-sent', earlierTo }
       }
       journal(
         settled.state === 'abandoned'
@@ -816,7 +823,7 @@ export async function runAssign(id: string, peerId: string, deps: AssignDeps): P
   if (!target) return { sent: false }
   try {
     if (deps.gate) {
-      const early = await deps.gate.beforeAssign(id, deps.atomic ?? null)
+      const early = await deps.gate.beforeAssign(id, deps.atomic ?? null, target)
       if (early) return early
     }
     const item = await deps.read(id)

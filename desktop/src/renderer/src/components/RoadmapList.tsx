@@ -282,7 +282,7 @@ export function RoadmapList(): React.JSX.Element {
     setAssignItem(null)
     try {
       const f = assignFeedback(await window.api.roadmapAssign(item.id, peerId))
-      showToast(f.key, f.level)
+      showToast(f.key, f.level, { params: f.params })
       await refresh()
     } catch (e) {
       setMutationError(e instanceof Error ? e.message : String(e))

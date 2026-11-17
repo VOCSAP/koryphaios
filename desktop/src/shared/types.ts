@@ -1118,6 +1118,11 @@ export interface AssignResult {
   reason?: string
   /** Pre-atomic path only: the announce was delivered but the card changed before it moved to in_progress. */
   writeSkipped?: boolean
+  /**
+   * Set with reason 'earlier-assignment-sent': this click sent nothing, it only
+   * confirmed an earlier unconfirmed assignment of the card, which went to this peer.
+   */
+  earlierTo?: string
 }
 
 /** Result of an operator stop on an in_progress item (PLAN K3). */
