@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
+  demoteExtraTeamLeads,
   fromWorkspaceSessions,
   joinArgs,
   splitArgs,
@@ -146,6 +147,76 @@ test("fromWorkspaceSessions honours position ordering", () => {
     { claudeSessionId: "a", name: "A", cwd: "/p", args: [], color: "#000", position: 0 },
   ];
   expect(fromWorkspaceSessions(sessions).map((d) => d.name)).toEqual(["A", "B"]);
+});
+
+function roleDef(name: string, extra: { role?: string; lead?: boolean } = {}) {
+  return { id: `local-${name}`, name, cwd: "/p", command: "", args: "", sessionId: `sid-${name}`, color: "#000", createdAt: 1, ...extra };
+}
+
+function persistedWith(extra: Record<string, unknown>, i = 0): WorkspaceSession {
+  return { claudeSessionId: `sid-${i}`, name: `s-${i}`, cwd: "/p", args: [], color: "#000", position: i, ...extra } as WorkspaceSession;
+}
+
+test("role and lead survive the workspace round trip, only on the sessions that had them", () => {
+  const persisted = toWorkspaceSessions([
+    roleDef("boss", { role: "team-lead", lead: true }),
+    roleDef("dev", { role: "developer" }),
+    roleDef("plain"),
+  ]);
+  expect(persisted.map((s) => s.role)).toEqual(["team-lead", "developer", undefined]);
+  expect(persisted.map((s) => s.lead)).toEqual([true, undefined, undefined]);
+  const round = fromWorkspaceSessions(persisted);
+  expect(round.map((d) => d.role)).toEqual(["team-lead", "developer", undefined]);
+  expect(round.map((d) => d.lead)).toEqual([true, undefined, undefined]);
+});
+
+test("a workspace saved before role and lead existed restores without either and demotes nobody", () => {
+  const old = fromWorkspaceSessions([persistedWith({}, 0), persistedWith({}, 1)]);
+  for (const d of old) {
+    expect("role" in d).toBe(false);
+    expect("lead" in d).toBe(false);
+  }
+  expect(demoteExtraTeamLeads(old)).toEqual([]);
+});
+
+// The workspace file is repo-cloned (hostile input): role goes through the spawn
+// normalisation and lead counts only as the boolean true.
+test("a hostile role or lead in the file is normalised or dropped on restore, never carried as is", () => {
+  const roles: unknown[] = ["Team Lead!", "  DEV  ", "!!!", "", 7, null, { toString: () => "team-lead" }, ["team-lead"]];
+  expect(fromWorkspaceSessions(roles.map((role, i) => persistedWith({ role }, i))).map((d) => d.role)).toEqual([
+    "team-lead",
+    "dev",
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+  ]);
+  const leads: unknown[] = ["true", 1, "yes", {}, [true], null, false];
+  expect(fromWorkspaceSessions(leads.map((lead, i) => persistedWith({ lead }, i))).map((d) => d.lead)).toEqual(
+    leads.map(() => undefined),
+  );
+  expect(fromWorkspaceSessions([persistedWith({ lead: true })]).map((d) => d.lead)).toEqual([true]);
+});
+
+test("demoteExtraTeamLeads keeps the first team-lead role and the first lead crown and names each session that lost one, once", () => {
+  const defs = fromWorkspaceSessions([
+    persistedWith({ role: "team-lead", lead: true }, 0),
+    persistedWith({ role: "team-lead" }, 1),
+    persistedWith({ role: "developer", lead: true }, 2),
+    persistedWith({ role: "team-lead", lead: true }, 3),
+    persistedWith({ role: "reviewer" }, 4),
+  ]);
+  expect(demoteExtraTeamLeads(defs)).toEqual(["s-1", "s-2", "s-3"]);
+  expect(defs.map((d) => d.role)).toEqual(["team-lead", undefined, "developer", undefined, "reviewer"]);
+  expect(defs.map((d) => d.lead)).toEqual([true, undefined, undefined, undefined, undefined]);
+});
+
+test("demoteExtraTeamLeads follows position order, not the order of the file", () => {
+  const defs = fromWorkspaceSessions([persistedWith({ role: "team-lead" }, 1), persistedWith({ role: "team-lead" }, 0)]);
+  expect(demoteExtraTeamLeads(defs)).toEqual(["s-1"]);
+  expect(defs.map((d) => [d.name, d.role])).toEqual([["s-0", "team-lead"], ["s-1", undefined]]);
 });
 
 // ----- open-id-registry -----

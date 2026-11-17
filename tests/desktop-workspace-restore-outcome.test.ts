@@ -10,6 +10,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { extractBracedBody } from "./_braced-body";
 import {
+  workspaceRestoreDemotionToast,
   workspaceRestoreOrThrow,
   workspaceRestoreToastKeyFor,
   type WorkspaceRestoreQuietReason
@@ -21,6 +22,17 @@ import * as workspaceRestoreOutcome from "../desktop/src/shared/workspace-restor
 
 test("ok:true resolves to { applied: true }", () => {
   expect(workspaceRestoreOrThrow({ ok: true })).toEqual({ applied: true });
+});
+
+test("the sessions a restore demoted travel on the applied outcome and name themselves in one toast", () => {
+  const outcome = workspaceRestoreOrThrow({ ok: true, demotedTeamLeads: ["deputy", "third"] });
+  expect(outcome).toEqual({ applied: true, demotedTeamLeads: ["deputy", "third"] });
+  expect(workspaceRestoreDemotionToast(outcome as { applied: true; demotedTeamLeads?: string[] })).toEqual({
+    key: "toast.workspaceRestoreDemotedTeamLeads",
+    params: { names: "deputy, third" }
+  });
+  expect(workspaceRestoreDemotionToast({ applied: true })).toBeNull();
+  expect(workspaceRestoreDemotionToast({ applied: true, demotedTeamLeads: [] })).toBeNull();
 });
 
 const quietReasons: WorkspaceRestoreQuietReason[] = [

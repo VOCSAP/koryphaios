@@ -19,13 +19,15 @@ function extractShowToast(source: string): string {
 const SHOW_TOAST_BODY = extractShowToast(STORE);
 
 type ToastAction = { label: string; onClick: () => void };
-type ToastState = { toast: string | null; toastAction: ToastAction | null };
+type ToastParams = Record<string, string | number>;
+type ToastOpts = { action?: ToastAction; raw?: boolean; params?: ToastParams };
+type ToastState = { toast: string | null; toastAction: ToastAction | null; toastParams?: ToastParams | null };
 
 function toastHarness(): {
   advance(ms: number): void;
   fireDue(): void;
   fireNext(): void;
-  showToast(key: string, variant: "success" | "info" | "error", opts?: { action?: ToastAction }): boolean;
+  showToast(key: string, variant: "success" | "info" | "error", opts?: ToastOpts): boolean;
   state(): ToastState;
 } {
   let now = 10_000;
@@ -42,7 +44,7 @@ function toastHarness(): {
     TOAST_MS,
     { now: () => now },
     (callback: () => void, delay: number) => { timers.push({ callback, dueAt: now + delay }); }
-  ) as (key: string, variant: "success" | "info" | "error", opts?: { action?: ToastAction }) => boolean;
+  ) as (key: string, variant: "success" | "info" | "error", opts?: ToastOpts) => boolean;
   return {
     advance: (ms) => { now += ms; },
     fireDue: () => {
@@ -108,4 +110,38 @@ test("a repair after the info toast expires recreates its undo action before the
   expect(toast.showToast("toast.terminalCopyRepaired", "info", { action: second })).toBe(true);
   expect(toast.state().toast).toBe("toast.terminalCopyRepaired");
   expect(toast.state().toastAction).toBe(second);
+});
+
+const NAMES = "toast.workspaceRestoreDemotedTeamLeads";
+
+test("a repeat that replaces the visible params stays up a full duration, and the first timer no longer closes it", () => {
+  const toast = toastHarness();
+
+  expect(toast.showToast(NAMES, "info", { params: { names: "first" } })).toBe(true);
+  toast.advance(TOAST_MS.info - 1);
+  expect(toast.showToast(NAMES, "info", { params: { names: "second" } })).toBe(true);
+  expect(toast.state().toastParams).toEqual({ names: "second" });
+
+  toast.advance(1);
+  toast.fireDue();
+  expect(toast.state().toast, "the first timer must not close the replaced toast").toBe(NAMES);
+
+  toast.advance(TOAST_MS.info - 2);
+  toast.fireDue();
+  expect(toast.state().toast, "one tick short of a full duration after the replacement").toBe(NAMES);
+  toast.advance(1);
+  toast.fireDue();
+  expect(toast.state().toast).toBeNull();
+});
+
+test("an identical repeat keeps the first expiry", () => {
+  const toast = toastHarness();
+
+  toast.showToast(NAMES, "info", { params: { names: "first" } });
+  toast.advance(TOAST_MS.info - 1);
+  expect(toast.showToast(NAMES, "info", { params: { names: "first" } })).toBe(false);
+
+  toast.advance(1);
+  toast.fireDue();
+  expect(toast.state().toast).toBeNull();
 });

@@ -187,6 +187,7 @@ export const EN_DEFAULTS: Record<string, string> = {
   'toast.workspaceMissing': 'This workspace no longer exists',
   'toast.workspaceRestoreBusy': 'Another workspace restore is already in progress',
   'toast.workspaceRestoreSuperseded': 'This workspace restore was replaced by a newer action',
+  'toast.workspaceRestoreDemotedTeamLeads': 'Only the first team-lead kept its role. Sessions restored without it: {names}',
   'toast.peerIdCopied': 'peer id copied',
   'toast.peerTableCopied': 'peer table copied',
 

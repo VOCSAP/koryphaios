@@ -39,7 +39,7 @@ import {
   type QuotaEpisode
 } from '@shared/quota-notice'
 import { shouldShowTemplateAppliedToast } from '@shared/template-apply-outcome'
-import { workspaceRestoreToastKeyFor } from '@shared/workspace-restore-outcome'
+import { workspaceRestoreDemotionToast, workspaceRestoreToastKeyFor } from '@shared/workspace-restore-outcome'
 import { keepDrafts, type QuestionDraft } from './components/approval-answers'
 import { TOAST_ACTION_MS, TOAST_MS } from './toast-timing'
 
@@ -382,8 +382,9 @@ interface DeckState {
    * Background/systemic failures go to the log + journal (+ banner when the
    * broker is down) -- never toast them. Same key throttled to one per 5 s.
    *
-   * Returns whether it DISPLAYED: the throttle drops a repeat instead of
-   * queueing it, so a caller carrying a count (rather than a fixed sentence)
+   * Returns whether it DISPLAYED: the throttle drops an identical repeat
+   * instead of queueing it, and a repeat whose params differ replaces the
+   * visible text. A caller carrying a count (rather than a fixed sentence)
    * needs to know whether its number was announced or must be carried over.
    */
   showToast(
@@ -1074,8 +1075,15 @@ export const useDeck = create<DeckState>((set, get) => ({
     const now = Date.now()
     const last = lastToastAt.get(key) ?? 0
     if (now - last < 5000 && get().toast === key) {
-      if (opts?.action) set({ toastAction: opts.action })
-      return false
+      const shown = get()
+      const raw = opts?.raw ?? false
+      const params = opts?.params ?? null
+      const changed =
+        shown.toastVariant !== variant || shown.toastRaw !== raw || JSON.stringify(shown.toastParams) !== JSON.stringify(params)
+      if (!changed) {
+        if (opts?.action) set({ toastAction: opts.action })
+        return false
+      }
     }
     lastToastAt.set(key, now)
     set({
@@ -1367,6 +1375,8 @@ export const useDeck = create<DeckState>((set, get) => ({
       if (outcome.applied) {
         // Close the selection window once a workspace has been loaded.
         set({ workspacesOpen: false })
+        const demotion = workspaceRestoreDemotionToast(outcome)
+        if (demotion) get().showToast(demotion.key, 'info', { params: demotion.params })
         return
       }
       const toastKey = workspaceRestoreToastKeyFor(outcome.reason)

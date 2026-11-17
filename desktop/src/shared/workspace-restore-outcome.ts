@@ -47,7 +47,7 @@ export function credentialFailureReporter(
 }
 
 export type WorkspaceRestoreResult =
-  | { ok: true }
+  | { ok: true; demotedTeamLeads?: string[] }
   | {
       ok: false
       reason: 'missing' | 'empty' | 'locked' | 'shell-declined' | 'cwd-declined' | 'lock-race' | 'unattended' | 'busy' | 'superseded' | 'credential-timed-out'
@@ -72,10 +72,12 @@ function credentialUnavailableMessage(cause: WorkspaceCredentialCause): string {
 }
 
 /** The main-process sink's resolved (non-throwing) outcome. */
-export type WorkspaceRestoreOutcome = { applied: true } | { applied: false; reason: WorkspaceRestoreQuietReason }
+export type WorkspaceRestoreOutcome =
+  | { applied: true; demotedTeamLeads?: string[] }
+  | { applied: false; reason: WorkspaceRestoreQuietReason }
 
 export function workspaceRestoreOrThrow(result: WorkspaceRestoreResult): WorkspaceRestoreOutcome {
-  if (result.ok) return { applied: true }
+  if (result.ok) return result.demotedTeamLeads ? { applied: true, demotedTeamLeads: result.demotedTeamLeads } : { applied: true }
   switch (result.reason) {
     case 'missing':
     case 'empty':
@@ -100,6 +102,15 @@ export function workspaceRestoreOrThrow(result: WorkspaceRestoreResult): Workspa
       throw new Error(`unknown workspace restore failure: ${String(_exhaustive)}`)
     }
   }
+}
+
+export function workspaceRestoreDemotionToast(outcome: {
+  applied: true
+  demotedTeamLeads?: string[]
+}): { key: 'toast.workspaceRestoreDemotedTeamLeads'; params: { names: string } } | null {
+  return outcome.demotedTeamLeads?.length
+    ? { key: 'toast.workspaceRestoreDemotedTeamLeads', params: { names: outcome.demotedTeamLeads.join(', ') } }
+    : null
 }
 
 /**

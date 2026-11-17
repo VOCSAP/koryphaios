@@ -54,13 +54,11 @@ export interface SessionDef {
    * Kebab-cased role label (^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$);
    * empty/undefined means no role. Its own field, not folded into args, so it
    * can be re-emitted fresh on both a plain spawn and a fork-resume.
-   * A role opens no capability today -- it is re-normalised through the single
-   * production sink regardless of scope. The day an authorization decision is
-   * keyed on role, this premise stops holding; that arbitration must be
-   * reopened first, card 7defe381.
-   * Deliberately absent from workspace capture: a workspace file is hostile
-   * input too, so restoring one erases the role broker-side rather than merely
-   * forgetting it.
+   * Captured in workspaces and templates, and normalised with sanitizeRole at
+   * each boundary a hostile file crosses (session creation, workspace restore).
+   * It opens no capability: an authorization decision keyed on it needs that
+   * premise reopened first. A restore keeps the role team-lead on the first
+   * session only, a rule applied apart from the uniqueness of `lead`.
    */
   role?: string
   /**
@@ -95,9 +93,9 @@ export interface SessionDef {
    */
   supervisor?: boolean
   /**
-   * The window's TEAM-LEAD (PLAN C10): the peer targeted announces (dispatch,
-   * integration notices) go to. Explicit flag, single per window (the service
-   * enforces uniqueness); captured in workspaces and templates. 👑 badge.
+   * The window's TEAM-LEAD: the peer that announces (dispatch, integration
+   * notices) target. Explicit flag, unique per window, captured in workspaces
+   * and templates; a restore keeps it on the first session only. 👑 badge.
    */
   lead?: boolean
   /**

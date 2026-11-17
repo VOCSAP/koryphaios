@@ -28,6 +28,7 @@ mock.module("@shared/template-apply-outcome", () => sharedTemplateApply);
 mock.module("@shared/workspace-restore-outcome", () => sharedWorkspaceRestore);
 
 const listeners = new Map<string, () => void>();
+let restoreOutcome: unknown = undefined;
 
 // Every `on*` subscription is recorded by name and returns its unsubscribe; any
 // other method resolves to an inert value, enough for init() to run to its end.
@@ -44,6 +45,7 @@ const api = new Proxy(
       if (["listSessions", "listWorkspaces", "listTemplates", "inboxHistory"].includes(name)) {
         return () => Promise.resolve([]);
       }
+      if (name === "restoreWorkspace") return () => Promise.resolve(restoreOutcome);
       if (name === "getConfig") return () => Promise.resolve({});
       if (name === "getI18n") return () => Promise.resolve({ dict: {}, available: [] });
       return () => Promise.resolve(undefined);
@@ -147,4 +149,50 @@ test("closing the picker resets the edit intent so the next plain open is not an
   listeners.get("onMenuEditTemplate")!();
   useDeck.getState().openTemplates(false);
   expect(useDeck.getState().templatesEdit).toBe(false);
+});
+
+const shownToast = () => {
+  const { toast, toastVariant, toastParams } = useDeck.getState();
+  return { toast, toastVariant, toastParams };
+};
+
+// Mutants: the showToast call removed from restoreWorkspace; showToast's repeat branch leaving the first toast's params on screen.
+test("a restore that demoted sessions toasts their names, and a second one inside the throttle shows its own", async () => {
+  useDeck.setState({ toast: null, toastParams: null });
+  restoreOutcome = { applied: true, demotedTeamLeads: ["deputy"] };
+  await useDeck.getState().restoreWorkspace("wsp-1");
+  expect(shownToast()).toEqual({
+    toast: "toast.workspaceRestoreDemotedTeamLeads",
+    toastVariant: "info",
+    toastParams: { names: "deputy" }
+  });
+
+  restoreOutcome = { applied: true, demotedTeamLeads: ["second", "third"] };
+  await useDeck.getState().restoreWorkspace("wsp-2");
+  expect(shownToast()).toEqual({
+    toast: "toast.workspaceRestoreDemotedTeamLeads",
+    toastVariant: "info",
+    toastParams: { names: "second, third" }
+  });
+});
+
+test("a restore that demoted nobody leaves the toast alone", async () => {
+  useDeck.setState({ toast: null, toastParams: null });
+  restoreOutcome = { applied: true };
+  await useDeck.getState().restoreWorkspace("wsp-3");
+  expect(useDeck.getState().toast).toBeNull();
+});
+
+// Mutants: the repeat branch always false (a caller carrying a count loses its number), or always true (it counts it twice).
+test("showToast returns false for an identical repeat and true when the repeat replaces what is on screen", () => {
+  const { showToast } = useDeck.getState();
+  useDeck.setState({ toast: null, toastParams: null });
+  expect(showToast("toast.queueReplaced", "info", { params: { n: 2 } })).toBe(true);
+  expect(showToast("toast.queueReplaced", "info", { params: { n: 2 } })).toBe(false);
+  expect(showToast("toast.queueReplaced", "info", { params: { n: 5 } })).toBe(true);
+  expect(useDeck.getState().toastParams).toEqual({ n: 5 });
+
+  expect(showToast("toast.queueReplaced", "error", { raw: true })).toBe(true);
+  expect(shownToast()).toEqual({ toast: "toast.queueReplaced", toastVariant: "error", toastParams: null });
+  expect(useDeck.getState().toastRaw).toBe(true);
 });

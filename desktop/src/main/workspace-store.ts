@@ -53,6 +53,9 @@ export interface WorkspaceSession {
   clodexContextTokens?: number
   /** SessionDef.disallowedTools: the only place a restored read-only tile finds its denial, `args` does not hold it. */
   disallowedTools?: string[]
+  /** SessionDef.role and .lead; typed here, re-validated by fromWorkspaceSessions because the file comes from a repo. */
+  role?: string
+  lead?: boolean
   color: string
   position: number
 }

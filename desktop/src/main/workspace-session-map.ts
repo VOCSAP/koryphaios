@@ -7,6 +7,7 @@ import { randomUUID } from 'node:crypto'
 // Relative import (not the @shared alias) so this module resolves cleanly when
 // the bun test imports it directly, per the pure-module testing convention.
 import type { SessionDef } from '../shared/types'
+import { sanitizeRole, TEAM_LEAD_ROLE } from '../shared/role'
 import { isClodexContextTokens } from '../shared/clodex-context'
 import { isToolNameList, liftDisallowedTools } from '../shared/tool-names'
 import type { WorkspaceSession } from './workspace-store'
@@ -47,9 +48,47 @@ export function toWorkspaceSessions(defs: SessionDef[]): WorkspaceSession[] {
     bridge: bridgeOf(d),
     ...contextOf(d),
     ...(d.disallowedTools?.length ? { disallowedTools: [...d.disallowedTools] } : {}),
+    ...(d.role ? { role: d.role } : {}),
+    ...(d.lead ? { lead: true } : {}),
     color: d.color,
     position: i
   }))
+}
+
+/** The persisted role through the spawn normalisation, '' when it is not a string or nothing usable remains. */
+function roleOf(source: { role?: unknown }): string {
+  return typeof source.role === 'string' ? sanitizeRole(source.role) : ''
+}
+
+/**
+ * Keep the first team-lead role and the first lead crown (position order, as
+ * `defs` comes from fromWorkspaceSessions) and strip them from the others.
+ * Returns the names of the sessions that lost one, each once, so the restore
+ * can announce them.
+ */
+export function demoteExtraTeamLeads(defs: SessionDef[]): string[] {
+  const demoted: string[] = []
+  let roleSeen = false
+  let leadSeen = false
+  for (const d of defs) {
+    let lost = false
+    if (d.role === TEAM_LEAD_ROLE) {
+      if (roleSeen) {
+        delete d.role
+        lost = true
+      }
+      roleSeen = true
+    }
+    if (d.lead) {
+      if (leadSeen) {
+        delete d.lead
+        lost = true
+      }
+      leadSeen = true
+    }
+    if (lost) demoted.push(d.name)
+  }
+  return demoted
 }
 
 /**
@@ -75,6 +114,8 @@ export function fromWorkspaceSessions(sessions: WorkspaceSession[]): SessionDef[
         bridge: bridgeOf(s),
         ...contextOf(s),
         ...(disallowedTools ? { disallowedTools } : {}),
+        ...(roleOf(s) ? { role: roleOf(s) } : {}),
+        ...(s.lead === true ? { lead: true } : {}),
         args,
         sessionId: s.claudeSessionId,
         color: s.color,

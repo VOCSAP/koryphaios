@@ -41,7 +41,7 @@ import {
   type Lock
 } from './workspace-lock'
 import type { LockConnection, LockOpener } from './file-lock'
-import { fromWorkspaceSessions, joinArgs, toWorkspaceSessions } from './workspace-session-map'
+import { demoteExtraTeamLeads, fromWorkspaceSessions, joinArgs, toWorkspaceSessions } from './workspace-session-map'
 import { logWarn, reportError } from './log'
 import { effectiveAgent, isTeamLeadAgent } from './team-lead-bridge'
 
@@ -483,6 +483,7 @@ export class WorkspaceService {
         if (gate === 'unattended') return { ok: false, reason: 'unattended' }
       }
       const defs = fromWorkspaceSessions(ws.sessions)
+      const demotedTeamLeads = demoteExtraTeamLeads(defs)
       this.restoreModPreparation?.abort()
       const controller = new AbortController()
       this.restoreModPreparation = controller
@@ -543,7 +544,9 @@ export class WorkspaceService {
           `restore(${id}) recaptured 0 sessions right after restoring ${ws.sessions.length}`
         )
       }
-      return { ok: true }
+      if (demotedTeamLeads.length === 0) return { ok: true }
+      logWarn('workspace', `restore(${id}) kept the first team-lead only; demoted: ${demotedTeamLeads.join(', ')}`)
+      return { ok: true, demotedTeamLeads }
     } finally {
       if (this.activeRestoreOperation === operation) {
         this.restoreModPreparation = null
