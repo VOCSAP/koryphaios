@@ -369,6 +369,14 @@ existant : toute ligne amont livree par le pull ecrase le rang local, et le
 toast qui l'accompagne informe l'operateur -- la perte n'est donc jamais
 silencieuse.
 
+Une seule ligne tiree n'ecrase pas le rang local : l'echo du propre push de la
+replique, une fois ce push acquitte, quand il rend exactement le rang que ce
+push a envoye et un `content_rev` egal a la base acquittee. Un rang deplace
+localement pendant l'aller-retour survit alors et part au push suivant, et
+`queue_replaced` ne bouge pas. Le rang envoye est retenu en memoire, par
+carte : apres un redemarrage, ou si l'amont a lui-meme deplace le rang entre
+temps, la regle ci-dessus s'applique sans exception.
+
 **Hors de ce decoupage, a porter ailleurs :**
 - Le verrou d'ordre broker (option V-B) part dans le briefing de `011d3547`,
   avec l'obligation symetrique et la note de re-cle `project_key` -> `lot_id`.

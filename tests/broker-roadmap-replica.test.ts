@@ -2852,6 +2852,153 @@ test("an edit landing on the replica while its push is in flight keeps its own d
   expect((await itemOn(upstream, card.id))!.content_updated_at).toBe(edit.content_updated_at);
 }, 40_000);
 
+async function replicaSettled(id: string): Promise<void> {
+  await pollUntil("the replica holds nothing left to push", 15_000, async () => {
+    const db = openBrokerDb(replica.dbPath);
+    try {
+      const row = db.query("SELECT sync_dirty FROM roadmap_items WHERE id = ?").get(id) as { sync_dirty: number };
+      return { done: row.sync_dirty === 0, value: row.sync_dirty };
+    } finally {
+      db.close();
+    }
+  });
+}
+
+/** queue_replaced as published by a pass that STARTED after this call, so it covers everything applied so far. */
+async function queueReplacedAfterNextPass(): Promise<number> {
+  const first = (await syncStatus()).last_sync_at;
+  await pollUntil("a first pass completes", 15_000, async () => {
+    const status = await syncStatus();
+    return { done: status.last_sync_at !== first, value: status.last_sync_at };
+  });
+  const second = (await syncStatus()).last_sync_at;
+  const status = await pollUntil("a full pass completes", 15_000, async () => {
+    const s = await syncStatus();
+    return { done: s.last_sync_at !== second, value: s };
+  });
+  return status.queue_replaced;
+}
+
+test("a queue move landing on the replica while its push is in flight still reaches the upstream, and replaces nothing", async () => {
+  const card = await createOn(replica, { by: "agent-local", title: "ranked during its push", description: "sent version" });
+  await waitForItem("the card reaches the upstream", upstream, card.id, (i) => i.title === "ranked during its push");
+  await replicaSettled(card.id);
+  const replacedBefore = await queueReplacedAfterNextPass();
+
+  let moved = false;
+  duringNextPush = async () => {
+    await createOn(replica, { id: card.id, by: "agent-local", queue: 7 });
+    moved = true;
+  };
+  await createOn(replica, { id: card.id, by: "agent-local", description: "sent version two" });
+  const ranked = await waitForItem("the queue move reaches the upstream", upstream, card.id, (i) => i.queue === 7);
+  expect(moved, "the queue move ran while a push was in flight").toBe(true);
+  expect([ranked.description, ranked.queue]).toEqual(["sent version two", 7]);
+  await waitForItem("the replica keeps its rank", replica, card.id, (i) => i.queue === 7);
+  await replicaSettled(card.id);
+  expect(await queueReplacedAfterNextPass(), "the echo of the replica's own push replaces no local rank").toBe(replacedBefore);
+}, 60_000);
+
+test("a content edit and a queue move landing together while a held card's push is in flight both reach the upstream", async () => {
+  const card = await createOn(replica, {
+    by: "agent-local",
+    title: "held, edited and ranked during its push",
+    description: "sent version",
+    status: "in_progress",
+  });
+  expect(card.locked, "the card is held on the replica, so the pull takes its held-here branch").toBe(true);
+  await waitForItem("the card reaches the upstream", upstream, card.id, (i) => i.title === "held, edited and ranked during its push");
+  await replicaSettled(card.id);
+
+  let moved = false;
+  duringNextPush = async () => {
+    await createOn(replica, { id: card.id, by: "agent-local", description: "edited in flight", queue: 8 });
+    moved = true;
+  };
+  await createOn(replica, { id: card.id, by: "agent-local", description: "sent version two" });
+  const landed = await waitForItem(
+    "the in-flight edit and rank reach the upstream",
+    upstream,
+    card.id,
+    (i) => i.description === "edited in flight" && i.queue === 8
+  );
+  expect(moved, "the edit ran while a push was in flight").toBe(true);
+  expect([landed.description, landed.queue]).toEqual(["edited in flight", 8]);
+}, 60_000);
+
+test("an upstream rank move crossing a local one in flight wins, is counted, and does not protect a later upstream move", async () => {
+  const card = await createOn(replica, { by: "agent-local", title: "ranked on both sides", description: "sent version" });
+  await waitForItem("the card reaches the upstream", upstream, card.id, (i) => i.title === "ranked on both sides");
+  await replicaSettled(card.id);
+  const replacedBefore = await queueReplacedAfterNextPass();
+
+  let moved = false;
+  duringNextPush = async () => {
+    await createOn(replica, { id: card.id, by: "agent-local", queue: 5 });
+    await createOn(upstream, { id: card.id, by: "agent-upstream", queue: 3 });
+    moved = true;
+  };
+  await createOn(replica, { id: card.id, by: "agent-local", description: "sent version two" });
+  await waitForItem("the upstream rank comes back to the replica", replica, card.id, (i) => i.queue === 3);
+  expect(moved, "both rank moves ran while a push was in flight").toBe(true);
+  await replicaSettled(card.id);
+  expect((await itemOn(upstream, card.id))!.queue, "the upstream rank is never overwritten").toBe(3);
+  expect(await queueReplacedAfterNextPass(), "the local rank the upstream took back is counted").toBe(replacedBefore + 1);
+
+  // The rank this push sent was null: an upstream move back to null is not an echo.
+  await createOn(upstream, { id: card.id, by: "agent-upstream", queue: null });
+  await waitForItem("the later upstream rank reaches the replica", replica, card.id, (i) => i.queue === null);
+  await replicaSettled(card.id);
+  expect((await itemOn(upstream, card.id))!.queue, "the replica never pushes its old rank back").toBeNull();
+  expect((await itemOn(replica, card.id))!.queue).toBeNull();
+}, 60_000);
+
+test("an upstream content edit crossing a local rank move in flight takes the rank back, and is counted", async () => {
+  const card = await createOn(replica, { by: "agent-local", title: "edited upstream during its push", description: "sent version" });
+  await waitForItem("the card reaches the upstream", upstream, card.id, (i) => i.title === "edited upstream during its push");
+  await replicaSettled(card.id);
+  const replacedBefore = await queueReplacedAfterNextPass();
+
+  let moved = false;
+  duringNextPush = async () => {
+    await createOn(replica, { id: card.id, by: "agent-local", queue: 6 });
+    await createOn(upstream, { id: card.id, by: "agent-upstream", rationale: "written upstream meanwhile" });
+    moved = true;
+  };
+  await createOn(replica, { id: card.id, by: "agent-local", description: "sent version two" });
+  await waitForItem(
+    "the upstream row comes back with its own rank",
+    replica,
+    card.id,
+    (i) => i.rationale === "written upstream meanwhile" && i.queue === null
+  );
+  expect(moved, "both writes ran while a push was in flight").toBe(true);
+  await replicaSettled(card.id);
+  expect((await itemOn(upstream, card.id))!.queue, "the upstream rank is never overwritten").toBeNull();
+  expect(await queueReplacedAfterNextPass(), "the local rank the upstream took back is counted").toBe(replacedBefore + 1);
+}, 60_000);
+
+test("a queue move landing while a push is in flight leaves the card to push even when no echo comes back", async () => {
+  const card = await createOn(replica, { by: "agent-local", title: "ranked while the pull is silent", description: "sent version" });
+  await waitForItem("the card reaches the upstream", upstream, card.id, (i) => i.title === "ranked while the pull is silent");
+  await replicaSettled(card.id);
+
+  let moved = false;
+  duringNextPush = async () => {
+    pullSuppressed = true;
+    await createOn(replica, { id: card.id, by: "agent-local", queue: 9 });
+    moved = true;
+  };
+  try {
+    await createOn(replica, { id: card.id, by: "agent-local", description: "sent version two" });
+    const ranked = await waitForItem("the queue move reaches the upstream without any pull", upstream, card.id, (i) => i.queue === 9);
+    expect(moved, "the queue move ran while a push was in flight").toBe(true);
+    expect(ranked.description).toBe("sent version two");
+  } finally {
+    pullSuppressed = false;
+  }
+}, 60_000);
+
 test("a merge equal to one side keeps that side's date, whatever it is, including unknown", async () => {
   const names = ["equals the remote side", "equals the local side", "equals a remote side whose date is unknown"];
   const cards: RoadmapItem[] = [];

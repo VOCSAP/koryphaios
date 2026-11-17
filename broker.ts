@@ -9375,10 +9375,20 @@ function keepLocalAgainstSweep(remote: RoadmapSyncRow): void {
 }
 
 /**
+ * The queue each acknowledged push sent, for the cards whose rank moved here
+ * while that push was in flight. Keyed by card id alone: ids are unique across
+ * projects, and a replica talks to one upstream for the life of its process.
+ * Held in memory only: after a restart the echo overwrites the rank like any
+ * pulled row.
+ */
+const pushedQueueEcho = new Map<string, number | null>();
+
+/**
  * Applies one pulled row. Returns true when a local queue position was
  * replaced, so the pass can report how much local ordering the upstream order
- * overwrote (§4: the queue is never pushed, and losing a local order must not
- * be silent).
+ * overwrote (losing a local order must not be silent). The echo of an
+ * acknowledged push is the one pulled row that keeps a rank moved since that
+ * push was sent.
  */
 function applyPulledRow(remote: RoadmapSyncRow): boolean {
   // Checked before every branch: the conflict branch parks the row in
@@ -9440,6 +9450,11 @@ function applyPulledRow(remote: RoadmapSyncRow): boolean {
   const dirty =
     local.sync_dirty === 1 &&
     (syncBaseContent === null || !contentEquals(pickSyncContent(rowToRoadmapItem(local)), syncBaseContent));
+  const echoedQueue = pushedQueueEcho.get(remote.id);
+  pushedQueueEcho.delete(remote.id);
+  const queuePending =
+    echoedQueue !== undefined && echoedQueue === remote.queue && local.sync_base_rev === remote.content_rev;
+  const pulledQueue = queuePending ? local.queue : remote.queue;
   // Hoisted: the clean branch below needs it too. heldLocally is a SCOPE
   // predicate (locked/lock_scope on this row), never a liveness check: a
   // dead holder's lock is released only by this replica's OWN stale-lock
@@ -9489,9 +9504,9 @@ function applyPulledRow(remote: RoadmapSyncRow): boolean {
       return false;
     }
     db.run(
-      `UPDATE roadmap_items SET sync_base_rev = ?, sync_base = ?, sync_dirty = 0,
+      `UPDATE roadmap_items SET sync_base_rev = ?, sync_base = ?, sync_dirty = ?,
          sync_state = 'clean', sync_remote = NULL WHERE id = ?`,
-      [remote.content_rev, contentJson, remote.id]
+      [remote.content_rev, contentJson, queuePending ? 1 : 0, remote.id]
     );
   } else if (local.sync_base_rev !== null && local.sync_base_rev === remote.content_rev) {
     // Dirty here, untouched there: the local edit stands and will be pushed.
@@ -9521,7 +9536,7 @@ function applyPulledRow(remote: RoadmapSyncRow): boolean {
     // A card held HERE still shows who else wants it upstream: the local holder
     // is the one who most needs to know the lock is disputed across machines.
     db.run("UPDATE roadmap_items SET queue = ?, lock_contested_by = ? WHERE id = ?", [
-      remote.queue,
+      pulledQueue,
       contestedJson,
       remote.id,
     ]);
@@ -9530,22 +9545,22 @@ function applyPulledRow(remote: RoadmapSyncRow): boolean {
       `UPDATE roadmap_items SET queue = ?, locked = 1, locked_by = ?, locked_group = ?,
          locked_by_token = NULL, locked_at = ?, lock_scope = 'remote',
          lock_contested_by = ? WHERE id = ?`,
-      [remote.queue, remote.locked_by, remote.locked_group, remote.locked_at, contestedJson, remote.id]
+      [pulledQueue, remote.locked_by, remote.locked_group, remote.locked_at, contestedJson, remote.id]
     );
   } else if (localScope === "remote") {
     db.run(
       `UPDATE roadmap_items SET queue = ?, ${CLEAR_LOCK_SET}, lock_scope = NULL,
          lock_contested_by = ? WHERE id = ?`,
-      [remote.queue, contestedJson, remote.id]
+      [pulledQueue, contestedJson, remote.id]
     );
   } else {
     db.run("UPDATE roadmap_items SET queue = ?, lock_contested_by = ? WHERE id = ?", [
-      remote.queue,
+      pulledQueue,
       contestedJson,
       remote.id,
     ]);
   }
-  return queueReplaced;
+  return queueReplaced && !queuePending;
 }
 
 function applyPulledPage(items: RoadmapSyncRow[], nextRev: number): void {
@@ -9754,7 +9769,9 @@ async function syncPushPass(): Promise<void> {
     const content = pickSyncContent(rowToRoadmapItem(row));
     // Read BEFORE the round-trip: a local edit landing while the request is in
     // flight must leave the card dirty, so it departs again on the next pass.
+    // The rank is read with the content because a rank move never versions it.
     const sentContentRev = row.content_rev;
+    const sentQueue = row.queue;
     const item: RoadmapSyncPushItem = {
       id: row.id,
       project_key: row.project_key,
@@ -9780,10 +9797,13 @@ async function syncPushPass(): Promise<void> {
       withApplying(() => {
         db.run(
           `UPDATE roadmap_items SET sync_base_rev = ?, sync_base = ?,
-             sync_dirty = CASE WHEN content_rev = ? THEN 0 ELSE sync_dirty END
+             sync_dirty = CASE WHEN content_rev = ? AND queue IS ? THEN 0 ELSE sync_dirty END
            WHERE id = ?`,
-          [accepted.content_rev, JSON.stringify(content), sentContentRev, row.id]
+          [accepted.content_rev, JSON.stringify(content), sentContentRev, sentQueue, row.id]
         );
+        const current = getRoadmapRow(row.id);
+        if (current !== null && current.queue !== sentQueue) pushedQueueEcho.set(row.id, sentQueue);
+        else pushedQueueEcho.delete(row.id);
       });
       continue;
     }
