@@ -96,7 +96,8 @@ export function bubbleCourrier(model: AvatarBubbleModel, report: (message: strin
       notif_expires_at: c.closedAt,
       answered_at: c.closedAt,
       delivered_at: null,
-      ...(c.reason === null ? {} : { close_reason: c.reason })
+      ...(c.reason === null ? {} : { close_reason: c.reason }),
+      ...(c.closedBy === null ? {} : { closed_by_authority: c.closedBy })
     }
     closedKeys.set(approval, c.key)
     return approval

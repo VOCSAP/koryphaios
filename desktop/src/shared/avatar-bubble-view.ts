@@ -100,6 +100,7 @@ export interface AvatarBubbleClosed {
   approvalId: string
   title: string
   closedAt: string
+  closedBy: InboxCloseAuthority | null
   reason: string | null
 }
 
@@ -271,6 +272,7 @@ export function projectAvatarBubble(input: AvatarBubbleInput): AvatarBubbleModel
         approvalId: entry.id,
         title: safeLine(entry.title),
         closedAt: entry.closed_at,
+        closedBy: entry.closed_by,
         reason: entry.reason === null ? null : safeLine(entry.reason)
       })
     }

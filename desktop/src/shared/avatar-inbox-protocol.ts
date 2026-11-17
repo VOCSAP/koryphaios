@@ -74,6 +74,7 @@ export interface InboxRelayClosed {
   id: string
   title: string
   closed_at: string
+  closed_by: InboxCloseAuthority | null
   reason: string | null
 }
 
@@ -186,7 +187,7 @@ const APPROVAL_FIELDS = [
   'tile_name'
 ] as const
 const MESSAGE_FIELDS = ['id', 'from_peer_id', 'text', 'sent_at', 'state', 'closed_at', 'closed_by', 'reason'] as const
-const CLOSED_FIELDS = ['id', 'title', 'closed_at', 'reason'] as const
+const CLOSED_FIELDS = ['id', 'title', 'closed_at', 'closed_by', 'reason'] as const
 const FRAME_FIELDS = [
   'type',
   'protocol_version',
@@ -253,6 +254,7 @@ function parseClosed(raw: unknown): InboxRelayClosed {
     id: input.id as string,
     title: boundedString(input.title, MAX_INBOX_TITLE, 'closed question title'),
     closed_at: boundedString(input.closed_at, MAX_INBOX_TIMESTAMP, 'closed question closed_at'),
+    closed_by: input.closed_by === null ? null : oneOf(input.closed_by, CLOSE_AUTHORITIES, 'closed question closed_by'),
     reason: nullableString(input.reason, MAX_INBOX_REASON, 'closed question reason')
   }
 }
@@ -362,6 +364,7 @@ function projectClosed(approval: Approval): InboxRelayClosed {
     id: approval.id,
     title: cut(approval.title, MAX_INBOX_TITLE).value,
     closed_at: cut(approval.answered_at ?? approval.created_at, MAX_INBOX_TIMESTAMP).value,
+    closed_by: approval.closed_by_authority ?? null,
     reason: approval.close_reason === undefined ? null : cut(approval.close_reason, MAX_INBOX_REASON).value
   }
 }

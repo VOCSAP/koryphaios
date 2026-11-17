@@ -442,6 +442,7 @@ test("two Decks closing the same approval id each open their own closed question
     approvalId,
     title,
     closedAt: "2026-11-17T09:30:00.000Z",
+    closedBy: null,
     reason: null
   });
   const s = state([]);
@@ -454,6 +455,40 @@ test("two Decks closing the same approval id each open their own closed question
   const modal = container.querySelector(".inbox-modal")?.textContent ?? "";
   expect(modal).toContain("close B");
   expect(modal, "B's row does not open A's question").not.toContain("close A");
+});
+
+test("a closed question names the authority that closed it, and only says when it closed if the relay carries none", async () => {
+  const closed = (approvalId: string, title: string, closedBy: string | null) => ({
+    key: JSON.stringify([IDENTITY.deckRunId, IDENTITY.broker_url, approvalId]),
+    identity: IDENTITY,
+    deckLabel: "alpha",
+    approvalId,
+    title,
+    closedAt: "2026-11-17T09:30:00.000Z",
+    closedBy,
+    reason: null
+  });
+  const cases: [string | null, string][] = [
+    ["author", "closed by label-author"],
+    ["lead", "closed by label-lead"],
+    ["supervisor", "closed by label-supervisor"],
+    [null, "inbox.closedAt"]
+  ];
+  const s = state([]);
+  s.dict = {
+    "inbox.closedByAuthority": "closed by {authority}",
+    "inbox.closedAuthority.author": "label-author",
+    "inbox.closedAuthority.lead": "label-lead",
+    "inbox.closedAuthority.supervisor": "label-supervisor"
+  };
+  s.model.closed = cases.map(([closedBy], i) => closed(`q-${i}`, `question ${i}`, closedBy)) as never;
+  await mount(s);
+  await openCourrier();
+  for (const [i, [, line]] of cases.entries()) {
+    await click([...container.querySelectorAll(".inbox-entry")][i]);
+    expect(container.querySelector(".inbox-closed-line")?.textContent, `question ${i}`).toBe(line);
+    await click(container.querySelector('.inbox-modal button[title="inbox.close"]'));
+  }
 });
 
 test("a copy of a listed message gets no key and is reported once", () => {
@@ -471,7 +506,7 @@ test("a copy of a listed closed question gets no key and is reported once", () =
   const traces: string[] = [];
   const s = state([]);
   const key = JSON.stringify([IDENTITY.deckRunId, IDENTITY.broker_url, "q-1"]);
-  s.model.closed = [{ key, identity: IDENTITY, deckLabel: "alpha", approvalId: "q-1", title: "t", closedAt: "2026-11-17T09:30:00.000Z", reason: null }] as never;
+  s.model.closed = [{ key, identity: IDENTITY, deckLabel: "alpha", approvalId: "q-1", title: "t", closedAt: "2026-11-17T09:30:00.000Z", closedBy: null, reason: null }] as never;
   const c = bubbleCourrier(s.model as never, (m) => traces.push(m));
   const listed = c.archive.closedQuestions[0]!;
   expect(c.approvalKey(listed)).toBe(key);

@@ -205,6 +205,26 @@ describe('projectAvatarBubble', () => {
     ])
   })
 
+  test('a closed question keeps the authority the relay carries, per Deck', () => {
+    const closed = (id: number, closed_by: 'lead' | null) => ({
+      id: `00000000-0000-4000-8000-${String(id).padStart(12, '0')}`,
+      title: `Q${id}`,
+      closed_at: `2026-11-17T10:00:0${id}.000Z`,
+      closed_by,
+      reason: null
+    })
+    const model = projectAvatarBubble({
+      boxes: [box(DECK_A, { closed: [closed(1, 'lead')] }), box(DECK_B, { closed: [closed(2, null)] })],
+      decks,
+      lost: [],
+      now: 0
+    })
+    expect(model.closed.map((entry) => [entry.title, entry.closedBy])).toEqual([
+      ['Q2', null],
+      ['Q1', 'lead']
+    ])
+  })
+
   test('a message key names its Deck run, broker, scope generation, id and send date, and the projection carries that key', () => {
     const sentAt = message(1).sent_at
     const keys = [
