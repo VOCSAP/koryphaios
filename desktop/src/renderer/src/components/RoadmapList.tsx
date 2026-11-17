@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
-import type { RoadmapItem, RoadmapPriority, RoadmapStatus, StopResult } from '@shared/types'
+import type { RoadmapItem, RoadmapPriority, RoadmapStatus } from '@shared/types'
 import { GLYPHS, GLYPH_ACTIONS, GLYPH_BADGES } from './icons'
 import { useDeck } from '../store'
 import { useT } from '../i18n'
 import { useRoadmapData } from '../roadmap-data'
+import { assignFeedback, stopFeedback } from '../dispatch-feedback'
 import { ConfirmDialog } from './ConfirmDialog'
 import { MobileSheet } from './MobileSheet'
 import { KIND_ICONS, RoadmapItemModal } from './RoadmapItemModal'
@@ -254,9 +255,8 @@ export function RoadmapList(): React.JSX.Element {
 
   const stop = async (item: RoadmapItem): Promise<void> => {
     try {
-      const r: StopResult = await window.api.roadmapStop(item.id)
-      if (!r.stopped) showToast('toast.stopFailed', 'info')
-      else showToast(r.via === 'supervisor' ? 'toast.stopSupervisor' : 'toast.stopBroadcast')
+      const f = stopFeedback(await window.api.roadmapStop(item.id))
+      showToast(f.key, f.level)
       await refresh()
     } catch (e) {
       setMutationError(e instanceof Error ? e.message : String(e))
@@ -281,8 +281,8 @@ export function RoadmapList(): React.JSX.Element {
   const assign = async (item: RoadmapItem, peerId: string): Promise<void> => {
     setAssignItem(null)
     try {
-      const r = await window.api.roadmapAssign(item.id, peerId)
-      showToast(r.sent ? 'toast.assignSent' : 'toast.assignFailed', r.sent ? 'success' : 'info')
+      const f = assignFeedback(await window.api.roadmapAssign(item.id, peerId))
+      showToast(f.key, f.level)
       await refresh()
     } catch (e) {
       setMutationError(e instanceof Error ? e.message : String(e))

@@ -6,8 +6,7 @@ import type {
   RoadmapLevel,
   RoadmapPriority,
   RoadmapStatus,
-  RoadmapTriage,
-  StopResult
+  RoadmapTriage
 } from '@shared/types'
 import { ROADMAP_TRIAGE_ROLES } from '@shared/types'
 import { GLYPH_ACTIONS, GLYPH_BADGES, roleGlyph } from './icons'
@@ -22,6 +21,7 @@ import { RoadmapFilterPanel } from './RoadmapFilterPanel'
 import { RoadmapFilterChips } from './RoadmapFilterChips'
 import { WorkflowLane } from './WorkflowLane'
 import { hasActiveCriteria, useRoadmapData } from '../roadmap-data'
+import { assignFeedback, dispatchFeedback, stopFeedback } from '../dispatch-feedback'
 import { buildAppendToQueue, buildInsertIntoQueue, buildStackIntoQueue, isRoadmapLocked } from '@shared/workflow'
 import {
   getRoadmapContextEditorProjection,
@@ -674,9 +674,8 @@ export function RoadmapView(): React.JSX.Element {
   }
 
   const dispatch = async (): Promise<void> => {
-    const r = await window.api.roadmapDispatch()
-    if (r.sent) showToast('toast.dispatched')
-    else showToast(r.reason === 'no-lead' ? 'toast.dispatchNoLead' : 'toast.dispatchFailed', 'info')
+    const f = dispatchFeedback(await window.api.roadmapDispatch())
+    showToast(f.key, f.level, { params: f.params })
     await refresh()
   }
 
@@ -708,11 +707,8 @@ export function RoadmapView(): React.JSX.Element {
 
   const stop = async (item: RoadmapItem): Promise<void> => {
     try {
-      const r: StopResult = await window.api.roadmapStop(item.id)
-      if (!r.stopped) showToast('toast.stopFailed', 'info')
-      else if (r.via === 'supervisor') showToast('toast.stopSupervisor')
-      else if (r.via === 'broadcast') showToast('toast.stopBroadcast')
-      else showToast('toast.stopNoPeers', 'info')
+      const f = stopFeedback(await window.api.roadmapStop(item.id))
+      showToast(f.key, f.level)
       await refresh()
     } catch (e) {
       setMutationError(e instanceof Error ? e.message : String(e))
@@ -774,8 +770,8 @@ export function RoadmapView(): React.JSX.Element {
   const assign = async (item: RoadmapItem, peerId: string): Promise<void> => {
     setAssignItem(null)
     try {
-      const r = await window.api.roadmapAssign(item.id, peerId)
-      showToast(r.sent ? 'toast.assignSent' : 'toast.assignFailed', r.sent ? 'success' : 'info')
+      const f = assignFeedback(await window.api.roadmapAssign(item.id, peerId))
+      showToast(f.key, f.level)
       await refresh()
     } catch (e) {
       setMutationError(e instanceof Error ? e.message : String(e))
