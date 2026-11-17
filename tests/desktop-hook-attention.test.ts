@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { createPendingApprovalsTick, hookAwaitedTiles, type PendingApprovalsIo } from "../desktop/src/main/hook-attention.ts";
-import { extractParenBody } from "./_braced-body.ts";
+import { extractBracedBody, extractParenBody } from "./_braced-body.ts";
 import { stripComments } from "./_state-scope-audit.ts";
 import type { Approval } from "../shared/types.ts";
 
@@ -163,4 +163,159 @@ test("the Avatar client reads the poll's last list and the Courrier's pending me
     ) ?? [],
     "the Avatar's unread count is fed by the factory's epoch-filtered pending list, in code and exactly once"
   ).toHaveLength(1);
+});
+
+// index.ts cannot be imported as a module: the three OS-notification producers are run from their own source
+// against stubs, so the guard sits where the bodies decide, not where a text scan could see it.
+function indexBodies(): { waiting: string; inbox: string; graph: string } {
+  const index = stripComments(readFileSync(join(import.meta.dir, "..", "desktop", "src", "main", "index.ts"), "utf8").replace(/\r\n/g, "\n"));
+  const bodyAfter = (anchor: string, arrow: boolean): string => {
+    const start = index.indexOf(anchor);
+    expect(start, `${anchor} exists`).toBeGreaterThanOrEqual(0);
+    const open = arrow ? index.indexOf("=> {", start) + 3 : index.indexOf("{", index.indexOf(")", start));
+    return extractBracedBody(index, open, true);
+  };
+  return {
+    waiting: bodyAfter("function notifyWaitingSession(", false),
+    inbox: bodyAfter("const notifyInbox = (", true),
+    graph: bodyAfter("const pollGraphDrafts = async", true)
+  };
+}
+
+interface FakeNotification {
+  options: { title: string; body: string };
+  shown: boolean;
+  handlers: Record<string, () => void>;
+}
+
+function notificationStubs(supported = true) {
+  const made: FakeNotification[] = [];
+  class Notification {
+    static isSupported = (): boolean => supported;
+    private readonly record: FakeNotification;
+    constructor(options: { title: string; body: string }) {
+      this.record = { options, shown: false, handlers: {} };
+      made.push(this.record);
+    }
+    on(event: string, handler: () => void): void {
+      this.record.handlers[event] = handler;
+    }
+    show(): void {
+      this.record.shown = true;
+    }
+  }
+  const sent: string[] = [];
+  const mainWindow = { show: () => void sent.push("show"), focus: () => void sent.push("focus"), webContents: { send: (channel: string) => void sent.push(channel) } };
+  let replacedAsked = 0;
+  const avatarClient = (replaced: boolean) => ({
+    notificationsReplaced: () => {
+      replacedAsked += 1;
+      return replaced;
+    }
+  });
+  return { Notification, made, sent, mainWindow, avatarClient, replacedAsked: () => replacedAsked };
+}
+
+const compile = (name: string, params: string[], body: string, args: string[]): ((...values: unknown[]) => unknown) => {
+  const js = new Bun.Transpiler({ loader: "ts" }).transformSync(`async function ${name}(${params.join(", ")}) {${body}\n}`);
+  return new Function(...args, `${js}\nreturn ${name};`) as (...values: unknown[]) => (...values: unknown[]) => unknown;
+};
+
+test("a waiting session raises its OS notification unless the Avatar vouches for the replacement, and the existing guards still win", async () => {
+  const { waiting } = indexBodies();
+  const run = (opts: { notifyAttention?: boolean; supported?: boolean; avatar: boolean | null }) => {
+    const stubs = notificationStubs(opts.supported ?? true);
+    const config = { notifyAttention: opts.notifyAttention ?? true, locale: "en" };
+    const service = { list: () => [{ id: "s1", name: "Session 1" }] };
+    const app = { getLocale: () => "en" };
+    const avatarClient = opts.avatar === null ? null : stubs.avatarClient(opts.avatar);
+    const notify = compile("notifyWaitingSession", ["id: string"], waiting, ["config", "service", "Notification", "app", "mainWindow", "avatarClient"])(
+      config,
+      service,
+      stubs.Notification,
+      app,
+      stubs.mainWindow,
+      avatarClient
+    ) as (id: string) => void;
+    notify("s1");
+    return stubs;
+  };
+
+  const shown = run({ avatar: false });
+  expect(shown.made.map((n) => [n.options.title, n.shown])).toEqual([["Session 1", true]]);
+  shown.made[0]!.handlers.click!();
+  expect(shown.sent, "the click handler is kept").toEqual(["show", "focus", "session:focus"]);
+  expect(run({ avatar: null }).made, "no Avatar client at all").toHaveLength(1);
+
+  const replaced = run({ avatar: true });
+  expect(replaced.made, "an active replacement builds no notification").toEqual([]);
+  expect(replaced.replacedAsked()).toBe(1);
+
+  expect(run({ avatar: false, notifyAttention: false }).made, "notifyAttention off").toEqual([]);
+  expect(run({ avatar: false, supported: false }).made, "OS notifications unsupported").toEqual([]);
+  expect(run({ avatar: true, notifyAttention: false }).replacedAsked(), "the config guard answers first").toBe(0);
+});
+
+test("an Inbox batch raises its OS notification unless the Avatar vouches for the replacement, and an empty batch stays silent", () => {
+  const { inbox } = indexBodies();
+  const run = (batch: { from: string; text: string }[], opts: { supported?: boolean; avatar: boolean | null }) => {
+    const stubs = notificationStubs(opts.supported ?? true);
+    const config = { locale: "en" };
+    const app = { getLocale: () => "en" };
+    const avatarClient = opts.avatar === null ? null : stubs.avatarClient(opts.avatar);
+    const notify = compile("notifyInbox", ["batch: { from: string; text: string }[]"], inbox, ["config", "Notification", "app", "mainWindow", "avatarClient"])(
+      config,
+      stubs.Notification,
+      app,
+      stubs.mainWindow,
+      avatarClient
+    ) as (batch: { from: string; text: string }[]) => void;
+    notify(batch);
+    return stubs;
+  };
+  const batch = [{ from: "coder-1", text: "hello" }];
+
+  const shown = run(batch, { avatar: false });
+  expect(shown.made.map((n) => [n.options.title, n.shown])).toEqual([["coder-1", true]]);
+  shown.made[0]!.handlers.click!();
+  expect(shown.sent, "the Inbox click is kept").toEqual(["show", "focus", "inbox:open"]);
+  expect(run(batch, { avatar: null }).made).toHaveLength(1);
+
+  expect(run(batch, { avatar: true }).made, "an active replacement builds no notification").toEqual([]);
+  expect(run([], { avatar: false }).made, "an empty batch").toEqual([]);
+  expect(run(batch, { avatar: false, supported: false }).made, "OS notifications unsupported").toEqual([]);
+  expect(run([], { avatar: true }).replacedAsked(), "an empty batch never asks").toBe(0);
+});
+
+test("a graph draft still raises its OS notification while the Avatar replaces the others, and never asks the Avatar", async () => {
+  const { graph } = indexBodies();
+  const stubs = notificationStubs();
+  const state = { lastDraftSignature: "" };
+  const config = { projectDir: "C:/work", locale: "en" };
+  const app = { getLocale: () => "en" };
+  const broadcasts: string[] = [];
+  const poll = compile(
+    "pollGraphDrafts",
+    [],
+    graph.replace("lastDraftSignature = signature", "state.lastDraftSignature = signature").replace("signature !== lastDraftSignature", "signature !== state.lastDraftSignature"),
+    ["fetchGraphDrafts", "computeDeckProjectKey", "config", "resolveBrokerEndpoint", "state", "broadcast", "notifiedDraftIds", "Notification", "app", "mainWindow", "avatarClient"]
+  )(
+    async () => [{ id: "d1", from_peer: "peer-9", title: "A question", prompt: "p", created_at: "2026-11-17T00:00:00.000Z" }],
+    () => "project",
+    config,
+    () => ({}),
+    state,
+    (channel: string) => void broadcasts.push(channel),
+    new Set<string>(),
+    stubs.Notification,
+    app,
+    stubs.mainWindow,
+    stubs.avatarClient(true)
+  ) as () => Promise<void>;
+  await poll();
+  expect(stubs.made.map((n) => [n.options.title, n.shown])).toEqual([["Graph question — peer-9", true]]);
+  stubs.made[0]!.handlers.click!();
+  expect(stubs.sent, "the draft click is kept").toEqual(["show", "focus", "inbox:open"]);
+  expect(stubs.replacedAsked(), "graph drafts are outside the replacement").toBe(0);
+  expect(broadcasts).toEqual(["graphDrafts:update"]);
 });

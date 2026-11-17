@@ -38,8 +38,11 @@ export interface AvatarBubbleIpcMain {
   removeHandler(channel: string): void
 }
 
+/** `failed` precedes the `closed` it causes; `ready` follows a successful show and focus. */
 export interface AvatarBubbleLifecycle {
   closed(): void
+  failed(): void
+  ready(): void
 }
 
 export interface AvatarBubbleRect {
@@ -194,6 +197,7 @@ export function createAvatarBubbleNativeAdapter(options: AvatarBubbleNativeAdapt
         })
       } catch (error) {
         options.reportError('avatar-bubble', 'Avatar bubble window could not be created', error)
+        lifecycle.failed()
         lifecycle.closed()
         return
       }
@@ -208,8 +212,16 @@ export function createAvatarBubbleNativeAdapter(options: AvatarBubbleNativeAdapt
       try {
         window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
         window.on('ready-to-show', () => {
-          window.show()
-          window.focus()
+          try {
+            window.show()
+            window.focus()
+          } catch (error) {
+            options.reportError('avatar-bubble', 'Avatar bubble could not be shown', error)
+            lifecycle.failed()
+            close(generation)
+            return
+          }
+          lifecycle.ready()
         })
         window.on('blur', () => close(generation))
         window.webContents.on('before-input-event', (_event, input) => {
@@ -222,19 +234,25 @@ export function createAvatarBubbleNativeAdapter(options: AvatarBubbleNativeAdapt
         })
         window.webContents.on('render-process-gone', () => {
           options.reportError('avatar-bubble', 'Avatar bubble renderer crashed')
+          lifecycle.failed()
           close(generation)
         })
         window.webContents.on('preload-error', (_event, _path, error) => {
           options.reportError('avatar-bubble', 'Avatar bubble preload failed', error)
+          lifecycle.failed()
           close(generation)
         })
       } catch (error) {
         options.reportError('avatar-bubble', 'Avatar bubble window setup failed', error)
+        lifecycle.failed()
         close(generation)
         return
       }
       void window.loadFile(options.html).catch((error: unknown) => {
+        // A load aborted because the bubble was already closed is expected, not a broken service.
+        if (window.isDestroyed()) return
         options.reportError('avatar-bubble', 'Avatar bubble failed to load', error)
+        lifecycle.failed()
         close(generation)
       })
     },
@@ -268,9 +286,13 @@ export interface AvatarBubbleWindowOptions {
   reportError(scope: string, message: string, error?: unknown): void
   rendererErrorBurst?: number
   rendererErrorRefillMs?: number
+  /** `notificationServiceReady` flipped. */
+  onNotificationAvailabilityChanged?(): void
 }
 
 export interface AvatarBubbleWindow {
+  /** False after a creation, load, preload or crash failure until a later bubble shows and serves its state; false once disposed. A normal close keeps it true. */
+  notificationServiceReady(): boolean
   open(): void
   close(): void
   /** The inbox, the attached Decks or the theme changed: the open bubble gets the new state. */
@@ -314,6 +336,34 @@ export function createAvatarBubbleWindow(options: AvatarBubbleWindowOptions): Av
   let available = burst
   let lastRefillAt = 0
   let suppressed = 0
+  let disposed = false
+  let broken = false
+  let failedAt = 0
+  let shownOn = 0
+  let servedOn = 0
+
+  const serviceReady = (): boolean => !disposed && !broken
+  const announceIfFlipped = (before: boolean): void => {
+    if (serviceReady() === before) return
+    try {
+      options.onNotificationAvailabilityChanged?.()
+    } catch (error) {
+      options.reportError('avatar-bubble', 'Avatar bubble availability observer failed', error)
+    }
+  }
+  const recover = (open: number): void => {
+    if (!broken || open <= failedAt || shownOn !== open || servedOn !== open) return
+    const before = serviceReady()
+    broken = false
+    announceIfFlipped(before)
+  }
+  const failed = (open: number): void => {
+    if (open !== generation) return
+    const before = serviceReady()
+    broken = true
+    failedAt = open
+    announceIfFlipped(before)
+  }
 
   const model = (): AvatarBubbleModel => {
     const now = options.now()
@@ -384,7 +434,10 @@ export function createAvatarBubbleWindow(options: AvatarBubbleWindowOptions): Av
   const getState: AvatarBubbleIpcHandler = async (event, ...args) => {
     const open = requireCurrent(event)
     if (args.length !== 0) throw new Error('Avatar bubble state does not accept arguments')
-    return state(open)
+    const answer = state(open)
+    servedOn = open
+    recover(open)
+    return answer
   }
 
   const act: AvatarBubbleIpcHandler = async (event, ...args) => {
@@ -495,12 +548,22 @@ export function createAvatarBubbleWindow(options: AvatarBubbleWindowOptions): Av
             cancelExpiry?.()
             cancelExpiry = null
           }
+        },
+        failed: () => failed(open),
+        ready: () => {
+          if (current !== open) return
+          shownOn = open
+          recover(open)
         }
       })
     },
     close,
     changed: push,
+    notificationServiceReady: serviceReady,
     dispose() {
+      const before = serviceReady()
+      disposed = true
+      announceIfFlipped(before)
       close()
       options.ipc.removeHandler(AVATAR_BUBBLE_CHANNELS.getState)
       options.ipc.removeHandler(AVATAR_BUBBLE_CHANNELS.act)

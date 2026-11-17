@@ -37,6 +37,8 @@ export interface AvatarWindowControllerOptions {
   reportError(scope: string, message: string, error?: unknown): void
   setTimeout(callback: () => void, delayMs: number): unknown
   clearTimeout(handle: unknown): void
+  /** Read-only observer, called with the state each reduction produced, before its effects run. */
+  stateChanged?(state: AvatarMachineState): void
 }
 
 export interface AvatarWindowController {
@@ -278,6 +280,11 @@ export function createAvatarWindowController(options: AvatarWindowControllerOpti
   const processEvent = (event: AvatarEvent): AvatarReply => {
     const result = reduce(state, event)
     state = result.state
+    try {
+      options.stateChanged?.(state)
+    } catch (error) {
+      options.reportError('avatar-window', 'Avatar state observer failed', error)
+    }
     for (const effect of result.effects) {
       if (!isEffectLive(state, effect)) continue
       try {

@@ -98,8 +98,11 @@ class MiniWindow implements AvatarBrowserWindow {
     return [...this.size]
   }
 
+  onShow: (() => void) | null = null
+
   showInactive(): void {
     this.calls.push('show')
+    this.onShow?.()
   }
 
   moveTop(): void {}
@@ -108,8 +111,11 @@ class MiniWindow implements AvatarBrowserWindow {
 const flush = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0))
 
 function setup(
-  options: { geometry?: AvatarGeometry; seed?: AvatarAppearance; locale?: 'en' | 'fr'; localUnread?: () => number | undefined } = {}
+  options: { geometry?: AvatarGeometry; seed?: AvatarAppearance; locale?: 'en' | 'fr'; localUnread?: () => number | undefined; now?: number } = {}
 ) {
+  let clock = options.now ?? 1_000
+  const announced: ReturnType<ReturnType<typeof assembleAvatar>['notificationPresentation']>[] = []
+  const shown: ReturnType<ReturnType<typeof assembleAvatar>['notificationPresentation']>[] = []
   const dir = tempDir()
   const file = join(dir, 'avatar-appearance.json')
   const target = { file }
@@ -135,6 +141,7 @@ function setup(
     html: 'avatar.html',
     createWindow: () => {
       const window = new MiniWindow()
+      window.onShow = () => shown.push(assembly.notificationPresentation())
       windows.push(window)
       return window
     },
@@ -143,7 +150,8 @@ function setup(
     geometry: () => options.geometry ?? GEOMETRY,
     theme: () => (dark ? 'dark' : 'light'),
     locale: options.locale ?? 'fr',
-    now: () => 1_000,
+    now: () => clock,
+    onNotificationAvailabilityChanged: () => announced.push(assembly.notificationPresentation()),
     localUnread: () => options.localUnread?.(),
     reportError,
     gesture: (kind) => { gestures.push(kind) },
@@ -170,7 +178,26 @@ function setup(
     return windows[windows.length - 1]!
   }
   const stored = (): AvatarAppearance => JSON.parse(readFileSync(target.file, 'utf8')) as AvatarAppearance
-  return { assembly, file, target, dir, reports, gestures, handlers, windows, invoke, fire, open, stored, reads: () => reads, setDark: (value: boolean) => { dark = value } }
+  return {
+    assembly,
+    file,
+    target,
+    dir,
+    reports,
+    gestures,
+    handlers,
+    windows,
+    timers,
+    announced,
+    shown,
+    setNow: (value: number) => { clock = value },
+    invoke,
+    fire,
+    open,
+    stored,
+    reads: () => reads,
+    setDark: (value: boolean) => { dark = value }
+  }
 }
 
 function seed(patch: Partial<AvatarAppearance> = {}): AvatarAppearance {
@@ -445,5 +472,111 @@ describe('Avatar assembly', () => {
     expect(window.destroyed).toBe(true)
     expect(s.handlers.size).toBe(0)
     expect(s.stored().positions['1']).toEqual({ workArea: MAIN.workArea, x: 100, y: 200 })
+  })
+})
+
+describe('Avatar notification presentation', () => {
+  const live = (s: ReturnType<typeof setup>, delay: number) => s.timers.filter((timer) => timer.active && timer.delay === delay)
+
+  test('a loading or promoting window is not a ready mask, only a settled one is', async () => {
+    const s = setup()
+    s.assembly.controller.dispatch({ kind: 'ShowRequested' })
+    expect(s.assembly.notificationPresentation()).toEqual({ maskReady: false, maskVisible: true, rendererAlive: false, dndActive: false })
+
+    await flush()
+    expect(s.assembly.controller.snapshot().lifecycle.kind).toBe('ready')
+    expect(s.assembly.notificationPresentation()).toEqual({ maskReady: true, maskVisible: true, rendererAlive: true, dndActive: false })
+    expect(s.shown.length, 'the native show ran while the window was promoting').toBeGreaterThan(0)
+    expect(s.shown.every((reading) => reading.maskReady === false && reading.rendererAlive === false)).toBe(true)
+  })
+
+  test('a renderer crash is announced at once and drops the mask and the renderer, with no timer fired', async () => {
+    const s = setup()
+    const window = await s.open()
+    expect(s.announced.at(-1)).toMatchObject({ maskReady: true, rendererAlive: true })
+    const before = s.announced.length
+
+    window.crash()
+
+    expect(s.announced.length).toBeGreaterThan(before)
+    expect(s.announced.at(-1)).toMatchObject({ maskReady: false, rendererAlive: false })
+    expect(s.assembly.notificationPresentation()).toMatchObject({ maskReady: false, rendererAlive: false })
+  })
+
+  test('hiding the mask is announced with maskVisible false while the window stays a ready one', async () => {
+    const s = setup()
+    await s.open()
+
+    s.assembly.controller.dispatch({ kind: 'HideRequested' })
+
+    expect(s.announced.at(-1)).toMatchObject({ maskVisible: false, maskReady: true, rendererAlive: true })
+  })
+
+  test('an unchanged reading is not announced again', async () => {
+    const s = setup()
+    await s.open()
+    const before = s.announced.length
+
+    s.assembly.controller.dispatch({ kind: 'RefreshRequested' })
+    s.assembly.controller.dispatch({ kind: 'PointerChanged', inside: true })
+
+    expect(s.announced).toHaveLength(before)
+  })
+
+  test('a Do-not-disturb window already running at startup arms one timer, and its end is announced when that timer fires', () => {
+    const s = setup({ seed: seed({ dndUntil: 61_000, dndChoice: '30m' }) })
+    expect(s.assembly.notificationPresentation().dndActive).toBe(true)
+    expect(live(s, 60_000)).toHaveLength(1)
+
+    s.setNow(61_000)
+    s.fire(60_000)
+
+    expect(s.assembly.notificationPresentation().dndActive).toBe(false)
+    expect(s.announced.at(-1)).toMatchObject({ dndActive: false })
+    expect(live(s, 60_000)).toHaveLength(0)
+  })
+
+  test('a new Do-not-disturb choice replaces the timer, and the callback of the old deadline neither re-arms nor announces', () => {
+    const s = setup()
+    s.assembly.chooseDnd('30m')
+    const old = live(s, 1_800_000)[0]!
+    s.assembly.chooseDnd('1h')
+    const current = live(s, 3_600_000)[0]!
+    expect(old.active).toBe(false)
+    const announced = s.announced.length
+
+    old.callback()
+
+    expect(current.active, 'the timer of the current deadline survives a late callback of the old one').toBe(true)
+    expect(live(s, 3_600_000), 'a late callback of the old deadline arms no second timer').toHaveLength(1)
+    expect(s.announced).toHaveLength(announced)
+    expect(s.assembly.notificationPresentation().dndActive).toBe(true)
+
+    s.setNow(3_601_000)
+    s.fire(3_600_000)
+    expect(s.assembly.notificationPresentation().dndActive).toBe(false)
+  })
+
+  test('a Do-not-disturb deadline beyond the native timer limit is capped and re-armed for the rest, announcing nothing meanwhile', () => {
+    const limit = 2_147_483_647
+    const s = setup({ seed: seed({ dndUntil: 1_000 + 3_000_000_000, dndChoice: 'tomorrow' }) })
+    expect(live(s, limit)).toHaveLength(1)
+    const announced = s.announced.length
+
+    s.setNow(1_000 + limit)
+    s.fire(limit)
+
+    expect(live(s, 3_000_000_000 - limit)).toHaveLength(1)
+    expect(s.assembly.notificationPresentation().dndActive).toBe(true)
+    expect(s.announced).toHaveLength(announced)
+  })
+
+  test('disposing the assembly cancels the Do-not-disturb timer', () => {
+    const s = setup({ seed: seed({ dndUntil: 61_000, dndChoice: '30m' }) })
+    expect(live(s, 60_000)).toHaveLength(1)
+
+    s.assembly.dispose()
+
+    expect(live(s, 60_000)).toHaveLength(0)
   })
 })

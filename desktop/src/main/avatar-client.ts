@@ -2,6 +2,7 @@ import { request } from 'node:https'
 import type { RawData } from 'ws'
 import {
   AVATAR_CAPABILITIES,
+  AVATAR_NOTIFICATION_LEASE_MS,
   AVATAR_PROTOCOL_VERSION,
   MAX_AVATAR_REQUEST_BYTES,
   invalidInboxActionRequestId,
@@ -9,7 +10,8 @@ import {
   unsupportedAvatarCommandRequestId,
   type AvatarAttachRequest,
   type AvatarCapability,
-  type AvatarDeckContext
+  type AvatarDeckContext,
+  type AvatarNotificationStatusFrame
 } from '../shared/avatar-protocol'
 import { AVATAR_HEARTBEAT_MS, type AvatarDeckIdentity } from '../shared/avatar-state'
 import type { HookAwaitRow } from '../shared/hook-await'
@@ -18,7 +20,8 @@ import { isAvatarCounter, projectAvatarCounters } from './avatar-counters'
 import type { AvatarInboxAction, InboxOutcome, InboxRelayApproval } from '../shared/avatar-inbox-protocol'
 import { createInboxPusher, type InboxActionResult, type InboxPusher, type InboxRelaySourcesInput } from './avatar-inbox-relay'
 import type { AvatarRendezvous } from './avatar-registry'
-import { avatarHttpsRequestOptions, connectAvatarWss } from './avatar-transport'
+import { shouldSuppressDeckNotification } from './avatar-notification-policy'
+import { avatarHttpsRequestOptions, connectAvatarWss, type AvatarWssLimits } from './avatar-transport'
 import { logInfo, logWarn, reportError } from './log'
 
 export const AVATAR_REQUEST_TIMEOUT_MS = 3_000
@@ -56,8 +59,10 @@ export interface AvatarClientOptions {
   /** The Courrier and the pending questions relayed to an Avatar that negotiated a3_inbox. */
   inbox?: AvatarInboxRelay
   now?: () => number
+  /** Times the notification lease; a server date never decides it. */
+  monotonicNow?: () => number
   post?: AvatarPost
-  connect?: (rendezvous: AvatarRendezvous) => AvatarClientSocket
+  connect?: (rendezvous: AvatarRendezvous, limits?: AvatarWssLimits) => AvatarClientSocket
   every?: (ms: number, tick: () => void) => () => void
   after?: (ms: number, fire: () => void) => () => void
   report?: typeof reportError
@@ -75,6 +80,8 @@ export interface AvatarClient {
   sessionsChanged(): void
   scopeChanged(): void
   inboxChanged(): void
+  /** True while the Avatar vouches, by a fresh lease on the current binding, that it shows the alerts the Deck would send to the OS. */
+  notificationsReplaced(): boolean
   stop(): Promise<void>
 }
 
@@ -118,6 +125,21 @@ function everyInterval(ms: number, tick: () => void): () => void {
 function afterTimeout(ms: number, fire: () => void): () => void {
   const timer = setTimeout(fire, ms)
   return () => clearTimeout(timer)
+}
+
+/** One WebSocket that negotiated a3_notify_replace; its sequence floor and lease live and die with it. */
+interface NotificationBinding {
+  socket: AvatarClientSocket
+  avatarRunId: string
+  identity: AvatarDeckIdentity
+  generation: number
+  attachmentKey: string
+  lastSeq: number
+  bound: boolean
+}
+
+function isNotificationStatusInput(input: unknown): boolean {
+  return typeof input === 'object' && input !== null && (input as { type?: unknown }).type === 'notification_status'
 }
 
 interface FailureEpisode {
@@ -169,7 +191,8 @@ function attachmentKey(identity: AvatarDeckIdentity, context: AvatarDeckContext 
 export function createAvatarClient(options: AvatarClientOptions): AvatarClient {
   const report = options.report ?? reportError
   const post = options.post ?? postAvatarJson
-  const connect = options.connect ?? ((rendezvous: AvatarRendezvous) => connectAvatarWss(rendezvous, '/ws'))
+  const connect = options.connect ?? ((rendezvous: AvatarRendezvous, limits?: AvatarWssLimits) => connectAvatarWss(rendezvous, '/ws', limits))
+  const monotonicNow = options.monotonicNow ?? (() => performance.now())
   const every = options.every ?? everyInterval
   const after = options.after ?? afterTimeout
   const info = options.info ?? logInfo
@@ -186,6 +209,44 @@ export function createAvatarClient(options: AvatarClientOptions): AvatarClient {
   let chain = Promise.resolve()
   let inboxGeneration: number | null = null
   let pusher: { socket: AvatarClientSocket; generation: number; relay: InboxPusher } | null = null
+  let notifyGeneration: number | null = null
+  let binding: NotificationBinding | null = null
+  let lease: { binding: NotificationBinding; receivedAt: number } | null = null
+
+  const bindingIsCurrent = (current: NotificationBinding): boolean =>
+    socket === current.socket &&
+    notifyGeneration === current.generation &&
+    attached !== null &&
+    attached.avatarRunId === current.avatarRunId &&
+    attached.key === current.attachmentKey
+
+  const receiveStatus = (current: AvatarClientSocket, frame: AvatarNotificationStatusFrame): void => {
+    const mine = binding
+    if (!stopHeartbeat || socket !== current) return
+    if (!mine || mine.socket !== current) {
+      report('avatar-client', 'ignored a notification status on a socket that did not negotiate it')
+      return
+    }
+    if (!mine.bound) {
+      report('avatar-client', 'rejected a notification status received before bound')
+      lease = null
+      return
+    }
+    if (
+      frame.avatarRunId !== mine.avatarRunId ||
+      frame.deckRunId !== mine.identity.deckRunId ||
+      frame.broker_url !== mine.identity.broker_url ||
+      frame.scope_generation !== mine.generation ||
+      !bindingIsCurrent(mine)
+    ) {
+      report('avatar-client', 'rejected a notification status that is not for the current binding')
+      lease = null
+      return
+    }
+    if (frame.seq <= mine.lastSeq) return
+    mine.lastSeq = frame.seq
+    lease = frame.replace ? { binding: mine, receivedAt: monotonicNow() } : null
+  }
 
   const stopPusher = (current: AvatarClientSocket): void => {
     if (pusher?.socket !== current) return
@@ -195,6 +256,7 @@ export function createAvatarClient(options: AvatarClientOptions): AvatarClient {
 
   const enqueue = (work: () => Promise<void>): Promise<void> => {
     chain = chain.then(work).catch((error: unknown) => {
+      lease = null
       link.fail('Avatar link failed', error)
     })
     return chain
@@ -238,19 +300,42 @@ export function createAvatarClient(options: AvatarClientOptions): AvatarClient {
   }
 
   const openSocket = (rendezvous: AvatarRendezvous, identity: AvatarDeckIdentity): void => {
-    const current = connect(rendezvous)
+    const negotiatedGeneration = notifyGeneration
+    const current =
+      negotiatedGeneration === null ? connect(rendezvous) : connect(rendezvous, { maxPayload: MAX_AVATAR_REQUEST_BYTES })
     let bound = false
     socket = current
+    lease = null
+    binding =
+      negotiatedGeneration === null || attached === null
+        ? null
+        : {
+            socket: current,
+            avatarRunId: rendezvous.avatarRunId,
+            identity,
+            generation: negotiatedGeneration,
+            attachmentKey: attached.key,
+            lastSeq: 0,
+            bound: false
+          }
     current.on('open', () => {
       current.send(JSON.stringify({ type: 'bind', protocol_version: AVATAR_PROTOCOL_VERSION, ...identity }))
     })
     current.on('message', (data) => {
+      const text = rawText(data)
+      const mine = binding?.socket === current ? binding : null
+      if (mine && Buffer.byteLength(text) > MAX_AVATAR_REQUEST_BYTES) {
+        report('avatar-client', 'rejected an oversize Avatar frame')
+        if (socket === current) lease = null
+        return
+      }
       let input: unknown
       let frame: ReturnType<typeof parseAvatarServerFrame>
       try {
-        input = JSON.parse(rawText(data)) as unknown
+        input = JSON.parse(text) as unknown
         frame = parseAvatarServerFrame(input)
       } catch (error) {
+        if (mine && socket === current && isNotificationStatusInput(input)) lease = null
         report('avatar-client', 'rejected an invalid Avatar frame', error)
         const unsupported = bound ? unsupportedAvatarCommandRequestId(input) : null
         if (unsupported) reply(current, unsupported, false, 'unsupported_command')
@@ -260,8 +345,13 @@ export function createAvatarClient(options: AvatarClientOptions): AvatarClient {
         }
         return
       }
+      if (frame.type === 'notification_status') {
+        receiveStatus(current, frame)
+        return
+      }
       if (frame.type === 'bound') {
         bound = true
+        if (mine) mine.bound = true
         webSocket.ok()
         const inbox = options.inbox
         if (inbox && inboxGeneration !== null && socket === current) {
@@ -328,9 +418,16 @@ export function createAvatarClient(options: AvatarClientOptions): AvatarClient {
     current.on('close', (code) => {
       stopPusher(current)
       if (socket === current) socket = null
+      if (binding?.socket === current) {
+        binding = null
+        lease = null
+      }
       if (!bound && code >= 4000) webSocket.fail(`Avatar closed the WebSocket before bound with code ${code}`)
     })
-    current.on('error', (error) => webSocket.fail('Avatar WebSocket error', error))
+    current.on('error', (error) => {
+      if (binding?.socket === current) lease = null
+      webSocket.fail('Avatar WebSocket error', error)
+    })
   }
 
   const sync = async (force: boolean): Promise<void> => {
@@ -339,7 +436,12 @@ export function createAvatarClient(options: AvatarClientOptions): AvatarClient {
     const rendezvous = options.rendezvous()
     if (!rendezvous) {
       attached = null
+      binding = null
+      lease = null
       return
+    }
+    const dropLease = (): void => {
+      if (epoch === scopeEpoch) lease = null
     }
     const deck = options.deck()
     const identity: AvatarDeckIdentity = { deckRunId: deck.deckRunId, broker_url: deck.broker_url }
@@ -364,8 +466,13 @@ export function createAvatarClient(options: AvatarClientOptions): AvatarClient {
       }
       const { context, ...attachDeck } = deck
       const capabilities: readonly AvatarCapability[] =
-        context === undefined ? [] : options.inbox ? AVATAR_CAPABILITIES : AVATAR_CAPABILITIES.filter((c) => c !== 'a3_inbox')
+        context === undefined
+          ? []
+          : options.inbox
+            ? AVATAR_CAPABILITIES
+            : AVATAR_CAPABILITIES.filter((c) => c !== 'a3_inbox' && c !== 'a3_notify_replace')
       let negotiatedInbox: number | null = null
+      let negotiatedNotify: number | null = null
       const attachResult = await post(rendezvous, '/attach', {
         protocol_version: AVATAR_PROTOCOL_VERSION,
         ...attachDeck,
@@ -373,6 +480,7 @@ export function createAvatarClient(options: AvatarClientOptions): AvatarClient {
       })
       const attachStatus = postStatus(attachResult)
       if (attachStatus !== 200) {
+        dropLease()
         link.fail(`Avatar refused the attach with status ${attachStatus}`)
         return
       }
@@ -388,18 +496,24 @@ export function createAvatarClient(options: AvatarClientOptions): AvatarClient {
         if (epoch !== scopeEpoch) return
         const contextStatus = postStatus(contextResult)
         if (contextStatus !== 200) {
+          dropLease()
           link.fail(`Avatar refused the attach with status ${contextStatus}`)
           return
         }
-        if (negotiatedCapabilities(contextResult).includes('a3_inbox')) negotiatedInbox = context.scope_generation
+        const negotiated = negotiatedCapabilities(contextResult)
+        if (negotiated.includes('a3_inbox')) negotiatedInbox = context.scope_generation
+        if (negotiated.includes('a3_inbox') && negotiated.includes('a3_notify_replace')) negotiatedNotify = context.scope_generation
       }
       const avatarChanged = previousAttachment?.avatarRunId !== rendezvous.avatarRunId
       const identityChanged = previousAttachment !== null && previousAttachment.identity.broker_url !== identity.broker_url
       const inboxChanged = negotiatedInbox !== inboxGeneration
+      const renegotiatesNotify = (negotiatedNotify !== null || notifyGeneration !== null) && socket !== null
       attached = { avatarRunId: rendezvous.avatarRunId, identity, key, name: deck.deckName }
       inboxGeneration = negotiatedInbox
+      notifyGeneration = negotiatedNotify
+      lease = null
       lastPushed = null
-      if (avatarChanged || identityChanged || (inboxChanged && socket !== null)) {
+      if (avatarChanged || identityChanged || (inboxChanged && socket !== null) || renegotiatesNotify) {
         const previousSocket = socket
         socket = null
         if (previousSocket) stopPusher(previousSocket)
@@ -423,6 +537,7 @@ export function createAvatarClient(options: AvatarClientOptions): AvatarClient {
     const stateStatus = postStatus(stateResult)
     if (stateStatus !== 200) {
       if (stateStatus === 409) attached = null
+      dropLease()
       link.fail(`Avatar refused the state with status ${stateStatus}`)
       return
     }
@@ -444,6 +559,8 @@ export function createAvatarClient(options: AvatarClientOptions): AvatarClient {
     scopeChanged() {
       scopeEpoch += 1
       lastPushed = null
+      lease = null
+      binding = null
       const previousSocket = socket
       socket = null
       if (previousSocket) stopPusher(previousSocket)
@@ -453,9 +570,26 @@ export function createAvatarClient(options: AvatarClientOptions): AvatarClient {
     inboxChanged() {
       pusher?.relay.changed()
     },
+    notificationsReplaced() {
+      const current = binding
+      const live = current !== null && lease?.binding === current ? lease : null
+      const suppress = shouldSuppressDeckNotification(
+        {
+          negotiated: current !== null && notifyGeneration !== null,
+          bound: current?.bound === true,
+          currentContext: current !== null && bindingIsCurrent(current),
+          status: live === null ? null : { replace: true, receivedAt: live.receivedAt, leaseMs: AVATAR_NOTIFICATION_LEASE_MS }
+        },
+        monotonicNow()
+      )
+      if (!suppress) lease = null
+      return suppress
+    },
     stop() {
       stopHeartbeat?.()
       stopHeartbeat = null
+      lease = null
+      binding = null
       return enqueue(async () => {
         const closing = socket
         socket = null

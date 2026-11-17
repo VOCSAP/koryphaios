@@ -53,9 +53,14 @@ export function requestAvatarHttps(
   return request(avatarHttpsRequestOptions(rendezvous, path), listener)
 }
 
+export interface AvatarWssLimits {
+  maxPayload: number
+}
+
 export function avatarWssOptions(
   rendezvous: AvatarRendezvous,
-  path: string
+  path: string,
+  limits?: AvatarWssLimits
 ): { url: string; options: ClientOptions } {
   const tls = avatarTlsOptions(rendezvous)
   return {
@@ -64,12 +69,13 @@ export function avatarWssOptions(
       agent: new Agent(tls),
       ca: tls.ca,
       rejectUnauthorized: true,
-      headers: { Authorization: `Bearer ${rendezvous.token}` }
+      headers: { Authorization: `Bearer ${rendezvous.token}` },
+      ...(limits ? { maxPayload: limits.maxPayload } : {})
     }
   }
 }
 
-export function connectAvatarWss(rendezvous: AvatarRendezvous, path: string): WebSocket {
-  const { url, options } = avatarWssOptions(rendezvous, path)
+export function connectAvatarWss(rendezvous: AvatarRendezvous, path: string, limits?: AvatarWssLimits): WebSocket {
+  const { url, options } = avatarWssOptions(rendezvous, path, limits)
   return new WebSocket(url, options)
 }

@@ -18,7 +18,8 @@ export const MAX_AVATAR_COUNTER = 1_000_000
 export const MAX_AVATAR_ATTACHMENTS = 64
 export const MAX_AVATAR_REQUEST_BYTES = 64 * 1024
 export const AVATAR_COMMANDS = ['focus', 'open_question'] as const
-export const AVATAR_CAPABILITIES = ['a3_context', 'a3_inbox'] as const
+export const AVATAR_CAPABILITIES = ['a3_context', 'a3_inbox', 'a3_notify_replace'] as const
+export const AVATAR_NOTIFICATION_LEASE_MS = 15_000
 export type AvatarCommand = (typeof AVATAR_COMMANDS)[number]
 export type AvatarCapability = (typeof AVATAR_CAPABILITIES)[number]
 
@@ -82,8 +83,19 @@ export interface AvatarCommandResultFrame {
   reason?: string
 }
 
+/** `replace` is every availability condition at once; false revokes the lease at once. */
+export interface AvatarNotificationStatusFrame extends AvatarDeckIdentity {
+  type: 'notification_status'
+  protocol_version: typeof AVATAR_PROTOCOL_VERSION
+  avatarRunId: string
+  scope_generation: number
+  seq: number
+  replace: boolean
+  lease_ms: typeof AVATAR_NOTIFICATION_LEASE_MS
+}
+
 export type AvatarDeckFrame = AvatarBindFrame | AvatarCommandResultFrame
-export type AvatarServerFrame = AvatarBoundFrame | AvatarCommandFrame | AvatarInboxCommandFrame
+export type AvatarServerFrame = AvatarBoundFrame | AvatarCommandFrame | AvatarInboxCommandFrame | AvatarNotificationStatusFrame
 
 export type AvatarProtocolErrorCode =
   | 'unsupported_protocol_version'
@@ -392,9 +404,45 @@ function parseAvatarInboxCommandFrame(input: Record<string, unknown>): AvatarInb
   }
 }
 
+const NOTIFICATION_STATUS_KEYS = [
+  'avatarRunId',
+  'broker_url',
+  'deckRunId',
+  'lease_ms',
+  'protocol_version',
+  'replace',
+  'scope_generation',
+  'seq',
+  'type'
+]
+
+function frameSafeInteger(value: unknown, minimum: number): number {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < minimum) invalidAvatarFrame()
+  return value
+}
+
+function parseAvatarNotificationStatusFrame(input: Record<string, unknown>): AvatarNotificationStatusFrame {
+  const keys = Object.keys(input).sort()
+  if (keys.length !== NOTIFICATION_STATUS_KEYS.length || keys.some((key, index) => key !== NOTIFICATION_STATUS_KEYS[index])) invalidAvatarFrame()
+  const avatarRunId = frameString(input.avatarRunId, MAX_DECK_RUN_ID_LENGTH)
+  if (!DECK_RUN_ID_PATTERN.test(avatarRunId)) invalidAvatarFrame()
+  if (typeof input.replace !== 'boolean' || input.lease_ms !== AVATAR_NOTIFICATION_LEASE_MS) invalidAvatarFrame()
+  return {
+    type: 'notification_status',
+    protocol_version: frameProtocolVersion(input.protocol_version),
+    avatarRunId,
+    scope_generation: frameSafeInteger(input.scope_generation, 0),
+    seq: frameSafeInteger(input.seq, 1),
+    replace: input.replace,
+    lease_ms: AVATAR_NOTIFICATION_LEASE_MS,
+    ...frameDeckIdentity(input)
+  }
+}
+
 export function parseAvatarServerFrame(value: unknown): AvatarServerFrame {
   const input = frameRecord(value)
   if (input.type === 'bound') return { type: 'bound' }
+  if (input.type === 'notification_status') return parseAvatarNotificationStatusFrame(input)
   if (input.type === 'command' && input.command === AVATAR_INBOX_COMMAND) return parseAvatarInboxCommandFrame(input)
   if (input.type === 'command') return parseAvatarCommandFrame(input)
   return invalidAvatarFrame()

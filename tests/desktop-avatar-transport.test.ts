@@ -123,3 +123,13 @@ test('Electron rejects a run-key-signed leaf before either client delivers its b
     rmSync(bundleDir, { recursive: true, force: true })
   }
 })
+
+test('the WSS payload bound is set only when the limits are given, so the legacy pair keeps its options', async () => {
+  const run = await generateAvatarRunCertificate()
+  const legacy = avatarWssOptions(rendezvous(run.certPem), '/ws')
+  expect('maxPayload' in legacy.options, 'no limits, no maxPayload').toBe(false)
+  const bounded = avatarWssOptions(rendezvous(run.certPem), '/ws', { maxPayload: 64 * 1024 })
+  expect(bounded.options.maxPayload).toBe(64 * 1024)
+  expect(bounded.url).toBe(legacy.url)
+  expect(bounded.options.rejectUnauthorized).toBe(true)
+})

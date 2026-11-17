@@ -4,10 +4,12 @@ import { request } from 'node:https'
 import { connect } from 'node:tls'
 import { generateAvatarRunCertificate } from '../desktop/src/main/avatar-certificate.ts'
 import { createAvatarInboxService } from '../desktop/src/main/avatar-inbox-service.ts'
+import type { AvatarNotificationAvailability } from '../desktop/src/main/avatar-notification-policy.ts'
 import {
   createAvatarSocketHub,
   deckSocketEndpoints,
   detachDeckInOrder,
+  notificationGenerationOf,
   inboxGenerationOf,
   installAvatarServerErrorReporter,
   MAX_AVATAR_REQUEST_BYTES,
@@ -39,7 +41,12 @@ interface AvatarResponse {
 }
 
 async function openServer(
-  options: { allowedBrokerUrls?: readonly string[]; inbox?: AvatarInboxSink } = {}
+  options: {
+    allowedBrokerUrls?: readonly string[]
+    inbox?: AvatarInboxSink
+    notificationAvailability?: () => AvatarNotificationAvailability
+    createHub?: (hubOptions: AvatarSocketHubOptions) => AvatarSocketHub
+  } = {}
 ): Promise<{ server: AvatarServer; state: AvatarState; reports: string[]; setNow(now: number): void }> {
   let now = 0
   const state = new AvatarState({ now: () => now })
@@ -51,7 +58,9 @@ async function openServer(
     token,
     report: (_scope, message) => reports.push(message),
     allowedBrokerUrls: () => options.allowedBrokerUrls ?? [attach.broker_url],
-    ...(options.inbox ? { inbox: options.inbox } : {})
+    ...(options.inbox ? { inbox: options.inbox } : {}),
+    ...(options.notificationAvailability ? { notificationAvailability: options.notificationAvailability } : {}),
+    ...(options.createHub ? { createHub: options.createHub } : {})
   })
   return { server, state, reports, setNow: (next) => { now = next } }
 }
@@ -1054,4 +1063,295 @@ test('refuses the A3 context when the server was given no broker allow-list', as
   } finally {
     await server.close()
   }
+})
+
+function notifyHub(availability: Partial<AvatarNotificationAvailability> = {}) {
+  const live = {
+    availability: { serviceReady: true, maskReady: true, maskVisible: true, rendererAlive: true, dndActive: false, ...availability },
+    generation: 3 as number | undefined,
+    providerThrows: false,
+    receiveThrows: false
+  }
+  const received: number[] = []
+  const atReceive: number[] = []
+  const sockets: FakeDeckSocket[] = []
+  const opened = openHub({
+    inboxGeneration: (identity) => (identity.deckRunId === deck.deckRunId ? 3 : undefined),
+    inbox: {
+      receive: (_identity, frame) => {
+        atReceive.push(statuses(sockets[0]!).length)
+        if (live.receiveThrows) throw new Error('the inbox refused')
+        received.push(frame.seq)
+      },
+      clear: () => undefined,
+      detach: () => undefined
+    },
+    notification: {
+      avatarRunId: 'avatar-run-1',
+      generation: (identity) => (identity.deckRunId === deck.deckRunId ? live.generation : undefined),
+      availability: () => {
+        if (live.providerThrows) throw new Error('the provider failed')
+        return live.availability
+      }
+    }
+  })
+  const bind = (identity = deck): FakeDeckSocket => {
+    const socket = boundSocket(opened.hub, identity)
+    sockets.push(socket)
+    return socket
+  }
+  return { ...opened, live, received, atReceive, bind }
+}
+
+const statuses = (socket: FakeDeckSocket): Array<Record<string, unknown>> => socket.sent.filter((frame) => frame.type === 'notification_status')
+const replaces = (socket: FakeDeckSocket): unknown[] => statuses(socket).map((frame) => frame.replace)
+
+test('a negotiated socket gets a negative status of exactly nine keys right after bound, and an other socket gets none', () => {
+  const { hub, bind } = notifyHub()
+  const socket = bind()
+  expect(socket.sent.map((frame) => frame.type)).toEqual(['bound', 'notification_status'])
+  expect(socket.sent[1]).toEqual({
+    type: 'notification_status',
+    protocol_version: 1,
+    avatarRunId: 'avatar-run-1',
+    ...deck,
+    scope_generation: 3,
+    seq: 1,
+    replace: false,
+    lease_ms: 15_000
+  })
+  const other = boundSocket(hub, otherDeck)
+  expect(other.sent, 'a Deck that did not negotiate it hears nothing').toEqual([{ type: 'bound' }])
+})
+
+test('a hub without a notification provider never sends a status, an a3_inbox snapshot or not', () => {
+  const { hub } = openHub({ inboxGeneration: () => 3, inbox: { receive: () => undefined, clear: () => undefined, detach: () => undefined } })
+  const socket = boundSocket(hub)
+  socket.receive(inboxFrame(1))
+  hub.refreshNotificationStatus()
+  hub.renewNotificationStatus(deck)
+  expect(socket.sent).toEqual([{ type: 'bound' }])
+})
+
+test('the status turns true only once the inbox took a complete snapshot, and truncation of approvals or messages keeps it false', () => {
+  const { bind, received, atReceive } = notifyHub()
+  const socket = bind()
+  expect(replaces(socket), 'service ready but no projection yet').toEqual([false])
+  socket.receive(inboxFrame(1))
+  expect(received).toEqual([1])
+  expect(atReceive, 'no true was sent before the inbox took the snapshot').toEqual([1])
+  expect(replaces(socket)).toEqual([false, true])
+
+  socket.receive({ ...inboxFrame(2), truncated: { approvals: 1, messages: 0, closed: 0 } })
+  expect(replaces(socket).at(-1), 'approvals truncated').toBe(false)
+  socket.receive({ ...inboxFrame(3), truncated: { approvals: 0, messages: 4, closed: 0 } })
+  expect(replaces(socket).at(-1), 'messages truncated').toBe(false)
+  socket.receive({ ...inboxFrame(4), truncated: { approvals: 0, messages: 0, closed: 9 } })
+  expect(replaces(socket).at(-1), 'closed truncated alone still replaces').toBe(true)
+})
+
+test('a refused, foreign, stale-generation or failing snapshot withdraws the status, and a replayed one renews nothing', () => {
+  const { bind, live, received } = notifyHub()
+  const socket = bind()
+  socket.receive(inboxFrame(1))
+  expect(replaces(socket).at(-1)).toBe(true)
+  const sentBefore = statuses(socket).length
+
+  socket.receive(inboxFrame(2))
+  socket.receive(inboxFrame(2))
+  socket.receive(inboxFrame(1))
+  expect(statuses(socket), 'a duplicate or older sequence changes nothing').toHaveLength(sentBefore)
+
+  socket.receive({ ...inboxFrame(2), run_ref: 'leak' })
+  expect(replaces(socket).at(-1), 'invalid shape').toBe(false)
+  socket.receive(inboxFrame(3))
+  expect(replaces(socket).at(-1)).toBe(true)
+  socket.receive(inboxFrame(4, 3, otherDeck))
+  expect(replaces(socket).at(-1), 'addressed to another Deck').toBe(false)
+  socket.receive(inboxFrame(5))
+  socket.receive(inboxFrame(6, 9))
+  expect(replaces(socket).at(-1), 'another scope generation').toBe(false)
+  socket.receive(inboxFrame(7))
+  expect(replaces(socket).at(-1)).toBe(true)
+  live.receiveThrows = true
+  socket.receive(inboxFrame(8))
+  expect(replaces(socket).at(-1), 'the inbox threw').toBe(false)
+  expect(received).not.toContain(8)
+})
+
+test('each availability condition revokes the status the moment the server is told, and an unchanged one sends nothing', () => {
+  const { hub, bind, live } = notifyHub()
+  const socket = bind()
+  socket.receive(inboxFrame(1))
+  hub.refreshNotificationStatus()
+  const steady = statuses(socket).length
+  hub.refreshNotificationStatus()
+  expect(statuses(socket), 'nothing changed, nothing sent').toHaveLength(steady)
+  for (const condition of ['serviceReady', 'maskReady', 'maskVisible', 'rendererAlive'] as const) {
+    live.availability = { ...live.availability, [condition]: false }
+    hub.refreshNotificationStatus()
+    expect(replaces(socket).at(-1), condition).toBe(false)
+    live.availability = { ...live.availability, [condition]: true }
+    hub.refreshNotificationStatus()
+    expect(replaces(socket).at(-1), `${condition} back`).toBe(true)
+  }
+  live.availability = { ...live.availability, dndActive: true }
+  hub.refreshNotificationStatus()
+  expect(replaces(socket).at(-1), 'dndActive').toBe(false)
+})
+
+test('every status carries a strictly increasing sequence, and a renewal sends a fresh one even when nothing changed', () => {
+  const { hub, bind } = notifyHub()
+  const socket = bind()
+  socket.receive(inboxFrame(1))
+  hub.renewNotificationStatus(deck)
+  hub.renewNotificationStatus(deck)
+  const seqs = statuses(socket).map((frame) => frame.seq as number)
+  expect(seqs).toEqual([1, 2, 3, 4])
+  expect(replaces(socket)).toEqual([false, true, true, true])
+})
+
+test('a failing provider yields false with a trace, and a different scope generation than the bound one can no longer yield true', () => {
+  const { hub, bind, live, reports } = notifyHub()
+  const socket = bind()
+  socket.receive(inboxFrame(1))
+  live.providerThrows = true
+  hub.refreshNotificationStatus()
+  expect(replaces(socket).at(-1)).toBe(false)
+  expect(reports).toContain('the notification availability could not be read')
+  live.providerThrows = false
+  hub.refreshNotificationStatus()
+  expect(replaces(socket).at(-1)).toBe(true)
+
+  live.generation = 4
+  hub.refreshNotificationStatus()
+  expect(replaces(socket).at(-1), 'the attachment moved to another scope').toBe(false)
+  socket.receive(inboxFrame(2))
+  hub.renewNotificationStatus(deck)
+  expect(replaces(socket).at(-1), 'a new snapshot does not bring it back on this binding').toBe(false)
+})
+
+test('a rebind starts negative with its own sequence, the old socket is revoked and ignored, and a detach revokes before closing', () => {
+  const { hub, bind, received } = notifyHub()
+  const first = bind()
+  first.receive(inboxFrame(1))
+  expect(replaces(first).at(-1)).toBe(true)
+
+  const second = bind()
+  expect(replaces(first).at(-1), 'the superseded socket is revoked').toBe(false)
+  expect(first.closed?.reason).toBe('superseded')
+  expect(statuses(second).map((frame) => [frame.seq, frame.replace])).toEqual([[1, false]])
+  first.receive(inboxFrame(9))
+  expect(received, 'an old socket fills nothing').toEqual([1])
+  hub.renewNotificationStatus(deck)
+  expect(replaces(second).at(-1), 'the first projection is not recycled').toBe(false)
+  second.receive(inboxFrame(1))
+  expect(replaces(second).at(-1)).toBe(true)
+
+  hub.detach(deck)
+  expect(second.sent.at(-1)).toMatchObject({ type: 'notification_status', replace: false })
+  expect(second.closed?.reason).toBe('detached')
+  const sent = second.sent.length
+  hub.refreshNotificationStatus()
+  hub.renewNotificationStatus(deck)
+  expect(second.sent, 'nothing goes to a released socket').toHaveLength(sent)
+})
+
+test('a status that cannot be sent is traced, and the stop revokes every negotiated socket', () => {
+  const { hub, bind, reports } = notifyHub()
+  const socket = bind()
+  socket.receive(inboxFrame(1))
+  hub.revokeNotificationStatuses()
+  expect(replaces(socket).at(-1), 'revoked at the stop').toBe(false)
+  socket.send = () => {
+    throw new Error('socket gone')
+  }
+  hub.renewNotificationStatus(deck)
+  expect(reports).toContain('a notification status could not be sent')
+})
+
+test('a3_notify_replace needs a3_inbox, a context scope generation and the notify capability on the attachment', () => {
+  const withContext = { ...attach, context: a3Context }
+  expect(notificationGenerationOf({ ...withContext, capabilities: ['a3_context', 'a3_inbox', 'a3_notify_replace'] })).toBe(1)
+  expect(notificationGenerationOf({ ...withContext, capabilities: ['a3_context', 'a3_inbox'] }), 'a3_inbox alone is no authorisation').toBeUndefined()
+  expect(notificationGenerationOf({ ...withContext, capabilities: ['a3_context', 'a3_notify_replace'] })).toBeUndefined()
+  expect(notificationGenerationOf({ ...attach, capabilities: ['a3_context', 'a3_inbox', 'a3_notify_replace'] })).toBeUndefined()
+  expect(notificationGenerationOf(undefined)).toBeUndefined()
+})
+
+test('the server grants a3_notify_replace only with a context, a3_inbox, an inbox sink and an availability provider', async () => {
+  const context = { group_id: '11111111111111111111111111111111', project_key: 'project-1', scope_generation: 1 }
+  const sink = { receive: () => undefined, clear: () => undefined, detach: () => undefined }
+  const availability = () => ({ serviceReady: true, maskReady: true, maskVisible: true, rendererAlive: true, dndActive: false })
+  const wanted = ['a3_context', 'a3_inbox', 'a3_notify_replace']
+  const granted = async (options: Parameters<typeof openServer>[0], body: Record<string, unknown>): Promise<unknown> => {
+    const { server } = await openServer(options)
+    try {
+      const response = await post(server, '/attach', JSON.stringify({ ...attach, ...body }))
+      return response.body.capabilities
+    } finally {
+      await server.close()
+    }
+  }
+  expect(await granted({ inbox: sink, notificationAvailability: availability }, { capabilities: wanted, context })).toEqual(wanted)
+  expect(await granted({ inbox: sink }, { capabilities: wanted, context }), 'no availability provider').toEqual(['a3_context', 'a3_inbox'])
+  expect(await granted({ notificationAvailability: availability }, { capabilities: wanted, context }), 'no inbox sink').toEqual(['a3_context', 'a3_inbox'])
+  expect(await granted({ inbox: sink, notificationAvailability: availability }, { capabilities: ['a3_context', 'a3_inbox'], context }), 'an Avatar-only a3_inbox request').toEqual([
+    'a3_context',
+    'a3_inbox'
+  ])
+  expect(await granted({ inbox: sink, notificationAvailability: availability }, { capabilities: wanted }), 'no context').toEqual(['a3_context', 'a3_inbox'])
+  expect(await granted({ inbox: sink, notificationAvailability: availability }, { capabilities: ['a3_context', 'a3_notify_replace'], context }), 'no a3_inbox').toEqual(['a3_context'])
+})
+
+test('an accepted /state asks the hub to renew its Deck, a refused one does not, and close revokes the statuses', async () => {
+  const calls: string[] = []
+  const createHub = (hubOptions: AvatarSocketHubOptions): AvatarSocketHub => {
+    const real = createAvatarSocketHub(hubOptions)
+    return {
+      ...real,
+      renewNotificationStatus: (identity) => {
+        calls.push(`renew ${identity.deckRunId}`)
+        real.renewNotificationStatus(identity)
+      },
+      revokeNotificationStatuses: () => {
+        calls.push('revoke')
+        real.revokeNotificationStatuses()
+      }
+    }
+  }
+  const { server } = await openServer({ createHub })
+  let closed = false
+  const counters = { working: 0, idle: 0, unknown: 0, waiting: 0, exited: 0, rateLimited: 0 }
+  try {
+    expect(await post(server, '/attach', JSON.stringify(attach))).toMatchObject({ status: 200 })
+    expect(calls, 'an attach alone renews nothing').toEqual([])
+    expect((await post(server, '/state', JSON.stringify({ identity: deck, counters, unread: 0 }))).status).toBe(200)
+    expect(calls, 'the heartbeat renews the lease').toEqual(['renew deck-run-1'])
+    expect((await post(server, '/state', JSON.stringify({ identity: otherDeck, counters, unread: 0 }))).status, 'a Deck that is not attached').toBe(409)
+    expect(calls).toEqual(['renew deck-run-1'])
+    await server.close()
+    closed = true
+    expect(calls, 'the stop revokes').toEqual(['renew deck-run-1', 'revoke'])
+  } finally {
+    if (!closed) await server.close()
+  }
+})
+
+test('a provider that keeps failing is traced once per episode, and again after it recovered', () => {
+  const { hub, bind, live, reports } = notifyHub()
+  const socket = bind()
+  socket.receive(inboxFrame(1))
+  const traces = (): number => reports.filter((message) => message === 'the notification availability could not be read').length
+  live.providerThrows = true
+  hub.renewNotificationStatus(deck)
+  hub.renewNotificationStatus(deck)
+  expect(traces(), 'two failing renewals, one trace').toBe(1)
+  live.providerThrows = false
+  hub.renewNotificationStatus(deck)
+  expect(traces()).toBe(1)
+  live.providerThrows = true
+  hub.renewNotificationStatus(deck)
+  hub.renewNotificationStatus(deck)
+  expect(traces(), 'a new episode is traced again').toBe(2)
 })

@@ -4,6 +4,7 @@ import {
   AVATAR_PROTOCOL_VERSION,
   AvatarProtocolError,
   AVATAR_COMMANDS,
+  AVATAR_NOTIFICATION_LEASE_MS,
   MAX_AVATAR_COUNTER,
   escapeAvatarTrayLabel,
   parseAvatarAttachRequest,
@@ -254,4 +255,64 @@ test('a project key is refused for exactly the characters displaySafe neutralise
     if (neutralised !== refused) mismatches.push(code.toString(16))
   }
   expect(mismatches).toEqual([])
+})
+
+const statusInput = (patch: Record<string, unknown> = {}) => ({
+  type: 'notification_status',
+  protocol_version: 1,
+  avatarRunId: 'avatar-run-1',
+  deckRunId: validAttach.deckRunId,
+  broker_url: validAttach.broker_url,
+  scope_generation: 3,
+  seq: 1,
+  replace: true,
+  lease_ms: 15_000,
+  ...patch
+})
+
+test('a notification_status frame of exactly nine well-typed keys parses, and the lease is 15000 ms', () => {
+  expect(AVATAR_NOTIFICATION_LEASE_MS).toBe(15_000)
+  expect(parseAvatarServerFrame(statusInput())).toEqual(statusInput())
+  expect(parseAvatarServerFrame(statusInput({ replace: false, seq: 2, scope_generation: 0 }))).toMatchObject({ replace: false, seq: 2, scope_generation: 0 })
+})
+
+test('a notification_status frame is refused for an extra key, a missing key, a truthy boolean, a non-integer, a wrong lease or a bad identity', () => {
+  const refused: Array<[string, unknown]> = [
+    ['extra key', { ...statusInput(), note: 'x' }],
+    ...Object.keys(statusInput()).map((key): [string, unknown] => {
+      const { [key]: _omitted, ...rest } = statusInput()
+      return [`missing ${key}`, rest]
+    }),
+    ['replace as a string', statusInput({ replace: 'true' })],
+    ['replace as a number', statusInput({ replace: 1 })],
+    ['replace null', statusInput({ replace: null })],
+    ['seq 0', statusInput({ seq: 0 })],
+    ['seq NaN', statusInput({ seq: Number.NaN })],
+    ['seq fractional', statusInput({ seq: 1.5 })],
+    ['seq as a string', statusInput({ seq: '2' })],
+    ['seq beyond the safe range', statusInput({ seq: Number.MAX_SAFE_INTEGER + 1 })],
+    ['scope generation negative', statusInput({ scope_generation: -1 })],
+    ['scope generation as a string', statusInput({ scope_generation: '3' })],
+    ['scope generation fractional', statusInput({ scope_generation: 0.5 })],
+    ['lease above the fixed one', statusInput({ lease_ms: 15_001 })],
+    ['lease below the fixed one', statusInput({ lease_ms: 14_999 })],
+    ['lease as a string', statusInput({ lease_ms: '15000' })],
+    ['lease infinite', statusInput({ lease_ms: Number.POSITIVE_INFINITY })],
+    ['empty Avatar run id', statusInput({ avatarRunId: '' })],
+    ['Avatar run id too long', statusInput({ avatarRunId: 'a'.repeat(65) })],
+    ['Avatar run id with a bad first character', statusInput({ avatarRunId: '-run' })],
+    ['Deck run id with a bad character', statusInput({ deckRunId: 'deck run' })],
+    ['broker with credentials', statusInput({ broker_url: 'http://user:pass@127.0.0.1:7899' })],
+    ['broker not http', statusInput({ broker_url: 'file:///x' })]
+  ]
+  for (const [name, frame] of refused) {
+    expect(() => parseAvatarServerFrame(frame), name).toThrow(/invalid Avatar WebSocket frame/)
+  }
+  expect(() => parseAvatarServerFrame(statusInput({ protocol_version: 2 }))).toThrow(/unsupported Avatar protocol version 2/)
+})
+
+test('a3_notify_replace is a capability the attach parser keeps next to the two it depends on', () => {
+  const context = { group_id: '1'.repeat(32), project_key: 'project-1', scope_generation: 1 }
+  const request = parseAvatarAttachRequest({ ...validAttach, capabilities: ['a3_context', 'a3_inbox', 'a3_notify_replace'], context })
+  expect(request.capabilities).toEqual(['a3_context', 'a3_inbox', 'a3_notify_replace'])
 })

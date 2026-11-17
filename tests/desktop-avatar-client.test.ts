@@ -93,6 +93,7 @@ function harness(overrides: Partial<AvatarClientOptions> = {}) {
   const warnings: string[] = []
   const heartbeat: { ms?: number; tick?: () => void } = {}
   const deadlines: Array<{ ms: number; fire(): void; cancelled: boolean }> = []
+  const connects: Array<unknown> = []
   const live = {
     rendezvous: rendezvous(),
     sessions: [] as SessionRuntime[],
@@ -117,7 +118,8 @@ function harness(overrides: Partial<AvatarClientOptions> = {}) {
       posts.push({ path, body })
       return live.post ? live.post(rendezvous, path, body) : (live.status[path] ?? 200)
     },
-    connect: () => {
+    connect: (_rendezvous, limits) => {
+      connects.push(limits)
       const socket = new FakeClientSocket()
       sockets.push(socket)
       return socket
@@ -141,7 +143,7 @@ function harness(overrides: Partial<AvatarClientOptions> = {}) {
     warn: (_scope, message) => warnings.push(message),
     ...overrides
   })
-  return { client, posts, sockets, reports, infos, warnings, heartbeat, deadlines, live }
+  return { client, posts, sockets, reports, infos, warnings, heartbeat, deadlines, live, connects }
 }
 
 const flush = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0))
@@ -310,7 +312,7 @@ function inboxApproval() {
   } as never
 }
 
-async function inboxHarness(granted: readonly string[]) {
+async function inboxHarness(granted: readonly string[], overrides: Partial<AvatarClientOptions> = {}) {
   const acts: Array<{ action: unknown; sentIds: string[] }> = []
   const context = harness({
     inbox: {
@@ -319,7 +321,8 @@ async function inboxHarness(granted: readonly string[]) {
         acts.push({ action, sentIds: [...sentIds.keys()] })
         return { outcome: 'won' }
       }
-    }
+    },
+    ...overrides
   })
   context.live.deck = { ...deck, context: inboxContext }
   context.live.status['/attach'] = { status: 200, body: { capabilities: granted } }
@@ -334,7 +337,10 @@ async function inboxHarness(granted: readonly string[]) {
 
 test('asks for a3_inbox only when it has an inbox to relay, and relays it after bound once granted', async () => {
   const { client, posts, socket } = await inboxHarness(['a3_context', 'a3_inbox'])
-  expect(posts[0]).toEqual({ path: '/attach', body: { protocol_version: 1, ...deck, capabilities: ['a3_context', 'a3_inbox'] } })
+  expect(posts[0]).toEqual({
+    path: '/attach',
+    body: { protocol_version: 1, ...deck, capabilities: ['a3_context', 'a3_inbox', 'a3_notify_replace'] }
+  })
   const frames = socket.sent.filter((frame) => frame.type === 'inbox_snapshot')
   expect(frames).toHaveLength(1)
   expect(frames[0]).toMatchObject({ seq: 1, scope_generation: 5, ...identity })
@@ -916,4 +922,269 @@ test('abandons a broker replacement whose detach answers after the scope moved o
   await flush()
   expect(attachedBrokers).toEqual([deck.broker_url, thirdBroker])
   await client.stop()
+})
+
+const NOTIFY_GRANTED = ['a3_context', 'a3_inbox', 'a3_notify_replace']
+const statusFrame = (overrides: Record<string, unknown> = {}) => ({
+  type: 'notification_status',
+  protocol_version: 1,
+  avatarRunId: 'avatar-run-1',
+  ...identity,
+  scope_generation: 5,
+  seq: 1,
+  replace: true,
+  lease_ms: 15_000,
+  ...overrides
+})
+
+async function notifyHarness(granted: readonly string[] = NOTIFY_GRANTED) {
+  const clock = { now: 1_000 }
+  const context = await inboxHarness(granted, { monotonicNow: () => clock.now })
+  return { ...context, clock }
+}
+
+test('the lease holds for 15000 ms on the injected monotonic clock and never longer, whatever the cache or the clock', async () => {
+  const { client, socket, clock } = await notifyHarness()
+  expect(client.notificationsReplaced(), 'no status yet').toBe(false)
+  socket.receive(statusFrame())
+  expect(client.notificationsReplaced()).toBe(true)
+  clock.now = 1_000 + 14_999
+  expect(client.notificationsReplaced()).toBe(true)
+  clock.now = 1_000 + 15_000
+  expect(client.notificationsReplaced(), 'the lease is over at its full length').toBe(false)
+  clock.now = 1_000 + 100
+  expect(client.notificationsReplaced(), 'an expired lease is not cached back to life').toBe(false)
+
+  socket.receive(statusFrame({ seq: 2 }))
+  clock.now = 500
+  expect(client.notificationsReplaced(), 'a clock gone backwards never extends the lease').toBe(false)
+  socket.receive(statusFrame({ seq: 3 }))
+  clock.now = Number.NaN
+  expect(client.notificationsReplaced(), 'a non-finite clock never suppresses').toBe(false)
+  await client.stop()
+})
+
+test('a duplicate or older sequence renews nothing and a revocation keeps the floor, so an old true cannot come back', async () => {
+  const { client, socket, clock } = await notifyHarness()
+  socket.receive(statusFrame({ seq: 2 }))
+  clock.now = 10_000
+  socket.receive(statusFrame({ seq: 2 }))
+  socket.receive(statusFrame({ seq: 1 }))
+  clock.now = 1_000 + 15_000
+  expect(client.notificationsReplaced(), 'a replayed frame did not renew the lease').toBe(false)
+
+  clock.now = 20_000
+  socket.receive(statusFrame({ seq: 3 }))
+  expect(client.notificationsReplaced()).toBe(true)
+  socket.receive(statusFrame({ seq: 4, replace: false }))
+  expect(client.notificationsReplaced(), 'replace false revokes at once').toBe(false)
+  socket.receive(statusFrame({ seq: 3 }))
+  socket.receive(statusFrame({ seq: 4 }))
+  expect(client.notificationsReplaced(), 'an old true after a revocation stays inert').toBe(false)
+  socket.receive(statusFrame({ seq: 5 }))
+  expect(client.notificationsReplaced()).toBe(true)
+  await client.stop()
+})
+
+test('a status for another Avatar run, Deck run, broker or scope generation cannot activate or keep the lease', async () => {
+  const { client, socket } = await notifyHarness()
+  const foreign = [
+    { avatarRunId: 'avatar-run-2' },
+    { deckRunId: 'deck-run-9' },
+    { broker_url: 'http://127.0.0.1:7000' },
+    { scope_generation: 6 }
+  ]
+  for (const [index, patch] of foreign.entries()) {
+    socket.receive(statusFrame({ seq: 10 + index * 2 }))
+    expect(client.notificationsReplaced(), `lease before ${JSON.stringify(patch)}`).toBe(true)
+    socket.receive(statusFrame({ seq: 11 + index * 2, ...patch }))
+    expect(client.notificationsReplaced(), JSON.stringify(patch)).toBe(false)
+  }
+  await client.stop()
+})
+
+test('a malformed, unnegotiated or pre-bound status never activates, clears an existing lease and leaves the socket open', async () => {
+  const { client, socket, reports } = await notifyHarness()
+  socket.receive(statusFrame())
+  expect(client.notificationsReplaced()).toBe(true)
+  const malformed = [
+    { ...statusFrame({ seq: 2 }), extra: 1 },
+    statusFrame({ seq: 3, replace: 'true' }),
+    statusFrame({ seq: 4, lease_ms: 30_000 }),
+    statusFrame({ seq: 5, scope_generation: -1 })
+  ]
+  for (const [index, bad] of malformed.entries()) {
+    socket.receive(statusFrame({ seq: 100 + index }))
+    expect(client.notificationsReplaced()).toBe(true)
+    socket.receive(bad)
+    expect(client.notificationsReplaced(), JSON.stringify(bad)).toBe(false)
+  }
+  expect(socket.closed, 'invalid data does not close the focus channel').toBeUndefined()
+  expect(reports).toContain('rejected an invalid Avatar frame')
+
+  const early = await notifyHarnessUnbound()
+  early.socket.receive(statusFrame())
+  expect(early.client.notificationsReplaced(), 'a status before bound activates nothing').toBe(false)
+  early.socket.receive({ type: 'bound' })
+  early.socket.receive(statusFrame())
+  expect(early.client.notificationsReplaced(), 'the floor was not consumed by the refused frame').toBe(true)
+
+  const legacy = await notifyHarness(['a3_context', 'a3_inbox'])
+  legacy.socket.receive(statusFrame())
+  expect(legacy.client.notificationsReplaced(), 'a status on a pair that did not negotiate it is ignored').toBe(false)
+  await Promise.all([client.stop(), early.client.stop(), legacy.client.stop()])
+})
+
+async function notifyHarnessUnbound() {
+  const clock = { now: 1_000 }
+  const context = harness({
+    monotonicNow: () => clock.now,
+    inbox: { sources: () => ({ approvals: [], messages: [], closed: [], tileName: () => null }), act: async () => ({ outcome: 'won' }) }
+  })
+  context.live.deck = { ...deck, context: inboxContext }
+  context.live.status['/attach'] = { status: 200, body: { capabilities: NOTIFY_GRANTED } }
+  context.client.start()
+  await flush()
+  await flush()
+  const socket = context.sockets[0]!
+  socket.open()
+  return { ...context, socket, clock }
+}
+
+test('every door that ends the binding drops the lease at once', async () => {
+  const doors: Array<[string, (h: Awaited<ReturnType<typeof notifyHarness>>) => Promise<void> | void]> = [
+    ['socket close', (h) => void h.socket.close(1006)],
+    ['socket error', (h) => void h.socket.emit('error', new Error('boom'))],
+    ['scope change', (h) => h.client.scopeChanged()],
+    [
+      'stop',
+      async (h) => {
+        const stopping = h.client.stop()
+        expect(h.client.notificationsReplaced(), 'before the async chain settles').toBe(false)
+        await stopping
+      }
+    ],
+    [
+      'rendezvous gone',
+      async (h) => {
+        h.live.rendezvous = null as never
+        h.heartbeat.tick?.()
+        await flush()
+      }
+    ],
+    [
+      'state refused',
+      async (h) => {
+        h.live.post = async (_r, path) => (path === '/state' ? 500 : { status: 200, body: { capabilities: NOTIFY_GRANTED } })
+        h.heartbeat.tick?.()
+        await flush()
+      }
+    ],
+    [
+      'renegotiation',
+      async (h) => {
+        h.live.deck = { ...h.live.deck, deckName: 'Renamed' }
+        h.heartbeat.tick?.()
+        await flush()
+        await flush()
+      }
+    ],
+    [
+      'attach refused',
+      async (h) => {
+        h.live.deck = { ...h.live.deck, deckName: 'Renamed' }
+        h.live.post = async (_r, path) => (path === '/attach' ? 500 : 200)
+        h.heartbeat.tick?.()
+        await flush()
+      }
+    ],
+    [
+      'context attach refused',
+      async (h) => {
+        let attaches = 0
+        h.live.deck = { ...h.live.deck, deckName: 'Renamed' }
+        h.live.post = async (_r, path) => {
+          if (path !== '/attach') return 200
+          attaches += 1
+          return attaches === 1 ? { status: 200, body: { capabilities: NOTIFY_GRANTED } } : 500
+        }
+        h.heartbeat.tick?.()
+        await flush()
+        await flush()
+      }
+    ],
+    [
+      'transport failure',
+      async (h) => {
+        h.live.post = async () => {
+          throw new Error('down')
+        }
+        h.heartbeat.tick?.()
+        await flush()
+      }
+    ]
+  ]
+  for (const [name, trigger] of doors) {
+    const h = await notifyHarness()
+    h.socket.receive(statusFrame())
+    expect(h.client.notificationsReplaced(), `${name}: lease before`).toBe(true)
+    await trigger(h)
+    expect(h.client.notificationsReplaced(), name).toBe(false)
+    await h.client.stop()
+  }
+})
+
+test('a renegotiated pair needs a new binding and its own accepted status, and an old socket cannot touch the new lease', async () => {
+  const h = await notifyHarness()
+  h.socket.receive(statusFrame({ seq: 7 }))
+  expect(h.client.notificationsReplaced()).toBe(true)
+  h.live.deck = { ...h.live.deck, deckName: 'Renamed' }
+  h.heartbeat.tick?.()
+  await flush()
+  await flush()
+  expect(h.socket.closed, 'the old socket was closed').toBeDefined()
+  const next = h.sockets[1]!
+  expect(next).toBeDefined()
+  next.open()
+  next.receive({ type: 'bound' })
+  expect(h.client.notificationsReplaced(), 'the new binding starts without the old witness').toBe(false)
+  next.receive(statusFrame({ seq: 1 }))
+  expect(h.client.notificationsReplaced(), 'its own floor restarts at zero').toBe(true)
+
+  h.socket.receive(statusFrame({ seq: 50, replace: false }))
+  h.socket.emit('close', 1006)
+  h.socket.emit('error', new Error('late'))
+  expect(h.client.notificationsReplaced(), 'late events of the old socket leave the new lease alone').toBe(true)
+  await h.client.stop()
+})
+
+test('nothing reactivates after stop', async () => {
+  const h = await notifyHarness()
+  await h.client.stop()
+  h.socket.receive(statusFrame())
+  expect(h.client.notificationsReplaced()).toBe(false)
+})
+
+test('only a pair that negotiated the capability gets the 64 KiB WSS bound, and an oversize frame there is refused', async () => {
+  const negotiated = await notifyHarness()
+  expect(negotiated.connects).toEqual([{ maxPayload: 64 * 1024 }])
+  negotiated.socket.receive(statusFrame())
+  expect(negotiated.client.notificationsReplaced()).toBe(true)
+  negotiated.socket.emit('message', Buffer.from(JSON.stringify({ ...statusFrame({ seq: 2 }), pad: 'x'.repeat(64 * 1024) })))
+  expect(negotiated.client.notificationsReplaced(), 'an oversize frame clears the lease and is not parsed').toBe(false)
+  expect(negotiated.reports).toContain('rejected an oversize Avatar frame')
+
+  const legacy = await notifyHarness(['a3_context', 'a3_inbox'])
+  expect(legacy.connects, 'the legacy pair keeps the default options').toEqual([undefined])
+  await Promise.all([negotiated.client.stop(), legacy.client.stop()])
+})
+
+test('an old Deck stays silent: nothing is asked without a context or an inbox to relay', async () => {
+  const noInbox = harness()
+  noInbox.live.deck = { ...deck, context: inboxContext }
+  noInbox.client.start()
+  await flush()
+  expect(JSON.stringify(noInbox.posts)).not.toContain('a3_notify_replace')
+  expect(noInbox.client.notificationsReplaced()).toBe(false)
+  await noInbox.client.stop()
 })

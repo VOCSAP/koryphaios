@@ -423,7 +423,7 @@ intervenir ? », « ca travaille beaucoup ? », « quoi exactement ? »).
 Deux garde-fous de conception :
 - **Aucun son par defaut.** Un son est un reglage explicite, par niveau, comme
   `notifyAttention` aujourd'hui.
-- **Aucune notification OS doublée. L5c : décidé, non livré.** L'Avatar
+- **Aucune notification OS doublée.** L'Avatar
   remplace les toasts OS du Deck pour le Courrier et l'attention seulement
   si les cinq conditions sont réunies : capacité de remplacement négociée,
   service Inbox prêt, lien vivant, Avatar non masqué et hors
@@ -438,8 +438,10 @@ Deux garde-fous de conception :
   Les notifications OS des **graph-drafts ne sont jamais coupées** par cette
   bascule. Les retours de geste du renderer restent également indépendants.
   Un Avatar recouvert par une autre fenêtre compte comme visible : le badge
-  du tray prend le relais, sans tentative de mesurer l'occlusion. Tant que
-  L5c n'est pas livré, les toasts du Deck ne changent pas (décision 14).
+  du tray prend le relais, sans tentative de mesurer l'occlusion.
+  Capacité `a3_notify_replace`, trame `notification_status`, bail de
+  15 000 ms renouvelé par chaque `/state` accepté. Un renderer figé sans
+  plantage n'est pas détecté : le bail ne borne que le silence du lien.
 
 ### 4.3 La bulle
 
@@ -981,7 +983,7 @@ rejeu Windows font partie du contrat, pas seulement le rendu d'un SVG.
   second événement et sans acquittement synthétique. Les compteurs du
   badge et du visage viennent du main Avatar ; le compteur Deck ne sert
   qu'au repli d'un ancien couple sans `a3_inbox`.
-- **L5c : décidé, non livré.** Le remplacement des toasts dépend d'une
+- **L5c.** Le remplacement des toasts dépend d'une
   capacité négociée, d'un service prêt, d'un lien vivant, de l'absence de
   masquage et de DND. Le statut Avatar vers Deck sur le socket porte un
   bail qui expire localement. Inconnu ou périmé laisse les toasts actifs.
@@ -1129,7 +1131,7 @@ Second tour (seance de questions sur ce brief) :
 12. **Jeton `deck-control`** : cree au palier B1, pas A1 (§3.2).
 13. **Version du protocole** : echangee au branchement ; Deck plus recent =
    l'avatar redemarre ; version inconnue = refus trace (§3.5).
-14. **Toasts du Deck, L5c : décidé, non livré** : coupés seulement si
+14. **Toasts du Deck, L5c** : coupés seulement si
    capacité de remplacement négociée, service prêt, lien vivant, Avatar
    non masqué et hors DND. Statut Avatar vers Deck sur le socket, bail
    expirant localement ; inconnu ou périmé conserve les notifications OS.

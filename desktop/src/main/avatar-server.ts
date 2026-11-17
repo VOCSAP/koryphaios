@@ -4,6 +4,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Duplex } from 'node:stream'
 import { WebSocket, WebSocketServer, type RawData } from 'ws'
 import {
+  AVATAR_NOTIFICATION_LEASE_MS,
   AVATAR_PROTOCOL_VERSION,
   AvatarProtocolError,
   MAX_AVATAR_ATTACHMENTS,
@@ -15,8 +16,10 @@ import {
   parseAvatarStateRequest,
   AVATAR_INBOX_COMMAND,
   type AvatarAttachRequest,
-  type AvatarCommand
+  type AvatarCommand,
+  type AvatarNotificationStatusFrame
 } from '../shared/avatar-protocol'
+import { canReplaceDeckNotifications, type AvatarNotificationAvailability } from './avatar-notification-policy'
 import type { AvatarInboxAction, AvatarInboxSnapshotFrame, InboxOutcome } from '../shared/avatar-inbox-protocol'
 import { validateQuestions } from '../../../shared/approval'
 import type { AvatarRunCertificate } from './avatar-certificate'
@@ -39,6 +42,10 @@ export interface AvatarServerOptions {
   commandResultTimeoutMs?: number
   report?: typeof reportError
   inbox?: AvatarInboxSink
+  /** Without it, a3_notify_replace is never negotiated. */
+  notificationAvailability?(): AvatarNotificationAvailability
+  /** Replaces the hub, so a test observes what the routes ask of it without a WebSocket client. */
+  createHub?(options: AvatarSocketHubOptions): AvatarSocketHub
 }
 
 /** Where the snapshots of an a3_inbox Deck land; cleared when its socket goes away, detached when the Deck detaches. */
@@ -68,6 +75,8 @@ export interface AvatarServer {
   isDeckBound(identity: AvatarDeckIdentity): boolean
   /** The Deck-side port of the Deck's open bound WebSocket, or null. */
   boundRemotePort(identity: AvatarDeckIdentity): number | null
+  /** Recomputes the status of every socket that negotiated a3_notify_replace and sends the ones that changed. */
+  refreshNotificationStatus(): void
   close(): Promise<void>
 }
 
@@ -104,6 +113,13 @@ export interface AvatarSocketHubOptions {
   /** The scope generation of an a3_inbox attachment; undefined when the Deck did not negotiate a3_inbox. */
   inboxGeneration?(identity: AvatarDeckIdentity): number | undefined
   inbox?: AvatarInboxSink
+  /** Present only when a3_notify_replace can be negotiated: the sink exists and the availability is readable. */
+  notification?: {
+    avatarRunId: string
+    /** The scope generation of an a3_notify_replace attachment; undefined when the Deck did not negotiate it. */
+    generation(identity: AvatarDeckIdentity): number | undefined
+    availability(): AvatarNotificationAvailability
+  }
   report: typeof reportError
   bindTimeoutMs: number
   commandResultTimeoutMs: number
@@ -117,6 +133,17 @@ export interface AvatarSocketHub {
   detach(identity: AvatarDeckIdentity): void
   isDeckBound(identity: AvatarDeckIdentity): boolean
   boundRemotePort(identity: AvatarDeckIdentity): number | null
+  refreshNotificationStatus(): void
+  /** A fresh status, changed or not, for the Deck's bound socket: the heartbeat that renews the Deck's lease. */
+  renewNotificationStatus(identity: AvatarDeckIdentity): void
+  revokeNotificationStatuses(): void
+}
+
+interface NotificationBindingState {
+  generation: number
+  seq: number
+  projectionReady: boolean
+  replace: boolean | null
 }
 
 interface BoundAvatarSocket {
@@ -126,6 +153,7 @@ interface BoundAvatarSocket {
   remotePort: number | null
   inboxSeq: number
   inboxRefusal: string | null
+  notify: NotificationBindingState | null
 }
 
 /**
@@ -165,6 +193,11 @@ export function detachDeckInOrder(steps: { state(): boolean; hub(): void; inbox(
   steps.hub()
   steps.inbox()
   return true
+}
+
+/** The scope generation a status must carry, or undefined when the attachment did not negotiate a3_notify_replace. */
+export function notificationGenerationOf(deck: AvatarAttachedDeck | undefined): number | undefined {
+  return deck?.capabilities?.includes('a3_notify_replace') && deck.capabilities.includes('a3_inbox') ? deck.context?.scope_generation : undefined
 }
 
 function deckKey(identity: AvatarDeckIdentity): string {
@@ -277,7 +310,14 @@ export async function startAvatarServer(options: AvatarServerOptions): Promise<A
           return
         }
         const requested = allowedBroker ? (attach.capabilities ?? []) : []
-        const capabilities = requested.includes('a3_context') ? requested : requested.filter((capability) => capability !== 'a3_inbox')
+        const withContext = requested.includes('a3_context') ? requested : requested.filter((capability) => capability !== 'a3_inbox')
+        const notifyReplace =
+          attach.context !== undefined &&
+          requested.includes('a3_context') &&
+          requested.includes('a3_inbox') &&
+          options.inbox !== undefined &&
+          options.notificationAvailability !== undefined
+        const capabilities = notifyReplace ? withContext : withContext.filter((capability) => capability !== 'a3_notify_replace')
         const key = deckKey(attach)
         if (!attached.has(key) && attached.size >= MAX_AVATAR_ATTACHMENTS) {
           reject(response, 409, { error: 'too_many_attached_decks' }, 'rejected Avatar attachment limit')
@@ -307,6 +347,7 @@ export async function startAvatarServer(options: AvatarServerOptions): Promise<A
           options.inbox?.clear(identity)
           options.inbox?.detach(identity)
         }
+        if (previous) hub.refreshNotificationStatus()
         sendJson(response, 200, {
           ok: true,
           protocol_version: AVATAR_PROTOCOL_VERSION,
@@ -338,6 +379,7 @@ export async function startAvatarServer(options: AvatarServerOptions): Promise<A
           return
         }
         options.state.receiveSnapshot(snapshot)
+        hub.renewNotificationStatus(snapshot.identity)
         sendJson(response, 200, { ok: true })
         return
       }
@@ -366,10 +408,19 @@ export async function startAvatarServer(options: AvatarServerOptions): Promise<A
   }
 
   const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_AVATAR_REQUEST_BYTES })
-  const hub = createAvatarSocketHub({
+  const hub = (options.createHub ?? createAvatarSocketHub)({
     isAttached: (identity) => attached.has(deckKey(identity)),
     inboxGeneration: (identity) => inboxGenerationOf(attached.get(deckKey(identity))),
     ...(options.inbox ? { inbox: options.inbox } : {}),
+    ...(options.inbox && options.notificationAvailability
+      ? {
+          notification: {
+            avatarRunId: options.avatarRunId,
+            generation: (identity: AvatarDeckIdentity) => notificationGenerationOf(attached.get(deckKey(identity))),
+            availability: options.notificationAvailability
+          }
+        }
+      : {}),
     report,
     bindTimeoutMs,
     commandResultTimeoutMs
@@ -439,8 +490,10 @@ export async function startAvatarServer(options: AvatarServerOptions): Promise<A
         sendInboxAction: hub.sendInboxAction,
         isDeckBound: hub.isDeckBound,
         boundRemotePort: hub.boundRemotePort,
+        refreshNotificationStatus: hub.refreshNotificationStatus,
         close: () =>
           new Promise((resolveClose, rejectClose) => {
+            hub.revokeNotificationStatuses()
             for (const socket of sockets) socket.terminate()
             server.close((serverError) => {
               wss.close((wssError) => {
@@ -458,12 +511,71 @@ export async function startAvatarServer(options: AvatarServerOptions): Promise<A
 export function createAvatarSocketHub(options: AvatarSocketHubOptions): AvatarSocketHub {
   const boundSockets = new Map<string, BoundAvatarSocket>()
   const { report, bindTimeoutMs, commandResultTimeoutMs } = options
+  // One trace per failing episode: every /state renews the status, so a provider that keeps throwing would trace each heartbeat.
+  let availabilityFailing = false
+
+  const isCurrent = (bound: BoundAvatarSocket): boolean => boundSockets.get(deckKey(bound.identity)) === bound
+
+  const statusReplace = (bound: BoundAvatarSocket): boolean => {
+    const notify = bound.notify
+    const configuration = options.notification
+    if (!notify || !configuration || !isCurrent(bound) || bound.ws.readyState !== WebSocket.OPEN) return false
+    if (configuration.generation(bound.identity) !== notify.generation) return false
+    try {
+      const replace = canReplaceDeckNotifications(configuration.availability(), notify.projectionReady)
+      availabilityFailing = false
+      return replace
+    } catch (error) {
+      if (!availabilityFailing) report('avatar-server', 'the notification availability could not be read', error)
+      availabilityFailing = true
+      return false
+    }
+  }
+
+  const sendStatus = (bound: BoundAvatarSocket, replace: boolean): void => {
+    const notify = bound.notify
+    const configuration = options.notification
+    if (!notify || !configuration) return
+    notify.seq += 1
+    notify.replace = replace
+    const frame: AvatarNotificationStatusFrame = {
+      type: 'notification_status',
+      protocol_version: AVATAR_PROTOCOL_VERSION,
+      avatarRunId: configuration.avatarRunId,
+      deckRunId: bound.identity.deckRunId,
+      broker_url: bound.identity.broker_url,
+      scope_generation: notify.generation,
+      seq: notify.seq,
+      replace,
+      lease_ms: AVATAR_NOTIFICATION_LEASE_MS
+    }
+    try {
+      bound.ws.send(JSON.stringify(frame), (error) => {
+        if (error) report('avatar-server', 'a notification status could not be sent', error)
+      })
+    } catch (error) {
+      report('avatar-server', 'a notification status could not be sent', error)
+    }
+  }
+
+  const publishStatus = (bound: BoundAvatarSocket, always: boolean): void => {
+    if (!bound.notify) return
+    const replace = statusReplace(bound)
+    if (always || replace !== bound.notify.replace) sendStatus(bound, replace)
+  }
+
+  const withdrawProjection = (bound: BoundAvatarSocket): void => {
+    if (!bound.notify?.projectionReady) return
+    bound.notify.projectionReady = false
+    publishStatus(bound, false)
+  }
 
   const releaseBoundSocket = (bound: BoundAvatarSocket, error: Error): void => {
-    if (boundSockets.get(deckKey(bound.identity)) === bound) {
+    if (isCurrent(bound)) {
       boundSockets.delete(deckKey(bound.identity))
       options.inbox?.clear(bound.identity)
     }
+    bound.notify = null
     for (const pending of bound.pending.values()) {
       clearTimeout(pending.timeout)
       pending.reject(error)
@@ -472,6 +584,7 @@ export function createAvatarSocketHub(options: AvatarSocketHubOptions): AvatarSo
   }
 
   const unbind = (bound: BoundAvatarSocket, code: number, reason: string, error: Error): void => {
+    if (bound.notify) sendStatus(bound, false)
     releaseBoundSocket(bound, error)
     bound.ws.close(code, reason)
   }
@@ -494,9 +607,11 @@ export function createAvatarSocketHub(options: AvatarSocketHubOptions): AvatarSo
 
   // A refused snapshot is dropped and the previous one kept: the socket also carries focus and open_question.
   const receiveInboxSnapshot = (bound: BoundAvatarSocket, input: unknown): void => {
+    if (!isCurrent(bound)) return
     const generation = options.inboxGeneration?.(bound.identity)
     if (generation === undefined || !options.inbox) {
       refuseInboxSnapshot(bound, 'ignored an inbox snapshot from a Deck that did not negotiate a3_inbox')
+      withdrawProjection(bound)
       return
     }
     let frame: AvatarInboxSnapshotFrame
@@ -504,20 +619,32 @@ export function createAvatarSocketHub(options: AvatarSocketHubOptions): AvatarSo
       frame = parseAvatarInboxSnapshotFrame(input, validateQuestions)
     } catch (error) {
       refuseInboxSnapshot(bound, 'ignored an invalid inbox snapshot', error)
+      withdrawProjection(bound)
       return
     }
     if (frame.deckRunId !== bound.identity.deckRunId || frame.broker_url !== bound.identity.broker_url) {
       refuseInboxSnapshot(bound, 'ignored an inbox snapshot addressed to another Deck')
+      withdrawProjection(bound)
       return
     }
     if (frame.scope_generation !== generation) {
       refuseInboxSnapshot(bound, 'ignored an inbox snapshot from another scope generation')
+      withdrawProjection(bound)
       return
     }
     if (frame.seq <= bound.inboxSeq) return
     bound.inboxSeq = frame.seq
     bound.inboxRefusal = null
-    options.inbox.receive(bound.identity, frame)
+    try {
+      options.inbox.receive(bound.identity, frame)
+    } catch (error) {
+      report('avatar-server', 'the inbox could not take a snapshot', error)
+      withdrawProjection(bound)
+      return
+    }
+    if (!bound.notify || !isCurrent(bound)) return
+    bound.notify.projectionReady = frame.truncated.approvals === 0 && frame.truncated.messages === 0
+    publishStatus(bound, false)
   }
 
   const accept = (socket: AvatarDeckSocket, remotePort: number | null): void => {
@@ -586,7 +713,8 @@ export function createAvatarSocketHub(options: AvatarSocketHubOptions): AvatarSo
           pending: new Map(),
           remotePort,
           inboxSeq: 0,
-          inboxRefusal: null
+          inboxRefusal: null,
+          notify: null
         }
         bound = current
         const previous = boundSockets.get(deckKey(current.identity))
@@ -596,6 +724,11 @@ export function createAvatarSocketHub(options: AvatarSocketHubOptions): AvatarSo
         }
         boundSockets.set(deckKey(current.identity), current)
         socket.send(JSON.stringify({ type: 'bound' }))
+        const notifyGeneration = options.notification?.generation(current.identity)
+        if (notifyGeneration !== undefined) {
+          current.notify = { generation: notifyGeneration, seq: 0, projectionReady: false, replace: null }
+          sendStatus(current, false)
+        }
         return
       }
 
@@ -681,5 +814,30 @@ export function createAvatarSocketHub(options: AvatarSocketHubOptions): AvatarSo
     return bound && bound.ws.readyState === WebSocket.OPEN ? bound.remotePort : null
   }
 
-  return { accept, focusDeck, sendInboxAction, detach, isDeckBound, boundRemotePort }
+  const refreshNotificationStatus = (): void => {
+    for (const bound of boundSockets.values()) publishStatus(bound, false)
+  }
+
+  const renewNotificationStatus = (identity: AvatarDeckIdentity): void => {
+    const bound = boundSockets.get(deckKey(identity))
+    if (bound) publishStatus(bound, true)
+  }
+
+  const revokeNotificationStatuses = (): void => {
+    for (const bound of boundSockets.values()) {
+      if (bound.notify) sendStatus(bound, false)
+    }
+  }
+
+  return {
+    accept,
+    focusDeck,
+    sendInboxAction,
+    detach,
+    isDeckBound,
+    boundRemotePort,
+    refreshNotificationStatus,
+    renewNotificationStatus,
+    revokeNotificationStatuses
+  }
 }

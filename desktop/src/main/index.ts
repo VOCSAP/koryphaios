@@ -1632,6 +1632,7 @@ service.on(
 function notifyWaitingSession(id: string): void {
   if (!config.notifyAttention) return
   if (!Notification.isSupported()) return
+  if (avatarClient?.notificationsReplaced()) return
   const session = service.list().find((s) => s.id === id)
   if (!session) return
   const isFr = (config.locale || app.getLocale()).toLowerCase().startsWith('fr')
@@ -1792,6 +1793,7 @@ const startBrokerFromBanner = createBrokerStart({
 
 const notifyInbox = (batch: { from: string; text: string }[]): void => {
   if (!Notification.isSupported() || batch.length === 0) return
+  if (avatarClient?.notificationsReplaced()) return
   const isFr = (config.locale || app.getLocale()).toLowerCase().startsWith('fr')
   const first = batch[0]!
   const n = new Notification(

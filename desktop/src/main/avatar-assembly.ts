@@ -4,6 +4,7 @@ import { avatarAppearanceDnd, type AvatarAppearance } from './avatar-appearance'
 import { createAvatarBootstrap } from './avatar-bootstrap'
 import { chooseAvatarDnd, type AvatarDndChoice, type AvatarDndState } from './avatar-tray-menu'
 import { registerAvatarViewIpcHandlers, type AvatarBrowserWindow, type AvatarViewIpcMain, type AvatarWindowConstructionOptions } from './avatar-window'
+import type { AvatarNotificationAvailability } from './avatar-notification-policy'
 import { createAvatarWindowController, type AvatarWindowController } from './avatar-window-controller'
 import type { AvatarGeometry } from './avatar-window-state'
 import type { SupportedLocale } from './i18n'
@@ -25,11 +26,17 @@ export interface AvatarAssemblyOptions {
   gesture(kind: AvatarViewGesture): void | Promise<void>
   setTimeout(callback: () => void, delayMs: number): unknown
   clearTimeout(handle: unknown): void
+  /** The mask, its renderer or the Do-not-disturb window changed what `notificationPresentation` reports. */
+  onNotificationAvailabilityChanged?(): void
 }
+
+export type AvatarNotificationPresentation = Omit<AvatarNotificationAvailability, 'serviceReady'>
 
 export interface AvatarAssembly {
   state: AvatarState
   controller: AvatarWindowController
+  /** What the operator can see of the mask right now; the bubble service and the projection are read elsewhere. */
+  notificationPresentation(): AvatarNotificationPresentation
   traySummary(): AvatarViewSummary
   trayDnd(): AvatarDndState | null
   chooseDnd(choice: AvatarDndChoice): void
@@ -44,6 +51,9 @@ export interface AvatarScreenSource {
   on(event: AvatarScreenEvent, listener: () => void): unknown
   removeListener(event: AvatarScreenEvent, listener: () => void): unknown
 }
+
+/** setTimeout fires at once above this many milliseconds. */
+const MAX_NATIVE_TIMER_MS = 2_147_483_647
 
 const AVATAR_SCREEN_EVENTS: readonly AvatarScreenEvent[] = ['display-added', 'display-removed', 'display-metrics-changed']
 
@@ -62,6 +72,49 @@ export function assembleAvatar(options: AvatarAssemblyOptions): AvatarAssembly {
     localUnread: options.localUnread
   })
   const tray: { envelope: AvatarViewState | null } = { envelope: null }
+  let dndTimer: unknown = null
+  let dndTimerDeadline: number | null = null
+  let lastPresentation = ''
+  let closing = false
+  const notificationPresentation = (): AvatarNotificationPresentation => {
+    const snapshot = controller.snapshot()
+    const { lifecycle, appearance } = snapshot
+    const ready = lifecycle.kind === 'ready'
+    const endpoint = ready ? controller.currentWindow() : null
+    return {
+      maskReady: ready,
+      maskVisible: appearance.visible === true,
+      rendererAlive: ready && endpoint !== null && endpoint.generation === lifecycle.token,
+      dndActive: appearance.dndUntil !== null && options.now() < appearance.dndUntil
+    }
+  }
+  const announceIfChanged = (): void => {
+    const key = JSON.stringify(notificationPresentation())
+    if (key === lastPresentation) return
+    lastPresentation = key
+    try {
+      options.onNotificationAvailabilityChanged?.()
+    } catch (error) {
+      options.reportError('avatar-assembly', 'Avatar notification availability observer failed', error)
+    }
+  }
+  const syncDndTimer = (): void => {
+    if (closing) return
+    const until = controller.snapshot().appearance.dndUntil
+    const deadline = until !== null && options.now() < until ? until : null
+    if (deadline === dndTimerDeadline) return
+    if (dndTimer !== null) options.clearTimeout(dndTimer)
+    dndTimer = null
+    dndTimerDeadline = deadline
+    if (deadline === null) return
+    dndTimer = options.setTimeout(() => {
+      if (dndTimerDeadline !== deadline) return
+      dndTimer = null
+      dndTimerDeadline = null
+      syncDndTimer()
+      announceIfChanged()
+    }, Math.min(deadline - options.now(), MAX_NATIVE_TIMER_MS))
+  }
   const controller = createAvatarWindowController({
     available: options.available,
     preload: options.preload,
@@ -76,8 +129,14 @@ export function assembleAvatar(options: AvatarAssemblyOptions): AvatarAssembly {
     writeSnapshot: options.writeSnapshot,
     reportError: options.reportError,
     setTimeout: options.setTimeout,
-    clearTimeout: options.clearTimeout
+    clearTimeout: options.clearTimeout,
+    stateChanged: () => {
+      syncDndTimer()
+      announceIfChanged()
+    }
   })
+  syncDndTimer()
+  lastPresentation = JSON.stringify(notificationPresentation())
   const disposeIpc = registerAvatarViewIpcHandlers({
     ipc: options.ipc,
     currentWindow: controller.currentWindow,
@@ -95,6 +154,7 @@ export function assembleAvatar(options: AvatarAssemblyOptions): AvatarAssembly {
   return {
     state,
     controller,
+    notificationPresentation,
     traySummary() {
       controller.dispatch({ kind: 'RefreshRequested' })
       if (tray.envelope === null) throw new Error('Avatar Tray summary is unavailable')
@@ -113,6 +173,10 @@ export function assembleAvatar(options: AvatarAssemblyOptions): AvatarAssembly {
       controller.dispatch({ kind: 'GeometryChanged', geometry: options.geometry() })
     },
     dispose() {
+      closing = true
+      if (dndTimer !== null) options.clearTimeout(dndTimer)
+      dndTimer = null
+      dndTimerDeadline = null
       disposeIpc()
       controller.shutdown()
     }

@@ -49,6 +49,30 @@ test("the Avatar re-reads the manual stop from both the broker probe and the Tra
   expect(js).toMatch(/brokerHealth:\s*\(port\)\s*=>\s*fetchBrokerHealth\(port,/);
 });
 
+// avatar-entry.ts imports electron at load and starts the Avatar, so it cannot be imported under bun: each wiring is pinned
+// to the body of the one call that carries it, in the transpiled file.
+function callBody(js: string, call: string): string {
+  const start = js.indexOf(call);
+  expect(start, `avatar-entry.ts: ${call} anchor is unavailable`).toBeGreaterThanOrEqual(0);
+  return extractParenBody(js, start + call.length - 1);
+}
+
+const REFRESH_ON_CHANGE = /onNotificationAvailabilityChanged:\s*\(\)\s*=>\s*server\?\.refreshNotificationStatus\(\)/;
+
+test("a change of the mask, its renderer or the Do-not-disturb window refreshes the notification status at once", () => {
+  expect(callBody(code(), "assembleAvatar("), "assembleAvatar carries the availability callback").toMatch(REFRESH_ON_CHANGE);
+});
+
+test("a bubble that fails or recovers refreshes the notification status at once", () => {
+  expect(callBody(code(), "createAvatarBubbleWindow("), "createAvatarBubbleWindow carries the availability callback").toMatch(REFRESH_ON_CHANGE);
+});
+
+test("the Avatar server reads the bubble service and the mask presentation as its notification availability", () => {
+  expect(callBody(code(), "startAvatarServer(")).toMatch(
+    /notificationAvailability:\s*\(\)\s*=>\s*\(\{\s*serviceReady:\s*bubble\?\.notificationServiceReady\(\)\s*\?\?\s*false,\s*\.\.\.assembly\.notificationPresentation\(\)\s*\}\)/
+  );
+});
+
 test("the Avatar server resolves its broker allow-list through the link policy", () => {
   const entry = code();
   const start = entry.indexOf("server = await startAvatarServer(");

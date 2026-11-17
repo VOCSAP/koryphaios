@@ -142,7 +142,8 @@ async function startAvatar(): Promise<void> {
       report: reportError
     }),
     setTimeout: (callback, delayMs) => setTimeout(callback, delayMs),
-    clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>)
+    clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
+    onNotificationAvailabilityChanged: () => server?.refreshNotificationStatus()
   })
   avatarAssembly = assembly
   const inbox = inboxWiring.inbox
@@ -175,7 +176,8 @@ async function startAvatar(): Promise<void> {
       const handle = setTimeout(callback, ms)
       return () => clearTimeout(handle)
     },
-    reportError
+    reportError,
+    onNotificationAvailabilityChanged: () => server?.refreshNotificationStatus()
   })
   server = await startAvatarServer({
     avatarRunId,
@@ -183,7 +185,11 @@ async function startAvatar(): Promise<void> {
     state: assembly.state,
     token,
     allowedBrokerUrls: () => avatarAllowedBrokerUrls(resolveBrokerEndpoint().url),
-    inbox
+    inbox,
+    notificationAvailability: () => ({
+      serviceReady: bubble?.notificationServiceReady() ?? false,
+      ...assembly.notificationPresentation()
+    })
   })
   const refreshManualStop = manualStopRefresher(
     brokerStoppedManually,

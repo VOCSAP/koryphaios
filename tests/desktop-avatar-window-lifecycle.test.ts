@@ -10,7 +10,7 @@ import {
 } from '../desktop/src/main/avatar-window.ts'
 import { createAvatarWindowController } from '../desktop/src/main/avatar-window-controller.ts'
 import { AVATAR_WINDOW_SIZES } from '../desktop/src/main/avatar-window-placement.ts'
-import type { AvatarGeometry, AvatarPublication } from '../desktop/src/main/avatar-window-state.ts'
+import type { AvatarGeometry, AvatarMachineState, AvatarPublication } from '../desktop/src/main/avatar-window-state.ts'
 
 const DISPLAY_A = { id: '1', workArea: { x: 0, y: 0, width: 1000, height: 800 } }
 const GEOMETRY: AvatarGeometry = { displays: [DISPLAY_A] }
@@ -226,6 +226,7 @@ interface RigOptions {
   available?: boolean
   configure?: (window: FakeWindow) => void
   geometry?: AvatarGeometry
+  stateChanged?: (state: AvatarMachineState) => void
 }
 
 const SUMMARY: AvatarViewState['summary'] = {
@@ -300,7 +301,8 @@ function rig(init: RigOptions = {}) {
     clearTimeout: (handle) => {
       const timer = timers.find((candidate) => candidate.id === handle)
       if (timer) timer.active = false
-    }
+    },
+    stateChanged: init.stateChanged
   })
 
   const dispose = registerAvatarViewIpcHandlers({
@@ -954,6 +956,50 @@ describe('initial state, crash, publication and persistence', () => {
     expect(g1.gone).toBe(true)
     expect(aliveWindows(r.windows)).toBe(1)
     expect(r.state.maxAlive).toBe(1)
+  })
+})
+
+describe('state observer', () => {
+  const kinds = (seen: AvatarMachineState[]): string[] => seen.map((state) => state.lifecycle.kind)
+
+  test('an outcome settled inside an effect reaches the observer, not only the public dispatch', () => {
+    const seen: AvatarMachineState[] = []
+    const r = rig({ stateChanged: (state) => seen.push(state) })
+    r.state.createFails = true
+    r.controller.dispatch({ kind: 'ShowRequested' })
+    expect(kinds(seen), 'loading is observed, then the allocation failure settled by the controller itself').toEqual(['loading', 'absent'])
+  })
+
+  test('every reduction of a full show is observed in order, ending ready', async () => {
+    const seen: AvatarMachineState[] = []
+    const r = rig({ stateChanged: (state) => seen.push(state) })
+    await r.open()
+    const observed = kinds(seen)
+    expect(observed[0]).toBe('loading')
+    expect(observed).toContain('promoting')
+    expect(observed[observed.length - 1]).toBe('ready')
+  })
+
+  test('a renderer crash is observed as a lifecycle that is no longer ready, in the same reduction', async () => {
+    const seen: AvatarMachineState[] = []
+    const r = rig({ stateChanged: (state) => seen.push(state) })
+    const g1 = await r.open()
+    const before = seen.length
+    g1.emitWeb('render-process-gone')
+    expect(kinds(seen).slice(before)[0], 'the first reduction after the crash is already past ready').not.toBe('ready')
+    expect(seen.length).toBeGreaterThan(before)
+  })
+
+  test('an observer that throws is traced and never blocks the effects of the reduction', async () => {
+    const r = rig({
+      stateChanged: () => {
+        throw new Error('observer failed')
+      }
+    })
+    const window = await r.open()
+    expect(r.controller.snapshot().lifecycle.kind).toBe('ready')
+    expect(window.destroyed).toBe(false)
+    expect(r.reports.map((report) => report.message)).toContain('Avatar state observer failed')
   })
 })
 

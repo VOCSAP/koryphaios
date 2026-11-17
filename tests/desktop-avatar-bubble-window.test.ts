@@ -62,6 +62,7 @@ function harness(initial: InboxRelayApproval[] = [approval(ID_1)], overrides: Pa
   const acted: Array<[AvatarDeckIdentity, AvatarInboxAction]> = []
   const focused: AvatarDeckIdentity[] = []
   const timers: Array<{ at: number; callback: () => void; cancelled: boolean }> = []
+  const flips: boolean[] = []
   let now = 0
   let outcome: AvatarInboxGestureResult = { outcome: 'won' }
   const box: AvatarBubbleBox = {
@@ -119,6 +120,7 @@ function harness(initial: InboxRelayApproval[] = [approval(ID_1)], overrides: Pa
       }
     },
     reportError: (_scope, message) => errors.push(message),
+    onNotificationAvailabilityChanged: () => flips.push(bubble.notificationServiceReady()),
     ...overrides
   })
   const event = (generation: number) => {
@@ -139,6 +141,7 @@ function harness(initial: InboxRelayApproval[] = [approval(ID_1)], overrides: Pa
     marked,
     focused,
     timers,
+    flips,
     call,
     actIntent,
     setNow: (value: number) => {
@@ -384,7 +387,13 @@ describe('avatar bubble read gestures', () => {
 })
 
 describe('avatar bubble native window', () => {
-  function fakeWindow() {
+  interface FakeWindowSteps {
+    show?: () => void
+    setWindowOpenHandler?: () => void
+    loadFile?: () => Promise<unknown>
+  }
+
+  function fakeWindow(steps: FakeWindowSteps = {}) {
     const listeners = new Map<string, (...args: unknown[]) => void>()
     const contentListeners = new Map<string, (...args: unknown[]) => void>()
     let destroyed = false
@@ -392,18 +401,18 @@ describe('avatar bubble native window', () => {
       webContents: {
         mainFrame: {},
         send() {},
-        setWindowOpenHandler() {},
+        setWindowOpenHandler: () => steps.setWindowOpenHandler?.(),
         on: (name, listener) => contentListeners.set(name, listener)
       },
       on: (name, listener) => listeners.set(name, listener),
-      show() {},
+      show: () => steps.show?.(),
       focus() {},
       destroy() {
         destroyed = true
         listeners.get('closed')?.()
       },
       isDestroyed: () => destroyed,
-      loadFile: async () => undefined
+      loadFile: () => steps.loadFile?.() ?? Promise.resolve(undefined)
     }
     return { window, listeners, contentListeners, destroyed: () => destroyed }
   }
@@ -433,19 +442,22 @@ describe('avatar bubble native window', () => {
     return { bubbleSession, handlers, cleared: () => cleared }
   }
 
-  function adapterOf(runId: string) {
+  function adapterOf(runId: string, steps: FakeWindowSteps = {}, createFails = false) {
     const session = fakeSession()
     const partitions: string[] = []
     const created: AvatarBubbleWindowConstructionOptions[] = []
     const fakes: Array<ReturnType<typeof fakeWindow>> = []
+    const events: string[] = []
+    const traces: string[] = []
     let closed = 0
     const adapter = createAvatarBubbleNativeAdapter({
       preload: 'p',
       html: 'h',
       runId,
       createWindow: (options) => {
+        if (createFails) throw new Error('constructor failed')
         created.push(options)
-        const fake = fakeWindow()
+        const fake = fakeWindow(steps)
         fakes.push(fake)
         return fake.window
       },
@@ -453,10 +465,18 @@ describe('avatar bubble native window', () => {
         partitions.push(partition)
         return session.bubbleSession
       },
-      reportError() {}
+      reportError: (_scope, message) => traces.push(message)
     })
-    const openNext = (generation: number) => adapter.open(generation, { x: 0, y: 0, width: 388, height: 560 }, { closed: () => (closed += 1) })
-    return { adapter, openNext, session, partitions, created, fakes, closed: () => closed }
+    const openNext = (generation: number) =>
+      adapter.open(generation, { x: 0, y: 0, width: 388, height: 560 }, {
+        closed: () => {
+          closed += 1
+          events.push('closed')
+        },
+        failed: () => events.push('failed'),
+        ready: () => events.push('ready')
+      })
+    return { adapter, openNext, session, partitions, created, fakes, events, traces, closed: () => closed }
   }
 
   function open() {
@@ -498,6 +518,204 @@ describe('avatar bubble native window', () => {
     const { fake } = open()
     fake.listeners.get('blur')!()
     expect(fake.destroyed()).toBe(true)
+  })
+
+  const settle = async (): Promise<void> => {
+    for (let turn = 0; turn < 5; turn += 1) await Promise.resolve()
+  }
+
+  test('a window that cannot be created is reported failed, then closed', () => {
+    const run = adapterOf('run-1', {}, true)
+    run.openNext(1)
+    expect(run.events).toEqual(['failed', 'closed'])
+  })
+
+  test('ready follows a successful show and focus, and a show that throws is a failure with no ready', () => {
+    const good = adapterOf('run-1')
+    good.openNext(1)
+    good.fakes[0]!.listeners.get('ready-to-show')!()
+    expect(good.events).toEqual(['ready'])
+
+    const bad = adapterOf('run-2', { show: () => { throw new Error('show failed') } })
+    bad.openNext(1)
+    bad.fakes[0]!.listeners.get('ready-to-show')!()
+    expect(bad.events).toEqual(['failed', 'closed'])
+  })
+
+  test('a renderer crash, a preload error and a setup failure are failures that precede the closure', () => {
+    const crashRun = adapterOf('run-1')
+    crashRun.openNext(1)
+    crashRun.fakes[0]!.contentListeners.get('render-process-gone')!()
+    expect(crashRun.events).toEqual(['failed', 'closed'])
+
+    const preload = adapterOf('run-2')
+    preload.openNext(1)
+    preload.fakes[0]!.contentListeners.get('preload-error')!({}, 'preload.js', new Error('boom'))
+    expect(preload.events).toEqual(['failed', 'closed'])
+
+    const setup = adapterOf('run-3', { setWindowOpenHandler: () => { throw new Error('setup failed') } })
+    setup.openNext(1)
+    expect(setup.events).toEqual(['failed', 'closed'])
+  })
+
+  test('a navigation refusal closes the bubble without declaring the service failed', () => {
+    const run = adapterOf('run-1')
+    run.openNext(1)
+    run.fakes[0]!.contentListeners.get('will-navigate')!({ preventDefault() {} })
+    expect(run.events).toEqual(['closed'])
+  })
+
+  test('a document that fails to load is a failure, but a load aborted by an earlier normal close is not', async () => {
+    const live = adapterOf('run-1', { loadFile: () => Promise.reject(new Error('load failed')) })
+    live.openNext(1)
+    await settle()
+    expect(live.events).toEqual(['failed', 'closed'])
+    expect(live.traces).toContain('Avatar bubble failed to load')
+
+    let rejectLoad: (error: Error) => void = () => {}
+    const aborted = adapterOf('run-2', { loadFile: () => new Promise((_resolve, reject) => { rejectLoad = reject }) })
+    aborted.openNext(1)
+    aborted.fakes[0]!.listeners.get('blur')!()
+    expect(aborted.events).toEqual(['closed'])
+    rejectLoad(new Error('aborted'))
+    await settle()
+    expect(aborted.events).toEqual(['closed'])
+    expect(aborted.traces, 'an expected abort leaves no trace').toEqual([])
+  })
+})
+
+describe('avatar bubble notification service', () => {
+  const opened = async (overrides: Partial<AvatarBubbleWindowOptions> = {}) => {
+    const h = harness(undefined, overrides)
+    h.bubble.open()
+    return h
+  }
+  const showAndServe = async (h: ReturnType<typeof harness>, generation: number): Promise<void> => {
+    h.lifecycles.get(generation)!.ready()
+    await h.call(AVATAR_BUBBLE_CHANNELS.getState, generation)
+  }
+
+  test('the service is ready once built, before any opening, and announces nothing yet', () => {
+    const h = harness()
+    expect(h.bubble.notificationServiceReady()).toBe(true)
+    expect(h.flips).toEqual([])
+  })
+
+  test('a normal close, however often, keeps the service ready and announces nothing', async () => {
+    const h = await opened()
+    await showAndServe(h, 1)
+    h.bubble.close()
+    h.bubble.open()
+    h.bubble.close()
+    expect(h.bubble.notificationServiceReady()).toBe(true)
+    expect(h.flips).toEqual([])
+  })
+
+  test('a failure makes the service unavailable, once, and the closure that follows heals nothing', async () => {
+    const h = await opened()
+    h.lifecycles.get(1)!.failed()
+    expect(h.bubble.notificationServiceReady()).toBe(false)
+    expect(h.flips).toEqual([false])
+
+    h.bubble.close()
+    expect(h.bubble.notificationServiceReady()).toBe(false)
+    h.bubble.open()
+    expect(h.bubble.notificationServiceReady(), 'an opening in progress after a failure is still unavailable').toBe(false)
+    expect(h.flips).toEqual([false])
+  })
+
+  test('after a failure only a later generation that is shown and serves its state restores the service', async () => {
+    const h = await opened()
+    h.lifecycles.get(1)!.failed()
+    h.bubble.close()
+
+    h.bubble.open()
+    h.lifecycles.get(2)!.ready()
+    expect(h.bubble.notificationServiceReady(), 'shown but no state served yet').toBe(false)
+    await h.call(AVATAR_BUBBLE_CHANNELS.getState, 2)
+    expect(h.bubble.notificationServiceReady()).toBe(true)
+    expect(h.flips).toEqual([false, true])
+
+    h.lifecycles.get(2)!.failed()
+    h.bubble.close()
+    h.bubble.open()
+    await h.call(AVATAR_BUBBLE_CHANNELS.getState, 3)
+    expect(h.bubble.notificationServiceReady(), 'a served state without the show is not enough').toBe(false)
+    h.lifecycles.get(3)!.ready()
+    expect(h.bubble.notificationServiceReady()).toBe(true)
+    expect(h.flips).toEqual([false, true, false, true])
+  })
+
+  test('the generation that failed cannot heal itself, even when it is shown and served again', async () => {
+    const h = await opened()
+    await showAndServe(h, 1)
+    h.lifecycles.get(1)!.failed()
+    expect(h.bubble.notificationServiceReady()).toBe(false)
+
+    await showAndServe(h, 1)
+
+    expect(h.bubble.notificationServiceReady()).toBe(false)
+    expect(h.flips).toEqual([false])
+  })
+
+  test('the failure callback of an older generation is ignored', async () => {
+    const h = await opened()
+    const first = h.lifecycles.get(1)!
+    h.bubble.close()
+    h.bubble.open()
+
+    first.failed()
+
+    expect(h.bubble.notificationServiceReady()).toBe(true)
+    expect(h.flips).toEqual([])
+  })
+
+  test('a creation failure inside open is a failure of the generation being opened', () => {
+    const h = harness(undefined, {
+      native: {
+        open: (_generation, _rect, lifecycle) => {
+          lifecycle.failed()
+          lifecycle.closed()
+        },
+        focus() {},
+        close() {},
+        endpoint: () => null
+      }
+    })
+    h.bubble.open()
+    expect(h.bubble.notificationServiceReady()).toBe(false)
+    expect(h.flips).toEqual([false])
+  })
+
+  test('dispose makes the service unavailable, announced, before any handler is removed', () => {
+    const seen: boolean[] = []
+    const holder: { bubble: ReturnType<typeof harness>['bubble'] | null } = { bubble: null }
+    const h = harness(undefined, {
+      ipc: {
+        handle() {},
+        removeHandler: () => {
+          seen.push(holder.bubble!.notificationServiceReady())
+        }
+      }
+    })
+    holder.bubble = h.bubble
+
+    h.bubble.dispose()
+
+    expect(h.flips).toEqual([false])
+    expect(seen.length).toBeGreaterThan(0)
+    expect(seen.every((ready) => ready === false)).toBe(true)
+  })
+
+  test('an observer that throws is traced and does not break the failure path', async () => {
+    const h = await opened({
+      onNotificationAvailabilityChanged: () => {
+        throw new Error('observer failed')
+      }
+    })
+    h.lifecycles.get(1)!.failed()
+    expect(h.bubble.notificationServiceReady()).toBe(false)
+    expect(h.errors).toContain('Avatar bubble availability observer failed')
   })
 })
 
