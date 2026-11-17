@@ -4,6 +4,7 @@
 import { test, expect } from 'bun:test'
 import type { RoadmapItem } from '../desktop/src/shared/types'
 import {
+  buildStackIntoQueue,
   clampLaneHeight,
   compareById,
   dependsRelated,
@@ -21,6 +22,8 @@ import {
   laneItems,
   layoutLane,
   queuedItems,
+  queueSourceOf,
+  sameWaveMembership,
   siblingDeps,
   stackTargetAt,
   unmetDeps,
@@ -349,6 +352,66 @@ test('siblingDeps copies the target dependencies, sanitized', () => {
   const tri = [item('X'), item('Y', { depends_on: ['X'] }), item('Z', { depends_on: ['Y', 'X'] })]
   expect(siblingDeps(tri, 'X', 'Z')).toBeNull() // Y and X both cycle back to X
   expect(siblingDeps(tri, 'Y', 'Z')).toEqual(['X']) // Y kept out (self), X fine
+})
+
+const WAVES_FIXTURE = [
+  item('a', { queue: 1 }),
+  item('b', { queue: 2 }),
+  item('c', { queue: 2 }),
+  item('d', { queue: 3 })
+]
+
+test('stacking a dependency-free card onto a dependency-free target puts it in the target wave', () => {
+  const src = queueSourceOf([...WAVES_FIXTURE, item('x')])
+  const { ids, waves } = buildStackIntoQueue(src, 'x', 'b')
+  expect(waves).toEqual([['a'], ['b', 'c', 'x'], ['d']])
+  expect(ids).toEqual(waves.flat())
+})
+
+test('stacking a card already queued elsewhere removes it from its previous wave', () => {
+  const src = queueSourceOf([
+    ...WAVES_FIXTURE,
+    item('x', { queue: 4 }),
+    item('y', { queue: 4 })
+  ])
+  expect(buildStackIntoQueue(src, 'x', 'a').waves).toEqual([['a', 'x'], ['b', 'c'], ['d'], ['y']])
+})
+
+test('stacking the only card of a wave drops the emptied wave', () => {
+  const src = queueSourceOf([...WAVES_FIXTURE, item('x', { queue: 4 })])
+  const { ids, waves } = buildStackIntoQueue(src, 'x', 'a')
+  expect(waves).toEqual([['a', 'x'], ['b', 'c'], ['d']])
+  expect(ids).toEqual(['a', 'x', 'b', 'c', 'd'])
+})
+
+test('stacking a card from a later wave keeps the other waves and the flat order', () => {
+  const src = queueSourceOf(WAVES_FIXTURE)
+  const { ids, waves } = buildStackIntoQueue(src, 'd', 'a')
+  expect(waves).toEqual([['a', 'd'], ['b', 'c']])
+  expect(ids).toEqual(['a', 'd', 'b', 'c'])
+})
+
+test('a directive card keeps a solo wave right after the target wave', () => {
+  const asDragged = queueSourceOf([...WAVES_FIXTURE, item('x', { kind: 'directive' })])
+  expect(buildStackIntoQueue(asDragged, 'x', 'b').waves).toEqual([['a'], ['b', 'c'], ['x'], ['d']])
+  const asTarget = queueSourceOf([
+    item('a', { queue: 1 }),
+    item('t', { queue: 2, kind: 'directive' }),
+    item('x')
+  ])
+  expect(buildStackIntoQueue(asTarget, 'x', 't').waves).toEqual([['a'], ['t'], ['x']])
+})
+
+test('a target outside the queue appends the card as a solo wave at the end', () => {
+  const head = item('h', { status: 'in_progress', locked: true, locked_by: 'p' })
+  const src = queueSourceOf([...WAVES_FIXTURE, head, item('x')])
+  expect(buildStackIntoQueue(src, 'x', 'h').waves).toEqual([['a'], ['b', 'c'], ['d'], ['x']])
+})
+
+test('sameWaveMembership ignores the order inside a wave but not the order of the waves', () => {
+  expect(sameWaveMembership([['a', 'c'], ['d']], [['c', 'a'], ['d']])).toBe(true)
+  expect(sameWaveMembership([['a'], ['d']], [['d'], ['a']])).toBe(false)
+  expect(sameWaveMembership([['a', 'c'], ['d']], [['a'], ['c', 'd']])).toBe(false)
 })
 
 test('dependsRelated: any dependency path (either direction) forbids parallelism', () => {

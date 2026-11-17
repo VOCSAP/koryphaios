@@ -91,15 +91,17 @@ test('COUNTER-PROBE: buildInsertIntoQueue from the FILTERED board silently drops
   expect(new Set(payload.ids)).toEqual(new Set(['a', 'b', 'c', 'new-id']))
 })
 
-test('buildStackIntoQueue from the true source stacks and keeps every existing id', () => {
-  const payload = buildStackIntoQueue(queueSourceOf(all), 'new-id', 'b', 'after')
+test('buildStackIntoQueue from the true source joins the target wave and keeps every existing id', () => {
+  const payload = buildStackIntoQueue(queueSourceOf(all), 'new-id', 'b')
   expect(new Set(payload.ids)).toEqual(new Set([...IDS, 'new-id']))
   expect(payload.ids.length).toBe(11)
   expect(payload.waves.flat()).toEqual(payload.ids)
+  expect(payload.waves.find((w) => w.includes('b'))).toEqual(['b', 'new-id'])
+  expect(payload.waves.length).toBe(10)
 })
 
 test('COUNTER-PROBE: buildStackIntoQueue from the FILTERED board silently drops the 7 hidden items', () => {
-  const payload = buildStackIntoQueue(queueSourceOf(board), 'new-id', 'b', 'after')
+  const payload = buildStackIntoQueue(queueSourceOf(board), 'new-id', 'b')
   expect(payload.ids.length).toBe(4)
   expect(new Set(payload.ids)).toEqual(new Set(['a', 'b', 'c', 'new-id']))
 })

@@ -307,17 +307,22 @@ Electron + React 19 + zustand, xterm terminals over node-pty. Sources in
   Below the board, the **Workflow lane** (`WorkflowLane.tsx`) draws the
   dispatch queue as a left-to-right chain of cards, GraphView-style (manual
   camera, SVG edges, no library): every position is DERIVED
-  (`shared/workflow.ts`), hierarchy-first — the column is the `depends_on`
-  DEPTH inside a connected component, so parallel branches (N:1 / 1:N
-  fan-ins) stack vertically in the same column, while unrelated components
-  chain left-to-right by queue rank (a dependency-free queue stays a flat
-  chain). Nothing visual is persisted, so the lane always agrees with the
-  kanban. Cards drag in from the board (HTML5 DnD) or reorder in place
-  (insertion caret between columns); dropping a card clearly above/below
-  another (grid-assisted dashed slot) makes it a PARALLEL SIBLING — it
-  adopts the target's dependencies (`siblingDeps`, sanitized + cycle-checked)
-  — and commits go through ONE atomic `roadmap:reorder` IPC → broker
-  `/roadmap/reorder`. Dependency-RELATED cards can never be parallel: the
+  (`shared/workflow.ts`), wave-first: the column is the WAVE (cards sharing
+  one `queue` value), and the members of a wave stack vertically in it.
+  Nothing visual is persisted, so the lane always agrees with the kanban.
+  Cards drag in from the board (HTML5 DnD) or reorder in place (insertion
+  caret between columns); dropping a card clearly above/below another
+  (grid-assisted dashed slot) makes it a PARALLEL SIBLING. Stacking declares
+  that no order constraint exists between the two cards: with no dependency
+  to share, the dragged card joins the target's WHOLE wave
+  (`buildStackIntoQueue`, a pure merge that copies no dependency; it leaves
+  its previous wave, other waves stay intact). A directive card, or a card
+  with unmet unqueued dependencies, keeps a plain insertion right after the
+  target, because a directive must be alone in its wave and a dependency
+  closure cannot join a wave. When the target has dependencies, the dragged
+  card, queued or not, adopts them (`siblingDeps`, sanitized + cycle-checked)
+  and joins the target's wave. Commits go through ONE atomic `roadmap:reorder`
+  IPC → broker `/roadmap/reorder`. Dependency-RELATED cards can never be parallel: the
   stack slot is not offered between them (`dependsRelated` — the card slides
   sideways instead), and while a drag hovers an insertion that would
   wrong-side a link, the link and both cards' borders turn red live

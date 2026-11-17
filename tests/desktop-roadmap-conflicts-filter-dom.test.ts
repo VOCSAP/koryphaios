@@ -112,6 +112,8 @@ let root: Root;
 let calls: string[];
 let cards: RoadmapItem[];
 let searches: Array<{ include_archived?: boolean }>;
+let upserts: Array<{ id: string; depends_on?: string[] }>;
+let reorders: Array<{ ids: string[]; waves: string[][] }>;
 
 // The board's stop controls probe window.api and fall back to "unavailable"
 // when a channel is missing, so only the roadmap channels are provided.
@@ -123,11 +125,21 @@ function installApi(): void {
       return Promise.resolve({ items, facets: null });
     },
     roadmapList: () => Promise.resolve(cards),
+    roadmapUpsert: (patch: { id: string; depends_on?: string[] }) => {
+      upserts.push(patch);
+      return Promise.resolve({});
+    },
+    roadmapReorder: (ids: string[], waves: string[][]) => {
+      reorders.push({ ids, waves });
+      return Promise.resolve({});
+    },
     reportError: () => undefined
   };
 }
 
 beforeEach(() => {
+  upserts = [];
+  reorders = [];
   calls = [];
   cards = [];
   searches = [];
@@ -474,4 +486,86 @@ test("without a specific text the filtered empty state keeps its generic line", 
   const empties = container.querySelectorAll(".roadmap-empty");
   expect(empties.length).toBe(1);
   expect(empties[0]!.textContent).toContain("roadmap.emptyFiltered");
+});
+
+async function stackBelow(id: string, targetId: string): Promise<void> {
+  const node = (cardId: string): HTMLElement =>
+    [...container.querySelectorAll<HTMLElement>(".wf-node-title")]
+      .find((el) => el.textContent === cardId)!
+      .closest<HTMLElement>(".wf-node")!;
+  const from = node(id);
+  const to = node(targetId);
+  const transform = container.querySelector<HTMLElement>(".wf-world")!.style.transform;
+  const zoom = Number(/scale\(([\d.]+)\)/.exec(transform)![1]);
+  const dx = (parseFloat(to.style.left) - parseFloat(from.style.left)) * zoom;
+  const dy = (parseFloat(to.style.top) + sharedWorkflow.WF_NODE_H - parseFloat(from.style.top)) * zoom;
+  const canvas = container.querySelector<HTMLElement>(".wf-canvas")!;
+  const at = (type: string, x: number, y: number): MouseEvent =>
+    new MouseEvent(type, { bubbles: true, button: 0, clientX: x, clientY: y });
+  await act(async () => {
+    from.dispatchEvent(at("mousedown", 1000, 1000));
+  });
+  await act(async () => {
+    canvas.dispatchEvent(at("mousemove", 1000 + dx, 1000 + dy));
+  });
+  await act(async () => {
+    canvas.dispatchEvent(at("mouseup", 1000 + dx, 1000 + dy));
+  });
+  await settle();
+}
+
+async function mountRoadmap(): Promise<void> {
+  fakeUseDeck.setState({ view: "roadmap" });
+  await act(async () => {
+    root.render(React.createElement(Shell));
+  });
+  await settle();
+}
+
+test("stacking a queued card below a card with other dependencies adopts them and joins the target wave", async () => {
+  cards = [
+    card("p", { queue: 1 }),
+    card("a", { queue: 2, depends_on: ["p"] }),
+    card("c", { queue: 3 })
+  ];
+  await mountRoadmap();
+  await stackBelow("c", "a");
+  expect(upserts).toEqual([{ id: "c", depends_on: ["p"] }]);
+  expect(reorders).toEqual([{ ids: ["p", "a", "c"], waves: [["p"], ["a", "c"]] }]);
+});
+
+test("stacking a queued card with the same dependencies below a card joins the target wave without rewriting the dependencies", async () => {
+  cards = [
+    card("p", { queue: 1 }),
+    card("a", { queue: 2, depends_on: ["p"] }),
+    card("c", { queue: 3, depends_on: ["p"] })
+  ];
+  await mountRoadmap();
+  await stackBelow("c", "a");
+  expect(upserts).toEqual([]);
+  expect(reorders).toEqual([{ ids: ["p", "a", "c"], waves: [["p"], ["a", "c"]] }]);
+});
+
+test("stacking a card already in the target wave with the same dependencies writes nothing", async () => {
+  cards = [
+    card("p", { queue: 1 }),
+    card("a", { queue: 2, depends_on: ["p"] }),
+    card("c", { queue: 2, depends_on: ["p"] })
+  ];
+  await mountRoadmap();
+  await stackBelow("c", "a");
+  expect(upserts).toEqual([]);
+  expect(reorders).toEqual([]);
+});
+
+test("stacking the first card of a wave below a card of its own wave writes nothing although the merge reorders the wave", async () => {
+  cards = [
+    card("p", { queue: 1 }),
+    card("a", { queue: 2, depends_on: ["p"] }),
+    card("c", { queue: 2, depends_on: ["p"] })
+  ];
+  await mountRoadmap();
+  await stackBelow("a", "c");
+  expect(upserts).toEqual([]);
+  expect(reorders).toEqual([]);
 });

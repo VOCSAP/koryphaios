@@ -594,29 +594,34 @@ export function buildInsertIntoQueue(src: QueueSource, id: string, at: number): 
   return { ids, waves }
 }
 
+/** Same wave grouping, ignoring the order of ids inside a wave (the broker persists only `queue`). */
+export function sameWaveMembership(a: string[][], b: string[][]): boolean {
+  const canon = (waves: string[][]): string => JSON.stringify(waves.map((w) => [...w].sort()))
+  return canon(a) === canon(b)
+}
+
 /**
- * Inserts dragId right at the boundary before or after the target's whole wave,
- * never mid-wave. Dependency adoption is the caller's job via roadmapUpsert;
- * this only computes the id/wave placement.
+ * Puts dragId at the end of the target's wave: it leaves its previous wave
+ * (one left empty disappears) and every other wave is untouched. A directive
+ * card must stay alone in its wave (broker rule), so when dragId or the target
+ * is one, or the target is not queued, dragId takes a solo wave right after the
+ * target's wave (queue end when the target is not queued). Dependency adoption
+ * is the caller's job via roadmapUpsert; this only computes the placement.
  */
 export function buildStackIntoQueue(
   src: QueueSource,
   dragId: string,
-  targetId: string,
-  side: 'before' | 'after' = 'after'
+  targetId: string
 ): ReorderPayload {
-  const queued = queuedItems(src.all)
-  const queuedIds = queued.map((i) => i.id)
-  const baseWaves = wavesOf(queued)
-  const at = queuedIds.indexOf(targetId)
-  const targetWave = at >= 0 ? baseWaves.findIndex((w) => w.includes(targetId)) : -1
-  const boundary =
-    targetWave >= 0
-      ? side === 'after'
-        ? baseWaves.slice(0, targetWave + 1).reduce((n, w) => n + w.length, 0)
-        : baseWaves.slice(0, targetWave).reduce((n, w) => n + w.length, 0)
-      : queuedIds.length
-  const ids = insertAt(queuedIds, dragId, boundary)
-  const waves = insertSoloWaves(baseWaves, ids.indexOf(dragId), [dragId])
-  return { ids, waves }
+  const rest = queuedItems(src.all).filter((i) => i.id !== dragId)
+  const baseWaves = wavesOf(rest)
+  const targetWave = baseWaves.findIndex((w) => w.includes(targetId))
+  const isDirective = (id: string): boolean => src.all.find((i) => i.id === id)?.kind === 'directive'
+  const joins = targetWave >= 0 && !isDirective(dragId) && !isDirective(targetId)
+  const waves = joins
+    ? baseWaves.map((w, i) => (i === targetWave ? [...w, dragId] : w))
+    : targetWave < 0
+      ? [...baseWaves, [dragId]]
+      : [...baseWaves.slice(0, targetWave + 1), [dragId], ...baseWaves.slice(targetWave + 1)]
+  return { ids: waves.flat(), waves }
 }

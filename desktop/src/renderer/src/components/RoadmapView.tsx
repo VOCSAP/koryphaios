@@ -22,7 +22,15 @@ import { RoadmapFilterChips } from './RoadmapFilterChips'
 import { WorkflowLane } from './WorkflowLane'
 import { hasActiveCriteria, useRoadmapData } from '../roadmap-data'
 import { assignFeedback, dispatchFeedback, stopFeedback } from '../dispatch-feedback'
-import { buildAppendToQueue, buildInsertIntoQueue, buildStackIntoQueue, isRoadmapLocked } from '@shared/workflow'
+import {
+  buildAppendToQueue,
+  buildInsertIntoQueue,
+  buildStackIntoQueue,
+  isRoadmapLocked,
+  queuedItems,
+  sameWaveMembership,
+  wavesOf
+} from '@shared/workflow'
 import {
   getRoadmapContextEditorProjection,
   isRoadmapStaleSaveError,
@@ -600,25 +608,23 @@ export function RoadmapView(): React.JSX.Element {
     }
   }
 
-  /**
-   * Stack gesture (parallel siblings): the dragged card adopts the target's
-   * dependencies; a card stacked in from the board joins the queue right
-   * after its new sibling.
-   */
   const stackItem = async (
     dragId: string,
     targetId: string,
     dependsOn: string[]
   ): Promise<void> => {
     try {
-      await window.api.roadmapUpsert({ id: dragId, depends_on: dependsOn })
       const item = queue.all.find((i) => i.id === dragId)
-      if (item && item.queue === null) {
-        // Stacking never lands INSIDE an existing wave -- buildStackIntoQueue
-        // rounds to the boundary right after the target's WHOLE wave (see its
-        // doc comment in shared/workflow.ts).
-        const payload = buildStackIntoQueue(queue, dragId, targetId, 'after')
-        await window.api.roadmapReorder(payload.ids, payload.waves)
+      const sameDeps =
+        item !== undefined &&
+        dependsOn.length === item.depends_on.length &&
+        dependsOn.every((d) => item.depends_on.includes(d))
+      if (!sameDeps) await window.api.roadmapUpsert({ id: dragId, depends_on: dependsOn })
+      if (item) {
+        const payload = buildStackIntoQueue(queue, dragId, targetId)
+        if (!sameWaveMembership(payload.waves, wavesOf(queuedItems(queue.all)))) {
+          await window.api.roadmapReorder(payload.ids, payload.waves)
+        }
       }
       await refresh()
     } catch (e) {

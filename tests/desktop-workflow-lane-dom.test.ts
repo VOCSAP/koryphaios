@@ -91,7 +91,10 @@ afterEach(() => {
   container.remove();
 });
 
-async function mountLane(items: RoadmapItem[]): Promise<void> {
+async function mountLane(
+  items: RoadmapItem[],
+  handlers: { onReorder?: (ids: string[], waves: string[][]) => void; onStack?: (...a: unknown[]) => void } = {},
+): Promise<void> {
   const noop = (): void => {};
   await act(async () => {
     root.render(
@@ -107,6 +110,7 @@ async function mountLane(items: RoadmapItem[]): Promise<void> {
         onAddDep: noop,
         onRemoveDep: noop,
         onStack: noop,
+        ...handlers,
       }),
     );
   });
@@ -133,4 +137,134 @@ test("a card whose dependencies all resolve shows no unknown-dependency badge", 
     card(DONE_ID, { status: "done" }),
   ]);
   expect(unknownBadges()).toEqual([]);
+});
+
+function nodeOf(id: string): HTMLElement {
+  const title = [...container.querySelectorAll<HTMLElement>(".wf-node-title")].find(
+    (el) => el.textContent === id,
+  );
+  return title!.closest<HTMLElement>(".wf-node")!;
+}
+
+function worldZoom(): number {
+  const transform = container.querySelector<HTMLElement>(".wf-world")!.style.transform;
+  return Number(/scale\(([\d.]+)\)/.exec(transform)![1]);
+}
+
+async function stackBelow(id: string, targetId: string): Promise<void> {
+  const from = nodeOf(id);
+  const to = nodeOf(targetId);
+  const zoom = worldZoom();
+  const dx = (parseFloat(to.style.left) - parseFloat(from.style.left)) * zoom;
+  const dy = (parseFloat(to.style.top) + workflow.WF_NODE_H - parseFloat(from.style.top)) * zoom;
+  const canvas = container.querySelector<HTMLElement>(".wf-canvas")!;
+  const at = (type: string, x: number, y: number): MouseEvent =>
+    new MouseEvent(type, { bubbles: true, button: 0, clientX: x, clientY: y });
+  await act(async () => {
+    from.dispatchEvent(at("mousedown", 1000, 1000));
+  });
+  await act(async () => {
+    canvas.dispatchEvent(at("mousemove", 1000 + dx, 1000 + dy));
+  });
+  await act(async () => {
+    canvas.dispatchEvent(at("mouseup", 1000 + dx, 1000 + dy));
+  });
+}
+
+function recorder(): {
+  reorders: [string[], string[][]][];
+  stacks: unknown[][];
+  onReorder: (ids: string[], waves: string[][]) => void;
+  onStack: (...a: unknown[]) => void;
+} {
+  const reorders: [string[], string[][]][] = [];
+  const stacks: unknown[][] = [];
+  return {
+    reorders,
+    stacks,
+    onReorder: (ids, waves) => void reorders.push([ids, waves]),
+    onStack: (...a) => void stacks.push(a),
+  };
+}
+
+test("dropping a card below a dependency-free card commits the card into that wave", async () => {
+  const rec = recorder();
+  await mountLane(
+    [card("a", { queue: 1 }), card("b", { queue: 2 }), card("c", { queue: 3 })],
+    rec,
+  );
+  await stackBelow("c", "a");
+  expect(rec.stacks).toEqual([]);
+  expect(rec.reorders).toEqual([[["a", "c", "b"], [["a", "c"], ["b"]]]]);
+});
+
+test("dropping a card below a card of its own wave commits nothing", async () => {
+  const rec = recorder();
+  await mountLane([card("a", { queue: 1 }), card("c", { queue: 1 })], rec);
+  await stackBelow("c", "a");
+  expect(rec.reorders).toEqual([]);
+  expect(rec.stacks).toEqual([]);
+});
+
+test("dropping the first card of a wave below a card of its own wave commits nothing", async () => {
+  const rec = recorder();
+  await mountLane([card("a", { queue: 1 }), card("c", { queue: 1 })], rec);
+  await stackBelow("a", "c");
+  expect(rec.reorders).toEqual([]);
+  expect(rec.stacks).toEqual([]);
+});
+
+test("dropping a card below a card with dependencies hands them to onStack and commits no reorder itself", async () => {
+  const rec = recorder();
+  await mountLane(
+    [
+      card("p", { queue: 1 }),
+      card("a", { queue: 2, depends_on: ["p"] }),
+      card("c", { queue: 3 }),
+    ],
+    rec,
+  );
+  await stackBelow("c", "a");
+  expect(rec.stacks).toEqual([["c", "a", ["p"]]]);
+  expect(rec.reorders).toEqual([]);
+});
+
+test("dropping a queued card with the same dependencies below a card still reaches onStack", async () => {
+  const rec = recorder();
+  await mountLane(
+    [
+      card("p", { queue: 1 }),
+      card("a", { queue: 2, depends_on: ["p"] }),
+      card("c", { queue: 3, depends_on: ["p"] }),
+    ],
+    rec,
+  );
+  await stackBelow("c", "a");
+  expect(rec.stacks).toEqual([["c", "a", ["p"]]]);
+});
+
+test("a directive card dropped below a card keeps a wave of its own", async () => {
+  const rec = recorder();
+  await mountLane(
+    [card("a", { queue: 1 }), card("b", { queue: 2 }), card("d", { queue: 3, kind: "directive", target_peer_ids: [] })],
+    rec,
+  );
+  await stackBelow("d", "a");
+  expect(rec.reorders).toEqual([[["a", "d", "b"], [["a"], ["d"], ["b"]]]]);
+});
+
+test("a card with an unqueued dependency is inserted after the target and pulls it in", async () => {
+  const rec = recorder();
+  await mountLane(
+    [
+      card("a", { queue: 1 }),
+      card("b", { queue: 2 }),
+      card("c", { queue: 3, depends_on: ["q"] }),
+      card("q"),
+    ],
+    rec,
+  );
+  await stackBelow("c", "a");
+  expect(rec.stacks).toEqual([]);
+  expect(rec.reorders).toEqual([[["a", "q", "c", "b"], [["a"], ["q"], ["c"], ["b"]]]]);
 });

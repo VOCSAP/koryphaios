@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { RoadmapItem } from '@shared/types'
 import {
+  buildStackIntoQueue,
   caretXAt,
   clampLaneHeight,
   dependsRelated,
@@ -16,6 +17,7 @@ import {
   laneItems,
   layoutLane,
   queuedItems,
+  sameWaveMembership,
   siblingDeps,
   slotConflicts,
   stackTargetAt,
@@ -42,10 +44,6 @@ import { KIND_ICONS } from './RoadmapItemModal'
 // persisted queue number (queued items) or, for locked in-progress heads, a
 // single shared column 0 — heads are observed concurrency, not a scheduling
 // intent, so they never lay out as a sequence.
-// Dropping inside an existing wave's column band ties the card into that wave;
-// dropping in the gap between two waves starts a new one-item wave; dropping
-// above/below another card makes it a parallel sibling that adopts the target's
-// dependencies.
 // Reordering commits through one atomic roadmap:reorder call carrying both the
 // flat id order and the wave grouping.
 
@@ -328,16 +326,21 @@ export function WorkflowLane({
     onReorder(withClosure, waves)
   }
 
-  /** Parallel-sibling drop: `id` adopts the target's dependencies. */
   const commitStack = (id: string, targetId: string): void => {
     const item = droppable(id)
     if (!item) return
     const deps = siblingDeps(items, id, targetId)
     if (!deps) {
-      // Target has no dependencies to share, so there is nothing to stack
-      // against -- degrade to a plain insertion right after the target
-      // instead of refusing the gesture, mirroring where the sibling path
-      // lands a newly-queued card (RoadmapView.stackItem inserts at `at + 1`).
+      if (enqueueClosure(items, id).length === 0) {
+        const current = wavesOf(queuedItems(items))
+        const payload = buildStackIntoQueue(source, id, targetId)
+        if (!sameWaveMembership(payload.waves, current)) {
+          onReorder(payload.ids, payload.waves)
+        }
+        return
+      }
+      // A closure splice and a wave join exclude each other (see commitDrop):
+      // insert right after the target as a plain drop.
       const targetSlot = laneIds.indexOf(targetId)
       if (targetSlot >= 0) {
         commitDrop(id, targetSlot + 1)
@@ -349,9 +352,7 @@ export function WorkflowLane({
       }
       return
     }
-    const same =
-      deps.length === item.depends_on.length && deps.every((d) => item.depends_on.includes(d))
-    if (!same || !queuedIds.includes(id)) onStack(id, targetId, deps)
+    onStack(id, targetId, deps)
   }
 
   // ----- mouse interactions (GraphView pattern) -----
