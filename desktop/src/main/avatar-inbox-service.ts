@@ -27,7 +27,7 @@ export interface AvatarInboxBox extends AvatarInboxContent {
 export interface AvatarInboxServiceOptions {
   send(identity: AvatarDeckIdentity, action: AvatarInboxAction): Promise<AvatarCommandResult>
   report: typeof reportError
-  changed?(): void
+  changed(): void
 }
 
 export interface AvatarInboxService extends AvatarInboxSink {
@@ -53,10 +53,10 @@ export function createAvatarInboxService(options: AvatarInboxServiceOptions): Av
   return {
     receive(identity, frame) {
       boxes.set(deckKey(identity), { identity, frame, settledLocally: new Set() })
-      options.changed?.()
+      options.changed()
     },
     clear(identity) {
-      if (boxes.delete(deckKey(identity))) options.changed?.()
+      if (boxes.delete(deckKey(identity))) options.changed()
     },
     boxes() {
       return [...boxes.values()].map((box) => ({
@@ -84,7 +84,7 @@ export function createAvatarInboxService(options: AvatarInboxServiceOptions): Av
         }
         if (result.outcome === 'won') {
           boxes.get(key)?.settledLocally.add(action.approval_id)
-          options.changed?.()
+          options.changed()
         }
         return { outcome: result.outcome, ...(result.reason === undefined ? {} : { reason: result.reason }) }
       } catch (error) {

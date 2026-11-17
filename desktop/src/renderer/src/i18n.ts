@@ -4,21 +4,9 @@
 
 import { useCallback } from 'react'
 import { useDeck } from './store'
+import { translate, type TFn } from './translate'
 
-/** Interpolate `{name}` placeholders; missing key -> key, missing param -> token. */
-export function translate(
-  dict: Record<string, string>,
-  key: string,
-  params?: Record<string, string | number>
-): string {
-  const template = dict[key] ?? key
-  if (!params) return template
-  return template.replace(/\{(\w+)\}/g, (match, name: string) =>
-    Object.prototype.hasOwnProperty.call(params, name) ? String(params[name]) : match
-  )
-}
-
-export type TFn = (key: string, params?: Record<string, string | number>) => string
+export { translate, type TFn }
 
 /** Locale-aware HH:MM for badges (quota resume time). */
 export function formatClock(epochMs: number): string {

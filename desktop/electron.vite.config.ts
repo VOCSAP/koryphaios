@@ -29,6 +29,7 @@ export default defineConfig({
           index: resolve(__dirname, 'src/preload/index.ts'),
           avatar: resolve(__dirname, 'src/preload/avatar.ts'),
           approval: resolve(__dirname, 'src/preload/approval.ts'),
+          'avatar-bubble': resolve(__dirname, 'src/preload/avatar-bubble.ts'),
           // Guest preload injected into the embedded-browser <webview> (PLAN D1).
           'browser-inspect': resolve(__dirname, 'src/preload/browser-inspect.ts')
         }
@@ -49,7 +50,8 @@ export default defineConfig({
         input: {
           index: resolve(__dirname, 'src/renderer/index.html'),
           avatar: resolve(__dirname, 'src/renderer/avatar.html'),
-          approval: resolve(__dirname, 'src/renderer/approval.html')
+          approval: resolve(__dirname, 'src/renderer/approval.html'),
+          'avatar-bubble': resolve(__dirname, 'src/renderer/avatar-bubble.html')
         }
       }
     }

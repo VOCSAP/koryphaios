@@ -5030,6 +5030,35 @@ body:has(.rm-modal) .rm-conflict-modal {
   box-shadow: 0 6px 28px rgba(0, 0, 0, 0.45);
 }
 
+/* Hosted by another surface (the Avatar bubble): it fills its host, and an
+   entry opens inside the host instead of over the Deck viewport. */
+.inbox-panel.is-embedded {
+  position: relative;
+  left: auto;
+  bottom: auto;
+  width: auto;
+  max-width: none;
+  height: auto;
+  max-height: none;
+  flex: 1;
+  min-height: 0;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+}
+
+.inbox-panel.is-embedded .modal-backdrop {
+  position: absolute;
+  inset: 0;
+}
+
+.inbox-panel.is-embedded .inbox-modal {
+  width: auto;
+  max-width: calc(100% - 20px);
+  max-height: calc(100% - 20px);
+  overflow-y: auto;
+}
+
 .inbox-header {
   display: flex;
   align-items: center;
@@ -9809,6 +9838,342 @@ html.avatar-document body {
 @keyframes avatar-fade {
   from { opacity: 0.35; }
   to { opacity: 1; }
+}
+
+/* ---------- Avatar bubble window (Reclame / Courrier) ----------------------
+   A transparent window 8px wider than the frame: the margin on the mask side
+   (data-anchor) holds the tail, bottom-aligned with the mask. One request at
+   a time on Reclame, so a verdict is one click away; Courrier is InboxCore
+   embedded and read-only. */
+html.avatar-bubble-document,
+html.avatar-bubble-document body,
+html.avatar-bubble-document #avatar-bubble {
+  height: 100%;
+  margin: 0;
+  background: transparent;
+  overflow: hidden;
+}
+
+.avb {
+  position: relative;
+  box-sizing: border-box;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.avb[data-anchor='right'] {
+  padding-right: 8px;
+}
+
+.avb[data-anchor='left'] {
+  padding-left: 8px;
+}
+
+.avb-frame {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+/* A square turned 45 degrees, half hidden under the frame: only the point shows. */
+.avb-tail {
+  position: absolute;
+  bottom: 22px;
+  width: 12px;
+  height: 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  transform: rotate(45deg);
+  pointer-events: none;
+}
+
+.avb[data-anchor='right'] .avb-tail {
+  right: 2px;
+  border-left: 0;
+  border-bottom: 0;
+}
+
+.avb[data-anchor='left'] .avb-tail {
+  left: 2px;
+  border-right: 0;
+  border-top: 0;
+}
+
+.avb-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 6px 6px 12px;
+  background: var(--bg-2);
+  border-bottom: 1px solid var(--border);
+}
+
+.avb-title {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  color: var(--fg-dim);
+}
+
+.avb-tabs {
+  display: flex;
+  flex: 1;
+  justify-content: center;
+  gap: 2px;
+}
+
+.avb-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--fg-dim);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.avb-tab:hover:not(:disabled) {
+  background: var(--bg-3);
+  color: var(--fg);
+}
+
+.avb-tab:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.avb-tab.is-active {
+  background: var(--selected);
+  border-color: var(--border);
+  color: var(--fg);
+}
+
+.avb-tab-glyph,
+.avb-foot-glyph,
+.avb-card-line-glyph {
+  display: inline-flex;
+}
+
+.avb-tab-glyph svg,
+.avb-card-line-glyph svg {
+  width: 13px;
+  height: 13px;
+}
+
+.avb-tab-count {
+  min-width: 15px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: var(--bg-3);
+  color: var(--fg);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 15px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+/* An agent awaits the operator: the glow semantics, whatever colour the operator picked. */
+.avb-tab-count.is-waiting {
+  background: var(--glow);
+  color: var(--bg-2);
+}
+
+.avb-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.avb-summary {
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--border);
+  color: var(--fg-dim);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.avb-empty {
+  flex: 1;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  color: var(--fg-dim);
+  font-size: 12px;
+  text-align: center;
+}
+
+.avb-card {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  overflow-y: auto;
+}
+
+.avb-card.is-blocking {
+  box-shadow: inset 2px 0 0 var(--glow);
+}
+
+.avb-card.is-settled > :not(.avb-card-head):not(.avb-card-line) {
+  opacity: 0.55;
+}
+
+.avb-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.avb-card-family {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--fg-dim);
+}
+
+.avb-pager {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.avb-pager-count {
+  min-width: 36px;
+  font-size: 11px;
+  color: var(--fg-dim);
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.avb-card-from {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  font-size: 12px;
+}
+
+.avb-card-deck {
+  font-weight: 600;
+}
+
+.avb-card-sep,
+.avb-card-time {
+  color: var(--fg-dim);
+}
+
+.avb-card-tile {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.avb-card-time {
+  margin-left: auto;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.avb-card-text {
+  max-height: 180px;
+}
+
+.avb-card-line {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.avb-card-line.is-cut {
+  background: color-mix(in srgb, var(--glow) 4%, transparent);
+  border: 1px solid color-mix(in srgb, var(--glow) 45%, var(--border));
+}
+
+.avb-card-line.is-cut .avb-card-line-glyph {
+  color: var(--glow);
+}
+
+.avb-card-line.is-settled {
+  background: var(--bg-3);
+  border: 1px solid var(--border);
+  color: var(--fg-dim);
+}
+
+.avb-card-notice {
+  font-size: 11px;
+  color: var(--danger);
+}
+
+/* A pick only selects; the Send button answers. */
+.avb-pick.is-on {
+  border-color: var(--accent);
+  background: var(--selected);
+}
+
+.avb-pick:disabled,
+.avb-card-actions button:disabled,
+.avb-reply:disabled {
+  opacity: 0.4;
+}
+
+.avb-reply {
+  min-height: 0;
+}
+
+.avb-card-actions {
+  margin-top: 0;
+  flex-wrap: wrap;
+}
+
+.avb-card-actions .btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.avb-card-actions .btn svg {
+  width: 13px;
+  height: 13px;
+}
+
+.avb-foot {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-2);
+  color: var(--fg-dim);
+  font-size: 11px;
+}
+
+.avb-foot-glyph svg {
+  width: 12px;
+  height: 12px;
 }
 
 /* ---------- Approval reader window (an approval too long for the native box) ---------- */

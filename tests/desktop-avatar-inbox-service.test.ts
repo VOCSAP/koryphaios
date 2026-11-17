@@ -45,7 +45,8 @@ function service(send: (identity: typeof deck, action: AvatarInboxAction) => Pro
       sent.push(action)
       return send(identity, action)
     },
-    report: (_scope, message) => reports.push(message)
+    report: (_scope, message) => reports.push(message),
+    changed: () => {}
   })
   return { inbox, reports, sent }
 }

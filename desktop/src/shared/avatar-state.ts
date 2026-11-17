@@ -113,20 +113,7 @@ function compareIdentity(left: AvatarDeckIdentity, right: AvatarDeckIdentity): n
   return 0
 }
 
-export function selectAvatarFocusDeck(
-  decks: readonly AvatarDeckStatus[],
-  attached: readonly AvatarDeckIdentity[]
-): AvatarDeckIdentity | null {
-  const rule = urgentRule(decks)
-  if (rule === null) return null
-  const attachedKeys = new Set(attached.map(deckKey))
-  const winner = decks
-    .filter((deck) => attachedKeys.has(deckKey(deck.identity)) && rule[1](deck))
-    .sort((left, right) => compareIdentity(left.identity, right.identity))[0]
-  return winner ? { ...winner.identity } : null
-}
-
-/** Unlike selectAvatarFocusDeck, a Deck that waits on the operator wins even while another Deck shows the panne face. */
+/** A Deck that waits on the operator wins even while another Deck shows the panne face. */
 export function selectAvatarAttentionDeck(
   decks: readonly AvatarDeckStatus[],
   attached: readonly AvatarDeckIdentity[]

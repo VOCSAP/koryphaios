@@ -129,6 +129,7 @@ interface MountOptions {
   archive?: unknown;
   reclame?: boolean;
   courrierWrites?: boolean;
+  embedded?: boolean;
 }
 
 function Host(opts: MountOptions): React.JSX.Element {
@@ -186,7 +187,8 @@ function Host(opts: MountOptions): React.JSX.Element {
       : undefined,
     seedApprovalId: null,
     onSeedConsumed: () => {},
-    onClose: () => {}
+    onClose: () => {},
+    embedded: opts.embedded
   } as never);
 }
 
@@ -360,6 +362,25 @@ test("a hook request's Hand back reaches the Reclame callback as handback, not a
   await click(container.querySelector(".inbox-entry"));
   await click(buttonLabelled("inbox.handback"));
   expect(calls.answers).toEqual([{ id: "hk", action: { kind: "handback" } }]);
+});
+
+// Mutant: a permission given the question's note, which offers an acknowledgement a permission never has.
+test("a permission's note speaks of allowing or denying, not of acknowledging", async () => {
+  await mount({ approvals: [approval({ id: "perm" })] });
+  await click(container.querySelector(".inbox-entry"));
+  expect([...container.querySelectorAll(".inbox-modal-note")].map((n) => n.textContent)).toEqual(["inbox.notePermission"]);
+});
+
+// Mutant: the header rendered whatever `embedded` says, or the modifier class dropped.
+test("an embedded Courrier drops its own header and marks its root for the host's geometry", async () => {
+  await mount({ messages: [MESSAGE], embedded: true });
+  expect(container.querySelector(".inbox-panel")?.className).toBe("inbox-panel is-embedded");
+  expect(container.querySelector(".inbox-header")).toBeNull();
+  await act(async () => {
+    root.render(React.createElement(Host, { messages: [MESSAGE] }));
+  });
+  expect(container.querySelector(".inbox-panel")?.className).toBe("inbox-panel");
+  expect(container.querySelector(".inbox-header")).not.toBeNull();
 });
 
 test("two gestures while an answer is still in flight send it once", async () => {

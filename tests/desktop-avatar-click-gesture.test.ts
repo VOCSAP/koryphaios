@@ -22,24 +22,29 @@ function harness(decks: AvatarDeckStatus[], overrides: Partial<AvatarClickGestur
   const sent: Array<[string, string]> = []
   const infos: string[] = []
   const reports: string[] = []
+  let bubbles = 0
   const gesture = createAvatarClickGesture({
     decks: () => decks,
     attached: () => decks.map((deck) => deck.identity),
     send: async (identity, command) => {
       sent.push([identity.deckRunId, command])
     },
+    openBubble: () => {
+      bubbles += 1
+    },
     info: (_scope, message) => infos.push(message),
     report: (_scope, message) => reports.push(message),
     ...overrides
   })
-  return { gesture, sent, infos, reports }
+  return { gesture, sent, infos, reports, bubbles: () => bubbles }
 }
 
 test('a double-click sends open_question to the waiting Deck, not to the Deck shown in panne', async () => {
-  const { gesture, sent, reports } = harness([status(down, {}, true), status(waiting, { waiting: 1 })])
+  const { gesture, sent, reports, bubbles } = harness([status(down, {}, true), status(waiting, { waiting: 1 })])
   gesture('double')
   await flush()
   expect(sent).toEqual([['run-b-waiting', 'open_question']])
+  expect(bubbles()).toBe(0)
   expect(reports).toEqual([])
 })
 
@@ -60,19 +65,12 @@ test('a double-click ignores a waiting Deck that is not attached', async () => {
   expect(sent).toEqual([])
 })
 
-test('a single click keeps focusing the Deck of the global urgent face', async () => {
-  const { gesture, sent } = harness([status(down, {}, true), status(waiting, { waiting: 1 })])
+test('a single click opens the bubble and sends no command to any Deck', async () => {
+  const { gesture, sent, bubbles } = harness([status(down, {}, true), status(waiting, { waiting: 1 })])
   gesture('single')
   await flush()
-  expect(sent).toEqual([['run-a-down', 'focus']])
-})
-
-test('a single click with no urgent Deck sends nothing and says why', async () => {
-  const { gesture, sent, infos } = harness([status(waiting, { working: 1 })])
-  gesture('single')
-  await flush()
+  expect(bubbles()).toBe(1)
   expect(sent).toEqual([])
-  expect(infos).toEqual(['Avatar click ignored because no attached Deck produces an urgent face'])
 })
 
 test('a failed send is reported, never thrown at the gesture', async () => {
@@ -80,10 +78,6 @@ test('a failed send is reported, never thrown at the gesture', async () => {
     send: () => Promise.reject(new Error('server stopped'))
   })
   gesture('double')
-  gesture('single')
   await flush()
-  expect(reports).toEqual([
-    'Avatar double-click open question gesture failed',
-    'Avatar click focus gesture failed'
-  ])
+  expect(reports).toEqual(['Avatar double-click open question gesture failed'])
 })

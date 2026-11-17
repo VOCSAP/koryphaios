@@ -3,7 +3,7 @@ import { randomBytes, randomUUID } from 'node:crypto'
 import { existsSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, screen } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, screen, session } from 'electron'
 import {
   brokerStopMarkerPath,
   clearBrokerStopMarker,
@@ -22,6 +22,13 @@ import {
   trayBrokerSummary
 } from './avatar-broker-wiring'
 import { startAvatarBrokerProbe, type AvatarBrokerProbe } from './avatar-broker-probe'
+import {
+  avatarBubbleDict,
+  avatarBubblePlacement,
+  createAvatarBubbleNativeAdapter,
+  createAvatarBubbleWindow,
+  type AvatarBubbleWindow
+} from './avatar-bubble-window'
 import { generateAvatarRunCertificate } from './avatar-certificate'
 import { createAvatarClickGesture } from './avatar-click-gesture'
 import { avatarAllowedBrokerUrls } from './avatar-deck-link'
@@ -45,6 +52,7 @@ import { createAvatarQuitHandler } from './avatar-quit-handler'
 import { AVATAR_TRAY_COPY } from './avatar-tray-copy'
 import { deckBrokerMode, peersConfigPath, resolveBrokerEndpoint } from './broker-client'
 import { ensureLoopbackBroker, locateUserBrokerScript, spawnDetachedBroker } from './broker-spawn'
+import { loadDict } from './i18n'
 import { initDeckLog, logInfo, logWarn, reportError } from './log'
 import { installProcessFailureGuard } from './process-failure-guard'
 
@@ -63,6 +71,7 @@ let server: AvatarServer | null = null
 let tray: AvatarTray | null = null
 let brokerProbe: AvatarBrokerProbe | null = null
 let avatarAssembly: AvatarAssembly | null = null
+let bubble: AvatarBubbleWindow | null = null
 let stopFollowers: (() => void) | null = null
 
 const brokerMarkerPath = (): string => brokerStopMarkerPath(peersConfigPath())
@@ -80,6 +89,12 @@ function avatarGeometry(): AvatarGeometry {
   return {
     displays: screen.getAllDisplays().map((display) => ({ id: String(display.id), workArea: display.workArea }))
   }
+}
+
+function avatarMaskBounds(): Electron.Rectangle | null {
+  const endpoint = avatarAssembly?.controller.currentWindow()
+  const mask = endpoint ? BrowserWindow.fromWebContents(endpoint.webContents as Electron.WebContents) : null
+  return mask && !mask.isDestroyed() && mask.isVisible() ? mask.getBounds() : null
 }
 
 async function startAvatar(): Promise<void> {
@@ -112,6 +127,7 @@ async function startAvatar(): Promise<void> {
       decks: () => avatarAssembly?.state.summary().decks ?? [],
       attached: () => server?.attachedDecks() ?? [],
       send: (identity, command) => focusFromTray(identity, command),
+      openBubble: () => bubble?.open(),
       info: logInfo,
       report: reportError
     }),
@@ -119,17 +135,48 @@ async function startAvatar(): Promise<void> {
     clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>)
   })
   avatarAssembly = assembly
+  const inbox = createAvatarInboxService({
+    send: (identity, action) =>
+      server ? server.sendInboxAction(identity, action) : Promise.reject(new Error('Avatar server is not running')),
+    report: reportError,
+    changed: () => bubble?.changed()
+  })
+  const shippedLocales = app.isPackaged ? join(process.resourcesPath, 'locales') : join(app.getAppPath(), 'locales')
+  bubble = createAvatarBubbleWindow({
+    ipc: ipcMain,
+    native: createAvatarBubbleNativeAdapter({
+      preload: join(__dirname, '../preload/avatar-bubble.js'),
+      html: join(__dirname, '../renderer/avatar-bubble.html'),
+      runId: avatarRunId,
+      createWindow: (options) => new BrowserWindow(options),
+      sessionFromPartition: (partition) => session.fromPartition(partition),
+      reportError
+    }),
+    boxes: () => inbox.boxes(),
+    decks: () => server?.attachedDecks() ?? [],
+    act: (identity, action) => inbox.act(identity, action),
+    focusDeck: (identity) => focusFromTray(identity, 'focus'),
+    theme: () => (nativeTheme.shouldUseDarkColors ? 'dark' : 'light'),
+    lang: locale,
+    dict: avatarBubbleDict(loadDict(locale, [shippedLocales, join(deckUserData, 'locales')])),
+    placement: () => {
+      const mask = avatarMaskBounds()
+      return mask ? avatarBubblePlacement(mask, screen.getDisplayMatching(mask).workArea) : null
+    },
+    now: Date.now,
+    setTimer: (callback, ms) => {
+      const handle = setTimeout(callback, ms)
+      return () => clearTimeout(handle)
+    },
+    reportError
+  })
   server = await startAvatarServer({
     avatarRunId,
     certificate,
     state: assembly.state,
     token,
     allowedBrokerUrls: () => avatarAllowedBrokerUrls(resolveBrokerEndpoint().url),
-    inbox: createAvatarInboxService({
-      send: (identity, action) =>
-        server ? server.sendInboxAction(identity, action) : Promise.reject(new Error('Avatar server is not running')),
-      report: reportError
-    })
+    inbox
   })
   const refreshManualStop = manualStopRefresher(
     brokerStoppedManually,
@@ -245,7 +292,10 @@ async function startAvatar(): Promise<void> {
       })
     },
     theme: nativeTheme,
-    themeChanged: assembly.themeChanged,
+    themeChanged: () => {
+      assembly.themeChanged()
+      bubble?.changed()
+    },
     screen,
     geometryChanged: assembly.geometryChanged,
     dispatch: assembly.controller.dispatch
@@ -261,6 +311,8 @@ function disposeAvatarTray(): void {
 async function stopAvatar(): Promise<void> {
   stopFollowers?.()
   stopFollowers = null
+  bubble?.dispose()
+  bubble = null
   avatarAssembly?.dispose()
   avatarAssembly = null
   brokerProbe?.stop()

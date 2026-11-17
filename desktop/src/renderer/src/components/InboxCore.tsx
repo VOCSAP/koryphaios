@@ -87,6 +87,8 @@ export interface InboxCoreProps {
   seedApprovalId: string | null
   onSeedConsumed: () => void
   onClose: () => void
+  /** Hosted inside another surface: no floating-panel geometry and no header of its own. */
+  embedded?: boolean
 }
 
 type ReadState = 'unread' | 'seen' | 'acked'
@@ -126,11 +128,13 @@ function ClosedBanner(props: { t: TFn; closure: ClosureInfo; report?: (message: 
   }, [stamp.valid, closure.at])
   const line = closure.peer
     ? t('inbox.closedBy', { peer: closure.peer, date: stamp.date, time: stamp.time })
-    : t('inbox.closedByAuthority', {
-        authority: closure.authority ? t(`inbox.closedAuthority.${closure.authority}`) : '?',
-        date: stamp.date,
-        time: stamp.time
-      })
+    : closure.authority
+      ? t('inbox.closedByAuthority', {
+          authority: t(`inbox.closedAuthority.${closure.authority}`),
+          date: stamp.date,
+          time: stamp.time
+        })
+      : t('inbox.closedAt', { date: stamp.date, time: stamp.time })
   return (
     <div className="inbox-closed-banner" role="note">
       <div className="inbox-closed-line">
@@ -358,13 +362,15 @@ export function InboxCore(props: InboxCoreProps): React.JSX.Element {
   }
 
   return (
-    <div className="inbox-panel">
-      <div className="inbox-header">
-        <span className="inbox-title">{t('inbox.title')}</span>
-        <button className="inbox-close" title={t('inbox.close')} onClick={props.onClose}>
-          {GLYPH_ACTIONS.close}
-        </button>
-      </div>
+    <div className={props.embedded ? 'inbox-panel is-embedded' : 'inbox-panel'}>
+      {!props.embedded && (
+        <div className="inbox-header">
+          <span className="inbox-title">{t('inbox.title')}</span>
+          <button className="inbox-close" title={t('inbox.close')} onClick={props.onClose}>
+            {GLYPH_ACTIONS.close}
+          </button>
+        </div>
+      )}
       {props.leading}
       <div className="inbox-list">
         {entries.length === 0 && !props.leading && <div className="inbox-empty">{t('inbox.empty')}</div>}
@@ -651,7 +657,13 @@ export function InboxCore(props: InboxCoreProps): React.JSX.Element {
               {hookApproval
                 ? t('inbox.noteHook')
                 : open.kind === 'approval'
-                  ? t(open.approval.informational ? 'inbox.noteInformation' : 'inbox.noteBlocking')
+                  ? t(
+                      open.approval.informational
+                        ? 'inbox.noteInformation'
+                        : open.approval.kind === 'permission'
+                          ? 'inbox.notePermission'
+                          : 'inbox.noteBlocking'
+                    )
                   : open.kind === 'closed-question'
                     ? t('inbox.noteClosed')
                     : replyability === 'responded'
