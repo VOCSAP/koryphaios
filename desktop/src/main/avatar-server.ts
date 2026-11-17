@@ -11,10 +11,14 @@ import {
   parseAvatarAttachRequest,
   parseAvatarDeckFrame,
   parseAvatarDetachRequest,
+  parseAvatarInboxSnapshotFrame,
   parseAvatarStateRequest,
+  AVATAR_INBOX_COMMAND,
   type AvatarAttachRequest,
   type AvatarCommand
 } from '../shared/avatar-protocol'
+import type { AvatarInboxAction, AvatarInboxSnapshotFrame, InboxOutcome } from '../shared/avatar-inbox-protocol'
+import { validateQuestions } from '../../../shared/approval'
 import type { AvatarRunCertificate } from './avatar-certificate'
 import type { TcpEndpoint } from './avatar-socket-owner'
 import { AvatarState, type AvatarDeckIdentity } from '../shared/avatar-state'
@@ -34,6 +38,13 @@ export interface AvatarServerOptions {
   bindTimeoutMs?: number
   commandResultTimeoutMs?: number
   report?: typeof reportError
+  inbox?: AvatarInboxSink
+}
+
+/** Where the snapshots of an a3_inbox Deck land; cleared when its socket goes away. */
+export interface AvatarInboxSink {
+  receive(identity: AvatarDeckIdentity, frame: AvatarInboxSnapshotFrame): void
+  clear(identity: AvatarDeckIdentity): void
 }
 
 export interface AvatarAttachedDeck extends AvatarAttachRequest {}
@@ -42,6 +53,8 @@ export interface AvatarCommandResult {
   requestId: string
   ok: boolean
   error?: string
+  outcome?: InboxOutcome
+  reason?: string
 }
 
 export interface AvatarServer {
@@ -50,6 +63,7 @@ export interface AvatarServer {
   attachedDecks(): AvatarAttachedDeck[]
   sweepDeadDecks(isAlive: (pid: number) => boolean): void
   focusDeck(identity: AvatarDeckIdentity, command: AvatarCommand): Promise<AvatarCommandResult>
+  sendInboxAction(identity: AvatarDeckIdentity, action: AvatarInboxAction): Promise<AvatarCommandResult>
   isDeckBound(identity: AvatarDeckIdentity): boolean
   /** The Deck-side port of the Deck's open bound WebSocket, or null. */
   boundRemotePort(identity: AvatarDeckIdentity): number | null
@@ -86,6 +100,9 @@ export interface AvatarDeckSocket {
 
 export interface AvatarSocketHubOptions {
   isAttached(identity: AvatarDeckIdentity): boolean
+  /** The scope generation of an a3_inbox attachment; undefined when the Deck did not negotiate a3_inbox. */
+  inboxGeneration?(identity: AvatarDeckIdentity): number | undefined
+  inbox?: AvatarInboxSink
   report: typeof reportError
   bindTimeoutMs: number
   commandResultTimeoutMs: number
@@ -95,6 +112,7 @@ export interface AvatarSocketHub {
   /** `remotePort` is the Deck-side TCP port of the upgraded connection, null when the transport has none. */
   accept(socket: AvatarDeckSocket, remotePort: number | null): void
   focusDeck(identity: AvatarDeckIdentity, command: AvatarCommand): Promise<AvatarCommandResult>
+  sendInboxAction(identity: AvatarDeckIdentity, action: AvatarInboxAction): Promise<AvatarCommandResult>
   detach(identity: AvatarDeckIdentity): void
   isDeckBound(identity: AvatarDeckIdentity): boolean
   boundRemotePort(identity: AvatarDeckIdentity): number | null
@@ -105,6 +123,8 @@ interface BoundAvatarSocket {
   identity: AvatarDeckIdentity
   pending: Map<string, PendingAvatarCommand>
   remotePort: number | null
+  inboxSeq: number
+  inboxRefusal: string | null
 }
 
 /**
@@ -127,6 +147,11 @@ export function observeAvatarRequest(request: Promise<void>, report: typeof repo
 
 export function installAvatarServerErrorReporter(server: AvatarServerErrorEmitter, report: typeof reportError): void {
   server.on('error', (error) => report('avatar-server', 'server error', error))
+}
+
+/** The scope generation inbox frames must carry, or undefined when the attachment did not negotiate a3_inbox. */
+export function inboxGenerationOf(deck: AvatarAttachedDeck | undefined): number | undefined {
+  return deck?.capabilities?.includes('a3_inbox') ? deck.context?.scope_generation : undefined
 }
 
 function deckKey(identity: AvatarDeckIdentity): string {
@@ -198,6 +223,8 @@ function readJson(request: IncomingMessage): Promise<unknown> {
 
 export async function startAvatarServer(options: AvatarServerOptions): Promise<AvatarServer> {
   const attached = new Map<string, AvatarAttachedDeck>()
+  // Outlives a context-free reattach, which would otherwise reset the floor a lower generation is refused against.
+  const highestGeneration = new Map<string, number>()
   const sockets = new Set<WebSocket>()
   const report = options.report ?? reportError
   const bindTimeoutMs = options.bindTimeoutMs ?? AVATAR_BIND_TIMEOUT_MS
@@ -236,13 +263,24 @@ export async function startAvatarServer(options: AvatarServerOptions): Promise<A
           )
           return
         }
-        const capabilities = allowedBroker ? (attach.capabilities ?? []) : []
+        const requested = allowedBroker ? (attach.capabilities ?? []) : []
+        const capabilities = requested.includes('a3_context') ? requested : requested.filter((capability) => capability !== 'a3_inbox')
         const key = deckKey(attach)
         if (!attached.has(key) && attached.size >= MAX_AVATAR_ATTACHMENTS) {
           reject(response, 409, { error: 'too_many_attached_decks' }, 'rejected Avatar attachment limit')
           return
         }
-        if (!attached.has(key)) {
+        const previous = attached.get(key)
+        if (previous && previous.deckPid !== attach.deckPid) {
+          reject(response, 409, { error: 'deck_pid_mismatch' }, 'rejected Avatar attachment from another process for an attached Deck')
+          return
+        }
+        const highest = highestGeneration.get(key)
+        if (attach.context && highest !== undefined && attach.context.scope_generation < highest) {
+          reject(response, 409, { error: 'stale_scope_generation' }, 'rejected Avatar attachment with an older scope generation')
+          return
+        }
+        if (!previous) {
           options.state.receiveSnapshot({
             identity: { deckRunId: attach.deckRunId, broker_url: attach.broker_url },
             counters: { working: 0, idle: 0, unknown: 0, waiting: 0, exited: 0, rateLimited: 0 },
@@ -250,6 +288,7 @@ export async function startAvatarServer(options: AvatarServerOptions): Promise<A
           })
         }
         attached.set(key, { ...attach, ...(attach.capabilities === undefined ? {} : { capabilities }) })
+        if (attach.context) highestGeneration.set(key, Math.max(highest ?? 0, attach.context.scope_generation))
         sendJson(response, 200, {
           ok: true,
           protocol_version: AVATAR_PROTOCOL_VERSION,
@@ -262,6 +301,7 @@ export async function startAvatarServer(options: AvatarServerOptions): Promise<A
         const identity = parseAvatarDetachRequest(body)
         const key = deckKey(identity)
         const detached = attached.delete(key)
+        highestGeneration.delete(key)
         hub.detach(identity)
         options.state.detach(identity)
         sendJson(response, 200, { ok: true, detached })
@@ -304,6 +344,8 @@ export async function startAvatarServer(options: AvatarServerOptions): Promise<A
   const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_AVATAR_REQUEST_BYTES })
   const hub = createAvatarSocketHub({
     isAttached: (identity) => attached.has(deckKey(identity)),
+    inboxGeneration: (identity) => inboxGenerationOf(attached.get(deckKey(identity))),
+    ...(options.inbox ? { inbox: options.inbox } : {}),
     report,
     bindTimeoutMs,
     commandResultTimeoutMs
@@ -360,10 +402,12 @@ export async function startAvatarServer(options: AvatarServerOptions): Promise<A
             if (!attachedDeck) continue
             if (!options.state.removeDeadDeck(deck.identity, !isAlive(attachedDeck.deckPid))) continue
             attached.delete(deckKey(deck.identity))
+            highestGeneration.delete(deckKey(deck.identity))
             hub.detach(deck.identity)
           }
         },
         focusDeck: hub.focusDeck,
+        sendInboxAction: hub.sendInboxAction,
         isDeckBound: hub.isDeckBound,
         boundRemotePort: hub.boundRemotePort,
         close: () =>
@@ -389,6 +433,7 @@ export function createAvatarSocketHub(options: AvatarSocketHubOptions): AvatarSo
   const releaseBoundSocket = (bound: BoundAvatarSocket, error: Error): void => {
     if (boundSockets.get(deckKey(bound.identity)) === bound) {
       boundSockets.delete(deckKey(bound.identity))
+      options.inbox?.clear(bound.identity)
     }
     for (const pending of bound.pending.values()) {
       clearTimeout(pending.timeout)
@@ -410,6 +455,40 @@ export function createAvatarSocketHub(options: AvatarSocketHubOptions): AvatarSo
   const closeSocket = (socket: AvatarDeckSocket, code: number, reason: string, message: string, error?: unknown): void => {
     report('avatar-server', message, error)
     socket.close(code, reason)
+  }
+
+  const refuseInboxSnapshot = (bound: BoundAvatarSocket, message: string, error?: unknown): void => {
+    if (bound.inboxRefusal === message) return
+    bound.inboxRefusal = message
+    report('avatar-server', message, error)
+  }
+
+  // A refused snapshot is dropped and the previous one kept: the socket also carries focus and open_question.
+  const receiveInboxSnapshot = (bound: BoundAvatarSocket, input: unknown): void => {
+    const generation = options.inboxGeneration?.(bound.identity)
+    if (generation === undefined || !options.inbox) {
+      refuseInboxSnapshot(bound, 'ignored an inbox snapshot from a Deck that did not negotiate a3_inbox')
+      return
+    }
+    let frame: AvatarInboxSnapshotFrame
+    try {
+      frame = parseAvatarInboxSnapshotFrame(input, validateQuestions)
+    } catch (error) {
+      refuseInboxSnapshot(bound, 'ignored an invalid inbox snapshot', error)
+      return
+    }
+    if (frame.deckRunId !== bound.identity.deckRunId || frame.broker_url !== bound.identity.broker_url) {
+      refuseInboxSnapshot(bound, 'ignored an inbox snapshot addressed to another Deck')
+      return
+    }
+    if (frame.scope_generation !== generation) {
+      refuseInboxSnapshot(bound, 'ignored an inbox snapshot from another scope generation')
+      return
+    }
+    if (frame.seq <= bound.inboxSeq) return
+    bound.inboxSeq = frame.seq
+    bound.inboxRefusal = null
+    options.inbox.receive(bound.identity, frame)
   }
 
   const accept = (socket: AvatarDeckSocket, remotePort: number | null): void => {
@@ -442,6 +521,11 @@ export function createAvatarSocketHub(options: AvatarSocketHubOptions): AvatarSo
         return
       }
 
+      if (bound && input && typeof input === 'object' && !Array.isArray(input) && (input as { type?: unknown }).type === 'inbox_snapshot') {
+        receiveInboxSnapshot(bound, input)
+        return
+      }
+
       let frame: ReturnType<typeof parseAvatarDeckFrame>
       try {
         frame = parseAvatarDeckFrame(input)
@@ -467,18 +551,21 @@ export function createAvatarSocketHub(options: AvatarSocketHubOptions): AvatarSo
           return
         }
         clearTimeout(bindDeadline)
-        bound = {
+        const current: BoundAvatarSocket = {
           ws: socket,
           identity: { deckRunId: frame.deckRunId, broker_url: frame.broker_url },
           pending: new Map(),
-          remotePort
+          remotePort,
+          inboxSeq: 0,
+          inboxRefusal: null
         }
-        const previous = boundSockets.get(deckKey(bound.identity))
+        bound = current
+        const previous = boundSockets.get(deckKey(current.identity))
         if (previous) {
           report('avatar-server', 'replaced the Avatar WebSocket of a Deck that bound again')
           unbind(previous, 4410, 'superseded', new Error('Avatar Deck WebSocket superseded'))
         }
-        boundSockets.set(deckKey(bound.identity), bound)
+        boundSockets.set(deckKey(current.identity), current)
         socket.send(JSON.stringify({ type: 'bound' }))
         return
       }
@@ -497,7 +584,9 @@ export function createAvatarSocketHub(options: AvatarSocketHubOptions): AvatarSo
       const result: AvatarCommandResult = {
         requestId: frame.requestId,
         ok: frame.ok,
-        ...(frame.error === undefined ? {} : { error: frame.error })
+        ...(frame.error === undefined ? {} : { error: frame.error }),
+        ...(frame.outcome === undefined ? {} : { outcome: frame.outcome }),
+        ...(frame.reason === undefined ? {} : { reason: frame.reason })
       }
       pending.resolve(result)
     })
@@ -509,7 +598,7 @@ export function createAvatarSocketHub(options: AvatarSocketHubOptions): AvatarSo
     socket.on('error', (error) => report('avatar-server', 'Avatar WebSocket error', error))
   }
 
-  const focusDeck = (identity: AvatarDeckIdentity, command: AvatarCommand): Promise<AvatarCommandResult> => {
+  const sendCommand = (identity: AvatarDeckIdentity, payload: Record<string, unknown>): Promise<AvatarCommandResult> => {
     if (!options.isAttached(identity)) return Promise.reject(new Error('Avatar Deck is not attached'))
     const bound = boundSockets.get(deckKey(identity))
     if (!bound || bound.ws.readyState !== WebSocket.OPEN) {
@@ -525,7 +614,7 @@ export function createAvatarSocketHub(options: AvatarSocketHubOptions): AvatarSo
       bound.pending.set(requestId, { resolve, reject, timeout })
       try {
         bound.ws.send(
-          JSON.stringify({ type: 'command', requestId, command, deckRunId: identity.deckRunId, broker_url: identity.broker_url }),
+          JSON.stringify({ type: 'command', requestId, ...payload, deckRunId: identity.deckRunId, broker_url: identity.broker_url }),
           (error) => {
             if (!error) return
             const pending = bound.pending.get(requestId)
@@ -545,6 +634,16 @@ export function createAvatarSocketHub(options: AvatarSocketHubOptions): AvatarSo
     })
   }
 
+  const focusDeck = (identity: AvatarDeckIdentity, command: AvatarCommand): Promise<AvatarCommandResult> =>
+    sendCommand(identity, { command })
+
+  const sendInboxAction = (identity: AvatarDeckIdentity, action: AvatarInboxAction): Promise<AvatarCommandResult> => {
+    if (options.inboxGeneration?.(identity) === undefined) {
+      return Promise.reject(new Error('Avatar Deck did not negotiate a3_inbox'))
+    }
+    return sendCommand(identity, { command: AVATAR_INBOX_COMMAND, inbox: action })
+  }
+
   const isDeckBound = (identity: AvatarDeckIdentity): boolean =>
     boundSockets.get(deckKey(identity))?.ws.readyState === WebSocket.OPEN
 
@@ -553,5 +652,5 @@ export function createAvatarSocketHub(options: AvatarSocketHubOptions): AvatarSo
     return bound && bound.ws.readyState === WebSocket.OPEN ? bound.remotePort : null
   }
 
-  return { accept, focusDeck, detach, isDeckBound, boundRemotePort }
+  return { accept, focusDeck, sendInboxAction, detach, isDeckBound, boundRemotePort }
 }

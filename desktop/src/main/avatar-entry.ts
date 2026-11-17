@@ -26,6 +26,7 @@ import { generateAvatarRunCertificate } from './avatar-certificate'
 import { createAvatarClickGesture } from './avatar-click-gesture'
 import { avatarAllowedBrokerUrls } from './avatar-deck-link'
 import { createDeckFocusGesture, deckProcessIsAlive } from './avatar-focus-gesture'
+import { createAvatarInboxService } from './avatar-inbox-service'
 import { allowForegroundWindow, runForegroundHelper } from './avatar-foreground'
 import { configureAvatarLifetime, type AvatarLifetimeLease } from './avatar-lifetime'
 import { ensureAvatarPrivateDir } from './avatar-private-dir'
@@ -123,7 +124,12 @@ async function startAvatar(): Promise<void> {
     certificate,
     state: assembly.state,
     token,
-    allowedBrokerUrls: () => avatarAllowedBrokerUrls(resolveBrokerEndpoint().url)
+    allowedBrokerUrls: () => avatarAllowedBrokerUrls(resolveBrokerEndpoint().url),
+    inbox: createAvatarInboxService({
+      send: (identity, action) =>
+        server ? server.sendInboxAction(identity, action) : Promise.reject(new Error('Avatar server is not running')),
+      report: reportError
+    })
   })
   const refreshManualStop = manualStopRefresher(
     brokerStoppedManually,

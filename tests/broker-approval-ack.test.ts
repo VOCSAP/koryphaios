@@ -207,6 +207,20 @@ describe("acknowledging a channel-route question", () => {
     expect(stillPending).not.toContain(acked.id);
   }, 30_000);
 
+  test("an acknowledgement and a verdict given through the Avatar are recorded as answered via avatar", async () => {
+    const b = shared;
+    const op = newOperator();
+    const peer = await connectPeer(b, "/tmp/ack-proj-avatar");
+    const acked = await raise(b, op, { reply_route: "channel", reply_peer_id: peer.peerId, tile_ref: "t-avatar-ack" });
+    const declined = await raise(b, op, { reply_route: "channel", reply_peer_id: peer.peerId, tile_ref: "t-avatar-deny" });
+
+    const ackRes = await signedPost<{ approval: Approval }>(b, "/approval/claim", { id: acked.id, via: "avatar", acknowledge: true }, op);
+    const denyRes = await signedPost<{ approval: Approval }>(b, "/approval/claim", { id: declined.id, via: "avatar", answer_kind: "deny" }, op);
+    expect([ackRes.status, denyRes.status]).toEqual([200, 200]);
+    expect([ackRes.body.approval.status, ackRes.body.approval.answered_via]).toEqual(["acknowledged", "avatar"]);
+    expect([denyRes.body.approval.status, denyRes.body.approval.answered_via]).toEqual(["answered", "avatar"]);
+  }, 30_000);
+
   test("a keystroke-route question cannot be acknowledged and stays pending", async () => {
     const b = shared;
     const op = newOperator();
@@ -497,6 +511,8 @@ describe("a permission raise merged into a tile's channel question", () => {
     expect(mixed.status).toBe(400);
     const remote = await signedPost(b, "/approval/claim", { id: question.id, via: "ntfy", terminal: true }, op);
     expect(remote.status, "only the Deck witnesses its own terminal").toBe(400);
+    const fromAvatar = await signedPost(b, "/approval/claim", { id: question.id, via: "avatar", terminal: true }, op);
+    expect(fromAvatar.status, "the Avatar sees no tile, so it cannot witness a terminal answer").toBe(400);
     const ticket = await raise(b, op, { reply_route: "channel", reply_peer_id: peer.peerId, tile_ref: "t-terminal" });
     expect(ticket.mergeable).toBe(false);
     const guarded = await signedPost(b, "/approval/claim", { id: ticket.id, via: "deck", terminal: true }, op);

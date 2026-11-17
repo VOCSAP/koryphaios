@@ -2066,7 +2066,7 @@ export interface ApprovalQuestion {
 export type ApprovalAnswers = Record<string, string[]>;
 
 /** Which channel settled the approval. */
-export type ApprovalVia = "deck" | "telegram" | "discord" | "ntfy";
+export type ApprovalVia = "deck" | "avatar" | "telegram" | "discord" | "ntfy";
 
 /**
  * How the answer gets back to the agent (C-9).

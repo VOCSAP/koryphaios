@@ -80,7 +80,7 @@ export function approvalWaitTimeoutSec(requested: unknown, replyRoute: string): 
 
 export const APPROVAL_KINDS: readonly ApprovalKind[] = ["permission", "question", "plan"];
 export const APPROVAL_ANSWER_KINDS: readonly ApprovalAnswerKind[] = ["allow", "deny", "text", "answers"];
-export const APPROVAL_VIAS: readonly ApprovalVia[] = ["deck", "telegram", "discord", "ntfy"];
+export const APPROVAL_VIAS: readonly ApprovalVia[] = ["deck", "avatar", "telegram", "discord", "ntfy"];
 
 // --- Auth proof ---
 
@@ -512,7 +512,7 @@ export function isInboxEntryId(v: unknown): v is string {
  * an answer ambiguous (two questions with one text, two options with one
  * label) is refused rather than normalised away.
  */
-function validateQuestions(raw: unknown): ValidationResult<ApprovalQuestion[]> {
+export function validateQuestions(raw: unknown): ValidationResult<ApprovalQuestion[]> {
   if (!Array.isArray(raw)) return { ok: false, error: "questions must be an array" };
   if (raw.length === 0) return { ok: false, error: "questions needs at least one question" };
   if (raw.length > APPROVAL_QUESTIONS_MAX) return { ok: false, error: `at most ${APPROVAL_QUESTIONS_MAX} questions` };

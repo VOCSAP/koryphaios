@@ -164,6 +164,32 @@ describe("approval lifecycle", () => {
     expect(res.body.approval.answered_at).toBeTruthy();
   });
 
+  test("an approval whose notification expired is settled by the Deck or the Avatar, never by a phone gateway", async () => {
+    const b = await boot();
+    const op = newOperator();
+    const signer = { cred: op.cred, operator_id: op.id };
+    const expire = (id: string): void => {
+      const db = openBrokerDb(b.dbPath);
+      db.run("UPDATE pending_approvals SET status = 'expired_notif' WHERE id = ?", [id]);
+      db.close();
+    };
+    const fromPhone = await addApproval(b, op);
+    expire(fromPhone.id);
+    const phone = await signedPost(b, "/approval/claim", { id: fromPhone.id, via: "telegram", answer_kind: "allow" }, signer);
+    expect(phone.status, "a gateway's notification is the one that expired").toBe(409);
+
+    const fromAvatar = await addApproval(b, op);
+    expire(fromAvatar.id);
+    const avatar = await signedPost<{ approval: Approval }>(
+      b,
+      "/approval/claim",
+      { id: fromAvatar.id, via: "avatar", answer_kind: "deny" },
+      signer
+    );
+    expect(avatar.status).toBe(200);
+    expect([avatar.body.approval.status, avatar.body.approval.answered_via]).toEqual(["answered", "avatar"]);
+  });
+
   test("THE arbiter contract: the second claim gets 409", async () => {
     const b = await boot();
     const op = newOperator();

@@ -276,7 +276,7 @@ export type ApprovalStatus =
   | 'closed'
 export type InboxCloseAuthority = 'author' | 'lead' | 'supervisor'
 export type ApprovalKind = 'permission' | 'question' | 'plan'
-export type ApprovalVia = 'deck' | 'telegram' | 'discord' | 'ntfy'
+export type ApprovalVia = 'deck' | 'avatar' | 'telegram' | 'discord' | 'ntfy'
 export type ApprovalReplyRoute = 'channel' | 'pty' | 'hook'
 export type ApprovalAnswerKind = 'allow' | 'deny' | 'text' | 'answers'
 

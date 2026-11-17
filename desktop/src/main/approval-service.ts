@@ -17,6 +17,7 @@ import {
   sanitizeAnswerForPty,
   type Approval,
   type ApprovalAddResponse,
+  type ApprovalVia,
   type InboxGate
 } from './approval-auth'
 import type { OperatorIdentity } from './operator-identity'
@@ -27,6 +28,9 @@ import {
 } from './broker-client'
 import { commandHash } from './launch-approval'
 import { reportError } from './log'
+
+/** The two channels whose verdicts the Deck signs with the operator key. */
+export type OperatorSettlingVia = Extract<ApprovalVia, 'deck' | 'avatar'>
 
 export class BrokerHttpError extends Error {
   constructor(
@@ -275,7 +279,7 @@ export async function addApproval(
  */
 export async function claimApproval(
   deps: ApprovalDeps,
-  args: { id: string } & (
+  args: { id: string; via: OperatorSettlingVia } & (
     | { answerKind: 'allow' | 'deny' | 'text'; answerText?: string }
     | { answerKind: 'answers'; answers: Record<string, string[]> }
     | { handback: true }
@@ -287,7 +291,7 @@ export async function claimApproval(
       // project_key is required here: without it the broker refuses the claim
       // and the Deck cannot settle any approval.
       project_key: deps.projectKey,
-      via: 'deck',
+      via: args.via,
       // The broker refuses a handback carrying any answer field, so each
       // shape sends only its own members.
       ...('handback' in args
@@ -390,12 +394,12 @@ export async function settleTileAnsweredInTerminal(
 }
 
 /** Settle as acknowledged (read, no answer). Same 409 contract as claimApproval. */
-export async function ackApproval(deps: ApprovalDeps, id: string): Promise<Approval | null> {
+export async function ackApproval(deps: ApprovalDeps, id: string, via: OperatorSettlingVia): Promise<Approval | null> {
   try {
     const res = await signedPost<{ approval: Approval }>(deps, '/approval/claim', {
       id,
       project_key: deps.projectKey,
-      via: 'deck',
+      via,
       acknowledge: true
     })
     return res.approval

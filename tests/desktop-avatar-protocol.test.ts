@@ -1,4 +1,5 @@
 import { expect, test } from 'bun:test'
+import { displaySafe } from '../desktop/src/main/ttsr-dialog.ts'
 import {
   AVATAR_PROTOCOL_VERSION,
   AvatarProtocolError,
@@ -26,7 +27,7 @@ test('accepts the current protocol version and resolved Deck identity', () => {
 })
 
 test('accepts A3 context only when its capability is negotiated', () => {
-  const context = { group_id: 'group-1', project_key: 'project-1', scope_generation: 1 }
+  const context = { group_id: '11111111111111111111111111111111', project_key: 'project-1', scope_generation: 1 }
   expect(parseAvatarAttachRequest({ ...validAttach, capabilities: ['a3_context'], context })).toEqual({
     ...validAttach,
     capabilities: ['a3_context'],
@@ -214,17 +215,43 @@ test('reads the requestId of a command refused only for being outside AVATAR_COM
   expect(unsupportedAvatarCommandRequestId(null)).toBeNull()
 })
 
-const a3Context = { group_id: 'group-1', project_key: 'project-1', scope_generation: 1 }
+const a3Context = { group_id: '11111111111111111111111111111111', project_key: 'project-1', scope_generation: 1 }
 
 test.each([
   ['a negative scope generation', { ...a3Context, scope_generation: -1 }],
   ['a fractional scope generation', { ...a3Context, scope_generation: 1.5 }],
   ['a scope generation beyond the safe integers', { ...a3Context, scope_generation: 2 ** 53 }],
   ['a scope generation that is not a number', { ...a3Context, scope_generation: '1' }],
-  ['a missing scope generation', { group_id: 'group-1', project_key: 'project-1' }],
+  ['a missing scope generation', { group_id: '11111111111111111111111111111111', project_key: 'project-1' }],
   ['an empty group', { ...a3Context, group_id: '' }],
   ['an absurdly long group', { ...a3Context, group_id: 'g'.repeat(10_000) }],
-  ['an absurdly long project key', { ...a3Context, project_key: 'p'.repeat(100_000) }]
+  ['an absurdly long project key', { ...a3Context, project_key: 'p'.repeat(100_000) }],
+  ['a group that is not a group digest', { ...a3Context, group_id: 'group-1' }],
+  ['a group digest in upper case', { ...a3Context, group_id: 'A'.repeat(32) }],
+  ['a group digest one character short', { ...a3Context, group_id: 'a'.repeat(31) }],
+  ['a project key in mixed case', { ...a3Context, project_key: 'github.com/Owner/repo' }],
+  ['a project key carrying NUL', { ...a3Context, project_key: `project${String.fromCharCode(0)}-1` }],
+  ['a project key carrying a C1 control', { ...a3Context, project_key: `project${String.fromCharCode(0x85)}-1` }],
+  ['a project key carrying a bidi override', { ...a3Context, project_key: `project${String.fromCharCode(0x202e)}-1` }],
+  ['a project key carrying a bidi isolate', { ...a3Context, project_key: `project${String.fromCharCode(0x2068)}-1` }]
 ])('refuses an A3 context carrying %s', (_what, context) => {
   expect(() => parseAvatarAttachRequest({ ...validAttach, capabilities: ['a3_context'], context })).toThrow(/invalid Avatar attach request/)
+})
+
+test('a project key is refused for exactly the characters displaySafe neutralises', () => {
+  const mismatches: string[] = []
+  for (let code = 0; code <= 0xffff; code++) {
+    if (code >= 0xd800 && code <= 0xdfff) continue
+    const char = String.fromCharCode(code)
+    if (char.toLowerCase() !== char) continue
+    const neutralised = displaySafe(`a${char}b`) !== `a${char}b`
+    let refused = false
+    try {
+      parseAvatarAttachRequest({ ...validAttach, capabilities: ['a3_context'], context: { ...a3Context, project_key: `a${char}b` } })
+    } catch {
+      refused = true
+    }
+    if (neutralised !== refused) mismatches.push(code.toString(16))
+  }
+  expect(mismatches).toEqual([])
 })

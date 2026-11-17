@@ -11897,8 +11897,9 @@ function handleApprovalAdd(
  * makes "answered in the Deck" and "answered on the phone" mutually
  * exclusive.
  *
- * `via='deck'` may also settle an expired_notif approval: the notification
- * expired, the session did not (C-4).
+ * `via='deck'` and `via='avatar'` may also settle an expired_notif approval:
+ * the notification expired, the session did not (C-4). Both are signed by the
+ * Deck's own operator key.
  */
 function settleApproval(
   id: string,
@@ -11915,7 +11916,7 @@ function settleApproval(
   /** Validated JSON of an `answers` verdict; null for every other kind. */
   answersJson: string | null = null
 ): { approval: Approval } | { error: string; status: number; refused?: AnswerRefusal; state?: string } {
-  const allowed = via === "deck" ? "('pending','expired_notif')" : "('pending')";
+  const allowed = via === "deck" || via === "avatar" ? "('pending','expired_notif')" : "('pending')";
   const now = new Date().toISOString();
   const where = approvalWhere(scope);
   // Every settling path runs through here, the phone gateways included, so a

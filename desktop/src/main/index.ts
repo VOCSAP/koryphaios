@@ -104,7 +104,7 @@ import {
   type RunInboxSigner
 } from './broker-client'
 import { createApprovalListsTick, createInboxArchive } from './inbox-archive'
-import { discardUnscopedInboxFiles, loadAckState, loadInboxHistory, pendingInboxCounter } from './inbox-store'
+import { discardUnscopedInboxFiles, inboxHistoryFile, loadAckState, loadInboxHistory, pendingInboxCounter } from './inbox-store'
 import { createInboxActions } from './inbox-actions'
 import { spawn as spawnProcess } from 'node:child_process'
 import {
@@ -253,6 +253,7 @@ import {
   type ApprovalDialogSpec
 } from './serve-approval-dialog'
 import { createAvatarClient, type AvatarClient } from './avatar-client'
+import { approvalTileName, createInboxActionHandler, createStampedReader, journalStamp, relayInboxMessages } from './avatar-inbox-relay'
 import { boundedAvatarDetach, createAvatarScopeTracker, deckAvatarClientOptions, focusDeckWindow } from './avatar-deck-link'
 import { avatarLaunchCommand, ensureAvatar, spawnDetachedAvatar } from './avatar-ensure'
 import {
@@ -1813,7 +1814,10 @@ const runReadErrors = createRunReadErrorSink((message, e) => reportError('inbox'
 
 let archiveSeq = 0
 const inboxArchive = createInboxArchive({
-  onChange: (snapshot) => broadcast('inbox:archive-changed', snapshot),
+  onChange: (snapshot) => {
+    broadcast('inbox:archive-changed', snapshot)
+    avatarClient?.inboxChanged()
+  },
   report: (message, e) => reportError('inbox', message, e)
 })
 
@@ -1853,7 +1857,10 @@ const inboxEffects = createInboxEffects({
     })
   },
   broadcast,
-  notify: notifyInbox,
+  notify: (batch) => {
+    notifyInbox(batch)
+    avatarClient?.inboxChanged()
+  },
   applyEntryStates: inboxArchive.applyMessageStates,
   info: (message) => logInfo('inbox', message),
   error: (message, e) => reportError('inbox', message, e)
@@ -1897,12 +1904,12 @@ const pollOperatorInbox = async (): Promise<void> => {
  * on.
  */
 function purgeInboxSession(): Promise<void> {
-  return inboxEffects.purge()
+  return inboxEffects.purge().finally(() => avatarClient?.inboxChanged())
 }
 
 /** Empty or unknown ids are a 0-effect no-op, matching the broker's scope='ids' semantics. */
 function inboxDelete(ids: number[]): Promise<number> {
-  return inboxEffects.delete(ids)
+  return inboxEffects.delete(ids).finally(() => avatarClient?.inboxChanged())
 }
 
 // ----- Graph drafts poll -----
@@ -2072,9 +2079,11 @@ const pollPendingApprovals = createPendingApprovalsTick({
     lastPendingApprovals = list
     broadcast('approvals:pending', list)
     avatarClient?.sessionsChanged()
+    avatarClient?.inboxChanged()
   },
   pendingUnavailable: () => {
     lastPendingApprovals = []
+    avatarClient?.inboxChanged()
   },
   report: (text, err) => reportError('approvals', text, err)
 })
@@ -3423,6 +3432,17 @@ async function openOldestPendingQuestion(): Promise<void> {
   }
 }
 
+const relayedInboxMessages = createStampedReader(
+  () =>
+    [
+      sessionDir(),
+      journalStamp(inboxHistoryFile(sessionDir())),
+      inboxEffects.pendingMessages().map((m) => m.id).join(','),
+      inboxArchive.version()
+    ].join('|'),
+  () => relayInboxMessages(loadInboxHistory(sessionDir()), inboxEffects.pendingMessages(), inboxArchive.snapshot().messages)
+)
+
 avatarClient = createAvatarClient({
   ...avatarOptions,
   pendingApprovals: () => lastPendingApprovals,
@@ -3430,6 +3450,15 @@ avatarClient = createAvatarClient({
     version: inboxArchive.version(),
     messages: inboxArchive.snapshot().messages
   })),
+  inbox: {
+    sources: () => ({
+      approvals: lastPendingApprovals,
+      messages: relayedInboxMessages(),
+      closed: inboxArchive.snapshot().closedQuestions,
+      tileName: (approval) => approvalTileName(approval, service.list())
+    }),
+    act: createInboxActionHandler({ approvalDeps: () => approvals.deps() })
+  },
   openQuestion: () => openOldestPendingQuestion()
 })
 let avatarDetach: Promise<void> = Promise.resolve()
@@ -3770,37 +3799,37 @@ app.whenReady().then(async () => {
     approvalReply: async (id: string, text: string): Promise<boolean> => {
       const deps = approvals.deps()
       if (!deps) return false
-      const res = await claimApproval(deps, { id, answerKind: 'text', answerText: text })
+      const res = await claimApproval(deps, { id, via: 'deck', answerKind: 'text', answerText: text })
       return res !== null
     },
     approvalDecline: async (id: string): Promise<boolean> => {
       const deps = approvals.deps()
       if (!deps) return false
-      const res = await claimApproval(deps, { id, answerKind: 'deny' })
+      const res = await claimApproval(deps, { id, via: 'deck', answerKind: 'deny' })
       return res !== null
     },
     approvalAck: async (id: string): Promise<boolean> => {
       const deps = approvals.deps()
       if (!deps) return false
-      const res = await ackApproval(deps, id)
+      const res = await ackApproval(deps, id, 'deck')
       return res !== null
     },
     approvalAllow: async (id: string): Promise<boolean> => {
       const deps = approvals.deps()
       if (!deps) return false
-      const res = await claimApproval(deps, { id, answerKind: 'allow' })
+      const res = await claimApproval(deps, { id, via: 'deck', answerKind: 'allow' })
       return res !== null
     },
     approvalAnswers: async (id: string, answers: Record<string, string[]>): Promise<boolean> => {
       const deps = approvals.deps()
       if (!deps) return false
-      const res = await claimApproval(deps, { id, answerKind: 'answers', answers })
+      const res = await claimApproval(deps, { id, via: 'deck', answerKind: 'answers', answers })
       return res !== null
     },
     approvalHandback: async (id: string): Promise<boolean> => {
       const deps = approvals.deps()
       if (!deps) return false
-      const res = await claimApproval(deps, { id, handback: true })
+      const res = await claimApproval(deps, { id, via: 'deck', handback: true })
       return res !== null
     },
     inboxReply: async (entry: { id: number; sentAt: string }, text: string): Promise<InboxReplyOutcome> => {

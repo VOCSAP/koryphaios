@@ -46,7 +46,7 @@ function deps(overrides: Partial<DeckAvatarLinkDeps> = {}): DeckAvatarLinkDeps {
     projectKey: 'project-a',
     stateDir: freshDir(),
     brokerUrl: () => 'http://127.0.0.1:7899',
-    scope: () => ({ group_id: 'group-a', project_key: 'project-a', scope_generation: 1 }),
+    scope: () => ({ group_id: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', project_key: 'project-a', scope_generation: 1 }),
     sessions: () => [],
     window: () => null,
     workspaceName: () => null,
@@ -96,13 +96,13 @@ test('carries the scope and the broker read at every call as the Deck context an
   const options = deckAvatarClientOptions(
     deps({
       brokerUrl: () => broker,
-      scope: () => ({ group_id: 'group-a', project_key: 'project-a', scope_generation: generation })
+      scope: () => ({ group_id: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', project_key: 'project-a', scope_generation: generation })
     })
   )
-  expect(options.deck().context).toEqual({ group_id: 'group-a', project_key: 'project-a', scope_generation: 1 })
+  expect(options.deck().context).toEqual({ group_id: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', project_key: 'project-a', scope_generation: 1 })
   generation = 2
   broker = 'http://127.0.0.1:7900'
-  expect(options.deck().context).toEqual({ group_id: 'group-a', project_key: 'project-a', scope_generation: 2 })
+  expect(options.deck().context).toEqual({ group_id: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', project_key: 'project-a', scope_generation: 2 })
   expect(options.deck().broker_url).toBe('http://127.0.0.1:7900')
 })
 
@@ -117,12 +117,12 @@ test('increments scope generation before notifying the Avatar client', () => {
 
   scope.scopeChanged(() => {
     notifications += 1
-    notifiedGeneration = scope.context('group-b', 'project-b').scope_generation
+    notifiedGeneration = scope.context('bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 'project-b').scope_generation
   })
 
   expect(notifications).toBe(1)
   expect(notifiedGeneration).toBe(1)
-  expect(scope.context('group-b', 'project-b')).toEqual({ group_id: 'group-b', project_key: 'project-b', scope_generation: 1 })
+  expect(scope.context('bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 'project-b')).toEqual({ group_id: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', project_key: 'project-b', scope_generation: 1 })
 })
 
 test('never ends the bounded Deck name on half of a surrogate pair', () => {

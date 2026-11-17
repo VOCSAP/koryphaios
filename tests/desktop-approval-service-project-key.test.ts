@@ -167,10 +167,24 @@ test("addApproval sends tile_only only when the answer belongs on the tile", asy
 
 test("claimApproval sends project_key on its /approval/claim request", async () => {
   const deps = makeDeps("proj-claim");
-  await claimApproval(deps, { id: "appr-1", answerKind: "allow" });
+  await claimApproval(deps, { id: "appr-1", via: "deck", answerKind: "allow" });
   expect(calls.length).toBe(1);
   expect(calls[0]!.url.endsWith("/approval/claim")).toBe(true);
   expect(calls[0]!.body.project_key).toBe("proj-claim");
+});
+
+test("claimApproval and ackApproval send the channel their caller names, avatar included", async () => {
+  const deps = makeDeps("proj-via");
+  await claimApproval(deps, { id: "appr-1", via: "avatar", answerKind: "deny" });
+  await claimApproval(deps, { id: "appr-2", via: "deck", answerKind: "allow" });
+  await ackApproval(deps, "appr-3", "avatar");
+  await ackApproval(deps, "appr-4", "deck");
+  expect(calls.map((c) => [c.body.id, c.body.via])).toEqual([
+    ["appr-1", "avatar"],
+    ["appr-2", "deck"],
+    ["appr-3", "avatar"],
+    ["appr-4", "deck"]
+  ]);
 });
 
 test("markVerdictsDelivered sends project_key on its /approval/delivered request", async () => {
@@ -235,7 +249,7 @@ test("a refused claim surfaces the broker's reason to the operator, status last"
 
   const gone = claimApproval(
     { ...deps, fetchImpl: answering(410, JSON.stringify({ error: reason })) },
-    { id: "a", answerKind: "allow" }
+    { id: "a", via: "deck", answerKind: "allow" }
   );
   const goneError = await gone.catch((error: unknown) => error);
   expect(goneError, "a status other than 409 must remain an error").toBeInstanceOf(BrokerHttpError);
@@ -247,15 +261,15 @@ test("a refused claim surfaces the broker's reason to the operator, status last"
   expect(goneError).toMatchObject({ message: `/approval/claim failed: ${reason}: 410` });
   expect(String(goneError)).toBe(`Error: /approval/claim failed: ${reason}: 410`);
 
-  const raw = claimApproval({ ...deps, fetchImpl: answering(502, "Bad Gateway") }, { id: "a", answerKind: "allow" });
+  const raw = claimApproval({ ...deps, fetchImpl: answering(502, "Bad Gateway") }, { id: "a", via: "deck", answerKind: "allow" });
   await expect(raw).rejects.toThrow("/approval/claim failed: Bad Gateway: 502");
 
-  const empty = claimApproval({ ...deps, fetchImpl: answering(500, "") }, { id: "a", answerKind: "allow" });
+  const empty = claimApproval({ ...deps, fetchImpl: answering(500, "") }, { id: "a", via: "deck", answerKind: "allow" });
   await expect(empty).rejects.toThrow(/^\/approval\/claim failed: 500$/);
 
   const lost = await claimApproval(
     { ...deps, fetchImpl: answering(409, JSON.stringify({ error: "already-settled" })) },
-    { id: "a", answerKind: "allow" }
+    { id: "a", via: "deck", answerKind: "allow" }
   );
   expect(lost, "a lost race still reads as null once the reason is in the message").toBeNull();
 });
@@ -274,6 +288,6 @@ test("ackApproval treats only HTTP 409 as already settled", async () => {
     (async () => new Response(JSON.stringify({ error: "already-settled" }), { status })) as unknown as typeof fetch;
   const deps = makeDeps("proj-ack");
 
-  await expect(ackApproval({ ...deps, fetchImpl: answering(409) }, "a")).resolves.toBeNull();
-  await expect(ackApproval({ ...deps, fetchImpl: answering(410) }, "a")).rejects.toBeInstanceOf(BrokerHttpError);
+  await expect(ackApproval({ ...deps, fetchImpl: answering(409) }, "a", "deck")).resolves.toBeNull();
+  await expect(ackApproval({ ...deps, fetchImpl: answering(410) }, "a", "deck")).rejects.toBeInstanceOf(BrokerHttpError);
 });

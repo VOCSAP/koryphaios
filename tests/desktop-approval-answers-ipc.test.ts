@@ -29,7 +29,7 @@ beforeEach(() => {
 });
 
 test("an answers claim sends answer_kind answers and the answers object, no answer_text", async () => {
-  await claimApproval(makeDeps(), { id: "a", answerKind: "answers", answers: { "Which?": ["One"] } });
+  await claimApproval(makeDeps(), { id: "a", via: "deck", answerKind: "answers", answers: { "Which?": ["One"] } });
   expect(calls.length).toBe(1);
   expect(calls[0]!.url.endsWith("/approval/claim")).toBe(true);
   expect(calls[0]!.body.answer_kind).toBe("answers");
@@ -38,7 +38,7 @@ test("an answers claim sends answer_kind answers and the answers object, no answ
 });
 
 test("a handback claim sends handback true and no answer field the broker would refuse", async () => {
-  await claimApproval(makeDeps(), { id: "a", handback: true });
+  await claimApproval(makeDeps(), { id: "a", via: "deck", handback: true });
   const body = calls[0]!.body;
   expect(body.handback).toBe(true);
   for (const k of ["answer_kind", "answer_text", "answers", "terminal", "acknowledge"]) {

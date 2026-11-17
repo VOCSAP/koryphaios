@@ -6,6 +6,7 @@ import { generateAvatarRunCertificate } from '../desktop/src/main/avatar-certifi
 import {
   createAvatarSocketHub,
   deckSocketEndpoints,
+  inboxGenerationOf,
   installAvatarServerErrorReporter,
   MAX_AVATAR_REQUEST_BYTES,
   observeAvatarRequest,
@@ -209,10 +210,10 @@ test('attaches one Deck per identity, receives state, and makes detach idempoten
       unread: 3
     })
 
-    expect(await post(server, '/attach', JSON.stringify({ ...attach, deckPid: 5252, deckName: 'Renamed' }))).toMatchObject({
+    expect(await post(server, '/attach', JSON.stringify({ ...attach, deckName: 'Renamed' }))).toMatchObject({
       status: 200
     })
-    expect(server.attachedDecks()).toEqual([{ ...attach, deckPid: 5252, deckName: 'Renamed' }])
+    expect(server.attachedDecks()).toEqual([{ ...attach, deckName: 'Renamed' }])
 
     expect(await post(server, '/detach', JSON.stringify({
       deckRunId: attach.deckRunId,
@@ -230,7 +231,7 @@ test('attaches one Deck per identity, receives state, and makes detach idempoten
 
 test('negotiates A3 context only with a capable Deck while preserving A1 attachments', async () => {
   const { server } = await openServer()
-  const context = { group_id: 'group-1', project_key: 'project-1', scope_generation: 1 }
+  const context = { group_id: '11111111111111111111111111111111', project_key: 'project-1', scope_generation: 1 }
   try {
     expect(await post(server, '/attach', JSON.stringify({ ...attach, capabilities: ['a3_context'], context }))).toEqual({
       status: 200,
@@ -242,6 +243,49 @@ test('negotiates A3 context only with a capable Deck while preserving A1 attachm
       body: { ok: true, protocol_version: 1, avatarRunId: 'avatar-run-1' }
     })
     expect(server.attachedDecks()).toEqual([{ ...attach, capabilities: [] }])
+  } finally {
+    await server.close()
+  }
+})
+
+test('refuses a reattach from another process or with an older scope generation, and keeps the attached entry', async () => {
+  const { server } = await openServer()
+  const context = { group_id: '11111111111111111111111111111111', project_key: 'project-1', scope_generation: 2 }
+  const a3 = { ...attach, capabilities: ['a3_context' as const] }
+  try {
+    expect((await post(server, '/attach', JSON.stringify({ ...a3, context }))).status).toBe(200)
+    expect(await post(server, '/attach', JSON.stringify({ ...a3, deckPid: attach.deckPid + 1, context }))).toEqual({
+      status: 409,
+      body: { error: 'deck_pid_mismatch' }
+    })
+    expect(await post(server, '/attach', JSON.stringify({ ...a3, context: { ...context, scope_generation: 1 } }))).toEqual({
+      status: 409,
+      body: { error: 'stale_scope_generation' }
+    })
+    expect(server.attachedDecks()).toEqual([{ ...a3, context }])
+
+    expect((await post(server, '/attach', JSON.stringify({ ...a3, context }))).status, 'same generation and process').toBe(200)
+    const next = { ...context, scope_generation: 3 }
+    expect((await post(server, '/attach', JSON.stringify({ ...a3, context: next }))).status, 'newer generation').toBe(200)
+    expect(server.attachedDecks()).toEqual([{ ...a3, context: next }])
+  } finally {
+    await server.close()
+  }
+})
+
+test('a context-free reattach does not lower the generation floor of the Deck', async () => {
+  const { server } = await openServer()
+  const context = { group_id: '11111111111111111111111111111111', project_key: 'project-1', scope_generation: 5 }
+  const a3 = { ...attach, capabilities: ['a3_context' as const] }
+  try {
+    expect((await post(server, '/attach', JSON.stringify({ ...a3, context }))).status).toBe(200)
+    expect((await post(server, '/attach', JSON.stringify(a3))).status, 'context-free reattach').toBe(200)
+    expect(await post(server, '/attach', JSON.stringify({ ...a3, context: { ...context, scope_generation: 1 } }))).toEqual({
+      status: 409,
+      body: { error: 'stale_scope_generation' }
+    })
+    expect((await post(server, '/detach', JSON.stringify({ deckRunId: attach.deckRunId, broker_url: attach.broker_url }))).status).toBe(200)
+    expect((await post(server, '/attach', JSON.stringify({ ...a3, context: { ...context, scope_generation: 1 } }))).status, 'a detach ends the attachment').toBe(200)
   } finally {
     await server.close()
   }
@@ -345,7 +389,7 @@ test('keeps distinct broker identities with the same Deck run id attached', asyn
 test('keeps an unlisted broker attached in A1 while refusing its A3 context', async () => {
   const { server, reports } = await openServer()
   const broker_url = 'https://untrusted.example.test'
-  const context = { group_id: 'group-1', project_key: 'project-1', scope_generation: 1 }
+  const context = { group_id: '11111111111111111111111111111111', project_key: 'project-1', scope_generation: 1 }
   try {
     expect(await post(server, '/attach', JSON.stringify({ ...attach, broker_url, capabilities: ['a3_context'] }))).toEqual({
       status: 200,
@@ -761,7 +805,7 @@ test.each([
   ['a broker URL extending an allowed one with a path', {}, `${attach.broker_url}/evil`]
 ])('refuses the A3 context of a broker outside the allow-list: %s', async (_what, options, broker_url) => {
   const { server } = await openServer(options)
-  const context = { group_id: 'group-1', project_key: 'project-1', scope_generation: 1 }
+  const context = { group_id: '11111111111111111111111111111111', project_key: 'project-1', scope_generation: 1 }
   try {
     expect(await post(server, '/attach', JSON.stringify({ ...attach, broker_url, capabilities: ['a3_context'], context }))).toEqual({
       status: 403,
@@ -772,6 +816,115 @@ test.each([
   }
 })
 
+const a3Context = { group_id: '11111111111111111111111111111111', project_key: 'project-1', scope_generation: 1 }
+
+test('grants a3_inbox only with a3_context to an allowed broker', async () => {
+  const { server } = await openServer()
+  try {
+    expect((await post(server, '/attach', JSON.stringify({ ...attach, capabilities: ['a3_context', 'a3_inbox'], context: a3Context }))).body.capabilities).toEqual([
+      'a3_context',
+      'a3_inbox'
+    ])
+    expect((await post(server, '/attach', JSON.stringify({ ...attach, capabilities: ['a3_inbox'] }))).body.capabilities).toBeUndefined()
+  } finally {
+    await server.close()
+  }
+})
+
+test('inbox frames are expected only from an attachment that negotiated a3_inbox with a context', () => {
+  const withContext = { ...attach, context: a3Context }
+  expect(inboxGenerationOf({ ...withContext, capabilities: ['a3_context', 'a3_inbox'] })).toBe(1)
+  expect(inboxGenerationOf({ ...withContext, capabilities: ['a3_context'] })).toBeUndefined()
+  expect(inboxGenerationOf({ ...attach, capabilities: ['a3_context', 'a3_inbox'] })).toBeUndefined()
+  expect(inboxGenerationOf(undefined)).toBeUndefined()
+})
+
+function inboxFrame(seq: number, generation = 3, identity = deck): Record<string, unknown> {
+  return {
+    type: 'inbox_snapshot',
+    protocol_version: 1,
+    ...identity,
+    scope_generation: generation,
+    seq,
+    approvals: [],
+    messages: [],
+    closed: [],
+    truncated: { approvals: 0, messages: 0, closed: 0 }
+  }
+}
+
+function inboxHub(negotiated = true) {
+  const received: Array<[string, number]> = []
+  const cleared: string[] = []
+  const opened = openHub({
+    inboxGeneration: (identity) => (negotiated && identity.deckRunId === deck.deckRunId ? 3 : undefined),
+    inbox: {
+      receive: (identity, frame) => received.push([identity.deckRunId, frame.seq]),
+      clear: (identity) => cleared.push(identity.deckRunId)
+    }
+  })
+  return { ...opened, received, cleared }
+}
+
+test('hands an a3_inbox snapshot to the inbox in seq order and ignores a stale or foreign one', () => {
+  const { hub, received, reports } = inboxHub()
+  const socket = boundSocket(hub)
+  socket.receive(inboxFrame(1))
+  socket.receive(inboxFrame(1))
+  socket.receive(inboxFrame(2, 4))
+  socket.receive(inboxFrame(3, 3, otherDeck))
+  socket.receive(inboxFrame(3))
+  expect(received).toEqual([
+    ['deck-run-1', 1],
+    ['deck-run-1', 3]
+  ])
+  expect(reports).toContain('ignored an inbox snapshot from another scope generation')
+  expect(reports).toContain('ignored an inbox snapshot addressed to another Deck')
+  expect(socket.closed).toBeUndefined()
+})
+
+test('drops an invalid inbox snapshot, traced once, without closing the socket that carries focus', async () => {
+  const { hub, received, reports } = inboxHub()
+  const socket = boundSocket(hub)
+  socket.receive({ ...inboxFrame(1), run_ref: 'leak' })
+  socket.receive({ ...inboxFrame(2), run_ref: 'leak' })
+  expect(received).toEqual([])
+  expect(reports.filter((r) => r === 'ignored an invalid inbox snapshot')).toHaveLength(1)
+  expect(socket.closed).toBeUndefined()
+  const focus = hub.focusDeck(deck, 'focus')
+  socket.receive({ type: 'command_result', requestId: lastRequestId(socket), ok: true })
+  expect((await settledWithin(focus)).ok).toBe(true)
+})
+
+test('ignores a snapshot from a Deck that did not negotiate a3_inbox, and refuses to send it an inbox action', async () => {
+  const { hub, received, reports } = inboxHub(false)
+  const socket = boundSocket(hub)
+  socket.receive(inboxFrame(1))
+  expect(received).toEqual([])
+  expect(reports).toContain('ignored an inbox snapshot from a Deck that did not negotiate a3_inbox')
+  expect(socket.closed).toBeUndefined()
+  await expect(hub.sendInboxAction(deck, { approval_id: '00000000-0000-4000-8000-000000000001', action: 'allow' })).rejects.toThrow(/a3_inbox/)
+})
+
+test('erases the box when the bound socket closes or the Deck detaches', () => {
+  const { hub, cleared } = inboxHub()
+  boundSocket(hub).close(1000, 'gone')
+  expect(cleared).toEqual(['deck-run-1'])
+  boundSocket(hub)
+  hub.detach(deck)
+  expect(cleared).toEqual(['deck-run-1', 'deck-run-1'])
+})
+
+test('sends an inbox action as a command carrying its payload and returns the Deck outcome', async () => {
+  const { hub } = inboxHub()
+  const socket = boundSocket(hub)
+  const action = { approval_id: '00000000-0000-4000-8000-000000000001', action: 'text' as const, text: 'go' }
+  const sent = hub.sendInboxAction(deck, action)
+  expect(socket.sent.at(-1)).toMatchObject({ type: 'command', command: 'inbox_action', inbox: action, ...deck })
+  socket.receive({ type: 'command_result', requestId: lastRequestId(socket), ok: true, outcome: 'refused', reason: 'informational' })
+  expect(await settledWithin(sent)).toMatchObject({ ok: true, outcome: 'refused', reason: 'informational' })
+})
+
 test('refuses the A3 context when the server was given no broker allow-list', async () => {
   const server = await startAvatarServer({
     avatarRunId: 'avatar-run-1',
@@ -780,7 +933,7 @@ test('refuses the A3 context when the server was given no broker allow-list', as
     token,
     report: () => undefined
   })
-  const context = { group_id: 'group-1', project_key: 'project-1', scope_generation: 1 }
+  const context = { group_id: '11111111111111111111111111111111', project_key: 'project-1', scope_generation: 1 }
   try {
     expect(await post(server, '/attach', JSON.stringify({ ...attach, capabilities: ['a3_context'], context }))).toEqual({
       status: 403,

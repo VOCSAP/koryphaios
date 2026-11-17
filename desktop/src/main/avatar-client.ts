@@ -4,6 +4,7 @@ import {
   AVATAR_CAPABILITIES,
   AVATAR_PROTOCOL_VERSION,
   MAX_AVATAR_REQUEST_BYTES,
+  invalidInboxActionRequestId,
   parseAvatarServerFrame,
   unsupportedAvatarCommandRequestId,
   type AvatarAttachRequest,
@@ -14,6 +15,8 @@ import { AVATAR_HEARTBEAT_MS, type AvatarDeckIdentity } from '../shared/avatar-s
 import type { HookAwaitRow } from '../shared/hook-await'
 import type { SessionRuntime } from '../shared/types'
 import { isAvatarCounter, projectAvatarCounters } from './avatar-counters'
+import type { AvatarInboxAction, InboxOutcome, InboxRelayApproval } from '../shared/avatar-inbox-protocol'
+import { createInboxPusher, type InboxActionResult, type InboxPusher, type InboxRelaySourcesInput } from './avatar-inbox-relay'
 import type { AvatarRendezvous } from './avatar-registry'
 import { avatarHttpsRequestOptions, connectAvatarWss } from './avatar-transport'
 import { logInfo, logWarn, reportError } from './log'
@@ -50,6 +53,9 @@ export interface AvatarClientOptions {
   inboxUnread?(): number
   focus(): Promise<void>
   openQuestion(): Promise<void>
+  /** The Courrier and the pending questions relayed to an Avatar that negotiated a3_inbox. */
+  inbox?: AvatarInboxRelay
+  now?: () => number
   post?: AvatarPost
   connect?: (rendezvous: AvatarRendezvous) => AvatarClientSocket
   every?: (ms: number, tick: () => void) => () => void
@@ -59,10 +65,16 @@ export interface AvatarClientOptions {
   warn?: typeof logWarn
 }
 
+export interface AvatarInboxRelay {
+  sources(): InboxRelaySourcesInput
+  act(action: AvatarInboxAction, sent: ReadonlyMap<string, InboxRelayApproval>): Promise<InboxActionResult>
+}
+
 export interface AvatarClient {
   start(): boolean
   sessionsChanged(): void
   scopeChanged(): void
+  inboxChanged(): void
   stop(): Promise<void>
 }
 
@@ -165,12 +177,21 @@ export function createAvatarClient(options: AvatarClientOptions): AvatarClient {
   const link = failureEpisode(report, info, 'Avatar link restored')
   const webSocket = failureEpisode(report, info, 'Avatar WebSocket restored')
   const unreadInput = failureEpisode(report, info, 'Inbox unread count valid again')
+  const now = options.now ?? Date.now
   let attached: { avatarRunId: string; identity: AvatarDeckIdentity; key: string; name: string } | null = null
   let socket: AvatarClientSocket | null = null
   let lastPushed: string | null = null
   let stopHeartbeat: (() => void) | null = null
   let scopeEpoch = 0
   let chain = Promise.resolve()
+  let inboxGeneration: number | null = null
+  let pusher: { socket: AvatarClientSocket; generation: number; relay: InboxPusher } | null = null
+
+  const stopPusher = (current: AvatarClientSocket): void => {
+    if (pusher?.socket !== current) return
+    pusher.relay.stop()
+    pusher = null
+  }
 
   const enqueue = (work: () => Promise<void>): Promise<void> => {
     chain = chain.then(work).catch((error: unknown) => {
@@ -179,9 +200,41 @@ export function createAvatarClient(options: AvatarClientOptions): AvatarClient {
     return chain
   }
 
-  const reply = (current: AvatarClientSocket, requestId: string, ok: boolean, error?: string): void => {
+  const reply = (
+    current: AvatarClientSocket,
+    requestId: string,
+    ok: boolean,
+    error?: string,
+    settled?: { outcome: InboxOutcome; reason?: string }
+  ): void => {
     if (socket !== current) return
-    current.send(JSON.stringify({ type: 'command_result', requestId, ok, ...(error === undefined ? {} : { error }) }))
+    current.send(
+      JSON.stringify({
+        type: 'command_result',
+        requestId,
+        ok,
+        ...(error === undefined ? {} : { error }),
+        ...(settled === undefined ? {} : settled)
+      })
+    )
+  }
+
+  const runInboxAction = (current: AvatarClientSocket, requestId: string, action: AvatarInboxAction): void => {
+    const relay = pusher?.socket === current ? pusher.relay : null
+    if (!relay || !options.inbox) {
+      reply(current, requestId, false, 'unsupported_command')
+      return
+    }
+    options.inbox.act(action, relay.sentApprovals()).then(
+      (result) => {
+        if ('error' in result) reply(current, requestId, false, result.error)
+        else reply(current, requestId, true, undefined, result)
+      },
+      (error: unknown) => {
+        report('avatar-client', `Avatar ${action.action} gesture failed`, error)
+        reply(current, requestId, false, 'inbox_action_failed')
+      }
+    )
   }
 
   const openSocket = (rendezvous: AvatarRendezvous, identity: AvatarDeckIdentity): void => {
@@ -201,11 +254,32 @@ export function createAvatarClient(options: AvatarClientOptions): AvatarClient {
         report('avatar-client', 'rejected an invalid Avatar frame', error)
         const unsupported = bound ? unsupportedAvatarCommandRequestId(input) : null
         if (unsupported) reply(current, unsupported, false, 'unsupported_command')
+        const invalidInbox = bound ? invalidInboxActionRequestId(input) : null
+        if (invalidInbox) {
+          reply(current, invalidInbox, false, pusher?.socket === current ? 'invalid_inbox_action' : 'unsupported_command')
+        }
         return
       }
       if (frame.type === 'bound') {
         bound = true
         webSocket.ok()
+        const inbox = options.inbox
+        if (inbox && inboxGeneration !== null && socket === current) {
+          stopPusher(current)
+          pusher = {
+            socket: current,
+            generation: inboxGeneration,
+            relay: createInboxPusher({
+              identity,
+              scopeGeneration: inboxGeneration,
+              sources: () => inbox.sources(),
+              send: (text) => current.send(text),
+              after,
+              now,
+              report
+            })
+          }
+        }
         return
       }
       if (!bound) {
@@ -215,6 +289,10 @@ export function createAvatarClient(options: AvatarClientOptions): AvatarClient {
       if (frame.deckRunId !== identity.deckRunId || frame.broker_url !== identity.broker_url) {
         report('avatar-client', 'rejected an Avatar command addressed to another Deck')
         reply(current, frame.requestId, false, 'wrong_deck')
+        return
+      }
+      if (frame.command === 'inbox_action') {
+        runInboxAction(current, frame.requestId, frame.inbox)
         return
       }
       const { requestId, command } = frame
@@ -248,6 +326,7 @@ export function createAvatarClient(options: AvatarClientOptions): AvatarClient {
       )
     })
     current.on('close', (code) => {
+      stopPusher(current)
       if (socket === current) socket = null
       if (!bound && code >= 4000) webSocket.fail(`Avatar closed the WebSocket before bound with code ${code}`)
     })
@@ -284,7 +363,9 @@ export function createAvatarClient(options: AvatarClientOptions): AvatarClient {
         if (detachStatus !== 200) report('avatar-client', `Avatar refused the detach with status ${detachStatus}`)
       }
       const { context, ...attachDeck } = deck
-      const capabilities = context === undefined ? [] : AVATAR_CAPABILITIES
+      const capabilities: readonly AvatarCapability[] =
+        context === undefined ? [] : options.inbox ? AVATAR_CAPABILITIES : AVATAR_CAPABILITIES.filter((c) => c !== 'a3_inbox')
+      let negotiatedInbox: number | null = null
       const attachResult = await post(rendezvous, '/attach', {
         protocol_version: AVATAR_PROTOCOL_VERSION,
         ...attachDeck,
@@ -310,14 +391,18 @@ export function createAvatarClient(options: AvatarClientOptions): AvatarClient {
           link.fail(`Avatar refused the attach with status ${contextStatus}`)
           return
         }
+        if (negotiatedCapabilities(contextResult).includes('a3_inbox')) negotiatedInbox = context.scope_generation
       }
       const avatarChanged = previousAttachment?.avatarRunId !== rendezvous.avatarRunId
       const identityChanged = previousAttachment !== null && previousAttachment.identity.broker_url !== identity.broker_url
+      const inboxChanged = negotiatedInbox !== inboxGeneration
       attached = { avatarRunId: rendezvous.avatarRunId, identity, key, name: deck.deckName }
+      inboxGeneration = negotiatedInbox
       lastPushed = null
-      if (avatarChanged || identityChanged) {
+      if (avatarChanged || identityChanged || (inboxChanged && socket !== null)) {
         const previousSocket = socket
         socket = null
+        if (previousSocket) stopPusher(previousSocket)
         previousSocket?.close(1000, avatarChanged ? 'Avatar restarted' : 'Deck scope changed')
       }
     }
@@ -361,8 +446,12 @@ export function createAvatarClient(options: AvatarClientOptions): AvatarClient {
       lastPushed = null
       const previousSocket = socket
       socket = null
+      if (previousSocket) stopPusher(previousSocket)
       previousSocket?.close(1000, 'Deck scope changed')
       if (stopHeartbeat) void enqueue(() => sync(true))
+    },
+    inboxChanged() {
+      pusher?.relay.changed()
     },
     stop() {
       stopHeartbeat?.()
@@ -370,6 +459,7 @@ export function createAvatarClient(options: AvatarClientOptions): AvatarClient {
       return enqueue(async () => {
         const closing = socket
         socket = null
+        if (closing) stopPusher(closing)
         closing?.close(1000, 'Deck detaching')
         const rendezvous = options.rendezvous()
         if (!rendezvous || !attached) return

@@ -1,4 +1,16 @@
 import { posix, win32 } from 'node:path'
+import { projectKeyCaseRefusal, validateProjectKey } from '../../../shared/project-key'
+import {
+  AVATAR_INBOX_PROTOCOL_VERSION,
+  INBOX_OUTCOMES,
+  MAX_INBOX_OUTCOME_REASON,
+  parseAvatarInboxAction,
+  parseAvatarInboxContent,
+  type AvatarInboxAction,
+  type AvatarInboxSnapshotFrame,
+  type InboxOutcome,
+  type InboxQuestionsValidator
+} from './avatar-inbox-protocol'
 import type { AvatarDeckCounters, AvatarDeckIdentity, AvatarDeckSnapshot } from './avatar-state'
 
 export const AVATAR_PROTOCOL_VERSION = 1
@@ -6,7 +18,7 @@ export const MAX_AVATAR_COUNTER = 1_000_000
 export const MAX_AVATAR_ATTACHMENTS = 64
 export const MAX_AVATAR_REQUEST_BYTES = 64 * 1024
 export const AVATAR_COMMANDS = ['focus', 'open_question'] as const
-export const AVATAR_CAPABILITIES = ['a3_context'] as const
+export const AVATAR_CAPABILITIES = ['a3_context', 'a3_inbox'] as const
 export type AvatarCommand = (typeof AVATAR_COMMANDS)[number]
 export type AvatarCapability = (typeof AVATAR_CAPABILITIES)[number]
 
@@ -22,6 +34,8 @@ const MAX_AVATAR_COMMAND_ERROR_LENGTH = 256
 const MAX_DECK_NAME_LENGTH = 64
 const MAX_PROJECT_DIR_LENGTH = 4_096
 const DECK_RUN_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
+const GROUP_ID_PATTERN = /^[a-f0-9]{32}$/
+const INVISIBLE_FORMAT_PATTERN = /[\u061C\u200B-\u200F\u2028\u2029\u202A-\u202E\u2060-\u2069\uFEFF]/
 
 export interface AvatarAttachRequest {
   protocol_version: number
@@ -49,15 +63,27 @@ export interface AvatarCommandFrame extends AvatarDeckIdentity {
   command: AvatarCommand
 }
 
+export const AVATAR_INBOX_COMMAND = 'inbox_action'
+
+/** Outside AVATAR_COMMANDS: offered only on an a3_inbox attachment, and it carries a payload. */
+export interface AvatarInboxCommandFrame extends AvatarDeckIdentity {
+  type: 'command'
+  requestId: string
+  command: typeof AVATAR_INBOX_COMMAND
+  inbox: AvatarInboxAction
+}
+
 export interface AvatarCommandResultFrame {
   type: 'command_result'
   requestId: string
   ok: boolean
   error?: string
+  outcome?: InboxOutcome
+  reason?: string
 }
 
 export type AvatarDeckFrame = AvatarBindFrame | AvatarCommandResultFrame
-export type AvatarServerFrame = AvatarBoundFrame | AvatarCommandFrame
+export type AvatarServerFrame = AvatarBoundFrame | AvatarCommandFrame | AvatarInboxCommandFrame
 
 export type AvatarProtocolErrorCode =
   | 'unsupported_protocol_version'
@@ -152,8 +178,10 @@ function optionalAvatarContext(value: unknown, capabilities: readonly AvatarCapa
   const projectKey = requiredString(input.project_key)
   const scopeGeneration = input.scope_generation
   if (
-    groupId.length > MAX_DECK_RUN_ID_LENGTH ||
-    projectKey.length > MAX_PROJECT_DIR_LENGTH ||
+    !GROUP_ID_PATTERN.test(groupId) ||
+    !validateProjectKey(projectKey).ok ||
+    projectKeyCaseRefusal(projectKey) !== null ||
+    INVISIBLE_FORMAT_PATTERN.test(projectKey) ||
     typeof scopeGeneration !== 'number' ||
     !Number.isSafeInteger(scopeGeneration) ||
     scopeGeneration < 0
@@ -303,16 +331,38 @@ export function parseAvatarDeckFrame(value: unknown): AvatarDeckFrame {
       ok: typeof input.ok === 'boolean' ? input.ok : invalidAvatarFrame()
     }
     if (input.error !== undefined) result.error = frameString(input.error, MAX_AVATAR_COMMAND_ERROR_LENGTH)
+    if (input.outcome !== undefined) {
+      if (!(INBOX_OUTCOMES as readonly unknown[]).includes(input.outcome)) invalidAvatarFrame()
+      result.outcome = input.outcome as InboxOutcome
+    }
+    if (input.reason !== undefined) result.reason = frameString(input.reason, MAX_INBOX_OUTCOME_REASON)
     return result
   }
   return invalidAvatarFrame()
+}
+
+/**
+ * An inbox_snapshot frame. Kept out of parseAvatarDeckFrame: an invalid one is
+ * dropped without closing the socket, and its questions need the broker's
+ * validator, which the caller injects.
+ */
+export function parseAvatarInboxSnapshotFrame(value: unknown, validateQuestions: InboxQuestionsValidator): AvatarInboxSnapshotFrame {
+  const input = frameRecord(value)
+  if (input.protocol_version !== AVATAR_INBOX_PROTOCOL_VERSION) invalidAvatarFrame()
+  return {
+    ...parseAvatarInboxContent(input, validateQuestions),
+    protocol_version: AVATAR_INBOX_PROTOCOL_VERSION,
+    ...frameDeckIdentity(input)
+  }
 }
 
 /** requestId of a well-formed command whose only defect is a command outside AVATAR_COMMANDS, else null. */
 export function unsupportedAvatarCommandRequestId(value: unknown): string | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null
   const input = value as Record<string, unknown>
-  if (input.type !== 'command' || (AVATAR_COMMANDS as readonly unknown[]).includes(input.command)) return null
+  if (input.type !== 'command' || input.command === AVATAR_INBOX_COMMAND || (AVATAR_COMMANDS as readonly unknown[]).includes(input.command)) {
+    return null
+  }
   try {
     return parseAvatarCommandFrame({ ...input, command: AVATAR_COMMANDS[0] }).requestId
   } catch {
@@ -320,9 +370,32 @@ export function unsupportedAvatarCommandRequestId(value: unknown): string | null
   }
 }
 
+/** requestId of an inbox_action addressed with a valid requestId and identity whose payload is refused, else null. */
+export function invalidInboxActionRequestId(value: unknown): string | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const input = value as Record<string, unknown>
+  if (input.type !== 'command' || input.command !== AVATAR_INBOX_COMMAND) return null
+  try {
+    return parseAvatarCommandFrame({ ...input, command: AVATAR_COMMANDS[0] }).requestId
+  } catch {
+    return null
+  }
+}
+
+function parseAvatarInboxCommandFrame(input: Record<string, unknown>): AvatarInboxCommandFrame {
+  return {
+    type: 'command',
+    requestId: frameRequestId(input.requestId),
+    command: AVATAR_INBOX_COMMAND,
+    inbox: parseAvatarInboxAction(input.inbox),
+    ...frameDeckIdentity(input)
+  }
+}
+
 export function parseAvatarServerFrame(value: unknown): AvatarServerFrame {
   const input = frameRecord(value)
   if (input.type === 'bound') return { type: 'bound' }
+  if (input.type === 'command' && input.command === AVATAR_INBOX_COMMAND) return parseAvatarInboxCommandFrame(input)
   if (input.type === 'command') return parseAvatarCommandFrame(input)
   return invalidAvatarFrame()
 }

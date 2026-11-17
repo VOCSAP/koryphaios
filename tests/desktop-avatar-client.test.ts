@@ -254,7 +254,7 @@ test('attaches, binds, pushes state on change and repeats it every five seconds'
 })
 
 test('sends A3 context only after the Avatar announces the same capability', async () => {
-  const context = { group_id: 'group-1', project_key: 'project-1', scope_generation: 1 }
+  const context = { group_id: '11111111111111111111111111111111', project_key: 'project-1', scope_generation: 1 }
   const { client, posts, live } = harness()
   live.deck = { ...deck, context }
   live.status['/attach'] = { status: 200, body: { capabilities: ['a3_context'] } }
@@ -269,7 +269,7 @@ test('sends A3 context only after the Avatar announces the same capability', asy
 })
 
 test('keeps A1/A2 behavior with an older Avatar that does not announce A3', async () => {
-  const context = { group_id: 'group-1', project_key: 'project-1', scope_generation: 1 }
+  const context = { group_id: '11111111111111111111111111111111', project_key: 'project-1', scope_generation: 1 }
   const { client, posts, live } = harness()
   live.deck = { ...deck, context }
   client.start()
@@ -278,6 +278,91 @@ test('keeps A1/A2 behavior with an older Avatar that does not announce A3', asyn
     { path: '/attach', body: { protocol_version: 1, ...deck, capabilities: ['a3_context'] } },
     expect.objectContaining({ path: '/state', body: expect.objectContaining({ identity }) })
   ])
+  await client.stop()
+})
+
+const inboxContext = { group_id: '11111111111111111111111111111111', project_key: 'project-1', scope_generation: 5 }
+const APPROVAL_ID = '00000000-0000-4000-8000-000000000001'
+
+function inboxApproval() {
+  return {
+    id: APPROVAL_ID,
+    operator_id: 'op',
+    origin: { host: 'h', os_user_hash: 'x', project_key: 'p', group_id: 'g', from_peer: 'peer-a', session_ref: 's', tile_ref: 't' },
+    kind: 'question',
+    title: 'Proceed?',
+    question: 'q',
+    options: [],
+    status: 'pending',
+    reply_route: 'channel',
+    mergeable: false,
+    absorbed_permission: false,
+    informational: false,
+    answered_via: null,
+    answer_kind: null,
+    answer_text: null,
+    questions: null,
+    answers: null,
+    created_at: '2026-11-17T08:00:00.000Z',
+    notif_expires_at: '2026-11-17T09:00:00.000Z',
+    answered_at: null,
+    delivered_at: null
+  } as never
+}
+
+async function inboxHarness(granted: readonly string[]) {
+  const acts: Array<{ action: unknown; sentIds: string[] }> = []
+  const context = harness({
+    inbox: {
+      sources: () => ({ approvals: [inboxApproval()], messages: [], closed: [], tileName: () => null }),
+      act: async (action, sentIds) => {
+        acts.push({ action, sentIds: [...sentIds.keys()] })
+        return { outcome: 'won' }
+      }
+    }
+  })
+  context.live.deck = { ...deck, context: inboxContext }
+  context.live.status['/attach'] = { status: 200, body: { capabilities: granted } }
+  context.client.start()
+  await flush()
+  await flush()
+  const socket = context.sockets[0]!
+  socket.open()
+  socket.receive({ type: 'bound' })
+  return { ...context, socket, acts }
+}
+
+test('asks for a3_inbox only when it has an inbox to relay, and relays it after bound once granted', async () => {
+  const { client, posts, socket } = await inboxHarness(['a3_context', 'a3_inbox'])
+  expect(posts[0]).toEqual({ path: '/attach', body: { protocol_version: 1, ...deck, capabilities: ['a3_context', 'a3_inbox'] } })
+  const frames = socket.sent.filter((frame) => frame.type === 'inbox_snapshot')
+  expect(frames).toHaveLength(1)
+  expect(frames[0]).toMatchObject({ seq: 1, scope_generation: 5, ...identity })
+  expect((frames[0]!.approvals as Array<{ id: string }>).map((a) => a.id)).toEqual([APPROVAL_ID])
+  await client.stop()
+})
+
+test('relays nothing and refuses inbox_action as unsupported when the Avatar did not grant a3_inbox', async () => {
+  const { client, socket, acts } = await inboxHarness(['a3_context'])
+  expect(socket.sent.filter((frame) => frame.type === 'inbox_snapshot')).toEqual([])
+  socket.receive(command({ command: 'inbox_action', inbox: { approval_id: APPROVAL_ID, action: 'allow' } }))
+  await flush()
+  expect(socket.sent.at(-1)).toEqual({ type: 'command_result', requestId: 'request-1', ok: false, error: 'unsupported_command' })
+  expect(acts).toEqual([])
+  await client.stop()
+})
+
+test('carries out an inbox_action against the ids relayed on this socket and answers its outcome', async () => {
+  const { client, socket, acts } = await inboxHarness(['a3_context', 'a3_inbox'])
+  socket.receive(command({ command: 'inbox_action', inbox: { approval_id: APPROVAL_ID, action: 'deny' } }))
+  await flush()
+  expect(acts).toEqual([{ action: { approval_id: APPROVAL_ID, action: 'deny' }, sentIds: [APPROVAL_ID] }])
+  expect(socket.sent.at(-1)).toEqual({ type: 'command_result', requestId: 'request-1', ok: true, outcome: 'won' })
+
+  socket.receive(command({ requestId: 'request-2', command: 'inbox_action', inbox: { approval_id: APPROVAL_ID, action: 'terminal' } }))
+  await flush()
+  expect(socket.sent.at(-1)).toEqual({ type: 'command_result', requestId: 'request-2', ok: false, error: 'invalid_inbox_action' })
+  expect(acts).toHaveLength(1)
   await client.stop()
 })
 
@@ -432,7 +517,7 @@ test('renews its attachment when the Deck scope generation changes', async () =>
   client.start()
   await flush()
   ;(live.deck as typeof deck & { context: { group_id: string; project_key: string; scope_generation: number } }).context = {
-    group_id: 'group-2',
+    group_id: '22222222222222222222222222222222',
     project_key: 'project-1',
     scope_generation: 2
   }
@@ -456,7 +541,7 @@ test('ignores an attachment response from a scope generation it has left', async
   await flush()
   live.deck = {
     ...deck,
-    context: { group_id: 'group-2', project_key: 'project-1', scope_generation: 2 }
+    context: { group_id: '22222222222222222222222222222222', project_key: 'project-1', scope_generation: 2 }
   }
   client.scopeChanged()
   releaseAttach(200)
@@ -657,10 +742,10 @@ test('stop closes the socket, detaches once, and ignores later session changes',
 
 test.each([
   ['scope generation', { scope_generation: 2 }],
-  ['group', { group_id: 'group-2' }],
+  ['group', { group_id: '22222222222222222222222222222222' }],
   ['project key', { project_key: 'project-2' }]
 ])('renews its attachment when only the %s of the Deck context changes', async (_field, change) => {
-  const context = { group_id: 'group-1', project_key: 'project-1', scope_generation: 1 }
+  const context = { group_id: '11111111111111111111111111111111', project_key: 'project-1', scope_generation: 1 }
   const { client, posts, live } = harness()
   live.deck = { ...deck, context }
   client.start()
@@ -702,7 +787,7 @@ test('ignores a state response from a scope generation it has left', async () =>
 })
 
 test('ignores a context attachment response from a scope generation it has left', async () => {
-  const context = { group_id: 'group-1', project_key: 'project-1', scope_generation: 1 }
+  const context = { group_id: '11111111111111111111111111111111', project_key: 'project-1', scope_generation: 1 }
   let releaseContext: (result: AvatarPostResult) => void = () => undefined
   let attachCount = 0
   const { client, reports, live } = harness()
@@ -719,7 +804,7 @@ test('ignores a context attachment response from a scope generation it has left'
   }
   client.start()
   await flush()
-  live.deck = { ...deck, context: { ...context, group_id: 'group-2', scope_generation: 2 } }
+  live.deck = { ...deck, context: { ...context, group_id: '22222222222222222222222222222222', scope_generation: 2 } }
   client.scopeChanged()
   releaseContext(403)
   await flush()
@@ -729,7 +814,7 @@ test('ignores a context attachment response from a scope generation it has left'
 })
 
 test('retries a refused A3 context before restoring the Avatar link', async () => {
-  const context = { group_id: 'group-1', project_key: 'project-1', scope_generation: 1 }
+  const context = { group_id: '11111111111111111111111111111111', project_key: 'project-1', scope_generation: 1 }
   let contextAttempts = 0
   const { client, heartbeat, infos, live, reports } = harness()
   live.deck = { ...deck, context }
@@ -782,14 +867,14 @@ test('detaches a blocked B attachment before replacing it with C', async () => {
   live.deck = {
     ...deck,
     broker_url: brokerB,
-    context: { group_id: 'group-b', project_key: 'project-b', scope_generation: 1 }
+    context: { group_id: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', project_key: 'project-b', scope_generation: 1 }
   }
   client.scopeChanged()
   await flush()
   live.deck = {
     ...deck,
     broker_url: brokerC,
-    context: { group_id: 'group-c', project_key: 'project-c', scope_generation: 2 }
+    context: { group_id: 'cccccccccccccccccccccccccccccccc', project_key: 'project-c', scope_generation: 2 }
   }
   client.scopeChanged()
   releaseContextB(200)
