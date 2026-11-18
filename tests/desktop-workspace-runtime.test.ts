@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
-  demoteExtraTeamLeads,
+  demoteExtraLeads,
   fromWorkspaceSessions,
   joinArgs,
   splitArgs,
@@ -176,7 +176,7 @@ test("a workspace saved before role and lead existed restores without either and
     expect("role" in d).toBe(false);
     expect("lead" in d).toBe(false);
   }
-  expect(demoteExtraTeamLeads(old)).toEqual([]);
+  expect(demoteExtraLeads(old)).toEqual([]);
 });
 
 // The workspace file is repo-cloned (hostile input): role goes through the spawn
@@ -200,7 +200,7 @@ test("a hostile role or lead in the file is normalised or dropped on restore, ne
   expect(fromWorkspaceSessions([persistedWith({ lead: true })]).map((d) => d.lead)).toEqual([true]);
 });
 
-test("demoteExtraTeamLeads keeps the first team-lead role and the first lead crown and names each session that lost one, once", () => {
+test("demoteExtraLeads keeps the first lead crown, names each session that lost it, and never touches a role", () => {
   const defs = fromWorkspaceSessions([
     persistedWith({ role: "team-lead", lead: true }, 0),
     persistedWith({ role: "team-lead" }, 1),
@@ -208,15 +208,21 @@ test("demoteExtraTeamLeads keeps the first team-lead role and the first lead cro
     persistedWith({ role: "team-lead", lead: true }, 3),
     persistedWith({ role: "reviewer" }, 4),
   ]);
-  expect(demoteExtraTeamLeads(defs)).toEqual(["s-1", "s-2", "s-3"]);
-  expect(defs.map((d) => d.role)).toEqual(["team-lead", undefined, "developer", undefined, "reviewer"]);
+  expect(demoteExtraLeads(defs)).toEqual(["s-2", "s-3"]);
+  expect(defs.map((d) => d.role)).toEqual(["team-lead", "team-lead", "developer", "team-lead", "reviewer"]);
   expect(defs.map((d) => d.lead)).toEqual([true, undefined, undefined, undefined, undefined]);
 });
 
-test("demoteExtraTeamLeads follows position order, not the order of the file", () => {
-  const defs = fromWorkspaceSessions([persistedWith({ role: "team-lead" }, 1), persistedWith({ role: "team-lead" }, 0)]);
-  expect(demoteExtraTeamLeads(defs)).toEqual(["s-1"]);
-  expect(defs.map((d) => [d.name, d.role])).toEqual([["s-0", "team-lead"], ["s-1", undefined]]);
+test("demoteExtraLeads leaves several team-lead roles without a crown alone: they are sub-leads", () => {
+  const defs = fromWorkspaceSessions([persistedWith({ role: "team-lead" }, 0), persistedWith({ role: "team-lead" }, 1)]);
+  expect(demoteExtraLeads(defs)).toEqual([]);
+  expect(defs.map((d) => [d.name, d.role])).toEqual([["s-0", "team-lead"], ["s-1", "team-lead"]]);
+});
+
+test("demoteExtraLeads follows position order, not the order of the file", () => {
+  const defs = fromWorkspaceSessions([persistedWith({ lead: true }, 1), persistedWith({ lead: true }, 0)]);
+  expect(demoteExtraLeads(defs)).toEqual(["s-1"]);
+  expect(defs.map((d) => [d.name, d.lead])).toEqual([["s-0", true], ["s-1", undefined]]);
 });
 
 // ----- open-id-registry -----

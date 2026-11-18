@@ -7,7 +7,7 @@ import { randomUUID } from 'node:crypto'
 // Relative import (not the @shared alias) so this module resolves cleanly when
 // the bun test imports it directly, per the pure-module testing convention.
 import type { SessionDef } from '../shared/types'
-import { sanitizeRole, TEAM_LEAD_ROLE } from '../shared/role'
+import { sanitizeRole } from '../shared/role'
 import { isClodexContextTokens } from '../shared/clodex-context'
 import { isToolNameList, liftDisallowedTools } from '../shared/tool-names'
 import type { WorkspaceSession } from './workspace-store'
@@ -61,32 +61,21 @@ function roleOf(source: { role?: unknown }): string {
 }
 
 /**
- * Keep the first team-lead role and the first lead crown (position order, as
- * `defs` comes from fromWorkspaceSessions) and strip them from the others.
- * Returns the names of the sessions that lost one, each once, so the restore
- * can announce them.
+ * Keep the first lead crown (position order, as `defs` comes from
+ * fromWorkspaceSessions) and strip it from the others. Roles are never touched:
+ * several `team-lead` sessions are sub-leads and keep theirs. Returns the names
+ * of the sessions that lost the crown so the restore can announce them.
  */
-export function demoteExtraTeamLeads(defs: SessionDef[]): string[] {
+export function demoteExtraLeads(defs: SessionDef[]): string[] {
   const demoted: string[] = []
-  let roleSeen = false
   let leadSeen = false
   for (const d of defs) {
-    let lost = false
-    if (d.role === TEAM_LEAD_ROLE) {
-      if (roleSeen) {
-        delete d.role
-        lost = true
-      }
-      roleSeen = true
+    if (!d.lead) continue
+    if (leadSeen) {
+      delete d.lead
+      demoted.push(d.name)
     }
-    if (d.lead) {
-      if (leadSeen) {
-        delete d.lead
-        lost = true
-      }
-      leadSeen = true
-    }
-    if (lost) demoted.push(d.name)
+    leadSeen = true
   }
   return demoted
 }

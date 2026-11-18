@@ -789,27 +789,38 @@ test("WorkspaceService.restore(): applies the workspace captured before its appr
   expect(restored.map((session) => session.name)).toEqual(["reviewer"]);
 });
 
-test("WorkspaceService.restore(): a second team-lead restores without the role and is named in the result, a lone one is not", async () => {
+test("WorkspaceService.restore(): a second lead crown is dropped and named in the result, every team-lead role is kept, a lone crown is not named", async () => {
   const proj = freshProject();
   ensureWorkspacesDir(proj);
   const base = sampleWorkspace().sessions[0]!;
-  const two = sampleWorkspace({
-    id: "wsp-two-leads",
+  const twoCrowns = sampleWorkspace({
+    id: "wsp-two-crowns",
     sessions: [
       { ...base, name: "boss", args: [], role: "team-lead", lead: true, position: 0 },
+      { ...base, name: "deputy", args: [], role: "team-lead", lead: true, position: 1 },
+    ],
+  });
+  const twoSubLeads = sampleWorkspace({
+    id: "wsp-two-sub-leads",
+    sessions: [
+      { ...base, name: "boss", args: [], role: "team-lead", position: 0 },
       { ...base, name: "deputy", args: [], role: "team-lead", position: 1 },
     ],
   });
   const one = sampleWorkspace({ id: "wsp-one-lead", sessions: [{ ...base, name: "boss", args: [], role: "team-lead", lead: true, position: 0 }] });
-  saveWorkspace(proj, two);
+  saveWorkspace(proj, twoCrowns);
+  saveWorkspace(proj, twoSubLeads);
   saveWorkspace(proj, one);
   let restored: SessionDef[] = [];
   const deps = fakeDeps(proj);
   deps.service.restoreFrom = (sessions) => { restored = sessions; return []; };
   const svc = workspaceService(deps);
 
-  await expect(svc.restore(two.id, "attended")).resolves.toEqual({ ok: true, demotedTeamLeads: ["deputy"] });
-  expect(restored.map((s) => [s.name, s.role, s.lead])).toEqual([["boss", "team-lead", true], ["deputy", undefined, undefined]]);
+  await expect(svc.restore(twoCrowns.id, "attended")).resolves.toEqual({ ok: true, demotedTeamLeads: ["deputy"] });
+  expect(restored.map((s) => [s.name, s.role, s.lead])).toEqual([["boss", "team-lead", true], ["deputy", "team-lead", undefined]]);
+
+  await expect(svc.restore(twoSubLeads.id, "attended")).resolves.toEqual({ ok: true });
+  expect(restored.map((s) => [s.name, s.role, s.lead])).toEqual([["boss", "team-lead", undefined], ["deputy", "team-lead", undefined]]);
 
   await expect(svc.restore(one.id, "attended")).resolves.toEqual({ ok: true });
   expect(restored.map((s) => [s.name, s.role, s.lead])).toEqual([["boss", "team-lead", true]]);

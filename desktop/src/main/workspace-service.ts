@@ -41,7 +41,7 @@ import {
   type Lock
 } from './workspace-lock'
 import type { LockConnection, LockOpener } from './file-lock'
-import { demoteExtraTeamLeads, fromWorkspaceSessions, joinArgs, toWorkspaceSessions } from './workspace-session-map'
+import { demoteExtraLeads, fromWorkspaceSessions, joinArgs, toWorkspaceSessions } from './workspace-session-map'
 import { logWarn, reportError } from './log'
 import { effectiveAgent, isTeamLeadAgent } from './team-lead-bridge'
 
@@ -483,7 +483,7 @@ export class WorkspaceService {
         if (gate === 'unattended') return { ok: false, reason: 'unattended' }
       }
       const defs = fromWorkspaceSessions(ws.sessions)
-      const demotedTeamLeads = demoteExtraTeamLeads(defs)
+      const demotedTeamLeads = demoteExtraLeads(defs)
       this.restoreModPreparation?.abort()
       const controller = new AbortController()
       this.restoreModPreparation = controller
@@ -545,7 +545,7 @@ export class WorkspaceService {
         )
       }
       if (demotedTeamLeads.length === 0) return { ok: true }
-      logWarn('workspace', `restore(${id}) kept the first team-lead only; demoted: ${demotedTeamLeads.join(', ')}`)
+      logWarn('workspace', `restore(${id}) kept the first main lead only; demoted: ${demotedTeamLeads.join(', ')}`)
       return { ok: true, demotedTeamLeads }
     } finally {
       if (this.activeRestoreOperation === operation) {
