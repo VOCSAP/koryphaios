@@ -16,9 +16,12 @@ import {
   newWorkspaceId,
   saveWorkspace,
   selectPrunableWorkspaces,
+  WORKSPACE_SESSION_FIELD_CLASS,
+  workspaceApproval,
   workspaceHasShellFields,
   workspacesDir,
 } from "../desktop/src/main/workspace-store.ts";
+import { TEMPLATE_SESSION_FIELD_CLASS } from "../desktop/src/shared/template.ts";
 import {
   acquireLock,
   BOOT_RECLAIM_TOLERANCE_MS,
@@ -148,6 +151,138 @@ test("workspaceHasShellFields fires on a bridge marker alone, with empty args", 
   // does not recognize still asked for a launch binary of its own.
   expect(workspaceHasShellFields(bridged("something-else"))).toBe(true);
   expect(workspaceHasShellFields(bridged(42))).toBe(true);
+});
+
+const lone = (extra: Record<string, unknown>): Pick<Workspace, "sessions"> => ({
+  sessions: [
+    { claudeSessionId: "sid-1", name: "s", cwd: "/p", args: [], color: "#000", position: 0, ...extra },
+  ] as Workspace["sessions"],
+});
+
+test("a session whose only non-empty approval field is lead, disallowedTools or clodexContextTokens gates the restore", () => {
+  for (const extra of [{ lead: true }, { disallowedTools: ["Bash"] }, { clodexContextTokens: 300_000 }]) {
+    expect(workspaceHasShellFields(lone(extra)), `${JSON.stringify(extra)} has to ask the operator`).toBe(true);
+  }
+});
+
+test("name, color, role and position alone open no dialog, and an empty approval field does not gate", () => {
+  expect(workspaceHasShellFields(lone({ name: "boss", color: "#fff", role: "team-lead", position: 3 }))).toBe(false);
+  expect(workspaceHasShellFields(lone({ lead: false, disallowedTools: [] }))).toBe(false);
+});
+
+test("WorkspaceService.restore(): a workspace whose only approval field is lead waits for the operator", async () => {
+  const proj = freshProject();
+  ensureWorkspacesDir(freshRoot(proj));
+  const base = sampleWorkspace().sessions[0]!;
+  const crowned = sampleWorkspace({ id: "wsp-lead-only", sessions: [{ ...base, cwd: proj, args: [], lead: true }] });
+  const plain = sampleWorkspace({ id: "wsp-role-only", sessions: [{ ...base, cwd: proj, args: [], role: "reviewer" }] });
+  saveFresh(proj, crowned);
+  saveFresh(proj, plain);
+
+  for (const [verdict, reason] of [["declined", "shell-declined"], ["unattended", "unattended"]] as const) {
+    let asked = 0;
+    let effects = 0;
+    const deps = fakeDeps(proj, { confirmShellFields: async () => { asked++; return verdict; } });
+    deps.service.restoreFrom = () => { effects++; return []; };
+    await expect(workspaceService(deps).restore(crowned.id, "attended"), verdict).resolves.toEqual({ ok: false, reason });
+    expect(asked, `${verdict}: the lead has to be put to the operator`).toBe(1);
+    expect(effects, `${verdict}: nothing is restored`).toBe(0);
+  }
+
+  let asked = 0;
+  const deps = fakeDeps(proj, { confirmShellFields: async () => { asked++; return "declined"; } });
+  await expect(workspaceService(deps).restore(plain.id, "attended")).resolves.toEqual({ ok: true });
+  expect(asked, "a role alone opens no dialog").toBe(0);
+});
+
+const wsClassed = (wanted: string) =>
+  Object.entries(WORKSPACE_SESSION_FIELD_CLASS)
+    .filter(([, cls]) => cls === wanted)
+    .map(([field]) => field)
+    .sort();
+
+test("the free fields are name, color, role and position, cwd keeps its own gate and claudeSessionId is validated at parse", () => {
+  expect(wsClassed("free"), "the free set is the operator's decision: every other field asks for approval").toEqual([
+    "color",
+    "name",
+    "position",
+    "role",
+  ]);
+  expect(wsClassed("own-gate")).toEqual(["cwd"]);
+  expect(wsClassed("validated")).toEqual(["claudeSessionId"]);
+  expect(wsClassed("approval")).toEqual(["args", "bridge", "clodexContextTokens", "disallowedTools", "lead"]);
+});
+
+test("a field a workspace session shares with a template has the template's class", () => {
+  const shared = Object.keys(WORKSPACE_SESSION_FIELD_CLASS).filter((field) => field in TEMPLATE_SESSION_FIELD_CLASS);
+  expect(shared.sort()).toEqual(["args", "bridge", "clodexContextTokens", "color", "disallowedTools", "lead", "name", "role"]);
+  for (const field of shared) {
+    expect(
+      WORKSPACE_SESSION_FIELD_CLASS[field as keyof typeof WORKSPACE_SESSION_FIELD_CLASS],
+      `${field} is classed apart from the template`,
+    ).toBe(TEMPLATE_SESSION_FIELD_CLASS[field as keyof typeof TEMPLATE_SESSION_FIELD_CLASS]);
+  }
+});
+
+const WS_APPROVAL_SAMPLES: Record<string, { value: unknown; shown: string }> = {
+  args: { value: ["--flag-x"], shown: "--flag-x" },
+  bridge: { value: "clodex", shown: "[clodex]" },
+  clodexContextTokens: { value: 300_000, shown: "300000" },
+  lead: { value: true, shown: "lead" },
+  disallowedTools: { value: ["Bash"], shown: "Bash" },
+};
+
+test("every approval field has a sample in this file, so the loop below covers it", () => {
+  expect(Object.keys(WS_APPROVAL_SAMPLES).sort()).toEqual(wsClassed("approval"));
+});
+
+for (const [field, { value, shown }] of Object.entries(WS_APPROVAL_SAMPLES)) {
+  test(`${field} alone gates the restore, changes the approved payload and is shown to the operator`, () => {
+    const withField = lone({ [field]: value });
+    expect(workspaceHasShellFields(withField), `${field} has to ask the operator`).toBe(true);
+    expect(JSON.stringify(workspaceApproval(withField).hashPayload), `${field} has to be in the approved payload`).not.toBe(
+      JSON.stringify(workspaceApproval(lone({})).hashPayload),
+    );
+    expect(workspaceApproval(withField).previewLines.join("\n"), `${field} has to be shown`).toContain(shown);
+  });
+}
+
+test("a workspace that carries only args and a bridge keeps the approved payload and the preview it always had", () => {
+  const hash = (extra: Record<string, unknown>) => JSON.stringify(workspaceApproval(lone(extra)).hashPayload);
+  expect(hash({ args: ["--model", "opus"] })).toBe('[{"args":"--model opus"}]');
+  expect(hash({ bridge: "clodex" })).toBe('[{"args":"","bridge":"clodex"}]');
+  expect(hash({ args: ["--a"], bridge: "clodex" })).toBe('[{"args":"--a","bridge":"clodex"}]');
+  expect(hash({})).toBe('[{"args":""}]');
+  expect(workspaceApproval(lone({ args: ["--model", "opus"] })).previewLines).toEqual(["s: --model opus"]);
+  expect(workspaceApproval(lone({ bridge: "clodex" })).previewLines).toEqual(["s: [clodex]"]);
+});
+
+test("a resume leaves the approved payload alone: claudeSessionId, position, name, color and role are not in it", () => {
+  const before = lone({ args: ["--agent", "dev"], lead: true });
+  const after = {
+    sessions: [
+      { ...before.sessions[0]!, claudeSessionId: "a-forked-id", position: 7, name: "renamed", color: "#fff", role: "reviewer" },
+    ],
+  };
+  expect(JSON.stringify(workspaceApproval(after).hashPayload)).toBe(JSON.stringify(workspaceApproval(before).hashPayload));
+});
+
+test("loadWorkspace refuses the whole file when a claudeSessionId is not a plain id", () => {
+  const proj = freshProject();
+  ensureWorkspacesDir(freshRoot(proj));
+  const load = (claudeSessionId: string, n: number) => {
+    const ws = sampleWorkspace({ id: `wsp_id_${n}` });
+    writeFileSync(
+      join(workspacesDir(proj, "koryphaios"), `${ws.id}.json`),
+      JSON.stringify({ ...ws, sessions: [{ ...ws.sessions[0]!, claudeSessionId }] }),
+      "utf8",
+    );
+    return loadWorkspace(fresh(proj, ws.id));
+  };
+  const hostile = ["../x", "a/b", "a\\b", 'a"b', "a$(x)", "a`x`", "a b", "..", "a..b", "a;b", "a'b"];
+  hostile.forEach((id, n) => expect(load(id, n), `${JSON.stringify(id)} has to be refused`).toBeNull());
+  const plain = ["0f8fad5b-d9cb-469f-a165-9f7a4a3b8c11", "", "sid-1", "wsp.id_1"];
+  plain.forEach((id, n) => expect(load(id, 100 + n), `${JSON.stringify(id)} has to load`).not.toBeNull());
 });
 
 test("loadWorkspace rejects a file whose session names a bridge this build does not know", () => {

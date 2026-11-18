@@ -80,7 +80,7 @@ import {
   type CallerAttendance,
   type WorkspaceApprovalGateResult
 } from './workspace-service'
-import type { WorkspaceSession } from './workspace-store'
+import { workspaceApproval, type WorkspaceSession } from './workspace-store'
 import { credentialFailureReporter } from '../shared/workspace-restore-outcome'
 import { RESCOPE_WAIT_MS } from './scope-adoption'
 import {
@@ -2892,22 +2892,18 @@ const confirmWorkspaceShellFields = async (
   ws: { id: string; name: string; sessions: WorkspaceSession[] },
   attendance: CallerAttendance
 ): Promise<WorkspaceApprovalGateResult> => {
+  const approval = workspaceApproval(ws)
   const approvalOpts: ShellFieldApprovalOpts = {
     keyPart: 'workspace',
     basename: ws.name && ws.name.trim() ? ws.name : ws.id,
-    hashPayload: ws.sessions.map((s) => ({
-      args: s.args.join(' '),
-      ...(s.bridge ? { bridge: s.bridge } : {})
-    })),
-    previewLines: ws.sessions
-      .filter((s) => s.args.length > 0 || s.bridge)
-      .map((s) => `${s.name}: ${[s.bridge && `[${s.bridge}]`, ...s.args].filter(Boolean).join(' ')}`),
+    hashPayload: approval.hashPayload,
+    previewLines: approval.previewLines,
     labelEn: 'Workspace',
     labelFr: 'Espace de travail',
     messageEn:
-      'This project workspace runs custom launch args or a custom launch binary, executed in a shell.',
+      'This project workspace carries settings that need your approval, including launch args or a launch binary, lead, tools, context size.',
     messageFr:
-      'Cet espace de travail (config du projet) exécute des arguments ou un binaire de lancement personnalisés dans un shell.',
+      'Cet espace de travail (config du projet) porte des réglages qui demandent ton accord, notamment : arguments ou binaire de lancement, lead, outils, taille de contexte.',
     buttonsEn: ['Restore this workspace', 'Refuse'],
     buttonsFr: ['Restaurer cet espace de travail', 'Refuser']
   }

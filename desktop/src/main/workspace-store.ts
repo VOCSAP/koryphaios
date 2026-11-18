@@ -4,9 +4,9 @@ import { randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join, sep } from 'node:path'
 // Relative import (not the @shared alias), like workspace-session-map.ts: this
-// pulls in only the pure predicate, keeping this module resolvable under
+// pulls in only pure helpers, keeping this module resolvable under
 // `bun test` without an alias tsconfig.
-import { sessionsHaveShellFields } from '../shared/template'
+import { isPresent, TEMPLATE_SESSION_FIELD_CLASS } from '../shared/template'
 import { isToolNameList } from '../shared/tool-names'
 import { isValidClodexContextInput } from '../shared/clodex-context'
 // worktree-service.ts is itself node-builtins-only (no electron/@shared), so
@@ -125,11 +125,15 @@ export function newWorkspaceId(): string {
  * string instead of string[]) would sail through and only fail later, deep
  * in `joinArgs`/`workspace-session-map.ts`.
  */
+function isPlainSessionId(value: unknown): boolean {
+  return typeof value === 'string' && /^[\w.-]*$/.test(value) && !value.includes('..')
+}
+
 function isWorkspaceSession(value: unknown): value is WorkspaceSession {
   if (typeof value !== 'object' || value === null) return false
   const s = value as Record<string, unknown>
   return (
-    typeof s.claudeSessionId === 'string' &&
+    isPlainSessionId(s.claudeSessionId) &&
     typeof s.name === 'string' &&
     typeof s.cwd === 'string' &&
     typeof s.color === 'string' &&
@@ -157,10 +161,60 @@ function isWorkspace(value: unknown): value is Workspace {
   )
 }
 
+export type WorkspaceFieldClass = 'free' | 'approval' | 'own-gate' | 'validated'
+
+export const WORKSPACE_SESSION_FIELD_CLASS = {
+  args: TEMPLATE_SESSION_FIELD_CLASS.args,
+  bridge: TEMPLATE_SESSION_FIELD_CLASS.bridge,
+  clodexContextTokens: TEMPLATE_SESSION_FIELD_CLASS.clodexContextTokens,
+  lead: TEMPLATE_SESSION_FIELD_CLASS.lead,
+  disallowedTools: TEMPLATE_SESSION_FIELD_CLASS.disallowedTools,
+  name: TEMPLATE_SESSION_FIELD_CLASS.name,
+  color: TEMPLATE_SESSION_FIELD_CLASS.color,
+  role: TEMPLATE_SESSION_FIELD_CLASS.role,
+  position: 'free',
+  cwd: 'own-gate',
+  claudeSessionId: 'validated'
+} as const satisfies Record<keyof WorkspaceSession, WorkspaceFieldClass>
+
+const APPROVAL_FIELDS = (Object.keys(WORKSPACE_SESSION_FIELD_CLASS) as (keyof WorkspaceSession)[]).filter(
+  (field) => WORKSPACE_SESSION_FIELD_CLASS[field] === 'approval'
+)
+
+function approvalValue(s: WorkspaceSession, field: keyof WorkspaceSession): unknown {
+  return field === 'args' ? s.args.join(' ') : s[field]
+}
+
 export function workspaceHasShellFields(ws: Pick<Workspace, 'sessions'>): boolean {
-  return sessionsHaveShellFields(
-    ws.sessions.map((s) => ({ args: s.args.join(' '), bridge: s.bridge }))
-  )
+  return ws.sessions.some((s) => APPROVAL_FIELDS.some((field) => isPresent(approvalValue(s, field))))
+}
+
+export function workspaceApproval(ws: Pick<Workspace, 'sessions'>): {
+  hashPayload: Array<Record<string, unknown>>
+  previewLines: string[]
+} {
+  return {
+    hashPayload: ws.sessions.map((s) => {
+      // args stays unconditional and bridge stays right after it to preserve existing approval hashes.
+      const entry: Record<string, unknown> = { args: s.args.join(' ') }
+      for (const field of APPROVAL_FIELDS) {
+        if (field !== 'args' && isPresent(approvalValue(s, field))) entry[field] = s[field]
+      }
+      return entry
+    }),
+    previewLines: ws.sessions.flatMap((s) => {
+      const lines: string[] = []
+      if (s.args.length > 0 || s.bridge) {
+        lines.push(`${s.name}: ${[s.bridge && `[${s.bridge}]`, ...s.args].filter(Boolean).join(' ')}`)
+      }
+      for (const field of APPROVAL_FIELDS) {
+        if (field === 'args' || field === 'bridge' || !isPresent(s[field])) continue
+        const value = s[field]
+        lines.push(`${s.name}: ${value === true ? field : `${field} ${Array.isArray(value) ? value.join(',') : String(value)}`}`)
+      }
+      return lines
+    })
+  }
 }
 
 /** True when `cwd` is `projectDir` itself or a path nested under it. */

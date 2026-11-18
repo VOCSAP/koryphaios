@@ -39,6 +39,7 @@ import {
   templateToInputs
 } from "../desktop/src/shared/template.ts";
 import { renderSpawnApprovalQuestion } from "../desktop/src/main/serve-approval-dialog.ts";
+import { workspaceApproval } from "../desktop/src/main/workspace-store.ts";
 import type { DeckControlSession as SessionRuntime } from "../desktop/src/main/deck-control.ts";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -3605,7 +3606,7 @@ test("unattended workspace restores do not open a dialog whether shell fields ar
   const source = readFileSync(INDEX_TS_PATH, "utf-8");
   let approved = false;
   const probe = unattendedApprovalProbe(() => approved);
-  const confirm = compileConfirmWorkspaceShellFields(source, probe.deps);
+  const confirm = compileConfirmWorkspaceShellFields(source, { ...probe.deps, workspaceApproval });
   const workspace = { id: "workspace-1", name: "workspace", sessions: [{ name: "dev", args: ["--danger"] }] };
 
   expect(await confirm(workspace, "unattended")).toBe("unattended");
@@ -3614,6 +3615,31 @@ test("unattended workspace restores do not open a dialog whether shell fields ar
   approved = true;
   expect(await confirm(workspace, "unattended")).toBe("approved");
   expect(probe.dialogOpens()).toBe(0);
+});
+
+test("confirmWorkspaceShellFields puts a lead, tools and a context size into the approved payload and the preview", async () => {
+  const captured: { hashPayload: unknown; previewLines: string[] }[] = [];
+  const confirm = compileConfirmWorkspaceShellFields(readFileSync(INDEX_TS_PATH, "utf-8"), {
+    ...unattendedApprovalProbe(() => false).deps,
+    refusesUnattendedApproval: () => false,
+    confirmShellFieldApproval: async (opts: { hashPayload: unknown; previewLines: string[] }) => {
+      captured.push(opts);
+      return true;
+    },
+    workspaceApproval
+  });
+  const workspace = {
+    id: "workspace-1",
+    name: "workspace",
+    sessions: [{ name: "boss", args: [], bridge: "clodex", clodexContextTokens: 300_000, lead: true, disallowedTools: ["Bash"] }]
+  };
+
+  expect(await confirm(workspace, "attended")).toBe("approved");
+  expect(captured[0]!.hashPayload, "the approved payload has to carry every approval field").toEqual([
+    { args: "", bridge: "clodex", clodexContextTokens: 300_000, lead: true, disallowedTools: ["Bash"] }
+  ]);
+  const shown = captured[0]!.previewLines.join("\n");
+  for (const wanted of ["lead", "Bash", "300000"]) expect(shown, `${wanted} has to be shown to the operator`).toContain(wanted);
 });
 
 const CONFIRM_SPAWN_SHELL_FIELDS_SIGNATURE = /const confirmSpawnShellFields = async \(entry, attendance\) => \{/g;

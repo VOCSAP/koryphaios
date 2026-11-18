@@ -222,7 +222,7 @@ const APPROVAL_FIELDS = (Object.keys(TEMPLATE_SESSION_FIELD_CLASS) as (keyof Tem
 )
 
 /** Unexpected types must gate because template sessions originate in untrusted files. */
-function isPresent(value: unknown): boolean {
+export function isPresent(value: unknown): boolean {
   if (value === undefined || value === false) return false
   if (typeof value === 'string') return value.trim() !== ''
   if (Array.isArray(value)) return value.length > 0
