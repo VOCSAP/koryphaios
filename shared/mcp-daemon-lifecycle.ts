@@ -335,9 +335,9 @@ export interface RunDaemonOptions {
   maxSessions?: number;
   brokers?: BrokerEnsurer;
   /**
-   * The local broker to have running before the first listen: on Windows a process spawned while the daemon
-   * listens inherits the listening socket and keeps the port bound after the daemon exits. The wait is bounded
-   * by BROKER_FIRST_WAIT_MS, and only the spawn has to happen before the listen.
+   * The local broker to have running before the first listen, so a runtime that lets a child inherit handles
+   * cannot keep the daemon port bound. The wait is bounded by BROKER_FIRST_WAIT_MS, and only the spawn has to
+   * happen before the listen.
    */
   brokerBeforeListen?: BrokerEnsureRequest;
   settings?: DaemonSessionSettings;

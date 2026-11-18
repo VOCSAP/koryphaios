@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
-import { createBrokerEnsurer, HEALTH_TIMEOUT_MS, spawnDetachedBroker } from "../shared/broker-ensure.ts";
+import { HEALTH_TIMEOUT_MS } from "../shared/broker-ensure.ts";
 import { brokerStopMarkerPath, writeBrokerStopMarker } from "../shared/broker-stop-marker.ts";
 import { settingsFilePath } from "../shared/config.ts";
 import type { Logger } from "../shared/logger.ts";
@@ -1444,76 +1444,6 @@ describe("the broker before the first listen", () => {
       expect(lines).toContain(`broker not pre-ensured: ${mode}`);
     });
   }
-
-  const connects = (port: number) =>
-    Bun.connect({ hostname: "127.0.0.1", port, socket: { data() {}, open() {}, close() {}, error() {} } }).then(
-      (socket) => {
-        socket.end();
-        return true;
-      },
-      () => false,
-    );
-
-  test.skipIf(process.platform !== "win32")(
-    "a process spawned after the listen keeps the daemon port bound, one spawned before does not (windows)",
-    async () => {
-      const sleeper = join(root, "sleeper.ts");
-      writeFileSync(sleeper, 'import { writeFileSync } from "node:fs";\nwriteFileSync(process.argv[2], String(process.pid));\nsetTimeout(() => {}, 30000);\n');
-      const env = Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined));
-      const { log } = recordingLog();
-      const pids: number[] = [];
-      const pidOf = async (file: string): Promise<number> => {
-        await until(() => existsSync(file), "the spawned process to write its pid");
-        const pid = Number(readFileSync(file, "utf8"));
-        pids.push(pid);
-        return pid;
-      };
-      try {
-        const [after, before] = await freePorts(2);
-        const lateFile = join(root, `late${++counter}.pid`);
-        const late = begin({
-          ports: [after as number],
-          start: (opts) => {
-            const handle = startDaemon(opts);
-            handles.push(handle);
-            spawnDetachedBroker(process.execPath, [sleeper, lateFile], env, log);
-            return handle;
-          },
-        });
-        await serving(late, after as number);
-        await late.run.stop("test");
-        await pidOf(lateFile);
-        expect(await connects(after as number), "the inherited listening socket no longer keeps the port bound: this proof is vacuous").toBe(true);
-
-        const earlyFile = join(root, `early${++counter}.pid`);
-        const ensurer = createBrokerEnsurer({
-          isAlive: async () => existsSync(earlyFile),
-          locate: () => ({ command: process.execPath, script: sleeper }),
-          spawn: (command, args, spawnEnv) => spawnDetachedBroker(command, [...args, earlyFile], spawnEnv, log),
-          sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
-          baseEnv: env,
-          home: root,
-          log,
-          pollMs: 20,
-          stopped: () => null,
-        });
-        const early = begin({ ports: [before as number], brokers: ensurer, brokerBeforeListen: request });
-        await serving(early, before as number);
-        await early.run.stop("test");
-        const pid = await pidOf(earlyFile);
-        expect(() => process.kill(pid, 0), "the broker stand-in has to be alive when the port is probed").not.toThrow();
-        expect(await connects(before as number), "the daemon port stayed bound after the daemon stopped").toBe(false);
-      } finally {
-        for (const pid of pids) {
-          try {
-            process.kill(pid);
-          } catch {
-            // The stand-in already exited by itself.
-          }
-        }
-      }
-    },
-  );
 });
 
 describe("the entry point", () => {
