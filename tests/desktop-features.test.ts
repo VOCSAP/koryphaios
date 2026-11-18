@@ -70,6 +70,35 @@ test("handoff follows normal precedence: local wins over global", () => {
   expect(resolveFeatures(proj, env).handoff).toBe("kleos");
 });
 
+const legacyConfigPath = (proj: string): string => join(proj, ".claude", "claude-peers", "config.json");
+
+test("a project config under .claude/claude-peers keeps the same limits: 'on' enables nothing, 'off' restricts", () => {
+  const enabling = tmpProject();
+  writeJson(legacyConfigPath(enabling), { features: { magicCompact: "on" } });
+  expect(resolveFeatures(enabling, envWithGlobal().env).magicCompact).toBe(DEFAULT_FEATURES.magicCompact);
+  const { env, dir } = envWithGlobal();
+  writeJson(join(dir, "config.json"), { features: { magicCompact: "on" } });
+  const restricting = tmpProject();
+  writeJson(legacyConfigPath(restricting), { features: { magicCompact: "off" } });
+  expect(resolveFeatures(restricting, env).magicCompact).toBe("off");
+});
+
+test("a project config under .claude/koryphaios cannot enable magicCompact either", () => {
+  const { env } = envWithGlobal();
+  const proj = tmpProject();
+  writeJson(localConfigPath(proj), { features: { magicCompact: "on" } });
+  expect(resolveFeatures(proj, env).magicCompact).toBe(DEFAULT_FEATURES.magicCompact);
+});
+
+test("when both project configs exist only the one under .claude/koryphaios speaks", () => {
+  const { env, dir } = envWithGlobal();
+  writeJson(join(dir, "config.json"), { features: { magicCompact: "on" } });
+  const proj = tmpProject();
+  writeJson(localConfigPath(proj), { features: { handoff: "kleos" } });
+  writeJson(legacyConfigPath(proj), { features: { magicCompact: "off", handoff: "off" } });
+  expect(resolveFeatures(proj, env)).toEqual({ magicCompact: "on", handoff: "kleos" });
+});
+
 test("malformed flag values are ignored (fall back to defaults)", () => {
   const { env, dir } = envWithGlobal();
   writeJson(join(dir, "config.json"), { features: { magicCompact: "sometimes", handoff: 5 } });

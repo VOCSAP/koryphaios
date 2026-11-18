@@ -1,15 +1,13 @@
-// Resolves the command the Deck runs in each session PTY, plus optional launch
-// presets. First-wins precedence (DESIGN / PLAN §5):
-//   1. project-local <projectDir>/.claude/claude-peers/config.json
-//   2. global %APPDATA%\koryphaios\config.json  (XDG equiv on Unix)
-//   3. built-in default
-//
-// Pure node builtins only (no electron) so it is unit-testable and the global
-// path is derived from env rather than app.getPath.
-
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir, platform } from 'node:os'
 import { dirname, join } from 'node:path'
+import {
+  isAbsentFileError,
+  projectCreationPath,
+  selectProjectFile,
+  traceInvalidFileOnce,
+  type ProjectFileReport
+} from './project-files'
 
 export const DEFAULT_LAUNCH_COMMAND =
   'claude --dangerously-load-development-channels server:claude-peers'
@@ -98,7 +96,7 @@ export function globalConfigPath(env: NodeJS.ProcessEnv = process.env): string {
 }
 
 export function localConfigPath(projectDir: string): string {
-  return join(projectDir, '.claude', 'claude-peers', 'config.json')
+  return projectCreationPath(projectDir, 'config.json')
 }
 
 function isPreset(p: unknown): p is LaunchPreset {
@@ -120,12 +118,14 @@ function isModel(m: unknown): m is ModelOption {
   )
 }
 
-/** Read + validate one config file. Missing or malformed => null (treated as absent). */
-function readConfigFile(file: string): Partial<LaunchConfig> | null {
+export function readConfigFile(
+  file: string,
+  report?: ProjectFileReport,
+  readFile: (file: string, encoding: 'utf-8') => string = readFileSync
+): Partial<LaunchConfig> | null {
   try {
-    if (!existsSync(file)) return null
-    const raw = JSON.parse(readFileSync(file, 'utf-8')) as Record<string, unknown>
-    if (!raw || typeof raw !== 'object') return null
+    const raw = JSON.parse(readFile(file, 'utf-8')) as Record<string, unknown>
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('the config is not a JSON object')
     const out: Partial<LaunchConfig> = {}
     if (typeof raw.launchCommand === 'string' && raw.launchCommand.trim()) {
       out.launchCommand = raw.launchCommand.trim()
@@ -149,35 +149,39 @@ function readConfigFile(file: string): Partial<LaunchConfig> | null {
       if (Object.keys(feats).length > 0) out.features = feats
     }
     return out
-  } catch {
+  } catch (error) {
+    if (!isAbsentFileError(error)) traceInvalidFileOnce(file, error, report)
     return null
   }
 }
 
+function readProjectConfig(projectDir: string, report?: ProjectFileReport): Partial<LaunchConfig> | null {
+  const selected = selectProjectFile(projectDir, 'config.json')
+  return selected ? readConfigFile(selected.path, report) : null
+}
+
 export function resolveLaunchConfig(
   projectDir: string,
-  env: NodeJS.ProcessEnv = process.env
+  env: NodeJS.ProcessEnv = process.env,
+  report?: ProjectFileReport
 ): LaunchConfig {
   const merged: LaunchConfig = {
     launchCommand: DEFAULT_LAUNCH_COMMAND,
     presets: [],
     models: DEFAULT_MODELS
   }
-  // global first, then local (local wins).
-  for (const src of [readConfigFile(globalConfigPath(env)), readConfigFile(localConfigPath(projectDir))]) {
+  for (const src of [readConfigFile(globalConfigPath(env), report), readProjectConfig(projectDir, report)]) {
     if (!src) continue
     if (src.launchCommand) merged.launchCommand = src.launchCommand
     if (src.presets) merged.presets = src.presets
-    // Only override the default model list when the file supplies a non-empty one.
     if (src.models && src.models.length > 0) merged.models = src.models
     if (src.worktreeInit) merged.worktreeInit = src.worktreeInit
   }
   return merged
 }
 
-/** The launchCommand a PROJECT config supplies, or null (PLAN C19 gating). */
-export function projectLaunchCommand(projectDir: string): string | null {
-  return readConfigFile(localConfigPath(projectDir))?.launchCommand ?? null
+export function projectLaunchCommand(projectDir: string, report?: ProjectFileReport): string | null {
+  return readProjectConfig(projectDir, report)?.launchCommand ?? null
 }
 
 /** The launchCommand ignoring any project config: global file, else default. */
@@ -185,14 +189,8 @@ export function globalLaunchCommand(env: NodeJS.ProcessEnv = process.env): strin
   return readConfigFile(globalConfigPath(env))?.launchCommand ?? DEFAULT_LAUNCH_COMMAND
 }
 
-/**
- * The worktreeInit hook a PROJECT config supplies, or null (B5 gating). A
- * project-sourced worktreeInit runs through a shell on worktree creation, so —
- * exactly like `projectLaunchCommand` — it must pass the one-time C19 operator
- * approval before it is honored.
- */
-export function projectWorktreeInit(projectDir: string): string | null {
-  return readConfigFile(localConfigPath(projectDir))?.worktreeInit ?? null
+export function projectWorktreeInit(projectDir: string, report?: ProjectFileReport): string | null {
+  return readProjectConfig(projectDir, report)?.worktreeInit ?? null
 }
 
 /** The worktreeInit ignoring any project config: global file, else undefined. */
@@ -200,44 +198,21 @@ export function globalWorktreeInit(env: NodeJS.ProcessEnv = process.env): string
   return readConfigFile(globalConfigPath(env))?.worktreeInit
 }
 
-/**
- * Resolve the effective per-machine feature flags (CT3). Trust rules differ per
- * flag:
- *  - `handoff` only shapes advisory briefing text (never reaches a shell/PTY),
- *    so it follows normal precedence: a project-local value wins over global.
- *  - `magicCompact` gates the Deck typing a command into an agent's terminal, so
- *    it is decided by the GLOBAL config only; a project-local (clonable, hence
- *    hostile) value may only RESTRICT it to 'off', never enable it. This mirrors
- *    the launchCommand / worktreeInit gating (project config can restrict, not
- *    grant, shell-reaching behavior).
- */
+/** magicCompact types into an agent's terminal, so a project config (clonable, hostile) may only turn it off. */
 export function resolveFeatures(
   projectDir: string,
-  env: NodeJS.ProcessEnv = process.env
+  env: NodeJS.ProcessEnv = process.env,
+  report?: ProjectFileReport
 ): FeatureFlags {
-  const global = readConfigFile(globalConfigPath(env))?.features
-  const local = readConfigFile(localConfigPath(projectDir))?.features
+  const global = readConfigFile(globalConfigPath(env), report)?.features
+  const local = readProjectConfig(projectDir, report)?.features
 
   const handoff = local?.handoff ?? global?.handoff ?? DEFAULT_FEATURES.handoff
 
   let magicCompact = global?.magicCompact ?? DEFAULT_FEATURES.magicCompact
-  if (local?.magicCompact === 'off') magicCompact = 'off' // local may only restrict
+  if (local?.magicCompact === 'off') magicCompact = 'off'
 
   return { magicCompact, handoff }
-}
-
-/** Create the project-local config on demand (UI action). No-op if it exists. */
-export function createLocalConfig(projectDir: string): string {
-  const file = localConfigPath(projectDir)
-  if (existsSync(file)) return file
-  mkdirSync(dirname(file), { recursive: true })
-  const template: LaunchConfig = {
-    launchCommand: DEFAULT_LAUNCH_COMMAND,
-    presets: [],
-    models: DEFAULT_MODELS
-  }
-  writeFileSync(file, JSON.stringify(template, null, 2), 'utf-8')
-  return file
 }
 
 /** Persist the global launch config (Settings dialog, M5). */

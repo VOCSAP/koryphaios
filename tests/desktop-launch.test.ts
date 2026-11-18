@@ -9,7 +9,9 @@ import {
   DEFAULT_LAUNCH_COMMAND,
   DEFAULT_MODELS,
   localConfigPath,
+  projectLaunchCommand,
   projectWorktreeInit,
+  readConfigFile,
   globalWorktreeInit,
   globalConfigDir
 } from "../desktop/src/main/launch-config.ts";
@@ -59,8 +61,31 @@ afterEach(() => {
 
 function writeLocalConfig(projectDir: string, obj: unknown): void {
   const file = localConfigPath(projectDir);
-  mkdirSync(join(projectDir, ".claude", "claude-peers"), { recursive: true });
+  mkdirSync(dirname(file), { recursive: true });
   writeFileSync(file, typeof obj === "string" ? obj : JSON.stringify(obj), "utf-8");
+}
+
+function writeLegacyConfig(projectDir: string, obj: unknown): void {
+  const file = join(projectDir, ".claude", "claude-peers", "config.json");
+  mkdirSync(dirname(file), { recursive: true });
+  writeFileSync(file, typeof obj === "string" ? obj : JSON.stringify(obj), "utf-8");
+}
+
+function collectReports(): {
+  reports: string[];
+  errors: unknown[];
+  report: (scope: string, message: string, error?: unknown) => void;
+} {
+  const reports: string[] = [];
+  const errors: unknown[] = [];
+  return {
+    reports,
+    errors,
+    report: (_scope, message, error) => {
+      reports.push(message);
+      errors.push(error);
+    }
+  };
 }
 
 // Point the global config at an (empty) temp dir so the developer's real global
@@ -108,6 +133,114 @@ test("malformed JSON is ignored (falls back to default)", () => {
   const proj = tmpProject();
   writeLocalConfig(proj, "{ this is not json ");
   expect(resolveLaunchConfig(proj, emptyGlobalEnv()).launchCommand).toBe(DEFAULT_LAUNCH_COMMAND);
+});
+
+test("a config under .claude/claude-peers is still read when .claude/koryphaios has none", () => {
+  const proj = tmpProject();
+  writeLegacyConfig(proj, { launchCommand: "claude old-folder", worktreeInit: "bun install" });
+  expect(resolveLaunchConfig(proj, emptyGlobalEnv()).launchCommand).toBe("claude old-folder");
+  expect(projectLaunchCommand(proj)).toBe("claude old-folder");
+  expect(projectWorktreeInit(proj)).toBe("bun install");
+});
+
+test("the config under .claude/koryphaios wins over the one under .claude/claude-peers", () => {
+  const proj = tmpProject();
+  writeLegacyConfig(proj, { launchCommand: "claude old-folder", worktreeInit: "old init" });
+  writeLocalConfig(proj, { launchCommand: "claude new-folder", worktreeInit: "new init" });
+  expect(resolveLaunchConfig(proj, emptyGlobalEnv()).launchCommand).toBe("claude new-folder");
+  expect(projectLaunchCommand(proj)).toBe("claude new-folder");
+  expect(projectWorktreeInit(proj)).toBe("new init");
+});
+
+test("the two project configs are never merged: the elected file alone speaks", () => {
+  const proj = tmpProject();
+  writeLegacyConfig(proj, { launchCommand: "claude old-folder", worktreeInit: "old init" });
+  writeLocalConfig(proj, { presets: [{ label: "New", args: "--x" }] });
+  const cfg = resolveLaunchConfig(proj, emptyGlobalEnv());
+  expect(cfg.presets).toHaveLength(1);
+  expect(cfg.launchCommand).toBe(DEFAULT_LAUNCH_COMMAND);
+  expect(projectLaunchCommand(proj)).toBeNull();
+  expect(projectWorktreeInit(proj)).toBeNull();
+});
+
+test("a .claude/koryphaios folder without a config does not hide the config of .claude/claude-peers", () => {
+  const proj = tmpProject();
+  mkdirSync(join(proj, ".claude", "koryphaios", "workspaces"), { recursive: true });
+  writeLegacyConfig(proj, { launchCommand: "claude old-folder" });
+  expect(resolveLaunchConfig(proj, emptyGlobalEnv()).launchCommand).toBe("claude old-folder");
+});
+
+test("a malformed config under .claude/koryphaios hides a valid one under .claude/claude-peers and is traced once", () => {
+  const proj = tmpProject();
+  writeLegacyConfig(proj, { launchCommand: "claude old-folder", worktreeInit: "old init" });
+  writeLocalConfig(proj, "{ this is not json ");
+  const { reports, report } = collectReports();
+  const env = emptyGlobalEnv();
+  expect(resolveLaunchConfig(proj, env, report).launchCommand).toBe(DEFAULT_LAUNCH_COMMAND);
+  expect(projectLaunchCommand(proj, report)).toBeNull();
+  expect(projectWorktreeInit(proj, report)).toBeNull();
+  expect(reports, "one trace for the unchanged invalid file, naming it").toHaveLength(1);
+  expect(reports[0]).toContain(localConfigPath(proj));
+});
+
+test("a config that is valid JSON but not an object is invalid and traced", () => {
+  const proj = tmpProject();
+  writeLocalConfig(proj, "42");
+  const { reports, report } = collectReports();
+  expect(resolveLaunchConfig(proj, emptyGlobalEnv(), report).launchCommand).toBe(DEFAULT_LAUNCH_COMMAND);
+  expect(reports).toHaveLength(1);
+});
+
+test("a config whose root is a JSON array is invalid and traced", () => {
+  const proj = tmpProject();
+  writeLocalConfig(proj, "[]");
+  const { reports, report } = collectReports();
+  expect(resolveLaunchConfig(proj, emptyGlobalEnv(), report).launchCommand).toBe(DEFAULT_LAUNCH_COMMAND);
+  expect(reports).toHaveLength(1);
+});
+
+test("a config that cannot be read for a reason other than absence is traced and hides the old folder's config", () => {
+  const proj = tmpProject();
+  writeLegacyConfig(proj, { launchCommand: "claude old-folder" });
+  mkdirSync(localConfigPath(proj), { recursive: true });
+  const { reports, errors, report } = collectReports();
+  expect(resolveLaunchConfig(proj, emptyGlobalEnv(), report).launchCommand).toBe(DEFAULT_LAUNCH_COMMAND);
+  expect(reports).toHaveLength(1);
+  expect((errors[0] as NodeJS.ErrnoException).code).toBe("EISDIR");
+});
+
+test("a read error other than absence is traced for a path the disk does not hold: the file is read, not pre-checked", () => {
+  const missing = join(tmpProject(), "config.json");
+  const failure = Object.assign(new Error("access denied"), { code: "EACCES" });
+  const calls: string[] = [];
+  const { reports, errors, report } = collectReports();
+  const read = (file: string): string => {
+    calls.push(file);
+    throw failure;
+  };
+  expect(readConfigFile(missing, report, read)).toBeNull();
+  expect(calls, "the reader is called for the path").toEqual([missing]);
+  expect(reports).toHaveLength(1);
+  expect(errors[0]).toBe(failure);
+});
+
+test("a reader that fails with ENOENT is an absence and is not traced", () => {
+  const missing = join(tmpProject(), "config.json");
+  const calls: string[] = [];
+  const { reports, report } = collectReports();
+  const read = (file: string): string => {
+    calls.push(file);
+    throw Object.assign(new Error("no such file"), { code: "ENOENT" });
+  };
+  expect(readConfigFile(missing, report, read)).toBeNull();
+  expect(calls).toEqual([missing]);
+  expect(reports).toEqual([]);
+});
+
+test("an absent config is not traced", () => {
+  const { reports, report } = collectReports();
+  resolveLaunchConfig(tmpProject(), emptyGlobalEnv(), report);
+  expect(reports).toEqual([]);
 });
 
 test("models default to DEFAULT_MODELS, a local non-empty list overrides", () => {
