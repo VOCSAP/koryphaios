@@ -690,3 +690,36 @@ test("import: a duplicate id inside one file is judged against the first occurre
   ]);
   expect(await storedDate(id)).toBe(OTHER_DATE);
 });
+
+test("import: a terminal item never holds a rank, whether the file carries one or the stored row did", async () => {
+  async function rankedCard(title: string): Promise<RoadmapItem> {
+    const res = await post<UpsertRes>(`${broker.url}/roadmap/upsert`, {
+      project_key: PK,
+      by: "rank-author",
+      title,
+      queue: 3,
+    });
+    expect(res.status).toBe(200);
+    expect(res.body.item.queue, "non-vacuity: the stored row starts ranked").toBe(3);
+    return res.body.item;
+  }
+  const kept = await rankedCard("ranked, re-imported as planned");
+  const closed = await rankedCard("ranked, re-imported as done");
+  const born = crypto.randomUUID();
+
+  await importRaw([
+    importItem(kept, { title: kept.title }),
+    importItem(closed, { title: closed.title, status: "done" }),
+    { id: born, kind: "feature", title: "born done with a rank", status: "done", queue: 5 },
+  ]);
+  const stored = new Map((await listAll()).map((i) => [i.id, i.queue]));
+  expect(stored.get(kept.id), "negative control: a non-terminal re-import keeps the stored rank").toBe(3);
+  expect(stored.get(closed.id), "a stored rank does not survive the move to done").toBeNull();
+  expect(stored.get(born), "a rank carried by a done item is dropped").toBeNull();
+
+  await importRaw([importItem(kept, { title: kept.title, status: "archived" })]);
+  const db = openBrokerDb(broker.dbPath);
+  const archived = db.query("SELECT status, queue FROM roadmap_items WHERE id = ?").get(kept.id);
+  db.close();
+  expect(archived, "a stored rank does not survive the move to archived").toEqual({ status: "archived", queue: null });
+});

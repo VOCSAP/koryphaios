@@ -6121,6 +6121,14 @@ function refusesInactiveQueue(
   return storedInactive && nextQueue != null && nextQueue !== storedQueue;
 }
 
+function isTerminalStatus(status: RoadmapStatus): boolean {
+  return status === "done" || status === "archived";
+}
+
+function queueForStatus(status: RoadmapStatus, queue: number | null): number | null {
+  return isTerminalStatus(status) ? null : queue;
+}
+
 /**
  * The one place where the triage vocabulary and the MoSCoW one describe the
  * same fact: a card nobody will action. They are kept consistent by REFUSING
@@ -6429,7 +6437,7 @@ function handleRoadmapUpsert(
       depends_on: nextDependsOn?.ids ?? existing.depends_on,
       directive: nextDirective,
       target_peer_ids: nextTargets,
-      queue: body.queue !== undefined ? body.queue : existing.queue,
+      queue: queueForStatus(nextStatus, body.queue !== undefined ? body.queue : existing.queue),
       updated_by: by,
       inactive: nextInactive,
     };
@@ -6676,7 +6684,7 @@ function handleRoadmapUpsert(
       JSON.stringify(createDependsOn.ids),
       by,
       by,
-      body.queue ?? null,
+      queueForStatus(createStatus, body.queue ?? null),
       createDirective,
       JSON.stringify(createTargets),
       createLocked ? 1 : 0,
@@ -6744,6 +6752,7 @@ function handleRoadmapArchive(
   db.run(
     `UPDATE roadmap_items SET
        status = 'archived',
+       queue = NULL,
        deleted_at = COALESCE(deleted_at, datetime('now')),
        ${CLEAR_LOCK_SET},
        operator_id = COALESCE(?, operator_id),
@@ -7135,7 +7144,9 @@ function handleRoadmapReorder(
   // caller whose view of the queue is accidentally empty. Every non-empty
   // partial list is refused below.
   const currentlyQueued = db
-    .query("SELECT id, locked, locked_group FROM roadmap_items WHERE project_key = ? AND queue IS NOT NULL")
+    .query(
+      "SELECT id, locked, locked_group FROM roadmap_items WHERE project_key = ? AND queue IS NOT NULL AND status NOT IN ('done', 'archived')"
+    )
     .all(projectKey) as { id: string; locked: number; locked_group: string | null }[];
   if (ids.length > 0) {
     const provided = new Set(ids);
@@ -7552,12 +7563,14 @@ function handleRoadmapImport(body: {
               ? it.deleted_at
               : null
             : (existing?.deleted_at ?? null),
-        queue:
+        queue: queueForStatus(
+          nextStatusVal,
           it.queue !== undefined
             ? typeof it.queue === "number" && Number.isInteger(it.queue) && it.queue >= 1
               ? it.queue
               : null
-            : (existing?.queue ?? null),
+            : (existing?.queue ?? null)
+        ),
         directive: importDirective,
         target_peer_ids: JSON.stringify(
           importDirective
@@ -8689,14 +8702,10 @@ function handleRoadmapSyncPush(body: RoadmapSyncPushRequest): SyncPushResult {
         conflict: { error: "conflict", reason: "content", item: rowToSyncRow(existing) },
       };
     }
-    // Content plus the columns that ride with it. `queue` is pushed here (a
-    // dedicated trigger keeps it from versioning the content, see
-    // roadmap_queue_dirty_au above), but only when the pushed item actually
-    // carries the key: a replica older than this contract omits it entirely,
-    // and that omission must leave the upstream rank alone, never clear it --
-    // the CASE guards on presence, not on the value being non-null. Every
-    // lock column (their own protocol) and `operator_id` (a local signature
-    // proof) stay deliberately absent from this SET list.
+    // An omitted `queue` key leaves the upstream rank alone (older replicas never
+    // send it), except on a terminal status, which always clears it. Lock columns
+    // (their own protocol) and `operator_id` (a local signature proof) stay out
+    // of this SET on purpose.
     db.run(
       `UPDATE roadmap_items SET
          kind = ?, title = ?, description = ?, rationale = ?, context = ?, priority = ?,
@@ -8711,7 +8720,8 @@ function handleRoadmapSyncPush(body: RoadmapSyncPushRequest): SyncPushResult {
         item.value, item.effort, item.status, item.triage, JSON.stringify(item.tags),
         JSON.stringify(item.depends_on), item.deleted_at, item.directive,
         JSON.stringify(item.target_peer_ids), item.inactive ? 1 : 0,
-        item.queue !== undefined ? 1 : 0, item.queue ?? null,
+        item.queue !== undefined || isTerminalStatus(item.status) ? 1 : 0,
+        queueForStatus(item.status, item.queue ?? null),
         adoptedContentDate(
           item.content_updated_at ?? null,
           contentEquals(pickSyncContent(rowToRoadmapItem(existing)), pickSyncContent(item)),
@@ -8740,7 +8750,7 @@ function handleRoadmapSyncPush(body: RoadmapSyncPushRequest): SyncPushResult {
         // A brand-new card has no upstream rank to lose, so an omitted key
         // and an explicit null are the same NULL here -- unlike the SET
         // above, presence does not need to be distinguished on the INSERT.
-        item.queue ?? null,
+        queueForStatus(item.status, item.queue ?? null),
         item.directive, JSON.stringify(item.target_peer_ids), item.inactive ? 1 : 0,
         item.content_updated_at ?? null,
       ]

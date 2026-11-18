@@ -1072,6 +1072,60 @@ test("a push with queue: null explicitly clears the upstream rank", async () => 
   ]).toEqual(["an explicit null clears the upstream rank, unlike a merely absent key", null]);
 }, 20_000);
 
+test.each([true, false])(
+  "a push turning a ranked card done clears the upstream rank (queue key present: %p)",
+  async (carriesKey) => {
+    const b = shared;
+    const signed = await post<UpsertRes>(
+      `${b.url}/roadmap/upsert`,
+      deckAuthored({ project_key: PK, title: "ranked, closed on the replica", queue: 5 })
+    );
+    expect(signed.status).toBe(200);
+    const id = signed.body.item.id;
+    expect(signed.body.item.queue, "non-vacuity: the upstream row starts ranked").toBe(5);
+    const preDb = openBrokerDb(b.dbPath);
+    const contentRev = (
+      preDb.query("SELECT content_rev FROM roadmap_items WHERE id = ?").get(id) as { content_rev: number }
+    ).content_rev;
+    preDb.close();
+
+    const item = pushItem({ id, title: "closed on the replica", status: "done", queue: 9 } as Partial<RoadmapSyncPushItem> & {
+      id: string;
+    });
+    if (!carriesKey) delete item.queue;
+    const pushed = await post<RoadmapSyncPushResponse>(`${b.url}/roadmap/sync/push`, {
+      replica_id: R1,
+      item,
+      expected_content_rev: contentRev,
+    });
+    expect(pushed.status).toBe(200);
+
+    const db = openBrokerDb(b.dbPath);
+    const stored = db.query("SELECT status, queue FROM roadmap_items WHERE id = ?").get(id);
+    db.close();
+    expect(stored, "a done card holds no rank, whatever the push carried").toEqual({ status: "done", queue: null });
+  },
+  20_000
+);
+
+test("a push inserting a card already done with a rank stores it unranked", async () => {
+  const b = shared;
+  const id = crypto.randomUUID();
+  const pushed = await post<RoadmapSyncPushResponse>(`${b.url}/roadmap/sync/push`, {
+    replica_id: R1,
+    item: pushItem({ id, title: "born done on the replica", status: "done", queue: 4 } as Partial<RoadmapSyncPushItem> & {
+      id: string;
+    }),
+    expected_content_rev: null,
+  });
+  expect(pushed.status).toBe(200);
+
+  const db = openBrokerDb(b.dbPath);
+  const stored = db.query("SELECT status, queue FROM roadmap_items WHERE id = ?").get(id);
+  db.close();
+  expect(stored, "the INSERT drops the rank of a terminal card").toEqual({ status: "done", queue: null });
+}, 20_000);
+
 test.each([0, -1, 1.5, "3"])("push refuses an invalid queue rank: %p", async (badQueue) => {
   const b = shared;
   const item = {

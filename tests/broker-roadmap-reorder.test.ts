@@ -475,3 +475,57 @@ test("reorder and dequeue move the queue and leave every card's content date alo
   expect(afterDequeue.status).toBe("planned");
   expect(afterDequeue.content_updated_at, "a dequeue planned -> planned dates nothing").toBe(pinned);
 });
+
+test("a status-only patch to done or archived drops the card's queue rank", async () => {
+  const toDone = await create("wf terminal done", { queue: 1 });
+  const toArchived = await create("wf terminal archived", { queue: 2 });
+  expect(toDone.queue, "non-vacuity: the card starts ranked").toBe(1);
+
+  const done = await upsert({ id: toDone.id, status: "done" });
+  expect(done.status).toBe(200);
+  expect((done.body as { item: RoadmapItem }).item.queue, "done keeps no rank").toBeNull();
+
+  const archived = await upsert({ id: toArchived.id, status: "archived" });
+  expect(archived.status).toBe(200);
+  expect((archived.body as { item: RoadmapItem }).item.queue, "archived keeps no rank").toBeNull();
+});
+
+test("a legacy done card with a rank does not block a reorder of the active set, and loses its rank", async () => {
+  const active = await create("wf legacy active", { queue: 1 });
+  const legacy = await create("wf legacy done");
+  const db = openBrokerDb(broker.dbPath);
+  db.run("UPDATE roadmap_items SET status = 'done', queue = 7 WHERE id = ?", [legacy.id]);
+  const seeded = db.query("SELECT status, queue FROM roadmap_items WHERE id = ?").get(legacy.id);
+  expect(seeded, "non-vacuity: the legacy row is done and ranked").toEqual({ status: "done", queue: 7 });
+
+  const res = await reorder({ ids: [active.id], waves: [[active.id]] });
+  expect(res.status, JSON.stringify(res.body)).toBe(200);
+  expect((res.body as { items: RoadmapItem[] }).items.map((i) => [i.id, i.queue])).toEqual([[active.id, 1]]);
+
+  const after = db.query("SELECT queue FROM roadmap_items WHERE id = ?").get(legacy.id);
+  db.close();
+  expect(after, "the wide unqueue UPDATE cleans the legacy rank").toEqual({ queue: null });
+});
+
+test("a card created done with a rank is stored unranked, and a ranked card created planned keeps its rank", async () => {
+  const ranked = await create("wf born planned", { queue: 1 });
+  expect(ranked.queue, "negative control: a non-terminal birth keeps its rank").toBe(1);
+
+  const born = await create("wf born done", { status: "done", queue: 2 });
+  expect(born.status).toBe("done");
+  expect(born.queue, "a terminal birth stores no rank").toBeNull();
+  const reordered = await reorder({ ids: [ranked.id], waves: [[ranked.id]] });
+  expect(reordered.status, JSON.stringify(reordered.body)).toBe(200);
+});
+
+test("archiving a ranked card drops its rank, so the active set reorders without it", async () => {
+  const kept = await create("wf archive kept", { queue: 1 });
+  const archived = await create("wf archive gone", { queue: 2 });
+  const res = await post<{ item: RoadmapItem }>(`${broker.url}/roadmap/archive`, deckAuthored({ id: archived.id }));
+  expect(res.status).toBe(200);
+  expect(res.body.item.status).toBe("archived");
+  expect(res.body.item.queue, "an archived card holds no rank").toBeNull();
+
+  const reordered = await reorder({ ids: [kept.id], waves: [[kept.id]] });
+  expect(reordered.status, JSON.stringify(reordered.body)).toBe(200);
+});
