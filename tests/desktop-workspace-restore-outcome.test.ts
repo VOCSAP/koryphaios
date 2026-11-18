@@ -60,6 +60,11 @@ test("lock-race throws, with an actionable message naming what happened", () => 
   );
 });
 
+test("a workspace held by both project folders throws, naming both folders and what to do", () => {
+  expect(() => workspaceRestoreOrThrow({ ok: false, reason: "duplicate" })).toThrow(/\.claude\/koryphaios and \.claude\/claude-peers/);
+  expect(() => workspaceRestoreOrThrow({ ok: false, reason: "duplicate" })).toThrow(/delete or move one of the two files/);
+});
+
 test("credential failures throw before any session is opened", () => {
   expect(() => workspaceRestoreOrThrow({ ok: false, reason: "credential-timed-out" })).toThrow(/Aucune session/);
   expect(() => workspaceRestoreOrThrow({ ok: false, reason: "credential-unavailable", cause: "mint-refused" })).toThrow(/credential Inbox/);
@@ -82,6 +87,7 @@ test("only non-quiet restore reasons throw", () => {
     { ok: false, reason: "busy" },
     { ok: false, reason: "superseded" },
     { ok: false, reason: "lock-race" },
+    { ok: false, reason: "duplicate" },
     { ok: false, reason: "credential-timed-out" },
     { ok: false, reason: "credential-unavailable", cause: "mint-refused" },
     { ok: false, reason: "unattended" }
@@ -94,7 +100,7 @@ test("only non-quiet restore reasons throw", () => {
       return true;
     }
   });
-  expect(threw).toEqual([false, false, false, false, false, false, false, true, true, true, true]);
+  expect(threw).toEqual([false, false, false, false, false, false, false, true, true, true, true, true]);
 });
 
 test("an unrecognised reason value (bypassing the type system) throws rather than silently resolving", () => {

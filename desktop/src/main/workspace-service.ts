@@ -22,7 +22,8 @@ import {
   ensureWorkspacesDir,
   listWorkspaces,
   loadWorkspace,
-  newWorkspaceId,
+  locateWorkspace,
+  newWorkspaceRef,
   saveWorkspace,
   selectPrunableWorkspaces,
   workspaceHasShellFields,
@@ -43,6 +44,8 @@ import {
 import type { LockConnection, LockOpener } from './file-lock'
 import { demoteExtraLeads, fromWorkspaceSessions, joinArgs, toWorkspaceSessions } from './workspace-session-map'
 import { logWarn, reportError } from './log'
+import { sameWorkspaceRef, type WorkspaceRef } from './project-files'
+import type { WorkspaceLocation } from './workspace-store'
 import { effectiveAgent, isTeamLeadAgent } from './team-lead-bridge'
 
 /**
@@ -174,12 +177,14 @@ export class WorkspaceService {
   /** `process.uptime()` at the SAME instant as `bootAnchorInstant`, the monotonic
    *  reference `currentBootInstant` advances from afterward. */
   private readonly bootAnchorProcessUptime: number
-  private currentId: string | null = null
-  /** The same-host OS lock of `currentId`: this reference is what keeps it held. */
+  /** Where the owned workspace lives, fixed when its lock was acquired and used until it is released. */
+  private currentRef: WorkspaceRef | null = null
+  /** The same-host OS lock of `currentRef`: this reference is what keeps it held. */
   private held: LockConnection | null = null
   private persistedName: { id: string; name: string } | null = null
   private heartbeatTimer: NodeJS.Timeout | null = null
   private heartbeatFailureWorkspaceId: string | null = null
+  private refusedSaveFor: string | null = null
   private pruneTimer: NodeJS.Timeout | null = null
   private restoreOperation = 0
   private activeRestoreOperation: number | null = null
@@ -216,15 +221,11 @@ export class WorkspaceService {
     return this.bootAnchorInstant + Math.round((process.uptime() - this.bootAnchorProcessUptime) * 1000)
   }
 
-  /**
-   * Held by another instance: its same-host OS lock, or a live JSON lock that
-   * is not ours. The one predicate behind the list badge and the restore
-   * refusal. An unreadable JSON lock alone proves no owner.
-   */
-  private lockedByOther(id: string, now: number): boolean {
-    if (this.currentId === id && this.held) return false
-    if (probeSameHostLock(this.deps.projectDir, id, this.deps.openLock) !== 'free') return true
-    const read = inspectLock(this.deps.projectDir, id)
+  /** Held by another instance: its same-host OS lock, or a live JSON lock that is not ours; an unreadable JSON lock alone proves no owner. */
+  private lockedByOther(ref: WorkspaceRef, now: number): boolean {
+    if (this.currentRef && sameWorkspaceRef(this.currentRef, ref) && this.held) return false
+    if (probeSameHostLock(ref, this.deps.openLock) !== 'free') return true
+    const read = inspectLock(ref)
     return read.kind === 'lock' && this.liveForeign(read.lock, now)
   }
 
@@ -241,10 +242,14 @@ export class WorkspaceService {
   }
 
   private releaseCurrent(): boolean {
-    if (!this.currentId) return true
-    const released = releaseLock(this.deps.projectDir, this.currentId, { pid: this.pid, host: this.host }, this.held)
+    if (!this.currentRef) return true
+    const released = releaseLock(this.currentRef, { pid: this.pid, host: this.host }, this.held)
     this.held = null
     return released
+  }
+
+  private get currentId(): string | null {
+    return this.currentRef?.id ?? null
   }
 
   get currentWorkspaceId(): string | null {
@@ -255,6 +260,24 @@ export class WorkspaceService {
   get currentWorkspaceName(): string | null {
     if (!this.persistedName || this.persistedName.id !== this.currentId) return null
     return typeof this.persistedName.name === 'string' ? this.persistedName.name : null
+  }
+
+  private locate(id: string): WorkspaceLocation {
+    const found = locateWorkspace(this.deps.projectDir, id)
+    if (found.kind === 'conflict') reportError('workspace', `workspace ${id} exists in both project folders, nothing is done with it`)
+    return found
+  }
+
+  /** Null while `ref` is the only stored copy of its id; else the refusal: duplicate for a second copy, missing for none or the other folder. */
+  private movedSince(ref: WorkspaceRef): WorkspaceRestoreResult | null {
+    const found = this.locate(ref.id)
+    if (found.kind === 'one' && sameWorkspaceRef(found.ref, ref)) return null
+    return { ok: false, reason: found.kind === 'conflict' ? 'duplicate' : 'missing' }
+  }
+
+  private refOf(id: string): WorkspaceRef | null {
+    const found = this.locate(id)
+    return found.kind === 'one' ? found.ref : null
   }
 
   /**
@@ -272,63 +295,45 @@ export class WorkspaceService {
     }
   }
 
-  /**
-   * D6: delete unpinned auto-saves older than PRUNE_MAX_AGE_MS, never touching a
-   * pinned, current, or live-locked-by-another-instance workspace. Returns the
-   * pruned ids. Best-effort: a delete failure is swallowed by deleteWorkspace.
-   */
+  /** Deletes unpinned auto-saves older than PRUNE_MAX_AGE_MS, never a pinned, current, locked-by-another or conflicting one; returns the pruned ids. */
   pruneStale(): string[] {
     const now = Date.now()
     const keepIds = this.currentId ? [this.currentId] : []
-    const candidates = selectPrunableWorkspaces(listWorkspaces(this.deps.projectDir), {
-      now,
-      maxAgeMs: PRUNE_MAX_AGE_MS,
-      keepIds
-    })
+    const listed = listWorkspaces(this.deps.projectDir)
+    const refs = new Map(listed.filter((ws) => !ws.conflict).map((ws) => [ws.id, ws.ref]))
+    const candidates = selectPrunableWorkspaces(listed, { now, maxAgeMs: PRUNE_MAX_AGE_MS, keepIds })
     const pruned: string[] = []
     for (const id of candidates) {
-      if (inspectLock(this.deps.projectDir, id).kind === 'unreadable') continue
-      if (this.lockedByOther(id, now)) continue
-      deleteWorkspace(this.deps.projectDir, id)
+      const ref = refs.get(id)
+      if (!ref) continue
+      if (inspectLock(ref).kind === 'unreadable') continue
+      if (this.lockedByOther(ref, now)) continue
+      deleteWorkspace(ref)
       pruned.push(id)
     }
     return pruned
   }
 
-  /**
-   * Own a workspace id: acquire its lock + (re)start the heartbeat. Returns
-   * whether the lock was actually acquired -- `this.currentId` and the
-   * heartbeat are only committed on success, never on the strength of the
-   * caller's intent alone (card 438c15e3: the previous ordering stamped
-   * `this.currentId = id` BEFORE knowing acquireLock()'s result, so a lost
-   * race was invisible).
-   */
-  private own(id: string): boolean {
-    // Not calling acquireLock() again while the OS lock is ours: it would wait
-    // on that very lock. this.currentId is only an in-memory belief; the held
-    // connection and the on-disk JSON decide.
-    if (this.currentId === id && this.held) {
-      const read = inspectLock(this.deps.projectDir, id)
+  /** Acquires the lock of `ref` and starts the heartbeat; `currentRef` is committed only once the lock is ours. */
+  private own(ref: WorkspaceRef): boolean {
+    // Not calling acquireLock() again while the OS lock is ours: it would wait on that very lock.
+    if (this.currentRef && sameWorkspaceRef(this.currentRef, ref) && this.held) {
+      const read = inspectLock(this.currentRef)
       const mine = read.kind === 'lock' && ownsLock(read.lock, { pid: this.pid, host: this.host })
       if (mine || !(read.kind === 'lock' && this.liveForeign(read.lock, Date.now()))) {
-        // A missing, unreadable or dead JSON lock is ours to rewrite: the OS
-        // lock says no one else on this host can hold the workspace.
-        if (!mine) this.stampCurrent(id)
+        // A missing, unreadable or dead JSON lock is ours to rewrite: the OS lock says no one else on this host holds it.
+        if (!mine) this.stampCurrent(this.currentRef)
         if (!this.heartbeatTimer) {
           this.heartbeatTimer = setInterval(() => this.heartbeatTick(), HEARTBEAT_MS)
         }
         return true
       }
-      // A live foreign JSON lock (another host, or a Deck without the OS
-      // lock) took it: give ours back, the acquire below then refuses.
+      // A live foreign JSON lock took it: give ours back, the acquire below then refuses.
       releaseHeldLock(this.held)
       this.held = null
     }
-    // The lock is written before saveWorkspace would create the tree, so a
-    // fresh project dir (no .claude/claude-peers/workspaces yet) would ENOENT.
-    // Create it up front -- own() is the first writer of any workspace file.
-    ensureWorkspacesDir(this.deps.projectDir)
-    const acquired = acquireLock(this.deps.projectDir, id, {
+    ensureWorkspacesDir(ref)
+    const acquired = acquireLock(ref, {
       pid: this.pid,
       host: this.host,
       startedAt: this.startedAt,
@@ -339,12 +344,10 @@ export class WorkspaceService {
       open: this.deps.openLock
     })
     if (!acquired) return false
-    // Only release the PREVIOUS workspace's lock once the new one is
-    // actually ours -- releasing it first (the old ordering) would strand
-    // this instance owning neither workspace if the new acquire then failed.
-    if (this.currentId && this.currentId !== id) this.releaseCurrent()
+    // The previous workspace is released only once the new one is ours, else a failed acquire strands both.
+    if (this.currentRef && !sameWorkspaceRef(this.currentRef, ref)) this.releaseCurrent()
     this.held = acquired
-    this.currentId = id
+    this.currentRef = ref
     if (!this.heartbeatTimer) {
       this.heartbeatTimer = setInterval(() => this.heartbeatTick(), HEARTBEAT_MS)
     }
@@ -352,22 +355,22 @@ export class WorkspaceService {
   }
 
   private heartbeatTick(): void {
-    if (!this.currentId || !this.heartbeatTimer) return
-    const id = this.currentId
+    if (!this.currentRef || !this.heartbeatTimer) return
+    const ref = this.currentRef
+    const id = ref.id
     try {
-      const refreshed = refreshLock(this.deps.projectDir, id, Date.now(), {
+      const refreshed = refreshLock(ref, Date.now(), {
         pid: this.pid,
         host: this.host
       })
       if (!refreshed) {
-        const read = inspectLock(this.deps.projectDir, id)
+        const read = inspectLock(ref)
         if (this.held && !(read.kind === 'lock' && this.liveForeign(read.lock, Date.now()))) {
-          this.stampCurrent(id, false)
+          this.stampCurrent(ref, false)
           if (this.heartbeatFailureWorkspaceId !== id) {
             reportError('workspace', `rewriting the missing, unreadable or dead JSON lock of the owned workspace ${id}`)
           }
         } else {
-          // A foreign owner cannot be refreshed by this instance.
           reportError('workspace', `heartbeat lost ownership of workspace ${id}, stopping`)
           if (this.heartbeatTimer) clearInterval(this.heartbeatTimer)
           this.heartbeatTimer = null
@@ -384,22 +387,14 @@ export class WorkspaceService {
     }
   }
 
-  private stampCurrent(id: string, report = true): void {
-    if (report) reportError('workspace', `rewriting the missing, unreadable or dead JSON lock of the owned workspace ${id}`)
-    stampLock(this.deps.projectDir, id, { pid: this.pid, host: this.host, startedAt: this.startedAt, now: Date.now() })
+  private stampCurrent(ref: WorkspaceRef, report = true): void {
+    if (report) reportError('workspace', `rewriting the missing, unreadable or dead JSON lock of the owned workspace ${ref.id}`)
+    stampLock(ref, { pid: this.pid, host: this.host, startedAt: this.startedAt, now: Date.now() })
   }
 
-  /** Mint + own a fresh workspace if none is current yet, or reconfirm
-   *  ownership of the current one. Returns whether a workspace is current
-   *  AND still actually ours afterwards. `this.currentId` alone is an
-   *  IN-MEMORY belief (review round 7): every persist() call (saveAuto,
-   *  saveNamed) reaches this method, so an early `if (this.currentId) return
-   *  true` here -- not just in own()'s own fast path -- is exactly the gap a
-   *  third-party reclaim of the on-disk lock file would walk through
-   *  unnoticed. Route through own(), which re-reads the lock and confirms
-   *  identity via ownsLock before writing. */
+  /** Mints and owns a workspace when none is current, else reconfirms ownership through the on-disk lock, not the in-memory ref. */
   private ensureCurrent(): boolean {
-    return this.own(this.currentId ?? newWorkspaceId())
+    return this.own(this.currentRef ?? newWorkspaceRef(this.deps.projectDir))
   }
 
   /**
@@ -441,7 +436,8 @@ export class WorkspaceService {
   }
 
   sessionCwds(id: string): string[] {
-    const ws = loadWorkspace(this.deps.projectDir, id)
+    const ref = this.refOf(id)
+    const ws = ref && loadWorkspace(ref)
     if (!ws) return []
     const cwds = fromWorkspaceSessions(ws.sessions)
       .map((d) => d.cwd?.trim())
@@ -450,7 +446,8 @@ export class WorkspaceService {
   }
 
   hasTeamLeadAgentSession(id: string): boolean {
-    const ws = loadWorkspace(this.deps.projectDir, id)
+    const ref = this.refOf(id)
+    const ws = ref && loadWorkspace(ref)
     if (!ws) return false
     return ws.sessions.some((s) => isTeamLeadAgent(effectiveAgent(undefined, joinArgs(s.args)).agent))
   }
@@ -461,24 +458,31 @@ export class WorkspaceService {
     this.activeRestoreOperation = operation
     this.pendingRestoreId = id
     try {
-      const ws = loadWorkspace(this.deps.projectDir, id)
-      if (!ws) return { ok: false, reason: 'missing' }
+      const found = this.locate(id)
+      if (found.kind === 'conflict') return { ok: false, reason: 'duplicate' }
+      const ref = found.kind === 'one' ? found.ref : null
+      const ws = ref && loadWorkspace(ref)
+      if (!ref || !ws) return { ok: false, reason: 'missing' }
       // restoreFrom replaces live sessions, so an empty snapshot is never applicable.
       if (ws.sessions.length === 0) return { ok: false, reason: 'empty' }
-      if (this.lockedByOther(id, Date.now())) {
+      if (this.lockedByOther(ref, Date.now())) {
         return { ok: false, reason: 'locked' }
       }
       if (workspaceHasShellFields(ws)) {
         const gate = await this.deps.confirmShellFields(ws, attendance)
         if (this.activeRestoreOperation !== operation) return { ok: false, reason: 'superseded' }
-        if (this.lockedByOther(id, Date.now())) return { ok: false, reason: 'locked' }
+        const moved = this.movedSince(ref)
+        if (moved) return moved
+        if (this.lockedByOther(ref, Date.now())) return { ok: false, reason: 'locked' }
         if (gate === 'declined') return { ok: false, reason: 'shell-declined' }
         if (gate === 'unattended') return { ok: false, reason: 'unattended' }
       }
       if (workspaceHasUntrustedCwd(ws, this.deps.projectDir)) {
         const gate = await this.deps.confirmUntrustedCwd(ws, attendance)
         if (this.activeRestoreOperation !== operation) return { ok: false, reason: 'superseded' }
-        if (this.lockedByOther(id, Date.now())) return { ok: false, reason: 'locked' }
+        const moved = this.movedSince(ref)
+        if (moved) return moved
+        if (this.lockedByOther(ref, Date.now())) return { ok: false, reason: 'locked' }
         if (gate === 'declined') return { ok: false, reason: 'cwd-declined' }
         if (gate === 'unattended') return { ok: false, reason: 'unattended' }
       }
@@ -492,29 +496,35 @@ export class WorkspaceService {
         : { ok: true as const, plans: new Map() }
       if (!prepared.ok) return { ok: false, reason: 'superseded' }
       if (this.activeRestoreOperation !== operation) return { ok: false, reason: 'superseded' }
-      if (this.lockedByOther(id, Date.now())) return { ok: false, reason: 'locked' }
+      const movedAfterPreparation = this.movedSince(ref)
+      if (movedAfterPreparation) return movedAfterPreparation
+      if (this.lockedByOther(ref, Date.now())) return { ok: false, reason: 'locked' }
       let acquired = false
       let lockedAfterReadiness = false
+      const movedAfterReadiness: { result: WorkspaceRestoreResult | null } = { result: null }
       let adoption: ScopeAdoptionResult
       try {
         adoption = await this.deps.adoptScope(
           { groupId: ws.groupId, scopeKind: ws.scopeKind },
           () => {
-            if (this.lockedByOther(id, Date.now())) {
+            movedAfterReadiness.result = this.movedSince(ref)
+            if (movedAfterReadiness.result) return false
+            if (this.lockedByOther(ref, Date.now())) {
               lockedAfterReadiness = true
               return false
             }
-            acquired = this.own(id)
+            acquired = this.own(ref)
             return acquired
           }
         )
       } catch (error) {
         if (acquired) {
           this.releaseCurrent()
-          this.currentId = null
+          this.currentRef = null
         }
         throw error
       }
+      if (movedAfterReadiness.result) return movedAfterReadiness.result
       if (lockedAfterReadiness) return { ok: false, reason: 'locked' }
       if (adoption.state !== 'published') {
         if (adoption.state === 'credential-unavailable') {
@@ -534,7 +544,7 @@ export class WorkspaceService {
         if (!this.releaseCurrent()) {
           reportError('workspace', `restore(${id}) could not release the workspace after application failure`)
         }
-        this.currentId = null
+        this.currentRef = null
         throw error
       }
       this.persistedName = { id, name: ws.name }
@@ -558,20 +568,20 @@ export class WorkspaceService {
 
   deleteWs(id: string): void {
     if (id === this.pendingRestoreId) this.invalidateRestore()
-    if (id === this.currentId) {
+    const found = this.locate(id)
+    if (found.kind === 'conflict') return
+    const owned = this.currentRef?.id === id ? this.currentRef : null
+    const target = found.kind === 'one' ? found.ref : owned
+    if (!target) return
+    if (owned && sameWorkspaceRef(owned, target)) {
       if (this.held) releaseHeldLock(this.held)
       this.held = null
-      this.currentId = null
+      this.currentRef = null
     }
-    deleteWorkspace(this.deps.projectDir, id)
+    deleteWorkspace(target)
   }
 
-  /**
-   * "New (clear)": detach from the current workspace so the next created session
-   * mints a fresh one. Captures a final auto-save (while sessions still exist --
-   * call this BEFORE SessionService.closeAll) and releases the lock; the prior
-   * workspace is kept restorable, not deleted.
-   */
+  /** Detaches from the current workspace so the next session mints a fresh one: a final auto-save (call before closeAll), then the lock release; the old workspace stays restorable. */
   startNew(): void {
     this.invalidateRestore()
     if (!this.currentId) return
@@ -582,14 +592,13 @@ export class WorkspaceService {
         `startNew() skipped releaseLock for ${this.currentId}: on-disk lock owned by another identity`
       )
     }
-    this.currentId = null
+    this.currentRef = null
   }
 
-  /** All workspaces for this project, with lock + current flags, newest first. */
   listForCwd(): WorkspaceSummary[] {
     const now = Date.now()
     return listWorkspaces(this.deps.projectDir).map((ws) => {
-      const lockedByOther = ws.id !== this.currentId && this.lockedByOther(ws.id, now)
+      const lockedByOther = ws.id !== this.currentId && !ws.conflict && this.lockedByOther(ws.ref, now)
       return {
         id: ws.id,
         name: ws.name,
@@ -647,17 +656,38 @@ export class WorkspaceService {
 
   // ----- internals -----
 
+  /** True when the owned id has a snapshot that is not the owned one: nothing is written then, and it is traced once per id. */
+  private snapshotElsewhere(): boolean {
+    const ref = this.currentRef
+    if (!ref) return false
+    const found = locateWorkspace(this.deps.projectDir, ref.id)
+    if (found.kind === 'none' || (found.kind === 'one' && sameWorkspaceRef(found.ref, ref))) {
+      this.refusedSaveFor = null
+      return false
+    }
+    if (this.refusedSaveFor !== ref.id) {
+      this.refusedSaveFor = ref.id
+      reportError('workspace', `workspace ${ref.id} has a snapshot that is not the owned one, saving stopped until the extra copy is removed`)
+    }
+    return true
+  }
+
   private persist(name: string | undefined, pin: boolean): WorkspaceSummary | null {
     if (!this.ensureCurrent()) {
       reportError('workspace', 'persist() skipped: could not acquire the workspace lock')
       return null
     }
+    if (this.snapshotElsewhere()) {
+      if (pin) throw new Error('workspace-duplicate-id')
+      return null
+    }
     // Adopt any post-discovery session-id rotation (e.g. a /clear) before
     // snapshotting, so the saved workspace resumes the current transcript.
     this.deps.service.refreshLiveSessionIds()
-    const id = this.currentId as string
+    const ref = this.currentRef as WorkspaceRef
+    const id = ref.id
     const scope = this.deps.getScope()
-    const existing = loadWorkspace(this.deps.projectDir, id)
+    const existing = loadWorkspace(ref)
     const ws: Workspace = {
       id,
       name: name ?? existing?.name ?? autoName(scope.name, new Date()),
@@ -671,7 +701,7 @@ export class WorkspaceService {
       updatedAt: Date.now(),
       sessions: toWorkspaceSessions(this.deps.service.captureSessions())
     }
-    const saved = saveWorkspace(this.deps.projectDir, ws)
+    const saved = saveWorkspace(ref, ws)
     this.persistedName = { id: saved.id, name: saved.name }
     return {
       id: saved.id,

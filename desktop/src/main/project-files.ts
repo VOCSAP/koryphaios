@@ -14,10 +14,27 @@ export interface ProjectFileCandidate {
   source: ProjectFileSource
 }
 
+export const PROJECT_SOURCES: readonly ProjectFileSource[] = ['koryphaios', 'legacy']
+
+export interface WorkspaceRef {
+  readonly projectDir: string
+  readonly id: string
+  readonly source: ProjectFileSource
+}
+
 export type ProjectFileReport = (scope: string, message: string, error?: unknown) => void
 
+/** Two refs name the same stored workspace only when project, folder and id all agree. */
+export function sameWorkspaceRef(a: WorkspaceRef, b: WorkspaceRef): boolean {
+  return a.id === b.id && a.source === b.source && canonicalPath(a.projectDir) === canonicalPath(b.projectDir)
+}
+
+export function projectRootPath(projectDir: string, source: ProjectFileSource): string {
+  return join(projectDir, '.claude', source === 'koryphaios' ? PROJECT_DIR_NAME : LEGACY_PROJECT_DIR_NAME)
+}
+
 export function projectCreationPath(projectDir: string, ...segments: string[]): string {
-  return join(projectDir, '.claude', PROJECT_DIR_NAME, ...segments)
+  return join(projectRootPath(projectDir, 'koryphaios'), ...segments)
 }
 
 export function isAbsentFileError(error: unknown): boolean {

@@ -1,13 +1,4 @@
-// In-repo workspace persistence for Claude Peers Desk (DESIGN 6.3/6.4).
-// A workspace is a restorable snapshot stored at
-//   <project>/.claude/claude-peers/workspaces/<id>.json
-// It holds the GROUP ID only -- never the scope secret (DESIGN 6.8) -- so a
-// leaked or cloud-synced workspace cannot join the group.
-//
-// Pure: node fs/path/crypto plus two node-builtins-only siblings (atomic-write,
-// worktree-service) and no electron / node-pty, so it is unit-testable under
-// bun. Own types are declared here rather than imported via @shared, to
-// mirror the existing pure-module pattern (scope.ts, session-command.ts).
+// A workspace snapshot holds the GROUP ID only, never the scope secret, so a leaked or cloud-synced file cannot join the group.
 
 import { randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
@@ -25,6 +16,7 @@ import { isValidClodexContextInput } from '../shared/clodex-context'
 // 8.3 short names (worktree-service.ts's own docstring on canonicalPath).
 import { canonicalPath } from './worktree-service'
 import { writeFileAtomic } from './atomic-write'
+import { PROJECT_SOURCES, projectRootPath, type ProjectFileSource, type WorkspaceRef } from './project-files'
 
 /** "ephemeral" scopes mint a fresh secret on restore; "custom" ones are re-supplied via the launch arg. */
 export type ScopeKind = 'ephemeral' | 'custom'
@@ -75,30 +67,40 @@ export interface Workspace {
   sessions: WorkspaceSession[]
 }
 
-/** `.claude/claude-peers` dir (shared with the launch-config location). */
-export function peersConfigDir(projectDir: string): string {
-  return join(projectDir, '.claude', 'claude-peers')
+export function workspacesDir(projectDir: string, source: ProjectFileSource): string {
+  return join(projectRootPath(projectDir, source), 'workspaces')
 }
 
-export function workspacesDir(projectDir: string): string {
-  return join(peersConfigDir(projectDir), 'workspaces')
+function workspacePath(ref: WorkspaceRef): string {
+  return join(workspacesDir(ref.projectDir, ref.source), `${ref.id}.json`)
 }
 
-function workspacePath(projectDir: string, id: string): string {
-  return join(workspacesDir(projectDir), `${id}.json`)
+/** A fresh id, always under the new folder. */
+export function newWorkspaceRef(projectDir: string): WorkspaceRef {
+  return { projectDir, id: newWorkspaceId(), source: 'koryphaios' }
 }
 
-/**
- * Create the workspaces dir tree and ensure `.claude/claude-peers/.gitignore`
- * ignores `workspaces/` (session ids + layout are machine/project-local noise;
- * note there is no secret in them, DESIGN 6.4). The launch-config `config.json`
- * sitting next to it stays committable. Idempotent.
- */
-export function ensureWorkspacesDir(projectDir: string): string {
-  const dir = workspacesDir(projectDir)
+const WORKSPACE_ID_PATTERN = /^[\w-]+$/
+
+export type WorkspaceLocation ={ kind: 'none' } | { kind: 'one'; ref: WorkspaceRef } | { kind: 'conflict' }
+
+/** Where the snapshot of `id` lives, by file existence in each folder; an id in both is a conflict, never a winner. */
+export function locateWorkspace(projectDir: string, id: string): WorkspaceLocation {
+  if (!WORKSPACE_ID_PATTERN.test(id)) return { kind: 'none' }
+  const found = PROJECT_SOURCES.map((source): WorkspaceRef => ({ projectDir, id, source })).filter((ref) =>
+    existsSync(workspacePath(ref))
+  )
+  if (found.length === 0) return { kind: 'none' }
+  const [only, other] = found
+  return other || !only ? { kind: 'conflict' } : { kind: 'one', ref: only }
+}
+
+/** Creates the workspaces folder of `ref`'s root and keeps `workspaces/` in that root's own .gitignore. Idempotent. */
+export function ensureWorkspacesDir(ref: Pick<WorkspaceRef, 'projectDir' | 'source'>): string {
+  const dir = workspacesDir(ref.projectDir, ref.source)
   mkdirSync(dir, { recursive: true })
 
-  const gitignore = join(peersConfigDir(projectDir), '.gitignore')
+  const gitignore = join(projectRootPath(ref.projectDir, ref.source), '.gitignore')
   const line = 'workspaces/'
   let lines: string[] = []
   if (existsSync(gitignore)) {
@@ -186,25 +188,40 @@ export function workspaceHasUntrustedCwd(
   })
 }
 
-/** List workspaces for a project, newest first. Malformed files are skipped. */
-export function listWorkspaces(projectDir: string): Workspace[] {
-  const dir = workspacesDir(projectDir)
+export type StoredWorkspace = Workspace & { readonly ref: WorkspaceRef; readonly conflict: boolean }
+
+function readWorkspacesIn(projectDir: string, source: ProjectFileSource): StoredWorkspace[] {
+  const dir = workspacesDir(projectDir, source)
   if (!existsSync(dir)) return []
-  const out: Workspace[] = []
+  const out: StoredWorkspace[] = []
   for (const entry of readdirSync(dir)) {
     if (!entry.endsWith('.json')) continue
     try {
       const parsed = JSON.parse(readFileSync(join(dir, entry), 'utf8')) as unknown
-      if (isWorkspace(parsed)) out.push(parsed)
+      if (isWorkspace(parsed)) {
+        out.push({ ...parsed, ref: { projectDir, id: entry.slice(0, -'.json'.length), source }, conflict: false })
+      }
     } catch {
       // Partial / corrupt file -> skip, do not break the whole listing.
     }
   }
-  return out.sort((a, b) => b.updatedAt - a.updatedAt)
+  return out
 }
 
-export function loadWorkspace(projectDir: string, id: string): Workspace | null {
-  const file = workspacePath(projectDir, id)
+/** Workspaces of both folders, newest first; an id held by both appears once, flagged `conflict`. Malformed files are skipped. */
+export function listWorkspaces(projectDir: string): StoredWorkspace[] {
+  const byId = new Map<string, StoredWorkspace>()
+  for (const source of PROJECT_SOURCES) {
+    for (const ws of readWorkspacesIn(projectDir, source)) {
+      const seen = byId.get(ws.ref.id)
+      byId.set(ws.ref.id, seen ? { ...(ws.updatedAt > seen.updatedAt ? ws : seen), conflict: true } : ws)
+    }
+  }
+  return [...byId.values()].sort((a, b) => b.updatedAt - a.updatedAt)
+}
+
+export function loadWorkspace(ref: WorkspaceRef): Workspace | null {
+  const file = workspacePath(ref)
   if (!existsSync(file)) return null
   try {
     const parsed = JSON.parse(readFileSync(file, 'utf8')) as unknown
@@ -218,20 +235,18 @@ export function loadWorkspace(projectDir: string, id: string): Workspace | null 
  * Persist a workspace atomically (write temp then rename), stamping `updatedAt`.
  * Strips any stray `scopeSecret` defensively so it can never leak into the repo.
  */
-export function saveWorkspace(projectDir: string, ws: Workspace): Workspace {
-  ensureWorkspacesDir(projectDir)
+export function saveWorkspace(ref: WorkspaceRef, ws: Workspace): Workspace {
+  ensureWorkspacesDir(ref)
   const stamped: Workspace = { ...ws, updatedAt: Date.now() }
-  // Defensive: a secret must never be persisted (DESIGN 6.8).
   delete (stamped as Workspace & { scopeSecret?: unknown }).scopeSecret
-  const file = workspacePath(projectDir, ws.id)
-  writeFileAtomic(file, JSON.stringify(stamped, null, 2))
+  writeFileAtomic(workspacePath(ref), JSON.stringify(stamped, null, 2))
   return stamped
 }
 
-/** Remove a workspace JSON and its sidecar lock (best-effort). */
-export function deleteWorkspace(projectDir: string, id: string): void {
-  const dir = workspacesDir(projectDir)
-  for (const f of [join(dir, `${id}.json`), join(dir, `${id}.lock`)]) {
+/** Remove a workspace JSON and its two lock files, in the folder of `ref` only (best-effort). */
+export function deleteWorkspace(ref: WorkspaceRef): void {
+  const dir = workspacesDir(ref.projectDir, ref.source)
+  for (const f of [join(dir, `${ref.id}.json`), join(dir, `${ref.id}.lock`), join(dir, `${ref.id}.lock.sqlite`)]) {
     try {
       rmSync(f, { force: true })
     } catch {

@@ -12,6 +12,7 @@ import {
   ensureWorkspacesDir,
   listWorkspaces,
   loadWorkspace,
+  locateWorkspace,
   newWorkspaceId,
   saveWorkspace,
   selectPrunableWorkspaces,
@@ -22,7 +23,9 @@ import {
   acquireLock,
   BOOT_RECLAIM_TOLERANCE_MS,
   isLockLive,
+  lockPath,
   ownsLock,
+  probeSameHostLock,
   readLock,
   refreshLock,
   releaseHeldLock,
@@ -48,6 +51,9 @@ import { SPAWN_CAP } from "../desktop/src/main/spawn-cap.ts";
 import type { AppConfig, SessionDef } from "../desktop/src/shared/types.ts";
 import type { Scope } from "../desktop/src/main/scope.ts";
 import { reachedWithin } from "./_bounded-await.ts";
+const fresh = (projectDir: string, id: string) => ({ projectDir, id, source: "koryphaios" as const });
+const freshRoot = (projectDir: string) => ({ projectDir, source: "koryphaios" as const });
+const saveFresh = (projectDir: string, ws: { id: string }) => saveWorkspace(fresh(projectDir, ws.id), ws as never);
 
 // A non-secret sentinel value used to prove the store strips a stray
 // scopeSecret-like field; deliberately not credential-shaped.
@@ -104,17 +110,17 @@ test("saveWorkspace + loadWorkspace round-trips (modulo updatedAt) and stores no
   const proj = freshProject();
   const ws = sampleWorkspace();
   // Sneak a stray secret-like field in to prove it is stripped on save.
-  const saved = saveWorkspace(proj, { ...ws, scopeSecret: LEAK_MARKER } as Workspace);
+  const saved = saveFresh(proj, { ...ws, scopeSecret: LEAK_MARKER } as Workspace);
   expect((saved as Record<string, unknown>).scopeSecret).toBeUndefined();
 
-  const loaded = loadWorkspace(proj, ws.id);
+  const loaded = loadWorkspace(fresh(proj, ws.id));
   expect(loaded).not.toBeNull();
   expect(loaded!.id).toBe(ws.id);
   expect(loaded!.sessions).toEqual(ws.sessions);
   expect((loaded as Record<string, unknown>).scopeSecret).toBeUndefined();
 
   // The persisted bytes must not contain the sentinel anywhere.
-  const raw = readFileSync(join(workspacesDir(proj), `${ws.id}.json`), "utf8");
+  const raw = readFileSync(join(workspacesDir(proj, "koryphaios"), `${ws.id}.json`), "utf8");
   expect(raw).not.toContain(LEAK_MARKER);
 });
 
@@ -146,50 +152,50 @@ test("workspaceHasShellFields fires on a bridge marker alone, with empty args", 
 
 test("loadWorkspace rejects a file whose session names a bridge this build does not know", () => {
   const proj = freshProject();
-  ensureWorkspacesDir(proj);
+  ensureWorkspacesDir(freshRoot(proj));
   const ws = sampleWorkspace({ id: "wsp_bad_bridge" });
   const hostile = {
     ...ws,
     sessions: [{ ...ws.sessions[0]!, bridge: "clodex-evil" }],
   };
   writeFileSync(
-    join(workspacesDir(proj), "wsp_bad_bridge.json"),
+    join(workspacesDir(proj, "koryphaios"), "wsp_bad_bridge.json"),
     JSON.stringify(hostile, null, 2),
     "utf8",
   );
-  expect(loadWorkspace(proj, "wsp_bad_bridge")).toBeNull();
+  expect(loadWorkspace(fresh(proj, "wsp_bad_bridge"))).toBeNull();
   expect(listWorkspaces(proj).map((w) => w.id)).not.toContain("wsp_bad_bridge");
 
   // Control: the very same file with the known marker loads, so the rejection
   // above is the enum check and not the surrounding shape.
   const good = { ...ws, sessions: [{ ...ws.sessions[0]!, bridge: "clodex" }] };
   writeFileSync(
-    join(workspacesDir(proj), "wsp_good_bridge.json"),
+    join(workspacesDir(proj, "koryphaios"), "wsp_good_bridge.json"),
     JSON.stringify({ ...good, id: "wsp_good_bridge" }, null, 2),
     "utf8",
   );
-  expect(loadWorkspace(proj, "wsp_good_bridge")?.sessions[0]!.bridge).toBe("clodex");
+  expect(loadWorkspace(fresh(proj, "wsp_good_bridge"))?.sessions[0]!.bridge).toBe("clodex");
 });
 
 test("clodexContextTokens round-trips def -> workspace file -> def, and a hostile value rejects the file whole", () => {
   const proj = freshProject();
-  ensureWorkspacesDir(proj);
+  ensureWorkspacesDir(freshRoot(proj));
   const ws = sampleWorkspace({ id: "wsp_ctx" });
   const captured = toWorkspaceSessions([
     { id: "d", name: "n", cwd: proj, command: "", args: "", sessionId: "s", color: "#fff", createdAt: 1, bridge: "clodex", clodexContextTokens: 531_000 },
   ]);
   expect(captured[0]!.clodexContextTokens).toBe(531_000);
-  saveWorkspace(proj, { ...ws, sessions: captured });
-  const loaded = loadWorkspace(proj, "wsp_ctx")!;
+  saveFresh(proj, { ...ws, sessions: captured });
+  const loaded = loadWorkspace(fresh(proj, "wsp_ctx"))!;
   expect(fromWorkspaceSessions(loaded.sessions)[0]!.clodexContextTokens).toBe(531_000);
 
   for (const bad of [199_999, 872_001, 1.5, "300000", null, Number.NaN]) {
     writeFileSync(
-      join(workspacesDir(proj), "wsp_ctx_bad.json"),
+      join(workspacesDir(proj, "koryphaios"), "wsp_ctx_bad.json"),
       JSON.stringify({ ...loaded, id: "wsp_ctx_bad", sessions: [{ ...captured[0]!, clodexContextTokens: bad }] }),
       "utf8",
     );
-    expect(loadWorkspace(proj, "wsp_ctx_bad"), `value ${String(bad)}`).toBeNull();
+    expect(loadWorkspace(fresh(proj, "wsp_ctx_bad")), `value ${String(bad)}`).toBeNull();
   }
 
   const unbridged = toWorkspaceSessions([
@@ -208,19 +214,19 @@ test("a saved session keeps its tool denial through capture, file and restore, a
   expect(captured[1]).not.toHaveProperty("disallowedTools");
 
   const proj = freshProject();
-  ensureWorkspacesDir(proj);
+  ensureWorkspacesDir(freshRoot(proj));
   const ws = sampleWorkspace({ id: "wsp_denial", sessions: captured });
-  saveWorkspace(proj, ws);
-  const restored = fromWorkspaceSessions(loadWorkspace(proj, "wsp_denial")!.sessions);
+  saveFresh(proj, ws);
+  const restored = fromWorkspaceSessions(loadWorkspace(fresh(proj, "wsp_denial"))!.sessions);
   expect(restored[0]!.disallowedTools).toEqual(["Write", "Edit"]);
   expect(restored[1]!.disallowedTools).toBeUndefined();
 
   writeFileSync(
-    join(workspacesDir(proj), "wsp_hostile_denial.json"),
+    join(workspacesDir(proj, "koryphaios"), "wsp_hostile_denial.json"),
     JSON.stringify({ ...ws, id: "wsp_hostile_denial", sessions: [{ ...captured[0]!, disallowedTools: ["Write", "$(id)"] }] }),
     "utf8"
   );
-  expect(loadWorkspace(proj, "wsp_hostile_denial")).toBeNull();
+  expect(loadWorkspace(fresh(proj, "wsp_hostile_denial"))).toBeNull();
 });
 
 test("a workspace saved with the denial inside args gets it lifted into the field at restore, and a hostile pair stays in args", () => {
@@ -242,10 +248,10 @@ test("a workspace saved with the denial inside args gets it lifted into the fiel
 
 test("listWorkspaces sorts by updatedAt desc and skips malformed files", () => {
   const proj = freshProject();
-  ensureWorkspacesDir(proj);
-  saveWorkspace(proj, sampleWorkspace({ name: "old", updatedAt: 1 }));
-  saveWorkspace(proj, sampleWorkspace({ name: "newer" }));
-  writeFileSync(join(workspacesDir(proj), "garbage.json"), "{ not json");
+  ensureWorkspacesDir(freshRoot(proj));
+  saveFresh(proj, sampleWorkspace({ name: "old", updatedAt: 1 }));
+  saveFresh(proj, sampleWorkspace({ name: "newer" }));
+  writeFileSync(join(workspacesDir(proj, "koryphaios"), "garbage.json"), "{ not json");
 
   const list = listWorkspaces(proj);
   expect(list.length).toBe(2);
@@ -255,18 +261,18 @@ test("listWorkspaces sorts by updatedAt desc and skips malformed files", () => {
 
 test("loadWorkspace returns null for malformed/missing", () => {
   const proj = freshProject();
-  ensureWorkspacesDir(proj);
-  writeFileSync(join(workspacesDir(proj), "wsp_bad.json"), "{ partial");
-  expect(loadWorkspace(proj, "wsp_bad")).toBeNull();
-  expect(loadWorkspace(proj, "wsp_absent")).toBeNull();
+  ensureWorkspacesDir(freshRoot(proj));
+  writeFileSync(join(workspacesDir(proj, "koryphaios"), "wsp_bad.json"), "{ partial");
+  expect(loadWorkspace(fresh(proj, "wsp_bad"))).toBeNull();
+  expect(loadWorkspace(fresh(proj, "wsp_absent"))).toBeNull();
 });
 
 test("ensureWorkspacesDir creates tree and adds gitignore line exactly once", () => {
   const proj = freshProject();
-  ensureWorkspacesDir(proj);
-  ensureWorkspacesDir(proj); // idempotent
-  const gitignore = join(proj, ".claude", "claude-peers", ".gitignore");
-  expect(existsSync(workspacesDir(proj))).toBe(true);
+  ensureWorkspacesDir(freshRoot(proj));
+  ensureWorkspacesDir(freshRoot(proj)); // idempotent
+  const gitignore = join(proj, ".claude", "koryphaios", ".gitignore");
+  expect(existsSync(workspacesDir(proj, "koryphaios"))).toBe(true);
   const lines = readFileSync(gitignore, "utf8")
     .split(/\r?\n/)
     .filter((l) => l.trim() === "workspaces/");
@@ -275,11 +281,11 @@ test("ensureWorkspacesDir creates tree and adds gitignore line exactly once", ()
 
 test("ensureWorkspacesDir preserves a pre-existing gitignore (keeps config.json committable)", () => {
   const proj = freshProject();
-  const cpDir = join(proj, ".claude", "claude-peers");
-  ensureWorkspacesDir(proj);
+  const cpDir = join(proj, ".claude", "koryphaios");
+  ensureWorkspacesDir(freshRoot(proj));
   // Simulate a hand-written gitignore that already ignores something else.
   writeFileSync(join(cpDir, ".gitignore"), "*.local\n");
-  ensureWorkspacesDir(proj);
+  ensureWorkspacesDir(freshRoot(proj));
   const body = readFileSync(join(cpDir, ".gitignore"), "utf8");
   expect(body).toContain("*.local");
   expect(body).toContain("workspaces/");
@@ -288,12 +294,12 @@ test("ensureWorkspacesDir preserves a pre-existing gitignore (keeps config.json 
 test("deleteWorkspace removes json + lock and is a no-op when already gone", () => {
   const proj = freshProject();
   const ws = sampleWorkspace();
-  saveWorkspace(proj, ws);
-  writeFileSync(join(workspacesDir(proj), `${ws.id}.lock`), "{}");
-  deleteWorkspace(proj, ws.id);
-  expect(existsSync(join(workspacesDir(proj), `${ws.id}.json`))).toBe(false);
-  expect(existsSync(join(workspacesDir(proj), `${ws.id}.lock`))).toBe(false);
-  expect(() => deleteWorkspace(proj, ws.id)).not.toThrow(); // already gone
+  saveFresh(proj, ws);
+  writeFileSync(join(workspacesDir(proj, "koryphaios"), `${ws.id}.lock`), "{}");
+  deleteWorkspace(fresh(proj, ws.id));
+  expect(existsSync(join(workspacesDir(proj, "koryphaios"), `${ws.id}.json`))).toBe(false);
+  expect(existsSync(join(workspacesDir(proj, "koryphaios"), `${ws.id}.lock`))).toBe(false);
+  expect(() => deleteWorkspace(fresh(proj, ws.id))).not.toThrow(); // already gone
 });
 
 test("autoName has a fixed prefix, no em dash, and the HH:MM", () => {
@@ -380,10 +386,10 @@ function untrack(held: LockConnection | null): LockConnection | null {
 
 test("acquireLock writes a fresh lock when none exists", () => {
   const proj = freshProject();
-  ensureWorkspacesDir(proj);
-  const held = takeLock(proj, "wsp_1", { ...baseLiveness, pid: 4242 });
+  ensureWorkspacesDir(freshRoot(proj));
+  const held = takeLock(fresh(proj, "wsp_1"), { ...baseLiveness, pid: 4242 });
   expect(held).not.toBeNull();
-  const lock = readLock(proj, "wsp_1");
+  const lock = readLock(fresh(proj, "wsp_1"));
   expect(lock).not.toBeNull();
   expect(lock!.pid).toBe(4242);
   expect(lock!.host).toBe("this-host");
@@ -396,24 +402,24 @@ test("acquireLock writes a fresh lock when none exists", () => {
 
 test("acquireLock refuses a live same-host owner, reclaims a dead one", () => {
   const proj = freshProject();
-  ensureWorkspacesDir(proj);
-  const first = takeLock(proj, "wsp_1", { ...baseLiveness, pid: 4242 });
+  ensureWorkspacesDir(freshRoot(proj));
+  const first = takeLock(fresh(proj, "wsp_1"), { ...baseLiveness, pid: 4242 });
 
   // The owner's OS lock refuses on its own, whatever its JSON lock says.
-  expect(takeLock(proj, "wsp_1", { ...baseLiveness, pid: 9999, isPidAlive: () => false })).toBeNull();
+  expect(takeLock(fresh(proj, "wsp_1"), { ...baseLiveness, pid: 9999, isPidAlive: () => false })).toBeNull();
 
   dropOsLock(first);
   // Same host, pid alive -> refuse.
-  expect(takeLock(proj, "wsp_1", { ...baseLiveness, pid: 9999, isPidAlive: () => true })).toBeNull();
+  expect(takeLock(fresh(proj, "wsp_1"), { ...baseLiveness, pid: 9999, isPidAlive: () => true })).toBeNull();
 
   // Same host, pid dead -> reclaim.
-  const reclaimed = takeLock(proj, "wsp_1", {
+  const reclaimed = takeLock(fresh(proj, "wsp_1"), {
     ...baseLiveness,
     pid: 9999,
     isPidAlive: () => false,
   });
   expect(reclaimed).not.toBeNull();
-  expect(readLock(proj, "wsp_1")!.pid).toBe(9999);
+  expect(readLock(fresh(proj, "wsp_1"))!.pid).toBe(9999);
 });
 
 // A bare pid-alive check cannot tell a still-running owner from an unrelated
@@ -512,8 +518,8 @@ test("isLockLive same-host: tolerance boundary fails toward 'cannot conclude', n
 
 test("acquireLock: lock startedAt precedes this machine's boot, pid alive -> reclaimed (positive proof)", () => {
   const proj = freshProject();
-  ensureWorkspacesDir(proj);
-  dropOsLock(takeLock(proj, "wsp_1", { ...baseLiveness, pid: 4242, startedAt: 1_000, bootInstant: 0 }));
+  ensureWorkspacesDir(freshRoot(proj));
+  dropOsLock(takeLock(fresh(proj, "wsp_1"), { ...baseLiveness, pid: 4242, startedAt: 1_000, bootInstant: 0 }));
   // A later liveness check runs on a machine that has since rebooted:
   // bootInstant now postdates the recorded owner's startedAt by more than
   // the tolerance, so the lock is provably stale even with a live pid. Also
@@ -521,7 +527,7 @@ test("acquireLock: lock startedAt precedes this machine's boot, pid alive -> rec
   // baseLiveness.now = 10_000) + staleMs (5_000) so the AND condition's
   // second half (heartbeat stale, review round 6) is satisfied too --
   // without it the reclaim would fall back to isPidAlive and stay refused.
-  const reclaimed = takeLock(proj, "wsp_1", {
+  const reclaimed = takeLock(fresh(proj, "wsp_1"), {
     ...baseLiveness,
     now: 20_000,
     pid: 5555,
@@ -530,16 +536,16 @@ test("acquireLock: lock startedAt precedes this machine's boot, pid alive -> rec
     isPidAlive: () => true,
   });
   expect(reclaimed).not.toBeNull();
-  const lock = readLock(proj, "wsp_1")!;
+  const lock = readLock(fresh(proj, "wsp_1"))!;
   expect(lock.pid).toBe(5555);
   expect(lock.startedAt).toBe(6_000);
 });
 
 test("acquireLock: lock startedAt at/after boot, pid alive -> refused, on-disk lock unchanged (negative proof)", () => {
   const proj = freshProject();
-  ensureWorkspacesDir(proj);
-  dropOsLock(takeLock(proj, "wsp_1", { ...baseLiveness, pid: 4242, startedAt: 6_000, bootInstant: 0 }));
-  const refused = takeLock(proj, "wsp_1", {
+  ensureWorkspacesDir(freshRoot(proj));
+  dropOsLock(takeLock(fresh(proj, "wsp_1"), { ...baseLiveness, pid: 4242, startedAt: 6_000, bootInstant: 0 }));
+  const refused = takeLock(fresh(proj, "wsp_1"), {
     ...baseLiveness,
     pid: 9999,
     startedAt: 7_000,
@@ -547,16 +553,16 @@ test("acquireLock: lock startedAt at/after boot, pid alive -> refused, on-disk l
     isPidAlive: () => true,
   });
   expect(refused).toBeNull();
-  const lock = readLock(proj, "wsp_1")!;
+  const lock = readLock(fresh(proj, "wsp_1"))!;
   expect(lock.pid).toBe(4242);
   expect(lock.startedAt).toBe(6_000);
 });
 
 test("acquireLock: lock startedAt at/after boot, pid dead -> reclaimed (fallback preserves the pre-card guarantee)", () => {
   const proj = freshProject();
-  ensureWorkspacesDir(proj);
-  dropOsLock(takeLock(proj, "wsp_1", { ...baseLiveness, pid: 4242, startedAt: 6_000, bootInstant: 0 }));
-  const reclaimed = takeLock(proj, "wsp_1", {
+  ensureWorkspacesDir(freshRoot(proj));
+  dropOsLock(takeLock(fresh(proj, "wsp_1"), { ...baseLiveness, pid: 4242, startedAt: 6_000, bootInstant: 0 }));
+  const reclaimed = takeLock(fresh(proj, "wsp_1"), {
     ...baseLiveness,
     pid: 9999,
     startedAt: 7_000,
@@ -564,7 +570,7 @@ test("acquireLock: lock startedAt at/after boot, pid dead -> reclaimed (fallback
     isPidAlive: () => false, // ...but the fallback still catches a dead owner
   });
   expect(reclaimed).not.toBeNull();
-  expect(readLock(proj, "wsp_1")!.pid).toBe(9999);
+  expect(readLock(fresh(proj, "wsp_1"))!.pid).toBe(9999);
 });
 
 test("isLockLive cross-host relies on heartbeat freshness, boundary is stale", () => {
@@ -576,15 +582,15 @@ test("isLockLive cross-host relies on heartbeat freshness, boundary is stale", (
 
 test("refreshLock updates heartbeat; releaseLock removes the file (no-op if gone)", () => {
   const proj = freshProject();
-  ensureWorkspacesDir(proj);
-  const held = takeLock(proj, "wsp_1", { ...baseLiveness, pid: 4242 });
+  ensureWorkspacesDir(freshRoot(proj));
+  const held = takeLock(fresh(proj, "wsp_1"), { ...baseLiveness, pid: 4242 });
   const owner = { pid: 4242, host: "this-host" };
-  expect(refreshLock(proj, "wsp_1", 99_999, owner)).toBe(true);
-  expect(readLock(proj, "wsp_1")!.heartbeat).toBe(99_999);
-  expect(releaseLock(proj, "wsp_1", owner, untrack(held))).toBe(true);
-  expect(readLock(proj, "wsp_1")).toBeNull();
-  expect(releaseLock(proj, "wsp_1", owner, null)).toBe(true); // already gone -> no-op, still ok
-  expect(takeLock(proj, "wsp_1", { ...baseLiveness, pid: 9999 }), "the release gave the OS lock back").not.toBeNull();
+  expect(refreshLock(fresh(proj, "wsp_1"), 99_999, owner)).toBe(true);
+  expect(readLock(fresh(proj, "wsp_1"))!.heartbeat).toBe(99_999);
+  expect(releaseLock(fresh(proj, "wsp_1"), owner, untrack(held))).toBe(true);
+  expect(readLock(fresh(proj, "wsp_1"))).toBeNull();
+  expect(releaseLock(fresh(proj, "wsp_1"), owner, null)).toBe(true); // already gone -> no-op, still ok
+  expect(takeLock(fresh(proj, "wsp_1"), { ...baseLiveness, pid: 9999 }), "the release gave the OS lock back").not.toBeNull();
 });
 
 test("ownsLock matches pid+host exactly, mismatched pid or host both refuse", () => {
@@ -596,20 +602,20 @@ test("ownsLock matches pid+host exactly, mismatched pid or host both refuse", ()
 
 test("refreshLock refuses to re-stamp a lock owned by a different identity (no heartbeat theft)", () => {
   const proj = freshProject();
-  ensureWorkspacesDir(proj);
-  takeLock(proj, "wsp_1", { ...baseLiveness, pid: 4242 });
+  ensureWorkspacesDir(freshRoot(proj));
+  takeLock(fresh(proj, "wsp_1"), { ...baseLiveness, pid: 4242 });
   const foreign = { pid: 9999, host: "this-host" };
-  expect(refreshLock(proj, "wsp_1", 99_999, foreign)).toBe(false);
-  expect(readLock(proj, "wsp_1")!.heartbeat).not.toBe(99_999);
+  expect(refreshLock(fresh(proj, "wsp_1"), 99_999, foreign)).toBe(false);
+  expect(readLock(fresh(proj, "wsp_1"))!.heartbeat).not.toBe(99_999);
 });
 
 test("releaseLock refuses to delete a lock owned by a different identity (no cross-instance destruction)", () => {
   const proj = freshProject();
-  ensureWorkspacesDir(proj);
-  takeLock(proj, "wsp_1", { ...baseLiveness, pid: 4242 });
+  ensureWorkspacesDir(freshRoot(proj));
+  takeLock(fresh(proj, "wsp_1"), { ...baseLiveness, pid: 4242 });
   const foreign = { pid: 9999, host: "this-host" };
-  expect(releaseLock(proj, "wsp_1", foreign, null)).toBe(false);
-  expect(readLock(proj, "wsp_1")).not.toBeNull();
+  expect(releaseLock(fresh(proj, "wsp_1"), foreign, null)).toBe(false);
+  expect(readLock(fresh(proj, "wsp_1"))).not.toBeNull();
 });
 
 // ----- WorkspaceService (own()/persist()/restore() wiring) -----
@@ -716,12 +722,12 @@ function cwdOnlyWorkspace(id: string): Workspace {
 
 test("WorkspaceService.restore(): each approval gate rejects an invalidated request", async () => {
   const proj = freshProject();
-  ensureWorkspacesDir(proj);
+  ensureWorkspacesDir(freshRoot(proj));
   for (const [name, ws, gateKey] of [
     ["shell", shellOnlyWorkspace(proj, "wsp-shell"), "confirmShellFields"],
     ["cwd", cwdOnlyWorkspace("wsp-cwd"), "confirmUntrustedCwd"],
   ] as const) {
-    saveWorkspace(proj, ws);
+    saveFresh(proj, ws);
     const gate = deferredGate();
     let effects = 0;
     const deps = fakeDeps(proj, {
@@ -743,12 +749,12 @@ test("WorkspaceService.restore(): each approval gate rejects an invalidated requ
 
 test("WorkspaceService.restore(): each approval gate rechecks a lock acquired while waiting", async () => {
   const proj = freshProject();
-  ensureWorkspacesDir(proj);
+  ensureWorkspacesDir(freshRoot(proj));
   for (const [name, ws, gateKey] of [
     ["shell", shellOnlyWorkspace(proj, "wsp-shell-lock"), "confirmShellFields"],
     ["cwd", cwdOnlyWorkspace("wsp-cwd-lock"), "confirmUntrustedCwd"],
   ] as const) {
-    saveWorkspace(proj, ws);
+    saveFresh(proj, ws);
     const gate = deferredGate();
     let effects = 0;
     const deps = fakeDeps(proj, {
@@ -760,7 +766,7 @@ test("WorkspaceService.restore(): each approval gate rechecks a lock acquired wh
 
     const restoring = svc.restore(ws.id, "attended");
     await Promise.resolve();
-    takeLock(proj, ws.id, { ...baseLiveness, pid: 9999, isPidAlive: () => true });
+    takeLock(fresh(proj, ws.id), { ...baseLiveness, pid: 9999, isPidAlive: () => true });
     gate.resolve("approved");
 
     await expect(restoring, name).resolves.toEqual({ ok: false, reason: "locked" });
@@ -770,10 +776,10 @@ test("WorkspaceService.restore(): each approval gate rechecks a lock acquired wh
 
 test("WorkspaceService.restore(): applies the workspace captured before its approval", async () => {
   const proj = freshProject();
-  ensureWorkspacesDir(proj);
+  ensureWorkspacesDir(freshRoot(proj));
   const original = shellOnlyWorkspace(proj, "wsp-captured");
   const replacement = { ...original, sessions: [{ ...original.sessions[0]!, name: "rewritten", args: ["--agent", "rewritten"] }] };
-  saveWorkspace(proj, original);
+  saveFresh(proj, original);
   const gate = deferredGate();
   let restored: SessionDef[] = [];
   const deps = fakeDeps(proj, { confirmShellFields: async () => gate.promise });
@@ -782,7 +788,7 @@ test("WorkspaceService.restore(): applies the workspace captured before its appr
 
   const restoring = svc.restore(original.id, "attended");
   await Promise.resolve();
-  saveWorkspace(proj, replacement);
+  saveFresh(proj, replacement);
   gate.resolve("approved");
 
   await expect(restoring).resolves.toEqual({ ok: true });
@@ -791,7 +797,7 @@ test("WorkspaceService.restore(): applies the workspace captured before its appr
 
 test("WorkspaceService.restore(): a second lead crown is dropped and named in the result, every team-lead role is kept, a lone crown is not named", async () => {
   const proj = freshProject();
-  ensureWorkspacesDir(proj);
+  ensureWorkspacesDir(freshRoot(proj));
   const base = sampleWorkspace().sessions[0]!;
   const twoCrowns = sampleWorkspace({
     id: "wsp-two-crowns",
@@ -808,9 +814,9 @@ test("WorkspaceService.restore(): a second lead crown is dropped and named in th
     ],
   });
   const one = sampleWorkspace({ id: "wsp-one-lead", sessions: [{ ...base, name: "boss", args: [], role: "team-lead", lead: true, position: 0 }] });
-  saveWorkspace(proj, twoCrowns);
-  saveWorkspace(proj, twoSubLeads);
-  saveWorkspace(proj, one);
+  saveFresh(proj, twoCrowns);
+  saveFresh(proj, twoSubLeads);
+  saveFresh(proj, one);
   let restored: SessionDef[] = [];
   const deps = fakeDeps(proj);
   deps.service.restoreFrom = (sessions) => { restored = sessions; return []; };
@@ -828,11 +834,11 @@ test("WorkspaceService.restore(): a second lead crown is dropped and named in th
 
 test("WorkspaceService.restore(): concurrent approval returns busy without invalidating the first request", async () => {
   const proj = freshProject();
-  ensureWorkspacesDir(proj);
+  ensureWorkspacesDir(freshRoot(proj));
   const first = sampleWorkspace({ id: "wsp-first" });
   const second = sampleWorkspace({ id: "wsp-second" });
-  saveWorkspace(proj, first);
-  saveWorkspace(proj, second);
+  saveFresh(proj, first);
+  saveFresh(proj, second);
   const gate = deferredGate();
   const deps = fakeDeps(proj, {
     confirmShellFields: (() => gate.promise) as unknown as WorkspaceDeps["confirmShellFields"],
@@ -849,9 +855,9 @@ test("WorkspaceService.restore(): concurrent approval returns busy without inval
 });
 
 function seedRaceWorkspaces(proj: string): { oldWs: Workspace } {
-  ensureWorkspacesDir(proj);
+  ensureWorkspacesDir(freshRoot(proj));
   const oldWs = sampleWorkspace({ id: "wsp_old" });
-  saveWorkspace(proj, oldWs);
+  saveFresh(proj, oldWs);
   // Sessions distinguishable from oldWs's default ("reviewer") so the
   // anti-corruption assertion cannot pass by content coincidence.
   const targetWs = sampleWorkspace({
@@ -867,12 +873,12 @@ function seedRaceWorkspaces(proj: string): { oldWs: Workspace } {
       },
     ],
   });
-  saveWorkspace(proj, targetWs);
+  saveFresh(proj, targetWs);
   return { oldWs };
 }
 
 function takeForeignTargetLock(proj: string): void {
-  takeLock(proj, "wsp_target", {
+  takeLock(fresh(proj, "wsp_target"), {
     host: "other-host",
     now: Date.now(),
     bootInstant: 0,
@@ -907,8 +913,8 @@ test("WorkspaceService.restore(): a foreign lock taken while the scope is adopte
 
 test("WorkspaceService.restore(): the sessions spawn only once the adopted scope's transition has settled", async () => {
   const proj = freshProject();
-  ensureWorkspacesDir(proj);
-  saveWorkspace(proj, sampleWorkspace({ id: "wsp_scope" }));
+  ensureWorkspacesDir(freshRoot(proj));
+  saveFresh(proj, sampleWorkspace({ id: "wsp_scope" }));
   let settle = (): void => {};
   const transition = new Promise<void>((resolve) => {
     settle = resolve;
@@ -940,8 +946,8 @@ test("WorkspaceService.restore(): the sessions spawn only once the adopted scope
 
 test("WorkspaceService.restore(): a credential timeout does not acquire or replace sessions", async () => {
   const proj = freshProject();
-  ensureWorkspacesDir(proj);
-  saveWorkspace(proj, sampleWorkspace({ id: "wsp_credential_timeout" }));
+  ensureWorkspacesDir(freshRoot(proj));
+  saveFresh(proj, sampleWorkspace({ id: "wsp_credential_timeout" }));
   const deps = fakeDeps(proj, {
     adoptScope: async () => ({ state: "credential-timed-out" }),
   });
@@ -955,9 +961,9 @@ test("WorkspaceService.restore(): a credential timeout does not acquire or repla
 });
 
 function adoptionHarness(proj: string) {
-  ensureWorkspacesDir(proj);
-  saveWorkspace(proj, sampleWorkspace({ id: "wsp_a", groupId: "g-a" }));
-  saveWorkspace(proj, sampleWorkspace({ id: "wsp_b", groupId: "g-b" }));
+  ensureWorkspacesDir(freshRoot(proj));
+  saveFresh(proj, sampleWorkspace({ id: "wsp_a", groupId: "g-a" }));
+  saveFresh(proj, sampleWorkspace({ id: "wsp_b", groupId: "g-b" }));
   const initial: Scope = { ...fakeScope(), groupId: "g-initial" };
   const state = { active: initial, restored: 0 };
   const settles: Array<() => void> = [];
@@ -1108,15 +1114,15 @@ test("WorkspaceService.restore(): quitting during the scope adoption does not re
 
 test("WorkspaceService.restore(): succeeds and owns the lock when nothing contends", async () => {
   const proj = freshProject();
-  ensureWorkspacesDir(proj);
+  ensureWorkspacesDir(freshRoot(proj));
   const ws = sampleWorkspace({ id: "wsp_target" });
-  saveWorkspace(proj, ws);
+  saveFresh(proj, ws);
   const deps = fakeDeps(proj);
   const svc = workspaceService(deps);
   const result = await svc.restore("wsp_target", "attended");
   expect(result).toEqual({ ok: true });
   expect(svc.currentWorkspaceId).toBe("wsp_target");
-  const lock = readLock(proj, "wsp_target");
+  const lock = readLock(fresh(proj, "wsp_target"));
   expect(lock).not.toBeNull();
   expect(lock!.pid).toBe(4242);
   expect(lock!.host).toBe("this-host");
@@ -1124,10 +1130,8 @@ test("WorkspaceService.restore(): succeeds and owns the lock when nothing conten
 
 test("WorkspaceService.restore(): operator restore is not bound by the agent spawn cap", async () => {
   const proj = freshProject();
-  ensureWorkspacesDir(proj);
-  saveWorkspace(
-    proj,
-    sampleWorkspace({
+  ensureWorkspacesDir(freshRoot(proj));
+  saveFresh(proj, sampleWorkspace({
       id: "wsp_over_cap",
       sessions: Array.from({ length: SPAWN_CAP + 3 }, (_, position) => ({
         claudeSessionId: `sid-${position}`,
@@ -1148,7 +1152,7 @@ test("WorkspaceService.restore(): operator restore is not bound by the agent spa
 
 test("WorkspaceService.restore(): a workspace id with no saved file resolves to reason 'missing'", async () => {
   const proj = freshProject();
-  ensureWorkspacesDir(proj);
+  ensureWorkspacesDir(freshRoot(proj));
   const deps = fakeDeps(proj);
   const svc = workspaceService(deps);
   const result = await svc.restore("wsp_does_not_exist", "attended");
@@ -1158,9 +1162,9 @@ test("WorkspaceService.restore(): a workspace id with no saved file resolves to 
 
 test("WorkspaceService.restore(): a saved workspace with zero sessions resolves to reason 'empty', never reaching restoreFrom (b8d65b24 follow-up)", async () => {
   const proj = freshProject();
-  ensureWorkspacesDir(proj);
+  ensureWorkspacesDir(freshRoot(proj));
   const ws = sampleWorkspace({ id: "wsp_empty", sessions: [] });
-  saveWorkspace(proj, ws);
+  saveFresh(proj, ws);
   const deps = fakeDeps(proj);
   const svc = workspaceService(deps);
   const result = await svc.restore("wsp_empty", "attended");
@@ -1179,7 +1183,7 @@ test("WorkspaceService.restore(): a saved workspace with zero sessions resolves 
 // claudeSessionId that never had one.
 test("WorkspaceService.restore(): refuses when args are shell-bearing and confirmShellFields declines (card 09d54a29)", async () => {
   const proj = freshProject();
-  ensureWorkspacesDir(proj);
+  ensureWorkspacesDir(freshRoot(proj));
   const ws = sampleWorkspace({
     id: "wsp_hostile",
     sessions: [
@@ -1195,7 +1199,7 @@ test("WorkspaceService.restore(): refuses when args are shell-bearing and confir
       },
     ],
   });
-  saveWorkspace(proj, ws);
+  saveFresh(proj, ws);
   let confirmCalls = 0;
   const deps = fakeDeps(proj, {
     confirmShellFields: async () => {
@@ -1218,7 +1222,7 @@ test("WorkspaceService.restore(): refuses when args are shell-bearing and confir
 // gate before restoreFrom() runs.
 test("WorkspaceService.restore(): refuses when a session carries only a bridge marker and confirmShellFields declines", async () => {
   const proj = freshProject();
-  ensureWorkspacesDir(proj);
+  ensureWorkspacesDir(freshRoot(proj));
   const ws = sampleWorkspace({
     id: "wsp_bridge_only",
     sessions: [
@@ -1233,7 +1237,7 @@ test("WorkspaceService.restore(): refuses when a session carries only a bridge m
       },
     ],
   });
-  saveWorkspace(proj, ws);
+  saveFresh(proj, ws);
   let confirmCalls = 0;
   const deps = fakeDeps(proj, {
     confirmShellFields: async () => {
@@ -1253,10 +1257,10 @@ test("WorkspaceService.restore(): refuses when a session carries only a bridge m
 
 test("WorkspaceService.restore(): proceeds when args are shell-bearing and confirmShellFields approves", async () => {
   const proj = freshProject();
-  ensureWorkspacesDir(proj);
+  ensureWorkspacesDir(freshRoot(proj));
   // sampleWorkspace()'s default session already carries non-empty args.
   const ws = sampleWorkspace({ id: "wsp_approved" });
-  saveWorkspace(proj, ws);
+  saveFresh(proj, ws);
   const deps = fakeDeps(proj, { confirmShellFields: async () => "approved" });
   const svc = workspaceService(deps);
   const result = await svc.restore("wsp_approved", "attended");
@@ -1265,9 +1269,9 @@ test("WorkspaceService.restore(): proceeds when args are shell-bearing and confi
 
 test("WorkspaceService.restore(): an unattended caller with an unapproved shell-bearing payload gets 'unattended', not 'shell-declined' (card 64f8f629)", async () => {
   const proj = freshProject();
-  ensureWorkspacesDir(proj);
+  ensureWorkspacesDir(freshRoot(proj));
   const ws = sampleWorkspace({ id: "wsp_hostile_unattended" });
-  saveWorkspace(proj, ws);
+  saveFresh(proj, ws);
   const deps = fakeDeps(proj, { confirmShellFields: async () => "unattended" });
   const svc = workspaceService(deps);
   const result = await svc.restore("wsp_hostile_unattended", "unattended");
@@ -1282,9 +1286,9 @@ test("WorkspaceService.restore(): an unattended caller with an unapproved shell-
 // pre-existing test green. These two observe the RECEIVED argument instead.
 test("WorkspaceService.restore(): the caller's own attendance ('unattended') reaches confirmShellFields verbatim", async () => {
   const proj = freshProject();
-  ensureWorkspacesDir(proj);
+  ensureWorkspacesDir(freshRoot(proj));
   const ws = sampleWorkspace({ id: "wsp_seen_unattended" });
-  saveWorkspace(proj, ws);
+  saveFresh(proj, ws);
   const seen: CallerAttendance[] = [];
   const deps = fakeDeps(proj, {
     confirmShellFields: async (_ws, attendance) => {
@@ -1299,9 +1303,9 @@ test("WorkspaceService.restore(): the caller's own attendance ('unattended') rea
 
 test("WorkspaceService.restore(): the caller's own attendance ('attended') reaches confirmShellFields verbatim", async () => {
   const proj = freshProject();
-  ensureWorkspacesDir(proj);
+  ensureWorkspacesDir(freshRoot(proj));
   const ws = sampleWorkspace({ id: "wsp_seen_attended" });
-  saveWorkspace(proj, ws);
+  saveFresh(proj, ws);
   const seen: CallerAttendance[] = [];
   const deps = fakeDeps(proj, {
     confirmShellFields: async (_ws, attendance) => {
@@ -1316,7 +1320,7 @@ test("WorkspaceService.restore(): the caller's own attendance ('attended') reach
 
 test("WorkspaceService.restore(): never asks for approval when no session carries args", async () => {
   const proj = freshProject();
-  ensureWorkspacesDir(proj);
+  ensureWorkspacesDir(freshRoot(proj));
   const ws = sampleWorkspace({
     id: "wsp_benign",
     sessions: [
@@ -1330,7 +1334,7 @@ test("WorkspaceService.restore(): never asks for approval when no session carrie
       },
     ],
   });
-  saveWorkspace(proj, ws);
+  saveFresh(proj, ws);
   let confirmCalls = 0;
   const deps = fakeDeps(proj, {
     confirmShellFields: async () => {
@@ -1355,7 +1359,7 @@ test("WorkspaceService.restore(): never asks for approval when no session carrie
 // SEPARATE named predicate/callback rather than folded into the same one.
 test("WorkspaceService.restore(): refuses when a session's cwd is outside the project tree and confirmUntrustedCwd declines (card 09d54a29 follow-up, GX-SEC)", async () => {
   const proj = freshProject();
-  ensureWorkspacesDir(proj);
+  ensureWorkspacesDir(freshRoot(proj));
   const outside = mkdtempSync(join(tmpdir(), "cp-wsp-outside-"));
   tmpDirs.push(outside);
   const ws = sampleWorkspace({
@@ -1372,7 +1376,7 @@ test("WorkspaceService.restore(): refuses when a session's cwd is outside the pr
       },
     ],
   });
-  saveWorkspace(proj, ws);
+  saveFresh(proj, ws);
   let confirmCalls = 0;
   const deps = fakeDeps(proj, {
     confirmUntrustedCwd: async () => {
@@ -1389,7 +1393,7 @@ test("WorkspaceService.restore(): refuses when a session's cwd is outside the pr
 
 test("WorkspaceService.restore(): an unattended caller with an unapproved untrusted cwd gets 'unattended', not 'cwd-declined' (card 64f8f629)", async () => {
   const proj = freshProject();
-  ensureWorkspacesDir(proj);
+  ensureWorkspacesDir(freshRoot(proj));
   const outside = mkdtempSync(join(tmpdir(), "cp-wsp-outside-"));
   tmpDirs.push(outside);
   const ws = sampleWorkspace({
@@ -1399,7 +1403,7 @@ test("WorkspaceService.restore(): an unattended caller with an unapproved untrus
       { claudeSessionId: "sid-1", name: "reviewer", cwd: outside, args: [], color: "#4488ff", position: 0 },
     ],
   });
-  saveWorkspace(proj, ws);
+  saveFresh(proj, ws);
   const deps = fakeDeps(proj, { confirmUntrustedCwd: async () => "unattended" });
   const svc = workspaceService(deps);
   const result = await svc.restore("wsp_hostile_cwd_unattended", "unattended");
@@ -1411,7 +1415,7 @@ test("WorkspaceService.restore(): an unattended caller with an unapproved untrus
 // confirmShellFields above, on the SEPARATE untrusted-cwd gate.
 test("WorkspaceService.restore(): the caller's own attendance reaches confirmUntrustedCwd verbatim, in both directions", async () => {
   const proj = freshProject();
-  ensureWorkspacesDir(proj);
+  ensureWorkspacesDir(freshRoot(proj));
   const outside = mkdtempSync(join(tmpdir(), "cp-wsp-outside-"));
   tmpDirs.push(outside);
   const wsFor = (id: string): Workspace =>
@@ -1422,8 +1426,8 @@ test("WorkspaceService.restore(): the caller's own attendance reaches confirmUnt
         { claudeSessionId: "sid-1", name: "reviewer", cwd: outside, args: [], color: "#4488ff", position: 0 },
       ],
     });
-  saveWorkspace(proj, wsFor("wsp_cwd_seen_unattended"));
-  saveWorkspace(proj, wsFor("wsp_cwd_seen_attended"));
+  saveFresh(proj, wsFor("wsp_cwd_seen_unattended"));
+  saveFresh(proj, wsFor("wsp_cwd_seen_attended"));
 
   const seen: CallerAttendance[] = [];
   const deps = fakeDeps(proj, {
@@ -1440,7 +1444,7 @@ test("WorkspaceService.restore(): the caller's own attendance reaches confirmUnt
 
 test("WorkspaceService.restore(): proceeds when cwd is outside the project tree and confirmUntrustedCwd approves", async () => {
   const proj = freshProject();
-  ensureWorkspacesDir(proj);
+  ensureWorkspacesDir(freshRoot(proj));
   const outside = mkdtempSync(join(tmpdir(), "cp-wsp-outside-"));
   tmpDirs.push(outside);
   const ws = sampleWorkspace({
@@ -1457,7 +1461,7 @@ test("WorkspaceService.restore(): proceeds when cwd is outside the project tree 
       },
     ],
   });
-  saveWorkspace(proj, ws);
+  saveFresh(proj, ws);
   const deps = fakeDeps(proj, { confirmUntrustedCwd: async () => "approved" });
   const svc = workspaceService(deps);
   const result = await svc.restore("wsp_approved_cwd", "attended");
@@ -1470,7 +1474,7 @@ test("WorkspaceService.restore(): proceeds when cwd is outside the project tree 
 // without prompting, or every ordinary restore would nag the operator.
 test("WorkspaceService.restore(): never asks about cwd for the project root or a .worktrees/ path under it", async () => {
   const proj = freshProject();
-  ensureWorkspacesDir(proj);
+  ensureWorkspacesDir(freshRoot(proj));
   const wt = join(proj, ".worktrees", "feature-x");
   mkdirSync(wt, { recursive: true });
   const ws = sampleWorkspace({
@@ -1481,7 +1485,7 @@ test("WorkspaceService.restore(): never asks about cwd for the project root or a
       { claudeSessionId: "sid-2", name: "wt", cwd: wt, args: [], color: "#4488ff", position: 1 },
     ],
   });
-  saveWorkspace(proj, ws);
+  saveFresh(proj, ws);
   let confirmCalls = 0;
   const deps = fakeDeps(proj, {
     confirmUntrustedCwd: async () => {
@@ -1502,7 +1506,7 @@ test("WorkspaceService.restore(): never asks about cwd for the project root or a
 // heartbeatTick() directly, without an injectable timer.
 test("WorkspaceService.heartbeatTick(): refreshes with THIS instance's own identity, self-ejects ONCE on mismatch (not per call)", async () => {
   const proj = freshProject();
-  ensureWorkspacesDir(proj);
+  ensureWorkspacesDir(freshRoot(proj));
   const deps = fakeDeps(proj); // pid: 4242, host: "this-host"
   const svc = workspaceService(deps);
   expect(svc.saveAuto()).not.toBeNull();
@@ -1512,21 +1516,21 @@ test("WorkspaceService.heartbeatTick(): refreshes with THIS instance's own ident
   // Phase 1: lock still ours -- heartbeatTick() must pass deps.pid/deps.host
   // to refreshLock() (not e.g. hardcoded/omitted values) and bump the
   // on-disk heartbeat, with no error reported.
-  const before = readLock(proj, id)!.heartbeat;
+  const before = readLock(fresh(proj, id))!.heartbeat;
   const reportedOwned: Array<{ scope: string; text: string }> = [];
   onDeckError((scope, text) => reportedOwned.push({ scope, text }));
   tick();
   onDeckError(() => {});
   expect(reportedOwned.length).toBe(0);
-  expect(readLock(proj, id)!.heartbeat).toBeGreaterThanOrEqual(before);
-  expect(readLock(proj, id)!.pid).toBe(4242);
-  expect(readLock(proj, id)!.host).toBe("this-host");
+  expect(readLock(fresh(proj, id))!.heartbeat).toBeGreaterThanOrEqual(before);
+  expect(readLock(fresh(proj, id))!.pid).toBe(4242);
+  expect(readLock(fresh(proj, id))!.host).toBe("this-host");
 
   // Phase 2: steal the lock out from under this instance WITHOUT going
   // through WorkspaceService, so the next tick() must observe a mismatch. A
   // LIVE owner (fresh heartbeat on another host): a dead one is rewritten.
   const foreignLock: Lock = { pid: 99_999, host: "other-host", startedAt: 0, heartbeat: Date.now() };
-  writeFileSync(join(workspacesDir(proj), `${id}.lock`), JSON.stringify(foreignLock));
+  writeFileSync(join(workspacesDir(proj, "koryphaios"), `${id}.lock`), JSON.stringify(foreignLock));
 
   const reported: Array<{ scope: string; text: string }> = [];
   onDeckError((scope, text) => reported.push({ scope, text }));
@@ -1544,12 +1548,12 @@ test("WorkspaceService.heartbeatTick(): refreshes with THIS instance's own ident
   // deps.pid/deps.host rather than always succeeding regardless of who
   // calls it (which would silently keep a foreign lock alive forever --
   // the exact failure this card exists to close).
-  expect(readLock(proj, id)).toEqual(foreignLock);
+  expect(readLock(fresh(proj, id))).toEqual(foreignLock);
 });
 
 test("WorkspaceService.heartbeatTick(): reports a successful repair when no failure was reported", async () => {
   const proj = freshProject();
-  ensureWorkspacesDir(proj);
+  ensureWorkspacesDir(freshRoot(proj));
   const svc = workspaceService(fakeDeps(proj, {
     openLock: () => ({ exec: () => {}, close: () => {} }),
   }));
@@ -1558,8 +1562,8 @@ test("WorkspaceService.heartbeatTick(): reports a successful repair when no fail
   const tick = () => (svc as unknown as { heartbeatTick(): void }).heartbeatTick();
   const reported: Array<{ scope: string; text: string }> = [];
 
-  rmSync(workspacesDir(proj), { recursive: true, force: true });
-  ensureWorkspacesDir(proj);
+  rmSync(workspacesDir(proj, "koryphaios"), { recursive: true, force: true });
+  ensureWorkspacesDir(freshRoot(proj));
   onDeckError((scope, text) => reported.push({ scope, text }));
   try {
     tick();
@@ -1571,12 +1575,12 @@ test("WorkspaceService.heartbeatTick(): reports a successful repair when no fail
   expect(reported).toEqual([
     expect.objectContaining({ scope: "workspace", text: expect.stringContaining(id) }),
   ]);
-  expect(readLock(proj, id)).toEqual(expect.objectContaining({ pid: 4242, host: "this-host" }));
+  expect(readLock(fresh(proj, id))).toEqual(expect.objectContaining({ pid: 4242, host: "this-host" }));
 });
 
 test("WorkspaceService.heartbeatTick(): reports failures independently after changing workspaces", async () => {
   const proj = freshProject();
-  ensureWorkspacesDir(proj);
+  ensureWorkspacesDir(freshRoot(proj));
   const svc = workspaceService(fakeDeps(proj, {
     openLock: () => ({ exec: () => {}, close: () => {} }),
   }));
@@ -1594,19 +1598,19 @@ test("WorkspaceService.heartbeatTick(): reports failures independently after cha
     expect(thrown).toBeUndefined();
   };
 
-  rmSync(workspacesDir(proj), { recursive: true, force: true });
+  rmSync(workspacesDir(proj, "koryphaios"), { recursive: true, force: true });
   onDeckError((scope, text) => reported.push({ scope, text }));
   try {
     tickWithoutThrow();
-    ensureWorkspacesDir(proj);
-    saveWorkspace(proj, sampleWorkspace({ id: "wsp_b" }));
+    ensureWorkspacesDir(freshRoot(proj));
+    saveFresh(proj, sampleWorkspace({ id: "wsp_b" }));
     expect(await svc.restore("wsp_b", "attended")).toEqual({ ok: true });
 
-    rmSync(workspacesDir(proj), { recursive: true, force: true });
+    rmSync(workspacesDir(proj, "koryphaios"), { recursive: true, force: true });
     tickWithoutThrow();
   } finally {
     onDeckError(() => {});
-    ensureWorkspacesDir(proj);
+    ensureWorkspacesDir(freshRoot(proj));
   }
 
   expect(reported.filter(({ text }) => text.includes("heartbeat failed"))).toEqual([
@@ -1617,7 +1621,7 @@ test("WorkspaceService.heartbeatTick(): reports failures independently after cha
 
 test("WorkspaceService.heartbeatTick(): retains the lock and retries after workspace storage disappears", async () => {
   const proj = freshProject();
-  ensureWorkspacesDir(proj);
+  ensureWorkspacesDir(freshRoot(proj));
   let rollbacks = 0;
   let closes = 0;
   const svc = workspaceService(fakeDeps(proj, {
@@ -1645,7 +1649,7 @@ test("WorkspaceService.heartbeatTick(): retains the lock and retries after works
     expect(thrown).toBeUndefined();
   };
 
-  rmSync(workspacesDir(proj), { recursive: true, force: true });
+  rmSync(workspacesDir(proj, "koryphaios"), { recursive: true, force: true });
   onDeckError((scope, text) => reported.push({ scope, text }));
   try {
     tickWithoutThrow();
@@ -1658,30 +1662,30 @@ test("WorkspaceService.heartbeatTick(): retains the lock and retries after works
     expect(heartbeatFailures()).toHaveLength(1);
     expect(reported).toHaveLength(1);
 
-    ensureWorkspacesDir(proj);
+    ensureWorkspacesDir(freshRoot(proj));
     tickWithoutThrow();
     expect(reported).toHaveLength(1);
-    expect(readLock(proj, id)).toEqual(expect.objectContaining({ pid: 4242, host: "this-host" }));
+    expect(readLock(fresh(proj, id))).toEqual(expect.objectContaining({ pid: 4242, host: "this-host" }));
 
-    rmSync(workspacesDir(proj), { recursive: true, force: true });
+    rmSync(workspacesDir(proj, "koryphaios"), { recursive: true, force: true });
     tickWithoutThrow();
     expect(heartbeatFailures()).toHaveLength(2);
     expect(reported).toHaveLength(2);
   } finally {
     onDeckError(() => {});
-    ensureWorkspacesDir(proj);
+    ensureWorkspacesDir(freshRoot(proj));
   }
 });
 
 test("WorkspaceService.restore(): re-restoring the already-current workspace does not lose the lock (own() same-id fast path)", async () => {
   const proj = freshProject();
-  ensureWorkspacesDir(proj);
+  ensureWorkspacesDir(freshRoot(proj));
   const ws = sampleWorkspace({ id: "wsp_target" });
-  saveWorkspace(proj, ws);
+  saveFresh(proj, ws);
   const deps = fakeDeps(proj);
   const svc = workspaceService(deps);
   expect(await svc.restore("wsp_target", "attended")).toEqual({ ok: true });
-  const before = readLock(proj, "wsp_target");
+  const before = readLock(fresh(proj, "wsp_target"));
   expect(before).not.toBeNull();
   // A second restore() of the SAME id this instance already owns must NOT
   // route through acquireLock() again: acquireLock() refuses whenever the
@@ -1692,7 +1696,7 @@ test("WorkspaceService.restore(): re-restoring the already-current workspace doe
   // currentId already x, the lock must survive the call").
   expect(await svc.restore("wsp_target", "attended")).toEqual({ ok: true });
   expect(svc.currentWorkspaceId).toBe("wsp_target");
-  expect(readLock(proj, "wsp_target")).toEqual(before);
+  expect(readLock(fresh(proj, "wsp_target"))).toEqual(before);
 });
 
 test("WorkspaceService.saveNamed(): a third party reclaiming the lock file out from under a held currentId must refuse the write (review round 7)", async () => {
@@ -1702,9 +1706,9 @@ test("WorkspaceService.saveNamed(): a third party reclaiming the lock file out f
   // own()/ownsLock before writing, not trust the in-memory currentId. Before
   // this fix: threw=false, write went through under a foreign live lock.
   const proj = freshProject();
-  ensureWorkspacesDir(proj);
+  ensureWorkspacesDir(freshRoot(proj));
   const ws = sampleWorkspace({ id: "wsp_target" });
-  saveWorkspace(proj, ws);
+  saveFresh(proj, ws);
   const deps = fakeDeps(proj); // pid: 4242, host: "this-host"
   const svc = workspaceService(deps);
   expect(await svc.restore("wsp_target", "attended")).toEqual({ ok: true });
@@ -1723,12 +1727,12 @@ test("WorkspaceService.saveNamed(): a third party reclaiming the lock file out f
     startedAt: Date.now(),
     heartbeat: Date.now(),
   };
-  writeFileSync(join(workspacesDir(proj), "wsp_target.lock"), JSON.stringify(foreignLock));
+  writeFileSync(join(workspacesDir(proj, "koryphaios"), "wsp_target.lock"), JSON.stringify(foreignLock));
 
   expect(() => svc.saveNamed("renamed")).toThrow("workspace-lock-unavailable");
   // The foreign lock must be UNCHANGED -- this instance must not have
   // re-stamped it with its own identity while "writing".
-  expect(readLock(proj, "wsp_target")).toEqual(foreignLock);
+  expect(readLock(fresh(proj, "wsp_target"))).toEqual(foreignLock);
   // this instance still (wrongly, in its own memory) believes it owns
   // wsp_target -- own()'s fast path answers that on the NEXT call by
   // re-reading the file, not by caching this refusal, but the refusal
@@ -1738,20 +1742,20 @@ test("WorkspaceService.saveNamed(): a third party reclaiming the lock file out f
 
 test("WorkspaceService.restore(): failing to acquire the NEW lock leaves the OLD lock intact (never lose both)", async () => {
   const proj = freshProject();
-  ensureWorkspacesDir(proj);
-  saveWorkspace(proj, sampleWorkspace({ id: "wsp_a" }));
-  saveWorkspace(proj, sampleWorkspace({ id: "wsp_b" }));
+  ensureWorkspacesDir(freshRoot(proj));
+  saveFresh(proj, sampleWorkspace({ id: "wsp_a" }));
+  saveFresh(proj, sampleWorkspace({ id: "wsp_b" }));
   const deps = fakeDeps(proj);
   const svc = workspaceService(deps);
   expect(await svc.restore("wsp_a", "attended")).toEqual({ ok: true });
-  const lockABefore = readLock(proj, "wsp_a");
+  const lockABefore = readLock(fresh(proj, "wsp_a"));
   expect(lockABefore).not.toBeNull();
   // wsp_b is already held live by a foreign instance -- own("wsp_b") must
   // refuse (acquireLock() returns false), and restore() must fail WITHOUT
   // touching wsp_a's lock: own() only releases the OLD lock AFTER the NEW
   // one is confirmed acquired (workspace-service.ts), so a failed
   // acquisition of the new id must never cost the old one.
-  takeLock(proj, "wsp_b", {
+  takeLock(fresh(proj, "wsp_b"), {
     host: "other-host",
     now: Date.now(),
     bootInstant: 0,
@@ -1766,12 +1770,12 @@ test("WorkspaceService.restore(): failing to acquire the NEW lock leaves the OLD
   // loses the race INSIDE own(), after sessions were already swapped).
   expect(await svc.restore("wsp_b", "attended")).toEqual({ ok: false, reason: "locked" });
   expect(svc.currentWorkspaceId).toBe("wsp_a");
-  expect(readLock(proj, "wsp_a")).toEqual(lockABefore);
+  expect(readLock(fresh(proj, "wsp_a"))).toEqual(lockABefore);
 });
 
 test("WorkspaceService.saveAuto(): reclaims a lock left by a dead pid after the own()/persist() reordering (blocking measurement, service level)", async () => {
   const proj = freshProject();
-  ensureWorkspacesDir(proj);
+  ensureWorkspacesDir(freshRoot(proj));
   const deps = fakeDeps(proj);
   const svc = workspaceService(deps);
   const summary = svc.saveAuto();
@@ -1785,12 +1789,12 @@ test("WorkspaceService.saveAuto(): reclaims a lock left by a dead pid after the 
   // A dead instance holds no OS lock: releaseOnQuit stands for its exit.
   svc.releaseOnQuit();
   const deadLock: Lock = { pid: 777_777, host: "this-host", startedAt: 0, heartbeat: 0 };
-  writeFileSync(join(workspacesDir(proj), `${id}.lock`), JSON.stringify(deadLock));
+  writeFileSync(join(workspacesDir(proj, "koryphaios"), `${id}.lock`), JSON.stringify(deadLock));
   const deps2 = fakeDeps(proj, { pid: 5555 });
   const svc2 = workspaceService(deps2);
   const result = await svc2.restore(id, "attended");
   expect(result).toEqual({ ok: true });
-  expect(readLock(proj, id)!.pid).toBe(5555);
+  expect(readLock(fresh(proj, id))!.pid).toBe(5555);
 });
 
 // ----- session-close -----
@@ -1921,9 +1925,9 @@ function modRestoreRig(proj: string, overrides: Partial<WorkspaceDeps> = {}, eve
 
 test("WorkspaceService.restore(): mod plans are prepared only after the approval, in that order", async () => {
   const proj = freshProject();
-  ensureWorkspacesDir(proj);
+  ensureWorkspacesDir(freshRoot(proj));
   const ws = shellOnlyWorkspace(proj, "wsp-prep-order");
-  saveWorkspace(proj, ws);
+  saveFresh(proj, ws);
   const gate = deferredGate();
   const events: string[] = [];
   const rig = modRestoreRig(proj, { confirmShellFields: async () => { events.push("gate"); return gate.promise; } }, events);
@@ -1945,9 +1949,9 @@ test.each([
   ["cwd", "confirmUntrustedCwd"],
 ] as const)("WorkspaceService.restore(): a restore declined at the %s approval prepares nothing", async (_name, gateKey) => {
   const proj = freshProject();
-  ensureWorkspacesDir(proj);
+  ensureWorkspacesDir(freshRoot(proj));
   const ws = gateKey === "confirmShellFields" ? shellOnlyWorkspace(proj, "wsp-prep-declined-shell") : cwdOnlyWorkspace("wsp-prep-declined-cwd");
-  saveWorkspace(proj, ws);
+  saveFresh(proj, ws);
   const rig = modRestoreRig(proj, { [gateKey]: async () => "declined" });
 
   const result = await settled(rig.svc.restore(ws.id, "attended"));
@@ -1958,14 +1962,14 @@ test.each([
 
 test("WorkspaceService.restore(): restoreFrom receives the very defs that were prepared, with their plans keyed by def id", async () => {
   const proj = freshProject();
-  ensureWorkspacesDir(proj);
+  ensureWorkspacesDir(freshRoot(proj));
   const ws = projectSessionsWorkspace(proj, "wsp-prep-plans");
-  saveWorkspace(proj, ws);
+  saveFresh(proj, ws);
   const rig = modRestoreRig(proj);
 
   const restoring = rig.svc.restore(ws.id, "attended");
   await flushMicrotasks();
-  saveWorkspace(proj, { ...ws, sessions: ws.sessions.map((s) => ({ ...s, name: "rewritten" })) });
+  saveFresh(proj, { ...ws, sessions: ws.sessions.map((s) => ({ ...s, name: "rewritten" })) });
   rig.pending[0]!.release();
   await expect(settled(restoring)).resolves.toEqual({ ok: true });
 
@@ -1984,9 +1988,9 @@ test("WorkspaceService.restore(): restoreFrom receives the very defs that were p
 
 test("WorkspaceService.restore(): the live tiles, scope and config stay untouched while the mods are being prepared", async () => {
   const proj = freshProject();
-  ensureWorkspacesDir(proj);
+  ensureWorkspacesDir(freshRoot(proj));
   const ws = projectSessionsWorkspace(proj, "wsp-prep-wait");
-  saveWorkspace(proj, ws);
+  saveFresh(proj, ws);
   const rig = modRestoreRig(proj);
   const liveBefore = rig.deps.sessions.map((s) => s.id);
 
@@ -2003,9 +2007,9 @@ test("WorkspaceService.restore(): the live tiles, scope and config stay untouche
 
 test("WorkspaceService.restore(): a restore superseded while mods prepare applies nothing", async () => {
   const proj = freshProject();
-  ensureWorkspacesDir(proj);
+  ensureWorkspacesDir(freshRoot(proj));
   const ws = projectSessionsWorkspace(proj, "wsp-prep-superseded");
-  saveWorkspace(proj, ws);
+  saveFresh(proj, ws);
   const rig = modRestoreRig(proj);
 
   const restoring = rig.svc.restore(ws.id, "attended");
@@ -2019,14 +2023,14 @@ test("WorkspaceService.restore(): a restore superseded while mods prepare applie
 
 test("WorkspaceService.restore(): a lock taken by another instance while mods prepare refuses the restore", async () => {
   const proj = freshProject();
-  ensureWorkspacesDir(proj);
+  ensureWorkspacesDir(freshRoot(proj));
   const ws = projectSessionsWorkspace(proj, "wsp-prep-locked");
-  saveWorkspace(proj, ws);
+  saveFresh(proj, ws);
   const rig = modRestoreRig(proj);
 
   const restoring = rig.svc.restore(ws.id, "attended");
   await flushMicrotasks();
-  takeLock(proj, ws.id, { ...baseLiveness, pid: 9999, isPidAlive: () => true });
+  takeLock(fresh(proj, ws.id), { ...baseLiveness, pid: 9999, isPidAlive: () => true });
   rig.pending[0]!.release();
 
   await expect(settled(restoring)).resolves.toEqual({ ok: false, reason: "locked" });
@@ -2035,11 +2039,11 @@ test("WorkspaceService.restore(): a lock taken by another instance while mods pr
 
 test("WorkspaceService.restore(): a second restore aborts the previous preparation and only it is applied", async () => {
   const proj = freshProject();
-  ensureWorkspacesDir(proj);
+  ensureWorkspacesDir(freshRoot(proj));
   const first = projectSessionsWorkspace(proj, "wsp-prep-first");
   const second = projectSessionsWorkspace(proj, "wsp-prep-second");
-  saveWorkspace(proj, first);
-  saveWorkspace(proj, second);
+  saveFresh(proj, first);
+  saveFresh(proj, second);
   const rig = modRestoreRig(proj);
 
   const restoringFirst = rig.svc.restore(first.id, "attended");
@@ -2064,9 +2068,9 @@ test("WorkspaceService.restore(): a second restore aborts the previous preparati
 
 test("WorkspaceService.restore(): a failing preparation swaps nothing and leaves the service ready for the next restore", async () => {
   const proj = freshProject();
-  ensureWorkspacesDir(proj);
+  ensureWorkspacesDir(freshRoot(proj));
   const ws = projectSessionsWorkspace(proj, "wsp-prep-failing");
-  saveWorkspace(proj, ws);
+  saveFresh(proj, ws);
   const rig = modRestoreRig(proj);
 
   const failing = rig.svc.restore(ws.id, "attended").then(() => "resolved", () => "rejected");
@@ -2088,9 +2092,9 @@ test.each([
   ["quitting", "quit", (svc: ReturnType<typeof workspaceService>) => svc.releaseOnQuit()],
 ] as const)("WorkspaceService: %s aborts the mod preparation of a pending restore and no tile is swapped", async (_name, slug, act) => {
   const proj = freshProject();
-  ensureWorkspacesDir(proj);
+  ensureWorkspacesDir(freshRoot(proj));
   const ws = projectSessionsWorkspace(proj, `wsp-abort-${slug}`);
-  saveWorkspace(proj, ws);
+  saveFresh(proj, ws);
   const rig = modRestoreRig(proj);
 
   const restoring = rig.svc.restore(ws.id, "attended");
@@ -2107,11 +2111,11 @@ test.each([
 
 test("WorkspaceService.deleteWs: deleting another workspace leaves the pending restore preparation running", async () => {
   const proj = freshProject();
-  ensureWorkspacesDir(proj);
+  ensureWorkspacesDir(freshRoot(proj));
   const restored = projectSessionsWorkspace(proj, "wsp-abort-bystander-restored");
   const other = projectSessionsWorkspace(proj, "wsp-abort-bystander-other");
-  saveWorkspace(proj, restored);
-  saveWorkspace(proj, other);
+  saveFresh(proj, restored);
+  saveFresh(proj, other);
   const rig = modRestoreRig(proj);
 
   const restoring = rig.svc.restore(restored.id, "attended");
@@ -2126,9 +2130,9 @@ test("WorkspaceService.deleteWs: deleting another workspace leaves the pending r
 
 test("WorkspaceService.restore(): a superseded mod preparation swaps nothing and releases the operation", async () => {
   const proj = freshProject();
-  ensureWorkspacesDir(proj);
+  ensureWorkspacesDir(freshRoot(proj));
   const ws = projectSessionsWorkspace(proj, "wsp-prep-batch-superseded");
-  saveWorkspace(proj, ws);
+  saveFresh(proj, ws);
   let preparations = 0;
   const events: string[] = [];
   const rig = modRestoreRig(proj, {
@@ -2149,9 +2153,9 @@ test("WorkspaceService.restore(): a superseded mod preparation swaps nothing and
 
 test("WorkspaceService.restore(): a restore started after an invalidation prepares on a fresh signal", async () => {
   const proj = freshProject();
-  ensureWorkspacesDir(proj);
+  ensureWorkspacesDir(freshRoot(proj));
   const ws = projectSessionsWorkspace(proj, "wsp-abort-fresh-signal");
-  saveWorkspace(proj, ws);
+  saveFresh(proj, ws);
   const rig = modRestoreRig(proj);
 
   const first = rig.svc.restore(ws.id, "attended");
@@ -2201,13 +2205,13 @@ test("WorkspaceService.restore(): each refused adoption state maps to its own re
   ];
   for (const [adoption, expected, reported] of table) {
     const proj = freshProject();
-    ensureWorkspacesDir(proj);
-    saveWorkspace(proj, sampleWorkspace({ id: "wsp_refused" }));
+    ensureWorkspacesDir(freshRoot(proj));
+    saveFresh(proj, sampleWorkspace({ id: "wsp_refused" }));
     const rig = credentialRig(proj, async () => adoption);
     await expect(rig.svc.restore("wsp_refused", "attended"), adoption.state).resolves.toEqual(expected);
     expect(rig.events, `${adoption.state}: no config and no session may follow a refused adoption`).toEqual([]);
     expect(rig.svc.currentWorkspaceId, `${adoption.state}: the workspace must not become current`).toBeNull();
-    expect(readLock(proj, "wsp_refused"), `${adoption.state}: no lock may be left behind`).toBeNull();
+    expect(readLock(fresh(proj, "wsp_refused")), `${adoption.state}: no lock may be left behind`).toBeNull();
     expect(rig.failures.length, `${adoption.state}: failure sink calls`).toBe(reported ? 1 : 0);
   }
 });
@@ -2215,8 +2219,8 @@ test("WorkspaceService.restore(): each refused adoption state maps to its own re
 test("WorkspaceService.restore(): a credential refusal reaches the failure sink with its typed cause and keeps that cause", async () => {
   for (const cause of ["trust", "identity", "capability", "local-file", "mint-refused"] as const) {
     const proj = freshProject();
-    ensureWorkspacesDir(proj);
-    saveWorkspace(proj, sampleWorkspace({ id: "wsp_cause" }));
+    ensureWorkspacesDir(freshRoot(proj));
+    saveFresh(proj, sampleWorkspace({ id: "wsp_cause" }));
     const rig = credentialRig(proj, async () => ({ state: "credential-unavailable", cause }));
     await expect(rig.svc.restore("wsp_cause", "attended"), cause).resolves.toEqual({ ok: false, reason: "credential-unavailable", cause });
     expect(rig.failures, `${cause}: the sink receives the adoption result`).toEqual([{ state: "credential-unavailable", cause }]);
@@ -2232,8 +2236,8 @@ test("WorkspaceService.restore(): a preparation refused as busy or closed is a q
   ];
   for (const [cause, reason] of table) {
     const proj = freshProject();
-    ensureWorkspacesDir(proj);
-    saveWorkspace(proj, sampleWorkspace({ id: "wsp_quiet_refusal" }));
+    ensureWorkspacesDir(freshRoot(proj));
+    saveFresh(proj, sampleWorkspace({ id: "wsp_quiet_refusal" }));
     const rig = credentialRig(proj, async () => ({ state: "credential-unavailable", cause }));
     await expect(rig.svc.restore("wsp_quiet_refusal", "attended"), cause).resolves.toEqual({ ok: false, reason });
     expect(rig.failures, `${cause}: a quiet refusal must not reach the credential failure sink`).toEqual([]);
@@ -2244,8 +2248,8 @@ test("WorkspaceService.restore(): a preparation refused as busy or closed is a q
 
 test("WorkspaceService.restore(): a preparation refused as invalid-target keeps its own cause and reaches the failure sink", async () => {
   const proj = freshProject();
-  ensureWorkspacesDir(proj);
-  saveWorkspace(proj, sampleWorkspace({ id: "wsp_invalid_target" }));
+  ensureWorkspacesDir(freshRoot(proj));
+  saveFresh(proj, sampleWorkspace({ id: "wsp_invalid_target" }));
   const rig = credentialRig(proj, async () => ({ state: "credential-unavailable", cause: "invalid-target" }));
   await expect(rig.svc.restore("wsp_invalid_target", "attended")).resolves.toEqual({ ok: false, reason: "credential-unavailable", cause: "invalid-target" });
   expect(rig.failures).toEqual([{ state: "credential-unavailable", cause: "invalid-target" }]);
@@ -2254,8 +2258,8 @@ test("WorkspaceService.restore(): a preparation refused as invalid-target keeps 
 
 test("WorkspaceService.restore(): an adoption target carries the saved workspace's own group and scope kind", async () => {
   const proj = freshProject();
-  ensureWorkspacesDir(proj);
-  saveWorkspace(proj, sampleWorkspace({ id: "wsp_target_scope", groupId: "g-custom-saved", scopeKind: "custom" }));
+  ensureWorkspacesDir(freshRoot(proj));
+  saveFresh(proj, sampleWorkspace({ id: "wsp_target_scope", groupId: "g-custom-saved", scopeKind: "custom" }));
   const targets: unknown[] = [];
   const rig = credentialRig(proj, async (ws, own) => {
     targets.push(ws);
@@ -2282,8 +2286,8 @@ test("WorkspaceService.restore(): a workspace locked by another instance is refu
 
 test("WorkspaceService.restore(): an adoption error after acquisition releases the target workspace", async () => {
   const proj = freshProject();
-  ensureWorkspacesDir(proj);
-  saveWorkspace(proj, sampleWorkspace({ id: "wsp_adoption_error" }));
+  ensureWorkspacesDir(freshRoot(proj));
+  saveFresh(proj, sampleWorkspace({ id: "wsp_adoption_error" }));
   const boom = new Error("scope publication failed");
   const rig = credentialRig(proj, async (_ws, own) => {
     own();
@@ -2292,13 +2296,13 @@ test("WorkspaceService.restore(): an adoption error after acquisition releases t
 
   await expect(rig.svc.restore("wsp_adoption_error", "attended")).rejects.toBe(boom);
   expect(rig.svc.currentWorkspaceId).toBeNull();
-  expect(readLock(proj, "wsp_adoption_error")).toBeNull();
+  expect(readLock(fresh(proj, "wsp_adoption_error"))).toBeNull();
 });
 
 test("WorkspaceService.restore(): a setConfig error after acquisition releases the target workspace", async () => {
   const proj = freshProject();
-  ensureWorkspacesDir(proj);
-  saveWorkspace(proj, sampleWorkspace({ id: "wsp_config_error" }));
+  ensureWorkspacesDir(freshRoot(proj));
+  saveFresh(proj, sampleWorkspace({ id: "wsp_config_error" }));
   const boom = new Error("configuration failed");
   const rig = credentialRig(proj, async (_ws, own) => own()
     ? { state: "published", scope: { projectKey: "project", groupId: "scope" } }
@@ -2308,7 +2312,7 @@ test("WorkspaceService.restore(): a setConfig error after acquisition releases t
 
   await expect(rig.svc.restore("wsp_config_error", "attended")).rejects.toBe(boom);
   expect(rig.svc.currentWorkspaceId).toBeNull();
-  expect(readLock(proj, "wsp_config_error")).toBeNull();
+  expect(readLock(fresh(proj, "wsp_config_error"))).toBeNull();
   expect(rig.counts.restoreFrom).toBe(0);
 });
 
@@ -2319,8 +2323,8 @@ test("WorkspaceService.restore(): an error while applying the sessions keeps the
     ? { state: "published", scope: { projectKey: "project", groupId: ws.groupId } }
     : { state: "lock-race" });
   await expect(rig.svc.restore("wsp_old", "attended")).resolves.toEqual({ ok: true });
-  const oldBefore = loadWorkspace(proj, "wsp_old");
-  const targetBefore = loadWorkspace(proj, "wsp_target");
+  const oldBefore = loadWorkspace(fresh(proj, "wsp_old"));
+  const targetBefore = loadWorkspace(fresh(proj, "wsp_target"));
   const applied = rig.counts.restoreFrom;
   const cancelled = rig.counts.cancel;
 
@@ -2339,9 +2343,9 @@ test("WorkspaceService.restore(): an error while applying the sessions keeps the
   expect(rig.deps.sessions.map((s) => s.name), "the partial application stays in place").toEqual(["target-peer"]);
   expect(rig.counts.cancel - cancelled, "the scope adoption is not cancelled or rolled back").toBe(0);
   expect(rig.svc.currentWorkspaceId, "the failed workspace must not stay current").toBeNull();
-  expect(readLock(proj, "wsp_target"), "the target workspace lock is released").toBeNull();
-  expect(loadWorkspace(proj, "wsp_target"), "no partial snapshot is written into the target").toEqual(targetBefore);
-  expect(loadWorkspace(proj, "wsp_old"), "no partial snapshot is written into the previous workspace").toEqual(oldBefore);
+  expect(readLock(fresh(proj, "wsp_target")), "the target workspace lock is released").toBeNull();
+  expect(loadWorkspace(fresh(proj, "wsp_target")), "no partial snapshot is written into the target").toEqual(targetBefore);
+  expect(loadWorkspace(fresh(proj, "wsp_old")), "no partial snapshot is written into the previous workspace").toEqual(oldBefore);
 });
 
 test("WorkspaceService.restore(): a release refused after an application failure is traced and the original error still propagates", async () => {
@@ -2353,7 +2357,7 @@ test("WorkspaceService.restore(): a release refused after an application failure
   const boom = new Error("tile spawn failed");
   rig.deps.service.restoreFrom = (() => {
     const foreign: Lock = { pid: 99_999, host: "other-host", startedAt: 0, heartbeat: Date.now() };
-    writeFileSync(join(workspacesDir(proj), "wsp_target.lock"), JSON.stringify(foreign));
+    writeFileSync(join(workspacesDir(proj, "koryphaios"), "wsp_target.lock"), JSON.stringify(foreign));
     throw boom;
   }) as WorkspaceDeps["service"]["restoreFrom"];
 
@@ -2369,19 +2373,19 @@ test("WorkspaceService.restore(): a release refused after an application failure
 
 test("WorkspaceService.restore(): re-saves the restored workspace under the live scope right after applying it", async () => {
   const proj = freshProject();
-  ensureWorkspacesDir(proj);
-  saveWorkspace(proj, sampleWorkspace({ id: "wsp_recapture", scopeName: "scope-label-saved-earlier" }));
+  ensureWorkspacesDir(freshRoot(proj));
+  saveFresh(proj, sampleWorkspace({ id: "wsp_recapture", scopeName: "scope-label-saved-earlier" }));
   const rig = credentialRig(proj, async (ws, own) => own()
     ? { state: "published", scope: { projectKey: "project", groupId: ws.groupId } }
     : { state: "lock-race" });
   await expect(rig.svc.restore("wsp_recapture", "attended")).resolves.toEqual({ ok: true });
-  expect(loadWorkspace(proj, "wsp_recapture")!.scopeName, "the file records the scope the restored tiles now run under").toBe(fakeScope().name);
+  expect(loadWorkspace(fresh(proj, "wsp_recapture"))!.scopeName, "the file records the scope the restored tiles now run under").toBe(fakeScope().name);
 });
 
 test("WorkspaceService.restore(): the restored workspace's name stays current even when no tile could be re-captured", async () => {
   const proj = freshProject();
-  ensureWorkspacesDir(proj);
-  saveWorkspace(proj, sampleWorkspace({ id: "wsp_nameless", name: "Named before restore" }));
+  ensureWorkspacesDir(freshRoot(proj));
+  saveFresh(proj, sampleWorkspace({ id: "wsp_nameless", name: "Named before restore" }));
   const rig = credentialRig(proj, async (ws, own) => own()
     ? { state: "published", scope: { projectKey: "project", groupId: ws.groupId } }
     : { state: "lock-race" });
@@ -2394,8 +2398,8 @@ test("WorkspaceService.restore(): the restored workspace's name stays current ev
 
 test("WorkspaceService.restore(): without a mod preparer, restoreFrom still receives a plans map", async () => {
   const proj = freshProject();
-  ensureWorkspacesDir(proj);
-  saveWorkspace(proj, sampleWorkspace({ id: "wsp_noplans" }));
+  ensureWorkspacesDir(freshRoot(proj));
+  saveFresh(proj, sampleWorkspace({ id: "wsp_noplans" }));
   const rig = credentialRig(proj, async (ws, own) => own()
     ? { state: "published", scope: { projectKey: "project", groupId: ws.groupId } }
     : { state: "lock-race" });
@@ -2413,8 +2417,8 @@ test("WorkspaceService.restore(): without a mod preparer, restoreFrom still rece
 
 test("WorkspaceService.deleteWs: deleting a workspace whose restore already finished does not cancel the scope adoption", async () => {
   const proj = freshProject();
-  ensureWorkspacesDir(proj);
-  saveWorkspace(proj, sampleWorkspace({ id: "wsp_finished" }));
+  ensureWorkspacesDir(freshRoot(proj));
+  saveFresh(proj, sampleWorkspace({ id: "wsp_finished" }));
   const rig = credentialRig(proj, async (ws, own) => own()
     ? { state: "published", scope: { projectKey: "project", groupId: ws.groupId } }
     : { state: "lock-race" });
@@ -2426,9 +2430,9 @@ test("WorkspaceService.deleteWs: deleting a workspace whose restore already fini
 
 test("WorkspaceService.startNew(): a finished restore's mod preparation signal is not aborted afterwards", async () => {
   const proj = freshProject();
-  ensureWorkspacesDir(proj);
+  ensureWorkspacesDir(freshRoot(proj));
   const ws = projectSessionsWorkspace(proj, "wsp-finished-signal");
-  saveWorkspace(proj, ws);
+  saveFresh(proj, ws);
   const rig = modRestoreRig(proj);
   const restoring = rig.svc.restore(ws.id, "attended");
   await flushMicrotasks();
@@ -2440,9 +2444,436 @@ test("WorkspaceService.startNew(): a finished restore's mod preparation signal i
 
 test("WorkspaceService.releaseOnQuit(): closes the scope adoption for good rather than only cancelling it", async () => {
   const proj = freshProject();
-  ensureWorkspacesDir(proj);
+  ensureWorkspacesDir(freshRoot(proj));
   const rig = credentialRig(proj, async () => ({ state: "closed" }));
   rig.svc.releaseOnQuit();
   expect(rig.counts.close, "quit closes admission").toBe(1);
   expect(rig.counts.cancel, "quit is not a re-armable cancel").toBe(0);
 });
+
+// ----- two project folders: a new workspace goes to .claude/koryphaios, an old one stays in .claude/claude-peers -----
+
+const legacy = (projectDir: string, id: string) => ({ projectDir, id, source: "legacy" as const });
+const legacyRoot = (projectDir: string) => ({ projectDir, source: "legacy" as const });
+const newFolder = (proj: string) => join(proj, ".claude", "koryphaios");
+const oldFolder = (proj: string) => join(proj, ".claude", "claude-peers");
+const foreignOwner = {
+  host: "other-host",
+  now: Date.now(),
+  bootInstant: 0,
+  startedAt: 1_000,
+  staleMs: 5_000,
+  isPidAlive: () => true,
+  pid: 1,
+};
+
+function saveInOldFolder(proj: string, ws: Workspace): void {
+  saveWorkspace(legacy(proj, ws.id), ws);
+}
+
+function ageSnapshot(ref: ReturnType<typeof legacy> | ReturnType<typeof fresh>): void {
+  const file = join(workspacesDir(ref.projectDir, ref.source), `${ref.id}.json`);
+  writeFileSync(file, JSON.stringify({ ...JSON.parse(readFileSync(file, "utf8")), updatedAt: 1000 }));
+}
+
+test("a new workspace and its two locks are created under .claude/koryphaios and nothing under .claude/claude-peers", () => {
+  const proj = freshProject();
+  const svc = workspaceService(fakeDeps(proj));
+  svc.saveAuto();
+  const id = svc.currentWorkspaceId!;
+  for (const file of [`${id}.json`, `${id}.lock`, `${id}.lock.sqlite`]) {
+    expect(existsSync(join(newFolder(proj), "workspaces", file)), file).toBe(true);
+  }
+  expect(existsSync(oldFolder(proj)), "the old folder is never created").toBe(false);
+});
+
+test("a restored workspace of .claude/claude-peers is saved in place with its two locks and nothing appears under .claude/koryphaios", async () => {
+  const proj = freshProject();
+  saveInOldFolder(proj, sampleWorkspace({ id: "wsp_old", name: "kept in place" }));
+  const svc = workspaceService(fakeDeps(proj));
+  expect(await svc.restore("wsp_old", "attended")).toEqual({ ok: true });
+  svc.saveAuto();
+  for (const file of ["wsp_old.json", "wsp_old.lock", "wsp_old.lock.sqlite"]) {
+    expect(existsSync(join(oldFolder(proj), "workspaces", file)), file).toBe(true);
+  }
+  expect(loadWorkspace(legacy(proj, "wsp_old"))!.updatedAt, "the snapshot was rewritten where it was").toBeGreaterThan(1000);
+  expect(existsSync(newFolder(proj)), "the new folder is never created for an old workspace").toBe(false);
+});
+
+test("releaseOnQuit frees the two locks of an old workspace in its own folder", async () => {
+  const proj = freshProject();
+  saveInOldFolder(proj, sampleWorkspace({ id: "wsp_old" }));
+  const svc = workspaceService(fakeDeps(proj));
+  expect(await svc.restore("wsp_old", "attended")).toEqual({ ok: true });
+  expect(probeSameHostLock(legacy(proj, "wsp_old")), "held while open").toBe("held");
+  svc.releaseOnQuit();
+  expect(existsSync(lockPath(legacy(proj, "wsp_old"))), "the JSON lock is gone").toBe(false);
+  expect(probeSameHostLock(legacy(proj, "wsp_old")), "the OS lock is given back").toBe("free");
+  expect(existsSync(newFolder(proj))).toBe(false);
+});
+
+test("deleteWs removes the snapshot and both locks of an old workspace and leaves a new one alone", async () => {
+  const proj = freshProject();
+  saveInOldFolder(proj, sampleWorkspace({ id: "wsp_old" }));
+  saveFresh(proj, sampleWorkspace({ id: "wsp_new" }));
+  const svc = workspaceService(fakeDeps(proj));
+  expect(await svc.restore("wsp_old", "attended")).toEqual({ ok: true });
+  svc.deleteWs("wsp_old");
+  for (const file of ["wsp_old.json", "wsp_old.lock", "wsp_old.lock.sqlite"]) {
+    expect(existsSync(join(oldFolder(proj), "workspaces", file)), file).toBe(false);
+  }
+  expect(existsSync(join(newFolder(proj), "workspaces", "wsp_new.json"))).toBe(true);
+  expect(svc.currentWorkspaceId).toBeNull();
+});
+
+test("deleteWorkspace removes the snapshot, the JSON lock and the OS lock file of that folder only", () => {
+  const proj = freshProject();
+  for (const ref of [fresh(proj, "wsp_a"), legacy(proj, "wsp_a")]) {
+    ensureWorkspacesDir(ref);
+    const dir = workspacesDir(proj, ref.source);
+    for (const suffix of [".json", ".lock", ".lock.sqlite"]) writeFileSync(join(dir, `wsp_a${suffix}`), "x");
+  }
+  deleteWorkspace(legacy(proj, "wsp_a"));
+  for (const suffix of [".json", ".lock", ".lock.sqlite"]) {
+    expect(existsSync(join(workspacesDir(proj, "legacy"), `wsp_a${suffix}`)), `old ${suffix}`).toBe(false);
+    expect(existsSync(join(workspacesDir(proj, "koryphaios"), `wsp_a${suffix}`)), `new ${suffix}`).toBe(true);
+  }
+});
+
+test("pruneStale prunes old workspaces of both folders in place, keeping a pinned one and one another Deck holds", () => {
+  const proj = freshProject();
+  const entries: Array<[ReturnType<typeof legacy> | ReturnType<typeof fresh>, Partial<Workspace>]> = [
+    [legacy(proj, "wsp_old_free"), {}],
+    [legacy(proj, "wsp_old_pinned"), { pinned: true }],
+    [legacy(proj, "wsp_old_held"), {}],
+    [legacy(proj, "wsp_old_os_only"), {}],
+    [fresh(proj, "wsp_new_free"), {}],
+  ];
+  for (const [ref, overrides] of entries) {
+    saveWorkspace(ref, sampleWorkspace({ id: ref.id, ...overrides }));
+    ageSnapshot(ref);
+  }
+  takeLock(legacy(proj, "wsp_old_held"), foreignOwner);
+  takeLock(legacy(proj, "wsp_old_os_only"), foreignOwner);
+  rmSync(lockPath(legacy(proj, "wsp_old_os_only")));
+  const svc = workspaceService(fakeDeps(proj));
+  expect(svc.pruneStale().sort()).toEqual(["wsp_new_free", "wsp_old_free"]);
+  const remains = (dir: string, id: string) => existsSync(join(workspacesDir(proj, dir as "legacy"), `${id}.json`));
+  expect(remains("legacy", "wsp_old_free")).toBe(false);
+  expect(remains("koryphaios", "wsp_new_free")).toBe(false);
+  expect(remains("legacy", "wsp_old_pinned")).toBe(true);
+  expect(remains("legacy", "wsp_old_held")).toBe(true);
+  expect(remains("legacy", "wsp_old_os_only"), "only its OS lock in the old folder says it is held").toBe(true);
+});
+
+test("listForCwd lists the workspaces of both folders and flags an old one another Deck holds", () => {
+  const proj = freshProject();
+  saveInOldFolder(proj, sampleWorkspace({ id: "wsp_old" }));
+  saveFresh(proj, sampleWorkspace({ id: "wsp_new" }));
+  takeLock(legacy(proj, "wsp_old"), foreignOwner);
+  const list = workspaceService(fakeDeps(proj)).listForCwd();
+  expect(list.map((w) => w.id).sort()).toEqual(["wsp_new", "wsp_old"]);
+  expect(list.find((w) => w.id === "wsp_old")!.locked).toBe(true);
+  expect(list.find((w) => w.id === "wsp_new")!.locked).toBe(false);
+});
+
+test("a workspace of either folder is restored through the same approval gate", async () => {
+  const proj = freshProject();
+  saveInOldFolder(proj, shellOnlyWorkspace(proj, "wsp_old"));
+  saveFresh(proj, shellOnlyWorkspace(proj, "wsp_new"));
+  const asked: string[] = [];
+  const svc = workspaceService(
+    fakeDeps(proj, {
+      confirmShellFields: async (ws) => {
+        asked.push(ws.id);
+        return "declined";
+      },
+    }),
+  );
+  expect(await svc.restore("wsp_old", "attended")).toEqual({ ok: false, reason: "shell-declined" });
+  expect(await svc.restore("wsp_new", "attended")).toEqual({ ok: false, reason: "shell-declined" });
+  expect(asked).toEqual(["wsp_old", "wsp_new"]);
+});
+
+test("ensureWorkspacesDir keeps workspaces/ in the .gitignore of the folder of its ref and never touches the other folder", () => {
+  const proj = freshProject();
+  ensureWorkspacesDir(freshRoot(proj));
+  expect(readFileSync(join(newFolder(proj), ".gitignore"), "utf8")).toContain("workspaces/");
+  expect(existsSync(oldFolder(proj)), "a new workspace never creates the old folder").toBe(false);
+
+  const other = freshProject();
+  mkdirSync(oldFolder(other), { recursive: true });
+  writeFileSync(join(oldFolder(other), ".gitignore"), "*.local\n");
+  ensureWorkspacesDir(legacyRoot(other));
+  const body = readFileSync(join(oldFolder(other), ".gitignore"), "utf8");
+  expect(body).toContain("*.local");
+  expect(body).toContain("workspaces/");
+  expect(existsSync(newFolder(other)), "an old workspace never creates the new folder").toBe(false);
+});
+
+test("locateWorkspace tells none, one folder and both folders apart, and refuses an id that is not a plain name", () => {
+  const proj = freshProject();
+  expect(locateWorkspace(proj, "wsp_x")).toEqual({ kind: "none" });
+  saveWorkspace(fresh(proj, "wsp_x"), sampleWorkspace({ id: "wsp_x" }));
+  expect(locateWorkspace(proj, "wsp_x")).toEqual({ kind: "one", ref: fresh(proj, "wsp_x") });
+  saveInOldFolder(proj, sampleWorkspace({ id: "wsp_y" }));
+  expect(locateWorkspace(proj, "wsp_y")).toEqual({ kind: "one", ref: legacy(proj, "wsp_y") });
+  saveInOldFolder(proj, sampleWorkspace({ id: "wsp_x" }));
+  expect(locateWorkspace(proj, "wsp_x"), "an id in both folders has no winner").toEqual({ kind: "conflict" });
+
+  writeFileSync(join(newFolder(proj), "outside.json"), "{}");
+  for (const hostile of ["../outside", "..\\outside", "a/b", "", ".", ".."]) {
+    expect(locateWorkspace(proj, hostile), JSON.stringify(hostile)).toEqual({ kind: "none" });
+  }
+});
+
+test("a lock lives next to the snapshot of its own folder", () => {
+  const proj = freshProject();
+  expect(lockPath(fresh(proj, "wsp_x"))).toBe(join(newFolder(proj), "workspaces", "wsp_x.lock"));
+  expect(lockPath(legacy(proj, "wsp_x"))).toBe(join(oldFolder(proj), "workspaces", "wsp_x.lock"));
+  ensureWorkspacesDir(legacyRoot(proj));
+  takeLock(legacy(proj, "wsp_x"), { ...baseLiveness, pid: 4242 });
+  expect(existsSync(join(oldFolder(proj), "workspaces", "wsp_x.lock.sqlite"))).toBe(true);
+  expect(existsSync(newFolder(proj))).toBe(false);
+});
+
+test("a restore of an id whose snapshot moved to the other folder takes over that folder's lock and gives back the old one", async () => {
+  const proj = freshProject();
+  saveInOldFolder(proj, sampleWorkspace({ id: "wsp_moved" }));
+  const svc = workspaceService(fakeDeps(proj));
+  expect(await svc.restore("wsp_moved", "attended")).toEqual({ ok: true });
+  rmSync(join(workspacesDir(proj, "legacy"), "wsp_moved.json"));
+  saveFresh(proj, sampleWorkspace({ id: "wsp_moved" }));
+  expect(await svc.restore("wsp_moved", "attended")).toEqual({ ok: true });
+  svc.saveAuto();
+  expect(locateWorkspace(proj, "wsp_moved"), "no snapshot was rewritten in the old folder").toEqual({ kind: "one", ref: fresh(proj, "wsp_moved") });
+  expect(existsSync(lockPath(legacy(proj, "wsp_moved"))), "the old JSON lock is gone").toBe(false);
+  expect(probeSameHostLock(legacy(proj, "wsp_moved")), "the old OS lock is given back").toBe("free");
+  expect(probeSameHostLock(fresh(proj, "wsp_moved")), "the new folder's lock is ours").toBe("held");
+});
+
+test("a Deck that owns an id in one folder cannot take the copy another Deck holds in the other folder, and stops saving its own", async () => {
+  const proj = freshProject();
+  saveInOldFolder(proj, sampleWorkspace({ id: "wsp_both" }));
+  const first = workspaceService(fakeDeps(proj));
+  expect(await first.restore("wsp_both", "attended")).toEqual({ ok: true });
+  const oldSnapshot = join(workspacesDir(proj, "legacy"), "wsp_both.json");
+  rmSync(oldSnapshot);
+  saveFresh(proj, sampleWorkspace({ id: "wsp_both" }));
+  const second = workspaceService(fakeDeps(proj, { pid: 4343 }));
+  expect(await second.restore("wsp_both", "attended")).toEqual({ ok: true });
+
+  const traces: string[] = [];
+  onDeckError((_scope, text) => traces.push(text));
+  try {
+    expect(first.saveAuto()).toBeNull();
+  } finally {
+    onDeckError(() => {});
+  }
+  expect(existsSync(oldSnapshot), "the first Deck does not recreate its snapshot").toBe(false);
+  expect(locateWorkspace(proj, "wsp_both")).toEqual({ kind: "one", ref: fresh(proj, "wsp_both") });
+  expect(traces.some((text) => text.includes("saving stopped")), "the refusal is traced").toBe(true);
+  expect(probeSameHostLock(legacy(proj, "wsp_both")), "the first Deck keeps its own lock").toBe("held");
+  expect(await first.restore("wsp_both", "attended"), "the other copy belongs to the second Deck").toEqual({ ok: false, reason: "locked" });
+});
+
+test("deleteWs removes the copy the list shows, not the owned one of the same id in the other folder", async () => {
+  const proj = freshProject();
+  saveInOldFolder(proj, sampleWorkspace({ id: "wsp_moved" }));
+  const svc = workspaceService(fakeDeps(proj));
+  expect(await svc.restore("wsp_moved", "attended")).toEqual({ ok: true });
+  rmSync(join(workspacesDir(proj, "legacy"), "wsp_moved.json"));
+  saveFresh(proj, sampleWorkspace({ id: "wsp_moved" }));
+  svc.deleteWs("wsp_moved");
+  expect(existsSync(join(workspacesDir(proj, "koryphaios"), "wsp_moved.json")), "the listed copy is deleted").toBe(false);
+  expect(svc.currentWorkspaceId, "the owned workspace stays owned").toBe("wsp_moved");
+  expect(probeSameHostLock(legacy(proj, "wsp_moved"))).toBe("held");
+});
+
+test("a copy appearing in the other folder after the restore stops the saves, traced once, and quit frees the right lock", async () => {
+  const proj = freshProject();
+  saveInOldFolder(proj, sampleWorkspace({ id: "wsp_old" }));
+  const svc = workspaceService(fakeDeps(proj));
+  expect(await svc.restore("wsp_old", "attended")).toEqual({ ok: true });
+  const oldSnapshot = join(workspacesDir(proj, "legacy"), "wsp_old.json");
+  const copy = join(workspacesDir(proj, "koryphaios"), "wsp_old.json");
+  saveFresh(proj, sampleWorkspace({ id: "wsp_old" }));
+  const keptOld = readFileSync(oldSnapshot, "utf8");
+  const keptCopy = readFileSync(copy, "utf8");
+
+  const traces: string[] = [];
+  onDeckError((_scope, text) => traces.push(text));
+  try {
+    expect(svc.saveAuto()).toBeNull();
+    expect(svc.saveAuto()).toBeNull();
+    expect(() => svc.saveNamed("explicit")).toThrow("workspace-duplicate-id");
+  } finally {
+    onDeckError(() => {});
+  }
+  expect(traces.filter((text) => text.includes("saving stopped")), "traced once, not per save").toHaveLength(1);
+  expect(readFileSync(oldSnapshot, "utf8"), "the owned snapshot is not rewritten").toBe(keptOld);
+  expect(readFileSync(copy, "utf8"), "the copy is not rewritten").toBe(keptCopy);
+
+  svc.releaseOnQuit();
+  expect(existsSync(lockPath(legacy(proj, "wsp_old"))), "the lock of the owned folder is released").toBe(false);
+  expect(probeSameHostLock(legacy(proj, "wsp_old"))).toBe("free");
+  expect(existsSync(lockPath(fresh(proj, "wsp_old"))), "no lock appears in the other folder").toBe(false);
+});
+
+test("the saves resume once the extra copy is removed, and a later copy is traced again", async () => {
+  const proj = freshProject();
+  saveInOldFolder(proj, sampleWorkspace({ id: "wsp_old" }));
+  const svc = workspaceService(fakeDeps(proj));
+  expect(await svc.restore("wsp_old", "attended")).toEqual({ ok: true });
+  const traces: string[] = [];
+  onDeckError((_scope, text) => traces.push(text));
+  try {
+    saveFresh(proj, sampleWorkspace({ id: "wsp_old" }));
+    expect(svc.saveAuto()).toBeNull();
+    deleteWorkspace(fresh(proj, "wsp_old"));
+    expect(svc.saveAuto(), "the extra copy is gone").not.toBeNull();
+    saveFresh(proj, sampleWorkspace({ id: "wsp_old" }));
+    expect(svc.saveAuto()).toBeNull();
+  } finally {
+    onDeckError(() => {});
+  }
+  expect(traces.filter((text) => text.includes("saving stopped"))).toHaveLength(2);
+});
+
+test("restore refuses an id held by both folders as 'duplicate', opens nothing and takes no lock", async () => {
+  const proj = freshProject();
+  saveInOldFolder(proj, sampleWorkspace({ id: "wsp_twice" }));
+  saveFresh(proj, sampleWorkspace({ id: "wsp_twice" }));
+  const deps = fakeDeps(proj);
+  const svc = workspaceService(deps);
+  expect(await svc.restore("wsp_twice", "attended")).toEqual({ ok: false, reason: "duplicate" });
+  expect(deps.sessions).toEqual([fakeSession()]);
+  expect(svc.currentWorkspaceId).toBeNull();
+  for (const ref of [legacy(proj, "wsp_twice"), fresh(proj, "wsp_twice")]) {
+    expect(existsSync(lockPath(ref)), `no lock under ${ref.source}`).toBe(false);
+  }
+});
+
+test("deleteWs of the owned workspace deletes nothing and keeps it owned once its id is held by both folders", async () => {
+  const proj = freshProject();
+  saveInOldFolder(proj, sampleWorkspace({ id: "wsp_old" }));
+  const svc = workspaceService(fakeDeps(proj));
+  expect(await svc.restore("wsp_old", "attended")).toEqual({ ok: true });
+  saveFresh(proj, sampleWorkspace({ id: "wsp_old" }));
+  svc.deleteWs("wsp_old");
+  expect(existsSync(join(workspacesDir(proj, "legacy"), "wsp_old.json"))).toBe(true);
+  expect(existsSync(join(workspacesDir(proj, "koryphaios"), "wsp_old.json"))).toBe(true);
+  expect(svc.currentWorkspaceId).toBe("wsp_old");
+});
+
+test("an id held by both folders is listed once, unlocked, and never pruned", () => {
+  const proj = freshProject();
+  saveInOldFolder(proj, sampleWorkspace({ id: "wsp_twice" }));
+  saveFresh(proj, sampleWorkspace({ id: "wsp_twice" }));
+  ageSnapshot(legacy(proj, "wsp_twice"));
+  ageSnapshot(fresh(proj, "wsp_twice"));
+  const svc = workspaceService(fakeDeps(proj));
+  const listed = svc.listForCwd().filter((w) => w.id === "wsp_twice");
+  expect(listed).toHaveLength(1);
+  expect(listed[0]!.locked).toBe(false);
+  expect(svc.pruneStale()).toEqual([]);
+  expect(existsSync(join(workspacesDir(proj, "legacy"), "wsp_twice.json"))).toBe(true);
+  expect(existsSync(join(workspacesDir(proj, "koryphaios"), "wsp_twice.json"))).toBe(true);
+});
+
+test("an id held by both folders shows unlocked whichever copy another Deck holds", () => {
+  const proj = freshProject();
+  saveInOldFolder(proj, sampleWorkspace({ id: "wsp_older_held" }));
+  ageSnapshot(legacy(proj, "wsp_older_held"));
+  saveFresh(proj, sampleWorkspace({ id: "wsp_older_held" }));
+  takeLock(legacy(proj, "wsp_older_held"), foreignOwner);
+
+  saveInOldFolder(proj, sampleWorkspace({ id: "wsp_shown_held" }));
+  saveFresh(proj, sampleWorkspace({ id: "wsp_shown_held" }));
+  ageSnapshot(fresh(proj, "wsp_shown_held"));
+  takeLock(legacy(proj, "wsp_shown_held"), foreignOwner);
+
+  const list = workspaceService(fakeDeps(proj)).listForCwd();
+  expect(list.find((w) => w.id === "wsp_older_held")!.locked, "the held copy is the older one").toBe(false);
+  expect(list.find((w) => w.id === "wsp_shown_held")!.locked, "the held copy is the one the list shows").toBe(false);
+});
+
+type CopyChange = "appears" | "vanishes" | "moves";
+const copyChanges: Record<CopyChange, { run: (proj: string, id: string) => void; result: { ok: false; reason: "duplicate" | "missing" } }> = {
+  appears: { run: (proj, id) => void saveFresh(proj, sampleWorkspace({ id })), result: { ok: false, reason: "duplicate" } },
+  vanishes: { run: (proj, id) => rmSync(join(workspacesDir(proj, "legacy"), `${id}.json`)), result: { ok: false, reason: "missing" } },
+  moves: {
+    run: (proj, id) => {
+      rmSync(join(workspacesDir(proj, "legacy"), `${id}.json`));
+      saveFresh(proj, sampleWorkspace({ id }));
+    },
+    result: { ok: false, reason: "missing" },
+  },
+};
+
+type WaitPoint = "shell approval" | "cwd approval" | "mod preparation" | "scope adoption";
+const waitPoints: WaitPoint[] = ["shell approval", "cwd approval", "mod preparation", "scope adoption"];
+
+async function restoreChangedWhileWaiting(proj: string, id: string, point: WaitPoint, change: () => void) {
+  const published = { state: "published" as const, scope: { projectKey: "project", groupId: fakeScope().groupId } };
+  const later = { steps: 0 };
+  const adopt: WorkspaceDeps["adoptScope"] = async (_ws, own) => {
+    later.steps++;
+    return own() ? published : { state: "lock-race" };
+  };
+  if (point === "shell approval" || point === "cwd approval") {
+    const shell = point === "shell approval";
+    saveInOldFolder(proj, shell ? sampleWorkspace({ id }) : cwdOnlyWorkspace(id));
+    const gate = deferredGate();
+    const asked = async (): Promise<WorkspaceApprovalGateResult> => {
+      later.steps++;
+      return "approved";
+    };
+    const deps = fakeDeps(proj, {
+      ...(shell ? { confirmShellFields: async () => gate.promise, confirmUntrustedCwd: asked } : { confirmUntrustedCwd: async () => gate.promise }),
+      prepareModPlans: async () => {
+        later.steps++;
+        return { ok: true, plans: new Map() };
+      },
+      adoptScope: adopt,
+    });
+    const svc = workspaceService(deps);
+    const restoring = svc.restore(id, "attended");
+    await flushMicrotasks();
+    change();
+    gate.resolve("approved");
+    return { result: await settled(restoring), deps, svc, later };
+  }
+  saveInOldFolder(proj, projectSessionsWorkspace(proj, id));
+  if (point === "mod preparation") {
+    const rig = modRestoreRig(proj, { adoptScope: adopt });
+    const restoring = rig.svc.restore(id, "attended");
+    await flushMicrotasks();
+    change();
+    rig.pending[0]!.release();
+    return { result: await settled(restoring), deps: rig.deps, svc: rig.svc, later };
+  }
+  const deps = fakeDeps(proj, {
+    adoptScope: async (_ws, own) => {
+      change();
+      return own() ? published : { state: "lock-race" };
+    },
+  });
+  const svc = workspaceService(deps);
+  return { result: await settled(svc.restore(id, "attended")), deps, svc, later };
+}
+
+for (const point of waitPoints) {
+  for (const [name, change] of Object.entries(copyChanges) as Array<[CopyChange, (typeof copyChanges)[CopyChange]]>) {
+    test(`WorkspaceService.restore(): a stored copy that ${name} during the ${point} refuses as '${change.result.reason}' and opens nothing`, async () => {
+      const proj = freshProject();
+      const id = "wsp_wait";
+      const { result, deps, svc, later } = await restoreChangedWhileWaiting(proj, id, point, () => change.run(proj, id));
+      expect(result).toEqual(change.result);
+      expect(later.steps, "no step after the wait ran for the stale copy").toBe(0);
+      expect(deps.sessions, "no session was swapped").toEqual([fakeSession()]);
+      expect(svc.currentWorkspaceId).toBeNull();
+      expect(probeSameHostLock(legacy(proj, id)), "no lock was taken").toBe("free");
+    });
+  }
+}

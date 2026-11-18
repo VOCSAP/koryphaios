@@ -15,6 +15,9 @@ import {
 import { ensureWorkspacesDir, saveWorkspace, type Workspace } from '../desktop/src/main/workspace-store.ts'
 import { WorkspaceService, type WorkspaceDeps } from '../desktop/src/main/workspace-service.ts'
 import type { AppConfig, SessionDef } from '../desktop/src/shared/types.ts'
+const fresh = (projectDir: string, id: string) => ({ projectDir, id, source: "koryphaios" as const });
+const freshRoot = (projectDir: string) => ({ projectDir, source: "koryphaios" as const });
+const saveFresh = (projectDir: string, ws: { id: string }) => saveWorkspace(fresh(projectDir, ws.id), ws as never);
 
 const MODULE = join(import.meta.dir, '..', 'desktop', 'src', 'main', 'workspace-lock.ts')
 
@@ -37,14 +40,14 @@ afterEach(async () => {
 function freshProject(): string {
   const dir = mkdtempSync(join(tmpdir(), 'kory-wslock-'))
   dirs.push(dir)
-  ensureWorkspacesDir(dir)
+  ensureWorkspacesDir(freshRoot(dir))
   return dir
 }
 
 const liveness = { host: 'this-host', bootInstant: 0, staleMs: 120_000, startedAt: 1_000 }
 
 function takeLock(projectDir: string, id: string, pid: number, isPidAlive: (pid: number) => boolean = () => true) {
-  const held = acquireLock(projectDir, id, { ...liveness, now: Date.now(), pid, isPidAlive })
+  const held = acquireLock(fresh(projectDir, id), { ...liveness, now: Date.now(), pid, isPidAlive })
   if (held) heldLocks.add(held)
   return held
 }
@@ -74,7 +77,7 @@ function writeChildScript(dir: string): string {
     "  writeFileSync(join(barrier, `ready-${name}`), '')",
     '  waitFor(join(barrier, `ready-${twin}`), 5_000)',
     '}',
-    "const held = acquireLock(projectDir, 'ws1', { host: 'this-host', bootInstant: 0, staleMs: 120_000, startedAt: 1_000, now: Date.now(), pid: process.pid, isPidAlive })",
+    "const held = acquireLock({ projectDir, id: 'ws1', source: 'koryphaios' }, { host: 'this-host', bootInstant: 0, staleMs: 120_000, startedAt: 1_000, now: Date.now(), pid: process.pid, isPidAlive })",
     "if (mode === 'hold') { writeFileSync(join(barrier, 'held'), String(held !== null)); sleep(60_000) }",
     'process.stdout.write(JSON.stringify({ name, acquired: held !== null }))',
     'sleep(1_000)'
@@ -104,7 +107,7 @@ async function holdInChild(projectDir: string, id = 'ws1') {
 
 test('two Decks judging the same stale lock at once: exactly one acquires it', async () => {
   const projectDir = freshProject()
-  writeFileSync(lockPath(projectDir, 'ws1'), JSON.stringify({ pid: 999_999, host: 'this-host', startedAt: 1, heartbeat: 1 }))
+  writeFileSync(lockPath(fresh(projectDir, 'ws1')), JSON.stringify({ pid: 999_999, host: 'this-host', startedAt: 1, heartbeat: 1 }))
   const barrier = join(projectDir, 'barrier')
   mkdirSync(barrier)
   const script = writeChildScript(barrier)
@@ -144,35 +147,35 @@ test('a Deck killed while owning a workspace frees it for the next one, within a
   }
   expect(takeLock(projectDir, 'ws1', 5555, pidAlive), 'the dead owner left its lock behind').not.toBeNull()
   expect(Date.now() - startedAt).toBeLessThan(2_000)
-  expect(readLock(projectDir, 'ws1')!.pid).toBe(5555)
+  expect(readLock(fresh(projectDir, 'ws1'))!.pid).toBe(5555)
 })
 
 test("releasing a workspace this Deck does not own leaves the owner's locks in place", async () => {
   const projectDir = freshProject()
   await holdInChild(projectDir)
-  expect(releaseLock(projectDir, 'ws1', { pid: 5555, host: 'this-host' }, null)).toBe(false)
-  expect(readLock(projectDir, 'ws1'), "the owner's JSON lock").not.toBeNull()
-  expect(probeSameHostLock(projectDir, 'ws1'), "the owner's OS lock").toBe('held')
+  expect(releaseLock(fresh(projectDir, 'ws1'), { pid: 5555, host: 'this-host' }, null)).toBe(false)
+  expect(readLock(fresh(projectDir, 'ws1')), "the owner's JSON lock").not.toBeNull()
+  expect(probeSameHostLock(fresh(projectDir, 'ws1')), "the owner's OS lock").toBe('held')
   expect(takeLock(projectDir, 'ws1', 5555, () => false)).toBeNull()
 })
 
 test('a JSON lock from another host decides alone: refused while its heartbeat is fresh, taken once stale', () => {
   const projectDir = freshProject()
   const foreign = { pid: 1, host: 'other-host', startedAt: 1, heartbeat: Date.now() }
-  writeFileSync(lockPath(projectDir, 'ws1'), JSON.stringify(foreign))
-  expect(probeSameHostLock(projectDir, 'ws1')).toBe('free')
+  writeFileSync(lockPath(fresh(projectDir, 'ws1')), JSON.stringify(foreign))
+  expect(probeSameHostLock(fresh(projectDir, 'ws1'))).toBe('free')
   expect(takeLock(projectDir, 'ws1', 5555)).toBeNull()
-  writeFileSync(lockPath(projectDir, 'ws1'), JSON.stringify({ ...foreign, heartbeat: Date.now() - 200_000 }))
+  writeFileSync(lockPath(fresh(projectDir, 'ws1')), JSON.stringify({ ...foreign, heartbeat: Date.now() - 200_000 }))
   expect(takeLock(projectDir, 'ws1', 5555)).not.toBeNull()
-  expect(readLock(projectDir, 'ws1')!.host).toBe('this-host')
+  expect(readLock(fresh(projectDir, 'ws1'))!.host).toBe('this-host')
 })
 
 test('an unreadable JSON lock is rewritten once the OS lock is won', () => {
   const projectDir = freshProject()
-  writeFileSync(lockPath(projectDir, 'ws1'), '{ torn')
-  expect(readLock(projectDir, 'ws1')).toBeNull()
+  writeFileSync(lockPath(fresh(projectDir, 'ws1')), '{ torn')
+  expect(readLock(fresh(projectDir, 'ws1'))).toBeNull()
   expect(takeLock(projectDir, 'ws1', 5555)).not.toBeNull()
-  expect(readLock(projectDir, 'ws1')).toEqual({ pid: 5555, host: 'this-host', startedAt: 1_000, heartbeat: expect.any(Number) })
+  expect(readLock(fresh(projectDir, 'ws1'))).toEqual({ pid: 5555, host: 'this-host', startedAt: 1_000, heartbeat: expect.any(Number) })
 })
 
 // ----- WorkspaceService -----
@@ -226,7 +229,7 @@ function service(projectDir: string, pid: number, openLock?: LockOpener): Worksp
 
 test('the workspace list shows as locked a workspace another Deck process owns, and free once it dies', async () => {
   const projectDir = freshProject()
-  saveWorkspace(projectDir, sampleWorkspace('ws1'))
+  saveFresh(projectDir, sampleWorkspace('ws1'))
   const svc = service(projectDir, 5555)
   const holder = await holdInChild(projectDir)
   expect(svc.listForCwd().find((w) => w.id === 'ws1')?.locked).toBe(true)
@@ -239,25 +242,25 @@ test('the workspace list shows as locked a workspace another Deck process owns, 
 
 test('the OS lock of an owned workspace survives a garbage collection: the service keeps its connection', async () => {
   const projectDir = freshProject()
-  saveWorkspace(projectDir, sampleWorkspace('ws1'))
+  saveFresh(projectDir, sampleWorkspace('ws1'))
   const svc = service(projectDir, 5555)
   expect(await svc.restore('ws1', 'attended')).toEqual({ ok: true })
   Bun.gc(true)
   Bun.gc(true)
-  expect(probeSameHostLock(projectDir, 'ws1'), 'a collected connection drops its lock').toBe('held')
+  expect(probeSameHostLock(fresh(projectDir, 'ws1')), 'a collected connection drops its lock').toBe('held')
 })
 
 test('pruneStale never deletes a workspace whose lock it cannot read', () => {
   const projectDir = freshProject()
   for (const id of ['ws_torn', 'ws_free']) {
-    saveWorkspace(projectDir, sampleWorkspace(id))
-    const file = join(projectDir, '.claude', 'claude-peers', 'workspaces', `${id}.json`)
+    saveFresh(projectDir, sampleWorkspace(id))
+    const file = join(projectDir, '.claude', 'koryphaios', 'workspaces', `${id}.json`)
     writeFileSync(file, JSON.stringify({ ...JSON.parse(readFileSync(file, 'utf8')), updatedAt: 1000 }))
   }
-  writeFileSync(lockPath(projectDir, 'ws_torn'), '{ torn')
+  writeFileSync(lockPath(fresh(projectDir, 'ws_torn')), '{ torn')
   const svc = service(projectDir, 5555)
   expect(svc.pruneStale()).toEqual(['ws_free'])
-  expect(existsSync(join(projectDir, '.claude', 'claude-peers', 'workspaces', 'ws_torn.json'))).toBe(true)
+  expect(existsSync(join(projectDir, '.claude', 'koryphaios', 'workspaces', 'ws_torn.json'))).toBe(true)
 })
 
 /** The real opener, counting the lock connections it hands out. */
@@ -274,33 +277,33 @@ function countingOpener(): { open: LockOpener; opened: () => number } {
 
 test("the owner of the current workspace rewrites its vanished JSON lock without ever letting go of the OS lock", async () => {
   const projectDir = freshProject()
-  saveWorkspace(projectDir, sampleWorkspace('ws1'))
+  saveFresh(projectDir, sampleWorkspace('ws1'))
   const counter = countingOpener()
   const svc = service(projectDir, 5555, counter.open)
   expect(await svc.restore('ws1', 'attended')).toEqual({ ok: true })
-  rmSync(lockPath(projectDir, 'ws1'))
+  rmSync(lockPath(fresh(projectDir, 'ws1')))
   expect(takeLock(projectDir, 'ws1', 6666, () => false), 'no other Deck may win while the JSON is gone').toBeNull()
 
   const opensBefore = counter.opened()
   expect(svc.saveAuto()).not.toBeNull()
   expect(counter.opened(), 'the owner reopened its lock database: it gave the OS lock up in between').toBe(opensBefore)
-  expect(readLock(projectDir, 'ws1')!.pid).toBe(5555)
+  expect(readLock(fresh(projectDir, 'ws1'))!.pid).toBe(5555)
   expect(svc.currentWorkspaceId).toBe('ws1')
-  expect(probeSameHostLock(projectDir, 'ws1')).toBe('held')
+  expect(probeSameHostLock(fresh(projectDir, 'ws1'))).toBe('held')
 })
 
 test('a lock database that cannot be probed keeps the workspace locked, traced once with its remedy', async () => {
   const projectDir = freshProject()
-  saveWorkspace(projectDir, sampleWorkspace('ws1'))
-  const file = join(projectDir, '.claude', 'claude-peers', 'workspaces', 'ws1.json')
+  saveFresh(projectDir, sampleWorkspace('ws1'))
+  const file = join(projectDir, '.claude', 'koryphaios', 'workspaces', 'ws1.json')
   writeFileSync(file, JSON.stringify({ ...JSON.parse(readFileSync(file, 'utf8')), updatedAt: 1000 }))
-  const garbage = `${lockPath(projectDir, 'ws1')}.sqlite`
+  const garbage = `${lockPath(fresh(projectDir, 'ws1'))}.sqlite`
   writeFileSync(garbage, 'not a lock database, '.repeat(40))
   const reported: string[] = []
   onDeckError((_scope, text) => reported.push(text))
   try {
     const svc = service(projectDir, 5555)
-    expect(probeSameHostLock(projectDir, 'ws1')).toBe('unprobeable')
+    expect(probeSameHostLock(fresh(projectDir, 'ws1'))).toBe('unprobeable')
     expect(svc.listForCwd().find((w) => w.id === 'ws1')?.locked).toBe(true)
     expect(svc.listForCwd().find((w) => w.id === 'ws1')?.locked).toBe(true)
     expect(await svc.restore('ws1', 'attended')).toEqual({ ok: false, reason: 'locked' })
@@ -315,28 +318,28 @@ test('a lock database that cannot be probed keeps the workspace locked, traced o
 
 test('a heartbeat that finds a foreign JSON lock gives the OS lock back', async () => {
   const projectDir = freshProject()
-  saveWorkspace(projectDir, sampleWorkspace('ws1'))
+  saveFresh(projectDir, sampleWorkspace('ws1'))
   const svc = service(projectDir, 5555)
   expect(await svc.restore('ws1', 'attended')).toEqual({ ok: true })
   const tick = () => (svc as unknown as { heartbeatTick(): void }).heartbeatTick()
-  rmSync(lockPath(projectDir, 'ws1'))
+  rmSync(lockPath(fresh(projectDir, 'ws1')))
   tick()
-  expect(readLock(projectDir, 'ws1')!.pid, 'a vanished JSON lock is rewritten by its OS lock owner').toBe(5555)
-  expect(probeSameHostLock(projectDir, 'ws1')).toBe('held')
+  expect(readLock(fresh(projectDir, 'ws1'))!.pid, 'a vanished JSON lock is rewritten by its OS lock owner').toBe(5555)
+  expect(probeSameHostLock(fresh(projectDir, 'ws1'))).toBe('held')
 
-  writeFileSync(lockPath(projectDir, 'ws1'), JSON.stringify({ pid: 999_999, host: 'this-host', startedAt: 1, heartbeat: 1 }))
+  writeFileSync(lockPath(fresh(projectDir, 'ws1')), JSON.stringify({ pid: 999_999, host: 'this-host', startedAt: 1, heartbeat: 1 }))
   tick()
-  expect(readLock(projectDir, 'ws1')!.pid, "a dead foreign JSON lock is rewritten, as own() does").toBe(5555)
-  expect(probeSameHostLock(projectDir, 'ws1'), 'a dead foreign JSON lock must not eject the owner').toBe('held')
+  expect(readLock(fresh(projectDir, 'ws1'))!.pid, "a dead foreign JSON lock is rewritten, as own() does").toBe(5555)
+  expect(probeSameHostLock(fresh(projectDir, 'ws1')), 'a dead foreign JSON lock must not eject the owner').toBe('held')
 
-  writeFileSync(lockPath(projectDir, 'ws1'), JSON.stringify({ pid: 1, host: 'other-host', startedAt: 1, heartbeat: Date.now() }))
+  writeFileSync(lockPath(fresh(projectDir, 'ws1')), JSON.stringify({ pid: 1, host: 'other-host', startedAt: 1, heartbeat: Date.now() }))
   tick()
-  expect(probeSameHostLock(projectDir, 'ws1'), 'the ejected owner still holds the OS lock').toBe('free')
+  expect(probeSameHostLock(fresh(projectDir, 'ws1')), 'the ejected owner still holds the OS lock').toBe('free')
 })
 
 test('a JSON lock naming this very Deck is taken back once the OS lock is won', () => {
   const projectDir = freshProject()
-  writeFileSync(lockPath(projectDir, 'ws1'), JSON.stringify({ pid: 5555, host: 'this-host', startedAt: 1, heartbeat: Date.now() }))
+  writeFileSync(lockPath(fresh(projectDir, 'ws1')), JSON.stringify({ pid: 5555, host: 'this-host', startedAt: 1, heartbeat: Date.now() }))
   expect(takeLock(projectDir, 'ws1', 5555, () => true)).not.toBeNull()
   expect(takeLock(projectDir, 'ws1', 6666, () => true), 'the OS lock still refuses anyone else').toBeNull()
 })

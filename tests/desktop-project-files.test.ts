@@ -4,7 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   MAX_TRACED_FILES,
+  PROJECT_SOURCES,
   projectCreationPath,
+  projectRootPath,
+  sameWorkspaceRef,
   selectProjectFile,
   traceInvalidFileOnce
 } from "../desktop/src/main/project-files.ts";
@@ -29,6 +32,27 @@ const inLegacy = (project: string, name: string): string => join(project, ".clau
 test("a new project file is created under .claude/koryphaios", () => {
   const project = tmpProject();
   expect(projectCreationPath(project, "workspaces", "w.json")).toBe(join(project, ".claude", "koryphaios", "workspaces", "w.json"));
+});
+
+test("each source names its own folder under .claude", () => {
+  const project = tmpProject();
+  expect(projectRootPath(project, "koryphaios")).toBe(join(project, ".claude", "koryphaios"));
+  expect(projectRootPath(project, "legacy")).toBe(join(project, ".claude", "claude-peers"));
+  expect(PROJECT_SOURCES).toEqual(["koryphaios", "legacy"]);
+});
+
+test("two refs are the same workspace only when project, folder and id all agree, whatever the project spelling", () => {
+  const project = tmpProject();
+  const real = join(project, "real");
+  mkdirSync(real);
+  const link = join(project, "link");
+  symlinkSync(real, link, "junction");
+  const ref = { projectDir: real, id: "wsp_a", source: "koryphaios" as const };
+  expect(sameWorkspaceRef(ref, { ...ref })).toBe(true);
+  expect(sameWorkspaceRef(ref, { ...ref, projectDir: link }), "an alias of the project").toBe(true);
+  expect(sameWorkspaceRef(ref, { ...ref, source: "legacy" }), "the other folder").toBe(false);
+  expect(sameWorkspaceRef(ref, { ...ref, id: "wsp_b" }), "another id").toBe(false);
+  expect(sameWorkspaceRef(ref, { ...ref, projectDir: project }), "another project").toBe(false);
 });
 
 test("the file under .claude/koryphaios is selected when both folders hold the file", () => {

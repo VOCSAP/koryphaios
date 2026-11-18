@@ -5,6 +5,9 @@ import { join } from "node:path";
 
 import { WorkspaceService } from "../desktop/src/main/workspace-service.ts";
 import { lockPath } from "../desktop/src/main/workspace-lock.ts";
+const fresh = (projectDir: string, id: string) => ({ projectDir, id, source: "koryphaios" as const });
+const freshRoot = (projectDir: string) => ({ projectDir, source: "koryphaios" as const });
+const saveFresh = (projectDir: string, ws: { id: string }) => saveWorkspace(fresh(projectDir, ws.id), ws as never);
 
 const tmpDirs: string[] = [];
 afterEach(() => {
@@ -67,7 +70,7 @@ test("a final save that throws still releases the workspace lock, and the error 
   const { svc, failSave } = makeService(proj);
   const summary = svc.saveAuto();
   expect(summary).not.toBeNull();
-  const lock = lockPath(proj, summary!.id);
+  const lock = lockPath(fresh(proj, summary!.id));
   expect(["lock held before quit", existsSync(lock)]).toEqual(["lock held before quit", true]);
 
   const boom = new Error("disk full");
@@ -83,7 +86,7 @@ test("a final save that succeeds releases the lock", () => {
   const proj = freshProject();
   const { svc } = makeService(proj);
   const summary = svc.saveAuto();
-  const lock = lockPath(proj, summary!.id);
+  const lock = lockPath(fresh(proj, summary!.id));
   svc.releaseOnQuit();
   expect(existsSync(lock)).toBe(false);
 });

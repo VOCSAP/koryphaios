@@ -9,6 +9,9 @@ import { join } from "node:path";
 // sidecar .lock before the workspaces dir existed (fresh project dir).
 import { WorkspaceService } from "../desktop/src/main/workspace-service.ts";
 import { workspacesDir } from "../desktop/src/main/workspace-store.ts";
+const fresh = (projectDir: string, id: string) => ({ projectDir, id, source: "koryphaios" as const });
+const freshRoot = (projectDir: string) => ({ projectDir, source: "koryphaios" as const });
+const saveFresh = (projectDir: string, ws: { id: string }) => saveWorkspace(fresh(projectDir, ws.id), ws as never);
 
 const tmpDirs: string[] = [];
 afterEach(() => {
@@ -73,16 +76,16 @@ function makeService(projectDir: string): WorkspaceService {
 
 test("saveAuto does not ENOENT on a fresh project dir (own() ensures the dir)", () => {
   const proj = freshProject();
-  // The .claude/claude-peers/workspaces tree does NOT exist yet.
-  expect(existsSync(workspacesDir(proj))).toBe(false);
+  // The .claude/koryphaios/workspaces tree does NOT exist yet.
+  expect(existsSync(workspacesDir(proj, "koryphaios"))).toBe(false);
 
   const svc = makeService(proj);
   // Before the fix this threw ENOENT writing the .lock before the dir existed.
   expect(() => svc.saveAuto()).not.toThrow();
 
   // The dir now exists and holds a workspace json + its sidecar lock.
-  expect(existsSync(workspacesDir(proj))).toBe(true);
-  const files = readdirSync(workspacesDir(proj));
+  expect(existsSync(workspacesDir(proj, "koryphaios"))).toBe(true);
+  const files = readdirSync(workspacesDir(proj, "koryphaios"));
   expect(files.some((f) => f.endsWith(".json"))).toBe(true);
   expect(files.some((f) => f.endsWith(".lock"))).toBe(true);
 

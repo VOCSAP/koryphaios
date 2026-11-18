@@ -15,6 +15,9 @@ import {
 } from "../desktop/src/main/workspace-service";
 import { newWorkspaceId, saveWorkspace, type Workspace } from "../desktop/src/main/workspace-store";
 import { extractBracedBody } from "./_braced-body";
+const fresh = (projectDir: string, id: string) => ({ projectDir, id, source: "koryphaios" as const });
+const freshRoot = (projectDir: string) => ({ projectDir, source: "koryphaios" as const });
+const saveFresh = (projectDir: string, ws: { id: string }) => saveWorkspace(fresh(projectDir, ws.id), ws as never);
 
 const SESSION_SERVICE_PATH = join(import.meta.dir, "..", "desktop", "src", "main", "session-service.ts");
 
@@ -108,7 +111,7 @@ test("hasTeamLeadAgentSession: true when a persisted session carries --agent \"t
   const proj = freshProject();
   const svc = new WorkspaceService(minimalDeps(proj));
   const ws = sampleWorkspace([["--agent", '"reviewer"'], ["--agent", '"team-lead"']]);
-  saveWorkspace(proj, ws);
+  saveFresh(proj, ws);
   expect(svc.hasTeamLeadAgentSession(ws.id)).toBe(true);
 });
 
@@ -116,7 +119,7 @@ test("hasTeamLeadAgentSession: false when no session is the team-lead agent", ()
   const proj = freshProject();
   const svc = new WorkspaceService(minimalDeps(proj));
   const ws = sampleWorkspace([["--agent", '"reviewer"'], ["--model", '"opus"']]);
-  saveWorkspace(proj, ws);
+  saveFresh(proj, ws);
   expect(svc.hasTeamLeadAgentSession(ws.id)).toBe(false);
 });
 
@@ -126,7 +129,7 @@ test("hasTeamLeadAgentSession: true when the team-lead --agent comes last, false
   const last = sampleWorkspace([["--agent", '"developer"', "--agent", '"team-lead"']]);
   const overridden = sampleWorkspace([["--agent", '"team-lead"', "--agent", '"developer"']]);
   const notPlain = sampleWorkspace([["--agent", '"team-lead"', ";", "true"]]);
-  for (const ws of [last, overridden, notPlain]) saveWorkspace(proj, ws);
+  for (const ws of [last, overridden, notPlain]) saveFresh(proj, ws);
   expect(svc.hasTeamLeadAgentSession(last.id)).toBe(true);
   expect(svc.hasTeamLeadAgentSession(overridden.id)).toBe(false);
   expect(svc.hasTeamLeadAgentSession(notPlain.id)).toBe(false);

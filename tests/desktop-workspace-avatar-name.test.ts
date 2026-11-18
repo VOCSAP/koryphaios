@@ -5,6 +5,9 @@ import { basename, join } from 'node:path'
 import { deckAvatarClientOptions } from '../desktop/src/main/avatar-deck-link.ts'
 import { WorkspaceService } from '../desktop/src/main/workspace-service.ts'
 import { loadWorkspace, saveWorkspace } from '../desktop/src/main/workspace-store.ts'
+const fresh = (projectDir: string, id: string) => ({ projectDir, id, source: "koryphaios" as const });
+const freshRoot = (projectDir: string) => ({ projectDir, source: "koryphaios" as const });
+const saveFresh = (projectDir: string, ws: { id: string }) => saveWorkspace(fresh(projectDir, ws.id), ws as never);
 
 const dirs: string[] = []
 
@@ -78,8 +81,8 @@ test('a restored workspace whose name is not a string yields no name, and the De
     const first = makeService(project, () => [session('agent', project)])
     const saved = first.saveNamed('Alpha')
     first.releaseOnQuit()
-    const stored = loadWorkspace(project, saved.id)!
-    saveWorkspace(project, { ...stored, name: hostile as unknown as string })
+    const stored = loadWorkspace(fresh(project, saved.id))!
+    saveFresh(project, { ...stored, name: hostile as unknown as string })
 
     const second = makeService(project, () => [])
     expect(await second.restore(saved.id, 'attended')).toEqual({ ok: true })

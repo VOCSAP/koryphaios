@@ -50,13 +50,13 @@ export type WorkspaceRestoreResult =
   | { ok: true; demotedTeamLeads?: string[] }
   | {
       ok: false
-      reason: 'missing' | 'empty' | 'locked' | 'shell-declined' | 'cwd-declined' | 'lock-race' | 'unattended' | 'busy' | 'superseded' | 'credential-timed-out'
+      reason: 'missing' | 'empty' | 'locked' | 'shell-declined' | 'cwd-declined' | 'lock-race' | 'duplicate' | 'unattended' | 'busy' | 'superseded' | 'credential-timed-out'
     }
   | { ok: false; reason: 'credential-unavailable'; cause: WorkspaceCredentialCause }
 
 export type WorkspaceRestoreQuietReason = Exclude<
   Exclude<WorkspaceRestoreResult, { ok: true }>['reason'],
-  'lock-race' | 'unattended' | 'credential-timed-out' | 'credential-unavailable'
+  'lock-race' | 'duplicate' | 'unattended' | 'credential-timed-out' | 'credential-unavailable'
 >
 
 function credentialUnavailableMessage(cause: WorkspaceCredentialCause): string {
@@ -89,6 +89,8 @@ export function workspaceRestoreOrThrow(result: WorkspaceRestoreResult): Workspa
       return { applied: false, reason: result.reason }
     case 'lock-race':
       throw new Error('workspace restore could not acquire its lock before changing any session -- check the workspace picker and retry')
+    case 'duplicate':
+      throw new Error('this workspace exists in both .claude/koryphaios and .claude/claude-peers, so it was not restored -- delete or move one of the two files and retry')
     case 'credential-timed-out':
       throw new Error("Restauration annulée. Aucune session de cette restauration n'a été ouverte ; le scope est inchangé. Le credential Inbox n'a pas été délivré dans le délai prévu. Vérifiez dans le Journal l'état du broker et d'une éventuelle révocation en attente avant de réessayer.")
     case 'credential-unavailable':

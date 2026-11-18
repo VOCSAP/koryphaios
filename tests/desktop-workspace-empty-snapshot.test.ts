@@ -12,6 +12,9 @@ import { join } from "node:path";
 // workspace and clobbering a real snapshot the same way.
 import { WorkspaceService, type WorkspaceDeps } from "../desktop/src/main/workspace-service.ts";
 import { listWorkspaces, saveWorkspace, type Workspace } from "../desktop/src/main/workspace-store.ts";
+const fresh = (projectDir: string, id: string) => ({ projectDir, id, source: "koryphaios" as const });
+const freshRoot = (projectDir: string) => ({ projectDir, source: "koryphaios" as const });
+const saveFresh = (projectDir: string, ws: { id: string }) => saveWorkspace(fresh(projectDir, ws.id), ws as never);
 
 const tmpDirs: string[] = [];
 afterEach(() => {
@@ -188,7 +191,7 @@ test("restore() refuses a workspace persisted with zero sessions, never touching
     updatedAt: 1,
     sessions: [],
   };
-  saveWorkspace(proj, empty);
+  saveFresh(proj, empty);
 
   const result = await svc.restore("legacy-empty", "attended");
 
