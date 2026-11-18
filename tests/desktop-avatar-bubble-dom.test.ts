@@ -435,7 +435,7 @@ test("a read gesture main refuses is reported, not swallowed", async () => {
 
 test("two Decks closing the same approval id each open their own closed question", async () => {
   const approvalId = "aaaaaaaa-0000-4000-8000-0000000000cc";
-  const closed = (identity: typeof IDENTITY, deckLabel: string, title: string) => ({
+  const closed = (identity: typeof IDENTITY, deckLabel: string, title: string, fromPeerId: string, tileName: string) => ({
     key: JSON.stringify([identity.deckRunId, identity.broker_url, approvalId]),
     identity,
     deckLabel,
@@ -443,14 +443,20 @@ test("two Decks closing the same approval id each open their own closed question
     title,
     closedAt: "2026-11-17T09:30:00.000Z",
     closedBy: null,
-    reason: null
+    reason: null,
+    fromPeerId,
+    tileName
   });
   const s = state([]);
-  s.model.closed = [closed(IDENTITY, "alpha", "close A"), closed(OTHER_DECK, "beta", "close B")] as never;
+  s.model.closed = [
+    closed(IDENTITY, "alpha", "close A", "peer-a", "Team A"),
+    closed(OTHER_DECK, "beta", "close B", "peer-b", "Team B")
+  ] as never;
   await mount(s);
   await openCourrier();
   const rows = [...container.querySelectorAll(".inbox-entry")];
   expect(rows.map((r) => r.querySelector(".inbox-entry-excerpt")?.textContent)).toEqual(["close A", "close B"]);
+  expect(rows.map((r) => r.querySelector(".inbox-entry-from")?.textContent)).toEqual(["alpha · Team A", "beta · Team B"]);
   await click(rows[1]);
   const modal = container.querySelector(".inbox-modal")?.textContent ?? "";
   expect(modal).toContain("close B");
@@ -484,6 +490,9 @@ test("a closed question names the authority that closed it, and only says when i
   s.model.closed = cases.map(([closedBy], i) => closed(`q-${i}`, `question ${i}`, closedBy)) as never;
   await mount(s);
   await openCourrier();
+  expect([...container.querySelectorAll(".inbox-entry-from")].map((n) => n.textContent)).toEqual(
+    cases.map(() => "inbox.senderUnresolvedEmpty")
+  );
   for (const [i, [, line]] of cases.entries()) {
     await click([...container.querySelectorAll(".inbox-entry")][i]);
     expect(container.querySelector(".inbox-closed-line")?.textContent, `question ${i}`).toBe(line);

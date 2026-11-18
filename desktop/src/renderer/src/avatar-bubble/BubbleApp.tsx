@@ -236,7 +236,7 @@ export function BubbleApp({ api, clock = REAL_CLOCK }: { api: AvatarBubbleApi; c
                 onReplyDraft={noop}
                 approvalDrafts={NO_DRAFTS}
                 onApprovalDraft={noop}
-                resolveSender={() => ({ resolved: false, raw: '' })}
+                resolveSender={courrier.resolveSender}
                 report={(message) => api.reportError(message)}
                 seedApprovalId={null}
                 onSeedConsumed={noop}

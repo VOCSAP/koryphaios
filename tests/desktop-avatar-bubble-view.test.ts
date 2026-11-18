@@ -205,13 +205,15 @@ describe('projectAvatarBubble', () => {
     ])
   })
 
-  test('a closed question keeps the authority the relay carries, per Deck', () => {
+  test('a closed question keeps its authority and sender projection per Deck', () => {
     const closed = (id: number, closed_by: 'lead' | null) => ({
       id: `00000000-0000-4000-8000-${String(id).padStart(12, '0')}`,
       title: `Q${id}`,
       closed_at: `2026-11-17T10:00:0${id}.000Z`,
       closed_by,
-      reason: null
+      reason: null,
+      from_peer_id: id === 1 ? `peer${NUL}${RLO}\nlead` : `peer-${id}`,
+      tile_name: id === 1 ? `Team${NUL}${RLO}\nlead` : null
     })
     const model = projectAvatarBubble({
       boxes: [box(DECK_A, { closed: [closed(1, 'lead')] }), box(DECK_B, { closed: [closed(2, null)] })],
@@ -219,9 +221,9 @@ describe('projectAvatarBubble', () => {
       lost: [],
       now: 0
     })
-    expect(model.closed.map((entry) => [entry.title, entry.closedBy])).toEqual([
-      ['Q2', null],
-      ['Q1', 'lead']
+    expect(model.closed.map((entry) => [entry.title, entry.closedBy, entry.fromPeerId, entry.tileName])).toEqual([
+      ['Q2', null, 'peer-2', null],
+      ['Q1', 'lead', `peer${REPLACEMENT}${REPLACEMENT} / lead`, `Team${REPLACEMENT}${REPLACEMENT} / lead`]
     ])
   })
 

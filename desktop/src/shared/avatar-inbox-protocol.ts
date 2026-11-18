@@ -76,6 +76,8 @@ export interface InboxRelayClosed {
   closed_at: string
   closed_by: InboxCloseAuthority | null
   reason: string | null
+  from_peer_id?: string
+  tile_name?: string | null
 }
 
 export interface InboxTruncation {
@@ -248,14 +250,20 @@ function parseMessage(raw: unknown): InboxRelayMessage {
 }
 
 function parseClosed(raw: unknown): InboxRelayClosed {
-  const input = exactRecord(raw, CLOSED_FIELDS, [], 'closed question')
+  const input = exactRecord(raw, CLOSED_FIELDS, ['from_peer_id', 'tile_name'], 'closed question')
   if (!isApprovalId(input.id)) invalid('closed question id')
   return {
     id: input.id as string,
     title: boundedString(input.title, MAX_INBOX_TITLE, 'closed question title'),
     closed_at: boundedString(input.closed_at, MAX_INBOX_TIMESTAMP, 'closed question closed_at'),
     closed_by: input.closed_by === null ? null : oneOf(input.closed_by, CLOSE_AUTHORITIES, 'closed question closed_by'),
-    reason: nullableString(input.reason, MAX_INBOX_REASON, 'closed question reason')
+    reason: nullableString(input.reason, MAX_INBOX_REASON, 'closed question reason'),
+    ...(input.from_peer_id === undefined
+      ? {}
+      : { from_peer_id: boundedString(input.from_peer_id, MAX_INBOX_PEER_ID, 'closed question from_peer_id') }),
+    ...(input.tile_name === undefined
+      ? {}
+      : { tile_name: nullableString(input.tile_name, MAX_INBOX_TILE_NAME, 'closed question tile_name') })
   }
 }
 
@@ -359,13 +367,15 @@ function projectMessage({ message, entry }: InboxRelayMessageSource): InboxRelay
   }
 }
 
-function projectClosed(approval: Approval): InboxRelayClosed {
+function projectClosed(approval: Approval, tileName: string | null): InboxRelayClosed {
   return {
     id: approval.id,
     title: cut(approval.title, MAX_INBOX_TITLE).value,
     closed_at: cut(approval.answered_at ?? approval.created_at, MAX_INBOX_TIMESTAMP).value,
     closed_by: approval.closed_by_authority ?? null,
-    reason: approval.close_reason === undefined ? null : cut(approval.close_reason, MAX_INBOX_REASON).value
+    reason: approval.close_reason === undefined ? null : cut(approval.close_reason, MAX_INBOX_REASON).value,
+    from_peer_id: cut(approval.origin.from_peer, MAX_INBOX_PEER_ID).value,
+    tile_name: tileName === null ? null : cut(tileName, MAX_INBOX_TILE_NAME).value
   }
 }
 
@@ -396,7 +406,10 @@ export function projectAvatarInbox(sources: InboxRelaySources, frame: (content: 
     MAX_INBOX_APPROVALS
   )
   const messages = keepNewest(newestLast(sources.messages.map(projectMessage), (m) => m.id), MAX_INBOX_MESSAGES)
-  const closed = keepNewest(newestLast(sources.closed.map(projectClosed), (c) => c.closed_at), MAX_INBOX_CLOSED)
+  const closed = keepNewest(
+    newestLast(sources.closed.map((approval) => projectClosed(approval, sources.tileName(approval))), (c) => c.closed_at),
+    MAX_INBOX_CLOSED
+  )
   const content: AvatarInboxContent = {
     approvals: approvals.kept,
     messages: messages.kept,

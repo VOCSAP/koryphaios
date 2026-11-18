@@ -102,6 +102,8 @@ export interface AvatarBubbleClosed {
   closedAt: string
   closedBy: InboxCloseAuthority | null
   reason: string | null
+  fromPeerId?: string
+  tileName?: string | null
 }
 
 export interface AvatarBubbleModel {
@@ -273,7 +275,9 @@ export function projectAvatarBubble(input: AvatarBubbleInput): AvatarBubbleModel
         title: safeLine(entry.title),
         closedAt: entry.closed_at,
         closedBy: entry.closed_by,
-        reason: entry.reason === null ? null : safeLine(entry.reason)
+        reason: entry.reason === null ? null : safeLine(entry.reason),
+        ...(entry.from_peer_id === undefined ? {} : { fromPeerId: safeLine(entry.from_peer_id) }),
+        ...(entry.tile_name === undefined ? {} : { tileName: entry.tile_name === null ? null : safeLine(entry.tile_name) })
       })
     }
     truncated.approvals += box.truncated.approvals

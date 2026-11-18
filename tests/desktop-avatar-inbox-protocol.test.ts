@@ -15,8 +15,10 @@ import {
   MAX_INBOX_FRAME_BYTES,
   MAX_INBOX_OPTION,
   MAX_INBOX_OPTIONS,
+  MAX_INBOX_PEER_ID,
   MAX_INBOX_REASON,
   MAX_INBOX_TEXT,
+  MAX_INBOX_TILE_NAME,
   MAX_INBOX_TITLE,
   parseAvatarInboxAction,
   projectAvatarInbox,
@@ -138,7 +140,15 @@ test('a snapshot the Deck builds always passes the Avatar parse, with the pick-l
   expect(parsed.approvals[0]!.tile_name).toBe('Tile one')
   expect(parsed.messages[1]).toMatchObject({ state: 'closed', closed_by: 'lead', reason: 'done', closed_at: '2026-11-17T08:40:00.000Z' })
   expect(parsed.closed).toEqual([
-    { id: uuid(9), title: 'Question 9', closed_at: '2026-11-17T08:30:00.000Z', closed_by: 'lead', reason: 'answered elsewhere' }
+    {
+      id: uuid(9),
+      title: 'Question 9',
+      closed_at: '2026-11-17T08:30:00.000Z',
+      closed_by: 'lead',
+      reason: 'answered elsewhere',
+      from_peer_id: 'peer-a',
+      tile_name: 'Tile one'
+    }
   ])
   for (const secret of [SECRET_OPERATOR, SECRET_SESSION, SECRET_ANSWER, 'tile-1', 'os_user_hash', 'github.com/owner/repo']) {
     expect(text, `the frame must not carry ${secret}`).not.toContain(secret)
@@ -225,9 +235,25 @@ test('a closed question relays who closed it, null for a row the broker stamped 
   expect(parsed.closed.map((c) => c.closed_by)).toEqual(['supervisor', null])
 })
 
+test('a closed question from an older Deck may omit both sender fields', () => {
+  const frame = JSON.parse(
+    frameText(project(sources({ closed: [approval(9, { status: 'closed', answered_at: '2026-11-17T08:30:00.000Z' })] })))
+  ) as Record<string, any>
+  delete frame.closed[0].from_peer_id
+  delete frame.closed[0].tile_name
+
+  const [closed] = parseAvatarInboxSnapshotFrame(frame, validateQuestions).closed
+  expect(closed).not.toHaveProperty('from_peer_id')
+  expect(closed).not.toHaveProperty('tile_name')
+})
+
 test.each([
   ['an authority outside author, lead and supervisor', (c: Record<string, any>) => { c.closed_by = 'operator' }],
-  ['no closed_by at all', (c: Record<string, any>) => { delete c.closed_by }]
+  ['no closed_by at all', (c: Record<string, any>) => { delete c.closed_by }],
+  ['a non-string from_peer_id', (c: Record<string, any>) => { c.from_peer_id = 42 }],
+  ['a from_peer_id over 64 code points', (c: Record<string, any>) => { c.from_peer_id = 'p'.repeat(MAX_INBOX_PEER_ID + 1) }],
+  ['a non-string tile_name', (c: Record<string, any>) => { c.tile_name = { forged: true } }],
+  ['a tile_name over 64 code points', (c: Record<string, any>) => { c.tile_name = 't'.repeat(MAX_INBOX_TILE_NAME + 1) }]
 ])('the Avatar refuses a closed question carrying %s', (_what, mutate) => {
   const frame = JSON.parse(
     frameText(project(sources({ closed: [approval(9, { status: 'closed', answered_at: '2026-11-17T08:30:00.000Z' })] })))

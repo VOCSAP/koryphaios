@@ -1,4 +1,5 @@
 import type { AvatarBubbleMessage, AvatarBubbleModel } from '@shared/avatar-bubble-view'
+import type { ApprovalSenderResolution } from '../inbox-sender'
 import {
   inboxEntryKey,
   type AckableInboxEntry,
@@ -22,6 +23,7 @@ export interface BubbleCourrier {
   source: (entry: AckableInboxEntry) => AvatarBubbleMessage | null
   /** AvatarBubbleClosed.key of a closed question, two Decks may close the same approval id; null as for entryKey. */
   approvalKey: (approval: Approval) => string | null
+  resolveSender: (approval: Approval) => ApprovalSenderResolution
 }
 
 /**
@@ -73,6 +75,7 @@ export function bubbleCourrier(model: AvatarBubbleModel, report: (message: strin
     )
   }
   const closedKeys = new Map<Approval, string>()
+  const closedSenders = new Map<string, string>()
   const closedQuestions = model.closed.map((c): Approval => {
     const approval: Approval = {
       id: c.approvalId,
@@ -100,9 +103,16 @@ export function bubbleCourrier(model: AvatarBubbleModel, report: (message: strin
       ...(c.closedBy === null ? {} : { closed_by_authority: c.closedBy })
     }
     closedKeys.set(approval, c.key)
+    const sender = c.tileName ?? c.fromPeerId
+    if (sender) closedSenders.set(c.key, many ? `${c.deckLabel} · ${sender}` : sender)
     return approval
   })
   const approvalKey = (approval: Approval): string | null =>
     closedKeys.get(approval) ?? refuse(approval, `bubble Courrier left out question ${approval.id}: not one the bubble listed`)
-  return { messages, archive: { status: 'ready', messages: states, closedQuestions }, readStates, entryKey, source, approvalKey }
+  const resolveSender = (approval: Approval): ApprovalSenderResolution => {
+    const key = closedKeys.get(approval)
+    const name = key === undefined ? undefined : closedSenders.get(key)
+    return name === undefined ? { resolved: false, raw: '' } : { resolved: true, name }
+  }
+  return { messages, archive: { status: 'ready', messages: states, closedQuestions }, readStates, entryKey, source, approvalKey, resolveSender }
 }
