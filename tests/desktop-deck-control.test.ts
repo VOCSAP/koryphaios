@@ -3232,34 +3232,39 @@ test("deck_list_sessions: model, context and observation age come from liveStatu
 const INDEX_TS_PATH = join(import.meta.dir, "..", "desktop", "src", "main", "index.ts");
 
 const SHOW_APPROVAL_DIALOG_SIGNATURE =
-  /const routeTrustApproval = createApprovalRouter<[^\n]*>\(\{\s+native: async \(nativeSpec\) => \{/g;
+  /const routeTrustApproval = createApprovalRouter\(\{\s+native: async \(nativeSpec\) => \{/g;
 
 const RESOLVE_TEMPLATE_INPUTS_SIGNATURE = /const resolveTemplateInputs = async \(path, attendance\) => \{/g;
 
 type TemplateResolverProbeDeps = Record<string, unknown>;
 
-function extractShowApprovalDialogBody(src: string): string {
-  const matches = [...src.matchAll(SHOW_APPROVAL_DIALOG_SIGNATURE)];
-  if (matches.length !== 1) throw new Error(`routeTrustApproval native adapter matched ${matches.length} times`);
+const APPROVE_SPAWN_SIGNATURE = /const approveSpawn = async \(entries, plan, callerId\) => \{/g;
+const REQUEST_SPAWN_GRANT_SIGNATURE = /function requestSpawnGrant\(mode, callerId, deps\) \{/g;
+
+const transpiledTs = (src: string): string => new Bun.Transpiler({ loader: "ts" }).transformSync(src);
+
+function bodyOfUniqueAnchor(src: string, anchor: RegExp, name: string): string {
+  const js = transpiledTs(src);
+  const matches = [...js.matchAll(anchor)];
+  if (matches.length === 0) throw new Error(`${name} signature matched 0 times -- has it been renamed?`);
+  if (matches.length > 1) {
+    throw new Error(`${name} signature matched ${matches.length} times -- cannot execute an ambiguous source boundary`);
+  }
   const match = matches[0]!;
-  return extractBracedBody(src, match.index + match[0].length - 1);
+  return extractBracedBody(js, match.index + match[0].length - 1);
 }
 
-const CONFIRM_SHELL_FIELD_APPROVAL_SIGNATURE =
-  /const confirmShellFieldApproval = async \(opts: ShellFieldApprovalOpts\): Promise<boolean> => \{/g;
+function extractShowApprovalDialogBody(src: string): string {
+  return bodyOfUniqueAnchor(src, SHOW_APPROVAL_DIALOG_SIGNATURE, "routeTrustApproval native adapter");
+}
+
+const CONFIRM_SHELL_FIELD_APPROVAL_SIGNATURE = /const confirmShellFieldApproval = async \(opts\) => \{/g;
 
 function compileConfirmShellFieldApproval(
   src: string,
   deps: TemplateResolverProbeDeps
 ): (opts: unknown) => Promise<boolean> {
-  const matches = [...src.matchAll(CONFIRM_SHELL_FIELD_APPROVAL_SIGNATURE)];
-  if (matches.length !== 1) {
-    throw new Error(
-      `confirmShellFieldApproval signature matched ${matches.length} times -- cannot execute an ambiguous source boundary`
-    );
-  }
-  const match = matches[0]!;
-  const body = extractBracedBody(src, match.index + match[0].length - 1);
+  const body = bodyOfUniqueAnchor(src, CONFIRM_SHELL_FIELD_APPROVAL_SIGNATURE, "confirmShellFieldApproval");
   return new Function(
     ...Object.keys(deps),
     `return async (opts) => {${body}}`
@@ -3343,32 +3348,97 @@ function compileResolveTemplateInputs(
   src: string,
   deps: TemplateResolverProbeDeps
 ): (path: string, attendance: string) => unknown {
-  const js = new Bun.Transpiler({ loader: "ts" }).transformSync(src);
-  const matches = [...js.matchAll(RESOLVE_TEMPLATE_INPUTS_SIGNATURE)];
-  if (matches.length !== 1) {
-    throw new Error(
-      `resolveTemplateInputs signature matched ${matches.length} times -- cannot execute an ambiguous source boundary`
-    );
-  }
-  const match = matches[0]!;
-  const body = extractBracedBody(js, match.index + match[0].length - 1);
+  const body = bodyOfUniqueAnchor(src, RESOLVE_TEMPLATE_INPUTS_SIGNATURE, "resolveTemplateInputs");
   return new Function(
     ...Object.keys(deps),
     `return async (path, attendance) => {${body}}`
   )(...Object.values(deps)) as (path: string, attendance: string) => unknown;
 }
 
-test("a resolveTemplateInputs left only in a comment gives no anchor to execute", () => {
-  const fn = [
-    "const resolveTemplateInputs = async (path: string, attendance: CallerAttendance): Promise<TemplateResolveResult> => {",
-    "  return { ok: true, inputs: [] }",
-    "}"
-  ];
-  for (const source of [`/*\n${fn.join("\n")}\n*/\nexport const x = 1\n`, `${fn.map((line) => `// ${line}`).join("\n")}\nexport const x = 1\n`]) {
-    expect(() => compileResolveTemplateInputs(source, {})).toThrow("matched 0 times");
+const SIGNATURES_AS_WRITTEN: Record<string, { fn: string[]; extract: (src: string) => unknown }> = {
+  routeTrustApproval: {
+    fn: [
+      "const routeTrustApproval = createApprovalRouter<ApprovalDialogSpec>({",
+      "  native: async (nativeSpec) => {",
+      "    return true",
+      "  }",
+      "})"
+    ],
+    extract: extractShowApprovalDialogBody
+  },
+  confirmShellFieldApproval: {
+    fn: [
+      "const confirmShellFieldApproval = async (opts: ShellFieldApprovalOpts): Promise<boolean> => {",
+      "  return true",
+      "}"
+    ],
+    extract: (src) => compileConfirmShellFieldApproval(src, {})
+  },
+  resolveTemplateInputs: {
+    fn: [
+      "const resolveTemplateInputs = async (path: string, attendance: CallerAttendance): Promise<TemplateResolveResult> => {",
+      "  return { ok: true, inputs: [] }",
+      "}"
+    ],
+    extract: (src) => compileResolveTemplateInputs(src, {})
+  },
+  confirmWorkspaceShellFields: {
+    fn: [
+      "const confirmWorkspaceShellFields = async (",
+      "  ws: { id: string; name: string; sessions: WorkspaceSession[] },",
+      "  attendance: CallerAttendance",
+      "): Promise<WorkspaceApprovalGateResult> => {",
+      "  return 'approved'",
+      "}"
+    ],
+    extract: (src) => compileConfirmWorkspaceShellFields(src, {})
+  },
+  confirmSpawnShellFields: {
+    fn: [
+      "const confirmSpawnShellFields = async (",
+      "  entry: { command?: string; args?: string },",
+      "  attendance: CallerAttendance",
+      "): Promise<boolean> => {",
+      "  return true",
+      "}"
+    ],
+    extract: extractConfirmSpawnShellFieldsBody
+  },
+  approveSpawn: {
+    fn: [
+      "const approveSpawn = async (",
+      "  entries: SpawnSummary[],",
+      "  plan: unknown[],",
+      "  callerId: string",
+      "): Promise<SpawnApprovalResult> => {",
+      "  return { pending: false, decisions: [] }",
+      "}"
+    ],
+    extract: (src) => bodyOfUniqueAnchor(src, APPROVE_SPAWN_SIGNATURE, "approveSpawn")
+  },
+  requestSpawnGrant: {
+    fn: [
+      "function requestSpawnGrant(",
+      "  mode: 'team-review' | 'full-control',",
+      "  callerId: string,",
+      "  deps: ApprovalDeps",
+      "): (plan: SpawnGrantPlanItem[]) => Promise<{ pending: true } | { pending: false; granted: boolean }> {",
+      "  return () => Promise.resolve({ pending: true })",
+      "}"
+    ],
+    extract: (src) => bodyOfUniqueAnchor(src, REQUEST_SPAWN_GRANT_SIGNATURE, "requestSpawnGrant")
   }
-  expect(() => compileResolveTemplateInputs(`${fn.join("\n")}\n`, {})).not.toThrow();
-});
+};
+
+for (const [name, { fn, extract }] of Object.entries(SIGNATURES_AS_WRITTEN)) {
+  test(`${name} left only in a comment gives no anchor to execute`, () => {
+    const inBlock = `/*\n${fn.join("\n")}\n*/\nexport const x = 1\n`;
+    const inLines = `${fn.map((line) => `// ${line}`).join("\n")}\nexport const x = 1\n`;
+    expect(() => extract(inBlock)).toThrow("matched 0 times");
+    expect(() => extract(inLines)).toThrow("matched 0 times");
+    expect(() => extract(`${fn.join("\n")}\n`)).not.toThrow();
+  });
+}
 
 test("resolveTemplateInputs passes bridge-aware approval options to the approval cache", async () => {
   const plain = {
@@ -3475,31 +3545,16 @@ describe("resolveTemplateInputs with the real template gate", () => {
   });
 });
 
-const CONFIRM_WORKSPACE_SHELL_FIELDS_SIGNATURE =
-  /const confirmWorkspaceShellFields = async \(\s*ws: \{ id: string; name: string; sessions: WorkspaceSession\[\] \},\s*attendance: CallerAttendance\s*\): Promise<WorkspaceApprovalGateResult> => \{/g;
+const CONFIRM_WORKSPACE_SHELL_FIELDS_SIGNATURE = /const confirmWorkspaceShellFields = async \(ws, attendance\) => \{/g;
 
 function compileConfirmWorkspaceShellFields(
   src: string,
   deps: TemplateResolverProbeDeps
 ): (workspace: unknown, attendance: string) => unknown {
-  const matches = [...src.matchAll(CONFIRM_WORKSPACE_SHELL_FIELDS_SIGNATURE)];
-  if (matches.length !== 1) {
-    throw new Error(
-      `confirmWorkspaceShellFields signature matched ${matches.length} times -- cannot execute an ambiguous source boundary`
-    );
-  }
-  const match = matches[0]!;
-  const body = extractBracedBody(src, match.index + match[0].length - 1);
-  const executableBody = body.replace(
-    /const approvalOpts:\s*ShellFieldApprovalOpts\s*=/,
-    "const approvalOpts ="
-  );
-  if (executableBody === body) {
-    throw new Error("confirmWorkspaceShellFields approval options type annotation was not found");
-  }
+  const body = bodyOfUniqueAnchor(src, CONFIRM_WORKSPACE_SHELL_FIELDS_SIGNATURE, "confirmWorkspaceShellFields");
   return new Function(
     ...Object.keys(deps),
-    `return async (ws, attendance) => {${executableBody}}`
+    `return async (ws, attendance) => {${body}}`
   )(...Object.values(deps)) as (workspace: unknown, attendance: string) => unknown;
 }
 
@@ -3561,23 +3616,10 @@ test("unattended workspace restores do not open a dialog whether shell fields ar
   expect(probe.dialogOpens()).toBe(0);
 });
 
-const CONFIRM_SPAWN_SHELL_FIELDS_SIGNATURE =
-  /const confirmSpawnShellFields = async \(\s*entry: \{ command\?: string; args\?: string \},\s*attendance: CallerAttendance\s*\): Promise<boolean> => \{/g;
+const CONFIRM_SPAWN_SHELL_FIELDS_SIGNATURE = /const confirmSpawnShellFields = async \(entry, attendance\) => \{/g;
 
 function extractConfirmSpawnShellFieldsBody(src: string): string {
-  const matches = [...src.matchAll(CONFIRM_SPAWN_SHELL_FIELDS_SIGNATURE)];
-  if (matches.length === 0) {
-    throw new Error(
-      "confirmSpawnShellFields not found in index.ts with its expected signature -- has it been renamed?"
-    );
-  }
-  if (matches.length > 1) {
-    throw new Error(
-      `confirmSpawnShellFields signature matched ${matches.length} times -- anchor is no longer unique, cannot pick one without guessing`
-    );
-  }
-  const m = matches[0]!;
-  return extractBracedBody(src, m.index + m[0].length - 1);
+  return bodyOfUniqueAnchor(src, CONFIRM_SPAWN_SHELL_FIELDS_SIGNATURE, "confirmSpawnShellFields");
 }
 
 // Pins BOTH arguments, not just the function name (card ecaf736b): a mutation
@@ -3615,7 +3657,7 @@ test("confirmSpawnShellFields refuses BEFORE opening the dialog for an unattende
 // immune to source drift in index.ts.
 
 test("the extractor throws when the signature is absent", () => {
-  expect(() => extractConfirmSpawnShellFieldsBody("no such function here")).toThrow(/has it been renamed/);
+  expect(() => extractConfirmSpawnShellFieldsBody("export const unrelated = 1")).toThrow(/has it been renamed/);
 });
 
 test("the extractor throws (never picks the first) when the signature matches more than once", () => {
@@ -3626,7 +3668,7 @@ test("the extractor throws (never picks the first) when the signature matches mo
   return true
 }
 `;
-  const twice = oneOccurrence + "\n" + oneOccurrence;
+  const twice = `{${oneOccurrence}}\n{${oneOccurrence}}`;
   expect(() => extractConfirmSpawnShellFieldsBody(twice)).toThrow(/matched 2 times/);
 });
 
@@ -3683,10 +3725,16 @@ test("the checker REJECTS a second argument replaced by a constant (always/never
 // approveSpawn raises an asynchronous broker approval instead (card
 // 02e1c07c) and is not one of these four -- see the spawnDialog-unreachable
 // guard further down for its own proof.
+const unattendedRefusalSites = (src: string): number =>
+  (transpiledTs(src).match(/refusesUnattendedApproval\(/g) ?? []).length;
+
 test("refusesUnattendedApproval is called at exactly 4 sites in index.ts (one per dialog-opening sink)", () => {
-  const src = readFileSync(INDEX_TS_PATH, "utf-8");
-  const calls = src.match(/refusesUnattendedApproval\(/g) ?? [];
-  expect(calls.length).toBe(4);
+  expect(unattendedRefusalSites(readFileSync(INDEX_TS_PATH, "utf-8"))).toBe(4);
+});
+
+test("a refusesUnattendedApproval call left in a comment is not a site", () => {
+  const src = "/* refusesUnattendedApproval(a) */\n// refusesUnattendedApproval(b)\nrefusesUnattendedApproval(c)\n";
+  expect(unattendedRefusalSites(src)).toBe(1);
 });
 
 // ----- Card 02e1c07c: non-blocking supervisor spawn approval -----
@@ -4135,12 +4183,7 @@ test("approveSpawn (real file) never references dialog.showMessageBoxSync or spa
   expect(src, "spawnDialog must not exist: it has zero callers left once approveSpawn stops using it").not.toContain(
     "const spawnDialog ="
   );
-  const anchor =
-    /const approveSpawn = async \(\s*entries: SpawnSummary\[\],\s*plan: unknown\[\],\s*callerId: string\s*\): Promise<SpawnApprovalResult> => \{/g;
-  const matches = [...src.matchAll(anchor)];
-  expect(matches.length, "approveSpawn not found with its expected signature -- has it been renamed?").toBe(1);
-  const m = matches[0]!;
-  const body = extractBracedBody(src, m.index + m[0].length - 1);
+  const body = bodyOfUniqueAnchor(src, APPROVE_SPAWN_SIGNATURE, "approveSpawn");
   expect(body, "approveSpawn must never open a dialog directly").not.toContain("dialog.showMessageBoxSync");
   expect(body, "approveSpawn must never call the deleted spawnDialog").not.toContain("spawnDialog(");
   expect(body, "team-review/full-control must go through the async grant, not a local decision").toContain(
@@ -4159,33 +4202,17 @@ test("approveSpawn (real file) never references dialog.showMessageBoxSync or spa
 });
 
 test("requestSpawnGrant (real file) raises with merge:'never', never 'tile' -- a guarded spawn request must never merge with an unrelated attention notification on the same tile", () => {
-  const src = readFileSync(INDEX_TS_PATH, "utf-8");
-  // Anchored on the FULL signature through its body-opening brace: the
-  // return type itself contains `{ pending: true }` object-type literals,
-  // so a shallow "first `{` after the function name" search would grab the
-  // return-type annotation instead of the function body.
-  const anchor =
-    /function requestSpawnGrant\(\s*mode: 'team-review' \| 'full-control',\s*callerId: string,\s*deps: ApprovalDeps\s*\): \(plan: SpawnGrantPlanItem\[\]\) => Promise<\{ pending: true \} \| \{ pending: false; granted: boolean \}> \{/g;
-  const matches = [...src.matchAll(anchor)];
-  expect(matches.length, "requestSpawnGrant not found with its expected signature -- has it been renamed?").toBe(1);
-  const m = matches[0]!;
-  const body = extractBracedBody(src, m.index + m[0].length - 1);
+  const body = bodyOfUniqueAnchor(readFileSync(INDEX_TS_PATH, "utf-8"), REQUEST_SPAWN_GRANT_SIGNATURE, "requestSpawnGrant");
   expect(body, "merge:'never' must be present -- an omission would default broker-side to 'tile'").toMatch(
-    /merge:\s*'never'/
+    /merge:\s*["']never["']/
   );
   expect(body, "merge:'tile' would let N per-entry approvals sharing one tile_ref collapse into one, so a single allow authorises all N").not.toMatch(
-    /merge:\s*'tile'/
+    /merge:\s*["']tile["']/
   );
 });
 
 test("requestSpawnGrant (real file) checks countInFlightSpawnGrants BEFORE ever calling arbitrateSpawnGrant -- a NEW plan cannot bypass the cap", () => {
-  const src = readFileSync(INDEX_TS_PATH, "utf-8");
-  const anchor =
-    /function requestSpawnGrant\(\s*mode: 'team-review' \| 'full-control',\s*callerId: string,\s*deps: ApprovalDeps\s*\): \(plan: SpawnGrantPlanItem\[\]\) => Promise<\{ pending: true \} \| \{ pending: false; granted: boolean \}> \{/g;
-  const matches = [...src.matchAll(anchor)];
-  expect(matches.length, "requestSpawnGrant not found with its expected signature -- has it been renamed?").toBe(1);
-  const m = matches[0]!;
-  const body = extractBracedBody(src, m.index + m[0].length - 1);
+  const body = bodyOfUniqueAnchor(readFileSync(INDEX_TS_PATH, "utf-8"), REQUEST_SPAWN_GRANT_SIGNATURE, "requestSpawnGrant");
   const capIdx = body.search(/countInFlightSpawnGrants\(/);
   const arbitrateIdx = body.search(/arbitrateSpawnGrant\(/);
   expect(capIdx, "the cap check must be present in requestSpawnGrant's body").toBeGreaterThan(-1);
