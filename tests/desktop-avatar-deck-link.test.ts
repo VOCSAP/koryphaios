@@ -117,6 +117,20 @@ test('carries the configured theme read at every call, in a form the attach pars
   expect(parseAvatarAttachRequest({ protocol_version: 1, ...deck, capabilities: ['a3_context'] }).theme).toBe('light')
 })
 
+test('a configured theme other than dark or light is left out, and the Deck still attaches', () => {
+  for (const hand of ['purple', 'Dark', '', ' light', 'system', 7, null, undefined, {}, ['dark']]) {
+    const deck = deckAvatarClientOptions(deps({ theme: () => hand })).deck()
+    expect('theme' in deck, `${JSON.stringify(hand)} is not sent`).toBe(false)
+    expect(() => parseAvatarAttachRequest({ protocol_version: 1, ...deck, capabilities: ['a3_context'] })).not.toThrow()
+  }
+})
+
+test('a configured theme of dark or light is sent', () => {
+  for (const theme of ['dark', 'light'] as const) {
+    expect(deckAvatarClientOptions(deps({ theme: () => theme })).deck().theme).toBe(theme)
+  }
+})
+
 test('permits the active Deck broker URL to carry Avatar context', () => {
   expect(avatarAllowedBrokerUrls('http://127.0.0.1:7899')).toEqual(['http://127.0.0.1:7899'])
 })

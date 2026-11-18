@@ -22,7 +22,7 @@ import {
   type AvatarSocketHubOptions
 } from '../desktop/src/main/avatar-server.ts'
 import { AvatarState } from '../desktop/src/shared/avatar-state.ts'
-import { MAX_AVATAR_ATTACHMENTS, MAX_AVATAR_COUNTER } from '../desktop/src/shared/avatar-protocol.ts'
+import { MAX_AVATAR_ATTACHMENTS, MAX_AVATAR_COUNTER, resolveAvatarBubbleTheme } from '../desktop/src/shared/avatar-protocol.ts'
 
 const certificate = generateAvatarRunCertificate()
 const token = 'avatar-test-token'
@@ -384,6 +384,32 @@ test('with the real inbox service, a detached or swept Deck makes one refresh th
     setNow(15_000)
     server.sweepDeadDecks(() => false)
     expect(listed, 'after the sweep').toEqual([0])
+  } finally {
+    await server.close()
+  }
+})
+
+test('when the last Deck with an explicit theme detaches or is swept, the refresh resolves the Windows theme', async () => {
+  const themes: string[] = []
+  const watched: { server: AvatarServer | null } = { server: null }
+  const inbox = createAvatarInboxService({
+    send: async () => ({ requestId: 'r', ok: true }),
+    report: () => undefined,
+    changed: () => void themes.push(resolveAvatarBubbleTheme(watched.server!.attachedDecks(), 'dark'))
+  })
+  const { server, setNow } = await openServer({ inbox })
+  watched.server = server
+  try {
+    expect((await post(server, '/attach', JSON.stringify({ ...attach, theme: 'light' }))).status).toBe(200)
+    expect(resolveAvatarBubbleTheme(server.attachedDecks(), 'dark'), 'attached').toBe('light')
+    expect((await post(server, '/detach', JSON.stringify({ deckRunId: attach.deckRunId, broker_url: attach.broker_url }))).status).toBe(200)
+    expect(themes, 'the refresh of /detach').toEqual(['dark'])
+
+    themes.length = 0
+    expect((await post(server, '/attach', JSON.stringify({ ...attach, theme: 'light' }))).status).toBe(200)
+    setNow(15_000)
+    server.sweepDeadDecks(() => false)
+    expect(themes, 'the refresh of the sweep').toEqual(['dark'])
   } finally {
     await server.close()
   }

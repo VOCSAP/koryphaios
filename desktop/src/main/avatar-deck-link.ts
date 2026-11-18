@@ -26,7 +26,7 @@ export interface DeckAvatarLinkDeps {
   sessions(): SessionRuntime[]
   window(): DeckAvatarWindow | null
   workspaceName(): string | null
-  theme(): AvatarTheme
+  theme(): unknown
 }
 
 export interface AvatarScopeTracker {
@@ -82,6 +82,10 @@ function deckNameFrom(candidates: readonly unknown[]): string {
   return 'Deck'
 }
 
+function deckThemeFrom(value: unknown): { theme?: AvatarTheme } {
+  return value === 'dark' || value === 'light' ? { theme: value } : {}
+}
+
 export async function boundedAvatarDetach(
   detach: Promise<void>,
   wait: (ms: number) => Promise<void>,
@@ -115,7 +119,7 @@ export function deckAvatarClientOptions(
       broker_url: deps.brokerUrl(),
       projectDir,
       deckName: deckNameFrom([deps.workspaceName(), basename(projectDir), projectDir]),
-      theme: deps.theme(),
+      ...deckThemeFrom(deps.theme()),
       context: deps.scope()
     }),
     autoAttachEnabled: () => avatarAutoAttachEnabled(settingsFile, deps.projectKey),
