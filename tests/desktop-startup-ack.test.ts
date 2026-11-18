@@ -11,6 +11,7 @@ import {
   stripAnsi,
   type StartupAckEvent
 } from "../desktop/src/main/startup-ack.ts";
+import { ADD_DIR_LINES } from "./_unknown-dialog-fixture.ts";
 
 // The dialog the channels flag raises before Claude Code's UI (both cues).
 const CHANNELS_WARNING = `
@@ -224,4 +225,13 @@ test("field capture: the LATER repaints of the same screen use literal spaces --
   const events = collect(d);
   for (const c of CHANNELS_FIELD_CAPTURE.slice(FIRST_PAINT + 1)) d.feed("s2", c.data);
   expect(events).toEqual([{ id: "s2" }]);
+});
+
+test("the reconstructed add-dir dialog, which shares the generic footer, is never acknowledged", () => {
+  const d = new StartupAckDetector();
+  const events = collect(d);
+  const paint = ADD_DIR_LINES.join("\r\n");
+  d.feed("s3", paint);
+  d.feed("s3", paint);
+  expect(events).toEqual([]);
 });

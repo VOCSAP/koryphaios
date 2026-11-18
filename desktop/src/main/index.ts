@@ -298,7 +298,7 @@ import {
 import { createPendingApprovalsTick } from './hook-attention'
 import { pendingQuestionTarget } from './pending-question-target'
 import { matchPermissionDialog, permissionDialogShown } from './permission-dialog'
-import { trustPromptShown } from './attention'
+import { describeUnknownDialog, trustPromptShown, unknownDialogOnScreen, type AttentionEvent } from './attention'
 import { applyEnrolment, ensureOperatorIdentity, exportEnrolment } from './operator-identity'
 import { buildAuthProof, type Approval } from './approval-auth'
 import { INBOX_GATES } from '../../../shared/approval'
@@ -1385,6 +1385,8 @@ const openApprovals = new Map<string, string>()
 // pruned against what the broker still returns, so they cannot outgrow it.
 const heldVerdicts = new Set<string>()
 const unroutableTraced = new Set<string>()
+// Tile -> the unknown-dialog episode already written to the journal, so one episode logs once.
+const unknownEpisodeLogged = new Map<string, string>()
 
 /**
  * Raises the Deck's question for a tile. `tileOnly` makes the broker refuse
@@ -1455,6 +1457,30 @@ const pollApprovalVerdicts = async (): Promise<void> => {
       // demands that tile still be the one waiting on this approval.
       const tile = approval.origin.tile_ref || approval.origin.session_ref
       const live = service.list().find((s) => s.id === tile)
+      if (
+        live &&
+        approval.reply_route !== 'channel' &&
+        approval.reply_route !== 'hook' &&
+        approval.status === 'answered' &&
+        approval.answer_kind !== null
+      ) {
+        // Judged on the source and on the screen BEFORE the tile's waiting flag: an unknown dialog
+        // can be on screen before its episode is confirmed, and its default option can close the tile.
+        if (
+          service.attentionSourceOf(tile) === 'unknown-dialog' ||
+          unknownDialogOnScreen(live.claudeLaunch, service.screenRead(tile))
+        ) {
+          const reason = 'an unknown dialog is on screen, and no remote answer is typed into it'
+          applied.push(approval.id)
+          heldVerdicts.delete(approval.id)
+          reportError(
+            'approvals',
+            `the answer to "${approval.title}" (from ${approval.answered_via}) was NOT typed into "${live.name}": ${reason}. Answer the dialog in the terminal.`
+          )
+          broadcast('approvals:not-applied', { tile: live.name, title: approval.title, reason })
+          continue
+        }
+      }
       const state = live ? { exists: true, waiting: waitingTiles.has(tile) } : null
       const disposition = classifyVerdict(approval, state)
       if (disposition === 'settle') {
@@ -1575,8 +1601,21 @@ const pollApprovalVerdicts = async (): Promise<void> => {
 
 service.on(
   'attention',
-  ({ id, waiting, manual }: { id: string; waiting: boolean; manual?: boolean }) => {
+  ({ id, waiting, manual, source, episodeId, dialog }: AttentionEvent) => {
     const session = service.list().find((s) => s.id === id)
+    // An unknown dialog has no answer to give: no question, no approval, no sweep of the tile's
+    // other approvals (a neighbouring hook one stays), and its fall is never "answered in the terminal".
+    if (source === 'unknown-dialog') {
+      waitingTiles.delete(id)
+      if (waiting && dialog && unknownEpisodeLogged.get(id) !== episodeId) {
+        unknownEpisodeLogged.set(id, episodeId ?? '')
+        journal.add('attention', describeUnknownDialog(id, session?.name ?? id, dialog))
+      } else if (!waiting && unknownEpisodeLogged.get(id) === episodeId) {
+        unknownEpisodeLogged.delete(id)
+      }
+      return
+    }
+    unknownEpisodeLogged.delete(id)
     // The operator answered locally: settle the approval so the phone
     // notification is invalidated (the broker makes the two exclusive).
     if (!waiting) {

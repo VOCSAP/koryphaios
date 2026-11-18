@@ -1,8 +1,23 @@
 import { describe, expect, test } from 'bun:test'
 import { readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
-import { classifyInjectGuard, createXtermScreen, inspectInjectGuard, ScreenGuard } from '../desktop/src/main/xterm-screen'
+import {
+  classifyInjectGuard,
+  composerGeometryVisible,
+  createXtermScreen,
+  inspectInjectGuard,
+  ScreenGuard
+} from '../desktop/src/main/xterm-screen'
 import { EXPECTED_FIXTURE_VERDICTS, fixtureStartSize, GEOMETRY_MARKER, RESIZE_MARKER } from './_fixture-verdicts'
+import {
+  ADD_DIR_LINES,
+  CHEVRON,
+  QUOTED_IN_COMPOSER,
+  RULE,
+  UD_COLS,
+  UD_ROWS,
+  snapshotOf
+} from './_unknown-dialog-fixture'
 
 const esc = String.fromCharCode(27)
 const createScreen = (
@@ -1060,6 +1075,63 @@ describe('ScreenGuard xterm lifecycle', () => {
       reason: 'screen-fault'
     })
     guard.stop()
+  })
+})
+
+describe('composerGeometryVisible', () => {
+  const grid = (lines: string[], cursor = { x: 0, y: 0 }) => snapshotOf(lines, cursor)
+  const rows = (...lines: string[]): string[] => lines
+  const at = (row: number, ...lines: string[]): string[] => [...Array<string>(row).fill(''), ...lines]
+  const labelled = `${'─'.repeat(60)} label ${'─'.repeat(UD_COLS - 60 - 7)}`
+
+  test('a single-line composer between two full-width rules is visible', () => {
+    expect(composerGeometryVisible(grid(at(36, RULE, `${CHEVRON} `, RULE)))).toBe(true)
+  })
+
+  test('a labelled top rule does not hide the composer', () => {
+    expect(composerGeometryVisible(grid(at(10, labelled, `${CHEVRON} draft`, RULE)))).toBe(true)
+  })
+
+  test('a multi-line composer is visible wherever the cursor is', () => {
+    const lines = at(5, RULE, `${CHEVRON} first line`, '  second line', '  third line', RULE)
+    expect(composerGeometryVisible(grid(lines, { x: 0, y: 0 }))).toBe(true)
+    expect(composerGeometryVisible(grid(lines, { x: 4, y: 30 }))).toBe(true)
+  })
+
+  test('a draft quoting the rules and options of a dialog is still a composer', () => {
+    expect(composerGeometryVisible(grid(QUOTED_IN_COMPOSER))).toBe(true)
+  })
+
+  test('the add-dir dialog, which has a top rule and no bottom border, is not a composer', () => {
+    expect(composerGeometryVisible(grid(ADD_DIR_LINES))).toBe(false)
+  })
+
+  test('a rule followed by a title, or a chevron row with no closing rule, is not a composer', () => {
+    expect(composerGeometryVisible(grid(rows(RULE, 'Title', RULE)))).toBe(false)
+    expect(composerGeometryVisible(grid(rows(RULE, `${CHEVRON} draft`, 'text')))).toBe(false)
+    expect(composerGeometryVisible(grid(rows(RULE.slice(1), `${CHEVRON} draft`, RULE)))).toBe(false)
+  })
+
+  test('a real xterm fed a composer and a real xterm fed the add-dir reconstruction tell them apart', async () => {
+    const readOf = async (lines: string[]) => {
+      const screen = createScreen({ cols: UD_COLS, rows: UD_ROWS })
+      screen.feed(lines.join('\r\n'))
+      await screen.drain()
+      const read = screen.read()
+      screen.dispose()
+      if (read.status !== 'ready') throw new Error(`xterm screen unavailable: ${read.reason}`)
+      return read.snapshot
+    }
+    expect(composerGeometryVisible(await readOf(at(36, RULE, `${CHEVRON} `, RULE)))).toBe(true)
+    expect(composerGeometryVisible(await readOf(ADD_DIR_LINES))).toBe(false)
+  })
+
+  test('the inject guard still decides dialogs before the composer, as it did before the geometry was exposed', () => {
+    const composer = grid(at(36, RULE, `${CHEVRON} `, RULE), { x: 2, y: 37 })
+    expect(inspectInjectGuard(composer)).toEqual({ state: 'clear' })
+    expect(inspectInjectGuard(grid(ADD_DIR_LINES))).toMatchObject({ state: 'modal', rule: 'composer-geometry' })
+    const picker = grid(at(2, `${CHEVRON} 1. Yes`, '  2. No'))
+    expect(inspectInjectGuard(picker)).toMatchObject({ state: 'modal', rule: 'picker' })
   })
 })
 

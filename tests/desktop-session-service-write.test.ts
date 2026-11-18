@@ -9,6 +9,7 @@ import { fromWorkspaceSessions, toWorkspaceSessions } from "../desktop/src/main/
 import { LaunchAttemptRegistry } from "../desktop/src/main/mod-launch-plan.ts";
 import { parseTemplate, toTemplate, templateToInputs } from "../desktop/src/shared/template.ts";
 import { effectiveAgent, isTeamLeadAgent } from "../desktop/src/main/team-lead-bridge.ts";
+import { ADD_DIR_LINES, COMPOSER_LINES, UD_COLS, UD_ROWS } from "./_unknown-dialog-fixture.ts";
 
 const SESSION_SERVICE_PATH = join(import.meta.dir, "..", "desktop", "src", "main", "session-service.ts");
 const SHARED = join(import.meta.dir, "..", "desktop", "src", "shared");
@@ -163,12 +164,19 @@ class Timers {
   }
 }
 
+function openTypingGate(self: object): void {
+  const target = self as { pty: { life?: (id: string) => object | null }; mayTypeAutomatically?: unknown };
+  target.pty.life ??= () => null;
+  target.mayTypeAutomatically = () => true;
+}
+
 function autoResume(
   id: string,
   self: object,
   timers: Timers,
   logInfo: (scope: string, message: string) => void = () => {}
 ): void {
+  openTypingGate(self);
   const source = readFileSync(SESSION_SERVICE_PATH, "utf-8");
   const body = extractBody(source, /private autoResume\(id: string\): void \{/, "autoResume()");
   const run = new Function("id", "setTimeout", "logInfo", body) as (
@@ -181,6 +189,7 @@ function autoResume(
 }
 
 function startupAck(id: string, self: object, timers: Timers): void {
+  openTypingGate(self);
   const source = readFileSync(SESSION_SERVICE_PATH, "utf-8");
   const body = extractBody(
     source,
@@ -1482,5 +1491,282 @@ describe("clodexContextTokens reaches the spawned child env", () => {
       expect(() => service.create({ name: "x", bridge: "clodex", clodexContextTokens: bad as never })).toThrow(/between 200000 and 872000/);
       expect(service.captureSessions()).toEqual([]);
     });
+  });
+});
+
+describe("unknown-dialog attention in the real service", () => {
+  const DIALOG = { title: "Adding a new directory:", text: "Adding a new directory:\nNo, exit\nYes, add it", truncated: false };
+  const unknownRaise = (id: string, episodeId: string) => ({ id, waiting: true, source: "unknown-dialog", episodeId, dialog: DIALOG });
+  const unknownFall = (id: string, episodeId: string) => ({ id, waiting: false, source: "unknown-dialog", episodeId });
+
+  async function withTile(body: (ctx: {
+    service: InstanceType<typeof SessionService>;
+    id: string;
+    pty: SessionFakePty;
+    detector: { emit(event: string, payload: unknown): void };
+    emitted: Array<Record<string, unknown>>;
+  }) => Promise<void>, createOptions: Record<string, unknown> = {}): Promise<void> {
+    const home = mkdtempSync(join(tmpdir(), "kory-unknown-dialog-"));
+    const service = createSessionService(home, join(home, "project"));
+    try {
+      const { id } = service.create(createOptions);
+      const pty = sessionPtys.at(-1)!;
+      const emitted: Array<Record<string, unknown>> = [];
+      service.on("attention", (event: Record<string, unknown>) => emitted.push(event));
+      const detector = (service as unknown as { attentionDetector: { emit(event: string, payload: unknown): void } }).attentionDetector;
+      await body({ service, id, pty, detector, emitted });
+    } finally {
+      service.closeAll();
+      for (const pty of sessionPtys.splice(0)) pty.exit();
+      rmSync(home, { recursive: true, force: true });
+    }
+  }
+
+  test("an unknown source replacing a known one at the same boolean still reaches the listeners, once per episode", async () => {
+    await withTile(async ({ service, id, detector, emitted }) => {
+      detector.emit("attention", { id, waiting: true });
+      detector.emit("attention", unknownRaise(id, "ep-1"));
+      detector.emit("attention", unknownRaise(id, "ep-1"));
+      expect(emitted.map((e) => [e.source ?? "known", e.episodeId ?? null])).toEqual([
+        ["known", null],
+        ["unknown-dialog", "ep-1"]
+      ]);
+      expect(service.attentionSourceOf(id)).toBe("unknown-dialog");
+      detector.emit("attention", unknownRaise(id, "ep-2"));
+      expect(emitted, "a second signature is a second episode, the badge being up already").toHaveLength(3);
+      expect(service.list().find((s) => s.id === id)?.needsAttention).toBe(true);
+    });
+  });
+
+  test("a known raise replaces an open unknown episode and a stale fall cannot close the new one", async () => {
+    await withTile(async ({ service, id, detector, emitted }) => {
+      detector.emit("attention", unknownRaise(id, "ep-1"));
+      detector.emit("attention", { id, waiting: true });
+      expect(service.attentionSourceOf(id)).toBe("known");
+      detector.emit("attention", unknownFall(id, "ep-1"));
+      expect(service.list().find((s) => s.id === id)?.needsAttention, "the old episode id is refused").toBe(true);
+      expect(emitted).toHaveLength(2);
+    });
+  });
+
+  test("the fall of an unknown episode lowers the flag and clears the source", async () => {
+    await withTile(async ({ service, id, detector, emitted }) => {
+      detector.emit("attention", unknownRaise(id, "ep-1"));
+      detector.emit("attention", unknownFall(id, "ep-1"));
+      expect(service.attentionSourceOf(id)).toBeNull();
+      expect(service.list().find((s) => s.id === id)?.needsAttention).toBe(false);
+      expect(emitted[1]).toMatchObject({ waiting: false, source: "unknown-dialog", episodeId: "ep-1" });
+    });
+  });
+
+  test("a known fall cannot lower an open unknown episode", async () => {
+    await withTile(async ({ service, id, detector }) => {
+      detector.emit("attention", unknownRaise(id, "ep-1"));
+      detector.emit("attention", { id, waiting: false });
+      expect(service.attentionSourceOf(id)).toBe("unknown-dialog");
+      expect(service.list().find((s) => s.id === id)?.needsAttention).toBe(true);
+    });
+  });
+
+  test("a restarted tile does not inherit the source of the previous process", async () => {
+    await withTile(async ({ service, id, pty, detector }) => {
+      detector.emit("attention", unknownRaise(id, "ep-1"));
+      pty.exit(1);
+      await service.restart(id);
+      expect(service.attentionSourceOf(id)).toBeNull();
+      expect(service.list().find((s) => s.id === id)?.needsAttention).toBe(false);
+      detector.emit("attention", unknownFall(id, "ep-1"));
+      expect(service.attentionSourceOf(id), "a callback of the previous process cannot lower or raise the new one").toBeNull();
+    });
+  });
+
+  test("a manual dismissal clears an unknown episode and its source", async () => {
+    await withTile(async ({ service, id, detector, emitted }) => {
+      detector.emit("attention", unknownRaise(id, "ep-1"));
+      service.clearAttention(id);
+      expect(service.attentionSourceOf(id)).toBeNull();
+      expect(emitted.at(-1)).toMatchObject({ id, waiting: false, manual: true });
+    });
+  });
+
+  type Tile = Parameters<Parameters<typeof withTile>[0]>[0];
+  const paint = (lines: string[]): string => `\x1b[2J\x1b[H${lines.join("\r\n")}`;
+  const CHANNELS_WARNING = "WARNING: Loading development channels\r\n❯ 1. I am using this for local development\r\n  2. Exit";
+  const privates = (service: Tile["service"]) =>
+    service as unknown as {
+      autoResume(id: string): void;
+      pendingPrompt: Map<string, string>;
+      runtime: Map<string, { rateLimited: boolean; claudeLaunch: boolean }>;
+      screenGuard: { invalidate(id: string, message: string): void };
+    };
+  async function until(condition: () => boolean, what: string, ms = 2000): Promise<void> {
+    const deadline = Date.now() + ms;
+    while (!condition() && Date.now() < deadline) await Bun.sleep(5);
+    if (!condition()) throw new Error(`timed out waiting for ${what}`);
+  }
+  async function show(tile: Tile, lines: string[]): Promise<void> {
+    tile.pty.output(paint(lines));
+    await until(() => tile.service.screenRead(tile.id).status === "ready", "a readable screen");
+  }
+  async function claudeTile(tile: Tile, lines: string[]): Promise<void> {
+    expect(tile.service.list().find((s) => s.id === tile.id)?.claudeLaunch, "the tile under test is a claude launch").toBe(true);
+    tile.service.resize(tile.id, UD_COLS, UD_ROWS);
+    await show(tile, lines);
+  }
+  const armAutoResume = (tile: Tile): void => {
+    tile.service.setAutoResume(tile.id, true);
+    privates(tile.service).runtime.get(tile.id)!.rateLimited = true;
+  };
+  const lingering = (): Promise<void> => Bun.sleep(300);
+
+  test("autoResume types nothing while the tile sits on an unknown-dialog source, even over a composer", async () => {
+    await withTile(async (tile) => {
+      await claudeTile(tile, COMPOSER_LINES);
+      armAutoResume(tile);
+      tile.detector.emit("attention", unknownRaise(tile.id, "ep-1"));
+      privates(tile.service).autoResume(tile.id);
+      await lingering();
+      expect(tile.pty.writes).toEqual([]);
+    });
+  });
+
+  test("autoResume types nothing when the screen shows an unknown dialog before any episode was confirmed", async () => {
+    await withTile(async (tile) => {
+      await claudeTile(tile, ADD_DIR_LINES);
+      armAutoResume(tile);
+      privates(tile.service).autoResume(tile.id);
+      await lingering();
+      expect(tile.pty.writes).toEqual([]);
+    });
+  });
+
+  test("autoResume types nothing when the screen cannot be read", async () => {
+    await withTile(async (tile) => {
+      await claudeTile(tile, COMPOSER_LINES);
+      armAutoResume(tile);
+      privates(tile.service).screenGuard.invalidate(tile.id, "probe");
+      expect(tile.service.screenRead(tile.id).status).toBe("unavailable");
+      privates(tile.service).autoResume(tile.id);
+      await lingering();
+      expect(tile.pty.writes).toEqual([]);
+    });
+  });
+
+  test("autoResume stops after Escape when an unknown dialog appears before the continuation", async () => {
+    await withTile(async (tile) => {
+      await claudeTile(tile, COMPOSER_LINES);
+      armAutoResume(tile);
+      privates(tile.service).autoResume(tile.id);
+      expect(tile.pty.writes).toEqual(["\x1b"]);
+      await show(tile, ADD_DIR_LINES);
+      await lingering();
+      expect(tile.pty.writes, "no continue and no Return into the dialog").toEqual(["\x1b"]);
+    });
+  });
+
+  test("autoResume stops after Escape when the PTY was replaced meanwhile", async () => {
+    await withTile(async (tile) => {
+      await claudeTile(tile, COMPOSER_LINES);
+      armAutoResume(tile);
+      privates(tile.service).autoResume(tile.id);
+      expect(tile.pty.writes).toEqual(["\x1b"]);
+      tile.pty.exit(1);
+      await tile.service.restart(tile.id);
+      const replacement = sessionPtys.at(-1)!;
+      expect(replacement).not.toBe(tile.pty);
+      await lingering();
+      expect(tile.pty.writes).toEqual(["\x1b"]);
+      expect(replacement.writes, "the continuation is not typed into the new process").toEqual([]);
+    });
+  });
+
+  test("autoResume types Escape, continue and Return into a claude tile whose screen is a readable composer", async () => {
+    await withTile(async (tile) => {
+      await claudeTile(tile, COMPOSER_LINES);
+      armAutoResume(tile);
+      privates(tile.service).autoResume(tile.id);
+      await until(() => tile.pty.writes.length === 3, "the continuation");
+      expect(tile.pty.writes).toEqual(["\x1b", "continue", "\r"]);
+    });
+  });
+
+  test("the startup acknowledgement types nothing into an unknown dialog and keeps the pending prompt", async () => {
+    await withTile(async (tile) => {
+      await claudeTile(tile, COMPOSER_LINES);
+      expect(privates(tile.service).pendingPrompt.get(tile.id)).toBe("hello");
+      tile.pty.output(CHANNELS_WARNING);
+      await show(tile, ADD_DIR_LINES);
+      await Bun.sleep(650);
+      expect(tile.pty.writes).toEqual([]);
+      expect(privates(tile.service).pendingPrompt.get(tile.id)).toBe("hello");
+    }, { prompt: "hello" });
+  });
+
+  test("an unknown dialog appearing between the acknowledgement and the deferred prompt keeps the prompt unsent", async () => {
+    await withTile(async (tile) => {
+      await claudeTile(tile, COMPOSER_LINES);
+      tile.pty.output(CHANNELS_WARNING);
+      await show(tile, COMPOSER_LINES);
+      await until(() => tile.pty.writes.length === 1, "the acknowledgement");
+      expect(tile.pty.writes).toEqual(["\r"]);
+      await show(tile, ADD_DIR_LINES);
+      await Bun.sleep(650);
+      expect(tile.pty.writes, "the prompt is not typed into the dialog").toEqual(["\r"]);
+      expect(privates(tile.service).pendingPrompt.get(tile.id)).toBe("hello");
+    }, { prompt: "hello" });
+  });
+
+  test("a PTY replaced between the acknowledgement and the deferred prompt gets neither", async () => {
+    await withTile(async (tile) => {
+      await claudeTile(tile, COMPOSER_LINES);
+      tile.pty.output(CHANNELS_WARNING);
+      await show(tile, COMPOSER_LINES);
+      await until(() => tile.pty.writes.length === 1, "the acknowledgement");
+      tile.pty.exit(1);
+      await tile.service.restart(tile.id);
+      const replacement = sessionPtys.at(-1)!;
+      expect(replacement).not.toBe(tile.pty);
+      await Bun.sleep(650);
+      expect(tile.pty.writes).toEqual(["\r"]);
+      expect(replacement.writes, "the deferred prompt is not typed into the new process").toEqual([]);
+    }, { prompt: "hello" });
+  });
+
+  test("a PTY replaced between the acknowledgement being decided and its first keystroke gets nothing", async () => {
+    await withTile(async (tile) => {
+      await claudeTile(tile, COMPOSER_LINES);
+      tile.pty.output(CHANNELS_WARNING);
+      tile.pty.exit(1);
+      await tile.service.restart(tile.id);
+      const replacement = sessionPtys.at(-1)!;
+      expect(replacement).not.toBe(tile.pty);
+      await Bun.sleep(650);
+      expect(tile.pty.writes).toEqual([]);
+      expect(replacement.writes, "the Return of the old process is not typed into the new one").toEqual([]);
+    }, { prompt: "hello" });
+  });
+
+  test("autoResume types into a tile that is not a claude launch, whatever its screen shows", async () => {
+    await withTile(async (tile) => {
+      expect(tile.service.list().find((s) => s.id === tile.id)?.claudeLaunch).toBe(false);
+      tile.service.resize(tile.id, UD_COLS, UD_ROWS);
+      await show(tile, ADD_DIR_LINES);
+      armAutoResume(tile);
+      privates(tile.service).autoResume(tile.id);
+      await until(() => tile.pty.writes.length === 3, "the continuation");
+      expect(tile.pty.writes).toEqual(["\x1b", "continue", "\r"]);
+    }, { command: "codex" });
+  });
+
+  test("the startup acknowledgement and the deferred prompt are typed when the screen is a readable composer", async () => {
+    await withTile(async (tile) => {
+      await claudeTile(tile, COMPOSER_LINES);
+      tile.pty.output(CHANNELS_WARNING);
+      await show(tile, COMPOSER_LINES);
+      await until(() => tile.pty.writes.length === 2, "the acknowledgement and the prompt", 3000);
+      expect(tile.pty.writes[0]).toBe("\r");
+      expect(tile.pty.writes[1]).toContain("hello");
+      expect(privates(tile.service).pendingPrompt.has(tile.id)).toBe(false);
+    }, { prompt: "hello" });
   });
 });

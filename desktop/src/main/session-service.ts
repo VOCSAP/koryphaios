@@ -38,7 +38,14 @@ import {
   type QuotaLimitEvent,
   type QuotaResumeDueEvent
 } from './quota'
-import { AttentionDetector, screenShowsWait, type AttentionEvent } from './attention'
+import {
+  AttentionDetector,
+  inspectUnknownDialog,
+  screenShowsWait,
+  type AttentionEvent,
+  type AttentionSource,
+  type UnknownDialogPayload
+} from './attention'
 import { createScreenWitness } from './attention-screen-witness'
 import { StartupAckDetector, type StartupAckEvent } from './startup-ack'
 import { OpenIdRegistry } from './open-id-registry'
@@ -124,6 +131,10 @@ interface RuntimeState {
   needsAttention: boolean
   /** A wait screen detected in the PTY (attention.ts, PLAN C11). */
   ptyAttention: boolean
+  /** Which detector lit ptyAttention; null while it is down. Runtime-only. */
+  ptyAttentionSource: AttentionSource | null
+  /** The open unknown-dialog episode, null for a known source. Runtime-only. */
+  unknownDialog: { episodeId: string; dialog: UnknownDialogPayload } | null
   /** An open `hook` approval row names this tile: its module waits on a verdict. */
   hookAttention: boolean
   locked: boolean
@@ -292,7 +303,10 @@ export class SessionService extends EventEmitter {
       now: () => Date.now(),
       showsWait: screenShowsWait,
       reportError
-    })
+    }),
+    screenRead: (id) => this.screenGuard.read(id),
+    unknownDialogEnabled: (id) => this.runtime.get(id)?.claudeLaunch === true,
+    reportError
   })
   private startupAckDetector = new StartupAckDetector()
   private screenGuard = new ScreenGuard(reportError)
@@ -493,11 +507,20 @@ export class SessionService extends EventEmitter {
 
     // "Needs you" transitions (PLAN C11): runtime flag + event for the system
     // notification in index.ts (ipc -> session:attention).
-    this.attentionDetector.on('attention', ({ id, waiting }: AttentionEvent) => {
+    this.attentionDetector.on('attention', (event: AttentionEvent) => {
+      const { id, waiting } = event
       const r = this.runtime.get(id)
-      if (!r || r.ptyAttention === waiting) return
+      if (!r) return
+      const unknown = event.source === 'unknown-dialog'
+      if (unknown) {
+        if (waiting ? r.unknownDialog?.episodeId === event.episodeId : r.unknownDialog?.episodeId !== event.episodeId) return
+      } else if (waiting ? r.ptyAttention && r.ptyAttentionSource === 'known' : !r.ptyAttention || r.ptyAttentionSource === 'unknown-dialog') {
+        return
+      }
+      r.ptyAttentionSource = waiting ? (unknown ? 'unknown-dialog' : 'known') : null
+      r.unknownDialog = waiting && unknown ? { episodeId: event.episodeId!, dialog: event.dialog! } : null
       this.applyAttention(id, r, waiting, r.hookAttention)
-      this.emit('attention', { id, waiting })
+      this.emit('attention', event)
       this.broadcast()
     })
 
@@ -510,9 +533,11 @@ export class SessionService extends EventEmitter {
     // injection fires; falls back to manual typing.
     this.startupAckDetector.on('ack', ({ id }: StartupAckEvent) => {
       this.attentionDetector.purgeScreenMemory(id)
+      const life = this.pty.life(id)
       setTimeout(() => {
         const r = this.runtime.get(id)
         if (!r || r.status === 'exited') return
+        if (!this.mayTypeAutomatically(id, life, 'startup acknowledgement')) return
         if (!this.pty.write(id, '\r')) return
         const name = this.defs.find((d) => d.id === id)?.name
         this.emit('startup-ack', { id, name })
@@ -522,6 +547,7 @@ export class SessionService extends EventEmitter {
         setTimeout(() => {
           const r2 = this.runtime.get(id)
           if (!r2 || r2.status === 'exited') return
+          if (!this.mayTypeAutomatically(id, life, 'deferred prompt')) return
           if (this.pty.write(id, encodeInitialPromptKeystrokes(prompt))) this.pendingPrompt.delete(id)
         }, PROMPT_INJECT_SETTLE_MS)
       }, STARTUP_ACK_SETTLE_MS)
@@ -974,6 +1000,8 @@ export class SessionService extends EventEmitter {
       resumeAt: null,
       needsAttention: false,
       ptyAttention: false,
+      ptyAttentionSource: null,
+      unknownDialog: null,
       hookAttention: false,
       locked: false,
       mintedCallerId: resolvedMcpConfig?.callerId ?? null,
@@ -1257,6 +1285,8 @@ export class SessionService extends EventEmitter {
         resumeAt: null,
         needsAttention: false,
         ptyAttention: false,
+        ptyAttentionSource: null,
+        unknownDialog: null,
         hookAttention: false,
         locked: false,
         mintedCallerId: mintedCallerIds.get(d.id) ?? null,
@@ -1406,6 +1436,8 @@ export class SessionService extends EventEmitter {
   clearAttention(id: string): void {
     const r = this.runtime.get(id)
     if (!r || !r.ptyAttention) return
+    r.ptyAttentionSource = null
+    r.unknownDialog = null
     this.applyAttention(id, r, false, r.hookAttention)
     this.attentionDetector.clear(id)
     this.emit('attention', { id, waiting: false, manual: true } satisfies AttentionEvent)
@@ -1812,6 +1844,8 @@ export class SessionService extends EventEmitter {
       r.resumeAt = null
       r.needsAttention = false
       r.ptyAttention = false
+      r.ptyAttentionSource = null
+      r.unknownDialog = null
       r.hookAttention = false
       // Freeze the launch classification for the process actually spawned.
       r.claudeLaunch = isClaudeLaunch(base)
@@ -1986,14 +2020,45 @@ export class SessionService extends EventEmitter {
       return
     }
 
+    const life = this.pty.life(id)
+    if (!this.mayTypeAutomatically(id, life, 'auto-resume escape')) return
     if (!this.pty.write(id, '\x1b')) return
     const t = setTimeout(() => {
       if (!this.pty.isAlive(id)) return
+      if (!this.mayTypeAutomatically(id, life, 'auto-resume continue')) return
       if (!this.pty.write(id, 'continue')) return
       if (!this.pty.write(id, '\r')) return
       this.emit('quota', { id, limited: true, resetAt: r.resumeAt, resumed: true })
     }, 100)
     if (typeof t.unref === 'function') t.unref()
+  }
+
+  /** Direct startup and quota writes bypass TileInjector, so they fail closed on unreadable or unknown screens. */
+  private mayTypeAutomatically(id: string, life: object | null, sequence: string): boolean {
+    const r = this.runtime.get(id)
+    if (!r) return false
+    if (this.pty.life(id) !== life) {
+      logInfo('attention', `${sequence} not typed into ${id}: the session was restarted meanwhile`)
+      return false
+    }
+    if (!r.claudeLaunch) return true
+    const read = this.screenGuard.read(id)
+    const refusal =
+      r.ptyAttentionSource === 'unknown-dialog'
+        ? 'an unknown dialog waits for the operator'
+        : read.status === 'unavailable'
+          ? `the screen cannot be read (${read.reason})`
+          : inspectUnknownDialog(read.snapshot) !== null
+            ? 'the screen shows an unknown dialog'
+            : null
+    if (refusal === null) return true
+    logInfo('attention', `${sequence} not typed into ${id}: ${refusal}`)
+    return false
+  }
+
+  /** The detector source lighting a tile's PTY attention, null when it is down. */
+  attentionSourceOf(id: string): AttentionSource | null {
+    return this.runtime.get(id)?.ptyAttentionSource ?? null
   }
 
   /** Types a command into tile `id` once its earlier injections are done. */

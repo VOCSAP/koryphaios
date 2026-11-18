@@ -3,16 +3,44 @@
 // prompt); prose/code containing question-like text must NOT trigger.
 
 import { beforeAll, test, expect } from "bun:test";
+import { EventEmitter } from "node:events";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   AttentionDetector,
   ATTENTION_CONFIRMATION_DELAY_MS,
+  boundDialog,
+  DIALOG_TEXT_MAX,
+  DIALOG_TITLE_MAX,
+  describeUnknownDialog,
   detectWaiting,
+  inspectUnknownDialog,
+  projectAttentionEvent,
   screenShowsWait,
   stripAnsi,
+  UNKNOWN_SAMPLE_INTERVAL_MS,
+  UNKNOWN_UNREADABLE_RETRIES,
   type AttentionEvent
 } from "../desktop/src/main/attention.ts";
+import {
+  ADD_DIR_LINES,
+  ADD_DIR_SELECTION_MOVED,
+  BUSY_CHUNK,
+  CHEVRON,
+  FOOTER,
+  QUOTED_IN_ANSWER_BUSY,
+  QUOTED_IN_ANSWER_THEN_COMPOSER,
+  QUOTED_IN_COMPOSER,
+  RULE,
+  UD_COLS,
+  UD_ROWS,
+  blankRead,
+  composerRead,
+  padded,
+  readyOf,
+  snapshotOf,
+  unavailableRead
+} from "./_unknown-dialog-fixture.ts";
 import { createScreenWitness } from "../desktop/src/main/attention-screen-witness.ts";
 import { EXPECTED_FIXTURE_VERDICTS, fixtureStartSize, RESIZE_MARKER } from "./_fixture-verdicts.ts";
 import {
@@ -1252,4 +1280,471 @@ test("a real resize storm over an open dialog never vetoes, whatever the read la
     const missed = deadlines(escWrittenAt + 400, lastAt).filter((at) => !vetoesAt(read, at));
     expect(missed, `lag ${lag} ms, dialog gone`).toEqual([]);
   }
+});
+
+const INSPECT = (lines: string[]) => inspectUnknownDialog(snapshotOf(lines));
+const swap = (lines: string[], from: string, to: string): string[] => lines.map((line) => (line === from ? to : line));
+
+test("the reconstructed add-dir dialog is read with its title, options and footer", () => {
+  const dialog = INSPECT(ADD_DIR_LINES);
+  expect(dialog?.title).toBe("Adding a new directory:");
+  expect(dialog?.options).toEqual(["No, exit", "Yes, add it"]);
+  expect(dialog?.footer).toBe("enter to confirm · esc to cancel");
+});
+
+test("moving the selector keeps the dialog signature", () => {
+  expect(INSPECT(ADD_DIR_SELECTION_MOVED)?.signature).toBe(INSPECT(ADD_DIR_LINES)?.signature);
+});
+
+const SPACED_LABELS = ["Default", "Explanatory", "Learning"];
+const spacedOptions = (selected: number): string[] => [
+  RULE,
+  "Pick a style",
+  "",
+  ...SPACED_LABELS.flatMap((label, i) => [i === selected ? `${CHEVRON} ${label}` : `  ${label}`, ""]),
+  FOOTER
+];
+
+test.each([0, 1, 2])("options separated by blank rows form one block with the selector on option %p", (selected) => {
+  expect(INSPECT(spacedOptions(selected))?.options).toEqual(SPACED_LABELS);
+  expect(INSPECT(spacedOptions(selected))?.signature).toBe(INSPECT(spacedOptions(0))?.signature);
+});
+
+test("an open episode on spaced options keeps its episode and its journal entry when the selector moves", () => {
+  const rig = unknownRig();
+  rig.show("s1", readyOf(spacedOptions(0)));
+  rig.d.feed("s1", "paint");
+  rig.clock.advanceBy(UNKNOWN_RAISE_AT);
+  expect(rig.events).toHaveLength(1);
+  rig.show("s1", readyOf(spacedOptions(1)));
+  rig.d.feed("s1", "repaint");
+  rig.clock.advanceBy(UNKNOWN_RAISE_AT * 2);
+  expect(rig.events, "the selector moved inside one block: no second episode").toHaveLength(1);
+});
+
+test("a real xterm fed the reconstruction yields the same unknown dialog as the hand-built grid", async () => {
+  const screen = createXtermScreen({ cols: UD_COLS, rows: UD_ROWS, reportError: () => undefined });
+  screen.feed(ADD_DIR_LINES.join("\r\n"));
+  await screen.drain();
+  const read = screen.read();
+  screen.dispose();
+  if (read.status !== "ready") throw new Error(`the xterm screen was not ready: ${read.reason}`);
+  expect(inspectUnknownDialog(read.snapshot)?.signature).toBe(INSPECT(ADD_DIR_LINES)?.signature);
+});
+
+const TRUST_LIKE = [RULE, "Do you trust the files in this folder?", "", `${CHEVRON} Yes`, "  No", "", FOOTER];
+const REFUSALS: Array<[string, string[]]> = [
+  ["a dialog with no rule above its title", ADD_DIR_LINES.slice(1)],
+  ["a dialog with no title between the rule and the options", [RULE, `${CHEVRON} No, exit`, "  Yes, add it", "", FOOTER]],
+  ["a dialog with one option", ADD_DIR_LINES.filter((line) => line !== "  Yes, add it")],
+  ["a dialog with no selected option", swap(ADD_DIR_LINES, `${CHEVRON} No, exit`, "  No, exit")],
+  ["a dialog with two selected options", swap(ADD_DIR_LINES, "  Yes, add it", `${CHEVRON} Yes, add it`)],
+  [
+    "a dialog with three options and two selected ones",
+    [RULE, "Pick one", "", `${CHEVRON} First`, `${CHEVRON} Second`, "  Third", "", FOOTER]
+  ],
+  [
+    "a dialog with two selected options, the first indented to the label column",
+    ADD_DIR_LINES.map((line) =>
+      line === `${CHEVRON} No, exit` ? `    ${CHEVRON} No, exit` : line === "  Yes, add it" ? `  ${CHEVRON} Yes, add it` : line
+    )
+  ],
+  [
+    "an aligned row separated from the options by more blank rows than the scan covers",
+    [RULE, "Pick a style", "  Orphan", ...Array<string>(21).fill(""), `${CHEVRON} Default`, "  Explanatory", "", FOOTER]
+  ],
+  ["a dialog whose options are not aligned", swap(ADD_DIR_LINES, "  Yes, add it", " Yes, add it")],
+  ["a footer reduced to Esc to cancel", swap(ADD_DIR_LINES, FOOTER, "Esc to cancel")],
+  ["a footer reduced to Enter to confirm", swap(ADD_DIR_LINES, FOOTER, "Enter to confirm")],
+  ["a footer with free text around it", swap(ADD_DIR_LINES, FOOTER, `${FOOTER} for this folder`)],
+  ["a press-again footer", swap(ADD_DIR_LINES, FOOTER, "Press Ctrl-C again to exit")],
+  ["a screen whose last content is not the footer", [...ADD_DIR_LINES, "", "● done"]],
+  ["a numbered chooser", [RULE, "Pick one:", "", `${CHEVRON} 1. First`, "  2. Second", "", FOOTER]],
+  ["a trust prompt", TRUST_LIKE],
+  ["an MCP consent title", [RULE, "New MCP server found in this project:", "", `${CHEVRON} Use`, "  Skip", "", FOOTER]],
+  ["a development-channels warning", [RULE, "WARNING: Loading development channels", "", `${CHEVRON} I am using this for local development`, "  Exit", "", FOOTER]],
+  ["the dialog quoted in a multi-line composer", QUOTED_IN_COMPOSER],
+  ["the dialog quoted in an agent answer, the composer back below", QUOTED_IN_ANSWER_THEN_COMPOSER],
+  ["a blank screen", []]
+];
+test.each(REFUSALS)("refuses %s", (_name, lines) => {
+  expect(INSPECT(lines)).toBeNull();
+});
+
+test("the dialog quoted in a multi-line composer is refused by the composer, not by its footer or options", () => {
+  const dialogShaped = [RULE, ...QUOTED_IN_COMPOSER.slice(2, -1)];
+  expect(INSPECT(dialogShaped), "control: the same quoted lines under a plain rule are a dialog").not.toBeNull();
+  expect(INSPECT(QUOTED_IN_COMPOSER)).toBeNull();
+});
+
+const UNKNOWN_RAISE_AT = UNKNOWN_SAMPLE_INTERVAL_MS + ATTENTION_CONFIRMATION_DELAY_MS;
+
+function unknownRig(enabled: (id: string) => boolean = () => true) {
+  const clock = confirmationClock();
+  const screens = new Map<string, XtermScreenRead>();
+  const traces: unknown[][] = [];
+  let reader: (id: string) => XtermScreenRead = (id) => screens.get(id) ?? blankRead();
+  const d = new AttentionDetector({
+    ...clock.options,
+    now: () => clock.now,
+    screenRead: (id) => reader(id),
+    unknownDialogEnabled: enabled,
+    reportError: (...args: unknown[]) => traces.push(args)
+  });
+  const events = collect(d);
+  return {
+    clock,
+    d,
+    events,
+    traces,
+    show: (id: string, read: XtermScreenRead) => void screens.set(id, read),
+    readWith: (fn: (id: string) => XtermScreenRead) => void (reader = fn)
+  };
+}
+type UnknownRig = ReturnType<typeof unknownRig>;
+const live = (rig: UnknownRig) => rig.clock.planned.filter((t) => !t.fired && !t.cleared);
+const raiseDialog = (rig: UnknownRig, id = "s1"): void => {
+  rig.show(id, readyOf(ADD_DIR_LINES));
+  rig.d.feed(id, "paint");
+  rig.clock.advanceBy(UNKNOWN_RAISE_AT);
+};
+
+test("an unknown dialog raises attention after the confirmation delay with a bounded payload and an episode id", () => {
+  const rig = unknownRig();
+  rig.show("s1", readyOf(ADD_DIR_LINES));
+  rig.d.feed("s1", "paint");
+  rig.clock.advanceTo(UNKNOWN_RAISE_AT - 1);
+  expect(rig.events, "the delay is a floor, not a hint").toEqual([]);
+  rig.clock.advanceTo(UNKNOWN_RAISE_AT);
+  expect(rig.events).toHaveLength(1);
+  const event = rig.events[0]!;
+  expect(event).toMatchObject({ id: "s1", waiting: true, source: "unknown-dialog" });
+  expect(event.episodeId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+  expect(event.dialog).toEqual({
+    title: "Adding a new directory:",
+    text: expect.stringContaining("Yes, add it"),
+    truncated: false
+  });
+});
+
+test("the unknown path stays silent and timer-free for a tile it is not enabled for", () => {
+  const rig = unknownRig(() => false);
+  rig.show("s1", readyOf(ADD_DIR_LINES));
+  rig.d.feed("s1", "paint");
+  rig.clock.advanceBy(UNKNOWN_RAISE_AT * 3);
+  expect(rig.events).toEqual([]);
+  expect(rig.clock.planned).toEqual([]);
+});
+
+test("a stable unknown episode leaves no timer running until the next output", () => {
+  const rig = unknownRig();
+  raiseDialog(rig);
+  expect(rig.events).toHaveLength(1);
+  expect(live(rig)).toEqual([]);
+  rig.clock.advanceBy(60_000);
+  expect(rig.events).toHaveLength(1);
+});
+
+test("a tile that never printed schedules nothing", () => {
+  const rig = unknownRig();
+  rig.show("s1", readyOf(ADD_DIR_LINES));
+  rig.clock.advanceBy(UNKNOWN_RAISE_AT * 2);
+  expect(rig.events).toEqual([]);
+  expect(rig.clock.planned).toEqual([]);
+});
+
+test.each([
+  ["a blank screen", blankRead()],
+  ["an unavailable screen after a resize", unavailableRead("resize-pending")],
+  ["a pending screen", unavailableRead("screen-pending")],
+  ["an unrelated non-empty screen with no sign of activity", readyOf(["● the answer is on the way"])]
+])("an open unknown episode holds on %s", (_name, read) => {
+  const rig = unknownRig();
+  raiseDialog(rig);
+  rig.show("s1", read);
+  for (let i = 0; i < 40; i++) {
+    rig.d.feed("s1", "repaint");
+    rig.clock.advanceBy(100);
+  }
+  expect(rig.events, "a blank or unreadable screen is no proof the dialog was answered").toHaveLength(1);
+});
+
+test("an open unknown episode falls after the composer shows for the whole delay, naming the same episode", () => {
+  const rig = unknownRig();
+  raiseDialog(rig);
+  const episodeId = rig.events[0]!.episodeId;
+  rig.show("s1", composerRead());
+  rig.d.feed("s1", "repaint");
+  const from = rig.clock.now;
+  rig.clock.advanceTo(from + UNKNOWN_SAMPLE_INTERVAL_MS + ATTENTION_CONFIRMATION_DELAY_MS - 1);
+  expect(rig.events).toHaveLength(1);
+  rig.clock.advanceTo(from + UNKNOWN_SAMPLE_INTERVAL_MS + ATTENTION_CONFIRMATION_DELAY_MS);
+  expect(rig.events).toHaveLength(2);
+  expect(rig.events[1]).toEqual({ id: "s1", waiting: false, source: "unknown-dialog", episodeId });
+});
+
+test("a blank repaint inside the fall window restarts the proof instead of satisfying it", () => {
+  const rig = unknownRig();
+  raiseDialog(rig);
+  rig.show("s1", composerRead());
+  rig.d.feed("s1", "repaint");
+  rig.clock.advanceBy(ATTENTION_CONFIRMATION_DELAY_MS / 2);
+  rig.show("s1", blankRead());
+  rig.clock.advanceBy(UNKNOWN_SAMPLE_INTERVAL_MS * 2);
+  rig.show("s1", composerRead());
+  rig.d.feed("s1", "repaint");
+  const resumedFrom = rig.clock.now;
+  rig.clock.advanceTo(resumedFrom + ATTENTION_CONFIRMATION_DELAY_MS - 1);
+  expect(rig.events, "half a delay before the blank and half after is not a whole delay").toHaveLength(1);
+  rig.clock.advanceTo(resumedFrom + UNKNOWN_SAMPLE_INTERVAL_MS + ATTENTION_CONFIRMATION_DELAY_MS);
+  expect(rig.events).toHaveLength(2);
+});
+
+test("an open unknown episode falls on a non-empty screen with no dialog once a busy cue came after it", () => {
+  const rig = unknownRig();
+  raiseDialog(rig);
+  rig.clock.advanceBy(100);
+  rig.show("s1", readyOf(["● the answer is on the way"]));
+  rig.d.feed("s1", BUSY_CHUNK);
+  rig.clock.advanceBy(UNKNOWN_SAMPLE_INTERVAL_MS + ATTENTION_CONFIRMATION_DELAY_MS);
+  expect(rig.events).toHaveLength(2);
+  expect(rig.events[1]).toMatchObject({ waiting: false, source: "unknown-dialog", episodeId: rig.events[0]!.episodeId });
+});
+
+test("a busy cue received before the last sight of the dialog does not close the episode", () => {
+  const rig = unknownRig();
+  rig.show("s1", readyOf(ADD_DIR_LINES));
+  rig.d.feed("s1", BUSY_CHUNK);
+  rig.clock.advanceBy(UNKNOWN_RAISE_AT);
+  expect(rig.events).toHaveLength(1);
+  rig.clock.advanceBy(100);
+  rig.show("s1", readyOf(["● the answer is on the way"]));
+  rig.d.feed("s1", "repaint");
+  rig.clock.advanceBy(ATTENTION_CONFIRMATION_DELAY_MS * 3);
+  expect(rig.events, "that cue is older than the last sample that still saw the dialog").toHaveLength(1);
+});
+
+test("a blank or unreadable screen after a busy cue is no proof that the dialog was answered", () => {
+  for (const read of [blankRead(), unavailableRead("resize-pending")]) {
+    const rig = unknownRig();
+    raiseDialog(rig);
+    rig.clock.advanceBy(100);
+    rig.show("s1", read);
+    rig.d.feed("s1", BUSY_CHUNK);
+    rig.clock.advanceBy(ATTENTION_CONFIRMATION_DELAY_MS * 3);
+    expect(rig.events).toHaveLength(1);
+  }
+});
+
+test("a busy cue during the confirmation restarts it", () => {
+  const rig = unknownRig();
+  rig.show("s1", readyOf(ADD_DIR_LINES));
+  rig.d.feed("s1", "paint");
+  rig.clock.advanceBy(700);
+  rig.d.feed("s1", BUSY_CHUNK);
+  rig.clock.advanceTo(700 + ATTENTION_CONFIRMATION_DELAY_MS - 1);
+  expect(rig.events).toEqual([]);
+  rig.clock.advanceTo(700 + UNKNOWN_SAMPLE_INTERVAL_MS + ATTENTION_CONFIRMATION_DELAY_MS);
+  expect(rig.events).toHaveLength(1);
+});
+
+test.each([
+  ["the composer", composerRead()],
+  ["a blank screen", blankRead()],
+  ["an unavailable screen", unavailableRead("screen-fault")]
+])("%s seen during the confirmation cancels it", (_name, contradiction) => {
+  const rig = unknownRig();
+  rig.show("s1", readyOf(ADD_DIR_LINES));
+  rig.d.feed("s1", "paint");
+  rig.clock.advanceBy(1000);
+  rig.show("s1", contradiction);
+  rig.clock.advanceBy(UNKNOWN_SAMPLE_INTERVAL_MS * 2);
+  rig.show("s1", readyOf(ADD_DIR_LINES));
+  rig.d.feed("s1", "paint");
+  rig.clock.advanceTo(UNKNOWN_RAISE_AT + 100);
+  expect(rig.events, "the first sight no longer counts").toEqual([]);
+  rig.clock.advanceBy(ATTENTION_CONFIRMATION_DELAY_MS);
+  expect(rig.events).toHaveLength(1);
+});
+
+test("a dialog quoted by a busy agent answer never raises, and neither does it once the composer is back", () => {
+  const rig = unknownRig();
+  rig.show("s1", readyOf(QUOTED_IN_ANSWER_BUSY));
+  for (let i = 0; i < 40; i++) {
+    rig.d.feed("s1", BUSY_CHUNK);
+    rig.clock.advanceBy(100);
+  }
+  expect(rig.events, "control: the quote alone parses as a dialog, only the running turn refuses it").toEqual([]);
+  expect(INSPECT(QUOTED_IN_ANSWER_BUSY)).not.toBeNull();
+  rig.show("s1", readyOf(QUOTED_IN_ANSWER_THEN_COMPOSER));
+  rig.d.feed("s1", "paint");
+  rig.clock.advanceBy(UNKNOWN_RAISE_AT * 2);
+  expect(rig.events).toEqual([]);
+});
+
+test("known, then unknown, then known again: the badge is never lowered between them", () => {
+  const rig = unknownRig();
+  rig.d.feed("s1", PERMISSION_SCREEN);
+  rig.clock.advanceBy(ATTENTION_CONFIRMATION_DELAY_MS);
+  expect(rig.events).toEqual([{ id: "s1", waiting: true }]);
+  rig.show("s1", readyOf(ADD_DIR_LINES));
+  rig.d.feed("s1", "paint");
+  rig.clock.advanceBy(UNKNOWN_RAISE_AT);
+  expect(rig.events).toHaveLength(2);
+  expect(rig.events[1]).toMatchObject({ waiting: true, source: "unknown-dialog" });
+  rig.d.feed("s1", PERMISSION_SCREEN);
+  rig.clock.advanceBy(ATTENTION_CONFIRMATION_DELAY_MS);
+  expect(rig.events).toHaveLength(3);
+  expect(rig.events[2], "a known dialog replaces the unknown one with a known raise").toEqual({ id: "s1", waiting: true });
+  rig.show("s1", composerRead());
+  rig.d.feed("s1", "repaint");
+  rig.clock.advanceBy(ATTENTION_CONFIRMATION_DELAY_MS * 3);
+  expect(
+    rig.events.filter((e) => e.source === "unknown-dialog" && !e.waiting),
+    "the replaced unknown episode is closed silently, it cannot fall later"
+  ).toEqual([]);
+});
+
+test("two tiles on the same dialog raise their own episodes and fall independently", () => {
+  const rig = unknownRig();
+  rig.show("s1", readyOf(ADD_DIR_LINES));
+  rig.show("s2", readyOf(ADD_DIR_LINES));
+  rig.d.feed("s1", "paint");
+  rig.d.feed("s2", "paint");
+  rig.clock.advanceBy(UNKNOWN_RAISE_AT);
+  const raised = rig.events.filter((e) => e.waiting);
+  expect(raised.map((e) => e.id).sort()).toEqual(["s1", "s2"]);
+  expect(raised[0]!.episodeId).not.toBe(raised[1]!.episodeId);
+  rig.show("s1", composerRead());
+  rig.d.feed("s1", "repaint");
+  rig.clock.advanceBy(UNKNOWN_SAMPLE_INTERVAL_MS + ATTENTION_CONFIRMATION_DELAY_MS);
+  const fell = rig.events.filter((e) => !e.waiting);
+  expect(fell).toEqual([{ id: "s1", waiting: false, source: "unknown-dialog", episodeId: raised.find((e) => e.id === "s1")!.episodeId }]);
+});
+
+test("a different dialog stable for the delay opens a new episode without lowering the badge", () => {
+  const rig = unknownRig();
+  raiseDialog(rig);
+  rig.show("s1", readyOf(swap(ADD_DIR_LINES, "Adding a new directory:", "Moving to a new directory:")));
+  rig.d.feed("s1", "paint");
+  rig.clock.advanceBy(UNKNOWN_RAISE_AT);
+  expect(rig.events.map((e) => e.waiting)).toEqual([true, true]);
+  expect(rig.events[1]!.episodeId).not.toBe(rig.events[0]!.episodeId);
+  expect(rig.events[1]!.dialog?.title).toBe("Moving to a new directory:");
+});
+
+test("moving the selector inside an open dialog keeps the episode", () => {
+  const rig = unknownRig();
+  raiseDialog(rig);
+  rig.show("s1", readyOf(ADD_DIR_SELECTION_MOVED));
+  rig.d.feed("s1", "repaint");
+  rig.clock.advanceBy(UNKNOWN_RAISE_AT * 2);
+  expect(rig.events).toHaveLength(1);
+});
+
+test("clearing a tile cancels its sampling, and a restarted tile starts its own confirmation", () => {
+  const rig = unknownRig();
+  rig.show("s1", readyOf(ADD_DIR_LINES));
+  rig.d.feed("s1", "paint");
+  rig.clock.advanceBy(500);
+  rig.d.clear("s1");
+  expect(live(rig)).toEqual([]);
+  rig.clock.advanceBy(UNKNOWN_RAISE_AT * 2);
+  expect(rig.events).toEqual([]);
+  const restartedAt = rig.clock.now;
+  rig.d.feed("s1", "paint");
+  rig.clock.advanceTo(restartedAt + UNKNOWN_RAISE_AT - 1);
+  expect(rig.events, "the old state's sight of the dialog does not count for the restarted tile").toEqual([]);
+  rig.clock.advanceTo(restartedAt + UNKNOWN_RAISE_AT);
+  expect(rig.events).toHaveLength(1);
+});
+
+test("a screen reader that throws is traced and read as unavailable", () => {
+  const rig = unknownRig();
+  raiseDialog(rig);
+  rig.readWith(() => {
+    throw new Error("xterm gone");
+  });
+  rig.d.feed("s1", "repaint");
+  rig.clock.advanceBy(ATTENTION_CONFIRMATION_DELAY_MS * 2);
+  expect(rig.traces.length).toBeGreaterThan(0);
+  expect(rig.events, "an unreadable screen holds the episode").toHaveLength(1);
+});
+
+test("a screen unreadable after the only chunk and ready later still confirms, from the moment it is readable", () => {
+  const rig = unknownRig();
+  const readableAt = 700;
+  rig.readWith(() => (rig.clock.now < readableAt ? unavailableRead("screen-pending") : readyOf(ADD_DIR_LINES)));
+  rig.d.feed("s1", "paint");
+  rig.clock.advanceTo(readableAt + ATTENTION_CONFIRMATION_DELAY_MS - 1);
+  expect(rig.events, "the confirmation starts when the screen is first readable, not at the chunk").toEqual([]);
+  rig.clock.advanceTo(readableAt + UNKNOWN_SAMPLE_INTERVAL_MS + ATTENTION_CONFIRMATION_DELAY_MS);
+  expect(rig.events).toHaveLength(1);
+});
+
+test("a screen that never becomes readable is retried a bounded number of times, then left alone", () => {
+  const rig = unknownRig();
+  rig.readWith(() => unavailableRead("screen-pending"));
+  rig.d.feed("s1", "paint");
+  rig.clock.advanceBy(UNKNOWN_SAMPLE_INTERVAL_MS * (UNKNOWN_UNREADABLE_RETRIES + 5));
+  expect(live(rig)).toEqual([]);
+  expect(rig.clock.planned.length).toBeLessThanOrEqual(UNKNOWN_UNREADABLE_RETRIES + 2);
+  expect(rig.events).toEqual([]);
+});
+
+test("the session:attention forward hands the renderer and the companion the projection, never the raw event", () => {
+  const ipcSource = readFileSync(join(import.meta.dir, "..", "desktop", "src", "main", "ipc.ts"), "utf8").replace(/\r\n/g, "\n");
+  expect(ipcSource.split("'session:attention'").length - 1, "one forward of the channel in ipc.ts").toBe(1);
+  const forwards = ipcSource.match(/^ *service\.on\('attention', [^\n]*\n/gm) ?? [];
+  expect(forwards, "one attention forward in ipc.ts").toHaveLength(1);
+  const sent: unknown[] = [];
+  const service = new EventEmitter();
+  new Function("service", "broadcast", "projectAttentionEvent", forwards[0]!)(
+    service,
+    (_channel: string, payload: unknown) => sent.push(payload),
+    projectAttentionEvent
+  );
+  service.emit("attention", {
+    id: "s1",
+    waiting: true,
+    source: "unknown-dialog",
+    episodeId: "ep-1",
+    dialog: { title: "SECRET-TITLE", text: "SECRET-TEXT", truncated: false }
+  });
+  expect(sent).toEqual([{ id: "s1", waiting: true }]);
+  expect(JSON.stringify(sent)).not.toContain("SECRET");
+});
+
+test("the IPC projection carries the id, the flag and the manual marker, never the dialog text or the episode id", () => {
+  const raised: AttentionEvent = {
+    id: "s1",
+    waiting: true,
+    source: "unknown-dialog",
+    episodeId: "ep-1",
+    dialog: { title: "SECRET-TITLE", text: "SECRET-TEXT", truncated: false }
+  };
+  expect(projectAttentionEvent(raised)).toEqual({ id: "s1", waiting: true });
+  expect(JSON.stringify(projectAttentionEvent(raised))).not.toContain("SECRET");
+  expect(projectAttentionEvent({ id: "s1", waiting: false, manual: true })).toEqual({ id: "s1", waiting: false, manual: true });
+});
+
+test("a dialog is bounded by code points, stripped of control characters and flagged when cut", () => {
+  const long = boundDialog("\u{1d4b3}".repeat(DIALOG_TITLE_MAX + 5), "x".repeat(DIALOG_TEXT_MAX + 5));
+  expect([...long.title]).toHaveLength(DIALOG_TITLE_MAX);
+  expect([...long.text]).toHaveLength(DIALOG_TEXT_MAX);
+  expect(long.truncated).toBe(true);
+  const clean = boundDialog("a\u001bb", "line1\nli\u0007ne2");
+  expect(clean).toEqual({ title: "ab", text: "line1\nline2", truncated: false });
+});
+
+test("the journal entry names the tile and its id, bounds its payload again, and says when it is cut", () => {
+  const entry = describeUnknownDialog("s1", "tile one", {
+    title: "t".repeat(DIALOG_TITLE_MAX + 50),
+    text: "x".repeat(DIALOG_TEXT_MAX + 50),
+    truncated: false
+  });
+  expect(entry).toContain('"tile one"');
+  expect(entry).toContain("(s1)");
+  expect(entry).toContain("[truncated]");
+  expect(entry.length).toBeLessThan(DIALOG_TITLE_MAX + DIALOG_TEXT_MAX + 300);
 });

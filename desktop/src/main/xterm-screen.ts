@@ -355,33 +355,55 @@ export function createXtermScreen(options: XtermScreenOptions): XtermScreen {
   return { feed, resize, read, drain, invalidate, dispose }
 }
 
+const HORIZONTAL_RULE = String.fromCodePoint(0x2500)
+
+const isPureBorderRow = (line: string, cols: number): boolean =>
+  [...line].length === cols && [...line].every((character) => character === HORIZONTAL_RULE)
+
+const isTopBorderRow = (line: string, cols: number): boolean => {
+  if ([...line].length !== cols) return false
+  const labelStart = line.indexOf(' ')
+  if (labelStart < 0) return isPureBorderRow(line, cols)
+  const labelEnd = line.lastIndexOf(' ')
+  const beforeLabel = line.slice(0, labelStart)
+  const label = line.slice(labelStart + 1, labelEnd)
+  const afterLabel = line.slice(labelEnd + 1)
+  return (
+    beforeLabel.length > 0 &&
+    afterLabel.length > 0 &&
+    label.length > 0 &&
+    label.trim() === label &&
+    !label.includes(HORIZONTAL_RULE) &&
+    [...beforeLabel].every((character) => character === HORIZONTAL_RULE) &&
+    [...afterLabel].every((character) => character === HORIZONTAL_RULE)
+  )
+}
+
+/**
+ * A composer is visible when a full-width rule (its top one may carry a label) is followed by a
+ * line starting with the chevron and, further down, by a full-width rule. Independent of the
+ * cursor row and of the dialog rules, so a multi-line draft quoting a dialog still counts.
+ */
+export function composerGeometryVisible(snapshot: XtermScreenSnapshot): boolean {
+  const { lines, cols } = snapshot
+  for (let top = 0; top + 2 < lines.length; top++) {
+    if (!isTopBorderRow(lines[top]!, cols) || !lines[top + 1]!.trimStart().startsWith(CHEVRON)) continue
+    for (let bottom = top + 2; bottom < lines.length; bottom++) {
+      if (isPureBorderRow(lines[bottom]!, cols)) return true
+    }
+  }
+  return false
+}
+
 export function inspectInjectGuard(snapshot: XtermScreenSnapshot): InjectGuardInspection {
-  const horizontal = String.fromCodePoint(0x2500)
   const chevron = String.fromCodePoint(0x276f)
   const dialogTopLeft = String.fromCodePoint(0x256d)
   const dialogTopRight = String.fromCodePoint(0x256e)
   const dialogBottomLeft = String.fromCodePoint(0x2570)
   const dialogBottomRight = String.fromCodePoint(0x256f)
   const { lines, cols, cursor } = snapshot
-  const isPureBorder = (line: string): boolean => [...line].length === cols && [...line].every((character) => character === horizontal)
-  const isTopBorder = (line: string): boolean => {
-    if ([...line].length !== cols) return false
-    const labelStart = line.indexOf(' ')
-    if (labelStart < 0) return isPureBorder(line)
-    const labelEnd = line.lastIndexOf(' ')
-    const beforeLabel = line.slice(0, labelStart)
-    const label = line.slice(labelStart + 1, labelEnd)
-    const afterLabel = line.slice(labelEnd + 1)
-    return (
-      beforeLabel.length > 0 &&
-      afterLabel.length > 0 &&
-      label.length > 0 &&
-      label.trim() === label &&
-      !label.includes(horizontal) &&
-      [...beforeLabel].every((character) => character === horizontal) &&
-      [...afterLabel].every((character) => character === horizontal)
-    )
-  }
+  const isPureBorder = (line: string): boolean => isPureBorderRow(line, cols)
+  const isTopBorder = (line: string): boolean => isTopBorderRow(line, cols)
   const isPicker = (line: string): boolean => NUMBERED_PROMPT.test(line)
   // The echo of a submitted prompt is painted on the message background; a selector's chevron carries only a
   // foreground colour. A visible cursor alone does not tell them apart: a selector can leave it visible.

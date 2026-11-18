@@ -6,6 +6,7 @@ import { createImagePreviewService, nodePreviewFs, previewHandler } from './imag
 import { createLinkOpener, nodeLinkFs } from './link-opener'
 import { homedir } from 'node:os'
 import { handleAnswersIpc } from './approval-service'
+import { projectAttentionEvent } from './attention'
 import type {
   AckableInboxEntry,
   AppConfig,
@@ -1651,6 +1652,6 @@ export function registerIpc({
   service.on('changed', (sessions) => broadcast('sessions:changed', sessions))
   service.on('thinking', (e) => broadcast('session:thinking', e))
   service.on('quota', (e) => broadcast('session:quota', e))
-  service.on('attention', (e) => broadcast('session:attention', e))
+  service.on('attention', (e) => broadcast('session:attention', projectAttentionEvent(e)))
   sandbox.on('changed', (st) => broadcast('sandbox:changed', st))
 }

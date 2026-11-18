@@ -14,7 +14,14 @@ import {
   settleTileAnsweredInTerminal,
 } from "../desktop/src/main/approval-service";
 import { matchPermissionDialog, permissionDialogShown } from "../desktop/src/main/permission-dialog";
-import { trustPromptShown } from "../desktop/src/main/attention";
+import {
+  DIALOG_TEXT_MAX,
+  DIALOG_TITLE_MAX,
+  describeUnknownDialog,
+  trustPromptShown,
+  unknownDialogOnScreen,
+} from "../desktop/src/main/attention";
+import { ADD_DIR_LINES, composerRead, readyOf } from "./_unknown-dialog-fixture";
 import { withinDeferWindow } from "../desktop/src/main/approval-service";
 import { canonicalPath } from "../desktop/src/main/worktree-service";
 import { buildApprovalRequest } from "../desktop/hooks/approval-hook";
@@ -63,7 +70,7 @@ const registerPoller = await evaluate<{ poll: () => Promise<void> }>(
           openApprovals, heldVerdicts, unroutableTraced, canApplyVerdict, classifyVerdict, buildKeystrokes,
           journal, markVerdictsDelivered, reportError, matchPermissionDialog, permissionDialogShown,
           trustPromptShown, withinDeferWindow, canonicalPath, broadcast, raiseTileQuestion,
-          notTypedQuestion } = env
+          notTypedQuestion, unknownDialogOnScreen } = env
 ${POLLER}
   return { poll: pollApprovalVerdicts }
 }
@@ -74,7 +81,8 @@ ${POLLER}
 const registerListener = await evaluate<void>(
   `export function register(env) {
   const { service, waitingTiles, openApprovals, approvals, settleTileAnsweredInTerminal, reportError, journal,
-          approvalsEnabled, raiseTileQuestion, trustPromptShown, config, Notification, app } = env
+          approvalsEnabled, raiseTileQuestion, trustPromptShown, config, Notification, app,
+          unknownEpisodeLogged, describeUnknownDialog } = env
 ${LISTENER}
 }
 `,
@@ -127,6 +135,8 @@ function pollerEnv(opts: {
   waiting?: string[];
   approvalsEnabled?: () => boolean;
   screens?: Record<string, XtermScreenRead>;
+  sources?: Record<string, "known" | "unknown-dialog" | null>;
+  nonClaude?: string[];
 }) {
   const calls: Call[] = [];
   const waitingTiles = new Set<string>(opts.waiting ?? []);
@@ -138,10 +148,19 @@ function pollerEnv(opts: {
     approvalsEnabled: opts.approvalsEnabled ?? (() => true),
     fetchUndeliveredVerdicts: async () => opts.settled,
     service: {
-      list: () => (opts.tiles ?? ["s1"]).map((id) => ({ id, name: `tile ${id}`, peerId: null, cwd: "C:\\proj" })),
+      list: () =>
+        (opts.tiles ?? ["s1"]).map((id) => ({
+          id,
+          name: `tile ${id}`,
+          peerId: null,
+          cwd: "C:\\proj",
+          claudeLaunch: !opts.nonClaude?.includes(id),
+        })),
       write: (tile: string, keys: string) => written.push({ tile, keys }),
       screenRead: (tile: string) => opts.screens?.[tile] ?? composerScreen(),
+      attentionSourceOf: (tile: string) => opts.sources?.[tile] ?? null,
     },
+    unknownDialogOnScreen,
     waitingTiles,
     openApprovals,
     heldVerdicts: new Set<string>(),
@@ -704,8 +723,7 @@ describe("pollApprovalVerdicts types no remote answer into a trust prompt", () =
   });
 });
 
-describe("attention listener settlement rules", () => {
-  function listenerEnv(
+function listenerEnv(
     sweepResult: { settled: string[]; lost: string[]; delivered: string[] } = {
       settled: ["appr-42"],
       lost: [],
@@ -736,10 +754,13 @@ describe("attention listener settlement rules", () => {
       config: { notifyAttention: false, locale: "en" },
       Notification: Object.assign(function () {}, { isSupported: () => false }),
       app: { getLocale: () => "en" },
+      unknownEpisodeLogged: new Map<string, string>(),
+      describeUnknownDialog,
     });
     return { calls, service, waitingTiles, openApprovals };
   }
 
+describe("attention listener settlement rules", () => {
   test("dismissing a flag while an approval is still open leaves a trace", async () => {
     const { calls, service, openApprovals } = listenerEnv();
     openApprovals.set("s1", "appr-42");
@@ -965,5 +986,173 @@ describe("settleTileAnsweredInTerminal", () => {
       "a row closed by the terminal must never be typed into the dialog now on screen",
     ).not.toBe("apply");
     expect(buildKeystrokes(closed)).toBeNull();
+  });
+});
+
+describe("answers refused while an unknown dialog may be on screen", () => {
+  const dialogScreen = readyOf(ADD_DIR_LINES);
+  const unknownRaise = (title = "Adding a new directory:", text = "Adding a new directory:\nNo, exit\nYes, add it") => ({
+    id: "s1",
+    waiting: true,
+    source: "unknown-dialog",
+    episodeId: "ep-1",
+    dialog: { title, text, truncated: false },
+  });
+  const unknownFall = { id: "s1", waiting: false, source: "unknown-dialog", episodeId: "ep-1" };
+  const refusedFor = (calls: Call[]) =>
+    calls.filter((c) => c.fn === "broadcast" && c.args[0] === "approvals:not-applied");
+
+  test.each([true, false])(
+    "an answered terminal verdict is refused on an unknown-dialog source (tile waiting: %p) and typed nowhere",
+    async (waiting) => {
+      const env = pollerEnv({
+        settled: [verdict()],
+        waiting: waiting ? ["s1"] : [],
+        screens: { s1: composerScreen() },
+        sources: { s1: "unknown-dialog" },
+      });
+      await env.poll();
+      expect(env.written, "mutation: drop the source guard").toEqual([]);
+      expect(flat(env.marked), "the verdict is marked delivered, not held for a retry").toEqual(["appr-42"]);
+      expect(refusedFor(env.calls)).toHaveLength(1);
+      expect(env.calls.filter((c) => c.fn === "reportError" && /unknown dialog/.test(String(c.args[1])))).toHaveLength(1);
+      expect(raised(env.calls), "no replacement question for an unanswerable screen").toEqual([]);
+    },
+  );
+
+  test.each([true, false])(
+    "an answered terminal verdict is refused on a candidate snapshot before any episode exists (tile waiting: %p)",
+    async (waiting) => {
+      const env = pollerEnv({
+        settled: [verdict()],
+        waiting: waiting ? ["s1"] : [],
+        screens: { s1: dialogScreen },
+        sources: { s1: null },
+      });
+      await env.poll();
+      expect(env.written, "mutation: drop the snapshot guard").toEqual([]);
+      expect(flat(env.marked)).toEqual(["appr-42"]);
+      expect(refusedFor(env.calls)).toHaveLength(1);
+    },
+  );
+
+  test("the refusal comes before the classification, so a verdict that would be held is refused too", async () => {
+    const env = pollerEnv({
+      settled: [verdict({ answered_at: new Date().toISOString() })],
+      waiting: [],
+      screens: { s1: dialogScreen },
+      sources: { s1: null },
+    });
+    await env.poll();
+    expect(flat(env.marked), "mutation: place the guard after classifyVerdict -- a waiting=false tile is deferred instead").toEqual([
+      "appr-42",
+    ]);
+  });
+
+  test("a hook verdict and an unanswered row keep their own treatment on such a tile", async () => {
+    const hook = pollerEnv({
+      settled: [verdict({ reply_route: "hook" } as Partial<Approval>)],
+      waiting: ["s1"],
+      screens: { s1: dialogScreen },
+      sources: { s1: "unknown-dialog" },
+    });
+    await hook.poll();
+    expect(flat(hook.marked), "settled as before: another route delivered it").toEqual(["appr-42"]);
+    expect(refusedFor(hook.calls), "no refusal notice for a verdict that was never going to be typed").toEqual([]);
+    const unanswered = pollerEnv({
+      settled: [verdict({ status: "pending", answer_kind: null } as Partial<Approval>)],
+      waiting: ["s1"],
+      screens: { s1: dialogScreen },
+      sources: { s1: "unknown-dialog" },
+    });
+    await unanswered.poll();
+    expect(flat(unanswered.marked), "held, not consumed").toEqual([]);
+    expect(refusedFor(unanswered.calls)).toEqual([]);
+  });
+
+  test("a tile that no longer exists keeps the unroutable treatment", async () => {
+    const env = pollerEnv({ settled: [verdict({ tile: "gone" })], tiles: ["s1"], sources: { gone: "unknown-dialog" } });
+    await env.poll();
+    expect(flat(env.marked)).toEqual([]);
+    expect(refusedFor(env.calls)).toEqual([]);
+  });
+
+  test("a tile that is not a claude launch gets its answer on a screen that merely looks like the dialog", async () => {
+    const env = pollerEnv({
+      settled: [verdict()],
+      waiting: ["s1"],
+      screens: { s1: dialogScreen },
+      sources: { s1: null },
+      nonClaude: ["s1"],
+    });
+    await env.poll();
+    expect(env.written, "mutation: judge the screen of every live tile").toHaveLength(1);
+    expect(refusedFor(env.calls)).toEqual([]);
+  });
+
+  test("control: the same answer is typed once the tile shows a composer and no unknown source", async () => {
+    const env = pollerEnv({ settled: [verdict()], waiting: ["s1"], screens: { s1: composerScreen() }, sources: { s1: null } });
+    await env.poll();
+    expect(env.written).toHaveLength(1);
+  });
+
+  test("the unknown raise is journaled from its payload with the tile name and id, bounded, once per episode", async () => {
+    const env = listenerEnv();
+    let screenReads = 0;
+    env.service.screenRead = () => (screenReads++, composerScreen());
+    const huge = unknownRaise("T".repeat(DIALOG_TITLE_MAX + 40), "X".repeat(DIALOG_TEXT_MAX + 40));
+    env.service.emit("attention", huge);
+    env.service.emit("attention", huge);
+    await drain();
+    const lines = env.calls.filter((c) => c.fn === "journal.add");
+    expect(lines, "one entry per episode").toHaveLength(1);
+    const entry = String(lines[0]!.args[1]);
+    expect(lines[0]!.args[0]).toBe("attention");
+    expect(entry).toContain('"tile one"');
+    expect(entry).toContain("(s1)");
+    expect(entry).toContain("[truncated]");
+    expect(entry.length, "mutation: drop the caps").toBeLessThan(DIALOG_TITLE_MAX + DIALOG_TEXT_MAX + 300);
+    expect(screenReads, "the entry is built from the payload, never from the current screen").toBe(0);
+  });
+
+  test("an unknown raise raises no question and sweeps nothing, and keeps a neighbouring approval open", async () => {
+    const env = listenerEnv();
+    env.openApprovals.set("s1", "appr-hook");
+    env.waitingTiles.add("s1");
+    env.service.emit("attention", unknownRaise());
+    await drain();
+    expect(raised(env.calls)).toEqual([]);
+    expect(env.calls.some((c) => c.fn === "settleTileAnsweredInTerminal")).toBe(false);
+    expect(env.openApprovals.get("s1")).toBe("appr-hook");
+    expect(env.waitingTiles.has("s1"), "the tile is no longer an answerable question").toBe(false);
+  });
+
+  test("the fall of an unknown episode is never read as answered in the terminal", async () => {
+    const env = listenerEnv();
+    env.openApprovals.set("s1", "appr-hook");
+    env.service.emit("attention", unknownRaise());
+    env.service.emit("attention", unknownFall);
+    await Bun.sleep(20);
+    expect(env.calls.some((c) => c.fn === "settleTileAnsweredInTerminal"), "mutation: ignore the source on the fall").toBe(false);
+    expect(env.openApprovals.get("s1"), "a neighbouring hook approval stays open").toBe("appr-hook");
+    expect(env.calls.some((c) => c.fn === "reportError")).toBe(false);
+  });
+
+  test("a new episode of the same tile is journaled again", async () => {
+    const env = listenerEnv();
+    env.service.emit("attention", unknownRaise());
+    env.service.emit("attention", unknownFall);
+    env.service.emit("attention", { ...unknownRaise(), episodeId: "ep-2" });
+    await drain();
+    expect(env.calls.filter((c) => c.fn === "journal.add")).toHaveLength(2);
+  });
+
+  test("a known raise after an unknown episode takes the known path", async () => {
+    const env = listenerEnv();
+    env.service.emit("attention", unknownRaise());
+    env.service.emit("attention", { id: "s1", waiting: true });
+    await drain();
+    expect(raised(env.calls)).toHaveLength(1);
+    expect(env.waitingTiles.has("s1")).toBe(true);
   });
 });
