@@ -38,6 +38,12 @@ import {
   templateHasShellFields,
   templateToInputs
 } from "../desktop/src/shared/template.ts";
+import {
+  globalTemplatesDir,
+  readTemplate,
+  templateSource,
+  writeTemplate
+} from "../desktop/src/main/template-store.ts";
 import { renderSpawnApprovalQuestion } from "../desktop/src/main/serve-approval-dialog.ts";
 import { workspaceApproval } from "../desktop/src/main/workspace-store.ts";
 import type { DeckControlSession as SessionRuntime } from "../desktop/src/main/deck-control.ts";
@@ -3543,6 +3549,82 @@ describe("resolveTemplateInputs with the real template gate", () => {
     const run = resolveWith(free, "attended");
     expect(await run.result).toEqual({ ok: true, inputs: [free] });
     expect(run.dialogs().length).toBe(0);
+  });
+});
+
+describe("resolveTemplateInputs gates the templates of both local folders alike", () => {
+  const gateWith = (place: "koryphaios" | "claude-peers" | "other" | "global") => {
+    const proj = mkdtempSync(join(tmpdir(), "tpl-gate-proj-"));
+    const globalRoot = mkdtempSync(join(tmpdir(), "tpl-gate-global-"));
+    const env = { APPDATA: globalRoot, XDG_CONFIG_HOME: globalRoot } as NodeJS.ProcessEnv;
+    const dir = place === "global" ? globalTemplatesDir(env) : join(proj, ".claude", place, "templates");
+    const path = writeTemplate(dir, "t", {
+      type: "claude-peers-template",
+      version: 1,
+      name: "t",
+      sessions: [{ name: "dev", prompt: "do the thing" }]
+    } as never);
+    const dialogs: unknown[] = [];
+    const resolve = compileResolveTemplateInputs(readFileSync(INDEX_TS_PATH, "utf-8"), {
+      getConfig: () => ({ projectDir: proj }),
+      templateSource: (candidate: string, projectDir: string) => templateSource(candidate, projectDir, env),
+      reportError: () => {},
+      readTemplate,
+      templateHasShellFields,
+      templateApproval,
+      templateToInputs,
+      basename: (candidate: string) => candidate,
+      refusesUnattendedApproval: (who: string, approved: boolean) => who === "unattended" && !approved,
+      isShellFieldPreApproved: () => false,
+      journal: { add: () => {} },
+      confirmShellFieldApproval: async (opts: unknown) => {
+        dialogs.push(opts);
+        return false;
+      }
+    });
+    return {
+      path,
+      resolve,
+      dialogs,
+      cleanup: () => {
+        rmSync(proj, { recursive: true, force: true });
+        rmSync(globalRoot, { recursive: true, force: true });
+      }
+    };
+  };
+
+  for (const place of ["koryphaios", "claude-peers"] as const) {
+    test("a template in .claude/" + place + "/templates waits for the operator, and is refused when nobody can answer", async () => {
+      const gate = gateWith(place);
+      try {
+        expect(await gate.resolve(gate.path, "attended")).toEqual({ ok: false, reason: "refused" });
+        expect(gate.dialogs.length, "the approval dialog has to open").toBe(1);
+        expect(await gate.resolve(gate.path, "unattended")).toEqual({ ok: false, reason: "unattended" });
+        expect(gate.dialogs.length, "nobody can answer: no second dialog").toBe(1);
+      } finally {
+        gate.cleanup();
+      }
+    });
+  }
+
+  test("a global template carrying the same field opens no dialog", async () => {
+    const gate = gateWith("global");
+    try {
+      expect(await gate.resolve(gate.path, "attended")).toMatchObject({ ok: true });
+      expect(gate.dialogs.length).toBe(0);
+    } finally {
+      gate.cleanup();
+    }
+  });
+
+  test("a template in a folder beside the two local ones is refused as outside the allowed dirs", async () => {
+    const gate = gateWith("other");
+    try {
+      expect(await gate.resolve(gate.path, "attended")).toEqual({ ok: false, reason: "containment" });
+      expect(gate.dialogs.length).toBe(0);
+    } finally {
+      gate.cleanup();
+    }
   });
 });
 

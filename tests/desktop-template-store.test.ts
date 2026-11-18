@@ -1,5 +1,5 @@
 import { test, expect, afterEach } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -7,6 +7,7 @@ import { join } from "node:path";
 import {
   globalTemplatesDir,
   localTemplatesDir,
+  localTemplateDirs,
   listTemplates,
   writeTemplate,
   readTemplate,
@@ -16,6 +17,7 @@ import {
 } from "../desktop/src/main/template-store.ts";
 import { toTemplate, TEMPLATE_TYPE } from "../desktop/src/shared/template.ts";
 import { onDeckError } from "../desktop/src/main/log.ts";
+import { MAX_TRACED_FILES, MAX_TRACED_PER_SCAN } from "../desktop/src/main/project-files.ts";
 
 const tmpDirs: string[] = [];
 function tmp(): string {
@@ -41,7 +43,7 @@ test("globalTemplatesDir / localTemplatesDir resolve under the app dirs", () => 
   const g = tmp();
   expect(globalTemplatesDir(env(g)).replace(/\\/g, "/")).toContain("koryphaios/templates");
   const proj = tmp();
-  expect(localTemplatesDir(proj).replace(/\\/g, "/")).toContain(".claude/claude-peers/templates");
+  expect(localTemplatesDir(proj).replace(/\\/g, "/")).toContain(".claude/koryphaios/templates");
 });
 
 test("write then read round-trips a template", () => {
@@ -221,6 +223,135 @@ test("templateWriteDir gives any caller the project dir for a local template", (
   const proj = tmp();
   expect(templateWriteDir(proj, true, "unattended", e)).toBe(localTemplatesDir(proj));
   expect(templateWriteDir(proj, true, "attended", e)).toBe(localTemplatesDir(proj));
+});
+
+const koryphaiosDir = (proj: string): string => join(proj, ".claude", "koryphaios", "templates");
+const legacyDir = (proj: string): string => join(proj, ".claude", "claude-peers", "templates");
+
+function traced(run: () => void): string[] {
+  const texts: string[] = [];
+  onDeckError((_scope, text) => texts.push(text));
+  try {
+    run();
+  } finally {
+    onDeckError(() => {});
+  }
+  return texts;
+}
+
+test("local templates are created under koryphaios and read from koryphaios then claude-peers", () => {
+  const proj = tmp();
+  expect(localTemplatesDir(proj)).toBe(koryphaiosDir(proj));
+  expect(localTemplateDirs(proj)).toEqual([koryphaiosDir(proj), legacyDir(proj)]);
+  expect(templateWriteDir(proj, true, "unattended", env(tmp()))).toBe(koryphaiosDir(proj));
+});
+
+test("templateSource classes a template of either local folder as local and nothing beside them", () => {
+  const e = env(tmp());
+  const proj = tmp();
+  const fresh = writeTemplate(koryphaiosDir(proj), "a", toTemplate([{ name: "a" }], "a"));
+  const old = writeTemplate(legacyDir(proj), "b", toTemplate([{ name: "b" }], "b"));
+  expect(templateSource(fresh, proj, e)).toBe("local");
+  expect(templateSource(old, proj, e)).toBe("local");
+  expect(templateSource(join(proj, ".claude", "other", "templates", "x.json"), proj, e)).toBeNull();
+  expect(templateSource(join(koryphaiosDir(proj), "sub", "x.json"), proj, e)).toBeNull();
+  expect(templateSource(join(proj, ".claude", "koryphaios", "x.json"), proj, e)).toBeNull();
+  expect(
+    templateSource(join(koryphaiosDir(proj), "..", "..", "claude-peers", "templates", "x.json"), proj, e)
+  ).toBe("local");
+});
+
+test("listTemplates lists global, koryphaios then claude-peers and never merges one name held by two folders", () => {
+  const e = env(tmp());
+  const proj = tmp();
+  const global = writeTemplate(globalTemplatesDir(e), "shared", toTemplate([{ name: "g" }], "Shared"));
+  const fresh = writeTemplate(koryphaiosDir(proj), "shared", toTemplate([{ name: "n" }], "Shared"));
+  const old = writeTemplate(legacyDir(proj), "shared", toTemplate([{ name: "o" }, { name: "p" }], "Shared"));
+  expect(listTemplates(proj, e).map((t) => [t.path, t.source, t.sessionCount])).toEqual([
+    [global, "global", 1],
+    [fresh, "local", 1],
+    [old, "local", 2],
+  ]);
+});
+
+test("deleteTemplate removes the exact template chosen in either local folder and refuses a sibling folder", () => {
+  const e = env(tmp());
+  const proj = tmp();
+  const fresh = writeTemplate(koryphaiosDir(proj), "same", toTemplate([{ name: "n" }], "Same"));
+  const old = writeTemplate(legacyDir(proj), "same", toTemplate([{ name: "o" }], "Same"));
+  expect(deleteTemplate(old, proj, e)).toBe(true);
+  expect(listTemplates(proj, e).map((t) => t.path)).toEqual([fresh]);
+  expect(deleteTemplate(fresh, proj, e)).toBe(true);
+  expect(listTemplates(proj, e)).toEqual([]);
+
+  const sibling = writeTemplate(join(proj, ".claude", "other", "templates"), "x", toTemplate([{ name: "z" }], "X"));
+  expect(deleteTemplate(sibling, proj, e)).toBe(false);
+  expect(readTemplate(sibling)).not.toBeNull();
+});
+
+test("readTemplate traces an invalid file once per signature and stays silent about an absent one", () => {
+  const dir = globalTemplatesDir(env(tmp()));
+  mkdirSync(dir, { recursive: true });
+  const bad = join(dir, "bad.json");
+  writeFileSync(bad, "{ not json", "utf-8");
+  const about = (run: () => void): number => traced(run).filter((text) => text.includes(bad)).length;
+  expect(about(() => { expect(readTemplate(bad)).toBeNull(); expect(readTemplate(bad)).toBeNull(); })).toBe(1);
+  writeFileSync(bad, "{ not json, and a longer file now", "utf-8");
+  expect(about(() => readTemplate(bad))).toBe(1);
+  expect(traced(() => { expect(readTemplate(join(dir, "absent.json"))).toBeNull(); })).toEqual([]);
+});
+
+test("readTemplate traces valid JSON that is not a template", () => {
+  const dir = globalTemplatesDir(env(tmp()));
+  mkdirSync(dir, { recursive: true });
+  const notATemplate = join(dir, "not-a-template.json");
+  writeFileSync(notATemplate, JSON.stringify({ hello: 1 }), "utf-8");
+  const texts = traced(() => { expect(readTemplate(notATemplate)).toBeNull(); });
+  expect(texts.filter((text) => text.includes(notATemplate))).toHaveLength(1);
+});
+
+test("listTemplates traces a folder it cannot read once, and stays silent about an absent folder", () => {
+  const e = env(tmp());
+  const proj = tmp();
+  const unreadable = koryphaiosDir(proj);
+  const readDir = (dir: string): string[] => {
+    throw Object.assign(new Error(dir === unreadable ? "denied" : "absent"), {
+      code: dir === unreadable ? "EACCES" : "ENOENT",
+    });
+  };
+  const texts = traced(() => {
+    expect(listTemplates(proj, e, readDir)).toEqual([]);
+    expect(listTemplates(proj, e, readDir)).toEqual([]);
+  });
+  expect(texts.filter((text) => text.includes(unreadable))).toHaveLength(1);
+  expect(texts.filter((text) => !text.includes(unreadable))).toEqual([]);
+});
+
+test("a folder of more invalid templates than the trace cap costs one trace per file up to the budget, one line for the rest, and nothing on the next listing", () => {
+  const e = env(tmp());
+  const proj = tmp();
+  const dir = koryphaiosDir(proj);
+  mkdirSync(dir, { recursive: true });
+  for (let index = 0; index < MAX_TRACED_FILES + 1; index++) {
+    writeFileSync(join(dir, "junk-" + index + ".json"), "{ not json " + index, "utf-8");
+  }
+  const first = traced(() => { listTemplates(proj, e); });
+  expect(first).toHaveLength(MAX_TRACED_PER_SCAN + 1);
+  expect(first.filter((text) => text.includes(MAX_TRACED_FILES + 1 - MAX_TRACED_PER_SCAN + " more invalid files"))).toHaveLength(1);
+  expect(traced(() => { listTemplates(proj, e); }), "the second listing traces nothing").toEqual([]);
+});
+
+test("the same invalid templates read in another order trace nothing again", () => {
+  const e = env(tmp());
+  const proj = tmp();
+  const dir = koryphaiosDir(proj);
+  mkdirSync(dir, { recursive: true });
+  for (let index = 0; index < 2 * MAX_TRACED_PER_SCAN + 4; index++) {
+    writeFileSync(join(dir, "junk-" + index + ".json"), "{ not json " + index, "utf-8");
+  }
+  expect(traced(() => { listTemplates(proj, e); })).toHaveLength(MAX_TRACED_PER_SCAN + 1);
+  const reversed = (folder: string): string[] => readdirSync(folder).reverse();
+  expect(traced(() => { listTemplates(proj, e, reversed); })).toEqual([]);
 });
 
 test("ipc.ts reaches the global templates dir only through templateWriteDir, with attendance from isLocalIpcEvent", () => {

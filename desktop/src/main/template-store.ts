@@ -1,17 +1,16 @@
-// Filesystem layer for team templates. Discovers, reads and writes template
-// .json files in two locations:
-//   - global: <globalConfigDir>/templates  (e.g. %APPDATA%/koryphaios/templates)
-//   - local:  <projectDir>/.claude/claude-peers/templates
-//
-// Node builtins + relative imports only (no electron, no `@shared/*` alias) so
-// it stays unit-testable under bun, like launch-config.ts. The pure validation /
-// shaping lives in ../shared/template.ts.
-
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { globalConfigDir } from './launch-config'
 import { parseTemplate, type SessionTemplate } from '../shared/template'
 import { reportError } from './log'
+import {
+  PROJECT_SOURCES,
+  isAbsentFileError,
+  projectCreationPath,
+  projectRootPath,
+  traceInvalidFileOnce,
+  traceScan
+} from './project-files'
 import type { CallerAttendance } from './workspace-service'
 
 export interface TemplateSummary {
@@ -28,7 +27,11 @@ export function globalTemplatesDir(env: NodeJS.ProcessEnv = process.env): string
 }
 
 export function localTemplatesDir(projectDir: string): string {
-  return join(projectDir, '.claude', 'claude-peers', 'templates')
+  return projectCreationPath(projectDir, 'templates')
+}
+
+export function localTemplateDirs(projectDir: string): string[] {
+  return PROJECT_SOURCES.map((source) => join(projectRootPath(projectDir, source), 'templates'))
 }
 
 /**
@@ -51,14 +54,7 @@ export function templateWriteDir(
   return globalTemplatesDir(env)
 }
 
-/**
- * Which allowed templates dir directly contains `path`, or null when it lives
- * outside both (M-SEC-9 containment). `template:read` / `template:apply` accept
- * a caller-supplied path (renderer, supervisor, paired phone), so an arbitrary
- * absolute path must be rejected before it is read/applied. 'local' = the
- * repo-shipped (untrusted) dir; 'global' = the operator's own app-state dir.
- * Mirrors the resolve-equality guard already used by `deleteTemplate`.
- */
+// Both local dirs hold repo-shipped templates, so both classify as 'local' and take the approval gate.
 export function templateSource(
   path: string,
   projectDir: string,
@@ -67,20 +63,14 @@ export function templateSource(
   if (!path.toLowerCase().endsWith('.json')) return null
   const dir = resolve(dirname(path))
   if (dir === resolve(globalTemplatesDir(env))) return 'global'
-  if (dir === resolve(localTemplatesDir(projectDir))) return 'local'
+  if (localTemplateDirs(projectDir).some((local) => dir === resolve(local))) return 'local'
   return null
 }
 
-/**
- * Reads and validates a template file; a multi-lead file is normalized (first
- * wins) and the repair is reported via reportError rather than happening
- * silently.
- */
-export function readTemplate(path: string): SessionTemplate | null {
+function readTemplateFile(path: string, onInvalid: (error: unknown) => void): SessionTemplate | null {
   try {
-    if (!existsSync(path)) return null
     const parsed = parseTemplate(JSON.parse(readFileSync(path, 'utf-8')))
-    if (!parsed) return null
+    if (!parsed) throw new Error('the file is not a valid template')
     if (parsed.demotedLeadNames.length > 0) {
       reportError(
         'template',
@@ -89,20 +79,29 @@ export function readTemplate(path: string): SessionTemplate | null {
       )
     }
     return parsed.template
-  } catch {
+  } catch (error) {
+    if (!isAbsentFileError(error)) onInvalid(error)
     return null
   }
 }
 
-function listDir(dir: string, source: 'global' | 'local'): TemplateSummary[] {
+export function readTemplate(path: string): SessionTemplate | null {
+  return readTemplateFile(path, (error) => traceInvalidFileOnce(path, error))
+}
+
+function listDir(
+  dir: string,
+  source: 'global' | 'local',
+  readDir: (dir: string) => string[]
+): TemplateSummary[] {
   try {
-    if (!existsSync(dir)) return []
+    const scan = traceScan(dir)
     const out: TemplateSummary[] = []
-    for (const f of readdirSync(dir)) {
+    for (const f of [...readDir(dir)].sort()) {
       if (!f.toLowerCase().endsWith('.json')) continue
       const path = join(dir, f)
-      const tpl = readTemplate(path)
-      if (!tpl) continue // skip malformed / non-template json
+      const tpl = readTemplateFile(path, (error) => scan.invalid(path, error))
+      if (!tpl) continue
       out.push({
         path,
         name: tpl.name || f.replace(/\.json$/i, ''),
@@ -110,17 +109,22 @@ function listDir(dir: string, source: 'global' | 'local'): TemplateSummary[] {
         sessionCount: tpl.sessions.length
       })
     }
+    scan.done()
     return out
-  } catch {
+  } catch (error) {
+    if (!isAbsentFileError(error)) traceInvalidFileOnce(dir, error)
     return []
   }
 }
 
-/** All templates from the global dir then the project-local dir. */
-export function listTemplates(projectDir: string, env: NodeJS.ProcessEnv = process.env): TemplateSummary[] {
+export function listTemplates(
+  projectDir: string,
+  env: NodeJS.ProcessEnv = process.env,
+  readDir: (dir: string) => string[] = readdirSync
+): TemplateSummary[] {
   return [
-    ...listDir(globalTemplatesDir(env), 'global'),
-    ...listDir(localTemplatesDir(projectDir), 'local')
+    ...listDir(globalTemplatesDir(env), 'global', readDir),
+    ...localTemplateDirs(projectDir).flatMap((dir) => listDir(dir, 'local', readDir))
   ]
 }
 
@@ -154,12 +158,6 @@ export function writeTemplate(dir: string, name: string, tpl: SessionTemplate): 
   return file
 }
 
-/**
- * Delete a template .json file. Guarded: the path must be a `.json` that lives
- * directly in the global or project-local templates dir (defends against an
- * arbitrary path being passed through the IPC). Returns true if a file was
- * removed.
- */
 export function deleteTemplate(
   path: string,
   projectDir: string,
@@ -167,10 +165,7 @@ export function deleteTemplate(
 ): boolean {
   try {
     if (!path.toLowerCase().endsWith('.json')) return false
-    const allowedDirs = [
-      resolve(globalTemplatesDir(env)),
-      resolve(localTemplatesDir(projectDir))
-    ]
+    const allowedDirs = [globalTemplatesDir(env), ...localTemplateDirs(projectDir)].map((dir) => resolve(dir))
     if (!allowedDirs.includes(resolve(dirname(path)))) return false
     if (!existsSync(path)) return false
     rmSync(path, { force: true })

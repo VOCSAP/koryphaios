@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { statSync } from 'node:fs'
 import { join } from 'node:path'
 import { reportError } from './log'
@@ -6,6 +7,7 @@ import { canonicalPath } from './worktree-service'
 export const PROJECT_DIR_NAME = 'koryphaios'
 export const LEGACY_PROJECT_DIR_NAME = 'claude-peers'
 export const MAX_TRACED_FILES = 64
+export const MAX_TRACED_PER_SCAN = 8
 
 export type ProjectFileSource = 'koryphaios' | 'legacy'
 
@@ -71,11 +73,43 @@ function signatureOf(file: string): string {
   }
 }
 
-export function traceInvalidFileOnce(file: string, error: unknown, report: ProjectFileReport = reportError): void {
-  const key = canonicalPath(file)
-  const signature = signatureOf(file)
-  if (traced.get(key) === signature) return
+function firstSeen(key: string, signature: string): boolean {
+  if (traced.get(key) === signature) return false
   traced.set(key, signature)
   if (traced.size > MAX_TRACED_FILES) traced.delete(traced.keys().next().value as string)
+  return true
+}
+
+export function traceInvalidFileOnce(file: string, error: unknown, report: ProjectFileReport = reportError): void {
+  if (!firstSeen(canonicalPath(file), signatureOf(file))) return
   report('project-files', `Ignoring the invalid file ${file}`, error)
+}
+
+export interface TraceScan {
+  invalid(file: string, error: unknown): void
+  done(): void
+}
+
+// A scan that reads more invalid files than the FIFO above holds would evict each entry just before reading it again.
+// Feed it the files in a stable order: the summary signature depends on it.
+export function traceScan(dir: string, report: ProjectFileReport = reportError): TraceScan {
+  let single = 0
+  let rest = 0
+  const digest = createHash('sha256')
+  return {
+    invalid(file, error) {
+      if (single < MAX_TRACED_PER_SCAN) {
+        single++
+        traceInvalidFileOnce(file, error, report)
+        return
+      }
+      rest++
+      digest.update(`${canonicalPath(file)}:${signatureOf(file)}\n`)
+    },
+    done() {
+      if (rest === 0) return
+      if (!firstSeen(`${canonicalPath(dir)}#rest`, `${rest}:${digest.digest('hex')}`)) return
+      report('project-files', `${rest} more invalid files in ${dir}`)
+    }
+  }
 }

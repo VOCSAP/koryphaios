@@ -2,14 +2,17 @@
 // shadowing global on a name collision, guarded delete, size cap.
 
 import { test, expect, afterEach } from "bun:test";
-import { mkdirSync, mkdtempSync, existsSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, existsSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { onDeckError } from "../desktop/src/main/log.ts";
+import { MAX_TRACED_FILES, MAX_TRACED_PER_SCAN } from "../desktop/src/main/project-files.ts";
 
 // Node-only module (no electron / no @shared alias), imports under bun.
 import {
   globalSnippetsDir,
   localSnippetsDir,
+  localSnippetDirs,
   listSnippets,
   writeSnippet,
   deleteSnippet,
@@ -40,7 +43,7 @@ test("dirs resolve under the app config dir and the project .claude dir", () => 
   const g = tmp();
   expect(globalSnippetsDir(env(g)).replace(/\\/g, "/")).toContain("/snippets");
   const proj = tmp();
-  expect(localSnippetsDir(proj).replace(/\\/g, "/")).toContain(".claude/claude-peers/snippets");
+  expect(localSnippetsDir(proj).replace(/\\/g, "/")).toContain(".claude/koryphaios/snippets");
 });
 
 test("write then list round-trips name and text, sorted by name", () => {
@@ -100,4 +103,122 @@ test("deleteSnippet only removes .md files inside the two snippet dirs", () => {
   writeFileSync(wrongExt, "{}");
   expect(deleteSnippet(wrongExt, proj, env(g))).toBe(false);
   expect(existsSync(wrongExt)).toBe(true);
+});
+
+const koryphaiosDir = (proj: string): string => join(proj, ".claude", "koryphaios", "snippets");
+const legacyDir = (proj: string): string => join(proj, ".claude", "claude-peers", "snippets");
+
+function traced(run: () => void): string[] {
+  const texts: string[] = [];
+  onDeckError((_scope, text) => texts.push(text));
+  try {
+    run();
+  } finally {
+    onDeckError(() => {});
+  }
+  return texts;
+}
+
+test("snippets are created under koryphaios and read from koryphaios then claude-peers", () => {
+  const proj = tmp();
+  expect(localSnippetsDir(proj)).toBe(koryphaiosDir(proj));
+  expect(localSnippetDirs(proj)).toEqual([koryphaiosDir(proj), legacyDir(proj)]);
+  expect(writeSnippet(localSnippetsDir(proj), "fresh", "text")).toBe(join(koryphaiosDir(proj), "fresh.md"));
+});
+
+test("a snippet name is listed once, from koryphaios before claude-peers before global", () => {
+  const g = tmp();
+  const proj = tmp();
+  writeSnippet(globalSnippetsDir(env(g)), "a-all", "global");
+  writeSnippet(globalSnippetsDir(env(g)), "b-old-and-global", "global");
+  writeSnippet(globalSnippetsDir(env(g)), "c-global-only", "global");
+  writeSnippet(legacyDir(proj), "a-all", "legacy");
+  writeSnippet(legacyDir(proj), "b-old-and-global", "legacy");
+  writeSnippet(legacyDir(proj), "d-old-only", "legacy");
+  writeSnippet(koryphaiosDir(proj), "a-all", "koryphaios");
+  writeSnippet(koryphaiosDir(proj), "e-new-only", "koryphaios");
+  expect(listSnippets(proj, env(g)).map((s) => s.source + ":" + s.name + ":" + s.text)).toEqual([
+    "local:a-all:koryphaios",
+    "local:b-old-and-global:legacy",
+    "local:d-old-only:legacy",
+    "local:e-new-only:koryphaios",
+    "global:c-global-only:global",
+  ]);
+});
+
+test("deleteSnippet removes the exact snippet chosen in either local folder and refuses a sibling folder", () => {
+  const g = tmp();
+  const proj = tmp();
+  const fresh = writeSnippet(koryphaiosDir(proj), "same", "from koryphaios");
+  const old = writeSnippet(legacyDir(proj), "same", "from claude-peers");
+  expect(deleteSnippet(fresh, proj, env(g))).toBe(true);
+  expect(listSnippets(proj, env(g)).map((s) => s.text)).toEqual(["from claude-peers"]);
+  expect(deleteSnippet(old, proj, env(g))).toBe(true);
+  expect(listSnippets(proj, env(g))).toEqual([]);
+
+  const sibling = writeSnippet(join(proj, ".claude", "other", "snippets"), "x", "keep");
+  expect(deleteSnippet(sibling, proj, env(g))).toBe(false);
+  expect(existsSync(sibling)).toBe(true);
+});
+
+test("listSnippets traces a snippet it cannot read once per signature and ignores the absent folders", () => {
+  const g = tmp();
+  const proj = tmp();
+  const dir = legacyDir(proj);
+  writeSnippet(dir, "ok", "fine");
+  const unreadable = join(dir, "unreadable.md");
+  mkdirSync(unreadable);
+  const texts = traced(() => {
+    expect(listSnippets(proj, env(g)).map((s) => s.name)).toEqual(["ok"]);
+    expect(listSnippets(proj, env(g)).map((s) => s.name)).toEqual(["ok"]);
+  });
+  expect(texts.filter((text) => text.includes(unreadable))).toHaveLength(1);
+  expect(texts.filter((text) => !text.includes(unreadable))).toEqual([]);
+});
+
+test("a folder of more unreadable snippets than the trace cap costs one trace per file up to the budget, one line for the rest, and nothing on the next listing", () => {
+  const g = tmp();
+  const proj = tmp();
+  const dir = legacyDir(proj);
+  for (let index = 0; index < MAX_TRACED_FILES + 1; index++) mkdirSync(join(dir, "junk-" + index + ".md"), { recursive: true });
+  const first = traced(() => { listSnippets(proj, env(g)); });
+  expect(first).toHaveLength(MAX_TRACED_PER_SCAN + 1);
+  expect(first.filter((text) => text.includes(MAX_TRACED_FILES + 1 - MAX_TRACED_PER_SCAN + " more invalid files"))).toHaveLength(1);
+  expect(traced(() => { listSnippets(proj, env(g)); }), "the second listing traces nothing").toEqual([]);
+});
+
+test("the same unreadable snippets read in another order trace nothing again", () => {
+  const g = tmp();
+  const proj = tmp();
+  const dir = legacyDir(proj);
+  for (let index = 0; index < 2 * MAX_TRACED_PER_SCAN + 4; index++) mkdirSync(join(dir, "junk-" + index + ".md"), { recursive: true });
+  expect(traced(() => { listSnippets(proj, env(g)); })).toHaveLength(MAX_TRACED_PER_SCAN + 1);
+  const reversed = (folder: string): string[] => readdirSync(folder).reverse();
+  expect(traced(() => { listSnippets(proj, env(g), reversed); })).toEqual([]);
+});
+
+test("listSnippets stays silent about a snippet that vanished after the folder was listed", () => {
+  const g = tmp();
+  const proj = tmp();
+  const texts = traced(() => {
+    expect(listSnippets(proj, env(g), () => ["ghost.md"])).toEqual([]);
+  });
+  expect(texts).toEqual([]);
+});
+
+test("listSnippets traces a folder it cannot read once, and stays silent about an absent folder", () => {
+  const g = tmp();
+  const proj = tmp();
+  const unreadable = legacyDir(proj);
+  const readDir = (dir: string): string[] => {
+    throw Object.assign(new Error(dir === unreadable ? "denied" : "absent"), {
+      code: dir === unreadable ? "EACCES" : "ENOENT",
+    });
+  };
+  const texts = traced(() => {
+    expect(listSnippets(proj, env(g), readDir)).toEqual([]);
+    expect(listSnippets(proj, env(g), readDir)).toEqual([]);
+  });
+  expect(texts.filter((text) => text.includes(unreadable))).toHaveLength(1);
+  expect(texts.filter((text) => !text.includes(unreadable))).toEqual([]);
 });

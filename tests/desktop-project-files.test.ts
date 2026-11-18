@@ -4,12 +4,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   MAX_TRACED_FILES,
+  MAX_TRACED_PER_SCAN,
   PROJECT_SOURCES,
   projectCreationPath,
   projectRootPath,
   sameWorkspaceRef,
   selectProjectFile,
-  traceInvalidFileOnce
+  traceInvalidFileOnce,
+  traceScan
 } from "../desktop/src/main/project-files.ts";
 
 const tmpDirs: string[] = [];
@@ -180,4 +182,51 @@ test("the traced files are bounded: the oldest is evicted first, and none at exa
   expect(reports, "the second oldest is still remembered").toHaveLength(MAX_TRACED_FILES + 1);
   trace(files[0]!);
   expect(reports, "the oldest was evicted and traces again").toHaveLength(MAX_TRACED_FILES + 2);
+});
+
+function scanReports(dir: string, files: string[]): string[] {
+  const reports: string[] = [];
+  const scan = traceScan(dir, (_scope, message) => {
+    reports.push(message);
+  });
+  for (const file of files) scan.invalid(file, new Error("bad"));
+  scan.done();
+  return reports;
+}
+
+test("a scan traces the first invalid files one by one and the rest in one line for the folder", () => {
+  const project = tmpProject();
+  const files = tracedFiles(project, MAX_TRACED_PER_SCAN + 5);
+  const reports = scanReports(project, files);
+  expect(reports).toHaveLength(MAX_TRACED_PER_SCAN + 1);
+  for (const file of files.slice(0, MAX_TRACED_PER_SCAN)) {
+    expect(reports.filter((message) => message.includes(file))).toHaveLength(1);
+  }
+  expect(reports[MAX_TRACED_PER_SCAN]).toBe("5 more invalid files in " + project);
+  for (const file of files.slice(MAX_TRACED_PER_SCAN)) {
+    expect(reports.some((message) => message.includes(file)), "an overflowing file is not named").toBe(false);
+  }
+});
+
+test("a scan of exactly the budget adds no summary line", () => {
+  const project = tmpProject();
+  expect(scanReports(project, tracedFiles(project, MAX_TRACED_PER_SCAN))).toHaveLength(MAX_TRACED_PER_SCAN);
+});
+
+test("a second scan of more invalid files than the cap traces nothing", () => {
+  const project = tmpProject();
+  const files = tracedFiles(project, MAX_TRACED_FILES + 1);
+  expect(scanReports(project, files)).toHaveLength(MAX_TRACED_PER_SCAN + 1);
+  expect(scanReports(project, files)).toEqual([]);
+});
+
+test("the summary is traced again when the overflowing files change, and only the summary", () => {
+  const project = tmpProject();
+  const files = tracedFiles(project, MAX_TRACED_PER_SCAN + 5);
+  scanReports(project, files);
+  for (const file of files.slice(MAX_TRACED_PER_SCAN)) {
+    put(file, "{ broken, and longer than before");
+    setMtime(file, 2_000);
+  }
+  expect(scanReports(project, files)).toEqual(["5 more invalid files in " + project]);
 });
