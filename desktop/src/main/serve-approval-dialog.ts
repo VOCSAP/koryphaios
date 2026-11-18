@@ -108,7 +108,12 @@ export function renderSpawnApprovalQuestion(summaries: readonly SpawnSummary[], 
       summary.worktree_branch ? `${isFr ? 'branche' : 'branch'}: ${summary.worktree_branch}` : ''
     ].filter(Boolean)
     const head = parts.join('  ')
-    return [head, summary.args ? `   args: ${summary.args}` : '', summary.prompt_preview ? `   ${summary.prompt_preview}` : '']
+    return [
+      head,
+      summary.args ? `   args: ${summary.args}` : '',
+      ...(summary.extra_fields ?? []).map((field) => `   ${field}`),
+      summary.prompt_preview ? `   ${summary.prompt_preview}` : ''
+    ]
       .filter(Boolean)
       .join('\n')
   })

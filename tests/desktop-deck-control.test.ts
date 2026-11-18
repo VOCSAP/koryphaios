@@ -4,7 +4,7 @@
 // electron/node-pty; the MCP server is spawned for real (bun runs the TS) and
 // spoken to over newline-delimited JSON-RPC.
 
-import { test, expect, afterAll, afterEach } from "bun:test";
+import { test, expect, afterAll, afterEach, describe } from "bun:test";
 import type { Subprocess } from "bun";
 import {
   startDeckControl,
@@ -32,6 +32,13 @@ import {
   shouldAutoSpawnSupervisor
 } from "../desktop/src/main/supervisor.ts";
 import type { CreateSessionInput } from "../desktop/src/shared/types.ts";
+import {
+  TEMPLATE_SESSION_FIELD_CLASS,
+  templateApproval,
+  templateHasShellFields,
+  templateToInputs
+} from "../desktop/src/shared/template.ts";
+import { renderSpawnApprovalQuestion } from "../desktop/src/main/serve-approval-dialog.ts";
 import type { DeckControlSession as SessionRuntime } from "../desktop/src/main/deck-control.ts";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -2016,6 +2023,46 @@ test("deck_apply_template shows a clodex bridge in the agent approval recap", as
   expect(deps.approvals[0]![0]!.name).toBe("[clodex] bridge");
 });
 
+test("deck_apply_template shows every approval field of a template entry in the agent approval recap", async () => {
+  const samples: Record<string, { value: unknown; shown: string }> = {
+    command: { value: "run-cmd", shown: "run-cmd" },
+    args: { value: "--flag-x", shown: "--flag-x" },
+    bridge: { value: "clodex", shown: "[clodex]" },
+    clodexContextTokens: { value: 300_000, shown: "300000" },
+    prompt: { value: "prompt-x", shown: "prompt-x" },
+    lead: { value: true, shown: "[lead]" },
+    agent: { value: "agent-x", shown: "agent-x" },
+    worktreeBranch: { value: "branch-x", shown: "branch-x" },
+    announce: { value: "announce-x", shown: "announce-x" },
+    disallowedTools: { value: ["Bash"], shown: "Bash" }
+  };
+  const approvalFields = Object.entries(TEMPLATE_SESSION_FIELD_CLASS)
+    .filter(([, cls]) => cls === "approval")
+    .map(([field]) => field);
+  expect(Object.keys(samples).sort(), "a new approval field needs a sample here").toEqual(approvalFields.sort());
+
+  const state = { sessions: [] as SessionRuntime[] };
+  const deps = makeDeps(state);
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+  for (const [field, { value, shown }] of Object.entries(samples)) {
+    const session = { name: "dev", ...(field === "clodexContextTokens" ? { bridge: "clodex" } : {}), [field]: value };
+    deps.resolveTemplate = async () => ({
+      ok: true,
+      inputs: templateToInputs({ type: "claude-peers-template", version: 1, sessions: [session] } as never)
+    });
+    state.sessions.length = 0;
+    deps.approvals.length = 0;
+    await call(srv, "deck_apply_template", { path: "/t.json" });
+    expect(deps.approvals.length, `${field}: the recap has to be asked`).toBe(1);
+    const read = renderSpawnApprovalQuestion(deps.approvals[0]!, false)
+      .split("\n")
+      .map((line) => line.replace(/^\d\d[|+] /, ""))
+      .join("");
+    expect(read, `${field} has to be in the recap the operator reads`).toContain(shown);
+  }
+});
+
 test("deck_apply_template: batch cap refuses the whole template before any tile spawns or approval is asked", async () => {
   const state = { sessions: Array.from({ length: SPAWN_CAP - 1 }, (_, i) => fakeSession(`live-${i}`)) };
   const deps = makeDeps(state);
@@ -3187,8 +3234,7 @@ const INDEX_TS_PATH = join(import.meta.dir, "..", "desktop", "src", "main", "ind
 const SHOW_APPROVAL_DIALOG_SIGNATURE =
   /const routeTrustApproval = createApprovalRouter<[^\n]*>\(\{\s+native: async \(nativeSpec\) => \{/g;
 
-const RESOLVE_TEMPLATE_INPUTS_SIGNATURE =
-  /const resolveTemplateInputs = async \(path: string, attendance: CallerAttendance\): Promise<TemplateResolveResult> => \{/g;
+const RESOLVE_TEMPLATE_INPUTS_SIGNATURE = /const resolveTemplateInputs = async \(path, attendance\) => \{/g;
 
 type TemplateResolverProbeDeps = Record<string, unknown>;
 
@@ -3297,26 +3343,32 @@ function compileResolveTemplateInputs(
   src: string,
   deps: TemplateResolverProbeDeps
 ): (path: string, attendance: string) => unknown {
-  const matches = [...src.matchAll(RESOLVE_TEMPLATE_INPUTS_SIGNATURE)];
+  const js = new Bun.Transpiler({ loader: "ts" }).transformSync(src);
+  const matches = [...js.matchAll(RESOLVE_TEMPLATE_INPUTS_SIGNATURE)];
   if (matches.length !== 1) {
     throw new Error(
       `resolveTemplateInputs signature matched ${matches.length} times -- cannot execute an ambiguous source boundary`
     );
   }
   const match = matches[0]!;
-  const body = extractBracedBody(src, match.index + match[0].length - 1);
-  const executableBody = body.replace(
-    /const approvalOpts:\s*ShellFieldApprovalOpts\s*=/,
-    "const approvalOpts ="
-  );
-  if (executableBody === body) {
-    throw new Error("resolveTemplateInputs approval options type annotation was not found");
-  }
+  const body = extractBracedBody(js, match.index + match[0].length - 1);
   return new Function(
     ...Object.keys(deps),
-    `return async (path, attendance) => {${executableBody}}`
+    `return async (path, attendance) => {${body}}`
   )(...Object.values(deps)) as (path: string, attendance: string) => unknown;
 }
+
+test("a resolveTemplateInputs left only in a comment gives no anchor to execute", () => {
+  const fn = [
+    "const resolveTemplateInputs = async (path: string, attendance: CallerAttendance): Promise<TemplateResolveResult> => {",
+    "  return { ok: true, inputs: [] }",
+    "}"
+  ];
+  for (const source of [`/*\n${fn.join("\n")}\n*/\nexport const x = 1\n`, `${fn.map((line) => `// ${line}`).join("\n")}\nexport const x = 1\n`]) {
+    expect(() => compileResolveTemplateInputs(source, {})).toThrow("matched 0 times");
+  }
+  expect(() => compileResolveTemplateInputs(`${fn.join("\n")}\n`, {})).not.toThrow();
+});
 
 test("resolveTemplateInputs passes bridge-aware approval options to the approval cache", async () => {
   const plain = {
@@ -3370,6 +3422,57 @@ test("resolveTemplateInputs passes bridge-aware approval options to the approval
     [{ command: "", args: "--model clodex:openai-oauth:gpt-5.6-sol" }],
     [{ command: "", args: "--model clodex:openai-oauth:gpt-5.6-sol", bridge: "clodex" }]
   ]);
+});
+
+describe("resolveTemplateInputs with the real template gate", () => {
+  const resolveWith = (session: Record<string, unknown>, attendance: string, verdict = false) => {
+    const template = { type: "claude-peers-template", version: 1, sessions: [session] };
+    const dialogs: unknown[] = [];
+    const resolve = compileResolveTemplateInputs(readFileSync(INDEX_TS_PATH, "utf-8"), {
+      getConfig: () => ({ projectDir: "/project" }),
+      templateSource: () => "local",
+      reportError: () => {},
+      readTemplate: () => template,
+      templateHasShellFields,
+      templateApproval,
+      templateToInputs,
+      basename: (path: string) => path,
+      refusesUnattendedApproval: (who: string, approved: boolean) => who === "unattended" && !approved,
+      isShellFieldPreApproved: () => false,
+      journal: { add: () => {} },
+      confirmShellFieldApproval: async (opts: unknown) => {
+        dialogs.push(opts);
+        return verdict;
+      }
+    });
+    return { result: resolve("/t.json", attendance), dialogs: () => dialogs };
+  };
+
+  for (const session of [
+    { name: "dev", lead: true },
+    { name: "dev", agent: "team-lead" },
+    { name: "dev", prompt: "do the thing" }
+  ]) {
+    test(`a local template whose only approval field is ${Object.keys(session)[1]} waits for the operator, who may refuse`, async () => {
+      const attended = resolveWith(session, "attended");
+      expect(await attended.result).toEqual({ ok: false, reason: "refused" });
+      expect(attended.dialogs().length, "the approval dialog has to open").toBe(1);
+
+      const approved = resolveWith(session, "attended", true);
+      expect(await approved.result).toEqual({ ok: true, inputs: [session] });
+
+      const unattended = resolveWith(session, "unattended");
+      expect(await unattended.result).toEqual({ ok: false, reason: "unattended" });
+      expect(unattended.dialogs().length, "nobody can answer: no dialog").toBe(0);
+    });
+  }
+
+  test("a local template carrying only free fields opens no dialog", async () => {
+    const free = { name: "dev", model: "opus", effort: "high", role: "reviewer", color: "#4f86ff" };
+    const run = resolveWith(free, "attended");
+    expect(await run.result).toEqual({ ok: true, inputs: [free] });
+    expect(run.dialogs().length).toBe(0);
+  });
 });
 
 const CONFIRM_WORKSPACE_SHELL_FIELDS_SIGNATURE =

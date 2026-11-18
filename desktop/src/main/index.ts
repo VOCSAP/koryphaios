@@ -2849,17 +2849,6 @@ const confirmSpawnShellFields = async (
   return await confirmShellFieldApproval(approvalOpts)
 }
 
-/**
- * Containment + approval gate for applying a template (B4 + M-SEC-9). Returns
- * a discriminated result (card 96c98453): 'ok:false' distinguishes a real
- * anomaly (path outside the allowed template dirs, malformed file -- both
- * MUST be surfaced as an error by callers) from the operator declining a
- * REPO-LOCAL template's shell-field approval dialog ('refused' -- a
- * deliberate choice, never an error). Global (operator-owned) templates are
- * trusted and never prompt. `attendance` (card 64f8f629) is required: an
- * 'unattended' caller never opens the dialog for an unapproved payload --
- * see confirmShellFieldApproval's own doc for why.
- */
 const resolveTemplateInputs = async (path: string, attendance: CallerAttendance): Promise<TemplateResolveResult> => {
   const projectDir = getConfig().projectDir
   const source = templateSource(path, projectDir)
@@ -2869,13 +2858,6 @@ const resolveTemplateInputs = async (path: string, attendance: CallerAttendance)
   }
   const tpl = readTemplate(path)
   if (!tpl) {
-    // Review correction C1, card 96c98453: mirrors the containment branch
-    // above (2246) -- without this, a malformed template left NO trace
-    // anywhere. readTemplate already swallows the real parse/schema cause
-    // into a plain null (template-store.ts's own catch), and the agent
-    // route (deck-control.ts) has no log sink of its own on this path
-    // (`grep -c reportError deck-control.ts` is 0), so this is the only
-    // place this anomaly is ever recorded.
     reportError('template', `template file is missing or invalid: ${path}`)
     return { ok: false, reason: 'malformed' }
   }
@@ -2888,8 +2870,10 @@ const resolveTemplateInputs = async (path: string, attendance: CallerAttendance)
       previewLines: approval.previewLines,
       labelEn: 'Template',
       labelFr: 'Modèle',
-      messageEn: 'This project template runs custom commands, executed in a shell.',
-      messageFr: 'Ce modèle (config du projet) exécute des commandes personnalisées dans un shell.',
+      messageEn:
+        'This project template carries settings that need your approval, including launch commands or arguments, lead, agent, prompt, tools.',
+      messageFr:
+        'Ce modèle (config du projet) porte des réglages qui demandent ton accord, notamment : commandes ou arguments de lancement, lead, agent, prompt, outils.',
       buttonsEn: ['Apply this template', 'Refuse'],
       buttonsFr: ['Appliquer ce modèle', 'Refuser']
     }

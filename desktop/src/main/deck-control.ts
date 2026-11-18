@@ -72,6 +72,7 @@ export interface SpawnSummary {
    * the operator actually sees what they are approving. '' when absent.
    */
   args: string
+  extra_fields?: string[]
 }
 
 /**
@@ -330,16 +331,6 @@ function summarizeEntry(entry: SpawnPlanEntry, embedded: EmbeddedAgent | null): 
   }
 }
 
-/**
- * The recap shown by the approval dialog for a template batch (card 89cb66f9)
- * -- mirrors summarizeEntry above, but from a TemplateInput (which carries a
- * separate `command` field the shell-field-approval hash already covers, so
- * both are folded into `args` here for the operator to actually SEE what a
- * template entry runs, same reasoning as summarizeEntry's own `args`). A
- * `[clodex]` prefix names the wrapper that changes the launch binary. A
- * `[lead]` prefix flags an entry that will take the window's crown (PLAN
- * C18) -- otherwise the dialog never says a tile is about to become lead.
- */
 function summarizeTemplateInput(input: TemplateInput): SpawnSummary {
   return {
     name: (input.bridge === 'clodex' ? '[clodex] ' : '') + (input.lead ? '[lead] ' : '') + (input.name ?? input.agent ?? 'peer'),
@@ -350,7 +341,12 @@ function summarizeTemplateInput(input: TemplateInput): SpawnSummary {
     cli: 'claude',
     worktree_branch: input.worktreeBranch ?? '',
     prompt_preview: (input.prompt ?? '').slice(0, 160),
-    args: [input.command ?? '', input.args ?? ''].filter(Boolean).join(' ')
+    args: [input.command ?? '', input.args ?? ''].filter(Boolean).join(' '),
+    extra_fields: [
+      input.announce ? `announce: ${input.announce}` : '',
+      input.disallowedTools?.length ? `disallowedTools: ${input.disallowedTools.join(',')}` : '',
+      input.clodexContextTokens !== undefined ? `clodexContextTokens: ${input.clodexContextTokens}` : ''
+    ].filter(Boolean)
   }
 }
 

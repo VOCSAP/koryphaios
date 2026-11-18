@@ -188,18 +188,6 @@ function hasLaunchBridge(bridge: unknown): boolean {
   return typeof bridge === 'string' ? bridge.trim() !== '' : true
 }
 
-/**
- * True when any session-like object carries a shell-bearing field — a
- * `command` (which replaces the launch binary), a free-form `args` string
- * (appended verbatim to the login-shell command line, session-command.ts), or
- * a `bridge` marker (which rewrites the launch binary at spawn,
- * session-service.ts's resolveBaseCommand).
- * The core predicate behind `templateHasShellFields`, factored out so a
- * second untrusted-file source of sessions (workspace restore, card
- * 09d54a29: `workspaceHasShellFields` in workspace-store.ts) can reuse the
- * exact same rule instead of reimplementing it and drifting apart, the way
- * the two already had on the `lead` field.
- */
 export function sessionsHaveShellFields(
   sessions: readonly { command?: string; args?: string; bridge?: string }[]
 ): boolean {
@@ -211,32 +199,65 @@ export function sessionsHaveShellFields(
   )
 }
 
-/**
- * True when any session in the template carries a shell-bearing field — a
- * `command` (which replaces the launch binary), a free-form `args` string
- * (appended verbatim to the login-shell command line) or a `bridge` marker. A
- * repo-local template with any of them is treated as untrusted and gated
- * behind operator approval before it can spawn (B4), mirroring the C19
- * launchCommand gate. `agent`/`model` are NOT shell-bearing here: they are
- * allow-listed + quoted at spawn (B6).
- */
+export const TEMPLATE_SESSION_FIELD_CLASS = {
+  command: 'approval',
+  args: 'approval',
+  bridge: 'approval',
+  clodexContextTokens: 'approval',
+  prompt: 'approval',
+  lead: 'approval',
+  agent: 'approval',
+  worktreeBranch: 'approval',
+  announce: 'approval',
+  disallowedTools: 'approval',
+  name: 'free',
+  color: 'free',
+  role: 'free',
+  model: 'free',
+  effort: 'free'
+} as const satisfies Record<keyof TemplateSession, 'free' | 'approval'>
+
+const APPROVAL_FIELDS = (Object.keys(TEMPLATE_SESSION_FIELD_CLASS) as (keyof TemplateSession)[]).filter(
+  (field) => TEMPLATE_SESSION_FIELD_CLASS[field] === 'approval'
+)
+
+/** Unexpected types must gate because template sessions originate in untrusted files. */
+function isPresent(value: unknown): boolean {
+  if (value === undefined || value === false) return false
+  if (typeof value === 'string') return value.trim() !== ''
+  if (Array.isArray(value)) return value.length > 0
+  return true
+}
+
 export function templateHasShellFields(tpl: SessionTemplate): boolean {
-  return sessionsHaveShellFields(tpl.sessions)
+  return tpl.sessions.some((s) => APPROVAL_FIELDS.some((field) => isPresent(s[field])))
 }
 
 export function templateApproval(tpl: SessionTemplate): {
-  hashPayload: Array<{ command: string; args: string; bridge?: 'clodex' }>
+  hashPayload: Array<Record<string, unknown>>
   previewLines: string[]
 } {
   return {
-    hashPayload: tpl.sessions.map((s) => ({
-      command: s.command ?? '',
-      args: s.args ?? '',
-      ...(s.bridge === 'clodex' ? { bridge: s.bridge } : {})
-    })),
-    previewLines: tpl.sessions
-      .filter((s) => (s.command && s.command.trim()) || (s.args && s.args.trim()) || s.bridge === 'clodex')
-      .map((s) => [s.bridge === 'clodex' ? '[clodex]' : undefined, s.command, s.args].filter(Boolean).join(' '))
+    hashPayload: tpl.sessions.map((s) => {
+      // command/args stay unconditional and bridge stays first to preserve existing approval hashes.
+      const entry: Record<string, unknown> = { command: s.command ?? '', args: s.args ?? '' }
+      for (const field of APPROVAL_FIELDS) {
+        if (field !== 'command' && field !== 'args' && isPresent(s[field])) entry[field] = s[field]
+      }
+      return entry
+    }),
+    previewLines: tpl.sessions.flatMap((s) => {
+      const lines: string[] = []
+      if ((s.command && s.command.trim()) || (s.args && s.args.trim()) || s.bridge === 'clodex') {
+        lines.push([s.bridge === 'clodex' ? '[clodex]' : undefined, s.command, s.args].filter(Boolean).join(' '))
+      }
+      for (const field of APPROVAL_FIELDS) {
+        if (field === 'command' || field === 'args' || field === 'bridge' || !isPresent(s[field])) continue
+        const value = s[field]
+        lines.push(`${s.name}: ${value === true ? field : `${field} ${Array.isArray(value) ? value.join(',') : String(value)}`}`)
+      }
+      return lines
+    })
   }
 }
 
