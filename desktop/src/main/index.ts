@@ -3455,7 +3455,8 @@ const avatarOptions = deckAvatarClientOptions({
   scope: () => avatarScope.context(activeScope.groupId, avatarProjectKey),
   sessions: () => service.list(),
   window: () => mainWindow,
-  workspaceName: () => workspaces.currentWorkspaceName
+  workspaceName: () => workspaces.currentWorkspaceName,
+  theme: () => config.theme
 })
 /**
  * The Avatar's double-click in attention: bring this Deck forward on its

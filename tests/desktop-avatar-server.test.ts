@@ -45,6 +45,7 @@ async function openServer(
     allowedBrokerUrls?: readonly string[]
     inbox?: AvatarInboxSink
     notificationAvailability?: () => AvatarNotificationAvailability
+    deckThemeChanged?: () => void
     createHub?: (hubOptions: AvatarSocketHubOptions) => AvatarSocketHub
   } = {}
 ): Promise<{ server: AvatarServer; state: AvatarState; reports: string[]; setNow(now: number): void }> {
@@ -60,6 +61,7 @@ async function openServer(
     allowedBrokerUrls: () => options.allowedBrokerUrls ?? [attach.broker_url],
     ...(options.inbox ? { inbox: options.inbox } : {}),
     ...(options.notificationAvailability ? { notificationAvailability: options.notificationAvailability } : {}),
+    ...(options.deckThemeChanged ? { deckThemeChanged: options.deckThemeChanged } : {}),
     ...(options.createHub ? { createHub: options.createHub } : {})
   })
   return { server, state, reports, setNow: (next) => { now = next } }
@@ -239,6 +241,44 @@ test('attaches one Deck per identity, receives state, and makes detach idempoten
       broker_url: attach.broker_url
     }))).toEqual({ status: 200, body: { ok: true, detached: false } })
     expect(state.summary().face).toBe('seul')
+  } finally {
+    await server.close()
+  }
+})
+
+test('keeps the Deck theme on its attachment and signals only an attach that sets or changes it', async () => {
+  let signals = 0
+  const { server } = await openServer({ deckThemeChanged: () => { signals += 1 } })
+  try {
+    expect((await post(server, '/attach', JSON.stringify(attach))).status).toBe(200)
+    expect(signals, 'an older Deck sends no theme').toBe(0)
+    expect((await post(server, '/attach', JSON.stringify({ ...attach, theme: 'light' }))).status).toBe(200)
+    expect(signals).toBe(1)
+    expect(server.attachedDecks()).toEqual([{ ...attach, theme: 'light' }])
+    expect((await post(server, '/attach', JSON.stringify({ ...attach, theme: 'light' }))).status).toBe(200)
+    expect(signals, 'same theme again').toBe(1)
+    expect((await post(server, '/attach', JSON.stringify({ ...attach, theme: 'dark' }))).status).toBe(200)
+    expect(signals).toBe(2)
+    expect((await post(server, '/attach', JSON.stringify({ ...attach, theme: 'purple' }))).status).toBe(400)
+    expect(server.attachedDecks()).toEqual([{ ...attach, theme: 'dark' }])
+    expect(signals, 'a refused attach signals nothing').toBe(2)
+  } finally {
+    await server.close()
+  }
+})
+
+test('signals the first explicit theme of each new Deck identity, once that Deck is already attached', async () => {
+  const seen: Array<Array<{ deckRunId: string; theme?: string }>> = []
+  let observe: () => Array<{ deckRunId: string; theme?: string }> = () => []
+  const { server } = await openServer({ deckThemeChanged: () => { seen.push(observe()) } })
+  observe = () => server.attachedDecks().map((deck) => ({ deckRunId: deck.deckRunId, ...(deck.theme === undefined ? {} : { theme: deck.theme }) }))
+  try {
+    expect((await post(server, '/attach', JSON.stringify({ ...attach, deckRunId: 'deck-run-a', theme: 'light' }))).status).toBe(200)
+    expect((await post(server, '/attach', JSON.stringify({ ...attach, deckRunId: 'deck-run-b', theme: 'dark' }))).status).toBe(200)
+    expect(seen, 'each new identity signals, and the callback already sees its Deck').toEqual([
+      [{ deckRunId: 'deck-run-a', theme: 'light' }],
+      [{ deckRunId: 'deck-run-a', theme: 'light' }, { deckRunId: 'deck-run-b', theme: 'dark' }]
+    ])
   } finally {
     await server.close()
   }

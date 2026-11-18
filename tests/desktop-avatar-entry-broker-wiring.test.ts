@@ -49,8 +49,6 @@ test("the Avatar re-reads the manual stop from both the broker probe and the Tra
   expect(js).toMatch(/brokerHealth:\s*\(port\)\s*=>\s*fetchBrokerHealth\(port,/);
 });
 
-// avatar-entry.ts imports electron at load and starts the Avatar, so it cannot be imported under bun: each wiring is pinned
-// to the body of the one call that carries it, in the transpiled file.
 function callBody(js: string, call: string): string {
   const start = js.indexOf(call);
   expect(start, `avatar-entry.ts: ${call} anchor is unavailable`).toBeGreaterThanOrEqual(0);
@@ -71,6 +69,20 @@ test("the Avatar server reads the bubble service and the mask presentation as it
   expect(callBody(code(), "startAvatarServer(")).toMatch(
     /notificationAvailability:\s*\(\)\s*=>\s*\(\{\s*serviceReady:\s*bubble\?\.notificationServiceReady\(\)\s*\?\?\s*false,\s*\.\.\.assembly\.notificationPresentation\(\)\s*\}\)/
   );
+});
+
+test("the bubble resolves its theme from the attached Decks, with Windows as the fallback", () => {
+  expect(
+    callBody(code(), "createAvatarBubbleWindow("),
+    "createAvatarBubbleWindow carries the theme callback"
+  ).toMatch(/theme:\s*\(\)\s*=>\s*resolveAvatarBubbleTheme\(server\?\.attachedDecks\(\)\s*\?\?\s*\[\],/);
+});
+
+test("a Deck theme change refreshes the open bubble", () => {
+  expect(
+    callBody(code(), "startAvatarServer("),
+    "startAvatarServer carries deckThemeChanged"
+  ).toMatch(/deckThemeChanged:\s*\(\)\s*=>\s*bubble\?\.changed\(\)/);
 });
 
 test("the Avatar server resolves its broker allow-list through the link policy", () => {

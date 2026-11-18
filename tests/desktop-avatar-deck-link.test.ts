@@ -50,6 +50,7 @@ function deps(overrides: Partial<DeckAvatarLinkDeps> = {}): DeckAvatarLinkDeps {
     sessions: () => [],
     window: () => null,
     workspaceName: () => null,
+    theme: () => 'dark',
     ...overrides
   }
 }
@@ -104,6 +105,16 @@ test('carries the scope and the broker read at every call as the Deck context an
   broker = 'http://127.0.0.1:7900'
   expect(options.deck().context).toEqual({ group_id: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', project_key: 'project-a', scope_generation: 2 })
   expect(options.deck().broker_url).toBe('http://127.0.0.1:7900')
+})
+
+test('carries the configured theme read at every call, in a form the attach parser accepts', () => {
+  let theme: 'dark' | 'light' = 'dark'
+  const options = deckAvatarClientOptions(deps({ theme: () => theme }))
+  expect(options.deck().theme).toBe('dark')
+  theme = 'light'
+  const deck = options.deck()
+  expect(deck.theme).toBe('light')
+  expect(parseAvatarAttachRequest({ protocol_version: 1, ...deck, capabilities: ['a3_context'] }).theme).toBe('light')
 })
 
 test('permits the active Deck broker URL to carry Avatar context', () => {

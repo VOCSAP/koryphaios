@@ -1,6 +1,3 @@
-// index.ts and the renderer store cannot load under bun (Electron, a live
-// window.api): the wiring runs from index.ts's own source against stubs, and
-// the real store runs in a child process.
 import { expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -82,6 +79,14 @@ test("the Avatar scope uses the project key calculated for its options", () => {
   expect(start, "index.ts: Avatar options anchor is unavailable").toBeGreaterThanOrEqual(0);
   const body = extractParenBody(index, index.indexOf("(", start));
   expect(body).toContain("scope: () => avatarScope.context(activeScope.groupId, avatarProjectKey)");
+});
+
+test("the Avatar options carry the Deck's configured theme", () => {
+  const index = indexCode();
+  const start = index.indexOf("const avatarOptions = deckAvatarClientOptions(");
+  expect(start, "index.ts: Avatar options anchor is unavailable").toBeGreaterThanOrEqual(0);
+  const body = extractParenBody(index, index.indexOf("(", start));
+  expect(body, "the Avatar client options read config.theme").toContain("theme: () => config.theme");
 });
 
 test("openOldestPendingQuestion focuses the window, then opens the oldest pending row in the Courrier", async () => {

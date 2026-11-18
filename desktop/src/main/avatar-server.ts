@@ -44,6 +44,7 @@ export interface AvatarServerOptions {
   inbox?: AvatarInboxSink
   /** Without it, a3_notify_replace is never negotiated. */
   notificationAvailability?(): AvatarNotificationAvailability
+  deckThemeChanged?(): void
   /** Replaces the hub, so a test observes what the routes ask of it without a WebSocket client. */
   createHub?(options: AvatarSocketHubOptions): AvatarSocketHub
 }
@@ -348,6 +349,7 @@ export async function startAvatarServer(options: AvatarServerOptions): Promise<A
           options.inbox?.detach(identity)
         }
         if (previous) hub.refreshNotificationStatus()
+        if (previous?.theme !== attach.theme) options.deckThemeChanged?.()
         sendJson(response, 200, {
           ok: true,
           protocol_version: AVATAR_PROTOCOL_VERSION,

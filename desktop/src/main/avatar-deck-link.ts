@@ -1,5 +1,5 @@
 import { basename, join, resolve } from 'node:path'
-import type { AvatarDeckContext } from '../shared/avatar-protocol'
+import type { AvatarDeckContext, AvatarTheme } from '../shared/avatar-protocol'
 import type { SessionRuntime } from '../shared/types'
 import type { AvatarClientOptions } from './avatar-client'
 import { readAvatarRegistry } from './avatar-registry'
@@ -26,6 +26,7 @@ export interface DeckAvatarLinkDeps {
   sessions(): SessionRuntime[]
   window(): DeckAvatarWindow | null
   workspaceName(): string | null
+  theme(): AvatarTheme
 }
 
 export interface AvatarScopeTracker {
@@ -114,6 +115,7 @@ export function deckAvatarClientOptions(
       broker_url: deps.brokerUrl(),
       projectDir,
       deckName: deckNameFrom([deps.workspaceName(), basename(projectDir), projectDir]),
+      theme: deps.theme(),
       context: deps.scope()
     }),
     autoAttachEnabled: () => avatarAutoAttachEnabled(settingsFile, deps.projectKey),

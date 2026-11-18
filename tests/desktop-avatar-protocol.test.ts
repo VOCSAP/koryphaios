@@ -11,6 +11,7 @@ import {
   parseAvatarDeckFrame,
   parseAvatarServerFrame,
   parseAvatarStateRequest,
+  resolveAvatarBubbleTheme,
   unsupportedAvatarCommandRequestId
 } from '../desktop/src/shared/avatar-protocol.ts'
 
@@ -25,6 +26,37 @@ const validAttach = {
 
 test('accepts the current protocol version and resolved Deck identity', () => {
   expect(parseAvatarAttachRequest(validAttach)).toEqual(validAttach)
+})
+
+test('carries a Deck theme of the closed set and omits it when the Deck sends none', () => {
+  for (const theme of ['dark', 'light', 'system']) {
+    expect(parseAvatarAttachRequest({ ...validAttach, theme }).theme).toBe(theme)
+  }
+  expect('theme' in parseAvatarAttachRequest(validAttach)).toBe(false)
+})
+
+test('refuses a Deck theme outside the closed set instead of coercing it', () => {
+  for (const theme of ['Dark', 'purple', '', ' dark', 1, true, null, {}, ['dark']]) {
+    expect(() => parseAvatarAttachRequest({ ...validAttach, theme })).toThrow(
+      expect.objectContaining({ code: 'invalid_attach_request' })
+    )
+  }
+})
+
+test('the bubble follows the one explicit theme all attached Decks agree on', () => {
+  expect(resolveAvatarBubbleTheme([{ theme: 'light' }], 'dark')).toBe('light')
+  expect(resolveAvatarBubbleTheme([{ theme: 'dark' }, { theme: 'dark' }], 'light')).toBe('dark')
+})
+
+test('the bubble follows the system theme when Decks disagree, one is not explicit, or none is attached', () => {
+  expect(resolveAvatarBubbleTheme([{ theme: 'light' }, { theme: 'dark' }], 'dark')).toBe('dark')
+  expect(resolveAvatarBubbleTheme([{ theme: 'light' }, { theme: 'dark' }], 'light')).toBe('light')
+  expect(resolveAvatarBubbleTheme([{ theme: 'system' }], 'dark')).toBe('dark')
+  expect(resolveAvatarBubbleTheme([{ theme: 'light' }, { theme: 'system' }], 'dark')).toBe('dark')
+  expect(resolveAvatarBubbleTheme([{ theme: 'light' }, {}], 'dark')).toBe('dark')
+  expect(resolveAvatarBubbleTheme([{}], 'light')).toBe('light')
+  expect(resolveAvatarBubbleTheme([], 'dark')).toBe('dark')
+  expect(resolveAvatarBubbleTheme([], 'light')).toBe('light')
 })
 
 test('accepts A3 context only when its capability is negotiated', () => {

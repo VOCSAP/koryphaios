@@ -201,7 +201,13 @@ export function createAvatarClient(options: AvatarClientOptions): AvatarClient {
   const webSocket = failureEpisode(report, info, 'Avatar WebSocket restored')
   const unreadInput = failureEpisode(report, info, 'Inbox unread count valid again')
   const now = options.now ?? Date.now
-  let attached: { avatarRunId: string; identity: AvatarDeckIdentity; key: string; name: string } | null = null
+  let attached: {
+    avatarRunId: string
+    identity: AvatarDeckIdentity
+    key: string
+    name: string
+    theme: AvatarAttachRequest['theme']
+  } | null = null
   let socket: AvatarClientSocket | null = null
   let lastPushed: string | null = null
   let stopHeartbeat: (() => void) | null = null
@@ -451,7 +457,8 @@ export function createAvatarClient(options: AvatarClientOptions): AvatarClient {
       attached === null ||
       attached.avatarRunId !== rendezvous.avatarRunId ||
       attached.key !== key ||
-      attached.name !== deck.deckName
+      attached.name !== deck.deckName ||
+      attached.theme !== deck.theme
     if (needsAttach) {
       const previousAttachment = attached
       if (
@@ -484,7 +491,13 @@ export function createAvatarClient(options: AvatarClientOptions): AvatarClient {
         link.fail(`Avatar refused the attach with status ${attachStatus}`)
         return
       }
-      attached = { avatarRunId: rendezvous.avatarRunId, identity, key: context === undefined ? key : contextFreeKey, name: deck.deckName }
+      attached = {
+        avatarRunId: rendezvous.avatarRunId,
+        identity,
+        key: context === undefined ? key : contextFreeKey,
+        name: deck.deckName,
+        theme: deck.theme
+      }
       if (epoch !== scopeEpoch) return
       if (context && negotiatedCapabilities(attachResult).includes('a3_context')) {
         const contextResult = await post(rendezvous, '/attach', {
@@ -508,7 +521,7 @@ export function createAvatarClient(options: AvatarClientOptions): AvatarClient {
       const identityChanged = previousAttachment !== null && previousAttachment.identity.broker_url !== identity.broker_url
       const inboxChanged = negotiatedInbox !== inboxGeneration
       const renegotiatesNotify = (negotiatedNotify !== null || notifyGeneration !== null) && socket !== null
-      attached = { avatarRunId: rendezvous.avatarRunId, identity, key, name: deck.deckName }
+      attached = { avatarRunId: rendezvous.avatarRunId, identity, key, name: deck.deckName, theme: deck.theme }
       inboxGeneration = negotiatedInbox
       notifyGeneration = negotiatedNotify
       lease = null

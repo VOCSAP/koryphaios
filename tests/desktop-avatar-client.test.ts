@@ -702,6 +702,23 @@ test('a renamed Deck re-attaches once under the same identity, keeping its socke
   await client.stop()
 })
 
+test('a Deck theme change re-attaches once under the same identity, keeping its socket', async () => {
+  const { client, posts, sockets, heartbeat, live } = await boundHarness()
+  live.deck = { ...deck, theme: 'light' }
+  heartbeat.tick?.()
+  await flush()
+  heartbeat.tick?.()
+  await flush()
+  const attaches = posts.filter((post) => post.path === '/attach')
+  expect(attaches).toEqual([
+    { path: '/attach', body: { protocol_version: 1, ...deck } },
+    { path: '/attach', body: { protocol_version: 1, ...deck, theme: 'light' } }
+  ])
+  expect(sockets).toHaveLength(1)
+  expect(sockets[0]!.closed).toBeUndefined()
+  await client.stop()
+})
+
 test('renews the identity and socket when the broker provider changes', async () => {
   const { client, posts, sockets, heartbeat, live } = await boundHarness()
   const nextIdentity = { deckRunId: 'deck-run-other', broker_url: 'http://127.0.0.1:7900' }

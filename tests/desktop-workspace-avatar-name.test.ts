@@ -93,7 +93,8 @@ test('a restored workspace whose name is not a string yields no name, and the De
       scope: () => ({ group_id: 'group-1', project_key: 'project-a', scope_generation: 0 }),
       sessions: () => [],
       window: () => null,
-      workspaceName: () => second.currentWorkspaceName
+      workspaceName: () => second.currentWorkspaceName,
+      theme: () => 'dark'
     })
     expect(() => options.deck()).not.toThrow()
     expect(options.deck().deckName).toBe(basename(project))

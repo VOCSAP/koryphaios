@@ -20,8 +20,10 @@ export const MAX_AVATAR_REQUEST_BYTES = 64 * 1024
 export const AVATAR_COMMANDS = ['focus', 'open_question'] as const
 export const AVATAR_CAPABILITIES = ['a3_context', 'a3_inbox', 'a3_notify_replace'] as const
 export const AVATAR_NOTIFICATION_LEASE_MS = 15_000
+export const AVATAR_THEMES = ['dark', 'light', 'system'] as const
 export type AvatarCommand = (typeof AVATAR_COMMANDS)[number]
 export type AvatarCapability = (typeof AVATAR_CAPABILITIES)[number]
+export type AvatarTheme = (typeof AVATAR_THEMES)[number]
 
 export interface AvatarDeckContext {
   group_id: string
@@ -45,6 +47,8 @@ export interface AvatarAttachRequest {
   broker_url: string
   projectDir: string
   deckName: string
+  /** Omitted means system fallback. */
+  theme?: AvatarTheme
   capabilities?: AvatarCapability[]
   context?: AvatarDeckContext
 }
@@ -182,6 +186,12 @@ function optionalAvatarCapabilities(value: unknown): AvatarCapability[] | undefi
   return [...new Set(value.filter((capability): capability is AvatarCapability => (AVATAR_CAPABILITIES as readonly unknown[]).includes(capability)))]
 }
 
+function optionalAvatarTheme(value: unknown): AvatarTheme | undefined {
+  if (value === undefined) return undefined
+  if (!(AVATAR_THEMES as readonly unknown[]).includes(value)) invalidAttachRequest()
+  return value as AvatarTheme
+}
+
 function optionalAvatarContext(value: unknown, capabilities: readonly AvatarCapability[] | undefined): AvatarDeckContext | undefined {
   if (value === undefined) return undefined
   if (!capabilities?.includes('a3_context')) invalidAttachRequest()
@@ -207,6 +217,13 @@ export function escapeAvatarTrayLabel(deckName: string): string {
   return deckName.replaceAll('&', '&&')
 }
 
+/** The bubble's theme: the one explicit theme every attached Deck agrees on, else the system theme. */
+export function resolveAvatarBubbleTheme(decks: readonly { theme?: AvatarTheme }[], system: 'dark' | 'light'): 'dark' | 'light' {
+  const first = decks[0]?.theme
+  if (first !== 'dark' && first !== 'light') return system
+  return decks.every((deck) => deck.theme === first) ? first : system
+}
+
 function requiredProtocolVersion(value: unknown): number {
   if (typeof value !== 'number' || !Number.isSafeInteger(value)) invalidAttachRequest()
   if (value !== AVATAR_PROTOCOL_VERSION) {
@@ -219,6 +236,7 @@ export function parseAvatarAttachRequest(value: unknown): AvatarAttachRequest {
   const input = record(value)
   const capabilities = optionalAvatarCapabilities(input.capabilities)
   const context = optionalAvatarContext(input.context, capabilities)
+  const theme = optionalAvatarTheme(input.theme)
   return {
     protocol_version: requiredProtocolVersion(input.protocol_version),
     deckRunId: requiredDeckRunId(input.deckRunId),
@@ -226,6 +244,7 @@ export function parseAvatarAttachRequest(value: unknown): AvatarAttachRequest {
     broker_url: requiredBrokerUrl(input.broker_url),
     projectDir: requiredProjectDir(input.projectDir),
     deckName: requiredDeckName(input.deckName),
+    ...(theme === undefined ? {} : { theme }),
     ...(capabilities === undefined ? {} : { capabilities }),
     ...(context === undefined ? {} : { context })
   }

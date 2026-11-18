@@ -49,6 +49,7 @@ import { finishAvatarStartup } from './avatar-startup'
 import { avatarDeckStateDir, readAvatarLocale } from './avatar-locale'
 import { selectWindowShown, type AvatarGeometry } from './avatar-window-state'
 import { createAvatarQuitHandler } from './avatar-quit-handler'
+import { resolveAvatarBubbleTheme } from '../shared/avatar-protocol'
 import { AVATAR_TRAY_COPY } from './avatar-tray-copy'
 import { deckBrokerMode, peersConfigPath, resolveBrokerEndpoint } from './broker-client'
 import { ensureLoopbackBroker, locateUserBrokerScript, spawnDetachedBroker } from './broker-spawn'
@@ -164,7 +165,7 @@ async function startAvatar(): Promise<void> {
     act: (identity, action) => inbox.act(identity, action),
     markRead: (identity, entry, status) => inbox.markRead(identity, entry, status),
     focusDeck: (identity) => focusFromTray(identity, 'focus'),
-    theme: () => (nativeTheme.shouldUseDarkColors ? 'dark' : 'light'),
+    theme: () => resolveAvatarBubbleTheme(server?.attachedDecks() ?? [], nativeTheme.shouldUseDarkColors ? 'dark' : 'light'),
     lang: locale,
     dict: avatarBubbleDict(loadDict(locale, [shippedLocales, join(deckUserData, 'locales')])),
     placement: () => {
@@ -186,6 +187,7 @@ async function startAvatar(): Promise<void> {
     token,
     allowedBrokerUrls: () => avatarAllowedBrokerUrls(resolveBrokerEndpoint().url),
     inbox,
+    deckThemeChanged: () => bubble?.changed(),
     notificationAvailability: () => ({
       serviceReady: bubble?.notificationServiceReady() ?? false,
       ...assembly.notificationPresentation()
