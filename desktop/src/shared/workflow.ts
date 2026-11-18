@@ -605,23 +605,34 @@ export function sameWaveMembership(a: string[][], b: string[][]): boolean {
  * (one left empty disappears) and every other wave is untouched. A directive
  * card must stay alone in its wave (broker rule), so when dragId or the target
  * is one, or the target is not queued, dragId takes a solo wave right after the
- * target's wave (queue end when the target is not queued). Dependency adoption
- * is the caller's job via roadmapUpsert; this only computes the placement.
+ * target's wave (queue end when the target is not queued). The unmet unqueued
+ * dependencies of dragId (computed from `dependsOn` when the caller is about to
+ * rewrite them) are queued as solo waves, dependency-first, right before the
+ * wave dragId lands in. Dependency adoption is the caller's job via
+ * roadmapUpsert; this only computes the placement.
  */
 export function buildStackIntoQueue(
   src: QueueSource,
   dragId: string,
-  targetId: string
+  targetId: string,
+  dependsOn?: string[]
 ): ReorderPayload {
   const rest = queuedItems(src.all).filter((i) => i.id !== dragId)
   const baseWaves = wavesOf(rest)
   const targetWave = baseWaves.findIndex((w) => w.includes(targetId))
   const isDirective = (id: string): boolean => src.all.find((i) => i.id === id)?.kind === 'directive'
+  const items = dependsOn ? src.all.map((i) => (i.id === dragId ? { ...i, depends_on: dependsOn } : i)) : src.all
+  const closure = enqueueClosure(items, dragId).map((id) => [id])
   const joins = targetWave >= 0 && !isDirective(dragId) && !isDirective(targetId)
   const waves = joins
-    ? baseWaves.map((w, i) => (i === targetWave ? [...w, dragId] : w))
+    ? [
+        ...baseWaves.slice(0, targetWave),
+        ...closure,
+        [...baseWaves[targetWave]!, dragId],
+        ...baseWaves.slice(targetWave + 1)
+      ]
     : targetWave < 0
-      ? [...baseWaves, [dragId]]
-      : [...baseWaves.slice(0, targetWave + 1), [dragId], ...baseWaves.slice(targetWave + 1)]
+      ? [...baseWaves, ...closure, [dragId]]
+      : [...baseWaves.slice(0, targetWave + 1), ...closure, [dragId], ...baseWaves.slice(targetWave + 1)]
   return { ids: waves.flat(), waves }
 }

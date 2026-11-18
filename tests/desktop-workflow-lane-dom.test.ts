@@ -253,7 +253,7 @@ test("a directive card dropped below a card keeps a wave of its own", async () =
   expect(rec.reorders).toEqual([[["a", "d", "b"], [["a"], ["d"], ["b"]]]]);
 });
 
-test("a card with an unqueued dependency is inserted after the target and pulls it in", async () => {
+test("a card with an unqueued dependency pulls it in before the target wave and joins that wave", async () => {
   const rec = recorder();
   await mountLane(
     [
@@ -266,5 +266,65 @@ test("a card with an unqueued dependency is inserted after the target and pulls 
   );
   await stackBelow("c", "a");
   expect(rec.stacks).toEqual([]);
-  expect(rec.reorders).toEqual([[["a", "q", "c", "b"], [["a"], ["q"], ["c"], ["b"]]]]);
+  expect(rec.reorders).toEqual([[["q", "a", "c", "b"], [["q"], ["a", "c"], ["b"]]]]);
+});
+
+test("a card with a two-level unqueued closure pulls it in dependency-first before the target wave", async () => {
+  const rec = recorder();
+  await mountLane(
+    [
+      card("a", { queue: 1 }),
+      card("b", { queue: 2 }),
+      card("c", { queue: 3, depends_on: ["q"] }),
+      card("q", { depends_on: ["r"] }),
+      card("r"),
+    ],
+    rec,
+  );
+  await stackBelow("c", "a");
+  expect(rec.reorders).toEqual([[["r", "q", "a", "c", "b"], [["r"], ["q"], ["a", "c"], ["b"]]]]);
+});
+
+async function dragSideways(id: string, dxWorld: number): Promise<void> {
+  const from = nodeOf(id);
+  const dx = dxWorld * worldZoom();
+  const canvas = container.querySelector<HTMLElement>(".wf-canvas")!;
+  const at = (type: string, x: number): MouseEvent =>
+    new MouseEvent(type, { bubbles: true, button: 0, clientX: x, clientY: 1000 });
+  await act(async () => {
+    from.dispatchEvent(at("mousedown", 1000));
+  });
+  await act(async () => {
+    canvas.dispatchEvent(at("mousemove", 1000 + dx));
+  });
+  await act(async () => {
+    canvas.dispatchEvent(at("mouseup", 1000 + dx));
+  });
+}
+
+test("a stacked card dragged sideways into the gap after its column leaves the wave although the flat order is unchanged", async () => {
+  const rec = recorder();
+  await mountLane([card("a", { queue: 1 }), card("c", { queue: 1 }), card("b", { queue: 2 })], rec);
+  // Card centre starts at WF_NODE_W / 2; the gap between column 0 and 1 spans WF_NODE_W..WF_PITCH_X.
+  await dragSideways("c", (workflow.WF_NODE_W + workflow.WF_PITCH_X) / 2 - workflow.WF_NODE_W / 2);
+  expect(rec.stacks).toEqual([]);
+  expect(rec.reorders).toEqual([[["a", "c", "b"], [["a"], ["c"], ["b"]]]]);
+});
+
+const columnCentre = (col: number): number => col * workflow.WF_PITCH_X + workflow.WF_NODE_W / 2;
+const gapAfter = (col: number): number => col * workflow.WF_PITCH_X + (workflow.WF_NODE_W + workflow.WF_PITCH_X) / 2;
+
+test("a singleton card dropped back into its own gap commits nothing", async () => {
+  const rec = recorder();
+  await mountLane([card("a", { queue: 1 }), card("b", { queue: 2 }), card("c", { queue: 3 })], rec);
+  await dragSideways("b", gapAfter(0) - columnCentre(1));
+  expect(rec.stacks).toEqual([]);
+  expect(rec.reorders).toEqual([]);
+});
+
+test("a singleton card dragged into another gap commits its new order as solo waves", async () => {
+  const rec = recorder();
+  await mountLane([card("a", { queue: 1 }), card("b", { queue: 2 }), card("c", { queue: 3 })], rec);
+  await dragSideways("a", gapAfter(1) - columnCentre(0));
+  expect(rec.reorders).toEqual([[["b", "a", "c"], [["b"], ["a"], ["c"]]]]);
 });

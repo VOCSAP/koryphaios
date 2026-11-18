@@ -408,6 +408,64 @@ test('a target outside the queue appends the card as a solo wave at the end', ()
   expect(buildStackIntoQueue(src, 'x', 'h').waves).toEqual([['a'], ['b', 'c'], ['d'], ['x']])
 })
 
+test('stacking a card with a two-level unqueued closure queues it dependency-first as solo waves before the target wave', () => {
+  const src = queueSourceOf([
+    ...WAVES_FIXTURE,
+    item('x', { depends_on: ['q'] }),
+    item('q', { depends_on: ['r'] }),
+    item('r')
+  ])
+  const { ids, waves } = buildStackIntoQueue(src, 'x', 'b')
+  expect(waves).toEqual([['a'], ['r'], ['q'], ['b', 'c', 'x'], ['d']])
+  expect(ids).toEqual(waves.flat())
+})
+
+test('a queued card stacked with an unqueued dependency leaves its wave and brings the dependency before the target wave', () => {
+  const src = queueSourceOf([
+    ...WAVES_FIXTURE,
+    item('x', { queue: 4, depends_on: ['q'] }),
+    item('q')
+  ])
+  expect(buildStackIntoQueue(src, 'x', 'a').waves).toEqual([['q'], ['a', 'x'], ['b', 'c'], ['d']])
+})
+
+test('a dependency already queued, done or a locked head is not queued again', () => {
+  const head = item('h', { status: 'in_progress', locked: true, locked_by: 'p' })
+  const src = queueSourceOf([
+    ...WAVES_FIXTURE,
+    head,
+    item('done', { status: 'done' }),
+    item('x', { depends_on: ['a', 'h', 'done'] })
+  ])
+  expect(buildStackIntoQueue(src, 'x', 'b').waves).toEqual([['a'], ['b', 'c', 'x'], ['d']])
+})
+
+test('the closure of a directive stacked on a card stays solo, right before the directive wave', () => {
+  const src = queueSourceOf([
+    ...WAVES_FIXTURE,
+    item('x', { kind: 'directive', depends_on: ['q'] }),
+    item('q')
+  ])
+  expect(buildStackIntoQueue(src, 'x', 'b').waves).toEqual([['a'], ['b', 'c'], ['q'], ['x'], ['d']])
+})
+
+test('a target outside the queue brings the closure and the card as solo waves at the end', () => {
+  const head = item('h', { status: 'in_progress', locked: true, locked_by: 'p' })
+  const src = queueSourceOf([...WAVES_FIXTURE, head, item('x', { depends_on: ['q'] }), item('q')])
+  expect(buildStackIntoQueue(src, 'x', 'h').waves).toEqual([['a'], ['b', 'c'], ['d'], ['q'], ['x']])
+})
+
+test('the closure follows the dependencies the card is about to adopt, not the ones it holds now', () => {
+  const src = queueSourceOf([
+    ...WAVES_FIXTURE,
+    item('x', { depends_on: ['old'] }),
+    item('old'),
+    item('adopted')
+  ])
+  expect(buildStackIntoQueue(src, 'x', 'b', ['adopted']).waves).toEqual([['a'], ['adopted'], ['b', 'c', 'x'], ['d']])
+  expect(buildStackIntoQueue(src, 'x', 'b').waves).toEqual([['a'], ['old'], ['b', 'c', 'x'], ['d']])
+})
+
 test('sameWaveMembership ignores the order inside a wave but not the order of the waves', () => {
   expect(sameWaveMembership([['a', 'c'], ['d']], [['c', 'a'], ['d']])).toBe(true)
   expect(sameWaveMembership([['a'], ['d']], [['d'], ['a']])).toBe(false)

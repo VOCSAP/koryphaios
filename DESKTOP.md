@@ -316,12 +316,15 @@ Electron + React 19 + zustand, xterm terminals over node-pty. Sources in
   that no order constraint exists between the two cards: with no dependency
   to share, the dragged card joins the target's WHOLE wave
   (`buildStackIntoQueue`, a pure merge that copies no dependency; it leaves
-  its previous wave, other waves stay intact). A directive card, or a card
-  with unmet unqueued dependencies, keeps a plain insertion right after the
-  target, because a directive must be alone in its wave and a dependency
-  closure cannot join a wave. When the target has dependencies, the dragged
-  card, queued or not, adopts them (`siblingDeps`, sanitized + cycle-checked)
-  and joins the target's wave. Commits go through ONE atomic `roadmap:reorder`
+  its previous wave, other waves stay intact). The card's unmet unqueued
+  dependencies are queued first, as solo waves dependency-first, right before
+  the wave the card lands in: before the target's wave when it joins it, before
+  its own solo wave otherwise (a directive card, or a target outside the
+  queue). A directive card lands in its own solo wave, after its closure.
+  When the target has
+  dependencies, the dragged card, queued or not, adopts them (`siblingDeps`,
+  sanitized + cycle-checked), the closure follows the adopted dependencies,
+  and it joins the target's wave. Commits go through ONE atomic `roadmap:reorder`
   IPC → broker `/roadmap/reorder`. Dependency-RELATED cards can never be parallel: the
   stack slot is not offered between them (`dependsRelated` — the card slides
   sideways instead), and while a drag hovers an insertion that would

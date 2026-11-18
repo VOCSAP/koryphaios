@@ -621,7 +621,7 @@ export function RoadmapView(): React.JSX.Element {
         dependsOn.every((d) => item.depends_on.includes(d))
       if (!sameDeps) await window.api.roadmapUpsert({ id: dragId, depends_on: dependsOn })
       if (item) {
-        const payload = buildStackIntoQueue(queue, dragId, targetId)
+        const payload = buildStackIntoQueue(queue, dragId, targetId, dependsOn)
         if (!sameWaveMembership(payload.waves, wavesOf(queuedItems(queue.all)))) {
           await window.api.roadmapReorder(payload.ids, payload.waves)
         }

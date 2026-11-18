@@ -248,22 +248,16 @@ export function WorkflowLane({
 
   // ----- reorder / stack commits -----
 
-  /** New queue after dropping `id` at full-lane slot `slot`; null = no-op. */
-  const queueAfterDrop = (id: string, slot: number): string[] | null => {
+  const queueAfterDrop = (id: string, slot: number): string[] => {
     const without = laneIds.filter((x) => x !== id)
     const rank = laneIds.indexOf(id)
     const adj = rank >= 0 && slot > rank ? slot - 1 : slot
     const idx = Math.min(without.length, Math.max(headCount, adj))
     const nextLane = [...without.slice(0, idx), id, ...without.slice(idx)]
-    const next = nextLane.filter((x) => {
+    return nextLane.filter((x) => {
       const it = byId.get(x)
       return !(it && isHead(it))
     })
-    const current = queuedIds.includes(id) ? queuedIds : null
-    if (current && next.length === current.length && next.every((x, i) => x === current[i])) {
-      return null
-    }
-    return next
   }
 
   const droppable = (id: string): RoadmapItem | null => {
@@ -273,17 +267,10 @@ export function WorkflowLane({
     return item
   }
 
-  /**
-   * `joinAnchorId` (from shared/workflow.ts SlotHit.join, resolved to a wave
-   * member via joinAnchorAt) ties `id` into that member's existing wave instead of
-   * giving it its own. Null when the drop lands in a gap (new wave) --
-   * that is also the default for every non-drag caller (commitStack's
-   * degrade path), which has no join position to honor.
-   */
+  /** `joinAnchorId`: a member of the wave to join; null starts a new wave. */
   const commitDrop = (id: string, slot: number, joinAnchorId: string | null = null): void => {
     if (!droppable(id)) return
     const next = queueAfterDrop(id, slot)
-    if (!next) return
     // Enqueues id's unmet, unqueued dependencies alongside it in the same
     // reorder commit, spliced dependency-first right before id's own slot.
     const closure = enqueueClosure(items, id)
@@ -323,6 +310,9 @@ export function WorkflowLane({
                 : [...baseWaves[anchorWave]!, id]
             return [...baseWaves.slice(0, anchorWave), merged, ...baseWaves.slice(anchorWave + 1)]
           })()
+    const sameOrder =
+      withClosure.length === queuedIds.length && withClosure.every((x, i) => x === queuedIds[i])
+    if (sameOrder && sameWaveMembership(waves, wavesOf(queuedItems(items)))) return
     onReorder(withClosure, waves)
   }
 
@@ -331,25 +321,8 @@ export function WorkflowLane({
     if (!item) return
     const deps = siblingDeps(items, id, targetId)
     if (!deps) {
-      if (enqueueClosure(items, id).length === 0) {
-        const current = wavesOf(queuedItems(items))
-        const payload = buildStackIntoQueue(source, id, targetId)
-        if (!sameWaveMembership(payload.waves, current)) {
-          onReorder(payload.ids, payload.waves)
-        }
-        return
-      }
-      // A closure splice and a wave join exclude each other (see commitDrop):
-      // insert right after the target as a plain drop.
-      const targetSlot = laneIds.indexOf(targetId)
-      if (targetSlot >= 0) {
-        commitDrop(id, targetSlot + 1)
-      } else {
-        // targetId always comes from stackTargetAt(lane, ...), so this
-        // should be unreachable; trace it instead of dropping the gesture
-        // silently if that invariant ever breaks.
-        window.api.reportError('roadmap', `commitStack: target ${targetId} not in lane`)
-      }
+      const payload = buildStackIntoQueue(source, id, targetId)
+      if (!sameWaveMembership(payload.waves, wavesOf(queuedItems(items)))) onReorder(payload.ids, payload.waves)
       return
     }
     onStack(id, targetId, deps)

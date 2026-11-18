@@ -569,3 +569,24 @@ test("stacking the first card of a wave below a card of its own wave writes noth
   expect(upserts).toEqual([]);
   expect(reorders).toEqual([]);
 });
+
+test("stacking a card adopts the target dependencies and queues none of the dependencies it gave up", async () => {
+  cards = [
+    card("p", { queue: 1 }),
+    card("a", { queue: 2, depends_on: ["p"] }),
+    card("c", { queue: 3, depends_on: ["q"] }),
+    card("q", {})
+  ];
+  await mountRoadmap();
+  await stackBelow("c", "a");
+  expect(upserts).toEqual([{ id: "c", depends_on: ["p"] }]);
+  expect(reorders).toEqual([{ ids: ["p", "a", "c"], waves: [["p"], ["a", "c"]] }]);
+});
+
+test("stacking a card queues the unqueued dependencies it adopts, as solo waves before the target wave", async () => {
+  cards = [card("a", { queue: 1, depends_on: ["t"] }), card("b", { queue: 2 }), card("c", { queue: 3 }), card("t", {})];
+  await mountRoadmap();
+  await stackBelow("c", "a");
+  expect(upserts).toEqual([{ id: "c", depends_on: ["t"] }]);
+  expect(reorders).toEqual([{ ids: ["t", "a", "c", "b"], waves: [["t"], ["a", "c"], ["b"]] }]);
+});
