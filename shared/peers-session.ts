@@ -1027,6 +1027,7 @@ export async function handleAskOperator(args: unknown, identity: CompanionIdenti
         question,
         options: Array.isArray(rawOptions) ? rawOptions.map(String) : [],
         session_ref: cred.sessionRef,
+        tile_ref: (ctx.env.CLAUDE_PEERS_DESK_SESSION ?? "").trim(),
         merge: "never",
         ...(informational ? { informational: true } : {}),
         reply_route: "channel",

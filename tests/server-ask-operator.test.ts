@@ -390,6 +390,7 @@ describe("ask_operator over MCP stdio", () => {
     expect(approval?.informational).toBe(false);
     // The MCP tool signs with the RESTRICTED session credential.
     expect(approval?.origin.session_ref).toBe(`window-${h.run!.run}`);
+    expect(approval?.origin.tile_ref, "an ask_operator question carries the Desk tile that originated it").toBe(DESK_SESSION);
     expect(res.result?.content?.[0]?.text).toContain(`Ticket "${approval!.id}"`);
   }, 60_000);
 
