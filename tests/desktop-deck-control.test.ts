@@ -107,6 +107,7 @@ function fakeSession(id: string, extra: Partial<SessionRuntime> = {}): SessionRu
     expired: false,
     rateLimited: false,
     resumeAt: null,
+    needsAttention: false,
     ...extra
   };
 }
@@ -3183,7 +3184,8 @@ test("deck_list_sessions: model, context and observation age come from liveStatu
       fakeSession("rep", { liveStatus: live({}) }),
       fakeSession("none", { liveStatus: null }),
       fakeSession("compact", { liveStatus: live({ contextPct: null, contextWindow: null }) }),
-      fakeSession("skew", { liveStatus: live({ at: Date.now() + 60_000 }) })
+      fakeSession("skew", { liveStatus: live({ at: Date.now() + 60_000 }) }),
+      fakeSession("waiting", { needsAttention: true, rateLimited: false })
     ]
   };
   const srv = await startDeckControl(makeDeps(state));
@@ -3208,6 +3210,9 @@ test("deck_list_sessions: model, context and observation age come from liveStatu
     context_window: null
   });
   expect(byId.skew!.status_age_s, "a source clock ahead of the Deck never yields a negative age").toBe(0);
+  expect(byId.waiting!.needs_attention, "a tile waiting for the operator reads true").toBe(true);
+  expect(byId.rep!.needs_attention, "a tile that does not wait reads false, not absent").toBe(false);
+  expect(byId.waiting!.rate_limited, "needs_attention does not borrow rate_limited").toBe(false);
   expect(Object.keys(byId.rep!).sort(), "the view is an explicit pick: no modelId, path or token joins it").toEqual(
     [
       "context_pct",
@@ -3216,6 +3221,7 @@ test("deck_list_sessions: model, context and observation age come from liveStatu
       "id",
       "model",
       "name",
+      "needs_attention",
       "peer_id",
       "rate_limited",
       "status",
