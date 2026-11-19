@@ -14,7 +14,7 @@ import { afterAll, afterEach, beforeEach, expect, mock, test } from "bun:test";
 import type { Root } from "../desktop/tests-support/react-test-harness"; // type-only: erased, no runtime resolution
 import { mockStore, storeMockStubs } from "./_store-mock";
 import { bannerKind, replicaOfflineTextKey } from "../desktop/src/shared/status-banner.ts";
-import type { OperatorTrustStatusEvent, RoadmapSyncStatus } from "../desktop/src/shared/types.ts";
+import type { HostRoadmapMcpStatus, OperatorTrustStatusEvent, RoadmapSyncStatus } from "../desktop/src/shared/types.ts";
 
 afterAll(async () => {
   await GlobalRegistrator.unregister();
@@ -40,6 +40,9 @@ interface FakeDeckState {
   operatorTrustRetrying: boolean;
   openOperatorTrustDialog(open: boolean): void;
   retryOperatorTrust(): Promise<unknown>;
+  hostRoadmapMcp: HostRoadmapMcpStatus | null;
+  hostRoadmapMcpRetrying: boolean;
+  retryHostRoadmapMcp(): Promise<void>;
 }
 
 function initialFakeState(): FakeDeckState {
@@ -58,6 +61,9 @@ function initialFakeState(): FakeDeckState {
     operatorTrustRetrying: false,
     openOperatorTrustDialog: () => {},
     retryOperatorTrust: async () => null,
+    hostRoadmapMcp: null,
+    hostRoadmapMcpRetrying: false,
+    retryHostRoadmapMcp: async () => {},
   };
 }
 
@@ -171,6 +177,43 @@ test("Retry runs the store re-check, and is disabled with its own label while on
   act(() => fakeUseDeck.setState({ operatorTrustRetrying: true }));
   const busy = bannerButton("operatorTrust.retrying");
   expect(busy.disabled).toBe(true);
+});
+
+test.each([
+  ["missing", "banner.hostRoadmapMissing"],
+  ["wrong-scope", "banner.hostRoadmapWrongScope"],
+] as const)("host roadmap verdict %s renders its own sentence and a single Retry action", (verdict, textKey) => {
+  fakeUseDeck.setState({ hostRoadmapMcp: verdict });
+  mountBanner();
+  expect(container.textContent).toContain(textKey);
+  expect(container.querySelector(".status-banner-text")?.getAttribute("title"), "a line cut by the ellipsis stays readable on hover").toBe(textKey);
+  expect(container.querySelector(".status-banner")?.className).toContain("status-banner-warn");
+  const labels = [...container.querySelectorAll(".status-banner > *")].map((el) =>
+    el.tagName === "BUTTON" ? `button:${el.textContent}` : el.className
+  );
+  expect(labels).toEqual(["status-banner-text", "button:banner.retry"]);
+});
+
+test.each(["registered", "unknown", null] as const)("host roadmap verdict %s renders no banner", (verdict) => {
+  fakeUseDeck.setState({ hostRoadmapMcp: verdict });
+  mountBanner();
+  expect(container.querySelector(".status-banner")).toBeNull();
+});
+
+test("the host roadmap Retry runs the store re-probe, and is disabled with its own label while one runs", () => {
+  let retries = 0;
+  fakeUseDeck.setState({
+    hostRoadmapMcp: "missing",
+    retryHostRoadmapMcp: async () => {
+      retries++;
+    },
+  });
+  mountBanner();
+  act(() => bannerButton("banner.retry").click());
+  expect(retries).toBe(1);
+
+  act(() => fakeUseDeck.setState({ hostRoadmapMcpRetrying: true }));
+  expect(bannerButton("operatorTrust.retrying").disabled).toBe(true);
 });
 
 test("an unconfigured trust policy uses the neutral information tone", () => {

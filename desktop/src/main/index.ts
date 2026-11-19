@@ -37,6 +37,7 @@ import {
 import { buildStatusLineSettings, statusLineHookPath, writeTileSettings } from './statusline-settings'
 import { createSessionHandoffLaunch, purgeSessionHandoffDrafts } from './session-handoff'
 import { hostClaudeVersion, hostSupportsKoryTelemetry, prewarmClaudeVersion } from './usage-service'
+import { createHostRoadmapMcpProbe, runHostRoadmapProbe } from './host-roadmap-mcp'
 import { registerIpc, resolveDocsDir } from './ipc'
 import { parseCliContext } from './cli-context'
 import { computeScope, buildScopeEnv, resolveAdoptedScope, type Scope, type ScopeEnv } from './scope'
@@ -3593,6 +3594,11 @@ function createWindow(): void {
   }
 }
 
+const hostRoadmapMcp = createHostRoadmapMcpProbe({
+  run: () => runHostRoadmapProbe(config.shell),
+  report: reportError
+})
+
 app.whenReady().then(async () => {
   // If this window was launched with a custom scope, remember its secret (opt-out
   // via the rememberScopeSecrets setting). The plaintext never hits disk -- only
@@ -3603,6 +3609,7 @@ app.whenReady().then(async () => {
     )
   }
   void prewarmClaudeVersion(config.shell)
+  void hostRoadmapMcp.status()
   nativeTheme.themeSource = config.theme
   // Card 6c380073: drop last run's team-lead --mcp-config files before this
   // run can mint anything (see the function's own doc for why the ordering
@@ -3795,6 +3802,7 @@ app.whenReady().then(async () => {
     brokerStart: () => startBrokerFromBanner(),
     operatorTrustStatus: () => operatorTrustStatus,
     retryOperatorTrust: () => retryOperatorTrust(approvals, () => operatorTrustStatus),
+    hostRoadmapMcpStatus: (force) => hostRoadmapMcp.status(force),
     brokerRetry: () => {
       void pollOperatorInbox()
       void pollGraphDrafts()

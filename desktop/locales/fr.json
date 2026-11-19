@@ -76,6 +76,8 @@
   "banner.operatorInvalid": "La politique de confiance opérateur du broker est invalide",
   "banner.operatorUnreachable": "Le broker est injoignable pour vérifier la confiance opérateur",
   "banner.operatorDetails": "Détails",
+  "banner.hostRoadmapMissing": "Les sessions hôte n’ont pas les outils roadmap. Dans le clone de Koryphaios, lancez bun scripts/relay-setup.ts --print-only et collez la commande claude mcp add affichée (INSTALL.md)",
+  "banner.hostRoadmapWrongScope": "kory-roadmap n’est inscrit que pour un projet. Depuis votre dossier personnel, lancez claude mcp remove kory-roadmap ; puis, dans le clone de Koryphaios, bun scripts/relay-setup.ts --print-only et collez la commande claude mcp add affichée",
   "operatorTrust.dialogTitle": "Confiance opérateur",
   "operatorTrust.help.unconfigured": "Ce broker n'a aucune politique de confiance opérateur : les approbations et les autres actions opérateur restent désactivées. Exportez la clé publique de ce Deck avec bun cli.ts operator-trust export, créez la politique avec bun cli.ts operator-trust init sur l'hôte du broker, puis redémarrez le broker. Procédure : runbooks/operator-trust.md.",
   "operatorTrust.help.notTrusted": "La politique du broker ne contient pas la clé de ce Deck. Exécutez bun cli.ts operator-trust export, comparez l'empreinte ci-dessous par un canal distinct, ajoutez la clé publique à la politique, puis redémarrez le broker. Procédure : runbooks/operator-trust.md.",

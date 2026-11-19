@@ -9,6 +9,7 @@ import type {
   DeckGraphDraft,
   DeckView,
   HelpSelection,
+  HostRoadmapMcpStatus,
   InboxAckStatus,
   InboxArchiveSnapshot,
   InboxEntry,
@@ -241,6 +242,9 @@ interface DeckState {
   operatorTrustDialogOpen: boolean
   /** A trust re-check is in flight; shared by the banner and the dialog so neither fires a second one. */
   operatorTrustRetrying: boolean
+  /** Host kory-roadmap probe verdict: null until main answers, drives the banner. */
+  hostRoadmapMcp: HostRoadmapMcpStatus | null
+  hostRoadmapMcpRetrying: boolean
   /**
    * `since` of the outage whose banner the user dismissed. The banner hides
    * for THAT outage only (a new outage has a new `since`, so it reappears);
@@ -430,6 +434,8 @@ interface DeckState {
    * already in flight.
    */
   retryOperatorTrust(): Promise<'compatible' | 'unchanged' | 'changed' | null>
+  /** Re-run the host kory-roadmap probe (banner Retry); a second click while one runs is ignored. */
+  retryHostRoadmapMcp(): Promise<void>
   /** Success toast only once the clipboard resolved; any failure, even synchronous, goes through guarded(). */
   copyOperatorFingerprint(value: string): Promise<void>
   /** Open the build modal and spawn the build (no-op if one already runs). */
@@ -621,6 +627,8 @@ export const useDeck = create<DeckState>((set, get) => ({
   operatorTrustStatus: { state: 'unknown' },
   operatorTrustDialogOpen: false,
   operatorTrustRetrying: false,
+  hostRoadmapMcp: null,
+  hostRoadmapMcpRetrying: false,
   offlineBannerDismissed: null,
   remote: false,
   mobile: false,
@@ -840,6 +848,9 @@ export const useDeck = create<DeckState>((set, get) => ({
       .catch((e) => window.api.reportError('sandbox', `status hydration failed: ${errorText(e)}`))
     void window.api.getBrokerStatus().then((status) => set({ brokerStatus: status }))
     void window.api.getOperatorTrustStatus().then((status) => set({ operatorTrustStatus: status }))
+    void guarded('host roadmap check', async () => {
+      set({ hostRoadmapMcp: await window.api.hostRoadmapMcpStatus() })
+    })
     // Companion server status (PLAN MB2): rail glyph glow while it runs. A
     // remote client is 'remote-blocked' on the status invoke — the event push
     // still keeps its flag honest (harmlessly unused there).
@@ -1267,6 +1278,18 @@ export const useDeck = create<DeckState>((set, get) => ({
   openSandboxAuth: (open) => set({ sandboxAuthOpen: open }),
   openSandboxBuild: (open) => set({ sandboxBuildOpen: open }),
   openOperatorTrustDialog: (open) => set({ operatorTrustDialogOpen: open }),
+
+  async retryHostRoadmapMcp() {
+    if (get().hostRoadmapMcpRetrying) return
+    set({ hostRoadmapMcpRetrying: true })
+    try {
+      await guarded('host roadmap check', async () => {
+        set({ hostRoadmapMcp: await window.api.hostRoadmapMcpStatus(true) })
+      })
+    } finally {
+      set({ hostRoadmapMcpRetrying: false })
+    }
+  },
 
   async retryOperatorTrust() {
     if (get().operatorTrustRetrying) return null

@@ -103,6 +103,7 @@ export const COMPANION_MANIFEST = {
   startBroker: { kind: 'invoke', channel: 'broker:start' },
   getOperatorTrustStatus: { kind: 'invoke', channel: 'operator-trust:status' },
   retryOperatorTrust: { kind: 'invoke', channel: 'operator-trust:retry' },
+  hostRoadmapMcpStatus: { kind: 'invoke', channel: 'host-roadmap-mcp:status' },
 
   // diff / review
   collectDiff: { kind: 'invoke', channel: 'diff:collect' },
@@ -390,6 +391,7 @@ export const CHANNEL_TIERS: Readonly<Record<string, 0 | 1 | 2 | 3>> = {
   'broker:status': 0,
   'operator-trust:status': 0,
   'operator-trust:retry': 1,
+  'host-roadmap-mcp:status': 1,
   'diff:collect': 0,
   'diff:collect-file': 0,
   'explorer:roots': 0,

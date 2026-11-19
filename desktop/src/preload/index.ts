@@ -106,6 +106,7 @@ const api: DeckApi = {
   startBroker: () => ipcRenderer.invoke('broker:start'),
   getOperatorTrustStatus: () => ipcRenderer.invoke('operator-trust:status'),
   retryOperatorTrust: () => ipcRenderer.invoke('operator-trust:retry'),
+  hostRoadmapMcpStatus: (force?: boolean) => ipcRenderer.invoke('host-roadmap-mcp:status', force),
 
   ptyInput: (id: string, data: string) => ipcRenderer.send('pty:input', id, data),
   ptyResize: (id: string, cols: number, rows: number) =>

@@ -76,6 +76,8 @@
   "banner.operatorInvalid": "The broker operator trust policy is invalid",
   "banner.operatorUnreachable": "The broker could not be reached to verify operator trust",
   "banner.operatorDetails": "Details",
+  "banner.hostRoadmapMissing": "Host sessions have no roadmap tools. In the Koryphaios clone, run bun scripts/relay-setup.ts --print-only and paste the claude mcp add it prints (INSTALL.md)",
+  "banner.hostRoadmapWrongScope": "kory-roadmap is registered for one project only. From your home folder, run claude mcp remove kory-roadmap; then in the Koryphaios clone run bun scripts/relay-setup.ts --print-only and paste the claude mcp add it prints",
   "operatorTrust.dialogTitle": "Operator trust",
   "operatorTrust.help.unconfigured": "This broker has no operator trust policy, so approvals and the other operator actions stay off. Export this Deck's public key with bun cli.ts operator-trust export, create the policy with bun cli.ts operator-trust init on the broker host, then restart the broker. Procedure: runbooks/operator-trust.md.",
   "operatorTrust.help.notTrusted": "The broker's policy does not list this Deck's key. Run bun cli.ts operator-trust export, compare the fingerprint below through a separate channel, add the public key to the policy, then restart the broker. Procedure: runbooks/operator-trust.md.",

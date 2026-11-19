@@ -197,6 +197,34 @@ test("an offline non-replica broker cannot raise the replica banner", () => {
   expect(bannerKind(input({ status: { mode: "local", online: false } }))).toBeNull();
 });
 
+// ----- the host kory-roadmap registration -----
+
+test("a missing or mis-scoped host registration raises its own banner", () => {
+  expect(bannerKind(input({ hostRoadmapMcp: "missing" }))).toBe("host-roadmap-missing");
+  expect(bannerKind(input({ hostRoadmapMcp: "wrong-scope" }))).toBe("host-roadmap-wrong-scope");
+});
+
+test.each(["registered", "unknown", null, undefined] as const)(
+  "a host probe verdict of %s raises no banner",
+  (hostRoadmapMcp) => {
+    expect(bannerKind(input({ hostRoadmapMcp }))).toBeNull();
+  }
+);
+
+test("the host registration banner yields to every state that blocks the operator more", () => {
+  const host = { hostRoadmapMcp: "missing" } as const;
+  expect(bannerKind(input({ ...host, brokerUp: false }))).toBe("broker-down");
+  expect(bannerKind(input({ ...host, conflicts: 2 }))).toBe("conflicts");
+  expect(bannerKind(input({ ...host, status: { mode: "replica", online: true, refused: 1 } }))).toBe("refused");
+  expect(bannerKind(input({ ...host, operatorTrust: "not-trusted" }))).toBe("operator-not-trusted");
+});
+
+test("the host registration banner outranks an offline upstream", () => {
+  expect(
+    bannerKind(input({ hostRoadmapMcp: "missing", status: { mode: "replica", online: false } }))
+  ).toBe("host-roadmap-missing");
+});
+
 // ----- which sentence a replica-offline banner shows (card 7974fb83) -----
 
 test("a transport failure keeps the original 'unreachable' wording", () => {

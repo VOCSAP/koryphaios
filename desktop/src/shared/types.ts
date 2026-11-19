@@ -1791,6 +1791,13 @@ export interface OperatorTrustStatusEvent {
   fingerprint?: string
 }
 
+/**
+ * Whether the host Claude CLI has kory-roadmap in its user scope. Only
+ * 'missing' and 'wrong-scope' are shown to the operator; 'unknown' is a probe
+ * that could not tell (CLI absent, no answer in time) and stays in the journal.
+ */
+export type HostRoadmapMcpStatus = 'registered' | 'wrong-scope' | 'missing' | 'unknown'
+
 // ----- Activity journal (PLAN C14) -----
 // Mirror of main/journal.ts shapes (kept import-free for bun tests).
 
@@ -2442,6 +2449,8 @@ export interface DeckApi {
   getOperatorTrustStatus(): Promise<OperatorTrustStatusEvent>
   retryOperatorTrust(): Promise<OperatorTrustStatusEvent>
   onOperatorTrustStatus(cb: (status: OperatorTrustStatusEvent) => void): () => void
+  /** Verdict of the host kory-roadmap probe; `force` re-probes unless one is already running (banner Retry). */
+  hostRoadmapMcpStatus(force?: boolean): Promise<HostRoadmapMcpStatus>
 
   // diff / review (PLAN C13)
   /** Full diff picture of a dir (uncommitted + branch-vs-main for worktrees). */

@@ -19,6 +19,7 @@ import type {
   I18nPayload,
   DeckGraphDraft,
   InboxArchiveSnapshot,
+  HostRoadmapMcpStatus,
   InboxReplyOutcome,
   LaunchConfig,
   OperatorTrustStatusEvent,
@@ -209,6 +210,8 @@ interface IpcDeps {
   brokerStart: () => Promise<BrokerStartResult>
   operatorTrustStatus: () => OperatorTrustStatusEvent
   retryOperatorTrust: () => Promise<OperatorTrustStatusEvent>
+  /** Verdict of the host kory-roadmap probe, owned by index.ts; `force` re-probes. */
+  hostRoadmapMcpStatus: (force: boolean) => Promise<HostRoadmapMcpStatus>
   /** Sandbox container lifecycle for this project (PLAN-SANDBOX). */
   sandbox: SandboxService
   /**
@@ -307,6 +310,7 @@ export function registerIpc({
   brokerStart,
   operatorTrustStatus,
   retryOperatorTrust,
+  hostRoadmapMcpStatus,
   sandbox,
   sandboxGate,
   sandboxWarmTranscripts,
@@ -1120,6 +1124,7 @@ export function registerIpc({
   regHandle('operator-trust:retry', async () => {
     return retryOperatorTrust()
   })
+  regHandle('host-roadmap-mcp:status', (_e, force: unknown) => hostRoadmapMcpStatus(force === true))
 
   // ----- renderer error reporting (PLAN O4) -----
   // ErrorBoundaries and the window-level error/unhandledrejection handlers

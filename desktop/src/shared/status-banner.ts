@@ -7,7 +7,7 @@
 // No React, no electron, no @shared alias: importable by a relative path from
 // bun test.
 
-import type { OperatorTrustState, RoadmapSyncOfflineReason, RoadmapSyncStatus } from './types'
+import type { HostRoadmapMcpStatus, OperatorTrustState, RoadmapSyncOfflineReason, RoadmapSyncStatus } from './types'
 
 export type StatusBannerKind =
   | 'broker-stopped'
@@ -18,6 +18,8 @@ export type StatusBannerKind =
   | 'operator-identity-unreadable'
   | 'operator-invalid'
   | 'operator-unreachable'
+  | 'host-roadmap-missing'
+  | 'host-roadmap-wrong-scope'
   | 'conflicts'
   | 'refused'
   | 'replica-offline'
@@ -36,6 +38,8 @@ export interface StatusBannerInput {
    */
   conflicts: number
   status: RoadmapSyncStatus
+  /** Host kory-roadmap probe verdict; null until it answers. Absent = no host banner. */
+  hostRoadmapMcp?: HostRoadmapMcpStatus | null
 }
 
 /**
@@ -46,7 +50,8 @@ export interface StatusBannerInput {
  * 3. cards await arbitration;
  * 4. the upstream refused pushes;
  * 5. operator trust is degraded, so privileged actions remain unavailable;
- * 6. the upstream is unreachable.
+ * 6. the host Claude CLI lacks kory-roadmap in its user scope;
+ * 7. the upstream is unreachable.
  */
 export function bannerKind(input: StatusBannerInput): StatusBannerKind | null {
   if (input.brokerManualStop) return 'broker-stopped'
@@ -62,6 +67,8 @@ export function bannerKind(input: StatusBannerInput): StatusBannerKind | null {
   if (input.operatorTrust === 'identity-unreadable') return 'operator-identity-unreadable'
   if (input.operatorTrust === 'invalid') return 'operator-invalid'
   if (input.operatorTrust === 'unreachable') return 'operator-unreachable'
+  if (input.hostRoadmapMcp === 'missing') return 'host-roadmap-missing'
+  if (input.hostRoadmapMcp === 'wrong-scope') return 'host-roadmap-wrong-scope'
   if (input.status.mode === 'replica' && input.status.online === false) return 'replica-offline'
   return null
 }

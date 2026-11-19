@@ -48,6 +48,9 @@ export function StatusBanner(): React.JSX.Element | null {
   const openTrustDialog = useDeck((s) => s.openOperatorTrustDialog)
   const retryTrust = useDeck((s) => s.retryOperatorTrust)
   const trustRetrying = useDeck((s) => s.operatorTrustRetrying)
+  const hostRoadmapMcp = useDeck((s) => s.hostRoadmapMcp)
+  const hostRoadmapRetrying = useDeck((s) => s.hostRoadmapMcpRetrying)
+  const retryHostRoadmap = useDeck((s) => s.retryHostRoadmapMcp)
   const [brokerStarting, setBrokerStarting] = useState(false)
   // Kept after a failed Start: the marker is already gone by then, so the strip
   // falls back to broker-down, which must still say why the broker is not up.
@@ -80,7 +83,8 @@ export function StatusBanner(): React.JSX.Element | null {
     brokerDismissed: status !== null && dismissed === status.since,
     operatorTrust: operatorTrust.state,
     conflicts,
-    status: sync
+    status: sync,
+    hostRoadmapMcp
   })
 
   // The operator's own choice, so the amber of a state only they can move, not
@@ -145,6 +149,22 @@ export function StatusBanner(): React.JSX.Element | null {
           onClick={() => void retryTrust()}
         >
           {trustRetrying ? t('operatorTrust.retrying') : t('banner.retry')}
+        </button>
+      </div>
+    )
+  }
+
+  // The operator fixes this outside the Deck (claude mcp add), so the only
+  // action is Retry, which re-runs the probe once they have.
+  if (kind === 'host-roadmap-missing' || kind === 'host-roadmap-wrong-scope') {
+    const remedy = t(kind === 'host-roadmap-missing' ? 'banner.hostRoadmapMissing' : 'banner.hostRoadmapWrongScope')
+    return (
+      <div className="status-banner status-banner-warn" role="status">
+        <span className="status-banner-text" title={remedy}>
+          {GLYPH_BADGES.warning} {remedy}
+        </span>
+        <button className="status-banner-action" disabled={hostRoadmapRetrying} onClick={() => void retryHostRoadmap()}>
+          {hostRoadmapRetrying ? t('operatorTrust.retrying') : t('banner.retry')}
         </button>
       </div>
     )
