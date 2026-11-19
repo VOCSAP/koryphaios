@@ -50,10 +50,20 @@ export function WorkspacesDialog(): React.JSX.Element {
                 )}
                 {ws.pinned && <span className="ws-badge">{t('workspaces.pinned')}</span>}
                 {ws.locked && <span className="ws-badge ws-badge-locked">{t('workspaces.locked')}</span>}
+                {ws.conflict && (
+                  <span
+                    className="ws-badge ws-badge-conflict"
+                    role="note"
+                    title={t('workspaces.conflictHint', { id: ws.id })}
+                    aria-label={`${t('workspaces.conflict')}. ${t('workspaces.conflictHint', { id: ws.id })}`}
+                  >
+                    {t('workspaces.conflict')}
+                  </span>
+                )}
               </div>
               <button
                 className="ws-btn primary"
-                disabled={ws.current || ws.locked || ws.sessionCount === 0}
+                disabled={ws.current || ws.locked || ws.conflict || ws.sessionCount === 0}
                 onClick={() => requestRestore(ws.id)}
               >
                 {t('workspaces.restore')}
@@ -61,7 +71,7 @@ export function WorkspacesDialog(): React.JSX.Element {
               {!loadOnly && (
                 <button
                   className="ws-btn ws-btn-danger"
-                  disabled={ws.current || ws.locked}
+                  disabled={ws.current || ws.locked || ws.conflict}
                   onClick={() => setDeleting(ws)}
                 >
                   {t('workspaces.delete')}

@@ -2551,9 +2551,14 @@ code {
   border-color: var(--accent);
   color: var(--accent);
 }
-.ws-badge-locked {
+.ws-badge-locked,
+.ws-badge-conflict {
   border-color: var(--danger);
   color: var(--danger);
+}
+/* The title carries the two file paths to resolve; the cursor says it is there. */
+.ws-badge-conflict {
+  cursor: help;
 }
 .ws-btn {
   background: var(--bg);

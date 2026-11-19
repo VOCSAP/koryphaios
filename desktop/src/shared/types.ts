@@ -209,6 +209,8 @@ export interface WorkspaceSummary {
   locked: boolean
   /** True if this is the workspace the running app currently owns. */
   current: boolean
+  /** True if this id is stored in both project folders: neither copy is restored, deleted or pruned. */
+  conflict: boolean
 }
 
 /** A discovered team template (global or project-local). `path` is its id. */

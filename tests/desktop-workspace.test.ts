@@ -2889,6 +2889,21 @@ test("restore refuses an id held by both folders as 'duplicate', opens nothing a
   }
 });
 
+test("listForCwd flags an id held by both folders as a conflict, and only that id", () => {
+  const proj = freshProject();
+  saveInOldFolder(proj, sampleWorkspace({ id: "wsp_twice" }));
+  saveFresh(proj, sampleWorkspace({ id: "wsp_twice" }));
+  saveFresh(proj, sampleWorkspace({ id: "wsp_fresh" }));
+  saveInOldFolder(proj, sampleWorkspace({ id: "wsp_old" }));
+  const rows = workspaceService(fakeDeps(proj)).listForCwd();
+  const conflictById = Object.fromEntries(rows.map((row) => [row.id, row.conflict]));
+  expect(conflictById, "one row per id, conflict true only for the id stored in both folders").toEqual({
+    wsp_twice: true,
+    wsp_fresh: false,
+    wsp_old: false
+  });
+});
+
 test("deleteWs of the owned workspace deletes nothing and keeps it owned once its id is held by both folders", async () => {
   const proj = freshProject();
   saveInOldFolder(proj, sampleWorkspace({ id: "wsp_old" }));

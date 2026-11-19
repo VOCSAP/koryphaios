@@ -607,7 +607,8 @@ export class WorkspaceService {
         sessionCount: ws.sessions.length,
         updatedAt: ws.updatedAt,
         locked: lockedByOther,
-        current: ws.id === this.currentId
+        current: ws.id === this.currentId,
+        conflict: ws.conflict
       }
     })
   }
@@ -711,7 +712,8 @@ export class WorkspaceService {
       sessionCount: saved.sessions.length,
       updatedAt: saved.updatedAt,
       locked: false,
-      current: true
+      current: true,
+      conflict: false
     }
   }
 }

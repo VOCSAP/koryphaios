@@ -42,7 +42,8 @@ const quietReasons: WorkspaceRestoreQuietReason[] = [
   "shell-declined",
   "cwd-declined",
   "busy",
-  "superseded"
+  "superseded",
+  "duplicate"
 ];
 
 test("every quiet reason resolves to { applied: false, reason } -- never throws", () => {
@@ -60,9 +61,9 @@ test("lock-race throws, with an actionable message naming what happened", () => 
   );
 });
 
-test("a workspace held by both project folders throws, naming both folders and what to do", () => {
-  expect(() => workspaceRestoreOrThrow({ ok: false, reason: "duplicate" })).toThrow(/\.claude\/koryphaios and \.claude\/claude-peers/);
-  expect(() => workspaceRestoreOrThrow({ ok: false, reason: "duplicate" })).toThrow(/delete or move one of the two files/);
+test("a workspace held by both project folders resolves quietly to its own localized toast", () => {
+  expect(workspaceRestoreOrThrow({ ok: false, reason: "duplicate" })).toEqual({ applied: false, reason: "duplicate" });
+  expect(workspaceRestoreToastKeyFor("duplicate")).toBe("toast.workspaceDuplicate");
 });
 
 test("credential failures throw before any session is opened", () => {
@@ -100,7 +101,7 @@ test("only non-quiet restore reasons throw", () => {
       return true;
     }
   });
-  expect(threw).toEqual([false, false, false, false, false, false, false, true, true, true, true, true]);
+  expect(threw).toEqual([false, false, false, false, false, false, false, true, false, true, true, true]);
 });
 
 test("an unrecognised reason value (bypassing the type system) throws rather than silently resolving", () => {
@@ -152,7 +153,8 @@ test("proof #1 mirror for the renderer sink: exactly the two declined reasons ar
     null, // shell-declined
     null, // cwd-declined
     "toast.workspaceRestoreBusy", // busy
-    "toast.workspaceRestoreSuperseded" // superseded
+    "toast.workspaceRestoreSuperseded", // superseded
+    "toast.workspaceDuplicate" // duplicate
   ]);
 });
 

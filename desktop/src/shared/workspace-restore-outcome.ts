@@ -56,7 +56,7 @@ export type WorkspaceRestoreResult =
 
 export type WorkspaceRestoreQuietReason = Exclude<
   Exclude<WorkspaceRestoreResult, { ok: true }>['reason'],
-  'lock-race' | 'duplicate' | 'unattended' | 'credential-timed-out' | 'credential-unavailable'
+  'lock-race' | 'unattended' | 'credential-timed-out' | 'credential-unavailable'
 >
 
 function credentialUnavailableMessage(cause: WorkspaceCredentialCause): string {
@@ -86,11 +86,10 @@ export function workspaceRestoreOrThrow(result: WorkspaceRestoreResult): Workspa
     case 'cwd-declined':
     case 'busy':
     case 'superseded':
+    case 'duplicate':
       return { applied: false, reason: result.reason }
     case 'lock-race':
       throw new Error('workspace restore could not acquire its lock before changing any session -- check the workspace picker and retry')
-    case 'duplicate':
-      throw new Error('this workspace exists in both .claude/koryphaios and .claude/claude-peers, so it was not restored -- delete or move one of the two files and retry')
     case 'credential-timed-out':
       throw new Error("Restauration annulée. Aucune session de cette restauration n'a été ouverte ; le scope est inchangé. Le credential Inbox n'a pas été délivré dans le délai prévu. Vérifiez dans le Journal l'état du broker et d'une éventuelle révocation en attente avant de réessayer.")
     case 'credential-unavailable':
@@ -124,7 +123,14 @@ export function workspaceRestoreDemotionToast(outcome: {
  */
 export function workspaceRestoreToastKeyFor(
   reason: WorkspaceRestoreQuietReason
-): 'toast.nothingToRestore' | 'toast.alreadyOpen' | 'toast.workspaceMissing' | 'toast.workspaceRestoreBusy' | 'toast.workspaceRestoreSuperseded' | null {
+):
+  | 'toast.nothingToRestore'
+  | 'toast.alreadyOpen'
+  | 'toast.workspaceMissing'
+  | 'toast.workspaceRestoreBusy'
+  | 'toast.workspaceRestoreSuperseded'
+  | 'toast.workspaceDuplicate'
+  | null {
   switch (reason) {
     case 'empty':
       return 'toast.nothingToRestore'
@@ -139,6 +145,8 @@ export function workspaceRestoreToastKeyFor(
       return 'toast.workspaceRestoreBusy'
     case 'superseded':
       return 'toast.workspaceRestoreSuperseded'
+    case 'duplicate':
+      return 'toast.workspaceDuplicate'
     default: {
       const _exhaustive: never = reason
       void _exhaustive
