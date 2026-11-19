@@ -16,6 +16,7 @@ import { deriveOperatorId, generateCredential } from "../shared/approval.ts";
 import { publicKeyFingerprint } from "../shared/operator-trust.ts";
 import type { SecretCipher } from "../desktop/src/main/scope-secrets.ts";
 import { reachedWithin } from "./_bounded-await.ts";
+import { extractParenBody } from "./_braced-body.ts";
 
 const dirs: string[] = [];
 afterAll(() => {
@@ -28,35 +29,44 @@ function tmp(): string {
   return d;
 }
 
-const fakeCipher: SecretCipher = {
+function withAsync(sync: Pick<SecretCipher, "isAvailable" | "encrypt" | "decrypt">): SecretCipher {
+  return {
+    ...sync,
+    isAvailableAsync: async () => sync.isAvailable(),
+    encryptAsync: async (plain) => sync.encrypt(plain),
+    decryptAsync: async (buf) => sync.decrypt(buf),
+  };
+}
+
+const fakeCipher: SecretCipher = withAsync({
   isAvailable: () => true,
   encrypt: (s: string) => Buffer.from(`X${s}`, "utf8"),
   decrypt: (b: Buffer) => b.toString("utf8").slice(1),
-};
+});
 
 /**
  * Simulates a corrupted or re-keyed operator identity file: cannot decrypt what
  * fakeCipher encrypted.
  */
-const hostileCipher: SecretCipher = {
+const hostileCipher: SecretCipher = withAsync({
   isAvailable: () => true,
   encrypt: () => Buffer.from(""),
   decrypt: () => {
     throw new Error("keychain changed");
   },
-};
+});
 
 /** Models a keychain that is DOWN right now (locked, mid OS migration) -- the
  * exact same observable failure as real corruption from inside decrypt(),
  * which is precisely why isAvailable() (not the decrypt failure itself) has
  * to be the signal that tells the two apart. */
-const unavailableCipher: SecretCipher = {
+const unavailableCipher: SecretCipher = withAsync({
   isAvailable: () => false,
   encrypt: () => Buffer.from(""),
   decrypt: () => {
     throw new Error("keychain locked");
   },
-};
+});
 
 const originalFetch = globalThis.fetch;
 afterEach(() => {
@@ -102,11 +112,11 @@ function retryOperatorTrustHandler(
 }
 
 function registerRoadmapSigner(
-  ensureIdentity: () => { state: string },
+  ensureIdentity: () => Promise<{ state: string }>,
   configure: (loader: () => unknown) => void,
 ): void {
   const source = readFileSync(join(import.meta.dir, "..", "desktop", "src", "main", "index.ts"), "utf8").replace(/\r\n/g, "\n");
-  const start = source.indexOf("configureRoadmapSigner(() => {");
+  const start = source.indexOf("configureRoadmapSigner(async () => {");
   const end = source.indexOf("\n\n/** Global switch", start);
   if (start < 0 || end < 0) throw new Error("configureRoadmapSigner source slice is unavailable");
   new Function(
@@ -129,15 +139,43 @@ function registerRoadmapSigner(
   );
 }
 
-test("roadmap signing is disabled when the operator identity is unavailable", () => {
+test("roadmap signing is disabled when the operator identity is unavailable", async () => {
   let loader: (() => unknown) | null = null;
   registerRoadmapSigner(
-    () => ({ state: "identity-unreadable" }),
+    async () => ({ state: "identity-unreadable" }),
     (registered) => { loader = registered; },
   );
 
   expect(loader).not.toBeNull();
-  expect(loader!()).toBeNull();
+  expect(await loader!()).toBeNull();
+});
+
+test("the roadmap signer loader resolves the identity itself, asynchronously, on each load", async () => {
+  let loader: (() => unknown) | null = null;
+  let calls = 0;
+  registerRoadmapSigner(
+    async () => {
+      calls += 1;
+      return { state: "ready", identity: { publicKey: "pk", privateKey: "sk", operatorId: "op" } } as never;
+    },
+    (registered) => { loader = registered; },
+  );
+
+  expect(calls, "registering the signer resolves nothing").toBe(0);
+  const signer = (await loader!()) as (payload: Record<string, unknown>) => { public_key: string };
+  expect(calls).toBe(1);
+  expect(signer({ a: 1 }).public_key).toBe("pk");
+});
+
+test("the operator identity is created only by the lazy roadmap signer loader, never at startup", () => {
+  const source = readFileSync(join(import.meta.dir, "..", "desktop", "src", "main", "index.ts"), "utf8");
+  const anchor = "configureRoadmapSigner(";
+  const loaderAt = source.indexOf(anchor);
+  expect(loaderAt, "index.ts must configure the roadmap signer").toBeGreaterThanOrEqual(0);
+  const loader = extractParenBody(source, loaderAt + anchor.length - 1, true);
+  expect(loader.split("ensureOperatorIdentity(").length - 1, "the loader is the identity's creation site").toBe(1);
+  const outside = source.slice(0, loaderAt) + source.slice(loaderAt + anchor.length + loader.length + 1);
+  expect(outside, "no other call site: nothing mints an identity at startup").not.toContain("ensureOperatorIdentity(");
 });
 
 test.each(["compatible", "unconfigured", "not-trusted", "incompatible", "invalid", "unreachable"])("operator trust status publishes the shared fingerprint for %s", (state) => {
@@ -1089,7 +1127,7 @@ describe("ApprovalRuntime.arm() without any mobile transport configured", () => 
     expect(await runtime.arm()).toBe(true);
     const firstId = runtime.operator?.operatorId;
     await runtime.disarm();
-    const enrolled = createOperatorIdentity(stateDir, fakeCipher, generateCredential());
+    const enrolled = await createOperatorIdentity(stateDir, fakeCipher, generateCredential());
     expect(enrolled.operatorId).not.toBe(firstId);
 
     globalThis.fetch = (async (input: string | URL | Request) => {
@@ -1248,7 +1286,7 @@ describe("ApprovalRuntime.arm() without any mobile transport configured", () => 
 
   test("refuses an undecryptable persisted identity without replacing it", async () => {
     const stateDir = tmp();
-    createOperatorIdentity(stateDir, fakeCipher, generateCredential());
+    await createOperatorIdentity(stateDir, fakeCipher, generateCredential());
     const file = join(stateDir, "operator.json");
     const before = readFileSync(file, "utf8");
     const runtime = new ApprovalRuntime({
@@ -1263,6 +1301,48 @@ describe("ApprovalRuntime.arm() without any mobile transport configured", () => 
     expect(runtime.deps()).toBeNull();
     expect(readFileSync(file, "utf8")).toBe(before);
     expect(readdirSync(stateDir).filter((entry) => entry.includes(".bak-"))).toHaveLength(0);
+  });
+
+  test("a disarm during the identity resolution publishes no status and keeps the identity", async () => {
+    const stateDir = tmp();
+    await createOperatorIdentity(stateDir, fakeCipher, generateCredential());
+    const before = readFileSync(join(stateDir, "operator.json"), "utf8");
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let started: () => void = () => {};
+    const reached = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const slowHostile: SecretCipher = {
+      ...hostileCipher,
+      decryptAsync: async () => {
+        started();
+        await gate;
+        throw new Error("keychain changed");
+      },
+    };
+    const states: string[] = [];
+    const runtime = new ApprovalRuntime({
+      stateDir,
+      cipher: slowHostile,
+      endpoint: () => ({ url: "http://broker.local", token: "" }),
+      runId: "run-test",
+      host: "test-host", groupId: () => "g-runtime",
+      onTrustStatus: (state: string) => states.push(state),
+    });
+
+    const arming = runtime.arm();
+    await reachedWithin(reached, "the identity resolution is in flight");
+    const disarming = runtime.disarm();
+    release();
+
+    expect(await arming).toBe(false);
+    await disarming;
+    expect(states).toEqual([]);
+    expect(runtime.operator).toBeNull();
+    expect(readFileSync(join(stateDir, "operator.json"), "utf8")).toBe(before);
   });
 
   test("refuses a malformed persisted identity without replacing it", async () => {
@@ -1370,7 +1450,7 @@ describe("ApprovalRuntime.arm() when the keychain is merely unavailable (not cor
 
   test("gives up arming this run WITHOUT touching the existing identity", async () => {
     const stateDir = tmp();
-    const original = createOperatorIdentity(stateDir, fakeCipher, generateCredential());
+    const original = await createOperatorIdentity(stateDir, fakeCipher, generateCredential());
     const file = join(stateDir, "operator.json");
     const before = readFileSync(file, "utf8");
 
@@ -1398,7 +1478,7 @@ describe("ApprovalRuntime.arm() when the keychain is merely unavailable (not cor
 
     // Reloading with a WORKING cipher afterwards recovers the SAME identity
     // -- proof the outage, not the identity, was the problem.
-    const recovered = loadOperatorIdentity(stateDir, fakeCipher);
+    const recovered = await loadOperatorIdentity(stateDir, fakeCipher);
     expect(recovered?.operatorId).toBe(original.operatorId);
     expect(recovered?.privateKey).toBe(original.privateKey);
   });
@@ -1417,13 +1497,13 @@ describe("ensureOperatorIdentity()", () => {
     expect(readdirSync(stateDir)).toEqual(["operator.json"]);
   });
 
-  test("leaves a completed first identity unchanged on a second resolution", () => {
+  test("leaves a completed first identity unchanged on a second resolution", async () => {
     const stateDir = tmp();
 
-    const first = ensureOperatorIdentity(stateDir, fakeCipher);
+    const first = await ensureOperatorIdentity(stateDir, fakeCipher);
     const file = join(stateDir, "operator.json");
     const firstContent = readFileSync(file, "utf8");
-    const second = ensureOperatorIdentity(stateDir, fakeCipher);
+    const second = await ensureOperatorIdentity(stateDir, fakeCipher);
 
     expect(first.state).toBe("ready");
     expect(second.state).toBe("ready");
@@ -1433,14 +1513,14 @@ describe("ensureOperatorIdentity()", () => {
     expect(readdirSync(stateDir)).toEqual(["operator.json"]);
   });
 
-  test("uses atomic first publication without replacing an existing identity", () => {
+  test("uses atomic first publication without replacing an existing identity", async () => {
     const stateDir = tmp();
-    const original = createOperatorIdentity(stateDir, fakeCipher, generateCredential());
+    const original = await createOperatorIdentity(stateDir, fakeCipher, generateCredential());
     const file = join(stateDir, "operator.json");
     const before = readFileSync(file, "utf8");
-    const resolved = ensureOperatorIdentity(stateDir, fakeCipher);
+    const resolved = await ensureOperatorIdentity(stateDir, fakeCipher);
     const source = readFileSync(join(import.meta.dir, "..", "desktop", "src", "main", "operator-identity.ts"), "utf8").replace(/\r\n/g, "\n");
-    const start = source.indexOf("export function ensureOperatorIdentity(");
+    const start = source.indexOf("export async function ensureOperatorIdentity(");
     const end = source.indexOf("\n}\n\n/** Writes an explicitly supplied credential", start);
     if (start < 0 || end < 0) throw new Error("ensureOperatorIdentity source slice is unavailable");
 
@@ -1453,10 +1533,10 @@ describe("ensureOperatorIdentity()", () => {
 
 describe("createOperatorIdentity() backup-before-overwrite", () => {
   // Explicit replacement retains the existing private key as a backup.
-  test("never destroys the previous identity: it survives as a .bak sibling", () => {
+  test("never destroys the previous identity: it survives as a .bak sibling", async () => {
     const stateDir = tmp();
-    const v1 = createOperatorIdentity(stateDir, fakeCipher, generateCredential());
-    const v2 = createOperatorIdentity(stateDir, fakeCipher, generateCredential());
+    const v1 = await createOperatorIdentity(stateDir, fakeCipher, generateCredential());
+    const v2 = await createOperatorIdentity(stateDir, fakeCipher, generateCredential());
 
     expect(v2.operatorId).not.toBe(v1.operatorId);
 
@@ -1466,7 +1546,7 @@ describe("createOperatorIdentity() backup-before-overwrite", () => {
     expect(deriveOperatorId(backedUp.publicKey)).toBe(v1.operatorId);
 
     // The live file is v2, not v1.
-    const live = loadOperatorIdentity(stateDir, fakeCipher);
+    const live = await loadOperatorIdentity(stateDir, fakeCipher);
     expect(live?.operatorId).toBe(v2.operatorId);
   });
 
@@ -1475,9 +1555,9 @@ describe("createOperatorIdentity() backup-before-overwrite", () => {
   // the actual millisecond to repeat (rather than hoping two fast calls land
   // in the same one) is the only way to prove the collision-handling branch
   // fires, not just that it happened not to be needed.
-  test("two backups computed in the SAME millisecond do not clobber each other", () => {
+  test("two backups computed in the SAME millisecond do not clobber each other", async () => {
     const stateDir = tmp();
-    const v1 = createOperatorIdentity(stateDir, fakeCipher, generateCredential());
+    const v1 = await createOperatorIdentity(stateDir, fakeCipher, generateCredential());
     const file = join(stateDir, "operator.json");
 
     const RealDate = globalThis.Date;
@@ -1497,7 +1577,7 @@ describe("createOperatorIdentity() backup-before-overwrite", () => {
       // its existsSync/increment loop to actually run.
       writeFileSync(`${file}.bak-${stamp}`, "unrelated pre-existing file, must survive untouched");
 
-      const v2 = createOperatorIdentity(stateDir, fakeCipher, generateCredential());
+      const v2 = await createOperatorIdentity(stateDir, fakeCipher, generateCredential());
 
       expect(readFileSync(`${file}.bak-${stamp}`, "utf8")).toBe(
         "unrelated pre-existing file, must survive untouched"

@@ -62,16 +62,16 @@ function uniqueBackupPath(file: string): string {
   return candidate
 }
 
-function encrypt(cipher: SecretCipher, plain: string): string {
-  if (cipher.isAvailable()) return ENC_PREFIX + cipher.encrypt(plain).toString('base64')
+async function encrypt(cipher: SecretCipher, plain: string): Promise<string> {
+  if (await cipher.isAvailableAsync()) return ENC_PREFIX + (await cipher.encryptAsync(plain)).toString('base64')
   return PLAIN_PREFIX + plain
 }
 
-function decrypt(cipher: SecretCipher, stored: string): string | null {
+async function decrypt(cipher: SecretCipher, stored: string): Promise<string | null> {
   if (stored.startsWith(PLAIN_PREFIX)) return stored.slice(PLAIN_PREFIX.length)
   if (stored.startsWith(ENC_PREFIX)) {
     try {
-      return cipher.decrypt(Buffer.from(stored.slice(ENC_PREFIX.length), 'base64'))
+      return await cipher.decryptAsync(Buffer.from(stored.slice(ENC_PREFIX.length), 'base64'))
     } catch (e) {
       // Keychain changed or another OS profile: the identity is unusable. Trace
       // it — silently minting a NEW identity would orphan the operator's phone
@@ -102,12 +102,12 @@ function computeOsUserHash(salt: string): string {
     .slice(0, 32)
 }
 
-export function loadOperatorIdentity(dir: string, cipher: SecretCipher): OperatorIdentity | null {
+export async function loadOperatorIdentity(dir: string, cipher: SecretCipher): Promise<OperatorIdentity | null> {
   const file = identityPath(dir)
   if (!existsSync(file)) return null
   try {
     const stored = JSON.parse(readFileSync(file, 'utf8')) as StoredIdentity
-    const privateKey = decrypt(cipher, stored.privateKeyEnc ?? '')
+    const privateKey = await decrypt(cipher, stored.privateKeyEnc ?? '')
     if (!privateKey || !stored.publicKey) return null
     return {
       operatorId: deriveOperatorId(stored.publicKey),
@@ -138,8 +138,8 @@ export function publishFirstIdentity(file: string, contents: string): void {
 }
 
 /** Resolves the persisted identity or creates the first one without replacement. */
-export function ensureOperatorIdentity(dir: string, cipher: SecretCipher): OperatorIdentityResolution {
-  const loaded = loadOperatorIdentity(dir, cipher)
+export async function ensureOperatorIdentity(dir: string, cipher: SecretCipher): Promise<OperatorIdentityResolution> {
+  const loaded = await loadOperatorIdentity(dir, cipher)
   if (loaded) return { state: 'ready', identity: loaded }
 
   const file = identityPath(dir)
@@ -150,29 +150,30 @@ export function ensureOperatorIdentity(dir: string, cipher: SecretCipher): Opera
   const salt = randomBytes(16).toString('base64url')
   const stored: StoredIdentity = {
     publicKey: cred.publicKey,
-    privateKeyEnc: encrypt(cipher, cred.privateKey),
+    privateKeyEnc: await encrypt(cipher, cred.privateKey),
     userSalt: salt,
     createdAt: new Date().toISOString()
   }
   publishFirstIdentity(file, JSON.stringify(stored, null, 2))
 
-  const identity = loadOperatorIdentity(dir, cipher)
+  const identity = await loadOperatorIdentity(dir, cipher)
   return identity ? { state: 'ready', identity } : { state: 'unreadable' }
 }
 
 /** Writes an explicitly supplied credential, retaining an existing identity as a backup. */
-export function createOperatorIdentity(
+export async function createOperatorIdentity(
   dir: string,
   cipher: SecretCipher,
   cred: ApprovalCredential,
   salt = randomBytes(16).toString('base64url')
-): OperatorIdentity {
+): Promise<OperatorIdentity> {
+  const privateKeyEnc = await encrypt(cipher, cred.privateKey)
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
   const file = identityPath(dir)
   if (existsSync(file)) renameSync(file, uniqueBackupPath(file))
   const stored: StoredIdentity = {
     publicKey: cred.publicKey,
-    privateKeyEnc: encrypt(cipher, cred.privateKey),
+    privateKeyEnc,
     userSalt: salt,
     createdAt: new Date().toISOString()
   }
@@ -198,12 +199,12 @@ export interface EnrolmentPayload {
   userSalt: string
 }
 
-export function exportEnrolment(dir: string, cipher: SecretCipher): EnrolmentPayload | null {
+export async function exportEnrolment(dir: string, cipher: SecretCipher): Promise<EnrolmentPayload | null> {
   const file = identityPath(dir)
   if (!existsSync(file)) return null
   try {
     const stored = JSON.parse(readFileSync(file, 'utf8')) as StoredIdentity
-    const privateKey = decrypt(cipher, stored.privateKeyEnc ?? '')
+    const privateKey = await decrypt(cipher, stored.privateKeyEnc ?? '')
     if (!privateKey) return null
     return { v: 1, privateKey, publicKey: stored.publicKey, userSalt: stored.userSalt ?? '' }
   } catch (e) {
@@ -220,11 +221,11 @@ export function exportEnrolment(dir: string, cipher: SecretCipher): EnrolmentPay
  * (hostile input #3) — the enrolment channel must not be able to widen into
  * filesystem access.
  */
-export function applyEnrolment(
+export async function applyEnrolment(
   dir: string,
   cipher: SecretCipher,
   payload: unknown
-): OperatorIdentity | null {
+): Promise<OperatorIdentity | null> {
   const p = payload as Partial<EnrolmentPayload> | null
   if (!p || typeof p !== 'object') return null
   if (typeof p.privateKey !== 'string' || typeof p.publicKey !== 'string') return null
@@ -235,7 +236,7 @@ export function applyEnrolment(
     // not at the first approval when the operator is away from the machine.
     const probe = { privateKey: p.privateKey, publicKey: p.publicKey }
     if (!credentialWorks(probe)) return null
-    return createOperatorIdentity(dir, cipher, probe, salt)
+    return await createOperatorIdentity(dir, cipher, probe, salt)
   } catch (e) {
     reportError('approvals', 'enrolment payload rejected', e)
     return null

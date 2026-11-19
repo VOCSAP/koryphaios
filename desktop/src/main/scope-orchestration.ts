@@ -10,7 +10,7 @@ export interface ScopeWiringDeps<Scope, Published = Scope> {
   approvals: ScopeApprovalRuntime
   currentScope: () => Scope
   hasLiveSessions: () => boolean
-  resolveScope: (workspace: ScopeRestoreRequest) => Scope
+  resolveScope: (workspace: ScopeRestoreRequest) => Scope | Promise<Scope>
   toScopeTarget: (scope: Scope) => ScopeTarget
   publishScope: (scope: Scope, previous: Scope) => Published
   afterScopePublished: (previous: Published) => void
@@ -48,15 +48,21 @@ export function createScopeWiring<Scope, Published>(deps: ScopeWiringDeps<Scope,
     mayChangeScope: scopeMayChange(deps.hasLiveSessions),
     onCleanupError: deps.onCleanupError
   })
+  let spawns = 0
   const spawnEnvironment = captureSpawnEnvironment(
-    () => scopeAdoption.captureSpawnContext(),
+    () => {
+      spawns += 1
+      scopeAdoption.captureSpawnContext()
+    },
     () => ({ ...deps.scopeEnvironment(), ...deps.approvalEnvironment(), ...deps.designEnvironment() })
   )
   let epoch = 0
   const adoptScope = async (workspace: ScopeRestoreRequest, own: () => boolean): Promise<ScopeAdoptionResult> => {
+    const spawnsBefore = spawns
+    const next = await deps.resolveScope(workspace)
+    if (spawns !== spawnsBefore) return { state: 'superseded' }
     const previous = deps.currentScope()
     const previousTarget = deps.toScopeTarget(previous)
-    const next = deps.resolveScope(workspace)
     const nextTarget = deps.toScopeTarget(next)
     let published: Published | null = null
     const result = await scopeAdoption.adopt(nextTarget, own, (adopted) => {

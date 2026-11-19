@@ -9,6 +9,7 @@
 
 import { existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { writeFileAtomic } from './atomic-write'
+import { reportError } from './log'
 import { join } from 'node:path'
 
 /**
@@ -16,11 +17,17 @@ import { join } from 'node:path'
  * (DPAPI on Windows, Keychain on macOS, libsecret on Linux). `isAvailable`
  * gates every operation: when false (e.g. Linux without a keyring) the store
  * is a no-op and callers fall back to the launch-arg behaviour.
+ * A buffer written by `encrypt` reads back through `decryptAsync`.
+ * `isAvailableAsync` is false before the app is ready. An async failure is
+ * traced and rethrown; `shouldReEncrypt` is not surfaced.
  */
 export interface SecretCipher {
   isAvailable(): boolean
   encrypt(plain: string): Buffer
   decrypt(buf: Buffer): string
+  isAvailableAsync(): Promise<boolean>
+  encryptAsync(plain: string): Promise<Buffer>
+  decryptAsync(buf: Buffer): Promise<string>
 }
 
 /** `<dir>/scope-secrets.json` = { [groupId]: base64(encryptedBuffer) }. */
@@ -54,15 +61,16 @@ function writeMap(dir: string, map: Record<string, string>): void {
  * nothing) when encryption is unavailable. Best-effort: an FS error propagates
  * so the caller can log, but the caller treats D8 as optional.
  */
-export function rememberScopeSecret(
+export async function rememberScopeSecret(
   dir: string,
   cipher: SecretCipher,
   groupId: string,
   secret: string
-): boolean {
-  if (!cipher.isAvailable()) return false
+): Promise<boolean> {
+  if (!(await cipher.isAvailableAsync())) return false
+  const sealed = await cipher.encryptAsync(secret)
   const map = readMap(dir)
-  map[groupId] = cipher.encrypt(secret).toString('base64')
+  map[groupId] = sealed.toString('base64')
   writeMap(dir, map)
   return true
 }
@@ -71,17 +79,18 @@ export function rememberScopeSecret(
  * Recall + decrypt the secret stored for `groupId`, or null when encryption is
  * unavailable, nothing is stored, or decryption fails (e.g. the OS key changed).
  */
-export function recallScopeSecret(
+export async function recallScopeSecret(
   dir: string,
   cipher: SecretCipher,
   groupId: string
-): string | null {
-  if (!cipher.isAvailable()) return null
+): Promise<string | null> {
+  if (!(await cipher.isAvailableAsync())) return null
   const enc = readMap(dir)[groupId]
   if (!enc) return null
   try {
-    return cipher.decrypt(Buffer.from(enc, 'base64'))
-  } catch {
+    return await cipher.decryptAsync(Buffer.from(enc, 'base64'))
+  } catch (error) {
+    reportError('scope', 'a remembered scope secret could not be decrypted', error instanceof Error ? error.name : typeof error)
     return null
   }
 }

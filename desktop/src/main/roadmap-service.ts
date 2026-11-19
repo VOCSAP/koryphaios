@@ -68,22 +68,46 @@ export function computeDeckProjectKey(projectDir: string): string {
 export type RoadmapAuthFields = Record<string, unknown>
 export type RoadmapSigner = (payload: Record<string, unknown>) => RoadmapAuthFields | null
 
-let signerLoader: (() => RoadmapSigner | null) | null = null
+type RoadmapSignerLoader = () => RoadmapSigner | null | Promise<RoadmapSigner | null>
+
+let signerLoader: RoadmapSignerLoader | null = null
 let cachedSigner: RoadmapSigner | null = null
+let loadingSigner: Promise<RoadmapSigner | null> | null = null
+let signerGeneration = 0
 
 /** Called once at app start with a loader; the loader itself runs on first use. */
-export function configureRoadmapSigner(loader: () => RoadmapSigner | null): void {
+export function configureRoadmapSigner(loader: RoadmapSignerLoader): void {
   signerLoader = loader
   cachedSigner = null
+  loadingSigner = null
+  signerGeneration += 1
 }
 
 /** Test seam: forget both the loader and what it returned. */
 export function resetRoadmapSigner(): void {
   signerLoader = null
   cachedSigner = null
+  loadingSigner = null
+  signerGeneration += 1
 }
 
-function operatorProof(payload: Record<string, unknown>): RoadmapAuthFields | null {
+// Concurrent first signatures share one load: the loader may create the identity.
+async function loadSigner(loader: RoadmapSignerLoader): Promise<RoadmapSigner | null> {
+  const generation = signerGeneration
+  try {
+    loadingSigner ??= Promise.resolve().then(loader)
+    const signer = await loadingSigner
+    if (signer && generation === signerGeneration) cachedSigner = signer
+    return signer
+  } catch (e) {
+    reportError('roadmap', 'the operator signer could not be loaded', e)
+    throw e
+  } finally {
+    if (generation === signerGeneration) loadingSigner = null
+  }
+}
+
+async function operatorProof(payload: Record<string, unknown>): Promise<RoadmapAuthFields | null> {
   if (!cachedSigner) {
     if (!signerLoader) {
       reportError(
@@ -92,14 +116,15 @@ function operatorProof(payload: Record<string, unknown>): RoadmapAuthFields | nu
       )
       return null
     }
-    cachedSigner = signerLoader()
-    if (!cachedSigner) {
+    const signer = await loadSigner(signerLoader)
+    if (!signer) {
       reportError(
         'roadmap',
         'operator identity unavailable: this Deck cannot sign roadmap writes (re-enrol this machine)'
       )
       return null
     }
+    return signer(payload)
   }
   return cachedSigner(payload)
 }
@@ -109,8 +134,8 @@ function operatorProof(payload: Record<string, unknown>): RoadmapAuthFields | nu
  * must be built from the FINAL body: adding a field afterwards would invalidate
  * the signature broker-side (verifyAuthProof hashes the whole payload).
  */
-function signedAsOperator(body: Record<string, unknown>): Record<string, unknown> {
-  const fields = operatorProof(body)
+async function signedAsOperator(body: Record<string, unknown>): Promise<Record<string, unknown>> {
+  const fields = await operatorProof(body)
   return fields ? { ...body, ...fields } : body
 }
 
@@ -490,7 +515,7 @@ export async function upsertRoadmap(
   const res = await roadmapPost<RoadmapUpsertResponse>(
     endpoint,
     '/roadmap/upsert',
-    signedAsOperator({
+    await signedAsOperator({
       // project_key is ignored by the broker on patch (id set) and required on create.
       project_key: projectKey,
       by: DECK_AUTHOR,
@@ -552,7 +577,7 @@ export async function postAtomicDispatch(
   const path = '/roadmap/dispatch-atomic'
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
   if (endpoint.token) headers['Authorization'] = `Bearer ${endpoint.token}`
-  const body = signedAsOperator({
+  const body = await signedAsOperator({
     by: DECK_AUTHOR,
     action: request.action,
     intent: request.intent,
@@ -611,7 +636,7 @@ export async function appendRoadmapContext(
   const res = await roadmapPost<RoadmapContextAppendResponse>(
     endpoint,
     '/roadmap/append-context',
-    signedAsOperator({ id, by: DECK_AUTHOR, text })
+    await signedAsOperator({ id, by: DECK_AUTHOR, text })
   )
   return sanitizeOne(res?.item, '/roadmap/append-context')
 }
@@ -629,7 +654,7 @@ export async function reorderRoadmap(
   const res = await roadmapPost<RoadmapReorderResponse>(
     endpoint,
     '/roadmap/reorder',
-    signedAsOperator({
+    await signedAsOperator({
       project_key: projectKey,
       by: DECK_AUTHOR,
       ids,
@@ -646,7 +671,7 @@ export async function archiveRoadmap(endpoint: BrokerEndpoint, id: string): Prom
   const res = await roadmapPost<RoadmapArchiveResponse>(
     endpoint,
     '/roadmap/archive',
-    signedAsOperator({
+    await signedAsOperator({
       id,
       by: DECK_AUTHOR
     })
@@ -670,7 +695,7 @@ async function roadmapLockPeers(
   const res = await roadmapPost<{ parked?: unknown; released?: unknown; failed?: unknown }>(
     endpoint,
     path,
-    signedAsOperator({
+    await signedAsOperator({
       project_key: projectKey,
       peer_ids: peerIds,
       by: DECK_AUTHOR
@@ -902,7 +927,7 @@ export async function resolveRoadmapConflict(
   const res = await roadmapPost<{ item?: unknown }>(
     endpoint,
     '/roadmap/sync/resolve',
-    signedAsOperator({ id, choice, by: DECK_AUTHOR })
+    await signedAsOperator({ id, choice, by: DECK_AUTHOR })
   )
   return sanitizeOne(res?.item, '/roadmap/sync/resolve')
 }

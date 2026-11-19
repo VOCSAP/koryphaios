@@ -2,6 +2,8 @@ import { test, expect, afterEach } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { extractParenBody } from "./_braced-body.ts";
+import { onDeckError } from "../desktop/src/main/log.ts";
 
 // scope-secrets.ts imports only node builtins (the Electron safeStorage cipher
 // is injected), so it imports cleanly under bun. We inject a reversible fake
@@ -15,11 +17,12 @@ import {
 
 const tmpDirs: string[] = [];
 afterEach(() => {
+  onDeckError(() => {});
   for (const d of tmpDirs.splice(0)) {
     try {
       rmSync(d, { recursive: true, force: true });
-    } catch {
-      /* best-effort */
+    } catch (error) {
+      console.warn(`cleanup of ${d} failed`, error);
     }
   }
 });
@@ -30,15 +33,26 @@ function freshDir(): string {
   return d;
 }
 
+type SyncCipher = Pick<SecretCipher, "isAvailable" | "encrypt" | "decrypt">;
+
+function withAsync(sync: SyncCipher): SecretCipher {
+  return {
+    ...sync,
+    isAvailableAsync: async () => sync.isAvailable(),
+    encryptAsync: async (plain) => sync.encrypt(plain),
+    decryptAsync: async (buf) => sync.decrypt(buf),
+  };
+}
+
 // Reversible fake: "encrypt" by reversing the string into a Buffer. Proves the
 // stored blob is not the plaintext and that decrypt round-trips.
-const fakeCipher: SecretCipher = {
+const fakeCipher: SecretCipher = withAsync({
   isAvailable: () => true,
   encrypt: (plain) => Buffer.from([...plain].reverse().join(""), "utf8"),
   decrypt: (buf) => [...buf.toString("utf8")].reverse().join(""),
-};
+});
 
-const unavailableCipher: SecretCipher = {
+const unavailableCipher: SecretCipher = withAsync({
   isAvailable: () => false,
   encrypt: () => {
     throw new Error("must not be called");
@@ -46,64 +60,108 @@ const unavailableCipher: SecretCipher = {
   decrypt: () => {
     throw new Error("must not be called");
   },
-};
-
-test("remember then recall round-trips the secret, keyed by groupId", () => {
-  const dir = freshDir();
-  expect(rememberScopeSecret(dir, fakeCipher, "gid-A", "super-secret")).toBe(true);
-  expect(recallScopeSecret(dir, fakeCipher, "gid-A")).toBe("super-secret");
 });
 
-test("the plaintext secret is never written to disk", () => {
+test("remember then recall round-trips the secret, keyed by groupId", async () => {
   const dir = freshDir();
-  rememberScopeSecret(dir, fakeCipher, "gid-A", "super-secret");
+  expect(await rememberScopeSecret(dir, fakeCipher, "gid-A", "super-secret")).toBe(true);
+  expect(await recallScopeSecret(dir, fakeCipher, "gid-A")).toBe("super-secret");
+});
+
+test("the plaintext secret is never written to disk", async () => {
+  const dir = freshDir();
+  await rememberScopeSecret(dir, fakeCipher, "gid-A", "super-secret");
   const raw = readFileSync(join(dir, "scope-secrets.json"), "utf8");
   expect(raw).not.toContain("super-secret");
 });
 
-test("recall returns null for an unknown groupId", () => {
+test("recall returns null for an unknown groupId", async () => {
   const dir = freshDir();
-  rememberScopeSecret(dir, fakeCipher, "gid-A", "s");
-  expect(recallScopeSecret(dir, fakeCipher, "gid-OTHER")).toBeNull();
+  await rememberScopeSecret(dir, fakeCipher, "gid-A", "s");
+  expect(await recallScopeSecret(dir, fakeCipher, "gid-OTHER")).toBeNull();
 });
 
-test("an unavailable cipher makes remember a no-op and recall null", () => {
+test("an unavailable cipher makes remember a no-op and recall null", async () => {
   const dir = freshDir();
-  expect(rememberScopeSecret(dir, unavailableCipher, "gid-A", "s")).toBe(false);
+  expect(await rememberScopeSecret(dir, unavailableCipher, "gid-A", "s")).toBe(false);
   expect(existsSync(join(dir, "scope-secrets.json"))).toBe(false);
-  expect(recallScopeSecret(dir, unavailableCipher, "gid-A")).toBeNull();
+  expect(await recallScopeSecret(dir, unavailableCipher, "gid-A")).toBeNull();
 });
 
-test("a decrypt failure surfaces as null, not a throw", () => {
+test("the store goes through the async cipher only, which is unavailable before ready", async () => {
   const dir = freshDir();
-  const throwingDecrypt: SecretCipher = {
+  let ready = false;
+  const syncRemoved = (): never => {
+    throw new Error("the sync cipher must not be used");
+  };
+  const lateCipher: SecretCipher = {
+    ...fakeCipher,
+    isAvailable: syncRemoved,
+    encrypt: syncRemoved,
+    decrypt: syncRemoved,
+    isAvailableAsync: async () => ready,
+  };
+  expect(await rememberScopeSecret(dir, lateCipher, "gid-A", "s")).toBe(false);
+  expect(existsSync(join(dir, "scope-secrets.json"))).toBe(false);
+  expect(await recallScopeSecret(dir, lateCipher, "gid-A")).toBeNull();
+  ready = true;
+  expect(await rememberScopeSecret(dir, lateCipher, "gid-A", "s")).toBe(true);
+  expect(await recallScopeSecret(dir, lateCipher, "gid-A")).toBe("s");
+});
+
+test("a decrypt failure surfaces as null, not a throw, and is traced without any value", async () => {
+  const dir = freshDir();
+  const texts: string[] = [];
+  onDeckError((_scope, text) => texts.push(text));
+  const throwingDecrypt = withAsync({
     isAvailable: () => true,
     encrypt: (p) => Buffer.from(p, "utf8"),
     decrypt: () => {
       throw new Error("OS key changed");
     },
-  };
-  rememberScopeSecret(dir, throwingDecrypt, "gid-A", "s");
-  expect(recallScopeSecret(dir, throwingDecrypt, "gid-A")).toBeNull();
+  });
+  await rememberScopeSecret(dir, throwingDecrypt, "gid-A", "s");
+  expect(await recallScopeSecret(dir, throwingDecrypt, "gid-A")).toBeNull();
+  expect(texts).toEqual(["a remembered scope secret could not be decrypted: Error"]);
 });
 
-test("a corrupt store file is treated as empty, never throws", () => {
+test("a corrupt store file is treated as empty, never throws", async () => {
   const dir = freshDir();
   writeFileSync(join(dir, "scope-secrets.json"), "{ not valid json");
-  expect(recallScopeSecret(dir, fakeCipher, "gid-A")).toBeNull();
+  expect(await recallScopeSecret(dir, fakeCipher, "gid-A")).toBeNull();
   // and a subsequent remember still works (overwrites the garbage)
-  expect(rememberScopeSecret(dir, fakeCipher, "gid-A", "s")).toBe(true);
-  expect(recallScopeSecret(dir, fakeCipher, "gid-A")).toBe("s");
+  expect(await rememberScopeSecret(dir, fakeCipher, "gid-A", "s")).toBe(true);
+  expect(await recallScopeSecret(dir, fakeCipher, "gid-A")).toBe("s");
 });
 
-test("forget drops a stored secret and is a no-op when absent", () => {
+test("forget drops a stored secret and is a no-op when absent", async () => {
   const dir = freshDir();
-  rememberScopeSecret(dir, fakeCipher, "gid-A", "s");
-  rememberScopeSecret(dir, fakeCipher, "gid-B", "t");
+  await rememberScopeSecret(dir, fakeCipher, "gid-A", "s");
+  await rememberScopeSecret(dir, fakeCipher, "gid-B", "t");
   forgetScopeSecret(dir, "gid-A");
-  expect(recallScopeSecret(dir, fakeCipher, "gid-A")).toBeNull();
-  expect(recallScopeSecret(dir, fakeCipher, "gid-B")).toBe("t");
+  expect(await recallScopeSecret(dir, fakeCipher, "gid-A")).toBeNull();
+  expect(await recallScopeSecret(dir, fakeCipher, "gid-B")).toBe("t");
   // no-op when absent
   forgetScopeSecret(dir, "gid-A");
-  expect(recallScopeSecret(dir, fakeCipher, "gid-B")).toBe("t");
+  expect(await recallScopeSecret(dir, fakeCipher, "gid-B")).toBe("t");
+});
+
+test("index remembers the scope secret only inside the whenReady handler", () => {
+  const source = readFileSync(join(import.meta.dir, "..", "desktop", "src", "main", "index.ts"), "utf8");
+  const anchor = "app.whenReady().then(";
+  const at = source.indexOf(anchor);
+  expect(at, "index.ts must start the app from app.whenReady().then(").toBeGreaterThanOrEqual(0);
+  const open = at + anchor.length - 1;
+  const handler = extractParenBody(source, open, true);
+  const call = "void rememberScopeSecret(";
+  const callAt = handler.indexOf(call);
+  expect(callAt, "the remember call lives in the ready handler, never awaited: startup must not wait on the cipher").toBeGreaterThanOrEqual(0);
+  const args = extractParenBody(handler, callAt + call.length - 1, true);
+  expect(
+    handler.slice(callAt + call.length + args.length + 1).startsWith(".catch("),
+    "a failure of the floating remember is traced"
+  ).toBe(true);
+  expect(source.slice(0, at), "no remember call before the ready handler: the cipher is unavailable then").not.toContain("rememberScopeSecret(");
+  expect(source.slice(open + handler.length + 2)).not.toContain("rememberScopeSecret(");
+  expect(source, "the scope resolution waits for the recall").toContain("await recallScopeSecret(");
 });

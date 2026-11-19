@@ -63,6 +63,42 @@ test('a spawn captures the published scope and supersedes a pending adoption', a
   expect(result).toEqual({ state: 'superseded' })
 })
 
+test('a spawn during an asynchronous scope resolution supersedes the adoption before it prepares anything', async () => {
+  let release: () => void = () => {}
+  const gate = new Promise<void>((resolve) => { release = resolve })
+  let prepared = false
+  const wiring = createScopeWiring(wiringDeps({
+    approvals: {
+      prepareScope: async (target) => {
+        prepared = true
+        return readyPreparation(target, [])
+      },
+      whenPreparationSettled: async () => {}
+    },
+    resolveScope: async () => {
+      await gate
+      return candidate
+    }
+  }))
+
+  const adoption = wiring.adoptScope(candidate, () => true)
+  wiring.spawnEnvironment()
+  release()
+
+  expect(await reachedWithin(adoption, 'adoption superseded by the spawn', 1500)).toEqual({ state: 'superseded' })
+  expect(prepared).toBe(false)
+})
+
+test('a failing scope resolution rejects the adoption instead of being swallowed', async () => {
+  const wiring = createScopeWiring(wiringDeps({
+    resolveScope: async () => {
+      throw new Error('recall failed')
+    }
+  }))
+
+  await expect(wiring.adoptScope(candidate, () => true)).rejects.toThrow('recall failed')
+})
+
 test('a successful adoption publishes the scope before running its post-publication cleanup', async () => {
   const events: string[] = []
   const wiring = createScopeWiring(wiringDeps({

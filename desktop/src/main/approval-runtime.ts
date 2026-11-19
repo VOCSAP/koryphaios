@@ -512,7 +512,8 @@ export class ApprovalRuntime {
     if (!(await this.revokeDebt()) || !this.isCurrentArm(generation)) return this.refusedPreparation('mint-refused')
 
     if (!existsSync(this.opts.stateDir)) mkdirSync(this.opts.stateDir, { recursive: true })
-    const identityResult = ensureOperatorIdentity(this.opts.stateDir, this.opts.cipher)
+    const identityResult = await ensureOperatorIdentity(this.opts.stateDir, this.opts.cipher)
+    if (!this.isCurrentArm(generation)) return this.refusedPreparation('mint-refused')
     if (identityResult.state !== 'ready') {
       this.identity = null
       this.opts.onTrustStatus?.('identity-unreadable')

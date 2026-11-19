@@ -27,6 +27,9 @@ const fakeCipher: SecretCipher = {
   isAvailable: () => true,
   encrypt: (s: string) => Buffer.from(`X${s}`, "utf8"),
   decrypt: (b: Buffer) => b.toString("utf8").slice(1),
+  isAvailableAsync: async () => true,
+  encryptAsync: async (s: string) => Buffer.from(`X${s}`, "utf8"),
+  decryptAsync: async (b: Buffer) => b.toString("utf8").slice(1),
 };
 
 const originalFetch = globalThis.fetch;
@@ -1066,13 +1069,20 @@ describe("ApprovalRuntime prepared root lifecycle", () => {
   test("an operator identity the keychain cannot read is refused as identity before any request", async () => {
     const wire = wireBroker();
     const stateDir = tmp();
-    createOperatorIdentity(stateDir, fakeCipher, generateCredential());
+    await createOperatorIdentity(stateDir, fakeCipher, generateCredential());
     const unavailableCipher: SecretCipher = {
       isAvailable: () => false,
       encrypt: () => {
         throw new Error("keychain unavailable");
       },
       decrypt: () => {
+        throw new Error("keychain unavailable");
+      },
+      isAvailableAsync: async () => false,
+      encryptAsync: async () => {
+        throw new Error("keychain unavailable");
+      },
+      decryptAsync: async () => {
         throw new Error("keychain unavailable");
       },
     };

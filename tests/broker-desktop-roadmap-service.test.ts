@@ -366,6 +366,86 @@ test("with no signer configured, an operator-authored write is refused, loudly",
   }
 });
 
+const deckSigner = (payload: Record<string, unknown>) => {
+  const signed = { ...payload, public_key: deckOperator.publicKey };
+  return {
+    public_key: deckOperator.publicKey,
+    auth: buildAuthProof(deckOperator.privateKey, signed, {
+      kind: "operator",
+      operator_id: deriveOperatorId(deckOperator.publicKey)
+    })
+  };
+};
+
+async function withSignerLoader(loader: Parameters<typeof configureRoadmapSigner>[0], run: () => Promise<void>): Promise<void> {
+  configureRoadmapSigner(loader);
+  try {
+    await run();
+  } finally {
+    configureRoadmapSigner(() => deckSigner);
+  }
+}
+
+test("an async signer loader signs the write: the request waits for the signature", async () => {
+  const endpoint = { url: broker.url, token: null };
+  const key = "github.com/acme/deck-async-signer-test";
+  await withSignerLoader(
+    async () => {
+      await Promise.resolve();
+      return deckSigner;
+    },
+    async () => {
+      expect((await upsertRoadmap(endpoint, key, { title: "async signed" })).id.length).toBeGreaterThan(10);
+    }
+  );
+});
+
+test("two concurrent first signatures share one load of the signer", async () => {
+  const endpoint = { url: broker.url, token: null };
+  const key = "github.com/acme/deck-concurrent-signer-test";
+  let loads = 0;
+  let release: () => void = () => {};
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await withSignerLoader(
+    async () => {
+      loads += 1;
+      await gate;
+      return deckSigner;
+    },
+    async () => {
+      const pending = [
+        upsertRoadmap(endpoint, key, { title: "first" }),
+        upsertRoadmap(endpoint, key, { title: "second" })
+      ];
+      release();
+      const both = await Promise.all(pending);
+      expect(both.map((item) => item.title).sort()).toEqual(["first", "second"]);
+      expect(loads).toBe(1);
+      await upsertRoadmap(endpoint, key, { title: "third" });
+      expect(loads, "a loaded signer is cached for the next writes").toBe(1);
+    }
+  );
+});
+
+test("a loader that has no signer yet is asked again on the next write", async () => {
+  const endpoint = { url: broker.url, token: null };
+  const key = "github.com/acme/deck-retry-signer-test";
+  let loads = 0;
+  await withSignerLoader(
+    async () => {
+      loads += 1;
+      return loads === 1 ? null : deckSigner;
+    },
+    async () => {
+      await expect(upsertRoadmap(endpoint, key, { title: "too early" })).rejects.toThrow(/sign the write with the operator credential/);
+      expect((await upsertRoadmap(endpoint, key, { title: "retried" })).id.length).toBeGreaterThan(10);
+      expect(loads).toBe(2);
+    }
+  );
+});
+
 type GuardedSite = {
   name: string;
   create: RoadmapUpsertFields;

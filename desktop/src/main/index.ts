@@ -54,7 +54,7 @@ import {
   type SecretCipher
 } from './scope-secrets'
 import { applyProviderKeyPatch, sanitizeProviders } from './provider-secrets'
-import { createSafeStorageCipher, type AsyncSecretCipher } from './safe-storage-cipher'
+import { createSafeStorageCipher } from './safe-storage-cipher'
 import { GLOBAL_RULES_FILE, TtsrService, type TtsrApprovalRequest } from './ttsr-service'
 import { ttsrApprovalSpec } from './ttsr-dialog'
 import { sanitizeTtsrDisabled } from './ttsr-toggles'
@@ -478,23 +478,12 @@ function initSessionState(): void {
 // Remember a custom scope's secret on this machine (encrypted via the OS
 // credential store) so a custom-scope workspace can be restored without
 // re-supplying the secret via the launch arg. Keyed by groupId in userData.
-const secretCipher: SecretCipher & AsyncSecretCipher = createSafeStorageCipher(safeStorage)
+const secretCipher: SecretCipher = createSafeStorageCipher(safeStorage)
 // Delegates to sandbox-prompt.ts's sandboxPromptRoot so the value
 // composeSandboxAppendPrompt's containment check anchors on is PROVABLY the
 // same expression every other call site here uses -- not a parallel one
 // that could silently diverge (card 9e529177 audit round 2).
 const secretsDir = (): string => sandboxPromptRoot(app.getPath('userData'))
-
-// If this window was launched with a custom scope, remember its secret (opt-out
-// via the rememberScopeSecrets setting). The plaintext never hits disk -- only
-// the encrypted blob, in a userData file separate from the workspace JSON.
-if (activeScope.scopeKind === 'custom' && config.rememberScopeSecrets) {
-  try {
-    rememberScopeSecret(secretsDir(), secretCipher, activeScope.groupId, activeScope.secret)
-  } catch (e) {
-    reportError('scope', 'could not remember scope secret', e)
-  }
-}
 
 // Base command each session runs. presets/models/worktreeInit follow the
 // normal project > global precedence (resolveLaunchConfig at use sites); the
@@ -722,10 +711,10 @@ const scopeWiring = createScopeWiring<Scope, { scope: Scope; environment: ScopeE
   approvals,
   currentScope: () => activeScope,
   hasLiveSessions: () => service.hasLiveSessions(),
-  resolveScope: (ws) => {
+  resolveScope: async (ws) => {
     let next = resolveAdoptedScope(ws, activeScope, cliContext.projectDir)
     if (next.groupId !== ws.groupId && ws.scopeKind === 'custom' && config.rememberScopeSecrets) {
-      const remembered = recallScopeSecret(secretsDir(), secretCipher, ws.groupId)
+      const remembered = await recallScopeSecret(secretsDir(), secretCipher, ws.groupId)
       if (remembered) next = computeScope(cliContext.projectDir, remembered)
     }
     return next
@@ -776,9 +765,9 @@ const permissionLeases = new PermissionLeaseRuntime({
   reportError: (message, error) => reportError('permission-lease', message, error)
 })
 
-configureRoadmapSigner(() => {
+configureRoadmapSigner(async () => {
   const stateDir = join(app.getPath('userData'), APP_STATE_SUBDIR)
-  const identityResult = ensureOperatorIdentity(stateDir, secretCipher)
+  const identityResult = await ensureOperatorIdentity(stateDir, secretCipher)
   if (identityResult.state !== 'ready') return null
   const identity = identityResult.identity
   return (payload) => {
@@ -3610,6 +3599,14 @@ function createWindow(): void {
 }
 
 app.whenReady().then(async () => {
+  // If this window was launched with a custom scope, remember its secret (opt-out
+  // via the rememberScopeSecrets setting). The plaintext never hits disk -- only
+  // the encrypted blob, in a userData file separate from the workspace JSON.
+  if (activeScope.scopeKind === 'custom' && config.rememberScopeSecrets) {
+    void rememberScopeSecret(secretsDir(), secretCipher, activeScope.groupId, activeScope.secret).catch((e) =>
+      reportError('scope', 'could not remember scope secret', e instanceof Error ? e.name : typeof e)
+    )
+  }
   void prewarmClaudeVersion(config.shell)
   nativeTheme.themeSource = config.theme
   // Card 6c380073: drop last run's team-lead --mcp-config files before this
@@ -3760,7 +3757,7 @@ app.whenReady().then(async () => {
     exportEnrolment(join(app.getPath('userData'), APP_STATE_SUBDIR), secretCipher)
   )
   regHandle('approvals:enrolment-apply', async (_e, payload: unknown) => {
-    const adopted = applyEnrolment(join(app.getPath('userData'), APP_STATE_SUBDIR), secretCipher, payload)
+    const adopted = await applyEnrolment(join(app.getPath('userData'), APP_STATE_SUBDIR), secretCipher, payload)
     if (!adopted) return false
     await approvals.disarm()
     if (!(await approvals.arm())) {

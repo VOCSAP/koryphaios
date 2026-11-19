@@ -31,32 +31,41 @@ function tmp(): string {
   return d;
 }
 
+function withAsync(sync: Pick<SecretCipher, "isAvailable" | "encrypt" | "decrypt">): SecretCipher {
+  return {
+    ...sync,
+    isAvailableAsync: async () => sync.isAvailable(),
+    encryptAsync: async (plain) => sync.encrypt(plain),
+    decryptAsync: async (buf) => sync.decrypt(buf),
+  };
+}
+
 /** Reversible fake cipher (scope-secrets test pattern). */
-const fakeCipher: SecretCipher = {
+const fakeCipher: SecretCipher = withAsync({
   isAvailable: () => true,
   encrypt: (s: string) => Buffer.from(`X${s}`, "utf8"),
   decrypt: (b: Buffer) => b.toString("utf8").slice(1),
-};
+});
 
 /** Stand-in for Linux without a keyring: encryption unavailable. */
-const noCipher: SecretCipher = {
+const noCipher: SecretCipher = withAsync({
   isAvailable: () => false,
   encrypt: () => Buffer.from(""),
   decrypt: () => {
     throw new Error("unavailable");
   },
-};
+});
 
-function createInitialIdentity(dir: string, cipher: SecretCipher) {
-  const result = ensureOperatorIdentity(dir, cipher);
+async function createInitialIdentity(dir: string, cipher: SecretCipher) {
+  const result = await ensureOperatorIdentity(dir, cipher);
   if (result.state !== "ready") throw new Error("initial identity unavailable");
   return result.identity;
 }
 
 describe("operator identity", () => {
-  test("first run mints a credential and persists it encrypted", () => {
+  test("first run mints a credential and persists it encrypted", async () => {
     const dir = tmp();
-    const id = createInitialIdentity(dir, fakeCipher);
+    const id = await createInitialIdentity(dir, fakeCipher);
     expect(id).not.toBeNull();
     expect(id?.operatorId).toMatch(/^[0-9a-f]{16}$/);
 
@@ -66,93 +75,111 @@ describe("operator identity", () => {
     expect(raw).not.toContain(id!.privateKey);
   });
 
-  test("the identity is stable across loads", () => {
+  test("the identity is stable across loads", async () => {
     const dir = tmp();
-    const first = createInitialIdentity(dir, fakeCipher);
-    const second = loadOperatorIdentity(dir, fakeCipher);
+    const first = await createInitialIdentity(dir, fakeCipher);
+    const second = await loadOperatorIdentity(dir, fakeCipher);
     expect(second?.operatorId).toBe(first!.operatorId);
     expect(second?.privateKey).toBe(first!.privateKey);
   });
 
-  test("two app-state dirs (two OS accounts) yield two identities", () => {
+  test("two app-state dirs (two OS accounts) yield two identities", async () => {
     // This is the compartmentalisation guarantee: %APPDATA% is per OS user, so
     // account A and account B on the SAME machine cannot collide.
-    const a = createInitialIdentity(tmp(), fakeCipher);
-    const b = createInitialIdentity(tmp(), fakeCipher);
+    const a = await createInitialIdentity(tmp(), fakeCipher);
+    const b = await createInitialIdentity(tmp(), fakeCipher);
     expect(a?.operatorId).not.toBe(b?.operatorId);
     expect(a?.osUserHash).not.toBe(b?.osUserHash);
   });
 
-  test("operator_id is the digest of the public key (self-certifying)", () => {
-    const id = createInitialIdentity(tmp(), fakeCipher);
+  test("operator_id is the digest of the public key (self-certifying)", async () => {
+    const id = await createInitialIdentity(tmp(), fakeCipher);
     expect(id?.operatorId).toBe(deriveOperatorId(id!.publicKey));
   });
 
-  test("without OS encryption it still works, explicitly in the clear", () => {
+  test("without OS encryption it still works, explicitly in the clear", async () => {
     const dir = tmp();
-    const id = createInitialIdentity(dir, noCipher);
+    const id = await createInitialIdentity(dir, noCipher);
     expect(id).not.toBeNull();
     expect(readFileSync(join(dir, "operator.json"), "utf8")).toContain("plain:");
-    expect(loadOperatorIdentity(dir, noCipher)?.operatorId).toBe(id!.operatorId);
+    expect((await loadOperatorIdentity(dir, noCipher))?.operatorId).toBe(id!.operatorId);
   });
 
-  test("an undecryptable identity returns null rather than silently minting a new one", () => {
+  test("an undecryptable identity returns null rather than silently minting a new one", async () => {
     // Minting a fresh identity here would orphan the operator's phone pairing.
     const dir = tmp();
-    createOperatorIdentity(dir, fakeCipher, generateCredential());
-    const hostile: SecretCipher = {
+    await createOperatorIdentity(dir, fakeCipher, generateCredential());
+    const hostile: SecretCipher = withAsync({
       isAvailable: () => true,
       encrypt: () => Buffer.from(""),
       decrypt: () => {
         throw new Error("keychain changed");
       },
-    };
-    expect(loadOperatorIdentity(dir, hostile)).toBeNull();
+    });
+    expect(await loadOperatorIdentity(dir, hostile)).toBeNull();
   });
 
-  test("a corrupt identity file is a null, not a crash", () => {
+  test("a corrupt identity file is a null, not a crash", async () => {
     const dir = tmp();
     writeFileSync(join(dir, "operator.json"), "{ not json");
-    expect(loadOperatorIdentity(dir, fakeCipher)).toBeNull();
+    expect(await loadOperatorIdentity(dir, fakeCipher)).toBeNull();
+  });
+
+  test("the identity is written and read through the async cipher only", async () => {
+    const dir = tmp();
+    const asyncOnly: SecretCipher = {
+      ...fakeCipher,
+      isAvailable: () => {
+        throw new Error("the sync probe must not be used");
+      },
+      encrypt: () => {
+        throw new Error("the sync encrypt must not be used");
+      },
+      decrypt: () => {
+        throw new Error("the sync decrypt must not be used");
+      },
+    };
+    const created = await createInitialIdentity(dir, asyncOnly);
+    expect((await loadOperatorIdentity(dir, asyncOnly))?.operatorId).toBe(created.operatorId);
   });
 });
 
 describe("multi-PC enrolment", () => {
-  test("PC#2 adopting the payload shares the identity", () => {
+  test("PC#2 adopting the payload shares the identity", async () => {
     const pc1 = tmp();
     const pc2 = tmp();
-    const original = createInitialIdentity(pc1, fakeCipher);
+    const original = await createInitialIdentity(pc1, fakeCipher);
 
-    const payload = exportEnrolment(pc1, fakeCipher);
+    const payload = await exportEnrolment(pc1, fakeCipher);
     expect(payload?.v).toBe(1);
 
-    const adopted = applyEnrolment(pc2, fakeCipher, payload);
+    const adopted = await applyEnrolment(pc2, fakeCipher, payload);
     expect(adopted?.operatorId).toBe(original!.operatorId);
     // Same identity, same salt -> the same origin label follows the person.
     expect(adopted?.osUserHash).toBe(original!.osUserHash);
     // ...and it survives a reload on PC#2.
-    expect(loadOperatorIdentity(pc2, fakeCipher)?.operatorId).toBe(original!.operatorId);
+    expect((await loadOperatorIdentity(pc2, fakeCipher))?.operatorId).toBe(original!.operatorId);
   });
 
-  test("garbage payloads are refused without throwing", () => {
+  test("garbage payloads are refused without throwing", async () => {
     const dir = tmp();
     for (const bad of [null, undefined, 42, "string", {}, { privateKey: "x" }, { privateKey: "x", publicKey: "y" }]) {
-      expect(applyEnrolment(dir, fakeCipher, bad)).toBeNull();
+      expect(await applyEnrolment(dir, fakeCipher, bad)).toBeNull();
     }
   });
 
-  test("a mismatched keypair is refused (probe before persist)", () => {
+  test("a mismatched keypair is refused (probe before persist)", async () => {
     const a = generateCredential();
     const b = generateCredential();
     expect(credentialWorks({ privateKey: a.privateKey, publicKey: b.publicKey })).toBe(false);
     expect(credentialWorks(a)).toBe(true);
     expect(
-      applyEnrolment(tmp(), fakeCipher, { v: 1, privateKey: a.privateKey, publicKey: b.publicKey })
+      await applyEnrolment(tmp(), fakeCipher, { v: 1, privateKey: a.privateKey, publicKey: b.publicKey })
     ).toBeNull();
   });
 
-  test("exporting from a machine with no identity yields null", () => {
-    expect(exportEnrolment(tmp(), fakeCipher)).toBeNull();
+  test("exporting from a machine with no identity yields null", async () => {
+    expect(await exportEnrolment(tmp(), fakeCipher)).toBeNull();
   });
 });
 
