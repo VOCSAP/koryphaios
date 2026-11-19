@@ -1,11 +1,13 @@
-import { lstat, readFile } from 'node:fs/promises'
+import { lstat } from 'node:fs/promises'
 import { isAbsolute } from 'node:path'
 import { approve, commandHash, isApproved } from './launch-approval'
 import { reportError } from './log'
 import { resolveWithin } from './explorer-service'
 import { electProjectEntry } from '../shared/project-dirs'
+import { fileIdentity, readBounded } from '../shared/ttsr-fs'
 
 const ENV_NAME = /^[A-Z_][A-Z0-9_]*$/
+const SERVE_CONFIG_MAX_BYTES = 256 * 1024
 
 export const SERVE_CONFIG_FIELD_NAMES = {
   root: ['version', 'name', 'actions', 'primary'],
@@ -251,12 +253,23 @@ export async function readServeConfig(projectDir: string): Promise<ServeConfigRe
   let path: string
   let text: string
   try {
-    if ((await lstat(elected.path)).isSymbolicLink()) {
+    const leaf = await lstat(elected.path, { bigint: true })
+    if (leaf.isSymbolicLink()) {
       reportError('serve-config', `refusing serve.json: ${elected.path} is a link`)
       return { error: 'read' }
     }
     path = await resolveWithin(projectDir, elected.rel)
-    text = await readFile(path, 'utf-8')
+    const res = readBounded(path, { cap: SERVE_CONFIG_MAX_BYTES, expect: fileIdentity(leaf) })
+    if (res.kind === 'absent') return { error: 'missing' }
+    if (res.kind === 'refused') {
+      reportError('serve-config', `could not read serve.json (${elected.rel}): ${res.reason}`)
+      return { error: 'read' }
+    }
+    if (res.stat.nlink > 1) {
+      reportError('serve-config', `could not read serve.json (${elected.rel}): ${res.stat.nlink} hard links`)
+      return { error: 'read' }
+    }
+    text = res.bytes.toString('utf-8')
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
       return { error: 'missing' }
@@ -268,8 +281,8 @@ export async function readServeConfig(projectDir: string): Promise<ServeConfigRe
   let raw: unknown
   try {
     raw = JSON.parse(text)
-  } catch (error) {
-    reportError('serve-config', 'invalid serve.json', error)
+  } catch {
+    reportError('serve-config', 'invalid serve.json: not valid JSON')
     return { error: 'invalid JSON' }
   }
 
