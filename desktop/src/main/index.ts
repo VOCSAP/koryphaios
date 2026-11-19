@@ -54,6 +54,7 @@ import {
   type SecretCipher
 } from './scope-secrets'
 import { applyProviderKeyPatch, sanitizeProviders } from './provider-secrets'
+import { createSafeStorageCipher, type AsyncSecretCipher } from './safe-storage-cipher'
 import { GLOBAL_RULES_FILE, TtsrService, type TtsrApprovalRequest } from './ttsr-service'
 import { ttsrApprovalSpec } from './ttsr-dialog'
 import { sanitizeTtsrDisabled } from './ttsr-toggles'
@@ -474,14 +475,10 @@ function initSessionState(): void {
   }
 }
 
-// D8: remember a custom scope's secret on this machine (encrypted via the OS
+// Remember a custom scope's secret on this machine (encrypted via the OS
 // credential store) so a custom-scope workspace can be restored without
 // re-supplying the secret via the launch arg. Keyed by groupId in userData.
-const secretCipher: SecretCipher = {
-  isAvailable: () => safeStorage.isEncryptionAvailable(),
-  encrypt: (plain) => safeStorage.encryptString(plain),
-  decrypt: (buf) => safeStorage.decryptString(buf)
-}
+const secretCipher: SecretCipher & AsyncSecretCipher = createSafeStorageCipher(safeStorage)
 // Delegates to sandbox-prompt.ts's sandboxPromptRoot so the value
 // composeSandboxAppendPrompt's containment check anchors on is PROVABLY the
 // same expression every other call site here uses -- not a parallel one
