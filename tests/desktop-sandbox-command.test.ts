@@ -1,7 +1,12 @@
 // PLAN-SANDBOX SBX1: pure sandbox builders (naming, path/env mapping, engine
 // arg vectors, launch script) — desktop/src/main/sandbox-command.
 import { test, expect, describe } from "bun:test";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
+  SANDBOX_CONFIG_DIR,
   DEFAULT_SANDBOX_PORTS,
   SANDBOX_AUTH_VOLUME,
   SANDBOX_CREDENTIALS_FILE,
@@ -562,12 +567,8 @@ test("auth commands run in a throwaway container, not the project one", () => {
   expect(buildAuthCommand("podman", "koryphaios-sandbox")).toBe(
     `podman run --rm -it ${mount} koryphaios-sandbox bash -lc claude`
   );
-  // The probe demands credentials AND a finished onboarding: probing the
-  // credentials alone made the login dialog kill the CLI mid-onboarding
-  // (hasCompletedOnboarding never written), so every agent re-ran onboarding
-  // while the Docker view claimed "connected". The if/else keeps the exit
-  // code binary (a bare grep on a missing .claude.json exits 2 = "unknown").
-  expect(buildAuthProbeArgs("koryphaios-sandbox")).toEqual([
+  // The exit code stays binary: a bare grep on a missing .claude.json exits 2 = "unknown".
+  expect(buildAuthProbeArgs("koryphaios-sandbox").slice(0, -1)).toEqual([
     "run",
     "--rm",
     "-v",
@@ -577,7 +578,6 @@ test("auth commands run in a throwaway container, not the project one", () => {
     "koryphaios-sandbox",
     "sh",
     "-c",
-    `if test -s ${SANDBOX_CREDENTIALS_FILE} && grep -qs hasCompletedOnboarding /home/kory/.claude/.claude.json; then exit 0; else exit 1; fi`,
   ]);
   expect(buildAuthPurgeArgs("koryphaios-sandbox")).toEqual([
     "run",
@@ -593,6 +593,50 @@ test("auth commands run in a throwaway container, not the project one", () => {
   ]);
   // The work mount is the one thing that must never appear here.
   expect(buildAuthCommand("docker", "koryphaios-sandbox")).not.toContain("/work");
+});
+
+// The probe script is run for real with sh against a temp config dir: the
+// verdict is its exit code, so a string comparison of the script would not
+// prove which credentials it accepts.
+describe("auth probe script verdict", () => {
+  const SH = Bun.which("sh");
+  const NOW = Date.now();
+  const DAY = 86_400_000;
+
+  function probeExit(credentials: string | null, claudeJson: string | null): number | null {
+    const dir = mkdtempSync(join(tmpdir(), "kory-auth-probe-")).replaceAll("\\", "/");
+    try {
+      if (credentials !== null) writeFileSync(`${dir}/.credentials.json`, credentials);
+      if (claudeJson !== null) writeFileSync(`${dir}/.claude.json`, claudeJson);
+      const script = buildAuthProbeArgs("koryphaios-sandbox").at(-1)!.replaceAll(SANDBOX_CONFIG_DIR, dir);
+      return spawnSync(SH!, ["-c", script]).status;
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+  const onboarded = '{"hasCompletedOnboarding":true}';
+  const creds = (fields: string) => `{"claudeAiOauth":{"accessToken":"x","refreshToken":"y",${fields}}}`;
+
+  test.skipIf(!SH)("signed in when the refresh token expires in the future (sh missing: skipped)", () => {
+    expect(probeExit(creds(`"expiresAt":0,"refreshTokenExpiresAt":${NOW + DAY}`), onboarded)).toBe(0);
+  });
+
+  test.skipIf(!SH)("not signed in when the refresh token expired (sh missing: skipped)", () => {
+    expect(probeExit(creds(`"expiresAt":0,"refreshTokenExpiresAt":${NOW - DAY}`), onboarded)).toBe(1);
+    expect(probeExit(creds('"refreshTokenExpiresAt" : 0'), onboarded)).toBe(1);
+  });
+
+  test.skipIf(!SH)("signed in when the credentials carry no numeric refresh expiry (sh missing: skipped)", () => {
+    expect(probeExit(creds('"expiresAt":0'), onboarded)).toBe(0);
+    expect(probeExit(creds('"refreshTokenExpiresAt":null'), onboarded)).toBe(0);
+  });
+
+  test.skipIf(!SH)("missing credentials or onboarding stays exit 1, never 2 (sh missing: skipped)", () => {
+    expect(probeExit(null, onboarded)).toBe(1);
+    expect(probeExit("", onboarded)).toBe(1);
+    expect(probeExit(creds(`"refreshTokenExpiresAt":${NOW + DAY}`), null)).toBe(1);
+    expect(probeExit(creds(`"refreshTokenExpiresAt":${NOW + DAY}`), "{}")).toBe(1);
+  });
 });
 
 // `image rm` is deliberately unforced: the engine refusing because a container

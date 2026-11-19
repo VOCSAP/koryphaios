@@ -514,6 +514,9 @@ export function buildAuthCommand(engine: SandboxEngine, image: string): string {
  * On a missing .claude.json a bare grep -q exits 2; the if/else collapses every
  * miss to exit 1 so probeAuth reads it as a plain not-signed-in rather than
  * engine trouble.
+ * A refreshTokenExpiresAt (ms epoch) in the past is not signed in either: the
+ * CLI cannot refresh and asks for /login. Only the digits are extracted, never
+ * a token; a missing or non-numeric field counts as signed in.
  */
 export function buildAuthProbeArgs(image: string): string[] {
   return [
@@ -523,7 +526,7 @@ export function buildAuthProbeArgs(image: string): string[] {
     image,
     'sh',
     '-c',
-    `if test -s ${SANDBOX_CREDENTIALS_FILE} && grep -qs hasCompletedOnboarding ${SANDBOX_CLAUDE_JSON}; then exit 0; else exit 1; fi`
+    `if test -s ${SANDBOX_CREDENTIALS_FILE} && grep -qs hasCompletedOnboarding ${SANDBOX_CLAUDE_JSON}; then e=$(sed -n 's/.*"refreshTokenExpiresAt"[[:space:]]*:[[:space:]]*\\([0-9]*\\).*/\\1/p' ${SANDBOX_CREDENTIALS_FILE} | head -n 1); if test -z "$e" || test "$e" -gt "$(date +%s)000"; then exit 0; fi; fi; exit 1`
   ]
 }
 
