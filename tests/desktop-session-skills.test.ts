@@ -2,7 +2,8 @@ import { afterEach, expect, test } from 'bun:test'
 import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { readSessionSkills, sessionSkillsHandlers, sessionSkillsPath, writeSessionSkills } from '../desktop/src/main/session-skills'
+import { extractBracedBody } from './_braced-body'
+import { readSessionSkills, registerSessionSkillsChannels, sessionSkillsHandlers, sessionSkillsPath, writeSessionSkills } from '../desktop/src/main/session-skills'
 
 const dirs: string[] = []
 
@@ -92,6 +93,13 @@ test('rejects a linked, malformed, or non-strict settings file instead of treati
   expect(() => writeSessionSkills(state, { version: 1, addendum: { start: '', end: '', stop: '' }, commands: [] })).toThrow('Invalid session skills settings')
 })
 
+test('throws a stat failure other than a missing file instead of reading it as absent', () => {
+  const state = stateDir()
+  const unstatable = join(state, 'a' + String.fromCharCode(0) + 'b')
+
+  expect(() => readSessionSkills(unstatable)).toThrow()
+})
+
 test('distinguishes a non-regular file from a symbolic link', () => {
   const state = stateDir()
   mkdirSync(sessionSkillsPath(state))
@@ -137,6 +145,7 @@ test('reads a later persisted value without retaining a prior snapshot', () => {
 test('reads an externally replaced settings document on the next access', () => {
   const state = stateDir()
   writeSessionSkills(state, addenda('first'))
+  expect(readSessionSkills(state).addendum.start).toBe('first')
   writeFileSync(sessionSkillsPath(state), JSON.stringify({ version: 1, addendum: { start: 'second', end: '', stop: '' } }))
 
   expect(readSessionSkills(state).addendum.start).toBe('second')
@@ -182,6 +191,39 @@ test('handler set ignores a hostile trailing directory argument', () => {
   expect(handlers.set(value, hostile)).toEqual(value)
   expect(handlers.get(hostile)).toEqual(value)
   expect(readSessionSkills(state)).toEqual(value)
+  expect(existsSync(sessionSkillsPath(hostile))).toBe(false)
+})
+
+type RegisteredHandler = (event: unknown, ...args: unknown[]) => unknown
+
+function registerChannels(state: string): Map<string, RegisteredHandler> {
+  const registered = new Map<string, RegisteredHandler>()
+  registerSessionSkillsChannels((channel, fn) => registered.set(channel, fn), state)
+  return registered
+}
+
+test('registers skills:get and skills:set on the state directory it is given', () => {
+  const state = stateDir()
+  const other = stateDir()
+  const registered = registerChannels(state)
+  const value = addenda('wired')
+
+  expect([...registered.keys()].sort()).toEqual(['skills:get', 'skills:set'])
+  expect(registered.get('skills:set')!({ sender: 'ipc-event' }, value)).toEqual(value)
+  expect(readSessionSkills(state)).toEqual(value)
+  expect(registered.get('skills:get')!({ sender: 'ipc-event' })).toEqual(value)
+  expect(existsSync(sessionSkillsPath(other))).toBe(false)
+  expect(readdirSync(state).filter((name) => name !== 'session-skills.json')).toEqual([])
+})
+
+test('skills:get and skills:set ignore trailing arguments and refuse an invalid payload', () => {
+  const state = stateDir()
+  const hostile = stateDir()
+  const registered = registerChannels(state)
+
+  registered.get('skills:get')!({}, addenda('from-get'), hostile)
+  expect(existsSync(sessionSkillsPath(state))).toBe(false)
+  expect(() => registered.get('skills:set')!({}, { version: 1, addendum: {}, commands: [] }, hostile)).toThrow('Invalid session skills settings')
   expect(existsSync(sessionSkillsPath(hostile))).toBe(false)
 })
 
@@ -299,4 +341,20 @@ test('a failed save removes its temporary file and preserves the prior document 
   expect(() => writeSessionSkills(state, addenda('new'))).toThrow()
   expect(readdirSync(state).filter((name) => name.endsWith('.tmp'))).toEqual([])
   expect(JSON.parse(readFileSync(alias, 'utf8')).addendum.start).toBe('old')
+})
+
+// index.ts and ipc.ts import electron, so neither can be loaded here: the one
+// line each of them contributes to the settings wiring is pinned as text.
+test('the Deck must write skills where the helper reads them', () => {
+  const main = join(import.meta.dir, '..', 'desktop', 'src', 'main')
+  const wiring = 'the Deck must write skills where the helper reads them'
+  const index = readFileSync(join(main, 'index.ts'), 'utf8')
+  const ipc = readFileSync(join(main, 'ipc.ts'), 'utf8')
+  const head = '}: IpcDeps): void {'
+  const start = ipc.indexOf(head)
+  if (start === -1) throw new Error(`ipc.ts: missing ${head}`)
+  const registerIpcBody = extractBracedBody(ipc, start + head.length - 1, true)
+
+  expect(index.split('sessionSkillsDir: sessionSkillsStateDir,').length - 1, `${wiring}: registerIpc receives the handoff state directory`).toBe(1)
+  expect(registerIpcBody.split('registerSessionSkillsChannels(regHandle, sessionSkillsDir)').length - 1, `${wiring}: registerIpc registers the channels on that directory`).toBe(1)
 })

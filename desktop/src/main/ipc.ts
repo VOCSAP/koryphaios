@@ -143,7 +143,7 @@ import { registerWorkspaceRestoreHandler } from './workspace-restore-effects'
 import { availableLocales, loadDict, resolveLocale } from './i18n'
 import { reportError } from './log'
 import { prewarmAndDetectThalpos } from './thalpos-detect'
-import { sessionSkillsHandlers } from './session-skills'
+import { registerSessionSkillsChannels } from './session-skills'
 
 /**
  * Build the renderer i18n payload from the current config. Reads shipped locale
@@ -683,9 +683,7 @@ export function registerIpc({
     ...setConfig(patch ?? {}),
     localProviders: sanitizeProviders(getConfig().localProviders ?? [])
   }))
-  const sessionSkills = sessionSkillsHandlers(sessionSkillsDir)
-  regHandle('skills:get', (_e, ...args: unknown[]) => sessionSkills.get(...args))
-  regHandle('skills:set', (_e, value: unknown, ...args: unknown[]) => sessionSkills.set(value, ...args))
+  registerSessionSkillsChannels(regHandle, sessionSkillsDir)
   regHandle('mods:list', () => listMods())
   regHandle('thalpos:status', () => prewarmAndDetectThalpos({
     prewarm: () => prewarmClaudeVersion(getConfig().shell),

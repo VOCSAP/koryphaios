@@ -106,3 +106,12 @@ export function sessionSkillsHandlers(stateDir: string) {
     set: (settings: unknown, ..._args: unknown[]) => writeSessionSkills(stateDir, settings)
   }
 }
+
+export function registerSessionSkillsChannels(
+  regHandle: (channel: string, fn: (event: unknown, ...args: unknown[]) => unknown) => void,
+  stateDir: string
+): void {
+  const handlers = sessionSkillsHandlers(stateDir)
+  regHandle('skills:get', (_e, ...args) => handlers.get(...args))
+  regHandle('skills:set', (_e, value, ...args) => handlers.set(value, ...args))
+}
