@@ -1,5 +1,5 @@
 import { test, expect, afterEach } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, linkSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -615,6 +615,141 @@ test.skipIf(!canLink)("templateSaveTarget refuses a source whose folder is a lin
   expect(() => templateSaveTarget(proj, true, "attended", "in", join(legacyDir(proj), "in.json"), e)).toThrow(
     /resolves outside the project/
   );
+});
+
+// ----- a repo-shipped link as the templates folder (card 0a0b180d) -----
+
+function projectWithTemplatesLinkedTo(outside: string): string {
+  const proj = tmp();
+  mkdirSync(join(proj, ".claude", "koryphaios"), { recursive: true });
+  symlinkSync(outside, koryphaiosDir(proj), "junction");
+  return proj;
+}
+
+test.skipIf(!canLink)("template export and the agent save refuse a templates folder that links out of the project (needs symlinkSync)", () => {
+  const e = env(tmp());
+  const outside = tmp();
+  const proj = projectWithTemplatesLinkedTo(outside);
+  const tpl = toTemplate([{ name: "a" }], "x");
+  expect(() => writeTemplate(templateWriteDir(proj, true, "attended", e), "x", tpl)).toThrow(/resolves outside the project/);
+  expect(() => writeAgentTemplate(proj, true, "x", tpl, e)).toThrow(/resolves outside the project/);
+  expect(readdirSync(outside), "nothing may be written through the link").toEqual([]);
+});
+
+test.skipIf(!canLink)("templateSaveTarget refuses the default folder and a cross-scope copy when the templates folder links out (needs symlinkSync)", () => {
+  const e = env(tmp());
+  const outside = tmp();
+  const proj = projectWithTemplatesLinkedTo(outside);
+  const global = savedTemplate(globalTemplatesDir(e), "g", "g");
+  expect(() => templateSaveTarget(proj, true, "attended", "x", undefined, e)).toThrow(/resolves outside the project/);
+  expect(() => templateSaveTarget(proj, true, "attended", "x", global, e)).toThrow(/resolves outside the project/);
+  expect(readdirSync(outside)).toEqual([]);
+});
+
+test.skipIf(!canLink)("a link on a level above the templates folder is refused before anything is created (needs symlinkSync)", () => {
+  const e = env(tmp());
+  const outside = tmp();
+  const proj = tmp();
+  symlinkSync(outside, join(proj, ".claude"), "junction");
+  expect(() => writeAgentTemplate(proj, true, "x", toTemplate([{ name: "a" }], "x"), e)).toThrow(/resolves outside the project/);
+  expect(readdirSync(outside), "the missing levels must not be created through the link").toEqual([]);
+});
+
+test.skipIf(!canLink)("a dangling link as the templates folder is refused, not created through (needs symlinkSync)", () => {
+  const e = env(tmp());
+  const proj = tmp();
+  mkdirSync(join(proj, ".claude", "koryphaios"), { recursive: true });
+  const target = join(tmp(), "not-yet");
+  symlinkSync(target, koryphaiosDir(proj), "junction");
+  expect(() => writeAgentTemplate(proj, true, "x", toTemplate([{ name: "a" }], "x"), e)).toThrow(/cannot be resolved/);
+  expect(existsSync(target), "mkdir recursive must not create the dangling target").toBe(false);
+});
+
+test.skipIf(!canLink)("a templates folder linked to a sibling whose name starts with the project's is refused (needs symlinkSync)", () => {
+  const e = env(tmp());
+  const proj = tmp();
+  const sibling = `${proj}-sibling`;
+  tmpDirs.push(sibling);
+  mkdirSync(sibling);
+  mkdirSync(join(proj, ".claude", "koryphaios"), { recursive: true });
+  symlinkSync(sibling, koryphaiosDir(proj), "junction");
+  expect(() => writeAgentTemplate(proj, true, "x", toTemplate([{ name: "a" }], "x"), e)).toThrow(/resolves outside the project/);
+  expect(readdirSync(sibling)).toEqual([]);
+});
+
+test.skipIf(!canLink)("a templates folder linked to another folder inside the project is still written (needs symlinkSync)", () => {
+  const e = env(tmp());
+  const proj = tmp();
+  const inside = join(proj, "shared-templates");
+  mkdirSync(inside);
+  mkdirSync(join(proj, ".claude", "koryphaios"), { recursive: true });
+  symlinkSync(inside, koryphaiosDir(proj), "junction");
+  writeAgentTemplate(proj, true, "x", toTemplate([{ name: "a" }], "x"), e);
+  expect(readdirSync(inside)).toEqual(["x.json"]);
+});
+
+test.skipIf(!canLink)("writeTemplateAt refuses a target file that is a link and leaves the victim untouched (needs symlinkSync)", () => {
+  const e = env(tmp());
+  const proj = tmp();
+  const victim = savedTemplate(tmp(), "victim", "victim");
+  const before = readFileSync(victim, "utf-8");
+  mkdirSync(koryphaiosDir(proj), { recursive: true });
+  symlinkSync(victim, join(koryphaiosDir(proj), "x.json"), "file");
+  const tpl = toTemplate([{ name: "a" }], "x");
+  expect(() => writeAgentTemplate(proj, true, "x", tpl, e)).toThrow(/is a link/);
+  expect(() => writeTemplateAt(join(koryphaiosDir(proj), "x.json"), tpl)).toThrow(/is a link/);
+  expect(readFileSync(victim, "utf-8")).toBe(before);
+});
+
+const canHardLink = ((): boolean => {
+  const probe = mkdtempSync(join(tmpdir(), "tpl-hard-"));
+  try {
+    writeFileSync(join(probe, "t"), "x");
+    linkSync(join(probe, "t"), join(probe, "h"));
+    return true;
+  } catch {
+    return false;
+  } finally {
+    rmSync(probe, { recursive: true, force: true });
+  }
+})();
+
+test.skipIf(!canHardLink)("writeTemplateAt refuses a target that is a hard link to a file elsewhere and leaves it untouched (needs linkSync)", () => {
+  const e = env(tmp());
+  const proj = tmp();
+  const victim = savedTemplate(tmp(), "victim", "victim");
+  const before = readFileSync(victim, "utf-8");
+  mkdirSync(koryphaiosDir(proj), { recursive: true });
+  linkSync(victim, join(koryphaiosDir(proj), "x.json"));
+  expect(() => writeAgentTemplate(proj, true, "x", toTemplate([{ name: "a" }], "x"), e)).toThrow(/hard links/);
+  expect(readFileSync(victim, "utf-8"), "writeFileSync rewrites in place: the hard-linked file outside must be unchanged").toBe(before);
+});
+
+test.skipIf(!canLink)("a project reached through a link prefix is written, since both sides are resolved (needs symlinkSync)", () => {
+  const e = env(tmp());
+  const base = tmp();
+  const real = join(base, "real");
+  mkdirSync(real);
+  const via = join(base, "via");
+  symlinkSync(real, via, "junction");
+  const written = writeAgentTemplate(via, true, "x", toTemplate([{ name: "a" }], "x"), e);
+  expect(written).toBe(join(localTemplatesDir(via), "x.json"));
+  expect(readdirSync(join(real, ".claude", "koryphaios", "templates"))).toEqual(["x.json"]);
+});
+
+test("writeTemplateAt refuses a target that is not a regular file", () => {
+  const proj = tmp();
+  mkdirSync(join(koryphaiosDir(proj), "x.json"), { recursive: true });
+  expect(() => writeTemplateAt(join(koryphaiosDir(proj), "x.json"), toTemplate([{ name: "a" }], "x"))).toThrow(
+    /not a regular file/
+  );
+});
+
+test("writeTemplateAt still overwrites a regular template file", () => {
+  const proj = tmp();
+  const file = savedTemplate(koryphaiosDir(proj), "x", "old");
+  writeTemplateAt(file, toTemplate([{ name: "a" }, { name: "b" }], "new"));
+  expect(readTemplate(file)!.sessions).toHaveLength(2);
 });
 
 test("editing a legacy template in place leaves one entry in the list, at the legacy path, with the edited content", () => {

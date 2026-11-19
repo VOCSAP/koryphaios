@@ -9,7 +9,7 @@ import {
   writeFileSync,
   type Stats
 } from 'node:fs'
-import { basename, dirname, join, resolve, sep } from 'node:path'
+import { basename, dirname, join, relative, resolve, sep } from 'node:path'
 import { globalConfigDir } from './launch-config'
 import { parseTemplate, type SessionTemplate } from '../shared/template'
 import { reportError } from './log'
@@ -46,6 +46,25 @@ export function localTemplateDirs(projectDir: string): string[] {
   return PROJECT_SOURCES.map((source) => join(projectRootPath(projectDir, source), 'templates'))
 }
 
+// A cloned repo can ship the templates folder, or a level above it, as a link: the nearest level that exists decides where the write lands.
+function refuseEscapingFolder(dir: string, projectDir: string): void {
+  const refuse = (why: string): never => {
+    throw new Error(`refused: the templates folder ${why}`)
+  }
+  const folder = resolve(dir)
+  let existing = folder
+  while (!entryPresent(existing) && dirname(existing) !== existing) existing = dirname(existing)
+  let real: string
+  try {
+    real = realpathSync.native(existing)
+  } catch (error) {
+    return refuse(`cannot be resolved (${error instanceof Error ? error.message : String(error)})`)
+  }
+  if (!join(real, relative(existing, folder)).startsWith(canonicalPath(projectDir) + sep)) {
+    refuse('resolves outside the project')
+  }
+}
+
 /**
  * Target dir of a template write. The global dir is trusted (applying a template
  * from it asks no shell-field approval), so only the Deck window may write there;
@@ -57,7 +76,11 @@ export function templateWriteDir(
   attendance: CallerAttendance,
   env: NodeJS.ProcessEnv = process.env
 ): string {
-  if (local) return localTemplatesDir(projectDir)
+  if (local) {
+    const dir = localTemplatesDir(projectDir)
+    refuseEscapingFolder(dir, projectDir)
+    return dir
+  }
   if (attendance !== 'attended') {
     throw new Error(
       'refused: a paired device cannot save a template to the global folder -- save it in this project, or use the Deck on the PC'
@@ -164,6 +187,15 @@ export function writeTemplateAt(file: string, tpl: SessionTemplate): string {
       `template has multiple leads (${leadNames.join(', ')}); at most one session may carry lead: true`
     )
   }
+  let leaf: Stats | null = null
+  try {
+    leaf = lstatSync(file)
+  } catch (error) {
+    if (!isAbsentFileError(error)) throw error
+  }
+  if (leaf?.isSymbolicLink()) throw new Error('refused: the template to write is a link')
+  if (leaf && !leaf.isFile()) throw new Error('refused: the template to write is not a regular file')
+  if (leaf && leaf.nlink > 1) throw new Error('refused: the template to write has other hard links')
   mkdirSync(dirname(file), { recursive: true })
   writeFileSync(file, JSON.stringify(tpl, null, 2), 'utf-8')
   return file
