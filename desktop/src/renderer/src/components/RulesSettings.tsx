@@ -355,6 +355,7 @@ export function RulesSettings(): React.JSX.Element {
       {list.projects.map((project) => {
         const locked = project.file.status !== 'approved'
         const editDisabledReason = locked ? t('rules.editDisabledPending') : null
+        const addLocked = project.file.status === 'pending'
         return (
           <section className="rules-section" key={project.projectDir}>
             <h3 title={`${project.projectDir}\n${project.file.path}`}>{baseName(project.projectDir)}</h3>
@@ -415,8 +416,8 @@ export function RulesSettings(): React.JSX.Element {
               <div>
                 <button
                   className="primary"
-                  disabled={locked}
-                  title={locked ? t('rules.addDisabledPending') : undefined}
+                  disabled={addLocked}
+                  title={addLocked ? t('rules.addDisabledPending') : undefined}
                   onClick={() => openAddRepo(project)}
                 >
                   {t('rules.addRule')}

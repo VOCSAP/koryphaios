@@ -1172,6 +1172,20 @@ describe("operator saves: base hash and approval rules", () => {
     expect(readFileSync(join(cwd, REPO_RULES_REL), "utf8")).toBe(agent);
   });
 
+  test("saveRepo with a null expected hash is refused as stale once the repo file has appeared", async () => {
+    const h = harness();
+    const cwd = tmp();
+    const ref: TtsrProjectRef = { root: cwd, projectKey: `local:${cwd}` };
+    h.svc.fileFor({ id: randomUUID(), cwd });
+    const openedPath = repoRulesEntry(cwd).path;
+    const agent = fileOf(rule("r-agent"));
+    const written = writeRepoRules(cwd, agent);
+    expect(written, "the file appears where the editor was opened").toBe(openedPath);
+    const res = await h.svc.saveRepo(ref, fileOf(rule("r-mine")), null, openedPath);
+    expect(res, "an editor opened on an absent file must not overwrite one it never saw").toMatchObject({ ok: false, reason: "stale" });
+    expect(readFileSync(written, "utf8")).toBe(agent);
+  });
+
   test("saveRepo over a PENDING base is refused: the operator would approve agent content unseen", async () => {
     const h = harness();
     const cwd = tmp();

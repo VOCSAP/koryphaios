@@ -548,6 +548,44 @@ test("adding a rule to a repo file names the repo rules file the editor was open
   expect(saveRepoCalls[0]![3], "the add save carries the path read, not the project dir").toBe("/proj/.claude/claude-peers/rules.json");
 });
 
+test("a project without a rules file can add a rule: the save creates the file with a null hash", async () => {
+  const absent = baseList("absent");
+  const newPath = "/proj/.claude/koryphaios/rules.json";
+  absent.projects[0]!.file = { ...absent.projects[0]!.file, path: newPath };
+  currentList = absent;
+  await mount();
+  const repoSection = container.querySelector('h3[title^="/proj"]')!.closest("section")!;
+  const addBtn = [...repoSection.querySelectorAll("button")].find((b) => b.textContent === "rules.addRule") as HTMLButtonElement;
+  expect(addBtn.disabled, "the absent-file hint promises an add here").toBe(false);
+  act(() => {
+    addBtn.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  });
+  const inputSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+  if (!inputSetter) throw new Error("input has no native value setter");
+  const idInput = container.querySelector('input[placeholder="no-emoji-ui"]') as HTMLInputElement;
+  const patternInput = [...container.querySelectorAll("input")].find(
+    (i) => i.type === "text" && i.placeholder === "" && i.value === ""
+  ) as HTMLInputElement;
+  act(() => {
+    inputSetter.call(idInput, "no-todo");
+    idInput.dispatchEvent(new Event("input", { bubbles: true }));
+    inputSetter.call(patternInput, "TODO");
+    patternInput.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  const saveBtn = [...container.querySelectorAll("button")].find((b) => b.textContent === "common.save")!;
+  act(() => {
+    saveBtn.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  });
+  await act(async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+  expect(saveRepoCalls.length).toBe(1);
+  expect(saveRepoCalls[0]![0]).toBe("/proj");
+  expect(saveRepoCalls[0]![2], "an absent file is created, never matched against a hash").toBeNull();
+  expect(saveRepoCalls[0]![3]).toBe(newPath);
+});
+
 test("a project section header shows the rules file read, whichever folder it lives in", async () => {
   const projectAt = (projectDir: string, path: string) => ({
     projectDir,
