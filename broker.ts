@@ -13235,6 +13235,17 @@ function handleApprovalTokenMint(
   if (existing && existing.inbox_purpose !== null) return { error: "token is an inbox credential", status: 409 };
   const now = new Date();
   const nowIso = now.toISOString();
+  // A second live token on a run root's session_ref would share its approval
+  // scope, attested channel questions included.
+  const heldByRoot = db
+    .query(
+      `SELECT 1 FROM approval_session_tokens
+        WHERE operator_id = ? AND project_key = ? AND session_ref = ?
+          AND inbox_purpose = 'run' AND revoked_at IS NULL AND expires_at > ?
+        LIMIT 1`
+    )
+    .get(auth.operator_id, projectKey, sessionRef, nowIso);
+  if (heldByRoot) return { error: "session_ref is held by a live inbox root", status: 409 };
   const expiresAt = new Date(now.getTime() + ttlHours * 3600_000).toISOString();
   const capabilities = { renew_only: true } as const;
   if (body.renew_only === true) {

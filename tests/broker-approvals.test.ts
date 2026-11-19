@@ -2590,7 +2590,7 @@ describe("Inbox run roots and mandates (token routes)", () => {
     const legacy = await signedPost<Mint>(
       b,
       "/approval/token-mint",
-      { session_public_key: legacyCred.publicKey, session_ref: "window-a" },
+      { session_public_key: legacyCred.publicKey, session_ref: "window-legacy" },
       { cred: op.cred, operator_id: op.id }
     );
     expect(legacy.status).toBe(200);
@@ -2598,6 +2598,50 @@ describe("Inbox run roots and mandates (token routes)", () => {
     expect(rowOf(b, legacy.body.token_id)?.inbox_purpose).toBeNull();
     expect((await mint(b, op, legacyCred, runBlock())).status).toBe(409);
     expect(rowOf(b, legacy.body.token_id)?.inbox_purpose).toBeNull();
+  });
+
+  test("a legacy mint cannot share the session_ref of a live run root, until that root is revoked", async () => {
+    const b = await boot();
+    const op = newOperator();
+    const legacyMint = (cred: ApprovalCredential, sessionRef: string, signer: Operator = op, extra: Record<string, unknown> = {}) =>
+      signedPost<Mint & { error?: string }>(
+        b,
+        "/approval/token-mint",
+        { session_public_key: cred.publicKey, session_ref: sessionRef, ...extra },
+        { cred: signer.cred, operator_id: signer.id }
+      );
+    // Minted before the root exists, so its renewal would succeed without the check.
+    const earlier = generateCredential();
+    const earlierMint = await legacyMint(earlier, "window-held");
+    expect(earlierMint.status).toBe(200);
+    const earlierExpiry = rowOf(b, earlierMint.body.token_id)?.expires_at;
+
+    const root = await mint(b, op, generateCredential(), runBlock(), { session_ref: "window-held" });
+    expect(root.status).toBe(200);
+
+    const squatter = generateCredential();
+    const held = await legacyMint(squatter, "window-held");
+    expect([held.status, held.body.error]).toEqual([409, "session_ref is held by a live inbox root"]);
+    expect(rowOf(b, deriveTokenId(squatter.publicKey))).toBeNull();
+    const heldRenew = await legacyMint(earlier, "window-held", op, { renew_only: true });
+    expect([heldRenew.status, heldRenew.body.error], "a renewal is refused the same way").toEqual([
+      409,
+      "session_ref is held by a live inbox root",
+    ]);
+    expect(rowOf(b, earlierMint.body.token_id)?.expires_at).toBe(earlierExpiry);
+
+    expect((await legacyMint(generateCredential(), "window-free")).status, "a free session_ref").toBe(200);
+    expect((await legacyMint(generateCredential(), "window-held", otherOperator())).status, "another operator").toBe(200);
+    expect(
+      (await legacyMint(generateCredential(), "window-held", op, { project_key: "github.com/other/repo" })).status,
+      "another project"
+    ).toBe(200);
+
+    await signedPost(b, "/approval/token-revoke", { token_id: root.body.token_id }, { cred: op.cred, operator_id: op.id });
+    expect(rowOf(b, root.body.token_id)?.revoked_at).toEqual(expect.any(String));
+    const after = await legacyMint(squatter, "window-held");
+    expect(after.status, "the root is revoked").toBe(200);
+    expect(rowOf(b, after.body.token_id)?.inbox_purpose).toBeNull();
   });
 
   test("a mandate copies its scope from a live run parent and never outlives it", async () => {
