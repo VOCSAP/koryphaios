@@ -17,9 +17,6 @@ const dirs: string[] = [];
 const originalFetch = globalThis.fetch;
 
 const cipher: SecretCipher = {
-  isAvailable: () => true,
-  encrypt: (value: string) => Buffer.from(`X${value}`, "utf8"),
-  decrypt: (value: Buffer) => value.toString("utf8").slice(1),
   isAvailableAsync: async () => true,
   encryptAsync: async (value: string) => Buffer.from(`X${value}`, "utf8"),
   decryptAsync: async (value: Buffer) => value.toString("utf8").slice(1),

@@ -15,9 +15,6 @@ const projectKey = "github.com/vocsap/koryphaios";
 const renewalDelayMs = 6 * 3600_000;
 
 const cipher: SecretCipher = {
-  isAvailable: () => true,
-  encrypt: (value: string) => Buffer.from(value),
-  decrypt: (value: Buffer) => value.toString(),
   isAvailableAsync: async () => true,
   encryptAsync: async (value: string) => Buffer.from(value),
   decryptAsync: async (value: Buffer) => value.toString()

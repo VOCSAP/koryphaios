@@ -14,17 +14,12 @@ import { join } from 'node:path'
 
 /**
  * Minimal encrypt/decrypt surface, satisfied by Electron's `safeStorage`
- * (DPAPI on Windows, Keychain on macOS, libsecret on Linux). `isAvailable`
- * gates every operation: when false (e.g. Linux without a keyring) the store
- * is a no-op and callers fall back to the launch-arg behaviour.
- * A buffer written by `encrypt` reads back through `decryptAsync`.
- * `isAvailableAsync` is false before the app is ready. An async failure is
- * traced and rethrown; `shouldReEncrypt` is not surfaced.
+ * (DPAPI on Windows, Keychain on macOS, libsecret on Linux). `isAvailableAsync`
+ * gates every operation: when false (before the app is ready, or Linux without
+ * a keyring) the store is a no-op and callers fall back to the launch-arg
+ * behaviour. A failure is traced and rethrown; `shouldReEncrypt` is not surfaced.
  */
 export interface SecretCipher {
-  isAvailable(): boolean
-  encrypt(plain: string): Buffer
-  decrypt(buf: Buffer): string
   isAvailableAsync(): Promise<boolean>
   encryptAsync(plain: string): Promise<Buffer>
   decryptAsync(buf: Buffer): Promise<string>

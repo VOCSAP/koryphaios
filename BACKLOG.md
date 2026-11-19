@@ -118,7 +118,7 @@ Sans objet (cible inexistante) :
 - [ ] **M-SEC-10** -- le chiffrement au repos est LIVRÉ (C29 :
       `applyProviderKeyPatch` + `secretCipher` `safeStorage` +
       `sanitizeProviders`). Résiduel : le repli `plain:<key>` silencieux
-      quand `safeStorage.isEncryptionAvailable()` est faux, sans aucun
+      quand `isAsyncEncryptionAvailable()` est faux, sans aucun
       signalement à l'UI. -> `d8eaffdd`.
 - [ ] **M-SEC-11** -- des caps PAR CHAMP existent déjà
       (`MAX_DIRECTIVE_TARGETS=16`, `LOCK_BATCH_MAX_TARGETS=64`,

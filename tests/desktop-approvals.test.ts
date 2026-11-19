@@ -31,30 +31,21 @@ function tmp(): string {
   return d;
 }
 
-function withAsync(sync: Pick<SecretCipher, "isAvailable" | "encrypt" | "decrypt">): SecretCipher {
-  return {
-    ...sync,
-    isAvailableAsync: async () => sync.isAvailable(),
-    encryptAsync: async (plain) => sync.encrypt(plain),
-    decryptAsync: async (buf) => sync.decrypt(buf),
-  };
-}
-
 /** Reversible fake cipher (scope-secrets test pattern). */
-const fakeCipher: SecretCipher = withAsync({
-  isAvailable: () => true,
-  encrypt: (s: string) => Buffer.from(`X${s}`, "utf8"),
-  decrypt: (b: Buffer) => b.toString("utf8").slice(1),
-});
+const fakeCipher: SecretCipher = {
+  isAvailableAsync: async () => true,
+  encryptAsync: async (s: string) => Buffer.from(`X${s}`, "utf8"),
+  decryptAsync: async (b: Buffer) => b.toString("utf8").slice(1),
+};
 
 /** Stand-in for Linux without a keyring: encryption unavailable. */
-const noCipher: SecretCipher = withAsync({
-  isAvailable: () => false,
-  encrypt: () => Buffer.from(""),
-  decrypt: () => {
+const noCipher: SecretCipher = {
+  isAvailableAsync: async () => false,
+  encryptAsync: async () => Buffer.from(""),
+  decryptAsync: async () => {
     throw new Error("unavailable");
   },
-});
+};
 
 async function createInitialIdentity(dir: string, cipher: SecretCipher) {
   const result = await ensureOperatorIdentity(dir, cipher);
@@ -109,13 +100,13 @@ describe("operator identity", () => {
     // Minting a fresh identity here would orphan the operator's phone pairing.
     const dir = tmp();
     await createOperatorIdentity(dir, fakeCipher, generateCredential());
-    const hostile: SecretCipher = withAsync({
-      isAvailable: () => true,
-      encrypt: () => Buffer.from(""),
-      decrypt: () => {
+    const hostile: SecretCipher = {
+      isAvailableAsync: async () => true,
+      encryptAsync: async () => Buffer.from(""),
+      decryptAsync: async () => {
         throw new Error("keychain changed");
       },
-    });
+    };
     expect(await loadOperatorIdentity(dir, hostile)).toBeNull();
   });
 
@@ -125,23 +116,6 @@ describe("operator identity", () => {
     expect(await loadOperatorIdentity(dir, fakeCipher)).toBeNull();
   });
 
-  test("the identity is written and read through the async cipher only", async () => {
-    const dir = tmp();
-    const asyncOnly: SecretCipher = {
-      ...fakeCipher,
-      isAvailable: () => {
-        throw new Error("the sync probe must not be used");
-      },
-      encrypt: () => {
-        throw new Error("the sync encrypt must not be used");
-      },
-      decrypt: () => {
-        throw new Error("the sync decrypt must not be used");
-      },
-    };
-    const created = await createInitialIdentity(dir, asyncOnly);
-    expect((await loadOperatorIdentity(dir, asyncOnly))?.operatorId).toBe(created.operatorId);
-  });
 });
 
 describe("multi-PC enrolment", () => {

@@ -102,15 +102,10 @@ import { migrateGraphsAtRest } from "../desktop/src/main/graph-store.ts";
 import type { SecretCipher } from "../desktop/src/main/scope-secrets.ts";
 
 function fakeCipher(available = true): SecretCipher {
-  const encrypt = (plain: string) => Buffer.from([...Buffer.from(plain, "utf-8")].reverse());
-  const decrypt = (buf: Buffer) => Buffer.from([...buf].reverse()).toString("utf-8");
   return {
-    isAvailable: () => available,
-    encrypt,
-    decrypt,
     isAvailableAsync: async () => available,
-    encryptAsync: async (plain) => encrypt(plain),
-    decryptAsync: async (buf) => decrypt(buf),
+    encryptAsync: async (plain) => Buffer.from([...Buffer.from(plain, "utf-8")].reverse()),
+    decryptAsync: async (buf) => Buffer.from([...buf].reverse()).toString("utf-8"),
   };
 }
 
@@ -177,17 +172,6 @@ test("no keychain -> clear-text fallback keeps the feature working", async () =>
   expect(JSON.parse(readFileSync(graphsFile(dir, KEY), "utf-8"))).toBeArray();
   expect((await loadGraphs(dir, KEY, off)).map((d) => d.name)).toEqual(["plain"]);
   expect(await migrateGraphsAtRest(dir, KEY, off)).toBe(false);
-});
-
-test("the store goes through the async cipher only", async () => {
-  const dir = tmp();
-  const removed = (): never => {
-    throw new Error("the sync cipher must not be used");
-  };
-  const asyncOnly: SecretCipher = { ...fakeCipher(), isAvailable: removed, encrypt: removed, decrypt: removed };
-  await upsertGraph(dir, KEY, doc("a", "one"), asyncOnly);
-  expect((await loadGraphs(dir, KEY, asyncOnly)).map((d) => d.name)).toEqual(["one"]);
-  expect(await migrateGraphsAtRest(dir, KEY, asyncOnly)).toBe(false);
 });
 
 test("concurrent saves of one project lose no update", async () => {

@@ -6,22 +6,14 @@ const WITNESS = "witness-value-123";
 
 interface FakeOptions {
   ready?: boolean;
-  syncRemoved?: boolean;
   failAsync?: boolean;
-  failSync?: boolean;
 }
 
 function fakeStorage(options: FakeOptions = {}): SafeStorageLike {
   const seal = (plain: string): Buffer => Buffer.from(`v10:${Buffer.from(plain).toString("base64")}`);
   const open = (buf: Buffer): string => Buffer.from(buf.toString().slice(4), "base64").toString();
-  const removed = (): never => {
-    throw new Error("the sync safeStorage API was removed");
-  };
   const asyncFailure = (): Promise<never> => Promise.reject(new Error("async boom"));
   return {
-    isEncryptionAvailable: () => (options.syncRemoved ? removed() : options.ready !== false),
-    encryptString: (plain) => (options.syncRemoved ? removed() : options.failSync ? removed() : seal(plain)),
-    decryptString: (buf) => (options.syncRemoved ? removed() : options.failSync ? removed() : open(buf)),
     isAsyncEncryptionAvailable: () => (options.failAsync ? asyncFailure() : Promise.resolve(options.ready !== false)),
     encryptStringAsync: (plain) => (options.failAsync ? asyncFailure() : Promise.resolve(seal(plain))),
     decryptStringAsync: (buf) =>
@@ -37,15 +29,18 @@ function captureTraces(): void {
 afterEach(() => onDeckError(() => {}));
 
 describe("async codec", () => {
-  test("round trips a value without touching the sync API", async () => {
-    const cipher = createSafeStorageCipher(fakeStorage({ syncRemoved: true }));
-    const sealed = await cipher.encryptAsync(WITNESS);
-    expect(await cipher.decryptAsync(sealed)).toBe(WITNESS);
+  test("exposes the three async operations and nothing else", () => {
+    expect(Object.keys(createSafeStorageCipher(fakeStorage())).sort()).toEqual([
+      "decryptAsync",
+      "encryptAsync",
+      "isAvailableAsync"
+    ]);
   });
 
-  test("reads back a buffer produced by the sync path", async () => {
+  test("round trips a value", async () => {
     const cipher = createSafeStorageCipher(fakeStorage());
-    expect(await cipher.decryptAsync(cipher.encrypt(WITNESS))).toBe(WITNESS);
+    const sealed = await cipher.encryptAsync(WITNESS);
+    expect(await cipher.decryptAsync(sealed)).toBe(WITNESS);
   });
 
   test("is not available before the app is ready, and is once it is", async () => {
@@ -80,18 +75,6 @@ describe("async codec", () => {
     const cipher = createSafeStorageCipher(fakeStorage());
     await cipher.decryptAsync(await cipher.encryptAsync(WITNESS));
     await cipher.isAvailableAsync();
-    expect(traces).toEqual([]);
-  });
-});
-
-describe("sync codec", () => {
-  test("keeps delegating to the storage, and a failure propagates untouched and untraced", () => {
-    captureTraces();
-    const cipher = createSafeStorageCipher(fakeStorage());
-    expect(cipher.isAvailable()).toBe(true);
-    expect(cipher.decrypt(cipher.encrypt(WITNESS))).toBe(WITNESS);
-    const failing = createSafeStorageCipher(fakeStorage({ failSync: true }));
-    expect(() => failing.decrypt(Buffer.from("v10:x"))).toThrow("sync safeStorage API was removed");
     expect(traces).toEqual([]);
   });
 });

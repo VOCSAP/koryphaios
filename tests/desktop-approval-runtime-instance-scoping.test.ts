@@ -24,9 +24,6 @@ function tmp(): string {
 }
 
 const fakeCipher: SecretCipher = {
-  isAvailable: () => true,
-  encrypt: (s: string) => Buffer.from(`X${s}`, "utf8"),
-  decrypt: (b: Buffer) => b.toString("utf8").slice(1),
   isAvailableAsync: async () => true,
   encryptAsync: async (s: string) => Buffer.from(`X${s}`, "utf8"),
   decryptAsync: async (b: Buffer) => b.toString("utf8").slice(1),
@@ -1071,13 +1068,6 @@ describe("ApprovalRuntime prepared root lifecycle", () => {
     const stateDir = tmp();
     await createOperatorIdentity(stateDir, fakeCipher, generateCredential());
     const unavailableCipher: SecretCipher = {
-      isAvailable: () => false,
-      encrypt: () => {
-        throw new Error("keychain unavailable");
-      },
-      decrypt: () => {
-        throw new Error("keychain unavailable");
-      },
       isAvailableAsync: async () => false,
       encryptAsync: async () => {
         throw new Error("keychain unavailable");

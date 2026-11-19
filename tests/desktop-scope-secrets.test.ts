@@ -33,34 +33,23 @@ function freshDir(): string {
   return d;
 }
 
-type SyncCipher = Pick<SecretCipher, "isAvailable" | "encrypt" | "decrypt">;
-
-function withAsync(sync: SyncCipher): SecretCipher {
-  return {
-    ...sync,
-    isAvailableAsync: async () => sync.isAvailable(),
-    encryptAsync: async (plain) => sync.encrypt(plain),
-    decryptAsync: async (buf) => sync.decrypt(buf),
-  };
-}
-
 // Reversible fake: "encrypt" by reversing the string into a Buffer. Proves the
 // stored blob is not the plaintext and that decrypt round-trips.
-const fakeCipher: SecretCipher = withAsync({
-  isAvailable: () => true,
-  encrypt: (plain) => Buffer.from([...plain].reverse().join(""), "utf8"),
-  decrypt: (buf) => [...buf.toString("utf8")].reverse().join(""),
-});
+const fakeCipher: SecretCipher = {
+  isAvailableAsync: async () => true,
+  encryptAsync: async (plain) => Buffer.from([...plain].reverse().join(""), "utf8"),
+  decryptAsync: async (buf) => [...buf.toString("utf8")].reverse().join(""),
+};
 
-const unavailableCipher: SecretCipher = withAsync({
-  isAvailable: () => false,
-  encrypt: () => {
+const unavailableCipher: SecretCipher = {
+  isAvailableAsync: async () => false,
+  encryptAsync: async () => {
     throw new Error("must not be called");
   },
-  decrypt: () => {
+  decryptAsync: async () => {
     throw new Error("must not be called");
   },
-});
+};
 
 test("remember then recall round-trips the secret, keyed by groupId", async () => {
   const dir = freshDir();
@@ -88,19 +77,10 @@ test("an unavailable cipher makes remember a no-op and recall null", async () =>
   expect(await recallScopeSecret(dir, unavailableCipher, "gid-A")).toBeNull();
 });
 
-test("the store goes through the async cipher only, which is unavailable before ready", async () => {
+test("the store does nothing while the cipher is unavailable before ready, and works once it is", async () => {
   const dir = freshDir();
   let ready = false;
-  const syncRemoved = (): never => {
-    throw new Error("the sync cipher must not be used");
-  };
-  const lateCipher: SecretCipher = {
-    ...fakeCipher,
-    isAvailable: syncRemoved,
-    encrypt: syncRemoved,
-    decrypt: syncRemoved,
-    isAvailableAsync: async () => ready,
-  };
+  const lateCipher: SecretCipher = { ...fakeCipher, isAvailableAsync: async () => ready };
   expect(await rememberScopeSecret(dir, lateCipher, "gid-A", "s")).toBe(false);
   expect(existsSync(join(dir, "scope-secrets.json"))).toBe(false);
   expect(await recallScopeSecret(dir, lateCipher, "gid-A")).toBeNull();
@@ -113,13 +93,13 @@ test("a decrypt failure surfaces as null, not a throw, and is traced without any
   const dir = freshDir();
   const texts: string[] = [];
   onDeckError((_scope, text) => texts.push(text));
-  const throwingDecrypt = withAsync({
-    isAvailable: () => true,
-    encrypt: (p) => Buffer.from(p, "utf8"),
-    decrypt: () => {
+  const throwingDecrypt: SecretCipher = {
+    isAvailableAsync: async () => true,
+    encryptAsync: async (p) => Buffer.from(p, "utf8"),
+    decryptAsync: async () => {
       throw new Error("OS key changed");
     },
-  });
+  };
   await rememberScopeSecret(dir, throwingDecrypt, "gid-A", "s");
   expect(await recallScopeSecret(dir, throwingDecrypt, "gid-A")).toBeNull();
   expect(texts).toEqual(["a remembered scope secret could not be decrypted: Error"]);

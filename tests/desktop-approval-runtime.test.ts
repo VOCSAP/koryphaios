@@ -29,44 +29,35 @@ function tmp(): string {
   return d;
 }
 
-function withAsync(sync: Pick<SecretCipher, "isAvailable" | "encrypt" | "decrypt">): SecretCipher {
-  return {
-    ...sync,
-    isAvailableAsync: async () => sync.isAvailable(),
-    encryptAsync: async (plain) => sync.encrypt(plain),
-    decryptAsync: async (buf) => sync.decrypt(buf),
-  };
-}
-
-const fakeCipher: SecretCipher = withAsync({
-  isAvailable: () => true,
-  encrypt: (s: string) => Buffer.from(`X${s}`, "utf8"),
-  decrypt: (b: Buffer) => b.toString("utf8").slice(1),
-});
+const fakeCipher: SecretCipher = {
+  isAvailableAsync: async () => true,
+  encryptAsync: async (s: string) => Buffer.from(`X${s}`, "utf8"),
+  decryptAsync: async (b: Buffer) => b.toString("utf8").slice(1),
+};
 
 /**
  * Simulates a corrupted or re-keyed operator identity file: cannot decrypt what
  * fakeCipher encrypted.
  */
-const hostileCipher: SecretCipher = withAsync({
-  isAvailable: () => true,
-  encrypt: () => Buffer.from(""),
-  decrypt: () => {
+const hostileCipher: SecretCipher = {
+  isAvailableAsync: async () => true,
+  encryptAsync: async () => Buffer.from(""),
+  decryptAsync: async () => {
     throw new Error("keychain changed");
   },
-});
+};
 
 /** Models a keychain that is DOWN right now (locked, mid OS migration) -- the
- * exact same observable failure as real corruption from inside decrypt(),
- * which is precisely why isAvailable() (not the decrypt failure itself) has
+ * exact same observable failure as real corruption from inside decryptAsync(),
+ * which is precisely why isAvailableAsync() (not the decrypt failure itself) has
  * to be the signal that tells the two apart. */
-const unavailableCipher: SecretCipher = withAsync({
-  isAvailable: () => false,
-  encrypt: () => Buffer.from(""),
-  decrypt: () => {
+const unavailableCipher: SecretCipher = {
+  isAvailableAsync: async () => false,
+  encryptAsync: async () => Buffer.from(""),
+  decryptAsync: async () => {
     throw new Error("keychain locked");
   },
-});
+};
 
 const originalFetch = globalThis.fetch;
 afterEach(() => {

@@ -20,22 +20,12 @@ afterEach(() => onDeckError(() => {}));
 
 /** Reversible fake cipher: "encryption" = byte-reversed string. */
 const fakeCipher: SecretCipher = {
-  isAvailable: () => true,
-  encrypt: (plain) => Buffer.from([...plain].reverse().join("")),
-  decrypt: (buf) => [...buf.toString()].reverse().join(""),
   isAvailableAsync: async () => true,
   encryptAsync: async (plain) => Buffer.from([...plain].reverse().join("")),
   decryptAsync: async (buf) => [...buf.toString()].reverse().join("")
 };
 
 const deadCipher: SecretCipher = {
-  isAvailable: () => false,
-  encrypt: () => {
-    throw new Error("unavailable");
-  },
-  decrypt: () => {
-    throw new Error("unavailable");
-  },
   isAvailableAsync: async () => false,
   encryptAsync: async () => {
     throw new Error("unavailable");
@@ -113,15 +103,6 @@ test("decryptProviders round-trips, and a corrupt blob degrades to 'no key' with
   expect(out[0].apiKey).toBeUndefined();
   expect(out[0].apiKeyEnc).toBeUndefined(); // blob never propagates in memory shape
   expect(texts.some((text) => text.includes("stored provider key could not be decrypted")), "the failure is traced").toBe(true);
-});
-
-test("the keys go through the async cipher only", async () => {
-  const removed = (): never => {
-    throw new Error("the sync cipher must not be used");
-  };
-  const asyncOnly: SecretCipher = { ...fakeCipher, isAvailable: removed, encrypt: removed, decrypt: removed };
-  const stored = await applyProviderKeyPatch([], [p("a", { apiKey: "sk-x" })], asyncOnly);
-  expect((await decryptProviders(stored, asyncOnly))[0].apiKey).toBe("sk-x");
 });
 
 test("applySealedProviderPatch seals the provider keys and leaves every other field alone", async () => {
