@@ -300,12 +300,12 @@ export class WorkspaceService {
     const now = Date.now()
     const keepIds = this.currentId ? [this.currentId] : []
     const listed = listWorkspaces(this.deps.projectDir)
-    const refs = new Map(listed.filter((ws) => !ws.conflict).map((ws) => [ws.id, ws.ref]))
     const candidates = selectPrunableWorkspaces(listed, { now, maxAgeMs: PRUNE_MAX_AGE_MS, keepIds })
     const pruned: string[] = []
     for (const id of candidates) {
-      const ref = refs.get(id)
-      if (!ref) continue
+      const found = this.locate(id)
+      if (found.kind !== 'one') continue
+      const ref = found.ref
       if (inspectLock(ref).kind === 'unreadable') continue
       if (this.lockedByOther(ref, now)) continue
       deleteWorkspace(ref)

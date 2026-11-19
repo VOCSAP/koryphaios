@@ -1,5 +1,5 @@
 import { test, expect, afterEach } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -2914,6 +2914,29 @@ test("an id held by both folders is listed once, unlocked, and never pruned", ()
   expect(svc.pruneStale()).toEqual([]);
   expect(existsSync(join(workspacesDir(proj, "legacy"), "wsp_twice.json"))).toBe(true);
   expect(existsSync(join(workspacesDir(proj, "koryphaios"), "wsp_twice.json"))).toBe(true);
+});
+
+test("an id whose second copy is malformed is still held by both folders and never pruned", () => {
+  const proj = freshProject();
+  saveInOldFolder(proj, sampleWorkspace({ id: "wsp_half" }));
+  ageSnapshot(legacy(proj, "wsp_half"));
+  ensureWorkspacesDir(freshRoot(proj));
+  writeFileSync(join(workspacesDir(proj, "koryphaios"), "wsp_half.json"), "{not json");
+  expect(locateWorkspace(proj, "wsp_half")).toEqual({ kind: "conflict" });
+  const svc = workspaceService(fakeDeps(proj));
+  expect(svc.pruneStale()).toEqual([]);
+  expect(existsSync(join(workspacesDir(proj, "legacy"), "wsp_half.json")), "the only valid copy survives").toBe(true);
+});
+
+test("a dangling link under .claude/koryphaios makes its id a conflict, never a lone legacy copy", () => {
+  const proj = freshProject();
+  saveInOldFolder(proj, sampleWorkspace({ id: "wsp_link" }));
+  ageSnapshot(legacy(proj, "wsp_link"));
+  ensureWorkspacesDir(freshRoot(proj));
+  symlinkSync(join(proj, "gone.json"), join(workspacesDir(proj, "koryphaios"), "wsp_link.json"), "file");
+  expect(locateWorkspace(proj, "wsp_link")).toEqual({ kind: "conflict" });
+  expect(workspaceService(fakeDeps(proj)).pruneStale()).toEqual([]);
+  expect(existsSync(join(workspacesDir(proj, "legacy"), "wsp_link.json"))).toBe(true);
 });
 
 test("an id held by both folders shows unlocked whichever copy another Deck holds", () => {

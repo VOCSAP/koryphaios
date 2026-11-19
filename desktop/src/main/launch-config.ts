@@ -2,6 +2,7 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir, platform } from 'node:os'
 import { dirname, join } from 'node:path'
 import {
+  entryPresent,
   isAbsentFileError,
   projectCreationPath,
   selectProjectFile,
@@ -150,7 +151,8 @@ export function readConfigFile(
     }
     return out
   } catch (error) {
-    if (!isAbsentFileError(error)) traceInvalidFileOnce(file, error, report)
+    // ENOENT on an entry that exists is a dangling link: elected, refused, and said so.
+    if (!isAbsentFileError(error) || entryPresent(file)) traceInvalidFileOnce(file, error, report)
     return null
   }
 }

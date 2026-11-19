@@ -1,8 +1,8 @@
 import { createHash } from 'node:crypto'
-import { statSync } from 'node:fs'
+import { lstatSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { reportError } from './log'
-import { LEGACY_PROJECT_DIR_NAME, PROJECT_DIR_NAME } from '../shared/project-dirs'
+import { electProjectEntry, LEGACY_PROJECT_DIR_NAME, PROJECT_DIR_NAME } from '../shared/project-dirs'
 import { canonicalPath } from './worktree-service'
 
 export { LEGACY_PROJECT_DIR_NAME, PROJECT_DIR_NAME }
@@ -44,22 +44,20 @@ export function isAbsentFileError(error: unknown): boolean {
   return code === 'ENOENT' || code === 'ENOTDIR'
 }
 
-function existsOnDisk(path: string): boolean {
+/** Never throws. An entry is present unless lstat says ENOENT or ENOTDIR: a dangling link counts, as in `electEntry`. */
+export function entryPresent(path: string): boolean {
   try {
-    statSync(path)
+    lstatSync(path)
     return true
   } catch (error) {
     return !isAbsentFileError(error)
   }
 }
 
-/** Selection is by the FILE existing, never by its folder or its content. */
+/** Selection is by the FILE existing, never by its folder or its content; the rule is `electEntry`'s. */
 export function selectProjectFile(projectDir: string, ...segments: string[]): ProjectFileCandidate | null {
-  const candidates: ProjectFileCandidate[] = [
-    { path: projectCreationPath(projectDir, ...segments), source: 'koryphaios' },
-    { path: join(projectDir, '.claude', LEGACY_PROJECT_DIR_NAME, ...segments), source: 'legacy' }
-  ]
-  return candidates.find((candidate) => existsOnDisk(candidate.path)) ?? null
+  const entry = electProjectEntry(projectDir, ...segments)
+  return entry === null ? null : { path: entry.path, source: entry.source }
 }
 
 const traced = new Map<string, string>()

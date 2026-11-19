@@ -91,6 +91,23 @@ test("the file is selected by existence, whatever its content", () => {
   expect(selectProjectFile(project, "config.json")?.source).toBe("koryphaios");
 });
 
+test("a dangling link under .claude/koryphaios is selected, never skipped for the old folder's file", () => {
+  const project = tmpProject();
+  put(inLegacy(project, "config.json"));
+  mkdirSync(join(inNew(project, "config.json"), ".."), { recursive: true });
+  symlinkSync(join(project, "gone.json"), inNew(project, "config.json"), "file");
+  expect(selectProjectFile(project, "config.json")).toEqual({ path: inNew(project, "config.json"), source: "koryphaios" });
+});
+
+test("a live link under .claude/koryphaios is selected like a plain file", () => {
+  const project = tmpProject();
+  put(join(project, "real.json"));
+  put(inLegacy(project, "config.json"));
+  mkdirSync(join(inNew(project, "config.json"), ".."), { recursive: true });
+  symlinkSync(join(project, "real.json"), inNew(project, "config.json"), "file");
+  expect(selectProjectFile(project, "config.json")?.source).toBe("koryphaios");
+});
+
 function setMtime(file: string, seconds: number): void {
   utimesSync(file, seconds, seconds);
 }

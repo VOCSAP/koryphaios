@@ -16,7 +16,13 @@ import { isValidClodexContextInput } from '../shared/clodex-context'
 // 8.3 short names (worktree-service.ts's own docstring on canonicalPath).
 import { canonicalPath } from './worktree-service'
 import { writeFileAtomic } from './atomic-write'
-import { PROJECT_SOURCES, projectRootPath, type ProjectFileSource, type WorkspaceRef } from './project-files'
+import {
+  entryPresent,
+  PROJECT_SOURCES,
+  projectRootPath,
+  type ProjectFileSource,
+  type WorkspaceRef
+} from './project-files'
 
 /** "ephemeral" scopes mint a fresh secret on restore; "custom" ones are re-supplied via the launch arg. */
 export type ScopeKind = 'ephemeral' | 'custom'
@@ -88,7 +94,7 @@ export type WorkspaceLocation ={ kind: 'none' } | { kind: 'one'; ref: WorkspaceR
 export function locateWorkspace(projectDir: string, id: string): WorkspaceLocation {
   if (!WORKSPACE_ID_PATTERN.test(id)) return { kind: 'none' }
   const found = PROJECT_SOURCES.map((source): WorkspaceRef => ({ projectDir, id, source })).filter((ref) =>
-    existsSync(workspacePath(ref))
+    entryPresent(workspacePath(ref))
   )
   if (found.length === 0) return { kind: 'none' }
   const [only, other] = found

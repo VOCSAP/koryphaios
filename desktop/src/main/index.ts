@@ -3647,10 +3647,11 @@ app.whenReady().then(async () => {
       journal.add('session', 'project launchCommand refused — using the global command')
     }
   }
-  // B5: gate a PROJECT-sourced worktreeInit the same way. A repo-shipped
-  // `.claude/claude-peers/config.json` worktreeInit runs through a shell on
-  // worktree creation, so it only lands after a one-time operator approval;
-  // refusal falls back to the global hook (or none).
+  // A PROJECT-sourced worktreeInit is gated the same way. A repo-shipped
+  // `.claude/koryphaios/config.json` (or the older `.claude/claude-peers/config.json`)
+  // worktreeInit runs through a shell on worktree creation, so it only lands
+  // after a one-time operator approval; refusal falls back to the global hook
+  // (or none).
   {
     const projWti = projectWorktreeInit(cliContext.projectDir)
     const globalWti = globalWorktreeInit()

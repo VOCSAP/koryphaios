@@ -1,12 +1,12 @@
-// Project launchCommand hardening (PLAN C19). A repo can carry
-// .claude/claude-peers/config.json with its own `launchCommand` — which the
-// Deck would run in every PTY it spawns for that project. That is arbitrary
-// command execution on clone, so a PROJECT-sourced launchCommand now requires
-// a one-time operator approval: the command's hash is remembered per
-// project_key in the app state; a different command (different hash) asks
-// again; refusal falls back to the global/default command.
+// A PROJECT-sourced launchCommand needs a one-time operator approval. A repo
+// can carry .claude/koryphaios/config.json (or the older
+// .claude/claude-peers/config.json) with its own `launchCommand`, which the
+// Deck would run in every PTY it spawns for that project: arbitrary command
+// execution on clone. The command's hash is remembered per project_key in the
+// app state; a different command (different hash) asks again; refusal falls
+// back to the global/default command.
 //
-// Node builtins only (no electron) — index.ts supplies the actual dialog as
+// Node builtins only (no electron): index.ts supplies the actual dialog as
 // the injected `confirm` callback, tests inject a stub.
 
 import { createHash } from 'node:crypto'

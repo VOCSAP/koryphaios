@@ -1,5 +1,5 @@
 import { test, expect, afterEach } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 
@@ -234,6 +234,26 @@ test("a reader that fails with ENOENT is an absence and is not traced", () => {
   };
   expect(readConfigFile(missing, report, read)).toBeNull();
   expect(calls).toEqual([missing]);
+  expect(reports).toEqual([]);
+});
+
+test("a dangling link under .claude/koryphaios hides the old folder's config and is traced, naming the link", () => {
+  const proj = tmpProject();
+  writeLegacyConfig(proj, { launchCommand: "claude old-folder" });
+  mkdirSync(dirname(localConfigPath(proj)), { recursive: true });
+  symlinkSync(join(proj, "gone.json"), localConfigPath(proj), "file");
+  const { reports, errors, report } = collectReports();
+  expect(resolveLaunchConfig(proj, emptyGlobalEnv(), report).launchCommand).toBe(DEFAULT_LAUNCH_COMMAND);
+  expect(reports, "a refused link is never silent").toHaveLength(1);
+  expect(reports[0]).toContain(localConfigPath(proj));
+  expect((errors[0] as NodeJS.ErrnoException).code).toBe("ENOENT");
+});
+
+test("a config whose parent folder is a file reads as absent: no throw, no trace", () => {
+  const proj = tmpProject();
+  writeFileSync(join(proj, "not-a-folder"), "x", "utf-8");
+  const { reports, report } = collectReports();
+  expect(readConfigFile(join(proj, "not-a-folder", "config.json"), report)).toBeNull();
   expect(reports).toEqual([]);
 });
 
