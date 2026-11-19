@@ -1,4 +1,4 @@
-import { readFile } from 'node:fs/promises'
+import { lstat, readFile } from 'node:fs/promises'
 import { isAbsolute } from 'node:path'
 import { approve, commandHash, isApproved } from './launch-approval'
 import { reportError } from './log'
@@ -251,6 +251,10 @@ export async function readServeConfig(projectDir: string): Promise<ServeConfigRe
   let path: string
   let text: string
   try {
+    if ((await lstat(elected.path)).isSymbolicLink()) {
+      reportError('serve-config', `refusing serve.json: ${elected.path} is a link`)
+      return { error: 'read' }
+    }
     path = await resolveWithin(projectDir, elected.rel)
     text = await readFile(path, 'utf-8')
   } catch (error) {

@@ -644,6 +644,15 @@ test('a dangling link at the koryphaios path is not replaced by the claude-peers
   expect('config' in (await readServeConfig(project))).toBe(false)
 })
 
+test('refuses a serve.json leaf that is a link, even to a file inside the project', async () => {
+  const project = createProject()
+  const inner = join(project, 'web', 'inner.json')
+  writeFileSync(inner, JSON.stringify(validServeJson()), 'utf-8')
+  symlinkSync(inner, serveIn(project, 'koryphaios'), 'file')
+
+  expect(await readServeConfig(project)).toEqual({ error: 'read' })
+})
+
 test('neither folder holding a serve.json is reported as missing', async () => {
   const project = createProject()
   mkdirSync(join(project, '.claude', 'koryphaios'), { recursive: true })
