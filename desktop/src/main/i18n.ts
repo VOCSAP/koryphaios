@@ -206,7 +206,7 @@ export const EN_DEFAULTS: Record<string, string> = {
   'settings.projectDirHelp': 'Default working directory for new peer terminals.',
   'settings.launchCommand': 'Launch command',
   'settings.launchCommandHelp':
-    'Run in each terminal, with --session-id appended. Saved to the global launch config; a project .claude/claude-peers/config.json overrides it.',
+    'Run in each terminal, with --session-id appended. Saved to the global launch config; a project .claude/koryphaios/config.json (or the older .claude/claude-peers/config.json) overrides it.',
   'settings.shellOverride': 'Shell override',
   'settings.shellPlaceholder': 'auto ($SHELL / powershell.exe)',
   'settings.shellHelp': 'Leave empty to auto-detect per OS.',
@@ -326,7 +326,7 @@ export const EN_DEFAULTS: Record<string, string> = {
   'template.name': 'Template name',
   'template.namePlaceholder': 'e.g. My team',
   'template.localCheckbox': 'Local template (this project)',
-  'template.localHelp': 'Saved in this project: .claude/claude-peers/templates',
+  'template.localHelp': 'Saved in this project: .claude/koryphaios/templates (templates in the older .claude/claude-peers/templates are listed too)',
   'template.globalHelp': 'Saved globally, available to every project',
   'template.pickTitle': 'Use a template',
   'template.empty': 'No templates yet. Save the current sessions from File > Template > Save Template, or create one from Manage templates.',
@@ -918,7 +918,7 @@ export const EN_DEFAULTS: Record<string, string> = {
   'tile.snippetsTitle': 'Insert a saved prompt (fills the input, does not send)',
   'snippets.title': 'Saved prompts',
   'snippets.hint':
-    "Reusable prompts inserted into a session's input field — never sent automatically. Project prompts live in .claude/claude-peers/snippets and shadow a global prompt with the same name.",
+    "Reusable prompts inserted into a session's input field -- never sent automatically. Project prompts live in .claude/koryphaios/snippets (or the older .claude/claude-peers/snippets) and shadow a global prompt with the same name; the koryphaios folder wins over the older one.",
   'snippets.empty': 'No saved prompts yet',
   'snippets.manage': 'Manage…',
   'snippets.new': '＋ New prompt',

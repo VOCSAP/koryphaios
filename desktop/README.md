@@ -310,7 +310,9 @@ windows.
 A *workspace* is a restorable snapshot of the window: its session set (names,
 colours, args, cwd), display mode, and the group **identity** (a `groupId`
 hash -- **never the secret**). Stored in-repo at
-`<project>/.claude/claude-peers/workspaces/<id>.json` (git-ignored by default).
+`<project>/.claude/koryphaios/workspaces/<id>.json` (git-ignored by default).
+A workspace already saved under `<project>/.claude/claude-peers/workspaces/` is
+still listed and is kept up to date there, with its locks; nothing is migrated.
 
 - The live workspace **auto-saves** continuously while you work.
 - **Save As** gives it a name and pins it (kept, not pruned).
@@ -343,7 +345,9 @@ button): discrete inputs on change, free-text inputs on blur.
 
 Each tile spawns the resolved launch command in a real pseudo-terminal:
 
-- **Command resolution** (first wins): `<project>/.claude/claude-peers/config.json`
+- **Command resolution** (first wins): `<project>/.claude/koryphaios/config.json`
+  (else the older `<project>/.claude/claude-peers/config.json`; the older file is
+  never a fallback when the new one exists but is invalid)
   -> global config (`%APPDATA%\kory` / XDG) -> default
   `claude --dangerously-load-development-channels server:claude-peers`.
 - **Shell wrapping (default = login, non-interactive):** `"$SHELL" -l -c "<cmd>"`

@@ -518,7 +518,7 @@ test("saving from a raw editor names the repo rules file the editor was opened o
 
 test("adding a rule to a repo file names the repo rules file the editor was opened on", async () => {
   await mount();
-  const repoSection = container.querySelector('h3[title="/proj"]')!.closest("section")!;
+  const repoSection = container.querySelector('h3[title^="/proj"]')!.closest("section")!;
   const addBtn = [...repoSection.querySelectorAll("button")].find((b) => b.textContent === "rules.addRule")!;
   act(() => {
     addBtn.dispatchEvent(new MouseEvent("click", { bubbles: true }));
@@ -546,6 +546,23 @@ test("adding a rule to a repo file names the repo rules file the editor was open
   expect(saveRepoCalls.length).toBe(1);
   expect(saveRepoCalls[0]![0]).toBe("/proj");
   expect(saveRepoCalls[0]![3], "the add save carries the path read, not the project dir").toBe("/proj/.claude/claude-peers/rules.json");
+});
+
+test("a project section header shows the rules file read, whichever folder it lives in", async () => {
+  const projectAt = (projectDir: string, path: string) => ({
+    projectDir,
+    projectKey: "shared-key",
+    sessionIds: [`s-${projectDir}`],
+    file: { path, status: "absent" as const, hash: null, errors: [], text: null },
+    rules: [],
+  });
+  const newPath = "/proj-new/.claude/koryphaios/rules.json";
+  const oldPath = "/proj-old/.claude/claude-peers/rules.json";
+  currentList = { ...baseList(), projects: [projectAt("/proj-new", newPath), projectAt("/proj-old", oldPath)] };
+  await mount();
+  const titleOf = (dir: string): string => container.querySelector(`h3[title^="${dir}"]`)!.getAttribute("title")!;
+  expect(titleOf("/proj-new"), "the section shows the path it was given").toContain(newPath);
+  expect(titleOf("/proj-old"), "the section shows the path it was given").toContain(oldPath);
 });
 
 test("a removed approved repo file is surfaced, not shown as a plain absent file", async () => {

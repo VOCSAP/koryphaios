@@ -357,7 +357,7 @@ export function RulesSettings(): React.JSX.Element {
         const editDisabledReason = locked ? t('rules.editDisabledPending') : null
         return (
           <section className="rules-section" key={project.projectDir}>
-            <h3 title={project.projectDir}>{baseName(project.projectDir)}</h3>
+            <h3 title={`${project.projectDir}\n${project.file.path}`}>{baseName(project.projectDir)}</h3>
             <FileStatusBadge status={project.file.status} t={t} />
             {project.file.removedApproved === true ? (
               <p className="field-error">{t('rules.approvedRemoved')}</p>

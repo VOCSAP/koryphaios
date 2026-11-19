@@ -5,8 +5,10 @@
 A **workspace** is a restorable snapshot of the window: its session set
 (names, colours, args, cwd, worktrees, team-lead), display mode, and the
 group **identity** (a `groupId` hash — **never the secret**). Workspaces are
-stored in-repo at `<project>/.claude/claude-peers/workspaces/<id>.json`
-(git-ignored by default).
+stored in-repo at `<project>/.claude/koryphaios/workspaces/<id>.json`
+(git-ignored by default). A workspace already saved under
+`<project>/.claude/claude-peers/workspaces/` is still listed and is kept up to
+date there, with its locks; nothing is migrated.
 
 - The live workspace **auto-saves** continuously while you work.
 - **Save As…** names it and pins it (kept, never pruned).
@@ -34,8 +36,10 @@ agent, model, effort, args, initial prompt, worktree branch, announcement,
 colour, and a single team-lead crown.
 
 - **Save**: `File > Template > Save Template…` captures the current session set.
-  *Local* templates are saved in `<project>/.claude/claude-peers/templates/`;
-  *global* ones are available to every project.
+  *Local* templates are saved in `<project>/.claude/koryphaios/templates/`;
+  *global* ones are available to every project. The list also shows the
+  templates of the older `<project>/.claude/claude-peers/templates/`; a
+  template is recognised by its path, not its name.
 - **Apply**: from the empty-state `Use template` button or the templates
   dialog. `append` adds the template's sessions to the current ones;
   `replace` auto-saves and closes the current set first. Applying a template

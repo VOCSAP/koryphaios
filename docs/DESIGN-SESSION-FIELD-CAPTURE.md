@@ -85,8 +85,9 @@ lancement. Ce n'est pas une perte a corriger, c'est une exclusion a nommer.
 
 ### 2.3 Le `.gitignore` n'est pas une defense
 
-**DEDUIT** (`workspace-store.ts:71-90`) : `ensureWorkspacesDir` ecrit
-`workspaces/` dans `.claude/claude-peers/.gitignore`. C'est NOTRE hygiene, pas
+**DEDUIT** (`workspace-store.ts:98-114`) : `ensureWorkspacesDir` ecrit
+`workspaces/` dans le `.gitignore` du dossier projet (`.claude/koryphaios/`, ou
+l'ancien `.claude/claude-peers/` pour un workspace deja la). C'est NOTRE hygiene, pas
 une garantie : gitignore n'empeche pas un depot de SUIVRE un fichier, et un
 fichier suivi arrive dans le clone. L'app ne peut pas distinguer un workspace
 ecrit par l'operateur d'un workspace livre par le depot.

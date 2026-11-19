@@ -118,7 +118,7 @@ dernier-ecrivain-gagne sans fuite de contenu.
 | `operator.json` (`operator-identity.ts:22`) | identite Ed25519 de l'operateur | aucune, VOULU | MACHINE | OK |
 | `companion-cert.json` (`companion-server.ts:180`) | certificat auto-signe | aucune, VOULU | MACHINE | OK -- mais deux fenetres qui ouvrent le companion se disputent le port (§10 Q3) |
 | `<prefix><callerId>.json` team-lead MCP (`team-lead-mcp-sweep.ts:20`) | configs MCP du superviseur | derivee de `project_key` | PROJET | OK, l'accumulation entre deux fenetres du meme depot est documentee |
-| workspaces (`<projectDir>/.claude/claude-peers/`) | tuiles sauvegardees | hors `userData` | PROJET | OK par construction |
+| workspaces (`<projectDir>/.claude/koryphaios/`, et l'ancien `.claude/claude-peers/` lu et entretenu sur place) | tuiles sauvegardees | hors `userData` | PROJET | OK par construction |
 | cache peer-id (`~/.claude/peers/`) | `peer-id-<cwd>-<session>.txt` | cwd + session CC | -- | OK |
 | journal / logs | `broker.log`, `server.log`, journal d'activite | aucune | MACHINE | a verifier (§10 Q4) |
 

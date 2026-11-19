@@ -534,7 +534,8 @@ Electron + React 19 + zustand, xterm terminals over node-pty. Sources in
   one project file still last-writer-win (`config.json` alone holds the
   inter-process lock).
 - **Security gates**: any value that comes from a CLONED REPO (project
-  `.claude/claude-peers/config.json`, project-local `templates/*.json`) and
+  `.claude/koryphaios/config.json` or the older `.claude/claude-peers/config.json`,
+  project-local `templates/*.json` under either folder) and
   reaches a shell / spawn is an RCE vector, so it is either GLOBAL-config-only
   or approval-gated. Reuse `launch-approval.ts` (sha256 per project_key,
   one-time operator dialog) — never invent a new trust store, and never put the
@@ -587,7 +588,8 @@ Electron + React 19 + zustand, xterm terminals over node-pty. Sources in
   tokens only the day it fires. Three sources: Kory built-ins
   (`shared/ttsr-builtin.ts`, read-only), the operator's global file
   (`<globalConfigDir>/ttsr-rules.json`), and a repo file
-  (`<projectDir>/.claude/claude-peers/rules.json`, agent- or human-authored).
+  (`<projectDir>/.claude/koryphaios/rules.json`, else the older
+  `<projectDir>/.claude/claude-peers/rules.json`; agent- or human-authored).
   Shared engine (`shared/ttsr-rules.ts`, node builtins only): validator,
   field extraction, evaluation, hash. A repo file is a cloned-repo value
   (hostile input #1): the hook never sees it until approved

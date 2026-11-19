@@ -99,8 +99,10 @@ automatically. Open via the tile's snippet button; *Manage…* creates, edits
 and deletes them.
 
 - **Global** snippets are available to every project; **project** snippets
-  live in `<project>/.claude/claude-peers/snippets/` and shadow a global
-  prompt with the same name.
+  live in `<project>/.claude/koryphaios/snippets/` (the older
+  `<project>/.claude/claude-peers/snippets/` is still read) and shadow a global
+  prompt with the same name. On a name clash, koryphaios wins over claude-peers,
+  which wins over global.
 
 ## The launch command under the hood
 

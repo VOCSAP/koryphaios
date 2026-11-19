@@ -60,7 +60,10 @@ source (id, hook, a View/Edit button, an Active checkbox):
 |---|---|---|
 | **Kory** | built into the app | read-only, toggle only |
 | **Global** | the operator, from this page | the Active checkbox |
-| **Repo** (`.claude/claude-peers/rules.json`) | an agent (`repo-rules` skill) or a human | approval (hash-based), then the Active checkbox |
+| **Repo** (`.claude/koryphaios/rules.json`, else the older `.claude/claude-peers/rules.json`) | an agent (`repo-rules` skill) or a human | approval (hash-based), then the Active checkbox |
+
+The koryphaios file is the one used when it exists; the older file is read only
+when it does not. An invalid koryphaios file never falls back to the older one.
 
 A repo file's rules are **active by default once its file is approved**; the
 Active checkbox *disables* one, it does not turn the file on. While a repo
@@ -97,7 +100,9 @@ file-only.
 
 Resolution order (first wins):
 
-1. **Project-local** `<project>/.claude/claude-peers/config.json`
+1. **Project-local** `<project>/.claude/koryphaios/config.json`, else the older
+   `<project>/.claude/claude-peers/config.json` (no fallback to the older file
+   when the new one exists but is invalid)
 2. **Global** config file (above)
 3. Built-in default:
    `claude --dangerously-load-development-channels server:claude-peers`
@@ -192,10 +197,10 @@ the embedded English base.
 | Data | Location |
 |------|----------|
 | App config & session persistence | Electron `userData` dir (`koryphaios`) |
-| Workspaces | `<project>/.claude/claude-peers/workspaces/*.json` (git-ignored) |
-| Local templates | `<project>/.claude/claude-peers/templates/` |
+| Workspaces | `<project>/.claude/koryphaios/workspaces/*.json` (git-ignored); a workspace already under `.claude/claude-peers/workspaces/` stays there with its locks, nothing is migrated |
+| Local templates | `<project>/.claude/koryphaios/templates/`; `.claude/claude-peers/templates/` is listed too, a template is identified by its path |
 | Global templates | global config dir |
-| Project snippets | `<project>/.claude/claude-peers/snippets/` |
+| Project snippets | `<project>/.claude/koryphaios/snippets/`, then `.claude/claude-peers/snippets/`, then global on a name clash |
 | Worktrees | `<project>/.worktrees/<branch>/` (add to `.gitignore`) |
 | Dirty-tree checkpoints | `refs/claude-peers/` stash anchors (auto-purged after 7 days) |
 | Annotated screenshots | app state dir (pruned after 7 days) |

@@ -88,7 +88,7 @@ Mécanismes à connaître :
 
 | Besoin | Existant | Fichier |
 |---|---|---|
-| Config projet lue depuis le repo | `.claude/claude-peers/config.json` (`launchCommand`, `presets`, `worktreeInit`, `features`), fusion global → local | `desktop/src/main/launch-config.ts` |
+| Config projet lue depuis le repo | `.claude/koryphaios/config.json` s'il existe, sinon l'ancien `.claude/claude-peers/config.json`, sans repli après un JSON invalide (`launchCommand`, `presets`, `worktreeInit`, `features`), fusion global → local | `desktop/src/main/launch-config.ts` |
 | Gate d'approbation d'une commande issue d'un repo cloné | sha256 par `project_key`, dialogue une fois, refus = repli ; déjà appliqué à `launchCommand`, `worktreeInit` (clé suffixée `::worktreeInit`) et aux templates locaux | `desktop/src/main/launch-approval.ts`, `index.ts` (~l. 3002 et 3035), fichier PROJECT `launch-approvals.json` classé dans `tests/desktop-state-scope.test.ts` |
 | Port dynamique loopback | `server.listen(opts.port ?? 0, '127.0.0.1', …)` | `demo-control.ts:157`, `deck-control.ts:885`, `companion-server.ts:211` |
 | Navigateur embarqué + barre d'outils | `browser-toolbar` (JSX ~l. 1520), URL par défaut `http://localhost:3000` (`initialUrl`), mémorisée dans `config.browserUrl` (`store.ts:77`), navigation via `wv.loadURL(url)` | `desktop/src/renderer/src/components/BrowserView.tsx` |
@@ -107,7 +107,8 @@ par concept » (CLAUDE.md, règle Lot/Workflow/Vague).
 Arrêtés (session 2026-09-14, opérateur) :
 
 1. **Déclaration dans le repo**, fichier dédié
-   `<project>/.claude/claude-peers/serve.json` (pas un champ de `config.json`,
+   `<project>/.claude/koryphaios/serve.json`, ou l'ancien
+   `<project>/.claude/claude-peers/serve.json` s'il est seul (pas un champ de `config.json`,
    pour que le hash d'approbation ne couvre que cette commande et que le skill
    puisse écrire un fichier entier sans toucher au reste). Partageable,
    lisible par les agents, versionnable. Contrairement à Launch Station, pas

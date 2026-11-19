@@ -32,7 +32,7 @@ n'intervient qu'au moment d'écrire.
 |---|---|---|---|---|
 | Kory (fixes) | constantes de code, `desktop/src/shared/ttsr-builtin.ts` | le code | actives par défaut, désactivables une à une | `kory/` |
 | Globales | `<globalConfigDir>/ttsr-rules.json` | l'opérateur, via le Deck | case « Actif » | `user/` |
-| Dépôt | `<projectDir>/.claude/claude-peers/rules.json` | un agent (via la skill) ou un humain | **approbation opérateur**, puis case « Actif » | `repo/` |
+| Dépôt | `<projectDir>/.claude/koryphaios/rules.json`, sinon l'ancien `<projectDir>/.claude/claude-peers/rules.json` (jamais de repli après un JSON invalide) | un agent (via la skill) ou un humain | **approbation opérateur**, puis case « Actif » | `repo/` |
 
 Les préfixes sont posés par le chargeur, pas écrits dans les fichiers : un
 même id dans deux sources ne peut pas se masquer.
@@ -300,7 +300,7 @@ Frontmatter :
 ```yaml
 ---
 name: repo-rules
-description: Add or change a repo-specific guard rule (.claude/claude-peers/rules.json) that blocks or warns on a tool call matching a regex. Use when the same mechanical mistake recurs in this repo, or when the operator asks for a rule. Not for judgment rules.
+description: Add or change a repo-specific guard rule (.claude/koryphaios/rules.json) that blocks or warns on a tool call matching a regex. Use when the same mechanical mistake recurs in this repo, or when the operator asks for a rule. Not for judgment rules.
 allowed-tools: Bash(bun "${CLAUDE_PLUGIN_ROOT}/bin/kory-rules.mjs" *)
 ---
 ```
