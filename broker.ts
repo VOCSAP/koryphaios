@@ -119,6 +119,15 @@ import {
 } from "./shared/roadmap-context-document-cas.ts";
 import { formatRoadmapStaleSaveError, isRoadmapStaleSaveError } from "./shared/roadmap-append.ts";
 import { isValidQueueRank } from "./shared/roadmap-queue.ts";
+import {
+  applyQueueDelta,
+  canonicalQueueDelta,
+  parseQueueDeltaOps,
+  queueDeltaCardIds,
+  queueDeltaMovedIds,
+  queueToWaves,
+  wavesToRanks,
+} from "./shared/roadmap-queue-delta.ts";
 import { resolveRoadmapDateFilter, type RoadmapDateWindow } from "./shared/roadmap-date-filter.ts";
 import {
   adoptedContentDate,
@@ -227,6 +236,9 @@ import type {
   RoadmapLockReleaseRequest,
   RoadmapLockReleaseResponse,
   RoadmapPriority,
+  RoadmapQueueDeltaConflict,
+  RoadmapQueueDeltaRequest,
+  RoadmapQueueDeltaResponse,
   RoadmapReorderRequest,
   RoadmapReorderResponse,
   RoadmapStatus,
@@ -1367,6 +1379,37 @@ const BUMP_CONTEXT_DOCUMENT_REV_SEQ =
 const IS_APPLYING = "COALESCE((SELECT value FROM roadmap_sync_meta WHERE key = 'applying'), '0') = '1'";
 const IS_REPLICA = "COALESCE((SELECT value FROM roadmap_sync_meta WHERE key = 'mode'), '') = 'replica'";
 
+// The queue of a project is versioned as a whole: a delta names the revision it
+// was written against. A revision has no row of its own for a project that never
+// had a queued card, which reads as 0.
+db.run(`
+  CREATE TABLE IF NOT EXISTS roadmap_queue_state (
+    project_key TEXT PRIMARY KEY,
+    rev INTEGER NOT NULL
+  )
+`);
+
+// One receipt per queue mutation, kept for good: a replica that was offline for
+// longer than any retention window must still get the answer to its retry
+// instead of applying the mutation twice.
+db.run(`
+  CREATE TABLE IF NOT EXISTS roadmap_queue_receipts (
+    replica_id TEXT NOT NULL,
+    project_key TEXT NOT NULL,
+    mutation_id TEXT NOT NULL,
+    payload_hash TEXT NOT NULL,
+    queue_rev_before INTEGER NOT NULL,
+    queue_rev_after INTEGER NOT NULL,
+    response TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (replica_id, project_key, mutation_id)
+  )
+`);
+
+const BUMP_QUEUE_REV = (projectKey: string): string =>
+  `INSERT INTO roadmap_queue_state (project_key, rev) VALUES (${projectKey}, 1)
+     ON CONFLICT(project_key) DO UPDATE SET rev = rev + 1;`;
+
 // Dropped and recreated on every startup rather than CREATE IF NOT EXISTS: the
 // generated column lists change with the schema, and an "if not exists" would
 // keep serving the definition compiled by an older broker.
@@ -1375,6 +1418,10 @@ for (const name of [
   "roadmap_rev_au",
   "roadmap_content_rev_au",
   "roadmap_queue_dirty_au",
+  "roadmap_queue_rev_ai",
+  "roadmap_queue_rev_bi",
+  "roadmap_queue_rev_au",
+  "roadmap_queue_rev_ad",
   "roadmap_lock_scope_ai",
   "roadmap_lock_scope_au",
   "roadmap_lock_release_au",
@@ -1425,6 +1472,41 @@ db.run(`
   WHEN old.queue IS NOT new.queue AND NOT (${IS_APPLYING})
   BEGIN
     UPDATE roadmap_items SET sync_dirty = 1 WHERE rowid = new.rowid;
+  END
+`);
+
+// Every write of a queued rank moves the project's queue revision, in triggers
+// for the reason the revision stamps above are: a handler-side call fails open
+// the day a new writer forgets it. The BEFORE INSERT one is for INSERT OR
+// REPLACE, which drops the old row without firing a delete trigger while
+// recursive triggers are off; it reads the row about to be replaced, so a
+// replacement that moves a card across projects invalidates the old queue too.
+db.run(`
+  CREATE TRIGGER roadmap_queue_rev_au AFTER UPDATE OF queue ON roadmap_items
+  WHEN old.queue IS NOT new.queue
+  BEGIN
+    ${BUMP_QUEUE_REV("new.project_key")}
+  END
+`);
+db.run(`
+  CREATE TRIGGER roadmap_queue_rev_ai AFTER INSERT ON roadmap_items
+  WHEN new.queue IS NOT NULL
+  BEGIN
+    ${BUMP_QUEUE_REV("new.project_key")}
+  END
+`);
+db.run(`
+  CREATE TRIGGER roadmap_queue_rev_bi BEFORE INSERT ON roadmap_items
+  WHEN EXISTS (SELECT 1 FROM roadmap_items WHERE id = new.id AND queue IS NOT NULL)
+  BEGIN
+    ${BUMP_QUEUE_REV("(SELECT project_key FROM roadmap_items WHERE id = new.id)")}
+  END
+`);
+db.run(`
+  CREATE TRIGGER roadmap_queue_rev_ad AFTER DELETE ON roadmap_items
+  WHEN old.queue IS NOT NULL
+  BEGIN
+    ${BUMP_QUEUE_REV("old.project_key")}
   END
 `);
 
@@ -8205,7 +8287,14 @@ function handleRoadmapSyncPull(
   // The last row of an ORDER BY rev page carries the greatest rev; an empty
   // page leaves the cursor where it was.
   const next_rev = items.length > 0 ? items[items.length - 1]!.rev : since;
-  return { items, next_rev };
+  const queue_revs: Record<string, number> = {};
+  for (const state of db.query("SELECT project_key, rev FROM roadmap_queue_state").all() as {
+    project_key: string;
+    rev: number;
+  }[]) {
+    queue_revs[state.project_key] = state.rev;
+  }
+  return { items, next_rev, queue_revs };
 }
 
 type SyncPushResult =
@@ -8759,6 +8848,210 @@ function handleRoadmapSyncPush(body: RoadmapSyncPushRequest): SyncPushResult {
   const stored = getRoadmapRow(item.id)!;
   const row = rowToSyncRow(stored);
   return { ok: true, response: { item: row, rev: row.rev, content_rev: row.content_rev } };
+}
+
+type QueueDeltaResult =
+  | { ok: true; response: RoadmapQueueDeltaResponse }
+  | { ok: false; conflict: RoadmapQueueDeltaConflict }
+  | { error: string; status: number; op_index?: number; item_id?: string };
+
+const QUEUE_MUTATION_ID_REGEX = /^[A-Za-z0-9-]{8,64}$/;
+
+/**
+ * What a receipt keeps: the identity of the mutation and which cards it moved,
+ * never the cards themselves. A receipt is never purged, so a stored row would
+ * grow it with every card the mutation touched and replay a stale copy of one.
+ */
+interface QueueDeltaReceipt {
+  mutation_id: string;
+  payload_hash: string;
+  queue_rev: number;
+  changes: { id: string; queue: number | null; rev: number }[];
+}
+
+/** The reply of a mutation, with the CURRENT rows of the cards it moved. */
+function queueDeltaResponse(receipt: QueueDeltaReceipt, replayed: boolean): RoadmapQueueDeltaResponse {
+  const items: RoadmapSyncRow[] = [];
+  for (const { id } of receipt.changes) {
+    const row = getRoadmapRow(id);
+    if (row) items.push(rowToSyncRow(row));
+  }
+  return {
+    mutation_id: receipt.mutation_id,
+    payload_hash: receipt.payload_hash,
+    queue_rev: receipt.queue_rev,
+    replayed,
+    items,
+  };
+}
+
+function queueRev(projectKey: string): number {
+  const row = db.query("SELECT rev FROM roadmap_queue_state WHERE project_key = ?").get(projectKey) as
+    | { rev: number }
+    | null;
+  return row?.rev ?? 0;
+}
+
+/**
+ * The upstream half of a queue mutation: one envelope, one transaction, one
+ * receipt. The receipt is looked up BEFORE the revision is compared, because
+ * the commit of the first attempt is itself what made `expected_queue_rev`
+ * stale for its own retry. A refusal writes nothing, the receipt included.
+ * No `content_rev` is read: a rank move depends on the queue, not on what the
+ * cards say.
+ */
+function handleRoadmapQueueDelta(body: RoadmapQueueDeltaRequest): QueueDeltaResult {
+  const route = "/roadmap/sync/queue-delta";
+  const refused = refuseWhenReplica(route);
+  if (refused) return refused;
+  const notAnUpstream = requireServeReplicas(route);
+  if (notAnUpstream) return notAnUpstream;
+  const unauthenticated = requireBrokerToken(route);
+  if (unauthenticated) return unauthenticated;
+  if (typeof body !== "object" || body === null) return { error: "body must be an object", status: 400 };
+  const replicaId = syncReplicaId(body.replica_id);
+  if (typeof replicaId !== "string") return replicaId;
+  const projectKey = typeof body.project_key === "string" ? body.project_key : "";
+  if (!projectKey) return { error: "project_key is required", status: 400 };
+  const projectKeyCheck = validateProjectKey(projectKey);
+  if (!projectKeyCheck.ok) {
+    return { error: `project_key is invalid (${projectKeyCheck.reason})`, status: 400 };
+  }
+  const caseRefusal = projectKeyCaseRefusal(projectKey);
+  if (caseRefusal) return { error: caseRefusal, status: 400 };
+  if (typeof body.mutation_id !== "string" || !QUEUE_MUTATION_ID_REGEX.test(body.mutation_id)) {
+    return { error: "mutation_id must be 8 to 64 chars of [A-Za-z0-9-]", status: 400 };
+  }
+  const mutationId = body.mutation_id;
+  const expected = syncInteger(body.expected_queue_rev, "expected_queue_rev", 0);
+  if (typeof expected !== "number") return expected;
+  const parsed = parseQueueDeltaOps(body.ops);
+  if (!parsed.ok) return { error: parsed.error, status: 400, op_index: parsed.op_index };
+  const ops = parsed.ops;
+  const malformedId = queueDeltaCardIds(ops).find((id) => !ROADMAP_ID_REGEX.test(id));
+  if (malformedId !== undefined) {
+    return { error: `card id '${malformedId}' is malformed`, status: 400, item_id: malformedId };
+  }
+  const payloadHash = createHash("sha256").update(canonicalQueueDelta(projectKey, expected, ops)).digest("hex");
+
+  const apply = db.transaction((): QueueDeltaResult => {
+    const receipt = db
+      .query(
+        "SELECT payload_hash, response FROM roadmap_queue_receipts WHERE replica_id = ? AND project_key = ? AND mutation_id = ?"
+      )
+      .get(replicaId, projectKey, mutationId) as { payload_hash: string; response: string } | null;
+    if (receipt) {
+      if (receipt.payload_hash !== payloadHash) {
+        return {
+          ok: false,
+          conflict: { error: "conflict", reason: "mutation_reused", queue_rev: queueRev(projectKey) },
+        };
+      }
+      return { ok: true, response: queueDeltaResponse(JSON.parse(receipt.response) as QueueDeltaReceipt, true) };
+    }
+    const before = queueRev(projectKey);
+    if (before !== expected) {
+      return { ok: false, conflict: { error: "conflict", reason: "queue_rev", queue_rev: before } };
+    }
+
+    const cards = new Map<string, RoadmapRow>();
+    for (const id of queueDeltaCardIds(ops)) {
+      const row = getRoadmapRow(id);
+      if (!row || row.project_key !== projectKey) {
+        return { error: `unknown roadmap item '${id}' in this project`, status: 404, item_id: id };
+      }
+      cards.set(id, row);
+    }
+    for (const op of ops) {
+      if (op.op !== "place" && op.op !== "join") continue;
+      for (const id of op.ids) {
+        const row = cards.get(id)!;
+        if (row.status === "done" || row.status === "archived") {
+          return { error: `item '${id}' is ${row.status} and cannot be queued`, status: 400, item_id: id };
+        }
+        if (row.inactive === 1) {
+          return {
+            error: `item '${id}' is inactive -- clear inactive before queuing it`,
+            status: 403,
+            item_id: id,
+          };
+        }
+      }
+    }
+
+    // The queue the dispatcher and the reorder read: a done or archived card
+    // that kept a rank is not in it, so it is never renumbered or rewritten here.
+    const queued = db
+      .query(
+        "SELECT id, queue, kind FROM roadmap_items WHERE project_key = ? AND queue IS NOT NULL AND status NOT IN ('done', 'archived')"
+      )
+      .all(projectKey) as { id: string; queue: number; kind: string }[];
+    const applied = applyQueueDelta(queueToWaves(queued), ops);
+    if (!applied.ok) {
+      return { error: applied.error, status: 400, op_index: applied.op_index, ...(applied.item_id ? { item_id: applied.item_id } : {}) };
+    }
+    const kindOf = new Map(queued.map((row) => [row.id, row.kind]));
+    for (const id of cards.keys()) kindOf.set(id, cards.get(id)!.kind);
+    const named = new Set(queueDeltaMovedIds(ops));
+    for (const wave of applied.waves) {
+      if (wave.length < 2 || !wave.some((id) => named.has(id))) continue;
+      const directive = wave.find((id) => kindOf.get(id) === "directive");
+      if (directive !== undefined) {
+        return { error: `directive item '${directive}' must be in a singleton wave`, status: 400, item_id: directive };
+      }
+    }
+
+    const ranks = wavesToRanks(applied.waves);
+    const previous = new Map(queued.map((row) => [row.id, row.queue]));
+    const changed = [...new Set([...previous.keys(), ...ranks.keys()])].filter(
+      (id) => (previous.get(id) ?? null) !== (ranks.get(id) ?? null)
+    );
+    // Only a card the operations move or remove is protected by its lock: a card
+    // that merely takes a new rank number keeps its place relative to the others.
+    const removed = changed.filter((id) => !ranks.has(id));
+    for (const id of new Set([...named, ...removed])) {
+      const row = cards.get(id) ?? getRoadmapRow(id);
+      if (row && row.locked === 1 && !relayHoldsLock(id, replicaId)) {
+        log.info(`${route}: card ${id} is work-locked by '${row.locked_by}', replica ${replicaId} refused`);
+        return {
+          ok: false,
+          conflict: { error: "conflict", reason: "locked_upstream", queue_rev: before, item_id: id },
+        };
+      }
+    }
+
+    const by = relayedAuthor("deck", replicaId);
+    for (const id of changed) {
+      db.run("UPDATE roadmap_items SET queue = ?, updated_by = ?, updated_at = datetime('now') WHERE id = ?", [
+        ranks.get(id) ?? null,
+        by,
+        id,
+      ]);
+    }
+    const after = queueRev(projectKey);
+    const stored: QueueDeltaReceipt = {
+      mutation_id: mutationId,
+      payload_hash: payloadHash,
+      queue_rev: after,
+      changes: changed.map((id) => {
+        const row = getRoadmapRow(id)!;
+        return { id, queue: row.queue, rev: row.rev };
+      }),
+    };
+    db.run(
+      `INSERT INTO roadmap_queue_receipts
+         (replica_id, project_key, mutation_id, payload_hash, queue_rev_before, queue_rev_after, response)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [replicaId, projectKey, mutationId, payloadHash, before, after, JSON.stringify(stored)]
+    );
+    return { ok: true, response: queueDeltaResponse(stored, false) };
+  });
+  try {
+    return apply();
+  } catch (error) {
+    log.error(`${route}: queue delta write failed`, error);
+    return { error: "queue delta write failed", status: 500 };
+  }
 }
 
 type SyncLockResult =
@@ -14573,6 +14866,15 @@ const server = Bun.serve<WsData>({
           }
           // A refused push is not a request error: the body carries the
           // upstream row the replica needs to arbitrate against.
+          if (!result.ok) return Response.json(result.conflict, { status: 409 });
+          return Response.json(result.response);
+        }
+        case "/roadmap/sync/queue-delta": {
+          const result = handleRoadmapQueueDelta(body as RoadmapQueueDeltaRequest);
+          if ("error" in result) {
+            const { status, ...errorBody } = result;
+            return Response.json(errorBody, { status });
+          }
           if (!result.ok) return Response.json(result.conflict, { status: 409 });
           return Response.json(result.response);
         }

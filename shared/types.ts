@@ -1,5 +1,6 @@
 import type { DelegationPolicy, DelegationTaskAction, DelegationTaskStatus } from "./delegated-task.ts";
 import type { PeerTelemetrySnapshot } from "./peer-telemetry.ts";
+import type { QueueDeltaOp } from "./roadmap-queue-delta.ts";
 
 // Display name for a peer, mutable via set_id, unique per (peer_id, group_id).
 export type PeerId = string;
@@ -735,6 +736,11 @@ export interface RoadmapSyncPullResponse {
   items: RoadmapSyncRow[];
   /** Greatest `rev` returned, or `since_rev` when the page is empty. */
   next_rev: number;
+  /**
+   * Queue revision of every project that has one: the base a queue delta names
+   * as `expected_queue_rev`. Absent from an upstream that predates the delta.
+   */
+  queue_revs?: Record<string, number>;
 }
 
 /**
@@ -783,6 +789,45 @@ export interface RoadmapSyncPushConflict {
   error: "conflict";
   reason: "content" | "locked_upstream" | "missing";
   item: RoadmapSyncRow | null;
+}
+
+/**
+ * One queue mutation of a project, in relative operations (see
+ * shared/roadmap-queue-delta.ts). The unit of atomicity AND of idempotence:
+ * `(replica_id, project_key, mutation_id)` names it, and the receipt keeps the
+ * hash of its payload. A rank operation depends on `expected_queue_rev` alone,
+ * never on the content revision of the cards it moves.
+ */
+export interface RoadmapQueueDeltaRequest {
+  replica_id: string;
+  project_key: string;
+  mutation_id: string;
+  expected_queue_rev: number;
+  ops: QueueDeltaOp[];
+}
+
+export interface RoadmapQueueDeltaResponse {
+  mutation_id: string;
+  payload_hash: string;
+  /** Queue revision of the project once this mutation is committed. */
+  queue_rev: number;
+  /** True when the receipt of an earlier identical request was returned and nothing was applied. */
+  replayed: boolean;
+  /** Cards whose rank changed, as /roadmap/sync/pull serves them. */
+  items: RoadmapSyncRow[];
+}
+
+/**
+ * 409 body of /roadmap/sync/queue-delta. 'queue_rev': the project's queue moved
+ * past `expected_queue_rev`; 'locked_upstream': a card the delta moves is
+ * work-locked by a holder this replica does not relay (`item_id`);
+ * 'mutation_reused': the mutation id is already receipted with another payload.
+ */
+export interface RoadmapQueueDeltaConflict {
+  error: "conflict";
+  reason: "queue_rev" | "locked_upstream" | "mutation_reused";
+  queue_rev: number;
+  item_id?: string;
 }
 
 export type RoadmapSyncLockAction = "claim" | "release";

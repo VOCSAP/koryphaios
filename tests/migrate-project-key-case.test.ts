@@ -105,6 +105,8 @@ const EXPECTED_PROJECT_KEY_TABLES = [
   "pending_approvals",
   "roadmap_context_documents",
   "roadmap_items",
+  "roadmap_queue_receipts",
+  "roadmap_queue_state",
 ];
 
 function insertRoadmapItem(db: Database, id: string, projectKey: string): void {
@@ -142,6 +144,19 @@ function insertPendingApproval(db: Database, id: string, projectKey: string): vo
     `INSERT INTO pending_approvals (id, operator_id, kind, title, question, created_at, notif_expires_at, project_key)
      VALUES (?, 'op1', 'ask_operator', 'title', 'question?', ${NOW}, ${NOW}, ?)`,
     [id, projectKey]
+  );
+}
+
+function insertQueueState(db: Database, projectKey: string, rev: number): void {
+  db.run("INSERT INTO roadmap_queue_state (project_key, rev) VALUES (?, ?)", [projectKey, rev]);
+}
+
+function insertQueueReceipt(db: Database, replicaId: string, projectKey: string, mutationId: string): void {
+  db.run(
+    `INSERT INTO roadmap_queue_receipts
+       (replica_id, project_key, mutation_id, payload_hash, queue_rev_before, queue_rev_after, response)
+     VALUES (?, ?, ?, 'hash-1', 3, 7, '{"changes":[{"id":"a","queue":1,"rev":9}]}')`,
+    [replicaId, projectKey, mutationId]
   );
 }
 
@@ -300,6 +315,66 @@ test("a collision inside dispatch_requests is REFUSED, never merged", () => {
     .query<{ project_key: string }, []>("SELECT project_key FROM dispatch_requests WHERE id = 'd1'")
     .get();
   expect(row?.project_key).toBe("github.com/VOCSAP/koryphaios");
+});
+
+// Card c149cc3c. A queue revision and a mutation receipt are keyed by the
+// project, and a receipt is kept for good: the migration must carry both into
+// lowercase untouched, and must never fold two casings of one project into one
+// row, which would either lower a revision or drop a receipt the replica still
+// retries against.
+test("a queue revision and a mutation receipt move to the lowercase key with every other column untouched", () => {
+  const db = seededDb();
+  insertQueueState(db, "github.com/VOCSAP/koryphaios", 7);
+  insertQueueState(db, "github.com/vocsap/other-repo", 2);
+  insertQueueReceipt(db, "replica-one", "github.com/VOCSAP/koryphaios", "mutation-0001");
+  const receiptBefore = db
+    .query("SELECT replica_id, mutation_id, payload_hash, queue_rev_before, queue_rev_after, response, created_at FROM roadmap_queue_receipts")
+    .get();
+
+  expect(migrateAll(db, true).status).toBe("written");
+
+  const state = db.query("SELECT project_key, rev FROM roadmap_queue_state ORDER BY project_key").all();
+  expect(state).toEqual([
+    { project_key: "github.com/vocsap/koryphaios", rev: 7 },
+    { project_key: "github.com/vocsap/other-repo", rev: 2 },
+  ]);
+  const receipts = db.query("SELECT project_key FROM roadmap_queue_receipts").all();
+  expect(receipts).toEqual([{ project_key: "github.com/vocsap/koryphaios" }]);
+  expect(
+    db
+      .query("SELECT replica_id, mutation_id, payload_hash, queue_rev_before, queue_rev_after, response, created_at FROM roadmap_queue_receipts")
+      .get()
+  ).toEqual(receiptBefore);
+});
+
+test("two casings of one project in the queue revisions are REFUSED, never merged, so no revision goes backwards", () => {
+  const db = seededDb();
+  insertQueueState(db, "github.com/VOCSAP/koryphaios", 9);
+  insertQueueState(db, "github.com/vocsap/koryphaios", 4);
+
+  const result = migrateAll(db, true);
+
+  expect(result.status).toBe("collision");
+  if (result.status === "collision") expect(result.collisions.has("roadmap_queue_state")).toBe(true);
+  expect(db.query("SELECT project_key, rev FROM roadmap_queue_state ORDER BY project_key").all()).toEqual([
+    { project_key: "github.com/VOCSAP/koryphaios", rev: 9 },
+    { project_key: "github.com/vocsap/koryphaios", rev: 4 },
+  ]);
+});
+
+test("two receipts that would become the same primary key are REFUSED, never merged, so no receipt is lost", () => {
+  const db = seededDb();
+  insertQueueReceipt(db, "replica-one", "github.com/VOCSAP/koryphaios", "mutation-0001");
+  insertQueueReceipt(db, "replica-one", "github.com/vocsap/koryphaios", "mutation-0001");
+
+  const result = migrateAll(db, true);
+
+  expect(result.status).toBe("collision");
+  if (result.status === "collision") expect(result.collisions.has("roadmap_queue_receipts")).toBe(true);
+  expect(db.query("SELECT project_key FROM roadmap_queue_receipts ORDER BY project_key").all()).toEqual([
+    { project_key: "github.com/VOCSAP/koryphaios" },
+    { project_key: "github.com/vocsap/koryphaios" },
+  ]);
 });
 
 test("non-ASCII casing uses Unicode-correct JS toLowerCase(), never SQLite's ASCII-only LOWER()", () => {

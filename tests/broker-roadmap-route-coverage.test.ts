@@ -78,6 +78,7 @@ const READ_ROUTES = new Set([
 const EXEMPT_ROUTES = new Set<string>([
   "/roadmap/context-document/sync/push",
   "/roadmap/sync/push",
+  "/roadmap/sync/queue-delta",
   "/roadmap/sync/lock",
 ]);
 
@@ -174,6 +175,7 @@ const EXPECTED_ROUTES = [
   "/roadmap/sync/lock",
   "/roadmap/sync/pull",
   "/roadmap/sync/push",
+  "/roadmap/sync/queue-delta",
   "/roadmap/sync/resolve",
   "/roadmap/sync/status",
   "/roadmap/upsert",
@@ -270,6 +272,13 @@ test("the author-exempt replication routes are not open: with no broker_token th
         created_at: "2026-01-01T00:00:00.000Z",
         updated_at: "2026-01-01T00:00:00.000Z",
       },
+    },
+    "/roadmap/sync/queue-delta": {
+      replica_id: "replica-coverage",
+      project_key: PK,
+      mutation_id: "mutation-coverage-exempt",
+      expected_queue_rev: 0,
+      ops: [{ op: "clear" }],
     },
     "/roadmap/sync/lock": {
       replica_id: "replica-coverage",
@@ -431,6 +440,7 @@ const GUARDED_INACTIVE_HANDLERS = new Set([
  */
 const REPLICATION_INACTIVE_HANDLERS = new Set([
   "handleRoadmapContextDocumentSyncPush",
+  "handleRoadmapQueueDelta",
   "handleRoadmapSyncPush",
   "handleRoadmapSyncResolve",
 ]);
@@ -499,6 +509,7 @@ const EXPECTED_INACTIVE_HANDLERS = [
   "handleRoadmapList",
   "handleRoadmapLockPark",
   "handleRoadmapLockRelease",
+  "handleRoadmapQueueDelta",
   "handleRoadmapReorder",
   "handleRoadmapSyncConflicts",
   "handleRoadmapSyncLock",

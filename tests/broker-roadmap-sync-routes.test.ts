@@ -23,6 +23,8 @@ import type {
   RoadmapContextDocumentSyncPullResponse,
   RoadmapContextDocumentSyncPushResponse,
   RoadmapItem,
+  RoadmapQueueDeltaConflict,
+  RoadmapQueueDeltaResponse,
   RoadmapSyncLockClaimResponse,
   RoadmapSyncLockReleaseResponse,
   RoadmapSyncPullResponse,
@@ -2334,3 +2336,597 @@ test("resolve requires the same author proof as any other Deck roadmap write", a
   );
   expect(badChoice.status).toBe(400);
 }, 20_000);
+
+// ----- /roadmap/sync/queue-delta -----
+
+type DeltaBody = Partial<RoadmapQueueDeltaResponse> &
+  Partial<RoadmapQueueDeltaConflict> & { error?: string; op_index?: number; item_id?: string };
+type QueueRows = Array<[string, number]>;
+
+/** One project per test: the queue revision is per project, so tests on the shared upstream never meet. */
+function queueProject(name: string): string {
+  return `${PK}-qd-${name}`;
+}
+
+async function seedQueue(b: TestBroker, project: string, cards: Array<[string, number | null]>): Promise<void> {
+  for (const [id, queue] of cards) {
+    const res = await post(`${b.url}/roadmap/sync/push`, {
+      replica_id: R1,
+      item: pushItem({ id, project_key: project, queue }),
+      expected_content_rev: null,
+    });
+    expect([id, res.status]).toEqual([id, 200]);
+  }
+}
+
+async function queueRevOf(b: TestBroker, project: string): Promise<number> {
+  const page = await pull(b, 0, 1);
+  return page.body.queue_revs?.[project] ?? 0;
+}
+
+function storedQueue(b: TestBroker, project: string): QueueRows {
+  const db = openBrokerDb(b.dbPath, { readonly: true });
+  try {
+    return (
+      db
+        .query("SELECT id, queue FROM roadmap_items WHERE project_key = ? AND queue IS NOT NULL ORDER BY queue, id")
+        .all(project) as { id: string; queue: number }[]
+    ).map((row) => [row.id, row.queue]);
+  } finally {
+    db.close();
+  }
+}
+
+function receiptCount(b: TestBroker, project: string): number {
+  const db = openBrokerDb(b.dbPath, { readonly: true });
+  try {
+    return (
+      db.query("SELECT COUNT(*) AS n FROM roadmap_queue_receipts WHERE project_key = ?").get(project) as { n: number }
+    ).n;
+  } finally {
+    db.close();
+  }
+}
+
+function sendDelta(
+  b: TestBroker,
+  project: string,
+  expected: number,
+  ops: unknown,
+  over: { mutation_id?: string; replica_id?: string } = {}
+) {
+  return post<DeltaBody>(`${b.url}/roadmap/sync/queue-delta`, {
+    replica_id: over.replica_id ?? R1,
+    project_key: project,
+    mutation_id: over.mutation_id ?? crypto.randomUUID(),
+    expected_queue_rev: expected,
+    ops,
+  });
+}
+
+test("queue-delta: a rank move depends on the queue revision alone, not on the content revision of the cards it moves", async () => {
+  const b = shared;
+  const project = queueProject("content");
+  const [a, c, d] = ["qd-content-a", "qd-content-c", "qd-content-d"];
+  await seedQueue(b, project, [[a, 1], [c, 2], [d, 3]]);
+  const edited = await post<UpsertRes>(
+    `${b.url}/roadmap/upsert`,
+    deckAuthored({ project_key: project, id: d, title: "edited upstream after the replica read it" })
+  );
+  expect(edited.status).toBe(200);
+  const before = await queueRevOf(b, project);
+  const queueBefore = storedQueue(b, project);
+  expect(queueBefore.map(([id]) => id).sort()).toEqual([a, c, d]);
+
+  const res = await sendDelta(b, project, before, [{ op: "place", ids: [d], at: "start" }]);
+
+  expect(res.status).toBe(200);
+  expect(res.body.replayed).toBe(false);
+  expect(storedQueue(b, project)).toEqual([[d, 1], [a, 2], [c, 3]]);
+  expect(res.body.queue_rev).toBeGreaterThan(before);
+  expect(res.body.queue_rev).toBe(await queueRevOf(b, project));
+  expect(res.body.items?.map((row) => [row.id, row.queue]).sort()).toEqual([[a, 2], [c, 3], [d, 1]]);
+  expect(res.body.items?.map((row) => row.updated_by)).toEqual(Array(3).fill(`via:${R1.slice(0, 8)}:deck`));
+}, 20_000);
+
+test("queue-delta: a retry after a lost response returns the stored receipt and applies nothing twice", async () => {
+  const b = shared;
+  const project = queueProject("retry");
+  const [a, c] = ["qd-retry-a", "qd-retry-c"];
+  await seedQueue(b, project, [[a, 1], [c, 2]]);
+  const base = await queueRevOf(b, project);
+  const mutation_id = crypto.randomUUID();
+  const ops = [{ op: "remove", ids: [a] }];
+
+  const first = await sendDelta(b, project, base, ops, { mutation_id });
+  expect(first.status).toBe(200);
+  expect(first.body.replayed).toBe(false);
+  const settled = await queueRevOf(b, project);
+  expect(settled).toBe(first.body.queue_rev!);
+
+  // The base this request names is stale now (its own commit moved it), and the
+  // operation could not apply a second time: only the receipt can answer.
+  const retry = await sendDelta(b, project, base, ops, { mutation_id });
+  expect(retry.status).toBe(200);
+  expect(retry.body.replayed).toBe(true);
+  expect(retry.body.payload_hash).toBe(first.body.payload_hash);
+  expect(retry.body.queue_rev).toBe(first.body.queue_rev);
+  expect(retry.body.items?.map((row) => row.id)).toEqual(first.body.items?.map((row) => row.id));
+  expect(await queueRevOf(b, project)).toBe(settled);
+  expect(storedQueue(b, project)).toEqual([[c, 1]]);
+  expect(receiptCount(b, project)).toBe(1);
+}, 20_000);
+
+test("queue-delta: a receipt belongs to its replica and project: the same mutation id elsewhere is a new mutation", async () => {
+  const b = shared;
+  const project = queueProject("scope");
+  const [a, c] = ["qd-scope-a", "qd-scope-c"];
+  await seedQueue(b, project, [[a, 1], [c, 2]]);
+  const mutation_id = crypto.randomUUID();
+
+  const first = await sendDelta(b, project, await queueRevOf(b, project), [{ op: "remove", ids: [a] }], { mutation_id });
+  expect(first.status).toBe(200);
+  const other = await sendDelta(b, project, await queueRevOf(b, project), [{ op: "remove", ids: [c] }], {
+    mutation_id,
+    replica_id: R2,
+  });
+
+  expect([other.status, other.body.replayed]).toEqual([200, false]);
+  expect(storedQueue(b, project)).toEqual([]);
+}, 20_000);
+
+test("queue-delta: the same mutation id with another payload is refused and changes nothing", async () => {
+  const b = shared;
+  const project = queueProject("reuse");
+  const [a, c] = ["qd-reuse-a", "qd-reuse-c"];
+  await seedQueue(b, project, [[a, 1], [c, 2]]);
+  const base = await queueRevOf(b, project);
+  const mutation_id = crypto.randomUUID();
+  const first = await sendDelta(b, project, base, [{ op: "place", ids: [a], at: "end" }], { mutation_id });
+  expect(first.status).toBe(200);
+  const queueAfterFirst = storedQueue(b, project);
+  const revAfterFirst = await queueRevOf(b, project);
+
+  const reused = await sendDelta(b, project, base, [{ op: "place", ids: [c], at: "end" }], { mutation_id });
+
+  expect(reused.status).toBe(409);
+  expect(reused.body.reason).toBe("mutation_reused");
+  expect(storedQueue(b, project)).toEqual(queueAfterFirst);
+  expect(await queueRevOf(b, project)).toBe(revAfterFirst);
+  expect(receiptCount(b, project)).toBe(1);
+}, 20_000);
+
+test("queue-delta: a stale base is refused with the current revision, writes no receipt, and the mutation can be sent again on the new base", async () => {
+  const b = shared;
+  const project = queueProject("stale");
+  const [a, c, d] = ["qd-stale-a", "qd-stale-c", "qd-stale-d"];
+  await seedQueue(b, project, [[a, 1], [c, 2]]);
+  const stale = await queueRevOf(b, project);
+  const third = await post(`${b.url}/roadmap/sync/push`, {
+    replica_id: R2,
+    item: pushItem({ id: d, project_key: project, queue: 3 }),
+    expected_content_rev: null,
+  });
+  expect(third.status).toBe(200);
+  const current = await queueRevOf(b, project);
+  expect(current).toBeGreaterThan(stale);
+  const queueBefore = storedQueue(b, project);
+  const mutation_id = crypto.randomUUID();
+
+  const refused = await sendDelta(b, project, stale, [{ op: "place", ids: [a], at: "end" }], { mutation_id });
+
+  expect(refused.status).toBe(409);
+  expect(refused.body).toMatchObject({ error: "conflict", reason: "queue_rev", queue_rev: current });
+  expect(storedQueue(b, project)).toEqual(queueBefore);
+  expect(receiptCount(b, project)).toBe(0);
+  const again = await sendDelta(b, project, current, [{ op: "place", ids: [a], at: "end" }], { mutation_id });
+  expect([again.status, again.body.replayed]).toEqual([200, false]);
+  expect(storedQueue(b, project)).toEqual([[c, 1], [d, 2], [a, 3]]);
+}, 20_000);
+
+test("queue-delta: a card the project does not have is a 404 naming it, and nothing is written or receipted", async () => {
+  const b = shared;
+  const project = queueProject("atomic");
+  const [a, c, d] = ["qd-atomic-a", "qd-atomic-c", "qd-atomic-d"];
+  await seedQueue(b, project, [[a, 1], [c, 2], [d, 3]]);
+  const base = await queueRevOf(b, project);
+  const queueBefore = storedQueue(b, project);
+
+  const refused = await sendDelta(b, project, base, [
+    { op: "place", ids: [a], at: "end" },
+    { op: "join", ids: [c], anchor: "qd-atomic-not-a-card" },
+  ]);
+  const unknown = await sendDelta(b, project, base, [{ op: "remove", ids: [a, "qd-atomic-no-such-card"] }]);
+
+  expect([refused.status, refused.body.item_id]).toEqual([404, "qd-atomic-not-a-card"]);
+  expect([unknown.status, unknown.body.item_id]).toEqual([404, "qd-atomic-no-such-card"]);
+  expect(storedQueue(b, project)).toEqual(queueBefore);
+  expect(await queueRevOf(b, project)).toBe(base);
+  expect(receiptCount(b, project)).toBe(0);
+}, 20_000);
+
+test("queue-delta: an anchor that exists but is not queued is refused with the operation index, whole delta unapplied", async () => {
+  const b = shared;
+  const project = queueProject("anchor");
+  const [a, c, off] = ["qd-anchor-a", "qd-anchor-c", "qd-anchor-off"];
+  await seedQueue(b, project, [[a, 1], [c, 2], [off, null]]);
+  const base = await queueRevOf(b, project);
+  const queueBefore = storedQueue(b, project);
+
+  const refused = await sendDelta(b, project, base, [
+    { op: "place", ids: [a], at: "end" },
+    { op: "place", ids: [c], before: off },
+  ]);
+
+  expect(refused.status).toBe(400);
+  expect([refused.body.op_index, refused.body.item_id]).toEqual([1, off]);
+  expect(storedQueue(b, project)).toEqual(queueBefore);
+  expect(await queueRevOf(b, project)).toBe(base);
+}, 20_000);
+
+test("queue-delta: a directive cannot share a wave, a done card cannot be queued, an inactive one is a 403", async () => {
+  const b = shared;
+  const project = queueProject("rules");
+  const [a, dir, done, off] = ["qd-rules-a", "qd-rules-dir", "qd-rules-done", "qd-rules-off"];
+  await seedQueue(b, project, [[a, 1]]);
+  for (const extra of [
+    pushItem({ id: dir, project_key: project, kind: "directive", directive: "clear", queue: 2 }),
+    pushItem({ id: done, project_key: project, status: "done", queue: null }),
+    pushItem({ id: off, project_key: project, inactive: true, queue: null }),
+  ]) {
+    const res = await post(`${b.url}/roadmap/sync/push`, { replica_id: R1, item: extra, expected_content_rev: null });
+    expect([extra.id, res.status]).toEqual([extra.id, 200]);
+  }
+  const base = await queueRevOf(b, project);
+  const queueBefore = storedQueue(b, project);
+
+  const joined = await sendDelta(b, project, base, [{ op: "join", ids: [a], anchor: dir }]);
+  const finished = await sendDelta(b, project, base, [{ op: "place", ids: [done], at: "end" }]);
+  const inactive = await sendDelta(b, project, base, [{ op: "place", ids: [off], at: "end" }]);
+
+  expect([joined.status, joined.body.item_id]).toEqual([400, dir]);
+  expect([finished.status, finished.body.item_id]).toEqual([400, done]);
+  expect([inactive.status, inactive.body.item_id]).toEqual([403, off]);
+  expect(storedQueue(b, project)).toEqual(queueBefore);
+}, 30_000);
+
+test("queue-delta: a fault while the receipt is written rolls the whole mutation back, then the retry applies it", async () => {
+  const b = shared;
+  const project = queueProject("fault");
+  const [a, c] = ["qd-fault-a", "qd-fault-c"];
+  await seedQueue(b, project, [[a, 1], [c, 2]]);
+  const base = await queueRevOf(b, project);
+  const queueBefore = storedQueue(b, project);
+  const mutation_id = crypto.randomUUID();
+  const ops = [{ op: "place", ids: [c], at: "start" }];
+  const trigger = `zz_fault_${project.replace(/[^a-z0-9]/g, "_")}`;
+  const db = openBrokerDb(b.dbPath);
+  db.run(
+    `CREATE TRIGGER ${trigger} BEFORE INSERT ON roadmap_queue_receipts WHEN new.project_key = '${project}'
+     BEGIN SELECT RAISE(ABORT, 'receipt fault'); END`
+  );
+  try {
+    const failed = await sendDelta(b, project, base, ops, { mutation_id });
+
+    expect(failed.status).toBe(500);
+    expect(storedQueue(b, project)).toEqual(queueBefore);
+    expect(await queueRevOf(b, project)).toBe(base);
+  } finally {
+    db.run(`DROP TRIGGER IF EXISTS ${trigger}`);
+    db.close();
+  }
+
+  const retried = await sendDelta(b, project, base, ops, { mutation_id });
+  expect([retried.status, retried.body.replayed]).toEqual([200, false]);
+  expect(storedQueue(b, project)).toEqual([[c, 1], [a, 2]]);
+}, 30_000);
+
+test("queue-delta: a queue of 520 cards is rearranged in one transaction, with no cap on the queue", async () => {
+  const b = shared;
+  const project = queueProject("big");
+  const ids = Array.from({ length: 520 }, (_, i) => `qd-big-${String(i).padStart(3, "0")}`);
+  const db = openBrokerDb(b.dbPath);
+  try {
+    db.transaction(() => {
+      ids.forEach((id, i) => {
+        db.run(
+          "INSERT INTO roadmap_items (id, project_key, kind, title, created_at, updated_at, queue) VALUES (?, ?, 'feature', 'big', 'x', 'x', ?)",
+          [id, project, i + 1]
+        );
+      });
+    })();
+  } finally {
+    db.close();
+  }
+  const base = await queueRevOf(b, project);
+  expect(base).toBeGreaterThanOrEqual(520);
+
+  const res = await sendDelta(b, project, base, [{ op: "place", ids: [ids[519]!], at: "start" }]);
+
+  expect(res.status).toBe(200);
+  const queue = storedQueue(b, project);
+  expect(queue).toHaveLength(520);
+  expect(queue[0]).toEqual([ids[519]!, 1]);
+  expect(queue[1]).toEqual([ids[0]!, 2]);
+  expect(queue[519]).toEqual([ids[518]!, 520]);
+  expect(res.body.items).toHaveLength(520);
+
+  const cleared = await sendDelta(b, project, res.body.queue_rev!, [{ op: "clear" }]);
+  expect(cleared.status).toBe(200);
+  expect(storedQueue(b, project)).toEqual([]);
+  expect(cleared.body.items).toHaveLength(520);
+}, 60_000);
+
+test("queue-delta: a card work-locked by another relay refuses the whole delta, a card that only takes a new number does not", async () => {
+  const b = shared;
+  const project = queueProject("lock");
+  const [a, c, d] = ["qd-lock-a", "qd-lock-c", "qd-lock-d"];
+  await seedQueue(b, project, [[a, 1], [c, 2], [d, 3]]);
+  const claim = await post<RoadmapSyncLockClaimResponse>(`${b.url}/roadmap/sync/lock`, {
+    replica_id: R2,
+    id: c,
+    action: "claim",
+    owner: { peer_id: "agent-lock-owner", group_id: null },
+  });
+  expect(claim.status).toBe(200);
+  const base = await queueRevOf(b, project);
+  const queueBefore = storedQueue(b, project);
+
+  const refused = await sendDelta(b, project, base, [
+    { op: "place", ids: [d], at: "start" },
+    { op: "remove", ids: [c] },
+  ]);
+
+  expect(refused.status).toBe(409);
+  expect(refused.body).toMatchObject({ reason: "locked_upstream", item_id: c, queue_rev: base });
+  expect(storedQueue(b, project)).toEqual(queueBefore);
+  expect(receiptCount(b, project)).toBe(0);
+
+  const renumbered = await sendDelta(b, project, base, [{ op: "place", ids: [d], at: "start" }]);
+  expect(renumbered.status).toBe(200);
+  expect(storedQueue(b, project)).toEqual([[d, 1], [a, 2], [c, 3]]);
+
+  const holder = await sendDelta(b, project, renumbered.body.queue_rev!, [{ op: "remove", ids: [c] }], { replica_id: R2 });
+  expect(holder.status).toBe(200);
+  expect(storedQueue(b, project)).toEqual([[d, 1], [a, 2]]);
+
+  const requeued = await sendDelta(b, project, holder.body.queue_rev!, [{ op: "place", ids: [c], at: "end" }]);
+  expect([requeued.status, requeued.body.item_id]).toEqual([409, c]);
+}, 30_000);
+
+test("queue-delta: a clear that would unqueue a card locked by another relay is refused", async () => {
+  const b = shared;
+  const project = queueProject("lockclear");
+  const [a, c] = ["qd-lockclear-a", "qd-lockclear-c"];
+  await seedQueue(b, project, [[a, 1], [c, 2]]);
+  const claim = await post(`${b.url}/roadmap/sync/lock`, {
+    replica_id: R2,
+    id: a,
+    action: "claim",
+    owner: { peer_id: "agent-lockclear-owner", group_id: null },
+  });
+  expect(claim.status).toBe(200);
+  const base = await queueRevOf(b, project);
+
+  const refused = await sendDelta(b, project, base, [{ op: "clear" }]);
+
+  expect(refused.status).toBe(409);
+  expect(refused.body).toMatchObject({ reason: "locked_upstream", item_id: a });
+  expect(storedQueue(b, project)).toHaveLength(2);
+}, 20_000);
+
+test("queue-delta: a done card that kept a rank is outside the queue: never renumbered, rewritten, receipted or removable", async () => {
+  const b = shared;
+  const project = queueProject("done");
+  const [a, dir, done] = ["qd-done-a", "qd-done-dir", "qd-done-x"];
+  await seedQueue(b, project, [[a, 1]]);
+  for (const item of [
+    pushItem({ id: dir, project_key: project, kind: "directive", directive: "clear", queue: 2 }),
+    pushItem({ id: done, project_key: project, queue: 2 }),
+  ]) {
+    const res = await post(`${b.url}/roadmap/sync/push`, { replica_id: R1, item, expected_content_rev: null });
+    expect([item.id, res.status]).toEqual([item.id, 200]);
+  }
+  // A card finished through a direct write keeps its rank, sharing wave 2 with the directive.
+  const direct = openBrokerDb(b.dbPath);
+  try {
+    direct.run("UPDATE roadmap_items SET status = 'done' WHERE id = ?", [done]);
+  } finally {
+    direct.close();
+  }
+  const doneRow = (): unknown => {
+    const db = openBrokerDb(b.dbPath, { readonly: true });
+    try {
+      return db.query("SELECT queue, rev, updated_by, updated_at, status FROM roadmap_items WHERE id = ?").get(done);
+    } finally {
+      db.close();
+    }
+  };
+  const untouched = doneRow();
+  expect(untouched).toMatchObject({ queue: 2, status: "done" });
+  const base = await queueRevOf(b, project);
+
+  const moved = await sendDelta(b, project, base, [{ op: "place", ids: [dir], at: "start" }]);
+
+  expect(moved.status).toBe(200);
+  expect(moved.body.items?.map((row) => row.id).sort()).toEqual([a, dir]);
+  expect(storedQueue(b, project)).toEqual([[dir, 1], [a, 2], [done, 2]]);
+  expect(doneRow()).toEqual(untouched);
+
+  const removal = await sendDelta(b, project, moved.body.queue_rev!, [{ op: "remove", ids: [done] }]);
+  expect([removal.status, removal.body.item_id, removal.body.op_index]).toEqual([400, done, 0]);
+  expect(doneRow()).toEqual(untouched);
+}, 30_000);
+
+test("queue-delta: a receipt keeps which cards moved, never their rows, and a replay answers with the current rows", async () => {
+  const b = shared;
+  const project = queueProject("receipt");
+  const [a, c] = ["qd-receipt-a", "qd-receipt-c"];
+  for (const [id, queue] of [[a, 1], [c, 2]] as const) {
+    const res = await post(`${b.url}/roadmap/sync/push`, {
+      replica_id: R1,
+      item: pushItem({ id, project_key: project, queue, description: `RECEIPT-BODY-${"x".repeat(3000)}`, context: "y".repeat(3000) }),
+      expected_content_rev: null,
+    });
+    expect([id, res.status]).toEqual([id, 200]);
+  }
+  const base = await queueRevOf(b, project);
+  const mutation_id = crypto.randomUUID();
+  const ops = [{ op: "place", ids: [c], at: "start" }];
+
+  const first = await sendDelta(b, project, base, ops, { mutation_id });
+
+  expect(first.status).toBe(200);
+  expect(first.body.items?.map((row) => row.description.slice(0, 12))).toEqual(["RECEIPT-BODY", "RECEIPT-BODY"]);
+  const db = openBrokerDb(b.dbPath, { readonly: true });
+  let stored: string;
+  try {
+    stored = (
+      db.query("SELECT response FROM roadmap_queue_receipts WHERE project_key = ?").get(project) as { response: string }
+    ).response;
+  } finally {
+    db.close();
+  }
+  const receipt = JSON.parse(stored) as { changes: Record<string, unknown>[] };
+  expect(Object.keys(receipt).sort()).toEqual(["changes", "mutation_id", "payload_hash", "queue_rev"]);
+  expect(receipt.changes.map((change) => Object.keys(change).sort().join(","))).toEqual(["id,queue,rev", "id,queue,rev"]);
+  expect(stored).not.toContain("RECEIPT-BODY");
+  expect(stored.length).toBeLessThan(600);
+
+  const edited = await post<UpsertRes>(
+    `${b.url}/roadmap/upsert`,
+    deckAuthored({ project_key: project, id: a, title: "edited after the receipt was written" })
+  );
+  expect(edited.status).toBe(200);
+  const replay = await sendDelta(b, project, base, ops, { mutation_id });
+
+  expect([replay.status, replay.body.replayed, replay.body.queue_rev]).toEqual([200, true, first.body.queue_rev]);
+  expect(replay.body.items?.find((row) => row.id === a)?.title).toBe("edited after the receipt was written");
+}, 30_000);
+
+test("queue revision: every writer of the rank moves the project's revision and only the project's", async () => {
+  const b = shared;
+  const bystander = queueProject("bystander");
+  await seedQueue(b, bystander, [["qd-bystander-a", 1]]);
+  const bystanderRev = await queueRevOf(b, bystander);
+  expect(bystanderRev).toBeGreaterThan(0);
+
+  const sql = (run: (db: ReturnType<typeof openBrokerDb>) => void) => async () => {
+    const db = openBrokerDb(b.dbPath);
+    try {
+      run(db);
+    } finally {
+      db.close();
+    }
+  };
+  const writers: Array<[string, (project: string, id: string) => Promise<unknown>]> = [
+    ["an upsert creating a queued card", (p) => post(`${b.url}/roadmap/upsert`, deckAuthored({ project_key: p, title: "queued", queue: 7 }))],
+    ["an upsert changing the rank", (p, id) => post(`${b.url}/roadmap/upsert`, deckAuthored({ project_key: p, id, queue: 4 }))],
+    ["an upsert to a terminal status", (p, id) => post(`${b.url}/roadmap/upsert`, deckAuthored({ project_key: p, id, status: "done" }))],
+    ["an archive", (_p, id) => post(`${b.url}/roadmap/archive`, deckAuthored({ id }))],
+    ["a reorder", (p, id) => post(`${b.url}/roadmap/reorder`, deckAuthored({ project_key: p, ids: [id], waves: [[id]] }))],
+    ["a clearing reorder", (p) => post(`${b.url}/roadmap/reorder`, deckAuthored({ project_key: p, ids: [], waves: [] }))],
+    [
+      "a replica push carrying a rank",
+      (p) =>
+        post(`${b.url}/roadmap/sync/push`, {
+          replica_id: R1,
+          item: pushItem({ id: `qd-writers-pushed-${crypto.randomUUID().slice(0, 8)}`, project_key: p, queue: 9 }),
+          expected_content_rev: null,
+        }),
+    ],
+    ["a direct UPDATE of the column", (_p, id) => sql((db) => db.run("UPDATE roadmap_items SET queue = 5 WHERE id = ?", [id]))()],
+    ["a direct UPDATE to NULL", (_p, id) => sql((db) => db.run("UPDATE roadmap_items SET queue = NULL WHERE id = ?", [id]))()],
+    [
+      "an INSERT OR REPLACE dropping a queued card's rank",
+      (p, id) =>
+        sql((db) =>
+          db.run("INSERT OR REPLACE INTO roadmap_items (id, project_key, kind, title, created_at, updated_at) VALUES (?, ?, 'feature', 'replaced', 'x', 'x')", [id, p])
+        )(),
+    ],
+    ["a DELETE of a queued card", (_p, id) => sql((db) => db.run("DELETE FROM roadmap_items WHERE id = ?", [id]))()],
+  ];
+  for (const [name, write] of writers) {
+    const project = queueProject(`writers-${name.replace(/[^a-z]+/g, "-").slice(0, 24)}`);
+    const id = `qd-writers-${crypto.randomUUID().slice(0, 12)}`;
+    await seedQueue(b, project, [[id, 1]]);
+    const before = await queueRevOf(b, project);
+
+    await write(project, id);
+
+    expect([name, (await queueRevOf(b, project)) > before]).toEqual([name, true]);
+    expect([name, await queueRevOf(b, bystander)]).toEqual([name, bystanderRev]);
+  }
+}, 60_000);
+
+test("queue revision: a write that leaves the rank as it was moves nothing, and a refused insert leaves no trace", async () => {
+  const b = shared;
+  const project = queueProject("noop");
+  const id = "qd-noop-a";
+  await seedQueue(b, project, [[id, 1], ["qd-noop-b", null]]);
+  const before = await queueRevOf(b, project);
+  const db = openBrokerDb(b.dbPath);
+  try {
+    db.run("UPDATE roadmap_items SET queue = 1 WHERE id = ?", [id]);
+    db.run("UPDATE roadmap_items SET title = 'renamed' WHERE id = ?", [id]);
+    db.run("UPDATE roadmap_items SET queue = NULL WHERE id = 'qd-noop-b'");
+    expect(() =>
+      db.run("INSERT INTO roadmap_items (id, project_key, kind, title, created_at, updated_at) VALUES (?, ?, 'feature', 'dup', 'x', 'x')", [id, project])
+    ).toThrow();
+  } finally {
+    db.close();
+  }
+
+  expect(await queueRevOf(b, project)).toBe(before);
+}, 20_000);
+
+test("queue revision: pull reports a revision for a project that has a queue and none for one that never had", async () => {
+  const b = shared;
+  const queued = queueProject("pulled");
+  const never = queueProject("never");
+  await seedQueue(b, queued, [["qd-pulled-a", 1]]);
+  await seedQueue(b, never, [["qd-never-a", null]]);
+
+  const page = await pull(b, 0, 1);
+
+  expect(page.body.queue_revs?.[queued]).toBeGreaterThan(0);
+  expect(Object.keys(page.body.queue_revs ?? {})).not.toContain(never);
+}, 20_000);
+
+test("queue-delta: the route is gated like the other replication routes, and malformed envelopes are refused before anything is read", async () => {
+  const project = queueProject("gates");
+  const body = {
+    replica_id: R1,
+    project_key: project,
+    mutation_id: crypto.randomUUID(),
+    expected_queue_rev: 0,
+    ops: [{ op: "clear" }],
+  };
+  const probe = (b: TestBroker, withToken: boolean, payload: unknown) =>
+    fetch(`${b.url}/roadmap/sync/queue-delta`, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...(withToken ? { authorization: `Bearer ${TOKEN}` } : {}) },
+      body: JSON.stringify(payload),
+    });
+
+  const tokenless = await probe(openUpstream, false, body);
+  expect([tokenless.status, ((await tokenless.json()) as { error: string }).error.includes("broker_token")]).toEqual([403, true]);
+  const noRoleRes = await probe(noRole, true, body);
+  expect([noRoleRes.status, ((await noRoleRes.json()) as { error: string }).error.includes("serve_replicas")]).toEqual([403, true]);
+  expect((await probe(deadReplica, true, body)).status).toBe(403);
+  expect((await probe(bare, true, body)).status).toBe(403);
+
+  for (const [name, payload] of [
+    ["a miscased project", { ...body, project_key: project.toUpperCase() }],
+    ["a bad mutation id", { ...body, mutation_id: "short" }],
+    ["a float revision", { ...body, expected_queue_rev: 1.5 }],
+    ["a negative revision", { ...body, expected_queue_rev: -1 }],
+    ["no operations", { ...body, ops: [] }],
+    ["a malformed card id", { ...body, ops: [{ op: "remove", ids: ["bad id!"] }] }],
+    ["a bad replica id", { ...body, replica_id: "X" }],
+  ] as const) {
+    const res = await probe(shared, true, payload);
+    expect([name, res.status]).toEqual([name, 400]);
+  }
+  expect(receiptCount(shared, project)).toBe(0);
+}, 30_000);

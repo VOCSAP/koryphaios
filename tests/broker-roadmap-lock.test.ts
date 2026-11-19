@@ -1777,6 +1777,7 @@ const ROUTES_PROBED_ELSEWHERE: Record<string, string> = {
   "/roadmap/sync/pull": "tests/broker-roadmap-sync-routes.test.ts compares the stored token value to the pulled page",
   "/roadmap/sync/push": "tests/broker-roadmap-sync-routes.test.ts compares it to the refused push reply",
   "/roadmap/sync/lock": "same rowToSyncRow projection as pull and push",
+  "/roadmap/sync/queue-delta": "same rowToSyncRow projection as pull and push",
   "/roadmap/sync/conflicts": "tests/broker-roadmap-replica.test.ts compares it to both sides of a conflict",
   "/roadmap/sync/resolve": "tests/broker-roadmap-replica.test.ts compares it to the resolve reply",
 };
