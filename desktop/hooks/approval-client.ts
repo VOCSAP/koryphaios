@@ -25,6 +25,10 @@ interface SignedRequest {
   timeoutMs: number;
 }
 
+export function deskTileRef(env: NodeJS.ProcessEnv): string {
+  return (env[DESK_SESSION_ENV] ?? "").trim();
+}
+
 function text(value: unknown): string {
   return typeof value === "string" ? value : "";
 }
@@ -197,7 +201,7 @@ async function main(): Promise<void> {
       process.argv[2] ?? "",
       await readStdin(),
       loadApprovalCredential(process.env[APPROVAL_FILE_ENV]),
-      (process.env[DESK_SESSION_ENV] ?? "").trim()
+      deskTileRef(process.env)
     );
   } catch (err) {
     output = { ok: false, error: `helper failed: ${errorText(err)}` };

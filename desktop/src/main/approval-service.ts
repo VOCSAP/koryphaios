@@ -250,7 +250,7 @@ export async function addApproval(
     // origin.project_key.
     project_key: deps.projectKey,
     session_ref: args.sessionRef,
-    tile_ref: args.tileRef ?? args.sessionRef,
+    tile_ref: args.tileRef || args.sessionRef,
     merge: args.merge,
     ...(args.tileOnly ? { tile_only: true } : {}),
     // A resolved peer means the broker can deliver the answer as a message and

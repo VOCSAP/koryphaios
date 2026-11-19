@@ -5,10 +5,19 @@
 // be unscoped.
 
 import { test, expect, describe } from "bun:test";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
+import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { deriveOperatorId, generateCredential } from "../shared/approval.ts";
+import type { SessionApprovalCredential } from "../shared/approval-client.ts";
+import { handleAskOperator, type OperatorToolContext } from "../shared/peers-session.ts";
+import type { CompanionIdentity } from "../shared/roadmap-dispatch.ts";
+import { buildApprovalRequest } from "../desktop/hooks/approval-hook.ts";
+import { deskTileRef, runApprovalClient } from "../desktop/hooks/approval-client.ts";
+import { extractBracedBody } from "./_braced-body";
+import { addApproval, type ApprovalDeps } from "../desktop/src/main/approval-service.ts";
 
 const REPO_ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "..");
 const TABLE = "pending_approvals";
@@ -100,14 +109,17 @@ const UNSCOPED_BY_DESIGN: Record<string, string> = {
  * another session's unrelated untracked file, turning this test red for
  * everyone for a reason CI can never reproduce.
  */
-function gitTrackedTsFiles(): string[] {
+function gitTrackedFiles(): string[] {
   const result = spawnSync("git", ["ls-files", "--cached"], { cwd: REPO_ROOT, encoding: "utf-8" });
   if (result.status !== 0) throw new Error(`git ls-files failed: ${result.stderr}`);
   return result.stdout
     .split("\n")
     .map((s) => s.trim())
-    .filter(Boolean)
-    .filter((f) => f.endsWith(".ts") || f.endsWith(".tsx"));
+    .filter(Boolean);
+}
+
+function gitTrackedTsFiles(): string[] {
+  return gitTrackedFiles().filter((f) => f.endsWith(".ts") || f.endsWith(".tsx"));
 }
 
 /**
@@ -404,6 +416,272 @@ describe("no unscoped SQL reaches pending_approvals", () => {
     // silently become an allow-list.
     for (const [fragment, reason] of Object.entries(UNSCOPED_BY_DESIGN)) {
       expect(reason.length, `exemption "${fragment}" has no argument`).toBeGreaterThan(30);
+    }
+  });
+});
+
+const ADD_ROUTE = /\/approval\/add\b/;
+const CODE_FILE = /\.(?:[cm]?[jt]sx?|py|sh|ps1)$/;
+const NOT_PRODUCTION = /^(?:tests|docs|runbooks)\//;
+
+interface AddRouteFile {
+  role: "producer" | "handler" | "label";
+  argument: string;
+}
+
+/**
+ * Production files whose code names the /approval/add route. A producer sends
+ * tile_ref or the Inbox shows "Émetteur non résolu"; the broker cannot refuse an
+ * absent one without breaking a hook or bundle older than the Deck, so the set of
+ * doors is the guard. A new file is refused until it is argued here.
+ */
+const ADD_ROUTE_FILES: Record<string, AddRouteFile> = {
+  "broker.ts": { role: "handler", argument: "The route's own handler: it receives tile_ref and never posts to itself." },
+  "shared/approval.ts": {
+    role: "label",
+    argument: "The signed gate label 'POST /approval/add:channel': a string bound into a proof, no request is made.",
+  },
+  "desktop/hooks/approval-hook.ts": {
+    role: "producer",
+    argument: "postQuestion: tile_ref is the CLAUDE_PEERS_DESK_SESSION value that main() reads, '' when it is absent.",
+  },
+  "desktop/hooks/approval-client.ts": {
+    role: "producer",
+    argument: "buildSignedRequest: tile_ref is the tileRef argument, which main() fills from CLAUDE_PEERS_DESK_SESSION.",
+  },
+  "desktop/src/main/approval-service.ts": {
+    role: "producer",
+    argument: "addApproval: tile_ref is args.tileRef, else args.sessionRef; the environment plays no part.",
+  },
+  "shared/peers-session.ts": {
+    role: "producer",
+    argument: "handleAskOperator: tile_ref is ctx.env.CLAUDE_PEERS_DESK_SESSION trimmed, '' when it is absent.",
+  },
+};
+
+function withoutComments(src: string): string {
+  let out = "";
+  let i = 0;
+  while (i < src.length) {
+    const c = src[i]!;
+    const next = src[i + 1];
+    if (c === "/" && next === "/") {
+      while (i < src.length && src[i] !== "\n") i++;
+      continue;
+    }
+    if (c === "/" && next === "*") {
+      const end = src.indexOf("*/", i + 2);
+      i = end === -1 ? src.length : end + 2;
+      out += " ";
+      continue;
+    }
+    if (c === '"' || c === "'" || c === "`") {
+      out += c;
+      i++;
+      while (i < src.length && src[i] !== c) {
+        if (src[i] === "\\" && i + 1 < src.length) out += src[i++]!;
+        out += src[i++]!;
+      }
+      if (i < src.length) out += src[i++]!;
+      continue;
+    }
+    out += c;
+    i++;
+  }
+  return out;
+}
+
+const JS_FILE = /\.[cm]?[jt]sx?$/;
+
+function namesAddRoute(src: string, file: string): boolean {
+  if (!src.includes("approval")) return false;
+  const text = JS_FILE.test(file) ? withoutComments(src) : src;
+  return ADD_ROUTE.test(text.replace(/["'`]\s*\+\s*["'`]/g, ""));
+}
+
+function filesNamingAddRoute(): string[] {
+  return gitTrackedFiles()
+    .filter((f) => CODE_FILE.test(f) && !NOT_PRODUCTION.test(f))
+    .filter((f) => namesAddRoute(readFileSync(join(REPO_ROOT, f), "utf-8"), f))
+    .sort();
+}
+
+const TILE = "tile-door-7f3a";
+const DESK_ENV = { CLAUDE_PEERS_DESK_SESSION: `  ${TILE}  ` };
+
+interface Posted {
+  route: string;
+  body: Record<string, unknown>;
+}
+
+function credential(): SessionApprovalCredential {
+  const key = generateCredential();
+  return {
+    brokerUrl: "http://broker.test",
+    brokerToken: null,
+    operatorId: deriveOperatorId(key.publicKey),
+    tokenId: "tok-1",
+    sessionRef: "window-1",
+    privateKey: key.privateKey,
+    publicKey: key.publicKey,
+    osUserHash: "h",
+    blockSec: 900,
+    origin: { host: "h", project_key: "p" },
+    inbox: null,
+  };
+}
+
+/** Builds each producer's real payload with the tile id it should carry, then returns what it posted. */
+const DOORS: Record<string, () => Promise<Posted[]>> = {
+  "desktop/hooks/approval-hook.ts": async () =>
+    [
+      { hook_event_name: "Notification", notification_type: "agent_needs_input", message: "waiting" },
+      { hook_event_name: "PermissionRequest", tool_name: "Bash", tool_input: { command: "ls" } },
+    ].map((payload) => ({ route: "/approval/add", body: buildApprovalRequest(payload, credential(), deskTileRef(DESK_ENV)) })),
+
+  "desktop/hooks/approval-client.ts": async () => {
+    const posted: Posted[] = [];
+    const fetchImpl = async (url: string, init: RequestInit) => {
+      posted.push({ route: new URL(url).pathname, body: JSON.parse(String(init.body)) });
+      return new Response(JSON.stringify({ approval: { id: "a-1" } }));
+    };
+    for (const kind of ["question", "permission"]) {
+      await runApprovalClient("add", JSON.stringify({ kind, title: "t", question: "q" }), credential(), deskTileRef(DESK_ENV), fetchImpl);
+    }
+    return posted;
+  },
+
+  "desktop/src/main/approval-service.ts": async () => {
+    const posted: Posted[] = [];
+    const key = generateCredential();
+    const deps: ApprovalDeps = {
+      endpoint: { url: "http://127.0.0.1:0", token: null },
+      identity: { operatorId: deriveOperatorId(key.publicKey), publicKey: key.publicKey, privateKey: key.privateKey, osUserHash: "h" },
+      projectKey: "p",
+      fetchImpl: (async (url: string | URL | Request, init?: RequestInit) => {
+        posted.push({ route: new URL(String(url)).pathname, body: JSON.parse(String(init?.body)) });
+        return new Response(JSON.stringify({ approval: { id: "a-1" } }));
+      }) as typeof fetch,
+    };
+    const base = { kind: "question", title: "t", question: "q", projectKey: "p", host: "h", merge: "tile" } as const;
+    await addApproval(deps, { ...base, sessionRef: "other-session", tileRef: TILE });
+    await addApproval(deps, { ...base, sessionRef: TILE });
+    await addApproval(deps, { ...base, sessionRef: TILE, tileRef: "" });
+    return posted;
+  },
+
+  "shared/peers-session.ts": async () => {
+    const dir = mkdtempSync(join(tmpdir(), "approval-door-"));
+    try {
+      const key = generateCredential();
+      const file = join(dir, "cred.json");
+      writeFileSync(
+        file,
+        JSON.stringify({
+          brokerUrl: "http://broker.test",
+          operatorId: "op-1",
+          tokenId: "root-id",
+          privateKey: key.privateKey,
+          publicKey: key.publicKey,
+          inbox: { version: 1, run_ref: "run-1", group_id: "g-run" },
+        })
+      );
+      const identity: CompanionIdentity = {
+        host: "h",
+        peerId: "lead-peer",
+        groupId: "g-run",
+        instanceToken: "instance-marker",
+        inboxBinding: { version: 1, runRef: "run-1", groupId: "g-run" },
+        operatorId: "op-1",
+        projectKey: "",
+        fromPeer: "lead-peer",
+      };
+      const posted: Posted[] = [];
+      const context = {
+        broker: {
+          post: async (route: string, body: Record<string, unknown>) => {
+            posted.push({ route, body });
+            return { approval: { id: "a-1", reply_route: "channel" } };
+          },
+        },
+        env: { CLAUDE_PEERS_APPROVAL_FILE: file, CLAUDE_PEERS_DESK_SESSION: `  ${TILE}  ` },
+        role: null,
+        cwd: "/",
+        log: { log: () => {}, logError: () => {} },
+        deck: { url: "", token: "" },
+      } as unknown as OperatorToolContext;
+      await handleAskOperator({ title: "t", question: "q" }, identity, context);
+      return posted;
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  },
+};
+
+describe("every producer of /approval/add says which tile it speaks for", () => {
+  test("the production files naming the route are exactly the argued ones", () => {
+    const found = filesNamingAddRoute();
+    const argued = Object.keys(ADD_ROUTE_FILES);
+    expect(
+      found.filter((f) => !argued.includes(f)),
+      `These files name the /approval/add route in code and are not in ADD_ROUTE_FILES. A producer must send a non-empty ` +
+        `tile_ref: add the file there with how it produces tile_ref, and add its door to DOORS.`
+    ).toEqual([]);
+    expect(
+      argued.filter((f) => !found.includes(f)),
+      `These ADD_ROUTE_FILES entries no longer name the route (a producer renamed, moved or deleted): update the table ` +
+        `and DOORS, do not leave an entry that protects nothing.`
+    ).toEqual([]);
+  });
+
+  test("every producer in the table has a door below, and every door a table entry", () => {
+    const producers = Object.entries(ADD_ROUTE_FILES)
+      .filter(([, v]) => v.role === "producer")
+      .map(([f]) => f)
+      .sort();
+    expect(Object.keys(DOORS).sort(), "DOORS and the producers of ADD_ROUTE_FILES must be the same set").toEqual(producers);
+  });
+
+  for (const [file, door] of Object.entries(DOORS)) {
+    test(`${file} posts a tile_ref equal to the tile id it was given`, async () => {
+      const posted = await door();
+      expect(posted.length, `${file} posted nothing: the door no longer reaches the route`).toBeGreaterThan(0);
+      for (const { route, body } of posted) {
+        expect(route.endsWith("/approval/add"), `${file} posted to ${route}`).toBe(true);
+        expect(body.tile_ref, `${file}: tile_ref missing or not the tile id (kind ${String(body.kind)})`).toBe(TILE);
+      }
+    });
+  }
+
+  for (const file of ["desktop/hooks/approval-hook.ts", "desktop/hooks/approval-client.ts"]) {
+    test(`${file} main() takes its tile id from deskTileRef(process.env) and from nothing else`, () => {
+      const src = withoutComments(readFileSync(join(REPO_ROOT, file), "utf-8"));
+      const heads = [...src.matchAll(/async function main\(\)[^{]*\{/g)];
+      expect(heads.length, `${file} must hold exactly one main()`).toBe(1);
+      const body = extractBracedBody(src, heads[0]!.index! + heads[0]![0].length - 1, true);
+      expect(body.split("deskTileRef(process.env)").length - 1, `${file} main() must call deskTileRef(process.env) once`).toBe(1);
+      expect(
+        /CLAUDE_PEERS_DESK_SESSION|DESK_SESSION_ENV/.test(body),
+        `${file} main() reads the desk session variable itself instead of through deskTileRef`
+      ).toBe(false);
+    });
+  }
+
+  test("the route scan sees a literal, a template and joined literals, and ignores prose", () => {
+    const cases: Array<[string, string, string, boolean]> = [
+      ["a literal path", "a.ts", `post("/approval/add", body);`, true],
+      ["a template url", "a.ts", "fetch(`${base}/approval/add`, init);", true],
+      ["two literals joined", "a.ts", `post("/approval/" + "add", body);`, true],
+      ["a line comment", "a.ts", `// POST /approval/add is slow`, false],
+      ["a block comment", "a.ts", "/** all of them reach /approval/add */\nconst x = 1;", false],
+      ["another route", "a.ts", `post("/approval/added", body);`, false],
+      ["a shell glob before the call", "a.sh", `cp "$a"/* "$b"\ncurl "$u/approval/add"`, true],
+      ["a powershell glob before the call", "a.ps1", `Copy-Item "$a/*" $b\nInvoke-RestMethod "$u/approval/add"`, true],
+      ["a python comment holding a slash-star before the call", "a.py", `# copies dir/* first\nrequests.post(url + "/approval/add")`, true],
+      ["KNOWN GAP: a route completed by a variable is not seen", "a.ts", `post("/approval/" + verb, body);`, false],
+    ];
+    for (const [label, file, src, expected] of cases) {
+      expect(namesAddRoute(src, file), `route probe "${label}"`).toBe(expected);
     }
   });
 });

@@ -7,7 +7,7 @@ import {
   type SessionApprovalCredential,
 } from "../../shared/approval-client.ts";
 
-import { runApprovalClient } from "./approval-client.ts";
+import { deskTileRef, runApprovalClient } from "./approval-client.ts";
 import { createPermissionLeaseReader, type PermissionLeaseReader } from "./permission-lease.ts";
 import {
   observePermissionTranscript,
@@ -27,7 +27,6 @@ export const PERMISSION_BUDGET_MS =
   (PERMISSION_RUNNER_TIMEOUT_SEC - WITHDRAW_GRACE_SEC - PERMISSION_WITHDRAW_AND_MARGIN_SEC) * 1000;
 const PERMISSION_WAIT_SEC = 25;
 const DENY_MESSAGE = "Denied by the operator from Koryphaios";
-const DESK_SESSION_ENV = "CLAUDE_PEERS_DESK_SESSION";
 const EXCLUDED_PERMISSION_TOOLS = new Set(["AskUserQuestion", "ExitPlanMode"]);
 const FORMAT_OR_SEPARATOR = /[\p{Cf}\p{Zl}\p{Zp}]/u;
 const CONTROL = /\p{Cc}/u;
@@ -464,7 +463,7 @@ async function main(): Promise<void> {
     return;
   }
 
-  const tileRef = (process.env[DESK_SESSION_ENV] ?? "").trim();
+  const tileRef = deskTileRef(process.env);
   const request = buildApprovalRequest(payload, cfg, tileRef);
   if (kind === "permission") {
     const transcript = permissionTranscriptContext(payload);
