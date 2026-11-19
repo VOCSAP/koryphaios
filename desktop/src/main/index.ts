@@ -695,6 +695,7 @@ const applyClodexAutoStart = async (enabled: boolean): Promise<void> => {
 }
 
 const approvalRunId = randomUUID()
+const runAnchorId = randomUUID()
 let operatorTrustStatus: OperatorTrustStatusEvent = { state: 'unknown' }
 function setOperatorTrustStatus(state: OperatorTrustStatusEvent['state'], publicKey?: string): void {
   if (publicKey) {
@@ -826,7 +827,9 @@ const service = new SessionService(
     secret: activeScope.secret,
     endpoint: resolveBrokerEndpoint()
   }),
-  permissionLeases
+  permissionLeases,
+  undefined,
+  runAnchorId
 )
 
 const tileTelemetryPublisher = new TileTelemetryPublisher({

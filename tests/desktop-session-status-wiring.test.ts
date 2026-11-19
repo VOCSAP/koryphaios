@@ -88,6 +88,7 @@ function setup(
     hostTelemetry?: boolean;
     pluginDirs?: (hasDeckLeadTools: boolean, sandboxed: boolean) => readonly string[];
     mintTeamLeadBridge?: () => { mcpConfig: string; callerId: string } | null;
+    runAnchorId?: string;
   } = {}
 ) {
   const home = mkdtempSync(join(tmpdir(), "kory-status-wiring-"));
@@ -106,7 +107,11 @@ function setup(
     "claude",
     opts.pluginDirs ?? (() => []),
     home,
-    opts.mintTeamLeadBridge
+    opts.mintTeamLeadBridge,
+    undefined,
+    undefined,
+    undefined,
+    opts.runAnchorId
   );
   services.push(svc);
   svc.setStatusLineSettingsProvider(() => SETTINGS);
@@ -715,6 +720,51 @@ test("a resumed (forked) spawn gets --settings too", async () => {
   const line = lastLine();
   expect(line, "restart took the resume path").toContain("--fork-session");
   expect(hostSettings(line), "resume spawn launched with the Deck statusLine").toBe(TILE_SETTINGS);
+});
+
+const RUN_ANCHOR = "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d";
+
+test("every tile of one Deck process carries the same run anchor, and only a resumed spawn names the session it forks", async () => {
+  const { svc, home, cwd } = setup({ runAnchorId: RUN_ANCHOR });
+  const first = svc.create({});
+  expect(spawned.at(-1)!.env.KORY_RUN_ANCHOR_ID, "fresh tile").toBe(RUN_ANCHOR);
+  expect(spawned.at(-1)!.env.KORY_FORKED_FROM, "a fresh spawn forks nothing").toBe("");
+  svc.create({});
+  expect(spawned.at(-1)!.env.KORY_RUN_ANCHOR_ID, "second tile of the same run").toBe(RUN_ANCHOR);
+
+  const projDir = join(home, ".claude", "projects", encodeProjectDir(cwd));
+  mkdirSync(projDir, { recursive: true });
+  const previous = first.sessionId;
+  writeFileSync(join(projDir, `${previous}.jsonl`), "{}\n");
+  spawned.filter((p) => p.env.CLAUDE_PEERS_DESK_SESSION === first.id).at(-1)!.exit(1);
+  await svc.restart(first.id);
+  expect(lastLine(), "restart took the resume path").toContain("--fork-session");
+  expect(spawned.at(-1)!.env.KORY_FORKED_FROM, "the resumed spawn names the session it forks").toBe(previous);
+  expect(spawned.at(-1)!.env.KORY_RUN_ANCHOR_ID, "the resumed tile keeps the run anchor").toBe(RUN_ANCHOR);
+});
+
+test("an inherited fork label never reaches a fresh tile", () => {
+  const inherited = process.env.KORY_FORKED_FROM;
+  process.env.KORY_FORKED_FROM = "11111111-1111-4111-8111-111111111111";
+  try {
+    const { svc } = setup({ runAnchorId: RUN_ANCHOR });
+    svc.create({});
+    expect(spawned.at(-1)!.env.KORY_FORKED_FROM).toBe("");
+  } finally {
+    if (inherited === undefined) delete process.env.KORY_FORKED_FROM;
+    else process.env.KORY_FORKED_FROM = inherited;
+  }
+});
+
+test("index mints the run anchor apart from the approval run id and hands it to SessionService", () => {
+  const source = readFileSync(join(import.meta.dir, "..", "desktop", "src", "main", "index.ts"), "utf8");
+  expect(source, "the anchor is a fresh uuid of its own").toMatch(/^const runAnchorId = randomUUID\(\)$/m);
+  const constructAnchor = "new SessionService(";
+  const constructAt = source.indexOf(constructAnchor);
+  expect(constructAt, "index.ts must create the SessionService").toBeGreaterThanOrEqual(0);
+  const args = extractParenBody(source, constructAt + constructAnchor.length - 1, true);
+  expect(args.trimEnd().endsWith("runAnchorId"), "the run anchor is the last SessionService argument").toBe(true);
+  expect(args, "the approval run id never reaches the SessionService constructor").not.toContain("approvalRunId");
 });
 
 test("a sandbox restart cleans its prior tile process before replacement spawn", async () => {

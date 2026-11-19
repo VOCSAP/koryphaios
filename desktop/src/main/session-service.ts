@@ -409,7 +409,9 @@ export class SessionService extends EventEmitter {
     /** Null leaves every tile without a peer_id. */
     private getTilePeerScope: (() => TilePeerScope) | null = null,
     private permissionLeases: PermissionLeaseRuntime | null = null,
-    private platform: NodeJS.Platform = process.platform
+    private platform: NodeJS.Platform = process.platform,
+    /** One value per Deck process, exported to every tile as KORY_RUN_ANCHOR_ID; '' exports no anchor. */
+    private runAnchorId = ''
   ) {
     super()
     // Starts empty: the previous run is recovered explicitly through a
@@ -1728,13 +1730,14 @@ export class SessionService extends EventEmitter {
     const statusSourceTrusted = fallbackInjected || koryModuleServed
 
     let command: string
+    let forkedFrom = ''
     if (effective === 'resume') {
-      const prev = def.sessionId
+      forkedFrom = def.sessionId
       def.sessionId = randomUUID()
       command = buildSessionCommandLine({
         baseCommand: base,
         sessionId: def.sessionId,
-        prevSessionId: prev,
+        prevSessionId: forkedFrom,
         effort: this.flagValue('effort', def.effort),
         pluginDirs,
         mcpConfig: this.mcpConfigForLaunch(def),
@@ -1795,6 +1798,7 @@ export class SessionService extends EventEmitter {
     // launched the Deck must never point a tile at another tile's rules or log.
     const ttsr = this.ttsrFiles(def)
     Object.assign(sessionEnv, { CLAUDE_PEERS_TTSR_FILE: ttsr.file, CLAUDE_PEERS_TTSR_LOG: ttsr.log })
+    Object.assign(sessionEnv, { KORY_RUN_ANCHOR_ID: this.runAnchorId, KORY_FORKED_FROM: forkedFrom })
     if (handoffLaunch) Object.assign(sessionEnv, handoffLaunch.environment)
 
     // The supervisor stays on the host because it pilots the Deck through its host-only MCP harness.

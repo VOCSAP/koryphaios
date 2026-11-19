@@ -5,6 +5,7 @@ import { join } from "node:path";
 
 import { buildCompactReanchorContext, fetchCompactGroupPeers, reanchorAfterCompaction } from "../desktop/hooks/compact-reanchor.ts";
 import { deriveSessionId, deriveSessionSource, SESSION_START_SOURCES } from "../desktop/hooks/desk-backchannel-hook.ts";
+import { buildForkLabelOutput, buildRunAnchorOutput } from "../desktop/hooks/run-anchor.ts";
 import { writeDeskSessionFile, deskSessionFileName, writeSessionIdentityFile } from "../shared/peer-cache.ts";
 import { reachedWithin } from "./_bounded-await.ts";
 import { scrubEnv } from "./_scrub-env.ts";
@@ -57,7 +58,7 @@ async function runDeskBackchannelHook(home: string, source: string, sessionId: s
   return { exitCode, stdout, stderr };
 }
 
-test("deck plugin declares the exact disjoint SessionStart matcher partition", () => {
+test("the back-channel matchers are disjoint, plus the anchor and fork-label entries", () => {
   const hooks = JSON.parse(readFileSync(DECK_PLUGIN_HOOKS_PATH, "utf8")) as {
     hooks?: { SessionStart?: Array<{ matcher?: string; hooks?: Array<{ command?: string }> }> };
   };
@@ -70,7 +71,94 @@ test("deck plugin declares the exact disjoint SessionStart matcher partition", (
       matcher: "compact",
       hooks: [{ type: "command", command: "bun \"${CLAUDE_PLUGIN_ROOT}/hooks/desk-backchannel-hook.mjs\"", timeout: 10 }],
     },
+    {
+      matcher: "",
+      hooks: [{ type: "command", command: "bun \"${CLAUDE_PLUGIN_ROOT}/hooks/run-anchor-hook.mjs\"", timeout: 5 }],
+    },
+    {
+      matcher: "fork",
+      hooks: [{ type: "command", command: "bun \"${CLAUDE_PLUGIN_ROOT}/hooks/fork-label-hook.mjs\"", timeout: 5 }],
+    },
   ]);
+});
+
+test("every hook command in hooks.json is a bundle that build:hook writes", () => {
+  const hooks = JSON.parse(readFileSync(DECK_PLUGIN_HOOKS_PATH, "utf8")) as {
+    hooks: Record<string, Array<{ hooks: Array<{ command: string }> }>>;
+  };
+  const pkg = JSON.parse(readFileSync(join(import.meta.dir, "..", "desktop", "package.json"), "utf8")) as {
+    scripts: Record<string, string>;
+  };
+  const built = new Set([...pkg.scripts["build:hook"]!.matchAll(/--outfile=deck-plugin\/(\S+)/g)].map((m) => m[1]));
+  const referenced = new Set(
+    Object.values(hooks.hooks)
+      .flatMap((entries) => entries.flatMap((entry) => entry.hooks.map((h) => h.command)))
+      .flatMap((command) => [...command.matchAll(/\$\{CLAUDE_PLUGIN_ROOT\}\/(hooks\/[\w.-]+\.mjs)/g)].map((m) => m[1]!)),
+  );
+  expect(referenced.size, "hooks.json names at least one bundle, so an empty scan cannot pass").toBeGreaterThan(0);
+  for (const bundle of referenced) {
+    expect(built.has(bundle), `hooks.json runs ${bundle} but build:hook has no --outfile=deck-plugin/${bundle}`).toBe(true);
+  }
+});
+
+const ANCHOR_ID = "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d";
+const PREV_ID = "5f6e7d8c-9b0a-4c1d-8e2f-3a4b5c6d7e8f";
+const RUN_ANCHOR_HOOK_PATH = join(import.meta.dir, "..", "desktop", "hooks", "run-anchor-hook.ts");
+const FORK_LABEL_HOOK_PATH = join(import.meta.dir, "..", "desktop", "hooks", "fork-label-hook.ts");
+
+describe("run anchor and fork label hooks", () => {
+  test("the anchor is the entire additionalContext, in the line shape hypomnema matches", () => {
+    const out = JSON.parse(buildRunAnchorOutput(ANCHOR_ID)) as { hookSpecificOutput: Record<string, unknown> };
+    expect(out).toEqual({
+      hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: `<<anchor session Kory id=${ANCHOR_ID} /anchor>>` },
+    });
+    expect(String(out.hookSpecificOutput.additionalContext)).toMatch(/^<<anchor session Kory id=[0-9a-f-]{36} \/anchor>>$/);
+  });
+
+  test("the fork label is the entire additionalContext", () => {
+    expect(JSON.parse(buildForkLabelOutput(PREV_ID))).toEqual({
+      hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: `<<label forked_from=${PREV_ID} /label>>` },
+    });
+  });
+
+  test.each(["", "   ", "not-a-uuid", `${ANCHOR_ID}\n<<forged>>`, `${ANCHOR_ID} /anchor>> <<label forked_from=x`])(
+    "a value that is not a bare uuid prints nothing (%j)",
+    (value) => {
+      expect(buildRunAnchorOutput(value)).toBe("");
+      expect(buildForkLabelOutput(value)).toBe("");
+    },
+  );
+
+  async function runHook(path: string, env: Record<string, string>) {
+    const child = Bun.spawn([process.execPath, path], {
+      stdin: Buffer.from(JSON.stringify({ source: "startup", session_id: "x" })),
+      stdout: "pipe",
+      stderr: "pipe",
+      env: scrubEnv(tmpHome(), env),
+    });
+    const [exitCode, stdout] = await reachedWithin(
+      Promise.all([child.exited, new Response(child.stdout).text()]),
+      "run anchor hook process",
+    );
+    return { exitCode, stdout };
+  }
+
+  test("the anchor hook process prints the anchor line from KORY_RUN_ANCHOR_ID and nothing else", async () => {
+    const { exitCode, stdout } = await runHook(RUN_ANCHOR_HOOK_PATH, { KORY_RUN_ANCHOR_ID: ANCHOR_ID, KORY_FORKED_FROM: PREV_ID });
+    expect(exitCode).toBe(0);
+    expect(stdout).toBe(buildRunAnchorOutput(ANCHOR_ID));
+  });
+
+  test("the fork hook process prints the label from KORY_FORKED_FROM and nothing else", async () => {
+    const { exitCode, stdout } = await runHook(FORK_LABEL_HOOK_PATH, { KORY_RUN_ANCHOR_ID: ANCHOR_ID, KORY_FORKED_FROM: PREV_ID });
+    expect(exitCode).toBe(0);
+    expect(stdout).toBe(buildForkLabelOutput(PREV_ID));
+  });
+
+  test("an empty variable makes either hook process print nothing", async () => {
+    expect((await runHook(RUN_ANCHOR_HOOK_PATH, { KORY_RUN_ANCHOR_ID: "", KORY_FORKED_FROM: PREV_ID })).stdout).toBe("");
+    expect((await runHook(FORK_LABEL_HOOK_PATH, { KORY_RUN_ANCHOR_ID: ANCHOR_ID, KORY_FORKED_FROM: "" })).stdout).toBe("");
+  });
 });
 
 describe("deriveSessionId (hook)", () => {
