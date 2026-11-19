@@ -41,7 +41,7 @@ export function TemplatesDialog(): React.JSX.Element {
   const [confirmReplace, setConfirmReplace] = useState(false)
   const [deleting, setDeleting] = useState<TemplateSummary | null>(null)
   // Composer (PLAN C18): open state; path null = create fresh.
-  const [composer, setComposer] = useState<{ path: string | null } | null>(null)
+  const [composer, setComposer] = useState<{ path: string | null; source?: TemplateSummary['source'] } | null>(null)
   // Bumped at both places that open a blank composer: setComposer({ path: null
   // }) alone does not remount TemplateComposer when one is already open, since
   // React reuses the instance.
@@ -86,7 +86,7 @@ export function TemplatesDialog(): React.JSX.Element {
   // In edit intent a row opens its composer instead of being selected.
   const choose = (tpl: TemplateSummary): void => {
     if (edit) {
-      setComposer({ path: tpl.path })
+      setComposer({ path: tpl.path, source: tpl.source })
       return
     }
     setSelected(tpl.path)
@@ -141,7 +141,7 @@ export function TemplatesDialog(): React.JSX.Element {
                       title={t('composer.edit')}
                       onClick={(e) => {
                         e.stopPropagation()
-                        setComposer({ path: tpl.path })
+                        setComposer({ path: tpl.path, source: tpl.source })
                       }}
                     >
                       {GLYPH_ACTIONS.edit}
@@ -224,6 +224,7 @@ export function TemplatesDialog(): React.JSX.Element {
         <TemplateComposer
           key={composer.path ?? 'new-' + composerNonce.current}
           path={composer.path}
+          source={composer.source}
           onClose={() => setComposer(null)}
           onSaved={() => {
             void refreshTemplates()

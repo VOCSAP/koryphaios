@@ -2543,7 +2543,9 @@ export interface DeckApi {
   writeTemplateFile(
     name: string,
     local: boolean,
-    tpl: import('./template').SessionTemplate
+    tpl: import('./template').SessionTemplate,
+    /** The file the composer opened: main re-validates it and saves back to it. */
+    sourcePath?: string
   ): Promise<string>
   /** Export the current sessions as a template; `local` => project dir, else global. Returns the written path. */
   exportTemplate(name: string, local: boolean): Promise<string | null>

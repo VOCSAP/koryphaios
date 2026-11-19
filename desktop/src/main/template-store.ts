@@ -1,10 +1,22 @@
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
-import { dirname, join, resolve } from 'node:path'
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+  type Stats
+} from 'node:fs'
+import { basename, dirname, join, resolve, sep } from 'node:path'
 import { globalConfigDir } from './launch-config'
 import { parseTemplate, type SessionTemplate } from '../shared/template'
 import { reportError } from './log'
+import { canonicalPath } from './worktree-service'
 import {
   PROJECT_SOURCES,
+  entryPresent,
   isAbsentFileError,
   projectCreationPath,
   projectRootPath,
@@ -145,17 +157,20 @@ function safeBase(name: string): string {
  * parseTemplate, so this only fires as a live guard on the two routes that
  * build a template straight from live session defs.
  */
-export function writeTemplate(dir: string, name: string, tpl: SessionTemplate): string {
+export function writeTemplateAt(file: string, tpl: SessionTemplate): string {
   const leadNames = tpl.sessions.filter((s) => s.lead).map((s) => s.name)
   if (leadNames.length > 1) {
     throw new Error(
       `template has multiple leads (${leadNames.join(', ')}); at most one session may carry lead: true`
     )
   }
-  mkdirSync(dir, { recursive: true })
-  const file = join(dir, `${safeBase(name)}.json`)
+  mkdirSync(dirname(file), { recursive: true })
   writeFileSync(file, JSON.stringify(tpl, null, 2), 'utf-8')
   return file
+}
+
+export function writeTemplate(dir: string, name: string, tpl: SessionTemplate): string {
+  return writeTemplateAt(join(dir, `${safeBase(name)}.json`), tpl)
 }
 
 /** Template write of an agent-reachable caller: always the project dir, the global dir is refused. */
@@ -174,6 +189,86 @@ export function writeAgentTemplate(
   return writeTemplate(templateWriteDir(projectDir, local, 'unattended', env), name, tpl)
 }
 
+// A cloned repo can ship a link as the template or as its folder; neither may lead a write or a delete out of the tree.
+function refuseEscapingSource(
+  sourcePath: string,
+  origin: 'global' | 'local',
+  projectDir: string,
+  env: NodeJS.ProcessEnv
+): void {
+  const refuse = (why: string): never => {
+    throw new Error(`refused: the template to save over ${why}`)
+  }
+  let leaf: Stats | null = null
+  try {
+    leaf = lstatSync(sourcePath)
+  } catch (error) {
+    if (!isAbsentFileError(error)) throw error
+  }
+  if (leaf?.isSymbolicLink()) refuse('is a link')
+  if (leaf && !leaf.isFile()) refuse('is not a regular file')
+  let folder: string
+  try {
+    folder = realpathSync.native(dirname(sourcePath))
+  } catch (error) {
+    return refuse(`has a folder that cannot be resolved (${error instanceof Error ? error.message : String(error)})`)
+  }
+  if (origin === 'global') {
+    if (folder !== canonicalPath(globalTemplatesDir(env))) refuse('is in a folder that resolves elsewhere')
+  } else if (!folder.startsWith(canonicalPath(projectDir) + sep)) {
+    refuse('is in a folder that resolves outside the project')
+  }
+}
+
+function existingTemplateError(wanted: string): Error {
+  return new Error(`refused: a template named ${wanted || 'template'} already exists in this folder`)
+}
+
+export interface TemplateSaveTarget {
+  file: string
+  /** The file a rename leaves behind: delete it only once `file` is written. */
+  removeAfter?: string
+}
+
+/**
+ * Where a composer save lands. A template opened from a file is saved back to
+ * that file, legacy folder included; only a changed name moves it. `sourcePath`
+ * comes from the renderer, so a refused one throws instead of falling back to the
+ * default dir. A `local` that differs from the source's scope is a copy into the
+ * default dir of the other scope, and the source stays.
+ */
+export function templateSaveTarget(
+  projectDir: string,
+  local: boolean,
+  attendance: CallerAttendance,
+  name: string,
+  sourcePath?: string,
+  env: NodeJS.ProcessEnv = process.env
+): TemplateSaveTarget {
+  if (sourcePath === undefined) {
+    return { file: join(templateWriteDir(projectDir, local, attendance, env), `${safeBase(name)}.json`) }
+  }
+  if (typeof sourcePath !== 'string') throw new Error('refused: the template to save over is not a path')
+  const origin = templateSource(sourcePath, projectDir, env)
+  if (!origin) throw new Error('refused: the template to save over is not in a template folder')
+  const wanted = name.trim()
+  if ((origin === 'local') !== local) {
+    const copy = join(templateWriteDir(projectDir, local, attendance, env), `${safeBase(name)}.json`)
+    if (entryPresent(copy)) throw existingTemplateError(wanted)
+    return { file: copy }
+  }
+  if (origin === 'global') templateWriteDir(projectDir, false, attendance, env)
+  refuseEscapingSource(sourcePath, origin, projectDir, env)
+  const stored = readTemplate(sourcePath)?.name?.trim() || basename(sourcePath).replace(/\.json$/i, '')
+  const target = join(dirname(sourcePath), `${safeBase(name)}.json`)
+  // A case-only difference is the same file on a case-insensitive disk: removing it would delete the write.
+  if (wanted === '' || wanted === stored || resolve(target).toLowerCase() === resolve(sourcePath).toLowerCase()) {
+    return { file: sourcePath }
+  }
+  if (entryPresent(target)) throw existingTemplateError(wanted)
+  return { file: target, removeAfter: sourcePath }
+}
+
 export function deleteTemplate(
   path: string,
   projectDir: string,
@@ -186,7 +281,8 @@ export function deleteTemplate(
     if (!existsSync(path)) return false
     rmSync(path, { force: true })
     return true
-  } catch {
+  } catch (error) {
+    reportError('template', `delete ${path} failed: ${error instanceof Error ? error.message : String(error)}`)
     return false
   }
 }

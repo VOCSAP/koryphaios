@@ -225,7 +225,8 @@ const api: DeckApi = {
 
   listTemplates: () => ipcRenderer.invoke('template:list'),
   readTemplateFile: (path: string) => ipcRenderer.invoke('template:read', path),
-  writeTemplateFile: (name, local, tpl) => ipcRenderer.invoke('template:write', name, local, tpl),
+  writeTemplateFile: (name, local, tpl, sourcePath) =>
+    ipcRenderer.invoke('template:write', name, local, tpl, sourcePath),
   exportTemplate: (name: string, local: boolean) =>
     ipcRenderer.invoke('template:export', name, local),
   applyTemplate: (path: string, mode: 'append' | 'replace') =>

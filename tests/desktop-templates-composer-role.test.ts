@@ -83,7 +83,8 @@ mock.module("@shared/role", () => {
   return { TEAM_LEAD_ROLE, BUILTIN_ROLES, ROLE_MAX, sanitizeRole, mergeRoleChoices };
 });
 
-let writeCalls: Array<{ name: string; local: boolean; tpl: unknown }> = [];
+let writeCalls: Array<{ name: string; local: boolean; tpl: unknown; sourcePath?: string }> = [];
+let readResult: unknown = null;
 
 (window as unknown as { api: unknown }).api = {
   listAgents: () => Promise.resolve([]),
@@ -91,9 +92,9 @@ let writeCalls: Array<{ name: string; local: boolean; tpl: unknown }> = [];
   modelCatalogs: () => Promise.resolve([]),
   onModelsChanged: () => () => {},
   reportError: () => {},
-  readTemplateFile: () => Promise.resolve(null),
-  writeTemplateFile: (name: string, local: boolean, tpl: unknown) => {
-    writeCalls.push({ name, local, tpl });
+  readTemplateFile: () => Promise.resolve(readResult),
+  writeTemplateFile: (name: string, local: boolean, tpl: unknown, sourcePath?: string) => {
+    writeCalls.push({ name, local, tpl, sourcePath });
     return Promise.resolve(`/fake/${name}.json`);
   }
 };
@@ -111,6 +112,7 @@ let root: Root;
 beforeEach(() => {
   resetFakeStore();
   writeCalls = [];
+  readResult = null;
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
@@ -249,4 +251,43 @@ test("picking a role on a card and saving writes it into that session's Template
   const tpl = writeCalls[0]!.tpl as { sessions: Array<{ name: string; role?: string }> };
   expect(tpl.sessions).toHaveLength(1);
   expect(tpl.sessions[0]!.role).toBe("developer");
+});
+
+async function saveEdited(opened: string, source: "global" | "local"): Promise<void> {
+  readResult = {
+    type: realSharedTemplate.TEMPLATE_TYPE,
+    version: realSharedTemplate.TEMPLATE_VERSION,
+    name: "Old Team",
+    sessions: [{ name: "lead" }]
+  };
+  await act(async () => {
+    root.render(React.createElement(TemplateComposer, { path: opened, source, onClose: noop, onSaved: noop }));
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+
+  const primaryBtn = container.querySelector(".modal-actions button.primary") as HTMLButtonElement | null;
+  expect(primaryBtn).not.toBeNull();
+  await act(async () => {
+    primaryBtn!.click();
+    await Promise.resolve();
+  });
+}
+
+test("saving an edited template hands the file it was opened from to writeTemplateFile", async () => {
+  const opened = "/proj/.claude/claude-peers/templates/old.json";
+  await saveEdited(opened, "local");
+  expect(writeCalls).toHaveLength(1);
+  expect(writeCalls[0]!.name).toBe("Old Team");
+  expect(writeCalls[0]!.sourcePath, "an edit without the source path writes a second copy").toBe(opened);
+});
+
+test("the scope an edited template is saved with comes from where it was listed, not from its path", async () => {
+  await saveEdited("/home/u/.claude/koryphaios/templates/g.json", "global");
+  expect(writeCalls[0]!.local, "a global template whose path contains .claude must stay global").toBe(false);
+  writeCalls = [];
+  act(() => root.unmount());
+  root = createRoot(container);
+  await saveEdited("/srv/shared/templates/p.json", "local");
+  expect(writeCalls[0]!.local).toBe(true);
 });

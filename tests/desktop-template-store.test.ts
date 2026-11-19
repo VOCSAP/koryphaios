@@ -1,5 +1,5 @@
 import { test, expect, afterEach } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -13,6 +13,7 @@ import {
   readTemplate,
   deleteTemplate,
   templateSource,
+  templateSaveTarget,
   templateWriteDir,
   writeAgentTemplate,
 } from "../desktop/src/main/template-store.ts";
@@ -362,32 +363,45 @@ test("ipc.ts and the index.ts saveTemplate reach the global templates dir only t
     ipcSource,
     "ipc.ts must not name globalTemplatesDir: a handler resolving the global dir itself bypasses the companion refusal of templateWriteDir"
   ).not.toContain("globalTemplatesDir");
-  for (const [channel, firstWork] of [
-    ["template:write", "parseTemplate("],
-    ["template:export", "captureSessions("]
+  for (const [channel, firstWork, gateCall, sink] of [
+    [
+      "template:write",
+      "parseTemplate(",
+      "templateSaveTarget(getConfig().projectDir, local, attendance, name, sourcePath)",
+      "writeTemplateAt(target.file,"
+    ],
+    ["template:export", "captureSessions(", "templateWriteDir(getConfig().projectDir, local, attendance)", "writeTemplate(dir,"]
   ] as const) {
+    const gate = gateCall.slice(0, gateCall.indexOf("("));
     const start = ipcSource.indexOf(`regHandle('${channel}'`);
     expect(start, `${channel} handler not found in ipc.ts`).toBeGreaterThanOrEqual(0);
     const end = ipcSource.indexOf("regHandle(", start + 1);
     const body = ipcSource.slice(start, end < 0 ? undefined : end);
     expect(
-      body.split("templateWriteDir(").length - 1,
-      `${channel} must call templateWriteDir exactly once, or a second call can feed the sink a dir resolved without the caller's attendance`
+      body.split(`${gate}(`).length - 1,
+      `${channel} must call ${gate} exactly once, or a second call can feed the sink a path resolved without the caller's attendance`
     ).toBe(1);
-    expect(body, `${channel} must write to the dir templateWriteDir resolved`).toContain("writeTemplate(dir,");
+    expect(body, `${channel} must write to the path ${gate} resolved`).toContain(sink);
     expect(body.indexOf(firstWork), `${channel} body must contain ${firstWork}`).toBeGreaterThanOrEqual(0);
     expect(
-      body.indexOf("templateWriteDir(") < body.indexOf(firstWork),
+      body.indexOf(`${gate}(`) < body.indexOf(firstWork),
       `${channel} must refuse a paired device before ${firstWork} runs, not after work is done`
     ).toBe(true);
     expect(
       body,
-      `${channel} must resolve its dir through templateWriteDir with the caller's attendance, or a paired device writes into the global templates dir`
-    ).toMatch(/templateWriteDir\(getConfig\(\)\.projectDir, local, attendance\)/);
+      `${channel} must resolve its target through ${gate} with the caller's attendance, or a paired device writes into the global templates dir`
+    ).toContain(gateCall);
     expect(body, `${channel} must derive attendance from isLocalIpcEvent(_e)`).toContain(
       "const attendance: CallerAttendance = isLocalIpcEvent(_e) ? 'attended' : 'unattended'"
     );
   }
+  const writeAt = ipcSource.indexOf("regHandle('template:write'");
+  const writeBody = ipcSource.slice(writeAt, ipcSource.indexOf("regHandle(", writeAt + 1));
+  expect(
+    writeBody.indexOf("writeTemplateAt(") >= 0 &&
+      writeBody.indexOf("writeTemplateAt(") < writeBody.indexOf("deleteTemplate(target.removeAfter,"),
+    "template:write must delete a renamed template's old file only after the new one is written"
+  ).toBe(true);
 
   const indexSource = readFileSync(join(import.meta.dir, "..", "desktop", "src", "main", "index.ts"), "utf-8");
   const anchor = "saveTemplate: (name, local) =>";
@@ -422,4 +436,182 @@ test("writeAgentTemplate writes a local template into the project dir and never 
   expect(path).toBe(join(localTemplatesDir(proj), "mine.json"));
   expect(existsSync(path)).toBe(true);
   expect(existsSync(globalTemplatesDir(e))).toBe(false);
+});
+
+function savedTemplate(dir: string, fileName: string, storedName: string): string {
+  return writeTemplate(dir, fileName, toTemplate([{ name: "a" }], storedName));
+}
+
+test("templateSaveTarget without a source keeps the default dir and the name-derived file", () => {
+  const e = env(tmp());
+  const proj = tmp();
+  expect(templateSaveTarget(proj, true, "attended", "My Team", undefined, e)).toEqual({
+    file: join(koryphaiosDir(proj), "My-Team.json")
+  });
+  expect(() => templateSaveTarget(proj, false, "unattended", "My Team", undefined, e)).toThrow(/refused/);
+});
+
+test("templateSaveTarget saves an edited template back into its own file, the legacy folder included", () => {
+  const e = env(tmp());
+  const proj = tmp();
+  const fresh = savedTemplate(koryphaiosDir(proj), "mine", "mine");
+  const old = savedTemplate(legacyDir(proj), "old-file", "Old Team");
+  expect(templateSaveTarget(proj, true, "attended", "mine", fresh, e)).toEqual({ file: fresh });
+  const inPlace = templateSaveTarget(proj, true, "attended", "Old Team", old, e);
+  expect(inPlace, "an unchanged name must not move a legacy template into the new folder").toEqual({ file: old });
+});
+
+test("templateSaveTarget on a rename targets the source folder and names the old file for removal", () => {
+  const e = env(tmp());
+  const proj = tmp();
+  const old = savedTemplate(legacyDir(proj), "old", "Old Team");
+  expect(templateSaveTarget(proj, true, "attended", "New Team", old, e)).toEqual({
+    file: join(legacyDir(proj), "New-Team.json"),
+    removeAfter: old
+  });
+});
+
+test("templateSaveTarget treats a case-only rename of the file name as the same file", () => {
+  const e = env(tmp());
+  const proj = tmp();
+  const lower = savedTemplate(koryphaiosDir(proj), "team", "team");
+  expect(
+    templateSaveTarget(proj, true, "attended", "TEAM", lower, e),
+    "removing the old name would delete the file just written on a case-insensitive disk"
+  ).toEqual({ file: lower });
+});
+
+test("templateSaveTarget refuses a source outside the template folders instead of using the default dir", () => {
+  const e = env(tmp());
+  const proj = tmp();
+  for (const bad of [
+    join(proj, "evil.json"),
+    "/etc/passwd",
+    join(koryphaiosDir(proj), "..", "..", "..", "escape.json"),
+    join(koryphaiosDir(proj), "sub", "x.json"),
+    join(koryphaiosDir(proj), "x.txt")
+  ]) {
+    for (const local of [true, false]) {
+      expect(() => templateSaveTarget(proj, local, "attended", "x", bad, e), `${bad} local:${local}`).toThrow(
+        /not in a template folder/
+      );
+    }
+  }
+  expect(() => templateSaveTarget(proj, true, "attended", "x", null as never, e)).toThrow(/not a path/);
+});
+
+test("templateSaveTarget copies into the default dir of the other scope and leaves the source alone", () => {
+  const e = env(tmp());
+  const proj = tmp();
+  const global = savedTemplate(globalTemplatesDir(e), "g", "g");
+  const legacy = savedTemplate(legacyDir(proj), "p", "p");
+  expect(templateSaveTarget(proj, true, "attended", "Copy Name", global, e)).toEqual({
+    file: join(koryphaiosDir(proj), "Copy-Name.json")
+  });
+  expect(templateSaveTarget(proj, false, "attended", "Copy Name", legacy, e)).toEqual({
+    file: join(globalTemplatesDir(e), "Copy-Name.json")
+  });
+});
+
+test("templateSaveTarget refuses a copy into the global folder for a caller that is not the Deck window", () => {
+  const e = env(tmp());
+  const proj = tmp();
+  const project = savedTemplate(koryphaiosDir(proj), "p", "p");
+  expect(() => templateSaveTarget(proj, false, "unattended", "p2", project, e)).toThrow(/refused/);
+});
+
+test("templateSaveTarget never copies onto an existing template of the other scope", () => {
+  const e = env(tmp());
+  const proj = tmp();
+  const project = savedTemplate(koryphaiosDir(proj), "p", "p");
+  savedTemplate(globalTemplatesDir(e), "p", "other");
+  expect(() => templateSaveTarget(proj, false, "attended", "p", project, e)).toThrow(
+    "refused: a template named p already exists in this folder"
+  );
+});
+
+test("templateSaveTarget lets only the Deck window save over a global template", () => {
+  const e = env(tmp());
+  const proj = tmp();
+  const global = savedTemplate(globalTemplatesDir(e), "g", "g");
+  expect(templateSaveTarget(proj, false, "attended", "g", global, e)).toEqual({ file: global });
+  expect(() => templateSaveTarget(proj, false, "unattended", "g", global, e)).toThrow(/refused/);
+});
+
+test("deleteTemplate traces a failed delete instead of swallowing it", () => {
+  const e = env(tmp());
+  const proj = tmp();
+  const stuck = join(koryphaiosDir(proj), "stuck.json");
+  mkdirSync(stuck, { recursive: true });
+  let deleted: boolean | undefined;
+  const texts = traced(() => {
+    deleted = deleteTemplate(stuck, proj, e);
+  });
+  expect(deleted).toBe(false);
+  expect(texts.some((text) => text.includes("stuck.json")), "a failed template delete left no trace").toBe(true);
+});
+
+const canLink = ((): boolean => {
+  const probe = mkdtempSync(join(tmpdir(), "tpl-link-"));
+  try {
+    writeFileSync(join(probe, "t"), "x");
+    symlinkSync(join(probe, "t"), join(probe, "l"), "file");
+    mkdirSync(join(probe, "d"));
+    symlinkSync(join(probe, "d"), join(probe, "dl"), "junction");
+    return true;
+  } catch {
+    return false;
+  } finally {
+    rmSync(probe, { recursive: true, force: true });
+  }
+})();
+
+test("templateSaveTarget never renames onto another template", () => {
+  const e = env(tmp());
+  const proj = tmp();
+  const alpha = savedTemplate(legacyDir(proj), "a", "Alpha");
+  savedTemplate(legacyDir(proj), "b", "b");
+  expect(() => templateSaveTarget(proj, true, "attended", "b", alpha, e)).toThrow(
+    "refused: a template named b already exists in this folder"
+  );
+});
+
+test("templateSaveTarget refuses a source that is a directory", () => {
+  const e = env(tmp());
+  const proj = tmp();
+  mkdirSync(join(legacyDir(proj), "d.json"), { recursive: true });
+  expect(() => templateSaveTarget(proj, true, "attended", "d", join(legacyDir(proj), "d.json"), e)).toThrow(
+    /not a regular file/
+  );
+});
+
+test.skipIf(!canLink)("templateSaveTarget refuses a source that is a link out of the project (needs symlinkSync)", () => {
+  const e = env(tmp());
+  const proj = tmp();
+  const victim = savedTemplate(tmp(), "victim", "victim");
+  mkdirSync(legacyDir(proj), { recursive: true });
+  const link = join(legacyDir(proj), "evil.json");
+  symlinkSync(victim, link, "file");
+  expect(() => templateSaveTarget(proj, true, "attended", "victim", link, e)).toThrow(/is a link/);
+});
+
+test.skipIf(!canLink)("templateSaveTarget refuses a rename onto a link (needs symlinkSync)", () => {
+  const e = env(tmp());
+  const proj = tmp();
+  const victim = savedTemplate(tmp(), "victim", "victim");
+  const real = savedTemplate(legacyDir(proj), "real", "Real");
+  symlinkSync(victim, join(legacyDir(proj), "Other.json"), "file");
+  expect(() => templateSaveTarget(proj, true, "attended", "Other", real, e)).toThrow(/already exists in this folder/);
+});
+
+test.skipIf(!canLink)("templateSaveTarget refuses a source whose folder is a link leaving the project (needs symlinkSync)", () => {
+  const e = env(tmp());
+  const proj = tmp();
+  const outside = tmp();
+  savedTemplate(outside, "in", "in");
+  mkdirSync(join(proj, ".claude", "claude-peers"), { recursive: true });
+  symlinkSync(outside, legacyDir(proj), "junction");
+  expect(() => templateSaveTarget(proj, true, "attended", "in", join(legacyDir(proj), "in.json"), e)).toThrow(
+    /resolves outside the project/
+  );
 });

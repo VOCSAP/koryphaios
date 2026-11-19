@@ -13,6 +13,8 @@ import { EntryCard } from './TemplateEntryCard'
 interface Props {
   /** Template file to edit, or null to compose a fresh one. */
   path: string | null
+  /** Folder scope of the template being edited. */
+  source?: 'global' | 'local'
   onClose: () => void
   /** Called after a successful save (the picker refreshes its list). */
   onSaved: () => void
@@ -22,7 +24,7 @@ function emptySession(n: number): TemplateSession {
   return { name: `agent-${n}` }
 }
 
-export function TemplateComposer({ path, onClose, onSaved }: Props): React.JSX.Element {
+export function TemplateComposer({ path, source, onClose, onSaved }: Props): React.JSX.Element {
   const t = useT()
   const showToast = useDeck((s) => s.showToast)
   const { catalogs, sandboxOn } = useModelChoices()
@@ -40,10 +42,10 @@ export function TemplateComposer({ path, onClose, onSaved }: Props): React.JSX.E
     void window.api.readTemplateFile(path).then((tpl) => {
       if (!tpl) return
       setName(tpl.name ?? '')
-      setLocal(path.includes('.claude'))
+      setLocal(source === 'local')
       if (tpl.sessions.length > 0) setSessions(tpl.sessions.map((s) => liftEntryLaunchOptions({ ...s })))
     })
-  }, [path])
+  }, [path, source])
 
   const update = (idx: number, next: TemplateSession): void =>
     setSessions((all) => all.map((s, i) => (i === idx ? next : s)))
@@ -68,7 +70,7 @@ export function TemplateComposer({ path, onClose, onSaved }: Props): React.JSX.E
       sessions: clean
     }
     try {
-      await window.api.writeTemplateFile(name.trim(), local, tpl)
+      await window.api.writeTemplateFile(name.trim(), local, tpl, path ?? undefined)
       showToast('toast.templateSaved')
       onSaved()
       onClose()

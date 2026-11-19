@@ -115,7 +115,9 @@ import {
   readTemplate,
   templateSource,
   writeTemplate,
+  writeTemplateAt,
   deleteTemplate,
+  templateSaveTarget,
   templateWriteDir
 } from './template-store'
 import {
@@ -1631,9 +1633,9 @@ export function registerIpc({
     // M-SEC-9: only read templates that live in an allowed dir.
     templateSource(path, getConfig().projectDir) ? readTemplate(path) : null
   )
-  regHandle('template:write', (_e, name: string, local: boolean, tpl: unknown) => {
+  regHandle('template:write', (_e, name: string, local: boolean, tpl: unknown, sourcePath?: string) => {
     const attendance: CallerAttendance = isLocalIpcEvent(_e) ? 'attended' : 'unattended'
-    const dir = templateWriteDir(getConfig().projectDir, local, attendance)
+    const target = templateSaveTarget(getConfig().projectDir, local, attendance, name, sourcePath)
     // parseTemplate validates the shape AND normalizes lead uniqueness; a
     // demotion here is surfaced the same way readTemplate does.
     const parsed = parseTemplate(tpl)
@@ -1647,7 +1649,9 @@ export function registerIpc({
     }
     const out = parsed.template
     if (name && name.trim()) out.name = name.trim()
-    return writeTemplate(dir, name || out.name || 'template', out)
+    const file = writeTemplateAt(target.file, out)
+    if (target.removeAfter) deleteTemplate(target.removeAfter, getConfig().projectDir)
+    return file
   })
 
   // ----- forward service events to every surface (window + companion, MB1) -----

@@ -220,6 +220,11 @@ const STATE_SCOPES: Record<string, StateFileRule> = {
     scope: "project",
     reason: "<safeName>.json under a templates dir (project-local or global); a template is content the operator exports, not window state",
   },
+  templateSaveTarget: {
+    kind: "constructor",
+    scope: "project",
+    reason: "<safeName>.json next to the template the composer opened, or under the default templates dir; same content as writeTemplate, not window state",
+  },
   workspacePath: {
     kind: "constructor",
     scope: "project",
