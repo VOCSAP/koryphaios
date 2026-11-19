@@ -17,6 +17,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { decidePeerAnnounce } from "../desktop/src/main/peer-rotation.ts";
+import { hasPlainProviderKey } from "../desktop/src/main/provider-secrets.ts";
 import { extractBracedBody } from "./_braced-body";
 
 const INDEX =
@@ -158,7 +159,7 @@ const registerSetConfig = await evaluate<{
   `export function register(env) {
   let config = env.config
   const { reportError, sanitizeGlowColor, sanitizeSpawnCap, sanitizeLinkPatch,
-    applyProviderKeyPatch, secretCipher, sanitizeTtsrDisabled, prewarmClaudeVersion,
+    hasPlainProviderKey, sanitizeTtsrDisabled, prewarmClaudeVersion,
     saveConfig, nativeTheme, applyClodexAutoStart, ttsr, broadcast, sanitizeConfigForRenderer } = env
 ${SET_CONFIG}
   return { setConfig }
@@ -600,8 +601,7 @@ test("config:set removes a non-boolean normalizeTerminalCopy patch", () => {
     sanitizeGlowColor: (value: string) => value,
     sanitizeSpawnCap: () => 4,
     sanitizeLinkPatch: (patch: Record<string, unknown>) => patch,
-    applyProviderKeyPatch: () => [],
-    secretCipher: {},
+    hasPlainProviderKey,
     sanitizeTtsrDisabled: (value: unknown) => value,
     prewarmClaudeVersion: () => undefined,
     saveConfig: () => undefined,
@@ -616,6 +616,36 @@ test("config:set removes a non-boolean normalizeTerminalCopy patch", () => {
   expect(reports).toEqual([["config", "rejected config:set normalizeTerminalCopy (false)"]]);
 });
 
+test("config:set refuses a localProviders patch that still carries a plain apiKey, and keeps a sealed one", () => {
+  const reports: Array<[string, string]> = [];
+  const config: Record<string, unknown> = { theme: "dark", agentSpawnCap: 4, clodexAutoStart: false, ttsrDisabled: [], localProviders: [] };
+  const { setConfig } = registerSetConfig({
+    config,
+    reportError: (scope: string, message: string) => reports.push([scope, message]),
+    sanitizeGlowColor: (value: string) => value,
+    sanitizeSpawnCap: () => 4,
+    sanitizeLinkPatch: (patch: Record<string, unknown>) => patch,
+    hasPlainProviderKey,
+    sanitizeTtsrDisabled: (value: unknown) => value,
+    prewarmClaudeVersion: () => undefined,
+    saveConfig: () => undefined,
+    nativeTheme: { themeSource: "" },
+    applyClodexAutoStart: () => undefined,
+    ttsr: { recompileAll: () => undefined },
+    broadcast: () => undefined,
+    sanitizeConfigForRenderer: (value: Record<string, unknown>) => value
+  });
+
+  const unsealed = [{ id: "a", name: "a", baseUrl: "http://a", apiKey: "sk-plain" }];
+  expect(setConfig({ localProviders: unsealed }).localProviders).toEqual([]);
+  expect(reports).toEqual([["config", "rejected config:set localProviders carrying a plain apiKey"]]);
+  expect(JSON.stringify(config)).not.toContain("sk-plain");
+
+  const sealed = [{ id: "a", name: "a", baseUrl: "http://a", apiKeyEnc: "enc:AAAA" }];
+  expect(setConfig({ localProviders: sealed }).localProviders).toEqual(sealed);
+  expect(reports).toHaveLength(1);
+});
+
 test("config:set removes a non-boolean thalposAutostart patch and keeps a boolean one", () => {
   const reports: Array<[string, string]> = [];
   const config: Record<string, unknown> = { theme: "dark", agentSpawnCap: 4, clodexAutoStart: false, ttsrDisabled: [], thalposAutostart: false };
@@ -625,8 +655,7 @@ test("config:set removes a non-boolean thalposAutostart patch and keeps a boolea
     sanitizeGlowColor: (value: string) => value,
     sanitizeSpawnCap: () => 4,
     sanitizeLinkPatch: (patch: Record<string, unknown>) => patch,
-    applyProviderKeyPatch: () => [],
-    secretCipher: {},
+    hasPlainProviderKey,
     sanitizeTtsrDisabled: (value: unknown) => value,
     prewarmClaudeVersion: () => undefined,
     saveConfig: () => undefined,

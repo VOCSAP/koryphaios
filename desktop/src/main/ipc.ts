@@ -132,7 +132,7 @@ import { getCatalogs } from './model-registry'
 import { readUsage } from './usage-service'
 import { runPtyCommand } from './pty-run'
 import { GRAPH_INFER_TIMEOUT_MS } from './model-adapters'
-import { decryptProviders, sanitizeProviders } from './provider-secrets'
+import { applySealedProviderPatch, decryptProviders, sanitizeProviders } from './provider-secrets'
 import type { SecretCipher } from './scope-secrets'
 import { compileContext, runInference, type InferRequest } from './graph-engine'
 import { graphId as graphDocId, parseGraphDoc, type GraphDoc } from '../shared/graph'
@@ -679,8 +679,8 @@ export function registerIpc({
     ...getConfig(),
     localProviders: sanitizeProviders(getConfig().localProviders ?? [])
   }))
-  regHandle('config:set', (_e, patch: Partial<AppConfig>) => ({
-    ...setConfig(patch ?? {}),
+  regHandle('config:set', async (_e, patch: Partial<AppConfig>) => ({
+    ...(await applySealedProviderPatch(patch ?? {}, secretCipher, () => getConfig().localProviders ?? [], setConfig)),
     localProviders: sanitizeProviders(getConfig().localProviders ?? [])
   }))
   registerSessionSkillsChannels(regHandle, sessionSkillsDir)
@@ -817,11 +817,11 @@ export function registerIpc({
       timeoutMs: GRAPH_INFER_TIMEOUT_MS
     })
 
-  const utilityDeps = (): UtilityDeps => ({
+  const utilityDeps = async (): Promise<UtilityDeps> => ({
     stateDir: join(app.getPath('userData'), APP_STATE_SUBDIR),
     shell: getConfig().shell,
     cwd: getConfig().projectDir,
-    localProviders: decryptProviders(getConfig().localProviders ?? [], secretCipher),
+    localProviders: await decryptProviders(getConfig().localProviders ?? [], secretCipher),
     runTty
   })
 
@@ -829,8 +829,8 @@ export function registerIpc({
   // haiku default) drafts the item's context field grounded in the project
   // files. The result only fills the editor textarea -- saving stays an
   // explicit operator action.
-  regHandle('roadmap:wand', (_e, draft: WandDraft) =>
-    runUtilityInference(utilityDeps(), {
+  regHandle('roadmap:wand', async (_e, draft: WandDraft) =>
+    runUtilityInference(await utilityDeps(), {
       target: getConfig().wandTarget,
       system: WAND_SYSTEM_PROMPT,
       prompt: buildWandPrompt(
@@ -1307,7 +1307,7 @@ export function registerIpc({
         ...((await helpSnapshot()) as Record<string, unknown>),
         ...(sel ? { code_selection: sel } : null)
       }
-      return runUtilityInference(utilityDeps(), {
+      return runUtilityInference(await utilityDeps(), {
         target: getConfig().helpTarget,
         system: buildHelpSystemPrompt({ view, data, docsDir }),
         prompt: buildHelpPrompt(question ?? '', transcript ?? []),
@@ -1328,7 +1328,7 @@ export function registerIpc({
     const cfg = readDigestConfig()
     const { key } = roadmapCtx()
     const sources = await collectSources(sourcesForProject(cfg, key), projectDir)
-    return runUtilityInference(utilityDeps(), {
+    return runUtilityInference(await utilityDeps(), {
       target: getConfig().helpTarget,
       system: buildDigestSystemPrompt({
         locale: resolveLocale(getConfig().locale, app.getLocale()),
@@ -1438,9 +1438,9 @@ export function registerIpc({
   // Model catalogs for the pickers (C29): frontier CLIs detected through the
   // login shell (cached for the app run), local endpoints discovered live.
   // Keys are decrypted in memory here only — the catalog sent back carries none.
-  regHandle('models:catalog', (_e, refresh?: boolean) =>
+  regHandle('models:catalog', async (_e, refresh?: boolean) =>
     getCatalogs(
-      decryptProviders(getConfig().localProviders ?? [], secretCipher),
+      await decryptProviders(getConfig().localProviders ?? [], secretCipher),
       getConfig().shell,
       { refresh: !!refresh }
     )
@@ -1462,11 +1462,11 @@ export function registerIpc({
     )
   )
 
-  regHandle('graph:list', () => {
+  regHandle('graph:list', async () => {
     const { stateDir, key } = graphCtx()
     // Opportunistic K8 migration: a pre-encryption clear file is rewritten
     // encrypted the first time the view lists it (cheap no-op afterwards).
-    migrateGraphsAtRest(stateDir, key, secretCipher)
+    await migrateGraphsAtRest(stateDir, key, secretCipher)
     return loadGraphs(stateDir, key, secretCipher)
   })
   regHandle('graph:create', (_e, name: string) => {
@@ -1490,23 +1490,23 @@ export function registerIpc({
     const { stateDir, key } = graphCtx()
     return upsertGraph(stateDir, key, doc, secretCipher)
   })
-  regHandle('graph:compile', (_e, graphId: string, nodeId: string) => {
+  regHandle('graph:compile', async (_e, graphId: string, nodeId: string) => {
     const { stateDir, key } = graphCtx()
-    const doc = loadGraphs(stateDir, key, secretCipher).find((d) => d.id === graphId)
+    const doc = (await loadGraphs(stateDir, key, secretCipher)).find((d) => d.id === graphId)
     if (!doc) throw new Error('unknown graph')
     return compileContext(doc, nodeId)
   })
   regHandle('graph:infer', async (_e, graphId: string, req: InferRequest) => {
     const { stateDir, key } = graphCtx()
     // Re-read from disk: the renderer may have saved node moves meanwhile.
-    const doc = loadGraphs(stateDir, key, secretCipher).find((d) => d.id === graphId)
+    const doc = (await loadGraphs(stateDir, key, secretCipher)).find((d) => d.id === graphId)
     if (!doc) throw new Error('unknown graph')
     const updated = await runInference(
       {
         stateDir,
         shell: getConfig().shell,
         cwd: getConfig().projectDir,
-        localProviders: decryptProviders(getConfig().localProviders ?? [], secretCipher),
+        localProviders: await decryptProviders(getConfig().localProviders ?? [], secretCipher),
         runTty
       },
       doc,
@@ -1541,13 +1541,14 @@ export function registerIpc({
       createdAt: Date.now(),
       updatedAt: Date.now()
     }
-    upsertGraph(stateDir, key, doc, secretCipher)
+    await upsertGraph(stateDir, key, doc, secretCipher)
     // Broker flip is best-effort: opening must work even with the broker down
     // (worst case the draft reappears as pending and the operator re-opens it).
     try {
       await markGraphDraftOpened(draft.id, { endpoint: resolveBrokerEndpoint() })
-    } catch {
+    } catch (e) {
       // next poll keeps it pending; the created doc stands either way
+      reportError('graph', 'could not mark the graph draft opened', e instanceof Error ? e.name : typeof e)
     }
     journal.add('graph', `graph draft opened: ${doc.name} (from ${draft.from || '?'})`)
     return { docId: doc.id, nodeId }

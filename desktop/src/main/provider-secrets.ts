@@ -14,18 +14,18 @@ import { reportError } from './log'
 const ENC_PREFIX = 'enc:'
 const PLAIN_PREFIX = 'plain:'
 
-function encryptKey(cipher: SecretCipher, plain: string): string {
-  if (cipher.isAvailable()) {
-    return ENC_PREFIX + cipher.encrypt(plain).toString('base64')
+async function encryptKey(cipher: SecretCipher, plain: string): Promise<string> {
+  if (await cipher.isAvailableAsync()) {
+    return ENC_PREFIX + (await cipher.encryptAsync(plain)).toString('base64')
   }
   return PLAIN_PREFIX + plain
 }
 
-function decryptKey(cipher: SecretCipher, stored: string): string | undefined {
+async function decryptKey(cipher: SecretCipher, stored: string): Promise<string | undefined> {
   if (stored.startsWith(PLAIN_PREFIX)) return stored.slice(PLAIN_PREFIX.length)
   if (stored.startsWith(ENC_PREFIX)) {
     try {
-      return cipher.decrypt(Buffer.from(stored.slice(ENC_PREFIX.length), 'base64'))
+      return await cipher.decryptAsync(Buffer.from(stored.slice(ENC_PREFIX.length), 'base64'))
     } catch (e) {
       // OS key changed / other user profile: behave as "no key stored", but
       // leave a trace (O6) -- downstream this looks like an unauthenticated
@@ -37,15 +37,27 @@ function decryptKey(cipher: SecretCipher, stored: string): string | undefined {
   return undefined
 }
 
-/**
- * Merge a renderer-sent providers array into the stored shape: encrypt fresh
- * keys, honour explicit clears (''), carry the previous blob (matched by id)
- * when the field is untouched. Strips every transient/renderer-only field.
- */
-export function applyProviderKeyPatch(
-  prev: LocalProviderConfig[],
+/** Encrypts the keys the operator just typed, by provider object; the only async step of a provider patch. */
+export async function sealProviderKeys(
   next: LocalProviderConfig[],
   cipher: SecretCipher
+): Promise<ReadonlyMap<LocalProviderConfig, string>> {
+  const fresh = next.filter((p) => p && typeof p === 'object' && p.id && typeof p.apiKey === 'string' && p.apiKey)
+  const sealed = await Promise.all(fresh.map((p) => encryptKey(cipher, p.apiKey!)))
+  return new Map(fresh.map((p, i) => [p, sealed[i]!]))
+}
+
+/**
+ * Merge a renderer-sent providers array into the stored shape: take the sealed
+ * fresh keys, honour explicit clears (''), carry the previous blob (matched by
+ * id) when the field is untouched. Strips every transient/renderer-only field.
+ * Synchronous on purpose: the caller reads `prev` and applies the result with
+ * no await in between.
+ */
+export function mergeProviderPatch(
+  prev: LocalProviderConfig[],
+  next: LocalProviderConfig[],
+  sealed: ReadonlyMap<LocalProviderConfig, string>
 ): LocalProviderConfig[] {
   const prevById = new Map(prev.map((p) => [p.id, p]))
   return next
@@ -57,14 +69,45 @@ export function applyProviderKeyPatch(
         baseUrl: typeof p.baseUrl === 'string' ? p.baseUrl : ''
       }
       if (typeof p.apiKey === 'string') {
-        // Operator touched the field: '' clears, anything else re-encrypts.
-        if (p.apiKey) stored.apiKeyEnc = encryptKey(cipher, p.apiKey)
+        // Operator touched the field: '' clears, anything else carries the sealed key.
+        const fresh = sealed.get(p)
+        if (fresh) stored.apiKeyEnc = fresh
       } else {
         const carried = prevById.get(p.id)?.apiKeyEnc
         if (carried) stored.apiKeyEnc = carried
       }
       return stored
     })
+}
+
+export async function applyProviderKeyPatch(
+  prev: LocalProviderConfig[],
+  next: LocalProviderConfig[],
+  cipher: SecretCipher
+): Promise<LocalProviderConfig[]> {
+  return mergeProviderPatch(prev, next, await sealProviderKeys(next, cipher))
+}
+
+/** True when a provider still carries a transient `apiKey`: such a patch was never sealed. */
+export function hasPlainProviderKey(providers: readonly LocalProviderConfig[]): boolean {
+  return providers.some((p) => !!p && typeof p === 'object' && 'apiKey' in p)
+}
+
+/**
+ * A config patch with its provider keys sealed, then applied. The stored providers
+ * are read and `apply` runs in the same synchronous step, after the only await:
+ * two concurrent patches cannot carry a stale blob over each other's new key.
+ */
+export async function applySealedProviderPatch<T extends { localProviders?: LocalProviderConfig[] }, R>(
+  patch: T,
+  cipher: SecretCipher,
+  readCurrent: () => LocalProviderConfig[],
+  apply: (patch: T) => R
+): Promise<R> {
+  const incoming = patch.localProviders
+  if (!incoming) return apply(patch)
+  const sealed = await sealProviderKeys(incoming, cipher)
+  return apply({ ...patch, localProviders: mergeProviderPatch(readCurrent(), incoming, sealed) })
 }
 
 /** Renderer-facing copy: secrets stripped, presence exposed as `hasKey`. */
@@ -81,10 +124,12 @@ export function sanitizeProviders(providers: LocalProviderConfig[]): LocalProvid
 export function decryptProviders(
   providers: LocalProviderConfig[],
   cipher: SecretCipher
-): LocalProviderConfig[] {
-  return (providers ?? []).map((p) => {
-    const apiKey = p.apiKeyEnc ? decryptKey(cipher, p.apiKeyEnc) : undefined
-    const { apiKeyEnc: _enc, ...rest } = p
-    return apiKey ? { ...rest, apiKey } : { ...rest }
-  })
+): Promise<LocalProviderConfig[]> {
+  return Promise.all(
+    (providers ?? []).map(async (p) => {
+      const apiKey = p.apiKeyEnc ? await decryptKey(cipher, p.apiKeyEnc) : undefined
+      const { apiKeyEnc: _enc, ...rest } = p
+      return apiKey ? { ...rest, apiKey } : { ...rest }
+    })
+  )
 }

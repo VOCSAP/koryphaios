@@ -53,7 +53,7 @@ import {
   recallScopeSecret,
   type SecretCipher
 } from './scope-secrets'
-import { applyProviderKeyPatch, sanitizeProviders } from './provider-secrets'
+import { hasPlainProviderKey, sanitizeProviders } from './provider-secrets'
 import { createSafeStorageCipher } from './safe-storage-cipher'
 import { GLOBAL_RULES_FILE, TtsrService, type TtsrApprovalRequest } from './ttsr-service'
 import { ttsrApprovalSpec } from './ttsr-dialog'
@@ -563,18 +563,13 @@ const setConfig = (patch: Partial<AppConfig>): AppConfig => {
     patch = rest
   }
   patch = sanitizeLinkPatch(patch, (message) => reportError('config', message))
-  // Local-provider API keys never persist in clear (C29): a renderer patch
-  // carries transient `apiKey` fields that are encrypted (safeStorage) into
-  // `apiKeyEnc` here, and the renderer echo below only ever sees `hasKey`.
-  if (patch.localProviders) {
-    patch = {
-      ...patch,
-      localProviders: applyProviderKeyPatch(
-        config.localProviders ?? [],
-        patch.localProviders,
-        secretCipher
-      )
-    }
+  // Local-provider API keys never persist in clear (C29): config:set seals the
+  // transient `apiKey` fields into `apiKeyEnc` before this runs, so a patch that
+  // still carries one was never sealed and is refused whole.
+  if (patch.localProviders && hasPlainProviderKey(patch.localProviders)) {
+    reportError('config', 'rejected config:set localProviders carrying a plain apiKey')
+    const { localProviders: _ignored, ...rest } = patch
+    patch = rest
   }
   // Toggle keys become a guard-rules decision: only well-formed keys persist.
   if (patch.ttsrDisabled !== undefined) {
