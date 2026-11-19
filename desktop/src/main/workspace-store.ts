@@ -16,10 +16,14 @@ import { isValidClodexContextInput } from '../shared/clodex-context'
 // 8.3 short names (worktree-service.ts's own docstring on canonicalPath).
 import { canonicalPath } from './worktree-service'
 import { writeFileAtomic } from './atomic-write'
+import { reportError } from './log'
 import {
+  assertWorkspaceId,
   entryPresent,
+  isWorkspaceId,
   PROJECT_SOURCES,
   projectRootPath,
+  traceScan,
   type ProjectFileSource,
   type WorkspaceRef
 } from './project-files'
@@ -78,6 +82,7 @@ export function workspacesDir(projectDir: string, source: ProjectFileSource): st
 }
 
 function workspacePath(ref: WorkspaceRef): string {
+  assertWorkspaceId(ref.id)
   return join(workspacesDir(ref.projectDir, ref.source), `${ref.id}.json`)
 }
 
@@ -86,13 +91,14 @@ export function newWorkspaceRef(projectDir: string): WorkspaceRef {
   return { projectDir, id: newWorkspaceId(), source: 'koryphaios' }
 }
 
-const WORKSPACE_ID_PATTERN = /^[\w-]+$/
-
 export type WorkspaceLocation ={ kind: 'none' } | { kind: 'one'; ref: WorkspaceRef } | { kind: 'conflict' }
 
 /** Where the snapshot of `id` lives, by file existence in each folder; an id in both is a conflict, never a winner. */
 export function locateWorkspace(projectDir: string, id: string): WorkspaceLocation {
-  if (!WORKSPACE_ID_PATTERN.test(id)) return { kind: 'none' }
+  if (!isWorkspaceId(id)) {
+    reportError('workspace', `locateWorkspace refused workspace id ${JSON.stringify(String(id).slice(0, 80))}`)
+    return { kind: 'none' }
+  }
   const found = PROJECT_SOURCES.map((source): WorkspaceRef => ({ projectDir, id, source })).filter((ref) =>
     entryPresent(workspacePath(ref))
   )
@@ -254,17 +260,24 @@ function readWorkspacesIn(projectDir: string, source: ProjectFileSource): Stored
   const dir = workspacesDir(projectDir, source)
   if (!existsSync(dir)) return []
   const out: StoredWorkspace[] = []
-  for (const entry of readdirSync(dir)) {
+  const scan = traceScan(dir)
+  for (const entry of [...readdirSync(dir)].sort()) {
     if (!entry.endsWith('.json')) continue
+    const id = entry.slice(0, -'.json'.length)
+    if (!isWorkspaceId(id)) {
+      scan.invalid(join(dir, entry), new Error('the file name is not a workspace id'))
+      continue
+    }
     try {
       const parsed = JSON.parse(readFileSync(join(dir, entry), 'utf8')) as unknown
       if (isWorkspace(parsed)) {
-        out.push({ ...parsed, ref: { projectDir, id: entry.slice(0, -'.json'.length), source }, conflict: false })
+        out.push({ ...parsed, ref: { projectDir, id, source }, conflict: false })
       }
     } catch {
       // Partial / corrupt file -> skip, do not break the whole listing.
     }
   }
+  scan.done()
   return out
 }
 
@@ -296,6 +309,7 @@ export function loadWorkspace(ref: WorkspaceRef): Workspace | null {
  * Strips any stray `scopeSecret` defensively so it can never leak into the repo.
  */
 export function saveWorkspace(ref: WorkspaceRef, ws: Workspace): Workspace {
+  assertWorkspaceId(ref.id)
   ensureWorkspacesDir(ref)
   const stamped: Workspace = { ...ws, updatedAt: Date.now() }
   delete (stamped as Workspace & { scopeSecret?: unknown }).scopeSecret
@@ -305,6 +319,7 @@ export function saveWorkspace(ref: WorkspaceRef, ws: Workspace): Workspace {
 
 /** Remove a workspace JSON and its two lock files, in the folder of `ref` only (best-effort). */
 export function deleteWorkspace(ref: WorkspaceRef): void {
+  assertWorkspaceId(ref.id)
   const dir = workspacesDir(ref.projectDir, ref.source)
   for (const f of [join(dir, `${ref.id}.json`), join(dir, `${ref.id}.lock`), join(dir, `${ref.id}.lock.sqlite`)]) {
     try {

@@ -26,6 +26,21 @@ export interface WorkspaceRef {
 
 export type ProjectFileReport = (scope: string, message: string, error?: unknown) => void
 
+const WORKSPACE_ID_PATTERN = /^[\w-]{1,64}$/
+
+export function isWorkspaceId(id: unknown): id is string {
+  return typeof id === 'string' && WORKSPACE_ID_PATTERN.test(id)
+}
+
+/** Refuses, with a trace, an id that is not of the shape the Deck mints, before it reaches a path. */
+export function assertWorkspaceId(id: unknown): asserts id is string {
+  if (isWorkspaceId(id)) return
+  const shown = typeof id === 'string' ? JSON.stringify(id.slice(0, 80)) : typeof id
+  const error = new Error(`refused workspace id ${shown}`)
+  reportError('workspace', error.message)
+  throw error
+}
+
 /** Two refs name the same stored workspace only when project, folder and id all agree. */
 export function sameWorkspaceRef(a: WorkspaceRef, b: WorkspaceRef): boolean {
   return a.id === b.id && a.source === b.source && canonicalPath(a.projectDir) === canonicalPath(b.projectDir)

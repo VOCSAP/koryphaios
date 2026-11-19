@@ -1,5 +1,5 @@
 import { test, expect, afterEach } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -3050,3 +3050,123 @@ for (const point of waitPoints) {
     });
   }
 }
+
+// ----- a workspace id of the wrong shape never reaches a path -----
+
+const HOSTILE_WORKSPACE_IDS: Array<[string, string]> = [
+  ["a parent step", "../x"],
+  ["a backslash parent step", "..\\x"],
+  ["a posix absolute path", "/tmp/x"],
+  ["a drive absolute path", "C:\\x"],
+  ["an empty id", ""],
+  ["65 characters", "a".repeat(65)],
+  ["a trailing newline", "wsp_ok\n"],
+];
+
+for (const source of ["koryphaios", "legacy"] as const) {
+  for (const [what, id] of HOSTILE_WORKSPACE_IDS) {
+    test(`an id with ${what} is refused with a trace by every path builder of the ${source} folder, and nothing is created`, () => {
+      const proj = freshProject();
+      const root = { projectDir: proj, source };
+      const workspaces = ensureWorkspacesDir(root);
+      const ref = { projectDir: proj, id, source };
+      const traces: string[] = [];
+      onDeckError((_scope, text) => traces.push(text));
+      try {
+        expect(() => saveWorkspace(ref, sampleWorkspace())).toThrow("refused workspace id");
+        expect(() => loadWorkspace(ref)).toThrow("refused workspace id");
+        expect(() => lockPath(ref)).toThrow("refused workspace id");
+        expect(() => readLock(ref)).toThrow("refused workspace id");
+        expect(() => acquireLock(ref, { ...baseLiveness, pid: 4242 })).toThrow("refused workspace id");
+      } finally {
+        onDeckError(() => {});
+      }
+      expect(traces.filter((text) => text.includes("refused workspace id")), "one trace per refusal").toHaveLength(5);
+      expect(readdirSync(workspaces), "nothing was written beside the snapshots").toEqual([]);
+      expect(readdirSync(join(workspaces, "..")).sort(), "nothing was written one level up").toEqual([".gitignore", "workspaces"]);
+    });
+  }
+}
+
+test("a minted id and an id of 64 characters keep their snapshot and lock files", () => {
+  const proj = freshProject();
+  for (const id of [newWorkspaceId(), "a".repeat(64)]) {
+    saveFresh(proj, sampleWorkspace({ id }));
+    expect(loadWorkspace(fresh(proj, id))!.id).toBe(id);
+    expect(lockPath(fresh(proj, id))).toBe(join(newFolder(proj), "workspaces", `${id}.lock`));
+    expect(locateWorkspace(proj, id)).toEqual({ kind: "one", ref: fresh(proj, id) });
+  }
+});
+
+test("locateWorkspace answers none for an id of 65 characters and traces the refusal", () => {
+  const proj = freshProject();
+  const traces: string[] = [];
+  onDeckError((_scope, text) => traces.push(text));
+  try {
+    expect(locateWorkspace(proj, "a".repeat(65))).toEqual({ kind: "none" });
+  } finally {
+    onDeckError(() => {});
+  }
+  expect(traces.filter((text) => text.includes("refused workspace id"))).toHaveLength(1);
+});
+
+test("saving under an id of the wrong shape creates no project folder at all", () => {
+  const proj = freshProject();
+  expect(() => saveWorkspace(fresh(proj, "../x"), sampleWorkspace())).toThrow("refused workspace id");
+  expect(existsSync(join(proj, ".claude")), "not even the workspaces folder was made").toBe(false);
+});
+
+for (const [what, id] of HOSTILE_WORKSPACE_IDS) {
+  test(`deleting an id with ${what} is refused with a trace and removes nothing beside or above the snapshots`, () => {
+    const proj = freshProject();
+    const workspaces = ensureWorkspacesDir(freshRoot(proj));
+    const witnesses = [
+      join(workspaces, "..", "x.json"),
+      join(workspaces, "..", "x.lock"),
+      join(workspaces, "..", "x.lock.sqlite"),
+      join(workspaces, ".json"),
+      join(workspaces, ".lock"),
+    ];
+    for (const witness of witnesses) writeFileSync(witness, "kept");
+    const traces: string[] = [];
+    onDeckError((_scope, text) => traces.push(text));
+    try {
+      expect(() => deleteWorkspace(fresh(proj, id))).toThrow("refused workspace id");
+    } finally {
+      onDeckError(() => {});
+    }
+    expect(traces.filter((text) => text.includes("refused workspace id"))).toHaveLength(1);
+    for (const witness of witnesses) expect(existsSync(witness), witness).toBe(true);
+  });
+}
+
+test("deleteWorkspace of a minted id still removes its snapshot and both locks", () => {
+  const proj = freshProject();
+  const id = newWorkspaceId();
+  saveFresh(proj, sampleWorkspace({ id }));
+  const dir = workspacesDir(proj, "koryphaios");
+  for (const suffix of [".lock", ".lock.sqlite"]) writeFileSync(join(dir, `${id}${suffix}`), "x");
+  deleteWorkspace(fresh(proj, id));
+  expect(readdirSync(dir)).toEqual([]);
+});
+
+test("a snapshot file whose name is not a workspace id is skipped, traced once, and neither the list nor the prune fails", () => {
+  const proj = freshProject();
+  const minted = newWorkspaceId();
+  saveFresh(proj, sampleWorkspace({ id: minted }));
+  const odd = join(workspacesDir(proj, "koryphaios"), "my ws.v2.json");
+  writeFileSync(odd, JSON.stringify(sampleWorkspace({ id: "my ws.v2", updatedAt: 1000 })));
+  const svc = workspaceService(fakeDeps(proj));
+  const traces: string[] = [];
+  onDeckError((_scope, text) => traces.push(text));
+  try {
+    expect(svc.listForCwd().map((w) => w.id)).toEqual([minted]);
+    expect(listWorkspaces(proj).map((w) => w.id)).toEqual([minted]);
+    expect(svc.pruneStale()).toEqual([]);
+    expect(svc.pruneStale()).toEqual([]);
+  } finally {
+    onDeckError(() => {});
+  }
+  expect(traces.filter((text) => text.includes("my ws.v2.json")), "one trace for the file, not one per call").toHaveLength(1);
+  expect(existsSync(odd), "the file is left alone").toBe(true);
+});

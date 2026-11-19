@@ -5,7 +5,7 @@ import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { openLockDatabase, type LockConnection, type LockOpener } from './file-lock'
 import { reportError } from './log'
-import { projectRootPath, type WorkspaceRef } from './project-files'
+import { assertWorkspaceId, projectRootPath, type WorkspaceRef } from './project-files'
 
 export interface Lock {
   pid: number
@@ -67,6 +67,7 @@ export interface LivenessOpts {
 }
 
 export function lockPath(ref: WorkspaceRef): string {
+  assertWorkspaceId(ref.id)
   return join(projectRootPath(ref.projectDir, ref.source), 'workspaces', `${ref.id}.lock`)
 }
 
@@ -247,6 +248,7 @@ export function acquireLock(
   ref: WorkspaceRef,
   opts: LivenessOpts & { pid: number; startedAt: number; open?: LockOpener }
 ): LockConnection | null {
+  assertWorkspaceId(ref.id)
   let held: LockConnection | null
   try {
     held = holdSameHostLock(ref, opts.open ?? openLockDatabase, ACQUIRE_BUSY_MS)
