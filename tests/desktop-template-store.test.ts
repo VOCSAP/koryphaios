@@ -16,6 +16,7 @@ import {
   templateSaveTarget,
   templateWriteDir,
   writeAgentTemplate,
+  writeTemplateAt,
 } from "../desktop/src/main/template-store.ts";
 import { toTemplate, TEMPLATE_TYPE } from "../desktop/src/shared/template.ts";
 import { extractBracedBody } from "./_braced-body.ts";
@@ -614,4 +615,30 @@ test.skipIf(!canLink)("templateSaveTarget refuses a source whose folder is a lin
   expect(() => templateSaveTarget(proj, true, "attended", "in", join(legacyDir(proj), "in.json"), e)).toThrow(
     /resolves outside the project/
   );
+});
+
+test("editing a legacy template in place leaves one entry in the list, at the legacy path, with the edited content", () => {
+  const e = env(tmp());
+  const proj = tmp();
+  const old = savedTemplate(legacyDir(proj), "old-file", "Old Team");
+  const target = templateSaveTarget(proj, true, "attended", "Old Team", old, e);
+  writeTemplateAt(target.file, toTemplate([{ name: "a" }, { name: "b" }], "Old Team"));
+  if (target.removeAfter) deleteTemplate(target.removeAfter, proj, e);
+  expect(
+    listTemplates(proj, e).map(({ name, path, sessionCount }) => ({ name, path, sessionCount })),
+    "an edit of a legacy template must not leave a second copy in the list"
+  ).toEqual([{ name: "Old Team", path: old, sessionCount: 2 }]);
+});
+
+test("renaming a legacy template leaves one entry in the list, under the new name", () => {
+  const e = env(tmp());
+  const proj = tmp();
+  const old = savedTemplate(legacyDir(proj), "old-file", "Old Team");
+  const target = templateSaveTarget(proj, true, "attended", "New Team", old, e);
+  writeTemplateAt(target.file, toTemplate([{ name: "a" }], "New Team"));
+  if (target.removeAfter) deleteTemplate(target.removeAfter, proj, e);
+  expect(
+    listTemplates(proj, e).map(({ name, path }) => ({ name, path })),
+    "a rename must leave neither the old name nor a second file in the list"
+  ).toEqual([{ name: "New Team", path: join(legacyDir(proj), "New-Team.json") }]);
 });
