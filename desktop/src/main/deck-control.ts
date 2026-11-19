@@ -1014,7 +1014,7 @@ export function startDeckControl(
       case 'deck_save_template': {
         const name = str(args, 'name')
         if (!name) throw new Error('name is required')
-        const saved = deps.saveTemplate(name, args['local'] === true)
+        const saved = deps.saveTemplate(name, args['local'] !== false)
         if (!saved) throw new Error('template save failed')
         return { path: saved }
       }

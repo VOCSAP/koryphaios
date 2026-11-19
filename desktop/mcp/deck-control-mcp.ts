@@ -260,12 +260,12 @@ const TOOLS = [
   {
     name: 'deck_save_template',
     description:
-      'Save the current session set as a reusable template. local=true writes it into the project, else globally.',
+      'Save the current session set as a reusable template in the project.',
     inputSchema: {
       type: 'object',
       properties: {
         name: { type: 'string' },
-        local: { type: 'boolean', description: 'Write into the project dir (default false = global).' }
+        local: { type: 'boolean', description: 'Project only (default true); false is refused.' }
       },
       required: ['name']
     }

@@ -158,6 +158,22 @@ export function writeTemplate(dir: string, name: string, tpl: SessionTemplate): 
   return file
 }
 
+/** Template write of an agent-reachable caller: always the project dir, the global dir is refused. */
+export function writeAgentTemplate(
+  projectDir: string,
+  local: boolean,
+  name: string,
+  tpl: SessionTemplate,
+  env: NodeJS.ProcessEnv = process.env
+): string {
+  if (!local) {
+    throw new Error(
+      'refused: an agent saves templates in the project only; the operator saves global ones from the Deck'
+    )
+  }
+  return writeTemplate(templateWriteDir(projectDir, local, 'unattended', env), name, tpl)
+}
+
 export function deleteTemplate(
   path: string,
   projectDir: string,

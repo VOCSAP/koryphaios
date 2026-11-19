@@ -4860,3 +4860,22 @@ test("the surface measure counts dispatch and the lead/supervisor-only tools", a
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("deck_save_template saves into the project unless local:false, and the refusal reaches the agent", async () => {
+  const deps = makeDeps({ sessions: [] });
+  const saves: boolean[] = [];
+  deps.saveTemplate = (name, local) => {
+    saves.push(local);
+    if (!local) throw new Error("refused: an agent saves templates in the project only");
+    return `/proj/templates/${name}.json`;
+  };
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+
+  expect((await call(srv, "deck_save_template", { name: "t" })).body.ok).toBe(true);
+  expect((await call(srv, "deck_save_template", { name: "t", local: true })).body.ok).toBe(true);
+  const refused = await call(srv, "deck_save_template", { name: "t", local: false });
+  expect(refused.body.ok).toBe(false);
+  expect(refused.body.error).toContain("project only");
+  expect(saves, "a call without local must be a project save").toEqual([true, true, false]);
+});

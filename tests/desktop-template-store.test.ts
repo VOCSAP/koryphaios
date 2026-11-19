@@ -1,5 +1,5 @@
 import { test, expect, afterEach } from "bun:test";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -14,8 +14,10 @@ import {
   deleteTemplate,
   templateSource,
   templateWriteDir,
+  writeAgentTemplate,
 } from "../desktop/src/main/template-store.ts";
 import { toTemplate, TEMPLATE_TYPE } from "../desktop/src/shared/template.ts";
+import { extractBracedBody } from "./_braced-body.ts";
 import { onDeckError } from "../desktop/src/main/log.ts";
 import { MAX_TRACED_FILES, MAX_TRACED_PER_SCAN } from "../desktop/src/main/project-files.ts";
 
@@ -354,7 +356,7 @@ test("the same invalid templates read in another order trace nothing again", () 
   expect(traced(() => { listTemplates(proj, e, reversed); })).toEqual([]);
 });
 
-test("ipc.ts reaches the global templates dir only through templateWriteDir, with attendance from isLocalIpcEvent", () => {
+test("ipc.ts and the index.ts saveTemplate reach the global templates dir only through templateWriteDir, ipc with attendance from isLocalIpcEvent", () => {
   const ipcSource = readFileSync(join(import.meta.dir, "..", "desktop", "src", "main", "ipc.ts"), "utf-8");
   expect(
     ipcSource,
@@ -386,4 +388,38 @@ test("ipc.ts reaches the global templates dir only through templateWriteDir, wit
       "const attendance: CallerAttendance = isLocalIpcEvent(_e) ? 'attended' : 'unattended'"
     );
   }
+
+  const indexSource = readFileSync(join(import.meta.dir, "..", "desktop", "src", "main", "index.ts"), "utf-8");
+  const anchor = "saveTemplate: (name, local) =>";
+  expect(indexSource.split(anchor).length - 1, "index.ts must hold exactly one saveTemplate dep").toBe(1);
+  const saveBody = extractBracedBody(indexSource, indexSource.indexOf("{", indexSource.indexOf(anchor)));
+  expect(
+    saveBody,
+    "the agent saveTemplate dep must not resolve the global templates dir itself: an agent would write a trusted template"
+  ).not.toContain("globalTemplatesDir");
+  expect(saveBody, "the agent saveTemplate dep must not call writeTemplate with a dir it chose").not.toContain(
+    "writeTemplate("
+  );
+  expect(saveBody, "the agent saveTemplate dep must write through writeAgentTemplate in the project dir").toContain(
+    "writeAgentTemplate(getConfig().projectDir, local,"
+  );
+});
+
+test("writeAgentTemplate refuses a global write and creates no templates folder", () => {
+  const e = env(tmp());
+  const proj = tmp();
+  expect(() => writeAgentTemplate(proj, false, "evil", toTemplate([{ name: "a" }], "a"), e)).toThrow(
+    "refused: an agent saves templates in the project only; the operator saves global ones from the Deck"
+  );
+  expect(existsSync(globalTemplatesDir(e)), "a refused agent write reached the global templates dir").toBe(false);
+  expect(existsSync(localTemplatesDir(proj))).toBe(false);
+});
+
+test("writeAgentTemplate writes a local template into the project dir and never the global one", () => {
+  const e = env(tmp());
+  const proj = tmp();
+  const path = writeAgentTemplate(proj, true, "mine", toTemplate([{ name: "a" }], "a"), e);
+  expect(path).toBe(join(localTemplatesDir(proj), "mine.json"));
+  expect(existsSync(path)).toBe(true);
+  expect(existsSync(globalTemplatesDir(e))).toBe(false);
 });

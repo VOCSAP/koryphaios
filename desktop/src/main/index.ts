@@ -328,14 +328,7 @@ import {
   removeWorktree,
   runWorktreeInit
 } from './worktree-service'
-import {
-  globalTemplatesDir,
-  listTemplates,
-  localTemplatesDir,
-  readTemplate,
-  templateSource,
-  writeTemplate
-} from './template-store'
+import { listTemplates, readTemplate, templateSource, writeAgentTemplate } from './template-store'
 import {
   sessionsHaveShellFields,
   templateApproval,
@@ -3213,8 +3206,7 @@ const controlDeps: DeckControlDeps = {
   },
   saveTemplate: (name, local) => {
     const tpl = toTemplate(service.captureSessions(), name)
-    const dir = local ? localTemplatesDir(getConfig().projectDir) : globalTemplatesDir()
-    return writeTemplate(dir, name || tpl.name || 'template', tpl)
+    return writeAgentTemplate(getConfig().projectDir, local, name || tpl.name || 'template', tpl)
   },
   announce: (text) => broadcastAnnounce(text),
   // Team spawn (TS2-TS4/02e1c07c): trust-mode gate, sync/async connection
