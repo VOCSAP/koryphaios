@@ -15,7 +15,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 // Node-only modules (no electron), import under bun.
 import {
@@ -28,6 +28,7 @@ import {
   TTSR_PROMPT_INTERVAL_MS,
   TtsrService,
   defaultResolveProject,
+  repoRulesEntry,
   repoRulesPathForWrite,
   type TtsrApprovalRequest,
   type TtsrProjectRef,
@@ -72,7 +73,7 @@ const fileOf = (...rules: Record<string, unknown>[]): string => JSON.stringify({
 
 function writeRepoRules(root: string, text: string): string {
   const p = join(root, REPO_RULES_REL);
-  mkdirSync(join(root, ".claude", "claude-peers"), { recursive: true });
+  mkdirSync(dirname(p), { recursive: true });
   writeFileSync(p, text);
   return p;
 }
@@ -479,7 +480,7 @@ describe("paths and symlinks", () => {
     const elsewhere = tmp();
     const target = join(elsewhere, "rules.json");
     writeFileSync(target, fileOf(rule("r-one")));
-    mkdirSync(join(cwd, ".claude", "claude-peers"), { recursive: true });
+    mkdirSync(dirname(join(cwd, REPO_RULES_REL)), { recursive: true });
     symlinkSync(target, join(cwd, REPO_RULES_REL));
     const path = h.svc.fileFor({ id: randomUUID(), cwd });
     await flush();
@@ -487,7 +488,7 @@ describe("paths and symlinks", () => {
     expect(h.prompts).toEqual([]);
     expect(h.svc.list().projects[0]!.file.errors[0]).toContain("symlink");
     expect(() => repoRulesPathForWrite(cwd)).toThrow(/symlink/);
-    const res = await h.svc.saveRepo({ root: cwd, projectKey: `local:${cwd}` }, fileOf(rule("r-two")), null);
+    const res = await h.svc.saveRepo({ root: cwd, projectKey: `local:${cwd}` }, fileOf(rule("r-two")), null, repoRulesEntry(cwd).path);
     expect(res.ok, "a save over a symlinked leaf is refused").toBe(false);
     expect((res as { errors: string[] }).errors.join("\n")).toContain("symlink");
     expect(readFileSync(target, "utf8"), "the write must not go through the symlink").toContain("r-one");
@@ -553,13 +554,236 @@ describe("operator saves", () => {
     const cwd = tmp();
     const path = h.svc.fileFor({ id: randomUUID(), cwd });
     const text = fileOf(rule("r-one"));
-    expect(await h.svc.saveRepo({ root: cwd, projectKey: `local:${cwd}` }, text, null)).toEqual({
+    expect(await h.svc.saveRepo({ root: cwd, projectKey: `local:${cwd}` }, text, null, repoRulesEntry(cwd).path)).toEqual({
       ok: true,
       hash: rulesHash(text),
       approved: true,
     });
     expect(readFileSync(join(cwd, REPO_RULES_REL), "utf8")).toBe(text);
     expect(effective(path)).toEqual([...KORY_IDS, "repo/r-one"]);
+  });
+});
+
+const NEW_REL = join(".claude", "koryphaios", "rules.json");
+const OLD_REL = join(".claude", "claude-peers", "rules.json");
+function rulesIn(root: string, rel: string, text: string): string {
+  const p = join(root, rel);
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, text);
+  return p;
+}
+
+describe("repo rules in both project folders", () => {
+  const ref = (cwd: string): TtsrProjectRef => ({ root: cwd, projectKey: "local:" + cwd });
+
+  test("a rules.json under .claude/koryphaios is gated like any repo file and listed with the path it was read from", async () => {
+    const h = harness();
+    const cwd = tmp();
+    const text = fileOf(rule("r-new"));
+    const file = rulesIn(cwd, NEW_REL, text);
+    const path = h.svc.fileFor({ id: randomUUID(), cwd });
+    await flush();
+    expect(effective(path)).toEqual(KORY_IDS);
+    expect(h.prompts.map((p) => [p.hash, p.rulesFile])).toEqual([[rulesHash(text), NEW_REL]]);
+    expect(h.svc.list().projects[0]!.file).toMatchObject({ path: file, status: "pending" });
+    expect(h.svc.approveRepo(ref(cwd), rulesHash(text))).toEqual({ ok: true });
+    expect(effective(path)).toEqual([...KORY_IDS, "repo/r-new"]);
+  });
+
+  test("a rules.json under .claude/claude-peers alone passes the same gate: pending, approved by hash, pending again once edited", async () => {
+    const h = harness();
+    const cwd = tmp();
+    const text = fileOf(rule("r-old"));
+    const file = rulesIn(cwd, OLD_REL, text);
+    const path = h.svc.fileFor({ id: randomUUID(), cwd });
+    await flush();
+    expect(effective(path)).toEqual(KORY_IDS);
+    expect(h.prompts.map((p) => [p.hash, p.rulesFile])).toEqual([[rulesHash(text), OLD_REL]]);
+    expect(h.svc.list().projects[0]!.file).toMatchObject({ path: file, status: "pending" });
+    expect(h.svc.approveRepo(ref(cwd), rulesHash(text))).toEqual({ ok: true });
+    expect(effective(path)).toEqual([...KORY_IDS, "repo/r-old"]);
+
+    rulesIn(cwd, OLD_REL, fileOf(rule("r-old", { message: "Rule r-old: a longer message than the approved one." })));
+    h.svc.tick();
+    expect(effective(path), "an edited claude-peers file is pending again").toEqual(KORY_IDS);
+    expect(h.svc.list().projects[0]!.file.status).toBe("pending");
+  });
+
+  test("the koryphaios file wins when both exist, and the shadowed claude-peers file is traced once per version", async () => {
+    const h = harness();
+    const cwd = tmp();
+    rulesIn(cwd, OLD_REL, fileOf(rule("r-old")));
+    const text = fileOf(rule("r-new"));
+    rulesIn(cwd, NEW_REL, text);
+    const path = h.svc.fileFor({ id: randomUUID(), cwd });
+    await flush();
+    expect(h.svc.approveRepo(ref(cwd), rulesHash(text))).toEqual({ ok: true });
+    expect(effective(path)).toEqual([...KORY_IDS, "repo/r-new"]);
+    h.svc.tick();
+    h.svc.tick();
+    const shadowed = (): string[] => h.errors.filter((e) => e.includes("ignored") && e.includes(OLD_REL));
+    expect(shadowed()).toHaveLength(1);
+    rulesIn(cwd, OLD_REL, fileOf(rule("r-old", { message: "Rule r-old: a longer message than before, still ignored." })));
+    h.svc.tick();
+    expect(shadowed()).toHaveLength(2);
+  });
+
+  test("an invalid koryphaios file loads nothing and does not fall back to claude-peers", async () => {
+    const h = harness();
+    const cwd = tmp();
+    rulesIn(cwd, OLD_REL, fileOf(rule("r-old")));
+    rulesIn(cwd, NEW_REL, "{ not json");
+    const path = h.svc.fileFor({ id: randomUUID(), cwd });
+    h.svc.tick();
+    await flush();
+    expect(effective(path)).toEqual(KORY_IDS);
+    expect(h.prompts).toEqual([]);
+    expect(h.svc.list().projects[0]!.file).toMatchObject({ path: join(cwd, NEW_REL), status: "invalid" });
+  });
+
+  test("a symlinked rules.json under .claude/koryphaios is refused and the claude-peers file is not used instead", async () => {
+    const h = harness();
+    const cwd = tmp();
+    const target = join(tmp(), "rules.json");
+    writeFileSync(target, fileOf(rule("r-new")));
+    mkdirSync(dirname(join(cwd, NEW_REL)), { recursive: true });
+    symlinkSync(target, join(cwd, NEW_REL));
+    rulesIn(cwd, OLD_REL, fileOf(rule("r-old")));
+    const path = h.svc.fileFor({ id: randomUUID(), cwd });
+    await flush();
+    expect(effective(path)).toEqual(KORY_IDS);
+    expect(h.prompts).toEqual([]);
+    expect(h.svc.list().projects[0]!.file.errors[0]).toContain("symlink");
+  });
+
+  test("a .claude/koryphaios folder symlinked outside the project is refused and the claude-peers file is not used instead", async () => {
+    const h = harness();
+    const cwd = tmp();
+    const outside = tmp();
+    writeFileSync(join(outside, "rules.json"), fileOf(rule("r-new")));
+    mkdirSync(join(cwd, ".claude"), { recursive: true });
+    symlinkSync(outside, join(cwd, ".claude", "koryphaios"), "junction");
+    rulesIn(cwd, OLD_REL, fileOf(rule("r-old")));
+    const path = h.svc.fileFor({ id: randomUUID(), cwd });
+    await flush();
+    expect(effective(path)).toEqual(KORY_IDS);
+    expect(h.prompts).toEqual([]);
+    expect(h.svc.list().projects[0]!.file.errors[0]).toContain("outside the project root");
+    expect(() => repoRulesPathForWrite(cwd)).toThrow(/outside the project root/);
+  });
+
+  test("content approved under claude-peers does not approve different content that appears under koryphaios", async () => {
+    const h = harness();
+    const cwd = tmp();
+    const old = fileOf(rule("r-old"));
+    rulesIn(cwd, OLD_REL, old);
+    const path = h.svc.fileFor({ id: randomUUID(), cwd });
+    await flush();
+    expect(h.svc.approveRepo(ref(cwd), rulesHash(old))).toEqual({ ok: true });
+    expect(effective(path)).toEqual([...KORY_IDS, "repo/r-old"]);
+
+    rulesIn(cwd, NEW_REL, fileOf(rule("r-new")));
+    h.svc.tick();
+    expect(effective(path), "the new file is read, and it is not the approved content").toEqual(KORY_IDS);
+    expect(h.svc.list().projects[0]!.file.status).toBe("pending");
+  });
+
+  test("saveRepo edits a claude-peers rules.json in place and creates nothing under koryphaios", async () => {
+    const h = harness();
+    const cwd = tmp();
+    const base = fileOf(rule("r-old"));
+    const file = rulesIn(cwd, OLD_REL, base);
+    const path = h.svc.fileFor({ id: randomUUID(), cwd });
+    await flush();
+    expect(h.svc.approveRepo(ref(cwd), rulesHash(base))).toEqual({ ok: true });
+    const next = fileOf(rule("r-old"), rule("r-two"));
+    expect(await h.svc.saveRepo(ref(cwd), next, rulesHash(base), repoRulesEntry(cwd).path)).toEqual({ ok: true, hash: rulesHash(next), approved: true });
+    expect(readFileSync(file, "utf8")).toBe(next);
+    expect(existsSync(join(cwd, NEW_REL))).toBe(false);
+    expect(effective(path)).toEqual([...KORY_IDS, "repo/r-old", "repo/r-two"]);
+  });
+
+  test("saveRepo creates the file under koryphaios when neither folder holds one", async () => {
+    const h = harness();
+    const cwd = tmp();
+    h.svc.fileFor({ id: randomUUID(), cwd });
+    const text = fileOf(rule("r-one"));
+    expect(await h.svc.saveRepo(ref(cwd), text, null, repoRulesEntry(cwd).path)).toMatchObject({ ok: true });
+    expect(readFileSync(join(cwd, NEW_REL), "utf8")).toBe(text);
+    expect(existsSync(join(cwd, OLD_REL))).toBe(false);
+  });
+
+  test("saveRepo is refused as stale when the file in force moves to another folder while it validates", async () => {
+    const cwd = tmp();
+    const base = fileOf(rule("r-old"));
+    let armed = false;
+    const h = harness({
+      probeRules: async () => {
+        if (armed) rulesIn(cwd, NEW_REL, base);
+        return [];
+      },
+    });
+    const file = rulesIn(cwd, OLD_REL, base);
+    h.svc.fileFor({ id: randomUUID(), cwd });
+    await flush();
+    expect(h.svc.approveRepo(ref(cwd), rulesHash(base))).toEqual({ ok: true });
+    armed = true;
+    const res = await h.svc.saveRepo(ref(cwd), fileOf(rule("r-old"), rule("r-two")), rulesHash(base), repoRulesEntry(cwd).path);
+    expect(res).toMatchObject({ ok: false, reason: "stale" });
+    expect(readFileSync(file, "utf8"), "the claude-peers file is left as it was").toBe(base);
+    expect(readFileSync(join(cwd, NEW_REL), "utf8"), "the file that appeared meanwhile, same content, is not overwritten").toBe(base);
+  });
+
+  test("saveRepo is refused as stale when the editor opened the claude-peers file and an identical koryphaios file now wins, hash matching", async () => {
+    const h = harness();
+    const cwd = tmp();
+    const base = fileOf(rule("r-old"));
+    const oldFile = rulesIn(cwd, OLD_REL, base);
+    h.svc.fileFor({ id: randomUUID(), cwd });
+    await flush();
+    expect(h.svc.approveRepo(ref(cwd), rulesHash(base))).toEqual({ ok: true });
+    const openedPath = h.svc.list().projects[0]!.file.path;
+    expect(openedPath).toBe(oldFile);
+
+    const newFile = rulesIn(cwd, NEW_REL, base);
+    const next = fileOf(rule("r-old"), rule("r-two"));
+    const res = await h.svc.saveRepo(ref(cwd), next, rulesHash(base), openedPath);
+    expect(res, "same hash, other source: the editor never saw the file now in force").toMatchObject({ ok: false, reason: "stale" });
+    expect(readFileSync(oldFile, "utf8")).toBe(base);
+    expect(readFileSync(newFile, "utf8")).toBe(base);
+    expect(await h.svc.saveRepo(ref(cwd), next, rulesHash(base), newFile)).toMatchObject({ ok: true });
+    expect(readFileSync(newFile, "utf8"), "the save that names the file in force still writes it").toBe(next);
+  });
+
+  test("repoRulesPathForWrite writes only the two known files and keeps its containment checks for the claude-peers one", () => {
+    const cwd = tmp();
+    expect(repoRulesPathForWrite(cwd, OLD_REL)).toBe(join(cwd, OLD_REL));
+    expect(() => repoRulesPathForWrite(cwd, join(".claude", "other", "rules.json"))).toThrow(/not a rules file/);
+    expect(() => repoRulesPathForWrite(cwd, join("..", "x", "rules.json"))).toThrow(/not a rules file/);
+    const outside = tmp();
+    const linked = tmp();
+    mkdirSync(join(linked, ".claude"), { recursive: true });
+    symlinkSync(outside, join(linked, ".claude", "claude-peers"), "junction");
+    expect(() => repoRulesPathForWrite(linked, OLD_REL)).toThrow(/outside the project root/);
+    expect(existsSync(join(outside, "rules.json"))).toBe(false);
+  });
+
+  test("the end of a timing probe applies the file that was probed, even under claude-peers", async () => {
+    let release: () => void = () => {};
+    const timed = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const h = harness({ probeRules: () => timed.then(() => []) });
+    h.answer.value = true;
+    const cwd = tmp();
+    rulesIn(cwd, OLD_REL, fileOf(rule("r-old")));
+    const path = h.svc.fileFor({ id: randomUUID(), cwd });
+    expect(h.prompts, "no prompt before the patterns are timed").toEqual([]);
+    release();
+    await flush();
+    await flush();
+    expect(h.prompts).toHaveLength(1);
+    expect(effective(path)).toEqual([...KORY_IDS, "repo/r-old"]);
   });
 });
 
@@ -731,7 +955,7 @@ describe("the three call sites validate through the shared parser", () => {
     const h = harness();
     expect(await h.svc.saveGlobal(text, null)).toEqual({ ok: false, reason: "invalid", errors: expected });
     const cwd = tmp();
-    expect(await h.svc.saveRepo({ root: cwd, projectKey: `local:${cwd}` }, text, null)).toEqual({
+    expect(await h.svc.saveRepo({ root: cwd, projectKey: `local:${cwd}` }, text, null, repoRulesEntry(cwd).path)).toEqual({
       ok: false,
       reason: "invalid",
       errors: expected,
@@ -769,7 +993,7 @@ describe("pattern timing gate (worker probe)", () => {
     expect((res as { errors: string[] }).errors.join("\n")).toContain('rules[0] "g-slow": pattern: too slow');
     expect(existsSync(h.globalFile)).toBe(false);
     const cwd = tmp();
-    const repo = await h.svc.saveRepo({ root: cwd, projectKey: `local:${cwd}` }, text, null);
+    const repo = await h.svc.saveRepo({ root: cwd, projectKey: `local:${cwd}` }, text, null, repoRulesEntry(cwd).path);
     expect(repo.ok, "a slow pattern must not reach the repo file").toBe(false);
     expect(existsSync(join(cwd, REPO_RULES_REL))).toBe(false);
   }, 20000);
@@ -937,11 +1161,11 @@ describe("operator saves: base hash and approval rules", () => {
     const ref: TtsrProjectRef = { root: cwd, projectKey: `local:${cwd}` };
     h.svc.fileFor({ id: randomUUID(), cwd });
     const r1 = fileOf(rule("r-one"));
-    expect(await h.svc.saveRepo(ref, r1, null)).toEqual({ ok: true, hash: rulesHash(r1), approved: true });
+    expect(await h.svc.saveRepo(ref, r1, null, repoRulesEntry(cwd).path)).toEqual({ ok: true, hash: rulesHash(r1), approved: true });
     const agent = fileOf(rule("r-one", { mode: "warn" }));
     writeRepoRules(cwd, agent);
     const mine = fileOf(rule("r-one"), rule("r-two"));
-    expect(await h.svc.saveRepo(ref, mine, rulesHash(r1)), "the agent rewrote the file after the editor opened it").toMatchObject({
+    expect(await h.svc.saveRepo(ref, mine, rulesHash(r1), repoRulesEntry(cwd).path),"the agent rewrote the file after the editor opened it").toMatchObject({
       ok: false,
       reason: "stale",
     });
@@ -955,7 +1179,7 @@ describe("operator saves: base hash and approval rules", () => {
     const agent = fileOf(rule("r-agent"));
     writeRepoRules(cwd, agent);
     h.svc.fileFor({ id: randomUUID(), cwd });
-    const res = await h.svc.saveRepo(ref, fileOf(rule("r-agent"), rule("r-mine")), rulesHash(agent));
+    const res = await h.svc.saveRepo(ref, fileOf(rule("r-agent"), rule("r-mine")), rulesHash(agent), repoRulesEntry(cwd).path);
     expect(res, "a pending base must be reviewed and approved first").toMatchObject({ ok: false, reason: "pending" });
     expect(readFileSync(join(cwd, REPO_RULES_REL), "utf8")).toBe(agent);
   });
@@ -968,7 +1192,7 @@ describe("operator saves: base hash and approval rules", () => {
     writeRepoRules(cwd, broken);
     const path = h.svc.fileFor({ id: randomUUID(), cwd });
     const fixed = fileOf(rule("r-fixed"));
-    expect(await h.svc.saveRepo(ref, fixed, rulesHash(broken))).toEqual({ ok: true, hash: rulesHash(fixed), approved: false });
+    expect(await h.svc.saveRepo(ref, fixed, rulesHash(broken), repoRulesEntry(cwd).path)).toEqual({ ok: true, hash: rulesHash(fixed), approved: false });
     expect(readFileSync(join(cwd, REPO_RULES_REL), "utf8")).toBe(fixed);
     expect(effective(path), "content fixed from an invalid (possibly agent-written) base is not approved by the save").toEqual(KORY_IDS);
     expect(h.svc.list().projects[0]!.file.status).toBe("pending");
@@ -981,7 +1205,9 @@ describe("operator saves: base hash and approval rules", () => {
     const body = extractBracedBody(src, src.indexOf("{", anchor));
     expect(body, "expectedHash crossing the renderer boundary must be validated main-side").toContain("/^[0-9a-f]{64}$/");
     expect(src).toContain("ttsr.saveGlobal(requireText(text), requireExpectedHash(expectedHash))");
-    expect(src).toContain("ttsr.saveRepo(await rulesProject(dir), requireText(text), requireExpectedHash(expectedHash))");
+    expect(src).toContain(
+      "ttsr.saveRepo(await rulesProject(dir), requireText(text), requireExpectedHash(expectedHash), requireExpectedPath(expectedPath))",
+    );
   });
 });
 

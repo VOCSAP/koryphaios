@@ -160,7 +160,7 @@ function baseList(projectFileStatus: "approved" | "pending" | "invalid" | "absen
 let setEnabledCalls: Array<[string, boolean]> = [];
 let approveCalls: Array<[string, string]> = [];
 let saveGlobalCalls: Array<[string, string | null]> = [];
-let saveRepoCalls: Array<[string, string, string | null]> = [];
+let saveRepoCalls: Array<[string, string, string | null, string]> = [];
 let currentList: TtsrRulesList = baseList();
 let approveResult: TtsrApproveResult = { ok: true };
 let saveResult: TtsrSaveResult = { ok: true, hash: "newhash", approved: true };
@@ -177,8 +177,8 @@ function installApi(): void {
       saveGlobalCalls.push([text, expectedHash]);
       return Promise.resolve(saveResult);
     },
-    rulesSaveRepo: (projectDir: string, text: string, expectedHash: string | null) => {
-      saveRepoCalls.push([projectDir, text, expectedHash]);
+    rulesSaveRepo: (projectDir: string, text: string, expectedHash: string | null, expectedPath: string) => {
+      saveRepoCalls.push([projectDir, text, expectedHash, expectedPath]);
       return Promise.resolve(saveResult);
     },
     rulesApproveRepo: (projectDir: string, hash: string) => {
@@ -402,9 +402,10 @@ test("(M3) two worktrees sharing a project_key: editing project B's row saves to
   });
 
   expect(saveRepoCalls.length).toBe(1);
-  const [savedDir, , savedHash] = saveRepoCalls[0]!;
+  const [savedDir, , savedHash, savedPath] = saveRepoCalls[0]!;
   expect(savedDir).toBe("/worktree-b");
   expect(savedHash).toBe("hash-b");
+  expect(savedPath, "the save names the rules file the modal was opened on").toBe("/worktree-b/.claude/claude-peers/rules.json");
 });
 
 test("(M4b) a pending repo file locks Edit/Add to View-only until approved", async () => {
@@ -494,6 +495,57 @@ test("saving from a raw editor with approved:false tells the operator the file i
     await Promise.resolve();
   });
   expect(container.textContent).toContain("rules.savedPendingApproval");
+});
+
+test("saving from a raw editor names the repo rules file the editor was opened on", async () => {
+  currentList = baseList("invalid");
+  await mount();
+  const editRawBtn = [...container.querySelectorAll("button")].find((b) => b.textContent === "rules.editRawFile")!;
+  act(() => {
+    editRawBtn.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  });
+  const saveBtn = [...container.querySelectorAll("button")].find((b) => b.textContent === "common.save")!;
+  act(() => {
+    saveBtn.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  });
+  await act(async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+  expect(saveRepoCalls.length).toBe(1);
+  expect(saveRepoCalls[0]![3], "the raw save carries the path read, not the project dir").toBe("/proj/.claude/claude-peers/rules.json");
+});
+
+test("adding a rule to a repo file names the repo rules file the editor was opened on", async () => {
+  await mount();
+  const repoSection = container.querySelector('h3[title="/proj"]')!.closest("section")!;
+  const addBtn = [...repoSection.querySelectorAll("button")].find((b) => b.textContent === "rules.addRule")!;
+  act(() => {
+    addBtn.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  });
+  const inputSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+  if (!inputSetter) throw new Error("input has no native value setter");
+  const idInput = container.querySelector('input[placeholder="no-emoji-ui"]') as HTMLInputElement;
+  const patternInput = [...container.querySelectorAll("input")].find(
+    (i) => i.type === "text" && i.placeholder === "" && i.value === ""
+  ) as HTMLInputElement;
+  act(() => {
+    inputSetter.call(idInput, "no-todo");
+    idInput.dispatchEvent(new Event("input", { bubbles: true }));
+    inputSetter.call(patternInput, "TODO");
+    patternInput.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  const saveBtn = [...container.querySelectorAll("button")].find((b) => b.textContent === "common.save")!;
+  act(() => {
+    saveBtn.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  });
+  await act(async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+  expect(saveRepoCalls.length).toBe(1);
+  expect(saveRepoCalls[0]![0]).toBe("/proj");
+  expect(saveRepoCalls[0]![3], "the add save carries the path read, not the project dir").toBe("/proj/.claude/claude-peers/rules.json");
 });
 
 test("a removed approved repo file is surfaced, not shown as a plain absent file", async () => {

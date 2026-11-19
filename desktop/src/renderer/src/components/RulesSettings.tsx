@@ -195,7 +195,7 @@ export function RulesSettings(): React.JSX.Element {
     const locked = project.file.status !== 'approved'
     setEditing({
       mode: locked ? 'view' : 'edit',
-      target: { kind: 'repo', projectDir: project.projectDir },
+      target: { kind: 'repo', projectDir: project.projectDir, filePath: project.file.path },
       rule: row.rule,
       existingRules: project.rules.map((r) => r.rule),
       expectedHash: project.file.hash
@@ -215,7 +215,7 @@ export function RulesSettings(): React.JSX.Element {
   const openAddRepo = (project: TtsrRepoProject): void => {
     setEditing({
       mode: 'add',
-      target: { kind: 'repo', projectDir: project.projectDir },
+      target: { kind: 'repo', projectDir: project.projectDir, filePath: project.file.path },
       rule: null,
       existingRules: project.rules.map((r) => r.rule),
       expectedHash: project.file.hash
@@ -245,7 +245,7 @@ export function RulesSettings(): React.JSX.Element {
       const res =
         target.kind === 'global'
           ? await window.api.rulesSaveGlobal(text, expectedHash)
-          : await window.api.rulesSaveRepo(target.projectDir, text, expectedHash)
+          : await window.api.rulesSaveRepo(target.projectDir, text, expectedHash, target.filePath)
       if (!res.ok) {
         if (res.reason === 'stale' || res.reason === 'pending') handleSaveConflict(res.reason)
         else window.api.reportError('rules', `delete rule "${rule.id}" failed: ${res.errors.join('; ')}`)
@@ -384,7 +384,7 @@ export function RulesSettings(): React.JSX.Element {
                   className="btn"
                   onClick={() =>
                     setRawEditing({
-                      target: { kind: 'repo', projectDir: project.projectDir },
+                      target: { kind: 'repo', projectDir: project.projectDir, filePath: project.file.path },
                       text: project.file.text ?? '',
                       expectedHash: project.file.hash
                     })

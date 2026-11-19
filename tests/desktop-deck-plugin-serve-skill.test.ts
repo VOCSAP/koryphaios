@@ -34,6 +34,8 @@ function examples(markdown: string): Example[] {
   return found
 }
 
+const frontmatterOf = (markdown: string): string => /^---\r?\n([\s\S]*?)\r?\n---/.exec(markdown)?.[1] ?? ''
+
 const logsDir = mkdtempSync(join(tmpdir(), 'cp-serve-skill-logs-'))
 const projects: string[] = []
 beforeAll(() => initDeckLog(logsDir))
@@ -46,14 +48,14 @@ afterAll(() => rmSync(logsDir, { recursive: true, force: true }))
 function projectFor(json: string): string {
   const project = realpathSync.native(mkdtempSync(join(tmpdir(), 'cp-serve-skill-')))
   projects.push(project)
-  mkdirSync(join(project, '.claude', 'claude-peers'), { recursive: true })
+  mkdirSync(join(project, '.claude', 'koryphaios'), { recursive: true })
   const parsed = JSON.parse(json) as { actions?: Array<{ cwd?: unknown }> }
   for (const action of parsed.actions ?? []) {
     if (typeof action.cwd === 'string' && !action.cwd.startsWith('/') && !action.cwd.includes(':')) {
       mkdirSync(join(project, action.cwd), { recursive: true })
     }
   }
-  writeFileSync(join(project, '.claude', 'claude-peers', 'serve.json'), json, 'utf8')
+  writeFileSync(join(project, '.claude', 'koryphaios', 'serve.json'), json, 'utf8')
   return project
 }
 
@@ -86,6 +88,12 @@ test('every refused example is refused for the field it names', async () => {
     const result = await readServeConfig(projectFor(example.json))
     expect('error' in result && result.error.startsWith(`${example.label}:`), `${example.label}: ${JSON.stringify(result)}`).toBe(true)
   }
+})
+
+test('the skill sends the file to .claude/koryphaios and an existing claude-peers file is edited in place', () => {
+  expect(SKILL).toContain('write ONE file, `.claude/koryphaios/serve.json`')
+  expect(SKILL).toMatch(/`\.claude\/claude-peers\/serve\.json` already exists, edit that file in place\s+and\s+do not create the other one/)
+  expect(frontmatterOf(SKILL)).toContain('.claude/koryphaios/serve.json')
 })
 
 test('the skill guides without an agent, without an emoji, and without naming an unshipped button', () => {

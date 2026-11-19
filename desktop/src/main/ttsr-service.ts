@@ -33,6 +33,7 @@ import {
   type TtsrTool
 } from '../shared/ttsr-rules'
 import { KORY_EFFECTIVE_RULES } from '../shared/ttsr-builtin'
+import { PROJECT_DIR_NAME, electProjectEntry, projectEntryCandidates, type ProjectEntry } from '../shared/project-dirs'
 import { fileIdentity, fileIdentityMismatch, readBounded, type BoundedReadOptions, type BoundedReadResult, type FileIdentity } from '../shared/ttsr-fs'
 import type {
   TtsrApproveResult,
@@ -61,8 +62,13 @@ import { isValidSandboxSessionId } from './sandbox-prompt'
 import { SANDBOX_RUN_DIR } from './sandbox-command'
 import { computeDeckProjectKey } from './roadmap-service'
 
-/** Repo rules file, relative to the project root. */
-export const REPO_RULES_REL = join('.claude', 'claude-peers', 'rules.json')
+/** Repo rules file a Deck save creates, relative to the project root. */
+export const REPO_RULES_REL = join('.claude', PROJECT_DIR_NAME, 'rules.json')
+
+/** The repo rules file in force: the one that exists (koryphaios first), else the one a save would create. */
+export function repoRulesEntry(root: string): ProjectEntry {
+  return electProjectEntry(root, 'rules.json') ?? projectEntryCandidates(root, 'rules.json')[0]!
+}
 /** Operator rules file name, under the global config dir. */
 export const GLOBAL_RULES_FILE = 'ttsr-rules.json'
 /** Subdirectory of the window's session dir holding the effective files. */
@@ -127,6 +133,7 @@ export interface TtsrApprovalRequest {
   projectKey: string
   hash: string
   rules: TtsrRule[]
+  rulesFile: string
   /** Set when the timing probe could not start bun and timed the rules under V8: its reason. */
   bunUnavailable?: string
 }
@@ -184,6 +191,8 @@ interface FileSnapshot {
 interface ProjectState {
   root: string
   key: string
+  /** The file `snap` was read from. */
+  entry: ProjectEntry
   snap: FileSnapshot
   /** Hash whose rules this root applied at the last evaluation, null when none. */
   applied: string | null
@@ -501,10 +510,10 @@ export class TtsrService {
     this.global = this.readRulesFile(gPath, null)
     if (beforeGlobal.hash !== this.global.hash || beforeGlobal.status !== this.global.status) changed = true
     for (const state of this.projects.values()) {
-      const path = join(state.root, REPO_RULES_REL)
       const before = state.snap
-      state.snap = this.readRulesFile(path, state.root)
-      if (before.hash !== state.snap.hash || before.status !== state.snap.status) {
+      const beforePath = state.entry.path
+      this.reread(state)
+      if (before.hash !== state.snap.hash || before.status !== state.snap.status || beforePath !== state.entry.path) {
         changed = true
         this.settle(state)
       }
@@ -551,19 +560,30 @@ export class TtsrService {
 
   /**
    * Validates and writes a project's repo rules file. `expectedHash` as for
-   * saveGlobal. The new hash is approved (and becomes the root's current
+   * saveGlobal. `expectedPath` is the file the editor opened; a save whose
+   * file in force now resolves elsewhere is refused as 'stale' even when the
+   * hash matches. The new hash is approved (and becomes the root's current
    * hash) only when the base was absent or the file this root applies: an
    * operator editing agent-written content he has not approved would
    * approve it unseen, so a pending base is refused ('pending'), and an
    * invalid base (the raw editor fixing it) is written but stays pending.
    */
-  async saveRepo(project: TtsrProjectRef, text: string, expectedHash: string | null): Promise<TtsrSaveResult> {
+  async saveRepo(
+    project: TtsrProjectRef,
+    text: string,
+    expectedHash: string | null,
+    expectedPath: string
+  ): Promise<TtsrSaveResult> {
     const parsed = parseRulesFile(text)
     if (!parsed.ok) return { ok: false, reason: 'invalid', errors: parsed.errors }
     const hash = rulesHash(text)
     const slow = await this.probeErrors(hash, parsed.file.rules)
     if (slow.length > 0) return { ok: false, reason: 'invalid', errors: slow }
-    const base = this.readRulesFile(join(project.root, REPO_RULES_REL), project.root)
+    const target = repoRulesEntry(project.root)
+    if (target.path !== expectedPath) {
+      return { ok: false, reason: 'stale', errors: ['file: the rules file in force changed folder since the editor opened it; reload'] }
+    }
+    const base = this.readRulesFile(target.path, project.root)
     const refused = baseRefusal(base, expectedHash)
     if (refused) return refused
     let approve = base.status === 'absent'
@@ -579,7 +599,7 @@ export class TtsrService {
     }
     let path: string
     try {
-      path = repoRulesPathForWrite(project.root)
+      path = repoRulesPathForWrite(project.root, target.rel)
       writeFileAtomic(path, text)
     } catch (e) {
       this.deps.reportError('ttsr', `could not write the repo guard rules of ${project.root}`, e)
@@ -600,7 +620,7 @@ export class TtsrService {
     )
     const state = this.projects.get(project.root)
     if (state) {
-      state.snap = this.readRulesFile(path, project.root)
+      this.reread(state)
       this.settle(state)
     }
     this.recompileAll()
@@ -612,9 +632,9 @@ export class TtsrService {
    * content; it becomes the hash this root applies.
    */
   approveRepo(project: TtsrProjectRef, hash: string): TtsrApproveResult {
-    const snap = this.readRulesFile(join(project.root, REPO_RULES_REL), project.root)
     const state = this.projects.get(project.root)
-    if (state) state.snap = snap
+    if (state) this.reread(state)
+    const snap = state ? state.snap : this.readRulesFile(repoRulesEntry(project.root).path, project.root)
     if (snap.status === 'absent') return { ok: false, reason: 'absent' }
     if (snap.status === 'invalid') return { ok: false, reason: 'invalid' }
     if (snap.hash !== hash) return { ok: false, reason: 'stale' }
@@ -718,7 +738,7 @@ export class TtsrService {
         .map((t) => t.id)
       if (sessionIds.length === 0) continue
       const approved = this.isApproved(state)
-      const file = this.fileState(join(state.root, REPO_RULES_REL), state.snap, approved ? 'approved' : 'pending')
+      const file = this.fileState(state.entry.path, state.snap, approved ? 'approved' : 'pending')
       const current = this.approvals.roots[state.root]
       if (current !== undefined && current !== state.snap.hash) {
         file.previousHash = current
@@ -803,15 +823,32 @@ export class TtsrService {
   }
 
   private refreshProject(ref: TtsrProjectRef): ProjectState {
-    const path = join(ref.root, REPO_RULES_REL)
     let state = this.projects.get(ref.root)
     if (!state) {
-      state = { root: ref.root, key: ref.projectKey, snap: this.readRulesFile(path, ref.root), applied: null }
+      state = { root: ref.root, key: ref.projectKey, entry: repoRulesEntry(ref.root), snap: ABSENT, applied: null }
       this.projects.set(ref.root, state)
-    } else {
-      state.snap = this.readRulesFile(path, ref.root)
     }
+    this.reread(state)
     return state
+  }
+
+  /** Elects the file in force, reads it, and keeps both on the state so every later step names the same file. */
+  private reread(state: ProjectState): void {
+    state.entry = repoRulesEntry(state.root)
+    state.snap = this.readRulesFile(state.entry.path, state.root)
+    this.traceShadowed(state)
+  }
+
+  private traceShadowed(state: ProjectState): void {
+    for (const other of projectEntryCandidates(state.root, 'rules.json')) {
+      if (other.path === state.entry.path) continue
+      const sig = statSig(other.path)
+      if (sig === 'absent') continue
+      const tag = `shadowed\n${other.path}\n${sig}`
+      if (this.reportedInvalid.has(tag)) continue
+      this.reportedInvalid.add(tag)
+      this.deps.reportError('ttsr', `repo guard rules ${other.path} are ignored: ${state.entry.path} is in force and wins`)
+    }
   }
 
   private pruneProjects(): void {
@@ -945,7 +982,7 @@ export class TtsrService {
         this.reportedInvalid.add(tag)
         this.deps.reportError(
           'ttsr',
-          `repo guard rules rejected (${snap.errors.length} error(s)), none loaded: ${join(state.root, REPO_RULES_REL)}: ${snap.errors.slice(0, 3).join('; ')}`
+          `repo guard rules rejected (${snap.errors.length} error(s)), none loaded: ${state.entry.path}: ${snap.errors.slice(0, 3).join('; ')}`
         )
       }
       return
@@ -964,7 +1001,13 @@ export class TtsrService {
     this.prompted.add(promptKey)
     this.lastPromptAt.set(root, this.now())
     this.promptOpen.add(root)
-    const req: TtsrApprovalRequest = { projectDir: root, projectKey: state.key, hash: snap.hash, rules: snap.rules }
+    const req: TtsrApprovalRequest = {
+      projectDir: root,
+      projectKey: state.key,
+      hash: snap.hash,
+      rules: snap.rules,
+      rulesFile: state.entry.rel
+    }
     const verdict = this.probes.get(snap.hash)
     if (verdict?.done && verdict.bunUnavailable !== undefined) req.bunUnavailable = verdict.bunUnavailable
     const closed = (): void => {
@@ -1066,7 +1109,7 @@ export class TtsrService {
       if (this.global.hash === hash) this.global = this.readRulesFile(this.deps.globalRulesFile(), null)
       for (const state of this.projects.values()) {
         if (state.snap.hash !== hash) continue
-        state.snap = this.readRulesFile(join(state.root, REPO_RULES_REL), state.root)
+        this.reread(state)
         this.settle(state)
       }
       this.recompileAll()
@@ -1289,12 +1332,15 @@ function baseRefusal(base: FileSnapshot, expectedHash: string | null): TtsrSaveR
  * nor a non-file. Throws otherwise. Residual race: a directory swapped for a
  * symlink after these checks and before the atomic rename.
  */
-export function repoRulesPathForWrite(root: string): string {
+export function repoRulesPathForWrite(root: string, rel: string = REPO_RULES_REL): string {
   const canonRoot = canonicalizePath(root)
-  const path = join(canonRoot, REPO_RULES_REL)
+  const path = join(canonRoot, rel)
   const parent = dirname(path)
   const refuse = (why: string): never => {
     throw new Error(`refusing to write ${path}: ${why}`)
+  }
+  if (!projectEntryCandidates(canonRoot, 'rules.json').some((candidate) => candidate.rel === rel)) {
+    refuse('it is not a rules file')
   }
   let existing = parent
   while (existing !== canonRoot && !existsSync(existing)) existing = dirname(existing)

@@ -2,10 +2,10 @@ import { createHash } from 'node:crypto'
 import { statSync } from 'node:fs'
 import { join } from 'node:path'
 import { reportError } from './log'
+import { LEGACY_PROJECT_DIR_NAME, PROJECT_DIR_NAME } from '../shared/project-dirs'
 import { canonicalPath } from './worktree-service'
 
-export const PROJECT_DIR_NAME = 'koryphaios'
-export const LEGACY_PROJECT_DIR_NAME = 'claude-peers'
+export { LEGACY_PROJECT_DIR_NAME, PROJECT_DIR_NAME }
 export const MAX_TRACED_FILES = 64
 export const MAX_TRACED_PER_SCAN = 8
 

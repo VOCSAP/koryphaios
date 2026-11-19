@@ -1,10 +1,10 @@
 import { readFile } from 'node:fs/promises'
-import { isAbsolute, join } from 'node:path'
+import { isAbsolute } from 'node:path'
 import { approve, commandHash, isApproved } from './launch-approval'
 import { reportError } from './log'
 import { resolveWithin } from './explorer-service'
+import { electProjectEntry } from '../shared/project-dirs'
 
-const SERVE_FILE = ['.claude', 'claude-peers', 'serve.json']
 const ENV_NAME = /^[A-Z_][A-Z0-9_]*$/
 
 export const SERVE_CONFIG_FIELD_NAMES = {
@@ -246,10 +246,12 @@ export async function validateServeConfig(raw: unknown, projectDir: string): Pro
 }
 
 export async function readServeConfig(projectDir: string): Promise<ServeConfigReadResult> {
+  const elected = electProjectEntry(projectDir, 'serve.json')
+  if (!elected) return { error: 'missing' }
   let path: string
   let text: string
   try {
-    path = await resolveWithin(projectDir, join(...SERVE_FILE))
+    path = await resolveWithin(projectDir, elected.rel)
     text = await readFile(path, 'utf-8')
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {

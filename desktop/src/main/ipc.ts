@@ -1071,8 +1071,12 @@ export function registerIpc({
   regHandle('rules:save-global', (_e, text: unknown, expectedHash: unknown) =>
     ttsr.saveGlobal(requireText(text), requireExpectedHash(expectedHash))
   )
-  regHandle('rules:save-repo', async (_e, dir: unknown, text: unknown, expectedHash: unknown) =>
-    ttsr.saveRepo(await rulesProject(dir), requireText(text), requireExpectedHash(expectedHash))
+  const requireExpectedPath = (path: unknown): string => {
+    if (typeof path !== 'string' || path.length === 0 || path.includes('\0')) throw new Error('rules: invalid expectedPath')
+    return path
+  }
+  regHandle('rules:save-repo', async (_e, dir: unknown, text: unknown, expectedHash: unknown, expectedPath: unknown) =>
+    ttsr.saveRepo(await rulesProject(dir), requireText(text), requireExpectedHash(expectedHash), requireExpectedPath(expectedPath))
   )
   regHandle('rules:approve-repo', async (_e, dir: unknown, hash: unknown) => {
     if (typeof hash !== 'string') throw new Error('rules: hash must be a string')

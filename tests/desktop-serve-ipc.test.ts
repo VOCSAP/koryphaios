@@ -82,6 +82,27 @@ function harness(init: Init = {}) {
   return { ipc: createServeIpc(deps), started, reads, prompts, servePaths, errors }
 }
 
+for (const folder of ['koryphaios', 'claude-peers']) {
+  test('a serve.json under .claude/' + folder + ' asks the operator, who is pointed at the file that was read', async () => {
+    const dir = project()
+    rmSync(join(dir, '.claude'), { recursive: true, force: true })
+    mkdirSync(join(dir, '.claude', folder), { recursive: true })
+    writeFileSync(
+      join(dir, '.claude', folder, 'serve.json'),
+      JSON.stringify({ version: 1, actions: [{ name: 'web', cwd: 'web', command: 'bun run dev', url: 'http://${HOST}:${PORT}/' }] })
+    )
+    const refused = harness({ allowed: [dir], confirm: false })
+    expect(await refused.ipc.start(dir)).toMatchObject({ ok: false, reason: 'refused' })
+    expect(refused.started).toEqual([])
+    expect(refused.prompts).toEqual(['bun run dev'])
+    expect(refused.servePaths).toEqual([realpathSync.native(join(dir, '.claude', folder, 'serve.json'))])
+
+    const granted = harness({ allowed: [dir], confirm: true })
+    expect(await granted.ipc.start(dir)).toMatchObject({ ok: true })
+    expect(granted.started).toHaveLength(1)
+  })
+}
+
 test('opens one approval dialog at a time and refuses a repeated start while it is open', async () => {
   const dir = project()
   const open: Array<(granted: boolean) => void> = []

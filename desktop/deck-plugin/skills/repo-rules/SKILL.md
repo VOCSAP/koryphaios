@@ -1,6 +1,6 @@
 ---
 name: repo-rules
-description: Add or change a repo-specific guard rule (.claude/claude-peers/rules.json) that blocks or warns on a tool call matching a regex. Use when the same mechanical mistake recurs in this repo, or when the operator asks for a rule. Not for judgment rules.
+description: Add or change a repo-specific guard rule (.claude/koryphaios/rules.json) that blocks or warns on a tool call matching a regex. Use when the same mechanical mistake recurs in this repo, or when the operator asks for a rule. Not for judgment rules.
 allowed-tools: Bash(bun "${CLAUDE_PLUGIN_ROOT}/bin/kory-rules.mjs" *)
 ---
 
@@ -21,7 +21,7 @@ when there are two", canonicalizing paths before comparing them, which of
 five hostile inputs a new field is. Those need reading and reasoning, not a
 regex -- they stay in CLAUDE.md.
 
-## Format (`.claude/claude-peers/rules.json`)
+## Format (`.claude/koryphaios/rules.json`)
 
 ```json
 {
@@ -75,14 +75,20 @@ One full example -- ban a debug print left in committed code:
 
 ## Workflow
 
-1. Edit `.claude/claude-peers/rules.json` with your normal edit tool (there
-   is no `add` command -- editing the JSON directly is already shorter).
+1. Find the file. `.claude/claude-peers/rules.json` already there: edit that
+   one in place. Neither there: create `.claude/koryphaios/rules.json`. Never
+   create the second file while the first exists: when both are present only
+   `.claude/koryphaios/rules.json` is read, so the existing claude-peers rules
+   would stop applying. Edit it with your normal edit tool (there is no `add` command --
+   editing the JSON directly is already shorter).
 2. `bun "${CLAUDE_PLUGIN_ROOT}/bin/kory-rules.mjs" check` -- fix every
    reported error; a typo'd field name is rejected, not silently ignored.
    `check` also times each pattern on long adversarial input: "too slow"
    means nested or adjacent repetitions (`\w+\w+x`, `(a|aa)+`) -- bound or
    anchor them. A pattern matching everyday text (`a`, `\s`, `\d`) is
-   rejected too: it would fire on almost every call.
+   rejected too: it would fire on almost every call. `check` prints the path
+   it read: when that is not the file you edited, or it warns that another
+   file is ignored, stop and tell the operator.
 3. `bun "${CLAUDE_PLUGIN_ROOT}/bin/kory-rules.mjs" test <id> --text "..." --expect match`
    on a case that should trigger it, and
    `... test <id> --text "..." --expect none` on one that should not. Both

@@ -54,7 +54,7 @@ import {
   type SecretCipher
 } from './scope-secrets'
 import { applyProviderKeyPatch, sanitizeProviders } from './provider-secrets'
-import { GLOBAL_RULES_FILE, REPO_RULES_REL, TtsrService, type TtsrApprovalRequest } from './ttsr-service'
+import { GLOBAL_RULES_FILE, TtsrService, type TtsrApprovalRequest } from './ttsr-service'
 import { ttsrApprovalSpec } from './ttsr-dialog'
 import { sanitizeTtsrDisabled } from './ttsr-toggles'
 import {
@@ -1019,7 +1019,7 @@ function composeSandboxAppendPrompt(sessionId: string, command: string, launch: 
 async function promptTtsrApproval(req: TtsrApprovalRequest): Promise<boolean> {
   return await showApprovalDialog(
     ttsrApprovalSpec(
-      { rules: req.rules, projectDir: req.projectDir, rulesFile: REPO_RULES_REL, bunUnavailable: req.bunUnavailable },
+      { rules: req.rules, projectDir: req.projectDir, rulesFile: req.rulesFile, bunUnavailable: req.bunUnavailable },
       isFrLocale()
     )
   )

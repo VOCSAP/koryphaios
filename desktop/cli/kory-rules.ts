@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 // `kory-rules`: the agent-facing CLI for a repo's TTSR rules file
-// (.claude/claude-peers/rules.json), run through the `repo-rules` skill.
+// (.claude/koryphaios/rules.json, else .claude/claude-peers/rules.json), run
+// through the `repo-rules` skill.
 // Wraps the shared rules engine so validation,
 // path/field semantics and matching stay identical to what the plugin hook
 // actually enforces at runtime -- this CLI never reimplements them.
@@ -9,8 +10,9 @@
 // An agent edits the JSON with its normal editing tool, then runs `check`.
 
 import { spawnSync } from "node:child_process";
-import { readFileSync, realpathSync, statSync } from "node:fs";
+import { lstatSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { electEntry, electProjectEntry, projectEntryCandidates } from "../src/shared/project-dirs.ts";
 import { probeRulesSpeed } from "../src/shared/ttsr-probe.ts";
 import {
   ambiguousAlternationWarnings,
@@ -27,7 +29,7 @@ import {
 } from "../src/shared/ttsr-rules.ts";
 
 const TTSR_FILE_ENV = "CLAUDE_PEERS_TTSR_FILE";
-const DEFAULT_RULES_RELPATH = ".claude/claude-peers/rules.json";
+const RULES_FILE_HELP = ".claude/koryphaios/rules.json, else .claude/claude-peers/rules.json";
 /** Cap on files listed per `scan` match report -- an agent-facing CLI is read
  * token-cheap, not a full report. */
 const SCAN_TOP_FILES = 20;
@@ -62,7 +64,15 @@ function projectRoot(): string {
 }
 
 function defaultRulesPath(): string {
-  return join(projectRoot(), DEFAULT_RULES_RELPATH);
+  const root = projectRoot();
+  const candidates = projectEntryCandidates(root, "rules.json");
+  const elected = electProjectEntry(root, "rules.json") ?? candidates[0]!;
+  for (const other of candidates) {
+    if (other.path !== elected.path && electEntry([other], lstatSync)) {
+      process.stderr.write(`warning: ${other.path} also exists and is ignored; ${elected.path} is the file in force\n`);
+    }
+  }
+  return elected.path;
 }
 
 /**
@@ -448,7 +458,7 @@ async function cmdScan(args: string[]): Promise<void> {
 
 // --- entrypoint ---
 
-const HELP = `kory-rules -- inspect and test this repo's TTSR rules file (${DEFAULT_RULES_RELPATH})
+const HELP = `kory-rules -- inspect and test this repo's TTSR rules file (${RULES_FILE_HELP})
 
 Usage:
   kory-rules check [file]              validate the rules file (default: repo rules.json)

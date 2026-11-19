@@ -4,7 +4,7 @@
 
 import { afterAll, afterEach, beforeAll, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 
 const DESKTOP_DIR = resolve(import.meta.dir, "..", "desktop");
@@ -116,6 +116,80 @@ beforeAll(() => {
       (value) => ({ value }),
       (error: unknown) => ({ error })
     );
+});
+
+const NEW_RULES_RELPATH = ".claude/koryphaios/rules.json";
+
+function folderProject(files: Record<string, unknown>): string {
+  const dir = mkdtempSync(join(tmpdir(), "kory-rules-cli-folders-"));
+  tmpDirs.push(dir);
+  for (const [rel, content] of Object.entries(files)) {
+    mkdirSync(dirname(join(dir, rel)), { recursive: true });
+    writeFileSync(join(dir, rel), typeof content === "string" ? content : JSON.stringify(content));
+  }
+  return dir;
+}
+
+// --- both project folders ---
+
+test("check: a rules file under .claude/koryphaios is the default and is the path reported", async () => {
+  const dir = folderProject({ [NEW_RULES_RELPATH]: VALID_RULE });
+  const result = await runCli(["check"], dir);
+  expect(result.exitCode).toBe(0);
+  expect(result.stdout).toContain(join(".claude", "koryphaios", "rules.json"));
+  expect(result.stderr).not.toContain("also exists");
+});
+
+test("check: a rules file under .claude/claude-peers alone is still the default", async () => {
+  const dir = folderProject({ [RULES_RELPATH]: VALID_RULE });
+  const result = await runCli(["check"], dir);
+  expect(result.exitCode).toBe(0);
+  expect(result.stdout).toContain(join(".claude", "claude-peers", "rules.json"));
+  expect(result.stderr).not.toContain("also exists");
+});
+
+test("check: with both files the koryphaios one is read and the other is named as ignored on stderr", async () => {
+  const dir = folderProject({ [NEW_RULES_RELPATH]: VALID_RULE, [RULES_RELPATH]: "{ not json" });
+  const result = await runCli(["check"], dir);
+  expect(result.exitCode).toBe(0);
+  expect(result.stdout).toContain(join(".claude", "koryphaios", "rules.json"));
+  expect(result.stderr).toContain("also exists and is ignored");
+  expect(result.stderr).toContain(join(".claude", "claude-peers", "rules.json"));
+});
+
+test("check: an invalid koryphaios file fails and the valid claude-peers file is not used instead", async () => {
+  const dir = folderProject({ [NEW_RULES_RELPATH]: "{ not json", [RULES_RELPATH]: VALID_RULE });
+  const result = await runCli(["check"], dir);
+  expect(result.exitCode).toBe(1);
+  expect(result.stdout).toContain("invalid:");
+  expect(result.stdout).toContain(join(".claude", "koryphaios", "rules.json"));
+});
+
+test("check: with no rules file the error names the file a new rule would go in", async () => {
+  const dir = folderProject({});
+  const result = await runCli(["check"], dir);
+  expect(result.exitCode).toBe(1);
+  expect(result.stderr).toContain(join(".claude", "koryphaios", "rules.json"));
+});
+
+test("test and list: read the rules of the koryphaios file", async () => {
+  const dir = folderProject({ [NEW_RULES_RELPATH]: VALID_RULE });
+  const tested = await runCli(
+    ["test", "no-emoji-ui", "--text", "here is an EMOJI_MARK", "--path", "src/a.txt", "--expect", "match"],
+    dir
+  );
+  expect(tested.exitCode).toBe(0);
+  expect(tested.stdout.trim()).toBe("match (deny)");
+  const listed = await runCli(["list"], dir, { CLAUDE_PEERS_TTSR_FILE: undefined });
+  expect(listed.exitCode).toBe(0);
+  expect(listed.stdout).toContain("no-emoji-ui");
+});
+
+test("the repo-rules skill sends the file to .claude/koryphaios and an existing claude-peers file is edited in place", async () => {
+  const skill = await Bun.file(join(DESKTOP_DIR, "deck-plugin", "skills", "repo-rules", "SKILL.md")).text();
+  expect(skill).toContain("create `.claude/koryphaios/rules.json`");
+  expect(skill).toMatch(/`\.claude\/claude-peers\/rules\.json` already there: edit that\s+one in place/);
+  expect(skill).toMatch(/Never\s+create the second file while the first exists/);
 });
 
 // --- --help / usage ---

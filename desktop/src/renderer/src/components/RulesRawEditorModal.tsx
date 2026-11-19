@@ -33,7 +33,7 @@ export function RulesRawEditorModal({ target, initialText, expectedHash, onClose
       const res =
         target.kind === 'global'
           ? await window.api.rulesSaveGlobal(text, expectedHash)
-          : await window.api.rulesSaveRepo(target.projectDir, text, expectedHash)
+          : await window.api.rulesSaveRepo(target.projectDir, text, expectedHash, target.filePath)
       if (res.ok) onSaved(res.approved)
       else if (res.reason === 'stale' || res.reason === 'pending') onConflict(res.reason)
       else setErrors(res.errors)

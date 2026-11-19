@@ -22,7 +22,8 @@ import type { TtsrTestResult } from '@shared/types'
 import { GLYPH_ACTIONS } from './icons'
 import { useT } from '../i18n'
 
-export type RuleEditTarget = { kind: 'global' } | { kind: 'repo'; projectDir: string }
+/** `filePath`: the `TtsrFileState.path` of the repo file the editor was opened on. */
+export type RuleEditTarget = { kind: 'global' } | { kind: 'repo'; projectDir: string; filePath: string }
 
 /** Same compatibility table as the shared validator (ttsr-rules.ts FIELD_TOOLS),
  * duplicated here for the narrowing only -- the save round-trip is what
@@ -177,7 +178,7 @@ export function RuleEditorModal({
       const res =
         target.kind === 'global'
           ? await window.api.rulesSaveGlobal(text, expectedHash)
-          : await window.api.rulesSaveRepo(target.projectDir, text, expectedHash)
+          : await window.api.rulesSaveRepo(target.projectDir, text, expectedHash, target.filePath)
       if (res.ok) {
         onSaved(res.approved)
       } else if (res.reason === 'stale' || res.reason === 'pending') {

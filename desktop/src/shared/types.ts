@@ -2472,14 +2472,18 @@ export interface DeckApi {
    */
   rulesSaveGlobal(text: string, expectedHash: string | null): Promise<TtsrSaveResult>
   /**
-   * Validate then write a project's `.claude/claude-peers/rules.json`.
+   * Validate then write a project's repo rules file in force
+   * (`.claude/koryphaios/rules.json`, else `.claude/claude-peers/rules.json`).
    * `projectDir` is re-validated main-side (a live tile's project root or an
-   * allowed work dir). `expectedHash` as for `rulesSaveGlobal`. The new hash
-   * is approved in the same call only when the base was absent or the file
-   * this root applies; a pending base is refused ('pending'), an invalid base
-   * is overwritten but the result stays pending (`approved: false`).
+   * allowed work dir). `expectedHash` as for `rulesSaveGlobal`;
+   * `expectedPath`: the `TtsrFileState.path` the editor was opened on, refused
+   * as 'stale' when the file in force resolves elsewhere now, whatever its
+   * hash. The new hash is approved in the same call only when the base was
+   * absent or the file this root applies; a pending base is refused
+   * ('pending'), an invalid base is overwritten but the result stays pending
+   * (`approved: false`).
    */
-  rulesSaveRepo(projectDir: string, text: string, expectedHash: string | null): Promise<TtsrSaveResult>
+  rulesSaveRepo(projectDir: string, text: string, expectedHash: string | null, expectedPath: string): Promise<TtsrSaveResult>
   /** Approve a pending repo file; refused unless `hash` is the file's CURRENT hash. */
   rulesApproveRepo(projectDir: string, hash: string): Promise<TtsrApproveResult>
   /**

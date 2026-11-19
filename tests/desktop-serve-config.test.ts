@@ -564,3 +564,89 @@ test('canonicalizes a symlinked project prefix before accepting cwd', async () =
     rmSync(outer, { recursive: true, force: true })
   }
 })
+
+function serveIn(project: string, folder: string): string {
+  mkdirSync(join(project, '.claude', folder), { recursive: true })
+  return join(project, '.claude', folder, 'serve.json')
+}
+
+function named(name: string): Record<string, unknown> {
+  return { ...validServeJson(), name }
+}
+
+test('reads .claude/koryphaios/serve.json and reports the real path it read', async () => {
+  const project = createProject()
+  const file = serveIn(project, 'koryphaios')
+  writeFileSync(file, JSON.stringify(named('New')), 'utf-8')
+
+  const result = await readServeConfig(project)
+
+  expect('config' in result && result.config.name).toBe('New')
+  expect('path' in result && result.path).toBe(realpathSync.native(file))
+})
+
+test('reads .claude/claude-peers/serve.json when the koryphaios folder has none', async () => {
+  const project = createProject()
+  mkdirSync(join(project, '.claude', 'koryphaios'), { recursive: true })
+  writeFileSync(serveIn(project, 'claude-peers'), JSON.stringify(named('Old')), 'utf-8')
+
+  const result = await readServeConfig(project)
+
+  expect('config' in result && result.config.name).toBe('Old')
+  expect('path' in result && result.path).toBe(realpathSync.native(servePath(project)))
+})
+
+test('the koryphaios file wins when both exist', async () => {
+  const project = createProject()
+  writeFileSync(serveIn(project, 'claude-peers'), JSON.stringify(named('Old')), 'utf-8')
+  writeFileSync(serveIn(project, 'koryphaios'), JSON.stringify(named('New')), 'utf-8')
+
+  const result = await readServeConfig(project)
+
+  expect('config' in result && result.config.name).toBe('New')
+})
+
+test('an invalid koryphaios file is refused and the claude-peers file is not used instead', async () => {
+  const project = createProject()
+  writeFileSync(serveIn(project, 'claude-peers'), JSON.stringify(named('Old')), 'utf-8')
+  const file = serveIn(project, 'koryphaios')
+
+  writeFileSync(file, '{ not json', 'utf-8')
+  expect(errorOf(await readServeConfig(project))).toBe('invalid JSON')
+
+  writeFileSync(file, JSON.stringify({ ...named('New'), version: 2 }), 'utf-8')
+  expect(errorOf(await readServeConfig(project))).toBe('version: must be 1')
+})
+
+test('a koryphaios folder that leaves the project is refused and the claude-peers file is not used instead', async () => {
+  const outer = realpathSync.native(mkdtempSync(join(tmpdir(), 'cp-serve-escape-new-')))
+  try {
+    const project = join(outer, 'project')
+    const elsewhere = join(outer, 'elsewhere')
+    mkdirSync(join(project, '.claude', 'claude-peers'), { recursive: true })
+    mkdirSync(join(project, 'web'), { recursive: true })
+    mkdirSync(elsewhere, { recursive: true })
+    writeFileSync(join(elsewhere, 'serve.json'), JSON.stringify(validServeJson()), 'utf-8')
+    writeFileSync(join(project, '.claude', 'claude-peers', 'serve.json'), JSON.stringify(named('Old')), 'utf-8')
+    symlinkSync(elsewhere, join(project, '.claude', 'koryphaios'), 'junction')
+
+    expect(await readServeConfig(project)).toEqual({ error: 'read' })
+  } finally {
+    rmSync(outer, { recursive: true, force: true })
+  }
+})
+
+test('a dangling link at the koryphaios path is not replaced by the claude-peers file', async () => {
+  const project = createProject()
+  writeFileSync(serveIn(project, 'claude-peers'), JSON.stringify(named('Old')), 'utf-8')
+  symlinkSync(join(project, 'nowhere.json'), serveIn(project, 'koryphaios'), 'file')
+
+  expect('config' in (await readServeConfig(project))).toBe(false)
+})
+
+test('neither folder holding a serve.json is reported as missing', async () => {
+  const project = createProject()
+  mkdirSync(join(project, '.claude', 'koryphaios'), { recursive: true })
+
+  expect(await readServeConfig(project)).toEqual({ error: 'missing' })
+})

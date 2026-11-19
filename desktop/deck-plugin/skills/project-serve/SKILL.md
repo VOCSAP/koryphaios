@@ -1,14 +1,18 @@
 ---
 name: project-serve
-description: Use to write or fix the project's dev-server file `.claude/claude-peers/serve.json`, which tells Koryphaios how to start the project's dev server. Triggers include "how do I start this project", "configure the dev server for Kory", "write the serve.json", "comment démarrer ce projet", "configure le serveur de dev pour Kory", "écris le serve.json", and a serve.json the Deck rejected. NOT for starting, stopping or testing the server yourself, and NOT for approving it (the operator approves it in a native dialog).
+description: Use to write or fix the project's dev-server file `.claude/koryphaios/serve.json`, which tells Koryphaios how to start the project's dev server. Triggers include "how do I start this project", "configure the dev server for Kory", "write the serve.json", "comment démarrer ce projet", "configure le serveur de dev pour Kory", "écris le serve.json", and a serve.json the Deck rejected. NOT for starting, stopping or testing the server yourself, and NOT for approving it (the operator approves it in a native dialog).
 ---
 
 # Project serve
 
-You write ONE file, `.claude/claude-peers/serve.json`, that the Deck reads,
+You write ONE file, `.claude/koryphaios/serve.json`, that the Deck reads,
 validates and shows to the operator for approval before it ever runs. You
 propose; the operator approves. Its reader is the Deck's validator first and
 the operator second, so it must pass the first and read clearly to the second.
+
+If `.claude/claude-peers/serve.json` already exists, edit that file in place and
+do not create the other one: when both exist only `.claude/koryphaios/serve.json`
+is read, so a second file would hide the first.
 
 ## 1. Find how the project starts
 
