@@ -49,7 +49,7 @@ export interface StatusBannerInput {
  * 1. the operator stopped the local broker on purpose;
  * 2. the local broker is unreachable;
  * 3. cards await arbitration;
- * 4. the upstream refused pushes;
+ * 4. the upstream refused pushes (an undelivered queue shows in its place);
  * 5. operator trust is degraded, so privileged actions remain unavailable;
  * 6. the host Claude CLI lacks kory-roadmap in its user scope;
  * 7. the upstream is unreachable;
@@ -64,7 +64,9 @@ export function bannerKind(input: StatusBannerInput): StatusBannerKind | null {
   // `online === true` and not merely "not false": an undefined online is a
   // broker that never reported one, and a refusal counter without a link state
   // must not be read as a healthy link.
-  if (input.status.online === true && (input.status.refused ?? 0) > 0) return 'refused'
+  if (input.status.online === true && (input.status.refused ?? 0) > 0) {
+    return queueUndelivered(input) ? 'queue-undelivered' : 'refused'
+  }
   if (input.operatorTrust === 'unconfigured') return 'operator-unconfigured'
   if (input.operatorTrust === 'not-trusted') return 'operator-not-trusted'
   if (input.operatorTrust === 'incompatible') return 'operator-incompatible'
@@ -74,11 +76,15 @@ export function bannerKind(input: StatusBannerInput): StatusBannerKind | null {
   if (input.hostRoadmapMcp === 'missing') return 'host-roadmap-missing'
   if (input.hostRoadmapMcp === 'wrong-scope') return 'host-roadmap-wrong-scope'
   if (input.status.mode === 'replica' && input.status.online === false) return 'replica-offline'
-  // Pending alone is the normal state between two passes: only a failure says
-  // the order is not reaching the other machines.
-  const outbox = input.status.queue_outbox
-  if (outbox && outbox.pending > 0 && outbox.last_failure !== null) return 'queue-undelivered'
+  if (queueUndelivered(input)) return 'queue-undelivered'
   return null
+}
+
+// Pending alone is the normal state between two passes: only a failure says
+// the order is not reaching the other machines.
+function queueUndelivered(input: StatusBannerInput): boolean {
+  const outbox = input.status.queue_outbox
+  return !!outbox && outbox.pending > 0 && outbox.last_failure !== null
 }
 
 /**

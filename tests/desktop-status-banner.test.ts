@@ -64,16 +64,29 @@ test("a failure with nothing left pending raises no banner", () => {
   ).toBeNull();
 });
 
-test("an upstream outage, a refused push and conflicts all outrank the undelivered queue", () => {
+test("an upstream outage and conflicts outrank the undelivered queue", () => {
   expect(
     bannerKind(input({ status: { mode: "replica", online: false, queue_outbox: OUTBOX_STUCK } }))
   ).toBe("replica-offline");
   expect(
-    bannerKind(input({ status: { mode: "replica", online: true, refused: 1, queue_outbox: OUTBOX_STUCK } }))
-  ).toBe("refused");
-  expect(
     bannerKind(input({ conflicts: 1, status: { mode: "replica", online: true, queue_outbox: OUTBOX_STUCK } }))
   ).toBe("conflicts");
+});
+
+test("a refused push does not hide a stuck queue, and shows alone when the queue is not stuck", () => {
+  expect(
+    bannerKind(input({ status: { mode: "replica", online: true, refused: 1, queue_outbox: OUTBOX_STUCK } }))
+  ).toBe("queue-undelivered");
+  expect(
+    bannerKind(input({ status: { mode: "replica", online: true, refused: 1 } }))
+  ).toBe("refused");
+  expect(
+    bannerKind(
+      input({
+        status: { mode: "replica", online: true, refused: 1, queue_outbox: { ...OUTBOX_STUCK, last_failure: null } },
+      })
+    )
+  ).toBe("refused");
 });
 
 // ----- each state alone -----

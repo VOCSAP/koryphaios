@@ -101,6 +101,14 @@ export function parseQueueDeltaOps(raw: unknown): { ok: true; ops: QueueDeltaOp[
   return { ok: true, ops };
 }
 
+/** Whether one envelope may carry these operations: the two limits parseQueueDeltaOps enforces. */
+export function fitsQueueDeltaLimits(ops: readonly QueueDeltaOp[]): boolean {
+  if (ops.length > QUEUE_DELTA_MAX_OPS) return false;
+  let named = 0;
+  for (const op of ops) if (op.op !== "clear") named += op.ids.length;
+  return named <= QUEUE_DELTA_MAX_IDS;
+}
+
 /** Every card id an operation names, anchors included, for existence and permission checks. */
 export function queueDeltaCardIds(ops: readonly QueueDeltaOp[]): string[] {
   const seen = new Set<string>();
@@ -204,17 +212,97 @@ export function applyQueueDelta(
 }
 
 /**
- * The operations that restate a whole ordered queue: the first wave goes to the
- * start, each next one right after the first card of the previous. No leading
- * `clear`: a queued card the author never saw stays, after the restated waves.
- * One operation per wave, so a queue of QUEUE_DELTA_MAX_OPS waves still fits.
+ * The cards of `after` whose place relative to every other kept card is already
+ * right in `before`: the heaviest chain of (rank before, rank after) points that
+ * rises strictly on both axes, so two kept cards share a wave in one list only if
+ * they share it in the other.
  */
-export function reorderToDeltaOps(waves: readonly (readonly string[])[]): QueueDeltaOp[] {
-  if (waves.length === 0) return [{ op: "clear" }];
-  return waves.map((wave, i): QueueDeltaOp => {
-    const ids = [...wave];
-    return i === 0 ? { op: "place", ids, at: "start" } : { op: "place", ids, after: waves[i - 1]![0]! };
-  });
+function stableCards(before: ReadonlyMap<string, number>, after: ReadonlyMap<string, number>): Set<string> {
+  const points = new Map<string, { b: number; a: number; ids: string[] }>();
+  for (const [id, b] of before) {
+    const a = after.get(id);
+    if (a === undefined) continue;
+    const key = `${b}:${a}`;
+    const point = points.get(key);
+    if (point) point.ids.push(id);
+    else points.set(key, { b, a, ids: [id] });
+  }
+  const sorted = [...points.values()].sort((x, y) => x.b - y.b || x.a - y.a);
+  const best: number[] = [];
+  const previous: number[] = [];
+  let end = -1;
+  for (let i = 0; i < sorted.length; i++) {
+    best[i] = sorted[i]!.ids.length;
+    previous[i] = -1;
+    for (let j = 0; j < i; j++) {
+      if (sorted[j]!.b < sorted[i]!.b && sorted[j]!.a < sorted[i]!.a && best[j]! + sorted[i]!.ids.length > best[i]!) {
+        best[i] = best[j]! + sorted[i]!.ids.length;
+        previous[i] = j;
+      }
+    }
+    if (end < 0 || best[i]! > best[end]!) end = i;
+  }
+  const kept = new Set<string>();
+  for (let i = end; i >= 0; i = previous[i]!) for (const id of sorted[i]!.ids) kept.add(id);
+  return kept;
+}
+
+/**
+ * The fewest operations that turn the queue `before` into `after`: cards that
+ * left are removed, and only the cards that cannot stay where they are (plus the
+ * new ones) are named, each wave of `after` that holds one getting a `join` on a
+ * card that stays, or a `place` right after the previous wave, or right before
+ * the first card that stays when no wave comes first. Anchors are neighbours the
+ * author saw, so a card the author never saw keeps its own place. Applied to
+ * `before` with applyQueueDelta, the result is `after`.
+ */
+export function diffToDeltaOps(
+  before: readonly (readonly string[])[],
+  after: readonly (readonly string[])[]
+): QueueDeltaOp[] {
+  const rankBefore = wavesToRanks(before);
+  const rankAfter = wavesToRanks(after);
+  const ops: QueueDeltaOp[] = [];
+  const removed = [...rankBefore.keys()].filter((id) => !rankAfter.has(id));
+  if (removed.length > 0) ops.push({ op: "remove", ids: removed });
+  const kept = stableCards(rankBefore, rankAfter);
+  const firstKept = after.flat().find((id) => kept.has(id));
+  let previous: string | null = null;
+  for (const wave of after) {
+    const staying = wave.filter((id) => kept.has(id));
+    const moving = wave.filter((id) => !kept.has(id));
+    if (moving.length > 0) {
+      if (staying.length > 0) ops.push({ op: "join", ids: moving, anchor: staying[0]! });
+      else if (previous !== null) ops.push({ op: "place", ids: moving, after: previous });
+      else if (firstKept !== undefined) ops.push({ op: "place", ids: moving, before: firstKept });
+      else ops.push({ op: "place", ids: moving, at: "start" });
+    }
+    previous = wave[0]!;
+  }
+  return ops;
+}
+
+/**
+ * The operation that gives one card the rank it was just written with, on the
+ * queue as it stood before the write: it joins the wave holding that rank. A rank
+ * no wave holds goes where the number puts it, before the first wave of a higher
+ * rank, for local ranks keep gaps (a terminal card leaves one); only a rank above
+ * every wave goes to the end. null leaves the queue.
+ */
+export function rankMoveToDeltaOps(
+  rows: readonly { id: string; queue: number }[],
+  id: string,
+  rank: number | null
+): QueueDeltaOp[] {
+  if ((rows.find((row) => row.id === id)?.queue ?? null) === rank) return [];
+  if (rank === null) return [{ op: "remove", ids: [id] }];
+  const mates = rows.filter((row) => row.id !== id && row.queue === rank).map((row) => row.id).sort();
+  if (mates.length > 0) return [{ op: "join", ids: [id], anchor: mates[0]! }];
+  const higher = rows.filter((row) => row.id !== id && row.queue > rank);
+  if (higher.length === 0) return [{ op: "place", ids: [id], at: "end" }];
+  const next = Math.min(...higher.map((row) => row.queue));
+  const before = higher.filter((row) => row.queue === next).map((row) => row.id).sort()[0]!;
+  return [{ op: "place", ids: [id], before }];
 }
 
 /** Stable text of an envelope's meaning: key order and whitespace never change its hash. */

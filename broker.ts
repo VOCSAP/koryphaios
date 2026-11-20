@@ -122,11 +122,13 @@ import { isValidQueueRank } from "./shared/roadmap-queue.ts";
 import {
   applyQueueDelta,
   canonicalQueueDelta,
+  diffToDeltaOps,
+  fitsQueueDeltaLimits,
   parseQueueDeltaOps,
   queueDeltaCardIds,
   queueDeltaMovedIds,
   queueToWaves,
-  reorderToDeltaOps,
+  rankMoveToDeltaOps,
   type QueueDeltaOp,
   wavesToRanks,
 } from "./shared/roadmap-queue-delta.ts";
@@ -6601,7 +6603,7 @@ function handleRoadmapUpsert(
     // preserves whatever the last SIGNED write recorded, instead of erasing
     // it -- the column means "last operator to sign a write", and an
     // ordinary agent's write does not un-happen that fact.
-    const write = db.run(
+    const runUpdate = () => db.run(
       `UPDATE roadmap_items SET
          kind = ?, title = ?, description = ?, rationale = ?, context = ?, priority = ?,
          value = ?, effort = ?, status = ?, triage = ?, tags = ?, depends_on = ?, queue = ?,
@@ -6647,10 +6649,26 @@ function handleRoadmapUpsert(
         contentDate,
         next.updated_by,
         next.status,
-        body.id,
+        body.id!,
         ...(compareContentRevision ? [body.expected_content_rev!] : []),
       ]
     );
+    // A terminal status leaves the queue by the content push, which the upstream
+    // clears on its own: a `remove` for it would be refused as not queued.
+    const movesRank =
+      BROKER_MODE === "replica" && next.queue !== existing.queue && !isTerminalStatus(next.status);
+    const waveRefusal =
+      movesRank ? directiveWaveRefusal(existing.project_key, body.id!, next.kind, next.queue) : null;
+    if (waveRefusal !== null) return { error: waveRefusal, status: 400 };
+    const write = db.transaction(() => {
+      const queueBefore = movesRank ? queueRowsOf(existing.project_key) : [];
+      const written = runUpdate();
+      if (movesRank && written.changes > 0) journalRankMove(existing.project_key, queueBefore, body.id!, next.queue);
+      if (BROKER_MODE === "replica" && isTerminalStatus(next.status) && written.changes > 0) {
+        unnameTerminalCard(existing.project_key, body.id!);
+      }
+      return written;
+    })();
     if (compareContentRevision && write.changes === 0) {
       return {
         error: formatRoadmapStaleSaveError("the card changed since it was opened; reload it before saving again"),
@@ -6769,7 +6787,7 @@ function handleRoadmapUpsert(
   if ("error" in createDependsOn) return createDependsOn;
 
   const id = randomUUID();
-  db.run(
+  const runInsert = () => db.run(
     `INSERT INTO roadmap_items
        (id, project_key, kind, title, description, rationale, context, priority, value,
         effort, status, triage, tags, depends_on, created_by, updated_by,
@@ -6807,6 +6825,15 @@ function handleRoadmapUpsert(
       new Date().toISOString(),
     ]
   );
+  const createdRank = queueForStatus(createStatus, body.queue ?? null);
+  const createWaveRefusal =
+    BROKER_MODE === "replica" ? directiveWaveRefusal(projectKey, id, createKind, createdRank) : null;
+  if (createWaveRefusal !== null) return { error: createWaveRefusal, status: 400 };
+  db.transaction(() => {
+    const queueBefore = BROKER_MODE === "replica" && createdRank !== null ? queueRowsOf(projectKey) : [];
+    runInsert();
+    if (BROKER_MODE === "replica" && createdRank !== null) journalRankMove(projectKey, queueBefore, id, createdRank);
+  })();
   return upsertResponse(id, author);
 }
 
@@ -6872,6 +6899,7 @@ function handleRoadmapArchive(
      WHERE id = ?`,
     [author.operator_id ?? null, new Date().toISOString(), by, body.id]
   );
+  if (BROKER_MODE === "replica") unnameTerminalCard(existing.project_key, body.id);
   return { item: getRoadmapItem(body.id)! };
 }
 
@@ -7342,11 +7370,13 @@ function handleRoadmapReorder(
   // that moves a card FORWARD, not its position in a list.
   const reorderTx = db.transaction(() => {
     const ranksBefore = new Map<string, number>();
+    const queueBefore: { id: string; queue: number }[] = [];
     if (BROKER_MODE === "replica") {
       for (const row of db
-        .query("SELECT id, queue FROM roadmap_items WHERE project_key = ? AND queue IS NOT NULL")
-        .all(projectKey) as { id: string; queue: number }[]) {
+        .query("SELECT id, queue, status FROM roadmap_items WHERE project_key = ? AND queue IS NOT NULL")
+        .all(projectKey) as { id: string; queue: number; status: RoadmapStatus }[]) {
         ranksBefore.set(row.id, row.queue);
+        if (!isTerminalStatus(row.status)) queueBefore.push({ id: row.id, queue: row.queue });
       }
     }
     // Unqueue everything first: the per-id UPDATE below re-stamps the kept ones.
@@ -7368,7 +7398,7 @@ function handleRoadmapReorder(
       }
     });
     if (BROKER_MODE === "replica") {
-      journalQueueMutation(projectKey, waves, ranksBefore);
+      journalQueueMutation(projectKey, diffToDeltaOps(queueToWaves(queueBefore), waves), ranksBefore);
       clearRankOnlyDirty(projectKey);
     }
   });
@@ -7687,7 +7717,7 @@ function handleRoadmapImport(body: {
             : (existing?.deleted_at ?? null),
         queue: queueForStatus(
           nextStatusVal,
-          it.queue !== undefined
+          BROKER_MODE !== "replica" && it.queue !== undefined
             ? typeof it.queue === "number" && Number.isInteger(it.queue) && it.queue >= 1
               ? it.queue
               : null
@@ -7748,6 +7778,7 @@ function handleRoadmapImport(body: {
           ? existing.content_updated_at
           : readContentDate(it.content_updated_at);
       insert.run(...ROADMAP_IMPORT_COLUMNS.map((column) => values[column]));
+      if (BROKER_MODE === "replica" && isTerminalStatus(nextStatusVal)) unnameTerminalCard(projectKey, id);
       // INSERT OR REPLACE fires the INSERT trigger, never the UPDATE one, so
       // the trigger that marks changed content dirty cannot see an import: a
       // replica has to flag the divergence itself, or the imported content
@@ -9516,6 +9547,10 @@ function writeSyncContent(
       contentUpdatedAt, updatedBy, updatedAt, id,
     ]
   );
+  const projectKey = getRoadmapRow(id)?.project_key;
+  if (BROKER_MODE === "replica" && isTerminalStatus(content.status) && projectKey !== undefined) {
+    unnameTerminalCard(projectKey, id);
+  }
   return null;
 }
 
@@ -10204,34 +10239,133 @@ function queueCoveredCards(): Set<string> {
 }
 
 /**
- * Journals the reorder just written locally, in the transaction that wrote it:
- * the gesture is durable before anything leaves for the upstream. `before` is
- * the rank each card held when the gesture started, which is the upstream's
+ * The operations that take the queue the upstream will hold when the entry
+ * `entrySeq` applies to the local one: the ranks it is believed to hold
+ * (`known`), after the operations of the entries ahead of it. Only the cards
+ * queued here or named by `named` take part, so a card another operator queued
+ * meanwhile is neither removed nor moved, and a terminal card (the upstream
+ * refuses an operation on it) is left out.
+ */
+function compactQueueOps(
+  projectKey: string,
+  entrySeq: number,
+  known: WithheldRanks,
+  named: readonly QueueDeltaOp[]
+): QueueDeltaOp[] {
+  const live = (id: string): boolean => {
+    const row = getRoadmapRow(id);
+    return row !== null && !isTerminalStatus(row.status as RoadmapStatus);
+  };
+  const local = (
+    db
+      .query("SELECT id, queue, status FROM roadmap_items WHERE project_key = ? AND queue IS NOT NULL")
+      .all(projectKey) as { id: string; queue: number; status: string }[]
+  ).filter((row) => !isTerminalStatus(row.status as RoadmapStatus));
+  const relevant = new Set([...local.map((row) => row.id), ...queueDeltaCardIds(named)]);
+  let waves = queueToWaves(
+    Object.entries(known)
+      .filter(([id, rank]) => rank !== null && live(id))
+      .map(([id, rank]) => ({ id, queue: rank as number }))
+  );
+  for (const ahead of db
+    .query("SELECT mutation_id, ops FROM roadmap_queue_outbox WHERE project_key = ? AND seq < ? ORDER BY seq")
+    .all(projectKey, entrySeq) as { mutation_id: string; ops: string }[]) {
+    const applied = applyQueueDelta(waves, JSON.parse(ahead.ops) as QueueDeltaOp[]);
+    if (applied.ok) waves = applied.waves;
+    else log.warn(`roadmap sync: queue mutation ${ahead.mutation_id} of ${projectKey} does not apply to the ranks it was written on: ${applied.error}`);
+  }
+  const base = waves.map((wave) => wave.filter((id) => relevant.has(id) && live(id))).filter((wave) => wave.length > 0);
+  return diffToDeltaOps(base, queueToWaves(local));
+}
+
+/**
+ * The upstream refuses a terminal card as the target of an operation, and the
+ * refusal takes the whole entry with it: the entry not sent yet that names the
+ * card is rewritten from the ranks the upstream holds, and goes when nothing is
+ * left.
+ */
+function unnameTerminalCard(projectKey: string, id: string): void {
+  const latest = db
+    .query("SELECT seq, ops, withheld, sent_at FROM roadmap_queue_outbox WHERE project_key = ? ORDER BY seq DESC LIMIT 1")
+    .get(projectKey) as { seq: number; ops: string; withheld: string; sent_at: string | null } | null;
+  if (latest === null || latest.sent_at !== null) return;
+  const ops = JSON.parse(latest.ops) as QueueDeltaOp[];
+  if (!queueDeltaCardIds(ops).includes(id)) return;
+  const rewritten = compactQueueOps(projectKey, latest.seq, parseWithheld(latest.withheld), ops);
+  if (rewritten.length === 0) db.run("DELETE FROM roadmap_queue_outbox WHERE seq = ?", [latest.seq]);
+  else db.run("UPDATE roadmap_queue_outbox SET ops = ? WHERE seq = ?", [JSON.stringify(rewritten), latest.seq]);
+}
+
+/**
+ * Journals the queue move just written locally, in the transaction that wrote
+ * it: the gesture is durable before anything leaves for the upstream. `before`
+ * is the rank each card held when the gesture started, which is the upstream's
  * order as far as this replica knows, except where an entry of the project
  * already holds a rank: the local ranks then are the order of that entry's
- * gesture, and the entry's own map is the upstream's. A mutation not sent yet is
- * replaced by a newer one (both restate the whole queue); a sent one is kept,
- * for its retry must carry the same payload.
+ * gesture, and the entry's own map is the upstream's. The operations of a
+ * mutation not sent yet are followed by the new ones, each written against the
+ * queue the previous left; past the limits of one delta the entry is rewritten
+ * as the whole difference from the upstream's ranks. A sent one is kept, for its
+ * retry must carry the same payload.
  */
-function journalQueueMutation(projectKey: string, waves: string[][], before: Map<string, number>): void {
-  const ops = JSON.stringify(reorderToDeltaOps(waves));
+function journalQueueMutation(projectKey: string, ops: QueueDeltaOp[], before: Map<string, number>): void {
+  if (ops.length === 0) return;
   const base: WithheldRanks = {};
   for (const [id, rank] of before) base[id] = rank;
-  for (const id of waves.flat()) if (!(id in base)) base[id] = null;
+  for (const id of queueDeltaCardIds(ops)) if (!(id in base)) base[id] = null;
   const latest = db
-    .query("SELECT seq, withheld, sent_at FROM roadmap_queue_outbox WHERE project_key = ? ORDER BY seq DESC LIMIT 1")
-    .get(projectKey) as { seq: number; withheld: string; sent_at: string | null } | null;
-  const withheld = JSON.stringify({ ...base, ...(latest ? parseWithheld(latest.withheld) : {}) });
+    .query("SELECT seq, ops, withheld, sent_at FROM roadmap_queue_outbox WHERE project_key = ? ORDER BY seq DESC LIMIT 1")
+    .get(projectKey) as { seq: number; ops: string; withheld: string; sent_at: string | null } | null;
+  const merged: WithheldRanks = { ...base, ...(latest ? parseWithheld(latest.withheld) : {}) };
+  const withheld = JSON.stringify(merged);
   if (latest && latest.sent_at === null) {
-    db.run("UPDATE roadmap_queue_outbox SET ops = ?, withheld = ? WHERE seq = ?", [ops, withheld, latest.seq]);
+    const joined = [...(JSON.parse(latest.ops) as QueueDeltaOp[]), ...ops];
+    const kept = fitsQueueDeltaLimits(joined) ? joined : compactQueueOps(projectKey, latest.seq, merged, joined);
+    db.run("UPDATE roadmap_queue_outbox SET ops = ?, withheld = ? WHERE seq = ?", [JSON.stringify(kept), withheld, latest.seq]);
     return;
   }
   db.run("INSERT INTO roadmap_queue_outbox (project_key, mutation_id, ops, withheld) VALUES (?, ?, ?, ?)", [
     projectKey,
     randomUUID(),
-    ops,
+    JSON.stringify(ops),
     withheld,
   ]);
+}
+
+/** The refusal a rank write meets upstream when it would put a directive in a wave of several cards, said here before the entry is built on it. */
+function directiveWaveRefusal(projectKey: string, id: string, kind: string, rank: number | null): string | null {
+  if (rank === null) return null;
+  const mates = db
+    .query(
+      "SELECT id, kind FROM roadmap_items WHERE project_key = ? AND queue = ? AND id != ? AND status NOT IN ('done', 'archived')"
+    )
+    .all(projectKey, rank, id) as { id: string; kind: string }[];
+  if (mates.length === 0) return null;
+  const directive = kind === "directive" ? id : mates.find((mate) => mate.kind === "directive")?.id;
+  return directive === undefined ? null : `directive item '${directive}' must be in a singleton wave`;
+}
+
+/** The queued rows of a project as they stand, to be read before a write that moves one rank. */
+function queueRowsOf(projectKey: string): { id: string; queue: number; status: string }[] {
+  return db
+    .query("SELECT id, queue, status FROM roadmap_items WHERE project_key = ? AND queue IS NOT NULL")
+    .all(projectKey) as { id: string; queue: number; status: string }[];
+}
+
+/** Journals the rank one card was just written with, against the queue `queueBefore` as it stood before the write. */
+function journalRankMove(
+  projectKey: string,
+  queueBefore: { id: string; queue: number; status: string }[],
+  id: string,
+  rank: number | null
+): void {
+  const live = queueBefore.filter((row) => !isTerminalStatus(row.status as RoadmapStatus));
+  journalQueueMutation(
+    projectKey,
+    rankMoveToDeltaOps(live, id, rank),
+    new Map(queueBefore.map((row) => [row.id, row.queue]))
+  );
+  clearRankOnlyDirty(projectKey);
 }
 
 /**
@@ -10309,9 +10443,19 @@ function applyQueueDeltaRefusal(
   refusal: Pick<RoadmapQueueOutboxRefusal, "reason" | "status" | "message" | "item_id">
 ): void {
   let restored = 0;
+  let dropped = 0;
   withApplying(() => {
-    restored = restoreRanks(parseWithheld(entry.withheld), new Set());
+    // A later entry is written against the queue this one was to leave, so it
+    // goes with it; its map holds the same upstream ranks plus the cards it was
+    // first to name, which the upstream does not queue.
+    const upstreamRanks: WithheldRanks = {};
+    const later = db
+      .query("SELECT withheld FROM roadmap_queue_outbox WHERE project_key = ? AND seq > ? ORDER BY seq DESC")
+      .all(entry.project_key, entry.seq) as { withheld: string }[];
+    for (const row of [...later, entry]) Object.assign(upstreamRanks, parseWithheld(row.withheld));
+    restored = restoreRanks(upstreamRanks, new Set());
     db.run("DELETE FROM roadmap_queue_outbox WHERE seq = ?", [entry.seq]);
+    dropped = db.run("DELETE FROM roadmap_queue_outbox WHERE project_key = ? AND seq > ?", [entry.project_key, entry.seq]).changes;
   });
   syncQueueReplacedTotal += restored;
   syncQueueRefusals.push({
@@ -10322,7 +10466,7 @@ function applyQueueDeltaRefusal(
   });
   if (syncQueueRefusals.length > QUEUE_REFUSALS_KEPT) syncQueueRefusals.shift();
   log.error(
-    `roadmap sync: queue mutation ${entry.mutation_id} of ${entry.project_key} refused (${refusal.status} ${refusal.reason}): ${refusal.message} -- ${restored} rank(s) restored to the upstream's, the local order is gone`
+    `roadmap sync: queue mutation ${entry.mutation_id} of ${entry.project_key} refused (${refusal.status} ${refusal.reason}): ${refusal.message} -- ${restored} rank(s) restored to the upstream's, ${dropped} later mutation(s) of the project dropped, the local order is gone`
   );
 }
 
@@ -10392,13 +10536,26 @@ async function syncQueueDeltaPass(): Promise<void> {
 }
 
 /** Throws when the upstream could not be reached or did not settle the mutation; returns when it was held back or answered. */
-async function sendQueueMutation(entry: QueueOutboxRow): Promise<void> {
+async function sendQueueMutation(head: QueueOutboxRow): Promise<void> {
+  // The pass read its heads before sending another project's: a gesture
+  // journaled since is in the row, not in the copy.
+  const entry = db.query("SELECT * FROM roadmap_queue_outbox WHERE seq = ?").get(head.seq) as QueueOutboxRow | null;
+  if (entry === null) return;
   const ops = JSON.parse(entry.ops) as QueueDeltaOp[];
   let expected = entry.expected_queue_rev;
   if (entry.sent_at === null) {
     if (queueRevStaleProjects.has(entry.project_key)) return;
-    const unpushed = queueDeltaCardIds(ops).some((id) => getRoadmapRow(id)?.sync_base_rev === null);
-    if (unpushed) return;
+    const unpushed = queueDeltaCardIds(ops).find((id) => getRoadmapRow(id)?.sync_base_rev === null);
+    if (unpushed !== undefined) {
+      const refused = syncRefusedPushes.get(unpushed);
+      if (refused) {
+        throw new QueueDeliveryError(
+          `the mutation waits for card ${unpushed}, which the upstream refuses to take: ${refused.message}`,
+          0
+        );
+      }
+      return;
+    }
     expected = adoptedUpstreamQueueRev(entry.project_key);
     if (expected === null) return;
     db.run("UPDATE roadmap_queue_outbox SET expected_queue_rev = ?, sent_at = datetime('now') WHERE seq = ?", [
@@ -10487,7 +10644,26 @@ async function syncPushPass(): Promise<void> {
       (entry) => entry.project_key
     )
   );
+  const projectsWithSentMutation = new Set(
+    (
+      db.query("SELECT DISTINCT project_key FROM roadmap_queue_outbox WHERE sent_at IS NOT NULL").all() as {
+        project_key: string;
+      }[]
+    ).map((entry) => entry.project_key)
+  );
   for (const row of rows) {
+    const terminal = isTerminalStatus(row.status as RoadmapStatus);
+    // The upstream clears the rank of a terminal card, which moves the revision a
+    // sent mutation quotes: its retry would meet a 409 and lose the gesture. A
+    // card the upstream has never seen goes anyway, the mutation waits for it.
+    if (
+      terminal &&
+      row.sync_base_rev !== null &&
+      coveredByQueueMutation.has(row.id) &&
+      projectsWithSentMutation.has(row.project_key)
+    ) {
+      continue;
+    }
     const content = pickSyncContent(rowToRoadmapItem(row));
     // Read BEFORE the round-trip: a local edit landing while the request is in
     // flight must leave the card dirty, so it departs again on the next pass.
@@ -10502,10 +10678,10 @@ async function syncPushPass(): Promise<void> {
       created_at: row.created_at,
       updated_at: row.updated_at,
       // Named explicitly, never by the spread below: `queue` is outside the
-      // content pick-list on purpose (see RoadmapSyncPushItem). Omitted for a
-      // card a pending queue mutation covers: the key's absence leaves the
-      // upstream rank alone, and the mutation moves it atomically.
-      ...(coveredByQueueMutation.has(row.id) ? {} : { queue: row.queue }),
+      // content pick-list on purpose (see RoadmapSyncPushItem). A rank travels by
+      // a queue mutation, so only a terminal card (its rank is cleared) carries
+      // the key, unless a pending mutation covers it.
+      ...(!terminal || coveredByQueueMutation.has(row.id) ? {} : { queue: row.queue }),
       content_updated_at: row.content_updated_at,
       // Spread of a pick-list result, whose type is exactly the fifteen
       // content fields -- no table column can ride along.
@@ -10517,21 +10693,23 @@ async function syncPushPass(): Promise<void> {
     );
     if (res.status === 200) {
       clearRefusedPush(row.id);
-      // The rank this push carried may have moved the upstream revision the
-      // pending mutation was to quote; the next pull adopts the new one.
-      if (!coveredByQueueMutation.has(row.id) && projectsWithQueueMutation.has(row.project_key)) {
+      // A terminal card has its rank cleared upstream, covered by a mutation or
+      // not, which moves the revision that mutation was to quote; the next pull
+      // adopts the new one.
+      if (terminal && projectsWithQueueMutation.has(row.project_key)) {
         queueRevStaleProjects.add(row.project_key);
       }
+      const rankSent = item.queue !== undefined;
       const accepted = res.body as RoadmapSyncPushResponse;
       withApplying(() => {
         db.run(
           `UPDATE roadmap_items SET sync_base_rev = ?, sync_base = ?,
-             sync_dirty = CASE WHEN content_rev = ? AND queue IS ? THEN 0 ELSE sync_dirty END
+             sync_dirty = CASE WHEN content_rev = ?${rankSent ? " AND queue IS ?" : ""} THEN 0 ELSE sync_dirty END
            WHERE id = ?`,
-          [accepted.content_rev, JSON.stringify(content), sentContentRev, sentQueue, row.id]
+          [accepted.content_rev, JSON.stringify(content), sentContentRev, ...(rankSent ? [sentQueue] : []), row.id]
         );
         const current = getRoadmapRow(row.id);
-        if (current !== null && current.queue !== sentQueue) pushedQueueEcho.set(row.id, sentQueue);
+        if (rankSent && current !== null && current.queue !== sentQueue) pushedQueueEcho.set(row.id, sentQueue);
         else pushedQueueEcho.delete(row.id);
       });
       continue;

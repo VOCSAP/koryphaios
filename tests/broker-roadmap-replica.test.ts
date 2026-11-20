@@ -94,7 +94,12 @@ let queueDeltaLoseAnswers = 0;
 /** 503 on /roadmap/sync/queue-delta without asking the upstream. */
 let queueDeltaSuppressed = false;
 /** Every queue-delta request the replica made, in order. */
-const queueDeltaSeen: Array<{ mutation_id: string; expected_queue_rev: number }> = [];
+type QueueDeltaSeen = { mutation_id: string; expected_queue_rev: number; ops: Array<{ op: string; ids?: string[] }> };
+const queueDeltaSeen: QueueDeltaSeen[] = [];
+/** Runs once, while the next queue-delta request is held by the proxy, before it reaches the upstream. */
+let duringNextQueueDelta: (() => Promise<void>) | null = null;
+/** The card of every /roadmap/sync/push the replica made, as the upstream received it. */
+const pushSeen: Array<{ id: string; carriesQueue: boolean }> = [];
 /** Answers every pull with the upstream's `queue_revs` but no rows and the cursor where it was. */
 let pullDropRows = false;
 /** Replaces `queue_revs` in every pull answer, as a broken upstream could; `servedOverrides` counts them. */
@@ -132,7 +137,12 @@ beforeAll(async () => {
       if (url.pathname === "/roadmap/sync/queue-delta" && req.method === "POST") {
         if (queueDeltaSuppressed) return new Response("queue-delta suppressed for a test", { status: 503 });
         const text = await req.text();
-        queueDeltaSeen.push(JSON.parse(text) as { mutation_id: string; expected_queue_rev: number });
+        queueDeltaSeen.push(JSON.parse(text) as QueueDeltaSeen);
+        if (duringNextQueueDelta) {
+          const hook = duringNextQueueDelta;
+          duringNextQueueDelta = null;
+          await hook();
+        }
         if (queueDeltaOverride) {
           const answer = queueDeltaOverride.body;
           return new Response(JSON.stringify(typeof answer === "function" ? answer() : answer), {
@@ -159,6 +169,10 @@ beforeAll(async () => {
       const auth = req.headers.get("authorization");
       if (auth) headers.authorization = auth;
       const body = req.method === "POST" ? await req.text() : undefined;
+      if (url.pathname === "/roadmap/sync/push" && body !== undefined) {
+        const pushed = (JSON.parse(body) as { item: { id: string } & Record<string, unknown> }).item;
+        pushSeen.push({ id: pushed.id, carriesQueue: "queue" in pushed });
+      }
       const response = await fetch(`${upstream.url}${url.pathname}${url.search}`, {
         method: req.method,
         headers,
@@ -356,6 +370,15 @@ async function createOn(broker: TestBroker, body: Record<string, unknown>): Prom
   return res.body.item;
 }
 
+/** A rank no wave holds goes to the end of the queue, and the upstream numbers the waves itself. */
+async function holdsLastRank(card: RoadmapItem): Promise<boolean> {
+  const queued = (await post<ListRes>(`${upstream.url}/roadmap/list`, { project_key: PK })).body.items.filter(
+    (i) => i.queue !== null
+  );
+  const own = queued.find((i) => i.id === card.id)?.queue ?? null;
+  return own !== null && queued.every((i) => i.id === card.id || i.queue! < own);
+}
+
 /**
  * Teardown for a test whose cards the upstream keeps refusing: the counters it
  * leaves behind are broker-lifetime state that other tests assert exactly.
@@ -458,28 +481,33 @@ test("a card written upstream reaches the replica", async () => {
   ]).toEqual(["the replicated card keeps the upstream's attribution", "from the central broker", "agent-upstream"]);
 });
 
-test("a card written on the replica reaches the upstream with its rank and its attribution kept", async () => {
+test("a card written on the replica reaches the upstream with its place in the queue and its attribution kept", async () => {
   const card = await createOn(replica, {
     by: "agent-local",
     title: "written on the replica",
     description: "offline work",
-    queue: 4,
+    queue: 1000,
   });
-  expect(card.queue).toBe(4);
-  const upstreamCard = await waitForItem("replica card reaches the upstream", upstream, card.id, (i) => i.title === "written on the replica");
+  expect(card.queue).toBe(1000);
+  const upstreamCard = await waitForItem(
+    "replica card reaches the upstream with its place",
+    upstream,
+    card.id,
+    (i) => i.title === "written on the replica" && i.queue !== null
+  );
   expect([
-    "the rank is pushed, the author already was",
-    upstreamCard.queue,
+    "the place is delivered by the queue mutation, the author already was",
+    await holdsLastRank(card),
     upstreamCard.created_by,
-    upstreamCard.updated_by,
     upstreamCard.description,
   ]).toEqual([
-    "the rank is pushed, the author already was",
-    4,
-    "agent-local",
+    "the place is delivered by the queue mutation, the author already was",
+    true,
     "agent-local",
     "offline work",
   ]);
+  // The mutation names no author per card: the rank is attributed to the replica's relay.
+  expect(upstreamCard.updated_by).toMatch(/^via:[a-z0-9]+:deck$/);
 });
 
 test("a context document deported on the replica reaches the upstream through document push", async () => {
@@ -2132,22 +2160,21 @@ test("a batch full of rows the upstream refuses never starves the row behind the
   await forgetRefusedCards(poison);
 }, 90_000);
 
-test("CREATION: a card born on the replica with a rank keeps that rank through its first push", async () => {
-  // A card never before seen upstream must not lose its rank on arrival.
-  // queue: 7 is arbitrary and distinct from any rank the other tests in this
-  // file leave lying around.
-  const born = await createOn(replica, { by: "agent-local", title: "born with a rank", queue: 7 });
-  expect(born.queue, "the rank exists locally right after creation").toBe(7);
+test("CREATION: a card born on the replica with a rank is queued upstream once its first push has landed", async () => {
+  // The first push carries the card without a rank; the mutation that names it
+  // waits for that push, so a card never before seen upstream is not lost.
+  const born = await createOn(replica, { by: "agent-local", title: "born with a rank", queue: 1000 });
+  expect(born.queue, "the rank exists locally right after creation").toBe(1000);
   const onUpstream = await waitForItem(
-    "the card's first push reaches the upstream",
+    "the card reaches the upstream, queued",
     upstream,
     born.id,
-    (i) => i.title === "born with a rank"
+    (i) => i.title === "born with a rank" && i.queue !== null
   );
-  expect([
-    "the INSERT keeps the rank a brand-new card was created with",
-    onUpstream.queue,
-  ]).toEqual(["the INSERT keeps the rank a brand-new card was created with", 7]);
+  expect(["the mutation queues the card where its rank puts it", await holdsLastRank(onUpstream)]).toEqual([
+    "the mutation queues the card where its rank puts it",
+    true,
+  ]);
 });
 
 test("reorder-only: a replica's content edit survives an upstream-only reorder of the same card", async () => {
@@ -2963,15 +2990,21 @@ test("a queue move landing on the replica while its push is in flight still reac
 
   let moved = false;
   duringNextPush = async () => {
-    await createOn(replica, { id: card.id, by: "agent-local", queue: 7 });
+    await createOn(replica, { id: card.id, by: "agent-local", queue: 1000 });
     moved = true;
   };
+  const pushed = pushSeen.length;
   await createOn(replica, { id: card.id, by: "agent-local", description: "sent version two" });
-  const ranked = await waitForItem("the queue move reaches the upstream", upstream, card.id, (i) => i.queue === 7);
+  const ranked = await waitForItem("the queue move reaches the upstream", upstream, card.id, (i) => i.queue !== null);
   expect(moved, "the queue move ran while a push was in flight").toBe(true);
-  expect([ranked.description, ranked.queue]).toEqual(["sent version two", 7]);
-  await waitForItem("the replica keeps its rank", replica, card.id, (i) => i.queue === 7);
+  expect([ranked.description, await holdsLastRank(ranked)]).toEqual(["sent version two", true]);
+  await waitForItem("the replica keeps its rank", replica, card.id, (i) => i.queue === ranked.queue);
   await replicaSettled(card.id);
+  await waitPasses(2);
+  expect(
+    pushSeen.slice(pushed).filter((p) => p.id === card.id),
+    "the rank moved in flight leaves nothing to push again"
+  ).toHaveLength(1);
   expect(await queueReplacedAfterNextPass(), "the echo of the replica's own push replaces no local rank").toBe(replacedBefore);
 }, 60_000);
 
@@ -2988,7 +3021,7 @@ test("a content edit and a queue move landing together while a held card's push 
 
   let moved = false;
   duringNextPush = async () => {
-    await createOn(replica, { id: card.id, by: "agent-local", description: "edited in flight", queue: 8 });
+    await createOn(replica, { id: card.id, by: "agent-local", description: "edited in flight", queue: 1000 });
     moved = true;
   };
   await createOn(replica, { id: card.id, by: "agent-local", description: "sent version two" });
@@ -2996,10 +3029,10 @@ test("a content edit and a queue move landing together while a held card's push 
     "the in-flight edit and rank reach the upstream",
     upstream,
     card.id,
-    (i) => i.description === "edited in flight" && i.queue === 8
+    (i) => i.description === "edited in flight" && i.queue !== null
   );
   expect(moved, "the edit ran while a push was in flight").toBe(true);
-  expect([landed.description, landed.queue]).toEqual(["edited in flight", 8]);
+  expect([landed.description, await holdsLastRank(landed)]).toEqual(["edited in flight", true]);
 }, 60_000);
 
 test("an upstream rank move crossing a local one in flight wins, is counted, and does not protect a later upstream move", async () => {
@@ -3029,7 +3062,7 @@ test("an upstream rank move crossing a local one in flight wins, is counted, and
   expect((await itemOn(replica, card.id))!.queue).toBeNull();
 }, 60_000);
 
-test("an upstream content edit crossing a local rank move in flight takes the rank back, and is counted", async () => {
+test("an upstream content edit crossing a local rank move in flight leaves the rank where the mutation put it", async () => {
   const card = await createOn(replica, { by: "agent-local", title: "edited upstream during its push", description: "sent version" });
   await waitForItem("the card reaches the upstream", upstream, card.id, (i) => i.title === "edited upstream during its push");
   await replicaSettled(card.id);
@@ -3037,24 +3070,26 @@ test("an upstream content edit crossing a local rank move in flight takes the ra
 
   let moved = false;
   duringNextPush = async () => {
-    await createOn(replica, { id: card.id, by: "agent-local", queue: 6 });
+    await createOn(replica, { id: card.id, by: "agent-local", queue: 1000 });
     await createOn(upstream, { id: card.id, by: "agent-upstream", rationale: "written upstream meanwhile" });
     moved = true;
   };
   await createOn(replica, { id: card.id, by: "agent-local", description: "sent version two" });
   await waitForItem(
-    "the upstream row comes back with its own rank",
+    "the upstream row comes back with the rank of the mutation",
     replica,
     card.id,
-    (i) => i.rationale === "written upstream meanwhile" && i.queue === null
+    (i) => i.rationale === "written upstream meanwhile" && i.queue !== null
   );
   expect(moved, "both writes ran while a push was in flight").toBe(true);
   await replicaSettled(card.id);
-  expect((await itemOn(upstream, card.id))!.queue, "the upstream rank is never overwritten").toBeNull();
-  expect(await queueReplacedAfterNextPass(), "the local rank the upstream took back is counted").toBe(replacedBefore + 1);
+  expect(
+    ["a rank depends on the queue revision, never on the content of the card", await holdsLastRank(card)]
+  ).toEqual(["a rank depends on the queue revision, never on the content of the card", true]);
+  expect(await queueReplacedAfterNextPass(), "no local rank was taken back").toBe(replacedBefore);
 }, 60_000);
 
-test("a queue move landing while a push is in flight leaves the card to push even when no echo comes back", async () => {
+test("a queue move landing while a push is in flight reaches the upstream even when no pull answers", async () => {
   const card = await createOn(replica, { by: "agent-local", title: "ranked while the pull is silent", description: "sent version" });
   await waitForItem("the card reaches the upstream", upstream, card.id, (i) => i.title === "ranked while the pull is silent");
   await replicaSettled(card.id);
@@ -3062,12 +3097,12 @@ test("a queue move landing while a push is in flight leaves the card to push eve
   let moved = false;
   duringNextPush = async () => {
     pullSuppressed = true;
-    await createOn(replica, { id: card.id, by: "agent-local", queue: 9 });
+    await createOn(replica, { id: card.id, by: "agent-local", queue: 1000 });
     moved = true;
   };
   try {
     await createOn(replica, { id: card.id, by: "agent-local", description: "sent version two" });
-    const ranked = await waitForItem("the queue move reaches the upstream without any pull", upstream, card.id, (i) => i.queue === 9);
+    const ranked = await waitForItem("the queue move reaches the upstream without any pull", upstream, card.id, (i) => i.queue !== null);
     expect(moved, "the queue move ran while a push was in flight").toBe(true);
     expect(ranked.description).toBe("sent version two");
   } finally {
@@ -3358,7 +3393,7 @@ async function ranksOf(broker: TestBroker, cards: RoadmapItem[]): Promise<Array<
   return ranks;
 }
 
-test("S1: a swap made while the upstream edits a card ends A=2 B=1 on both sides, the pull keeping the local ranks meanwhile", async () => {
+test("S1: a swap made while the upstream edits a card puts A behind B on both sides, beside the cards the other operator queued, the pull keeping the local ranks meanwhile", async () => {
   const { a, b } = await queuePair("S1");
   const replaced = (await syncStatus()).queue_replaced ?? 0;
   let head!: RoadmapItem;
@@ -3405,19 +3440,19 @@ test("S1: a swap made while the upstream edits a card ends A=2 B=1 on both sides
     queueDeltaSuppressed = false;
   }
   try {
-    await waitRanks("the upstream applies the swap", upstream, a, b, 2, 1);
+    await waitRanks("the upstream applies the swap beside the cards it never named", upstream, a, b, 3, 2);
     await pollUntil("the journal is empty", 20_000, async () => ({ done: outboxCount() === 0, value: outboxCount() }));
     expect([
       "the acknowledgement gives every card its upstream rank",
-      ...(await ranksOf(replica, [b, a, head, tail])),
+      ...(await ranksOf(replica, [head, b, a, tail])),
     ]).toEqual(["the acknowledgement gives every card its upstream rank", 1, 2, 3, 4]);
   } finally {
     pullSuppressed = false;
   }
-  await waitRanks("the replica holds the same order", replica, a, b, 2, 1);
+  await waitRanks("the replica holds the same order", replica, a, b, 3, 2);
   expect(["the upstream ranks of the cards the mutation did not name", ...(await ranksOf(upstream, [head, tail]))]).toEqual([
     "the upstream ranks of the cards the mutation did not name",
-    3,
+    1,
     4,
   ]);
   await pollUntil("the journal is empty", 20_000, async () => ({ done: outboxCount() === 0, value: outboxCount() }));
@@ -3581,7 +3616,7 @@ test("two gestures made before the first send are one mutation that carries the 
       });
     expect((await gesture([b, a, c])).status).toBe(200);
     expect((await gesture([c, b, a])).status).toBe(200);
-    expect(outboxCount(), "the second gesture replaced the first, which was never sent").toBe(1);
+    expect(outboxCount(), "the second gesture was appended to the first, which was never sent").toBe(1);
   } finally {
     pullSuppressed = false;
   }
@@ -3751,6 +3786,10 @@ test("two refusals in a row leave the replica on the upstream order, not on the 
     queueDeltaOverride = { status: 409, body: { error: "conflict", reason: "queue_rev", queue_rev: 9 } };
     await pollUntil("both mutations are refused", 30_000, async () => ({ done: outboxCount() === 0, value: outboxCount() }));
     await waitPasses(3);
+    expect(
+      new Set(queueDeltaSeen.slice(seen).map((s) => s.mutation_id)).size,
+      "the second mutation is written on top of the first: it goes with it and is never sent"
+    ).toBe(1);
     expect(["the replica holds the upstream order", ...(await ranksOf(replica, [a, b, c]))]).toEqual([
       "the replica holds the upstream order",
       1,
@@ -3813,28 +3852,418 @@ test("a second mutation refused after the first was acknowledged gives back the 
   }
 }, 90_000);
 
-test("a rank this replica pushes for another card does not make its own mutation refused", async () => {
-  const { a, b } = await queuePair("probe3");
-  const other = await createOn(upstream, { by: "agent-upstream", title: "probe3 other" });
-  await waitForItem("the unqueued card reaches the replica", replica, other.id, (i) => i.title === other.title);
-  await waitPasses(2);
+test("a card the mutation covers that turns terminal before the tick does not make the mutation refused", async () => {
+  const [a, b, c] = (await queueCards("covered-terminal", 3)) as [RoadmapItem, RoadmapItem, RoadmapItem];
   const refusals = (await syncStatus()).queue_outbox?.refused.length ?? 0;
 
   await goOffline();
-  expect((await swapOnReplica(a, b)).status).toBe(200);
-  await createOn(replica, { id: other.id, by: "agent-local", queue: 3 });
+  expect(
+    (await post(`${replica.url}/roadmap/reorder`, {
+      project_key: PK,
+      by: "agent-local",
+      ids: [b.id, a.id, c.id],
+      waves: [[b.id], [a.id], [c.id]],
+    })).status
+  ).toBe(200);
+  await createOn(replica, { id: c.id, by: "agent-local", status: "done" });
   await goOnline();
 
   await waitRanks("the swap reaches the upstream", upstream, a, b, 2, 1);
-  await pollUntil("the journal is empty", 30_000, async () => ({ done: outboxCount() === 0, value: outboxCount() }));
+  await journalEmpties();
   expect(["the swap was not refused", (await syncStatus()).queue_outbox?.refused.length]).toEqual([
     "the swap was not refused",
     refusals,
   ]);
-  expect(["the other card kept the rank it was given", (await itemOn(upstream, other.id))?.queue]).toEqual([
-    "the other card kept the rank it was given",
+  expect(["the swap and the cleared rank", ...(await ranksOf(upstream, [b, a, c]))]).toEqual([
+    "the swap and the cleared rank",
+    1,
+    2,
+    null,
+  ]);
+}, 90_000);
+
+test("a covered card that turns terminal waits while the mutation that covers it is sent and unanswered", async () => {
+  const [a, b, c] = (await queueCards("sent-terminal", 3)) as [RoadmapItem, RoadmapItem, RoadmapItem];
+  const refusals = (await syncStatus()).queue_outbox?.refused.length ?? 0;
+  const seen = queueDeltaSeen.length;
+  const pushed = pushSeen.length;
+
+  queueDeltaOverride = { status: 503, body: { error: "unavailable" } };
+  try {
+    expect(
+      (await post(`${replica.url}/roadmap/reorder`, {
+        project_key: PK,
+        by: "agent-local",
+        ids: [b.id, a.id, c.id],
+        waves: [[b.id], [a.id], [c.id]],
+      })).status
+    ).toBe(200);
+    await pollUntil("the mutation was sent", 20_000, async () => ({
+      done: queueDeltaSeen.length > seen,
+      value: queueDeltaSeen.length - seen,
+    }));
+    await createOn(replica, { id: c.id, by: "agent-local", status: "done" });
+    await waitPasses(3);
+    expect(
+      pushSeen.slice(pushed).filter((p) => p.id === c.id),
+      "the upstream would clear the rank and move the revision the retry quotes"
+    ).toEqual([]);
+  } finally {
+    queueDeltaOverride = null;
+  }
+  await waitRanks("the kept mutation applies", upstream, a, b, 2, 1);
+  await waitForItem("the card turns terminal upstream once the mutation settled", upstream, c.id, (i) => i.status === "done");
+  await journalEmpties();
+  expect(["no refusal", (await syncStatus()).queue_outbox?.refused.length]).toEqual(["no refusal", refusals]);
+  expect(await ranksOf(upstream, [b, a, c])).toEqual([1, 2, null]);
+}, 90_000);
+
+test("a gesture journaled while another project's mutation is in flight is sent with its entry", async () => {
+  const other = "github.com/vocsap/replica-repo-two";
+  const { a, b } = await queuePair("two-projects");
+  const [x, y, z] = (await Promise.all(
+    ["x", "y", "z"].map((tag) => createOn(upstream, { project_key: other, by: "agent-upstream", title: `two projects ${tag}` }))
+  )) as [RoadmapItem, RoadmapItem, RoadmapItem];
+  const rankIn = async (broker: TestBroker, card: RoadmapItem): Promise<number | null | undefined> =>
+    (await post<ListRes>(`${broker.url}/roadmap/list`, { project_key: other })).body.items.find((i) => i.id === card.id)?.queue;
+  const reorderOther = (cards: RoadmapItem[]) =>
+    post(`${replica.url}/roadmap/reorder`, {
+      project_key: other,
+      by: "agent-local",
+      ids: cards.map((c) => c.id),
+      waves: cards.map((c) => [c.id]),
+    });
+  expect(
+    (await post(`${upstream.url}/roadmap/reorder`, {
+      project_key: other,
+      by: "agent-upstream",
+      ids: [x.id, y.id, z.id],
+      waves: [[x.id], [y.id], [z.id]],
+    })).status
+  ).toBe(200);
+  await pollUntil("the replica holds the other project's queue and its revision", 20_000, async () => {
+    const reading = openBrokerDb(replica.dbPath, { readonly: true });
+    const upstreamReading = openBrokerDb(upstream.dbPath, { readonly: true });
+    try {
+      const held = reading.query("SELECT rev FROM roadmap_queue_upstream WHERE project_key = ?").get(other) as { rev: number } | null;
+      const real = upstreamReading.query("SELECT rev FROM roadmap_queue_state WHERE project_key = ?").get(other) as { rev: number } | null;
+      const ranks = [await rankIn(replica, x), await rankIn(replica, y), await rankIn(replica, z)];
+      return { done: held !== null && held.rev === real?.rev && ranks.join() === "1,2,3", value: [held, real, ranks] };
+    } finally {
+      reading.close();
+      upstreamReading.close();
+    }
+  });
+
+  holdQueueDelivery();
+  try {
+    expect((await swapOnReplica(a, b)).status).toBe(200);
+    expect((await reorderOther([y, x, z])).status).toBe(200);
+    duringNextQueueDelta = async () => {
+      expect((await reorderOther([z, y, x])).status).toBe(200);
+    };
+  } finally {
+    pullSuppressed = false;
+  }
+  await pollUntil("the other project's last gesture reaches the upstream", 30_000, async () => {
+    const value = [await rankIn(upstream, z), await rankIn(upstream, y), await rankIn(upstream, x)];
+    return { done: value.join() === "1,2,3", value };
+  });
+  await journalEmpties();
+  duringNextQueueDelta = null;
+  expect(["the first project's swap", ...(await ranksOf(upstream, [b, a]))]).toEqual(["the first project's swap", 1, 2]);
+}, 90_000);
+
+/** A gesture that names `b` is waiting; `b` turns terminal by `turnTerminal`, and the rest of the gesture must still reach the upstream. */
+async function terminalCardLeavesTheEntry(tag: string, turnTerminal: (b: RoadmapItem) => Promise<void>): Promise<void> {
+  const [a, b, c, d] = (await queueCards(tag, 4)) as [RoadmapItem, RoadmapItem, RoadmapItem, RoadmapItem];
+  const refusals = (await syncStatus()).queue_outbox?.refused.length ?? 0;
+  holdQueueDelivery();
+  try {
+    expect(
+      (await post(`${replica.url}/roadmap/reorder`, {
+        project_key: PK,
+        by: "agent-local",
+        ids: [b.id, a.id, d.id, c.id],
+        waves: [[b.id], [a.id], [d.id], [c.id]],
+      })).status
+    ).toBe(200);
+    expect(journaledOps().flatMap((op) => op.ids ?? []), "the gesture names b").toContain(b.id);
+    await turnTerminal(b);
+    const named = journaledOps().flatMap((op) => [...(op.ids ?? []), ...(op.anchor === undefined ? [] : [op.anchor])]);
+    expect(named, "no operation names the terminal card").not.toContain(b.id);
+  } finally {
+    pullSuppressed = false;
+  }
+  await journalEmpties();
+  expect(["no refusal", (await syncStatus()).queue_outbox?.refused.length]).toEqual(["no refusal", refusals]);
+  const order = await ranksOf(upstream, [a, d, c]);
+  expect(["the rest of the gesture applied", order[0]! < order[1]!, order[1]! < order[2]!]).toEqual([
+    "the rest of the gesture applied",
+    true,
+    true,
+  ]);
+}
+
+test("an unsent entry that names a card that turns terminal by an update is rewritten without it, not refused whole", async () => {
+  await terminalCardLeavesTheEntry("named-terminal", async (b) => {
+    await createOn(replica, { id: b.id, by: "agent-local", status: "done" });
+  });
+}, 90_000);
+
+test("an unsent entry that names a card that is archived is rewritten without it, not refused whole", async () => {
+  await terminalCardLeavesTheEntry("named-archived", async (b) => {
+    expect((await post(`${replica.url}/roadmap/archive`, { id: b.id, by: "agent-local" })).status).toBe(200);
+  });
+}, 90_000);
+
+test("an unsent entry that names a card that an import marks done is rewritten without it, not refused whole", async () => {
+  await terminalCardLeavesTheEntry("named-imported", async (b) => {
+    const res = await post(`${replica.url}/roadmap/import`, {
+      project_key: PK,
+      by: "agent-local",
+      items: [{ id: b.id, title: b.title, kind: "feature", status: "done" }],
+    });
+    expect(res.status).toBe(200);
+  });
+}, 90_000);
+
+test("a rewritten entry leaves a card another operator queued meanwhile where it is", async () => {
+  const [a, b, c] = (await queueCards("stranger", 3)) as [RoadmapItem, RoadmapItem, RoadmapItem];
+  const stranger = await createOn(upstream, { by: "agent-upstream", title: "queued while the pull is frozen" });
+  await waitForItem("the stranger reaches the replica", replica, stranger.id, (i) => i.title === stranger.title);
+  holdQueueDelivery();
+  try {
+    const db = openBrokerDb(replica.dbPath);
+    db.run("INSERT INTO roadmap_queue_outbox (project_key, mutation_id, ops, withheld) VALUES (?, ?, ?, ?)", [
+      PK,
+      "stranger-at-the-limit",
+      JSON.stringify(Array.from({ length: 500 }, () => ({ op: "place", ids: [a.id], at: "end" }))),
+      JSON.stringify({ [a.id]: 1, [b.id]: 2, [c.id]: 3 }),
+    ]);
+    db.close();
+    pullSuppressed = false;
+    pullQueueRevsOverride = { [PK]: -1 };
+    const order = [a, b, c, stranger];
+    expect(
+      (await post(`${upstream.url}/roadmap/reorder`, {
+        project_key: PK,
+        by: "agent-upstream",
+        ids: order.map((card) => card.id),
+        waves: order.map((card) => [card.id]),
+      })).status
+    ).toBe(200);
+    await pollUntil("the frozen pull set the stranger's rank aside", 20_000, async () => {
+      const reading = openBrokerDb(replica.dbPath, { readonly: true });
+      try {
+        const row = reading.query("SELECT withheld FROM roadmap_queue_outbox WHERE mutation_id = ?").get("stranger-at-the-limit") as { withheld: string };
+        const value = (JSON.parse(row.withheld) as Record<string, number | null>)[stranger.id];
+        return { done: value === 4, value };
+      } finally {
+        reading.close();
+      }
+    });
+    expect(
+      (await post(`${replica.url}/roadmap/reorder`, {
+        project_key: PK,
+        by: "agent-local",
+        ids: [b.id, a.id, c.id],
+        waves: [[b.id], [a.id], [c.id]],
+      })).status
+    ).toBe(200);
+    const ops = journaledOps();
+    expect(ops.some((op) => op.op === "remove"), "the stranger is not asked to leave the queue").toBe(false);
+    expect(ops.flatMap((op) => op.ids ?? [])).not.toContain(stranger.id);
+  } finally {
+    pullQueueRevsOverride = undefined;
+  }
+  await journalEmpties();
+  expect(await ranksOf(upstream, [stranger])).toEqual([4]);
+}, 90_000);
+
+test("a rewritten entry starts from the queue the entries ahead of it leave", async () => {
+  const [a, b, c] = (await queueCards("ahead", 3)) as [RoadmapItem, RoadmapItem, RoadmapItem];
+  const seen = queueDeltaSeen.length;
+  const gesture = (cards: RoadmapItem[]) =>
+    post(`${replica.url}/roadmap/reorder`, {
+      project_key: PK,
+      by: "agent-local",
+      ids: cards.map((card) => card.id),
+      waves: cards.map((card) => [card.id]),
+    });
+
+  queueDeltaOverride = { status: 503, body: { error: "unavailable" } };
+  try {
+    expect((await gesture([b, a, c])).status).toBe(200);
+    await pollUntil("the first mutation was sent", 20_000, async () => ({
+      done: queueDeltaSeen.length > seen,
+      value: queueDeltaSeen.length - seen,
+    }));
+    expect((await gesture([c, b, a])).status, "a second entry").toBe(200);
+    expect(outboxCount()).toBe(2);
+    const db = openBrokerDb(replica.dbPath);
+    db.run("UPDATE roadmap_queue_outbox SET ops = ? WHERE seq = (SELECT MAX(seq) FROM roadmap_queue_outbox)", [
+      JSON.stringify(Array.from({ length: 500 }, () => ({ op: "place", ids: [a.id], at: "end" }))),
+    ]);
+    db.close();
+    expect((await gesture([c, a, b])).status, "past the limit, the second entry is rewritten").toBe(200);
+  } finally {
+    queueDeltaOverride = null;
+  }
+  await journalEmpties();
+  expect(["the last gesture, after the first", ...(await ranksOf(upstream, [c, a, b]))]).toEqual([
+    "the last gesture, after the first",
+    1,
+    2,
     3,
   ]);
+}, 90_000);
+
+test("a rank that would put a directive in a wave of several cards is refused here, not by the upstream", async () => {
+  holdQueueDelivery();
+  const directive =await createOn(replica, { by: "agent-local", title: "a directive in the queue", kind: "directive", directive: "clear", queue: 1000 });
+  const plain = await createOn(replica, { by: "agent-local", title: "a card" });
+  const into = await post<{ error: string }>(`${replica.url}/roadmap/upsert`, {
+    project_key: PK,
+    id: plain.id,
+    by: "agent-local",
+    queue: 1000,
+  });
+  expect([into.status, into.body.error]).toEqual([400, `directive item '${directive.id}' must be in a singleton wave`]);
+  expect((await itemOn(replica, plain.id))?.queue, "the card was not written").toBeNull();
+
+  const occupied = await createOn(replica, { by: "agent-local", title: "an occupied wave", queue: 1001 });
+  const moved = await post<{ error: string }>(`${replica.url}/roadmap/upsert`, {
+    project_key: PK,
+    by: "agent-local",
+    title: "a directive that joins it",
+    kind: "directive",
+    directive: "clear",
+    queue: 1001,
+  });
+  expect([moved.status, moved.body.error]).toEqual([400, expect.stringContaining("must be in a singleton wave")]);
+  expect((await itemOn(replica, occupied.id))?.queue).toBe(1001);
+  pullSuppressed = false;
+  await journalEmpties();
+}, 60_000);
+
+test("a card born with a rank whose first push the upstream refuses makes the stuck mutation visible", async () => {
+  await post(`${upstream.url}/roadmap/reorder`, { project_key: PK, by: "agent-upstream", ids: [], waves: [] });
+  await pollUntil("the replica holds an empty queue", 20_000, async () => {
+    const value = adoptedQueueRev();
+    return { done: (value ?? 0) === upstreamQueueRev() && outboxCount() === 0, value };
+  });
+  pushRefused = true;
+  let born: RoadmapItem;
+  try {
+    born = await createOn(replica, { by: "agent-local", title: "refused at its first push", queue: 1000 });
+    await pollUntil("the stuck mutation is reported", 20_000, async () => {
+      const value = (await syncStatus()).queue_outbox?.last_failure ?? null;
+      return { done: value !== null && value.includes(born.id), value };
+    });
+  } finally {
+    pushRefused = false;
+  }
+  await createOn(replica, { id: born.id, by: "agent-local", description: "now accepted" });
+  await waitForItem("the card reaches the upstream, queued", upstream, born.id, (i) => i.queue !== null);
+  await journalEmpties();
+}, 90_000);
+
+test("a refusal gives back the ranks of every entry of the project, a card only a later one named included", async () => {
+  const { a, b } = await queuePair("union");
+  const fresh = await createOn(upstream, { by: "agent-upstream", title: "queued by the second entry" });
+  await waitForItem("the card reaches the replica", replica, fresh.id, (i) => i.title === fresh.title);
+  const seen = queueDeltaSeen.length;
+
+  queueDeltaOverride = { status: 503, body: { error: "unavailable" } };
+  try {
+    expect((await swapOnReplica(a, b)).status).toBe(200);
+    await pollUntil("the first mutation was sent", 20_000, async () => ({
+      done: queueDeltaSeen.length > seen,
+      value: queueDeltaSeen.length - seen,
+    }));
+    await createOn(replica, { id: fresh.id, by: "agent-local", queue: 1000 });
+    expect(outboxCount(), "the second entry").toBe(2);
+    queueDeltaOverride = { status: 409, body: { error: "conflict", reason: "queue_rev", queue_rev: 9 } };
+    await journalEmpties();
+    await waitPasses(2);
+    expect(["the replica holds the upstream's ranks", ...(await ranksOf(replica, [a, b, fresh]))]).toEqual([
+      "the replica holds the upstream's ranks",
+      1,
+      2,
+      null,
+    ]);
+    expect(await ranksOf(upstream, [fresh])).toEqual([null]);
+  } finally {
+    queueDeltaOverride = null;
+  }
+}, 90_000);
+
+test("a rank below the whole queue, after its head went done, puts the card first upstream", async () => {
+  const [a, b, c] = (await queueCards("gap", 3)) as [RoadmapItem, RoadmapItem, RoadmapItem];
+  const x = await createOn(upstream, { by: "agent-upstream", title: "gap newcomer" });
+  await waitForItem("the newcomer reaches the replica", replica, x.id, (i) => i.title === x.title);
+  await createOn(replica, { id: a.id, by: "agent-local", status: "done" });
+  await waitForItem("the head turns done upstream", upstream, a.id, (i) => i.status === "done");
+  await waitForItem("the replica keeps the gap at the head", replica, b.id, (i) => i.queue === 2);
+  await journalEmpties();
+
+  await createOn(replica, { id: x.id, by: "agent-local", queue: 1 });
+  await waitForItem("the newcomer is queued upstream", upstream, x.id, (i) => i.queue !== null);
+  await journalEmpties();
+  const ranks = await ranksOf(upstream, [x, b, c]);
+  expect(["the newcomer is first", ranks[0]! < ranks[1]!, ranks[1]! < ranks[2]!]).toEqual(["the newcomer is first", true, true]);
+  expect(["the replica agrees", ...(await ranksOf(replica, [x, b, c]))]).toEqual(["the replica agrees", ...ranks]);
+}, 90_000);
+
+test("a card the upstream turns done while an unsent entry names it leaves the entry, which is not refused", async () => {
+  const [a, b, c, d] = (await queueCards("pulled-terminal", 4)) as [RoadmapItem, RoadmapItem, RoadmapItem, RoadmapItem];
+  const refusals = (await syncStatus()).queue_outbox?.refused.length ?? 0;
+  holdQueueDelivery();
+  try {
+    expect(
+      (await post(`${replica.url}/roadmap/reorder`, {
+        project_key: PK,
+        by: "agent-local",
+        ids: [b.id, a.id, d.id, c.id],
+        waves: [[b.id], [a.id], [d.id], [c.id]],
+      })).status
+    ).toBe(200);
+    expect(journaledOps().flatMap((op) => op.ids ?? []), "the gesture names b").toContain(b.id);
+    pullSuppressed = false;
+    pullQueueRevsOverride = { [PK]: -1 };
+    await createOn(upstream, { id: b.id, by: "agent-upstream", status: "done" });
+    await waitForItem("the pull delivers the done status", replica, b.id, (i) => i.status === "done");
+    const named = journaledOps().flatMap((op) => [...(op.ids ?? []), ...(op.anchor === undefined ? [] : [op.anchor])]);
+    expect(named, "no operation names the card the upstream closed").not.toContain(b.id);
+  } finally {
+    pullQueueRevsOverride = undefined;
+  }
+  await journalEmpties();
+  expect(["no refusal", (await syncStatus()).queue_outbox?.refused.length]).toEqual(["no refusal", refusals]);
+  const order = await ranksOf(upstream, [a, d, c]);
+  expect(["the rest of the gesture applied", order[0]! < order[1]!, order[1]! < order[2]!]).toEqual([
+    "the rest of the gesture applied",
+    true,
+    true,
+  ]);
+}, 90_000);
+
+test("a reorder leaves a terminal card that still holds a rank out of its operations", async () => {
+  const { a, b } = await queuePair("terminal-base");
+  const stale = await createOn(replica, { by: "agent-local", title: "done with a leftover rank" });
+  await createOn(replica, { id: stale.id, by: "agent-local", status: "done" });
+  const db = openBrokerDb(replica.dbPath);
+  db.run("UPDATE roadmap_items SET queue = 3 WHERE id = ?", [stale.id]);
+  db.close();
+  holdQueueDelivery();
+  try {
+    expect((await swapOnReplica(a, b)).status).toBe(200);
+    expect(journaledOps().flatMap((op) => op.ids ?? []), "the leftover rank is not asked of the upstream").not.toContain(stale.id);
+  } finally {
+    pullSuppressed = false;
+  }
+  await journalEmpties();
 }, 90_000);
 
 test("the next mutation of a project waits for an adopted revision after the previous one was acknowledged", async () => {
@@ -3871,3 +4300,252 @@ test("the next mutation of a project waits for an adopted revision after the pre
   }
   await pollUntil("the journal is empty", 20_000, async () => ({ done: outboxCount() === 0, value: outboxCount() }));
 }, 90_000);
+
+/** Nothing leaves for the upstream until the next pull adopts a revision again. */
+function holdQueueDelivery(): void {
+  pullSuppressed = true;
+  const db = openBrokerDb(replica.dbPath);
+  db.run("DELETE FROM roadmap_sync_meta WHERE key = 'upstream_queue_revs_adopted'");
+  db.run("DELETE FROM roadmap_queue_upstream");
+  db.close();
+}
+
+function journaledOps(): Array<{ op: string; ids?: string[]; anchor?: string; at?: string }> {
+  const db = openBrokerDb(replica.dbPath, { readonly: true });
+  try {
+    return (db.query("SELECT ops FROM roadmap_queue_outbox ORDER BY seq").all() as { ops: string }[]).flatMap(
+      (row) => JSON.parse(row.ops) as Array<{ op: string; ids?: string[]; anchor?: string; at?: string }>
+    );
+  } finally {
+    db.close();
+  }
+}
+
+async function journalEmpties(): Promise<void> {
+  await pollUntil("the journal is empty", 30_000, async () => ({ done: outboxCount() === 0, value: outboxCount() }));
+}
+
+test("a swap in a queue of three is one mutation that names one card, and leaves the third where it was", async () => {
+  const [a, b, c] = (await queueCards("minimal", 3)) as [RoadmapItem, RoadmapItem, RoadmapItem];
+  const seen = queueDeltaSeen.length;
+
+  expect(
+    (await post(`${replica.url}/roadmap/reorder`, {
+      project_key: PK,
+      by: "agent-local",
+      ids: [b.id, a.id, c.id],
+      waves: [[b.id], [a.id], [c.id]],
+    })).status
+  ).toBe(200);
+  await waitRanks("the upstream applies the swap", upstream, a, b, 2, 1);
+  await journalEmpties();
+
+  const sent = queueDeltaSeen.slice(seen);
+  expect(sent, "one mutation").toHaveLength(1);
+  expect(
+    sent[0]!.ops.flatMap((op) => op.ids ?? []),
+    "the mutation names one card, not the whole queue"
+  ).toHaveLength(1);
+  expect(await ranksOf(upstream, [b, a, c])).toEqual([1, 2, 3]);
+}, 60_000);
+
+test("a swap meets a card another operator queued meanwhile and leaves it where it is", async () => {
+  const { a, b } = await queuePair("meanwhile");
+  const stranger = await createOn(upstream, { by: "agent-upstream", title: "queued by another operator" });
+  await waitForItem("the stranger reaches the replica", replica, stranger.id, (i) => i.title === stranger.title);
+  holdQueueDelivery();
+  try {
+    expect((await swapOnReplica(a, b)).status).toBe(200);
+    // The stranger queues itself AHEAD of the pair upstream, behind the replica's back.
+    const order = [stranger, a, b];
+    expect(
+      (await post(`${upstream.url}/roadmap/reorder`, {
+        project_key: PK,
+        by: "agent-upstream",
+        ids: order.map((c) => c.id),
+        waves: order.map((c) => [c.id]),
+      })).status
+    ).toBe(200);
+  } finally {
+    pullSuppressed = false;
+  }
+  await journalEmpties();
+  expect(["the swap keeps the stranger first", ...(await ranksOf(upstream, [stranger, b, a]))]).toEqual([
+    "the swap keeps the stranger first",
+    1,
+    2,
+    3,
+  ]);
+}, 60_000);
+
+test("emptying the queue on the replica removes the cards it holds and never sends a clear", async () => {
+  const cards = await queueCards("empty", 3);
+  const seen = queueDeltaSeen.length;
+
+  expect(
+    (await post(`${replica.url}/roadmap/reorder`, { project_key: PK, by: "agent-local", ids: [], waves: [] })).status
+  ).toBe(200);
+  await pollUntil("the upstream empties the queue", 20_000, async () => {
+    const value = await ranksOf(upstream, cards);
+    return { done: value.every((rank) => rank === null), value };
+  });
+  await journalEmpties();
+  const sent = queueDeltaSeen.slice(seen);
+  expect(sent).toHaveLength(1);
+  expect(sent[0]!.ops).toEqual([{ op: "remove", ids: cards.map((c) => c.id) }]);
+}, 60_000);
+
+test("a reorder that changes nothing leaves the journal empty", async () => {
+  const { a, b } = await queuePair("noop");
+  expect(
+    (await post(`${replica.url}/roadmap/reorder`, {
+      project_key: PK,
+      by: "agent-local",
+      ids: [a.id, b.id],
+      waves: [[a.id], [b.id]],
+    })).status
+  ).toBe(200);
+  expect(outboxCount()).toBe(0);
+}, 60_000);
+
+test("rank writes made before the first send are one mutation, and no content push carries a rank", async () => {
+  await post(`${upstream.url}/roadmap/reorder`, { project_key: PK, by: "agent-upstream", ids: [], waves: [] });
+  const [x, y, z] = await Promise.all(
+    ["x", "y", "z"].map((tag) => createOn(upstream, { by: "agent-upstream", title: `rank write ${tag}`, description: "v1" }))
+  ) as [RoadmapItem, RoadmapItem, RoadmapItem];
+  for (const card of [x, y, z]) {
+    await waitForItem("the card reaches the replica", replica, card.id, (i) => i.title === card.title);
+  }
+  await pollUntil("the replica adopted the current revision", 20_000, async () => {
+    const value = adoptedQueueRev();
+    return { done: (value ?? 0) === upstreamQueueRev() && outboxCount() === 0, value };
+  });
+  const seen = queueDeltaSeen.length;
+  const pushed = pushSeen.length;
+
+  holdQueueDelivery();
+  try {
+    await createOn(replica, { id: x.id, by: "agent-local", queue: 1, description: "edited with a rank" });
+    await createOn(replica, { id: y.id, by: "agent-local", queue: 2 });
+    await createOn(replica, { id: z.id, by: "agent-local", queue: 2 });
+    expect(outboxCount(), "three gestures, one entry").toBe(1);
+    expect(journaledOps()).toEqual([
+      { op: "place", ids: [x.id], at: "end" },
+      { op: "place", ids: [y.id], at: "end" },
+      { op: "join", ids: [z.id], anchor: y.id },
+    ]);
+    await pollUntil("the content of x was pushed", 20_000, async () => {
+      const value = pushSeen.slice(pushed).filter((p) => p.id === x.id);
+      return { done: value.length > 0, value };
+    });
+  } finally {
+    pullSuppressed = false;
+  }
+  await waitForItem("the upstream holds the first rank", upstream, x.id, (i) => i.queue === 1);
+  await journalEmpties();
+  expect(["the ranks as written", ...(await ranksOf(upstream, [x, y, z]))]).toEqual(["the ranks as written", 1, 2, 2]);
+  expect(queueDeltaSeen.length - seen, "one mutation for three writes").toBe(1);
+  expect(
+    pushSeen.slice(pushed).filter((p) => p.carriesQueue),
+    "a rank travels by the mutation, never by the content push"
+  ).toEqual([]);
+}, 90_000);
+
+test("a card that leaves the queue by a terminal status is not asked of the upstream, which clears it itself", async () => {
+  const { a, b } = await queuePair("terminal");
+  holdQueueDelivery();
+  try {
+    await createOn(replica, { id: b.id, by: "agent-local", status: "done" });
+    expect(outboxCount(), "a remove for a card the upstream clears would be refused").toBe(0);
+  } finally {
+    pullSuppressed = false;
+  }
+  await waitForItem("the upstream clears the rank with the status", upstream, b.id, (i) => i.status === "done" && i.queue === null);
+  await waitPasses(2);
+  expect(outboxCount()).toBe(0);
+  expect((await itemOn(upstream, a.id))?.queue).toBe(1);
+}, 60_000);
+
+test("a content edit of a queued card does not carry its rank, and a rank written alone leaves the card clean", async () => {
+  const { a, b } = await queuePair("carried");
+  const pushed = pushSeen.length;
+  await createOn(replica, { id: a.id, by: "agent-local", description: "edited, not moved" });
+  await pollUntil("the edit reaches the upstream", 20_000, async () => {
+    const value = (await itemOn(upstream, a.id))?.description;
+    return { done: value === "edited, not moved", value };
+  });
+  expect(
+    pushSeen.slice(pushed).filter((p) => p.id === a.id && p.carriesQueue),
+    "a rank travels by a queue mutation, never by the content push"
+  ).toEqual([]);
+
+  holdQueueDelivery();
+  pushRefused = true;
+  try {
+    await createOn(replica, { id: b.id, by: "agent-local", queue: 1 });
+    await waitPasses(2);
+    const reading = openBrokerDb(replica.dbPath, { readonly: true });
+    try {
+      const row = reading.query("SELECT sync_dirty FROM roadmap_items WHERE id = ?").get(b.id) as { sync_dirty: number };
+      expect(row.sync_dirty, "the mutation carries the rank, the content push has nothing to say").toBe(0);
+    } finally {
+      reading.close();
+    }
+  } finally {
+    pushRefused = false;
+    pullSuppressed = false;
+  }
+  await journalEmpties();
+}, 60_000);
+
+test("a card taken out of the queue by a null rank is removed upstream", async () => {
+  const { a, b } = await queuePair("dequeue");
+  await createOn(replica, { id: a.id, by: "agent-local", queue: null });
+  await pollUntil("the upstream dequeues the card", 20_000, async () => {
+    const value = await ranksOf(upstream, [a, b]);
+    return { done: value[0] === null && value[1] === 1, value };
+  });
+  await journalEmpties();
+}, 60_000);
+
+test("an unsent entry that would pass the operation limit is rewritten as the whole difference, never cut", async () => {
+  const [a, b, c] = (await queueCards("compact", 3)) as [RoadmapItem, RoadmapItem, RoadmapItem];
+  const seen = queueDeltaSeen.length;
+  holdQueueDelivery();
+  try {
+    const db = openBrokerDb(replica.dbPath);
+    db.run("INSERT INTO roadmap_queue_outbox (project_key, mutation_id, ops, withheld) VALUES (?, ?, ?, ?)", [
+      PK,
+      "at-the-operation-limit",
+      JSON.stringify(Array.from({ length: 500 }, () => ({ op: "place", ids: [a.id], at: "end" }))),
+      JSON.stringify({ [a.id]: 1, [b.id]: 2, [c.id]: 3 }),
+    ]);
+    db.close();
+    expect(
+      (await post(`${replica.url}/roadmap/reorder`, {
+        project_key: PK,
+        by: "agent-local",
+        ids: [b.id, a.id, c.id],
+        waves: [[b.id], [a.id], [c.id]],
+      })).status
+    ).toBe(200);
+    expect(outboxCount()).toBe(1);
+    expect(journaledOps(), "the whole difference from the upstream's ranks").toHaveLength(1);
+  } finally {
+    pullSuppressed = false;
+  }
+  await waitRanks("the upstream applies the swap", upstream, a, b, 2, 1);
+  await journalEmpties();
+  expect(queueDeltaSeen.slice(seen)).toHaveLength(1);
+}, 60_000);
+
+test("an import on a replica does not carry the rank of the file", async () => {
+  const id = `imported-with-a-rank-${Date.now()}`;
+  const res = await post(`${replica.url}/roadmap/import`, {
+    project_key: PK,
+    by: "agent-local",
+    items: [{ id, title: "imported with a rank", kind: "feature", queue: 5 }],
+  });
+  expect(res.status).toBe(200);
+  expect((await itemOn(replica, id))?.queue).toBeNull();
+}, 30_000);
