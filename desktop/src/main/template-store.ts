@@ -46,10 +46,10 @@ export function localTemplateDirs(projectDir: string): string[] {
   return PROJECT_SOURCES.map((source) => join(projectRootPath(projectDir, source), 'templates'))
 }
 
-// A cloned repo can ship the templates folder, or a level above it, as a link: the nearest level that exists decides where the write lands.
-function refuseEscapingFolder(dir: string, projectDir: string): void {
+// A cloned repo can ship the templates folder, or a level above it, as a link: the nearest level that exists decides where a write or delete lands.
+export function refuseEscapingFolder(dir: string, projectDir: string, noun: 'templates' | 'snippets' = 'templates'): void {
   const refuse = (why: string): never => {
-    throw new Error(`refused: the templates folder ${why}`)
+    throw new Error(`refused: the ${noun} folder ${why}`)
   }
   const folder = resolve(dir)
   let existing = folder
@@ -307,14 +307,14 @@ export function deleteTemplate(
   env: NodeJS.ProcessEnv = process.env
 ): boolean {
   try {
-    if (!path.toLowerCase().endsWith('.json')) return false
-    const allowedDirs = [globalTemplatesDir(env), ...localTemplateDirs(projectDir)].map((dir) => resolve(dir))
-    if (!allowedDirs.includes(resolve(dirname(path)))) return false
+    const source = templateSource(path, projectDir, env)
+    if (!source) return false
+    if (source === 'local') refuseEscapingFolder(dirname(path), projectDir)
     if (!existsSync(path)) return false
     rmSync(path, { force: true })
     return true
   } catch (error) {
-    reportError('template', `delete ${path} failed: ${error instanceof Error ? error.message : String(error)}`)
+    reportError('template', `delete ${String(JSON.stringify(path)).slice(0, 300)} failed: ${error instanceof Error ? error.message : String(error)}`)
     return false
   }
 }

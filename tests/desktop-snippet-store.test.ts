@@ -2,7 +2,7 @@
 // shadowing global on a name collision, guarded delete, size cap.
 
 import { test, expect, afterEach } from "bun:test";
-import { mkdirSync, mkdtempSync, existsSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, existsSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { onDeckError } from "../desktop/src/main/log.ts";
@@ -159,6 +159,54 @@ test("deleteSnippet removes the exact snippet chosen in either local folder and 
   const sibling = writeSnippet(join(proj, ".claude", "other", "snippets"), "x", "keep");
   expect(deleteSnippet(sibling, proj, env(g))).toBe(false);
   expect(existsSync(sibling)).toBe(true);
+});
+
+test("deleteSnippet removes a global snippet", () => {
+  const g = tmp();
+  const proj = tmp();
+  const path = writeSnippet(globalSnippetsDir(env(g)), "gone", "bye");
+  expect(deleteSnippet(path, proj, env(g))).toBe(true);
+  expect(existsSync(path)).toBe(false);
+});
+
+const canLink = ((): boolean => {
+  const probe = mkdtempSync(join(tmpdir(), "snip-link-"));
+  try {
+    mkdirSync(join(probe, "d"));
+    symlinkSync(join(probe, "d"), join(probe, "dl"), "junction");
+    return true;
+  } catch {
+    return false;
+  } finally {
+    rmSync(probe, { recursive: true, force: true });
+  }
+})();
+
+test.skipIf(!canLink)("deleteSnippet refuses a local snippets folder that links out of the project and keeps the file there (needs symlinkSync)", () => {
+  const g = tmp();
+  const outside = tmp();
+  const victim = writeSnippet(outside, "victim", "keep");
+  const proj = tmp();
+  mkdirSync(join(proj, ".claude", "koryphaios"), { recursive: true });
+  symlinkSync(outside, koryphaiosDir(proj), "junction");
+  let deleted: boolean | undefined;
+  const texts = traced(() => {
+    deleted = deleteSnippet(join(koryphaiosDir(proj), "victim.md"), proj, env(g));
+  });
+  expect(deleted).toBe(false);
+  expect(existsSync(victim), "the file behind the link must survive").toBe(true);
+  expect(texts.some((text) => text.includes("the snippets folder resolves outside the project")), "the refusal left no trace").toBe(true);
+});
+
+test.skipIf(!canLink)("deleteSnippet removes a snippet through a link that stays inside the project (needs symlinkSync)", () => {
+  const g = tmp();
+  const proj = tmp();
+  const inside = join(proj, "shared-snippets");
+  const file = writeSnippet(inside, "x", "bye");
+  mkdirSync(join(proj, ".claude", "koryphaios"), { recursive: true });
+  symlinkSync(inside, koryphaiosDir(proj), "junction");
+  expect(deleteSnippet(join(koryphaiosDir(proj), "x.md"), proj, env(g))).toBe(true);
+  expect(existsSync(file)).toBe(false);
 });
 
 test("listSnippets traces a snippet it cannot read once per signature and ignores the absent folders", () => {

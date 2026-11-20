@@ -1,6 +1,8 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { globalConfigDir } from './launch-config'
+import { reportError } from './log'
+import { refuseEscapingFolder } from './template-store'
 import {
   PROJECT_SOURCES,
   isAbsentFileError,
@@ -96,12 +98,15 @@ export function deleteSnippet(
 ): boolean {
   try {
     if (!path.toLowerCase().endsWith('.md')) return false
-    const allowedDirs = [globalSnippetsDir(env), ...localSnippetDirs(projectDir)].map((dir) => resolve(dir))
-    if (!allowedDirs.includes(resolve(dirname(path)))) return false
+    const dir = resolve(dirname(path))
+    const local = localSnippetDirs(projectDir).some((candidate) => dir === resolve(candidate))
+    if (!local && dir !== resolve(globalSnippetsDir(env))) return false
+    if (local) refuseEscapingFolder(dir, projectDir, 'snippets')
     if (!existsSync(path)) return false
     rmSync(path, { force: true })
     return true
-  } catch {
+  } catch (error) {
+    reportError('snippet', `delete ${String(JSON.stringify(path)).slice(0, 300)} failed: ${error instanceof Error ? error.message : String(error)}`)
     return false
   }
 }

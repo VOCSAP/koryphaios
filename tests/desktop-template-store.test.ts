@@ -765,6 +765,43 @@ test("editing a legacy template in place leaves one entry in the list, at the le
   ).toEqual([{ name: "Old Team", path: old, sessionCount: 2 }]);
 });
 
+test.skipIf(!canLink)("deleteTemplate refuses a local templates folder that links out of the project and keeps the file there (needs symlinkSync)", () => {
+  const e = env(tmp());
+  const outside = tmp();
+  const victim = savedTemplate(outside, "victim", "victim");
+  const proj = projectWithTemplatesLinkedTo(outside);
+  let deleted: boolean | undefined;
+  const texts = traced(() => {
+    deleted = deleteTemplate(join(koryphaiosDir(proj), "victim.json"), proj, e);
+  });
+  expect(deleted).toBe(false);
+  expect(existsSync(victim), "the file behind the link must survive").toBe(true);
+  expect(texts.some((text) => text.includes("resolves outside the project")), "the refusal left no trace").toBe(true);
+});
+
+test.skipIf(!canLink)("deleteTemplate removes a template through a link that stays inside the project (needs symlinkSync)", () => {
+  const e = env(tmp());
+  const proj = tmp();
+  const inside = join(proj, "shared-templates");
+  const file = savedTemplate(inside, "x", "x");
+  mkdirSync(join(proj, ".claude", "koryphaios"), { recursive: true });
+  symlinkSync(inside, koryphaiosDir(proj), "junction");
+  expect(deleteTemplate(join(koryphaiosDir(proj), "x.json"), proj, e)).toBe(true);
+  expect(existsSync(file)).toBe(false);
+});
+
+test.skipIf(!canLink)("deleteTemplate removes a template that is a link to a file outside the project and keeps the target (needs symlinkSync)", () => {
+  const e = env(tmp());
+  const proj = tmp();
+  const victim = savedTemplate(tmp(), "victim", "victim");
+  mkdirSync(koryphaiosDir(proj), { recursive: true });
+  const link = join(koryphaiosDir(proj), "evil.json");
+  symlinkSync(victim, link, "file");
+  expect(deleteTemplate(link, proj, e)).toBe(true);
+  expect(existsSync(victim), "only the link may go").toBe(true);
+  expect(readdirSync(koryphaiosDir(proj)), "the link itself must be gone").toEqual([]);
+});
+
 test("renaming a legacy template leaves one entry in the list, under the new name", () => {
   const e = env(tmp());
   const proj = tmp();

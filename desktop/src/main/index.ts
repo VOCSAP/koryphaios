@@ -225,6 +225,7 @@ import {
 import { createPersistentJournal, initDeckLog, logInfo, logWarn, onDeckError, reportError } from './log'
 import { installProcessFailureGuard } from './process-failure-guard'
 import { sanitizeSpawnCap } from './spawn-cap'
+import { restrictConfigPatch } from './config-patch'
 import {
   startDeckControl,
   type DeckControlDeps,
@@ -529,16 +530,17 @@ const getConfig = (): AppConfig => config
 /** Rebuilds the native menu from the active locale; assigned once the menu exists. */
 let rebuildAppMenu: (() => void) | null = null
 const setConfig = (patch: Partial<AppConfig>): AppConfig => {
-  // B9: projectDir is a launch-time, in-memory context (from cliContext), never
+  // projectDir is a launch-time, in-memory context (from cliContext), never
   // a runtime setting — the renderer only ever patches display/settings fields.
   // A `config:set { projectDir }` would repoint every project-scoped resolver
   // (worktreeInit, launchCommand, templates) at an attacker-chosen repo AFTER
-  // the C19 boot gate ran, so it is rejected here rather than silently applied.
+  // the boot gate ran, so it is rejected here rather than silently applied.
   if (patch.projectDir !== undefined && patch.projectDir !== config.projectDir) {
     reportError('config', `rejected config:set projectDir override (${patch.projectDir})`)
     const { projectDir: _ignored, ...rest } = patch
     patch = rest
   }
+  patch = restrictConfigPatch(patch, config, (message) => reportError('config', message))
   // The glow colour lands in a CSS variable renderer-side: clamp to hex/''
   // here too so a compromised-renderer patch can't persist arbitrary text.
   if (patch.glowColor !== undefined) {
