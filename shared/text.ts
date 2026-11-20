@@ -1,4 +1,5 @@
 // Text sanitisers and cutters, with ZERO dependencies.
+// The Deck renderer and the Android shell import this file: it must stay free of imports.
 //
 // These two live apart from `shared/approval.ts` (which pulls `node:crypto`)
 // and from `notify/format.ts` (which reaches for `Buffer`) for one concrete
@@ -61,4 +62,41 @@ export function fitVisibly(
 export function truncate(s: string, max: number): string {
   if (s.length <= max) return s;
   return `${s.slice(0, Math.max(0, max - 1))}…`;
+}
+
+const HIDDEN_CHAR_RE = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu;
+const BIDI_CHAR_RE = /\p{Bidi_Control}/u;
+const CONTROL_CHAR_RE = /\p{Cc}/u;
+const INVISIBLE_CHAR_RE = /[\p{Cf}\p{Zl}\p{Zp}]/u;
+
+/** LF and TAB lay a multiline command out; they hide nothing and stay as they are. */
+function showsLayoutOnly(char: string): boolean {
+  return char === "\n" || char === "\t";
+}
+
+/**
+ * Show every control, format and line/paragraph separator character as
+ * `<U+XXXX>` so text cannot reorder or hide part of itself on a screen.
+ * Display only: the stored text stays what the agent sent.
+ */
+export function revealFormatChars(s: string): string {
+  return s.replace(HIDDEN_CHAR_RE, (char) =>
+    showsLayoutOnly(char) ? char : `<U+${char.codePointAt(0)!.toString(16).toUpperCase().padStart(4, "0")}>`
+  );
+}
+
+/** What an approval's text hides, in a fixed order; empty when it hides nothing. */
+export function approvalTextFlags(
+  title: string,
+  question: string,
+  options: readonly string[] = []
+): Array<"bidi" | "control" | "invisible"> {
+  const found = new Set<"bidi" | "control" | "invisible">();
+  for (const char of [title, question, ...options].join("\n")) {
+    if (BIDI_CHAR_RE.test(char)) found.add("bidi");
+    else if (CONTROL_CHAR_RE.test(char)) {
+      if (!showsLayoutOnly(char)) found.add("control");
+    } else if (INVISIBLE_CHAR_RE.test(char)) found.add("invisible");
+  }
+  return (["bidi", "control", "invisible"] as const).filter((flag) => found.has(flag));
 }

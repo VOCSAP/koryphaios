@@ -62,6 +62,7 @@ interface FakeApproval {
   question: string;
   options: string[];
   questions: unknown;
+  text_flags?: string[];
   mergeable: boolean;
   absorbed_permission: boolean;
   informational: boolean;
@@ -374,6 +375,42 @@ test("a permission's note speaks of allowing or denying, not of acknowledging", 
   await mount({ approvals: [approval({ id: "perm" })] });
   await click(container.querySelector(".inbox-entry"));
   expect([...container.querySelectorAll(".inbox-modal-note")].map((n) => n.textContent)).toEqual(["inbox.notePermission"]);
+});
+
+// Mutants: the subject or the body shown raw, the badge dropped, the badge shown for a clean row.
+test("a flagged permission shows its title and command revealed, with the badge in the modal", async () => {
+  const rlo = String.fromCodePoint(0x202e);
+  await mount({
+    approvals: [approval({ id: "perm", title: `Bash: ls ${rlo}`, question: `ls ${rlo}`, text_flags: ["bidi"] })]
+  });
+  await click(container.querySelector(".inbox-entry"));
+  const modal = container.querySelector(".inbox-modal")!;
+  expect(modal.querySelector(".inbox-modal-subject")!.textContent).toBe("Bash: ls <U+202E>");
+  expect(modal.querySelector(".approval-command-head")!.textContent).toBe("ls <U+202E>");
+  expect(modal.querySelector(".approval-text-flags")).not.toBeNull();
+  expect(container.textContent).not.toContain(rlo);
+});
+
+// Mutants: an option chip shown raw, or the value sent changed along with its label.
+test("a question option hiding a bidi override shows revealed, is flagged, and is still sent as written", async () => {
+  const rlo = String.fromCodePoint(0x202e);
+  const hidden = `Yes ${rlo}`;
+  await mount({
+    approvals: [approval({ id: "q", kind: "question", options: [hidden, "No"], text_flags: ["bidi"] })]
+  });
+  await click(container.querySelector(".inbox-entry"));
+  const chips = [...container.querySelectorAll(".inbox-modal .inbox-option")].map((c) => c.textContent);
+  expect(chips).toEqual(["Yes <U+202E>", "No"]);
+  expect(container.querySelector(".inbox-modal .approval-text-flags")).not.toBeNull();
+  expect(container.textContent).not.toContain(rlo);
+  await click(container.querySelector(".inbox-modal .inbox-option"));
+  expect(calls.answers).toEqual([{ id: "q", action: { kind: "text", text: hidden } }]);
+});
+
+test("a permission with no flag shows no text-flags badge in the modal", async () => {
+  await mount({ approvals: [approval({ id: "perm", text_flags: [] })] });
+  await click(container.querySelector(".inbox-entry"));
+  expect(container.querySelector(".inbox-modal .approval-text-flags")).toBeNull();
 });
 
 // Mutant: the header rendered whatever `embedded` says, or the modifier class dropped.

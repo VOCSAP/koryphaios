@@ -291,6 +291,27 @@ describe("renderNtfy (hostile input #4: the agent writes these strings)", () => 
     expect(r.message).toBe("rm -rf");
   });
 
+  test("shows a bidi override as <U+202E> in the title and the question", () => {
+    const rlo = String.fromCodePoint(0x202e);
+    const r = renderNtfy(approval({ title: `Bash ${rlo}`, question: `echo ${rlo}x` }), "bureau");
+    expect(r.title).toBe("bureau · Bash <U+202E>");
+    expect(r.message).toBe("echo <U+202E>x");
+  });
+
+  test("reveals the question of a row that carries structured questions", () => {
+    const rlo = String.fromCodePoint(0x202e);
+    const r = renderNtfy(
+      approval({
+        kind: "question",
+        question: `echo ${rlo}x`,
+        questions: [{ question: "Pick?", header: "H", options: [{ label: "A", description: "" }], multi_select: false }],
+      }),
+      "bureau"
+    );
+    expect(r.message).toContain("echo <U+202E>x");
+    expect(r.message).not.toContain(rlo);
+  });
+
   test("caps both fields", () => {
     const r = renderNtfy(approval({ title: "T".repeat(500), question: "Q".repeat(5000) }), "b");
     expect(r.title.length).toBeLessThanOrEqual(NTFY_TITLE_MAX);

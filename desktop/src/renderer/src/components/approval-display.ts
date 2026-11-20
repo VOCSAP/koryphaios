@@ -1,5 +1,7 @@
+import { revealFormatChars } from '../../../../../shared/text'
+
 export function displayApprovalText(text: string): string {
-  return text
+  return revealFormatChars(text)
 }
 
 export function splitCommandLine(text: string): { head: string; rest: string } {

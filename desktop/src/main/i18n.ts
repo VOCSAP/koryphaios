@@ -988,6 +988,10 @@ export const EN_DEFAULTS: Record<string, string> = {
   'inbox.linkWebTitle': 'Open in the browser',
   'inbox.dangerBadge': 'Risky pattern:',
   'inbox.signalLegend': 'Indicative signal: a request without a badge is never guaranteed safe.',
+  'inbox.textFlagsBadge': 'Hidden characters shown:',
+  'inbox.textFlagBidi': 'text direction',
+  'inbox.textFlagControl': 'control',
+  'inbox.textFlagInvisible': 'invisible',
   'inbox.navigate': 'Go to the tile',
   'inbox.navigateUnavailable': 'The requesting tile is not open in this window.',
   'inbox.noteBlocking':

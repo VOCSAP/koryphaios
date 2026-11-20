@@ -306,6 +306,7 @@ import { describeUnknownDialog, trustPromptShown, unknownDialogOnScreen, type At
 import { applyEnrolment, ensureOperatorIdentity, exportEnrolment } from './operator-identity'
 import { buildAuthProof, type Approval } from './approval-auth'
 import { INBOX_GATES } from '../../../shared/approval'
+import { revealFormatChars } from '../../../shared/text'
 import { addEventSink, broadcast, regHandle } from './api-registry'
 import { CompanionServer } from './companion-server'
 import {
@@ -1456,7 +1457,7 @@ const pollApprovalVerdicts = async (): Promise<void> => {
           heldVerdicts.delete(approval.id)
           reportError(
             'approvals',
-            `the answer to "${approval.title}" (from ${approval.answered_via}) was NOT typed into "${live.name}": ${reason}. Answer the dialog in the terminal.`
+            `the answer to "${revealFormatChars(approval.title)}" (from ${approval.answered_via}) was NOT typed into "${live.name}": ${reason}. Answer the dialog in the terminal.`
           )
           broadcast('approvals:not-applied', { tile: live.name, title: approval.title, reason })
           continue
@@ -1478,7 +1479,7 @@ const pollApprovalVerdicts = async (): Promise<void> => {
           unroutableTraced.add(approval.id)
           reportError(
             'approvals',
-            `the answer to "${approval.title}" (from ${approval.answered_via}) reached no open tile "${tile || 'none'}". It is kept undelivered and typed in only if that tile comes back asking; otherwise answer it in the terminal.`
+            `the answer to "${revealFormatChars(approval.title)}" (from ${approval.answered_via}) reached no open tile "${tile || 'none'}". It is kept undelivered and typed in only if that tile comes back asking; otherwise answer it in the terminal.`
           )
         }
         continue
@@ -1502,7 +1503,7 @@ const pollApprovalVerdicts = async (): Promise<void> => {
         heldVerdicts.delete(approval.id)
         reportError(
           'approvals',
-          `the answer to "${approval.title}" (from ${approval.answered_via}) was never typed into "${live?.name ?? tile}": the session stopped asking. Answer it in the terminal.`
+          `the answer to "${revealFormatChars(approval.title)}" (from ${approval.answered_via}) was never typed into "${live?.name ?? tile}": the session stopped asking. Answer it in the terminal.`
         )
         broadcast('approvals:not-applied', {
           tile: live?.name ?? tile,
@@ -1520,7 +1521,7 @@ const pollApprovalVerdicts = async (): Promise<void> => {
         const reason = `nothing safe to send for a ${approval.answer_kind} answer`
         reportError(
           'approvals',
-          `the answer to "${approval.title}" could not be typed into "${live?.name ?? tile}": ${reason}`
+          `the answer to "${revealFormatChars(approval.title)}" could not be typed into "${live?.name ?? tile}": ${reason}`
         )
         broadcast('approvals:not-applied', { tile: live?.name ?? tile, title: approval.title, reason })
         if (live && approvalsEnabled()) raiseTileQuestion(live, notTypedQuestion(approval, live.name, reason), true)
@@ -1555,7 +1556,7 @@ const pollApprovalVerdicts = async (): Promise<void> => {
         heldVerdicts.delete(approval.id)
         reportError(
           'approvals',
-          `the answer to "${approval.title}" (from ${approval.answered_via}) was NOT typed into "${live?.name ?? tile}": ${match.reason}. Answer the dialog in the terminal.`
+          `the answer to "${revealFormatChars(approval.title)}" (from ${approval.answered_via}) was NOT typed into "${live?.name ?? tile}": ${match.reason}. Answer the dialog in the terminal.`
         )
         broadcast('approvals:not-applied', { tile: live?.name ?? tile, title: approval.title, reason: match.reason })
         if (live && approvalsEnabled()) {

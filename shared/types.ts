@@ -2197,6 +2197,9 @@ export interface ApprovalOrigin {
   tile_ref: string;
 }
 
+/** What an approval's text hides from the operator: reordering (bidi), a control character, or an invisible format character. */
+export type ApprovalTextFlag = "bidi" | "control" | "invisible";
+
 export interface Approval {
   id: string;
   operator_id: string;
@@ -2204,6 +2207,8 @@ export interface Approval {
   kind: ApprovalKind;
   title: string;
   question: string;
+  /** Computed from title and question on every read, never stored; empty when the text shows exactly what it holds. */
+  text_flags: ApprovalTextFlag[];
   options: string[];
   status: ApprovalStatus;
   /** Where the answer will be delivered. The routing TOKEN is never exposed. */

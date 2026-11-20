@@ -66,6 +66,43 @@ describe("escaping (hostile input #4: the text comes from an agent)", () => {
     expect(out.match(/<b>/g)).toHaveLength(1);
   });
 
+  test("Telegram shows a bidi override as <U+202E>, escaped once, in the title and the question", () => {
+    const rlo = String.fromCodePoint(0x202e);
+    const out = renderTelegram(approval({ title: `ls ${rlo}`, question: `echo ${rlo}x` }));
+    expect(out).toContain("<b>ls &lt;U+202E&gt;</b>");
+    expect(out).toContain("echo &lt;U+202E&gt;x");
+    expect(out).not.toContain(rlo);
+    expect(out).not.toContain("&amp;lt;");
+  });
+
+  test("Telegram reveals the question of a row that carries structured questions", () => {
+    const rlo = String.fromCodePoint(0x202e);
+    const out = renderTelegram(
+      approval({
+        kind: "question",
+        question: `echo ${rlo}x`,
+        questions: [{ question: "Pick?", header: "H", options: [{ label: "A", description: "" }], multi_select: false }],
+      })
+    );
+    expect(out).toContain("echo &lt;U+202E&gt;x");
+    expect(out).not.toContain(rlo);
+  });
+
+  test("Discord shows a bidi override as <U+202E> in the title and the fenced question", () => {
+    const rlo = String.fromCodePoint(0x202e);
+    const out = renderDiscord(approval({ title: `ls ${rlo}`, question: `echo ${rlo}x\nnext\tline` }));
+    expect(out).toContain("**ls <U+202E>**");
+    expect(out).toContain("echo <U+202E>x\nnext\tline");
+    expect(out).not.toContain(rlo);
+  });
+
+  test("a settled message shows the title with its hidden characters revealed", () => {
+    const rlo = String.fromCodePoint(0x202e);
+    const out = renderSettled(approval({ title: `ls ${rlo}`, status: "answered", answer_kind: "allow", answered_via: "deck" }), "the Deck");
+    expect(out).toContain("ls <U+202E>");
+    expect(out).not.toContain(rlo);
+  });
+
   test("an agent cannot break out of the Discord code fence", () => {
     const out = renderDiscord(approval({ question: "```\n@everyone\n```" }));
     expect(out).not.toContain("\n```\n@everyone");

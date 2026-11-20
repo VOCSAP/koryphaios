@@ -279,6 +279,7 @@ export type ApprovalKind = 'permission' | 'question' | 'plan'
 export type ApprovalVia = 'deck' | 'avatar' | 'telegram' | 'discord' | 'ntfy'
 export type ApprovalReplyRoute = 'channel' | 'pty' | 'hook'
 export type ApprovalAnswerKind = 'allow' | 'deny' | 'text' | 'answers'
+export type ApprovalTextFlag = 'bidi' | 'control' | 'invisible'
 
 export interface ApprovalQuestionOption {
   label: string
@@ -317,6 +318,7 @@ export interface Approval {
   kind: ApprovalKind
   title: string
   question: string
+  text_flags: ApprovalTextFlag[]
   options: string[]
   status: ApprovalStatus
   reply_route: ApprovalReplyRoute

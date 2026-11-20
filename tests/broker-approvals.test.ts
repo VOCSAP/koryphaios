@@ -147,6 +147,44 @@ describe("approval lifecycle", () => {
     expect(wire).not.toContain("pid");
   });
 
+  test("a title or question hiding a bidi override is served raw and carries its text_flags", async () => {
+    const b = await boot();
+    const op = newOperator();
+    const rlo = String.fromCodePoint(0x202e);
+    const zwsp = String.fromCodePoint(0x200b);
+    const c1 = String.fromCodePoint(0x85);
+
+    const bidi = await addApproval(b, op, { title: `Bash: ls ${rlo}`, question: `echo ${rlo}x` });
+    expect(bidi.title).toBe(`Bash: ls ${rlo}`);
+    expect(bidi.question).toBe(`echo ${rlo}x`);
+    expect(bidi.text_flags).toEqual(["bidi"]);
+
+    const mixed = await addApproval(b, op, { title: `a${c1}b`, question: `c${zwsp}d${rlo}` });
+    expect(mixed.text_flags, "fixed order, one entry per class").toEqual(["bidi", "control", "invisible"]);
+
+    const option = await addApproval(b, op, { kind: "question", options: [`Yes ${rlo}`, "No"] });
+    expect(option.options, "the option is stored as written").toEqual([`Yes ${rlo}`, "No"]);
+    expect(option.text_flags, "an option hiding a bidi override flags the row").toEqual(["bidi"]);
+
+    const clean = await addApproval(b, op, { question: "Allow `npm test`?\nthen\tmore" });
+    expect(clean.text_flags, "LF and TAB are layout, not a flag").toEqual([]);
+  });
+
+  test("a row stored with a hidden character is flagged again when listed", async () => {
+    const b = await boot();
+    const op = newOperator();
+    const rlo = String.fromCodePoint(0x202e);
+    const added = await addApproval(b, op, { question: `echo ${rlo}x` });
+    const listed = await signedPost<{ approvals: Approval[] }>(
+      b,
+      "/approval/list",
+      approvalListBody(DEFAULT_PROJECT_KEY),
+      { cred: op.cred, operator_id: op.id }
+    );
+    expect(listed.status).toBe(200);
+    expect(listed.body.approvals.find((a) => a.id === added.id)?.text_flags).toEqual(["bidi"]);
+  });
+
   test("claim settles it and records who won", async () => {
     const b = await boot();
     const op = newOperator();

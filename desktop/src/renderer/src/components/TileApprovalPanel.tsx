@@ -5,6 +5,7 @@ import { useT } from '../i18n'
 import { GLYPH_ACTIONS, GLYPH_BADGES } from './icons'
 import { HookApprovalAnswer } from './HookApprovalAnswer'
 import { ApprovalRequestBody } from './ApprovalRequestBody'
+import { displayApprovalText } from './approval-display'
 import { linkedText } from './LinkedText'
 import { formQuestions } from './approval-answers'
 import { canAnswerVerdict } from './verdict-remote'
@@ -35,7 +36,7 @@ export function TileApprovalPanel({ tileId }: { tileId: string }): React.JSX.Ele
     >
       <div className="tile-approval-head">
         <span className="tile-approval-glyph">{GLYPH_BADGES.clepsydra}</span>
-        <span className="tile-approval-title">{row.title || t('inbox.familyBlocking')}</span>
+        <span className="tile-approval-title">{displayApprovalText(row.title) || t('inbox.familyBlocking')}</span>
         {others > 0 && <span className="tile-approval-more">{t('tile.approvalMore', { n: others })}</span>}
         <button
           type="button"

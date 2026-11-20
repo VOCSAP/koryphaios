@@ -27,6 +27,7 @@ import { canonicalPath } from "../desktop/src/main/worktree-service";
 import { buildApprovalRequest } from "../desktop/hooks/approval-hook";
 import { createXtermScreen, type XtermScreenRead } from "../desktop/src/main/xterm-screen";
 import { deriveOperatorId, generateCredential } from "../shared/approval.ts";
+import { revealFormatChars } from "../shared/text.ts";
 import type { Approval } from "../desktop/src/main/approval-auth";
 
 const INDEX =
@@ -70,7 +71,7 @@ const registerPoller = await evaluate<{ poll: () => Promise<void> }>(
           openApprovals, heldVerdicts, unroutableTraced, canApplyVerdict, classifyVerdict, buildKeystrokes,
           journal, markVerdictsDelivered, reportError, matchPermissionDialog, permissionDialogShown,
           trustPromptShown, withinDeferWindow, canonicalPath, broadcast, raiseTileQuestion,
-          notTypedQuestion, unknownDialogOnScreen } = env
+          notTypedQuestion, unknownDialogOnScreen, revealFormatChars } = env
 ${POLLER}
   return { poll: pollApprovalVerdicts }
 }
@@ -176,6 +177,7 @@ function pollerEnv(opts: {
     broadcast: (...args: unknown[]) => calls.push({ fn: "broadcast", args }),
     raiseTileQuestion: (...args: unknown[]) => calls.push({ fn: "raiseTileQuestion", args }),
     notTypedQuestion,
+    revealFormatChars,
     journal: { add: (...args: unknown[]) => calls.push({ fn: "journal.add", args }) },
     markVerdictsDelivered: async (_deps: unknown, ids: string[]) => {
       marked.push([...ids]);
@@ -425,6 +427,19 @@ describe("pollApprovalVerdicts delivery rules", () => {
     expect(traces, "mutation: drop the unroutable trace, or its once-per-id guard").toHaveLength(1);
     expect(String(traces[0]!.args[1])).toContain('"Finding"');
     expect(String(traces[0]!.args[1])).toContain(named);
+  });
+
+  test("the journal trace of an unroutable verdict reveals a hidden character of the title", async () => {
+    const rlo = String.fromCodePoint(0x202e);
+    const hidden = verdict({
+      title: `Finding${rlo}`,
+      origin: { tile_ref: "gone", session_ref: "gone" } as unknown as Approval["origin"],
+    });
+    const { poll, calls } = pollerEnv({ settled: [hidden], tiles: ["s1"] });
+    await poll();
+    const trace = String(calls.find((c) => c.fn === "reportError" && c.args[0] === "approvals")!.args[1]);
+    expect(trace, "mutation: the title written to the journal raw").toContain('"Finding<U+202E>"');
+    expect(trace).not.toContain(rlo);
   });
 
   test("an unroutable verdict names no tile when the approval carries neither reference", async () => {

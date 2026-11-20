@@ -194,7 +194,7 @@ import {
 // an agent, so it crosses the same boundary as an approval answer and gets the
 // same flattening. shared/text.ts is the dependency-free leaf (shared/approval.ts
 // pulls node:crypto), which is why these two live there.
-import { stripControl, truncate } from "./shared/text.ts";
+import { approvalTextFlags, stripControl, truncate } from "./shared/text.ts";
 import type {
   RegisterRequest,
   RegisterResponse,
@@ -12057,6 +12057,7 @@ function rowToApproval(row: ApprovalRow): Approval {
     kind: row.kind as Approval["kind"],
     title: row.title,
     question: row.question,
+    text_flags: approvalTextFlags(row.title, row.question, options),
     options,
     status: row.status as ApprovalStatus,
     answered_via: (row.answered_via as ApprovalVia | null) ?? null,

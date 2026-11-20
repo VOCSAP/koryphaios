@@ -507,7 +507,7 @@ export function InboxCore(props: InboxCoreProps): React.JSX.Element {
             </header>
             <div className="inbox-modal-time">{new Date(entryAt(open)).toLocaleString()}</div>
             {(open.kind === 'approval' || open.kind === 'closed-question') && open.approval.title && (
-              <div className="inbox-modal-subject">{open.approval.title}</div>
+              <div className="inbox-modal-subject">{displayApprovalText(open.approval.title)}</div>
             )}
             {!(hookApproval && canAnswerVerdict && formQuestions(hookApproval)) &&
               (open.kind === 'approval' || open.kind === 'closed-question' ? (
@@ -555,7 +555,7 @@ export function InboxCore(props: InboxCoreProps): React.JSX.Element {
                           )
                         }
                       >
-                        {opt}
+                        {displayApprovalText(opt)}
                       </button>
                     )
                   })}

@@ -9,6 +9,7 @@ import {
   validateCloseReason,
 } from "../shared/approval.ts";
 import { settledOutcome } from "../shared/approval-outcome.ts";
+import { approvalTextFlags, revealFormatChars } from "../shared/text.ts";
 import type { ApprovalQuestion } from "../shared/types.ts";
 
 const ESC = String.fromCharCode(0x1b);
@@ -306,5 +307,52 @@ describe("the reason of a close", () => {
     const pair = String.fromCodePoint(0x1f600);
     expect(validateCloseReason(pair.repeat(CLOSE_REASON_MAX)).ok).toBe(true);
     expect(validateCloseReason(pair.repeat(CLOSE_REASON_MAX + 1)).ok).toBe(false);
+  });
+});
+
+describe("revealFormatChars and approvalTextFlags", () => {
+  const code = (c: number): string => `<U+${c.toString(16).toUpperCase().padStart(4, "0")}>`;
+  const shown = [0x202e, 0x2066, 0x061c, 0x200b, 0xfeff, 0x2028, 0x2029, 0x85, 0x1b, 0x7f, 0xe0041];
+
+  test("every control, format and separator code point shows as <U+XXXX>", () => {
+    for (const c of shown) {
+      expect(revealFormatChars(`a${String.fromCodePoint(c)}b`), `U+${c.toString(16)}`).toBe(`a${code(c)}b`);
+    }
+  });
+
+  test("LF, TAB, emoji and CJK stay as they are", () => {
+    const text = `ls -la\n\tcd ${String.fromCodePoint(0x1f600)} ${String.fromCodePoint(0x6f22)}`;
+    expect(revealFormatChars(text)).toBe(text);
+  });
+
+  test("a bidi override is flagged bidi, a C0 or C1 control control, a zero-width or separator invisible", () => {
+    const flags = (c: number): string[] => approvalTextFlags("t", `a${String.fromCodePoint(c)}b`);
+    for (const c of [0x202e, 0x2066, 0x061c]) expect(flags(c), `U+${c.toString(16)}`).toEqual(["bidi"]);
+    for (const c of [0x85, 0x1b]) expect(flags(c), `U+${c.toString(16)}`).toEqual(["control"]);
+    for (const c of [0x200b, 0xfeff, 0x2028, 0xe0041]) expect(flags(c), `U+${c.toString(16)}`).toEqual(["invisible"]);
+  });
+
+  test("flags come in a fixed order, whichever field holds the character", () => {
+    const [rlo, c1, zwsp] = [0x202e, 0x85, 0x200b].map((c) => String.fromCodePoint(c));
+    expect(approvalTextFlags(`${zwsp}`, `${c1}${rlo}${zwsp}`)).toEqual(["bidi", "control", "invisible"]);
+    expect(approvalTextFlags(`${rlo}${rlo}`, "")).toEqual(["bidi"]);
+  });
+
+  test("a clean title and a multiline question carry no flag", () => {
+    expect(approvalTextFlags("Bash: ls", "Input: ls\n\twith tab")).toEqual([]);
+  });
+
+  test("a hidden character in an option flags the row, and a clean option does not", () => {
+    const zwsp = String.fromCodePoint(0x200b);
+    expect(approvalTextFlags("t", "q", ["Yes", `No${zwsp}`])).toEqual(["invisible"]);
+    expect(approvalTextFlags("t", "q", ["Yes", "No"])).toEqual([]);
+  });
+
+  test("the draft keeps a bidi override in the title and the question for the broker to flag", () => {
+    const rlo = String.fromCodePoint(0x202e);
+    const r = validateApprovalDraft({ kind: "permission", title: `Bash: ls ${rlo}`, question: `echo ${rlo}x` });
+    if (!r.ok) throw new Error(r.error);
+    expect(r.value.title).toBe(`Bash: ls ${rlo}`);
+    expect(r.value.question).toBe(`echo ${rlo}x`);
   });
 });

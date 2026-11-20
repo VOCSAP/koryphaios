@@ -29,6 +29,7 @@ interface FakeApproval {
   question: string;
   options: string[];
   questions: null;
+  text_flags?: string[];
   mergeable: boolean;
   absorbed_permission: boolean;
   created_at: string;
@@ -99,7 +100,7 @@ const { translate } = await import("../desktop/src/renderer/src/i18n.ts");
 
 const keyT = (key: string, params?: Record<string, string | number>): string => translate({}, key, params);
 
-function body(props: { approval: { kind: string; question: string }; danger?: string | null; className: string }): unknown {
+function body(props: { approval: { kind: string; question: string; text_flags?: string[] }; danger?: string | null; className: string }): unknown {
   return React.createElement(ApprovalRequestBody, { t: keyT, renderText: linkedText, ...props } as never);
 }
 const { InboxPanel } = await import("../desktop/src/renderer/src/components/InboxPanel.tsx");
@@ -195,6 +196,58 @@ test("the danger badge appears only with a danger prop, before the legend, namin
   const badge = container.querySelector(".approval-danger-badge")!;
   expect(badge.querySelector("code")!.textContent).toBe("rm -rf");
   expect(badge.querySelector("svg"), "the badge carries a glyph, not an emoji").not.toBeNull();
+});
+
+test("a permission shows a bidi override as <U+202E> and never the raw character", () => {
+  const rlo = String.fromCodePoint(0x202e);
+  render(body({
+    approval: { kind: "permission", question: `echo ${rlo}evil\nrm\tx` },
+    className: "inbox-modal-text"
+  }));
+  expect(container.querySelector(".approval-command-head")!.textContent).toBe("echo <U+202E>evil");
+  expect(container.querySelector(".approval-command-rest")!.textContent, "TAB is layout, not revealed").toBe("rm\tx");
+  expect(container.textContent).not.toContain(rlo);
+});
+
+test("a question shows an invisible character as its code point", () => {
+  const zwsp = String.fromCodePoint(0x200b);
+  render(body({
+    approval: { kind: "question", question: `Which${zwsp}branch?` },
+    className: "inbox-modal-text"
+  }));
+  expect(shape()).toEqual(["plain:inbox-modal-text=Which<U+200B>branch?"]);
+});
+
+test("a flagged permission shows the text-flags badge before the legend, naming each flag", () => {
+  render(body({
+    approval: { kind: "permission", question: "ls", text_flags: ["bidi", "invisible"] },
+    className: "inbox-modal-text"
+  }));
+  expect(shape()[1]).toBe("signal:approval-danger-badge approval-text-flags|approval-signal-legend");
+  const badge = container.querySelector(".approval-text-flags")!;
+  expect(badge.textContent).toContain("inbox.textFlagsBadge");
+  expect(badge.querySelector("code")!.textContent).toBe("inbox.textFlagBidi, inbox.textFlagInvisible");
+  expect(badge.querySelector("svg"), "the badge carries a glyph, not an emoji").not.toBeNull();
+});
+
+test("a flagged question shows the text-flags badge under its text", () => {
+  render(body({
+    approval: { kind: "question", question: "Which branch?", text_flags: ["control"] },
+    className: "inbox-modal-text"
+  }));
+  expect(shape()).toEqual(["plain:inbox-modal-text=Which branch?", "signal:approval-danger-badge approval-text-flags"]);
+});
+
+test("empty or absent text_flags render no text-flags badge", () => {
+  for (const approvalProps of [
+    { kind: "permission", question: "ls", text_flags: [] },
+    { kind: "permission", question: "ls" },
+    { kind: "question", question: "Which branch?", text_flags: [] },
+    { kind: "question", question: "Which branch?" }
+  ]) {
+    render(body({ approval: approvalProps, className: "inbox-modal-text" }));
+    expect(container.querySelector(".approval-text-flags"), JSON.stringify(approvalProps)).toBeNull();
+  }
 });
 
 test("a null danger renders no badge", () => {
@@ -460,6 +513,17 @@ test("the tile panel renders its hook permission through the shared body", () =>
   );
   expect(body.querySelector(".approval-signal .approval-signal-legend")).not.toBeNull();
   expect(body.querySelector(".inbox-goto-btn"), "the tile already is the destination").toBeNull();
+});
+
+test("the tile panel reveals a bidi override in its title and badges the flagged row", () => {
+  const rlo = String.fromCodePoint(0x202e);
+  fakeUseDeck.setState({
+    pendingApprovals: [approval({ title: `ls ${rlo}`, question: `ls ${rlo}`, text_flags: ["bidi"] })]
+  });
+  render(React.createElement(TileApprovalPanel, { tileId: "tile-a" }));
+  expect(container.querySelector(".tile-approval-title")!.textContent).toBe("ls <U+202E>");
+  expect(container.querySelector(".tile-approval-body .approval-text-flags")).not.toBeNull();
+  expect(container.textContent).not.toContain(rlo);
 });
 
 // Process isolation preserves alias resolution and avoids irreversible renderer mocks.

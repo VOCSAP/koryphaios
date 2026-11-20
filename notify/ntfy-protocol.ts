@@ -9,7 +9,7 @@
 // notification.
 
 import { isPrivateHost } from "../shared/net.ts";
-import { fitVisibly, stripControl, truncate } from "../shared/text.ts";
+import { fitVisibly, revealFormatChars, stripControl, truncate } from "../shared/text.ts";
 import type { Approval } from "../shared/types.ts";
 
 /** Envelope version. Bumped only on a breaking change; the app checks it. */
@@ -341,17 +341,17 @@ export function renderNtfy(
   // machine is asking but not what it is asking.
   const origin = truncate(stripControl(originText), NTFY_ORIGIN_MAX);
   const title = truncate(
-    stripControl(approval.title) || "Koryphaios",
+    revealFormatChars(stripControl(approval.title)) || "Koryphaios",
     NTFY_TITLE_MAX - origin.length - 3
   );
   const question = stripControl(approval.question, { keepNewlines: true }).trim();
   if (!approval.questions) {
-    const fit = fitVisibly(question, NTFY_MESSAGE_MAX, NTFY_MESSAGE_MAX, (body) => body);
+    const fit = fitVisibly(question, NTFY_MESSAGE_MAX, NTFY_MESSAGE_MAX, (body) => revealFormatChars(body));
     return { title: `${origin} · ${title}`, message: fit.message, whole: fit.whole };
   }
   const listed = [question, stripControl(questionLines(approval).join("\n"), { keepNewlines: true })].join("\n\n");
   const pointer = optionButtons(approval, NTFY_ACTIONS_MAX) ? "" : QUESTIONS_POINTER;
-  const fit = fitVisibly(listed, NTFY_MESSAGE_MAX, NTFY_MESSAGE_MAX, (body) => (pointer ? `${body}\n\n${pointer}` : body));
+  const fit = fitVisibly(listed, NTFY_MESSAGE_MAX, NTFY_MESSAGE_MAX, (body) => (pointer ? `${revealFormatChars(body)}\n\n${pointer}` : revealFormatChars(body)));
   return { title: `${origin} · ${title}`, message: fit.message, whole: fit.whole };
 }
 

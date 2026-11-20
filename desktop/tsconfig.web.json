@@ -27,6 +27,7 @@
     "src/preload/index.d.ts",
     "design-client/**/*.ts",
     "../shared/roadmap-append.ts",
-    "../shared/project-key.ts"
+    "../shared/project-key.ts",
+    "../shared/text.ts"
   ]
 }

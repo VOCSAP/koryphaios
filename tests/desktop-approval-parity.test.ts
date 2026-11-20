@@ -22,6 +22,7 @@ const UNION_NAMES = [
   "ApprovalVia",
   "ApprovalReplyRoute",
   "ApprovalAnswerKind",
+  "ApprovalTextFlag",
 ] as const;
 const INTERFACE_NAMES = ["ApprovalOrigin", "Approval"] as const;
 
@@ -162,6 +163,7 @@ export type ApprovalStatus = "pending" | "answered" | "expired_notif" | "abandon
 export type ApprovalVia = "deck" | "telegram" | "discord" | "ntfy"
 export type ApprovalReplyRoute = "channel" | "pty"
 export type ApprovalAnswerKind = "allow" | "deny" | "text"
+export type ApprovalTextFlag = "bidi" | "control" | "invisible"
 
 export interface ApprovalOrigin {
   host: string

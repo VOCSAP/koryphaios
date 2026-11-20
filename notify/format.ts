@@ -8,7 +8,7 @@
 // runs in HTML mode (three characters to escape) rather than MarkdownV2 (which
 // needs eighteen escaped anywhere in the string, and silently 400s on a miss).
 
-import { fitVisibly, truncate } from "../shared/text.ts";
+import { fitVisibly, revealFormatChars, truncate } from "../shared/text.ts";
 import type { Approval } from "../shared/types.ts";
 import { settledOutcome } from "../shared/approval-outcome.ts";
 import type { AnswerRefusal } from "./types.ts";
@@ -30,6 +30,11 @@ export function escapeHtml(s: string): string {
 // mobile app); re-exported here because every caller imports it from this
 // module alongside the renderers.
 export { truncate };
+
+/** A title shown on a chat message: cut to `max`, then revealed, so the cut never lands inside a `<U+XXXX>` marker. */
+function shownTitle(approval: Approval, max: number): string {
+  return revealFormatChars(truncate(approval.title, max));
+}
 
 /** Human origin badge: `host · project`, the multi-PC disambiguator. */
 export function originLabel(approval: Approval): string {
@@ -80,13 +85,13 @@ export const DISCORD_QUESTION_MAX = 1500;
 
 /** The Telegram message (HTML parse mode), and whether it shows the question whole. */
 export function telegramView(approval: Approval): { message: string; whole: boolean } {
-  const head = `<b>${escapeHtml(truncate(approval.title, 200))}</b>`;
+  const head = `<b>${escapeHtml(shownTitle(approval, 200))}</b>`;
   const badge = `<i>${escapeHtml(originLabel(approval))}</i>`;
   if (approval.questions) {
     const listed = escapeHtml(truncate(questionLines(approval).join("\n"), 1200));
     const hint = chatOptionButtons(approval) ? "Tap an option." : QUESTIONS_POINTER;
     return fitVisibly(approval.question, TELEGRAM_QUESTION_MAX, TELEGRAM_TEXT_MAX, (body) =>
-      [head, badge, "", escapeHtml(body), "", listed, "", `<i>${escapeHtml(hint)}</i>`].join("\n")
+      [head, badge, "", escapeHtml(revealFormatChars(body)), "", listed, "", `<i>${escapeHtml(hint)}</i>`].join("\n")
     );
   }
   const hint =
@@ -96,7 +101,7 @@ export function telegramView(approval: Approval): { message: string; whole: bool
         ? "Information: no answer is expected."
         : "Reply to this message with your answer.";
   return fitVisibly(approval.question, TELEGRAM_QUESTION_MAX, TELEGRAM_TEXT_MAX, (body) =>
-    [head, badge, "", escapeHtml(body), "", `<i>${escapeHtml(hint)}</i>`].join("\n")
+    [head, badge, "", escapeHtml(revealFormatChars(body)), "", `<i>${escapeHtml(hint)}</i>`].join("\n")
   );
 }
 
@@ -110,10 +115,10 @@ export function discordView(approval: Approval): { message: string; whole: boole
   // agent-supplied block keeps a stray backtick or underscore from reflowing
   // the message, and stops any attempt at fake formatting.
   const fenced = approval.questions ? `${approval.question}\n\n${questionLines(approval).join("\n")}` : approval.question;
-  const title = `**${truncate(approval.title, 200).replace(/\*/g, "\\*")}**`;
+  const title = `**${shownTitle(approval, 200).replace(/\*/g, "\\*")}**`;
   const pointer = approval.questions && !chatOptionButtons(approval) ? [QUESTIONS_POINTER] : [];
   return fitVisibly(fenced, DISCORD_QUESTION_MAX, DISCORD_TEXT_MAX, (body) =>
-    [title, `_${originLabel(approval)}_`, "```", body.replace(/```/g, "``​`"), "```", ...pointer].join("\n")
+    [title, `_${originLabel(approval)}_`, "```", revealFormatChars(body).replace(/```/g, "``​`"), "```", ...pointer].join("\n")
   );
 }
 
@@ -143,12 +148,12 @@ export function renderSettled(approval: Approval, viaLabel: string): string {
     case "pending":
     case "gone":
       // Nobody answered: no check mark, and the label is the reason, not a channel.
-      return `✕ ${truncate(approval.title, 120)}: closed, ${viaLabel}`;
+      return `✕ ${shownTitle(approval, 120)}: closed, ${viaLabel}`;
     case "closed":
       // The close reason is agent text: it never reaches a phone channel.
-      return `✕ ${truncate(approval.title, 120)}: closed without an answer`;
+      return `✕ ${shownTitle(approval, 120)}: closed without an answer`;
   }
-  return `✓ ${truncate(approval.title, 120)} — handled via ${viaLabel}: ${verdict}`;
+  return `✓ ${shownTitle(approval, 120)} — handled via ${viaLabel}: ${verdict}`;
 }
 
 export const ALREADY_HANDLED_NOTICE = "Validation expired or invalid / already handled";

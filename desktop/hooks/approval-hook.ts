@@ -28,7 +28,6 @@ export const PERMISSION_BUDGET_MS =
 const PERMISSION_WAIT_SEC = 25;
 const DENY_MESSAGE = "Denied by the operator from Koryphaios";
 const EXCLUDED_PERMISSION_TOOLS = new Set(["AskUserQuestion", "ExitPlanMode"]);
-const FORMAT_OR_SEPARATOR = /[\p{Cf}\p{Zl}\p{Zp}]/u;
 const CONTROL = /\p{Cc}/u;
 const AGENT_TYPE_TITLE_BUDGET = 80;
 const AGENT_TITLE_SEPARATOR = " agent -- ";
@@ -79,7 +78,6 @@ export function classifyPayload(p: HookPayload): "permission" | "question" | "sk
 
 function hasUnsafeText(value: string, allowLayout: boolean): boolean {
   for (const character of value) {
-    if (FORMAT_OR_SEPARATOR.test(character)) return true;
     if (CONTROL.test(character) && !(allowLayout && (character === "\n" || character === "\t"))) return true;
   }
   return false;

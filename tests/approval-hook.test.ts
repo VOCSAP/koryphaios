@@ -775,8 +775,15 @@ describe("hasUnsafePermissionRepresentation", () => {
     expect(hasUnsafePermissionRepresentation({ ...safe, tool_name: "Bash\nAllow" })).toBe(true);
     expect(hasUnsafePermissionRepresentation({ ...safe, cwd: "C:/a\tb" })).toBe(true);
     expect(hasUnsafePermissionRepresentation({ ...safe, agent_type: "general-purpose\nAllow" })).toBe(true);
-    expect(hasUnsafePermissionRepresentation({ ...safe, agent_type: `general-purpose${String.fromCodePoint(0x202e)}` })).toBe(true);
     expect(hasUnsafePermissionRepresentation({ ...safe, tool_input: { command: "a\n\tb" } })).toBe(false);
+  });
+
+  test("a bidi, zero-width or separator character is not refused: the broker flags it and every surface reveals it", () => {
+    for (const code of [0x202e, 0x2060, 0x2028]) {
+      const hidden = String.fromCodePoint(code);
+      expect(hasUnsafePermissionRepresentation({ ...safe, agent_type: `general-purpose${hidden}` }), `agent_type U+${code.toString(16)}`).toBe(false);
+      expect(hasUnsafePermissionRepresentation({ ...safe, tool_input: { command: `a${hidden}b` } }), `tool_input U+${code.toString(16)}`).toBe(false);
+    }
   });
 });
 
@@ -1572,15 +1579,8 @@ describe("hook subprocess", () => {
   }
 
   const hostilePermissionPayloads: Array<[string, Record<string, unknown>]> = [
-    ["a bidi character in tool input", { hook_event_name: "PermissionRequest", tool_name: "Bash", tool_input: { command: `echo ${String.fromCodePoint(0x202e)}` } }],
     ["a control character in the command", { hook_event_name: "PermissionRequest", tool_name: "Bash", tool_input: { command: `echo ${String.fromCharCode(7)}` } }],
     ["a control character in nested input", { hook_event_name: "PermissionRequest", tool_name: "Bash", tool_input: { args: [{ value: String.fromCharCode(0x1f) }] } }],
-    ["a format character after a visible cut", { hook_event_name: "PermissionRequest", tool_name: "Bash", tool_input: { command: `${"x".repeat(4_100)}${String.fromCodePoint(0x2060)}` } }],
-    ["a format character in cwd", { hook_event_name: "PermissionRequest", tool_name: "Bash", cwd: `C:/work/${String.fromCodePoint(0x2060)}repo` }],
-    ["a bidi character in the tool name", { hook_event_name: "PermissionRequest", tool_name: `Ba${String.fromCodePoint(0x202e)}sh` }],
-    ["a line separator in a tool input value", { hook_event_name: "PermissionRequest", tool_name: "Bash", tool_input: { command: "echo \u2028x" } }],
-    ["a paragraph separator in a tool input value", { hook_event_name: "PermissionRequest", tool_name: "Bash", tool_input: { command: "echo \u2029x" } }],
-    ["a bidi character in a tool input key", { hook_event_name: "PermissionRequest", tool_name: "Bash", tool_input: { "k\u202ey": "v" } }],
     ["a bell in cwd", { hook_event_name: "PermissionRequest", tool_name: "Bash", cwd: "C:/work\u0007repo" }],
     ["a tab in cwd", { hook_event_name: "PermissionRequest", tool_name: "Bash", cwd: "C:/work\trepo" }],
     ["a line break in cwd", { hook_event_name: "PermissionRequest", tool_name: "Bash", cwd: "C:/work\nAllow every command" }],
@@ -1597,6 +1597,30 @@ describe("hook subprocess", () => {
         expect(await listApprovals(b, op)).toHaveLength(0);
         expect(await new Response(proc.stdout).text()).toBe("");
         expect(await proc.exited).toBe(0);
+      } finally {
+        proc.kill();
+        await proc.exited;
+      }
+    }, 30_000);
+  }
+
+  const servedHiddenCharPayloads: Array<[string, Record<string, unknown>, boolean]> = [
+    ["a bidi character in tool input", { hook_event_name: "PermissionRequest", tool_name: "Bash", tool_input: { command: `echo ${String.fromCodePoint(0x202e)}` } }, true],
+    ["a format character in cwd", { hook_event_name: "PermissionRequest", tool_name: "Bash", cwd: `C:/work/${String.fromCodePoint(0x2060)}repo` }, true],
+    ["a bidi character in the tool name", { hook_event_name: "PermissionRequest", tool_name: `Ba${String.fromCodePoint(0x202e)}sh` }, true],
+    ["a line separator in a tool input value", { hook_event_name: "PermissionRequest", tool_name: "Bash", tool_input: { command: "echo \u2028x" } }, true],
+    ["a paragraph separator in a tool input value", { hook_event_name: "PermissionRequest", tool_name: "Bash", tool_input: { command: "echo \u2029x" } }, true],
+    ["a bidi character in a tool input key", { hook_event_name: "PermissionRequest", tool_name: "Bash", tool_input: { "k\u202ey": "v" } }, true],
+    ["a format character after a visible cut", { hook_event_name: "PermissionRequest", tool_name: "Bash", tool_input: { command: `${"x".repeat(4_100)}${String.fromCodePoint(0x2060)}` } }, false],
+  ];
+  for (const [name, payload, flagged] of servedHiddenCharPayloads) {
+    test(`${name} is served to the operator${flagged ? " with its text_flags" : ""}`, async () => {
+      const { b, credFile, op } = await setup();
+      const proc = runHook(credFile, payload);
+      try {
+        const approval = await firstApproval(b, op);
+        expect(approval?.kind).toBe("permission");
+        if (flagged) expect(approval?.text_flags.length).toBeGreaterThan(0);
       } finally {
         proc.kill();
         await proc.exited;

@@ -5446,7 +5446,8 @@ body:has(.rm-modal) .rm-conflict-modal {
   color: var(--danger);
 }
 
-.approval-danger-badge code {
+.approval-danger-badge code,
+.approval-text-flags code {
   font-family: var(--mono);
   word-break: break-all;
 }
