@@ -15,7 +15,7 @@ import {
   type PermissionTranscriptObserver,
 } from "./permission-transcript.ts";
 import { verdictOf } from "./approval-verdict.ts";
-import { TITLE_DETAIL_MAX, summarizeToolInput } from "./tool-summary.ts";
+import { TITLE_DETAIL_MAX, summarizeToolInput, toolDetail } from "./tool-summary.ts";
 
 export { APPROVAL_FILE_ENV, APPROVAL_HOOK_BLOCK_SEC_DEFAULT, TITLE_DETAIL_MAX, summarizeToolInput };
 
@@ -123,8 +123,8 @@ export function buildApprovalRequest(
   const question = capVisibly(
     blocking
       ? [
-          `The agent wants to use ${stripControl(p.tool_name ?? "a tool").trim() || "a tool"}.`,
-          p.tool_input ? `Input: ${safeJson(p.tool_input)}` : "",
+          toolHead(p.tool_name ?? "", p.tool_input),
+          p.tool_input && Object.keys(p.tool_input).length > 0 ? `Input: ${safeJson(p.tool_input)}` : "",
           p.cwd ? `Working directory: ${stripControl(p.cwd).trim()}` : "",
         ]
           .filter(Boolean)
@@ -151,6 +151,12 @@ export function buildApprovalRequest(
     },
     public_key: cfg.publicKey,
   };
+}
+
+function toolHead(toolName: string, input: Record<string, unknown> | undefined): string {
+  const name = stripControl(toolName || "tool").trim() || "tool";
+  const detail = toolDetail(input) || (input && Object.keys(input).length > 0 ? safeJson(input) : "");
+  return capVisibly(detail ? `${name}: ${detail}` : name, TITLE_DETAIL_MAX);
 }
 
 function safeJson(value: unknown): string {

@@ -1353,10 +1353,77 @@ describe("approval request shaping", () => {
       cfg
     );
     const question = String(body.question);
-    const fullLength = Array.from(`The agent wants to use Bash.\nInput: ${JSON.stringify({ command: "x".repeat(5000) })}`).length;
+    const head = question.split("\n")[0]!;
+    const fullLength = Array.from(`${head}\nInput: ${JSON.stringify({ command: "x".repeat(5000) })}`).length;
     expect(question.endsWith(`[truncated from ${fullLength} characters]`), question.slice(-60)).toBe(true);
     expect(Array.from(question).length).toBeLessThanOrEqual(4000);
     expect(question).toContain("x".repeat(3000));
+  });
+
+  test("line 1 of a permission question is the tool summary, one line", () => {
+    const head = (toolName: string, toolInput: Record<string, unknown>): string =>
+      String(
+        buildApprovalRequest({ hook_event_name: "PermissionRequest", tool_name: toolName, tool_input: toolInput }, cfg)
+          .question
+      ).split("\n")[0]!;
+
+    expect(head("Bash", { command: "rm -rf build" })).toBe("Bash: rm -rf build");
+    expect(head("Write", { file_path: "/a/b.ts", content: "x" })).toBe("Write: /a/b.ts");
+    expect(head("Bash", { command: "echo a\necho b" })).toBe("Bash: echo a echo b");
+  });
+
+  test("a tool with no command, path or url shows its compact JSON on line 1, and a tool with no input only its name", () => {
+    const question = (toolName: string, toolInput: Record<string, unknown>): string =>
+      String(
+        buildApprovalRequest({ hook_event_name: "PermissionRequest", tool_name: toolName, tool_input: toolInput }, cfg)
+          .question
+      );
+
+    expect(question("WebSearch", { query: "kory" }).split("\n")[0]).toBe('WebSearch: {"query":"kory"}');
+    const empty = question("Glob", {});
+    expect(empty.split("\n")[0]).toBe("Glob");
+    expect(empty, "an empty input must not emit an Input line").not.toContain("Input:");
+  });
+
+  test("a summary past the title bound is cut visibly on line 1 while the Input line keeps the whole command", () => {
+    const command = "c".repeat(500);
+    const question = String(
+      buildApprovalRequest(
+        { hook_event_name: "PermissionRequest", tool_name: "Bash", tool_input: { command } },
+        cfg
+      ).question
+    );
+    const [head, input] = question.split("\n") as [string, string];
+
+    expect(head.endsWith("[truncated from 506 characters]"), head).toBe(true);
+    expect(Array.from(head).length).toBeLessThanOrEqual(160);
+    expect(input).toBe(`Input: ${JSON.stringify({ command })}`);
+  });
+
+  test("a tool name with no input is cut visibly on line 1 like any other summary", () => {
+    const question = String(
+      buildApprovalRequest(
+        { hook_event_name: "PermissionRequest", tool_name: "T".repeat(3000), tool_input: {} },
+        cfg
+      ).question
+    );
+    const head = question.split("\n")[0]!;
+
+    expect(head.endsWith("[truncated from 3000 characters]"), head).toBe(true);
+    expect(Array.from(head).length).toBeLessThanOrEqual(160);
+  });
+
+  test("a 3700-character command keeps its whole Input line inside the question bound", () => {
+    const command = "d".repeat(3700);
+    const question = String(
+      buildApprovalRequest(
+        { hook_event_name: "PermissionRequest", tool_name: "Bash", tool_input: { command } },
+        cfg
+      ).question
+    );
+    const input = question.split("\n").find((line) => line.startsWith("Input: "));
+
+    expect(input, "the Input line must survive the 4000-character bound").toBe(`Input: ${JSON.stringify({ command })}`);
   });
 
   test("a long notification message is cut visibly in the title, whole in the question", () => {

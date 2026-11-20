@@ -87,7 +87,8 @@ type QuestionInput = { kind: 'none' } | { kind: 'ambiguous' } | { kind: 'ok'; va
  * Input lines, or a duplicated key JSON.parse would silently resolve).
  */
 function questionInput(question: string, field: string): QuestionInput {
-  const inputs = question.split('\n').filter((l) => l.startsWith('Input: '))
+  // Line 1 is the tool head, which the agent's tool name can make read `Input: `.
+  const inputs = question.split('\n').slice(1).filter((l) => l.startsWith('Input: '))
   if (inputs.length === 0) return { kind: 'none' }
   if (inputs.length > 1) return { kind: 'ambiguous' }
   const raw = inputs[0]!.slice('Input: '.length)

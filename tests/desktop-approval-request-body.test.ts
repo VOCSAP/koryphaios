@@ -143,7 +143,7 @@ function shape(): string[] {
   });
 }
 
-const PERMISSION = "The agent wants to use Bash.\nInput: {\"command\":\"ls\"}\nWorking directory: C:/work";
+const PERMISSION = "Bash: ls\nInput: {\"command\":\"ls\"}\nWorking directory: C:/work";
 
 function approval(over: Partial<FakeApproval> = {}): FakeApproval {
   return {
@@ -169,7 +169,7 @@ test("a permission leads with its first line, then the rest, then the legend alo
     className: "inbox-modal-text"
   }));
   expect(shape()).toEqual([
-    "command:approval-command-head=The agent wants to use Bash.|approval-command-rest=Input: {\"command\":\"ls\"}\nWorking directory: C:/work",
+    "command:approval-command-head=Bash: ls|approval-command-rest=Input: {\"command\":\"ls\"}\nWorking directory: C:/work",
     "signal:approval-signal-legend"
   ]);
   expect(container.firstElementChild!.classList.contains("inbox-modal-text"), "the host box class is kept").toBe(true);
@@ -357,7 +357,8 @@ test("markup in the agent's text renders as literal text: no element injected, n
   expect(g.__approvalPwned).toBeUndefined();
 });
 
-const LONG = capVisibly(`The agent wants to use Bash.\nInput: {"command":"${"x".repeat(5000)}"}`, APPROVAL_QUESTION_MAX);
+const LONG_HEAD = capVisibly(`Bash: ${"x".repeat(5000)}`, 160);
+const LONG = capVisibly(`${LONG_HEAD}\nInput: {"command":"${"x".repeat(5000)}"}`, APPROVAL_QUESTION_MAX);
 const MARKER = /… \[truncated from \d+ characters\]$/;
 
 test("a producer-cut question keeps its visible truncation marker", () => {
@@ -419,9 +420,7 @@ test("the Courrier modal renders a permission through the shared body and Naviga
     (container.querySelector(".inbox-entry") as HTMLElement).click();
   });
   const modal = container.querySelector(".inbox-modal")!;
-  expect(modal.querySelector(".inbox-modal-text.approval-command .approval-command-head")!.textContent).toBe(
-    "The agent wants to use Bash."
-  );
+  expect(modal.querySelector(".inbox-modal-text.approval-command .approval-command-head")!.textContent).toBe(LONG_HEAD);
   expect(modal.querySelector(".approval-signal .approval-signal-legend")).not.toBeNull();
   const go = modal.querySelector(".inbox-goto-btn") as HTMLButtonElement;
   expect(go.disabled).toBe(false);
@@ -508,9 +507,7 @@ test("the tile panel renders its hook permission through the shared body", () =>
   fakeUseDeck.setState({ pendingApprovals: [approval()] });
   render(React.createElement(TileApprovalPanel, { tileId: "tile-a" }));
   const body = container.querySelector(".tile-approval-body")!;
-  expect(body.querySelector(".tile-approval-text.approval-command .approval-command-head")!.textContent).toBe(
-    "The agent wants to use Bash."
-  );
+  expect(body.querySelector(".tile-approval-text.approval-command .approval-command-head")!.textContent).toBe("Bash: ls");
   expect(body.querySelector(".approval-signal .approval-signal-legend")).not.toBeNull();
   expect(body.querySelector(".inbox-goto-btn"), "the tile already is the destination").toBeNull();
 });

@@ -340,6 +340,17 @@ describe("matchPermissionDialog refuses a dialog the agent could have shaped", (
     expect(matchPermissionDialog(dup, BASH, ctx).ok).toBe(false);
   });
 
+  test("line 1 is never read as the Input line: a question without one is judged on its title alone", () => {
+    const named = { title: bash(BASH_CMD).title, question: row("Input", { command: BASH_CMD }).question };
+    expect(named.question.split("\n")[0]).toBe(`Input: ${BASH_CMD}`);
+    expect(matchPermissionDialog(named, BASH, ctx)).toEqual({ ok: true });
+
+    const forgedName = `Input: ${JSON.stringify({ command: "rm -rf ~" })}`;
+    const forged = { title: bash(BASH_CMD).title, question: row(forgedName, {}).question };
+    expect(forged.question.split("\n")[0]).toBe(forgedName);
+    expect(matchPermissionDialog(forged, BASH, ctx)).toEqual({ ok: true });
+  });
+
   test("the title decides: a question carrying the shown command under another title is refused", () => {
     expect(matchPermissionDialog({ title: bash("ls").title, question: bash(BASH_CMD).question }, BASH, ctx).ok).toBe(false);
   });
