@@ -47,7 +47,7 @@ export function graphsFile(stateDir: string, projectKey: string): string {
 }
 
 function parseDocs(raw: unknown): GraphDoc[] {
-  if (!Array.isArray(raw)) return []
+  if (!Array.isArray(raw)) throw new Error('graphs file is not an array')
   return raw
     .map(parseGraphDoc)
     .filter((d): d is GraphDoc => !!d)
@@ -55,11 +55,11 @@ function parseDocs(raw: unknown): GraphDoc[] {
 }
 
 /**
- * All graphs of the project, newest first. Corrupt entries are dropped; an
- * encrypted file that cannot be decrypted (no cipher, OS key changed) yields
- * [] rather than throwing -- the operator sees an empty list, not a crash.
+ * [] only when the file is absent. A file that exists but cannot be read (no
+ * cipher, OS key changed, corrupt JSON, oversized) is traced, with the error
+ * name only, and thrown: a caller that goes on to save would overwrite it.
  */
-export async function loadGraphs(
+async function readGraphs(
   stateDir: string,
   projectKey: string,
   cipher?: SecretCipher
@@ -68,14 +68,34 @@ export async function loadGraphs(
   try {
     if (!existsSync(file)) return []
     const text = readFileSync(file, 'utf-8')
-    if (text.length > MAX_FILE_BYTES) return []
+    if (text.length > MAX_FILE_BYTES) throw new Error('graphs file is too large')
     const raw = JSON.parse(text)
     if (isEnvelope(raw)) {
-      if (!cipher || !(await cipher.isAvailableAsync())) return []
+      if (!cipher || !(await cipher.isAvailableAsync())) {
+        throw new Error('graphs file is encrypted and no cipher is available')
+      }
       return parseDocs(JSON.parse(await cipher.decryptAsync(Buffer.from(raw.payload, 'base64'))))
     }
     // Legacy clear array (pre-K8): still readable, re-encrypted on next save.
     return parseDocs(raw)
+  } catch (e) {
+    reportError('graph', 'could not read the graphs file', e instanceof Error ? e.name : typeof e)
+    throw e
+  }
+}
+
+/**
+ * All graphs of the project, newest first. Corrupt entries are dropped; a file
+ * that cannot be read yields [] (already traced by readGraphs) -- the operator
+ * sees an empty list, not a crash.
+ */
+export async function loadGraphs(
+  stateDir: string,
+  projectKey: string,
+  cipher?: SecretCipher
+): Promise<GraphDoc[]> {
+  try {
+    return await readGraphs(stateDir, projectKey, cipher)
   } catch {
     return []
   }
@@ -153,7 +173,7 @@ export function upsertGraph(
 ): Promise<GraphDoc> {
   return serialized(graphsFile(stateDir, projectKey), async () => {
     const stamped = { ...doc, updatedAt: Date.now() }
-    const rest = (await loadGraphs(stateDir, projectKey, cipher)).filter((d) => d.id !== doc.id)
+    const rest = (await readGraphs(stateDir, projectKey, cipher)).filter((d) => d.id !== doc.id)
     await saveGraphs(stateDir, projectKey, [stamped, ...rest], cipher)
     return stamped
   })
@@ -166,7 +186,7 @@ export function deleteGraph(
   cipher?: SecretCipher
 ): Promise<boolean> {
   return serialized(graphsFile(stateDir, projectKey), async () => {
-    const docs = await loadGraphs(stateDir, projectKey, cipher)
+    const docs = await readGraphs(stateDir, projectKey, cipher)
     const rest = docs.filter((d) => d.id !== id)
     if (rest.length === docs.length) return false
     await saveGraphs(stateDir, projectKey, rest, cipher)

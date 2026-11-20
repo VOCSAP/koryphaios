@@ -217,6 +217,102 @@ test("a failing save rejects, and does not block the next one", async () => {
   expect((await loadGraphs(dir, KEY, fakeCipher())).map((d) => d.id)).toEqual(["b"]);
 });
 
+async function traced<T>(run: () => Promise<T>): Promise<{ result: T; texts: string[] }> {
+  const texts: string[] = [];
+  onDeckError((_scope, text) => texts.push(text));
+  try {
+    return { result: await run(), texts };
+  } finally {
+    onDeckError(() => {});
+  }
+}
+
+test("a save or delete never overwrites a graphs file that cannot be read", async () => {
+  const cipher = fakeCipher();
+  const brokenDecrypt: SecretCipher = {
+    ...cipher,
+    decryptAsync: async () => {
+      throw new Error("key mismatch");
+    },
+  };
+  const cases: Array<[string, SecretCipher | undefined]> = [
+    ["no cipher", undefined],
+    ["keychain unavailable", fakeCipher(false)],
+    ["decryption fails", brokenDecrypt],
+  ];
+  for (const [label, usable] of cases) {
+    const dir = tmp();
+    await saveGraphs(dir, KEY, [doc("a", "precious")], cipher);
+    const before = readFileSync(graphsFile(dir, KEY));
+
+    const { texts } = await traced(async () => {
+      await expect(upsertGraph(dir, KEY, doc("b", "new"), usable), label).rejects.toThrow();
+      await expect(deleteGraph(dir, KEY, "a", usable), label).rejects.toThrow();
+      return null;
+    });
+
+    expect(readFileSync(graphsFile(dir, KEY)).equals(before), label).toBe(true);
+    expect(texts, label).toHaveLength(2);
+    expect(texts.every((t) => t.startsWith("could not read the graphs file")), label).toBe(true);
+    // The rejected saves did not poison the queue: the readable cipher still sees the original doc.
+    await upsertGraph(dir, KEY, doc("c", "later"), cipher);
+    expect((await loadGraphs(dir, KEY, cipher)).map((d) => d.id).sort(), label).toEqual(["a", "c"]);
+  }
+});
+
+test("a graphs file that is not a readable array is traced by name only, refused on save, and reads as []", async () => {
+  const cipher = fakeCipher();
+  const envelopeOf = async (plain: string) =>
+    JSON.stringify({ v: 1, cipher: "safeStorage", payload: (await cipher.encryptAsync(plain)).toString("base64") });
+  const cases: Array<[string, string, string]> = [
+    ["corrupt JSON", "not json{{{ SECRET-CONTENT", "SyntaxError"],
+    ["empty object", "{}", "Error"],
+    ["null", "null", "Error"],
+    ["number", "42", "Error"],
+    ["encrypted payload that is not an array", await envelopeOf("{}"), "Error"],
+  ];
+  for (const [label, content, errorName] of cases) {
+    const dir = tmp();
+    mkdirSync(join(dir, "graphs"), { recursive: true });
+    writeFileSync(graphsFile(dir, KEY), content, "utf-8");
+    const before = readFileSync(graphsFile(dir, KEY));
+
+    const { result, texts } = await traced(async () => {
+      const listed = await loadGraphs(dir, KEY, cipher);
+      await expect(upsertGraph(dir, KEY, doc("a"), cipher), label).rejects.toThrow();
+      return listed;
+    });
+
+    expect(result, label).toEqual([]);
+    expect(readFileSync(graphsFile(dir, KEY)).equals(before), label).toBe(true);
+    expect(texts, label).toEqual([
+      `could not read the graphs file: ${errorName}`,
+      `could not read the graphs file: ${errorName}`,
+    ]);
+  }
+});
+
+test("a graphs file over the size cap is refused on save and left untouched", async () => {
+  const dir = tmp();
+  mkdirSync(join(dir, "graphs"), { recursive: true });
+  writeFileSync(graphsFile(dir, KEY), "[" + " ".repeat(64 * 1024 * 1024) + "]", "utf-8");
+  const before = readFileSync(graphsFile(dir, KEY));
+
+  await traced(async () => {
+    await expect(upsertGraph(dir, KEY, doc("a"))).rejects.toThrow();
+    return null;
+  });
+
+  expect(readFileSync(graphsFile(dir, KEY)).equals(before)).toBe(true);
+});
+
+test("an absent graphs file is an empty list, not a refusal, and is not traced", async () => {
+  const dir = tmp();
+  const { texts } = await traced(async () => upsertGraph(dir, KEY, doc("a", "first"), fakeCipher()));
+  expect(texts).toEqual([]);
+  expect((await loadGraphs(dir, KEY, fakeCipher())).map((d) => d.name)).toEqual(["first"]);
+});
+
 test("opening a graph draft traces a failed broker flip instead of swallowing it", () => {
   const source = readFileSync(join(import.meta.dir, "..", "desktop", "src", "main", "ipc.ts"), "utf8").replace(/\r\n/g, "\n");
   const anchor = "regHandle('graphDraft:open'";
