@@ -36,3 +36,19 @@ test("enrolment apply fails before reporting successful linking when approval ar
   expect(enrolmentApplyFailsWhenArmFails(indexTs)).toBe(true);
   expect(enrolmentApplyFailsWhenArmFails(indexTs.replace("if (!(await approvals.arm())) {", "if (false) {"))).toBe(false);
 });
+
+function enrolmentApplyInvalidatesSignerInOrder(source: string): boolean {
+  const start = source.indexOf("regHandle('approvals:enrolment-apply'");
+  const end = source.indexOf("\n  })", start);
+  if (start === -1 || end === -1) return false;
+  const body = source.slice(start, end);
+  const adopted = body.indexOf("if (!adopted) return false");
+  const invalidate = body.indexOf("invalidateRoadmapSigner()");
+  const disarm = body.indexOf("approvals.disarm()");
+  return adopted !== -1 && invalidate > adopted && disarm > invalidate;
+}
+
+test("enrolment apply drops the cached roadmap signer once the identity is adopted, before approvals are re-armed", () => {
+  expect(enrolmentApplyInvalidatesSignerInOrder(indexTs)).toBe(true);
+  expect(enrolmentApplyInvalidatesSignerInOrder(indexTs.replace("invalidateRoadmapSigner()", ""))).toBe(false);
+});

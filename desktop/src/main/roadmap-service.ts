@@ -83,6 +83,13 @@ export function configureRoadmapSigner(loader: RoadmapSignerLoader): void {
   signerGeneration += 1
 }
 
+/** Forget the cached signer and any load in flight; the next signature runs the loader again. */
+export function invalidateRoadmapSigner(): void {
+  cachedSigner = null
+  loadingSigner = null
+  signerGeneration += 1
+}
+
 /** Test seam: forget both the loader and what it returned. */
 export function resetRoadmapSigner(): void {
   signerLoader = null

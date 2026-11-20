@@ -20,6 +20,7 @@ import {
   stopBroker,
   type TestBroker
 } from "./_helper.ts";
+import { reachedWithin } from "./_bounded-await.ts";
 import { fetchAtomicDispatchCapability } from "../desktop/src/main/broker-client.ts";
 import {
   atomicOperationId,
@@ -37,6 +38,7 @@ import {
   appendRoadmapContext,
   computeDeckProjectKey,
   configureRoadmapSigner,
+  invalidateRoadmapSigner,
   resetRoadmapSigner,
   listRoadmap,
   postAtomicDispatch,
@@ -442,6 +444,130 @@ test("a loader that has no signer yet is asked again on the next write", async (
       await expect(upsertRoadmap(endpoint, key, { title: "too early" })).rejects.toThrow(/sign the write with the operator credential/);
       expect((await upsertRoadmap(endpoint, key, { title: "retried" })).id.length).toBeGreaterThan(10);
       expect(loads).toBe(2);
+    }
+  );
+});
+
+const identityTaggedSigner = (identity: string, used: string[]) => (payload: Record<string, unknown>) => {
+  used.push(identity);
+  return deckSigner(payload);
+};
+
+function gate(): { opened: Promise<void>; open: () => void } {
+  let open: () => void = () => {};
+  const opened = new Promise<void>((resolve) => {
+    open = resolve;
+  });
+  return { opened, open };
+}
+
+test("after the signer is invalidated, the next write signs with the identity the loader now returns", async () => {
+  const endpoint = { url: broker.url, token: null };
+  const key = "github.com/acme/deck-invalidate-signer-test";
+  const used: string[] = [];
+  let onDisk = "old";
+  await withSignerLoader(
+    () => identityTaggedSigner(onDisk, used),
+    async () => {
+      await upsertRoadmap(endpoint, key, { title: "before enrolment" });
+      onDisk = "new";
+      invalidateRoadmapSigner();
+      await upsertRoadmap(endpoint, key, { title: "after enrolment" });
+      expect(used, "each write is signed by the identity on disk when its signer was loaded").toEqual(["old", "new"]);
+    }
+  );
+});
+
+test("a signer load that started before the invalidation does not put the old identity back in the cache", async () => {
+  const endpoint = { url: broker.url, token: null };
+  const key = "github.com/acme/deck-invalidate-inflight-test";
+  const used: string[] = [];
+  let onDisk = "old";
+  let loads = 0;
+  let firstLoadStarted: () => void = () => {};
+  const started = new Promise<void>((resolve) => {
+    firstLoadStarted = resolve;
+  });
+  let releaseFirstLoad: () => void = () => {};
+  const firstLoadGate = new Promise<void>((resolve) => {
+    releaseFirstLoad = resolve;
+  });
+  const secondLoad = gate();
+  await withSignerLoader(
+    async () => {
+      loads += 1;
+      const load = loads;
+      const identity = onDisk;
+      if (load === 1) {
+        firstLoadStarted();
+        await firstLoadGate;
+      }
+      if (load === 2) secondLoad.open();
+      return identityTaggedSigner(identity, used);
+    },
+    async () => {
+      const inFlight = upsertRoadmap(endpoint, key, { title: "signed while the enrolment lands" });
+      await started;
+      onDisk = "new";
+      invalidateRoadmapSigner();
+      try {
+        const afterEnrolment = upsertRoadmap(endpoint, key, { title: "after enrolment" });
+        await reachedWithin(secondLoad.opened, "a signer load after the invalidation", 1500);
+        await afterEnrolment;
+      } finally {
+        releaseFirstLoad();
+      }
+      await inFlight;
+      await upsertRoadmap(endpoint, key, { title: "after the old load settled" });
+      expect(used, "the write that loaded the old signer keeps it; every later write signs with the new identity").toEqual([
+        "new",
+        "old",
+        "new"
+      ]);
+      expect(loads, "the late old load must not force a third load either").toBe(2);
+    }
+  );
+});
+
+test("an old signer load settling late does not clear the load of the new generation: a later write joins it", async () => {
+  const endpoint = { url: broker.url, token: null };
+  const key = "github.com/acme/deck-invalidate-late-settle-test";
+  let loads = 0;
+  const firstStarted = gate();
+  const firstRelease = gate();
+  const secondStarted = gate();
+  const secondRelease = gate();
+  await withSignerLoader(
+    async () => {
+      loads += 1;
+      const load = loads;
+      if (load === 1) {
+        firstStarted.open();
+        await firstRelease.opened;
+      }
+      if (load === 2) {
+        secondStarted.open();
+        await secondRelease.opened;
+      }
+      return deckSigner;
+    },
+    async () => {
+      try {
+        const first = upsertRoadmap(endpoint, key, { title: "first, old load" });
+        await reachedWithin(firstStarted.opened, "the first signer load started", 1500);
+        invalidateRoadmapSigner();
+        const second = upsertRoadmap(endpoint, key, { title: "second, load after the invalidation" });
+        await reachedWithin(secondStarted.opened, "the signer load after the invalidation started", 1500);
+        firstRelease.open();
+        await reachedWithin(first, "the write holding the old load settled", 1500);
+        const third = upsertRoadmap(endpoint, key, { title: "third, while the second load is pending" });
+        secondRelease.open();
+        await reachedWithin(Promise.all([second, third]), "the writes of the new generation settled", 1500);
+        expect(loads, "the third write joins the pending load instead of starting another").toBe(2);
+      } finally {
+        firstRelease.open();
+        secondRelease.open();
+      }
     }
   );
 });

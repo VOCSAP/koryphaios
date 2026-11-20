@@ -145,6 +145,7 @@ import {
   configureRoadmapSigner,
   fetchRoadmapConflicts,
   fetchRoadmapSyncStatus,
+  invalidateRoadmapSigner,
   listRoadmap,
   postAtomicDispatch,
   RoadmapRequestError,
@@ -3761,6 +3762,7 @@ app.whenReady().then(async () => {
   regHandle('approvals:enrolment-apply', async (_e, payload: unknown) => {
     const adopted = await applyEnrolment(join(app.getPath('userData'), APP_STATE_SUBDIR), secretCipher, payload)
     if (!adopted) return false
+    invalidateRoadmapSigner()
     await approvals.disarm()
     if (!(await approvals.arm())) {
       reportError('approvals', 'could not arm remote approvals after enrolment')
