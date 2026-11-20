@@ -241,6 +241,23 @@ describe("effective file per tile", () => {
     expect(effective(sup), "the supervisor applies only the generic Kory rules").toEqual(KORY_IDS);
   });
 
+  test("a repo rule that reuses a built-in's id sits beside it: it neither replaces it nor shares its toggle", async () => {
+    const h = harness();
+    const cwd = tmp();
+    writeRepoRules(
+      cwd,
+      fileOf(rule("rm-recursive", { tools: ["Bash"], field: "command", mode: "warn", pattern: "never-matches" }))
+    );
+    h.answer.value = true;
+    h.svc.tick();
+    const path = h.svc.fileFor({ id: randomUUID(), cwd });
+    await flush();
+    expect(effective(path)).toEqual([...KORY_IDS, "repo/rm-recursive"]);
+    h.disabled.push("kory/rm-recursive");
+    h.svc.recompileAll();
+    expect(effective(path)).toEqual([...KORY_IDS.filter((k) => k !== "kory/rm-recursive"), "repo/rm-recursive"]);
+  });
+
   test("remove() deletes the tile's effective file and its sandbox copy", () => {
     const h = harness();
     const id = randomUUID();

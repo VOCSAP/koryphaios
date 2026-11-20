@@ -185,6 +185,80 @@ describe("approval lifecycle", () => {
     expect(listed.body.approvals.find((a) => a.id === added.id)?.text_flags).toEqual(["bidi"]);
   });
 
+  test("a permission's danger list is normalised, served, flagged for hidden characters and listed again", async () => {
+    const b = await boot();
+    const op = newOperator();
+    const rlo = String.fromCodePoint(0x202e);
+    const bel = String.fromCodePoint(0x07);
+
+    const plain = await addApproval(b, op);
+    expect(plain.danger, "a row with no danger reads as an empty list").toEqual([]);
+
+    const added = await addApproval(b, op, {
+      danger: [
+        { id: "kory/rm-rf", source: "kory", message: `  Deletes files${bel} recursively${rlo}  ` },
+        { id: "repo/drop-table", source: "repo", message: "x".repeat(500) },
+      ],
+    });
+    expect(added.danger[0], "controls stripped, the bidi character kept for the reveal").toEqual({
+      id: "kory/rm-rf",
+      source: "kory",
+      message: `Deletes files recursively${rlo}`,
+    });
+    expect(added.danger[1]?.message.length, "a long message is cut").toBeLessThanOrEqual(200);
+
+    const edge = await addApproval(b, op, {
+      danger: [
+        ...Array.from({ length: 7 }, (_, i) => ({ id: `user/r${i}`, source: "user", message: "m" })),
+        { id: "user/last", source: "user", message: "y".repeat(200) },
+      ],
+    });
+    expect(edge.danger.length, "eight entries are accepted").toBe(8);
+    expect(edge.danger[7]?.message, "a message of exactly 200 characters is kept whole").toBe("y".repeat(200));
+    expect(added.text_flags, "a hidden character in a danger message flags the row").toEqual(["bidi"]);
+
+    const listed = await signedPost<{ approvals: Approval[] }>(
+      b,
+      "/approval/list",
+      approvalListBody(DEFAULT_PROJECT_KEY),
+      { cred: op.cred, operator_id: op.id }
+    );
+    expect(listed.body.approvals.find((a) => a.id === added.id)?.danger).toEqual(added.danger);
+  });
+
+  const refusedDangers: Array<[string, Record<string, unknown>]> = [
+    ["a non-array", { danger: "x" }],
+    ["nine entries", { danger: Array.from({ length: 9 }, () => ({ id: "kory/a", source: "kory", message: "m" })) }],
+    ["a null entry", { danger: [null] }],
+    ["an unknown key", { danger: [{ id: "kory/a", source: "kory", message: "m", pattern: ".*" }] }],
+    ["an id outside the three sources", { danger: [{ id: "evil/a", source: "evil", message: "m" }] }],
+    ["an id with an upper-case letter", { danger: [{ id: "kory/Rm", source: "kory", message: "m" }] }],
+    ["an id longer than a rule id", { danger: [{ id: `kory/${"a".repeat(80)}`, source: "kory", message: "m" }] }],
+    ["a source that is not the id prefix", { danger: [{ id: "kory/a", source: "user", message: "m" }] }],
+    ["a message that is not a string", { danger: [{ id: "kory/a", source: "kory", message: 7 }] }],
+    ["a danger on a question", { kind: "question", danger: [{ id: "kory/a", source: "kory", message: "m" }] }],
+  ];
+  for (const [name, body] of refusedDangers) {
+    test(`${name} in danger is refused whole and nothing is stored`, async () => {
+      const b = await boot();
+      const op = newOperator();
+      const res = await signedPost<{ error: string }>(
+        b,
+        "/approval/add",
+        { kind: "permission", title: "Run tests", question: "Allow?", options: [], origin: { host: "bureau", project_key: DEFAULT_PROJECT_KEY }, ...body },
+        { cred: op.cred, operator_id: op.id }
+      );
+      expect(res.status).toBe(400);
+      const listed = await signedPost<{ approvals: Approval[] }>(
+        b,
+        "/approval/list",
+        approvalListBody(DEFAULT_PROJECT_KEY),
+        { cred: op.cred, operator_id: op.id }
+      );
+      expect(listed.body.approvals).toEqual([]);
+    });
+  }
+
   test("claim settles it and records who won", async () => {
     const b = await boot();
     const op = newOperator();

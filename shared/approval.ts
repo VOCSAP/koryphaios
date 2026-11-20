@@ -25,6 +25,7 @@ import type {
   ApprovalAnswers,
   ApprovalAuthKind,
   ApprovalAuthProof,
+  ApprovalDanger,
   ApprovalKind,
   ApprovalMerge,
   ApprovalOrigin,
@@ -40,6 +41,7 @@ export type {
   ApprovalAnswerKind,
   ApprovalAuthKind,
   ApprovalAuthProof,
+  ApprovalDanger,
   ApprovalKind,
   ApprovalMerge,
   ApprovalOrigin,
@@ -57,6 +59,8 @@ export const APPROVAL_OPTIONS_MAX = 10;
 export const APPROVAL_ANSWER_MAX = 4000;
 export const APPROVAL_SESSION_REF_MAX = 128;
 export const APPROVAL_QUESTIONS_MAX = 4;
+export const APPROVAL_DANGER_MAX = 8;
+export const APPROVAL_DANGER_MESSAGE_MAX = 200;
 export const APPROVAL_HEADER_MAX = 64;
 export const APPROVAL_OPTION_DESCRIPTION_MAX = 500;
 /** One Other answer: it reaches the model as is. */
@@ -446,6 +450,8 @@ export interface ApprovalDraft {
   tile_only: boolean;
   /** AskUserQuestion questions, null when the body carries none. */
   questions: ApprovalQuestion[] | null;
+  /** Guard rules the producer reports as matching, empty when the body carries none. */
+  danger: ApprovalDanger[];
 }
 
 export type ValidationResult<T> = { ok: true; value: T } | { ok: false; error: string };
@@ -557,6 +563,35 @@ export function validateQuestions(raw: unknown): ValidationResult<ApprovalQuesti
   return { ok: true, value: out };
 }
 
+const DANGER_ID_RE = /^(kory|user|repo)\/[a-z0-9]+(?:-[a-z0-9]+)*$/;
+const DANGER_ID_MAX = 80;
+const DANGER_KEYS: readonly string[] = ["id", "source", "message"];
+
+/**
+ * The matches come from the hook of an agent's tile (hostile input #4) and
+ * only hint at what the operator should look at: a closed shape is refused
+ * whole, the message is stripped and capped like a title.
+ */
+export function validateApprovalDanger(raw: unknown): ValidationResult<ApprovalDanger[]> {
+  if (!Array.isArray(raw)) return { ok: false, error: "danger must be an array" };
+  if (raw.length > APPROVAL_DANGER_MAX) return { ok: false, error: `at most ${APPROVAL_DANGER_MAX} danger entries` };
+  const out: ApprovalDanger[] = [];
+  for (const [i, d] of raw.entries()) {
+    if (!isPlainObject(d)) return { ok: false, error: `danger entry ${i + 1} must be an object` };
+    const stray = Object.keys(d).find((k) => !DANGER_KEYS.includes(k));
+    if (stray !== undefined) return { ok: false, error: `danger entry ${i + 1}: unknown key "${cutCodePoints(stray, 40)}"` };
+    const id = d.id;
+    if (typeof id !== "string" || id.length > DANGER_ID_MAX || !DANGER_ID_RE.test(id)) {
+      return { ok: false, error: `danger entry ${i + 1}: id must be <kory|user|repo>/<rule id>` };
+    }
+    const source = id.slice(0, id.indexOf("/")) as ApprovalDanger["source"];
+    if (d.source !== source) return { ok: false, error: `danger entry ${i + 1}: source must match the id prefix` };
+    if (typeof d.message !== "string") return { ok: false, error: `danger entry ${i + 1}: message must be a string` };
+    out.push({ id, source, message: capVisibly(stripControl(d.message).trim(), APPROVAL_DANGER_MESSAGE_MAX) });
+  }
+  return { ok: true, value: out };
+}
+
 /**
  * Validate an `answers` claim against the row's questions. Every question must
  * be answered, by option labels (any number on a multi-select question, one
@@ -625,6 +660,7 @@ export function validateApprovalDraft(body: {
   merge?: unknown;
   tile_only?: unknown;
   questions?: unknown;
+  danger?: unknown;
 }): ValidationResult<ApprovalDraft> {
   const kind = str(body.kind) as ApprovalKind;
   if (!APPROVAL_KINDS.includes(kind)) return { ok: false, error: "kind must be permission|question|plan" };
@@ -676,7 +712,15 @@ export function validateApprovalDraft(body: {
     questions = parsed.value;
   }
 
-  return { ok: true, value: { kind, title, question, options, session_ref, tile_ref, merge, tile_only, questions } };
+  let danger: ApprovalDanger[] = [];
+  if (body.danger !== undefined && body.danger !== null) {
+    if (kind !== "permission") return { ok: false, error: "danger belongs to kind permission" };
+    const parsed = validateApprovalDanger(body.danger);
+    if (!parsed.ok) return parsed;
+    danger = parsed.value;
+  }
+
+  return { ok: true, value: { kind, title, question, options, session_ref, tile_ref, merge, tile_only, questions, danger } };
 }
 
 // --- Sanitisers ---

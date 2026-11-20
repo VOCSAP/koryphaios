@@ -293,6 +293,7 @@ import type {
   ApprovalAuthProof,
   ApprovalClaimRequest,
   ApprovalClaimResponse,
+  ApprovalDanger,
   ApprovalDeliveredRequest,
   ApprovalDeliveredResponse,
   ApprovalListRequest,
@@ -1978,6 +1979,7 @@ for (const column of [
   "closed_by_instance_ref TEXT",
   "closed_by_peer_id_snapshot TEXT",
   "informational INTEGER NOT NULL DEFAULT 0",
+  "danger_json TEXT",
 ]) {
   try {
     db.run(`ALTER TABLE pending_approvals ADD COLUMN ${column}`);
@@ -12170,6 +12172,7 @@ type ApprovalRow = {
   producer_secret_hash: string;
   questions_json: string | null;
   answers_json: string | null;
+  danger_json?: string | null;
   author_instance_ref?: string | null;
   inbox_run_ref?: string | null;
   inbox_group_id?: string | null;
@@ -12214,6 +12217,7 @@ function rowToApproval(row: ApprovalRow): Approval {
     // route -- but it is a real anomaly, so it is traced (no-silent-errors).
     log.error(`approval ${row.id}: unreadable options_json`, err);
   }
+  const danger = parseStoredJson<ApprovalDanger[]>(row, "danger_json", row.danger_json ?? null) ?? [];
   return {
     id: row.id,
     operator_id: row.operator_id,
@@ -12235,7 +12239,8 @@ function rowToApproval(row: ApprovalRow): Approval {
     kind: row.kind as Approval["kind"],
     title: row.title,
     question: row.question,
-    text_flags: approvalTextFlags(row.title, row.question, options),
+    text_flags: approvalTextFlags(row.title, row.question, [...options, ...danger.map((d) => d.message)]),
+    danger,
     options,
     status: row.status as ApprovalStatus,
     answered_via: (row.answered_via as ApprovalVia | null) ?? null,
@@ -12707,8 +12712,8 @@ function handleApprovalAdd(
       `INSERT INTO pending_approvals
          (id, ${stamped.columns.join(", ")}, origin_host, origin_user, group_id, from_peer,
           tile_ref, mergeable, absorbed_permission, informational, reply_route, reply_token, reply_group, producer_secret_hash,
-          kind, title, question, options_json, questions_json, status, created_at, notif_expires_at${asker ? ", author_peer_id_snapshot" : ""})
-       VALUES (?, ${stamped.columns.map(() => "?").join(", ")}, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?${asker ? ", ?" : ""})`,
+          kind, title, question, options_json, questions_json, danger_json, status, created_at, notif_expires_at${asker ? ", author_peer_id_snapshot" : ""})
+       VALUES (?, ${stamped.columns.map(() => "?").join(", ")}, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?${asker ? ", ?" : ""})`,
       [
         id,
         ...stamped.values,
@@ -12729,6 +12734,7 @@ function handleApprovalAdd(
         draft.value.question,
         JSON.stringify(draft.value.options),
         draft.value.questions ? JSON.stringify(draft.value.questions) : null,
+        draft.value.danger.length > 0 ? JSON.stringify(draft.value.danger) : null,
         createdAt,
         notifExpiresAt,
         ...(asker ? [asker.peer_id] : []),

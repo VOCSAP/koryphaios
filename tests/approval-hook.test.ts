@@ -10,15 +10,21 @@ import {
   deriveTokenId,
   generateCredential,
 } from "../shared/approval.ts";
+import type { SpawnSyncReturns } from "node:child_process";
 import type { Approval } from "../shared/types.ts";
+import { qualifyRule } from "../desktop/src/shared/ttsr-rules.ts";
+import { KORY_EFFECTIVE_RULES } from "../desktop/src/shared/ttsr-builtin.ts";
+import type { TtsrRule } from "../desktop/src/shared/ttsr-types.ts";
 import type { PermissionLeaseReader } from "../desktop/hooks/permission-lease.ts";
 import type { PermissionTranscriptContext, PermissionTranscriptObserver } from "../desktop/hooks/permission-transcript.ts";
 import { encodePermissionLeaseDescriptor } from "../desktop/shared/permission-lease.ts";
 import {
   buildApprovalRequest,
   classifyPayload,
+  dangerFor,
   hasUnsafePermissionRepresentation,
   loadConfig,
+  matchDanger,
   parseHookPayload,
   PERMISSION_BUDGET_MS,
   servePermission,
@@ -1446,6 +1452,149 @@ describe("approval request shaping", () => {
   });
 });
 
+describe("danger signal", () => {
+  const rule = (over: Partial<TtsrRule> = {}) =>
+    qualifyRule("user", {
+      id: "no-rm-rf",
+      event: "PreToolUse",
+      tools: ["Bash"],
+      field: "command",
+      pattern: "rm\\s+-rf",
+      mode: "warn",
+      message: "Deletes files recursively.",
+      ...over,
+    });
+  const permission = {
+    hook_event_name: "PermissionRequest",
+    tool_name: "Bash",
+    tool_input: { command: "rm -rf build" },
+    cwd: "C:/work",
+  };
+  const entry = (id: string) => ({ id: `user/${id}`, source: "user", message: "m" });
+
+  function rulesEnv(rules: unknown[]): NodeJS.ProcessEnv {
+    const dir = mkdtempSync(join(tmpdir(), "cp-danger-"));
+    tmpDirs.push(dir);
+    const file = join(dir, "rules.json");
+    writeFileSync(file, JSON.stringify({ version: 1, rules }));
+    return { CLAUDE_PEERS_TTSR_FILE: file };
+  }
+  const answered = (stdout: string, status = 0): SpawnSyncReturns<string> =>
+    ({ status, signal: null, output: [], pid: 1, stdout, stderr: "" }) as SpawnSyncReturns<string>;
+  function spy(result: SpawnSyncReturns<string>): { calls: string[]; child: (input: string) => SpawnSyncReturns<string> } {
+    const calls: string[] = [];
+    return {
+      calls,
+      child: (input) => {
+        calls.push(input);
+        return result;
+      },
+    };
+  }
+  const run = (
+    env: NodeJS.ProcessEnv,
+    child?: (input: string) => SpawnSyncReturns<string>,
+    wallMs?: number,
+    call: typeof permission = permission
+  ) => captureStderr(async () => dangerFor(call, env, child, wallMs));
+
+  test("matchDanger judges a permission payload as a PreToolUse call and keeps the warn matches only", () => {
+    const rules = [rule(), rule({ id: "never", pattern: "never-matches" }), rule({ id: "denied", mode: "deny" })];
+    expect(matchDanger(rules, permission)).toEqual([
+      { id: "user/no-rm-rf", source: "user", message: "Deletes files recursively." },
+    ]);
+  });
+
+  test("no rules file variable, or a file that does not exist, spawns nothing and says nothing", async () => {
+    const quiet = spy(answered("[]"));
+    expect((await run({}, quiet.child)).result).toEqual([]);
+    const missing = await run({ CLAUDE_PEERS_TTSR_FILE: join(tmpdir(), "cp-danger-absent", "rules.json") }, quiet.child);
+    expect(missing.result).toEqual([]);
+    expect(missing.stderr, "an absent file is a tile with no rules, not a fault").toBe("");
+    expect(quiet.calls).toEqual([]);
+  });
+
+  test("an invalid rules file gives no danger and is traced", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "cp-danger-"));
+    tmpDirs.push(dir);
+    const file = join(dir, "rules.json");
+    writeFileSync(file, JSON.stringify({ version: 2, rules: [] }));
+    const quiet = spy(answered("[]"));
+    const out = await run({ CLAUDE_PEERS_TTSR_FILE: file }, quiet.child);
+    expect(out.result).toEqual([]);
+    expect(out.stderr).toContain("danger rules file invalid");
+    expect(quiet.calls).toEqual([]);
+  });
+
+  test("a file with no warn rule for the called tool never spawns the evaluation", async () => {
+    const env = rulesEnv([
+      rule({ mode: "deny" }),
+      rule({ id: "edit-only", tools: ["Edit"], field: "added" }),
+      rule({ id: "after", event: "PostToolUse" }),
+    ]);
+    const quiet = spy(answered(JSON.stringify([entry("no-rm-rf")])));
+    expect((await run(env, quiet.child)).result).toEqual([]);
+    expect(quiet.calls).toEqual([]);
+  });
+
+  test("the evaluation receives the warn rules of the tool and the call, and its matches come back", async () => {
+    const env = rulesEnv([rule(), rule({ id: "other", mode: "deny" })]);
+    const answer = spy(answered(JSON.stringify([entry("no-rm-rf")])));
+    const out = await run(env, answer.child);
+    expect(out.result).toEqual([{ id: "user/no-rm-rf", source: "user", message: "m" }]);
+    const sent = JSON.parse(answer.calls[0] ?? "{}") as { rules: Array<{ qualifiedId: string }>; payload: Record<string, unknown> };
+    expect(sent.rules.map((r) => r.qualifiedId)).toEqual(["user/no-rm-rf"]);
+    expect(sent.payload).toEqual({ tool_name: "Bash", tool_input: permission.tool_input, cwd: "C:/work" });
+  });
+
+  test("more than eight matches are cut to eight", async () => {
+    const env = rulesEnv([rule()]);
+    const many = spy(answered(JSON.stringify(Array.from({ length: 12 }, (_, i) => entry(`r${i}`)))));
+    expect((await run(env, many.child)).result.length).toBe(8);
+  });
+
+  test("a match the broker would refuse is dropped whole and traced", async () => {
+    const env = rulesEnv([rule()]);
+    const bad = spy(answered(JSON.stringify([{ id: "evil/x", source: "evil", message: "m" }])));
+    const out = await run(env, bad.child);
+    expect(out.result).toEqual([]);
+    expect(out.stderr).toContain("danger matches refused");
+  });
+
+  const brokenChildren: Array<[string, SpawnSyncReturns<string>]> = [
+    ["a spawn error", { ...answered(""), status: null, error: new Error("spawnSync ETIMEDOUT") }],
+    ["a non-zero exit that still printed matches", answered(JSON.stringify([entry("no-rm-rf")]), 1)],
+    ["output that is not JSON", answered("not json")],
+  ];
+  for (const [name, result] of brokenChildren) {
+    test(`${name} gives no danger and is traced`, async () => {
+      const out = await run(rulesEnv([rule()]), spy(result).child);
+      expect(out.result).toEqual([]);
+      expect(out.stderr).toContain("Kory approval hook: danger");
+    });
+  }
+
+  test("the real evaluation process answers with the matches", async () => {
+    const out = await run(rulesEnv([rule()]));
+    expect(out.result).toEqual([{ id: "user/no-rm-rf", source: "user", message: "Deletes files recursively." }]);
+  }, 20_000);
+
+  test("the Kory built-in warn rules flag a recursive delete and stay silent on a plain listing", async () => {
+    const env = rulesEnv([...KORY_EFFECTIVE_RULES]);
+    const flagged = await run(env);
+    expect(flagged.result.map((d) => d.id)).toEqual(["kory/rm-recursive"]);
+    expect(flagged.result[0]?.source).toBe("kory");
+    const listing = await run(env, undefined, undefined, { ...permission, tool_input: { command: "ls -la" } });
+    expect(listing.result).toEqual([]);
+  }, 20_000);
+
+  test("an evaluation that outlives the wall is killed and gives no danger", async () => {
+    const out = await run(rulesEnv([rule()]), undefined, 1);
+    expect(out.result).toEqual([]);
+    expect(out.stderr).toContain("danger evaluation stopped");
+  }, 20_000);
+});
+
 describe("hook subprocess", () => {
   async function setup(): Promise<{
     b: TestBroker;
@@ -1494,9 +1643,12 @@ describe("hook subprocess", () => {
     credFile: string | null,
     payload: unknown,
     tileRef?: string,
-    permissionLease = true
+    permissionLease = true,
+    extraEnv: Record<string, string> = {}
   ): Bun.Subprocess<"pipe", "pipe", "pipe"> {
     const env: Record<string, string> = { ...process.env } as Record<string, string>;
+    delete env.CLAUDE_PEERS_TTSR_FILE;
+    Object.assign(env, extraEnv);
     if (credFile) env.CLAUDE_PEERS_APPROVAL_FILE = credFile;
     else delete env.CLAUDE_PEERS_APPROVAL_FILE;
     if (tileRef) env.CLAUDE_PEERS_DESK_SESSION = tileRef;
@@ -1694,6 +1846,50 @@ describe("hook subprocess", () => {
       }
     }, 30_000);
   }
+
+  test("a permission carries the guard rules that matched its call, and is served without them when the rules file is unusable", async () => {
+    const { b, credFile, op } = await setup();
+    const dir = dirname(credFile);
+    const good = join(dir, "rules-good.json");
+    writeFileSync(
+      good,
+      JSON.stringify({
+        version: 1,
+        rules: [
+          qualifyRule("user", {
+            id: "no-rm-rf",
+            event: "PreToolUse",
+            tools: ["Bash"],
+            field: "command",
+            pattern: "rm\\s+-rf",
+            mode: "warn",
+            message: "Deletes files recursively.",
+          }),
+        ],
+      })
+    );
+    const bad = join(dir, "rules-bad.json");
+    writeFileSync(bad, "{ not json");
+    const call = (command: string) => ({ hook_event_name: "PermissionRequest", tool_name: "Bash", tool_input: { command } });
+    const first = runHook(credFile, call("rm -rf build"), "tile-a", true, { CLAUDE_PEERS_TTSR_FILE: good });
+    const second = runHook(credFile, call("ls"), "tile-b", true, { CLAUDE_PEERS_TTSR_FILE: bad });
+    try {
+      let rows: Approval[] = [];
+      for (let i = 0; i < 80 && rows.length < 2; i++) {
+        rows = await listApprovals(b, op);
+        if (rows.length < 2) await Bun.sleep(100);
+      }
+      expect(rows.length).toBe(2);
+      const byTile = (tile: string) => rows.find((r) => r.origin.tile_ref === tile);
+      expect(byTile("tile-a")?.danger).toEqual([{ id: "user/no-rm-rf", source: "user", message: "Deletes files recursively." }]);
+      expect(byTile("tile-b")?.kind, "an unusable rules file never stops the approval").toBe("permission");
+      expect(byTile("tile-b")?.danger).toEqual([]);
+    } finally {
+      first.kill();
+      second.kill();
+      await Promise.all([first.exited, second.exited]);
+    }
+  }, 60_000);
 
   test("a multiline tab-indented command is still served", async () => {
     const { b, credFile, op } = await setup();

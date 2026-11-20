@@ -1,4 +1,18 @@
-import { APPROVAL_QUESTION_MAX, buildAuthProof, capVisibly, stripControl } from "../../shared/approval.ts";
+import { spawnSync, type SpawnSyncReturns } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+
+import {
+  APPROVAL_DANGER_MAX,
+  APPROVAL_QUESTION_MAX,
+  buildAuthProof,
+  capVisibly,
+  stripControl,
+  validateApprovalDanger,
+  type ApprovalDanger,
+} from "../../shared/approval.ts";
+import { evaluate, parseEffectiveFile } from "../src/shared/ttsr-rules.ts";
+import type { TtsrEffectiveRule } from "../src/shared/ttsr-types.ts";
 import {
   APPROVAL_FILE_ENV,
   APPROVAL_HOOK_BLOCK_SEC_DEFAULT,
@@ -170,6 +184,94 @@ function safeJson(value: unknown): string {
 
 export function loadConfig(path: string | undefined, read?: FileReader): ApprovalHookConfig | null {
   return loadApprovalCredential(path, read);
+}
+
+const TTSR_FILE_ENV = "CLAUDE_PEERS_TTSR_FILE";
+const DANGER_EVAL_ARG = "--danger-eval";
+const DANGER_WALL_MS = 3000;
+
+interface DangerInput {
+  rules: TtsrEffectiveRule[];
+  payload: Pick<HookPayload, "tool_name" | "tool_input" | "cwd">;
+}
+
+export type DangerChild = (input: string, wallMs: number) => SpawnSyncReturns<string>;
+
+// The rules hold user and repo regexes, and a JavaScriptCore regex can run for
+// tens of seconds without being cut. A Worker cannot be stopped from outside
+// while this hook waits hours for a verdict; a child process is killed at the wall.
+function spawnDangerChild(input: string, wallMs: number): SpawnSyncReturns<string> {
+  return spawnSync(process.execPath, [fileURLToPath(import.meta.url), DANGER_EVAL_ARG], {
+    input,
+    encoding: "utf8",
+    timeout: wallMs,
+    windowsHide: true,
+    stdio: ["pipe", "pipe", "inherit"],
+  });
+}
+
+/** The warn rules that fire on a call, judged as a PreToolUse call. */
+export function matchDanger(rules: readonly TtsrEffectiveRule[], payload: DangerInput["payload"]): ApprovalDanger[] {
+  const result = evaluate(rules, { ...payload, hook_event_name: "PreToolUse" }, payload.cwd || process.cwd());
+  for (const err of result.errors) trace("danger rule not evaluated", err);
+  for (const o of result.overBudget) trace("danger rule over budget", `${o.qualifiedId} (${o.reason})`);
+  return result.warns.map((w) => ({
+    id: w.qualifiedId,
+    source: w.qualifiedId.slice(0, w.qualifiedId.indexOf("/")) as ApprovalDanger["source"],
+    message: w.message,
+  }));
+}
+
+function dangerEvalMain(): void {
+  const input = JSON.parse(readFileSync(0, "utf8")) as DangerInput;
+  process.stdout.write(JSON.stringify(matchDanger(input.rules, input.payload)));
+}
+
+/**
+ * The guard rules of the tile that match a permission call, in the shape the
+ * broker accepts. Any failure returns none: the approval is always served, and
+ * no match never means the call is safe.
+ */
+export function dangerFor(
+  payload: HookPayload,
+  env: NodeJS.ProcessEnv,
+  child: DangerChild = spawnDangerChild,
+  wallMs: number = DANGER_WALL_MS
+): ApprovalDanger[] {
+  const file = env[TTSR_FILE_ENV];
+  const tool = payload.tool_name;
+  if (!file || !tool) return [];
+  let text: string;
+  try {
+    text = readFileSync(file, "utf8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") trace("danger rules unreadable", err);
+    return [];
+  }
+  const parsed = parseEffectiveFile(text);
+  if (!parsed.ok) {
+    trace("danger rules file invalid", parsed.errors.join("; "));
+    return [];
+  }
+  const rules = parsed.file.rules.filter(
+    (r) => r.mode === "warn" && r.event === "PreToolUse" && (r.tools as readonly string[]).includes(tool)
+  );
+  if (rules.length === 0) return [];
+  const input: DangerInput = { rules, payload: { tool_name: tool, tool_input: payload.tool_input, cwd: payload.cwd } };
+  const run = child(JSON.stringify(input), wallMs);
+  if (run.error || run.status !== 0) {
+    trace("danger evaluation stopped", run.error ?? `exit ${run.status}`);
+    return [];
+  }
+  try {
+    const raw: unknown = JSON.parse(run.stdout);
+    const checked = validateApprovalDanger(Array.isArray(raw) ? raw.slice(0, APPROVAL_DANGER_MAX) : raw);
+    if (checked.ok) return checked.value;
+    trace("danger matches refused", checked.error);
+  } catch (err) {
+    trace("danger output unreadable", err);
+  }
+  return [];
 }
 
 async function postQuestion(cfg: ApprovalHookConfig, payload: Record<string, unknown>): Promise<void> {
@@ -475,6 +577,8 @@ async function main(): Promise<void> {
     const lease = createPermissionLeaseReader(process.env.KORY_PERMISSION_LEASE, { reportError: trace });
     if (!lease) return;
     try {
+      const danger = dangerFor(payload, process.env);
+      if (danger.length > 0) request.danger = danger;
       await servePermission(cfg, request, tileRef, { lease, transcript: transcript ?? undefined });
     } finally {
       lease.dispose();
@@ -485,7 +589,10 @@ async function main(): Promise<void> {
 }
 
 if (import.meta.main) {
-  main()
-    .catch((err) => trace("hook failed", err))
-    .finally(() => process.exit(0));
+  if (process.argv[2] === DANGER_EVAL_ARG) dangerEvalMain();
+  else {
+    main()
+      .catch((err) => trace("hook failed", err))
+      .finally(() => process.exit(0));
+  }
 }

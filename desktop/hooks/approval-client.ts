@@ -66,6 +66,7 @@ export function buildSignedRequest(
         tile_ref: tileRef,
         reply_route: "hook",
         merge: "never",
+        ...(Array.isArray(request.danger) ? { danger: request.danger } : {}),
         origin: {
           host: cfg.origin?.host ?? "",
           os_user_hash: cfg.origin?.os_user_hash ?? "",

@@ -85,6 +85,7 @@ export function bubbleCourrier(model: AvatarBubbleModel, report: (message: strin
       title: many ? `${c.deckLabel} · ${c.title}` : c.title,
       question: c.title,
       text_flags: [],
+      danger: [],
       options: [],
       status: 'closed',
       reply_route: 'channel',

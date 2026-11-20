@@ -12,21 +12,23 @@ const TEXT_WRITERS: TtsrRule['tools'] = ['Edit', 'MultiEdit', 'Write']
 
 // A shell word: single- or double-quoted string, or a run of plain characters.
 const WORD = String.raw`(?:'[^']{0,2048}'|"(?:[^"\\]|\\[\s\S]){0,2048}"|[^\s'"]{1,2048})`
-// `git` at command position (start, or after a separator, a subshell or a
-// brace), past shell keywords and VAR=value prefixes, then its global options
-// (-C dir, -c k=v, --no-pager, --git-dir=x, -p), then the subcommand. `git`
-// inside an argument (a commit message, a grep pattern) is not a command.
-// Limit: a separator inside a quoted argument still counts as one, and a git
-// reached through a path (/usr/bin/git) or a wrapper (xargs) is not seen.
-const GIT =
+// Command position: start, or after a separator, a subshell or a brace, past
+// shell keywords and VAR=value prefixes. A command name inside an argument (a
+// commit message, a grep pattern) is not a command.
+// Limit: a separator inside a quoted argument still counts as one, and a
+// command reached through a path (/usr/bin/git) or a wrapper (xargs) is not seen.
+const CMD =
   String.raw`(?:^|[\n;&|(){}` + '`' + String.raw`])[ \t]{0,64}` +
-  String.raw`(?:(?:then|do|else|exec|command|time|nohup|sudo|env)[ \t]{1,16}|\w{1,64}=(?:'[^'\n]{0,256}'|"[^"\n]{0,256}"|[^\s'"]{0,256})[ \t]{1,16}){0,8}` +
-  String.raw`git(?:[ \t]{1,16}(?:-[Cc][ \t]{1,16}${WORD}|--[a-z][a-z-]{0,63}(?:=${WORD})?|-[pP])){0,8}[ \t]{1,16}`
+  String.raw`(?:(?:then|do|else|exec|command|time|nohup|sudo|env)[ \t]{1,16}|\w{1,64}=(?:'[^'\n]{0,256}'|"[^"\n]{0,256}"|[^\s'"]{0,256})[ \t]{1,16}){0,8}`
+// `git`, its global options (-C dir, -c k=v, --no-pager, --git-dir=x, -p), then the subcommand.
+const GIT =
+  CMD + String.raw`git(?:[ \t]{1,16}(?:-[Cc][ \t]{1,16}${WORD}|--[a-z][a-z-]{0,63}(?:=${WORD})?|-[pP])){0,8}[ \t]{1,16}`
 // End of a shell word.
 const EOW = String.raw`(?=[\s;&|)]|$)`
 // Rest of the same shell command, a quoted string consumed whole, so an
 // option spelled inside a quoted argument is never taken for a flag.
-const SEG = String.raw`(?:[^;&|\n'"` + '`' + String.raw`]|'[^']{0,2048}'|"(?:[^"\\]|\\[\s\S]){0,2048}"){0,2048}?[ \t]`
+const ARGS = String.raw`(?:[^;&|\n'"` + '`' + String.raw`]|'[^']{0,2048}'|"(?:[^"\\]|\\[\s\S]){0,2048}"){0,2048}?`
+const SEG = ARGS + String.raw`[ \t]`
 
 // A catch body holding nothing but whitespace and dismissive comments
 // (`/* ignore */`, `// noop`, an empty comment). A comment that explains why
@@ -112,6 +114,111 @@ export const KORY_RULES: readonly TtsrRule[] = [
     mode: 'deny',
     message:
       'This looks like a credential (API key, token or private key): never write it into a file. Read it from an environment variable or a secret store, and ask the operator to rotate it if it was exposed.'
+  },
+  // The `warn` rules below are signals shown to the operator on a permission
+  // request, never a verdict: a call they do not match is not safe.
+  {
+    id: 'rm-recursive',
+    event: 'PreToolUse',
+    tools: ['Bash'],
+    field: 'command',
+    pattern: String.raw`${CMD}rm${EOW}${SEG}(?:--recursive|-[a-zA-Z]{0,8}[rR][a-zA-Z]{0,8})${EOW}`,
+    flags: 'i',
+    mode: 'warn',
+    message: 'Recursive delete: removes a whole directory tree, outside the trash.'
+  },
+  {
+    id: 'ps-remove-recursive',
+    event: 'PreToolUse',
+    tools: ['Bash'],
+    field: 'command',
+    // `rm` is left to rm-recursive so one command raises one signal. Accepts -r up
+    // to -Recurse; a longer parameter such as -Force never matches.
+    pattern:
+      String.raw`${CMD}(?:remove-item|ri|del|erase|rd|rmdir)${EOW}${SEG}-r(?:e(?:c(?:u(?:r(?:se?)?)?)?)?)?(?![\w-])`,
+    flags: 'i',
+    mode: 'warn',
+    message: 'PowerShell recursive delete: removes a whole directory tree, outside the Recycle Bin.'
+  },
+  {
+    id: 'cmd-rmdir-recursive',
+    event: 'PreToolUse',
+    tools: ['Bash'],
+    field: 'command',
+    // `/s/q` is one word in cmd, so the switch ends at a slash as well.
+    pattern: String.raw`${CMD}(?:rmdir|rd)${EOW}${SEG}/s(?!\w)`,
+    flags: 'i',
+    mode: 'warn',
+    message: 'cmd recursive delete (rmdir /s): removes a whole directory tree, outside the Recycle Bin.'
+  },
+  {
+    id: 'sql-drop',
+    event: 'PreToolUse',
+    tools: ['Bash'],
+    field: 'command',
+    pattern: String.raw`\bdrop\s{1,16}(?:table|database)\b`,
+    flags: 'i',
+    mode: 'warn',
+    message: 'SQL DROP of a table or a database: the data is lost unless it was backed up.'
+  },
+  {
+    id: 'chmod-777-recursive',
+    event: 'PreToolUse',
+    tools: ['Bash'],
+    field: 'command',
+    pattern:
+      String.raw`${CMD}chmod${EOW}(?=${SEG}(?:--recursive|-[a-zA-Z]{0,8}R[a-zA-Z]{0,8})${EOW})(?=${SEG}0?777${EOW})`,
+    mode: 'warn',
+    message: 'Recursive chmod 777: makes a whole tree writable by everyone.'
+  },
+  {
+    id: 'pipe-to-shell',
+    event: 'PreToolUse',
+    tools: ['Bash'],
+    field: 'command',
+    // `||` never matches: the character after the first `|` must start a shell name.
+    pattern:
+      String.raw`${CMD}(?:curl|wget)${EOW}${ARGS}\|[ \t]{0,16}` +
+      String.raw`(?:sudo(?:[ \t]{1,16}-{1,2}[\w=-]{1,32}){0,4}[ \t]{1,16})?(?:ba|z|da|a)?sh${EOW}`,
+    mode: 'warn',
+    message: 'A downloaded script piped straight into a shell: nobody reviewed what it runs.'
+  },
+  {
+    id: 'dd-to-device',
+    event: 'PreToolUse',
+    tools: ['Bash'],
+    field: 'command',
+    pattern: String.raw`${CMD}dd${EOW}${SEG}of=/dev/(?!(?:null|zero|stdout|stderr)${EOW})`,
+    mode: 'warn',
+    message: 'dd writing to a device under /dev: overwrites a whole disk or partition.'
+  },
+  {
+    id: 'mkfs',
+    event: 'PreToolUse',
+    tools: ['Bash'],
+    field: 'command',
+    pattern: String.raw`${CMD}mkfs(?:\.[a-z0-9]{1,16})?${EOW}`,
+    mode: 'warn',
+    message: 'mkfs builds a new filesystem: the data of the device is erased.'
+  },
+  {
+    id: 'git-reset-hard',
+    event: 'PreToolUse',
+    tools: ['Bash'],
+    field: 'command',
+    pattern: String.raw`${GIT}reset${EOW}${SEG}--hard${EOW}`,
+    mode: 'warn',
+    message: 'git reset --hard discards every uncommitted change.'
+  },
+  {
+    id: 'git-clean-force',
+    event: 'PreToolUse',
+    tools: ['Bash'],
+    field: 'command',
+    // -n (dry run) in a bundle leaves the rule silent.
+    pattern: String.raw`${GIT}clean${EOW}${SEG}(?:--force|-[a-mo-zA-Z]{0,8}f[a-mo-zA-Z]{0,8})${EOW}`,
+    mode: 'warn',
+    message: 'git clean -f deletes untracked files for good.'
   }
 ]
 

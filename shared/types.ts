@@ -2200,6 +2200,14 @@ export interface ApprovalOrigin {
 /** What an approval's text hides from the operator: reordering (bidi), a control character, or an invisible format character. */
 export type ApprovalTextFlag = "bidi" | "control" | "invisible";
 
+/** A guard rule that matched the call a permission asks about: a signal for the operator, never a verdict. */
+export interface ApprovalDanger {
+  /** `<source>/<rule id>`. */
+  id: string;
+  source: "kory" | "user" | "repo";
+  message: string;
+}
+
 export interface Approval {
   id: string;
   operator_id: string;
@@ -2207,8 +2215,10 @@ export interface Approval {
   kind: ApprovalKind;
   title: string;
   question: string;
-  /** Computed from title and question on every read, never stored; empty when the text shows exactly what it holds. */
+  /** Computed from title, question, options and danger messages on every read, never stored; empty when the text shows exactly what it holds. */
   text_flags: ApprovalTextFlag[];
+  /** Rules the producer says matched; its absence never means the call is safe. Empty for a row that carries none. */
+  danger: ApprovalDanger[];
   options: string[];
   status: ApprovalStatus;
   /** Where the answer will be delivered. The routing TOKEN is never exposed. */
@@ -2329,6 +2339,8 @@ export interface ApprovalAddRequest {
   tile_only?: boolean;
   /** An information: only on an attested channel question with merge 'never', no options and no questions. */
   informational?: boolean;
+  /** Guard rules that matched the call: kind 'permission' only. Absent reads as none; an older broker ignores it. */
+  danger?: ApprovalDanger[];
   /**
    * AskUserQuestion questions: kind 'question', merge 'never', and a hook route
    * or a channel route to an active peer. `multi_select` defaults to false.

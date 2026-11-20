@@ -311,6 +311,13 @@ export interface ApprovalOrigin {
   tile_ref: string
 }
 
+/** A guard rule the producer reports as matching the call: a signal, never a verdict. */
+export interface ApprovalDanger {
+  id: string
+  source: 'kory' | 'user' | 'repo'
+  message: string
+}
+
 export interface Approval {
   id: string
   operator_id: string
@@ -319,6 +326,7 @@ export interface Approval {
   title: string
   question: string
   text_flags: ApprovalTextFlag[]
+  danger: ApprovalDanger[]
   options: string[]
   status: ApprovalStatus
   reply_route: ApprovalReplyRoute
