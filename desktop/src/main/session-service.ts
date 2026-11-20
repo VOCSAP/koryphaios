@@ -47,7 +47,7 @@ import {
   type UnknownDialogPayload
 } from './attention'
 import { createScreenWitness } from './attention-screen-witness'
-import { StartupAckDetector, type StartupAckEvent } from './startup-ack'
+import { detectChannelsWarning, screenMayBecomeReadable, StartupAckDetector, type StartupAckEvent } from './startup-ack'
 import { OpenIdRegistry } from './open-id-registry'
 import {
   listTranscriptIds,
@@ -78,7 +78,7 @@ import { DIRECTIVE_IDLE_WAIT_MS } from './directive-run'
 import { gracefulClose } from './session-close'
 import { createOscParser, type OscSnapshot } from './detect/osc'
 import { createActivityTracker, ACTIVITY_IDLE_MS, type Activity } from './detect/activity'
-import { logInfo, reportError } from './log'
+import { logInfo, logWarn, reportError } from './log'
 import {
   effectiveAgent,
   isTeamLeadAgent,
@@ -229,6 +229,9 @@ const CLOSE_HARD_DEADLINE_MS = 3000
 
 /** Dev-channels warning auto-ack: let the dialog finish painting first. */
 const STARTUP_ACK_SETTLE_MS = 350
+/** A refused ack is retried while the tile's screen only lags the PTY. */
+const STARTUP_ACK_RETRY_MS = 250
+const STARTUP_ACK_MAX_RETRIES = 40
 /**
  * Initial-prompt injection (150eb188): let Claude Code's own TUI finish
  * rendering after the dialog-dismiss Enter before typing into it, mirroring
@@ -536,10 +539,26 @@ export class SessionService extends EventEmitter {
     this.startupAckDetector.on('ack', ({ id }: StartupAckEvent) => {
       this.attentionDetector.purgeScreenMemory(id)
       const life = this.pty.life(id)
-      setTimeout(() => {
+      const typeAck = (retriesLeft = STARTUP_ACK_MAX_RETRIES) => {
         const r = this.runtime.get(id)
         if (!r || r.status === 'exited') return
-        if (!this.mayTypeAutomatically(id, life, 'startup acknowledgement')) return
+        const retry = retriesLeft < STARTUP_ACK_MAX_RETRIES
+        if (!this.mayTypeAutomatically(id, life, 'startup acknowledgement', retry)) {
+          if (!this.startupAckMayRetry(id, life)) {
+            if (retry) this.mayTypeAutomatically(id, life, 'startup acknowledgement')
+            return
+          }
+          if (retriesLeft === 0) {
+            logWarn('attention', `startup acknowledgement abandoned for ${id}: the screen stayed unreadable after ${STARTUP_ACK_MAX_RETRIES} retries`)
+            return
+          }
+          setTimeout(() => typeAck(retriesLeft - 1), STARTUP_ACK_RETRY_MS)
+          return
+        }
+        if (retry && this.startupWarningGone(id)) {
+          logInfo('attention', `startup acknowledgement not typed into ${id}: the warning is no longer on screen`)
+          return
+        }
         if (!this.pty.write(id, '\r')) return
         const name = this.defs.find((d) => d.id === id)?.name
         this.emit('startup-ack', { id, name })
@@ -552,7 +571,8 @@ export class SessionService extends EventEmitter {
           if (!this.mayTypeAutomatically(id, life, 'deferred prompt')) return
           if (this.pty.write(id, encodeInitialPromptKeystrokes(prompt))) this.pendingPrompt.delete(id)
         }, PROMPT_INJECT_SETTLE_MS)
-      }, STARTUP_ACK_SETTLE_MS)
+      }
+      setTimeout(() => typeAck(), STARTUP_ACK_SETTLE_MS)
     })
   }
 
@@ -2038,7 +2058,7 @@ export class SessionService extends EventEmitter {
   }
 
   /** Direct startup and quota writes bypass TileInjector, so they fail closed on unreadable or unknown screens. */
-  private mayTypeAutomatically(id: string, life: object | null, sequence: string): boolean {
+  private mayTypeAutomatically(id: string, life: object | null, sequence: string, quiet = false): boolean {
     const r = this.runtime.get(id)
     if (!r) return false
     if (this.pty.life(id) !== life) {
@@ -2056,8 +2076,21 @@ export class SessionService extends EventEmitter {
             ? 'the screen shows an unknown dialog'
             : null
     if (refusal === null) return true
-    logInfo('attention', `${sequence} not typed into ${id}: ${refusal}`)
+    if (!quiet) logInfo('attention', `${sequence} not typed into ${id}: ${refusal}`)
     return false
+  }
+
+  /** True when a readable screen does not show the dev-channels warning, e.g. the operator answered it by hand. */
+  private startupWarningGone(id: string): boolean {
+    const read = this.screenGuard.read(id)
+    return read.status === 'ready' && !detectChannelsWarning(read.snapshot.lines.join('\n'))
+  }
+
+  /** Whether a refused startup acknowledgement can still succeed: same PTY life, no unknown dialog, screen only lagging. */
+  private startupAckMayRetry(id: string, life: object | null): boolean {
+    const r = this.runtime.get(id)
+    if (!r || this.pty.life(id) !== life || r.ptyAttentionSource === 'unknown-dialog') return false
+    return screenMayBecomeReadable(this.screenGuard.read(id))
   }
 
   /** The detector source lighting a tile's PTY attention, null when it is down. */

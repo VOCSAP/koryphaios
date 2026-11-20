@@ -2,15 +2,26 @@
 // (anthropics/claude-code#42486), since the Deck's own launch flags make every
 // spawn stop on it until a human presses Enter.
 // Requires both screen cues present before acking, fires once per process run,
-// and sends a single Enter, never a digit, so a mis-detection at worst submits
-// an empty prompt.
+// and sends a single Enter, never a digit.
 // The MCP-server consent dialog is never auto-acknowledged: its content is
 // project-sourced, so that trust decision stays with the operator.
 
 import { EventEmitter } from 'node:events'
+import type { XtermScreenRead, XtermScreenUnavailableReason } from './xterm-screen'
 
 export interface StartupAckEvent {
   id: string
+}
+
+const TRANSIENT_SCREEN_REASONS: ReadonlySet<XtermScreenUnavailableReason> = new Set([
+  'screen-pending',
+  'resize-pending',
+  'sequence-incomplete'
+])
+
+/** True while the headless screen only lags the PTY; a fault or a disposed screen never recovers. */
+export function screenMayBecomeReadable(read: XtermScreenRead): boolean {
+  return read.status === 'unavailable' && TRANSIENT_SCREEN_REASONS.has(read.reason)
 }
 
 // Strips both CSI and OSC sequences with one combined regex, re-run on the

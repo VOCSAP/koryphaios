@@ -8,9 +8,11 @@ import { join } from "node:path";
 import {
   StartupAckDetector,
   detectChannelsWarning,
+  screenMayBecomeReadable,
   stripAnsi,
   type StartupAckEvent
 } from "../desktop/src/main/startup-ack.ts";
+import type { XtermScreenRead, XtermScreenUnavailableReason } from "../desktop/src/main/xterm-screen.ts";
 import { ADD_DIR_LINES } from "./_unknown-dialog-fixture.ts";
 
 // The dialog the channels flag raises before Claude Code's UI (both cues).
@@ -225,6 +227,17 @@ test("field capture: the LATER repaints of the same screen use literal spaces --
   const events = collect(d);
   for (const c of CHANNELS_FIELD_CAPTURE.slice(FIRST_PAINT + 1)) d.feed("s2", c.data);
   expect(events).toEqual([{ id: "s2" }]);
+});
+
+test("screenMayBecomeReadable is true only for the screen states that clear once the parser catches up", () => {
+  const unavailable = (reason: XtermScreenUnavailableReason): XtermScreenRead => ({ status: "unavailable", reason });
+  expect(screenMayBecomeReadable(unavailable("screen-pending"))).toBe(true);
+  expect(screenMayBecomeReadable(unavailable("resize-pending"))).toBe(true);
+  expect(screenMayBecomeReadable(unavailable("sequence-incomplete"))).toBe(true);
+  expect(screenMayBecomeReadable(unavailable("screen-fault"))).toBe(false);
+  expect(screenMayBecomeReadable(unavailable("disposed"))).toBe(false);
+  const snapshot = { revision: 1, cols: 80, rows: 24, lines: [], cursor: { x: 0, y: 0 } };
+  expect(screenMayBecomeReadable({ status: "ready", snapshot })).toBe(false);
 });
 
 test("the reconstructed add-dir dialog, which shares the generic footer, is never acknowledged", () => {

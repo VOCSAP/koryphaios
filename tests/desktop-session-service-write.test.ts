@@ -7,6 +7,7 @@ import { validPtyDimensions } from "../desktop/src/main/pty-manager.ts";
 import { onDeckError } from "../desktop/src/main/log.ts";
 import { fromWorkspaceSessions, toWorkspaceSessions } from "../desktop/src/main/workspace-session-map.ts";
 import { LaunchAttemptRegistry } from "../desktop/src/main/mod-launch-plan.ts";
+import { screenMayBecomeReadable } from "../desktop/src/main/startup-ack.ts";
 import { parseTemplate, toTemplate, templateToInputs } from "../desktop/src/shared/template.ts";
 import { effectiveAgent, isTeamLeadAgent } from "../desktop/src/main/team-lead-bridge.ts";
 import { ADD_DIR_LINES, COMPOSER_LINES, UD_COLS, UD_ROWS } from "./_unknown-dialog-fixture.ts";
@@ -167,7 +168,7 @@ class Timers {
 function openTypingGate(self: object): void {
   const target = self as { pty: { life?: (id: string) => object | null }; mayTypeAutomatically?: unknown };
   target.pty.life ??= () => null;
-  target.mayTypeAutomatically = () => true;
+  target.mayTypeAutomatically ??= () => true;
 }
 
 function autoResume(
@@ -188,8 +189,21 @@ function autoResume(
   run.call(self, id, timers.setTimeout.bind(timers), logInfo);
 }
 
-function startupAck(id: string, self: object, timers: Timers): void {
+const ACK_SETTLE = 10;
+const ACK_RETRY = 15;
+const PROMPT_SETTLE = 20;
+
+function startupAck(
+  id: string,
+  self: object,
+  timers: Timers,
+  maxRetries = 3,
+  logWarn: (scope: string, message: string) => void = () => {},
+  logInfo: (scope: string, message: string) => void = () => {}
+): void {
   openTypingGate(self);
+  (self as { startupAckMayRetry?: unknown }).startupAckMayRetry ??= () => false;
+  (self as { startupWarningGone?: unknown }).startupWarningGone ??= () => false;
   const source = readFileSync(SESSION_SERVICE_PATH, "utf-8");
   const body = extractBody(
     source,
@@ -200,18 +214,26 @@ function startupAck(id: string, self: object, timers: Timers): void {
     "id",
     "setTimeout",
     "STARTUP_ACK_SETTLE_MS",
+    "STARTUP_ACK_RETRY_MS",
+    "STARTUP_ACK_MAX_RETRIES",
     "PROMPT_INJECT_SETTLE_MS",
     "encodeInitialPromptKeystrokes",
+    "logWarn",
+    "logInfo",
     body
   ) as (
     this: object,
     id: string,
     setTimeout: Timers["setTimeout"],
     startupDelay: number,
+    retryDelay: number,
+    maxRetries: number,
     promptDelay: number,
-    encodePrompt: (prompt: string) => string
+    encodePrompt: (prompt: string) => string,
+    logWarn: (scope: string, message: string) => void,
+    logInfo: (scope: string, message: string) => void
   ) => void;
-  run.call(self, id, timers.setTimeout.bind(timers), 10, 20, (prompt) => `<${prompt}>`);
+  run.call(self, id, timers.setTimeout.bind(timers), ACK_SETTLE, ACK_RETRY, maxRetries, PROMPT_SETTLE, (prompt) => `<${prompt}>`, logWarn, logInfo);
 }
 
 test("interrupt reports no-terminal when a live PTY rejects Escape", () => {
@@ -492,6 +514,137 @@ test("startup acknowledgement deletes a pending prompt after its deferred write 
   timers.fire(20);
 
   expect(pendingPrompt.has("tile")).toBe(false);
+});
+
+function retryingAckTile(refusals: number, mayRetry: () => boolean, warningGone: () => boolean = () => false) {
+  const pendingPrompt = new Map([["tile", "hello"]]);
+  const writes: string[] = [];
+  const events: unknown[] = [];
+  const quietFlags: Array<boolean | undefined> = [];
+  let decisions = 0;
+  let warningChecks = 0;
+  const self = {
+    attentionDetector: { purgeScreenMemory: () => {} },
+    runtime: new Map([["tile", { status: "running" }]]),
+    pty: { write: (_id: string, data: string) => (writes.push(data), true) },
+    defs: [{ id: "tile", name: "Tile" }],
+    emit: (_event: string, payload: unknown) => events.push(payload),
+    pendingPrompt,
+    mayTypeAutomatically: (_id: string, _life: unknown, _sequence: string, quiet?: boolean) => (quietFlags.push(quiet), ++decisions > refusals),
+    startupAckMayRetry: mayRetry,
+    startupWarningGone: () => (warningChecks++, warningGone())
+  };
+  return { self, writes, events, pendingPrompt, quietFlags, decisions: () => decisions, warningChecks: () => warningChecks };
+}
+
+test("startup acknowledgement is retried while the screen only lags, then types Return and the pending prompt once", () => {
+  const timers = new Timers();
+  const tile = retryingAckTile(2, () => true);
+
+  startupAck("tile", tile.self, timers);
+  timers.fire(ACK_SETTLE);
+  expect(tile.writes, "the first refusal types nothing").toEqual([]);
+  timers.fire(ACK_RETRY);
+  expect(tile.writes, "the second refusal types nothing").toEqual([]);
+  timers.fire(ACK_RETRY);
+  expect(tile.writes).toEqual(["\r"]);
+  expect(tile.events).toEqual([{ id: "tile", name: "Tile" }]);
+  timers.fire(PROMPT_SETTLE);
+  expect(tile.writes).toEqual(["\r", "<hello>"]);
+  timers.fire(ACK_RETRY);
+  expect(tile.decisions(), "no retry stays scheduled once the ack is typed").toBe(4);
+});
+
+test("startup acknowledgement stops after its retry budget and logs the abandon", () => {
+  const timers = new Timers();
+  const warnings: Array<[string, string]> = [];
+  const tile = retryingAckTile(Infinity, () => true);
+
+  startupAck("tile", tile.self, timers, 2, (scope, message) => warnings.push([scope, message]));
+  timers.fire(ACK_SETTLE);
+  timers.fire(ACK_RETRY);
+  expect(warnings, "the budget is not spent yet").toEqual([]);
+  timers.fire(ACK_RETRY);
+  timers.fire(ACK_RETRY);
+
+  expect(tile.decisions(), "one first attempt and two retries").toBe(3);
+  expect(tile.writes).toEqual([]);
+  expect(warnings).toHaveLength(1);
+  expect(warnings[0]![0]).toBe("attention");
+  expect(warnings[0]![1]).toContain("startup acknowledgement abandoned for tile");
+  expect(tile.pendingPrompt.get("tile"), "the prompt stays pending for manual typing").toBe("hello");
+});
+
+test("startup acknowledgement refused for a reason that cannot recover is final: no retry, no abandon log", () => {
+  const timers = new Timers();
+  const warnings: Array<[string, string]> = [];
+  const tile = retryingAckTile(Infinity, () => false);
+
+  startupAck("tile", tile.self, timers, 3, (scope, message) => warnings.push([scope, message]));
+  timers.fire(ACK_SETTLE);
+  timers.fire(ACK_RETRY);
+  timers.fire(ACK_RETRY);
+
+  expect(tile.decisions()).toBe(1);
+  expect(tile.writes).toEqual([]);
+  expect(warnings).toEqual([]);
+});
+
+test("startup acknowledgement retry ends silently when the tile exits meanwhile", () => {
+  const timers = new Timers();
+  const warnings: Array<[string, string]> = [];
+  const tile = retryingAckTile(Infinity, () => true);
+
+  startupAck("tile", tile.self, timers, 3, (scope, message) => warnings.push([scope, message]));
+  timers.fire(ACK_SETTLE);
+  tile.self.runtime.set("tile", { status: "exited" });
+  timers.fire(ACK_RETRY);
+  timers.fire(ACK_RETRY);
+
+  expect(tile.decisions()).toBe(1);
+  expect(warnings).toEqual([]);
+});
+
+test("a retry types nothing and keeps the prompt when the warning was answered by hand meanwhile", () => {
+  const timers = new Timers();
+  const infos: Array<[string, string]> = [];
+  const tile = retryingAckTile(1, () => true, () => true);
+
+  startupAck("tile", tile.self, timers, 3, undefined, (scope, message) => infos.push([scope, message]));
+  timers.fire(ACK_SETTLE);
+  timers.fire(ACK_RETRY);
+  timers.fire(PROMPT_SETTLE);
+
+  expect(tile.warningChecks()).toBe(1);
+  expect(tile.writes).toEqual([]);
+  expect(tile.events).toEqual([]);
+  expect(tile.pendingPrompt.get("tile")).toBe("hello");
+  expect(infos).toEqual([["attention", "startup acknowledgement not typed into tile: the warning is no longer on screen"]]);
+});
+
+test("the first attempt types Return without asking whether the warning is still on screen", () => {
+  const timers = new Timers();
+  const tile = retryingAckTile(0, () => true, () => true);
+
+  startupAck("tile", tile.self, timers);
+  timers.fire(ACK_SETTLE);
+
+  expect(tile.warningChecks()).toBe(0);
+  expect(tile.writes).toEqual(["\r"]);
+});
+
+test("only the first refusal and a final refusal on a retry are loud, the retries in between are quiet", () => {
+  const timers = new Timers();
+  let mayRetryCalls = 0;
+  const tile = retryingAckTile(Infinity, () => ++mayRetryCalls < 3);
+
+  startupAck("tile", tile.self, timers, 5);
+  timers.fire(ACK_SETTLE);
+  timers.fire(ACK_RETRY);
+  timers.fire(ACK_RETRY);
+
+  expect(tile.quietFlags.map(Boolean), "first attempt loud, one quiet retry, then a quiet retry that turned final and is re-asked loud").toEqual([false, true, true, false]);
+  expect(tile.decisions()).toBe(4);
 });
 
 test("SessionService rejects a refused launch mod plan before spawning a PTY (mutation: ignore refused plan)", () => {
@@ -1768,5 +1921,103 @@ describe("unknown-dialog attention in the real service", () => {
       expect(tile.pty.writes[1]).toContain("hello");
       expect(privates(tile.service).pendingPrompt.has(tile.id)).toBe(false);
     }, { prompt: "hello" });
+  });
+
+  const ackRetry = (tile: Tile, life: object | null): boolean =>
+    (tile.service as unknown as { startupAckMayRetry(id: string, life: object | null): boolean }).startupAckMayRetry(tile.id, life);
+  const lifeOf = (tile: Tile): object | null =>
+    (tile.service as unknown as { pty: { life(id: string): object | null } }).pty.life(tile.id);
+  const lagScreen = (tile: Tile, pty: SessionFakePty = tile.pty): void => {
+    tile.service.resize(tile.id, UD_COLS, UD_ROWS);
+    pty.output(paint(COMPOSER_LINES));
+    const read = tile.service.screenRead(tile.id);
+    expect(screenMayBecomeReadable(read), `the screen lags the PTY right after output, got ${JSON.stringify(read.status === "ready" ? "ready" : read)}`).toBe(true);
+  };
+
+  test("a refused startup acknowledgement is retryable while the tile's screen only lags the PTY", async () => {
+    await withTile(async (tile) => {
+      lagScreen(tile);
+      expect(ackRetry(tile, lifeOf(tile))).toBe(true);
+    });
+  });
+
+  test("a refused startup acknowledgement is final once an unknown dialog holds the tile, even with a lagging screen", async () => {
+    await withTile(async (tile) => {
+      lagScreen(tile);
+      tile.detector.emit("attention", unknownRaise(tile.id, "ep-1"));
+      expect(tile.service.attentionSourceOf(tile.id)).toBe("unknown-dialog");
+      expect(ackRetry(tile, lifeOf(tile))).toBe(false);
+    });
+  });
+
+  test("a refused startup acknowledgement is final once the PTY was replaced, even with a lagging screen", async () => {
+    await withTile(async (tile) => {
+      const before = lifeOf(tile);
+      tile.pty.exit(1);
+      await tile.service.restart(tile.id);
+      const replacement = sessionPtys.at(-1)!;
+      expect(replacement).not.toBe(tile.pty);
+      lagScreen(tile, replacement);
+      expect(lifeOf(tile)).not.toBe(before);
+      expect(ackRetry(tile, before)).toBe(false);
+    });
+  });
+
+  test("a refused startup acknowledgement is final when the screen is readable or faulted", async () => {
+    await withTile(async (tile) => {
+      await claudeTile(tile, ADD_DIR_LINES);
+      expect(ackRetry(tile, lifeOf(tile)), "a readable screen showing a dialog is a verdict, not a lag").toBe(false);
+      privates(tile.service).screenGuard.invalidate(tile.id, "probe");
+      const read = tile.service.screenRead(tile.id);
+      expect(read.status === "unavailable" && read.reason).toBe("screen-fault");
+      expect(ackRetry(tile, lifeOf(tile))).toBe(false);
+    });
+  });
+
+  function record(tile: Tile, method: "mayTypeAutomatically" | "startupAckMayRetry" | "startupWarningGone"): boolean[] {
+    const calls: boolean[] = [];
+    const target = tile.service as unknown as Record<string, (...args: unknown[]) => boolean>;
+    const original = target[method]!.bind(tile.service);
+    target[method] = (...args: unknown[]) => {
+      const verdict = original(...args);
+      calls.push(verdict);
+      return verdict;
+    };
+    return calls;
+  }
+
+  /** Acknowledgement decided while the screen lags: a resize after the warning output holds `resize-pending` until the next PTY output. */
+  async function ackRefusedOnLaggingScreen(tile: Tile): Promise<{ typed: boolean[]; retryable: boolean[]; gone: boolean[] }> {
+    await claudeTile(tile, COMPOSER_LINES);
+    const typed = record(tile, "mayTypeAutomatically");
+    const retryable = record(tile, "startupAckMayRetry");
+    const gone = record(tile, "startupWarningGone");
+    tile.pty.output(CHANNELS_WARNING);
+    tile.service.resize(tile.id, UD_COLS + 1, UD_ROWS);
+    await until(() => retryable.length > 0, "the first refusal");
+    expect(retryable, "the first attempt was refused for a lagging screen").toEqual([true]);
+    expect(tile.pty.writes).toEqual([]);
+    return { typed, retryable, gone };
+  }
+
+  test("a retry types nothing once the operator answered the warning by hand and the repaint shows a composer", async () => {
+    await withTile(async (tile) => {
+      const { typed, gone } = await ackRefusedOnLaggingScreen(tile);
+      tile.pty.output(paint(COMPOSER_LINES));
+      await until(() => typed.includes(true), "the retry that sees a readable screen");
+      expect(gone).toEqual([true]);
+      expect(tile.pty.writes, "no Return and no deferred prompt into what the operator types").toEqual([]);
+    }, { prompt: "hello" });
+  });
+
+  test("a retry types Return once when the warning is still on screen after the lag", async () => {
+    await withTile(async (tile) => {
+      const { typed, gone } = await ackRefusedOnLaggingScreen(tile);
+      tile.pty.output(paint(CHANNELS_WARNING.split("\r\n")));
+      await until(() => tile.pty.writes.length === 1, "the acknowledgement");
+      expect(tile.pty.writes).toEqual(["\r"]);
+      expect(gone).toEqual([false]);
+      expect(typed.filter(Boolean)).toHaveLength(1);
+    });
   });
 });
