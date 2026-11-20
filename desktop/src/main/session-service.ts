@@ -2062,7 +2062,7 @@ export class SessionService extends EventEmitter {
     const r = this.runtime.get(id)
     if (!r) return false
     if (this.pty.life(id) !== life) {
-      logInfo('attention', `${sequence} not typed into ${id}: the session was restarted meanwhile`)
+      if (!quiet) logInfo('attention', `${sequence} not typed into ${id}: the session was restarted meanwhile`)
       return false
     }
     if (!r.claudeLaunch) return true
@@ -2083,7 +2083,7 @@ export class SessionService extends EventEmitter {
   /** True when a readable screen does not show the dev-channels warning, e.g. the operator answered it by hand. */
   private startupWarningGone(id: string): boolean {
     const read = this.screenGuard.read(id)
-    return read.status === 'ready' && !detectChannelsWarning(read.snapshot.lines.join('\n'))
+    return read.status === 'ready' && !detectChannelsWarning(read.snapshot.lines.join(''))
   }
 
   /** Whether a refused startup acknowledgement can still succeed: same PTY life, no unknown dialog, screen only lagging. */

@@ -1,10 +1,10 @@
-import { describe, expect, mock, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { afterAll, beforeAll, describe, expect, mock, test } from "bun:test";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { extractBracedBody } from "./_braced-body";
 import { validPtyDimensions } from "../desktop/src/main/pty-manager.ts";
-import { onDeckError } from "../desktop/src/main/log.ts";
+import { initDeckLog, onDeckError } from "../desktop/src/main/log.ts";
 import { fromWorkspaceSessions, toWorkspaceSessions } from "../desktop/src/main/workspace-session-map.ts";
 import { LaunchAttemptRegistry } from "../desktop/src/main/mod-launch-plan.ts";
 import { screenMayBecomeReadable } from "../desktop/src/main/startup-ack.ts";
@@ -1651,6 +1651,12 @@ describe("unknown-dialog attention in the real service", () => {
   const DIALOG = { title: "Adding a new directory:", text: "Adding a new directory:\nNo, exit\nYes, add it", truncated: false };
   const unknownRaise = (id: string, episodeId: string) => ({ id, waiting: true, source: "unknown-dialog", episodeId, dialog: DIALOG });
   const unknownFall = (id: string, episodeId: string) => ({ id, waiting: false, source: "unknown-dialog", episodeId });
+  const LOGS_DIR = mkdtempSync(join(tmpdir(), "kory-ack-log-"));
+  const MAIN_LOG = join(LOGS_DIR, "main.log");
+  beforeAll(() => {
+    initDeckLog(LOGS_DIR);
+  });
+  afterAll(() => rmSync(LOGS_DIR, { recursive: true, force: true }));
 
   async function withTile(body: (ctx: {
     service: InstanceType<typeof SessionService>;
@@ -1974,6 +1980,17 @@ describe("unknown-dialog attention in the real service", () => {
     });
   });
 
+  const NARROW_COLS = 40;
+
+  function logMark(): number {
+    return existsSync(MAIN_LOG) ? readFileSync(MAIN_LOG).length : 0;
+  }
+
+  function logLinesSince(mark: number, needle: string): string[] {
+    if (!existsSync(MAIN_LOG)) return [];
+    return readFileSync(MAIN_LOG).subarray(mark).toString("utf-8").split("\n").filter((line) => line.includes(needle));
+  }
+
   function record(tile: Tile, method: "mayTypeAutomatically" | "startupAckMayRetry" | "startupWarningGone"): boolean[] {
     const calls: boolean[] = [];
     const target = tile.service as unknown as Record<string, (...args: unknown[]) => boolean>;
@@ -1987,13 +2004,13 @@ describe("unknown-dialog attention in the real service", () => {
   }
 
   /** Acknowledgement decided while the screen lags: a resize after the warning output holds `resize-pending` until the next PTY output. */
-  async function ackRefusedOnLaggingScreen(tile: Tile): Promise<{ typed: boolean[]; retryable: boolean[]; gone: boolean[] }> {
+  async function ackRefusedOnLaggingScreen(tile: Tile, cols = UD_COLS + 1): Promise<{ typed: boolean[]; retryable: boolean[]; gone: boolean[] }> {
     await claudeTile(tile, COMPOSER_LINES);
     const typed = record(tile, "mayTypeAutomatically");
     const retryable = record(tile, "startupAckMayRetry");
     const gone = record(tile, "startupWarningGone");
     tile.pty.output(CHANNELS_WARNING);
-    tile.service.resize(tile.id, UD_COLS + 1, UD_ROWS);
+    tile.service.resize(tile.id, cols, UD_ROWS);
     await until(() => retryable.length > 0, "the first refusal");
     expect(retryable, "the first attempt was refused for a lagging screen").toEqual([true]);
     expect(tile.pty.writes).toEqual([]);
@@ -2002,11 +2019,13 @@ describe("unknown-dialog attention in the real service", () => {
 
   test("a retry types nothing once the operator answered the warning by hand and the repaint shows a composer", async () => {
     await withTile(async (tile) => {
+      const mark = logMark();
       const { typed, gone } = await ackRefusedOnLaggingScreen(tile);
       tile.pty.output(paint(COMPOSER_LINES));
       await until(() => typed.includes(true), "the retry that sees a readable screen");
       expect(gone).toEqual([true]);
       expect(tile.pty.writes, "no Return and no deferred prompt into what the operator types").toEqual([]);
+      expect(logLinesSince(mark, `startup acknowledgement not typed into ${tile.id}: the warning is no longer on screen`)).toHaveLength(1);
     }, { prompt: "hello" });
   });
 
@@ -2018,6 +2037,40 @@ describe("unknown-dialog attention in the real service", () => {
       expect(tile.pty.writes).toEqual(["\r"]);
       expect(gone).toEqual([false]);
       expect(typed.filter(Boolean)).toHaveLength(1);
+    });
+  });
+
+  test("a retry still sees the warning when a narrow tile wraps a word of it across two rows", async () => {
+    await withTile(async (tile) => {
+      const { gone } = await ackRefusedOnLaggingScreen(tile, NARROW_COLS);
+      tile.pty.output(paint(CHANNELS_WARNING.split("\r\n")));
+      await until(() => tile.pty.writes.length === 1, "the acknowledgement typed on the wrapped warning");
+      expect(tile.pty.writes).toEqual(["\r"]);
+      expect(gone).toEqual([false]);
+    });
+  });
+
+  test("the first refused attempt is the only refusal written to the log while the retries wait", async () => {
+    await withTile(async (tile) => {
+      const mark = logMark();
+      const { typed } = await ackRefusedOnLaggingScreen(tile);
+      await until(() => typed.length >= 3, "two retries after the first attempt", 3000);
+      const refusals = logLinesSince(mark, `startup acknowledgement not typed into ${tile.id}: the screen cannot be read`);
+      expect(refusals, "one line for the first attempt, none for the quiet retries").toHaveLength(1);
+    });
+  });
+
+  test("a PTY replaced while a retry waits is logged once, by the final loud re-ask", async () => {
+    await withTile(async (tile) => {
+      const mark = logMark();
+      const { typed } = await ackRefusedOnLaggingScreen(tile);
+      tile.pty.exit(1);
+      await tile.service.restart(tile.id);
+      await until(() => typed.length >= 3, "the quiet retry and the loud re-ask");
+      await Bun.sleep(300);
+      expect(typed.length, "no further attempt once the life changed").toBe(3);
+      const lines = logLinesSince(mark, `startup acknowledgement not typed into ${tile.id}: the session was restarted meanwhile`);
+      expect(lines).toHaveLength(1);
     });
   });
 });
