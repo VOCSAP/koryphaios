@@ -2,6 +2,11 @@ export const EXPECTED_FIXTURE_VERDICTS: Record<string, { checkpoints: readonly (
   'ask-user-question-2.1.301.json': { checkpoints: ['modal', 'clear', 'modal', 'modal'], final: 'modal' },
   'channels-warning-conpty-win.json': { checkpoints: [], final: 'modal' },
   'composer-2.1.283-reduced.json': { checkpoints: [], final: 'clear' },
+  'composer-cleared-after-multiline-2.1.328.json': { checkpoints: [], final: 'clear' },
+  'composer-draft-2.1.328.json': { checkpoints: [], final: 'clear' },
+  'composer-empty-2.1.328.json': { checkpoints: [], final: 'clear' },
+  'composer-multiline-2.1.328.json': { checkpoints: [], final: 'modal' },
+  'composer-slash-picker-2.1.328.json': { checkpoints: [], final: 'clear' },
   'dialog-open-no-esc.json': { checkpoints: ['modal', 'modal'], final: 'modal' },
   'dialog-open-with-esc.json': { checkpoints: ['modal', 'modal'], final: 'modal' },
   'draft-numbered-2.1.301.json': { checkpoints: ['modal', 'clear', 'modal', 'modal', 'clear'], final: 'clear' },
@@ -46,6 +51,18 @@ export const EXPECTED_FIXTURE_VERDICTS: Record<string, { checkpoints: readonly (
   'prosopon-432ab5e-resume-120c-2.1.306.json': { checkpoints: ['clear', 'clear'], final: 'clear' },
   'prosopon-432ab5e-quota-80c-2.1.306.json': { checkpoints: ['clear'], final: 'clear' },
   'stock-quota-80c-2.1.306.json': { checkpoints: ['clear'], final: 'clear' }
+}
+
+/** What composerState reads on the final screen of a capture. */
+export const EXPECTED_COMPOSER_STATES: Record<string, 'empty' | 'draft' | 'unknown'> = {
+  'composer-2.1.283-reduced.json': 'empty',
+  'composer-cleared-after-multiline-2.1.328.json': 'empty',
+  'composer-draft-2.1.328.json': 'draft',
+  'composer-empty-2.1.328.json': 'empty',
+  'composer-multiline-2.1.328.json': 'draft',
+  'composer-slash-picker-2.1.328.json': 'unknown',
+  'draft-typed-with-esc.json': 'draft',
+  'prompt-idle-with-esc.json': 'empty'
 }
 
 export const RESIZE_MARKER = /^\n########## RESIZE \[(\d+),(\d+)\] ##########/

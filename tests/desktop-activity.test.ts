@@ -360,6 +360,7 @@ function makeExitSelf(id: string, initialActivity: Activity) {
     cleanupSandbox: () => Promise.resolve(),
     clearSessionHandoff: () => {},
     revokePermissionLease: () => {},
+    revokeHold: () => false,
     persist: () => {},
     emit: () => {},
     broadcast: () => {},

@@ -6,7 +6,7 @@ import { logInfo, reportError } from './log'
 import { encodeSubmittedKeystrokes } from './session-command'
 import { DIRECTIVE_IDLE_WAIT_MS } from './directive-run'
 import { MAGIC_TIMEOUT_MS } from './magic-compact'
-import { inspectInjectGuard, type XtermScreenRead } from './xterm-screen'
+import { composerState, inspectInjectGuard, type XtermScreenRead } from './xterm-screen'
 import type { DirectiveOutcome, InjectRefusal } from './session-service'
 
 const DIRECTIVE_IDLE_POLL_MS = 500
@@ -48,9 +48,27 @@ export interface InjectorClock {
 
 export type InTurnInject = (command: string, idleWaitMs?: number) => Promise<DirectiveOutcome>
 
+export interface InjectCommandOptions {
+  /** False types the command with no Escape first, for a caller that has already proven the screen. */
+  escape?: boolean
+}
+
+export interface HoldInjectOptions extends InjectCommandOptions {
+  idleWaitMs?: number
+}
+
+export interface TileHold {
+  isCurrent: () => boolean
+  /** Resolves with the reason given to `revokeHold`; stays pending when the hold ends any other way. */
+  revoked: Promise<string>
+  inject: (command: string, options?: HoldInjectOptions) => Promise<DirectiveOutcome>
+}
+
 export class TileInjector {
   private readonly turns = new Map<string, Promise<void>>()
   private readonly turnGenerations = new Map<string, object>()
+  private readonly holds = new Map<string, { generation: object; done: () => void; onRevoke: (reason: string) => void }>()
+  private readonly revocations = new Map<string, { count: number; reason: string }>()
   private readonly timing: InjectorTiming
 
   constructor(
@@ -73,9 +91,70 @@ export class TileInjector {
 
   /**
    * Runs `fn` after every earlier turn of tile `id` has settled, whatever its
-   * outcome, or has held the tile past the turn ceiling.
+   * outcome, or has held the tile past the turn ceiling. A turn queued behind a
+   * hold has no bound: it waits for the hold to settle or be revoked.
    */
   inTurn<T>(id: string, fn: (isCurrent: () => boolean) => Promise<T>): Promise<T> {
+    return this.takeTurn(id, fn)
+  }
+
+  /**
+   * A turn with no ceiling, for a sequence that waits on events, not on the
+   * clock. It ends when `fn` settles or on `revokeHold`; its writes are refused
+   * from then on, like a turn released at its ceiling. `inject` also refuses
+   * ('no-terminal') once the tile runs another PTY than the one it had when
+   * this was called, not when the hold starts.
+   */
+  holdTile<T>(id: string, fn: (hold: TileHold) => Promise<T>): Promise<T> {
+    let onRevoke!: (reason: string) => void
+    const revoked = new Promise<string>((resolve) => {
+      onRevoke = resolve
+    })
+    const life = this.pty.life(id)
+    const revokedAtCall = this.revocations.get(id)?.count ?? 0
+    return this.takeTurn(
+      id,
+      (isCurrent) => {
+        const revocation = this.revocations.get(id)
+        if (revocation && revocation.count !== revokedAtCall) {
+          this.info('session', `hold of tile ${id} started revoked: ${revocation.reason}`)
+          this.holds.get(id)?.done()
+          onRevoke(revocation.reason)
+        }
+        return fn({
+          isCurrent,
+          revoked,
+          inject: async (command, options = {}) => {
+            if (!isCurrent()) throw this.staleTurn(id)
+            if (life === null || this.pty.life(id) !== life) return 'no-terminal'
+            return this.injectCommand(id, command, options.idleWaitMs ?? DIRECTIVE_IDLE_WAIT_MS, isCurrent, {
+              escape: options.escape
+            })
+          }
+        })
+      },
+      onRevoke
+    )
+  }
+
+  /**
+   * Ends the running hold of tile `id`: its generation goes first, then the
+   * next turn is released. Every hold already queued when this is called
+   * starts revoked and writes nothing. True only when a hold was running; an
+   * inTurn turn is never revoked.
+   */
+  revokeHold(id: string, reason: string): boolean {
+    this.revocations.set(id, { count: (this.revocations.get(id)?.count ?? 0) + 1, reason })
+    const hold = this.holds.get(id)
+    if (!hold) return false
+    this.info('session', `hold of tile ${id} revoked: ${reason}`)
+    hold.done()
+    hold.onRevoke(reason)
+    return true
+  }
+
+  /** A turn with `onRevoke` is a hold: no ceiling, revocable. Without it, it is released at the ceiling. */
+  private takeTurn<T>(id: string, fn: (isCurrent: () => boolean) => Promise<T>, onRevoke?: (reason: string) => void): Promise<T> {
     const previous = this.turns.get(id) ?? Promise.resolve()
     let release!: () => void
     const settled = new Promise<void>((resolve) => {
@@ -84,15 +163,21 @@ export class TileInjector {
     const run = previous.then(() => {
       const generation = {}
       this.turnGenerations.set(id, generation)
-      const ceiling = this.clock.setTimeout(() => {
-        this.report(`injection turn of tile ${id} still running after ${this.timing.turnCeilingMs} ms; its queue is released`)
-        done()
-      }, this.timing.turnCeilingMs)
-      if (typeof ceiling.unref === 'function') ceiling.unref()
+      let ceiling: NodeJS.Timeout | undefined
       const done = () => {
-        this.clock.clearTimeout(ceiling)
+        if (ceiling) this.clock.clearTimeout(ceiling)
         if (this.turnGenerations.get(id) === generation) this.turnGenerations.delete(id)
+        if (this.holds.get(id)?.generation === generation) this.holds.delete(id)
         release()
+      }
+      if (onRevoke === undefined) {
+        ceiling = this.clock.setTimeout(() => {
+          this.report(`injection turn of tile ${id} still running after ${this.timing.turnCeilingMs} ms; its queue is released`)
+          done()
+        }, this.timing.turnCeilingMs)
+        if (typeof ceiling.unref === 'function') ceiling.unref()
+      } else {
+        this.holds.set(id, { generation, done, onRevoke })
       }
       const turn = Promise.resolve().then(() => fn(() => this.turnGenerations.get(id) === generation))
       turn.then(done, done)
@@ -119,16 +204,20 @@ export class TileInjector {
   }
 
   /**
-   * Types a command the way the operator would: dismiss any open menu, settle,
-   * then one write carrying the text and its submit keystroke, only once the
-   * tile is idle ('busy-timeout' past the deadline). Takes no turn itself:
-   * callers go through inTurn or serializeTile, except the operator's stop.
+   * Types a command the way the operator would: dismiss any open menu (unless
+   * `options.escape` is false), settle, then one write carrying the text and
+   * its submit keystroke, only once the tile is idle ('busy-timeout' past the
+   * deadline). With `escape` false the composer is read once more right before
+   * the write and must be empty, or the outcome is 'refused-modal'. Takes no
+   * turn itself: callers go through inTurn, serializeTile or holdTile, except
+   * the operator's stop.
    */
   async injectCommand(
     id: string,
     command: string,
     idleWaitMs: number = DIRECTIVE_IDLE_WAIT_MS,
-    isCurrent?: () => boolean
+    isCurrent?: () => boolean,
+    options?: InjectCommandOptions
   ): Promise<DirectiveOutcome> {
     if (isCurrent && !isCurrent()) throw this.staleTurn(id)
     if (!this.pty.isAlive(id)) return 'no-terminal'
@@ -140,16 +229,35 @@ export class TileInjector {
     if (!idle) return 'busy-timeout'
     const firstRefusal = this.refusal(id)
     if (firstRefusal) return firstRefusal
+    if (options?.escape !== false) {
+      if (isCurrent && !isCurrent()) throw this.staleTurn(id)
+      if (!this.pty.write(id, '\x1b')) return 'no-terminal'
+      await new Promise<void>((res) => this.clock.setTimeout(res, this.timing.settleMs))
+      if (isCurrent && !isCurrent()) throw this.staleTurn(id)
+      if (!this.pty.isAlive(id) || this.pty.life(id) !== life) return 'no-terminal'
+      const secondRefusal = this.refusal(id)
+      if (secondRefusal) return secondRefusal
+    }
     if (isCurrent && !isCurrent()) throw this.staleTurn(id)
-    if (!this.pty.write(id, '\x1b')) return 'no-terminal'
-    await new Promise<void>((res) => this.clock.setTimeout(res, this.timing.settleMs))
-    if (isCurrent && !isCurrent()) throw this.staleTurn(id)
-    if (!this.pty.isAlive(id) || this.pty.life(id) !== life) return 'no-terminal'
-    const secondRefusal = this.refusal(id)
-    if (secondRefusal) return secondRefusal
-    if (isCurrent && !isCurrent()) throw this.staleTurn(id)
+    if (options?.escape === false) {
+      const draft = this.draftRefusal(id)
+      if (draft) return draft
+    }
     if (!this.pty.write(id, encodeSubmittedKeystrokes(command))) return 'no-terminal'
     return 'written'
+  }
+
+  /** The screen read just before a write that sends no Escape: only an empty composer takes the command. */
+  private draftRefusal(id: string): InjectRefusal | null {
+    const screen = this.screenGuard.read(id)
+    if (screen.status === 'unavailable') {
+      this.info('session', `command injection screen-unavailable for ${id}: ${screen.reason}`)
+      return 'screen-unavailable'
+    }
+    const state = composerState(screen.snapshot)
+    if (state === 'empty') return null
+    this.info('session', `command injection refused-modal for ${id}: draft-present, composer ${state}`)
+    return 'refused-modal'
   }
 
   private staleTurn(id: string): Error {

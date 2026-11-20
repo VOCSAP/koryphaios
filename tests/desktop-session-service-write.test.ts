@@ -3,6 +3,8 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { extractBracedBody } from "./_braced-body";
+import { reachedWithin } from "./_bounded-await";
+import type { TileHold } from "../desktop/src/main/tile-injector.ts";
 import { validPtyDimensions } from "../desktop/src/main/pty-manager.ts";
 import { initDeckLog, onDeckError } from "../desktop/src/main/log.ts";
 import { fromWorkspaceSessions, toWorkspaceSessions } from "../desktop/src/main/workspace-session-map.ts";
@@ -814,6 +816,87 @@ test("SessionService restart does not replace a live PTY", async () => {
     for (const pty of sessionPtys.splice(0)) pty.exit();
     rmSync(home, { recursive: true, force: true });
   }
+});
+
+async function openServiceHold(service: InstanceType<typeof SessionService>, id: string) {
+  let release!: () => void;
+  const finished = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let started!: (hold: TileHold) => void;
+  const ready = new Promise<TileHold>((resolve) => {
+    started = resolve;
+  });
+  const held = service.holdTile(id, async (hold) => {
+    started(hold);
+    await finished;
+  });
+  return { hold: await reachedWithin(ready, "the hold start"), release, held };
+}
+
+describe("a hold on a tile ends with its terminal", () => {
+  const withTile = async (run: (service: InstanceType<typeof SessionService>, id: string, pty: SessionFakePty) => Promise<void>) => {
+    const home = mkdtempSync(join(tmpdir(), "kory-pty-hold-"));
+    const service = createSessionService(home, join(home, "project"));
+    try {
+      const { id } = service.create({});
+      await run(service, id, sessionPtys.at(-1)!);
+    } finally {
+      service.closeAll();
+      for (const pty of sessionPtys.splice(0)) pty.exit();
+      rmSync(home, { recursive: true, force: true });
+    }
+  };
+
+  test("revokeHold ends the running hold and says so", () =>
+    withTile(async (service, id) => {
+      const { hold, release, held } = await openServiceHold(service, id);
+      expect(service.revokeHold(id, "operator typed")).toBe(true);
+      expect(hold.isCurrent()).toBe(false);
+      expect(service.revokeHold(id, "again")).toBe(false);
+      release();
+      await held;
+    }));
+
+  test("a spontaneous exit of the PTY, clean or not, revokes it", () =>
+    withTile(async (service, id, pty) => {
+      const { hold, release, held } = await openServiceHold(service, id);
+      pty.exit(1);
+      expect(hold.isCurrent()).toBe(false);
+      expect(await reachedWithin(hold.revoked, "the revocation")).toBe("pty exited");
+      release();
+      await held;
+    }));
+
+  test("closing the tile revokes it before the escalation starts", () =>
+    withTile(async (service, id) => {
+      const { hold, release, held } = await openServiceHold(service, id);
+      await service.remove(id);
+      expect(hold.isCurrent()).toBe(false);
+      expect(await reachedWithin(hold.revoked, "the revocation")).toBe("session closing");
+      release();
+      await held;
+    }));
+
+  test("closing every session revokes it", () =>
+    withTile(async (service, id) => {
+      const { hold, release, held } = await openServiceHold(service, id);
+      service.closeAll();
+      expect(hold.isCurrent()).toBe(false);
+      expect(await reachedWithin(hold.revoked, "the revocation")).toBe("sessions closed");
+      release();
+      await held;
+    }));
+
+  test("restoring a workspace revokes it, the killed PTY emitting no exit", () =>
+    withTile(async (service, id) => {
+      const { hold, release, held } = await openServiceHold(service, id);
+      service.restoreFrom([]);
+      expect(hold.isCurrent()).toBe(false);
+      expect(await reachedWithin(hold.revoked, "the revocation")).toBe("workspace restored");
+      release();
+      await held;
+    }));
 });
 
 test("a launched tile exports its supervisor bit as 1 or 0 whatever the Deck's own environment holds", async () => {

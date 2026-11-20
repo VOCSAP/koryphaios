@@ -73,7 +73,7 @@ import {
 } from './session-status-file'
 import { sameLiveStatus } from '@shared/session-status'
 import { classifyInjectGuard, inspectInjectGuard, ScreenGuard } from './xterm-screen'
-import { TileInjector, type InTurnInject } from './tile-injector'
+import { TileInjector, type InTurnInject, type TileHold } from './tile-injector'
 import { DIRECTIVE_IDLE_WAIT_MS } from './directive-run'
 import { gracefulClose } from './session-close'
 import { createOscParser, type OscSnapshot } from './detect/osc'
@@ -435,6 +435,7 @@ export class SessionService extends EventEmitter {
     this.pty.on('exit', ({ id, exitCode }: { id: string; exitCode: number }) => {
       void this.peerTelemetryPublisher?.stop(id)
       this.revokePermissionLease(id)
+      this.revokeHold(id, 'pty exited')
       this.clearSessionHandoff(id)
       // This listener receives spontaneous exits only.
       const def = this.defs.find((d) => d.id === id)
@@ -1067,10 +1068,12 @@ export class SessionService extends EventEmitter {
   async remove(id: string): Promise<void> {
     this.launchAttempts?.cancel(id)
     this.revokePermissionLease(id)
+    this.revokeHold(id, 'session closing')
     const forceCleanup = (): void => {
       const def = this.defs.find((d) => d.id === id)
       if (!def) return
       this.revokePermissionLease(id)
+      this.revokeHold(id, 'session closed')
       this.clearSessionHandoff(id)
       void this.peerTelemetryPublisher?.stop(id)
       this.emit('removed', { id: def.id, name: def.name })
@@ -1157,6 +1160,7 @@ export class SessionService extends EventEmitter {
     this.launchAttempts?.cancelAll()
     this.revokeAllPermissionLeases()
     for (const d of this.defs) {
+      this.revokeHold(d.id, 'sessions closed')
       this.clearSessionHandoff(d.id)
       void this.peerTelemetryPublisher?.stop(d.id)
       this.emit('removed', { id: d.id, name: d.name })
@@ -1249,6 +1253,7 @@ export class SessionService extends EventEmitter {
     this.launchAttempts?.cancelAllExcept(preservedAttemptIds)
     this.revokeAllPermissionLeases()
     for (const d of this.defs) {
+      this.revokeHold(d.id, 'workspace restored')
       void this.peerTelemetryPublisher?.stop(d.id)
       this.emit('removed', { id: d.id, name: d.name })
     }
@@ -2106,6 +2111,16 @@ export class SessionService extends EventEmitter {
   /** Holds tile `id` for a whole injection sequence; injections inside it take no further turn. */
   serializeTile<T>(id: string, fn: (inject: InTurnInject) => Promise<T>): Promise<T> {
     return this.injector.serializeTile(id, fn)
+  }
+
+  /** Holds tile `id` with no ceiling until `fn` settles or the hold is revoked. */
+  holdTile<T>(id: string, fn: (hold: TileHold) => Promise<T>): Promise<T> {
+    return this.injector.holdTile(id, fn)
+  }
+
+  /** Ends the running hold of tile `id`; false when it has none. */
+  revokeHold(id: string, reason: string): boolean {
+    return this.injector.revokeHold(id, reason)
   }
 
   /** The operator's stop: it never waits behind a queued directive or a magic_compact. */

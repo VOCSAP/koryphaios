@@ -4,11 +4,18 @@ import { join } from 'node:path'
 import {
   classifyInjectGuard,
   composerGeometryVisible,
+  composerState,
   createXtermScreen,
   inspectInjectGuard,
   ScreenGuard
 } from '../desktop/src/main/xterm-screen'
-import { EXPECTED_FIXTURE_VERDICTS, fixtureStartSize, GEOMETRY_MARKER, RESIZE_MARKER } from './_fixture-verdicts'
+import {
+  EXPECTED_COMPOSER_STATES,
+  EXPECTED_FIXTURE_VERDICTS,
+  fixtureStartSize,
+  GEOMETRY_MARKER,
+  RESIZE_MARKER
+} from './_fixture-verdicts'
 import {
   ADD_DIR_LINES,
   CHEVRON,
@@ -1132,6 +1139,78 @@ describe('composerGeometryVisible', () => {
     expect(inspectInjectGuard(grid(ADD_DIR_LINES))).toMatchObject({ state: 'modal', rule: 'composer-geometry' })
     const picker = grid(at(2, `${CHEVRON} 1. Yes`, '  2. No'))
     expect(inspectInjectGuard(picker)).toMatchObject({ state: 'modal', rule: 'picker' })
+  })
+})
+
+describe('composerState', () => {
+  const grid = (lines: string[], cursor = { x: 0, y: 0 }) => snapshotOf(lines, cursor)
+  const at = (row: number, ...lines: string[]): string[] => [...Array<string>(row).fill(''), ...lines]
+  const composer = (typed: string, ...below: string[]): string[] => at(5, RULE, `${CHEVRON}${typed}`, RULE, ...below)
+  const labelled = `${'─'.repeat(60)} label ${'─'.repeat(UD_COLS - 60 - 7)}`
+  const zeroWidthSpace = String.fromCodePoint(0x200b)
+  const boxTop = `${String.fromCodePoint(0x256d)}${'─'.repeat(UD_COLS - 2)}${String.fromCodePoint(0x256e)}`
+  const boxBottom = `${String.fromCodePoint(0x2570)}${'─'.repeat(UD_COLS - 2)}${String.fromCodePoint(0x256f)}`
+
+  test('every capture reads as the composer it shows', async () => {
+    for (const [fixture, expected] of Object.entries(EXPECTED_COMPOSER_STATES)) {
+      expect(composerState(await fixtureSnapshot(fixture)), fixture).toBe(expected)
+    }
+    expect(composerState(await fixtureSnapshot('composer-2.1.285-agent-explorer-reduced.json', 100, 30))).toBe('empty')
+  })
+
+  test('a bare chevron between two rules is empty, whatever the hint rows under it and the labelled rule above', () => {
+    expect(composerState(grid(composer('')))).toBe('empty')
+    expect(composerState(grid(composer('', '  ? for shortcuts', '  status row one', '  status row two')))).toBe('empty')
+    expect(composerState(grid(at(5, labelled, CHEVRON, RULE)))).toBe('empty')
+  })
+
+  test('the cursor decides nothing: the guard says modal where the cursor is parked, the state still reads empty', () => {
+    for (const cursor of [{ x: 0, y: 0 }, { x: 9, y: 20 }, { x: 1, y: 6 }]) {
+      expect(composerState(grid(composer(''), cursor)), JSON.stringify(cursor)).toBe('empty')
+    }
+    expect(inspectInjectGuard(grid(composer(''), { x: 0, y: 0 }))).toMatchObject({ state: 'modal', rule: 'composer-geometry' })
+    expect(inspectInjectGuard(grid(composer(''), { x: 2, y: 6 }))).toEqual({ state: 'clear' })
+  })
+
+  test('a chevron followed by anything, spaces only included, is a draft', () => {
+    expect(composerState(grid(composer(' ')))).toBe('draft')
+    expect(composerState(grid(composer('   ')))).toBe('draft')
+    expect(composerState(grid(composer(String.fromCodePoint(0x00a0))))).toBe('draft')
+    expect(composerState(grid(composer(' hello')))).toBe('draft')
+    expect(composerState(grid(composer(' /')))).toBe('draft')
+    expect(composerState(grid(composer(` ${zeroWidthSpace}`)))).toBe('draft')
+  })
+
+  test('a composer of several rows is a draft even when its first row is a bare chevron', () => {
+    expect(composerState(grid(at(5, RULE, `${CHEVRON} first`, '  second', RULE)))).toBe('draft')
+    expect(composerState(grid(at(5, RULE, CHEVRON, '  second', RULE)))).toBe('draft')
+    expect(composerState(grid(at(5, RULE, CHEVRON, '', RULE)))).toBe('draft')
+  })
+
+  test('a menu under the composer, adjacent or not, is unknown', () => {
+    expect(composerState(grid(composer(' /', `  ${CHEVRON} /add-dir  Add a directory`, '    /clear')))).toBe('unknown')
+    expect(composerState(grid(composer('', '  hint', '', `  ${CHEVRON} item`)))).toBe('unknown')
+  })
+
+  test('a numbered picker or a dialog box beside an otherwise empty composer is unknown', () => {
+    const picker = [...at(1, `${CHEVRON} 1. Yes`, '  2. No'), '', '', RULE, CHEVRON, RULE]
+    expect(composerState(grid(picker))).toBe('unknown')
+    const dialog = [...at(1, boxTop, '  Do you trust this folder?', boxBottom), '', RULE, CHEVRON, RULE]
+    expect(composerState(grid(dialog))).toBe('unknown')
+  })
+
+  test('two composers on screen are unknown: a painted one cannot stand for the real one', () => {
+    expect(composerState(grid([...at(1, RULE, CHEVRON, RULE), '', '', RULE, CHEVRON, RULE]))).toBe('unknown')
+    expect(composerState(grid([...at(1, RULE, `${CHEVRON} fake`, RULE), '', '', RULE, CHEVRON, RULE]))).toBe('unknown')
+    expect(composerState(grid(at(5, RULE, CHEVRON, labelled, `${CHEVRON} fake`, RULE))), 'the first has no bottom rule').toBe('unknown')
+  })
+
+  test('no composer, a composer without its bottom rule, a plain or an empty screen are unknown', () => {
+    expect(composerState(grid(at(5, RULE, CHEVRON)))).toBe('unknown')
+    expect(composerState(grid(at(5, RULE, CHEVRON, 'text')))).toBe('unknown')
+    expect(composerState(grid(at(5, RULE.slice(1), CHEVRON, RULE)))).toBe('unknown')
+    expect(composerState(grid(['plain text']))).toBe('unknown')
+    expect(composerState(grid([]))).toBe('unknown')
   })
 })
 

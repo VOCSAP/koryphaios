@@ -440,6 +440,33 @@ export function inspectInjectGuard(snapshot: XtermScreenSnapshot): InjectGuardIn
   return { state: 'modal', rule: 'composer-geometry', line: cursor.y + 1 }
 }
 
+export type ComposerState = 'empty' | 'draft' | 'unknown'
+
+/**
+ * What the visible composer holds, from the screen alone. The text of a screen is the agent's to paint, so
+ * 'empty' needs positive proof: one composer on screen, a bare chevron between its two rules, no selector
+ * row (a chevron-led row) under it, and no picker or dialog anywhere. A composer with text, or with more
+ * than one row, is a 'draft'; whatever else is ambiguous is 'unknown'. The hardware cursor is not read: it
+ * is parked off the composer in some captures.
+ */
+export function composerState(snapshot: XtermScreenSnapshot): ComposerState {
+  const guard = inspectInjectGuard(snapshot)
+  if (guard.state === 'modal' && guard.rule !== 'composer-geometry') return 'unknown'
+  const { lines, cols } = snapshot
+  const tops: number[] = []
+  for (let y = 0; y + 1 < lines.length; y++) {
+    if (isTopBorderRow(lines[y]!, cols) && lines[y + 1]!.trimStart().startsWith(CHEVRON)) tops.push(y)
+  }
+  if (tops.length !== 1) return 'unknown'
+  const chevronRow = tops[0]! + 1
+  let bottom = chevronRow + 1
+  while (bottom < lines.length && !isPureBorderRow(lines[bottom]!, cols)) bottom++
+  if (bottom >= lines.length) return 'unknown'
+  if (lines.slice(bottom + 1).some((line) => line.trimStart().startsWith(CHEVRON))) return 'unknown'
+  const typed = lines[chevronRow]!.trimStart().slice(CHEVRON.length)
+  return bottom === chevronRow + 1 && typed === '' ? 'empty' : 'draft'
+}
+
 export function classifyInjectGuard(snapshot: XtermScreenSnapshot): InjectGuardState {
   return inspectInjectGuard(snapshot).state
 }
