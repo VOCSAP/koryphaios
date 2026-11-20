@@ -8,6 +8,7 @@ import {
   queueDeltaCardIds,
   queueDeltaMovedIds,
   queueToWaves,
+  reorderToDeltaOps,
   wavesToRanks,
   type QueueDeltaOp,
 } from "../shared/roadmap-queue-delta.ts";
@@ -138,6 +139,32 @@ test("the cards an envelope names include its anchors, and the moved ones exclud
   ]);
   expect(queueDeltaCardIds(list).sort()).toEqual(["a", "b", "d", "x", "y"]);
   expect(queueDeltaMovedIds(list).sort()).toEqual(["d", "x", "y"]);
+});
+
+function replay(start: string[][], restated: string[][]): string[][] {
+  const applied = applyQueueDelta(start, reorderToDeltaOps(restated));
+  if (!applied.ok) throw new Error(`unexpected refusal: ${applied.error}`);
+  return applied.waves;
+}
+
+test("restating an order gives it back whatever the queue held, keeping cards it never named after it", () => {
+  const order = [["c"], ["a", "b"], ["d"]];
+  expect(replay([], order)).toEqual(order);
+  expect(replay([["d"], ["a"], ["b"], ["c"]], order)).toEqual(order);
+  expect(replay([["x"], ["d"], ["y"]], order)).toEqual([...order, ["x"], ["y"]]);
+});
+
+test("restating an empty queue clears it", () => {
+  expect(reorderToDeltaOps([])).toEqual([{ op: "clear" }]);
+  expect(replay([["a"], ["b"]], [])).toEqual([]);
+});
+
+test("a queue of as many waves as an envelope may hold is restated in one envelope", () => {
+  const waves = Array.from({ length: QUEUE_DELTA_MAX_OPS }, (_, i) => [`card-${i}`]);
+  const restated = reorderToDeltaOps(waves);
+  expect(restated.length).toBe(QUEUE_DELTA_MAX_OPS);
+  expect(parseQueueDeltaOps(JSON.parse(JSON.stringify(restated))).ok).toBe(true);
+  expect(replay([], waves)).toEqual(waves);
 });
 
 test("the canonical text ignores key order and changes with any part of the meaning", () => {

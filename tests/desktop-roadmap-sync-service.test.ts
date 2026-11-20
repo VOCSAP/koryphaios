@@ -213,6 +213,92 @@ test("counters take only finite integers; every other JSON shape drops the field
   expect(Number("")).toBe(0);
 });
 
+const OUTBOX_REFUSAL = {
+  project_key: "github.com/acme/app",
+  mutation_id: "m-1",
+  reason: "queue_rev" as const,
+  status: 409,
+  message: "queue moved",
+  at: "2026-11-20T10:00:00.000Z",
+};
+
+test("queue_outbox crosses the sanitizer field for field, a refusal's optional item_id included", () => {
+  const status = sanitizeSyncStatus({
+    mode: "replica",
+    queue_outbox: {
+      pending: 2,
+      refused: [{ ...OUTBOX_REFUSAL, item_id: "card-9" }],
+      last_failure: "HTTP 503",
+    },
+  });
+  expect(status.queue_outbox).toEqual({
+    pending: 2,
+    refused: [{ ...OUTBOX_REFUSAL, item_id: "card-9" }],
+    last_failure: "HTTP 503",
+  });
+});
+
+test("a delivered queue keeps last_failure null instead of dropping the outbox", () => {
+  expect(
+    sanitizeSyncStatus({ mode: "replica", queue_outbox: { pending: 0, refused: [], last_failure: null } })
+      .queue_outbox
+  ).toEqual({ pending: 0, refused: [], last_failure: null });
+});
+
+test("a malformed queue_outbox is dropped whole, never read as an empty queue", () => {
+  for (const bad of [
+    null,
+    "queue",
+    [],
+    { refused: [], last_failure: null },
+    { pending: "2", refused: [], last_failure: null },
+    { pending: 1.5, refused: [], last_failure: null },
+    { pending: 1, refused: "none", last_failure: null },
+    { pending: 1, refused: [], last_failure: 503 },
+    { pending: 1, refused: [] },
+  ]) {
+    expect(
+      sanitizeSyncStatus({ mode: "replica", queue_outbox: bad }).queue_outbox,
+      `queue_outbox ${JSON.stringify(bad)} must be dropped`
+    ).toBeUndefined();
+  }
+});
+
+test("queue_outbox refusals keep only well-formed entries, the most recent 20", () => {
+  const refused = sanitizeSyncStatus({
+    mode: "replica",
+    queue_outbox: {
+      pending: 0,
+      last_failure: null,
+      refused: [
+        OUTBOX_REFUSAL,
+        { ...OUTBOX_REFUSAL, reason: "not_a_reason" },
+        { ...OUTBOX_REFUSAL, status: "409" },
+        { ...OUTBOX_REFUSAL, message: undefined },
+        "garbage",
+        ...Array.from({ length: 25 }, (_, i) => ({ ...OUTBOX_REFUSAL, mutation_id: `m-${i}` })),
+      ],
+    },
+  }).queue_outbox!.refused;
+  expect(refused).toHaveLength(20);
+  expect(refused.at(-1)!.mutation_id).toBe("m-24");
+  expect(refused.every((r) => r.reason === "queue_rev")).toBe(true);
+});
+
+test("queue_outbox free text is clipped before it reaches the renderer and the companion", () => {
+  const long = "x".repeat(5000);
+  const outbox = sanitizeSyncStatus({
+    mode: "replica",
+    queue_outbox: {
+      pending: 1,
+      last_failure: long,
+      refused: [{ ...OUTBOX_REFUSAL, message: long }],
+    },
+  }).queue_outbox!;
+  expect(outbox.last_failure!.length).toBeLessThan(400);
+  expect(outbox.refused[0]!.message.length).toBeLessThan(400);
+});
+
 test("online is a boolean or absent: a truthy string must not read as online", () => {
   expect(sanitizeSyncStatus({ mode: "replica", online: true }).online).toBe(true);
   expect(sanitizeSyncStatus({ mode: "replica", online: false }).online).toBe(false);

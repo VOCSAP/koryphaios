@@ -203,6 +203,20 @@ export function applyQueueDelta(
   return { ok: true, waves };
 }
 
+/**
+ * The operations that restate a whole ordered queue: the first wave goes to the
+ * start, each next one right after the first card of the previous. No leading
+ * `clear`: a queued card the author never saw stays, after the restated waves.
+ * One operation per wave, so a queue of QUEUE_DELTA_MAX_OPS waves still fits.
+ */
+export function reorderToDeltaOps(waves: readonly (readonly string[])[]): QueueDeltaOp[] {
+  if (waves.length === 0) return [{ op: "clear" }];
+  return waves.map((wave, i): QueueDeltaOp => {
+    const ids = [...wave];
+    return i === 0 ? { op: "place", ids, at: "start" } : { op: "place", ids, after: waves[i - 1]![0]! };
+  });
+}
+
 /** Stable text of an envelope's meaning: key order and whitespace never change its hash. */
 export function canonicalQueueDelta(projectKey: string, expectedQueueRev: number, ops: readonly QueueDeltaOp[]): string {
   const normalized = ops.map((op) => {

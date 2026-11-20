@@ -36,6 +36,46 @@ test("a replica whose upstream is online and clean raises no banner", () => {
   ).toBeNull();
 });
 
+// ----- queue outbox -----
+
+const OUTBOX_STUCK = { pending: 2, refused: [], last_failure: "HTTP 503" };
+
+test("a queue waiting WITHOUT a failure raises no banner: that is the normal state between two passes", () => {
+  expect(
+    bannerKind(
+      input({
+        status: { mode: "replica", online: true, queue_outbox: { ...OUTBOX_STUCK, last_failure: null } },
+      })
+    )
+  ).toBeNull();
+});
+
+test("a queue waiting WITH a delivery failure raises the undelivered-queue banner", () => {
+  expect(bannerKind(input({ status: { mode: "replica", online: true, queue_outbox: OUTBOX_STUCK } }))).toBe(
+    "queue-undelivered"
+  );
+});
+
+test("a failure with nothing left pending raises no banner", () => {
+  expect(
+    bannerKind(
+      input({ status: { mode: "replica", online: true, queue_outbox: { ...OUTBOX_STUCK, pending: 0 } } })
+    )
+  ).toBeNull();
+});
+
+test("an upstream outage, a refused push and conflicts all outrank the undelivered queue", () => {
+  expect(
+    bannerKind(input({ status: { mode: "replica", online: false, queue_outbox: OUTBOX_STUCK } }))
+  ).toBe("replica-offline");
+  expect(
+    bannerKind(input({ status: { mode: "replica", online: true, refused: 1, queue_outbox: OUTBOX_STUCK } }))
+  ).toBe("refused");
+  expect(
+    bannerKind(input({ conflicts: 1, status: { mode: "replica", online: true, queue_outbox: OUTBOX_STUCK } }))
+  ).toBe("conflicts");
+});
+
 // ----- each state alone -----
 
 test("the local broker being down raises the outage banner", () => {

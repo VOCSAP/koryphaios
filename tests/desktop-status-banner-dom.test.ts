@@ -252,6 +252,59 @@ test("an absent offline_reason (an older broker) falls back to the generic wordi
   expect(container.textContent).toContain("banner.replicaOffline");
 });
 
+test("an undelivered queue renders its warn banner with the delivery failure as detail", () => {
+  fakeUseDeck.setState({
+    roadmapSync: {
+      status: {
+        mode: "replica",
+        online: true,
+        queue_outbox: { pending: 2, refused: [], last_failure: "HTTP 503 from upstream" },
+      },
+      conflicts: [],
+    },
+  });
+  mountBanner();
+  expect(container.textContent).toContain("banner.queueUndelivered");
+  expect(container.querySelector(".status-banner-detail")?.textContent).toContain("HTTP 503 from upstream");
+  expect(container.querySelector(".status-banner")?.className).toContain("status-banner-warn");
+});
+
+test("the undelivered-queue count is the pending reorders, not the refused ones", () => {
+  const refusal = {
+    project_key: "github.com/acme/app",
+    mutation_id: "m",
+    reason: "queue_rev",
+    status: 409,
+    message: "queue moved",
+    at: "2026-11-20T10:00:00.000Z",
+  } as const;
+  fakeUseDeck.setState({
+    dict: { "banner.queueUndelivered": "waiting={count}" },
+    roadmapSync: {
+      status: {
+        mode: "replica",
+        online: true,
+        queue_outbox: { pending: 2, refused: [refusal, refusal, refusal], last_failure: "HTTP 503" },
+      },
+      conflicts: [],
+    },
+  });
+  mountBanner();
+  expect(container.textContent).toContain("waiting=2");
+  expect(container.textContent).not.toContain("waiting=3");
+});
+
+test("a queue that is only waiting renders no banner at all", () => {
+  fakeUseDeck.setState({
+    roadmapSync: {
+      status: { mode: "replica", online: true, queue_outbox: { pending: 2, refused: [], last_failure: null } },
+      conflicts: [],
+    },
+  });
+  mountBanner();
+  expect(container.querySelector(".status-banner")).toBeNull();
+});
+
 test("the remote error detail is rendered regardless of which of the three causes fired -- the operator's actual discriminant for a grouped 'refused'", () => {
   fakeUseDeck.setState({
     roadmapSync: {

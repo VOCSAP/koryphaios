@@ -23,6 +23,7 @@ export type StatusBannerKind =
   | 'conflicts'
   | 'refused'
   | 'replica-offline'
+  | 'queue-undelivered'
 
 export interface StatusBannerInput {
   /** The operator stopped the local broker on purpose: not dismissable, only Start clears it. */
@@ -51,7 +52,10 @@ export interface StatusBannerInput {
  * 4. the upstream refused pushes;
  * 5. operator trust is degraded, so privileged actions remain unavailable;
  * 6. the host Claude CLI lacks kory-roadmap in its user scope;
- * 7. the upstream is unreachable.
+ * 7. the upstream is unreachable;
+ * 8. the dispatch-queue order cannot be delivered to the upstream (below 7: an
+ *    outage already says that nothing leaves, this one covers a link that is
+ *    up, or not reported down, where the order silently stays local).
  */
 export function bannerKind(input: StatusBannerInput): StatusBannerKind | null {
   if (input.brokerManualStop) return 'broker-stopped'
@@ -70,6 +74,10 @@ export function bannerKind(input: StatusBannerInput): StatusBannerKind | null {
   if (input.hostRoadmapMcp === 'missing') return 'host-roadmap-missing'
   if (input.hostRoadmapMcp === 'wrong-scope') return 'host-roadmap-wrong-scope'
   if (input.status.mode === 'replica' && input.status.online === false) return 'replica-offline'
+  // Pending alone is the normal state between two passes: only a failure says
+  // the order is not reaching the other machines.
+  const outbox = input.status.queue_outbox
+  if (outbox && outbox.pending > 0 && outbox.last_failure !== null) return 'queue-undelivered'
   return null
 }
 

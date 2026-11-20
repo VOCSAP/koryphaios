@@ -1,6 +1,6 @@
 # Push atomique des deltas de file
 
-Carte : `c149cc3c`. Statut : contrat accepté par l'opérateur (A1 et B1 ci-dessous). Le lot L1 (côté upstream) est implémenté ; L2 à L4 restent à faire.
+Carte : `c149cc3c`. Statut : contrat accepté par l'opérateur (A1 et B1 ci-dessous). Les lots L1 (côté upstream) et L2 (côté réplique) sont implémentés ; L3 et L4 restent à faire.
 
 ## Problème
 
@@ -71,9 +71,19 @@ Les deux tables portent un `project_key` et entrent donc dans la migration de ca
 
 La révision saute donc de plusieurs unités pour une transaction qui change plusieurs cartes : seule l'égalité compte. Un projet qui n'a jamais eu de carte ordonnée n'a pas de ligne, et sa révision se lit 0. `/roadmap/sync/pull` rend la table dans `queue_revs` : c'est la source de `expected_queue_rev` d'une réplique.
 
+## Côté réplique
+
+Le reorder d'une réplique (`/roadmap/reorder`) est reformulé en opérations relatives par `reorderToDeltaOps` : une `place` par vague, la première au début, chacune ensuite après la première carte de la précédente, jamais de `clear` en tête (une carte en file seulement côté amont reste, après les vagues reformulées) ; `ids: []` donne `clear`. L'entrée est écrite dans `roadmap_queue_outbox` dans la transaction du reorder local, avec les rangs que chaque carte avait avant le geste (`withheld`, l'ordre amont tel que la réplique le connaît). Un geste fait avant l'envoi du précédent le remplace en gardant les rangs déjà rangés ; un geste fait après l'envoi s'ajoute.
+
+- **Révision citée.** `expected_queue_rev` est la révision lue dans `roadmap_queue_upstream`, adoptée à la page finale d'un pull (une page intermédiaire annoncerait des rangs non reçus). `0` n'est lu que si `upstream_queue_revs_adopted` est posée : avant la première adoption rien ne part et l'entrée attend. L'adoption continue pendant le gel. Après un acquittement, ou après un push de contenu qui porte un rang pour une carte que le journal ne couvre pas, l'entrée suivante du projet attend la prochaine adoption : la révision de la réponse n'est jamais lue comme révision courante, et le push d'un rang a pu faire avancer celle de l'amont. Cette attente (`queueRevStaleProjects`) est en mémoire seulement : après un redémarrage elle est vide, mais la première passe commence par un pull qui adopte la révision courante ; si cette adoption est refusée (`queue_revs` invalide), l'entrée peut citer une révision périmée, ce qui donne un 409 visible et le retour aux rangs amont, jamais une perte silencieuse.
+- **Ordre d'une passe.** Pull, contenu, deltas, verrous. Un delta dont une carte nommée n'a pas encore de base amont (née hors ligne) attend la fin de son push de contenu. Le push de contenu omet `queue` pour une carte couverte par une entrée, et un geste de rang seul remet `sync_dirty` à 0 : le rang voyage par la mutation.
+- **Gel du pull.** Tant qu'un projet a une entrée, le pull n'écrit aucun de ses rangs, carte nouvelle comprise ; le rang tiré est rangé dans les entrées du projet, et `queue_replaced` ne compte rien.
+- **Acquittement.** Les rangs de `items` sont appliqués, puis les rangs rangés pour les cartes que `items` ne contient pas, puis l'entrée est retirée. Un renvoi après réponse perdue garde le même `mutation_id` : l'amont répond par le reçu, rien n'est appliqué deux fois.
+- **Refus.** 409 (`queue_rev`, `locked_upstream`, `mutation_reused`) et tout 4xx qui nomme une carte ou l'enveloppe : les rangs remis sont les rangs AMONT (ceux que l'entrée avait rangés, tenus à jour par les pulls gelés), jamais l'ordre d'un geste local précédent ; l'entrée est retirée, `queue_replaced` compte les rangs remis, et le refus est dans le journal (`log.error`) et dans `queue_outbox.refused` du statut. Une entrée créée après l'envoi d'une autre hérite des rangs amont de celle-ci, et un acquittement les met à jour avec les rangs de `items` : deux refus de suite remettent bien l'ordre amont. Pas de rebase automatique.
+- **Échec de livraison.** Une erreur de transport, un 5xx, un 408, 425 ou 429, et un 401, 403 ou 404 sans carte (route absente ou réplique refusée) ne sont pas un refus de la mutation : l'entrée reste avec le même `mutation_id`, l'erreur est écrite UNE fois par cause (statut HTTP et `mutation_id`, jamais le texte du corps, qui peut varier d'une réponse à l'autre) dans le journal ; le dernier échec est dans `queue_outbox.last_failure` du statut, effacé au premier envoi réussi, et `last_error` ne le porte pas ; le projet suivant est traité, et la passe continue (verrous, documents de contexte, fédération), la réplique restant en ligne.
+
 ## Reste à faire
 
-- L2 : journal local, ACK, refus et intégration du pull, qui écrit aujourd'hui `remote.queue` même en conflit. Le pull ne doit pas appliquer `remote.queue` aux cartes couvertes par un delta en attente. Scénarios à garder : pull avant push, push avant pull, attendu des deux côtés `A=2 B=1`. Réécrire l'assertion de `tests/broker-roadmap-replica.test.ts` qui épingle la « Limite acceptée » de `DESIGN-QUEUE-GLOBAL-ORDER.md`.
 - L3 : producteurs du Deck (IPC `roadmapReorder` en opération relative), conversion des autres écrivains de rang, et les écritures de contenu dépendantes (une création sans laquelle l'opération serait impossible), reportées hors de L1.
 - L4 : régressions et redémarrage, ancien client contre nouveau broker et l'inverse. Déployer le support upstream avant d'activer les nouveaux producteurs. À la migration, ne pas inventer une révision zéro pour une file dont la base est inconnue.
 

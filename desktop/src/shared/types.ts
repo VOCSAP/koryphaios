@@ -834,6 +834,28 @@ export type RoadmapSyncMode = 'local' | 'upstream' | 'replica'
  */
 export type RoadmapSyncOfflineReason = 'transport' | 'stale_upstream' | 'refused'
 
+export const ROADMAP_QUEUE_OUTBOX_REASONS = [
+  'queue_rev',
+  'locked_upstream',
+  'mutation_reused',
+  'invalid',
+  'not_found',
+  'forbidden'
+] as const
+
+/** A queue mutation the upstream refused (mirror of core RoadmapQueueOutboxRefusal). */
+export interface RoadmapQueueOutboxRefusal {
+  project_key: string
+  mutation_id: string
+  reason: (typeof ROADMAP_QUEUE_OUTBOX_REASONS)[number]
+  /** HTTP status of the refusal. */
+  status: number
+  message: string
+  item_id?: string
+  /** ISO timestamp. */
+  at: string
+}
+
 /**
  * Replication health, polled on the inbox tick. Every field beyond `mode` is
  * replica-only and optional: a non-replica broker answers `{ mode }` alone.
@@ -880,6 +902,13 @@ export interface RoadmapSyncStatus {
    * is what the operator is told about -- never the lifetime total.
    */
   queue_replaced?: number
+  /**
+   * Queue mutations waiting for the upstream, the latest it refused, and the
+   * last failure to deliver one (null once a send went through). Waiting alone
+   * is the normal state between two passes; `last_failure` is what says the
+   * order is not reaching the other machines.
+   */
+  queue_outbox?: { pending: number; refused: RoadmapQueueOutboxRefusal[]; last_failure: string | null }
   locks?: { local: number; global: number; contested: number; remote: number }
 }
 

@@ -23,6 +23,7 @@ import type {
   RoadmapListFilters,
   RoadmapListResponse,
   RoadmapLockScope,
+  RoadmapQueueOutboxRefusal,
   RoadmapQuery,
   RoadmapReorderResponse,
   RoadmapSearchResult,
@@ -36,7 +37,7 @@ import type {
   RoadmapUpsertFields,
   RoadmapUpsertResponse
 } from '../shared/types'
-import { ROADMAP_TRIAGE_ROLES } from '../shared/types'
+import { ROADMAP_QUEUE_OUTBOX_REASONS, ROADMAP_TRIAGE_ROLES } from '../shared/types'
 
 export { normalizeRemoteUrl }
 
@@ -786,6 +787,65 @@ function lockCounts(v: unknown): RoadmapSyncStatus['locks'] {
   return { local, global, contested, remote }
 }
 
+const OUTBOX_TEXT_MAX = 300
+const OUTBOX_ID_MAX = 128
+const OUTBOX_REFUSED_MAX = 20
+
+function clip(v: string, max: number): string {
+  return v.length > max ? `${v.slice(0, max)}…` : v
+}
+
+function outboxRefusal(v: unknown): RoadmapQueueOutboxRefusal | null {
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return null
+  const r = v as Record<string, unknown>
+  const reason = enumOrNull(r.reason, ROADMAP_QUEUE_OUTBOX_REASONS)
+  const status = counter(r.status)
+  if (
+    typeof r.project_key !== 'string' ||
+    typeof r.mutation_id !== 'string' ||
+    typeof r.message !== 'string' ||
+    typeof r.at !== 'string' ||
+    reason === null ||
+    status === undefined
+  ) {
+    return null
+  }
+  const refusal: RoadmapQueueOutboxRefusal = {
+    project_key: clip(r.project_key, OUTBOX_ID_MAX),
+    mutation_id: clip(r.mutation_id, OUTBOX_ID_MAX),
+    reason,
+    status,
+    message: clip(r.message, OUTBOX_TEXT_MAX),
+    at: clip(r.at, OUTBOX_ID_MAX)
+  }
+  if (typeof r.item_id === 'string') refusal.item_id = clip(r.item_id, OUTBOX_ID_MAX)
+  return refusal
+}
+
+/**
+ * The queue outbox travels whole or not at all, like the lock counters: an
+ * unreadable `pending` read as 0 would report an empty queue over a broker
+ * that simply spoke another shape. Free text is clipped here because this
+ * event reaches paired companions and the banner prints `last_failure` as is.
+ */
+function queueOutbox(v: unknown): RoadmapSyncStatus['queue_outbox'] {
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return undefined
+  const r = v as Record<string, unknown>
+  const pending = counter(r.pending)
+  if (pending === undefined || !Array.isArray(r.refused)) return undefined
+  if (r.last_failure !== null && typeof r.last_failure !== 'string') return undefined
+  const refused: RoadmapQueueOutboxRefusal[] = []
+  for (const entry of r.refused.slice(-OUTBOX_REFUSED_MAX)) {
+    const refusal = outboxRefusal(entry)
+    if (refusal) refused.push(refusal)
+  }
+  return {
+    pending,
+    refused,
+    last_failure: r.last_failure === null ? null : clip(r.last_failure, OUTBOX_TEXT_MAX)
+  }
+}
+
 /**
  * Pick-list over the status payload. `mode` falls back to 'local', the inert
  * value: an unreadable status must never make the Deck believe it is a
@@ -818,6 +878,7 @@ export function sanitizeSyncStatus(raw: unknown, route = '/roadmap/sync/status')
     refused: counter(r.refused),
     refused_locks: counter(r.refused_locks),
     queue_replaced: counter(r.queue_replaced),
+    queue_outbox: queueOutbox(r.queue_outbox),
     locks: lockCounts(r.locks)
   }
 }

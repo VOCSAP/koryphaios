@@ -830,6 +830,20 @@ export interface RoadmapQueueDeltaConflict {
   item_id?: string;
 }
 
+/** A queue mutation the upstream refused: its ranks were restored to the upstream's and the entry is gone. */
+export interface RoadmapQueueOutboxRefusal {
+  project_key: string;
+  mutation_id: string;
+  reason: RoadmapQueueDeltaConflict["reason"] | "invalid" | "not_found" | "forbidden";
+  /** HTTP status of the refusal. */
+  status: number;
+  message: string;
+  /** The card the upstream named, when it did. */
+  item_id?: string;
+  /** ISO timestamp. */
+  at: string;
+}
+
 export type RoadmapSyncLockAction = "claim" | "release";
 
 export interface RoadmapSyncLockRequest {
@@ -907,6 +921,13 @@ export interface RoadmapSyncStatus {
    * and monotonic so a poller can toast the delta.
    */
   queue_replaced?: number;
+  /**
+   * Queue mutations waiting for the upstream, the latest it refused since this
+   * broker started (most recent last, at most 20), and the last failure to
+   * deliver one (transport, 5xx, retry-later, route refused), null once a send
+   * went through.
+   */
+  queue_outbox?: { pending: number; refused: RoadmapQueueOutboxRefusal[]; last_failure: string | null };
   locks?: { local: number; global: number; contested: number; remote: number };
   /** Replica only; absent on an upstream/local broker. */
   federation?: FederationStatus;

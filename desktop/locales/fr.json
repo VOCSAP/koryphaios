@@ -101,6 +101,7 @@
   "banner.roadmapConflicts": "{count} conflit(s) de roadmap à arbitrer",
   "banner.openRoadmap": "Ouvrir la roadmap",
   "banner.pushRefused": "{count} modification(s) refusée(s) par le broker distant",
+  "banner.queueUndelivered": "Ordre de file non livré au broker distant : {count} réordonnancement(s) en attente",
   "toast.workspaceSaved": "Espace enregistré",
   "toast.nothingToSave": "Rien à enregistrer",
   "toast.nothingToRestore": "Cet espace de travail n'a aucune session à restaurer",

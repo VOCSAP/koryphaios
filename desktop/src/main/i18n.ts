@@ -185,6 +185,7 @@ export const EN_DEFAULTS: Record<string, string> = {
   'banner.roadmapConflicts': '{count} roadmap conflict(s) to arbitrate',
   'banner.openRoadmap': 'Open the roadmap',
   'banner.pushRefused': '{count} change(s) refused by the upstream broker',
+  'banner.queueUndelivered': 'Queue order not delivered to the upstream broker: {count} reorder(s) waiting',
   'toast.workspaceSaved': 'Workspace saved',
   'toast.nothingToSave': 'Nothing to save',
   'toast.nothingToRestore': 'This workspace has no sessions to restore',

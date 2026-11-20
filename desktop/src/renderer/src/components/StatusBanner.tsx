@@ -227,5 +227,19 @@ export function StatusBanner(): React.JSX.Element | null {
     )
   }
 
+  // No Retry for the same reason: the outbox re-arms itself, and `last_failure`
+  // names what keeps the order from leaving.
+  if (kind === 'queue-undelivered') {
+    const failure = sync.queue_outbox?.last_failure ?? null
+    return (
+      <div className="status-banner status-banner-warn" role="status">
+        <span className="status-banner-text" title={failure ?? undefined}>
+          {GLYPH_BADGES.warning} {t('banner.queueUndelivered', { count: sync.queue_outbox?.pending ?? 0 })}
+          {failure ? <span className="status-banner-detail"> — {failure}</span> : null}
+        </span>
+      </div>
+    )
+  }
+
   return null
 }

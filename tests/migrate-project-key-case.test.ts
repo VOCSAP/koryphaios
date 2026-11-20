@@ -105,8 +105,10 @@ const EXPECTED_PROJECT_KEY_TABLES = [
   "pending_approvals",
   "roadmap_context_documents",
   "roadmap_items",
+  "roadmap_queue_outbox",
   "roadmap_queue_receipts",
   "roadmap_queue_state",
+  "roadmap_queue_upstream",
 ];
 
 function insertRoadmapItem(db: Database, id: string, projectKey: string): void {
@@ -158,6 +160,18 @@ function insertQueueReceipt(db: Database, replicaId: string, projectKey: string,
      VALUES (?, ?, ?, 'hash-1', 3, 7, '{"changes":[{"id":"a","queue":1,"rev":9}]}')`,
     [replicaId, projectKey, mutationId]
   );
+}
+
+function insertQueueOutbox(db: Database, projectKey: string, mutationId: string): void {
+  db.run(
+    `INSERT INTO roadmap_queue_outbox (project_key, mutation_id, ops, expected_queue_rev, withheld)
+     VALUES (?, ?, '[{"op":"clear"}]', 4, '{"card-a":2}')`,
+    [projectKey, mutationId]
+  );
+}
+
+function insertQueueUpstream(db: Database, projectKey: string, rev: number): void {
+  db.run("INSERT INTO roadmap_queue_upstream (project_key, rev) VALUES (?, ?)", [projectKey, rev]);
 }
 
 function insertDispatchRequest(db: Database, id: string, projectKey: string): void {
@@ -374,6 +388,63 @@ test("two receipts that would become the same primary key are REFUSED, never mer
   expect(db.query("SELECT project_key FROM roadmap_queue_receipts ORDER BY project_key").all()).toEqual([
     { project_key: "github.com/VOCSAP/koryphaios" },
     { project_key: "github.com/vocsap/koryphaios" },
+  ]);
+});
+
+// The replica's journal of queue mutations and the queue revisions it adopted
+// from its upstream are keyed by project: a journal entry that kept its old
+// casing would be sent for a project the upstream does not know, and folding
+// two casings would lower an adopted revision.
+test("a journal entry and an adopted upstream revision move to the lowercase key with every other column untouched", () => {
+  const db = seededDb();
+  insertQueueOutbox(db, "github.com/VOCSAP/koryphaios", "mutation-0001");
+  insertQueueUpstream(db, "github.com/VOCSAP/koryphaios", 7);
+  const outboxBefore = db
+    .query("SELECT seq, mutation_id, ops, expected_queue_rev, sent_at, withheld, created_at FROM roadmap_queue_outbox")
+    .get();
+
+  expect(migrateAll(db, true).status).toBe("written");
+
+  expect(db.query("SELECT project_key FROM roadmap_queue_outbox").all()).toEqual([
+    { project_key: "github.com/vocsap/koryphaios" },
+  ]);
+  expect(
+    db
+      .query("SELECT seq, mutation_id, ops, expected_queue_rev, sent_at, withheld, created_at FROM roadmap_queue_outbox")
+      .get()
+  ).toEqual(outboxBefore);
+  expect(db.query("SELECT project_key, rev FROM roadmap_queue_upstream").all()).toEqual([
+    { project_key: "github.com/vocsap/koryphaios", rev: 7 },
+  ]);
+});
+
+test("two casings of one project in the journal are REFUSED, never merged, so no pending mutation is lost", () => {
+  const db = seededDb();
+  insertQueueOutbox(db, "github.com/VOCSAP/koryphaios", "mutation-0001");
+  insertQueueOutbox(db, "github.com/vocsap/koryphaios", "mutation-0002");
+
+  const result = migrateAll(db, true);
+
+  expect(result.status).toBe("collision");
+  if (result.status === "collision") expect(result.collisions.has("roadmap_queue_outbox")).toBe(true);
+  expect(db.query("SELECT project_key FROM roadmap_queue_outbox ORDER BY seq").all()).toEqual([
+    { project_key: "github.com/VOCSAP/koryphaios" },
+    { project_key: "github.com/vocsap/koryphaios" },
+  ]);
+});
+
+test("two casings of one project in the adopted upstream revisions are REFUSED, never merged, so no revision goes backwards", () => {
+  const db = seededDb();
+  insertQueueUpstream(db, "github.com/VOCSAP/koryphaios", 9);
+  insertQueueUpstream(db, "github.com/vocsap/koryphaios", 4);
+
+  const result = migrateAll(db, true);
+
+  expect(result.status).toBe("collision");
+  if (result.status === "collision") expect(result.collisions.has("roadmap_queue_upstream")).toBe(true);
+  expect(db.query("SELECT project_key, rev FROM roadmap_queue_upstream ORDER BY project_key").all()).toEqual([
+    { project_key: "github.com/VOCSAP/koryphaios", rev: 9 },
+    { project_key: "github.com/vocsap/koryphaios", rev: 4 },
   ]);
 });
 

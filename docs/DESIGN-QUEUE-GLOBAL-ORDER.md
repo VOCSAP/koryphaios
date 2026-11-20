@@ -359,15 +359,24 @@ contenu local a son propre `sync_base` parse ; `recordPushDivergence` laisse
 passer sans conflit un push refuse pour `content` dont le contenu local
 egale deja son `sync_base`.
 
-**Limite acceptee, etendue.** Un rang local peut encore etre perdu : pas
-seulement quand un reorder amont posterieur ecrase le rang local (l'ordre
-GLOBAL fait autorite, §4), mais plus generalement des qu'UNE LIGNE AMONT EST
-LIVREE PAR LE PULL AVANT QUE LE PUSH DU RANG N'AIT ETE ACQUITTE -- y compris
-quand ce push a ete refuse parce que le contenu de la carte avait bouge en
-amont entre-temps. Le contrat reste celui du compteur `queue_replaced`
-existant : toute ligne amont livree par le pull ecrase le rang local, et le
-toast qui l'accompagne informe l'operateur -- la perte n'est donc jamais
-silencieuse.
+**Limite acceptee, reduite.** Le reorder d'une replique ne passe plus par le
+push ligne a ligne : il est journalise dans `roadmap_queue_outbox` dans la
+transaction qui l'ecrit, puis envoye par `/roadmap/sync/queue-delta` apres la
+passe de contenu (`DESIGN-ROADMAP-QUEUE-DELTA.md`, « Cote replique »). Il ne
+depend plus du contenu des cartes : une edition amont ne fait plus perdre le
+rang local, et un echange de deux cartes finit au meme ordre des deux cotes
+quel que soit l'ordre du pull et du push. Tant que le journal d'un projet
+n'est pas vide, le pull n'ecrit aucun rang de ce projet. Un refus de l'amont
+remet les rangs amont, et `queue_replaced` compte ces rangs remis : la perte
+d'un ordre local n'est jamais silencieuse.
+
+Ce qui reste de la limite : un rang ecrit par un autre chemin que le reorder
+(upsert avec `queue`, import) part encore par `/roadmap/sync/push`, et pour
+ces cartes UNE LIGNE AMONT LIVREE PAR LE PULL AVANT QUE LE PUSH DU RANG N'AIT
+ETE ACQUITTE ecrase le rang local, y compris quand ce push a ete refuse parce
+que le contenu avait bouge. Le contrat reste celui du compteur
+`queue_replaced` existant : toute ligne amont livree par le pull ecrase alors
+le rang local, et le toast informe l'operateur.
 
 Une seule ligne tiree n'ecrase pas le rang local : l'echo du propre push de la
 replique, une fois ce push acquitte, quand il rend exactement le rang que ce
