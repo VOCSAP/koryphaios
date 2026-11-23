@@ -50,6 +50,7 @@ export type SequenceStopReason =
   | 'seq-gap'
   | 'seq-regressed'
   | 'signal-refused'
+  | 'source-changed'
   | 'step-mismatch'
   | 'quiescence-unknown'
   | 'operator-cancelled'
@@ -90,6 +91,7 @@ export type SequenceState = Running | SequenceResult
 export type SequenceEvent =
   | { type: 'signal'; signal: TurnSignal }
   | { type: 'signal-refused'; reason: TurnSignalRefusal }
+  | { type: 'source-changed' }
   | { type: 'submitted'; step: number }
   | { type: 'inject-refused'; step: number; outcome: InjectionRefusal }
   | { type: 'start-timeout'; token: number }
@@ -280,6 +282,8 @@ export function reduceSequence(state: SequenceState, event: SequenceEvent): Tran
       return onSignal(state, event.signal)
     case 'signal-refused':
       return stop(state, 'signal-refused')
+    case 'source-changed':
+      return stop(state, 'source-changed')
     case 'submitted':
       if (event.step !== state.step) return stop(state, 'step-mismatch')
       return phase.kind === 'submitting'

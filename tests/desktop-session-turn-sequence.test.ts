@@ -678,6 +678,18 @@ describe('the runner events', () => {
     }
   })
 
+  test('a source change interrupts the sequence and says whether the step was typed', () => {
+    const before = drive(plan([skillA]))
+    before.send({ type: 'source-changed' })
+    expect(before.state).toEqual({ status: 'interrupted', step: 0, typed: false, reason: 'source-changed' })
+
+    const after = drive(plan([skillA]))
+    after.send({ type: 'submitted', step: 0 })
+    after.send({ type: 'source-changed' })
+    expect(after.state).toEqual({ status: 'interrupted', step: 0, typed: true, reason: 'source-changed' })
+    expect(after.effects.at(-1)).toMatchObject({ type: 'finish' })
+  })
+
   test('a submitted event for another step interrupts, the one for the current step after its command.run changes nothing', () => {
     const wrong = drive(plan([skillA, skillB]))
     wrong.send({ type: 'submitted', step: 1 })
