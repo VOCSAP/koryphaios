@@ -10,7 +10,10 @@ import type {
   SessionDef,
   SessionLiveStatus,
   SessionRuntime,
+  SessionSkillRefusal,
+  SessionSkillRunResult,
   SessionStatus,
+  SkillEligibility,
   ThalposStatus
 } from '@shared/types'
 import { PtyManager, validPtyDimensions } from './pty-manager'
@@ -100,6 +103,8 @@ import { TELEMETRY_CAPABILITY_ENV } from '../../../shared/peer-telemetry'
 import { windowsPtyFor } from '../shared/windows-pty'
 import type { TilePty } from './tile-process-owner'
 import { runSequence, type SequenceHandle, type SequenceInput } from './session-turn-runner'
+import { readSessionSkills } from './session-skills'
+import { assembleSkillSequence, SKILL_MOMENTS, type SkillMoment, type StopMode } from './session-skill-sequence'
 import { createTileTurnFeed, type TileTurnFeed } from './tile-turn-feed'
 import type { TileRef, TurnSignalServer } from './turn-signal-server'
 import { isToolNameList } from '../shared/tool-names'
@@ -681,6 +686,8 @@ export class SessionService extends EventEmitter {
   /** The signal URL each PTY life was launched with: a tile has a source only while its PTY posts to the current server. */
   private turnSignalSources = new WeakMap<object, string>()
   private sequenceSlots = new Map<string, { handle: SequenceHandle | null }>()
+  private sessionSkillsStateDir: string | null = null
+  private sequenceJournal: (line: string) => void = () => {}
   /** The tile's one subscription to the signal server; `generation` is the PTY life of the last event it carried. */
   private tileFeeds = new Map<
     string,
@@ -693,6 +700,16 @@ export class SessionService extends EventEmitter {
 
   setTurnSignalSubscribe(subscribe: TurnSignalServer['subscribe'] | null): void {
     this.turnSignalSubscribe = subscribe
+  }
+
+  /** The global state directory the Skills settings are read from, once per sequence. */
+  setSessionSkillsStateDir(dir: string | null): void {
+    this.sessionSkillsStateDir = dir
+  }
+
+  /** Where the sequence runner, a refused run and a directive waiting behind a sequence leave their Journal lines. */
+  setSequenceJournal(journal: (line: string) => void): void {
+    this.sequenceJournal = journal
   }
 
   /** The live PTYs of the tiles: the turn-signal server decides which tile owns a connection from these alone. */
@@ -745,6 +762,16 @@ export class SessionService extends EventEmitter {
   private hasTurnSignalSource(id: string): boolean {
     const life = this.pty.life(id)
     return life !== null && this.turnSignalUrl !== null && this.turnSignalSources.get(life) === this.turnSignalUrl
+  }
+
+  /** The first condition that keeps the Skills sequences out of this tile, in the order they are checked. */
+  private skillEligibility(def: SessionDef): SkillEligibility {
+    if (!this.isClaudeSession(def.id)) return { eligible: false, reason: 'not-claude' }
+    if (this.runsInSandbox(def)) return { eligible: false, reason: 'sandbox' }
+    if (!def.lead && !def.supervisor) return { eligible: false, reason: 'not-lead' }
+    if (!this.deckLeadPluginTiles.has(def.id)) return { eligible: false, reason: 'no-lead-plugin' }
+    if (this.turnSignalSubscribe === null || !this.hasTurnSignalSource(def.id)) return { eligible: false, reason: 'no-signals' }
+    return { eligible: true }
   }
 
   /** Sandboxed tiles use container telemetry and do not install the host hook. */
@@ -2074,7 +2101,8 @@ export class SessionService extends EventEmitter {
       // No runtime yet: leans "it's claude" (see isClaudeSession's doc).
       claudeLaunch: r?.claudeLaunch ?? true,
       liveStatus: r?.liveStatus ?? null,
-      windowsPty: this.windowsPty
+      windowsPty: this.windowsPty,
+      skillEligibility: this.skillEligibility(def)
     }
   }
 
@@ -2207,6 +2235,7 @@ export class SessionService extends EventEmitter {
 
   /** Holds tile `id` for a whole injection sequence; injections inside it take no further turn. */
   serializeTile<T>(id: string, fn: (inject: InTurnInject) => Promise<T>): Promise<T> {
+    if (this.sequenceSlots.has(id)) this.sequenceJournal(`a directive on tile ${id} waits behind a running sequence`)
     return this.injector.serializeTile(id, fn)
   }
 
@@ -2234,6 +2263,9 @@ export class SessionService extends EventEmitter {
         backgroundTasks: (tile) => {
           const entry = this.tileFeed(tile)
           return entry !== null && entry.generation === this.pty.life(tile) ? entry.feed.backgroundTasks() : null
+        },
+        onState: (view) => {
+          this.emit('sequence', view)
         },
         life: (tile) => this.pty.life(tile),
         hasSource: (tile) => subscribe !== null && this.hasTurnSignalSource(tile),
@@ -2270,6 +2302,39 @@ export class SessionService extends EventEmitter {
     if (!handle) return false
     handle.override()
     return true
+  }
+
+  /** Runs the Skills sequence of `moment` in tile `id`; the command lines are read here and never leave the main process. */
+  async runSkillSequence(id: unknown, moment: unknown, mode?: unknown): Promise<SessionSkillRunResult> {
+    const refuse = (reason: SessionSkillRefusal, detail?: string, tile?: string): SessionSkillRunResult => {
+      this.sequenceJournal(`skill sequence${tile === undefined ? '' : ` on tile ${tile}`}: refused (${detail === undefined ? reason : `${reason}: ${detail}`})`)
+      return detail === undefined ? { status: 'refused', reason } : { status: 'refused', reason, detail }
+    }
+    const stopMode = mode === 'soft' || mode === 'hard' ? mode : null
+    if (typeof id !== 'string' || !SKILL_MOMENTS.includes(moment as SkillMoment) || (moment === 'stop' ? stopMode === null : mode !== undefined)) {
+      return refuse('bad-request')
+    }
+    const def = this.defs.find((d) => d.id === id)
+    if (!def) return refuse('unknown-tile')
+    const eligibility = this.skillEligibility(def)
+    if (!eligibility.eligible) return refuse('not-eligible', eligibility.reason, id)
+    let settings: ReturnType<typeof readSessionSkills>
+    try {
+      if (this.sessionSkillsStateDir === null) throw new Error('no skills state directory')
+      settings = readSessionSkills(this.sessionSkillsStateDir)
+    } catch (e) {
+      reportError('session', `skills settings unreadable, no sequence started on tile ${id}`, e)
+      return refuse('settings-unreadable', undefined, id)
+    }
+    const plan = moment === 'stop' ? assembleSkillSequence('stop', settings, stopMode as StopMode) : assembleSkillSequence(moment as 'start' | 'end', settings)
+    if ('refused' in plan) return refuse('command-refused', `${plan.moment} line ${plan.line}: ${plan.reason}`, id)
+    const handle = this.runSequence(id, plan, (line) => this.sequenceJournal(line))
+    handle.result.catch((e) => reportError('session', `skill sequence on tile ${id} failed`, e))
+    const early = await Promise.race([handle.result, Promise.resolve(null)])
+    if (early?.status !== 'refused') return { status: 'started' }
+    return early.reason === 'bad-plan' || early.reason === 'no-source' || early.reason === 'sequence-active'
+      ? { status: 'refused', reason: early.reason }
+      : { status: 'refused', reason: 'command-refused', detail: early.reason }
   }
 
   /** The operator's stop: it never waits behind a queued directive or a magic_compact, and it ends the tile's running hold. */

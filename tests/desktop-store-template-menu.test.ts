@@ -196,3 +196,81 @@ test("showToast returns false for an identical repeat and true when the repeat r
   expect(shownToast()).toEqual({ toast: "toast.queueReplaced", toastVariant: "error", toastParams: null });
   expect(useDeck.getState().toastRaw).toBe(true);
 });
+
+const sequenceView = (tileId: string) => ({ tileId, step: 1, total: 2, phase: "waiting-background", background: 2, reason: null });
+const pushSequence = (view: unknown) => (listeners.get("onSessionSequence") as unknown as (v: unknown) => void)(view);
+const changeSessions = (ids: string[]) =>
+  (listeners.get("onSessionsChanged") as unknown as (sessions: unknown[]) => void)(
+    ids.map((id) => ({ id, rateLimited: false, status: "running" }))
+  );
+
+// Mutant: the onSessionSequence subscription removed.
+test("a sequence view pushed by main lands in the store under its tile", () => {
+  changeSessions(["a"]);
+  pushSequence(sequenceView("a"));
+  expect(useDeck.getState().sessionSequences["a"]).toEqual(sequenceView("a"));
+  changeSessions([]);
+});
+
+// Mutant: sessionSequences left alone when the session list changes.
+test("a tile that disappears takes its sequence state with it, and a restored tile of the same id starts clean", () => {
+  changeSessions(["a", "b"]);
+  pushSequence(sequenceView("a"));
+  pushSequence(sequenceView("b"));
+  changeSessions(["a"]);
+  expect(Object.keys(useDeck.getState().sessionSequences)).toEqual(["a"]);
+  changeSessions([]);
+  expect(useDeck.getState().sessionSequences).toEqual({});
+  changeSessions(["a"]);
+  expect(useDeck.getState().sessionSequences["a"]).toBeUndefined();
+  changeSessions([]);
+});
+
+async function withApi(over: Record<string, (...args: unknown[]) => unknown>, run: () => Promise<void>): Promise<void> {
+  const holder = window as unknown as { api: object };
+  const real = holder.api;
+  holder.api = new Proxy(real, { get: (target, name: string) => over[name] ?? Reflect.get(target, name) });
+  try {
+    await run();
+  } finally {
+    holder.api = real;
+  }
+}
+
+// Mutants: the store keeps only the id and the moment; the reply of main dropped.
+test("runSkill hands main the tile, the moment and the stop mode, and returns the reply", async () => {
+  const calls: unknown[][] = [];
+  const reply = { status: "refused", reason: "bad-request" };
+  await withApi({ runSessionSkill: (...args) => (calls.push(args), Promise.resolve(reply)) }, async () => {
+    expect(await useDeck.getState().runSkill("t", "stop", "hard")).toEqual(reply);
+    await useDeck.getState().runSkill("t", "start");
+  });
+  expect(calls).toEqual([
+    ["t", "stop", "hard"],
+    ["t", "start", undefined],
+  ]);
+});
+
+test("a run that main rejects resolves null instead of throwing", async () => {
+  await withApi({ runSessionSkill: () => Promise.reject(new Error("main refused")) }, async () => {
+    expect(await useDeck.getState().runSkill("t", "start")).toBeNull();
+  });
+});
+
+// Mutants: cancel calling the override method, or the reverse.
+test("cancelSequence and overrideSequence call their own main method with the tile", async () => {
+  const cancelled: unknown[][] = [];
+  const overridden: unknown[][] = [];
+  await withApi(
+    {
+      cancelSessionSequence: (...args) => (cancelled.push(args), Promise.resolve(true)),
+      overrideSessionQuiescence: (...args) => (overridden.push(args), Promise.resolve(true)),
+    },
+    async () => {
+      await useDeck.getState().cancelSequence("t");
+      expect([cancelled, overridden]).toEqual([[["t"]], []]);
+      await useDeck.getState().overrideSequence("u");
+      expect([cancelled, overridden]).toEqual([[["t"]], [["u"]]]);
+    }
+  );
+});

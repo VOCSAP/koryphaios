@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron'
+import { skillSequenceBridge } from './skill-sequence-bridge'
 import type {
   AppConfig,
   LinkIntent,
@@ -29,6 +30,7 @@ import type {
   ServeChannelState,
   SessionAttentionEvent,
   SessionQuotaEvent,
+  SessionSequenceView,
   SessionSkillSettings,
   ApprovalNotAppliedEvent,
   SessionRuntime,
@@ -92,6 +94,7 @@ const api: DeckApi = {
     ipcRenderer.invoke('sessions:set-auto-resume', id, enabled),
   clearAttention: (id: string) => ipcRenderer.invoke('sessions:clear-attention', id),
   setLead: (id: string) => ipcRenderer.invoke('sessions:set-lead', id),
+  ...skillSequenceBridge(ipcRenderer),
   setSessionLocked: (id: string, locked: boolean) =>
     ipcRenderer.invoke('sessions:set-locked', id, locked),
   peekNextColor: () => ipcRenderer.invoke('sessions:peek-next-color'),
@@ -287,6 +290,7 @@ const api: DeckApi = {
   onSessionThinking: (cb: (e: SessionThinkingEvent) => void) =>
     subscribe('session:thinking', cb),
   onSessionQuota: (cb: (e: SessionQuotaEvent) => void) => subscribe('session:quota', cb),
+  onSessionSequence: (cb: (view: SessionSequenceView) => void) => subscribe('sessions:sequence', cb),
   onApprovalNotApplied: (cb: (e: ApprovalNotAppliedEvent) => void) => subscribe('approvals:not-applied', cb),
   onSessionAttention: (cb: (e: SessionAttentionEvent) => void) =>
     subscribe('session:attention', cb),

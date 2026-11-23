@@ -23,6 +23,10 @@ import type {
   SandboxSettingsPatch,
   SandboxStatus,
   SessionRuntime,
+  SessionSequenceView,
+  SessionSkillMoment,
+  SessionSkillRunResult,
+  SessionSkillStopMode,
   TemplateSummary,
   WorkspaceSummary
 } from '@shared/types'
@@ -55,6 +59,8 @@ export type InboxApproval = Extract<InboxEntry, { kind: 'approval' }>['approval'
 
 interface DeckState {
   sessions: SessionRuntime[]
+  /** Progress of each tile's Skills sequence by tile id; the last view stays until the next run. */
+  sessionSequences: Record<string, SessionSequenceView>
   config: AppConfig | null
   /** Active navigation-rail view: agents (sessions) or roadmap. */
   view: DeckView
@@ -413,6 +419,10 @@ interface DeckState {
   setAutoResume(id: string, enabled: boolean): Promise<void>
   /** Manual dismiss for a stuck "needs you" flag (card 4f0143ff). */
   clearAttention(id: string): Promise<void>
+  /** Runs a Skills sequence in a lead tile; null when the call itself failed (already toasted). */
+  runSkill(id: string, moment: SessionSkillMoment, mode?: SessionSkillStopMode): Promise<SessionSkillRunResult | null>
+  cancelSequence(id: string): Promise<void>
+  overrideSequence(id: string): Promise<void>
   reorderSessions(ids: string[]): Promise<void>
   updateConfig(patch: Partial<AppConfig>): Promise<void>
   /** Broadcast a free-text operator message to all peers in the active group. */
@@ -562,6 +572,7 @@ export function roadmapConflictCount(s: DeckState): number {
 
 export const useDeck = create<DeckState>((set, get) => ({
   sessions: [],
+  sessionSequences: {},
   config: null,
   // The Deck opens on Home: the supervisor is the entry point of the app (it
   // spawns lazily on that view's first visit), so landing there is what starts
@@ -699,7 +710,7 @@ export const useDeck = create<DeckState>((set, get) => ({
     })
 
     window.api.onSessionsChanged((next) => {
-      const { selectedId, maximizedId, browserPairedId } = get()
+      const { selectedId, maximizedId, browserPairedId, sessionSequences } = get()
       const stillExists = next.some((s) => s.id === selectedId)
       const maxStillExists = next.some((s) => s.id === maximizedId)
       const pairedStillExists = next.some((s) => s.id === browserPairedId)
@@ -707,7 +718,8 @@ export const useDeck = create<DeckState>((set, get) => ({
         sessions: next,
         selectedId: stillExists ? selectedId : (next[0]?.id ?? null),
         maximizedId: maxStillExists ? maximizedId : null,
-        browserPairedId: pairedStillExists ? browserPairedId : null
+        browserPairedId: pairedStillExists ? browserPairedId : null,
+        sessionSequences: Object.fromEntries(Object.entries(sessionSequences).filter(([id]) => next.some((s) => s.id === id)))
       })
     })
     window.api.onMenuSettings(() => get().openSettings(true))
@@ -740,6 +752,9 @@ export const useDeck = create<DeckState>((set, get) => ({
     // injection moment as a toast.
     window.api.onSessionQuota((e) => {
       if (e.resumed) get().showToast('toast.quotaResumed', 'info')
+    })
+    window.api.onSessionSequence((view) => {
+      set((s) => ({ sessionSequences: { ...s.sessionSequences, [view.tileId]: view } }))
     })
     // The operator answered from a phone or this Courrier and believes it
     // landed: the journal alone would leave the dialog waiting unnoticed.
@@ -1221,6 +1236,22 @@ export const useDeck = create<DeckState>((set, get) => ({
   async clearAttention(id) {
     // The cleared flag arrives via onSessionsChanged (broadcast).
     await guarded('clear attention', () => window.api.clearAttention(id))
+  },
+
+  async runSkill(id, moment, mode) {
+    let result: SessionSkillRunResult | null = null
+    await guarded('run skill', async () => {
+      result = await window.api.runSessionSkill(id, moment, mode)
+    })
+    return result
+  },
+
+  async cancelSequence(id) {
+    await guarded('cancel sequence', () => window.api.cancelSessionSequence(id))
+  },
+
+  async overrideSequence(id) {
+    await guarded('skip background wait', () => window.api.overrideSessionQuiescence(id))
   },
 
   async reorderSessions(ids) {

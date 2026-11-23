@@ -29,6 +29,9 @@ export const COMPANION_MANIFEST = {
   setSessionAutoResume: { kind: 'invoke', channel: 'sessions:set-auto-resume' },
   clearAttention: { kind: 'invoke', channel: 'sessions:clear-attention' },
   setLead: { kind: 'invoke', channel: 'sessions:set-lead' },
+  runSessionSkill: { kind: 'invoke', channel: 'skills:run' },
+  cancelSessionSequence: { kind: 'invoke', channel: 'sessions:sequence-cancel' },
+  overrideSessionQuiescence: { kind: 'invoke', channel: 'sessions:sequence-override' },
   setSessionLocked: { kind: 'invoke', channel: 'sessions:set-locked' },
   peekNextColor: { kind: 'invoke', channel: 'sessions:peek-next-color' },
   reorderSessions: { kind: 'invoke', channel: 'sessions:reorder' },
@@ -225,6 +228,7 @@ export const COMPANION_MANIFEST = {
   onSessionsChanged: { kind: 'event', channel: 'sessions:changed' },
   onSessionThinking: { kind: 'event', channel: 'session:thinking' },
   onSessionQuota: { kind: 'event', channel: 'session:quota' },
+  onSessionSequence: { kind: 'event', channel: 'sessions:sequence' },
   onApprovalNotApplied: { kind: 'event', channel: 'approvals:not-applied' },
   onSessionAttention: { kind: 'event', channel: 'session:attention' },
   onInboxMessages: { kind: 'event', channel: 'inbox:new' },
@@ -356,7 +360,12 @@ const EXPLICIT_REMOTE_BLOCKED_CHANNELS: readonly string[] = [
   // is refused nowhere; the third third is that RoadmapSyncStatus declares no
   // upstream address for it to carry.
   'peersConfig:get',
-  'skills:get'
+  'skills:get',
+  // Typing the operator's own configured commands into a lead tile, or
+  // pushing a sequence past its wait for background tasks, is a host action:
+  // a paired phone may watch a sequence and cancel it, never start or hurry one.
+  'skills:run',
+  'sessions:sequence-override'
 ]
 
 /**
@@ -449,6 +458,7 @@ export const CHANNEL_TIERS: Readonly<Record<string, 0 | 1 | 2 | 3>> = {
   'sessions:set-auto-resume': 1,
   'sessions:clear-attention': 1,
   'sessions:set-lead': 1,
+  'sessions:sequence-cancel': 1,
   'sessions:reorder': 1,
   'broker:retry': 1,
   'announce:send': 1,
@@ -469,6 +479,8 @@ export const CHANNEL_TIERS: Readonly<Record<string, 0 | 1 | 2 | 3>> = {
   'sessions:create': 2,
   'sessions:remove': 2,
   'sessions:restart': 2,
+  'skills:run': 2,
+  'sessions:sequence-override': 2,
   'sessions:set-locked': 2,
   'app:new-clear': 2,
   'workspace:save': 2,

@@ -200,6 +200,22 @@ test('Skills prompts stay local: get is explicit-blocked and set is blocked by t
   expect(REMOTE_BLOCKED_CHANNELS.has('skills:set')).toBe(true)
 })
 
+test('A paired phone may watch and cancel a Skills sequence, never start or hurry one', () => {
+  expect(COMPANION_MANIFEST.runSessionSkill).toEqual({ kind: 'invoke', channel: 'skills:run' })
+  expect(COMPANION_MANIFEST.cancelSessionSequence).toEqual({ kind: 'invoke', channel: 'sessions:sequence-cancel' })
+  expect(COMPANION_MANIFEST.overrideSessionQuiescence).toEqual({ kind: 'invoke', channel: 'sessions:sequence-override' })
+  expect(COMPANION_MANIFEST.onSessionSequence).toEqual({ kind: 'event', channel: 'sessions:sequence' })
+  expect(CHANNEL_TIERS['skills:run']).toBe(2)
+  expect(CHANNEL_TIERS['sessions:sequence-override']).toBe(2)
+  expect(CHANNEL_TIERS['sessions:sequence-cancel']).toBe(1)
+  expect(REMOTE_BLOCKED_CHANNELS.has('skills:run'), 'starting a sequence types the operator commands at the host').toBe(true)
+  expect(REMOTE_BLOCKED_CHANNELS.has('sessions:sequence-override'), 'hurrying one skips a wait the operator may want').toBe(true)
+  expect(REMOTE_BLOCKED_CHANNELS.has('sessions:sequence-cancel')).toBe(false)
+  for (const mode of ['full', 'light'] as const) {
+    expect(shouldForwardEvent('sessions:sequence', mode), 'progress carries no command text').toBe(true)
+  }
+})
+
 test('peersConfig:summary is never PUSHED either: blocking the read alone would leak the same payload', () => {
   // The invoke floor only refuses what the phone ASKS for. peersConfig:summary
   // is broadcast by the host after a successful write, unasked -- so blocking

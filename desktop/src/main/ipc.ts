@@ -145,6 +145,7 @@ import { availableLocales, loadDict, resolveLocale } from './i18n'
 import { reportError } from './log'
 import { prewarmAndDetectThalpos } from './thalpos-detect'
 import { registerSessionSkillsChannels } from './session-skills'
+import { registerSkillSequenceChannels } from './skill-sequence-ipc'
 
 /**
  * Build the renderer i18n payload from the current config. Reads shipped locale
@@ -388,6 +389,7 @@ export function registerIpc({
   )
   regHandle('sessions:clear-attention', (_e, id: string) => service.clearAttention(id))
   regHandle('sessions:set-lead', (_e, id: string) => service.setLead(id))
+  registerSkillSequenceChannels(regHandle, service)
   regHandle('sessions:set-locked', (_e, id: string, locked: boolean) =>
     service.setLocked(id, locked)
   )
@@ -1664,6 +1666,7 @@ export function registerIpc({
   service.on('changed', (sessions) => broadcast('sessions:changed', sessions))
   service.on('thinking', (e) => broadcast('session:thinking', e))
   service.on('quota', (e) => broadcast('session:quota', e))
+  service.on('sequence', (view) => broadcast('sessions:sequence', view))
   service.on('attention', (e) => broadcast('session:attention', projectAttentionEvent(e)))
   sandbox.on('changed', (st) => broadcast('sandbox:changed', st))
 }

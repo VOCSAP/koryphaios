@@ -364,6 +364,7 @@ test('the Deck must write skills where the helper reads them', () => {
 
   expect(index.split('sessionSkillsDir: sessionSkillsStateDir,').length - 1, `${wiring}: registerIpc receives the handoff state directory`).toBe(1)
   expect(registerIpcBody.split('registerSessionSkillsChannels(regHandle, sessionSkillsDir)').length - 1, `${wiring}: registerIpc registers the channels on that directory`).toBe(1)
+  expect(registerIpcBody.split('registerSkillSequenceChannels(regHandle, service)').length - 1, `${wiring}: registerIpc registers the Skills sequence channels`).toBe(1)
 })
 
 const withCommands = (commands: { start?: string[]; end?: string[]; stop?: string[] }) => ({

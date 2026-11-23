@@ -7,6 +7,8 @@ import { extractParenBody } from "./_braced-body.ts";
 import { reachedWithin } from "./_bounded-await";
 import type { TurnSignalEvent } from "../desktop/src/main/turn-signal-server.ts";
 import { START_TIMEOUT_MS } from "../desktop/src/main/session-turn-runner.ts";
+import { NATIVE_COMMANDS } from "../desktop/src/main/session-skill-sequence.ts";
+import { writeSessionSkills } from "../desktop/src/main/session-skills.ts";
 import { ATTENTION_CONFIRMATION_DELAY_MS } from "../desktop/src/main/attention.ts";
 
 const SHARED = join(import.meta.dir, "..", "desktop", "src", "shared");
@@ -1916,4 +1918,230 @@ test("a sequence types step 1 without an override once a main turn follows a sub
   expect(writes.join("")).toContain(`/${SKILL_STEP.command} kory-step:`);
   tile.svc.cancelSequence(tile.tile.id);
   await reachedWithin(handle.result, "the cancelled sequence", 1500);
+});
+
+const LEAD_CREATE = { lead: true } as const;
+const LEAD_TOOLS = { hasDeckLeadTools: true } as const;
+const CONFIGURED_ARG = "marker-arg";
+
+function skillsDir(commands: { start?: string[]; end?: string[]; stop?: string[] } = {}): string {
+  const dir = mkdtempSync(join(tmpdir(), "kory-skills-state-"));
+  tmpDirs.push(dir);
+  writeSessionSkills(dir, {
+    version: 3,
+    addendum: { start: "", end: "", stop: "" },
+    storage: { mode: "kory", instructions: "" },
+    commands: { start: [], end: [], stop: [], ...commands },
+  });
+  return dir;
+}
+
+function leadTile(commands: { start?: string[]; end?: string[]; stop?: string[] } = {}) {
+  const { svc } = setup(SERVED);
+  svc.setTurnSignalUrl(TURN_URL);
+  const server = signalServer();
+  svc.setTurnSignalSubscribe(server.subscribe);
+  const journal: string[] = [];
+  svc.setSequenceJournal((line) => journal.push(line));
+  svc.setSessionSkillsStateDir(skillsDir(commands));
+  const views: unknown[] = [];
+  svc.on("sequence", (view) => views.push({ ...view }));
+  const tile = svc.create(LEAD_CREATE, LEAD_TOOLS);
+  const writes = typing(svc);
+  return { svc, server, journal, tile, views, writes };
+}
+
+function leadSignals(lead: ReturnType<typeof leadTile>) {
+  const generation = lead.svc.turnSignalTiles()[0]!.generation;
+  let seq = 0;
+  return (signal: Record<string, unknown>): void =>
+    lead.server.listeners.at(-1)!({ type: "signal", signal: { ...signal, seq: ++seq }, loadId: "load-1", generation } as TurnSignalEvent);
+}
+
+/** Plays one finished main turn of the step `command` the Deck just typed, with `backgroundTasks` left running. */
+function finishTurn(lead: ReturnType<typeof leadTile>, send: ReturnType<typeof leadSignals>, command: string, backgroundTasks: number): void {
+  const nonce = [...lead.writes.join("").matchAll(NONCE_TOKEN)].at(-1)![1];
+  send({ kind: "command.run:enter", command, args: `kory-step:${nonce}`, origin: "composer" });
+  send({ kind: "command.run:resolved", command });
+  send({ kind: "turn.start", turnId: `turn-${command}`, commandSeq: 1 });
+  send({ kind: "turn.complete", turnId: `turn-${command}`, reason: "answer", isAborted: false, backgroundTasks });
+}
+
+test("runSkillSequence starts the moment's sequence and the sequence event follows it to its end", async () => {
+  const lead = leadTile();
+  expect(await lead.svc.runSkillSequence(lead.tile.id, "start")).toEqual({ status: "started" });
+  await settle();
+  expect(lead.writes.join("")).toContain(`/${NATIVE_COMMANDS.start} kory-step:`);
+  finishTurn(lead, leadSignals(lead), NATIVE_COMMANDS.start, 0);
+  await settle();
+
+  const base = { tileId: lead.tile.id, total: 1, background: null, reason: null };
+  expect(lead.views).toEqual([
+    { ...base, step: 0, phase: "running" },
+    { ...base, step: 1, phase: "done" },
+  ]);
+  expect(lead.journal).toContain(`sequence on tile ${lead.tile.id}: done, 1 step`);
+});
+
+test("the sequence event reports the wait for background tasks with its count, then the operator's cancel", async () => {
+  const lead = leadTile({ start: ["/prepare-notes"] });
+  await lead.svc.runSkillSequence(lead.tile.id, "start");
+  await settle();
+  finishTurn(lead, leadSignals(lead), "prepare-notes", 2);
+  await settle();
+  expect(lead.views.at(-1)).toEqual({ tileId: lead.tile.id, step: 1, total: 2, phase: "waiting-background", background: 2, reason: null });
+
+  expect(lead.svc.cancelSequence(lead.tile.id)).toBe(true);
+  await settle();
+  expect(lead.views.at(-1)).toEqual({ tileId: lead.tile.id, step: 1, total: 2, phase: "stopped", background: null, reason: "operator-cancelled" });
+});
+
+test("a stop sequence types the native stop skill with its mode", async () => {
+  for (const mode of ["soft", "hard"] as const) {
+    const lead = leadTile();
+    expect(await lead.svc.runSkillSequence(lead.tile.id, "stop", mode)).toEqual({ status: "started" });
+    await settle();
+    expect(lead.writes.join(""), mode).toContain(`/${NATIVE_COMMANDS.stop} ${mode} kory-step:`);
+    lead.svc.cancelSequence(lead.tile.id);
+    await settle();
+  }
+});
+
+test("a sequence reads its settings from the configured state directory, never from the working directory", async () => {
+  const hostile = mkdtempSync(join(tmpdir(), "kory-skills-hostile-"));
+  tmpDirs.push(hostile);
+  writeSessionSkills(hostile, {
+    version: 3,
+    addendum: { start: "", end: "", stop: "" },
+    storage: { mode: "kory", instructions: "" },
+    commands: { start: ["/hostile-cmd"], end: [], stop: [] },
+  });
+  const cwd = process.cwd();
+  process.chdir(hostile);
+  try {
+    const lead = leadTile({ start: ["/global-cmd"] });
+    await lead.svc.runSkillSequence(lead.tile.id, "start");
+    await settle();
+    expect(lead.writes.join("")).toContain("/global-cmd kory-step:");
+    expect(lead.writes.join("")).not.toContain("hostile-cmd");
+    lead.svc.cancelSequence(lead.tile.id);
+    await settle();
+  } finally {
+    process.chdir(cwd);
+  }
+});
+
+test("a refused run is journaled and returned, and no command text leaves the service", async () => {
+  const lead = leadTile({ start: [`/marked-cmd ${CONFIGURED_ARG}`], end: [`/model ${CONFIGURED_ARG}`] });
+  const results: unknown[] = [];
+  const run = async (id: unknown, moment: unknown, mode?: unknown) => results.push(await lead.svc.runSkillSequence(id, moment, mode));
+
+  await run(42, "start");
+  await run(lead.tile.id, "nope");
+  await run(lead.tile.id, "stop");
+  await run(lead.tile.id, "stop", "sideways");
+  await run(lead.tile.id, "start", "soft");
+  await run("no-such-tile", "start");
+  await run(lead.tile.id, "end");
+  expect(results).toEqual([
+    { status: "refused", reason: "bad-request" },
+    { status: "refused", reason: "bad-request" },
+    { status: "refused", reason: "bad-request" },
+    { status: "refused", reason: "bad-request" },
+    { status: "refused", reason: "bad-request" },
+    { status: "refused", reason: "unknown-tile" },
+    { status: "refused", reason: "command-refused", detail: "end line 1: dialogue-command" },
+  ]);
+  expect(lead.journal).toContain(`skill sequence on tile ${lead.tile.id}: refused (command-refused: end line 1: dialogue-command)`);
+  expect(lead.journal.filter((line) => line === "skill sequence: refused (bad-request)")).toHaveLength(5);
+  expect(lead.journal).toContain("skill sequence: refused (unknown-tile)");
+
+  expect(await lead.svc.runSkillSequence(lead.tile.id, "start")).toEqual({ status: "started" });
+  expect(await lead.svc.runSkillSequence(lead.tile.id, "start"), "a second run on the same tile").toEqual({ status: "refused", reason: "sequence-active" });
+  await settle();
+  expect(lead.writes.join(""), "the configured line is typed into the tile").toContain(CONFIGURED_ARG);
+  expect(JSON.stringify([results, lead.journal, lead.views]), "and nowhere else").not.toContain(CONFIGURED_ARG);
+  lead.svc.cancelSequence(lead.tile.id);
+  await settle();
+});
+
+test("unreadable settings refuse the run before any claim and name the cause in the Journal's error sink", async () => {
+  const errors: string[] = [];
+  onDeckError((scope, text) => errors.push(`[${scope}] ${text}`));
+  try {
+    const lead = leadTile();
+    const broken = skillsDir();
+    writeFileSync(join(broken, "session-skills.json"), "{");
+    lead.svc.setSessionSkillsStateDir(broken);
+    expect(await lead.svc.runSkillSequence(lead.tile.id, "start")).toEqual({ status: "refused", reason: "settings-unreadable" });
+    lead.svc.setSessionSkillsStateDir(null);
+    expect(await lead.svc.runSkillSequence(lead.tile.id, "start")).toEqual({ status: "refused", reason: "settings-unreadable" });
+    expect(errors.filter((line) => line.startsWith("[session] skills settings unreadable"))).toHaveLength(2);
+    lead.svc.setSessionSkillsStateDir(skillsDir());
+    expect(await lead.svc.runSkillSequence(lead.tile.id, "start"), "no claim was left by the refusals").toEqual({ status: "started" });
+    lead.svc.cancelSequence(lead.tile.id);
+    await settle();
+  } finally {
+    onDeckError(() => {});
+  }
+});
+
+test("a tile reports why it cannot run a sequence, one reason per condition, the first failing one", () => {
+  const eligibilityOf = (svc: InstanceType<typeof SessionService>, id: string) => svc.list().find((tile) => tile.id === id)!.skillEligibility;
+  const served = (opts: Parameters<typeof setup>[0] = SERVED) => {
+    const { svc } = setup(opts);
+    svc.setTurnSignalUrl(TURN_URL);
+    svc.setTurnSignalSubscribe(signalServer().subscribe);
+    return svc;
+  };
+  const no = (reason: string) => ({ eligible: false, reason });
+
+  const lead = served();
+  expect(eligibilityOf(lead, lead.create(LEAD_CREATE, LEAD_TOOLS).id), "a served lead tile").toEqual({ eligible: true });
+  const supervisor = served();
+  expect(eligibilityOf(supervisor, supervisor.create({ supervisor: true }, LEAD_TOOLS).id), "a supervisor carries the lead plugin").toEqual({ eligible: true });
+  const shell = served();
+  expect(eligibilityOf(shell, shell.create({ ...LEAD_CREATE, command: "bash" }, LEAD_TOOLS).id)).toEqual(no("not-claude"));
+  const sandboxed = served({ ...SERVED, sandboxPeersDir: "/peers" });
+  expect(eligibilityOf(sandboxed, sandboxed.create(LEAD_CREATE, LEAD_TOOLS).id)).toEqual(no("sandbox"));
+  const plain = served();
+  expect(eligibilityOf(plain, plain.create({}, LEAD_TOOLS).id)).toEqual(no("not-lead"));
+  const bare = served();
+  expect(eligibilityOf(bare, bare.create(LEAD_CREATE).id)).toEqual(no("no-lead-plugin"));
+  const offline = served();
+  offline.setTurnSignalSubscribe(null);
+  expect(eligibilityOf(offline, offline.create(LEAD_CREATE, LEAD_TOOLS).id), "no server").toEqual(no("no-signals"));
+  const unlaunched = served({ hostTelemetry: true });
+  expect(eligibilityOf(unlaunched, unlaunched.create(LEAD_CREATE, LEAD_TOOLS).id), "a tile launched without the signal environment").toEqual(no("no-signals"));
+  const replaced = served();
+  const replacedId = replaced.create(LEAD_CREATE, LEAD_TOOLS).id;
+  replaced.setTurnSignalUrl(OTHER_URL);
+  expect(eligibilityOf(replaced, replacedId), "a server replaced after the spawn").toEqual(no("no-signals"));
+  const both = served({ ...SERVED, sandboxPeersDir: "/peers" });
+  expect(eligibilityOf(both, both.create({ command: "bash" }).id), "the first failing condition wins").toEqual(no("not-claude"));
+});
+
+test("an ineligible tile refuses the run with its reason and types nothing", async () => {
+  const lead = leadTile();
+  const other = lead.svc.create({}, LEAD_TOOLS);
+  expect(await lead.svc.runSkillSequence(other.id, "start")).toEqual({ status: "refused", reason: "not-eligible", detail: "not-lead" });
+  expect(lead.journal).toContain(`skill sequence on tile ${other.id}: refused (not-eligible: not-lead)`);
+  expect(lead.writes).toEqual([]);
+});
+
+test("a directive that takes a tile behind a running sequence leaves one Journal line saying why", async () => {
+  const lead = leadTile();
+  await lead.svc.runSkillSequence(lead.tile.id, "start");
+  await settle();
+  const waiting = lead.svc.serializeTile(lead.tile.id, async () => "ran");
+  expect(lead.journal.filter((line) => line.includes("waits behind a running sequence"))).toEqual([
+    `a directive on tile ${lead.tile.id} waits behind a running sequence`,
+  ]);
+
+  lead.svc.cancelSequence(lead.tile.id);
+  expect(await reachedWithin(waiting, "the directive after the sequence", 1500)).toBe("ran");
+
+  const idle = leadTile();
+  await idle.svc.serializeTile(idle.tile.id, async () => "ran");
+  expect(idle.journal, "no sequence, no line").toEqual([]);
 });

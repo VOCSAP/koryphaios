@@ -867,11 +867,13 @@ service.setSessionHandoffLaunchProvider((tileId, helperPath) => createSessionHan
   app.getPath('logs')
 ))
 service.setHostTelemetryProvider(hostSupportsKoryTelemetry)
+service.setSessionSkillsStateDir(sessionSkillsStateDir)
 
 const journal = createPersistentJournal({
   dir: app.getPath('logs'),
   onWriteFailure: (file, error) => logWarn('journal', `cannot persist ${file}`, error)
 })
+service.setSequenceJournal((line) => journal.add('dispatch', line))
 
 onDeckError((scope, text) => journal.add('error', `[${scope}] ${text}`))
 initSessionState()

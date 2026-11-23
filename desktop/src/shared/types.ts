@@ -181,6 +181,8 @@ export interface SessionRuntime extends SessionDef {
   liveStatus: SessionLiveStatus | null
   /** Host PTY backend the terminal must emulate; null off Windows. */
   windowsPty: WindowsPtyInfo | null
+  /** Whether the Skills sequences can run in this tile, and the first reason they cannot. */
+  skillEligibility: SkillEligibility
 }
 
 /** One statusLine report, validated main-side before it reaches the renderer. */
@@ -531,6 +533,39 @@ export interface SessionSkillStorage {
   mode: 'kory' | 'custom'
   instructions: string
 }
+
+export type SessionSkillMoment = 'start' | 'end' | 'stop'
+export type SessionSkillStopMode = 'soft' | 'hard'
+
+/** Why a tile cannot run the Skills sequences, in the order the conditions are checked. */
+export type SkillIneligibility = 'not-claude' | 'sandbox' | 'not-lead' | 'no-lead-plugin' | 'no-signals'
+export type SkillEligibility = { eligible: true } | { eligible: false; reason: SkillIneligibility }
+
+/** Progress of the Skills sequence of one tile; carries no command text. */
+export interface SessionSequenceView {
+  tileId: string
+  /** The step in flight, or the next one while waiting; the step count once done. */
+  step: number
+  total: number
+  phase: 'running' | 'waiting-background' | 'done' | 'stopped'
+  /** The background task count the sequence waits on; null otherwise. */
+  background: number | null
+  /** Why the sequence stopped; null while it runs or when it is done. */
+  reason: string | null
+}
+
+export type SessionSkillRefusal =
+  | 'bad-request'
+  | 'unknown-tile'
+  | 'not-eligible'
+  | 'settings-unreadable'
+  | 'command-refused'
+  | 'bad-plan'
+  | 'no-source'
+  | 'sequence-active'
+
+/** `detail` names a rule or a tile condition, never a command line. */
+export type SessionSkillRunResult = { status: 'started' } | { status: 'refused'; reason: SessionSkillRefusal; detail?: string }
 
 /** Slash command lines (`/name [args]`) the Deck types around the native skill of each moment. */
 export interface SessionSkillCommands {
@@ -2369,6 +2404,12 @@ export interface DeckApi {
   clearAttention(id: string): Promise<void>
   /** Designate a session as the window's team-lead (unique, PLAN C10). */
   setLead(id: string): Promise<void>
+  /** Runs the Skills sequence of one moment in a team-lead tile; says whether it started or why it was refused. `mode` is required for `stop`. */
+  runSessionSkill(id: string, moment: SessionSkillMoment, mode?: SessionSkillStopMode): Promise<SessionSkillRunResult>
+  /** Cancels the tile's running sequence; false when none runs. */
+  cancelSessionSequence(id: string): Promise<boolean>
+  /** Types the sequence's next step without waiting for background tasks; false when none runs. */
+  overrideSessionQuiescence(id: string): Promise<boolean>
   setSessionLocked(id: string, locked: boolean): Promise<void>
   /** The colour the next auto-assigned session would receive (create preview). */
   peekNextColor(): Promise<string>
@@ -2889,6 +2930,7 @@ export interface DeckApi {
   onSessionsChanged(cb: (sessions: SessionRuntime[]) => void): () => void
   onSessionThinking(cb: (e: SessionThinkingEvent) => void): () => void
   onSessionQuota(cb: (e: SessionQuotaEvent) => void): () => void
+  onSessionSequence(cb: (view: SessionSequenceView) => void): () => void
   /** An operator's answer the Deck refused to type into a tile (screen check). */
   onApprovalNotApplied(cb: (e: ApprovalNotAppliedEvent) => void): () => void
   onSessionAttention(cb: (e: SessionAttentionEvent) => void): () => void
