@@ -200,7 +200,7 @@ import {
   type JoinAnnounceIntent
 } from '@shared/announce'
 import { isHead } from '@shared/workflow'
-import { APP_STATE_SUBDIR, runDataMigration } from './migrate-data-dir'
+import { APP_STATE_SUBDIR, appStateDirOf, runDataMigration } from './migrate-data-dir'
 import type { SessionRuntime } from '@shared/types'
 import { listAgents } from './agents'
 import { createSessionWithWorktree, restartSessionGated } from './create-session'
@@ -411,7 +411,7 @@ let activeScopeEnv: ScopeEnv = buildScopeEnv(activeScope)
 const avatarScope = createAvatarScopeTracker()
 let avatarClient: AvatarClient | null = null
 
-const appStateDir = (): string => join(app.getPath('userData'), APP_STATE_SUBDIR)
+const appStateDir = (): string => appStateDirOf(app.getPath('userData'))
 // SESSION-scoped state of THIS window (session-state.ts): sessions/<groupId>/
 // under the shared state dir. Every session-scoped file goes through here,
 // never through appStateDir() -- userData is shared by every Kory window.

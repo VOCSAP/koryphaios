@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { extractBracedBody } from './_braced-body'
 import { readSessionSkills, registerSessionSkillsChannels, sessionSkillsHandlers, sessionSkillsPath, writeSessionSkills } from '../desktop/src/main/session-skills'
+import { APP_STATE_SUBDIR, appStateDirOf } from '../desktop/src/main/migrate-data-dir'
 
 const dirs: string[] = []
 
@@ -21,18 +22,20 @@ test('returns empty addenda only when the global file is absent', () => {
   const state = stateDir()
 
   expect(readSessionSkills(state)).toEqual({
-    version: 2,
+    version: 3,
     addendum: { start: '', end: '', stop: '' },
-    storage: { mode: 'kory', instructions: '' }
+    storage: { mode: 'kory', instructions: '' },
+    commands: { start: [], end: [], stop: [] }
   })
 })
 
 test('normalizes an absent or v1 settings document to Kory storage', () => {
   const state = stateDir()
   const expected = {
-    version: 2,
+    version: 3 as const,
     addendum: { start: '', end: '', stop: '' },
-    storage: { mode: 'kory', instructions: '' }
+    storage: { mode: 'kory' as const, instructions: '' },
+    commands: { start: [], end: [], stop: [] }
   }
 
   expect(readSessionSkills(state)).toEqual(expected)
@@ -46,9 +49,10 @@ test('normalizes an absent or v1 settings document to Kory storage', () => {
 test('accepts bounded custom storage instructions', () => {
   const state = stateDir()
   const settings = {
-    version: 2 as const,
+    version: 3 as const,
     addendum: { start: '', end: '', stop: '' },
-    storage: { mode: 'custom' as const, instructions: 'é'.repeat(8 * 1024) }
+    storage: { mode: 'custom' as const, instructions: 'é'.repeat(8 * 1024) },
+    commands: { start: [], end: [], stop: [] }
   }
 
   expect(writeSessionSkills(state, settings)).toEqual(settings)
@@ -59,9 +63,10 @@ test('accepts bounded custom storage instructions', () => {
 test('persists each addendum in the global state directory', () => {
   const state = stateDir()
   const settings = {
-    version: 2 as const,
+    version: 3 as const,
     addendum: { start: 'Prepare context.', end: 'Publish the handoff.', stop: 'Explain the stop.' },
-    storage: { mode: 'kory' as const, instructions: '' }
+    storage: { mode: 'kory' as const, instructions: '' },
+    commands: { start: [], end: [], stop: [] }
   }
 
   expect(writeSessionSkills(state, settings)).toEqual(settings)
@@ -110,9 +115,10 @@ test('distinguishes a non-regular file from a symbolic link', () => {
 test('names the oversized addendum that is rejected before persistence', () => {
   const state = stateDir()
   const settings = {
-    version: 2 as const,
+    version: 3 as const,
     addendum: { start: 'x'.repeat(16 * 1024 + 1), end: '', stop: '' },
-    storage: { mode: 'kory' as const, instructions: '' }
+    storage: { mode: 'kory' as const, instructions: '' },
+    commands: { start: [], end: [], stop: [] }
   }
 
   expect(() => writeSessionSkills(state, settings)).toThrow('start')
@@ -160,9 +166,10 @@ test('does not derive the settings file from the working directory', () => {
 })
 
 const addenda = (start = '', end = '', stop = '') => ({
-  version: 2 as const,
+  version: 3 as const,
   addendum: { start, end, stop },
-  storage: { mode: 'kory' as const, instructions: '' }
+  storage: { mode: 'kory' as const, instructions: '' },
+  commands: { start: [] as string[], end: [] as string[], stop: [] as string[] }
 })
 
 test('handlers set and get use their shared state directory', () => {
@@ -357,4 +364,142 @@ test('the Deck must write skills where the helper reads them', () => {
 
   expect(index.split('sessionSkillsDir: sessionSkillsStateDir,').length - 1, `${wiring}: registerIpc receives the handoff state directory`).toBe(1)
   expect(registerIpcBody.split('registerSessionSkillsChannels(regHandle, sessionSkillsDir)').length - 1, `${wiring}: registerIpc registers the channels on that directory`).toBe(1)
+})
+
+const withCommands = (commands: { start?: string[]; end?: string[]; stop?: string[] }) => ({
+  ...addenda('a', 'b', 'c'),
+  commands: { start: [] as string[], end: [] as string[], stop: [] as string[], ...commands }
+})
+
+test('lifts a v2 file on disk to v3 with empty command lists and keeps its addendum and storage', () => {
+  const state = stateDir()
+  const storage = { mode: 'custom' as const, instructions: 'Keep notes in docs/.' }
+  writeFileSync(sessionSkillsPath(state), JSON.stringify({ version: 2, addendum: { start: 'S', end: 'E', stop: 'P' }, storage }))
+
+  expect(readSessionSkills(state)).toEqual({
+    version: 3,
+    addendum: { start: 'S', end: 'E', stop: 'P' },
+    storage,
+    commands: { start: [], end: [], stop: [] }
+  })
+})
+
+test('lifts a v1 file through v2 to v3 in one read', () => {
+  const state = stateDir()
+  writeFileSync(sessionSkillsPath(state), JSON.stringify({ version: 1, addendum: { start: 'S', end: '', stop: '' } }))
+
+  const read = readSessionSkills(state)
+  expect(read.version).toBe(3)
+  expect(read.storage).toEqual({ mode: 'kory', instructions: '' })
+  expect(read.commands).toEqual({ start: [], end: [], stop: [] })
+})
+
+test('persists configured command lines for each moment and reads them back unchanged', () => {
+  const state = stateDir()
+  const value = withCommands({ start: ['/kleos-session-start'], end: ['/compact', '/review-notes today'], stop: ['/wrap-up'] })
+
+  expect(writeSessionSkills(state, value)).toEqual(value)
+  expect(JSON.parse(readFileSync(sessionSkillsPath(state), 'utf8')).commands).toEqual(value.commands)
+  expect(readSessionSkills(state)).toEqual(value)
+})
+
+test('a v2 or v1 document carrying commands is refused, not lifted', () => {
+  const state = stateDir()
+  const file = sessionSkillsPath(state)
+  const storage = { mode: 'kory', instructions: '' }
+  for (const content of [
+    { version: 2, addendum: { start: '', end: '', stop: '' }, storage, commands: { start: [], end: [], stop: [] } },
+    { version: 1, addendum: { start: '', end: '', stop: '' }, commands: { start: [], end: [], stop: [] } }
+  ]) {
+    writeFileSync(file, JSON.stringify(content))
+    expect(() => readSessionSkills(state)).toThrow('Invalid session skills settings')
+  }
+})
+
+test('refuses a v3 document without commands, with an unknown top-level key, or with an unknown commands key', () => {
+  const state = stateDir()
+  const { commands: _commands, ...withoutCommands } = withCommands({})
+  const documents = [
+    withoutCommands,
+    { ...withCommands({}), extra: true },
+    { ...withCommands({}), commands: { start: [], end: [], stop: [], extra: [] } },
+    { ...withCommands({}), commands: { start: [], end: [] } }
+  ]
+
+  for (const content of documents) {
+    expect(() => writeSessionSkills(state, content)).toThrow('Invalid session skills settings')
+    writeFileSync(sessionSkillsPath(state), JSON.stringify(content))
+    expect(() => readSessionSkills(state)).toThrow('Invalid session skills settings')
+  }
+})
+
+test('refuses a command list that is not an array of valid lines and names the moment and the line', () => {
+  const state = stateDir()
+  const refused: [unknown, string][] = [
+    [{ start: 'not-an-array' }, 'Invalid session skills settings'],
+    [{ end: ['/ok', 'no-slash'] }, 'Session skill command "end" line 2 is invalid (missing-slash)'],
+    [{ stop: ['/a\nb'] }, 'Session skill command "stop" line 1 is invalid (control-character)'],
+    [{ start: ['   '] }, 'Session skill command "start" line 1 is invalid (empty)'],
+    [{ start: ['/'] }, 'Session skill command "start" line 1 is invalid (empty)'],
+    [{ start: [42] }, 'Session skill command "start" line 1 is invalid (not-a-string)']
+  ]
+
+  for (const [commands, message] of refused) {
+    expect(() => writeSessionSkills(state, withCommands(commands as never)), message).toThrow(message)
+    writeFileSync(sessionSkillsPath(state), JSON.stringify(withCommands(commands as never)))
+    expect(() => readSessionSkills(state), message).toThrow(message)
+  }
+  expect(readdirSync(state)).toEqual(['session-skills.json'])
+})
+
+test('accepts a moment at exactly the line ceiling and refuses one line more', () => {
+  const state = stateDir()
+  const lines = Array.from({ length: 8 }, (_, index) => `/step-${index}`)
+
+  expect(writeSessionSkills(state, withCommands({ start: lines })).commands.start).toEqual(lines)
+  expect(() => writeSessionSkills(state, withCommands({ start: [...lines, '/step-8'] }))).toThrow('Session skill commands "start" has too many lines')
+})
+
+test('the Deck state directory that holds the skills settings comes from userData alone, whatever the cwd and the environment hold', () => {
+  const userData = stateDir()
+  const hostile = stateDir()
+  const names = ['CLAUDE_PROJECT_DIR', 'DESK_PROJECT_DIR']
+  const saved = names.map((name) => process.env[name])
+  const cwd = process.cwd()
+  for (const name of names) process.env[name] = hostile
+  process.chdir(hostile)
+  try {
+    const dir = appStateDirOf(userData)
+
+    expect(dir).toBe(join(userData, APP_STATE_SUBDIR))
+    mkdirSync(dir, { recursive: true })
+    writeSessionSkills(dir, addenda('global'))
+    expect(readSessionSkills(dir).addendum.start).toBe('global')
+    expect(readdirSync(hostile)).toEqual([])
+  } finally {
+    process.chdir(cwd)
+    names.forEach((name, index) => {
+      const value = saved[index]
+      if (value === undefined) delete process.env[name]
+      else process.env[name] = value
+    })
+  }
+})
+
+test('a v2 file whose custom storage has blank instructions is refused, not repaired to Kory storage', () => {
+  const state = stateDir()
+  const body = JSON.stringify({ version: 2, addendum: { start: 'S', end: '', stop: '' }, storage: { mode: 'custom', instructions: '   ' } })
+  writeFileSync(sessionSkillsPath(state), body)
+
+  expect(() => readSessionSkills(state)).toThrow('Invalid session skills settings')
+  expect(readFileSync(sessionSkillsPath(state), 'utf8')).toBe(body)
+})
+
+test('rejects unknown storage keys in a v3 document on read and write', () => {
+  const state = stateDir()
+  const extra = { ...withCommands({}), storage: { mode: 'kory', instructions: '', extra: '' } }
+
+  expect(() => writeSessionSkills(state, extra)).toThrow('Invalid session skills settings')
+  writeFileSync(sessionSkillsPath(state), JSON.stringify(extra))
+  expect(() => readSessionSkills(state)).toThrow('Invalid session skills settings')
 })

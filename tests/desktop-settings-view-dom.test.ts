@@ -40,7 +40,8 @@ type ThalposStatusReply = { usable: true; maxHours: number } | { usable: false; 
 const THALPOS_USABLE: ThalposStatusReply = { usable: true, maxHours: 12 };
 let thalposStatusImpl: () => Promise<ThalposStatusReply> = () => Promise.resolve(THALPOS_USABLE);
 const KORY_STORAGE = { mode: "kory", instructions: "" } as const;
-const NO_SKILLS: SessionSkillSettings = { version: 2, addendum: { start: "", end: "", stop: "" }, storage: KORY_STORAGE };
+const NO_COMMANDS: SessionSkillSettings["commands"] = { start: [], end: [], stop: [] };
+const NO_SKILLS: SessionSkillSettings = { version: 3, addendum: { start: "", end: "", stop: "" }, storage: KORY_STORAGE, commands: NO_COMMANDS };
 let getSkillsImpl: () => Promise<SessionSkillSettings> = () => Promise.resolve(NO_SKILLS);
 let setSkillsImpl: (value: SessionSkillSettings) => Promise<SessionSkillSettings> = (value) => Promise.resolve(value);
 let setSkillsCalls: SessionSkillSettings[] = [];
@@ -474,7 +475,7 @@ test("a skills file that cannot be read stays an invalid state with no field to 
     "the failed read must be traced with its cause"
   ).toHaveLength(1);
 
-  getSkillsImpl = () => Promise.resolve({ version: 2, addendum: { start: "S", end: "", stop: "" }, storage: KORY_STORAGE });
+  getSkillsImpl = () => Promise.resolve({ version: 3, addendum: { start: "S", end: "", stop: "" }, storage: KORY_STORAGE, commands: NO_COMMANDS });
   const retry = panel.querySelector(".skills-invalid button") as HTMLButtonElement;
   await act(async () => {
     retry.click();
@@ -510,7 +511,7 @@ test("a refused save keeps the typed text and shows the refusal as an error stat
 });
 
 test("each moment shows its own stored text and saves into its own field", async () => {
-  getSkillsImpl = () => Promise.resolve({ version: 2, addendum: { start: "S0", end: "E0", stop: "P0" }, storage: KORY_STORAGE });
+  getSkillsImpl = () => Promise.resolve({ version: 3, addendum: { start: "S0", end: "E0", stop: "P0" }, storage: KORY_STORAGE, commands: NO_COMMANDS });
   const panel = await openSkills();
 
   expect(MOMENT_COMMANDS.map((c) => momentArea(panel, c)?.value), "each field must be seeded from its own moment").toEqual([
@@ -531,7 +532,7 @@ test("each moment shows its own stored text and saves into its own field", async
   await clickSave(panel);
 
   expect(setSkillsCalls, "each moment's text must land in its own field of the one document").toEqual([
-    { version: 2, addendum: { start: "S1", end: "E1", stop: "P1" }, storage: KORY_STORAGE },
+    { version: 3, addendum: { start: "S1", end: "E1", stop: "P1" }, storage: KORY_STORAGE, commands: NO_COMMANDS },
   ]);
   expect(skillsRoot(panel).dataset.state, "an accepted write must show the saved state").toBe("saved");
   expect(panel.querySelector("[role=status]")?.textContent).toContain("skills.saved");
@@ -639,7 +640,7 @@ test("every skills text is accepted at exactly 16 KiB of UTF-8 and refused two b
 
 test("switching the handoff storage back to Kory is a change the save keeps, with the typed text", async () => {
   const custom = { mode: "custom", instructions: "kleos-cli handoff latest" } as const;
-  getSkillsImpl = () => Promise.resolve({ version: 2, addendum: { start: "S0", end: "", stop: "" }, storage: custom });
+  getSkillsImpl = () => Promise.resolve({ version: 3, addendum: { start: "S0", end: "", stop: "" }, storage: custom, commands: NO_COMMANDS });
   const panel = await openSkills();
 
   expect(storageRadio(panel, "custom").checked, "the stored custom mode must be shown chosen").toBe(true);
@@ -652,9 +653,10 @@ test("switching the handoff storage back to Kory is a change the save keeps, wit
 
   expect(setSkillsCalls, "the switch must reach the one document, the addendum untouched").toEqual([
     {
-      version: 2,
+      version: 3,
       addendum: { start: "S0", end: "", stop: "" },
       storage: { mode: "kory", instructions: "kleos-cli handoff latest" },
+      commands: NO_COMMANDS,
     },
   ]);
   expect(skillsRoot(panel).dataset.state).toBe("saved");
@@ -664,4 +666,23 @@ test("switching the handoff storage back to Kory is a change the save keeps, wit
   expect(storageArea(panel)?.value, "the text typed for custom storage must survive a round trip through Kory").toBe(
     "kleos-cli handoff latest"
   );
+});
+
+test("a save from the Skills screen sends the stored command lists back, and the ones main returned the next time", async () => {
+  const stored = { start: ["/kleos-session-start"], end: ["/compact", "/note x"], stop: ["/wrap-up"] };
+  getSkillsImpl = () => Promise.resolve({ version: 3, addendum: { start: "", end: "", stop: "" }, storage: KORY_STORAGE, commands: stored });
+  setSkillsImpl = (value) => Promise.resolve({ ...value, commands: { ...value.commands, start: ["/from-main"] } });
+  const panel = await openSkills();
+
+  await typeInto(momentArea(panel, "/kory-session-start")!, "S1");
+  await clickSave(panel);
+  await typeInto(momentArea(panel, "/kory-session-end")!, "E1");
+  await clickSave(panel);
+
+  expect(setSkillsCalls.map((v) => v.version), "the screen writes the current schema").toEqual([3, 3]);
+  expect(setSkillsCalls[0]!.commands, "the first save must carry the stored lists intact").toEqual(stored);
+  expect(setSkillsCalls[1]!.commands, "the next save must carry what main returned, not the first read").toEqual({
+    ...stored,
+    start: ["/from-main"],
+  });
 });

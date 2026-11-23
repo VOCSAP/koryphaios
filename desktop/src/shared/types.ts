@@ -532,10 +532,18 @@ export interface SessionSkillStorage {
   instructions: string
 }
 
+/** Slash command lines (`/name [args]`) the Deck types around the native skill of each moment. */
+export interface SessionSkillCommands {
+  start: string[]
+  end: string[]
+  stop: string[]
+}
+
 export interface SessionSkillSettings {
-  version: 2
+  version: 3
   addendum: SessionSkillAddendum
   storage: SessionSkillStorage
+  commands: SessionSkillCommands
 }
 
 /** A selectable language for the settings picker: stable code + native label. */

@@ -1,5 +1,5 @@
 import { useEffect, useId, useState } from 'react'
-import type { SessionSkillAddendum, SessionSkillSettings, SessionSkillStorage } from '@shared/types'
+import type { SessionSkillAddendum, SessionSkillCommands, SessionSkillSettings, SessionSkillStorage } from '@shared/types'
 import { SESSION_SKILL_TEXT_MAX_BYTES, sessionSkillTextBytes } from '../../../shared/session-skill-limits'
 import { GLYPH_ACTIONS, GLYPH_BADGES } from './icons'
 import { errorText } from '../store'
@@ -14,6 +14,7 @@ const MOMENTS: { id: Moment; command: string; titleKey: string; helpKey: string 
 ]
 
 const EMPTY: SessionSkillAddendum = { start: '', end: '', stop: '' }
+const NO_COMMANDS: SessionSkillCommands = { start: [], end: [], stop: [] }
 
 type Storage = SessionSkillStorage
 type StorageMode = Storage['mode']
@@ -140,6 +141,7 @@ export function SkillsSettings(): React.JSX.Element {
   const [draft, setDraft] = useState<SessionSkillAddendum>(EMPTY)
   const [savedStorage, setSavedStorage] = useState<Storage>(KORY_STORAGE)
   const [draftStorage, setDraftStorage] = useState<Storage>(KORY_STORAGE)
+  const [commands, setCommands] = useState<SessionSkillCommands>(NO_COMMANDS)
   const [save, setSave] = useState<Save>({ kind: 'idle' })
 
   const read = async (): Promise<void> => {
@@ -150,6 +152,7 @@ export function SkillsSettings(): React.JSX.Element {
       setDraft(settings.addendum)
       setSavedStorage(settings.storage)
       setDraftStorage(settings.storage)
+      setCommands(settings.commands)
       setSave({ kind: 'idle' })
       setLoad({ kind: 'ready' })
     } catch (e) {
@@ -183,12 +186,13 @@ export function SkillsSettings(): React.JSX.Element {
   const submit = async (): Promise<void> => {
     const sent: SessionSkillAddendum = { start: draft.start, end: draft.end, stop: draft.stop }
     const sentStorage: Storage = { mode: draftStorage.mode, instructions: draftStorage.instructions }
-    const value: SessionSkillSettings = { version: 2, addendum: sent, storage: sentStorage }
+    const value: SessionSkillSettings = { version: 3, addendum: sent, storage: sentStorage, commands }
     setSave({ kind: 'saving' })
     try {
       const stored = await window.api.setSessionSkills(value)
       setSaved(stored.addendum)
       setSavedStorage(stored.storage)
+      setCommands(stored.commands)
       // Only when nothing was typed since the click, or those keystrokes are lost.
       setDraft((d) => (sameAddendum(d, sent) ? stored.addendum : d))
       setDraftStorage((s) => (sameStorage(s, sentStorage) ? stored.storage : s))

@@ -22,6 +22,11 @@ const MIGRATE_FILES = ['config.json', 'sessions.json'] as const
  */
 export const APP_STATE_SUBDIR = 'config'
 
+/** The Deck's app state directory, taken from userData alone: never from the project, the cwd or the environment. */
+export function appStateDirOf(userDataDir: string): string {
+  return join(userDataDir, APP_STATE_SUBDIR)
+}
+
 /** Subfolder under userData holding one marker file per completed migration. */
 export const MIGRATION_MARKER_SUBDIR = '.migrated'
 

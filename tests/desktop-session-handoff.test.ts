@@ -288,9 +288,10 @@ helperTest("helper reports the launch context and publishes its bound draft with
   });
   const env = { ...process.env, KORY_SESSION_HANDOFF_BINDING: bindingPath };
   writeSessionSkills(root, {
-    version: 2,
+    version: 3,
     addendum: { start: "Prepare context.", end: "Publish the handoff.", stop: "Explain the stop." },
-    storage: { mode: "custom", instructions: "Store and read with the configured tool." }
+    storage: { mode: "custom", instructions: "Store and read with the configured tool." },
+    commands: { start: [], end: [], stop: [] }
   });
 
   const context = Bun.spawnSync({ cmd: ["bash", HELPER_WRAPPER, "context"], env });
@@ -303,9 +304,10 @@ helperTest("helper reports the launch context and publishes its bound draft with
     storage: { mode: "custom", instructions: "Store and read with the configured tool." }
   });
   writeSessionSkills(root, {
-    version: 2,
+    version: 3,
     addendum: { start: "New context.", end: "New handoff.", stop: "New stop." },
-    storage: { mode: "kory", instructions: "" }
+    storage: { mode: "kory", instructions: "" },
+    commands: { start: [], end: [], stop: [] }
   });
   const refreshed = Bun.spawnSync({ cmd: ["bash", HELPER_WRAPPER, "context"], env });
   expect(refreshed.exitCode).toBe(0);
@@ -448,7 +450,7 @@ helperTest("context returns all empty addenda when no skills document exists", (
 helperTest("context retains empty addenda next to a filled addendum", () => {
   const root = stateDir();
   const { env } = boundHelper(root);
-  writeSessionSkills(root, { version: 2, addendum: { start: "only start", end: "", stop: "" }, storage: { mode: "kory", instructions: "" } });
+  writeSessionSkills(root, { version: 3, addendum: { start: "only start", end: "", stop: "" }, storage: { mode: "kory", instructions: "" }, commands: { start: [], end: [], stop: [] } });
 
   const addendum = JSON.parse(Bun.spawnSync({ cmd: ["bash", HELPER_WRAPPER, "context"], env }).stdout.toString()).addendum;
   expect(addendum).toEqual({ start: "only start", end: "", stop: "" });
@@ -458,7 +460,7 @@ helperTest("context ignores hostile skills documents in its working directory", 
   const root = stateDir();
   const hostileCwd = stateDir();
   const { env } = boundHelper(root);
-  const global = { version: 2 as const, addendum: { start: "global", end: "", stop: "" }, storage: { mode: "kory" as const, instructions: "" } };
+  const global = { version: 3 as const, addendum: { start: "global", end: "", stop: "" }, storage: { mode: "kory" as const, instructions: "" }, commands: { start: [], end: [], stop: [] } };
   writeSessionSkills(root, global);
   writeFileSync(join(hostileCwd, "session-skills.json"), JSON.stringify({ version: 1, addendum: { start: "cwd", end: "", stop: "" } }));
   mkdirSync(join(hostileCwd, ".claude", "claude-peers"), { recursive: true });
@@ -474,7 +476,7 @@ helperTest("two bound tiles read one shared skills document", () => {
   const root = stateDir();
   const first = boundHelper(root, "tile-a", "generation-a");
   const second = boundHelper(root, "tile-b", "generation-b");
-  const value = { version: 2 as const, addendum: { start: "shared", end: "", stop: "" }, storage: { mode: "kory" as const, instructions: "" } };
+  const value = { version: 3 as const, addendum: { start: "shared", end: "", stop: "" }, storage: { mode: "kory" as const, instructions: "" }, commands: { start: [], end: [], stop: [] } };
   writeSessionSkills(root, value);
 
   for (const env of [first.env, second.env]) {

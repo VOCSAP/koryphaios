@@ -1,8 +1,9 @@
 import { randomUUID } from 'node:crypto'
 import { lstatSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import type { SessionSkillAddendum, SessionSkillSettings } from '../shared/types'
-import { SESSION_SKILL_TEXT_MAX_BYTES as MAX_ADDENDUM_BYTES } from '../shared/session-skill-limits'
+import type { SessionSkillAddendum, SessionSkillCommands, SessionSkillSettings } from '../shared/types'
+import { SESSION_COMMAND_LIMITS, SESSION_SKILL_TEXT_MAX_BYTES as MAX_ADDENDUM_BYTES } from '../shared/session-skill-limits'
+import { validateCommandLine } from '../shared/session-command-line'
 
 const SESSION_SKILLS_FILE = 'session-skills.json'
 const MAX_DOCUMENT_BYTES = 64 * 1024
@@ -12,7 +13,12 @@ export function sessionSkillsPath(stateDir: string): string {
 }
 
 function emptySessionSkills(): SessionSkillSettings {
-  return { version: 2, addendum: { start: '', end: '', stop: '' }, storage: { mode: 'kory', instructions: '' } }
+  return {
+    version: 3,
+    addendum: { start: '', end: '', stop: '' },
+    storage: { mode: 'kory', instructions: '' },
+    commands: { start: [], end: [], stop: [] }
+  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -33,20 +39,49 @@ function validateAddendum(value: unknown): asserts value is SessionSkillAddendum
   }
 }
 
-function legacySessionSkills(value: unknown): SessionSkillSettings | null {
+function validateStorage(value: unknown): asserts value is SessionSkillSettings['storage'] {
+  if (!isRecord(value) || !hasExactKeys(value, ['mode', 'instructions']) || (value.mode !== 'kory' && value.mode !== 'custom') || typeof value.instructions !== 'string') {
+    throw new Error('Invalid session skills settings')
+  }
+  if (Buffer.byteLength(value.instructions, 'utf8') > MAX_ADDENDUM_BYTES) throw new Error('Session skill storage instructions is too large')
+  if (value.mode === 'custom' && value.instructions.trim() === '') throw new Error('Invalid session skills settings')
+}
+
+function validateCommands(value: unknown): asserts value is SessionSkillCommands {
+  if (!isRecord(value) || !hasExactKeys(value, ['start', 'end', 'stop'])) throw new Error('Invalid session skills settings')
+  for (const moment of ['start', 'end', 'stop'] as const) {
+    const lines = value[moment]
+    if (!Array.isArray(lines)) throw new Error('Invalid session skills settings')
+    if (lines.length > SESSION_COMMAND_LIMITS.linesPerMoment) throw new Error(`Session skill commands "${moment}" has too many lines`)
+    lines.forEach((line, index) => {
+      const checked = validateCommandLine(line)
+      if (!checked.ok) throw new Error(`Session skill command "${moment}" line ${index + 1} is invalid (${checked.reason})`)
+    })
+  }
+}
+
+type SessionSkillsV2 = Omit<SessionSkillSettings, 'version' | 'commands'> & { version: 2 }
+
+function legacySessionSkillsV1(value: unknown): SessionSkillsV2 | null {
   if (!isRecord(value) || !hasExactKeys(value, ['version', 'addendum']) || value.version !== 1) return null
   validateAddendum(value.addendum)
   return { version: 2, addendum: value.addendum, storage: { mode: 'kory', instructions: '' } }
 }
 
+// Chain v1 -> v2 -> v3: a document older than the current schema is lifted, never repaired.
+function legacySessionSkills(value: unknown): SessionSkillSettings | null {
+  const v2 = legacySessionSkillsV1(value) ?? value
+  if (!isRecord(v2) || !hasExactKeys(v2, ['version', 'addendum', 'storage']) || v2.version !== 2) return null
+  validateAddendum(v2.addendum)
+  validateStorage(v2.storage)
+  return { version: 3, addendum: v2.addendum, storage: v2.storage, commands: { start: [], end: [], stop: [] } }
+}
+
 function validateSessionSkills(value: unknown): asserts value is SessionSkillSettings {
-  if (!isRecord(value) || !hasExactKeys(value, ['version', 'addendum', 'storage']) || value.version !== 2) throw new Error('Invalid session skills settings')
+  if (!isRecord(value) || !hasExactKeys(value, ['version', 'addendum', 'storage', 'commands']) || value.version !== 3) throw new Error('Invalid session skills settings')
   validateAddendum(value.addendum)
-  if (!isRecord(value.storage) || !hasExactKeys(value.storage, ['mode', 'instructions']) || (value.storage.mode !== 'kory' && value.storage.mode !== 'custom') || typeof value.storage.instructions !== 'string') {
-    throw new Error('Invalid session skills settings')
-  }
-  if (Buffer.byteLength(value.storage.instructions, 'utf8') > MAX_ADDENDUM_BYTES) throw new Error('Session skill storage instructions is too large')
-  if (value.storage.mode === 'custom' && value.storage.instructions.trim() === '') throw new Error('Invalid session skills settings')
+  validateStorage(value.storage)
+  validateCommands(value.commands)
 }
 
 function serializeSessionSkills(value: SessionSkillSettings): string {
