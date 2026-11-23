@@ -2069,7 +2069,7 @@ test("a sequence reads its settings from the configured state directory, never f
 });
 
 test("a refused run is journaled and returned, and no command text leaves the service", async () => {
-  const lead = leadTile({ start: [`/marked-cmd ${CONFIGURED_ARG}`], end: [`/model ${CONFIGURED_ARG}`] });
+  const lead = leadTile({ start: [`/marked-cmd ${CONFIGURED_ARG}`] });
   const results: unknown[] = [];
   const run = async (id: unknown, moment: unknown, mode?: unknown) => results.push(await lead.svc.runSkillSequence(id, moment, mode));
 
@@ -2079,7 +2079,6 @@ test("a refused run is journaled and returned, and no command text leaves the se
   await run(lead.tile.id, "stop", "sideways");
   await run(lead.tile.id, "start", "soft");
   await run("no-such-tile", "start");
-  await run(lead.tile.id, "end");
   expect(results).toEqual([
     { status: "refused", reason: "bad-request" },
     { status: "refused", reason: "bad-request" },
@@ -2087,9 +2086,7 @@ test("a refused run is journaled and returned, and no command text leaves the se
     { status: "refused", reason: "bad-request" },
     { status: "refused", reason: "bad-request" },
     { status: "refused", reason: "unknown-tile" },
-    { status: "refused", reason: "command-refused", detail: "end line 1: dialogue-command" },
   ]);
-  expect(lead.journal).toContain(`skill sequence on tile ${lead.tile.id}: refused (command-refused: end line 1: dialogue-command)`);
   expect(lead.journal.filter((line) => line === "skill sequence: refused (bad-request)")).toHaveLength(5);
   expect(lead.journal).toContain("skill sequence: refused (unknown-tile)");
 
@@ -2114,6 +2111,14 @@ test("unreadable settings refuse the run before any claim and name the cause in 
     lead.svc.setSessionSkillsStateDir(null);
     expect(await lead.svc.runSkillSequence(lead.tile.id, "start")).toEqual({ status: "refused", reason: "settings-unreadable" });
     expect(errors.filter((line) => line.startsWith("[session] skills settings unreadable"))).toHaveLength(2);
+    const handEdited = skillsDir();
+    const file = join(handEdited, "session-skills.json");
+    const document = JSON.parse(readFileSync(file, "utf8"));
+    document.commands.end = ["/login"];
+    writeFileSync(file, JSON.stringify(document));
+    lead.svc.setSessionSkillsStateDir(handEdited);
+    expect(await lead.svc.runSkillSequence(lead.tile.id, "end"), "a dialogue command written by hand").toEqual({ status: "refused", reason: "settings-unreadable" });
+    expect(errors.some((line) => line.includes("settings unreadable") && line.includes("dialogue-command"))).toBe(true);
     lead.svc.setSessionSkillsStateDir(skillsDir());
     expect(await lead.svc.runSkillSequence(lead.tile.id, "start"), "no claim was left by the refusals").toEqual({ status: "started" });
     lead.svc.cancelSequence(lead.tile.id);

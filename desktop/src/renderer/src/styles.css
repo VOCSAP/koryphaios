@@ -2461,9 +2461,14 @@ code {
   font-size: 12px;
 }
 
-.chip:hover {
+.chip:not(:disabled):hover {
   background: var(--bg);
   border-color: var(--accent);
+}
+
+.chip:disabled {
+  opacity: 0.4;
+  cursor: default;
 }
 
 .palette-row {
@@ -9497,6 +9502,109 @@ body:has(.rm-modal) .rm-conflict-modal {
 .skills-field textarea {
   min-height: 96px;
   line-height: 1.45;
+}
+
+/* The commands a moment chains. The native skill is a row of the same list, at
+   the place it is typed, so the order reads without a sentence. */
+.skills-commands {
+  margin-top: 12px;
+}
+
+.skills-commands-label {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.skills-command-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.skills-command {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr) auto;
+  column-gap: 8px;
+  row-gap: 2px;
+  align-items: center;
+}
+
+.skills-command-index {
+  display: inline-flex;
+  justify-content: flex-end;
+  color: var(--fg-dim);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Stretched to the row so the field and its icon buttons share one height. */
+.skills-command-input {
+  align-self: stretch;
+  width: 100%;
+  min-width: 0;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--fg);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 5px 8px;
+}
+
+.skills-command-input:focus {
+  border-color: var(--accent);
+  outline: none;
+}
+
+.skills-command-input[aria-invalid='true'] {
+  border-color: var(--danger);
+}
+
+/* Not an input: dashed and dim, so the fixed row never reads as editable. */
+.skills-command-fixed {
+  grid-column: 2 / 4;
+  align-self: stretch;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--fg-dim);
+  padding: 5px 8px;
+  border: 1px dashed var(--border);
+  border-radius: 6px;
+}
+
+.skills-command-tools {
+  display: inline-flex;
+  gap: 4px;
+}
+
+.skills-command-note {
+  grid-column: 2 / 4;
+  color: var(--fg-dim);
+  font-size: 11px;
+}
+
+.skills-command-error {
+  color: var(--danger);
+}
+
+.skills-commands > .skills-hint {
+  margin-top: 6px;
+}
+
+.skills-command-add {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.skills-command-add .chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
 }
 
 .skills-actions {

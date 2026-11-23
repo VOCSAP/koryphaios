@@ -5,8 +5,9 @@
 
 import { TURN_SIGNAL_LIMITS, isWireText, type TurnSignal, type TurnSignalRefusal } from '../../hooks/turn-signal-wire'
 import type { SequenceInjectionRefusal, SequenceStopReason } from '../shared/types'
+import type { CommandClass } from '../shared/session-command-line'
 
-export type CommandClass = 'skill' | 'compact' | 'locale' | 'dialogue'
+export type { CommandClass }
 
 /** Declared by the caller: the engine's name of a command, without its slash, to its class. */
 export type CommandTable = Readonly<Record<string, CommandClass>>

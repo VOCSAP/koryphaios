@@ -442,7 +442,8 @@ test('refuses a command list that is not an array of valid lines and names the m
     [{ stop: ['/a\nb'] }, 'Session skill command "stop" line 1 is invalid (control-character)'],
     [{ start: ['   '] }, 'Session skill command "start" line 1 is invalid (empty)'],
     [{ start: ['/'] }, 'Session skill command "start" line 1 is invalid (empty)'],
-    [{ start: [42] }, 'Session skill command "start" line 1 is invalid (not-a-string)']
+    [{ start: [42] }, 'Session skill command "start" line 1 is invalid (not-a-string)'],
+    [{ end: ['/ok', '/Login'] }, 'Session skill command "end" line 2 is invalid (dialogue-command)']
   ]
 
   for (const [commands, message] of refused) {

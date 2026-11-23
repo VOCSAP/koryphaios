@@ -6,7 +6,7 @@ import { TURN_SIGNAL_LIMITS, isWireText } from '../desktop/hooks/turn-signal-wir
 import { assembleSkillSequence, BUILTIN_COMMAND_TABLES, NATIVE_COMMANDS, type SkillMoment } from '../desktop/src/main/session-skill-sequence'
 import { readSessionSkills, writeSessionSkills } from '../desktop/src/main/session-skills'
 import { startSequence, stepArgs, type CommandClass, type PlanStep } from '../desktop/src/main/session-turn-sequence'
-import { validateCommandLine, type CommandLineRefusal } from '../desktop/src/shared/session-command-line'
+import { checkConfiguredLine, validateCommandLine, type CommandLineRefusal } from '../desktop/src/shared/session-command-line'
 import { SESSION_COMMAND_LIMITS } from '../desktop/src/shared/session-skill-limits'
 import type { SessionSkillSettings } from '../desktop/src/shared/types'
 
@@ -299,6 +299,21 @@ test('a built-in that runs a model turn, and a name no table knows, is a skill',
   for (const name of [...MEASURED.modelTurn, 'agents', 'security-review', 'verify', 'not-a-builtin']) {
     expect(classOfBuiltin(`/${name}`), name).toBe('skill')
   }
+})
+
+test('the shared line check gives the class of a runnable line and refuses a dialogue one, whatever its case', () => {
+  expect(checkConfiguredLine('/compact')).toEqual({ ok: true, command: 'compact', args: '', commandClass: 'compact' })
+  expect(checkConfiguredLine('  /CLEAR  now ')).toEqual({ ok: true, command: 'CLEAR', args: 'now', commandClass: 'locale' })
+  expect(checkConfiguredLine('/my-skill a b')).toEqual({ ok: true, command: 'my-skill', args: 'a b', commandClass: 'skill' })
+  for (const name of [...MEASURED.dialogue, ...MEASURED.ending, ...MEASURED.interactiveUnmeasured]) {
+    expect(checkConfiguredLine(`/${name}`), name).toEqual({ ok: false, reason: 'dialogue-command' })
+    expect(checkConfiguredLine(`/${name.toUpperCase()} x`), name.toUpperCase()).toEqual({ ok: false, reason: 'dialogue-command' })
+  }
+})
+
+test('the shared line check keeps the parser refusal of a line it cannot split', () => {
+  expect(checkConfiguredLine('no slash')).toEqual({ ok: false, reason: 'missing-slash' })
+  expect(checkConfiguredLine(42)).toEqual({ ok: false, reason: 'not-a-string' })
 })
 
 test('no command name sits in two built-in class tables', () => {

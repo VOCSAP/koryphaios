@@ -392,6 +392,18 @@ const IconForward = (
   </Svg>
 )
 
+/** Up / down chevrons: the back / forward pair turned a quarter, drawn rather than rotated. */
+const IconUp = (
+  <Svg>
+    <path d="m5 14.5 7-7 7 7" />
+  </Svg>
+)
+const IconDown = (
+  <Svg>
+    <path d="m5 9.5 7 7 7-7" />
+  </Svg>
+)
+
 /** Folding side panel — the δέλτος πτυκτή, the hinged wax diptych: the frame is
  *  the panel, the vertical line is its hinge (the narrow rail that SURVIVES the
  *  fold, which is why it is drawn inside the frame and not at its edge), the
@@ -1067,6 +1079,8 @@ export const GLYPH_ACTIONS = {
   menu: IconMenu,
   back: IconBack,
   forward: IconForward,
+  up: IconUp,
+  down: IconDown,
   panelFold: IconPanelFold,
   panelUnfold: IconPanelUnfold,
   filterFold: IconFilterFold,

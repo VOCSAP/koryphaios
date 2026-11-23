@@ -519,10 +519,10 @@ test("each moment shows its own stored text and saves into its own field", async
     "E0",
     "P0",
   ]);
-  expect(panel.querySelectorAll("textarea"), "one text area per moment, no command editor").toHaveLength(3);
+  expect(panel.querySelectorAll("textarea"), "one text area per moment").toHaveLength(3);
   expect(
     panel.querySelectorAll("input:not([type=radio])"),
-    "no command input, hidden or disabled, may be offered while no command is ever typed"
+    "an empty command list offers no command row until the operator adds one"
   ).toHaveLength(0);
 
   await typeInto(momentArea(panel, "/kory-session-start")!, "S1");
@@ -668,16 +668,36 @@ test("switching the handoff storage back to Kory is a change the save keeps, wit
   );
 });
 
-test("a save from the Skills screen sends the stored command lists back, and the ones main returned the next time", async () => {
+test("a late save reply replaces untouched command lists with main's, and never a row added while it was pending", async () => {
   const stored = { start: ["/kleos-session-start"], end: ["/compact", "/note x"], stop: ["/wrap-up"] };
   getSkillsImpl = () => Promise.resolve({ version: 3, addendum: { start: "", end: "", stop: "" }, storage: KORY_STORAGE, commands: stored });
-  setSkillsImpl = (value) => Promise.resolve({ ...value, commands: { ...value.commands, start: ["/from-main"] } });
+  let reply: (() => void) | null = null;
+  setSkillsImpl = (value) =>
+    new Promise((resolve) => {
+      reply = () => resolve({ ...value, commands: { ...value.commands, start: ["/from-main"] } });
+    });
+  const answer = async (): Promise<void> => {
+    expect(reply, "a save must be pending").not.toBeNull();
+    await act(async () => {
+      reply!();
+    });
+    reply = null;
+    await flush();
+  };
   const panel = await openSkills();
+  const start = momentSection(panel, "/kory-session-start");
+  const end = momentSection(panel, "/kory-session-end");
 
   await typeInto(momentArea(panel, "/kory-session-start")!, "S1");
   await clickSave(panel);
+  await answer();
+  expect(lineTexts(start), "an untouched list must show what main stored").toEqual(["/from-main"]);
+
   await typeInto(momentArea(panel, "/kory-session-end")!, "E1");
   await clickSave(panel);
+  await press(addCommandButton(end));
+  await typeLine(rowInput(commandRows(end)[2]!), "   ");
+  await answer();
 
   expect(setSkillsCalls.map((v) => v.version), "the screen writes the current schema").toEqual([3, 3]);
   expect(setSkillsCalls[0]!.commands, "the first save must carry the stored lists intact").toEqual(stored);
@@ -685,4 +705,160 @@ test("a save from the Skills screen sends the stored command lists back, and the
     ...stored,
     start: ["/from-main"],
   });
+  expect(lineTexts(end), "a row added while the reply was pending must stay on screen").toEqual(["/compact", "/note x", "   "]);
+});
+
+function momentSection(panel: HTMLElement, command: string): HTMLElement {
+  const section = [...panel.querySelectorAll("section")].find((s) => s.querySelector("code")?.textContent === command);
+  expect(section, `the ${command} moment must be shown`).not.toBeUndefined();
+  return section as HTMLElement;
+}
+
+function commandItems(section: HTMLElement): HTMLLIElement[] {
+  return [...section.querySelectorAll(".skills-command-list > li")] as HTMLLIElement[];
+}
+
+function commandRows(section: HTMLElement): HTMLLIElement[] {
+  return commandItems(section).filter((li) => !li.hasAttribute("data-native"));
+}
+
+function rowInput(row: HTMLLIElement): HTMLInputElement {
+  return row.querySelector("input") as HTMLInputElement;
+}
+
+function rowButton(row: HTMLLIElement, label: string): HTMLButtonElement {
+  return row.querySelector(`button[aria-label="${label}"]`) as HTMLButtonElement;
+}
+
+function addCommandButton(section: HTMLElement): HTMLButtonElement {
+  return section.querySelector(".skills-command-add button") as HTMLButtonElement;
+}
+
+async function typeLine(input: HTMLInputElement, text: string): Promise<void> {
+  const nativeSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+  if (!nativeSetter) throw new Error("input has no native value setter");
+  await act(async () => {
+    nativeSetter.call(input, text);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+}
+
+async function press(button: HTMLButtonElement): Promise<void> {
+  await act(async () => {
+    button.click();
+  });
+}
+
+const lineTexts = (section: HTMLElement): string[] => commandRows(section).map((r) => rowInput(r).value);
+
+test("added, moved and removed command lines reach the save in the order shown, trimmed and without blank lines", async () => {
+  getSkillsImpl = () =>
+    Promise.resolve({ ...NO_SKILLS, commands: { start: ["/first", "/second"], end: [], stop: [] } });
+  const panel = await openSkills();
+  const start = momentSection(panel, "/kory-session-start");
+  expect(lineTexts(start), "the stored lines must be shown in their stored order").toEqual(["/first", "/second"]);
+
+  await press(addCommandButton(start));
+  await typeLine(rowInput(commandRows(start)[2]!), "  /third some args  ");
+  await press(addCommandButton(start));
+  expect(commandRows(start), "each add must offer one more row").toHaveLength(4);
+  expect(rowButton(commandRows(start)[0]!, "skills.commandUp").disabled, "the first row cannot move up").toBe(true);
+  expect(rowButton(commandRows(start)[3]!, "skills.commandDown").disabled, "the last row cannot move down").toBe(true);
+
+  const moved = commandRows(start)[2]!;
+  await press(rowButton(moved, "skills.commandUp"));
+  expect(lineTexts(start), "moving up must swap the row with the one above it").toEqual(["/first", "  /third some args  ", "/second", ""]);
+  expect(commandRows(start)[1] === moved, "the moved row must be the same element, so focus and typing follow it").toBe(true);
+  await press(rowButton(commandRows(start)[0]!, "skills.commandDown"));
+  expect(lineTexts(start), "moving down must swap the row with the one below it").toEqual(["  /third some args  ", "/first", "/second", ""]);
+  expect(commandRows(start)[0] === moved, "the row moved twice must still be the same element").toBe(true);
+  await press(rowButton(commandRows(start)[1]!, "skills.commandRemove"));
+  expect(skillsRoot(panel).dataset.state).toBe("dirty");
+  await clickSave(panel);
+
+  expect(setSkillsCalls.map((v) => v.commands), "the save must carry the lines as shown, trimmed, the blank one dropped").toEqual([
+    { start: ["/third some args", "/second"], end: [], stop: [] },
+  ]);
+  expect(lineTexts(start), "after the save the blank row is gone and the typed rows stay").toEqual(["  /third some args  ", "/second"]);
+  expect(skillsRoot(panel).dataset.state).toBe("saved");
+});
+
+test("a refused command line says why, blocks the save, and a valid line names how the Deck will finish it", async () => {
+  const panel = await openSkills();
+  await act(async () => {
+    fakeUseDeck.setState({
+      dict: { "skills.commandRefused": "REFUSED:{lines}", "skills.commandRefusedAt": "{moment}#{line}", "skills.endTitle": "End" },
+    });
+  });
+  const end = momentSection(panel, "/kory-session-end");
+  const save = panel.querySelector(".skills-actions button") as HTMLButtonElement;
+  const status = (): string => panel.querySelector(".skills-actions .skills-status")?.textContent ?? "";
+
+  const refused: Array<[string, string]> = [
+    ["/login", "skills.refusalDialogue"],
+    ["/model", "skills.refusalDialogue"],
+    ["note this", "skills.refusalSlash"],
+    ["/", "skills.refusalEmpty"],
+  ];
+  await press(addCommandButton(end));
+  await typeLine(rowInput(commandRows(end)[0]!), "/kept-first");
+  await press(addCommandButton(end));
+  const row = (): HTMLLIElement => commandRows(end)[1]!;
+  for (const [line, reason] of refused) {
+    await typeLine(rowInput(row()), line);
+    expect(row().dataset.state, `${line}: the row must be marked refused`).toBe("refused");
+    expect(rowInput(row()).getAttribute("aria-invalid"), `${line}: the input must be marked invalid`).toBe("true");
+    expect(row().querySelector(".skills-command-error")?.textContent, `${line}: the row must say why`).toBe(reason);
+    expect(save.disabled, `${line}: a refused line must not be savable`).toBe(true);
+    expect(status(), `${line}: the action bar must name the moment and the displayed line number`).toBe("REFUSED:End#2");
+    await clickSave(panel);
+    expect(setSkillsCalls, `${line}: no write may leave with a refused line`).toHaveLength(0);
+  }
+
+  const accepted: Array<[string, string]> = [
+    ["/compact", "skills.classCompact"],
+    ["/clear", "skills.classLocale"],
+    ["/my-plugin:recall last week", "skills.classSkill"],
+  ];
+  for (const [line, label] of accepted) {
+    await typeLine(rowInput(row()), line);
+    expect(row().dataset.state, `${line}: the row must be valid`).toBe("valid");
+    expect(row().querySelector(".skills-command-note")?.textContent, `${line}: the row must name its class`).toBe(label);
+    expect(save.disabled, `${line}: a valid line must be savable`).toBe(false);
+  }
+  await clickSave(panel);
+  expect(setSkillsCalls.map((v) => v.commands.end)).toEqual([["/kept-first", "/my-plugin:recall last week"]]);
+});
+
+test("the built-in skill is shown after the start list and before the end and stop lists", async () => {
+  getSkillsImpl = () => Promise.resolve({ ...NO_SKILLS, commands: { start: ["/s"], end: ["/e"], stop: ["/p"] } });
+  const panel = await openSkills();
+  const placement = (command: string): string[] =>
+    commandItems(momentSection(panel, command)).map((li) =>
+      li.hasAttribute("data-native") ? `native:${li.querySelector("code")?.textContent}` : rowInput(li).value
+    );
+
+  expect(placement("/kory-session-start"), "start types the list, then its own skill").toEqual(["/s", "native:/kory-session-start"]);
+  expect(placement("/kory-session-end"), "end types its own skill, then the list").toEqual(["native:/kory-session-end", "/e"]);
+  expect(placement("/kory-session-stop"), "stop types its own protocol, then the list").toEqual(["native:/kory-session-stop", "/p"]);
+  expect(
+    panel.querySelectorAll("[data-native] input"),
+    "the built-in row is never editable"
+  ).toHaveLength(0);
+});
+
+test("a moment already holding the most lines main accepts cannot take another, and says so", async () => {
+  const full = Array.from({ length: 8 }, (_, i) => `/step-${i + 1}`);
+  getSkillsImpl = () => Promise.resolve({ ...NO_SKILLS, commands: { start: [], end: [], stop: full } });
+  const panel = await openSkills();
+  const stop = momentSection(panel, "/kory-session-stop");
+
+  expect(addCommandButton(stop).disabled, "a full list must not offer one more row").toBe(true);
+  expect(stop.querySelector(".skills-command-add")?.textContent, "the limit must be stated").toContain("skills.commandMax");
+  await press(addCommandButton(stop));
+  expect(commandRows(stop), "a click on the disabled add must change nothing").toHaveLength(8);
+
+  await press(rowButton(commandRows(stop)[7]!, "skills.commandRemove"));
+  expect(addCommandButton(stop).disabled, "one row under the limit must be addable again").toBe(false);
+  expect(addCommandButton(momentSection(panel, "/kory-session-start")).disabled, "the limit is per moment").toBe(false);
 });

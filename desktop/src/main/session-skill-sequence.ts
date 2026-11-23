@@ -1,7 +1,6 @@
 import type { SessionSkillSettings } from '../shared/types'
-import { validateCommandLine, type CommandLineRefusal } from '../shared/session-command-line'
+import { checkConfiguredLine, type CommandLineRefusal } from '../shared/session-command-line'
 import type { SequenceInput, SequenceStepInput } from './session-turn-runner'
-import type { CommandClass } from './session-turn-sequence'
 
 export type SkillMoment = 'start' | 'end' | 'stop'
 export type StopMode = 'soft' | 'hard'
@@ -14,35 +13,7 @@ export const NATIVE_COMMANDS = {
   stop: 'claude-peers-deck-lead:kory-session-stop'
 } as const satisfies Record<SkillMoment, string>
 
-// A name the Deck does not know is a skill: it gets a step token and is proven by its own turn.
-const COMPACT_COMMANDS: ReadonlySet<string> = new Set(['compact'])
-const LOCAL_COMMANDS: ReadonlySet<string> = new Set([
-  'branch', 'btw', 'bug', 'cd', 'clear', 'color', 'context', 'copy', 'diff', 'feedback', 'focus', 'fork',
-  'keybindings', 'list-agents', 'mcp', 'plan', 'recap', 'release-notes', 'reload-skills', 'rename', 'subtask',
-  'terminal-setup'
-])
-// Interactive built-ins, and those that end the session, are refused: no step can finish them safely.
-const DIALOGUE_COMMANDS: ReadonlySet<string> = new Set([
-  'add-dir', 'auto-mode-setup', 'autocompact', 'config', 'effort', 'export', 'fast', 'goal', 'help', 'hooks', 'ide',
-  'login', 'mobile', 'model', 'permissions', 'powerup', 'rewind', 'status', 'tasks', 'theme', 'usage', 'workflows',
-  'background', 'exit', 'logout',
-  'memory', 'output-style', 'plugin', 'radio', 'reload-plugins', 'resume', 'skills', 'stickers', 'team-onboarding', 'tui'
-])
-
-/** Every built-in table by the class it gives; a name sits in one table only. */
-export const BUILTIN_COMMAND_TABLES: Readonly<Record<Exclude<CommandClass, 'skill'>, ReadonlySet<string>>> = {
-  dialogue: DIALOGUE_COMMANDS,
-  compact: COMPACT_COMMANDS,
-  locale: LOCAL_COMMANDS
-}
-
-function classOf(command: string): CommandClass {
-  const name = command.toLowerCase()
-  if (DIALOGUE_COMMANDS.has(name)) return 'dialogue'
-  if (COMPACT_COMMANDS.has(name)) return 'compact'
-  if (LOCAL_COMMANDS.has(name)) return 'locale'
-  return 'skill'
-}
+export { BUILTIN_COMMAND_TABLES } from '../shared/session-command-line'
 
 export interface SkillSequenceRefusal {
   refused: true
@@ -57,11 +28,10 @@ export type SkillSequenceResult = SequenceInput | SkillSequenceRefusal
 function configuredSteps(moment: SkillMoment, settings: SessionSkillSettings): SequenceStepInput[] | SkillSequenceRefusal {
   const steps: SequenceStepInput[] = []
   for (const [index, line] of settings.commands[moment].entries()) {
-    const parsed = validateCommandLine(line)
-    if (!parsed.ok) return { refused: true, reason: parsed.reason, moment, line: index + 1 }
-    const commandClass = classOf(parsed.command)
-    if (commandClass === 'dialogue') return { refused: true, reason: 'dialogue-command', moment, line: index + 1 }
-    steps.push(parsed.args === '' ? { command: parsed.command, commandClass } : { command: parsed.command, args: parsed.args, commandClass })
+    const checked = checkConfiguredLine(line)
+    if (!checked.ok) return { refused: true, reason: checked.reason, moment, line: index + 1 }
+    const { command, args, commandClass } = checked
+    steps.push(args === '' ? { command, commandClass } : { command, args, commandClass })
   }
   return steps
 }

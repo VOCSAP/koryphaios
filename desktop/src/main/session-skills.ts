@@ -3,7 +3,7 @@ import { lstatSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node
 import { join } from 'node:path'
 import type { SessionSkillAddendum, SessionSkillCommands, SessionSkillSettings } from '../shared/types'
 import { SESSION_COMMAND_LIMITS, SESSION_SKILL_TEXT_MAX_BYTES as MAX_ADDENDUM_BYTES } from '../shared/session-skill-limits'
-import { validateCommandLine } from '../shared/session-command-line'
+import { checkConfiguredLine } from '../shared/session-command-line'
 
 const SESSION_SKILLS_FILE = 'session-skills.json'
 const MAX_DOCUMENT_BYTES = 64 * 1024
@@ -54,7 +54,7 @@ function validateCommands(value: unknown): asserts value is SessionSkillCommands
     if (!Array.isArray(lines)) throw new Error('Invalid session skills settings')
     if (lines.length > SESSION_COMMAND_LIMITS.linesPerMoment) throw new Error(`Session skill commands "${moment}" has too many lines`)
     lines.forEach((line, index) => {
-      const checked = validateCommandLine(line)
+      const checked = checkConfiguredLine(line)
       if (!checked.ok) throw new Error(`Session skill command "${moment}" line ${index + 1} is invalid (${checked.reason})`)
     })
   }
