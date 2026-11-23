@@ -168,9 +168,13 @@ async function startAvatar(): Promise<void> {
     theme: () => resolveAvatarBubbleTheme(server?.attachedDecks() ?? [], nativeTheme.shouldUseDarkColors ? 'dark' : 'light'),
     lang: locale,
     dict: avatarBubbleDict(loadDict(locale, [shippedLocales, join(deckUserData, 'locales')])),
-    placement: () => {
+    placement: (expanded) => {
       const mask = avatarMaskBounds()
-      return mask ? avatarBubblePlacement(mask, screen.getDisplayMatching(mask).workArea) : null
+      return mask ? avatarBubblePlacement(mask, screen.getDisplayMatching(mask).workArea, expanded) : null
+    },
+    expanded: () => assembly.controller.snapshot().appearance.bubbleExpanded,
+    persistExpanded: (expanded) => {
+      assembly.controller.dispatch({ kind: 'AppearanceChanged', patch: { bubbleExpanded: expanded } })
     },
     now: Date.now,
     setTimer: (callback, ms) => {

@@ -304,6 +304,7 @@ export interface AvatarBubbleState {
   /** Only the avatarBubble.* and inbox.* keys, user locale overrides applied. */
   dict: Record<string, string>
   anchor: AvatarBubbleAnchor
+  expanded: boolean
   model: AvatarBubbleModel
 }
 
@@ -323,6 +324,11 @@ export interface AvatarBubbleFocusIntent {
   broker_url: string
 }
 
+export interface AvatarBubbleSetExpandedIntent {
+  generation: number
+  expanded: boolean
+}
+
 export interface AvatarBubbleReadIntent {
   generation: number
   deckRunId: string
@@ -339,6 +345,7 @@ export const AVATAR_BUBBLE_CHANNELS = {
   markSeen: 'avatar-bubble:mark-seen',
   ack: 'avatar-bubble:ack',
   focusDeck: 'avatar-bubble:focus-deck',
+  setExpanded: 'avatar-bubble:set-expanded',
   close: 'avatar-bubble:close',
   reportError: 'avatar-bubble:report-error'
 } as const
@@ -359,6 +366,7 @@ export interface AvatarBubbleApi {
   markSeen(intent: AvatarBubbleReadIntent): Promise<InboxAckStatus>
   ack(intent: AvatarBubbleReadIntent): Promise<InboxAckStatus>
   focusDeck(intent: AvatarBubbleFocusIntent): Promise<void>
+  setExpanded(intent: AvatarBubbleSetExpandedIntent): Promise<void>
   close(): Promise<void>
   reportError(message: string): void
 }

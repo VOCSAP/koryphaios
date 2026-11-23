@@ -22,6 +22,7 @@ const api: AvatarBubbleApi = {
   act: (intent) => ipcRenderer.invoke(AVATAR_BUBBLE_CHANNELS.act, intent) as Promise<{ outcome: AvatarBubbleActOutcome; reason?: string }>,
   ...avatarBubbleReadApi(ipcRenderer.invoke.bind(ipcRenderer)),
   focusDeck: (intent) => ipcRenderer.invoke(AVATAR_BUBBLE_CHANNELS.focusDeck, intent) as Promise<void>,
+  setExpanded: (intent) => ipcRenderer.invoke(AVATAR_BUBBLE_CHANNELS.setExpanded, intent) as Promise<void>,
   close: () => ipcRenderer.invoke(AVATAR_BUBBLE_CHANNELS.close) as Promise<void>,
   reportError(message) {
     void ipcRenderer.invoke(AVATAR_BUBBLE_CHANNELS.reportError, message)

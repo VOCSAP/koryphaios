@@ -7,11 +7,13 @@ afterAll(async () => {
 });
 
 import { afterAll, afterEach, beforeEach, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import type { Root } from "../desktop/tests-support/react-test-harness";
 
 const { act, React, createRoot } = await import("../desktop/tests-support/react-test-harness");
 const { BubbleApp, AVATAR_BUBBLE_ARM_MS } = await import("../desktop/src/renderer/src/avatar-bubble/BubbleApp.tsx");
 const { bubbleCourrier } = await import("../desktop/src/renderer/src/avatar-bubble/courrier.ts");
+const { GLYPH_ACTIONS } = await import("../desktop/src/renderer/src/components/icons.tsx");
 
 const IDENTITY = { deckRunId: "run-1", broker_url: "http://127.0.0.1:7899" };
 
@@ -109,6 +111,7 @@ function state(reclame: Card[], courrier: Message[] = [], generation = 7, courri
     lang: "en",
     dict: {},
     anchor: "right",
+    expanded: false,
     model: { reclame, courrier, courrierPending, closed: [], truncated: { approvals: 0, messages: 0, closed: 0 }, nextChangeAt: null }
   };
 }
@@ -116,6 +119,7 @@ function state(reclame: Card[], courrier: Message[] = [], generation = 7, courri
 interface Calls {
   acts: unknown[];
   focus: unknown[];
+  resizes: unknown[];
   reads: { gesture: string; intent: Record<string, unknown> }[];
   reports: string[];
 }
@@ -124,6 +128,7 @@ let calls: Calls;
 let current: ReturnType<typeof state>;
 let actResult: () => Promise<{ outcome: string; reason?: string }>;
 let readResult: () => Promise<string>;
+let resizeResult: () => Promise<void>;
 let push: (next: unknown) => void = () => {};
 let container: HTMLDivElement;
 let root: Root;
@@ -145,6 +150,10 @@ function fakeApi() {
       calls.focus.push(intent);
       return Promise.resolve();
     },
+    setExpanded: (intent: unknown) => {
+      calls.resizes.push(intent);
+      return resizeResult();
+    },
     markSeen: (intent: Record<string, unknown>) => {
       calls.reads.push({ gesture: "markSeen", intent });
       return readResult();
@@ -161,7 +170,8 @@ function fakeApi() {
 }
 
 beforeEach(() => {
-  calls = { acts: [], focus: [], reads: [], reports: [] };
+  calls = { acts: [], focus: [], resizes: [], reads: [], reports: [] };
+  resizeResult = () => Promise.resolve();
   actResult = () => Promise.resolve({ outcome: "won" });
   readResult = () => Promise.resolve("seen");
   container = document.createElement("div");
@@ -543,4 +553,168 @@ test("an answered message is not listed even when main still relays it, and the 
 test("an empty Reclame says nothing is waiting", async () => {
   await mount(state([]));
   expect(container.querySelector(".avb-empty")?.textContent).toBe("avatarBubble.emptyReclame");
+});
+
+async function glyphMarkup(glyph: unknown): Promise<string> {
+  const host = document.createElement("div");
+  const scratch = createRoot(host);
+  await act(async () => {
+    scratch.render(glyph as never);
+  });
+  const markup = host.innerHTML;
+  await act(async () => {
+    scratch.unmount();
+  });
+  return markup;
+}
+
+const headerButtons = (): HTMLButtonElement[] => [...container.querySelectorAll<HTMLButtonElement>(".avb-head .icon-btn")];
+const sizeButton = (): HTMLButtonElement => headerButtons().at(-2)!;
+const root_ = (): HTMLElement => container.querySelector(".avb") as HTMLElement;
+const expandedState = (over: Partial<ReturnType<typeof state>> = {}) => ({ ...state([card()]), expanded: true, ...over });
+
+test("the size button sits just before the close button and is named by its title and aria-label", async () => {
+  await mount(state([card()]));
+  expect(headerButtons().map((b) => b.getAttribute("aria-label"))).toEqual(["avatarBubble.expand", "avatarBubble.close"]);
+  expect(sizeButton().title).toBe("avatarBubble.expand");
+  expect(sizeButton().querySelector("svg")).not.toBeNull();
+});
+
+test("a normal bubble offers to enlarge with the tile's expand glyph, an expanded one to shrink with its restore glyph", async () => {
+  const expandGlyph = await glyphMarkup(GLYPH_ACTIONS.expand);
+  const restoreGlyph = await glyphMarkup(GLYPH_ACTIONS.restore);
+  expect(expandGlyph).not.toBe(restoreGlyph);
+  await mount(state([card()]));
+  expect(sizeButton().innerHTML).toBe(expandGlyph);
+  await act(async () => push(expandedState()));
+  expect(sizeButton().getAttribute("aria-label")).toBe("avatarBubble.collapse");
+  expect(sizeButton().title).toBe("avatarBubble.collapse");
+  expect(sizeButton().innerHTML).toBe(restoreGlyph);
+  await act(async () => push(state([card()])));
+  expect(sizeButton().getAttribute("aria-label")).toBe("avatarBubble.expand");
+  expect(sizeButton().innerHTML).toBe(expandGlyph);
+});
+
+test("the bubble root carries data-expanded from the state, loading root included", async () => {
+  current = state([card()]);
+  await act(async () => {
+    root.render(React.createElement(BubbleApp, { api: { ...fakeApi(), getState: () => new Promise(() => {}) }, clock } as never));
+  });
+  expect(root_().getAttribute("data-expanded"), "before the first state").toBe("false");
+  await act(async () => push(state([card()])));
+  expect(root_().getAttribute("data-expanded")).toBe("false");
+  await act(async () => push(expandedState()));
+  expect(root_().getAttribute("data-expanded")).toBe("true");
+});
+
+test("the button asks for the opposite of the current size, with the state's generation", async () => {
+  await mount({ ...state([card()], [], 12) });
+  await click(sizeButton());
+  expect(calls.resizes).toEqual([{ generation: 12, expanded: true }]);
+  await act(async () => push(expandedState({ generation: 12 })));
+  await click(sizeButton());
+  expect(calls.resizes).toEqual([
+    { generation: 12, expanded: true },
+    { generation: 12, expanded: false }
+  ]);
+});
+
+test("a click while the resize is pending sends nothing, and the button works again once it settles", async () => {
+  let settle: () => void = () => {};
+  resizeResult = () => new Promise<void>((resolve) => (settle = resolve));
+  await mount(state([card()]));
+  await click(sizeButton());
+  await click(sizeButton());
+  expect(calls.resizes).toHaveLength(1);
+  await act(async () => settle());
+  await click(sizeButton());
+  expect(calls.resizes).toHaveLength(2);
+});
+
+const refuse = (): void => {
+  resizeResult = () => Promise.reject(new Error("window gone"));
+};
+const resizeNotices = (): Element[] => [...container.querySelectorAll(".avb-resize-notice")];
+const expectResizeNotice = (): void => {
+  const notices = resizeNotices();
+  expect(notices).toHaveLength(1);
+  expect(notices[0]!.textContent).toBe("avatarBubble.resizeFailed");
+  expect(notices[0]!.getAttribute("role")).toBe("alert");
+  expect(notices[0]!.parentElement?.className, "under the header, outside any tab panel").toBe("avb-frame");
+};
+
+test("a refused resize is traced, tells the operator, keeps the old glyph, and leaves the button usable", async () => {
+  refuse();
+  await mount(state([card()]));
+  const before = sizeButton().innerHTML;
+  await click(sizeButton());
+  expect(calls.reports).toEqual(["bubble resize was refused: window gone"]);
+  expectResizeNotice();
+  expect(container.querySelector(".avb-card-notice"), "the card notice is for the answer, not for the size").toBeNull();
+  expect(sizeButton().innerHTML).toBe(before);
+  expect(root_().getAttribute("data-expanded")).toBe("false");
+  await click(sizeButton());
+  expect(calls.resizes).toHaveLength(2);
+});
+
+test("a refused resize from the Courrier tab is shown there too", async () => {
+  refuse();
+  await mount(state([card()], [message()], 7, 1));
+  await openCourrier();
+  await click(sizeButton());
+  expectResizeNotice();
+  expect(container.querySelector(".avb-card"), "Courrier is on screen").toBeNull();
+});
+
+test("a refused resize is shown when Reclame holds no card", async () => {
+  refuse();
+  await mount(state([]));
+  expect(container.querySelector(".avb-card")).toBeNull();
+  await click(sizeButton());
+  expectResizeNotice();
+});
+
+test("a second refusal replaces the notice, and the next try clears it while the call is pending", async () => {
+  refuse();
+  await mount(state([card()]));
+  await click(sizeButton());
+  await click(sizeButton());
+  expect(calls.resizes).toHaveLength(2);
+  expectResizeNotice();
+  let settle: () => void = () => {};
+  resizeResult = () => new Promise<void>((resolve) => (settle = resolve));
+  await click(sizeButton());
+  expect(resizeNotices(), "cleared as soon as the next try starts").toHaveLength(0);
+  await act(async () => settle());
+  expect(resizeNotices()).toHaveLength(0);
+});
+
+// Each state is read on its own mount: happy-dom keeps an element's computed style across an attribute change.
+async function questionCapUnderRealStyles(expanded: boolean): Promise<string> {
+  const sheet = document.createElement("style");
+  sheet.textContent = readFileSync(new URL("../desktop/src/renderer/src/styles.css", import.meta.url), "utf8");
+  document.head.appendChild(sheet);
+  try {
+    const longQuestion = card({ kind: "question", question: "Which root?\n".repeat(40), gestures: ["deny"] });
+    await mount({ ...state([longQuestion]), expanded });
+    return getComputedStyle(container.querySelector(".avb-card-text") as Element).maxHeight;
+  } finally {
+    sheet.remove();
+  }
+}
+
+test("the question text keeps its 180 px cap in a normal bubble", async () => {
+  expect(await questionCapUnderRealStyles(false)).toBe("180px");
+});
+
+test("the question text loses its cap in an expanded bubble, so the card is the one scroll area", async () => {
+  expect(await questionCapUnderRealStyles(true)).toBe("none");
+});
+
+test("the size button is also there on the Courrier tab", async () => {
+  await mount(expandedState());
+  await openCourrier();
+  expect(sizeButton().getAttribute("aria-label")).toBe("avatarBubble.collapse");
+  await click(sizeButton());
+  expect(calls.resizes).toEqual([{ generation: 7, expanded: false }]);
 });

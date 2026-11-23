@@ -55,6 +55,8 @@ export interface AvatarBubbleRect {
 export interface AvatarBubbleNativeAdapter {
   open(generation: number, rect: AvatarBubbleRect, lifecycle: AvatarBubbleLifecycle): void
   focus(generation: number): void
+  /** Moves then sizes the window of a generation to the rect; a destroyed window is ignored. */
+  resize(generation: number, rect: AvatarBubbleRect): void
   close(generation: number): void
   endpoint(generation: number): AvatarBubbleWebContents | null
 }
@@ -66,15 +68,36 @@ export interface AvatarBubblePlacement {
 
 /** 380 x 560 of bubble plus the 8 px margin on the mask side where the renderer draws the tail. */
 export const AVATAR_BUBBLE_SIZE = { width: 388, height: 560 } as const
+const AVATAR_BUBBLE_EXPANDED_SHARE = { width: 0.6, height: 0.8 } as const
+const AVATAR_BUBBLE_EXPANDED_MAX_WIDTH = 1_200
 const RENDERER_ERROR_MAX_CHARS = 2_048
 const DICT_PREFIXES = ['avatarBubble.', 'inbox.'] as const
 
-/** Against the mask on the side with room (left first), bottom edges aligned, kept inside the work area. */
-export function avatarBubblePlacement(mask: AvatarBubbleRect, workArea: AvatarBubbleRect): AvatarBubblePlacement {
-  const width = Math.min(AVATAR_BUBBLE_SIZE.width, workArea.width)
-  const height = Math.min(AVATAR_BUBBLE_SIZE.height, workArea.height)
+/** Integer DIP avoids Chromium growing a non-resizable window at fractional DPI. */
+export function avatarBubbleSize(workArea: AvatarBubbleRect, expanded: boolean): { width: number; height: number } {
+  const wantedWidth = expanded
+    ? Math.max(AVATAR_BUBBLE_SIZE.width, Math.min(workArea.width * AVATAR_BUBBLE_EXPANDED_SHARE.width, AVATAR_BUBBLE_EXPANDED_MAX_WIDTH))
+    : AVATAR_BUBBLE_SIZE.width
+  const wantedHeight = expanded
+    ? Math.max(AVATAR_BUBBLE_SIZE.height, workArea.height * AVATAR_BUBBLE_EXPANDED_SHARE.height)
+    : AVATAR_BUBBLE_SIZE.height
+  return {
+    width: Math.min(Math.round(wantedWidth), Math.floor(workArea.width)),
+    height: Math.min(Math.round(wantedHeight), Math.floor(workArea.height))
+  }
+}
+
+export function avatarBubblePlacement(mask: AvatarBubbleRect, workArea: AvatarBubbleRect, expanded = false): AvatarBubblePlacement {
+  const size = avatarBubbleSize(workArea, expanded)
+  const leftRoom = Math.floor(mask.x - workArea.x)
+  const rightRoom = Math.floor(workArea.x + workArea.width - (mask.x + mask.width))
+  const widerRoom = Math.max(leftRoom, rightRoom)
+  const beside = expanded && widerRoom >= AVATAR_BUBBLE_SIZE.width
+  const width = beside ? Math.min(size.width, widerRoom) : size.width
+  const height = size.height
   const left = mask.x - width
-  const anchor: AvatarBubbleAnchor = left >= workArea.x ? 'right' : 'left'
+  const onLeft = beside ? leftRoom >= rightRoom : left >= workArea.x
+  const anchor: AvatarBubbleAnchor = onLeft ? 'right' : 'left'
   const x = anchor === 'right' ? left : mask.x + mask.width
   const y = mask.y + mask.height - height
   return {
@@ -123,6 +146,8 @@ export interface AvatarBubbleBrowserWindow {
   on(event: string, listener: (...args: unknown[]) => void): void
   show(): void
   focus(): void
+  setPosition(x: number, y: number): void
+  setContentSize(width: number, height: number): void
   destroy(): void
   isDestroyed(): boolean
   loadFile(file: string): Promise<unknown>
@@ -260,6 +285,14 @@ export function createAvatarBubbleNativeAdapter(options: AvatarBubbleNativeAdapt
       const window = windows.get(generation)
       if (window && !window.isDestroyed()) window.focus()
     },
+    // At fractional DPI the system widens a non-resizable window after setPosition and pins its bounds to that width;
+    // setContentSize resets them, so it always follows the move, with the size asked for and never one read back.
+    resize(generation, rect) {
+      const window = windows.get(generation)
+      if (!window || window.isDestroyed()) return
+      window.setPosition(rect.x, rect.y)
+      window.setContentSize(rect.width, rect.height)
+    },
     close,
     endpoint(generation) {
       return windows.get(generation)?.webContents ?? null
@@ -278,8 +311,11 @@ export interface AvatarBubbleWindowOptions {
   theme(): AvatarBubbleTheme
   lang: 'en' | 'fr'
   dict: Record<string, string>
-  /** Where the bubble opens against the mask; null when the mask is not shown. */
-  placement(): AvatarBubblePlacement | null
+  /** Where the bubble sits against the mask at the normal or the larger size; null when the mask is not shown. */
+  placement(expanded: boolean): AvatarBubblePlacement | null
+  /** The size the operator left the bubble at, read when a bubble opens. */
+  expanded(): boolean
+  persistExpanded(expanded: boolean): void
   now(): number
   /** Returns a cancel function. */
   setTimer(callback: () => void, ms: number): () => void
@@ -327,6 +363,7 @@ export function createAvatarBubbleWindow(options: AvatarBubbleWindowOptions): Av
   let generation = 0
   let current: number | null = null
   let anchor: AvatarBubbleAnchor = 'right'
+  let expanded = false
   let lost: AvatarBubbleLost[] = []
   let lastModel: AvatarBubbleModel | null = null
   let closeWhenEmpty = false
@@ -379,6 +416,7 @@ export function createAvatarBubbleWindow(options: AvatarBubbleWindowOptions): Av
     lang: options.lang,
     dict: options.dict,
     anchor,
+    expanded,
     model: model()
   })
 
@@ -491,6 +529,28 @@ export function createAvatarBubbleWindow(options: AvatarBubbleWindowOptions): Av
     await options.focusDeck(identity)
   }
 
+  const setExpanded: AvatarBubbleIpcHandler = async (event, ...args) => {
+    const open = requireCurrent(event)
+    const wanted = requireIntent(open, args).expanded
+    if (typeof wanted !== 'boolean') return refuse('Avatar bubble resize does not name a boolean')
+    const placement = options.placement(wanted)
+    if (placement === null) return refuse('Avatar bubble could not be resized because the mask is not shown')
+    try {
+      options.native.resize(open, placement.rect)
+    } catch (error) {
+      options.reportError('avatar-bubble', 'Avatar bubble could not be resized', error)
+      throw new Error('Avatar bubble could not be resized')
+    }
+    expanded = wanted
+    anchor = placement.anchor
+    push()
+    try {
+      options.persistExpanded(wanted)
+    } catch (error) {
+      options.reportError('avatar-bubble', 'Avatar bubble size could not be kept for the next bubble', error)
+    }
+  }
+
   const closeHandler: AvatarBubbleIpcHandler = async (event, ...args) => {
     requireCurrent(event)
     if (args.length !== 0) throw new Error('Avatar bubble close does not accept arguments')
@@ -521,6 +581,7 @@ export function createAvatarBubbleWindow(options: AvatarBubbleWindowOptions): Av
   options.ipc.handle(AVATAR_BUBBLE_CHANNELS.markSeen, readGesture('seen'))
   options.ipc.handle(AVATAR_BUBBLE_CHANNELS.ack, readGesture('acked'))
   options.ipc.handle(AVATAR_BUBBLE_CHANNELS.focusDeck, focusDeck)
+  options.ipc.handle(AVATAR_BUBBLE_CHANNELS.setExpanded, setExpanded)
   options.ipc.handle(AVATAR_BUBBLE_CHANNELS.close, closeHandler)
   options.ipc.handle(AVATAR_BUBBLE_CHANNELS.reportError, rendererError)
 
@@ -530,7 +591,8 @@ export function createAvatarBubbleWindow(options: AvatarBubbleWindowOptions): Av
         options.native.focus(current)
         return
       }
-      const placement = options.placement()
+      expanded = options.expanded()
+      const placement = options.placement(expanded)
       if (placement === null) {
         options.reportError('avatar-bubble', 'Avatar bubble was not opened because the mask is not shown')
         return
@@ -570,6 +632,7 @@ export function createAvatarBubbleWindow(options: AvatarBubbleWindowOptions): Av
       options.ipc.removeHandler(AVATAR_BUBBLE_CHANNELS.markSeen)
       options.ipc.removeHandler(AVATAR_BUBBLE_CHANNELS.ack)
       options.ipc.removeHandler(AVATAR_BUBBLE_CHANNELS.focusDeck)
+      options.ipc.removeHandler(AVATAR_BUBBLE_CHANNELS.setExpanded)
       options.ipc.removeHandler(AVATAR_BUBBLE_CHANNELS.close)
       options.ipc.removeHandler(AVATAR_BUBBLE_CHANNELS.reportError)
     }

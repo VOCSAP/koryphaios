@@ -37,6 +37,7 @@ function appearance(patch: Partial<AvatarAppearance> = {}): AvatarAppearance {
     frame: 'normal',
     idleOpacity: 1,
     motion: 'continuous',
+    bubbleExpanded: false,
     dndUntil: null,
     dndChoice: null,
     positions: Object.create(null) as AvatarAppearance['positions'],
@@ -1213,6 +1214,22 @@ describe('position, restoration and persistence rules', () => {
     expect(h.writes.length).toBe(writes + 1)
     h.dispatch({ kind: 'AppearanceChanged', patch: { frame: 'full' } })
     expect(h.writes.length, 'the same frame chosen again writes nothing').toBe(writes + 1)
+  })
+
+  test('a bubble size change is stored and published without any native effect on the mask', () => {
+    const h = readyHarness()
+    const native = h.executed.length
+    const writes = h.writes.length
+    h.dispatch({ kind: 'AppearanceChanged', patch: { bubbleExpanded: true } })
+    expect(h.state.appearance.bubbleExpanded).toBe(true)
+    const kinds = h.executed.slice(native).map((effect) => effect.kind)
+    expect(new Set(kinds), 'the bubble is its own window: the mask keeps its size and options').toEqual(new Set(['writeSnapshot', 'publish']))
+    expect(lastWrite(h).bubbleExpanded).toBe(true)
+    h.dispatch({ kind: 'AppearanceChanged', patch: { bubbleExpanded: true } })
+    expect(h.writes.length, 'the same size chosen again writes nothing').toBe(writes + 1)
+    h.dispatch({ kind: 'AppearanceChanged', patch: { bubbleExpanded: false } })
+    expect(h.state.appearance.bubbleExpanded).toBe(false)
+    expect(lastWrite(h).bubbleExpanded).toBe(false)
   })
 
   test('a patch changing size and always on top carries both in one preparation', () => {

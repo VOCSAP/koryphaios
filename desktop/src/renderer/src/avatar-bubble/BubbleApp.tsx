@@ -58,7 +58,9 @@ export function BubbleApp({ api, clock = REAL_CLOCK }: { api: AvatarBubbleApi; c
   const [currentKey, setCurrentKey] = useState<string | null>(null)
   const [busyKey, setBusyKey] = useState<string | null>(null)
   const [notice, setNotice] = useState<Notice | null>(null)
+  const [resizeNotice, setResizeNotice] = useState<string | null>(null)
   const pushed = useRef(false)
+  const resizing = useRef(false)
 
   useEffect(() => {
     const unsubscribe = api.onState((next) => {
@@ -106,7 +108,7 @@ export function BubbleApp({ api, clock = REAL_CLOCK }: { api: AvatarBubbleApi; c
 
   if (!state) {
     return (
-      <div className="avb" data-anchor="right">
+      <div className="avb" data-anchor="right" data-expanded="false">
         <div className="avb-frame">
           <div className="avb-empty" role="status">
             {loadFailed ? 'Kory' : ''}
@@ -148,6 +150,22 @@ export function BubbleApp({ api, clock = REAL_CLOCK }: { api: AvatarBubbleApi; c
     api.close().catch((error: unknown) => api.reportError(`bubble close failed: ${error instanceof Error ? error.message : String(error)}`))
   }
 
+  const toggleExpanded = (): void => {
+    if (resizing.current) return
+    resizing.current = true
+    setResizeNotice(null)
+    api
+      .setExpanded({ generation: state.generation, expanded: !state.expanded })
+      .catch((error: unknown) => {
+        api.reportError(`bubble resize was refused: ${error instanceof Error ? error.message : String(error)}`)
+        setResizeNotice(t('avatarBubble.resizeFailed'))
+      })
+      .finally(() => {
+        resizing.current = false
+      })
+  }
+
+  const sizeLabel = t(state.expanded ? 'avatarBubble.collapse' : 'avatarBubble.expand')
   const waiting = cards.filter((c) => c.blocking && !c.settledElsewhere).length
   const informations = cards.filter((c) => !c.blocking && !c.settledElsewhere).length
   const open = state.model.courrierPending
@@ -171,7 +189,7 @@ export function BubbleApp({ api, clock = REAL_CLOCK }: { api: AvatarBubbleApi; c
   }
 
   return (
-    <div className="avb" data-anchor={state.anchor}>
+    <div className="avb" data-anchor={state.anchor} data-expanded={state.expanded}>
       <div className="avb-frame">
         <header className="avb-head">
           <span className="avb-title">Kory</span>
@@ -187,10 +205,19 @@ export function BubbleApp({ api, clock = REAL_CLOCK }: { api: AvatarBubbleApi; c
               {open > 0 && <span className="avb-tab-count">{open}</span>}
             </button>
           </div>
+          <button className="icon-btn" title={sizeLabel} aria-label={sizeLabel} onClick={toggleExpanded}>
+            {state.expanded ? GLYPH_ACTIONS.restore : GLYPH_ACTIONS.expand}
+          </button>
           <button className="icon-btn" title={t('avatarBubble.close')} aria-label={t('avatarBubble.close')} onClick={close}>
             {GLYPH_ACTIONS.close}
           </button>
         </header>
+
+        {resizeNotice !== null && (
+          <div className="avb-resize-notice" role="alert">
+            {resizeNotice}
+          </div>
+        )}
 
         {tab === 'reclame' ? (
           <div className="avb-body" role="tabpanel">

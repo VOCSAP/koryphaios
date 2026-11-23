@@ -23,6 +23,7 @@ function validAppearance(): AvatarAppearance {
     frame: 'normal',
     idleOpacity: 1,
     motion: 'continuous',
+    bubbleExpanded: true,
     dndUntil: 1_800_000_000_000,
     dndChoice: '1h',
     positions: {
@@ -125,6 +126,7 @@ test('rejects one malformed appearance field while preserving validation of ever
       frame: 'normal',
       idleOpacity: 1,
       motion: 'continuous',
+      bubbleExpanded: false,
       dndUntil: null,
       dndChoice: null,
       positions: {}
@@ -143,6 +145,42 @@ test('a file written before the frame existed reads as a normal frame and keeps 
   expect(read.frame).toBe('normal')
   expect(read.size, 'a missing frame must not reset the stored appearance to defaults').toBe('l')
   expect(errors).toEqual([])
+})
+
+test('a file written before the bubble size was kept reads as a normal bubble and keeps every other choice', async () => {
+  const appearance = await import('../desktop/src/main/avatar-appearance.ts')
+  const file = appearanceFile()
+  const { bubbleExpanded: _bubbleExpanded, ...older } = { ...validAppearance(), size: 'l' as const }
+  writeFileSync(file, JSON.stringify(older))
+  const errors: string[] = []
+  const read = appearance.readAvatarAppearance(file, { reportError: (_scope, message) => errors.push(message) })
+  expect(read.bubbleExpanded).toBe(false)
+  expect(read.size, 'a missing flag must not reset the stored appearance to defaults').toBe('l')
+  expect(errors).toEqual([])
+})
+
+test('a bubble size that is not a boolean reads as normal and keeps every other choice', async () => {
+  const appearance = await import('../desktop/src/main/avatar-appearance.ts')
+  const file = appearanceFile()
+  for (const bad of ['true', 'yes', 1, 0, null, {}, []]) {
+    writeFileSync(file, JSON.stringify({ ...validAppearance(), size: 'l', bubbleExpanded: bad }))
+    const errors: string[] = []
+    const read = appearance.readAvatarAppearance(file, { reportError: (_scope, message) => errors.push(message) })
+    expect(read.bubbleExpanded, `bubbleExpanded ${JSON.stringify(bad)}`).toBe(false)
+    expect(read.size, `a bad flag ${JSON.stringify(bad)} must not reset the stored appearance`).toBe('l')
+    expect(read.dndChoice).toBe('1h')
+    expect(Object.keys(read.positions)).toEqual(['primary'])
+    expect(errors).toEqual([])
+  }
+})
+
+test('the expanded bubble round-trips through the file, and so does the normal one', async () => {
+  const appearance = await import('../desktop/src/main/avatar-appearance.ts')
+  const file = appearanceFile()
+  appearance.writeAvatarAppearance(file, { ...validAppearance(), bubbleExpanded: true })
+  expect(appearance.readAvatarAppearance(file, { reportError: () => {} }).bubbleExpanded).toBe(true)
+  appearance.writeAvatarAppearance(file, { ...validAppearance(), bubbleExpanded: false })
+  expect(appearance.readAvatarAppearance(file, { reportError: () => {} }).bubbleExpanded).toBe(false)
 })
 
 test('a full frame round-trips through the file', async () => {

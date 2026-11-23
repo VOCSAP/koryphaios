@@ -10,6 +10,7 @@ const appearance = {
   frame: 'normal' as const,
   idleOpacity: 1,
   motion: 'continuous' as const,
+  bubbleExpanded: false,
   dndUntil: null,
   dndChoice: null,
   positions: {}

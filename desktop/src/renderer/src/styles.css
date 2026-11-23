@@ -10315,6 +10315,11 @@ html.avatar-bubble-document #avatar-bubble {
   max-height: 180px;
 }
 
+/* The card is the one scroll area once the window is larger: no scroll box inside it. */
+.avb[data-expanded=true] .avb-card-text {
+  max-height: none;
+}
+
 .avb-card-line {
   display: flex;
   align-items: flex-start;
@@ -10341,6 +10346,13 @@ html.avatar-bubble-document #avatar-bubble {
 }
 
 .avb-card-notice {
+  font-size: 11px;
+  color: var(--danger);
+}
+
+.avb-resize-notice {
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--border);
   font-size: 11px;
   color: var(--danger);
 }

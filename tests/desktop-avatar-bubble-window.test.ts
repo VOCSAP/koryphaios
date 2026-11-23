@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import {
   avatarBubbleDict,
   avatarBubblePlacement,
+  avatarBubbleSize,
   createAvatarBubbleNativeAdapter,
   createAvatarBubbleWindow,
   type AvatarBubbleBrowserWindow,
@@ -9,6 +10,7 @@ import {
   type AvatarBubbleLifecycle,
   type AvatarBubbleNativeAdapter,
   type AvatarBubblePlacement,
+  type AvatarBubbleRect,
   type AvatarBubbleWindowConstructionOptions,
   type AvatarBubbleWindowOptions,
   type AvatarBubbleWebContents
@@ -19,6 +21,7 @@ import type { AvatarDeckIdentity } from '../desktop/src/shared/avatar-state'
 import { createAvatarInboxService, type AvatarInboxGestureResult, type AvatarInboxReadEntry } from '../desktop/src/main/avatar-inbox-service'
 import type { InboxAckStatus } from '../desktop/src/shared/types'
 import type { ApprovalWindowSession } from '../desktop/src/main/approval-window'
+import { AVATAR_WINDOW_SIZES, restoreAvatarPlacement } from '../desktop/src/main/avatar-window-placement'
 
 const DECK = { deckRunId: 'run-a', broker_url: 'http://127.0.0.1:7899' }
 const ID_1 = '00000000-0000-4000-8000-000000000001'
@@ -77,12 +80,25 @@ function harness(initial: InboxRelayApproval[] = [approval(ID_1)], overrides: Pa
   }
   const marked: Array<[AvatarDeckIdentity, AvatarInboxReadEntry, InboxAckStatus]> = []
   let placement: AvatarBubblePlacement | null = { rect: { x: 0, y: 0, width: 388, height: 560 }, anchor: 'left' }
+  const expandedPlacement: AvatarBubblePlacement = { rect: { x: 100, y: 50, width: 1152, height: 832 }, anchor: 'right' }
+  const asked: boolean[] = []
+  const opened: AvatarBubbleRect[] = []
+  const resized: Array<[number, AvatarBubbleRect]> = []
+  let resizeFails = false
+  let stored = false
+  let persistFails = false
+  const persisted: boolean[] = []
   const native: AvatarBubbleNativeAdapter = {
-    open(generation, _rect, lifecycle) {
+    open(generation, rect, lifecycle) {
+      opened.push(rect)
       endpoints.set(generation, contents())
       lifecycles.set(generation, lifecycle)
     },
     focus() {},
+    resize(generation, rect) {
+      if (resizeFails) throw new Error('window gone')
+      resized.push([generation, rect])
+    },
     close(generation) {
       closed.push(generation)
       endpoints.delete(generation)
@@ -110,7 +126,16 @@ function harness(initial: InboxRelayApproval[] = [approval(ID_1)], overrides: Pa
     theme: () => 'dark',
     lang: 'fr',
     dict: { 'avatarBubble.allow': 'Autoriser' },
-    placement: () => placement,
+    placement: (expanded) => {
+      asked.push(expanded)
+      return expanded && placement !== null ? expandedPlacement : placement
+    },
+    expanded: () => stored,
+    persistExpanded: (value) => {
+      if (persistFails) throw new Error('disk full')
+      persisted.push(value)
+      stored = value
+    },
     now: () => now,
     setTimer: (callback, ms) => {
       const timer = { at: now + ms, callback, cancelled: false }
@@ -152,7 +177,22 @@ function harness(initial: InboxRelayApproval[] = [approval(ID_1)], overrides: Pa
     },
     setPlacement: (value: AvatarBubblePlacement | null) => {
       placement = value
-    }
+    },
+    failResize: () => {
+      resizeFails = true
+    },
+    failPersist: () => {
+      persistFails = true
+    },
+    storeExpanded: (value: boolean) => {
+      stored = value
+    },
+    persisted,
+    asked,
+    opened,
+    resized,
+    expandedRect: () => expandedPlacement.rect,
+    normalRect: () => placement?.rect
   }
 }
 
@@ -304,6 +344,155 @@ describe('avatar bubble IPC', () => {
   })
 })
 
+describe('avatar bubble expand gesture', () => {
+  const expand = (generation: number, expanded: unknown) => ({ generation, expanded })
+  const lastState = (h: ReturnType<typeof harness>): AvatarBubbleState => h.endpoints.get(1)!.sent.at(-1)![1] as AvatarBubbleState
+
+  test('a bubble opens at the normal size', async () => {
+    const h = harness()
+    h.bubble.open()
+    expect(h.asked).toEqual([false])
+    expect(h.opened).toEqual([h.normalRect()!])
+    expect(((await h.call(AVATAR_BUBBLE_CHANNELS.getState, 1)) as AvatarBubbleState).expanded).toBe(false)
+  })
+
+  test('a bubble opens at the size the store holds', async () => {
+    const h = harness()
+    h.storeExpanded(true)
+    h.bubble.open()
+    expect(h.asked).toEqual([true])
+    expect(h.opened).toEqual([h.expandedRect()])
+    expect(((await h.call(AVATAR_BUBBLE_CHANNELS.getState, 1)) as AvatarBubbleState).expanded).toBe(true)
+  })
+
+  test('the store decides the size of the next bubble, even when the last one was left larger', async () => {
+    const h = harness()
+    h.bubble.open()
+    h.failPersist()
+    await h.call(AVATAR_BUBBLE_CHANNELS.setExpanded, 1, expand(1, true))
+    h.bubble.close()
+    h.bubble.open()
+    expect(h.asked.at(-1)).toBe(false)
+    expect(h.opened.at(-1)).toEqual(h.normalRect()!)
+    expect(((await h.call(AVATAR_BUBBLE_CHANNELS.getState, 2)) as AvatarBubbleState).expanded).toBe(false)
+  })
+
+  test('each choice reaches the store once the window has been resized', async () => {
+    const h = harness()
+    h.bubble.open()
+    await h.call(AVATAR_BUBBLE_CHANNELS.setExpanded, 1, expand(1, true))
+    await h.call(AVATAR_BUBBLE_CHANNELS.setExpanded, 1, expand(1, false))
+    expect(h.persisted).toEqual([true, false])
+  })
+
+  test('a store that fails is traced and leaves the window and the pushed state at the new size', async () => {
+    const h = harness()
+    h.bubble.open()
+    h.failPersist()
+    await h.call(AVATAR_BUBBLE_CHANNELS.setExpanded, 1, expand(1, true))
+    expect(h.errors).toContain('Avatar bubble size could not be kept for the next bubble')
+    expect(h.resized).toEqual([[1, h.expandedRect()]])
+    expect(lastState(h).expanded).toBe(true)
+  })
+
+  test('expanding resizes the open window to the expanded placement and pushes the state with it', async () => {
+    const h = harness()
+    h.bubble.open()
+    await h.call(AVATAR_BUBBLE_CHANNELS.setExpanded, 1, expand(1, true))
+    expect(h.asked).toEqual([false, true])
+    expect(h.resized).toEqual([[1, h.expandedRect()]])
+    expect(lastState(h)).toMatchObject({ generation: 1, expanded: true, anchor: 'right' })
+  })
+
+  test('the anchor follows the placement of each size, so a flip at the larger size reaches the renderer and back', async () => {
+    const h = harness()
+    h.bubble.open()
+    expect(((await h.call(AVATAR_BUBBLE_CHANNELS.getState, 1)) as AvatarBubbleState).anchor).toBe('left')
+    await h.call(AVATAR_BUBBLE_CHANNELS.setExpanded, 1, expand(1, true))
+    expect(lastState(h).anchor).toBe('right')
+    await h.call(AVATAR_BUBBLE_CHANNELS.setExpanded, 1, expand(1, false))
+    expect(lastState(h).anchor).toBe('left')
+  })
+
+  test('collapsing returns the window to the normal placement', async () => {
+    const h = harness()
+    h.bubble.open()
+    await h.call(AVATAR_BUBBLE_CHANNELS.setExpanded, 1, expand(1, true))
+    await h.call(AVATAR_BUBBLE_CHANNELS.setExpanded, 1, expand(1, false))
+    expect(h.resized.map(([, rect]) => rect)).toEqual([h.expandedRect(), h.normalRect()!])
+    expect(lastState(h).expanded).toBe(false)
+  })
+
+  test('the next bubble opens at the size the last one was left at', async () => {
+    const h = harness()
+    h.bubble.open()
+    await h.call(AVATAR_BUBBLE_CHANNELS.setExpanded, 1, expand(1, true))
+    h.bubble.close()
+    h.bubble.open()
+    expect(h.opened.at(-1)).toEqual(h.expandedRect())
+    expect(((await h.call(AVATAR_BUBBLE_CHANNELS.getState, 2)) as AvatarBubbleState).expanded).toBe(true)
+  })
+
+  test('a sender from an earlier generation, a sub-frame or a stale intent generation is refused and resizes nothing', async () => {
+    const h = harness()
+    h.bubble.open()
+    const stale = h.endpoints.get(1)!
+    h.bubble.close()
+    h.bubble.open()
+    const handler = h.handlers.get(AVATAR_BUBBLE_CHANNELS.setExpanded)!
+    await expect(handler({ sender: stale, senderFrame: stale.mainFrame }, expand(2, true))).rejects.toThrow('not current')
+    const current = h.endpoints.get(2)!
+    await expect(handler({ sender: current, senderFrame: {} }, expand(2, true))).rejects.toThrow('not current')
+    await expect(h.call(AVATAR_BUBBLE_CHANNELS.setExpanded, 2, expand(1, true))).rejects.toThrow('intent is invalid')
+    expect(h.resized).toEqual([])
+    expect(h.asked).toEqual([false, false])
+  })
+
+  test('a value that is not a boolean, or an intent with extra arguments, is refused, traced and resizes nothing', async () => {
+    const h = harness()
+    h.bubble.open()
+    for (const bad of ['true', 1, null, undefined, {}]) {
+      await expect(h.call(AVATAR_BUBBLE_CHANNELS.setExpanded, 1, expand(1, bad))).rejects.toThrow('does not name a boolean')
+    }
+    await expect(h.call(AVATAR_BUBBLE_CHANNELS.setExpanded, 1, expand(1, true), 'more')).rejects.toThrow('intent is invalid')
+    await expect(h.call(AVATAR_BUBBLE_CHANNELS.setExpanded, 1)).rejects.toThrow('intent is invalid')
+    expect(h.resized).toEqual([])
+    expect(h.persisted).toEqual([])
+    expect(h.errors.filter((message) => message.includes('does not name a boolean'))).toHaveLength(5)
+    expect(((await h.call(AVATAR_BUBBLE_CHANNELS.getState, 1)) as AvatarBubbleState).expanded).toBe(false)
+  })
+
+  test('with the mask gone the request is refused and traced, and the bubble keeps its size', async () => {
+    const h = harness()
+    h.bubble.open()
+    h.setPlacement(null)
+    await expect(h.call(AVATAR_BUBBLE_CHANNELS.setExpanded, 1, expand(1, true))).rejects.toThrow('mask is not shown')
+    expect(h.errors).toContain('Avatar bubble could not be resized because the mask is not shown')
+    expect(h.resized).toEqual([])
+    expect(h.persisted).toEqual([])
+    expect(((await h.call(AVATAR_BUBBLE_CHANNELS.getState, 1)) as AvatarBubbleState).expanded).toBe(false)
+  })
+
+  test('a window that cannot be resized is traced, rejects, and the state keeps the old size and anchor', async () => {
+    const h = harness()
+    h.bubble.open()
+    h.failResize()
+    const before = h.endpoints.get(1)!.sent.length
+    await expect(h.call(AVATAR_BUBBLE_CHANNELS.setExpanded, 1, expand(1, true))).rejects.toThrow('could not be resized')
+    expect(h.errors).toContain('Avatar bubble could not be resized')
+    expect(h.endpoints.get(1)!.sent.length).toBe(before)
+    expect(h.persisted).toEqual([])
+    expect(((await h.call(AVATAR_BUBBLE_CHANNELS.getState, 1)) as AvatarBubbleState).expanded).toBe(false)
+    expect(h.bubble.notificationServiceReady()).toBe(true)
+  })
+
+  test('dispose removes the handler', () => {
+    const h = harness()
+    h.bubble.dispose()
+    expect(h.handlers.has(AVATAR_BUBBLE_CHANNELS.setExpanded)).toBe(false)
+  })
+})
+
 describe('avatar bubble read gestures', () => {
   const SENT = '2026-11-17T10:00:00.000Z'
   const readIntent = (generation: number, patch: Record<string, unknown> = {}) => ({ generation, ...DECK, scopeGeneration: 1, id: 7, sentAt: SENT, ...patch })
@@ -391,12 +580,20 @@ describe('avatar bubble native window', () => {
     show?: () => void
     setWindowOpenHandler?: () => void
     loadFile?: () => Promise<unknown>
+    /** Width the system adds once a move has returned, as Windows does at 125 % DPI; it lands on settle(). */
+    driftAfterMove?: number
+    /** Destroyed while the adapter still holds it: `closed` has not been delivered yet. */
+    destroyBeforeClosed?: boolean
   }
 
   function fakeWindow(steps: FakeWindowSteps = {}) {
     const listeners = new Map<string, (...args: unknown[]) => void>()
     const contentListeners = new Map<string, (...args: unknown[]) => void>()
     let destroyed = false
+    const calls: string[] = []
+    const sizes: Array<[number, number]> = []
+    const geometry = { x: 0, y: 0, width: 388, height: 560 }
+    let pendingDrift = 0
     const window: AvatarBubbleBrowserWindow = {
       webContents: {
         mainFrame: {},
@@ -407,14 +604,31 @@ describe('avatar bubble native window', () => {
       on: (name, listener) => listeners.set(name, listener),
       show: () => steps.show?.(),
       focus() {},
+      setPosition(x, y) {
+        calls.push('setPosition')
+        geometry.x = x
+        geometry.y = y
+        pendingDrift += steps.driftAfterMove ?? 0
+      },
+      setContentSize(width, height) {
+        calls.push('setContentSize')
+        sizes.push([width, height])
+        geometry.width = width
+        geometry.height = height
+      },
       destroy() {
         destroyed = true
-        listeners.get('closed')?.()
+        if (!steps.destroyBeforeClosed) listeners.get('closed')?.()
       },
       isDestroyed: () => destroyed,
       loadFile: () => steps.loadFile?.() ?? Promise.resolve(undefined)
     }
-    return { window, listeners, contentListeners, destroyed: () => destroyed }
+    Object.assign(window, { getContentSize: () => [geometry.width, geometry.height] })
+    const settle = (): void => {
+      geometry.width += pendingDrift
+      pendingDrift = 0
+    }
+    return { window, listeners, contentListeners, calls, sizes, geometry, settle, destroyed: () => destroyed }
   }
 
   function fakeSession() {
@@ -503,6 +717,36 @@ describe('avatar bubble native window', () => {
     let prevented = false
     run.session.handlers.download!({ preventDefault: () => (prevented = true) })
     expect(prevented).toBe(true)
+  })
+
+  test('every resize moves the window then asks for the requested rect, never for a size read back after the system widened it', () => {
+    const run = adapterOf('run-1', { driftAfterMove: 15 })
+    run.openNext(1)
+    const fake = run.fakes[0]!
+    const first = { x: 120, y: 40, width: 1152, height: 832 }
+    const second = { x: 300, y: 90, width: 700, height: 600 }
+
+    run.adapter.resize(1, first)
+    fake.settle()
+    expect(fake.geometry.width, 'the system widened the window after the first move returned').toBe(first.width + 15)
+
+    run.adapter.resize(1, second)
+    fake.settle()
+    expect(fake.calls).toEqual(['setPosition', 'setContentSize', 'setPosition', 'setContentSize'])
+    expect(fake.sizes).toEqual([
+      [first.width, first.height],
+      [second.width, second.height]
+    ])
+    expect(fake.geometry).toEqual({ x: second.x, y: second.y, width: second.width + 15, height: second.height })
+  })
+
+  test('resize of an unknown or destroyed window is ignored', () => {
+    const run = adapterOf('run-1', { destroyBeforeClosed: true })
+    run.openNext(1)
+    run.adapter.resize(9, { x: 0, y: 0, width: 500, height: 500 })
+    run.fakes[0]!.window.destroy()
+    run.adapter.resize(1, { x: 0, y: 0, width: 500, height: 500 })
+    expect(run.fakes[0]!.calls).toEqual([])
   })
 
   test('Escape closes the bubble, another key does not', () => {
@@ -678,6 +922,7 @@ describe('avatar bubble notification service', () => {
           lifecycle.closed()
         },
         focus() {},
+        resize() {},
         close() {},
         endpoint: () => null
       }
@@ -734,6 +979,166 @@ describe('avatarBubblePlacement', () => {
       rect: { x: 170, y: 0, width: 388, height: 560 },
       anchor: 'left'
     })
+  })
+
+  test('expanded, keeps the mask side and the bottom alignment at the larger size', () => {
+    expect(avatarBubblePlacement({ x: 1700, y: 800, width: 160, height: 160 }, workArea, true)).toEqual({
+      rect: { x: 548, y: 128, width: 1152, height: 832 },
+      anchor: 'right'
+    })
+  })
+
+  test('expanded, flips the anchor to the left when the larger bubble no longer fits left of the mask', () => {
+    expect(avatarBubblePlacement({ x: 500, y: 800, width: 160, height: 160 }, workArea, true)).toEqual({
+      rect: { x: 660, y: 128, width: 1152, height: 832 },
+      anchor: 'left'
+    })
+  })
+
+  test('expanded, never leaves the work area on any side, whichever display it sits on', () => {
+    const second = { x: 1920, y: 0, width: 1920, height: 1040 }
+    const masks = [
+      { x: 1000, y: 800, width: 160, height: 160 },
+      { x: 10, y: 20, width: 160, height: 160 },
+      { x: 1750, y: 900, width: 160, height: 160 }
+    ]
+    for (const area of [workArea, second]) {
+      for (const mask of masks) {
+        const { rect } = avatarBubblePlacement({ ...mask, x: mask.x + area.x }, area, true)
+        expect(rect.x).toBeGreaterThanOrEqual(area.x)
+        expect(rect.y).toBeGreaterThanOrEqual(area.y)
+        expect(rect.x + rect.width).toBeLessThanOrEqual(area.x + area.width)
+        expect(rect.y + rect.height).toBeLessThanOrEqual(area.y + area.height)
+      }
+    }
+  })
+
+  test('not expanded by default, the size is the normal one', () => {
+    expect(avatarBubblePlacement({ x: 1700, y: 800, width: 160, height: 160 }, workArea).rect).toMatchObject({ width: 388, height: 560 })
+  })
+
+  test('not expanded, the left side wins while it holds the normal width, even when the right side is wider', () => {
+    expect(avatarBubblePlacement({ x: 500, y: 800, width: 160, height: 160 }, workArea)).toEqual({
+      rect: { x: 112, y: 400, width: 388, height: 560 },
+      anchor: 'right'
+    })
+  })
+
+  const covers = (rect: { x: number; width: number }, mask: { x: number; width: number }): boolean =>
+    rect.x < mask.x + mask.width && mask.x < rect.x + rect.width
+
+  test('expanded, the mask at its default centred position keeps the bubble beside it, the anchor naming the mask side', () => {
+    const restored = restoreAvatarPlacement([{ id: 'd', workArea }], {}, AVATAR_WINDOW_SIZES.m)
+    const mask = { x: restored.x, y: restored.y, width: restored.width, height: restored.height }
+    const { rect, anchor } = avatarBubblePlacement(mask, workArea, true)
+    expect(covers(rect, mask), `bubble ${JSON.stringify(rect)} over mask ${JSON.stringify(mask)}`).toBe(false)
+    expect(anchor).toBe('right')
+    expect(rect.x + rect.width, 'against the mask, tail side').toBe(mask.x)
+    expect(rect.width).toBe(mask.x - workArea.x)
+  })
+
+  test('expanded, the width is limited to the room on the wider side of the mask, which can be the right one', () => {
+    const mask = { x: 800, y: 440, width: 160, height: 160 }
+    const { rect, anchor } = avatarBubblePlacement(mask, workArea, true)
+    expect(anchor).toBe('left')
+    expect(rect.x).toBe(mask.x + mask.width)
+    expect(rect.width).toBe(workArea.x + workArea.width - (mask.x + mask.width))
+  })
+
+  test('expanded, a mask near the left edge and one near the right edge keep the proportional width on their open side', () => {
+    expect(avatarBubblePlacement({ x: 10, y: 20, width: 160, height: 160 }, workArea, true)).toMatchObject({ rect: { x: 170, width: 1152 }, anchor: 'left' })
+    expect(avatarBubblePlacement({ x: 1750, y: 900, width: 160, height: 160 }, workArea, true)).toMatchObject({ rect: { x: 598, width: 1152 }, anchor: 'right' })
+  })
+
+  test('expanded, a side with less than the normal width is never the one the bubble takes', () => {
+    const area = { x: 0, y: 0, width: 1000, height: 800 }
+    const { rect, anchor } = avatarBubblePlacement({ x: 700, y: 300, width: 160, height: 160 }, area, true)
+    expect(anchor).toBe('right')
+    expect(rect.x + rect.width).toBe(700)
+  })
+
+  test('expanded, the normal width is the least room that narrows the bubble, 388 on a side narrows it and 387 on both sides does not', () => {
+    const exact = { x: 0, y: 0, width: 936, height: 800 }
+    expect(avatarBubblePlacement({ x: 388, y: 300, width: 160, height: 160 }, exact, true)).toMatchObject({ rect: { x: 0, width: 388 }, anchor: 'right' })
+    const short = { x: 0, y: 0, width: 934, height: 800 }
+    const shortMask = { x: 387, y: 300, width: 160, height: 160 }
+    const placed = avatarBubblePlacement(shortMask, short, true)
+    expect(placed.rect.width, 'no side holds 388: the proportional width is kept').toBe(560)
+    expect(placed.anchor).toBe('left')
+    expect(placed.rect.x, 'kept inside the work area').toBeGreaterThanOrEqual(short.x)
+    expect(placed.rect.x + placed.rect.width, 'kept inside the work area').toBeLessThanOrEqual(short.x + short.width)
+    expect(covers(placed.rect, shortMask), 'no room beside the mask: the overlap is accepted').toBe(true)
+  })
+
+  test('with room for the normal width on a side, a bubble of either size never covers the mask and the anchor names the mask side', () => {
+    const areas = [
+      { x: 0, y: 0, width: 1920, height: 1040 },
+      { x: 1920, y: 0, width: 1366, height: 728 },
+      { x: 0, y: 0, width: 1000, height: 800 }
+    ]
+    let checked = 0
+    for (const area of areas) {
+      for (const expanded of [false, true]) {
+        for (let x = area.x; x <= area.x + area.width - 160; x += 37) {
+          for (const y of [area.y, area.y + Math.floor(area.height / 2), area.y + area.height - 160]) {
+            const mask = { x, y, width: 160, height: 160 }
+            const leftRoom = mask.x - area.x
+            const rightRoom = area.x + area.width - (mask.x + mask.width)
+            if (Math.max(leftRoom, rightRoom) < 388) continue
+            checked += 1
+            const { rect, anchor } = avatarBubblePlacement(mask, area, expanded)
+            const label = `expanded ${expanded} area ${JSON.stringify(area)} mask x ${x}: ${JSON.stringify(rect)} ${anchor}`
+            expect(covers(rect, mask), label).toBe(false)
+            expect(anchor === 'right' ? rect.x + rect.width : rect.x, label).toBe(anchor === 'right' ? mask.x : mask.x + mask.width)
+            expect(rect.width, label).toBeGreaterThanOrEqual(388)
+            expect(rect.x, label).toBeGreaterThanOrEqual(area.x)
+            expect(rect.x + rect.width, label).toBeLessThanOrEqual(area.x + area.width)
+          }
+        }
+      }
+    }
+    expect(checked).toBeGreaterThan(100)
+  })
+})
+
+describe('avatarBubbleSize', () => {
+  const area = (width: number, height: number) => ({ x: 0, y: 0, width, height })
+
+  test('normal size on a roomy screen', () => {
+    expect(avatarBubbleSize(area(1920, 1040), false)).toEqual({ width: 388, height: 560 })
+  })
+
+  test('expanded is 60 % of the width and 80 % of the height of the work area', () => {
+    expect(avatarBubbleSize(area(1920, 1040), true)).toEqual({ width: 1152, height: 832 })
+  })
+
+  test('expanded never goes below the normal size', () => {
+    expect(avatarBubbleSize(area(1000, 600), true)).toEqual({ width: 600, height: 560 })
+    expect(avatarBubbleSize(area(500, 1000), true)).toEqual({ width: 388, height: 800 })
+  })
+
+  test('expanded width stops at 1200 px on a large screen while the height keeps following the screen', () => {
+    expect(avatarBubbleSize(area(3840, 2160), true)).toEqual({ width: 1200, height: 1728 })
+  })
+
+  test('a work area smaller than the normal size caps both sizes', () => {
+    expect(avatarBubbleSize(area(300, 400), true)).toEqual({ width: 300, height: 400 })
+    expect(avatarBubbleSize(area(300, 400), false)).toEqual({ width: 300, height: 400 })
+  })
+
+  test('a fractional work area smaller than the normal size gives integer DIP that stay inside it', () => {
+    for (const expanded of [false, true]) {
+      const size = avatarBubbleSize(area(300.6, 400.6), expanded)
+      expect(size, `expanded ${expanded}`).toEqual({ width: 300, height: 400 })
+    }
+    expect(avatarBubbleSize(area(387.9, 559.9), false)).toEqual({ width: 387, height: 559 })
+  })
+
+  test('a fractional work area still gives integer DIP', () => {
+    const size = avatarBubbleSize(area(1365.5, 728.5), true)
+    expect(Number.isInteger(size.width)).toBe(true)
+    expect(Number.isInteger(size.height)).toBe(true)
+    expect(size).toEqual({ width: 819, height: 583 })
   })
 })
 

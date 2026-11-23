@@ -32,6 +32,8 @@ export interface AvatarAppearance {
   frame: AvatarFrame
   idleOpacity: number
   motion: AvatarMotion
+  /** The message bubble opens at its larger size. */
+  bubbleExpanded: boolean
   dndUntil: number | null
   dndChoice: AvatarDndChoice | null
   positions: Record<string, AvatarScreenPosition>
@@ -80,6 +82,7 @@ function defaultAppearance(): AvatarAppearance {
     frame: 'normal',
     idleOpacity: 1,
     motion: 'continuous',
+    bubbleExpanded: false,
     dndUntil: null,
     dndChoice: null,
     positions: emptyPositions()
@@ -108,6 +111,8 @@ function readAppearance(value: unknown, dependencies: AvatarAppearanceDependenci
   appearance.frame = frame
   appearance.idleOpacity = value.idleOpacity
   appearance.motion = value.motion
+  // A bad flag reads as false: it must not discard the position and Do Not Disturb the file also holds.
+  appearance.bubbleExpanded = value.bubbleExpanded === true
   appearance.dndUntil = value.dndUntil
   appearance.dndChoice = dndChoice as AvatarDndChoice | null
   for (const [screenId, position] of Object.entries(value.positions)) {

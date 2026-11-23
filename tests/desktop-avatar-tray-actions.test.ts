@@ -20,6 +20,7 @@ const APPEARANCE: AvatarAppearance = {
   frame: 'normal',
   idleOpacity: 1,
   motion: 'continuous',
+  bubbleExpanded: false,
   dndUntil: null,
   dndChoice: null,
   positions: {}
